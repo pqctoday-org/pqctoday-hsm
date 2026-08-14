@@ -313,14 +313,21 @@ CK_RV SoftHSM::C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
 
-	if (pMechanism == NULL_PTR) return CKR_ARGUMENTS_BAD;
-	if (pTemplate == NULL_PTR && ulCount != 0) return CKR_ARGUMENTS_BAD;
-	if (phKey == NULL_PTR) return CKR_ARGUMENTS_BAD;
-
-	// Get the session
+	// SESSION HANDLE FIRST. PKCS#11 v3.2 §5.1: the session-handle error class
+	// takes MANDATORY precedence over the argument and capability classes, so
+	// a caller who passes both a dead session and a null mechanism must be
+	// told about the session. The argument checks used to run first, which
+	// made C_GenerateKey answer CKR_ARGUMENTS_BAD where every other entry
+	// point in this engine answers CKR_SESSION_HANDLE_INVALID — plan item C2
+	// fixed the init functions and missed this one
+	// (DEFECT-CPP-SESSION-HANDLE-PRECEDENCE-GENERATEKEY).
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
+	if (pMechanism == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	if (pTemplate == NULL_PTR && ulCount != 0) return CKR_ARGUMENTS_BAD;
+	if (phKey == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	// Check the mechanism, only accept DSA and DH parameters
 	// and symmetric ciphers
@@ -2283,6 +2290,15 @@ CK_RV SoftHSM::C_UnwrapKey
 				else
 					value = keydata;
 				bOK = bOK && osobject->setAttribute(CKA_VALUE, value);
+
+				// CKA_VALUE_LEN — "Length in bytes of key value" (§6.14 and
+				// every other secret-key table). It was never set here, so an
+				// unwrapped 32-byte AES key reported a length of 0 and the
+				// caller could not tell the key's size from the token
+				// (DEFECT-CPP-UNWRAPPED-AES-VALUE-LEN-ZERO). Taken from the
+				// PLAINTEXT key material, not from `value`, which is the
+				// token-encrypted blob on a private object.
+				bOK = bOK && osobject->setAttribute(CKA_VALUE_LEN, (unsigned long)keydata.size());
 
 				// PKCS#11 v3.2 §4.11: KCV "SHALL be supplied … regardless of
 				// how the key object is created or derived" → covers C_UnwrapKey.

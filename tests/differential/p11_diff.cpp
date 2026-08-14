@@ -606,6 +606,16 @@ static void add(Scenario s) { gScenarios.push_back(std::move(s)); }
 // divergence cannot be introduced without someone writing a sentence about it.
 struct Exception_ {
     std::string id, scenario, path, kind, status, justification, citation;
+    // Why this entry can never match, for the entries that never can. An
+    // adjudication about a divergence the probe cannot see — on-disk storage,
+    // PIN lockout, build-flag-dependent mechanism sets — is worth writing down
+    // and is not the same thing as an entry that HAS gone stale. Both used to
+    // be reported under one heading reading "either the engines converged and
+    // the entry is stale, or its scenario did not run", which meant six
+    // permanent, deliberate entries sat in the stale list forever and trained
+    // the reader to skip it. An entry scoped to __never_matches__ must now
+    // declare this, and is listed separately.
+    std::string unobservable;
     // Value matchers. Two divergences can share a path and be entirely
     // different questions — CKA_KEY_GEN_MECHANISM differing because Rust
     // narrows CK_UNAVAILABLE_INFORMATION to 32 bits is a defect; the same
@@ -663,6 +673,19 @@ static void load_exceptions(const std::string& file) {
         }
         x.justification = e.at("justification").get<std::string>();
         x.citation      = e.value("citation", "");
+        x.unobservable  = e.value("unobservable", "");
+        if (x.scenario == "__never_matches__" && x.unobservable.empty()) {
+            fprintf(stdout, "FATAL: exception %s is scoped to __never_matches__ but declares no "
+                            "'unobservable' reason. Say why the probe cannot see it, or give it a "
+                            "real scenario glob.\n", x.id.c_str());
+            exit(2);
+        }
+        if (!x.unobservable.empty() && x.scenario != "__never_matches__") {
+            fprintf(stdout, "FATAL: exception %s declares 'unobservable' but is scoped to '%s'. An "
+                            "entry that CAN match must not claim it cannot.\n",
+                    x.id.c_str(), x.scenario.c_str());
+            exit(2);
+        }
         if (!opt_drop_exception.empty() && x.id == opt_drop_exception) {
             fprintf(stdout, "[demo] exception %s DROPPED for this run\n", x.id.c_str());
             continue;
@@ -905,12 +928,24 @@ static void write_reports(int ran, int skipped) {
         }
     }
 
-    std::vector<std::string> unused;
-    for (const auto& x : gExceptions) if (x.hits == 0) unused.push_back(x.id);
+    std::vector<const Exception_*> unused, unobservable;
+    for (const auto& x : gExceptions) {
+        if (x.hits != 0) continue;
+        (x.unobservable.empty() ? unused : unobservable).push_back(&x);
+    }
+    if (!unobservable.empty()) {
+        printf("STANDING ADJUDICATIONS, DELIBERATELY UNOBSERVABLE (%zu) — these do not\n",
+               unobservable.size());
+        printf("match because no probe can see them, and each says why. Not stale:\n");
+        for (const auto* x : unobservable)
+            printf("  - %-42s %s\n", x->id.c_str(), x->unobservable.c_str());
+        printf("\n");
+    }
     if (!unused.empty()) {
-        printf("EXCEPTION ENTRIES THAT MATCHED NOTHING (%zu) — either the engines\n", unused.size());
-        printf("converged and the entry is stale, or its scenario did not run:\n");
-        for (const auto& u : unused) printf("  - %s\n", u.c_str());
+        printf("EXCEPTION ENTRIES THAT MATCHED NOTHING (%zu) — the engines converged\n", unused.size());
+        printf("and the entry is stale, or its scenario did not run. DELETE a stale\n");
+        printf("entry; do not leave it as cover for a divergence that no longer exists:\n");
+        for (const auto* x : unused) printf("  - %s\n", x->id.c_str());
         printf("\n");
     }
 

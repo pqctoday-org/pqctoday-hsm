@@ -226,8 +226,17 @@ pub fn ensure_slot(slot_id: u32) {
 /// that profile (see rust/RUST_P11_V32_CONFORMANCE_REPORT.md).
 fn init_profile_objects(slot_id: u32) {
     let mut attrs: Attributes = HashMap::new();
-    attrs.insert(CKA_CLASS, CKO_PROFILE.to_le_bytes().to_vec());
-    attrs.insert(CKA_PROFILE_ID, CKP_BASELINE_PROVIDER.to_le_bytes().to_vec());
+    // store_ulong, NOT u32::to_le_bytes. §5.7.7 makes C_FindObjects "an exact
+    // byte-for-byte match with all attributes in the template", so a four-byte
+    // CKA_CLASS cannot match the eight-byte CK_OBJECT_CLASS an LP64 caller
+    // supplies — which is why the differential harness saw Rust publish ZERO
+    // findable CKO_PROFILE objects while C++ published two. The object existed
+    // the whole time and was simply unfindable at native width; C_InitToken
+    // never destroyed it (CKA_DESTROYABLE=FALSE already protects it, and
+    // destroy_destroyable_objects_on_slot honours that). Every other object in
+    // this engine goes through store_ulong; this one was the outlier.
+    store_ulong(&mut attrs, CKA_CLASS, CKO_PROFILE);
+    store_ulong(&mut attrs, CKA_PROFILE_ID, CKP_BASELINE_PROVIDER);
     attrs.insert(CKA_TOKEN, vec![1]);
     attrs.insert(CKA_PRIV_SLOT_ID, slot_id.to_le_bytes().to_vec());
     store_bool(&mut attrs, CKA_MODIFIABLE, false);
@@ -339,6 +348,53 @@ fn apply_object_defaults(attrs: &mut Attributes) {
         // CKA_ALWAYS_AUTHENTICATE: private keys only (no per-op re-auth by default)
         if class == CKO_PRIVATE_KEY && !attrs.contains_key(&CKA_ALWAYS_AUTHENTICATE) {
             store_bool(attrs, CKA_ALWAYS_AUTHENTICATE, false);
+        }
+        // CKA_VERIFY_RECOVER / CKA_SIGN_RECOVER are COMMON key attributes —
+        // Table 27 (public) and Table 28 (private) — so every public key
+        // possesses the first and every private key the second, whatever the
+        // token can actually do with them. This engine materialised neither,
+        // and answered CKR_ATTRIBUTE_TYPE_INVALID for both on every key.
+        //
+        // Recorded backwards. The harness entry blamed C++ for "still
+        // asserting" them after the recovery dispatch path was removed
+        // (DEFECT-CPP-RECOVERY-ATTRIBUTES-STILL-ASSERTED, 68 observations).
+        // The specification's own tables say otherwise: the attributes are
+        // standard and their absence is the defect, so Rust was the wrong
+        // side. Plan item C3 concerned the MECHANISM-INFO recovery FLAGS,
+        // which are a different question and correctly stayed unadvertised.
+        //
+        // FALSE, because this engine implements no recovery mechanism —
+        // materialising them as TRUE would be the advertise-without-dispatch
+        // fault C3 exists to prevent. A caller's template still wins.
+        if class == CKO_PUBLIC_KEY && !attrs.contains_key(&CKA_VERIFY_RECOVER) {
+            store_bool(attrs, CKA_VERIFY_RECOVER, false);
+        }
+        if class == CKO_PRIVATE_KEY && !attrs.contains_key(&CKA_SIGN_RECOVER) {
+            store_bool(attrs, CKA_SIGN_RECOVER, false);
+        }
+        // CKA_ALWAYS_SENSITIVE / CKA_NEVER_EXTRACTABLE — §4.10's history
+        // attributes, defined for private and secret keys. Most generation
+        // arms set them by hand and the XMSS and XMSS^MT arms did not, so
+        // §6.66.4's "CKA_SENSITIVE MUST be true and CKA_EXTRACTABLE MUST be
+        // false for this key" could not be checked on exactly the key type it
+        // is written about (DEFECT-XMSS-PUBLIC-KEY-ATTRIBUTE-SPREAD).
+        //
+        // Derived rather than hard-coded, and only as a DEFAULT: every path
+        // that knows better — C_CreateObject, C_UnwrapKey, C_DeriveKey — sets
+        // both to false explicitly before the object is allocated, and
+        // `contains_key` leaves those alone. The derivation is the definition:
+        // a key that was generated in-token (CKA_LOCAL) has been whatever it
+        // is now for its whole life.
+        if class == CKO_PRIVATE_KEY || class == CKO_SECRET_KEY {
+            let local = read_bool_attr(attrs, CKA_LOCAL);
+            if !attrs.contains_key(&CKA_ALWAYS_SENSITIVE) {
+                let v = local && read_bool_attr(attrs, CKA_SENSITIVE);
+                store_bool(attrs, CKA_ALWAYS_SENSITIVE, v);
+            }
+            if !attrs.contains_key(&CKA_NEVER_EXTRACTABLE) {
+                let v = local && !read_bool_attr(attrs, CKA_EXTRACTABLE);
+                store_bool(attrs, CKA_NEVER_EXTRACTABLE, v);
+            }
         }
     }
 }
@@ -1335,8 +1391,25 @@ pub fn store_bool(attrs: &mut Attributes, attr_type: u32, value: bool) {
 /// CK_ULONG compares byte-exact in `C_FindObjects`, and the value reads back at
 /// native width through `C_GetAttributeValue`. All map readers take the low
 /// 4 bytes (`from_le_bytes([v[0..3]])`), so widening is backward-compatible.
+///
+/// **`CK_UNAVAILABLE_INFORMATION` is widened, not zero-extended.** §3.1 makes
+/// it `(~0UL)`, so on LP64 it is eight bytes of `0xFF`. The engine's internal
+/// value is the 32-bit sentinel `0xFFFF_FFFF`, and `(0xFFFF_FFFF as
+/// usize).to_le_bytes()` is `ff ff ff ff 00 00 00 00` — mechanism 4294967295,
+/// which is not `CK_UNAVAILABLE_INFORMATION` and which a caller comparing
+/// against the macro will never match. That is what the differential harness
+/// recorded as DEFECT-RUST-KEY-GEN-MECHANISM-NARROWED on four objects
+/// (imported, derived, unwrapped and unwrapped-private keys), against C++'s
+/// `ffffffffffffffff`. `ck_abi::widen` already applies exactly this rule to
+/// scalar out-parameters; applying it here makes one rule cover both surfaces.
+/// Readers are unaffected — they take the low four bytes, which round-trip.
 pub fn store_ulong(attrs: &mut Attributes, attr_type: u32, value: u32) {
-    attrs.insert(attr_type, (value as usize).to_le_bytes().to_vec());
+    let native = if value == crate::constants::CK_UNAVAILABLE_INFORMATION {
+        usize::MAX
+    } else {
+        value as usize
+    };
+    attrs.insert(attr_type, native.to_le_bytes().to_vec());
 }
 
 /// Read a CK_BBOOL attribute back from an attrs HashMap (returns false if absent).
@@ -1408,12 +1481,22 @@ pub fn compute_kcv(attrs: &mut Attributes) {
                 _ => return,
             }
         }
-        CKO_PUBLIC_KEY | CKO_PRIVATE_KEY | CKO_CERTIFICATE => {
-            // Asymmetric keys and certificates: SHA-256 of CKA_VALUE (the
-            // DER cert bytes, for CKO_CERTIFICATE) → first 3 bytes. §4.6
-            // Table 19 doesn't mandate a specific algorithm for
-            // certificates (token-defined) — reusing the same convention
-            // already used for public/private keys.
+        // CERTIFICATES ONLY — public and private keys are NOT in this arm.
+        //
+        // §4.11 introduces the attribute as "the key check value (KCV)
+        // attribute for SYMMETRIC KEY OBJECTS", and the tables agree: it is
+        // listed in the Common Secret Key Attributes table and in §4.6's
+        // certificate table (Table 19), and in NEITHER the common public-key
+        // (Table 27) nor the common private-key (Table 28) table. A public key
+        // has nothing to check, and a private key's checksum is not something
+        // the specification defines.
+        //
+        // This arm used to include both, which is how an EC private key
+        // recovered through C_UnwrapKey came back carrying a three-byte
+        // checksum (DEFECT-CHECK-VALUE-ON-UNWRAPPED-PRIVATE-KEY). §4.6 does
+        // not mandate an algorithm for certificates, so the SHA-256 convention
+        // stays for that class.
+        CKO_CERTIFICATE => {
             let hash = Sha256::digest(&key_value);
             hash[..3].to_vec()
         }

@@ -364,14 +364,23 @@ CK_RV SoftHSM::C_CopyObject(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
 
-	if (pTemplate == NULL_PTR) return CKR_ARGUMENTS_BAD;
-	if (phNewObject == NULL_PTR) return CKR_ARGUMENTS_BAD;
-	*phNewObject = CK_INVALID_HANDLE;
-
-	// Get the session
+	// SESSION HANDLE FIRST — §5.1 gives the session-handle error class
+	// mandatory precedence over the argument class.
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
+	// A NULL pTemplate with ulCount == 0 is a copy with NO modifications,
+	// which is the ordinary meaning of "copy this object" — the same
+	// pointer/count convention every other entry point in this engine uses
+	// (compare C_GenerateKey). Rejecting it outright meant an uncopyable
+	// object answered CKR_ARGUMENTS_BAD instead of §4.1.3's
+	// CKR_ACTION_PROHIBITED, so the caller was told its arguments were wrong
+	// when what was actually wrong was that the object refused to be copied
+	// (the second half of DEFECT-CPP-COPYABLE-CANNOT-BE-CLEARED).
+	if (pTemplate == NULL_PTR && ulCount != 0) return CKR_ARGUMENTS_BAD;
+	if (phNewObject == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	*phNewObject = CK_INVALID_HANDLE;
 
 	// Get the slot
 	Slot* slot = session->getSlot();

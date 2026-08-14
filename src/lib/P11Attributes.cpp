@@ -481,6 +481,29 @@ CK_RV P11Attribute::update(Token* token, bool isPrivate, CK_VOID_PTR pValue, CK_
 		}
 	}
 
+	// ck12  Attribute cannot be changed once set to CK_FALSE. It becomes a
+	//       read only attribute. Like ck11, the one-way rule itself lives in
+	//       the specific attribute's updateAttr — this branch only says the
+	//       attribute is REACHABLE from C_SetAttributeValue / C_CopyObject.
+	//
+	//       There was no ck12 branch at all until 2026-08-14, so an attribute
+	//       carrying ck12 and nothing else — CKA_COPYABLE is the only one —
+	//       fell through to the CKR_ATTRIBUTE_READ_ONLY at the bottom of this
+	//       function and could never be set to CK_FALSE. That inverted the
+	//       rule: the copy protection an application is supposed to be able to
+	//       APPLY could not be applied at all. (CKA_EXTRACTABLE also carries
+	//       ck12 but reaches updateAttr through ck8, which is why this went
+	//       unnoticed.) Recorded by the differential harness as
+	//       DEFECT-CPP-COPYABLE-CANNOT-BE-CLEARED; P11AttrCopyable::updateAttr
+	//       already implements the rule correctly and was simply unreachable.
+	if ((checks & ck12) == ck12)
+	{
+		if (OBJECT_OP_SET==op || OBJECT_OP_COPY==op)
+		{
+			return updateAttr(token, isPrivate, pValue, ulValueLen, op);
+		}
+	}
+
 	// ck17  Can be changed in the process of copying the object using C_CopyObject.
 	if ((checks & ck17) == ck17)
 	{
