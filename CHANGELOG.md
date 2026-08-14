@@ -22,11 +22,17 @@ answers: conformance is defined by the **Profiles** document (§7 of the spec
 contains no technical requirement at all), and the session/login/object-access
 model lives in the **Usage Guide**.
 
-Two conclusions reversed as a result. **No profile mandates any mechanism** —
-every profile but one says "None specified" — so the 47 mechanism differences
-between the engines are product decisions, not defects. And **a token declares
-conformance by publishing a profile object**, which the C++ engine did not, so
-it could not claim conformance to anything.
+Two conclusions reversed as a result. **The profiles this engine claims mandate
+no mechanism** — Baseline, Extended, Authentication Token and Public
+Certificates Token each say "Supports the following mechanisms: a. None
+specified" — so the 47 mechanism differences between the engines are product
+decisions, not defects. *Corrected 2026-08-14: an earlier wording claimed no
+profile mandates any mechanism. That is wrong — Complete Provider (§5.2
+condition 6) requires "Supports all mechanisms [PKCS11_Spec] Section 6", and
+under that profile these divergences WOULD be defects. Neither engine claims
+it, deliberately.* And **a token declares conformance by publishing a profile
+object**, which the C++ engine did not, so it could not claim conformance to
+anything.
 
 ### If you are upgrading, read these three
 

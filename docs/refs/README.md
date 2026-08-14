@@ -19,7 +19,7 @@ Authoritative copies of the standards this engine is audited against. Each was f
 
 Section 7 of the specification contains no technical requirement. It says an implementation is a conforming Provider **only if** it meets one or more provider profiles specified in the Profiles document. Two consequences:
 
-- **The base specification mandates no mechanism, algorithm, curve or digest.** Every profile except HKDF TLS Token states "Supports the following mechanisms: a. None specified." So "this engine lacks mechanism X" is a product decision, not a conformance defect, unless a claimed profile requires it.
+- **The base specification mandates no mechanism, algorithm, curve or digest** — but the profiles differ, so read the one you claim. Baseline, Extended, Authentication Token and Public Certificates Token each state "Supports the following mechanisms: a. None specified"; HKDF TLS Token names `CKM_HKDF_DATA`; and **Complete Provider §5.2 condition 6 requires "Supports all mechanisms [PKCS11_Spec] Section 6."** So "this engine lacks mechanism X" is a product decision under the profiles this engine claims, and would be a conformance defect under Complete Provider — which is exactly why neither engine claims it.
 - **A token declares conformance by publishing a `CKO_PROFILE` object.** Baseline Provider condition 4 requires one carrying `CKP_BASELINE_PROVIDER`. An engine that publishes none has not established conformance to anything.
 
 ### Why the Usage Guide matters

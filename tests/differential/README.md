@@ -180,7 +180,7 @@ A legal one, where the specification is genuinely silent:
   "status": "legal",
   "scenario": "env.mechanism_set",
   "path": "mech*",
-  "justification": "The two engines advertise different mechanism sets (127 vs 116, 47 differences) and no profile requires any mechanism, so this is a product decision, not a conformance gap.",
+  "justification": "The two engines advertise different mechanism sets (127 vs 116, 47 differences) and no profile THIS ENGINE CLAIMS requires any mechanism, so this is a product decision, not a conformance gap. Complete Provider does require all of them; neither engine claims it.",
   "citation": "PKCS #11 Profiles v3.2 OS: Baseline Provider, Complete Provider, Extended Provider, Authentication Token and Public Certificates Token each state 'Supports the following mechanisms: a. None specified.' Only the HKDF TLS Token profile names one."
 }
 ```
