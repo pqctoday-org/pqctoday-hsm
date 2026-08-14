@@ -686,6 +686,9 @@ static std::vector<Finding> gFindings;
 struct CtxEntry { std::string scenario, prefix, cpp, rust; };
 static std::vector<CtxEntry> gCtx;
 
+// Total observations compared — the denominator the divergence counts sit over.
+static size_t gCompared = 0;
+
 static Exception_* match_exception(const Finding& f) {
     for (auto& x : gExceptions)
         if (glob_alt(x.scenario, f.scenario) && glob_alt(x.path, f.path) &&
@@ -817,6 +820,7 @@ static void compare(const Scenario& sc, const Recorder& a, const Recorder& b) {
             if (ce.cpp != ce.rust) gCtx.push_back(ce);
         }
         if (p.rfind("_ctx.", 0) == 0 || p.find("._ctx.") != std::string::npos) continue;
+        gCompared++;
         bool ha = a.vals.count(p), hb = b.vals.count(p);
         Finding f;
         f.scenario = sc.id; f.path = p;
@@ -858,7 +862,7 @@ static void write_reports(int ran, int skipped) {
     printf(" DIFFERENTIAL RESULT\n");
     printf("================================================================\n");
     printf(" scenarios run          : %d (%d skipped for absent mechanisms)\n", ran, skipped);
-    printf(" observations compared  : see report\n");
+    printf(" observations compared  : %zu\n", gCompared);
     printf(" divergences, legal     : %zu  (adjudicated permitted, with citation)\n", legal);
     printf(" divergences, known defect: %zu (recorded open non-conformance)\n", defect);
     printf(" divergences, UNCOVERED : %zu  <-- these fail the run\n", uncovered);
@@ -921,6 +925,7 @@ static void write_files(int ran, int skipped, size_t covered, size_t uncovered) 
     json j;
     j["_summary"] = {
         {"scenarios_run", ran}, {"scenarios_skipped", skipped},
+        {"observations_compared", gCompared},
         {"divergences_covered", covered}, {"divergences_uncovered", uncovered},
         {"divergences_legal", legal}, {"divergences_known_defect", defect},
         {"cpp_engine", gCpp.path}, {"rust_engine", gRust.path},
@@ -950,6 +955,7 @@ static void write_files(int ran, int skipped, size_t covered, size_t uncovered) 
         md << "**Exception deliberately dropped for this run:** `" << opt_drop_exception << "`  \n";
     md << "\n| | |\n|---|---|\n";
     md << "| scenarios run | " << ran << " |\n";
+    md << "| observations compared | " << gCompared << " |\n";
     md << "| scenarios skipped (mechanism absent on one engine) | " << skipped << " |\n";
     md << "| divergences adjudicated legal | " << legal << " |\n";
     md << "| divergences recorded as known defects | " << defect << " |\n";
