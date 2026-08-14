@@ -17461,6 +17461,86 @@ mod param_struct_width_tests {
         }
     }
 
+    /// End-to-end through the ported parser: the half-sized
+    /// `CK_MAC_GENERAL_PARAMS` the old length guard accepted is now refused.
+    ///
+    /// Old guard: `if p_param == 0 || param_len < usz` — but the *read* was
+    /// `*(p_param as *const u32)`, so on LP64 a caller supplying 4 bytes got
+    /// past a guard written for the read that was there before it, and the
+    /// engine took the CK_ULONG's top four bytes from beyond the buffer.
+    #[test]
+    fn mac_general_params_refuse_a_half_sized_parameter() {
+        let mech = CKM_SHA256_HMAC_GENERAL;
+
+        // A full, well-formed parameter is accepted and read at native width.
+        let full = 16usize.to_ne_bytes();
+        let m = packed_mech(mech, full.as_ptr(), full.len());
+        assert_eq!(
+            unsafe { parse_sign_mech_params(m.as_ptr() as *const u8, mech) },
+            Ok((16u32.to_le_bytes().to_vec(), false)),
+        );
+
+        // Half of one, which is what a 32-bit caller's struct looks like.
+        let half = 16u32.to_ne_bytes();
+        let m = packed_mech(mech, half.as_ptr(), half.len());
+        if size_of::<usize>() == 8 {
+            assert_eq!(
+                unsafe { parse_sign_mech_params(m.as_ptr() as *const u8, mech) },
+                Err(CKR_MECHANISM_PARAM_INVALID),
+                "require_len must reject a half-sized CK_MAC_GENERAL_PARAMS \
+                 rather than reading four bytes past the caller's buffer",
+            );
+        }
+    }
+
+    /// End-to-end through the ported parser: the KMAC customization pointer
+    /// survives at full width and the customization string comes back intact.
+    /// The old reading kept the pointer's low half and dereferenced it.
+    #[test]
+    fn kmac_customization_pointer_survives_at_full_width() {
+        let custom = b"tenant-7".to_vec();
+        // pCustomization / ulCustomizationLen / ulOutputLen at native width.
+        let mut param = vec![0u8; 3 * size_of::<usize>()];
+        let w = size_of::<usize>();
+        param[0..w].copy_from_slice(&(custom.as_ptr() as usize).to_ne_bytes());
+        param[w..2 * w].copy_from_slice(&custom.len().to_ne_bytes());
+        param[2 * w..3 * w].copy_from_slice(&32usize.to_ne_bytes());
+
+        let m = packed_mech(CKM_KMAC_128, param.as_ptr(), param.len());
+        let (ctx, det) =
+            unsafe { parse_sign_mech_params(m.as_ptr() as *const u8, CKM_KMAC_128) }.unwrap();
+        assert!(!det);
+        // ctx = LE u32 output length, then the customization bytes verbatim.
+        assert_eq!(&ctx[0..4], &32u32.to_le_bytes());
+        assert_eq!(&ctx[4..], &custom[..]);
+    }
+
+    /// End-to-end through the ported parser: the counter block is the
+    /// caller's, not the caller's shifted four bytes right.
+    #[test]
+    fn aes_ctr_counter_block_is_the_callers() {
+        let cb: Vec<u8> = (0xa0u8..0xb0).collect();
+        let w = size_of::<usize>();
+        let mut param = vec![0u8; w + 16];
+        param[0..w].copy_from_slice(&128usize.to_ne_bytes());
+        param[w..w + 16].copy_from_slice(&cb);
+        let (got, bits) = unsafe { parse_aes_ctr_params(param.as_ptr(), param.len()) }.unwrap();
+        assert_eq!(bits, 128);
+        assert_eq!(got, cb, "cb comes from the ABI offset, not from a literal 4");
+
+        // The pre-844ed27 struct — a 20-byte buffer with cb at offset 4 — is
+        // now TooShort on LP64 rather than being read as if it were valid.
+        if w == 8 {
+            let mut old_shaped = vec![0u8; 20];
+            old_shaped[0..4].copy_from_slice(&128u32.to_ne_bytes());
+            old_shaped[4..20].copy_from_slice(&cb);
+            assert_eq!(
+                unsafe { parse_aes_ctr_params(old_shaped.as_ptr(), old_shaped.len()) },
+                Err(CKR_MECHANISM_PARAM_INVALID),
+            );
+        }
+    }
+
     /// "typedef CK_ULONG CK_MAC_GENERAL_PARAMS" — one CK_ULONG, so the
     /// parameter is 8 bytes on LP64, not 4.
     #[test]
