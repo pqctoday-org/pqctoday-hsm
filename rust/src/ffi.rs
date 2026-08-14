@@ -4582,13 +4582,8 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         }
         // Parse CK_EDDSA_PARAMS: if phFlag is set, use internal CKM_EDDSA_PH
         if mech_type == CKM_EDDSA {
-            let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
-            let ul_param_len = *((p_mechanism as *const usize).add(2));
-            if !p_param.is_null() && ul_param_len >= 4 {
-                let ph_flag = *(p_param as *const u32);
-                if ph_flag != 0 {
-                    mech_type = CKM_EDDSA_PH;
-                }
+            if eddsa_ph_flag(p_mechanism) {
+                mech_type = CKM_EDDSA_PH;
             }
         }
         // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
@@ -4628,15 +4623,21 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 (Vec::new(), false)
             }
         } else if mech_type == CKM_KMAC_128 || mech_type == CKM_KMAC_256 {
-            // Vendor KMAC params (wasm32, 12 B): pCustomization(u32),
-            // ulCustomizationLen(u32), ulOutputLen(u32). Absent → defaults.
+            // Vendor KMAC params at NATIVE width: pCustomization(CK_BYTE_PTR),
+            // ulCustomizationLen(CK_ULONG), ulOutputLen(CK_ULONG) — 12 B on
+            // wasm32, 24 B on LP64. Absent → defaults.
+            //
+            // These were read as three u32s, which on a 64-bit build took the
+            // LOW HALF of the caller's pCustomization pointer and then
+            // dereferenced it: not merely a wrong MAC, a wild read.
             let p_param = *((p_mechanism as *const usize).add(1));
             let param_len = *((p_mechanism as *const usize).add(2));
-            if p_param != 0 && param_len >= 12 {
+            let usz = core::mem::size_of::<usize>();
+            if p_param != 0 && param_len >= 3 * usz {
                 let pp = p_param as *const u8;
-                let s_ptr = std::ptr::read_unaligned(pp as *const u32);
-                let s_len = std::ptr::read_unaligned((pp as *const u32).add(1)) as usize;
-                let out_len = std::ptr::read_unaligned((pp as *const u32).add(2));
+                let s_ptr = std::ptr::read_unaligned(pp as *const usize);
+                let s_len = std::ptr::read_unaligned((pp as *const usize).add(1));
+                let out_len = std::ptr::read_unaligned((pp as *const usize).add(2)) as u32;
                 if out_len > 1024 || s_len > 1024 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
@@ -4649,14 +4650,20 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 (Vec::new(), false)
             }
         } else if let Some((_, digest_len)) = hmac_general_base(mech_type) {
-            // CK_MAC_GENERAL_PARAMS = single CK_ULONG ulMacLength (§6.x).
-            // 1..=digest_len; carried to C_Sign/C_Verify in the ctx vec (LE).
+            // CK_MAC_GENERAL_PARAMS is a bare CK_ULONG ulMacLength
+            // ("typedef CK_ULONG CK_MAC_GENERAL_PARAMS"), so it is 4 B on
+            // wasm32 and 8 B on LP64 — read at native width like every other
+            // parameter here. The old 4-byte read happened to yield the right
+            // number on a little-endian 64-bit host and the wrong one (0) on a
+            // big-endian one; the length guard also accepted a half-sized
+            // parameter.
             let p_param = *((p_mechanism as *const usize).add(1));
             let param_len = *((p_mechanism as *const usize).add(2));
-            if p_param == 0 || param_len < 4 {
+            let usz = core::mem::size_of::<usize>();
+            if p_param == 0 || param_len < usz {
                 return CKR_MECHANISM_PARAM_INVALID;
             }
-            let mac_len = std::ptr::read_unaligned(p_param as *const u32);
+            let mac_len = std::ptr::read_unaligned(p_param as *const usize) as u32;
             if mac_len == 0 || mac_len as usize > digest_len {
                 return CKR_MECHANISM_PARAM_INVALID;
             }
@@ -4718,6 +4725,30 @@ fn takes_sign_additional_ctx(mech: u32) -> bool {
 /// - context longer than 255 bytes (FIPS 204 §5.2 / FIPS 205 §9.2 — an
 ///   overlong context is an error, NOT "ignore");
 /// - unknown hedge variant value.
+/// `CK_EDDSA_PARAMS.phFlag` (PKCS#11 v3.2 §6.3.7).
+///
+///     typedef struct CK_EDDSA_PARAMS {
+///         CK_BBOOL    phFlag;
+///         CK_ULONG    ulContextDataLen;
+///         CK_BYTE_PTR pContextData;
+///     } CK_EDDSA_PARAMS;
+///
+/// `phFlag` is a CK_BBOOL — ONE byte, followed by padding to the alignment
+/// of the CK_ULONG that comes next (3 bytes on wasm32, 7 on LP64). Reading
+/// it as a u32 pulled 3 of those padding bytes in with it, so a caller who
+/// set `phFlag = CK_FALSE` without zeroing the whole struct could be
+/// switched to the PRE-HASHED variant by leftover stack bytes and get an
+/// Ed25519ph signature where it asked for pure Ed25519 — a silently wrong
+/// signature, from a completely valid call.
+///
+/// Byte 0 is the right read on every target, and it also stays compatible
+/// with the little-endian 32-bit `phFlag` the wasm/TS callers write.
+unsafe fn eddsa_ph_flag(p_mechanism: *const u8) -> bool {
+    let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
+    let ul_param_len = *((p_mechanism as *const usize).add(2));
+    !p_param.is_null() && ul_param_len >= 1 && *p_param != 0
+}
+
 unsafe fn parse_sign_additional_ctx(p_mechanism: *const u8) -> Result<(Vec<u8>, bool), u32> {
     // CK_MECHANISM layout (WASM32): mechType(4) + pParameter(4) + ulParameterLen(4)
     let p_param = *((p_mechanism as *const usize).add(1));
@@ -5046,13 +5077,8 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         }
         // Parse CK_EDDSA_PARAMS: if phFlag is set, use internal CKM_EDDSA_PH
         if mech_type == CKM_EDDSA {
-            let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
-            let ul_param_len = *((p_mechanism as *const usize).add(2));
-            if !p_param.is_null() && ul_param_len >= 4 {
-                let ph_flag = *(p_param as *const u32);
-                if ph_flag != 0 {
-                    mech_type = CKM_EDDSA_PH;
-                }
+            if eddsa_ph_flag(p_mechanism) {
+                mech_type = CKM_EDDSA_PH;
             }
         }
         // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
@@ -5092,15 +5118,21 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 (Vec::new(), false)
             }
         } else if mech_type == CKM_KMAC_128 || mech_type == CKM_KMAC_256 {
-            // Vendor KMAC params (wasm32, 12 B): pCustomization(u32),
-            // ulCustomizationLen(u32), ulOutputLen(u32). Absent → defaults.
+            // Vendor KMAC params at NATIVE width: pCustomization(CK_BYTE_PTR),
+            // ulCustomizationLen(CK_ULONG), ulOutputLen(CK_ULONG) — 12 B on
+            // wasm32, 24 B on LP64. Absent → defaults.
+            //
+            // These were read as three u32s, which on a 64-bit build took the
+            // LOW HALF of the caller's pCustomization pointer and then
+            // dereferenced it: not merely a wrong MAC, a wild read.
             let p_param = *((p_mechanism as *const usize).add(1));
             let param_len = *((p_mechanism as *const usize).add(2));
-            if p_param != 0 && param_len >= 12 {
+            let usz = core::mem::size_of::<usize>();
+            if p_param != 0 && param_len >= 3 * usz {
                 let pp = p_param as *const u8;
-                let s_ptr = std::ptr::read_unaligned(pp as *const u32);
-                let s_len = std::ptr::read_unaligned((pp as *const u32).add(1)) as usize;
-                let out_len = std::ptr::read_unaligned((pp as *const u32).add(2));
+                let s_ptr = std::ptr::read_unaligned(pp as *const usize);
+                let s_len = std::ptr::read_unaligned((pp as *const usize).add(1));
+                let out_len = std::ptr::read_unaligned((pp as *const usize).add(2)) as u32;
                 if out_len > 1024 || s_len > 1024 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
@@ -5113,14 +5145,20 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 (Vec::new(), false)
             }
         } else if let Some((_, digest_len)) = hmac_general_base(mech_type) {
-            // CK_MAC_GENERAL_PARAMS = single CK_ULONG ulMacLength (§6.x).
-            // 1..=digest_len; carried to C_Sign/C_Verify in the ctx vec (LE).
+            // CK_MAC_GENERAL_PARAMS is a bare CK_ULONG ulMacLength
+            // ("typedef CK_ULONG CK_MAC_GENERAL_PARAMS"), so it is 4 B on
+            // wasm32 and 8 B on LP64 — read at native width like every other
+            // parameter here. The old 4-byte read happened to yield the right
+            // number on a little-endian 64-bit host and the wrong one (0) on a
+            // big-endian one; the length guard also accepted a half-sized
+            // parameter.
             let p_param = *((p_mechanism as *const usize).add(1));
             let param_len = *((p_mechanism as *const usize).add(2));
-            if p_param == 0 || param_len < 4 {
+            let usz = core::mem::size_of::<usize>();
+            if p_param == 0 || param_len < usz {
                 return CKR_MECHANISM_PARAM_INVALID;
             }
-            let mac_len = std::ptr::read_unaligned(p_param as *const u32);
+            let mac_len = std::ptr::read_unaligned(p_param as *const usize) as u32;
             if mac_len == 0 || mac_len as usize > digest_len {
                 return CKR_MECHANISM_PARAM_INVALID;
             }
@@ -5657,13 +5695,8 @@ pub fn C_VerifySignatureInit(
             return rv;
         }
         if mech_type == CKM_EDDSA {
-            let p_param = *((p_mechanism as *const usize).add(1)) as usize as *const u8;
-            let ul_param_len = *((p_mechanism as *const usize).add(2));
-            if !p_param.is_null() && ul_param_len >= 4 {
-                let ph_flag = *(p_param as *const u32);
-                if ph_flag != 0 {
-                    mech_type = CKM_EDDSA_PH;
-                }
+            if eddsa_ph_flag(p_mechanism) {
+                mech_type = CKM_EDDSA_PH;
             }
         }
         // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
@@ -5702,15 +5735,21 @@ pub fn C_VerifySignatureInit(
                 (Vec::new(), false)
             }
         } else if mech_type == CKM_KMAC_128 || mech_type == CKM_KMAC_256 {
-            // Vendor KMAC params (wasm32, 12 B): pCustomization(u32),
-            // ulCustomizationLen(u32), ulOutputLen(u32). Absent → defaults.
+            // Vendor KMAC params at NATIVE width: pCustomization(CK_BYTE_PTR),
+            // ulCustomizationLen(CK_ULONG), ulOutputLen(CK_ULONG) — 12 B on
+            // wasm32, 24 B on LP64. Absent → defaults.
+            //
+            // These were read as three u32s, which on a 64-bit build took the
+            // LOW HALF of the caller's pCustomization pointer and then
+            // dereferenced it: not merely a wrong MAC, a wild read.
             let p_param = *((p_mechanism as *const usize).add(1));
             let param_len = *((p_mechanism as *const usize).add(2));
-            if p_param != 0 && param_len >= 12 {
+            let usz = core::mem::size_of::<usize>();
+            if p_param != 0 && param_len >= 3 * usz {
                 let pp = p_param as *const u8;
-                let s_ptr = std::ptr::read_unaligned(pp as *const u32);
-                let s_len = std::ptr::read_unaligned((pp as *const u32).add(1)) as usize;
-                let out_len = std::ptr::read_unaligned((pp as *const u32).add(2));
+                let s_ptr = std::ptr::read_unaligned(pp as *const usize);
+                let s_len = std::ptr::read_unaligned((pp as *const usize).add(1));
+                let out_len = std::ptr::read_unaligned((pp as *const usize).add(2)) as u32;
                 if out_len > 1024 || s_len > 1024 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
@@ -5723,14 +5762,20 @@ pub fn C_VerifySignatureInit(
                 (Vec::new(), false)
             }
         } else if let Some((_, digest_len)) = hmac_general_base(mech_type) {
-            // CK_MAC_GENERAL_PARAMS = single CK_ULONG ulMacLength (§6.x).
-            // 1..=digest_len; carried to C_Sign/C_Verify in the ctx vec (LE).
+            // CK_MAC_GENERAL_PARAMS is a bare CK_ULONG ulMacLength
+            // ("typedef CK_ULONG CK_MAC_GENERAL_PARAMS"), so it is 4 B on
+            // wasm32 and 8 B on LP64 — read at native width like every other
+            // parameter here. The old 4-byte read happened to yield the right
+            // number on a little-endian 64-bit host and the wrong one (0) on a
+            // big-endian one; the length guard also accepted a half-sized
+            // parameter.
             let p_param = *((p_mechanism as *const usize).add(1));
             let param_len = *((p_mechanism as *const usize).add(2));
-            if p_param == 0 || param_len < 4 {
+            let usz = core::mem::size_of::<usize>();
+            if p_param == 0 || param_len < usz {
                 return CKR_MECHANISM_PARAM_INVALID;
             }
-            let mac_len = std::ptr::read_unaligned(p_param as *const u32);
+            let mac_len = std::ptr::read_unaligned(p_param as *const usize) as u32;
             if mac_len == 0 || mac_len as usize > digest_len {
                 return CKR_MECHANISM_PARAM_INVALID;
             }
@@ -17361,3 +17406,97 @@ mod mlkem_value_len_ffi_tests {
 #[cfg(test)]
 #[path = "conformance_v32_tests.rs"]
 mod conformance_v32_tests;
+
+// ── Mechanism-parameter struct widths (2026-08-13) ──────────────────────────
+//
+// Three defects in one day shared a single wrong belief: that the fields of a
+// caller-supplied CK_* parameter struct are 4 bytes wide. They are CK_ULONG /
+// CK_BYTE_PTR, which are 4 bytes on wasm32 and 8 on LP64 — so every one of
+// them was invisible in the browser and wrong in the native library. These
+// tests pin the layouts that were being misread.
+#[cfg(test)]
+mod param_struct_width_tests {
+    use super::*;
+    use std::mem::size_of;
+
+    /// A CK_MECHANISM in the engine's packed `[type, pParameter, ulParameterLen]`
+    /// form — what ck_abi::xlate_mech hands the entry points.
+    fn packed_mech(mech: u32, param: *const u8, len: usize) -> [usize; 3] {
+        [mech as usize, param as usize, len]
+    }
+
+    /// PKCS#11 v3.2 §6.3.7 CK_EDDSA_PARAMS at native layout.
+    #[repr(C)]
+    struct CkEddsaParams {
+        ph_flag: u8, // CK_BBOOL — ONE byte
+        ul_context_data_len: usize,
+        p_context_data: *const u8,
+    }
+
+    /// phFlag is a CK_BBOOL. Reading four bytes for it pulled in the padding
+    /// that follows, so a caller that set phFlag = CK_FALSE without zeroing
+    /// the struct could be silently switched to Ed25519**ph**.
+    #[test]
+    fn eddsa_ph_flag_reads_one_byte_not_four() {
+        // Guard the premise: there IS padding after phFlag to read into.
+        assert!(size_of::<CkEddsaParams>() >= 3 * size_of::<usize>());
+
+        // A caller-shaped struct whose phFlag byte is CK_FALSE but whose
+        // padding bytes are dirty — exactly what an un-memset stack struct
+        // looks like.
+        let mut raw = vec![0xABu8; size_of::<CkEddsaParams>()];
+        raw[0] = 0; // phFlag = CK_FALSE
+        let m = packed_mech(CKM_EDDSA, raw.as_ptr(), raw.len());
+        assert!(
+            !unsafe { eddsa_ph_flag(m.as_ptr() as *const u8) },
+            "CK_FALSE with dirty padding must stay pure EdDSA"
+        );
+
+        // CK_TRUE is still honoured.
+        raw[0] = 1;
+        let m = packed_mech(CKM_EDDSA, raw.as_ptr(), raw.len());
+        assert!(unsafe { eddsa_ph_flag(m.as_ptr() as *const u8) }, "CK_TRUE selects the PH variant");
+
+        // The little-endian 32-bit phFlag the wasm/TS callers write keeps
+        // working in both states.
+        let mut le32 = vec![0u8; size_of::<CkEddsaParams>()];
+        le32[0..4].copy_from_slice(&1u32.to_le_bytes());
+        let m = packed_mech(CKM_EDDSA, le32.as_ptr(), le32.len());
+        assert!(unsafe { eddsa_ph_flag(m.as_ptr() as *const u8) });
+        le32[0..4].copy_from_slice(&0u32.to_le_bytes());
+        let m = packed_mech(CKM_EDDSA, le32.as_ptr(), le32.len());
+        assert!(!unsafe { eddsa_ph_flag(m.as_ptr() as *const u8) });
+
+        // No parameter at all is not pre-hashed either.
+        let m = packed_mech(CKM_EDDSA, std::ptr::null(), 0);
+        assert!(!unsafe { eddsa_ph_flag(m.as_ptr() as *const u8) });
+    }
+
+    /// The vendor KMAC parameter block's first field is a POINTER. Read as a
+    /// u32 on LP64 it kept only the low half and was then dereferenced, so
+    /// this asserts the layout the reader now assumes — a pointer-width first
+    /// field followed by two CK_ULONGs, 12 B on wasm32 and 24 B on LP64.
+    #[test]
+    fn kmac_params_are_pointer_width() {
+        #[repr(C)]
+        struct CkKmacParams {
+            p_customization: *const u8,
+            ul_customization_len: usize,
+            ul_output_len: usize,
+        }
+        assert_eq!(size_of::<CkKmacParams>(), 3 * size_of::<usize>());
+        // The old reader's 12-byte assumption only holds where a pointer is
+        // 4 bytes; asserting it here means a 64-bit build can never silently
+        // go back to it.
+        if size_of::<usize>() == 8 {
+            assert_ne!(size_of::<CkKmacParams>(), 12);
+        }
+    }
+
+    /// "typedef CK_ULONG CK_MAC_GENERAL_PARAMS" — one CK_ULONG, so the
+    /// parameter is 8 bytes on LP64, not 4.
+    #[test]
+    fn mac_general_params_is_one_ck_ulong() {
+        assert_eq!(size_of::<crate::ck_abi::CK_ULONG>(), size_of::<usize>());
+    }
+}
