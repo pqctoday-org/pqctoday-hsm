@@ -1221,6 +1221,297 @@ void test_kem_value_len() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// S5 — hash-based-signature private keys MUST be sensitive and unextractable
+// (2026-08-13 remediation).
+//
+// PKCS#11 v3.2 §6.65.3 (HSS): "CKA_SENSITIVE MUST be true, CKA_EXTRACTABLE MUST
+// be false, and CKA_COPYABLE MUST be false for this key."
+// §6.66.4 (XMSS) and §6.66.5 (XMSS-MT): "CKA_SENSITIVE MUST be true and
+// CKA_EXTRACTABLE MUST be false for this key."
+//
+// Until this pass the C++ engine set none of them, so the class defaults
+// applied (CKA_SENSITIVE=false, CKA_EXTRACTABLE=true).  The HSS/XMSS private
+// key's CKA_VALUE is the one-time-signature STATE — the same tables warn that
+// "exporting this value is dangerous as it would allow key reuse" — so the key
+// was one C_GetAttributeValue away from an extraction that permits forgery.
+//
+// §4.1.1 rule 5 makes a template contradicting a mechanism-contributed value an
+// error; the plan's chosen code is CKR_ATTRIBUTE_VALUE_INVALID.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_hbs_key_protection() {
+    const char* CAT = "HBSProtect";
+    const CK_MECHANISM_TYPE M_HSS_KP    = 0x00004032UL;
+    const CK_MECHANISM_TYPE M_XMSS_KP   = 0x00004034UL;
+    const CK_MECHANISM_TYPE M_XMSSMT_KP = 0x00004035UL;
+    const CK_KEY_TYPE KT_HSS    = 0x00000046UL;
+    const CK_KEY_TYPE KT_XMSS   = 0x00000047UL;
+    const CK_KEY_TYPE KT_XMSSMT = 0x00000048UL;
+    const CK_ATTRIBUTE_TYPE A_PARAMETER_SET = 0x0000061dUL;
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+
+    // Generate one HBS key pair, optionally injecting ONE extra private-key
+    // template entry (used for the "contradicting template" cases).
+    auto gen = [&](CK_MECHANISM_TYPE mech, CK_KEY_TYPE kt, CK_ULONG paramSet,
+                   CK_ATTRIBUTE* extra, CK_OBJECT_HANDLE* hPub, CK_OBJECT_HANDLE* hPriv) -> CK_RV {
+        CK_MECHANISM m = { mech, NULL_PTR, 0 };
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS,          &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,       &kt,       sizeof(kt) },
+            { CKA_VERIFY,         &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,          &bFalse,   sizeof(bFalse) },
+            { A_PARAMETER_SET,    &paramSet, sizeof(paramSet) },
+        };
+        CK_ATTRIBUTE privTmpl[6] = {
+            { CKA_CLASS,          &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,       &kt,        sizeof(kt) },
+            { CKA_SIGN,           &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,          &bFalse,    sizeof(bFalse) },
+            { A_PARAMETER_SET,    &paramSet,  sizeof(paramSet) },
+        };
+        CK_ULONG privCount = 5;
+        if (extra) privTmpl[privCount++] = *extra;
+        *hPub = 0; *hPriv = 0;
+        return fl->C_GenerateKeyPair(hSess, &m, pubTmpl, 5, privTmpl, privCount, hPub, hPriv);
+    };
+
+    struct Case { const char* name; CK_MECHANISM_TYPE mech; CK_KEY_TYPE kt; CK_ULONG ps; bool copyable; };
+    // HSS parameter set 0x01 == CKP_HSS_LMS_SHA256_M32_H5 / LMOTS w8 default.
+    Case cases[] = {
+        { "HSS",    M_HSS_KP,    KT_HSS,    0x00000001UL, true  },
+        { "XMSS",   M_XMSS_KP,   KT_XMSS,   0x00000001UL, false },
+        { "XMSSMT", M_XMSSMT_KP, KT_XMSSMT, 0x00000001UL, false },
+    };
+
+    for (const Case& c : cases) {
+        if (!mech_advertised(c.mech)) {
+            record_result(CAT, std::string(c.name) + "_advertised", "SKIP", "mechanism not advertised");
+            continue;
+        }
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_RV rv = gen(c.mech, c.kt, c.ps, NULL, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result(CAT, std::string(c.name) + "_Generate", "FAIL", "RV=" + std::to_string(rv));
+            continue;
+        }
+        record_result(CAT, std::string(c.name) + "_Generate", "PASS", "");
+
+        CK_BBOOL sens = CK_FALSE, extr = CK_TRUE, copy = CK_TRUE;
+        CK_ATTRIBUTE q[] = {
+            { CKA_SENSITIVE,   &sens, sizeof(sens) },
+            { CKA_EXTRACTABLE, &extr, sizeof(extr) },
+        };
+        CK_RV rq = fl->C_GetAttributeValue(hSess, hPriv, q, 2);
+        record_result(CAT, std::string(c.name) + "_CKA_SENSITIVE_true",
+                      (rq == CKR_OK && sens == CK_TRUE) ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rq) + " CKA_SENSITIVE=" + std::to_string((int)sens));
+        record_result(CAT, std::string(c.name) + "_CKA_EXTRACTABLE_false",
+                      (rq == CKR_OK && extr == CK_FALSE) ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rq) + " CKA_EXTRACTABLE=" + std::to_string((int)extr));
+
+        if (c.copyable) {
+            CK_ATTRIBUTE qc = { CKA_COPYABLE, &copy, sizeof(copy) };
+            CK_RV rc = fl->C_GetAttributeValue(hSess, hPriv, &qc, 1);
+            record_result(CAT, std::string(c.name) + "_CKA_COPYABLE_false",
+                          (rc == CKR_OK && copy == CK_FALSE) ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rc) + " CKA_COPYABLE=" + std::to_string((int)copy));
+        }
+
+        // The OTS state must not be readable: §4.2 makes CKA_VALUE on a
+        // sensitive key CKR_ATTRIBUTE_SENSITIVE.
+        std::vector<CK_BYTE> big(200000);
+        CK_ATTRIBUTE v = { CKA_VALUE, big.data(), (CK_ULONG)big.size() };
+        CK_RV rvv = fl->C_GetAttributeValue(hSess, hPriv, &v, 1);
+        record_result(CAT, std::string(c.name) + "_CKA_VALUE_not_extractable",
+                      rvv == CKR_ATTRIBUTE_SENSITIVE ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rvv) + " (want CKR_ATTRIBUTE_SENSITIVE=0x11)");
+
+        // Contradicting templates must be refused.
+        CK_ATTRIBUTE noSens = { CKA_SENSITIVE, &bFalse, sizeof(bFalse) };
+        CK_OBJECT_HANDLE a = 0, b = 0;
+        CK_RV r1 = gen(c.mech, c.kt, c.ps, &noSens, &a, &b);
+        record_result(CAT, std::string(c.name) + "_reject_SENSITIVE_false",
+                      r1 == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r1) + " (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
+
+        CK_ATTRIBUTE yesExtr = { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) };
+        a = 0; b = 0;
+        CK_RV r2 = gen(c.mech, c.kt, c.ps, &yesExtr, &a, &b);
+        record_result(CAT, std::string(c.name) + "_reject_EXTRACTABLE_true",
+                      r2 == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r2) + " (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
+
+        if (c.copyable) {
+            CK_ATTRIBUTE yesCopy = { CKA_COPYABLE, &bTrue, sizeof(bTrue) };
+            a = 0; b = 0;
+            CK_RV r3 = gen(c.mech, c.kt, c.ps, &yesCopy, &a, &b);
+            record_result(CAT, std::string(c.name) + "_reject_COPYABLE_true",
+                          r3 == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r3) + " (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
+        }
+
+        // A template that merely RESTATES the mandated values must succeed
+        // (§4.1.1 rule 6).
+        CK_ATTRIBUTE okSens = { CKA_SENSITIVE, &bTrue, sizeof(bTrue) };
+        a = 0; b = 0;
+        CK_RV r4 = gen(c.mech, c.kt, c.ps, &okSens, &a, &b);
+        record_result(CAT, std::string(c.name) + "_accept_restated_SENSITIVE_true",
+                      r4 == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(r4));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S2 (C++ half) — CKA_WRAP_TEMPLATE mismatch must be CKR_KEY_HANDLE_INVALID.
+//
+// PKCS#11 v3.2 §5.18.3: "To partition the wrapping keys so they can only wrap a
+// subset of extractable keys the attribute CKA_WRAP_TEMPLATE can be used on the
+// wrapping key ... If all attributes match according to the C_FindObject rules
+// of attribute matching then the wrap will proceed. ... If any attribute
+// mismatch occurs on an attempt to wrap a key then the function SHALL return
+// CKR_KEY_HANDLE_INVALID."
+//
+// The engine enforced the partition correctly but returned
+// CKR_KEY_NOT_WRAPPABLE from both mismatch sites.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_wrap_template_return_code() {
+    const char* CAT = "WrapTemplate";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE aesType = CKK_AES;
+    CK_ULONG klen = 32;
+
+    // Wrapping key constrained to keys whose CKA_LABEL is exactly "WRAPME".
+    CK_UTF8CHAR allowed[] = "WRAPME";
+    CK_ATTRIBUTE wrapTemplate[] = {
+        { CKA_LABEL, allowed, sizeof(allowed) - 1 }
+    };
+    CK_ATTRIBUTE kekTmpl[] = {
+        { CKA_CLASS,          &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE,       &aesType,  sizeof(aesType) },
+        { CKA_VALUE_LEN,      &klen,     sizeof(klen) },
+        { CKA_TOKEN,          &bFalse,   sizeof(bFalse) },
+        { CKA_WRAP,           &bTrue,    sizeof(bTrue) },
+        { CKA_UNWRAP,         &bTrue,    sizeof(bTrue) },
+        { CKA_WRAP_TEMPLATE,  wrapTemplate, sizeof(wrapTemplate) },
+    };
+    CK_MECHANISM aesGen = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE hKek = CK_INVALID_HANDLE;
+    CK_RV rv = fl->C_GenerateKey(hSess, &aesGen, kekTmpl, 7, &hKek);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Generate_KEK_with_WRAP_TEMPLATE", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+    record_result(CAT, "Generate_KEK_with_WRAP_TEMPLATE", "PASS", "");
+
+    // The partition can only be enforced if the template actually round-trips
+    // through the object store, so assert that before asserting the codes.
+    {
+        CK_ATTRIBUTE probe = { CKA_WRAP_TEMPLATE, NULL_PTR, 0 };
+        CK_RV r = fl->C_GetAttributeValue(hSess, hKek, &probe, 1);
+        record_result(CAT, "KEK_WRAP_TEMPLATE_round_trips",
+                      (r == CKR_OK && probe.ulValueLen == sizeof(CK_ATTRIBUTE)) ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " ulValueLen=" + std::to_string((long)probe.ulValueLen) +
+                      " (want " + std::to_string(sizeof(CK_ATTRIBUTE)) + ")");
+    }
+
+    auto makeTarget = [&](const char* label, CK_OBJECT_HANDLE* h) -> CK_RV {
+        CK_ATTRIBUTE tmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN,   &klen,     sizeof(klen) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_LABEL,       (CK_UTF8CHAR_PTR)label, (CK_ULONG)strlen(label) },
+        };
+        *h = CK_INVALID_HANDLE;
+        return fl->C_GenerateKey(hSess, &aesGen, tmpl, 7, h);
+    };
+
+    CK_MECHANISM wrapMech = { CKM_AES_KEY_WRAP, NULL_PTR, 0 };
+
+    // (0) control: a KEK carrying NO CKA_WRAP_TEMPLATE wraps anything, so a
+    //     failure below is attributable to the partition check and not to the
+    //     wrap machinery itself.
+    {
+        CK_ATTRIBUTE plainKek[] = {
+            { CKA_CLASS,     &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,  &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN, &klen,     sizeof(klen) },
+            { CKA_TOKEN,     &bFalse,   sizeof(bFalse) },
+            { CKA_WRAP,      &bTrue,    sizeof(bTrue) },
+        };
+        CK_OBJECT_HANDLE hPlain = CK_INVALID_HANDLE, hT = CK_INVALID_HANDLE;
+        CK_RV r = fl->C_GenerateKey(hSess, &aesGen, plainKek, 5, &hPlain);
+        if (r == CKR_OK && makeTarget("ANY", &hT) == CKR_OK) {
+            CK_BYTE out[512]; CK_ULONG outLen = sizeof(out);
+            r = fl->C_WrapKey(hSess, &wrapMech, hPlain, hT, out, &outLen);
+            record_result(CAT, "Wrap_without_template_baseline",
+                          r == CKR_OK ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r) + " len=" + std::to_string(outLen));
+        } else {
+            record_result(CAT, "Wrap_without_template_baseline", "FAIL",
+                          "setup RV=" + std::to_string(r));
+        }
+    }
+
+    // (a) label MISMATCH → §5.18.3 SHALL be CKR_KEY_HANDLE_INVALID.
+    CK_OBJECT_HANDLE hBad = CK_INVALID_HANDLE;
+    if (makeTarget("DENIED", &hBad) == CKR_OK) {
+        CK_BYTE out[512]; CK_ULONG outLen = sizeof(out);
+        CK_RV r = fl->C_WrapKey(hSess, &wrapMech, hKek, hBad, out, &outLen);
+        record_result(CAT, "Wrap_template_value_mismatch",
+                      r == CKR_KEY_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_KEY_HANDLE_INVALID=0x60)");
+    } else {
+        record_result(CAT, "Wrap_template_value_mismatch", "FAIL", "target key generation failed");
+    }
+
+    // (b) label MATCH → the wrap must proceed.
+    CK_OBJECT_HANDLE hGood = CK_INVALID_HANDLE;
+    if (makeTarget("WRAPME", &hGood) == CKR_OK) {
+        CK_BYTE out[512]; CK_ULONG outLen = sizeof(out);
+        CK_RV r = fl->C_WrapKey(hSess, &wrapMech, hKek, hGood, out, &outLen);
+        record_result(CAT, "Wrap_template_match_proceeds",
+                      r == CKR_OK ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " len=" + std::to_string(outLen));
+    } else {
+        record_result(CAT, "Wrap_template_match_proceeds", "FAIL", "target key generation failed");
+    }
+
+    // (c) wrap template naming an attribute the target does not carry at all
+    //     (CKA_SUBJECT exists on private keys/certificates, never on a secret
+    //     key) — the "absent attribute" mismatch site, same SHALL.
+    {
+        CK_UTF8CHAR subj[] = "\x30\x00";
+        CK_ATTRIBUTE wt2[] = { { CKA_SUBJECT, subj, 2 } };
+        CK_ATTRIBUTE kek2Tmpl[] = {
+            { CKA_CLASS,         &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,      &aesType,  sizeof(aesType) },
+            { CKA_VALUE_LEN,     &klen,     sizeof(klen) },
+            { CKA_TOKEN,         &bFalse,   sizeof(bFalse) },
+            { CKA_WRAP,          &bTrue,    sizeof(bTrue) },
+            { CKA_WRAP_TEMPLATE, wt2,       sizeof(wt2) },
+        };
+        CK_OBJECT_HANDLE hKek2 = CK_INVALID_HANDLE;
+        CK_RV r = fl->C_GenerateKey(hSess, &aesGen, kek2Tmpl, 6, &hKek2);
+        if (r != CKR_OK) {
+            record_result(CAT, "Wrap_template_absent_attribute", "FAIL",
+                          "KEK generation RV=" + std::to_string(r));
+        } else {
+            CK_OBJECT_HANDLE hT = CK_INVALID_HANDLE;
+            makeTarget("ANY", &hT);
+            CK_BYTE out[512]; CK_ULONG outLen = sizeof(out);
+            r = fl->C_WrapKey(hSess, &wrapMech, hKek2, hT, out, &outLen);
+            record_result(CAT, "Wrap_template_absent_attribute",
+                          r == CKR_KEY_HANDLE_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(r) + " (want CKR_KEY_HANDLE_INVALID=0x60)");
+        }
+    }
+}
+
 #ifndef CKM_HASH_ML_DSA_SHA512
 #define CKM_HASH_ML_DSA_SHA512 0x00000026UL
 #define CKM_HASH_ML_DSA_SHA3_512 0x0000002aUL
@@ -3996,6 +4287,229 @@ void test_kcv_compliance() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// S11 (C++ half) — CKA_CHECK_VALUE on encapsulated / decapsulated keys.
+//
+// PKCS#11 v3.2 §4.11: "The attribute is optional, but if supported, regardless
+// of how the key object is created or derived, the value of the attribute is
+// always supplied. It SHALL be supplied even if the encryption operation for
+// the key is forbidden."  For a generic secret the value is "the first three
+// bytes of the SHA-1 hash" of the key value.
+//
+// On caller-supplied values: "If a value is supplied in the application
+// template (allowed but never necessary) then, if supported, it MUST match what
+// the library calculates it to be or the library returns a
+// CKR_ATTRIBUTE_VALUE_INVALID."  Suppression: "The generation of the KCV may be
+// prevented by the application supplying the attribute in the template as a
+// no-value (0 length) entry."
+//
+// Two defects this covers: (1) neither KEM path computed the value at all, and
+// (2) the C++ template handling rejected ANY non-empty caller value, including
+// a CORRECT one, which §4.11 requires be accepted.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_kem_check_value() {
+    const char* CAT = "KEMKcv";
+    typedef CK_RV (*C_EncapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_OBJECT_HANDLE_PTR);
+    typedef CK_RV (*C_DecapsulateKey_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE, CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_OBJECT_HANDLE_PTR);
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    C_EncapsulateKey_t EncapFn = dlib ? (C_EncapsulateKey_t)dlsym(dlib, "C_EncapsulateKey") : NULL;
+    C_DecapsulateKey_t DecapFn = dlib ? (C_DecapsulateKey_t)dlsym(dlib, "C_DecapsulateKey") : NULL;
+    if (!EncapFn || !DecapFn) {
+        record_result(CAT, "KEM_CKA_CHECK_VALUE", "SKIP", "Function pointers missing");
+        return;
+    }
+
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE secType = CKK_GENERIC_SECRET;
+
+    CK_ATTRIBUTE ssTmpl[] = {
+        { CKA_CLASS,       &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+        { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+        { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+        { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+    };
+
+    // Generate an ML-KEM-768 pair as the KEM subject.
+    CK_KEY_TYPE kemType = CKK_ML_KEM;
+    CK_ULONG ps768 = 2;
+    CK_ATTRIBUTE pubTmpl[] = {
+        { CKA_CLASS,         &pubClass, sizeof(pubClass) },
+        { CKA_KEY_TYPE,      &kemType,  sizeof(kemType) },
+        { CKA_ENCAPSULATE,   &bTrue,    sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &ps768,    sizeof(ps768) },
+        { CKA_TOKEN,         &bFalse,   sizeof(bFalse) }
+    };
+    CK_ATTRIBUTE privTmpl[] = {
+        { CKA_CLASS,         &privClass, sizeof(privClass) },
+        { CKA_KEY_TYPE,      &kemType,   sizeof(kemType) },
+        { CKA_DECAPSULATE,   &bTrue,     sizeof(bTrue) },
+        { CKA_PARAMETER_SET, &ps768,     sizeof(ps768) },
+        { CKA_TOKEN,         &bFalse,    sizeof(bFalse) }
+    };
+    CK_MECHANISM kemGen = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+    CK_RV rv = fl->C_GenerateKeyPair(hSess, &kemGen, pubTmpl, 5, privTmpl, 5, &hPub, &hPriv);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Generate_ML_KEM_768", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+
+    CK_MECHANISM mlkemMech = { CKM_ML_KEM, NULL_PTR, 0 };
+    CK_BYTE ct[2000]; CK_ULONG ctLen = sizeof(ct);
+    CK_OBJECT_HANDLE hEnc = 0;
+    rv = EncapFn(hSess, &mlkemMech, hPub, ssTmpl, 5, ct, &ctLen, &hEnc);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Encap_MLKEM768", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+
+    // Read the shared secret back and compute the independent SHA-1 oracle.
+    auto kcvOf = [&](CK_OBJECT_HANDLE h, std::vector<unsigned char>* oracleOut) -> std::vector<unsigned char> {
+        CK_BYTE val[256];
+        CK_ATTRIBUTE a = { CKA_VALUE, val, sizeof(val) };
+        if (fl->C_GetAttributeValue(hSess, h, &a, 1) != CKR_OK) { oracleOut->clear(); return {}; }
+        *oracleOut = oracle_sha1_kcv(val, a.ulValueLen);
+        return read_kcv(h);
+    };
+
+    std::vector<unsigned char> oracle, hsm;
+    hsm = kcvOf(hEnc, &oracle);
+    record_result(CAT, "Encap_KCV_present",
+                  hsm.size() == 3 ? "PASS" : "FAIL",
+                  "got " + std::to_string(hsm.size()) + " bytes (§4.11 SHALL be supplied)");
+    record_result(CAT, "Encap_KCV_equals_SHA1_oracle",
+                  (hsm.size() == 3 && hsm == oracle) ? "PASS" : "FAIL",
+                  "HSM=" + hex_bytes(hsm) + " oracle=" + hex_bytes(oracle));
+
+    CK_OBJECT_HANDLE hDec = 0;
+    rv = DecapFn(hSess, &mlkemMech, hPriv, ssTmpl, 5, ct, ctLen, &hDec);
+    if (rv != CKR_OK) {
+        record_result(CAT, "Decap_MLKEM768", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+    std::vector<unsigned char> dOracle, dHsm;
+    dHsm = kcvOf(hDec, &dOracle);
+    record_result(CAT, "Decap_KCV_present",
+                  dHsm.size() == 3 ? "PASS" : "FAIL",
+                  "got " + std::to_string(dHsm.size()) + " bytes");
+    record_result(CAT, "Decap_KCV_equals_SHA1_oracle",
+                  (dHsm.size() == 3 && dHsm == dOracle) ? "PASS" : "FAIL",
+                  "HSM=" + hex_bytes(dHsm) + " oracle=" + hex_bytes(dOracle));
+    // The KCV is the cheap way both ends confirm the same secret — this is the
+    // whole reason §4.11 matters on the KEM paths.
+    record_result(CAT, "Encap_and_Decap_KCV_agree",
+                  (hsm.size() == 3 && hsm == dHsm) ? "PASS" : "FAIL",
+                  "encap=" + hex_bytes(hsm) + " decap=" + hex_bytes(dHsm));
+
+    // ── caller-supplied CORRECT value must be ACCEPTED (§4.11 "MUST match") ──
+    if (dHsm.size() == 3) {
+        CK_ATTRIBUTE okTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_CHECK_VALUE, dHsm.data(), 3 },
+        };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        CK_RV r = DecapFn(hSess, &mlkemMech, hPriv, okTmpl, 6, ct, ctLen, &h);
+        record_result(CAT, "Decap_correct_caller_KCV_accepted",
+                      r == CKR_OK ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (§4.11: a matching supplied value is legal)");
+    }
+
+    // ── caller-supplied WRONG value → CKR_ATTRIBUTE_VALUE_INVALID ────────────
+    {
+        CK_BYTE wrong[3] = { 0xDE, 0xAD, 0xBE };
+        CK_ATTRIBUTE badTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_CHECK_VALUE, wrong,     3 },
+        };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        CK_RV r = DecapFn(hSess, &mlkemMech, hPriv, badTmpl, 6, ct, ctLen, &h);
+        record_result(CAT, "Decap_wrong_caller_KCV_rejected",
+                      r == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
+    }
+
+    // ── zero-length entry SUPPRESSES generation ──────────────────────────────
+    {
+        CK_ATTRIBUTE supTmpl[] = {
+            { CKA_CLASS,       &secClass, sizeof(secClass) },
+            { CKA_KEY_TYPE,    &secType,  sizeof(secType) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) },
+            { CKA_EXTRACTABLE, &bTrue,    sizeof(bTrue) },
+            { CKA_SENSITIVE,   &bFalse,   sizeof(bFalse) },
+            { CKA_CHECK_VALUE, NULL_PTR,  0 },
+        };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        CK_RV r = DecapFn(hSess, &mlkemMech, hPriv, supTmpl, 6, ct, ctLen, &h);
+        std::vector<unsigned char> k = (r == CKR_OK) ? read_kcv(h) : std::vector<unsigned char>{0xff};
+        record_result(CAT, "Decap_zero_length_KCV_suppresses",
+                      (r == CKR_OK && k.empty()) ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " kcv bytes=" + std::to_string(k.size()));
+    }
+
+    // ── ECDH-as-KEM: same §4.11 mandate, different mechanism ─────────────────
+    {
+        CK_KEY_TYPE ecType = CKK_EC;
+        CK_BYTE oid_p256[] = { 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        CK_ATTRIBUTE ecPub[] = {
+            { CKA_CLASS,       &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE,    &ecType,   sizeof(ecType) },
+            { CKA_EC_PARAMS,   oid_p256,  sizeof(oid_p256) },
+            { CKA_ENCAPSULATE, &bTrue,    sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,   sizeof(bFalse) }
+        };
+        CK_ATTRIBUTE ecPriv[] = {
+            { CKA_CLASS,       &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE,    &ecType,    sizeof(ecType) },
+            { CKA_DECAPSULATE, &bTrue,     sizeof(bTrue) },
+            { CKA_TOKEN,       &bFalse,    sizeof(bFalse) }
+        };
+        CK_MECHANISM ecGen = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hEcPub = 0, hEcPriv = 0;
+        if (fl->C_GenerateKeyPair(hSess, &ecGen, ecPub, 5, ecPriv, 4, &hEcPub, &hEcPriv) != CKR_OK) {
+            record_result(CAT, "ECDH_KEM_KCV", "SKIP", "EC key generation failed");
+        } else {
+            CK_MECHANISM ecdh = { CKM_ECDH1_DERIVE, NULL_PTR, 0 };
+            CK_BYTE ect[300]; CK_ULONG ectLen = sizeof(ect);
+            CK_OBJECT_HANDLE hE = 0, hD = 0;
+            CK_RV r = EncapFn(hSess, &ecdh, hEcPub, ssTmpl, 5, ect, &ectLen, &hE);
+            if (r != CKR_OK) {
+                record_result(CAT, "ECDH_Encap_KCV_present", "FAIL", "RV=" + std::to_string(r));
+            } else {
+                std::vector<unsigned char> o, k;
+                k = kcvOf(hE, &o);
+                record_result(CAT, "ECDH_Encap_KCV_present",
+                              k.size() == 3 ? "PASS" : "FAIL",
+                              "got " + std::to_string(k.size()) + " bytes");
+                record_result(CAT, "ECDH_Encap_KCV_equals_SHA1_oracle",
+                              (k.size() == 3 && k == o) ? "PASS" : "FAIL",
+                              "HSM=" + hex_bytes(k) + " oracle=" + hex_bytes(o));
+                r = DecapFn(hSess, &ecdh, hEcPriv, ssTmpl, 5, ect, ectLen, &hD);
+                if (r == CKR_OK) {
+                    std::vector<unsigned char> o2, k2;
+                    k2 = kcvOf(hD, &o2);
+                    record_result(CAT, "ECDH_Decap_KCV_equals_SHA1_oracle",
+                                  (k2.size() == 3 && k2 == o2) ? "PASS" : "FAIL",
+                                  "HSM=" + hex_bytes(k2) + " oracle=" + hex_bytes(o2));
+                } else {
+                    record_result(CAT, "ECDH_Decap_KCV_equals_SHA1_oracle", "FAIL",
+                                  "decap RV=" + std::to_string(r));
+                }
+            }
+        }
+    }
+}
+
 // ── G1 security-critical regression tests ────────────────────────────────────
 // Locks in the slice G1 fixes: zero-IV GCM/ChaCha rejection (C++C-1/C++C-2),
 // RIPEMD160→SHA-1 substitution removal (C++C-4), large-message XMSS sign
@@ -6115,6 +6629,9 @@ int main(int argc, char** argv) {
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_hybrid_kem(); }
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_kem_allowed_mechanisms(); }
     if (opt_category == "all" || opt_category == "pqc-kem") { refresh_session(); test_kem_value_len(); }
+    if (opt_category == "all" || opt_category == "kem-kcv") { refresh_session(); test_kem_check_value(); }
+    if (opt_category == "all" || opt_category == "hbs-protect") { refresh_session(); test_hbs_key_protection(); }
+    if (opt_category == "all" || opt_category == "wrap-template") { refresh_session(); test_wrap_template_return_code(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_pqc_dsa(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_mldsa_context_binding(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_multipart_signing(); }

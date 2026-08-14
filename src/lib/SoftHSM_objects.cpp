@@ -255,6 +255,37 @@ CK_RV extractObjectInformation(CK_ATTRIBUTE_PTR pTemplate,
 	return CKR_OK;
 }
 
+// PKCS#11 v3.2 §4.11 — CKA_CHECK_VALUE in an object-creation template.
+//
+//   "If a value is supplied in the application template (allowed but never
+//    necessary) then, if supported, it MUST match what the library calculates
+//    it to be or the library returns a CKR_ATTRIBUTE_VALUE_INVALID."
+//   "The generation of the KCV may be prevented by the application supplying
+//    the attribute in the template as a no-value (0 length) entry."
+//
+// The C++ engine used to reject EVERY non-empty entry, including a correct one,
+// which the first sentence forbids. This helper only classifies the entry; the
+// comparison itself has to happen where the key bits are known.
+CK_RV checkValueFromTemplate(const CK_ATTRIBUTE& attr, bool& generate,
+                             bool& supplied, ByteString& suppliedValue)
+{
+	if (attr.ulValueLen == 0)
+	{
+		// No-value entry: suppression channel.
+		generate = false;
+		supplied = false;
+		suppliedValue.wipe(0);
+		return CKR_OK;
+	}
+	if (attr.pValue == NULL_PTR)
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	generate = true;
+	supplied = true;
+	suppliedValue = ByteString((unsigned char*)attr.pValue, attr.ulValueLen);
+	return CKR_OK;
+}
+
 CK_RV checkKeyLength(CK_KEY_TYPE keyType, size_t byteLen)
 {
 	switch (keyType) {
@@ -913,18 +944,66 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 		return rv;
 	}
 
+	// ── S5 (2026-08-13) — hash-based-signature private keys ──────────────────
+	// PKCS#11 v3.2 §6.65.3 (HSS): "CKA_SENSITIVE MUST be true, CKA_EXTRACTABLE
+	// MUST be false, and CKA_COPYABLE MUST be false for this key."
+	// §6.66.4 (XMSS) / §6.66.5 (XMSS-MT): "CKA_SENSITIVE MUST be true and
+	// CKA_EXTRACTABLE MUST be false for this key."
+	//
+	// These keys hold the one-time-signature STATE in CKA_VALUE — the same
+	// tables warn that "exporting this value is dangerous as it would allow key
+	// reuse", and reuse of an LMS/XMSS one-time key permits forgery. Until this
+	// pass neither generation nor C_CreateObject set any of the three, so the
+	// class defaults applied (sensitive false) and the state was one
+	// C_GetAttributeValue from extraction.
+	//
+	// Enforced here rather than in the keygen mechanism block because both
+	// C_CreateObject and C_GenerateKeyPair reach the object through this
+	// function, so one gate covers "at generation AND at object creation".
+	const bool hbsPrivateKey =
+		(objClass == CKO_PRIVATE_KEY) &&
+		(keyType == CKK_HSS || keyType == CKK_XMSS || keyType == CKK_XMSSMT);
+	if (hbsPrivateKey)
+	{
+		for (CK_ULONG i = 0; i < ulCount; i++)
+		{
+			const CK_ATTRIBUTE_TYPE t = pTemplate[i].type;
+			if (t != CKA_SENSITIVE && t != CKA_EXTRACTABLE &&
+			    !(keyType == CKK_HSS && t == CKA_COPYABLE))
+				continue;
+			if (pTemplate[i].pValue == NULL_PTR ||
+			    pTemplate[i].ulValueLen != sizeof(CK_BBOOL))
+				return CKR_ATTRIBUTE_VALUE_INVALID;
+			const CK_BBOOL v = *(CK_BBOOL*)pTemplate[i].pValue;
+			const CK_BBOOL required = (t == CKA_SENSITIVE) ? CK_TRUE : CK_FALSE;
+			// §4.1.1 rule 6 lets a template restate the mandated value; rule 5
+			// makes a contradicting one an error.
+			if ((v != CK_FALSE) != (required != CK_FALSE))
+				return CKR_ATTRIBUTE_VALUE_INVALID;
+		}
+	}
+
 	// Change order of attributes
 	const CK_ULONG maxAttribs = 32;
 	CK_ATTRIBUTE attribs[maxAttribs];
 	CK_ATTRIBUTE saveAttribs[maxAttribs];
 	CK_ULONG attribsCount = 0;
 	CK_ULONG saveAttribsCount = 0;
-	if (ulCount > maxAttribs)
+	// Three forced entries may be appended below for HBS private keys.
+	if (ulCount > (hbsPrivateKey ? maxAttribs - 3 : maxAttribs))
 	{
 		return CKR_TEMPLATE_INCONSISTENT;
 	}
 	for (CK_ULONG i=0; i < ulCount; i++)
 	{
+		if (hbsPrivateKey &&
+		    (pTemplate[i].type == CKA_SENSITIVE ||
+		     pTemplate[i].type == CKA_EXTRACTABLE ||
+		     (keyType == CKK_HSS && pTemplate[i].type == CKA_COPYABLE)))
+		{
+			// Validated above; the engine writes the mandated value itself.
+			continue;
+		}
 		switch (pTemplate[i].type)
 		{
 			case CKA_CHECK_VALUE:
@@ -932,6 +1011,27 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 				break;
 			default:
 				attribs[attribsCount++] = pTemplate[i];
+		}
+	}
+	CK_BBOOL hbsSensitive = CK_TRUE;
+	CK_BBOOL hbsExtractable = CK_FALSE;
+	CK_BBOOL hbsCopyable = CK_FALSE;
+	if (hbsPrivateKey)
+	{
+		attribs[attribsCount].type = CKA_SENSITIVE;
+		attribs[attribsCount].pValue = &hbsSensitive;
+		attribs[attribsCount].ulValueLen = sizeof(hbsSensitive);
+		attribsCount++;
+		attribs[attribsCount].type = CKA_EXTRACTABLE;
+		attribs[attribsCount].pValue = &hbsExtractable;
+		attribs[attribsCount].ulValueLen = sizeof(hbsExtractable);
+		attribsCount++;
+		if (keyType == CKK_HSS)
+		{
+			attribs[attribsCount].type = CKA_COPYABLE;
+			attribs[attribsCount].pValue = &hbsCopyable;
+			attribs[attribsCount].ulValueLen = sizeof(hbsCopyable);
+			attribsCount++;
 		}
 	}
 	for (CK_ULONG i=0; i < saveAttribsCount; i++)

@@ -35,6 +35,7 @@
 #define _SOFTHSM_V3_SOFTSHM_HELPERS_H
 
 #include "cryptoki.h"
+#include "ByteString.h"
 #include <cstddef>
 
 // ---------------------------------------------------------------------------
@@ -79,5 +80,21 @@ CK_RV extractObjectInformation(CK_ATTRIBUTE_PTR pTemplate,
                                CK_BBOOL& isOnToken,
                                CK_BBOOL& isPrivate,
                                bool bImplicit);
+
+/// Compute the PKCS#11 v3.2 §4.11 / §4.10.2 key check value of a secret key:
+/// CKK_AES → AES-ECB(zero block)[0:3]; every other symmetric type →
+/// SHA-1(keyBits)[0:3].  Returns an empty ByteString when it cannot be
+/// computed.  Defined in SoftHSM_keygen.cpp; used by keygen and kem files.
+ByteString computeSecretKeyKCV(CK_KEY_TYPE keyType, const ByteString& keyBits);
+
+/// PKCS#11 v3.2 §4.11 CKA_CHECK_VALUE template handling, shared by every
+/// object-creation function that contributes a secret key.
+///   • a no-value (0 length) entry suppresses generation  → generate=false
+///   • a non-empty entry is the caller's claim, to be compared against what
+///     the library computes                              → supplied=true
+/// Returns CKR_ATTRIBUTE_VALUE_INVALID for a malformed entry.
+/// Defined in SoftHSM_objects.cpp.
+CK_RV checkValueFromTemplate(const CK_ATTRIBUTE& attr, bool& generate,
+                             bool& supplied, ByteString& suppliedValue);
 
 #endif // !_SOFTHSM_V3_SOFTSHM_HELPERS_H

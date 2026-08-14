@@ -121,7 +121,9 @@ static ByteString computeAsymKCV(const ByteString& keyValue)
 // §4.11 mandates KCV "regardless of how the key object is created or derived" —
 // used by C_UnwrapKey + C_DeriveKey (HKDF, SP800-108, PBKD2) to populate
 // CKA_CHECK_VALUE consistently with C_GenerateKey.
-static ByteString computeSecretKeyKCV(CK_KEY_TYPE keyType, const ByteString& keyBits)
+// Non-static (declared in SoftHSMHelpers.h) since the 2026-08-13 S11
+// remediation: C_EncapsulateKey / C_DecapsulateKey need the same computation.
+ByteString computeSecretKeyKCV(CK_KEY_TYPE keyType, const ByteString& keyBits)
 {
 	if (keyBits.size() == 0) return ByteString("");
 	if (keyType == CKK_AES)
@@ -1436,16 +1438,46 @@ CK_RV SoftHSM::C_WrapKey
 
 			for (attrmap_type::const_iterator it = map.begin(); it != map.end(); ++it)
 			{
+				// PKCS#11 v3.2 §5.18.3: "If any attribute mismatch occurs on an
+				// attempt to wrap a key then the function SHALL return
+				// CKR_KEY_HANDLE_INVALID." Both sites returned
+				// CKR_KEY_NOT_WRAPPABLE until the 2026-08-13 remediation (S2).
 				if (!key->attributeExists(it->first))
 				{
-					return CKR_KEY_NOT_WRAPPABLE;
+					return CKR_KEY_HANDLE_INVALID;
 				}
 
 				OSAttribute keyAttr = key->getAttribute(it->first);
 				ByteString v1, v2;
-				if (!keyAttr.peekValue(v1) || !it->second.peekValue(v2) || (v1 != v2))
+				if (!keyAttr.peekValue(v1) || !it->second.peekValue(v2))
 				{
-					return CKR_KEY_NOT_WRAPPABLE;
+					return CKR_KEY_HANDLE_INVALID;
+				}
+
+				// A private object stores its byte-string attributes encrypted
+				// under the token key (P11Attribute::updateAttr), so the raw
+				// stored bytes never equal the plaintext bytes the application
+				// put in CKA_WRAP_TEMPLATE. Comparing them directly made the
+				// partition mechanism reject EVERY private key, including the
+				// ones it was configured to allow — §5.18.3 requires that "if
+				// all attributes match ... then the wrap will proceed".
+				// CKA_UNIQUE_ID, CKA_CHECK_VALUE and CKA_PUBLIC_KEY_INFO are
+				// the three byte-string attributes whose P11Attribute::retrieve
+				// overrides deliberately ignore the private flag, so they are
+				// stored in clear and must not be decrypted here.
+				if (isKeyPrivate && keyAttr.isByteStringAttribute() && v1.size() != 0 &&
+				    it->first != CKA_UNIQUE_ID && it->first != CKA_CHECK_VALUE &&
+				    it->first != CKA_PUBLIC_KEY_INFO)
+				{
+					ByteString plain;
+					if (!token->decrypt(v1, plain))
+						return CKR_GENERAL_ERROR;
+					v1 = plain;
+				}
+
+				if (v1 != v2)
+				{
+					return CKR_KEY_HANDLE_INVALID;
 				}
 			}
 		}
