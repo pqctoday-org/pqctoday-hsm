@@ -36,10 +36,15 @@
 #include <stdlib.h>
 #include <openssl/x509.h>
 
-// CKC_OPENPGP was in PKCS#11 2.x but removed from v3.2 headers; keep for
-// backward-compatible object storage only (no crypto operations).
+// C3 (2026-08-13): the OpenPGP certificate type was carried at 0x00000003, an
+// UNASSIGNED OASIS codepoint below CKC_VENDOR_DEFINED — squatting a value the
+// standard may allocate to something else. PKCS#11 v3.2 removed CKC_OPENPGP,
+// and §2 reserves 0x80000000 upwards for vendors, so this fork's OpenPGP
+// certificate type now lives there. Applications that used the old value get
+// CKR_ATTRIBUTE_VALUE_INVALID, which is the correct answer for a codepoint this
+// library does not define.
 #ifndef CKC_OPENPGP
-#define CKC_OPENPGP 0x00000003UL
+#define CKC_OPENPGP (CKC_VENDOR_DEFINED | 0x00000003UL)
 #endif
 
 // Constructor
@@ -84,7 +89,10 @@ bool P11Object::init(OSObject *inobject)
 	P11Attribute* attrCopyable = new P11AttrCopyable(osobject);
 	P11Attribute* attrDestroyable = new P11AttrDestroyable(osobject);
 	P11Attribute* attrUniqueId = new P11AttrUniqueId(osobject);
-	P11Attribute* attrProfileId = new P11AttrProfileId(osobject);
+	// CKA_PROFILE_ID is NOT a common attribute. It was created here for every
+	// object in the store, defaulting to 0 — the value Profiles v3.2 §3 reserves
+	// as CKP_INVALID_ID — so every key, certificate and data object published an
+	// invalid profile id. It now belongs to P11ProfileObj alone.
 
 	// Initialize the attributes
 	if
@@ -96,8 +104,7 @@ bool P11Object::init(OSObject *inobject)
 		!attrLabel->init() ||
 		!attrCopyable->init() ||
 		!attrDestroyable->init() ||
-		!attrUniqueId->init() ||
-		!attrProfileId->init()
+		!attrUniqueId->init()
 	)
 	{
 		ERROR_MSG("Could not initialize the attribute");
@@ -109,7 +116,6 @@ bool P11Object::init(OSObject *inobject)
 		delete attrCopyable;
 		delete attrDestroyable;
 		delete attrUniqueId;
-		delete attrProfileId;
 		return false;
 	}
 
@@ -122,7 +128,6 @@ bool P11Object::init(OSObject *inobject)
 	attributes[attrCopyable->getType()] = attrCopyable;
 	attributes[attrDestroyable->getType()] = attrDestroyable;
 	attributes[attrUniqueId->getType()] = attrUniqueId;
-	attributes[attrProfileId->getType()] = attrProfileId;
 
 	initialized = true;
 	return true;
@@ -291,6 +296,50 @@ CK_RV P11Object::saveTemplate(Token *token, bool isPrivate, CK_ATTRIBUTE_PTR pTe
 				return CKR_TEMPLATE_INCOMPLETE;
 			}
 		}
+
+		// The three certificate value/URL rules (2026-08-13). All three were
+		// declared on real attributes — ck14 on CKA_VALUE, ck15 on CKA_URL,
+		// ck16 on CKA_HASH_OF_{SUBJECT,ISSUER}_PUBLIC_KEY — and read by NO code
+		// path, so an X.509 certificate object with an empty value, an empty URL
+		// and no public-key hashes was created without complaint.
+		//
+		//  ck14  MUST be non-empty if CKA_URL is empty.
+		//  ck15  MUST be non-empty if CKA_VALUE is empty.
+		//  ck16  Can only be empty if CKA_URL is empty.
+		if (op == OBJECT_OP_CREATE || op == OBJECT_OP_GENERATE)
+		{
+			const bool selfEmpty = !osobject->attributeExists(i->first) ||
+			                       osobject->getByteStringValue(i->first).size() == 0;
+			const bool urlEmpty = !osobject->attributeExists(CKA_URL) ||
+			                      osobject->getByteStringValue(CKA_URL).size() == 0;
+			const bool valueEmpty = !osobject->attributeExists(CKA_VALUE) ||
+			                        osobject->getByteStringValue(CKA_VALUE).size() == 0;
+
+			if ((checks & P11Attribute::ck14) == P11Attribute::ck14 &&
+			    urlEmpty && selfEmpty)
+			{
+				ERROR_MSG("Attribute (0x%08X) must be non-empty when CKA_URL is empty",
+				          (unsigned int)i->first);
+				osobject->abortTransaction();
+				return CKR_TEMPLATE_INCOMPLETE;
+			}
+			if ((checks & P11Attribute::ck15) == P11Attribute::ck15 &&
+			    valueEmpty && selfEmpty)
+			{
+				ERROR_MSG("Attribute (0x%08X) must be non-empty when CKA_VALUE is empty",
+				          (unsigned int)i->first);
+				osobject->abortTransaction();
+				return CKR_TEMPLATE_INCOMPLETE;
+			}
+			if ((checks & P11Attribute::ck16) == P11Attribute::ck16 &&
+			    selfEmpty && !urlEmpty)
+			{
+				ERROR_MSG("Attribute (0x%08X) may only be empty when CKA_URL is empty",
+				          (unsigned int)i->first);
+				osobject->abortTransaction();
+				return CKR_TEMPLATE_INCOMPLETE;
+			}
+		}
 	}
 
 	// [PKCS#11 v2.40, 4.1.1 Creating objects]
@@ -344,6 +393,31 @@ bool P11Object::isModifiable()
 }
 
 // Constructor
+// ─── CKO_PROFILE (PKCS#11 v3.2 §4.9, Profiles v3.2 §5.1) ────────────────────
+
+P11ProfileObj::P11ProfileObj() { initialized = false; }
+
+bool P11ProfileObj::init(OSObject *inobject)
+{
+	if (initialized) return true;
+	if (inobject == NULL) return false;
+
+	// Create parent
+	if (!P11Object::init(inobject)) return false;
+
+	P11Attribute* attrProfileId = new P11AttrProfileId(osobject);
+	if (!attrProfileId->init())
+	{
+		ERROR_MSG("Could not initialize the profile-id attribute");
+		delete attrProfileId;
+		return false;
+	}
+	attributes[attrProfileId->getType()] = attrProfileId;
+
+	initialized = true;
+	return true;
+}
+
 P11DataObj::P11DataObj()
 {
 	initialized = false;

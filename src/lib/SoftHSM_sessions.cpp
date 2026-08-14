@@ -58,6 +58,15 @@ CK_RV SoftHSM::C_OpenSession(CK_SLOT_ID slotID, CK_FLAGS flags, CK_VOID_PTR pApp
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 	*phSession = handleManager->addSession(slotID, sessionGuard);
 
+	// C1 — Profiles v3.2 §5.1 condition 4 requires the token to expose a
+	// CKO_PROFILE object; §7.2 of the Standard makes meeting a profile the ONLY
+	// definition of a conforming Provider. Publishing them here (rather than at
+	// token initialisation) means tokens created by earlier builds gain them on
+	// first use. Idempotent and public, so it needs no login.
+	Token* token = session->getToken();
+	if (token != NULL && token->isInitialized())
+		publishProfileObjects(token);
+
 	return CKR_OK;
 }
 
@@ -363,15 +372,17 @@ CK_RV SoftHSM::C_GetSessionValidationFlags(CK_SESSION_HANDLE hSession,
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
 
+	// C2 — session-handle precedence: the handle is validated before the
+	// argument and capability checks below.
+	auto sessionGuard = handleManager->getSessionShared(hSession);
+	Session* session = sessionGuard.get();
+	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
+
 	if (pFlags == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	// Validate the requested flags type. The only defined query state is
 	// CKS_LAST_VALIDATION_OK; anything else is a bad argument.
 	if (type != CKS_LAST_VALIDATION_OK) return CKR_ARGUMENTS_BAD;
-
-	auto sessionGuard = handleManager->getSessionShared(hSession);
-	Session* session = sessionGuard.get();
-	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 
 	// No validation constraints recorded for a software token.
 	*pFlags = 0;

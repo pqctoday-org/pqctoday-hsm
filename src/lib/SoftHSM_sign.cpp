@@ -1218,7 +1218,14 @@ CK_RV SoftHSM::StatefulSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMe
 // Initialise a signing operation using the specified key and mechanism
 CK_RV SoftHSM::C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
-	if (pMechanism == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_SignInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active signature operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_SIGN);
 
 	// Resolved before dispatch: a failed init can leave the session op state
 	// torn down, and the key identity is most wanted on exactly those records.
@@ -1874,7 +1881,14 @@ CK_RV SoftHSM::C_SignFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignature, C
 CK_RV SoftHSM::C_SignRecoverInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
-	if (pMechanism == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_SignRecoverInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active signature operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_SIGN);
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
@@ -1907,12 +1921,13 @@ CK_RV SoftHSM::C_SignRecoverInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pM
 
 	AsymMech::Type mechanism = (pMechanism->mechanism == CKM_RSA_PKCS) ? AsymMech::RSA_PKCS : AsymMech::RSA;
 
-	if (!asymCrypto->signInit(privateKey, mechanism, NULL, 0))
-	{
-		asymCrypto->recyclePrivateKey(privateKey);
-		CryptoFactory::i()->recycleAsymmetricAlgorithm(asymCrypto);
-		return CKR_MECHANISM_INVALID;
-	}
+	// C3 (2026-08-13): CKM_RSA_PKCS and CKM_RSA_X_509 are SINGLE-PART-only
+	// mechanisms — AsymSignInit gates the streaming signInit on
+	// bAllowMultiPartOp for exactly this reason, and OSSLRSA::signInit sends both
+	// of them to its `default:` arm. Calling it unconditionally here made every
+	// recovery init fail CKR_MECHANISM_INVALID, so the recovery path this
+	// function dispatches was never actually reachable. C_SignRecover uses the
+	// single-part asymCrypto->sign() entry point, which does support both.
 
 	session->setOpType(SESSION_OP_SIGN_RECOVER);
 	session->setAsymmetricCryptoOp(asymCrypto);
@@ -2905,7 +2920,14 @@ CK_RV SoftHSM::StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDa
 // Initialise a verification operation using the specified key and mechanism
 CK_RV SoftHSM::C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
-	if (pMechanism == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_VerifyInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active verification operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_VERIFY);
 
 	if (isMacMechanism(pMechanism))
 		return MacVerifyInit(hSession, pMechanism, hKey);
@@ -3298,6 +3320,15 @@ static CK_RV applyPerMessageParam(Session* session,
 CK_RV SoftHSM::C_MessageSignInit(CK_SESSION_HANDLE hSession,
 	CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_MessageSignInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active message-based signature operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_MESSAGE_SIGN);
+
 	// Reuse existing asymmetric-sign init; it validates the key, mechanism, and session
 	CK_RV rv = AsymSignInit(hSession, pMechanism, hKey);
 	if (rv != CKR_OK) return rv;
@@ -3376,6 +3407,15 @@ CK_RV SoftHSM::C_MessageSignFinal(CK_SESSION_HANDLE hSession)
 CK_RV SoftHSM::C_MessageVerifyInit(CK_SESSION_HANDLE hSession,
 	CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_MessageVerifyInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active message-based verification operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_MESSAGE_VERIFY);
+
 	CK_RV rv = AsymVerifyInit(hSession, pMechanism, hKey);
 	if (rv != CKR_OK) return rv;
 
@@ -3598,6 +3638,14 @@ CK_RV SoftHSM::C_VerifySignatureInit(CK_SESSION_HANDLE hSession,
 	CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_VerifySignatureInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active verification operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_VERIFY);
 	if (pSignature == NULL_PTR || ulSignatureLen == 0) return CKR_ARGUMENTS_BAD;
 
 	// Reuse AsymVerifyInit to validate the mechanism, load the public key, and
@@ -3791,7 +3839,14 @@ CK_RV SoftHSM::C_VerifySignatureFinal(CK_SESSION_HANDLE hSession)
 CK_RV SoftHSM::C_VerifyRecoverInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
-	if (pMechanism == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_VerifyRecoverInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active verification operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_VERIFY);
 
 	std::shared_ptr<Session> sessionGuard;
 	Session* session; Token* token; OSObject* key;
@@ -3824,12 +3879,13 @@ CK_RV SoftHSM::C_VerifyRecoverInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR 
 
 	AsymMech::Type mechanism = (pMechanism->mechanism == CKM_RSA_PKCS) ? AsymMech::RSA_PKCS : AsymMech::RSA;
 
-	if (!asymCrypto->verifyInit(publicKey, mechanism, NULL, 0))
-	{
-		asymCrypto->recyclePublicKey(publicKey);
-		CryptoFactory::i()->recycleAsymmetricAlgorithm(asymCrypto);
-		return CKR_MECHANISM_INVALID;
-	}
+	// C3 (2026-08-13): CKM_RSA_PKCS and CKM_RSA_X_509 are SINGLE-PART-only
+	// mechanisms — AsymSignInit gates the streaming verifyInit on
+	// bAllowMultiPartOp for exactly this reason, and OSSLRSA::verifyInit sends both
+	// of them to its `default:` arm. Calling it unconditionally here made every
+	// recovery init fail CKR_MECHANISM_INVALID, so the recovery path this
+	// function dispatches was never actually reachable. C_VerifyRecover uses the
+	// single-part asymCrypto->verify() entry point, which does support both.
 
 	session->setOpType(SESSION_OP_VERIFY_RECOVER);
 	session->setAsymmetricCryptoOp(asymCrypto);

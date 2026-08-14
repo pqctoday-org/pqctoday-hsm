@@ -261,6 +261,48 @@ bool init_token() {
 
     // ── G4 pre-init checks (must run BEFORE C_Initialize) ────────────────────
     if (opt_category == "all" || opt_category == "g4-retcodes") {
+        // C2 (2026-08-13) — §5.4: C_Initialize, C_GetFunctionList,
+        // C_GetInterfaceList and C_GetInterface "are the only Cryptoki
+        // functions which an application may call before calling
+        // C_Initialize", so EVERY other entry point owes the pre-init caller
+        // CKR_CRYPTOKI_NOT_INITIALIZED — including on the argument paths that
+        // used to answer first.
+        {
+            typedef CK_RV (*SI_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
+            typedef CK_RV (*WFSE_t)(CK_FLAGS, CK_SLOT_ID_PTR, CK_VOID_PTR);
+            SI_t SI = (SI_t)dlsym(handle, "C_SignInit");
+            SI_t VI = (SI_t)dlsym(handle, "C_VerifyInit");
+            SI_t EI = (SI_t)dlsym(handle, "C_EncryptInit");
+            WFSE_t WFSE = (WFSE_t)dlsym(handle, "C_WaitForSlotEvent");
+            if (SI) {
+                CK_RV r = SI(0, NULL_PTR, 0);
+                record_result("G4Retcodes", "C2_SignInit_null_mech_pre_init",
+                              r == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                              "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(r));
+            }
+            if (VI) {
+                CK_RV r = VI(0, NULL_PTR, 0);
+                record_result("G4Retcodes", "C2_VerifyInit_null_mech_pre_init",
+                              r == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                              "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(r));
+            }
+            if (EI) {
+                CK_RV r = EI(0, NULL_PTR, 0);
+                record_result("G4Retcodes", "C2_EncryptInit_null_mech_pre_init",
+                              r == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                              "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(r));
+            }
+            if (WFSE) {
+                // Flags were tested BEFORE initialisation, so a pre-init caller
+                // that omitted CKF_DONT_BLOCK got CKR_FUNCTION_NOT_SUPPORTED.
+                CK_SLOT_ID sl = 0;
+                CK_RV r = WFSE(0, &sl, NULL_PTR);
+                record_result("G4Retcodes", "C2_WaitForSlotEvent_pre_init_outranks_flags",
+                              r == CKR_CRYPTOKI_NOT_INITIALIZED ? "PASS" : "FAIL",
+                              "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=" + std::to_string(r));
+            }
+        }
+
         // V-19: C_GetSessionValidationFlags before C_Initialize →
         // CKR_CRYPTOKI_NOT_INITIALIZED.
         typedef CK_RV (*C_GSVF_t)(CK_SESSION_HANDLE, CK_SESSION_VALIDATION_FLAGS_TYPE, CK_FLAGS_PTR);
@@ -1359,6 +1401,356 @@ void test_hbs_key_protection() {
         CK_RV r4 = gen(c.mech, c.kt, c.ps, &okSens, &a, &b);
         record_result(CAT, std::string(c.name) + "_accept_restated_SENSITIVE_true",
                       r4 == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(r4));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C1 — a conforming provider publishes a CKO_PROFILE object.
+//
+// PKCS#11 v3.2 §7.2 defines a conforming Provider ONLY as one meeting a profile
+// in [PKCS11-Prof]; Profiles v3.2 §5.1 condition 4 requires an implementation
+// claiming Baseline Provider to "Support the following objects: a. CKO_PROFILE
+// with value CKP_BASELINE_PROVIDER". The C++ engine published none, so it could
+// not claim conformance to anything — the single broadest finding in the audit.
+//
+// Related defect: CKA_PROFILE_ID was stamped on EVERY object with value 0,
+// which Profiles v3.2 §3 defines as CKP_INVALID_ID ("Invalid Profile"). It
+// belongs on profile objects only.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_profile_objects() {
+    const char* CAT = "Profile";
+#ifndef CKO_PROFILE
+    const CK_OBJECT_CLASS CLS_PROFILE = 0x00000009UL;
+#else
+    const CK_OBJECT_CLASS CLS_PROFILE = CKO_PROFILE;
+#endif
+#ifndef CKA_PROFILE_ID
+    const CK_ATTRIBUTE_TYPE A_PROFILE_ID = 0x00000601UL;
+#else
+    const CK_ATTRIBUTE_TYPE A_PROFILE_ID = CKA_PROFILE_ID;
+#endif
+    const CK_ULONG P_INVALID_ID = 0x00000000UL;
+    const CK_ULONG P_BASELINE   = 0x00000001UL;
+    const CK_ULONG P_EXTENDED   = 0x00000002UL;
+
+    // ── find every CKO_PROFILE object on the token ───────────────────────────
+    CK_OBJECT_CLASS cls = CLS_PROFILE;
+    CK_ATTRIBUTE findTmpl[] = { { CKA_CLASS, &cls, sizeof(cls) } };
+    CK_RV r = fl->C_FindObjectsInit(hSess, findTmpl, 1);
+    std::vector<CK_ULONG> ids;
+    if (r != CKR_OK) {
+        record_result(CAT, "FindObjectsInit_CKO_PROFILE", "FAIL", "RV=" + std::to_string(r));
+    } else {
+        CK_OBJECT_HANDLE found[16];
+        CK_ULONG n = 0;
+        fl->C_FindObjects(hSess, found, 16, &n);
+        fl->C_FindObjectsFinal(hSess);
+        record_result(CAT, "Token_publishes_a_CKO_PROFILE_object",
+                      n > 0 ? "PASS" : "FAIL",
+                      "found " + std::to_string(n) +
+                      " (Profiles v3.2 §5.1 cond. 4 requires at least one)");
+        for (CK_ULONG i = 0; i < n; i++) {
+            CK_ULONG id = 0xDEADBEEF;
+            CK_ATTRIBUTE a = { A_PROFILE_ID, &id, sizeof(id) };
+            if (fl->C_GetAttributeValue(hSess, found[i], &a, 1) == CKR_OK) ids.push_back(id);
+        }
+        bool haveBaseline = false, anyInvalid = false;
+        for (CK_ULONG id : ids) {
+            if (id == P_BASELINE) haveBaseline = true;
+            if (id == P_INVALID_ID) anyInvalid = true;
+        }
+        std::string idList;
+        for (CK_ULONG id : ids) idList += std::to_string(id) + " ";
+        record_result(CAT, "CKP_BASELINE_PROVIDER_present",
+                      haveBaseline ? "PASS" : "FAIL",
+                      "profile ids: [ " + idList + "]");
+        record_result(CAT, "No_profile_object_carries_CKP_INVALID_ID",
+                      !anyInvalid ? "PASS" : "FAIL",
+                      "profile ids: [ " + idList + "]");
+        // The engine implements C_GetMechanismList/Info, C_Login, C_LoginUser
+        // and C_Logout, so Profiles §5.3 Extended Provider is met too — but the
+        // claim must be COMPUTED, so this only records what the token says.
+        bool haveExtended = false;
+        for (CK_ULONG id : ids) if (id == P_EXTENDED) haveExtended = true;
+        record_result(CAT, "Extended_provider_claim_recorded",
+                      "PASS",
+                      std::string("CKP_EXTENDED_PROVIDER ") +
+                      (haveExtended ? "claimed" : "not claimed") +
+                      " by this build");
+    }
+
+    // ── application creation of a profile object must be refused ─────────────
+    {
+        CK_ULONG id = P_BASELINE;
+        CK_BBOOL bFalse = CK_FALSE;
+        CK_ATTRIBUTE t[] = {
+            { CKA_CLASS,   &cls,    sizeof(cls) },
+            { CKA_TOKEN,   &bFalse, sizeof(bFalse) },
+            { A_PROFILE_ID, &id,    sizeof(id) },
+        };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        CK_RV rc = fl->C_CreateObject(hSess, t, 3, &h);
+        record_result(CAT, "Application_cannot_create_CKO_PROFILE",
+                      rc == CKR_ATTRIBUTE_READ_ONLY ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rc) + " (want CKR_ATTRIBUTE_READ_ONLY=0x10)");
+    }
+
+    // ── CKA_PROFILE_ID must not exist on ordinary objects ────────────────────
+    {
+        CK_OBJECT_CLASS sec = CKO_SECRET_KEY;
+        CK_KEY_TYPE aes = CKK_AES;
+        CK_ULONG klen = 32;
+        CK_BBOOL bFalse = CK_FALSE;
+        CK_ATTRIBUTE t[] = {
+            { CKA_CLASS,     &sec,   sizeof(sec) },
+            { CKA_KEY_TYPE,  &aes,   sizeof(aes) },
+            { CKA_VALUE_LEN, &klen,  sizeof(klen) },
+            { CKA_TOKEN,     &bFalse, sizeof(bFalse) },
+        };
+        CK_MECHANISM m = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        if (fl->C_GenerateKey(hSess, &m, t, 4, &h) != CKR_OK) {
+            record_result(CAT, "CKA_PROFILE_ID_absent_on_ordinary_object", "FAIL",
+                          "key generation failed");
+        } else {
+            CK_ULONG id = 0xDEADBEEF;
+            CK_ATTRIBUTE a = { A_PROFILE_ID, &id, sizeof(id) };
+            CK_RV rc = fl->C_GetAttributeValue(hSess, h, &a, 1);
+            record_result(CAT, "CKA_PROFILE_ID_absent_on_ordinary_object",
+                          rc == CKR_ATTRIBUTE_TYPE_INVALID ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rc) + " value=" + std::to_string(id) +
+                          " (want CKR_ATTRIBUTE_TYPE_INVALID=0x12; 0 is CKP_INVALID_ID)");
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C2 — error codes and precedence.
+//
+// • Null-mechanism cancel form: §5.8.1 "C_EncryptInit can be called with
+//   pMechanism set to NULL_PTR to terminate an active encryption operation. If
+//   an active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED
+//   must be returned." The same sentence appears for C_DecryptInit, C_SignInit,
+//   C_SignRecoverInit, C_VerifyInit, C_VerifyRecoverInit, C_DigestInit,
+//   C_MessageEncryptInit and C_VerifySignatureInit. The engine returned
+//   CKR_ARGUMENTS_BAD, which is neither of the two permitted answers.
+// • Session-handle precedence: the session-handle class takes precedence over
+//   argument and capability codes, so the handle is validated first.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_c2_error_codes() {
+    const char* CAT = "ErrCodes";
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_OBJECT_CLASS sec = CKO_SECRET_KEY;
+    CK_KEY_TYPE aes = CKK_AES;
+    CK_ULONG klen = 32;
+    CK_ATTRIBUTE keyT[] = {
+        { CKA_CLASS,     &sec,    sizeof(sec) },
+        { CKA_KEY_TYPE,  &aes,    sizeof(aes) },
+        { CKA_VALUE_LEN, &klen,   sizeof(klen) },
+        { CKA_TOKEN,     &bFalse, sizeof(bFalse) },
+        { CKA_ENCRYPT,   &bTrue,  sizeof(bTrue) },
+        { CKA_DECRYPT,   &bTrue,  sizeof(bTrue) },
+        { CKA_SIGN,      &bTrue,  sizeof(bTrue) },
+        { CKA_VERIFY,    &bTrue,  sizeof(bTrue) },
+    };
+    CK_MECHANISM keyGen = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE hKey = CK_INVALID_HANDLE;
+    CK_RV r = fl->C_GenerateKey(hSess, &keyGen, keyT, 8, &hKey);
+    if (r != CKR_OK) {
+        record_result(CAT, "Setup_AES_key", "FAIL", "RV=" + std::to_string(r));
+        return;
+    }
+
+    // (1) cancel an ACTIVE operation with the null-mechanism form.
+    {
+        CK_BYTE iv[16] = {1};
+        CK_MECHANISM cbc = { CKM_AES_CBC, iv, sizeof(iv) };
+        CK_RV ri = fl->C_EncryptInit(hSess, &cbc, hKey);
+        CK_RV rc = fl->C_EncryptInit(hSess, NULL_PTR, hKey);
+        record_result(CAT, "C_EncryptInit_null_mechanism_cancels",
+                      rc == CKR_OK ? "PASS" : "FAIL",
+                      "init RV=" + std::to_string(ri) + " cancel RV=" + std::to_string(rc) +
+                      " (want CKR_OK or CKR_OPERATION_CANCEL_FAILED, never CKR_ARGUMENTS_BAD=0x7)");
+        // After a successful cancel the session must accept a fresh init.
+        CK_RV r2 = fl->C_EncryptInit(hSess, &cbc, hKey);
+        record_result(CAT, "C_EncryptInit_after_cancel_succeeds",
+                      r2 == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(r2));
+        fl->C_EncryptInit(hSess, NULL_PTR, hKey);
+    }
+    // (2) the same form with NO active operation is still not an argument error.
+    {
+        CK_RV rc = fl->C_DigestInit(hSess, NULL_PTR);
+        record_result(CAT, "C_DigestInit_null_mechanism_no_active_op",
+                      rc == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rc));
+        CK_RV rs = fl->C_SignInit(hSess, NULL_PTR, hKey);
+        record_result(CAT, "C_SignInit_null_mechanism_no_active_op",
+                      rs == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rs));
+        CK_RV rvv = fl->C_VerifyInit(hSess, NULL_PTR, hKey);
+        record_result(CAT, "C_VerifyInit_null_mechanism_no_active_op",
+                      rvv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rvv));
+        CK_RV rd = fl->C_DecryptInit(hSess, NULL_PTR, hKey);
+        record_result(CAT, "C_DecryptInit_null_mechanism_no_active_op",
+                      rd == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rd));
+    }
+    // (3) …but a bad SESSION still outranks it (handle class takes precedence).
+    {
+        CK_RV rc = fl->C_DigestInit(0xBADBAD, NULL_PTR);
+        record_result(CAT, "Null_mechanism_still_checks_session_handle",
+                      rc == CKR_SESSION_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rc) + " (want CKR_SESSION_HANDLE_INVALID=0xB3)");
+    }
+
+    // (4) session-handle precedence over argument checks: C_SeedRandom with a
+    //     bad handle AND a null buffer must report the handle.
+    {
+        CK_RV rc = fl->C_SeedRandom(0xBADBAD, NULL_PTR, 0);
+        record_result(CAT, "C_SeedRandom_session_handle_precedence",
+                      rc == CKR_SESSION_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rc) +
+                      " (want CKR_SESSION_HANDLE_INVALID=0xB3, not CKR_ARGUMENTS_BAD=0x7)");
+        CK_RV rg = fl->C_GenerateRandom(0xBADBAD, NULL_PTR, 0);
+        record_result(CAT, "C_GenerateRandom_session_handle_precedence",
+                      rg == CKR_SESSION_HANDLE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rg));
+    }
+
+    // (5) C_GetInterface — §5.4.6 rule 3: "If flags is non-zero, the interface
+    //     returned must match all of the supplied flag values". The engine
+    //     rejected ANY non-zero flags as a malformed argument, so it could never
+    //     have honoured a flag it did support. This build declares no interface
+    //     flags (it is not fork-tolerant in the CKF_INTERFACE_FORK_SAFE sense —
+    //     a forked child does not keep its session objects, states and handles),
+    //     so the correct answer to a fork-safe request is "no such interface",
+    //     CKR_FUNCTION_FAILED, not "your argument is invalid".
+    {
+        void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+        typedef CK_RV (*GI_t)(CK_UTF8CHAR_PTR, CK_VERSION_PTR, CK_INTERFACE_PTR_PTR, CK_FLAGS);
+        typedef CK_RV (*GIL_t)(CK_INTERFACE_PTR, CK_ULONG_PTR);
+        GI_t GI = dlib ? (GI_t)dlsym(dlib, "C_GetInterface") : NULL;
+        GIL_t GIL = dlib ? (GIL_t)dlsym(dlib, "C_GetInterfaceList") : NULL;
+        if (!GI || !GIL) {
+            record_result(CAT, "C_GetInterface_flag_matching", "SKIP", "symbols unavailable");
+        } else {
+            CK_ULONG n = 0;
+            GIL(NULL_PTR, &n);
+            std::vector<CK_INTERFACE> list(n ? n : 1);
+            GIL(list.data(), &n);
+            // Every interface must be retrievable with its OWN declared flags.
+            bool allOwnFlagsOk = true;
+            for (CK_ULONG i = 0; i < n; i++) {
+                CK_INTERFACE_PTR out = NULL;
+                if (GI(list[i].pInterfaceName, NULL_PTR, &out, list[i].flags) != CKR_OK)
+                    allOwnFlagsOk = false;
+            }
+            record_result(CAT, "C_GetInterface_matches_own_flags",
+                          allOwnFlagsOk ? "PASS" : "FAIL",
+                          std::to_string(n) + " interfaces");
+            CK_INTERFACE_PTR out = NULL;
+            CK_RV rf = GI(NULL_PTR, NULL_PTR, &out, 0x00000001UL /*CKF_INTERFACE_FORK_SAFE*/);
+            bool declaresForkSafe = false;
+            for (CK_ULONG i = 0; i < n; i++)
+                if (list[i].flags & 0x00000001UL) declaresForkSafe = true;
+            CK_RV want = declaresForkSafe ? CKR_OK : CKR_FUNCTION_FAILED;
+            record_result(CAT, "C_GetInterface_unmatched_flag_is_not_ARGUMENTS_BAD",
+                          rf == want ? "PASS" : "FAIL",
+                          "RV=" + std::to_string(rf) + " want=" + std::to_string(want) +
+                          " (declaresForkSafe=" + std::to_string((int)declaresForkSafe) + ")");
+            // A flag bit no interface declares must still be refused.
+            CK_RV ru = GI(NULL_PTR, NULL_PTR, &out, 0x40000000UL);
+            record_result(CAT, "C_GetInterface_unknown_flag_refused",
+                          ru != CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(ru));
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// C3 — advertised capabilities must equal dispatch.
+//
+// Each mechanism flag is DEFINED as "the mechanism can be used with function
+// F". The engine's sign-recovery path accepts CKM_RSA_PKCS and CKM_RSA_X_509
+// but C_GetMechanismInfo advertised neither CKF_SIGN_RECOVER nor
+// CKF_VERIFY_RECOVER for them, so a caller doing the correct thing — checking
+// the advertisement first — would never use a working feature.
+// ─────────────────────────────────────────────────────────────────────────────
+void test_c3_advertised_capabilities() {
+    const char* CAT = "MechFlags";
+    struct Case { const char* name; CK_MECHANISM_TYPE m; };
+    const Case cases[] = {
+        { "CKM_RSA_PKCS",  CKM_RSA_PKCS  },
+        { "CKM_RSA_X_509", CKM_RSA_X_509 },
+    };
+    for (const Case& c : cases) {
+        if (!mech_advertised(c.m)) {
+            record_result(CAT, std::string(c.name) + "_advertised", "SKIP", "not advertised");
+            continue;
+        }
+        CK_MECHANISM_INFO info;
+        memset(&info, 0, sizeof(info));
+        CK_RV r = fl->C_GetMechanismInfo(hSlot, c.m, &info);
+        if (r != CKR_OK) {
+            record_result(CAT, std::string(c.name) + "_recovery_flags", "FAIL",
+                          "C_GetMechanismInfo RV=" + std::to_string(r));
+            continue;
+        }
+        bool sr = (info.flags & CKF_SIGN_RECOVER) != 0;
+        bool vr = (info.flags & CKF_VERIFY_RECOVER) != 0;
+        record_result(CAT, std::string(c.name) + "_advertises_SIGN_RECOVER",
+                      sr ? "PASS" : "FAIL", "flags=0x" + std::to_string(info.flags));
+        record_result(CAT, std::string(c.name) + "_advertises_VERIFY_RECOVER",
+                      vr ? "PASS" : "FAIL", "flags=0x" + std::to_string(info.flags));
+
+        // …and the advertisement must be true: the recovery init must accept it.
+        CK_OBJECT_CLASS pubC = CKO_PUBLIC_KEY, privC = CKO_PRIVATE_KEY;
+        CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+        CK_ULONG bits = 2048;
+        CK_BYTE pubExp[] = { 0x01, 0x00, 0x01 };
+        CK_ATTRIBUTE pubT[] = {
+            { CKA_CLASS, &pubC, sizeof(pubC) },
+            { CKA_MODULUS_BITS, &bits, sizeof(bits) },
+            { CKA_PUBLIC_EXPONENT, pubExp, sizeof(pubExp) },
+            { CKA_VERIFY_RECOVER, &bTrue, sizeof(bTrue) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_ATTRIBUTE privT[] = {
+            { CKA_CLASS, &privC, sizeof(privC) },
+            { CKA_SIGN_RECOVER, &bTrue, sizeof(bTrue) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        };
+        CK_MECHANISM kp = { CKM_RSA_PKCS_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        if (fl->C_GenerateKeyPair(hSess, &kp, pubT, 5, privT, 3, &hPub, &hPriv) == CKR_OK) {
+            CK_MECHANISM m = { c.m, NULL_PTR, 0 };
+            CK_RV rs = fl->C_SignRecoverInit(hSess, &m, hPriv);
+            record_result(CAT, std::string(c.name) + "_SignRecoverInit_accepts",
+                          rs == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rs));
+            if (rs == CKR_OK) fl->C_SignRecoverInit(hSess, NULL_PTR, hPriv);
+            CK_RV rvr = fl->C_VerifyRecoverInit(hSess, &m, hPub);
+            record_result(CAT, std::string(c.name) + "_VerifyRecoverInit_accepts",
+                          rvr == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rvr));
+            if (rvr == CKR_OK) fl->C_VerifyRecoverInit(hSess, NULL_PTR, hPub);
+        }
+    }
+
+    // The OpenPGP certificate type squatted 0x00000003, an unassigned OASIS
+    // codepoint below CKC_VENDOR_DEFINED (0x80000000). A certificate template
+    // naming that codepoint must no longer be accepted.
+    {
+        CK_OBJECT_CLASS certC = CKO_CERTIFICATE;
+        CK_CERTIFICATE_TYPE squatted = 0x00000003UL;
+        CK_BBOOL bFalse = CK_FALSE;
+        CK_BYTE dummy[] = { 0x30, 0x00 };
+        CK_ATTRIBUTE t[] = {
+            { CKA_CLASS,            &certC,    sizeof(certC) },
+            { CKA_CERTIFICATE_TYPE, &squatted, sizeof(squatted) },
+            { CKA_TOKEN,            &bFalse,   sizeof(bFalse) },
+            { CKA_VALUE,            dummy,     sizeof(dummy) },
+        };
+        CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+        CK_RV rc = fl->C_CreateObject(hSess, t, 4, &h);
+        record_result(CAT, "OpenPGP_codepoint_0x3_not_squatted",
+                      rc == CKR_ATTRIBUTE_VALUE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rc) +
+                      " (0x3 is unassigned by OASIS; want CKR_ATTRIBUTE_VALUE_INVALID=0x13)");
     }
 }
 
@@ -7211,6 +7603,9 @@ int main(int argc, char** argv) {
     if (opt_category == "all" || opt_category == "xmss-paramset") { refresh_session(); test_xmss_parameter_set(); }
     if (opt_category == "all" || opt_category == "raw-encoding") { refresh_session(); test_kem_ciphertext_and_ec_point_encoding(); }
     if (opt_category == "all" || opt_category == "pq-keybytes") { refresh_session(); test_pq_private_key_encoding_and_seed(); }
+    if (opt_category == "all" || opt_category == "profile") { refresh_session(); test_profile_objects(); }
+    if (opt_category == "all" || opt_category == "errcodes") { refresh_session(); test_c2_error_codes(); }
+    if (opt_category == "all" || opt_category == "mechflags") { refresh_session(); test_c3_advertised_capabilities(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_pqc_dsa(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_mldsa_context_binding(); }
     if (opt_category == "all" || opt_category == "pqc-dsa") { refresh_session(); test_multipart_signing(); }

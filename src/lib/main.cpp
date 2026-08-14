@@ -1931,12 +1931,33 @@ PKCS_API CK_RV C_GetInterfaceList(CK_INTERFACE_PTR pInterfacesList,
 }
 
 // Return a specific interface by name and optional version.
-// Per spec §5.1.3.2:
-//   - ppInterface must not be NULL.
-//   - flags must be 0 (no flags are defined yet).
-//   - pInterfaceName == NULL  → return the default interface (highest version).
-//   - pVersion == NULL        → return the highest version of the named interface.
-//   - Unknown name or version → CKR_ARGUMENTS_BAD.
+// Per §5.4.6 there are THREE independent match rules, each of which the caller
+// may leave unconstrained:
+//   1. "If pInterfaceName is not NULL_PTR, the name of the interface returned
+//       must match. If pInterfaceName is NULL_PTR, the cryptoki library can
+//       return a default interface of its choice"
+//   2. "If pVersion is not NULL_PTR, the version of the interface returned must
+//       match. If pVersion is NULL_PTR, the cryptoki library can return an
+//       interface of any version"
+//   3. "If flags is non-zero, the interface returned must match all of the
+//       supplied flag values (but may include additional flags not specified).
+//       If flags is 0, the cryptoki library can return an interface with any
+//       flags"
+//
+// C2 (2026-08-13): rule 3 was not implemented — ANY non-zero flags value was
+// rejected as a malformed argument, so the library could never have honoured a
+// flag it did support, and the specification's own worked example (which passes
+// CKF_INTERFACE_FORK_SAFE) was answered CKR_ARGUMENTS_BAD.
+//
+// This build declares NO interface flags. CKF_INTERFACE_FORK_SAFE means "each
+// process will get its own copy of all session objects, session states, login
+// states, and encryption states. Each process will also maintain access to token
+// objects with their previously supplied handles" — this engine's only fork
+// behaviour is the opt-in library.reset_on_fork, which DESTROYS that state
+// rather than duplicating it, so claiming the flag would be false. A request for
+// it therefore finds no matching interface: CKR_FUNCTION_FAILED ("nothing to
+// return"), which the return list permits, rather than CKR_ARGUMENTS_BAD ("your
+// argument is invalid"), which would misdescribe a well-formed request.
 PKCS_API CK_RV C_GetInterface(CK_UTF8CHAR_PTR pInterfaceName,
 	CK_VERSION_PTR pVersion,
 	CK_INTERFACE_PTR_PTR ppInterface,
@@ -1945,43 +1966,51 @@ PKCS_API CK_RV C_GetInterface(CK_UTF8CHAR_PTR pInterfaceName,
 	if (ppInterface == NULL_PTR)
 		return CKR_ARGUMENTS_BAD;
 
-	if (flags != 0)
+	// Rule 1: an unknown name can never match.
+	if (pInterfaceName != NULL_PTR &&
+	    strcmp((const char*)pInterfaceName, "PKCS 11") != 0)
 		return CKR_ARGUMENTS_BAD;
 
-	// NULL name → return default interface (v3.2, the highest supported version)
-	if (pInterfaceName == NULL_PTR)
+	// Rule 2: an unknown version can never match.
+	bool versionKnown = (pVersion == NULL_PTR);
+	if (pVersion != NULL_PTR)
 	{
-		*ppInterface = &interfaces[2];
-		return CKR_OK;
+		versionKnown =
+			(pVersion->major == 2 && pVersion->minor == 40) ||
+			(pVersion->major == 3 && pVersion->minor == 0) ||
+			(pVersion->major == 3 && pVersion->minor == 2);
 	}
-
-	// Only "PKCS 11" is supported
-	if (strcmp((const char*)pInterfaceName, "PKCS 11") != 0)
+	if (!versionKnown)
 		return CKR_ARGUMENTS_BAD;
 
-	// NULL version → return highest version of "PKCS 11" (v3.2)
-	if (pVersion == NULL_PTR)
+	// Walk the table newest-first so an unconstrained request keeps returning
+	// the highest supported version, as before.
+	for (CK_ULONG n = interfaceCount; n > 0; n--)
 	{
-		*ppInterface = &interfaces[2];
+		CK_INTERFACE* candidate = &interfaces[n - 1];
+
+		if (pInterfaceName != NULL_PTR &&
+		    strcmp((const char*)candidate->pInterfaceName,
+		           (const char*)pInterfaceName) != 0)
+			continue;
+
+		if (pVersion != NULL_PTR)
+		{
+			CK_VERSION* iv = (CK_VERSION*)candidate->pFunctionList;
+			if (iv == NULL_PTR) continue;
+			if (iv->major != pVersion->major || iv->minor != pVersion->minor)
+				continue;
+		}
+
+		// Rule 3: every requested flag must be present; extra flags are allowed.
+		if ((candidate->flags & flags) != flags)
+			continue;
+
+		*ppInterface = candidate;
 		return CKR_OK;
 	}
 
-	// Match exact version: {2,40}, {3,0}, or {3,2}
-	if (pVersion->major == 2 && pVersion->minor == 40)
-	{
-		*ppInterface = &interfaces[0];
-		return CKR_OK;
-	}
-	if (pVersion->major == 3 && pVersion->minor == 0)
-	{
-		*ppInterface = &interfaces[1];
-		return CKR_OK;
-	}
-	if (pVersion->major == 3 && pVersion->minor == 2)
-	{
-		*ppInterface = &interfaces[2];
-		return CKR_OK;
-	}
-
-	return CKR_ARGUMENTS_BAD;
+	// Name and version were recognised, so the only unmet constraint is the
+	// flags one: no interface of this library provides the requested capability.
+	return CKR_FUNCTION_FAILED;
 }

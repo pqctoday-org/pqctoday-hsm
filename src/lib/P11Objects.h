@@ -74,6 +74,23 @@ protected:
 	bool isModifiable();
 };
 
+// PKCS#11 v3.2 §4.9 / Profiles v3.2 §5.1 condition 4 — the CKO_PROFILE object a
+// conforming Provider must publish. CKA_PROFILE_ID lives here and ONLY here: it
+// used to be attached by P11Object::init to every object in the store, where its
+// default value 0 is Profiles v3.2's reserved CKP_INVALID_ID.
+class P11ProfileObj : public P11Object
+{
+public:
+	// Constructor
+	P11ProfileObj();
+
+	// Add attributes
+	virtual bool init(OSObject *inobject);
+
+protected:
+	bool initialized;
+};
+
 class P11DataObj : public P11Object
 {
 public:

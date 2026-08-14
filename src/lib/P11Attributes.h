@@ -89,8 +89,17 @@ public:
 		ck12=0x800,     // 12  Attribute cannot be changed once set to CK_FALSE. It becomes a read only attribute.
 		ck13=0x1000,    // Intentionally not defined
 		ck14=0x2000,    // 14  MUST be non-empty if CKA_URL is empty. (CKA_VALUE)
+		                //     Enforced in P11Object::saveTemplate since 2026-08-13;
+		                //     it was declared on CKA_VALUE of both certificate
+		                //     classes and read by no code path, so a certificate
+		                //     with neither a value nor a URL was accepted.
 		ck15=0x4000,    // 15  MUST be non-empty if CKA_VALUE is empty. (CKA_URL)
 		ck16=0x8000,    // 16  Can only be empty if CKA_URL is empty.
+		                //     (CKA_HASH_OF_{SUBJECT,ISSUER}_PUBLIC_KEY)
+		                //     ck15 and ck16 were likewise inert until 2026-08-13:
+		                //     declared on the attributes above and read nowhere,
+		                //     so an X.509 certificate object could be created
+		                //     with no value, no URL and no public-key hashes.
 		ck17=0x10000,   // 17  Can be changed in the process of copying the object using C_CopyObject.
 		ck18=0x20000,
 		ck19=0x40000,
@@ -337,6 +346,11 @@ public:
 protected:
 	// Set the default value of the attribute
 	virtual bool setDefault();
+	// CK_PROFILE_ID is a CK_ULONG. The base updateAttr stores a byte string,
+	// which reads back correctly through C_GetAttributeValue but is invisible to
+	// OSObject::getUnsignedLongValue — which is how the engine itself checks
+	// which profiles a token already publishes.
+	virtual CK_RV updateAttr(Token* token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int op);
 };
 
 /*****************************************

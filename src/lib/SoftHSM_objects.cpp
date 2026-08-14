@@ -50,9 +50,15 @@
 #include "SymmetricKey.h"
 #include "AESKey.h"
 
-// CKC_OPENPGP was in PKCS#11 2.x but removed from v3.2 headers.
+// C3 (2026-08-13): the OpenPGP certificate type was carried at 0x00000003, an
+// UNASSIGNED OASIS codepoint below CKC_VENDOR_DEFINED — squatting a value the
+// standard may allocate to something else. PKCS#11 v3.2 removed CKC_OPENPGP,
+// and §2 reserves 0x80000000 upwards for vendors, so this fork's OpenPGP
+// certificate type now lives there. Applications that used the old value get
+// CKR_ATTRIBUTE_VALUE_INVALID, which is the correct answer for a codepoint this
+// library does not define.
 #ifndef CKC_OPENPGP
-#define CKC_OPENPGP 0x00000003UL
+#define CKC_OPENPGP (CKC_VENDOR_DEFINED | 0x00000003UL)
 #endif
 
 
@@ -139,6 +145,12 @@ static CK_RV newP11Object(CK_OBJECT_CLASS objClass, CK_KEY_TYPE keyType, CK_CERT
 			}
 			else
 				return CKR_ATTRIBUTE_VALUE_INVALID;
+			break;
+		case CKO_PROFILE:
+			// Profiles v3.2 §5.1 condition 4. The engine publishes these itself
+			// (SoftHSM::publishProfileObjects); an application asking to create
+			// one is refused in SoftHSM::CreateObject before it reaches here.
+			*p11object = new P11ProfileObj();
 			break;
 		case CKO_DOMAIN_PARAMETERS:
 			return CKR_ATTRIBUTE_VALUE_INVALID;
@@ -898,6 +910,129 @@ CK_RV SoftHSM::C_FindObjectsFinal(CK_SESSION_HANDLE hSession)
 	return CKR_OK;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// C1 — profile publication (PKCS#11 v3.2 §7.2 + Profiles v3.2 §5)
+//
+// §7.2 defines a conforming Provider ONLY as one meeting a profile in
+// [PKCS11-Prof]; Profiles v3.2 §5.1 condition 4 requires "CKO_PROFILE with
+// value CKP_BASELINE_PROVIDER". Before this the engine published no profile
+// object at all, so it could not claim conformance to anything.
+//
+// The set is COMPUTED, never hard-coded: this fork is built with mechanisms and
+// entry points behind #ifdefs, so a build that drops one must stop claiming the
+// profile that requires it rather than shipping a false conformance statement.
+// The exported function list is the honest evidence of what a given build
+// dispatches, so each profile's function requirements are checked against it.
+// ─────────────────────────────────────────────────────────────────────────────
+std::vector<CK_ULONG> SoftHSM::computeSupportedProfiles()
+{
+	std::vector<CK_ULONG> profiles;
+
+	CK_FUNCTION_LIST_3_2_PTR fl = NULL_PTR;
+	CK_INTERFACE_PTR iface = NULL_PTR;
+	CK_VERSION v32 = { 3, 2 };
+	if (C_GetInterface((CK_UTF8CHAR_PTR)"PKCS 11", &v32, &iface, 0) != CKR_OK ||
+	    iface == NULL_PTR || iface->pFunctionList == NULL_PTR)
+		return profiles;
+	fl = (CK_FUNCTION_LIST_3_2_PTR)iface->pFunctionList;
+
+	// Profiles v3.2 §5.1 condition 5 — Baseline Provider functions. Conditions
+	// 2 (data types) and 3 (attributes, incl. CKA_UNIQUE_ID and CKA_PROFILE_ID)
+	// are satisfied structurally by pkcs11t.h and by P11Object/P11ProfileObj;
+	// condition 6 specifies no mechanisms.
+	const bool baseline =
+		fl->C_GetFunctionList   != NULL_PTR && fl->C_GetInterfaceList  != NULL_PTR &&
+		fl->C_GetInterface      != NULL_PTR && fl->C_Initialize        != NULL_PTR &&
+		fl->C_Finalize          != NULL_PTR && fl->C_GetInfo           != NULL_PTR &&
+		fl->C_GetSlotList       != NULL_PTR && fl->C_GetSlotInfo       != NULL_PTR &&
+		fl->C_GetTokenInfo      != NULL_PTR && fl->C_OpenSession       != NULL_PTR &&
+		fl->C_CloseSession      != NULL_PTR && fl->C_GetSessionInfo    != NULL_PTR &&
+		fl->C_FindObjectsInit   != NULL_PTR && fl->C_FindObjects       != NULL_PTR &&
+		fl->C_FindObjectsFinal  != NULL_PTR && fl->C_GetAttributeValue != NULL_PTR;
+
+	if (!baseline)
+		return profiles;
+	profiles.push_back(CKP_BASELINE_PROVIDER);
+
+	// Profiles v3.2 §5.3 — Extended Provider adds CK_MECHANISM_TYPE /
+	// CK_MECHANISM support plus five functions, and specifies no mechanisms.
+	const bool extended =
+		fl->C_GetMechanismList != NULL_PTR && fl->C_GetMechanismInfo != NULL_PTR &&
+		fl->C_Login            != NULL_PTR && fl->C_LoginUser        != NULL_PTR &&
+		fl->C_Logout           != NULL_PTR;
+	if (extended)
+		profiles.push_back(CKP_EXTENDED_PROVIDER);
+
+	// CKP_COMPLETE_PROVIDER is deliberately NOT claimed: §5.2 requires support
+	// for ALL mechanisms in [PKCS11_Spec] section 6, which this build does not
+	// have (its mechanism list is trimmed by WITH_* build flags). Claiming it
+	// would turn this fix into a fresh conformance violation.
+	return profiles;
+}
+
+void SoftHSM::publishProfileObjects(Token* token)
+{
+	if (token == NULL_PTR) return;
+
+	std::vector<CK_ULONG> wanted = computeSupportedProfiles();
+	if (wanted.empty()) return;
+
+	// Idempotent: only create the ids the token does not already carry.
+	std::set<OSObject*> objects;
+	token->getObjects(objects);
+	for (std::set<OSObject*>::iterator it = objects.begin(); it != objects.end(); ++it)
+	{
+		if (!(*it)->isValid()) continue;
+		if ((*it)->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PROFILE) continue;
+		CK_ULONG id = (*it)->getUnsignedLongValue(CKA_PROFILE_ID, CKP_INVALID_ID);
+		for (std::vector<CK_ULONG>::iterator w = wanted.begin(); w != wanted.end(); ++w)
+		{
+			if (*w == id) { wanted.erase(w); break; }
+		}
+	}
+
+	for (size_t i = 0; i < wanted.size(); i++)
+	{
+		OSObject* object = (OSObject*)token->createObject();
+		if (object == NULL_PTR) continue;
+
+		// P11AttrClass::updateAttr refuses a template class that differs from the
+		// object's stored one, so seed it first — the same thing
+		// SoftHSM::CreateObject does for CKA_KEY_TYPE.
+		{
+			OSAttribute attrCls((unsigned long)CKO_PROFILE);
+			object->setAttribute(CKA_CLASS, attrCls);
+		}
+
+		P11ProfileObj p11object;
+		if (!p11object.init(object)) continue;
+
+		// A profile object is public, on-token, and not modifiable or
+		// destroyable by the application: it is the library's own statement
+		// about itself.
+		CK_OBJECT_CLASS cls = CKO_PROFILE;
+		CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+		CK_ULONG id = wanted[i];
+		CK_ATTRIBUTE tmpl[] = {
+			{ CKA_CLASS,       &cls,    sizeof(cls) },
+			{ CKA_TOKEN,       &bTrue,  sizeof(bTrue) },
+			{ CKA_PRIVATE,     &bFalse, sizeof(bFalse) },
+			{ CKA_PROFILE_ID,  &id,     sizeof(id) },
+		};
+		if (p11object.saveTemplate(token, false, tmpl, 4, OBJECT_OP_GENERATE) != CKR_OK)
+		{
+			object->destroyObject();
+			continue;
+		}
+		if (object->startTransaction())
+		{
+			object->setAttribute(CKA_MODIFIABLE, false);
+			object->setAttribute(CKA_DESTROYABLE, false);
+			object->commitTransaction();
+		}
+	}
+}
+
 CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount, CK_OBJECT_HANDLE_PTR phObject, int op)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
@@ -943,6 +1078,15 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 
 		return rv;
 	}
+
+	// C1 (2026-08-13). Profile objects describe what the LIBRARY conforms to, so
+	// they are read-only token objects the engine publishes for itself
+	// (publishProfileObjects below). An application creating one could otherwise
+	// claim conformance the implementation does not have. Rust's
+	// CKR_ATTRIBUTE_READ_ONLY is the better code than the CKR_ATTRIBUTE_VALUE_INVALID
+	// this used to fall through to.
+	if (op == OBJECT_OP_CREATE && objClass == CKO_PROFILE)
+		return CKR_ATTRIBUTE_READ_ONLY;
 
 	// ── S5 (2026-08-13) — hash-based-signature private keys ──────────────────
 	// PKCS#11 v3.2 §6.65.3 (HSS): "CKA_SENSITIVE MUST be true, CKA_EXTRACTABLE

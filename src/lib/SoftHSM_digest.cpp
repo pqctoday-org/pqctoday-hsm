@@ -47,7 +47,14 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
 
-	if (pMechanism == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	// C2 (2026-08-13) — §5.8.1 and its siblings: "C_DigestInit can be called with
+	// pMechanism set to NULL_PTR to terminate an active message-digesting operation. If an
+	// active operation ... cannot be cancelled, CKR_OPERATION_CANCEL_FAILED must
+	// be returned." CKR_ARGUMENTS_BAD, which this used to answer, is neither of
+	// the two permitted results. C_SessionCancel already implements the
+	// per-family cancel semantics (and the initialisation and session-handle
+	// checks that outrank this one), so the cancel form routes into it.
+	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_DIGEST);
 
 	std::shared_ptr<Session> sessionGuard; Session* session;
 	// SESSION_OP_DIGEST lets a Digest init pair with an already-active
