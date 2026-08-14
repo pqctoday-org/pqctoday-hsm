@@ -93,6 +93,24 @@ exact bytes of a freshly generated key differ between engines by construction,
 but the *encoding* must not. `RAW_EC_POINT_UNCOMPRESSED_P256` versus
 `DER_OCTET_STRING` is a real finding; the 65 bytes themselves are noise.
 
+**Three classes of attribute are deliberately not classified**, because running
+an encoding classifier over random bytes produces a verdict that flips with the
+leading byte and a flaky harness gets switched off. Each was found by the
+harness failing intermittently on an otherwise identical series of runs:
+
+- **Unstructured** — `CKA_UNIQUE_ID`, `CKA_CHECK_VALUE`, `CKA_ID`, `CKA_SEED`,
+  `CKA_LABEL`, the dates. A Rust unique id beginning `'0'` reads as an ASN.1
+  SEQUENCE tag; roughly one three-byte check value in 256 starts `0x30`.
+- **Big integers** — the RSA modulus, exponents, primes and coefficient, and
+  `CKA_PUBLIC_KEY_INFO`. Not classified, *and* their length is recorded rounded
+  up to a multiple of eight: an RSA CRT exponent whose top byte is zero
+  serialises as 127 bytes rather than 128, about one key in 256. The rounding
+  still catches a truncated, empty or wrong-size value.
+- **Random outputs** — anything recorded with `ByteView::LEN`.
+
+Length and presence remain recorded for all three, which is where the meaning
+actually is: a check value present versus absent, a modulus 256 bytes versus 0.
+
 ### Coverage
 
 | group | what it drives |

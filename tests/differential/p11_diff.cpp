@@ -421,6 +421,24 @@ static bool is_unstructured_attr(CK_ATTRIBUTE_TYPE t) {
     }
 }
 
+// Big-integer attributes. Their byte length varies by one with the random
+// key — an RSA CRT exponent whose top byte happens to be zero serialises as
+// 127 bytes rather than 128, roughly one key in 256 — so the exact length is
+// not a cross-engine observable. It is recorded rounded up to a multiple of
+// eight, which is stable across keys and still catches a truncated, empty or
+// wrong-modulus-size value. Found the hard way: the harness failed on
+// CKA_EXPONENT_1.len 127 vs 128 on one run in a series that was otherwise
+// identical.
+static bool is_bignum_attr(CK_ATTRIBUTE_TYPE t) {
+    switch (t) {
+        case CKA_MODULUS: case CKA_PUBLIC_EXPONENT: case CKA_PRIVATE_EXPONENT:
+        case CKA_PRIME_1: case CKA_PRIME_2: case CKA_EXPONENT_1:
+        case CKA_EXPONENT_2: case CKA_COEFFICIENT: case CKA_PUBLIC_KEY_INFO:
+            return true;
+        default: return false;
+    }
+}
+
 // The canonical attribute probe. Every object produced by every creation path
 // is interrogated with the SAME list, so "this engine does not set X" shows up
 // as a return-code difference rather than as a silently missing row.
@@ -453,7 +471,11 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
         if (rv != CKR_OK) continue;
         present.push_back(an);
         if (a.ulValueLen == (CK_ULONG)-1) { r.put(prefix + "." + an, "UNAVAILABLE"); continue; }
-        r.num(prefix + "." + an + ".len", (unsigned long long)a.ulValueLen);
+        if (is_bignum_attr(t))
+            r.num(prefix + "." + an + ".len_rounded8",
+                  (unsigned long long)((a.ulValueLen + 7) / 8 * 8));
+        else
+            r.num(prefix + "." + an + ".len", (unsigned long long)a.ulValueLen);
         std::vector<CK_BYTE> buf(a.ulValueLen ? a.ulValueLen : 1);
         a.pValue = buf.data();
         CK_RV rv2 = e.fl->C_GetAttributeValue(s, o, &a, 1);
@@ -466,7 +488,10 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
         // random, and a flaky harness gets switched off. Length is still
         // recorded, which is the observable that actually carries meaning here
         // (a 3-byte check value present versus absent).
-        if (!is_unstructured_attr(t))
+        // A big integer is not an encoding either: a 128-byte private exponent
+        // whose first byte happens to be 0x30 classifies as an ASN.1 SEQUENCE,
+        // which is the same random-byte trap as the check value above.
+        if (!is_unstructured_attr(t) && !is_bignum_attr(t))
             r.put(prefix + "." + an + ".enc", classify(buf.data(), a.ulValueLen));
         if (is_opaque_attr(t)) {
             // Value intentionally not compared — see is_opaque_attr.
