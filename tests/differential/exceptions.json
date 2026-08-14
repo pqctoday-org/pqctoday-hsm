@@ -81,14 +81,6 @@
       "citation": "PKCS#11 v3.2 §6.3: an unsupported curve should fail CKR_CURVE_NOT_SUPPORTED — a requirement on the refusal, not on the coverage. Profiles v3.2 mandates no curve."
     },
     {
-      "id": "DEFECT-RUST-AES-CTR-CIPHERTEXT",
-      "status": "defect",
-      "scenario": "bytes.aes_ctr",
-      "path": "*ct.bytes",
-      "justification": "AES-256-CTR over a fixed key, fixed counter block and fixed plaintext produces different ciphertext in the two engines, at BOTH 128-bit and 32-bit counter widths. An independent OpenSSL oracle agrees with C++, so Rust's CKM_AES_CTR is wrong. Found by this harness; not previously recorded anywhere.",
-      "citation": "PKCS#11 v3.2 §6.28 CK_AES_CTR_PARAMS: cb is the full 128-bit initial counter block and ulCounterBits names how many of its low-order bits increment. Oracle: openssl enc -aes-256-ctr with the same key/IV matches the C++ output byte for byte."
-    },
-    {
       "id": "LEGAL-INTERFACE-ORDER-AND-FORK-FLAG",
       "status": "legal",
       "scenario": "env.interfaces",
