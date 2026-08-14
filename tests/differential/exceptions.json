@@ -108,15 +108,15 @@
       "id": "LEGAL-IDENTITY-STRINGS",
       "status": "legal",
       "scenario": "env.library_info",
-      "path": "*",
-      "justification": "manufacturerID and libraryDescription are the engines' own names; they are informational and no interoperable behaviour depends on them.",
+      "path": "manufacturerID|libraryDescription",
+      "justification": "manufacturerID and libraryDescription are the engines' own names; they are informational and no interoperable behaviour depends on them. Deliberately NOT scoped to the whole env.library_info scenario: cryptokiVersion and the library flags in that same scenario are real conformance signals and must keep failing if they ever diverge.",
       "citation": "PKCS#11 v3.2 §5.5.2 CK_INFO — these fields are descriptive, blank-padded strings with no constrained content."
     },
     {
       "id": "DEFECT-RUST-NO-PROFILE-OBJECT-AFTER-INIT-TOKEN",
       "status": "defect",
       "scenario": "env.profile_objects",
-      "path": "*",
+      "path": "count|profile_ids",
       "justification": "After C_InitToken, C++ publishes two CKO_PROFILE objects (ids 1 and 2) and Rust publishes none, so on this path Rust has not established that it is a conforming Provider at all. The 2026-08-13 divergence report recorded the opposite polarity (Rust published one, C++ none), which means C_InitToken destroys Rust's profile object without recreating it.",
       "citation": "PKCS #11 Profiles v3.2, Baseline Provider condition 4: 'Supports the following objects: a. CKO_PROFILE with value CKP_BASELINE_PROVIDER.' PKCS#11 v3.2 §5.5.7: initialisation destroys all objects that can be destroyed — a profile object should not be one of them, or must be reinstated."
     },
