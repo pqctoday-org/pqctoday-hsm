@@ -390,6 +390,15 @@ pub enum KmipAlgorithm {
     CompositeMlDsa65EcdsaP256Sha512, // 0x80000067 (spec-convention vendor extension, §11.12)
     /// id-MLDSA87-ECDSA-P384-SHA512 — OID `1.3.6.1.5.5.7.6.49`.
     CompositeMlDsa87EcdsaP384Sha512, // 0x80000068 (spec-convention vendor extension, §11.12)
+    /// id-MLDSA44-Ed25519-SHA512 — OID `1.3.6.1.5.5.7.6.39`. §10.4 recommended.
+    CompositeMlDsa44Ed25519Sha512, // 0x80000069 (spec-convention vendor extension, §11.12)
+    /// id-MLDSA44-ECDSA-P256-SHA256 — OID `1.3.6.1.5.5.7.6.40`. §10.4 recommended.
+    CompositeMlDsa44EcdsaP256Sha256, // 0x8000006a (spec-convention vendor extension, §11.12)
+    /// id-MLDSA65-RSA3072-PSS-SHA512 — OID `1.3.6.1.5.5.7.6.41`. §10.4 recommended
+    /// as the RSA choice, in preference to the RSA-2048 profile above.
+    CompositeMlDsa65Rsa3072PssSha512, // 0x8000006b (spec-convention vendor extension, §11.12)
+    /// id-MLDSA65-Ed25519-SHA512 — OID `1.3.6.1.5.5.7.6.48`. §10.4 recommended.
+    CompositeMlDsa65Ed25519Sha512, // 0x8000006c (spec-convention vendor extension, §11.12)
 }
 
 impl KmipAlgorithm {
@@ -456,6 +465,10 @@ impl KmipAlgorithm {
             CompositeMlDsa44Rsa2048PssSha256 => 0x80000066,
             CompositeMlDsa65EcdsaP256Sha512 => 0x80000067,
             CompositeMlDsa87EcdsaP384Sha512 => 0x80000068,
+            CompositeMlDsa44Ed25519Sha512 => 0x80000069,
+            CompositeMlDsa44EcdsaP256Sha256 => 0x8000006a,
+            CompositeMlDsa65Rsa3072PssSha512 => 0x8000006b,
+            CompositeMlDsa65Ed25519Sha512 => 0x8000006c,
         }
     }
 
@@ -523,6 +536,10 @@ impl KmipAlgorithm {
             0x80000066 => CompositeMlDsa44Rsa2048PssSha256,
             0x80000067 => CompositeMlDsa65EcdsaP256Sha512,
             0x80000068 => CompositeMlDsa87EcdsaP384Sha512,
+            0x80000069 => CompositeMlDsa44Ed25519Sha512,
+            0x8000006a => CompositeMlDsa44EcdsaP256Sha256,
+            0x8000006b => CompositeMlDsa65Rsa3072PssSha512,
+            0x8000006c => CompositeMlDsa65Ed25519Sha512,
             _ => return None,
         })
     }
@@ -537,6 +554,10 @@ impl KmipAlgorithm {
             KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256
                 | KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512
                 | KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512
+                | KmipAlgorithm::CompositeMlDsa44Ed25519Sha512
+                | KmipAlgorithm::CompositeMlDsa44EcdsaP256Sha256
+                | KmipAlgorithm::CompositeMlDsa65Rsa3072PssSha512
+                | KmipAlgorithm::CompositeMlDsa65Ed25519Sha512
         )
     }
 
@@ -584,6 +605,10 @@ impl KmipAlgorithm {
                 | CompositeMlDsa44Rsa2048PssSha256
                 | CompositeMlDsa65EcdsaP256Sha512
                 | CompositeMlDsa87EcdsaP384Sha512
+                | CompositeMlDsa44Ed25519Sha512
+                | CompositeMlDsa44EcdsaP256Sha256
+                | CompositeMlDsa65Rsa3072PssSha512
+                | CompositeMlDsa65Ed25519Sha512
         )
     }
 
@@ -809,6 +834,39 @@ impl KmipAlgorithm {
             push(Some(CKM_EC_MONTGOMERY_KEY_DERIVE));
         }
 
+        // KMIP 3.0 §6.34 CreateSplitKey, via the vendor mechanism
+        // `CKM_PQCTODAY_SPLIT_KEY`. Splitting is not expressed by any
+        // CryptographicUsageMask bit — §11.24 has no "split" flag — so this is
+        // gated on key TYPE, not on the mask: a secret is splittable, an
+        // asymmetric key is not.
+        //
+        // FIXES a regression from S12 (2026-08-13), which started enforcing
+        // CKA_ALLOWED_MECHANISMS inside `native::split_key::split`. This
+        // builder was never taught about the split mechanism, so every
+        // KMIP-created key carried a whitelist that omitted it and
+        // CreateSplitKey failed with CKR_MECHANISM_INVALID → "mechanism not
+        // supported by the engine" for ALL keys — the operation was simply
+        // dead. It went unnoticed because the tests that cover it
+        // (opTemplates.local, learnLessons.local) are `.local.test.ts`, which
+        // need a real wasm engine and are not part of CI.
+        //
+        // Listing it is not a widening of the raw-PKCS#11 bypass this
+        // whitelist exists to close: the mechanism is vendor-defined and has
+        // no `C_*` entry point, so a raw PKCS#11 caller cannot invoke it at
+        // all. KMIP's own layer remains the only door, and it still applies
+        // its policy and lifecycle checks before calling the engine.
+        // AES only, deliberately narrow. An earlier version of this also listed
+        // the HMAC and ChaCha20 algorithms, which broke
+        // `kmip_created_key_refuses_a_mechanism_outside_its_allowed_list`: an
+        // HMAC derivation key is created with a deliberately minimal
+        // single-mechanism whitelist, and appending split to it widened a
+        // restriction the caller had asked for. Splitting is a key-custody
+        // operation on a symmetric SECRET; scope it to the key type that
+        // actually gets split rather than to everything symmetric.
+        if matches!(self, KmipAlgorithm::Aes) {
+            push(Some(softhsmrustv3::constants::CKM_PQCTODAY_SPLIT_KEY));
+        }
+
         mechs
     }
 
@@ -881,6 +939,10 @@ impl KmipAlgorithm {
             CompositeMlDsa44Rsa2048PssSha256 => "ML-DSA-44-RSA2048-PSS",
             CompositeMlDsa65EcdsaP256Sha512 => "ML-DSA-65-ECDSA-P256",
             CompositeMlDsa87EcdsaP384Sha512 => "ML-DSA-87-ECDSA-P384",
+            CompositeMlDsa44Ed25519Sha512 => "ML-DSA-44-Ed25519",
+            CompositeMlDsa44EcdsaP256Sha256 => "ML-DSA-44-ECDSA-P256",
+            CompositeMlDsa65Rsa3072PssSha512 => "ML-DSA-65-RSA3072-PSS",
+            CompositeMlDsa65Ed25519Sha512 => "ML-DSA-65-Ed25519",
         }
     }
 }
@@ -911,6 +973,10 @@ mod tests {
             CompositeMlDsa44Rsa2048PssSha256,
             CompositeMlDsa65EcdsaP256Sha512,
             CompositeMlDsa87EcdsaP384Sha512,
+            CompositeMlDsa44Ed25519Sha512,
+            CompositeMlDsa44EcdsaP256Sha256,
+            CompositeMlDsa65Rsa3072PssSha512,
+            CompositeMlDsa65Ed25519Sha512,
         ]
     }
 

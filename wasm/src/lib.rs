@@ -181,10 +181,19 @@ impl KmipPlayground {
         // create_key_pair.rs's own composite branch), resolved and
         // generated in its own path, separate from the single-algorithm
         // match below.
+        // Names are `KmipAlgorithm::spec_name()` values. The four §10.4
+        // profiles added 2026-08-18 were easy to miss here: this list is a
+        // plain string match, so omitting one is not a compile error — the
+        // profile simply never resolves and the caller silently falls through
+        // to the single-algorithm path below.
         let composite_algo = match algorithm {
             "ML-DSA-44-RSA2048-PSS" => Some(KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256),
             "ML-DSA-65-ECDSA-P256" => Some(KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512),
             "ML-DSA-87-ECDSA-P384" => Some(KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512),
+            "ML-DSA-44-Ed25519" => Some(KmipAlgorithm::CompositeMlDsa44Ed25519Sha512),
+            "ML-DSA-44-ECDSA-P256" => Some(KmipAlgorithm::CompositeMlDsa44EcdsaP256Sha256),
+            "ML-DSA-65-RSA3072-PSS" => Some(KmipAlgorithm::CompositeMlDsa65Rsa3072PssSha512),
+            "ML-DSA-65-Ed25519" => Some(KmipAlgorithm::CompositeMlDsa65Ed25519Sha512),
             _ => None,
         };
 
@@ -203,11 +212,20 @@ impl KmipPlayground {
             ) {
                 return error_json(&format!("composite CA ML-DSA keygen failed: CK_RV=0x{rv:08x}"));
             }
-            let classical_result = match profile.classical_ec_field_width {
-                Some(32) => native::generate_ecdsa_keypair(session, EccCurve::P256, &classical_cka_id, "demo-ca-composite"),
-                Some(48) => native::generate_ecdsa_keypair(session, EccCurve::P384, &classical_cka_id, "demo-ca-composite"),
-                None => native::generate_rsa_keypair(session, 2048, &classical_cka_id, "demo-ca-composite"),
-                Some(other) => {
+            // Dispatch on the profile's explicit draft §6 family. This matched
+            // on `classical_ec_field_width` until 2026-08-18, where `None` meant
+            // RSA and the size was hard-coded to 2048 — so an Ed25519 profile
+            // (.39/.48) would have generated an RSA key, and .41's 3072 would
+            // have been silently downgraded. Same defect as
+            // `kmip/src/ops/create_key_pair.rs`, in a second copy of the
+            // dispatch that lives in this crate.
+            use pqctoday_kmip::ops::composite_sig::CompositeClassical;
+            let classical_result = match profile.classical {
+                CompositeClassical::Ecdsa { field_width: 32 } => native::generate_ecdsa_keypair(session, EccCurve::P256, &classical_cka_id, "demo-ca-composite"),
+                CompositeClassical::Ecdsa { field_width: 48 } => native::generate_ecdsa_keypair(session, EccCurve::P384, &classical_cka_id, "demo-ca-composite"),
+                CompositeClassical::RsaPss { modulus_bits } => native::generate_rsa_keypair(session, modulus_bits, &classical_cka_id, "demo-ca-composite"),
+                CompositeClassical::Ed25519 => native::generate_ed25519_keypair(session, &classical_cka_id, "demo-ca-composite"),
+                CompositeClassical::Ecdsa { field_width: other } => {
                     return error_json(&format!("composite CA: no profile uses a {other}-byte EC field width"))
                 }
             };

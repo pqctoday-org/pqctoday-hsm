@@ -853,7 +853,20 @@ fn sign_tbs_with_plan(
             // ECDSA; RSA-PSS signatures have no raw-vs-DER distinction —
             // same conversion rule `issue_certificate`'s single-algorithm
             // path already applies, reused here rather than reinvented.
-            let classical_final = if profile.classical_sign_mech == softhsmrustv3::constants::CKM_ECDSA_SHA512 {
+            // Discriminate on "is the classical half ECDSA", NOT on which hash
+            // it uses. This previously tested `classical_sign_mech ==
+            // CKM_ECDSA_SHA512`, which worked only while both EC profiles were
+            // (incorrectly) pinned to SHA-512; once they were corrected to
+            // ecdsa-with-SHA256 / -SHA384 per draft §6 that condition became
+            // unreachable and would have silently emitted RAW ECDSA signatures
+            // instead of RFC 3279 §2.2.3 DER.
+            //
+            // ECDSA is the ONLY family that needs this. RSASSA-PSS emits a bare
+            // integer of the modulus width, and Ed25519 a raw 64-byte string
+            // (RFC 8032) — DER-wrapping either would corrupt it. So the test is
+            // "is the classical half ECDSA", asked of the profile's explicit
+            // family rather than inferred from a mechanism or a null field.
+            let classical_final = if profile.classical.ec_field_width().is_some() {
                 ecdsa_raw_to_der(&classical_raw)?
             } else {
                 classical_raw
@@ -2378,14 +2391,28 @@ pub(crate) mod tests {
         let (mldsa_pub_h, _mldsa_prv_h) =
             native::generate_ml_dsa_keypair(sess, profile.mldsa_param_set, &mldsa_cka_id, "ca-mldsa")
                 .expect("ML-DSA half keygen");
-        let curve = match profile.classical_ec_field_width {
-            Some(32) => EccCurve::P256,
-            Some(48) => EccCurve::P384,
-            other => panic!("test only covers EC composite profiles, got field width {other:?}"),
-        };
-        let (classical_pub_h, _classical_prv_h) =
-            native::generate_ecdsa_keypair(sess, curve, &classical_cka_id, "ca-classical")
-                .expect("classical half keygen");
+        // Generalised 2026-08-18: was EC-only, which would have made the four
+        // new §10.4 profiles untestable through this helper — and silently so,
+        // since a panic here reads as "test not applicable" rather than
+        // "profile unsupported".
+        use super::super::composite_sig::CompositeClassical;
+        let (classical_pub_h, _classical_prv_h) = match profile.classical {
+            CompositeClassical::Ecdsa { field_width } => {
+                let curve = match field_width {
+                    32 => EccCurve::P256,
+                    48 => EccCurve::P384,
+                    other => panic!("no composite profile uses a {other}-byte EC field width"),
+                };
+                native::generate_ecdsa_keypair(sess, curve, &classical_cka_id, "ca-classical")
+            }
+            CompositeClassical::RsaPss { modulus_bits } => {
+                native::generate_rsa_keypair(sess, modulus_bits, &classical_cka_id, "ca-classical")
+            }
+            CompositeClassical::Ed25519 => {
+                native::generate_ed25519_keypair(sess, &classical_cka_id, "ca-classical")
+            }
+        }
+        .expect("classical half keygen");
 
         let sink: Arc<dyn crate::auditlog::AuditSink> = Arc::new(RingSink::new(256));
         let deps = Deps::new(
@@ -2414,6 +2441,20 @@ pub(crate) mod tests {
             &deps, "urn:composite-ca-priv", "urn:composite-ca-cert", "Composite Test CA", 3650,
         )
         .expect("bootstrap composite CA cert");
+
+        // Cross-engine escape hatch: with COMPOSITE_CERT_DUMP_DIR set, write the
+        // DER this helper just produced so an INDEPENDENT implementation can
+        // check it. Deliberately hung off the real issuance path rather than a
+        // parallel dumper — an artifact from a second code path would only
+        // prove that second path correct.
+        //
+        // Every composite bug found so far (the traditional-hash misreading,
+        // low-S over-enforcement, raw r||s) surfaced because two
+        // implementations disagreed, never because one of them tested itself.
+        if let Ok(dir) = std::env::var("COMPOSITE_CERT_DUMP_DIR") {
+            let path = format!("{dir}/{}.der", profile.label);
+            std::fs::write(&path, &der).unwrap_or_else(|e| panic!("dump {path}: {e}"));
+        }
 
         let cert = Certificate::from_der(&der).expect("composite cert parses as X.509");
         let composite_oid = der::oid::ObjectIdentifier::from_str(profile.oid).unwrap();
@@ -2452,16 +2493,34 @@ pub(crate) mod tests {
         )
         .expect("ML-DSA half must independently verify against the ML-DSA public key");
 
-        let field_width = profile.classical_ec_field_width.unwrap();
-        let EcdsaSigValue { r, s } = EcdsaSigValue::from_der(classical_sig_der).expect("classical half is a valid Ecdsa-Sig-Value");
-        let pad = |bytes: &[u8]| {
-            let mut p = vec![0u8; field_width];
-            p[field_width - bytes.len()..].copy_from_slice(bytes);
-            p
+        // Only ECDSA is DER-wrapped on the wire. RSASSA-PSS emits a bare
+        // modulus-width integer and Ed25519 a raw 64-byte string (RFC 8032), so
+        // both go to the engine untouched — un-wrapping them would corrupt the
+        // signature, and DER-parsing them would fail outright.
+        let classical_native_sig = match profile.classical {
+            CompositeClassical::Ecdsa { field_width } => {
+                let EcdsaSigValue { r, s } = EcdsaSigValue::from_der(classical_sig_der)
+                    .expect("classical half is a valid Ecdsa-Sig-Value");
+                let pad = |bytes: &[u8]| {
+                    let mut p = vec![0u8; field_width];
+                    p[field_width - bytes.len()..].copy_from_slice(bytes);
+                    p
+                };
+                let mut raw = pad(r.as_bytes());
+                raw.extend(pad(s.as_bytes()));
+                raw
+            }
+            CompositeClassical::RsaPss { .. } | CompositeClassical::Ed25519 => {
+                classical_sig_der.to_vec()
+            }
         };
-        let mut raw = pad(r.as_bytes());
-        raw.extend(pad(s.as_bytes()));
-        let ok = native::verify(sess, classical_pub_h, profile.classical_sign_mech, &mprime, &raw)
+        // Sanity-check the fixed-length families while we have the bytes: a
+        // silently wrong length here would otherwise surface only as an opaque
+        // verify failure.
+        if matches!(profile.classical, CompositeClassical::Ed25519) {
+            assert_eq!(classical_native_sig.len(), 64, "RFC 8032 fixes Ed25519 signatures at 64 bytes");
+        }
+        let ok = native::verify(sess, classical_pub_h, profile.classical_sign_mech, &mprime, &classical_native_sig)
             .expect("classical verify call");
         assert!(ok, "classical half must independently verify against the classical public key");
 
@@ -2479,6 +2538,18 @@ pub(crate) mod tests {
         let _ = session::finalize();
     }
 
+    /// .37 has been implemented since the composite work landed but never had a
+    /// CA bootstrap test — the RSA issuance path was only ever exercised
+    /// indirectly. Added 2026-08-18 when dumping certificates for cross-engine
+    /// checking turned up six artifacts for seven implemented profiles.
+    #[test]
+    fn bootstrap_composite_mldsa44_rsa2048_pss_ca_both_halves_verify() {
+        bootstrap_composite_ca_and_verify(
+            &super::super::composite_sig::MLDSA44_RSA2048_PSS_SHA256,
+            KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256,
+        );
+    }
+
     #[test]
     fn bootstrap_composite_mldsa65_ecdsa_p256_ca_both_halves_verify() {
         bootstrap_composite_ca_and_verify(
@@ -2492,6 +2563,45 @@ pub(crate) mod tests {
         bootstrap_composite_ca_and_verify(
             &super::super::composite_sig::MLDSA87_ECDSA_P384_SHA512,
             KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512,
+        );
+    }
+
+    // The four profiles added 2026-08-18 to reach the six draft §10.4
+    // recommends. Each exercises issuance AND verification of both halves, so
+    // they cover the two genuinely new classical paths: Ed25519 keygen/sign
+    // (which must NOT be routed through the ECDSA raw→DER conversion, its
+    // signature being a raw 64-byte string), and RSA at a size other than the
+    // 2048 previously hard-coded in `create_key_pair.rs`.
+
+    #[test]
+    fn bootstrap_composite_mldsa44_ed25519_ca_both_halves_verify() {
+        bootstrap_composite_ca_and_verify(
+            &super::super::composite_sig::MLDSA44_ED25519_SHA512,
+            KmipAlgorithm::CompositeMlDsa44Ed25519Sha512,
+        );
+    }
+
+    #[test]
+    fn bootstrap_composite_mldsa44_ecdsa_p256_ca_both_halves_verify() {
+        bootstrap_composite_ca_and_verify(
+            &super::super::composite_sig::MLDSA44_ECDSA_P256_SHA256,
+            KmipAlgorithm::CompositeMlDsa44EcdsaP256Sha256,
+        );
+    }
+
+    #[test]
+    fn bootstrap_composite_mldsa65_rsa3072_pss_ca_both_halves_verify() {
+        bootstrap_composite_ca_and_verify(
+            &super::super::composite_sig::MLDSA65_RSA3072_PSS_SHA512,
+            KmipAlgorithm::CompositeMlDsa65Rsa3072PssSha512,
+        );
+    }
+
+    #[test]
+    fn bootstrap_composite_mldsa65_ed25519_ca_both_halves_verify() {
+        bootstrap_composite_ca_and_verify(
+            &super::super::composite_sig::MLDSA65_ED25519_SHA512,
+            KmipAlgorithm::CompositeMlDsa65Ed25519Sha512,
         );
     }
 

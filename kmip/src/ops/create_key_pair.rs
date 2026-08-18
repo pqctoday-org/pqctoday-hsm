@@ -387,21 +387,37 @@ pub fn create_key_pair(
                     // parameterisable), same explicit-not-inferred
                     // discipline `verify_composite_signature` already
                     // uses for `classical_ec_field_width`.
-                    let classical_result = match profile.classical_ec_field_width {
-                        Some(32) => softhsmrustv3::native::generate_ecdsa_keypair(
+                    // Dispatch on the profile's explicit §6 family. This was a
+                    // `match` on `classical_ec_field_width` until 2026-08-18,
+                    // where `None` meant RSA and the size was hard-coded to
+                    // 2048 right here. That was wrong in two ways once §6's
+                    // full profile set is supported: Ed25519 is also non-EC and
+                    // would have fallen into the RSA arm, and .41 fixes RSA at
+                    // 3072, which the hard-coded literal silently overrode.
+                    let classical_result = match profile.classical {
+                        super::composite_sig::CompositeClassical::Ecdsa { field_width: 32 } => softhsmrustv3::native::generate_ecdsa_keypair(
                             session,
                             softhsmrustv3::native::EccCurve::P256,
                             &classical_cka_id,
                             label,
                         ),
-                        Some(48) => softhsmrustv3::native::generate_ecdsa_keypair(
+                        super::composite_sig::CompositeClassical::Ecdsa { field_width: 48 } => softhsmrustv3::native::generate_ecdsa_keypair(
                             session,
                             softhsmrustv3::native::EccCurve::P384,
                             &classical_cka_id,
                             label,
                         ),
-                        None => softhsmrustv3::native::generate_rsa_keypair(session, 2048, &classical_cka_id, label),
-                        Some(other) => {
+                        // §6 "RSA size" comes from the profile, never a default.
+                        super::composite_sig::CompositeClassical::RsaPss { modulus_bits } => softhsmrustv3::native::generate_rsa_keypair(
+                            session,
+                            modulus_bits,
+                            &classical_cka_id,
+                            label,
+                        ),
+                        super::composite_sig::CompositeClassical::Ed25519 => {
+                            softhsmrustv3::native::generate_ed25519_keypair(session, &classical_cka_id, label)
+                        }
+                        super::composite_sig::CompositeClassical::Ecdsa { field_width: other } => {
                             return fail(
                                 deps,
                                 correlation_id,
@@ -927,6 +943,10 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         CompositeMlDsa44Rsa2048PssSha256 => "ML-DSA-44-RSA2048-PSS",
         CompositeMlDsa65EcdsaP256Sha512 => "ML-DSA-65-ECDSA-P256",
         CompositeMlDsa87EcdsaP384Sha512 => "ML-DSA-87-ECDSA-P384",
+        CompositeMlDsa44Ed25519Sha512 => "ML-DSA-44-Ed25519",
+        CompositeMlDsa44EcdsaP256Sha256 => "ML-DSA-44-ECDSA-P256",
+        CompositeMlDsa65Rsa3072PssSha512 => "ML-DSA-65-RSA3072-PSS",
+        CompositeMlDsa65Ed25519Sha512 => "ML-DSA-65-Ed25519",
     }
     .into()
 }
@@ -990,6 +1010,10 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         "ML-DSA-44-RSA2048-PSS" => CompositeMlDsa44Rsa2048PssSha256,
         "ML-DSA-65-ECDSA-P256" => CompositeMlDsa65EcdsaP256Sha512,
         "ML-DSA-87-ECDSA-P384" => CompositeMlDsa87EcdsaP384Sha512,
+        "ML-DSA-44-Ed25519" => CompositeMlDsa44Ed25519Sha512,
+        "ML-DSA-44-ECDSA-P256" => CompositeMlDsa44EcdsaP256Sha256,
+        "ML-DSA-65-RSA3072-PSS" => CompositeMlDsa65Rsa3072PssSha512,
+        "ML-DSA-65-Ed25519" => CompositeMlDsa65Ed25519Sha512,
         // Size-suffixed classical algos collapse to their base enum.
         _ => match base {
             "AES" => Aes,
@@ -1363,6 +1387,10 @@ rules: []
             KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256,
             KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512,
             KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512,
+            KmipAlgorithm::CompositeMlDsa44Ed25519Sha512,
+            KmipAlgorithm::CompositeMlDsa44EcdsaP256Sha256,
+            KmipAlgorithm::CompositeMlDsa65Rsa3072PssSha512,
+            KmipAlgorithm::CompositeMlDsa65Ed25519Sha512,
         ] {
             let name = canonical_name(a);
             assert_eq!(parse_algorithm(&name).unwrap(), a, "{name}");

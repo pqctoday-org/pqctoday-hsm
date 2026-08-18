@@ -297,15 +297,20 @@ pub fn is_known_algorithm_name(name: &str) -> bool {
 /// and the legacy uppercase (`ED25519`) both validate — the engine likewise
 /// matches composites case-insensitively.
 ///
-/// `RSA2048-PSS` added alongside the three real
-/// `KmipAlgorithm::CompositeMlDsa*` variants (draft-ietf-lamps-pq-
-/// composite-sigs-19 §6) — `KmipAlgorithm::canonical_name`'s output for
-/// those three is exactly `ML-DSA-{44,65,87}-{RSA2048-PSS,ECDSA-P256,
-/// ECDSA-P384}` (no hash-function suffix — the LAMPS profile's hash choice
-/// is baked into the OID/engine mechanism, not distinguished at the
-/// policy-name layer), so this tail set must stay a superset of what those
-/// three variants actually produce or a real composite policy target would
-/// fail its own linter.
+/// The tail set must stay a superset of what the real
+/// `KmipAlgorithm::CompositeMlDsa*` variants produce via `spec_name()`
+/// (draft-ietf-lamps-pq-composite-sigs-19 §6), or a legitimate composite
+/// policy target would fail its own linter and the rule would be rejected.
+/// Names carry no hash-function suffix — the LAMPS profile's hash choice is
+/// baked into the OID and engine mechanism, not distinguished at the
+/// policy-name layer.
+///
+/// `RSA3072-PSS` added 2026-08-18 with the .41 profile. It was missed at first:
+/// the test guarding this set listed its three variants by hand, so it stayed
+/// green while three of the seven real variants went unchecked. The test now
+/// discovers variants by sweeping the vendor codepoint range, which is what
+/// caught the omission — see
+/// `known_algorithm_names_accepts_every_real_composite_sig_variant`.
 fn is_ml_dsa_suffix(s: &str) -> bool {
     match s {
         "44" | "65" | "87" => true,
@@ -318,7 +323,7 @@ fn is_ml_dsa_suffix(s: &str) -> bool {
                 && matches!(
                     tail.as_str(),
                     "ED25519" | "ED448" | "ECDSA-P256" | "ECDSA-P384" | "ECDSA-P521"
-                        | "RSA2048-PSS"
+                        | "RSA2048-PSS" | "RSA3072-PSS" | "RSA4096-PSS"
                 )
         }
     }
@@ -356,19 +361,33 @@ mod tests {
         }
     }
 
-    /// The linter's accepted composite tail set must stay a superset of
-    /// what the three real `KmipAlgorithm::CompositeMlDsa*` variants
-    /// actually produce — sourced from `spec_name()` directly (not
-    /// hand-typed) so this can't silently drift from the enum the way a
-    /// copy-pasted literal could.
+    /// The linter's accepted composite tail set must stay a superset of what
+    /// the real `KmipAlgorithm::CompositeMlDsa*` variants actually produce.
+    ///
+    /// The names come from `spec_name()` rather than being hand-typed, and as
+    /// of 2026-08-18 so does the VARIANT LIST: it is discovered by sweeping
+    /// the vendor codepoint range and keeping whatever `is_composite_sig()`
+    /// admits. The previous version sourced only the names that way while
+    /// listing three variants literally, which is the same drift it set out to
+    /// prevent — adding profiles .39/.40/.41/.48 left that list silently three
+    /// short, and the test still passed.
     #[test]
     fn known_algorithm_names_accepts_every_real_composite_sig_variant() {
         use crate::kmip30::KmipAlgorithm;
-        for a in [
-            KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256,
-            KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512,
-            KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512,
-        ] {
+        let composites: Vec<KmipAlgorithm> = (0x8000_0000u32..=0x8000_00ff)
+            .filter_map(KmipAlgorithm::from_wire_value)
+            .filter(|a| a.is_composite_sig())
+            .collect();
+
+        // Guard against the sweep silently finding nothing (e.g. if the
+        // codepoint range moved), which would make the loop below vacuous.
+        assert!(
+            composites.len() >= 7,
+            "expected at least the 7 implemented composite profiles, found {}",
+            composites.len()
+        );
+
+        for a in composites {
             let name = a.spec_name();
             assert!(is_known_algorithm_name(name), "should accept {name}");
         }

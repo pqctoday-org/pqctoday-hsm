@@ -233,6 +233,15 @@ const CONSUMED: &[&str] = &[
     "ml-kem/ml-kem-acvp.json",
     "ml-dsa/ml-dsa-acvp.json",
     "slh-dsa/slh-dsa-acvp.json",
+    // Driven by `ops::validate::tests::external_composite_vectors_verify`
+    // rather than a test in this file — it needs the composite verification
+    // path, which lives in the lib crate. Registered here because this file is
+    // the single orphan registry for everything under `kat/`.
+    //
+    // Missed when the fixture landed on 2026-08-17: that session ran
+    // `cargo test --lib`, which never builds this integration test, so the
+    // orphan check did not run and the file sat unregistered.
+    "composite-sigs/external-composite-vectors.json",
 ];
 
 /// Vector files NOT driven by a test, each with the specific engine-capability

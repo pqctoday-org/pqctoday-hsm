@@ -47,6 +47,64 @@ use crate::kmip30::KmipAlgorithm;
 /// there against the draft's own worked examples).
 const PREFIX: &[u8] = b"CompositeAlgorithmSignatures2025";
 
+/// RFC 8410 fixes the Ed25519 public key at 32 raw bytes, RFC 8032 fixes the
+/// signature at 64. Unlike ECDSA and RSA both are exact, so a wrong length is
+/// a conformance failure the verifier can state outright (draft §3.3 step 2).
+const ED25519_PUBKEY_BYTES: usize = 32;
+const ED25519_SIG_BYTES: usize = 64;
+
+/// Modulus bit length of a DER `RSAPublicKey` (RFC 8017 §A.1.1), for the
+/// draft §6 "RSA size" check.
+///
+/// Parsed here rather than via the engine because this is pure encoding, not
+/// crypto (invariant 0a): read `SEQUENCE { modulus INTEGER, .. }` and measure
+/// the first INTEGER's magnitude. ASN.1 INTEGER is signed, so an RSA modulus —
+/// whose top bit is always set — always carries a leading 0x00 pad; counting
+/// that byte would report 2048 bits as 2056 and fail every conformant key.
+fn rsa_public_key_modulus_bits(rsa_public_key_der: &[u8]) -> Result<u32> {
+    let bad = |why: &str| {
+        KmipError::failed(
+            ResultReason::CryptographicFailure,
+            format!("composite RSA classical key is not a parseable DER RSAPublicKey: {why}"),
+        )
+    };
+    // Minimal TLV reader: enough for SEQUENCE { INTEGER, INTEGER } and no more.
+    fn read_tlv(b: &[u8], off: usize) -> Option<(u8, &[u8], usize)> {
+        let tag = *b.get(off)?;
+        let first = *b.get(off + 1)?;
+        let (len, mut p) = if first & 0x80 == 0 {
+            (first as usize, off + 2)
+        } else {
+            let n = (first & 0x7f) as usize;
+            if n == 0 || n > 4 {
+                return None;
+            }
+            let mut len = 0usize;
+            for i in 0..n {
+                len = len.checked_mul(256)?.checked_add(*b.get(off + 2 + i)? as usize)?;
+            }
+            (len, off + 2 + n)
+        };
+        let value = b.get(p..p.checked_add(len)?)?;
+        p += len;
+        Some((tag, value, p))
+    }
+
+    let (tag, seq, _) = read_tlv(rsa_public_key_der, 0).ok_or_else(|| bad("truncated outer TLV"))?;
+    if tag != 0x30 {
+        return Err(bad("outer element is not a SEQUENCE"));
+    }
+    let (mtag, modulus, _) = read_tlv(seq, 0).ok_or_else(|| bad("truncated modulus"))?;
+    if mtag != 0x02 {
+        return Err(bad("modulus is not an INTEGER"));
+    }
+    let magnitude = modulus.iter().position(|&b| b != 0).map_or(&modulus[0..0], |i| &modulus[i..]);
+    if magnitude.is_empty() {
+        return Err(bad("modulus is zero"));
+    }
+    Ok(((magnitude.len() - 1) * 8 + (8 - magnitude[0].leading_zeros() as usize)) as u32)
+}
+
 /// One LAMPS draft-19 §6 composite-sig profile. Every field is ported
 /// verbatim from `certBuilder.ts`'s `CompositeProfileDraft19` — see that
 /// file's own doc comment for the field-by-field spec citations.
@@ -83,39 +141,96 @@ pub struct CompositeSigProfile {
     pub mldsa_pubkey_bytes: usize,
     /// Classical component: engine keygen mechanism.
     pub classical_keygen_mech: u32,
-    /// Classical component: engine sign/verify mechanism. Per draft-19
-    /// §3.2, the classical algorithm signs M' using its OWN standard
-    /// hash-then-sign convention (e.g. ECDSA-with-SHA512) — M' is the
-    /// "message" from the classical algorithm's point of view, not a
-    /// pre-hashed digest to sign raw. This mechanism is therefore the
-    /// ordinary hash-composite one (`CKM_ECDSA_SHA512`,
-    /// `CKM_SHA256_RSA_PKCS_PSS`), not a raw/no-hash variant.
+    /// Classical component: engine sign/verify mechanism. Per draft §3.2,
+    /// the classical algorithm signs M' using its OWN standard
+    /// hash-then-sign convention — M' is the "message" from the classical
+    /// algorithm's point of view, not a pre-hashed digest to sign raw.
+    /// This mechanism is therefore the ordinary hash-composite one
+    /// (`CKM_ECDSA_SHA256`, `CKM_ECDSA_SHA384`, `CKM_SHA256_RSA_PKCS_PSS`),
+    /// not a raw/no-hash variant.
+    ///
+    /// The hash here comes from §6's "Traditional Signature Algorithm" for
+    /// the profile and pairs with the CURVE (P-256 → SHA-256, P-384 →
+    /// SHA-384). It is NOT the `SHA512` in the profile name — that is the
+    /// pre-hash PH applied when building M'. This doc previously gave
+    /// "ECDSA-with-SHA512" as the example, matching a bug corrected
+    /// 2026-08-17.
     pub classical_sign_mech: u32,
     /// Classical component's X.509 AlgorithmIdentifier OID (used only to
     /// resolve the EC curve for keygen — the outer cert never carries
     /// this OID directly, since the composite `oid` above covers both
     /// SPKI and signature).
     pub classical_oid: &'static str,
-    /// EC field width in bytes for DER↔raw ECDSA signature conversion
-    /// (`Some(32)` P-256, `Some(48)` P-384), or `None` for an RSA
-    /// classical half. **Deliberately explicit, not inferred from
-    /// `classical_sign_mech`'s hash algorithm**: draft-19's profiles
-    /// decouple curve from hash in a way `spki_verify.rs`'s single-
-    /// algorithm OID table assumes never happens (that table hardcodes
-    /// SHA-256↔P-256/SHA-384↔P-384/SHA-512↔P-521 — the "natural" RFC 5758
-    /// pairing). Both composite profiles here use SHA-512 regardless of
-    /// curve (P-256 AND P-384), so `spki_verify.rs`'s table cannot be
-    /// reused for a composite's classical half without silently picking
-    /// the wrong field width — this field exists so nothing has to guess.
-    pub classical_ec_field_width: Option<usize>,
+    /// The classical half's family and its draft §6 parameters.
+    ///
+    /// REPLACED `classical_ec_field_width: Option<usize>` on 2026-08-18.
+    /// That field doubled as the family discriminator, with `None` meaning
+    /// "RSA" — which worked only while RSA was the sole non-EC family. Draft
+    /// §6 also defines Ed25519 profiles (.39, .48), which are equally
+    /// non-EC, so `None` would have silently routed an Ed25519 profile into
+    /// `create_key_pair.rs`'s RSA keygen arm. It also had nowhere to record
+    /// an RSA modulus size, which §6 fixes per profile (2048 for .37, 3072
+    /// for .41) and which the old code hard-coded to 2048 at the call site.
+    ///
+    /// The previous doc was right that nothing should infer the family from
+    /// `classical_sign_mech` — a hash change silently breaks that. This goes
+    /// further: the family is now stated outright rather than inferred from
+    /// any field at all, and `match` exhaustiveness makes the compiler
+    /// reject a new family that a consumer has not handled.
+    pub classical: CompositeClassical,
+}
+
+/// Traditional (non-PQ) half of a composite profile, exactly as draft-19 §6
+/// specifies it. Mirrors `certBuilder.ts`'s `CompositeClassicalSpec`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CompositeClassical {
+    /// §6 "Traditional Algorithm: ECDSA".
+    Ecdsa {
+        /// Field width in bytes — 32 for P-256, 48 for P-384. Used for the
+        /// raw↔DER `Ecdsa-Sig-Value` conversion: PKCS#11 `C_Sign` returns
+        /// fixed-width `r||s`, while §4.1 requires DER (RFC 3279 §2.2.3).
+        field_width: usize,
+    },
+    /// §6 "Traditional Signature Algorithm: id-RSASSA-PSS".
+    RsaPss {
+        /// §6 "RSA size" — normative and per-profile. §3.3 step 2 makes a
+        /// component key "not of the correct type or length" an invalid
+        /// signature, so this is a conformance requirement, not a default.
+        modulus_bits: u32,
+    },
+    /// §6 "Traditional Signature Algorithm: id-Ed25519".
+    ///
+    /// PureEdDSA (RFC 8032 §5.1): signs M' whole and hashes internally with
+    /// SHA-512, so there is no separate traditional hash to record. Both the
+    /// key (32 B) and the signature (64 B) are raw fixed-length byte strings
+    /// per RFC 8410 — notably NOT DER — so Ed25519 must stay out of the
+    /// raw→DER conversion that ECDSA needs.
+    Ed25519,
+}
+
+impl CompositeClassical {
+    /// EC field width, or `None` for the non-EC families. Keeps call sites
+    /// that genuinely want the width (raw↔DER conversion) unchanged, while
+    /// leaving the family decision to an explicit `match`.
+    pub fn ec_field_width(self) -> Option<usize> {
+        match self {
+            CompositeClassical::Ecdsa { field_width } => Some(field_width),
+            _ => None,
+        }
+    }
 }
 
 const OID_MLDSA44_RSA2048_PSS_SHA256: &str = "1.3.6.1.5.5.7.6.37";
 const OID_MLDSA65_ECDSA_P256_SHA512: &str = "1.3.6.1.5.5.7.6.45";
 const OID_MLDSA87_ECDSA_P384_SHA512: &str = "1.3.6.1.5.5.7.6.49";
+const OID_MLDSA44_ED25519_SHA512: &str = "1.3.6.1.5.5.7.6.39";
+const OID_MLDSA44_ECDSA_P256_SHA256: &str = "1.3.6.1.5.5.7.6.40";
+const OID_MLDSA65_RSA3072_PSS_SHA512: &str = "1.3.6.1.5.5.7.6.41";
+const OID_MLDSA65_ED25519_SHA512: &str = "1.3.6.1.5.5.7.6.48";
 const OID_RSA_ENCRYPTION: &str = "1.2.840.113549.1.1.1";
 const OID_EC_P256: &str = "1.2.840.10045.3.1.7";
 const OID_EC_P384: &str = "1.3.132.0.34";
+const OID_ED25519: &str = "1.3.101.112";
 
 pub const MLDSA44_RSA2048_PSS_SHA256: CompositeSigProfile = CompositeSigProfile {
     oid: OID_MLDSA44_RSA2048_PSS_SHA256,
@@ -128,7 +243,8 @@ pub const MLDSA44_RSA2048_PSS_SHA256: CompositeSigProfile = CompositeSigProfile 
     classical_keygen_mech: softhsmrustv3::constants::CKM_RSA_PKCS_KEY_PAIR_GEN,
     classical_sign_mech: softhsmrustv3::constants::CKM_SHA256_RSA_PKCS_PSS,
     classical_oid: OID_RSA_ENCRYPTION,
-    classical_ec_field_width: None,
+    // §6 "RSA size: 2048" for this profile.
+    classical: CompositeClassical::RsaPss { modulus_bits: 2048 },
 };
 
 pub const MLDSA65_ECDSA_P256_SHA512: CompositeSigProfile = CompositeSigProfile {
@@ -140,9 +256,19 @@ pub const MLDSA65_ECDSA_P256_SHA512: CompositeSigProfile = CompositeSigProfile {
     mldsa_sig_bytes: 3309,
     mldsa_pubkey_bytes: 1952,
     classical_keygen_mech: softhsmrustv3::constants::CKM_EC_KEY_PAIR_GEN,
-    classical_sign_mech: softhsmrustv3::constants::CKM_ECDSA_SHA512,
+    // draft-ietf-lamps-pq-composite-sigs §6 gives this profile
+    // "Traditional Signature Algorithm: ecdsa-with-SHA256". The SHA512 in the
+    // profile NAME is the pre-hash PH above, applied to the message when
+    // building M' — it is NOT the traditional algorithm's hash, which tracks
+    // the CURVE (P-256 -> SHA-256, P-384 -> SHA-384).
+    // Corrected 2026-08-17: was CKM_ECDSA_SHA512, which produced signatures
+    // that verified only against implementations sharing the same misreading.
+    // Confirmed against the Bouncy Castle IETF Hackathon r5 trust anchor
+    // (MLDSA65-ECDSA-P256-SHA512-1.3.6.1.5.5.7.6.45_ta.der), which verifies
+    // under SHA-256 and fails under SHA-512.
+    classical_sign_mech: softhsmrustv3::constants::CKM_ECDSA_SHA256,
     classical_oid: OID_EC_P256,
-    classical_ec_field_width: Some(32),
+    classical: CompositeClassical::Ecdsa { field_width: 32 },
 };
 
 pub const MLDSA87_ECDSA_P384_SHA512: CompositeSigProfile = CompositeSigProfile {
@@ -154,17 +280,128 @@ pub const MLDSA87_ECDSA_P384_SHA512: CompositeSigProfile = CompositeSigProfile {
     mldsa_sig_bytes: 4627,
     mldsa_pubkey_bytes: 2592,
     classical_keygen_mech: softhsmrustv3::constants::CKM_EC_KEY_PAIR_GEN,
-    classical_sign_mech: softhsmrustv3::constants::CKM_ECDSA_SHA512,
+    // §6: "Traditional Signature Algorithm: ecdsa-with-SHA384" — the ECDSA
+    // hash tracks the P-384 curve, not the SHA512 pre-hash in the name.
+    // Corrected 2026-08-17 alongside the P-256 profile above.
+    classical_sign_mech: softhsmrustv3::constants::CKM_ECDSA_SHA384,
     classical_oid: OID_EC_P384,
-    classical_ec_field_width: Some(48),
+    classical: CompositeClassical::Ecdsa { field_width: 48 },
 };
+
+/// id-MLDSA44-Ed25519-SHA512 — draft §6, and one of the two profiles §10.4
+/// recommends "when performance or bandwidth is a concern".
+///
+/// The pre-hash is SHA-512 rather than the SHA-256 the other ML-DSA-44
+/// profiles use. That is deliberate per §6's note: for Ed25519 and Ed448 the
+/// pre-hash matches the hash inside RFC 8032 itself, not the ML-DSA parameter
+/// set.
+pub const MLDSA44_ED25519_SHA512: CompositeSigProfile = CompositeSigProfile {
+    oid: OID_MLDSA44_ED25519_SHA512,
+    label: "id-MLDSA44-Ed25519-SHA512",
+    signature_label: "COMPSIG-MLDSA44-Ed25519-SHA512",
+    pre_hash_mech: softhsmrustv3::constants::CKM_SHA512,
+    mldsa_param_set: softhsmrustv3::constants::CKP_ML_DSA_44,
+    mldsa_sig_bytes: 2420,
+    mldsa_pubkey_bytes: 1312,
+    classical_keygen_mech: softhsmrustv3::constants::CKM_EC_EDWARDS_KEY_PAIR_GEN,
+    // CKM_EDDSA, never CKM_EDDSA_PH: §6 specifies id-Ed25519, i.e. PureEdDSA
+    // over M' itself. Pre-hashing M' would implement Ed25519ph, a different
+    // algorithm that no §6 profile uses.
+    classical_sign_mech: softhsmrustv3::constants::CKM_EDDSA,
+    classical_oid: OID_ED25519,
+    classical: CompositeClassical::Ed25519,
+};
+
+/// id-MLDSA44-ECDSA-P256-SHA256 — draft §6, §10.4 recommended.
+///
+/// The only profile where the pre-hash and the traditional hash are the SAME
+/// (both SHA-256), which makes it the control case for the 2026-08-17
+/// traditional-hash bug: an implementation that wrongly uses PH as the
+/// traditional hash still produces a VALID certificate here and diverges only
+/// on the profiles where the two differ.
+pub const MLDSA44_ECDSA_P256_SHA256: CompositeSigProfile = CompositeSigProfile {
+    oid: OID_MLDSA44_ECDSA_P256_SHA256,
+    label: "id-MLDSA44-ECDSA-P256-SHA256",
+    signature_label: "COMPSIG-MLDSA44-ECDSA-P256-SHA256",
+    pre_hash_mech: softhsmrustv3::constants::CKM_SHA256,
+    mldsa_param_set: softhsmrustv3::constants::CKP_ML_DSA_44,
+    mldsa_sig_bytes: 2420,
+    mldsa_pubkey_bytes: 1312,
+    classical_keygen_mech: softhsmrustv3::constants::CKM_EC_KEY_PAIR_GEN,
+    classical_sign_mech: softhsmrustv3::constants::CKM_ECDSA_SHA256,
+    classical_oid: OID_EC_P256,
+    classical: CompositeClassical::Ecdsa { field_width: 32 },
+};
+
+/// id-MLDSA65-RSA3072-PSS-SHA512 — draft §6, the profile §10.4 recommends
+/// "when RSA is required" (note it points here, NOT at the RSA-2048 .37).
+///
+/// The RSA analogue of the traditional-hash trap: PH is SHA-512 while §6.1
+/// Table 2 fixes the RSASSA-PSS hash at SHA-256 for both the 2048- and
+/// 3072-bit levels. .37 cannot expose a mistake here — both of its hashes are
+/// SHA-256 — so this is the profile where reusing PH as the PSS hash finally
+/// shows up.
+pub const MLDSA65_RSA3072_PSS_SHA512: CompositeSigProfile = CompositeSigProfile {
+    oid: OID_MLDSA65_RSA3072_PSS_SHA512,
+    label: "id-MLDSA65-RSA3072-PSS-SHA512",
+    signature_label: "COMPSIG-MLDSA65-RSA3072-PSS-SHA512",
+    pre_hash_mech: softhsmrustv3::constants::CKM_SHA512,
+    mldsa_param_set: softhsmrustv3::constants::CKP_ML_DSA_65,
+    mldsa_sig_bytes: 3309,
+    mldsa_pubkey_bytes: 1952,
+    classical_keygen_mech: softhsmrustv3::constants::CKM_RSA_PKCS_KEY_PAIR_GEN,
+    // §6.1 Table 2: SHA-256 digest + MGF1-SHA-256 + 32-byte salt, at BOTH
+    // 2048 and 3072 bits. NOT SHA-512 — that is the pre-hash above.
+    classical_sign_mech: softhsmrustv3::constants::CKM_SHA256_RSA_PKCS_PSS,
+    classical_oid: OID_RSA_ENCRYPTION,
+    classical: CompositeClassical::RsaPss { modulus_bits: 3072 },
+};
+
+/// id-MLDSA65-Ed25519-SHA512 — draft §6, named by §10.4 for applications
+/// concerned with SUF-CMA.
+///
+/// Read §9.2.2 before relying on that: the draft's own analysis concludes
+/// Composite ML-DSA is NOT SUF-CMA secure against quantum adversaries and that
+/// "applications where SUF-CMA security is critical SHOULD NOT use Composite
+/// ML-DSA". Ed25519 removes ECDSA's trivial signature malleability, which is a
+/// real improvement but not the full property.
+pub const MLDSA65_ED25519_SHA512: CompositeSigProfile = CompositeSigProfile {
+    oid: OID_MLDSA65_ED25519_SHA512,
+    label: "id-MLDSA65-Ed25519-SHA512",
+    signature_label: "COMPSIG-MLDSA65-Ed25519-SHA512",
+    pre_hash_mech: softhsmrustv3::constants::CKM_SHA512,
+    mldsa_param_set: softhsmrustv3::constants::CKP_ML_DSA_65,
+    mldsa_sig_bytes: 3309,
+    mldsa_pubkey_bytes: 1952,
+    classical_keygen_mech: softhsmrustv3::constants::CKM_EC_EDWARDS_KEY_PAIR_GEN,
+    classical_sign_mech: softhsmrustv3::constants::CKM_EDDSA,
+    classical_oid: OID_ED25519,
+    classical: CompositeClassical::Ed25519,
+};
+
+/// Every composite profile the engine implements. Single source for both
+/// lookup directions below, so a new profile cannot be added to one and
+/// forgotten in the other.
+pub const ALL_PROFILES: [&CompositeSigProfile; 7] = [
+    &MLDSA44_RSA2048_PSS_SHA256,
+    &MLDSA44_ED25519_SHA512,
+    &MLDSA44_ECDSA_P256_SHA256,
+    &MLDSA65_RSA3072_PSS_SHA512,
+    &MLDSA65_ECDSA_P256_SHA512,
+    &MLDSA65_ED25519_SHA512,
+    &MLDSA87_ECDSA_P384_SHA512,
+];
 
 /// Resolve a `KmipAlgorithm` composite variant to its profile. `None` for
 /// every non-composite algorithm.
 pub fn profile_for(algo: KmipAlgorithm) -> Option<&'static CompositeSigProfile> {
     match algo {
         KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256 => Some(&MLDSA44_RSA2048_PSS_SHA256),
+        KmipAlgorithm::CompositeMlDsa44Ed25519Sha512 => Some(&MLDSA44_ED25519_SHA512),
+        KmipAlgorithm::CompositeMlDsa44EcdsaP256Sha256 => Some(&MLDSA44_ECDSA_P256_SHA256),
+        KmipAlgorithm::CompositeMlDsa65Rsa3072PssSha512 => Some(&MLDSA65_RSA3072_PSS_SHA512),
         KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512 => Some(&MLDSA65_ECDSA_P256_SHA512),
+        KmipAlgorithm::CompositeMlDsa65Ed25519Sha512 => Some(&MLDSA65_ED25519_SHA512),
         KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512 => Some(&MLDSA87_ECDSA_P384_SHA512),
         _ => None,
     }
@@ -174,7 +411,7 @@ pub fn profile_for(algo: KmipAlgorithm) -> Option<&'static CompositeSigProfile> 
 /// `validate.rs` needs: an inbound certificate names the OID, not the
 /// `KmipAlgorithm`).
 pub fn profile_for_oid(oid: &str) -> Option<&'static CompositeSigProfile> {
-    for p in [&MLDSA44_RSA2048_PSS_SHA256, &MLDSA65_ECDSA_P256_SHA512, &MLDSA87_ECDSA_P384_SHA512] {
+    for p in ALL_PROFILES {
         if p.oid == oid {
             return Some(p);
         }
@@ -367,32 +604,66 @@ pub fn verify_composite_signature(
     // (`spki.algorithm.parameters.decode_as::<ObjectIdentifier>()`) — a
     // real bug caught by this file's own test actually running against
     // the engine, not by inspection.
-    let (classical_handle, classical_native_sig) = if let Some(field_width) = profile.classical_ec_field_width {
-        let spki_der = match field_width {
-            32 => softhsmrustv3::crypto::handlers::build_ec_spki_p256(classical_pk),
-            48 => softhsmrustv3::crypto::handlers::build_ec_spki_p384(classical_pk),
-            other => {
-                return Err(KmipError::failed(
-                    ResultReason::CryptographicFailure,
-                    format!("{}: no composite profile uses a {other}-byte EC field width", profile.label),
-                ))
+    let (classical_handle, classical_native_sig) = match profile.classical {
+        CompositeClassical::Ecdsa { field_width } => {
+            let spki_der = match field_width {
+                32 => softhsmrustv3::crypto::handlers::build_ec_spki_p256(classical_pk),
+                48 => softhsmrustv3::crypto::handlers::build_ec_spki_p384(classical_pk),
+                other => {
+                    return Err(KmipError::failed(
+                        ResultReason::CryptographicFailure,
+                        format!("{}: no composite profile uses a {other}-byte EC field width", profile.label),
+                    ))
+                }
+            };
+            let h = softhsmrustv3::native::register_ecdsa_public_key(session, &spki_der, TRANSIENT_ID, TRANSIENT_LABEL)
+                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "verify_composite_signature:import-classical"))?;
+            (h, ecdsa_der_to_raw(classical_sig_der, field_width)?)
+        }
+        CompositeClassical::RsaPss { modulus_bits } => {
+            // draft §6 fixes "RSA size" per profile, and §3.3 step 2 makes a
+            // component key "not of the correct type or length for the given
+            // component algorithm" an INVALID signature. So a certificate
+            // claiming .41 while carrying a 2048-bit modulus must be rejected
+            // — checked here because it is the only conformance property of
+            // the RSA half that stays checkable regardless of the signature.
+            let actual_bits = rsa_public_key_modulus_bits(classical_pk)?;
+            if actual_bits != modulus_bits {
+                return Ok(SpkiVerdict::Invalid);
             }
-        };
-        let h = softhsmrustv3::native::register_ecdsa_public_key(session, &spki_der, TRANSIENT_ID, TRANSIENT_LABEL)
-            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "verify_composite_signature:import-classical"))?;
-        (h, ecdsa_der_to_raw(classical_sig_der, field_width)?)
-    } else {
-        // RSA: `register_rsa_public_key_der` accepts a bare PKCS#1
-        // `RSAPublicKey` DER too (`RsaPublicKey::from_pkcs1_der`
-        // fallback), so `classical_pk` — raw modulus||exponent-free
-        // bytes are NOT what draft-19 carries here; the composite SPKI's
-        // classical half for RSA is itself a full DER `RSAPublicKey`
-        // (`SEQUENCE { modulus, publicExponent }`, RFC 8017 §A.1.1) per
-        // `certBuilder.ts`'s own RSA composite handling — passed through
-        // unwrapped, no AlgorithmIdentifier reconstruction needed.
-        let h = softhsmrustv3::native::register_rsa_public_key_der(session, classical_pk, TRANSIENT_ID, TRANSIENT_LABEL)
-            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "verify_composite_signature:import-classical"))?;
-        (h, classical_sig_der.to_vec())
+            // `register_rsa_public_key_der` accepts a bare PKCS#1
+            // `RSAPublicKey` DER too (`RsaPublicKey::from_pkcs1_der`
+            // fallback), so `classical_pk` — raw modulus||exponent-free
+            // bytes are NOT what draft-19 carries here; the composite SPKI's
+            // classical half for RSA is itself a full DER `RSAPublicKey`
+            // (`SEQUENCE { modulus, publicExponent }`, RFC 8017 §A.1.1) per
+            // `certBuilder.ts`'s own RSA composite handling — passed through
+            // unwrapped, no AlgorithmIdentifier reconstruction needed.
+            let h = softhsmrustv3::native::register_rsa_public_key_der(session, classical_pk, TRANSIENT_ID, TRANSIENT_LABEL)
+                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "verify_composite_signature:import-classical"))?;
+            (h, classical_sig_der.to_vec())
+        }
+        CompositeClassical::Ed25519 => {
+            // RFC 8410: the composite carries the bare 32-byte public key and
+            // RFC 8032 fixes the signature at 64 bytes — both raw, neither
+            // DER, so there is no `ecdsa_der_to_raw` step and no length
+            // ambiguity. Reject wrong lengths outright (§3.3 step 2 again)
+            // rather than letting the engine fail opaquely.
+            if classical_pk.len() != ED25519_PUBKEY_BYTES {
+                return Ok(SpkiVerdict::Invalid);
+            }
+            if classical_sig_der.len() != ED25519_SIG_BYTES {
+                return Ok(SpkiVerdict::Invalid);
+            }
+            // Built via the engine's own helper for the same reason the EC
+            // arm does: `register_ed25519_public_key` parses a full SPKI and
+            // checks the algorithm OID, so a raw 32-byte key handed to it
+            // straight would be rejected as key-type-inconsistent.
+            let spki_der = softhsmrustv3::crypto::handlers::build_ed25519_spki(classical_pk);
+            let h = softhsmrustv3::native::register_ed25519_public_key(session, &spki_der, TRANSIENT_ID, TRANSIENT_LABEL)
+                .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "verify_composite_signature:import-classical"))?;
+            (h, classical_sig_der.to_vec())
+        }
     };
     let classical_ok = {
         let _guard = DestroyOnDrop { session, handle: classical_handle };

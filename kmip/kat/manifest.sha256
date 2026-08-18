@@ -132,3 +132,4 @@ d1bc19050269a99bfa84038ad466688428ebc98417ba35b48a06f3c05aefc9bd  ./frodokem/raw
 e29858b32dbd88f926e2a45d3d464812642e1df7cd45fcf9c3db4b4c683f45f0  ./frodokem/raw/PQCkemKAT_31296_shake.rsp
 1c866df7985ef3e3ca1402d046778d49c643ec584b8bf25b30baf7a34bcdde34  ./frodokem/raw/PQCkemKAT_43088.rsp
 05cdb3dad681f448da3b86eaa8404e6555593199b4311b6738fcfabf79f288dd  ./frodokem/raw/PQCkemKAT_43088_shake.rsp
+d0a9083795ef86d2c7505a0b240a2394999920e4f4ad639fe0c918368a2afe56  ./composite-sigs/external-composite-vectors.json
