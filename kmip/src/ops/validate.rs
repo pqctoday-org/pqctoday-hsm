@@ -453,6 +453,100 @@ mod tests {
         );
     }
 
+    /// EXTERNAL cross-implementation guard.
+    ///
+    /// Every other composite test in this crate signs with this engine and
+    /// verifies with this engine. That symmetry is exactly why the 2026-08-17
+    /// traditional-hash bug survived a fully green suite: the signer and the
+    /// verifier both read one profile table, so every round-trip agreed while
+    /// the output was non-interoperable with every conformant implementation.
+    ///
+    /// These vectors come from OTHER implementations — the composite-sigs
+    /// draft's own published test vectors, and a Bouncy Castle IETF Hackathon
+    /// trust anchor. They are the only tests here that can fail when our
+    /// assumptions are wrong but internally consistent. Do not regenerate them
+    /// locally; that re-creates the blind spot they exist to close.
+    #[test]
+    fn external_composite_vectors_verify() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/kat/composite-sigs/external-composite-vectors.json");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("KAT fixture present"))
+                .expect("KAT fixture parses");
+
+        let (deps, _g) = deps_with_session();
+        let session = deps.engine_session;
+
+        // ── raw signature vectors (no certificate encoding involved) ──
+        let raw = &doc["raw_signature_vectors"];
+        let msg = raw["message_utf8"].as_str().unwrap().as_bytes();
+        let mut checked = 0usize;
+        for v in raw["vectors"].as_array().unwrap() {
+            let tc = v["tcId"].as_str().unwrap();
+            let expect = v["expect"].as_str().unwrap();
+            let oid = v["oid"].as_str().unwrap();
+            // The fixture is shared with the hub, which implements more
+            // profiles than this engine. Skip what we do not implement rather
+            // than forcing a new KmipAlgorithm variant just to consume a vector.
+            let Some(profile) = super::super::composite_sig::profile_for_oid(oid) else {
+                eprintln!("[external-vector] skipped {tc}: engine has no profile for {oid}");
+                continue;
+            };
+            let pk = hex::decode(v["pk_hex"].as_str().unwrap()).unwrap();
+            let sig = hex::decode(v["sig_hex"].as_str().unwrap()).unwrap();
+
+            // Wrap the raw composite public key in an SPKI carrying the
+            // composite OID — the same shape a certificate would present.
+            let spki = spki::SubjectPublicKeyInfoOwned {
+                algorithm: spki::AlgorithmIdentifierOwned {
+                    oid: oid.parse().unwrap(),
+                    parameters: None,
+                },
+                subject_public_key: der::asn1::BitString::from_bytes(&pk).unwrap(),
+            };
+            let verdict = super::super::composite_sig::verify_composite_signature(
+                session, profile, &spki, msg, &sig,
+            );
+            match expect {
+                "verifies" => {
+                    assert_eq!(
+                        verdict.expect("verify ran"),
+                        super::super::spki_verify::SpkiVerdict::Valid,
+                        "{tc}: the specification's OWN vector must verify. If this fails, the \
+                         profile's classical hash is wrong — draft section 6 'Traditional \
+                         Signature Algorithm' pairs the hash with the CURVE; the SHAxxx in a \
+                         profile NAME is the pre-hash."
+                    );
+                    checked += 1;
+                }
+                other => panic!("{tc}: unknown expect '{other}'"),
+            }
+        }
+        // Only .45 is both implemented here AND a "verifies" vector today (.49 is
+        // the upstream-inconsistent one, .40/.46 are not implemented by this
+        // engine). The certificate vector below adds a second, independent path.
+        assert!(checked >= 1, "expected at least 1 asserted raw vector, got {checked}");
+
+        // ── certificate vector: full Validate path ──
+        for v in doc["certificate_vectors"]["vectors"].as_array().unwrap() {
+            let tc = v["tcId"].as_str().unwrap();
+            let der = hex::decode(v["cert_der_hex"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                validate_chain(session, &[der.clone()], OffsetDateTime::now_utc()),
+                SignatureValidity::Valid,
+                "{tc}: an independently produced composite certificate must validate"
+            );
+            // Negative control — the guard must be able to fail.
+            let mut bad = der;
+            let n = bad.len();
+            bad[n - 4] ^= 0xff;
+            assert_ne!(
+                validate_chain(session, &[bad], OffsetDateTime::now_utc()),
+                SignatureValidity::Valid,
+                "{tc}: a tampered certificate must never validate"
+            );
+        }
+    }
+
     #[test]
     fn expired_cert_is_invalid() {
         // Validate the self-signed cert at an instant far in the future,
