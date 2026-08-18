@@ -12,6 +12,69 @@ _Nothing yet._
 
 ---
 
+## [0.24.0] — 2026-08-18
+
+**All six §10.4-recommended composite signature profiles, and two conformance
+failures closed.**
+
+### Added
+
+- **Four composite-signature profiles**, bringing the KMIP engine to seven and
+  to parity with the hub: `id-MLDSA44-Ed25519-SHA512` (.39),
+  `id-MLDSA44-ECDSA-P256-SHA256` (.40), `id-MLDSA65-RSA3072-PSS-SHA512` (.41)
+  and `id-MLDSA65-Ed25519-SHA512` (.48), at vendor codepoints
+  `0x80000069`–`0x8000006c` (KMIP 3.0 §11.12). Together with the existing .45
+  and .49 this covers every profile
+  `draft-ietf-lamps-pq-composite-sigs` §10.4 recommends.
+- **Ed25519 as a composite classical half** — a genuinely new signing path;
+  previously only ECDSA and RSA were supported.
+- **RSA size enforcement.** §6 fixes "RSA size" per profile and §3.3 step 2
+  makes a component key "not of the correct type or length" an invalid
+  signature, so a certificate claiming .41 while carrying a 2048-bit modulus is
+  now rejected rather than accepted.
+
+### Changed
+
+- **`CompositeSigProfile` states its classical family explicitly.**
+  `classical_ec_field_width: Option<usize>` had doubled as the discriminator,
+  with `None` meaning RSA. That held only while RSA was the sole non-EC family:
+  Ed25519 is also non-EC, so .39/.48 would have been routed into the RSA keygen
+  path and generated an RSA key. The same arm hard-coded 2048 bits, which .41
+  fixes at 3072. Replaced by a `CompositeClassical` enum; `match` exhaustiveness
+  now makes the compiler reject a new family a consumer has not handled, which
+  is how the remaining wiring sites were found.
+
+### Fixed
+
+- **`Create Split Key` had been failing for every key** with
+  "mechanism not supported by the engine", while `Query` continued to advertise
+  the operation as supported. Enforcement of `CKA_ALLOWED_MECHANISMS` was added
+  to the split path on 2026-08-13, but the whitelist builder was never taught
+  about the split mechanism. Advertising an operation that can never succeed is
+  a conformance failure against both specs, not merely a bug.
+
+  PKCS#11 v3.2 defines `CKA_ALLOWED_MECHANISMS` as "a list of mechanisms allowed
+  to be used with this key", so the compliant fix is to make the list state what
+  the key may actually do — not to stop enforcing it, which would be fail-open.
+  KMIP 3.0 defines Create Split Key with no usage-mask precondition (there is no
+  split bit in Cryptographic Usage Mask), so splittability follows key type.
+
+  Note the gate only ever bit the keys it was meant to protect: the check
+  returns OK when the attribute is absent, and raw-PKCS#11-created keys have no
+  such attribute — so only KMIP-created keys were blocked, the inverse of the
+  bypass it was written to close.
+
+### Verification
+
+- All seven profiles were issued through this engine and verified by the hub's
+  **independent TypeScript implementation** — both halves, all seven valid.
+  Every composite defect found in this work surfaced because two
+  implementations disagreed, never because one tested itself.
+- 686 library tests plus the full integration suite pass; the hub's
+  `gate:cacp` is 175/175, up from 173/175.
+
+---
+
 ## [0.23.0] — 2026-08-14
 
 **PKCS#11 v3.2 conformance, adjudicated against the Standard rather than against
