@@ -83,13 +83,20 @@ pub struct CompositeSigProfile {
     pub mldsa_pubkey_bytes: usize,
     /// Classical component: engine keygen mechanism.
     pub classical_keygen_mech: u32,
-    /// Classical component: engine sign/verify mechanism. Per draft-19
-    /// §3.2, the classical algorithm signs M' using its OWN standard
-    /// hash-then-sign convention (e.g. ECDSA-with-SHA512) — M' is the
-    /// "message" from the classical algorithm's point of view, not a
-    /// pre-hashed digest to sign raw. This mechanism is therefore the
-    /// ordinary hash-composite one (`CKM_ECDSA_SHA512`,
-    /// `CKM_SHA256_RSA_PKCS_PSS`), not a raw/no-hash variant.
+    /// Classical component: engine sign/verify mechanism. Per draft §3.2,
+    /// the classical algorithm signs M' using its OWN standard
+    /// hash-then-sign convention — M' is the "message" from the classical
+    /// algorithm's point of view, not a pre-hashed digest to sign raw.
+    /// This mechanism is therefore the ordinary hash-composite one
+    /// (`CKM_ECDSA_SHA256`, `CKM_ECDSA_SHA384`, `CKM_SHA256_RSA_PKCS_PSS`),
+    /// not a raw/no-hash variant.
+    ///
+    /// The hash here comes from §6's "Traditional Signature Algorithm" for
+    /// the profile and pairs with the CURVE (P-256 → SHA-256, P-384 →
+    /// SHA-384). It is NOT the `SHA512` in the profile name — that is the
+    /// pre-hash PH applied when building M'. This doc previously gave
+    /// "ECDSA-with-SHA512" as the example, matching a bug corrected
+    /// 2026-08-17.
     pub classical_sign_mech: u32,
     /// Classical component's X.509 AlgorithmIdentifier OID (used only to
     /// resolve the EC curve for keygen — the outer cert never carries
@@ -98,15 +105,21 @@ pub struct CompositeSigProfile {
     pub classical_oid: &'static str,
     /// EC field width in bytes for DER↔raw ECDSA signature conversion
     /// (`Some(32)` P-256, `Some(48)` P-384), or `None` for an RSA
-    /// classical half. **Deliberately explicit, not inferred from
-    /// `classical_sign_mech`'s hash algorithm**: draft-19's profiles
-    /// decouple curve from hash in a way `spki_verify.rs`'s single-
-    /// algorithm OID table assumes never happens (that table hardcodes
-    /// SHA-256↔P-256/SHA-384↔P-384/SHA-512↔P-521 — the "natural" RFC 5758
-    /// pairing). Both composite profiles here use SHA-512 regardless of
-    /// curve (P-256 AND P-384), so `spki_verify.rs`'s table cannot be
-    /// reused for a composite's classical half without silently picking
-    /// the wrong field width — this field exists so nothing has to guess.
+    /// classical half.
+    ///
+    /// Doubles as the "is the classical half ECDSA?" discriminator — see
+    /// `certify.rs`'s raw→DER conversion. Do NOT reintroduce a test on
+    /// `classical_sign_mech`'s hash for that purpose: it silently breaks
+    /// whenever a profile's hash changes.
+    ///
+    /// CORRECTED 2026-08-17: this doc previously asserted "Both composite
+    /// profiles here use SHA-512 regardless of curve (P-256 AND P-384)".
+    /// That documented a bug as if it were intent. Draft §6 pairs the
+    /// traditional hash WITH the curve — ecdsa-with-SHA256 for P-256,
+    /// ecdsa-with-SHA384 for P-384 — i.e. the ordinary RFC 5758 pairing.
+    /// The `SHA512` in the profile names is the pre-hash PH, not the
+    /// traditional algorithm's hash. The field is still worth keeping
+    /// explicit so nothing has to infer width from a mechanism constant.
     pub classical_ec_field_width: Option<usize>,
 }
 
@@ -140,7 +153,17 @@ pub const MLDSA65_ECDSA_P256_SHA512: CompositeSigProfile = CompositeSigProfile {
     mldsa_sig_bytes: 3309,
     mldsa_pubkey_bytes: 1952,
     classical_keygen_mech: softhsmrustv3::constants::CKM_EC_KEY_PAIR_GEN,
-    classical_sign_mech: softhsmrustv3::constants::CKM_ECDSA_SHA512,
+    // draft-ietf-lamps-pq-composite-sigs §6 gives this profile
+    // "Traditional Signature Algorithm: ecdsa-with-SHA256". The SHA512 in the
+    // profile NAME is the pre-hash PH above, applied to the message when
+    // building M' — it is NOT the traditional algorithm's hash, which tracks
+    // the CURVE (P-256 -> SHA-256, P-384 -> SHA-384).
+    // Corrected 2026-08-17: was CKM_ECDSA_SHA512, which produced signatures
+    // that verified only against implementations sharing the same misreading.
+    // Confirmed against the Bouncy Castle IETF Hackathon r5 trust anchor
+    // (MLDSA65-ECDSA-P256-SHA512-1.3.6.1.5.5.7.6.45_ta.der), which verifies
+    // under SHA-256 and fails under SHA-512.
+    classical_sign_mech: softhsmrustv3::constants::CKM_ECDSA_SHA256,
     classical_oid: OID_EC_P256,
     classical_ec_field_width: Some(32),
 };
@@ -154,7 +177,10 @@ pub const MLDSA87_ECDSA_P384_SHA512: CompositeSigProfile = CompositeSigProfile {
     mldsa_sig_bytes: 4627,
     mldsa_pubkey_bytes: 2592,
     classical_keygen_mech: softhsmrustv3::constants::CKM_EC_KEY_PAIR_GEN,
-    classical_sign_mech: softhsmrustv3::constants::CKM_ECDSA_SHA512,
+    // §6: "Traditional Signature Algorithm: ecdsa-with-SHA384" — the ECDSA
+    // hash tracks the P-384 curve, not the SHA512 pre-hash in the name.
+    // Corrected 2026-08-17 alongside the P-256 profile above.
+    classical_sign_mech: softhsmrustv3::constants::CKM_ECDSA_SHA384,
     classical_oid: OID_EC_P384,
     classical_ec_field_width: Some(48),
 };

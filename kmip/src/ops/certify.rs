@@ -853,7 +853,16 @@ fn sign_tbs_with_plan(
             // ECDSA; RSA-PSS signatures have no raw-vs-DER distinction —
             // same conversion rule `issue_certificate`'s single-algorithm
             // path already applies, reused here rather than reinvented.
-            let classical_final = if profile.classical_sign_mech == softhsmrustv3::constants::CKM_ECDSA_SHA512 {
+            // Discriminate on "is the classical half ECDSA", NOT on which hash
+            // it uses. This previously tested `classical_sign_mech ==
+            // CKM_ECDSA_SHA512`, which worked only while both EC profiles were
+            // (incorrectly) pinned to SHA-512; once they were corrected to
+            // ecdsa-with-SHA256 / -SHA384 per draft §6 that condition became
+            // unreachable and would have silently emitted RAW ECDSA signatures
+            // instead of RFC 3279 §2.2.3 DER. `classical_ec_field_width` is
+            // Some(..) exactly for the EC profiles and None for RSA, which is
+            // the property actually being asked about here.
+            let classical_final = if profile.classical_ec_field_width.is_some() {
                 ecdsa_raw_to_der(&classical_raw)?
             } else {
                 classical_raw
