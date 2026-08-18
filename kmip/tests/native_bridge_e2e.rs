@@ -2133,9 +2133,15 @@ fn narrowing_usage_mask_via_set_attribute_shrinks_engine_whitelist() {
     // CKR_ATTRIBUTE_VALUE_INVALID (the `.expect` above is where it surfaced)
     // and the key carried no restriction at all. Both sides now derive the
     // stride from `state::MECHANISM_TYPE_SIZE` via the one packer.
+    // CKM_PQCTODAY_SPLIT_KEY joins the list as of 2026-08-18. It is present on
+    // every AES key regardless of usage mask, because KMIP 3.0 defines Create
+    // Split Key with NO usage-mask precondition (there is no split bit in
+    // Cryptographic Usage Mask) — splittability follows key TYPE. Omitting it
+    // had made Create Split Key fail for every KMIP-created key while Query
+    // still advertised the operation.
     let full = pqctoday_kmip::kmip30::algos::pack_allowed_mechanisms(&[
         c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM,
-        c::CKM_AES_KEY_WRAP, c::CKM_AES_KEY_WRAP_KWP,
+        c::CKM_AES_KEY_WRAP, c::CKM_AES_KEY_WRAP_KWP, c::CKM_PQCTODAY_SPLIT_KEY,
     ]);
     assert_eq!(before, full, "whitelist must start with cipher + wrap mechanisms");
 
@@ -2156,8 +2162,13 @@ fn narrowing_usage_mask_via_set_attribute_shrinks_engine_whitelist() {
 
     let after = softhsmrustv3::native::get_attribute(session, handle, c::CKA_ALLOWED_MECHANISMS)
         .expect("CKA_ALLOWED_MECHANISMS still present after narrowing");
+    // Split survives the narrowing for the same reason it was there to begin
+    // with: it is not governed by any usage-mask bit, so removing WRAP_KEY /
+    // UNWRAP_KEY cannot remove it. The wrap mechanisms DO disappear, which is
+    // what this test is actually about — asserted again below by enforcement.
     let cipher_only = pqctoday_kmip::kmip30::algos::pack_allowed_mechanisms(&[
         c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM,
+        c::CKM_PQCTODAY_SPLIT_KEY,
     ]);
     assert_eq!(after, cipher_only, "whitelist must shrink once WRAP_KEY/UNWRAP_KEY are removed");
 

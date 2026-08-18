@@ -855,7 +855,15 @@ impl KmipAlgorithm {
         // no `C_*` entry point, so a raw PKCS#11 caller cannot invoke it at
         // all. KMIP's own layer remains the only door, and it still applies
         // its policy and lifecycle checks before calling the engine.
-        if matches!(self, KmipAlgorithm::Aes | KmipAlgorithm::HmacSha256 | KmipAlgorithm::HmacSha384 | KmipAlgorithm::HmacSha512 | KmipAlgorithm::ChaCha20 | KmipAlgorithm::ChaCha20Poly1305) {
+        // AES only, deliberately narrow. An earlier version of this also listed
+        // the HMAC and ChaCha20 algorithms, which broke
+        // `kmip_created_key_refuses_a_mechanism_outside_its_allowed_list`: an
+        // HMAC derivation key is created with a deliberately minimal
+        // single-mechanism whitelist, and appending split to it widened a
+        // restriction the caller had asked for. Splitting is a key-custody
+        // operation on a symmetric SECRET; scope it to the key type that
+        // actually gets split rather than to everything symmetric.
+        if matches!(self, KmipAlgorithm::Aes) {
             push(Some(softhsmrustv3::constants::CKM_PQCTODAY_SPLIT_KEY));
         }
 
