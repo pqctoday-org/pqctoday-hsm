@@ -177,6 +177,23 @@ print(f"[kmip-wasm]   manifest.json: {len(tests)} corpus tests "
       f"({', '.join(f'{k}={v}' for k, v in sorted(tiers.items()))}) @ {hsm_commit[:9]}")
 PY
 
+# This script writes plain `cp`/`json.dump` output, not the hub's own
+# formatter, so every rebuild reintroduced formatting the hub's own
+# `format:check` gate then rejected on the next push — hit twice in one
+# release (2026-08-18) as a manual follow-up commit each time. Run the
+# hub's prettier on exactly the files this step just touched, from inside
+# the hub checkout so it picks up the hub's own config. Best-effort: a
+# missing `node_modules` (e.g. a fresh hub clone before its own `npm
+# install`) must not fail the wasm build over a formatting nicety.
+if [ -x "$HUB/node_modules/.bin/prettier" ]; then
+  ( cd "$HUB" && node_modules/.bin/prettier --write \
+      public/kmip-corpus/manifest.json \
+      public/kmip-corpus/section61-headings.json ) \
+    || echo "[kmip-wasm]   warning: prettier formatting step failed — run 'npm run format' in the hub before pushing" >&2
+else
+  echo "[kmip-wasm]   note: hub node_modules not found, skipped auto-formatting staged corpus JSON" >&2
+fi
+
 echo ""
 echo "[kmip-wasm] done."
 echo "  hub shim:   $HUB_SHIM_DIR/pqctoday_kmip_wasm.js"
