@@ -834,6 +834,31 @@ impl KmipAlgorithm {
             push(Some(CKM_EC_MONTGOMERY_KEY_DERIVE));
         }
 
+        // KMIP 3.0 §6.34 CreateSplitKey, via the vendor mechanism
+        // `CKM_PQCTODAY_SPLIT_KEY`. Splitting is not expressed by any
+        // CryptographicUsageMask bit — §11.24 has no "split" flag — so this is
+        // gated on key TYPE, not on the mask: a secret is splittable, an
+        // asymmetric key is not.
+        //
+        // FIXES a regression from S12 (2026-08-13), which started enforcing
+        // CKA_ALLOWED_MECHANISMS inside `native::split_key::split`. This
+        // builder was never taught about the split mechanism, so every
+        // KMIP-created key carried a whitelist that omitted it and
+        // CreateSplitKey failed with CKR_MECHANISM_INVALID → "mechanism not
+        // supported by the engine" for ALL keys — the operation was simply
+        // dead. It went unnoticed because the tests that cover it
+        // (opTemplates.local, learnLessons.local) are `.local.test.ts`, which
+        // need a real wasm engine and are not part of CI.
+        //
+        // Listing it is not a widening of the raw-PKCS#11 bypass this
+        // whitelist exists to close: the mechanism is vendor-defined and has
+        // no `C_*` entry point, so a raw PKCS#11 caller cannot invoke it at
+        // all. KMIP's own layer remains the only door, and it still applies
+        // its policy and lifecycle checks before calling the engine.
+        if matches!(self, KmipAlgorithm::Aes | KmipAlgorithm::HmacSha256 | KmipAlgorithm::HmacSha384 | KmipAlgorithm::HmacSha512 | KmipAlgorithm::ChaCha20 | KmipAlgorithm::ChaCha20Poly1305) {
+            push(Some(softhsmrustv3::constants::CKM_PQCTODAY_SPLIT_KEY));
+        }
+
         mechs
     }
 

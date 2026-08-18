@@ -530,17 +530,32 @@ rules:
         // CKR_ATTRIBUTE_VALUE_INVALID and the key was left unrestricted;
         // the `.expect` above is where that surfaced. Both sides now go
         // through the one packer.
+        // CKM_PQCTODAY_SPLIT_KEY joins the five cipher mechanisms as of
+        // 2026-08-18. KMIP 3.0 defines Create Split Key with NO usage-mask
+        // precondition — there is no split bit in Cryptographic Usage Mask —
+        // so a symmetric key is splittable by virtue of its TYPE, and
+        // PKCS#11 v3.2 defines CKA_ALLOWED_MECHANISMS as "a list of mechanisms
+        // allowed to be used with this key". Omitting it made the attribute
+        // understate what the key is permitted to do, and since S12
+        // (2026-08-13) started enforcing the list inside
+        // `native::split_key::split`, Create Split Key failed with
+        // CKR_MECHANISM_INVALID for every KMIP-created key — while `Query`
+        // continued to advertise the operation as supported.
         let expected = crate::kmip30::algos::pack_allowed_mechanisms(&[
             c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM,
+            c::CKM_PQCTODAY_SPLIT_KEY,
         ]);
         assert_eq!(allowed, expected);
         // Byte equality is necessary but not sufficient — assert the ENGINE
-        // reads back the same five mechanisms, which is what actually gates
-        // use. Under the old packing this returned half the list.
+        // reads back the same mechanisms, which is what actually gates use.
+        // Under the old packing this returned half the list.
         assert_eq!(
             softhsmrustv3::state::parse_allowed_mechanisms(&allowed),
-            vec![c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM],
-            "engine must parse exactly the five mechanisms Create intended"
+            vec![
+                c::CKM_AES_CBC, c::CKM_AES_CBC_PAD, c::CKM_AES_ECB, c::CKM_AES_CTR, c::CKM_AES_GCM,
+                c::CKM_PQCTODAY_SPLIT_KEY,
+            ],
+            "engine must parse exactly the mechanisms Create intended"
         );
 
         // Enforcement, not just presence: AES-KEY-WRAP is a real AES
