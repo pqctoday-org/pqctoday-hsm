@@ -2605,6 +2605,19 @@ pub(crate) mod tests {
         );
     }
 
+    /// .46 (ML-DSA-65 + ECDSA P-384) — the 8th profile, added 2026-08-18 to
+    /// close the last gap this engine had against the full draft §6 set
+    /// (composite-hybrid remediation plan Gap 3). Same real-issuance,
+    /// both-halves-independently-verify, tampered-signature-rejected
+    /// coverage as every other profile above.
+    #[test]
+    fn bootstrap_composite_mldsa65_ecdsa_p384_ca_both_halves_verify() {
+        bootstrap_composite_ca_and_verify(
+            &super::super::composite_sig::MLDSA65_ECDSA_P384_SHA512,
+            KmipAlgorithm::CompositeMlDsa65EcdsaP384Sha512,
+        );
+    }
+
     /// WP-C6 end to end: a hybrid-KEM key pair generated through the
     /// real `CreateKeyPair` handler (the K6 path, unchanged by this
     /// work), certified under a plain ML-DSA-65 CA — the "asymmetric

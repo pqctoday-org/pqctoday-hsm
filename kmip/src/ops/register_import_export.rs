@@ -603,6 +603,17 @@ pub fn register(
                     format!("Register: Certificate Value ({} bytes) does not parse as a valid X.509 certificate", der.len()),
                 )));
             }
+            // Phase 2a (2026-08-18) — reject at accept time what would
+            // otherwise be silently accepted here and only refused later,
+            // loudly, if this certificate is ever designated a CA or
+            // touched by Re-certify (both use the stricter parser this
+            // checks). See der_x509::is_canonical's doc comment.
+            if !super::der_x509::is_canonical(der) {
+                return Err(fail_err(deps, correlation_id, "Register", KmipError::failed(
+                    ResultReason::InvalidField,
+                    format!("Register: Certificate Value ({} bytes) is not canonical DER (X.690 §8.3.2) — a top-level INTEGER (e.g. the serial number) carries a redundant leading byte", der.len()),
+                )));
+            }
         }
     }
 
@@ -810,6 +821,14 @@ pub fn import_object(
                 return Err(fail_err(deps, correlation_id, "Import", KmipError::failed(
                     ResultReason::InvalidField,
                     format!("Import: Certificate Value ({} bytes) does not parse as a valid X.509 certificate", der.len()),
+                )));
+            }
+            // Phase 2a (2026-08-18) — same upstream canonicality guard as
+            // Register; see that function for the rationale.
+            if !super::der_x509::is_canonical(der) {
+                return Err(fail_err(deps, correlation_id, "Import", KmipError::failed(
+                    ResultReason::InvalidField,
+                    format!("Import: Certificate Value ({} bytes) is not canonical DER (X.690 §8.3.2) — a top-level INTEGER (e.g. the serial number) carries a redundant leading byte", der.len()),
                 )));
             }
         }

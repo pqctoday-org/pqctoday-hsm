@@ -312,6 +312,7 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         CompositeMlDsa44EcdsaP256Sha256 => "ML-DSA-44-ECDSA-P256",
         CompositeMlDsa65Rsa3072PssSha512 => "ML-DSA-65-RSA3072-PSS",
         CompositeMlDsa65Ed25519Sha512 => "ML-DSA-65-Ed25519",
+        CompositeMlDsa65EcdsaP384Sha512 => "ML-DSA-65-ECDSA-P384",
     }
     .into()
 }

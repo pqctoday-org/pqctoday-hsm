@@ -227,6 +227,7 @@ const OID_MLDSA44_ED25519_SHA512: &str = "1.3.6.1.5.5.7.6.39";
 const OID_MLDSA44_ECDSA_P256_SHA256: &str = "1.3.6.1.5.5.7.6.40";
 const OID_MLDSA65_RSA3072_PSS_SHA512: &str = "1.3.6.1.5.5.7.6.41";
 const OID_MLDSA65_ED25519_SHA512: &str = "1.3.6.1.5.5.7.6.48";
+const OID_MLDSA65_ECDSA_P384_SHA512: &str = "1.3.6.1.5.5.7.6.46";
 const OID_RSA_ENCRYPTION: &str = "1.2.840.113549.1.1.1";
 const OID_EC_P256: &str = "1.2.840.10045.3.1.7";
 const OID_EC_P384: &str = "1.3.132.0.34";
@@ -379,10 +380,39 @@ pub const MLDSA65_ED25519_SHA512: CompositeSigProfile = CompositeSigProfile {
     classical: CompositeClassical::Ed25519,
 };
 
+/// id-MLDSA65-ECDSA-P384-SHA512 — draft §6. Added 2026-08-18, the one
+/// profile in this arc the engine previously left unimplemented (see the
+/// composite-hybrid remediation plan's Gap 3) — a mismatched-tier
+/// combination (ML-DSA-65 "medium" + P-384 "high") rather than one of the
+/// matched-tier pairs .45/.49 above, which is likely why it was skipped
+/// originally rather than a deliberate exclusion.
+///
+/// Pre-hash and traditional-hash values confirmed against the shared
+/// external KAT fixture (`kat/composite-sigs/external-composite-vectors.json`,
+/// tcId `id-MLDSA65-ECDSA-P384-SHA512`: `"ph": "SHA512", "trad_hash":
+/// "SHA384"`) rather than inferred by pattern-matching the other two ECDSA
+/// profiles — the same class of mistake (assuming PH is the traditional
+/// hash) produced the bug corrected 2026-08-17 in .45/.49 above.
+pub const MLDSA65_ECDSA_P384_SHA512: CompositeSigProfile = CompositeSigProfile {
+    oid: OID_MLDSA65_ECDSA_P384_SHA512,
+    label: "id-MLDSA65-ECDSA-P384-SHA512",
+    signature_label: "COMPSIG-MLDSA65-ECDSA-P384-SHA512",
+    pre_hash_mech: softhsmrustv3::constants::CKM_SHA512,
+    mldsa_param_set: softhsmrustv3::constants::CKP_ML_DSA_65,
+    mldsa_sig_bytes: 3309,
+    mldsa_pubkey_bytes: 1952,
+    classical_keygen_mech: softhsmrustv3::constants::CKM_EC_KEY_PAIR_GEN,
+    // Traditional hash tracks the P-384 curve (SHA-384), NOT the SHA512
+    // pre-hash in the profile name — same pattern as .49 above.
+    classical_sign_mech: softhsmrustv3::constants::CKM_ECDSA_SHA384,
+    classical_oid: OID_EC_P384,
+    classical: CompositeClassical::Ecdsa { field_width: 48 },
+};
+
 /// Every composite profile the engine implements. Single source for both
 /// lookup directions below, so a new profile cannot be added to one and
 /// forgotten in the other.
-pub const ALL_PROFILES: [&CompositeSigProfile; 7] = [
+pub const ALL_PROFILES: [&CompositeSigProfile; 8] = [
     &MLDSA44_RSA2048_PSS_SHA256,
     &MLDSA44_ED25519_SHA512,
     &MLDSA44_ECDSA_P256_SHA256,
@@ -390,6 +420,7 @@ pub const ALL_PROFILES: [&CompositeSigProfile; 7] = [
     &MLDSA65_ECDSA_P256_SHA512,
     &MLDSA65_ED25519_SHA512,
     &MLDSA87_ECDSA_P384_SHA512,
+    &MLDSA65_ECDSA_P384_SHA512,
 ];
 
 /// Resolve a `KmipAlgorithm` composite variant to its profile. `None` for
@@ -403,6 +434,7 @@ pub fn profile_for(algo: KmipAlgorithm) -> Option<&'static CompositeSigProfile> 
         KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512 => Some(&MLDSA65_ECDSA_P256_SHA512),
         KmipAlgorithm::CompositeMlDsa65Ed25519Sha512 => Some(&MLDSA65_ED25519_SHA512),
         KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512 => Some(&MLDSA87_ECDSA_P384_SHA512),
+        KmipAlgorithm::CompositeMlDsa65EcdsaP384Sha512 => Some(&MLDSA65_ECDSA_P384_SHA512),
         _ => None,
     }
 }
@@ -717,10 +749,11 @@ mod tests {
     }
 
     #[test]
-    fn profile_for_oid_resolves_all_three_and_rejects_unknown() {
+    fn profile_for_oid_resolves_all_eight_and_rejects_unknown() {
         assert!(profile_for_oid("1.3.6.1.5.5.7.6.37").is_some());
         assert!(profile_for_oid("1.3.6.1.5.5.7.6.45").is_some());
         assert!(profile_for_oid("1.3.6.1.5.5.7.6.49").is_some());
+        assert!(profile_for_oid("1.3.6.1.5.5.7.6.46").is_some());
         assert!(profile_for_oid("1.2.840.113549.1.1.11").is_none());
     }
 
@@ -729,7 +762,33 @@ mod tests {
         assert!(profile_for(KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256).is_some());
         assert!(profile_for(KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512).is_some());
         assert!(profile_for(KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512).is_some());
+        assert!(profile_for(KmipAlgorithm::CompositeMlDsa65EcdsaP384Sha512).is_some());
         assert!(profile_for(KmipAlgorithm::Ecdsa).is_none());
         assert!(profile_for(KmipAlgorithm::MlDsa65).is_none());
+    }
+
+    #[test]
+    fn all_profiles_contains_every_kmip_algorithm_variant_exactly_once() {
+        // Guards against the `ALL_PROFILES` array (a plain literal list, not
+        // derived from `KmipAlgorithm` at compile time) silently drifting
+        // out of sync with `profile_for`'s match arms — e.g. a new profile
+        // added to one and forgotten in the other.
+        for algo in [
+            KmipAlgorithm::CompositeMlDsa44Rsa2048PssSha256,
+            KmipAlgorithm::CompositeMlDsa44Ed25519Sha512,
+            KmipAlgorithm::CompositeMlDsa44EcdsaP256Sha256,
+            KmipAlgorithm::CompositeMlDsa65Rsa3072PssSha512,
+            KmipAlgorithm::CompositeMlDsa65EcdsaP256Sha512,
+            KmipAlgorithm::CompositeMlDsa65Ed25519Sha512,
+            KmipAlgorithm::CompositeMlDsa87EcdsaP384Sha512,
+            KmipAlgorithm::CompositeMlDsa65EcdsaP384Sha512,
+        ] {
+            let oid = profile_for(algo).expect("every composite variant resolves").oid;
+            assert!(
+                ALL_PROFILES.iter().any(|p| p.oid == oid),
+                "{algo:?}'s profile (oid {oid}) is not in ALL_PROFILES"
+            );
+        }
+        assert_eq!(ALL_PROFILES.len(), 8, "update this test's variant list alongside ALL_PROFILES");
     }
 }

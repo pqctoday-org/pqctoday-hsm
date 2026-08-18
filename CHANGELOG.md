@@ -8,7 +8,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`id-MLDSA65-ECDSA-P384-SHA512` composite-signature profile (.46)** —
+  the last gap against the full draft §6 profile set, at vendor codepoint
+  `0x8000006d`. Cross-verified against the shared external KAT vector
+  fixture, same mechanism that caught the 2026-08-17 traditional-hash bug
+  in the two other ECDSA profiles.
+
+### Changed
+
+- **`Register`/`Import` now reject non-canonical certificate DER at accept
+  time.** Previously a certificate with a non-canonical top-level INTEGER
+  (e.g. a serial number with a redundant leading byte) could be
+  successfully registered/imported, then refused — loudly, with no
+  warning at accept time — the moment it was designated a CA or touched by
+  Re-certify. Both operations now check the same strict parser up front,
+  so a bad certificate is caught at the point an operator can still act
+  on it.
+
+### Fixed
+
+- Corrected a stale test comment claiming composite profiles `.40` and
+  `.46` were unimplemented and `.49` had an "upstream-inconsistent"
+  vector — `.40` was already implemented, `.49`'s hash bug was already
+  fixed (2026-08-17), and `.46` is now implemented (see Added above).
 
 ---
 

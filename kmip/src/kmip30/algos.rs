@@ -399,6 +399,14 @@ pub enum KmipAlgorithm {
     CompositeMlDsa65Rsa3072PssSha512, // 0x8000006b (spec-convention vendor extension, §11.12)
     /// id-MLDSA65-Ed25519-SHA512 — OID `1.3.6.1.5.5.7.6.48`. §10.4 recommended.
     CompositeMlDsa65Ed25519Sha512, // 0x8000006c (spec-convention vendor extension, §11.12)
+    /// id-MLDSA65-ECDSA-P384-SHA512 — OID `1.3.6.1.5.5.7.6.46`. Added
+    /// 2026-08-18 (was previously the one profile in this arc the engine
+    /// left unimplemented — see the composite-hybrid remediation plan's
+    /// Gap 3). Cross-verified against the shared external KAT vector
+    /// (`kat/composite-sigs/external-composite-vectors.json`, tcId
+    /// `id-MLDSA65-ECDSA-P384-SHA512`), same mechanism that caught the
+    /// 2026-08-17 traditional-hash bug in the two other ECDSA profiles.
+    CompositeMlDsa65EcdsaP384Sha512, // 0x8000006d (spec-convention vendor extension, §11.12)
 }
 
 impl KmipAlgorithm {
@@ -469,6 +477,7 @@ impl KmipAlgorithm {
             CompositeMlDsa44EcdsaP256Sha256 => 0x8000006a,
             CompositeMlDsa65Rsa3072PssSha512 => 0x8000006b,
             CompositeMlDsa65Ed25519Sha512 => 0x8000006c,
+            CompositeMlDsa65EcdsaP384Sha512 => 0x8000006d,
         }
     }
 
@@ -540,6 +549,7 @@ impl KmipAlgorithm {
             0x8000006a => CompositeMlDsa44EcdsaP256Sha256,
             0x8000006b => CompositeMlDsa65Rsa3072PssSha512,
             0x8000006c => CompositeMlDsa65Ed25519Sha512,
+            0x8000006d => CompositeMlDsa65EcdsaP384Sha512,
             _ => return None,
         })
     }
@@ -558,6 +568,7 @@ impl KmipAlgorithm {
                 | KmipAlgorithm::CompositeMlDsa44EcdsaP256Sha256
                 | KmipAlgorithm::CompositeMlDsa65Rsa3072PssSha512
                 | KmipAlgorithm::CompositeMlDsa65Ed25519Sha512
+                | KmipAlgorithm::CompositeMlDsa65EcdsaP384Sha512
         )
     }
 
@@ -609,6 +620,7 @@ impl KmipAlgorithm {
                 | CompositeMlDsa44EcdsaP256Sha256
                 | CompositeMlDsa65Rsa3072PssSha512
                 | CompositeMlDsa65Ed25519Sha512
+                | CompositeMlDsa65EcdsaP384Sha512
         )
     }
 
@@ -943,6 +955,7 @@ impl KmipAlgorithm {
             CompositeMlDsa44EcdsaP256Sha256 => "ML-DSA-44-ECDSA-P256",
             CompositeMlDsa65Rsa3072PssSha512 => "ML-DSA-65-RSA3072-PSS",
             CompositeMlDsa65Ed25519Sha512 => "ML-DSA-65-Ed25519",
+            CompositeMlDsa65EcdsaP384Sha512 => "ML-DSA-65-ECDSA-P384",
         }
     }
 }
@@ -977,6 +990,7 @@ mod tests {
             CompositeMlDsa44EcdsaP256Sha256,
             CompositeMlDsa65Rsa3072PssSha512,
             CompositeMlDsa65Ed25519Sha512,
+            CompositeMlDsa65EcdsaP384Sha512,
         ]
     }
 

@@ -77,6 +77,16 @@ struct EcdsaSigValue<'a> {
 /// `r || s`, zero-padded to `field_width` bytes each half. See the
 /// module doc's invariant-0a note: this is ASN.1 reformatting of an
 /// already-computed signature, not a crypto computation.
+///
+/// KNOWN RISK (audited 2026-08-18, left as-is by design): `EcdsaSigValue::
+/// from_der` below is strict about DER canonicality (X.690 §8.3.2), same
+/// as `validate.rs`'s `TbsCertificate::from_der` re-parse (see the note
+/// there for the full writeup). A non-canonical `r` or `s` — a redundant
+/// leading byte, lower real-world likelihood here since these come from a
+/// signing library's modular arithmetic rather than hand-assembled bytes,
+/// but the same shape of defect — fails this decode and the caller
+/// degrades the certificate's verdict to `Unknown` rather than erroring
+/// loudly. Bundled with `validate.rs`'s decision: not changed for now.
 fn ecdsa_der_to_raw(der_sig: &[u8], field_width: usize) -> Result<Vec<u8>> {
     let sig = EcdsaSigValue::from_der(der_sig).map_err(|e| {
         KmipError::failed(ResultReason::CryptographicFailure, format!("ECDSA signature DER: {e}"))

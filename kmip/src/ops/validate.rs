@@ -283,6 +283,27 @@ pub(crate) fn validate_chain(session: Option<u32>, ders: &[Vec<u8>], at: OffsetD
                 // Chameleon checks below — both need a fully-typed
                 // `TbsCertificate` for their extension/re-encode logic,
                 // not raw byte access.
+                //
+                // KNOWN RISK (audited 2026-08-18, left as-is by design):
+                // this re-parse runs unconditionally for every non-self-
+                // signed link, not only Catalyst/Chameleon-shaped ones.
+                // `x509_cert`'s decoder is strict about DER canonicality
+                // (X.690 §8.3.2) — a certificate whose serial number (or
+                // any other top-level INTEGER) carries a redundant leading
+                // byte will fail `Err(_)` here and fall to `degrade_unknown
+                // = true` below, even though its primary signature already
+                // verified above. `x509-parser` (this loop's primary
+                // parser) tolerates the same non-canonical encoding, so
+                // this can silently mark an otherwise-genuinely-valid
+                // certificate `Unknown` instead of `Valid`. Originally
+                // found via this workshop's own serial-number generator
+                // (fixed at the source, pqctoday-hub commit b64586326) —
+                // the fix there does not close this gap for a THIRD-PARTY
+                // or externally-issued certificate with the same quirk.
+                // Deliberately not changed here: tightening the primary
+                // parser or loosening this one is a real behavior change
+                // (of unclear blast radius — some legacy CAs are known to
+                // emit non-canonical serials), decided against for now.
                 match TbsCertificate::from_der(tbs_bytes) {
                     Ok(typed_tbs) => {
                         // ITU-T X.509 (2019) §9.8 Catalyst — an OPT-IN
@@ -521,10 +542,15 @@ mod tests {
                 other => panic!("{tc}: unknown expect '{other}'"),
             }
         }
-        // Only .45 is both implemented here AND a "verifies" vector today (.49 is
-        // the upstream-inconsistent one, .40/.46 are not implemented by this
-        // engine). The certificate vector below adds a second, independent path.
-        assert!(checked >= 1, "expected at least 1 asserted raw vector, got {checked}");
+        // All 3 raw vectors in the fixture (.45, .46, .49) are implemented by
+        // this engine as of 2026-08-18 (.46 was the last gap — see the
+        // composite-hybrid remediation plan's Gap 3) and all 3 assert
+        // "verifies", so every one must be checked, none silently skipped.
+        // This comment previously (incorrectly) claimed only .45 was
+        // implemented and .40/.46 were not — .40 was already implemented
+        // when that was written, and .46 has been implemented since. The
+        // certificate vector below adds a second, independent path.
+        assert_eq!(checked, 3, "expected all 3 raw vectors to be asserted, got {checked}");
 
         // ── certificate vector: full Validate path ──
         for v in doc["certificate_vectors"]["vectors"].as_array().unwrap() {

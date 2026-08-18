@@ -13,6 +13,7 @@
 //! RFC 5280 parser; MIT/Apache) instead of hand-rolled DER walking so
 //! we get the full attribute surface in five-line helpers.
 
+use der::Decode;
 use x509_parser::prelude::*;
 
 /// Extract the Subject Name commonName RDN value (OID 2.5.4.3) from
@@ -59,6 +60,25 @@ pub fn extract_serial_number(der: &[u8]) -> Option<Vec<u8>> {
 /// the engine.
 pub fn is_parseable(der: &[u8]) -> bool {
     X509Certificate::from_der(der).is_ok()
+}
+
+/// True if `der` parses under the STRICT `x509_cert`/`der` crate parser —
+/// the same one `certify.rs::resolve_ca` and Re-certify's existing-cert
+/// load use, which enforces DER canonicality (X.690 §8.3.2) and rejects a
+/// certificate whose serial number (or any other top-level INTEGER)
+/// carries a redundant leading byte.
+///
+/// Added 2026-08-18 (composite-hybrid remediation plan, Phase 2a): before
+/// this, `Register`/`Import` accepted anything [`is_parseable`] tolerated
+/// (the LENIENT `x509_parser` crate), so a non-canonical certificate could
+/// be successfully registered today and then refused — loudly, but with
+/// no warning at accept time — the moment it was designated a CA or
+/// touched by Re-certify. Checking both parsers up front makes Register/
+/// Import's acceptance strictness match what the certificate will
+/// eventually be held to, so a bad certificate is rejected at the point
+/// an operator can still act on it, not two steps later.
+pub fn is_canonical(der: &[u8]) -> bool {
+    x509_cert::Certificate::from_der(der).is_ok()
 }
 
 #[cfg(test)]
