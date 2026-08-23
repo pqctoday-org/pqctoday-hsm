@@ -161,13 +161,17 @@ if [[ $RUN_RUST_P11 == 1 ]]; then
   # Build the Rust engine's wasm pkg (dev + acvp + larger stack) then drive its
   # real PKCS#11 ABI through the v3.2 conformance matrix. This is the Rust-engine
   # conformance evidence (report gap P2/T1) — the wasm build runs in the
-  # container, the node driver on the host.
+  # container, the node driver on the host. test_p11_conformance.js itself
+  # regenerates rust/RUST_P11_V32_CONFORMANCE_REPORT.md from this run's real
+  # per-section results, engine commit, and timestamp (writeReport(), bottom
+  # of that file) every time it runs to completion — this step is the report's
+  # only real regeneration path, so this IS "invoking the report writer."
   STEP=$((STEP+1)); say "step $STEP: Rust PKCS#11 v3.2 conformance (257 checks)"
   if dexec "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=2097152' wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp >/dev/null 2>&1" \
      && ( cd "$ROOT/rust" && node test_p11_conformance.js 2>&1 | grep -q 'RESULT: .* 0 failed' ); then
-    ok "Rust PKCS#11 v3.2 conformance"
+    ok "Rust PKCS#11 v3.2 conformance (report regenerated: rust/RUST_P11_V32_CONFORMANCE_REPORT.md)"
   else
-    bad "Rust PKCS#11 v3.2 conformance"
+    bad "Rust PKCS#11 v3.2 conformance (report regenerated regardless — check it for the real failures)"
   fi
 fi
 

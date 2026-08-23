@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# pre-push — refuses to push a commit that scripts/local-gate.sh has not
+# validated. Installed via scripts/install-hooks.sh (one-time, per clone).
+#
+# The gate script has written .gate-ok-<HEAD-short-sha> since it was
+# introduced (WP2.0), documenting the intent that "a pre-push hook can
+# verify the gate ran on the current commit" — but no such hook existed
+# until this one. Markers accumulated with no reader; the newest one could
+# sit many commits behind HEAD with nothing to notice or object.
+#
+# This hook is deliberately narrow: it checks that *a* gate run passed at
+# the exact commit being pushed. It does not try to infer whether this is a
+# "release" push that should have used --all — that judgment call is a
+# documented human step (see RELEASING.md), not something to guess here.
+#
+# Bypass: `git push --no-verify` (git's own escape hatch — use it knowingly,
+# not as a habit).
+
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+HEAD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)" || exit 0
+MARKER="$ROOT/.gate-ok-$HEAD_SHA"
+
+if [[ -f "$MARKER" ]]; then
+  exit 0
+fi
+
+cat >&2 <<EOF
+
+[pre-push] BLOCKED — no local-gate marker for the commit being pushed ($HEAD_SHA).
+
+  This repo validates locally, not on GitHub (directive 2026-07-01: GitHub
+  is release-only, not a test platform). Run the gate first:
+
+      bash scripts/local-gate.sh          # core suites
+      bash scripts/local-gate.sh --all    # + C++/ACVP/rust-p11/TLS-interop
+
+  A passing run writes .gate-ok-$HEAD_SHA, which this hook checks for.
+
+  Deliberate bypass (use sparingly, not as habit): git push --no-verify
+
+EOF
+exit 1
