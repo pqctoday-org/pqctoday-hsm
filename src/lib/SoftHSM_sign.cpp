@@ -216,10 +216,21 @@ CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechani
 		return CKR_GENERAL_ERROR;
 	}
 
-	// Key must have at least 1 byte; RFC 2104 permits any positive key size for HMAC
+	// Enforce the same per-mechanism minimum key size that MacVerifyInit
+	// enforces (kMacMechTable.minKeyBytes — 0 means "no PKCS#11 minimum",
+	// e.g. CMAC, whose key size is already constrained by its AES key type).
+	// Before this fix Sign only rejected a fully empty key (bitLen==0),
+	// while Verify already rejected anything below minKeyBytes; the two
+	// were never wired to the same rule despite resolveMacMech() supplying
+	// minSize to both. That asymmetry meant a mechanism like
+	// CKM_SHA3_384_HMAC / CKM_SHA3_512_HMAC (minKeyBytes 48 / 64) would
+	// accept a sign with a shorter key and produce a real MAC, then reject
+	// verification of that very same MAC forever — a real round trip is
+	// impossible below the minimum, and PASS/FAIL now reflects that
+	// symmetrically. Found 2026-08-23 by the Gap 2 SHA3-HMAC round-trip test.
 	privkey->setBitLen(privkey->getKeyBits().size() * 8);
 
-	if (privkey->getBitLen() == 0)
+	if (privkey->getBitLen() < (minSize * 8))
 	{
 		mac->recycleKey(privkey);
 		CryptoFactory::i()->recycleMacAlgorithm(mac);

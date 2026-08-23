@@ -378,6 +378,56 @@
             "details": "RV=0",
             "status": "PASS",
             "test": "C_Verify_87_PreHash_SHA3_512"
+        },
+        {
+            "details": "Gen ML-DSA-65 for pre-hash coverage",
+            "status": "PASS",
+            "test": "PreHashGap_GenerateKey_65"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=3309",
+            "status": "PASS",
+            "test": "PreHash65_Generic_HASH_ML_DSA_explicitSHA256"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=3309",
+            "status": "PASS",
+            "test": "PreHash65_SHA224"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=3309",
+            "status": "PASS",
+            "test": "PreHash65_SHA256"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=3309",
+            "status": "PASS",
+            "test": "PreHash65_SHA384"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=3309",
+            "status": "PASS",
+            "test": "PreHash65_SHA3_224"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=3309",
+            "status": "PASS",
+            "test": "PreHash65_SHA3_256"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=3309",
+            "status": "PASS",
+            "test": "PreHash65_SHA3_384"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=3309",
+            "status": "PASS",
+            "test": "PreHash65_SHAKE128"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=3309",
+            "status": "PASS",
+            "test": "PreHash65_SHAKE256"
         }
     ],
     "DSA-CTX": [
@@ -631,7 +681,7 @@
     ],
     "Fork": [
         {
-            "details": "child pid 73669 exited status 0",
+            "details": "child pid 91651 exited status 0",
             "status": "PASS",
             "test": "Child_survived_and_reported"
         },
@@ -671,7 +721,7 @@
             "test": "Child_writes_do_not_reach_parent"
         },
         {
-            "details": "8 sibling pairs, all distinct=1 childA=1E524938401B7D7F… childB=82AFD2FA7992A487… (identical output would repeat ECDSA nonces)",
+            "details": "8 sibling pairs, all distinct=1 childA=48CBC0FB54C73268… childB=6FE63D76BCE552B8… (identical output would repeat ECDSA nonces)",
             "status": "PASS",
             "test": "Sibling_children_RNG_diverge"
         },
@@ -686,7 +736,7 @@
             "test": "Fork_safe_interface_retrievable"
         },
         {
-            "details": "child=8281A0160DEED172… parent=58FF7627DE8F2C8B… preFork=335A640C83F904EF…",
+            "details": "child=E4F99D3FBEF4C68E… parent=062308F857AD36EC… preFork=876D1D3BAF19A86D…",
             "status": "PASS",
             "test": "Parent_and_child_RNG_diverge"
         }
@@ -1498,22 +1548,22 @@
     ],
     "KCV": [
         {
-            "details": "3 bytes: 97C70A",
+            "details": "3 bytes: BD81FB",
             "status": "PASS",
             "test": "AES_Generate_KCV_Present"
         },
         {
-            "details": "HSM=97C70A == oracle=97C70A",
+            "details": "HSM=BD81FB == oracle=BD81FB",
             "status": "PASS",
             "test": "AES_Generate_KCV_Equals_OracleEcbZeroBlock"
         },
         {
-            "details": "3 bytes: 105A5B",
+            "details": "3 bytes: 76FF46",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Present"
         },
         {
-            "details": "original=105A5B unwrapped=105A5B",
+            "details": "original=76FF46 unwrapped=76FF46",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Equals_Original"
         },
@@ -1593,6 +1643,11 @@
             "details": "RV=0",
             "status": "PASS",
             "test": "CKM_HKDF_DERIVE"
+        },
+        {
+            "details": "len=96 deterministic, key-dependent XOF output",
+            "status": "PASS",
+            "test": "CKM_SHAKE_256_KEY_DERIVATION"
         }
     ],
     "KEM": [
@@ -1649,7 +1704,7 @@
             "test": "Encap_KCV_present"
         },
         {
-            "details": "HSM=762CB2 oracle=762CB2",
+            "details": "HSM=D3E280 oracle=D3E280",
             "status": "PASS",
             "test": "Encap_KCV_equals_SHA1_oracle"
         },
@@ -1659,12 +1714,12 @@
             "test": "Decap_KCV_present"
         },
         {
-            "details": "HSM=762CB2 oracle=762CB2",
+            "details": "HSM=D3E280 oracle=D3E280",
             "status": "PASS",
             "test": "Decap_KCV_equals_SHA1_oracle"
         },
         {
-            "details": "encap=762CB2 decap=762CB2",
+            "details": "encap=D3E280 decap=D3E280",
             "status": "PASS",
             "test": "Encap_and_Decap_KCV_agree"
         },
@@ -1689,12 +1744,12 @@
             "test": "ECDH_Encap_KCV_present"
         },
         {
-            "details": "HSM=622921 oracle=622921",
+            "details": "HSM=CEEB68 oracle=CEEB68",
             "status": "PASS",
             "test": "ECDH_Encap_KCV_equals_SHA1_oracle"
         },
         {
-            "details": "HSM=622921 oracle=622921",
+            "details": "HSM=CEEB68 oracle=CEEB68",
             "status": "PASS",
             "test": "ECDH_Decap_KCV_equals_SHA1_oracle"
         }
@@ -1842,7 +1897,7 @@
     ],
     "KcvTemplate": [
         {
-            "details": "engine=3C07CC oracle=3C07CC",
+            "details": "engine=6FDF72 oracle=6FDF72",
             "status": "PASS",
             "test": "GenerateKey_AES_KCV_matches_oracle"
         },
@@ -1862,7 +1917,7 @@
             "test": "GenerateKey_AES_zero_length_suppresses"
         },
         {
-            "details": "engine=1CF0A3 oracle=1CF0A3",
+            "details": "engine=6D3A44 oracle=6D3A44",
             "status": "PASS",
             "test": "GenerateKey_Generic_KCV_matches_oracle"
         },
@@ -1882,12 +1937,12 @@
             "test": "GenerateKey_Generic_zero_length_suppresses"
         },
         {
-            "details": "engine=34BC3D oracle=34BC3D",
+            "details": "engine=392583 oracle=392583",
             "status": "PASS",
             "test": "UnwrapKey_AES_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=34BC3D",
+            "details": "RV=0 readback=392583",
             "status": "PASS",
             "test": "UnwrapKey_AES_correct_value_accepted"
         },
@@ -1902,12 +1957,12 @@
             "test": "UnwrapKey_AES_zero_length_suppresses"
         },
         {
-            "details": "engine=2ED533 oracle=2ED533",
+            "details": "engine=59BAB8 oracle=59BAB8",
             "status": "PASS",
             "test": "DeriveKey_HKDF_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=2ED533",
+            "details": "RV=0 readback=59BAB8",
             "status": "PASS",
             "test": "DeriveKey_HKDF_correct_value_accepted"
         },
@@ -1922,12 +1977,12 @@
             "test": "DeriveKey_HKDF_zero_length_suppresses"
         },
         {
-            "details": "engine=A67B1A oracle=A67B1A",
+            "details": "engine=5F4E51 oracle=5F4E51",
             "status": "PASS",
             "test": "DeriveKey_ECDH_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=A67B1A",
+            "details": "RV=0 readback=5F4E51",
             "status": "PASS",
             "test": "DeriveKey_ECDH_correct_value_accepted"
         },
@@ -1962,12 +2017,12 @@
             "test": "DeriveKey_PBKD2_zero_length_suppresses"
         },
         {
-            "details": "engine=F80929 oracle=F80929",
+            "details": "engine=386AA5 oracle=386AA5",
             "status": "PASS",
             "test": "DeriveKey_SP800108_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=F80929",
+            "details": "RV=0 readback=386AA5",
             "status": "PASS",
             "test": "DeriveKey_SP800108_correct_value_accepted"
         },
@@ -1982,12 +2037,12 @@
             "test": "DeriveKey_SP800108_zero_length_suppresses"
         },
         {
-            "details": "CKA_VALUE unreadable (RV=17), engine KCV=D46F13",
+            "details": "CKA_VALUE unreadable (RV=17), engine KCV=2F6A3B",
             "status": "SKIP",
             "test": "DeriveKey_Concat_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=D46F13",
+            "details": "RV=0 readback=2F6A3B",
             "status": "PASS",
             "test": "DeriveKey_Concat_correct_value_accepted"
         },
@@ -2002,12 +2057,12 @@
             "test": "DeriveKey_Concat_zero_length_suppresses"
         },
         {
-            "details": "engine=257129 oracle=257129",
+            "details": "engine=A2EAE0 oracle=A2EAE0",
             "status": "PASS",
             "test": "DeriveKey_X25519_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=257129",
+            "details": "RV=0 readback=A2EAE0",
             "status": "PASS",
             "test": "DeriveKey_X25519_correct_value_accepted"
         },
@@ -2104,6 +2159,46 @@
             "details": "RV=0",
             "status": "PASS",
             "test": "C_EncryptMessageBegin_IV8"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_MessageDecryptInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_DecryptMessageBegin"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_DecryptMessageNext"
+        },
+        {
+            "details": "streaming Encrypt(Begin/Next)->Decrypt(Begin/Next) byte-exact round trip, len=48",
+            "status": "PASS",
+            "test": "DecryptRoundTrip_Streaming_PlaintextMatch"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_MessageDecryptFinal"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_EncryptMessage"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_DecryptMessage"
+        },
+        {
+            "details": "one-shot C_EncryptMessage->C_DecryptMessage byte-exact round trip, len=48",
+            "status": "PASS",
+            "test": "DecryptRoundTrip_OneShot_PlaintextMatch"
         }
     ],
     "MsgSign": [
@@ -2126,6 +2221,48 @@
             "details": "expected CKR_MECHANISM_PARAM_INVALID, got RV=113",
             "status": "PASS",
             "test": "C_MessageSignInit_RSA_RejectsSignCtxParam"
+        }
+    ],
+    "MsgVerify": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_MessageVerifyInit"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyMessageBegin"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyMessageNext"
+        },
+        {
+            "details": "streaming Sign(Begin/Next)->Verify(Begin/Next) round trip verified a real RSA signature",
+            "status": "PASS",
+            "test": "VerifyRoundTrip_Streaming"
+        },
+        {
+            "details": "tampered signature correctly rejected — RV=192",
+            "status": "PASS",
+            "test": "VerifyRoundTrip_TamperedSignatureRejected"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignMessage"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyMessage"
+        },
+        {
+            "details": "one-shot C_SignMessage->C_VerifyMessage round trip verified a real RSA signature",
+            "status": "PASS",
+            "test": "VerifyRoundTrip_OneShot"
         }
     ],
     "MultiPart": [
@@ -2323,7 +2460,7 @@
             "test": "ML_DSA_44_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0x84 len=2560",
+            "details": "first byte=0x2b len=2560",
             "status": "PASS",
             "test": "ML_DSA_44_CKA_VALUE_not_DER_wrapped"
         },
@@ -2343,7 +2480,7 @@
             "test": "ML_KEM_768_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0xcd len=2400",
+            "details": "first byte=0xe7 len=2400",
             "status": "PASS",
             "test": "ML_KEM_768_CKA_VALUE_not_DER_wrapped"
         },
@@ -2358,7 +2495,7 @@
             "test": "SLH_DSA_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0x4d len=64",
+            "details": "first byte=0xd1 len=64",
             "status": "PASS",
             "test": "SLH_DSA_CKA_VALUE_not_DER_wrapped"
         },
@@ -2380,12 +2517,12 @@
             "test": "Token_publishes_a_CKO_PROFILE_object"
         },
         {
-            "details": "profile ids: [ 1 2 ]",
+            "details": "profile ids: [ 2 1 ]",
             "status": "PASS",
             "test": "CKP_BASELINE_PROVIDER_present"
         },
         {
-            "details": "profile ids: [ 1 2 ]",
+            "details": "profile ids: [ 2 1 ]",
             "status": "PASS",
             "test": "No_profile_object_carries_CKP_INVALID_ID"
         },
@@ -2484,6 +2621,71 @@
     ],
     "SHA-3": [
         {
+            "details": "len=28 deterministic, input-dependent",
+            "status": "PASS",
+            "test": "Digest_SHA3_224"
+        },
+        {
+            "details": "len=64 deterministic, input-dependent",
+            "status": "PASS",
+            "test": "Digest_SHA3_512"
+        },
+        {
+            "details": "sign+verify round trip OK, macLen=28",
+            "status": "PASS",
+            "test": "HMAC_SHA3_224"
+        },
+        {
+            "details": "sign+verify round trip OK, macLen=32",
+            "status": "PASS",
+            "test": "HMAC_SHA3_256"
+        },
+        {
+            "details": "sign+verify round trip OK, macLen=48",
+            "status": "PASS",
+            "test": "HMAC_SHA3_384"
+        },
+        {
+            "details": "sign+verify round trip OK, macLen=64",
+            "status": "PASS",
+            "test": "HMAC_SHA3_512"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "RsaTail_GenerateRSA2048"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "RsaTail_SHA3_224_PKCS"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "RsaTail_SHA3_224_PSS"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "RsaTail_SHA3_256_PKCS"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "RsaTail_SHA3_256_PSS"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "RsaTail_SHA3_512_PKCS"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "RsaTail_SHA3_512_PSS"
+        },
+        {
             "details": "RV=0",
             "status": "PASS",
             "test": "DigestInit_256"
@@ -2519,6 +2721,66 @@
             "details": "RV=0",
             "status": "PASS",
             "test": "C_Sign_SHA2_256F_Deterministic_Ctx"
+        },
+        {
+            "details": "Gen SLH-DSA-SHA2-128S for pre-hash coverage",
+            "status": "PASS",
+            "test": "PreHashGap_GenerateKey_128S"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=7856",
+            "status": "PASS",
+            "test": "PreHashSLH_Generic_HASH_SLH_DSA_explicitSHA256"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=7856",
+            "status": "PASS",
+            "test": "PreHashSLH_SHA224"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=7856",
+            "status": "PASS",
+            "test": "PreHashSLH_SHA256"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=7856",
+            "status": "PASS",
+            "test": "PreHashSLH_SHA384"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=7856",
+            "status": "PASS",
+            "test": "PreHashSLH_SHA512"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=7856",
+            "status": "PASS",
+            "test": "PreHashSLH_SHA3_224"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=7856",
+            "status": "PASS",
+            "test": "PreHashSLH_SHA3_256"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=7856",
+            "status": "PASS",
+            "test": "PreHashSLH_SHA3_384"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=7856",
+            "status": "PASS",
+            "test": "PreHashSLH_SHA3_512"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=7856",
+            "status": "PASS",
+            "test": "PreHashSLH_SHAKE128"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=7856",
+            "status": "PASS",
+            "test": "PreHashSLH_SHAKE256"
         }
     ],
     "Session": [
@@ -2661,9 +2923,9 @@
     ],
     "_summary": {
         "engine": "./build/src/lib/libsofthsmv3.dylib",
-        "engine_commit": "5a107b2898f636e2cb152a1f42c1fc0a0d275f62",
+        "engine_commit": "415935d4ae7721c1c3761d0e3014f99b7ec9e1fc",
         "fail": 0,
-        "pass": 507,
+        "pass": 559,
         "skip": 3,
         "xfail_known_engine_bugs": 0
     }

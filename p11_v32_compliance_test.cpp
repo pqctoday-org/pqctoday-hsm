@@ -161,7 +161,7 @@ void print_usage() {
     printf("Usage: p11_v32_compliance_test [options]\n");
     printf("Options:\n");
     printf("  --engine <path>    Path to the PKCS#11 library (default: %s)\n", opt_engine.c_str());
-    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen, g4-retcodes, g5-attrs, g7-sha3rsa, g8-dual, g-async, g-isolation (default: %s)\n", opt_category.c_str());
+    printf("  --category <cat>   Test category: all, init, discovery, pqc-kem, pqc-dsa, hbs, attr, g1-security, g2-mechtable, g3-keygen, g4-retcodes, g5-attrs, g7-sha3rsa, g8-dual, g-async, g-isolation, g2-prehash, g2-sha3tail (default: %s)\n", opt_category.c_str());
     printf("  --report <path>    Output bases (e.g. 'rep' creates 'rep.md' and 'rep.json') (default: %s)\n", opt_report.c_str());
     printf("  --pin <pin>        Token PIN (default: %s)\n", opt_pin.c_str());
     printf("  --workdir <dir>    Scratch dir for softhsm2.conf + token store (default: %s)\n", opt_workdir.c_str());
@@ -3045,6 +3045,27 @@ typedef CK_RV (*C_MessageEncryptInit_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_
 typedef CK_RV (*C_EncryptMessageBegin_t)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG);
 typedef CK_RV (*C_EncryptMessageNext_t)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_ULONG);
 typedef CK_RV (*C_MessageEncryptFinal_t)(CK_SESSION_HANDLE);
+typedef CK_RV (*C_EncryptMessage_t)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR);
+
+// Function pointer structs for v3.2 message based decryption (Gap 1, 2026-08-23:
+// the decrypt half of §5.19 was never exercised anywhere in this file — only
+// the sign/encrypt halves above were tested).
+typedef CK_RV (*C_MessageDecryptInit_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
+typedef CK_RV (*C_DecryptMessageBegin_t)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG);
+typedef CK_RV (*C_DecryptMessageNext_t)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR, CK_ULONG);
+typedef CK_RV (*C_MessageDecryptFinal_t)(CK_SESSION_HANDLE);
+typedef CK_RV (*C_DecryptMessage_t)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR);
+
+// Function pointer structs for v3.2 message based verification (Gap 1) — the
+// verify half of §5.19 was never exercised anywhere in this file either.
+// (C_MessageSignInit_t itself is declared here too — test_message_signatures()
+// above only ever declared it function-locally, so it isn't visible here.)
+typedef CK_RV (*C_MessageSignInit_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
+typedef CK_RV (*C_MessageVerifyInit_t)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
+typedef CK_RV (*C_VerifyMessage_t)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG);
+typedef CK_RV (*C_MessageVerifyFinal_t)(CK_SESSION_HANDLE);
+typedef CK_RV (*C_MessageSignFinal_t)(CK_SESSION_HANDLE);
+typedef CK_RV (*C_SignMessage_t)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR);
 
 void test_v32_kdfs() {
     CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
@@ -3601,6 +3622,326 @@ void test_message_encryption() {
 }
 
 /* ---------------------------------------------------------------------------
+ * test_message_decryption  (compliance-testing remediation, 2026-08-23, Gap 1)
+ *
+ * test_message_encryption() above only ever calls C_MessageEncryptInit and
+ * C_EncryptMessageBegin — it never calls C_EncryptMessageNext, so no real
+ * ciphertext is ever produced, and the entire decrypt half of §5.19
+ * (C_MessageDecryptInit / C_DecryptMessage / C_DecryptMessageBegin /
+ * C_DecryptMessageNext / C_MessageDecryptFinal) plus the one-shot
+ * C_EncryptMessage form were untested anywhere in this file.
+ *
+ * Both engine halves are implemented for real (SoftHSM_cipher.cpp,
+ * SoftHSM::C_MessageDecryptInit et al. — confirmed by reading the
+ * implementation, not assumed), so this does a genuine seam test: produce
+ * real AES-GCM ciphertext with the streaming Begin/Next encrypt path, then
+ * decrypt it back with the streaming Begin/Next decrypt path and byte-compare
+ * against the original plaintext — then repeat with the one-shot
+ * C_EncryptMessage / C_DecryptMessage forms. A PASS here requires the
+ * decrypted bytes to equal the original message; RV==CKR_OK on each half in
+ * isolation is not sufficient.
+ * ------------------------------------------------------------------------- */
+void test_message_decryption() {
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    C_MessageEncryptInit_t MsgEncInit = (C_MessageEncryptInit_t)dlsym(dlib, "C_MessageEncryptInit");
+    C_EncryptMessageBegin_t MsgEncBeg = (C_EncryptMessageBegin_t)dlsym(dlib, "C_EncryptMessageBegin");
+    C_EncryptMessageNext_t MsgEncNext = (C_EncryptMessageNext_t)dlsym(dlib, "C_EncryptMessageNext");
+    C_MessageEncryptFinal_t MsgEncFinal = (C_MessageEncryptFinal_t)dlsym(dlib, "C_MessageEncryptFinal");
+    C_EncryptMessage_t MsgEncOneShot = (C_EncryptMessage_t)dlsym(dlib, "C_EncryptMessage");
+
+    C_MessageDecryptInit_t MsgDecInit = (C_MessageDecryptInit_t)dlsym(dlib, "C_MessageDecryptInit");
+    C_DecryptMessageBegin_t MsgDecBeg = (C_DecryptMessageBegin_t)dlsym(dlib, "C_DecryptMessageBegin");
+    C_DecryptMessageNext_t MsgDecNext = (C_DecryptMessageNext_t)dlsym(dlib, "C_DecryptMessageNext");
+    C_MessageDecryptFinal_t MsgDecFinal = (C_MessageDecryptFinal_t)dlsym(dlib, "C_MessageDecryptFinal");
+    C_DecryptMessage_t MsgDecOneShot = (C_DecryptMessage_t)dlsym(dlib, "C_DecryptMessage");
+
+    if (!MsgEncInit || !MsgEncBeg || !MsgEncNext || !MsgDecInit || !MsgDecBeg || !MsgDecNext) {
+        record_result("MsgCrypt", "Validation_Decrypt", "SKIP", "v3.0 message decrypt APIs missing");
+        return;
+    }
+
+    // Token AES-128 key (CKA_TOKEN=true, matches test_message_encryption's
+    // template) so it stays valid across the multiple message operations below.
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE ktype = CKK_AES;
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_ULONG valueLen = 16;
+    CK_ATTRIBUTE tmpl[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &ktype, sizeof(ktype) },
+        { CKA_ENCRYPT, &bTrue, sizeof(bTrue) },
+        { CKA_DECRYPT, &bTrue, sizeof(bTrue) },
+        { CKA_VALUE_LEN, &valueLen, sizeof(valueLen) },
+        { CKA_TOKEN, &bTrue, sizeof(bTrue) },
+        { CKA_SENSITIVE, &bFalse, sizeof(bFalse) },
+        { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) }
+    };
+    CK_OBJECT_HANDLE hKey = 0;
+    CK_MECHANISM genMech = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+    CK_RV rvGen = fl->C_GenerateKey(hSess, &genMech, tmpl, 8, &hKey);
+    if (rvGen != CKR_OK) {
+        record_result("MsgCrypt", "DecryptRoundTrip_GenKey", "FAIL", "RV=" + std::to_string(rvGen));
+        return;
+    }
+
+    CK_MECHANISM encMech = { CKM_AES_GCM, NULL_PTR, 0 };
+    CK_BYTE plaintext[] = "Message-based AES-GCM decrypt round-trip payload";
+    CK_ULONG ptLen = sizeof(plaintext) - 1;
+
+    // ---- Phase 1: streaming C_EncryptMessageBegin/Next -> C_DecryptMessageBegin/Next ----
+    CK_BYTE iv[12] = { 'A','B','C','D','E','F','G','H','I','J','K','L' };
+    CK_BYTE tag[16];
+    CK_GCM_MESSAGE_PARAMS encParams = { iv, sizeof(iv), 0, CKG_NO_GENERATE, tag, 128 };
+
+    CK_RV rv = MsgEncInit(hSess, &encMech, hKey);
+    if (rv != CKR_OK) {
+        record_result("MsgCrypt", "DecryptRoundTrip_ProduceCiphertext", "FAIL",
+                      "MsgEncInit failed, could not produce real ciphertext to decrypt — RV=" + std::to_string(rv));
+        return;
+    }
+    rv = MsgEncBeg(hSess, &encParams, sizeof(encParams), NULL_PTR, 0);
+    if (rv != CKR_OK) {
+        record_result("MsgCrypt", "DecryptRoundTrip_ProduceCiphertext", "FAIL",
+                      "MsgEncBeg failed, could not produce real ciphertext to decrypt — RV=" + std::to_string(rv));
+        return;
+    }
+    CK_BYTE ciphertext[256];
+    CK_ULONG ctLen = sizeof(ciphertext);
+    rv = MsgEncNext(hSess, &encParams, sizeof(encParams), plaintext, ptLen, ciphertext, &ctLen, CKF_END_OF_MESSAGE);
+    if (rv != CKR_OK) {
+        record_result("MsgCrypt", "DecryptRoundTrip_ProduceCiphertext", "FAIL",
+                      "MsgEncNext failed, could not produce real ciphertext to decrypt — RV=" + std::to_string(rv));
+        return;
+    }
+    if (MsgEncFinal) MsgEncFinal(hSess);
+
+    rv = MsgDecInit(hSess, &encMech, hKey);
+    record_result("MsgCrypt", "C_MessageDecryptInit", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+    if (rv != CKR_OK) return;
+
+    CK_GCM_MESSAGE_PARAMS decParams = { iv, sizeof(iv), 0, CKG_NO_GENERATE, tag, 128 };
+    rv = MsgDecBeg(hSess, &decParams, sizeof(decParams), NULL_PTR, 0);
+    record_result("MsgCrypt", "C_DecryptMessageBegin", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+    if (rv != CKR_OK) return;
+
+    CK_BYTE plainOut[256];
+    CK_ULONG plainOutLen = sizeof(plainOut);
+    rv = MsgDecNext(hSess, &decParams, sizeof(decParams), ciphertext, ctLen, plainOut, &plainOutLen, CKF_END_OF_MESSAGE);
+    bool decOk = (rv == CKR_OK);
+    record_result("MsgCrypt", "C_DecryptMessageNext", decOk ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+
+    bool matches = decOk && plainOutLen == ptLen && memcmp(plainOut, plaintext, ptLen) == 0;
+    record_result("MsgCrypt", "DecryptRoundTrip_Streaming_PlaintextMatch",
+                  matches ? "PASS" : "FAIL",
+                  matches ? "streaming Encrypt(Begin/Next)->Decrypt(Begin/Next) byte-exact round trip, len=" + std::to_string(plainOutLen)
+                          : "decrypted plaintext did not byte-match the original — RV=" + std::to_string(rv));
+
+    if (MsgDecFinal) {
+        rv = MsgDecFinal(hSess);
+        record_result("MsgCrypt", "C_MessageDecryptFinal", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+    }
+
+    // ---- Phase 2: one-shot C_EncryptMessage -> C_DecryptMessage round trip ----
+    if (!MsgEncOneShot || !MsgDecOneShot) {
+        record_result("MsgCrypt", "Validation_OneShot", "SKIP", "one-shot v3.0 APIs missing");
+        return;
+    }
+
+    CK_BYTE iv2[12] = { '1','2','3','4','5','6','7','8','9','0','a','b' };
+    CK_BYTE tag2[16];
+    CK_GCM_MESSAGE_PARAMS encParams2 = { iv2, sizeof(iv2), 0, CKG_NO_GENERATE, tag2, 128 };
+
+    rv = MsgEncInit(hSess, &encMech, hKey);
+    if (rv != CKR_OK) {
+        record_result("MsgCrypt", "C_EncryptMessage", "FAIL", "MsgEncInit failed: RV=" + std::to_string(rv));
+        return;
+    }
+    CK_BYTE ciphertext2[256];
+    CK_ULONG ct2Len = sizeof(ciphertext2);
+    rv = MsgEncOneShot(hSess, &encParams2, sizeof(encParams2), NULL_PTR, 0, plaintext, ptLen, ciphertext2, &ct2Len);
+    record_result("MsgCrypt", "C_EncryptMessage", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+    if (MsgEncFinal) MsgEncFinal(hSess);
+    if (rv != CKR_OK) return;
+
+    rv = MsgDecInit(hSess, &encMech, hKey);
+    if (rv != CKR_OK) {
+        record_result("MsgCrypt", "C_DecryptMessage", "FAIL", "MsgDecInit failed: RV=" + std::to_string(rv));
+        return;
+    }
+    CK_GCM_MESSAGE_PARAMS decParams2 = { iv2, sizeof(iv2), 0, CKG_NO_GENERATE, tag2, 128 };
+    CK_BYTE plainOut2[256];
+    CK_ULONG plainOut2Len = sizeof(plainOut2);
+    rv = MsgDecOneShot(hSess, &decParams2, sizeof(decParams2), NULL_PTR, 0, ciphertext2, ct2Len, plainOut2, &plainOut2Len);
+    record_result("MsgCrypt", "C_DecryptMessage", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+
+    bool matches2 = (rv == CKR_OK) && plainOut2Len == ptLen && memcmp(plainOut2, plaintext, ptLen) == 0;
+    record_result("MsgCrypt", "DecryptRoundTrip_OneShot_PlaintextMatch",
+                  matches2 ? "PASS" : "FAIL",
+                  matches2 ? "one-shot C_EncryptMessage->C_DecryptMessage byte-exact round trip, len=" + std::to_string(plainOut2Len)
+                           : "one-shot decrypted plaintext did not byte-match the original");
+    if (MsgDecFinal) MsgDecFinal(hSess);
+}
+
+/* ---------------------------------------------------------------------------
+ * test_message_verification  (compliance-testing remediation, 2026-08-23, Gap 1)
+ *
+ * test_message_signatures() above only ever calls C_MessageSignInit,
+ * C_SignMessageBegin and C_SignMessageNext — the verify half of §5.19
+ * (C_MessageVerifyInit / C_VerifyMessage / C_VerifyMessageBegin /
+ * C_VerifyMessageNext / C_MessageVerifyFinal) plus the one-shot
+ * C_SignMessage form were untested anywhere in this file.
+ *
+ * This does a genuine seam test: produce a real RSA signature with the
+ * streaming Sign Begin/Next path, then verify it with the streaming Verify
+ * Begin/Next path (must accept a genuine signature AND reject a tampered
+ * one — proving this isn't a stub that always returns CKR_OK), then repeat
+ * with the one-shot C_SignMessage / C_VerifyMessage forms.
+ * ------------------------------------------------------------------------- */
+void test_message_verification() {
+    void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+    C_MessageSignInit_t SignInit = (C_MessageSignInit_t)dlsym(dlib, "C_MessageSignInit");
+    C_SignMessageBegin_t SignBegin = (C_SignMessageBegin_t)dlsym(dlib, "C_SignMessageBegin");
+    C_SignMessageNext_t SignNext = (C_SignMessageNext_t)dlsym(dlib, "C_SignMessageNext");
+    C_MessageSignFinal_t SignFinal = (C_MessageSignFinal_t)dlsym(dlib, "C_MessageSignFinal");
+    C_SignMessage_t SignOneShot = (C_SignMessage_t)dlsym(dlib, "C_SignMessage");
+
+    C_MessageVerifyInit_t VerifyInit = (C_MessageVerifyInit_t)dlsym(dlib, "C_MessageVerifyInit");
+    C_VerifyMessageBegin_t VerifyBegin = (C_VerifyMessageBegin_t)dlsym(dlib, "C_VerifyMessageBegin");
+    C_VerifyMessageNext_t VerifyNext = (C_VerifyMessageNext_t)dlsym(dlib, "C_VerifyMessageNext");
+    C_MessageVerifyFinal_t VerifyFinal = (C_MessageVerifyFinal_t)dlsym(dlib, "C_MessageVerifyFinal");
+    C_VerifyMessage_t VerifyOneShot = (C_VerifyMessage_t)dlsym(dlib, "C_VerifyMessage");
+
+    if (!SignInit || !SignBegin || !SignNext || !VerifyInit || !VerifyBegin || !VerifyNext) {
+        record_result("MsgVerify", "Validation", "SKIP", "v3.0 message sign/verify APIs missing");
+        return;
+    }
+
+    // RSA-1024 key pair — same pattern as test_message_signatures.
+    CK_OBJECT_CLASS privClass = CKO_PRIVATE_KEY;
+    CK_KEY_TYPE ktype = CKK_RSA;
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_ULONG modulusBits = 1024;
+    CK_BYTE publicExponent[] = { 3 };
+    CK_ATTRIBUTE privTmpl[] = {
+        { CKA_CLASS, &privClass, sizeof(privClass) },
+        { CKA_KEY_TYPE, &ktype, sizeof(ktype) },
+        { CKA_SIGN, &bTrue, sizeof(bTrue) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) }
+    };
+    CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY;
+    CK_ATTRIBUTE pubTmpl[] = {
+        { CKA_CLASS, &pubClass, sizeof(pubClass) },
+        { CKA_KEY_TYPE, &ktype, sizeof(ktype) },
+        { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+        { CKA_MODULUS_BITS, &modulusBits, sizeof(modulusBits) },
+        { CKA_PUBLIC_EXPONENT, publicExponent, sizeof(publicExponent) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) }
+    };
+    CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+    CK_MECHANISM kpMech = { CKM_RSA_PKCS_KEY_PAIR_GEN, NULL_PTR, 0 };
+    CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubTmpl, 6, privTmpl, 4, &hPub, &hPriv);
+    if (rv != CKR_OK) {
+        record_result("MsgVerify", "VerifyRoundTrip_GenKeyPair", "FAIL", "RV=" + std::to_string(rv));
+        return;
+    }
+
+    CK_MECHANISM signMech = { CKM_RSA_PKCS, NULL_PTR, 0 };
+    CK_BYTE msg[] = "PKCS#11 v3.2 message-based verify round trip";
+    CK_ULONG msgLen = sizeof(msg) - 1;
+
+    // ---- Phase 1: streaming C_SignMessageBegin/Next -> C_VerifyMessageBegin/Next ----
+    rv = SignInit(hSess, &signMech, hPriv);
+    if (rv != CKR_OK) {
+        record_result("MsgVerify", "VerifyRoundTrip_ProduceSignature", "FAIL",
+                      "SignInit failed, could not produce a real signature to verify — RV=" + std::to_string(rv));
+        return;
+    }
+    rv = SignBegin(hSess, NULL_PTR, 0);
+    if (rv != CKR_OK) {
+        record_result("MsgVerify", "VerifyRoundTrip_ProduceSignature", "FAIL",
+                      "SignBegin failed, could not produce a real signature to verify — RV=" + std::to_string(rv));
+        return;
+    }
+    CK_BYTE sig[512];
+    CK_ULONG sigLen = sizeof(sig);
+    rv = SignNext(hSess, NULL_PTR, 0, msg, msgLen, sig, &sigLen);
+    if (rv != CKR_OK) {
+        record_result("MsgVerify", "VerifyRoundTrip_ProduceSignature", "FAIL",
+                      "SignNext failed, could not produce a real signature to verify — RV=" + std::to_string(rv));
+        return;
+    }
+    if (SignFinal) SignFinal(hSess);
+
+    rv = VerifyInit(hSess, &signMech, hPub);
+    record_result("MsgVerify", "C_MessageVerifyInit", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+    if (rv != CKR_OK) return;
+
+    rv = VerifyBegin(hSess, NULL_PTR, 0);
+    record_result("MsgVerify", "C_VerifyMessageBegin", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+    if (rv != CKR_OK) return;
+
+    rv = VerifyNext(hSess, NULL_PTR, 0, msg, msgLen, sig, sigLen);
+    record_result("MsgVerify", "C_VerifyMessageNext", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+    record_result("MsgVerify", "VerifyRoundTrip_Streaming",
+                  rv == CKR_OK ? "PASS" : "FAIL",
+                  rv == CKR_OK ? "streaming Sign(Begin/Next)->Verify(Begin/Next) round trip verified a real RSA signature"
+                               : "verify rejected a signature produced by the sign half — RV=" + std::to_string(rv));
+
+    // Negative control: a tampered signature MUST fail verify — proves this
+    // isn't a stub that always returns CKR_OK.
+    if (rv == CKR_OK) {
+        if (VerifyFinal) VerifyFinal(hSess);
+        CK_RV rvNeg = VerifyInit(hSess, &signMech, hPub);
+        if (rvNeg == CKR_OK) rvNeg = VerifyBegin(hSess, NULL_PTR, 0);
+        if (rvNeg == CKR_OK) {
+            CK_BYTE badSig[512];
+            memcpy(badSig, sig, sigLen);
+            badSig[0] ^= 0xFF;
+            CK_RV rvBad = VerifyNext(hSess, NULL_PTR, 0, msg, msgLen, badSig, sigLen);
+            record_result("MsgVerify", "VerifyRoundTrip_TamperedSignatureRejected",
+                          rvBad != CKR_OK ? "PASS" : "FAIL",
+                          rvBad != CKR_OK ? "tampered signature correctly rejected — RV=" + std::to_string(rvBad)
+                                          : "tampered signature was incorrectly accepted as valid");
+        } else {
+            record_result("MsgVerify", "VerifyRoundTrip_TamperedSignatureRejected", "FAIL",
+                          "could not re-init verify context for negative check — RV=" + std::to_string(rvNeg));
+        }
+    }
+    if (VerifyFinal) VerifyFinal(hSess);
+
+    // ---- Phase 2: one-shot C_SignMessage -> C_VerifyMessage round trip ----
+    if (!SignOneShot || !VerifyOneShot) {
+        record_result("MsgVerify", "Validation_OneShot", "SKIP", "one-shot v3.0 APIs missing");
+        return;
+    }
+
+    rv = SignInit(hSess, &signMech, hPriv);
+    if (rv != CKR_OK) {
+        record_result("MsgVerify", "C_SignMessage", "FAIL", "SignInit failed: RV=" + std::to_string(rv));
+        return;
+    }
+    CK_BYTE sig2[512];
+    CK_ULONG sig2Len = sizeof(sig2);
+    rv = SignOneShot(hSess, NULL_PTR, 0, msg, msgLen, sig2, &sig2Len);
+    record_result("MsgVerify", "C_SignMessage", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+    if (SignFinal) SignFinal(hSess);
+    if (rv != CKR_OK) return;
+
+    rv = VerifyInit(hSess, &signMech, hPub);
+    if (rv != CKR_OK) {
+        record_result("MsgVerify", "C_VerifyMessage", "FAIL", "VerifyInit failed: RV=" + std::to_string(rv));
+        return;
+    }
+    rv = VerifyOneShot(hSess, NULL_PTR, 0, msg, msgLen, sig2, sig2Len);
+    record_result("MsgVerify", "C_VerifyMessage", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+    record_result("MsgVerify", "VerifyRoundTrip_OneShot",
+                  rv == CKR_OK ? "PASS" : "FAIL",
+                  rv == CKR_OK ? "one-shot C_SignMessage->C_VerifyMessage round trip verified a real RSA signature"
+                               : "one-shot verify rejected a signature produced by one-shot sign — RV=" + std::to_string(rv));
+    if (VerifyFinal) VerifyFinal(hSess);
+}
+
+/* ---------------------------------------------------------------------------
  * test_g7_sha3_384_rsa  (audit gap G7)
  *
  * The SHA3-224/256/512 RSA sign/verify variants were already supported, but
@@ -3708,6 +4049,456 @@ void test_g7_sha3_384_rsa() {
         record_result("G7Sha3Rsa", "C_SignInit_PSS_wrong_hashAlg",
                       rejected ? "PASS" : "FAIL",
                       "expected ARGUMENTS_BAD/MECHANISM_PARAM_INVALID, RV=" + std::to_string(rv));
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * test_g2_prehash_mechanisms  (compliance-testing remediation, 2026-08-23, Gap 2 pt 1)
+ *
+ * SoftHSM_slots.cpp's prepareSupportedMechanisms() advertises the full v3.2
+ * pre-hash ("HashML-DSA" / "HashSLH-DSA", §6.67.7 / §6.69.7) families: the
+ * generic CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA plus 10 hash-specific variants
+ * each. But cross-checking every CKM_HASH_ML_DSA and CKM_HASH_SLH_DSA
+ * reference already in this file (not the task brief's guess, the actual
+ * grep) shows:
+ *   - ML-DSA: only the pure form and _SHA512 / _SHA3_512 are exercised, in
+ *     test_pqc_dsa(). The generic CKM_HASH_ML_DSA plus 8 of the 10 specific
+ *     variants (_SHA224/_SHA256/_SHA384/_SHA3_224/_SHA3_256/_SHA3_384/
+ *     _SHAKE128/_SHAKE256) were never tested — 9 mechanisms.
+ *   - SLH-DSA: test_pqc_slh_dsa() only exercises the pure CKM_SLH_DSA form.
+ *     The generic CKM_HASH_SLH_DSA plus all 10 specific variants were never
+ *     tested — 11 mechanisms.
+ * That is 20 previously-untested mechanisms, not the 16 the task brief
+ * guessed (it under-counted the ML-DSA generic form and _SHA256, and the
+ * SLH-DSA generic form and _SHA256/_SHAKE256 — all confirmed genuinely
+ * untested by grepping this file, so all 20 are covered here for real).
+ *
+ * Each specific variant is a real end-to-end sign+verify round trip: the
+ * message is passed RAW to C_Sign (the engine does the pre-hash internally,
+ * per parseMLDSASignContext / the HASH_MLDSA_CASE / HASH_SLHDSA_CASE dispatch
+ * macros in SoftHSM_sign.cpp — confirmed by reading the dispatch code, not
+ * assumed). The generic form additionally exercises the
+ * CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash parameter path that the specific
+ * mechanisms bypass.
+ * ------------------------------------------------------------------------- */
+void test_g2_prehash_mechanisms() {
+    CK_BYTE msg[] = "PKCS#11 v3.2 pre-hash coverage-gap round trip";
+    CK_ULONG msgLen = sizeof(msg) - 1;
+
+    auto signVerifyRoundTrip = [&](const std::string& category, const std::string& name,
+                                    CK_OBJECT_HANDLE priv, CK_OBJECT_HANDLE pub,
+                                    CK_MECHANISM_TYPE mechType, CK_VOID_PTR param, CK_ULONG paramLen) {
+        if (!mech_advertised(mechType)) {
+            record_result(category, name, "SKIP", "mechanism not advertised");
+            return;
+        }
+        CK_MECHANISM mech = { mechType, param, paramLen };
+        CK_RV rv = fl->C_SignInit(hSess, &mech, priv);
+        if (rv != CKR_OK) {
+            record_result(category, name, "FAIL", "C_SignInit RV=" + std::to_string(rv));
+            return;
+        }
+        CK_BYTE sig[50000];
+        CK_ULONG sigLen = sizeof(sig);
+        rv = fl->C_Sign(hSess, msg, msgLen, sig, &sigLen);
+        if (rv != CKR_OK) {
+            record_result(category, name, "FAIL", "C_Sign RV=" + std::to_string(rv));
+            return;
+        }
+        rv = fl->C_VerifyInit(hSess, &mech, pub);
+        if (rv == CKR_OK) rv = fl->C_Verify(hSess, msg, msgLen, sig, sigLen);
+        record_result(category, name, rv == CKR_OK ? "PASS" : "FAIL",
+                      rv == CKR_OK ? "real sign+verify round trip OK, sigLen=" + std::to_string(sigLen)
+                                   : "verify failed RV=" + std::to_string(rv));
+    };
+
+    // ---- ML-DSA pre-hash family (9 previously-untested mechanisms) ----
+    {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY;
+        CK_OBJECT_CLASS privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE ktypeDsa = 0x0000004a; // CKK_ML_DSA
+        CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+        CK_ULONG paramSetDsa = 2; // CKP_ML_DSA_65
+
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS, &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE, &ktypeDsa, sizeof(ktypeDsa) },
+            { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &paramSetDsa, sizeof(paramSetDsa) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS, &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &ktypeDsa, sizeof(ktypeDsa) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &paramSetDsa, sizeof(paramSetDsa) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }
+        };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_MECHANISM kpMech = { CKM_ML_DSA_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubTmpl, 5, privTmpl, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result("DSA", "PreHashGap_GenerateKey_65", "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            record_result("DSA", "PreHashGap_GenerateKey_65", "PASS", "Gen ML-DSA-65 for pre-hash coverage");
+
+            // Generic CKM_HASH_ML_DSA needs an explicit CK_HASH_SIGN_ADDITIONAL_CONTEXT.
+            CK_HASH_SIGN_ADDITIONAL_CONTEXT genCtx = { CKH_HEDGE_PREFERRED, NULL_PTR, 0, CKM_SHA256 };
+            signVerifyRoundTrip("DSA", "PreHash65_Generic_HASH_ML_DSA_explicitSHA256",
+                                 hPriv, hPub, CKM_HASH_ML_DSA, &genCtx, sizeof(genCtx));
+
+            // The 8 specific pre-hash variants not already covered by test_pqc_dsa
+            // (SHA512 and SHA3_512 are covered there).
+            struct { CK_MECHANISM_TYPE mech; const char* name; } specific[] = {
+                { CKM_HASH_ML_DSA_SHA224,   "PreHash65_SHA224"   },
+                { CKM_HASH_ML_DSA_SHA256,   "PreHash65_SHA256"   },
+                { CKM_HASH_ML_DSA_SHA384,   "PreHash65_SHA384"   },
+                { CKM_HASH_ML_DSA_SHA3_224, "PreHash65_SHA3_224" },
+                { CKM_HASH_ML_DSA_SHA3_256, "PreHash65_SHA3_256" },
+                { CKM_HASH_ML_DSA_SHA3_384, "PreHash65_SHA3_384" },
+                { CKM_HASH_ML_DSA_SHAKE128, "PreHash65_SHAKE128" },
+                { CKM_HASH_ML_DSA_SHAKE256, "PreHash65_SHAKE256" },
+            };
+            for (auto& s : specific)
+                signVerifyRoundTrip("DSA", s.name, hPriv, hPub, s.mech, NULL_PTR, 0);
+        }
+    }
+
+    // ---- SLH-DSA pre-hash family (11 previously-untested mechanisms) ----
+    {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY;
+        CK_OBJECT_CLASS privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE ktypeDsa = 0x0000004b; // CKK_SLH_DSA
+        CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+        CK_ULONG paramSetDsa = 1; // CKP_SLH_DSA_SHA2_128S (fastest param set — 11 signatures below)
+
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS, &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE, &ktypeDsa, sizeof(ktypeDsa) },
+            { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &paramSetDsa, sizeof(paramSetDsa) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS, &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &ktypeDsa, sizeof(ktypeDsa) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) },
+            { CKA_PARAMETER_SET, &paramSetDsa, sizeof(paramSetDsa) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }
+        };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_MECHANISM kpMech = { 0x0000002dUL /* CKM_SLH_DSA_KEY_PAIR_GEN */, NULL_PTR, 0 };
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubTmpl, 5, privTmpl, 5, &hPub, &hPriv);
+        if (rv != CKR_OK) {
+            record_result("SLHDSA", "PreHashGap_GenerateKey_128S", "FAIL", "RV=" + std::to_string(rv));
+        } else {
+            record_result("SLHDSA", "PreHashGap_GenerateKey_128S", "PASS",
+                          "Gen SLH-DSA-SHA2-128S for pre-hash coverage");
+
+            CK_HASH_SIGN_ADDITIONAL_CONTEXT genCtx = { CKH_HEDGE_PREFERRED, NULL_PTR, 0, CKM_SHA256 };
+            signVerifyRoundTrip("SLHDSA", "PreHashSLH_Generic_HASH_SLH_DSA_explicitSHA256",
+                                 hPriv, hPub, CKM_HASH_SLH_DSA, &genCtx, sizeof(genCtx));
+
+            struct { CK_MECHANISM_TYPE mech; const char* name; } specific[] = {
+                { CKM_HASH_SLH_DSA_SHA224,   "PreHashSLH_SHA224"   },
+                { CKM_HASH_SLH_DSA_SHA256,   "PreHashSLH_SHA256"   },
+                { CKM_HASH_SLH_DSA_SHA384,   "PreHashSLH_SHA384"   },
+                { CKM_HASH_SLH_DSA_SHA512,   "PreHashSLH_SHA512"   },
+                { CKM_HASH_SLH_DSA_SHA3_224, "PreHashSLH_SHA3_224" },
+                { CKM_HASH_SLH_DSA_SHA3_256, "PreHashSLH_SHA3_256" },
+                { CKM_HASH_SLH_DSA_SHA3_384, "PreHashSLH_SHA3_384" },
+                { CKM_HASH_SLH_DSA_SHA3_512, "PreHashSLH_SHA3_512" },
+                { CKM_HASH_SLH_DSA_SHAKE128, "PreHashSLH_SHAKE128" },
+                { CKM_HASH_SLH_DSA_SHAKE256, "PreHashSLH_SHAKE256" },
+            };
+            for (auto& s : specific)
+                signVerifyRoundTrip("SLHDSA", s.name, hPriv, hPub, s.mech, NULL_PTR, 0);
+        }
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * test_g2_sha3_mechanism_tail  (compliance-testing remediation, 2026-08-23, Gap 2 pt 2)
+ *
+ * The task brief guessed a 13-mechanism tail including HMAC_GENERAL and
+ * SHA3 KEY_DERIVATION variants. Cross-checking SoftHSM_slots.cpp's
+ * prepareSupportedMechanisms() (the actual advertised list) shows NONE of
+ * CKM_SHA3_*_HMAC_GENERAL, CKM_SHA{256,384,512}_HMAC_GENERAL, or
+ * CKM_SHA3_{256,384,512}_KEY_DERIVATION are advertised at all — they are
+ * not gaps because they are not falsely-advertised capabilities. The real
+ * 13-strong tail, confirmed by grepping every CKM_ reference already in
+ * this file against the advertised table, is:
+ *   - 2 bare digests:      CKM_SHA3_224, CKM_SHA3_512
+ *                          (SHA3_256 has DigestInit-only coverage via
+ *                           test_sha3_hashes(); SHA3_384 is untouched as a
+ *                           bare digest but IS covered via RSA in G7)
+ *   - 4 HMACs:              CKM_SHA3_{224,256,384,512}_HMAC
+ *   - 3 RSA PKCS#1 v1.5:    CKM_SHA3_{224,256,512}_RSA_PKCS
+ *                          (384 already covered by test_g7_sha3_384_rsa)
+ *   - 3 RSA PSS:            CKM_SHA3_{224,256,512}_RSA_PKCS_PSS
+ *                          (384 already covered by test_g7_sha3_384_rsa)
+ *   - 1 KDF:                CKM_SHAKE_256_KEY_DERIVATION
+ * 2+4+3+3+1 = 13, matching the task brief's count but not its composition.
+ * ------------------------------------------------------------------------- */
+void test_g2_sha3_mechanism_tail() {
+    // 1. Bare digests: CKM_SHA3_224, CKM_SHA3_512. A real digest computation
+    //    (not just DigestInit) checked for the correct output length, for
+    //    determinism (same input -> same output), and for input-dependence
+    //    (different input -> different output) — rules out a stub that
+    //    returns a fixed-length zero buffer or an Init-only no-op.
+    {
+        struct { CK_MECHANISM_TYPE mech; const char* name; CK_ULONG expectLen; } digests[] = {
+            { CKM_SHA3_224, "Digest_SHA3_224", 28 },
+            { CKM_SHA3_512, "Digest_SHA3_512", 64 },
+        };
+        CK_BYTE msgA[] = "abc";
+        CK_BYTE msgB[] = "a different message for the non-constant-output check";
+        for (auto& d : digests) {
+            if (!mech_advertised(d.mech)) {
+                record_result("SHA-3", d.name, "SKIP", "mechanism not advertised");
+                continue;
+            }
+            CK_MECHANISM mech1 = { d.mech, NULL_PTR, 0 };
+            CK_BYTE out1[128]; CK_ULONG out1Len = sizeof(out1);
+            CK_RV rv = fl->C_DigestInit(hSess, &mech1);
+            if (rv == CKR_OK) rv = fl->C_Digest(hSess, msgA, sizeof(msgA)-1, out1, &out1Len);
+            if (rv != CKR_OK) {
+                record_result("SHA-3", d.name, "FAIL", "digest RV=" + std::to_string(rv));
+                continue;
+            }
+            CK_MECHANISM mech2 = { d.mech, NULL_PTR, 0 };
+            CK_BYTE out2[128]; CK_ULONG out2Len = sizeof(out2);
+            CK_RV rv2 = fl->C_DigestInit(hSess, &mech2);
+            if (rv2 == CKR_OK) rv2 = fl->C_Digest(hSess, msgA, sizeof(msgA)-1, out2, &out2Len);
+            bool deterministic = (rv2 == CKR_OK) && out2Len == out1Len && memcmp(out1, out2, out1Len) == 0;
+
+            CK_MECHANISM mech3 = { d.mech, NULL_PTR, 0 };
+            CK_BYTE out3[128]; CK_ULONG out3Len = sizeof(out3);
+            CK_RV rv3 = fl->C_DigestInit(hSess, &mech3);
+            if (rv3 == CKR_OK) rv3 = fl->C_Digest(hSess, msgB, sizeof(msgB)-1, out3, &out3Len);
+            bool nonConstant = (rv3 == CKR_OK) && !(out3Len == out1Len && memcmp(out1, out3, out1Len) == 0);
+
+            bool lenOk = (out1Len == d.expectLen);
+            bool pass = lenOk && deterministic && nonConstant;
+            record_result("SHA-3", d.name, pass ? "PASS" : "FAIL",
+                          pass ? "len=" + std::to_string(out1Len) + " deterministic, input-dependent"
+                               : "len=" + std::to_string(out1Len) + " (want " + std::to_string(d.expectLen) +
+                                 ") deterministic=" + std::to_string(deterministic) +
+                                 " nonConstant=" + std::to_string(nonConstant));
+        }
+    }
+
+    // 2. HMAC family: CKM_SHA3_{224,256,384,512}_HMAC — real sign+verify round
+    //    trip with a MAC-length assertion, same pattern as test_ripemd160_hmac.
+    {
+        struct { CK_MECHANISM_TYPE mech; const char* name; CK_ULONG expectLen; } hmacs[] = {
+            { CKM_SHA3_224_HMAC, "HMAC_SHA3_224", 28 },
+            { CKM_SHA3_256_HMAC, "HMAC_SHA3_256", 32 },
+            { CKM_SHA3_384_HMAC, "HMAC_SHA3_384", 48 },
+            { CKM_SHA3_512_HMAC, "HMAC_SHA3_512", 64 },
+        };
+        for (auto& h : hmacs) {
+            if (!mech_advertised(h.mech)) {
+                record_result("SHA-3", h.name, "SKIP", "mechanism not advertised");
+                continue;
+            }
+            CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+            CK_KEY_TYPE genType = CKK_GENERIC_SECRET;
+            CK_BBOOL bTrue = CK_TRUE;
+            // Key length == the mechanism's own digest output size, which is
+            // also kMacMechTable's minKeyBytes for every SHA3 HMAC entry
+            // (SoftHSM_sign.cpp) — anything shorter is correctly rejected by
+            // both MacSignInit and MacVerifyInit (a genuine engine asymmetry
+            // between the two was found and fixed here, 2026-08-23: Sign used
+            // to silently accept a too-short key and produce a MAC that could
+            // then never be verified; see MacSignInit's minSize comment).
+            CK_ULONG keyLen = h.expectLen;
+            CK_ATTRIBUTE tmpl[] = {
+                { CKA_CLASS, &secClass, sizeof(secClass) },
+                { CKA_KEY_TYPE, &genType, sizeof(genType) },
+                { CKA_VALUE_LEN, &keyLen, sizeof(keyLen) },
+                { CKA_SIGN, &bTrue, sizeof(bTrue) },
+                { CKA_VERIFY, &bTrue, sizeof(bTrue) }
+            };
+            CK_OBJECT_HANDLE hKey = 0;
+            CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+            CK_RV rv = fl->C_GenerateKey(hSess, &genMech, tmpl, 5, &hKey);
+            if (rv != CKR_OK) {
+                record_result("SHA-3", h.name, "FAIL", "key gen failed RV=" + std::to_string(rv));
+                continue;
+            }
+            CK_MECHANISM macMech = { h.mech, NULL_PTR, 0 };
+            CK_BYTE msg[] = "abc";
+            CK_BYTE mac[128]; CK_ULONG macLen = sizeof(mac);
+            rv = fl->C_SignInit(hSess, &macMech, hKey);
+            if (rv == CKR_OK) rv = fl->C_Sign(hSess, msg, 3, mac, &macLen);
+            bool signOk = (rv == CKR_OK) && (macLen == h.expectLen);
+            if (!signOk) {
+                record_result("SHA-3", h.name, "FAIL",
+                              "sign failed or wrong length RV=" + std::to_string(rv) +
+                              " len=" + std::to_string(macLen) + " (want " + std::to_string(h.expectLen) + ")");
+                continue;
+            }
+            rv = fl->C_VerifyInit(hSess, &macMech, hKey);
+            if (rv == CKR_OK) rv = fl->C_Verify(hSess, msg, 3, mac, macLen);
+            record_result("SHA-3", h.name, rv == CKR_OK ? "PASS" : "FAIL",
+                          rv == CKR_OK ? "sign+verify round trip OK, macLen=" + std::to_string(macLen)
+                                       : "verify failed RV=" + std::to_string(rv));
+        }
+    }
+
+    // 3. RSA sign families: CKM_SHA3_{224,256,512}_RSA_PKCS and _PSS variants
+    //    (384 already covered by test_g7_sha3_384_rsa). One RSA-2048 keypair
+    //    reused across all six mechanisms, mirroring G7's structure.
+    {
+        CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY;
+        CK_OBJECT_CLASS privClass = CKO_PRIVATE_KEY;
+        CK_KEY_TYPE ktypeRsa = CKK_RSA;
+        CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+        CK_ULONG modulusBits = 2048;
+        CK_BYTE pubExp[] = { 0x01, 0x00, 0x01 };
+        CK_ATTRIBUTE pubTmpl[] = {
+            { CKA_CLASS, &pubClass, sizeof(pubClass) },
+            { CKA_KEY_TYPE, &ktypeRsa, sizeof(ktypeRsa) },
+            { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+            { CKA_MODULUS_BITS, &modulusBits, sizeof(modulusBits) },
+            { CKA_PUBLIC_EXPONENT, pubExp, sizeof(pubExp) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }
+        };
+        CK_ATTRIBUTE privTmpl[] = {
+            { CKA_CLASS, &privClass, sizeof(privClass) },
+            { CKA_KEY_TYPE, &ktypeRsa, sizeof(ktypeRsa) },
+            { CKA_SIGN, &bTrue, sizeof(bTrue) },
+            { CKA_TOKEN, &bFalse, sizeof(bFalse) }
+        };
+        CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+        CK_MECHANISM kpMech = { CKM_RSA_PKCS_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_RV rv = fl->C_GenerateKeyPair(hSess, &kpMech, pubTmpl, 6, privTmpl, 4, &hPub, &hPriv);
+        record_result("SHA-3", "RsaTail_GenerateRSA2048", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+        if (rv == CKR_OK) {
+            CK_BYTE msg[] = "SHA3 RSA mechanism-tail round-trip test message";
+
+            struct { CK_MECHANISM_TYPE pkcs; CK_MECHANISM_TYPE pss; CK_MECHANISM_TYPE hashAlg;
+                     CK_RSA_PKCS_MGF_TYPE mgf; CK_ULONG sLen; const char* tag; } fam[] = {
+                { CKM_SHA3_224_RSA_PKCS, CKM_SHA3_224_RSA_PKCS_PSS, CKM_SHA3_224, CKG_MGF1_SHA3_224, 28, "SHA3_224" },
+                { CKM_SHA3_256_RSA_PKCS, CKM_SHA3_256_RSA_PKCS_PSS, CKM_SHA3_256, CKG_MGF1_SHA3_256, 32, "SHA3_256" },
+                { CKM_SHA3_512_RSA_PKCS, CKM_SHA3_512_RSA_PKCS_PSS, CKM_SHA3_512, CKG_MGF1_SHA3_512, 64, "SHA3_512" },
+            };
+            for (auto& f : fam) {
+                // PKCS#1 v1.5
+                if (!mech_advertised(f.pkcs)) {
+                    record_result("SHA-3", std::string("RsaTail_") + f.tag + "_PKCS", "SKIP", "mechanism not advertised");
+                } else {
+                    CK_MECHANISM signMech = { f.pkcs, NULL_PTR, 0 };
+                    CK_RV rv2 = fl->C_SignInit(hSess, &signMech, hPriv);
+                    if (rv2 == CKR_OK) {
+                        CK_BYTE sig[256]; CK_ULONG sigLen = sizeof(sig);
+                        rv2 = fl->C_Sign(hSess, msg, sizeof(msg)-1, sig, &sigLen);
+                        if (rv2 == CKR_OK) {
+                            rv2 = fl->C_VerifyInit(hSess, &signMech, hPub);
+                            if (rv2 == CKR_OK) rv2 = fl->C_Verify(hSess, msg, sizeof(msg)-1, sig, sigLen);
+                        }
+                    }
+                    record_result("SHA-3", std::string("RsaTail_") + f.tag + "_PKCS",
+                                  rv2 == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv2));
+                }
+
+                // PKCS#1 PSS
+                if (!mech_advertised(f.pss)) {
+                    record_result("SHA-3", std::string("RsaTail_") + f.tag + "_PSS", "SKIP", "mechanism not advertised");
+                } else {
+                    CK_RSA_PKCS_PSS_PARAMS pssParams = { f.hashAlg, f.mgf, f.sLen };
+                    CK_MECHANISM signMech = { f.pss, &pssParams, sizeof(pssParams) };
+                    CK_RV rv3 = fl->C_SignInit(hSess, &signMech, hPriv);
+                    if (rv3 == CKR_OK) {
+                        CK_BYTE sig[256]; CK_ULONG sigLen = sizeof(sig);
+                        rv3 = fl->C_Sign(hSess, msg, sizeof(msg)-1, sig, &sigLen);
+                        if (rv3 == CKR_OK) {
+                            rv3 = fl->C_VerifyInit(hSess, &signMech, hPub);
+                            if (rv3 == CKR_OK) rv3 = fl->C_Verify(hSess, msg, sizeof(msg)-1, sig, sigLen);
+                        }
+                    }
+                    record_result("SHA-3", std::string("RsaTail_") + f.tag + "_PSS",
+                                  rv3 == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv3));
+                }
+            }
+        }
+    }
+
+    // 4. KDF: CKM_SHAKE_256_KEY_DERIVATION — XOF over the base key, squeezed to
+    //    CKA_VALUE_LEN (SoftHSM_keygen.cpp). No independent KAT is asserted;
+    //    instead this proves the output is (a) exactly the requested length,
+    //    (b) deterministic for a given base key, and (c) actually a function
+    //    of the key (a different base key yields a different output) — ruling
+    //    out a stub that returns zeros or a fixed buffer.
+    {
+        if (!mech_advertised(CKM_SHAKE_256_KEY_DERIVATION)) {
+            record_result("KDF", "CKM_SHAKE_256_KEY_DERIVATION", "SKIP", "mechanism not advertised");
+        } else {
+            CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+            CK_KEY_TYPE genType = CKK_GENERIC_SECRET;
+            CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+            CK_ULONG baseLen = 32;
+            CK_ATTRIBUTE baseTmpl[] = {
+                { CKA_CLASS, &secClass, sizeof(secClass) },
+                { CKA_KEY_TYPE, &genType, sizeof(genType) },
+                { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+                { CKA_VALUE_LEN, &baseLen, sizeof(baseLen) },
+                { CKA_DERIVE, &bTrue, sizeof(bTrue) }
+            };
+            CK_OBJECT_HANDLE hBase1 = 0, hBase2 = 0;
+            CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+            CK_RV rv = fl->C_GenerateKey(hSess, &genMech, baseTmpl, 5, &hBase1);
+            if (rv == CKR_OK) rv = fl->C_GenerateKey(hSess, &genMech, baseTmpl, 5, &hBase2);
+            if (rv != CKR_OK) {
+                record_result("KDF", "CKM_SHAKE_256_KEY_DERIVATION", "FAIL",
+                              "base key gen failed RV=" + std::to_string(rv));
+            } else {
+                CK_ULONG outLen = 96; // matches the X-Wing use case documented in SoftHSM_slots.cpp
+                CK_ATTRIBUTE deriveTmpl[] = {
+                    { CKA_CLASS, &secClass, sizeof(secClass) },
+                    { CKA_KEY_TYPE, &genType, sizeof(genType) },
+                    { CKA_VALUE_LEN, &outLen, sizeof(outLen) },
+                    { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+                    { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+                    { CKA_SENSITIVE, &bFalse, sizeof(bFalse) }
+                };
+                CK_MECHANISM shakeMech = { CKM_SHAKE_256_KEY_DERIVATION, NULL_PTR, 0 };
+
+                CK_OBJECT_HANDLE hDerived1 = 0, hDerived2 = 0, hDerivedOther = 0;
+                CK_RV rv1 = fl->C_DeriveKey(hSess, &shakeMech, hBase1, deriveTmpl, 6, &hDerived1);
+                CK_RV rv2 = fl->C_DeriveKey(hSess, &shakeMech, hBase1, deriveTmpl, 6, &hDerived2);
+                CK_RV rv3 = fl->C_DeriveKey(hSess, &shakeMech, hBase2, deriveTmpl, 6, &hDerivedOther);
+
+                if (rv1 != CKR_OK || rv2 != CKR_OK || rv3 != CKR_OK) {
+                    record_result("KDF", "CKM_SHAKE_256_KEY_DERIVATION", "FAIL",
+                                  "derive RV1=" + std::to_string(rv1) + " RV2=" + std::to_string(rv2) +
+                                  " RV3=" + std::to_string(rv3));
+                } else {
+                    CK_ATTRIBUTE getVal1 = { CKA_VALUE, NULL_PTR, 0 };
+                    CK_ATTRIBUTE getVal2 = { CKA_VALUE, NULL_PTR, 0 };
+                    CK_ATTRIBUTE getVal3 = { CKA_VALUE, NULL_PTR, 0 };
+                    fl->C_GetAttributeValue(hSess, hDerived1, &getVal1, 1);
+                    fl->C_GetAttributeValue(hSess, hDerived2, &getVal2, 1);
+                    fl->C_GetAttributeValue(hSess, hDerivedOther, &getVal3, 1);
+                    std::vector<CK_BYTE> v1(getVal1.ulValueLen), v2(getVal2.ulValueLen), v3(getVal3.ulValueLen);
+                    getVal1.pValue = v1.data(); getVal2.pValue = v2.data(); getVal3.pValue = v3.data();
+                    fl->C_GetAttributeValue(hSess, hDerived1, &getVal1, 1);
+                    fl->C_GetAttributeValue(hSess, hDerived2, &getVal2, 1);
+                    fl->C_GetAttributeValue(hSess, hDerivedOther, &getVal3, 1);
+
+                    bool lenOk = (v1.size() == outLen);
+                    bool deterministic = (v1.size() == v2.size()) && (memcmp(v1.data(), v2.data(), v1.size()) == 0);
+                    bool keyDependent = !((v1.size() == v3.size()) && (memcmp(v1.data(), v3.data(), v1.size()) == 0));
+                    bool pass = lenOk && deterministic && keyDependent;
+                    record_result("KDF", "CKM_SHAKE_256_KEY_DERIVATION", pass ? "PASS" : "FAIL",
+                                  pass ? "len=" + std::to_string(v1.size()) + " deterministic, key-dependent XOF output"
+                                       : "len=" + std::to_string(v1.size()) + " (want " + std::to_string(outLen) +
+                                         ") deterministic=" + std::to_string(deterministic) +
+                                         " keyDependent=" + std::to_string(keyDependent));
+                }
+            }
+        }
     }
 }
 
@@ -4367,8 +5158,14 @@ void test_kmac() {
     // — and the failure path recorded nothing, so the whole "KMAC" category
     // silently produced zero rows in every report generated since it was
     // added. Found 2026-08-23 regenerating cpp_compliance_report at HEAD.
+    //
+    // keyLen=32 (not the KMAC-128-sized 16 this used before): MacSignInit
+    // now enforces kMacMechTable's minKeyBytes symmetrically with
+    // MacVerifyInit (Gap 2 fix, same date) — CKM_KMAC_256's minimum is 32
+    // bytes, so a 16-byte key would newly fail C_SignInit for that mech.
+    // 32 bytes clears both KMAC_128 (min 16) and KMAC_256 (min 32).
     CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
-    CK_ULONG keyLen = 16;
+    CK_ULONG keyLen = 32;
     CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
     CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
     CK_BBOOL bTrue = CK_TRUE;
@@ -8506,6 +9303,8 @@ int main(int argc, char** argv) {
         refresh_session(); test_v32_kdfs();
         refresh_session(); test_message_signatures();
         refresh_session(); test_message_encryption();
+        refresh_session(); test_message_decryption();
+        refresh_session(); test_message_verification();
     }
     if (opt_category == "all" || opt_category == "pqc-slh") {
         refresh_session(); test_pqc_slh_dsa();
@@ -8559,6 +9358,12 @@ int main(int argc, char** argv) {
     }
     if (opt_category == "all" || opt_category == "g7-sha3rsa") {
         refresh_session(); test_g7_sha3_384_rsa();
+    }
+    if (opt_category == "all" || opt_category == "g2-prehash") {
+        refresh_session(); test_g2_prehash_mechanisms();
+    }
+    if (opt_category == "all" || opt_category == "g2-sha3tail") {
+        refresh_session(); test_g2_sha3_mechanism_tail();
     }
     if (opt_category == "all" || opt_category == "g8-dual") {
         refresh_session(); test_g8_dual_functions();
