@@ -31,16 +31,16 @@ use pqctoday_kmip::auditlog::{AuditSink, RingSink};
 use pqctoday_kmip::error::ResultReason;
 use pqctoday_kmip::kmip30::{
     AdjustAttributeRequest, AdjustmentType, ArchiveRequest, Attribute,
-    CreateKeyPairRequest, CreateRequest, DeactivateRequest, DerivationMethod,
+    Constraint, CreateKeyPairRequest, CreateRequest, DeactivateRequest, DerivationMethod,
     DerivationParameters, DeriveKeyRequest, DiscoverVersionsRequest, EndpointRole, ExportRequest,
     GetAttributesRequest, GetConstraintsRequest, GetRequest, GetUsageAllocationRequest,
     ImportRequest, KeyBlock, KeyFormatType, KmipAlgorithm, LocateRequest, LoginRequest,
     LogoutRequest, ObjectDefaults, ObjectType, PingRequest, ReKeyKeyPairRequest, ReKeyRequest,
-    RecoverRequest, SetAttributeRequest, SetDefaultsRequest, SetEndpointRoleRequest, State,
-    UsageMask,
+    RecoverRequest, SetAttributeRequest, SetConstraintsRequest, SetDefaultsRequest,
+    SetEndpointRoleRequest, State, UsageMask,
 };
 use pqctoday_kmip::ops::allocation_and_config::{
-    get_constraints, get_usage_allocation, set_defaults, set_endpoint_role,
+    get_constraints, get_usage_allocation, set_constraints, set_defaults, set_endpoint_role,
 };
 use pqctoday_kmip::ops::attribute_mutate::{adjust_attribute, set_attribute};
 use pqctoday_kmip::ops::create::create;
@@ -720,6 +720,62 @@ fn get_constraints_returns_structure_with_expected_bound() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+// ── SetConstraints ────────────────────────────────────────────────────────────
+
+/// §6.1.59: a client-set constraints list genuinely replaces the
+/// engine-bounds default, and an explicit empty list is a real override
+/// ("no constraints"), not merely "unset" — Get Constraints (§6.1.28)
+/// reads either back exactly.
+///
+/// `allocation_and_config.rs`'s own unit tests
+/// (`set_constraints_then_get_round_trips`,
+/// `set_constraints_empty_list_overrides_the_default`,
+/// `set_constraints_replaces_not_merges`) already prove this store-mutation
+/// logic at the handler level, against a lightweight test `Deps` with no
+/// engine attached. This test closes a narrower, real gap: Set Constraints
+/// was, alone among its K19 sibling cluster (Get Constraints/Get Usage
+/// Allocation/Set Defaults — all covered above in THIS file), the one
+/// operation with no entry in the real-engine e2e suite that is this
+/// file's whole reason to exist — its only prior reference here was a
+/// free-text `"unit:ops::allocation_and_config"` string in
+/// `coverage_map()` that the meta-test below never actually resolved
+/// against a real test. Local integration coverage only — like every
+/// other test in this file, the OASIS corpus never replays Set
+/// Constraints (see the module doc comment).
+#[test]
+fn set_constraints_replaces_default_and_get_constraints_reads_it_back() {
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    // Before any Set Constraints call, Get Constraints reports the
+    // engine-bounds default (proven by get_constraints_returns_structure_
+    // with_expected_bound above) — a real AES SymmetricKey constraint is
+    // already present.
+    let before = get_constraints(&deps, GetConstraintsRequest, "sc-before").unwrap();
+    assert!(!before.constraints.is_empty(), "engine-bounds default is non-empty before any Set");
+
+    // Set Constraints replaces it entirely with a client-supplied list.
+    let custom = vec![Constraint {
+        object_types: vec![ObjectType::SymmetricKey],
+        attributes: vec![
+            Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+            Attribute::CryptographicLength(128),
+        ],
+    }];
+    set_constraints(&deps, SetConstraintsRequest { constraints: custom.clone() }, "sc-set").unwrap();
+    let after = get_constraints(&deps, GetConstraintsRequest, "sc-get").unwrap();
+    assert_eq!(after.constraints, custom, "Get Constraints reads back exactly what was Set, replacing the default");
+
+    // An explicit empty list is a real override, not "unset" / "reverts
+    // to default" — the store distinguishes "never called" from "called
+    // with zero constraints".
+    set_constraints(&deps, SetConstraintsRequest { constraints: vec![] }, "sc-clear").unwrap();
+    let cleared = get_constraints(&deps, GetConstraintsRequest, "sc-get2").unwrap();
+    assert!(cleared.constraints.is_empty(), "an explicit empty Set Constraints overrides the default with nothing");
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
 // ── SetDefaults ──────────────────────────────────────────────────────────────
 
 /// §6.1.58: SetDefaults for SymmetricKey → a later Create that OMITS the
@@ -1189,6 +1245,26 @@ fn certify_issues_certificate_get_able_with_links() {
 //   "e2e:op_coverage"     → a test in THIS file (the 18-op P1.3 gap)
 //   "e2e:native_bridge"   → a real-engine test in native_bridge_e2e.rs
 //   "unit:<module>"       → handler-level #[cfg(test)] in src/ops/
+//
+// KNOWN GAP (2026-08-23 compliance-testing audit): `coverage_map_covers_
+// every_handled_operation` below only checks that this map's KEY SET
+// equals HANDLED_OPERATIONS — it never parses or resolves the free-text
+// VALUE strings against anything. A value can name a test function that
+// was renamed or deleted, or one that never existed, and the meta-test
+// still passes; "every operation has coverage" is enforced at the level
+// of "someone wrote a string naming a test", not "a test naming that
+// operation actually exists and runs green". This was caught concretely
+// for `SetConstraints`, whose only entry used to be the bare string
+// "unit:ops::allocation_and_config" with no function name at all — never
+// resolved, so a maintainer had to go read the source to learn whether
+// real coverage existed (it did, just not in the tier this file tracks;
+// see the Set Constraints test below). Hardening this properly — parsing
+// each value's `e2e:<file>(<fn1>, <fn2>, ...)` / `unit:<module>(<fn>...)`
+// shape and asserting every named function is a real `#[test]` in the
+// named file/module — is a real, tractable follow-up (a text-scan over
+// `include_str!` of the referenced source files, not a proc-macro or
+// build-script) but was out of scope for the pass that added this
+// comment; do not read the CURRENT meta-test as having done it.
 fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation, &'static str> {
     use pqctoday_kmip::kmip30::Operation as Op;
     [
@@ -1205,7 +1281,7 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
         (Op::ReKeyKeyPair, "e2e:op_coverage(rekey_key_pair_mints_both_halves_with_links_and_retires_originals)"),
         (Op::GetUsageAllocation, "e2e:op_coverage(get_usage_allocation_decrements_then_rejects_over_budget)"),
         (Op::GetConstraints, "e2e:op_coverage(get_constraints_returns_structure_with_expected_bound)"),
-        (Op::SetConstraints, "unit:ops::allocation_and_config"),
+        (Op::SetConstraints, "e2e:op_coverage(set_constraints_replaces_default_and_get_constraints_reads_it_back) + unit:ops::allocation_and_config(set_constraints_then_get_round_trips, set_constraints_empty_list_overrides_the_default, set_constraints_replaces_not_merges)"),
         (Op::SetDefaults, "e2e:op_coverage(set_defaults_inherited_by_create_unless_client_overrides)"),
         (Op::SetEndpointRole, "e2e:op_coverage(set_endpoint_role_server_ok_client_unsupported)"),
         (Op::DiscoverVersions, "e2e:op_coverage(discover_versions_intersection_semantics)"),
@@ -1314,6 +1390,12 @@ fn pkcs11_get_info_returns_real_ck_info_bytes_against_real_engine() {
 /// The coverage checklist's key set MUST equal `HANDLED_OPERATIONS`
 /// exactly. A new handled op without a coverage entry — or a stale entry
 /// for an op that was removed — fails here.
+///
+/// Deliberately weaker than the name suggests: this only proves the KEY
+/// SET is complete, not that each entry's free-text value names a test
+/// that actually exists — see the KNOWN GAP note on `coverage_map()`
+/// above. Do not read a green run of this test as proof that every
+/// named test is real.
 #[test]
 fn coverage_map_covers_every_handled_operation() {
     use std::collections::HashSet;

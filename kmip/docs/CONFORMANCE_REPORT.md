@@ -10,7 +10,10 @@
 > differs) — the figures below were freshly verified, not merely carried forward. The
 > dated stamps below are when the prose was last edited, not a ceiling on validity.
 
-**Generated**: 2026-06-08 · **Updated**: 2026-08-23 (re-verified against HEAD `5a107b2` /
+**Generated**: 2026-06-08 · **Updated**: 2026-08-23 (compliance-testing coverage/honesty pass —
+§3.1's 23-operation evidence-tier table, `Set Constraints` promoted from unit-only to real-engine
+e2e coverage, §4.8's wire-level `Maximum Response Size` TLS test, item 10's self-verified/
+corpus-proven qualifier in the §5.1 Baseline Server profile table; re-verified against HEAD `5a107b2` /
 v0.24.0+unreleased — Create Split Key regression documented and closed, all 8
 composite-signature profiles now implemented, Register/Import certificate
 DER-canonicality rejection added; earlier: 2026-08-12, baseline re-stated for CSD02;
@@ -200,6 +203,38 @@ Asynchronous Requests`, Phase 4) and `Create Split Key` / `Join Split
 Key` (Phase 3.3) are genuinely implemented but not invoked as live
 requests by any transcript in the OASIS mandatory/optional corpus — see
 §4.3/§4.4 for how those are proven instead.
+
+### 3.1 The 23 ops the OASIS corpus never invokes as live requests (2026-08-23 audit)
+
+Beyond the 6 named above, a further audit confirmed 23 implemented operations
+that no OASIS transcript ever invokes as a live `RequestBatchItem` — each
+appears in the corpus, if at all, only as a `Query`-response *enumeration
+value* (e.g. `MSGENC-*-M-1-30.xml`'s advertised-operations list), never as
+something the harness actually sends and checks a response for. "Never
+replayed" is not the same as "never tested": every one of the 23 has at
+least real unit-level coverage; most also have real integration coverage
+against the live dispatcher/engine. Classified by evidence tier:
+
+| Operation | Tier | Evidence |
+|---|---|---|
+| Deactivate, Archive, Recover, Ping, Login, Logout, Get Usage Allocation, Get Constraints, Set Defaults, Derive Key, Re-Key, Re-Key Key Pair, Validate, Certify | real-engine integration, this file | `tests/op_coverage_e2e.rs` — one named test per op (see `coverage_map()`) |
+| Create Split Key, Join Split Key | real-engine integration, through the actual `dispatcher::dispatch()` | `tests/native_bridge_e2e.rs::create_split_key_then_join_threshold_subset_reconstructs_via_real_engine` + `::create_split_key_then_join_covers_every_11_54_method_via_real_engine` |
+| Poll, Cancel, Process, Query Asynchronous Requests | real-engine integration, through `dispatcher::dispatch()` | `tests/async_ops_e2e.rs` — 5 tests, e.g. `mandatory_hash_enqueues_then_poll_matches_synchronous_result` |
+| **Set Constraints** | real-engine integration, this file (added 2026-08-23; previously handler-unit-only) | `tests/op_coverage_e2e.rs::set_constraints_replaces_default_and_get_constraints_reads_it_back`, plus `src/ops/allocation_and_config.rs`'s 3 existing unit tests |
+| Obtain Lease, Re-Certify | handler-level unit tests only (real logic, real assertions; Re-Certify's are real-engine too) — no dedicated integration-test-file entry | `src/ops/lifecycle_and_protocol.rs::obtain_lease_*` (3 tests); `src/ops/certify.rs::recertify_*` (2 tests) |
+
+None of the 23 above is corpus-proven and this report does not claim
+otherwise — "local integration coverage" or "unit coverage", stated plainly,
+not "OASIS-conformant" for these specific paths. `Set Constraints` was the
+one entry `coverage_map()`'s meta-test could not actually verify (its value
+was a free-text module name with no function reference); it now has the
+same real-engine e2e tier as its `Get Constraints`/`Get Usage
+Allocation`/`Set Defaults` siblings. `Obtain Lease` and `Re-Certify` remain
+at the unit tier — real, substantive tests, just not (yet) promoted into an
+integration-test file; a documented, not silently accepted, gap. See
+`tests/op_coverage_e2e.rs`'s `coverage_map()` module comment for the broader
+known limitation this audit found in the meta-test itself (it checks the
+map's key set, never resolves the value strings against real tests).
 
 **Advertised surface equals implemented surface.** CSD02 defines 66 operations;
 this server implements **62** of them (`dispatcher::HANDLED_OPERATIONS`) and `Query`
@@ -448,6 +483,33 @@ loads already depend on without a local regression test. This is a
 real gap in test coverage, not a claim this report is overstating —
 noted here rather than left for the next audit to rediscover.
 
+### 4.8 §9.10 Maximum Response Size: wire-level proof (2026-08-23)
+
+`enforce_max_response_size` (`src/dispatcher/mod.rs`) previously had only 3
+unit tests exercising it purely in-process via `dispatch()` — no TLS, no
+wire codec. A new test,
+`tests/tls_e2e.rs::max_response_size_enforced_over_real_tls_connection`,
+proves the same behavior over a real TLS connection to the real listener: a `Query
+[QueryOperations, QueryObjects]` request with `Maximum Response Size = 256`
+gets `OperationFailed`/`ResponseTooLarge`, the identical request with
+`= 2048` succeeds, and `= 0` (the explicit "no limit" case) also succeeds.
+
+**This was not a genuinely uncovered gap** — it looked like one until the
+corpus was actually checked. `MSGENC-XML-M-1-30.xml` /
+`MSGENC-JSON-M-1-30.xml` / `MSGENC-HTTPS-M-1-30.xml` already exercise
+exactly the `256`-too-small / `2048`-sufficient pair over real TLS via
+`conformance/harness/dispatcher_replay.py`, and all three already pass (see
+§4 above) — so §9.10's wire-level `ResponseTooLarge` path was already
+corpus-proven before this test existed. What the new test adds: (1) a
+second, Rust-native proof of the same fact that runs on every `cargo test`
+rather than only the separate Python replay harness, and (2) the explicit
+`Maximum Response Size = 0` case at the wire level, which no OASIS
+transcript covers (every corpus request either omits the field or sets a
+real positive limit). Confirmed non-vacuous: temporarily disabling the size
+check in `enforce_max_response_size` and re-running failed this test with
+the expected assertion (`left: 0, right: 1` on the Result Status check),
+confirming it measures the real behavior rather than passing regardless.
+
 ## 5. Scope decision: resolved
 
 ### 5.1 Conformance claim — scope statement
@@ -483,7 +545,7 @@ own 13-item list rather than approximated:
 | 2–3 | System/User Objects: User, Group, Password Credential, Certificate | **Met** (Phase 6.1 correction — these were genuinely implemented all along via `CreateUser`/`CreateGroup`/`CreateCredential`; a stale Query-advertisement doc comment had mislabeled them "unimplemented" since before this server could actually create them) |
 | 4–8, 11–12 | Attribute/Message/Object/Operation data structures, message protocols | Met — evidenced by §2 codec conformance + §4 dispatcher conformance |
 | 9 | 32 named Client-to-Server Operations (Activate…Set Endpoint Role) | **Met** — every one of the 32 is a real, `HANDLED_OPERATIONS` handler. `Set Endpoint Role` accepts the identity request (role=Server) and, since 2026-08-13, also performs the real role switch (role=Client) for an authenticated caller — see §5.1.4 |
-| 10 | 5 named Server-to-Client Operations (Discover Versions, Notify, Put, Query, Set Endpoint Role, all issued *by the server*) | **Met (2026-08-13).** All five are implemented and exercised on the §6.1.61 role-swapped channel: `Notify`/`Put` are pushed, and `Discover Versions`/`Query`/`Set Endpoint Role` are issued by the server with the answers actually changing what it does — see §5.1.4, which also records how each was proven non-vacuous |
+| 10 | 5 named Server-to-Client Operations (Discover Versions, Notify, Put, Query, Set Endpoint Role, all issued *by the server*) | **Met (2026-08-13) — self-verified, not corpus-proven.** All five are implemented and exercised on the §6.1.61 role-swapped channel: `Notify`/`Put` are pushed, and `Discover Versions`/`Query`/`Set Endpoint Role` are issued by the server with the answers actually changing what it does — see §5.1.4, which also records how each was proven non-vacuous. Unlike items 1–9/11–12 above, this is never checked against an OASIS transcript: the corpus (§5.3) has zero server-to-client transcripts to replay, so the evidence is entirely this codebase's own — 14 Rust tests in `tests/server_to_client_messages.rs` + 9 tests in `python-client/tests/test_server_to_client_push.py` — the same self-verified/corpus-proven distinction §4.6 draws explicitly |
 | 13 | Optional non-contradicting extensions | N/A (optional) |
 
 **Correction from the prior revision of this report:** that version speculated the async
