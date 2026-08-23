@@ -4,7 +4,7 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `5a107b2898f6` · **Generated:** 2026-08-23T21:58:02.681Z — machine-written
+**Engine commit:** `c81270f56500` · **Generated:** 2026-08-23T22:30:20.321Z — machine-written
 by this harness itself (`writeReport()` in `test_p11_conformance.js`) at the
 end of every run, not hand-edited.
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
@@ -17,13 +17,7 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**256 passed / 1 failed** across 40 sections in this JS harness.
-
-⚠️ **This run has 1 real failure(s)** — see "Full transcript" below
-for the exact check(s) and `got`/`expected` codes. The hand-authored
-narrative preserved below was written for an earlier, fully-passing run and
-may describe (or claim) an all-green state that does not hold for this run —
-trust the count above and the transcript, not prose written for a prior run.
+**273 passed / 0 failed** across 41 sections in this JS harness.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -142,7 +136,8 @@ silently double-succeed. Regression test:
 - ML-KEM — encap/decap usage + provenance (§5.18.8/9) (4 passed / 0 failed)
 - E1 — ML-DSA context string + hedge variant (§6.67, FIPS 204 §5.2) (10 passed / 0 failed)
 - E9 — CKR_SIGNATURE_LEN_RANGE (§5.12.6) (2 passed / 0 failed)
-- D4 — spec-mandated stubs (5 passed / 1 failed)
+- D4 — spec-mandated stubs (5 passed / 0 failed)
+- D4b — C_SignRecover / C_VerifyRecover round-trip (RSA only, §5.13) (17 passed / 0 failed)
 - F1 — mechanism table reconciliation (R6.2) (1 passed / 0 failed)
 - R3.1 — C_CreateObject template validation (§4.1.1) (7 passed / 0 failed)
 - E3 — GCM ulTagBits honored + validated (§6.27.7 / SP 800-38D §5.2.1.2) (11 passed / 0 failed)
@@ -276,7 +271,25 @@ silently double-succeed. Regression test:
   ✅ C_CancelFunction → FUNCTION_NOT_PARALLEL
   ✅ C_WaitForSlotEvent(DONT_BLOCK) → NO_EVENT
   ✅ C_WaitForSlotEvent(blocking) → FUNCTION_NOT_SUPPORTED
-  ❌ C_SignRecoverInit → FUNCTION_NOT_SUPPORTED: got 0x0, expected 0x54
+  ✅ C_SignRecoverInit with NULL mechanism (cancel form, nothing active) → OK
+
+── D4b — C_SignRecover / C_VerifyRecover round-trip (RSA only, §5.13) ──
+  ✅ CKM_RSA_X_509 (raw): keygen → OK
+  ✅ CKM_RSA_X_509 (raw): SignRecoverInit → OK
+  ✅ CKM_RSA_X_509 (raw): SignRecover → OK
+  ✅ CKM_RSA_X_509 (raw): VerifyRecoverInit → OK
+  ✅ CKM_RSA_X_509 (raw): VerifyRecover → OK
+  ✅ CKM_RSA_X_509 (raw): recovered message matches (tail)
+  ✅ CKM_RSA_X_509 (raw): VerifyRecoverInit (2nd) → OK
+  ✅ CKM_RSA_X_509 (raw): tampered signature never recovers the original message
+  ✅ CKM_RSA_PKCS: keygen → OK
+  ✅ CKM_RSA_PKCS: SignRecoverInit → OK
+  ✅ CKM_RSA_PKCS: SignRecover → OK
+  ✅ CKM_RSA_PKCS: VerifyRecoverInit → OK
+  ✅ CKM_RSA_PKCS: VerifyRecover → OK
+  ✅ CKM_RSA_PKCS: recovered message matches (tail)
+  ✅ CKM_RSA_PKCS: VerifyRecoverInit (2nd) → OK
+  ✅ CKM_RSA_PKCS: tampered signature never recovers the original message
   ✅ C_DigestEncryptUpdate (no active ops) → OPERATION_NOT_INITIALIZED
 
 ── F1 — mechanism table reconciliation (R6.2) ──
@@ -505,5 +518,5 @@ silently double-succeed. Regression test:
   ✅ C_Logout (leaving SO) → OK
   ✅ re-Login(USER) → OK
 
-════════ RESULT: 256 passed, 1 failed ════════
+════════ RESULT: 273 passed, 0 failed ════════
 ```

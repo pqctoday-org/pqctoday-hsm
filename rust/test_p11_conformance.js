@@ -44,10 +44,12 @@ const CKR = {
 const CKA = {
   CLASS: 0x000, TOKEN: 0x001, PRIVATE: 0x002, LABEL: 0x003, UNIQUE_ID: 0x004, VALUE: 0x011,
   KEY_TYPE: 0x100, SENSITIVE: 0x103, ENCRYPT: 0x104, DECRYPT: 0x105,
-  WRAP: 0x106, UNWRAP: 0x107, SIGN: 0x108, VERIFY: 0x10a, DERIVE: 0x10c,
+  WRAP: 0x106, UNWRAP: 0x107, SIGN: 0x108, SIGN_RECOVER: 0x109, VERIFY: 0x10a,
+  VERIFY_RECOVER: 0x10b, DERIVE: 0x10c,
   EXTRACTABLE: 0x162, LOCAL: 0x163, NEVER_EXTRACTABLE: 0x164, ALWAYS_SENSITIVE: 0x165,
   PARAMETER_SET: 0x61d, ENCAPSULATE: 0x633, DECAPSULATE: 0x634,
-  VALUE_LEN: 0x161, MODULUS: 0x120, EC_PARAMS: 0x180, EC_POINT: 0x181,
+  VALUE_LEN: 0x161, MODULUS: 0x120, MODULUS_BITS: 0x121, PUBLIC_EXPONENT: 0x122,
+  EC_PARAMS: 0x180, EC_POINT: 0x181,
   ALLOWED_MECHANISMS: 0x40000600,
   TRUSTED: 0x086, CHECK_VALUE: 0x090,
   CERTIFICATE_TYPE: 0x080, CERTIFICATE_CATEGORY: 0x087, URL: 0x089,
@@ -56,8 +58,9 @@ const CKA = {
 };
 const CKO = { DATA: 0, CERTIFICATE: 1, PUBLIC_KEY: 2, PRIVATE_KEY: 3, SECRET_KEY: 4 };
 const CKC = { X_509: 0, X_509_ATTR_CERT: 1, WTLS: 2 };
-const CKK = { AES: 0x1f, GENERIC_SECRET: 0x10, ML_KEM: 0x49, ML_DSA: 0x4a, SLH_DSA: 0x4b, EC: 0x03 };
+const CKK = { RSA: 0x00, AES: 0x1f, GENERIC_SECRET: 0x10, ML_KEM: 0x49, ML_DSA: 0x4a, SLH_DSA: 0x4b, EC: 0x03 };
 const CKM = {
+  RSA_PKCS_KEY_PAIR_GEN: 0x00, RSA_PKCS: 0x01, RSA_X_509: 0x03,
   ML_KEM_KEY_PAIR_GEN: 0x0f, ML_KEM: 0x17, ML_DSA_KEY_PAIR_GEN: 0x1c, ML_DSA: 0x1d,
   HASH_ML_DSA_SHA256: 0x24,
   SLH_DSA_KEY_PAIR_GEN: 0x2d, SLH_DSA: 0x2e, SHA256: 0x250, SHA256_HMAC: 0x251,
@@ -184,6 +187,21 @@ function genMlDsa(hSession, withPs = true) {
     { type: CKA.SIGN, bool: true }];
   const hPub = alloc(4), hPrv = alloc(4);
   const rv = w._C_GenerateKeyPair(hSession, buildMech(CKM.ML_DSA_KEY_PAIR_GEN),
+    buildTpl(pub), pub.length, buildTpl(prv), prv.length, hPub, hPrv);
+  return { rv, pub: readU32(hPub), prv: readU32(hPrv) };
+}
+// 1024-bit — same size p11_v32_compliance_test.cpp uses for round-trip speed
+// (not a production key size). CKA_SIGN_RECOVER/CKA_VERIFY_RECOVER are the
+// PKCS#11 v2.x pair Table 39's C_SignRecover/C_VerifyRecover check for §5.13.
+function genRsaRecover(hSession) {
+  const pub = [{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.RSA },
+    { type: CKA.VERIFY_RECOVER, bool: true },
+    { type: CKA.MODULUS_BITS, ulong: 1024 },
+    { type: CKA.PUBLIC_EXPONENT, bytes: new Uint8Array([0x01, 0x00, 0x01]) }];
+  const prv = [{ type: CKA.CLASS, ulong: CKO.PRIVATE_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.RSA },
+    { type: CKA.SIGN_RECOVER, bool: true }];
+  const hPub = alloc(4), hPrv = alloc(4);
+  const rv = w._C_GenerateKeyPair(hSession, buildMech(CKM.RSA_PKCS_KEY_PAIR_GEN),
     buildTpl(pub), pub.length, buildTpl(prv), prv.length, hPub, hPrv);
   return { rv, pub: readU32(hPub), prv: readU32(hPrv) };
 }
@@ -460,7 +478,68 @@ check('C_GetFunctionStatus → FUNCTION_NOT_PARALLEL', w._C_GetFunctionStatus(hS
 check('C_CancelFunction → FUNCTION_NOT_PARALLEL', w._C_CancelFunction(hS), CKR.FUNCTION_NOT_PARALLEL);
 check('C_WaitForSlotEvent(DONT_BLOCK) → NO_EVENT', w._C_WaitForSlotEvent(1, 0, 0), CKR.NO_EVENT);
 check('C_WaitForSlotEvent(blocking) → FUNCTION_NOT_SUPPORTED', w._C_WaitForSlotEvent(0, 0, 0), CKR.FUNCTION_NOT_SUPPORTED);
-check('C_SignRecoverInit → FUNCTION_NOT_SUPPORTED', w._C_SignRecoverInit(hS, 0, 0), CKR.FUNCTION_NOT_SUPPORTED);
+// C_SignRecoverInit/C_SignRecover/C_VerifyRecoverInit/C_VerifyRecover are now
+// IMPLEMENTED (RSA only, per PKCS#11 v3.2 Table 39/45 — the only mechanism
+// family with a recover form), not stubs. This assertion previously still
+// expected FUNCTION_NOT_SUPPORTED, which the engine stopped returning as of
+// commit eed556e (noted in this report's own prior "Refreshed 2026-08-13"
+// prose) — leaving it failing, silently, until fixed here. A round-trip
+// (not a flipped expected value) proves the recover form actually recovers
+// the original message, for both CKM_RSA_X_509 (raw RSASP1) and
+// CKM_RSA_PKCS (PKCS#1 v1.5 padding).
+// NULL mechanism hits the C2 cancel form (cancel_active_operation) before
+// the null-pointer check ever runs, and cancelling nothing is a no-op
+// success — CKR_OK, not CKR_ARGUMENTS_BAD (an earlier version of this
+// check assumed the latter without verifying against the real engine).
+check('C_SignRecoverInit with NULL mechanism (cancel form, nothing active) → OK', w._C_SignRecoverInit(hS, 0, 0), CKR.OK);
+section('D4b — C_SignRecover / C_VerifyRecover round-trip (RSA only, §5.13)');
+for (const [label, mech] of [['CKM_RSA_X_509 (raw)', CKM.RSA_X_509], ['CKM_RSA_PKCS', CKM.RSA_PKCS]]) {
+  const kp = genRsaRecover(hS);
+  check(`${label}: keygen → OK`, kp.rv, CKR.OK);
+  const msg = new Uint8Array(8).fill(0x5a);
+  const msgP = alloc(8); writeBytes(msgP, msg);
+  check(`${label}: SignRecoverInit → OK`, w._C_SignRecoverInit(hS, buildMech(mech), kp.prv), CKR.OK);
+  const sigLenP = alloc(4); writeU32(sigLenP, 0);
+  w._C_SignRecover(hS, msgP, 8, 0, sigLenP); // length query
+  const sigLen = readU32(sigLenP);
+  const sigP = alloc(sigLen); writeU32(sigLenP, sigLen);
+  check(`${label}: SignRecover → OK`, w._C_SignRecover(hS, msgP, 8, sigP, sigLenP), CKR.OK);
+
+  check(`${label}: VerifyRecoverInit → OK`, w._C_VerifyRecoverInit(hS, buildMech(mech), kp.pub), CKR.OK);
+  const dataLenP = alloc(4); writeU32(dataLenP, 0);
+  w._C_VerifyRecover(hS, sigP, sigLen, 0, dataLenP); // length query
+  const dataLen = readU32(dataLenP);
+  const dataP = alloc(dataLen); writeU32(dataLenP, dataLen);
+  check(`${label}: VerifyRecover → OK`, w._C_VerifyRecover(hS, sigP, sigLen, dataP, dataLenP), CKR.OK);
+  const recovered = Buffer.from(new Uint8Array(mem().buffer, dataP, readU32(dataLenP)));
+  // CKM_RSA_X_509 recovers exactly the 8-byte message (left-zero-padded
+  // input, raw RSASP1); CKM_RSA_PKCS recovers the PKCS#1 v1.5 DigestInfo-
+  // less EMSA block, which for a raw (unhashed) C_SignRecover payload is
+  // the message itself once the padding is stripped — check the message
+  // bytes appear as the tail of what was recovered either way.
+  const tail = recovered.subarray(recovered.length - 8);
+  check(`${label}: recovered message matches (tail)`, Buffer.from(msg).equals(tail) ? 1 : 0, 1);
+
+  // Negative control: a tampered signature must not recover the original.
+  const badSig = Buffer.from(new Uint8Array(mem().buffer, sigP, sigLen));
+  badSig[badSig.length - 1] ^= 0xff;
+  writeBytes(sigP, badSig);
+  check(`${label}: VerifyRecoverInit (2nd) → OK`, w._C_VerifyRecoverInit(hS, buildMech(mech), kp.pub), CKR.OK);
+  const badLenP = alloc(4); writeU32(badLenP, dataLen);
+  const badDataP = alloc(dataLen);
+  const badRv = w._C_VerifyRecover(hS, sigP, sigLen, badDataP, badLenP);
+  const badRecovered = badRv === CKR.OK
+    ? Buffer.from(new Uint8Array(mem().buffer, badDataP, readU32(badLenP))).subarray(-8)
+    : null;
+  check(`${label}: tampered signature never recovers the original message`,
+    badRv !== CKR.OK || !Buffer.from(msg).equals(badRecovered) ? 1 : 0, 1);
+  // CKR_BUFFER_TOO_SMALL correctly leaves the op active ("retry with a
+  // bigger buffer") — which the negative control above can legitimately
+  // hit if the tampered recovery produces a longer result than badLenP's
+  // pre-set size. Force-clear via the NULL-mechanism cancel form (C2) so
+  // state never leaks into the next mechanism's round-trip.
+  w._C_VerifyRecoverInit(hS, 0, 0);
+}
 // Dual-function ops are now IMPLEMENTED (not stubs): with neither a digest nor
 // an encrypt operation active, C_DigestEncryptUpdate returns
 // OPERATION_NOT_INITIALIZED (§5.16), not FUNCTION_NOT_SUPPORTED.
