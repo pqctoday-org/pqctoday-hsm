@@ -62,9 +62,34 @@ const CKK = { RSA: 0x00, AES: 0x1f, GENERIC_SECRET: 0x10, ML_KEM: 0x49, ML_DSA: 
 const CKM = {
   RSA_PKCS_KEY_PAIR_GEN: 0x00, RSA_PKCS: 0x01, RSA_X_509: 0x03,
   ML_KEM_KEY_PAIR_GEN: 0x0f, ML_KEM: 0x17, ML_DSA_KEY_PAIR_GEN: 0x1c, ML_DSA: 0x1d,
-  HASH_ML_DSA_SHA256: 0x24,
-  SLH_DSA_KEY_PAIR_GEN: 0x2d, SLH_DSA: 0x2e, SHA256: 0x250, SHA256_HMAC: 0x251,
+  // v3.2 §6.67.7 generic + concrete ML-DSA pre-hash mechanisms (values
+  // verified against docs/refs/pkcs11t-canonical-v3.2.h — SHA256 (0x24) was
+  // already present; the rest close the G2a gap).
+  HASH_ML_DSA: 0x1f, HASH_ML_DSA_SHA224: 0x23, HASH_ML_DSA_SHA256: 0x24,
+  HASH_ML_DSA_SHA384: 0x25, HASH_ML_DSA_SHA512: 0x26,
+  HASH_ML_DSA_SHA3_224: 0x27, HASH_ML_DSA_SHA3_256: 0x28,
+  HASH_ML_DSA_SHA3_384: 0x29, HASH_ML_DSA_SHA3_512: 0x2a,
+  HASH_ML_DSA_SHAKE128: 0x2b, HASH_ML_DSA_SHAKE256: 0x2c,
+  SLH_DSA_KEY_PAIR_GEN: 0x2d, SLH_DSA: 0x2e,
+  // v3.2 §6.69.7 generic + concrete SLH-DSA pre-hash mechanisms (same
+  // canonical-header verification as the ML-DSA block above).
+  HASH_SLH_DSA: 0x34, HASH_SLH_DSA_SHA224: 0x36, HASH_SLH_DSA_SHA256: 0x37,
+  HASH_SLH_DSA_SHA384: 0x38, HASH_SLH_DSA_SHA512: 0x39,
+  HASH_SLH_DSA_SHA3_224: 0x3a, HASH_SLH_DSA_SHA3_256: 0x3b,
+  HASH_SLH_DSA_SHA3_384: 0x3c, HASH_SLH_DSA_SHA3_512: 0x3d,
+  HASH_SLH_DSA_SHAKE128: 0x3e, HASH_SLH_DSA_SHAKE256: 0x3f,
+  SHA256: 0x250, SHA256_HMAC: 0x251,
   SHA256_HMAC_GENERAL: 0x252, SHA384_HMAC: 0x261, GENERIC_SECRET_KEY_GEN: 0x350,
+  // SHA-3/HMAC-general/KDF-tail family (G2b) — same canonical-header
+  // verification discipline as above.
+  SHA384: 0x260, SHA384_HMAC_GENERAL: 0x262,
+  SHA512: 0x270, SHA512_HMAC: 0x271, SHA512_HMAC_GENERAL: 0x272,
+  SHA3_256: 0x2b0, SHA3_256_HMAC: 0x2b1, SHA3_256_HMAC_GENERAL: 0x2b2,
+  SHA3_512: 0x2d0, SHA3_512_HMAC: 0x2d1, SHA3_512_HMAC_GENERAL: 0x2d2,
+  SHA256_KEY_DERIVATION: 0x393, SHA384_KEY_DERIVATION: 0x394,
+  SHA512_KEY_DERIVATION: 0x395, SHA3_256_KEY_DERIVATION: 0x397,
+  SHA3_384_KEY_DERIVATION: 0x399, SHA3_512_KEY_DERIVATION: 0x39a,
+  HKDF_DERIVE: 0x402a,
   SP800_108_COUNTER_KDF: 0x3ac, SP800_108_FEEDBACK_KDF: 0x3ad,
   AES_KEY_GEN: 0x1080, AES_ECB: 0x1081, AES_CBC: 0x1082, AES_CBC_PAD: 0x1085,
   AES_CTR: 0x1086, AES_GCM: 0x1087, AES_KEY_WRAP: 0x2109,
@@ -74,7 +99,11 @@ const CKM = {
   SHA384_RSA_PKCS_PSS: 0x44, SHA512_RSA_PKCS_PSS: 0x45,
 };
 const CKF = { RW_SESSION: 2, SERIAL_SESSION: 4 };
-const CKP = { ML_DSA_65: 2, ML_KEM_768: 2 };
+// CKP_SLH_DSA_SHA2_128F verified against docs/refs/pkcs11t-canonical-v3.2.h
+// (§ CKP_SLH_DSA_* block) — the fast-signing 128-bit set, chosen for round-
+// trip test speed (the "s" — small-signature — sets are dramatically slower
+// to sign).
+const CKP = { ML_DSA_65: 2, ML_KEM_768: 2, SLH_DSA_SHA2_128F: 3 };
 const CKU = { SO: 0, USER: 1 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -202,6 +231,20 @@ function genRsaRecover(hSession) {
     { type: CKA.SIGN_RECOVER, bool: true }];
   const hPub = alloc(4), hPrv = alloc(4);
   const rv = w._C_GenerateKeyPair(hSession, buildMech(CKM.RSA_PKCS_KEY_PAIR_GEN),
+    buildTpl(pub), pub.length, buildTpl(prv), prv.length, hPub, hPrv);
+  return { rv, pub: readU32(hPub), prv: readU32(hPrv) };
+}
+// CKA_PARAMETER_SET is a REQUIRED template attribute for SLH-DSA key-pair
+// generation (§6.69.2 — no default, unlike ML-DSA's implicit ML-DSA-65).
+// CKA_SIGN/CKA_VERIFY are engine-side defaults for this mechanism (always
+// true) so, unlike genMlDsa/genRsaRecover, they don't need to be requested.
+function genSlhDsa(hSession, ps) {
+  const pub = [{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.SLH_DSA },
+    { type: CKA.PARAMETER_SET, ulong: ps }];
+  const prv = [{ type: CKA.CLASS, ulong: CKO.PRIVATE_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.SLH_DSA },
+    { type: CKA.PARAMETER_SET, ulong: ps }];
+  const hPub = alloc(4), hPrv = alloc(4);
+  const rv = w._C_GenerateKeyPair(hSession, buildMech(CKM.SLH_DSA_KEY_PAIR_GEN),
     buildTpl(pub), pub.length, buildTpl(prv), prv.length, hPub, hPrv);
   return { rv, pub: readU32(hPub), prv: readU32(hPrv) };
 }
@@ -959,6 +1002,182 @@ section('Round-2 — T5 message API ≡ one-shot GCM (§5.19)');
   check('streamed ct+tag byte-equals one-shot GCM', streamed.equals(reference) ? 1 : 0, 1);
 }
 
+section('G1 — message-based decrypt/verify round trip (§5.19)');
+{
+  // All 11 gap functions from the audit — C_MessageDecryptInit,
+  // C_DecryptMessage(Begin/Next/one-shot), C_MessageDecryptFinal,
+  // C_MessageVerifyInit, C_VerifyMessage(Begin/Next/one-shot),
+  // C_MessageVerifyFinal, plus one-shot C_EncryptMessage/C_SignMessage —
+  // are all confirmed real wasm-bindgen exports in pkg/*.d.ts (grepped
+  // against ck_abi.rs's shim_mech_key!/shim_msg_sign!/shim_msg_verify!
+  // macro instantiations for C_Message{Encrypt,Decrypt,Sign,Verify}Init
+  // and friends), so every check below is a real round trip, not a
+  // rejection/not-implemented check.
+
+  // CK_GCM_MESSAGE_PARAMS (wasm32, 24 B): pIv, ulIvLen, ulIvBits,
+  // ivGenerator, pTag, ulTagBits — same layout as the T5 section above.
+  function gmpBuf(ivBytes, tagPtr, tagBits) {
+    const ivP = alloc(ivBytes.length); writeBytes(ivP, ivBytes);
+    const p = alloc(24);
+    new Uint32Array(mem().buffer, p, 6).set([ivP, ivBytes.length, 0, 0, tagPtr, tagBits]);
+    return p;
+  }
+
+  const key = genAes(hS);
+  check('fixture: AES key → OK', key.rv, CKR.OK);
+  const iv = new Uint8Array(12).map((_, i) => i + 100);
+  const pt = new Uint8Array(24).map((_, i) => 0x30 + i);
+  const ptP = alloc(24); writeBytes(ptP, pt);
+
+  // ── encrypt/decrypt, ONE-SHOT form: C_EncryptMessage → C_DecryptMessage ──
+  const tagP = alloc(16);
+  check('C_MessageEncryptInit (one-shot fixture) → OK',
+    w._C_MessageEncryptInit(hS, buildMech(CKM.AES_GCM), key.h), CKR.OK);
+  const gmpEnc = gmpBuf(iv, tagP, 128);
+  const ctLenP = alloc(4); writeU32(ctLenP, 0);
+  w._C_EncryptMessage(hS, gmpEnc, 24, 0, 0, ptP, 24, 0, ctLenP); // §5.2 length query
+  check('C_EncryptMessage length query = plaintext length (tag travels out-of-band)',
+    readU32(ctLenP), 24);
+  const ctP = alloc(24); writeU32(ctLenP, 24);
+  check('C_EncryptMessage (one-shot, previously untested) → OK',
+    w._C_EncryptMessage(hS, gmpEnc, 24, 0, 0, ptP, 24, ctP, ctLenP), CKR.OK);
+  check('C_MessageEncryptFinal → OK', w._C_MessageEncryptFinal(hS), CKR.OK);
+
+  check('C_MessageDecryptInit → OK',
+    w._C_MessageDecryptInit(hS, buildMech(CKM.AES_GCM), key.h), CKR.OK);
+  const gmpDec = gmpBuf(iv, tagP, 128);
+  const ptLenP = alloc(4); writeU32(ptLenP, 0);
+  w._C_DecryptMessage(hS, gmpDec, 24, 0, 0, ctP, 24, 0, ptLenP); // §5.2 length query
+  check('C_DecryptMessage length query = ciphertext length', readU32(ptLenP), 24);
+  const ptOutP = alloc(24); writeU32(ptLenP, 24);
+  check('C_DecryptMessage (one-shot, previously untested) → OK',
+    w._C_DecryptMessage(hS, gmpDec, 24, 0, 0, ctP, 24, ptOutP, ptLenP), CKR.OK);
+  const recovered = Buffer.from(new Uint8Array(mem().buffer, ptOutP, readU32(ptLenP)));
+  check('one-shot message-encrypt → message-decrypt recovers the ORIGINAL plaintext (real SEAM)',
+    Buffer.from(pt).equals(recovered) ? 1 : 0, 1);
+  check('C_MessageDecryptFinal → OK', w._C_MessageDecryptFinal(hS), CKR.OK);
+
+  // negative control: a tampered tag must never decrypt
+  check('C_MessageDecryptInit (tamper control) → OK',
+    w._C_MessageDecryptInit(hS, buildMech(CKM.AES_GCM), key.h), CKR.OK);
+  const badTagP = alloc(16);
+  writeBytes(badTagP, new Uint8Array(mem().buffer, tagP, 16));
+  new Uint8Array(mem().buffer, badTagP, 16)[15] ^= 0xff;
+  const gmpBad = gmpBuf(iv, badTagP, 128);
+  const badLenP = alloc(4); writeU32(badLenP, 24);
+  const badPtP = alloc(24);
+  check('C_DecryptMessage with tampered tag → ENCRYPTED_DATA_INVALID',
+    w._C_DecryptMessage(hS, gmpBad, 24, 0, 0, ctP, 24, badPtP, badLenP), CKR.ENCRYPTED_DATA_INVALID);
+  check('C_MessageDecryptFinal (after failed decrypt) → OK', w._C_MessageDecryptFinal(hS), CKR.OK);
+
+  // ── encrypt/decrypt, STREAMING form: Begin/Next(x2)/Final on BOTH sides ──
+  const tagP2 = alloc(16);
+  check('C_MessageEncryptInit (streaming fixture) → OK',
+    w._C_MessageEncryptInit(hS, buildMech(CKM.AES_GCM), key.h), CKR.OK);
+  const gmpEnc2 = gmpBuf(iv, tagP2, 128);
+  check('C_EncryptMessageBegin (streaming fixture) → OK',
+    w._C_EncryptMessageBegin(hS, gmpEnc2, 24, 0, 0), CKR.OK);
+  const eout1 = alloc(14); const eol1 = alloc(4); writeU32(eol1, 14);
+  check('C_EncryptMessageNext part 1 (streaming fixture) → OK',
+    w._C_EncryptMessageNext(hS, gmpEnc2, 24, ptP, 14, eout1, eol1, 0), CKR.OK);
+  const eout2 = alloc(10); const eol2 = alloc(4); writeU32(eol2, 10);
+  check('C_EncryptMessageNext part 2 END_OF_MESSAGE (streaming fixture) → OK',
+    w._C_EncryptMessageNext(hS, gmpEnc2, 24, ptP + 14, 10, eout2, eol2, 0x1), CKR.OK);
+  check('C_MessageEncryptFinal (streaming fixture) → OK', w._C_MessageEncryptFinal(hS), CKR.OK);
+  const streamCt = Buffer.concat([
+    Buffer.from(new Uint8Array(mem().buffer, eout1, readU32(eol1))),
+    Buffer.from(new Uint8Array(mem().buffer, eout2, readU32(eol2))),
+  ]);
+  const streamCtP = alloc(streamCt.length); writeBytes(streamCtP, streamCt);
+
+  check('C_MessageDecryptInit (streaming, previously untested) → OK',
+    w._C_MessageDecryptInit(hS, buildMech(CKM.AES_GCM), key.h), CKR.OK);
+  const gmpDec2 = gmpBuf(iv, tagP2, 128);
+  check('C_DecryptMessageBegin (previously untested) → OK',
+    w._C_DecryptMessageBegin(hS, gmpDec2, 24, 0, 0), CKR.OK);
+  const dout1 = alloc(14); const dol1 = alloc(4); writeU32(dol1, 14);
+  check('C_DecryptMessageNext part 1, intermediate (previously untested) → OK',
+    w._C_DecryptMessageNext(hS, gmpDec2, 24, streamCtP, 14, dout1, dol1, 0), CKR.OK);
+  check('intermediate part releases 0 bytes (plaintext withheld until tag verifies, §5.15)',
+    readU32(dol1), 0);
+  const dout2 = alloc(24); const dol2 = alloc(4); writeU32(dol2, 24);
+  check('C_DecryptMessageNext part 2 END_OF_MESSAGE (previously untested) → OK',
+    w._C_DecryptMessageNext(hS, gmpDec2, 24, streamCtP + 14, 10, dout2, dol2, 0x1), CKR.OK);
+  const streamRecovered = Buffer.from(new Uint8Array(mem().buffer, dout2, readU32(dol2)));
+  check('streaming message-encrypt → message-decrypt recovers the ORIGINAL plaintext (real SEAM)',
+    Buffer.from(pt).equals(streamRecovered) ? 1 : 0, 1);
+  check('C_MessageDecryptFinal (streaming, previously untested) → OK',
+    w._C_MessageDecryptFinal(hS), CKR.OK);
+
+  // ── sign/verify, message API: one-shot + streaming, both directions ─────
+  const hmacTpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+    { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+    { type: CKA.VALUE, bytes: new Uint8Array(32).fill(0x5c) },
+    { type: CKA.SIGN, bool: true }, { type: CKA.VERIFY, bool: true }]);
+  const hmacHp = alloc(4);
+  check('import HMAC key (message sign/verify fixture) → OK',
+    w._C_CreateObject(hS, hmacTpl, 5, hmacHp), CKR.OK);
+  const hHmac = readU32(hmacHp);
+  const msg2 = new TextEncoder().encode('message-api sign/verify round trip, one-shot');
+  const msg2P = alloc(msg2.length); writeBytes(msg2P, msg2);
+
+  check('C_MessageSignInit (one-shot fixture) → OK',
+    w._C_MessageSignInit(hS, buildMech(CKM.SHA256_HMAC), hHmac), CKR.OK);
+  const sigLenP = alloc(4); writeU32(sigLenP, 0);
+  w._C_SignMessage(hS, 0, 0, msg2P, msg2.length, 0, sigLenP); // §5.2 length query
+  const sigLen = readU32(sigLenP);
+  const sigP = alloc(sigLen); writeU32(sigLenP, sigLen);
+  check('C_SignMessage (one-shot, previously untested) → OK',
+    w._C_SignMessage(hS, 0, 0, msg2P, msg2.length, sigP, sigLenP), CKR.OK);
+  check('C_MessageSignFinal → OK', w._C_MessageSignFinal(hS), CKR.OK);
+
+  check('C_MessageVerifyInit (one-shot, previously untested) → OK',
+    w._C_MessageVerifyInit(hS, buildMech(CKM.SHA256_HMAC), hHmac), CKR.OK);
+  check('C_VerifyMessage (one-shot, previously untested) validates the REAL signature → OK',
+    w._C_VerifyMessage(hS, 0, 0, msg2P, msg2.length, sigP, readU32(sigLenP)), CKR.OK);
+  check('C_MessageVerifyFinal → OK', w._C_MessageVerifyFinal(hS), CKR.OK);
+
+  // negative control: a tampered signature must never verify
+  const badSig2 = Buffer.from(new Uint8Array(mem().buffer, sigP, sigLen));
+  badSig2[0] ^= 0xff;
+  const badSigP = alloc(sigLen); writeBytes(badSigP, badSig2);
+  check('C_MessageVerifyInit (tamper control) → OK',
+    w._C_MessageVerifyInit(hS, buildMech(CKM.SHA256_HMAC), hHmac), CKR.OK);
+  check('C_VerifyMessage with tampered signature → SIGNATURE_INVALID',
+    w._C_VerifyMessage(hS, 0, 0, msg2P, msg2.length, badSigP, sigLen), CKR.SIGNATURE_INVALID);
+  check('C_MessageVerifyFinal (after tamper) → OK', w._C_MessageVerifyFinal(hS), CKR.OK);
+
+  // streaming sign/verify
+  const msg3 = new TextEncoder().encode('message-api sign/verify round trip, streaming form');
+  const msg3P = alloc(msg3.length); writeBytes(msg3P, msg3);
+  const split = 18;
+  check('C_MessageSignInit (streaming, previously untested) → OK',
+    w._C_MessageSignInit(hS, buildMech(CKM.SHA256_HMAC), hHmac), CKR.OK);
+  check('C_SignMessageBegin (previously untested) → OK',
+    w._C_SignMessageBegin(hS, 0, 0), CKR.OK);
+  check('C_SignMessageNext part 1, non-final (previously untested) → OK',
+    w._C_SignMessageNext(hS, 0, 0, msg3P, split, 0, 0), CKR.OK);
+  const sl2 = alloc(4); writeU32(sl2, 0);
+  w._C_SignMessageNext(hS, 0, 0, msg3P + split, msg3.length - split, 0, sl2); // length query
+  const sig2Len = readU32(sl2);
+  const sig2P = alloc(sig2Len); writeU32(sl2, sig2Len);
+  check('C_SignMessageNext part 2, final (previously untested) → OK',
+    w._C_SignMessageNext(hS, 0, 0, msg3P + split, msg3.length - split, sig2P, sl2), CKR.OK);
+  check('C_MessageSignFinal (streaming, previously untested) → OK',
+    w._C_MessageSignFinal(hS), CKR.OK);
+
+  check('C_MessageVerifyInit (streaming, previously untested) → OK',
+    w._C_MessageVerifyInit(hS, buildMech(CKM.SHA256_HMAC), hHmac), CKR.OK);
+  check('C_VerifyMessageBegin (previously untested) → OK',
+    w._C_VerifyMessageBegin(hS, 0, 0), CKR.OK);
+  check('C_VerifyMessageNext part 1, non-final (previously untested) → OK',
+    w._C_VerifyMessageNext(hS, 0, 0, msg3P, split, 0, 0), CKR.OK);
+  check('C_VerifyMessageNext part 2, final — validates the REAL streamed signature (real SEAM) → OK',
+    w._C_VerifyMessageNext(hS, 0, 0, msg3P + split, msg3.length - split, sig2P, sig2Len), CKR.OK);
+  check('C_MessageVerifyFinal (streaming, previously untested) → OK',
+    w._C_MessageVerifyFinal(hS), CKR.OK);
+}
+
 section('Round-2 — SP800-108 KBKDF PRF must be a keyed-MAC mechanism (§6.26)');
 {
   const crypto = require('crypto');
@@ -1485,6 +1704,297 @@ section('WP-B — CKO_CERTIFICATE object lifecycle, X.509 only (§4.6 Tables 19-
   }
 
   w._C_DestroyObject(hS, certHandle);
+}
+
+section('G2a — SLH-DSA baseline + v3.2 pre-hash ML-DSA/SLH-DSA round trips (§6.67.7/§6.69.7)');
+{
+  // Zero prior coverage of SLH-DSA in this harness before this section
+  // (confirmed: no CKM.SLH_DSA/CKK.SLH_DSA reference anywhere above)
+  // despite the engine fully implementing FIPS 205 (CLAUDE.md: "SLH-DSA
+  // (SHA2/SHAKE x 12 param sets)") and advertising both
+  // CKM_SLH_DSA_KEY_PAIR_GEN and CKM_SLH_DSA. SHA2-128f chosen for speed
+  // (the small-signature "s" variants are dramatically slower to sign).
+  const slh = genSlhDsa(hS, CKP.SLH_DSA_SHA2_128F);
+  check('CKM_SLH_DSA_KEY_PAIR_GEN (SHA2-128f, previously untested) → OK', slh.rv, CKR.OK);
+  const slhMsg = new TextEncoder().encode('slh-dsa plain sign/verify round trip');
+  const slhMsgP = alloc(slhMsg.length); writeBytes(slhMsgP, slhMsg);
+
+  check('SignInit(CKM_SLH_DSA, previously untested) → OK',
+    w._C_SignInit(hS, buildMech(CKM.SLH_DSA), slh.prv), CKR.OK);
+  const slhSlP = alloc(4); writeU32(slhSlP, 0);
+  w._C_Sign(hS, slhMsgP, slhMsg.length, 0, slhSlP);
+  const slhSigP = alloc(readU32(slhSlP));
+  check('Sign(CKM_SLH_DSA) → OK', w._C_Sign(hS, slhMsgP, slhMsg.length, slhSigP, slhSlP), CKR.OK);
+  check('VerifyInit(CKM_SLH_DSA, previously untested) → OK',
+    w._C_VerifyInit(hS, buildMech(CKM.SLH_DSA), slh.pub), CKR.OK);
+  check('Verify(CKM_SLH_DSA) round trip → OK',
+    w._C_Verify(hS, slhMsgP, slhMsg.length, slhSigP, readU32(slhSlP)), CKR.OK);
+  // negative control
+  check('VerifyInit(CKM_SLH_DSA) (2nd) → OK', w._C_VerifyInit(hS, buildMech(CKM.SLH_DSA), slh.pub), CKR.OK);
+  new Uint8Array(mem().buffer, slhMsgP, 1)[0] ^= 0xff;
+  check('Verify(CKM_SLH_DSA) tampered message → SIGNATURE_INVALID',
+    w._C_Verify(hS, slhMsgP, slhMsg.length, slhSigP, readU32(slhSlP)), CKR.SIGNATURE_INVALID);
+  new Uint8Array(mem().buffer, slhMsgP, 1)[0] ^= 0xff; // restore
+
+  // ── concrete pre-hash mechanisms: real sign+verify round trips proving
+  // the engine's FIPS 204/205 HashML-DSA/HashSLH-DSA composite construction
+  // (internal hash-then-sign, per crypto/handlers.rs sign_ml_dsa/sign_slh_dsa)
+  // round-trips through the PKCS#11 ABI. CKM_HASH_ML_DSA_SHA256 (0x24) is
+  // NOT repeated in the loop below — WP-A already exercises it (only as a
+  // mechanism-REJECTION check on a restricted key, never a real round trip),
+  // and the other 9 ML-DSA variants below drive the identical prehash code
+  // path, so a 10th near-duplicate case would prove nothing new.
+  const mlKp = genMlDsa(hS, true);
+  check('fixture: ML-DSA-65 keypair → OK', mlKp.rv, CKR.OK);
+  const phMsg = new TextEncoder().encode('pre-hash round trip message, 2026-08-23');
+  const phMsgP = alloc(phMsg.length); writeBytes(phMsgP, phMsg);
+
+  function prehashRoundTrip(label, mech, prv, pub) {
+    check(`${label}: SignInit (previously untested) → OK`, w._C_SignInit(hS, buildMech(mech), prv), CKR.OK);
+    const slP = alloc(4); writeU32(slP, 0);
+    w._C_Sign(hS, phMsgP, phMsg.length, 0, slP);
+    const sigP = alloc(readU32(slP));
+    check(`${label}: Sign → OK`, w._C_Sign(hS, phMsgP, phMsg.length, sigP, slP), CKR.OK);
+    check(`${label}: VerifyInit (previously untested) → OK`, w._C_VerifyInit(hS, buildMech(mech), pub), CKR.OK);
+    check(`${label}: Verify round trip → OK`,
+      w._C_Verify(hS, phMsgP, phMsg.length, sigP, readU32(slP)), CKR.OK);
+  }
+
+  for (const [label, mech] of [
+    ['CKM_HASH_ML_DSA_SHA224', CKM.HASH_ML_DSA_SHA224],
+    ['CKM_HASH_ML_DSA_SHA384', CKM.HASH_ML_DSA_SHA384],
+    ['CKM_HASH_ML_DSA_SHA512', CKM.HASH_ML_DSA_SHA512],
+    ['CKM_HASH_ML_DSA_SHA3_224', CKM.HASH_ML_DSA_SHA3_224],
+    ['CKM_HASH_ML_DSA_SHA3_256', CKM.HASH_ML_DSA_SHA3_256],
+    ['CKM_HASH_ML_DSA_SHA3_384', CKM.HASH_ML_DSA_SHA3_384],
+    ['CKM_HASH_ML_DSA_SHA3_512', CKM.HASH_ML_DSA_SHA3_512],
+    ['CKM_HASH_ML_DSA_SHAKE128', CKM.HASH_ML_DSA_SHAKE128],
+    ['CKM_HASH_ML_DSA_SHAKE256', CKM.HASH_ML_DSA_SHAKE256],
+  ]) prehashRoundTrip(label, mech, mlKp.prv, mlKp.pub);
+
+  for (const [label, mech] of [
+    ['CKM_HASH_SLH_DSA_SHA224', CKM.HASH_SLH_DSA_SHA224],
+    ['CKM_HASH_SLH_DSA_SHA256', CKM.HASH_SLH_DSA_SHA256],
+    ['CKM_HASH_SLH_DSA_SHA384', CKM.HASH_SLH_DSA_SHA384],
+    ['CKM_HASH_SLH_DSA_SHA512', CKM.HASH_SLH_DSA_SHA512],
+    ['CKM_HASH_SLH_DSA_SHA3_224', CKM.HASH_SLH_DSA_SHA3_224],
+    ['CKM_HASH_SLH_DSA_SHA3_256', CKM.HASH_SLH_DSA_SHA3_256],
+    ['CKM_HASH_SLH_DSA_SHA3_384', CKM.HASH_SLH_DSA_SHA3_384],
+    ['CKM_HASH_SLH_DSA_SHA3_512', CKM.HASH_SLH_DSA_SHA3_512],
+    ['CKM_HASH_SLH_DSA_SHAKE128', CKM.HASH_SLH_DSA_SHAKE128],
+    ['CKM_HASH_SLH_DSA_SHAKE256', CKM.HASH_SLH_DSA_SHAKE256],
+  ]) prehashRoundTrip(label, mech, slh.prv, slh.pub);
+
+  // ── generic pre-hash form: CKM_HASH_ML_DSA / CKM_HASH_SLH_DSA, selecting
+  // the digest via CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash (§6.67.7/§6.69.7) —
+  // SEPARATE advertised mechanism IDs from every concrete variant above, so
+  // a real round trip here closes a genuinely different gap-list entry.
+  function hashSignCtxParam(hedge, ctxBytes, hash) {
+    let ctxPtr = 0;
+    if (ctxBytes && ctxBytes.length) { ctxPtr = alloc(ctxBytes.length); writeBytes(ctxPtr, ctxBytes); }
+    return new Uint8Array(new Uint32Array([hedge, ctxPtr, ctxBytes ? ctxBytes.length : 0, hash]).buffer);
+  }
+
+  check('SignInit(CKM_HASH_ML_DSA generic, hash=SHA256, previously untested) → OK',
+    w._C_SignInit(hS, buildMech(CKM.HASH_ML_DSA, hashSignCtxParam(0, null, CKM.SHA256)), mlKp.prv), CKR.OK);
+  const gSlP = alloc(4); writeU32(gSlP, 0);
+  w._C_Sign(hS, phMsgP, phMsg.length, 0, gSlP);
+  const gSigP = alloc(readU32(gSlP));
+  check('Sign(CKM_HASH_ML_DSA generic) → OK', w._C_Sign(hS, phMsgP, phMsg.length, gSigP, gSlP), CKR.OK);
+  check('VerifyInit(CKM_HASH_ML_DSA generic, hash=SHA256) → OK',
+    w._C_VerifyInit(hS, buildMech(CKM.HASH_ML_DSA, hashSignCtxParam(0, null, CKM.SHA256)), mlKp.pub), CKR.OK);
+  check('Verify(CKM_HASH_ML_DSA generic) round trip → OK',
+    w._C_Verify(hS, phMsgP, phMsg.length, gSigP, readU32(gSlP)), CKR.OK);
+  // remap_generic_hash_mech() maps this generic form onto the SAME concrete
+  // CKM_HASH_ML_DSA_SHA256 code path — proving that by cross-verifying under
+  // the concrete mechanism spelling too (a real check on the remap, not an
+  // assumption about it).
+  check('generic-form signature ALSO verifies under CKM_HASH_ML_DSA_SHA256 → OK',
+    (() => {
+      const rv1 = w._C_VerifyInit(hS, buildMech(CKM.HASH_ML_DSA_SHA256), mlKp.pub);
+      if (rv1 !== CKR.OK) return rv1;
+      return w._C_Verify(hS, phMsgP, phMsg.length, gSigP, readU32(gSlP));
+    })(), CKR.OK);
+
+  check('SignInit(CKM_HASH_SLH_DSA generic, hash=SHA256, previously untested) → OK',
+    w._C_SignInit(hS, buildMech(CKM.HASH_SLH_DSA, hashSignCtxParam(0, null, CKM.SHA256)), slh.prv), CKR.OK);
+  const gSlP2 = alloc(4); writeU32(gSlP2, 0);
+  w._C_Sign(hS, phMsgP, phMsg.length, 0, gSlP2);
+  const gSigP2 = alloc(readU32(gSlP2));
+  check('Sign(CKM_HASH_SLH_DSA generic) → OK', w._C_Sign(hS, phMsgP, phMsg.length, gSigP2, gSlP2), CKR.OK);
+  check('VerifyInit(CKM_HASH_SLH_DSA generic, hash=SHA256) → OK',
+    w._C_VerifyInit(hS, buildMech(CKM.HASH_SLH_DSA, hashSignCtxParam(0, null, CKM.SHA256)), slh.pub), CKR.OK);
+  check('Verify(CKM_HASH_SLH_DSA generic) round trip → OK',
+    w._C_Verify(hS, phMsgP, phMsg.length, gSigP2, readU32(gSlP2)), CKR.OK);
+  check('generic-form signature ALSO verifies under CKM_HASH_SLH_DSA_SHA256 → OK',
+    (() => {
+      const rv1 = w._C_VerifyInit(hS, buildMech(CKM.HASH_SLH_DSA_SHA256), slh.pub);
+      if (rv1 !== CKR.OK) return rv1;
+      return w._C_Verify(hS, phMsgP, phMsg.length, gSigP2, readU32(gSlP2));
+    })(), CKR.OK);
+}
+
+section('G2b — SHA-3 digest/HMAC/HMAC-general + KDF-tail round trips (§6.29x/§6.45)');
+{
+  const crypto = require('crypto');
+
+  // ── digests: CKM_SHA384/SHA512/SHA3_256/SHA3_512, byte-compared against
+  // an independent Node crypto digest (same cross-check discipline as the
+  // SP800-108 KBKDF section above) ──────────────────────────────────────
+  for (const [label, mech, nodeAlg] of [
+    ['CKM_SHA384', CKM.SHA384, 'sha384'],
+    ['CKM_SHA512', CKM.SHA512, 'sha512'],
+    ['CKM_SHA3_256', CKM.SHA3_256, 'sha3-256'],
+    ['CKM_SHA3_512', CKM.SHA3_512, 'sha3-512'],
+  ]) {
+    const msg = new TextEncoder().encode(`digest round trip for ${label}`);
+    const msgP = alloc(msg.length); writeBytes(msgP, msg);
+    check(`${label}: DigestInit (previously untested) → OK`, w._C_DigestInit(hS, buildMech(mech)), CKR.OK);
+    const dlP = alloc(4); writeU32(dlP, 0);
+    w._C_Digest(hS, msgP, msg.length, 0, dlP);
+    const dLen = readU32(dlP);
+    const dP = alloc(dLen); writeU32(dlP, dLen);
+    check(`${label}: Digest → OK`, w._C_Digest(hS, msgP, msg.length, dP, dlP), CKR.OK);
+    const digest = Buffer.from(new Uint8Array(mem().buffer, dP, readU32(dlP)));
+    const expected = crypto.createHash(nodeAlg).update(Buffer.from(msg)).digest();
+    check(`${label}: byte-equals independent Node crypto digest`, digest.equals(expected) ? 1 : 0, 1);
+  }
+
+  // ── HMAC (plain, non-general), byte-compared against independent Node HMAC
+  function hmacKey(byteVal) {
+    const tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+      { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+      { type: CKA.VALUE, bytes: new Uint8Array(32).fill(byteVal) },
+      { type: CKA.SIGN, bool: true }, { type: CKA.VERIFY, bool: true }]);
+    const hp = alloc(4);
+    const rv = w._C_CreateObject(hS, tpl, 5, hp);
+    return { rv, h: readU32(hp), key: new Uint8Array(32).fill(byteVal) };
+  }
+
+  for (const [label, mech, nodeAlg] of [
+    ['CKM_SHA3_256_HMAC', CKM.SHA3_256_HMAC, 'sha3-256'],
+    ['CKM_SHA3_512_HMAC', CKM.SHA3_512_HMAC, 'sha3-512'],
+  ]) {
+    const k = hmacKey(0x91);
+    check(`${label}: import key → OK`, k.rv, CKR.OK);
+    const msg = new TextEncoder().encode(`${label} round trip`);
+    const msgP = alloc(msg.length); writeBytes(msgP, msg);
+    check(`${label}: SignInit (previously untested) → OK`, w._C_SignInit(hS, buildMech(mech), k.h), CKR.OK);
+    const slP = alloc(4); writeU32(slP, 0);
+    w._C_Sign(hS, msgP, msg.length, 0, slP);
+    const sigP = alloc(readU32(slP));
+    check(`${label}: Sign → OK`, w._C_Sign(hS, msgP, msg.length, sigP, slP), CKR.OK);
+    const mac = Buffer.from(new Uint8Array(mem().buffer, sigP, readU32(slP)));
+    const expectedMac = crypto.createHmac(nodeAlg, Buffer.from(k.key)).update(Buffer.from(msg)).digest();
+    check(`${label}: byte-equals independent Node HMAC`, mac.equals(expectedMac) ? 1 : 0, 1);
+    check(`${label}: VerifyInit (previously untested) → OK`, w._C_VerifyInit(hS, buildMech(mech), k.h), CKR.OK);
+    check(`${label}: Verify round trip → OK`,
+      w._C_Verify(hS, msgP, msg.length, sigP, readU32(slP)), CKR.OK);
+  }
+
+  // ── HMAC-GENERAL: truncated MAC must byte-equal the first N bytes of the
+  // independent Node HMAC (same pattern as the existing E8 SHA256 case)
+  for (const [label, mech, nodeAlg] of [
+    ['CKM_SHA384_HMAC_GENERAL', CKM.SHA384_HMAC_GENERAL, 'sha384'],
+    ['CKM_SHA512_HMAC_GENERAL', CKM.SHA512_HMAC_GENERAL, 'sha512'],
+    ['CKM_SHA3_256_HMAC_GENERAL', CKM.SHA3_256_HMAC_GENERAL, 'sha3-256'],
+    ['CKM_SHA3_512_HMAC_GENERAL', CKM.SHA3_512_HMAC_GENERAL, 'sha3-512'],
+  ]) {
+    const k = hmacKey(0x62);
+    check(`${label}: import key → OK`, k.rv, CKR.OK);
+    const msg = new TextEncoder().encode(`${label} round trip, truncated`);
+    const msgP = alloc(msg.length); writeBytes(msgP, msg);
+    const macParam = new Uint8Array(new Uint32Array([20]).buffer); // ulMacLength=20
+    check(`${label}: SignInit(len=20, previously untested) → OK`,
+      w._C_SignInit(hS, buildMech(mech, macParam), k.h), CKR.OK);
+    const slP = alloc(4); writeU32(slP, 0);
+    w._C_Sign(hS, msgP, msg.length, 0, slP);
+    check(`${label}: mac length = 20`, readU32(slP), 20);
+    const sigP = alloc(20); writeU32(slP, 20);
+    check(`${label}: Sign → OK`, w._C_Sign(hS, msgP, msg.length, sigP, slP), CKR.OK);
+    const mac = Buffer.from(new Uint8Array(mem().buffer, sigP, 20));
+    const fullMac = crypto.createHmac(nodeAlg, Buffer.from(k.key)).update(Buffer.from(msg)).digest();
+    check(`${label}: truncated MAC byte-equals first 20 bytes of independent Node HMAC`,
+      mac.equals(fullMac.subarray(0, 20)) ? 1 : 0, 1);
+    check(`${label}: VerifyInit(len=20, previously untested) → OK`,
+      w._C_VerifyInit(hS, buildMech(mech, macParam), k.h), CKR.OK);
+    check(`${label}: Verify round trip → OK`, w._C_Verify(hS, msgP, msg.length, sigP, 20), CKR.OK);
+  }
+
+  // ── KDF tail: single-hash CKA_VALUE derivation, byte-compared against
+  // an independent Node digest of the base key ─────────────────────────
+  for (const [label, mech, nodeAlg] of [
+    ['CKM_SHA256_KEY_DERIVATION', CKM.SHA256_KEY_DERIVATION, 'sha256'],
+    ['CKM_SHA384_KEY_DERIVATION', CKM.SHA384_KEY_DERIVATION, 'sha384'],
+    ['CKM_SHA512_KEY_DERIVATION', CKM.SHA512_KEY_DERIVATION, 'sha512'],
+    ['CKM_SHA3_256_KEY_DERIVATION', CKM.SHA3_256_KEY_DERIVATION, 'sha3-256'],
+    ['CKM_SHA3_384_KEY_DERIVATION', CKM.SHA3_384_KEY_DERIVATION, 'sha3-384'],
+    ['CKM_SHA3_512_KEY_DERIVATION', CKM.SHA3_512_KEY_DERIVATION, 'sha3-512'],
+  ]) {
+    const baseVal = new Uint8Array(32).map((_, i) => (i * 7 + 5) & 0xff);
+    const baseTpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+      { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+      { type: CKA.VALUE, bytes: baseVal }, { type: CKA.DERIVE, bool: true }]);
+    const bhp = alloc(4);
+    check(`${label}: import base key → OK`, w._C_CreateObject(hS, baseTpl, 4, bhp), CKR.OK);
+    const hBase = readU32(bhp);
+    // no CKA_VALUE_LEN in the derived template — get back the FULL,
+    // untruncated digest to compare byte-for-byte against Node.
+    const dTpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+      { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET }]);
+    const hd = alloc(4); writeU32(hd, 0);
+    check(`${label}: DeriveKey (previously untested) → OK`,
+      w._C_DeriveKey(hS, buildMech(mech), hBase, dTpl, 2, hd), CKR.OK);
+    const hDerived = readU32(hd);
+    const outTpl = buildTpl([{ type: CKA.VALUE, bytes: new Uint8Array(64) }]);
+    check(`${label}: GetAttributeValue(derived) → OK`,
+      w._C_GetAttributeValue(hS, hDerived, outTpl, 1), CKR.OK);
+    const derived = Buffer.from(new Uint8Array(mem().buffer, readU32(outTpl + 4), readU32(outTpl + 8)));
+    const expected = crypto.createHash(nodeAlg).update(Buffer.from(baseVal)).digest();
+    check(`${label}: derived value byte-equals independent Node digest of the base key`,
+      derived.equals(expected) ? 1 : 0, 1);
+  }
+
+  // ── CKM_HKDF_DERIVE, byte-compared against Node's built-in crypto.hkdfSync
+  {
+    // CK_HKDF_PARAMS (wasm32, 32 B): bExtract@0 (Bbool), bExpand@1 (Bbool),
+    // prfHashMechanism@4, ulSaltType@8, pSalt@12, ulSaltLen@16, hSaltKey@20,
+    // pInfo@24, ulInfoLen@28 — verified against ck_param.rs's hkdf ck_struct!
+    // block (same field order/packing the engine itself parses with).
+    function hkdfParams(bExtract, bExpand, prf, saltType, saltPtr, saltLen, saltKeyHandle, infoPtr, infoLen) {
+      const b = new Uint8Array(32);
+      b[0] = bExtract ? 1 : 0;
+      b[1] = bExpand ? 1 : 0;
+      new Uint32Array(b.buffer, 4, 7).set([prf, saltType, saltPtr, saltLen, saltKeyHandle, infoPtr, infoLen]);
+      return b;
+    }
+    const CKF_HKDF_SALT_NULL = 1;
+
+    const ikm = new Uint8Array(32).map((_, i) => (i * 13 + 1) & 0xff);
+    const baseTpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+      { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
+      { type: CKA.VALUE, bytes: ikm }, { type: CKA.DERIVE, bool: true }]);
+    const bhp = alloc(4);
+    check('CKM_HKDF_DERIVE: import IKM key → OK', w._C_CreateObject(hS, baseTpl, 4, bhp), CKR.OK);
+    const hBase = readU32(bhp);
+
+    const info = new TextEncoder().encode('hkdf round trip info');
+    const infoP = alloc(info.length); writeBytes(infoP, info);
+    const dTpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
+      { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET }, { type: CKA.VALUE_LEN, ulong: 32 }]);
+    const hd = alloc(4); writeU32(hd, 0);
+    const params = hkdfParams(true, true, CKM.SHA256, CKF_HKDF_SALT_NULL, 0, 0, 0, infoP, info.length);
+    check('CKM_HKDF_DERIVE: DeriveKey (previously untested) → OK',
+      w._C_DeriveKey(hS, buildMech(CKM.HKDF_DERIVE, params), hBase, dTpl, 3, hd), CKR.OK);
+    const hDerived = readU32(hd);
+    const outTpl = buildTpl([{ type: CKA.VALUE, bytes: new Uint8Array(32) }]);
+    check('CKM_HKDF_DERIVE: GetAttributeValue(derived) → OK',
+      w._C_GetAttributeValue(hS, hDerived, outTpl, 1), CKR.OK);
+    const derived = Buffer.from(new Uint8Array(mem().buffer, readU32(outTpl + 4), readU32(outTpl + 8)));
+    const expected = Buffer.from(crypto.hkdfSync('sha256', Buffer.from(ikm), Buffer.alloc(0), Buffer.from(info), 32));
+    check('CKM_HKDF_DERIVE: byte-equals independent Node crypto.hkdfSync',
+      derived.equals(expected) ? 1 : 0, 1);
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

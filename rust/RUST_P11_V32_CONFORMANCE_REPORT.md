@@ -4,7 +4,7 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `c81270f56500` · **Generated:** 2026-08-23T22:30:20.321Z — machine-written
+**Engine commit:** `8bfc226560b4` · **Generated:** 2026-08-23T22:59:47.479Z — machine-written
 by this harness itself (`writeReport()` in `test_p11_conformance.js`) at the
 end of every run, not hand-edited.
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
@@ -17,7 +17,7 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**273 passed / 0 failed** across 41 sections in this JS harness.
+**492 passed / 0 failed** across 44 sections in this JS harness.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -153,11 +153,14 @@ silently double-succeed. Regression test:
 - Round-2 — C_SignUpdate/Final ≡ one-shot C_Sign (CKM_SHA256_HMAC) (8 passed / 0 failed)
 - Round-2 — mechanism table contents + FIPS ranges (F2/T8) (11 passed / 0 failed)
 - Round-2 — T5 message API ≡ one-shot GCM (§5.19) (10 passed / 0 failed)
+- G1 — message-based decrypt/verify round trip (§5.19) (45 passed / 0 failed)
 - Round-2 — SP800-108 KBKDF PRF must be a keyed-MAC mechanism (§6.26) (8 passed / 0 failed)
 - Round-2 — SP800-108 CK_PRF_DATA_TYPE completeness (COUNTER, KEY_HANDLE, SUM_OF_SEGMENTS) (17 passed / 0 failed)
 - WP4a — CKO_TRUST object lifecycle (§4.7 Table 25) (17 passed / 0 failed)
 - WP-A — CKA_ALLOWED_MECHANISMS enforcement (§4.8 Table 13) (9 passed / 0 failed)
 - WP-B — CKO_CERTIFICATE object lifecycle, X.509 only (§4.6 Tables 19-20) (26 passed / 0 failed)
+- G2a — SLH-DSA baseline + v3.2 pre-hash ML-DSA/SLH-DSA round trips (§6.67.7/§6.69.7) (94 passed / 0 failed)
+- G2b — SHA-3 digest/HMAC/HMAC-general + KDF-tail round trips (§6.29x/§6.45) (80 passed / 0 failed)
 
 ## Full transcript
 
@@ -431,6 +434,53 @@ silently double-succeed. Regression test:
   ✅ C_MessageEncryptFinal → OK
   ✅ streamed ct+tag byte-equals one-shot GCM
 
+── G1 — message-based decrypt/verify round trip (§5.19) ──
+  ✅ fixture: AES key → OK
+  ✅ C_MessageEncryptInit (one-shot fixture) → OK
+  ✅ C_EncryptMessage length query = plaintext length (tag travels out-of-band)
+  ✅ C_EncryptMessage (one-shot, previously untested) → OK
+  ✅ C_MessageEncryptFinal → OK
+  ✅ C_MessageDecryptInit → OK
+  ✅ C_DecryptMessage length query = ciphertext length
+  ✅ C_DecryptMessage (one-shot, previously untested) → OK
+  ✅ one-shot message-encrypt → message-decrypt recovers the ORIGINAL plaintext (real SEAM)
+  ✅ C_MessageDecryptFinal → OK
+  ✅ C_MessageDecryptInit (tamper control) → OK
+  ✅ C_DecryptMessage with tampered tag → ENCRYPTED_DATA_INVALID
+  ✅ C_MessageDecryptFinal (after failed decrypt) → OK
+  ✅ C_MessageEncryptInit (streaming fixture) → OK
+  ✅ C_EncryptMessageBegin (streaming fixture) → OK
+  ✅ C_EncryptMessageNext part 1 (streaming fixture) → OK
+  ✅ C_EncryptMessageNext part 2 END_OF_MESSAGE (streaming fixture) → OK
+  ✅ C_MessageEncryptFinal (streaming fixture) → OK
+  ✅ C_MessageDecryptInit (streaming, previously untested) → OK
+  ✅ C_DecryptMessageBegin (previously untested) → OK
+  ✅ C_DecryptMessageNext part 1, intermediate (previously untested) → OK
+  ✅ intermediate part releases 0 bytes (plaintext withheld until tag verifies, §5.15)
+  ✅ C_DecryptMessageNext part 2 END_OF_MESSAGE (previously untested) → OK
+  ✅ streaming message-encrypt → message-decrypt recovers the ORIGINAL plaintext (real SEAM)
+  ✅ C_MessageDecryptFinal (streaming, previously untested) → OK
+  ✅ import HMAC key (message sign/verify fixture) → OK
+  ✅ C_MessageSignInit (one-shot fixture) → OK
+  ✅ C_SignMessage (one-shot, previously untested) → OK
+  ✅ C_MessageSignFinal → OK
+  ✅ C_MessageVerifyInit (one-shot, previously untested) → OK
+  ✅ C_VerifyMessage (one-shot, previously untested) validates the REAL signature → OK
+  ✅ C_MessageVerifyFinal → OK
+  ✅ C_MessageVerifyInit (tamper control) → OK
+  ✅ C_VerifyMessage with tampered signature → SIGNATURE_INVALID
+  ✅ C_MessageVerifyFinal (after tamper) → OK
+  ✅ C_MessageSignInit (streaming, previously untested) → OK
+  ✅ C_SignMessageBegin (previously untested) → OK
+  ✅ C_SignMessageNext part 1, non-final (previously untested) → OK
+  ✅ C_SignMessageNext part 2, final (previously untested) → OK
+  ✅ C_MessageSignFinal (streaming, previously untested) → OK
+  ✅ C_MessageVerifyInit (streaming, previously untested) → OK
+  ✅ C_VerifyMessageBegin (previously untested) → OK
+  ✅ C_VerifyMessageNext part 1, non-final (previously untested) → OK
+  ✅ C_VerifyMessageNext part 2, final — validates the REAL streamed signature (real SEAM) → OK
+  ✅ C_MessageVerifyFinal (streaming, previously untested) → OK
+
 ── Round-2 — SP800-108 KBKDF PRF must be a keyed-MAC mechanism (§6.26) ──
   ✅ import KBKDF base key → OK
   ✅ C_DeriveKey SP800-108 with bare CKM_SHA256 PRF → MECHANISM_PARAM_INVALID
@@ -518,5 +568,183 @@ silently double-succeed. Regression test:
   ✅ C_Logout (leaving SO) → OK
   ✅ re-Login(USER) → OK
 
-════════ RESULT: 273 passed, 0 failed ════════
+── G2a — SLH-DSA baseline + v3.2 pre-hash ML-DSA/SLH-DSA round trips (§6.67.7/§6.69.7) ──
+  ✅ CKM_SLH_DSA_KEY_PAIR_GEN (SHA2-128f, previously untested) → OK
+  ✅ SignInit(CKM_SLH_DSA, previously untested) → OK
+  ✅ Sign(CKM_SLH_DSA) → OK
+  ✅ VerifyInit(CKM_SLH_DSA, previously untested) → OK
+  ✅ Verify(CKM_SLH_DSA) round trip → OK
+  ✅ VerifyInit(CKM_SLH_DSA) (2nd) → OK
+  ✅ Verify(CKM_SLH_DSA) tampered message → SIGNATURE_INVALID
+  ✅ fixture: ML-DSA-65 keypair → OK
+  ✅ CKM_HASH_ML_DSA_SHA224: SignInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA224: Sign → OK
+  ✅ CKM_HASH_ML_DSA_SHA224: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA224: Verify round trip → OK
+  ✅ CKM_HASH_ML_DSA_SHA384: SignInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA384: Sign → OK
+  ✅ CKM_HASH_ML_DSA_SHA384: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA384: Verify round trip → OK
+  ✅ CKM_HASH_ML_DSA_SHA512: SignInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA512: Sign → OK
+  ✅ CKM_HASH_ML_DSA_SHA512: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA512: Verify round trip → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_224: SignInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_224: Sign → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_224: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_224: Verify round trip → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_256: SignInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_256: Sign → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_256: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_256: Verify round trip → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_384: SignInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_384: Sign → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_384: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_384: Verify round trip → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_512: SignInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_512: Sign → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_512: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHA3_512: Verify round trip → OK
+  ✅ CKM_HASH_ML_DSA_SHAKE128: SignInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHAKE128: Sign → OK
+  ✅ CKM_HASH_ML_DSA_SHAKE128: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHAKE128: Verify round trip → OK
+  ✅ CKM_HASH_ML_DSA_SHAKE256: SignInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHAKE256: Sign → OK
+  ✅ CKM_HASH_ML_DSA_SHAKE256: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_ML_DSA_SHAKE256: Verify round trip → OK
+  ✅ CKM_HASH_SLH_DSA_SHA224: SignInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA224: Sign → OK
+  ✅ CKM_HASH_SLH_DSA_SHA224: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA224: Verify round trip → OK
+  ✅ CKM_HASH_SLH_DSA_SHA256: SignInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA256: Sign → OK
+  ✅ CKM_HASH_SLH_DSA_SHA256: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA256: Verify round trip → OK
+  ✅ CKM_HASH_SLH_DSA_SHA384: SignInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA384: Sign → OK
+  ✅ CKM_HASH_SLH_DSA_SHA384: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA384: Verify round trip → OK
+  ✅ CKM_HASH_SLH_DSA_SHA512: SignInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA512: Sign → OK
+  ✅ CKM_HASH_SLH_DSA_SHA512: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA512: Verify round trip → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_224: SignInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_224: Sign → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_224: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_224: Verify round trip → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_256: SignInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_256: Sign → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_256: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_256: Verify round trip → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_384: SignInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_384: Sign → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_384: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_384: Verify round trip → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_512: SignInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_512: Sign → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_512: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHA3_512: Verify round trip → OK
+  ✅ CKM_HASH_SLH_DSA_SHAKE128: SignInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHAKE128: Sign → OK
+  ✅ CKM_HASH_SLH_DSA_SHAKE128: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHAKE128: Verify round trip → OK
+  ✅ CKM_HASH_SLH_DSA_SHAKE256: SignInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHAKE256: Sign → OK
+  ✅ CKM_HASH_SLH_DSA_SHAKE256: VerifyInit (previously untested) → OK
+  ✅ CKM_HASH_SLH_DSA_SHAKE256: Verify round trip → OK
+  ✅ SignInit(CKM_HASH_ML_DSA generic, hash=SHA256, previously untested) → OK
+  ✅ Sign(CKM_HASH_ML_DSA generic) → OK
+  ✅ VerifyInit(CKM_HASH_ML_DSA generic, hash=SHA256) → OK
+  ✅ Verify(CKM_HASH_ML_DSA generic) round trip → OK
+  ✅ generic-form signature ALSO verifies under CKM_HASH_ML_DSA_SHA256 → OK
+  ✅ SignInit(CKM_HASH_SLH_DSA generic, hash=SHA256, previously untested) → OK
+  ✅ Sign(CKM_HASH_SLH_DSA generic) → OK
+  ✅ VerifyInit(CKM_HASH_SLH_DSA generic, hash=SHA256) → OK
+  ✅ Verify(CKM_HASH_SLH_DSA generic) round trip → OK
+  ✅ generic-form signature ALSO verifies under CKM_HASH_SLH_DSA_SHA256 → OK
+
+── G2b — SHA-3 digest/HMAC/HMAC-general + KDF-tail round trips (§6.29x/§6.45) ──
+  ✅ CKM_SHA384: DigestInit (previously untested) → OK
+  ✅ CKM_SHA384: Digest → OK
+  ✅ CKM_SHA384: byte-equals independent Node crypto digest
+  ✅ CKM_SHA512: DigestInit (previously untested) → OK
+  ✅ CKM_SHA512: Digest → OK
+  ✅ CKM_SHA512: byte-equals independent Node crypto digest
+  ✅ CKM_SHA3_256: DigestInit (previously untested) → OK
+  ✅ CKM_SHA3_256: Digest → OK
+  ✅ CKM_SHA3_256: byte-equals independent Node crypto digest
+  ✅ CKM_SHA3_512: DigestInit (previously untested) → OK
+  ✅ CKM_SHA3_512: Digest → OK
+  ✅ CKM_SHA3_512: byte-equals independent Node crypto digest
+  ✅ CKM_SHA3_256_HMAC: import key → OK
+  ✅ CKM_SHA3_256_HMAC: SignInit (previously untested) → OK
+  ✅ CKM_SHA3_256_HMAC: Sign → OK
+  ✅ CKM_SHA3_256_HMAC: byte-equals independent Node HMAC
+  ✅ CKM_SHA3_256_HMAC: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA3_256_HMAC: Verify round trip → OK
+  ✅ CKM_SHA3_512_HMAC: import key → OK
+  ✅ CKM_SHA3_512_HMAC: SignInit (previously untested) → OK
+  ✅ CKM_SHA3_512_HMAC: Sign → OK
+  ✅ CKM_SHA3_512_HMAC: byte-equals independent Node HMAC
+  ✅ CKM_SHA3_512_HMAC: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA3_512_HMAC: Verify round trip → OK
+  ✅ CKM_SHA384_HMAC_GENERAL: import key → OK
+  ✅ CKM_SHA384_HMAC_GENERAL: SignInit(len=20, previously untested) → OK
+  ✅ CKM_SHA384_HMAC_GENERAL: mac length = 20
+  ✅ CKM_SHA384_HMAC_GENERAL: Sign → OK
+  ✅ CKM_SHA384_HMAC_GENERAL: truncated MAC byte-equals first 20 bytes of independent Node HMAC
+  ✅ CKM_SHA384_HMAC_GENERAL: VerifyInit(len=20, previously untested) → OK
+  ✅ CKM_SHA384_HMAC_GENERAL: Verify round trip → OK
+  ✅ CKM_SHA512_HMAC_GENERAL: import key → OK
+  ✅ CKM_SHA512_HMAC_GENERAL: SignInit(len=20, previously untested) → OK
+  ✅ CKM_SHA512_HMAC_GENERAL: mac length = 20
+  ✅ CKM_SHA512_HMAC_GENERAL: Sign → OK
+  ✅ CKM_SHA512_HMAC_GENERAL: truncated MAC byte-equals first 20 bytes of independent Node HMAC
+  ✅ CKM_SHA512_HMAC_GENERAL: VerifyInit(len=20, previously untested) → OK
+  ✅ CKM_SHA512_HMAC_GENERAL: Verify round trip → OK
+  ✅ CKM_SHA3_256_HMAC_GENERAL: import key → OK
+  ✅ CKM_SHA3_256_HMAC_GENERAL: SignInit(len=20, previously untested) → OK
+  ✅ CKM_SHA3_256_HMAC_GENERAL: mac length = 20
+  ✅ CKM_SHA3_256_HMAC_GENERAL: Sign → OK
+  ✅ CKM_SHA3_256_HMAC_GENERAL: truncated MAC byte-equals first 20 bytes of independent Node HMAC
+  ✅ CKM_SHA3_256_HMAC_GENERAL: VerifyInit(len=20, previously untested) → OK
+  ✅ CKM_SHA3_256_HMAC_GENERAL: Verify round trip → OK
+  ✅ CKM_SHA3_512_HMAC_GENERAL: import key → OK
+  ✅ CKM_SHA3_512_HMAC_GENERAL: SignInit(len=20, previously untested) → OK
+  ✅ CKM_SHA3_512_HMAC_GENERAL: mac length = 20
+  ✅ CKM_SHA3_512_HMAC_GENERAL: Sign → OK
+  ✅ CKM_SHA3_512_HMAC_GENERAL: truncated MAC byte-equals first 20 bytes of independent Node HMAC
+  ✅ CKM_SHA3_512_HMAC_GENERAL: VerifyInit(len=20, previously untested) → OK
+  ✅ CKM_SHA3_512_HMAC_GENERAL: Verify round trip → OK
+  ✅ CKM_SHA256_KEY_DERIVATION: import base key → OK
+  ✅ CKM_SHA256_KEY_DERIVATION: DeriveKey (previously untested) → OK
+  ✅ CKM_SHA256_KEY_DERIVATION: GetAttributeValue(derived) → OK
+  ✅ CKM_SHA256_KEY_DERIVATION: derived value byte-equals independent Node digest of the base key
+  ✅ CKM_SHA384_KEY_DERIVATION: import base key → OK
+  ✅ CKM_SHA384_KEY_DERIVATION: DeriveKey (previously untested) → OK
+  ✅ CKM_SHA384_KEY_DERIVATION: GetAttributeValue(derived) → OK
+  ✅ CKM_SHA384_KEY_DERIVATION: derived value byte-equals independent Node digest of the base key
+  ✅ CKM_SHA512_KEY_DERIVATION: import base key → OK
+  ✅ CKM_SHA512_KEY_DERIVATION: DeriveKey (previously untested) → OK
+  ✅ CKM_SHA512_KEY_DERIVATION: GetAttributeValue(derived) → OK
+  ✅ CKM_SHA512_KEY_DERIVATION: derived value byte-equals independent Node digest of the base key
+  ✅ CKM_SHA3_256_KEY_DERIVATION: import base key → OK
+  ✅ CKM_SHA3_256_KEY_DERIVATION: DeriveKey (previously untested) → OK
+  ✅ CKM_SHA3_256_KEY_DERIVATION: GetAttributeValue(derived) → OK
+  ✅ CKM_SHA3_256_KEY_DERIVATION: derived value byte-equals independent Node digest of the base key
+  ✅ CKM_SHA3_384_KEY_DERIVATION: import base key → OK
+  ✅ CKM_SHA3_384_KEY_DERIVATION: DeriveKey (previously untested) → OK
+  ✅ CKM_SHA3_384_KEY_DERIVATION: GetAttributeValue(derived) → OK
+  ✅ CKM_SHA3_384_KEY_DERIVATION: derived value byte-equals independent Node digest of the base key
+  ✅ CKM_SHA3_512_KEY_DERIVATION: import base key → OK
+  ✅ CKM_SHA3_512_KEY_DERIVATION: DeriveKey (previously untested) → OK
+  ✅ CKM_SHA3_512_KEY_DERIVATION: GetAttributeValue(derived) → OK
+  ✅ CKM_SHA3_512_KEY_DERIVATION: derived value byte-equals independent Node digest of the base key
+  ✅ CKM_HKDF_DERIVE: import IKM key → OK
+  ✅ CKM_HKDF_DERIVE: DeriveKey (previously untested) → OK
+  ✅ CKM_HKDF_DERIVE: GetAttributeValue(derived) → OK
+  ✅ CKM_HKDF_DERIVE: byte-equals independent Node crypto.hkdfSync
+
+════════ RESULT: 492 passed, 0 failed ════════
 ```
