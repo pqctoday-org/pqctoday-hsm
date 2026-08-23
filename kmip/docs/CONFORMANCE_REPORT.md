@@ -1,12 +1,20 @@
 # KMIP 3.0 Conformance Report
 
-> **Current as of v0.22.0** (baseline re-stated for CSD02 on 2026-08-12). The replay
-> figures below are regenerated per run via `../conformance/harness/dispatcher_replay.py`
-> and gated by the three Python scripts described in §7 — **not** by `cargo test`; no
-> Rust test reads the replay report. The dated stamps below are when the prose was last
-> edited, not a ceiling on validity.
+> **Current as of v0.24.0 + unreleased work at `5a107b2`** (composite-profile /
+> certificate-canonicality pass, 2026-08-18; baseline re-stated for CSD02 on 2026-08-12).
+> The replay figures below are regenerated per run via
+> `../conformance/harness/dispatcher_replay.py` and gated by the three Python scripts
+> described in §7 — **not** by `cargo test`; no Rust test reads the replay report. Both
+> the OASIS replay (97/0/5) and the PQC corpus replay (42/42) were re-run at `5a107b2` on
+> 2026-08-23 and reproduce byte-for-byte (only the regenerated report's timestamp
+> differs) — the figures below were freshly verified, not merely carried forward. The
+> dated stamps below are when the prose was last edited, not a ceiling on validity.
 
-**Generated**: 2026-06-08 · **Updated**: 2026-08-12 (baseline re-stated for CSD02; earlier: 2026-07-09, `GAP_REMEDIATION_PLAN.md` Phases A–I complete)
+**Generated**: 2026-06-08 · **Updated**: 2026-08-23 (re-verified against HEAD `5a107b2` /
+v0.24.0+unreleased — Create Split Key regression documented and closed, all 8
+composite-signature profiles now implemented, Register/Import certificate
+DER-canonicality rejection added; earlier: 2026-08-12, baseline re-stated for CSD02;
+2026-07-09, `GAP_REMEDIATION_PLAN.md` Phases A–I complete)
 **Subsystem**: `pqctoday-kmip` (`kmip/` crate)
 **Spec**: OASIS Key Management Interoperability Protocol v3.0 **Committee Specification Draft 02
 (CSD02, 7 May 2026)** — a committee draft, **not a ratified OASIS Standard**. Companion documents:
@@ -44,6 +52,8 @@ covered separately by the 42-transcript vendored subset in `../conformance/pqc_c
 | Query honesty | ✅ **nothing advertised that isn't real** | both `ADVERTISED_UNIMPLEMENTED_*` lists in `ops/query.rs` are empty (Phase 6.1) |
 | Asynchronous processing | ✅ **real** — job store + background executor | Poll/Cancel/Process/Query Asynchronous Requests all genuinely implemented (Phase 4) |
 | Stateful hash-based signatures | ✅ **real** — HSS/LMS wired to the engine | KMIP `Sign` on an HSS/LMS key advances + persists the real leaf index (Phase 1.5) |
+| Split Key / Join Split Key (§6.1.12/§6.1.33) | ✅ **real** — restored 2026-08-18 after a 5-day whitelist-bug regression that failed every key while `Query` kept advertising it | §4.5 below |
+| Composite signature profiles (LAMPS draft-19 §6/§10.4) | ✅ **8/8 implemented** (`.37`/`.39`/`.40`/`.41`/`.45`/`.46`/`.48`/`.49`) | §4.6 below |
 | Baseline Server profile (§5.1.2) | ✅ **all 13 conditions met** (item 10 closed 2026-08-13) | §5.1.4 below |
 | Quantum Safe Authentication Suite (Profiles §3.3) | ✅ **all clauses met** — all 3 mandated hybrid groups, interop-proven vs OpenSSL 3.6 | §5.2 below |
 | Third-party interop (PyKMIP / vendor) | ⏸️ never run — **not currently possible** | KMIP 3.0 has no compatible OSS client; see §5.3 |
@@ -128,7 +138,8 @@ scroll past the line.
 the PQC surface and exercises none of it. `kmip/conformance/pqc_corpus/` holds a vendored
 **42-transcript** subset of the OASIS `kmip-3-0-pqc-tests-03.zip` package (full set: 1452);
 its README carries the coverage matrix and the selection rationale. It replays through the
-same harness (`KMIP_REPLAY_CORPUS=conformance/pqc_corpus`) and has its own CI job.
+same harness (`KMIP_REPLAY_CORPUS=conformance/pqc_corpus`) and has its own CI job — **42
+PASS / 0 FAIL**, re-verified 2026-08-23 at HEAD (`5a107b2`).
 
 ## 2. TTLV codec compliance: ✅ 100%
 
@@ -308,11 +319,134 @@ object handles — the KMIP server never sees a raw secret byte, split or
 whole. Building this surfaced and fixed a genuine bug in the KMIP 3.0
 draft's own printed GF(2¹⁶) multiplication formula (re-derived from
 first principles, cross-checked against the spec's own inverse
-formula). No OASIS transcript exercises Split Key; proven by 18
-crypto-layer unit tests plus an end-to-end test that splits a
-freshly-generated key 5 ways, joins a 3-share subset back together, and
-confirms the reconstructed bytes match exactly (and that fewer than
-the threshold fails instead of silently reconstructing garbage).
+formula). No OASIS transcript exercises Split Key; the underlying math
+is proven by 18 crypto-layer unit tests in `rust/`'s own suite, and the
+KMIP-level wire plumbing (Attribute decode, `ObjectRecord` round-trip,
+engine-handle resolution) by two end-to-end tests in
+`kmip/tests/native_bridge_e2e.rs`:
+`create_split_key_then_join_threshold_subset_reconstructs_via_real_engine`
+(splits a freshly-generated key 5 ways, joins a 3-share subset back
+together, confirms the reconstructed bytes match exactly, and confirms
+fewer than the threshold fails instead of silently reconstructing
+garbage) and `create_split_key_then_join_covers_every_11_54_method_via_real_engine`
+(drives all four §11.54 methods — XOR, both polynomial-field variants,
+and Prime Field — through that same KMIP-level path, not just the one
+GF(2⁸) case the first test exercises).
+
+**Regression, found and closed (0.24.0, 2026-08-18).** Between
+2026-08-13 and 2026-08-18 `Create Split Key` was silently broken for
+every key: the 2026-08-13 `CKA_ALLOWED_MECHANISMS` enforcement pass
+(PKCS#11 v3.2 §4.8 Table 13) added a whitelist check to the split path
+but never taught the whitelist builder about the split mechanism, so
+every call failed with "mechanism not supported by the engine" while
+`Query` continued to advertise the operation as supported — a
+conformance failure against both specs (an advertised operation that
+can never succeed), not merely a functional bug. Fixed by teaching the
+whitelist builder about `CKM_PQCTODAY_SPLIT_KEY`
+(`rust/src/native/split_key.rs`); the two e2e tests above are what
+actually proves the fix, since they exercise the exact whitelist-gated
+call path the bug broke, not only the crypto-layer math the whitelist
+sits in front of. Full kmip lib suite: 688/688 at the fix commit;
+890 passed / 0 failed / 15 ignored across the full test-binary set,
+re-verified at current HEAD (`5a107b2`).
+
+### 4.6 Composite signature profiles (LAMPS draft-ietf-lamps-pq-composite-sigs-19 §6): 8/8 implemented
+
+Not part of the OASIS KMIP corpus — draft-19 is an IETF LAMPS document,
+not folded into KMIP 3.0 CSD02 — so, like §4.3–§4.5, this is proven by
+this repo's own tests rather than corpus replay. The engine implements
+every composite-signature profile the draft defines a concrete OID for,
+at vendor codepoints `0x80000066`–`0x8000006d`
+(`kmip/src/kmip30/algos.rs`, KMIP 3.0 §11.12 spec-convention vendor
+extension range):
+
+| §6 profile | OID (`1.3.6.1.5.5.7.6.N`) | §10.4 recommended | Added |
+|---|---|---|---|
+| `id-MLDSA44-RSA2048-PSS-SHA256` | .37 | no | pre-0.24.0 |
+| `id-MLDSA44-Ed25519-SHA512` | .39 | yes | 0.24.0 (2026-08-18) |
+| `id-MLDSA44-ECDSA-P256-SHA256` | .40 | yes | 0.24.0 (2026-08-18) |
+| `id-MLDSA65-RSA3072-PSS-SHA512` | .41 | yes | 0.24.0 (2026-08-18) |
+| `id-MLDSA65-ECDSA-P256-SHA512` | .45 | yes | pre-0.24.0 |
+| `id-MLDSA65-ECDSA-P384-SHA512` | **.46** | no | **`5a107b2` (2026-08-18, unreleased)** |
+| `id-MLDSA65-Ed25519-SHA512` | .48 | yes | 0.24.0 (2026-08-18) |
+| `id-MLDSA87-ECDSA-P384-SHA512` | .49 | yes | pre-0.24.0 |
+
+Together, .39/.40/.41/.45/.48/.49 are "every profile
+draft-ietf-lamps-pq-composite-sigs §10.4 recommends" (CHANGELOG
+0.24.0); .37 and .46 are the two the draft defines but §10.4 does not
+single out. .46 (ML-DSA-65 + P-384 — a mismatched-tier pairing, unlike
+the matched-tier .45/.49 pairs) was the one profile still unimplemented
+after 0.24.0, and was closed in the same commit as the Register/Import
+tightening below (§4.7); see `kmip/src/ops/composite_sig.rs`'s own doc
+comment on `MLDSA65_ECDSA_P384_SHA512` for why it had likely been
+skipped originally.
+
+**Evidence.** Two independent checks per profile, both real rather than
+a self-round-trip:
+
+- **Issuance + both-halves-independent-verify**, one test per profile
+  in `kmip/src/ops/certify.rs`:
+  `bootstrap_composite_mldsa44_rsa2048_pss_ca_both_halves_verify`,
+  `bootstrap_composite_mldsa65_ecdsa_p256_ca_both_halves_verify`,
+  `bootstrap_composite_mldsa87_ecdsa_p384_ca_both_halves_verify`,
+  `bootstrap_composite_mldsa44_ed25519_ca_both_halves_verify`,
+  `bootstrap_composite_mldsa44_ecdsa_p256_ca_both_halves_verify`,
+  `bootstrap_composite_mldsa65_rsa3072_pss_ca_both_halves_verify`,
+  `bootstrap_composite_mldsa65_ed25519_ca_both_halves_verify`, and
+  `bootstrap_composite_mldsa65_ecdsa_p384_ca_both_halves_verify` (.46) —
+  each generates real ML-DSA and classical key material through the
+  engine, issues a composite CA certificate, and verifies both halves
+  independently.
+- **External KAT cross-check**, `external_composite_vectors_verify` in
+  `kmip/src/ops/validate.rs`, against the shared fixture
+  `kmip/kat/composite-sigs/external-composite-vectors.json` — vectors
+  produced outside this codebase (shared with the hub's own
+  implementation), so agreement is evidence toward interoperability
+  rather than a self-round-trip. `composite_sig.rs`'s own tests assert
+  `.45`/`.46`/`.49` are present in that fixture and checked here.
+- CHANGELOG 0.24.0 additionally records that every profile issued
+  through this engine was cross-verified against **the hub's
+  independent TypeScript implementation** — every composite defect
+  found during this work surfaced from two implementations
+  disagreeing, never from one testing itself.
+
+**Self-verified vs corpus-proven, stated plainly:** unlike §2/§4's
+OASIS figures, none of this is checked against an OASIS transcript —
+there is none to check against for this surface. The KAT fixture and
+the hub cross-check are the closest analogue this codebase has to
+independent proof here.
+
+### 4.7 Register / Import: non-canonical certificate DER rejected at accept time
+
+Added in `5a107b2` (2026-08-18, unreleased). `Register` and `Import`
+(`kmip/src/ops/register_import_export.rs::register` /
+`::import_object`) already rejected genuinely unparseable Certificate
+DER (`ResultReason::InvalidField`, tested by
+`register_certificate_rejects_unparseable_der`); what they did not
+reject was DER that parses under the lenient `x509_parser` crate but is
+not **canonical** per X.690 §8.3.2 — e.g. a serial number (or any other
+top-level INTEGER) carrying a redundant leading byte. Previously such a
+certificate could be successfully registered/imported and would only be
+refused later — loudly, with no warning at accept time — the moment it
+was designated a CA or touched by Re-certify (both of which already
+used the stricter `x509_cert`/`der`-crate parser). Both operations now
+call that same strict parser up front via `der_x509::is_canonical`
+(`kmip/src/ops/der_x509.rs`, itself added 2026-08-18 for
+`certify.rs`'s CA-designation and Re-certify paths), so a bad
+certificate is caught at the point an operator can still act on it.
+
+**Self-verified, not yet corpus- or test-proven for this exact path.**
+The kmip crate's full test suite (890 passed / 0 failed / 15 ignored,
+re-run at HEAD) includes no test that constructs a certificate which is
+well-formed-but-non-canonical and asserts `Register`/`Import` reject
+it — `register_certificate_rejects_unparseable_der` covers only
+genuinely malformed DER (garbage bytes), a different case.
+`der_x509::is_canonical` itself has no dedicated unit test either; its
+behavior is inherited from the `x509_cert`/`der` crate's own strict
+decoder, the same one `certify.rs`'s CA-designation and Re-certify
+loads already depend on without a local regression test. This is a
+real gap in test coverage, not a claim this report is overstating —
+noted here rather than left for the next audit to rediscover.
 
 ## 5. Scope decision: resolved
 
