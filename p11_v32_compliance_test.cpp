@@ -1470,16 +1470,29 @@ void test_profile_objects() {
         record_result(CAT, "No_profile_object_carries_CKP_INVALID_ID",
                       !anyInvalid ? "PASS" : "FAIL",
                       "profile ids: [ " + idList + "]");
-        // The engine implements C_GetMechanismList/Info, C_Login, C_LoginUser
-        // and C_Logout, so Profiles §5.3 Extended Provider is met too — but the
-        // claim must be COMPUTED, so this only records what the token says.
+        // Profiles v3.2 §5.3 Extended Provider requires C_GetMechanismList,
+        // C_GetMechanismInfo, C_Login, C_Logout (all baseline v2.40 — always
+        // present in `fl` if the engine loaded at all, so checking them adds
+        // no signal) and C_LoginUser (a v3.0 addition, NOT in the base
+        // CK_FUNCTION_LIST_PTR struct `fl` uses — the one function whose
+        // absence would make a claimed Extended Provider condition false).
+        // This row previously recorded an unconditional "PASS" regardless of
+        // whether the claim held — a row in the pass column that could never
+        // fail. It now actually checks the one condition capable of failing.
         bool haveExtended = false;
         for (CK_ULONG id : ids) if (id == P_EXTENDED) haveExtended = true;
-        record_result(CAT, "Extended_provider_claim_recorded",
-                      "PASS",
-                      std::string("CKP_EXTENDED_PROVIDER ") +
-                      (haveExtended ? "claimed" : "not claimed") +
-                      " by this build");
+        if (haveExtended) {
+            void* dlib = dlopen(opt_engine.c_str(), RTLD_NOW);
+            void* loginUserSym = dlib ? dlsym(dlib, "C_LoginUser") : NULL_PTR;
+            record_result(CAT, "Extended_provider_claim_recorded",
+                          loginUserSym != NULL_PTR ? "PASS" : "FAIL",
+                          std::string("CKP_EXTENDED_PROVIDER claimed; C_LoginUser ") +
+                          (loginUserSym != NULL_PTR ? "exported (§5.3 satisfiable)"
+                                                     : "MISSING — claim is false"));
+        } else {
+            record_result(CAT, "Extended_provider_claim_recorded", "SKIP",
+                          "CKP_EXTENDED_PROVIDER not claimed by this build");
+        }
     }
 
     // ── application creation of a profile object must be refused ─────────────
@@ -4347,29 +4360,52 @@ void test_aes_ctr() {
 }
 
 void test_kmac() {
-    CK_MECHANISM genMech = { CKM_AES_KEY_GEN, NULL_PTR, 0 }; 
+    // Mechanism/key-type must agree: CKK_GENERIC_SECRET is generated via
+    // CKM_GENERIC_SECRET_KEY_GEN (see test_ripemd160_hmac below for the same
+    // pairing). This function previously paired CKM_AES_KEY_GEN with
+    // CKA_KEY_TYPE=CKK_GENERIC_SECRET, which C_GenerateKey correctly rejects
+    // — and the failure path recorded nothing, so the whole "KMAC" category
+    // silently produced zero rows in every report generated since it was
+    // added. Found 2026-08-23 regenerating cpp_compliance_report at HEAD.
+    CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
     CK_ULONG keyLen = 16;
     CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
     CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
     CK_BBOOL bTrue = CK_TRUE;
-    
+
     CK_ATTRIBUTE tmpl[] = {
         { CKA_CLASS, &secClass, sizeof(secClass) },
         { CKA_KEY_TYPE, &keyType, sizeof(keyType) },
         { CKA_VALUE_LEN, &keyLen, sizeof(keyLen) },
         { CKA_SIGN, &bTrue, sizeof(bTrue) }
     };
-    
+
     CK_OBJECT_HANDLE hKey;
     CK_RV rv = fl->C_GenerateKey(hSess, &genMech, tmpl, 4, &hKey);
     if (rv == CKR_OK) {
+        // Round-trip (SignInit + Sign), not just SignInit: a bare SignInit
+        // leaves the session with an active sign operation, so a second
+        // SignInit on the same session previously failed with
+        // CKR_OPERATION_ACTIVE (RV=144) — a test-harness bug, not an engine
+        // one, masked as long as this category produced zero rows at all.
+        // Completing each op with C_Sign both proves real MAC computation
+        // and naturally clears the operation before the next mechanism.
         CK_MECHANISM kmacMech = { CKM_KMAC_128, NULL_PTR, 0 };
+        CK_BYTE msg[] = "test";
+        CK_BYTE mac128[64]; CK_ULONG mac128Len = sizeof(mac128);
         rv = fl->C_SignInit(hSess, &kmacMech, hKey);
-        record_result("KMAC", "SignInit_128", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+        if (rv == CKR_OK) rv = fl->C_Sign(hSess, msg, sizeof(msg) - 1, mac128, &mac128Len);
+        record_result("KMAC", "Sign_128", rv == CKR_OK ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rv) + " MacLen=" + std::to_string(mac128Len));
 
         CK_MECHANISM kmacMech2 = { CKM_KMAC_256, NULL_PTR, 0 };
+        CK_BYTE mac256[64]; CK_ULONG mac256Len = sizeof(mac256);
         rv = fl->C_SignInit(hSess, &kmacMech2, hKey);
-        record_result("KMAC", "SignInit_256", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
+        if (rv == CKR_OK) rv = fl->C_Sign(hSess, msg, sizeof(msg) - 1, mac256, &mac256Len);
+        record_result("KMAC", "Sign_256", rv == CKR_OK ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(rv) + " MacLen=" + std::to_string(mac256Len));
+    } else {
+        record_result("KMAC", "GenerateKey", "FAIL", "key gen failed RV=" + std::to_string(rv));
     }
 }
 
@@ -4423,22 +4459,33 @@ void test_ripemd160_hmac() {
 
 void test_bip32_wallets() {
     // Generate Master Node
-    CK_MECHANISM genMech = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
+    // Mechanism/key-type must agree (see test_kmac above for the identical
+    // defect and test_ripemd160_hmac for the correct pairing): this
+    // previously used CKM_AES_KEY_GEN with CKA_KEY_TYPE=CKK_GENERIC_SECRET,
+    // which C_GenerateKey correctly rejects, and the early `return` recorded
+    // nothing — so the entire BIP32 category, including the HD-wallet
+    // derivation this suite exists to pin (2026-08-14 incident: the feature
+    // "had no test of any kind" until this one was added), silently
+    // produced zero rows in every report since. Found 2026-08-23.
+    CK_MECHANISM genMech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
     CK_ULONG keyLen = 32;
     CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
     CK_KEY_TYPE keyType = CKK_GENERIC_SECRET;
     CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
-    
+
     CK_ATTRIBUTE tmpl[] = {
         { CKA_CLASS, &secClass, sizeof(secClass) },
         { CKA_KEY_TYPE, &keyType, sizeof(keyType) },
         { CKA_VALUE_LEN, &keyLen, sizeof(keyLen) },
         { CKA_DERIVE, &bTrue, sizeof(bTrue) }
     };
-    
+
     CK_OBJECT_HANDLE hSeed;
     CK_RV rv = fl->C_GenerateKey(hSess, &genMech, tmpl, 4, &hSeed);
-    if (rv != CKR_OK) return;
+    if (rv != CKR_OK) {
+        record_result("BIP32", "Seed_GenerateKey", "FAIL", "key gen failed RV=" + std::to_string(rv));
+        return;
+    }
     
     CK_BYTE curveOid[] = { 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a }; // SECP256K1
     CK_OBJECT_CLASS drvClass = CKO_PRIVATE_KEY;

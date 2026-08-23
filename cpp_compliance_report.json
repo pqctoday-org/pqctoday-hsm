@@ -205,6 +205,18 @@
             "test": "NIST_SP800_38D_KAT"
         }
     ],
+    "BIP32": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Master_Derive"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Child_Derive"
+        }
+    ],
     "ChaCha20": [
         {
             "details": "Created CKK_CHACHA20 Secret Key",
@@ -538,6 +550,68 @@
             "test": "Sign_Ed448"
         }
     ],
+    "ErrCodes": [
+        {
+            "details": "init RV=0 cancel RV=0 (want CKR_OK or CKR_OPERATION_CANCEL_FAILED, never CKR_ARGUMENTS_BAD=0x7)",
+            "status": "PASS",
+            "test": "C_EncryptInit_null_mechanism_cancels"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_EncryptInit_after_cancel_succeeds"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_DigestInit_null_mechanism_no_active_op"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_SignInit_null_mechanism_no_active_op"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_VerifyInit_null_mechanism_no_active_op"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "C_DecryptInit_null_mechanism_no_active_op"
+        },
+        {
+            "details": "RV=179 (want CKR_SESSION_HANDLE_INVALID=0xB3)",
+            "status": "PASS",
+            "test": "Null_mechanism_still_checks_session_handle"
+        },
+        {
+            "details": "RV=179 (want CKR_SESSION_HANDLE_INVALID=0xB3, not CKR_ARGUMENTS_BAD=0x7)",
+            "status": "PASS",
+            "test": "C_SeedRandom_session_handle_precedence"
+        },
+        {
+            "details": "RV=179",
+            "status": "PASS",
+            "test": "C_GenerateRandom_session_handle_precedence"
+        },
+        {
+            "details": "3 interfaces",
+            "status": "PASS",
+            "test": "C_GetInterface_matches_own_flags"
+        },
+        {
+            "details": "RV=0 want=0 (declaresForkSafe=1)",
+            "status": "PASS",
+            "test": "C_GetInterface_unmatched_flag_is_not_ARGUMENTS_BAD"
+        },
+        {
+            "details": "RV=6",
+            "status": "PASS",
+            "test": "C_GetInterface_unknown_flag_refused"
+        }
+    ],
     "FIPS": [
         {
             "details": "RV=274",
@@ -553,6 +627,68 @@
             "details": "ctx>255 must be rejected, RV=7",
             "status": "PASS",
             "test": "ML-DSA_Oversized_Ctx"
+        }
+    ],
+    "Fork": [
+        {
+            "details": "child pid 73669 exited status 0",
+            "status": "PASS",
+            "test": "Child_survived_and_reported"
+        },
+        {
+            "details": "C_GetSessionInfo RV=0",
+            "status": "PASS",
+            "test": "Child_session_handle_resolves"
+        },
+        {
+            "details": "child state=3 parent state=3 (CKS_RW_USER_FUNCTIONS=3)",
+            "status": "PASS",
+            "test": "Child_login_state_preserved"
+        },
+        {
+            "details": "RV=0 len=8",
+            "status": "PASS",
+            "test": "Child_session_object_readable"
+        },
+        {
+            "details": "RV=0 len=8",
+            "status": "PASS",
+            "test": "Child_token_object_readable_by_pre_fork_handle"
+        },
+        {
+            "details": "parent init RV=0 update RV=0 child final RV=0 len=16",
+            "status": "PASS",
+            "test": "Child_inherits_active_encryption_state"
+        },
+        {
+            "details": "parent C_EncryptFinal after child's RV=0",
+            "status": "PASS",
+            "test": "Parent_encryption_state_independent"
+        },
+        {
+            "details": "child C_SetAttributeValue RV=0; parent label len=11 intact=1",
+            "status": "PASS",
+            "test": "Child_writes_do_not_reach_parent"
+        },
+        {
+            "details": "8 sibling pairs, all distinct=1 childA=1E524938401B7D7F… childB=82AFD2FA7992A487… (identical output would repeat ECDSA nonces)",
+            "status": "PASS",
+            "test": "Sibling_children_RNG_diverge"
+        },
+        {
+            "details": "3 interfaces, CKF_INTERFACE_FORK_SAFE declared=1",
+            "status": "PASS",
+            "test": "Fork_safe_flag_declared_in_interface_list"
+        },
+        {
+            "details": "C_GetInterface(flags=CKF_INTERFACE_FORK_SAFE) RV=0",
+            "status": "PASS",
+            "test": "Fork_safe_interface_retrievable"
+        },
+        {
+            "details": "child=8281A0160DEED172… parent=58FF7627DE8F2C8B… preFork=335A640C83F904EF…",
+            "status": "PASS",
+            "test": "Parent_and_child_RNG_diverge"
         }
     ],
     "G-DA-X": [
@@ -715,7 +851,7 @@
             "test": "Flag_SLH_DSA_MESSAGE"
         },
         {
-            "details": "126 advertised, 0 rejected by C_GetMechanismInfo",
+            "details": "127 advertised, 0 rejected by C_GetMechanismInfo",
             "status": "PASS",
             "test": "AdvertiseSubsetDispatch"
         }
@@ -793,6 +929,26 @@
         }
     ],
     "G4Retcodes": [
+        {
+            "details": "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400",
+            "status": "PASS",
+            "test": "C2_SignInit_null_mech_pre_init"
+        },
+        {
+            "details": "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400",
+            "status": "PASS",
+            "test": "C2_VerifyInit_null_mech_pre_init"
+        },
+        {
+            "details": "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400",
+            "status": "PASS",
+            "test": "C2_EncryptInit_null_mech_pre_init"
+        },
+        {
+            "details": "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400",
+            "status": "PASS",
+            "test": "C2_WaitForSlotEvent_pre_init_outranks_flags"
+        },
         {
             "details": "expect CKR_CRYPTOKI_NOT_INITIALIZED, RV=400",
             "status": "PASS",
@@ -1169,6 +1325,123 @@
             "test": "CrossToken_Destroy_didNotAffectA"
         }
     ],
+    "HBSProtect": [
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "HSS_Generate"
+        },
+        {
+            "details": "RV=0 CKA_SENSITIVE=1",
+            "status": "PASS",
+            "test": "HSS_CKA_SENSITIVE_true"
+        },
+        {
+            "details": "RV=0 CKA_EXTRACTABLE=0",
+            "status": "PASS",
+            "test": "HSS_CKA_EXTRACTABLE_false"
+        },
+        {
+            "details": "RV=0 CKA_COPYABLE=0",
+            "status": "PASS",
+            "test": "HSS_CKA_COPYABLE_false"
+        },
+        {
+            "details": "RV=17 (want CKR_ATTRIBUTE_SENSITIVE=0x11)",
+            "status": "PASS",
+            "test": "HSS_CKA_VALUE_not_extractable"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "HSS_reject_SENSITIVE_false"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "HSS_reject_EXTRACTABLE_true"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "HSS_reject_COPYABLE_true"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "HSS_accept_restated_SENSITIVE_true"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "XMSS_Generate"
+        },
+        {
+            "details": "RV=0 CKA_SENSITIVE=1",
+            "status": "PASS",
+            "test": "XMSS_CKA_SENSITIVE_true"
+        },
+        {
+            "details": "RV=0 CKA_EXTRACTABLE=0",
+            "status": "PASS",
+            "test": "XMSS_CKA_EXTRACTABLE_false"
+        },
+        {
+            "details": "RV=17 (want CKR_ATTRIBUTE_SENSITIVE=0x11)",
+            "status": "PASS",
+            "test": "XMSS_CKA_VALUE_not_extractable"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "XMSS_reject_SENSITIVE_false"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "XMSS_reject_EXTRACTABLE_true"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "XMSS_accept_restated_SENSITIVE_true"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "XMSSMT_Generate"
+        },
+        {
+            "details": "RV=0 CKA_SENSITIVE=1",
+            "status": "PASS",
+            "test": "XMSSMT_CKA_SENSITIVE_true"
+        },
+        {
+            "details": "RV=0 CKA_EXTRACTABLE=0",
+            "status": "PASS",
+            "test": "XMSSMT_CKA_EXTRACTABLE_false"
+        },
+        {
+            "details": "RV=17 (want CKR_ATTRIBUTE_SENSITIVE=0x11)",
+            "status": "PASS",
+            "test": "XMSSMT_CKA_VALUE_not_extractable"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "XMSSMT_reject_SENSITIVE_false"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "XMSSMT_reject_EXTRACTABLE_true"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "XMSSMT_accept_restated_SENSITIVE_true"
+        }
+    ],
     "HybridKEM": [
         {
             "details": "",
@@ -1181,7 +1454,7 @@
             "test": "Generate_ML_KEM_768"
         },
         {
-            "details": "ephemeral pubkey len=34",
+            "details": "ephemeral pubkey len=32",
             "status": "PASS",
             "test": "Encapsulate_X25519_half"
         },
@@ -1225,22 +1498,22 @@
     ],
     "KCV": [
         {
-            "details": "3 bytes: B44E1B",
+            "details": "3 bytes: 97C70A",
             "status": "PASS",
             "test": "AES_Generate_KCV_Present"
         },
         {
-            "details": "HSM=B44E1B == oracle=B44E1B",
+            "details": "HSM=97C70A == oracle=97C70A",
             "status": "PASS",
             "test": "AES_Generate_KCV_Equals_OracleEcbZeroBlock"
         },
         {
-            "details": "3 bytes: A451B8",
+            "details": "3 bytes: 105A5B",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Present"
         },
         {
-            "details": "original=A451B8 unwrapped=A451B8",
+            "details": "original=105A5B unwrapped=105A5B",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Equals_Original"
         },
@@ -1367,6 +1640,448 @@
             "details": "SS matched",
             "status": "PASS",
             "test": "C_DecapsulateKey_1024"
+        }
+    ],
+    "KEMKcv": [
+        {
+            "details": "got 3 bytes (§4.11 SHALL be supplied)",
+            "status": "PASS",
+            "test": "Encap_KCV_present"
+        },
+        {
+            "details": "HSM=762CB2 oracle=762CB2",
+            "status": "PASS",
+            "test": "Encap_KCV_equals_SHA1_oracle"
+        },
+        {
+            "details": "got 3 bytes",
+            "status": "PASS",
+            "test": "Decap_KCV_present"
+        },
+        {
+            "details": "HSM=762CB2 oracle=762CB2",
+            "status": "PASS",
+            "test": "Decap_KCV_equals_SHA1_oracle"
+        },
+        {
+            "details": "encap=762CB2 decap=762CB2",
+            "status": "PASS",
+            "test": "Encap_and_Decap_KCV_agree"
+        },
+        {
+            "details": "RV=0 (§4.11: a matching supplied value is legal)",
+            "status": "PASS",
+            "test": "Decap_correct_caller_KCV_accepted"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "Decap_wrong_caller_KCV_rejected"
+        },
+        {
+            "details": "RV=0 kcv bytes=0",
+            "status": "PASS",
+            "test": "Decap_zero_length_KCV_suppresses"
+        },
+        {
+            "details": "got 3 bytes",
+            "status": "PASS",
+            "test": "ECDH_Encap_KCV_present"
+        },
+        {
+            "details": "HSM=622921 oracle=622921",
+            "status": "PASS",
+            "test": "ECDH_Encap_KCV_equals_SHA1_oracle"
+        },
+        {
+            "details": "HSM=622921 oracle=622921",
+            "status": "PASS",
+            "test": "ECDH_Decap_KCV_equals_SHA1_oracle"
+        }
+    ],
+    "KEMNeg": [
+        {
+            "details": "RV=112 (want CKR_MECHANISM_INVALID)",
+            "status": "PASS",
+            "test": "Encap_MLKEM_restricted"
+        },
+        {
+            "details": "RV=112 (want CKR_MECHANISM_INVALID)",
+            "status": "PASS",
+            "test": "Decap_MLKEM_restricted"
+        },
+        {
+            "details": "RV=0 (whitelist includes CKM_ML_KEM)",
+            "status": "PASS",
+            "test": "Encap_MLKEM_whitelisted"
+        },
+        {
+            "details": "RV=112 (want CKR_MECHANISM_INVALID)",
+            "status": "PASS",
+            "test": "Encap_ECDH_restricted"
+        },
+        {
+            "details": "RV=112 (want CKR_MECHANISM_INVALID)",
+            "status": "PASS",
+            "test": "Decap_ECDH_restricted"
+        }
+    ],
+    "KEMValueLen": [
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Generate_ML_KEM_768"
+        },
+        {
+            "details": "ct len=1088",
+            "status": "PASS",
+            "test": "Encap_MLKEM768"
+        },
+        {
+            "details": "CKA_VALUE_LEN=32 len(CKA_VALUE)=32 (want 32)",
+            "status": "PASS",
+            "test": "Encap_MLKEM768_VALUE_LEN"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Decap_MLKEM768"
+        },
+        {
+            "details": "CKA_VALUE_LEN=32 len(CKA_VALUE)=32 (want 32)",
+            "status": "PASS",
+            "test": "Decap_MLKEM768_VALUE_LEN"
+        },
+        {
+            "details": "RV=209 (want CKR_TEMPLATE_INCONSISTENT)",
+            "status": "PASS",
+            "test": "Encap_MLKEM768_conflicting_VALUE_LEN"
+        },
+        {
+            "details": "RV=209 (want CKR_TEMPLATE_INCONSISTENT)",
+            "status": "PASS",
+            "test": "Decap_MLKEM768_conflicting_VALUE_LEN"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Decap_MLKEM768_matching_VALUE_LEN"
+        },
+        {
+            "details": "CKA_VALUE_LEN=32 len(CKA_VALUE)=32 (want 32)",
+            "status": "PASS",
+            "test": "Decap_MLKEM768_matching_VALUE_LEN_readback"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Generate_EC_P256"
+        },
+        {
+            "details": "ct len=65",
+            "status": "PASS",
+            "test": "Encap_ECDH_P256"
+        },
+        {
+            "details": "CKA_VALUE_LEN=32 len(CKA_VALUE)=32 (want 32)",
+            "status": "PASS",
+            "test": "Encap_ECDH_P256_VALUE_LEN"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Decap_ECDH_P256"
+        },
+        {
+            "details": "CKA_VALUE_LEN=32 len(CKA_VALUE)=32 (want 32)",
+            "status": "PASS",
+            "test": "Decap_ECDH_P256_VALUE_LEN"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Encap_ECDH_P256_truncated"
+        },
+        {
+            "details": "CKA_VALUE_LEN=16 len(CKA_VALUE)=16 (want 16)",
+            "status": "PASS",
+            "test": "Encap_ECDH_P256_truncated_VALUE_LEN"
+        },
+        {
+            "details": "CKA_VALUE_LEN=16 len(CKA_VALUE)=16 (want 16)",
+            "status": "PASS",
+            "test": "Decap_ECDH_P256_truncated_VALUE_LEN"
+        },
+        {
+            "details": "truncated secrets must match on both sides",
+            "status": "PASS",
+            "test": "Decap_ECDH_P256_truncated"
+        },
+        {
+            "details": "RV=209 (want CKR_TEMPLATE_INCONSISTENT)",
+            "status": "PASS",
+            "test": "Encap_ECDH_P256_oversized_VALUE_LEN"
+        },
+        {
+            "details": "RV=209 (want CKR_TEMPLATE_INCONSISTENT)",
+            "status": "PASS",
+            "test": "Decap_ECDH_P256_oversized_VALUE_LEN"
+        }
+    ],
+    "KMAC": [
+        {
+            "details": "RV=0 MacLen=32",
+            "status": "PASS",
+            "test": "Sign_128"
+        },
+        {
+            "details": "RV=0 MacLen=64",
+            "status": "PASS",
+            "test": "Sign_256"
+        }
+    ],
+    "KcvTemplate": [
+        {
+            "details": "engine=3C07CC oracle=3C07CC",
+            "status": "PASS",
+            "test": "GenerateKey_AES_KCV_matches_oracle"
+        },
+        {
+            "details": "output is freshly random each call, so the caller cannot know the check value in advance",
+            "status": "SKIP",
+            "test": "GenerateKey_AES_correct_value_accepted"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "GenerateKey_AES_wrong_value_rejected"
+        },
+        {
+            "details": "RV=0 kcv bytes=0",
+            "status": "PASS",
+            "test": "GenerateKey_AES_zero_length_suppresses"
+        },
+        {
+            "details": "engine=1CF0A3 oracle=1CF0A3",
+            "status": "PASS",
+            "test": "GenerateKey_Generic_KCV_matches_oracle"
+        },
+        {
+            "details": "output is freshly random each call, so the caller cannot know the check value in advance",
+            "status": "SKIP",
+            "test": "GenerateKey_Generic_correct_value_accepted"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "GenerateKey_Generic_wrong_value_rejected"
+        },
+        {
+            "details": "RV=0 kcv bytes=0",
+            "status": "PASS",
+            "test": "GenerateKey_Generic_zero_length_suppresses"
+        },
+        {
+            "details": "engine=34BC3D oracle=34BC3D",
+            "status": "PASS",
+            "test": "UnwrapKey_AES_KCV_matches_oracle"
+        },
+        {
+            "details": "RV=0 readback=34BC3D",
+            "status": "PASS",
+            "test": "UnwrapKey_AES_correct_value_accepted"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "UnwrapKey_AES_wrong_value_rejected"
+        },
+        {
+            "details": "RV=0 kcv bytes=0",
+            "status": "PASS",
+            "test": "UnwrapKey_AES_zero_length_suppresses"
+        },
+        {
+            "details": "engine=2ED533 oracle=2ED533",
+            "status": "PASS",
+            "test": "DeriveKey_HKDF_KCV_matches_oracle"
+        },
+        {
+            "details": "RV=0 readback=2ED533",
+            "status": "PASS",
+            "test": "DeriveKey_HKDF_correct_value_accepted"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "DeriveKey_HKDF_wrong_value_rejected"
+        },
+        {
+            "details": "RV=0 kcv bytes=0",
+            "status": "PASS",
+            "test": "DeriveKey_HKDF_zero_length_suppresses"
+        },
+        {
+            "details": "engine=A67B1A oracle=A67B1A",
+            "status": "PASS",
+            "test": "DeriveKey_ECDH_KCV_matches_oracle"
+        },
+        {
+            "details": "RV=0 readback=A67B1A",
+            "status": "PASS",
+            "test": "DeriveKey_ECDH_correct_value_accepted"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "DeriveKey_ECDH_wrong_value_rejected"
+        },
+        {
+            "details": "RV=0 kcv bytes=0",
+            "status": "PASS",
+            "test": "DeriveKey_ECDH_zero_length_suppresses"
+        },
+        {
+            "details": "engine=8422AA oracle=8422AA",
+            "status": "PASS",
+            "test": "DeriveKey_PBKD2_KCV_matches_oracle"
+        },
+        {
+            "details": "RV=0 readback=8422AA",
+            "status": "PASS",
+            "test": "DeriveKey_PBKD2_correct_value_accepted"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "DeriveKey_PBKD2_wrong_value_rejected"
+        },
+        {
+            "details": "RV=0 kcv bytes=0",
+            "status": "PASS",
+            "test": "DeriveKey_PBKD2_zero_length_suppresses"
+        },
+        {
+            "details": "engine=F80929 oracle=F80929",
+            "status": "PASS",
+            "test": "DeriveKey_SP800108_KCV_matches_oracle"
+        },
+        {
+            "details": "RV=0 readback=F80929",
+            "status": "PASS",
+            "test": "DeriveKey_SP800108_correct_value_accepted"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "DeriveKey_SP800108_wrong_value_rejected"
+        },
+        {
+            "details": "RV=0 kcv bytes=0",
+            "status": "PASS",
+            "test": "DeriveKey_SP800108_zero_length_suppresses"
+        },
+        {
+            "details": "CKA_VALUE unreadable (RV=17), engine KCV=D46F13",
+            "status": "SKIP",
+            "test": "DeriveKey_Concat_KCV_matches_oracle"
+        },
+        {
+            "details": "RV=0 readback=D46F13",
+            "status": "PASS",
+            "test": "DeriveKey_Concat_correct_value_accepted"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "DeriveKey_Concat_wrong_value_rejected"
+        },
+        {
+            "details": "RV=0 kcv bytes=0",
+            "status": "PASS",
+            "test": "DeriveKey_Concat_zero_length_suppresses"
+        },
+        {
+            "details": "engine=257129 oracle=257129",
+            "status": "PASS",
+            "test": "DeriveKey_X25519_KCV_matches_oracle"
+        },
+        {
+            "details": "RV=0 readback=257129",
+            "status": "PASS",
+            "test": "DeriveKey_X25519_correct_value_accepted"
+        },
+        {
+            "details": "RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "DeriveKey_X25519_wrong_value_rejected"
+        },
+        {
+            "details": "RV=0 kcv bytes=0",
+            "status": "PASS",
+            "test": "DeriveKey_X25519_zero_length_suppresses"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "SetAttributeValue_correct_accepted"
+        },
+        {
+            "details": "RV=19",
+            "status": "PASS",
+            "test": "SetAttributeValue_wrong_rejected"
+        },
+        {
+            "details": "RV=0 bytes left=0",
+            "status": "PASS",
+            "test": "SetAttributeValue_zero_length_destroys"
+        }
+    ],
+    "MechFlags": [
+        {
+            "details": "flags=0x424704",
+            "status": "PASS",
+            "test": "CKM_RSA_PKCS_advertises_SIGN_RECOVER"
+        },
+        {
+            "details": "flags=0x424704",
+            "status": "PASS",
+            "test": "CKM_RSA_PKCS_advertises_VERIFY_RECOVER"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "CKM_RSA_PKCS_SignRecoverInit_accepts"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "CKM_RSA_PKCS_VerifyRecoverInit_accepts"
+        },
+        {
+            "details": "flags=0x31488",
+            "status": "PASS",
+            "test": "CKM_RSA_X_509_advertises_SIGN_RECOVER"
+        },
+        {
+            "details": "flags=0x31488",
+            "status": "PASS",
+            "test": "CKM_RSA_X_509_advertises_VERIFY_RECOVER"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "CKM_RSA_X_509_SignRecoverInit_accepts"
+        },
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "CKM_RSA_X_509_VerifyRecoverInit_accepts"
+        },
+        {
+            "details": "RV=19 (0x3 is unassigned by OASIS; want CKR_ATTRIBUTE_VALUE_INVALID=0x13)",
+            "status": "PASS",
+            "test": "OpenPGP_codepoint_0x3_not_squatted"
         }
     ],
     "MsgCrypt": [
@@ -1601,6 +2316,172 @@
             "test": "Signature_Forgery_Invalid"
         }
     ],
+    "PQKeyBytes": [
+        {
+            "details": "len=2560 (want 2560)",
+            "status": "PASS",
+            "test": "ML_DSA_44_CKA_VALUE_is_raw_FIPS_length"
+        },
+        {
+            "details": "first byte=0x84 len=2560",
+            "status": "PASS",
+            "test": "ML_DSA_44_CKA_VALUE_not_DER_wrapped"
+        },
+        {
+            "details": "RV=0 len=32 (want 32)",
+            "status": "PASS",
+            "test": "ML_DSA_44_CKA_SEED_contributed"
+        },
+        {
+            "details": "sign RV=0 verify RV=0",
+            "status": "PASS",
+            "test": "ML_DSA_44_sign_verify_round_trip"
+        },
+        {
+            "details": "len=2400 (want 2400)",
+            "status": "PASS",
+            "test": "ML_KEM_768_CKA_VALUE_is_raw_FIPS_length"
+        },
+        {
+            "details": "first byte=0xcd len=2400",
+            "status": "PASS",
+            "test": "ML_KEM_768_CKA_VALUE_not_DER_wrapped"
+        },
+        {
+            "details": "RV=0 len=64 (want 64)",
+            "status": "PASS",
+            "test": "ML_KEM_768_CKA_SEED_contributed"
+        },
+        {
+            "details": "len=64 (want 64)",
+            "status": "PASS",
+            "test": "SLH_DSA_CKA_VALUE_is_raw_FIPS_length"
+        },
+        {
+            "details": "first byte=0x4d len=64",
+            "status": "PASS",
+            "test": "SLH_DSA_CKA_VALUE_not_DER_wrapped"
+        },
+        {
+            "details": "RV=0 len=0",
+            "status": "PASS",
+            "test": "SLH_DSA_CKA_SEED_absent"
+        },
+        {
+            "details": "sign RV=0 verify RV=0",
+            "status": "PASS",
+            "test": "SLH_DSA_sign_verify_round_trip"
+        }
+    ],
+    "Profile": [
+        {
+            "details": "found 2 (Profiles v3.2 §5.1 cond. 4 requires at least one)",
+            "status": "PASS",
+            "test": "Token_publishes_a_CKO_PROFILE_object"
+        },
+        {
+            "details": "profile ids: [ 1 2 ]",
+            "status": "PASS",
+            "test": "CKP_BASELINE_PROVIDER_present"
+        },
+        {
+            "details": "profile ids: [ 1 2 ]",
+            "status": "PASS",
+            "test": "No_profile_object_carries_CKP_INVALID_ID"
+        },
+        {
+            "details": "CKP_EXTENDED_PROVIDER claimed; C_LoginUser exported (§5.3 satisfiable)",
+            "status": "PASS",
+            "test": "Extended_provider_claim_recorded"
+        },
+        {
+            "details": "RV=16 (want CKR_ATTRIBUTE_READ_ONLY=0x10)",
+            "status": "PASS",
+            "test": "Application_cannot_create_CKO_PROFILE"
+        },
+        {
+            "details": "RV=18 value=3735928559 (want CKR_ATTRIBUTE_TYPE_INVALID=0x12; 0 is CKP_INVALID_ID)",
+            "status": "PASS",
+            "test": "CKA_PROFILE_ID_absent_on_ordinary_object"
+        }
+    ],
+    "RawEncoding": [
+        {
+            "details": "CKA_EC_POINT len=32 (want 32 bare RFC bytes)",
+            "status": "PASS",
+            "test": "Ed25519_EC_POINT_raw"
+        },
+        {
+            "details": "sign RV=0 verify RV=0",
+            "status": "PASS",
+            "test": "Ed25519_sign_verify_round_trip"
+        },
+        {
+            "details": "create RV=0 verify RV=0",
+            "status": "PASS",
+            "test": "Ed25519_import_raw_point_verifies"
+        },
+        {
+            "details": "create RV=0 verify RV=0",
+            "status": "PASS",
+            "test": "Ed25519_import_DER_point_still_verifies"
+        },
+        {
+            "details": "CKA_EC_POINT len=57 (want 57 bare RFC bytes)",
+            "status": "PASS",
+            "test": "Ed448_EC_POINT_raw"
+        },
+        {
+            "details": "sign RV=0 verify RV=0",
+            "status": "PASS",
+            "test": "Ed448_sign_verify_round_trip"
+        },
+        {
+            "details": "create RV=0 verify RV=0",
+            "status": "PASS",
+            "test": "Ed448_import_raw_point_verifies"
+        },
+        {
+            "details": "create RV=0 verify RV=0",
+            "status": "PASS",
+            "test": "Ed448_import_DER_point_still_verifies"
+        },
+        {
+            "details": "CKA_EC_POINT len=32 (want 32 bare RFC bytes)",
+            "status": "PASS",
+            "test": "X25519_EC_POINT_raw"
+        },
+        {
+            "details": "RV=0 len=65 first=0x4 (want 65, first byte 0x04 not a DER tag)",
+            "status": "PASS",
+            "test": "P256_ciphertext_is_65_raw_bytes"
+        },
+        {
+            "details": "decap RV=0 secrets equal=1",
+            "status": "PASS",
+            "test": "P256_raw_ciphertext_round_trip"
+        },
+        {
+            "details": "decap RV=0 secrets equal=1",
+            "status": "PASS",
+            "test": "P256_DER_ciphertext_still_accepted"
+        },
+        {
+            "details": "RV=0 len=32 (want 32; §6.3.17 gives Montgomery no DER form)",
+            "status": "PASS",
+            "test": "X25519_ciphertext_is_32_raw_bytes"
+        },
+        {
+            "details": "decap RV=0 secrets equal=1",
+            "status": "PASS",
+            "test": "X25519_raw_ciphertext_round_trip"
+        },
+        {
+            "details": "decap RV=0 secrets equal=1",
+            "status": "PASS",
+            "test": "X25519_DER_ciphertext_still_accepted"
+        }
+    ],
     "SHA-3": [
         {
             "details": "RV=0",
@@ -1667,6 +2548,38 @@
             "test": "C_LoginUser"
         }
     ],
+    "WrapTemplate": [
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Generate_KEK_with_WRAP_TEMPLATE"
+        },
+        {
+            "details": "RV=0 ulValueLen=24 (want 24)",
+            "status": "PASS",
+            "test": "KEK_WRAP_TEMPLATE_round_trips"
+        },
+        {
+            "details": "RV=0 len=40",
+            "status": "PASS",
+            "test": "Wrap_without_template_baseline"
+        },
+        {
+            "details": "RV=96 (want CKR_KEY_HANDLE_INVALID=0x60)",
+            "status": "PASS",
+            "test": "Wrap_template_value_mismatch"
+        },
+        {
+            "details": "RV=0 len=40",
+            "status": "PASS",
+            "test": "Wrap_template_match_proceeds"
+        },
+        {
+            "details": "RV=96 (want CKR_KEY_HANDLE_INVALID=0x60)",
+            "status": "PASS",
+            "test": "Wrap_template_absent_attribute"
+        }
+    ],
     "XMSS": [
         {
             "details": "Gen XMSS_SHA2_10_256",
@@ -1699,12 +2612,59 @@
             "test": "Generate_XMSSMT_SHA2_20_2_256"
         }
     ],
+    "XmssParamSet": [
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Generate_oid1_from_attribute"
+        },
+        {
+            "details": "sig len=2500 (XMSS-SHA2_10_256 = 2500)",
+            "status": "PASS",
+            "test": "Sign_oid1_length"
+        },
+        {
+            "details": "",
+            "status": "PASS",
+            "test": "Generate_oid2_from_attribute"
+        },
+        {
+            "details": "read 2",
+            "status": "PASS",
+            "test": "Public_CKA_PARAMETER_SET_echoes_2"
+        },
+        {
+            "details": "read 2",
+            "status": "PASS",
+            "test": "Private_CKA_PARAMETER_SET_echoes_2"
+        },
+        {
+            "details": "sig len=2692 (XMSS-SHA2_16_256 = 2692)",
+            "status": "PASS",
+            "test": "Sign_oid2_length"
+        },
+        {
+            "details": "attribute=1 mechParam=2 → sig len=2500 (must be 2500, the attribute's set)",
+            "status": "PASS",
+            "test": "Attribute_wins_over_mechanism_parameter"
+        },
+        {
+            "details": "RV=208 (want CKR_TEMPLATE_INCOMPLETE=0xD0)",
+            "status": "PASS",
+            "test": "Absent_CKA_PARAMETER_SET_is_TEMPLATE_INCOMPLETE"
+        },
+        {
+            "details": "RV=521 (want CKR_PARAMETER_SET_NOT_SUPPORTED=0x209)",
+            "status": "PASS",
+            "test": "Unsupported_parameter_set_code"
+        }
+    ],
     "_summary": {
-        "engine": "/Users/pqctoday/Antigravity/.worktrees/pqctoday-hsm-pkcs11-parity/build/src/lib/libsofthsmv3.dylib",
-        "engine_commit": "",
+        "engine": "./build/src/lib/libsofthsmv3.dylib",
+        "engine_commit": "5a107b2898f636e2cb152a1f42c1fc0a0d275f62",
         "fail": 0,
-        "pass": 324,
-        "skip": 0,
+        "pass": 507,
+        "skip": 3,
         "xfail_known_engine_bugs": 0
     }
 }
