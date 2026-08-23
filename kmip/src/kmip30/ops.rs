@@ -121,9 +121,10 @@ pub enum Operation {
     Process                   = 0x3a,
 
     // ── K3 — remaining KMIP 3.0 §11 Operation codepoints ──────────────────
-    // With these the enum covers all 64 published Operation values
-    // (0x01–0x40, `kmip-spec-3.0-tags-enums.json` `enums.Operation`).
-    // None has a dispatcher route — a recognized op without a handler
+    // With these the enum covers all values in 0x01–0x40, plus Encapsulate
+    // (0x41) / Decapsulate (0x42) defined above — all 66 published
+    // Operation values (`kmip-spec-3.0-tags-enums.json` `enums.Operation`).
+    // None of the ops added in this block has a dispatcher route — a recognized op without a handler
     // decodes to `RequestPayload::Unsupported(op)` and the dispatcher
     // fails that batch item with `OperationNotSupported (0x05)` per
     // KMIP 3.0 §9.2, leaving the rest of the message intact.
