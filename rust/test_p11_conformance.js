@@ -5,8 +5,14 @@
 // docs/gap-analysis-rust-pkcs11-v3.2.md (R1–R3.6, H-4, mixing guard).
 //
 // Run: node test_p11_conformance.js   (requires pkg/ built via wasm-pack)
+//
+// Also regenerates rust/RUST_P11_V32_CONFORMANCE_REPORT.md at the end of the
+// run with THIS run's real per-section pass/fail counts, engine commit, and
+// generation timestamp (see writeReport() near the bottom) — the report is
+// machine-written, not hand-edited, every time this file is run.
 'use strict';
 const fs = require('fs');
+const path = require('path');
 
 // ── module load ──────────────────────────────────────────────────────────────
 const wasmBuf = fs.readFileSync(__dirname + '/pkg/softhsmrustv3_bg.wasm');
@@ -70,14 +76,33 @@ const CKU = { SO: 0, USER: 1 };
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 let passes = 0, failures = 0;
+// Per-section breakdown + full transcript, captured live as checks run, so
+// writeReport() (bottom of file) can regenerate a report reflecting THIS
+// run's real results instead of a stale hand-edited one.
+const sections = [];
+let currentSection = null;
+const transcriptLines = [];
 function check(label, actual, expected) {
-  if (actual === expected) { passes++; console.log(`  ✅ ${label}`); }
-  else {
+  if (actual === expected) {
+    passes++;
+    if (currentSection) currentSection.passes++;
+    const line = `  ✅ ${label}`;
+    console.log(line);
+    transcriptLines.push(line);
+  } else {
     failures++;
-    console.log(`  ❌ ${label}: got 0x${actual.toString(16)}, expected 0x${expected.toString(16)}`);
+    if (currentSection) currentSection.failures++;
+    const line = `  ❌ ${label}: got 0x${actual.toString(16)}, expected 0x${expected.toString(16)}`;
+    console.log(line);
+    transcriptLines.push(line);
   }
 }
-function section(t) { console.log(`\n── ${t} ──`); }
+function section(t) {
+  console.log(`\n── ${t} ──`);
+  currentSection = { name: t, passes: 0, failures: 0 };
+  sections.push(currentSection);
+  transcriptLines.push('', `── ${t} ──`);
+}
 
 function alloc(n) { return w._malloc(n); }
 function writeBytes(ptr, bytes) { new Uint8Array(mem().buffer, ptr, bytes.length).set(bytes); }
@@ -1383,6 +1408,101 @@ section('WP-B — CKO_CERTIFICATE object lifecycle, X.509 only (§4.6 Tables 19-
   w._C_DestroyObject(hS, certHandle);
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Report generation — writes rust/RUST_P11_V32_CONFORMANCE_REPORT.md from
+// THIS run's real data: engine commit (git rev-parse), a real generation
+// timestamp, real per-section pass/fail counts, and the full transcript. This
+// closes the gap where the checked-in report claimed evidence for engine
+// commits the harness had never actually been re-run against — see
+// git history around 2026-08-23 ("compliance testing remediation") for the
+// audit that found it. Hand-authored historical narrative (dated remediation
+// write-ups already in the report) is preserved verbatim across
+// regenerations by copying it forward from whatever report is on disk before
+// this run overwrites it; only the live evidence (header fields, Result,
+// Sections covered, Full transcript) is regenerated.
+function gitCommit() {
+  try {
+    return require('child_process')
+      .execSync('git rev-parse --short=12 HEAD', { cwd: __dirname })
+      .toString().trim();
+  } catch (e) {
+    return `UNKNOWN (git rev-parse failed: ${e.message.replace(/\s+/g, ' ').trim()})`;
+  }
+}
+
+function writeReport() {
+  const reportPath = path.join(__dirname, 'RUST_P11_V32_CONFORMANCE_REPORT.md');
+  const commit = gitCommit();
+  const generated = new Date().toISOString();
+
+  let historical = '';
+  try {
+    const old = fs.readFileSync(reportPath, 'utf8');
+    const startMarker = "This is the Rust engine's OWN conformance evidence.";
+    const endMarker = '## Sections covered';
+    const startIdx = old.indexOf(startMarker);
+    const endIdx = old.indexOf(endMarker);
+    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+      historical = `${old.slice(startIdx, endIdx).trim()}\n\n`;
+    }
+  } catch (e) { /* no prior report on disk (first-ever run) — start fresh */ }
+
+  const sectionLines = sections
+    .map((s) => `- ${s.name} (${s.passes} passed / ${s.failures} failed)`)
+    .join('\n');
+
+  const out = `# softhsmrustv3 — PKCS#11 v3.2 Conformance Report (Rust engine)
+
+**Engine:** softhsmrustv3 (Rust), wasm32 build with \`--features acvp\`
+**Harness:** \`rust/test_p11_conformance.js\` (table-driven negative-path + KAT
+matrix asserting exact \`CKR_*\` codes in spec priority order §5.4/§5.12, plus
+PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
+**Engine commit:** \`${commit}\` · **Generated:** ${generated} — machine-written
+by this harness itself (\`writeReport()\` in \`test_p11_conformance.js\`) at the
+end of every run, not hand-edited.
+**Regenerate:** \`scripts/local-gate.sh --rust-p11\` (see below), or manually:
+\`\`\`
+docker exec pqc-rust bash -c 'cd /ag/pqctoday-hsm/rust && \\
+  RUSTFLAGS="-C link-arg=-zstack-size=2097152" \\
+  wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp'
+cd rust && node test_p11_conformance.js
+\`\`\`
+
+## Result
+
+**${passes} passed / ${failures} failed** across ${sections.length} sections in this JS harness.
+${failures > 0 ? `
+⚠️ **This run has ${failures} real failure(s)** — see "Full transcript" below
+for the exact check(s) and \`got\`/\`expected\` codes. The hand-authored
+narrative preserved below was written for an earlier, fully-passing run and
+may describe (or claim) an all-green state that does not hold for this run —
+trust the count above and the transcript, not prose written for a prior run.
+` : ''}
+${historical}## Sections covered
+
+${sectionLines}
+
+## Full transcript
+
+\`\`\`
+${transcriptLines.join('\n')}
+
+════════ RESULT: ${passes} passed, ${failures} failed ════════
+\`\`\`
+`;
+
+  fs.writeFileSync(reportPath, out);
+  console.log(`[report] wrote ${reportPath}`);
+  console.log(`[report] engine commit ${commit} · ${passes} passed / ${failures} failed · ${sections.length} sections`);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
+// writeReport() runs — and prints its own status lines — BEFORE the final
+// RESULT line below, not after. scripts/local-gate.sh's --rust-p11 step pipes
+// this process's output through `grep -q 'RESULT: .* 0 failed'`, which exits
+// (closing the pipe) the instant it matches; any stdout write from this
+// process after that line risks an EPIPE that `pipefail` would turn into a
+// false gate failure. Keeping RESULT strictly last avoids that.
+writeReport();
 console.log(`\n════════ RESULT: ${passes} passed, ${failures} failed ════════`);
 process.exit(failures === 0 ? 0 : 1);

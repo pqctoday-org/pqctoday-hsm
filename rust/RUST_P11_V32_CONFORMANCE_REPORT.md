@@ -4,11 +4,9 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `9490a0b` · **Generated:** 2026-07-10 ·
-**Refreshed:** 2026-08-13 (N2 remediation — surgical corrections only: the
-stale C_SignRecoverInit "stub" row and the advertised-mechanism count below
-were wrong against the code as of `eed556e`; the harness itself was not
-re-run for this refresh)
+**Engine commit:** `5a107b2898f6` · **Generated:** 2026-08-23T21:58:02.681Z — machine-written
+by this harness itself (`writeReport()` in `test_p11_conformance.js`) at the
+end of every run, not hand-edited.
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
 ```
 docker exec pqc-rust bash -c 'cd /ag/pqctoday-hsm/rust && \
@@ -19,12 +17,13 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**257 passed / 0 failed** across 40 sections in this JS harness — unchanged
-by the 2026-07-17 remediation below, which is instead covered by the Rust
-`cargo test --lib` suite (301 passed / 0 failed / 9 ignored; see the two new
-sections listed below). The JS harness and the Rust unit suite exercise the
-same wasm-bindgen `_C_*` ABI; new coverage was added directly in Rust rather
-than hand-duplicated into this harness.
+**256 passed / 1 failed** across 40 sections in this JS harness.
+
+⚠️ **This run has 1 real failure(s)** — see "Full transcript" below
+for the exact check(s) and `got`/`expected` codes. The hand-authored
+narrative preserved below was written for an earlier, fully-passing run and
+may describe (or claim) an all-green state that does not hold for this run —
+trust the count above and the transcript, not prose written for a prior run.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -124,46 +123,46 @@ silently double-succeed. Regression test:
 
 ## Sections covered
 
-- R1.2 — initialization gate (§5.4/§5.6)
-- Token init (fixture — before any session, §5.7 C_InitToken)
-- T7 — TokenInfo flags BEFORE C_InitPIN (§5.5, round-2 regression)
-- R2.2 — session flags (§5.6)
-- Login fixture — SO sets user PIN, then User login (§4.4)
-- R2.1 — session-handle validation (§5.12 priority)
-- R2.4 — key-handle vs permission codes (§5.12.4)
-- R3.6 — CKA_PARAMETER_SET required for PQC keygen (§6.67.2)
-- R1.4 — GCM IV validation (§6.27.7)
-- H-4 — single-shot two-call convention (§5.2)
-- Mixing guard — one-shot after Update → OPERATION_ACTIVE (§5.2)
-- R2.5 — operation-active on re-init / find FSM (§5.10/§5.12)
-- H-5 — stateful sign / digest two-call (§5.2)
-- R1.3 — private-object visibility (§4.4)
-- H-11 — CKR_ATTRIBUTE_SENSITIVE (§5.7.5)
-- R1.5 — authenticated wrap AAD binding (§5.18.6/7)
-- ML-KEM — encap/decap usage + provenance (§5.18.8/9)
-- E1 — ML-DSA context string + hedge variant (§6.67, FIPS 204 §5.2)
-- E9 — CKR_SIGNATURE_LEN_RANGE (§5.12.6)
-- D4 — spec-mandated stubs
-- F1 — mechanism table reconciliation (R6.2)
-- R3.1 — C_CreateObject template validation (§4.1.1)
-- E3 — GCM ulTagBits honored + validated (§6.27.7 / SP 800-38D §5.2.1.2)
-- E4 — AES-CTR ulCounterBits (§6.27.6)
-- E8 — HMAC general-length (§6.x CK_MAC_GENERAL_PARAMS)
-- E2 — RSA-PSS params validated (§6.4.5)
-- R3.7/D2 — session-object lifecycle + SessionCancel (§4.4/§5.6)
-- Round-2 — keygen template + RNG codes (§5.16/§5.14)
-- Round-2 — wrap/unwrap role-specific handle codes (§5.18)
-- Round-2 — operate-stage session-handle gate (§5.12.1)
-- Round-2 — T6 object management (Set/GetAttr, size, copy, §4.4.1/§5.7)
-- Round-2 — dynamic TokenInfo (§5.5, T7)
-- Round-2 — C_SignUpdate/Final ≡ one-shot C_Sign (CKM_SHA256_HMAC)
-- Round-2 — mechanism table contents + FIPS ranges (F2/T8)
-- Round-2 — T5 message API ≡ one-shot GCM (§5.19)
-- Round-2 — SP800-108 KBKDF PRF must be a keyed-MAC mechanism (§6.26)
-- Round-2 — SP800-108 CK_PRF_DATA_TYPE completeness (COUNTER, KEY_HANDLE, SUM_OF_SEGMENTS)
-- WP4a — CKO_TRUST object lifecycle (§4.7 Table 25)
-- WP-A — CKA_ALLOWED_MECHANISMS enforcement (§4.8 Table 13)
-- WP-B — CKO_CERTIFICATE object lifecycle, X.509 only (§4.6 Tables 19-20)
+- R1.2 — initialization gate (§5.4/§5.6) (4 passed / 0 failed)
+- Token init (fixture — before any session, §5.7 C_InitToken) (1 passed / 0 failed)
+- T7 — TokenInfo flags BEFORE C_InitPIN (§5.5, round-2 regression) (3 passed / 0 failed)
+- R2.2 — session flags (§5.6) (2 passed / 0 failed)
+- Login fixture — SO sets user PIN, then User login (§4.4) (4 passed / 0 failed)
+- R2.1 — session-handle validation (§5.12 priority) (3 passed / 0 failed)
+- R2.4 — key-handle vs permission codes (§5.12.4) (3 passed / 0 failed)
+- R3.6 — CKA_PARAMETER_SET required for PQC keygen (§6.67.2) (2 passed / 0 failed)
+- R1.4 — GCM IV validation (§6.27.7) (1 passed / 0 failed)
+- H-4 — single-shot two-call convention (§5.2) (5 passed / 0 failed)
+- Mixing guard — one-shot after Update → OPERATION_ACTIVE (§5.2) (4 passed / 0 failed)
+- R2.5 — operation-active on re-init / find FSM (§5.10/§5.12) (4 passed / 0 failed)
+- H-5 — stateful sign / digest two-call (§5.2) (3 passed / 0 failed)
+- R1.3 — private-object visibility (§4.4) (4 passed / 0 failed)
+- H-11 — CKR_ATTRIBUTE_SENSITIVE (§5.7.5) (2 passed / 0 failed)
+- R1.5 — authenticated wrap AAD binding (§5.18.6/7) (4 passed / 0 failed)
+- ML-KEM — encap/decap usage + provenance (§5.18.8/9) (4 passed / 0 failed)
+- E1 — ML-DSA context string + hedge variant (§6.67, FIPS 204 §5.2) (10 passed / 0 failed)
+- E9 — CKR_SIGNATURE_LEN_RANGE (§5.12.6) (2 passed / 0 failed)
+- D4 — spec-mandated stubs (5 passed / 1 failed)
+- F1 — mechanism table reconciliation (R6.2) (1 passed / 0 failed)
+- R3.1 — C_CreateObject template validation (§4.1.1) (7 passed / 0 failed)
+- E3 — GCM ulTagBits honored + validated (§6.27.7 / SP 800-38D §5.2.1.2) (11 passed / 0 failed)
+- E4 — AES-CTR ulCounterBits (§6.27.6) (11 passed / 0 failed)
+- E8 — HMAC general-length (§6.x CK_MAC_GENERAL_PARAMS) (10 passed / 0 failed)
+- E2 — RSA-PSS params validated (§6.4.5) (1 passed / 0 failed)
+- R3.7/D2 — session-object lifecycle + SessionCancel (§4.4/§5.6) (12 passed / 0 failed)
+- Round-2 — keygen template + RNG codes (§5.16/§5.14) (2 passed / 0 failed)
+- Round-2 — wrap/unwrap role-specific handle codes (§5.18) (3 passed / 0 failed)
+- Round-2 — operate-stage session-handle gate (§5.12.1) (3 passed / 0 failed)
+- Round-2 — T6 object management (Set/GetAttr, size, copy, §4.4.1/§5.7) (13 passed / 0 failed)
+- Round-2 — dynamic TokenInfo (§5.5, T7) (6 passed / 0 failed)
+- Round-2 — C_SignUpdate/Final ≡ one-shot C_Sign (CKM_SHA256_HMAC) (8 passed / 0 failed)
+- Round-2 — mechanism table contents + FIPS ranges (F2/T8) (11 passed / 0 failed)
+- Round-2 — T5 message API ≡ one-shot GCM (§5.19) (10 passed / 0 failed)
+- Round-2 — SP800-108 KBKDF PRF must be a keyed-MAC mechanism (§6.26) (8 passed / 0 failed)
+- Round-2 — SP800-108 CK_PRF_DATA_TYPE completeness (COUNTER, KEY_HANDLE, SUM_OF_SEGMENTS) (17 passed / 0 failed)
+- WP4a — CKO_TRUST object lifecycle (§4.7 Table 25) (17 passed / 0 failed)
+- WP-A — CKA_ALLOWED_MECHANISMS enforcement (§4.8 Table 13) (9 passed / 0 failed)
+- WP-B — CKO_CERTIFICATE object lifecycle, X.509 only (§4.6 Tables 19-20) (26 passed / 0 failed)
 
 ## Full transcript
 
@@ -277,16 +276,11 @@ silently double-succeed. Regression test:
   ✅ C_CancelFunction → FUNCTION_NOT_PARALLEL
   ✅ C_WaitForSlotEvent(DONT_BLOCK) → NO_EVENT
   ✅ C_WaitForSlotEvent(blocking) → FUNCTION_NOT_SUPPORTED
-  ~~C_SignRecoverInit → FUNCTION_NOT_SUPPORTED~~ — STALE (corrected
-  2026-08-13): C_SignRecoverInit/C_SignRecover are IMPLEMENTED since
-  `eed556e` (rust/src/ffi.rs), so this row no longer describes a
-  spec-mandated stub and its old PASS claim was false against current code
+  ❌ C_SignRecoverInit → FUNCTION_NOT_SUPPORTED: got 0x0, expected 0x54
   ✅ C_DigestEncryptUpdate (no active ops) → OPERATION_NOT_INITIALIZED
 
 ── F1 — mechanism table reconciliation (R6.2) ──
-  ✅ all advertised mechanisms answerable → 0 missing
-  (116 mechanisms in SUPPORTED_MECHS as of 2026-08-13; the "109" this
-  report originally recorded reflected the 2026-07-10 table)
+  ✅ all 116 advertised mechanisms answerable → 0 missing
 
 ── R3.1 — C_CreateObject template validation (§4.1.1) ──
   ✅ no CKA_CLASS → TEMPLATE_INCOMPLETE
@@ -511,5 +505,5 @@ silently double-succeed. Regression test:
   ✅ C_Logout (leaving SO) → OK
   ✅ re-Login(USER) → OK
 
-════════ RESULT: 257 passed, 0 failed ════════
+════════ RESULT: 256 passed, 1 failed ════════
 ```

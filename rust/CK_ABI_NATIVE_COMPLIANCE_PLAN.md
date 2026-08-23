@@ -1,3 +1,10 @@
+> **SUPERSEDED (2026-08-23).** This is a historical plan document from
+> 2026-06-15, kept for context. Its "315/0/0, identical to C++" figure
+> predates two full remediation waves (2026-08-13 security/wrong-result/
+> encoding/capability fixes) and the suite has since grown 15 report
+> categories. **Do not cite this file's numbers as current** — the live
+> report is `rust/RUST_P11_V32_CONFORMANCE_REPORT.md`.
+
 # softhsmrustv3 — native PKCS#11 v3.2 C-ABI compliance plan (166 → 315)
 
 **Branch:** `feat/cabi-native-64bit` (isolated; `main`/validated engine untouched).
