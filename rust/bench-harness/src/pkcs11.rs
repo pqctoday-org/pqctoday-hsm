@@ -513,12 +513,21 @@ impl Engine {
     /// `generate_key_pair`, but builds the public-key template from an
     /// `algos::KeygenParam` — the one place that knows how to encode each
     /// kind of required attribute (raw `CKA_EC_PARAMS` OID bytes at their
-    /// real declared length, vs. `CKA_PARAMETER_SET` as a bare 4-byte
-    /// `u32` regardless of this platform's 8-byte native `CK_ULONG` —
-    /// see `crypto/handlers.rs::get_attr_ulong`, which reads exactly 4
-    /// bytes at `pValue` no matter what `ulValueLen` says). Keeping this
-    /// encoding logic here, not in `algos.rs`, matches the module's own
-    /// rule: nothing outside `pkcs11.rs` builds a `CK_ATTRIBUTE` by hand.
+    /// real declared length, vs. `CKA_PARAMETER_SET`/`CKA_MODULUS_BITS` as
+    /// the platform's NATIVE `CK_ULONG` width — see
+    /// `crypto/handlers.rs::get_attr_ulong_native`, which as of the
+    /// engine's 2026-08-14 fix (commit e8b4129) strictly requires
+    /// `ulValueLen == size_of::<usize>()` (`ck_param::WORD`), refusing
+    /// any other length rather than reading the first 4 bytes of it. A
+    /// fixed 4-byte `u32` — this file's own convention until this fix —
+    /// only ever worked on a 32-bit target; on this native 64-bit build
+    /// `CK_ULONG = c_ulong` is 8 bytes, so it was silently wrong here too
+    /// (found 2026-08-24 alongside the CKA_EC_PARAMS regression below —
+    /// both are the same class of drift: this harness's template-building
+    /// assumptions not tracking the engine's `ffi.rs` correctness fixes).
+    /// Keeping this encoding logic here, not in `algos.rs`, matches the
+    /// module's own rule: nothing outside `pkcs11.rs` builds a
+    /// `CK_ATTRIBUTE` by hand.
     pub fn generate_key_pair_with_param(
         &self,
         session: CK_SESSION_HANDLE,
@@ -537,25 +546,25 @@ impl Engine {
                 self.generate_key_pair(session, mechanism, &mut pub_template, &mut [])
             }
             KeygenParam::ParameterSet(value) => {
-                let mut value = value;
+                // Native CK_ULONG width (8 bytes on this 64-bit build), not
+                // a fixed 4-byte u32 — see this fn's doc comment.
+                let mut value: CK_ULONG = value as CK_ULONG;
                 let mut pub_template = [CK_ATTRIBUTE {
                     attrType: CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE,
-                    pValue: &mut value as *mut u32 as CK_VOID_PTR,
-                    ulValueLen: std::mem::size_of::<u32>() as CK_ULONG,
+                    pValue: &mut value as *mut CK_ULONG as CK_VOID_PTR,
+                    ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
                 }];
                 self.generate_key_pair(session, mechanism, &mut pub_template, &mut [])
             }
             KeygenParam::RsaModulusBits(bits) => {
-                // Same plain-4-byte-u32 convention as ParameterSet above —
-                // confirmed against ffi.rs's CKM_RSA_PKCS_KEY_PAIR_GEN
-                // dispatch (get_attr_ulong), not native CK_ULONG width.
-                // No CKA_PUBLIC_EXPONENT: the engine generates and stores
-                // that itself, not caller-supplied.
-                let mut bits = bits;
+                // Native CK_ULONG width, same reasoning as ParameterSet
+                // above. No CKA_PUBLIC_EXPONENT: the engine generates and
+                // stores that itself, not caller-supplied.
+                let mut bits: CK_ULONG = bits as CK_ULONG;
                 let mut pub_template = [CK_ATTRIBUTE {
                     attrType: CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
-                    pValue: &mut bits as *mut u32 as CK_VOID_PTR,
-                    ulValueLen: std::mem::size_of::<u32>() as CK_ULONG,
+                    pValue: &mut bits as *mut CK_ULONG as CK_VOID_PTR,
+                    ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
                 }];
                 self.generate_key_pair(session, mechanism, &mut pub_template, &mut [])
             }
