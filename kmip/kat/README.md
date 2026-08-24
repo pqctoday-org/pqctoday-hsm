@@ -73,9 +73,10 @@ The full sha256 manifest is `manifest.sha256` — regenerate after any addition 
 | `oasis-kmip-3.0/optional/` | Same source | 7 | Optional KMIP 3.0 conformance tests (AKLC, CS-RNG, OMOS, SKLC) |
 | `oasis-kmip-2.1/` | Download on demand | — (dir not present) | KMIP 2.1 fallback test cases (created only when downloaded for legacy-mode validation) |
 | `ttlv-wire/` | Shipped | 6 `.bin` + `manifest.json` | KMIP 3.0 PQC-specific TTLV byte vectors (hand-crafted, codec round-trip) |
-| `ml-kem/` | Copy of `pqctoday-hub/src/data/acvp/mlkem_test.json` | 1 | NIST ACVP ML-KEM-512/768/1024 vectors |
-| `ml-dsa/` | Copy of `pqctoday-hub/src/data/acvp/mldsa_test.json` + `composite-sigs-jose-kat.json` | 2 | NIST ACVP ML-DSA-44/65/87 + LAMPS draft-19 composite vectors |
-| `slh-dsa/` | Copy of `pqctoday-hub/src/data/acvp/slhdsa_ctx_test.json` | 1 | NIST ACVP SLH-DSA SHA2 + SHAKE family with context vectors |
+| `ml-kem/` | Copy of `pqctoday-hub/src/data/acvp/mlkem_test.json` — real NIST ACVP-Server sample data, byte-verified (2026-08-24 WS-6/K-3; see the file's own `_provenance` block) | 1 | NIST ACVP ML-KEM-512/768/1024 vectors |
+| `ml-dsa/` | Copy of `pqctoday-hub/src/data/acvp/mldsa_test.json` + `composite-sigs-jose-kat.json` — real NIST ACVP-Server sample data, byte-verified (2026-08-24 WS-6/K-3) | 2 | NIST ACVP ML-DSA-44/65/87 + LAMPS draft-19 composite vectors |
+| `slh-dsa/` | Copy of `pqctoday-hub/src/data/acvp/slhdsa_ctx_test.json` — real NIST ACVP-Server sample data, all 12 parameter sets (2026-08-24 WS-6/K-3/H-4; previously covered only SLH-DSA-SHA2-128f, itself unverified) | 1 | NIST ACVP SLH-DSA SHA2 + SHAKE family (all 12 param sets) with context vectors |
+| `frodokem/raw/` | Microsoft `PQCrypto-LWEKE` reference implementation KATs (own README, already provenance-complete — see `frodokem/README.md`) | 6 | FrodoKEM-640/976/1344 × AES/SHAKE, 100 vectors each |
 | `rsa/` | Copy of `pqctoday-hub/src/data/acvp/{rsapss,rsa_oaep}_test.json` | 2 | NIST ACVP RSA-PSS + RSA-OAEP vectors |
 | `ecdsa/` | Copy of `pqctoday-hub/src/data/acvp/{ecdsa,ecdsa_p384,ecdsa_p521,eddsa,eddsa_ed448}_test.json` | 5 | NIST ACVP ECDSA P-256/384/521 + EdDSA Ed25519/Ed448 vectors |
 | `aes/` | Copy of `pqctoday-hub/src/data/acvp/aes{gcm,cbc,cmac,ctr,kw}_test.json` | 5 | NIST CAVP AES vectors in 5 modes |
