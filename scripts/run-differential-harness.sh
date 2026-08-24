@@ -38,11 +38,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-CPP_ENGINE="$BUILD_DIR/src/lib/libsofthsmv3.dylib"
-[[ -f "$CPP_ENGINE" ]] || CPP_ENGINE="$BUILD_DIR/src/lib/libsofthsmv3.so"
-RUST_ENGINE="rust/target/debug/libsofthsmrustv3.dylib"
-[[ -f "$RUST_ENGINE" ]] || RUST_ENGINE="rust/target/debug/libsofthsmrustv3.so"
-
 if [[ $DO_BUILD -eq 1 ]]; then
   echo "==> building the C++ engine ($BUILD_DIR)"
   if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
@@ -54,6 +49,23 @@ if [[ $DO_BUILD -eq 1 ]]; then
   echo "==> building the Rust engine (cdylib)"
   ( cd rust && cargo build --lib )
 fi
+
+# Detected AFTER the build, not before: on a fresh $BUILD_DIR (no prior
+# successful run) the .dylib does not exist yet at the top of this script,
+# so checking here-then-never-again would silently lock onto the .so
+# fallback forever — even after the build above produces a real .dylib —
+# and every subsequent run would FATAL "engine not built" against a path
+# macOS never produces. Only ever caught because every prior invocation of
+# this script happened to run against an ALREADY-built $BUILD_DIR (its own
+# header even hints at that habit: "--no-build only when you have just
+# built both yourself"); promoting this script into the default local
+# gate (2026-08-23) was the first genuinely from-clean-state run and hit
+# it immediately. If DO_BUILD=0, this still correctly detects whatever
+# was already on disk, unchanged from before.
+CPP_ENGINE="$BUILD_DIR/src/lib/libsofthsmv3.dylib"
+[[ -f "$CPP_ENGINE" ]] || CPP_ENGINE="$BUILD_DIR/src/lib/libsofthsmv3.so"
+RUST_ENGINE="rust/target/debug/libsofthsmrustv3.dylib"
+[[ -f "$RUST_ENGINE" ]] || RUST_ENGINE="rust/target/debug/libsofthsmrustv3.so"
 
 for f in "$CPP_ENGINE" "$RUST_ENGINE"; do
   [[ -f "$f" ]] || { echo "FATAL: engine not built: $f" >&2; exit 2; }

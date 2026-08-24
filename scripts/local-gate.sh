@@ -68,7 +68,17 @@ say()  { printf '\n\033[1;36m[gate] %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
 bad()  { printf '\033[1;31m  ✗ %s\033[0m\n' "$*"; FAILED+=("$*"); }
 
-dexec() { docker exec "$RUST_CONTAINER" bash -c "$1"; }
+dexec() {
+  # pipefail inside the nested shell for the same reason run_step_host sets
+  # it: `docker exec ... bash -c "..."` starts a fresh shell that does not
+  # inherit this script's own `set -o pipefail`, so a step whose command
+  # ends in `| tail -N` or another filter would report the filter's exit
+  # status, not the real command's. Central fix here covers every run_step
+  # call, present and future, not just the one that already got bitten
+  # (the differential harness step masked a real FATAL as PASS this way —
+  # this function protects the equivalent-shaped ACVP wasm step too).
+  docker exec "$RUST_CONTAINER" bash -c "set -o pipefail; $1"
+}
 
 ensure_container() {
   if ! docker exec "$RUST_CONTAINER" true 2>/dev/null; then
@@ -87,7 +97,15 @@ run_step() { # name, command(run in container)
 run_step_host() { # name, command(run on host) — for node/wasm steps
   STEP=$((STEP+1))
   say "step $STEP: $1"
-  if bash -c "$2"; then ok "$1"; else bad "$1"; fi
+  # pipefail: a command string ending in `| tail -N` (or any filter) must
+  # report the REAL command's exit status, not the filter's — bash -c
+  # starts a fresh shell that does NOT inherit this script's own `set -o
+  # pipefail` (that only governs pipes run directly in THIS shell), so
+  # without setting it again inside the nested shell, `real_cmd | tail -15`
+  # always "succeeds" here regardless of what real_cmd actually did. Found
+  # 2026-08-23: the differential harness step printed "FATAL: engine not
+  # built" and was still marked PASS by this function.
+  if bash -c "set -o pipefail; $2"; then ok "$1"; else bad "$1"; fi
 }
 
 # ── steps ───────────────────────────────────────────────────────────────────
