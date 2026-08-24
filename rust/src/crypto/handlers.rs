@@ -1875,6 +1875,52 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
             };
             4 + 32 + 67 * 32 + h * 32
         }
+        // XMSS^MT — this arm was MISSING entirely before 2026-08-24 (P-1
+        // remediation), so CKM_XMSSMT fell through to the generic `_ => 512`
+        // default at the bottom of this function. That's not merely an
+        // under-estimate: PKCS#11 §5.2's two-call size-query idiom (call
+        // with pSignature=NULL, allocate exactly the reported length, call
+        // again) returned CKR_BUFFER_TOO_SMALL on the SECOND call for every
+        // XMSSMT-SHA2_20/2_256 signature (real length 4963B, reported
+        // 512B) — a genuine conformance break for any correctly-written
+        // caller, not an untested gap. Found and fixed alongside wiring the
+        // release-tier XMSS/XMSSMT test (test_xmss_release.js), which
+        // verifies this arm's output against the real, measured signature
+        // length rather than trusting the formula alone.
+        //
+        // sig = idx_sig(ceil(h/8)) + random(n) + h*n [auth path across all
+        // layers] + d*len*n [one WOTS+ sig per layer]. RFC 8391 §4.2.3.
+        // len = len_1 + len_2 (§3.1.1, w=16 Winternitz parameter — the same
+        // value the CKM_XMSS arm above assumes): len_1 = ceil(8n/4) = 2n,
+        // len_2 = floor(log2(len_1*15)/4) + 1. n=32 → 67 (matches the XMSS
+        // arm's own hardcode); n=64 → 131.
+        CKM_XMSSMT => {
+            let mt_param = get_object_attr_u32(hkey, CKA_PARAMETER_SET)
+                .filter(|v| *v != 0)
+                .or_else(|| get_object_attr_u32(hkey, CKA_XMSSMT_PARAM_SET).filter(|v| *v != 0))
+                .unwrap_or(CKP_XMSSMT_SHA2_20_2_256);
+            let (h, d, n): (u32, u32, u32) = match mt_param {
+                CKP_XMSSMT_SHA2_20_2_256 | CKP_XMSSMT_SHAKE_20_2_256 => (20, 2, 32),
+                CKP_XMSSMT_SHA2_20_4_256 | CKP_XMSSMT_SHAKE_20_4_256 => (20, 4, 32),
+                CKP_XMSSMT_SHA2_40_2_256 | CKP_XMSSMT_SHAKE_40_2_256 => (40, 2, 32),
+                CKP_XMSSMT_SHA2_40_4_256 | CKP_XMSSMT_SHAKE_40_4_256 => (40, 4, 32),
+                CKP_XMSSMT_SHA2_40_8_256 | CKP_XMSSMT_SHAKE_40_8_256 => (40, 8, 32),
+                CKP_XMSSMT_SHA2_60_3_256 | CKP_XMSSMT_SHAKE_60_3_256 => (60, 3, 32),
+                CKP_XMSSMT_SHA2_60_6_256 | CKP_XMSSMT_SHAKE_60_6_256 => (60, 6, 32),
+                CKP_XMSSMT_SHA2_60_12_256 | CKP_XMSSMT_SHAKE_60_12_256 => (60, 12, 32),
+                CKP_XMSSMT_SHA2_20_2_512 | CKP_XMSSMT_SHAKE_20_2_512 => (20, 2, 64),
+                CKP_XMSSMT_SHA2_20_4_512 | CKP_XMSSMT_SHAKE_20_4_512 => (20, 4, 64),
+                CKP_XMSSMT_SHA2_40_2_512 | CKP_XMSSMT_SHAKE_40_2_512 => (40, 2, 64),
+                CKP_XMSSMT_SHA2_40_4_512 | CKP_XMSSMT_SHAKE_40_4_512 => (40, 4, 64),
+                CKP_XMSSMT_SHA2_40_8_512 | CKP_XMSSMT_SHAKE_40_8_512 => (40, 8, 64),
+                CKP_XMSSMT_SHA2_60_3_512 | CKP_XMSSMT_SHAKE_60_3_512 => (60, 3, 64),
+                CKP_XMSSMT_SHA2_60_6_512 | CKP_XMSSMT_SHAKE_60_6_512 => (60, 6, 64),
+                CKP_XMSSMT_SHA2_60_12_512 | CKP_XMSSMT_SHAKE_60_12_512 => (60, 12, 64),
+                _ => (20, 2, 32),
+            };
+            let len: u32 = if n == 32 { 67 } else { 131 };
+            (h + 7) / 8 + n + h * n + d * len * n
+        }
         // LMS/HSS — size depends on param set; compute from key attributes.
         // Formula (RFC 8554): LMOTS sig = 4+n+p*n; LMS sig = 4+lmots_sig+4+h*n; HSS sig = 4+Npub*pub_size+Nsig*lms_sig
         // For n=32: LMOTS(W1)=4+32+265*32=8724, LMOTS(W4)=4+32+67*32=2180, LMOTS(W8)=4+32+34*32=1124

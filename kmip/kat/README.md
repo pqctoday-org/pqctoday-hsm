@@ -85,6 +85,29 @@ The full sha256 manifest is `manifest.sha256` — regenerate after any addition 
 
 **Note on `oasis-kmip-2.1/`:** Not present by intent (the directory is created only when needed). The KMIP 3.0 mandatory profile already covers the classical surface; v2.1 fallback vectors are downloaded on demand from `https://docs.oasis-open.org/kmip/kmip-testcases/v2.1/`. See `../spec/oasis-kmip-2.1/kmip-spec-v2.1-os.pdf` for the reference.
 
+### Classic McEliece — permanent gap, not an oversight (P-2, formalized 2026-08-24)
+
+Classic McEliece has real functional coverage (`kmip/tests/frodokem_mceliece_e2e.rs`,
+self-consistency round-trip) but **no external KAT vector of any kind** — not
+NIST ACVP (never registered), not a submission-package static KAT, not even
+the crate's own test harness. This was investigated during the 2026-07-25
+FrodoKEM/McEliece C++/Rust parity work
+(`docs/remediation-plan-cpp-rust-pkcs11-parity-2026-07-25.md` §4): the crate
+in use, `classic-mceliece-rust` v3.1.0, ships no static KAT file, and neither
+does PQClean's reference implementation the way FrodoKEM's `PQCrypto-LWEKE`
+does. FrodoKEM's real, provenance-complete vectors above are a genuine
+external check for that algorithm; nothing equivalent exists to pull for
+McEliece with the crate this engine uses. Per the WS-6 remediation plan §6.5:
+this is a legitimate bottom rung on the trust ladder, not a failure — but it
+must be labeled honestly rather than left silently indistinguishable from the
+vector-backed rows above. McEliece's only correctness evidence is the functional round-trip test —
+**not even cross-engine differential comparison is available**: the C++
+engine has no Classic McEliece implementation at all (`src/lib/` carries
+no McEliece code; confirmed by grep, not assumed), so there is no second
+engine to diff against, unlike FrodoKEM which the differential harness
+does exercise. Never report McEliece as "ACVP-validated", "KAT-proven",
+or "cross-validated" — self-consistency is the entire evidence base.
+
 ## What OASIS provides for KMIP 3.0 (and what it doesn't)
 
 | Type | Available? | Where |

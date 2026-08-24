@@ -2888,10 +2888,24 @@ section('G7 — stateful hash-based signatures: HSS (§6.14)');
 // MEASURED performance barrier (not the "minutes-slow" Classic McEliece
 // case's key-size/complexity barrier, but the same category of finding:
 // genuinely infeasible at this harness's normal run cadence in a debug
-// build, not laziness). Left untested here — a real, separate finding,
+// build, not laziness). Left untested HERE — a real, separate finding,
 // not silently covered. HSS above (same §6.14 family, same code shape)
 // remains a REAL round trip because its default parameter set is
 // dramatically smaller (32 leaves vs. 1024+) and measured fast.
+//
+// UPDATE (2026-08-24, P-1 remediation): "left untested" no longer means
+// "untestable, permanently". test_xmss_release.js runs this exact round
+// trip (both mechanisms, default/smallest param sets, plus a tamper
+// control) against the --release wasm build, where fresh measurements put
+// XMSS keygen+sign at ~4.6s total and XMSS^MT at ~6.8s — both genuinely
+// practical, just not at THIS harness's default --dev cadence. That
+// release-tier run is what found and fixed a real bug this untested state
+// had been hiding: CKM_XMSSMT had no case in get_sig_len() at all (only
+// CKM_XMSS did), so the PKCS#11 §5.2 two-call size-query idiom reported
+// 512 bytes for a signature that is actually 4963 — CKR_BUFFER_TOO_SMALL
+// for any conformant caller, not merely an estimate being loose. Opt-in,
+// not part of the default gate (still too slow for every-change cadence):
+// `bash scripts/local-gate.sh --release-xmss` or `--all`.
 
 section('G8 — vendor-defined mechanisms: FrodoKEM / Keccak-256 / KMAC / BIP32 (≥ CKM_VENDOR_DEFINED)');
 {
