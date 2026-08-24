@@ -1,13 +1,13 @@
 # PKCS#11 v3.2 Compliance Report
 
 **Engine:** `./build/src/lib/libsofthsmv3.dylib`
-**Engine commit:** `415935d4ae7721c1c3761d0e3014f99b7ec9e1fc`
-**Date:** 2026-08-23 18:02:40 CDT
+**Engine commit:** `931b710f1192759bb803ed0d6e7412a1c093548b`
+**Date:** 2026-08-23 21:04:27 CDT
 
 ## Summary
-- **Total PASS:** 559
+- **Total PASS:** 779
 - **Total FAIL:** 0
-- **Total SKIP:** 3
+- **Total SKIP:** 36
 - **Total XFAIL (known engine bugs, documented in-line):** 0
 
 Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL = unexpected non-conformance; SKIP = feature not advertised by the token (v3.2 mandates no particular mechanism set); XFAIL = known, pre-existing engine non-conformance reported here but outside this suite's scope to fix.
@@ -221,7 +221,7 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 
 | Test | Status | Details |
 |---|---|---|
-| Child_survived_and_reported | ✅ PASS | child pid 91651 exited status 0 |
+| Child_survived_and_reported | ✅ PASS | child pid 94721 exited status 0 |
 | Child_session_handle_resolves | ✅ PASS | C_GetSessionInfo RV=0 |
 | Child_login_state_preserved | ✅ PASS | child state=3 parent state=3 (CKS_RW_USER_FUNCTIONS=3) |
 | Child_session_object_readable | ✅ PASS | RV=0 len=8 |
@@ -229,10 +229,10 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Child_inherits_active_encryption_state | ✅ PASS | parent init RV=0 update RV=0 child final RV=0 len=16 |
 | Parent_encryption_state_independent | ✅ PASS | parent C_EncryptFinal after child's RV=0 |
 | Child_writes_do_not_reach_parent | ✅ PASS | child C_SetAttributeValue RV=0; parent label len=11 intact=1 |
-| Sibling_children_RNG_diverge | ✅ PASS | 8 sibling pairs, all distinct=1 childA=48CBC0FB54C73268… childB=6FE63D76BCE552B8… (identical output would repeat ECDSA nonces) |
+| Sibling_children_RNG_diverge | ✅ PASS | 8 sibling pairs, all distinct=1 childA=D05E4ECB68E2217F… childB=1BEDF096897738A5… (identical output would repeat ECDSA nonces) |
 | Fork_safe_flag_declared_in_interface_list | ✅ PASS | 3 interfaces, CKF_INTERFACE_FORK_SAFE declared=1 |
 | Fork_safe_interface_retrievable | ✅ PASS | C_GetInterface(flags=CKF_INTERFACE_FORK_SAFE) RV=0 |
-| Parent_and_child_RNG_diverge | ✅ PASS | child=E4F99D3FBEF4C68E… parent=062308F857AD36EC… preFork=876D1D3BAF19A86D… |
+| Parent_and_child_RNG_diverge | ✅ PASS | child=051B8CC8FBE7EA5C… parent=CBCF09B5AF863C86… preFork=83DA9EBCF161859F… |
 
 ### G-DA-X
 
@@ -416,6 +416,74 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | CrossToken_DestroyObject_rejected | ✅ PASS | §2.4 expect CKR_OBJECT_HANDLE_INVALID, RV=130 |
 | CrossToken_Destroy_didNotAffectA | ✅ PASS | A's object must survive a rejected cross-token destroy, RV=0 |
 
+### GapAes
+
+| Test | Status | Details |
+|---|---|---|
+| ECB_roundtrip | ✅ PASS | ciphertext matches independent OpenSSL AES-256-ECB oracle AND decrypts back to plaintext |
+| ECB_ENCRYPT_DATA_derive | ✅ PASS | derived key value matches independent OpenSSL AES-256-ECB oracle |
+| CBC_ENCRYPT_DATA_derive | ✅ PASS | derived key value matches independent OpenSSL AES-256-CBC oracle |
+| KEY_WRAP_PAD_roundtrip | ✅ PASS | unwrapped 20-byte (non-multiple-of-8) key perfectly matches original (RFC5649 pad path exercised) |
+
+### GapClassical
+
+| Test | Status | Details |
+|---|---|---|
+| Digest_MD5 | ✅ PASS | matches independent OpenSSL oracle, len=16 |
+| Digest_SHA1 | ✅ PASS | matches independent OpenSSL oracle, len=20 |
+| Digest_SHA224 | ✅ PASS | matches independent OpenSSL oracle, len=28 |
+| Digest_SHA384 | ✅ PASS | matches independent OpenSSL oracle, len=48 |
+| Digest_SHA512 | ✅ PASS | matches independent OpenSSL oracle, len=64 |
+| HMAC_MD5 | ✅ PASS | engine sign matches independent OpenSSL HMAC oracle AND engine verify succeeds, len=16 |
+| HMAC_SHA1 | ✅ PASS | engine sign matches independent OpenSSL HMAC oracle AND engine verify succeeds, len=20 |
+| HMAC_SHA224 | ✅ PASS | engine sign matches independent OpenSSL HMAC oracle AND engine verify succeeds, len=28 |
+| HMAC_SHA384 | ✅ PASS | engine sign matches independent OpenSSL HMAC oracle AND engine verify succeeds, len=48 |
+| HMAC_SHA512 | ✅ PASS | engine sign matches independent OpenSSL HMAC oracle AND engine verify succeeds, len=64 |
+
+### GapDerive
+
+| Test | Status | Details |
+|---|---|---|
+| CONCATENATE_DATA_AND_BASE | ✅ PASS | derived value == data||base, byte-exact (order confirmed against dispatch code) |
+
+### GapEcdsaEddsa
+
+| Test | Status | Details |
+|---|---|---|
+| Generate_P256 | ✅ PASS | RV=0 |
+| ECDSA_SHA1 | ✅ PASS | real sign+verify round trip OK |
+| ECDSA_SHA224 | ✅ PASS | real sign+verify round trip OK |
+| ECDSA_SHA384 | ✅ PASS | real sign+verify round trip OK |
+| ECDSA_SHA3_224 | ✅ PASS | real sign+verify round trip OK |
+| ECDSA_SHA3_384 | ✅ PASS | real sign+verify round trip OK |
+| EDDSA_PH_Ed25519 | ✅ PASS | real sign+verify round trip OK |
+| EDDSA_PH_Ed448 | ✅ PASS | real sign+verify round trip OK |
+
+### GapRsaCipher
+
+| Test | Status | Details |
+|---|---|---|
+| Generate_RSA_2048 | ✅ PASS | RV=0 |
+| OAEP_roundtrip | ✅ PASS | encrypt/decrypt round trip recovered the original plaintext |
+| RSA_AES_KEY_WRAP_roundtrip | ✅ PASS | unwrapped AES key perfectly matches the original target's value |
+
+### GapRsaSign
+
+| Test | Status | Details |
+|---|---|---|
+| Generate_RSA_2048 | ✅ PASS | RV=0 |
+| PKCS_MD5 | ✅ PASS | real sign+verify round trip OK, sigLen=256 |
+| PKCS_SHA1 | ✅ PASS | real sign+verify round trip OK, sigLen=256 |
+| PKCS_SHA224 | ✅ PASS | real sign+verify round trip OK, sigLen=256 |
+| PKCS_SHA384 | ✅ PASS | real sign+verify round trip OK, sigLen=256 |
+| PKCS_SHA512 | ✅ PASS | real sign+verify round trip OK, sigLen=256 |
+| PSS_SHA1 | ✅ PASS | real sign+verify round trip OK, sigLen=256 |
+| PSS_SHA224 | ✅ PASS | real sign+verify round trip OK, sigLen=256 |
+| PSS_SHA256 | ✅ PASS | real sign+verify round trip OK, sigLen=256 |
+| PSS_SHA384 | ✅ PASS | real sign+verify round trip OK, sigLen=256 |
+| PSS_SHA512 | ✅ PASS | real sign+verify round trip OK, sigLen=256 |
+| PSS_Raw | ✅ PASS | real sign+verify round trip on a caller-supplied SHA-256 digest, OK |
+
 ### HBSProtect
 
 | Test | Status | Details |
@@ -464,14 +532,234 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 |---|---|---|
 | TokenSetup | ✅ PASS | Initialized token and session |
 
+### Invariant
+
+| Test | Status | Details |
+|---|---|---|
+| Encrypt_0x00001082 | ✅ PASS | C_EncryptInit RV=113 |
+| Decrypt_0x00001082 | ✅ PASS | C_DecryptInit RV=113 |
+| OutOfScope_0x00001105 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Encrypt_0x00001085 | ✅ PASS | C_EncryptInit RV=113 |
+| Decrypt_0x00001085 | ✅ PASS | C_DecryptInit RV=113 |
+| Sign_0x0000108a | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000108a | ✅ PASS | C_VerifyInit RV=99 |
+| Encrypt_0x00001086 | ✅ PASS | C_EncryptInit RV=7 |
+| Decrypt_0x00001086 | ✅ PASS | C_DecryptInit RV=7 |
+| Encrypt_0x00001081 | ✅ PASS | C_EncryptInit RV=0 |
+| Decrypt_0x00001081 | ✅ PASS | C_DecryptInit RV=0 |
+| OutOfScope_0x00001104 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Encrypt_0x00001087 | ✅ PASS | C_EncryptInit RV=7 |
+| Decrypt_0x00001087 | ✅ PASS | C_DecryptInit RV=7 |
+| OutOfScope_0x00001080 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x00002109 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x0000210a | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x8000105c | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x8000105b | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Encrypt_0x00001226 | ✅ PASS | C_EncryptInit RV=99 |
+| Decrypt_0x00001226 | ✅ PASS | C_DecryptInit RV=99 |
+| OutOfScope_0x00001225 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Encrypt_0x00004021 | ✅ PASS | C_EncryptInit RV=99 |
+| Decrypt_0x00004021 | ✅ PASS | C_DecryptInit RV=99 |
+| OutOfScope_0x00000362 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x00000360 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x00000363 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x00001051 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x00001050 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Sign_0x00001041 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00001041 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00001042 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00001042 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00001043 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00001043 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00001044 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00001044 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00001045 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00001045 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00001047 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00001047 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00001048 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00001048 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00001049 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00001049 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x0000104a | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x0000104a | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00001046 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00001046 | ✅ PASS | C_VerifyInit RV=0 |
+| OutOfScope_0x00001055 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x00001040 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x00001056 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Sign_0x00001057 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00001057 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x80001057 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x80001057 | ✅ PASS | C_VerifyInit RV=0 |
+| OutOfScope_0x00000350 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Sign_0x0000001f | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x0000001f | ✅ PASS | C_VerifyInit RV=7 |
+| Sign_0x00000023 | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x00000023 | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x00000024 | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x00000024 | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x00000025 | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x00000025 | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x00000027 | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x00000027 | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x00000028 | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x00000028 | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x00000029 | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x00000029 | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x0000002a | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000002a | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x00000026 | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x00000026 | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x0000002b | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000002b | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x0000002c | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000002c | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x00000034 | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x00000034 | ✅ PASS | C_VerifyInit RV=7 |
+| Sign_0x00000036 | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x00000036 | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x00000037 | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x00000037 | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x00000038 | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x00000038 | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x0000003a | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000003a | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x0000003b | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000003b | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x0000003c | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000003c | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x0000003d | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000003d | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x00000039 | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x00000039 | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x0000003e | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000003e | ✅ PASS | C_VerifyInit RV=99 |
+| Sign_0x0000003f | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000003f | ✅ PASS | C_VerifyInit RV=99 |
+| OutOfScope_0x0000402a | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Sign_0x00004033 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00004033 | ✅ PASS | C_VerifyInit RV=0 |
+| OutOfScope_0x00004032 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Sign_0x80000100 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x80000100 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x80000101 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x80000101 | ✅ PASS | C_VerifyInit RV=0 |
+| Digest_0x00000210 | ✅ PASS | C_DigestInit RV=0 |
+| Sign_0x00000211 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000211 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000005 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000005 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x0000001d | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000001d | ✅ PASS | C_VerifyInit RV=99 |
+| OutOfScope_0x0000001c | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x00000017 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x0000000f | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x000003b0 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Digest_0x00000240 | ✅ PASS | C_DigestInit RV=0 |
+| Sign_0x00000241 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000241 | ✅ PASS | C_VerifyInit RV=0 |
+| OutOfScope_0x00001054 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Sign_0x00000001 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000001 | ✅ PASS | C_VerifyInit RV=0 |
+| Encrypt_0x00000001 | ✅ PASS | C_EncryptInit RV=99 |
+| Decrypt_0x00000001 | ✅ PASS | C_DecryptInit RV=99 |
+| OutOfScope_0x00000000 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Encrypt_0x00000009 | ✅ PASS | C_EncryptInit RV=99 |
+| Decrypt_0x00000009 | ✅ PASS | C_DecryptInit RV=99 |
+| Sign_0x0000000d | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x0000000d | ✅ PASS | C_VerifyInit RV=7 |
+| Sign_0x00000003 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000003 | ✅ PASS | C_VerifyInit RV=0 |
+| Encrypt_0x00000003 | ✅ PASS | C_EncryptInit RV=99 |
+| Decrypt_0x00000003 | ✅ PASS | C_DecryptInit RV=99 |
+| Sign_0x00000006 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000006 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x0000000e | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x0000000e | ✅ PASS | C_VerifyInit RV=7 |
+| Digest_0x00000255 | ✅ PASS | C_DigestInit RV=0 |
+| Sign_0x00000256 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000256 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000046 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000046 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000047 | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x00000047 | ✅ PASS | C_VerifyInit RV=7 |
+| Digest_0x00000250 | ✅ PASS | C_DigestInit RV=0 |
+| Sign_0x00000251 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000251 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000040 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000040 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000043 | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x00000043 | ✅ PASS | C_VerifyInit RV=7 |
+| Digest_0x00000260 | ✅ PASS | C_DigestInit RV=0 |
+| Sign_0x00000261 | ✅ PASS | C_SignInit RV=98 |
+| Verify_0x00000261 | ✅ PASS | C_VerifyInit RV=98 |
+| Sign_0x00000041 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000041 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000044 | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x00000044 | ✅ PASS | C_VerifyInit RV=7 |
+| Digest_0x000002b5 | ✅ PASS | C_DigestInit RV=0 |
+| Sign_0x000002b6 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x000002b6 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000066 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000066 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000067 | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x00000067 | ✅ PASS | C_VerifyInit RV=7 |
+| Digest_0x000002b0 | ✅ PASS | C_DigestInit RV=0 |
+| Sign_0x000002b1 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x000002b1 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000060 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000060 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000063 | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x00000063 | ✅ PASS | C_VerifyInit RV=7 |
+| Digest_0x000002c0 | ✅ PASS | C_DigestInit RV=0 |
+| Sign_0x000002c1 | ✅ PASS | C_SignInit RV=98 |
+| Verify_0x000002c1 | ✅ PASS | C_VerifyInit RV=98 |
+| Sign_0x00000061 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000061 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000064 | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x00000064 | ✅ PASS | C_VerifyInit RV=7 |
+| Digest_0x000002d0 | ✅ PASS | C_DigestInit RV=0 |
+| Sign_0x000002d1 | ✅ PASS | C_SignInit RV=98 |
+| Verify_0x000002d1 | ✅ PASS | C_VerifyInit RV=98 |
+| Sign_0x00000062 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000062 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000065 | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x00000065 | ✅ PASS | C_VerifyInit RV=7 |
+| Digest_0x00000270 | ✅ PASS | C_DigestInit RV=0 |
+| Sign_0x00000271 | ✅ PASS | C_SignInit RV=98 |
+| Verify_0x00000271 | ✅ PASS | C_VerifyInit RV=98 |
+| Sign_0x00000042 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000042 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00000045 | ✅ PASS | C_SignInit RV=7 |
+| Verify_0x00000045 | ✅ PASS | C_VerifyInit RV=7 |
+| OutOfScope_0x0000039c | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Digest_0x00000220 | ✅ PASS | C_DigestInit RV=0 |
+| Sign_0x00000221 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00000221 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x0000002e | ✅ PASS | C_SignInit RV=99 |
+| Verify_0x0000002e | ✅ PASS | C_VerifyInit RV=99 |
+| OutOfScope_0x0000002d | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x000003ac | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x000003ad | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x80001058 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x80001059 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Sign_0x00004036 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00004036 | ✅ PASS | C_VerifyInit RV=0 |
+| Sign_0x00004037 | ✅ PASS | C_SignInit RV=0 |
+| Verify_0x00004037 | ✅ PASS | C_VerifyInit RV=0 |
+| OutOfScope_0x00004035 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| OutOfScope_0x00004034 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
+| Summary_AdvertisedImpliesDispatchable | ✅ PASS | 127 advertised, 94 mechanisms probed (181 Init calls across DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT), 33 out-of-scope (derive/generate/wrap-only), 0 answered CKR_MECHANISM_INVALID |
+
 ### KCV
 
 | Test | Status | Details |
 |---|---|---|
-| AES_Generate_KCV_Present | ✅ PASS | 3 bytes: BD81FB |
-| AES_Generate_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | HSM=BD81FB == oracle=BD81FB |
-| AES_Unwrap_KCV_Present | ✅ PASS | 3 bytes: 76FF46 |
-| AES_Unwrap_KCV_Equals_Original | ✅ PASS | original=76FF46 unwrapped=76FF46 |
+| AES_Generate_KCV_Present | ✅ PASS | 3 bytes: AD2B15 |
+| AES_Generate_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | HSM=AD2B15 == oracle=AD2B15 |
+| AES_Unwrap_KCV_Present | ✅ PASS | 3 bytes: 4284EC |
+| AES_Unwrap_KCV_Equals_Original | ✅ PASS | original=4284EC unwrapped=4284EC |
 | AES_Unwrap_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | matches AES-ECB(zero block)[0:3] oracle |
 | HKDF_Derive_KCV_Present | ✅ PASS | 3 bytes: BEEF61 |
 | HKDF_Derive_KCV_Equals_OracleSha1 | ✅ PASS | HSM=BEEF61 == oracle=BEEF61 |
@@ -513,16 +801,16 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Test | Status | Details |
 |---|---|---|
 | Encap_KCV_present | ✅ PASS | got 3 bytes (§4.11 SHALL be supplied) |
-| Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=D3E280 oracle=D3E280 |
+| Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=A72605 oracle=A72605 |
 | Decap_KCV_present | ✅ PASS | got 3 bytes |
-| Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=D3E280 oracle=D3E280 |
-| Encap_and_Decap_KCV_agree | ✅ PASS | encap=D3E280 decap=D3E280 |
+| Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=A72605 oracle=A72605 |
+| Encap_and_Decap_KCV_agree | ✅ PASS | encap=A72605 decap=A72605 |
 | Decap_correct_caller_KCV_accepted | ✅ PASS | RV=0 (§4.11: a matching supplied value is legal) |
 | Decap_wrong_caller_KCV_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | Decap_zero_length_KCV_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
 | ECDH_Encap_KCV_present | ✅ PASS | got 3 bytes |
-| ECDH_Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=CEEB68 oracle=CEEB68 |
-| ECDH_Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=CEEB68 oracle=CEEB68 |
+| ECDH_Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=458D03 oracle=458D03 |
+| ECDH_Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=458D03 oracle=458D03 |
 
 ### KEMNeg
 
@@ -570,40 +858,40 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 
 | Test | Status | Details |
 |---|---|---|
-| GenerateKey_AES_KCV_matches_oracle | ✅ PASS | engine=6FDF72 oracle=6FDF72 |
+| GenerateKey_AES_KCV_matches_oracle | ✅ PASS | engine=B1E873 oracle=B1E873 |
 | GenerateKey_AES_correct_value_accepted | ⚠️ SKIP | output is freshly random each call, so the caller cannot know the check value in advance |
 | GenerateKey_AES_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | GenerateKey_AES_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| GenerateKey_Generic_KCV_matches_oracle | ✅ PASS | engine=6D3A44 oracle=6D3A44 |
+| GenerateKey_Generic_KCV_matches_oracle | ✅ PASS | engine=AB810C oracle=AB810C |
 | GenerateKey_Generic_correct_value_accepted | ⚠️ SKIP | output is freshly random each call, so the caller cannot know the check value in advance |
 | GenerateKey_Generic_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | GenerateKey_Generic_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| UnwrapKey_AES_KCV_matches_oracle | ✅ PASS | engine=392583 oracle=392583 |
-| UnwrapKey_AES_correct_value_accepted | ✅ PASS | RV=0 readback=392583 |
+| UnwrapKey_AES_KCV_matches_oracle | ✅ PASS | engine=DC853D oracle=DC853D |
+| UnwrapKey_AES_correct_value_accepted | ✅ PASS | RV=0 readback=DC853D |
 | UnwrapKey_AES_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | UnwrapKey_AES_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_HKDF_KCV_matches_oracle | ✅ PASS | engine=59BAB8 oracle=59BAB8 |
-| DeriveKey_HKDF_correct_value_accepted | ✅ PASS | RV=0 readback=59BAB8 |
+| DeriveKey_HKDF_KCV_matches_oracle | ✅ PASS | engine=466D6A oracle=466D6A |
+| DeriveKey_HKDF_correct_value_accepted | ✅ PASS | RV=0 readback=466D6A |
 | DeriveKey_HKDF_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_HKDF_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_ECDH_KCV_matches_oracle | ✅ PASS | engine=5F4E51 oracle=5F4E51 |
-| DeriveKey_ECDH_correct_value_accepted | ✅ PASS | RV=0 readback=5F4E51 |
+| DeriveKey_ECDH_KCV_matches_oracle | ✅ PASS | engine=1EFF29 oracle=1EFF29 |
+| DeriveKey_ECDH_correct_value_accepted | ✅ PASS | RV=0 readback=1EFF29 |
 | DeriveKey_ECDH_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_ECDH_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
 | DeriveKey_PBKD2_KCV_matches_oracle | ✅ PASS | engine=8422AA oracle=8422AA |
 | DeriveKey_PBKD2_correct_value_accepted | ✅ PASS | RV=0 readback=8422AA |
 | DeriveKey_PBKD2_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_PBKD2_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_SP800108_KCV_matches_oracle | ✅ PASS | engine=386AA5 oracle=386AA5 |
-| DeriveKey_SP800108_correct_value_accepted | ✅ PASS | RV=0 readback=386AA5 |
+| DeriveKey_SP800108_KCV_matches_oracle | ✅ PASS | engine=4C6A9E oracle=4C6A9E |
+| DeriveKey_SP800108_correct_value_accepted | ✅ PASS | RV=0 readback=4C6A9E |
 | DeriveKey_SP800108_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_SP800108_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_Concat_KCV_matches_oracle | ⚠️ SKIP | CKA_VALUE unreadable (RV=17), engine KCV=2F6A3B |
-| DeriveKey_Concat_correct_value_accepted | ✅ PASS | RV=0 readback=2F6A3B |
+| DeriveKey_Concat_KCV_matches_oracle | ⚠️ SKIP | CKA_VALUE unreadable (RV=17), engine KCV=F40BD5 |
+| DeriveKey_Concat_correct_value_accepted | ✅ PASS | RV=0 readback=F40BD5 |
 | DeriveKey_Concat_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_Concat_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_X25519_KCV_matches_oracle | ✅ PASS | engine=A2EAE0 oracle=A2EAE0 |
-| DeriveKey_X25519_correct_value_accepted | ✅ PASS | RV=0 readback=A2EAE0 |
+| DeriveKey_X25519_KCV_matches_oracle | ✅ PASS | engine=C84DA0 oracle=C84DA0 |
+| DeriveKey_X25519_correct_value_accepted | ✅ PASS | RV=0 readback=C84DA0 |
 | DeriveKey_X25519_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_X25519_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
 | SetAttributeValue_correct_accepted | ✅ PASS | RV=0 |
@@ -724,14 +1012,14 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Test | Status | Details |
 |---|---|---|
 | ML_DSA_44_CKA_VALUE_is_raw_FIPS_length | ✅ PASS | len=2560 (want 2560) |
-| ML_DSA_44_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0x2b len=2560 |
+| ML_DSA_44_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0x68 len=2560 |
 | ML_DSA_44_CKA_SEED_contributed | ✅ PASS | RV=0 len=32 (want 32) |
 | ML_DSA_44_sign_verify_round_trip | ✅ PASS | sign RV=0 verify RV=0 |
 | ML_KEM_768_CKA_VALUE_is_raw_FIPS_length | ✅ PASS | len=2400 (want 2400) |
-| ML_KEM_768_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0xe7 len=2400 |
+| ML_KEM_768_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0x19 len=2400 |
 | ML_KEM_768_CKA_SEED_contributed | ✅ PASS | RV=0 len=64 (want 64) |
 | SLH_DSA_CKA_VALUE_is_raw_FIPS_length | ✅ PASS | len=64 (want 64) |
-| SLH_DSA_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0xd1 len=64 |
+| SLH_DSA_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0xf4 len=64 |
 | SLH_DSA_CKA_SEED_absent | ✅ PASS | RV=0 len=0 |
 | SLH_DSA_sign_verify_round_trip | ✅ PASS | sign RV=0 verify RV=0 |
 
@@ -740,8 +1028,8 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Test | Status | Details |
 |---|---|---|
 | Token_publishes_a_CKO_PROFILE_object | ✅ PASS | found 2 (Profiles v3.2 §5.1 cond. 4 requires at least one) |
-| CKP_BASELINE_PROVIDER_present | ✅ PASS | profile ids: [ 2 1 ] |
-| No_profile_object_carries_CKP_INVALID_ID | ✅ PASS | profile ids: [ 2 1 ] |
+| CKP_BASELINE_PROVIDER_present | ✅ PASS | profile ids: [ 1 2 ] |
+| No_profile_object_carries_CKP_INVALID_ID | ✅ PASS | profile ids: [ 1 2 ] |
 | Extended_provider_claim_recorded | ✅ PASS | CKP_EXTENDED_PROVIDER claimed; C_LoginUser exported (§5.3 satisfiable) |
 | Application_cannot_create_CKO_PROFILE | ✅ PASS | RV=16 (want CKR_ATTRIBUTE_READ_ONLY=0x10) |
 | CKA_PROFILE_ID_absent_on_ordinary_object | ✅ PASS | RV=18 value=3735928559 (want CKR_ATTRIBUTE_TYPE_INVALID=0x12; 0 is CKP_INVALID_ID) |

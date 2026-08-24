@@ -28,7 +28,13 @@
  OSSLCryptoFactory.cpp
 
  OpenSSL 3.x EVP-only cryptographic algorithm factory.
- OpenSSL 3.x EVP-only. Legacy algorithms (DES, DSA, DH, GOST, MD5) removed from this fork.
+ OpenSSL 3.x EVP-only. Legacy algorithms (DES, DSA, DH, GOST) removed from
+ this fork. MD5 (digest, HMAC, RSA-PKCS#1v1.5 sign) is intentionally RETAINED
+ for non-FIPS interop -- see the "audit G5" comments in SoftHSM_slots.cpp /
+ SoftHSM_sign.cpp -- this header comment was stale until the 2026-08-24 gap
+ remediation wired the last missing piece (OSSLMD5, the raw-digest class)
+ in below; do not re-remove it without also updating those advertise-side
+ gates.
  Retained: RSA, ECDSA, ECDH, EdDSA, AES, SHA-2, SHA-3, HMAC, CMAC,
  ML-DSA, SLH-DSA, ML-KEM.
  *****************************************************************************/
@@ -39,6 +45,7 @@
 #include "OSSLRNG.h"
 #include "OSSLAES.h"
 #include "OSSLChaCha20.h"
+#include "OSSLMD5.h"
 #include "OSSLSHA1.h"
 #include "OSSLSHA224.h"
 #include "OSSLSHA256.h"
@@ -170,6 +177,16 @@ HashAlgorithm* OSSLCryptoFactory::getHashAlgorithm(HashAlgo::Type algorithm)
 {
 	switch (algorithm)
 	{
+		// gap remediation (2026-08-24): CKM_MD5 is advertised in every
+		// non-FIPS build and SoftHSM_digest.cpp's C_DigestInit switch
+		// already maps it to HashAlgo::MD5 (audit G5) -- but this factory
+		// had no case for it, so the lookup fell through to `default` below
+		// and C_DigestInit turned the resulting NULL into
+		// CKR_MECHANISM_INVALID for an advertised mechanism. This also
+		// silently broke CKM_MD5_RSA_PKCS, whose sign path (OSSLRSA::
+		// signInit) calls this same factory method for its MD5 pre-hash.
+		case HashAlgo::MD5:
+			return new OSSLMD5();
 #ifdef WITH_RIPEMD160
 		case HashAlgo::RIPEMD160:
 			return new OSSLRIPEMD160();
@@ -206,6 +223,15 @@ MacAlgorithm* OSSLCryptoFactory::getMacAlgorithm(MacAlgo::Type algorithm)
 {
 	switch (algorithm)
 	{
+		// gap remediation (2026-08-24): OSSLHMACMD5 (OSSLHMAC.h) was fully
+		// implemented but never wired into this switch, so CKM_MD5_HMAC --
+		// advertised in every non-FIPS build (SoftHSM_slots.cpp) and
+		// correctly recognized by resolveMacMech's own CKM_MD5_HMAC special
+		// case (SoftHSM_sign.cpp) -- fell through to the `default` below and
+		// answered CKR_MECHANISM_INVALID for a mechanism the token claims to
+		// support. Found while adding real HMAC-MD5 round-trip coverage.
+		case MacAlgo::HMAC_MD5:
+			return new OSSLHMACMD5();
 #ifdef WITH_RIPEMD160
 		case MacAlgo::HMAC_RIPEMD160:
 			return new OSSLHMACRIPEMD160();

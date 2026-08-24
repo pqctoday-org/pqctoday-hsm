@@ -82,6 +82,17 @@ bool OSSLEDDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 		ERROR_MSG("Could not get the order length");
 		return false;
 	}
+	// gap remediation (2026-08-24): the PH instance name depends on which
+	// curve the key actually is. getOrderLength() returns 32 for Ed25519,
+	// 57 for Ed448 (OSSLEDPrivateKey::getOrderLength, ED448_KEYLEN) — read
+	// it BEFORE doubling below. This used to be hardcoded to "Ed25519ph"
+	// unconditionally, so an Ed448 key handed to CKM_EDDSA_PH got the wrong
+	// OpenSSL instance name; EVP_DigestSignInit_ex silently rejects the
+	// mismatch (Ed448ph instance requires an Ed448 key), which would have
+	// made CKM_EDDSA_PH's real dispatch path unreachable for Ed448 despite
+	// the mechanism being advertised. Found while adding real round-trip
+	// coverage for CKM_EDDSA_PH (previously untested by any mechanism name).
+	const char* phInstance = (len == 57) ? "Ed448ph" : "Ed25519ph";
 	len *= 2;
 	signature.resize(len);
 	memset(&signature[0], 0, len);
@@ -91,7 +102,7 @@ bool OSSLEDDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	if (mechanism == AsymMech::EDDSA_PH) {
 		OSSL_PARAM params[2];
 		params[0] = OSSL_PARAM_construct_utf8_string(
-			OSSL_SIGNATURE_PARAM_INSTANCE, (char*)"Ed25519ph", 0);
+			OSSL_SIGNATURE_PARAM_INSTANCE, (char*)phInstance, 0);
 		params[1] = OSSL_PARAM_construct_end();
 		init_ok = EVP_DigestSignInit_ex(ctx, NULL, NULL, NULL, NULL, pkey, params);
 	} else {
@@ -180,6 +191,10 @@ bool OSSLEDDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 		ERROR_MSG("Could not get the order length");
 		return false;
 	}
+	// gap remediation (2026-08-24): see the matching comment in sign() —
+	// the PH instance name must track the actual key curve (32 => Ed25519,
+	// 57 => Ed448), not a hardcoded "Ed25519ph".
+	const char* phInstance = (len == 57) ? "Ed448ph" : "Ed25519ph";
 	len *= 2;
 	if (signature.size() != len)
 	{
@@ -192,7 +207,7 @@ bool OSSLEDDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	if (mechanism == AsymMech::EDDSA_PH) {
 		OSSL_PARAM params[2];
 		params[0] = OSSL_PARAM_construct_utf8_string(
-			OSSL_SIGNATURE_PARAM_INSTANCE, (char*)"Ed25519ph", 0);
+			OSSL_SIGNATURE_PARAM_INSTANCE, (char*)phInstance, 0);
 		params[1] = OSSL_PARAM_construct_end();
 		init_ok = EVP_DigestVerifyInit_ex(ctx, NULL, NULL, NULL, NULL, pkey, params);
 	} else {

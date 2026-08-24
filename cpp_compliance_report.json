@@ -681,7 +681,7 @@
     ],
     "Fork": [
         {
-            "details": "child pid 91651 exited status 0",
+            "details": "child pid 94721 exited status 0",
             "status": "PASS",
             "test": "Child_survived_and_reported"
         },
@@ -721,7 +721,7 @@
             "test": "Child_writes_do_not_reach_parent"
         },
         {
-            "details": "8 sibling pairs, all distinct=1 childA=48CBC0FB54C73268… childB=6FE63D76BCE552B8… (identical output would repeat ECDSA nonces)",
+            "details": "8 sibling pairs, all distinct=1 childA=D05E4ECB68E2217F… childB=1BEDF096897738A5… (identical output would repeat ECDSA nonces)",
             "status": "PASS",
             "test": "Sibling_children_RNG_diverge"
         },
@@ -736,7 +736,7 @@
             "test": "Fork_safe_interface_retrievable"
         },
         {
-            "details": "child=E4F99D3FBEF4C68E… parent=062308F857AD36EC… preFork=876D1D3BAF19A86D…",
+            "details": "child=051B8CC8FBE7EA5C… parent=CBCF09B5AF863C86… preFork=83DA9EBCF161859F…",
             "status": "PASS",
             "test": "Parent_and_child_RNG_diverge"
         }
@@ -1375,6 +1375,208 @@
             "test": "CrossToken_Destroy_didNotAffectA"
         }
     ],
+    "GapAes": [
+        {
+            "details": "ciphertext matches independent OpenSSL AES-256-ECB oracle AND decrypts back to plaintext",
+            "status": "PASS",
+            "test": "ECB_roundtrip"
+        },
+        {
+            "details": "derived key value matches independent OpenSSL AES-256-ECB oracle",
+            "status": "PASS",
+            "test": "ECB_ENCRYPT_DATA_derive"
+        },
+        {
+            "details": "derived key value matches independent OpenSSL AES-256-CBC oracle",
+            "status": "PASS",
+            "test": "CBC_ENCRYPT_DATA_derive"
+        },
+        {
+            "details": "unwrapped 20-byte (non-multiple-of-8) key perfectly matches original (RFC5649 pad path exercised)",
+            "status": "PASS",
+            "test": "KEY_WRAP_PAD_roundtrip"
+        }
+    ],
+    "GapClassical": [
+        {
+            "details": "matches independent OpenSSL oracle, len=16",
+            "status": "PASS",
+            "test": "Digest_MD5"
+        },
+        {
+            "details": "matches independent OpenSSL oracle, len=20",
+            "status": "PASS",
+            "test": "Digest_SHA1"
+        },
+        {
+            "details": "matches independent OpenSSL oracle, len=28",
+            "status": "PASS",
+            "test": "Digest_SHA224"
+        },
+        {
+            "details": "matches independent OpenSSL oracle, len=48",
+            "status": "PASS",
+            "test": "Digest_SHA384"
+        },
+        {
+            "details": "matches independent OpenSSL oracle, len=64",
+            "status": "PASS",
+            "test": "Digest_SHA512"
+        },
+        {
+            "details": "engine sign matches independent OpenSSL HMAC oracle AND engine verify succeeds, len=16",
+            "status": "PASS",
+            "test": "HMAC_MD5"
+        },
+        {
+            "details": "engine sign matches independent OpenSSL HMAC oracle AND engine verify succeeds, len=20",
+            "status": "PASS",
+            "test": "HMAC_SHA1"
+        },
+        {
+            "details": "engine sign matches independent OpenSSL HMAC oracle AND engine verify succeeds, len=28",
+            "status": "PASS",
+            "test": "HMAC_SHA224"
+        },
+        {
+            "details": "engine sign matches independent OpenSSL HMAC oracle AND engine verify succeeds, len=48",
+            "status": "PASS",
+            "test": "HMAC_SHA384"
+        },
+        {
+            "details": "engine sign matches independent OpenSSL HMAC oracle AND engine verify succeeds, len=64",
+            "status": "PASS",
+            "test": "HMAC_SHA512"
+        }
+    ],
+    "GapDerive": [
+        {
+            "details": "derived value == data||base, byte-exact (order confirmed against dispatch code)",
+            "status": "PASS",
+            "test": "CONCATENATE_DATA_AND_BASE"
+        }
+    ],
+    "GapEcdsaEddsa": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_P256"
+        },
+        {
+            "details": "real sign+verify round trip OK",
+            "status": "PASS",
+            "test": "ECDSA_SHA1"
+        },
+        {
+            "details": "real sign+verify round trip OK",
+            "status": "PASS",
+            "test": "ECDSA_SHA224"
+        },
+        {
+            "details": "real sign+verify round trip OK",
+            "status": "PASS",
+            "test": "ECDSA_SHA384"
+        },
+        {
+            "details": "real sign+verify round trip OK",
+            "status": "PASS",
+            "test": "ECDSA_SHA3_224"
+        },
+        {
+            "details": "real sign+verify round trip OK",
+            "status": "PASS",
+            "test": "ECDSA_SHA3_384"
+        },
+        {
+            "details": "real sign+verify round trip OK",
+            "status": "PASS",
+            "test": "EDDSA_PH_Ed25519"
+        },
+        {
+            "details": "real sign+verify round trip OK",
+            "status": "PASS",
+            "test": "EDDSA_PH_Ed448"
+        }
+    ],
+    "GapRsaCipher": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_RSA_2048"
+        },
+        {
+            "details": "encrypt/decrypt round trip recovered the original plaintext",
+            "status": "PASS",
+            "test": "OAEP_roundtrip"
+        },
+        {
+            "details": "unwrapped AES key perfectly matches the original target's value",
+            "status": "PASS",
+            "test": "RSA_AES_KEY_WRAP_roundtrip"
+        }
+    ],
+    "GapRsaSign": [
+        {
+            "details": "RV=0",
+            "status": "PASS",
+            "test": "Generate_RSA_2048"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=256",
+            "status": "PASS",
+            "test": "PKCS_MD5"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=256",
+            "status": "PASS",
+            "test": "PKCS_SHA1"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=256",
+            "status": "PASS",
+            "test": "PKCS_SHA224"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=256",
+            "status": "PASS",
+            "test": "PKCS_SHA384"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=256",
+            "status": "PASS",
+            "test": "PKCS_SHA512"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=256",
+            "status": "PASS",
+            "test": "PSS_SHA1"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=256",
+            "status": "PASS",
+            "test": "PSS_SHA224"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=256",
+            "status": "PASS",
+            "test": "PSS_SHA256"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=256",
+            "status": "PASS",
+            "test": "PSS_SHA384"
+        },
+        {
+            "details": "real sign+verify round trip OK, sigLen=256",
+            "status": "PASS",
+            "test": "PSS_SHA512"
+        },
+        {
+            "details": "real sign+verify round trip on a caller-supplied SHA-256 digest, OK",
+            "status": "PASS",
+            "test": "PSS_Raw"
+        }
+    ],
     "HBSProtect": [
         {
             "details": "",
@@ -1546,24 +1748,1101 @@
             "test": "TokenSetup"
         }
     ],
+    "Invariant": [
+        {
+            "details": "C_EncryptInit RV=113",
+            "status": "PASS",
+            "test": "Encrypt_0x00001082"
+        },
+        {
+            "details": "C_DecryptInit RV=113",
+            "status": "PASS",
+            "test": "Decrypt_0x00001082"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00001105"
+        },
+        {
+            "details": "C_EncryptInit RV=113",
+            "status": "PASS",
+            "test": "Encrypt_0x00001085"
+        },
+        {
+            "details": "C_DecryptInit RV=113",
+            "status": "PASS",
+            "test": "Decrypt_0x00001085"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000108a"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000108a"
+        },
+        {
+            "details": "C_EncryptInit RV=7",
+            "status": "PASS",
+            "test": "Encrypt_0x00001086"
+        },
+        {
+            "details": "C_DecryptInit RV=7",
+            "status": "PASS",
+            "test": "Decrypt_0x00001086"
+        },
+        {
+            "details": "C_EncryptInit RV=0",
+            "status": "PASS",
+            "test": "Encrypt_0x00001081"
+        },
+        {
+            "details": "C_DecryptInit RV=0",
+            "status": "PASS",
+            "test": "Decrypt_0x00001081"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00001104"
+        },
+        {
+            "details": "C_EncryptInit RV=7",
+            "status": "PASS",
+            "test": "Encrypt_0x00001087"
+        },
+        {
+            "details": "C_DecryptInit RV=7",
+            "status": "PASS",
+            "test": "Decrypt_0x00001087"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00001080"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00002109"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x0000210a"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x8000105c"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x8000105b"
+        },
+        {
+            "details": "C_EncryptInit RV=99",
+            "status": "PASS",
+            "test": "Encrypt_0x00001226"
+        },
+        {
+            "details": "C_DecryptInit RV=99",
+            "status": "PASS",
+            "test": "Decrypt_0x00001226"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00001225"
+        },
+        {
+            "details": "C_EncryptInit RV=99",
+            "status": "PASS",
+            "test": "Encrypt_0x00004021"
+        },
+        {
+            "details": "C_DecryptInit RV=99",
+            "status": "PASS",
+            "test": "Decrypt_0x00004021"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00000362"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00000360"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00000363"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00001051"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00001050"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00001041"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00001041"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00001042"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00001042"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00001043"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00001043"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00001044"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00001044"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00001045"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00001045"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00001047"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00001047"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00001048"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00001048"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00001049"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00001049"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x0000104a"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x0000104a"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00001046"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00001046"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00001055"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00001040"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00001056"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00001057"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00001057"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x80001057"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x80001057"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00000350"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x0000001f"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x0000001f"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x00000023"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x00000023"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x00000024"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x00000024"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x00000025"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x00000025"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x00000027"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x00000027"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x00000028"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x00000028"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x00000029"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x00000029"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000002a"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000002a"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x00000026"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x00000026"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000002b"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000002b"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000002c"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000002c"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x00000034"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x00000034"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x00000036"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x00000036"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x00000037"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x00000037"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x00000038"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x00000038"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000003a"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000003a"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000003b"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000003b"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000003c"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000003c"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000003d"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000003d"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x00000039"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x00000039"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000003e"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000003e"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000003f"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000003f"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x0000402a"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00004033"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00004033"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00004032"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x80000100"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x80000100"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x80000101"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x80000101"
+        },
+        {
+            "details": "C_DigestInit RV=0",
+            "status": "PASS",
+            "test": "Digest_0x00000210"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000211"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000211"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000005"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000005"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000001d"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000001d"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x0000001c"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00000017"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x0000000f"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x000003b0"
+        },
+        {
+            "details": "C_DigestInit RV=0",
+            "status": "PASS",
+            "test": "Digest_0x00000240"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000241"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000241"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00001054"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000001"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000001"
+        },
+        {
+            "details": "C_EncryptInit RV=99",
+            "status": "PASS",
+            "test": "Encrypt_0x00000001"
+        },
+        {
+            "details": "C_DecryptInit RV=99",
+            "status": "PASS",
+            "test": "Decrypt_0x00000001"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00000000"
+        },
+        {
+            "details": "C_EncryptInit RV=99",
+            "status": "PASS",
+            "test": "Encrypt_0x00000009"
+        },
+        {
+            "details": "C_DecryptInit RV=99",
+            "status": "PASS",
+            "test": "Decrypt_0x00000009"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x0000000d"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x0000000d"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000003"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000003"
+        },
+        {
+            "details": "C_EncryptInit RV=99",
+            "status": "PASS",
+            "test": "Encrypt_0x00000003"
+        },
+        {
+            "details": "C_DecryptInit RV=99",
+            "status": "PASS",
+            "test": "Decrypt_0x00000003"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000006"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000006"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x0000000e"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x0000000e"
+        },
+        {
+            "details": "C_DigestInit RV=0",
+            "status": "PASS",
+            "test": "Digest_0x00000255"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000256"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000256"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000046"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000046"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x00000047"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x00000047"
+        },
+        {
+            "details": "C_DigestInit RV=0",
+            "status": "PASS",
+            "test": "Digest_0x00000250"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000251"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000251"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000040"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000040"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x00000043"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x00000043"
+        },
+        {
+            "details": "C_DigestInit RV=0",
+            "status": "PASS",
+            "test": "Digest_0x00000260"
+        },
+        {
+            "details": "C_SignInit RV=98",
+            "status": "PASS",
+            "test": "Sign_0x00000261"
+        },
+        {
+            "details": "C_VerifyInit RV=98",
+            "status": "PASS",
+            "test": "Verify_0x00000261"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000041"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000041"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x00000044"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x00000044"
+        },
+        {
+            "details": "C_DigestInit RV=0",
+            "status": "PASS",
+            "test": "Digest_0x000002b5"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x000002b6"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x000002b6"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000066"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000066"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x00000067"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x00000067"
+        },
+        {
+            "details": "C_DigestInit RV=0",
+            "status": "PASS",
+            "test": "Digest_0x000002b0"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x000002b1"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x000002b1"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000060"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000060"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x00000063"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x00000063"
+        },
+        {
+            "details": "C_DigestInit RV=0",
+            "status": "PASS",
+            "test": "Digest_0x000002c0"
+        },
+        {
+            "details": "C_SignInit RV=98",
+            "status": "PASS",
+            "test": "Sign_0x000002c1"
+        },
+        {
+            "details": "C_VerifyInit RV=98",
+            "status": "PASS",
+            "test": "Verify_0x000002c1"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000061"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000061"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x00000064"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x00000064"
+        },
+        {
+            "details": "C_DigestInit RV=0",
+            "status": "PASS",
+            "test": "Digest_0x000002d0"
+        },
+        {
+            "details": "C_SignInit RV=98",
+            "status": "PASS",
+            "test": "Sign_0x000002d1"
+        },
+        {
+            "details": "C_VerifyInit RV=98",
+            "status": "PASS",
+            "test": "Verify_0x000002d1"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000062"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000062"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x00000065"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x00000065"
+        },
+        {
+            "details": "C_DigestInit RV=0",
+            "status": "PASS",
+            "test": "Digest_0x00000270"
+        },
+        {
+            "details": "C_SignInit RV=98",
+            "status": "PASS",
+            "test": "Sign_0x00000271"
+        },
+        {
+            "details": "C_VerifyInit RV=98",
+            "status": "PASS",
+            "test": "Verify_0x00000271"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000042"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000042"
+        },
+        {
+            "details": "C_SignInit RV=7",
+            "status": "PASS",
+            "test": "Sign_0x00000045"
+        },
+        {
+            "details": "C_VerifyInit RV=7",
+            "status": "PASS",
+            "test": "Verify_0x00000045"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x0000039c"
+        },
+        {
+            "details": "C_DigestInit RV=0",
+            "status": "PASS",
+            "test": "Digest_0x00000220"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00000221"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00000221"
+        },
+        {
+            "details": "C_SignInit RV=99",
+            "status": "PASS",
+            "test": "Sign_0x0000002e"
+        },
+        {
+            "details": "C_VerifyInit RV=99",
+            "status": "PASS",
+            "test": "Verify_0x0000002e"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x0000002d"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x000003ac"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x000003ad"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x80001058"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x80001059"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00004036"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00004036"
+        },
+        {
+            "details": "C_SignInit RV=0",
+            "status": "PASS",
+            "test": "Sign_0x00004037"
+        },
+        {
+            "details": "C_VerifyInit RV=0",
+            "status": "PASS",
+            "test": "Verify_0x00004037"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00004035"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x00004034"
+        },
+        {
+            "details": "127 advertised, 94 mechanisms probed (181 Init calls across DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT), 33 out-of-scope (derive/generate/wrap-only), 0 answered CKR_MECHANISM_INVALID",
+            "status": "PASS",
+            "test": "Summary_AdvertisedImpliesDispatchable"
+        }
+    ],
     "KCV": [
         {
-            "details": "3 bytes: BD81FB",
+            "details": "3 bytes: AD2B15",
             "status": "PASS",
             "test": "AES_Generate_KCV_Present"
         },
         {
-            "details": "HSM=BD81FB == oracle=BD81FB",
+            "details": "HSM=AD2B15 == oracle=AD2B15",
             "status": "PASS",
             "test": "AES_Generate_KCV_Equals_OracleEcbZeroBlock"
         },
         {
-            "details": "3 bytes: 76FF46",
+            "details": "3 bytes: 4284EC",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Present"
         },
         {
-            "details": "original=76FF46 unwrapped=76FF46",
+            "details": "original=4284EC unwrapped=4284EC",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Equals_Original"
         },
@@ -1704,7 +2983,7 @@
             "test": "Encap_KCV_present"
         },
         {
-            "details": "HSM=D3E280 oracle=D3E280",
+            "details": "HSM=A72605 oracle=A72605",
             "status": "PASS",
             "test": "Encap_KCV_equals_SHA1_oracle"
         },
@@ -1714,12 +2993,12 @@
             "test": "Decap_KCV_present"
         },
         {
-            "details": "HSM=D3E280 oracle=D3E280",
+            "details": "HSM=A72605 oracle=A72605",
             "status": "PASS",
             "test": "Decap_KCV_equals_SHA1_oracle"
         },
         {
-            "details": "encap=D3E280 decap=D3E280",
+            "details": "encap=A72605 decap=A72605",
             "status": "PASS",
             "test": "Encap_and_Decap_KCV_agree"
         },
@@ -1744,12 +3023,12 @@
             "test": "ECDH_Encap_KCV_present"
         },
         {
-            "details": "HSM=CEEB68 oracle=CEEB68",
+            "details": "HSM=458D03 oracle=458D03",
             "status": "PASS",
             "test": "ECDH_Encap_KCV_equals_SHA1_oracle"
         },
         {
-            "details": "HSM=CEEB68 oracle=CEEB68",
+            "details": "HSM=458D03 oracle=458D03",
             "status": "PASS",
             "test": "ECDH_Decap_KCV_equals_SHA1_oracle"
         }
@@ -1897,7 +3176,7 @@
     ],
     "KcvTemplate": [
         {
-            "details": "engine=6FDF72 oracle=6FDF72",
+            "details": "engine=B1E873 oracle=B1E873",
             "status": "PASS",
             "test": "GenerateKey_AES_KCV_matches_oracle"
         },
@@ -1917,7 +3196,7 @@
             "test": "GenerateKey_AES_zero_length_suppresses"
         },
         {
-            "details": "engine=6D3A44 oracle=6D3A44",
+            "details": "engine=AB810C oracle=AB810C",
             "status": "PASS",
             "test": "GenerateKey_Generic_KCV_matches_oracle"
         },
@@ -1937,12 +3216,12 @@
             "test": "GenerateKey_Generic_zero_length_suppresses"
         },
         {
-            "details": "engine=392583 oracle=392583",
+            "details": "engine=DC853D oracle=DC853D",
             "status": "PASS",
             "test": "UnwrapKey_AES_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=392583",
+            "details": "RV=0 readback=DC853D",
             "status": "PASS",
             "test": "UnwrapKey_AES_correct_value_accepted"
         },
@@ -1957,12 +3236,12 @@
             "test": "UnwrapKey_AES_zero_length_suppresses"
         },
         {
-            "details": "engine=59BAB8 oracle=59BAB8",
+            "details": "engine=466D6A oracle=466D6A",
             "status": "PASS",
             "test": "DeriveKey_HKDF_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=59BAB8",
+            "details": "RV=0 readback=466D6A",
             "status": "PASS",
             "test": "DeriveKey_HKDF_correct_value_accepted"
         },
@@ -1977,12 +3256,12 @@
             "test": "DeriveKey_HKDF_zero_length_suppresses"
         },
         {
-            "details": "engine=5F4E51 oracle=5F4E51",
+            "details": "engine=1EFF29 oracle=1EFF29",
             "status": "PASS",
             "test": "DeriveKey_ECDH_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=5F4E51",
+            "details": "RV=0 readback=1EFF29",
             "status": "PASS",
             "test": "DeriveKey_ECDH_correct_value_accepted"
         },
@@ -2017,12 +3296,12 @@
             "test": "DeriveKey_PBKD2_zero_length_suppresses"
         },
         {
-            "details": "engine=386AA5 oracle=386AA5",
+            "details": "engine=4C6A9E oracle=4C6A9E",
             "status": "PASS",
             "test": "DeriveKey_SP800108_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=386AA5",
+            "details": "RV=0 readback=4C6A9E",
             "status": "PASS",
             "test": "DeriveKey_SP800108_correct_value_accepted"
         },
@@ -2037,12 +3316,12 @@
             "test": "DeriveKey_SP800108_zero_length_suppresses"
         },
         {
-            "details": "CKA_VALUE unreadable (RV=17), engine KCV=2F6A3B",
+            "details": "CKA_VALUE unreadable (RV=17), engine KCV=F40BD5",
             "status": "SKIP",
             "test": "DeriveKey_Concat_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=2F6A3B",
+            "details": "RV=0 readback=F40BD5",
             "status": "PASS",
             "test": "DeriveKey_Concat_correct_value_accepted"
         },
@@ -2057,12 +3336,12 @@
             "test": "DeriveKey_Concat_zero_length_suppresses"
         },
         {
-            "details": "engine=A2EAE0 oracle=A2EAE0",
+            "details": "engine=C84DA0 oracle=C84DA0",
             "status": "PASS",
             "test": "DeriveKey_X25519_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=A2EAE0",
+            "details": "RV=0 readback=C84DA0",
             "status": "PASS",
             "test": "DeriveKey_X25519_correct_value_accepted"
         },
@@ -2460,7 +3739,7 @@
             "test": "ML_DSA_44_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0x2b len=2560",
+            "details": "first byte=0x68 len=2560",
             "status": "PASS",
             "test": "ML_DSA_44_CKA_VALUE_not_DER_wrapped"
         },
@@ -2480,7 +3759,7 @@
             "test": "ML_KEM_768_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0xe7 len=2400",
+            "details": "first byte=0x19 len=2400",
             "status": "PASS",
             "test": "ML_KEM_768_CKA_VALUE_not_DER_wrapped"
         },
@@ -2495,7 +3774,7 @@
             "test": "SLH_DSA_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0xd1 len=64",
+            "details": "first byte=0xf4 len=64",
             "status": "PASS",
             "test": "SLH_DSA_CKA_VALUE_not_DER_wrapped"
         },
@@ -2517,12 +3796,12 @@
             "test": "Token_publishes_a_CKO_PROFILE_object"
         },
         {
-            "details": "profile ids: [ 2 1 ]",
+            "details": "profile ids: [ 1 2 ]",
             "status": "PASS",
             "test": "CKP_BASELINE_PROVIDER_present"
         },
         {
-            "details": "profile ids: [ 2 1 ]",
+            "details": "profile ids: [ 1 2 ]",
             "status": "PASS",
             "test": "No_profile_object_carries_CKP_INVALID_ID"
         },
@@ -2923,10 +4202,10 @@
     ],
     "_summary": {
         "engine": "./build/src/lib/libsofthsmv3.dylib",
-        "engine_commit": "415935d4ae7721c1c3761d0e3014f99b7ec9e1fc",
+        "engine_commit": "931b710f1192759bb803ed0d6e7412a1c093548b",
         "fail": 0,
-        "pass": 559,
-        "skip": 3,
+        "pass": 779,
+        "skip": 36,
         "xfail_known_engine_bugs": 0
     }
 }
