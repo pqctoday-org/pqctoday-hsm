@@ -1,0 +1,29 @@
+[package]
+name = "pqc-grpc-pkcs11"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "gRPC PKCS#11 remoting service over softhsmrustv3 — sandbox-bench-transport-arms-plan-08242026.md WP3."
+
+[[bin]]
+name = "pqc-grpc-pkcs11"
+path = "src/main.rs"
+
+[dependencies]
+softhsmrustv3 = { path = "../../rust" }
+pqctoday-pkcs11-remote-core = { path = "../core" }
+pqctoday-pkcs11-remote-proto = { path = "../proto" }
+pqctoday-tls = { path = "../../tls" }
+
+tonic = { version = "0.14", features = ["transport", "tls-aws-lc"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tonic-health = "0.14"
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }
+
+[dev-dependencies]
+tonic = { version = "0.14", features = ["transport", "tls-aws-lc"] }

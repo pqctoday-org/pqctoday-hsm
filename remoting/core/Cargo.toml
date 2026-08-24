@@ -1,0 +1,16 @@
+[package]
+name = "pqctoday-pkcs11-remote-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Transport-agnostic verb layer for the PKCS#11 gRPC/REST remoting services — engine bootstrap, the seven benchmark verbs mapped onto softhsmrustv3::native, and the CKR_* error-mapping contract both wire formats share (sandbox-bench-transport-arms-plan-08242026.md WP1/WP5a)."
+
+[dependencies]
+# Plane 3 pattern — direct Rust dependency on the engine, no FFI. Same as
+# pqctoday-kmip's own softhsmrustv3 dependency.
+softhsmrustv3 = { path = "../../rust" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+
+[dev-dependencies]
+serial_test = "3"

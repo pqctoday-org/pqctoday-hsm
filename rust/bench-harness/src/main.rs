@@ -51,6 +51,7 @@ mod algos;
 mod kmip;
 mod measure;
 mod pkcs11;
+mod transport;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -75,6 +76,8 @@ enum Command {
     /// Measure the KMIP 3.0 arms (real client over TLS, or the in-process
     /// control).
     Kmip(kmip::KmipArgs),
+    /// Measure the gRPC/REST PKCS#11 remoting arms (sandbox-bench-transport-arms-plan-08242026.md WP4).
+    Transport(transport::TransportArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -324,6 +327,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(Command::Kmip(args)) = &cli.command {
         return kmip::run(args);
+    }
+    if let Some(Command::Transport(args)) = &cli.command {
+        return transport::run(args);
     }
     if cli.list_algorithms {
         return list_algorithms(&cli);
