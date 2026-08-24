@@ -4,7 +4,7 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `931b710f1192` · **Generated:** 2026-08-24T02:20:08.563Z — machine-written
+**Engine commit:** `e0070c5be5c4` · **Generated:** 2026-08-24T03:03:19.185Z — machine-written
 by this harness itself (`writeReport()` in `test_p11_conformance.js`) at the
 end of every run, not hand-edited.
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
@@ -17,7 +17,7 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**943 passed / 0 failed** across 51 sections in this JS harness.
+**976 passed / 0 failed** across 51 sections in this JS harness.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -161,7 +161,7 @@ silently double-succeed. Regression test:
 - WP-B — CKO_CERTIFICATE object lifecycle, X.509 only (§4.6 Tables 19-20) (26 passed / 0 failed)
 - G2a — SLH-DSA baseline + v3.2 pre-hash ML-DSA/SLH-DSA round trips (§6.67.7/§6.69.7) (94 passed / 0 failed)
 - G2b — SHA-3 digest/HMAC/HMAC-general + KDF-tail round trips (§6.29x/§6.45) (80 passed / 0 failed)
-- G3 — RSA-OAEP / RSA-PSS / hash-then-RSA family (§6.4) (58 passed / 0 failed)
+- G3 — RSA-OAEP / RSA-PSS / hash-then-RSA family (§6.4) (91 passed / 0 failed)
 - G4 — ECDSA / EC-derive / EdDSA / Montgomery family (§6.3/§6.7) (81 passed / 0 failed)
 - G5 — AES-ECB / AES-KeyWrap variants / ChaCha20 family (§6.11/§6.20/§6.21/§6.31) (44 passed / 0 failed)
 - G6 — RIPEMD160 / bare SHA384_HMAC+SHA512_HMAC / GENERIC_SECRET / CONCATENATE / PBKDF2 (39 passed / 0 failed)
@@ -755,6 +755,7 @@ silently double-succeed. Regression test:
 
 ── G3 — RSA-OAEP / RSA-PSS / hash-then-RSA family (§6.4) ──
   ✅ fixture: RSA-2048 keypair (ENCRYPT/DECRYPT/SIGN/VERIFY) → OK
+  ✅ fixture: read RSA CKA_MODULUS/CKA_PUBLIC_EXPONENT → OK
   ✅ EncryptInit(CKM_RSA_PKCS_OAEP, previously untested) → OK
   ✅ Encrypt(CKM_RSA_PKCS_OAEP) → OK
   ✅ DecryptInit(CKM_RSA_PKCS_OAEP) → OK
@@ -762,8 +763,40 @@ silently double-succeed. Regression test:
   ✅ RSA-OAEP encrypt(pub) → decrypt(priv) recovers the ORIGINAL plaintext (real SEAM)
   ✅ DecryptInit (tamper control) → OK
   ✅ tampered OAEP ciphertext never decrypts to the original plaintext
-  ✅ SignInit(bare CKM_RSA_PKCS_PSS) → OK (mechanism accepted at Init)
-  ✅ KNOWN ENGINE DEFECT: Sign(bare CKM_RSA_PKCS_PSS) → MECHANISM_INVALID (advertised CKF_SIGN, but sign_rsa()/verify_rsa() never wire this mechanism — see comment above; regression-pinning the REAL observed behavior, not fabricating a pass)
+  ✅ CKM_RSA_PKCS: DecryptInit (R-2 fix) → OK
+  ✅ CKM_RSA_PKCS: Decrypt(engine) of Node-produced ciphertext → OK (dispatch reached, not MECHANISM_INVALID)
+  ✅ CKM_RSA_PKCS: independent oracle (Node crypto.publicEncrypt) → engine C_Decrypt recovers the ORIGINAL plaintext EXACTLY
+  ✅ CKM_RSA_PKCS: EncryptInit (R-2 fix) → OK
+  ✅ CKM_RSA_PKCS: Encrypt(engine) → OK (dispatch reached, not MECHANISM_INVALID)
+  ✅ CKM_RSA_PKCS: DecryptInit (engine round trip) → OK
+  ✅ CKM_RSA_PKCS: Decrypt(engine) → OK
+  ✅ CKM_RSA_PKCS: encrypt(pub) → decrypt(priv) recovers the ORIGINAL plaintext (real SEAM)
+  ✅ CKM_RSA_PKCS: DecryptInit (tamper control) → OK
+  ✅ CKM_RSA_PKCS: tampered ciphertext never decrypts to the original plaintext
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): SignInit (R-1 fix) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): Sign(digest) → OK (dispatch reached, not MECHANISM_INVALID)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): VerifyInit → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): Verify round trip → OK (real SEAM)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): independent oracle (Node crypto.verify, RSA-PSS) confirms the SAME signature is valid
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): VerifyInit (tamper control) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): Verify with tampered signature → SIGNATURE_INVALID
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): independent oracle also rejects the tampered signature
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): SignInit (R-1 fix) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): Sign(digest) → OK (dispatch reached, not MECHANISM_INVALID)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): VerifyInit → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): Verify round trip → OK (real SEAM)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): independent oracle (Node crypto.verify, RSA-PSS) confirms the SAME signature is valid
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): VerifyInit (tamper control) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): Verify with tampered signature → SIGNATURE_INVALID
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): independent oracle also rejects the tampered signature
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): SignInit (R-1 fix) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): Sign(digest) → OK (dispatch reached, not MECHANISM_INVALID)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): VerifyInit → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): Verify round trip → OK (real SEAM)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): independent oracle (Node crypto.verify, RSA-PSS) confirms the SAME signature is valid
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): VerifyInit (tamper control) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): Verify with tampered signature → SIGNATURE_INVALID
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): independent oracle also rejects the tampered signature
   ✅ CKM_SHA256_RSA_PKCS: SignInit (previously untested) → OK
   ✅ CKM_SHA256_RSA_PKCS: Sign → OK
   ✅ CKM_SHA256_RSA_PKCS: VerifyInit (previously untested) → OK
@@ -1044,10 +1077,10 @@ silently double-succeed. Regression test:
   ✅ 0x45 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x1 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x1 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ KNOWN ENGINE DEFECT — 0x1 EncryptInit: → MECHANISM_INVALID (advertised but never wired; see KNOWN_DEFECTS comment)
-  ✅ KNOWN ENGINE DEFECT — 0x1 DecryptInit: → MECHANISM_INVALID (advertised but never wired; see KNOWN_DEFECTS comment)
-  ✅ 0xd SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0xd VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0xd SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0xd VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x61 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x61 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x64 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
@@ -1218,5 +1251,5 @@ silently double-succeed. Regression test:
   ✅ 0x80000010 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ G9: probed at least one real operation for every flag-bearing advertised mechanism (191 probes total)
 
-════════ RESULT: 943 passed, 0 failed ════════
+════════ RESULT: 976 passed, 0 failed ════════
 ```

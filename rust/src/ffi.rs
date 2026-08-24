@@ -996,6 +996,11 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // sign-recover/verify-recover (CKF_SIGN_RECOVER 0x1000 |
         // CKF_VERIFY_RECOVER 0x4000; C_SignRecover reuses this mechanism's
         // existing sign_rsa() primitive directly, see that fn's doc comment).
+        // R-2 (2026-08-24): encrypt/decrypt are now genuinely wired (see
+        // CKM_RSA_PKCS's arms in C_Encrypt/C_Decrypt) — this advertisement
+        // was accurate in intent from 2026-07-25 but the dispatch match
+        // didn't back it until now; the decrypt arm carries a reviewed,
+        // accepted padding-oracle risk decision, documented in full there.
         CKM_RSA_PKCS => (
             1024,
             4096,
@@ -4672,6 +4677,24 @@ fn rsa_pss_mech_params(mech: u32) -> Option<(u32, u32)> {
     }
 }
 
+/// R-1 (2026-08-24) — bare `CKM_RSA_PKCS_PSS`'s hash is NOT fixed by the
+/// mechanism ID; it comes from the caller's `CK_RSA_PKCS_PSS_PARAMS.hashAlg`/
+/// `mgf` fields at runtime (§6.4.5). This validates the hashAlg/mgf PAIRING
+/// by reusing the exact associations `rsa_pss_mech_params` above already
+/// encodes per hash-specific sibling mechanism (SHA256↔MGF1_SHA256, etc.) —
+/// deliberately NOT a second, independently-maintained table that could
+/// silently drift out of sync with the first.
+fn pss_hash_mgf_pairing_valid(hash_alg: u32, mgf: u32) -> bool {
+    [
+        CKM_SHA256_RSA_PKCS_PSS,
+        CKM_SHA384_RSA_PKCS_PSS,
+        CKM_SHA512_RSA_PKCS_PSS,
+        CKM_SHA3_384_RSA_PKCS_PSS,
+    ]
+    .into_iter()
+    .any(|m| rsa_pss_mech_params(m) == Some((hash_alg, mgf)))
+}
+
 fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
@@ -4849,6 +4872,31 @@ unsafe fn parse_sign_mech_params(
             }
             None => (Vec::new(), false),
         });
+    }
+    if mech_type == CKM_RSA_PKCS_PSS {
+        // R-1 (2026-08-24) — bare CKM_RSA_PKCS_PSS. Unlike the hash-specific
+        // siblings above (whose hash is implied by the mechanism ID, so only
+        // sLen needs to travel to C_Sign/C_Verify), THIS mechanism has no
+        // implied hash at all — CK_RSA_PKCS_PSS_PARAMS is therefore REQUIRED,
+        // not optional (`.params()`, not `.opt_params()`), and hashAlg/mgf/
+        // sLen all have to be threaded through to the actual sign/verify
+        // dispatch for runtime hash selection.
+        let r = m
+            .params(&ck_param::pss::LAYOUT, ck_param::pss::FIELD_COUNT)
+            .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+        let hash_alg = r.ulong32(ck_param::pss::HASH_ALG);
+        let mgf = r.ulong32(ck_param::pss::MGF);
+        let s_len = r.ulong32(ck_param::pss::S_LEN);
+        if !pss_hash_mgf_pairing_valid(hash_alg, mgf) {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        // ctx vec layout for bare PSS: hashAlg(4) || mgf(4) || sLen(4), all
+        // LE u32 — see C_Sign_impl / C_Verify's own CKM_RSA_PKCS_PSS arm,
+        // which is the only reader of this 12-byte format.
+        let mut v = hash_alg.to_le_bytes().to_vec();
+        v.extend_from_slice(&mgf.to_le_bytes());
+        v.extend_from_slice(&s_len.to_le_bytes());
+        return Ok((v, false));
     }
     if mech_type == CKM_KMAC_128 || mech_type == CKM_KMAC_256 {
         // Vendor KMAC params — INSTANCE 3. `pCustomization` is a POINTER;
@@ -5163,6 +5211,29 @@ fn C_Sign_impl(
                 };
                 sign_rsa(eff_mech, &sk_bytes, eff_msg, pss_salt)
             }
+            // R-1 (2026-08-24) — bare CKM_RSA_PKCS_PSS. `eff_msg` here is
+            // ALREADY a digest, not a message: unlike the hash-specific PSS
+            // siblings just above (whose `sign_rsa` internally hashes the
+            // full message via `BlindedSigningKey<D>::sign()`), bare PSS
+            // operates directly on caller-supplied hashed bytes (RFC 8017
+            // §8.1 EMSA-PSS-ENCODE takes `mHash`, not `M`) — the caller has
+            // hashed the message itself before calling C_Sign. ctx_bytes is
+            // the 12-byte hashAlg||mgf||sLen format parse_sign_mech_params's
+            // CKM_RSA_PKCS_PSS branch produces (not the 4-byte sLen-only
+            // format the block above reads).
+            CKM_RSA_PKCS_PSS => {
+                if ctx_bytes.len() < 12 {
+                    Err(CKR_MECHANISM_PARAM_INVALID)
+                } else {
+                    let hash_alg = u32::from_le_bytes([
+                        ctx_bytes[0], ctx_bytes[1], ctx_bytes[2], ctx_bytes[3],
+                    ]);
+                    let s_len = u32::from_le_bytes([
+                        ctx_bytes[8], ctx_bytes[9], ctx_bytes[10], ctx_bytes[11],
+                    ]) as usize;
+                    sign_rsa_pss_bare(hash_alg, &sk_bytes, eff_msg, s_len)
+                }
+            }
             CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
             | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => {
                 sign_ecdsa(eff_mech, ps, &sk_bytes, eff_msg)
@@ -5445,6 +5516,25 @@ pub fn C_Verify(
                         verify_rsa(eff_mech, &n, &e, eff_msg, sig_bytes, pss_salt)
                     }
                     None => Err(CKR_KEY_TYPE_INCONSISTENT),
+                }
+            }
+            // R-1 (2026-08-24) — bare CKM_RSA_PKCS_PSS, mirroring C_Sign's
+            // own CKM_RSA_PKCS_PSS arm: `eff_msg` is already a digest, and
+            // ctx_bytes is the 12-byte hashAlg||mgf||sLen format.
+            CKM_RSA_PKCS_PSS => {
+                if ctx_bytes.len() < 12 {
+                    Err(CKR_MECHANISM_PARAM_INVALID)
+                } else {
+                    let hash_alg = u32::from_le_bytes([
+                        ctx_bytes[0], ctx_bytes[1], ctx_bytes[2], ctx_bytes[3],
+                    ]);
+                    let s_len = u32::from_le_bytes([
+                        ctx_bytes[8], ctx_bytes[9], ctx_bytes[10], ctx_bytes[11],
+                    ]) as usize;
+                    match get_rsa_public_components(hkey) {
+                        Some((n, e)) => verify_rsa_pss_bare(hash_alg, &n, &e, eff_msg, sig_bytes, s_len),
+                        None => Err(CKR_KEY_TYPE_INCONSISTENT),
+                    }
                 }
             }
             // PKCS#11 v3.2: EC public key material is in CKA_EC_POINT.
@@ -6064,6 +6154,12 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 };
                 (label, mgf.to_le_bytes().to_vec(), hash_alg)
             }
+            // R-2 (2026-08-24) — raw PKCS#1 v1.5, §6.4.1: takes NO mechanism
+            // parameter (same as CKM_AES_ECB above). See CKM_RSA_PKCS's arm
+            // in C_Decrypt below for this mechanism's full risk-acceptance
+            // documentation (encrypt is the public-key half; it carries none
+            // of the padding-oracle risk decrypt does).
+            CKM_RSA_PKCS => (Vec::new(), Vec::new(), 0),
             CKM_CHACHA20_POLY1305 => {
                 // CK_SALSA20_CHACHA20_POLY1305_PARAMS (§6.21). The old length
                 // guard was a literal 16 — the struct's wasm32 sizeof. On LP64
@@ -6392,6 +6488,37 @@ pub fn C_Encrypt(
                     }
                 })
             }
+            // R-2 (2026-08-24) — raw PKCS#1 v1.5 encrypt (§6.4.1): the
+            // public-key half of this mechanism. No decrypt-oracle risk
+            // applies here (that only exists on the DECRYPT side — see
+            // CKM_RSA_PKCS's arm in C_Decrypt below for the full,
+            // reviewed-and-accepted risk documentation covering this
+            // mechanism). Same key_bytes layout (`4-byte LE n_len || n ||
+            // e`) and `rsa` crate integration pattern as CKM_RSA_PKCS_OAEP
+            // just above.
+            CKM_RSA_PKCS => {
+                if key_bytes.len() < 8 {
+                    return CKR_KEY_TYPE_INCONSISTENT;
+                }
+                let n_len =
+                    u32::from_le_bytes([key_bytes[0], key_bytes[1], key_bytes[2], key_bytes[3]])
+                        as usize;
+                if key_bytes.len() < 4 + n_len + 1 {
+                    return CKR_KEY_TYPE_INCONSISTENT;
+                }
+                let n = rsa::BigUint::from_bytes_be(&key_bytes[4..4 + n_len]);
+                let e = rsa::BigUint::from_bytes_be(&key_bytes[4 + n_len..]);
+                let pk = match rsa::RsaPublicKey::new(n, e) {
+                    Ok(k) => k,
+                    Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                with_rng!(rng, {
+                    match pk.encrypt(&mut rng, rsa::Pkcs1v15Encrypt, plaintext) {
+                        Ok(ct) => ct,
+                        Err(_) => return CKR_FUNCTION_FAILED,
+                    }
+                })
+            }
             CKM_CHACHA20_POLY1305 => {
                 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::{Aead, Payload}};
                 use chacha20poly1305::aead::generic_array::GenericArray;
@@ -6594,6 +6721,11 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 };
                 (label, mgf.to_le_bytes().to_vec(), hash_alg)
             }
+            // R-2 (2026-08-24) — raw PKCS#1 v1.5, §6.4.1: takes NO mechanism
+            // parameter (same as CKM_AES_ECB above). See CKM_RSA_PKCS's arm
+            // in C_Decrypt below for this mechanism's full risk-acceptance
+            // documentation.
+            CKM_RSA_PKCS => (Vec::new(), Vec::new(), 0),
             // T1 — both ChaCha20 mechanisms advertise CKF_DECRYPT but were
             // previously only dispatched on the encrypt side of the wasm path.
             CKM_CHACHA20_POLY1305 => {
@@ -6798,6 +6930,60 @@ pub fn C_Decrypt(
                     Ok(pt) => pt,
                     // §6.16 — decode failure is CKR_ENCRYPTED_DATA_INVALID
                     // (uniform code, no padding-oracle distinction).
+                    Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                }
+            }
+            // R-2 (2026-08-24) — raw CKM_RSA_PKCS (PKCS#1 v1.5) decrypt.
+            //
+            // SECURITY-REVIEWED, ACCEPTED RISK — NOT AN OVERSIGHT. This wires
+            // bare CKM_RSA_PKCS decrypt using the `rsa` crate's own
+            // `Pkcs1v15Encrypt` padding primitive (`rsa` 0.9, "hazmat"
+            // feature — the same crate/feature already depended on for this
+            // engine's CKM_RSA_X_509 raw RSASP1/RSAVP1 path). The crate's OWN
+            // source (rsa-0.9.10/src/algorithms/pkcs1v15.rs,
+            // `pkcs1v15_encrypt_unpad`'s padding-validity check) carries this
+            // unresolved author TODO, verbatim:
+            //
+            //   "TODO: WARNING: THIS MUST BE CONSTANT TIME CHECK: [...] This
+            //   is currently copy & paste from the constant time impl in go,
+            //   but very likely not sufficient."
+            //
+            // and that same function's doc comment warns: "Note that whether
+            // this function returns an error or not discloses secret
+            // information. If an attacker can cause this function to run
+            // repeatedly and learn whether each instance returned an error
+            // then they can decrypt and forge signatures as if they had the
+            // private key." That is precisely a Bleichenbacher-class
+            // padding-oracle attack, and PKCS#11's C_Decrypt is structurally
+            // a repeated-query API — a caller may invoke it as many times as
+            // it likes against the same key, with no rate limiting at this
+            // layer.
+            //
+            // This engine's C++/OpenSSL backend already implements
+            // CKM_RSA_PKCS decrypt SAFELY for this product (OpenSSL's own
+            // constant-time unpadding). Weighed against that fact, the
+            // decision — made and confirmed by the product owner as of
+            // 2026-08-24 — is to ship this Rust-side implementation anyway,
+            // using the crate's primitive AS-IS: no additional hand-rolled
+            // hardening layered on top (a larger mitigation option was
+            // considered and deliberately NOT chosen). Future readers,
+            // including future compliance audits of this file: this gap is
+            // KNOWN and ACCEPTED, not missed.
+            CKM_RSA_PKCS => {
+                use rsa::pkcs8::DecodePrivateKey;
+                let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&key_bytes) {
+                    Ok(k) => k,
+                    Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                match sk.decrypt(rsa::Pkcs1v15Encrypt, ciphertext) {
+                    Ok(pt) => pt,
+                    // Uniform error code, no padding-oracle distinction AT
+                    // THIS DISPATCH LAYER (matches CKM_RSA_PKCS_OAEP's
+                    // existing convention just above) — this mitigates an
+                    // ADDITIONAL oracle ffi.rs itself could otherwise
+                    // introduce; it does NOT address the crate-internal
+                    // timing risk documented above, which is inherent to the
+                    // `rsa` crate's own primitive.
                     Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
                 }
             }

@@ -1530,6 +1530,46 @@ pub fn sign_rsa(
     }
 }
 
+/// R-1 (2026-08-24) — bare `CKM_RSA_PKCS_PSS` sign. Unlike its hash-specific
+/// PSS siblings above (CKM_SHA256_RSA_PKCS_PSS etc., each pinned to ONE
+/// compile-time hash and operating on the FULL message — `pss_sign!`'s
+/// `BlindedSigningKey<D>::try_sign_with_rng()` hashes `msg` internally via
+/// the `signature::RandomizedSigner` trait), bare PSS's hash is selected by
+/// the CALLER at runtime (CK_RSA_PKCS_PSS_PARAMS.hashAlg, §6.4.5), and its
+/// input (`digest`) is ALREADY a digest — the caller hashed the message
+/// itself before calling C_Sign (RFC 8017 §8.1: EMSA-PSS-ENCODE takes
+/// `mHash`, not `M`). That rules out the `Signer`/`RandomizedSigner`-trait
+/// macros above (they hash for you); this uses the crate's lower-level
+/// `rsa::pss::Pss` `SignatureScheme`, whose `sign()`/`verify()` operate
+/// directly on pre-hashed bytes — the same "hazmat"-family, prehash-oriented
+/// API this crate already depends on (`rsa` 0.9, "hazmat" feature) for
+/// CKM_RSA_X_509's raw RSASP1/RSAVP1 path.
+pub fn sign_rsa_pss_bare(
+    hash_alg: u32,
+    sk_bytes: &[u8],
+    digest: &[u8],
+    salt_len: usize,
+) -> Result<Vec<u8>, u32> {
+    use rsa::pkcs8::DecodePrivateKey;
+    let private_key =
+        rsa::RsaPrivateKey::from_pkcs8_der(sk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let mut rng = rand::rngs::OsRng;
+    macro_rules! pss_sign_prehashed {
+        ($hash:ty) => {
+            private_key
+                .sign_with_rng(&mut rng, rsa::pss::Pss::new_with_salt::<$hash>(salt_len), digest)
+                .map_err(|_| CKR_FUNCTION_FAILED)
+        };
+    }
+    match hash_alg {
+        CKM_SHA256 => pss_sign_prehashed!(sha2::Sha256),
+        CKM_SHA384 => pss_sign_prehashed!(sha2::Sha384),
+        CKM_SHA512 => pss_sign_prehashed!(sha2::Sha512),
+        CKM_SHA3_384 => pss_sign_prehashed!(sha3::Sha3_384),
+        _ => Err(CKR_MECHANISM_PARAM_INVALID),
+    }
+}
+
 /// Digest `msg` per a hash-composite ECDSA mechanism (`CKM_ECDSA_SHAx` /
 /// `CKM_ECDSA_SHA3_x`). `None` for anything else — including raw
 /// `CKM_ECDSA`, whose input is already a digest.
@@ -2211,6 +2251,44 @@ pub fn verify_rsa(
             .verify(rsa::Pkcs1v15Sign::new_unprefixed(), msg, sig_bytes)
             .map_err(|_| CKR_SIGNATURE_INVALID),
         _ => Err(CKR_MECHANISM_INVALID),
+    }
+}
+
+/// R-1 (2026-08-24) — bare `CKM_RSA_PKCS_PSS` verify, the counterpart to
+/// `sign_rsa_pss_bare` above: `digest` is already-hashed bytes, `hash_alg`
+/// is the caller-supplied (and, by the time this is called, already
+/// hashAlg/mgf-pairing-validated in ffi.rs's `parse_sign_mech_params`)
+/// runtime hash selector, and `salt_len` is the caller's authoritative
+/// CK_RSA_PKCS_PSS_PARAMS.sLen — no "try both conventions" fallback, unlike
+/// `verify_rsa`'s hash-specific PSS siblings (there is no legacy default to
+/// fall back to for a mechanism whose hash was never implied by its ID).
+pub fn verify_rsa_pss_bare(
+    hash_alg: u32,
+    n_bytes: &[u8],
+    e_bytes: &[u8],
+    digest: &[u8],
+    sig_bytes: &[u8],
+    salt_len: usize,
+) -> Result<(), u32> {
+    if n_bytes.is_empty() || e_bytes.is_empty() {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    let n = rsa::BigUint::from_bytes_be(n_bytes);
+    let e = rsa::BigUint::from_bytes_be(e_bytes);
+    let public_key = rsa::RsaPublicKey::new(n, e).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    macro_rules! pss_verify_prehashed {
+        ($hash:ty) => {
+            public_key
+                .verify(rsa::pss::Pss::new_with_salt::<$hash>(salt_len), digest, sig_bytes)
+                .map_err(|_| CKR_SIGNATURE_INVALID)
+        };
+    }
+    match hash_alg {
+        CKM_SHA256 => pss_verify_prehashed!(sha2::Sha256),
+        CKM_SHA384 => pss_verify_prehashed!(sha2::Sha384),
+        CKM_SHA512 => pss_verify_prehashed!(sha2::Sha512),
+        CKM_SHA3_384 => pss_verify_prehashed!(sha3::Sha3_384),
+        _ => Err(CKR_MECHANISM_PARAM_INVALID),
     }
 }
 

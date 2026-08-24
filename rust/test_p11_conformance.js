@@ -2102,8 +2102,38 @@ section('G2b — SHA-3 digest/HMAC/HMAC-general + KDF-tail round trips (§6.29x/
 
 section('G3 — RSA-OAEP / RSA-PSS / hash-then-RSA family (§6.4)');
 {
+  const crypto = require('crypto');
   const rsa = genRsaFull(hS);
   check('fixture: RSA-2048 keypair (ENCRYPT/DECRYPT/SIGN/VERIFY) → OK', rsa.rv, CKR.OK);
+
+  // R-1/R-2 (2026-08-24) shared fixture: the engine's own RSA public
+  // components (CKA_MODULUS/CKA_PUBLIC_EXPONENT — freely extractable, no
+  // CKA_EXTRACTABLE needed, unlike private-key material), imported into an
+  // INDEPENDENT Node crypto public-key object. Used below to cross-check
+  // both the bare-PSS sign path (R-1) and the raw-PKCS1v1.5 encrypt path
+  // (R-2) against a completely separate implementation, not self-
+  // consistency alone.
+  function readRsaPublicComponents(hPub) {
+    const nOut = buildTpl([{ type: CKA.MODULUS, bytes: new Uint8Array(512) }]);
+    const eOut = buildTpl([{ type: CKA.PUBLIC_EXPONENT, bytes: new Uint8Array(8) }]);
+    const rvN = w._C_GetAttributeValue(hS, hPub, nOut, 1);
+    const rvE = w._C_GetAttributeValue(hS, hPub, eOut, 1);
+    return {
+      rv: rvN !== CKR.OK ? rvN : rvE,
+      n: Buffer.from(new Uint8Array(mem().buffer, readU32(nOut + 4), readU32(nOut + 8))),
+      e: Buffer.from(new Uint8Array(mem().buffer, readU32(eOut + 4), readU32(eOut + 8))),
+    };
+  }
+  const rsaPubComponents = readRsaPublicComponents(rsa.pub);
+  check('fixture: read RSA CKA_MODULUS/CKA_PUBLIC_EXPONENT → OK', rsaPubComponents.rv, CKR.OK);
+  const nodeRsaPubKey = crypto.createPublicKey({
+    key: {
+      kty: 'RSA',
+      n: rsaPubComponents.n.toString('base64url'),
+      e: rsaPubComponents.e.toString('base64url'),
+    },
+    format: 'jwk',
+  });
 
   // ── CKM_RSA_PKCS_OAEP: real encrypt(pub) → decrypt(priv) round trip,
   // recovering the ORIGINAL plaintext, plus a tamper negative control.
@@ -2150,38 +2180,148 @@ section('G3 — RSA-OAEP / RSA-PSS / hash-then-RSA family (§6.4)');
       badRv !== CKR.OK ? 1 : 0, 1);
   }
 
-  // ── bare CKM_RSA_PKCS_PSS (0x0d): a REAL, CONFIRMED engine defect, found
-  // by this section, not fabricated. C_GetMechanismInfo advertises this
-  // mechanism with CKF_SIGN|CKF_VERIFY (ffi.rs's mechanism-info table,
-  // "CKM_RSA_PKCS_PSS => (2048, 4096, 0x00000800 | 0x00002000)"), and
-  // C_SignInit accepts it (mechanism-valid gate passes). But sign_rsa() /
-  // verify_rsa() in crypto/handlers.rs, and the C_Sign/C_Verify dispatch
-  // match in ffi.rs, both list every hash-then-sign PSS variant
-  // (CKM_SHA256_RSA_PKCS_PSS etc.) and CKM_RSA_PKCS (raw v1.5) — but never
-  // bare CKM_RSA_PKCS_PSS. So the ACTUAL C_Sign call falls through to
-  // CKR_MECHANISM_INVALID despite the mechanism being advertised as
-  // sign-capable — a genuine advertise-vs-dispatch gap, exactly the class
-  // of defect the new G10 invariant test below is designed to catch (its
-  // Init-only scope does NOT catch this one, since SignInit itself
-  // succeeds — see G10's own limitation note). NOT fixed in this pass
-  // (the fix needs a NEW runtime-hash-selected PSS arm threaded through
-  // both sign_rsa/verify_rsa's signatures — a real but non-trivial change,
-  // out of scope for a test-harness pass) — documented here with a
-  // regression-pinning check of the REAL observed behavior, not a
-  // fabricated pass.
+  // ── CKM_RSA_PKCS (raw PKCS#1 v1.5 encrypt/decrypt): R-2 fix (2026-08-24).
+  // This mechanism advertised CKF_ENCRYPT|CKF_DECRYPT (ffi.rs
+  // mechanism_info) since 2026-07-25 but neither C_EncryptInit nor
+  // C_DecryptInit dispatched it — only CKM_RSA_PKCS_OAEP was wired. Now
+  // wired via the `rsa` crate's own Pkcs1v15Encrypt primitive (see the
+  // mandatory risk-documentation comment on CKM_RSA_PKCS's arm in
+  // C_Decrypt, ffi.rs: this is a REVIEWED, ACCEPTED Bleichenbacher-class
+  // risk under repeated-query use — the crate's own padding-check TODO
+  // says "very likely not sufficient" for constant-time — accepted because
+  // the C++/OpenSSL engine already implements this mechanism safely for
+  // the product; not a silent gap).
+  //
+  // Two checks, not self-consistency alone:
+  //   (a) INDEPENDENT ORACLE — Node's own crypto.publicEncrypt (RSA_PKCS1_
+  //       PADDING) against the engine's own public key encrypts a
+  //       plaintext; the engine's C_Decrypt must recover it EXACTLY. This
+  //       proves the engine's decrypt is a correct, standards-compliant
+  //       PKCS#1v1.5 unpad against ciphertext from a wholly separate
+  //       implementation (OpenSSL, via Node).
+  //   (b) a real engine-only Encrypt→Decrypt round trip + tamper negative
+  //       control, mirroring the CKM_RSA_PKCS_OAEP block above exactly.
   {
-    const digest = new Uint8Array(32).fill(0xab); // stand-in pre-hashed digest
-    const digP = alloc(32); writeBytes(digP, digest);
-    const pssParams = new Uint8Array(new Uint32Array([CKM.SHA256, CKG.MGF1_SHA256, 32]).buffer);
-    check('SignInit(bare CKM_RSA_PKCS_PSS) → OK (mechanism accepted at Init)',
-      w._C_SignInit(hS, buildMech(CKM.RSA_PKCS_PSS, pssParams), rsa.prv), CKR.OK);
-    const slP = alloc(4); writeU32(slP, 0);
-    w._C_Sign(hS, digP, 32, 0, slP); // length query (engine returns a size without erroring)
-    const sigP = alloc(readU32(slP) || 256); writeU32(slP, readU32(slP) || 256);
-    check('KNOWN ENGINE DEFECT: Sign(bare CKM_RSA_PKCS_PSS) → MECHANISM_INVALID ' +
-      '(advertised CKF_SIGN, but sign_rsa()/verify_rsa() never wire this mechanism — ' +
-      'see comment above; regression-pinning the REAL observed behavior, not fabricating a pass)',
-      w._C_Sign(hS, digP, 32, sigP, slP), CKR.MECHANISM_INVALID);
+    // (a) independent oracle: Node encrypts (pub) → engine decrypts (priv).
+    const ptA = new TextEncoder().encode('rsa-pkcs1v15 independent-oracle cross-check plaintext');
+    const nodeCt = crypto.publicEncrypt(
+      { key: nodeRsaPubKey, padding: crypto.constants.RSA_PKCS1_PADDING },
+      Buffer.from(ptA));
+    check('CKM_RSA_PKCS: DecryptInit (R-2 fix) → OK',
+      w._C_DecryptInit(hS, buildMech(CKM.RSA_PKCS), rsa.prv), CKR.OK);
+    const nodeCtP = alloc(nodeCt.length); writeBytes(nodeCtP, nodeCt);
+    const ptLenPA = alloc(4); writeU32(ptLenPA, 0);
+    w._C_Decrypt(hS, nodeCtP, nodeCt.length, 0, ptLenPA);
+    const ptOutPA = alloc(readU32(ptLenPA)); writeU32(ptLenPA, readU32(ptLenPA));
+    check('CKM_RSA_PKCS: Decrypt(engine) of Node-produced ciphertext → OK (dispatch reached, not MECHANISM_INVALID)',
+      w._C_Decrypt(hS, nodeCtP, nodeCt.length, ptOutPA, ptLenPA), CKR.OK);
+    const recoveredA = Buffer.from(new Uint8Array(mem().buffer, ptOutPA, readU32(ptLenPA)));
+    check('CKM_RSA_PKCS: independent oracle (Node crypto.publicEncrypt) → engine C_Decrypt recovers the ORIGINAL plaintext EXACTLY',
+      Buffer.from(ptA).equals(recoveredA) ? 1 : 0, 1);
+
+    // (b) real engine round trip + tamper control (same shape as OAEP above).
+    const ptB = new TextEncoder().encode('rsa-pkcs1v15 engine round trip plaintext');
+    const ptBP = alloc(ptB.length); writeBytes(ptBP, ptB);
+    check('CKM_RSA_PKCS: EncryptInit (R-2 fix) → OK',
+      w._C_EncryptInit(hS, buildMech(CKM.RSA_PKCS), rsa.pub), CKR.OK);
+    const ctLenPB = alloc(4); writeU32(ctLenPB, 0);
+    w._C_Encrypt(hS, ptBP, ptB.length, 0, ctLenPB);
+    const ctPB = alloc(readU32(ctLenPB)); writeU32(ctLenPB, readU32(ctLenPB));
+    check('CKM_RSA_PKCS: Encrypt(engine) → OK (dispatch reached, not MECHANISM_INVALID)',
+      w._C_Encrypt(hS, ptBP, ptB.length, ctPB, ctLenPB), CKR.OK);
+    const ctLenB = readU32(ctLenPB);
+
+    check('CKM_RSA_PKCS: DecryptInit (engine round trip) → OK',
+      w._C_DecryptInit(hS, buildMech(CKM.RSA_PKCS), rsa.prv), CKR.OK);
+    const ptLenPB = alloc(4); writeU32(ptLenPB, 0);
+    w._C_Decrypt(hS, ctPB, ctLenB, 0, ptLenPB);
+    const ptOutPB = alloc(readU32(ptLenPB)); writeU32(ptLenPB, readU32(ptLenPB));
+    check('CKM_RSA_PKCS: Decrypt(engine) → OK', w._C_Decrypt(hS, ctPB, ctLenB, ptOutPB, ptLenPB), CKR.OK);
+    const recoveredB = Buffer.from(new Uint8Array(mem().buffer, ptOutPB, readU32(ptLenPB)));
+    check('CKM_RSA_PKCS: encrypt(pub) → decrypt(priv) recovers the ORIGINAL plaintext (real SEAM)',
+      Buffer.from(ptB).equals(recoveredB) ? 1 : 0, 1);
+
+    const badCtB = Buffer.from(new Uint8Array(mem().buffer, ctPB, ctLenB));
+    badCtB[ctLenB - 1] ^= 0xff;
+    const badCtPB = alloc(ctLenB); writeBytes(badCtPB, badCtB);
+    check('CKM_RSA_PKCS: DecryptInit (tamper control) → OK',
+      w._C_DecryptInit(hS, buildMech(CKM.RSA_PKCS), rsa.prv), CKR.OK);
+    const badLenPB = alloc(4); writeU32(badLenPB, ptB.length + 16);
+    const badPtPB = alloc(ptB.length + 16);
+    const badRvB = w._C_Decrypt(hS, badCtPB, ctLenB, badPtPB, badLenPB);
+    check('CKM_RSA_PKCS: tampered ciphertext never decrypts to the original plaintext',
+      badRvB !== CKR.OK ? 1 : 0, 1);
+  }
+
+  // ── bare CKM_RSA_PKCS_PSS (0x0d): R-1 fix (2026-08-24). This mechanism
+  // advertised CKF_SIGN|CKF_VERIFY (ffi.rs mechanism_info) and C_SignInit
+  // accepted it, but sign_rsa()/verify_rsa() never wired the bare form —
+  // only every hash-specific PSS sibling (CKM_SHA256_RSA_PKCS_PSS etc.) was
+  // listed. Now wired via runtime hash-algorithm dispatch
+  // (sign_rsa_pss_bare/verify_rsa_pss_bare in crypto/handlers.rs, using the
+  // `rsa` crate's lower-level `rsa::pss::Pss` SignatureScheme, which — unlike
+  // the hash-specific siblings' `BlindedSigningKey`/`Signer` machinery, which
+  // hashes the FULL message internally — operates directly on an
+  // ALREADY-HASHED digest, matching bare PSS's real semantics (RFC 8017
+  // §8.1 EMSA-PSS-ENCODE takes `mHash`, not `M`; the caller hashes the
+  // message itself before calling C_Sign).
+  //
+  // Real round trip at THREE different runtime hashAlg values (proving
+  // runtime dispatch, not one hard-coded path), each with a Sign→Verify
+  // round trip, an INDEPENDENT-ORACLE cross-check (Node's own crypto.verify
+  // with RSA-PSS padding — self-consistency alone is not sufficient for new
+  // crypto dispatch code, per this session's standard), and a tamper
+  // negative control checked against BOTH the engine and the oracle.
+  {
+    for (const [label, nodeHashName, hashAlg, mgf, sLen] of [
+      ['SHA-256', 'sha256', CKM.SHA256, CKG.MGF1_SHA256, 32],
+      ['SHA-384', 'sha384', CKM.SHA384, CKG.MGF1_SHA384, 48],
+      ['SHA-512', 'sha512', CKM.SHA512, CKG.MGF1_SHA512, 64],
+    ]) {
+      const message = new TextEncoder().encode(`bare CKM_RSA_PKCS_PSS round trip message (${label}), 2026-08-24`);
+      // The caller hashes the message itself — THIS is bare PSS's real
+      // input, not the message. Node hashing the SAME message with the SAME
+      // algorithm below (for the oracle check) is what makes that check
+      // valid: Node's crypto.verify(nodeHashName, message, ...) internally
+      // computes this exact digest before applying EMSA-PSS-VERIFY.
+      const digest = crypto.createHash(nodeHashName).update(Buffer.from(message)).digest();
+      const digP = alloc(digest.length); writeBytes(digP, digest);
+      const pssParams = new Uint8Array(new Uint32Array([hashAlg, mgf, sLen]).buffer);
+
+      check(`bare CKM_RSA_PKCS_PSS (${label}): SignInit (R-1 fix) → OK`,
+        w._C_SignInit(hS, buildMech(CKM.RSA_PKCS_PSS, pssParams), rsa.prv), CKR.OK);
+      const slP = alloc(4); writeU32(slP, 0);
+      w._C_Sign(hS, digP, digest.length, 0, slP);
+      const sigP = alloc(readU32(slP)); writeU32(slP, readU32(slP));
+      check(`bare CKM_RSA_PKCS_PSS (${label}): Sign(digest) → OK (dispatch reached, not MECHANISM_INVALID)`,
+        w._C_Sign(hS, digP, digest.length, sigP, slP), CKR.OK);
+      const sigLen = readU32(slP);
+      const sig = Buffer.from(new Uint8Array(mem().buffer, sigP, sigLen));
+
+      check(`bare CKM_RSA_PKCS_PSS (${label}): VerifyInit → OK`,
+        w._C_VerifyInit(hS, buildMech(CKM.RSA_PKCS_PSS, pssParams), rsa.pub), CKR.OK);
+      check(`bare CKM_RSA_PKCS_PSS (${label}): Verify round trip → OK (real SEAM)`,
+        w._C_Verify(hS, digP, digest.length, sigP, sigLen), CKR.OK);
+
+      const nodeOk = crypto.verify(nodeHashName, Buffer.from(message), {
+        key: nodeRsaPubKey, padding: crypto.constants.RSA_PKCS1_PSS_PADDING, saltLength: sLen,
+      }, sig);
+      check(`bare CKM_RSA_PKCS_PSS (${label}): independent oracle (Node crypto.verify, RSA-PSS) confirms the SAME signature is valid`,
+        nodeOk ? 1 : 0, 1);
+
+      // tamper negative control — engine AND independent oracle must both reject.
+      const badSig = Buffer.from(sig); badSig[0] ^= 0xff;
+      const badSigP = alloc(badSig.length); writeBytes(badSigP, badSig);
+      check(`bare CKM_RSA_PKCS_PSS (${label}): VerifyInit (tamper control) → OK`,
+        w._C_VerifyInit(hS, buildMech(CKM.RSA_PKCS_PSS, pssParams), rsa.pub), CKR.OK);
+      check(`bare CKM_RSA_PKCS_PSS (${label}): Verify with tampered signature → SIGNATURE_INVALID`,
+        w._C_Verify(hS, digP, digest.length, badSigP, badSig.length), CKR.SIGNATURE_INVALID);
+      const nodeBadOk = crypto.verify(nodeHashName, Buffer.from(message), {
+        key: nodeRsaPubKey, padding: crypto.constants.RSA_PKCS1_PSS_PADDING, saltLength: sLen,
+      }, badSig);
+      check(`bare CKM_RSA_PKCS_PSS (${label}): independent oracle also rejects the tampered signature`,
+        nodeBadOk ? 0 : 1, 1);
+    }
   }
 
   // ── hash-then-PKCS1v1.5 sign (full message, internal hash): real
@@ -2933,11 +3073,11 @@ section('G9 — advertise-vs-dispatch invariant: every advertised mechanism has 
 {
   // F1 (above) only proves C_GetMechanismInfo answers for every advertised
   // mechanism — a lookup-table entry exists. That is NOT the same claim as
-  // "the mechanism actually dispatches": this file's own G3 section found a
-  // REAL counter-example (bare CKM_RSA_PKCS_PSS advertises CKF_SIGN and
-  // C_SignInit accepts it, but C_Sign itself falls through to
-  // CKR_MECHANISM_INVALID) that F1 alone would never catch, because F1
-  // never attempts an operation.
+  // "the mechanism actually dispatches": this file's own G3 section
+  // originally FOUND a real counter-example here (bare CKM_RSA_PKCS_PSS
+  // advertised CKF_SIGN and C_SignInit accepted it, but C_Sign itself fell
+  // through to CKR_MECHANISM_INVALID — fixed 2026-08-24, R-1) that F1 alone
+  // would never have caught, because F1 never attempts an operation.
   //
   // This section attempts the REAL *_Init call (and, for a single-call
   // mechanism family — Derive/Generate/Wrap/Unwrap, which have no separate
@@ -2998,20 +3138,17 @@ section('G9 — advertise-vs-dispatch invariant: every advertised mechanism has 
 
   const XMSS_PARAM_ATTR_BAD = buildTpl([{ type: 0x61d /* CKA_PARAMETER_SET */, ulong: 0xffffffff }]);
 
-  // KNOWN, CONFIRMED advertise-vs-dispatch defects this very probe FOUND
-  // (real, verified against src/ffi.rs — not assumed): CKM_RSA_PKCS's own
-  // mechanism-info entry (ffi.rs ~line 999) deliberately advertises
-  // CKF_ENCRYPT|CKF_DECRYPT ("Raw RSA PKCS#1 v1.5 — sign/verify +
-  // encrypt/decrypt + sign-recover/verify-recover"), but the C_EncryptInit
-  // / C_DecryptInit dispatch matches (ffi.rs's EncryptCtx/DecryptCtx mech
-  // match) never list CKM_RSA_PKCS at all — only CKM_RSA_PKCS_OAEP is wired
-  // for RSA encrypt/decrypt. Same class of bug as the bare CKM_RSA_PKCS_PSS
-  // Sign defect G3 found and documented — NOT fixed here for the same
-  // reason (a real RSA PKCS#1v1.5 encrypt/decrypt implementation is a
-  // non-trivial cryptographic addition, out of scope for a test-harness
-  // pass), regression-pinned with the REAL observed code, not silently
-  // excluded from the sweep.
-  const KNOWN_DEFECTS = new Set([`${CKM.RSA_PKCS}:EncryptInit`, `${CKM.RSA_PKCS}:DecryptInit`]);
+  // R-1/R-2 (2026-08-24) — BOTH advertise-vs-dispatch defects this probe
+  // originally found here are now FIXED: bare CKM_RSA_PKCS_PSS Sign/Verify
+  // (R-1, real round trip in G3 above) and CKM_RSA_PKCS Encrypt/Decrypt
+  // (R-2, real round trip + independent-oracle cross-check in G3 above).
+  // KNOWN_DEFECTS is therefore empty — kept as a live Set (not deleted)
+  // because THAT is the point of this design: if either mechanism ever
+  // regresses back to CKR_MECHANISM_INVALID, this section starts FAILING
+  // immediately (neverMechanismInvalid's else-branch), rather than a stale
+  // pin silently masking a real regression. See git history for this file
+  // (search "KNOWN ENGINE DEFECT") for the original find.
+  const KNOWN_DEFECTS = new Set([]);
 
   function neverMechanismInvalid(mech, op, label, rv) {
     if (KNOWN_DEFECTS.has(`${mech}:${op}`)) {
