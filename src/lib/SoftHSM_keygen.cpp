@@ -7997,13 +7997,26 @@ CK_RV SoftHSM::MechParamCheckRSAPKCSOAEP(CK_MECHANISM_PTR pMechanism)
 
 	CK_RSA_PKCS_OAEP_PARAMS_PTR params = (CK_RSA_PKCS_OAEP_PARAMS_PTR)pMechanism->pParameter;
 
-	// Validate hash algorithm and matching MGF
+	// Validate hash algorithm and matching MGF. PKCS#11 v3.2 §6.1.8 defines
+	// hashAlg as an open "mechanism ID of the message digest algorithm" —
+	// the spec does not restrict this to any particular hash family, and
+	// CKG_MGF1_SHA3_224/256/384/512 are defined in the same normative
+	// table as the SHA-2 MGF1 variants (confirmed directly against
+	// docs/refs/pkcs11-spec-v3.2-os.pdf before this was reported as a
+	// genuine gap rather than a spec-mandated restriction). SHA-3 support
+	// added here to close that gap — previously this allow-list silently
+	// rejected SHA-3 with CKR_ARGUMENTS_BAD even though the engine
+	// supports SHA-3 as a digest/HMAC/KMAC elsewhere.
 	bool validCombo = false;
 	if (params->hashAlg == CKM_SHA_1    && params->mgf == CKG_MGF1_SHA1)    validCombo = true;
 	if (params->hashAlg == CKM_SHA224   && params->mgf == CKG_MGF1_SHA224)  validCombo = true;
 	if (params->hashAlg == CKM_SHA256   && params->mgf == CKG_MGF1_SHA256)  validCombo = true;
 	if (params->hashAlg == CKM_SHA384   && params->mgf == CKG_MGF1_SHA384)  validCombo = true;
 	if (params->hashAlg == CKM_SHA512   && params->mgf == CKG_MGF1_SHA512)  validCombo = true;
+	if (params->hashAlg == CKM_SHA3_224 && params->mgf == CKG_MGF1_SHA3_224) validCombo = true;
+	if (params->hashAlg == CKM_SHA3_256 && params->mgf == CKG_MGF1_SHA3_256) validCombo = true;
+	if (params->hashAlg == CKM_SHA3_384 && params->mgf == CKG_MGF1_SHA3_384) validCombo = true;
+	if (params->hashAlg == CKM_SHA3_512 && params->mgf == CKG_MGF1_SHA3_512) validCombo = true;
 	if (!validCombo)
 	{
 		ERROR_MSG("Invalid hashAlg/mgf combination for RSA-OAEP");

@@ -364,11 +364,15 @@ CK_RV SoftHSM::AsymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMec
 			{
 				CK_RSA_PKCS_OAEP_PARAMS_PTR oaepP = (CK_RSA_PKCS_OAEP_PARAMS_PTR)pMechanism->pParameter;
 				switch (oaepP->hashAlg) {
-					case CKM_SHA224: mechanism = AsymMech::RSA_PKCS_OAEP_SHA224; break;
-					case CKM_SHA256: mechanism = AsymMech::RSA_PKCS_OAEP_SHA256; break;
-					case CKM_SHA384: mechanism = AsymMech::RSA_PKCS_OAEP_SHA384; break;
-					case CKM_SHA512: mechanism = AsymMech::RSA_PKCS_OAEP_SHA512; break;
-					default:         mechanism = AsymMech::RSA_PKCS_OAEP;        break;
+					case CKM_SHA224:   mechanism = AsymMech::RSA_PKCS_OAEP_SHA224;   break;
+					case CKM_SHA256:   mechanism = AsymMech::RSA_PKCS_OAEP_SHA256;   break;
+					case CKM_SHA384:   mechanism = AsymMech::RSA_PKCS_OAEP_SHA384;   break;
+					case CKM_SHA512:   mechanism = AsymMech::RSA_PKCS_OAEP_SHA512;   break;
+					case CKM_SHA3_224: mechanism = AsymMech::RSA_PKCS_OAEP_SHA3_224; break;
+					case CKM_SHA3_256: mechanism = AsymMech::RSA_PKCS_OAEP_SHA3_256; break;
+					case CKM_SHA3_384: mechanism = AsymMech::RSA_PKCS_OAEP_SHA3_384; break;
+					case CKM_SHA3_512: mechanism = AsymMech::RSA_PKCS_OAEP_SHA3_512; break;
+					default:           mechanism = AsymMech::RSA_PKCS_OAEP;          break;
 				}
 			}
 			isRSA = true;
@@ -1083,11 +1087,15 @@ CK_RV SoftHSM::AsymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMec
 			{
 				CK_RSA_PKCS_OAEP_PARAMS_PTR oaepP = (CK_RSA_PKCS_OAEP_PARAMS_PTR)pMechanism->pParameter;
 				switch (oaepP->hashAlg) {
-					case CKM_SHA224: mechanism = AsymMech::RSA_PKCS_OAEP_SHA224; break;
-					case CKM_SHA256: mechanism = AsymMech::RSA_PKCS_OAEP_SHA256; break;
-					case CKM_SHA384: mechanism = AsymMech::RSA_PKCS_OAEP_SHA384; break;
-					case CKM_SHA512: mechanism = AsymMech::RSA_PKCS_OAEP_SHA512; break;
-					default:         mechanism = AsymMech::RSA_PKCS_OAEP;        break;
+					case CKM_SHA224:   mechanism = AsymMech::RSA_PKCS_OAEP_SHA224;   break;
+					case CKM_SHA256:   mechanism = AsymMech::RSA_PKCS_OAEP_SHA256;   break;
+					case CKM_SHA384:   mechanism = AsymMech::RSA_PKCS_OAEP_SHA384;   break;
+					case CKM_SHA512:   mechanism = AsymMech::RSA_PKCS_OAEP_SHA512;   break;
+					case CKM_SHA3_224: mechanism = AsymMech::RSA_PKCS_OAEP_SHA3_224; break;
+					case CKM_SHA3_256: mechanism = AsymMech::RSA_PKCS_OAEP_SHA3_256; break;
+					case CKM_SHA3_384: mechanism = AsymMech::RSA_PKCS_OAEP_SHA3_384; break;
+					case CKM_SHA3_512: mechanism = AsymMech::RSA_PKCS_OAEP_SHA3_512; break;
+					default:           mechanism = AsymMech::RSA_PKCS_OAEP;          break;
 				}
 			}
 			isRSA = true;

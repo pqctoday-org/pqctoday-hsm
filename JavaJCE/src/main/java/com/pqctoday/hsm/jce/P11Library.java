@@ -96,7 +96,8 @@ final class P11Library implements AutoCloseable {
         cGenerateRandom, cSeedRandom, cGenerateKeyPair, cSignInit, cSign,
         cVerifyInit, cVerify, cGetAttributeValue, cCreateObject,
         cFindObjectsInit, cFindObjects, cFindObjectsFinal,
-        cEncapsulateKey, cDecapsulateKey;
+        cEncapsulateKey, cDecapsulateKey, cDeriveKey,
+        cEncryptInit, cEncrypt, cDecryptInit, cDecrypt;
     private final long session;
     private volatile boolean closed;
 
@@ -143,6 +144,13 @@ final class P11Library implements AutoCloseable {
                 fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS, ADDRESS));
             cDecapsulateKey = h(linker, lib, "C_DecapsulateKey",
                 fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
+            cDeriveKey     = h(linker, lib, "C_DeriveKey",
+                fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
+            // Cross-checked against P11Ffm's already-live-verified bindings.
+            cEncryptInit   = h(linker, lib, "C_EncryptInit", fd(JAVA_LONG, ADDRESS, JAVA_LONG));
+            cEncrypt       = h(linker, lib, "C_Encrypt", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS));
+            cDecryptInit   = h(linker, lib, "C_DecryptInit", fd(JAVA_LONG, ADDRESS, JAVA_LONG));
+            cDecrypt       = h(linker, lib, "C_Decrypt", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS));
 
             ensureGlobalInit(linker, lib);
 
@@ -400,6 +408,106 @@ final class P11Library implements AutoCloseable {
             throw e;
         } catch (Throwable t) {
             throw new ProviderException("decapsulate failed", t);
+        }
+    }
+
+    // CK_ECDH1_DERIVE_PARAMS { CK_EC_KDF_TYPE kdf; CK_ULONG ulSharedDataLen;
+    // CK_BYTE_PTR pSharedData; CK_ULONG ulPublicDataLen; CK_BYTE_PTR pPublicData; }
+    private static final MemoryLayout ECDH1_DERIVE_PARAMS =
+        MemoryLayout.structLayout(JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS);
+
+    /**
+     * C_DeriveKey for CKM_ECDH1_DERIVE (CKD_NULL, no shared data — the
+     * plain-ECDH case). `peerPublicPointRaw` must be the RAW uncompressed
+     * point (04||X||Y), NOT the DER-OCTET-STRING-wrapped form CKA_EC_POINT
+     * itself stores — confirmed against the sandbox's own proven C sample
+     * (samples/c/08_ecdh_p256.c's get_ec_point() helper, which explicitly
+     * strips that wrapper before passing the bytes to this struct) before
+     * writing this method, not assumed. Returns the derived secret-key
+     * object's handle.
+     */
+    long ecdh1Derive(long basePrivateKey, byte[] peerPublicPointRaw, Attr[] ssTmpl) {
+        ensureOpen();
+        try {
+            MemorySegment pubData = bytes(peerPublicPointRaw);
+            MemorySegment params = arena.allocate(ECDH1_DERIVE_PARAMS);
+            params.set(JAVA_LONG, 0, 1L); // CKD_NULL (pkcs11t.h: 0x00000001)
+            params.set(JAVA_LONG, 8, 0L); // ulSharedDataLen
+            params.set(ADDRESS, 16, MemorySegment.NULL); // pSharedData
+            params.set(JAVA_LONG, 24, (long) peerPublicPointRaw.length);
+            params.set(ADDRESS, 32, pubData);
+
+            MemorySegment mech = arena.allocate(MECHANISM);
+            mech.set(JAVA_LONG, 0, P11Constants.CKM_ECDH1_DERIVE);
+            mech.set(ADDRESS, 8, params);
+            mech.set(JAVA_LONG, 16, ECDH1_DERIVE_PARAMS.byteSize());
+
+            MemorySegment tmpl = attrs(ssTmpl);
+            MemorySegment hKey = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cDeriveKey, session, mech, basePrivateKey,
+                tmpl, (long) ssTmpl.length, hKey), "C_DeriveKey");
+            return hKey.get(JAVA_LONG, 0);
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("ecdh1Derive failed", t);
+        }
+    }
+
+    // CK_RSA_PKCS_OAEP_PARAMS { CK_MECHANISM_TYPE hashAlg; CK_RSA_PKCS_MGF_TYPE mgf;
+    // CK_RSA_PKCS_OAEP_SOURCE_TYPE source; CK_VOID_PTR pSourceData; CK_ULONG ulSourceDataLen; }
+    // Pointer field is NOT last (unlike ECDH1_DERIVE_PARAMS) — its own struct, not reusable.
+    private static final MemoryLayout OAEP_PARAMS =
+        MemoryLayout.structLayout(JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG);
+
+    /** CKM_RSA_PKCS_OAEP with no label (CKZ_DATA_SPECIFIED, empty source — the common case). */
+    MemorySegment mechOaep(long hashAlg, long mgf) {
+        MemorySegment params = arena.allocate(OAEP_PARAMS);
+        params.set(JAVA_LONG, 0, hashAlg);
+        params.set(JAVA_LONG, 8, mgf);
+        params.set(JAVA_LONG, 16, 1L); // CKZ_DATA_SPECIFIED
+        params.set(ADDRESS, 24, MemorySegment.NULL);
+        params.set(JAVA_LONG, 32, 0L);
+        MemorySegment m = arena.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_RSA_PKCS_OAEP);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, OAEP_PARAMS.byteSize());
+        return m;
+    }
+
+    /** C_EncryptInit + C_Encrypt (single-part), two-call sizing. */
+    byte[] encrypt(MemorySegment mech, long key, byte[] plaintext) {
+        ensureOpen();
+        try {
+            P11Error.check(invokeRv(cEncryptInit, session, mech, key), "C_EncryptInit");
+            MemorySegment in = bytes(plaintext);
+            MemorySegment len = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cEncrypt, session, in, (long) plaintext.length, MemorySegment.NULL, len), "C_Encrypt(size)");
+            MemorySegment out = arena.allocate(len.get(JAVA_LONG, 0));
+            P11Error.check(invokeRv(cEncrypt, session, in, (long) plaintext.length, out, len), "C_Encrypt");
+            return toBytes(out, len.get(JAVA_LONG, 0));
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("encrypt failed", t);
+        }
+    }
+
+    /** C_DecryptInit + C_Decrypt (single-part), two-call sizing. */
+    byte[] decrypt(MemorySegment mech, long key, byte[] ciphertext) {
+        ensureOpen();
+        try {
+            P11Error.check(invokeRv(cDecryptInit, session, mech, key), "C_DecryptInit");
+            MemorySegment in = bytes(ciphertext);
+            MemorySegment len = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cDecrypt, session, in, (long) ciphertext.length, MemorySegment.NULL, len), "C_Decrypt(size)");
+            MemorySegment out = arena.allocate(len.get(JAVA_LONG, 0));
+            P11Error.check(invokeRv(cDecrypt, session, in, (long) ciphertext.length, out, len), "C_Decrypt");
+            return toBytes(out, len.get(JAVA_LONG, 0));
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("decrypt failed", t);
         }
     }
 

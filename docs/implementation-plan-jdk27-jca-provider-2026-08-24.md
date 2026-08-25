@@ -905,6 +905,128 @@ follows, and documented as such directly in the class.
     the KeyFactory import path added this workstream, not just the one
     proven for Signature in W2).
 
+**ECDH: DONE 2026-08-24, PASSED.**
+- `P11ECDHKeyAgreementSpi implements KeyAgreementSpi`, registered as
+  `"ECDH"`, works across all three curves already proven for ECDSA
+  (P-256/P-384/P-521). `engineDoPhase` extracts the peer's point from
+  `CKA_EC_POINT` and, because that attribute is DER `OCTET STRING`-wrapped
+  for ordinary EC keys (unlike EdDSA's raw encoding — see W2), unwraps it
+  via `ASN1OctetString.getInstance(...).getOctets()` before building the
+  `CK_ECDH1_DERIVE_PARAMS`. A foreign (non-token) peer public key is
+  imported on-the-fly through the same `P11PublicKeyFactorySpi` path
+  proven in W2/ML-KEM, not a separate code path.
+- **Real bug found and fixed at the root:** `C_DeriveKey` failed with
+  `CKR_KEY_FUNCTION_NOT_PERMITTED (0x68)` on the first live attempt.
+  Root cause: `P11ECKeyPairGeneratorSpi`'s private-key template only
+  granted `CKA_SIGN` (built for ECDSA in W2), never `CKA_DERIVE`. Fixed
+  by adding `CKA_DERIVE, true` to the private-key template. Re-ran the
+  full suite immediately after — 99/99, no ECDSA regression. The same
+  class of gap was then checked *proactively* on the RSA template (see
+  OAEP below) before it could bite the same way twice.
+- Shared secret extracted as a plain raw-byte `SecretKeySpec` — the same
+  deliberate, documented `CKA_EXTRACTABLE=true` exception as ML-KEM's
+  secret, for the identical reason (JSSE's own key schedule needs it in
+  JVM memory; see the ML-KEM section above).
+- **Verify:** two-of-our-own-keys agree; cross-verified against `SunEC`
+  (JDK's own ECDH) with a foreign-peer-key-accepted-directly test
+  exercising the on-the-fly import path.
+
+**RSA-OAEP: DONE 2026-08-24, PASSED — including a genuine C++ engine
+compliance-gap fix, not just Java-side work.**
+- `P11RSAOAEPCipherSpi implements CipherSpi`, one instance per
+  (digest, MGF) pair, registered as
+  `"RSA/ECB/OAEPWith" + digest + "AndMGF1Padding"` for the fuller
+  SHA-2 + SHA-3 matrix the user chose during W3 clarification
+  (SHA-256/384/512 and SHA3-256/384/512 — SHA-1 stays excluded per this
+  provider's FIPS 140-3 L3 policy, unchanged from W2).
+- **Real bug #1 (proactive fix):** applying the lesson just learned from
+  ECDH's `CKA_DERIVE` gap, the RSA key templates were checked before
+  first run and found to have the identical class of gap —
+  `P11RSAKeyPairGeneratorSpi` only granted `CKA_SIGN`/`CKA_VERIFY`, never
+  `CKA_ENCRYPT`/`CKA_DECRYPT`. Fixed before running rather than after a
+  failure.
+- **Real bug #2:** `initKey()` only recognized `Cipher.ENCRYPT_MODE`/
+  `DECRYPT_MODE` (opmodes 1/2), so `Cipher.WRAP_MODE`/`UNWRAP_MODE`
+  (opmodes 3/4) threw `InvalidKeyException`. Fixed by normalizing
+  wrap→encrypt-direction and unwrap→decrypt-direction before the
+  existing direction check; `engineWrap`/`engineUnwrap` implemented via
+  `engineDoFinal`. Verified via `wrapUnwrapRoundTripsAnAesKey`.
+- **Real bug #3 (a genuine C++ engine compliance gap, not a Java-side
+  issue) — found, spec-verified, and fixed at the root per explicit user
+  instruction ("ok then fix the gap"):** `C_EncryptInit` rejected every
+  SHA3-* OAEP combination with `CKR_ARGUMENTS_BAD`. Root cause, found by
+  reading source directly: `SoftHSM_keygen.cpp`'s
+  `MechParamCheckRSAPKCSOAEP` hardcoded a `validCombo` allow-list
+  covering only `{SHA-1, SHA224, SHA256, SHA384, SHA512}`. Verified
+  against the actual OASIS PKCS#11 v3.2 Standard PDF (`docs/refs/`,
+  §6.1.8, page 198, extracted via `pdftotext -layout`) — not the header
+  file, not memory — that `CK_RSA_PKCS_OAEP_PARAMS.hashAlg` is spec-defined
+  generically with no hash-family restriction, and that
+  `CKG_MGF1_SHA3_224/256/384/512` are defined in the same normative MGF
+  table as the SHA-2 variants. This confirmed the gap as a genuine engine
+  completeness bug, not a spec-mandated restriction. Fixed across four
+  sites in three files, all reusing the exact `EVP_sha3_*()` pattern
+  already proven working elsewhere in this codebase (ECDSA, HMAC):
+  - `AsymmetricAlgorithm.h`: added `RSA_PKCS_OAEP_SHA3_{224,256,384,512}`
+    to the `AsymMech::Type` enum.
+  - `OSSLRSA.cpp`: extended both the encrypt and decrypt padding-check
+    and MD-selection logic (4 sites) to accept and dispatch the new
+    enum values via `EVP_sha3_*()`.
+  - `SoftHSM_cipher.cpp`: extended the `CKM_SHA3_*` → `AsymMech`
+    mapping switch at both encrypt-init and decrypt-init sites.
+  - `SoftHSM_keygen.cpp`: extended `MechParamCheckRSAPKCSOAEP`'s
+    `validCombo` check with the four SHA3 hashAlg/MGF1 combinations,
+    with a comment citing the spec verification.
+  - Rebuilt for both macOS (sanity) and Linux (the real target, via a
+    standalone `docker build --target hsm-builder`), hot-swapped the
+    fresh `.so` into the running sandbox container, and ran the full
+    regression suite before touching any Java code: 106/107 passed, the
+    one failure being the not-yet-resynced WRAP_MODE Java fix above, not
+    a new regression.
+- **JDK/SunJCE quirk found and correctly attributed, not worked around in
+  the provider:** decrypting JDK-encrypted SHA-384/512 OAEP ciphertext
+  initially failed with `CKR_ENCRYPTED_DATA_INVALID`, SHA-256 did not.
+  Isolated via three standalone probes (self-round-trip in isolation →
+  fine; JDK-encrypts/we-decrypt in isolation → fails; forcing an explicit
+  `OAEPParameterSpec` with a matching `MGF1ParameterSpec` on the JDK side
+  → fixed). Conclusion: our provider is spec-correct (MGF1 digest always
+  matches the main hash); the plain transformation string alone doesn't
+  reliably make SunJCE default its MGF digest to match for SHA-384/512.
+  Fixed the **test**, not the provider, to pass an explicit
+  `OAEPParameterSpec` when cross-verifying against JDK.
+- **A second, harder JDK limitation found during cross-verify test
+  design:** SHA-3 OAEP cannot be cross-verified against the JDK at all,
+  for a different and more fundamental reason than the quirk above —
+  confirmed live that `Cipher.getInstance("RSA/ECB/OAEPWithSHA3-256AndMGF1Padding", "SunJCE")`
+  throws `NoSuchPaddingException` unconditionally, regardless of
+  provider or params: SunJCE's OAEP transformation-string parser simply
+  doesn't recognize a `SHA3-*` digest name inside
+  `"OAEPWith...AndMGF1Padding"`. This is why SHA-3 OAEP has its own
+  self-round-trip test (`sha3OaepSelfRoundTrips`) separate from the
+  SHA-2 JDK-cross-verify test, and why the user's Bouncy Castle
+  cross-check request (next) was the *only* way to get third-party
+  verification for SHA-3 at all — the JDK cannot serve as the oracle
+  here even in principle.
+- **Cross-checked against Bouncy Castle per explicit user request ("can
+  you cross check the fix with bouncy castle ?")**, using the same
+  `bcprov-jdk18on:1.85.2` dependency already present for ASN.1 codec work
+  and the W2 SLH-DSA cross-verify. `sha3OaepInteropsWithBouncyCastle`
+  proves both directions for all three SHA-3 digests: BC encrypts
+  against our exported public key, we decrypt (proves our engine fix
+  against BC's independent RSA-OAEP implementation); we encrypt against
+  a BC-generated public key (imported via `KeyFactory`), BC decrypts
+  (the reverse direction). The reverse direction surfaced one more real
+  bug: `P11PublicKeyFactorySpi.importRSA` only granted `CKA_VERIFY` on a
+  foreign-imported RSA public key, never `CKA_ENCRYPT` — the same class
+  of template-completeness gap as the ECDH/RSA-generation bugs above,
+  caught here because the test actually exercised encryption against an
+  imported key rather than only a generated one. Fixed by adding
+  `CKA_ENCRYPT, true` to `importRSA`'s template.
+- **Verify — full suite, all green:** `mvn test`, 110/110 (9 SHA-2
+  round-trip+JDK-cross-verify, 1 wrap/unwrap, 3 SHA-3 self-round-trip,
+  3 SHA-3×BC bidirectional cross-verify, 1 SHA-1-excluded negative test,
+  plus all prior W0–W2 tests unchanged).
+
 ### W4 — Symmetric, MAC, KDF, KeyStore write path
 - `CipherSpi` (AES GCM/CBC/CTR + AESWrap), `MacSpi` (HMAC/CMAC/KMAC),
   `KeyGeneratorSpi` (AES, generic-secret), `SecretKeyFactorySpi`

@@ -235,6 +235,43 @@ public final class SoftHSMv3Provider extends Provider {
             });
         }
 
+        // W3: RSA-OAEP — one Cipher service per (digest, MGF) pair, SHA-2
+        // + SHA-3 (user decision, "fuller matrix"). SHA-3 registration
+        // was briefly dropped after discovering the C++ engine's
+        // MechParamCheckRSAPKCSOAEP hardcoded a SHA-1/SHA-2-only
+        // allow-list — confirmed against the actual PKCS#11 v3.2 OASIS
+        // Standard text (docs/refs/pkcs11-spec-v3.2-os.pdf §6.1.8) that
+        // this was a genuine engine completeness gap, not a spec-mandated
+        // restriction (hashAlg is spec-defined as an open "mechanism ID
+        // of the message digest algorithm", and CKG_MGF1_SHA3_* is
+        // defined in the same normative table as the SHA-2 MGF1
+        // variants). Fixed directly in the engine (pqctoday-hsm's
+        // OSSLRSA.cpp + SoftHSM_cipher.cpp + SoftHSM_keygen.cpp — SHA-3
+        // support added to the same 4 locations the SHA-2 family already
+        // used, reusing the exact pattern already proven for
+        // ECDSA/HMAC's own SHA-3 support elsewhere in that codebase) per
+        // the user's explicit "fix the gap" request, rather than left as
+        // a permanently scoped-down Java-side workaround. See
+        // P11RSAOAEPCipherSpi's javadoc for why this registration shape
+        // differs from RSASSA-PSS's single configurable service.
+        registerRSAOAEP("SHA-256", CKM_SHA256, CKG_MGF1_SHA256);
+        registerRSAOAEP("SHA-384", CKM_SHA384, CKG_MGF1_SHA384);
+        registerRSAOAEP("SHA-512", CKM_SHA512, CKG_MGF1_SHA512);
+        registerRSAOAEP("SHA3-256", CKM_SHA3_256, CKG_MGF1_SHA3_256);
+        registerRSAOAEP("SHA3-384", CKM_SHA3_384, CKG_MGF1_SHA3_384);
+        registerRSAOAEP("SHA3-512", CKM_SHA3_512, CKG_MGF1_SHA3_512);
+
+        // W3: ECDH — CKM_ECDH1_DERIVE, CKD_NULL (plain ECDH, no KDF).
+        // See P11ECDHKeyAgreementSpi's javadoc for the raw-vs-DER-wrapped
+        // EC point distinction this needed.
+        putService(new Service(this, "KeyAgreement", "ECDH",
+            P11ECDHKeyAgreementSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11ECDHKeyAgreementSpi(lib);
+            }
+        });
+
         // W2: KeyStore (read path — see P11KeyStoreSpi's javadoc for why
         // write/delete throw for now). Fixes the classic SunPKCS11 "0
         // keys" gap for this token by actually enumerating objects via
@@ -244,6 +281,18 @@ public final class SoftHSMv3Provider extends Provider {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
                 return new P11KeyStoreSpi(lib);
+            }
+        });
+    }
+
+    private void registerRSAOAEP(String digestName, long hashMech, long mgf) {
+        // digestName is already exactly right for this: "SHA-256" ->
+        // ".../OAEPWithSHA-256AndMGF1Padding", "SHA3-256" -> "...SHA3-256...".
+        putService(new Service(this, "Cipher", "RSA/ECB/OAEPWith" + digestName + "AndMGF1Padding",
+            P11RSAOAEPCipherSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11RSAOAEPCipherSpi(lib, hashMech, mgf);
             }
         });
     }

@@ -99,6 +99,15 @@ final class P11ECKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
             P11Library.attrBool(CKA_SENSITIVE, true),
             P11Library.attrBool(CKA_EXTRACTABLE, false),
             P11Library.attrBool(CKA_SIGN, true),
+            // A real EC keypair is algorithm-agnostic at generation time
+            // — the single JCA "EC" KeyPairGenerator serves both ECDSA
+            // (CKA_SIGN) and ECDH (CKA_DERIVE), so both must be granted
+            // here, unlike every other keygen class in this module whose
+            // single-purpose key only ever needs one. Missing this
+            // caused a real, live CKR_KEY_FUNCTION_NOT_PERMITTED from
+            // C_DeriveKey during W3's ECDH work — the token correctly
+            // refusing a key that was never authorized for derive.
+            P11Library.attrBool(CKA_DERIVE, true),
         };
         long[] handles = lib.generateKeyPair(CKM_EC_KEY_PAIR_GEN, pubTmpl, prvTmpl);
         byte[] spki = lib.getAttributeBytes(handles[0], CKA_PUBLIC_KEY_INFO);

@@ -208,6 +208,7 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
             P11Library.attr(CKA_MODULUS, unsignedBigEndian(modulus)),
             P11Library.attr(CKA_PUBLIC_EXPONENT, unsignedBigEndian(exponent)),
             P11Library.attrBool(CKA_VERIFY, true),
+            P11Library.attrBool(CKA_ENCRYPT, true),
             P11Library.attrBool(CKA_TOKEN, false),
         };
         long handle = lib.createObject(tmpl);

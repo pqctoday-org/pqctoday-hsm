@@ -72,6 +72,14 @@ final class P11RSAKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
             P11Library.attrLong(CKA_MODULUS_BITS, modulusBits),
             P11Library.attr(CKA_PUBLIC_EXPONENT, unsignedBigEndian(publicExponent)),
             P11Library.attrBool(CKA_VERIFY, true),
+            // Same lesson as P11ECKeyPairGeneratorSpi's CKA_DERIVE fix:
+            // a real RSA keypair is algorithm-agnostic at generation
+            // time — the single "RSA" KeyPairGenerator serves both
+            // signing (CKA_VERIFY/CKA_SIGN) and OAEP encrypt/decrypt
+            // (CKA_ENCRYPT/CKA_DECRYPT), so both must be granted.
+            // Added proactively here (not after a live failure) once
+            // the EC precedent made the pattern obvious.
+            P11Library.attrBool(CKA_ENCRYPT, true),
             P11Library.attrBool(CKA_TOKEN, false),
         };
         P11Library.Attr[] prvTmpl = {
@@ -81,6 +89,7 @@ final class P11RSAKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
             P11Library.attrBool(CKA_SENSITIVE, true),
             P11Library.attrBool(CKA_EXTRACTABLE, false),
             P11Library.attrBool(CKA_SIGN, true),
+            P11Library.attrBool(CKA_DECRYPT, true),
         };
         long[] handles = lib.generateKeyPair(CKM_RSA_PKCS_KEY_PAIR_GEN, pubTmpl, prvTmpl);
         byte[] spki = lib.getAttributeBytes(handles[0], CKA_PUBLIC_KEY_INFO);

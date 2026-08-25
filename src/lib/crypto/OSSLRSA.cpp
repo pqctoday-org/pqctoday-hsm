@@ -1359,9 +1359,14 @@ bool OSSLRSA::encrypt(PublicKey* publicKey, const ByteString& data,
 	         padding == AsymMech::RSA_PKCS_OAEP_SHA224 ||
 	         padding == AsymMech::RSA_PKCS_OAEP_SHA256 ||
 	         padding == AsymMech::RSA_PKCS_OAEP_SHA384 ||
-	         padding == AsymMech::RSA_PKCS_OAEP_SHA512)
+	         padding == AsymMech::RSA_PKCS_OAEP_SHA512 ||
+	         padding == AsymMech::RSA_PKCS_OAEP_SHA3_224 ||
+	         padding == AsymMech::RSA_PKCS_OAEP_SHA3_256 ||
+	         padding == AsymMech::RSA_PKCS_OAEP_SHA3_384 ||
+	         padding == AsymMech::RSA_PKCS_OAEP_SHA3_512)
 	{
-		// OAEP overhead: 2*hashLen + 2; SHA-1=42, SHA-256=66, SHA-384=98, SHA-512=130
+		// OAEP overhead: 2*hashLen + 2; SHA-1=42, SHA-256=66, SHA-384=98, SHA-512=130,
+		// SHA3-256=66, SHA3-384=98, SHA3-512=130 (SHA-3 output sizes match SHA-2's)
 		osslPadding = RSA_PKCS1_OAEP_PADDING;
 	}
 	else if (padding == AsymMech::RSA)
@@ -1392,7 +1397,11 @@ bool OSSLRSA::encrypt(PublicKey* publicKey, const ByteString& data,
 	if (padding == AsymMech::RSA_PKCS_OAEP_SHA224 ||
 	    padding == AsymMech::RSA_PKCS_OAEP_SHA256 ||
 	    padding == AsymMech::RSA_PKCS_OAEP_SHA384 ||
-	    padding == AsymMech::RSA_PKCS_OAEP_SHA512)
+	    padding == AsymMech::RSA_PKCS_OAEP_SHA512 ||
+	    padding == AsymMech::RSA_PKCS_OAEP_SHA3_224 ||
+	    padding == AsymMech::RSA_PKCS_OAEP_SHA3_256 ||
+	    padding == AsymMech::RSA_PKCS_OAEP_SHA3_384 ||
+	    padding == AsymMech::RSA_PKCS_OAEP_SHA3_512)
 	{
 		const EVP_MD* md = NULL;
 		switch (padding) {
@@ -1400,6 +1409,10 @@ bool OSSLRSA::encrypt(PublicKey* publicKey, const ByteString& data,
 			case AsymMech::RSA_PKCS_OAEP_SHA256: md = EVP_sha256(); break;
 			case AsymMech::RSA_PKCS_OAEP_SHA384: md = EVP_sha384(); break;
 			case AsymMech::RSA_PKCS_OAEP_SHA512: md = EVP_sha512(); break;
+			case AsymMech::RSA_PKCS_OAEP_SHA3_224: md = EVP_sha3_224(); break;
+			case AsymMech::RSA_PKCS_OAEP_SHA3_256: md = EVP_sha3_256(); break;
+			case AsymMech::RSA_PKCS_OAEP_SHA3_384: md = EVP_sha3_384(); break;
+			case AsymMech::RSA_PKCS_OAEP_SHA3_512: md = EVP_sha3_512(); break;
 			default: break;
 		}
 		if (EVP_PKEY_CTX_set_rsa_oaep_md(ctx, md) <= 0 ||
@@ -1471,7 +1484,11 @@ bool OSSLRSA::decrypt(PrivateKey* privateKey, const ByteString& encryptedData,
 		case AsymMech::RSA_PKCS_OAEP_SHA224:
 		case AsymMech::RSA_PKCS_OAEP_SHA256:
 		case AsymMech::RSA_PKCS_OAEP_SHA384:
-		case AsymMech::RSA_PKCS_OAEP_SHA512: osslPadding = RSA_PKCS1_OAEP_PADDING; break;
+		case AsymMech::RSA_PKCS_OAEP_SHA512:
+		case AsymMech::RSA_PKCS_OAEP_SHA3_224:
+		case AsymMech::RSA_PKCS_OAEP_SHA3_256:
+		case AsymMech::RSA_PKCS_OAEP_SHA3_384:
+		case AsymMech::RSA_PKCS_OAEP_SHA3_512: osslPadding = RSA_PKCS1_OAEP_PADDING; break;
 		case AsymMech::RSA:                  osslPadding = RSA_NO_PADDING;          break;
 		default:
 			ERROR_MSG("Invalid padding mechanism supplied (%i)", padding);
@@ -1491,7 +1508,11 @@ bool OSSLRSA::decrypt(PrivateKey* privateKey, const ByteString& encryptedData,
 	if (padding == AsymMech::RSA_PKCS_OAEP_SHA224 ||
 	    padding == AsymMech::RSA_PKCS_OAEP_SHA256 ||
 	    padding == AsymMech::RSA_PKCS_OAEP_SHA384 ||
-	    padding == AsymMech::RSA_PKCS_OAEP_SHA512)
+	    padding == AsymMech::RSA_PKCS_OAEP_SHA512 ||
+	    padding == AsymMech::RSA_PKCS_OAEP_SHA3_224 ||
+	    padding == AsymMech::RSA_PKCS_OAEP_SHA3_256 ||
+	    padding == AsymMech::RSA_PKCS_OAEP_SHA3_384 ||
+	    padding == AsymMech::RSA_PKCS_OAEP_SHA3_512)
 	{
 		const EVP_MD* md = NULL;
 		switch (padding) {
@@ -1499,6 +1520,10 @@ bool OSSLRSA::decrypt(PrivateKey* privateKey, const ByteString& encryptedData,
 			case AsymMech::RSA_PKCS_OAEP_SHA256: md = EVP_sha256(); break;
 			case AsymMech::RSA_PKCS_OAEP_SHA384: md = EVP_sha384(); break;
 			case AsymMech::RSA_PKCS_OAEP_SHA512: md = EVP_sha512(); break;
+			case AsymMech::RSA_PKCS_OAEP_SHA3_224: md = EVP_sha3_224(); break;
+			case AsymMech::RSA_PKCS_OAEP_SHA3_256: md = EVP_sha3_256(); break;
+			case AsymMech::RSA_PKCS_OAEP_SHA3_384: md = EVP_sha3_384(); break;
+			case AsymMech::RSA_PKCS_OAEP_SHA3_512: md = EVP_sha3_512(); break;
 			default: break;
 		}
 		if (EVP_PKEY_CTX_set_rsa_oaep_md(ctx, md) <= 0 ||
