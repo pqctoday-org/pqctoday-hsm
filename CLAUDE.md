@@ -77,13 +77,16 @@ engine. It has its own checked-in PKCS#11 v3.2 conformance evidence
 The original Phase 0–6 roadmap (import + strip legacy, OpenSSL 3.x EVP
 migration, ML-DSA, ML-KEM, Emscripten WASM, npm package, app integration) is
 **complete**, as is the later hardening/conformance work. Current release is
-tracked in `CHANGELOG.md` (**0.24.0**, 2026-08-18, plus unreleased work —
+tracked in `CHANGELOG.md` (**0.25.0**, 2026-08-25, plus unreleased work —
 always trust the CHANGELOG's top entry over any version echoed in this
-file). Recent programs: all eight §10.4 composite signature profiles, KMIP
-3.0 §9.10 Maximum Response Size enforcement, PKCS#11 v3.2 conformance
-evidence (real Split Key + asynchronous processing, honest `Query`), a
-follow-up gap-remediation audit (13 findings across both crates —
-silently-dropped errors, stub behavior — all fixed), the CACP
+file). Recent programs: a real JDK 27 JCA/JCE provider (`JavaJCE/`, FFM-based)
+plus a second, gRPC-remote provider module (`JavaJCE-remote/`) with real
+self-signed certificate export — the only way a remote-generated public
+key's bytes leave the server; all eight §10.4 composite signature
+profiles, KMIP 3.0 §9.10 Maximum Response Size enforcement, PKCS#11 v3.2
+conformance evidence (real Split Key + asynchronous processing, honest
+`Query`), a follow-up gap-remediation audit (13 findings across both
+crates — silently-dropped errors, stub behavior — all fixed), the CACP
 crypto-agility policy engine (with its fail-open enforcement seams
 closed), hybrid KEMs, and an ongoing compliance-testing evidence/coverage
 remediation (2026-08-23 — see the repo's compliance-testing remediation

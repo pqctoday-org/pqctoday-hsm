@@ -1,7 +1,10 @@
 # KMIP 3.0 Conformance Report
 
-> **Current as of v0.24.0 + unreleased work at `5a107b2`** (composite-profile /
-> certificate-canonicality pass, 2026-08-18; baseline re-stated for CSD02 on 2026-08-12).
+> **Current as of v0.25.0** (composite-profile / certificate-canonicality pass
+> at `5a107b2`, 2026-08-18; baseline re-stated for CSD02 on 2026-08-12). No
+> KMIP-behavior changes in v0.25.0 itself (JCA/gRPC-provider release) — the
+> figures below are unchanged from `5a107b2`, re-verified by this release's
+> own gate run (2026-08-25).
 > The replay figures below are regenerated per run via
 > `../conformance/harness/dispatcher_replay.py` and gated by the three Python scripts
 > described in §7 — **not** by `cargo test`; no Rust test reads the replay report. Both

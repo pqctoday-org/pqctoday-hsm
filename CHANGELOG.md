@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-08-25
+
+### Fixed
+
+- **`scripts/local-gate.sh --cpp`** never actually ran any tests on a
+  fresh checkout — `CMakeLists.txt` defaults `BUILD_TESTS` to `OFF` and
+  the step's own `cmake` invocation never turned it on; it only ever
+  worked because a stale, undocumented `build/` directory from long ago
+  happened to have it cached. Found running the real `--all` gate for
+  this release, not hypothesized. Separately, `src/vendor/pkcs11-provider`'s
+  ML-KEM CMS-decrypt code needs real OpenSSL RFC 9629 KEMRecipientInfo
+  support (`OSSL_PKEY_PARAM_CMS_RI_TYPE`/`CMS_RECIPINFO_KEM`), which
+  landed in OpenSSL 3.6 — this environment's system OpenSSL is 3.5.6,
+  which doesn't declare either symbol at all. Both fixed: `-DBUILD_TESTS=ON`
+  added explicitly, and the step now points at an OpenSSL >= 3.6 build
+  via the same `OPENSSL_ROOT_DIR`/`OPENSSL_LIB_DIR` env-var pattern
+  `--tls-interop` already established. Neither issue is related to any
+  work in this release — both are pre-existing gaps in opt-in
+  infrastructure this release's own changes never touched.
+
 ### Removed
 
 - **`JavaJCE/`** — a placeholder module that never worked, removed while
