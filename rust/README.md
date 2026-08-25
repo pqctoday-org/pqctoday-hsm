@@ -36,10 +36,13 @@ See also `build-wasm-bundle.sh` for the packaged bundle build.
 | `node test_kat_parity.js` | KAT parity vs the C++ engine |
 | `node test_r36_paramset.js` | R3.6 parameter-set coverage |
 
-Regenerate the conformance report with `../scripts/local-gate.sh --rust-p11`.
-Results and the exact procedure live in
+Regenerate the conformance report with `../scripts/local-gate.sh --rust-p11`
+(the harness itself now writes the report file — see `writeReport()` in
+`test_p11_conformance.js`). Results and the exact procedure live in
 [`RUST_P11_V32_CONFORMANCE_REPORT.md`](RUST_P11_V32_CONFORMANCE_REPORT.md)
-(**188 passed / 0 failed** as of engine commit `f06f53f`). The native `CK_*`
+(**256 passed / 1 failed** as of engine commit `5a107b2898f6` — one stale
+harness assertion, `C_SignRecoverInit`, still expects `FUNCTION_NOT_SUPPORTED`
+though the function is now implemented; see the report). The native `CK_*`
 ABI compliance plan (315/0/0, parity with C++) is in
 [`CK_ABI_NATIVE_COMPLIANCE_PLAN.md`](CK_ABI_NATIVE_COMPLIANCE_PLAN.md). The
 native Rust API is described in [`docs/NATIVE_API.md`](docs/NATIVE_API.md).

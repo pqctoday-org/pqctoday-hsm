@@ -817,7 +817,7 @@ These map directly to the softhsmv3 `C_SignInit` / `C_Sign` / `C_VerifyInit` / `
 
 ### Sandbox Integration Coverage
 
-The `softhsmv3_compatibility_report.md` documents integration pathways for all tools in the PQCToday sandbox:
+Integration pathways for tools in the PQCToday sandbox:
 
 | Status | Tools |
 | --- | --- |

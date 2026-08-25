@@ -73,9 +73,10 @@ The full sha256 manifest is `manifest.sha256` — regenerate after any addition 
 | `oasis-kmip-3.0/optional/` | Same source | 7 | Optional KMIP 3.0 conformance tests (AKLC, CS-RNG, OMOS, SKLC) |
 | `oasis-kmip-2.1/` | Download on demand | — (dir not present) | KMIP 2.1 fallback test cases (created only when downloaded for legacy-mode validation) |
 | `ttlv-wire/` | Shipped | 6 `.bin` + `manifest.json` | KMIP 3.0 PQC-specific TTLV byte vectors (hand-crafted, codec round-trip) |
-| `ml-kem/` | Copy of `pqctoday-hub/src/data/acvp/mlkem_test.json` | 1 | NIST ACVP ML-KEM-512/768/1024 vectors |
-| `ml-dsa/` | Copy of `pqctoday-hub/src/data/acvp/mldsa_test.json` + `composite-sigs-jose-kat.json` | 2 | NIST ACVP ML-DSA-44/65/87 + LAMPS draft-19 composite vectors |
-| `slh-dsa/` | Copy of `pqctoday-hub/src/data/acvp/slhdsa_ctx_test.json` | 1 | NIST ACVP SLH-DSA SHA2 + SHAKE family with context vectors |
+| `ml-kem/` | Copy of `pqctoday-hub/src/data/acvp/mlkem_test.json` — real NIST ACVP-Server sample data, byte-verified (2026-08-24 WS-6/K-3; see the file's own `_provenance` block) | 1 | NIST ACVP ML-KEM-512/768/1024 vectors |
+| `ml-dsa/` | Copy of `pqctoday-hub/src/data/acvp/mldsa_test.json` + `composite-sigs-jose-kat.json` — real NIST ACVP-Server sample data, byte-verified (2026-08-24 WS-6/K-3) | 2 | NIST ACVP ML-DSA-44/65/87 + LAMPS draft-19 composite vectors |
+| `slh-dsa/` | Copy of `pqctoday-hub/src/data/acvp/slhdsa_ctx_test.json` — real NIST ACVP-Server sample data, all 12 parameter sets (2026-08-24 WS-6/K-3/H-4; previously covered only SLH-DSA-SHA2-128f, itself unverified) | 1 | NIST ACVP SLH-DSA SHA2 + SHAKE family (all 12 param sets) with context vectors |
+| `frodokem/raw/` | Microsoft `PQCrypto-LWEKE` reference implementation KATs (own README, already provenance-complete — see `frodokem/README.md`) | 6 | FrodoKEM-640/976/1344 × AES/SHAKE, 100 vectors each |
 | `rsa/` | Copy of `pqctoday-hub/src/data/acvp/{rsapss,rsa_oaep}_test.json` | 2 | NIST ACVP RSA-PSS + RSA-OAEP vectors |
 | `ecdsa/` | Copy of `pqctoday-hub/src/data/acvp/{ecdsa,ecdsa_p384,ecdsa_p521,eddsa,eddsa_ed448}_test.json` | 5 | NIST ACVP ECDSA P-256/384/521 + EdDSA Ed25519/Ed448 vectors |
 | `aes/` | Copy of `pqctoday-hub/src/data/acvp/aes{gcm,cbc,cmac,ctr,kw}_test.json` | 5 | NIST CAVP AES vectors in 5 modes |
@@ -83,6 +84,29 @@ The full sha256 manifest is `manifest.sha256` — regenerate after any addition 
 | `sha/` | Copy of `pqctoday-hub/src/data/acvp/{sha256,sha384,sha512,sha3_256,sha3_512,kmac,hkdf}_test.json` | 7 | NIST ACVP digest + KDF vectors |
 
 **Note on `oasis-kmip-2.1/`:** Not present by intent (the directory is created only when needed). The KMIP 3.0 mandatory profile already covers the classical surface; v2.1 fallback vectors are downloaded on demand from `https://docs.oasis-open.org/kmip/kmip-testcases/v2.1/`. See `../spec/oasis-kmip-2.1/kmip-spec-v2.1-os.pdf` for the reference.
+
+### Classic McEliece — permanent gap, not an oversight (P-2, formalized 2026-08-24)
+
+Classic McEliece has real functional coverage (`kmip/tests/frodokem_mceliece_e2e.rs`,
+self-consistency round-trip) but **no external KAT vector of any kind** — not
+NIST ACVP (never registered), not a submission-package static KAT, not even
+the crate's own test harness. This was investigated during the 2026-07-25
+FrodoKEM/McEliece C++/Rust parity work
+(`docs/remediation-plan-cpp-rust-pkcs11-parity-2026-07-25.md` §4): the crate
+in use, `classic-mceliece-rust` v3.1.0, ships no static KAT file, and neither
+does PQClean's reference implementation the way FrodoKEM's `PQCrypto-LWEKE`
+does. FrodoKEM's real, provenance-complete vectors above are a genuine
+external check for that algorithm; nothing equivalent exists to pull for
+McEliece with the crate this engine uses. Per the WS-6 remediation plan §6.5:
+this is a legitimate bottom rung on the trust ladder, not a failure — but it
+must be labeled honestly rather than left silently indistinguishable from the
+vector-backed rows above. McEliece's only correctness evidence is the functional round-trip test —
+**not even cross-engine differential comparison is available**: the C++
+engine has no Classic McEliece implementation at all (`src/lib/` carries
+no McEliece code; confirmed by grep, not assumed), so there is no second
+engine to diff against, unlike FrodoKEM which the differential harness
+does exercise. Never report McEliece as "ACVP-validated", "KAT-proven",
+or "cross-validated" — self-consistency is the entire evidence base.
 
 ## What OASIS provides for KMIP 3.0 (and what it doesn't)
 

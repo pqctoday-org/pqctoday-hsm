@@ -65,7 +65,7 @@ that is the trigger condition, and the pointer check is where it will surface.
 
 ## What it compares
 
-For each of the 48 scenarios, both engines are driven through the identical
+For each of the 49 scenarios, both engines are driven through the identical
 sequence and every observation is recorded as a `path -> value` pair. The two
 recordings are then diffed field by field.
 

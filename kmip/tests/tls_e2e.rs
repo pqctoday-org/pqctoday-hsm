@@ -18,8 +18,9 @@ use tokio_rustls::TlsConnector;
 use pqctoday_kmip::auditlog::{AuditSink, RingSink};
 use pqctoday_kmip::dispatcher::one_off_request;
 use pqctoday_kmip::kmip30::{
-    decode_request_message, encode_response_message, Operation, QueryFunction, QueryRequest,
-    RequestHeader, RequestMessage, RequestPayload, ResponsePayload, ResultStatus,
+    decode_request_message, encode_request_message, encode_response_message, Operation,
+    QueryFunction, QueryRequest, RequestHeader, RequestMessage, RequestPayload, ResponsePayload,
+    ResultStatus,
 };
 use pqctoday_kmip::ops::{Deps, DepsConfig};
 use pqctoday_kmip::policy::{load_from_str, Engine};
@@ -105,6 +106,122 @@ async fn tls_round_trip_query_request() {
     let (frame, _) = pqctoday_kmip::codec::decode(&resp_bytes).expect("valid TTLV");
     // Top-level tag should be Response Message = 0x42007b.
     assert_eq!(frame.tag.0, 0x42_007b, "top-level Response Message tag");
+
+    handle.abort();
+    let _ = handle.await;
+}
+
+/// §9.10 Maximum Response Size — wire-level proof over a real TLS
+/// connection to the real listener.
+///
+/// `enforce_max_response_size` (`src/dispatcher/mod.rs`) already has 3
+/// unit tests (`max_response_size_under_limit_passes_through`,
+/// `max_response_size_over_limit_replaces_with_response_too_large`,
+/// `max_response_size_zero_means_no_limit`) that exercise it purely
+/// in-process via `dispatch()` — no TLS, no wire codec. This test proves
+/// the same behavior survives the full stack: TLS handshake, TTLV
+/// request encode, wire decode by the listener/dispatcher, and TTLV
+/// response encode/decode back to a real client.
+///
+/// Distinct from — not filling a gap left by — the OASIS corpus: the
+/// `256`-byte-limit case below reproduces exactly what
+/// `MSGENC-XML-M-1-30.xml` / `MSGENC-JSON-M-1-30.xml` /
+/// `MSGENC-HTTPS-M-1-30.xml` already assert via
+/// `conformance/harness/dispatcher_replay.py` (a `Query`
+/// `[QueryOperations, QueryObjects]` request with `Maximum Response Size
+/// = 256` gets `OperationFailed`/`ResponseTooLarge`; the identical
+/// request with `= 2048` succeeds) — those three transcripts already
+/// pass in `conformance/REPLAY_REPORT.md`, so §9.10's wire-level
+/// `ResponseTooLarge` path was already corpus-proven before this test
+/// existed. What this test adds: (1) a second, Rust-native proof of the
+/// same fact that runs on every `cargo test` rather than only the
+/// separate Python replay harness, and (2) the explicit `= 0` "no limit"
+/// case at the wire level, which no OASIS transcript covers (every
+/// corpus request either omits `Maximum Response Size` or sets a real
+/// positive limit).
+#[tokio::test(flavor = "current_thread")]
+async fn max_response_size_enforced_over_real_tls_connection() {
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let bound = listener.local_addr().unwrap();
+    drop(listener); // release so serve() can rebind
+
+    let (tls_cfg, server_cert_pem) = tls_self_signed("kmip.test").expect("self-signed cert");
+    let deps = build_deps();
+
+    let server_cfg = tls_cfg.clone();
+    let server_deps = deps.clone();
+    let handle = tokio::spawn(async move {
+        if let Err(e) = serve(bound, server_cfg, server_deps).await {
+            eprintln!("server: {e}");
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store
+        .add(rustls::pki_types::CertificateDer::from(pem_to_der(&server_cert_pem)))
+        .unwrap();
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(client_config));
+
+    // One real TLS connection per request — sends a `Query
+    // [QueryOperations, QueryObjects]` (the same payload the OASIS
+    // MSGENC transcripts use, since it is large enough for a small limit
+    // to genuinely bite) with the given `Maximum Response Size`, and
+    // returns the first batch item's (ResultStatus, ResultReason) as
+    // decoded off the real wire bytes that came back.
+    async fn query_with_limit(
+        connector: &TlsConnector,
+        bound: SocketAddr,
+        max_resp_size: Option<i32>,
+    ) -> (u32, Option<u32>) {
+        let tcp = TcpStream::connect(bound).await.unwrap();
+        let server_name = ServerName::try_from("kmip.test").unwrap();
+        let mut tls = connector.connect(server_name, tcp).await.unwrap();
+
+        let mut req = one_off_request(RequestPayload::Query(QueryRequest {
+            functions: vec![QueryFunction::QueryOperations, QueryFunction::QueryObjects],
+        }));
+        req.header.maximum_response_size = max_resp_size;
+        let bytes = encode_request_message(&req)
+            .expect("encoder supports Query + Maximum Response Size header field");
+        tls.write_all(&bytes).await.unwrap();
+
+        let resp_bytes = read_one_frame_async(&mut tls).await;
+        let (frame, _) = pqctoday_kmip::codec::decode(&resp_bytes).expect("valid TTLV response");
+        decode_first_batch_item_status(&frame)
+    }
+
+    // §9.10: 256 bytes is too small for a real [QueryOperations,
+    // QueryObjects] response — same limit MSGENC-XML/JSON/HTTPS-M-1-30's
+    // first step uses, with the same expected outcome.
+    let (status_small, reason_small) = query_with_limit(&connector, bound, Some(256)).await;
+    assert_eq!(
+        status_small,
+        ResultStatus::OperationFailed.to_wire_value(),
+        "256 bytes must be too small for a real Query [Operations, Objects] response"
+    );
+    assert_eq!(
+        reason_small,
+        Some(pqctoday_kmip::error::ResultReason::ResponseTooLarge.to_wire_value()),
+        "must fail with ResponseTooLarge specifically, not some other error"
+    );
+
+    // 2048 is generous enough — the same limit the OASIS transcripts'
+    // second step uses, where it passes.
+    let (status_ok, reason_ok) = query_with_limit(&connector, bound, Some(2048)).await;
+    assert_eq!(status_ok, ResultStatus::Success.to_wire_value(), "2048 bytes must be enough");
+    assert_eq!(reason_ok, None, "a successful response carries no ResultReason");
+
+    // §9.10's "0 means no limit" case, at the wire level — not covered by
+    // any OASIS transcript (every corpus request either omits Maximum
+    // Response Size or sets a real positive limit).
+    let (status_zero, reason_zero) = query_with_limit(&connector, bound, Some(0)).await;
+    assert_eq!(status_zero, ResultStatus::Success.to_wire_value(), "0 means unlimited, not zero bytes");
+    assert_eq!(reason_zero, None);
 
     handle.abort();
     let _ = handle.await;
@@ -550,6 +667,43 @@ async fn permissive_profile_still_accepts_classical() {
 
     handle.abort();
     let _ = handle.await;
+}
+
+/// Pull `(ResultStatus, ResultReason)` out of a decoded Response Message's
+/// first Batch Item. Tag values are hardcoded (0x42007a Response Header /
+/// 0x42000f Batch Item / 0x42007f Result Status / 0x42007e Result Reason
+/// per KMIP 3.0 §9.1's tag table) because `kmip30::wire::tags` is
+/// `pub(crate)` and this file — like `build_request_bytes` below —
+/// already works at the raw TTLV level rather than through the crate's
+/// internal encoder/decoder helpers.
+fn decode_first_batch_item_status(frame: &pqctoday_kmip::codec::TtlvFrame) -> (u32, Option<u32>) {
+    use pqctoday_kmip::codec::Value;
+
+    assert_eq!(frame.tag.0, 0x42_007b, "top-level Response Message tag");
+    let top = match &frame.value {
+        Value::Structure(c) => c,
+        _ => panic!("Response Message is not a Structure"),
+    };
+    let batch_item = top
+        .iter()
+        .find(|c| c.tag.0 == 0x42_000f)
+        .expect("Response Message carries a Batch Item");
+    let bi = match &batch_item.value {
+        Value::Structure(c) => c,
+        _ => panic!("Batch Item is not a Structure"),
+    };
+    let result_status = bi
+        .iter()
+        .find_map(|c| match (c.tag.0, &c.value) {
+            (0x42_007f, Value::Enumeration(v)) => Some(*v),
+            _ => None,
+        })
+        .expect("Batch Item carries a Result Status");
+    let result_reason = bi.iter().find_map(|c| match (c.tag.0, &c.value) {
+        (0x42_007e, Value::Enumeration(v)) => Some(*v),
+        _ => None,
+    });
+    (result_status, result_reason)
 }
 
 fn build_request_bytes(req: &RequestMessage) -> Vec<u8> {
