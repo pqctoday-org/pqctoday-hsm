@@ -23,12 +23,10 @@ import static com.pqctoday.hsm.jce.P11Constants.*;
  * Single-salt only — a real constraint of the underlying engine,
  * confirmed by reading SoftHSM_keygen.cpp before writing any code:
  * PKCS#11's CK_HKDF_DERIVE operates on exactly one base key handle
- * (C_DeriveKey's hBaseKey) and one salt (either absent or raw bytes —
- * the engine explicitly rejects CKF_HKDF_SALT_KEY, "not supported").
- * salts() with more than one element is rejected with a clear
- * InvalidAlgorithmParameterException, rather than guessing at a
- * concatenation policy with no normative reference for salts
- * specifically.
+ * (C_DeriveKey's hBaseKey) and one salt. salts() with more than one
+ * element is rejected with a clear InvalidAlgorithmParameterException,
+ * rather than guessing at a concatenation policy with no normative
+ * reference for salts specifically.
  *
  * Multiple IKMs ARE supported, added for plan §W6's real, live need
  * (JEP 527 hybrid TLS 1.3's key schedule hands this class exactly two:
@@ -42,15 +40,40 @@ import static com.pqctoday.hsm.jce.P11Constants.*;
  * §W6's live spike proved it was genuinely needed, not spent on
  * speculatively ahead of any real caller.
  *
- * A salt key specifically must resolve to raw bytes (a foreign key with
- * a real getEncoded(), or omitted entirely) — this provider's own
- * opaque secret keys can never be used as a salt, since the engine
- * rejects CKF_HKDF_SALT_KEY and getEncoded() on our own keys is always
- * null by design. The IKM key has no such restriction: it is consumed
- * by handle (C_DeriveKey's base key), so this provider's own opaque
- * keys work fine there, same as ECDH's base private key.
+ * A salt key is either one of this provider's own token-resident keys
+ * (opaque or not — used by handle via CKF_HKDF_SALT_KEY, engine support
+ * added 2026-08-25, plan §WS-A) or a foreign key with real encoded bytes
+ * (used via CKF_HKDF_SALT_DATA) — see {@link #saltMechFor}. Before the
+ * engine change, an opaque salt was rejected outright; that limitation
+ * is what plan §W6's live TLS spike hit directly (JEP 527 hybrid TLS
+ * 1.3's key schedule needs to chain a previous opaque derived secret
+ * back in as the next Extract step's salt).
+ *
+ * {@code -Dsofthsmv3.jce.extractableHkdf=true} (default off, NON-FIPS):
+ * makes {@link #engineDeriveKey}'s output a plain extractable
+ * {@code SecretKeySpec} instead of an opaque {@link P11Key.Secret} —
+ * the fallback plan §WS-A decided on for a deployment running an engine
+ * build that predates the CKF_HKDF_SALT_KEY addition above: with an
+ * extractable output, {@link #saltMechFor}'s own logic naturally falls
+ * through to the plain-bytes CKF_HKDF_SALT_DATA path (already worked
+ * against every engine build, old or new) when that key is later used
+ * as a salt, rather than needing the new handle-based path at all. This
+ * is a real, disclosed narrowing of this provider's opaque-key
+ * guarantee for every {@code engineDeriveKey} caller while the flag is
+ * set, not a scoped-down exception the way the KEM/ECDH secrets are —
+ * flagged loudly via {@link P11Debug} every time it actually changes
+ * behavior, not silently.
  */
 final class P11HKDFKDFSpi extends KDFSpi {
+    // Deliberately NOT a cached `static final boolean` read once at class
+    // init: a caller (including this module's own tests) may reasonably
+    // toggle this property at runtime, and a one-time-cached read would
+    // silently stop honoring later changes the instant this class first
+    // loads — read fresh on every call instead.
+    private static boolean extractableHkdfFallback() {
+        return Boolean.getBoolean("softhsmv3.jce.extractableHkdf");
+    }
+
     private final P11Library lib;
     private final long prfHashMech;
     private final int hashOutputBytes;
@@ -74,6 +97,13 @@ final class P11HKDFKDFSpi extends KDFSpi {
     @Override
     protected SecretKey engineDeriveKey(String alg, AlgorithmParameterSpec spec)
             throws InvalidAlgorithmParameterException, NoSuchAlgorithmException {
+        if (extractableHkdfFallback()) {
+            P11Debug.log("HKDF engineDeriveKey(" + alg + ") — softhsmv3.jce.extractableHkdf=true, "
+                + "returning a NON-OPAQUE SecretKeySpec (non-FIPS fallback, see P11HKDFKDFSpi's javadoc)");
+            long handle = derive(spec, true);
+            byte[] raw = lib.getAttributeBytes(handle, CKA_VALUE);
+            return new javax.crypto.spec.SecretKeySpec(raw, alg);
+        }
         long handle = derive(spec, false);
         return new P11Key.Secret(lib, handle, alg);
     }
@@ -134,18 +164,21 @@ final class P11HKDFKDFSpi extends KDFSpi {
         }
 
         long ikmHandle = ikms.size() == 1 ? handleOf(ikms.get(0), "IKM") : handleOfConsolidated(ikms);
-        byte[] saltBytes = new byte[0];
-        if (!salts.isEmpty()) {
-            byte[] raw = salts.get(0).getEncoded();
-            if (raw == null) {
-                throw new InvalidAlgorithmParameterException(
-                    "HKDF salt must be a key with real encoded bytes (this provider's own opaque keys "
-                    + "can never be used as a salt — the engine rejects CKF_HKDF_SALT_KEY entirely)");
-            }
-            saltBytes = raw;
-        }
 
-        var mech = lib.mechHkdf(prfHashMech, extract, expand, saltBytes, info);
+        // Salt: prefer the handle path (CKF_HKDF_SALT_KEY, engine support
+        // added 2026-08-25 — plan §WS-A) whenever the salt is already one
+        // of this provider's own token-resident keys, opaque or not — no
+        // reason to round-trip through raw bytes when a handle already
+        // exists, and this is what actually unblocks the real caller that
+        // needed it: JEP 527 hybrid TLS 1.3 chaining a previous (opaque)
+        // derived secret back in as the next Extract step's salt (plan
+        // §W6). A foreign, non-opaque salt key still goes through the
+        // plain-bytes path (CKF_HKDF_SALT_DATA) — no need to import it
+        // onto the token first when the engine will happily take the
+        // bytes directly.
+        var mech = salts.isEmpty()
+            ? lib.mechHkdf(prfHashMech, extract, expand, new byte[0], info)
+            : saltMechFor(salts.get(0), extract, expand, info);
         // CKA_CLASS/CKA_KEY_TYPE must be present here even though the
         // engine's own HKDF code later forces both to exactly these same
         // values regardless of what's supplied — a SEPARATE, generic
@@ -176,6 +209,21 @@ final class P11HKDFKDFSpi extends KDFSpi {
             P11Library.attrBool(CKA_DERIVE, true),
         };
         return lib.deriveKey(mech, ikmHandle, outputTmpl);
+    }
+
+    private java.lang.foreign.MemorySegment saltMechFor(SecretKey salt, boolean extract, boolean expand, byte[] info)
+            throws InvalidAlgorithmParameterException {
+        if (salt instanceof P11Key.Secret s) {
+            return lib.mechHkdf(prfHashMech, extract, expand, s.handle(), info);
+        }
+        byte[] raw = salt.getEncoded();
+        if (raw == null) {
+            throw new InvalidAlgorithmParameterException(
+                "HKDF salt must be either one of this provider's own keys (used by handle) or a key "
+                + "with real encoded bytes (e.g. SecretKeySpec) — got " + salt.getClass()
+                + " with no encoded form");
+        }
+        return lib.mechHkdf(prfHashMech, extract, expand, raw, info);
     }
 
     /** Resolves a key to a token handle: directly for our own opaque keys, or by importing a foreign key's raw bytes. */

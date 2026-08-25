@@ -57,6 +57,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   against the same algorithm matrix as the existing KMIP arm, sharing its
   twin-container interleaved A/B comparison mechanism (`--compare-tls`,
   real min/max spread across repeats, `interleaved:true` per row).
+- **`CKM_HKDF_DERIVE` now supports `CKF_HKDF_SALT_KEY`** (salt supplied
+  as a key handle rather than raw data) — previously rejected outright
+  with `CKR_MECHANISM_PARAM_INVALID`. Needed so a caller can chain a
+  previous derived (opaque/non-extractable) secret back in as the next
+  HKDF-Extract's salt without exporting it — the exact shape JDK 27's
+  JEP 527 hybrid TLS 1.3 key schedule requires, and the gap the
+  `JavaJCE` provider's own live TLS handshake spike found directly.
+  Proven correct by equivalence (salt as `CKF_HKDF_SALT_DATA` vs the
+  identical bytes as `CKF_HKDF_SALT_KEY` → byte-identical output),
+  including through a private/sensitive salt key (exercises the
+  existing decrypt-on-read path). New C++ unit test coverage
+  (`DeriveTests::testHkdfDerive`) — `CKM_HKDF_DERIVE` had no prior
+  native test coverage at all. The Rust engine (`softhsmrustv3`)
+  already implemented this correctly; no cross-engine divergence.
 
 ### Fixed
 

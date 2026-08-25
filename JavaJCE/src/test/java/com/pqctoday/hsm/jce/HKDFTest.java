@@ -118,14 +118,34 @@ class HKDFTest {
     }
 
     @Test
-    void rejectsAnOpaqueKeyAsSalt() throws Exception {
+    void opaqueSaltIsAcceptedViaSaltKeyHandle() throws Exception {
+        // Was rejectsAnOpaqueKeyAsSalt until the engine gained real
+        // CKF_HKDF_SALT_KEY support (plan §WS-A, 2026-08-25) — the exact
+        // gap plan §W6's live TLS spike hit: JEP 527 hybrid TLS 1.3's key
+        // schedule needs to chain a previous (opaque) derived secret back
+        // in as the next Extract step's salt, which this provider's own
+        // "no plaintext key export" opaque keys could not previously
+        // satisfy at all. Proven correct, not just "doesn't throw
+        // anymore": derive with the opaque salt-by-handle, then derive
+        // again with the SAME salt bytes as a plain SecretKeySpec on
+        // JDK's own reference HKDF ("HKDF-SHA256" with no explicit
+        // provider) — byte-for-byte match is the real proof.
         SoftHSMv3Provider p = new SoftHSMv3Provider();
-        KDF kdf = KDF.getInstance("HKDF-SHA256", p);
-        SecretKey ikm = new SecretKeySpec(new byte[16], "Generic");
-        SecretKey opaqueSalt = new P11Key.Secret(p.lib, importRaw(p.lib, new byte[16]), "Generic");
+        byte[] ikmBytes = "opaque-salt-test-ikm".getBytes();
+        byte[] saltBytes = "opaque-salt-test-salt16".getBytes();
+        SecretKey ikm = new SecretKeySpec(ikmBytes, "Generic");
+        SecretKey opaqueSalt = new P11Key.Secret(p.lib, importRaw(p.lib, saltBytes), "Generic");
         var spec = HKDFParameterSpec.ofExtract().addIKM(ikm).addSalt(opaqueSalt).extractOnly();
-        assertThrows(InvalidAlgorithmParameterException.class, () -> kdf.deriveData(spec),
-            "this provider's own opaque keys can never be used as an HKDF salt (engine rejects CKF_HKDF_SALT_KEY)");
+
+        byte[] ours = KDF.getInstance("HKDF-SHA256", p).deriveData(spec);
+
+        SecretKey plainSalt = new SecretKeySpec(saltBytes, "Generic");
+        var jdkSpec = HKDFParameterSpec.ofExtract().addIKM(ikm).addSalt(plainSalt).extractOnly();
+        byte[] jdks = KDF.getInstance("HKDF-SHA256").deriveData(jdkSpec); // default SunJCE
+
+        assertEquals(32, ours.length);
+        assertArrayEquals(jdks, ours,
+            "salt-by-handle must key HKDF-Extract on the salt key's real CKA_VALUE, matching JDK's own reference HKDF given the same salt bytes");
     }
 
     @Test
@@ -152,5 +172,48 @@ class HKDFTest {
 
             assertArrayEquals(jdkOkm, ourOkm, name + " must match JDK SunJCE's own HKDF for the same inputs");
         }
+    }
+
+    @Test
+    void extractableHkdfFallbackFlagYieldsANonOpaqueKey() throws Exception {
+        // -Dsofthsmv3.jce.extractableHkdf=true (plan §WS-A's decided
+        // fallback for an engine build predating CKF_HKDF_SALT_KEY) — a
+        // real, disclosed narrowing of engineDeriveKey's opacity, off by
+        // default. System property is global JVM state (Surefire runs
+        // every test class in one JVM by default), so this restores it
+        // unconditionally in a finally block regardless of outcome —
+        // same discipline as AuthProviderTest's own token-wide-state care.
+        String prior = System.getProperty("softhsmv3.jce.extractableHkdf");
+        try {
+            System.setProperty("softhsmv3.jce.extractableHkdf", "true");
+            SoftHSMv3Provider p = new SoftHSMv3Provider();
+            SecretKey ikm = new SecretKeySpec("fallback-flag-test-ikm".getBytes(), "Generic");
+            var spec = HKDFParameterSpec.ofExtract().addIKM(ikm).extractOnly();
+            SecretKey derived = KDF.getInstance("HKDF-SHA256", p).deriveKey("Generic", spec);
+            assertFalse(derived instanceof P11Key.Secret,
+                "with the flag set, engineDeriveKey must NOT return this provider's opaque key type");
+            assertNotNull(derived.getEncoded(), "with the flag set, the derived key must be extractable");
+            assertEquals(32, derived.getEncoded().length);
+        } finally {
+            if (prior == null) {
+                System.clearProperty("softhsmv3.jce.extractableHkdf");
+            } else {
+                System.setProperty("softhsmv3.jce.extractableHkdf", prior);
+            }
+        }
+    }
+
+    @Test
+    void withoutTheFallbackFlagEngineDeriveKeyStaysOpaque() throws Exception {
+        // The default (flag unset) behavior — regression guard so the
+        // opt-in fallback above can never become the silent default.
+        assertNull(System.getProperty("softhsmv3.jce.extractableHkdf"),
+            "this test assumes no other test left the fallback flag set — a leaked property would invalidate it");
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        SecretKey ikm = new SecretKeySpec("default-opaque-test-ikm".getBytes(), "Generic");
+        var spec = HKDFParameterSpec.ofExtract().addIKM(ikm).extractOnly();
+        SecretKey derived = KDF.getInstance("HKDF-SHA256", p).deriveKey("Generic", spec);
+        assertTrue(derived instanceof P11Key.Secret, "by default engineDeriveKey must return this provider's opaque key type");
+        assertNull(derived.getEncoded(), "by default the derived key must stay opaque");
     }
 }

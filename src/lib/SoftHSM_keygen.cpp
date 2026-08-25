@@ -3718,9 +3718,11 @@ CK_RV SoftHSM::C_DeriveKey
 			ERROR_MSG("CKM_HKDF_DERIVE: at least one of bExtract/bExpand must be true");
 			return CKR_MECHANISM_PARAM_INVALID;
 		}
-		if (hkdfp->ulSaltType == CKF_HKDF_SALT_KEY)
+		if (hkdfp->ulSaltType != CKF_HKDF_SALT_NULL &&
+		    hkdfp->ulSaltType != CKF_HKDF_SALT_DATA &&
+		    hkdfp->ulSaltType != CKF_HKDF_SALT_KEY)
 		{
-			ERROR_MSG("CKM_HKDF_DERIVE: CKF_HKDF_SALT_KEY not supported");
+			ERROR_MSG("CKM_HKDF_DERIVE: invalid ulSaltType 0x%08lx", (unsigned long)hkdfp->ulSaltType);
 			return CKR_MECHANISM_PARAM_INVALID;
 		}
 
@@ -3762,6 +3764,35 @@ CK_RV SoftHSM::C_DeriveKey
 			hkdfIKM = key->getByteStringValue(CKA_VALUE);
 		}
 
+		// CKF_HKDF_SALT_KEY: salt supplied by handle rather than raw bytes
+		// (PKCS#11 v3.2 §6.62.2 — "salt is supplied as a key in hSaltKey",
+		// no additional class/CKA_DERIVE restriction on the salt key stated
+		// there beyond it being readable). Same handle-resolution and
+		// credential-check shape as hBaseKey above; an invalid handle is
+		// CKR_KEY_HANDLE_INVALID for the same GAP 6.5 reason noted at the
+		// base-key resolution earlier in this function.
+		ByteString hkdfSalt;
+		if (hkdfp->ulSaltType == CKF_HKDF_SALT_KEY)
+		{
+			OSObject *saltKey = (OSObject *)handleManager->getObject(hkdfp->hSaltKey, session->getSlot()->getSlotID());
+			if (saltKey == NULL_PTR || !saltKey->isValid()) return CKR_KEY_HANDLE_INVALID;
+
+			CK_BBOOL isSaltKeyOnToken = saltKey->getBooleanValue(CKA_TOKEN, false);
+			CK_BBOOL isSaltKeyPrivate = saltKey->getBooleanValue(CKA_PRIVATE, true);
+			CK_RV saltRv = haveRead(session->getState(), isSaltKeyOnToken, isSaltKeyPrivate);
+			if (saltRv != CKR_OK) return saltRv;
+
+			if (isSaltKeyPrivate)
+			{
+				if (!token->decrypt(saltKey->getByteStringValue(CKA_VALUE), hkdfSalt))
+					return CKR_GENERAL_ERROR;
+			}
+			else
+			{
+				hkdfSalt = saltKey->getByteStringValue(CKA_VALUE);
+			}
+		}
+
 		// Determine HKDF mode
 		int hkdfMode;
 		if (hkdfp->bExtract && hkdfp->bExpand)
@@ -3800,6 +3831,9 @@ CK_RV SoftHSM::C_DeriveKey
 			    hkdfp->pSalt != NULL_PTR && hkdfp->ulSaltLen > 0)
 				hkdfParams[hpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT,
 				                        hkdfp->pSalt, (size_t)hkdfp->ulSaltLen);
+			else if (hkdfp->ulSaltType == CKF_HKDF_SALT_KEY && hkdfSalt.size() > 0)
+				hkdfParams[hpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT,
+				                        hkdfSalt.byte_str(), hkdfSalt.size());
 			if (hkdfp->pInfo != NULL_PTR && hkdfp->ulInfoLen > 0)
 				hkdfParams[hpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
 				                        hkdfp->pInfo, (size_t)hkdfp->ulInfoLen);

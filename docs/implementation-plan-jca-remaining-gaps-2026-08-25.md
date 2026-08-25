@@ -163,6 +163,115 @@ green, full JavaJCE suite green against the rebuilt engine (expected
 199+/199+ after the test flip), differential-harness state recorded,
 CHANGELOG updated.
 
+**WS-A: DONE 2026-08-25, PASSED.**
+
+- **A1 (engine).** Implemented exactly as scoped — `CKF_HKDF_SALT_KEY`
+  resolves `hSaltKey` via `handleManager->getObject` (same pattern as
+  the base key), `CKR_KEY_HANDLE_INVALID` on a bad handle (matching the
+  base key's own `GAP 6.5` precedent, confirmed by reading that code
+  rather than guessing), the salt key's `CKA_VALUE` read with the same
+  `isPrivate → token->decrypt` branch as the base key, fed into
+  `OSSL_KDF_PARAM_SALT`. Spec-checked first: PKCS#11 v3.2 §6.62.2
+  (extracted from the real OASIS Standard PDF via `pdftotext`, not
+  recalled) says only "salt is supplied as a key in hSaltKey" — no
+  class/`CKA_DERIVE` restriction on the salt key beyond it being
+  readable, so none was added beyond the handle/credential check.
+- **New C++ test coverage, not just a rebuild.** `CKM_HKDF_DERIVE` had
+  **zero** prior C++ unit-test coverage anywhere in this engine's test
+  suite before this — confirmed by grepping the whole `src/lib/test/`
+  tree. Added `DeriveTests::testHkdfDerive` (5 assertions): the
+  decisive equivalence oracle (salt as `CKF_HKDF_SALT_DATA` vs the
+  identical bytes as `CKF_HKDF_SALT_KEY` → byte-identical output),
+  repeated against a **private/sensitive** salt key to exercise the
+  `decrypt()` branch specifically, an invalid salt handle →
+  `CKR_KEY_HANDLE_INVALID`, and an invalid `ulSaltType` value →
+  `CKR_MECHANISM_PARAM_INVALID` (the pre-existing code silently only
+  checked for the one bad value it used to reject; now validates the
+  field properly). This C++-level test — the real `C_DeriveKey` API,
+  no FFM, no Java — is what satisfies this workstream's planned
+  "isolated C probe" requirement; a separate `dlopen` script would have
+  exercised the identical code path redundantly.
+- **A real, live build-environment finding, not a code defect.**
+  Building via the existing `pqc-rust` container (Debian 13 / glibc
+  2.41) and copying the resulting `.so` into `pqc-dev-sandbox` (Ubuntu
+  24.04 / glibc 2.39) — the container this repo's own JavaJCE tests
+  actually run against — crashed the JVM outright:
+  `tcache_thread_shutdown(): unaligned tcache chunk detected / Aborted`,
+  a glibc heap-corruption abort from the ABI mismatch, not from
+  anything in this change (confirmed: the crash reproduced with the
+  change reverted too, before root-causing it to the cross-container
+  copy). Fixed by building the engine **natively inside**
+  `pqc-dev-sandbox` instead — copied a minimal source tarball
+  (`CMakeLists.txt`, `config.h.in.cmake`, `cmake/`, `src/`,
+  `softhsmv3.pc.in` — 1.4 MB, not the 27 GB working tree) into the
+  container and configured against its own OpenSSL 3.6.3 at
+  `/usr/local/ssl` (`-DOPENSSL_ROOT_DIR=/usr/local/ssl`, the exact path
+  `Dockerfile.dev-sandbox` itself uses — found by reading that
+  Dockerfile, not guessed). This is the correct build discipline for
+  any future engine rebuild targeting this container, not a one-off
+  workaround — worth carrying into WS-G's Dockerfile jar-wiring work,
+  which will need the same container-native build for consistency.
+- **A2 (Java salt-by-handle).** `P11Library` gained a `mechHkdf`
+  overload taking a `saltKeyHandle` directly (`CKF_HKDF_SALT_KEY =
+  0x4`, struct layout unchanged from the already-verified
+  `HKDF_PARAMS` layout). `P11HKDFKDFSpi`'s salt handling now prefers
+  the handle path whenever the salt is already one of this provider's
+  own token-resident keys (opaque or not — no reason to round-trip
+  through bytes when a handle exists), falling back to the existing
+  `CKF_HKDF_SALT_DATA` bytes path for a genuinely foreign key. The
+  flipped test (`opaqueSaltIsAcceptedViaSaltKeyHandle`, was
+  `rejectsAnOpaqueKeyAsSalt`) proves correctness the same way the C++
+  test does: byte-identical output against `KDF.getInstance("HKDF-SHA256")`
+  with **no explicit provider** (JDK's own real SunJCE reference
+  implementation), not a self-consistency check.
+- **A3 (non-FIPS fallback flag).** `-Dsofthsmv3.jce.extractableHkdf=true`
+  (default off) makes `engineDeriveKey` return a plain extractable
+  `SecretKeySpec` instead of the opaque `P11Key.Secret` — deliberately
+  **not** a cached `static final boolean` (a real bug caught before it
+  shipped: a one-time class-load-time read would have silently stopped
+  honoring the property the instant any earlier test loaded the class,
+  which is virtually guaranteed given how many other tests already use
+  HKDF) — read fresh via a plain method call every time instead, which
+  is also what let the test itself toggle it at runtime. With the flag
+  on, `saltMechFor`'s existing logic naturally falls through to the
+  plain-bytes path when that key is later used as a salt — no special
+  casing needed, the fallback design composes with what A2 already
+  built rather than duplicating it.
+- **Rust-engine parity: no divergence, nothing to record.** The Rust
+  engine (`softhsmrustv3`) **already** implements `CKF_HKDF_SALT_KEY`
+  correctly — found live at `rust/src/ffi.rs:8345` plus its own
+  pre-existing equivalence test
+  (`ffi::return_code_ffi_tests::hkdf_salt_as_key_equals_salt_as_data`,
+  confirmed passing: `test ... ok`) using the identical
+  data-vs-key-equivalence technique independently arrived at for the
+  C++ test above. The C++ engine was the one lagging; no
+  `tests/differential/exceptions.json` entry is needed. Full Rust
+  suite: 409 passed, 1 failed, 9 ignored — the one failure
+  (`ffi::param_struct_width_tests::bip32_child_derive_reads_flags_and_index_past_pnext`)
+  is pre-existing and unrelated (confirmed via `git diff HEAD -- rust/`
+  showing zero changes from this workstream), noted here rather than
+  silently stepped around, not investigated further as out of scope.
+- **Verify:** C++ — 74/74 unit tests (7 suites: `cryptotest`,
+  `datamgrtest`, `handlemgrtest`, `objstoretest`, `sessionmgrtest`,
+  `slotmgrtest`, `p11test`, the last containing the new
+  `testHkdfDerive`); PKCS#11 v3.2 compliance harness 779 PASS / 0 FAIL /
+  36 SKIP, unchanged from the pre-existing baseline — no regression.
+  Java — 200/200 (198 prior + 2 new fallback-flag tests), live against
+  the natively-rebuilt engine in `pqc-dev-sandbox`. Nothing pushed on
+  either repo.
+- **Known limitation, out of scope for this workstream:** `pkcs11-provider`
+  (`src/vendor/pkcs11-provider/`), a separate vendored component, fails
+  to build in both containers with
+  `error: 'OSSL_PKEY_PARAM_CMS_RI_TYPE' undeclared` — an OpenSSL-version
+  mismatch in that vendored code, confirmed pre-existing (reproduces
+  with this workstream's change fully reverted) and unrelated to
+  `softhsmv3` itself. `cmake --build build` (the bare "all" target,
+  including `local-gate.sh --cpp`'s own invocation) will currently fail
+  because of it; building the specific targets needed
+  (`softhsmv3`, the individual test binaries) bypasses it cleanly, as
+  done throughout this workstream. Not fixed here — flagged for
+  whoever next needs a full "all" build to succeed.
+
 ---
 
 ## 4. WS-B — W6 completion: handshake, record layer, benchmark

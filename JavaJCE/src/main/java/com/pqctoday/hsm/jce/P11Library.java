@@ -612,21 +612,21 @@ final class P11Library implements AutoCloseable {
 
     static final long CKF_HKDF_SALT_NULL = 0x00000001L;
     static final long CKF_HKDF_SALT_DATA = 0x00000002L;
+    static final long CKF_HKDF_SALT_KEY  = 0x00000004L;
 
     /**
-     * CKM_HKDF_DERIVE mechanism. Salt is always passed as raw bytes
-     * (CKF_HKDF_SALT_DATA) or omitted (CKF_HKDF_SALT_NULL) — confirmed by
-     * reading SoftHSM_keygen.cpp before writing this method that the
-     * engine explicitly rejects CKF_HKDF_SALT_KEY
-     * ("CKM_HKDF_DERIVE: CKF_HKDF_SALT_KEY not supported"), so a salt
-     * that is one of this provider's own opaque (non-extractable) keys
-     * can never be used here — P11HKDFKDFSpi rejects that case with a
-     * clear error rather than silently degrading. Also confirmed live in
-     * that same code path that CKA_VALUE_LEN is REQUIRED in the derive
-     * template regardless of mode, including extract-only (where RFC
-     * 5869 fixes the PRK length at the hash's output size) — the caller
-     * must compute and supply that length explicitly, the engine will
-     * not infer it.
+     * CKM_HKDF_DERIVE mechanism, salt passed as raw bytes
+     * (CKF_HKDF_SALT_DATA) or omitted (CKF_HKDF_SALT_NULL). CKA_VALUE_LEN
+     * is REQUIRED in the derive template regardless of mode, including
+     * extract-only (where RFC 5869 fixes the PRK length at the hash's
+     * output size) — confirmed live that the engine will not infer it,
+     * the caller must compute and supply it explicitly.
+     *
+     * See {@link #mechHkdf(long, boolean, boolean, long, byte[])} for the
+     * salt-by-handle (CKF_HKDF_SALT_KEY) overload, added for plan §W6/WS-A
+     * once the engine gained real support for it (2026-08-25) — this
+     * class's own javadoc used to say the engine "explicitly rejects
+     * CKF_HKDF_SALT_KEY", true when first written, no longer true.
      */
     MemorySegment mechHkdf(long prfHashMech, boolean extract, boolean expand, byte[] salt, byte[] info) {
         MemorySegment params = arena.allocate(HKDF_PARAMS);
@@ -636,7 +636,36 @@ final class P11Library implements AutoCloseable {
         params.set(JAVA_LONG, 16, salt.length > 0 ? CKF_HKDF_SALT_DATA : CKF_HKDF_SALT_NULL);
         params.set(ADDRESS, 24, salt.length > 0 ? bytes(salt) : MemorySegment.NULL);
         params.set(JAVA_LONG, 32, (long) salt.length);
-        params.set(JAVA_LONG, 40, 0L); // hSaltKey — always unused, see javadoc above
+        params.set(JAVA_LONG, 40, 0L); // hSaltKey — unused on this path, see the salt-by-handle overload
+        params.set(ADDRESS, 48, info.length > 0 ? bytes(info) : MemorySegment.NULL);
+        params.set(JAVA_LONG, 56, (long) info.length);
+        MemorySegment m = arena.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_HKDF_DERIVE);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, HKDF_PARAMS.byteSize());
+        return m;
+    }
+
+    /**
+     * CKM_HKDF_DERIVE with the salt supplied as a token object handle
+     * (CKF_HKDF_SALT_KEY) rather than raw bytes — lets an opaque key (one
+     * whose CKA_VALUE never crosses into the JVM) serve as the HKDF salt
+     * without extracting it. This is the salt-by-handle path plan §W6's
+     * live TLS spike needed: TLS 1.3's key schedule chains a previous
+     * (opaque) derived secret back in as the next Extract step's salt.
+     * The engine change (2026-08-25) is what makes this method possible —
+     * before it, hSaltKey was accepted structurally but the engine
+     * rejected CKF_HKDF_SALT_KEY outright.
+     */
+    MemorySegment mechHkdf(long prfHashMech, boolean extract, boolean expand, long saltKeyHandle, byte[] info) {
+        MemorySegment params = arena.allocate(HKDF_PARAMS);
+        params.set(JAVA_BYTE, 0, (byte) (extract ? 1 : 0));
+        params.set(JAVA_BYTE, 1, (byte) (expand ? 1 : 0));
+        params.set(JAVA_LONG, 8, prfHashMech);
+        params.set(JAVA_LONG, 16, CKF_HKDF_SALT_KEY);
+        params.set(ADDRESS, 24, MemorySegment.NULL); // pSalt — unused on this path
+        params.set(JAVA_LONG, 32, 0L); // ulSaltLen — unused on this path
+        params.set(JAVA_LONG, 40, saltKeyHandle);
         params.set(ADDRESS, 48, info.length > 0 ? bytes(info) : MemorySegment.NULL);
         params.set(JAVA_LONG, 56, (long) info.length);
         MemorySegment m = arena.allocate(MECHANISM);
