@@ -270,7 +270,72 @@ setup cost. Sabotage T16 both directions.
 
 ---
 
-## R5 phase 1 — pure ML-KEM TLS groups (gap F36-1) — Priority 1, effort M
+## R5 phase 1 — pure ML-KEM TLS groups (gap F36-1) — Priority 1, effort M — PARTIAL
+
+**PARTIAL (2026-08-25) — reported honestly, not claimed done.** Landed:
+group registration (`MLKEM512`/`768`/`1024`, IANA code points read live
+from the staged build's own source, not memory) and both client-role
+prerequisites (`ENCODED_PUBLIC_KEY` export + export-from-private
+relaxation in `kem/mlkem.c`), each live-verified independently — see
+T4kemexport. A real, separate `CKK_ML_KEM`/`CKK_SLH_DSA` gap in
+`p11prov_common_gen_set_params` was found live (TLS's own ephemeral-
+keygen call path passes real params, unlike a bare CLI `genpkey`,
+which passes none and never reaches that switch) and fixed alongside.
+
+**A genuine TLS 1.3 handshake was run** —
+`s_client -groups MLKEM768 -propquery "?provider=pkcs11"` against a
+software `s_server` — group negotiated as `MLKEM768`, and the C++
+engine's own log confirms 6 real objects created (the ephemeral
+keypair), not assumed. This is the strongest evidence yet in this
+remediation effort that the token can act as a real TLS participant,
+not just answer CLI probes.
+
+**Two things genuinely remain, both precisely scoped for continuation
+rather than hand-waved:**
+
+1. **Full handshake completion is blocked**, once the token genuinely
+   participates, by a separate, deeper bug: `tls13_generate_secret`
+   fails with an ASN.1/PKCS8 parse error. Traced as far as: OpenSSL's
+   `EVP_KDF_fetch` for the TLS1.3 KDF also honors the SSL_CTX's
+   propquery, and this provider registers its own `TLS13_KDF`
+   (`kdf.c`) — designed for deriving from token-resident secrets via
+   PKCS#11's own mechanisms, not for accepting the plain octet-string
+   secrets `tls13_generate_secret` hands it generically. Root cause
+   not yet nailed down further — `kdf.c`'s TLS13 implementation is
+   substantial, pre-existing, non-trivial code (also touched by
+   `p11prov_ecdh_derive_skey`'s digest-to-kdf mapping), so it was
+   deliberately NOT patched blind under this session's time
+   constraints — the risk of a wrong fix regressing already-working
+   derive functionality outweighed pushing further tonight.
+2. **A real false-pass risk, now documented**: without the propquery
+   preference, the identical handshake *succeeds* — but silently uses
+   the default provider's own software ML-KEM for the whole group (0
+   objects created on the token). Anyone testing "does TLS work with
+   groups MLKEM768" casually, without checking engine-log evidence,
+   would see a green handshake that never touched the token at all.
+   This is exactly the provider-vs-builtin precedence hazard flagged
+   in this plan's own v1/v2 investigation, now empirically confirmed.
+
+**Not started, as originally scoped:** the server role (importing a
+peer's raw public share to encapsulate against it) — still gated on
+ML-KEM keymgmt IMPORT/IMPORT_TYPES for the KEM operation path
+specifically (distinct from the keymgmt-level IMPORT already used for
+URI-PEM decode, which works — R2's proof).
+
+New harness case T4kemexport (PASS, sabotage-tested) locks in the
+proven prerequisite chain. The TLS handshake itself was verified
+manually, not reduced to a harness case, because it does not yet pass
+cleanly. Harness: `PASS=25 FAIL=0 XFAIL=1 XPASS=0`.
+
+**Next step for a future session**: instrument or read `kdf.c`'s
+`p11prov_tls13_kdf_derive` path with the same live-debug discipline
+used elsewhere this session (temporary `fprintf`, or the C++ engine's
+DEBUG log) to see exactly what it does with a plain octet-string
+secret it wasn't designed to receive, before deciding whether the fix
+belongs in `kdf.c` (make it degrade to pass-through for non-token
+secrets) or in how the group's propquery should be scoped (so a
+correctly-built application only routes the KEM group's own key
+operations through pkcs11, not the whole SSL_CTX).
 
 **Claim:** a real TLS 1.3 handshake negotiates `MLKEM512/768/1024`
 with the token performing the client-side KEM operations. Hybrids

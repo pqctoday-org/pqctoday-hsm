@@ -420,6 +420,40 @@ static int p11prov_mlkem_keymgmt_get_params_fn(void *keydata, OSSL_PARAM params[
         ret = OSSL_PARAM_set_int(p, CMS_RECIPINFO_KEM);
         if (ret != RET_OSSL_OK) return ret;
     }
+    /* R5 prerequisite #1: TLS reads a key's share via
+     * EVP_PKEY_get1_encoded_public_key, which is this param — only EC
+     * keymgmt had it before (keymgmt.c); ML-KEM's own public bytes ARE the
+     * encoded form, no point-compression step needed, so this is really
+     * just PUB_KEY under TLS's expected name. Unlike the PUB_KEY branch
+     * above (which reads CKA_VALUE off `key` directly and is only correct
+     * when `key` is already public-class), TLS holds the generated
+     * PRIVATE object — so this walks to the associated public object
+     * first via p11prov_obj_get_associated, the same borrowed-reference
+     * accessor p11prov_obj_get_ed_pub_key (objects.c) already uses for
+     * exactly this walk; p11prov_common_gen sets the association at
+     * keygen time (p11prov_obj_set_associated), so it is already cached
+     * here with no extra PKCS#11 round trip and nothing to free. */
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY);
+    if (p) {
+        CK_ATTRIBUTE *pub;
+        P11PROV_OBJ *pub_obj = key;
+
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) return RET_OSSL_ERR;
+        if (p11prov_obj_get_class(key) == CKO_PRIVATE_KEY) {
+            P11PROV_OBJ *assoc = p11prov_obj_get_associated(key);
+            if (assoc) {
+                pub_obj = assoc;
+            }
+        }
+        pub = p11prov_obj_get_attr(pub_obj, CKA_VALUE);
+        if (!pub) return RET_OSSL_ERR;
+        p->return_size = pub->ulValueLen;
+        if (p->data) {
+            if (p->data_size < pub->ulValueLen) return RET_OSSL_ERR;
+            memcpy(p->data, pub->pValue, pub->ulValueLen);
+            p->data_size = pub->ulValueLen;
+        }
+    }
     return RET_OSSL_OK;
 }
 
@@ -427,6 +461,7 @@ static const OSSL_PARAM *p11prov_mlkem_keymgmt_gettable_params_fn(void *provctx)
 {
     static const OSSL_PARAM params[] = {
         OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, NULL, 0),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
@@ -436,6 +471,20 @@ static const OSSL_PARAM *p11prov_mlkem_keymgmt_gettable_params_fn(void *provctx)
     return params;
 }
 
+/* R5 prerequisite #2: was "class == CKO_PUBLIC_KEY" strictly, refusing a
+ * private-class object even when only public params were selected — unlike
+ * ML-DSA's export (keymgmt.c's p11prov_mldsa_export), which allows any
+ * class through under the same selection-only-has-public-bits condition.
+ * The old comment here worried that calling p11prov_obj_export_public_key
+ * on a private object "returns garbage" — checked live and by reading
+ * get_public_attrs (objects.c): for CKO_PRIVATE_KEY it already walks to
+ * the associated CKO_PUBLIC_KEY object via p11prov_obj_find_associated
+ * before reading CKA_VALUE, exactly the same fallback ML-DSA's export
+ * already relies on. Needed so TLS key-share export
+ * (OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, get_params below) can work on the
+ * private object TLS actually holds after ephemeral keygen — see R5. */
+#define MLKEM_PUBLIC_PARAMS \
+    (OSSL_KEYMGMT_SELECT_PUBLIC_KEY | OSSL_KEYMGMT_SELECT_ALL_PARAMETERS)
 static int p11prov_mlkem_keymgmt_export_fn(void *keydata, int selection,
                                            OSSL_CALLBACK *cb_fn, void *cb_arg)
 {
@@ -449,11 +498,7 @@ static int p11prov_mlkem_keymgmt_export_fn(void *keydata, int selection,
 
     if (p11prov_ctx_allow_export(ctx) & DISALLOW_EXPORT_PUBLIC) return RET_OSSL_ERR;
 
-    /* Only export public-key bytes when the object itself is a public key.
-     * Private-key objects have CKA_VALUE = private key bytes; calling
-     * p11prov_obj_export_public_key on them returns garbage, which breaks
-     * the cert↔key match in OpenSSL's cms -decrypt KEMRecipientInfo path. */
-    if (class == CKO_PUBLIC_KEY && (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)) {
+    if (class == CKO_PUBLIC_KEY || (selection & ~MLKEM_PUBLIC_PARAMS) == 0) {
         return p11prov_obj_export_public_key(key, CKK_ML_KEM, true, false,
                                              cb_fn, cb_arg);
     }

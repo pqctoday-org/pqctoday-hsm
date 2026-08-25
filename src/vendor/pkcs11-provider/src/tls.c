@@ -173,8 +173,97 @@ struct {
     },
 };
 
+/* R5 phase 1 (gap F36-1): pure ML-KEM TLS groups, client role. IANA code
+ * points and security-bits read live from the staged 3.6.3 build's own
+ * source (providers/common/capabilities.c + include/internal/tlsgroups.h),
+ * not from memory: MLKEM512=0x0200(512), MLKEM768=0x0201(513),
+ * MLKEM1024=0x0202(514), TLS1_3-only. Needs its own 11-slot entry shape
+ * (TLS_PARAMS_ENTRY's 10 slots have no room for
+ * OSSL_CAPABILITY_TLS_GROUP_IS_KEM) — a separate macro/array, not a
+ * widened shared one, to leave every existing classical-group entry
+ * byte-for-byte unchanged. ALG names ("ML-KEM-768" etc) match this
+ * provider's own registered keymgmt/kem names exactly, so a propquery
+ * that prefers pkcs11 will fetch our implementation for the group's
+ * actual key generation/encap/decap.
+ *
+ * Hybrid groups (X25519MLKEM768 etc) are explicitly out of scope here —
+ * R5 phase 2, gated on the classical+KEM combiner question. */
+#define TLS_KEM_PARAMS_ENTRY(name, realname, algorithm, group_id, secbits,   \
+                             mintls, maxtls, mindtls, maxdtls, is_kem)       \
+    { OSSL_PARAM_utf8_string(OSSL_CAPABILITY_TLS_GROUP_NAME, (void *)name,   \
+                             sizeof(name)),                                  \
+      OSSL_PARAM_utf8_string(OSSL_CAPABILITY_TLS_GROUP_NAME_INTERNAL,        \
+                             (void *)realname, sizeof(realname)),            \
+      OSSL_PARAM_utf8_string(OSSL_CAPABILITY_TLS_GROUP_ALG, (void *)algorithm, \
+                             sizeof(algorithm)),                             \
+      OSSL_PARAM_uint(OSSL_CAPABILITY_TLS_GROUP_ID, &group_id),              \
+      OSSL_PARAM_uint(OSSL_CAPABILITY_TLS_GROUP_SECURITY_BITS, &secbits),    \
+      OSSL_PARAM_int(OSSL_CAPABILITY_TLS_GROUP_MIN_TLS, &mintls),            \
+      OSSL_PARAM_int(OSSL_CAPABILITY_TLS_GROUP_MAX_TLS, &maxtls),            \
+      OSSL_PARAM_int(OSSL_CAPABILITY_TLS_GROUP_MIN_DTLS, &mindtls),          \
+      OSSL_PARAM_int(OSSL_CAPABILITY_TLS_GROUP_MAX_DTLS, &maxdtls),          \
+      OSSL_PARAM_int(OSSL_CAPABILITY_TLS_GROUP_IS_KEM, &is_kem),             \
+      OSSL_PARAM_END }
+
+unsigned int mlkem512_group_id = 0x0200;
+unsigned int mlkem512_secbits = 128;
+int mlkem512_mintls = TLS1_3_VERSION;
+int mlkem512_maxtls = 0;
+int mlkem512_mindtls = -1;
+int mlkem512_maxdtls = -1;
+int mlkem_is_kem = 1;
+
+unsigned int mlkem768_group_id = 0x0201;
+unsigned int mlkem768_secbits = 192;
+int mlkem768_mintls = TLS1_3_VERSION;
+int mlkem768_maxtls = 0;
+int mlkem768_mindtls = -1;
+int mlkem768_maxdtls = -1;
+
+unsigned int mlkem1024_group_id = 0x0202;
+unsigned int mlkem1024_secbits = 256;
+int mlkem1024_mintls = TLS1_3_VERSION;
+int mlkem1024_maxtls = 0;
+int mlkem1024_mindtls = -1;
+int mlkem1024_maxdtls = -1;
+
+struct {
+    const char *name;
+    const OSSL_PARAM list[11];
+} tls_kem_params[] = {
+    {
+        "MLKEM512",
+        TLS_KEM_PARAMS_ENTRY("MLKEM512", "ML-KEM-512", "ML-KEM-512",
+                             mlkem512_group_id, mlkem512_secbits,
+                             mlkem512_mintls, mlkem512_maxtls,
+                             mlkem512_mindtls, mlkem512_maxdtls, mlkem_is_kem),
+    },
+    {
+        "MLKEM768",
+        TLS_KEM_PARAMS_ENTRY("MLKEM768", "ML-KEM-768", "ML-KEM-768",
+                             mlkem768_group_id, mlkem768_secbits,
+                             mlkem768_mintls, mlkem768_maxtls,
+                             mlkem768_mindtls, mlkem768_maxdtls, mlkem_is_kem),
+    },
+    {
+        "MLKEM1024",
+        TLS_KEM_PARAMS_ENTRY("MLKEM1024", "ML-KEM-1024", "ML-KEM-1024",
+                             mlkem1024_group_id, mlkem1024_secbits,
+                             mlkem1024_mintls, mlkem1024_maxtls,
+                             mlkem1024_mindtls, mlkem1024_maxdtls,
+                             mlkem_is_kem),
+    },
+};
+
 int tls_group_capabilities(OSSL_CALLBACK *cb, void *arg)
 {
+    for (size_t i = 0; i < sizeof(tls_kem_params) / sizeof(*tls_kem_params);
+        i++) {
+        int ret = cb(tls_kem_params[i].list, arg);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
     for (size_t i = 0; i < sizeof(tls_params) / sizeof(*tls_params); i++) {
         int ret = cb(tls_params[i].list, arg);
         if (ret != RET_OSSL_OK) {

@@ -145,7 +145,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 
 | ID | Gap | Evidence | Severity |
 |---|---|---|---|
-| F36-1 | `TLS-GROUP` capability registers **zero** PQC/hybrid groups — in any TLS handshake the ML-KEM share is computed by OpenSSL's software, never the token, even with the provider active. The staged 3.6.3 has group names MLKEM512/768/1024 + 3 hybrids natively for comparison | `tls.c:89-174`; live `-tls-groups` | **High** (flagship PQC story) |
+| F36-1 | **PARTIAL (R5 phase 1, 2026-08-25)** — was: `TLS-GROUP` capability registered zero PQC groups. Now: `MLKEM512`/`768`/`1024` registered as pure (non-hybrid) TLS 1.3 groups (`tls.c`), IANA code points and security-bits read live from the staged 3.6.3 build's own source (`0x0200`/`0x0201`/`0x0202`, 128/192/256 bits — not from memory). Two client-role prerequisites landed and live-verified: ML-KEM's `ENCODED_PUBLIC_KEY` get_params (TLS's key-share export mechanism) and relaxing its export function's class check so it works on the private object TLS actually holds post-keygen (was: strictly `CKO_PUBLIC_KEY`-only) — proven with a full simulated handshake sequence (export share from private → simulated server encapsulates → client decapsulates), byte-matched. A separate, real bug found and fixed along the way: `p11prov_common_gen_set_params`'s type switch had no case for `CKK_ML_KEM`/`CKK_SLH_DSA`, hit live by TLS's own ephemeral-keygen call path (which passes real params, unlike a bare `genpkey` CLI call). **A genuine, live TLS 1.3 handshake was run and the token demonstrably participated** — `s_client -groups MLKEM768 -propquery "?provider=pkcs11"` against a software `s_server`: `Negotiated TLS1.3 group: MLKEM768`, and the C++ engine's own log shows 6 real objects created (the ephemeral keypair) — not assumed, counted. **Two things remain genuinely open, not silently dropped**: (1) full handshake completion is blocked by a separate, not-yet-root-caused bug in this provider's own `TLS13_KDF` implementation (`kdf.c`) — once the token genuinely participates, secret derivation fails with an ASN.1/PKCS8 parse error, traced only as far as `tls13_generate_secret`'s KDF fetch also honoring the same propquery and landing on our TLS13-KDF instead of the default's; (2) **without** the propquery preference, the identical handshake *succeeds* but silently uses the default provider's own software ML-KEM for the entire group — 0 objects created on the token — a real false-pass risk for anyone testing this casually. Server role (importing a peer's raw public share to encapsulate against) remains unbuilt, as originally scoped. | `tls.c`, `kem/mlkem.c`; live `s_client`/`s_server` + C++ engine log | ~~**High**~~ Medium (flagship story partially told) |
 | F36-2 | LMS: OpenSSL 3.6's new verify-only LMS unused (see ALG-3, ENV-1) | release notes + live build | Medium |
 | F36-3 | `EVP_SKEY` KDF/KEYEXCH integration (3.6): provider has SKEYMGMT but the new `EVP_KDF_derive_SKEY`-style opaque-key flows are unprobed — token-resident secrets may not chain into OpenSSL KDFs without export | 3.6 CHANGES; needs probe (T-plan P2) | Medium |
 | F36-4 | *(positive baseline, not a gap)* CMS KEMRecipientInfo + `OSSL_PKEY_PARAM_CMS_RI_TYPE` already wired for ML-KEM (local commit `2cca4f0`) — must be regression-guarded by the new harness | `kem/mlkem.c:414-433` | — |
@@ -221,7 +221,8 @@ trusted; unexpected PASS of an XFAIL case fails the run (ratchet).
 | T12 | SLH-DSA keygen/store/encode reachability (ALG-1) | genpkey (all 12 param sets registered) → storeutl confirms on-token, correctly typed/named | **PASS** (flipped by R1, 2026-08-25) |
 | T12sign | SLH-DSA-SHA2-128s token-sign (ALG-1 remainder) | `pkeyutl -sign` → software verify (exact 7856-byte sig) + tamper rejection | **PASS** (flipped by R1's `get_ctx_params` fix, 2026-08-25) |
 | T12sign_shake | SLH-DSA-SHAKE-128f token-sign, independent hash family | same, exact 17088-byte sig | **PASS** (new case, R1) |
-| T13 | TLS-GROUP gap (F36-1) | not CLI-checkable cleanly (`list -tls-groups` merges all providers) — plan-only P2; the gap itself is source-anchored (`tls.c:89-174`) | plan-only |
+| T13 | TLS-GROUP gap (F36-1) | not scripted in the harness — a real handshake needs a live `s_server`/`s_client` pair plus engine-log evidence of token participation, run manually this session (see F36-1's row for the exact command and result); not yet reduced to a clean pass/fail harness case because full completion is blocked | manual, partial (see F36-1) |
+| T4kemexport | ML-KEM public-share export from private object (R5 prerequisites) | `pkey -pubout` on a `type=private` URI → simulated server encap → client decap, byte-matched | **PASS** (new case, R5) |
 | T14 | CMS RSA | CMS sign via token key → software cmsverify | PASS |
 | T16 | X25519 key exchange (ALG-5) | token-to-token derive (two independent arenas), both directions, byte-identical 32-byte secret | **PASS** (new case, R4) |
 | T16b | X448 key exchange (ALG-5) | same, 56-byte secret | **PASS** (new case, R4) |
@@ -372,6 +373,27 @@ silently dropped: peer-key validation against a genuinely foreign
 OpenSSL legacy-compatibility interaction, not the provider's own
 derive logic (which is proven correct). Harness: `PASS=24 FAIL=0
 XFAIL=1 XPASS=0`. Only remaining XFAIL: ENV-2 (T15b, remediation R6).
+
+**Further update (2026-08-25, same day) — R5 phase 1 (TLS groups),
+partial, honestly reported:** see F36-1 above for the full mechanism.
+Landed and live-verified: pure `MLKEM512`/`768`/`1024` TLS 1.3 group
+registration with IANA code points read from the staged build's own
+source; both client-role prerequisites (`ENCODED_PUBLIC_KEY` export,
+export-from-private-object); a real `CKK_ML_KEM`/`CKK_SLH_DSA` gap in
+`p11prov_common_gen_set_params` found live by TLS's own keygen call
+path and fixed. **A genuine TLS 1.3 handshake was run**, the group
+negotiated as `MLKEM768`, and the C++ engine's own log confirms the
+token generated a real ephemeral keypair (6 objects created) — this
+is the first time in this remediation effort the token has been shown
+participating in an actual protocol handshake, not just a CLI probe.
+Two things left open and precisely documented rather than glossed
+over: full handshake completion is blocked by a separate bug in this
+provider's own `TLS13_KDF` implementation once the token genuinely
+participates; without forcing that participation via propquery, the
+identical handshake silently succeeds using zero token involvement — a
+real false-pass risk worth knowing about. New harness case
+T4kemexport (the proven prerequisite chain) added, PASS,
+sabotage-tested. Harness: `PASS=25 FAIL=0 XFAIL=1 XPASS=0`.
 
 ## 7. Companion document
 

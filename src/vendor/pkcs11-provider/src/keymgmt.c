@@ -300,6 +300,18 @@ int p11prov_common_gen_set_params(void *genctx, const OSSL_PARAM params[])
         }
         break;
     case CKK_ML_DSA:
+    case CKK_ML_KEM:
+    case CKK_SLH_DSA:
+        /* R5: found live — TLS's ephemeral-key generation path (unlike a
+         * bare `genpkey` CLI call, which passes NULL/empty params and
+         * returns before this switch is ever reached) passes a real,
+         * non-empty OSSL_PARAM array into gen_init, hitting this switch's
+         * default case with "Invalid key gen type 73" (CKK_ML_KEM) for
+         * the very first `s_client -groups MLKEM768` attempt. Same latent
+         * gap for CKK_SLH_DSA, not yet triggered by anything but real by
+         * the same reasoning — fixed together. Neither type has anything
+         * curve/exponent-specific to parse here (mirrors ML-DSA's own
+         * no-op case, already correct). */
         break;
     default:
         P11PROV_raise(ctx->provctx, CKR_ARGUMENTS_BAD,

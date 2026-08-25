@@ -230,6 +230,29 @@ t4x_encode() { local w; w=$(mk_arena mlkemenc "$CPP_ENGINE_SO") && use_arena "$w
 }
 run_case T4x_encode PASS "ML-KEM genpkey -out writes a pkcs11: URI reference, never key bytes (gap OP-3 / remediation R3 core)" t4x_encode
 
+# R5 prerequisites (gap F36-1, TLS groups — client role): exports the
+# public share from the PRIVATE object TLS actually holds after ephemeral
+# keygen (was: strictly required class==CKO_PUBLIC_KEY, refusing this;
+# fixed via ENCODED_PUBLIC_KEY get_params + relaxed export_fn selection
+# check, both in kem/mlkem.c), then proves the exported share is really
+# usable: a simulated server encapsulates against it, and the client
+# decapsulates with its private key directly, matching secrets. This is
+# the exact sequence TLS's client role needs; the TLS handshake itself
+# (tls.c group registration, landed) does not yet complete end-to-end —
+# a separate, deeper bug in this provider's own TLS13-KDF implementation
+# breaks secret derivation once the token genuinely participates. See the
+# remediation plan's R5 entry for the full, evidence-based state.
+t4kemexport() {
+  local w; w=$(mk_arena mlkemexp "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm ML-KEM-768 -out "$w/k.pem" >/dev/null 2>&1
+  O pkey -in "pkcs11:token=mlkemexp;type=private" -pubout -out "$w/pub_from_priv.pem" || return 1
+  O pkeyutl -encap -pubin -inkey "$w/pub_from_priv.pem" -secret "$w/secret_server.bin" -out "$w/ct.bin" || return 1
+  O pkeyutl -decap -inkey "pkcs11:token=mlkemexp;type=private" -in "$w/ct.bin" -secret "$w/secret_client.bin" || return 1
+  [[ "$(stat -c%s "$w/secret_server.bin")" == "32" && "$(stat -c%s "$w/secret_client.bin")" == "32" ]] || { echo "wrong secret size"; return 1; }
+  cmp -s "$w/secret_server.bin" "$w/secret_client.bin"
+}
+run_case T4kemexport PASS "ML-KEM public-share export from the private object (R5 prerequisite): server-encap/client-decap parity" t4kemexport
+
 t5() { local w; w=$(mk_arena rsa "$CPP_ENGINE_SO") && use_arena "$w" || return 1
   O genpkey -propquery "?provider=pkcs11" -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$w/k.pem" || return 1
   O dgst -sha256 -sign "pkcs11:token=rsa;type=private" -out "$w/sig.bin" "$MSG" || return 1
