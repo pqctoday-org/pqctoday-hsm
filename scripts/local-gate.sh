@@ -13,19 +13,30 @@
 #   3. rust  cargo test                       — softhsmrustv3 engine tests
 #   4. OASIS KMIP 3.0 replay + baseline assert + staleness guard (97/0/5)
 #   5. wasm  smoke.cjs                         — CACP bundle boots + round-trips
-#   6. (--cpp)  C++ ctest incl. the v3.2 compliance harness  [opt-in, slow]
-#   7. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
-#   8. (--rust-p11)  Rust engine PKCS#11 v3.2 conformance (257 checks) [opt-in]
-#   9. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
+#   6. Rust engine PKCS#11 v3.2 conformance (257 checks) + report freshness
+#   7. cross-engine PKCS#11 differential harness (49 scenarios vs exceptions.json)
+#   8. (--cpp)  C++ ctest incl. the v3.2 compliance harness + report freshness  [opt-in, slow]
+#   9. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
+#  10. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
+#  11. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
 #
-# On success it writes .gate-ok-<HEAD-sha> so a pre-push hook can verify the
-# gate ran on the current commit.
+# Steps 6-7 (Rust PKCS#11 conformance, differential harness) were opt-in
+# until 2026-08-23 — both are core PKCS#11 v3.2 evidence, and both had gone
+# stale invisibly while opt-in (the Rust report 45 source-commits behind
+# HEAD; the differential harness never run at all outside a manual
+# invocation). --cpp stays opt-in: unlike the other two, its slow step is a
+# full CMake+ctest build, not proportionate to run on every push.
+#
+# On success it writes .gate-ok-<HEAD-sha> (with the flag set that produced
+# it) so a pre-push hook can verify the gate ran on the current commit —
+# see scripts/git-hooks/pre-push, installed via scripts/install-hooks.sh.
 #
 # Usage:
-#   bash scripts/local-gate.sh                 # core gate (steps 1-5)
+#   bash scripts/local-gate.sh                 # core gate (steps 1-7)
 #   bash scripts/local-gate.sh --cpp           # + C++ ctest
 #   bash scripts/local-gate.sh --acvp-wasm     # + ACVP wasm harness
-#   bash scripts/local-gate.sh --all           # everything
+#   bash scripts/local-gate.sh --release-xmss  # + XMSS/XMSS^MT vs release wasm build
+#   bash scripts/local-gate.sh --all           # everything (required before a release — see RELEASING.md)
 #   RUST_CONTAINER=pqc-rust bash scripts/local-gate.sh
 #
 # Rust steps run inside the warm OrbStack container ($RUST_CONTAINER, default
@@ -40,15 +51,16 @@ AG_RUST="/ag/pqctoday-hsm/rust"
 
 RUN_CPP=0
 RUN_ACVP_WASM=0
-RUN_RUST_P11=0
 RUN_TLS_INTEROP=0
+RUN_RELEASE_XMSS=0
 for arg in "$@"; do
   case "$arg" in
     --cpp) RUN_CPP=1 ;;
     --acvp-wasm) RUN_ACVP_WASM=1 ;;
-    --rust-p11) RUN_RUST_P11=1 ;;
+    --rust-p11) : ;; # now always runs (step 6); flag kept accepted, no-op, for muscle memory
     --tls-interop) RUN_TLS_INTEROP=1 ;;
-    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_RUST_P11=1; RUN_TLS_INTEROP=1 ;;
+    --release-xmss) RUN_RELEASE_XMSS=1 ;;
+    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_TLS_INTEROP=1; RUN_RELEASE_XMSS=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -60,7 +72,17 @@ say()  { printf '\n\033[1;36m[gate] %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓ %s\033[0m\n' "$*"; }
 bad()  { printf '\033[1;31m  ✗ %s\033[0m\n' "$*"; FAILED+=("$*"); }
 
-dexec() { docker exec "$RUST_CONTAINER" bash -c "$1"; }
+dexec() {
+  # pipefail inside the nested shell for the same reason run_step_host sets
+  # it: `docker exec ... bash -c "..."` starts a fresh shell that does not
+  # inherit this script's own `set -o pipefail`, so a step whose command
+  # ends in `| tail -N` or another filter would report the filter's exit
+  # status, not the real command's. Central fix here covers every run_step
+  # call, present and future, not just the one that already got bitten
+  # (the differential harness step masked a real FATAL as PASS this way —
+  # this function protects the equivalent-shaped ACVP wasm step too).
+  docker exec "$RUST_CONTAINER" bash -c "set -o pipefail; $1"
+}
 
 ensure_container() {
   if ! docker exec "$RUST_CONTAINER" true 2>/dev/null; then
@@ -79,7 +101,15 @@ run_step() { # name, command(run in container)
 run_step_host() { # name, command(run on host) — for node/wasm steps
   STEP=$((STEP+1))
   say "step $STEP: $1"
-  if bash -c "$2"; then ok "$1"; else bad "$1"; fi
+  # pipefail: a command string ending in `| tail -N` (or any filter) must
+  # report the REAL command's exit status, not the filter's — bash -c
+  # starts a fresh shell that does NOT inherit this script's own `set -o
+  # pipefail` (that only governs pipes run directly in THIS shell), so
+  # without setting it again inside the nested shell, `real_cmd | tail -15`
+  # always "succeeds" here regardless of what real_cmd actually did. Found
+  # 2026-08-23: the differential harness step printed "FATAL: engine not
+  # built" and was still marked PASS by this function.
+  if bash -c "set -o pipefail; $2"; then ok "$1"; else bad "$1"; fi
 }
 
 # ── steps ───────────────────────────────────────────────────────────────────
@@ -126,6 +156,37 @@ run_step "wasm target still compiles (cargo check)" \
 run_step_host "wasm CACP smoke" \
   "cd '$ROOT/wasm' && node smoke/smoke.cjs 2>&1 | tail -2 | grep -q 'PASS'"
 
+# Was opt-in (--rust-p11) until 2026-08-23. The Rust engine's own conformance
+# report went 45 source-commits stale while this was skippable — a default
+# gate step is what stops that recurring. Builds the wasm pkg (dev + acvp +
+# larger stack) in the container, drives the real PKCS#11 ABI through the
+# v3.2 conformance matrix on the host. test_p11_conformance.js itself
+# regenerates rust/RUST_P11_V32_CONFORMANCE_REPORT.md from this run's real
+# per-section results every time it runs to completion; the freshness check
+# right after confirms the regenerated report actually matches what's
+# committed (or fails loudly if it doesn't — see check_pkcs11_reports_fresh.py).
+STEP=$((STEP+1)); say "step $STEP: Rust PKCS#11 v3.2 conformance (257 checks)"
+# wasm-pack is built but not on the container's PATH — plain `wasm-pack` here
+# fails with "command not found" and always has, invisibly, because this step
+# was opt-in until now. Full path, matching how it was actually invoked by
+# hand before this step was promoted to default. Found 2026-08-23.
+if dexec "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=2097152' /cargo-target/release/wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp >/dev/null 2>&1" \
+   && ( cd "$ROOT/rust" && node test_p11_conformance.js 2>&1 | grep -q 'RESULT: .* 0 failed' ) \
+   && ( cd "$ROOT" && python3 scripts/check_pkcs11_reports_fresh.py --rust ); then
+  ok "Rust PKCS#11 v3.2 conformance (report regenerated + fresh)"
+else
+  bad "Rust PKCS#11 v3.2 conformance (report regenerated regardless — check it, or check_pkcs11_reports_fresh.py, for the real failure)"
+fi
+
+# Was a manual-only tool until 2026-08-23 — never wired into any gate,
+# despite being the instrument the 2026-08 remediation added specifically
+# "to gate the rest from rotting." Builds BOTH engines fresh (see the
+# script's own header for why that matters) and diffs every observable
+# outcome across 49 scenarios; only divergences already recorded with a
+# citation in tests/differential/exceptions.json are allowed.
+run_step_host "cross-engine PKCS#11 differential harness (49 scenarios)" \
+  "cd '$ROOT' && bash scripts/run-differential-harness.sh 2>&1 | tail -15"
+
 if [[ $RUN_CPP == 1 ]]; then
   # Preflight. $RUST_CONTAINER is a long-lived pet container built for Rust, and
   # it shipped without cmake, ctest or cppunit — so this step failed during
@@ -147,9 +208,19 @@ if [[ $RUN_CPP == 1 ]]; then
   # CI is amd64. It therefore cannot reproduce arch- or OpenSSL-specific faults —
   # the 2026-08 EdDSA keygen flake (CI building OpenSSL master; see PR #160) was
   # invisible here by construction. Green locally is necessary, not sufficient.
-  run_step "C++ ctest (incl. PKCS#11 v3.2 compliance harness)" \
+  # cpp_compliance_report.{json,md} land in $ROOT (--report path below), not
+  # build/ — ctest's own add_test invocation (CMakeLists.txt) writes into
+  # build/ and that copy is discarded; this explicit run is what regenerates
+  # the checked-in copy, with the freshness guard immediately after it.
+  run_step "C++ ctest (incl. PKCS#11 v3.2 compliance harness) + report freshness" \
     "cd /ag/pqctoday-hsm && (test -d build || cmake -S . -B build -DWITH_RIPEMD160=ON >/dev/null) && \
-     cmake --build build -j\$(nproc) >/dev/null && cd build && ctest --output-on-failure"
+     cmake --build build -j\$(nproc) >/dev/null && cd build && ctest --output-on-failure && \
+     cd /ag/pqctoday-hsm && \
+     ENGINE=./build/src/lib/libsofthsmv3.so; [ -f \"\$ENGINE\" ] || ENGINE=./build/src/lib/libsofthsmv3.dylib; \
+     ./build/p11_v32_compliance_test --engine \"\$ENGINE\" \
+       --workdir ./build/p11_v32_compliance_workdir --report ./cpp_compliance_report \
+       --engine-commit \$(git rev-parse HEAD) >/dev/null && \
+     python3 scripts/check_pkcs11_reports_fresh.py --cpp"
 fi
 
 if [[ $RUN_ACVP_WASM == 1 ]]; then
@@ -157,18 +228,16 @@ if [[ $RUN_ACVP_WASM == 1 ]]; then
     "cd /ag/pqctoday-hsm && npm run test:acvp 2>&1 | tail -5"
 fi
 
-if [[ $RUN_RUST_P11 == 1 ]]; then
-  # Build the Rust engine's wasm pkg (dev + acvp + larger stack) then drive its
-  # real PKCS#11 ABI through the v3.2 conformance matrix. This is the Rust-engine
-  # conformance evidence (report gap P2/T1) — the wasm build runs in the
-  # container, the node driver on the host.
-  STEP=$((STEP+1)); say "step $STEP: Rust PKCS#11 v3.2 conformance (257 checks)"
-  if dexec "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=2097152' wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp >/dev/null 2>&1" \
-     && ( cd "$ROOT/rust" && node test_p11_conformance.js 2>&1 | grep -q 'RESULT: .* 0 failed' ); then
-    ok "Rust PKCS#11 v3.2 conformance"
-  else
-    bad "Rust PKCS#11 v3.2 conformance"
-  fi
+if [[ $RUN_RELEASE_XMSS == 1 ]]; then
+  # P-1 (formalized 2026-08-24) — XMSS/XMSS^MT keygen+sign+verify against
+  # the RELEASE wasm build, where it is genuinely fast (~4.6s / ~6.8s total)
+  # rather than the ~80s+ the main conformance harness measured against its
+  # own --dev build (see that harness's own G7 section comment for why THAT
+  # build stays untested by default). Builds pkg-release/ fresh on the HOST
+  # (wasm-pack + rustup, not the Linux container — build-wasm-bundle.sh is
+  # tied to $HOME/.rustup) before running the round trip.
+  run_step_host "XMSS/XMSS^MT round trip vs release wasm build (P-1)" \
+    "cd '$ROOT/rust' && ./build-wasm-bundle.sh >/dev/null 2>&1 && node test_xmss_release.js 2>&1 | tail -25"
 fi
 
 if [[ $RUN_TLS_INTEROP == 1 ]]; then
@@ -200,8 +269,17 @@ echo
 if [[ ${#FAILED[@]} -eq 0 ]]; then
   HEAD_SHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   MARKER="$ROOT/.gate-ok-$HEAD_SHA"
-  : > "$MARKER"
-  printf '\033[1;32m[gate] ALL %d STEPS PASSED\033[0m  (marker: .gate-ok-%s)\n' "$STEP" "$HEAD_SHA"
+  FLAGS="core"
+  [[ $RUN_CPP == 1 ]] && FLAGS="$FLAGS,cpp"
+  [[ $RUN_ACVP_WASM == 1 ]] && FLAGS="$FLAGS,acvp-wasm"
+  [[ $RUN_TLS_INTEROP == 1 ]] && FLAGS="$FLAGS,tls-interop"
+  [[ $RUN_RELEASE_XMSS == 1 ]] && FLAGS="$FLAGS,release-xmss"
+  {
+    echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "flags: $FLAGS"
+    echo "steps: $STEP"
+  } > "$MARKER"
+  printf '\033[1;32m[gate] ALL %d STEPS PASSED\033[0m  (marker: .gate-ok-%s, flags: %s)\n' "$STEP" "$HEAD_SHA" "$FLAGS"
   exit 0
 else
   printf '\033[1;31m[gate] %d/%d STEP(S) FAILED:\033[0m\n' "${#FAILED[@]}" "$STEP"

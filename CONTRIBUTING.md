@@ -16,6 +16,9 @@ All participants must follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Development Setup
 
+Once, after cloning: `bash scripts/install-hooks.sh` — installs the
+pre-push hook that enforces the local gate described in step 4 below.
+
 ### Prerequisites
 
 | Tool | Minimum version |
@@ -91,7 +94,27 @@ cmake --build build-asan --target softhsmv3 p11_v32_compliance_test -j$(nproc)
 1. **Branch from `main`** — name your branch `feat/<topic>`, `fix/<topic>`, or `docs/<topic>`.
 2. **One logical change per PR** — reviewers should be able to understand the purpose in one sentence.
 3. **Add or update tests** — new code paths must have an automated assertion. For PKCS#11 attribute / mechanism / lifecycle behavior, add a case to `p11_v32_compliance_test.cpp` under the appropriate `--category` (preferred — uses the OpenSSL independent oracle and runs in CI). For internal C++ helpers (crypto primitives, byte-string handling, etc.) add a CppUnit case under `src/lib/.../test/` once the upstream CppUnit infra is repaired. Crypto-touching tests must reference the normative spec section (PKCS#11 v3.2, FIPS 203/204/205, RFC #) in a comment.
-4. **Pass CI** — the PR must pass: build → lint → unit tests → E2E smoke test.
+4. **Pass the local gate before pushing** — this project's validation loop is
+   local-first (directive 2026-07-01): GitHub is release-only, not a test
+   platform. Run `bash scripts/local-gate.sh` (core steps: kmip + rust + kmip
+   local-only suites, OASIS KMIP 3.0 replay with provenance + baseline +
+   staleness checks, the cross-engine PKCS#11 differential harness, the Rust
+   engine's PKCS#11 v3.2 conformance matrix, wasm smoke) before every push.
+   Add `--cpp` for the C++ `ctest` suite (incl. `p11_v32_compliance_test`),
+   `--acvp-wasm` for the 20-suite ACVP harness, `--tls-interop` for the
+   §3.3.3 hybrid-TLS-vs-OpenSSL proof, or `--all` for everything — required
+   before cutting a release (see `RELEASING.md`). A passing run writes
+   `.gate-ok-<HEAD-sha>`; the installed pre-push hook (`bash
+   scripts/install-hooks.sh`, one-time setup) refuses to push a commit
+   without a current marker. **Separately, GitHub CI still runs on every
+   push/PR** as a second, independent check: `build` (C++ `ctest`, incl. the
+   v3.2 compliance harness), `constants-gate` (PKCS#11 constant parity),
+   `rust-test` (kmip + rust `cargo test`, non-`#[ignore]` subset only),
+   `kmip-conformance` (OASIS replay + staleness guard), `kmip-pqc-conformance`
+   (PQC corpus replay), `deprecated-api-check`, and `python-client`. There is
+   no separate lint job and no separate E2E-smoke job in CI today — treat
+   this list, not the phrase "build → lint → unit tests → E2E smoke test",
+   as authoritative.
 5. **Sign your commits** — by submitting you certify that you wrote the code and have the right to submit it under the BSD-2-Clause license.
 6. **Update CHANGELOG.md** — add a line under `[Unreleased]` describing your change.
 

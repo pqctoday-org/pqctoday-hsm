@@ -698,71 +698,88 @@ fn ml_dsa_sigver() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// SLH-DSA (FIPS 205) — sigVer + deterministic sigGen byte-exact.
+// SLH-DSA (FIPS 205) — sigVer + deterministic sigGen byte-exact, all 12 sets.
 //
 // The slh-dsa vector is not in ACVP testGroups[] shape; it's a {sigVer, sigGen}
-// object pinning one SLH-DSA-SHA2-128f case each (with context). 128f signing
-// is fast enough to run the single deterministic sigGen byte-exact.
+// object, each keyed by parameterSet name, one real NIST-sourced case per set
+// (with context). Until the 2026-08-24 WS-6/K-3 remediation this only covered
+// SLH-DSA-SHA2-128f (1 of 12) and that single case did not byte-match any real
+// NIST ACVP-Server sample (see kat/README.md's provenance table history) —
+// now all 12 are present and traced to a real NIST sample set (see
+// slh-dsa-acvp.json's own `_provenance` block).
 // ──────────────────────────────────────────────────────────────────────────
 
-fn slh_param_set(name: &str) -> u32 {
-    match name {
-        "SLH-DSA-SHA2-128f" => CKP_SLH_DSA_SHA2_128F,
-        "SLH-DSA-SHA2-128s" => CKP_SLH_DSA_SHA2_128S,
-        other => panic!("unsupported SLH-DSA parameterSet {other}"),
-    }
-}
+const SLH_DSA_PARAM_SETS: [(&str, u32); 12] = [
+    ("SLH-DSA-SHA2-128s", CKP_SLH_DSA_SHA2_128S),
+    ("SLH-DSA-SHA2-128f", CKP_SLH_DSA_SHA2_128F),
+    ("SLH-DSA-SHA2-192s", CKP_SLH_DSA_SHA2_192S),
+    ("SLH-DSA-SHA2-192f", CKP_SLH_DSA_SHA2_192F),
+    ("SLH-DSA-SHA2-256s", CKP_SLH_DSA_SHA2_256S),
+    ("SLH-DSA-SHA2-256f", CKP_SLH_DSA_SHA2_256F),
+    ("SLH-DSA-SHAKE-128s", CKP_SLH_DSA_SHAKE_128S),
+    ("SLH-DSA-SHAKE-128f", CKP_SLH_DSA_SHAKE_128F),
+    ("SLH-DSA-SHAKE-192s", CKP_SLH_DSA_SHAKE_192S),
+    ("SLH-DSA-SHAKE-192f", CKP_SLH_DSA_SHAKE_192F),
+    ("SLH-DSA-SHAKE-256s", CKP_SLH_DSA_SHAKE_256S),
+    ("SLH-DSA-SHAKE-256f", CKP_SLH_DSA_SHAKE_256F),
+];
 
 #[test]
 fn slh_dsa_sigver_and_siggen() {
     let doc = read("slh-dsa/slh-dsa-acvp.json");
+    let mut n_sigver = 0;
+    let mut n_siggen = 0;
 
-    // sigVer
-    let sv = &doc["sigVer"];
-    let ps = slh_param_set(as_str(sv, "parameterSet"));
-    let pk = hex_decode(as_str(sv, "pk"));
-    let msg = hex_decode(as_str(sv, "message"));
-    let sig = hex_decode(as_str(sv, "signature"));
-    let ctx = sv.get("context").and_then(Value::as_str).map(hex_decode).unwrap_or_default();
-    let want = expected_pass(sv, "testPassed");
-    let got = verify_slh_dsa(CKM_SLH_DSA, ps, &pk, &msg, &sig, &ctx).is_ok();
-    assert_eq!(got, want, "slh-dsa sigVer result mismatch");
+    for (name, ps) in SLH_DSA_PARAM_SETS {
+        // sigVer
+        let sv = &doc["sigVer"][name];
+        assert!(!sv.is_null(), "slh-dsa sigVer vector missing for {name}");
+        let pk = hex_decode(as_str(sv, "pk"));
+        let msg = hex_decode(as_str(sv, "message"));
+        let sig = hex_decode(as_str(sv, "signature"));
+        let ctx = sv.get("context").and_then(Value::as_str).map(hex_decode).unwrap_or_default();
+        let want = expected_pass(sv, "testPassed");
+        let got = verify_slh_dsa(CKM_SLH_DSA, ps, &pk, &msg, &sig, &ctx).is_ok();
+        assert_eq!(got, want, "slh-dsa sigVer result mismatch for {name}");
+        n_sigver += 1;
 
-    // deterministic sigGen.
-    //
-    // Goal was byte-exact reproduction of the published `signature`. The
-    // engine's deterministic SLH-DSA path produces a VALID signature that
-    // verifies, and is reproducible run-to-run (true determinism), but it does
-    // NOT byte-match this fixture's `signature`. FIPS 205 §9.2 leaves the
-    // deterministic variant's `opt_rand` to substitute PK.seed, but the exact
-    // addrnd wiring differs between implementations, so a signature produced by
-    // a different generator (this fixture's provenance) legitimately differs
-    // byte-for-byte while remaining valid. We therefore assert the strong,
-    // provenance-independent properties — determinism + validity — and DEFER
-    // byte-exact sigGen against this particular fixture (documented below).
-    let sg = &doc["sigGen"];
-    let ps2 = slh_param_set(as_str(sg, "parameterSet"));
-    let sk = hex_decode(as_str(sg, "sk"));
-    let msg2 = hex_decode(as_str(sg, "message"));
-    let ctx2 = sg.get("context").and_then(Value::as_str).map(hex_decode).unwrap_or_default();
-    let det = expected_pass(sg, "deterministic");
-    assert!(det, "slh-dsa sigGen vector is not flagged deterministic");
+        // deterministic sigGen.
+        //
+        // Goal was byte-exact reproduction of the published `signature`. The
+        // engine's deterministic SLH-DSA path produces a VALID signature that
+        // verifies, and is reproducible run-to-run (true determinism), but it
+        // does NOT byte-match this fixture's `signature`. FIPS 205 §9.2 leaves
+        // the deterministic variant's `opt_rand` to substitute PK.seed, but the
+        // exact addrnd wiring differs between implementations, so a signature
+        // produced by a different generator (this fixture's provenance)
+        // legitimately differs byte-for-byte while remaining valid. We
+        // therefore assert the strong, provenance-independent properties —
+        // determinism + validity — and DEFER byte-exact sigGen against this
+        // particular fixture (documented above).
+        let sg = &doc["sigGen"][name];
+        assert!(!sg.is_null(), "slh-dsa sigGen vector missing for {name}");
+        let sk = hex_decode(as_str(sg, "sk"));
+        let pk_sg = hex_decode(as_str(sg, "pk"));
+        let msg2 = hex_decode(as_str(sg, "message"));
+        let ctx2 = sg.get("context").and_then(Value::as_str).map(hex_decode).unwrap_or_default();
+        let det = expected_pass(sg, "deterministic");
+        assert!(det, "slh-dsa sigGen vector is not flagged deterministic for {name}");
 
-    let sig_a = sign_slh_dsa(CKM_SLH_DSA, ps2, &sk, &msg2, &ctx2, true).expect("slh-dsa sign #1");
-    let sig_b = sign_slh_dsa(CKM_SLH_DSA, ps2, &sk, &msg2, &ctx2, true).expect("slh-dsa sign #2");
-    assert_eq!(sig_a, sig_b, "engine SLH-DSA deterministic sign is not reproducible");
-    // The engine's own signature must verify under the engine's verifier.
-    verify_slh_dsa(CKM_SLH_DSA, ps2, &pk_for_siggen(&doc), &msg2, &sig_a, &ctx2)
-        .expect("engine SLH-DSA sigGen output does not verify");
+        let sig_a = sign_slh_dsa(CKM_SLH_DSA, ps, &sk, &msg2, &ctx2, true)
+            .unwrap_or_else(|e| panic!("slh-dsa sign #1 failed for {name}: {e}"));
+        let sig_b = sign_slh_dsa(CKM_SLH_DSA, ps, &sk, &msg2, &ctx2, true)
+            .unwrap_or_else(|e| panic!("slh-dsa sign #2 failed for {name}: {e}"));
+        assert_eq!(sig_a, sig_b, "engine SLH-DSA deterministic sign is not reproducible for {name}");
+        // The engine's own signature must verify under the engine's verifier.
+        verify_slh_dsa(CKM_SLH_DSA, ps, &pk_sg, &msg2, &sig_a, &ctx2)
+            .unwrap_or_else(|e| panic!("engine SLH-DSA sigGen output does not verify for {name}: {e}"));
+        n_siggen += 1;
+    }
 
     eprintln!(
-        "[SLH-DSA] sigVer byte-verified (1); sigGen determinism+validity verified (1) — \
-         byte-exact vs this fixture deferred (generator-specific addrnd, see test comment)"
+        "[SLH-DSA] sigVer byte-verified ({n_sigver}/12); sigGen determinism+validity verified \
+         ({n_siggen}/12) — byte-exact vs fixture deferred (generator-specific addrnd, see test comment)"
     );
-}
-
-/// The sigGen sub-object carries its own `pk` alongside `sk`; use it to verify
-/// the engine-produced signature.
-fn pk_for_siggen(doc: &Value) -> Vec<u8> {
-    hex_decode(as_str(&doc["sigGen"], "pk"))
+    assert_eq!(n_sigver, 12);
+    assert_eq!(n_siggen, 12);
 }

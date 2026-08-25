@@ -68,6 +68,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `.46` were unimplemented and `.49` had an "upstream-inconsistent"
   vector — `.40` was already implemented, `.49`'s hash bug was already
   fixed (2026-08-17), and `.46` is now implemented (see Added above).
+- **Compliance-testing evidence audit (2026-08-23).** Several published
+  numbers had drifted from the code they describe: this changelog's 0.23.0
+  entry cited a "52-entry exception list" for the PKCS#11 differential
+  harness — it is 38 today (14 closed by subsequent harness-defect fixes).
+  `tests/differential/README.md` cited 48 scenarios; `scenarios.inc` has
+  49. `kmip/src/kmip30/ops.rs`'s `Operation` enum carried a comment saying
+  it covers "64 published Operation values" — it covers all 66
+  (Encapsulate/Decapsulate, added for the PQC KEM operations, sit outside
+  the 0x01–0x40 range the comment described). `cpp_compliance_report.*`
+  and `rust/RUST_P11_V32_CONFORMANCE_REPORT.md` were stale by one and two
+  remediation waves respectively, with three mutually-inconsistent C++
+  pass counts published across README/CHANGELOG/the report itself; both
+  are regenerated at HEAD as part of this pass (see this repo's
+  compliance-testing remediation plan, 2026-08-23, for the full account
+  and the follow-on coverage-closure work). Four orphaned evidence files
+  with no producer or consumer (`kat_dump.txt`,
+  `softhsmv3_compatibility_report.md`, `test_results/compliance_proof.*`)
+  are removed; history retains them.
 
 ---
 

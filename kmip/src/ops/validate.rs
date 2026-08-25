@@ -542,15 +542,17 @@ mod tests {
                 other => panic!("{tc}: unknown expect '{other}'"),
             }
         }
-        // All 3 raw vectors in the fixture (.45, .46, .49) are implemented by
-        // this engine as of 2026-08-18 (.46 was the last gap — see the
-        // composite-hybrid remediation plan's Gap 3) and all 3 assert
+        // All 4 raw vectors in the fixture (.40, .45, .46, .49) are
+        // implemented by this engine as of 2026-08-18 and all 4 assert
         // "verifies", so every one must be checked, none silently skipped.
-        // This comment previously (incorrectly) claimed only .45 was
-        // implemented and .40/.46 were not — .40 was already implemented
-        // when that was written, and .46 has been implemented since. The
-        // certificate vector below adds a second, independent path.
-        assert_eq!(checked, 3, "expected all 3 raw vectors to be asserted, got {checked}");
+        // .40's vector was ported from the hub's already-extracted copy of
+        // this same draft source on 2026-08-23 (hsm's fixture previously
+        // carried only .45/.46/.49; .37/.39/.41/.48 have no draft RAW vector
+        // at all — the draft's raw-vector set and its certificate-vector set
+        // cover different profile subsets, see the certificate vectors below
+        // for those four). The certificate vectors below add a second,
+        // independent path, and now cover .37/.39/.40/.41/.45/.48.
+        assert_eq!(checked, 4, "expected all 4 raw vectors to be asserted, got {checked}");
 
         // ── certificate vector: full Validate path ──
         for v in doc["certificate_vectors"]["vectors"].as_array().unwrap() {

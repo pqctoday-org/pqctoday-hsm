@@ -3075,7 +3075,20 @@ CK_RV SoftHSM::C_DeriveKey
 			}
 		}
 
-		CK_RV rv2 = CreateObject(hSession, drvAttr, drvCount, phKey, OBJECT_OP_GENERATE);
+		// C_DeriveKey is a derive operation — use OBJECT_OP_DERIVE, matching
+		// every other derive-to-key-object path in this function (see the
+		// ECDH/HKDF paths below). OBJECT_OP_GENERATE was wrong here: the
+		// P11Attribute checks table's ck4 rule ("MUST NOT be specified when
+		// object is generated") blocks CKA_EC_PARAMS specifically under
+		// OBJECT_OP_GENERATE, which silently rejected every BIP32 master/child
+		// derive with CKR_ATTRIBUTE_READ_ONLY — invisible until 2026-08-23,
+		// because this whole category had never actually run in the compliance
+		// suite before (see p11_v32_compliance_test.cpp's test_bip32_wallets).
+		// The other CreateObject(..., OBJECT_OP_GENERATE) calls in this same
+		// C_DeriveKey function (concatenate/HKDF/SP800-108/PBKD2, above) are
+		// unaffected: none of them ever supplies CKA_EC_PARAMS, so ck4 never
+		// gates them — this was the one call site where the wrong op mattered.
+		CK_RV rv2 = CreateObject(hSession, drvAttr, drvCount, phKey, OBJECT_OP_DERIVE);
 		if (rv2 != CKR_OK) {
 			privKeyBytes.wipe(); chainCodeBytes.wipe();
 			return rv2;

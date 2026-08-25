@@ -1,6 +1,8 @@
 project(softhsm_crypto)
 
-# OpenSSL-only backend. Botan, DES, DSA, DH, GOST, MD5 have been removed.
+# OpenSSL-only backend. Botan, DES, DSA, DH, GOST have been removed.
+# MD5 (digest/HMAC/RSA-PKCS#1v1.5 sign) is retained for non-FIPS interop --
+# see the OSSLCryptoFactory.cpp header comment.
 # ECC and EdDSA are always enabled.
 
 set(INCLUDE_DIRS ${PROJECT_SOURCE_DIR}
@@ -79,6 +81,7 @@ set(SOURCES
     OSSLEVPSymmetricAlgorithm.cpp
     OSSLHMAC.cpp
     OSSLKMAC.cpp
+    OSSLMD5.cpp
     OSSLRNG.cpp
     OSSLRSA.cpp
     OSSLRSAKeyPair.cpp
