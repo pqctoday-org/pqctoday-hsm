@@ -194,21 +194,35 @@ t3t() { # tamper: a flipped byte MUST fail verification (verifier can say no)
 }
 run_case T3t PASS "ML-DSA-65 tampered signature rejected" t3t
 
-# ML-KEM through the provider: keymgmt has NO GEN functions (confirmed in
-# src/kem/mlkem.c — zero OSSL_FUNC_KEYMGMT_GEN entries — and live:
-# `genpkey -propquery "?provider=pkcs11" -algorithm ML-KEM-768` dies with
-# gen_init "operation not supported for this keytype"). Gap OP-6 /
-# remediation R3b. Until keys can be created (or imported) on-token, the
-# software-encap -> token-decap E2E from the test plan is unreachable
-# natively — it exists today only on the WASM path (hub e2e), where keys
-# are created via the wasm API, not via provider keygen.
+# ML-KEM token keygen (gap OP-6 / remediation R3b, landed): the per-variant
+# ML-KEM keymgmt tables in src/kem/mlkem.c now carry real GEN_INIT/GEN/
+# GEN_CLEANUP/GEN_SET_PARAMS/GEN_SETTABLE_PARAMS entries (implemented in
+# keymgmt.c, modeled on the ML-DSA block, and exported non-static because
+# mlkem.c is a separate translation unit — see the comment ahead of
+# p11prov_mlkem_gen_init_int in keymgmt.c). genpkey's own exit code is
+# deliberately NOT gating this test: `-out` also needs a PrivateKeyInfo PEM
+# encoder to serialize the result, and ML-KEM has ZERO encoders registered
+# (confirmed live and in source — zero ADD_ALGO_EXT(..., encoder, ...)
+# lines for ML_KEM in provider.c) — a separate, distinct gap, OP-3 /
+# remediation R3, not yet landed. genpkey therefore prints "Error writing
+# key(s)" and exits 1 even on a fully successful keygen, because the key
+# generation + token persistence happens as a side effect BEFORE the
+# write-to-file step that fails. storeutl (a different provider entry
+# point, STORE not ENCODER) is the actual, authoritative proof this test
+# needs for R3b's own claim; see T4x_encode below for the encoder gap.
 t4x() { local w; w=$(mk_arena mlkemgen "$CPP_ENGINE_SO") && use_arena "$w" || return 1
-  O genpkey -propquery "?provider=pkcs11" -algorithm ML-KEM-768 -out "$w/k.pem" || return 1
-  # genpkey via the default provider "succeeds" by generating in SOFTWARE if
-  # the fetch falls back — assert the key actually landed on the token:
+  O genpkey -propquery "?provider=pkcs11" -algorithm ML-KEM-768 -out "$w/k.pem" >/dev/null 2>&1
   O storeutl -text "pkcs11:token=mlkemgen" 2>/dev/null | grep -q "ML-KEM"
 }
-run_case T4x XFAIL "ML-KEM token keygen via provider (gap OP-6 / remediation R3b)" t4x
+run_case T4x PASS "ML-KEM token keygen reachable through provider, verified via storeutl (gap OP-6 / remediation R3b)" t4x
+
+# Distinct from T4x above: genpkey's own `-out` PEM write, which needs a
+# PrivateKeyInfo encoder that doesn't exist yet for ML-KEM (gap OP-3 /
+# remediation R3, discovered live while landing R3b — see T4x's comment).
+t4x_encode() { local w; w=$(mk_arena mlkemenc "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm ML-KEM-768 -out "$w/k.pem"
+}
+run_case T4x_encode XFAIL "ML-KEM genpkey -out PrivateKeyInfo PEM write (gap OP-3 / remediation R3)" t4x_encode
 
 t5() { local w; w=$(mk_arena rsa "$CPP_ENGINE_SO") && use_arena "$w" || return 1
   O genpkey -propquery "?provider=pkcs11" -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$w/k.pem" || return 1

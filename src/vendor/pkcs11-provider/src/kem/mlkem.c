@@ -498,6 +498,14 @@ const OSSL_DISPATCH p11prov_mlkem_keymgmt_functions[] = {
  * variant gets its own entry in the OpenSSL method store keyed by name. */
 const OSSL_DISPATCH p11prov_mlkem512_keymgmt_functions[] = {
     { OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))p11prov_mlkem_keymgmt_new_fn },
+    { OSSL_FUNC_KEYMGMT_GEN_INIT, (void (*)(void))p11prov_mlkem512_gen_init },
+    { OSSL_FUNC_KEYMGMT_GEN, (void (*)(void))p11prov_mlkem_gen },
+    { OSSL_FUNC_KEYMGMT_GEN_CLEANUP,
+      (void (*)(void))p11prov_common_gen_cleanup },
+    { OSSL_FUNC_KEYMGMT_GEN_SET_PARAMS,
+      (void (*)(void))p11prov_common_gen_set_params },
+    { OSSL_FUNC_KEYMGMT_GEN_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_mlkem_gen_settable_params },
     { OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))p11prov_mlkem_keymgmt_free_fn },
     { OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))p11prov_mlkem_keymgmt_load_fn },
     { OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))p11prov_mlkem_keymgmt_has_fn },
@@ -514,6 +522,14 @@ const OSSL_DISPATCH p11prov_mlkem512_keymgmt_functions[] = {
 
 const OSSL_DISPATCH p11prov_mlkem768_keymgmt_functions[] = {
     { OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))p11prov_mlkem_keymgmt_new_fn },
+    { OSSL_FUNC_KEYMGMT_GEN_INIT, (void (*)(void))p11prov_mlkem768_gen_init },
+    { OSSL_FUNC_KEYMGMT_GEN, (void (*)(void))p11prov_mlkem_gen },
+    { OSSL_FUNC_KEYMGMT_GEN_CLEANUP,
+      (void (*)(void))p11prov_common_gen_cleanup },
+    { OSSL_FUNC_KEYMGMT_GEN_SET_PARAMS,
+      (void (*)(void))p11prov_common_gen_set_params },
+    { OSSL_FUNC_KEYMGMT_GEN_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_mlkem_gen_settable_params },
     { OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))p11prov_mlkem_keymgmt_free_fn },
     { OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))p11prov_mlkem_keymgmt_load_fn },
     { OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))p11prov_mlkem_keymgmt_has_fn },
@@ -530,6 +546,14 @@ const OSSL_DISPATCH p11prov_mlkem768_keymgmt_functions[] = {
 
 const OSSL_DISPATCH p11prov_mlkem1024_keymgmt_functions[] = {
     { OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))p11prov_mlkem_keymgmt_new_fn },
+    { OSSL_FUNC_KEYMGMT_GEN_INIT, (void (*)(void))p11prov_mlkem1024_gen_init },
+    { OSSL_FUNC_KEYMGMT_GEN, (void (*)(void))p11prov_mlkem_gen },
+    { OSSL_FUNC_KEYMGMT_GEN_CLEANUP,
+      (void (*)(void))p11prov_common_gen_cleanup },
+    { OSSL_FUNC_KEYMGMT_GEN_SET_PARAMS,
+      (void (*)(void))p11prov_common_gen_set_params },
+    { OSSL_FUNC_KEYMGMT_GEN_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_mlkem_gen_settable_params },
     { OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))p11prov_mlkem_keymgmt_free_fn },
     { OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))p11prov_mlkem_keymgmt_load_fn },
     { OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))p11prov_mlkem_keymgmt_has_fn },

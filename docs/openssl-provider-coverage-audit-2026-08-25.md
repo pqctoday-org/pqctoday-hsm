@@ -118,9 +118,9 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 |---|---|---|---|
 | OP-1 | `OSSL_OP_MAC` not implemented at all — token HMAC/CMAC/KMAC unreachable from `EVP_MAC`; every MAC falls back to software | source sweep; block-list table `provider.c:1570` | Medium |
 | OP-2 | No DECODERs for ML-DSA / ML-KEM / composites → **URI-PEM round-trip broken for PQC keys** (keygen writes the PEM; loading it back fails `store_result.c:160 unsupported` — proven live). Workaround: raw `pkcs11:` URIs, which do work | live probe; `provider.c:1500-1525` | **High** |
-| OP-3 | No ML-KEM encoders at all (no SPKI, no URI-PEM) — ML-KEM public keys can only leave via `pkey -pubout` on a URI-loaded key; latchset sibling tree has these encoders to port | `provider.c:1395-1494` vs `vendor/latchset/src/provider.c:1445-1457` | Medium |
+| OP-3 | **Confirmed live, root cause pinned down (2026-08-25, while landing R3b)** — ML-KEM has ZERO encoders registered at all (no SPKI, no text, no URI-PEM — confirmed both in source, zero `ADD_ALGO_EXT(..., encoder, ...)` lines for `ML_KEM` in `provider.c`, and live). Consequence discovered live: `genpkey -algorithm ML-KEM-768 -out k.pem` now generates and persists a real key on-token (R3b landed — see OP-6) but the `-out` write step itself fails with `Error writing key(s)`/exit 1, because writing ANY output (PEM file or `-text` to stdout) needs a PrivateKeyInfo/SPKI encoder that doesn't exist for this key type. The key is not lost — it's on the token and resolvable via its `pkcs11:` URI through STORE, a different code path from ENCODER — but genpkey's own convenience output is unusable. Latchset sibling tree has these encoders to port. | `provider.c:1395-1494` vs `vendor/latchset/src/provider.c:1445-1457`; live (T4x_encode) | Medium |
 | OP-4 | KEM dispatch lacks `SET_CTX_PARAMS`/`SETTABLE` | `kem/mlkem.c:259-289` | Low |
-| OP-6 | **ML-KEM keys cannot be GENERATED on token through the provider** — the ML-KEM keymgmt has no `OSSL_FUNC_KEYMGMT_GEN*` entries (`kem/mlkem.c`, confirmed zero hits) and `genpkey -propquery "?provider=pkcs11" -algorithm ML-KEM-768` dies live with `gen_init: operation not supported for this keytype`. ML-DSA keygen works, so this is an asymmetry, not a design rule. Blocks any native software-encap→token-decap E2E (today that flow is proven only on the WASM path, where keys are created via the wasm API) | live probe + source | **High** |
+| OP-6 | **RESOLVED (R3b, 2026-08-25)** — was: ML-KEM keys could not be GENERATED on token through the provider (ML-KEM keymgmt had no `OSSL_FUNC_KEYMGMT_GEN*` entries; ML-DSA keygen worked, so this was an asymmetry, not a design rule). Now: real `GEN_INIT`/`GEN`/`GEN_CLEANUP`/`GEN_SET_PARAMS`/`GEN_SETTABLE_PARAMS` wired into all 3 per-variant ML-KEM keymgmt tables (`kem/mlkem.c`), implemented in `keymgmt.c` (mirroring the ML-DSA block) and exported non-static since `kem/mlkem.c` is a separate translation unit. `CKA_PARAMETER_SET` is mandatory on the public-key template per the C++ engine's own `extractParameterSet` call (no silent default, matching ML-DSA's pattern); `CKA_ENCAPSULATE`/`CKA_DECAPSULATE` requested explicitly on pub/priv templates to match what a spec-correct caller sends (both engines enforce these server-side regardless of template content). Live-verified: key generates, persists on-token, and is independently confirmed via `storeutl -text` showing `ML-KEM-768 Public-Key`. Landing this surfaced OP-3 (above) as a distinct, still-open gap — genpkey's own `-out` write needs an encoder this fix does not provide. | both engines, live probe + source | ~~**High**~~ — |
 | OP-5 | KDF surface is HKDF+TLS13-KDF only; engines also offer PBKDF2 and SP800-108 counter/feedback KDFs that OpenSSL has standard fetch names for | `provider.c:1161` vs engine KDF mechs | Low–Medium |
 | WART-1 | Every provider token scan spams the C++ engine log: `ObjectFile.cpp(181): The attribute is not a byte string: 0x0/0x1/0x2/0x86/0x100/0x170-0x172/0x601` — provider queries CKA_CLASS/CKA_TOKEN/CKA_PRIVATE/CKA_TRUSTED/CKA_KEY_TYPE/CKA_MODIFIABLE/CKA_COPYABLE/CKA_DESTROYABLE/etc. with byte-string templates | observed on every live probe | Low (noise; masks real errors) |
 | WART-3 | Build hygiene: the gitignored WASM-generated `src/config.h` leaks into the **native** CMake build — compile warnings `"PACKAGE_MAJOR redefined"` and the live provider reports version **1.1** (config.h) while CMake defines **0.4.0** | observed in gate build log + live `list -providers` | Low |
@@ -207,7 +207,8 @@ trusted; unexpected PASS of an XFAIL case fails the run (ratchet).
 | T2 | Store | `storeutl` enumerates a freshly created token keypair | PASS |
 | T3a-c | ML-DSA-44/65/87 | token keygen → URI sign → **software** verify; FIPS 204 signature sizes (2420/3309/4627) | PASS |
 | T3t | Tamper | flipped-byte signature must fail software verify | PASS (reject) |
-| T4x | ML-KEM token keygen (OP-6) | provider keygen lands a key on token | **XFAIL** (flips on R3b; the full software-encap → token-decap E2E from the original plan is unreachable until then) |
+| T4x | ML-KEM token keygen (OP-6) | provider keygen lands a key on token, confirmed via `storeutl` (not gated on genpkey's own `-out` exit code — that write needs a still-missing encoder, tracked separately below) | **PASS** (flipped by R3b, 2026-08-25) |
+| T4x_encode | ML-KEM `genpkey -out` PEM write (OP-3) | same genpkey call, but this time its own exit code IS the assertion | **XFAIL** (new case, discovered live while landing R3b; flips on R3) |
 | T5 | RSA-3072 | token keygen → PKCS#1 sign → software verify; software OAEP-encrypt → provider decrypt | PASS |
 | T6 | ECDSA P-256 | token keygen → sign → software verify | PASS |
 | T7 | Ed25519 | token keygen → sign → software verify | PASS |
@@ -295,8 +296,29 @@ the other hash family) — not just "the fetch stopped erroring". See
 remediation plan R1 for the full mechanism and fix. Harness now reads
 `OPENSSL-PROVIDER-HARNESS: PASS=17 FAIL=0 XFAIL=3 XPASS=0` — T12
 flipped PASS (rescoped); T12sign and new T12sign_shake both flipped
-PASS. Remaining XFAILs: OP-6 (T4x), OP-2 (T11), ENV-2 (T15b) — all
-still plan-only, Priority 1/2 items.
+PASS. Remaining XFAILs at that point: OP-6 (T4x), OP-2 (T11), ENV-2
+(T15b) — all still plan-only, Priority 1/2 items.
+
+**Further update (2026-08-25, same day) — R3b (ML-KEM token keygen),
+done:** added real `GEN_INIT`/`GEN`/`GEN_CLEANUP`/`GEN_SET_PARAMS`/
+`GEN_SETTABLE_PARAMS` to all 3 ML-KEM keymgmt tables (`kem/mlkem.c`),
+implemented in `keymgmt.c` and exported non-static across the
+translation-unit boundary. Live-verified: `genpkey -algorithm ML-KEM-768`
+now generates a real key and persists it on-token, independently
+confirmed via `storeutl -text`. Landing it surfaced a real, previously
+undiscovered gap: `genpkey`'s own `-out` file write still fails
+(`Error writing key(s)`, exit 1) because ML-KEM has zero encoders
+registered — OP-3, a distinct, already-tracked gap, not part of R3b's
+scope. The original T4x test (as designed during the initial audit) had
+`|| return 1` directly after the `genpkey` call, meaning it could never
+have flipped to PASS on R3b alone even after R3b was fully correct — it
+was accidentally coupled to OP-3 too. Rescoped T4x to assert on
+`storeutl` alone (the actual claim R3b makes), and added a new case,
+T4x_encode, to independently track OP-3's gap so it isn't lost. Both
+sabotage-tested (T4x: broken storeutl assertion, FAIL exit 1;
+T4x_encode: swapped in a trivially-succeeding body, XPASS exit 1).
+Harness now reads `OPENSSL-PROVIDER-HARNESS: PASS=18 FAIL=0 XFAIL=3
+XPASS=0`. Remaining XFAILs: OP-3 (T4x_encode), OP-2 (T11), ENV-2 (T15b).
 
 ## 7. Companion document
 

@@ -37,4 +37,19 @@ extern const OSSL_DISPATCH p11prov_slhdsa_shake_256s_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_slhdsa_sha2_256f_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_slhdsa_shake_256f_keymgmt_functions[];
 
+/* ML-KEM token keygen (defined in keymgmt.c, consumed by kem/mlkem.c's
+ * per-variant OSSL_DISPATCH tables — see the comment ahead of
+ * p11prov_mlkem_gen_init_int in keymgmt.c for why these cross the file). */
+void *p11prov_mlkem512_gen_init(void *provctx, int selection,
+                                const OSSL_PARAM params[]);
+void *p11prov_mlkem768_gen_init(void *provctx, int selection,
+                                const OSSL_PARAM params[]);
+void *p11prov_mlkem1024_gen_init(void *provctx, int selection,
+                                 const OSSL_PARAM params[]);
+void *p11prov_mlkem_gen(void *genctx, OSSL_CALLBACK *cb_fn, void *cb_arg);
+const OSSL_PARAM *p11prov_mlkem_gen_settable_params(void *genctx,
+                                                     void *provctx);
+int p11prov_common_gen_set_params(void *genctx, const OSSL_PARAM params[]);
+void p11prov_common_gen_cleanup(void *genctx);
+
 #endif /* _KEYMGMT_H */

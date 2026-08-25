@@ -8,8 +8,10 @@
 
 #define DFLT_DIGEST "SHA256"
 
-DISPATCH_KEYMGMT_FN(common, gen_set_params);
-DISPATCH_KEYMGMT_FN(common, gen_cleanup);
+/* Non-static: shared with kem/mlkem.c's keymgmt GEN table, a separate
+ * translation unit (declared in keymgmt.h). */
+int p11prov_common_gen_set_params(void *genctx, const OSSL_PARAM params[]);
+void p11prov_common_gen_cleanup(void *genctx);
 
 DISPATCH_KEYMGMT_FN(rsa, new);
 DISPATCH_KEYMGMT_FN(rsa, gen_init);
@@ -131,6 +133,9 @@ struct key_generator {
         struct {
             CK_SLH_DSA_PARAMETER_SET_TYPE param_set;
         } slhdsa;
+        struct {
+            CK_ML_KEM_PARAMETER_SET_TYPE param_set;
+        } mlkem;
     } data;
 
     OSSL_CALLBACK *cb_fn;
@@ -145,8 +150,7 @@ const CK_MECHANISM_TYPE p11prov_rsapss_mechs[P11PROV_N_RSAPSS_MECHS] = {
     CKM_SHA3_512_RSA_PKCS_PSS, CKM_RSA_PKCS_PSS
 };
 
-static int p11prov_common_gen_set_params(void *genctx,
-                                         const OSSL_PARAM params[])
+int p11prov_common_gen_set_params(void *genctx, const OSSL_PARAM params[])
 {
     struct key_generator *ctx = (struct key_generator *)genctx;
     const OSSL_PARAM *p;
@@ -515,7 +519,7 @@ done:
     return ret;
 }
 
-static void p11prov_common_gen_cleanup(void *genctx)
+void p11prov_common_gen_cleanup(void *genctx)
 {
     struct key_generator *ctx = (struct key_generator *)genctx;
 
@@ -2626,6 +2630,128 @@ const OSSL_DISPATCH p11prov_mldsa87_keymgmt_functions[] = {
     DISPATCH_KEYMGMT_ELEM(mldsa, GETTABLE_PARAMS, gettable_params),
     { 0, NULL },
 };
+
+/* ML-KEM (FIPS 203) token keygen — modeled on the ML-DSA block above.
+ * The rest of ML-KEM's keymgmt (new/free/load/has/match/get_params/export)
+ * lives in kem/mlkem.c, a separate translation unit, because that file also
+ * owns the KEM encapsulate/decapsulate operation tables; only these gen
+ * functions plus the two shared p11prov_common_gen_* helpers above (now
+ * non-static for this reason) are exported via keymgmt.h so mlkem.c's
+ * per-variant OSSL_DISPATCH tables can reference them directly. */
+static void *p11prov_mlkem_gen_init_int(void *provctx, int selection,
+                                        const OSSL_PARAM params[],
+                                        CK_ML_KEM_PARAMETER_SET_TYPE param_set)
+{
+    struct key_generator *ctx = NULL;
+    int ret;
+
+    P11PROV_debug("mlkem gen_init %p", provctx);
+
+    ret = p11prov_ctx_status(provctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) == 0) {
+        P11PROV_raise(provctx, CKR_ARGUMENTS_BAD, "Unsupported selection");
+        return NULL;
+    }
+
+    ctx = OPENSSL_zalloc(sizeof(struct key_generator));
+    if (ctx == NULL) {
+        P11PROV_raise(provctx, CKR_HOST_MEMORY,
+                      "Failed to allocate key_generator structure");
+        return NULL;
+    }
+    ctx->provctx = (P11PROV_CTX *)provctx;
+    ctx->type = CKK_ML_KEM;
+    ctx->data.mlkem.param_set = param_set;
+
+    ctx->mechanism.mechanism = CKM_ML_KEM_KEY_PAIR_GEN;
+
+    ret = p11prov_common_gen_set_params(ctx, params);
+    if (ret != RET_OSSL_OK) {
+        p11prov_common_gen_cleanup(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+void *p11prov_mlkem512_gen_init(void *provctx, int selection,
+                                const OSSL_PARAM params[])
+{
+    return p11prov_mlkem_gen_init_int(provctx, selection, params,
+                                      CKP_ML_KEM_512);
+}
+
+void *p11prov_mlkem768_gen_init(void *provctx, int selection,
+                                const OSSL_PARAM params[])
+{
+    return p11prov_mlkem_gen_init_int(provctx, selection, params,
+                                      CKP_ML_KEM_768);
+}
+
+void *p11prov_mlkem1024_gen_init(void *provctx, int selection,
+                                 const OSSL_PARAM params[])
+{
+    return p11prov_mlkem_gen_init_int(provctx, selection, params,
+                                      CKP_ML_KEM_1024);
+}
+
+void *p11prov_mlkem_gen(void *genctx, OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    struct key_generator *ctx = (struct key_generator *)genctx;
+    void *key;
+    CK_RV ret;
+
+    /* PKCS#11 v3.2 C_GenerateKeyPair sets CKA_ENCAPSULATE=true on the public
+     * key and CKA_DECAPSULATE=true on the private key for CKM_ML_KEM_
+     * KEY_PAIR_GEN; both engines enforce this server-side regardless of the
+     * template (SoftHSM_keygen.cpp:7591/7674, rust/src/ffi.rs:1647/1666) —
+     * requesting them explicitly here matches what a spec-correct caller
+     * sends, not what either engine strictly requires. CKA_PARAMETER_SET is
+     * mandatory on the public-key template (extractParameterSet, no silent
+     * default); the private-key copy is intentionally ignored by both
+     * engines and re-derived from the generated key pair, so — like
+     * ML-DSA's block above — it is left off the private template. */
+#define MLKEM_PUBKEY_TMPL_SIZE 3
+    CK_ATTRIBUTE pubkey_template[MLKEM_PUBKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_ENCAPSULATE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_PARAMETER_SET, &ctx->data.mlkem.param_set,
+          sizeof(ctx->data.mlkem.param_set) },
+    };
+#define MLKEM_PRIVKEY_TMPL_SIZE 4
+    CK_ATTRIBUTE
+    privkey_template[MLKEM_PRIVKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_PRIVATE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SENSITIVE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_DECAPSULATE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+    };
+    int pubtsize = MLKEM_PUBKEY_TMPL_SIZE;
+    int privtsize = MLKEM_PRIVKEY_TMPL_SIZE;
+
+    P11PROV_debug("mlkem gen %p %p %p", ctx, cb_fn, cb_arg);
+
+    ret = p11prov_common_gen(ctx, pubkey_template, privkey_template, pubtsize,
+                             privtsize, cb_fn, cb_arg, &key);
+    if (ret != CKR_OK) {
+        P11PROV_raise(ctx->provctx, ret, "mlkem Key generation failed");
+        return NULL;
+    }
+    return key;
+}
+
+const OSSL_PARAM *p11prov_mlkem_gen_settable_params(void *genctx,
+                                                     void *provctx)
+{
+    static OSSL_PARAM p11prov_mlkem_params[] = {
+        OSSL_PARAM_utf8_string(P11PROV_PARAM_URI, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return p11prov_mlkem_params;
+}
 
 /* SLH-DSA (FIPS 205), all 12 parameter sets sharing CKM_SLH_DSA_KEY_PAIR_GEN,
  * distinguished by CKA_PARAMETER_SET — modeled on the ML-DSA block above. */
