@@ -54,12 +54,14 @@ final class P11Constants {
     static final long CKA_SENSITIVE        = 0x00000103L;
     static final long CKA_SIGN             = 0x00000108L;
     static final long CKA_VERIFY           = 0x0000010aL;
+    static final long CKA_MODULUS          = 0x00000120L;
     static final long CKA_MODULUS_BITS     = 0x00000121L;
     static final long CKA_PUBLIC_EXPONENT  = 0x00000122L;
     static final long CKA_EXTRACTABLE      = 0x00000162L;
     static final long CKA_PUBLIC_KEY_INFO  = 0x00000129L; // v3.2 §4.14: SubjectPublicKeyInfo DER
     static final long CKA_PARAMETER_SET    = 0x0000061dL;
     static final long CKA_EC_PARAMS        = 0x00000180L;
+    static final long CKA_EC_POINT         = 0x00000181L;
 
     // ── RSA-PSS mechanism parameters (CK_RSA_PKCS_PSS_PARAMS) ───────────
     static final long CKG_MGF1_SHA256 = 0x00000002L;

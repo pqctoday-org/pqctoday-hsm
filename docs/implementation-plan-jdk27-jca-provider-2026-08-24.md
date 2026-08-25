@@ -501,9 +501,64 @@ full since both are load-bearing for W2+.
 
 **ML-DSA: DONE. SLH-DSA (all 12 parameter sets): DONE. EdDSA
 (Ed25519/Ed448): DONE. EC/ECDSA (P-256/384/521): DONE. RSA
-(2048/3072/4096, PKCS#1 v1.5 + PSS): DONE.** All 2026-08-24, all
-PASSED. Remaining in W2: `KeyFactorySpi` (import side), `KeyStoreSpi`
-read path — not yet built.
+(2048/3072/4096, PKCS#1 v1.5 + PSS): DONE. `KeyFactorySpi` (public-key
+import, all 5 families): DONE.** All 2026-08-24, all PASSED. Remaining
+in W2: `KeyStoreSpi` read path — not yet built.
+
+**KeyFactory import — user decision: all 5 families at once, closes the
+reverse-cross-check gap flagged since the ML-DSA commit (a
+foreign-provider key could not be verified by our provider; only the
+reverse direction worked).**
+- New native binding, `C_CreateObject`, plus `P11Library.createObject(Attr[])`
+  — the same struct-building path `generateKeyPair` already uses, no new
+  struct shape needed.
+- **Every per-algorithm wire-format decision was confirmed empirically
+  against the live engine before being hardcoded, not derived from the
+  spec alone** — this surfaced one genuine asymmetry that would have
+  silently broken import if assumed: **EdDSA's `CKA_EC_POINT` is RAW**
+  (32 bytes for Ed25519, unwrapped), while **ordinary EC's `CKA_EC_POINT`
+  is a DER `OCTET STRING` wrapping the same kind of raw point bytes** (67
+  bytes for secp256r1 — tag `04`, length `41`, then the 65-byte
+  uncompressed point) — despite both using the identical attribute
+  number. Found by generating one real key per algorithm through this
+  provider and reading the attribute straight back via
+  `C_GetAttributeValue`, not by reading engine source alone (the source
+  reads `pub->getQ()`/`pub->getA()` from two different internal accessors
+  with no obvious tell from the C++ alone that their wire format
+  differs). The same live-probe method also independently reconfirmed
+  the secp384r1 OID derived during the EC/ECDSA work (`params=1.3.132.0.34`,
+  matching exactly) and produced the **complete real OID table** for
+  every registered algorithm/parameter set (all read from our own
+  generated SPKIs via Bouncy Castle, not guessed): ML-DSA-44/65/87 =
+  `2.16.840.1.101.3.4.3.{17,18,19}`; the 12 SLH-DSA parameter sets =
+  `2.16.840.1.101.3.4.3.{20-31}` (NIST CSOR arc, SHA2 variants first then
+  SHAKE); Ed25519/Ed448 = `1.3.101.{112,113}`; EC = `1.2.840.10045.2.1`
+  with the curve OID as `AlgorithmIdentifier` parameters; RSA =
+  `1.2.840.113549.1.1.1`.
+- ASN.1 parsing (`SubjectPublicKeyInfo`/`AlgorithmIdentifier`/
+  `RSAPublicKey`/`DEROctetString`) uses Bouncy Castle — same dependency,
+  same "pure syntax, not crypto" boundary as the ECDSA codec, every
+  class/method confirmed via `javap` against the real jar before use
+  (same discipline as the SLH-DSA cross-verify work).
+- **Private key import refused unconditionally** — not a new decision,
+  the original plan text already called this (§4, §6.2): an imported
+  private key's material would have already crossed through JVM memory
+  to reach this provider, exactly what the opaque-key/L3 design exists
+  to prevent. `engineGeneratePrivate` always throws
+  `InvalidKeySpecException`; confirmed by a dedicated test.
+- One generic `P11PublicKeyFactorySpi`, registered under all 19
+  algorithm names (matching the `P11PureSigSignatureSpi` precedent) —
+  import dispatches on the imported SPKI's own embedded OID, which is
+  self-describing, not on which registered name was used to look the
+  factory up.
+- **Verify — all live, first attempt (no debugging cycle needed —
+  the empirical pre-verification of every wire format paid off):**
+  `mvn test`, 79/79 total (9 new + 70 existing). For each of ML-DSA×3,
+  Ed25519, EC×3 curves, RSA: generate a keypair with **JDK's own software
+  implementation** (zero involvement of our provider), sign with it,
+  import the public key into our provider via `KeyFactory`, verify the
+  JDK-produced signature with **our** token — the exact reverse direction
+  that did not work before this workstream. All pass.
 
 **RSA — user clarifications locked in before starting: 2048/3072/4096
 with exponent 65537 (2048 stays FIPS-approved through 2030, rejected

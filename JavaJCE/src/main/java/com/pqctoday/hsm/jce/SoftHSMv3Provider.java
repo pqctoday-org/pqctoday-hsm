@@ -192,6 +192,26 @@ public final class SoftHSMv3Provider extends Provider {
                 return new P11RSAPSSSignatureSpi(lib);
             }
         });
+
+        // KeyFactory (public-key import — see P11PublicKeyFactorySpi for
+        // why private import is refused). One generic class, registered
+        // under every algorithm name above: import dispatches on the
+        // imported SPKI's own OID, not on which name looked the factory
+        // up, matching the Signature classes' precedent.
+        for (String name : new String[]{
+                "ML-DSA-44", "ML-DSA-65", "ML-DSA-87",
+                "SLH-DSA-SHA2-128S", "SLH-DSA-SHAKE-128S", "SLH-DSA-SHA2-128F", "SLH-DSA-SHAKE-128F",
+                "SLH-DSA-SHA2-192S", "SLH-DSA-SHAKE-192S", "SLH-DSA-SHA2-192F", "SLH-DSA-SHAKE-192F",
+                "SLH-DSA-SHA2-256S", "SLH-DSA-SHAKE-256S", "SLH-DSA-SHA2-256F", "SLH-DSA-SHAKE-256F",
+                "Ed25519", "Ed448", "EC", "RSA"}) {
+            putService(new Service(this, "KeyFactory", name,
+                P11PublicKeyFactorySpi.class.getName(), List.of(), Map.of()) {
+                @Override
+                public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                    return new P11PublicKeyFactorySpi(lib);
+                }
+            });
+        }
     }
 
     private void registerRSAPKCS1(String name, long mech) {

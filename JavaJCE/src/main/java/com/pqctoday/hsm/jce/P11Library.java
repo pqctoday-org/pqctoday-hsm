@@ -94,7 +94,7 @@ final class P11Library implements AutoCloseable {
         // P11Library instance guessing at other instances' state.
         cLogout, cCloseSession, cDigestInit, cDigestUpdate, cDigestFinal,
         cGenerateRandom, cSeedRandom, cGenerateKeyPair, cSignInit, cSign,
-        cVerifyInit, cVerify, cGetAttributeValue;
+        cVerifyInit, cVerify, cGetAttributeValue, cCreateObject;
     private final long session;
     private volatile boolean closed;
 
@@ -131,6 +131,7 @@ final class P11Library implements AutoCloseable {
             cVerifyInit    = h(linker, lib, "C_VerifyInit", fd(JAVA_LONG, ADDRESS, JAVA_LONG));
             cVerify        = h(linker, lib, "C_Verify", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG));
             cGetAttributeValue = h(linker, lib, "C_GetAttributeValue", fd(JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
+            cCreateObject  = h(linker, lib, "C_CreateObject", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
 
             ensureGlobalInit(linker, lib);
 
@@ -300,6 +301,21 @@ final class P11Library implements AutoCloseable {
             throw e;
         } catch (Throwable t) {
             throw new ProviderException("getAttributeBytes failed", t);
+        }
+    }
+
+    /** C_CreateObject — imports a caller-supplied key onto the token (public keys only; see KeyFactory import). */
+    long createObject(Attr[] template) {
+        ensureOpen();
+        try {
+            MemorySegment tmpl = attrs(template);
+            MemorySegment hObj = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cCreateObject, session, tmpl, (long) template.length, hObj), "C_CreateObject");
+            return hObj.get(JAVA_LONG, 0);
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("createObject failed", t);
         }
     }
 
