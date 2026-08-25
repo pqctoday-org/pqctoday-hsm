@@ -46,6 +46,20 @@ final class P11Constants {
     static final long CKM_AES_KEY_WRAP     = 0x00002109L;
     static final long CKM_AES_KEY_WRAP_PAD = 0x0000210aL;
 
+    // ── MAC (W4) ─────────────────────────────────────────────────────────
+    static final long CKM_GENERIC_SECRET_KEY_GEN = 0x00000350L;
+    static final long CKM_SHA224_HMAC   = 0x00000256L;
+    static final long CKM_SHA256_HMAC   = 0x00000251L;
+    static final long CKM_SHA384_HMAC   = 0x00000261L;
+    static final long CKM_SHA512_HMAC   = 0x00000271L;
+    static final long CKM_SHA3_224_HMAC = 0x000002b6L;
+    static final long CKM_SHA3_256_HMAC = 0x000002b1L;
+    static final long CKM_SHA3_384_HMAC = 0x000002c1L;
+    static final long CKM_SHA3_512_HMAC = 0x000002d1L;
+    static final long CKM_AES_CMAC      = 0x0000108aL;
+    static final long CKM_KMAC_128      = 0x80000100L; // CKM_VENDOR_DEFINED | 0x100
+    static final long CKM_KMAC_256      = 0x80000101L; // CKM_VENDOR_DEFINED | 0x101
+
     // ── Object classes ──────────────────────────────────────────────────
     static final long CKO_PUBLIC_KEY  = 0x00000002L;
     static final long CKO_PRIVATE_KEY = 0x00000003L;

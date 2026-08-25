@@ -1103,14 +1103,60 @@ compliance-gap fix, not just Java-side work.**
   CBC/CBC+PKCS5/CTR self-round-trip, GCM×Bouncy Castle bidirectional,
   AESWrap round-trip + Bouncy Castle unwrap cross-check).
 
-Remaining W4 scope (MAC, KDF, SecretKeyFactory, SP 800-108, KeyStore
-write path) — not started. One concrete finding already on record for
-when SP 800-108 is picked up: `CK_SP800_108_KDF_PARAMS` has a
-variable-length PRF-data-array parameter structure (confirmed reading
-W0.3's KMAC spike notes above) that needs its own dedicated FFM struct
-builder — `P11Library.mechWithParams`'s all-`CK_ULONG` shape doesn't
-cover it, deliberately noted in that method's own javadoc rather than
-stretched to fit.
+**MAC (HMAC-SHA-224/256/384/512, HmacSHA3-224/256/384/512, AESCMAC,
+KMAC128/256): DONE 2026-08-24, PASSED.**
+- `P11MacSpi`: one generic class, mechanism + expected key algorithm +
+  mac length supplied at construction — same shape as
+  `P11PureSigSignatureSpi`. Confirmed by reading `SoftHSM_sign.cpp`
+  before writing any code that PKCS#11 treats a MAC as a plain
+  `C_SignInit`/`C_Sign` operation, so **no new native binding was
+  needed** beyond what W2's Signature classes already proved — a real
+  scope reduction, same class of finding as GCM's IV policy above.
+- `P11GenericSecretKeyGeneratorSpi`: `CKK_GENERIC_SECRET` via
+  `CKM_GENERIC_SECRET_KEY_GEN`, one instance per registered HMAC/KMAC
+  name — confirmed against the engine's own MAC mechanism table
+  (`SoftHSM_sign.cpp`'s `kMacMechTable`) that `allowGenericSecret=true`
+  for every HMAC variant and both KMAC mechanisms, so no
+  mechanism-specific key type was needed there. `CKM_AES_CMAC` is the
+  one exception in that same table (`allowGenericSecret=false`,
+  requires `CKK_AES` specifically) — reuses the existing "AES"
+  `KeyGenerator` unchanged, no new class.
+- **KMAC output lengths were verified empirically, not assumed from the
+  W0.3 spike's documented values** — `MacTest` asserts the exact byte
+  length (128→32, 256→64) AND cross-verifies byte-for-byte against
+  Bouncy Castle, so a wrong assumption here would have failed loudly
+  rather than silently passing a self-consistency-only check.
+- **Cross-verification oracle chosen per-algorithm from a live
+  enumeration, not assumed:** ran `Security.getAlgorithms("Mac")`
+  against this JDK before writing the test and confirmed it registers
+  `HmacSHA224/256/384/512` and `HmacSHA3-224/256/384/512` but **not**
+  `AESCMAC` or `KMAC128`/`KMAC256` — so HMAC cross-verifies against the
+  JDK's own SunJCE (using a known raw key imported into both, the same
+  structural necessity as AES — see above), while AESCMAC and KMAC
+  cross-verify against Bouncy Castle instead (confirmed live that BC
+  registers all three), the same "JDK lacks it, use BC" pattern already
+  established for SLH-DSA (W2) and SHA-3 OAEP (W3).
+- **Verify:** `mvn test`, 141/141 (122 prior + 19 new — KeyGenerator +
+  self-consistency for all 8 HMAC variants, JDK cross-verify for all 8,
+  AESCMAC×Bouncy Castle, KMAC128/256×Bouncy Castle with empirical
+  length assertions).
+
+Remaining W4 scope (KDF, SecretKeyFactory, SP 800-108, KeyStore write
+path) — not started. One concrete finding already on record for when SP
+800-108 is picked up: `CK_SP800_108_KDF_PARAMS` has a variable-length
+PRF-data-array parameter structure (confirmed reading W0.3's KMAC spike
+notes above) that needs its own dedicated FFM struct builder —
+`P11Library.mechWithParams`'s all-`CK_ULONG` shape doesn't cover it,
+deliberately noted in that method's own javadoc rather than stretched to
+fit. The real JDK 24 `javax.crypto.KDF`/`KDFSpi`/`HKDFParameterSpec`
+shape was already verified live via `javap` this session (Extract/
+Expand/ExtractThenExpand, with `List<SecretKey>` IKM/salt) — worth
+noting before that workstream starts that the engine's own
+`CK_HKDF_PARAMS` (confirmed in `pkcs11t.h`) only supports a single IKM
+(the `C_DeriveKey` base key) and a single optional salt, so the JDK
+API's multi-IKM/multi-salt generalization will need either a documented
+single-element-only restriction or a deliberate concatenation policy —
+not yet decided.
 
 - GCM in-token IV policy (§4.3 note) — DONE, see above.
 - **Verify:** NIST CAVP/ACVP vectors for AES-GCM/CMAC/HKDF; interop with

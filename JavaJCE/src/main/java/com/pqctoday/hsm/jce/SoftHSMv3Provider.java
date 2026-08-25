@@ -292,6 +292,50 @@ public final class SoftHSMv3Provider extends Provider {
         registerAESWrap("AESWrap", CKM_AES_KEY_WRAP);
         registerAESWrap("AESWrapPad", CKM_AES_KEY_WRAP_PAD);
 
+        // W4: MAC (HMAC-SHA*/AESCMAC/KMAC128/256) — MAC is a plain
+        // C_Sign operation in PKCS#11 (confirmed reading SoftHSM_sign.cpp
+        // before writing P11MacSpi), so no new native binding was needed
+        // beyond what W2's Signature classes already proved. Key
+        // generators: HMAC/KMAC use CKK_GENERIC_SECRET (engine's own
+        // kMacMechTable marks allowGenericSecret=true for both); AESCMAC
+        // reuses the existing "AES" KeyGenerator unchanged (the table
+        // requires CKK_AES specifically, no generic-secret fallback).
+        // macLength values are the engine's own PKCS#11-minimum per
+        // mechanism (same table) — KMAC's in particular were NOT assumed:
+        // KMAC-256's 64-byte (not 32) output was already found live once
+        // this session, in the W0.3 spike.
+        registerHmac("HmacSHA224", CKM_SHA224_HMAC, 28);
+        registerHmac("HmacSHA256", CKM_SHA256_HMAC, 32);
+        registerHmac("HmacSHA384", CKM_SHA384_HMAC, 48);
+        registerHmac("HmacSHA512", CKM_SHA512_HMAC, 64);
+        registerHmac("HmacSHA3-224", CKM_SHA3_224_HMAC, 28);
+        registerHmac("HmacSHA3-256", CKM_SHA3_256_HMAC, 32);
+        registerHmac("HmacSHA3-384", CKM_SHA3_384_HMAC, 48);
+        registerHmac("HmacSHA3-512", CKM_SHA3_512_HMAC, 64);
+        registerGenericSecretKeyGenerator("KMAC128", 16);
+        registerGenericSecretKeyGenerator("KMAC256", 32);
+        putService(new Service(this, "Mac", "KMAC128",
+            P11MacSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11MacSpi(lib, CKM_KMAC_128, "KMAC128", 32);
+            }
+        });
+        putService(new Service(this, "Mac", "KMAC256",
+            P11MacSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11MacSpi(lib, CKM_KMAC_256, "KMAC256", 64);
+            }
+        });
+        putService(new Service(this, "Mac", "AESCMAC",
+            P11MacSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11MacSpi(lib, CKM_AES_CMAC, "AES", 16);
+            }
+        });
+
         // W2: KeyStore (read path — see P11KeyStoreSpi's javadoc for why
         // write/delete throw for now). Fixes the classic SunPKCS11 "0
         // keys" gap for this token by actually enumerating objects via
@@ -323,6 +367,27 @@ public final class SoftHSMv3Provider extends Provider {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
                 return new P11AESCipherSpi(lib, mode);
+            }
+        });
+    }
+
+    private void registerHmac(String name, long mech, int macLength) {
+        registerGenericSecretKeyGenerator(name, macLength);
+        putService(new Service(this, "Mac", name,
+            P11MacSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11MacSpi(lib, mech, name, macLength);
+            }
+        });
+    }
+
+    private void registerGenericSecretKeyGenerator(String name, int defaultKeySizeBytes) {
+        putService(new Service(this, "KeyGenerator", name,
+            P11GenericSecretKeyGeneratorSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11GenericSecretKeyGeneratorSpi(lib, name, defaultKeySizeBytes);
             }
         });
     }
