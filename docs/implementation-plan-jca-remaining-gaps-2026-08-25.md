@@ -724,6 +724,56 @@ deferred with real reasoning, none left implicit.**
    `CKR_*` codepoints — the Java side must surface the same numbers
    (`P11Error` naming discipline carries over).
 
+**E0: DONE 2026-08-25, all three answered live against real running
+infrastructure — nothing here was assumed from the plan text.**
+
+1. **Server confirmed live.** `pqc-grpc` container running, `0.0.0.0:5710`,
+   `PKCS11_REMOTE_TLS_PROFILE=quantum-safe`
+   (`PKCS11_REMOTE_TLS_CERT=/admin-certs/server.crt`,
+   `..._TLS_KEY=/admin-certs/server.key`,
+   `..._TLS_CLIENT_CA=/admin-certs/ca.crt`, confirmed via
+   `docker inspect`'s real env, not the plan's assumed default) — real
+   mTLS is mandatory, not optional, for this deployment (confirmed
+   reading `main.rs`: quantum-safe refuses to start without
+   `--tls-client-ca` at all). `/admin-certs` re-confirmed mounted
+   **read-only** in `pqc-dev-sandbox` with real `client.crt`/`client.key`/
+   `ca.crt` material present (not just `ca.crt` — a full client identity),
+   and real TCP reachability confirmed host-to-container
+   (`pqc-dev-sandbox` → `pqc-grpc:5710`, Python `socket.create_connection`,
+   not bash `/dev/tcp` which false-negatived on this image's bash build
+   for an unrelated reason — caught before trusting a bogus "unreachable"
+   result).
+2. **Keys are server-side handles for signing keys; the KEM shared
+   secret is NOT.** Confirmed reading `service.rs` end to end, not just
+   the proto: `GenerateKeyPairRequest`/`Response` and `Sign`/`Verify`
+   all address keys by `uint32` handle exactly as E0 hoped — this part
+   of the remote provider CAN be opaque-handle-shaped like the local
+   one. But `EncapsulateResponse`/`DecapsulateResponse` both carry the
+   shared secret as raw `bytes` directly on the wire, not a handle —
+   a real, structural difference from the local provider's opaque-KEM
+   design that E1's `RemoteKey`/`SoftHSMv3RemoteProvider` design needs
+   to account for (not a blocker: this is the same class of disclosed
+   exception the local provider already makes for ML-KEM/ECDH secrets
+   — the whole point of a KEM output is to leave the boundary it was
+   computed behind).
+3. **Error mapping confirmed, and it changes the Java-side design:**
+   `error.rs`'s `to_status` does NOT use gRPC's structured status-details
+   extension (`google.rpc.Status` + typed `Any` in trailing metadata) —
+   the `raw_ck_rv` is embedded as a formatted substring inside the plain
+   status message (`"{msg} (pkcs11_error={code:?}, raw_ck_rv=0x{rv:08X})"`).
+   The Java client's error mapping (E2/`P11Error` discipline) will need
+   to parse this out of `Status.getDescription()` with a regex, not
+   deserialize a structured detail object — a real implementation detail
+   E0 exists specifically to catch before E2's code gets written the
+   wrong way.
+
+WS-E's E1-E4 (architecture, build wiring, mTLS client, verification) are
+scoped and ready but **not yet executed** — a natural checkpoint given
+E0's own "nothing else starts until these are answered live" gate is
+now cleanly closed with real answers, and this is a good point to
+check in before starting a full new Maven module + gRPC codegen
+workstream.
+
 ### E1 — Architecture decision (made now, validated by E0)
 
 **Do NOT interface-ize `P11Library` across all ~20 SPIs.** The remote
@@ -873,6 +923,26 @@ sabotaging the new gate step before trusting it.**
 ---
 
 ## 9. WS-G — W8, sandbox side (full scope, decision Q3)
+
+**BLOCKED 2026-08-25, not started — real collision, not a hypothetical
+one.** `pqctoday-sandbox` was checked before touching it (this plan's
+own working-tree-safety discipline) and found on
+`fix/dev-sandbox-samples-remediation-0824` with real, substantial
+uncommitted changes to the exact two files item 1 below needs to edit:
+`docker/Dockerfile.dev-sandbox` (a whole new JDK 27 RC install block,
+apparently for that OTHER effort's own `RestPkcs11Demo.java` sample —
+different workstream labels, WS-5/WS-6, not this plan's WS-A-H) and
+`samples/java/pom.xml` (a new `org.json` dependency + shade-plugin
+wiring). Editing either file now risks either clobbering that
+in-progress work or, if staged carelessly, committing it bundled into
+a WS-G commit under a message that doesn't describe it — a real
+misattribution risk in a shared working tree, not just an inconvenience.
+**Deliberately not worked around** — reported to the user rather than
+guessed past. Once resolved (that branch's WIP committed, or explicit
+go-ahead confirmed), WS-G's own scope is unchanged from below; the
+JDK 27 RC install block already present in that uncommitted diff can
+likely be reused as-is for item 1's own "JDK 27 already present" step,
+once it's safely committed by whoever owns it.
 
 All sandbox work follows the sibling-checkout build model (§1
 correction 2) and the repo's own conventions (samples live as named
