@@ -20,6 +20,7 @@
 #  10. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
 #  11. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
 #  12. (--javajce) JavaJCE provider suite (mvn test) in pqc-dev-sandbox  [opt-in]
+#  13. (--javajce-remote) JavaJCE-remote gRPC provider suite vs live pqc-grpc  [opt-in]
 #
 # Steps 6-7 (Rust PKCS#11 conformance, differential harness) were opt-in
 # until 2026-08-23 — both are core PKCS#11 v3.2 evidence, and both had gone
@@ -35,6 +36,15 @@
 # available — FAIL-never-skip semantics when the flag IS passed, matching
 # --tls-interop's own precedent.
 #
+# --javajce-remote (plan §7, WS-E) is separate from --javajce, not folded
+# into it: it exercises the gRPC client module (JavaJCE-remote/) against a
+# genuinely running pqc-grpc server over real mTLS — a network-dependent
+# integration suite, not the local-FFM unit suite --javajce runs. It needs
+# BOTH $SANDBOX_CONTAINER (JDK 27 RC, same reason as --javajce) AND the
+# pqc-grpc/admin-certs stack from pqctoday-sandbox's docker-compose.yml
+# already up — checked explicitly below and failed loudly (not skipped)
+# if pqc-grpc isn't reachable, same FAIL-never-skip semantics.
+#
 # On success it writes .gate-ok-<HEAD-sha> (with the flag set that produced
 # it) so a pre-push hook can verify the gate ran on the current commit —
 # see scripts/git-hooks/pre-push, installed via scripts/install-hooks.sh.
@@ -45,6 +55,7 @@
 #   bash scripts/local-gate.sh --acvp-wasm     # + ACVP wasm harness
 #   bash scripts/local-gate.sh --release-xmss  # + XMSS/XMSS^MT vs release wasm build
 #   bash scripts/local-gate.sh --javajce       # + JavaJCE provider suite (needs pqc-dev-sandbox)
+#   bash scripts/local-gate.sh --javajce-remote  # + JavaJCE-remote suite (needs pqc-dev-sandbox + live pqc-grpc)
 #   bash scripts/local-gate.sh --all           # everything (required before a release — see RELEASING.md)
 #   RUST_CONTAINER=pqc-rust bash scripts/local-gate.sh
 #
@@ -61,12 +72,14 @@ SANDBOX_CONTAINER="${SANDBOX_CONTAINER:-pqc-dev-sandbox}"
 AG_KMIP="/ag/pqctoday-hsm/kmip"
 AG_RUST="/ag/pqctoday-hsm/rust"
 JAVAJCE_DIR="$ROOT/JavaJCE"
+JAVAJCE_REMOTE_DIR="$ROOT/JavaJCE-remote"
 
 RUN_CPP=0
 RUN_ACVP_WASM=0
 RUN_TLS_INTEROP=0
 RUN_RELEASE_XMSS=0
 RUN_JAVAJCE=0
+RUN_JAVAJCE_REMOTE=0
 for arg in "$@"; do
   case "$arg" in
     --cpp) RUN_CPP=1 ;;
@@ -75,7 +88,8 @@ for arg in "$@"; do
     --tls-interop) RUN_TLS_INTEROP=1 ;;
     --release-xmss) RUN_RELEASE_XMSS=1 ;;
     --javajce) RUN_JAVAJCE=1 ;;
-    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_TLS_INTEROP=1; RUN_RELEASE_XMSS=1; RUN_JAVAJCE=1 ;;
+    --javajce-remote) RUN_JAVAJCE_REMOTE=1 ;;
+    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_TLS_INTEROP=1; RUN_RELEASE_XMSS=1; RUN_JAVAJCE=1; RUN_JAVAJCE_REMOTE=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -345,6 +359,49 @@ if [[ $RUN_JAVAJCE == 1 ]]; then
   fi
 fi
 
+if [[ $RUN_JAVAJCE_REMOTE == 1 ]]; then
+  # Unlike --javajce (local FFM, no network), this step's whole point is a
+  # real network round trip against the live pqc-grpc server over real
+  # mTLS — same "run it for real, never mock" discipline as
+  # remoting/acceptance/tests/three_way_parity.rs on the Rust side. That
+  # server isn't part of $SANDBOX_CONTAINER itself (it's the pqc-grpc
+  # container from pqctoday-sandbox's docker-compose.yml, reached over the
+  # shared playground-network) — checked explicitly so a missing stack
+  # fails loudly with a clear reason instead of a confusing mvn stack
+  # trace three steps later.
+  STEP=$((STEP+1)); say "step $STEP: JavaJCE-remote gRPC provider suite (mvn test, pqc-dev-sandbox, live pqc-grpc)"
+  ensure_sandbox_container
+  if ! dexec_sandbox "getent hosts pqc-grpc >/dev/null 2>&1"; then
+    bad "JavaJCE-remote provider suite — pqc-grpc is not reachable from $SANDBOX_CONTAINER (start it: cd pqctoday-sandbox && docker compose up -d pqc-grpc)"
+  elif ! dexec_sandbox "[[ -f /admin-certs/client.crt && -f /admin-certs/client.key && -f /admin-certs/ca.crt ]]"; then
+    bad "JavaJCE-remote provider suite — /admin-certs mTLS material missing inside $SANDBOX_CONTAINER"
+  else
+    GATE_DEST_REMOTE=/tmp/hsm-javajce-remote-gate
+    # protoSourceRoot in JavaJCE-remote/pom.xml is ../remoting/proto/proto
+    # (consumed verbatim from the real Rust schema, never copied into the
+    # module's own tree — see that pom's own header comment) — staged at
+    # the matching relative path here, same fix as the original ad-hoc
+    # staging bug (a bare parent dir doesn't exist by default under
+    # docker cp; the intermediate dirs must be made first).
+    if dexec_sandbox "rm -rf $GATE_DEST_REMOTE && mkdir -p $GATE_DEST_REMOTE/remoting/proto/proto" \
+       && docker cp "$JAVAJCE_DIR" "$SANDBOX_CONTAINER:$GATE_DEST_REMOTE/JavaJCE" >/dev/null 2>&1 \
+       && docker cp "$JAVAJCE_REMOTE_DIR" "$SANDBOX_CONTAINER:$GATE_DEST_REMOTE/JavaJCE-remote" >/dev/null 2>&1 \
+       && docker cp "$ROOT/remoting/proto/proto/pkcs11_remote.proto" \
+            "$SANDBOX_CONTAINER:$GATE_DEST_REMOTE/remoting/proto/proto/pkcs11_remote.proto" >/dev/null 2>&1 \
+       && dexec_sandbox "cd $GATE_DEST_REMOTE/JavaJCE && \
+            export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
+            mvn -o install -DskipTests -q" \
+       && dexec_sandbox "cd $GATE_DEST_REMOTE/JavaJCE-remote && \
+            export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
+            mvn -o test 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' > /tmp/javajce-remote-gate.log; \
+            grep -E '$AGG_PATTERN' /tmp/javajce-remote-gate.log >/dev/null"; then
+      ok "JavaJCE-remote provider suite ($(dexec_sandbox "grep -E '$AGG_PATTERN' /tmp/javajce-remote-gate.log | tail -1"))"
+    else
+      bad "JavaJCE-remote provider suite — see /tmp/javajce-remote-gate.log inside $SANDBOX_CONTAINER for the real failure"
+    fi
+  fi
+fi
+
 # ── verdict ─────────────────────────────────────────────────────────────────
 echo
 if [[ ${#FAILED[@]} -eq 0 ]]; then
@@ -356,6 +413,7 @@ if [[ ${#FAILED[@]} -eq 0 ]]; then
   [[ $RUN_TLS_INTEROP == 1 ]] && FLAGS="$FLAGS,tls-interop"
   [[ $RUN_RELEASE_XMSS == 1 ]] && FLAGS="$FLAGS,release-xmss"
   [[ $RUN_JAVAJCE == 1 ]] && FLAGS="$FLAGS,javajce"
+  [[ $RUN_JAVAJCE_REMOTE == 1 ]] && FLAGS="$FLAGS,javajce-remote"
   {
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "flags: $FLAGS"

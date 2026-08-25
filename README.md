@@ -869,6 +869,18 @@ build/test instructions, and known limitations, and
 [`docs/jdk27-jca-provider-security-posture.md`](docs/jdk27-jca-provider-security-posture.md)
 for the section-by-section FIPS 140-3 area mapping.
 
+**A second, separate module, [`JavaJCE-remote/`](JavaJCE-remote/README.md)**
+(`SoftHSMv3RemoteProvider`, JCA name `SoftHSMv3-Remote`), bridges the
+same JCA/JCE surface to the engine over the network — `remoting/`'s gRPC
+service — instead of the local FFM path above, for deployments where
+the JVM and the engine aren't on the same host. Narrower algorithm
+coverage by real proto contract (Ed25519, ML-DSA-44/65/87,
+ML-KEM-512/768/1024 only), mandatory mTLS, and one added capability the
+local provider doesn't need: `getSelfSignedCertificate`, since keys
+generated remotely have no other way to leave the server as usable
+material (`getEncoded()` is `null` for both key types here — a wire
+capability gap, not the local provider's opacity-by-design choice).
+
 ---
 
 ## OpenSSH PKCS#11 Connector (`openssh-pkcs11/`)

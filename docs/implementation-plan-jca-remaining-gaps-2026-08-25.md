@@ -882,6 +882,122 @@ Extending the proto `Algorithm` enum + verb set (SLH-DSA, EC, RSA,
 symmetric) to widen the remote JCA surface — a cross-crate change with
 its own Rust-side test obligations.
 
+### E1.3 — Third correction: real certificate export (user-directed,
+mid-workstream, 2026-08-25)
+
+The user redirected after reading E1's own "no verb returns a public
+key's bytes at all" finding: **"java should allow public key extraction
+in a certificate format"**, then **"our pkcs11 backend should support
+that extraction"** (not a client-side fake) — closing the gap E1
+disclosed rather than accepting it as final. Clarified with the user
+before building: a full self-signed X.509 `Certificate` (not bare SPKI
+DER), parity across **both** gRPC and REST (not gRPC-only), full test
+depth.
+
+Delivered as an **8th verb**, `GetSelfSignedCertificate`
+(`session_handle, public_handle, private_handle, algorithm, subject_cn,
+validity_days` → `certificate_der`), built independently of
+`pqctoday-kmip`'s own `Certify` op (confirmed live: that code path
+rejects Ed25519 as a CA signing algorithm) in a new
+`remoting/core/src/cert.rs` — reads the real `SubjectPublicKeyInfo` via
+`CKA_PUBLIC_KEY_INFO` (PKCS#11 v3.2 §4.14, confirmed supported by both
+engines), builds a self-signed (issuer == subject) `TbsCertificate`
+with no extensions, signs through the already-proven `verbs::sign`
+path (never re-deriving PQC signing correctness). `AlgorithmIdentifier`
+parameters are `None` for Ed25519 (RFC 8410 §3/§6, fetched and
+confirmed, not assumed) and for ML-DSA-44/65/87 (matching
+draft-ietf-lamps-dilithium-certificates and kmip's own OID constants).
+Rejects ML-KEM keys with `CKR_ARGUMENTS_BAD` — a KEM key cannot sign
+its own certificate. Wired through all three existing transports
+(in-process, gRPC, REST) with two new `three_way_parity.rs` cases
+(`a6`/`a7`) that re-verify the embedded signature via `verbs::verify`,
+not just DER-parse it. Rust-side: 16/16 tests green (9 core + 7
+acceptance), committed `b3c7309`.
+
+**`subject_cn` is the bare RDN value, not a `"CN=..."` string** — the
+server itself builds `Name::from_str("CN={subject_cn}")`; passing an
+already-prefixed value produces a literal `CN=CN=...` subject (caught
+live, first smoke run — documented on the Java-side javadoc so callers
+don't repeat it).
+
+### E2/E3/E4 — Completion (2026-08-25)
+
+New module `JavaJCE-remote/` (separate Maven artifact depending on the
+core `softhsmv3-jce` jar, per E1's own architecture decision — zero
+network deps added to the core provider). One `GrpcTransport` class
+speaking all 8 verbs; `SoftHSMv3RemoteProvider` registers
+KeyPairGenerator (7 names) / Signature (4) / KEM (4 names, bare
+`"ML-KEM"` + 3 parameter-set names) plus the certificate-export method
+from E1.3. `RemoteKey.Priv`/`Pub` both report `getEncoded() == null`
+(E1's disclosed gap — `getSelfSignedCertificate` is the one way real
+key bytes leave this provider). `RemoteError` parses the real
+`raw_ck_rv=0x...` substring out of `Status.getDescription()`, mirroring
+`three_way_parity.rs`'s own `grpc_raw_ck_rv` helper rather than
+reinventing the parse. mTLS (E3) is fail-closed at construction — no
+plaintext fallback — verified against a real missing-cert-material
+case, not just asserted in prose.
+
+**Two real, live-caught build bugs, neither guessable from a diff
+review:**
+1. `protoc:4.36.0` (pinned explicitly, matching E2's own "pin after
+   checking Maven Central" discipline) generates code against a newer
+   `protobuf-java` API shape than `grpc-protobuf:1.83.1` transitively
+   resolves — dozens of compile errors in the generated stub
+   (`RuntimeVersion` class missing, wrong `parseUnknownField` arity,
+   missing `getMessageType(int)`/`isStringEmpty`/
+   `resolveAllFeaturesImmutable`). Fixed by declaring
+   `com.google.protobuf:protobuf-java:${protobuf.version}` explicitly,
+   forcing Maven's nearest-wins resolution to match `protoc`'s own
+   version exactly — protoc and its runtime library must be the same
+   version; nothing pins that automatically.
+2. `sessionHandle` was declared `long` in `GrpcTransport` (matching the
+   JCA-facing `long` shape used elsewhere in this codebase for
+   handles) but the wire type is `uint32` — every
+   `.setSessionHandle(sessionHandle)` call is a narrowing conversion
+   from a *wider* Java type back into an `int` setter, a real compile
+   error, not a style nit. Fixed by declaring the field as the `int`
+   it actually is on the wire (the other handles stay `long` at the
+   public method-signature boundary with an explicit `(int)` cast at
+   each call site, since those are genuinely public API surface;
+   `sessionHandle` is purely internal).
+
+**Verification (E4), against the real running `pqc-grpc` container,
+not a mock:** a 14-case JUnit suite
+(`JavaJCE-remote/src/test/.../RemoteProviderLiveTest.java`) — per-algorithm
+sign/verify/tamper-rejection (Ed25519, ML-DSA-44/65/87), per-algorithm
+certificate round trip with real `PKIXParameters`/`CertPathValidator`
+validation, per-algorithm KEM round trip (ML-KEM-512/768/1024),
+certificate-rejects-ML-KEM-key, missing-mTLS-material fails closed
+before any network call, and wrong-PIN rejected with the real
+`CKR_PIN_INCORRECT` name recovered from the wire. First live run
+caught the certificate cases failing with `UNIMPLEMENTED` — the
+already-running `pqc-grpc` container predated the E1.3 Rust commit;
+rebuilding+recreating the container (`docker compose build pqc-grpc`)
+picked up the new verb, after which all 14 cases passed. Sabotage-tested
+per this repo's own convention (a flipped assertion on a **copy**,
+never the real test file) to confirm the pass/fail detection is real,
+not vacuous — correctly reported 4 failures, not a false green.
+
+Also fixed: JDK 27's restricted-native-access enforcement (JEP 472)
+warns every run because `grpc-netty-shaded` loads a bundled native
+Netty transport via `System.loadLibrary()` from the classpath (the
+unnamed module) — will be a hard error in a future JDK release, not
+just a warning. Fixed at the source via
+`<argLine>--enable-native-access=ALL-UNNAMED</argLine>` on
+`maven-surefire-plugin` rather than leaving it for every future test
+run to re-discover.
+
+`scripts/local-gate.sh` gained a second opt-in step,
+`--javajce-remote`, separate from `--javajce` (that one is the local
+FFM suite, no network; this one's whole point is a real round trip
+against a live `pqc-grpc`) — checks `pqc-grpc` reachability and
+`/admin-certs` presence explicitly first so a missing stack fails with
+a clear message instead of a confusing `mvn` stack trace, then
+`mvn install`s the core module before `mvn test`ing the remote one
+(same `AGG_PATTERN`-anchored aggregate-line match `--javajce` already
+uses, reused rather than re-derived). Verified both the pass path and,
+via the same sabotage-a-copy technique, the fail path.
+
 ---
 
 ## 8. WS-F — W8, hsm side

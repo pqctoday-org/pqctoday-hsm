@@ -69,8 +69,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **gRPC and REST PKCS#11 remoting** (new `remoting/` standalone workspace:
   `proto`/`core`/`grpc`/`rest`/`acceptance`) — two new network-facing access
   paths to the engine (`pqc-grpc-pkcs11`, `pqc-rest-pkcs11`), alongside the
-  existing in-process and KMIP paths. 7 verbs: OpenSession, CloseSession,
-  GenerateKeyPair, Sign, Verify, Encapsulate, Decapsulate. Both services
+  existing in-process and KMIP paths. 8 verbs: OpenSession, CloseSession,
+  GenerateKeyPair, Sign, Verify, Encapsulate, Decapsulate,
+  GetSelfSignedCertificate (added 2026-08-25 — see below). Both services
   share the KMIP listener's quantum-safe TLS posture through a new
   `pqctoday-tls` crate — `SecP384r1MLKEM1024` (locally composed, since
   rustls 0.23 lacks it natively) extracted verbatim out of `pqctoday-kmip`
@@ -89,6 +90,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   against the same algorithm matrix as the existing KMIP arm, sharing its
   twin-container interleaved A/B comparison mechanism (`--compare-tls`,
   real min/max spread across repeats, `interleaved:true` per row).
+- **`GetSelfSignedCertificate`, an 8th remoting verb** (`remoting/core/src/cert.rs`) —
+  a real, self-signed X.509 certificate for a signature-capable keypair
+  already on the token (Ed25519, ML-DSA-44/65/87), reading the genuine
+  `SubjectPublicKeyInfo` via `CKA_PUBLIC_KEY_INFO` and signing through the
+  already-proven `Sign` path. Closes a real gap found live while building
+  the gRPC Java client (`JavaJCE-remote/`, below): none of the original 7
+  verbs return a public key's bytes at all, so a remote-generated key had
+  no way to leave the server as usable material. ML-KEM keys are rejected
+  with `CKR_ARGUMENTS_BAD` (a KEM key cannot sign its own certificate).
+  Two new `three_way_parity.rs` cases re-verify the embedded signature
+  across all three transports, not just DER-parse it.
+- **`JavaJCE-remote/`** — a second, separate Java provider module
+  (`com.pqctoday.hsm.jce.remote.SoftHSMv3RemoteProvider`, JCA name
+  `SoftHSMv3-Remote`) bridging `javax.crypto`/`java.security` to the
+  engine over the gRPC remoting surface above, rather than the local FFM
+  path `JavaJCE/` uses — a separate artifact by design, so the core
+  provider keeps zero network dependencies. Covers the remote surface's
+  narrower algorithm set (Ed25519, ML-DSA-44/65/87, ML-KEM-512/768/1024;
+  no SLH-DSA/EC/RSA/symmetric — a real proto contract limit, not an
+  omission) plus certificate export via the new verb above. mTLS is
+  mandatory at construction (fail-closed, no plaintext fallback), reusing
+  the same `/admin-certs` material every other admin-facing client in
+  this repo already uses. Verified with a 14-case JUnit suite against the
+  real running `pqc-grpc` container (not a mock): per-algorithm
+  sign/verify/tamper-rejection, per-algorithm certificate round trip
+  validated with real `PKIXParameters`/`CertPathValidator`, per-algorithm
+  KEM round trip, and real-error-code assertions (`CKR_PIN_INCORRECT`,
+  the mTLS fail-closed path). `scripts/local-gate.sh` gained a matching
+  opt-in `--javajce-remote` step (network-dependent, separate from the
+  local-only `--javajce` step).
 - **`CKM_HKDF_DERIVE` now supports `CKF_HKDF_SALT_KEY`** (salt supplied
   as a key handle rather than raw data) — previously rejected outright
   with `CKR_MECHANISM_PARAM_INVALID`. Needed so a caller can chain a
