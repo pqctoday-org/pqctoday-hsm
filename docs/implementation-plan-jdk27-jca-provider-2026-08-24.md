@@ -836,12 +836,74 @@ posture:**
   (SLH-DSA/EC/RSA/EdDSA, KeyFactory import, KeyStore read path):
 
 ### W3 — KEM + key agreement + OAEP
-- `KEMSpi` (ML-KEM 512/768/1024) over `C_EncapsulateKey`/`C_DecapsulateKey`;
-  `KeyAgreementSpi` (ECDH); `CipherSpi` for RSA-OAEP wrap/unwrap.
-- Shared-secret policy per §6.7.
-- **Verify:** KEM cross-check against JDK 24 software ML-KEM (encap
-  ours → decap theirs and reverse); ECDH against SunEC; OAEP round-trip
-  + wrap/unwrap of an AES key that never leaves the token unwrapped.
+
+**ML-KEM (512/768/1024): DONE 2026-08-24, PASSED — the headline feature
+this whole plan exists for.** User clarifications locked in before
+starting: session-only `SecretKey` for the shared secret (§6.7's open
+question, now resolved — see below), sequencing all three W3 sub-parts
+in one pass. ECDH and OAEP: not yet built.
+
+**Shared-secret handling (§6.7) — resolved with a precise architectural
+answer, not just a policy pick:** the user asked directly whether the
+KEM secret could be kept entirely out of JVM memory, mirroring the
+private-key opaque design. The honest answer, given before writing any
+code: no — unlike the private key (which no caller ever legitimately
+needs raw), the KEM secret's entire purpose is to be consumed by JSSE's
+own HKDF key schedule and AES-GCM record cipher, both of which run in
+the JVM. The "in-token HKDF chain" alternative only moves the boundary
+one derivation step further (raw secret stays in-token, but the
+*derived* traffic keys still have to reach JSSE's cipher code somehow);
+it doesn't eliminate JVM exposure. The only architecture that would is
+replacing JSSE's entire record-layer cipher engine with a token-backed
+one — a real, much larger undertaking (effectively a TLS-offload
+appliance), flagged as a genuinely open question for W6 rather than
+solved here. `P11MLKEMSpi` therefore extracts the decapsulated secret as
+a plain `SecretKeySpec` — the one deliberate, singular exception in this
+module to the "never `CKA_EXTRACTABLE=true`" pattern every other secret
+follows, and documented as such directly in the class.
+- `P11MLKEMKeyPairGeneratorSpi`: same single-mechanism,
+  parameter-set-on-the-key shape as ML-DSA/SLH-DSA, but **not** built on
+  `P11PureSigKeyPairGeneratorSpi` — ML-KEM keys carry
+  `CKA_ENCAPSULATE`/`CKA_DECAPSULATE` (confirmed against `pkcs11t.h`:
+  `0x633`/`0x634`), not `CKA_SIGN`/`CKA_VERIFY`.
+- `P11MLKEMSpi implements KEMSpi` — registered under the **bare family
+  name `"ML-KEM"`** (no parameter-set suffix) *and* the three
+  parameter-set names. The bare-name registration is not a guess:
+  W0.1's live JSSE probe (this exact provider, a real TLS handshake
+  against `pqc-rest`, back in W0) already proved JDK 27's
+  `Hybrid.getKEM()` requests exactly `KEM.getInstance("ML-KEM")`,
+  verbatim, regardless of which parameter set the hybrid group needs.
+  Interface shape (`KEMSpi`/`EncapsulatorSpi`/`DecapsulatorSpi`/
+  `KEM.Encapsulated`) confirmed via `javap` against the real JDK 24
+  classes before implementing, not assumed from the W0.1 probe's memory
+  alone.
+- Ciphertext ("encapsulation") sizes per parameter set and the 32-byte
+  secret size (FIPS 203 invariant, all parameter sets) were **verified
+  live** against the real engine before being hardcoded into
+  `engineEncapsulationSize()`/`engineSecretSize()` — confirmed exact:
+  512/768/1024 → 768/1088/1568 bytes.
+- `KeyFactory` extended to ML-KEM (3 more registered names), reusing the
+  same generic `P11PublicKeyFactorySpi` — `CKA_ENCAPSULATE` instead of
+  `CKA_VERIFY` on import, same pattern as generation. OIDs (NIST CSOR
+  arc `2.16.840.1.101.3.4.4.{1,2,3}` — a different sub-arc from
+  ML-DSA's `.3.x`, as expected) read from our own generated SPKIs via
+  Bouncy Castle, same discipline as every other algorithm's OID table.
+- **Verify — all live, first attempt (no debugging cycle):** `mvn test`,
+  90/90 total (9 new + 81 existing).
+  - Self round-trip via the standard `javax.crypto.KEM` API (the exact
+    API JSSE uses) for all 3 parameter sets: `encapsulationSize()`/
+    `secretSize()` match the FIPS 203 values exactly, encapsulate→
+    decapsulate produces identical secrets.
+  - **Both genuinely achievable cross-verification directions against
+    JDK 24's own software ML-KEM** (the third direction — JDK
+    decapsulating with *our* private key — is not achievable at all,
+    since decapsulation needs the private key and ours never leaves the
+    token; noted directly in the test rather than attempted):
+    JDK generates+encapsulates, we decapsulate (secrets match, no import
+    needed); JDK generates, we import via `KeyFactory`+encapsulate, JDK
+    decapsulates (secrets match — this direction specifically exercises
+    the KeyFactory import path added this workstream, not just the one
+    proven for Signature in W2).
 
 ### W4 — Symmetric, MAC, KDF, KeyStore write path
 - `CipherSpi` (AES GCM/CBC/CTR + AESWrap), `MacSpi` (HMAC/CMAC/KMAC),

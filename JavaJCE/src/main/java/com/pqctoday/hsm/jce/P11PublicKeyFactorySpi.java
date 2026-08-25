@@ -72,6 +72,11 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
         Map.entry("2.16.840.1.101.3.4.3.30", new PureSigAlgo("SLH-DSA-SHAKE-256S", CKP_SLH_DSA_SHAKE_256S)),
         Map.entry("2.16.840.1.101.3.4.3.31", new PureSigAlgo("SLH-DSA-SHAKE-256F", CKP_SLH_DSA_SHAKE_256F))
     );
+    private static final Map<String, PureSigAlgo> ML_KEM_OIDS = Map.of(
+        "2.16.840.1.101.3.4.4.1", new PureSigAlgo("ML-KEM-512", CKP_ML_KEM_512),
+        "2.16.840.1.101.3.4.4.2", new PureSigAlgo("ML-KEM-768", CKP_ML_KEM_768),
+        "2.16.840.1.101.3.4.4.3", new PureSigAlgo("ML-KEM-1024", CKP_ML_KEM_1024)
+    );
     private static final String OID_ED25519 = "1.3.101.112";
     private static final String OID_ED448 = "1.3.101.113";
     private static final String OID_EC_PUBLIC_KEY = "1.2.840.10045.2.1";
@@ -104,6 +109,9 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
         PureSigAlgo slhdsa = SLH_DSA_OIDS.get(oid);
         if (slhdsa != null) return importPureSig(slhdsa, CKK_SLH_DSA, rawKeyMaterial, x509Spec.getEncoded());
 
+        PureSigAlgo mlkem = ML_KEM_OIDS.get(oid);
+        if (mlkem != null) return importMLKEM(mlkem, rawKeyMaterial, x509Spec.getEncoded());
+
         if (oid.equals(OID_ED25519)) return importEdDSA("Ed25519", ED25519_OID, rawKeyMaterial, x509Spec.getEncoded());
         if (oid.equals(OID_ED448)) return importEdDSA("Ed448", ED448_OID, rawKeyMaterial, x509Spec.getEncoded());
 
@@ -133,6 +141,23 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
             P11Library.attrLong(CKA_PARAMETER_SET, algo.parameterSet()),
             P11Library.attr(CKA_VALUE, rawValue),
             P11Library.attrBool(CKA_VERIFY, true),
+            P11Library.attrBool(CKA_TOKEN, false),
+        };
+        long handle = lib.createObject(tmpl);
+        return new P11Key.Pub(handle, algo.jcaName(), spki);
+    }
+
+    private P11Key.Pub importMLKEM(PureSigAlgo algo, byte[] rawValue, byte[] spki) {
+        // Same shape as importPureSig, but CKA_ENCAPSULATE instead of
+        // CKA_VERIFY (an ML-KEM public key's operation is encapsulation,
+        // not verification) — see P11MLKEMKeyPairGeneratorSpi's javadoc
+        // for the same distinction on the generation side.
+        P11Library.Attr[] tmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_PUBLIC_KEY),
+            P11Library.attrLong(CKA_KEY_TYPE, CKK_ML_KEM),
+            P11Library.attrLong(CKA_PARAMETER_SET, algo.parameterSet()),
+            P11Library.attr(CKA_VALUE, rawValue),
+            P11Library.attrBool(CKA_ENCAPSULATE, true),
             P11Library.attrBool(CKA_TOKEN, false),
         };
         long handle = lib.createObject(tmpl);

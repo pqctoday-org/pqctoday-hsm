@@ -33,17 +33,22 @@ final class P11Constants {
     static final long CKM_SHA256               = 0x00000250L;
     static final long CKM_SHA384               = 0x00000260L;
     static final long CKM_SHA512               = 0x00000270L;
+    static final long CKM_ML_KEM_KEY_PAIR_GEN  = 0x0000000fL;
+    static final long CKM_ML_KEM                = 0x00000017L;
 
     // ── Object classes ──────────────────────────────────────────────────
     static final long CKO_PUBLIC_KEY  = 0x00000002L;
     static final long CKO_PRIVATE_KEY = 0x00000003L;
+    static final long CKO_SECRET_KEY  = 0x00000004L;
 
     // ── Key types ────────────────────────────────────────────────────────
-    static final long CKK_ML_DSA     = 0x0000004aL;
-    static final long CKK_SLH_DSA    = 0x0000004bL;
-    static final long CKK_EC_EDWARDS = 0x00000040L;
-    static final long CKK_EC         = 0x00000003L;
-    static final long CKK_RSA        = 0x00000000L;
+    static final long CKK_ML_DSA         = 0x0000004aL;
+    static final long CKK_SLH_DSA        = 0x0000004bL;
+    static final long CKK_EC_EDWARDS     = 0x00000040L;
+    static final long CKK_EC             = 0x00000003L;
+    static final long CKK_RSA            = 0x00000000L;
+    static final long CKK_ML_KEM         = 0x00000049L;
+    static final long CKK_GENERIC_SECRET = 0x00000010L;
 
     // ── Attributes ───────────────────────────────────────────────────────
     static final long CKA_CLASS            = 0x00000000L;
@@ -64,6 +69,9 @@ final class P11Constants {
     static final long CKA_PARAMETER_SET    = 0x0000061dL;
     static final long CKA_EC_PARAMS        = 0x00000180L;
     static final long CKA_EC_POINT         = 0x00000181L;
+    static final long CKA_VALUE_LEN        = 0x00000161L;
+    static final long CKA_ENCAPSULATE      = 0x00000633L;
+    static final long CKA_DECAPSULATE      = 0x00000634L;
 
     // ── RSA-PSS mechanism parameters (CK_RSA_PKCS_PSS_PARAMS) ───────────
     static final long CKG_MGF1_SHA256 = 0x00000002L;
@@ -82,6 +90,11 @@ final class P11Constants {
     static final long CKP_ML_DSA_44 = 0x00000001L;
     static final long CKP_ML_DSA_65 = 0x00000002L;
     static final long CKP_ML_DSA_87 = 0x00000003L;
+
+    // ── ML-KEM parameter sets (CKA_PARAMETER_SET values) ─────────────────
+    static final long CKP_ML_KEM_512  = 0x00000001L;
+    static final long CKP_ML_KEM_768  = 0x00000002L;
+    static final long CKP_ML_KEM_1024 = 0x00000003L;
 
     // ── SLH-DSA parameter sets (CKA_PARAMETER_SET values, all 12) ───────
     static final long CKP_SLH_DSA_SHA2_128S  = 0x00000001L;

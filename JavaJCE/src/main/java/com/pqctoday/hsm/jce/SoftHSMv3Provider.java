@@ -203,12 +203,34 @@ public final class SoftHSMv3Provider extends Provider {
                 "SLH-DSA-SHA2-128S", "SLH-DSA-SHAKE-128S", "SLH-DSA-SHA2-128F", "SLH-DSA-SHAKE-128F",
                 "SLH-DSA-SHA2-192S", "SLH-DSA-SHAKE-192S", "SLH-DSA-SHA2-192F", "SLH-DSA-SHAKE-192F",
                 "SLH-DSA-SHA2-256S", "SLH-DSA-SHAKE-256S", "SLH-DSA-SHA2-256F", "SLH-DSA-SHAKE-256F",
-                "Ed25519", "Ed448", "EC", "RSA"}) {
+                "Ed25519", "Ed448", "EC", "RSA",
+                "ML-KEM-512", "ML-KEM-768", "ML-KEM-1024"}) {
             putService(new Service(this, "KeyFactory", name,
                 P11PublicKeyFactorySpi.class.getName(), List.of(), Map.of()) {
                 @Override
                 public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
                     return new P11PublicKeyFactorySpi(lib);
+                }
+            });
+        }
+
+        // W3: ML-KEM (FIPS 203). KeyPairGenerator: one service per
+        // parameter set, same shape as ML-DSA/SLH-DSA. KEM: registered
+        // under the bare family name "ML-KEM" (no suffix) because W0.1's
+        // live JSSE probe proved JDK 27's own Hybrid.getKEM() requests
+        // exactly that string, verbatim, regardless of parameter set —
+        // plus the parameter-set-specific names for direct non-JSSE use.
+        // See P11MLKEMSpi's javadoc for the shared-secret handling
+        // decision.
+        registerMLKEMKeyPairGenerator("ML-KEM-512", CKP_ML_KEM_512);
+        registerMLKEMKeyPairGenerator("ML-KEM-768", CKP_ML_KEM_768);
+        registerMLKEMKeyPairGenerator("ML-KEM-1024", CKP_ML_KEM_1024);
+        for (String name : new String[]{"ML-KEM", "ML-KEM-512", "ML-KEM-768", "ML-KEM-1024"}) {
+            putService(new Service(this, "KEM", name,
+                P11MLKEMSpi.class.getName(), List.of(), Map.of()) {
+                @Override
+                public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                    return new P11MLKEMSpi(lib);
                 }
             });
         }
@@ -222,6 +244,16 @@ public final class SoftHSMv3Provider extends Provider {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
                 return new P11KeyStoreSpi(lib);
+            }
+        });
+    }
+
+    private void registerMLKEMKeyPairGenerator(String name, long parameterSet) {
+        putService(new Service(this, "KeyPairGenerator", name,
+            P11MLKEMKeyPairGeneratorSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11MLKEMKeyPairGeneratorSpi(lib, name, parameterSet);
             }
         });
     }

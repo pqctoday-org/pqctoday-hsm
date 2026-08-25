@@ -95,7 +95,8 @@ final class P11Library implements AutoCloseable {
         cLogout, cCloseSession, cDigestInit, cDigestUpdate, cDigestFinal,
         cGenerateRandom, cSeedRandom, cGenerateKeyPair, cSignInit, cSign,
         cVerifyInit, cVerify, cGetAttributeValue, cCreateObject,
-        cFindObjectsInit, cFindObjects, cFindObjectsFinal;
+        cFindObjectsInit, cFindObjects, cFindObjectsFinal,
+        cEncapsulateKey, cDecapsulateKey;
     private final long session;
     private volatile boolean closed;
 
@@ -136,6 +137,12 @@ final class P11Library implements AutoCloseable {
             cFindObjectsInit = h(linker, lib, "C_FindObjectsInit", fd(JAVA_LONG, ADDRESS, JAVA_LONG));
             cFindObjects   = h(linker, lib, "C_FindObjects", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
             cFindObjectsFinal = h(linker, lib, "C_FindObjectsFinal", fd(JAVA_LONG));
+            // v3.2 KEM functions — signatures cross-checked against P11Ffm's
+            // already-live-verified bindings, same discipline as above.
+            cEncapsulateKey = h(linker, lib, "C_EncapsulateKey",
+                fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS, ADDRESS));
+            cDecapsulateKey = h(linker, lib, "C_DecapsulateKey",
+                fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
 
             ensureGlobalInit(linker, lib);
 
@@ -349,6 +356,50 @@ final class P11Library implements AutoCloseable {
             throw e;
         } catch (Throwable t) {
             throw new ProviderException("findObjects failed", t);
+        }
+    }
+
+    /** Result of C_EncapsulateKey: the wire ciphertext plus a handle to the (opaque) derived shared-secret object. */
+    record Encapsulated(byte[] ciphertext, long sharedSecretHandle) {}
+
+    /** C_EncapsulateKey with two-call ciphertext sizing (v3.2 §5.27) — matches P11Ffm's proven pattern. */
+    Encapsulated encapsulate(long mechType, long publicKey, Attr[] ssTmpl) {
+        ensureOpen();
+        try {
+            MemorySegment mech = mech(mechType);
+            MemorySegment tmpl = attrs(ssTmpl);
+            MemorySegment ctLen = arena.allocate(JAVA_LONG);
+            MemorySegment hSs = arena.allocate(JAVA_LONG);
+            long rv = invokeRv(cEncapsulateKey, session, mech, publicKey,
+                tmpl, (long) ssTmpl.length, MemorySegment.NULL, ctLen, hSs);
+            if (rv != P11Error.CKR_OK && rv != 0x00000150L /* CKR_BUFFER_TOO_SMALL */) {
+                P11Error.check(rv, "C_EncapsulateKey(size)");
+            }
+            MemorySegment ct = arena.allocate(ctLen.get(JAVA_LONG, 0));
+            P11Error.check(invokeRv(cEncapsulateKey, session, mech, publicKey,
+                tmpl, (long) ssTmpl.length, ct, ctLen, hSs), "C_EncapsulateKey");
+            return new Encapsulated(toBytes(ct, ctLen.get(JAVA_LONG, 0)), hSs.get(JAVA_LONG, 0));
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("encapsulate failed", t);
+        }
+    }
+
+    /** C_DecapsulateKey; returns a handle to the (opaque) derived shared-secret object. */
+    long decapsulate(long mechType, long privateKey, Attr[] ssTmpl, byte[] ciphertext) {
+        ensureOpen();
+        try {
+            MemorySegment mech = mech(mechType);
+            MemorySegment hSs = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cDecapsulateKey, session, mech, privateKey,
+                attrs(ssTmpl), (long) ssTmpl.length, bytes(ciphertext), (long) ciphertext.length, hSs),
+                "C_DecapsulateKey");
+            return hSs.get(JAVA_LONG, 0);
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("decapsulate failed", t);
         }
     }
 
