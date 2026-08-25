@@ -1,510 +1,375 @@
-# OpenSSL provider remediation plan, phase 2 (2026-08-25) — PLAN ONLY, not executed
+# OpenSSL provider remediation plan, phase 2 (2026-08-25, v2) — PLAN ONLY, not executed
 
 Successor to `docs/openssl-provider-remediation-plan-2026-08-25.md`
-(phase 1), whose P0 batch, R1 (SLH-DSA end-to-end), and R3b (ML-KEM
-token keygen) are all executed and verified. This document covers
-**everything that remains**, re-explored against the source on
-2026-08-25 (after R3b landed) rather than carried over from the
-original audit — several items' scope changed materially on
-re-inspection, and two new latent bugs were found during this planning
-pass (see R4). Gap IDs still refer to
+(phase 1: P0 batch, R1, R3b all executed and verified). Covers
+everything that remains. Gap IDs refer to
 `docs/openssl-provider-coverage-audit-2026-08-25.md` §4.
 
-**Nothing in this document has been executed.** Every item runs later
-under its own explicit go-ahead, one at a time, with the same
-discipline phase 1 used: the named test must flip (or be newly added
-green) in the same commit, sabotage-tested in both directions, verified
-live against the real OpenSSL 3.6.3 oracle — never by exit codes read
-through a pipe, never via `openssl list` (proven unreliable for this
-provider: it never shows `@ pkcs11` even for known-working
-algorithms), and never with two keypairs sharing a token (type-only
-`pkcs11:` URIs match the wrong key — both traps were hit and
-documented in phase 1).
+**v2 (same day):** v1 was adversarially challenged claim-by-claim
+against the source before any execution. The challenge round changed
+the plan materially — see the log immediately below. v1's structure
+survives; several scopes, dependencies, and proofs do not.
 
-## Current state (baseline for this plan)
+**Nothing here has been executed.** Phase-1 discipline applies to every
+item: named test flips in the same commit, sabotage-tested both
+directions, verified live against the 3.6.3 oracle, exit codes read
+directly (never through a pipe), never via `openssl list` (proven
+blind for this provider), never with two keypairs sharing a token.
 
-Harness: `OPENSSL-PROVIDER-HARNESS: PASS=18 FAIL=0 XFAIL=3 XPASS=0`
-as of commit `9052c31`. The three open XFAILs, and the item that flips
-each:
+## Challenge round — what v2 changed and the evidence
 
-| XFAIL | Gap | Flips on |
-|---|---|---|
-| T4x_encode | OP-3 (no ML-KEM encoders) | **R3** |
-| T11 | OP-2 (no PQC decoders / URI-PEM load-back) | **R2** |
-| T15b | ENV-2 (Rust arm loses state across processes) | **R6** |
+| # | v1 claim | Challenge result | Effect |
+|---|---|---|---|
+| C1 | R3: "ML-KEM public keys can only leave via `pkey -pubout` on a URI-loaded key" (audit OP-3 wording) — SPKI/text/URI-PEM encoders all functionally required | **Partly wrong.** Live evidence from the R3b session: `storeutl -text` already prints the full `ML-KEM-768 Public-Key` hex **and a real `-----BEGIN PUBLIC KEY-----` SPKI PEM** with zero ML-KEM encoders registered. Public-key output flows keymgmt-export → OpenSSL imports into the **default provider's** ML-KEM → default's own encoder writes real SPKI. The only *functionally broken* path is the private key: `genpkey -out` (URI-PEM PrivateKeyInfo), because private material can't take the export bridge. | R3 split into a required core (URI-PEM PrivateKeyInfo, flips T4x_encode) and an explicitly-justified parity tier (SPKI/text). Effort drops toward S. |
+| C2 | R5: "client role needs no import work; prerequisites met by R3b" | **Wrong — two gaps hid under it.** (a) TLS key-share marshalling uses `EVP_PKEY_get1_encoded_public_key` → keymgmt get_params `OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY` — implemented **only in EC keymgmt** (`keymgmt.c:1645`); ML-KEM keymgmt lacks it. (b) ML-KEM's export_fn (`kem/mlkem.c:456`) requires `class == CKO_PUBLIC_KEY` strictly, but TLS holds the **generated private object** — compare mldsa's export, which also accepts a private object when only public params are selected and then walks to the associated public key. Both must land before any group registration can work, client role included. | R5 gains two named prerequisite work items; the "client-role-is-free" framing deleted. |
+| C3 | R4: fix list ended at exchange.c key-type sniff + registration + keymgmt + objects/store cases | **Incomplete — a fifth layer.** The derive path marshals the peer public key via `p11prov_obj_get_ec_public_raw` (`objects.c:3002`), which hard-rejects `key->data.key.type != CKK_EC` — a montgomery peer key is refused before any mechanism is chosen, independently of the CKK-sniff bug. (Silver lining verified in the same read: that function already handles private→associated-public replacement.) | R4 work list grows by one item; effort stays M but the estimate is now honest about why. |
+| C4 | KMIP section: "independent SPKI oracle" for R3's ML-KEM encoders | **Overreached.** The KMIP crate has ML-DSA OID parsing (`spki_verify.rs:63`) and a *hybrid* X25519MLKEM768 SPKI wrapper (`composite_kem.rs`), but **no pure ML-KEM SPKI builder** — there is no in-repo second implementation to byte-compare pure ML-KEM SPKIs against. | Oracle claim rescoped: ML-DSA + composites keep the KMIP cross-check; pure ML-KEM verifies against the default provider's parser (`pkey -pubin` + `asn1parse` OID assert) — still a different implementation than our encoder, honestly labeled a weaker independence. |
+| C5 | R8: "a provider MAC is only useful with a token-resident key, which arrives through SKEYMGMT — verify that first" | **Wrong dependency.** `EVP_MAC_init(key, len)` hands the provider raw key bytes (`OSSL_MAC_PARAM_KEY`); the MAC implementation creates its own ephemeral session key object via `C_CreateObject` — no SKEYMGMT involvement. SKEYMGMT matters only for the separate 3.6 `EVP_MAC_init_SKEY` opaque-key flow. | R8's sequencing gate removed; scoped as two independent modes (bytes-in now, SKEY later). |
+| C6 | R2: mechanics as described | **Survived challenge**, with one proof strengthened: the concern that a decoder-initiated store fetch might hit the WART-4 fresh-process lazy-init trap is already answered by T10 — the EC URI-PEM round trip passes today in a fresh-process arena *without* `early` load behavior, so the decode→store→load chain self-initializes. Cited as the control. | Proof section cites T10 as chain-liveness control; no scope change. |
+| C7 | R6: design as described | Survived, with one wiring detail added: T15b's flip needs the env var exported by the **Rust arm's arena helper** (`mk_rust_cnf`/T15b body), not just documented — and T15b's own `OPENSSL_CONF=/dev/null` guard comment shows the arena discipline to preserve. | Wiring note added. |
+| C8 | R7: "Ed25519 classical half needs a CKM_EDDSA branch" | Survived but under-specified: draft-19's M′ construction for Ed25519 profiles must be checked against the KMIP implementation + KAT vectors **before** choosing pure-Ed25519 vs prehashed dispatch — a wrong guess would sign structurally valid, cryptographically wrong composites that only the KAT check catches. | Verification-first step added to R7. |
 
-Recommended execution order: **R3 → R2 → R4 → R5-ph1 → R6**, then the
-Priority-2 tail (R7–R11) demand-driven. Rationale in the sequencing
-section at the end.
+Current baseline: `PASS=18 FAIL=0 XFAIL=3 XPASS=0` at `9052c31`.
+Open XFAILs: T4x_encode → **R3**, T11 → **R2**, T15b → **R6**.
+
+Recommended order (unchanged by the challenge): **R3 → R2 → R4 →
+R5-ph1 → R6**, P2 tail demand-driven.
 
 ---
 
-## R3 — ML-KEM encoders (gap OP-3) — Priority 1, effort S–M
+## R3 — ML-KEM encoders (gap OP-3) — Priority 1, effort S (core) + S (parity)
 
-**Claim when done:** an ML-KEM public key on the token can leave
-through every standard OpenSSL output path — `genpkey -out` writes a
-loadable URI-PEM, `pkey -pubout` emits a real SubjectPublicKeyInfo,
-`-text` prints a human-readable block — for all three parameter sets.
+**Core claim (what actually flips T4x_encode):** `genpkey -algorithm
+ML-KEM-* -out k.pem` exits 0 and writes a URI-PEM the R2 decoders will
+later load. Per C1, the functional gap is **only the private-key
+side**: the URI-PEM PrivateKeyInfo encoder, registered inside the
+`if (ctx->encode_pkey_as_pk11_uri)` block (the harness config sets
+`pkcs11-module-encode-provider-uri-to-pem = true`). Public-key output
+already works today through the export→default-provider bridge —
+verified live during R3b.
 
-**Ground truth (verified this pass):**
+**Core work items:**
 
-- ML-KEM has **zero** encoder registrations: no
-  `ADD_ALGO_EXT(ML_KEM_*, encoder, ...)` lines exist in
-  `src/vendor/pkcs11-provider/src/provider.c` (confirmed by sweep, and
-  live by T4x_encode's `Error writing key(s)`).
-- OpenSSL 3.6.3 has native NIDs ready to use:
-  `NID_ML_KEM_512 = 1454`, `NID_ML_KEM_768 = 1455`,
-  `NID_ML_KEM_1024 = 1456` (staged `obj_mac.h:6634-6646`), so the SPKI
-  encoder can be built exactly like our ML-DSA one — no manual OID DER
-  needed on the X509_PUBKEY path.
-- Two in-tree models exist, in order of preference:
-  1. **Our own ML-DSA and SLH-DSA encoders** in `encoder.c`
-     (`p11prov_mldsa_pubkey_to_x509` at ~1128, the SLH-DSA block from
-     R1 at ~1391+, both feeding the shared
-     `p11prov_encoder_private_key_write_pem` helper at `encoder.c:537`
-     for the URI-PEM PrivateKeyInfo side). These use this fork's actual
-     internal APIs — mirror these.
-  2. The latchset sibling (`src/vendor/latchset/src/encoder.c:1395-1503`,
-     registrations at `provider.c:1445-1499`) — use as a completeness
-     checklist only; its `p11prov_obj_export_public_key` has a
-     different signature than our fork's, so it does not transplant.
+1. `encoder.c`: ML-KEM PrivateKeyInfo/URI-PEM encode functions (3
+   variants) calling the shared `p11prov_encoder_private_key_write_pem`
+   (`encoder.c:537`) with `CKK_ML_KEM` — the exact shape of ML-DSA's
+   (`encoder.c:1268`) and SLH-DSA's (R1) equivalents.
+2. `encoder.h`: externs. `provider.c`: 3 registrations in the URI-PEM
+   block.
 
-**Work items:**
+**Parity tier (do in the same item, separately justified):** SPKI +
+text encoders for the 3 variants, mirroring `p11prov_mldsa_pubkey_to_x509`
+(`encoder.c:1128`) with `NID_ML_KEM_512/768/1024 = 1454/1455/1456`
+(staged `obj_mac.h:6634-6646`), dispatched by `CKA_PARAMETER_SET`.
+Justification is no longer "public output is broken" (it isn't — C1)
+but: (a) deployments with public-key export disallowed
+(`p11prov_ctx_allow_export` / `DISALLOW_EXPORT_PUBLIC`) lose all
+public output without provider-side encoders; (b) every other PQC
+family in this fork ships all three encoder kinds (R1 set the
+convention) — an asymmetric ML-KEM would be the odd one out the next
+audit flags again. If parity is dropped for time, say so in the audit
+rather than letting the bridge masquerade as provider encoding.
 
-1. `encoder.c`: ML-KEM keypoint struct + export callback + a
-   `pubkey_to_x509` switching on the three NIDs by
-   `CKA_PARAMETER_SET` (**not** key size — same caveat R1 proved for
-   SLH-DSA; ML-KEM sizes do differ per set, but the parameter-set
-   dispatch is the established, self-documenting pattern), SPKI-DER
-   encode + does_selection + dispatch table, text encoder (12-way not
-   needed here — 3-way), and a PrivateKeyInfo URI-PEM encode calling
-   the shared helper with `CKK_ML_KEM`.
-2. `encoder.h`: the three extern dispatch-table declarations
-   (convention per R1 cleanup: domain header, not provider.h).
-3. `provider.c`: text + SPKI registrations in the encoder block, and
-   URI-PEM registrations inside the
-   `if (ctx->encode_pkey_as_pk11_uri)` block — per variant, matching
-   how ML-DSA/SLH-DSA register.
-4. Fold in **OP-4** here if desired (same file family, low risk): the
-   KEM operation tables (`kem/mlkem.c:259-297`) lack
-   `SET_CTX_PARAMS`/`SETTABLE_CTX_PARAMS`. Note the phase-1 R1 lesson
-   **in reverse**: provider-kem(7) has the same pairing contract as
-   provider-signature(7) — if these are added, BOTH of the pair must
-   be added, and the same check applies to GET/GETTABLE. Check the doc
-   before touching the tables, not after.
+**Optionally fold in OP-4** (KEM tables lack SET/SETTABLE_CTX_PARAMS,
+`kem/mlkem.c:259-297`): before touching those tables, read
+provider-kem(7) in the staged 3.6.3 for its pairing contract — the R1
+lesson (provider-signature(7)'s mandatory GET/GETTABLE pairing
+rejected the whole method at fetch time) applied proactively, not
+retrospectively.
 
-**Proof:** T4x_encode flips XFAIL→PASS (the ratchet will force the
-expectation update). Upgrade it into a real test: `genpkey -out` exit
-0, PEM label present, `pkey -pubin -text` shows
-`ML-KEM-768 Public-Key`, and `openssl asn1parse` on the SPKI shows OID
-2.16.840.1.101.3.4.4.2 (768; .1/.3 for 512/1024). Add a
-`pkey -pubout` case for a second parameter set. Byte-level cross-check
-against the KMIP oracle (see the KMIP section below). Sabotage both
-directions.
+**Proof:** T4x_encode flips (ratchet forces the expectation update);
+upgrade it into a real test: exit 0 + `PKCS#11 PROVIDER URI` PEM label
+present (the load-back half stays with R2/T11k). Parity tier: with a
+config that sets the export-disallow knob, `pkey -pubout` must still
+produce SPKI whose `asn1parse` OID is 2.16.840.1.101.3.4.4.{1,2,3};
+cross-check note per C4: the parse-side oracle is the default
+provider, not KMIP. Sabotage both directions.
 
 ---
 
 ## R2 — PQC decoders / URI-PEM load-back (gap OP-2) — Priority 1, effort M
 
-**Claim when done:** a URI-PEM file written by `genpkey` for any PQC
-key type loads back and is usable (`pkeyutl -sign` for signers,
-`pkeyutl -encap` reachability for ML-KEM) — closing the asymmetry
-where the provider can write URI-PEMs it cannot read.
+Unchanged in scope by the challenge round (C6); mechanics restated
+compactly with the strengthened proof.
 
-**Ground truth — the entire decode pipeline, mapped this pass**
-(`decoder.c` is only 202 lines; the mechanism is fully generic):
+**The pipeline (all generic parts exist and work — T10 is the live
+control, including fresh-process lazy-init):** PEM label
+`"PKCS#11 PROVIDER URI"` (`pk11_uri.h:10`) → generic PEM→DER decoder
+re-emits the blob as structure `"pk11-uri"` (`decoder.c:152`,
+`pk11_uri.h:9`) → **missing piece:** per-key-type DER decoders
+(property `",input=der,structure=pk11-uri"`, `provider.c:1563`) that
+run a store fetch and filter on the store's `DATA_TYPE` string
+(`decoder.c:70,85`) → keymgmt LOAD by reference.
 
-1. The URI-PEM body is not key material: it is a tiny DER blob
-   (`P11PROV_PK11_URI`) wrapping the `pkcs11:` URI string, under PEM
-   label `"PKCS#11 PROVIDER URI"` (`pk11_uri.h:10`).
-2. A single generic PEM→DER decoder
-   (`p11prov_pem_decoder_p11prov_der_decode`, `decoder.c:152`) strips
-   the PEM and re-emits the blob tagged with
-   `OSSL_OBJECT_PARAM_DATA_STRUCTURE = "pk11-uri"` (`pk11_uri.h:9`).
-3. Per-key-type DER decoders — registered with property
-   `",input=der,structure=pk11-uri"` (`DER_DECODER_PROP`,
-   `provider.c:1563`) — parse the blob, extract the URI, and run a
-   store fetch (`p11prov_store_direct_fetch`), filtering results to
-   those whose store `DATA_TYPE` string equals the decoder's own name
-   (`filter_for_desired_data_type`, `decoder.c:70`). The surviving
-   object reference flows to the matching keymgmt's LOAD.
-4. Each per-type decoder is ~4 lines via two macros:
-   `P11PROV_DER_COMMON_DECODE_FN(<data-type-name>, <suffix>)` +
-   `DISPATCH_DECODER_FN_LIST(der, p11prov, <suffix>)`
-   (`decoder.h:23-40`). Today only rsa/ec/ed25519/ed448 exist
-   (`decoder.c:193-202`).
+**Work items:** 18 two-macro instantiations in `decoder.c`
+(`P11PROV_DER_COMMON_DECODE_FN` + `DISPATCH_DECODER_FN_LIST`,
+`decoder.h:23-40`) — 3 ML-DSA + 3 ML-KEM + 12 SLH-DSA — with the
+FORMAT_NAME argument being the **single-name** string that `store.c`
+emits (the `objects.h` macros: `MLDSA_44` = `"ML-DSA-44"`, `MLKEM_512`,
+`SLHDSA_*` — *not* the colon-separated `P11PROV_NAMES_*` lists, which
+are for registration); 18 externs in `decoder.h`; 18
+`ADD_ALGO_EXT(..., decoder, DEFAULT_PROPERTY(DER_DECODER_PROP), ...)`
+lines in `provider.c`. Store side and keymgmt LOADs are already
+complete for all 18 (verified; SLH-DSA's 12 landed in R1).
 
-**Why PQC fails today:** step 3 has no PQC decoders — nothing else.
-Steps 1–2 are type-agnostic and already work (T10 proves the chain for
-EC). And the store side is **already done**: `store.c` emits exact
-per-variant data-type names for ML-DSA (`"ML-DSA-44/65/87"`), ML-KEM
-(`"ML-KEM-512/768/1024"`), and all 12 SLH-DSA variants (added in R1).
-The keymgmt LOAD functions all exist.
+**Dependency:** only the ML-KEM *round-trip test* waits on R3 (no
+URI-PEM to load until its encoder exists). ML-DSA/SLH-DSA decode work
+is unblocked today.
 
-**Work items:**
-
-1. `decoder.c`: 18 macro instantiations — 3 ML-DSA + 3 ML-KEM + 12
-   SLH-DSA — each `P11PROV_DER_COMMON_DECODE_FN(NAME, suffix)` +
-   `DISPATCH_DECODER_FN_LIST`. The NAME argument must be the exact
-   store.c data-type string (which is the first element of each
-   `P11PROV_NAMES_*` macro — e.g. `P11PROV_NAMES_ML_DSA_44` =
-   `"ML-DSA-44:MLDSA44:2.16.840.1.101.3.4.3.17:id-ml-dsa-44"`, so use
-   the single-name macro/string, not the colon-list).
-2. `decoder.h`: 18 externs.
-3. `provider.c`: 18 `ADD_ALGO_EXT(<VARIANT>, decoder,
-   DEFAULT_PROPERTY(DER_DECODER_PROP), ...)` lines next to the
-   existing five.
-4. The audit's note stands: no `d2i_X509_PUBKEY` recursion concern
-   here — that was specific to composite SPKI decoding
-   (`provider.c:1577-1590` documents it); the pk11-uri structure
-   property firewalls these decoders from SPKI input.
-
-**Dependency:** the ML-KEM URI-PEM decode *test* needs R3 first (no
-URI-PEM exists to load until the ML-KEM URI-PEM encoder lands). The
-ML-DSA and SLH-DSA parts have no dependency — their encoders already
-work (T11 today writes the PEM fine and fails only on load).
-
-**Proof:** T11 flips (its body already does the full round trip:
-genpkey → grep PEM label → `pkeyutl -sign` with the PEM as `-inkey`).
-Add: an SLH-DSA round-trip case (one variant suffices; the other 11
-share the code path), and — after R3 — an ML-KEM round-trip
-(load-back + `pkeyutl -encap` reachability or `pkey -pubout`
-equality against the storeutl-obtained public key). Sabotage both
-directions; reuse T10 (EC) as the living control.
+**Proof:** T11 flips (its body already round-trips: genpkey → label
+grep → `pkeyutl -sign` on the PEM). Add one SLH-DSA round-trip case
+(single variant; the other 11 share the path) and — after R3 — T11k
+(ML-KEM: load back + `pkey -pubout` equality against the
+storeutl-obtained public key). T10 remains the EC control. Sabotage
+both directions.
 
 ---
 
-## R4 — X25519/X448 exchange (gap ALG-5) — Priority 1, effort M (was S; rescoped)
+## R4 — X25519/X448 exchange (gap ALG-5) — Priority 1, effort M
 
-**The phase-1 sketch ("registration branch dead — likely a 2-line
-fix") is wrong.** Re-exploration found four distinct problems, two of
-them real latent bugs; this is a medium item, structurally similar to
-what R1 turned out to be for SLH-DSA.
+Five layers, in dependency order — the first four are why the phase-1
+"2-line fix" framing was wrong, layer 5 found by this pass's challenge
+(C3). Mechanism/code agreement across the stack is verified and NOT a
+problem: `CKM_X25519 = 0x80001058`, `CKM_X448 = 0x80001059` (vendor
+arc) in provider `pkcs11.h:1006` and engine `pkcs11t.h:1272`; both
+engines advertise them (`SoftHSM_slots.cpp:555`, `constants.rs:582`);
+keygen is `CKM_EC_MONTGOMERY_KEY_PAIR_GEN = 0x1056`.
 
-**Ground truth (all verified this pass):**
+1. **objects.c fetch/export:** no `CKK_EC_MONTGOMERY` anywhere —
+   `p11prov_obj_from_handle` falls to `CKR_ARGUMENTS_BAD` (the same
+   missing-case class fixed twice in R1). Latchset upstream has the
+   full logic to port (`latchset/src/obj/fetch.c:194`,
+   `export.c:239,749`) — port the logic, not the diff (their tree is
+   refactored into `obj/`/`kmgmt/`; ours is flat).
+2. **store.c data-type case:** add `CKK_EC_MONTGOMERY` → `"X25519"`/
+   `"X448"` by bit size (model: our `CKK_EC_EDWARDS` case at
+   `store.c:391`; latchset's montgomery version at their
+   `store.c:470-476`).
+3. **keymgmt:** none exists. Model: our ed25519 keymgmt, which drives
+   gen through the common machinery with a preset mechanism
+   (`CKM_EC_EDWARDS_KEY_PAIR_GEN`, `keymgmt.c:1820`) — montgomery
+   analog uses `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` + the curve's
+   EC_PARAMS OID (X25519 = 1.3.101.110 arc; confirm the engines'
+   expected template against `SoftHSM_keygen.cpp:495-619` at
+   execution). Register under `"X25519"`/`"X448"`.
+4. **exchange.c key-type sniff (latent bug):** `exchange.c:203-207`
+   compares against locally-invented `CKK_X25519 = 0x45` /
+   `CKK_X448 = 0x46` (`exchange.c:9-14`; the names exist in **no**
+   header, so the fallbacks always activate). Real montgomery keys are
+   `CKK_EC_MONTGOMERY = 0x41` → the check never matches a real key,
+   and `0x46` **collides with CKK_HSS** (`pkcs11.h:521`) — an HSS key
+   reaching this path would silently select `CKM_X448`. Fix: dispatch
+   on `CKK_EC_MONTGOMERY` + curve (EC_PARAMS or key size); delete the
+   bogus CKK fallbacks and the inert-but-wrong
+   `#define CKM_X25519 0x0000021A` (`exchange.c:15-16`).
+5. **exchange.c peer marshalling (C3):** the derive path feeds
+   `CK_ECDH1_DERIVE_PARAMS.pPublicData` from
+   `p11prov_obj_get_ec_public_raw` (`exchange.c:~295`,
+   `objects.c:3002`), which hard-rejects non-`CKK_EC` keys. Needs a
+   montgomery branch (raw u-coordinate; verify the engines' expected
+   public-data encoding for CKM_X25519 — raw 32/56 bytes vs
+   DER-wrapped EC_POINT — against `SoftHSM_keygen.cpp:3181`'s derive
+   implementation before writing it). The private→associated-public
+   replacement in that function already works and carries over.
 
-1. **Dead registration (the known part).** `checklist[]`
-   (`provider.c:910`) lists no `CKM_X25519`/`CKM_X448`, so the
-   `case CKM_X25519:` registration branch (`provider.c:1154-1160`)
-   is unreachable. Mechanism codes agree across the whole stack —
-   provider `pkcs11.h:1006-1007` and engine `pkcs11t.h:1272` both say
-   `CKM_X25519 = 0x80001058`, `CKM_X448 = 0x80001059` (vendor arc);
-   the C++ engine advertises them (`SoftHSM_slots.cpp:555-556`,
-   dispatch at `SoftHSM_keygen.cpp:2744`), the Rust engine too
-   (`constants.rs:582-583`, `ffi.rs:1097`). Keygen is
-   `CKM_EC_MONTGOMERY_KEY_PAIR_GEN = 0x1056`, in both engines.
-2. **No keymgmt at all.** The dead branch registers only the
-   `exchange` op. There is no montgomery keymgmt table and no
-   registration — OpenSSL cannot even load an X25519 token key. (The
-   ed25519 keymgmt is the in-fork model; latchset upstream has a full
-   montgomery keymgmt — `latchset/src/obj/keymgmt.c:954-975` maps
-   x25519 OID/ec_params → `NID_X25519` — usable as a logic reference,
-   though its file layout is refactored relative to ours.)
-3. **Latent bug: object fetch would fail.** Our `objects.c` has zero
-   `CKK_EC_MONTGOMERY` handling — `p11prov_obj_from_handle`'s key-type
-   switch would return `CKR_ARGUMENTS_BAD` for a montgomery key. This
-   is the **same missing-case bug class found and fixed twice in R1**
-   (objects.c fetch, store.c naming) — the third and fourth instances.
-   `store.c`'s data-type switch also lacks the case (our fork's
-   `CKK_EC_EDWARDS` case at `store.c:391` is the nearest neighbor;
-   latchset's `store.c:470-476` shows the montgomery version emitting
-   `X25519_NAME`/`X448_NAME` by bit size).
-4. **Latent bug: wrong fallback constants in exchange.c.** The derive
-   path's key-type sniffing (`exchange.c:203-207`) compares against
-   `CKK_X25519`/`CKK_X448` — constants that **do not exist in
-   PKCS#11**; the local fallbacks (`exchange.c:9-14`) define them as
-   `0x45`/`0x46`, and they always activate (neither header defines
-   the names). Real montgomery keys are `CKK_EC_MONTGOMERY = 0x41` —
-   so the check can never match a real key (mechtype silently stays
-   `CKM_ECDH1_DERIVE`) — **and `0x46` collides with `CKK_HSS`**
-   (`pkcs11.h:521`): an HSS key reaching this code would silently
-   select `CKM_X448`. There is also a dead-but-wrong
-   `#define CKM_X25519 0x0000021A` fallback (`exchange.c:15-16`;
-   inert because `pkcs11.h` wins, but a trap for any future include
-   reshuffle). Fix direction: dispatch on `CKK_EC_MONTGOMERY` +
-   curve identification (EC_PARAMS OID or key size), delete the
-   bogus fallback constants entirely.
-
-**Work items (in dependency order):** objects.c fetch/export cases →
-store.c data-type case → montgomery keymgmt (+ keygen via
-`CKM_EC_MONTGOMERY_KEY_PAIR_GEN`, following the now-thrice-proven
-gen-block pattern) → exchange.c key-type-sniff fix → checklist +
-registration (keymgmt + exchange per variant). Engine-side nothing to
-do — both engines are ready.
-
-**Proof:** new T16: X25519 token keygen → provider derive vs software
-peer derive, byte-identical shared secret (mirror T8's ECDH shape,
-including its `OPENSSL_CONF=/dev/null` software-peer trick); T16b for
-X448 optional but cheap. A negative guard for the CKK_HSS collision
-is impractical to script cheaply (needs an HSS key in an exchange
-context) — the constant deletion itself removes the hazard; note it
-in the commit message. Sabotage T16 both directions.
+**Proof:** T16: X25519 token keygen → provider derive vs software peer
+derive (T8's shape, including the `OPENSSL_CONF=/dev/null` software
+peer), byte-identical secret; T16b (X448) cheap once T16 exists. The
+CKK_HSS-collision hazard is removed by deleting the constants — note
+in the commit message; a scripted negative test is not worth the HSS
+setup cost. Sabotage T16 both directions.
 
 ---
 
 ## R5 phase 1 — pure ML-KEM TLS groups (gap F36-1) — Priority 1, effort M
 
-**Claim when done:** a real TLS 1.3 handshake negotiates
-`MLKEM512/768/1024` with the **token** performing the KEM operations
-on its side of the connection — the flagship "PQC TLS backed by the
-HSM" story, phase 1 (pure groups only; hybrids are phase 2 and out of
-scope here).
+**Claim:** a real TLS 1.3 handshake negotiates `MLKEM512/768/1024`
+with the token performing the client-side KEM operations. Hybrids
+remain phase 2 (combiner question — out of scope).
 
-**Ground truth (verified this pass):**
+**Prerequisites (C2 — must land first, in this order):**
 
-- `tls.c` registers 13 classical groups and 0 KEM groups. The
-  registration mechanics are simple and fully local to `tls.c`:
-  `tls_params[]` entries built by `TLS_PARAMS_ENTRY` (9 params + END
-  in a fixed `OSSL_PARAM list[10]`, `tls.c:72-91`), delivered via
-  `tls_group_capabilities` (`tls.c:176`). The sigalg side of the same
-  file already registers ML-DSA + 3 composites — the KEM-group gap is
-  the last hole in this file, not a new subsystem.
-- KEM groups additionally require
-  `OSSL_CAPABILITY_TLS_GROUP_IS_KEM = "tls-group-is-kem"` (confirmed
-  present in staged 3.6.3 `core_names.h:151`) — so either a widened
-  entry macro (`list[11]`) or a KEM-specific one. The
-  `TLS_GROUP_ALG` value must be a name our provider registers for
-  BOTH keymgmt and KEM ops — `"ML-KEM-768"` etc. (already true since
-  the per-variant registrations).
-- **IANA code points must be read from the staged build's own source
-  during execution, not from memory** (`ssl/t1_lib.c` group table —
-  its default-groups string includes `X25519MLKEM768`, confirming the
-  staged build speaks these groups natively). Registering a
-  provider-side group under an id the linked OpenSSL also serves
-  natively raises a provider-vs-builtin precedence question — probe
-  it live first (register, then verify via handshake evidence WHOSE
-  implementation ran; engine DEBUG log is the arbiter).
-- **Prerequisite met:** client-side KEM-group participation needs
-  ephemeral keygen (R3b, done), public export (done), decapsulate
-  (done). **Prerequisite NOT met for the server role:** the server
-  must *import* the client's raw public share and encapsulate to it —
-  ML-KEM keymgmt has **no IMPORT/IMPORT_TYPES** (verified:
-  `kem/mlkem.c` dispatch tables), and `objects.c`'s
-  `p11prov_obj_import_key` type-gate covers only
-  `CKK_ML_DSA || CKK_SLH_DSA` (R1's fix). Import must also produce an
-  object the KEM op can use — i.e. a real session object handle via
-  `C_CreateObject`, since `C_EncapsulateKey` takes a handle, not
-  bytes.
+1. **ML-KEM keymgmt `ENCODED_PUBLIC_KEY`:** implement
+   `OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY` in `get_params` (TLS reads the
+   key share via `EVP_PKEY_get1_encoded_public_key`; for ML-KEM the
+   encoded form IS the raw public bytes, so this is the CKA_VALUE
+   lookup the PUB_KEY branch already does under another name). Only EC
+   keymgmt has it today (`keymgmt.c:1645-1744` — also the model for
+   the settable/peer side).
+2. **ML-KEM export from a private object:** relax
+   `p11prov_mlkem_keymgmt_export_fn` (`kem/mlkem.c:456`) to mldsa's
+   contract — accept a private object when only public params are
+   selected, exporting the **associated** public key (R3b's gen
+   already sets the association via `p11prov_obj_set_associated`).
 
-**Scope decision for phase 1:** token-as-**client** first
-(keygen/decap on token, software `s_server` peer): it needs no import
-work and already exercises the whole group-registration surface.
-Token-as-server (import + encap) is a separately gated follow-up
-inside R5 — do the keymgmt import work then.
+**Then the group registration itself (`tls.c`):** 3 entries; KEM
+groups need `OSSL_CAPABILITY_TLS_GROUP_IS_KEM` (`core_names.h:151`),
+which the existing 10-slot `TLS_PARAMS_ENTRY` (`tls.c:72-91`) cannot
+hold — a widened/KEM-specific entry shape. `TLS_GROUP_ALG` =
+`"ML-KEM-768"` etc. (our registered names). **IANA code points read
+from the staged build's own `ssl/t1_lib.c` group table at execution
+time, never from memory.** Registering ids the linked OpenSSL also
+serves natively raises provider-vs-builtin precedence — resolve by
+live probe, with the C++ engine DEBUG log as the arbiter of whose
+implementation actually ran.
 
-**Work items:** KEM-capable entry macro + 3 group entries (+ alias
-spellings if the staged build uses them) in `tls.c`; live probe of
-provider-vs-native precedence; harness case.
+**Server role (separately gated, inside R5, after phase 1):** peer
+share import (`EVP_PKEY_set1_encoded_public_key` →
+set_params/import), keymgmt IMPORT/IMPORT_TYPES (absent), the
+`p11prov_obj_import_key` type-gate (covers only
+`CKK_ML_DSA || CKK_SLH_DSA`), and an import that yields a real object
+handle `C_EncapsulateKey` can use.
 
-**Proof:** T13 finally becomes scriptable (the audit left it plan-only
-because `list -tls-groups` merges providers — the handshake IS the
-test): `s_server` (software, `OPENSSL_CONF=/dev/null`) +
-`s_client -groups MLKEM768` with the provider active on the client
-side; assert handshake completes AND token participation via the C++
-engine DEBUG log (the R1-proven diagnostic; grep for the ML-KEM
-decapsulate op against the client's token) — not via any `openssl
-list` output. Negative control: same handshake with the token config
-but `-groups X25519` must not touch the engine log's KEM path.
-Sabotage by breaking the group registration in a copy.
+**Proof:** T13 becomes scriptable: software `s_server`
+(`OPENSSL_CONF=/dev/null`) + `s_client -groups MLKEM768` with the
+provider active client-side **and the fetch pinned** (propquery or
+config default_properties — without pinning, the default provider's
+ML-KEM can serve the group silently and the test proves nothing);
+handshake completes AND the engine DEBUG log shows the token
+decapsulate. Negative control: same config, `-groups X25519` → no KEM
+op in the engine log. Sabotage by breaking the group entry in a copy.
 
 ---
 
 ## R6 — native Rust-engine persistence (gap ENV-2) — Priority 2, effort M
 
-**Claim when done:** the harness's Rust arm runs the same functional
-matrix as the C++ arm — multi-process CLI flows (`genpkey` then
-`pkeyutl` in separate processes) find the token state again.
+Unchanged by the challenge except wiring detail C7.
 
-**Ground truth (verified this pass):**
+**Grounding:** `serialize_token_state`/`deserialize_token_state`
+(`state_snapshot.rs:67/173`) already compile natively; only the
+`C_Finalize` stash call is emscripten-gated (`ffi.rs:251-252`), with an
+explicit zeroize rationale — so the native path must be **opt-in**
+(env var, e.g. `SOFTHSMRUST_STATE_FILE`): restore on `C_Initialize`
+(missing file = fresh token), stash on `C_Finalize` before the zeroize
+pass, byte-identical legacy behavior when unset. Inherit the
+`SHR3SNP2` load-refusal policy verbatim (`state_snapshot.rs:35-53`):
+refuse foreign/old snapshots loudly — silently rehydrated stateful-HBS
+counters are a forgery risk. File perms 0600; single-writer only
+(documented, not locked). **Honest limitation, stated in module doc
+and README:** the snapshot is plaintext at rest, unlike the C++ token
+directory's PIN-derived encryption of sensitive attributes —
+dev/test-grade persistence; an encrypted variant is a possible R6b,
+not scoped.
 
-- The snapshot surface is **already compiled natively**:
-  `serialize_token_state()` / `deserialize_token_state()`
-  (`rust/src/state_snapshot.rs:67/173`) are not cfg-gated; only the
-  **wiring** is — the `stash_before_finalize()` call in `C_Finalize`
-  sits under `#[cfg(target_os = "emscripten")]` (`ffi.rs:251-252`),
-  with an explicit comment: *"Native/wasm-bindgen builds skip this —
-  there, parking key material past finalize would defeat the
-  zeroize."* That is a deliberate security posture, not an oversight —
-  R6 must be **opt-in**, defaulting to today's zeroize-everything
-  behavior.
-- Format is versioned (`SHR3SNP2`), hand-rolled, with a
-  **load-refusal policy already designed in**: a v1 (`SHR3SNP1`)
-  snapshot is refused loudly because silently rehydrating stateful-HBS
-  keys under moved attribute ids would present a partially-used
-  XMSS/LMS key as fresh — a forgery risk (`state_snapshot.rs:35-53`).
-  R6 inherits this: refuse, never migrate.
+**Wiring (C7):** the harness's Rust arm must export the env var in
+its own arena setup (`mk_rust_cnf` + every process in T15b's flow) —
+preserving T15b's existing `OPENSSL_CONF=/dev/null` init-token guard.
 
-**Design (per the audit's original sketch, now grounded):** an
-env-var-gated file path (e.g. `SOFTHSMRUST_STATE_FILE`); when set:
-restore on `C_Initialize` (file absent = fresh token, not an error),
-stash on `C_Finalize` *before* the zeroize pass. When unset: byte-for-
-byte today's behavior. Document single-writer only (no locking; two
-concurrent processes would last-writer-win — same limitation class the
-C++ file backend handles with its own locking, which R6 does not need
-to replicate for a test-enablement feature). File perms 0600.
-**Honest limitation to document, not hide:** the snapshot stores key
-material unencrypted at rest — unlike the C++ engine's token
-directory, which encrypts sensitive attributes under a PIN-derived
-key. That makes this a dev/test persistence surface, not a production
-one; say so in the module doc and README. (Closing that gap — e.g.
-reusing the snapshot format under a PIN-derived AEAD — is a possible
-R6b, not scoped here.)
-
-**Proof:** T15b flips. Then the Rust arm stops being a two-test stub:
-wire the arm to export the env var in its arenas and run the
-functional flows the C++ arm runs (at minimum: store enumeration,
-ML-DSA sign round-trip, ML-KEM keygen — mirroring T2/T3b/T4x).
-Sabotage: unset the env var in a copy's Rust arm → T15b's flow must
-fail again (proving the variable, not something else, carries the
-persistence); flip a byte in the magic in a written state file → next
-init must refuse loudly (the SHR3SNP2 policy), not half-load.
+**Proof:** T15b flips; then extend the Rust arm beyond a stub —
+minimum: store enumeration, ML-DSA sign round-trip, ML-KEM keygen
+(mirror T2/T3b/T4x). Sabotage: (a) unset the env var in a copy →
+flow fails again, proving the variable carries the persistence;
+(b) corrupt the magic in a written state file → next init must refuse
+loudly, not half-load.
 
 ---
 
-## Priority 2 tail (R7–R11) — briefer, still grounded
+## Priority 2 tail
 
-### R7 — remaining composite profiles (ALG-4), effort M–L
-`composite.c`'s registry (`:96-130`) holds 3 of 8 draft-19 §6 profiles
-(.37, .45, .49). Missing five include all four §10.4-recommended ones
-(MLDSA44-Ed25519-SHA512, MLDSA44-ECDSA-P256-SHA256,
-MLDSA65-RSA3072-PSS-SHA512, MLDSA65-Ed25519-SHA512) +
-MLDSA65-ECDSA-P384-SHA512. The Ed25519-classical profiles need a
-`CKM_EDDSA` branch in the classical-half dispatch (audit anchor
-`composite.c:941`) — the other profiles are registry rows + name
-macros + TLS sigalg entries (the `tls.c` private-code-point pattern,
-0xFEB0-2, extends naturally). **The KMIP tree is the oracle**: all 8
-profiles live in `kmip`'s composite module and the external KAT
-vectors at `rust/kat/composite-sigs/external-composite-vectors.json` —
-per-profile proof is sign + M′ vector check against those, plus a
-harness COMPSIG sign case for at least one new profile.
+### R7 — remaining composite profiles (ALG-4), M–L
+Registry (`composite.c:96-130`) has 3 of 8 (.37/.45/.49); missing five
+include all four §10.4-recommended. **Verification-first step (C8):**
+before wiring the Ed25519 classical half (`CKM_EDDSA` branch at the
+`composite.c:941` dispatch), pin draft-19's M′ construction for the
+Ed25519 profiles against the KMIP implementation and
+`rust/kat/composite-sigs/external-composite-vectors.json` — pure vs
+prehashed chosen by evidence, not assumption; a wrong guess signs
+well-formed, wrong composites that only KATs catch. Then: registry
+rows, name macros, `tls.c` sigalg entries (0xFEB0+ private-range
+pattern). Proof per profile: sign + M′ KAT check + one harness COMPSIG
+case.
 
-### R8 — `OSSL_OP_MAC` (OP-1/ALG-8), effort M
-New `mac.c` implementing EVP_MAC over `CKM_*_HMAC` / `CKM_AES_CMAC` /
-`CKM_KMAC_*` (both engines advertise these; 45 HMAC/CMAC/KMAC
-references in `SoftHSM_slots.cpp` alone), mech-gated like every other
-op table, plus the `OSSL_OP_MAC` arm in `p11prov_query_operation`.
-Sequencing note: a provider MAC is only useful with a token-resident
-secret key, which arrives through SKEYMGMT (`skeymgmt.c`,
-`SKEY_SUPPORT`) — verify the secret-key import path works before
-building on it. Proof: `openssl mac` via provider == software HMAC
-over the same imported key bytes.
+### R8 — `OSSL_OP_MAC` (OP-1/ALG-8), M
+New `mac.c` over `CKM_*_HMAC`/`CKM_AES_CMAC`/`CKM_KMAC_*` (both
+engines advertise; 45 hits in `SoftHSM_slots.cpp` alone), mech-gated,
+plus the `OSSL_OP_MAC` arm in `p11prov_query_operation`. **C5:** the
+bytes-in mode (`OSSL_MAC_PARAM_KEY` → ephemeral session key object via
+`C_CreateObject` → `C_SignInit`) has **no** SKEYMGMT dependency and is
+the whole of phase one; the `EVP_MAC_init_SKEY` opaque-token-key mode
+is a separate later step. Proof: `openssl mac -propquery
+"?provider=pkcs11"` == software HMAC over identical key bytes, plus
+engine-log evidence the token computed it.
 
-### R9 — LMS/HSS story (ALG-3/F36-2/ENV-1), effort M after ENV-1
-Strictly gated on ENV-1: rebuild the 3.6.3 oracle with `enable-lms`.
-Then the coherent split (token signs with HSS/LMS, OpenSSL 3.6
-verifies natively — its LMS is verify-only) needs: custom-name
-signature exposure for token HSS sign + XDR public-key export for the
-native verifier. Proof: sign-on-token → `openssl pkeyutl -verify`
-native. The Rust engine's stateful-key rewind protections (SHR3SNP2
-policy, R6) interact here — R9 after R6 avoids testing stateful keys
-on an arm that forgets its own leaf counters.
+### R9 — LMS/HSS (ALG-3/F36-2/ENV-1), M after ENV-1
+Gated on ENV-1 (rebuild oracle with `enable-lms`). Token HSS **sign**
++ XDR public export → native `pkeyutl -verify` (3.6 LMS is
+verify-only, making this split uniquely coherent). Run after R6 so the
+stateful-key arm doesn't forget its own leaf counters mid-test.
 
 ### R10 — KDF widening + EVP_SKEY probes (OP-5/F36-3), probe-first
-Two cheap probes before any scoped work: (a) do PBKDF2/KBKDF
-fetches honor provider priority under a `?provider=pkcs11` propquery
-(same question WART-4 answered for digests — reuse T9's
-fresh-process + early-load arena pattern); (b) can
-`EVP_KDF_derive_SKEY` hand back a token-resident derived key as an
-opaque SKEYMGMT reference without exporting bytes. Probe output is a
-writeup appended to the audit, which then scopes (or closes) the item.
+Two cheap probes, writeups appended to the audit before any scoped
+work: (a) PBKDF2/KBKDF provider-priority under propquery (reuse T9's
+fresh-process arena pattern); (b) `EVP_KDF_derive_SKEY` opaque
+handoff viability.
 
-### R11 — XMSS/XMSS-MT (ALG-2), effort L, ranked last
-Custom names, no native OpenSSL counterpart, no CMS/TLS integration
-possible; no consumer has materialized. Keep last; the R9 stateful
-groundwork (state discipline, XDR-ish export) would be its foundation
-if one appears.
+### R11 — XMSS/XMSS-MT (ALG-2), L, last
+No native OpenSSL counterpart, no consumer. Revisit only on demand;
+R9's stateful groundwork would be its base.
 
 ---
 
-## How the KMIP Rust code manages key-object encoding/decoding — and what this plan borrows
+## KMIP cross-reference (rescoped per C4)
 
-Surveyed this pass (2026-08-25) at the user's request; this section
-doubles as the reference map.
+How the KMIP Rust code manages key-object encoding/decoding — surveyed
+2026-08-25:
 
-**What KMIP does (kmip/src):**
+- **Explicit wire formats, honest refusal:** KeyFormatType stored per
+  object, surfaced faithfully; all conversions through one rule table
+  (`ops/helpers.rs:1243`) — Raw↔TransparentSymmetricKey and RSA
+  PKCS#1↔PKCS#8 convert for real, everything else refuses loudly
+  (`KeyFormatTypeNotSupported`), never a silent substitute.
+- **PQC/HSS material is Raw-only** on Register (engine import takes
+  raw bytes; PKCS#8-wrapped PQC refused —
+  `register_import_export.rs:449-533`); RSA alone has multi-format
+  ingest with real DER normalization.
+- **Pure-Rust SPKI stack** (`der`/`spki` 0.7, `x509-cert` 0.2):
+  ML-DSA OID→mechanism mapping in `spki_verify.rs:63-142`; composite
+  SPKI assembly cached inline for two-engine-object keys
+  (`create_key_pair.rs:~335`); hybrid X25519MLKEM768 SPKI wrapper in
+  `composite_kem.rs`. **No pure ML-KEM SPKI builder exists** (C4).
 
-- **Wire formats are explicit KMIP KeyFormatType codepoints**, stored
-  per object and surfaced faithfully on Get/Export (the K8 fix:
-  stored format is never remapped to Raw). Requested-format
-  conversion runs through one shared rule table —
-  `ops/helpers.rs:1243 convert_key_format`: absent → stored; same →
-  as-is; Raw ↔ TransparentSymmetricKey (byte-identical rewrap);
-  PKCS#1 ↔ PKCS#8 for RSA private keys (real re-encode via the
-  RustCrypto `rsa` crate); **everything else → a loud
-  `KeyFormatTypeNotSupported` (0x10), never a silent lie.**
-- **PQC and HSS key material moves as Raw only** on Register — the
-  engine import path takes raw key bytes; PKCS#8-wrapped PQC private
-  keys are refused with the explicit unsupported error
-  (`register_import_export.rs:449-533`). RSA is the only family with
-  multi-format ingest (PKCS#1/PKCS#8/X.509 SPKI, normalized by real
-  DER parsing).
-- **SPKI construction/parsing is pure-Rust RustCrypto** — `der` 0.7 /
-  `spki` 0.7 / `x509-cert` 0.2 (Cargo.toml:104-110) — with its own
-  authoritative OID table (`ops/spki_verify.rs:63-65` — the NIST
-  sigAlgs arc strings) mapping OID → PKCS#11 mechanism+parameter-set
-  plans (`:135-142`). Composite public keys (which span two engine
-  objects and have no single handle) get their draft-19 §4 SPKI
-  assembled and cached inline as the KMIP record's `key_material`
-  (`ops/create_key_pair.rs:~335-360`).
+**What this plan actually borrows:**
 
-**What this plan borrows from it:**
-
-1. **An independent SPKI oracle for R3 (and R1-regression checks):**
-   the same public-key bytes pushed through (a) the provider's
-   encoder and (b) a KMIP-side/RustCrypto SPKI build must produce
-   byte-identical DER. Different language, different ASN.1 stack,
-   different authorship — a genuinely independent implementation, in
-   the same repo, already trusted by the KMIP conformance evidence.
-   Concretely: `storeutl`/`pkey -pubout` DER vs a small
-   `x509-cert`-based check (or an existing KMIP test helper) over the
-   raw `CKA_VALUE` bytes.
-2. **A three-way OID agreement gate** for R3/R2/R7: provider name
-   macros (`provider.h` NAMES strings embed OIDs), KMIP's OID
-   constants (`spki_verify.rs`), and the staged OpenSSL `obj_mac.h`
-   NIDs must all agree before an encoder/decoder lands — cheap to
-   check, catches transposition typos that produce valid-but-wrong
-   DER that only fails at a third-party verifier years later.
-3. **The honest-refusal pattern as the error model**: provider
-   encoders/decoders must fail loudly on unsupported selections
-   (KMIP's 0x10 discipline), never fall through to a software
-   implementation silently — the audit's whole premise is that "works
-   via silent software fallback" is indistinguishable from "works on
-   the token" unless refusal is explicit.
-4. **R7's vectors and registry** come from the KMIP tree outright
-   (all 8 profiles + external KAT file) — the provider side is a port
-   with an existing in-repo oracle, not new cryptography.
-5. **Boundary honesty:** no code is shared across the C/Rust boundary
-   — KMIP KeyBlock formats are transport encodings, not OpenSSL
-   provider encoders. The reuse is oracle + reference tables only.
+1. **Byte-level SPKI oracle where a second implementation truly
+   exists:** ML-DSA and composites (KMIP side) — same key bytes, two
+   independent builders, identical DER required. Pure ML-KEM instead
+   verifies against the default provider's parser (different
+   implementation of the *counterpart* operation — weaker independence,
+   labeled as such).
+2. **Three-way OID agreement gate** for R3/R2/R7: provider `NAMES`
+   macros ↔ KMIP OID constants ↔ staged `obj_mac.h` NIDs.
+3. **The honest-refusal error model** for encoders/decoders: fail
+   loudly on unsupported selections; a silent software fallback is
+   indistinguishable from token coverage — the audit's founding
+   premise.
+4. **R7's registry + KAT vectors** come from the KMIP tree outright.
+5. **Boundary honesty:** no code crosses the C/Rust boundary; reuse is
+   oracle + reference tables only.
 
 ---
 
-## Sequencing and dependencies
+## Sequencing and dependencies (v2)
 
 ```
-R3 (ML-KEM encoders)  ──┐
-                        ├──> R2 (decoders; ML-KEM round-trip case needs R3)
-R4 (X25519/X448)  ──────┤        [R2's ML-DSA/SLH-DSA parts independent]
-                        │
-R3b (done) ─────────────┴──> R5-ph1 (TLS groups, client role)
-                                  └─> R5 server role (needs ML-KEM keymgmt IMPORT)
-R6 (Rust persistence) — independent; unlocks any "both engines" claim;
-                        do before R9 (stateful keys need a non-amnesiac arm)
-R7, R8 — demand-driven; R8 after verifying SKEYMGMT import
-R9 — after ENV-1 (oracle rebuild) and preferably R6
-R10 — probes anytime (cheap); scoped items only after probe writeups
-R11 — last, on demonstrated demand only
+R3 core (URI-PEM priv encoder)  ──┬──> R2 (T11k needs R3; ML-DSA/SLH-DSA parts free)
+R3 parity (SPKI/text) ────────────┘
+R4 (5 layers, order internal)  — independent
+R5 pre-1 (ENCODED_PUBLIC_KEY) ──┐
+R5 pre-2 (export-from-private) ─┼──> R5-ph1 groups (client role)
+R3b (done) ─────────────────────┘        └─> R5 server role (import stack)
+R6 — independent; before R9; unlocks "both engines" claims
+R7 (M′ verification first), R8 (bytes-in mode first) — demand-driven
+R9 — after ENV-1 + preferably R6;  R10 — probes anytime;  R11 — last
 ```
 
-Every landed item updates the harness expectations in the same commit
-(ratchet discipline), updates `local-gate.sh`'s two count labels, and
-appends — never rewrites — the audit's and this plan's update logs.
+Every landed item updates harness expectations in the same commit
+(ratchet), updates `local-gate.sh`'s two count labels, and appends —
+never rewrites — the audit's and this plan's update logs.
 
-## Explicitly out of scope (unchanged from phase 1)
+## Explicitly out of scope (unchanged)
 
-Hybrid TLS groups (R5 phase 2 — needs the classical+KEM combiner
-question answered against `pqctoday-tls`'s existing composed
+Hybrid TLS groups (R5-ph2; combiner question vs `pqctoday-tls`'s
 SecP384r1MLKEM1024 first); FrodoKEM / Classic McEliece / BIP32 /
-Keccak-256 / split-key exposure through OpenSSL; WASM-arm changes;
-any OpenSSL version work beyond the staged 3.6.3 oracle (except
-ENV-1's `enable-lms` rebuild, which gates R9 and nothing else).
+Keccak-256 / split-key via OpenSSL; WASM-arm changes; OpenSSL version
+work beyond the staged 3.6.3 oracle except ENV-1's `enable-lms`
+rebuild (gates R9 only).
