@@ -29,11 +29,12 @@
        REST sample or org.json in its Java sample: a small, established
        library for wire-format syntax, not a crypto engine.
 
-       Release 24 is the compiler floor — FFM final since 22,
-       javax.crypto.KEM since 21 — so this builds and tests without the
-       JDK 27 RC; only the TLS phase (W6) needs 27. -->
+       Release target: JDK 27 (this project's target throughout). Built
+       against JDK 27 RC directly; GA is 2026-09-15, and the RC could in
+       principle still shift slightly before then (see the plan's own
+       risk register) — revisit if it does. -->
   <properties>
-    <maven.compiler.release>24</maven.compiler.release>
+    <maven.compiler.release>27</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>5.10.2</junit.version>
     <bouncycastle.version>1.85.2</bouncycastle.version>
