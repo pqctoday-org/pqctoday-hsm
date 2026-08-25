@@ -42,6 +42,14 @@ struct p11prov_sig_ctx {
     CK_ML_DSA_PARAMETER_SET_TYPE mldsa_paramset;
     CK_SIGN_ADDITIONAL_CONTEXT mldsa_params;
 
+    /* SLH-DSA param data (PKCS#11 v3.2 §6.68: CKM_SLH_DSA accepts the same
+     * optional CK_SIGN_ADDITIONAL_CONTEXT as CKM_ML_DSA — FIPS 205 §9.2
+     * context string, §10 hedge/deterministic — confirmed against the
+     * engine's own SoftHSM_sign.cpp CKM_SLH_DSA case, not assumed from
+     * ML-DSA's shape alone) */
+    CK_SLH_DSA_PARAMETER_SET_TYPE slhdsa_paramset;
+    CK_SIGN_ADDITIONAL_CONTEXT slhdsa_params;
+
     /* Signature to be verified, used by verify_message_final() */
     unsigned char *signature;
     size_t signature_len;

@@ -297,10 +297,43 @@ t11() { local w; w=$(mk_arena uripemml "$CPP_ENGINE_SO") && use_arena "$w" || re
 }
 run_case T11 XFAIL "URI-PEM round-trip for ML-DSA (gap OP-2 / remediation R2)" t11
 
+# R1 (partial): SLH-DSA keymgmt+store+encoder are now real and live-verified
+# (all 12 parameter sets) — genpkey lands a key on token, storeutl correctly
+# enumerates and text/SPKI-encodes it, matching OpenSSL's own 12 native
+# algorithm names for cross-recognition. T12's original propquery
+# ("provider=pkcs11", no "?") was itself a latent bug — every OTHER genpkey
+# case in this harness uses the optional "?provider=pkcs11" form (a required
+# propquery on genpkey fails generically here, reproduced live even for
+# plain RSA — a WART-4-adjacent gap, not specific to SLH-DSA — see the
+# remediation plan). Fixed to match the harness's own established pattern,
+# and upgraded from "genpkey exits 0" to an explicit on-token check (the
+# same class of false-positive the audit's own R0.1 investigation warns
+# about: an optional propquery quietly falling back to software would
+# still exit 0).
 t12() { local w; w=$(mk_arena slh "$CPP_ENGINE_SO") && use_arena "$w" || return 1
-  O genpkey -propquery "provider=pkcs11" -algorithm SLH-DSA-SHA2-128s -out "$w/k.pem"
+  O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHA2-128s -out "$w/k.pem" || return 1
+  O storeutl -text "pkcs11:token=slh" 2>/dev/null | grep -q "SLH-DSA-SHA2-128s Public-Key"
 }
-run_case T12 XFAIL "SLH-DSA reachable through provider (gap ALG-1 / remediation R1)" t12
+run_case T12 PASS "SLH-DSA keygen/store/encode reachable through provider, all 12 param sets (gap ALG-1 / remediation R1, partial)" t12
+
+# R1 remaining gap: keygen/store/encode all work (T12), but the SIGNATURE
+# operation itself does not — `pkeyutl -sign` on the very same on-token key
+# fails at OpenSSL's own fetch layer ("operation not supported for this
+# keytype", crypto/evp/m_sigver.c) despite the provider's signature
+# registration switch case being confirmed live (via a temporary debug
+# print) to run to completion for all 12 variants, with byte-identical
+# algorithm name strings across the keymgmt/signature/store registration
+# sites. Root cause not yet isolated — deepest investigation this session
+# got: it is not a registration, template, or name-matching bug on this
+# provider's side by every check available (gdb/`openssl list -select`
+# were both unreliable here — `list` never shows "@ pkcs11" for KNOWN-
+# WORKING ML-DSA either, so it cannot distinguish the two). Needs a build
+# with more provider-side introspection than this harness's tools allow.
+t12sign() { local w; w=$(mk_arena slhsign "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHA2-128s -out "$w/k.pem" || return 1
+  O pkeyutl -sign -inkey "pkcs11:token=slhsign;type=private" -rawin -in "$MSG" -out "$w/sig.bin"
+}
+run_case T12sign XFAIL "SLH-DSA token-sign (gap ALG-1 remainder / remediation R1, unresolved this session)" t12sign
 
 t14() { local w; w=$(mk_arena cms "$CPP_ENGINE_SO") && use_arena "$w" || return 1
   O genpkey -propquery "?provider=pkcs11" -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$w/k.pem" || return 1

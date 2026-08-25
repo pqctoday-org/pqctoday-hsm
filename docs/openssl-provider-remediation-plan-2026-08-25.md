@@ -14,9 +14,17 @@ remediation execution with the P0 batch. R0.1/R0.2/R0.3/R0.5 landed
 (commit `3bf6f56`). R0.4's first attempt caused a real regression and
 was reverted; a second, careful attempt found the provider already
 ships the real fix as an opt-in config directive and landed it — see
-its row below. **P0 batch is now fully done: harness is
-`PASS=14 FAIL=0 XFAIL=4 XPASS=0`.** Everything below P0 is still
-plan-only, unchanged.
+its row below. **P0 batch is now fully done: harness was
+`PASS=14 FAIL=0 XFAIL=4 XPASS=0`.**
+
+**Further update (2026-08-25, same day):** user asked to continue with
+R1 (SLH-DSA end-to-end, the highest-value P1 item). Landed **partially**:
+keygen/store/encode work for all 12 parameter sets (two real, unrelated
+bugs found and fixed along the way — see R1's row); token **sign** itself
+still fails with a not-yet-root-caused OpenSSL-side fetch error. Harness
+is now `PASS=15 FAIL=0 XFAIL=4 XPASS=0` (T12 flipped PASS, rescoped; new
+T12sign added XFAIL, tracking the remaining gap). Everything else below
+P0 is still plan-only, unchanged.
 
 ## Priority 0 — correctness / hygiene of what already ships
 
@@ -32,7 +40,7 @@ plan-only, unchanged.
 
 | # | Item | Gap | Sketch | Effort | Proof |
 |---|---|---|---|---|---|
-| R1 | **SLH-DSA end-to-end** | ALG-1 | Add `CKM_SLH_DSA`/`CKM_SLH_DSA_KEY_PAIR_GEN` to `PQC_MECHS`/`checklist[]` (`provider.c:859,896`); implement `sig/slhdsa.c` keymgmt+signature (model: `sig/mldsa.c`, which already solved context-string plumbing; parameter set via `CKA_PARAMETER_SET`, names mirror OpenSSL's own 12 native names for cross-verify); SPKI encoder like ML-DSA's | L | new T-cases: keygen+sign via provider, software cross-verify, for at least SHA2-128s/SHAKE-128f; T12 flips |
+| R1 | **SLH-DSA end-to-end** — **PARTIAL (2026-08-25 later same day): keygen/store/encode DONE for all 12 param sets; token SIGN still unresolved** | ALG-1 | ~~Add `CKM_SLH_DSA`/`CKM_SLH_DSA_KEY_PAIR_GEN` to `PQC_MECHS`/`checklist[]`; implement `sig/slhdsa.c` keymgmt+signature (model: `sig/mldsa.c`); SPKI encoder like ML-DSA's~~ Done as sketched, for all 12 parameter sets (not just SHA2-128s/SHAKE-128f) — full `sig/slhdsa.c`, 12 keymgmt tables in `keymgmt.c`, SPKI/text/URI-PEM encoders in `encoder.c`. Landing it surfaced **two real, pre-existing bugs unrelated to registration**, both now fixed: (1) `p11prov_obj_from_handle`'s key-type switch (`objects.c`) had no `CKK_SLH_DSA` case — fell into `default: return CKR_ARGUMENTS_BAD`, so a freshly-generated key could never be read back, even though the engine had already created it correctly (confirmed via C++ engine DEBUG logs — both PUBLIC and PRIVATE objects were created on-token before the provider-side failure). Added `fetch_slhdsa_key()`, sizes (32/48/64-byte PK per FIPS 205 security level) cross-checked live via `openssl asn1parse` on native 3.6.3 SPKI output. (2) `store.c`'s key-type-to-`data_type`-name switch (used by `pkcs11:` URI resolution) had the same gap, silently dropping SLH-DSA objects from `storeutl` enumeration entirely (empty output, no error). Both are the same *class* of bug as each other — a type-specific dispatch switch missing the new `CKK_SLH_DSA` case — found only by tracing live C++ engine logs after the generic "Invalid or improper arguments" provider error gave no line number. **Remaining, unresolved gap**: `pkeyutl -sign` against a correctly-created, correctly-enumerable on-token key fails at OpenSSL's own EVP fetch layer ("operation not supported for this keytype", not a provider-side error) — confirmed via a temporary debug print that the provider's 12-variant signature registration switch case runs to completion with byte-identical name strings across all three registration sites (keymgmt/signature/store); `openssl list -select` and gdb were both tried and found unreliable for this specific question (`list` never shows `@ pkcs11` for ML-DSA either, a known-working case, so it can't distinguish the two). Root cause not isolated this session. | L | T12 flipped from XFAIL to **PASS**, rescoped to what it actually tests (keygen+store+encode reachability — its original propquery had its own bug, fixed to match every other genpkey call in the harness: see proof column). New **T12sign** case added and left **XFAIL**, sabotage-tested both directions (flipped assertion → FAIL; pointed at ML-DSA-65 instead → XPASS), tracking the sign gap specifically so a future fix has a concrete test to flip. |
 | R2 | **PQC decoders (URI-PEM round-trip)** | OP-2 | Register ML-DSA + ML-KEM decoders (`input=der,structure=P11PROV_DER_STRUCTURE` like RSA/EC's); the URI-PEM body is provider-defined DER, so no d2i_X509_PUBKEY recursion applies (that issue was composite-SPKI-specific, `provider.c:1512-1525`) | M | T11 flips; add ML-KEM variant |
 | R3 | **ML-KEM encoders** | OP-3 | Port the latchset sibling's ML-KEM SPKI/text encoders (`vendor/latchset/src/provider.c:1445-1457`) + URI-PEM PrivateKeyInfo entry | S–M | new T-case: `pkey -pubout` without URI hop; ML-KEM URI-PEM round-trip |
 | R3b | **ML-KEM token keygen (keymgmt GEN)** | OP-6 | Add `OSSL_FUNC_KEYMGMT_GEN*` to the per-variant ML-KEM keymgmt tables (model: the working ML-DSA gen path; token template `CKA_ENCAPSULATE`/`CKA_DECAPSULATE` per the engines' own CKM_ML_KEM flags); unlocks the native software-encap→token-decap E2E and is a prerequisite for R5-ph1 | M | T4x flips; then add the full T4 KEM E2E cases (512/768/1024, ct sizes 768/1088/1568, secret equality) |

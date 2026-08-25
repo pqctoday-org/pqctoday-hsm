@@ -131,7 +131,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 
 | ID | Gap | Engine support | Provider state | Severity |
 |---|---|---|---|---|
-| ALG-1 | SLH-DSA (all 12 sets) | both engines, 13 mechs each | `sig/slhdsa.c` is a `{0,NULL}` stub AND the registration branch is unreachable (`CKM_SLH_DSA` absent from `checklist[]`/`PQC_MECHS`, `provider.c:859`); OpenSSL 3.6 has native names/OIDs to mirror | **High** |
+| ALG-1 | **PARTIALLY RESOLVED (R1, 2026-08-25 later same day)** — was: SLH-DSA (all 12 sets), `sig/slhdsa.c` a `{0,NULL}` stub, registration branch unreachable. Now: real keymgmt+signature+encoders for all 12 parameter sets; keygen/store/text-and-SPKI-encode all live-verified working. Token **sign** itself still fails at OpenSSL's own fetch layer, not yet root-caused — see `docs/openssl-provider-remediation-plan-2026-08-25.md` R1 for the full investigation trail (two other, unrelated real bugs found and fixed along the way: `objects.c`'s and `store.c`'s key-type dispatch switches both lacked a `CKK_SLH_DSA` case). | both engines, 13 mechs each | ~~`sig/slhdsa.c` is a `{0,NULL}` stub AND the registration branch is unreachable (`CKM_SLH_DSA` absent from `checklist[]`/`PQC_MECHS`, `provider.c:859`); OpenSSL 3.6 has native names/OIDs to mirror~~ | ~~**High**~~ **Medium** (keygen/store/encode no longer gaps; sign remains) |
 | ALG-2 | XMSS/XMSS-MT | both engines (sign+verify, stateful) | `sig/xmss.c` stub, unreachable; no native OpenSSL names exist (custom names required; no CMS/TLS story) | Medium |
 | ALG-3 | HSS/LMS | both engines **sign+verify** | nothing in provider; OpenSSL 3.6 native LMS is *verify-only* → token-sign/OpenSSL-verify is a uniquely coherent split, but blocked by ENV-1 (no `enable-lms` in staged build) | Medium |
 | ALG-4 | Composite profiles 4–8 | KMIP layer has all 8 §10.4 profiles | provider `composite.c` registry has 3; missing 5 include **all four §10.4-recommended** (MLDSA44-Ed25519-SHA512, MLDSA44-ECDSA-P256-SHA256, MLDSA65-RSA3072-PSS-SHA512, MLDSA65-Ed25519-SHA512) + MLDSA65-ECDSA-P384-SHA512 | Medium–High |
@@ -215,7 +215,8 @@ trusted; unexpected PASS of an XFAIL case fails the run (ratchet).
 | T9 | Digest fetch (WART-4) | `dgst -propquery provider=pkcs11` in a fresh process, dedicated arena with `pkcs11-module-load-behavior=early` | **PASS** (flipped by R0.4, 2026-08-25) |
 | T10 | URI-PEM round-trip, EC (control) | genpkey URI-PEM → load back → sign | PASS |
 | T11 | URI-PEM round-trip, ML-DSA (OP-2) | same flow | **XFAIL** (flips on R2) |
-| T12 | SLH-DSA reachability (ALG-1) | provider-propquery SLH-DSA-SHA2-128s keygen | **XFAIL** (flips on R1) |
+| T12 | SLH-DSA keygen/store/encode reachability (ALG-1) | genpkey (all 12 param sets registered) → storeutl confirms on-token, correctly typed/named | **PASS** (flipped by R1, 2026-08-25) |
+| T12sign | SLH-DSA token-sign (ALG-1 remainder) | `pkeyutl -sign` against the same on-token key | **XFAIL** (root cause not yet isolated; see remediation plan R1) |
 | T13 | TLS-GROUP gap (F36-1) | not CLI-checkable cleanly (`list -tls-groups` merges all providers) — plan-only P2; the gap itself is source-anchored (`tls.c:89-174`) | plan-only |
 | T14 | CMS RSA | CMS sign via token key → software cmsverify | PASS |
 | T15a/b | Rust arm | provider activates over `libsofthsmrustv3.so` (PASS); multi-process functional flow (XFAIL, ENV-2) | PASS + **XFAIL** (flips on R6) |
@@ -274,11 +275,22 @@ code 0, `OPENSSL-PROVIDER-HARNESS: PASS=13 FAIL=0 XFAIL=5 XPASS=0`.
 **Update (2026-08-25, later same day) — P0 remediation batch executed:**
 R0.1/R0.2/R0.3/R0.4/R0.5 all landed (R0.4 on a second, careful attempt
 after a first attempt regressed provider activation and was reverted —
-see the remediation plan for the full story). The harness now reads
+see the remediation plan for the full story). Harness was
 `OPENSSL-PROVIDER-HARNESS: PASS=14 FAIL=0 XFAIL=4 XPASS=0` — T9 flipped
 from XFAIL to PASS; WART-4 is resolved (§4A above); WART-1/3/5 are
-resolved/documented. Remaining XFAILs: OP-6 (T4x), OP-2 (T11), ALG-1
-(T12), ENV-2 (T15b) — all still plan-only, Priority 1/2 items.
+resolved/documented.
+
+**Further update (2026-08-25, same day) — R1 (SLH-DSA) started, landed
+partially:** keygen/store/encode now real and working for all 12
+parameter sets (two real, unrelated bugs found and fixed along the
+way — see remediation plan R1). Token **sign** itself still fails at
+OpenSSL's own fetch layer, root cause not isolated this session.
+Harness now reads `OPENSSL-PROVIDER-HARNESS: PASS=15 FAIL=0 XFAIL=4
+XPASS=0` — T12 flipped from XFAIL to PASS (rescoped to what it actually
+tests); new T12sign added, XFAIL, tracking the sign gap specifically.
+Remaining XFAILs: OP-6 (T4x), OP-2 (T11), ALG-1-sign-remainder
+(T12sign), ENV-2 (T15b) — all still plan-only or unresolved, Priority
+1/2 items.
 
 ## 7. Companion document
 

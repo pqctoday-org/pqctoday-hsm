@@ -128,6 +128,9 @@ struct key_generator {
         struct {
             CK_ML_DSA_PARAMETER_SET_TYPE param_set;
         } mldsa;
+        struct {
+            CK_SLH_DSA_PARAMETER_SET_TYPE param_set;
+        } slhdsa;
     } data;
 
     OSSL_CALLBACK *cb_fn;
@@ -2623,6 +2626,471 @@ const OSSL_DISPATCH p11prov_mldsa87_keymgmt_functions[] = {
     DISPATCH_KEYMGMT_ELEM(mldsa, GETTABLE_PARAMS, gettable_params),
     { 0, NULL },
 };
+
+/* SLH-DSA (FIPS 205), all 12 parameter sets sharing CKM_SLH_DSA_KEY_PAIR_GEN,
+ * distinguished by CKA_PARAMETER_SET — modeled on the ML-DSA block above. */
+
+static void *p11prov_slhdsa_new(void *provctx)
+{
+    P11PROV_CTX *ctx = (P11PROV_CTX *)provctx;
+    CK_RV ret;
+
+    P11PROV_debug("slhdsa new");
+
+    ret = p11prov_ctx_status(ctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    return p11prov_obj_new(provctx, CK_UNAVAILABLE_INFORMATION,
+                           CK_P11PROV_IMPORTED_HANDLE,
+                           CK_UNAVAILABLE_INFORMATION);
+}
+
+static void p11prov_slhdsa_free(void *key)
+{
+    P11PROV_debug("slhdsa free %p", key);
+    p11prov_obj_free((P11PROV_OBJ *)key);
+}
+
+static void *p11prov_slhdsa_load(const void *reference, size_t reference_sz)
+{
+    P11PROV_debug("slhdsa load %p, %ld", reference, reference_sz);
+    return p11prov_obj_from_typed_reference(reference, reference_sz,
+                                            CKK_SLH_DSA);
+}
+
+static int p11prov_slhdsa_has(const void *keydata, int selection)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+
+    P11PROV_debug("slhdsa has %p %d", key, selection);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        if (p11prov_obj_get_class(key) != CKO_PRIVATE_KEY) {
+            return RET_OSSL_ERR;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static int p11prov_slhdsa_match(const void *keydata1, const void *keydata2,
+                                int selection)
+{
+    P11PROV_debug("slhdsa match %p %p %d", keydata1, keydata2, selection);
+
+    return p11prov_common_match(keydata1, keydata2, CKK_SLH_DSA, selection);
+}
+
+static void *p11prov_slhdsa_gen_init_int(void *provctx, int selection,
+                                         const OSSL_PARAM params[],
+                                         CK_SLH_DSA_PARAMETER_SET_TYPE
+                                             param_set)
+{
+    struct key_generator *ctx = NULL;
+    int ret;
+
+    P11PROV_debug("slhdsa gen_init %p", provctx);
+
+    ret = p11prov_ctx_status(provctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) == 0) {
+        P11PROV_raise(provctx, CKR_ARGUMENTS_BAD, "Unsupported selection");
+        return NULL;
+    }
+
+    ctx = OPENSSL_zalloc(sizeof(struct key_generator));
+    if (ctx == NULL) {
+        P11PROV_raise(provctx, CKR_HOST_MEMORY,
+                      "Failed to allocate key_generator structure");
+        return NULL;
+    }
+    ctx->provctx = (P11PROV_CTX *)provctx;
+    ctx->type = CKK_SLH_DSA;
+    ctx->data.slhdsa.param_set = param_set;
+
+    ctx->mechanism.mechanism = CKM_SLH_DSA_KEY_PAIR_GEN;
+
+    ret = p11prov_common_gen_set_params(ctx, params);
+    if (ret != RET_OSSL_OK) {
+        p11prov_common_gen_cleanup(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+#define SLHDSA_GEN_INIT(suffix, paramset) \
+    static void *p11prov_slhdsa_##suffix##_gen_init(void *provctx, \
+                                                     int selection, \
+                                                     const OSSL_PARAM \
+                                                         params[]) \
+    { \
+        return p11prov_slhdsa_gen_init_int(provctx, selection, params, \
+                                           paramset); \
+    }
+
+SLHDSA_GEN_INIT(sha2_128s, CKP_SLH_DSA_SHA2_128S)
+SLHDSA_GEN_INIT(shake_128s, CKP_SLH_DSA_SHAKE_128S)
+SLHDSA_GEN_INIT(sha2_128f, CKP_SLH_DSA_SHA2_128F)
+SLHDSA_GEN_INIT(shake_128f, CKP_SLH_DSA_SHAKE_128F)
+SLHDSA_GEN_INIT(sha2_192s, CKP_SLH_DSA_SHA2_192S)
+SLHDSA_GEN_INIT(shake_192s, CKP_SLH_DSA_SHAKE_192S)
+SLHDSA_GEN_INIT(sha2_192f, CKP_SLH_DSA_SHA2_192F)
+SLHDSA_GEN_INIT(shake_192f, CKP_SLH_DSA_SHAKE_192F)
+SLHDSA_GEN_INIT(sha2_256s, CKP_SLH_DSA_SHA2_256S)
+SLHDSA_GEN_INIT(shake_256s, CKP_SLH_DSA_SHAKE_256S)
+SLHDSA_GEN_INIT(sha2_256f, CKP_SLH_DSA_SHA2_256F)
+SLHDSA_GEN_INIT(shake_256f, CKP_SLH_DSA_SHAKE_256F)
+
+static void *p11prov_slhdsa_gen(void *genctx, OSSL_CALLBACK *cb_fn,
+                                void *cb_arg)
+{
+    struct key_generator *ctx = (struct key_generator *)genctx;
+    void *key;
+    CK_RV ret;
+
+    /* always leave space for CKA_ID and CKA_LABEL */
+#define SLHDSA_PUBKEY_TMPL_SIZE 3
+    CK_ATTRIBUTE pubkey_template[SLHDSA_PUBKEY_TMPL_SIZE + COMMON_TMPL_SIZE] =
+        {
+            { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+            { CKA_VERIFY, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+            { CKA_PARAMETER_SET, &ctx->data.slhdsa.param_set,
+              sizeof(ctx->data.slhdsa.param_set) },
+        };
+#define SLHDSA_PRIVKEY_TMPL_SIZE 4
+    CK_ATTRIBUTE
+    privkey_template[SLHDSA_PRIVKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_PRIVATE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SENSITIVE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SIGN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+    };
+    int pubtsize = SLHDSA_PUBKEY_TMPL_SIZE;
+    int privtsize = SLHDSA_PRIVKEY_TMPL_SIZE;
+
+    P11PROV_debug("slhdsa gen %p %p %p", ctx, cb_fn, cb_arg);
+
+    ret = p11prov_common_gen(ctx, pubkey_template, privkey_template,
+                             pubtsize, privtsize, cb_fn, cb_arg, &key);
+    if (ret != CKR_OK) {
+        P11PROV_raise(ctx->provctx, ret, "slhdsa Key generation failed");
+        return NULL;
+    }
+    return key;
+}
+
+static const OSSL_PARAM *p11prov_slhdsa_gen_settable_params(void *genctx,
+                                                             void *provctx)
+{
+    static OSSL_PARAM p11prov_slhdsa_params[] = {
+        OSSL_PARAM_utf8_string(P11PROV_PARAM_URI, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return p11prov_slhdsa_params;
+}
+
+static int p11prov_slhdsa_import(void *keydata, int selection,
+                                 const OSSL_PARAM params[],
+                                 CK_SLH_DSA_PARAMETER_SET_TYPE param_set)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    CK_OBJECT_CLASS class = CK_UNAVAILABLE_INFORMATION;
+    CK_RV rv;
+
+    P11PROV_debug("slhdsa import %p", key);
+
+    if (!key) {
+        return RET_OSSL_ERR;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        class = CKO_PRIVATE_KEY;
+    } else if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        class = CKO_PUBLIC_KEY;
+    } else if (selection & OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS) {
+        class = CKO_DOMAIN_PARAMETERS;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        const OSSL_PARAM *p;
+        p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PRIV_KEY);
+        if (!p) {
+            /* not really a private key */
+            class = CKO_PUBLIC_KEY;
+        }
+    }
+
+    rv = p11prov_obj_import_key(key, CKK_SLH_DSA, class, param_set, params);
+    if (rv != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+    return RET_OSSL_OK;
+}
+
+#define SLHDSA_IMPORT(suffix, paramset) \
+    static int p11prov_slhdsa_##suffix##_import(void *keydata, \
+                                                int selection, \
+                                                const OSSL_PARAM params[]) \
+    { \
+        return p11prov_slhdsa_import(keydata, selection, params, paramset); \
+    }
+
+SLHDSA_IMPORT(sha2_128s, CKP_SLH_DSA_SHA2_128S)
+SLHDSA_IMPORT(shake_128s, CKP_SLH_DSA_SHAKE_128S)
+SLHDSA_IMPORT(sha2_128f, CKP_SLH_DSA_SHA2_128F)
+SLHDSA_IMPORT(shake_128f, CKP_SLH_DSA_SHAKE_128F)
+SLHDSA_IMPORT(sha2_192s, CKP_SLH_DSA_SHA2_192S)
+SLHDSA_IMPORT(shake_192s, CKP_SLH_DSA_SHAKE_192S)
+SLHDSA_IMPORT(sha2_192f, CKP_SLH_DSA_SHA2_192F)
+SLHDSA_IMPORT(shake_192f, CKP_SLH_DSA_SHAKE_192F)
+SLHDSA_IMPORT(sha2_256s, CKP_SLH_DSA_SHA2_256S)
+SLHDSA_IMPORT(shake_256s, CKP_SLH_DSA_SHAKE_256S)
+SLHDSA_IMPORT(sha2_256f, CKP_SLH_DSA_SHA2_256F)
+SLHDSA_IMPORT(shake_256f, CKP_SLH_DSA_SHAKE_256F)
+
+static int p11prov_slhdsa_export(void *keydata, int selection,
+                                 OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    P11PROV_CTX *ctx = p11prov_obj_get_prov_ctx(key);
+    CK_OBJECT_CLASS class = p11prov_obj_get_class(key);
+
+    P11PROV_debug("slhdsa export %p, selection= %d", keydata, selection);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    if (p11prov_ctx_allow_export(ctx) & DISALLOW_EXPORT_PUBLIC) {
+        return RET_OSSL_ERR;
+    }
+
+    if ((class == CKO_PUBLIC_KEY) || (selection & ~(PUBLIC_PARAMS)) == 0) {
+        return p11prov_obj_export_public_key(key, CKK_SLH_DSA, true, false,
+                                             cb_fn, cb_arg);
+    }
+
+    return RET_OSSL_ERR;
+}
+
+static const OSSL_PARAM *p11prov_slhdsa_import_types(int selection)
+{
+    static const OSSL_PARAM p11prov_slhdsa_imp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PRIV_KEY, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    P11PROV_debug("slhdsa import types");
+    if (selection & OSSL_KEYMGMT_SELECT_KEYPAIR) {
+        return p11prov_slhdsa_imp_key_types;
+    }
+    return NULL;
+}
+
+static const OSSL_PARAM *p11prov_slhdsa_export_types(int selection)
+{
+    static const OSSL_PARAM p11prov_slhdsa_exp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    P11PROV_debug("slhdsa export types");
+    if (selection == OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        return p11prov_slhdsa_exp_key_types;
+    }
+    return NULL;
+}
+
+/* See FIPS-205, Table 2 — cross-checked live against native OpenSSL 3.6.3
+ * (genpkey + pkeyutl -sign for all 12 algorithms), not transcribed from
+ * the spec alone. */
+#define P11PROV_SLH_DSA_128_SIG_SIZE 7856
+#define P11PROV_SLH_DSA_128F_SIG_SIZE 17088
+#define P11PROV_SLH_DSA_192S_SIG_SIZE 16224
+#define P11PROV_SLH_DSA_192F_SIG_SIZE 35664
+#define P11PROV_SLH_DSA_256S_SIG_SIZE 29792
+#define P11PROV_SLH_DSA_256F_SIG_SIZE 49856
+
+static int p11prov_slhdsa_get_params(void *keydata, OSSL_PARAM params[])
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    CK_ULONG param_set = p11prov_obj_get_key_param_set(key);
+    OSSL_PARAM *p;
+    int ret;
+
+    P11PROV_debug("slhdsa get params %p", keydata);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_BITS);
+    if (p) {
+        CK_ULONG bits_size = p11prov_obj_get_key_bit_size(key);
+        if (bits_size == 0) {
+            return RET_OSSL_ERR;
+        }
+        ret = OSSL_PARAM_set_int(p, bits_size);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_BITS);
+    if (p) {
+        int secbits = 0;
+        switch (param_set) {
+        case CKP_SLH_DSA_SHA2_128S:
+        case CKP_SLH_DSA_SHAKE_128S:
+        case CKP_SLH_DSA_SHA2_128F:
+        case CKP_SLH_DSA_SHAKE_128F:
+            secbits = 128;
+            break;
+        case CKP_SLH_DSA_SHA2_192S:
+        case CKP_SLH_DSA_SHAKE_192S:
+        case CKP_SLH_DSA_SHA2_192F:
+        case CKP_SLH_DSA_SHAKE_192F:
+            secbits = 192;
+            break;
+        case CKP_SLH_DSA_SHA2_256S:
+        case CKP_SLH_DSA_SHAKE_256S:
+        case CKP_SLH_DSA_SHA2_256F:
+        case CKP_SLH_DSA_SHAKE_256F:
+            secbits = 256;
+            break;
+        }
+        if (secbits == 0) {
+            return RET_OSSL_ERR;
+        }
+        ret = OSSL_PARAM_set_int(p, secbits);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
+    if (p) {
+        int sigsize = 0;
+        switch (param_set) {
+        case CKP_SLH_DSA_SHA2_128S:
+        case CKP_SLH_DSA_SHAKE_128S:
+            sigsize = P11PROV_SLH_DSA_128_SIG_SIZE;
+            break;
+        case CKP_SLH_DSA_SHA2_128F:
+        case CKP_SLH_DSA_SHAKE_128F:
+            sigsize = P11PROV_SLH_DSA_128F_SIG_SIZE;
+            break;
+        case CKP_SLH_DSA_SHA2_192S:
+        case CKP_SLH_DSA_SHAKE_192S:
+            sigsize = P11PROV_SLH_DSA_192S_SIG_SIZE;
+            break;
+        case CKP_SLH_DSA_SHA2_192F:
+        case CKP_SLH_DSA_SHAKE_192F:
+            sigsize = P11PROV_SLH_DSA_192F_SIG_SIZE;
+            break;
+        case CKP_SLH_DSA_SHA2_256S:
+        case CKP_SLH_DSA_SHAKE_256S:
+            sigsize = P11PROV_SLH_DSA_256S_SIG_SIZE;
+            break;
+        case CKP_SLH_DSA_SHA2_256F:
+        case CKP_SLH_DSA_SHAKE_256F:
+            sigsize = P11PROV_SLH_DSA_256F_SIG_SIZE;
+            break;
+        }
+        if (sigsize == 0) {
+            return RET_OSSL_ERR;
+        }
+        ret = OSSL_PARAM_set_int(p, sigsize);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MANDATORY_DIGEST);
+    if (p) {
+        /* SLH-DSA is hash-internal (FIPS 205 §10.1) — no external digest. */
+        ret = OSSL_PARAM_set_utf8_string(p, "");
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_PUB_KEY);
+    if (p) {
+        CK_ATTRIBUTE *pub;
+
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) {
+            return RET_OSSL_ERR;
+        }
+        pub = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!pub) {
+            return RET_OSSL_ERR;
+        }
+
+        p->return_size = pub->ulValueLen;
+        if (p->data) {
+            if (p->data_size < pub->ulValueLen) {
+                return RET_OSSL_ERR;
+            }
+            memcpy(p->data, pub->pValue, pub->ulValueLen);
+            p->data_size = pub->ulValueLen;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_slhdsa_gettable_params(void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
+        OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_MANDATORY_DIGEST, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+#define SLHDSA_KEYMGMT_FUNCTIONS(suffix) \
+    const OSSL_DISPATCH p11prov_slhdsa_##suffix##_keymgmt_functions[] = { \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, NEW, new), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa_##suffix, GEN_INIT, gen_init), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, GEN, gen), \
+        DISPATCH_KEYMGMT_ELEM(common, GEN_CLEANUP, gen_cleanup), \
+        DISPATCH_KEYMGMT_ELEM(common, GEN_SET_PARAMS, gen_set_params), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, GEN_SETTABLE_PARAMS, \
+                              gen_settable_params), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, LOAD, load), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, FREE, free), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, HAS, has), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, MATCH, match), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa_##suffix, IMPORT, import), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, IMPORT_TYPES, import_types), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, EXPORT, export), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, EXPORT_TYPES, export_types), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, GET_PARAMS, get_params), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, GETTABLE_PARAMS, gettable_params), \
+        { 0, NULL }, \
+    };
+
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_128s)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_128s)
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_128f)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_128f)
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_192s)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_192s)
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_192f)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_192f)
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_256s)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_256s)
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_256f)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_256f)
 
 DISPATCH_KEYMGMT_FN(hkdf, new);
 DISPATCH_KEYMGMT_FN(hkdf, free);

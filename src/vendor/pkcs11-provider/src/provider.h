@@ -183,9 +183,38 @@ extern const OSSL_DISPATCH
 #define P11PROV_NAMES_X448 "X448:1.3.101.111"
 #define P11PROV_DESCS_X448 "PKCS11 X448 Implementation"
 
-#define P11PROV_NAMES_SLH_DSA "SLH-DSA"
-#define P11PROV_NAME_SLH_DSA P11PROV_NAMES_SLH_DSA
-#define P11PROV_DESCS_SLH_DSA "PKCS11 SLH-DSA Implementation"
+/* SLH-DSA (FIPS 205), all 12 parameter sets — per-variant like ML-DSA's
+ * 44/65/87 (not the single generic name the earlier scaffolding used),
+ * so each variant gets its own OpenSSL namemap identity and
+ * `-algorithm SLH-DSA-SHA2-128s` etc. via `?provider=pkcs11` resolves
+ * straight to this provider's implementation instead of a name that
+ * doesn't match OpenSSL's own 12 native algorithm names. */
+#define P11PROV_NAMES_SLH_DSA_SHA2_128S "SLH-DSA-SHA2-128s"
+#define P11PROV_DESCS_SLH_DSA_SHA2_128S "PKCS11 SLH-DSA-SHA2-128s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_128S "SLH-DSA-SHAKE-128s"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_128S "PKCS11 SLH-DSA-SHAKE-128s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHA2_128F "SLH-DSA-SHA2-128f"
+#define P11PROV_DESCS_SLH_DSA_SHA2_128F "PKCS11 SLH-DSA-SHA2-128f Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_128F "SLH-DSA-SHAKE-128f"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_128F "PKCS11 SLH-DSA-SHAKE-128f Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHA2_192S "SLH-DSA-SHA2-192s"
+#define P11PROV_DESCS_SLH_DSA_SHA2_192S "PKCS11 SLH-DSA-SHA2-192s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_192S "SLH-DSA-SHAKE-192s"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_192S "PKCS11 SLH-DSA-SHAKE-192s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHA2_192F "SLH-DSA-SHA2-192f"
+#define P11PROV_DESCS_SLH_DSA_SHA2_192F "PKCS11 SLH-DSA-SHA2-192f Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_192F "SLH-DSA-SHAKE-192f"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_192F "PKCS11 SLH-DSA-SHAKE-192f Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHA2_256S "SLH-DSA-SHA2-256s"
+#define P11PROV_DESCS_SLH_DSA_SHA2_256S "PKCS11 SLH-DSA-SHA2-256s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_256S "SLH-DSA-SHAKE-256s"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_256S "PKCS11 SLH-DSA-SHAKE-256s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHA2_256F "SLH-DSA-SHA2-256f"
+#define P11PROV_DESCS_SLH_DSA_SHA2_256F "PKCS11 SLH-DSA-SHA2-256f Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_256F "SLH-DSA-SHAKE-256f"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_256F "PKCS11 SLH-DSA-SHAKE-256f Implementation"
+/* keymgmt tables: keymgmt.h. Encoder tables: encoder.h. Signature tables:
+ * sig/signature.h. Matches ML-DSA's own per-header convention. */
 
 #define P11PROV_NAMES_ML_KEM "ML-KEM:ML-KEM-512:ML-KEM-768:ML-KEM-1024"
 #define P11PROV_NAME_ML_KEM P11PROV_NAMES_ML_KEM

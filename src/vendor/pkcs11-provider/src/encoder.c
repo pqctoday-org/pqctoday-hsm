@@ -1377,3 +1377,341 @@ const OSSL_DISPATCH p11prov_mldsa_encoder_text_functions[] = {
     DISPATCH_TEXT_ENCODER_ELEM(ENCODE, mldsa, encode_text),
     { 0, NULL },
 };
+
+/* SLH-DSA — one shared table per format across all 12 parameter sets;
+ * each encode function dispatches on the key's own CKA_PARAMETER_SET at
+ * runtime (p11prov_obj_get_key_param_set), same structure as ML-DSA's
+ * encoders above. */
+
+struct slhdsa_key_point {
+    unsigned char *octet;
+    size_t len;
+};
+
+#ifdef NID_SLH_DSA_SHA2_128s
+static int p11prov_slhdsa_set_keypoint_data(const OSSL_PARAM *params,
+                                            void *key)
+{
+    struct slhdsa_key_point *keypoint = (struct slhdsa_key_point *)key;
+    const OSSL_PARAM *p;
+
+    p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PUB_KEY);
+    if (!p) {
+        return RET_OSSL_ERR;
+    }
+    if (p->data_type != OSSL_PARAM_OCTET_STRING) {
+        return RET_OSSL_ERR;
+    }
+    keypoint->octet = OPENSSL_memdup(p->data, p->data_size);
+    if (!keypoint->octet) {
+        return RET_OSSL_ERR;
+    }
+    keypoint->len = p->data_size;
+
+    return RET_OSSL_OK;
+}
+#endif /* defined(NID_SLH_DSA_SHA2_128s) */
+
+static X509_PUBKEY *p11prov_slhdsa_pubkey_to_x509(P11PROV_OBJ *key)
+{
+#ifdef NID_SLH_DSA_SHA2_128s
+    struct slhdsa_key_point keypoint = { 0 };
+    X509_PUBKEY *pubkey;
+    int nid = NID_undef;
+    int ret;
+
+    switch (p11prov_obj_get_key_param_set(key)) {
+    case CKP_SLH_DSA_SHA2_128S:
+        nid = NID_SLH_DSA_SHA2_128s;
+        break;
+    case CKP_SLH_DSA_SHAKE_128S:
+        nid = NID_SLH_DSA_SHAKE_128s;
+        break;
+    case CKP_SLH_DSA_SHA2_128F:
+        nid = NID_SLH_DSA_SHA2_128f;
+        break;
+    case CKP_SLH_DSA_SHAKE_128F:
+        nid = NID_SLH_DSA_SHAKE_128f;
+        break;
+    case CKP_SLH_DSA_SHA2_192S:
+        nid = NID_SLH_DSA_SHA2_192s;
+        break;
+    case CKP_SLH_DSA_SHAKE_192S:
+        nid = NID_SLH_DSA_SHAKE_192s;
+        break;
+    case CKP_SLH_DSA_SHA2_192F:
+        nid = NID_SLH_DSA_SHA2_192f;
+        break;
+    case CKP_SLH_DSA_SHAKE_192F:
+        nid = NID_SLH_DSA_SHAKE_192f;
+        break;
+    case CKP_SLH_DSA_SHA2_256S:
+        nid = NID_SLH_DSA_SHA2_256s;
+        break;
+    case CKP_SLH_DSA_SHAKE_256S:
+        nid = NID_SLH_DSA_SHAKE_256s;
+        break;
+    case CKP_SLH_DSA_SHA2_256F:
+        nid = NID_SLH_DSA_SHA2_256f;
+        break;
+    case CKP_SLH_DSA_SHAKE_256F:
+        nid = NID_SLH_DSA_SHAKE_256f;
+        break;
+    default:
+        return NULL;
+    }
+
+    ret = p11prov_obj_export_public_key(key, CKK_SLH_DSA, true, false,
+                                        p11prov_slhdsa_set_keypoint_data,
+                                        &keypoint);
+    if (ret != RET_OSSL_OK) {
+        OPENSSL_clear_free(keypoint.octet, keypoint.len);
+        return NULL;
+    }
+
+    pubkey = X509_PUBKEY_new();
+    if (!pubkey) {
+        OPENSSL_clear_free(keypoint.octet, keypoint.len);
+        return NULL;
+    }
+
+    ret = X509_PUBKEY_set0_param(pubkey, OBJ_nid2obj(nid), V_ASN1_UNDEF, NULL,
+                                 keypoint.octet, keypoint.len);
+    if (ret != RET_OSSL_OK) {
+        OPENSSL_clear_free(keypoint.octet, keypoint.len);
+        X509_PUBKEY_free(pubkey);
+        return NULL;
+    }
+
+    return pubkey;
+#else
+    return NULL;
+#endif
+}
+
+DISPATCH_ENCODER_FN(slhdsa, spki, der, does_selection);
+
+static int p11prov_slhdsa_encoder_spki_der_does_selection(void *inctx,
+                                                           int selection)
+{
+    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        return RET_OSSL_OK;
+    }
+    return RET_OSSL_ERR;
+}
+
+static int p11prov_slhdsa_encoder_spki_der_encode(
+    void *inctx, OSSL_CORE_BIO *cbio, const void *inkey,
+    const OSSL_PARAM key_abstract[], int selection,
+    OSSL_PASSPHRASE_CALLBACK *cb, void *cbarg)
+{
+    struct p11prov_encoder_ctx *ctx = (struct p11prov_encoder_ctx *)inctx;
+    P11PROV_OBJ *key = (P11PROV_OBJ *)inkey;
+    CK_KEY_TYPE type;
+    X509_PUBKEY *pubkey = NULL;
+    BIO *out = NULL;
+    int ret;
+
+    P11PROV_debug("slhdsa SubjectPublicKeyInfo DER Encoder");
+
+    if (!(selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)) {
+        return RET_OSSL_ERR;
+    }
+
+    type = p11prov_obj_get_key_type(key);
+    if (type != CKK_SLH_DSA) {
+        P11PROV_raise(ctx->provctx, CKR_GENERAL_ERROR, "Invalid Key Type");
+        ret = RET_OSSL_ERR;
+        goto done;
+    }
+
+    out = BIO_new_from_core_bio(p11prov_ctx_get_libctx(ctx->provctx), cbio);
+    if (!out) {
+        P11PROV_raise(ctx->provctx, CKR_GENERAL_ERROR, "Failed to init BIO");
+        ret = RET_OSSL_ERR;
+        goto done;
+    }
+
+    pubkey = p11prov_slhdsa_pubkey_to_x509(key);
+    if (!pubkey) {
+        ret = RET_OSSL_ERR;
+        goto done;
+    }
+
+    ret = i2d_X509_PUBKEY_bio(out, pubkey);
+
+done:
+    X509_PUBKEY_free(pubkey);
+    BIO_free(out);
+    return ret;
+}
+
+const OSSL_DISPATCH p11prov_slhdsa_encoder_spki_der_functions[] = {
+    DISPATCH_BASE_ENCODER_ELEM(NEWCTX, newctx),
+    DISPATCH_BASE_ENCODER_ELEM(FREECTX, freectx),
+    DISPATCH_ENCODER_ELEM(DOES_SELECTION, slhdsa, spki, der, does_selection),
+    DISPATCH_ENCODER_ELEM(ENCODE, slhdsa, spki, der, encode),
+    { 0, NULL },
+};
+
+static int p11prov_slhdsa_print_public_key(const OSSL_PARAM *params,
+                                            void *bio)
+{
+    BIO *out = (BIO *)bio;
+    const OSSL_PARAM *p;
+    int ret;
+
+    p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PUB_KEY);
+    if (p) {
+        ret = p11prov_print_buf(out, p, "Pub:", 4);
+        if (ret != RET_OSSL_OK) {
+            return RET_OSSL_ERR;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static int p11prov_slhdsa_encoder_priv_key_info_pem_encode(
+    void *inctx, OSSL_CORE_BIO *cbio, const void *inkey,
+    const OSSL_PARAM key_abstract[], int selection,
+    OSSL_PASSPHRASE_CALLBACK *cb, void *cbarg)
+{
+    return p11prov_encoder_private_key_write_pem(
+        CKK_SLH_DSA, inctx, cbio, inkey, key_abstract, selection, cb, cbarg);
+}
+
+const OSSL_DISPATCH p11prov_slhdsa_encoder_priv_key_info_pem_functions[] = {
+    DISPATCH_BASE_ENCODER_ELEM(NEWCTX, newctx),
+    DISPATCH_BASE_ENCODER_ELEM(FREECTX, freectx),
+    DISPATCH_ENCODER_ELEM(DOES_SELECTION, common, priv_key_info, pem,
+                          does_selection),
+    DISPATCH_ENCODER_ELEM(ENCODE, slhdsa, priv_key_info, pem, encode),
+    { 0, NULL },
+};
+
+DISPATCH_TEXT_ENCODER_FN(slhdsa, encode);
+
+static int p11prov_slhdsa_encoder_encode_text(void *inctx, OSSL_CORE_BIO *cbio,
+                                              const void *inkey,
+                                              const OSSL_PARAM key_abstract[],
+                                              int selection,
+                                              OSSL_PASSPHRASE_CALLBACK *cb,
+                                              void *cbarg)
+{
+    struct p11prov_encoder_ctx *ctx = (struct p11prov_encoder_ctx *)inctx;
+    P11PROV_OBJ *key = (P11PROV_OBJ *)inkey;
+    CK_KEY_TYPE type;
+    CK_OBJECT_CLASS class;
+    CK_ULONG param_set;
+    const char *type_name = "SLH-DSA";
+    const char *uri = NULL;
+    BIO *out;
+    int ret;
+
+    P11PROV_debug("slhdsa Text Encoder");
+
+    type = p11prov_obj_get_key_type(key);
+    if (type != CKK_SLH_DSA) {
+        P11PROV_raise(ctx->provctx, CKR_GENERAL_ERROR, "Invalid Key Type");
+        return RET_OSSL_ERR;
+    }
+    class = p11prov_obj_get_class(key);
+
+    out = BIO_new_from_core_bio(p11prov_ctx_get_libctx(ctx->provctx), cbio);
+    if (!out) {
+        P11PROV_raise(ctx->provctx, CKR_GENERAL_ERROR, "Failed to init BIO");
+        return RET_OSSL_ERR;
+    }
+
+    param_set = p11prov_obj_get_key_param_set(key);
+    switch (param_set) {
+    case CKP_SLH_DSA_SHA2_128S:
+        type_name = "SLH-DSA-SHA2-128s";
+        break;
+    case CKP_SLH_DSA_SHAKE_128S:
+        type_name = "SLH-DSA-SHAKE-128s";
+        break;
+    case CKP_SLH_DSA_SHA2_128F:
+        type_name = "SLH-DSA-SHA2-128f";
+        break;
+    case CKP_SLH_DSA_SHAKE_128F:
+        type_name = "SLH-DSA-SHAKE-128f";
+        break;
+    case CKP_SLH_DSA_SHA2_192S:
+        type_name = "SLH-DSA-SHA2-192s";
+        break;
+    case CKP_SLH_DSA_SHAKE_192S:
+        type_name = "SLH-DSA-SHAKE-192s";
+        break;
+    case CKP_SLH_DSA_SHA2_192F:
+        type_name = "SLH-DSA-SHA2-192f";
+        break;
+    case CKP_SLH_DSA_SHAKE_192F:
+        type_name = "SLH-DSA-SHAKE-192f";
+        break;
+    case CKP_SLH_DSA_SHA2_256S:
+        type_name = "SLH-DSA-SHA2-256s";
+        break;
+    case CKP_SLH_DSA_SHAKE_256S:
+        type_name = "SLH-DSA-SHAKE-256s";
+        break;
+    case CKP_SLH_DSA_SHA2_256F:
+        type_name = "SLH-DSA-SHA2-256f";
+        break;
+    case CKP_SLH_DSA_SHAKE_256F:
+        type_name = "SLH-DSA-SHAKE-256f";
+        break;
+    default:
+        BIO_printf(out, "[Error: Key Parameter set unknown %ld]", param_set);
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        if (class != CKO_PRIVATE_KEY) {
+            BIO_printf(out, "[Error: Invalid key data]\n");
+            goto done;
+        }
+        BIO_printf(out, "PKCS11 %s Private Key\n", type_name);
+        BIO_printf(out, "[Can't export and print private key data]\n");
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        if (class != CKO_PUBLIC_KEY) {
+            P11PROV_OBJ *assoc;
+
+            assoc = p11prov_obj_find_associated(key, CKO_PUBLIC_KEY);
+            if (!assoc) {
+                BIO_printf(out, "[Error: Failed to source public key data]\n");
+                goto done;
+            }
+
+            key = assoc;
+        }
+        BIO_printf(out, "PKCS11 %s Public Key\n", type_name);
+        ret = p11prov_obj_export_public_key(
+            key, CKK_SLH_DSA, true, false, p11prov_slhdsa_print_public_key,
+            out);
+        if (ret != RET_OSSL_OK) {
+            BIO_printf(out, "[Error: Failed to decode public key data]\n");
+        }
+    }
+
+    uri = p11prov_obj_get_public_uri(key);
+    if (uri) {
+        BIO_printf(out, "URI %s\n", uri);
+    }
+
+done:
+    if (key != inkey) {
+        p11prov_obj_free(key);
+    }
+    BIO_free(out);
+    return RET_OSSL_OK;
+}
+
+const OSSL_DISPATCH p11prov_slhdsa_encoder_text_functions[] = {
+    DISPATCH_BASE_ENCODER_ELEM(NEWCTX, newctx),
+    DISPATCH_BASE_ENCODER_ELEM(FREECTX, freectx),
+    DISPATCH_TEXT_ENCODER_ELEM(ENCODE, slhdsa, encode_text),
+    { 0, NULL },
+};
