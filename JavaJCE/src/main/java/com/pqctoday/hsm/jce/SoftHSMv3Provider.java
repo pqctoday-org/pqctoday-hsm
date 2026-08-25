@@ -44,6 +44,53 @@ public final class SoftHSMv3Provider extends Provider {
     private static final byte[] SHA256_ABC_KAT = HexFormat.of().parseHex(
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 
+    // RFC 4231 §4.7 Test Case 6 — HMAC-SHA-256 under a 131-byte
+    // (larger-than-block-size) all-0xaa key. Extracted verbatim from the
+    // RFC's own raw text (fetched and read directly, not from a
+    // paraphrased summary — an earlier AI-summarized fetch of this same
+    // RFC in this session returned an internally inconsistent value and
+    // was discarded). Deliberately NOT Test Case 1 (a 20-byte key):
+    // this engine enforces its own PKCS#11-level minimum HMAC key length
+    // equal to the digest's output size (kMacMechTable.minKeyBytes = 32
+    // for CKM_SHA256_HMAC, confirmed live and in SoftHSM_sign.cpp — a
+    // 20-byte key hits CKR_KEY_SIZE_RANGE, found live when this POST
+    // check first ran against the real engine, not a hypothetical).
+    private static final byte[] HMAC_KAT_KEY = HexFormat.of().parseHex("aa".repeat(131));
+    private static final byte[] HMAC_KAT_DATA =
+        "Test Using Larger Than Block-Size Key - Hash Key First"
+            .getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    private static final byte[] HMAC_KAT_EXPECTED = HexFormat.of().parseHex(
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+
+    // "Test Case 2" from the original GCM specification (McGrew & Viega,
+    // "The Galois/Counter Mode of Operation (GCM)", 2005, Appendix B —
+    // the paper NIST adopted as SP 800-38D's normative source; SP 800-38D
+    // itself does not carry worked vectors inline). AES-128, all-zero
+    // 16-byte key/plaintext, all-zero 96-bit IV, no AAD. Read directly
+    // from the primary-source PDF (not a third-party transcription) via
+    // this session's PDF page-extraction tooling, and cross-checked
+    // against the byte lengths PKCS#11's AES-GCM contract requires.
+    private static final byte[] GCM_KAT_KEY = new byte[16];
+    private static final byte[] GCM_KAT_PLAINTEXT = new byte[16];
+    private static final byte[] GCM_KAT_IV = new byte[12];
+    private static final byte[] GCM_KAT_EXPECTED_CT_TAG = HexFormat.of().parseHex(
+        "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf");
+
+    // Fixed message for the asymmetric pairwise-consistency checks below
+    // (§6.3). These five algorithm families (ML-DSA-65, SLH-DSA-SHA2-128S,
+    // ECDSA-P256, Ed25519, RSA-PSS) and ML-KEM-768 have no fixed-vector
+    // KAT this provider can run without importing a specific fixed
+    // private key onto the token — which this provider deliberately
+    // refuses as a matter of policy (see P11KeyStoreSpi.engineSetKeyEntry's
+    // foreign-key-material refusal: "same FIPS 140-3 L3 policy as
+    // private-key import"). Per FIPS 140-3 IG 10.3.A, the accepted
+    // alternative is a pairwise consistency test: generate a fresh
+    // keypair on the token, sign/encapsulate, then verify/decapsulate,
+    // and require it to succeed — genuinely different from a fixed-answer
+    // KAT and documented as such here rather than mislabeled.
+    private static final byte[] POST_SELF_TEST_MESSAGE =
+        "SoftHSMv3Provider POST pairwise-consistency message".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
     // Package-private (not private) so same-package test code can reach
     // the native layer directly for cross-verification checks that need
     // raw token attributes our own KeyFactory/SPKI code doesn't expose
@@ -65,25 +112,273 @@ public final class SoftHSMv3Provider extends Provider {
     }
 
     /**
-     * Power-on self-test: one digest KAT against a real published FIPS
-     * vector, run through this exact instance's native path before any
-     * service is exposed. A real implementation (W5) extends this per
-     * §6.3 to cover one KAT per algorithm family; this W1 slice proves the
-     * fail-closed mechanism with the one algorithm family this slice has.
+     * Power-on self-test (§6.3): every service construction runs this
+     * full battery first — one digest KAT, one HMAC-SHA-256 KAT, one
+     * AES-GCM KAT, one DRBG sanity check, one sign/verify pairwise
+     * consistency check per signature family (ML-DSA-65,
+     * SLH-DSA-SHA2-128S, ECDSA-P256, Ed25519, RSA-PSS), and one
+     * encapsulate/decapsulate consistency check (ML-KEM-768). Any
+     * failure closes the native session and throws out of the
+     * constructor — no caller can ever obtain a live reference to a
+     * provider whose POST failed, so every getService() call fails
+     * closed by construction, not by a checked flag (mirrors the CACP
+     * fail-open remediation lesson elsewhere in this repo).
+     *
+     * Every native object this battery creates (throwaway HMAC/AES keys,
+     * generated keypairs, ML-KEM shared-secret objects) is explicitly
+     * destroyed after use, success or failure — these are CKA_TOKEN=false
+     * session objects that would otherwise linger for the life of this
+     * provider's one long-lived session and pollute
+     * P11KeyStoreSpi#discoverAll()'s enumeration.
      */
     private void runPowerOnSelfTest() {
-        byte[] got;
         try {
-            got = lib.digest(CKM_SHA256, "abc".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+            checkSha256Kat();
+            checkDrbgHealth();
+            checkHmacSha256Kat();
+            checkAesGcmKat();
+            checkPureSigRoundTrip("ML-DSA-65", CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA, CKP_ML_DSA_65);
+            checkPureSigRoundTrip("SLH-DSA-SHA2-128S", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHA2_128S);
+            checkEcdsaP256RoundTrip();
+            checkEd25519RoundTrip();
+            checkRsaPssRoundTrip();
+            checkMlKem768RoundTrip();
         } catch (RuntimeException e) {
             lib.close();
-            throw new ProviderException("POST failed: SHA-256 KAT threw", e);
+            throw new ProviderException("POST failed: " + e.getMessage(), e);
         }
+    }
+
+    private void checkSha256Kat() {
+        byte[] got = lib.digest(CKM_SHA256, "abc".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
         if (!java.util.Arrays.equals(got, SHA256_ABC_KAT)) {
-            lib.close();
-            throw new ProviderException("POST failed: SHA-256(\"abc\") KAT mismatch — "
-                + "expected " + HexFormat.of().formatHex(SHA256_ABC_KAT)
-                + " got " + HexFormat.of().formatHex(got));
+            throw new IllegalStateException("SHA-256(\"abc\") KAT mismatch — expected "
+                + HexFormat.of().formatHex(SHA256_ABC_KAT) + " got " + HexFormat.of().formatHex(got));
+        }
+    }
+
+    /**
+     * Not a NIST SP 800-90B statistical health test suite — that battery
+     * runs inside OpenSSL's own DRBG implementation (this engine's actual
+     * randomness source, see the repo's CLAUDE.md: "OpenSSL-only
+     * backend"), out of this JCA layer's reach and not this provider's to
+     * duplicate. This is a minimal, honestly-scoped sanity check: two
+     * consecutive draws of the requested length that are not identical
+     * (catches a stuck/degenerate generator, nothing subtler).
+     */
+    private void checkDrbgHealth() {
+        byte[] a = lib.generateRandom(32);
+        byte[] b = lib.generateRandom(32);
+        if (a.length != 32 || b.length != 32) {
+            throw new IllegalStateException("DRBG health check failed: expected 32 random bytes, got "
+                + a.length + " and " + b.length);
+        }
+        if (java.util.Arrays.equals(a, b)) {
+            throw new IllegalStateException("DRBG health check failed: two consecutive 32-byte draws "
+                + "were identical (signature of a stuck/degenerate generator)");
+        }
+    }
+
+    private void checkHmacSha256Kat() {
+        P11Library.Attr[] tmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_SECRET_KEY),
+            P11Library.attrLong(CKA_KEY_TYPE, CKK_GENERIC_SECRET),
+            P11Library.attr(CKA_VALUE, HMAC_KAT_KEY),
+            P11Library.attrBool(CKA_TOKEN, false),
+            P11Library.attrBool(CKA_SIGN, true),
+        };
+        long handle = lib.createObject(tmpl);
+        try {
+            byte[] got = lib.sign(CKM_SHA256_HMAC, handle, HMAC_KAT_DATA);
+            if (!java.util.Arrays.equals(got, HMAC_KAT_EXPECTED)) {
+                throw new IllegalStateException("HMAC-SHA-256 KAT (RFC 4231 Test Case 1) mismatch — expected "
+                    + HexFormat.of().formatHex(HMAC_KAT_EXPECTED) + " got " + HexFormat.of().formatHex(got));
+            }
+        } finally {
+            lib.destroyObject(handle);
+        }
+    }
+
+    private void checkAesGcmKat() {
+        P11Library.Attr[] tmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_SECRET_KEY),
+            P11Library.attrLong(CKA_KEY_TYPE, CKK_AES),
+            P11Library.attr(CKA_VALUE, GCM_KAT_KEY),
+            P11Library.attrBool(CKA_TOKEN, false),
+            P11Library.attrBool(CKA_ENCRYPT, true),
+        };
+        long handle = lib.createObject(tmpl);
+        try {
+            var mech = lib.mechGcm(GCM_KAT_IV, new byte[0], 128);
+            byte[] got = lib.encrypt(mech, handle, GCM_KAT_PLAINTEXT);
+            if (!java.util.Arrays.equals(got, GCM_KAT_EXPECTED_CT_TAG)) {
+                throw new IllegalStateException("AES-GCM KAT (GCM spec Appendix B Test Case 2) mismatch — expected "
+                    + HexFormat.of().formatHex(GCM_KAT_EXPECTED_CT_TAG) + " got " + HexFormat.of().formatHex(got));
+            }
+        } finally {
+            lib.destroyObject(handle);
+        }
+    }
+
+    /** ML-DSA/SLH-DSA share this shape: keygen mechanism is parameter-set-agnostic, sign mechanism is too. */
+    private void checkPureSigRoundTrip(String label, long keygenMech, long signMech, long parameterSet) {
+        P11Library.Attr[] pubTmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_PUBLIC_KEY),
+            P11Library.attrLong(CKA_PARAMETER_SET, parameterSet),
+            P11Library.attrBool(CKA_VERIFY, true),
+            P11Library.attrBool(CKA_TOKEN, false),
+        };
+        P11Library.Attr[] prvTmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_PRIVATE_KEY),
+            P11Library.attrBool(CKA_TOKEN, false),
+            P11Library.attrBool(CKA_PRIVATE, true),
+            P11Library.attrBool(CKA_SENSITIVE, true),
+            P11Library.attrBool(CKA_EXTRACTABLE, false),
+            P11Library.attrBool(CKA_SIGN, true),
+        };
+        long[] handles = lib.generateKeyPair(keygenMech, pubTmpl, prvTmpl);
+        try {
+            byte[] sig = lib.sign(signMech, handles[1], POST_SELF_TEST_MESSAGE);
+            if (!lib.verify(signMech, handles[0], POST_SELF_TEST_MESSAGE, sig)) {
+                throw new IllegalStateException(label + " pairwise consistency check failed: "
+                    + "a freshly generated keypair's own signature did not verify");
+            }
+        } finally {
+            lib.destroyObject(handles[0]);
+            lib.destroyObject(handles[1]);
+        }
+    }
+
+    private void checkEcdsaP256RoundTrip() {
+        byte[] secp256r1Oid = { 0x06, 0x08, 0x2a, (byte) 0x86, 0x48, (byte) 0xce, 0x3d, 0x03, 0x01, 0x07 };
+        P11Library.Attr[] pubTmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_PUBLIC_KEY),
+            P11Library.attrLong(CKA_KEY_TYPE, CKK_EC),
+            P11Library.attr(CKA_EC_PARAMS, secp256r1Oid),
+            P11Library.attrBool(CKA_VERIFY, true),
+            P11Library.attrBool(CKA_TOKEN, false),
+        };
+        P11Library.Attr[] prvTmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_PRIVATE_KEY),
+            P11Library.attrBool(CKA_TOKEN, false),
+            P11Library.attrBool(CKA_PRIVATE, true),
+            P11Library.attrBool(CKA_SENSITIVE, true),
+            P11Library.attrBool(CKA_EXTRACTABLE, false),
+            P11Library.attrBool(CKA_SIGN, true),
+        };
+        long[] handles = lib.generateKeyPair(CKM_EC_KEY_PAIR_GEN, pubTmpl, prvTmpl);
+        try {
+            byte[] sig = lib.sign(CKM_ECDSA_SHA256, handles[1], POST_SELF_TEST_MESSAGE);
+            if (!lib.verify(CKM_ECDSA_SHA256, handles[0], POST_SELF_TEST_MESSAGE, sig)) {
+                throw new IllegalStateException("ECDSA-P256 pairwise consistency check failed: "
+                    + "a freshly generated keypair's own signature did not verify");
+            }
+        } finally {
+            lib.destroyObject(handles[0]);
+            lib.destroyObject(handles[1]);
+        }
+    }
+
+    private void checkEd25519RoundTrip() {
+        P11Library.Attr[] pubTmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_PUBLIC_KEY),
+            P11Library.attrLong(CKA_KEY_TYPE, CKK_EC_EDWARDS),
+            P11Library.attr(CKA_EC_PARAMS, ED25519_OID),
+            P11Library.attrBool(CKA_VERIFY, true),
+            P11Library.attrBool(CKA_TOKEN, false),
+        };
+        P11Library.Attr[] prvTmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_PRIVATE_KEY),
+            P11Library.attrBool(CKA_TOKEN, false),
+            P11Library.attrBool(CKA_PRIVATE, true),
+            P11Library.attrBool(CKA_SENSITIVE, true),
+            P11Library.attrBool(CKA_EXTRACTABLE, false),
+            P11Library.attrBool(CKA_SIGN, true),
+        };
+        long[] handles = lib.generateKeyPair(CKM_EC_EDWARDS_KEY_PAIR_GEN, pubTmpl, prvTmpl);
+        try {
+            byte[] sig = lib.sign(CKM_EDDSA, handles[1], POST_SELF_TEST_MESSAGE);
+            if (!lib.verify(CKM_EDDSA, handles[0], POST_SELF_TEST_MESSAGE, sig)) {
+                throw new IllegalStateException("Ed25519 pairwise consistency check failed: "
+                    + "a freshly generated keypair's own signature did not verify");
+            }
+        } finally {
+            lib.destroyObject(handles[0]);
+            lib.destroyObject(handles[1]);
+        }
+    }
+
+    private void checkRsaPssRoundTrip() {
+        P11Library.Attr[] pubTmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_PUBLIC_KEY),
+            P11Library.attrLong(CKA_MODULUS_BITS, 2048),
+            P11Library.attr(CKA_PUBLIC_EXPONENT, new byte[]{ 0x01, 0x00, 0x01 }),
+            P11Library.attrBool(CKA_VERIFY, true),
+            P11Library.attrBool(CKA_TOKEN, false),
+        };
+        P11Library.Attr[] prvTmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_PRIVATE_KEY),
+            P11Library.attrBool(CKA_TOKEN, false),
+            P11Library.attrBool(CKA_PRIVATE, true),
+            P11Library.attrBool(CKA_SENSITIVE, true),
+            P11Library.attrBool(CKA_EXTRACTABLE, false),
+            P11Library.attrBool(CKA_SIGN, true),
+        };
+        long[] handles = lib.generateKeyPair(CKM_RSA_PKCS_KEY_PAIR_GEN, pubTmpl, prvTmpl);
+        try {
+            var pssMech = lib.mechWithParams(CKM_SHA256_RSA_PKCS_PSS, CKM_SHA256, CKG_MGF1_SHA256, 32);
+            byte[] sig = lib.sign(pssMech, handles[1], POST_SELF_TEST_MESSAGE);
+            if (!lib.verify(pssMech, handles[0], POST_SELF_TEST_MESSAGE, sig)) {
+                throw new IllegalStateException("RSA-PSS pairwise consistency check failed: "
+                    + "a freshly generated keypair's own signature did not verify");
+            }
+        } finally {
+            lib.destroyObject(handles[0]);
+            lib.destroyObject(handles[1]);
+        }
+    }
+
+    private void checkMlKem768RoundTrip() {
+        P11Library.Attr[] pubTmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_PUBLIC_KEY),
+            P11Library.attrLong(CKA_PARAMETER_SET, CKP_ML_KEM_768),
+            P11Library.attrBool(CKA_ENCAPSULATE, true),
+            P11Library.attrBool(CKA_TOKEN, false),
+        };
+        P11Library.Attr[] prvTmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_PRIVATE_KEY),
+            P11Library.attrBool(CKA_TOKEN, false),
+            P11Library.attrBool(CKA_PRIVATE, true),
+            P11Library.attrBool(CKA_SENSITIVE, true),
+            P11Library.attrBool(CKA_EXTRACTABLE, false),
+            P11Library.attrBool(CKA_DECAPSULATE, true),
+        };
+        long[] handles = lib.generateKeyPair(CKM_ML_KEM_KEY_PAIR_GEN, pubTmpl, prvTmpl);
+        long ssEncHandle = -1;
+        long ssDecHandle = -1;
+        try {
+            P11Library.Attr[] ssTmpl = {
+                P11Library.attrLong(CKA_CLASS, CKO_SECRET_KEY),
+                P11Library.attrLong(CKA_KEY_TYPE, CKK_GENERIC_SECRET),
+                P11Library.attrBool(CKA_TOKEN, false),
+                P11Library.attrBool(CKA_SENSITIVE, false),
+                P11Library.attrBool(CKA_EXTRACTABLE, true),
+            };
+            P11Library.Encapsulated enc = lib.encapsulate(CKM_ML_KEM, handles[0], ssTmpl);
+            ssEncHandle = enc.sharedSecretHandle();
+            ssDecHandle = lib.decapsulate(CKM_ML_KEM, handles[1], ssTmpl, enc.ciphertext());
+            byte[] secretFromEncap = lib.getAttributeBytes(ssEncHandle, CKA_VALUE);
+            byte[] secretFromDecap = lib.getAttributeBytes(ssDecHandle, CKA_VALUE);
+            if (!java.util.Arrays.equals(secretFromEncap, secretFromDecap)) {
+                throw new IllegalStateException("ML-KEM-768 pairwise consistency check failed: "
+                    + "decapsulating a freshly encapsulated ciphertext with the matching private key "
+                    + "did not recover the same shared secret");
+            }
+        } finally {
+            lib.destroyObject(handles[0]);
+            lib.destroyObject(handles[1]);
+            if (ssEncHandle >= 0) lib.destroyObject(ssEncHandle);
+            if (ssDecHandle >= 0) lib.destroyObject(ssDecHandle);
         }
     }
 

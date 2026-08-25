@@ -1543,6 +1543,86 @@ provider stored.**
   the fabricated doc), a security-posture doc mapping each §6 item to
   its FIPS 140-3 section.
 
+**Full POST battery (§6.3): DONE 2026-08-25, PASSED.** Extends the W1
+single-digest-KAT stub to the plan's full-scope battery: SHA-256 KAT
+(unchanged), a DRBG sanity check, HMAC-SHA-256 KAT, AES-GCM KAT, one
+sign/verify pairwise-consistency check per signature family (ML-DSA-65,
+SLH-DSA-SHA2-128S, ECDSA-P256, Ed25519, RSA-PSS), and one
+encapsulate/decapsulate consistency check (ML-KEM-768).
+
+- **Design decision, made explicitly rather than silently defaulted
+  to:** the plan's own wording calls these "KAT"s, but a genuine
+  fixed-vector KAT for the six asymmetric checks would require
+  importing one specific, fixed private key onto the token — and this
+  provider already refuses foreign private-key import as a hard policy
+  (`P11KeyStoreSpi.engineSetKeyEntry`'s "same FIPS 140-3 L3 policy as
+  private-key import" refusal, from the certificate-management work
+  above). Re-litigating that refusal just for POST's convenience would
+  have been inconsistent. Per FIPS 140-3 IG 10.3.A, the accepted
+  substitute is a **pairwise consistency test**: generate a fresh
+  keypair on the token itself, sign/encapsulate, then verify/decapsulate,
+  and require success. That is what the six asymmetric checks do —
+  documented as such in the code (`POST_SELF_TEST_MESSAGE`'s javadoc)
+  rather than mislabeled as fixed-answer KATs they are not.
+- **Real, externally-sourced fixed vectors for the three checks where
+  that's actually possible** (no private key involved): SHA-256("abc")
+  (unchanged, FIPS 180-4), HMAC-SHA-256 (RFC 4231 §4.7 **Test Case 6**,
+  not Test Case 1), and AES-GCM ("Test Case 2" from the original GCM
+  specification, McGrew & Viega 2005, Appendix B — the paper NIST
+  adopted as SP 800-38D's normative source; SP 800-38D itself carries no
+  worked vectors inline). All three were fetched and read from real
+  primary-source text/PDF this session — an RFC 4231 fetch processed
+  through an AI web-summarizer first returned an internally
+  inconsistent value (the "key" and "output" fields came back
+  identical) and was discarded in favor of downloading the RFC's own
+  raw text and reading the exact table cells directly; the GCM vector
+  came from downloading and reading the actual McGrew/Viega PDF's
+  Appendix B page images via this session's PDF tooling, not a
+  third-party transcription.
+- **A real, live engine-policy finding, not a hypothetical:** RFC
+  4231's own Test Case 1 (a 20-byte HMAC key) was the first vector
+  tried for the HMAC-SHA-256 check, and it failed live with
+  `CKR_KEY_SIZE_RANGE` at `C_SignInit` — **every one of the 175
+  existing tests failed** (POST now runs on every `SoftHSMv3Provider`
+  construction, so a POST bug is maximally visible, exactly as
+  intended). Traced directly to `SoftHSM_sign.cpp`'s
+  `kMacMechTable`: this engine enforces its own minimum HMAC key
+  length equal to the digest's output size (`minKeyBytes = 32` for
+  `CKM_SHA256_HMAC`) — a real, deliberate, already-existing engine
+  policy (its own comment cites a prior fix, "Found 2026-08-23 by the
+  Gap 2 SHA3-HMAC round-trip test"), not a defect in this POST code.
+  RFC 2104 itself imposes no such minimum, so Test Case 1 is a
+  perfectly valid HMAC vector in general — just not usable against
+  *this* engine's stricter policy. Fixed by switching to RFC 4231's
+  Test Case 6 (a 131-byte key, safely above every mechanism's
+  `minKeyBytes` in the table).
+- **Cleanup discipline:** every native object POST creates (throwaway
+  HMAC/AES keys, six generated keypairs, two ML-KEM shared-secret
+  objects) is a `CKA_TOKEN=false` session object living in this
+  provider's one long-lived session — each is explicitly destroyed via
+  `lib.destroyObject()` in a `finally` block after use. Without this,
+  every POST run would leave a growing set of unlabeled throwaway
+  objects that `P11KeyStoreSpi#discoverAll()`'s full-scan enumeration
+  would then incorrectly surface as real (if oddly-aliased) KeyStore
+  entries.
+- **Honest scope note on the "DRBG health check":** this is a minimal
+  sanity check (two consecutive 32-byte draws that must differ — a
+  stuck/degenerate-generator check only), not a NIST SP 800-90B
+  statistical health-test battery. That fuller battery already runs
+  inside OpenSSL's own DRBG implementation (this engine's actual
+  randomness source, per this repo's own CLAUDE.md: "OpenSSL-only
+  backend") and is out of this JCA layer's reach — duplicating it here
+  would be both redundant and not actually meaningful without access to
+  the DRBG's internal state.
+- **Verify:** `mvn test` inside the dev-sandbox container (live, real
+  engine, not mocked), 175/175, 0 failures/errors — including the live
+  regression the RFC 4231 Test Case 1 key-size finding above caused and
+  then resolved. Provider construction is measurably slower now (full
+  suite: ~40s, dominated by the RSA-2048 keygen this battery now runs
+  on every single construction) — an accepted, expected trade-off for a
+  real POST battery, not a defect; a real HSM pays a comparable
+  power-on cost.
+
 ### W6 — TLS (JDK 27 / JEP 527)
 - Install the provider at higher priority than SunJCE and pin
   `jdk.tls.namedGroups=SecP256r1MLKEM768,SecP384r1MLKEM1024` (FIPS run
