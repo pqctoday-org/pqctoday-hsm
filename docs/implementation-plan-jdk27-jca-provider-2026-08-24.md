@@ -1881,6 +1881,59 @@ lifecycle, not just eager-login-at-construction.
   full suite) specifically to confirm the token-wide login-state
   mutation didn't poison any other test class.
 
+**Provider configuration file format (§6.1): DONE 2026-08-25, PASSED —
+scoped down honestly from a literal SunPKCS11 port.**
+- **Real reference checked first, then a deliberate scope decision, not
+  a shortcut:** `sun.security.pkcs11.Config` (extracted from JDK 27's
+  `src.zip`) is a real ~1000-line hand-rolled `StreamTokenizer` grammar
+  — keywords, `enabledMechanisms { ... }`/`disabledMechanisms { ... }`
+  blocks, a whole `TemplateManager` sublanguage for per-mechanism
+  attribute templates. It exists because SunPKCS11's own configuration
+  surface is that large. This provider's actual configurable surface is
+  three things — module path, PIN, an optional instance-name suffix —
+  so replicating SunPKCS11's grammar verbatim would mean building
+  parser machinery for concepts (per-mechanism template overrides, an
+  enable/disable mechanism allow-list separate from §5's own policy
+  layer) this provider has no matching internals for. Built a plain
+  `key = value` file (parsed via `java.util.Properties`, no
+  hand-rolled tokenizer needed) that covers the real surface honestly,
+  documented in `configure()`'s own javadoc as a deliberate scope-down
+  rather than silently passed off as SunPKCS11-compatible.
+- **Entry point is the real, standard one, not invented:** `Provider`'s
+  own `configure(String configArg)` (JDK 9+) — the exact mechanism
+  SunPKCS11 itself is conventionally activated through
+  (`Security.getProvider("SunPKCS11").configure(path)`, or the
+  `java.security` file's `"SunPKCS11-" + configFile` double-dash
+  syntax). `SoftHSMv3Provider#configure` parses the file and returns a
+  **new** provider instance built from it — per `Provider.configure`'s
+  own real javadoc ("if this Provider cannot be configured in-place, a
+  new Provider will be created and returned... callers should always
+  use the returned Provider"), confirmed from JDK 27 source before
+  assuming the mutate-vs-replace semantics either way.
+- **Keys:** `library` (required, the `.so` path); exactly one of `pin`
+  (a literal PIN in the file) or `pinEnv` (the name of an environment
+  variable to read the PIN from at configure-time — `pinEnv` wins if
+  both are present) — `pinEnv` is documented as the safer default,
+  since a config file with a literal PIN in it is exactly the kind of
+  thing that ends up checked into source control by accident; `name`
+  (optional) applies a suffix so this instance registers as
+  `"SoftHSMv3-" + suffix` rather than the bare `"SoftHSMv3"`, matching
+  the real SunPKCS11 convention for letting several independently
+  configured instances (different modules/PINs/slots) coexist in one
+  JVM without name collisions. Required a new 3-arg constructor
+  overload (`String modulePath, String pin, String nameSuffix`); the
+  existing 2-arg constructor now just delegates to it with a null
+  suffix, so its behavior — and every existing caller's — is unchanged.
+- **`ConfigureTest.java` (new, 7 tests)** — literal `pin` and `pinEnv`
+  both produce a genuinely working provider (a real `MessageDigest`
+  call through it, not just "construction didn't throw"); `name`
+  applies the expected suffix; missing `library`, missing both
+  `pin`/`pinEnv`, a `pinEnv` naming an unset environment variable, and a
+  nonexistent config file path all throw `InvalidParameterException`
+  (the real exception type `configure()`'s own contract specifies for
+  "anything wrong with the argument," verified rather than guessed).
+- **Verify:** `mvn test`, 198/198 (191 prior + 7 new), 0 failures.
+
 ### W6 — TLS (JDK 27 / JEP 527)
 - Install the provider at higher priority than SunJCE and pin
   `jdk.tls.namedGroups=SecP256r1MLKEM768,SecP384r1MLKEM1024` (FIPS run

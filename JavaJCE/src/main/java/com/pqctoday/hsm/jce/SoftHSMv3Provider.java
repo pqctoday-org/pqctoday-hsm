@@ -131,7 +131,19 @@ public final class SoftHSMv3Provider extends AuthProvider {
     }
 
     public SoftHSMv3Provider(String modulePath, String pin) {
-        super(NAME, "0.1.0", INFO);
+        this(modulePath, pin, null);
+    }
+
+    /**
+     * @param nameSuffix optional — when non-null/non-blank, this
+     *     instance registers as {@code "SoftHSMv3-" + nameSuffix} rather
+     *     than the bare {@code "SoftHSMv3"} name, matching the real
+     *     SunPKCS11 convention of allowing several distinctly-configured
+     *     instances (e.g. pointed at different modules/PINs) to coexist
+     *     in one JVM without name collisions — used by {@link #configure}.
+     */
+    public SoftHSMv3Provider(String modulePath, String pin, String nameSuffix) {
+        super(nameSuffix == null || nameSuffix.isBlank() ? NAME : NAME + "-" + nameSuffix, "0.1.0", INFO);
         this.lib = new P11Library(modulePath, pin);
         runPowerOnSelfTest();
         registerServices();
@@ -143,6 +155,74 @@ public final class SoftHSMv3Provider extends AuthProvider {
         // this is safe to register unconditionally without also having
         // to remove it again on a normal, explicit lib.close().
         Runtime.getRuntime().addShutdownHook(new Thread(lib::close, "SoftHSMv3Provider-shutdown"));
+    }
+
+    /**
+     * {@code Provider.configure(String configArg)} (JDK 9+, §6.1) —
+     * builds a new, independently-configured instance from a
+     * {@code .properties}-format file at {@code configArg}, mirroring
+     * how {@code SunPKCS11} is conventionally activated
+     * ({@code Security.getProvider("SunPKCS11").configure(path)}, or the
+     * {@code java.security} file's {@code "SunPKCS11-" + configFile}
+     * double-dash syntax) — same entry point, not this provider
+     * inventing its own.
+     *
+     * Deliberately NOT a port of {@code sun.security.pkcs11.Config}'s
+     * real format: that is a ~1000-line hand-rolled grammar
+     * ({@code StreamTokenizer}-based keywords, {@code enabledMechanisms
+     * { ... }} blocks, a {@code TemplateManager} sublanguage for
+     * per-mechanism attribute templates) built for SunPKCS11's own,
+     * much larger configuration surface — replicating it here would
+     * mean cloning machinery this provider has no matching internals
+     * for. This provider's actual configurable surface is narrow
+     * (module path, PIN, an optional name suffix), so a plain
+     * {@code key = value} file parsed via {@link java.util.Properties}
+     * covers it honestly rather than pretending to a compatibility this
+     * class doesn't have. Keys: {@code library} (required, the
+     * {@code .so} path), {@code pin} or {@code pinEnv} (exactly one
+     * required — {@code pinEnv} names an environment variable to read
+     * the PIN from at configure-time, the safer default for a file that
+     * might otherwise end up checked into source control with a literal
+     * PIN in it; {@code pinEnv} wins if both are present), {@code name}
+     * (optional instance-name suffix — see the 3-arg constructor).
+     *
+     * @throws InvalidParameterException per the real {@code configure()}
+     *     contract, on anything wrong with the file — missing, unreadable,
+     *     missing {@code library}, missing both {@code pin} and
+     *     {@code pinEnv}, or a named {@code pinEnv} variable that isn't
+     *     actually set.
+     */
+    @Override
+    public SoftHSMv3Provider configure(String configArg) {
+        java.util.Properties props = new java.util.Properties();
+        try (var in = new java.io.FileReader(configArg, java.nio.charset.StandardCharsets.UTF_8)) {
+            props.load(in);
+        } catch (java.io.IOException e) {
+            throw new java.security.InvalidParameterException(
+                "could not read " + NAME + " provider config file " + configArg + ": " + e.getMessage());
+        }
+        String library = props.getProperty("library");
+        if (library == null || library.isBlank()) {
+            throw new java.security.InvalidParameterException(
+                "config file " + configArg + " is missing required key \"library\"");
+        }
+        String pinEnv = props.getProperty("pinEnv");
+        String pin;
+        if (pinEnv != null && !pinEnv.isBlank()) {
+            pin = System.getenv(pinEnv);
+            if (pin == null) {
+                throw new java.security.InvalidParameterException(
+                    "config file " + configArg + " names pinEnv=\"" + pinEnv
+                    + "\" but that environment variable is not set");
+            }
+        } else {
+            pin = props.getProperty("pin");
+            if (pin == null || pin.isBlank()) {
+                throw new java.security.InvalidParameterException(
+                    "config file " + configArg + " must set either \"pin\" or \"pinEnv\"");
+            }
+        }
+        return new SoftHSMv3Provider(library, pin, props.getProperty("name"));
     }
 
     /**
