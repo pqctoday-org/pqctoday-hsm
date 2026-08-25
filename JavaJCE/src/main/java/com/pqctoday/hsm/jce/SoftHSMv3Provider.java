@@ -212,6 +212,18 @@ public final class SoftHSMv3Provider extends Provider {
                 }
             });
         }
+
+        // W2: KeyStore (read path — see P11KeyStoreSpi's javadoc for why
+        // write/delete throw for now). Fixes the classic SunPKCS11 "0
+        // keys" gap for this token by actually enumerating objects via
+        // C_FindObjects.
+        putService(new Service(this, "KeyStore", "PKCS11-SoftHSMv3",
+            P11KeyStoreSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11KeyStoreSpi(lib);
+            }
+        });
     }
 
     private void registerRSAPKCS1(String name, long mech) {

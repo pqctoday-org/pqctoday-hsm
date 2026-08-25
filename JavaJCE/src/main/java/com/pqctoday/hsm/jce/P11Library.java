@@ -94,7 +94,8 @@ final class P11Library implements AutoCloseable {
         // P11Library instance guessing at other instances' state.
         cLogout, cCloseSession, cDigestInit, cDigestUpdate, cDigestFinal,
         cGenerateRandom, cSeedRandom, cGenerateKeyPair, cSignInit, cSign,
-        cVerifyInit, cVerify, cGetAttributeValue, cCreateObject;
+        cVerifyInit, cVerify, cGetAttributeValue, cCreateObject,
+        cFindObjectsInit, cFindObjects, cFindObjectsFinal;
     private final long session;
     private volatile boolean closed;
 
@@ -132,6 +133,9 @@ final class P11Library implements AutoCloseable {
             cVerify        = h(linker, lib, "C_Verify", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG));
             cGetAttributeValue = h(linker, lib, "C_GetAttributeValue", fd(JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
             cCreateObject  = h(linker, lib, "C_CreateObject", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
+            cFindObjectsInit = h(linker, lib, "C_FindObjectsInit", fd(JAVA_LONG, ADDRESS, JAVA_LONG));
+            cFindObjects   = h(linker, lib, "C_FindObjects", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
+            cFindObjectsFinal = h(linker, lib, "C_FindObjectsFinal", fd(JAVA_LONG));
 
             ensureGlobalInit(linker, lib);
 
@@ -301,6 +305,50 @@ final class P11Library implements AutoCloseable {
             throw e;
         } catch (Throwable t) {
             throw new ProviderException("getAttributeBytes failed", t);
+        }
+    }
+
+    /**
+     * C_FindObjectsInit + repeated C_FindObjects + C_FindObjectsFinal.
+     * PKCS#11 §5.6 defines C_FindObjects as a batched call that must be
+     * called repeatedly (each time asking for up to `batch` more) until
+     * it returns fewer objects than requested — a single call is only
+     * guaranteed complete if the true match count is below the batch
+     * size. A first version of this method called C_FindObjects exactly
+     * once with a fixed cap and returned whatever came back, silently
+     * truncating once the token held more matching objects than that cap
+     * — caught live via `mvn test`'s full suite (not a single isolated
+     * test, which stayed under the cap and passed): a just-generated key
+     * went missing from KeyStore enumeration once accumulated session
+     * objects from ~80 other key-generating tests pushed the real count
+     * past the old hardcoded batch size. Fixed by looping.
+     */
+    long[] findObjects(Attr[] template) {
+        ensureOpen();
+        try {
+            MemorySegment tmpl = attrs(template);
+            P11Error.check(invokeRv(cFindObjectsInit, session, tmpl, (long) template.length), "C_FindObjectsInit");
+            try {
+                int batch = 256;
+                java.util.List<Long> out = new java.util.ArrayList<>();
+                MemorySegment handles = arena.allocate(JAVA_LONG, batch);
+                MemorySegment count = arena.allocate(JAVA_LONG);
+                while (true) {
+                    P11Error.check(invokeRv(cFindObjects, session, handles, (long) batch, count), "C_FindObjects");
+                    long n = count.get(JAVA_LONG, 0);
+                    for (int i = 0; i < n; i++) out.add(handles.get(JAVA_LONG, i * 8L));
+                    if (n < batch) break; // fewer than requested => this was the last batch
+                }
+                long[] result = new long[out.size()];
+                for (int i = 0; i < result.length; i++) result[i] = out.get(i);
+                return result;
+            } finally {
+                invokeRv(cFindObjectsFinal, session);
+            }
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("findObjects failed", t);
         }
     }
 

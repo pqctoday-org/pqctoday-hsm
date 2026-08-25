@@ -49,6 +49,8 @@ final class P11Constants {
     static final long CKA_CLASS            = 0x00000000L;
     static final long CKA_TOKEN            = 0x00000001L;
     static final long CKA_PRIVATE          = 0x00000002L;
+    static final long CKA_LABEL            = 0x00000003L;
+    static final long CKA_ID               = 0x00000102L;
     static final long CKA_VALUE            = 0x00000011L;
     static final long CKA_KEY_TYPE         = 0x00000100L;
     static final long CKA_SENSITIVE        = 0x00000103L;

@@ -502,8 +502,61 @@ full since both are load-bearing for W2+.
 **ML-DSA: DONE. SLH-DSA (all 12 parameter sets): DONE. EdDSA
 (Ed25519/Ed448): DONE. EC/ECDSA (P-256/384/521): DONE. RSA
 (2048/3072/4096, PKCS#1 v1.5 + PSS): DONE. `KeyFactorySpi` (public-key
-import, all 5 families): DONE.** All 2026-08-24, all PASSED. Remaining
-in W2: `KeyStoreSpi` read path — not yet built.
+import, all 5 families): DONE. `KeyStoreSpi` read path: DONE.** All
+2026-08-24, all PASSED. **W2 is complete.**
+
+**KeyStore read path — user decision: `CKA_LABEL` alias with a
+synthesized fallback, closes the classic SunPKCS11 "0 keys" gap for this
+engine (noted against this exact token in the sandbox's own
+OpenSession.java/ListKeys.java samples earlier this session).**
+- New `C_FindObjects{Init,Final}` bindings + `P11Library.findObjects(Attr[])`.
+  `P11KeyStoreSpi` enumerates via `CKA_CLASS ∈ {CKO_PUBLIC_KEY,
+  CKO_PRIVATE_KEY}`, resolving each discovered object's own JCA algorithm
+  name from its own attributes (`CKA_KEY_TYPE` → `CKA_PARAMETER_SET` for
+  ML-DSA/SLH-DSA, → `CKA_EC_PARAMS` for EdDSA specifically) — this works
+  for objects this *session* didn't itself just generate, not only
+  freshly-created ones.
+- **Two real bugs found and fixed via the full `mvn test` suite — neither
+  reproduced in isolation, both are genuine correctness gaps regardless:**
+  1. `findObjects` originally called `C_FindObjects` exactly **once**
+     with a fixed 256-object cap and returned whatever came back — not
+     spec-compliant (PKCS#11 §5.6 requires repeated calls until a call
+     returns fewer than requested). Fixed to loop properly. Kept even
+     though it turned out not to be the actual cause of the test failure
+     below — it's a real gap on its own, any token with >256 matching
+     objects would have silently truncated.
+  2. **The actual cause**: the alias-fallback logic used `CKA_ID` when
+     "present" (non-null) — but generating a key without an explicit
+     `CKA_ID` returns a **present, zero-length** byte array, not `null`
+     (confirmed live: two distinct freshly-generated ML-DSA-65 keys both
+     read back `CKA_ID=""`, `len=0`). Both collapsed to the identical
+     synthesized alias `"ML-DSA-65-"`, so `engineGetKey`'s
+     first-match lookup silently returned the *first* such key for every
+     later request, permanently shadowing every other key of the same
+     algorithm with an unset `CKA_ID`. Root-caused with a dedicated
+     probe (not guessed) reading both keys' real `CKA_LABEL`/`CKA_ID`
+     bytes back from the live token. Fixed by always folding the
+     object's own PKCS#11 handle (guaranteed unique within a session)
+     into the synthesized alias, using `CKA_ID`'s content only when it's
+     actually non-empty.
+  3. Passed in isolation both times (`mvn test -Dtest=KeyStoreTest`) but
+     failed within the full 81-test suite — the accumulated session
+     objects from ~80 other key-generating tests were exactly what
+     surfaced both bugs; an isolated single-key test would never have
+     caught either. Worth remembering for W3+: this module's own test
+     suite is now large enough to be a meaningful adversarial-scale
+     input on its own.
+- Write path (`engineSetKeyEntry`/`engineDeleteEntry`/certificate
+  entries) explicitly throws `UnsupportedOperationException` rather than
+  silently no-op-ing — matches the plan's original W2 scope (read path
+  only) and is confirmed by a dedicated test that the write path fails
+  loudly, not quietly.
+- **Verify — all live:** `mvn test`, 81/81 total (2 new KeyStore tests +
+  79 existing). A key generated via this provider is discoverable by
+  alias, `KeyStore.getKey()` returns a correctly-typed, correctly-handled
+  `P11Key.Pub`, `containsAlias`/`isKeyEntry`/`size()` all behave
+  correctly, and every write-path method throws rather than silently
+  accepting.
 
 **KeyFactory import — user decision: all 5 families at once, closes the
 reverse-cross-check gap flagged since the ML-DSA commit (a
