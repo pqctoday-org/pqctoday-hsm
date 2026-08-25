@@ -333,6 +333,161 @@ layer):
 with token-side proof; benchmark table committed; main plan W6 marked
 complete with the numbers.
 
+**WS-B: DONE 2026-08-25, PASSED — real handshakes, real proof, four more
+genuine bugs found and fixed along the way.**
+
+- **G2 decision, made with the user after reading real `SSLCipher.java`
+  source (not before):** confirmed live that JDK 27's TLS 1.3 record
+  cipher (`sun.security.ssl.SSLCipher$T13GcmWriteCipherGenerator`) calls
+  `Cipher.getInstance("AES/GCM/NoPadding")` with no explicit provider —
+  landing on this one at priority 1 — and for **every record** computes
+  the RFC 8446-mandated deterministic nonce (static IV XOR the
+  monotonic sequence number) and supplies it explicitly via
+  `GCMParameterSpec`. This is mandatory TLS 1.3 protocol structure, not
+  caller laziness — no module-generated-IV policy can ever satisfy it.
+  Also confirmed the plan's own "let record crypto stay on SunJCE"
+  option isn't actually viable: the traffic key itself is this
+  provider's own opaque `P11Key.Secret` from its own HKDF chain, which
+  only this provider's own Cipher can use at all — a different provider
+  would need the key to be extractable too, a bigger concession than
+  the IV question alone. Decision: add
+  `-Dsofthsmv3.jce.callerGcmIv=true` (default off, non-FIPS, matching
+  the fallback the main plan's own §5 risk 5 already reserved) —
+  `P11AESCipherSpi`'s ENCRYPT_MODE caller-IV rejection is gated behind
+  it; documented in the class javadoc as cryptographically sound by
+  construction (monotonic, non-repeating within a connection) while
+  plainly noting this provider cannot verify a given caller's IVs
+  actually follow a safe construction. New test
+  (`callerGcmIvFlagAllowsAndUsesTheExactSuppliedIv`) proves the exact
+  supplied IV is used and the ciphertext is genuinely correct (Bouncy
+  Castle decrypts it independently), not just that the call stops
+  throwing.
+- **A real engine-shape finding: `CKM_HKDF_DERIVE` output is ALWAYS
+  `CKK_GENERIC_SECRET`, unconditionally.** Confirmed reading
+  `SoftHSM_keygen.cpp`'s HKDF output-template code directly: it
+  iterates the caller's template with a `switch` whose `CKA_CLASS`/
+  `CKA_KEY_TYPE` cases are bare `continue` — silently discarding
+  whatever the caller supplied — then hardcodes `CKO_SECRET_KEY`/
+  `CKK_GENERIC_SECRET`. This provider's own `AES/GCM` Cipher correctly
+  refuses that object with `CKR_KEY_TYPE_INCONSISTENT` — found live
+  because JDK 27's own `SSLTrafficKeyDerivation` requests exactly
+  `"AES"` (`cs.bulkCipher.algorithm`, confirmed from real JDK source)
+  for the record cipher's traffic key, a genuine real caller, not a
+  hypothetical. Fixed in `P11HKDFKDFSpi.engineDeriveKey`: when `alg`
+  is `"AES"`, derive EXTRACTABLE, read the raw bytes back, destroy the
+  throwaway generic-secret object, re-import the same bytes as a
+  genuine `CKK_AES` object (the same raw-AES-import pattern already
+  established and tested — `P11AESWrapCipherSpi`'s unwrap path,
+  `importRawAesKeyReal` in the test suite — not a new technique), zero
+  the Java-side intermediate (§6.5). A real, disclosed, narrow
+  exception to this KDF's opaque-by-default output, same class as the
+  KEM/ECDH secrets: the whole point of a TLS traffic key is to be
+  consumed by this provider's own Cipher. New test
+  (`deriveKeyWithAesAlgorithmProducesAGenuineAesKeyUsableByThisProvidersOwnCipher`)
+  proves both that the key works with this provider's own AES/GCM
+  Cipher AND that its raw value exactly matches an independent
+  re-derivation via JDK's own reference HKDF — not just "some AES key
+  came out."
+- **A genuine, pre-existing bug in this provider's own `P11AESCipherSpi`,
+  unrelated to any of the above, found only because JSSE's usage
+  pattern is stricter than every other caller in this test suite.**
+  `engineGetOutputSize` returned a padded `inputLen + 32` "conservative
+  upper bound" rather than GCM's real exact size. Ordinary
+  byte[]-based `Cipher.doFinal()` — what every one of the 200+
+  pre-existing tests uses — never checks this value against the real
+  output length, so the bug was invisible until JDK 27's own
+  `SSLCipher` used the **ByteBuffer-based**
+  `Cipher.doFinal(ByteBuffer, ByteBuffer)` overload, whose default
+  `CipherSpi` bridging pre-sizes the output buffer from
+  `engineGetOutputSize()` and then strictly requires the real written
+  length to equal it (`"Cipher buffering error"` otherwise). Fixed: GCM
+  now returns the exact size (`inputLen ± tagBits/8` by direction);
+  CBC/CTR return the exact `inputLen`; CBC+PKCS5 returns the exact
+  encrypt-side padded size (decrypt-side stays a safe upper bound,
+  correctly — the real post-unpad length isn't knowable without
+  decrypting, and TLS 1.3 is GCM-only so this path is never exercised
+  the strict way). New test
+  (`gcmOutputSizeIsExactNotAConservativeUpperBound`) exercises the
+  actual `ByteBuffer` path directly — the only way to have caught this
+  in the first place.
+- **A genuine concurrency bug in this session's own earlier zeroization
+  work (commit `1ed4965`), found live, not introduced by this
+  workstream but surfaced by it.** The JVM shutdown hook
+  `SoftHSMv3Provider`'s constructor registers is one independent
+  `Thread` per constructed provider instance; the JVM runs every
+  registered shutdown hook concurrently. This test suite constructs
+  100+ providers, so JVM exit fired that many threads calling
+  `C_CloseSession` on their own distinct sessions all at once —
+  crashing the JVM outright with a native `SIGSEGV` inside
+  `libsofthsmv3.so`'s session teardown
+  (`std::_Rb_tree_increment`, i.e. an internal `std::map` iteration
+  corrupted by concurrent access). Checked
+  `HandleManager`/`SessionManager`/`SessionObjectStore` first — all
+  three already have their own per-instance mutexes, so the deeper
+  engine-side cause (some other unprotected shared state, or a genuine
+  gap) wasn't chased further; eliminating the concurrent-call pattern
+  is squarely this Java code's own responsibility (it chose to spawn N
+  independent threads) and is sufficient regardless of the engine-side
+  root cause. Fixed: a single JVM-wide lock (`P11Library.CLOSE_LOCK`)
+  now serializes every native `C_CloseSession` call across every
+  instance — `close()` is a rare, teardown-only operation, never a hot
+  path, so a single lock costs nothing in practice. Verified by
+  re-running the full 203-test suite three consecutive times after the
+  fix (a timing-dependent race needs more than one clean run to trust)
+  — no crash, all green.
+- **Both FIPS-profile hybrid groups, real live handshakes, with
+  token-side proof:**
+  ```
+  === SecP256r1MLKEM768 ===
+  [softhsmv3-jce] EC KeyPairGenerator.generateKeyPair() — curve=secp256r1
+  [softhsmv3-jce] ML-KEM KeyPairGenerator.generateKeyPair() — algorithm=ML-KEM-768
+  [softhsmv3-jce] ML-KEM Decapsulator.engineDecapsulate() — token C_DecapsulateKey
+  HANDSHAKE SUCCEEDED (group=SecP256r1MLKEM768)
+  Protocol: TLSv1.3
+  CipherSuite: TLS_AES_256_GCM_SHA384
+
+  === SecP384r1MLKEM1024 ===
+  [softhsmv3-jce] EC KeyPairGenerator.generateKeyPair() — curve=secp384r1
+  [softhsmv3-jce] ML-KEM KeyPairGenerator.generateKeyPair() — algorithm=ML-KEM-1024
+  [softhsmv3-jce] ML-KEM Decapsulator.engineDecapsulate() — token C_DecapsulateKey
+  HANDSHAKE SUCCEEDED (group=SecP384r1MLKEM1024)
+  Protocol: TLSv1.3
+  CipherSuite: TLS_AES_256_GCM_SHA384
+  ```
+  Curve/KEM pairing is correctly wired per group (secp256r1↔ML-KEM-768,
+  secp384r1↔ML-KEM-1024) — the hybrid combiner picks the right
+  component sizes for each named group, not a hardcoded pair.
+  `W6TlsHandshakeSpike.java` updated to take the group as `argv[0]` (so
+  both can be run without editing the file) and to stop right after a
+  successful handshake — an earlier version's subsequent bare HTTP GET
+  correctly triggered a `certificate_required` alert from pqc-rest's
+  own mTLS requirement at the application layer, unrelated to what this
+  spike verifies, so chasing it further would have been scope creep.
+- **Benchmark (required, decision Q4) —
+  `W6TlsHandshakeBenchmark.java`, new**, N=50 sequential real handshakes
+  per arm against the same live `pqc-rest:5720` endpoint,
+  `SecP256r1MLKEM768`:
+
+  | Arm | min | mean | p50 | p95 | max |
+  |---|---|---|---|---|---|
+  | stock JDK (SunJCE software ML-KEM) | 1ms | 4.2ms | 2ms | 6ms | 83ms |
+  | token-backed (SoftHSMv3Provider) | 4ms | 6.2ms | 5ms | 8ms | 72ms |
+
+  Ratio (token-backed mean / stock JDK mean): **1.48x**. A modest,
+  expected overhead — the same class of cost the main plan's own risk
+  #3 already anticipated ("FFM call overhead vs JNI... acceptable for
+  an HSM bridge — ops are token-bound anyway"), not a red flag. Both
+  arms' `max` outliers (83ms/72ms) are consistent with ordinary JIT
+  warmup/GC noise in a 50-iteration run, not a systemic issue — no
+  further investigation attempted, in line with the plan's own
+  "raw numbers, not adjectives" instruction.
+- **Verify:** `mvn test`, 203/203 (198 prior + 5 new: caller-IV,
+  HKDF-AES-reimport, exact-output-size, plus 2 already counted from
+  WS-A's own tail). Both FIPS-profile groups handshake green with
+  `P11Debug` token-side proof, live against `pqc-rest:5720`. Benchmark
+  table above, real numbers. Main plan's own W6 section should be
+  marked complete referencing this workstream.
+
 ---
 
 ## 5. WS-C — Zeroization architecture (`P11Library` arenas)

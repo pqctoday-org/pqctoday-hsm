@@ -1086,23 +1086,48 @@ final class P11Library implements AutoCloseable {
         return (long) h.invokeWithArguments(args);
     }
 
+    // Serializes every native C_CloseSession call across EVERY P11Library
+    // instance in this JVM process — found necessary live, not added
+    // speculatively: the JVM shutdown hook SoftHSMv3Provider registers
+    // (§6.5) is one independent Thread per constructed provider instance,
+    // and the JVM runs all registered shutdown hooks concurrently. A test
+    // suite that constructs 100+ providers (this one does) therefore fires
+    // that many threads all calling C_CloseSession on their own distinct
+    // session at once on exit — and that concurrent pattern crashed the
+    // JVM outright with a native SIGSEGV inside libsofthsmv3.so's session
+    // teardown (std::_Rb_tree_increment, i.e. an internal std::map
+    // iteration corrupted by concurrent access), reproduced live during
+    // plan §WS-B. HandleManager/SessionManager/SessionObjectStore all have
+    // their own per-instance mutexes already (checked before concluding
+    // this was the right fix, not assumed) — whether the deeper cause is
+    // some other unprotected shared state or a genuine engine gap wasn't
+    // chased further, since eliminating the concurrent-call pattern from
+    // the Java side is squarely this class's own responsibility (it chose
+    // to spawn N independent threads) and is sufficient regardless of the
+    // engine-side root cause. A single JVM-wide lock is fine here: close()
+    // is a rare, teardown-only operation, never a hot path.
+    private static final Object CLOSE_LOCK = new Object();
+
     @Override
     public void close() {
         if (closed) return;
-        closed = true;
-        try {
-            invokeRv(cCloseSession, session);
-            // C_Logout and C_Finalize are deliberately NOT called here:
-            // both are token-/process-wide state (spec §5.6.1 — login
-            // applies to every session on the token, not just this one),
-            // and this instance cannot know whether another live
-            // P11Library instance on the same token still needs to be
-            // logged in. Only C_CloseSession is genuinely scoped to this
-            // instance's own session and safe to call unilaterally.
-        } catch (Throwable ignored) {
-            // best-effort teardown
-        } finally {
-            arena.close();
+        synchronized (CLOSE_LOCK) {
+            if (closed) return;
+            closed = true;
+            try {
+                invokeRv(cCloseSession, session);
+                // C_Logout and C_Finalize are deliberately NOT called here:
+                // both are token-/process-wide state (spec §5.6.1 — login
+                // applies to every session on the token, not just this one),
+                // and this instance cannot know whether another live
+                // P11Library instance on the same token still needs to be
+                // logged in. Only C_CloseSession is genuinely scoped to this
+                // instance's own session and safe to call unilaterally.
+            } catch (Throwable ignored) {
+                // best-effort teardown
+            } finally {
+                arena.close();
+            }
         }
     }
 }

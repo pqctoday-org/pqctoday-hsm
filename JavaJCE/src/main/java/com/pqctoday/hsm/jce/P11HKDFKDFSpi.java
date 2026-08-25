@@ -104,8 +104,63 @@ final class P11HKDFKDFSpi extends KDFSpi {
             byte[] raw = lib.getAttributeBytes(handle, CKA_VALUE);
             return new javax.crypto.spec.SecretKeySpec(raw, alg);
         }
+        if ("AES".equalsIgnoreCase(alg)) {
+            return deriveAndReimportAsAes(spec);
+        }
         long handle = derive(spec, false);
         return new P11Key.Secret(lib, handle, alg);
+    }
+
+    /**
+     * The engine's {@code CKM_HKDF_DERIVE} unconditionally produces a
+     * {@code CKK_GENERIC_SECRET} object — confirmed reading
+     * {@code SoftHSM_keygen.cpp}'s HKDF output-template code, which
+     * explicitly discards any caller-supplied {@code CKA_CLASS}/
+     * {@code CKA_KEY_TYPE} from the template (a {@code switch} case
+     * whose only action is {@code continue}) and hardcodes
+     * {@code CKK_GENERIC_SECRET} instead — which this provider's own
+     * {@code AES/GCM} Cipher then correctly refuses with
+     * {@code CKR_KEY_TYPE_INCONSISTENT} at {@code C_EncryptInit}. Found
+     * live via plan §WS-B's TLS spike: JDK 27's own
+     * {@code SSLTrafficKeyDerivation} requests exactly {@code "AES"} for
+     * the record cipher's traffic key
+     * ({@code cs.bulkCipher.algorithm}, confirmed from real JDK source),
+     * so this case is a genuine, real caller, not a hypothetical.
+     *
+     * Bridged the same way this module already imports foreign raw AES
+     * keys ({@code P11AESWrapCipherSpi}'s unwrap path,
+     * {@code importRawAesKeyReal} in the test suite): derive
+     * EXTRACTABLE, read the raw bytes back, re-import as a genuine
+     * {@code CKK_AES} object, then destroy the throwaway generic-secret
+     * and zero the Java-side intermediate copy (§6.5). A real, disclosed,
+     * narrow exception to this KDF's opaque-by-default output — the same
+     * class of exception already accepted for the KEM/ECDH secrets: the
+     * whole point of a TLS traffic key is to be consumed by this
+     * provider's own Cipher, which cannot do that with a
+     * {@code CKK_GENERIC_SECRET} object no matter what Java-level
+     * algorithm label is attached to it.
+     */
+    private SecretKey deriveAndReimportAsAes(AlgorithmParameterSpec spec)
+            throws InvalidAlgorithmParameterException, NoSuchAlgorithmException {
+        long genericHandle = derive(spec, true);
+        byte[] raw = lib.getAttributeBytes(genericHandle, CKA_VALUE);
+        lib.destroyObject(genericHandle);
+        try {
+            P11Library.Attr[] tmpl = {
+                P11Library.attrLong(CKA_CLASS, CKO_SECRET_KEY),
+                P11Library.attrLong(CKA_KEY_TYPE, CKK_AES),
+                P11Library.attr(CKA_VALUE, raw),
+                P11Library.attrBool(CKA_TOKEN, false),
+                P11Library.attrBool(CKA_SENSITIVE, true),
+                P11Library.attrBool(CKA_EXTRACTABLE, false),
+                P11Library.attrBool(CKA_ENCRYPT, true),
+                P11Library.attrBool(CKA_DECRYPT, true),
+            };
+            long aesHandle = lib.createObject(tmpl);
+            return new P11Key.Secret(lib, aesHandle, "AES");
+        } finally {
+            java.util.Arrays.fill(raw, (byte) 0);
+        }
     }
 
     @Override

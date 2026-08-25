@@ -11,6 +11,7 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import java.nio.ByteBuffer;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidParameterException;
 import java.security.Security;
@@ -86,6 +87,50 @@ class AESCipherTest {
         assertThrows(InvalidAlgorithmParameterException.class,
             () -> enc.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, callerIv)),
             "plan §4.3: AES-GCM encryption IVs must be module-generated, not caller-supplied");
+    }
+
+    @Test
+    void callerGcmIvFlagAllowsAndUsesTheExactSuppliedIv() throws Exception {
+        // -Dsofthsmv3.jce.callerGcmIv=true (plan §WS-B's decided fallback
+        // for JEP 527 TLS 1.3, whose record cipher MUST supply its own
+        // RFC 8446-mandated deterministic nonce). Default off; a real,
+        // disclosed narrowing of the module-generated-IV policy while
+        // set, not a silent default — restored unconditionally, same
+        // discipline as this module's other two runtime flags.
+        String prior = System.getProperty("softhsmv3.jce.callerGcmIv");
+        try {
+            System.setProperty("softhsmv3.jce.callerGcmIv", "true");
+            Security.addProvider(new BouncyCastleProvider());
+            SoftHSMv3Provider p = new SoftHSMv3Provider();
+            byte[] rawKey = new byte[16];
+            new java.security.SecureRandom().nextBytes(rawKey);
+            long handle = importRawAesKeyReal(p.lib, rawKey, false);
+            SecretKey ourKey = new P11Key.Secret(p.lib, handle, "AES");
+
+            byte[] callerIv = new byte[12];
+            new java.security.SecureRandom().nextBytes(callerIv);
+            byte[] plaintext = "caller-supplied IV via the flag".getBytes();
+
+            Cipher enc = Cipher.getInstance("AES/GCM/NoPadding", p);
+            enc.init(Cipher.ENCRYPT_MODE, ourKey, new GCMParameterSpec(128, callerIv));
+            assertArrayEquals(callerIv, enc.getIV(), "the Cipher must use the EXACT IV supplied, not a different one");
+            byte[] ct = enc.doFinal(plaintext);
+
+            // Prove it's genuinely the same construction an independent
+            // implementation would produce with the same key/IV/plaintext
+            // — decrypt with Bouncy Castle, not just round-trip with
+            // ourselves.
+            SecretKey bcKey = new SecretKeySpec(rawKey, "AES");
+            Cipher bcDec = Cipher.getInstance("AES/GCM/NoPadding", "BC");
+            bcDec.init(Cipher.DECRYPT_MODE, bcKey, new GCMParameterSpec(128, callerIv));
+            assertArrayEquals(plaintext, bcDec.doFinal(ct));
+        } finally {
+            if (prior == null) {
+                System.clearProperty("softhsmv3.jce.callerGcmIv");
+            } else {
+                System.setProperty("softhsmv3.jce.callerGcmIv", prior);
+            }
+        }
     }
 
     @Test
@@ -210,6 +255,51 @@ class AESCipherTest {
         dec.init(Cipher.DECRYPT_MODE, recovered, new GCMParameterSpec(128, iv));
         assertArrayEquals(plaintext, dec.doFinal(ct),
             "the unwrapped key must decrypt what the original (wrapped) key encrypted");
+    }
+
+    @Test
+    void gcmOutputSizeIsExactNotAConservativeUpperBound() throws Exception {
+        // A real bug found live via plan §WS-B's TLS spike: JDK 27's own
+        // SSLCipher (the TLS 1.3 record cipher) uses the ByteBuffer-based
+        // Cipher.doFinal(ByteBuffer, ByteBuffer) overload, whose default
+        // CipherSpi bridging pre-sizes the output buffer from
+        // engineGetOutputSize()'s return value and then STRICTLY requires
+        // the real written length to equal it — "Cipher buffering error"
+        // otherwise. This provider's engineGetOutputSize used to return a
+        // padded inputLen+32 "conservative upper bound", which the
+        // ordinary byte[]-based doFinal() every other test here uses
+        // never noticed was wrong, since that path doesn't care.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        SecretKey key = KeyGenerator.getInstance("AES", p).generateKey();
+        byte[] plaintext = "exact output size check, GCM tag is 16 bytes".getBytes();
+
+        Cipher enc = Cipher.getInstance("AES/GCM/NoPadding", p);
+        enc.init(Cipher.ENCRYPT_MODE, key);
+        assertEquals(plaintext.length + 16, enc.getOutputSize(plaintext.length),
+            "GCM encrypt output size must be exactly plaintext + 16-byte tag, not a padded estimate");
+
+        // Exercise the actual ByteBuffer path JSSE uses, not just
+        // getOutputSize() in isolation — this is what a wrong estimate
+        // above would have broken in practice.
+        ByteBuffer inBuf = ByteBuffer.wrap(plaintext);
+        ByteBuffer outBuf = ByteBuffer.allocate(enc.getOutputSize(plaintext.length));
+        int written = enc.doFinal(inBuf, outBuf);
+        assertEquals(outBuf.capacity(), written,
+            "doFinal(ByteBuffer, ByteBuffer) must write exactly the pre-computed output size — this is JSSE's own strict check");
+        byte[] iv = enc.getIV();
+
+        Cipher dec = Cipher.getInstance("AES/GCM/NoPadding", p);
+        dec.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, iv));
+        assertEquals(plaintext.length, dec.getOutputSize(written),
+            "GCM decrypt output size must be exactly ciphertext-and-tag minus the 16-byte tag");
+        outBuf.flip();
+        ByteBuffer decOut = ByteBuffer.allocate(dec.getOutputSize(written));
+        int decWritten = dec.doFinal(outBuf, decOut);
+        assertEquals(plaintext.length, decWritten);
+        decOut.flip();
+        byte[] recoveredPlaintext = new byte[decWritten];
+        decOut.get(recoveredPlaintext);
+        assertArrayEquals(plaintext, recoveredPlaintext);
     }
 
     private static long importRawAesKeyReal(P11Library lib, byte[] raw, boolean extractable) {

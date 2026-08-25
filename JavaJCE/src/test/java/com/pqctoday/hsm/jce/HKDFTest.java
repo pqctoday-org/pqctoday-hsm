@@ -216,4 +216,54 @@ class HKDFTest {
         assertTrue(derived instanceof P11Key.Secret, "by default engineDeriveKey must return this provider's opaque key type");
         assertNull(derived.getEncoded(), "by default the derived key must stay opaque");
     }
+
+    @Test
+    void deriveKeyWithAesAlgorithmProducesAGenuineAesKeyUsableByThisProvidersOwnCipher() throws Exception {
+        // Real, live need (plan §WS-B): the engine's CKM_HKDF_DERIVE
+        // always produces a CKK_GENERIC_SECRET object regardless of the
+        // requested algorithm label — this provider's own AES/GCM Cipher
+        // then rejects it with CKR_KEY_TYPE_INCONSISTENT. JDK 27's own
+        // SSLTrafficKeyDerivation requests exactly "AES" for the TLS
+        // record cipher's traffic key, so deriveKey("AES", spec) must
+        // produce a key this provider's own Cipher can actually use.
+        //
+        // Correctness proven two ways: (1) the key round-trips through
+        // this provider's own AES/GCM Cipher; (2) the SAME derivation,
+        // done independently via JDK's own reference HKDF with an
+        // extractable IKM, produces byte-identical raw key material —
+        // confirming the re-import preserves the derived value exactly,
+        // not just that *some* usable AES key came out.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        byte[] ikmBytes = "aes-traffic-key-test-ikm".getBytes();
+        byte[] saltBytes = "aes-traffic-key-salt".getBytes();
+        byte[] info = "tls13 key".getBytes();
+        SecretKey ikm = new SecretKeySpec(ikmBytes, "Generic");
+        SecretKey salt = new SecretKeySpec(saltBytes, "Generic");
+        var spec = HKDFParameterSpec.ofExtract().addIKM(ikm).addSalt(salt)
+            .thenExpand(info, 16); // AES-128
+
+        SecretKey aesKey = KDF.getInstance("HKDF-SHA256", p).deriveKey("AES", spec);
+        assertEquals("AES", aesKey.getAlgorithm());
+        assertNull(aesKey.getEncoded(), "the re-imported AES key must still be opaque, like every other AES key this provider produces");
+
+        byte[] plaintext = "TLS record plaintext".getBytes();
+        var enc = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding", p);
+        enc.init(javax.crypto.Cipher.ENCRYPT_MODE, aesKey);
+        byte[] iv = enc.getIV();
+        byte[] ct = enc.doFinal(plaintext);
+        var dec = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding", p);
+        dec.init(javax.crypto.Cipher.DECRYPT_MODE, aesKey, new javax.crypto.spec.GCMParameterSpec(128, iv));
+        assertArrayEquals(plaintext, dec.doFinal(ct));
+
+        // Independent re-derivation via JDK's own reference HKDF (no
+        // provider), same inputs, to get the actual raw key bytes for comparison.
+        byte[] jdkOkm = KDF.getInstance("HKDF-SHA256").deriveData(
+            HKDFParameterSpec.ofExtract().addIKM(new SecretKeySpec(ikmBytes, "Generic"))
+                .addSalt(new SecretKeySpec(saltBytes, "Generic")).thenExpand(info, 16));
+        SecretKey jdkAesKey = new SecretKeySpec(jdkOkm, "AES");
+        var jdkDec = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding"); // default SunJCE
+        jdkDec.init(javax.crypto.Cipher.DECRYPT_MODE, jdkAesKey, new javax.crypto.spec.GCMParameterSpec(128, iv));
+        assertArrayEquals(plaintext, jdkDec.doFinal(ct),
+            "the re-imported AES key's raw value must exactly match JDK's own reference HKDF derivation");
+    }
 }
