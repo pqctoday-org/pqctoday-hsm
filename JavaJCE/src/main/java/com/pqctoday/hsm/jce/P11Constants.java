@@ -62,6 +62,11 @@ final class P11Constants {
 
     // ── KDF (W4) ─────────────────────────────────────────────────────────
     static final long CKM_HKDF_DERIVE = 0x0000402aL;
+    static final long CKM_PKCS5_PBKD2 = 0x000003b0L;
+    static final long CKZ_SALT_SPECIFIED = 0x00000001L;
+    static final long CKP_PKCS5_PBKD2_HMAC_SHA256 = 0x00000004L;
+    static final long CKP_PKCS5_PBKD2_HMAC_SHA384 = 0x00000005L;
+    static final long CKP_PKCS5_PBKD2_HMAC_SHA512 = 0x00000006L;
 
     // ── Object classes ──────────────────────────────────────────────────
     static final long CKO_PUBLIC_KEY  = 0x00000002L;

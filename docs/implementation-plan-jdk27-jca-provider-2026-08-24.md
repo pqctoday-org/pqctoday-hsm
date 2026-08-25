@@ -1209,14 +1209,64 @@ JDK 27 shape rather than trusted on the strength of the JDK 24 result).
   computes that same published value before trusting it as the oracle
   for the other digest sizes (SHA-384/512) via direct cross-verification.
 
-Remaining W4 scope (`SecretKeyFactory` for PBKDF2/SP 800-108, KeyStore
-write path) — not started. One concrete finding already on record for
-when SP 800-108 is picked up: `CK_SP800_108_KDF_PARAMS` has a
-variable-length PRF-data-array parameter structure (confirmed reading
-W0.3's KMAC spike notes above) that needs its own dedicated FFM struct
-builder — `P11Library.mechWithParams`'s all-`CK_ULONG` shape doesn't
-cover it, deliberately noted in that method's own javadoc rather than
-stretched to fit.
+**PBKDF2WithHmacSHA256/384/512 (SP 800-132): DONE 2026-08-24, PASSED.**
+- `P11PBKDF2SecretKeyFactorySpi implements SecretKeyFactorySpi`, via
+  `CKM_PKCS5_PBKD2`. No base key is needed — confirmed reading
+  `SoftHSM_keygen.cpp` before writing any code that this mechanism is
+  handled in its own early branch of `C_DeriveKey` that never resolves
+  `hBaseKey` at all (the password lives entirely in the mechanism
+  parameters), so `P11Library.deriveKeyNoBase` passes handle `0`
+  explicitly rather than reusing a real one. `CK_PKCS5_PBKD2_PARAMS2` is
+  all `CK_ULONG`/pointer fields (no `CK_BBOOL` fields like
+  `CK_HKDF_PARAMS`), so its FFM layout carried no alignment ambiguity to
+  verify against a C probe first.
+- Derived keys are opaque (`CKA_EXTRACTABLE=false`), the same design
+  choice as every other generated/derived key in this module — a
+  deliberate consistency call, not a JCA requirement.
+- **Two claims stated from JCA convention memory were challenged and
+  then actually verified live rather than left as assumptions**: that
+  `PBEKeySpec`'s `keyLength` is in bits (confirmed:
+  `keyLength=256` → a 32-byte JDK-derived key), and that JDK's own
+  PBKDF2-derived key reports `getAlgorithm()=="PBKDF2WithHmacSHA256"`,
+  not `"HmacSHA256"` (confirmed the same way). Both were correct, but
+  neither had actually been checked before being stated — flagged and
+  fixed on request rather than defended.
+- **That second finding drove a real design fix, not just a comment**:
+  `P11MacSpi`'s key check originally required `key.getAlgorithm()` to
+  exactly equal the Mac's own registered name (e.g. `"HmacSHA256"`).
+  Since a PBKDF2-derived key is generically labeled by design — matching
+  the JDK's own convention just confirmed — and this provider's opaque
+  keys have no raw bytes a caller could re-wrap into a differently-named
+  `SecretKeySpec` the way JDK's own interop workaround does, that check
+  would have made this provider's PBKDF2 output permanently unusable
+  with its own Mac classes. Relaxed to just require a real
+  `P11Key.Secret` token handle — the actual type constraint (e.g.
+  `CKM_AES_CMAC` needing `CKK_AES`) is enforced natively by the engine
+  regardless, so the Java-side check was only ever a UX nicety, not a
+  security boundary.
+- **Verify:** `mvn test`, 156/156 (148 prior + 8 new). Correctness
+  verified indirectly but conclusively, since a hardcoded KAT or direct
+  byte-for-byte JDK comparison is impossible for an opaque derived key:
+  derive via both this provider and JDK's own SunJCE for identical
+  inputs, then HMAC identical data with each side's key (JDK's via its
+  own exported bytes re-wrapped as `HmacSHA*`, ours via this provider's
+  own already-proven `Mac` SPI) and compare the MAC outputs — a match
+  proves identical derived key material without ever exporting this
+  provider's own bytes. One test surfaced a real sizing bug in the
+  test itself (not the provider): `HmacSHA384`/`512` need at least a
+  48/64-byte key per the engine's own MAC mechanism table, so a fixed
+  256-bit derived key across all three digest sizes failed live with
+  `CKR_KEY_SIZE_RANGE` — fixed by sizing the derived key to match each
+  HMAC variant.
+
+Remaining W4 scope (`SecretKeyFactory` for SP 800-108, KeyStore write
+path) — not started. One concrete finding already on record for when SP
+800-108 is picked up: `CK_SP800_108_KDF_PARAMS` has a variable-length
+PRF-data-array parameter structure (confirmed reading W0.3's KMAC spike
+notes above) that needs its own dedicated FFM struct builder —
+`P11Library.mechWithParams`'s all-`CK_ULONG` shape doesn't cover it,
+deliberately noted in that method's own javadoc rather than stretched to
+fit.
 
 - GCM in-token IV policy (§4.3 note) — DONE, see above.
 - **Verify:** NIST CAVP/ACVP vectors for AES-GCM/CMAC — DONE, see above

@@ -569,6 +569,49 @@ final class P11Library implements AutoCloseable {
         return m;
     }
 
+    // CK_PKCS5_PBKD2_PARAMS2 { CK_PKCS5_PBKDF2_SALT_SOURCE_TYPE saltSource;
+    // CK_VOID_PTR pSaltSourceData; CK_ULONG ulSaltSourceDataLen; CK_ULONG iterations;
+    // CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE prf; CK_VOID_PTR pPrfData;
+    // CK_ULONG ulPrfDataLen; CK_UTF8CHAR_PTR pPassword; CK_ULONG ulPasswordLen; }
+    // All 9 fields are CK_ULONG-or-pointer (8 bytes each, naturally aligned) —
+    // unlike CK_HKDF_PARAMS, no CK_BBOOL fields exist here, so there is no
+    // padding ambiguity to verify against a C probe first.
+    private static final MemoryLayout PBKDF2_PARAMS = MemoryLayout.structLayout(
+        JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG);
+
+    /** CKM_PKCS5_PBKD2 (SP 800-132). Salt is always CKZ_SALT_SPECIFIED (raw bytes) — the only source type this engine supports. */
+    MemorySegment mechPbkdf2(long prf, byte[] salt, long iterations, byte[] password) {
+        MemorySegment params = arena.allocate(PBKDF2_PARAMS);
+        params.set(JAVA_LONG, 0, P11Constants.CKZ_SALT_SPECIFIED);
+        params.set(ADDRESS, 8, bytes(salt));
+        params.set(JAVA_LONG, 16, (long) salt.length);
+        params.set(JAVA_LONG, 24, iterations);
+        params.set(JAVA_LONG, 32, prf);
+        params.set(ADDRESS, 40, MemorySegment.NULL); // pPrfData — unused for the HMAC PRF family
+        params.set(JAVA_LONG, 48, 0L);
+        params.set(ADDRESS, 56, bytes(password));
+        params.set(JAVA_LONG, 64, (long) password.length);
+        MemorySegment m = arena.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_PKCS5_PBKD2);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, PBKDF2_PARAMS.byteSize());
+        return m;
+    }
+
+    /**
+     * C_DeriveKey for mechanisms that need no base key (CKM_PKCS5_PBKD2:
+     * the password IS the key material, carried entirely in the
+     * mechanism parameters) — confirmed by reading SoftHSM_keygen.cpp's
+     * C_DeriveKey before writing this that PBKDF2 is handled in its own
+     * early branch that returns before hBaseKey is ever resolved or
+     * validated, so any handle value is accepted. Passes 0 explicitly
+     * (not reusing deriveKey(...) with a real handle) so a future reader
+     * doesn't mistake this for a real base-key dependency.
+     */
+    long deriveKeyNoBase(MemorySegment mech, Attr[] outputTmpl) {
+        return deriveKey(mech, 0L, outputTmpl);
+    }
+
     /** C_DeriveKey with a caller-built CK_MECHANISM (HKDF; ECDH has its own ecdh1Derive convenience above). */
     long deriveKey(MemorySegment mech, long baseKey, Attr[] outputTmpl) {
         ensureOpen();

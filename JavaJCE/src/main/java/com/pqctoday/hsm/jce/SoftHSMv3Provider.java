@@ -318,21 +318,21 @@ public final class SoftHSMv3Provider extends Provider {
             P11MacSpi.class.getName(), List.of(), Map.of()) {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
-                return new P11MacSpi(lib, CKM_KMAC_128, "KMAC128", 32);
+                return new P11MacSpi(lib, CKM_KMAC_128, 32);
             }
         });
         putService(new Service(this, "Mac", "KMAC256",
             P11MacSpi.class.getName(), List.of(), Map.of()) {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
-                return new P11MacSpi(lib, CKM_KMAC_256, "KMAC256", 64);
+                return new P11MacSpi(lib, CKM_KMAC_256, 64);
             }
         });
         putService(new Service(this, "Mac", "AESCMAC",
             P11MacSpi.class.getName(), List.of(), Map.of()) {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
-                return new P11MacSpi(lib, CKM_AES_CMAC, "AES", 16);
+                return new P11MacSpi(lib, CKM_AES_CMAC, 16);
             }
         });
 
@@ -347,6 +347,17 @@ public final class SoftHSMv3Provider extends Provider {
         registerHKDF("HKDF-SHA256", CKM_SHA256, 32);
         registerHKDF("HKDF-SHA384", CKM_SHA384, 48);
         registerHKDF("HKDF-SHA512", CKM_SHA512, 64);
+
+        // W4: PBKDF2 (SP 800-132) via SecretKeyFactory — see
+        // P11PBKDF2SecretKeyFactorySpi's javadoc for why no base key is
+        // needed. Registered for all three SHA-2 sizes, matching this
+        // module's own established pattern for every other digest-family
+        // service (Mac, MessageDigest, OAEP all cover 256/384/512
+        // uniformly), even though the plan text only named 256/512
+        // explicitly.
+        registerPBKDF2("PBKDF2WithHmacSHA256", CKP_PKCS5_PBKD2_HMAC_SHA256);
+        registerPBKDF2("PBKDF2WithHmacSHA384", CKP_PKCS5_PBKD2_HMAC_SHA384);
+        registerPBKDF2("PBKDF2WithHmacSHA512", CKP_PKCS5_PBKD2_HMAC_SHA512);
 
         // W2: KeyStore (read path — see P11KeyStoreSpi's javadoc for why
         // write/delete throw for now). Fixes the classic SunPKCS11 "0
@@ -398,13 +409,23 @@ public final class SoftHSMv3Provider extends Provider {
         });
     }
 
+    private void registerPBKDF2(String name, long prf) {
+        putService(new Service(this, "SecretKeyFactory", name,
+            P11PBKDF2SecretKeyFactorySpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11PBKDF2SecretKeyFactorySpi(lib, prf);
+            }
+        });
+    }
+
     private void registerHmac(String name, long mech, int macLength) {
         registerGenericSecretKeyGenerator(name, macLength);
         putService(new Service(this, "Mac", name,
             P11MacSpi.class.getName(), List.of(), Map.of()) {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
-                return new P11MacSpi(lib, mech, name, macLength);
+                return new P11MacSpi(lib, mech, macLength);
             }
         });
     }
