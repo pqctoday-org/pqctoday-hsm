@@ -4,7 +4,7 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `8bfc226560b4` · **Generated:** 2026-08-23T22:59:47.479Z — machine-written
+**Engine commit:** `4f7abd2de537` · **Generated:** 2026-08-24T05:07:10.186Z — machine-written
 by this harness itself (`writeReport()` in `test_p11_conformance.js`) at the
 end of every run, not hand-edited.
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
@@ -17,7 +17,7 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**492 passed / 0 failed** across 44 sections in this JS harness.
+**976 passed / 0 failed** across 51 sections in this JS harness.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -161,6 +161,13 @@ silently double-succeed. Regression test:
 - WP-B — CKO_CERTIFICATE object lifecycle, X.509 only (§4.6 Tables 19-20) (26 passed / 0 failed)
 - G2a — SLH-DSA baseline + v3.2 pre-hash ML-DSA/SLH-DSA round trips (§6.67.7/§6.69.7) (94 passed / 0 failed)
 - G2b — SHA-3 digest/HMAC/HMAC-general + KDF-tail round trips (§6.29x/§6.45) (80 passed / 0 failed)
+- G3 — RSA-OAEP / RSA-PSS / hash-then-RSA family (§6.4) (91 passed / 0 failed)
+- G4 — ECDSA / EC-derive / EdDSA / Montgomery family (§6.3/§6.7) (81 passed / 0 failed)
+- G5 — AES-ECB / AES-KeyWrap variants / ChaCha20 family (§6.11/§6.20/§6.21/§6.31) (44 passed / 0 failed)
+- G6 — RIPEMD160 / bare SHA384_HMAC+SHA512_HMAC / GENERIC_SECRET / CONCATENATE / PBKDF2 (39 passed / 0 failed)
+- G7 — stateful hash-based signatures: HSS (§6.14) (7 passed / 0 failed)
+- G8 — vendor-defined mechanisms: FrodoKEM / Keccak-256 / KMAC / BIP32 (≥ CKM_VENDOR_DEFINED) (29 passed / 0 failed)
+- G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) (193 passed / 0 failed)
 
 ## Full transcript
 
@@ -746,5 +753,503 @@ silently double-succeed. Regression test:
   ✅ CKM_HKDF_DERIVE: GetAttributeValue(derived) → OK
   ✅ CKM_HKDF_DERIVE: byte-equals independent Node crypto.hkdfSync
 
-════════ RESULT: 492 passed, 0 failed ════════
+── G3 — RSA-OAEP / RSA-PSS / hash-then-RSA family (§6.4) ──
+  ✅ fixture: RSA-2048 keypair (ENCRYPT/DECRYPT/SIGN/VERIFY) → OK
+  ✅ fixture: read RSA CKA_MODULUS/CKA_PUBLIC_EXPONENT → OK
+  ✅ EncryptInit(CKM_RSA_PKCS_OAEP, previously untested) → OK
+  ✅ Encrypt(CKM_RSA_PKCS_OAEP) → OK
+  ✅ DecryptInit(CKM_RSA_PKCS_OAEP) → OK
+  ✅ Decrypt(CKM_RSA_PKCS_OAEP) → OK
+  ✅ RSA-OAEP encrypt(pub) → decrypt(priv) recovers the ORIGINAL plaintext (real SEAM)
+  ✅ DecryptInit (tamper control) → OK
+  ✅ tampered OAEP ciphertext never decrypts to the original plaintext
+  ✅ CKM_RSA_PKCS: DecryptInit (R-2 fix) → OK
+  ✅ CKM_RSA_PKCS: Decrypt(engine) of Node-produced ciphertext → OK (dispatch reached, not MECHANISM_INVALID)
+  ✅ CKM_RSA_PKCS: independent oracle (Node crypto.publicEncrypt) → engine C_Decrypt recovers the ORIGINAL plaintext EXACTLY
+  ✅ CKM_RSA_PKCS: EncryptInit (R-2 fix) → OK
+  ✅ CKM_RSA_PKCS: Encrypt(engine) → OK (dispatch reached, not MECHANISM_INVALID)
+  ✅ CKM_RSA_PKCS: DecryptInit (engine round trip) → OK
+  ✅ CKM_RSA_PKCS: Decrypt(engine) → OK
+  ✅ CKM_RSA_PKCS: encrypt(pub) → decrypt(priv) recovers the ORIGINAL plaintext (real SEAM)
+  ✅ CKM_RSA_PKCS: DecryptInit (tamper control) → OK
+  ✅ CKM_RSA_PKCS: tampered ciphertext never decrypts to the original plaintext
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): SignInit (R-1 fix) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): Sign(digest) → OK (dispatch reached, not MECHANISM_INVALID)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): VerifyInit → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): Verify round trip → OK (real SEAM)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): independent oracle (Node crypto.verify, RSA-PSS) confirms the SAME signature is valid
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): VerifyInit (tamper control) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): Verify with tampered signature → SIGNATURE_INVALID
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-256): independent oracle also rejects the tampered signature
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): SignInit (R-1 fix) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): Sign(digest) → OK (dispatch reached, not MECHANISM_INVALID)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): VerifyInit → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): Verify round trip → OK (real SEAM)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): independent oracle (Node crypto.verify, RSA-PSS) confirms the SAME signature is valid
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): VerifyInit (tamper control) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): Verify with tampered signature → SIGNATURE_INVALID
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-384): independent oracle also rejects the tampered signature
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): SignInit (R-1 fix) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): Sign(digest) → OK (dispatch reached, not MECHANISM_INVALID)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): VerifyInit → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): Verify round trip → OK (real SEAM)
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): independent oracle (Node crypto.verify, RSA-PSS) confirms the SAME signature is valid
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): VerifyInit (tamper control) → OK
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): Verify with tampered signature → SIGNATURE_INVALID
+  ✅ bare CKM_RSA_PKCS_PSS (SHA-512): independent oracle also rejects the tampered signature
+  ✅ CKM_SHA256_RSA_PKCS: SignInit (previously untested) → OK
+  ✅ CKM_SHA256_RSA_PKCS: Sign → OK
+  ✅ CKM_SHA256_RSA_PKCS: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA256_RSA_PKCS: Verify round trip → OK
+  ✅ CKM_SHA256_RSA_PKCS: VerifyInit (tamper control) → OK
+  ✅ CKM_SHA256_RSA_PKCS: Verify with tampered signature → SIGNATURE_INVALID
+  ✅ CKM_SHA384_RSA_PKCS: SignInit (previously untested) → OK
+  ✅ CKM_SHA384_RSA_PKCS: Sign → OK
+  ✅ CKM_SHA384_RSA_PKCS: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA384_RSA_PKCS: Verify round trip → OK
+  ✅ CKM_SHA384_RSA_PKCS: VerifyInit (tamper control) → OK
+  ✅ CKM_SHA384_RSA_PKCS: Verify with tampered signature → SIGNATURE_INVALID
+  ✅ CKM_SHA512_RSA_PKCS: SignInit (previously untested) → OK
+  ✅ CKM_SHA512_RSA_PKCS: Sign → OK
+  ✅ CKM_SHA512_RSA_PKCS: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA512_RSA_PKCS: Verify round trip → OK
+  ✅ CKM_SHA512_RSA_PKCS: VerifyInit (tamper control) → OK
+  ✅ CKM_SHA512_RSA_PKCS: Verify with tampered signature → SIGNATURE_INVALID
+  ✅ CKM_SHA3_384_RSA_PKCS: SignInit (previously untested) → OK
+  ✅ CKM_SHA3_384_RSA_PKCS: Sign → OK
+  ✅ CKM_SHA3_384_RSA_PKCS: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA3_384_RSA_PKCS: Verify round trip → OK
+  ✅ CKM_SHA3_384_RSA_PKCS: VerifyInit (tamper control) → OK
+  ✅ CKM_SHA3_384_RSA_PKCS: Verify with tampered signature → SIGNATURE_INVALID
+  ✅ CKM_SHA256_RSA_PKCS_PSS: SignInit (previously untested) → OK
+  ✅ CKM_SHA256_RSA_PKCS_PSS: Sign → OK
+  ✅ CKM_SHA256_RSA_PKCS_PSS: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA256_RSA_PKCS_PSS: Verify round trip → OK
+  ✅ CKM_SHA256_RSA_PKCS_PSS: VerifyInit (tamper control) → OK
+  ✅ CKM_SHA256_RSA_PKCS_PSS: Verify with tampered signature → SIGNATURE_INVALID
+  ✅ CKM_SHA384_RSA_PKCS_PSS: SignInit (previously untested) → OK
+  ✅ CKM_SHA384_RSA_PKCS_PSS: Sign → OK
+  ✅ CKM_SHA384_RSA_PKCS_PSS: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA384_RSA_PKCS_PSS: Verify round trip → OK
+  ✅ CKM_SHA384_RSA_PKCS_PSS: VerifyInit (tamper control) → OK
+  ✅ CKM_SHA384_RSA_PKCS_PSS: Verify with tampered signature → SIGNATURE_INVALID
+  ✅ CKM_SHA512_RSA_PKCS_PSS: SignInit (previously untested) → OK
+  ✅ CKM_SHA512_RSA_PKCS_PSS: Sign → OK
+  ✅ CKM_SHA512_RSA_PKCS_PSS: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA512_RSA_PKCS_PSS: Verify round trip → OK
+  ✅ CKM_SHA512_RSA_PKCS_PSS: VerifyInit (tamper control) → OK
+  ✅ CKM_SHA512_RSA_PKCS_PSS: Verify with tampered signature → SIGNATURE_INVALID
+  ✅ CKM_SHA3_384_RSA_PKCS_PSS: SignInit (previously untested) → OK
+  ✅ CKM_SHA3_384_RSA_PKCS_PSS: Sign → OK
+  ✅ CKM_SHA3_384_RSA_PKCS_PSS: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA3_384_RSA_PKCS_PSS: Verify round trip → OK
+  ✅ CKM_SHA3_384_RSA_PKCS_PSS: VerifyInit (tamper control) → OK
+  ✅ CKM_SHA3_384_RSA_PKCS_PSS: Verify with tampered signature → SIGNATURE_INVALID
+
+── G4 — ECDSA / EC-derive / EdDSA / Montgomery family (§6.3/§6.7) ──
+  ✅ CKM_EC_KEY_PAIR_GEN (P-256, previously untested) → OK
+  ✅ SignInit(CKM_ECDSA, previously untested) → OK
+  ✅ Sign(CKM_ECDSA) → OK
+  ✅ VerifyInit(CKM_ECDSA, previously untested) → OK
+  ✅ Verify(CKM_ECDSA) round trip → OK
+  ✅ VerifyInit(CKM_ECDSA) (tamper control) → OK
+  ✅ Verify(CKM_ECDSA) tampered digest → SIGNATURE_INVALID
+  ✅ CKM_ECDSA_SHA256: SignInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA256: Sign → OK
+  ✅ CKM_ECDSA_SHA256: VerifyInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA256: Verify round trip → OK
+  ✅ CKM_ECDSA_SHA384: SignInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA384: Sign → OK
+  ✅ CKM_ECDSA_SHA384: VerifyInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA384: Verify round trip → OK
+  ✅ CKM_ECDSA_SHA512: SignInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA512: Sign → OK
+  ✅ CKM_ECDSA_SHA512: VerifyInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA512: Verify round trip → OK
+  ✅ CKM_ECDSA_SHA3_224: SignInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA3_224: Sign → OK
+  ✅ CKM_ECDSA_SHA3_224: VerifyInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA3_224: Verify round trip → OK
+  ✅ CKM_ECDSA_SHA3_256: SignInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA3_256: Sign → OK
+  ✅ CKM_ECDSA_SHA3_256: VerifyInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA3_256: Verify round trip → OK
+  ✅ CKM_ECDSA_SHA3_384: SignInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA3_384: Sign → OK
+  ✅ CKM_ECDSA_SHA3_384: VerifyInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA3_384: Verify round trip → OK
+  ✅ CKM_ECDSA_SHA3_512: SignInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA3_512: Sign → OK
+  ✅ CKM_ECDSA_SHA3_512: VerifyInit (previously untested) → OK
+  ✅ CKM_ECDSA_SHA3_512: Verify round trip → OK
+  ✅ CKM_ECDH1_DERIVE: fixture Alice keypair → OK
+  ✅ CKM_ECDH1_DERIVE: fixture Bob keypair → OK
+  ✅ CKM_ECDH1_DERIVE: read Alice CKA_EC_POINT → OK
+  ✅ CKM_ECDH1_DERIVE: read Bob CKA_EC_POINT → OK
+  ✅ CKM_ECDH1_DERIVE: Alice DeriveKey (previously untested) → OK
+  ✅ CKM_ECDH1_DERIVE: Bob DeriveKey → OK
+  ✅ CKM_ECDH1_DERIVE: both sides agree on the SAME shared secret (real SEAM)
+  ✅ CKM_ECDH1_COFACTOR_DERIVE: fixture Alice keypair → OK
+  ✅ CKM_ECDH1_COFACTOR_DERIVE: fixture Bob keypair → OK
+  ✅ CKM_ECDH1_COFACTOR_DERIVE: read Alice CKA_EC_POINT → OK
+  ✅ CKM_ECDH1_COFACTOR_DERIVE: read Bob CKA_EC_POINT → OK
+  ✅ CKM_ECDH1_COFACTOR_DERIVE: Alice DeriveKey (previously untested) → OK
+  ✅ CKM_ECDH1_COFACTOR_DERIVE: Bob DeriveKey → OK
+  ✅ CKM_ECDH1_COFACTOR_DERIVE: both sides agree on the SAME shared secret (real SEAM)
+  ✅ CKM_EC_EDWARDS_KEY_PAIR_GEN (Ed25519, previously untested) → OK
+  ✅ SignInit(CKM_EDDSA, pure, previously untested) → OK
+  ✅ Sign(CKM_EDDSA, pure) → OK
+  ✅ VerifyInit(CKM_EDDSA, pure, previously untested) → OK
+  ✅ Verify(CKM_EDDSA, pure) round trip → OK
+  ✅ VerifyInit(CKM_EDDSA) (tamper control) → OK
+  ✅ Verify(CKM_EDDSA) tampered signature → SIGNATURE_INVALID
+  ✅ SignInit(CKM_EDDSA, phFlag=true → internally CKM_EDDSA_PH, previously untested) → OK
+  ✅ Sign(CKM_EDDSA_PH via phFlag) → OK
+  ✅ VerifyInit(CKM_EDDSA, phFlag=true) → OK
+  ✅ Verify(CKM_EDDSA_PH via phFlag) round trip → OK
+  ✅ CKM_X25519: fixture Alice X25519 keypair (previously untested keygen) → OK
+  ✅ CKM_X25519: fixture Bob X25519 keypair → OK
+  ✅ CKM_X25519: read Alice CKA_EC_POINT (32 B, bare little-endian) → OK
+  ✅ CKM_X25519: read Bob CKA_EC_POINT → OK
+  ✅ CKM_X25519: Alice DeriveKey (previously untested) → OK
+  ✅ CKM_X25519: Bob DeriveKey → OK
+  ✅ CKM_X25519: both sides agree on the SAME shared secret (real SEAM)
+  ✅ CKM_EC_MONTGOMERY_KEY_DERIVE: fixture Alice X25519 keypair (previously untested keygen) → OK
+  ✅ CKM_EC_MONTGOMERY_KEY_DERIVE: fixture Bob X25519 keypair → OK
+  ✅ CKM_EC_MONTGOMERY_KEY_DERIVE: read Alice CKA_EC_POINT (32 B, bare little-endian) → OK
+  ✅ CKM_EC_MONTGOMERY_KEY_DERIVE: read Bob CKA_EC_POINT → OK
+  ✅ CKM_EC_MONTGOMERY_KEY_DERIVE: Alice DeriveKey (previously untested) → OK
+  ✅ CKM_EC_MONTGOMERY_KEY_DERIVE: Bob DeriveKey → OK
+  ✅ CKM_EC_MONTGOMERY_KEY_DERIVE: both sides agree on the SAME shared secret (real SEAM)
+  ✅ CKM_X448: fixture Alice X448 keypair (previously untested keygen) → OK
+  ✅ CKM_X448: fixture Bob X448 keypair → OK
+  ✅ CKM_X448: read Alice CKA_EC_POINT (56 B) → OK
+  ✅ CKM_X448: read Bob CKA_EC_POINT → OK
+  ✅ CKM_X448: Alice DeriveKey (previously untested) → OK
+  ✅ CKM_X448: Bob DeriveKey → OK
+  ✅ CKM_X448: both sides agree on the SAME shared secret (real SEAM)
+
+── G5 — AES-ECB / AES-KeyWrap variants / ChaCha20 family (§6.11/§6.20/§6.21/§6.31) ──
+  ✅ fixture: AES key → OK
+  ✅ EncryptInit(CKM_AES_ECB, previously untested) → OK
+  ✅ Encrypt(CKM_AES_ECB) → OK
+  ✅ ECB ciphertext length = plaintext length (no padding, no IV)
+  ✅ ECB: identical plaintext blocks → identical ciphertext blocks (real mode property)
+  ✅ DecryptInit(CKM_AES_ECB) → OK
+  ✅ Decrypt(CKM_AES_ECB) round trip → OK
+  ✅ ECB encrypt → decrypt recovers the ORIGINAL plaintext (real SEAM)
+  ✅ CKM_AES_KEY_WRAP: fixture KEK → OK
+  ✅ CKM_AES_KEY_WRAP: fixture target key → OK
+  ✅ CKM_AES_KEY_WRAP: read target CKA_VALUE (pre-wrap) → OK
+  ✅ CKM_AES_KEY_WRAP: WrapKey (previously untested) → OK
+  ✅ CKM_AES_KEY_WRAP: UnwrapKey (previously untested) → OK
+  ✅ CKM_AES_KEY_WRAP: read unwrapped CKA_VALUE → OK
+  ✅ CKM_AES_KEY_WRAP: wrap → unwrap recovers the ORIGINAL key bytes (real SEAM)
+  ✅ CKM_AES_KEY_WRAP_PAD: fixture KEK → OK
+  ✅ CKM_AES_KEY_WRAP_PAD: fixture target key → OK
+  ✅ CKM_AES_KEY_WRAP_PAD: read target CKA_VALUE (pre-wrap) → OK
+  ✅ CKM_AES_KEY_WRAP_PAD: WrapKey (previously untested) → OK
+  ✅ CKM_AES_KEY_WRAP_PAD: UnwrapKey (previously untested) → OK
+  ✅ CKM_AES_KEY_WRAP_PAD: read unwrapped CKA_VALUE → OK
+  ✅ CKM_AES_KEY_WRAP_PAD: wrap → unwrap recovers the ORIGINAL key bytes (real SEAM)
+  ✅ CKM_AES_KEY_WRAP_KWP: fixture KEK → OK
+  ✅ CKM_AES_KEY_WRAP_KWP: fixture target key → OK
+  ✅ CKM_AES_KEY_WRAP_KWP: read target CKA_VALUE (pre-wrap) → OK
+  ✅ CKM_AES_KEY_WRAP_KWP: WrapKey (previously untested) → OK
+  ✅ CKM_AES_KEY_WRAP_KWP: UnwrapKey (previously untested) → OK
+  ✅ CKM_AES_KEY_WRAP_KWP: read unwrapped CKA_VALUE → OK
+  ✅ CKM_AES_KEY_WRAP_KWP: wrap → unwrap recovers the ORIGINAL key bytes (real SEAM)
+  ✅ CKM_CHACHA20_KEY_GEN (previously untested) → OK
+  ✅ EncryptInit(CKM_CHACHA20, previously untested) → OK
+  ✅ Encrypt(CKM_CHACHA20) → OK
+  ✅ CHACHA20: ciphertext differs from plaintext
+  ✅ DecryptInit(CKM_CHACHA20) → OK
+  ✅ Decrypt(CKM_CHACHA20) round trip → OK
+  ✅ CHACHA20 encrypt → decrypt recovers the ORIGINAL plaintext (real SEAM)
+  ✅ EncryptInit(CKM_CHACHA20_POLY1305, previously untested) → OK
+  ✅ CHACHA20_POLY1305 ciphertext = plaintext + 16-byte tag
+  ✅ Encrypt(CKM_CHACHA20_POLY1305) → OK
+  ✅ DecryptInit(CKM_CHACHA20_POLY1305) → OK
+  ✅ Decrypt(CKM_CHACHA20_POLY1305) round trip → OK
+  ✅ CHACHA20_POLY1305 encrypt → decrypt recovers the ORIGINAL plaintext (real SEAM)
+  ✅ DecryptInit (tamper control) → OK
+  ✅ Decrypt with tampered Poly1305 tag → ENCRYPTED_DATA_INVALID
+
+── G6 — RIPEMD160 / bare SHA384_HMAC+SHA512_HMAC / GENERIC_SECRET / CONCATENATE / PBKDF2 ──
+  ✅ DigestInit(CKM_RIPEMD160, previously untested) → OK
+  ✅ Digest(CKM_RIPEMD160) → OK
+  ✅ CKM_RIPEMD160: byte-equals independent Node crypto digest
+  ✅ CKM_RIPEMD160_HMAC: import key → OK
+  ✅ CKM_RIPEMD160_HMAC: SignInit (previously untested) → OK
+  ✅ CKM_RIPEMD160_HMAC: Sign → OK
+  ✅ CKM_RIPEMD160_HMAC: byte-equals independent Node HMAC
+  ✅ CKM_RIPEMD160_HMAC: VerifyInit (previously untested) → OK
+  ✅ CKM_RIPEMD160_HMAC: Verify round trip → OK
+  ✅ CKM_SHA384_HMAC: import key → OK
+  ✅ CKM_SHA384_HMAC: SignInit (previously untested) → OK
+  ✅ CKM_SHA384_HMAC: Sign → OK
+  ✅ CKM_SHA384_HMAC: byte-equals independent Node HMAC
+  ✅ CKM_SHA384_HMAC: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA384_HMAC: Verify round trip → OK
+  ✅ CKM_SHA512_HMAC: import key → OK
+  ✅ CKM_SHA512_HMAC: SignInit (previously untested) → OK
+  ✅ CKM_SHA512_HMAC: Sign → OK
+  ✅ CKM_SHA512_HMAC: byte-equals independent Node HMAC
+  ✅ CKM_SHA512_HMAC: VerifyInit (previously untested) → OK
+  ✅ CKM_SHA512_HMAC: Verify round trip → OK
+  ✅ C_GenerateKey(CKM_GENERIC_SECRET_KEY_GEN, previously untested) → OK
+  ✅ generated key CKA_VALUE readable (32 B requested) → OK
+  ✅ generated key length = 32
+  ✅ SignInit(SHA256_HMAC) with generated key → OK
+  ✅ Sign with generated key → OK
+  ✅ VerifyInit with generated key → OK
+  ✅ generated key: real HMAC round trip verifies → OK
+  ✅ CONCATENATE_BASE_AND_KEY: fixture base key → OK
+  ✅ CONCATENATE_BASE_AND_KEY: fixture second key → OK
+  ✅ DeriveKey(CKM_CONCATENATE_BASE_AND_KEY, previously untested) → OK
+  ✅ read derived CKA_VALUE → OK
+  ✅ CONCATENATE_BASE_AND_KEY: derived value = base‖second (self-computed reference)
+  ✅ DeriveKey(CKM_CONCATENATE_BASE_AND_DATA, previously untested) → OK
+  ✅ read derived CKA_VALUE → OK
+  ✅ CONCATENATE_BASE_AND_DATA: derived value = base‖data (self-computed reference)
+  ✅ DeriveKey(CKM_PKCS5_PBKD2, previously untested) → OK
+  ✅ read derived CKA_VALUE → OK
+  ✅ CKM_PKCS5_PBKD2: byte-equals independent Node crypto.pbkdf2Sync
+
+── G7 — stateful hash-based signatures: HSS (§6.14) ──
+  ✅ CKM_HSS_KEY_PAIR_GEN (default param set, previously untested) → OK
+  ✅ SignInit(CKM_HSS, previously untested) → OK
+  ✅ Sign(CKM_HSS) → OK
+  ✅ VerifyInit(CKM_HSS, previously untested) → OK
+  ✅ Verify(CKM_HSS) round trip → OK
+  ✅ VerifyInit(CKM_HSS) (tamper control) → OK
+  ✅ Verify(CKM_HSS) tampered message → SIGNATURE_INVALID
+
+── G8 — vendor-defined mechanisms: FrodoKEM / Keccak-256 / KMAC / BIP32 (≥ CKM_VENDOR_DEFINED) ──
+  ✅ CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN (640-AES, previously untested) → OK
+  ✅ C_EncapsulateKey(CKM_PQCTODAY_FRODOKEM_ENCAPSULATE, previously untested) → OK
+  ✅ read encapsulator shared-secret CKA_VALUE → OK
+  ✅ C_DecapsulateKey(CKM_PQCTODAY_FRODOKEM_ENCAPSULATE, previously untested) → OK
+  ✅ read decapsulator shared-secret CKA_VALUE → OK
+  ✅ FrodoKEM: encapsulate → decapsulate agree on the SAME shared secret (real SEAM)
+  ✅ DigestInit(CKM_KECCAK_256, previously untested) → OK
+  ✅ Digest(CKM_KECCAK_256, empty input) → OK
+  ✅ CKM_KECCAK_256: Keccak-256("") byte-equals the well-known canonical KAT
+  ✅ KMAC: import key → OK
+  ✅ CKM_KMAC_128: SignInit (previously untested) → OK
+  ✅ CKM_KMAC_128: Sign → OK
+  ✅ CKM_KMAC_128: byte-equals independent pycryptodome KAT
+  ✅ CKM_KMAC_128: VerifyInit (previously untested) → OK
+  ✅ CKM_KMAC_128: Verify round trip → OK
+  ✅ CKM_KMAC_256: SignInit (previously untested) → OK
+  ✅ CKM_KMAC_256: Sign → OK
+  ✅ CKM_KMAC_256: byte-equals independent pycryptodome KAT
+  ✅ CKM_KMAC_256: VerifyInit (previously untested) → OK
+  ✅ CKM_KMAC_256: Verify round trip → OK
+  ✅ BIP32: import seed key → OK
+  ✅ DeriveKey(CKM_BIP32_MASTER_DERIVE, previously untested) → OK
+  ✅ read master CKA_VALUE → OK
+  ✅ read master CKA_BIP32_CHAIN_CODE → OK
+  ✅ BIP32 master derive: priv key byte-equals independent HMAC-SHA512("Bitcoin seed", seed)[0:32]
+  ✅ BIP32 master derive: chain code byte-equals independent HMAC-SHA512(...)[32:64]
+  ✅ DeriveKey(CKM_BIP32_CHILD_DERIVE, hardened index 0, previously untested) → OK
+  ✅ read child CKA_VALUE → OK
+  ✅ BIP32 child derive (hardened): byte-equals independent HMAC-SHA512 + mod-n scalar addition
+
+── G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) ──
+  ✅ fixture: live advertised mechanism count → 116
+  ✅ 0x0 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x9 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x9 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x9 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x9 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x40 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x40 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x41 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x41 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x42 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x42 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x43 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x43 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x44 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x44 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x45 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x45 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0xd SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0xd VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x61 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x61 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x64 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x64 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0xf GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
+  ✅ 0x80000001 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
+  ✅ 0x80000003 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
+  ✅ 0x1c GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
+  ✅ 0x1d SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1d VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1f SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1f VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x23 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x23 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x24 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x24 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x25 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x25 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x26 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x26 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x27 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x27 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x28 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x28 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x29 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x29 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2a SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2a VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2b SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2b VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2c SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2c VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2d GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
+  ✅ 0x2e SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2e VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x34 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x34 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x36 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x36 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x37 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x37 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x38 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x38 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x39 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x39 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3a SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3a VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3b SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3b VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3c SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3c VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3d SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3d VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3e SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3e VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3f SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x3f VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x250 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x260 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x270 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2b0 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2d0 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x240 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x251 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x251 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x261 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x261 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x271 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x271 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2b1 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2b1 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2d1 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2d1 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x241 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x241 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x252 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x252 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x262 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x262 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x272 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x272 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2b2 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2b2 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2d2 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2d2 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x80000100 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x80000100 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x80000101 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x80000101 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x350 GenerateKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1040 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
+  ✅ 0x1041 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1041 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1044 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1044 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1045 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1045 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1046 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1046 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1047 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1047 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1048 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1048 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1049 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1049 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x104a SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x104a VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1050 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1051 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1055 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
+  ✅ 0x1056 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
+  ✅ 0x80000011 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x80001058 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x80001059 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1057 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1057 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x80001057 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x80001057 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1080 GenerateKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
+  ✅ 0x1081 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1081 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1082 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1082 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1082 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1082 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1085 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1085 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1085 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1085 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1086 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1086 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1087 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1087 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x2109 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2109 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x110
+  ✅ 0x210b WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x210b UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x110
+  ✅ 0x210a WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x210a UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x110
+  ✅ 0x1226 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1226 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1225 GenerateKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x4021 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x4021 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x3b0 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x402a DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x3ac DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x3ad DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x360 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x362 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x393 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x394 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x395 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x397 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x399 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x39a DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x8000105b DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd1
+  ✅ 0x8000105c DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd1
+  ✅ 0x4032 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x4033 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x4033 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x4034 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x209
+  ✅ 0x4036 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x4036 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x4035 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x209
+  ✅ 0x4037 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x4037 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x80000010 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ G9: probed at least one real operation for every flag-bearing advertised mechanism (191 probes total)
+
+════════ RESULT: 976 passed, 0 failed ════════
 ```

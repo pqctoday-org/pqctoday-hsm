@@ -17,7 +17,8 @@
 #   7. cross-engine PKCS#11 differential harness (49 scenarios vs exceptions.json)
 #   8. (--cpp)  C++ ctest incl. the v3.2 compliance harness + report freshness  [opt-in, slow]
 #   9. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
-#  10. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
+#  10. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
+#  11. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
 #
 # Steps 6-7 (Rust PKCS#11 conformance, differential harness) were opt-in
 # until 2026-08-23 — both are core PKCS#11 v3.2 evidence, and both had gone
@@ -34,6 +35,7 @@
 #   bash scripts/local-gate.sh                 # core gate (steps 1-7)
 #   bash scripts/local-gate.sh --cpp           # + C++ ctest
 #   bash scripts/local-gate.sh --acvp-wasm     # + ACVP wasm harness
+#   bash scripts/local-gate.sh --release-xmss  # + XMSS/XMSS^MT vs release wasm build
 #   bash scripts/local-gate.sh --all           # everything (required before a release — see RELEASING.md)
 #   RUST_CONTAINER=pqc-rust bash scripts/local-gate.sh
 #
@@ -50,13 +52,15 @@ AG_RUST="/ag/pqctoday-hsm/rust"
 RUN_CPP=0
 RUN_ACVP_WASM=0
 RUN_TLS_INTEROP=0
+RUN_RELEASE_XMSS=0
 for arg in "$@"; do
   case "$arg" in
     --cpp) RUN_CPP=1 ;;
     --acvp-wasm) RUN_ACVP_WASM=1 ;;
     --rust-p11) : ;; # now always runs (step 6); flag kept accepted, no-op, for muscle memory
     --tls-interop) RUN_TLS_INTEROP=1 ;;
-    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_TLS_INTEROP=1 ;;
+    --release-xmss) RUN_RELEASE_XMSS=1 ;;
+    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_TLS_INTEROP=1; RUN_RELEASE_XMSS=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -224,6 +228,18 @@ if [[ $RUN_ACVP_WASM == 1 ]]; then
     "cd /ag/pqctoday-hsm && npm run test:acvp 2>&1 | tail -5"
 fi
 
+if [[ $RUN_RELEASE_XMSS == 1 ]]; then
+  # P-1 (formalized 2026-08-24) — XMSS/XMSS^MT keygen+sign+verify against
+  # the RELEASE wasm build, where it is genuinely fast (~4.6s / ~6.8s total)
+  # rather than the ~80s+ the main conformance harness measured against its
+  # own --dev build (see that harness's own G7 section comment for why THAT
+  # build stays untested by default). Builds pkg-release/ fresh on the HOST
+  # (wasm-pack + rustup, not the Linux container — build-wasm-bundle.sh is
+  # tied to $HOME/.rustup) before running the round trip.
+  run_step_host "XMSS/XMSS^MT round trip vs release wasm build (P-1)" \
+    "cd '$ROOT/rust' && ./build-wasm-bundle.sh >/dev/null 2>&1 && node test_xmss_release.js 2>&1 | tail -25"
+fi
+
 if [[ $RUN_TLS_INTEROP == 1 ]]; then
   # §3.3.3 requires all three hybrid TLS groups. SecP384r1MLKEM1024 is composed
   # locally (src/server/secp384r1mlkem1024.rs) because rustls 0.23 lacks it, and
@@ -257,6 +273,7 @@ if [[ ${#FAILED[@]} -eq 0 ]]; then
   [[ $RUN_CPP == 1 ]] && FLAGS="$FLAGS,cpp"
   [[ $RUN_ACVP_WASM == 1 ]] && FLAGS="$FLAGS,acvp-wasm"
   [[ $RUN_TLS_INTEROP == 1 ]] && FLAGS="$FLAGS,tls-interop"
+  [[ $RUN_RELEASE_XMSS == 1 ]] && FLAGS="$FLAGS,release-xmss"
   {
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "flags: $FLAGS"

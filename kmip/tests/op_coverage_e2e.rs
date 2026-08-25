@@ -1246,25 +1246,37 @@ fn certify_issues_certificate_get_able_with_links() {
 //   "e2e:native_bridge"   → a real-engine test in native_bridge_e2e.rs
 //   "unit:<module>"       → handler-level #[cfg(test)] in src/ops/
 //
-// KNOWN GAP (2026-08-23 compliance-testing audit): `coverage_map_covers_
-// every_handled_operation` below only checks that this map's KEY SET
-// equals HANDLED_OPERATIONS — it never parses or resolves the free-text
-// VALUE strings against anything. A value can name a test function that
-// was renamed or deleted, or one that never existed, and the meta-test
-// still passes; "every operation has coverage" is enforced at the level
-// of "someone wrote a string naming a test", not "a test naming that
-// operation actually exists and runs green". This was caught concretely
-// for `SetConstraints`, whose only entry used to be the bare string
-// "unit:ops::allocation_and_config" with no function name at all — never
-// resolved, so a maintainer had to go read the source to learn whether
-// real coverage existed (it did, just not in the tier this file tracks;
-// see the Set Constraints test below). Hardening this properly — parsing
-// each value's `e2e:<file>(<fn1>, <fn2>, ...)` / `unit:<module>(<fn>...)`
-// shape and asserting every named function is a real `#[test]` in the
-// named file/module — is a real, tractable follow-up (a text-scan over
-// `include_str!` of the referenced source files, not a proc-macro or
-// build-script) but was out of scope for the pass that added this
-// comment; do not read the CURRENT meta-test as having done it.
+// KNOWN GAP (2026-08-23 compliance-testing audit) — CLOSED 2026-08-24
+// (K-1, see compliance-gaps-remediation-plan-08242026.md §3): the
+// original `coverage_map_covers_every_handled_operation` below only
+// checked that this map's KEY SET equals HANDLED_OPERATIONS — it never
+// parsed or resolved the free-text VALUE strings against anything. A
+// value could name a test function that was renamed or deleted, or one
+// that never existed, and the meta-test still passed; "every operation
+// has coverage" was enforced at the level of "someone wrote a string
+// naming a test", not "a test naming that operation actually exists and
+// runs green". This was caught concretely for `SetConstraints`, whose
+// only entry used to be the bare string "unit:ops::allocation_and_config"
+// with no function name at all — never resolved, so a maintainer had to
+// go read the source to learn whether real coverage existed (it did,
+// just not in the tier this file tracks; see the Set Constraints test
+// below).
+//
+// `coverage_map_values_resolve_to_real_tests` (below the key-set test)
+// now parses every value's `e2e:<file>(<fn1>, <fn2>, ...)` /
+// `unit:<module>(<fn1>, ...)` / bare `unit:<module>` shape and confirms
+// each named function is a real `#[test]`/`#[tokio::test]` in the
+// resolved `tests/<file>.rs` or `src/ops/<module>.rs` — a plain
+// filesystem text-scan at test-runtime, no proc-macro or build-script.
+// Bare `unit:<module>` entries (no function name — Query, Get,
+// ObtainLease, etc.) are accepted but reported as UNVERIFIABLE BY NAME
+// rather than silently counted as fully resolved: the module file's
+// existence is checked, but which function proves coverage is not,
+// since nothing names it. The `Certify`/`ReCertify` entries below were
+// tightened at the same time — `ReCertify`'s old value used a
+// `recertify_*` wildcard and free-text commentary, neither of which a
+// name-resolving parser can verify; it now names both real test
+// functions directly.
 fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation, &'static str> {
     use pqctoday_kmip::kmip30::Operation as Op;
     [
@@ -1291,8 +1303,11 @@ fn coverage_map() -> std::collections::HashMap<pqctoday_kmip::kmip30::Operation,
         // P2.2 — §6.1.62 Validate (certificate-chain validation).
         (Op::Validate, "e2e:op_coverage(validate_stored_self_signed_cert_returns_valid_and_error_paths)"),
         // P2.3 — §6.1.6 Certify / §6.1.50 Re-certify (PQC-capable CA).
-        (Op::Certify, "e2e:op_coverage(certify_issues_certificate_get_able_with_links) + unit:ops::certify (RSA/ECDSA/ML-DSA issuance+verify)"),
-        (Op::ReCertify, "unit:ops::certify(recertify_*) — new window + Replaced/Replacement links + old retired"),
+        (Op::Certify, "e2e:op_coverage(certify_issues_certificate_get_able_with_links) + unit:ops::certify(certify_freshly_created_rsa_public_key_by_uid, certify_freshly_created_ecdsa_public_key_by_uid, certify_freshly_created_ml_dsa_public_key_by_uid)"),
+        // Re-certify: new validity window + Replaced/Replacement links +
+        // old cert retired — see recertify_new_window_links_and_old_retired.
+        // Second fn covers the CKA_ID-collision defect fixed alongside it.
+        (Op::ReCertify, "unit:ops::certify(recertify_new_window_links_and_old_retired, recertify_replaces_engine_object_sharing_linked_public_key_cka_id)"),
         // ── Real-engine e2e (native_bridge_e2e.rs) ──
         (Op::CreateKeyPair, "e2e:native_bridge(ml_dsa_65_create_sign_verify_destroy_against_real_engine)"),
         (Op::Sign, "e2e:native_bridge(ml_dsa_65_create_sign_verify_destroy_against_real_engine)"),
@@ -1391,11 +1406,13 @@ fn pkcs11_get_info_returns_real_ck_info_bytes_against_real_engine() {
 /// exactly. A new handled op without a coverage entry — or a stale entry
 /// for an op that was removed — fails here.
 ///
-/// Deliberately weaker than the name suggests: this only proves the KEY
-/// SET is complete, not that each entry's free-text value names a test
-/// that actually exists — see the KNOWN GAP note on `coverage_map()`
-/// above. Do not read a green run of this test as proof that every
-/// named test is real.
+/// Deliberately narrow: this only proves the KEY SET is complete, not
+/// that each entry's free-text value names a test that actually exists.
+/// That is a separate, stronger check — see
+/// `coverage_map_values_resolve_to_real_tests` immediately below, which
+/// parses and resolves every value against real source files. A green
+/// run of *this* test alone is not proof that every named test is real;
+/// combined with that one, it is.
 #[test]
 fn coverage_map_covers_every_handled_operation() {
     use std::collections::HashSet;
@@ -1413,6 +1430,424 @@ fn coverage_map_covers_every_handled_operation() {
         "coverage_map references ops that are not in HANDLED_OPERATIONS: {stale:?}"
     );
     assert_eq!(handled.len(), 62, "HANDLED_OPERATIONS count changed — review coverage");
+}
+
+// ── K-1 hardening — resolve coverage_map() values against real source ──
+//
+// The parser below gives `coverage_map_values_resolve_to_real_tests`
+// (further down) real teeth: it parses each value's
+// `e2e:<file>(<fn1>, <fn2>, ...)` / `unit:<module>(<fn1>, ...)` / bare
+// `unit:<module>` shape, then confirms every named function is a real
+// `#[test]`/`#[tokio::test]` in the resolved source file. See the KNOWN
+// GAP comment on `coverage_map()` above for why this exists.
+
+/// One coverage claim extracted from a single `coverage_map()` value.
+/// A value may name more than one claim, joined with " + " (e.g. an e2e
+/// test plus a handler-level unit test) — each becomes its own `CoverageClaim`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CoverageClaim {
+    /// `e2e:<file>(<fn1>, <fn2>, ...)` — real `#[test]` fns expected in
+    /// `tests/<file>.rs` (or `tests/<file>_e2e.rs` — see
+    /// `resolve_source_path`'s doc comment for why both are tried).
+    E2e { file: String, functions: Vec<String> },
+    /// `unit:<module>(<fn1>, ...)` — real `#[cfg(test)]` fns expected in
+    /// the resolved `src/ops/...` module file.
+    UnitNamed { module: String, functions: Vec<String> },
+    /// `unit:<module>` with NO function names. The module file's
+    /// existence can be checked; which function proves the operation is
+    /// covered cannot, since none is named. Kept as its own variant so a
+    /// green run never silently reads as "verified by name" for these —
+    /// see the `unverifiable` reporting in the test below.
+    UnitBare { module: String },
+}
+
+/// Splits `s` on top-level " + " — i.e. not inside a `(...)` — so a
+/// parenthesized function list is never itself mistaken for a claim
+/// separator. (No current entry needs this, since none embeds a bare
+/// `+` inside its function-name parens, but a slash/space-heavy
+/// free-text annotation could in principle; the depth tracking makes
+/// that fail loudly via `parse_claim` instead of silently mis-splitting.)
+fn split_top_level_plus(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b'+' if depth == 0
+                && i > 0
+                && i + 1 < bytes.len()
+                && bytes[i - 1] == b' '
+                && bytes[i + 1] == b' ' =>
+            {
+                parts.push(s[start..i - 1].trim());
+                start = i + 2;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(s[start..].trim());
+    parts
+}
+
+/// Parses one top-level segment (already split by `split_top_level_plus`)
+/// into a `CoverageClaim`, or a human-readable error for a shape the
+/// parser deliberately refuses to guess at — free-text commentary,
+/// wildcards, or a name that isn't a plain identifier. This is by
+/// design: `coverage_map()`'s two prior offenders
+/// (`"unit:ops::certify (RSA/ECDSA/ML-DSA issuance+verify)"` — a space
+/// before `(`, and its content not a name list at all — and
+/// `"unit:ops::certify(recertify_*)"` — a wildcard) were both rewritten
+/// to real function lists as part of this hardening pass specifically
+/// *because* neither shape is something a name-resolving parser can
+/// verify. A future entry written in either shape should fail here, not
+/// be silently absorbed as unverifiable commentary.
+fn parse_claim(segment: &str) -> Result<CoverageClaim, String> {
+    let segment = segment.trim();
+    let (kind, rest) = if let Some(r) = segment.strip_prefix("e2e:") {
+        ("e2e", r)
+    } else if let Some(r) = segment.strip_prefix("unit:") {
+        ("unit", r)
+    } else {
+        return Err(format!("segment does not start with 'e2e:' or 'unit:': {segment:?}"));
+    };
+
+    let (path, names_part) = match rest.find('(') {
+        Some(idx) => {
+            if !rest.ends_with(')') {
+                return Err(format!("unbalanced parens in segment: {segment:?}"));
+            }
+            (&rest[..idx], Some(&rest[idx + 1..rest.len() - 1]))
+        }
+        None => (rest, None),
+    };
+    let path = path.trim();
+    if path.is_empty() || path.contains(' ') {
+        return Err(format!(
+            "segment {segment:?} has no clean file/module path before '(' — likely a \
+             space-separated free-text annotation, not a machine-parseable reference"
+        ));
+    }
+
+    let functions: Option<Vec<String>> = match names_part {
+        None => None,
+        Some(inner) => {
+            let inner = inner.trim();
+            if inner.is_empty() {
+                None
+            } else {
+                let mut fns = Vec::new();
+                for raw in inner.split(',') {
+                    let name = raw.trim();
+                    if name.is_empty() {
+                        return Err(format!("empty function name in segment: {segment:?}"));
+                    }
+                    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        return Err(format!(
+                            "'{name}' in segment {segment:?} is not a plain identifier — \
+                             wildcards (e.g. 'foo_*') and free-text commentary inside parens \
+                             are not supported; name the covering function(s) explicitly"
+                        ));
+                    }
+                    fns.push(name.to_string());
+                }
+                Some(fns)
+            }
+        }
+    };
+
+    match (kind, functions) {
+        ("e2e", Some(functions)) => Ok(CoverageClaim::E2e { file: path.to_string(), functions }),
+        ("e2e", None) => Err(format!(
+            "'e2e:{path}' names no function(s) — e2e references must list at least one \
+             #[test] fn by name: {segment:?}"
+        )),
+        ("unit", Some(functions)) => {
+            Ok(CoverageClaim::UnitNamed { module: path.to_string(), functions })
+        }
+        ("unit", None) => Ok(CoverageClaim::UnitBare { module: path.to_string() }),
+        _ => unreachable!("kind is always \"e2e\" or \"unit\""),
+    }
+}
+
+/// Resolves a claim's `file`/`module` path to an on-disk source file
+/// under `manifest_dir` (this crate's root — `env!("CARGO_MANIFEST_DIR")`
+/// at the call site). `unit:` paths use the map's established
+/// `ops::<name>` convention (optionally nested, `ops::<a>::<b>`) —
+/// the `ops::` prefix is stripped and the remainder resolved under
+/// `src/ops/`. `e2e:` paths name a `tests/` file two different ways in
+/// the current map: `"native_bridge"` / `"op_coverage"` (the `_e2e`
+/// suffix omitted) and `"async_ops_e2e"` (already spelled out) both
+/// appear, so both `tests/<name>.rs` and `tests/<name>_e2e.rs` are
+/// tried, in that order.
+fn resolve_source_path(manifest_dir: &str, is_e2e: bool, path: &str) -> Vec<std::path::PathBuf> {
+    let stripped = path.strip_prefix("ops::").unwrap_or(path);
+    let rel: std::path::PathBuf = stripped.split("::").collect();
+    let base = std::path::Path::new(manifest_dir);
+    if is_e2e {
+        vec![
+            base.join("tests").join(&rel).with_extension("rs"),
+            base.join("tests").join(format!(
+                "{}_e2e",
+                rel.to_str().expect("ascii path")
+            )).with_extension("rs"),
+        ]
+    } else {
+        vec![base.join("src").join("ops").join(&rel).with_extension("rs")]
+    }
+}
+
+/// Finds the first candidate in `candidates` that exists on disk and
+/// returns its contents; errors listing every path tried if none do.
+fn read_first_existing(candidates: &[std::path::PathBuf]) -> Result<(std::path::PathBuf, String), String> {
+    for c in candidates {
+        if let Ok(content) = std::fs::read_to_string(c) {
+            return Ok((c.clone(), content));
+        }
+    }
+    Err(format!(
+        "no source file found — tried: {}",
+        candidates.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>().join(", ")
+    ))
+}
+
+/// Extracts the set of function names in `content` directly decorated
+/// with `#[test]` or `#[tokio::test]` on their own attribute line —
+/// exactly the shape every existing test in this crate uses (verified
+/// by inspection). Doc comments, other attributes (`#[should_panic]`,
+/// etc.), and blank lines between the test attribute and its `fn` line
+/// are skipped; encountering anything else first (a stray brace, an
+/// unrelated statement) means the attribute wasn't actually on a
+/// function and that occurrence contributes no name.
+fn test_fn_names(content: &str) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed == "#[test]" || trimmed == "#[tokio::test]" {
+            let mut j = i + 1;
+            while j < lines.len() {
+                let t = lines[j].trim();
+                if t.is_empty() || t.starts_with("//") || t.starts_with('#') {
+                    j += 1;
+                    continue;
+                }
+                if let Some(fn_pos) = t.find("fn ") {
+                    let before_ok = fn_pos == 0
+                        || !(t.as_bytes()[fn_pos - 1].is_ascii_alphanumeric()
+                            || t.as_bytes()[fn_pos - 1] == b'_');
+                    if before_ok {
+                        let rest = &t[fn_pos + 3..];
+                        let name: String =
+                            rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+                        if !name.is_empty() {
+                            names.insert(name);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        i += 1;
+    }
+    names
+}
+
+/// Verifies one `CoverageClaim` against real source files under
+/// `manifest_dir`. Pushes a human-readable line to `unverifiable` for a
+/// bare `unit:<module>` claim instead of silently treating it as fully
+/// resolved. Returns `Err` with a message naming the operation, the
+/// specific reference, and what's missing, on any claim that cannot be
+/// substantiated.
+fn verify_claim(
+    manifest_dir: &str,
+    op_label: &str,
+    claim: &CoverageClaim,
+    unverifiable: &mut Vec<String>,
+) -> Result<(), String> {
+    match claim {
+        CoverageClaim::E2e { file, functions } => {
+            let candidates = resolve_source_path(manifest_dir, true, file);
+            let (path, content) = read_first_existing(&candidates)
+                .map_err(|e| format!("{op_label}: e2e:{file}(...) — {e}"))?;
+            let real = test_fn_names(&content);
+            for f in functions {
+                if !real.contains(f) {
+                    return Err(format!(
+                        "{op_label}: e2e:{file}({f}) — no #[test]/#[tokio::test] fn named \
+                         '{f}' found in {path:?}"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        CoverageClaim::UnitNamed { module, functions } => {
+            let candidates = resolve_source_path(manifest_dir, false, module);
+            let (path, content) = read_first_existing(&candidates)
+                .map_err(|e| format!("{op_label}: unit:{module}(...) — {e}"))?;
+            let real = test_fn_names(&content);
+            for f in functions {
+                if !real.contains(f) {
+                    return Err(format!(
+                        "{op_label}: unit:{module}({f}) — no #[test]/#[tokio::test] fn named \
+                         '{f}' found in {path:?}"
+                    ));
+                }
+            }
+            Ok(())
+        }
+        CoverageClaim::UnitBare { module } => {
+            let candidates = resolve_source_path(manifest_dir, false, module);
+            let path = &candidates[0];
+            if !path.is_file() {
+                return Err(format!(
+                    "{op_label}: unit:{module} (bare) — module file not found ({path:?})"
+                ));
+            }
+            unverifiable.push(format!(
+                "{op_label} -> unit:{module} — UNVERIFIABLE BY NAME (bare: module file exists, \
+                 but no function is named, so which test proves coverage cannot be checked)"
+            ));
+            Ok(())
+        }
+    }
+}
+
+/// K-1 — the real hardening this file's KNOWN GAP comment called for.
+/// Parses every `coverage_map()` value and confirms each named function
+/// genuinely exists as a `#[test]`/`#[tokio::test]` in the file/module
+/// it claims to live in. Unlike `coverage_map_covers_every_handled_
+/// operation` (key-set only), a renamed or deleted test referenced by
+/// name now fails THIS test, with a message naming the exact operation
+/// and missing function.
+///
+/// Bare `unit:<module>` entries (no function name) are accepted — the
+/// module file must still exist — but are reported separately as
+/// UNVERIFIABLE BY NAME rather than counted as a full pass; see the
+/// eprintln! block below for the current list. This does not fail the
+/// build: forcing every historical bare entry to name explicit functions
+/// is a larger follow-up than this pass's scope (K-1's brief explicitly
+/// allows "accept but flag distinctly" as the alternative to "require
+/// upgrade"), but the gap stays visible in test output rather than
+/// disappearing into a silent green.
+#[test]
+fn coverage_map_values_resolve_to_real_tests() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let mut unverifiable = Vec::new();
+    let mut errors = Vec::new();
+
+    let mut map: Vec<_> = coverage_map().into_iter().collect();
+    map.sort_by_key(|(op, _)| format!("{op:?}"));
+
+    for (op, value) in &map {
+        let op_label = format!("{op:?}");
+        let segments = split_top_level_plus(value);
+        if segments.is_empty() || segments.iter().all(|s| s.is_empty()) {
+            errors.push(format!("{op_label}: empty coverage_map value"));
+            continue;
+        }
+        for seg in segments {
+            match parse_claim(seg) {
+                Ok(claim) => {
+                    if let Err(e) = verify_claim(manifest_dir, &op_label, &claim, &mut unverifiable) {
+                        errors.push(e);
+                    }
+                }
+                Err(e) => errors.push(format!("{op_label}: {e}")),
+            }
+        }
+    }
+
+    if !unverifiable.is_empty() {
+        eprintln!(
+            "\ncoverage_map: {} entrie(s) are UNVERIFIABLE BY NAME (bare unit:<module> — \
+             module file exists, but no function is named to resolve against):",
+            unverifiable.len()
+        );
+        for u in &unverifiable {
+            eprintln!("  - {u}");
+        }
+        eprintln!();
+    }
+
+    assert!(
+        errors.is_empty(),
+        "coverage_map contains {} unresolved reference(s) — a named test/module does not \
+         exist, or a value's shape could not be parsed:\n{}",
+        errors.len(),
+        errors.join("\n")
+    );
+}
+
+/// Parser-level regression tests — synthetic, deliberately-wrong inputs
+/// fed directly to `parse_claim`/`verify_claim`/`test_fn_names`, proving
+/// the hardening above actually rejects what it claims to reject. These
+/// never touch the real `coverage_map()` or mutate any real source file;
+/// they are the permanent record of the "prove it can fail" check run
+/// during development (a temporary bogus `coverage_map()` entry was
+/// also exercised by hand against the real map and confirmed to fail
+/// `coverage_map_values_resolve_to_real_tests` with a clear message
+/// naming the missing function, then removed — not left in committed
+/// code).
+#[test]
+fn coverage_map_parser_rejects_malformed_and_missing_references() {
+    // A function name that simply does not exist in a real file.
+    let claim = parse_claim("e2e:op_coverage(this_function_does_not_exist_zzz)").unwrap();
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let mut unverifiable = Vec::new();
+    let err = verify_claim(manifest_dir, "TestOp", &claim, &mut unverifiable)
+        .expect_err("a nonexistent function name must fail verification");
+    assert!(err.contains("this_function_does_not_exist_zzz"), "error must name the missing fn: {err}");
+
+    // A nonexistent e2e file.
+    let claim = parse_claim("e2e:this_file_does_not_exist_zzz(some_fn)").unwrap();
+    let err = verify_claim(manifest_dir, "TestOp", &claim, &mut unverifiable)
+        .expect_err("a nonexistent e2e file must fail verification");
+    assert!(err.contains("no source file found"), "error must explain the file lookup failed: {err}");
+
+    // A nonexistent unit module.
+    let claim = parse_claim("unit:ops::this_module_does_not_exist_zzz(some_fn)").unwrap();
+    let err = verify_claim(manifest_dir, "TestOp", &claim, &mut unverifiable)
+        .expect_err("a nonexistent unit module must fail verification");
+    assert!(err.contains("no source file found"), "error must explain the file lookup failed: {err}");
+
+    // Wildcards are refused at parse time, not silently accepted.
+    let err = parse_claim("unit:ops::certify(recertify_*)")
+        .expect_err("a wildcard function name must be rejected by the parser");
+    assert!(err.contains("wildcards"), "error must call out the wildcard: {err}");
+
+    // Free-text commentary with a space before '(' is refused, not
+    // absorbed as if it were a function-name list — this is the exact
+    // shape the real Certify entry used to have.
+    let err = parse_claim("unit:ops::certify (RSA/ECDSA/ML-DSA issuance+verify)")
+        .expect_err("space-separated free-text annotation must be rejected");
+    assert!(err.contains("free-text"), "error must call out the free-text shape: {err}");
+
+    // A bare unit:<module> reference to a REAL module is accepted, but
+    // recorded as unverifiable-by-name, not silently treated as a pass.
+    let claim = parse_claim("unit:ops::certify").unwrap();
+    assert_eq!(claim, CoverageClaim::UnitBare { module: "ops::certify".to_string() });
+    unverifiable.clear();
+    verify_claim(manifest_dir, "TestOp", &claim, &mut unverifiable)
+        .expect("a bare reference to a real module file must not itself be an error");
+    assert_eq!(unverifiable.len(), 1, "a bare reference must be flagged as unverifiable");
+    assert!(unverifiable[0].contains("UNVERIFIABLE BY NAME"));
+
+    // A well-formed reference to a function that IS real (this file,
+    // this very test) resolves cleanly — confirms the happy path still
+    // works alongside all the rejection paths above.
+    let claim = parse_claim(
+        "e2e:op_coverage(coverage_map_parser_rejects_malformed_and_missing_references)",
+    )
+    .unwrap();
+    let mut unverifiable2 = Vec::new();
+    verify_claim(manifest_dir, "TestOp", &claim, &mut unverifiable2)
+        .expect("a real, currently-running test function must resolve");
 }
 
 /// WP-2 remediation — Import(Certificate) round-trip. Before this fix,

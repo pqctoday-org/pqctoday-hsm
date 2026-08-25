@@ -1530,6 +1530,46 @@ pub fn sign_rsa(
     }
 }
 
+/// R-1 (2026-08-24) — bare `CKM_RSA_PKCS_PSS` sign. Unlike its hash-specific
+/// PSS siblings above (CKM_SHA256_RSA_PKCS_PSS etc., each pinned to ONE
+/// compile-time hash and operating on the FULL message — `pss_sign!`'s
+/// `BlindedSigningKey<D>::try_sign_with_rng()` hashes `msg` internally via
+/// the `signature::RandomizedSigner` trait), bare PSS's hash is selected by
+/// the CALLER at runtime (CK_RSA_PKCS_PSS_PARAMS.hashAlg, §6.4.5), and its
+/// input (`digest`) is ALREADY a digest — the caller hashed the message
+/// itself before calling C_Sign (RFC 8017 §8.1: EMSA-PSS-ENCODE takes
+/// `mHash`, not `M`). That rules out the `Signer`/`RandomizedSigner`-trait
+/// macros above (they hash for you); this uses the crate's lower-level
+/// `rsa::pss::Pss` `SignatureScheme`, whose `sign()`/`verify()` operate
+/// directly on pre-hashed bytes — the same "hazmat"-family, prehash-oriented
+/// API this crate already depends on (`rsa` 0.9, "hazmat" feature) for
+/// CKM_RSA_X_509's raw RSASP1/RSAVP1 path.
+pub fn sign_rsa_pss_bare(
+    hash_alg: u32,
+    sk_bytes: &[u8],
+    digest: &[u8],
+    salt_len: usize,
+) -> Result<Vec<u8>, u32> {
+    use rsa::pkcs8::DecodePrivateKey;
+    let private_key =
+        rsa::RsaPrivateKey::from_pkcs8_der(sk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let mut rng = rand::rngs::OsRng;
+    macro_rules! pss_sign_prehashed {
+        ($hash:ty) => {
+            private_key
+                .sign_with_rng(&mut rng, rsa::pss::Pss::new_with_salt::<$hash>(salt_len), digest)
+                .map_err(|_| CKR_FUNCTION_FAILED)
+        };
+    }
+    match hash_alg {
+        CKM_SHA256 => pss_sign_prehashed!(sha2::Sha256),
+        CKM_SHA384 => pss_sign_prehashed!(sha2::Sha384),
+        CKM_SHA512 => pss_sign_prehashed!(sha2::Sha512),
+        CKM_SHA3_384 => pss_sign_prehashed!(sha3::Sha3_384),
+        _ => Err(CKR_MECHANISM_PARAM_INVALID),
+    }
+}
+
 /// Digest `msg` per a hash-composite ECDSA mechanism (`CKM_ECDSA_SHAx` /
 /// `CKM_ECDSA_SHA3_x`). `None` for anything else — including raw
 /// `CKM_ECDSA`, whose input is already a digest.
@@ -1834,6 +1874,52 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
                 _ => 10,
             };
             4 + 32 + 67 * 32 + h * 32
+        }
+        // XMSS^MT — this arm was MISSING entirely before 2026-08-24 (P-1
+        // remediation), so CKM_XMSSMT fell through to the generic `_ => 512`
+        // default at the bottom of this function. That's not merely an
+        // under-estimate: PKCS#11 §5.2's two-call size-query idiom (call
+        // with pSignature=NULL, allocate exactly the reported length, call
+        // again) returned CKR_BUFFER_TOO_SMALL on the SECOND call for every
+        // XMSSMT-SHA2_20/2_256 signature (real length 4963B, reported
+        // 512B) — a genuine conformance break for any correctly-written
+        // caller, not an untested gap. Found and fixed alongside wiring the
+        // release-tier XMSS/XMSSMT test (test_xmss_release.js), which
+        // verifies this arm's output against the real, measured signature
+        // length rather than trusting the formula alone.
+        //
+        // sig = idx_sig(ceil(h/8)) + random(n) + h*n [auth path across all
+        // layers] + d*len*n [one WOTS+ sig per layer]. RFC 8391 §4.2.3.
+        // len = len_1 + len_2 (§3.1.1, w=16 Winternitz parameter — the same
+        // value the CKM_XMSS arm above assumes): len_1 = ceil(8n/4) = 2n,
+        // len_2 = floor(log2(len_1*15)/4) + 1. n=32 → 67 (matches the XMSS
+        // arm's own hardcode); n=64 → 131.
+        CKM_XMSSMT => {
+            let mt_param = get_object_attr_u32(hkey, CKA_PARAMETER_SET)
+                .filter(|v| *v != 0)
+                .or_else(|| get_object_attr_u32(hkey, CKA_XMSSMT_PARAM_SET).filter(|v| *v != 0))
+                .unwrap_or(CKP_XMSSMT_SHA2_20_2_256);
+            let (h, d, n): (u32, u32, u32) = match mt_param {
+                CKP_XMSSMT_SHA2_20_2_256 | CKP_XMSSMT_SHAKE_20_2_256 => (20, 2, 32),
+                CKP_XMSSMT_SHA2_20_4_256 | CKP_XMSSMT_SHAKE_20_4_256 => (20, 4, 32),
+                CKP_XMSSMT_SHA2_40_2_256 | CKP_XMSSMT_SHAKE_40_2_256 => (40, 2, 32),
+                CKP_XMSSMT_SHA2_40_4_256 | CKP_XMSSMT_SHAKE_40_4_256 => (40, 4, 32),
+                CKP_XMSSMT_SHA2_40_8_256 | CKP_XMSSMT_SHAKE_40_8_256 => (40, 8, 32),
+                CKP_XMSSMT_SHA2_60_3_256 | CKP_XMSSMT_SHAKE_60_3_256 => (60, 3, 32),
+                CKP_XMSSMT_SHA2_60_6_256 | CKP_XMSSMT_SHAKE_60_6_256 => (60, 6, 32),
+                CKP_XMSSMT_SHA2_60_12_256 | CKP_XMSSMT_SHAKE_60_12_256 => (60, 12, 32),
+                CKP_XMSSMT_SHA2_20_2_512 | CKP_XMSSMT_SHAKE_20_2_512 => (20, 2, 64),
+                CKP_XMSSMT_SHA2_20_4_512 | CKP_XMSSMT_SHAKE_20_4_512 => (20, 4, 64),
+                CKP_XMSSMT_SHA2_40_2_512 | CKP_XMSSMT_SHAKE_40_2_512 => (40, 2, 64),
+                CKP_XMSSMT_SHA2_40_4_512 | CKP_XMSSMT_SHAKE_40_4_512 => (40, 4, 64),
+                CKP_XMSSMT_SHA2_40_8_512 | CKP_XMSSMT_SHAKE_40_8_512 => (40, 8, 64),
+                CKP_XMSSMT_SHA2_60_3_512 | CKP_XMSSMT_SHAKE_60_3_512 => (60, 3, 64),
+                CKP_XMSSMT_SHA2_60_6_512 | CKP_XMSSMT_SHAKE_60_6_512 => (60, 6, 64),
+                CKP_XMSSMT_SHA2_60_12_512 | CKP_XMSSMT_SHAKE_60_12_512 => (60, 12, 64),
+                _ => (20, 2, 32),
+            };
+            let len: u32 = if n == 32 { 67 } else { 131 };
+            (h + 7) / 8 + n + h * n + d * len * n
         }
         // LMS/HSS — size depends on param set; compute from key attributes.
         // Formula (RFC 8554): LMOTS sig = 4+n+p*n; LMS sig = 4+lmots_sig+4+h*n; HSS sig = 4+Npub*pub_size+Nsig*lms_sig
@@ -2211,6 +2297,44 @@ pub fn verify_rsa(
             .verify(rsa::Pkcs1v15Sign::new_unprefixed(), msg, sig_bytes)
             .map_err(|_| CKR_SIGNATURE_INVALID),
         _ => Err(CKR_MECHANISM_INVALID),
+    }
+}
+
+/// R-1 (2026-08-24) — bare `CKM_RSA_PKCS_PSS` verify, the counterpart to
+/// `sign_rsa_pss_bare` above: `digest` is already-hashed bytes, `hash_alg`
+/// is the caller-supplied (and, by the time this is called, already
+/// hashAlg/mgf-pairing-validated in ffi.rs's `parse_sign_mech_params`)
+/// runtime hash selector, and `salt_len` is the caller's authoritative
+/// CK_RSA_PKCS_PSS_PARAMS.sLen — no "try both conventions" fallback, unlike
+/// `verify_rsa`'s hash-specific PSS siblings (there is no legacy default to
+/// fall back to for a mechanism whose hash was never implied by its ID).
+pub fn verify_rsa_pss_bare(
+    hash_alg: u32,
+    n_bytes: &[u8],
+    e_bytes: &[u8],
+    digest: &[u8],
+    sig_bytes: &[u8],
+    salt_len: usize,
+) -> Result<(), u32> {
+    if n_bytes.is_empty() || e_bytes.is_empty() {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    }
+    let n = rsa::BigUint::from_bytes_be(n_bytes);
+    let e = rsa::BigUint::from_bytes_be(e_bytes);
+    let public_key = rsa::RsaPublicKey::new(n, e).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    macro_rules! pss_verify_prehashed {
+        ($hash:ty) => {
+            public_key
+                .verify(rsa::pss::Pss::new_with_salt::<$hash>(salt_len), digest, sig_bytes)
+                .map_err(|_| CKR_SIGNATURE_INVALID)
+        };
+    }
+    match hash_alg {
+        CKM_SHA256 => pss_verify_prehashed!(sha2::Sha256),
+        CKM_SHA384 => pss_verify_prehashed!(sha2::Sha384),
+        CKM_SHA512 => pss_verify_prehashed!(sha2::Sha512),
+        CKM_SHA3_384 => pss_verify_prehashed!(sha3::Sha3_384),
+        _ => Err(CKR_MECHANISM_PARAM_INVALID),
     }
 }
 
