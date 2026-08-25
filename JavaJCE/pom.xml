@@ -13,18 +13,38 @@
        (see docs/implementation-plan-jdk27-jca-provider-2026-08-24.md and
        the CHANGELOG entry for what it replaced and why).
 
-       No crypto dependencies: every operation routes to the token via the
-       FFM native layer (java.lang.foreign, no JDK-internal APIs). Release
-       24 is the compiler floor — FFM final since 22, javax.crypto.KEM
-       since 21 — so this builds and tests without the JDK 27 RC; only the
-       TLS phase (W6) needs 27. -->
+       No SOFTWARE CRYPTO dependencies: every cryptographic operation
+       routes to the token via the FFM native layer (java.lang.foreign, no
+       JDK-internal APIs) — this provider never computes a signature, hash,
+       or key on the JVM side. bcprov-jdk18on below is the one exception,
+       and it is NOT used for crypto: only its org.bouncycastle.asn1
+       package (ASN1Integer/DLSequence/ASN1Sequence — pure DER syntax) is
+       used, to encode/decode the ECDSA-Sig-Value wire format PKCS#11's
+       raw r‖s output must be converted to/from for JCA interop (see
+       P11ECDSASignatureSpi's javadoc for why that conversion exists at
+       all). No BC Provider is ever registered
+       (Security.addProvider(new BouncyCastleProvider()) never appears in
+       this module) and no BC Cipher/Signature/KeyPairGenerator class is
+       ever used — same boundary as nlohmann::json in the sandbox's C++
+       REST sample or org.json in its Java sample: a small, established
+       library for wire-format syntax, not a crypto engine.
+
+       Release 24 is the compiler floor — FFM final since 22,
+       javax.crypto.KEM since 21 — so this builds and tests without the
+       JDK 27 RC; only the TLS phase (W6) needs 27. -->
   <properties>
     <maven.compiler.release>24</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>5.10.2</junit.version>
+    <bouncycastle.version>1.85.2</bouncycastle.version>
   </properties>
 
   <dependencies>
+    <dependency>
+      <groupId>org.bouncycastle</groupId>
+      <artifactId>bcprov-jdk18on</artifactId>
+      <version>${bouncycastle.version}</version>
+    </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>

@@ -130,6 +130,41 @@ public final class SoftHSMv3Provider extends Provider {
         // curve-agnostic, same shape ML-DSA/SLH-DSA already proved.
         registerEdDSA("Ed25519", ED25519_OID);
         registerEdDSA("Ed448", ED448_OID);
+
+        // W2: EC/ECDSA. Registration shape genuinely differs from the
+        // above: standard JCA "EC" is ONE KeyPairGenerator service
+        // covering every curve (curve chosen via
+        // initialize(ECGenParameterSpec), matching how SunEC itself
+        // works) rather than one service per curve — see
+        // P11ECKeyPairGeneratorSpi's javadoc. Signature needs its own
+        // class too, for a DIFFERENT reason than KeyPairGenerator: found
+        // live (not assumed) that PKCS#11's raw r‖s ECDSA signature
+        // format fails to cross-verify against JDK's own SunEC, which
+        // expects ASN.1 DER SEQUENCE{r,s} — see P11ECDSASignatureSpi's
+        // javadoc for the exact exception and the fix.
+        putService(new Service(this, "KeyPairGenerator", "EC",
+            P11ECKeyPairGeneratorSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11ECKeyPairGeneratorSpi(lib);
+            }
+        });
+        registerECDSASignature("SHA256withECDSA", CKM_ECDSA_SHA256);
+        registerECDSASignature("SHA384withECDSA", CKM_ECDSA_SHA384);
+        registerECDSASignature("SHA512withECDSA", CKM_ECDSA_SHA512);
+        registerECDSASignature("SHA3-256withECDSA", CKM_ECDSA_SHA3_256);
+        registerECDSASignature("SHA3-384withECDSA", CKM_ECDSA_SHA3_384);
+        registerECDSASignature("SHA3-512withECDSA", CKM_ECDSA_SHA3_512);
+    }
+
+    private void registerECDSASignature(String name, long mech) {
+        putService(new Service(this, "Signature", name,
+            P11ECDSASignatureSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11ECDSASignatureSpi(lib, mech);
+            }
+        });
     }
 
     private void registerEdDSA(String name, byte[] curveOid) {

@@ -500,9 +500,65 @@ full since both are load-bearing for W2+.
 ### W2 — Signatures + key generation
 
 **ML-DSA: DONE. SLH-DSA (all 12 parameter sets): DONE. EdDSA
-(Ed25519/Ed448): DONE.** All 2026-08-24, all PASSED. Remaining in W2:
-EC (ECDSA), RSA, `KeyFactorySpi` (import side), `KeyStoreSpi` read path
-— not yet built.
+(Ed25519/Ed448): DONE. EC/ECDSA (P-256/384/521): DONE.** All
+2026-08-24, all PASSED. Remaining in W2: RSA, `KeyFactorySpi` (import
+side), `KeyStoreSpi` read path — not yet built.
+
+**EC/ECDSA — the workstream that changed the project's dependency
+posture:**
+- `P11ECKeyPairGeneratorSpi`: standard JCA "EC" registration shape
+  (**one** service, curve chosen at `initialize(ECGenParameterSpec)`
+  time — matching `SunEC`), genuinely different from every algorithm
+  above (one-service-per-parameter-set). `secp256r1`'s `CKA_EC_PARAMS`
+  OID bytes reused from the sandbox's proven C samples; `secp521r1`'s
+  from this repo's own `p11_v32_compliance_test.cpp` (already
+  live-verified 779/0 this session); **`secp384r1`'s were not found
+  reused anywhere in this repo** — derived by direct DER-structure
+  analogy to the proven `secp521r1` encoding (same SECG OID arc, only
+  the final arc byte differs) and **not trusted on the derivation
+  alone**: empirically confirmed live by generating a real key and
+  decoding it through JDK's own EC `KeyFactory`, checking the resulting
+  field size is genuinely 48 bytes (P-384's real coordinate size), not
+  just that key generation didn't error.
+- **Real bug found via cross-verification, not assumed away:** a first
+  pass reusing `P11PureSigSignatureSpi` unchanged for ECDSA passed our
+  own sign→verify round-trip (self-consistent, since both sides used the
+  same raw format) but **failed** cross-verification against JDK's own
+  `SunEC` with a genuine `SignatureException` ("Invalid encoding for
+  signature" / "Not the correct tag"). Root cause: PKCS#11's
+  `C_Sign`/`C_Verify` for ECDSA use raw `r‖s` bytes (§2.3.1), but JCA's
+  `SHA256withECDSA` convention is ASN.1 DER `SEQUENCE{INTEGER r,
+  INTEGER s}` (RFC 3279 §2.2.3) — a well-known PKCS#11-to-JCA bridging
+  gotcha. This is exactly the class of defect the plan's
+  cross-verification testing convention exists to catch; a
+  self-consistency-only test suite would have shipped it silently.
+- **Dependency decision, made explicitly with the user rather than
+  unilaterally:** fixing this needs an ASN.1 DER codec. A first pass
+  hand-rolled a minimal ~80-line codec (exactly the 2-INTEGER SEQUENCE
+  shape, nothing more). Before committing to it, checked this repo's own
+  precedent for wire-format codecs (`@peculiar/asn1-schema`/`@peculiar/x509`
+  in `pqctoday-hub`'s `package.json`, `nlohmann::json` in the sandbox's
+  C++ REST sample, `org.json` in its Java sample) — all "pull in a
+  small, established library," never hand-roll. Confirmed via exhaustive
+  search that no Java ASN.1 library (Bouncy Castle or otherwise) was
+  already a dependency anywhere in this monorepo (`JavaJCE/pom.xml` is
+  the only Java `pom.xml` that exists). Presented the real tradeoff to
+  the user (new supply-chain dependency vs. custom crypto-adjacent
+  parsing code) rather than deciding unilaterally; **user chose Bouncy
+  Castle**. `bcprov-jdk18on` **1.85.2** (confirmed current release via
+  Maven Central metadata, not guessed) added as a dependency, used
+  **only** for its `org.bouncycastle.asn1` package (`ASN1Integer`/
+  `DERSequence`/`ASN1Sequence` — pure DER syntax). No BC `Provider` is
+  ever registered and no BC crypto class is ever used — same boundary as
+  `nlohmann::json`/`org.json` elsewhere in this project. `P11ECDSASignatureSpi`
+  rewritten on top of it, hand-rolled codec deleted.
+- **Verify — all live:** `mvn test`, 49/49 total (9 new ECDSA + 40
+  existing). Curve-identity check (including the empirically-derived
+  P-384 OID) passes for all 3 curves. Sign/verify round-trip + tamper
+  rejection across `SHA256/384/512withECDSA` on multiple curve/hash
+  combinations. **Cross-verified against JDK's own `SunEC`** for every
+  combination — the exact check that caught the DER-format bug in the
+  first place, now passing.
 
 **EdDSA:**
 - New `P11EdDSAKeyPairGeneratorSpi` — **not** built on the generic

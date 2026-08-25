@@ -16,6 +16,13 @@ final class P11Constants {
     static final long CKM_SLH_DSA              = 0x0000002eL;
     static final long CKM_EC_EDWARDS_KEY_PAIR_GEN = 0x00001055L;
     static final long CKM_EDDSA                = 0x00001057L;
+    static final long CKM_EC_KEY_PAIR_GEN      = 0x00001040L;
+    static final long CKM_ECDSA_SHA256         = 0x00001044L;
+    static final long CKM_ECDSA_SHA384         = 0x00001045L;
+    static final long CKM_ECDSA_SHA512         = 0x00001046L;
+    static final long CKM_ECDSA_SHA3_256       = 0x00001048L;
+    static final long CKM_ECDSA_SHA3_384       = 0x00001049L;
+    static final long CKM_ECDSA_SHA3_512       = 0x0000104aL;
 
     // ── Object classes ──────────────────────────────────────────────────
     static final long CKO_PUBLIC_KEY  = 0x00000002L;
@@ -25,6 +32,7 @@ final class P11Constants {
     static final long CKK_ML_DSA     = 0x0000004aL;
     static final long CKK_SLH_DSA    = 0x0000004bL;
     static final long CKK_EC_EDWARDS = 0x00000040L;
+    static final long CKK_EC         = 0x00000003L;
 
     // ── Attributes ───────────────────────────────────────────────────────
     static final long CKA_CLASS            = 0x00000000L;
