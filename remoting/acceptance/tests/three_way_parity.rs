@@ -29,8 +29,10 @@
 //! doc comments don't spell out — see the note on `session_handle_invalid`
 //! below for why "observed, then asserted" is the honest label for those).
 
+use der::Decode;
 use pqctoday_pkcs11_remote_core::verbs;
 use softhsmrustv3::constants::*;
+use x509_cert::Certificate;
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap()
@@ -420,4 +422,210 @@ fn a5_closed_session_reused_same_ckr_all_three_transports() {
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(rest_raw_ck_rv(&body), Some(expected));
     });
+}
+
+// ── Case A6 — GetSelfSignedCertificate (the 8th verb, added 2026-08-25):
+// real self-signed X.509 parity across all three transports ────────────────
+//
+// The real correctness bar, matching pqctoday-pkcs11-remote-core's own
+// cert.rs unit test: each transport's returned DER must re-parse AND its
+// embedded signature must genuinely verify — via `verbs::verify`, the
+// SAME independent check the control arm's own key uses — against its
+// own TBSCertificate bytes and its own public key. A transport that
+// returned well-formed-but-garbage-signed DER would still fail this,
+// unlike a check that only confirms "the bytes parse as ASN.1."
+// Issuer == subject is also asserted per transport (this verb is
+// specifically the self-signed case, not general Certify).
+
+fn assert_self_signed_and_valid(session: u32, pub_h: u32, algorithm: pqctoday_pkcs11_remote_core::Algorithm, der: &[u8]) {
+    let cert = Certificate::from_der(der).expect("returned certificate DER must parse as X.509");
+    assert_eq!(
+        cert.tbs_certificate.issuer.to_string(),
+        cert.tbs_certificate.subject.to_string(),
+        "issuer and subject must match for this self-signed verb"
+    );
+    let tbs_der = <x509_cert::certificate::TbsCertificate as der::Encode>::to_der(&cert.tbs_certificate)
+        .expect("re-encode the parsed TBSCertificate");
+    let sig = cert.signature.raw_bytes();
+    let ok = verbs::verify(session, pub_h, algorithm, &tbs_der, sig).expect("verify (control path)");
+    assert!(ok, "the certificate's own embedded signature must genuinely verify — not just parse");
+}
+
+#[test]
+fn a6_get_self_signed_certificate_parity_all_three_transports() {
+    let rt = rt();
+    rt.block_on(async {
+        acceptance::bootstrap_once();
+        let algo = pqctoday_pkcs11_remote_core::Algorithm::MlDsa65;
+
+        // (a) control
+        let session = verbs::open_session(acceptance::PIN).unwrap();
+        let (pub_h, prv_h) = verbs::generate_key_pair(session, algo, b"\xC1", "a6-control").unwrap();
+        let control_der =
+            verbs::get_self_signed_certificate(session, pub_h, prv_h, algo, "a6-control", 30).unwrap();
+        assert_self_signed_and_valid(session, pub_h, algo, &control_der);
+
+        // (b) gRPC
+        let mut grpc = acceptance::spawn_grpc().await.unwrap();
+        let g_session = grpc_open_session(&mut grpc, acceptance::PIN).await.unwrap();
+        let g_keys = grpc
+            .generate_key_pair(pqctoday_pkcs11_remote_proto::GenerateKeyPairRequest {
+                session_handle: g_session,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
+                cka_id: vec![0xC2],
+                label: "a6-grpc".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let g_der = grpc
+            .get_self_signed_certificate(pqctoday_pkcs11_remote_proto::GetSelfSignedCertificateRequest {
+                session_handle: g_session,
+                public_handle: g_keys.public_handle,
+                private_handle: g_keys.private_handle,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
+                subject_cn: "a6-grpc".into(),
+                validity_days: 30,
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .certificate_der;
+        // Cross-check via the SAME control session's own verify path —
+        // this is genuinely a different key than the control arm's own
+        // (a fresh gRPC-side keypair), so this proves the gRPC transport's
+        // own generate+sign+cert-build pipeline produced a real result,
+        // not that the control arm's key happens to verify anything.
+        assert_self_signed_and_valid(session, g_keys.public_handle, algo, &g_der);
+
+        // (c) REST
+        let rest_base = acceptance::spawn_rest().await.unwrap();
+        let http = reqwest::Client::new();
+        let r_session: serde_json::Value = http
+            .post(format!("{rest_base}/v1/sessions"))
+            .json(&serde_json::json!({ "user_pin": acceptance::PIN }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let r_session = r_session["session_handle"].as_u64().unwrap();
+        let r_keys: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys"))
+            .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ml-dsa65", "cka_id": b64(&[0xC3]), "label": "a6-rest" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let r_prv = r_keys["private_handle"].as_u64().unwrap() as u32;
+        let r_pub = r_keys["public_handle"].as_u64().unwrap() as u32;
+        let r_cert_resp: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys/{r_prv}/certificate"))
+            .json(&serde_json::json!({
+                "session_handle": r_session, "public_handle": r_pub,
+                "algorithm": "ml-dsa65", "subject_cn": "a6-rest", "validity_days": 30
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let r_der_b64 = r_cert_resp["certificate_der"].as_str().unwrap();
+        let r_der = b64_decode(r_der_b64);
+        assert_self_signed_and_valid(session, r_pub, algo, &r_der);
+    });
+}
+
+// ── Case A7 — GetSelfSignedCertificate rejects an ML-KEM key with
+// CKR_ARGUMENTS_BAD on all three transports (a KEM key cannot sign) ────────
+
+#[test]
+fn a7_get_self_signed_certificate_rejects_ml_kem_all_three_transports() {
+    let rt = rt();
+    rt.block_on(async {
+        acceptance::bootstrap_once();
+
+        // (a) control
+        let session = verbs::open_session(acceptance::PIN).unwrap();
+        let (pub_h, prv_h) = verbs::generate_key_pair(
+            session, pqctoday_pkcs11_remote_core::Algorithm::MlKem768, b"\xD1", "a7-control",
+        )
+        .unwrap();
+        let control_err = verbs::get_self_signed_certificate(
+            session, pub_h, prv_h, pqctoday_pkcs11_remote_core::Algorithm::MlKem768, "a7-control", 30,
+        )
+        .unwrap_err();
+        assert_eq!(control_err.raw(), CKR_ARGUMENTS_BAD);
+
+        // (b) gRPC
+        let mut grpc = acceptance::spawn_grpc().await.unwrap();
+        let g_session = grpc_open_session(&mut grpc, acceptance::PIN).await.unwrap();
+        let g_keys = grpc
+            .generate_key_pair(pqctoday_pkcs11_remote_proto::GenerateKeyPairRequest {
+                session_handle: g_session,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlKem768 as i32,
+                cka_id: vec![0xD2],
+                label: "a7-grpc".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let g_err = grpc
+            .get_self_signed_certificate(pqctoday_pkcs11_remote_proto::GetSelfSignedCertificateRequest {
+                session_handle: g_session,
+                public_handle: g_keys.public_handle,
+                private_handle: g_keys.private_handle,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlKem768 as i32,
+                subject_cn: "a7-grpc".into(),
+                validity_days: 30,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(grpc_raw_ck_rv(&g_err), Some(CKR_ARGUMENTS_BAD));
+
+        // (c) REST
+        let rest_base = acceptance::spawn_rest().await.unwrap();
+        let http = reqwest::Client::new();
+        let r_session: serde_json::Value = http
+            .post(format!("{rest_base}/v1/sessions"))
+            .json(&serde_json::json!({ "user_pin": acceptance::PIN }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let r_session = r_session["session_handle"].as_u64().unwrap();
+        let r_keys: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys"))
+            .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ml-kem768", "cka_id": b64(&[0xD3]), "label": "a7-rest" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let r_prv = r_keys["private_handle"].as_u64().unwrap();
+        let r_pub = r_keys["public_handle"].as_u64().unwrap();
+        let resp = http
+            .post(format!("{rest_base}/v1/keys/{r_prv}/certificate"))
+            .json(&serde_json::json!({
+                "session_handle": r_session, "public_handle": r_pub,
+                "algorithm": "ml-kem768", "subject_cn": "a7-rest", "validity_days": 30
+            }))
+            .send()
+            .await
+            .unwrap();
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(rest_raw_ck_rv(&body), Some(CKR_ARGUMENTS_BAD));
+    });
+}
+
+fn b64_decode(s: &str) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(s).expect("valid base64")
 }

@@ -1,4 +1,6 @@
-//! The seven benchmark verbs, mapped onto `softhsmrustv3::native` calls —
+//! The eight verbs (seven original benchmark verbs + `get_self_signed_certificate`,
+//! added 2026-08-25 — see `cert.rs`'s own module doc for why), mapped onto
+//! `softhsmrustv3::native` calls —
 //! the same functions the KMIP server's ops layer drives
 //! (`kmip/src/ops/*`). Transport-agnostic: `remoting/grpc` and
 //! `remoting/rest` both call only what's in this file.
@@ -169,4 +171,21 @@ pub fn decapsulate(
 ) -> Result<Vec<u8>, CkError> {
     assert!(algorithm.is_kem(), "decapsulate() called with a signature algorithm: {algorithm}");
     native::decapsulate(session, key_handle, algorithm.kem_mechanism(), ciphertext).map_err(CkError::from)
+}
+
+/// The 8th verb (added 2026-08-25): build and return a self-signed X.509
+/// certificate (DER) for a signature-capable keypair already generated
+/// on this token — the only verb in this crate that returns a public
+/// key's real bytes at all. See `cert.rs`'s own module doc for the full
+/// design (why this needed adding, why it's built independently of
+/// `pqctoday-kmip`'s own certificate code, and why ML-KEM is rejected).
+pub fn get_self_signed_certificate(
+    session: u32,
+    public_handle: u32,
+    private_handle: u32,
+    algorithm: Algorithm,
+    subject_cn: &str,
+    validity_days: i64,
+) -> Result<Vec<u8>, CkError> {
+    crate::cert::self_signed_certificate(session, public_handle, private_handle, algorithm, subject_cn, validity_days)
 }

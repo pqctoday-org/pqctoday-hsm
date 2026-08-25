@@ -127,6 +127,22 @@ pub struct DecapsulateResponse {
     pub shared_secret: Vec<u8>,
 }
 
+/// The 8th verb, added 2026-08-25 — see remoting/proto's own comment on
+/// `GetSelfSignedCertificateRequest` for why this exists at all.
+#[derive(Deserialize)]
+pub struct GetSelfSignedCertificateRequest {
+    pub session_handle: u32,
+    pub public_handle: u32,
+    pub algorithm: Algorithm,
+    pub subject_cn: String,
+    pub validity_days: i64,
+}
+#[derive(Serialize)]
+pub struct GetSelfSignedCertificateResponse {
+    #[serde(with = "b64")]
+    pub certificate_der: Vec<u8>,
+}
+
 /// WP5a error-mapping contract, REST half — mirrors `remoting/grpc/src/error.rs`'s
 /// `Pkcs11ErrorDetail` field-for-field so both wires carry the same three facts.
 #[derive(Serialize)]

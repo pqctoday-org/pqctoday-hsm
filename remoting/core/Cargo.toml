@@ -3,7 +3,7 @@ name = "pqctoday-pkcs11-remote-core"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Transport-agnostic verb layer for the PKCS#11 gRPC/REST remoting services — engine bootstrap, the seven benchmark verbs mapped onto softhsmrustv3::native, and the CKR_* error-mapping contract both wire formats share (sandbox-bench-transport-arms-plan-08242026.md WP1/WP5a)."
+description = "Transport-agnostic verb layer for the PKCS#11 gRPC/REST remoting services — engine bootstrap, the eight verbs mapped onto softhsmrustv3::native, and the CKR_* error-mapping contract both wire formats share (sandbox-bench-transport-arms-plan-08242026.md WP1/WP5a; the 8th verb, self-signed certificate export, added 2026-08-25 per pqctoday-hsm's own JCA-provider remaining-gaps plan §7/WS-E)."
 
 [dependencies]
 # Plane 3 pattern — direct Rust dependency on the engine, no FFI. Same as
@@ -11,6 +11,20 @@ description = "Transport-agnostic verb layer for the PKCS#11 gRPC/REST remoting 
 softhsmrustv3 = { path = "../../rust" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
+# X.509 self-signed certificate construction (cert.rs) — same pure-Rust
+# RustCrypto stack, same versions/features, already proven working in
+# pqctoday-kmip's own Cargo.toml (kmip/src/ops/certify.rs's
+# bootstrap_ca_certificate is the closest working precedent this
+# crate's own cert.rs is modeled on). Kept independent rather than
+# depending on pqctoday-kmip itself — that crate's cert-building is
+# tightly coupled to its own store/UID abstractions, not raw
+# session+handle args, and does not support Ed25519 as a signing
+# algorithm, which this crate's own algorithm set needs.
+x509-cert = { version = "0.2", default-features = false, features = ["builder"] }
+der = { version = "0.7", features = ["oid", "alloc"] }
+spki = { version = "0.7", features = ["alloc"] }
+const-oid = { version = "0.9", features = ["db"] }
+time = "0.3"
 
 [dev-dependencies]
 serial_test = "3"
