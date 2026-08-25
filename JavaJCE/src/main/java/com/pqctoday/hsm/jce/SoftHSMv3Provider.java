@@ -9,6 +9,8 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static com.pqctoday.hsm.jce.P11Constants.*;
+
 /**
  * JCA/JCE Provider bridging javax.crypto/java.security to this repo's
  * PKCS#11 v3.2 engine over FFM (see docs/implementation-plan-jdk27-jca-provider-2026-08-24.md).
@@ -98,14 +100,28 @@ public final class SoftHSMv3Provider extends Provider {
         registerDigest("SHA3-512", CKM_SHA3_512);
         // Deliberately NOT registered: SHA-1, MD5, RIPEMD-160 — see class javadoc.
 
-        // W2: ML-DSA (FIPS 204) — KeyPairGenerator + Signature, one
-        // service triple per parameter set. See P11MLDSAKeyPairGeneratorSpi
-        // / P11MLDSASignatureSpi for why one Signature class serves all
-        // three (the mechanism CKM_ML_DSA is parameter-set-agnostic; the
-        // parameter set lives on the key, not the mechanism).
-        registerMLDSA("ML-DSA-44", P11Constants.CKP_ML_DSA_44);
-        registerMLDSA("ML-DSA-65", P11Constants.CKP_ML_DSA_65);
-        registerMLDSA("ML-DSA-87", P11Constants.CKP_ML_DSA_87);
+        // W2: ML-DSA (FIPS 204) + SLH-DSA (FIPS 205) — KeyPairGenerator +
+        // Signature, one service pair per parameter set, both built on the
+        // generic P11PureSig* classes (see their javadoc for why one
+        // Signature class per algorithm serves every parameter set: the
+        // mechanism is parameter-set-agnostic, the parameter set lives on
+        // the key).
+        registerPureSig("ML-DSA-44", CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA, CKP_ML_DSA_44);
+        registerPureSig("ML-DSA-65", CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA, CKP_ML_DSA_65);
+        registerPureSig("ML-DSA-87", CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA, CKP_ML_DSA_87);
+
+        registerPureSig("SLH-DSA-SHA2-128S", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHA2_128S);
+        registerPureSig("SLH-DSA-SHAKE-128S", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHAKE_128S);
+        registerPureSig("SLH-DSA-SHA2-128F", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHA2_128F);
+        registerPureSig("SLH-DSA-SHAKE-128F", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHAKE_128F);
+        registerPureSig("SLH-DSA-SHA2-192S", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHA2_192S);
+        registerPureSig("SLH-DSA-SHAKE-192S", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHAKE_192S);
+        registerPureSig("SLH-DSA-SHA2-192F", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHA2_192F);
+        registerPureSig("SLH-DSA-SHAKE-192F", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHAKE_192F);
+        registerPureSig("SLH-DSA-SHA2-256S", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHA2_256S);
+        registerPureSig("SLH-DSA-SHAKE-256S", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHAKE_256S);
+        registerPureSig("SLH-DSA-SHA2-256F", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHA2_256F);
+        registerPureSig("SLH-DSA-SHAKE-256F", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHAKE_256F);
     }
 
     private void registerDigest(String name, long mech) {
@@ -118,19 +134,19 @@ public final class SoftHSMv3Provider extends Provider {
         });
     }
 
-    private void registerMLDSA(String name, long parameterSet) {
+    private void registerPureSig(String name, long keygenMech, long signMech, long parameterSet) {
         putService(new Service(this, "KeyPairGenerator", name,
-            P11MLDSAKeyPairGeneratorSpi.class.getName(), List.of(), Map.of()) {
+            P11PureSigKeyPairGeneratorSpi.class.getName(), List.of(), Map.of()) {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
-                return new P11MLDSAKeyPairGeneratorSpi(lib, name, parameterSet);
+                return new P11PureSigKeyPairGeneratorSpi(lib, name, keygenMech, parameterSet);
             }
         });
         putService(new Service(this, "Signature", name,
-            P11MLDSASignatureSpi.class.getName(), List.of(), Map.of()) {
+            P11PureSigSignatureSpi.class.getName(), List.of(), Map.of()) {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
-                return new P11MLDSASignatureSpi(lib);
+                return new P11PureSigSignatureSpi(lib, signMech);
             }
         });
     }

@@ -10,15 +10,18 @@ final class P11Constants {
     private P11Constants() {}
 
     // ── Mechanisms ───────────────────────────────────────────────────────
-    static final long CKM_ML_DSA_KEY_PAIR_GEN = 0x0000001cL;
-    static final long CKM_ML_DSA              = 0x0000001dL;
+    static final long CKM_ML_DSA_KEY_PAIR_GEN  = 0x0000001cL;
+    static final long CKM_ML_DSA               = 0x0000001dL;
+    static final long CKM_SLH_DSA_KEY_PAIR_GEN = 0x0000002dL;
+    static final long CKM_SLH_DSA              = 0x0000002eL;
 
     // ── Object classes ──────────────────────────────────────────────────
     static final long CKO_PUBLIC_KEY  = 0x00000002L;
     static final long CKO_PRIVATE_KEY = 0x00000003L;
 
     // ── Key types ────────────────────────────────────────────────────────
-    static final long CKK_ML_DSA = 0x0000004aL;
+    static final long CKK_ML_DSA  = 0x0000004aL;
+    static final long CKK_SLH_DSA = 0x0000004bL;
 
     // ── Attributes ───────────────────────────────────────────────────────
     static final long CKA_CLASS            = 0x00000000L;
@@ -37,4 +40,18 @@ final class P11Constants {
     static final long CKP_ML_DSA_44 = 0x00000001L;
     static final long CKP_ML_DSA_65 = 0x00000002L;
     static final long CKP_ML_DSA_87 = 0x00000003L;
+
+    // ── SLH-DSA parameter sets (CKA_PARAMETER_SET values, all 12) ───────
+    static final long CKP_SLH_DSA_SHA2_128S  = 0x00000001L;
+    static final long CKP_SLH_DSA_SHAKE_128S = 0x00000002L;
+    static final long CKP_SLH_DSA_SHA2_128F  = 0x00000003L;
+    static final long CKP_SLH_DSA_SHAKE_128F = 0x00000004L;
+    static final long CKP_SLH_DSA_SHA2_192S  = 0x00000005L;
+    static final long CKP_SLH_DSA_SHAKE_192S = 0x00000006L;
+    static final long CKP_SLH_DSA_SHA2_192F  = 0x00000007L;
+    static final long CKP_SLH_DSA_SHAKE_192F = 0x00000008L;
+    static final long CKP_SLH_DSA_SHA2_256S  = 0x00000009L;
+    static final long CKP_SLH_DSA_SHAKE_256S = 0x0000000aL;
+    static final long CKP_SLH_DSA_SHA2_256F  = 0x0000000bL;
+    static final long CKP_SLH_DSA_SHAKE_256F = 0x0000000cL;
 }

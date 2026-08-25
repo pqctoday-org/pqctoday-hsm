@@ -499,9 +499,37 @@ full since both are load-bearing for W2+.
 
 ### W2 — Signatures + key generation
 
-**ML-DSA slice: DONE 2026-08-24, PASSED.** Remaining in W2: SLH-DSA, EC,
-RSA, EdDSA `KeyPairGeneratorSpi`/`SignatureSpi`, `KeyFactorySpi` (import
-side), `KeyStoreSpi` read path — not yet built.
+**ML-DSA slice: DONE 2026-08-24, PASSED. SLH-DSA slice: DONE 2026-08-24,
+PASSED (all 12 parameter sets).** Remaining in W2: EC, RSA, EdDSA
+`KeyPairGeneratorSpi`/`SignatureSpi`, `KeyFactorySpi` (import side),
+`KeyStoreSpi` read path — not yet built.
+
+**SLH-DSA, added on top of the ML-DSA slice:**
+- Refactored `P11MLDSAKeyPairGeneratorSpi`/`P11MLDSASignatureSpi` into
+  generic `P11PureSigKeyPairGeneratorSpi`/`P11PureSigSignatureSpi` (both
+  algorithms are the exact same shape: single-mechanism pure keygen +
+  parameter-set-agnostic pure sign/verify — confirmed for SLH-DSA the
+  same way as ML-DSA, by reading `SoftHSM_keygen.cpp`'s dispatch and
+  `generateSLHDSA`'s `CKA_PUBLIC_KEY_INFO` write before assuming the
+  pattern transferred). Regression-tested the ML-DSA suite (still 14/14)
+  immediately after the refactor, before adding SLH-DSA on top — the
+  refactor itself never went unverified.
+- All 12 parameter sets registered (`SLH-DSA-{SHA2,SHAKE}-{128,192,256}{S,F}`),
+  `CKA_PARAMETER_SET` values taken from `pkcs11t.h`
+  (`CKP_SLH_DSA_SHA2_128S`..`CKP_SLH_DSA_SHAKE_256F`, 0x1–0xc).
+- **Verify — all live, all 12 parameter sets:** sign/verify round-trip,
+  tampered-message rejection, `mvn test` 24/24 new tests pass (38/38
+  total with W1+ML-DSA). **Every observed signature size matches the
+  published FIPS 205 table exactly** (128S/128F = 7856/17088 bytes,
+  192S/192F = 16224/35664, 256S/256F = 29792/49856 — SHA2 and SHAKE
+  variants of the same size class are equal-length, as expected), and
+  the SPKI-wrapped public key sizes (50/66/82 bytes) exactly match the
+  raw 32/48/64-byte FIPS 205 public keys plus the ASN.1 DER overhead
+  measured for ML-DSA's SPKI wrapping — cross-checked arithmetic, not
+  asserted from memory. No JDK software SLH-DSA exists to cross-verify
+  against (confirmed absent from the JDK 27 EA standard names doc during
+  W0) — this is the class of check the plan's §4.1 flagged as needing
+  ACVP KATs instead, not yet wired in.
 
 - `P11Constants`: shared CK_* constants class (values from `pkcs11t.h`,
   same source-of-truth discipline as everywhere else in this repo) — the
