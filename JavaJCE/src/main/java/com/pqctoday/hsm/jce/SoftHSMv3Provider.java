@@ -161,6 +161,47 @@ public final class SoftHSMv3Provider extends Provider {
         registerECDSASignature("SHA3-256withECDSA", CKM_ECDSA_SHA3_256);
         registerECDSASignature("SHA3-384withECDSA", CKM_ECDSA_SHA3_384);
         registerECDSASignature("SHA3-512withECDSA", CKM_ECDSA_SHA3_512);
+
+        // W2: RSA. KeyPairGenerator: same single-service,
+        // initialize()-configured shape as "EC" — sizes 2048/3072/4096,
+        // exponent 65537 by default (decided with the user). Signature:
+        // PKCS#1 v1.5 (SHA256/384/512withRSA) reuses P11PureSigSignatureSpi
+        // unchanged — RSA's PKCS#1 v1.5 signature format is already a raw
+        // modulus-size big-endian byte string in BOTH PKCS#11 and JCA (no
+        // ASN.1 wrapping, unlike ECDSA's r,s pair), confirmed live via
+        // cross-verification against SunRsaSign in the W2 RSA commit, not
+        // assumed from the (correct, as it turned out) general convention.
+        // RSASSA-PSS needed its own class (P11RSAPSSSignatureSpi): its
+        // mechanism/parameters are chosen by the caller via
+        // engineSetParameter(PSSParameterSpec) after construction, not
+        // fixed at registration time like every algorithm above.
+        putService(new Service(this, "KeyPairGenerator", "RSA",
+            P11RSAKeyPairGeneratorSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11RSAKeyPairGeneratorSpi(lib);
+            }
+        });
+        registerRSAPKCS1(("SHA256withRSA"), CKM_SHA256_RSA_PKCS);
+        registerRSAPKCS1(("SHA384withRSA"), CKM_SHA384_RSA_PKCS);
+        registerRSAPKCS1(("SHA512withRSA"), CKM_SHA512_RSA_PKCS);
+        putService(new Service(this, "Signature", "RSASSA-PSS",
+            P11RSAPSSSignatureSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11RSAPSSSignatureSpi(lib);
+            }
+        });
+    }
+
+    private void registerRSAPKCS1(String name, long mech) {
+        putService(new Service(this, "Signature", name,
+            P11PureSigSignatureSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11PureSigSignatureSpi(lib, mech);
+            }
+        });
     }
 
     private void registerECDSASignature(String name, long mech) {

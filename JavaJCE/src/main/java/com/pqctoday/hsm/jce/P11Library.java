@@ -238,9 +238,13 @@ final class P11Library implements AutoCloseable {
 
     /** C_SignInit + C_Sign (single-part), two-call sizing. */
     byte[] sign(long mechType, long key, byte[] data) {
+        return sign(mech(mechType), key, data);
+    }
+
+    /** Same as sign(long, long, byte[]) but with a caller-built CK_MECHANISM (e.g. RSA-PSS's parameter block). */
+    byte[] sign(MemorySegment mech, long key, byte[] data) {
         ensureOpen();
         try {
-            MemorySegment mech = mech(mechType);
             P11Error.check(invokeRv(cSignInit, session, mech, key), "C_SignInit");
             MemorySegment msg = bytes(data);
             MemorySegment len = arena.allocate(JAVA_LONG);
@@ -257,9 +261,13 @@ final class P11Library implements AutoCloseable {
 
     /** C_VerifyInit + C_Verify (single-part). Returns false (not an exception) on CKR_SIGNATURE_INVALID. */
     boolean verify(long mechType, long key, byte[] data, byte[] signature) {
+        return verify(mech(mechType), key, data, signature);
+    }
+
+    /** Same as verify(long, long, byte[], byte[]) but with a caller-built CK_MECHANISM. */
+    boolean verify(MemorySegment mech, long key, byte[] data, byte[] signature) {
         ensureOpen();
         try {
-            MemorySegment mech = mech(mechType);
             P11Error.check(invokeRv(cVerifyInit, session, mech, key), "C_VerifyInit");
             long rv = invokeRv(cVerify, session, bytes(data), (long) data.length,
                 bytes(signature), (long) signature.length);
@@ -313,6 +321,24 @@ final class P11Library implements AutoCloseable {
         m.set(JAVA_LONG, 0, type);
         m.set(ADDRESS, 8, MemorySegment.NULL);
         m.set(JAVA_LONG, 16, 0L);
+        return m;
+    }
+
+    /**
+     * CK_MECHANISM with a parameter block of N consecutive CK_ULONG
+     * fields — covers CK_RSA_PKCS_PSS_PARAMS { hashAlg; mgf; sLen; }
+     * (RSA-PSS, 3 fields) and any future PKCS#11 struct with the same
+     * "all-ULONG" shape. A struct mixing ULONG and pointer/byte fields
+     * (like CK_SP800_108_KDF_PARAMS's variable-length PRF-data array)
+     * needs its own dedicated builder — deliberately not attempted here.
+     */
+    MemorySegment mechWithParams(long type, long... params) {
+        MemorySegment p = arena.allocate(JAVA_LONG, params.length);
+        for (int i = 0; i < params.length; i++) p.set(JAVA_LONG, i * 8L, params[i]);
+        MemorySegment m = arena.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, type);
+        m.set(ADDRESS, 8, p);
+        m.set(JAVA_LONG, 16, params.length * 8L);
         return m;
     }
 

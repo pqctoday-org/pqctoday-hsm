@@ -23,6 +23,16 @@ final class P11Constants {
     static final long CKM_ECDSA_SHA3_256       = 0x00001048L;
     static final long CKM_ECDSA_SHA3_384       = 0x00001049L;
     static final long CKM_ECDSA_SHA3_512       = 0x0000104aL;
+    static final long CKM_RSA_PKCS_KEY_PAIR_GEN = 0x00000000L;
+    static final long CKM_SHA256_RSA_PKCS      = 0x00000040L;
+    static final long CKM_SHA384_RSA_PKCS      = 0x00000041L;
+    static final long CKM_SHA512_RSA_PKCS      = 0x00000042L;
+    static final long CKM_SHA256_RSA_PKCS_PSS  = 0x00000043L;
+    static final long CKM_SHA384_RSA_PKCS_PSS  = 0x00000044L;
+    static final long CKM_SHA512_RSA_PKCS_PSS  = 0x00000045L;
+    static final long CKM_SHA256               = 0x00000250L;
+    static final long CKM_SHA384               = 0x00000260L;
+    static final long CKM_SHA512               = 0x00000270L;
 
     // ── Object classes ──────────────────────────────────────────────────
     static final long CKO_PUBLIC_KEY  = 0x00000002L;
@@ -33,6 +43,7 @@ final class P11Constants {
     static final long CKK_SLH_DSA    = 0x0000004bL;
     static final long CKK_EC_EDWARDS = 0x00000040L;
     static final long CKK_EC         = 0x00000003L;
+    static final long CKK_RSA        = 0x00000000L;
 
     // ── Attributes ───────────────────────────────────────────────────────
     static final long CKA_CLASS            = 0x00000000L;
@@ -43,10 +54,17 @@ final class P11Constants {
     static final long CKA_SENSITIVE        = 0x00000103L;
     static final long CKA_SIGN             = 0x00000108L;
     static final long CKA_VERIFY           = 0x0000010aL;
+    static final long CKA_MODULUS_BITS     = 0x00000121L;
+    static final long CKA_PUBLIC_EXPONENT  = 0x00000122L;
     static final long CKA_EXTRACTABLE      = 0x00000162L;
     static final long CKA_PUBLIC_KEY_INFO  = 0x00000129L; // v3.2 §4.14: SubjectPublicKeyInfo DER
     static final long CKA_PARAMETER_SET    = 0x0000061dL;
     static final long CKA_EC_PARAMS        = 0x00000180L;
+
+    // ── RSA-PSS mechanism parameters (CK_RSA_PKCS_PSS_PARAMS) ───────────
+    static final long CKG_MGF1_SHA256 = 0x00000002L;
+    static final long CKG_MGF1_SHA384 = 0x00000003L;
+    static final long CKG_MGF1_SHA512 = 0x00000004L;
 
     // ── EdDSA curve OIDs (DER-encoded, RFC 8410) — the exact byte arrays
     // already proven live in pqctoday-sandbox's C/Rust Ed25519 samples

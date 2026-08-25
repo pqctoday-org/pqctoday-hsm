@@ -500,9 +500,46 @@ full since both are load-bearing for W2+.
 ### W2 — Signatures + key generation
 
 **ML-DSA: DONE. SLH-DSA (all 12 parameter sets): DONE. EdDSA
-(Ed25519/Ed448): DONE. EC/ECDSA (P-256/384/521): DONE.** All
-2026-08-24, all PASSED. Remaining in W2: RSA, `KeyFactorySpi` (import
-side), `KeyStoreSpi` read path — not yet built.
+(Ed25519/Ed448): DONE. EC/ECDSA (P-256/384/521): DONE. RSA
+(2048/3072/4096, PKCS#1 v1.5 + PSS): DONE.** All 2026-08-24, all
+PASSED. Remaining in W2: `KeyFactorySpi` (import side), `KeyStoreSpi`
+read path — not yet built.
+
+**RSA — user clarifications locked in before starting: 2048/3072/4096
+with exponent 65537 (2048 stays FIPS-approved through 2030, rejected
+outright below that rather than silently allowed):**
+- `P11RSAKeyPairGeneratorSpi`: same single-service,
+  `initialize()`-configured shape as `P11ECKeyPairGeneratorSpi`.
+  `CKA_MODULUS_BITS`/`CKA_PUBLIC_EXPONENT` requirements confirmed
+  directly from `SoftHSM_keygen.cpp`'s `generateRSA` (required/defaulted
+  respectively) before building the template.
+- PKCS#1 v1.5 (`SHA256/384/512withRSA`) needed **no new Signature
+  class** — reused `P11PureSigSignatureSpi` unchanged. Unlike ECDSA,
+  RSA's PKCS#1 v1.5 signature format is already a raw modulus-size
+  big-endian block in both PKCS#11 and JCA (no ASN.1 wrapping) —
+  confirmed live via cross-verification against JDK's `SunRsaSign`
+  before trusting the general "RSA doesn't need this" convention as fact.
+- RSASSA-PSS needed a new class, `P11RSAPSSSignatureSpi`, for a
+  different reason than ECDSA's: PSS's mechanism and mechanism
+  parameters (`CK_RSA_PKCS_PSS_PARAMS { hashAlg; mgf; sLen; }`) are
+  chosen by the *caller* via `engineSetParameter(PSSParameterSpec)`
+  after construction, not fixed at Service registration time like every
+  algorithm above — matches how `SunRsaSign` itself registers
+  `"RSASSA-PSS"` as one configurable service. Required a new
+  `P11Library.mechWithParams(type, long...)` helper (a `CK_MECHANISM`
+  with an all-`CK_ULONG` parameter block) — generalized narrowly for
+  this shape only; `CK_SP800_108_KDF_PARAMS`'s variable-length PRF-data
+  array needs a different builder, deliberately not attempted here.
+  SHA-1 PSS is explicitly rejected (same FIPS 140-3 L3 policy as every
+  digest registration); SHA-3 PSS variants are a real, scoped-out gap
+  (SHA-2 only for now), noted rather than silently incomplete.
+- **Verify — all live:** `mvn test`, 70/70 total (9 new RSA + 61
+  existing). Keygen + PKCS#1 v1.5 sign/verify/tamper-rejection across
+  all 3 modulus sizes, signature length exactly one modulus-size block.
+  **Cross-verified against JDK's `SunRsaSign`** for both PKCS#1 v1.5 and
+  PSS. SHA-1 PSS request correctly throws
+  `InvalidAlgorithmParameterException`; sub-2048 modulus request
+  correctly throws `InvalidParameterException`.
 
 **EC/ECDSA — the workstream that changed the project's dependency
 posture:**
