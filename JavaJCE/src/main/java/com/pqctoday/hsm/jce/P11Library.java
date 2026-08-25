@@ -102,6 +102,7 @@ final class P11Library implements AutoCloseable {
         cCopyObject, cDestroyObject;
     private final long session;
     private volatile boolean closed;
+    private volatile boolean loggedIn;
 
     P11Library(String modulePath, String pin) {
         arena = Arena.ofShared();
@@ -190,15 +191,87 @@ final class P11Library implements AutoCloseable {
             // Same class of bug as C_Initialize above, caught the same way
             // (live `mvn test` with 2+ instances) — every OTHER CK_RV still
             // fails hard via P11Error.check.
-            if (loginRv != P11Error.CKR_OK && loginRv != 0x00000100L /* CKR_USER_ALREADY_LOGGED_IN */) {
+            if (loginRv != P11Error.CKR_OK && loginRv != CKR_USER_ALREADY_LOGGED_IN) {
                 P11Error.check(loginRv, "C_Login");
             }
+            loggedIn = true;
         } catch (ProviderException e) {
             arena.close();
             throw e;
         } catch (Throwable t) {
             arena.close();
             throw new ProviderException("PKCS#11 module init failed for " + modulePath, t);
+        }
+    }
+
+    // §6.1 AuthProvider support. Real C_RV values from pkcs11t.h (grepped
+    // before use, this repo's usual discipline): CKR_USER_ALREADY_LOGGED_IN
+    // = 0x100, CKR_USER_NOT_LOGGED_IN = 0x101, CKR_PIN_INCORRECT = 0xA0.
+    static final long CKR_USER_ALREADY_LOGGED_IN = 0x00000100L;
+    static final long CKR_USER_NOT_LOGGED_IN     = 0x00000101L;
+    static final long CKR_PIN_INCORRECT          = 0x000000A0L;
+
+    boolean isLoggedIn() { return loggedIn; }
+
+    /**
+     * Explicit C_Login, for AuthProvider.login() called after an earlier
+     * logout() (construction already logs in eagerly — see the class
+     * javadoc — so this is not needed for the default "just works"
+     * lifecycle, only for a caller doing real login/logout cycling).
+     * The native call's own return code is authoritative, not the local
+     * `loggedIn` flag: PKCS#11 login state is per-TOKEN (spec §5.6.1), so
+     * another P11Library instance sharing this token in the same process
+     * could have changed it without this instance knowing.
+     */
+    void login(byte[] pinBytes) {
+        ensureOpen();
+        try {
+            MemorySegment pinSeg = arena.allocate(Math.max(pinBytes.length, 1));
+            MemorySegment.copy(pinBytes, 0, pinSeg, JAVA_BYTE, 0, pinBytes.length);
+            long rv = invokeRv(cLogin, session, CKU_USER, pinSeg, (long) pinBytes.length);
+            if (rv == P11Error.CKR_OK || rv == CKR_USER_ALREADY_LOGGED_IN) {
+                loggedIn = true;
+                return;
+            }
+            loggedIn = false;
+            if (rv == CKR_PIN_INCORRECT) {
+                // Distinct unchecked type so SoftHSMv3Provider.login() can
+                // translate this into javax.security.auth.login.FailedLoginException
+                // without string-matching a generic ProviderException message.
+                throw new SecurityException("CKR_PIN_INCORRECT");
+            }
+            P11Error.check(rv, "C_Login");
+        } catch (ProviderException | SecurityException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("login failed", t);
+        }
+    }
+
+    /**
+     * Explicit C_Logout — deauthenticates the WHOLE TOKEN (spec §5.6.1,
+     * same reasoning as login() above), not just this instance's own
+     * session: every other live P11Library/SoftHSMv3Provider instance
+     * sharing this token in the same process is logged out too, and
+     * their next privileged operation will fail until someone logs back
+     * in. This is real PKCS#11 semantics, not a bug in this method — the
+     * class javadoc's own C_Logout-exclusion note for close() documents
+     * the same fact from the other direction (why close() never calls it
+     * implicitly).
+     */
+    void logout() {
+        ensureOpen();
+        try {
+            long rv = invokeRv(cLogout, session);
+            if (rv == P11Error.CKR_OK || rv == CKR_USER_NOT_LOGGED_IN) {
+                loggedIn = false;
+                return;
+            }
+            P11Error.check(rv, "C_Logout");
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("logout failed", t);
         }
     }
 

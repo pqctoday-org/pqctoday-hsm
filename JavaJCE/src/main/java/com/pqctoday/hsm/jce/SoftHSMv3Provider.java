@@ -1,13 +1,19 @@
 package com.pqctoday.hsm.jce;
 
+import java.security.AuthProvider;
 import java.security.MessageDigestSpi;
 import java.security.NoSuchAlgorithmException;
-import java.security.Provider;
 import java.security.ProviderException;
 import java.security.SecureRandomSpi;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import javax.security.auth.Subject;
+import javax.security.auth.callback.Callback;
+import javax.security.auth.callback.CallbackHandler;
+import javax.security.auth.callback.PasswordCallback;
+import javax.security.auth.login.FailedLoginException;
+import javax.security.auth.login.LoginException;
 
 import static com.pqctoday.hsm.jce.P11Constants.*;
 
@@ -24,8 +30,26 @@ import static com.pqctoday.hsm.jce.P11Constants.*;
  * (§6.3) — failure here means every getService() call in this JVM fails
  * closed, matching the CACP fail-open remediation lesson elsewhere in
  * this repo (never fail open on a crypto boundary).
+ *
+ * Extends {@link AuthProvider} (§6.1) rather than plain {@code Provider}
+ * — login/logout are a real, separate lifecycle from construction in the
+ * standard JCA model (a caller can construct+register a provider, then
+ * call login() later, e.g. prompted via a CallbackHandler), not just
+ * this provider inventing its own thing. This provider's constructor
+ * still logs in eagerly by default (the constructor-supplied/env-var PIN,
+ * unchanged from W1 — every existing caller and all 180+ prior tests
+ * depend on "construct and it just works" and that stays true), so
+ * {@link #login} is a no-op immediately after construction; it only does
+ * real work for a caller who explicitly calls {@link #logout} first and
+ * then wants back in, mirroring exactly how SunPKCS11's own
+ * AuthProvider.login() behaves when a token doesn't strictly require a
+ * fresh login (confirmed by reading sun.security.pkcs11.SunPKCS11's real
+ * login()/logout() from JDK 27's own src.zip before writing this, not
+ * invented from the abstract AuthProvider javadoc alone). See
+ * P11Library#logout's javadoc for the real, disclosed token-wide-state
+ * consequence of calling logout — it does not affect only this instance.
  */
-public final class SoftHSMv3Provider extends Provider {
+public final class SoftHSMv3Provider extends AuthProvider {
 
     private static final String NAME = "SoftHSMv3";
     private static final String INFO = "PKCS#11 v3.2 bridge (FIPS 140-3 L3 approved subset)";
@@ -99,6 +123,8 @@ public final class SoftHSMv3Provider extends Provider {
     // already in the same package.
     final P11Library lib;
 
+    private volatile CallbackHandler callbackHandler;
+
     public SoftHSMv3Provider() {
         this(System.getenv().getOrDefault("PKCS11_MODULE", "/usr/local/lib/softhsm/libsofthsmv3.so"),
              System.getenv().getOrDefault("PKCS11_PIN", "1234"));
@@ -117,6 +143,88 @@ public final class SoftHSMv3Provider extends Provider {
         // this is safe to register unconditionally without also having
         // to remove it again on a normal, explicit lib.close().
         Runtime.getRuntime().addShutdownHook(new Thread(lib::close, "SoftHSMv3Provider-shutdown"));
+    }
+
+    /**
+     * AuthProvider#login (§6.1). Since this instance is already logged in
+     * by the time any caller can reach it (the constructor above logs in
+     * eagerly, unconditionally), the common case here is a legitimate
+     * no-op — exactly the "user already logged in" branch SunPKCS11's own
+     * login() has (verified against its real JDK 27 source before writing
+     * this, not assumed from the abstract AuthProvider contract alone).
+     * This only does real work for a caller who explicitly called
+     * {@link #logout} first: it resolves a CallbackHandler (the one
+     * passed in, else the one set via {@link #setCallbackHandler}), asks
+     * it for a PIN via a real {@link PasswordCallback}, and attempts a
+     * fresh C_Login. A wrong PIN surfaces as {@link FailedLoginException}
+     * specifically (not a generic LoginException) — P11Library#login
+     * distinguishes CKR_PIN_INCORRECT for exactly this.
+     */
+    @Override
+    public void login(Subject subject, CallbackHandler handler) throws LoginException {
+        if (lib.isLoggedIn()) {
+            return;
+        }
+        CallbackHandler effective = handler != null ? handler : callbackHandler;
+        if (effective == null) {
+            throw new LoginException("not logged in, and no CallbackHandler available "
+                + "(pass one to login() or call setCallbackHandler() first) — "
+                + "this provider's own construction-time PIN was already consumed by an earlier logout()");
+        }
+        PasswordCallback pwCallback = new PasswordCallback(NAME + " token PIN: ", false);
+        try {
+            effective.handle(new Callback[]{ pwCallback });
+        } catch (Exception e) {
+            LoginException le = new LoginException("callback handler failed to supply a PIN");
+            le.initCause(e);
+            throw le;
+        }
+        char[] pin = pwCallback.getPassword();
+        if (pin == null) {
+            throw new LoginException("CallbackHandler returned a null PIN");
+        }
+        // char[] -> byte[] without ever materializing a String: a String
+        // is immutable and un-zeroable, exactly the gap this method
+        // otherwise carefully avoids for the PIN (§6.5).
+        java.nio.ByteBuffer pinBuf = java.nio.charset.StandardCharsets.UTF_8.encode(java.nio.CharBuffer.wrap(pin));
+        byte[] pinBytes = new byte[pinBuf.remaining()];
+        pinBuf.get(pinBytes);
+        try {
+            lib.login(pinBytes);
+        } catch (SecurityException e) {
+            throw new FailedLoginException("PIN incorrect");
+        } catch (RuntimeException e) {
+            LoginException le = new LoginException(e.getMessage());
+            le.initCause(e);
+            throw le;
+        } finally {
+            java.util.Arrays.fill(pinBytes, (byte) 0);
+            if (pinBuf.hasArray()) java.util.Arrays.fill(pinBuf.array(), (byte) 0);
+            java.util.Arrays.fill(pin, '\0');
+            pwCallback.clearPassword();
+        }
+    }
+
+    /**
+     * AuthProvider#logout (§6.1). Real C_Logout — see
+     * {@link P11Library#logout}'s javadoc for the disclosed, genuinely
+     * token-wide consequence: this deauthenticates every other live
+     * session on this token in this process too, not just this instance.
+     */
+    @Override
+    public void logout() throws LoginException {
+        try {
+            lib.logout();
+        } catch (RuntimeException e) {
+            LoginException le = new LoginException(e.getMessage());
+            le.initCause(e);
+            throw le;
+        }
+    }
+
+    @Override
+    public void setCallbackHandler(CallbackHandler handler) {
+        this.callbackHandler = handler;
     }
 
     /**

@@ -1794,6 +1794,93 @@ rushed.**
   site in `P11Library`. Listed here as the honest state of §6.5, not
   claimed complete.
 
+**`AuthProvider` login/logout (§6.1): DONE 2026-08-25, PASSED.** Real
+lifecycle, not just eager-login-at-construction.
+- **The gap:** `P11Library`'s constructor has always logged in eagerly
+  and unconditionally (env-var/explicit PIN), with no separate way to
+  log out and back in — a genuine mismatch with the standard JCA model,
+  where `java.security.AuthProvider` defines `login`/`logout` as a
+  lifecycle distinct from construction (construct+register a provider,
+  then call `login()` later, possibly prompted via a `CallbackHandler`).
+- **Design, checked against the real reference implementation before
+  writing anything:** `SoftHSMv3Provider` now `extends AuthProvider`
+  (not plain `Provider` — `AuthProvider` is an abstract *class*
+  extending `Provider`, confirmed from JDK 27's real
+  `java/security/AuthProvider.java` source, not assumed from the name).
+  Rather than inventing a login-prompt pattern from the abstract
+  contract alone, `sun.security.pkcs11.SunPKCS11`'s own real
+  `login()`/`logout()`/`setCallbackHandler()` were extracted from the
+  same `src.zip` and read in full — this repo already ships a working,
+  JDK-shipped PKCS#11 `AuthProvider` reference implementation, so there
+  was no reason to guess at the idiom. The "already logged in → no-op"
+  branch, the `PasswordCallback`-via-`CallbackHandler` pattern, and
+  treating `CKR_USER_ALREADY_LOGGED_IN`/`CKR_USER_NOT_LOGGED_IN` as
+  benign races rather than errors are all taken directly from that real
+  code, not invented.
+- **Backward compatibility, deliberately preserved:** construction still
+  logs in eagerly by default — every existing caller and all 188 prior
+  tests depend on "construct and it just works." `login()` immediately
+  after construction is therefore a legitimate no-op (checked via a new
+  `P11Library#isLoggedIn()`), exactly matching SunPKCS11's own behavior
+  when a fresh login isn't actually required. `login()`/`logout()` only
+  do real work for a caller who explicitly calls `logout()` first.
+- **A real, disclosed consequence carried over from an existing code
+  comment, not a new discovery:** PKCS#11 login state is per-TOKEN, not
+  per-session (spec §5.6.1) — already documented in `P11Library`'s own
+  comment explaining why `close()` never calls `C_Logout`. `logout()`
+  now genuinely calls `C_Logout` (the `cLogout` handle was bound but
+  literally unused since W1, exactly as its own old comment predicted:
+  "reserved for W2's P11SessionPool" — now finally has a real caller),
+  which means it deauthenticates **every other live session on the same
+  token in the same process**, not just the calling instance. Documented
+  explicitly in both `P11Library#logout`'s and
+  `SoftHSMv3Provider#logout`'s javadoc, not left as a surprise.
+- **`P11Library` additions:** `CKR_USER_ALREADY_LOGGED_IN`/
+  `CKR_USER_NOT_LOGGED_IN`/`CKR_PIN_INCORRECT` as named constants
+  (verified against `pkcs11t.h`: `0x100`/`0x101`/`0xA0` — the
+  constructor's own login call already inlined the first of these with
+  a bare hex literal; now named and shared). `login(byte[] pin)` and
+  `logout()` methods using the native call's own return code as the
+  authoritative signal (not the cached `loggedIn` flag, since another
+  instance sharing the token could have changed it without this one
+  knowing) — `login` throws a distinct `SecurityException` for
+  `CKR_PIN_INCORRECT` specifically, so the `AuthProvider` layer can
+  translate it into a real `FailedLoginException` rather than a generic
+  `LoginException`.
+- **A real char[]/String secret-hygiene gap caught and fixed while
+  writing this, not shipped:** the natural way to turn a
+  `PasswordCallback`'s `char[]` PIN into the `byte[]` `C_Login` needs is
+  `new String(pin).getBytes(UTF_8)` — but a `String` is immutable and
+  un-zeroable, exactly the kind of lingering-copy gap the zeroization
+  audit above just spent real effort closing elsewhere. Rewritten to go
+  `char[] → ByteBuffer → byte[]` via `StandardCharsets.UTF_8.encode()`
+  directly, with the resulting `byte[]`, the `ByteBuffer`'s own backing
+  array, and the original `char[]` all explicitly zeroed in a `finally`
+  block — no `String` ever created.
+- **`AuthProviderTest.java` (new, 3 tests)** — real risk, real
+  discipline: PKCS#11 login state is per-token, so a careless test here
+  could deauthenticate every other test class sharing the same SoftHSM
+  token in the same Surefire JVM. Every test that mutates login state
+  wraps the risky portion in `try`/`finally` that unconditionally logs
+  back in with the correct PIN before returning, regardless of which
+  assertion (if any) failed first — verified this actually holds by
+  re-running the full 191-test suite (not just this file) after adding
+  it, and by re-running this file alone three times fresh to rule out
+  JUnit 5's non-deterministic method ordering hiding an order-dependent
+  bug. Covers: `login()` is a no-op immediately after construction;
+  `logout()` really deauthenticates (a subsequent `KeyGenerator`
+  operation genuinely fails, not just a flag check) and a wrong PIN via
+  a real `CallbackHandler` yields `FailedLoginException` specifically
+  (which itself must NOT leave the token authenticated); the correct PIN
+  via the same mechanism logs back in and real operations work again;
+  and `login()` with no `CallbackHandler` available after a `logout()`
+  fails cleanly with `LoginException` rather than hanging or throwing
+  something unhelpful.
+- **Verify:** `mvn test`, 191/191 (188 prior + 3 new), 0 failures — run
+  twice (once via `-Dtest=AuthProviderTest` in isolation, once as the
+  full suite) specifically to confirm the token-wide login-state
+  mutation didn't poison any other test class.
+
 ### W6 — TLS (JDK 27 / JEP 527)
 - Install the provider at higher priority than SunJCE and pin
   `jdk.tls.namedGroups=SecP256r1MLKEM768,SecP384r1MLKEM1024` (FIPS run
