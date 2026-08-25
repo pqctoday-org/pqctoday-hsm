@@ -924,67 +924,112 @@ sabotaging the new gate step before trusting it.**
 
 ## 9. WS-G — W8, sandbox side (full scope, decision Q3)
 
-**BLOCKED 2026-08-25, not started — real collision, not a hypothetical
-one.** `pqctoday-sandbox` was checked before touching it (this plan's
-own working-tree-safety discipline) and found on
-`fix/dev-sandbox-samples-remediation-0824` with real, substantial
-uncommitted changes to the exact two files item 1 below needs to edit:
-`docker/Dockerfile.dev-sandbox` (a whole new JDK 27 RC install block,
-apparently for that OTHER effort's own `RestPkcs11Demo.java` sample —
-different workstream labels, WS-5/WS-6, not this plan's WS-A-H) and
-`samples/java/pom.xml` (a new `org.json` dependency + shade-plugin
-wiring). Editing either file now risks either clobbering that
-in-progress work or, if staged carelessly, committing it bundled into
-a WS-G commit under a message that doesn't describe it — a real
-misattribution risk in a shared working tree, not just an inconvenience.
-**Deliberately not worked around** — reported to the user rather than
-guessed past. Once resolved (that branch's WIP committed, or explicit
-go-ahead confirmed), WS-G's own scope is unchanged from below; the
-JDK 27 RC install block already present in that uncommitted diff can
-likely be reused as-is for item 1's own "JDK 27 already present" step,
-once it's safely committed by whoever owns it.
+**Unblocked and DONE 2026-08-25.** The user's own call, once asked: commit
+the `fix/dev-sandbox-samples-remediation-0824` WIP as-is (it was
+coherent, finished-looking, and consistent with its own established
+WS-5-batch pattern — verified by reading the new `RestPkcs11Demo.java`
+in full and confirming its sibling references, e.g.
+`samples/py/23-rest-pkcs11.py`, `samples/c/15_rest_pkcs11.c`, genuinely
+exist, not assumed), then build WS-G on a fresh branch
+(`feat/jdk27-jca-provider`, matching this hsm-side branch's name) off
+that now-clean commit. Real commit `cc6e5d4` in the sandbox repo.
+
+**One genuine architectural finding, not anticipated in this plan's own
+text: `JcaProviderDemo`/`JcaTlsHybridDemo` could NOT be added as more
+classes inside `samples/java/`.** Confirmed live, not assumed:
+`docker/Dockerfile.dev-sandbox`'s own pre-build step for `samples/java`
+compiles with JDK 24's `javac` (`JAVA_HOME=temurin-24`), and `javac`
+cannot even *read* a dependency `.class` file whose own format is newer
+than the compiler's maximum — `softhsmv3-jce.jar` is built at
+`<maven.compiler.release>27</maven.compiler.release>`
+(`JavaJCE/pom.xml`), so a probe class referencing
+`SoftHSMv3Provider` failed JDK 24's `javac` outright with
+`class file has wrong version 71.0, should be 68.0`. Real JDK 27
+`javac` against the same jar compiles and runs cleanly. Fixed by giving
+the two new samples their own sibling Maven module,
+**`samples/java-jca/`** (own `pom.xml`, `<maven.compiler.release>27</maven.compiler.release>`,
+own `build.sh` using `JAVA_HOME=/usr/lib/jvm/jdk-27-rc`), rather than
+touching `samples/java/`'s own JDK 24 build at all.
 
 All sandbox work follows the sibling-checkout build model (§1
 correction 2) and the repo's own conventions (samples live as named
 classes under `samples/java/src/main/java/com/pqctoday/pkcs11/`).
 
-1. **Jar into the image** (`docker/Dockerfile.dev-sandbox`):
-   - In the existing `hsm-builder` stage (or a small dedicated stage
-     `FROM` it): install maven, `mvn -q package -DskipTests` in
-     `/usr/src/pqctoday-hsm/JavaJCE` using the image's JDK 27 RC
-     (already present at `/usr/lib/jvm/jdk-27-rc` — confirmed in the
-     Dockerfile 2026-08-25), producing `softhsmv3-jce-<v>.jar`.
-   - `COPY --from=` the jar (+ the bcprov jar it needs on the
-     classpath) into the final image at a stable path
-     (`/opt/softhsmv3-jce/`), documented in the image's header comment.
-   - Skip-tests at image build is correct here (tests need a live
-     token + env); the gate step (WS-F) is where tests run.
-   - Verify by the build-artifact discipline: image builds, jar present
-     with expected name/size, a one-liner
-     `java -cp ... MessageDigest.getInstance("SHA-256", new SoftHSMv3Provider())`
-     smoke inside the fresh image — locally via OrbStack (amd64
-     validation happens locally, never "requires a push").
-2. **Sample 1 — `JcaProviderDemo.java`** ("24-jca-provider" in the
-   main plan's numbering): consumes the installed jar through pure
-   standard JCA — generate ML-DSA-65 keypair, sign/verify; AES-GCM
-   round-trip; ML-KEM-768 encap/decap via `javax.crypto.KEM`; KeyStore
-   `setKeyEntry` with a token-signed cert chain + PKIX validation (the
-   showcase of what the raw-FFM `P11Ffm.java` sample deliberately does
-   NOT abstract — the README contrast writes itself: P11Ffm teaches the
-   PKCS#11 wire level, this teaches the drop-in JCA level).
-3. **Sample 2 — `JcaTlsHybridDemo.java`** (dependent on WS-B): the
-   spike's flow productized — provider at priority 1, groups pinned,
-   handshake against `pqc-rest:5720`, printing the negotiated group and
-   the `P11Debug` token-side evidence. Ships only after WS-B is green;
-   until then the sample directory carries no half-working demo.
-4. **Docs/matrix**: `samples/java/README.md` rows for both samples
-   (what each proves, how to run); the dev-sandbox samples matrix rows
-   (per the samples-audit conventions — check the matrix scope
-   decisions in the 0824 audit doc before adding, don't invent a new
-   format); `samples/java/pom.xml` gains the jar dependency via a
-   system-scoped/local-repo reference consistent with how the sample
-   build already resolves things (`build.sh` — check before choosing
-   the mechanism).
+1. **Jar into the image** (`docker/Dockerfile.dev-sandbox`) — DONE. Added
+   directly in the `runtime` stage right after the existing JDK 27 RC
+   install block (both `maven` and JDK 27 already live there — no
+   separate builder stage needed, simpler than the plan's own two
+   options): `COPY pqctoday-hsm/JavaJCE` + `JAVA_HOME=jdk-27-rc mvn -q
+   package -DskipTests`, then staged to **version-free stable names**
+   (`softhsmv3-jce.jar`, not `softhsmv3-jce-0.1.0-SNAPSHOT.jar` — a
+   refinement over the plan's own text, so `samples/java-jca`'s
+   system-scoped dependencies never need to track JavaJCE's own SNAPSHOT
+   version) at `/opt/softhsmv3-jce/`. Beyond `bcprov` (the plan's own
+   text), also staged **`bcpkix`** and **`bcutil`** — both real,
+   live-discovered needs: `bcpkix` because `JcaProviderDemo`'s
+   `KeyStore`/PKIX demo needs to build a real signed cert chain (bcpkix
+   is test-scope-only in `JavaJCE/pom.xml`, never shipped in the
+   provider jar itself), and `bcutil` because it is bcpkix's own real
+   transitive dependency — found by a live `NoClassDefFoundError` on
+   `org.bouncycastle.asn1.misc.MiscObjectIdentifiers`, not predicted:
+   **system-scoped Maven dependencies do not pull in transitive jars at
+   all**, unlike an ordinary repository dependency, so this needed its
+   own explicit staging + `pom.xml` entry once discovered.
+2. **Sample 1 — `JcaProviderDemo.java`** — DONE, in the new
+   `samples/java-jca/` module (see the architectural finding above).
+   ML-DSA-65 GenerateKeyPair→Sign→Verify (+ tampered-signature
+   rejection); AES-256-GCM round trip through an opaque token-resident
+   key; ML-KEM-768 GenerateKeyPair→Encapsulate→Decapsulate via
+   `javax.crypto.KEM`; `KeyStore.setKeyEntry` with a real Ed25519-signed
+   cert chain (Bouncy Castle's `bcpkix` for ASN.1/X.509 syntax only —
+   signing itself routes through `SoftHSMv3Provider`, the same
+   `JcaX509v3CertificateBuilder`/`JcaContentSignerBuilder` pattern
+   `JavaJCE`'s own `KeyStoreCertificateTest.java` already proves works)
+   validated end to end through the JDK's real
+   `PKIXParameters`/`CertPathValidator("PKIX")`.
+3. **Sample 2 — `JcaTlsHybridDemo.java`** — DONE (WS-B was already
+   green by the time this ran). Productized `W6TlsHandshakeSpike.java`:
+   provider at priority 1, group pinned (argv[0], default
+   `SecP256r1MLKEM768`), real handshake against `pqc-rest:5720`,
+   negotiated group/protocol/cipher-suite printed, `P11Debug` token-side
+   evidence available via `-Dsofthsmv3.jce.debug=true`.
+4. **Docs** — DONE, scoped to what actually fits: `samples/java-jca/README.md`
+   (new — module purpose, build/run, both samples' own table) plus a
+   cross-reference note added to `samples/java/README.md`. The dev-sandbox
+   **primitive coverage matrix** (`samples/SAMPLES.md`) was deliberately
+   **not** touched — confirmed first that it covers only the raw-PKCS#11
+   `01`-`20` primitive samples (checked its own real structure, not
+   assumed) and that the *already-committed* WS-5 REST/gRPC remoting
+   samples (a closer precedent than anything raw-primitive) aren't
+   referenced there either — grepped the whole repo for
+   `RestPkcs11Demo`/`23-rest-pkcs11` across every `.md` file, zero hits.
+   Force-fitting a JCA-provider-level sample into a per-primitive matrix
+   whose own columns are "does language X have a raw sample for
+   mechanism Y" would have been inventing a new, mismatched format —
+   exactly what this item's own text said not to do. `samples/java/pom.xml`
+   was deliberately **not** touched either — the system-scoped dependency
+   lives in `samples/java-jca/pom.xml` instead, for the same reason the
+   two samples aren't inside `samples/java/` at all (item 2's own
+   architectural finding).
+
+**Verify — real, not a claim:** three full `docker build`s run to
+convergence (the first two surfaced the `bcutil`/BC-provider-registration
+bugs above; the third is the state that shipped). The **truly final**
+build was smoke-tested from a genuinely fresh container (`docker run` off
+the new image tag, not the long-running dev session's own
+already-warm container) — `/opt/softhsmv3-jce/{softhsmv3-jce,bcprov,bcpkix,bcutil}.jar`
+all present at the expected stable paths, `samples/java-jca`'s own
+pre-built jar present, and **both samples run for real from that fresh
+image**: `JcaProviderDemo` — all 13 steps pass, including the live
+signed-cert-chain PKIX validation; `JcaTlsHybridDemo` — real handshake
+against `pqc-rest:5720` succeeds for **both** FIPS-profile groups
+(`SecP256r1MLKEM768`, `SecP384r1MLKEM1024`), `P11Debug` proof captured.
+Test image tags and the smoke-test container were all cleaned up
+afterward; `pqc-dev-sandbox:latest` (the live dev session's own image)
+was deliberately **not** retagged or rebuilt — promoting this to the
+running dev environment is a separate deploy-type decision, left
+unactioned per this project's own "no deploy without go-live"
+convention.
 
 ---
 
