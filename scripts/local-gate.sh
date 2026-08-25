@@ -19,13 +19,21 @@
 #   9. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
 #  10. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
 #  11. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
+#  12. (--javajce) JavaJCE provider suite (mvn test) in pqc-dev-sandbox  [opt-in]
 #
 # Steps 6-7 (Rust PKCS#11 conformance, differential harness) were opt-in
 # until 2026-08-23 — both are core PKCS#11 v3.2 evidence, and both had gone
 # stale invisibly while opt-in (the Rust report 45 source-commits behind
 # HEAD; the differential harness never run at all outside a manual
 # invocation). --cpp stays opt-in: unlike the other two, its slow step is a
-# full CMake+ctest build, not proportionate to run on every push.
+# full CMake+ctest build, not proportionate to run on every push. --javajce
+# stays opt-in too, for a different reason (plan
+# docs/implementation-plan-jca-remaining-gaps-2026-08-25.md §WS-F): it needs
+# a second container ($SANDBOX_CONTAINER, pqc-dev-sandbox — JDK 27 RC, a
+# different glibc than $RUST_CONTAINER, so binaries are NOT interchangeable
+# between them, see JavaJCE/README.md), which not every gate run has
+# available — FAIL-never-skip semantics when the flag IS passed, matching
+# --tls-interop's own precedent.
 #
 # On success it writes .gate-ok-<HEAD-sha> (with the flag set that produced
 # it) so a pre-push hook can verify the gate ran on the current commit —
@@ -36,23 +44,29 @@
 #   bash scripts/local-gate.sh --cpp           # + C++ ctest
 #   bash scripts/local-gate.sh --acvp-wasm     # + ACVP wasm harness
 #   bash scripts/local-gate.sh --release-xmss  # + XMSS/XMSS^MT vs release wasm build
+#   bash scripts/local-gate.sh --javajce       # + JavaJCE provider suite (needs pqc-dev-sandbox)
 #   bash scripts/local-gate.sh --all           # everything (required before a release — see RELEASING.md)
 #   RUST_CONTAINER=pqc-rust bash scripts/local-gate.sh
 #
 # Rust steps run inside the warm OrbStack container ($RUST_CONTAINER, default
 # pqc-rust) which mounts ~/Antigravity → /ag with a prebuilt cargo cache.
+# The --javajce step runs inside a SEPARATE container ($SANDBOX_CONTAINER,
+# default pqc-dev-sandbox) instead — that is where JDK 27 actually lives.
 
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_CONTAINER="${RUST_CONTAINER:-pqc-rust}"
+SANDBOX_CONTAINER="${SANDBOX_CONTAINER:-pqc-dev-sandbox}"
 AG_KMIP="/ag/pqctoday-hsm/kmip"
 AG_RUST="/ag/pqctoday-hsm/rust"
+JAVAJCE_DIR="$ROOT/JavaJCE"
 
 RUN_CPP=0
 RUN_ACVP_WASM=0
 RUN_TLS_INTEROP=0
 RUN_RELEASE_XMSS=0
+RUN_JAVAJCE=0
 for arg in "$@"; do
   case "$arg" in
     --cpp) RUN_CPP=1 ;;
@@ -60,7 +74,8 @@ for arg in "$@"; do
     --rust-p11) : ;; # now always runs (step 6); flag kept accepted, no-op, for muscle memory
     --tls-interop) RUN_TLS_INTEROP=1 ;;
     --release-xmss) RUN_RELEASE_XMSS=1 ;;
-    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_TLS_INTEROP=1; RUN_RELEASE_XMSS=1 ;;
+    --javajce) RUN_JAVAJCE=1 ;;
+    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_TLS_INTEROP=1; RUN_RELEASE_XMSS=1; RUN_JAVAJCE=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -89,6 +104,23 @@ ensure_container() {
     say "starting container $RUST_CONTAINER"
     docker start "$RUST_CONTAINER" >/dev/null 2>&1 || {
       echo "cannot start $RUST_CONTAINER — is OrbStack running?" >&2; exit 3; }
+  fi
+}
+
+# $SANDBOX_CONTAINER (pqc-dev-sandbox) is a DIFFERENT container than
+# $RUST_CONTAINER — different glibc, JDK 27 RC lives only here — so this is
+# a separate exec/ensure pair, not a parameter on the existing ones. See
+# JavaJCE/README.md and the --javajce header comment above for why a
+# binary built in one container cannot simply run in the other.
+dexec_sandbox() {
+  docker exec "$SANDBOX_CONTAINER" bash -c "set -o pipefail; $1"
+}
+
+ensure_sandbox_container() {
+  if ! docker exec "$SANDBOX_CONTAINER" true 2>/dev/null; then
+    say "starting container $SANDBOX_CONTAINER"
+    docker start "$SANDBOX_CONTAINER" >/dev/null 2>&1 || {
+      echo "cannot start $SANDBOX_CONTAINER — is OrbStack running?" >&2; exit 3; }
   fi
 }
 
@@ -264,6 +296,55 @@ if [[ $RUN_TLS_INTEROP == 1 ]]; then
      cargo test --quiet --test secp384r1mlkem1024_interop -- --ignored --test-threads=1"
 fi
 
+if [[ $RUN_JAVAJCE == 1 ]]; then
+  # JDK 27's javax.crypto.KDF (JEP 478) and the JEP 527 TLS 1.3 hybrid-KEM
+  # path this provider bridges to both need the JDK 27 RC — only
+  # $SANDBOX_CONTAINER has it, so this step syncs source in fresh each
+  # run (docker cp, not a bind mount — same flow used throughout the
+  # provider's own development, see the implementation plan docs) rather
+  # than assuming a stale prior copy is still current.
+  STEP=$((STEP+1)); say "step $STEP: JavaJCE provider suite (mvn test, pqc-dev-sandbox)"
+  ensure_sandbox_container
+  GATE_DEST=/tmp/hsm-javajce-gate
+  # Maven emits real ANSI color escapes even under `docker exec` with no
+  # TTY (confirmed live — `[INFO]` is genuinely `\x1b[1;34mINFO\x1b[m]` on
+  # the wire, not just a terminal-rendering artifact) — strip them before
+  # writing the log so both this grep and a human reading the file later
+  # see plain text, not escape-code noise wrapping the very line being
+  # matched against.
+  # `rm -rf $GATE_DEST/JavaJCE` (the WHOLE thing, not just target/) before
+  # the copy — real bug caught by a sabotage test while writing this step:
+  # `docker cp SRC container:DEST` copies SRC AS A SUBDIRECTORY of DEST
+  # when DEST already exists (rather than overwriting DEST's contents in
+  # place), so a second run without this would silently nest the new
+  # source under the stale prior copy and test THAT instead — a false
+  # green that would have gone undetected without deliberately re-running
+  # with a flipped assertion first.
+  # The success grep below must match ONLY the final aggregate summary
+  # line, not one of the 25 per-suite "Tests run: N, Failures: 0..." lines
+  # Surefire prints along the way (real bug caught live: an early version
+  # of this pattern had no end-anchor, so it happily matched any passing
+  # suite's own line even when a LATER suite failed and the real
+  # aggregate read "Failures: 1" — a sabotage test with one flipped
+  # assertion still reported green until this was anchored). The
+  # aggregate line is the only one with no trailing
+  # ", Time elapsed: ... -- in <ClassName>" text, hence the `$` anchor;
+  # it is tagged [ERROR] instead of [INFO] on a real failure, hence
+  # matching either prefix (a genuine failure still won't match the
+  # "Failures: 0" requirement itself).
+  AGG_PATTERN='^\[(INFO|ERROR)\][[:space:]]+Tests run: [0-9]+, Failures: 0, Errors: 0, Skipped: [0-9]+$'
+  if dexec_sandbox "rm -rf $GATE_DEST/JavaJCE && mkdir -p $GATE_DEST" \
+     && docker cp "$JAVAJCE_DIR" "$SANDBOX_CONTAINER:$GATE_DEST/JavaJCE" >/dev/null 2>&1 \
+     && dexec_sandbox "cd $GATE_DEST/JavaJCE && \
+          export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
+          mvn -o test 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' > /tmp/javajce-gate.log; \
+          grep -E '$AGG_PATTERN' /tmp/javajce-gate.log >/dev/null"; then
+    ok "JavaJCE provider suite ($(dexec_sandbox "grep -E '$AGG_PATTERN' /tmp/javajce-gate.log | tail -1"))"
+  else
+    bad "JavaJCE provider suite — see /tmp/javajce-gate.log inside $SANDBOX_CONTAINER for the real failure"
+  fi
+fi
+
 # ── verdict ─────────────────────────────────────────────────────────────────
 echo
 if [[ ${#FAILED[@]} -eq 0 ]]; then
@@ -274,6 +355,7 @@ if [[ ${#FAILED[@]} -eq 0 ]]; then
   [[ $RUN_ACVP_WASM == 1 ]] && FLAGS="$FLAGS,acvp-wasm"
   [[ $RUN_TLS_INTEROP == 1 ]] && FLAGS="$FLAGS,tls-interop"
   [[ $RUN_RELEASE_XMSS == 1 ]] && FLAGS="$FLAGS,release-xmss"
+  [[ $RUN_JAVAJCE == 1 ]] && FLAGS="$FLAGS,javajce"
   {
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "flags: $FLAGS"

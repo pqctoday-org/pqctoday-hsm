@@ -34,6 +34,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **A real Java JCA/JCE provider** (`JavaJCE/`, `com.pqctoday.hsm.jce.SoftHSMv3Provider`)
+  replacing the placeholder documented under Removed above — FFM-based
+  (`java.lang.foreign`, no JDK-internal APIs), targeting JDK 24+ (JDK 27
+  for TLS specifically, see below). Real, working coverage: `SecureRandom`
+  (token DRBG), digests (SHA-2/SHA-3), signatures (ML-DSA-44/65/87,
+  SLH-DSA — all 12 FIPS 205 parameter sets, Ed25519/Ed448, EC P-256/384/521,
+  RSA PKCS#1 v1.5 and RSASSA-PSS), `KeyPairGenerator`/`KeyFactory` for every
+  algorithm above plus ML-KEM-512/768/1024 (public-key import; private-key
+  import is refused by FIPS 140-3 L3 policy — keys are generated on-token),
+  `KEM` (ML-KEM, including under the bare `"ML-KEM"` name JDK 27's own JEP
+  527 hybrid-TLS path requests), `Cipher` (RSA-OAEP, AES-GCM/CBC/CTR,
+  AES-KeyWrap/KeyWrapPad), `KeyAgreement` (ECDH), `KeyGenerator`/`Mac`
+  (AES, HMAC-SHA-2/SHA-3, KMAC128/256, AES-CMAC), `KDF` (HKDF-SHA256/384/512,
+  JEP 478), `SecretKeyFactory` (PBKDF2, SP 800-108 counter/feedback),
+  `KeyStore` (full read/write/delete, real PKIX trust-path validation
+  against it), and `AuthProvider` (real `login()`/`logout()`). Every
+  generated/derived key is opaque (`getEncoded()` returns `null`) except a
+  small, disclosed set of deliberate exceptions where the whole point of
+  the primitive is to leave the token (ML-KEM's decapsulated secret,
+  ECDH's derived secret); `Destroyable` is implemented on every key type
+  with real `C_DestroyObject` behind it, not just a Java-side flag. A full
+  pre-operational self-test battery (real published KATs, a DRBG check,
+  and pairwise-consistency checks per asymmetric family) runs before any
+  service is exposed and fails closed. See `JavaJCE/README.md` for the
+  full algorithm table and known limitations, and
+  `docs/jdk27-jca-provider-security-posture.md` for the section-by-section
+  FIPS 140-3 area mapping. Deliberately excluded by FIPS 140-3 L3 policy
+  (never registered, not merely discouraged): SHA-1/MD5/RIPEMD-160/
+  Keccak-256, raw/PKCS#1-v1.5-as-Cipher, ChaCha20, AES-ECB, X25519/X448,
+  BIP32, standalone CONCATENATE/SHAKE-256-KDF, and stateful HSS/XMSS/
+  XMSS-MT (deferred pending their own state-management design, not an
+  oversight).
 - **gRPC and REST PKCS#11 remoting** (new `remoting/` standalone workspace:
   `proto`/`core`/`grpc`/`rest`/`acceptance`) — two new network-facing access
   paths to the engine (`pqc-grpc-pkcs11`, `pqc-rest-pkcs11`), alongside the
@@ -132,6 +164,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the real written length against it. Now returns the exact size for
   GCM/CBC/CTR; only CBC+PKCS5 decrypt keeps a safe upper bound (the
   true unpadded length isn't knowable before decrypting).
+- **Engine: `C_EncryptInit`/`C_DecryptInit` rejected every SHA-3 OAEP
+  combination with `CKR_ARGUMENTS_BAD`** — found while building the
+  `JavaJCE` provider's RSA-OAEP support and fixed at the root (not
+  worked around) per explicit instruction. Root cause:
+  `SoftHSM_keygen.cpp`'s `MechParamCheckRSAPKCSOAEP` hardcoded a
+  `validCombo` allow-list covering only `{SHA-1, SHA224, SHA256, SHA384,
+  SHA512}`. Verified against the real OASIS PKCS#11 v3.2 Standard PDF
+  (§6.1.8) that `CK_RSA_PKCS_OAEP_PARAMS.hashAlg` has no spec-mandated
+  hash-family restriction and `CKG_MGF1_SHA3_224/256/384/512` sit in the
+  same normative MGF table as the SHA-2 variants — a genuine engine
+  completeness gap, not a spec restriction. Fixed across four sites in
+  three files (`AsymmetricAlgorithm.h`'s `AsymMech::Type` enum,
+  `OSSLRSA.cpp`'s encrypt/decrypt padding-check and MD-selection logic,
+  `SoftHSM_cipher.cpp`'s mechanism-to-`AsymMech` mapping,
+  `SoftHSM_keygen.cpp`'s `validCombo` check), reusing the same
+  `EVP_sha3_*()` pattern already proven elsewhere in this engine
+  (ECDSA, HMAC). Note: SHA-3 OAEP cannot be cross-verified against the
+  JDK at all — `SunJCE`'s OAEP transformation-string parser doesn't
+  recognize a `SHA3-*` digest name and throws `NoSuchPaddingException`
+  unconditionally — so `JavaJCE`'s SHA-3 OAEP coverage is a self-round-trip
+  test plus a Bouncy Castle cross-check, not a JDK cross-verify.
 
 - **`bench-harness`'s keygen templates for Ed25519/X25519/RSA-with-
   parameter-set had gone stale against two already-shipped engine

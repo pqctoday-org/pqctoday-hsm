@@ -116,7 +116,7 @@ wrappers — each with its own README.
 | Rust WASM engine | N/A | **Pure Rust (~1.4 MB), drop-in parity** |
 | npm package | N/A | **@pqctoday/softhsm-wasm** |
 | StrongSwan IKEv2 ML-DSA | Not supported | **`strongswan-pkcs11/` adapter** — `CKK_ML_DSA` (0x4a), `CKM_ML_DSA_KEY_PAIR_GEN` (0x1c), `CKM_ML_DSA` (0x1d) |
-| Java JCE / Besu integration | Not supported | **`JavaJCE/` layer** — routes JCA `ML-DSA-65` and `ML-KEM-768` requests to softhsmv3 via patched SunPKCS11 |
+| Java JCA/JCE provider | Not supported | **`JavaJCE/` provider** — FFM-based (`java.lang.foreign`, no JDK-internal APIs), full standard-JCA coverage (signatures, KEM, Cipher, KeyAgreement, KDF, KeyStore) — see [Java JCA/JCE Provider](#java-jcajce-provider-javajce) below |
 | OpenSSH ML-DSA-65 signing | Not supported | **`openssh-pkcs11/` connector** — `ssh-mldsa-65` key type (draft-sfluhrer-ssh-mldsa-06) with signing via `CKM_ML_DSA` (0x1d); WASM client + privsep-free server |
 
 ## PQC Algorithms
@@ -748,7 +748,7 @@ SoftHSMv3 exposes integration interfaces that cover the full stack from browser 
 | **OpenSSL 3.x Provider** | `src/vendor/pkcs11-provider/` | Transparent routing from any `openssl` CLI or linked app |
 | **KMIP 3.0 server + CACP** | [`kmip/`](kmip/README.md) | Networked key management (TTLV/TLS) + crypto-agility policy engine; ML-KEM/ML-DSA/SLH-DSA + hybrid KEMs (3 ECDHE-MLKEM groups, OpenSSL-interop-verified); X25519/X448 ECDH + key agreement |
 | **StrongSwan Adapter** | [`strongswan-pkcs11/`](strongswan-pkcs11/README.md) | IKEv2 VPN — ML-KEM-768 key exchange + ML-DSA signing |
-| **Java JCE Layer** | [`JavaJCE/`](JavaJCE/JavaJCESofthsmv3.md) | Hyperledger Besu and JCA-based apps — ML-DSA-65 / ML-KEM-768 |
+| **Java JCA/JCE Provider** | [`JavaJCE/`](JavaJCE/README.md) | Any JCA-based app — real, standard-JCA signatures/KEM/Cipher/KeyAgreement/KDF/KeyStore, plus JDK 27 JEP 527 hybrid-TLS support |
 | **OpenSSH Connector** | [`openssh-pkcs11/`](openssh-pkcs11/README.md) | ML-DSA-65 ssh / sshd (draft-sfluhrer-ssh-mldsa-06); WASM build runs a real PQ SSH handshake |
 | **OpenPGP Connector** | [`openpgp/`](openpgp/README.md) | OpenPGP signing / decryption with keys held on the token (ML-DSA / ML-KEM) |
 | **MLS Provider** | [`openmls-provider/`](openmls-provider/README.md) | OpenMLS crypto provider backed by the token |
@@ -827,47 +827,47 @@ Integration pathways for tools in the PQCToday sandbox:
 
 ---
 
-## Java JCE Provider (`JavaJCE/`)
+## Java JCA/JCE Provider (`JavaJCE/`)
 
-The `JavaJCE/` module is a lightweight Java Security Provider that bridges JCA-based applications — including Hyperledger Besu — to softhsmv3 PKCS#11 v3.2 ML-DSA signing and ML-KEM key exchange.
+`JavaJCE/` (`com.pqctoday.hsm.jce.SoftHSMv3Provider`) is a real Java
+Security Provider bridging any standard JCA/JCE application to
+softhsmv3's PKCS#11 v3.2 surface — FFM-based (`java.lang.foreign`, no
+JDK-internal APIs, no JVM patching of any kind), replacing an earlier
+placeholder module that never worked (see the repo's `CHANGELOG.md`
+"Removed" entry for exactly what was wrong with it and why nothing from
+it carried forward).
 
-### Why it is needed
-
-Standard Java lacks frontend translation logic to convert high-level strings like `"ML-DSA-65"` into the `CKM_ML_DSA` (0x1d) integer used by the patched SunPKCS11 JNI. The `JavaJCE/` module intercepts JCA requests and performs that translation.
-
-### Components
-
-| File | Role |
-| --- | --- |
-| `SoftHSMJCEProvider.java` | Registers the provider with the JCA `Security` framework |
-| `MLDSASignatureSpi.java` | Intercepts `Signature.getInstance("ML-DSA-65")`, translates to `CKM_ML_DSA` (0x1d) + `C_SignInit` |
-| `MLKEMKeyAgreementSpi.java` | Intercepts `KeyAgreement.getInstance("ML-KEM-768")`, routes to `C_EncapsulateKey` / `C_DecapsulateKey` |
-| `PKCS11IntegrationTest.java` | Integration test validating round-trips against the compiled `libsofthsmv3.so` |
-
-### Usage
+Real, working coverage: `SecureRandom` (token DRBG), digests
+(SHA-2/SHA-3), signatures (ML-DSA-44/65/87, all 12 SLH-DSA FIPS 205
+parameter sets, Ed25519/Ed448, EC P-256/384/521, RSA PKCS#1 v1.5 and
+RSASSA-PSS including the SHA-3 family), `KeyPairGenerator`/`KeyFactory`
+for every algorithm above plus ML-KEM-512/768/1024, `KEM` (also under
+the bare `"ML-KEM"` name — the exact string JDK 27's own JEP 527
+hybrid-TLS path requests, and this provider completes real, live TLS
+1.3 handshakes through that path for both FIPS-profile hybrid groups),
+`Cipher` (RSA-OAEP, AES-GCM/CBC/CTR, AES-KeyWrap/KeyWrapPad),
+`KeyAgreement` (ECDH), `KeyGenerator`/`Mac`, `KDF` (HKDF, JEP 478),
+`SecretKeyFactory` (PBKDF2, SP 800-108), `KeyStore` (full read/write/
+delete, real PKIX trust-path validation), and `AuthProvider`. Standard
+JCA calls, no PKCS#11 plumbing visible to application code:
 
 ```java
-// Register the provider (typically in app bootstrap or Dockerfile entrypoint)
-Security.addProvider(new SoftHSMJCEProvider());
+Security.addProvider(new SoftHSMv3Provider());
 
-// Standard JCA call — no PKCS#11 plumbing visible to application code
 Signature sig = Signature.getInstance("ML-DSA-65");
 sig.initSign(mlDsaPrivateKey);
 sig.update(message);
 byte[] signature = sig.sign();
 ```
 
-### Deployment (Docker)
-
-The module is compiled inside `Dockerfile.physics` (the `playground-physics` sandbox container) using the patched JRE that holds the `CKM_ML_DSA` constants:
-
-```dockerfile
-COPY JavaJCE /JavaJCE
-RUN javac -cp /opt/jre/lib/ext/sunpkcs11.jar -d /build/javajce /JavaJCE/src/**/*.java \
- && jar -cf /opt/besu/lib/javajce-softhsm.jar -C /build/javajce .
-```
-
-The resulting JAR is added to the Besu classpath so all `Signature`/`KeyAgreement` calls transparently route through softhsmv3.
+Every generated/derived key is opaque (`getEncoded()` returns `null`)
+by design, with a small, disclosed set of deliberate exceptions where
+the whole point of the primitive is to leave the token (ML-KEM's
+decapsulated secret, ECDH's derived secret). See
+[`JavaJCE/README.md`](JavaJCE/README.md) for the full algorithm table,
+build/test instructions, and known limitations, and
+[`docs/jdk27-jca-provider-security-posture.md`](docs/jdk27-jca-provider-security-posture.md)
+for the section-by-section FIPS 140-3 area mapping.
 
 ---
 

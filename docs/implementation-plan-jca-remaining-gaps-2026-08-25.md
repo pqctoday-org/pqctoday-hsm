@@ -806,6 +806,70 @@ its own Rust-side test obligations.
    execution scope — noted as the main plan already notes it, actioned
    only with the usual proof-gated catalog process.
 
+**WS-F: DONE 2026-08-25, PASSED — one real bug caught by deliberately
+sabotaging the new gate step before trusting it.**
+
+- **`scripts/local-gate.sh --javajce`**, new opt-in step: syncs
+  `JavaJCE/` into `$SANDBOX_CONTAINER` (`pqc-dev-sandbox`, default —
+  a NEW container variable, separate from `$RUST_CONTAINER`, since
+  JDK 27 only lives there and the two containers are not ABI-compatible
+  — see WS-A's own build-environment finding), runs `mvn -o test`, and
+  asserts the aggregate summary line shows zero failures/errors. Added
+  to `--all`, the header comment's numbered list, and the usage block.
+  **A real bug, not a hypothetical, caught by this workstream's own
+  discipline of sabotage-testing new verification code before trusting
+  it green** (per this session's own standing practice — sabotage a
+  copy, never a write path): the first version's success check used
+  `grep -E '^\[INFO\] Tests run: [0-9]+, Failures: 0, Errors: 0'` with
+  no end-anchor, which matches not just the final aggregate summary
+  line but any of the 25 individual per-suite lines Surefire prints
+  along the way — so a run with exactly ONE class-level failure still
+  found 24 other matching "Failures: 0" lines and reported PASS. Caught
+  by copying `JavaJCE/` to a scratch directory, flipping one assertion
+  in `DestroyableTest`, and running the step's logic against that copy
+  standalone before wiring it into the real script — it reported green
+  on a build that had just failed. Fixed with an end-anchored pattern
+  matching only the true aggregate line (`Skipped: N$`, no trailing
+  `-- in ClassName`), re-verified against both the sabotaged copy
+  (correctly reports fail) and the real source (correctly reports the
+  genuine 208/208 pass). A SECOND real bug surfaced by the same
+  sabotage pass, unrelated to the grep pattern: `docker cp SRC
+  container:DEST` copies SRC as a subdirectory of DEST when DEST
+  already exists, rather than overwriting DEST's contents in place — a
+  second run of this step without first removing the whole prior
+  `JavaJCE` copy (not just its `target/`) would have silently nested
+  the new source under stale prior source and tested THAT. Fixed by
+  `rm -rf`-ing the whole destination before every `docker cp`, not just
+  `target/`. Also emits an `AGG_PATTERN` comment explaining the ANSI
+  finding (Maven emits real color escapes even under a non-TTY `docker
+  exec`, confirmed live via `cat -v`, not just a terminal-rendering
+  artifact) and why the log is stripped before matching.
+- **CHANGELOG.md**: one consolidated entry (new, first bullet under
+  `### Added`) covering the real JavaJCE provider as a whole — every
+  service actually implemented (cross-checked against
+  `JavaJCE/README.md`'s own table, not re-derived from memory), the
+  opaque-key design, the self-test battery, and pointers to the full
+  README and security-posture doc. Also added the SHA-3 OAEP engine fix
+  (`docs/implementation-plan-jdk27-jca-provider-2026-08-24.md`'s own W3
+  entry) under `### Fixed` — confirmed genuinely missing from the
+  CHANGELOG first (grepped for "SHA3.*OAEP", zero matches) rather than
+  assumed absent.
+- **Root `README.md`**: found substantially wrong, not just missing a
+  row — the existing "Java JCE Provider" section (and two summary-table
+  rows) still described the REMOVED placeholder module verbatim
+  (`SoftHSMJCEProvider`/`MLDSASignatureSpi`/`MLKEMKeyAgreementSpi`,
+  "patched SunPKCS11 JNI", a `Dockerfile.physics`/`playground-physics`
+  deployment snippet, a dead link to a `JavaJCESofthsmv3.md` file
+  confirmed no longer present on disk) — exactly the design the
+  CHANGELOG's own "Removed" entry says never worked and referenced
+  infrastructure that never existed in the repo. Rewrote the whole
+  section to describe the real, working FFM-based provider and fixed
+  both summary-table rows and the integration-interfaces table's dead
+  link, rather than only touching the one row the plan item's own text
+  named — leaving factually wrong architecture claims standing in a
+  checked-in root README while fixing an adjacent row would have been
+  worse than not touching the file at all.
+
 ---
 
 ## 9. WS-G — W8, sandbox side (full scope, decision Q3)
