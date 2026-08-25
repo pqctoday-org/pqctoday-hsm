@@ -97,6 +97,15 @@ public final class SoftHSMv3Provider extends Provider {
         registerDigest("SHA3-384", CKM_SHA3_384);
         registerDigest("SHA3-512", CKM_SHA3_512);
         // Deliberately NOT registered: SHA-1, MD5, RIPEMD-160 — see class javadoc.
+
+        // W2: ML-DSA (FIPS 204) — KeyPairGenerator + Signature, one
+        // service triple per parameter set. See P11MLDSAKeyPairGeneratorSpi
+        // / P11MLDSASignatureSpi for why one Signature class serves all
+        // three (the mechanism CKM_ML_DSA is parameter-set-agnostic; the
+        // parameter set lives on the key, not the mechanism).
+        registerMLDSA("ML-DSA-44", P11Constants.CKP_ML_DSA_44);
+        registerMLDSA("ML-DSA-65", P11Constants.CKP_ML_DSA_65);
+        registerMLDSA("ML-DSA-87", P11Constants.CKP_ML_DSA_87);
     }
 
     private void registerDigest(String name, long mech) {
@@ -105,6 +114,23 @@ public final class SoftHSMv3Provider extends Provider {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
                 return new P11MessageDigestSpi(lib, mech);
+            }
+        });
+    }
+
+    private void registerMLDSA(String name, long parameterSet) {
+        putService(new Service(this, "KeyPairGenerator", name,
+            P11MLDSAKeyPairGeneratorSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11MLDSAKeyPairGeneratorSpi(lib, name, parameterSet);
+            }
+        });
+        putService(new Service(this, "Signature", name,
+            P11MLDSASignatureSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11MLDSASignatureSpi(lib);
             }
         });
     }

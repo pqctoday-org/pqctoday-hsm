@@ -51,18 +51,34 @@ import static java.lang.foreign.ValueLayout.*;
  * the process lifetime, matching the engine's own atexit-handler design
  * intent, and matching how JCA providers conventionally treat expensive
  * process-wide native state (not torn down per-Provider-instance/GC).
- * close() only releases this instance's own session (C_Logout +
- * C_CloseSession), never the global state other instances may still need.
+ * close() only releases this instance's own session (C_CloseSession) —
+ * see the close() method itself for why C_Logout is deliberately excluded
+ * too (same token-wide-state reasoning as C_Initialize/C_Finalize above).
  */
 final class P11Library implements AutoCloseable {
 
     // CK_MECHANISM { CK_MECHANISM_TYPE; CK_VOID_PTR; CK_ULONG; }
     private static final MemoryLayout MECHANISM =
         MemoryLayout.structLayout(JAVA_LONG, ADDRESS, JAVA_LONG);
+    // CK_ATTRIBUTE { CK_ATTRIBUTE_TYPE; CK_VOID_PTR; CK_ULONG; }
+    private static final MemoryLayout ATTRIBUTE =
+        MemoryLayout.structLayout(JAVA_LONG, ADDRESS, JAVA_LONG);
+    private static final long ATTR_SIZE = ATTRIBUTE.byteSize();
 
     static final long CKU_USER = 1L;
     static final long CKF_SERIAL_SESSION = 0x4L;
     static final long CKF_RW_SESSION = 0x2L;
+
+    /** Attribute value pair; use attr()/attrBool()/attrLong() to build one. */
+    record Attr(long type, byte[] value) {}
+
+    static Attr attr(long type, byte[] value)  { return new Attr(type, value); }
+    static Attr attrBool(long type, boolean v) { return new Attr(type, new byte[]{ (byte) (v ? 1 : 0) }); }
+    static Attr attrLong(long type, long v) {
+        byte[] b = new byte[8];
+        for (int i = 0; i < 8; i++) b[i] = (byte) (v >>> (8 * i));
+        return new Attr(type, b);
+    }
 
     // Process-global C_Initialize guard — see class javadoc. Synchronized
     // on the class object; construction only happens on the (rare, non-hot)
@@ -77,7 +93,8 @@ final class P11Library implements AutoCloseable {
         // on this token closes" policy instead of an individual
         // P11Library instance guessing at other instances' state.
         cLogout, cCloseSession, cDigestInit, cDigestUpdate, cDigestFinal,
-        cGenerateRandom, cSeedRandom;
+        cGenerateRandom, cSeedRandom, cGenerateKeyPair, cSignInit, cSign,
+        cVerifyInit, cVerify, cGetAttributeValue;
     private final long session;
     private volatile boolean closed;
 
@@ -103,6 +120,17 @@ final class P11Library implements AutoCloseable {
             cDigestFinal   = h(linker, lib, "C_DigestFinal", fd(JAVA_LONG, ADDRESS, ADDRESS));
             cGenerateRandom = h(linker, lib, "C_GenerateRandom", fd(JAVA_LONG, ADDRESS, JAVA_LONG));
             cSeedRandom    = h(linker, lib, "C_SeedRandom", fd(JAVA_LONG, ADDRESS, JAVA_LONG));
+            // Signatures below cross-checked against P11Ffm's already-live-verified
+            // bindings (samples/java/.../P11Ffm.java in pqctoday-sandbox), not
+            // re-derived from the spec by hand — avoids repeating the transcription
+            // slip caught earlier on C_Login.
+            cGenerateKeyPair = h(linker, lib, "C_GenerateKeyPair",
+                fd(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS));
+            cSignInit      = h(linker, lib, "C_SignInit", fd(JAVA_LONG, ADDRESS, JAVA_LONG));
+            cSign          = h(linker, lib, "C_Sign", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS));
+            cVerifyInit    = h(linker, lib, "C_VerifyInit", fd(JAVA_LONG, ADDRESS, JAVA_LONG));
+            cVerify        = h(linker, lib, "C_Verify", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG));
+            cGetAttributeValue = h(linker, lib, "C_GetAttributeValue", fd(JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG));
 
             ensureGlobalInit(linker, lib);
 
@@ -189,7 +217,96 @@ final class P11Library implements AutoCloseable {
         }
     }
 
+    /** C_GenerateKeyPair; returns { publicHandle, privateHandle }. */
+    long[] generateKeyPair(long mechType, Attr[] pubTmpl, Attr[] prvTmpl) {
+        ensureOpen();
+        try {
+            MemorySegment mech = mech(mechType);
+            MemorySegment pub = attrs(pubTmpl);
+            MemorySegment prv = attrs(prvTmpl);
+            MemorySegment hPub = arena.allocate(JAVA_LONG);
+            MemorySegment hPrv = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cGenerateKeyPair, session, mech, pub, (long) pubTmpl.length,
+                prv, (long) prvTmpl.length, hPub, hPrv), "C_GenerateKeyPair");
+            return new long[]{ hPub.get(JAVA_LONG, 0), hPrv.get(JAVA_LONG, 0) };
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("generateKeyPair failed", t);
+        }
+    }
+
+    /** C_SignInit + C_Sign (single-part), two-call sizing. */
+    byte[] sign(long mechType, long key, byte[] data) {
+        ensureOpen();
+        try {
+            MemorySegment mech = mech(mechType);
+            P11Error.check(invokeRv(cSignInit, session, mech, key), "C_SignInit");
+            MemorySegment msg = bytes(data);
+            MemorySegment len = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cSign, session, msg, (long) data.length, MemorySegment.NULL, len), "C_Sign(size)");
+            MemorySegment sig = arena.allocate(len.get(JAVA_LONG, 0));
+            P11Error.check(invokeRv(cSign, session, msg, (long) data.length, sig, len), "C_Sign");
+            return toBytes(sig, len.get(JAVA_LONG, 0));
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("sign failed", t);
+        }
+    }
+
+    /** C_VerifyInit + C_Verify (single-part). Returns false (not an exception) on CKR_SIGNATURE_INVALID. */
+    boolean verify(long mechType, long key, byte[] data, byte[] signature) {
+        ensureOpen();
+        try {
+            MemorySegment mech = mech(mechType);
+            P11Error.check(invokeRv(cVerifyInit, session, mech, key), "C_VerifyInit");
+            long rv = invokeRv(cVerify, session, bytes(data), (long) data.length,
+                bytes(signature), (long) signature.length);
+            if (rv == P11Error.CKR_OK) return true;
+            if (rv == 0x000000c0L /* CKR_SIGNATURE_INVALID */) return false;
+            P11Error.check(rv, "C_Verify");
+            return false; // unreachable — check() throws for any other non-OK rv
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("verify failed", t);
+        }
+    }
+
+    /** C_GetAttributeValue, two-call sizing — for public-key export (SubjectPublicKeyInfo assembly). */
+    byte[] getAttributeBytes(long object, long attrType) {
+        ensureOpen();
+        try {
+            MemorySegment a = arena.allocate(ATTRIBUTE);
+            a.set(JAVA_LONG, 0, attrType);
+            a.set(ADDRESS, 8, MemorySegment.NULL);
+            a.set(JAVA_LONG, 16, 0L);
+            P11Error.check(invokeRv(cGetAttributeValue, session, object, a, 1L), "C_GetAttributeValue(size)");
+            long len = a.get(JAVA_LONG, 16);
+            MemorySegment buf = arena.allocate(Math.max(len, 1));
+            a.set(ADDRESS, 8, buf);
+            P11Error.check(invokeRv(cGetAttributeValue, session, object, a, 1L), "C_GetAttributeValue");
+            return toBytes(buf, len);
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("getAttributeBytes failed", t);
+        }
+    }
+
     // ── Struct builders (shared with future W2+ SPIs via package access) ──
+
+    private MemorySegment attrs(Attr[] template) {
+        MemorySegment seg = arena.allocate(ATTR_SIZE * Math.max(template.length, 1));
+        for (int i = 0; i < template.length; i++) {
+            MemorySegment val = bytes(template[i].value());
+            seg.set(JAVA_LONG, i * ATTR_SIZE, template[i].type());
+            seg.set(ADDRESS, i * ATTR_SIZE + 8, val);
+            seg.set(JAVA_LONG, i * ATTR_SIZE + 16, template[i].value().length);
+        }
+        return seg;
+    }
 
     MemorySegment mech(long type) {
         MemorySegment m = arena.allocate(MECHANISM);

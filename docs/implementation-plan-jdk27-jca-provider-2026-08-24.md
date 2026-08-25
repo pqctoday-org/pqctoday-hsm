@@ -498,15 +498,68 @@ full since both are load-bearing for W2+.
   17.5KB jar. POST fail-closed path verified via sabotaged copy (above).
 
 ### W2 — Signatures + key generation
-- `KeyPairGeneratorSpi` (ML-DSA, SLH-DSA, EC, RSA, EdDSA),
-  `SignatureSpi` for every §4.1/§4.2 signature row, `KeyFactorySpi`
-  (public-key SPKI export/import; private import refused — L3),
-  `KeyStoreSpi` read path (enumerate token objects — fixes the "0 keys"
-  SunPKCS11 gap properly).
-- **Verify:** cross-provider — sign with our provider, verify with JDK
-  24 software ML-DSA and vice versa; SLH-DSA against ACVP KATs; ECDSA/
-  EdDSA/RSA-PSS cross-checked with SunEC/SunRsaSign; negative tests
-  (wrong key type, tampered sig, SHA-1 name refused).
+
+**ML-DSA slice: DONE 2026-08-24, PASSED.** Remaining in W2: SLH-DSA, EC,
+RSA, EdDSA `KeyPairGeneratorSpi`/`SignatureSpi`, `KeyFactorySpi` (import
+side), `KeyStoreSpi` read path — not yet built.
+
+- `P11Constants`: shared CK_* constants class (values from `pkcs11t.h`,
+  same source-of-truth discipline as everywhere else in this repo) — the
+  home for every algorithm's constants going forward, so W2's remaining
+  algorithms don't scatter magic numbers per-file the way W1's digest
+  mechanisms did (a known, accepted minor inconsistency from W1, not
+  worth churning working code to fix retroactively).
+- `P11Key.Pub`/`P11Key.Priv`: opaque handle-backed key objects (plan
+  §6.2). Private keys: `getFormat()`/`getEncoded()` both `null` —
+  confirmed live via a dedicated test (`privateKeyNeverExportsMaterial`).
+  Public keys export their **real** X.509 SubjectPublicKeyInfo DER — and
+  critically, this class does **not** hand-assemble that ASN.1 itself.
+  Traced the engine's own `generateMLDSA` (`SoftHSM_keygen.cpp:5201+`)
+  and found it already computes a correct SPKI via `spkiFromPkey()` and
+  stores it under `CKA_PUBLIC_KEY_INFO` (PKCS#11 v3.2 §4.14) — so
+  `P11Key.Pub` just reads that attribute via `C_GetAttributeValue`
+  rather than reinventing ASN.1 encoding (same "don't reinvent
+  codecs" principle the sandbox samples were held to all session).
+- `P11MLDSAKeyPairGeneratorSpi`, one instance per registered parameter
+  set (ML-DSA-44/65/87 are separate JCA service names). Overrides
+  `initialize(AlgorithmParameterSpec, SecureRandom)` — a direct,
+  concrete application of the W0.1 finding: a caller may call this
+  overload redundantly even when the algorithm identity is already fixed
+  by the service name, the JDK's default implementation throws if not
+  overridden, and W0.1 showed that failure mode can be silently absorbed
+  by a caller (JSSE fell back to a different provider with no visible
+  error) rather than surfaced — so leaving it unoverridden here would
+  reproduce the exact footgun already found once this session.
+- `P11MLDSASignatureSpi`: **one class serves all three parameter sets**
+  — `CKM_ML_DSA` is parameter-set-agnostic; the parameter set lives on
+  the KEY (`CKA_PARAMETER_SET`), not the mechanism, confirmed via the
+  engine's own dispatch code before assuming it.
+- Native layer additions to `P11Library`: `C_GenerateKeyPair`,
+  `C_SignInit`/`C_Sign`, `C_VerifyInit`/`C_Verify`,
+  `C_GetAttributeValue`, and the `CK_ATTRIBUTE` struct builder —
+  **cross-checked against `P11Ffm`'s own already-live-verified bindings**
+  rather than re-derived from the spec by hand, specifically to avoid
+  repeating the `C_Login` parameter-count transcription slip caught
+  during W1 (documented there; same discipline applied proactively here).
+- **Verify — all live:** `mvn test`, 10 new ML-DSA tests (parameterized
+  across all 3 parameter sets) + the 4 existing W1 tests, 14/14 pass.
+  Confirmed: sign/verify round-trips; tampered-message verify correctly
+  returns `false` (not an exception); signature sizes match FIPS 204
+  exactly (2420 / 3309 / 4627 bytes for 44/65/87); private key material
+  never exports (`null`/`null`); and — the strongest check —
+  **our-generated public key (real SPKI DER) imported into JDK 24's own
+  software ML-DSA `KeyFactory`, verifying our token-produced signature,
+  succeeds** — proving the SPKI export is standards-correct, not merely
+  self-consistent with our own `KeyFactory`.
+- **Known gap, not silently skipped:** the reverse cross-check (a
+  JDK-software-generated keypair, signed by JDK, verified by *our*
+  provider) does not work yet — `P11MLDSASignatureSpi.engineInitVerify`
+  only accepts `P11Key.Pub` instances; there is no import path for a
+  foreign-provider `PublicKey`. `KeyFactorySpi`'s import side (still
+  unbuilt, listed above) is exactly what closes this gap — recorded here
+  so it isn't forgotten between now and then.
+- Original plan text below retained for the remaining W2 scope
+  (SLH-DSA/EC/RSA/EdDSA, KeyFactory import, KeyStore read path):
 
 ### W3 — KEM + key agreement + OAEP
 - `KEMSpi` (ML-KEM 512/768/1024) over `C_EncapsulateKey`/`C_DecapsulateKey`;
