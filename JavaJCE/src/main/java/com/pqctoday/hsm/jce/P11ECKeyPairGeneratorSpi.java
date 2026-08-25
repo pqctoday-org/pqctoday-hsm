@@ -111,8 +111,8 @@ final class P11ECKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
         };
         long[] handles = lib.generateKeyPair(CKM_EC_KEY_PAIR_GEN, pubTmpl, prvTmpl);
         byte[] spki = lib.getAttributeBytes(handles[0], CKA_PUBLIC_KEY_INFO);
-        P11Key.Pub pub = new P11Key.Pub(handles[0], "EC", spki);
-        P11Key.Priv priv = new P11Key.Priv(handles[1], "EC");
+        P11Key.Pub pub = new P11Key.Pub(lib, handles[0], "EC", spki);
+        P11Key.Priv priv = new P11Key.Priv(lib, handles[1], "EC");
         return new KeyPair(pub, priv);
     }
 }

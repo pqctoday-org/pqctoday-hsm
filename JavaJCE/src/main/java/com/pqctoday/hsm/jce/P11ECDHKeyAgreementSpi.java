@@ -54,6 +54,14 @@ final class P11ECDHKeyAgreementSpi extends KeyAgreementSpi {
             throw new InvalidKeyException("not a key from " + SoftHSMv3Provider.class.getSimpleName());
         }
         ourPrivateKeyHandle = p.handle();
+        // Real KeyAgreementSpi contract (verified against JDK 27 source):
+        // "After a call to generateSecret, the object can be reused... by
+        // calling one of the init methods" — so a caller starting a new
+        // agreement here has, by contract, already finished with any
+        // prior derivedSecret. Zero it before discarding the reference
+        // (§6.5) rather than just dropping it for the GC to reclaim
+        // whenever it gets around to it.
+        if (derivedSecret != null) java.util.Arrays.fill(derivedSecret, (byte) 0);
         derivedSecret = null;
     }
 

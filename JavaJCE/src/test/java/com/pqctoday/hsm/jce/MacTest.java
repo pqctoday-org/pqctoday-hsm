@@ -92,7 +92,7 @@ class MacTest {
         byte[] raw = new byte[macLength];
         new java.security.SecureRandom().nextBytes(raw);
         long handle = importRawSecret(p.lib, raw, CKK_GENERIC_SECRET);
-        SecretKey ourKey = new P11Key.Secret(handle, name);
+        SecretKey ourKey = new P11Key.Secret(p.lib, handle, name);
         SecretKey jdkKey = new SecretKeySpec(raw, name);
 
         Mac ours = Mac.getInstance(name, p);
@@ -113,7 +113,7 @@ class MacTest {
         byte[] rawKey = new byte[16];
         new java.security.SecureRandom().nextBytes(rawKey);
         long handle = importRawSecret(p.lib, rawKey, CKK_AES);
-        SecretKey ourKey = new P11Key.Secret(handle, "AES");
+        SecretKey ourKey = new P11Key.Secret(p.lib, handle, "AES");
         SecretKey bcKey = new SecretKeySpec(rawKey, "AES");
 
         Mac ours = Mac.getInstance("AESCMAC", p);
@@ -139,7 +139,7 @@ class MacTest {
         byte[] rawKey = new byte[keyBytes];
         new java.security.SecureRandom().nextBytes(rawKey);
         long handle = importRawSecret(p.lib, rawKey, CKK_GENERIC_SECRET);
-        SecretKey ourKey = new P11Key.Secret(handle, name);
+        SecretKey ourKey = new P11Key.Secret(p.lib, handle, name);
         SecretKey bcKey = new SecretKeySpec(rawKey, name);
 
         Mac ours = Mac.getInstance(name, p);

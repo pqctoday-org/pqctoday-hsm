@@ -1670,6 +1670,130 @@ PASSED.**
   that mentions wildcard-suffixed PKCS#11 mechanism family names.
 - **Verify:** `mvn test`, 183/183 (175 prior + 8 new), 0 failures.
 
+**Zeroization audit (§6.5): DONE 2026-08-25, PARTIAL — real fixes shipped,
+one architectural gap found and deliberately left open rather than
+rushed.**
+- **What the audit actually found, by reading the real code rather than
+  trusting §6.5's own wording** (the same discipline the §5 audit above
+  applied to its own plan section): §6.5 claims three things — "Confined
+  Arenas per operation; buffers... explicitly zeroed before Arena.close()",
+  "C_CloseSession/C_Logout on pool shutdown and JVM shutdown hook", and
+  "destroy() implemented on opaque key objects (Destroyable)." Checking
+  each against the actual code:
+  1. `P11Library`'s `arena` field is `Arena.ofShared()`, allocated once in
+     the constructor and never closed until the whole `P11Library`
+     closes — **not** confined per-operation arenas, and nothing zeroes
+     any buffer before `arena.close()` releases the native memory (FFM's
+     `Arena.close()` deallocates, it does not scrub). **Not fixed this
+     pass** — redesigning this touches every native call site across the
+     whole module (`bytes()`, `mech()`, `mechWithParams()`, `sign()`,
+     `verify()`, `encrypt()`, `decrypt()`, etc. all allocate from this one
+     shared arena) and is a real architectural change, not an incremental
+     slice; attempting it as a rushed add-on this late risked exactly the
+     kind of regression this session's whole discipline exists to avoid.
+     Left as a disclosed, open gap rather than silently claimed done.
+  2. No JVM shutdown hook existed anywhere in the module (grepped the
+     whole tree). **Fixed**: `SoftHSMv3Provider`'s constructor now
+     registers `Runtime.getRuntime().addShutdownHook(new Thread(lib::close, ...))`
+     after a successful POST + service registration — safe to register
+     unconditionally since `P11Library.close()` was already idempotent
+     (a `closed` guard makes a second call a no-op), so no separate
+     removal-on-manual-close bookkeeping is needed.
+  3. `P11Key.Priv/Pub/Secret` implemented no `Destroyable` interface at
+     all. **Fixed** — see below.
+- **`Destroyable` implementation, and why it's the only meaningful
+  "destroy" available:** these classes hold zero plaintext key material
+  in the JVM by design (the entire point of the opaque-handle
+  architecture) — there is no Java-heap byte[] to scrub. The only
+  security-meaningful "destroy" is destroying the underlying PKCS#11
+  object itself via `C_DestroyObject`, so that's what `destroy()` now
+  does on all three classes, requiring each to hold a `P11Library lib`
+  reference (a new constructor parameter — mechanical but wide-reaching:
+  24 call sites across 12 main-source files plus 4 test files construct
+  `P11Key.Priv/Pub/Secret` directly, all updated to pass `lib`/`p.lib`).
+  `destroy()` is idempotent (a second call silently no-ops, matching
+  real-world `Destroyable` implementations rather than the interface's
+  bare-minimum default); `handle()` throws `IllegalStateException` after
+  destroy (per `Destroyable`'s own javadoc: "subsequent calls to certain
+  methods... will result in an IllegalStateException"), so a later
+  attempt to use a destroyed key fails immediately and legibly in Java
+  rather than surfacing as an opaque native PKCS#11 error two layers
+  down; `getAlgorithm()`/`getFormat()`/`getEncoded()` stay usable
+  post-destroy as harmless metadata accessors.
+- **A real, live-verified JDK behavior check before touching anything,
+  not assumed:** the safe-to-zero-after-wrap reasoning below depends on
+  `SecretKeySpec`'s constructor defensively cloning its input — confirmed
+  by extracting `javax/crypto/spec/SecretKeySpec.java` from JDK 27's real
+  `src.zip` and reading `this.key = key.clone();` directly in the byte[]
+  constructor, not assumed from general Java convention.
+- **Java-heap secret-copy reduction, only where provably safe:** the one
+  place genuine plaintext secret material passes through the JVM heap at
+  all is ML-KEM's deliberately-extractable decapsulated secret and plain
+  ECDH's derived secret (both documented exceptions to the opaque-handle
+  pattern — see their own class javadocs). `P11MLKEMSpi`'s
+  `Encapsulator`/`Decapsulator` extracted a `fullSecret` byte[], sliced a
+  sub-range into `sliced`, wrapped `sliced` into a `SecretKeySpec`
+  (defensively cloned per the verified fact above), and then — until this
+  pass — just let both `fullSecret` and `sliced` fall out of scope
+  unzeroed. **Fixed**: both are now `Arrays.fill(..., (byte) 0)`
+  immediately after the `SecretKeySpec` is built, since neither is
+  referenced by anything else at that point. `P11ECDHKeyAgreementSpi`'s
+  `derivedSecret` field is similar but longer-lived (it backs all three
+  `engineGenerateSecret*` overloads); verified against JDK 27's real
+  `KeyAgreementSpi.java` javadoc that per the API's own contract, "after
+  a call to generateSecret, the object can be reused... by calling one
+  of the init methods" — meaning a caller starting a new agreement has,
+  by contract, already finished with any prior secret. **Fixed**:
+  `engineInit` now zeroes the outgoing `derivedSecret` before discarding
+  the reference. `P11HKDFKDFSpi.engineDeriveData()` was checked and
+  deliberately **left alone**: it returns the raw extracted byte[]
+  directly to the JCA caller (the actual `KDF.deriveData()` contract,
+  not a defensive-clone situation) — zeroing it would corrupt the bytes
+  the caller is holding, not just an internal copy.
+- **Real, disclosed reason this specific gotcha matters, not just
+  tidiness:** "let a local variable go out of scope" is not by itself a
+  reliable way to clear sensitive data in Java — a well-known JVM
+  behavior (the actual reason Java security guidance recommends explicit
+  `Arrays.fill(..., 0)` for sensitive byte[] rather than relying on GC)
+  is that a stale local-variable stack slot can keep an otherwise-dead
+  object artificially reachable until that slot is overwritten by a
+  later call.
+- **`ZeroizationAuditTest.java` (new) — a real, live heap dump, not a
+  code-review assertion.** Runs a full ML-KEM-768 encapsulate through the
+  standard JCA `KEM` API, extracts the resulting `SecretKey`'s bytes,
+  triggers a genuine JVM heap dump via
+  `com.sun.management.HotSpotDiagnosticMXBean.dumpHeap(path, true)`
+  (`live=true`: forces a GC pass first, dumps only reachable objects),
+  then does a raw byte-pattern scan of the resulting `.hprof` file (no
+  HPROF parser needed for a simple substring count) and asserts the
+  secret pattern appears **at most twice** — once for the test's own
+  comparison copy, once for the live `SecretKey`'s own (expected,
+  necessary) internal clone. A count higher than that would mean an
+  uncleared leftover copy — exactly what the `Arrays.fill()` calls above
+  exist to prevent. Every OTHER key type in this module was deliberately
+  **not** given the same heap-dump treatment: `P11Key.Priv/Pub/Secret`
+  never hold raw key bytes in the JVM at all (`getEncoded()` is
+  unconditionally `null`), so a heap dump there could only ever
+  re-confirm what reading the class already shows — not a meaningful use
+  of a genuinely slow, heavyweight verification technique.
+- **`DestroyableTest.java` (new)** — `destroy()` genuinely removes the
+  token object (proven by a second, independent `destroyObject` call
+  against the same handle afterward failing natively, not just trusting
+  `isDestroyed()`'s own flag), is idempotent, `handle()` throws
+  `IllegalStateException` post-destroy while metadata accessors stay
+  usable, and a real `Signature.initSign()` against a destroyed private
+  key fails immediately (at `initSign`, not deferred to `sign()` —
+  `engineInitSign` reads the handle eagerly).
+- **Verify:** `mvn test`, 188/188 (183 prior + 5 new: 1
+  `ZeroizationAuditTest` + 4 `DestroyableTest`), 0 failures.
+- **Explicitly not done, carried forward rather than hidden:** the
+  single-shared-Arena / no-zero-before-free architectural gap (finding 1
+  above). A proper fix needs its own scoped pass: per-operation confined
+  `Arena`s (or an explicit zero-fill pass over every buffer immediately
+  before the shared arena's own `close()`), touching every native call
+  site in `P11Library`. Listed here as the honest state of §6.5, not
+  claimed complete.
+
 ### W6 — TLS (JDK 27 / JEP 527)
 - Install the provider at higher priority than SunJCE and pin
   `jdk.tls.namedGroups=SecP256r1MLKEM768,SecP384r1MLKEM1024` (FIPS run

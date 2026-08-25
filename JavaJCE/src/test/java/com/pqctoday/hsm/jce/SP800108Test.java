@@ -78,7 +78,7 @@ class SP800108Test {
     void counterModeMatchesEngineReference() throws Exception {
         SoftHSMv3Provider p = new SoftHSMv3Provider();
         long handle = importRaw(p.lib, KI);
-        SecretKey ourKi = new P11Key.Secret(handle, "Generic");
+        SecretKey ourKi = new P11Key.Secret(p.lib, handle, "Generic");
 
         SecretKeyFactory skf = SecretKeyFactory.getInstance("SP800-108-Counter", p);
         SecretKey derived = skf.generateSecret(
@@ -94,7 +94,7 @@ class SP800108Test {
 
         Mac referenceMac = Mac.getInstance("HmacSHA256", p);
         long referenceHandle = importRaw(p.lib, EXPECTED_OUTPUT);
-        referenceMac.init(new P11Key.Secret(referenceHandle, "Generic"));
+        referenceMac.init(new P11Key.Secret(p.lib, referenceHandle, "Generic"));
         byte[] referenceOut = referenceMac.doFinal("probe".getBytes());
 
         assertArrayEquals(referenceOut, ourOut,
@@ -117,9 +117,9 @@ class SP800108Test {
 
         SecretKeyFactory skf = SecretKeyFactory.getInstance("SP800-108-Counter", p);
         SecretKey a = skf.generateSecret(
-            new P11SP800108KeySpec(new P11Key.Secret(handle1, "Generic"), "AESCMAC", fixedInput, 256));
+            new P11SP800108KeySpec(new P11Key.Secret(p.lib, handle1, "Generic"), "AESCMAC", fixedInput, 256));
         SecretKey b = skf.generateSecret(
-            new P11SP800108KeySpec(new P11Key.Secret(handle2, "Generic"), "AESCMAC", fixedInput, 256));
+            new P11SP800108KeySpec(new P11Key.Secret(p.lib, handle2, "Generic"), "AESCMAC", fixedInput, 256));
 
         Mac macA = Mac.getInstance("HmacSHA256", p);
         macA.init(a);
@@ -142,9 +142,9 @@ class SP800108Test {
 
         SecretKeyFactory skf = SecretKeyFactory.getInstance("SP800-108-Feedback", p);
         SecretKey a = skf.generateSecret(
-            new P11SP800108KeySpec(new P11Key.Secret(handle1, "Generic"), "HmacSHA256", fixedInput, iv, 256));
+            new P11SP800108KeySpec(new P11Key.Secret(p.lib, handle1, "Generic"), "HmacSHA256", fixedInput, iv, 256));
         SecretKey b = skf.generateSecret(
-            new P11SP800108KeySpec(new P11Key.Secret(handle2, "Generic"), "HmacSHA256", fixedInput, iv, 256));
+            new P11SP800108KeySpec(new P11Key.Secret(p.lib, handle2, "Generic"), "HmacSHA256", fixedInput, iv, 256));
 
         Mac macA = Mac.getInstance("HmacSHA256", p);
         macA.init(a);
@@ -163,7 +163,7 @@ class SP800108Test {
         byte[] rawKi = new byte[32];
         new SecureRandom().nextBytes(rawKi);
         long handle = importRaw(p.lib, rawKi);
-        SecretKey ki = new P11Key.Secret(handle, "Generic");
+        SecretKey ki = new P11Key.Secret(p.lib, handle, "Generic");
 
         SecretKeyFactory skf = SecretKeyFactory.getInstance("SP800-108-Feedback", p);
         SecretKey derived = skf.generateSecret(

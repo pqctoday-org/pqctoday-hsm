@@ -109,6 +109,14 @@ public final class SoftHSMv3Provider extends Provider {
         this.lib = new P11Library(modulePath, pin);
         runPowerOnSelfTest();
         registerServices();
+        // §6.5 zeroization posture: best-effort session/native-memory
+        // cleanup even if the caller never explicitly calls lib.close()
+        // (an abrupt JVM exit, an uncaught exception in caller code, a
+        // test that forgets teardown). P11Library.close() is already
+        // idempotent (a `closed` guard makes a second call a no-op), so
+        // this is safe to register unconditionally without also having
+        // to remove it again on a normal, explicit lib.close().
+        Runtime.getRuntime().addShutdownHook(new Thread(lib::close, "SoftHSMv3Provider-shutdown"));
     }
 
     /**
@@ -369,7 +377,10 @@ public final class SoftHSMv3Provider extends Provider {
             ssDecHandle = lib.decapsulate(CKM_ML_KEM, handles[1], ssTmpl, enc.ciphertext());
             byte[] secretFromEncap = lib.getAttributeBytes(ssEncHandle, CKA_VALUE);
             byte[] secretFromDecap = lib.getAttributeBytes(ssDecHandle, CKA_VALUE);
-            if (!java.util.Arrays.equals(secretFromEncap, secretFromDecap)) {
+            boolean match = java.util.Arrays.equals(secretFromEncap, secretFromDecap);
+            java.util.Arrays.fill(secretFromEncap, (byte) 0);
+            java.util.Arrays.fill(secretFromDecap, (byte) 0);
+            if (!match) {
                 throw new IllegalStateException("ML-KEM-768 pairwise consistency check failed: "
                     + "decapsulating a freshly encapsulated ciphertext with the matching private key "
                     + "did not recover the same shared secret");

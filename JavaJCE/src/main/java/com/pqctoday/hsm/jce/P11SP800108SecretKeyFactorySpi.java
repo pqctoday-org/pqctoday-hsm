@@ -81,7 +81,7 @@ final class P11SP800108SecretKeyFactorySpi extends SecretKeyFactorySpi {
             P11Library.attrBool(CKA_SIGN, true),
         };
         long handle = lib.deriveKey(mech, baseHandle, outputTmpl);
-        return new P11Key.Secret(handle, feedback ? "SP800-108-Feedback" : "SP800-108-Counter");
+        return new P11Key.Secret(lib, handle, feedback ? "SP800-108-Feedback" : "SP800-108-Counter");
     }
 
     /** Resolves the base key (Ki) to a token handle — directly for our own keys, or by importing a foreign key's raw bytes. */

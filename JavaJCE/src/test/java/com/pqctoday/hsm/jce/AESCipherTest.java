@@ -127,7 +127,7 @@ class AESCipherTest {
         new java.security.SecureRandom().nextBytes(rawKey);
         SecretKey bcKey = new SecretKeySpec(rawKey, "AES");
         long handle = importRawAesKeyReal(p.lib, rawKey, false);
-        SecretKey ourKey = new P11Key.Secret(handle, "AES");
+        SecretKey ourKey = new P11Key.Secret(p.lib, handle, "AES");
 
         byte[] plaintext = "BC AES-GCM cross-verify".getBytes();
         byte[] aad = "aad".getBytes();
@@ -169,7 +169,7 @@ class AESCipherTest {
         byte[] rawWrapKey = new byte[32];
         new java.security.SecureRandom().nextBytes(rawWrapKey);
         long wrapHandle = importRawAesKeyReal(p.lib, rawWrapKey, false);
-        SecretKey ourWrapKey = new P11Key.Secret(wrapHandle, "AES");
+        SecretKey ourWrapKey = new P11Key.Secret(p.lib, wrapHandle, "AES");
         SecretKey bcWrapKey = new SecretKeySpec(rawWrapKey, "AES");
 
         // The target key being wrapped must itself be CKA_EXTRACTABLE=true —
@@ -184,7 +184,7 @@ class AESCipherTest {
         byte[] rawTargetKey = new byte[32];
         new java.security.SecureRandom().nextBytes(rawTargetKey);
         long targetHandle = importRawAesKeyReal(p.lib, rawTargetKey, true);
-        SecretKey targetKey = new P11Key.Secret(targetHandle, "AES");
+        SecretKey targetKey = new P11Key.Secret(p.lib, targetHandle, "AES");
 
         Cipher ourWrapper = Cipher.getInstance("AESWrap", p);
         ourWrapper.init(Cipher.WRAP_MODE, ourWrapKey);

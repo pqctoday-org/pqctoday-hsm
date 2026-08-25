@@ -157,7 +157,7 @@ final class P11AESWrapCipherSpi extends CipherSpi {
         };
         try {
             long handle = lib.unwrapKey(mechType, keyHandle, wrappedKey, tmpl);
-            return new P11Key.Secret(handle, wrappedKeyAlgorithm);
+            return new P11Key.Secret(lib, handle, wrappedKeyAlgorithm);
         } catch (RuntimeException e) {
             throw new InvalidKeyException("unwrap failed", e);
         }

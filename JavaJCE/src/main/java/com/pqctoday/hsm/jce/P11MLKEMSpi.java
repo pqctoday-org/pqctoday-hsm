@@ -118,7 +118,14 @@ final class P11MLKEMSpi implements KEMSpi {
             P11Library.Encapsulated enc = lib.encapsulate(CKM_ML_KEM, publicKeyHandle, ssTmpl);
             byte[] fullSecret = lib.getAttributeBytes(enc.sharedSecretHandle(), CKA_VALUE);
             byte[] sliced = java.util.Arrays.copyOfRange(fullSecret, from, to);
+            // SecretKeySpec's constructor defensively clones its input
+            // (verified against real JDK 27 source: `this.key =
+            // key.clone()`), so both intermediate arrays are safe to
+            // zero immediately afterward — neither is referenced by
+            // anything else (§6.5 zeroization posture).
             SecretKey key = new SecretKeySpec(sliced, algorithm);
+            java.util.Arrays.fill(fullSecret, (byte) 0);
+            java.util.Arrays.fill(sliced, (byte) 0);
             return new KEM.Encapsulated(key, enc.ciphertext(), null);
         }
 
@@ -152,7 +159,13 @@ final class P11MLKEMSpi implements KEMSpi {
             }
             byte[] fullSecret = lib.getAttributeBytes(ssHandle, CKA_VALUE);
             byte[] sliced = java.util.Arrays.copyOfRange(fullSecret, from, to);
-            return new SecretKeySpec(sliced, algorithm);
+            // See Encapsulator#engineEncapsulate's comment: SecretKeySpec
+            // clones defensively, so both intermediates are safe to zero
+            // right after (§6.5).
+            SecretKey key = new SecretKeySpec(sliced, algorithm);
+            java.util.Arrays.fill(fullSecret, (byte) 0);
+            java.util.Arrays.fill(sliced, (byte) 0);
+            return key;
         }
 
         @Override public int engineSecretSize() { return SECRET_SIZE; }

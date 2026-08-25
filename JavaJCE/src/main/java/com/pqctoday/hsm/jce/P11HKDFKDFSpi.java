@@ -69,7 +69,7 @@ final class P11HKDFKDFSpi extends KDFSpi {
     protected SecretKey engineDeriveKey(String alg, AlgorithmParameterSpec spec)
             throws InvalidAlgorithmParameterException, NoSuchAlgorithmException {
         long handle = derive(spec, false);
-        return new P11Key.Secret(handle, alg);
+        return new P11Key.Secret(lib, handle, alg);
     }
 
     @Override

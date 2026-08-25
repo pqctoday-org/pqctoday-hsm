@@ -144,7 +144,7 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
             P11Library.attrBool(CKA_TOKEN, false),
         };
         long handle = lib.createObject(tmpl);
-        return new P11Key.Pub(handle, algo.jcaName(), spki);
+        return new P11Key.Pub(lib, handle, algo.jcaName(), spki);
     }
 
     private P11Key.Pub importMLKEM(PureSigAlgo algo, byte[] rawValue, byte[] spki) {
@@ -161,7 +161,7 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
             P11Library.attrBool(CKA_TOKEN, false),
         };
         long handle = lib.createObject(tmpl);
-        return new P11Key.Pub(handle, algo.jcaName(), spki);
+        return new P11Key.Pub(lib, handle, algo.jcaName(), spki);
     }
 
     private P11Key.Pub importEdDSA(String jcaName, byte[] curveOidDer, byte[] rawPoint, byte[] spki) {
@@ -175,7 +175,7 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
             P11Library.attrBool(CKA_TOKEN, false),
         };
         long handle = lib.createObject(tmpl);
-        return new P11Key.Pub(handle, jcaName, spki);
+        return new P11Key.Pub(lib, handle, jcaName, spki);
     }
 
     private P11Key.Pub importEC(byte[] curveOidDer, byte[] rawPoint, byte[] spki) throws InvalidKeySpecException {
@@ -198,7 +198,7 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
             P11Library.attrBool(CKA_TOKEN, false),
         };
         long handle = lib.createObject(tmpl);
-        return new P11Key.Pub(handle, "EC", spki);
+        return new P11Key.Pub(lib, handle, "EC", spki);
     }
 
     private P11Key.Pub importRSA(BigInteger modulus, BigInteger exponent, byte[] spki) {
@@ -212,7 +212,7 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
             P11Library.attrBool(CKA_TOKEN, false),
         };
         long handle = lib.createObject(tmpl);
-        return new P11Key.Pub(handle, "RSA", spki);
+        return new P11Key.Pub(lib, handle, "RSA", spki);
     }
 
     private static byte[] unsignedBigEndian(BigInteger v) {

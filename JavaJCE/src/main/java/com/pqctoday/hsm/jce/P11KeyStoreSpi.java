@@ -192,13 +192,13 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
         String alg = algorithmNameOf(handle);
         String algOrUnknown = alg != null ? alg : "unknown";
         if (objectClass == CKO_PRIVATE_KEY) {
-            return new P11Key.Priv(handle, algOrUnknown);
+            return new P11Key.Priv(lib, handle, algOrUnknown);
         }
         if (objectClass == CKO_SECRET_KEY) {
-            return new P11Key.Secret(handle, algOrUnknown);
+            return new P11Key.Secret(lib, handle, algOrUnknown);
         }
         byte[] spki = safeAttr(handle, CKA_PUBLIC_KEY_INFO);
-        return new P11Key.Pub(handle, algOrUnknown, spki != null ? spki : new byte[0]);
+        return new P11Key.Pub(lib, handle, algOrUnknown, spki != null ? spki : new byte[0]);
     }
 
     // ── Per-alias entry classification (all derived from one discoverAll() scan) ──

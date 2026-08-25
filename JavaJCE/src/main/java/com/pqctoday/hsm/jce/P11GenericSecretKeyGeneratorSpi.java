@@ -66,6 +66,6 @@ final class P11GenericSecretKeyGeneratorSpi extends KeyGeneratorSpi {
             P11Library.attrBool(CKA_SIGN, true),
         };
         long handle = lib.generateKey(CKM_GENERIC_SECRET_KEY_GEN, tmpl);
-        return new P11Key.Secret(handle, algorithm);
+        return new P11Key.Secret(lib, handle, algorithm);
     }
 }

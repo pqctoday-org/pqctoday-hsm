@@ -47,7 +47,7 @@ class HKDFTest {
         SoftHSMv3Provider p = new SoftHSMv3Provider();
         KDF kdf = KDF.getInstance("HKDF-SHA256", p);
 
-        SecretKey ikm = new P11Key.Secret(importRaw(p.lib, RFC5869_IKM), "Generic");
+        SecretKey ikm = new P11Key.Secret(p.lib, importRaw(p.lib, RFC5869_IKM), "Generic");
         SecretKey salt = new SecretKeySpec(RFC5869_SALT, "Generic"); // foreign key — has real getEncoded()
         var spec = HKDFParameterSpec.ofExtract().addIKM(ikm).addSalt(salt).thenExpand(RFC5869_INFO, 42);
 
@@ -60,7 +60,7 @@ class HKDFTest {
         SoftHSMv3Provider p = new SoftHSMv3Provider();
         KDF kdf = KDF.getInstance("HKDF-SHA256", p);
 
-        SecretKey ikm = new P11Key.Secret(importRaw(p.lib, RFC5869_IKM), "Generic");
+        SecretKey ikm = new P11Key.Secret(p.lib, importRaw(p.lib, RFC5869_IKM), "Generic");
         SecretKey salt = new SecretKeySpec(RFC5869_SALT, "Generic");
 
         var extractSpec = HKDFParameterSpec.ofExtract().addIKM(ikm).addSalt(salt).extractOnly();
@@ -77,7 +77,7 @@ class HKDFTest {
     void extractOnlyProducesAHashSizedPrk() throws Exception {
         SoftHSMv3Provider p = new SoftHSMv3Provider();
         KDF kdf = KDF.getInstance("HKDF-SHA384", p);
-        SecretKey ikm = new P11Key.Secret(importRaw(p.lib, RFC5869_IKM), "Generic");
+        SecretKey ikm = new P11Key.Secret(p.lib, importRaw(p.lib, RFC5869_IKM), "Generic");
         var spec = HKDFParameterSpec.ofExtract().addIKM(ikm).extractOnly();
         byte[] prk = kdf.deriveData(spec);
         assertEquals(48, prk.length, "SHA-384's PRK must be exactly the hash's 48-byte output size");
@@ -109,7 +109,7 @@ class HKDFTest {
         SoftHSMv3Provider p = new SoftHSMv3Provider();
         KDF kdf = KDF.getInstance("HKDF-SHA256", p);
         SecretKey ikm = new SecretKeySpec(new byte[16], "Generic");
-        SecretKey opaqueSalt = new P11Key.Secret(importRaw(p.lib, new byte[16]), "Generic");
+        SecretKey opaqueSalt = new P11Key.Secret(p.lib, importRaw(p.lib, new byte[16]), "Generic");
         var spec = HKDFParameterSpec.ofExtract().addIKM(ikm).addSalt(opaqueSalt).extractOnly();
         assertThrows(InvalidAlgorithmParameterException.class, () -> kdf.deriveData(spec),
             "this provider's own opaque keys can never be used as an HKDF salt (engine rejects CKF_HKDF_SALT_KEY)");
@@ -125,7 +125,7 @@ class HKDFTest {
             new SecureRandom().nextBytes(ikmBytes);
             new SecureRandom().nextBytes(saltBytes);
 
-            SecretKey ourIkm = new P11Key.Secret(importRaw(p.lib, ikmBytes), "Generic");
+            SecretKey ourIkm = new P11Key.Secret(p.lib, importRaw(p.lib, ikmBytes), "Generic");
             SecretKey ourSalt = new SecretKeySpec(saltBytes, "Generic");
             KDF ours = KDF.getInstance(name, p);
             byte[] ourOkm = ours.deriveData(

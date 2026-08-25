@@ -74,6 +74,6 @@ final class P11AESKeyGeneratorSpi extends KeyGeneratorSpi {
             P11Library.attrBool(CKA_UNWRAP, true),
         };
         long handle = lib.generateKey(CKM_AES_KEY_GEN, tmpl);
-        return new P11Key.Secret(handle, "AES");
+        return new P11Key.Secret(lib, handle, "AES");
     }
 }

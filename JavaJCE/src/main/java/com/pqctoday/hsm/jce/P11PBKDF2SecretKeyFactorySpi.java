@@ -75,7 +75,7 @@ final class P11PBKDF2SecretKeyFactorySpi extends SecretKeyFactorySpi {
                 P11Library.attrBool(CKA_SIGN, true),
             };
             long handle = lib.deriveKeyNoBase(mech, outputTmpl);
-            return new P11Key.Secret(handle, "PBKDF2");
+            return new P11Key.Secret(lib, handle, "PBKDF2");
         } finally {
             java.util.Arrays.fill(passwordBytes, (byte) 0);
         }
