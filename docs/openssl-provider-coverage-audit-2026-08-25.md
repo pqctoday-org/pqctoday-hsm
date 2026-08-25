@@ -72,7 +72,7 @@ plus a static set at `provider.c:1379`):
 | KEYMGMT | RSA, RSA-PSS, EC, HKDF, ED25519/448, ML-DSA×3, ML-KEM×3, composites×3 (static) | `provider.c:1534-1552` |
 | SKEYMGMT | AES, GENERIC-SECRET | `provider.c:1557-1558` |
 | ENCODER | RSA/RSA-PSS/EC: text+PKCS#1+SPKI; ED25519/448: text; ML-DSA: text+SPKI; composites: SPKI der/pem; URI-PEM PrivateKeyInfo for RSA/RSA-PSS/EC/Ed/ML-DSA **iff** `encode_pkey_as_pk11_uri` | **no ML-KEM encoders** (latchset sibling has them) |
-| DECODER | `DER<-pem`; RSA/RSA-PSS/EC/ED25519/ED448 from DER | **no ML-DSA/ML-KEM/composite decoders** (composite ones defined but unregistered — recursion issue, `provider.c:1512-1525`) |
+| DECODER | `DER<-pem`; RSA/RSA-PSS/EC/ED25519/ED448/ML-DSA×3/ML-KEM×3/SLH-DSA×12 from DER (R2, 2026-08-25) | composite decoders remain defined but unregistered — recursion issue, `provider.c:1512-1525` (unchanged) |
 | STORE | `pkcs11:` URI scheme | works, proven live |
 | MAC | **absent entirely** | `OSSL_OP_MAC` appears only in the block-list name table |
 | TLS-GROUP | 13 classical entries (P-224/256/384/521, ffdhe2048..8192) — **zero PQC/hybrid** | `tls.c:89-174` |
@@ -117,7 +117,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | ID | Gap | Evidence | Severity |
 |---|---|---|---|
 | OP-1 | `OSSL_OP_MAC` not implemented at all — token HMAC/CMAC/KMAC unreachable from `EVP_MAC`; every MAC falls back to software | source sweep; block-list table `provider.c:1570` | Medium |
-| OP-2 | No DECODERs for ML-DSA / ML-KEM / composites → **URI-PEM round-trip broken for PQC keys** (keygen writes the PEM; loading it back fails `store_result.c:160 unsupported` — proven live). Workaround: raw `pkcs11:` URIs, which do work | live probe; `provider.c:1500-1525` | **High** |
+| OP-2 | **RESOLVED (R2, 2026-08-25)** — was: no DECODERs for ML-DSA/ML-KEM/SLH-DSA (composites remain intentionally unregistered — §2's table, recursion issue) → URI-PEM round-trip broken; loading a written PEM back failed. Now: 18 decoder registrations (3 ML-DSA + 3 ML-KEM + 12 SLH-DSA) in `decoder.c`/`provider.c`, using the same generic PEM→DER→store-fetch chain already proven live by T10 (the EC control). Each per-type decoder's FORMAT_NAME had to be the exact single-name string `store.c` emits as `DATA_TYPE` (e.g. `MLDSA_44` = `"ML-DSA-44"`), not the colon-separated registration list. Live-verified for all three families: ML-DSA loads back and signs; SLH-DSA loads back and signs (7856-byte signature, correct size); ML-KEM loads back and **decapsulates** correctly (matched a reference secret from a direct-URI encapsulation). **A genuinely separate gap surfaced during ML-KEM's proof**: a URI-PEM-loaded ML-KEM object identifies as `type=private`, and neither `pkey -pubout` nor `pkeyutl -encap` work against it — confirmed live (`attribute does not exist: 0x633`/CKA_ENCAPSULATE) — because the keymgmt EXPORT function requires a public-class object and does not walk private→associated-public the way ML-DSA's does. This is not a decoder bug (decapsulate, which only needs the loaded private key's own attributes, works perfectly) — it is the same prerequisite already tracked for remediation R5 (TLS groups), now confirmed by a second, independent code path. | `decoder.c`, `provider.c`; live (T11, T11slh, T11kem) | ~~**High**~~ — |
 | OP-3 | **Core RESOLVED (R3, 2026-08-25)** — was: ML-KEM had zero encoders registered, so `genpkey -algorithm ML-KEM-768 -out k.pem` generated and persisted a real key on-token (R3b) but the `-out` write step failed, `Error writing key(s)`/exit 1. **Correction to this row's own earlier wording** (found live during R3, not assumed): public-key output was never actually broken — `storeutl -text`/`pkey -pubout` already worked with zero encoders, because ML-KEM's keymgmt EXPORT function bridges the public bytes into OpenSSL's default provider, which encodes them. The real, sole functional gap was the **private**-key URI-PEM PrivateKeyInfo encoder — the one path that can't use that bridge (private material never crosses into another provider). Fixed: `p11prov_mlkem_encoder_priv_key_info_pem_encode` (`encoder.c`), registered for all 3 variants inside the `encode_pkey_as_pk11_uri` block (`provider.c`). Like every other PrivateKeyInfo encoder in this fork, it never touches raw key bytes — `p11prov_encoder_private_key_to_asn1` calls `p11prov_obj_get_public_uri(key)` and PEM-wraps that `pkcs11:` URI string; live-verified the written file decodes to a `type=private` URI, and a negative harness assertion checks no `PRIVATE KEY` label ever appears. **Remaining, deliberately separate parity tier**: SPKI/text encoders for public keys (would let public output work even in `DISALLOW_EXPORT_PUBLIC` configs, and match every other PQC family in this fork) — not functionally required, scoped as follow-up. | `encoder.c`; live (T4x_encode, T10 as network-effect control) | ~~Medium~~ — |
 | OP-4 | KEM dispatch lacks `SET_CTX_PARAMS`/`SETTABLE` | `kem/mlkem.c:259-289` | Low |
 | OP-6 | **RESOLVED (R3b, 2026-08-25)** — was: ML-KEM keys could not be GENERATED on token through the provider (ML-KEM keymgmt had no `OSSL_FUNC_KEYMGMT_GEN*` entries; ML-DSA keygen worked, so this was an asymmetry, not a design rule). Now: real `GEN_INIT`/`GEN`/`GEN_CLEANUP`/`GEN_SET_PARAMS`/`GEN_SETTABLE_PARAMS` wired into all 3 per-variant ML-KEM keymgmt tables (`kem/mlkem.c`), implemented in `keymgmt.c` (mirroring the ML-DSA block) and exported non-static since `kem/mlkem.c` is a separate translation unit. `CKA_PARAMETER_SET` is mandatory on the public-key template per the C++ engine's own `extractParameterSet` call (no silent default, matching ML-DSA's pattern); `CKA_ENCAPSULATE`/`CKA_DECAPSULATE` requested explicitly on pub/priv templates to match what a spec-correct caller sends (both engines enforce these server-side regardless of template content). Live-verified: key generates, persists on-token, and is independently confirmed via `storeutl -text` showing `ML-KEM-768 Public-Key`. Landing this surfaced OP-3 (above) as a distinct, still-open gap — genpkey's own `-out` write needs an encoder this fix does not provide. | both engines, live probe + source | ~~**High**~~ — |
@@ -215,7 +215,9 @@ trusted; unexpected PASS of an XFAIL case fails the run (ratchet).
 | T8 | ECDH P-256 | provider derive vs software derive — same shared secret | PASS |
 | T9 | Digest fetch (WART-4) | `dgst -propquery provider=pkcs11` in a fresh process, dedicated arena with `pkcs11-module-load-behavior=early` | **PASS** (flipped by R0.4, 2026-08-25) |
 | T10 | URI-PEM round-trip, EC (control) | genpkey URI-PEM → load back → sign | PASS |
-| T11 | URI-PEM round-trip, ML-DSA (OP-2) | same flow | **XFAIL** (flips on R2) |
+| T11 | URI-PEM round-trip, ML-DSA (OP-2) | same flow | **PASS** (flipped by R2, 2026-08-25) |
+| T11slh | URI-PEM round-trip, SLH-DSA-SHA2-128s (OP-2) | same flow, one representative parameter set of the 12 registered | **PASS** (new case, R2) |
+| T11kem | URI-PEM round-trip, ML-KEM-768 (OP-2) | decoder-loaded private key decapsulates and matches a reference secret from a direct-URI encapsulation — encapsulate/pubout-from-private-object is a separate, still-open gap (see OP-2's row) | **PASS** (new case, R2) |
 | T12 | SLH-DSA keygen/store/encode reachability (ALG-1) | genpkey (all 12 param sets registered) → storeutl confirms on-token, correctly typed/named | **PASS** (flipped by R1, 2026-08-25) |
 | T12sign | SLH-DSA-SHA2-128s token-sign (ALG-1 remainder) | `pkeyutl -sign` → software verify (exact 7856-byte sig) + tamper rejection | **PASS** (flipped by R1's `get_ctx_params` fix, 2026-08-25) |
 | T12sign_shake | SLH-DSA-SHAKE-128f token-sign, independent hash family | same, exact 17088-byte sig | **PASS** (new case, R1) |
@@ -337,7 +339,19 @@ alarm (an unrelated test, T10, also failed) that traced to a mistake
 in the sabotage script itself (a non-scoped string replace hit an
 identical line shared by three test functions), not a real product
 bug; corrected and re-verified. Harness is now `PASS=19 FAIL=0
-XFAIL=2 XPASS=0`. Remaining XFAILs: OP-2 (T11), ENV-2 (T15b).
+XFAIL=2 XPASS=0`. Remaining XFAILs at that point: OP-2 (T11), ENV-2
+(T15b).
+
+**Further update (2026-08-25, same day) — R2 (PQC decoders) landed:**
+18 decoder registrations (ML-DSA×3, ML-KEM×3, SLH-DSA×12) — see OP-2
+above for the full mechanism and the genuinely separate gap (ML-KEM
+private→public bridge, already tracked under R5) that its own proof
+surfaced. T11 flipped PASS; T11slh and T11kem added, both PASS.
+Sabotage-tested (T11: broken sign-target path → FAIL, exit 1; T11kem:
+corrupted one byte of the decapsulated secret before the comparison →
+FAIL, exit 1 — proving the byte-equality check is real, not
+decorative). Harness: `PASS=22 FAIL=0 XFAIL=1 XPASS=0`. Only
+remaining XFAIL: ENV-2 (T15b).
 
 ## 7. Companion document
 

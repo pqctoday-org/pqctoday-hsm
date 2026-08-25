@@ -315,7 +315,38 @@ t11() { local w; w=$(mk_arena uripemml "$CPP_ENGINE_SO") && use_arena "$w" || re
   grep -q "PKCS#11 PROVIDER URI" "$w/k.pem" || { echo "no URI-PEM written"; return 1; }
   O pkeyutl -sign -inkey "$w/k.pem" -rawin -in "$MSG" -out "$w/sig.bin"
 }
-run_case T11 XFAIL "URI-PEM round-trip for ML-DSA (gap OP-2 / remediation R2)" t11
+run_case T11 PASS "URI-PEM round-trip for ML-DSA (gap OP-2 / remediation R2)" t11
+
+# R2, SLH-DSA variant: same decoder chain, one representative parameter set
+# (the other 11 share the identical code path — all 12 were registered
+# together in this remediation).
+t11slh() { local w; w=$(mk_arena uripemslh "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHA2-128s -out "$w/k.pem" || return 1
+  grep -q "PKCS#11 PROVIDER URI" "$w/k.pem" || { echo "no URI-PEM written"; return 1; }
+  O pkeyutl -sign -inkey "$w/k.pem" -rawin -in "$MSG" -out "$w/sig.bin" || return 1
+  [[ "$(stat -c%s "$w/sig.bin")" == "7856" ]] || { echo "sig size $(stat -c%s "$w/sig.bin") != 7856"; return 1; }
+}
+run_case T11slh PASS "URI-PEM round-trip for SLH-DSA-SHA2-128s (gap OP-2 / remediation R2)" t11slh
+
+# R2, ML-KEM variant: proves the decoder+load chain, not encapsulate-from-
+# private-object reachability — that needs a SEPARATE, still-open fix
+# (ML-KEM's export function requires a public-class object and does not
+# walk private->associated-public the way ML-DSA's does; confirmed live:
+# `pkey -pubout` and `pkeyutl -encap` both fail on a URI-PEM-loaded ML-KEM
+# private object with "attribute does not exist: 0x633" (CKA_ENCAPSULATE),
+# tracked under remediation R5's prerequisites). Decapsulate needs none of
+# that — it only reads the loaded private key's OWN attributes — so it is
+# the correct, honest proof that the decoder itself resolved a real,
+# usable private-key object from the URI-PEM file.
+t11kem() { local w; w=$(mk_arena uripemkem "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm ML-KEM-768 -out "$w/k.pem" || return 1
+  grep -q "PKCS#11 PROVIDER URI" "$w/k.pem" || { echo "no URI-PEM written"; return 1; }
+  O pkeyutl -encap -inkey "pkcs11:token=uripemkem;type=public" -secret "$w/secret_ref.bin" -out "$w/ct.bin" || return 1
+  O pkeyutl -decap -inkey "$w/k.pem" -in "$w/ct.bin" -secret "$w/secret_dec.bin" || return 1
+  [[ "$(stat -c%s "$w/secret_ref.bin")" == "32" && "$(stat -c%s "$w/secret_dec.bin")" == "32" ]] || { echo "secret size wrong"; return 1; }
+  cmp -s "$w/secret_ref.bin" "$w/secret_dec.bin"
+}
+run_case T11kem PASS "URI-PEM round-trip for ML-KEM-768: decoder-loaded private key decapsulates correctly (gap OP-2 / remediation R2)" t11kem
 
 # R1 (partial): SLH-DSA keymgmt+store+encoder are now real and live-verified
 # (all 12 parameter sets) — genpkey lands a key on token, storeutl correctly

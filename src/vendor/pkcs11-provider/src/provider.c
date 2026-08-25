@@ -1585,6 +1585,39 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
                  p11prov_der_decoder_p11prov_ed25519_functions);
     ADD_ALGO_EXT(ED448, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
                  p11prov_der_decoder_p11prov_ed448_functions);
+    /* remediation R2: URI-PEM load-back for PQC key types. Each decoder's
+     * property-matched structure ("pk11-uri") is generic and type-agnostic
+     * (decoder.c) — the store side already emits the exact per-variant
+     * DATA_TYPE name each of these filters on (store.c), landed in R1 for
+     * SLH-DSA and pre-existing for ML-DSA/ML-KEM. */
+    ADD_ALGO_EXT(ML_DSA_44, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mldsa44_functions);
+    ADD_ALGO_EXT(ML_DSA_65, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mldsa65_functions);
+    ADD_ALGO_EXT(ML_DSA_87, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mldsa87_functions);
+    ADD_ALGO_EXT(ML_KEM_512, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mlkem512_functions);
+    ADD_ALGO_EXT(ML_KEM_768, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mlkem768_functions);
+    ADD_ALGO_EXT(ML_KEM_1024, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mlkem1024_functions);
+#define SLHDSA_DECODER_URI(NAME, suffix) \
+    ADD_ALGO_EXT(NAME, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP), \
+                 p11prov_der_decoder_p11prov_##suffix##_functions);
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_128S, slhdsa_sha2_128s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_128S, slhdsa_shake_128s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_128F, slhdsa_sha2_128f)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_128F, slhdsa_shake_128f)
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_192S, slhdsa_sha2_192s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_192S, slhdsa_shake_192s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_192F, slhdsa_sha2_192f)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_192F, slhdsa_shake_192f)
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_256S, slhdsa_sha2_256s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_256S, slhdsa_shake_256s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_256F, slhdsa_sha2_256f)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_256F, slhdsa_shake_256f)
+#undef SLHDSA_DECODER_URI
     /* Composite SPKI decoders are DEFINED in composite.c but intentionally
      * NOT registered here. The implementation uses d2i_X509_PUBKEY which
      * itself invokes the OpenSSL DECODER chain, causing infinite recursion

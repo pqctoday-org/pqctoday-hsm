@@ -103,7 +103,39 @@ provider, not KMIP. Sabotage both directions.
 
 ---
 
-## R2 — PQC decoders / URI-PEM load-back (gap OP-2) — Priority 1, effort M
+## R2 — PQC decoders / URI-PEM load-back (gap OP-2) — Priority 1, effort M — DONE
+
+**DONE (2026-08-25).** Landed exactly as scoped below: 18 decoder
+registrations (3 ML-DSA + 3 ML-KEM + 12 SLH-DSA), each a two-macro
+instantiation in `decoder.c`/`decoder.h` plus one `ADD_ALGO_EXT` in
+`provider.c`, all reusing the generic PEM→DER→store-fetch chain T10
+already proved live in a fresh process. Live-verified for all three
+families, not just exit codes: ML-DSA loads back and signs; SLH-DSA
+loads back and signs at the exact 7856-byte size; ML-KEM loads back
+and **decapsulates**, matching a reference secret produced by a
+separate direct-URI encapsulation.
+
+**A genuinely new finding surfaced while proving the ML-KEM case**,
+not anticipated by v1 or v2's C2 challenge in this exact form: a
+URI-PEM-loaded ML-KEM object is `type=private`, and *both*
+`pkey -pubout` and `pkeyutl -encap` fail against it live
+(`attribute does not exist: 0x633` = CKA_ENCAPSULATE) — confirming,
+via a second and independent code path, the same root cause C2
+already flagged (ML-KEM's keymgmt EXPORT requires a public-class
+object, unlike ML-DSA's, which walks to the associated public key).
+This does **not** block R2's own claim — decapsulate needs none of
+that bridge, only the loaded private key's own attributes, and it
+works correctly — but it sharpens R5's prerequisite #2 from "needed
+for TLS key-share export" to "needed for `pkeyutl -encap`/`pkey
+-pubout` to work on ANY loaded ML-KEM private object, TLS or not." A
+standalone regression test for this deferred gap was deliberately
+NOT added here (it belongs with R5's fix, where it will be the actual
+proof); T11kem's comment block records the finding so it isn't lost.
+
+Sabotage-tested (T11: broken sign-target → FAIL; T11kem: a single
+corrupted byte in the decapsulated secret before the comparison →
+FAIL, proving the equality check is real). Harness: `PASS=22 FAIL=0
+XFAIL=1 XPASS=0` — only ENV-2 (T15b, R6) remains.
 
 Unchanged in scope by the challenge round (C6); mechanics restated
 compactly with the strengthened proof.
