@@ -44,7 +44,13 @@ public final class SoftHSMv3Provider extends Provider {
     private static final byte[] SHA256_ABC_KAT = HexFormat.of().parseHex(
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 
-    private final P11Library lib;
+    // Package-private (not private) so same-package test code can reach
+    // the native layer directly for cross-verification checks that need
+    // raw token attributes our own KeyFactory/SPKI code doesn't expose
+    // (e.g. SLHDSACrossVerifyTest reading CKA_VALUE) — deliberately not
+    // reflection, since that would be needless indirection for something
+    // already in the same package.
+    final P11Library lib;
 
     public SoftHSMv3Provider() {
         this(System.getenv().getOrDefault("PKCS11_MODULE", "/usr/local/lib/softhsm/libsofthsmv3.so"),

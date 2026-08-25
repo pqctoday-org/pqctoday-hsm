@@ -607,8 +607,30 @@ posture:**
   measured for ML-DSA's SPKI wrapping — cross-checked arithmetic, not
   asserted from memory. No JDK software SLH-DSA exists to cross-verify
   against (confirmed absent from the JDK 27 EA standard names doc during
-  W0) — this is the class of check the plan's §4.1 flagged as needing
-  ACVP KATs instead, not yet wired in.
+  W0).
+  **Gap closed 2026-08-24** (user's own suggestion, prompted by the
+  Bouncy Castle dependency discussion during the EC/ECDSA work): added
+  `SLHDSACrossVerifyTest`, an independent cross-check of every one of
+  the 12 token-produced SLH-DSA signatures against **Bouncy Castle's own
+  SLH-DSA implementation** (`bcprov-jdk18on` 1.85.2, already a dependency
+  for the ECDSA DER codec — confirmed real PQC support via BC's own
+  release notes, 1.79+). Used BC's low-level `org.bouncycastle.crypto`
+  API (`SLHDSASigner`/`SLHDSAPublicKeyParameters`/`SLHDSAParameters`),
+  not its JCA `Signature.getInstance(String)` wrapper — BC's own issue
+  tracker (`bcgit/bc-java#1841`) documents real, unresolved
+  algorithm-name inconsistency for SLH-DSA in that layer, so the
+  string-free typed API sidesteps it entirely. Every class/field name
+  used was confirmed via `javap` against the real installed jar before
+  writing any code, not guessed from documentation (BC's own docs didn't
+  have a usable code sample either). Fed with our RAW public key bytes
+  (`CKA_VALUE` — confirmed to hold "raw pub key bytes" for SLH-DSA in
+  `SoftHSM_keygen.cpp`, same as ML-DSA), not our own SPKI export, so this
+  check has zero dependency on our own `KeyFactory`/`P11Key` code being
+  correct — a genuinely independent verification path. **All 12
+  parameter sets pass** (`mvn test`, 61/61 total). This is explicitly
+  test-only: the provider itself never touches BC's PQC classes, only
+  its ASN.1 syntax classes for the unrelated ECDSA codec (see the pom.xml
+  dependency comment for that exact boundary).
 
 - `P11Constants`: shared CK_* constants class (values from `pkcs11t.h`,
   same source-of-truth discipline as everywhere else in this repo) — the
