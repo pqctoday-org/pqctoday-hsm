@@ -1623,6 +1623,53 @@ encapsulate/decapsulate consistency check (ML-KEM-768).
   real POST battery, not a defect; a real HSM pays a comparable
   power-on cost.
 
+**Policy-layer refusal tests for every §5 row: DONE 2026-08-25,
+PASSED.**
+- **A genuine, disclosed finding from writing these tests, not from
+  guessing:** §5's own text claims "the policy layer additionally
+  refuses them if requested by alias, so exclusion is enforced, not
+  just omitted" — but a full read of `SoftHSMv3Provider#registerServices()`
+  end to end (every `putService`/`registerX` call, ~300 lines) shows
+  there is no `addAlias` call anywhere and no generic passthrough
+  service that would accept an arbitrary caller-supplied `CKM_*` value.
+  Every §5 exclusion is, in the actual implementation, enforced purely
+  by never registering a JCA `Service` under that algorithm name — which
+  is a completely adequate enforcement mechanism (there is no alias or
+  generic entry point through which any of them could be reached
+  regardless), but it is enforcement **by omission**, not a separate
+  runtime-checked allow/deny layer as §5's own wording implies. Recorded
+  here rather than left for the next reader to discover the same gap
+  between the plan's wording and the code.
+- **`ExcludedMechanismsTest.java` (new, 8 tests)** — covers the §5 rows
+  `SoftHSMv3ProviderTest`'s pre-existing `deprecatedDigestsAreNotRegistered`
+  (SHA-1/MD5 digests) didn't: RIPEMD-160 + Keccak-256 digests,
+  SHA-1/MD5-based HMAC names, SHA-1/MD5 composite signature names, raw
+  RSA cipher (`RSA/ECB/NoPadding`, `RSA/ECB/PKCS1Padding`, bare `"RSA"`
+  as a Cipher — `CKM_RSA_PKCS` stays signature-only per §5),
+  ChaCha20/ChaCha20-Poly1305, AES-ECB, X25519/X448/XDH (KeyPairGenerator
+  *and* KeyAgreement), and HSS/XMSS/XMSSMT KeyPairGenerators. Each
+  asserts `NoSuchAlgorithmException` (or, for the two Cipher-transformation
+  cases, either that or `NoSuchPaddingException` — both prove the
+  transformation string resolves to nothing on this provider, and JCA's
+  own two-stage transformation lookup can legitimately fail at either
+  stage). `CKM_BIP32_MASTER/CHILD_DERIVE` and the `CKM_CONCATENATE_*`/
+  `CKM_SHAKE_256_KEY_DERIVATION` (standalone) rows are deliberately not
+  covered: §5 already notes these were never exposed under any
+  conventional JCA algorithm-name string a caller could plausibly reach
+  for, so there is no realistic "accidentally re-registered under its
+  usual name" regression to guard against the way there is for
+  SHA-1/AES-ECB/X25519, which collide with real, commonly-used JCA
+  names.
+- A small syntax mistake caught immediately by the compiler while
+  writing this file's own class javadoc: prose reading
+  "`CKM_CONCATENATE_*` mechanisms" line-wrapped such that the literal
+  substring `*/` appeared in the comment text, which javac correctly
+  read as the comment's own closing delimiter, corrupting everything
+  after it into malformed code. Fixed by rewording; noted only because
+  it's a genuine footgun worth remembering when writing Javadoc prose
+  that mentions wildcard-suffixed PKCS#11 mechanism family names.
+- **Verify:** `mvn test`, 183/183 (175 prior + 8 new), 0 failures.
+
 ### W6 — TLS (JDK 27 / JEP 527)
 - Install the provider at higher priority than SunJCE and pin
   `jdk.tls.namedGroups=SecP256r1MLKEM768,SecP384r1MLKEM1024` (FIPS run
