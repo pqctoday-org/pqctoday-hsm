@@ -64,6 +64,8 @@ rust/target/
 rust/bench-harness/target/
 openmls-provider/target/
 kmip/target/
+remoting/target/
+tls/target/
 
 # Scratch wasm-bindgen iterations (canonical is rust/pkg_bundler/)
 rust/pkg_bundler_new/

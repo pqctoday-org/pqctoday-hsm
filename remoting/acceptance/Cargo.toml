@@ -1,0 +1,26 @@
+[package]
+name = "pqctoday-pkcs11-remote-acceptance"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "WP5a — v3.2-derived acceptance suite for the PKCS#11 gRPC/REST remoting services: a shared case table run three ways (in-process core control, real gRPC, real REST), asserting exact CKR_* parity across transports."
+
+[lib]
+name = "acceptance"
+path = "src/lib.rs"
+
+[dependencies]
+pqctoday-pkcs11-remote-core = { path = "../core" }
+pqctoday-pkcs11-remote-proto = { path = "../proto" }
+pqc-grpc-pkcs11 = { path = "../grpc" }
+pqc-rest-pkcs11 = { path = "../rest" }
+softhsmrustv3 = { path = "../../rust" }
+tonic = { version = "0.14", features = ["transport"] }
+tonic-health = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+base64 = "0.22"
+anyhow = "1"

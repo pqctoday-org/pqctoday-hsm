@@ -1,0 +1,138 @@
+// PKCS#11 remoting — gRPC surface for the softhsmrustv3 engine.
+//
+// sandbox-bench-transport-arms-plan-08242026.md §4.WP3. Unary RPCs only in
+// phase 1 (decision 6). Representative algorithm cells (Ed25519, ML-DSA-*,
+// ML-KEM-*) per decision 6; the parameter-set-generic Algorithm enum below
+// is what makes widening the cell set config, not code.
+//
+// Verb parity with the REST service (remoting/rest) is intentional — the
+// two surfaces expose the same seven verbs so a benchmark can compare
+// framing/transport cost alone (WP5a's error-mapping contract depends on
+// this parity: the same CKR_* outcome must be representable on both wires).
+syntax = "proto3";
+package pqctoday.pkcs11remote.v1;
+
+enum Algorithm {
+  ALGORITHM_UNSPECIFIED = 0;
+  ED25519 = 1;
+  ML_DSA_44 = 2;
+  ML_DSA_65 = 3;
+  ML_DSA_87 = 4;
+  ML_KEM_512 = 5;
+  ML_KEM_768 = 6;
+  ML_KEM_1024 = 7;
+}
+
+// PKCS#11 v3.2 CKR_* return-code mirror, restricted to the codes this
+// service's verb layer can actually produce (see remoting/core/src/error.rs
+// — CkError::to_status/to_http keep this list authoritative in one place).
+// Values are the real CKR_* codepoints from pkcs11t.h, NOT sequential — a
+// case in the WP5a acceptance suite asserts the numeric value, and a
+// gRPC/REST client should be able to log the same number a raw PKCS#11
+// caller would see.
+enum Pkcs11Error {
+  PKCS11_ERROR_UNSPECIFIED = 0;
+  CKR_GENERAL_ERROR = 5;
+  CKR_FUNCTION_FAILED = 6;
+  CKR_ARGUMENTS_BAD = 7;
+  CKR_ATTRIBUTE_VALUE_INVALID = 0x13;
+  CKR_KEY_TYPE_INCONSISTENT = 0x63;
+  CKR_KEY_FUNCTION_NOT_PERMITTED = 0x68;
+  CKR_MECHANISM_INVALID = 0x70;
+  CKR_TEMPLATE_INCOMPLETE = 0xD0;
+  CKR_SESSION_HANDLE_INVALID = 0xB3;
+  CKR_PIN_INCORRECT = 0xA0;
+  CKR_SIGNATURE_INVALID = 0xC0;
+}
+
+message Pkcs11ErrorDetail {
+  Pkcs11Error code = 1;
+  uint32 raw_ck_rv = 2; // the exact CKR_* numeric value, spec priority order preserved
+  string message = 3;
+}
+
+message HealthRequest {}
+message HealthResponse {
+  bool ok = 1;
+  string engine_version = 2;
+}
+
+message OpenSessionRequest {
+  string user_pin = 1;
+}
+message OpenSessionResponse {
+  uint32 session_handle = 1;
+}
+
+message CloseSessionRequest {
+  uint32 session_handle = 1;
+}
+message CloseSessionResponse {}
+
+message GenerateKeyPairRequest {
+  uint32 session_handle = 1;
+  Algorithm algorithm = 2;
+  bytes cka_id = 3;
+  string label = 4;
+}
+message GenerateKeyPairResponse {
+  uint32 public_handle = 1;
+  uint32 private_handle = 2;
+}
+
+message SignRequest {
+  uint32 session_handle = 1;
+  uint32 private_handle = 2;
+  Algorithm algorithm = 3;
+  bytes data = 4;
+}
+message SignResponse {
+  bytes signature = 1;
+}
+
+message VerifyRequest {
+  uint32 session_handle = 1;
+  uint32 public_handle = 2;
+  Algorithm algorithm = 3;
+  bytes data = 4;
+  bytes signature = 5;
+}
+message VerifyResponse {
+  // A PROTOCOL-LEVEL answer, not an error — mirrors the engine's own
+  // Ok(false)/CKR_SIGNATURE_INVALID-as-non-fault convention (native::verify)
+  // and KMIP's ValidityIndicator model. A malformed request still returns a
+  // gRPC error via Pkcs11ErrorDetail; only "signature checked out invalid"
+  // comes back here.
+  bool valid = 1;
+}
+
+message EncapsulateRequest {
+  uint32 session_handle = 1;
+  uint32 public_handle = 2;
+  Algorithm algorithm = 3;
+}
+message EncapsulateResponse {
+  bytes ciphertext = 1;
+  bytes shared_secret = 2;
+}
+
+message DecapsulateRequest {
+  uint32 session_handle = 1;
+  uint32 private_handle = 2;
+  Algorithm algorithm = 3;
+  bytes ciphertext = 4;
+}
+message DecapsulateResponse {
+  bytes shared_secret = 1;
+}
+
+service Pkcs11Remote {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+  rpc GenerateKeyPair(GenerateKeyPairRequest) returns (GenerateKeyPairResponse);
+  rpc Sign(SignRequest) returns (SignResponse);
+  rpc Verify(VerifyRequest) returns (VerifyResponse);
+  rpc Encapsulate(EncapsulateRequest) returns (EncapsulateResponse);
+  rpc Decapsulate(DecapsulateRequest) returns (DecapsulateResponse);
+}

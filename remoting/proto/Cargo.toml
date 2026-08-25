@@ -1,0 +1,15 @@
+[package]
+name = "pqctoday-pkcs11-remote-proto"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Generated tonic/prost types for the PKCS#11 gRPC remoting service (pkcs11_remote.proto) — shared by the server (remoting/grpc) and the bench-harness client (rust/bench-harness) so the wire schema is single-sourced."
+
+[dependencies]
+prost = "0.14"
+tonic = { version = "0.14", features = ["transport", "codegen"] }
+tonic-prost = "0.14"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+protoc-bin-vendored = "3"

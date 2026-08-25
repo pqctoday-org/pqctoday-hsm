@@ -36,3 +36,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8"
 anyhow = "1"
+
+# gRPC/REST transport-bench arms (sandbox-bench-transport-arms-plan-08242026.md
+# WP4). Bridged into the blocking `measure::run_point` model via a shared
+# multi-thread tokio runtime + `Handle::block_on` per worker call (§4.WP4a) —
+# measure::run_point drives OS threads in tight loops, same reason the KMIP
+# arm above uses blocking rustls rather than tokio directly.
+pqctoday-tls = { path = "../../tls" }
+pqctoday-pkcs11-remote-proto = { path = "../../remoting/proto" }
+tonic = { version = "0.14", features = ["transport", "tls-aws-lc"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio-rustls = "0.26"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
+ureq = { version = "2", features = ["json", "tls"] }
+base64 = "0.22"

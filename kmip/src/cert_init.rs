@@ -12,7 +12,10 @@
 //!   ca.key        CA private key (PEM, PKCS#8)
 //!   ca.crt        CA self-signed cert (PEM)
 //!   server.key    Admin-facade server key (PEM, PKCS#8)
-//!   server.crt    Server cert signed by the CA (PEM); SANs: pqc-kmip, localhost, 127.0.0.1
+//!   server.crt    Server cert signed by the CA (PEM); SANs: pqc-kmip, pqc-grpc,
+//!                 pqc-rest, pqc-grpc-baseline, pqc-rest-baseline, localhost, 127.0.0.1
+//!                 (the gRPC/REST PKCS#11 remoting services share this one mint —
+//!                 sandbox-bench-transport-arms-plan-08242026.md WP2)
 //!   client.key    kms-proxy client key (PEM, PKCS#8)
 //!   client.crt    Client cert signed by the CA (PEM); CN=sandbox-kms-proxy
 //! ```
@@ -93,17 +96,28 @@ pub fn init_certs_if_missing(dir: &Path) -> anyhow::Result<AdminCertPaths> {
     srv_params.key_usages =
         vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
     srv_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    srv_params.subject_alt_names = vec![
-        SanType::DnsName(
-            Ia5String::try_from("pqc-kmip")
-                .map_err(|e| anyhow::anyhow!("SAN pqc-kmip: {e}"))?,
-        ),
-        SanType::DnsName(
-            Ia5String::try_from("localhost")
-                .map_err(|e| anyhow::anyhow!("SAN localhost: {e}"))?,
-        ),
-        SanType::IpAddress(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+    // Shared mint: the gRPC/REST PKCS#11 remoting services (pqc-grpc, pqc-rest,
+    // and their un-gated classical-baseline twins) mount the same admin-certs
+    // volume as pqc-kmip, so this one mint's server cert must be valid for all
+    // of them (sandbox-bench-transport-arms-plan-08242026.md WP2).
+    const SERVICE_DNS_NAMES: &[&str] = &[
+        "pqc-kmip",
+        "pqc-grpc",
+        "pqc-rest",
+        "pqc-grpc-baseline",
+        "pqc-rest-baseline",
+        "localhost",
     ];
+    let mut subject_alt_names: Vec<SanType> = SERVICE_DNS_NAMES
+        .iter()
+        .map(|name| {
+            Ia5String::try_from(*name)
+                .map(SanType::DnsName)
+                .map_err(|e| anyhow::anyhow!("SAN {name}: {e}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    subject_alt_names.push(SanType::IpAddress(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
+    srv_params.subject_alt_names = subject_alt_names;
     srv_params.not_after = expiry;
     let server_cert = srv_params
         .signed_by(&server_key, &ca_cert, &ca_key)

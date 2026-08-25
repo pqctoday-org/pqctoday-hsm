@@ -1,0 +1,29 @@
+[package]
+name = "pqc-rest-pkcs11"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "REST (JSON+base64 over HTTP/1.1 keep-alive) PKCS#11 remoting service over softhsmrustv3 — sandbox-bench-transport-arms-plan-08242026.md WP3."
+
+[[bin]]
+name = "pqc-rest-pkcs11"
+path = "src/main.rs"
+
+[dependencies]
+softhsmrustv3 = { path = "../../rust" }
+pqctoday-pkcs11-remote-core = { path = "../core" }
+pqctoday-tls = { path = "../../tls" }
+
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }

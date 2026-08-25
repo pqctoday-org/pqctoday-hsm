@@ -1,0 +1,16 @@
+[package]
+name = "pqctoday-tls"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "Shared rustls TLS-posture crate: KMIP 3.0 Profiles §3.3 Quantum Safe Authentication Suite (extracted from pqctoday-kmip's server::secp384r1mlkem1024 + TlsProfile so the gRPC/REST PKCS#11 remoting services can reuse the identical posture without depending on the kmip crate)."
+repository = "https://github.com/pqctoday-org/pqctoday-hsm"
+
+[dependencies]
+rustls = { version = "0.23", features = ["aws_lc_rs", "ring"] }
+
+[dev-dependencies]
+# Interop-proof harness only (tests/secp384r1mlkem1024_interop.rs, run --ignored) —
+# shells out to an installed `openssl` binary to prove the composed group actually
+# negotiates against a real independent TLS 1.3 stack, not just against itself.
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }

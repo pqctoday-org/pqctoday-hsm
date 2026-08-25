@@ -61,7 +61,17 @@ pub struct Engine {
     /// (confirmed against `rust/src/ck_abi.rs`'s own doc comments); a
     /// v3.2-aware client resolves the newer functions through the
     /// interface mechanism instead, exactly as done here.
-    functions_3_2: *const CK_FUNCTION_LIST_3_2,
+    ///
+    /// `None` when the loaded module has no `C_GetInterface` export at all,
+    /// or answers `C_GetInterface("PKCS 11", {3,2})` with anything but
+    /// success — sandbox-bench-transport-arms-plan-08242026.md WP4c: a
+    /// p11-kit-remoted module is exactly this case (p11-kit's RPC protocol
+    /// carries PKCS#11 3.0 calls but has no ENCAPSULATE/DECAPSULATE call
+    /// IDs at all, verified against its master source 2026-08-24). Every
+    /// v2.40-only function keeps working through `funcs()`; only the two
+    /// KEM entry points become unavailable, reported as a clear error
+    /// rather than a `load()`-time hard failure or a null-pointer crash.
+    functions_3_2: Option<*const CK_FUNCTION_LIST_3_2>,
 }
 
 // SAFETY: `CK_FUNCTION_LIST`'s entries are `unsafe extern "C" fn` pointers
@@ -110,32 +120,45 @@ impl Engine {
         // name is the literal "PKCS 11" (with a space) per the spec;
         // requesting version {3,2} explicitly avoids relying on the
         // library's default-interface ordering.
+        //
+        // OPTIONAL (WP4c, 2026-08-24): a module with no `C_GetInterface`
+        // export at all (stock p11-kit-client.so exports only the frozen
+        // v2.40 table) or one that answers with anything but success is
+        // NOT a load failure — it just means the two v3.2-only functions
+        // this harness needs for the KEM cells are unavailable through
+        // this particular module. Every v2.40 function still works. See
+        // `functions_3_2`'s doc comment.
         type GetInterfaceFn = unsafe extern "C" fn(
             *mut u8,
             *mut CK_VERSION,
             CK_INTERFACE_PTR_PTR,
             CK_FLAGS,
         ) -> CK_RV;
-        let get_interface: libloading::Symbol<GetInterfaceFn> =
-            unsafe { library.get(b"C_GetInterface\0") }.context("resolve C_GetInterface")?;
-        let mut interface_name: [u8; 8] = *b"PKCS 11\0";
-        let mut version_3_2 = CK_VERSION { major: 3, minor: 2 };
-        let mut interface_ptr: CK_INTERFACE_PTR = std::ptr::null_mut();
-        // SAFETY: `interface_name`/`version_3_2` are valid buffers for the
-        // duration of this call; `interface_ptr` is a valid non-null
-        // out-pointer per §5.5.
-        let rv = unsafe {
-            get_interface(interface_name.as_mut_ptr(), &mut version_3_2, &mut interface_ptr, 0)
+        let functions_3_2 = match unsafe { library.get::<GetInterfaceFn>(b"C_GetInterface\0") } {
+            Err(_) => None,
+            Ok(get_interface) => {
+                let mut interface_name: [u8; 8] = *b"PKCS 11\0";
+                let mut version_3_2 = CK_VERSION { major: 3, minor: 2 };
+                let mut interface_ptr: CK_INTERFACE_PTR = std::ptr::null_mut();
+                // SAFETY: `interface_name`/`version_3_2` are valid buffers
+                // for the duration of this call; `interface_ptr` is a
+                // valid non-null out-pointer per §5.5.
+                let rv = unsafe {
+                    get_interface(interface_name.as_mut_ptr(), &mut version_3_2, &mut interface_ptr, 0)
+                };
+                if rv != CKR_OK_RV || interface_ptr.is_null() {
+                    None
+                } else {
+                    // SAFETY: a successful C_GetInterface returns a
+                    // CK_INTERFACE whose pFunctionList, per the {3,2}
+                    // version we requested, points to a
+                    // CK_FUNCTION_LIST_3_2 — the engine's own
+                    // C_GetInterface dispatch (rust/src/ck_abi.rs) only
+                    // ever populates it that way for a 3.2 match.
+                    Some(unsafe { (*interface_ptr).pFunctionList as *const CK_FUNCTION_LIST_3_2 })
+                }
+            }
         };
-        if rv != CKR_OK_RV || interface_ptr.is_null() {
-            bail!("C_GetInterface(\"PKCS 11\", 3.2) failed: rv=0x{rv:x}");
-        }
-        // SAFETY: a successful C_GetInterface returns a CK_INTERFACE whose
-        // pFunctionList, per the {3,2} version we requested, points to a
-        // CK_FUNCTION_LIST_3_2 — the engine's own C_GetInterface dispatch
-        // (rust/src/ck_abi.rs) only ever populates it that way for a 3.2
-        // match.
-        let functions_3_2 = unsafe { (*interface_ptr).pFunctionList as *const CK_FUNCTION_LIST_3_2 };
 
         Ok(Self { _library: library, functions: list_ptr, functions_3_2 })
     }
@@ -151,9 +174,17 @@ impl Engine {
     }
 
     /// The v3.2-only function segment (`C_EncapsulateKey`/`C_DecapsulateKey`),
-    /// resolved via `C_GetInterface` in `load()`.
-    fn funcs_32(&self) -> &softhsmrustv3::ck_abi::FnListV32Ext {
-        unsafe { &(*self.functions_3_2).f32 }
+    /// resolved via `C_GetInterface` in `load()`. `None` when the loaded
+    /// module exposes no v3.2 interface — see `functions_3_2`'s doc.
+    fn funcs_32(&self) -> Option<&softhsmrustv3::ck_abi::FnListV32Ext> {
+        self.functions_3_2.map(|p| unsafe { &(*p).f32 })
+    }
+
+    /// True when this module can drive `C_EncapsulateKey`/`C_DecapsulateKey`
+    /// at all — the KEM cells are skipped with a clear reason, not run and
+    /// left to crash, when this is false.
+    pub fn supports_kem(&self) -> bool {
+        self.functions_3_2.is_some()
     }
 
     pub fn initialize(&self) -> Result<()> {
@@ -381,12 +412,18 @@ impl Engine {
         public_key: CK_OBJECT_HANDLE,
         template: &mut [CK_ATTRIBUTE],
     ) -> Result<(Vec<u8>, CK_OBJECT_HANDLE)> {
+        let funcs_32 = self.funcs_32().ok_or_else(|| {
+            anyhow::anyhow!(
+                "unsupported-by-transport: this module exposes no PKCS#11 v3.2 interface \
+                 (C_GetInterface unavailable or refused) — C_EncapsulateKey cannot be driven"
+            )
+        })?;
         let mut mech = CK_MECHANISM { mechanism: mechanism as CK_ULONG, pParameter: std::ptr::null_mut(), ulParameterLen: 0 };
         let mut ct_len: CK_ULONG = 0;
         let mut ss_handle: CK_OBJECT_HANDLE = 0;
         ck(
             unsafe {
-                (self.funcs_32().C_EncapsulateKey)(
+                (funcs_32.C_EncapsulateKey)(
                     session, &mut mech, public_key,
                     template.as_mut_ptr(), template.len() as CK_ULONG,
                     std::ptr::null_mut(), &mut ct_len, &mut ss_handle,
@@ -397,7 +434,7 @@ impl Engine {
         let mut ciphertext = vec![0u8; ct_len as usize];
         ck(
             unsafe {
-                (self.funcs_32().C_EncapsulateKey)(
+                (funcs_32.C_EncapsulateKey)(
                     session, &mut mech, public_key,
                     template.as_mut_ptr(), template.len() as CK_ULONG,
                     ciphertext.as_mut_ptr(), &mut ct_len, &mut ss_handle,
@@ -419,12 +456,18 @@ impl Engine {
         ciphertext: &[u8],
         template: &mut [CK_ATTRIBUTE],
     ) -> Result<CK_OBJECT_HANDLE> {
+        let funcs_32 = self.funcs_32().ok_or_else(|| {
+            anyhow::anyhow!(
+                "unsupported-by-transport: this module exposes no PKCS#11 v3.2 interface \
+                 (C_GetInterface unavailable or refused) — C_DecapsulateKey cannot be driven"
+            )
+        })?;
         let mut mech = CK_MECHANISM { mechanism: mechanism as CK_ULONG, pParameter: std::ptr::null_mut(), ulParameterLen: 0 };
         let mut ciphertext = ciphertext.to_vec();
         let mut ss_handle: CK_OBJECT_HANDLE = 0;
         ck(
             unsafe {
-                (self.funcs_32().C_DecapsulateKey)(
+                (funcs_32.C_DecapsulateKey)(
                     session, &mut mech, private_key,
                     template.as_mut_ptr(), template.len() as CK_ULONG,
                     ciphertext.as_mut_ptr(), ciphertext.len() as CK_ULONG, &mut ss_handle,
@@ -470,12 +513,21 @@ impl Engine {
     /// `generate_key_pair`, but builds the public-key template from an
     /// `algos::KeygenParam` — the one place that knows how to encode each
     /// kind of required attribute (raw `CKA_EC_PARAMS` OID bytes at their
-    /// real declared length, vs. `CKA_PARAMETER_SET` as a bare 4-byte
-    /// `u32` regardless of this platform's 8-byte native `CK_ULONG` —
-    /// see `crypto/handlers.rs::get_attr_ulong`, which reads exactly 4
-    /// bytes at `pValue` no matter what `ulValueLen` says). Keeping this
-    /// encoding logic here, not in `algos.rs`, matches the module's own
-    /// rule: nothing outside `pkcs11.rs` builds a `CK_ATTRIBUTE` by hand.
+    /// real declared length, vs. `CKA_PARAMETER_SET`/`CKA_MODULUS_BITS` as
+    /// the platform's NATIVE `CK_ULONG` width — see
+    /// `crypto/handlers.rs::get_attr_ulong_native`, which as of the
+    /// engine's 2026-08-14 fix (commit e8b4129) strictly requires
+    /// `ulValueLen == size_of::<usize>()` (`ck_param::WORD`), refusing
+    /// any other length rather than reading the first 4 bytes of it. A
+    /// fixed 4-byte `u32` — this file's own convention until this fix —
+    /// only ever worked on a 32-bit target; on this native 64-bit build
+    /// `CK_ULONG = c_ulong` is 8 bytes, so it was silently wrong here too
+    /// (found 2026-08-24 alongside the CKA_EC_PARAMS regression below —
+    /// both are the same class of drift: this harness's template-building
+    /// assumptions not tracking the engine's `ffi.rs` correctness fixes).
+    /// Keeping this encoding logic here, not in `algos.rs`, matches the
+    /// module's own rule: nothing outside `pkcs11.rs` builds a
+    /// `CK_ATTRIBUTE` by hand.
     pub fn generate_key_pair_with_param(
         &self,
         session: CK_SESSION_HANDLE,
@@ -494,25 +546,25 @@ impl Engine {
                 self.generate_key_pair(session, mechanism, &mut pub_template, &mut [])
             }
             KeygenParam::ParameterSet(value) => {
-                let mut value = value;
+                // Native CK_ULONG width (8 bytes on this 64-bit build), not
+                // a fixed 4-byte u32 — see this fn's doc comment.
+                let mut value: CK_ULONG = value as CK_ULONG;
                 let mut pub_template = [CK_ATTRIBUTE {
                     attrType: CKA_PARAMETER_SET as CK_ATTRIBUTE_TYPE,
-                    pValue: &mut value as *mut u32 as CK_VOID_PTR,
-                    ulValueLen: std::mem::size_of::<u32>() as CK_ULONG,
+                    pValue: &mut value as *mut CK_ULONG as CK_VOID_PTR,
+                    ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
                 }];
                 self.generate_key_pair(session, mechanism, &mut pub_template, &mut [])
             }
             KeygenParam::RsaModulusBits(bits) => {
-                // Same plain-4-byte-u32 convention as ParameterSet above —
-                // confirmed against ffi.rs's CKM_RSA_PKCS_KEY_PAIR_GEN
-                // dispatch (get_attr_ulong), not native CK_ULONG width.
-                // No CKA_PUBLIC_EXPONENT: the engine generates and stores
-                // that itself, not caller-supplied.
-                let mut bits = bits;
+                // Native CK_ULONG width, same reasoning as ParameterSet
+                // above. No CKA_PUBLIC_EXPONENT: the engine generates and
+                // stores that itself, not caller-supplied.
+                let mut bits: CK_ULONG = bits as CK_ULONG;
                 let mut pub_template = [CK_ATTRIBUTE {
                     attrType: CKA_MODULUS_BITS as CK_ATTRIBUTE_TYPE,
-                    pValue: &mut bits as *mut u32 as CK_VOID_PTR,
-                    ulValueLen: std::mem::size_of::<u32>() as CK_ULONG,
+                    pValue: &mut bits as *mut CK_ULONG as CK_VOID_PTR,
+                    ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
                 }];
                 self.generate_key_pair(session, mechanism, &mut pub_template, &mut [])
             }

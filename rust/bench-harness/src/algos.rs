@@ -35,10 +35,17 @@ use softhsmrustv3::constants::{
 };
 
 /// How a keygen call's public-key template must be built for a given
-/// algorithm. `None` — no attribute needed, the engine's own defaults are
-/// already correct (Ed25519, X25519). `EcParamsOid` — CKA_EC_PARAMS must
-/// carry this exact DER OID (Weierstrass curves; absent defaults to
-/// P-256, verified against `ffi.rs`'s curve-selection branch). `ParameterSet`
+/// algorithm. `None` — no attribute needed. `EcParamsOid` — CKA_EC_PARAMS
+/// must carry this exact DER OID: for the Weierstrass curves, absent
+/// defaults to P-256 (verified against `ffi.rs`'s curve-selection branch);
+/// for the Edwards/Montgomery curves (Ed25519, X25519) the attribute is
+/// REQUIRED — absent → `CKR_TEMPLATE_INCOMPLETE` — since the engine's
+/// 2026-08-13 "W2" correctness fix (`ffi.rs` commit da449bc) made it read
+/// `CKA_EC_PARAMS` instead of hardcoding Ed25519 (PKCS#11 v3.2 §6.3.10
+/// requires this; a stale pre-08-13 build of this engine is the only way
+/// `KeygenParam::None` ever worked for these two — found 2026-08-24
+/// bisecting a keygen failure that reproduced only against a freshly-built
+/// engine, never against an older cached one). `ParameterSet`
 /// — CKA_PARAMETER_SET is REQUIRED (ML-DSA/ML-KEM/SLH-DSA; absent →
 /// CKR_TEMPLATE_INCOMPLETE), and per `get_attr_ulong`'s implementation
 /// (`crypto/handlers.rs`) the value must be readable as a plain 4-byte
@@ -65,6 +72,13 @@ pub enum KeygenParam {
 pub const P256_OID: &[u8] = &[0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
 pub const P384_OID: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22];
 pub const P521_OID: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x23];
+/// id-Ed25519 (RFC 8032 / 1.3.101.112) — byte-identical to the OID
+/// `ffi.rs`'s Edwards keygen arm itself emits into the public key's
+/// `CKA_EC_PARAMS` (and, since the 2026-08-13 fix, requires as INPUT too).
+pub const ED25519_OID: &[u8] = &[0x06, 0x03, 0x2B, 0x65, 0x70];
+/// id-X25519 (RFC 8032 / 1.3.101.110) — same relationship to `ffi.rs`'s
+/// Montgomery keygen arm as `ED25519_OID` above.
+pub const X25519_OID: &[u8] = &[0x06, 0x03, 0x2B, 0x65, 0x6E];
 
 /// One benchmarked signature algorithm.
 #[derive(Clone, Copy, Debug)]
@@ -80,7 +94,7 @@ pub struct SignatureAlgo {
 
 pub const ED25519: SignatureAlgo = SignatureAlgo {
     name: "Ed25519", security_level: "L1",
-    keygen_mechanism: CKM_EC_EDWARDS_KEY_PAIR_GEN, keygen_param: KeygenParam::None,
+    keygen_mechanism: CKM_EC_EDWARDS_KEY_PAIR_GEN, keygen_param: KeygenParam::EcParamsOid(ED25519_OID),
     sign_mechanism: CKM_EDDSA, slow: false,
 };
 
@@ -248,7 +262,7 @@ pub struct KeyAgreementAlgo {
 
 pub const X25519: KeyAgreementAlgo = KeyAgreementAlgo {
     name: "X25519", security_level: "L1",
-    keygen_mechanism: CKM_EC_MONTGOMERY_KEY_PAIR_GEN, keygen_param: KeygenParam::None,
+    keygen_mechanism: CKM_EC_MONTGOMERY_KEY_PAIR_GEN, keygen_param: KeygenParam::EcParamsOid(X25519_OID),
 };
 pub const ECDH_P256: KeyAgreementAlgo = KeyAgreementAlgo {
     name: "ECDH-P256", security_level: "L1",

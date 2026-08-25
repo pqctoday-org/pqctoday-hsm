@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["proto", "core", "grpc", "rest", "acceptance"]
+
+# Standalone build root (sandbox-bench-transport-arms-plan-08242026.md §1.1/WP1) —
+# NOT a member of `../rust`'s workspace, so it never enters the wasm build graph.
+# `[patch]` does not propagate across build roots (confirmed the hard way by
+# `../rust/Cargo.toml`'s own comment and by `../kmip/Cargo.toml`'s duplicate
+# block), so this workspace repeats it for every member that path-deps on
+# `../../rust` (core, and anything built on core).
+[patch.crates-io]
+fips204 = { path = "../rust/fips204-patched" }
+fips205 = { path = "../rust/fips205-patched" }
+hbs-lms = { path = "../rust/hbs-lms-patched" }
+
+[profile.dev]
+# aws-lc-rs/cmake+clang builds are slow; keep incremental dev builds fast.
+opt-level = 0

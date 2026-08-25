@@ -10,6 +10,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **gRPC and REST PKCS#11 remoting** (new `remoting/` standalone workspace:
+  `proto`/`core`/`grpc`/`rest`/`acceptance`) — two new network-facing access
+  paths to the engine (`pqc-grpc-pkcs11`, `pqc-rest-pkcs11`), alongside the
+  existing in-process and KMIP paths. 7 verbs: OpenSession, CloseSession,
+  GenerateKeyPair, Sign, Verify, Encapsulate, Decapsulate. Both services
+  share the KMIP listener's quantum-safe TLS posture through a new
+  `pqctoday-tls` crate — `SecP384r1MLKEM1024` (locally composed, since
+  rustls 0.23 lacks it natively) extracted verbatim out of `pqctoday-kmip`
+  rather than reimplemented, so the two listeners can never drift on wire
+  format. `--tls-interop` against real OpenSSL 3.6.3 confirms the group:
+  handshake using the composed group, refusal of a classical-only client,
+  negotiation of all three KMIP 3.0 §3.3.3-mandated hybrid groups. A
+  derived v3.2 acceptance suite (`remoting/acceptance`) proves exact
+  `CKR_*` parity across in-process/gRPC/REST for 5 cases — not a port of
+  the full 492-assert conformance suite (that stays a property of the
+  engine/C-ABI), described accordingly as "v3.2-derived acceptance
+  coverage of the exposed verb subset" everywhere it's documented,
+  including the new `docs/PKCS11_REMOTING.md` coverage table.
+- `bench-harness transport` subcommand — benchmarks the new gRPC
+  (persistent-channel and per-request-channel variants) and REST arms
+  against the same algorithm matrix as the existing KMIP arm, sharing its
+  twin-container interleaved A/B comparison mechanism (`--compare-tls`,
+  real min/max spread across repeats, `interleaved:true` per row).
+
+### Fixed
+
+- **`bench-harness`'s keygen templates for Ed25519/X25519/RSA-with-
+  parameter-set had gone stale against two already-shipped engine
+  correctness fixes** — `da449bc` (2026-08-13, `CKA_EC_PARAMS` now
+  required for Edwards/Montgomery keygen) and `e8b4129` (2026-08-14,
+  native `CK_ULONG` width now strictly enforced instead of a hardcoded
+  4-byte value). The harness was still building the old template shape,
+  so its own default 26-algorithm matrix run had quietly stopped working
+  independent of anything above. Fixed; full matrix runs clean again.
+
 - **`id-MLDSA65-ECDSA-P384-SHA512` composite-signature profile (.46)** —
   the last gap against the full draft §6 profile set, at vendor codepoint
   `0x8000006d`. Cross-verified against the shared external KAT vector
