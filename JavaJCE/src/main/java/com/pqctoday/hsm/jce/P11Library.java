@@ -518,6 +518,73 @@ final class P11Library implements AutoCloseable {
         }
     }
 
+    // CK_HKDF_PARAMS { CK_BBOOL bExtract; CK_BBOOL bExpand; [6 bytes padding];
+    // CK_MECHANISM_TYPE prfHashMechanism; CK_ULONG ulSaltType; CK_BYTE_PTR pSalt;
+    // CK_ULONG ulSaltLen; CK_OBJECT_HANDLE hSaltKey; CK_BYTE_PTR pInfo; CK_ULONG ulInfoLen; }
+    // Layout NOT assumed from ABI convention alone — this is the first struct
+    // in this class with 1-byte fields immediately preceding an 8-byte field,
+    // an ambiguous case none of the earlier all-CK_ULONG/pointer structs
+    // exercised (they happened to need no padding either way). Confirmed via
+    // a standalone C probe (sizeof/offsetof against this repo's own
+    // pkcs11.h, no #pragma pack override present) before writing this
+    // layout: total size 64 bytes, 6 bytes of padding after the two
+    // CK_BBOOL fields to reach prfHashMechanism's 8-byte alignment.
+    private static final MemoryLayout HKDF_PARAMS = MemoryLayout.structLayout(
+        JAVA_BYTE, JAVA_BYTE, MemoryLayout.paddingLayout(6),
+        JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG);
+
+    static final long CKF_HKDF_SALT_NULL = 0x00000001L;
+    static final long CKF_HKDF_SALT_DATA = 0x00000002L;
+
+    /**
+     * CKM_HKDF_DERIVE mechanism. Salt is always passed as raw bytes
+     * (CKF_HKDF_SALT_DATA) or omitted (CKF_HKDF_SALT_NULL) — confirmed by
+     * reading SoftHSM_keygen.cpp before writing this method that the
+     * engine explicitly rejects CKF_HKDF_SALT_KEY
+     * ("CKM_HKDF_DERIVE: CKF_HKDF_SALT_KEY not supported"), so a salt
+     * that is one of this provider's own opaque (non-extractable) keys
+     * can never be used here — P11HKDFKDFSpi rejects that case with a
+     * clear error rather than silently degrading. Also confirmed live in
+     * that same code path that CKA_VALUE_LEN is REQUIRED in the derive
+     * template regardless of mode, including extract-only (where RFC
+     * 5869 fixes the PRK length at the hash's output size) — the caller
+     * must compute and supply that length explicitly, the engine will
+     * not infer it.
+     */
+    MemorySegment mechHkdf(long prfHashMech, boolean extract, boolean expand, byte[] salt, byte[] info) {
+        MemorySegment params = arena.allocate(HKDF_PARAMS);
+        params.set(JAVA_BYTE, 0, (byte) (extract ? 1 : 0));
+        params.set(JAVA_BYTE, 1, (byte) (expand ? 1 : 0));
+        params.set(JAVA_LONG, 8, prfHashMech);
+        params.set(JAVA_LONG, 16, salt.length > 0 ? CKF_HKDF_SALT_DATA : CKF_HKDF_SALT_NULL);
+        params.set(ADDRESS, 24, salt.length > 0 ? bytes(salt) : MemorySegment.NULL);
+        params.set(JAVA_LONG, 32, (long) salt.length);
+        params.set(JAVA_LONG, 40, 0L); // hSaltKey — always unused, see javadoc above
+        params.set(ADDRESS, 48, info.length > 0 ? bytes(info) : MemorySegment.NULL);
+        params.set(JAVA_LONG, 56, (long) info.length);
+        MemorySegment m = arena.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_HKDF_DERIVE);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, HKDF_PARAMS.byteSize());
+        return m;
+    }
+
+    /** C_DeriveKey with a caller-built CK_MECHANISM (HKDF; ECDH has its own ecdh1Derive convenience above). */
+    long deriveKey(MemorySegment mech, long baseKey, Attr[] outputTmpl) {
+        ensureOpen();
+        try {
+            MemorySegment tmpl = attrs(outputTmpl);
+            MemorySegment hKey = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cDeriveKey, session, mech, baseKey,
+                tmpl, (long) outputTmpl.length, hKey), "C_DeriveKey");
+            return hKey.get(JAVA_LONG, 0);
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("deriveKey failed", t);
+        }
+    }
+
     /** C_CreateObject — imports a caller-supplied key onto the token (public keys only; see KeyFactory import). */
     long createObject(Attr[] template) {
         ensureOpen();

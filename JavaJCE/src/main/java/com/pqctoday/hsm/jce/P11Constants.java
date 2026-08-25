@@ -60,6 +60,9 @@ final class P11Constants {
     static final long CKM_KMAC_128      = 0x80000100L; // CKM_VENDOR_DEFINED | 0x100
     static final long CKM_KMAC_256      = 0x80000101L; // CKM_VENDOR_DEFINED | 0x101
 
+    // ── KDF (W4) ─────────────────────────────────────────────────────────
+    static final long CKM_HKDF_DERIVE = 0x0000402aL;
+
     // ── Object classes ──────────────────────────────────────────────────
     static final long CKO_PUBLIC_KEY  = 0x00000002L;
     static final long CKO_PRIVATE_KEY = 0x00000003L;

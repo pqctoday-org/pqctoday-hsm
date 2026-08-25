@@ -1141,26 +1141,88 @@ KMAC128/256): DONE 2026-08-24, PASSED.**
   AESCMAC×Bouncy Castle, KMAC128/256×Bouncy Castle with empirical
   length assertions).
 
-Remaining W4 scope (KDF, SecretKeyFactory, SP 800-108, KeyStore write
-path) — not started. One concrete finding already on record for when SP
-800-108 is picked up: `CK_SP800_108_KDF_PARAMS` has a variable-length
-PRF-data-array parameter structure (confirmed reading W0.3's KMAC spike
-notes above) that needs its own dedicated FFM struct builder —
-`P11Library.mechWithParams`'s all-`CK_ULONG` shape doesn't cover it,
-deliberately noted in that method's own javadoc rather than stretched to
-fit. The real JDK 24 `javax.crypto.KDF`/`KDFSpi`/`HKDFParameterSpec`
-shape was already verified live via `javap` this session (Extract/
-Expand/ExtractThenExpand, with `List<SecretKey>` IKM/salt) — worth
-noting before that workstream starts that the engine's own
-`CK_HKDF_PARAMS` (confirmed in `pkcs11t.h`) only supports a single IKM
-(the `C_DeriveKey` base key) and a single optional salt, so the JDK
-API's multi-IKM/multi-salt generalization will need either a documented
-single-element-only restriction or a deliberate concatenation policy —
-not yet decided.
+**HKDF (HKDF-SHA256/384/512, via the new `javax.crypto.KDF`/`KDFSpi`
+API): DONE 2026-08-24, PASSED.** This slice also drove the module's
+compiler baseline from JDK 24 to JDK 27 (see `pom.xml` and the
+`build(JavaJCE): target JDK 27 directly` commit): `javax.crypto.KDF`
+(JEP 478) is still preview-only on JDK 24 (`javac` refuses it without
+`--enable-preview`) but finalized on the JDK 27 RC already in this
+environment — confirmed live before writing any HKDF code, not assumed
+from the earlier `javap` check alone (every other API surface diffed
+identically between the two JDKs, but a preview API specifically can
+still shift before finalization, so it was re-verified against the real
+JDK 27 shape rather than trusted on the strength of the JDK 24 result).
+
+- `P11HKDFKDFSpi implements KDFSpi`, one instance per registered name
+  (`HKDF-SHA256/384/512` — the exact JDK 27 EA-documented KDF names,
+  distinct from the `HmacSHA256`-style Mac names above even though both
+  key off the same hash).
+- **Single-IKM/single-salt restriction resolved as a hard technical
+  constraint, not a policy call** — confirmed by reading
+  `SoftHSM_keygen.cpp` before writing any code: PKCS#11's
+  `CKM_HKDF_DERIVE` operates on exactly one base-key handle and one
+  optional salt, and the engine explicitly rejects
+  `CKF_HKDF_SALT_KEY` ("not supported") — so a salt that is one of this
+  provider's own opaque (non-extractable) keys can never be used at
+  all, regardless of how many elements are in the list. `ikms()`/
+  `salts()` lists with more than one element are rejected with a clear
+  `InvalidAlgorithmParameterException` rather than inventing an
+  unspecified concatenation semantics for JDK's own multi-element
+  generalization.
+- **A real struct-layout question, verified rather than assumed from
+  ABI convention:** `CK_HKDF_PARAMS` is the first struct in this module
+  with 1-byte `CK_BBOOL` fields immediately preceding an 8-byte field —
+  an ambiguous case none of W1–W3's structs (all-`CK_ULONG`/pointer
+  shapes) actually exercised. Confirmed via a standalone C probe
+  (`sizeof`/`offsetof` against this repo's own `pkcs11.h`, no
+  `#pragma pack` override present) before writing the FFM layout: 64
+  bytes total, 6 bytes of padding after the two `CK_BBOOL` fields.
+- **A genuine, non-obvious engine requirement found via live
+  bisection, not source-reading alone:** `C_DeriveKey` for HKDF
+  initially failed with `CKR_TEMPLATE_INCOMPLETE` even though the
+  HKDF-specific code in `SoftHSM_keygen.cpp` reads as self-sufficient in
+  isolation (it force-overrides `CKA_CLASS`/`CKA_KEY_TYPE` to fixed
+  values regardless of what the caller supplies). Root cause: a
+  *separate*, shared, generic template pre-check
+  (`extractObjectInformation`, reached before the HKDF-specific block
+  since `CKM_HKDF_DERIVE`'s `isImplicit=false`) validates the caller's
+  raw template first and requires `CKA_CLASS`/`CKA_KEY_TYPE` to be
+  present there too — even though their values get discarded and
+  replaced moments later. Traced through the source, then confirmed
+  conclusively via an isolated C reproduction (`dlopen`'d directly
+  against the same built `.so`, bypassing Java/FFM entirely) that
+  bisected exactly which attribute was missing before touching the real
+  code — the same rigor as every other root-cause finding this session,
+  applied to a case where source-reading alone gave a misleading
+  picture.
+- **The canonical two-step HKDF pattern** (a separate `Extract` call
+  producing a PRK, later fed into a separate `Expand` call) surfaced one
+  more instance of the by-now-familiar missing-`CKA_DERIVE` bug class —
+  the derived PRK itself needs `CKA_DERIVE=true` to be usable as the
+  next step's base key. Fixed proactively in the same edit as the
+  `CKA_CLASS`/`CKA_KEY_TYPE` fix above, before it could cause a second
+  separate live failure.
+- **Verify:** `mvn test`, 148/148 (141 prior + 7 new). One of the seven
+  is a real published KAT, not just a cross-verify: RFC 5869 §A.1 Test
+  Case 1's exact IKM/salt/info/L inputs produce the exact published OKM
+  byte-for-byte — confirmed first, live, that JDK 27's own SunJCE
+  computes that same published value before trusting it as the oracle
+  for the other digest sizes (SHA-384/512) via direct cross-verification.
+
+Remaining W4 scope (`SecretKeyFactory` for PBKDF2/SP 800-108, KeyStore
+write path) — not started. One concrete finding already on record for
+when SP 800-108 is picked up: `CK_SP800_108_KDF_PARAMS` has a
+variable-length PRF-data-array parameter structure (confirmed reading
+W0.3's KMAC spike notes above) that needs its own dedicated FFM struct
+builder — `P11Library.mechWithParams`'s all-`CK_ULONG` shape doesn't
+cover it, deliberately noted in that method's own javadoc rather than
+stretched to fit.
 
 - GCM in-token IV policy (§4.3 note) — DONE, see above.
-- **Verify:** NIST CAVP/ACVP vectors for AES-GCM/CMAC/HKDF; interop with
-  SunJCE for CBC/CTR; GCM IV-uniqueness test across sessions.
+- **Verify:** NIST CAVP/ACVP vectors for AES-GCM/CMAC — DONE, see above
+  (RFC 5869 KAT stands in for HKDF's own vector); interop with SunJCE
+  for CBC/CTR — DONE; GCM IV-uniqueness test across sessions — not yet
+  attempted.
 
 ### W5 — FIPS posture completion + docs
 - Full POST battery, policy-layer refusal tests for every §5 row,

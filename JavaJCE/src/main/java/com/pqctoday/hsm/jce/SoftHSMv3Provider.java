@@ -336,6 +336,18 @@ public final class SoftHSMv3Provider extends Provider {
             }
         });
 
+        // W4: HKDF via the new javax.crypto.KDF/KDFSpi API (JEP 478,
+        // finalized on JDK 27 — see pom.xml). Registered under
+        // "HKDF-SHA256/384/512" — the exact JDK 27 EA-documented KDF
+        // names (confirmed W0's Java Security Standard Algorithm Names
+        // check), distinct from the "HmacSHA256" Mac names above even
+        // though both key off the same underlying hash. See
+        // P11HKDFKDFSpi's javadoc for the single-IKM/single-salt
+        // restriction this engine's CK_HKDF_PARAMS genuinely requires.
+        registerHKDF("HKDF-SHA256", CKM_SHA256, 32);
+        registerHKDF("HKDF-SHA384", CKM_SHA384, 48);
+        registerHKDF("HKDF-SHA512", CKM_SHA512, 64);
+
         // W2: KeyStore (read path — see P11KeyStoreSpi's javadoc for why
         // write/delete throw for now). Fixes the classic SunPKCS11 "0
         // keys" gap for this token by actually enumerating objects via
@@ -367,6 +379,21 @@ public final class SoftHSMv3Provider extends Provider {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
                 return new P11AESCipherSpi(lib, mode);
+            }
+        });
+    }
+
+    private void registerHKDF(String name, long prfHashMech, int hashOutputBytes) {
+        putService(new Service(this, "KDF", name,
+            P11HKDFKDFSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                try {
+                    return new P11HKDFKDFSpi(lib, prfHashMech, hashOutputBytes,
+                        (javax.crypto.KDFParameters) ctrParamObj);
+                } catch (java.security.InvalidAlgorithmParameterException e) {
+                    throw new NoSuchAlgorithmException(e.getMessage(), e);
+                }
             }
         });
     }
