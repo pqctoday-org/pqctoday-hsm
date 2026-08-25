@@ -21,6 +21,8 @@
 #  11. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
 #  12. (--javajce) JavaJCE provider suite (mvn test) in pqc-dev-sandbox  [opt-in]
 #  13. (--javajce-remote) JavaJCE-remote gRPC provider suite vs live pqc-grpc  [opt-in]
+#  14. (--openssl-provider) vendored pkcs11-provider vs real OpenSSL 3.6, both
+#                            engines (13 PASS / 0 FAIL / 5 XFAIL / 0 XPASS)  [opt-in]
 #
 # Steps 6-7 (Rust PKCS#11 conformance, differential harness) were opt-in
 # until 2026-08-23 — both are core PKCS#11 v3.2 evidence, and both had gone
@@ -80,6 +82,7 @@ RUN_TLS_INTEROP=0
 RUN_RELEASE_XMSS=0
 RUN_JAVAJCE=0
 RUN_JAVAJCE_REMOTE=0
+RUN_OPENSSL_PROVIDER=0
 for arg in "$@"; do
   case "$arg" in
     --cpp) RUN_CPP=1 ;;
@@ -89,7 +92,8 @@ for arg in "$@"; do
     --release-xmss) RUN_RELEASE_XMSS=1 ;;
     --javajce) RUN_JAVAJCE=1 ;;
     --javajce-remote) RUN_JAVAJCE_REMOTE=1 ;;
-    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_TLS_INTEROP=1; RUN_RELEASE_XMSS=1; RUN_JAVAJCE=1; RUN_JAVAJCE_REMOTE=1 ;;
+    --openssl-provider) RUN_OPENSSL_PROVIDER=1 ;;
+    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_TLS_INTEROP=1; RUN_RELEASE_XMSS=1; RUN_JAVAJCE=1; RUN_JAVAJCE_REMOTE=1; RUN_OPENSSL_PROVIDER=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -286,6 +290,20 @@ if [[ $RUN_CPP == 1 ]]; then
      python3 scripts/check_pkcs11_reports_fresh.py --cpp"
 fi
 
+if [[ $RUN_OPENSSL_PROVIDER == 1 ]]; then
+  # Coverage harness for the vendored OpenSSL provider (src/vendor/pkcs11-provider)
+  # against BOTH PKCS#11 engines under the real OpenSSL 3.6.3 oracle. Design
+  # record: docs/openssl-provider-coverage-audit-2026-08-25.md (§5/§6);
+  # remediation priorities: docs/openssl-provider-remediation-plan-2026-08-25.md.
+  # Reuses --cpp's build artifacts (provider .so + C++ engine .so); does NOT
+  # force RUN_CPP itself — same FAIL-never-skip precedent as --tls-interop:
+  # if the build is absent, the harness's own T0 preflight fails loudly with
+  # a clear "run the --cpp gate step / cmake build first" message rather than
+  # silently skipping.
+  run_step "OpenSSL provider coverage (13 PASS / 0 FAIL / 5 XFAIL / 0 XPASS)" \
+    "cd /ag/pqctoday-hsm && bash scripts/test-openssl-provider.sh"
+fi
+
 if [[ $RUN_ACVP_WASM == 1 ]]; then
   run_step "ACVP wasm harness (20 suites, cross-engine)" \
     "cd /ag/pqctoday-hsm && npm run test:acvp 2>&1 | tail -5"
@@ -431,6 +449,7 @@ if [[ ${#FAILED[@]} -eq 0 ]]; then
   [[ $RUN_RELEASE_XMSS == 1 ]] && FLAGS="$FLAGS,release-xmss"
   [[ $RUN_JAVAJCE == 1 ]] && FLAGS="$FLAGS,javajce"
   [[ $RUN_JAVAJCE_REMOTE == 1 ]] && FLAGS="$FLAGS,javajce-remote"
+  [[ $RUN_OPENSSL_PROVIDER == 1 ]] && FLAGS="$FLAGS,openssl-provider"
   {
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "flags: $FLAGS"
