@@ -538,7 +538,20 @@ t15a() { # provider must at least activate over the Rust cdylib
 run_case T15a PASS "provider activates over the native Rust cdylib" t15a
 
 t15b() { # ENV-2: in-memory token store, no cross-process persistence — any
-         # multi-process keygen+use flow MUST fail today (remediation R6)
+         # multi-process keygen+use flow MUST fail today (remediation R6).
+         # R6 (2026-08-25) landed opt-in native persistence
+         # (SOFTHSMRUST_STATE_FILE) but could NOT be verified end-to-end
+         # through THIS test: a separate, pre-existing bug (confirmed via
+         # git-stash against the pre-R6 binary, so not something R6
+         # introduced) makes `softhsm2-util --init-token` fail against the
+         # Rust engine with "Could not get the slot list" — its two
+         # required C_GetSlotList calls (count-only, then buffered) return
+         # inconsistent slot counts, confirmed live via a temporary debug
+         # trace (first call: 0 slots; second call: 1). Until that's
+         # fixed, this test's own `|| true` on the init-token line means
+         # it was already never getting a real token before R6 either —
+         # not scripted as a persistence proof, since it can't currently
+         # even prove the non-persistence half cleanly.
   [[ -n "$RUST_ENGINE_SO" ]] || return 1
   local w="$ROOT_WORK/rustfunc"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
   # OPENSSL_CONF=/dev/null: same reason as mk_arena's own init-token call

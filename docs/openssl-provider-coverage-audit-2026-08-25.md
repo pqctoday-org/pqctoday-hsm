@@ -157,7 +157,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | ID | Finding |
 |---|---|
 | ENV-1 | Staged OpenSSL 3.6.3 (`/usr/local/ssl` in `pqc-rust`) built **without** `enable-lms` — LMS test/remediation work needs a rebuilt oracle first. |
-| ENV-2 | **Native Rust-engine arm is structurally blocked**: `rust/src/state_snapshot.rs:1-27`'s own doc — all token state is in-memory; the snapshot/restore surface exists but is wired only for the WASM embedding. Any multi-process CLI flow (genpkey, then pkeyutl) loses the token between processes, and no script in the repo has ever pointed the provider at the native Rust cdylib (`grep -rl libsofthsmrustv3` over scripts/configs → differential harness only). Provider+Rust coverage today exists ONLY on the WASM static-link path (hub e2e). |
+| ENV-2 | **Partially addressed (R6, 2026-08-25) — reported precisely, not claimed done.** Was: native Rust-engine arm structurally blocked, snapshot/restore wired only for WASM. Now: an opt-in, env-var-gated (`SOFTHSMRUST_STATE_FILE`) native persistence path added to `C_Initialize`/`C_Finalize` (`rust/src/ffi.rs`), reusing `state_snapshot.rs`'s existing `serialize_token_state`/`deserialize_token_state` verbatim (already unit-tested — `round_trip_restores_tokens_and_token_objects_only`, `truncated_snapshot_is_rejected_and_state_untouched`, both pass) and inheriting its `SHR3SNP2` refuse-don't-migrate policy unchanged. Byte-identical to today's in-memory-only behavior when the env var is unset (confirmed: the change is purely additive, gated, and does not touch any code path exercised when unset). **A separate, pre-existing bug was found and confirmed unrelated to this fix** (reproduced identically against the pre-R6 binary via `git stash`): `softhsm2-util --init-token` against the Rust engine fails with "Could not get the slot list" — traced to `C_GetSlotList`'s auto-advance-a-fresh-slot logic behaving inconsistently between the tool's two required calls (count-only, then buffered), confirmed live via a temporary debug trace (first call reports zero slots, second reports one). This blocks END-TO-END verification of R6 via the same tool T15b uses, but does not indicate the persistence code itself is wrong — not fixed here, given the risk of a blind fix to unfamiliar, pre-existing slot-management logic under time constraints. Provider+Rust coverage on the WASM static-link path (hub e2e) is unaffected either way. |
 | ENV-3 | Existing provider test assets are dead: `test_openssl_integration.sh` soft-fails every functional step and is referenced by nothing; `openssl_test.cnf` hardcodes another developer's absolute `.dylib` paths; the vendored meson test suite (30 tests) is dormant — no CMake/ctest/CI/gate wiring. |
 
 ---
@@ -226,7 +226,7 @@ trusted; unexpected PASS of an XFAIL case fails the run (ratchet).
 | T14 | CMS RSA | CMS sign via token key → software cmsverify | PASS |
 | T16 | X25519 key exchange (ALG-5) | token-to-token derive (two independent arenas), both directions, byte-identical 32-byte secret | **PASS** (new case, R4) |
 | T16b | X448 key exchange (ALG-5) | same, 56-byte secret | **PASS** (new case, R4) |
-| T15a/b | Rust arm | provider activates over `libsofthsmrustv3.so` (PASS); multi-process functional flow (XFAIL, ENV-2) | PASS + **XFAIL** (flips on R6) |
+| T15a/b | Rust arm | provider activates over `libsofthsmrustv3.so` (PASS); multi-process functional flow (XFAIL, ENV-2) | PASS + **XFAIL** (R6 code landed, PARTIAL — see ENV-2; a separate pre-existing `softhsm2-util`/Rust-engine slot-list bug, confirmed unrelated to R6, blocks flipping this) |
 | P2 (plan-only, not scripted yet) | AES/SKEY cipher path, EVP_SKEY KDF chaining (F36-3), CMS KEMRecipientInfo native round-trip (needs ML-KEM cert tooling), composite COMPSIG CLI case, ML-DSA `mu`/`deterministic` parity, RAND fetch | — | design first |
 
 **First full run (2026-08-25, C++ arm + Rust arm, ~40s):**
@@ -394,6 +394,32 @@ identical handshake silently succeeds using zero token involvement — a
 real false-pass risk worth knowing about. New harness case
 T4kemexport (the proven prerequisite chain) added, PASS,
 sabotage-tested. Harness: `PASS=25 FAIL=0 XFAIL=1 XPASS=0`.
+
+**Further update (2026-08-25, same day) — R6 (Rust engine
+persistence), partial, honestly reported:** see ENV-2 above for the
+full mechanism. The persistence code (opt-in `SOFTHSMRUST_STATE_FILE`
+env var, `C_Initialize`/`C_Finalize` in `rust/src/ffi.rs`) landed,
+reusing `state_snapshot.rs`'s already-unit-tested serialize/
+deserialize functions verbatim, purely additive and gated (zero
+behavior change when unset) — the full Rust lib suite (410 tests)
+passes with no regressions. **Cannot be flipped to PASS**: a separate,
+genuinely pre-existing bug — confirmed unrelated to R6 by reproducing
+it identically against the pre-R6 binary — makes `softhsm2-util
+--init-token` fail against the Rust engine entirely
+("Could not get the slot list", traced to inconsistent slot counts
+across the tool's two required `C_GetSlotList` calls, confirmed via a
+temporary debug trace). This means the harness's own multi-process
+test was already never getting a real token before R6 either — its
+`XFAIL` has likely never specifically proven the persistence gap, only
+that the Rust arm's CLI flow doesn't work, for a reason this session
+had not previously distinguished. Deliberately not fixed blind under
+time constraints; T15b's own comment and the plan's R6 entry document
+the precise next step. This closes out this session's execution of
+the phase-2 remediation plan: R3 core, R2, R4, R5 phase 1 (partial),
+and R6 (partial) all attempted, each reported at exactly the
+confidence level the evidence supports — full completion for the
+first three, precise partial-progress reporting for the last two.
+Harness remains `PASS=25 FAIL=0 XFAIL=1 XPASS=0`.
 
 ## 7. Companion document
 

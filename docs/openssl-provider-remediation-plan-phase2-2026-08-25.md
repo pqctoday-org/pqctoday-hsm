@@ -385,7 +385,61 @@ op in the engine log. Sabotage by breaking the group entry in a copy.
 
 ---
 
-## R6 — native Rust-engine persistence (gap ENV-2) — Priority 2, effort M
+## R6 — native Rust-engine persistence (gap ENV-2) — Priority 2, effort M — PARTIAL
+
+**PARTIAL (2026-08-25) — reported honestly, not claimed done.** The
+persistence code itself landed exactly as designed: an opt-in
+`SOFTHSMRUST_STATE_FILE` env var, checked in `C_Initialize` (restore,
+missing file = fresh token) and `C_Finalize` (stash, before the
+zeroize pass — same ordering as the existing emscripten stash), both
+in `rust/src/ffi.rs`. Reuses `state_snapshot.rs`'s existing
+`serialize_token_state`/`deserialize_token_state` verbatim — no new
+serialization logic — and inherits its `SHR3SNP2` refuse-don't-
+migrate policy unchanged. The change is purely additive and gated:
+byte-identical to today's behavior whenever the env var is unset, so
+it carries essentially zero regression risk to any existing path.
+0600 permissions set on write (Unix). Both of `state_snapshot.rs`'s
+own pre-existing unit tests still pass
+(`round_trip_restores_tokens_and_token_objects_only`,
+`truncated_snapshot_is_rejected_and_state_untouched`), and the full
+Rust lib suite (410 tests) passes with zero regressions.
+
+**What blocks calling this DONE**: full end-to-end verification (the
+exact multi-process CLI flow T15b's own body attempts) is blocked by
+a separate, genuinely pre-existing bug, confirmed unrelated to R6 by
+reproducing it identically against the pre-R6 binary via `git stash`:
+`softhsm2-util --init-token` fails against the Rust engine with
+"Could not get the slot list." Root-caused as far as: the tool issues
+two required `C_GetSlotList` calls (first with a null buffer to get
+the count, then with an allocated buffer sized to that count) and the
+Rust engine's own auto-advance-a-fresh-slot logic in `C_GetSlotList`
+returns inconsistent counts across the two calls — confirmed live via
+a temporary debug trace: first call reports 0 slots, second reports
+1. This means the harness's own `t15b()` was **already** never
+successfully initializing a real token even before R6 — its `|| true`
+on the init-token line was silently absorbing this exact failure the
+whole time, so T15b's XFAIL has likely never been proof of the
+persistence gap specifically, only of "the Rust arm's CLI flow
+doesn't work," for a reason this session had not previously
+distinguished.
+
+**Deliberately not fixed here**: `C_GetSlotList`'s auto-advance logic
+is pre-existing, unfamiliar code with its own subtleties (thread-local
+state, an "always keep one free slot" invariant used elsewhere) — a
+blind fix under this session's time constraints risked a worse
+outcome than reporting the gap precisely and stopping. T15b's own
+comment in the harness now documents this exact finding.
+
+**Next step for a future session**: root-cause the `C_GetSlotList`
+count mismatch specifically (add the same kind of temporary debug
+trace this session used, but keep it long enough to see the auto-
+advance closure's own internal state on each call — this session's
+trace only observed the *outcome*, not *why* the two calls disagree);
+once `softhsm2-util --init-token` works reliably against the Rust
+engine, T15b can be rewritten as a real multi-process proof: process A
+sets `SOFTHSMRUST_STATE_FILE` + generates a key, process B (same env
+var) loads and uses it — flip PASS only once that round-trip is
+live-verified, not on code inspection alone.
 
 Unchanged by the challenge except wiring detail C7.
 

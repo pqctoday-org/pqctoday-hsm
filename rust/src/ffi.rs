@@ -232,6 +232,22 @@ pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
         }
     }
     crate::state::init_token_store();
+    // remediation R6: native, opt-in disk persistence — off by default,
+    // byte-identical to today's in-memory-only behavior when the env var
+    // is unset. Reuses state_snapshot.rs's existing serialize/deserialize
+    // pair (already compiled natively; only the emscripten wiring was
+    // missing) and inherits its SHR3SNP2 refuse-don't-migrate policy
+    // verbatim: a foreign/old-format snapshot is refused loudly here too,
+    // never half-loaded as a partially-initialized token. A missing file
+    // is not an error — first run on a fresh SOFTHSMRUST_STATE_FILE path
+    // is a normal empty token, exactly like today.
+    if let Ok(path) = std::env::var("SOFTHSMRUST_STATE_FILE") {
+        if let Ok(buf) = std::fs::read(&path) {
+            if let Err(rv) = crate::state_snapshot::deserialize_token_state(&buf) {
+                return rv;
+            }
+        }
+    }
     crate::state::set_initialized(true);
     CKR_OK
 }
@@ -250,6 +266,25 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     // See state_snapshot.rs and openssl-studio-pkcs11-wiring-plan-07242026.md.
     #[cfg(target_os = "emscripten")]
     crate::state_snapshot::stash_before_finalize();
+    // remediation R6: native counterpart to the emscripten stash above —
+    // same reasoning, same ordering (must run before the zeroize pass
+    // below), gated on the same opt-in env var C_Initialize checks rather
+    // than a build-time cfg, since this is a deliberate dev/test opt-in
+    // for any native build, not an embedding-specific requirement. Honest
+    // limitation, not hidden: unlike the C++ engine's token directory
+    // (PIN-derived encryption of sensitive attributes), this snapshot is
+    // plaintext at rest — a dev/test persistence surface, not production.
+    // Best-effort write, matching stash_before_finalize's own pattern.
+    if let Ok(path) = std::env::var("SOFTHSMRUST_STATE_FILE") {
+        let blob = crate::state_snapshot::serialize_token_state();
+        if std::fs::write(&path, &blob).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
     // Zeroize all key material (CKA_VALUE) before clearing object store
     OBJECTS.with(|o| {
         let mut store = o.borrow_mut();
