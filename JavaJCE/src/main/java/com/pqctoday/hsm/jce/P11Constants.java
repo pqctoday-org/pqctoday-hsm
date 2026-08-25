@@ -67,6 +67,9 @@ final class P11Constants {
     static final long CKP_PKCS5_PBKD2_HMAC_SHA256 = 0x00000004L;
     static final long CKP_PKCS5_PBKD2_HMAC_SHA384 = 0x00000005L;
     static final long CKP_PKCS5_PBKD2_HMAC_SHA512 = 0x00000006L;
+    static final long CKM_SP800_108_COUNTER_KDF  = 0x000003acL;
+    static final long CKM_SP800_108_FEEDBACK_KDF = 0x000003adL;
+    static final long CK_SP800_108_BYTE_ARRAY    = 0x00000004L;
 
     // ── Object classes ──────────────────────────────────────────────────
     static final long CKO_PUBLIC_KEY  = 0x00000002L;

@@ -1259,14 +1259,80 @@ JDK 27 shape rather than trusted on the strength of the JDK 24 result).
   `CKR_KEY_SIZE_RANGE` — fixed by sizing the derived key to match each
   HMAC variant.
 
-Remaining W4 scope (`SecretKeyFactory` for SP 800-108, KeyStore write
-path) — not started. One concrete finding already on record for when SP
-800-108 is picked up: `CK_SP800_108_KDF_PARAMS` has a variable-length
-PRF-data-array parameter structure (confirmed reading W0.3's KMAC spike
-notes above) that needs its own dedicated FFM struct builder —
-`P11Library.mechWithParams`'s all-`CK_ULONG` shape doesn't cover it,
-deliberately noted in that method's own javadoc rather than stretched to
-fit.
+**SP 800-108 counter/feedback KDF: DONE 2026-08-25, PASSED — W4 is now
+complete except the KeyStore write path.**
+- `P11SP800108KeySpec` (a provider-specific `KeySpec` — no standard JCA
+  name exists for this family, unlike PBKDF2's `PBEKeySpec`) +
+  `P11SP800108SecretKeyFactorySpi`, registered as two services,
+  `"SP800-108-Counter"`/`"SP800-108-Feedback"` — PRF choice lives in the
+  spec rather than the registered name (unlike this module's usual
+  one-service-per-digest pattern), since a per-(mode,PRF) registration
+  would be 18 services for a feature with no standard name to hang them
+  off anyway.
+- `CK_SP800_108_KDF_PARAMS`/`CK_SP800_108_FEEDBACK_KDF_PARAMS`/
+  `CK_PRF_DATA_PARAM` FFM structs: all-`CK_ULONG`/pointer fields, no
+  `CK_BBOOL` alignment ambiguity like `CK_HKDF_PARAMS` had, confirmed
+  reading `pkcs11t.h` before writing the layout. Deliberately scoped to
+  what the engine actually implements (confirmed reading
+  `SoftHSM_keygen.cpp`): only `CK_SP800_108_BYTE_ARRAY` fixed-input data
+  and (counter mode only) a default 32-bit counter — `CK_SP800_108_DKM_LENGTH`
+  and additional-derived-keys are parsed by the engine but silently
+  skipped, "not supported", so this module doesn't expose them either
+  rather than promising behavior the native layer doesn't have.
+- **The exact same `CKA_CLASS`/`CKA_KEY_TYPE`-in-the-output-template
+  requirement found for HKDF earlier in W4 recurred here** — SP 800-108
+  reaches the identical shared `extractObjectInformation` pre-check
+  (`isImplicit=false` for this mechanism too), so the same fix applied
+  immediately rather than being rediscovered live.
+- **A second genuine, disclosed cross-verification gap, found via
+  extensive live investigation, not assumed:** true third-party
+  cross-verification (the Bouncy Castle pattern used for AESCMAC/KMAC)
+  was attempted and abandoned — several standard SP 800-108
+  counter/fixed-input framings (counter as 4-byte BE/LE prefix or
+  suffix, with/without an auto-appended output-length field) all failed
+  to match this engine's real output, as did `openssl kdf`'s own CLI
+  output for the nominally identical key/salt/digest/r parameters
+  (re-confirmed with a corrected key value — see below — so this is a
+  genuine convention difference, not an artifact). Ruled out a bug in
+  this module's own FFM code conclusively via an isolated C
+  reproduction (`dlopen`'d directly against the engine's `.so`, no
+  Java/FFM involved, same technique that found the HKDF template bug):
+  it reproduces this provider's exact output and a *different* output
+  than the `openssl kdf` CLI tool for the same nominal inputs — proving
+  the engine's own C++ code and the CLI tool invoke the identical
+  OpenSSL `EVP_KDF_derive` primitive with some undocumented default
+  differing between call sites. The C-probe output became a genuine,
+  engine-verified reference vector for the counter-mode KAT. Feedback
+  mode additionally hit an unresolved "invalid seed length" from
+  OpenSSL's own KBKDF provider for every IV length tried — verified by
+  self-consistency (determinism) only, gap disclosed rather than hidden.
+- **A real debugging lesson worth recording:** the counter-mode KAT
+  initially failed live even after the CKA_CLASS fix, reproducibly and
+  deterministically — extensive live investigation (isolated C probes,
+  operation-ordering experiments, session-state hypotheses) eventually
+  traced it to a mundane transcription error in the *test's own*
+  32-byte reference key constant (62 hex characters typed instead of
+  64, silently truncating to 31 bytes) — not an engine bug, not a
+  session-state issue, not an FFM bug. `python3 -c "print(len(s)/2)"`
+  on a hand-typed hex constant would have caught this in seconds;
+  recorded here as a reminder to sanity-check hex literal *lengths*
+  before trusting them, the same discipline already applied to hex
+  literal *values*.
+- **Verify:** `mvn test`, 160/160 (156 prior + 4 new — counter-mode KAT
+  against the engine-verified reference, counter/feedback-mode
+  determinism, feedback mode without an IV).
+
+Also noted for cross-engine awareness (not acted on, out of scope for
+this Java provider): `pqctoday-hsm/kmip/src/ops/derive_key.rs`
+documents the separate Rust engine's own SP 800-108 counter-mode
+convention (`K(i) = HMAC(K, [i]₂ ‖ DerivationData)`, 32-bit BE counter
+from 1) — checked directly, and it does **not** match the C++ engine's
+OpenSSL-backed output for the same inputs either. Two engines in this
+same repo currently produce different SP 800-108 output for identical
+inputs; flagged here for whoever picks up cross-engine SP 800-108
+interop, not investigated further as part of this plan.
+
+Remaining W4 scope: KeyStore write path (`setEntry`/`deleteEntry`).
 
 - GCM in-token IV policy (§4.3 note) — DONE, see above.
 - **Verify:** NIST CAVP/ACVP vectors for AES-GCM/CMAC — DONE, see above

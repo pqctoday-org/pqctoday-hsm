@@ -359,6 +359,27 @@ public final class SoftHSMv3Provider extends Provider {
         registerPBKDF2("PBKDF2WithHmacSHA384", CKP_PKCS5_PBKD2_HMAC_SHA384);
         registerPBKDF2("PBKDF2WithHmacSHA512", CKP_PKCS5_PBKD2_HMAC_SHA512);
 
+        // W4: SP 800-108 counter/feedback KDF — no standard JCA name
+        // exists for this family (unlike PBKDF2's PBEKeySpec), so these
+        // are provider-named services taking a P11SP800108KeySpec (see
+        // its javadoc for why the PRF choice lives in the spec rather
+        // than the registered name, unlike this module's usual
+        // one-service-per-digest pattern).
+        putService(new Service(this, "SecretKeyFactory", "SP800-108-Counter",
+            P11SP800108SecretKeyFactorySpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11SP800108SecretKeyFactorySpi(lib, false);
+            }
+        });
+        putService(new Service(this, "SecretKeyFactory", "SP800-108-Feedback",
+            P11SP800108SecretKeyFactorySpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11SP800108SecretKeyFactorySpi(lib, true);
+            }
+        });
+
         // W2: KeyStore (read path — see P11KeyStoreSpi's javadoc for why
         // write/delete throw for now). Fixes the classic SunPKCS11 "0
         // keys" gap for this token by actually enumerating objects via

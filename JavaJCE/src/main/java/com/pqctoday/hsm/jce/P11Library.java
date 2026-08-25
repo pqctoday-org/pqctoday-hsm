@@ -612,6 +612,77 @@ final class P11Library implements AutoCloseable {
         return deriveKey(mech, 0L, outputTmpl);
     }
 
+    // CK_PRF_DATA_PARAM { CK_PRF_DATA_TYPE type; CK_VOID_PTR pValue; CK_ULONG ulValueLen; }
+    // — same 3-field ULONG/pointer/ULONG shape as CK_ATTRIBUTE/CK_MECHANISM,
+    // reused deliberately rather than declaring a byte-identical duplicate layout.
+    private static final MemoryLayout PRF_DATA_PARAM = MECHANISM; // structurally identical
+    private static final long PRF_DATA_PARAM_SIZE = PRF_DATA_PARAM.byteSize();
+
+    // CK_SP800_108_KDF_PARAMS { CK_SP800_108_PRF_TYPE prfType; CK_ULONG
+    // ulNumberOfDataParams; CK_PRF_DATA_PARAM_PTR pDataParams; CK_ULONG
+    // ulAdditionalDerivedKeys; CK_DERIVED_KEY_PTR pAdditionalDerivedKeys; }
+    private static final MemoryLayout SP800_108_COUNTER_PARAMS =
+        MemoryLayout.structLayout(JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS);
+
+    // CK_SP800_108_FEEDBACK_KDF_PARAMS — same as above with ulIVLen/pIV
+    // inserted before the additional-derived-keys tail.
+    private static final MemoryLayout SP800_108_FEEDBACK_PARAMS =
+        MemoryLayout.structLayout(JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS);
+
+    /**
+     * One-element CK_PRF_DATA_PARAM array holding CK_SP800_108_BYTE_ARRAY
+     * fixed input (label/context) — the only CK_PRF_DATA_TYPE this engine
+     * actually implements besides CK_SP800_108_ITERATION_VARIABLE
+     * (confirmed reading SoftHSM_keygen.cpp: CK_SP800_108_DKM_LENGTH and
+     * key-handle data params are parsed but silently skipped, "not
+     * supported"). Neither counter-width customization nor additional
+     * derived keys are exposed here — the engine's own default 32-bit
+     * counter applies, matching the scope this class's callers actually
+     * need. Returns {addressOrNull, count} — count is 0 (address unused)
+     * when fixedInput is empty, matching how an absent CK_PRF_DATA_PARAM
+     * array is expressed.
+     */
+    private MemorySegment prfDataParams(byte[] fixedInput) {
+        if (fixedInput.length == 0) return MemorySegment.NULL;
+        MemorySegment seg = arena.allocate(PRF_DATA_PARAM_SIZE);
+        seg.set(JAVA_LONG, 0, P11Constants.CK_SP800_108_BYTE_ARRAY);
+        seg.set(ADDRESS, 8, bytes(fixedInput));
+        seg.set(JAVA_LONG, 16, (long) fixedInput.length);
+        return seg;
+    }
+
+    /** CKM_SP800_108_COUNTER_KDF (SP 800-108 §5.1). prfType must be a CKM_SHA*_HMAC constant or CKM_AES_CMAC. */
+    MemorySegment mechSp800108Counter(long prfType, byte[] fixedInput) {
+        MemorySegment params = arena.allocate(SP800_108_COUNTER_PARAMS);
+        params.set(JAVA_LONG, 0, prfType);
+        params.set(JAVA_LONG, 8, fixedInput.length == 0 ? 0L : 1L);
+        params.set(ADDRESS, 16, prfDataParams(fixedInput));
+        params.set(JAVA_LONG, 24, 0L); // ulAdditionalDerivedKeys — not supported here
+        params.set(ADDRESS, 32, MemorySegment.NULL);
+        MemorySegment m = arena.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_SP800_108_COUNTER_KDF);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, SP800_108_COUNTER_PARAMS.byteSize());
+        return m;
+    }
+
+    /** CKM_SP800_108_FEEDBACK_KDF (SP 800-108 §5.2). iv may be empty (no seed supplied — engine default applies). */
+    MemorySegment mechSp800108Feedback(long prfType, byte[] fixedInput, byte[] iv) {
+        MemorySegment params = arena.allocate(SP800_108_FEEDBACK_PARAMS);
+        params.set(JAVA_LONG, 0, prfType);
+        params.set(JAVA_LONG, 8, fixedInput.length == 0 ? 0L : 1L);
+        params.set(ADDRESS, 16, prfDataParams(fixedInput));
+        params.set(JAVA_LONG, 24, (long) iv.length);
+        params.set(ADDRESS, 32, iv.length == 0 ? MemorySegment.NULL : bytes(iv));
+        params.set(JAVA_LONG, 40, 0L); // ulAdditionalDerivedKeys — not supported here
+        params.set(ADDRESS, 48, MemorySegment.NULL);
+        MemorySegment m = arena.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_SP800_108_FEEDBACK_KDF);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, SP800_108_FEEDBACK_PARAMS.byteSize());
+        return m;
+    }
+
     /** C_DeriveKey with a caller-built CK_MECHANISM (HKDF; ECDH has its own ecdh1Derive convenience above). */
     long deriveKey(MemorySegment mech, long baseKey, Attr[] outputTmpl) {
         ensureOpen();
