@@ -314,6 +314,28 @@ t15b() { # ENV-2: in-memory token store, no cross-process persistence — any
 }
 run_case T15b XFAIL "Rust arm functional flow (blocked by ENV-2 / remediation R6)" t15b
 
+# ─── R0.1 regression guard ──────────────────────────────────────────────────
+# The token-scan attribute-type noise (WART-1) was a real bug, not spec-legal
+# probing: P11Objects.cpp's mandatory-attribute-check loop called
+# getByteStringValue() on EVERY attribute in an object's schema (CKA_CLASS,
+# CKA_TOKEN, ...), not just the byte-string-typed ones the ck14/15/16 checks
+# actually read — fixed 2026-08-25 (remediation R0.1). This is the "harness
+# greps for zero ObjectFile.cpp(181) lines" proof that item's remediation
+# plan entry names — assert it here, across every case's raw log (show_log()
+# above filters this line from DISPLAY only; the underlying .log files still
+# have it if the noise comes back).
+NOISE_HITS=0
+for f in "$ROOT_WORK"/*.log; do
+  [[ -f "$f" ]] || continue
+  n=$(grep -c 'ObjectFile.cpp(181)' "$f" 2>/dev/null || true)
+  NOISE_HITS=$((NOISE_HITS + ${n:-0}))
+done
+if [[ $NOISE_HITS -gt 0 ]]; then
+  echo "REGRESSION: $NOISE_HITS 'ObjectFile.cpp(181)' attribute-type warning(s) across case logs (R0.1 regressed)"
+  FAIL=$((FAIL+1))
+  FAILED_CASES+=("R0.1-REGRESSION token-scan attribute-type noise is back ($NOISE_HITS hits)")
+fi
+
 # ─── verdict ────────────────────────────────────────────────────────────────
 echo
 if [[ ${#FAILED_CASES[@]} -gt 0 ]]; then
