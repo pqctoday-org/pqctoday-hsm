@@ -258,12 +258,29 @@ if [[ $RUN_CPP == 1 ]]; then
   # build/ — ctest's own add_test invocation (CMakeLists.txt) writes into
   # build/ and that copy is discarded; this explicit run is what regenerates
   # the checked-in copy, with the freshness guard immediately after it.
+  #
+  # OpenSSL >= 3.6 is required to even COMPILE now, not just for
+  # --tls-interop's own proof below: src/vendor/pkcs11-provider's ML-KEM
+  # CMS-decrypt code (commit 2cca4f0) uses
+  # OSSL_PKEY_PARAM_CMS_RI_TYPE/CMS_RECIPINFO_KEM — real OpenSSL RFC 9629
+  # KEMRecipientInfo support that landed in 3.6, confirmed absent from
+  # 3.5.6's own headers (undeclared-identifier compile errors, not a
+  # warning — found live running the real --all gate, 2026-08-25). Same
+  # env-var override pattern and default path as --tls-interop below, so
+  # a host that already staged that build for TLS interop needs no extra
+  # setup. -DBUILD_TESTS=ON is also required and was previously missing
+  # here entirely — CMakeLists.txt defaults it OFF, so this step only
+  # ever found tests because a stale, undocumented `build/` from long ago
+  # happened to have it cached; the `test -d build ||` guard below means
+  # a truly fresh checkout would have silently found zero tests.
+  OSSL_ROOT="${OPENSSL_ROOT_DIR:-/usr/local/ssl}"
+  OSSL_LIB="${OPENSSL_LIB_DIR:-/usr/local/ssl/lib}"
   run_step "C++ ctest (incl. PKCS#11 v3.2 compliance harness) + report freshness" \
-    "cd /ag/pqctoday-hsm && (test -d build || cmake -S . -B build -DWITH_RIPEMD160=ON >/dev/null) && \
-     cmake --build build -j\$(nproc) >/dev/null && cd build && ctest --output-on-failure && \
+    "cd /ag/pqctoday-hsm && (test -d build || cmake -S . -B build -DWITH_RIPEMD160=ON -DBUILD_TESTS=ON -DOPENSSL_ROOT_DIR=$OSSL_ROOT >/dev/null) && \
+     LD_LIBRARY_PATH=$OSSL_LIB cmake --build build -j\$(nproc) >/dev/null && cd build && LD_LIBRARY_PATH=$OSSL_LIB ctest --output-on-failure && \
      cd /ag/pqctoday-hsm && \
      ENGINE=./build/src/lib/libsofthsmv3.so; [ -f \"\$ENGINE\" ] || ENGINE=./build/src/lib/libsofthsmv3.dylib; \
-     ./build/p11_v32_compliance_test --engine \"\$ENGINE\" \
+     LD_LIBRARY_PATH=$OSSL_LIB ./build/p11_v32_compliance_test --engine \"\$ENGINE\" \
        --workdir ./build/p11_v32_compliance_workdir --report ./cpp_compliance_report \
        --engine-commit \$(git rev-parse HEAD) >/dev/null && \
      python3 scripts/check_pkcs11_reports_fresh.py --cpp"
