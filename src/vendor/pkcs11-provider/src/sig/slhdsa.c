@@ -44,6 +44,7 @@ DISPATCH_SLHDSA_FN(sign_message_final);
 DISPATCH_SLHDSA_FN(verify_message_update);
 DISPATCH_SLHDSA_FN(verify_message_final);
 #endif /* OSSL_FUNC_SIGNATURE_SIGN_MESSAGE_INIT */
+DISPATCH_SLHDSA_FN(get_ctx_params);
 DISPATCH_SLHDSA_FN(set_ctx_params);
 DISPATCH_SLHDSA_FN(gettable_ctx_params);
 DISPATCH_SLHDSA_FN(settable_ctx_params);
@@ -411,6 +412,164 @@ static int p11prov_slhdsa_verify_message_final(void *ctx)
 }
 #endif /* OSSL_FUNC_SIGNATURE_SIGN_MESSAGE_INIT */
 
+/* AlgorithmIdentifier DER for OSSL_SIGNATURE_PARAM_ALGORITHM_ID, one per
+ * parameter set — same NIST sigAlgs arc mldsa.c's der_ml_dsa_* tables use
+ * (2.16.840.1.101.3.4.3.<n>), final arc octets 0x14-0x1f. OIDs
+ * live-confirmed via `openssl list -signature-algorithms` against the real
+ * 3.6.3 build (2.16.840.1.101.3.4.3.20 through .31, id-slh-dsa-sha2-128s
+ * through id-slh-dsa-shake-256f in that exact order), not transcribed from
+ * the spec alone.
+ *
+ * Deliberately keyed by CKA_PARAMETER_SET below, NOT by key size like
+ * mldsa.c's get_ctx_params does for ML-DSA — SLH-DSA's SHA2 and SHAKE
+ * variants at the same security level share identical key sizes (e.g.
+ * SHA2-128s and SHAKE-128s are both 32-byte public keys), so size cannot
+ * distinguish which OID applies; only the token's own parameter-set
+ * attribute can. */
+static const unsigned char der_slh_dsa_sha2_128s_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x14
+};
+static const unsigned char der_slh_dsa_sha2_128f_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x15
+};
+static const unsigned char der_slh_dsa_sha2_192s_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x16
+};
+static const unsigned char der_slh_dsa_sha2_192f_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x17
+};
+static const unsigned char der_slh_dsa_sha2_256s_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x18
+};
+static const unsigned char der_slh_dsa_sha2_256f_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x19
+};
+static const unsigned char der_slh_dsa_shake_128s_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x1a
+};
+static const unsigned char der_slh_dsa_shake_128f_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x1b
+};
+static const unsigned char der_slh_dsa_shake_192s_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x1c
+};
+static const unsigned char der_slh_dsa_shake_192f_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x1d
+};
+static const unsigned char der_slh_dsa_shake_256s_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x1e
+};
+static const unsigned char der_slh_dsa_shake_256f_alg_id[] = {
+    DER_SEQUENCE,     DER_NIST_SIGALGS_LEN + 3,
+    DER_OBJECT,       DER_NIST_SIGALGS_LEN + 1,
+    DER_NIST_SIGALGS, 0x1f
+};
+
+static int p11prov_slhdsa_get_ctx_params(void *ctx, OSSL_PARAM *params)
+{
+    P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)ctx;
+    OSSL_PARAM *p;
+    int ret;
+
+    P11PROV_debug("slhdsa get ctx params (ctx=%p, params=%p)", ctx, params);
+
+    p = OSSL_PARAM_locate(params, OSSL_SIGNATURE_PARAM_ALGORITHM_ID);
+    if (p) {
+        CK_ULONG paramset = p11prov_obj_get_key_param_set(sigctx->key);
+        switch (paramset) {
+        case CKP_SLH_DSA_SHA2_128S:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_sha2_128s_alg_id,
+                sizeof(der_slh_dsa_sha2_128s_alg_id));
+            break;
+        case CKP_SLH_DSA_SHA2_128F:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_sha2_128f_alg_id,
+                sizeof(der_slh_dsa_sha2_128f_alg_id));
+            break;
+        case CKP_SLH_DSA_SHA2_192S:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_sha2_192s_alg_id,
+                sizeof(der_slh_dsa_sha2_192s_alg_id));
+            break;
+        case CKP_SLH_DSA_SHA2_192F:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_sha2_192f_alg_id,
+                sizeof(der_slh_dsa_sha2_192f_alg_id));
+            break;
+        case CKP_SLH_DSA_SHA2_256S:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_sha2_256s_alg_id,
+                sizeof(der_slh_dsa_sha2_256s_alg_id));
+            break;
+        case CKP_SLH_DSA_SHA2_256F:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_sha2_256f_alg_id,
+                sizeof(der_slh_dsa_sha2_256f_alg_id));
+            break;
+        case CKP_SLH_DSA_SHAKE_128S:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_shake_128s_alg_id,
+                sizeof(der_slh_dsa_shake_128s_alg_id));
+            break;
+        case CKP_SLH_DSA_SHAKE_128F:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_shake_128f_alg_id,
+                sizeof(der_slh_dsa_shake_128f_alg_id));
+            break;
+        case CKP_SLH_DSA_SHAKE_192S:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_shake_192s_alg_id,
+                sizeof(der_slh_dsa_shake_192s_alg_id));
+            break;
+        case CKP_SLH_DSA_SHAKE_192F:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_shake_192f_alg_id,
+                sizeof(der_slh_dsa_shake_192f_alg_id));
+            break;
+        case CKP_SLH_DSA_SHAKE_256S:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_shake_256s_alg_id,
+                sizeof(der_slh_dsa_shake_256s_alg_id));
+            break;
+        case CKP_SLH_DSA_SHAKE_256F:
+            ret = OSSL_PARAM_set_octet_string(
+                p, der_slh_dsa_shake_256f_alg_id,
+                sizeof(der_slh_dsa_shake_256f_alg_id));
+            break;
+        default:
+            ret = RET_OSSL_ERR;
+        }
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
 #ifndef OSSL_SIGNATURE_PARAM_DETERMINISTIC
 #define OSSL_SIGNATURE_PARAM_DETERMINISTIC "deterministic"
 #endif
@@ -485,6 +644,7 @@ static const OSSL_PARAM *p11prov_slhdsa_gettable_ctx_params(void *ctx,
                                                              void *prov)
 {
     static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_SIGNATURE_PARAM_ALGORITHM_ID, NULL, 0),
         OSSL_PARAM_END,
     };
     return params;
@@ -521,6 +681,7 @@ static const OSSL_PARAM *p11prov_slhdsa_settable_ctx_params(void *ctx,
                           digest_verify_update), \
         DISPATCH_SIG_ELEM(slhdsa, DIGEST_VERIFY_FINAL, digest_verify_final), \
         _SLHDSA_SIG_FUNCTIONS_MESSAGE_ELEMS \
+        DISPATCH_SIG_ELEM(slhdsa, GET_CTX_PARAMS, get_ctx_params), \
         DISPATCH_SIG_ELEM(slhdsa, GETTABLE_CTX_PARAMS, gettable_ctx_params), \
         DISPATCH_SIG_ELEM(slhdsa, SET_CTX_PARAMS, set_ctx_params), \
         DISPATCH_SIG_ELEM(slhdsa, SETTABLE_CTX_PARAMS, \

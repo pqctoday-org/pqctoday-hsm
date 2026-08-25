@@ -314,26 +314,55 @@ t12() { local w; w=$(mk_arena slh "$CPP_ENGINE_SO") && use_arena "$w" || return 
   O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHA2-128s -out "$w/k.pem" || return 1
   O storeutl -text "pkcs11:token=slh" 2>/dev/null | grep -q "SLH-DSA-SHA2-128s Public-Key"
 }
-run_case T12 PASS "SLH-DSA keygen/store/encode reachable through provider, all 12 param sets (gap ALG-1 / remediation R1, partial)" t12
+run_case T12 PASS "SLH-DSA keygen/store/encode reachable through provider, all 12 param sets (gap ALG-1 / remediation R1)" t12
 
-# R1 remaining gap: keygen/store/encode all work (T12), but the SIGNATURE
-# operation itself does not — `pkeyutl -sign` on the very same on-token key
-# fails at OpenSSL's own fetch layer ("operation not supported for this
-# keytype", crypto/evp/m_sigver.c) despite the provider's signature
-# registration switch case being confirmed live (via a temporary debug
-# print) to run to completion for all 12 variants, with byte-identical
-# algorithm name strings across the keymgmt/signature/store registration
-# sites. Root cause not yet isolated — deepest investigation this session
-# got: it is not a registration, template, or name-matching bug on this
-# provider's side by every check available (gdb/`openssl list -select`
-# were both unreliable here — `list` never shows "@ pkcs11" for KNOWN-
-# WORKING ML-DSA either, so it cannot distinguish the two). Needs a build
-# with more provider-side introspection than this harness's tools allow.
+# R1 remainder, ROOT-CAUSED AND FIXED (2026-08-25, follow-up pass): the
+# signature dispatch tables registered GETTABLE_CTX_PARAMS without its
+# mandatory pair GET_CTX_PARAMS, violating provider-signature(7)'s
+# documented consistency contract ("if one of them is provided then the
+# other one must also be provided"). OpenSSL 3.6's own
+# evp_signature_from_algorithm() (crypto/evp/signature.c) enforces this at
+# fetch time — an unpaired count raises EVP_R_INVALID_PROVIDER_FUNCTIONS
+# and returns NULL, so the whole method silently fails to construct. That
+# is why every provider-side probe last session showed nothing wrong: our
+# sign_init code was never reached, rejected one layer above it. Fixed by
+# implementing get_ctx_params (OSSL_SIGNATURE_PARAM_ALGORITHM_ID, one DER
+# AlgorithmIdentifier per parameter set, OIDs 2.16.840.1.101.3.4.3.20-31
+# live-confirmed via `openssl list-signature-algorithms`) — deliberately
+# dispatched on the key's own CKA_PARAMETER_SET, NOT key size the way
+# mldsa.c's version does: SLH-DSA's SHA2 and SHAKE variants at the same
+# security level share identical key sizes (e.g. SHA2-128s and
+# SHAKE-128s are both 32-byte public keys), so size alone can't tell them
+# apart. T12sign flipped XPASS the moment the fix landed (ratchet doing
+# its job); now a real, thorough case: SHA2-128s full round trip with
+# exact FIPS 205 signature size + tamper rejection, plus an independent
+# SHAKE-128f cross-check (different hash family) in ITS OWN arena — a
+# manual verification during the fix reused one arena across two
+# algorithms and silently re-signed with the stale first key, exactly
+# the URI-ambiguity trap this harness's own mk_arena comment already
+# warns about.
 t12sign() { local w; w=$(mk_arena slhsign "$CPP_ENGINE_SO") && use_arena "$w" || return 1
   O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHA2-128s -out "$w/k.pem" || return 1
-  O pkeyutl -sign -inkey "pkcs11:token=slhsign;type=private" -rawin -in "$MSG" -out "$w/sig.bin"
+  O pkeyutl -sign -inkey "pkcs11:token=slhsign;type=private" -rawin -in "$MSG" -out "$w/sig.bin" || return 1
+  [[ "$(stat -c%s "$w/sig.bin")" == "7856" ]] || { echo "sig size $(stat -c%s "$w/sig.bin") != 7856"; return 1; }
+  O pkey -in "pkcs11:token=slhsign;type=public" -pubin -pubout -out "$w/pub.pem" || return 1
+  O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" -sigfile "$w/sig.bin" || return 1
+  cp "$w/sig.bin" "$w/tampered.bin"
+  printf '\x00' | dd of="$w/tampered.bin" bs=1 seek=50 count=1 conv=notrunc 2>/dev/null
+  cmp -s "$w/sig.bin" "$w/tampered.bin" && printf '\xff' | dd of="$w/tampered.bin" bs=1 seek=50 count=1 conv=notrunc 2>/dev/null
+  if O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" -sigfile "$w/tampered.bin" >/dev/null 2>&1
+  then echo "tampered SLH-DSA signature VERIFIED — verifier cannot say no"; return 1; else return 0; fi
 }
-run_case T12sign XFAIL "SLH-DSA token-sign (gap ALG-1 remainder / remediation R1, unresolved this session)" t12sign
+run_case T12sign PASS "SLH-DSA-SHA2-128s token sign -> software verify (size 7856) + tamper rejection (gap ALG-1 remainder / remediation R1)" t12sign
+
+t12sign_shake() { local w; w=$(mk_arena slhshake "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHAKE-128f -out "$w/k.pem" || return 1
+  O pkeyutl -sign -inkey "pkcs11:token=slhshake;type=private" -rawin -in "$MSG" -out "$w/sig.bin" || return 1
+  [[ "$(stat -c%s "$w/sig.bin")" == "17088" ]] || { echo "sig size $(stat -c%s "$w/sig.bin") != 17088"; return 1; }
+  O pkey -in "pkcs11:token=slhshake;type=public" -pubin -pubout -out "$w/pub.pem" || return 1
+  O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" -sigfile "$w/sig.bin"
+}
+run_case T12sign_shake PASS "SLH-DSA-SHAKE-128f token sign -> software verify (size 17088, independent hash family) (gap ALG-1 remainder / remediation R1)" t12sign_shake
 
 t14() { local w; w=$(mk_arena cms "$CPP_ENGINE_SO") && use_arena "$w" || return 1
   O genpkey -propquery "?provider=pkcs11" -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$w/k.pem" || return 1
