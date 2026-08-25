@@ -90,6 +90,39 @@ class AESCipherTest {
     }
 
     @Test
+    void gcmIvsAreDistinctAcrossSessionsNotJustWithinOne() throws Exception {
+        // Plan §WS-D: the main plan's own W4 verify list marked this
+        // "not yet attempted" — module-generated GCM IVs come from
+        // C_GenerateRandom (the token's own SP 800-90A DRBG, per
+        // generateIv()'s own javadoc), a real cryptographic RNG rather
+        // than a per-process counter, so uniqueness across independent
+        // sessions is exactly the property worth checking directly
+        // rather than assuming from "it's an RNG." Two SEPARATE provider
+        // instances (independent P11Library sessions) are used
+        // deliberately, not one provider called twice — this is the
+        // "across sessions" case the plan item names, not merely
+        // "within one session."
+        SoftHSMv3Provider p1 = new SoftHSMv3Provider();
+        SoftHSMv3Provider p2 = new SoftHSMv3Provider();
+        SecretKey key1 = KeyGenerator.getInstance("AES", p1).generateKey();
+        SecretKey key2 = KeyGenerator.getInstance("AES", p2).generateKey();
+
+        int n = 64;
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (int i = 0; i < n; i++) {
+            SoftHSMv3Provider p = (i % 2 == 0) ? p1 : p2;
+            SecretKey key = (i % 2 == 0) ? key1 : key2;
+            Cipher enc = Cipher.getInstance("AES/GCM/NoPadding", p);
+            enc.init(Cipher.ENCRYPT_MODE, key);
+            byte[] iv = enc.getIV();
+            assertTrue(seen.add(java.util.HexFormat.of().formatHex(iv)),
+                "module-generated GCM IV repeated across " + n + " encrypts spanning two independent sessions "
+                + "— iteration " + i);
+        }
+        assertEquals(n, seen.size());
+    }
+
+    @Test
     void callerGcmIvFlagAllowsAndUsesTheExactSuppliedIv() throws Exception {
         // -Dsofthsmv3.jce.callerGcmIv=true (plan §WS-B's decided fallback
         // for JEP 527 TLS 1.3, whose record cipher MUST supply its own

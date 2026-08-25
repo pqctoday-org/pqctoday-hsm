@@ -70,7 +70,7 @@ env vars, defaulting to `/usr/local/lib/softhsm/libsofthsmv3.so` / `1234`)
 | `KeyPairGenerator` + `Signature` | SLH-DSA — all 12 SHA2/SHAKE × 128S/128F/192S/192F/256S/256F param sets (FIPS 205) | |
 | `KeyPairGenerator` + `Signature` | Ed25519, Ed448 | |
 | `KeyPairGenerator` + `Signature` | `"EC"` (secp256r1/384r1/521r1, curve chosen via `ECGenParameterSpec`) — SHA256/384/512/SHA3-256/384/512withECDSA | Raw PKCS#11 r‖s output converted to ASN.1 DER for JCA interop |
-| `KeyPairGenerator` + `Signature` | `"RSA"` (2048/3072/4096) — SHA256/384/512withRSA (PKCS#1 v1.5), RSASSA-PSS (SHA-2 only) | |
+| `KeyPairGenerator` + `Signature` | `"RSA"` (2048/3072/4096) — SHA256/384/512withRSA (PKCS#1 v1.5), RSASSA-PSS (SHA-2 and SHA-3 families) | |
 | `KeyFactory` | Public-key import for every algorithm above, plus ML-KEM-512/768/1024 | Public-key import only — private-key import is refused (FIPS 140-3 L3: keys are generated on-token, not brought in) |
 | `KeyPairGenerator` + `KEM` | ML-KEM-512/768/1024 (FIPS 203); also registered under the bare family name `"ML-KEM"` — the exact string JDK 27's own `Hybrid.getKEM()` requests for JEP 527 TLS | Decapsulated secret is the one deliberate exception to this module's opaque-key design — see §6.5 in the plan doc |
 | `Cipher` | `RSA/ECB/OAEPWith{SHA-256,SHA-384,SHA-512,SHA3-256,SHA3-384,SHA3-512}AndMGF1Padding` | |
@@ -119,20 +119,33 @@ document for the section-by-section mapping. Summary:
   issues `C_DestroyObject`, not just a Java-side flag.
 - A JVM shutdown hook provides best-effort session cleanup even if a
   caller never explicitly closes the provider.
-- **Known, disclosed gap, not hidden:** the native layer currently uses
-  one shared `Arena` for a session's whole lifetime rather than confined
-  per-operation arenas with an explicit zero-fill pass before release —
-  see the plan doc's zeroization-audit entry for exactly what's left and
-  why it wasn't rushed through as part of this pass.
+- Native (off-heap) memory is scrubbed too, not just the JVM heap: every
+  operation opens its own short-lived confined arena, and every buffer
+  carrying real byte content is explicitly zero-filled before that arena
+  closes (2026-08-25 — see the remaining-gaps plan's WS-C entry; this
+  used to be a disclosed gap, one shared session-lifetime `Arena` with
+  no zero-fill pass, closed as part of that workstream).
 
 ## Known limitations
 
 - Stateful hash-based signatures (HSS/XMSS) are not implemented — deferred
   by explicit scope decision (plan §10), not an oversight.
-- TLS integration (JEP 527 hybrid KEM groups via JSSE) is validated at the
-  spike level (plan §W0.1) but not yet wired into a full end-to-end
-  handshake test in this module — tracked as plan W6.
-- The Arena/zeroization gap noted above.
+- TLS integration (JEP 527 hybrid KEM groups via JSSE) completes real,
+  live TLS 1.3 handshakes for both FIPS-profile groups
+  (`SecP256r1MLKEM768`, `SecP384r1MLKEM1024`) against a real quantum-safe
+  endpoint, token-side proof included (2026-08-25 — see the remaining-gaps
+  plan's WS-B entry; the standalone spike `JavaJCE/spikes/
+  W6TlsHandshakeSpike.java` reproduces this). Needs
+  `-Dsofthsmv3.jce.callerGcmIv=true` (default off, non-FIPS) for the
+  record cipher — see `P11AESCipherSpi`'s own javadoc for why.
+- Pre-hash ML-DSA/SLH-DSA (`CKM_HASH_ML_DSA_*`, `CKM_HASH_SLH_DSA_*`) are
+  genuinely implemented by the engine but not exposed by this provider:
+  this same JDK's own ML-DSA implementation has no standard "HashML-DSA"
+  algorithm name or pre-hash `Signature` API surface to build against or
+  model a naming convention on — see `P11PureSigSignatureSpi`'s own
+  javadoc for the full investigation.
+- `KeyStore.engineGetCreationDate` always returns the epoch for an entry
+  that exists — PKCS#11 has no creation-timestamp attribute to report.
 - This module targets JDK 24+ for everything except TLS (W6), which rides
   JDK 27's JEP 527; JDK 27 itself is RC until ~2026-09-15 (see the plan's
   risk register for the GA-swap follow-up).

@@ -643,6 +643,68 @@ gap widened deliberately, zero behavioral regressions.**
 | Pre-hash ML-DSA / SLH-DSA (`CKM_HASH_ML_DSA_*`, `CKM_HASH_SLH_DSA_*`) | Investigate-then-decide: check engine mechanism table; if supported, these need a new SignatureSpi shape (digest parameter); if not, record as engine-gap and defer — either way stop leaving it implicit in a javadoc | live probe + doc |
 | `engineGetCreationDate` stub (`new Date(0)`) | PKCS#11 has no creation-timestamp attribute for the engine to report; keep the stub but document it in the KeyStore javadoc + README limitations instead of leaving it bare | doc only |
 
+**WS-D: DONE 2026-08-25, PASSED — three items shipped, one deliberately
+deferred with real reasoning, none left implicit.**
+
+- **SHA-3 PSS — real, not assumed, and built.** Confirmed by reading
+  both `SoftHSM_slots.cpp`'s mechanism-info table (same
+  `CKF_SIGN|CKF_VERIFY` flags as the SHA-2 variants) AND
+  `SoftHSM_sign.cpp`'s actual `C_SignInit`/`C_VerifyInit` dispatch (real
+  `AsymMech::RSA_SHA3_*_PKCS_PSS` cases expecting exactly
+  `{hashAlg=CKM_SHA3_*; mgf=CKG_MGF1_SHA3_*}`, not stubs) before adding
+  anything — the plan's own "do NOT assume from the OAEP precedent"
+  instruction, honored. `P11Constants` gained the four
+  `CKM_SHA3_*_RSA_PKCS_PSS` mechanism IDs plus the missing
+  `CKM_SHA3_224`/`CKG_MGF1_SHA3_224` pair (verified against
+  `pkcs11t.h`), and `P11RSAPSSSignatureSpi.DIGEST_TO_MECH_AND_MGF`
+  now covers all four SHA-3 variants alongside the existing SHA-2
+  three. Cross-verify used JDK's own SunRsaSign
+  (`sun.security.rsa.RSAPSSSignature`, read directly — its own class
+  javadoc states "We support SHA-1, SHA-2 family and SHA3 family", and
+  its `DIGEST_LENGTHS` map lists all four SHA3 entries explicitly), not
+  Bouncy Castle — the plan's own shorthand said "BC interop test" but
+  the actual established precedent in this file
+  (`pssInteropsWithJdkSunRsaSign`) already cross-verifies against real
+  JDK SunRsaSign, confirmed as the stronger, already-proven pattern
+  worth following rather than the plan's brief text. New parameterized
+  test `pssInteropsWithJdkSunRsaSignAcrossSha3Variants` (4 cases,
+  `RSATest.java`, 9→13 tests) — sign/verify/tamper-detection/JDK
+  cross-verify for all four digests.
+- **GCM IV uniqueness across sessions — the main plan's own W4 verify
+  list marked this "not yet attempted."** New test
+  (`gcmIvsAreDistinctAcrossSessionsNotJustWithinOne`, `AESCipherTest.java`,
+  14→15 tests): two independent `SoftHSMv3Provider` instances (two
+  separate `P11Library` sessions, not one provider called twice — the
+  actual "across sessions" case this item names), 64 interleaved
+  encrypts, every module-generated GCM IV distinct.
+- **Pre-hash ML-DSA/SLH-DSA — investigated, deliberately deferred with
+  real reasoning, not a bare "not yet built."** Confirmed the engine
+  genuinely implements every `CKM_HASH_ML_DSA_*`/`CKM_HASH_SLH_DSA_*`
+  variant (mechanism table AND real `C_SignInit`/`C_VerifyInit`
+  dispatch with the `CK_HASH_SIGN_ADDITIONAL_CONTEXT`/
+  `CK_SIGN_ADDITIONAL_CONTEXT` parameter shapes, not stubs) — this is
+  not an engine gap. What's actually missing: this same JDK 27's own
+  ML-DSA implementation (`sun.security.provider.ML_DSA`/`ML_DSA_Impls`,
+  read in full) implements only the pure, no-external-pre-hash mode —
+  no standard `"HashML-DSA"` algorithm name or pre-hash `Signature` API
+  surface exists anywhere in this JDK to interoperate against or model
+  a naming convention on. Building this now would mean inventing a
+  non-standard naming/parameter scheme with no external precedent to
+  verify it against — deferred with this disclosed reasoning
+  (`P11PureSigSignatureSpi`'s own javadoc, expanded), not left implicit.
+- **`engineGetCreationDate`** — real javadoc added explaining PKCS#11
+  has no creation-timestamp attribute at all (checked against
+  `pkcs11t.h` and the OASIS attribute list, not assumed), so the fixed
+  epoch return is the only value this method could ever report. README's
+  "Known limitations" section updated to match — and, found stale while
+  touching that file, its TLS/Arena-zeroization bullets (which still
+  described WS-B/WS-C's now-resolved gaps as open) corrected in the same
+  pass rather than left contradicting the actual shipped state.
+- **Verify:** `mvn test`, 208/208 (203 prior + 5 new: 4 SHA-3 PSS
+  variants, 1 GCM-IV-uniqueness). No C++/engine changes this
+  workstream — every item was either a Java-side extension against
+  already-real engine support, a new test, or documentation.
+
 ---
 
 ## 7. WS-E — W7: Rust engine via gRPC (full workstream, decision Q2)

@@ -303,6 +303,18 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
         return certAt(certs.get(0));
     }
 
+    /**
+     * Always returns the epoch ({@code new Date(0)}) for an entry that
+     * exists, {@code null} otherwise — a real, disclosed limitation
+     * (plan §WS-D), not an oversight: PKCS#11 v3.2 has no
+     * creation-timestamp attribute (checked against {@code pkcs11t.h}
+     * and the OASIS spec's attribute list before writing this) for the
+     * engine to report in the first place, so there is no real value
+     * this method could ever return — every KeyStore-backed object on
+     * this token reports the same fixed epoch, regardless of when it was
+     * actually created. Callers that need real creation-time tracking
+     * must maintain it themselves outside this KeyStore.
+     */
     @Override
     public Date engineGetCreationDate(String alias) {
         return engineContainsAlias(alias) ? new Date(0) : null; // token doesn't record creation time

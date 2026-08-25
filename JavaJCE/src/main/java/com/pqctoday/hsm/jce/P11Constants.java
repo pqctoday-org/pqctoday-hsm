@@ -31,6 +31,14 @@ final class P11Constants {
     static final long CKM_SHA256_RSA_PKCS_PSS  = 0x00000043L;
     static final long CKM_SHA384_RSA_PKCS_PSS  = 0x00000044L;
     static final long CKM_SHA512_RSA_PKCS_PSS  = 0x00000045L;
+    // WS-D: real, engine-dispatched (confirmed reading SoftHSM_slots.cpp's
+    // prepareSupportedMechanisms AND SoftHSM_sign.cpp's C_SignInit/
+    // C_VerifyInit dispatch before adding these — not assumed from the
+    // SHA-2 PSS precedent, per this item's own plan text).
+    static final long CKM_SHA3_224_RSA_PKCS_PSS = 0x00000067L;
+    static final long CKM_SHA3_256_RSA_PKCS_PSS = 0x00000063L;
+    static final long CKM_SHA3_384_RSA_PKCS_PSS = 0x00000064L;
+    static final long CKM_SHA3_512_RSA_PKCS_PSS = 0x00000065L;
     static final long CKM_SHA256               = 0x00000250L;
     static final long CKM_SHA384               = 0x00000260L;
     static final long CKM_SHA512               = 0x00000270L;
@@ -128,10 +136,12 @@ final class P11Constants {
     static final long CKG_MGF1_SHA256   = 0x00000002L;
     static final long CKG_MGF1_SHA384   = 0x00000003L;
     static final long CKG_MGF1_SHA512   = 0x00000004L;
+    static final long CKG_MGF1_SHA3_224 = 0x00000006L;
     static final long CKG_MGF1_SHA3_256 = 0x00000007L;
     static final long CKG_MGF1_SHA3_384 = 0x00000008L;
     static final long CKG_MGF1_SHA3_512 = 0x00000009L;
     static final long CKM_RSA_PKCS_OAEP = 0x00000009L;
+    static final long CKM_SHA3_224      = 0x000002b5L;
     static final long CKM_SHA3_256      = 0x000002b0L;
     static final long CKM_SHA3_384      = 0x000002c0L;
     static final long CKM_SHA3_512      = 0x000002d0L;

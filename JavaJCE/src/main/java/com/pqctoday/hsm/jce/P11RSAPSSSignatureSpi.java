@@ -18,12 +18,18 @@ import static com.pqctoday.hsm.jce.P11Constants.*;
  * Matches how SunRsaSign itself registers "RSASSA-PSS" as one configurable
  * service rather than one service per digest.
  *
- * Approved digests only (SHA-256/384/512 — SHA-1 explicitly rejected,
- * same FIPS 140-3 L3 exclusion policy enforced everywhere else in this
- * provider, W1's digest registration first). SHA-3 PSS variants
- * (CKG_MGF1_SHA3_*) are a real, not-yet-built gap — this class covers
- * the SHA-2 family only; scoped down deliberately rather than left
- * silently incomplete.
+ * Approved digests only (SHA-256/384/512 and the full SHA-3 family —
+ * SHA-1 explicitly rejected, same FIPS 140-3 L3 exclusion policy
+ * enforced everywhere else in this provider, W1's digest registration
+ * first). SHA-3 PSS support (plan §WS-D) was added once confirmed real
+ * rather than assumed from the SHA-2 precedent: the engine genuinely
+ * dispatches all four `CKM_SHA3_*_RSA_PKCS_PSS` mechanisms — checked in
+ * both `SoftHSM_slots.cpp`'s mechanism-info table (same
+ * `CKF_SIGN|CKF_VERIFY` capability flags as the SHA-2 variants) and
+ * `SoftHSM_sign.cpp`'s actual `C_SignInit`/`C_VerifyInit` dispatch
+ * (real `AsymMech::RSA_SHA3_*_PKCS_PSS` cases, not stubs), each
+ * expecting exactly the same `{hashAlg=CKM_SHA3_*; mgf=CKG_MGF1_SHA3_*}`
+ * parameter shape this class already builds for SHA-2.
  *
  * Default (before any engineSetParameter call): SHA-256/MGF1-SHA256/
  * 32-byte salt — NOT SunRsaSign's own SHA-1-based default, which this
@@ -39,7 +45,11 @@ final class P11RSAPSSSignatureSpi extends SignatureSpi {
         // digestName -> { CKM_SHA*_RSA_PKCS_PSS, CK_RSA_PKCS_PSS_PARAMS.hashAlg, CKG_MGF1_SHA* }
         "SHA-256", new long[]{ CKM_SHA256_RSA_PKCS_PSS, CKM_SHA256, CKG_MGF1_SHA256 },
         "SHA-384", new long[]{ CKM_SHA384_RSA_PKCS_PSS, CKM_SHA384, CKG_MGF1_SHA384 },
-        "SHA-512", new long[]{ CKM_SHA512_RSA_PKCS_PSS, CKM_SHA512, CKG_MGF1_SHA512 }
+        "SHA-512", new long[]{ CKM_SHA512_RSA_PKCS_PSS, CKM_SHA512, CKG_MGF1_SHA512 },
+        "SHA3-224", new long[]{ CKM_SHA3_224_RSA_PKCS_PSS, CKM_SHA3_224, CKG_MGF1_SHA3_224 },
+        "SHA3-256", new long[]{ CKM_SHA3_256_RSA_PKCS_PSS, CKM_SHA3_256, CKG_MGF1_SHA3_256 },
+        "SHA3-384", new long[]{ CKM_SHA3_384_RSA_PKCS_PSS, CKM_SHA3_384, CKG_MGF1_SHA3_384 },
+        "SHA3-512", new long[]{ CKM_SHA3_512_RSA_PKCS_PSS, CKM_SHA3_512, CKG_MGF1_SHA3_512 }
     );
 
     private String digestName = "SHA-256";
@@ -111,7 +121,7 @@ final class P11RSAPSSSignatureSpi extends SignatureSpi {
         if (!DIGEST_TO_MECH_AND_MGF.containsKey(digest)) {
             throw new InvalidAlgorithmParameterException(
                 "unsupported PSS digest " + digest + " — supported: " + DIGEST_TO_MECH_AND_MGF.keySet()
-                + " (SHA-1 excluded by this provider's FIPS 140-3 L3 policy; SHA-3 PSS not yet built)");
+                + " (SHA-1 excluded by this provider's FIPS 140-3 L3 policy)");
         }
         if (!(pss.getMGFAlgorithm().equals("MGF1")
                 && pss.getMGFParameters() instanceof MGF1ParameterSpec mgf

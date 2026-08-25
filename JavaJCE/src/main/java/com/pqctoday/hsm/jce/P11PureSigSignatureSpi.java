@@ -11,8 +11,29 @@ import java.security.spec.AlgorithmParameterSpec;
  * parameter set lives on the key, not the mechanism — confirmed for
  * ML-DSA and SLH-DSA by reading the engine's dispatch code before
  * assuming it). Pre-hash variants (CKM_HASH_ML_DSA_*, CKM_HASH_SLH_DSA_*)
- * are a separate, not-yet-built W2 item — they need a different
- * SignatureSpi shape (digest algorithm selection), not this class.
+ * are a separate, deliberately deferred item — they need a different
+ * SignatureSpi shape (digest algorithm selection) than this class, not
+ * this class extended.
+ *
+ * Investigated, not left implicit (plan §WS-D, 2026-08-25): the engine
+ * genuinely implements every one of these mechanisms — confirmed in both
+ * SoftHSM_slots.cpp's mechanism-info table and SoftHSM_sign.cpp's real
+ * C_SignInit/C_VerifyInit dispatch (the CK_HASH_SIGN_ADDITIONAL_CONTEXT/
+ * CK_SIGN_ADDITIONAL_CONTEXT parameter shapes, not stubs), so this is not
+ * an engine gap. What's actually missing is a corresponding JCA hook to
+ * build this class's shape against: this same JDK 27's own ML-DSA
+ * implementation (sun.security.provider.ML_DSA/ML_DSA_Impls, read in
+ * full) implements only the pure (no external pre-hash) mode — no
+ * "HashML-DSA" standard algorithm name, no pre-hash Signature API
+ * surface exists anywhere in this JDK to interoperate against or model
+ * a naming convention on. Building this now would mean inventing a
+ * non-standard algorithm-naming and digest-selection scheme with no
+ * external precedent to verify it against — exactly the kind of
+ * unforced design decision this module's own discipline avoids making
+ * speculatively. Deferred with this disclosed reasoning rather than
+ * left as a bare "not yet built"; revisit if/when a JDK release (or
+ * FIPS 204/205's own pre-hash mode) gains real standard-library
+ * traction worth building against.
  *
  * Extracted from what was P11MLDSASignatureSpi.
  */

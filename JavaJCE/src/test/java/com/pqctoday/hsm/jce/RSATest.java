@@ -112,6 +112,60 @@ class RSATest {
         assertTrue(jdkVerifier.verify(sig), "JDK SunRsaSign must verify our token-produced PSS signature");
     }
 
+    @ParameterizedTest
+    @CsvSource({
+        "SHA3-224, 28",
+        "SHA3-256, 32",
+        "SHA3-384, 48",
+        "SHA3-512, 64",
+    })
+    void pssInteropsWithJdkSunRsaSignAcrossSha3Variants(String digestName, int saltLen) throws Exception {
+        // Real JDK SunRsaSign support for the full SHA-3 family confirmed
+        // by reading sun.security.rsa.RSAPSSSignature directly (plan
+        // §WS-D) before writing this test — its own class javadoc states
+        // "We support SHA-1, SHA-2 family and SHA3 family", and its
+        // DIGEST_LENGTHS map lists all four SHA3_224/256/384/512 entries
+        // explicitly — not assumed from the SHA-2 precedent above. Engine
+        // dispatch confirmed the same way (SoftHSM_slots.cpp's mechanism
+        // table, SoftHSM_sign.cpp's actual C_SignInit/C_VerifyInit cases),
+        // documented in P11RSAPSSSignatureSpi's own class javadoc.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", p);
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+
+        PSSParameterSpec pssSpec = new PSSParameterSpec(
+            digestName, "MGF1", new MGF1ParameterSpec(digestName), saltLen, PSSParameterSpec.TRAILER_FIELD_BC);
+
+        Signature signer = Signature.getInstance("RSASSA-PSS", p);
+        signer.setParameter(pssSpec);
+        signer.initSign(kp.getPrivate());
+        byte[] msg = ("RSASSA-PSS " + digestName + " interop").getBytes();
+        signer.update(msg);
+        byte[] sig = signer.sign();
+
+        Signature verifier = Signature.getInstance("RSASSA-PSS", p);
+        verifier.setParameter(pssSpec);
+        verifier.initVerify(kp.getPublic());
+        verifier.update(msg);
+        assertTrue(verifier.verify(sig));
+
+        Signature verifier2 = Signature.getInstance("RSASSA-PSS", p);
+        verifier2.setParameter(pssSpec);
+        verifier2.initVerify(kp.getPublic());
+        verifier2.update("tampered".getBytes());
+        assertFalse(verifier2.verify(sig));
+
+        // Cross-verify against JDK's own SunRsaSign RSASSA-PSS.
+        KeyFactory kf = KeyFactory.getInstance("RSA");
+        PublicKey jdkPub = kf.generatePublic(new X509EncodedKeySpec(kp.getPublic().getEncoded()));
+        Signature jdkVerifier = Signature.getInstance("RSASSA-PSS");
+        jdkVerifier.setParameter(pssSpec);
+        jdkVerifier.initVerify(jdkPub);
+        jdkVerifier.update(msg);
+        assertTrue(jdkVerifier.verify(sig), "JDK SunRsaSign must verify our token-produced " + digestName + " PSS signature");
+    }
+
     @Test
     void pssRejectsSha1() {
         SoftHSMv3Provider p = new SoftHSMv3Provider();
