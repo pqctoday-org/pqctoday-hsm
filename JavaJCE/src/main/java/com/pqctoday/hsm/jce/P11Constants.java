@@ -37,6 +37,15 @@ final class P11Constants {
     static final long CKM_ML_KEM_KEY_PAIR_GEN  = 0x0000000fL;
     static final long CKM_ML_KEM                = 0x00000017L;
 
+    // ── AES (W4) ─────────────────────────────────────────────────────────
+    static final long CKM_AES_KEY_GEN      = 0x00001080L;
+    static final long CKM_AES_CBC          = 0x00001082L;
+    static final long CKM_AES_CBC_PAD      = 0x00001085L;
+    static final long CKM_AES_CTR          = 0x00001086L;
+    static final long CKM_AES_GCM          = 0x00001087L;
+    static final long CKM_AES_KEY_WRAP     = 0x00002109L;
+    static final long CKM_AES_KEY_WRAP_PAD = 0x0000210aL;
+
     // ── Object classes ──────────────────────────────────────────────────
     static final long CKO_PUBLIC_KEY  = 0x00000002L;
     static final long CKO_PRIVATE_KEY = 0x00000003L;
@@ -50,6 +59,7 @@ final class P11Constants {
     static final long CKK_RSA            = 0x00000000L;
     static final long CKK_ML_KEM         = 0x00000049L;
     static final long CKK_GENERIC_SECRET = 0x00000010L;
+    static final long CKK_AES            = 0x0000001fL;
 
     // ── Attributes ───────────────────────────────────────────────────────
     static final long CKA_CLASS            = 0x00000000L;
@@ -62,6 +72,8 @@ final class P11Constants {
     static final long CKA_SENSITIVE        = 0x00000103L;
     static final long CKA_ENCRYPT          = 0x00000104L;
     static final long CKA_DECRYPT          = 0x00000105L;
+    static final long CKA_WRAP             = 0x00000106L;
+    static final long CKA_UNWRAP           = 0x00000107L;
     static final long CKA_SIGN             = 0x00000108L;
     static final long CKA_VERIFY           = 0x0000010aL;
     static final long CKA_DERIVE           = 0x0000010cL;

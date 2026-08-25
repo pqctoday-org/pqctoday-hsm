@@ -1,5 +1,6 @@
 package com.pqctoday.hsm.jce;
 
+import javax.crypto.SecretKey;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 
@@ -50,5 +51,29 @@ final class P11Key {
         @Override public String getAlgorithm() { return algorithm; }
         @Override public String getFormat() { return "X.509"; }
         @Override public byte[] getEncoded() { return spkiDer.clone(); }
+    }
+
+    /**
+     * Opaque, handle-backed secret key (AES, HMAC generic-secret, etc.) —
+     * same non-exportable design as Priv above (CKA_SENSITIVE=TRUE,
+     * CKA_EXTRACTABLE=FALSE on the token side; getEncoded()==null here).
+     * The one deliberate exception to this pattern in the whole module
+     * remains the KEM/ECDH shared secret (see P11MLKEMSpi/P11ECDHKeyAgreementSpi),
+     * which is a plain javax.crypto.spec.SecretKeySpec, not this class.
+     */
+    static final class Secret implements SecretKey {
+        @java.io.Serial private static final long serialVersionUID = 1L;
+        private final transient long handle;
+        private final String algorithm;
+
+        Secret(long handle, String algorithm) {
+            this.handle = handle;
+            this.algorithm = algorithm;
+        }
+
+        long handle() { return handle; }
+        @Override public String getAlgorithm() { return algorithm; }
+        @Override public String getFormat() { return null; }
+        @Override public byte[] getEncoded() { return null; }
     }
 }

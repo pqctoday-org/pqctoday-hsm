@@ -97,7 +97,8 @@ final class P11Library implements AutoCloseable {
         cVerifyInit, cVerify, cGetAttributeValue, cCreateObject,
         cFindObjectsInit, cFindObjects, cFindObjectsFinal,
         cEncapsulateKey, cDecapsulateKey, cDeriveKey,
-        cEncryptInit, cEncrypt, cDecryptInit, cDecrypt;
+        cEncryptInit, cEncrypt, cDecryptInit, cDecrypt,
+        cGenerateKey, cWrapKey, cUnwrapKey;
     private final long session;
     private volatile boolean closed;
 
@@ -151,6 +152,12 @@ final class P11Library implements AutoCloseable {
             cEncrypt       = h(linker, lib, "C_Encrypt", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS));
             cDecryptInit   = h(linker, lib, "C_DecryptInit", fd(JAVA_LONG, ADDRESS, JAVA_LONG));
             cDecrypt       = h(linker, lib, "C_Decrypt", fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, ADDRESS));
+            // W4 — AES key generation and wrap/unwrap.
+            cGenerateKey   = h(linker, lib, "C_GenerateKey", fd(JAVA_LONG, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS));
+            cWrapKey       = h(linker, lib, "C_WrapKey",
+                fd(JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, ADDRESS, ADDRESS));
+            cUnwrapKey     = h(linker, lib, "C_UnwrapKey",
+                fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
 
             ensureGlobalInit(linker, lib);
 
@@ -523,6 +530,118 @@ final class P11Library implements AutoCloseable {
             throw e;
         } catch (Throwable t) {
             throw new ProviderException("createObject failed", t);
+        }
+    }
+
+    /** C_GenerateKey (single secret key, not a keypair — e.g. CKM_AES_KEY_GEN). */
+    long generateKey(long mechType, Attr[] tmpl) {
+        ensureOpen();
+        try {
+            MemorySegment mech = mech(mechType);
+            MemorySegment t = attrs(tmpl);
+            MemorySegment hKey = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cGenerateKey, session, mech, t, (long) tmpl.length, hKey), "C_GenerateKey");
+            return hKey.get(JAVA_LONG, 0);
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("generateKey failed", t);
+        }
+    }
+
+    // CK_GCM_PARAMS { CK_BYTE_PTR pIv; CK_ULONG ulIvLen; CK_ULONG ulIvBits;
+    // CK_BYTE_PTR pAAD; CK_ULONG ulAADLen; CK_ULONG ulTagBits; }
+    private static final MemoryLayout GCM_PARAMS =
+        MemoryLayout.structLayout(ADDRESS, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG);
+
+    /**
+     * CKM_AES_GCM mechanism. The IV is always supplied here as a plain
+     * byte array — this class has no opinion on where it came from; the
+     * caller (P11AESCipherSpi) is responsible for the L3 policy of
+     * generating it via this same instance's generateRandom() (the
+     * token's own SP 800-90A DRBG, C_GenerateRandom) rather than
+     * java.security.SecureRandom, and for rejecting a caller-supplied
+     * encryption IV per the plan's §4.3 GCM note. Using the traditional
+     * C_EncryptInit/C_Encrypt path with a pre-generated IV is spec-equivalent
+     * to the newer C_MessageEncryptInit/C_EncryptMessage in-module-IV-generation
+     * API for SP 800-38D §8.2 purposes (same DRBG either way) and needs no
+     * new native function family — confirmed by reading both code paths in
+     * SoftHSM_cipher.cpp before choosing this design.
+     */
+    MemorySegment mechGcm(byte[] iv, byte[] aad, int tagBits) {
+        MemorySegment params = arena.allocate(GCM_PARAMS);
+        params.set(ADDRESS, 0, bytes(iv));
+        params.set(JAVA_LONG, 8, (long) iv.length);
+        params.set(JAVA_LONG, 16, (long) iv.length * 8);
+        params.set(ADDRESS, 24, aad.length > 0 ? bytes(aad) : MemorySegment.NULL);
+        params.set(JAVA_LONG, 32, (long) aad.length);
+        params.set(JAVA_LONG, 40, (long) tagBits);
+        MemorySegment m = arena.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_AES_GCM);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, GCM_PARAMS.byteSize());
+        return m;
+    }
+
+    /** CKM_AES_CBC / CKM_AES_CBC_PAD — mechanism parameter is the raw 16-byte IV, no struct. */
+    MemorySegment mechCbc(long mechType, byte[] iv) {
+        MemorySegment m = arena.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, mechType);
+        m.set(ADDRESS, 8, bytes(iv));
+        m.set(JAVA_LONG, 16, (long) iv.length);
+        return m;
+    }
+
+    // CK_AES_CTR_PARAMS { CK_ULONG ulCounterBits; CK_BYTE cb[16]; } — cb is
+    // inline bytes within the struct, not a separate pointer target.
+    private static final MemoryLayout CTR_PARAMS =
+        MemoryLayout.structLayout(JAVA_LONG, MemoryLayout.sequenceLayout(16, JAVA_BYTE));
+
+    /** CKM_AES_CTR with the full 128-bit counter block treated as the counter (ulCounterBits=128). */
+    MemorySegment mechCtr(byte[] counterBlock) {
+        MemorySegment params = arena.allocate(CTR_PARAMS);
+        params.set(JAVA_LONG, 0, 128L);
+        MemorySegment.copy(counterBlock, 0, params, JAVA_BYTE, 8, 16);
+        MemorySegment m = arena.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_AES_CTR);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, CTR_PARAMS.byteSize());
+        return m;
+    }
+
+    /** C_WrapKey — wraps a token key object (by handle) with another token key, two-call sizing. */
+    byte[] wrapKey(long mechType, long wrappingKey, long keyToWrap) {
+        ensureOpen();
+        try {
+            MemorySegment mech = mech(mechType);
+            MemorySegment len = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cWrapKey, session, mech, wrappingKey, keyToWrap, MemorySegment.NULL, len),
+                "C_WrapKey(size)");
+            MemorySegment out = arena.allocate(len.get(JAVA_LONG, 0));
+            P11Error.check(invokeRv(cWrapKey, session, mech, wrappingKey, keyToWrap, out, len), "C_WrapKey");
+            return toBytes(out, len.get(JAVA_LONG, 0));
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("wrapKey failed", t);
+        }
+    }
+
+    /** C_UnwrapKey — returns a handle to the newly-imported (unwrapped) key object. */
+    long unwrapKey(long mechType, long unwrappingKey, byte[] wrapped, Attr[] tmpl) {
+        ensureOpen();
+        try {
+            MemorySegment mech = mech(mechType);
+            MemorySegment w = bytes(wrapped);
+            MemorySegment t = attrs(tmpl);
+            MemorySegment hKey = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cUnwrapKey, session, mech, unwrappingKey, w, (long) wrapped.length,
+                t, (long) tmpl.length, hKey), "C_UnwrapKey");
+            return hKey.get(JAVA_LONG, 0);
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("unwrapKey failed", t);
         }
     }
 

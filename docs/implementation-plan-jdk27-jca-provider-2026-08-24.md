@@ -1028,10 +1028,91 @@ compliance-gap fix, not just Java-side work.**
   plus all prior W0–W2 tests unchanged).
 
 ### W4 — Symmetric, MAC, KDF, KeyStore write path
-- `CipherSpi` (AES GCM/CBC/CTR + AESWrap), `MacSpi` (HMAC/CMAC/KMAC),
-  `KeyGeneratorSpi` (AES, generic-secret), `SecretKeyFactorySpi`
-  (HKDF/PBKDF2/SP 800-108), KeyStore `setEntry`/`deleteEntry`.
-- GCM in-token IV policy (§4.3 note).
+
+**AES KeyGenerator + Cipher (GCM/CBC/CTR) + AESWrap/AESWrapPad: DONE
+2026-08-24, PASSED.** MAC (HMAC/CMAC/KMAC), KDF (HKDF via the new
+`javax.crypto.KDF`/`KDFSpi`), `SecretKeyFactorySpi`
+(PBKDF2/SP 800-108), and the KeyStore write path are not yet built.
+
+- `P11AESKeyGeneratorSpi`: `CKM_AES_KEY_GEN`, 128/192/256-bit,
+  non-extractable session keys (plan §6.2), proactively granted
+  `CKA_ENCRYPT`/`CKA_DECRYPT`/`CKA_WRAP`/`CKA_UNWRAP` at generation time —
+  applying the exact lesson already learned twice in W3 (ECDH's missing
+  `CKA_DERIVE`, RSA's missing `CKA_ENCRYPT`/`CKA_DECRYPT`) rather than
+  waiting for a third live failure to discover the same class of gap.
+- `P11Key.Secret` added as the opaque `SecretKey` counterpart to the
+  existing `Priv`/`Pub` records — same non-exportable design
+  (`getEncoded()`/`getFormat()` return null).
+- **GCM IV policy (§4.3, SP 800-38D §8.2) — resolved with a simpler
+  design than the plan assumed, not the message-based API:** read both
+  of the engine's two distinct GCM code paths in `SoftHSM_cipher.cpp`
+  before writing any Java — the traditional `C_EncryptInit`/`C_Encrypt`
+  path (`CK_GCM_PARAMS`) requires a caller-supplied, non-null IV; only
+  the newer message-based `C_MessageEncryptInit`/`C_EncryptMessage`
+  family (`CK_GCM_MESSAGE_PARAMS`, `ivGenerator` field) generates an IV
+  inside the module. Rather than binding that whole second native
+  function family, `P11AESCipherSpi` generates the IV in Java by calling
+  `C_GenerateRandom` (already bound since W1) — the token's own SP
+  800-90A DRBG — immediately before `C_EncryptInit`, then supplies it as
+  a normal `CK_GCM_PARAMS.pIv`. Spec-equivalent for SP 800-38D §8.2
+  purposes (same DRBG, one call earlier), and a real scope reduction: no
+  new native function family needed. On `ENCRYPT_MODE`, a
+  caller-supplied `GCMParameterSpec`/`IvParameterSpec` is rejected
+  outright (`InvalidAlgorithmParameterException`); `DECRYPT_MODE`
+  requires one. CBC/CTR carry no such restriction — standard JCE
+  caller-or-generated IV behavior, since the plan's IV note was
+  GCM-specific.
+- Confirmed live, before writing the cipher, that the engine's
+  traditional-path GCM decrypt already treats the input as
+  `ciphertext‖tag` (`aeadBuf = pCipher || pTag` in
+  `SoftHSM_cipher.cpp`) — exactly JCE's own `Cipher.doFinal()` GCM
+  convention, so `P11AESCipherSpi` needed zero extra tag reassembly
+  logic in either direction.
+- `P11AESWrapCipherSpi` (AESWrap/AESWrapPad, SP 800-38F): a genuinely
+  different native shape than every other Cipher in this module —
+  confirmed by reading `SoftHSM_keygen.cpp` before writing any code that
+  `CKM_AES_KEY_WRAP` has no `C_EncryptInit`/`C_Encrypt` handling at all
+  in this engine, only native `C_WrapKey`/`C_UnwrapKey`, which operate
+  on a key OBJECT HANDLE rather than raw bytes. A foreign key (with a
+  real `getEncoded()`) is imported as a temporary session object first,
+  the same on-the-fly-import pattern W3's ECDH already proved for
+  foreign EC public keys.
+  - **Real finding, confirmed not a bug:** wrapping a plain
+    `KeyGenerator`-produced AES key failed live with
+    `CKR_KEY_UNEXTRACTABLE`. This is the engine correctly enforcing the
+    L3 non-export policy — `P11AESKeyGeneratorSpi`'s keys are
+    deliberately `CKA_EXTRACTABLE=false` "vault" keys and can never be
+    wrapped back out by design, mirroring why the private key itself is
+    opaque. AES-KW's real use case (wrapping a short-lived,
+    externally-sourced transport key) needs a key imported with
+    `CKA_EXTRACTABLE=true` instead — fixed the test's key choice, not
+    the provider, once this was understood.
+- **Cross-verification is structurally different for AES than every
+  asymmetric algorithm tested so far:** a token-*generated* AES key is
+  non-extractable by design (no public half to hand an external library,
+  unlike RSA/EC/ML-KEM/ML-DSA), so true independent-codebase
+  cross-verification is only possible using a KNOWN raw key imported
+  into both this provider and Bouncy Castle — not a workaround, just the
+  only way to get third-party verification for a symmetric algorithm
+  whose entire design point is that its key never normally leaves the
+  token. `AESCipherTest` does exactly this for GCM (both directions) and
+  for AESWrap (BC unwraps what we wrapped).
+- **Verify:** `mvn test`, 122/122 (110 prior W0–W3 + 12 new — KeyGenerator
+  size enforcement, GCM self-round-trip with/without AAD, GCM
+  caller-IV-on-encrypt rejection, GCM decrypt-without-IV rejection,
+  CBC/CBC+PKCS5/CTR self-round-trip, GCM×Bouncy Castle bidirectional,
+  AESWrap round-trip + Bouncy Castle unwrap cross-check).
+
+Remaining W4 scope (MAC, KDF, SecretKeyFactory, SP 800-108, KeyStore
+write path) — not started. One concrete finding already on record for
+when SP 800-108 is picked up: `CK_SP800_108_KDF_PARAMS` has a
+variable-length PRF-data-array parameter structure (confirmed reading
+W0.3's KMAC spike notes above) that needs its own dedicated FFM struct
+builder — `P11Library.mechWithParams`'s all-`CK_ULONG` shape doesn't
+cover it, deliberately noted in that method's own javadoc rather than
+stretched to fit.
+
+- GCM in-token IV policy (§4.3 note) — DONE, see above.
 - **Verify:** NIST CAVP/ACVP vectors for AES-GCM/CMAC/HKDF; interop with
   SunJCE for CBC/CTR; GCM IV-uniqueness test across sessions.
 

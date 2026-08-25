@@ -272,6 +272,26 @@ public final class SoftHSMv3Provider extends Provider {
             }
         });
 
+        // W4: AES (FIPS 197) — KeyGenerator, Cipher (GCM/CBC/CBC+PKCS5/CTR),
+        // and AESWrap/AESWrapPad (SP 800-38F, via native C_WrapKey/
+        // C_UnwrapKey — a different native shape than every other Cipher
+        // in this module; see P11AESWrapCipherSpi's javadoc). GCM's IV
+        // policy (module-generated only on encrypt, plan §4.3) lives in
+        // P11AESCipherSpi, not here.
+        putService(new Service(this, "KeyGenerator", "AES",
+            P11AESKeyGeneratorSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11AESKeyGeneratorSpi(lib);
+            }
+        });
+        registerAESCipher("AES/GCM/NoPadding", P11AESCipherSpi.Mode.GCM);
+        registerAESCipher("AES/CBC/NoPadding", P11AESCipherSpi.Mode.CBC);
+        registerAESCipher("AES/CBC/PKCS5Padding", P11AESCipherSpi.Mode.CBC_PAD);
+        registerAESCipher("AES/CTR/NoPadding", P11AESCipherSpi.Mode.CTR);
+        registerAESWrap("AESWrap", CKM_AES_KEY_WRAP);
+        registerAESWrap("AESWrapPad", CKM_AES_KEY_WRAP_PAD);
+
         // W2: KeyStore (read path — see P11KeyStoreSpi's javadoc for why
         // write/delete throw for now). Fixes the classic SunPKCS11 "0
         // keys" gap for this token by actually enumerating objects via
@@ -293,6 +313,26 @@ public final class SoftHSMv3Provider extends Provider {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
                 return new P11RSAOAEPCipherSpi(lib, hashMech, mgf);
+            }
+        });
+    }
+
+    private void registerAESCipher(String name, P11AESCipherSpi.Mode mode) {
+        putService(new Service(this, "Cipher", name,
+            P11AESCipherSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11AESCipherSpi(lib, mode);
+            }
+        });
+    }
+
+    private void registerAESWrap(String name, long mechType) {
+        putService(new Service(this, "Cipher", name,
+            P11AESWrapCipherSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11AESWrapCipherSpi(lib, mechType);
             }
         });
     }
