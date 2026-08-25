@@ -1027,12 +1027,14 @@ compliance-gap fix, not just Java-side work.**
   3 SHA-3×BC bidirectional cross-verify, 1 SHA-1-excluded negative test,
   plus all prior W0–W2 tests unchanged).
 
-### W4 — Symmetric, MAC, KDF, KeyStore write path
+### W4 — Symmetric, MAC, KDF, KeyStore write path — DONE 2026-08-25, PASSED, W4 COMPLETE
 
 **AES KeyGenerator + Cipher (GCM/CBC/CTR) + AESWrap/AESWrapPad: DONE
-2026-08-24, PASSED.** MAC (HMAC/CMAC/KMAC), KDF (HKDF via the new
-`javax.crypto.KDF`/`KDFSpi`), `SecretKeyFactorySpi`
-(PBKDF2/SP 800-108), and the KeyStore write path are not yet built.
+2026-08-24, PASSED.** MAC (HMAC/CMAC/KMAC): DONE. KDF (HKDF via the new
+`javax.crypto.KDF`/`KDFSpi`, on the JDK 27 baseline this bump required):
+DONE. `SecretKeyFactorySpi` (PBKDF2, SP 800-108 counter/feedback): DONE.
+KeyStore write path (`setEntry`/`deleteEntry`): DONE. All 2026-08-24/25,
+all PASSED, `mvn test` 168/168. **W4 is complete.**
 
 - `P11AESKeyGeneratorSpi`: `CKM_AES_KEY_GEN`, 128/192/256-bit,
   non-extractable session keys (plan §6.2), proactively granted
@@ -1332,7 +1334,56 @@ same repo currently produce different SP 800-108 output for identical
 inputs; flagged here for whoever picks up cross-engine SP 800-108
 interop, not investigated further as part of this plan.
 
-Remaining W4 scope: KeyStore write path (`setEntry`/`deleteEntry`).
+**KeyStore write path (`setEntry`/`deleteEntry`): DONE 2026-08-25,
+PASSED — W4 is now fully complete.**
+- `engineSetKeyEntry` promotes one of this provider's own opaque keys
+  (`P11Key.Priv`/`Pub`/`Secret` — already token-resident by
+  construction, typically as a session object from a prior
+  generate/derive call) to a persistent token object via
+  `C_CopyObject` with `CKA_TOKEN=true` and `CKA_LABEL=alias` in one
+  call — confirmed reading `SoftHSM_objects.cpp` before writing this
+  that `CKA_TOKEN` is exactly the one attribute `C_CopyObject`'s own
+  template loop recognizes for session→token promotion (otherwise
+  immutable post-creation, unlike ordinary attributes
+  `C_SetAttributeValue` can change). Discovery (`discoverAll()`) and
+  `keyFor()` extended to enumerate `CKO_SECRET_KEY` objects too, not
+  just the asymmetric key classes W2 originally covered — this
+  workstream added substantial secret-key material (AES, HMAC-family,
+  every KDF's output) a real caller would now reasonably want to
+  persist. `algorithmNameOf` extended for `CKK_AES`→`"AES"` and
+  `CKK_GENERIC_SECRET`→`"Generic"` — the latter is an honest, not a
+  precise, answer: the engine has no attribute distinguishing an
+  HMAC-key-shaped generic secret from a PBKDF2- or SP800-108-derived
+  one, so this doesn't pretend otherwise.
+- A foreign key (not one of this provider's own opaque types) is
+  refused — same FIPS 140-3 L3 policy as `P11PublicKeyFactorySpi`'s
+  private-key-import refusal, this KeyStore persists keys the token
+  itself already produced, it does not import external key material. A
+  non-empty certificate chain is refused too, honestly, rather than
+  silently accepted-and-discarded (`engineGetCertificateChain` always
+  returns `null`, so accepting one would be dishonest). The `byte[]`
+  overload of `setKeyEntry` (pre-protected key bytes, the PKCS#12-style
+  use case) is refused outright — this KeyStore wraps a live PKCS#11
+  token, not a file-based store, and has no natural mapping for it.
+- **A genuine, disclosed API-boundary limitation found live, not
+  assumed:** `java.security.KeyStore`'s own public `setKeyEntry`
+  method has a JDK-level precondition — "Private key must be
+  accompanied by certificate chain" — that runs *before*
+  `engineSetKeyEntry` is ever reached. Since this KeyStore's own
+  honest design refuses non-empty chains, storing a `PrivateKey` via
+  the *standard public* `KeyStore` API is genuinely unsupported here —
+  confirmed live via `assertThrows`, kept as an explicit, tested
+  limitation rather than silently worked around. `PublicKey` and
+  `SecretKey` entries have no such JDK-level requirement and work
+  normally.
+- **Verify:** `mvn test`, 168/168 (160 prior + 8 new). The load-bearing
+  test proves *true* persistence, not just same-session
+  re-readability: generate an AES key, `setKeyEntry`, encrypt with the
+  original (session-scoped) key, then **close that session entirely**
+  and open a completely fresh `SoftHSMv3Provider`/session — the entry
+  is still there, and the recovered key correctly decrypts what the
+  original encrypted. A session-scoped object would have vanished at
+  the session close; only a genuine token object survives it.
 
 - GCM in-token IV policy (§4.3 note) — DONE, see above.
 - **Verify:** NIST CAVP/ACVP vectors for AES-GCM/CMAC — DONE, see above

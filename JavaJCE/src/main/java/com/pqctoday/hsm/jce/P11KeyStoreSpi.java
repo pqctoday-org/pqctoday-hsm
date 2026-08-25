@@ -10,12 +10,27 @@ import java.util.*;
 import static com.pqctoday.hsm.jce.P11Constants.*;
 
 /**
- * "PKCS11-SoftHSMv3" KeyStore — READ path only (W2 scope; write/delete
- * entries deferred, as the original plan called for). Fixes the classic
- * SunPKCS11 "0 keys" gap for this token properly, by actually enumerating
- * token objects via C_FindObjects rather than the empty KeyStore SunPKCS11
- * often reports against this engine (a limitation noted since the
- * sandbox's OpenSession.java/ListKeys.java samples this session).
+ * "PKCS11-SoftHSMv3" KeyStore — read AND write path (W4 completes what
+ * W2 deferred). Fixes the classic SunPKCS11 "0 keys" gap for this token
+ * properly, by actually enumerating token objects via C_FindObjects
+ * rather than the empty KeyStore SunPKCS11 often reports against this
+ * engine (a limitation noted since the sandbox's
+ * OpenSession.java/ListKeys.java samples this session).
+ *
+ * Write path scope: engineSetKeyEntry promotes one of this provider's
+ * OWN opaque keys (P11Key.Priv/Pub/Secret — already token-resident by
+ * construction) to persistent storage via C_CopyObject with
+ * CKA_TOKEN=true and CKA_LABEL=alias — confirmed reading
+ * SoftHSM_objects.cpp before writing this that CKA_TOKEN is exactly the
+ * one attribute C_CopyObject's own template loop recognizes for
+ * session→token promotion (it's otherwise immutable post-creation). A
+ * FOREIGN key (not one of this provider's own opaque types) is refused,
+ * same FIPS 140-3 L3 policy as P11PublicKeyFactorySpi's private-key
+ * import refusal — this KeyStore persists keys the token itself
+ * generated or derived, it does not import external key material.
+ * Certificate chains are refused too if non-empty (this KeyStore never
+ * stores or returns certificates, so accepting one silently would be
+ * dishonest — engineGetCertificateChain always returns null).
  *
  * Alias scheme, per user decision: an object's own CKA_LABEL when set
  * (respects a label an operator already gave the key), falling back to a
@@ -47,14 +62,14 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
 
     // ── Discovery ────────────────────────────────────────────────────────
 
-    private record Entry(String alias, long handle, boolean isPrivate) {}
+    private record Entry(String alias, long handle, long objectClass) {}
 
     private List<Entry> discoverAll() {
         List<Entry> out = new ArrayList<>();
-        for (long cko : new long[]{ CKO_PUBLIC_KEY, CKO_PRIVATE_KEY }) {
+        for (long cko : new long[]{ CKO_PUBLIC_KEY, CKO_PRIVATE_KEY, CKO_SECRET_KEY }) {
             P11Library.Attr[] tmpl = { P11Library.attrLong(CKA_CLASS, cko) };
             for (long handle : lib.findObjects(tmpl)) {
-                out.add(new Entry(aliasFor(handle), handle, cko == CKO_PRIVATE_KEY));
+                out.add(new Entry(aliasFor(handle), handle, cko));
             }
         }
         return out;
@@ -121,6 +136,14 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
         }
         if (keyType == CKK_EC) return "EC";
         if (keyType == CKK_RSA) return "RSA";
+        if (keyType == CKK_AES) return "AES";
+        // CKK_GENERIC_SECRET covers HMAC/KMAC/HKDF/PBKDF2/SP800-108
+        // output alike — the engine doesn't preserve which of those
+        // Java-level algorithm names a given generic-secret object was
+        // really for (see P11GenericSecretKeyGeneratorSpi/HKDF/PBKDF2/
+        // SP800-108's own SPIs — all use this same CKK_ value), so
+        // "Generic" is the honest answer here, not a guess at which one.
+        if (keyType == CKK_GENERIC_SECRET) return "Generic";
         return null;
     }
 
@@ -144,11 +167,15 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
 
     private Key keyFor(Entry e) {
         String alg = algorithmNameOf(e.handle());
-        if (e.isPrivate()) {
-            return new P11Key.Priv(e.handle(), alg != null ? alg : "unknown");
+        String algOrUnknown = alg != null ? alg : "unknown";
+        if (e.objectClass() == CKO_PRIVATE_KEY) {
+            return new P11Key.Priv(e.handle(), algOrUnknown);
+        }
+        if (e.objectClass() == CKO_SECRET_KEY) {
+            return new P11Key.Secret(e.handle(), algOrUnknown);
         }
         byte[] spki = safeAttr(e.handle(), CKA_PUBLIC_KEY_INFO);
-        return new P11Key.Pub(e.handle(), alg != null ? alg : "unknown", spki != null ? spki : new byte[0]);
+        return new P11Key.Pub(e.handle(), algOrUnknown, spki != null ? spki : new byte[0]);
     }
 
     // ── KeyStoreSpi ──────────────────────────────────────────────────────
@@ -213,23 +240,54 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
     }
 
     @Override
-    public void engineSetKeyEntry(String alias, Key key, char[] password, Certificate[] chain) {
-        throw new UnsupportedOperationException(
-            "KeyStore write path is not built yet (W2 scope is read-only) — see the implementation plan");
+    public void engineSetKeyEntry(String alias, Key key, char[] password, Certificate[] chain) throws KeyStoreException {
+        if (chain != null && chain.length > 0) {
+            throw new KeyStoreException(
+                "this KeyStore never stores or returns certificates (engineGetCertificateChain always returns null) — "
+                + "pass a null or empty chain");
+        }
+        long handle = switch (key) {
+            case P11Key.Priv p -> p.handle();
+            case P11Key.Pub p -> p.handle();
+            case P11Key.Secret s -> s.handle();
+            default -> throw new KeyStoreException(
+                "this KeyStore only persists keys already resident on this provider's token "
+                + "(generated or derived via " + SoftHSMv3Provider.class.getSimpleName()
+                + ") — it does not import foreign key material, same FIPS 140-3 L3 policy as private-key import");
+        };
+        P11Library.Attr[] overrideTmpl = {
+            P11Library.attrBool(CKA_TOKEN, true),
+            P11Library.attr(CKA_LABEL, alias.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+        };
+        try {
+            lib.copyObject(handle, overrideTmpl);
+        } catch (RuntimeException e) {
+            throw new KeyStoreException("failed to persist key under alias \"" + alias + "\"", e);
+        }
     }
 
     @Override
-    public void engineSetKeyEntry(String alias, byte[] key, Certificate[] chain) {
-        throw new UnsupportedOperationException("KeyStore write path is not built yet");
+    public void engineSetKeyEntry(String alias, byte[] key, Certificate[] chain) throws KeyStoreException {
+        throw new KeyStoreException(
+            "pre-protected key bytes are not supported by this KeyStore — it wraps a live PKCS#11 token, "
+            + "not a file-based store; use engineSetKeyEntry(alias, Key, password, chain) with one of this "
+            + "provider's own keys instead");
     }
 
     @Override
-    public void engineSetCertificateEntry(String alias, Certificate cert) {
-        throw new UnsupportedOperationException("certificate entries are not supported by this KeyStore");
+    public void engineSetCertificateEntry(String alias, Certificate cert) throws KeyStoreException {
+        throw new KeyStoreException("certificate entries are not supported by this KeyStore");
     }
 
     @Override
-    public void engineDeleteEntry(String alias) {
-        throw new UnsupportedOperationException("KeyStore write path is not built yet (W2 scope is read-only)");
+    public void engineDeleteEntry(String alias) throws KeyStoreException {
+        long handle = discoverAll().stream().filter(e -> e.alias().equals(alias))
+            .findFirst().map(Entry::handle)
+            .orElseThrow(() -> new KeyStoreException("no entry with alias \"" + alias + "\""));
+        try {
+            lib.destroyObject(handle);
+        } catch (RuntimeException e) {
+            throw new KeyStoreException("failed to delete alias \"" + alias + "\"", e);
+        }
     }
 }

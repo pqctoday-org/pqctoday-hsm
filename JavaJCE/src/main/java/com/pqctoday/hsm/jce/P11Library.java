@@ -98,7 +98,8 @@ final class P11Library implements AutoCloseable {
         cFindObjectsInit, cFindObjects, cFindObjectsFinal,
         cEncapsulateKey, cDecapsulateKey, cDeriveKey,
         cEncryptInit, cEncrypt, cDecryptInit, cDecrypt,
-        cGenerateKey, cWrapKey, cUnwrapKey;
+        cGenerateKey, cWrapKey, cUnwrapKey,
+        cCopyObject, cDestroyObject;
     private final long session;
     private volatile boolean closed;
 
@@ -158,6 +159,9 @@ final class P11Library implements AutoCloseable {
                 fd(JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, ADDRESS, ADDRESS));
             cUnwrapKey     = h(linker, lib, "C_UnwrapKey",
                 fd(JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
+            // W4 — KeyStore write path.
+            cCopyObject    = h(linker, lib, "C_CopyObject", fd(JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
+            cDestroyObject = h(linker, lib, "C_DestroyObject", fd(JAVA_LONG, JAVA_LONG));
 
             ensureGlobalInit(linker, lib);
 
@@ -823,6 +827,43 @@ final class P11Library implements AutoCloseable {
             throw e;
         } catch (Throwable t) {
             throw new ProviderException("unwrapKey failed", t);
+        }
+    }
+
+    /**
+     * C_CopyObject — used by the KeyStore write path to promote a
+     * session-scoped key object to a persistent token object (a
+     * template entry of {@code CKA_TOKEN=true}) while simultaneously
+     * setting its {@code CKA_LABEL} (the alias), confirmed by reading
+     * SoftHSM_objects.cpp before writing this method: CKA_TOKEN is
+     * exactly the one attribute C_CopyObject's own template loop
+     * recognizes and overrides (session→token promotion is what this
+     * call exists for — CKA_TOKEN is otherwise immutable post-creation,
+     * unlike ordinary attributes C_SetAttributeValue can change).
+     */
+    long copyObject(long handle, Attr[] overrideTmpl) {
+        ensureOpen();
+        try {
+            MemorySegment tmpl = attrs(overrideTmpl);
+            MemorySegment hNew = arena.allocate(JAVA_LONG);
+            P11Error.check(invokeRv(cCopyObject, session, handle, tmpl, (long) overrideTmpl.length, hNew), "C_CopyObject");
+            return hNew.get(JAVA_LONG, 0);
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("copyObject failed", t);
+        }
+    }
+
+    /** C_DestroyObject. */
+    void destroyObject(long handle) {
+        ensureOpen();
+        try {
+            P11Error.check(invokeRv(cDestroyObject, session, handle), "C_DestroyObject");
+        } catch (ProviderException e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new ProviderException("destroyObject failed", t);
         }
     }
 
