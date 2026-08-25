@@ -1535,13 +1535,49 @@ provider stored.**
 - **Verify:** `mvn test`, 175/175 (168 prior + 7 new). No regressions
   in the discovery-dependent write-path tests from the earlier session.
 
-### W5 — FIPS posture completion + docs
+### W5 — FIPS posture completion + docs — **DONE 2026-08-25, W5 now fully complete.**
 - Full POST battery, policy-layer refusal tests for every §5 row,
   zeroization audit (heap-dump assertion that key bytes never appear),
   `AuthProvider` login/logout, provider configuration file format.
 - Deliverables: `JavaJCE/README.md` (honest capability table — replaces
   the fabricated doc), a security-posture doc mapping each §6 item to
   its FIPS 140-3 section.
+
+**Documentation deliverables: DONE 2026-08-25.**
+- **[`JavaJCE/README.md`](../JavaJCE/README.md)** (new — none existed;
+  the earlier fabricated one was already removed in W0.4) — quick start
+  (both env-var and `configure()`-file forms), a capability table
+  compiled directly from a full re-read of `registerServices()` rather
+  than from memory (every service name, every registered
+  algorithm/parameter set), the §5 exclusion list, a summary of the §6
+  operational posture with a pointer to the security-posture doc below,
+  and an honest "known limitations" section (the Arena/zeroization gap,
+  HSS/XMSS deferral, TLS not yet end-to-end tested in this module, JDK
+  27 RC status).
+- **[`docs/jdk27-jca-provider-security-posture.md`](jdk27-jca-provider-security-posture.md)**
+  (new) — maps every plan §6 item against all eleven FIPS 140-3
+  requirement areas (per ISO/IEC 19790:2012 clause 7, which FIPS 140-3
+  adopts; the eleven area names and their order were checked against a
+  real published FIPS 140-3 overview before writing the mapping, not
+  recalled from memory alone). States plainly, in its own opening
+  section, what it is **not**: a CMVP submission, a security-policy
+  document in the IG sense, or a validation claim. Verdict, area by
+  area: **Areas 1 (Module Specification), 2 (Interfaces), 9
+  (Self-Tests) — substantively addressed**; **Area 8 (SSP Management) —
+  substantively addressed, one disclosed gap** (the same Arena/
+  zeroization item from the audit above, not re-litigated, just
+  cross-referenced); **Area 3 (Roles/Services/Authentication) —
+  addressed for the `CKU_USER` role only**, explicitly noting this
+  provider never authenticates as SO and cross-referencing the
+  certificate-management work's own `CKA_TRUSTED`/SO-gating finding;
+  **Areas 4 (Software/Firmware Security), 5 (Operational Environment),
+  6 (Physical Security), 7 (Non-Invasive Security), 10 (Life-Cycle
+  Assurance), 11 (Mitigation of Other Attacks) — not addressed**, with
+  5, 6, and 7 called out specifically as largely inherent limitations of
+  a software module rather than scope this plan chose to skip. Written
+  this way deliberately — a document that only listed what *was* done
+  would be exactly the kind of overclaiming this whole session's
+  discipline exists to catch.
 
 **Full POST battery (§6.3): DONE 2026-08-25, PASSED.** Extends the W1
 single-digest-KAT stub to the plan's full-scope battery: SHA-256 KAT
