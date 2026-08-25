@@ -1,84 +1,123 @@
 package com.pqctoday.hsm.jce;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.cert.Certificate;
+import java.security.cert.CertificateEncodingException;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.util.*;
 
 import static com.pqctoday.hsm.jce.P11Constants.*;
 
 /**
- * "PKCS11-SoftHSMv3" KeyStore — read AND write path (W4 completes what
- * W2 deferred). Fixes the classic SunPKCS11 "0 keys" gap for this token
- * properly, by actually enumerating token objects via C_FindObjects
- * rather than the empty KeyStore SunPKCS11 often reports against this
- * engine (a limitation noted since the sandbox's
- * OpenSession.java/ListKeys.java samples this session).
+ * "PKCS11-SoftHSMv3" KeyStore — read AND write path, including real
+ * certificate storage (W4/W5 completes what W2 deferred). Fixes the
+ * classic SunPKCS11 "0 keys" gap for this token properly, by actually
+ * enumerating token objects via C_FindObjects rather than the empty
+ * KeyStore SunPKCS11 often reports against this engine (a limitation
+ * noted since the sandbox's OpenSession.java/ListKeys.java samples this
+ * session).
  *
- * Write path scope: engineSetKeyEntry promotes one of this provider's
- * OWN opaque keys (P11Key.Priv/Pub/Secret — already token-resident by
- * construction) to persistent storage via C_CopyObject with
- * CKA_TOKEN=true and CKA_LABEL=alias — confirmed reading
- * SoftHSM_objects.cpp before writing this that CKA_TOKEN is exactly the
- * one attribute C_CopyObject's own template loop recognizes for
- * session→token promotion (it's otherwise immutable post-creation). A
- * FOREIGN key (not one of this provider's own opaque types) is refused,
- * same FIPS 140-3 L3 policy as P11PublicKeyFactorySpi's private-key
- * import refusal — this KeyStore persists keys the token itself
- * generated or derived, it does not import external key material.
- * Certificate chains are refused too if non-empty (this KeyStore never
- * stores or returns certificates, so accepting one silently would be
- * dishonest — engineGetCertificateChain always returns null).
+ * Certificate design — verified against the real engine source and the
+ * real JDK 27 source before writing any of this, not assumed:
  *
- * Alias scheme, per user decision: an object's own CKA_LABEL when set
- * (respects a label an operator already gave the key), falling back to a
- * synthesized "algorithm-CKA_ID_hex" alias when CKA_LABEL is empty, so
- * every object still gets a stable, unique alias either way.
- *
- * Algorithm identity for an arbitrary discovered object (not one this
- * session just generated) is resolved from its own attributes:
- * CKA_KEY_TYPE first, then CKA_PARAMETER_SET for ML-DSA/SLH-DSA
- * (parameter set is part of the algorithm name, e.g. "ML-DSA-65"), or
- * CKA_EC_PARAMS for EdDSA specifically (Ed25519 vs Ed448, reverse-matched
- * against the ED25519_OID/ED448_OID constants already used for
- * generation — not a second, independently-typed table). Ordinary
- * CKK_EC resolves to the single name "EC" regardless of curve: unlike
- * ML-DSA/SLH-DSA, JCA's "EC" algorithm name does not vary by curve — the
- * curve is a property of the key, not the registered service name (same
- * as P11ECKeyPairGeneratorSpi's single "EC" service covering all three
- * curves) — so no curve-OID reverse-lookup is needed here. Public keys
- * additionally carry CKA_PUBLIC_KEY_INFO for full SPKI-backed
- * P11Key.Pub construction; private keys need only algorithm identity
- * (P11Key.Priv never encodes).
+ * - CKO_CERTIFICATE/CKC_X_509 is a genuinely implemented engine object
+ *   class (confirmed reading P11Objects.cpp/P11Objects.h), requiring
+ *   CKA_VALUE and CKA_SUBJECT at creation (both flagged mandatory —
+ *   "ck1" — in that same source). CKA_PUBLIC_KEY_INFO is auto-extracted
+ *   by the engine from the cert DER via OpenSSL at creation time.
+ * - CKA_TRUSTED can only be set to true by the SO (verified verbatim in
+ *   P11Attributes.cpp's CKA_TRUSTED updateAttr — "CKA_TRUSTED can only
+ *   be set to true by the SO"), and this provider's own P11Library only
+ *   ever logs in as CKU_USER (confirmed — no CKU_SO constant or login
+ *   call exists anywhere in this module). So the native trusted flag is
+ *   never usable here; TrustedCertificateEntry vs. a PrivateKeyEntry's
+ *   own chain certs is distinguished at the JAVA level instead: if a
+ *   private/secret key shares an alias, its certs are that entry's
+ *   chain; otherwise a certificate under that alias is a standalone
+ *   trusted entry.
+ * - Chain ordering: real java.security.KeyStore.getCertificateChain
+ *   javadoc says "ordered with the user's certificate first" (leaf
+ *   first). PKCS#11 has no standard "chain position" attribute, so this
+ *   class uses CKA_ID as its own internal ordinal ("0" = leaf, "1" =
+ *   next, ...) — a deliberate, simple, self-consistent convention (not
+ *   a real-world PKCS#11 interop convention like CKA_ID-as-pubkey-hash,
+ *   since no external PKCS#11 tooling reads these specific objects).
+ * - setKeyEntry re-setting an existing alias REPLACES it (confirmed
+ *   verbatim in KeyStore.java's javadoc: "If the given alias already
+ *   exists, the keystore information associated with it is overridden")
+ *   — this class deletes every existing object under that alias first,
+ *   rather than leaving the old ones orphaned as session/token garbage.
+ * - setCertificateEntry throws if the alias already identifies a
+ *   non-trusted-cert entry (confirmed verbatim in the same javadoc).
  */
 final class P11KeyStoreSpi extends KeyStoreSpi {
     private final P11Library lib;
+    private final CertificateFactory x509Factory;
 
     P11KeyStoreSpi(P11Library lib) {
         this.lib = lib;
+        try {
+            this.x509Factory = CertificateFactory.getInstance("X.509");
+        } catch (CertificateException e) {
+            throw new ProviderException("X.509 CertificateFactory unavailable", e);
+        }
     }
 
-    // ── Discovery ────────────────────────────────────────────────────────
+    // ── Low-level discovery helpers ─────────────────────────────────────
 
-    private record Entry(String alias, long handle, long objectClass) {}
+    private record ObjRef(long handle, long objectClass) {}
 
-    private List<Entry> discoverAll() {
-        List<Entry> out = new ArrayList<>();
-        for (long cko : new long[]{ CKO_PUBLIC_KEY, CKO_PRIVATE_KEY, CKO_SECRET_KEY }) {
+    /**
+     * One full scan across every object class, grouped by alias.
+     * Deliberately NOT an exact-CKA_LABEL lookup keyed by the target
+     * alias string: a key generated directly by KeyPairGenerator/
+     * KeyGenerator (i.e. never persisted via engineSetKeyEntry) has no
+     * CKA_LABEL at all, and is only discoverable via aliasFor()'s
+     * synthesized fallback — an exact-label filter would silently miss
+     * every such key. Caught live via a regression in this exact
+     * module's own pre-existing KeyStoreTest before this was fixed:
+     * "the key just generated must be discoverable through the
+     * KeyStore" started failing the moment discovery was rewritten to
+     * filter by CKA_LABEL directly instead of enumerating everything
+     * and computing each object's alias the way the original W2 read
+     * path always did.
+     */
+    private Map<String, List<ObjRef>> discoverAll() {
+        Map<String, List<ObjRef>> byAlias = new LinkedHashMap<>();
+        for (long cko : new long[]{ CKO_PUBLIC_KEY, CKO_PRIVATE_KEY, CKO_SECRET_KEY, CKO_CERTIFICATE }) {
             P11Library.Attr[] tmpl = { P11Library.attrLong(CKA_CLASS, cko) };
             for (long handle : lib.findObjects(tmpl)) {
-                out.add(new Entry(aliasFor(handle), handle, cko));
+                byAlias.computeIfAbsent(aliasFor(handle), k -> new ArrayList<>()).add(new ObjRef(handle, cko));
             }
         }
-        return out;
+        return byAlias;
+    }
+
+    private byte[] safeAttr(long handle, long attrType) {
+        try {
+            return lib.getAttributeBytes(handle, attrType);
+        } catch (RuntimeException e) {
+            return null; // attribute not present on this object type — not an error
+        }
+    }
+
+    private static long toLong(byte[] b) {
+        long v = 0;
+        for (int i = 0; i < Math.min(b.length, 8); i++) v |= (b[i] & 0xffL) << (8 * i);
+        return v;
     }
 
     private String aliasFor(long handle) {
         byte[] label = safeAttr(handle, CKA_LABEL);
         if (label != null && label.length > 0) {
-            return new String(label, java.nio.charset.StandardCharsets.UTF_8);
+            return new String(label, StandardCharsets.UTF_8);
         }
         // CKA_ID is not a reliable uniqueness source even when present:
         // keys generated without an explicit CKA_ID come back with a
@@ -97,21 +136,7 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
         return (alg != null ? alg : "unknown") + "-" + idPart + "-" + Long.toHexString(handle);
     }
 
-    private byte[] safeAttr(long handle, long attrType) {
-        try {
-            return lib.getAttributeBytes(handle, attrType);
-        } catch (RuntimeException e) {
-            return null; // attribute not present on this object type — not an error
-        }
-    }
-
-    private static long toLong(byte[] b) {
-        long v = 0;
-        for (int i = 0; i < Math.min(b.length, 8); i++) v |= (b[i] & 0xffL) << (8 * i);
-        return v;
-    }
-
-    /** Resolves the JCA algorithm name from an object's own attributes. Returns null if unrecognized. */
+    /** Resolves the JCA algorithm name from a key object's own attributes. Returns null if unrecognized. */
     private String algorithmNameOf(long handle) {
         byte[] keyTypeBytes = safeAttr(handle, CKA_KEY_TYPE);
         if (keyTypeBytes == null) return null;
@@ -140,9 +165,7 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
         // CKK_GENERIC_SECRET covers HMAC/KMAC/HKDF/PBKDF2/SP800-108
         // output alike — the engine doesn't preserve which of those
         // Java-level algorithm names a given generic-secret object was
-        // really for (see P11GenericSecretKeyGeneratorSpi/HKDF/PBKDF2/
-        // SP800-108's own SPIs — all use this same CKK_ value), so
-        // "Generic" is the honest answer here, not a guess at which one.
+        // really for, so "Generic" is the honest answer, not a guess.
         if (keyType == CKK_GENERIC_SECRET) return "Generic";
         return null;
     }
@@ -165,17 +188,65 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
         };
     }
 
-    private Key keyFor(Entry e) {
-        String alg = algorithmNameOf(e.handle());
+    private Key keyFor(long handle, long objectClass) {
+        String alg = algorithmNameOf(handle);
         String algOrUnknown = alg != null ? alg : "unknown";
-        if (e.objectClass() == CKO_PRIVATE_KEY) {
-            return new P11Key.Priv(e.handle(), algOrUnknown);
+        if (objectClass == CKO_PRIVATE_KEY) {
+            return new P11Key.Priv(handle, algOrUnknown);
         }
-        if (e.objectClass() == CKO_SECRET_KEY) {
-            return new P11Key.Secret(e.handle(), algOrUnknown);
+        if (objectClass == CKO_SECRET_KEY) {
+            return new P11Key.Secret(handle, algOrUnknown);
         }
-        byte[] spki = safeAttr(e.handle(), CKA_PUBLIC_KEY_INFO);
-        return new P11Key.Pub(e.handle(), algOrUnknown, spki != null ? spki : new byte[0]);
+        byte[] spki = safeAttr(handle, CKA_PUBLIC_KEY_INFO);
+        return new P11Key.Pub(handle, algOrUnknown, spki != null ? spki : new byte[0]);
+    }
+
+    // ── Per-alias entry classification (all derived from one discoverAll() scan) ──
+
+    /** The one key object (if any) among this alias's objects — CKO_PRIVATE_KEY preferred, then CKO_SECRET_KEY, then CKO_PUBLIC_KEY. */
+    private Optional<ObjRef> keyRefFor(Map<String, List<ObjRef>> all, String alias) {
+        List<ObjRef> refs = all.getOrDefault(alias, List.of());
+        for (long cko : new long[]{ CKO_PRIVATE_KEY, CKO_SECRET_KEY, CKO_PUBLIC_KEY }) {
+            for (ObjRef r : refs) {
+                if (r.objectClass() == cko) return Optional.of(r);
+            }
+        }
+        return Optional.empty();
+    }
+
+    /** Certificate handles among this alias's objects, ordered by CKA_ID ("0"=leaf) when present. */
+    private List<Long> certChainHandlesFor(Map<String, List<ObjRef>> all, String alias) {
+        List<Long> certs = all.getOrDefault(alias, List.of()).stream()
+            .filter(r -> r.objectClass() == CKO_CERTIFICATE)
+            .map(ObjRef::handle)
+            .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+        certs.sort(Comparator.comparingInt(h -> {
+            byte[] id = safeAttr(h, CKA_ID);
+            if (id == null || id.length == 0) return 0;
+            try {
+                return Integer.parseInt(new String(id, StandardCharsets.UTF_8));
+            } catch (NumberFormatException e) {
+                return 0;
+            }
+        }));
+        return certs;
+    }
+
+    private X509Certificate certAt(long handle) {
+        byte[] der = safeAttr(handle, CKA_VALUE);
+        if (der == null) return null;
+        try {
+            return (X509Certificate) x509Factory.generateCertificate(new ByteArrayInputStream(der));
+        } catch (CertificateException e) {
+            throw new ProviderException("stored certificate DER failed to parse", e);
+        }
+    }
+
+    /** Deletes every object (key or certificate) stored under this alias. */
+    private void deleteAllForAlias(String alias) {
+        for (ObjRef r : discoverAll().getOrDefault(alias, List.of())) {
+            lib.destroyObject(r.handle());
+        }
     }
 
     // ── KeyStoreSpi ──────────────────────────────────────────────────────
@@ -185,20 +256,18 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
         // No-op: this provider's session is already logged in by the time
         // SoftHSMv3Provider construction completes (see P11Library's
         // class javadoc) — the token IS the keystore, there is no file to
-        // load. A future P11SessionPool (W2+/W4) could move login to this
-        // method instead, matching SunPKCS11's own convention more
-        // closely; not attempted here since that would touch every SPI
-        // in this module, not just this one.
+        // load.
     }
 
     @Override
     public Enumeration<String> engineAliases() {
-        return Collections.enumeration(discoverAll().stream().map(Entry::alias).toList());
+        return Collections.enumeration(new ArrayList<>(discoverAll().keySet()));
     }
 
     @Override
     public boolean engineContainsAlias(String alias) {
-        return discoverAll().stream().anyMatch(e -> e.alias().equals(alias));
+        Map<String, List<ObjRef>> all = discoverAll();
+        return keyRefFor(all, alias).isPresent() || !certChainHandlesFor(all, alias).isEmpty();
     }
 
     @Override
@@ -208,15 +277,31 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
 
     @Override
     public Key engineGetKey(String alias, char[] password) {
-        return discoverAll().stream().filter(e -> e.alias().equals(alias))
-            .findFirst().map(this::keyFor).orElse(null);
+        return keyRefFor(discoverAll(), alias).map(r -> keyFor(r.handle(), r.objectClass())).orElse(null);
     }
 
     @Override
-    public Certificate[] engineGetCertificateChain(String alias) { return null; }
+    public Certificate[] engineGetCertificateChain(String alias) {
+        // Per java.security.KeyStore.getCertificateChain's real javadoc:
+        // only applies to a PrivateKeyEntry-shaped alias (a key entry
+        // with an associated chain) — not a TrustedCertificateEntry.
+        Map<String, List<ObjRef>> all = discoverAll();
+        if (keyRefFor(all, alias).isEmpty()) return null;
+        List<Long> certs = certChainHandlesFor(all, alias);
+        if (certs.isEmpty()) return null;
+        Certificate[] chain = new Certificate[certs.size()];
+        for (int i = 0; i < certs.size(); i++) chain[i] = certAt(certs.get(i));
+        return chain;
+    }
 
     @Override
-    public Certificate engineGetCertificate(String alias) { return null; }
+    public Certificate engineGetCertificate(String alias) {
+        // Real javadoc: TrustedCertificateEntry -> that cert;
+        // PrivateKeyEntry -> chain[0] (the leaf).
+        List<Long> certs = certChainHandlesFor(discoverAll(), alias);
+        if (certs.isEmpty()) return null;
+        return certAt(certs.get(0));
+    }
 
     @Override
     public Date engineGetCreationDate(String alias) {
@@ -225,14 +310,41 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
 
     @Override
     public boolean engineIsKeyEntry(String alias) {
-        return discoverAll().stream().anyMatch(e -> e.alias().equals(alias));
+        return keyRefFor(discoverAll(), alias).isPresent();
     }
 
     @Override
-    public boolean engineIsCertificateEntry(String alias) { return false; }
+    public boolean engineIsCertificateEntry(String alias) {
+        // A TrustedCertificateEntry specifically: a certificate exists
+        // under this alias AND no key does (a key's own chain certs are
+        // NOT "certificate entries" in the JCA sense — confirmed via
+        // KeyStore.getCertificate's javadoc distinguishing the two cases).
+        Map<String, List<ObjRef>> all = discoverAll();
+        return keyRefFor(all, alias).isEmpty() && !certChainHandlesFor(all, alias).isEmpty();
+    }
 
     @Override
-    public String engineGetCertificateAlias(Certificate cert) { return null; }
+    public String engineGetCertificateAlias(Certificate cert) {
+        if (!(cert instanceof X509Certificate x509)) return null;
+        byte[] target;
+        try {
+            target = x509.getEncoded();
+        } catch (CertificateEncodingException e) {
+            return null;
+        }
+        Map<String, List<ObjRef>> all = discoverAll();
+        for (String alias : all.keySet()) {
+            List<Long> certs = certChainHandlesFor(all, alias);
+            if (certs.isEmpty()) continue;
+            Certificate c = certAt(certs.get(0));
+            try {
+                if (Arrays.equals(target, c.getEncoded())) return alias;
+            } catch (CertificateEncodingException ignored) {
+                // skip — can't compare
+            }
+        }
+        return null;
+    }
 
     @Override
     public void engineStore(OutputStream stream, char[] password) {
@@ -241,11 +353,6 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
 
     @Override
     public void engineSetKeyEntry(String alias, Key key, char[] password, Certificate[] chain) throws KeyStoreException {
-        if (chain != null && chain.length > 0) {
-            throw new KeyStoreException(
-                "this KeyStore never stores or returns certificates (engineGetCertificateChain always returns null) — "
-                + "pass a null or empty chain");
-        }
         long handle = switch (key) {
             case P11Key.Priv p -> p.handle();
             case P11Key.Pub p -> p.handle();
@@ -255,14 +362,33 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
                 + "(generated or derived via " + SoftHSMv3Provider.class.getSimpleName()
                 + ") — it does not import foreign key material, same FIPS 140-3 L3 policy as private-key import");
         };
+        List<X509Certificate> x509Chain = new ArrayList<>();
+        if (chain != null) {
+            for (Certificate c : chain) {
+                if (!(c instanceof X509Certificate x509)) {
+                    throw new KeyStoreException("only X.509 certificates are supported, got " + c.getType());
+                }
+                x509Chain.add(x509);
+            }
+        }
+
+        // setKeyEntry on an existing alias REPLACES it (KeyStore.java's
+        // own javadoc) — delete every prior object under this alias
+        // first rather than orphaning it.
+        deleteAllForAlias(alias);
+
         P11Library.Attr[] overrideTmpl = {
             P11Library.attrBool(CKA_TOKEN, true),
-            P11Library.attr(CKA_LABEL, alias.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+            P11Library.attr(CKA_LABEL, alias.getBytes(StandardCharsets.UTF_8)),
         };
         try {
             lib.copyObject(handle, overrideTmpl);
         } catch (RuntimeException e) {
             throw new KeyStoreException("failed to persist key under alias \"" + alias + "\"", e);
+        }
+
+        for (int i = 0; i < x509Chain.size(); i++) {
+            createCertificateObject(alias, x509Chain.get(i), i);
         }
     }
 
@@ -276,16 +402,57 @@ final class P11KeyStoreSpi extends KeyStoreSpi {
 
     @Override
     public void engineSetCertificateEntry(String alias, Certificate cert) throws KeyStoreException {
-        throw new KeyStoreException("certificate entries are not supported by this KeyStore");
+        if (!(cert instanceof X509Certificate x509)) {
+            throw new KeyStoreException("only X.509 certificates are supported, got " + cert.getType());
+        }
+        if (keyRefFor(discoverAll(), alias).isPresent()) {
+            throw new KeyStoreException(
+                "alias \"" + alias + "\" already identifies a key entry, not a trusted certificate entry");
+        }
+        // Re-setting an existing TrustedCertificateEntry overrides it
+        // (KeyStore.java's own javadoc) — delete any prior standalone
+        // cert(s) under this alias first.
+        deleteAllForAlias(alias);
+        createCertificateObject(alias, x509, -1); // -1 = standalone trusted entry, no chain ordinal
+    }
+
+    private void createCertificateObject(String alias, X509Certificate cert, int chainIndex) throws KeyStoreException {
+        byte[] der;
+        byte[] subject;
+        byte[] issuer;
+        try {
+            der = cert.getEncoded();
+            subject = cert.getSubjectX500Principal().getEncoded();
+            issuer = cert.getIssuerX500Principal().getEncoded();
+        } catch (CertificateEncodingException e) {
+            throw new KeyStoreException("failed to encode certificate", e);
+        }
+        List<P11Library.Attr> tmpl = new ArrayList<>(List.of(
+            P11Library.attrLong(CKA_CLASS, CKO_CERTIFICATE),
+            P11Library.attrLong(CKA_CERTIFICATE_TYPE, CKC_X_509),
+            P11Library.attrBool(CKA_TOKEN, true),
+            P11Library.attr(CKA_LABEL, alias.getBytes(StandardCharsets.UTF_8)),
+            P11Library.attr(CKA_VALUE, der),
+            P11Library.attr(CKA_SUBJECT, subject),
+            P11Library.attr(CKA_ISSUER, issuer)
+        ));
+        if (chainIndex >= 0) {
+            tmpl.add(P11Library.attr(CKA_ID, Integer.toString(chainIndex).getBytes(StandardCharsets.UTF_8)));
+        }
+        try {
+            lib.createObject(tmpl.toArray(new P11Library.Attr[0]));
+        } catch (RuntimeException e) {
+            throw new KeyStoreException("failed to store certificate under alias \"" + alias + "\"", e);
+        }
     }
 
     @Override
     public void engineDeleteEntry(String alias) throws KeyStoreException {
-        long handle = discoverAll().stream().filter(e -> e.alias().equals(alias))
-            .findFirst().map(Entry::handle)
-            .orElseThrow(() -> new KeyStoreException("no entry with alias \"" + alias + "\""));
+        if (!engineContainsAlias(alias)) {
+            throw new KeyStoreException("no entry with alias \"" + alias + "\"");
+        }
         try {
-            lib.destroyObject(handle);
+            deleteAllForAlias(alias);
         } catch (RuntimeException e) {
             throw new KeyStoreException("failed to delete alias \"" + alias + "\"", e);
         }

@@ -38,6 +38,11 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>5.10.2</junit.version>
     <bouncycastle.version>1.85.2</bouncycastle.version>
+    <!-- bcpkix's release cadence lags bcprov's slightly — 1.85.2 does
+         not exist for bcpkix (confirmed against Maven Central's actual
+         metadata, latest published there is 1.85), so this is
+         deliberately a separate property, not a guess. -->
+    <bouncycastle.pkix.version>1.85</bouncycastle.pkix.version>
   </properties>
 
   <dependencies>
@@ -45,6 +50,21 @@
       <groupId>org.bouncycastle</groupId>
       <artifactId>bcprov-jdk18on</artifactId>
       <version>${bouncycastle.version}</version>
+    </dependency>
+    <!-- Test-only: builds real, signed X.509 certificates for
+         KeyStoreCertificateTest's end-to-end trust-path validation
+         (PKIXParameters/CertPathValidator against a real cert chain) —
+         same vendor/version family as the production bcprov-jdk18on
+         dependency above, but bcpkix (certificate building) is never
+         shipped in the provider itself, only used here to construct
+         test fixtures, same "BC crypto ops OK in test code" pattern
+         already established for the SLH-DSA/OAEP/SP800-108
+         cross-verify tests. -->
+    <dependency>
+      <groupId>org.bouncycastle</groupId>
+      <artifactId>bcpkix-jdk18on</artifactId>
+      <version>${bouncycastle.pkix.version}</version>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>

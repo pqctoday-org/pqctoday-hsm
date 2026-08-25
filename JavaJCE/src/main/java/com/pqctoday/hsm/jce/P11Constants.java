@@ -72,9 +72,13 @@ final class P11Constants {
     static final long CK_SP800_108_BYTE_ARRAY    = 0x00000004L;
 
     // ── Object classes ──────────────────────────────────────────────────
+    static final long CKO_CERTIFICATE = 0x00000001L;
     static final long CKO_PUBLIC_KEY  = 0x00000002L;
     static final long CKO_PRIVATE_KEY = 0x00000003L;
     static final long CKO_SECRET_KEY  = 0x00000004L;
+
+    // ── Certificate types ────────────────────────────────────────────────
+    static final long CKC_X_509 = 0x00000000L;
 
     // ── Key types ────────────────────────────────────────────────────────
     static final long CKK_ML_DSA         = 0x0000004aL;
@@ -113,6 +117,12 @@ final class P11Constants {
     static final long CKA_VALUE_LEN        = 0x00000161L;
     static final long CKA_ENCAPSULATE      = 0x00000633L;
     static final long CKA_DECAPSULATE      = 0x00000634L;
+
+    // ── Certificate attributes (v3.2 §4.9) ────────────────────────────────
+    static final long CKA_CERTIFICATE_TYPE = 0x00000080L;
+    static final long CKA_ISSUER           = 0x00000081L;
+    static final long CKA_SERIAL_NUMBER    = 0x00000082L;
+    static final long CKA_SUBJECT          = 0x00000101L;
 
     // ── RSA-PSS/OAEP mechanism parameters ────────────────────────────────
     static final long CKG_MGF1_SHA256   = 0x00000002L;

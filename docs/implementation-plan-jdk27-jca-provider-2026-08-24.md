@@ -1391,6 +1391,150 @@ PASSED — W4 is now fully complete.**
   for CBC/CTR — DONE; GCM IV-uniqueness test across sessions — not yet
   attempted.
 
+**Certificate management (`PrivateKeyEntry` chains + `TrustedCertificateEntry`):
+DONE 2026-08-25, PASSED — added after W4's original scope, on explicit
+user direction, because the write path above shipped with
+`engineGetCertificateChain` hard-wired to `null` and no way to build a
+`java.security.cert.CertPath`/`PKIXParameters` against anything this
+provider stored.**
+
+- **Why this exists:** the user asked directly why the KeyStore
+  couldn't store a certificate and validate a trust path, rejected an
+  initial vague answer as not standard JCA, and then corrected a
+  factual misunderstanding on this end — JCA's `PrivateKeyEntry` is a
+  private key *plus a certificate chain*, not a private key plus a
+  separate `PublicKey` object; the chain itself carries the public key
+  (`getCertificateChain()[0].getPublicKey()`). Scope was then set
+  explicitly: both `PrivateKeyEntry` (chain via
+  `engineGetCertificateChain`) and standalone `TrustedCertificateEntry`
+  (`engineGetCertificate`/`engineIsCertificateEntry`) had to work.
+- **Verification discipline this workstream was built under, by
+  explicit correction, not by default practice:** a first answer
+  claiming trust-path validation "works for free" via
+  `CertPathValidator`/`TrustManagerFactory` was given from memory,
+  unchecked — the user's response was "stop lying and guessing."
+  Every subsequent claim in this section was re-derived from real
+  source before being written down, and two more times during
+  implementation a stated "fact" turned out to be an unverified
+  inference (`setKeyEntry` replace-on-reset semantics; whether SO-only
+  gating on `CKA_TRUSTED` was invented) — both times the user asked
+  "where does that come from?" / "did you invent that?", and both times
+  the answer was re-derived and quoted verbatim from the real source
+  rather than defended from memory. The findings below are the result
+  of that process, not the first draft of it:
+  - **Engine support for `CKO_CERTIFICATE` is real, not assumed** —
+    confirmed by reading `SoftHSM_objects.cpp`/`P11Attributes.cpp`
+    directly: `CKO_CERTIFICATE` with `CKA_CERTIFICATE_TYPE=CKC_X_509`
+    is a genuinely implemented object class, `CKA_VALUE` (DER bytes)
+    and `CKA_SUBJECT` are mandatory at creation, and
+    `CKA_PUBLIC_KEY_INFO` is auto-extracted by the engine itself from
+    the certificate — this provider does not need to (and does not)
+    parse ASN.1 to get the subject public key back out.
+  - **`CKA_TRUSTED` can only be set `true` by an SO-role session** —
+    quoted verbatim from `P11Attributes.cpp` (the exact lines were
+    re-quoted a second time on direct challenge, not paraphrased from
+    memory), and this module's own `P11Library.java` was separately
+    grepped to confirm it only ever logs in as `CKU_USER` — there is no
+    `CKU_SO` constant anywhere in this codebase. So real PKCS#11-level
+    trust flagging is unreachable from this provider by construction,
+    not by oversight. **Consequence:** trust is distinguished purely at
+    the Java `KeyStore` level — a `TrustedCertificateEntry` is any
+    alias holding a certificate with no key object sharing that alias,
+    exactly as `engineIsCertificateEntry` computes it — not via any
+    PKCS#11 attribute.
+  - **Real `java.security.KeyStore`/`PKIXParameters` contracts**,
+    extracted from JDK 27's actual `src.zip` (not javadoc HTML, not
+    `javap` signatures, which show shape but not behavior) after being
+    told directly to double-check against the real JDK 27 doc/source:
+    `setKeyEntry` re-run on an existing alias **overrides** it
+    (verbatim javadoc: "the keystore information associated with it is
+    overridden"); `getCertificateChain` returns the chain
+    leaf-certificate-first; `getCertificate` returns the trusted cert
+    for a `TrustedCertificateEntry` or `chain[0]` for a
+    `PrivateKeyEntry`; and `PKIXParameters(KeyStore)`'s real
+    constructor body iterates `keystore.aliases()`, calls
+    `isCertificateEntry(alias)` for each, and wraps every
+    `X509Certificate` hit as a `TrustAnchor` — this is the exact,
+    verified mechanism by which a correctly-implemented `KeyStore`
+    gets real PKIX trust-path validation "for free," not the earlier
+    unverified claim restated with more confidence.
+  - `CKA_ID` is repurposed here purely as an internal chain-ordinal
+    (decimal string, "0" = leaf) to recover `getCertificateChain`'s
+    required leaf-first order on read-back — an explicit, disclosed
+    departure from PKCS#11's usual real-world convention of `CKA_ID`
+    being a public-key hash; there is nothing else in the object's
+    attributes that records chain position.
+- **Implementation:** `engineSetKeyEntry` now builds the key's token
+  object exactly as before (§ write-path note above), then persists
+  each chain certificate via a new `createCertificateObject(alias,
+  cert, chainIndex)` (`CKA_CLASS=CKO_CERTIFICATE`,
+  `CKA_CERTIFICATE_TYPE=CKC_X_509`, `CKA_TOKEN=true`, `CKA_LABEL=alias`,
+  `CKA_VALUE=`DER, `CKA_SUBJECT`, `CKA_ISSUER`, `CKA_ID=chainIndex`).
+  `engineSetCertificateEntry` uses the same helper with `chainIndex=-1`
+  (standalone, no ordinal needed) and, per real `KeyStore` contract,
+  throws if the alias already names a key entry rather than silently
+  overwriting one. `engineSetKeyEntry`/`engineSetCertificateEntry` both
+  call a new `deleteAllForAlias` first, matching the verified
+  override-on-reset semantics above rather than orphaning the old
+  objects. `engineDeleteEntry` now also removes every chain cert for
+  the alias, not just the key.
+- **A real discovery regression, caught by a pre-existing test, not
+  invented for this workstream:** the first rewrite of `discoverAll()`
+  switched from a full scan to an exact `CKA_LABEL`-match lookup per
+  alias, which broke `KeyStoreTest.enumeratesGeneratedKeysAndReturnsUsableKeyObjects`
+  — keys produced directly by `KeyPairGenerator`/`KeyGenerator` (never
+  routed through `setKeyEntry`) carry no `CKA_LABEL` at all and are
+  only discoverable via `aliasFor()`'s synthesized-alias fallback, which
+  an exact-label lookup can never match. Fixed by restoring a single
+  full scan across all four object classes
+  (`CKO_PUBLIC_KEY`/`CKO_PRIVATE_KEY`/`CKO_SECRET_KEY`/`CKO_CERTIFICATE`)
+  grouped by computed alias into one `Map<String, List<ObjRef>>`, with
+  every per-alias helper (`keyRefFor`, `certChainHandlesFor`, etc.)
+  deriving from that one map rather than issuing its own `C_FindObjects`
+  call.
+- **Test-only dependency added:** `bcpkix-jdk18on` (certificate
+  building — `JcaX509v3CertificateBuilder`, `JcaContentSignerBuilder`),
+  scoped `test`, same vendor/version family as the already-approved
+  `bcprov-jdk18on` but never shipped in the provider itself. Its
+  version had to be tracked as a separate property
+  (`bouncycastle.pkix.version=1.85`) after `bcpkix-jdk18on:1.85.2`
+  turned out not to exist on Maven Central — checked against the real
+  `maven-metadata.xml`, not assumed to track `bcprov`'s version 1:1.
+  `JcaContentSignerBuilder(...).setProvider(p)` routes the actual
+  certificate-signing operation through this HSM-backed provider
+  itself (Ed25519 keys generated on-token), so the test certificates
+  are genuinely token-signed, not signed by BC's own software
+  implementation.
+- **`KeyStoreCertificateTest.java` (new, 7 tests)** — covers both entry
+  types plus their interaction:
+  `setKeyEntryWithChainPersistsAndRetrievesInLeafFirstOrder`,
+  `setCertificateEntryStoresATrustedCertificate`,
+  `setCertificateEntryRejectsAnAliasThatIsAlreadyAKeyEntry`,
+  `reSettingAnAliasReplacesRatherThanOrphaningOldObjects`,
+  `deleteEntryRemovesTheKeyAndAllItsChainCertificates`, and the two
+  headline proofs:
+  `endToEndTrustPathValidationSucceedsForAKeystoreTrustedRoot` —
+  builds `PKIXParameters(ks)` from a `KeyStore` holding a token-signed
+  root, asserts that root is present among the resulting trust anchors
+  (by identity match, not an exact-count assertion — token-persistent
+  certs from other test methods correctly remain present on the shared
+  token across tests, that is the write path working as designed, not
+  a leak), then runs
+  `CertPathValidator.getInstance("PKIX").validate(...)` against a real
+  leaf→root `CertPath` and asserts it succeeds; and
+  `endToEndTrustPathValidationFailsForAnUntrustedRoot` — the negative
+  control, a leaf signed by a root deliberately *not* stored in the
+  `KeyStore`, asserting `CertPathValidatorException`. Two lesser fixes
+  along the way: an initial `notAfter = new Date(Long.MAX_VALUE / 2)`
+  produced malformed ASN.1 GeneralizedTime on encode (fixed to a plain
+  10-year validity window), and
+  `reSettingAnAliasReplacesRatherThanOrphaningOldObjects` re-sets with
+  a `PublicKey` rather than a `PrivateKey`, deliberately, to avoid the
+  unrelated JDK-level "PrivateKey needs a chain" precondition already
+  documented above.
+- **Verify:** `mvn test`, 175/175 (168 prior + 7 new). No regressions
+  in the discovery-dependent write-path tests from the earlier session.
+
 ### W5 — FIPS posture completion + docs
 - Full POST battery, policy-layer refusal tests for every §5 row,
   zeroization audit (heap-dump assertion that key bytes never appear),
