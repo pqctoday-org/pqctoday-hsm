@@ -414,23 +414,88 @@ run), and nothing is pushed without the local gate (`scripts/local-gate.sh`).
 off `main` (`94a5797`). `libsofthsmv3.dylib` built clean locally
 (pre-existing unused-parameter warnings only). Nothing pushed.
 
-### W1 — Module skeleton + native layer
-- Maven module in `JavaJCE/` (contents replaced): `pom.xml`
-  (release 24, shade not needed — this is a library jar), package
-  `today.pqc.hsm.jce` (final name TBD in review).
-- `P11Library` (FFM): generalize P11Ffm — `C_GetInterface` →
-  `CK_FUNCTION_LIST_3_2` struct walk, MethodHandle table for every
-  function §4 needs (incl. `C_EncapsulateKey`/`C_DecapsulateKey`,
-  `C_DeriveKey`, `C_WrapKey`/`C_UnwrapKey`, digest/verify/update
-  families), CKR error mapping, struct layouts for `CK_MECHANISM`,
-  GCM/OAEP/PSS/HKDF parameter structs.
-- `P11SessionPool`, opaque key classes, attribute-template builder.
-- `SoftHSMv3Provider` registering only `SecureRandom` + `MessageDigest`
-  (smallest end-to-end slice) + the POST harness (§6.3) with the KATs it
-  can run so far.
-- **Verify:** digest + random via provider inside the container; POST
-  failure path exercised via a sabotage build (on a copy — never the
-  write path).
+### W1 — Module skeleton + native layer — DONE 2026-08-24, PASSED
+
+Built and live-verified. Real deviations from the original plan text below
+(struct-walk decision, function resolution scope) and one real
+architectural bug class found and fixed via `mvn test`, documented in
+full since both are load-bearing for W2+.
+
+- Maven module in `JavaJCE/` (contents replaced): `pom.xml` (release 24;
+  JUnit 5 added — the plan's original "shade not needed" call stands,
+  this is a library jar). Package **`com.pqctoday.hsm.jce`** (chosen to
+  match the sandbox's existing `com.pqctoday.pkcs11` convention; no
+  longer "TBD" — this is the real package now in the repo).
+- `P11Library` (FFM), **one deliberate deviation from the original plan
+  text**: functions are resolved by symbol name (`dlsym`/`SymbolLookup.find`)
+  uniformly, not via a `C_GetInterface` → `CK_FUNCTION_LIST_3_2` struct
+  walk. Reasoning recorded in the class's own javadoc: `P11Ffm`'s header
+  comment already establishes that the v3.2 KEM entry points
+  (`C_EncapsulateKey`/`C_DecapsulateKey`) **must** be resolved by name
+  because `C_GetFunctionList` returns a v2-sized struct without those
+  slots — so by-name resolution is required for at least those functions
+  regardless of what's chosen for the rest, and maintaining two different
+  binding mechanisms for functions that are otherwise identical work has
+  no benefit. `C_GetInterface` is still probed once at construction
+  (verification only — confirms v3.2 negotiation) exactly as `P11Ffm`
+  does. This W1 slice bound 11 functions this way, all verified correct
+  by live execution: `C_Initialize`, `C_GetSlotList`, `C_OpenSession`,
+  `C_Login`, `C_Logout`, `C_CloseSession`, `C_DigestInit/Update/Final`,
+  `C_GenerateRandom`, `C_SeedRandom`.
+- `P11Error`: CKR_RV → JCA exception mapping, 105 codes generated
+  directly from `pkcs11t.h` (same technique as W0.2's mechanism sweep —
+  parsed the header, not hand-typed).
+- `SoftHSMv3Provider` registering `SecureRandom` ("SoftHSMv3-DRBG") +
+  8 approved `MessageDigest` algorithms (SHA-224/256/384/512,
+  SHA3-224/256/384/512) — SHA-1/MD5/RIPEMD-160 deliberately **not**
+  registered, live-confirmed via `NoSuchAlgorithmException` even though
+  the engine advertises and dispatches all three (§0.2's finding: the
+  engine is permissive, this provider's policy layer is what enforces
+  FIPS 140-3 L3, and this is the first place that enforcement became
+  real code, not just a plan table). POST harness (§6.3): one SHA-256("abc")
+  FIPS 180-4 KAT run through the real native path before any service is
+  registered; construction throws `ProviderException` and registers
+  nothing on failure — confirmed on a **sabotaged throwaway copy** (never
+  the real file — per this repo's sabotage-testing convention) with a
+  corrupted expected value, which threw exactly as designed with zero
+  services exposed. `P11SessionPool` and opaque key classes are genuinely
+  deferred to W2 (nothing in W1's slice needed them) — not built here, as
+  planned.
+- **Real bug found and fixed via `mvn test` (not caught by raw `javac`/
+  manual smoke test — needed 2+ Provider instances in one JVM to surface,
+  which is exactly what a real JUnit suite does and a single-shot smoke
+  script doesn't):** `C_Initialize` and `C_Login` are PKCS#11-spec
+  **process-/token-global** state, not per-caller (confirmed by reading
+  the engine's own `C_Initialize` — `src/lib/SoftHSM_slots.cpp:84-101`,
+  which tracks one `isInitialised` flag and even registers its own
+  `atexit` handler, signaling process-exit teardown is the intended
+  design). The first version of `P11Library` called
+  `C_Initialize`/`C_Login`/`C_Logout`/`C_Finalize` per-instance
+  (matching `P11Ffm`'s single-session sample pattern, which never needed
+  to construct two instances in one process). The second test's
+  `SoftHSMv3Provider` construction failed with
+  `CKR_CRYPTOKI_ALREADY_INITIALIZED`, then after that fix,
+  `CKR_USER_ALREADY_LOGGED_IN` — both genuine engine responses confirming
+  correct spec behavior, not engine bugs. **Fixed**: `C_Initialize` is
+  now called at most once per JVM process (`synchronized` idempotent
+  guard); `C_Login`'s `CKR_USER_ALREADY_LOGGED_IN` is tolerated as
+  benign (a prior instance already authenticated the whole token — every
+  other `CK_RV` still fails hard); `C_Logout`/`C_Finalize` are **never**
+  called from an individual instance's `close()` (both are token-/
+  process-wide — one instance closing must not log out or tear down
+  state other live instances still depend on). Real per-token
+  reference-counted logout is left to W2's `P11SessionPool`, which is
+  the class actually positioned to know when the LAST session on a token
+  closes — noted at the `cLogout` field with a forward reference so this
+  isn't silently forgotten.
+- **Verify — all live, via the real `mvn test`/`mvn package` (not just
+  raw `javac`+`java`):** all 4 JUnit tests pass against the live engine
+  inside the dev-sandbox container (SHA-256("abc") matches the FIPS
+  180-4 KAT exactly; all 8 approved digests produce correct output
+  lengths; SHA-1/MD5 confirmed unavailable; `SecureRandom` produces
+  distinct draws, supports `generateSeed`/`setSeed` through
+  `C_GenerateRandom`/`C_SeedRandom`). `mvn package` produces a real
+  17.5KB jar. POST fail-closed path verified via sabotaged copy (above).
 
 ### W2 — Signatures + key generation
 - `KeyPairGeneratorSpi` (ML-DSA, SLH-DSA, EC, RSA, EdDSA),
