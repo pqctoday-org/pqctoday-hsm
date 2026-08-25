@@ -220,20 +220,6 @@ final class P11HKDFKDFSpi extends KDFSpi {
 
         long ikmHandle = ikms.size() == 1 ? handleOf(ikms.get(0), "IKM") : handleOfConsolidated(ikms);
 
-        // Salt: prefer the handle path (CKF_HKDF_SALT_KEY, engine support
-        // added 2026-08-25 — plan §WS-A) whenever the salt is already one
-        // of this provider's own token-resident keys, opaque or not — no
-        // reason to round-trip through raw bytes when a handle already
-        // exists, and this is what actually unblocks the real caller that
-        // needed it: JEP 527 hybrid TLS 1.3 chaining a previous (opaque)
-        // derived secret back in as the next Extract step's salt (plan
-        // §W6). A foreign, non-opaque salt key still goes through the
-        // plain-bytes path (CKF_HKDF_SALT_DATA) — no need to import it
-        // onto the token first when the engine will happily take the
-        // bytes directly.
-        var mech = salts.isEmpty()
-            ? lib.mechHkdf(prfHashMech, extract, expand, new byte[0], info)
-            : saltMechFor(salts.get(0), extract, expand, info);
         // CKA_CLASS/CKA_KEY_TYPE must be present here even though the
         // engine's own HKDF code later forces both to exactly these same
         // values regardless of what's supplied — a SEPARATE, generic
@@ -263,13 +249,35 @@ final class P11HKDFKDFSpi extends KDFSpi {
             // before a third live failure rather than after it).
             P11Library.attrBool(CKA_DERIVE, true),
         };
-        return lib.deriveKey(mech, ikmHandle, outputTmpl);
+        // One confined arena spans both the mechanism build (which may
+        // embed real secret bytes — a foreign salt key's raw value) and
+        // the derive call that consumes it — see P11Library's own class
+        // javadoc ("Memory-lifetime architecture") for why a per-call
+        // arena inside the mech builder itself would free that memory
+        // before the native call ever read it.
+        try (var op = java.lang.foreign.Arena.ofConfined()) {
+            // Salt: prefer the handle path (CKF_HKDF_SALT_KEY, engine
+            // support added 2026-08-25 — plan §WS-A) whenever the salt is
+            // already one of this provider's own token-resident keys,
+            // opaque or not — no reason to round-trip through raw bytes
+            // when a handle already exists, and this is what actually
+            // unblocks the real caller that needed it: JEP 527 hybrid TLS
+            // 1.3 chaining a previous (opaque) derived secret back in as
+            // the next Extract step's salt (plan §W6). A foreign,
+            // non-opaque salt key still goes through the plain-bytes path
+            // (CKF_HKDF_SALT_DATA) — no need to import it onto the token
+            // first when the engine will happily take the bytes directly.
+            var mech = salts.isEmpty()
+                ? lib.mechHkdf(op, prfHashMech, extract, expand, new byte[0], info)
+                : saltMechFor(op, salts.get(0), extract, expand, info);
+            return lib.deriveKey(op, mech, ikmHandle, outputTmpl);
+        }
     }
 
-    private java.lang.foreign.MemorySegment saltMechFor(SecretKey salt, boolean extract, boolean expand, byte[] info)
+    private P11Library.BuiltMech saltMechFor(java.lang.foreign.Arena op, SecretKey salt, boolean extract, boolean expand, byte[] info)
             throws InvalidAlgorithmParameterException {
         if (salt instanceof P11Key.Secret s) {
-            return lib.mechHkdf(prfHashMech, extract, expand, s.handle(), info);
+            return lib.mechHkdf(op, prfHashMech, extract, expand, s.handle(), info);
         }
         byte[] raw = salt.getEncoded();
         if (raw == null) {
@@ -278,7 +286,7 @@ final class P11HKDFKDFSpi extends KDFSpi {
                 + "with real encoded bytes (e.g. SecretKeySpec) — got " + salt.getClass()
                 + " with no encoded form");
         }
-        return lib.mechHkdf(prfHashMech, extract, expand, raw, info);
+        return lib.mechHkdf(op, prfHashMech, extract, expand, raw, info);
     }
 
     /** Resolves a key to a token handle: directly for our own opaque keys, or by importing a foreign key's raw bytes. */

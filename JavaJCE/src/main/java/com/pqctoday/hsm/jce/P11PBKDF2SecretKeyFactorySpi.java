@@ -60,8 +60,8 @@ final class P11PBKDF2SecretKeyFactorySpi extends SecretKeyFactorySpi {
         }
 
         byte[] passwordBytes = new String(password).getBytes(StandardCharsets.UTF_8);
-        try {
-            var mech = lib.mechPbkdf2(prf, salt, iterations, passwordBytes);
+        try (var op = java.lang.foreign.Arena.ofConfined()) {
+            var mech = lib.mechPbkdf2(op, prf, salt, iterations, passwordBytes);
             P11Library.Attr[] outputTmpl = {
                 P11Library.attrLong(CKA_CLASS, CKO_SECRET_KEY),
                 P11Library.attrLong(CKA_KEY_TYPE, CKK_GENERIC_SECRET),
@@ -74,7 +74,7 @@ final class P11PBKDF2SecretKeyFactorySpi extends SecretKeyFactorySpi {
                 P11Library.attrBool(CKA_DECRYPT, true),
                 P11Library.attrBool(CKA_SIGN, true),
             };
-            long handle = lib.deriveKeyNoBase(mech, outputTmpl);
+            long handle = lib.deriveKeyNoBase(op, mech, outputTmpl);
             return new P11Key.Secret(lib, handle, "PBKDF2");
         } finally {
             java.util.Arrays.fill(passwordBytes, (byte) 0);

@@ -529,6 +529,109 @@ today (verify — if any test exercises concurrent ops on one instance,
 the confined arena will surface it loudly, which is acceptable and
 better than the current silent sharing).
 
+**WS-C: DONE 2026-08-25, PASSED — full `P11Library` rewrite, one
+gap widened deliberately, zero behavioral regressions.**
+
+- **Audit + classify (item 1), done by direct inspection of all ~24
+  allocation-bearing methods, not sampled:** confirmed the class
+  (a)/(b)/(c) split this section itself proposed maps cleanly onto real
+  call sites, with one refinement made along the way — the plan's own
+  minimum list ("PIN segments, `getAttributeBytes` output for
+  `CKA_VALUE`, wrap/unwrap buffers, `bytes(data)` in sign/encrypt/
+  decrypt") was widened into one uniform, simpler-to-verify rule: every
+  segment built from real byte[] content — anything from the shared
+  `bytes()` helper, or one of `attrs()`'s per-attribute value segments
+  (which can carry a real `CKA_VALUE` being imported, e.g. the WS-B
+  `deriveAndReimportAsAes` path) — is zeroed before its confined arena
+  closes; pure protocol scaffolding (mechanism/attribute struct headers,
+  length/handle scratch cells) is not. This is strictly more thorough
+  than the plan's own minimum (it additionally covers `digest()`'s input,
+  `generateRandom()`/`seedRandom()`'s buffers, `findObjects()`/
+  `generateKeyPair()`/`generateKey()`/`encapsulate()`/`decapsulate()`/
+  `ecdh1Derive()`/`copyObject()`'s template values) at negligible cost —
+  these are all sub-KB buffers on an already token-bound, non-hot-path
+  operation — and removes the risk of a missed case from a
+  method-by-method secret/non-secret judgment call. Two mechanism
+  builders' embedded parameters are real secret material and needed the
+  same treatment even though the plan didn't name them explicitly: HKDF's
+  salt (can be a foreign key's raw bytes) and PBKDF2's password — both
+  now tracked and zeroed via a small `BuiltMech` wrapper (mechanism
+  segment + the secret sub-segments it embeds), the mechanism-builder
+  analogue of `attrs()`'s own `BuiltAttrs`. Left deliberately unscrubbed,
+  matching the plan's own (c) examples: GCM IV/AAD, CBC/CTR IV, SP
+  800-108 fixed-input/IV, RSA-PSS's all-`CK_ULONG` params, ECDH's peer
+  public point, KEM ciphertext, signatures — all public by protocol
+  design, not secret.
+- **Refactor shape (item 2), the change genuinely touches every call
+  path, confirmed rather than assumed going in:** every operation method
+  in `P11Library` now opens its own `Arena.ofConfined()` (named `op`
+  throughout); the `mechXxx`/`attrs`/`bytes` builder family all take that
+  arena as an explicit parameter instead of reaching for the old shared
+  instance field. This rippled out to every external caller that builds
+  a mechanism via one of these builders and then makes a *separate*
+  `sign`/`verify`/`encrypt`/`decrypt`/`deriveKey` call with it — confirmed
+  by grepping every call site in the module first, not guessed at: seven
+  files (`P11AESCipherSpi`, `P11RSAOAEPCipherSpi`, `P11HKDFKDFSpi`,
+  `P11PBKDF2SecretKeyFactorySpi`, `P11SP800108SecretKeyFactorySpi`,
+  `P11RSAPSSSignatureSpi`, `SoftHSMv3Provider`'s own self-test KATs),
+  each now opens its own `try (Arena op = Arena.ofConfined())` spanning
+  both the mechanism build and the native call(s) that consume it — the
+  RSA-PSS self-test and `P11RSAPSSSignatureSpi` both needed the *same*
+  arena to span **two** separate native calls (`sign` then `verify`
+  reusing one mechanism segment), confirming the plan's own prediction
+  that a naive per-allocation fix wouldn't have worked. Every other
+  operation method that builds its own mechanism internally
+  (`digest`/`generateKeyPair`/`createObject`/`generateKey`/`wrapKey`/
+  `unwrapKey`/`copyObject`/`encapsulate`/`decapsulate`/`ecdh1Derive`/the
+  bare-`mechType` `sign`/`verify` overloads) needed no external API
+  change at all — confirmed by grepping for every one of `mech()`'s,
+  `bytes()`'s, and `attrs()`'s call sites across the whole module first
+  (all private/internal, zero external callers) before deciding these
+  could keep their existing signatures.
+- **Zero before close (item 3) and the PIN copy (item 4):** every
+  tracked segment is scrubbed (`MemorySegment.fill((byte) 0)`) in a
+  `finally` block before its confined arena closes — including
+  `decrypt()`'s output, the single most sensitive buffer in this class
+  (genuine decrypted plaintext). The constructor's PIN copy moved out of
+  the long-lived shared arena into a local confined one scoped to just
+  construction, zeroed immediately after the `C_Login` call returns
+  (plus the JVM-heap `pinBytes` array, a small bonus beyond the
+  native-memory scope this item asked for — free to add, strictly safer).
+  The shared `Arena.ofShared()` field itself is kept, narrowed to its one
+  remaining real job: holding the loaded native library alive for the
+  instance's lifetime (`SymbolLookup.libraryLookup`) and being closeable
+  from a different thread than the one that constructed it (WS-B's own
+  `CLOSE_LOCK` finding — shutdown hooks run on their own thread, and only
+  a shared arena can be closed cross-thread; a confined one could not).
+- **Concurrency note, resolved rather than left to a comment:** every
+  confined arena in this rewrite is created, used, and closed within one
+  synchronous call stack on one thread — never handed across a thread
+  boundary — so the note's own predicted failure mode (a confined arena
+  "surfacing loudly" under concurrent misuse) cannot occur by
+  construction, not merely by convention. Empirically confirmed, not
+  just reasoned about: the full suite constructs 100+ provider instances
+  and would have thrown `WrongThreadException` immediately on the first
+  violation — it didn't, across three consecutive clean runs.
+- **Verify:** `mvn test`, 203/203 unchanged (this refactor is invisible
+  behaviorally by design — no test needed to change). Both FIPS-profile
+  live handshakes (`SecP256r1MLKEM768`, `SecP384r1MLKEM1024`) re-run
+  against `pqc-rest` post-refactor and still succeed with the same
+  token-side proof as WS-B. Benchmark re-run: 1.47x mean-latency ratio
+  (was 1.48x pre-refactor) — no measurable regression from the
+  per-operation arena churn, confirming the plan's own "these are all
+  token-bound, non-hot-path operations" expectation. The existing
+  JVM-heap-dump audit (`ZeroizationAuditTest`) still passes unmodified —
+  correctly orthogonal, per this section's own scope note: it audits the
+  one place real secret bytes reach the JVM heap at all (ML-KEM's
+  decapsulated secret), which this native-memory-only refactor never
+  touches. Native-memory scrubbing itself verified by code review and by
+  this refactor's own structure (every secret-carrying buffer's arena
+  now closes within the single native call that used it, not at session
+  end) — not by a native-heap-dump probe, matching this section's own
+  explicit judgment that such a probe would be disproportionate here.
+  Area 8's disclosed gap in the security-posture doc should be flipped
+  from "one disclosed gap" to done, referencing this section.
+
 ---
 
 ## 6. WS-D — Small hardening items

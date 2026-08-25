@@ -54,6 +54,59 @@ import static java.lang.foreign.ValueLayout.*;
  * close() only releases this instance's own session (C_CloseSession) —
  * see the close() method itself for why C_Logout is deliberately excluded
  * too (same token-wide-state reasoning as C_Initialize/C_Finalize above).
+ *
+ * Memory-lifetime architecture (plan §WS-C, 2026-08-25 — replaces an
+ * earlier, disclosed design gap): a first version of this class allocated
+ * every native buffer — mechanism/attribute structs, key material,
+ * plaintext, the PIN — from ONE {@code Arena.ofShared()} that lived for
+ * the whole session, freed only when {@link #close()} ran. That arena's
+ * own javadoc still names the reason it must stay shared and long-lived
+ * for one specific purpose: {@code SymbolLookup.libraryLookup(modulePath,
+ * arena)} ties the loaded native library's lifetime to it, and
+ * {@link #close()} can run on a JVM shutdown-hook thread different from
+ * the one that constructed this instance (see {@code close()}'s own
+ * comment on {@code CLOSE_LOCK}) — a {@code Arena.ofConfined()} could not
+ * be closed from that other thread. But every OTHER allocation in this
+ * class never needed that lifetime: closing a confined arena deallocates
+ * without scrubbing, so real secret material (PIN bytes, HKDF salts,
+ * raw key bytes re-imported as AES, decrypted plaintext) sat mapped and
+ * readable in this process for as long as the session stayed open —
+ * potentially hours — rather than for the single native call that
+ * actually needed it. Every operation method below now opens its own
+ * {@code Arena.ofConfined()} (named {@code op} throughout) spanning
+ * exactly that one operation, and the mechanism/attribute builder methods
+ * (the {@code mechXxx}/{@code attrs}/{@code bytes} family) take that
+ * arena as an explicit parameter instead of reaching for an instance
+ * field — necessary because a caller building a mechanism via
+ * {@code mechGcm}/{@code mechHkdf}/etc. and a subsequent
+ * {@code encrypt}/{@code deriveKey}/etc. call are two separate method
+ * calls sharing one memory segment, so both must run inside the same
+ * still-open arena (a per-call self-closing arena inside the builder
+ * itself would free the segment before the native call that reads it
+ * ever ran). Every segment built from real byte[] content — anything
+ * that came from {@link #bytes} directly, or from {@link #attrs}'s
+ * per-attribute value segments (which can carry a real {@code CKA_VALUE})
+ * — is explicitly zeroed ({@code MemorySegment.fill((byte) 0)}) in a
+ * {@code finally} block before its confined arena closes; this is
+ * intentionally broader than only the values the plan itself named as
+ * clearly secret (the PIN, {@code getAttributeBytes}'s {@code CKA_VALUE}
+ * output, wrap/unwrap buffers, sign/encrypt/decrypt data) — applying one
+ * uniform rule ("real byte-content segments get scrubbed; pure protocol
+ * scaffolding like mechanism/attribute struct headers and length/handle
+ * cells does not") is both simpler to verify by inspection than a
+ * method-by-method secret/non-secret judgment call and strictly more
+ * thorough, at negligible cost (these are all sub-KB buffers on an
+ * already token-bound, non-hot-path operation). Public key material,
+ * KEM ciphertext, GCM IVs/AAD, and similar values that are public by
+ * protocol design are the deliberate exceptions left unscrubbed, matching
+ * the plan's own (c) classification. Verified by code review and by this
+ * refactor's own structure (every secret-carrying buffer's arena now
+ * closes within the single native call that used it, not at session end)
+ * — not by a native-heap-dump probe, which the plan explicitly judged
+ * disproportionate for this class of change (the existing JVM-heap-dump
+ * audit in {@code ZeroizationAuditTest} covers the one place real secret
+ * bytes ever reach the JVM heap at all, an orthogonal and already-solved
+ * problem this refactor does not touch).
  */
 final class P11Library implements AutoCloseable {
 
@@ -80,11 +133,52 @@ final class P11Library implements AutoCloseable {
         return new Attr(type, b);
     }
 
+    /**
+     * attrs() build result: the CK_ATTRIBUTE struct array plus each
+     * attribute's individually-allocated value segment, so the caller can
+     * scrub them (see {@link #zero(BuiltAttrs)}) after the native call
+     * that consumes them — a value segment can carry a real
+     * {@code CKA_VALUE} (raw key material being imported), and this class
+     * scrubs indiscriminately across all of them rather than special-casing
+     * which attribute type happens to be secret at a given call site (see
+     * the class javadoc's "Memory-lifetime architecture" note).
+     */
+    private record BuiltAttrs(MemorySegment segment, MemorySegment[] values) {}
+
+    /**
+     * mechXxx() build result for the two builders (HKDF, PBKDF2) whose
+     * mechanism parameters embed real secret byte content (a salt that may
+     * be a foreign key's raw bytes, or a PBKDF2 password) — see the class
+     * javadoc. Builders whose embedded byte content is public by protocol
+     * design (GCM IV/AAD, CBC/CTR IV, SP 800-108 fixed-input/IV, RSA-PSS's
+     * all-CK_ULONG params) return a plain {@link MemorySegment} instead;
+     * there is nothing in them worth tracking for zeroing.
+     */
+    record BuiltMech(MemorySegment segment, MemorySegment[] secrets) {}
+
+    private static void zero(MemorySegment... segs) {
+        for (MemorySegment s : segs) {
+            if (s != null && s != MemorySegment.NULL && s.byteSize() > 0) s.fill((byte) 0);
+        }
+    }
+
+    private static void zero(BuiltAttrs a) { zero(a.values()); }
+    private static void zero(BuiltMech m) { zero(m.secrets()); }
+
     // Process-global C_Initialize guard — see class javadoc. Synchronized
     // on the class object; construction only happens on the (rare, non-hot)
     // provider/session-setup path, so contention is not a concern.
     private static volatile boolean globalInitDone = false;
 
+    // Kept ONLY to hold the loaded native library alive for this instance's
+    // lifetime (SymbolLookup.libraryLookup(modulePath, arena) below) and to
+    // be closeable from a shutdown-hook thread different from the
+    // constructing one (see close()'s CLOSE_LOCK comment) — Arena.ofShared()
+    // is required for that cross-thread close, Arena.ofConfined() is not.
+    // NEVER allocate application data from this field after construction —
+    // see the class javadoc's "Memory-lifetime architecture" note; every
+    // operation method below opens its own short-lived confined arena
+    // instead.
     private final Arena arena;
     private final MethodHandle cGetSlotList, cOpenSession, cLogin,
         // cLogout: bound but deliberately unused in this class — see
@@ -166,33 +260,47 @@ final class P11Library implements AutoCloseable {
 
             ensureGlobalInit(linker, lib);
 
-            MemorySegment count = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cGetSlotList, (byte) 1, MemorySegment.NULL, count), "C_GetSlotList(size)");
-            long n = count.get(JAVA_LONG, 0);
-            if (n == 0) throw new ProviderException("no PKCS#11 slots with a token present");
-            MemorySegment slots = arena.allocate(JAVA_LONG, n);
-            P11Error.check(invokeRv(cGetSlotList, (byte) 1, slots, count), "C_GetSlotList");
-            long slot = slots.get(JAVA_LONG, 0);
+            // Slot lookup, session open, and login all use a LOCAL confined
+            // arena scoped to just this constructor — none of these
+            // segments need to outlive it, and the PIN copy in particular
+            // must not (plan §WS-C item 4): a prior version of this class
+            // allocated all of this from the long-lived shared `arena`
+            // field above, leaving the PIN's raw bytes mapped and readable
+            // for the whole session instead of for this one login call.
+            try (Arena init = Arena.ofConfined()) {
+                MemorySegment count = init.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cGetSlotList, (byte) 1, MemorySegment.NULL, count), "C_GetSlotList(size)");
+                long n = count.get(JAVA_LONG, 0);
+                if (n == 0) throw new ProviderException("no PKCS#11 slots with a token present");
+                MemorySegment slots = init.allocate(JAVA_LONG, n);
+                P11Error.check(invokeRv(cGetSlotList, (byte) 1, slots, count), "C_GetSlotList");
+                long slot = slots.get(JAVA_LONG, 0);
 
-            MemorySegment hSession = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cOpenSession, slot, CKF_SERIAL_SESSION | CKF_RW_SESSION,
-                MemorySegment.NULL, MemorySegment.NULL, hSession), "C_OpenSession");
-            session = hSession.get(JAVA_LONG, 0);
+                MemorySegment hSession = init.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cOpenSession, slot, CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                    MemorySegment.NULL, MemorySegment.NULL, hSession), "C_OpenSession");
+                session = hSession.get(JAVA_LONG, 0);
 
-            byte[] pinBytes = pin.getBytes(StandardCharsets.UTF_8);
-            MemorySegment pinSeg = arena.allocate(Math.max(pinBytes.length, 1));
-            MemorySegment.copy(pinBytes, 0, pinSeg, JAVA_BYTE, 0, pinBytes.length);
-            long loginRv = invokeRv(cLogin, session, CKU_USER, pinSeg, (long) pinBytes.length);
-            // CKR_USER_ALREADY_LOGGED_IN is not an error here: PKCS#11 login
-            // state is per-TOKEN, not per-session (spec §5.6.1) — a prior
-            // session on this same slot (e.g. an earlier P11Library
-            // instance in this process) already authenticated, and that
-            // covers every session on the token, including this new one.
-            // Same class of bug as C_Initialize above, caught the same way
-            // (live `mvn test` with 2+ instances) — every OTHER CK_RV still
-            // fails hard via P11Error.check.
-            if (loginRv != P11Error.CKR_OK && loginRv != CKR_USER_ALREADY_LOGGED_IN) {
-                P11Error.check(loginRv, "C_Login");
+                byte[] pinBytes = pin.getBytes(StandardCharsets.UTF_8);
+                MemorySegment pinSeg = init.allocate(Math.max(pinBytes.length, 1));
+                MemorySegment.copy(pinBytes, 0, pinSeg, JAVA_BYTE, 0, pinBytes.length);
+                try {
+                    long loginRv = invokeRv(cLogin, session, CKU_USER, pinSeg, (long) pinBytes.length);
+                    // CKR_USER_ALREADY_LOGGED_IN is not an error here: PKCS#11 login
+                    // state is per-TOKEN, not per-session (spec §5.6.1) — a prior
+                    // session on this same slot (e.g. an earlier P11Library
+                    // instance in this process) already authenticated, and that
+                    // covers every session on the token, including this new one.
+                    // Same class of bug as C_Initialize above, caught the same way
+                    // (live `mvn test` with 2+ instances) — every OTHER CK_RV still
+                    // fails hard via P11Error.check.
+                    if (loginRv != P11Error.CKR_OK && loginRv != CKR_USER_ALREADY_LOGGED_IN) {
+                        P11Error.check(loginRv, "C_Login");
+                    }
+                } finally {
+                    zero(pinSeg);
+                    java.util.Arrays.fill(pinBytes, (byte) 0);
+                }
             }
             loggedIn = true;
         } catch (ProviderException e) {
@@ -225,22 +333,26 @@ final class P11Library implements AutoCloseable {
      */
     void login(byte[] pinBytes) {
         ensureOpen();
-        try {
-            MemorySegment pinSeg = arena.allocate(Math.max(pinBytes.length, 1));
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment pinSeg = op.allocate(Math.max(pinBytes.length, 1));
             MemorySegment.copy(pinBytes, 0, pinSeg, JAVA_BYTE, 0, pinBytes.length);
-            long rv = invokeRv(cLogin, session, CKU_USER, pinSeg, (long) pinBytes.length);
-            if (rv == P11Error.CKR_OK || rv == CKR_USER_ALREADY_LOGGED_IN) {
-                loggedIn = true;
-                return;
+            try {
+                long rv = invokeRv(cLogin, session, CKU_USER, pinSeg, (long) pinBytes.length);
+                if (rv == P11Error.CKR_OK || rv == CKR_USER_ALREADY_LOGGED_IN) {
+                    loggedIn = true;
+                    return;
+                }
+                loggedIn = false;
+                if (rv == CKR_PIN_INCORRECT) {
+                    // Distinct unchecked type so SoftHSMv3Provider.login() can
+                    // translate this into javax.security.auth.login.FailedLoginException
+                    // without string-matching a generic ProviderException message.
+                    throw new SecurityException("CKR_PIN_INCORRECT");
+                }
+                P11Error.check(rv, "C_Login");
+            } finally {
+                zero(pinSeg);
             }
-            loggedIn = false;
-            if (rv == CKR_PIN_INCORRECT) {
-                // Distinct unchecked type so SoftHSMv3Provider.login() can
-                // translate this into javax.security.auth.login.FailedLoginException
-                // without string-matching a generic ProviderException message.
-                throw new SecurityException("CKR_PIN_INCORRECT");
-            }
-            P11Error.check(rv, "C_Login");
         } catch (ProviderException | SecurityException e) {
             throw e;
         } catch (Throwable t) {
@@ -278,16 +390,20 @@ final class P11Library implements AutoCloseable {
     /** C_DigestInit/Update/Final, single call. */
     byte[] digest(long mechType, byte[] data) {
         ensureOpen();
-        try {
-            MemorySegment mech = mech(mechType);
-            P11Error.check(invokeRv(cDigestInit, session, mech), "C_DigestInit");
-            MemorySegment in = bytes(data);
-            P11Error.check(invokeRv(cDigestUpdate, session, in, (long) data.length), "C_DigestUpdate");
-            MemorySegment len = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cDigestFinal, session, MemorySegment.NULL, len), "C_DigestFinal(size)");
-            MemorySegment out = arena.allocate(len.get(JAVA_LONG, 0));
-            P11Error.check(invokeRv(cDigestFinal, session, out, len), "C_DigestFinal");
-            return toBytes(out, len.get(JAVA_LONG, 0));
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment mech = mech(op, mechType);
+            MemorySegment in = bytes(op, data);
+            try {
+                P11Error.check(invokeRv(cDigestInit, session, mech), "C_DigestInit");
+                P11Error.check(invokeRv(cDigestUpdate, session, in, (long) data.length), "C_DigestUpdate");
+                MemorySegment len = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cDigestFinal, session, MemorySegment.NULL, len), "C_DigestFinal(size)");
+                MemorySegment out = op.allocate(len.get(JAVA_LONG, 0));
+                P11Error.check(invokeRv(cDigestFinal, session, out, len), "C_DigestFinal");
+                return toBytes(out, len.get(JAVA_LONG, 0));
+            } finally {
+                zero(in);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -298,10 +414,14 @@ final class P11Library implements AutoCloseable {
     /** C_GenerateRandom — SP 800-90A DRBG inside the token, never JVM software randomness. */
     byte[] generateRandom(int len) {
         ensureOpen();
-        try {
-            MemorySegment out = arena.allocate(Math.max(len, 1));
-            P11Error.check(invokeRv(cGenerateRandom, session, out, (long) len), "C_GenerateRandom");
-            return toBytes(out, len);
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment out = op.allocate(Math.max(len, 1));
+            try {
+                P11Error.check(invokeRv(cGenerateRandom, session, out, (long) len), "C_GenerateRandom");
+                return toBytes(out, len);
+            } finally {
+                zero(out);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -312,8 +432,13 @@ final class P11Library implements AutoCloseable {
     /** C_SeedRandom. */
     void seedRandom(byte[] seed) {
         ensureOpen();
-        try {
-            P11Error.check(invokeRv(cSeedRandom, session, bytes(seed), (long) seed.length), "C_SeedRandom");
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment s = bytes(op, seed);
+            try {
+                P11Error.check(invokeRv(cSeedRandom, session, s, (long) seed.length), "C_SeedRandom");
+            } finally {
+                zero(s);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -324,15 +449,20 @@ final class P11Library implements AutoCloseable {
     /** C_GenerateKeyPair; returns { publicHandle, privateHandle }. */
     long[] generateKeyPair(long mechType, Attr[] pubTmpl, Attr[] prvTmpl) {
         ensureOpen();
-        try {
-            MemorySegment mech = mech(mechType);
-            MemorySegment pub = attrs(pubTmpl);
-            MemorySegment prv = attrs(prvTmpl);
-            MemorySegment hPub = arena.allocate(JAVA_LONG);
-            MemorySegment hPrv = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cGenerateKeyPair, session, mech, pub, (long) pubTmpl.length,
-                prv, (long) prvTmpl.length, hPub, hPrv), "C_GenerateKeyPair");
-            return new long[]{ hPub.get(JAVA_LONG, 0), hPrv.get(JAVA_LONG, 0) };
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment mech = mech(op, mechType);
+            BuiltAttrs builtPub = attrs(op, pubTmpl);
+            BuiltAttrs builtPrv = attrs(op, prvTmpl);
+            try {
+                MemorySegment hPub = op.allocate(JAVA_LONG);
+                MemorySegment hPrv = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cGenerateKeyPair, session, mech, builtPub.segment(), (long) pubTmpl.length,
+                    builtPrv.segment(), (long) prvTmpl.length, hPub, hPrv), "C_GenerateKeyPair");
+                return new long[]{ hPub.get(JAVA_LONG, 0), hPrv.get(JAVA_LONG, 0) };
+            } finally {
+                zero(builtPub);
+                zero(builtPrv);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -340,22 +470,28 @@ final class P11Library implements AutoCloseable {
         }
     }
 
-    /** C_SignInit + C_Sign (single-part), two-call sizing. */
+    /** C_SignInit + C_Sign (single-part), two-call sizing. Opens its own confined arena — see the Arena-taking overload for callers that already built their own mechanism. */
     byte[] sign(long mechType, long key, byte[] data) {
-        return sign(mech(mechType), key, data);
+        try (Arena op = Arena.ofConfined()) {
+            return sign(op, mech(op, mechType), key, data);
+        }
     }
 
-    /** Same as sign(long, long, byte[]) but with a caller-built CK_MECHANISM (e.g. RSA-PSS's parameter block). */
-    byte[] sign(MemorySegment mech, long key, byte[] data) {
+    /** Same as sign(long, long, byte[]) but with a caller-built CK_MECHANISM (e.g. RSA-PSS's parameter block) and the arena it was built in — see the class javadoc's "Memory-lifetime architecture" note for why the arena must be shared across both calls. */
+    byte[] sign(Arena op, MemorySegment mech, long key, byte[] data) {
         ensureOpen();
         try {
             P11Error.check(invokeRv(cSignInit, session, mech, key), "C_SignInit");
-            MemorySegment msg = bytes(data);
-            MemorySegment len = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cSign, session, msg, (long) data.length, MemorySegment.NULL, len), "C_Sign(size)");
-            MemorySegment sig = arena.allocate(len.get(JAVA_LONG, 0));
-            P11Error.check(invokeRv(cSign, session, msg, (long) data.length, sig, len), "C_Sign");
-            return toBytes(sig, len.get(JAVA_LONG, 0));
+            MemorySegment msg = bytes(op, data);
+            try {
+                MemorySegment len = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cSign, session, msg, (long) data.length, MemorySegment.NULL, len), "C_Sign(size)");
+                MemorySegment sig = op.allocate(len.get(JAVA_LONG, 0));
+                P11Error.check(invokeRv(cSign, session, msg, (long) data.length, sig, len), "C_Sign");
+                return toBytes(sig, len.get(JAVA_LONG, 0));
+            } finally {
+                zero(msg);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -363,22 +499,29 @@ final class P11Library implements AutoCloseable {
         }
     }
 
-    /** C_VerifyInit + C_Verify (single-part). Returns false (not an exception) on CKR_SIGNATURE_INVALID. */
+    /** C_VerifyInit + C_Verify (single-part). Returns false (not an exception) on CKR_SIGNATURE_INVALID. Opens its own confined arena — see the Arena-taking overload. */
     boolean verify(long mechType, long key, byte[] data, byte[] signature) {
-        return verify(mech(mechType), key, data, signature);
+        try (Arena op = Arena.ofConfined()) {
+            return verify(op, mech(op, mechType), key, data, signature);
+        }
     }
 
-    /** Same as verify(long, long, byte[], byte[]) but with a caller-built CK_MECHANISM. */
-    boolean verify(MemorySegment mech, long key, byte[] data, byte[] signature) {
+    /** Same as verify(long, long, byte[], byte[]) but with a caller-built CK_MECHANISM and the arena it was built in. */
+    boolean verify(Arena op, MemorySegment mech, long key, byte[] data, byte[] signature) {
         ensureOpen();
         try {
             P11Error.check(invokeRv(cVerifyInit, session, mech, key), "C_VerifyInit");
-            long rv = invokeRv(cVerify, session, bytes(data), (long) data.length,
-                bytes(signature), (long) signature.length);
-            if (rv == P11Error.CKR_OK) return true;
-            if (rv == 0x000000c0L /* CKR_SIGNATURE_INVALID */) return false;
-            P11Error.check(rv, "C_Verify");
-            return false; // unreachable — check() throws for any other non-OK rv
+            MemorySegment msg = bytes(op, data);
+            try {
+                long rv = invokeRv(cVerify, session, msg, (long) data.length,
+                    bytes(op, signature), (long) signature.length);
+                if (rv == P11Error.CKR_OK) return true;
+                if (rv == 0x000000c0L /* CKR_SIGNATURE_INVALID */) return false;
+                P11Error.check(rv, "C_Verify");
+                return false; // unreachable — check() throws for any other non-OK rv
+            } finally {
+                zero(msg);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -386,20 +529,24 @@ final class P11Library implements AutoCloseable {
         }
     }
 
-    /** C_GetAttributeValue, two-call sizing — for public-key export (SubjectPublicKeyInfo assembly). */
+    /** C_GetAttributeValue, two-call sizing — for public-key export (SubjectPublicKeyInfo assembly) and the module's few deliberate opaque-key exceptions (raw CKA_VALUE reads). */
     byte[] getAttributeBytes(long object, long attrType) {
         ensureOpen();
-        try {
-            MemorySegment a = arena.allocate(ATTRIBUTE);
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment a = op.allocate(ATTRIBUTE);
             a.set(JAVA_LONG, 0, attrType);
             a.set(ADDRESS, 8, MemorySegment.NULL);
             a.set(JAVA_LONG, 16, 0L);
             P11Error.check(invokeRv(cGetAttributeValue, session, object, a, 1L), "C_GetAttributeValue(size)");
             long len = a.get(JAVA_LONG, 16);
-            MemorySegment buf = arena.allocate(Math.max(len, 1));
+            MemorySegment buf = op.allocate(Math.max(len, 1));
             a.set(ADDRESS, 8, buf);
-            P11Error.check(invokeRv(cGetAttributeValue, session, object, a, 1L), "C_GetAttributeValue");
-            return toBytes(buf, len);
+            try {
+                P11Error.check(invokeRv(cGetAttributeValue, session, object, a, 1L), "C_GetAttributeValue");
+                return toBytes(buf, len);
+            } finally {
+                zero(buf);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -424,25 +571,29 @@ final class P11Library implements AutoCloseable {
      */
     long[] findObjects(Attr[] template) {
         ensureOpen();
-        try {
-            MemorySegment tmpl = attrs(template);
-            P11Error.check(invokeRv(cFindObjectsInit, session, tmpl, (long) template.length), "C_FindObjectsInit");
+        try (Arena op = Arena.ofConfined()) {
+            BuiltAttrs builtTmpl = attrs(op, template);
             try {
-                int batch = 256;
-                java.util.List<Long> out = new java.util.ArrayList<>();
-                MemorySegment handles = arena.allocate(JAVA_LONG, batch);
-                MemorySegment count = arena.allocate(JAVA_LONG);
-                while (true) {
-                    P11Error.check(invokeRv(cFindObjects, session, handles, (long) batch, count), "C_FindObjects");
-                    long n = count.get(JAVA_LONG, 0);
-                    for (int i = 0; i < n; i++) out.add(handles.get(JAVA_LONG, i * 8L));
-                    if (n < batch) break; // fewer than requested => this was the last batch
+                P11Error.check(invokeRv(cFindObjectsInit, session, builtTmpl.segment(), (long) template.length), "C_FindObjectsInit");
+                try {
+                    int batch = 256;
+                    java.util.List<Long> out = new java.util.ArrayList<>();
+                    MemorySegment handles = op.allocate(JAVA_LONG, batch);
+                    MemorySegment count = op.allocate(JAVA_LONG);
+                    while (true) {
+                        P11Error.check(invokeRv(cFindObjects, session, handles, (long) batch, count), "C_FindObjects");
+                        long n = count.get(JAVA_LONG, 0);
+                        for (int i = 0; i < n; i++) out.add(handles.get(JAVA_LONG, i * 8L));
+                        if (n < batch) break; // fewer than requested => this was the last batch
+                    }
+                    long[] result = new long[out.size()];
+                    for (int i = 0; i < result.length; i++) result[i] = out.get(i);
+                    return result;
+                } finally {
+                    invokeRv(cFindObjectsFinal, session);
                 }
-                long[] result = new long[out.size()];
-                for (int i = 0; i < result.length; i++) result[i] = out.get(i);
-                return result;
             } finally {
-                invokeRv(cFindObjectsFinal, session);
+                zero(builtTmpl);
             }
         } catch (ProviderException e) {
             throw e;
@@ -457,20 +608,24 @@ final class P11Library implements AutoCloseable {
     /** C_EncapsulateKey with two-call ciphertext sizing (v3.2 §5.27) — matches P11Ffm's proven pattern. */
     Encapsulated encapsulate(long mechType, long publicKey, Attr[] ssTmpl) {
         ensureOpen();
-        try {
-            MemorySegment mech = mech(mechType);
-            MemorySegment tmpl = attrs(ssTmpl);
-            MemorySegment ctLen = arena.allocate(JAVA_LONG);
-            MemorySegment hSs = arena.allocate(JAVA_LONG);
-            long rv = invokeRv(cEncapsulateKey, session, mech, publicKey,
-                tmpl, (long) ssTmpl.length, MemorySegment.NULL, ctLen, hSs);
-            if (rv != P11Error.CKR_OK && rv != 0x00000150L /* CKR_BUFFER_TOO_SMALL */) {
-                P11Error.check(rv, "C_EncapsulateKey(size)");
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment mech = mech(op, mechType);
+            BuiltAttrs builtTmpl = attrs(op, ssTmpl);
+            try {
+                MemorySegment ctLen = op.allocate(JAVA_LONG);
+                MemorySegment hSs = op.allocate(JAVA_LONG);
+                long rv = invokeRv(cEncapsulateKey, session, mech, publicKey,
+                    builtTmpl.segment(), (long) ssTmpl.length, MemorySegment.NULL, ctLen, hSs);
+                if (rv != P11Error.CKR_OK && rv != 0x00000150L /* CKR_BUFFER_TOO_SMALL */) {
+                    P11Error.check(rv, "C_EncapsulateKey(size)");
+                }
+                MemorySegment ct = op.allocate(ctLen.get(JAVA_LONG, 0));
+                P11Error.check(invokeRv(cEncapsulateKey, session, mech, publicKey,
+                    builtTmpl.segment(), (long) ssTmpl.length, ct, ctLen, hSs), "C_EncapsulateKey");
+                return new Encapsulated(toBytes(ct, ctLen.get(JAVA_LONG, 0)), hSs.get(JAVA_LONG, 0));
+            } finally {
+                zero(builtTmpl);
             }
-            MemorySegment ct = arena.allocate(ctLen.get(JAVA_LONG, 0));
-            P11Error.check(invokeRv(cEncapsulateKey, session, mech, publicKey,
-                tmpl, (long) ssTmpl.length, ct, ctLen, hSs), "C_EncapsulateKey");
-            return new Encapsulated(toBytes(ct, ctLen.get(JAVA_LONG, 0)), hSs.get(JAVA_LONG, 0));
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -481,13 +636,20 @@ final class P11Library implements AutoCloseable {
     /** C_DecapsulateKey; returns a handle to the (opaque) derived shared-secret object. */
     long decapsulate(long mechType, long privateKey, Attr[] ssTmpl, byte[] ciphertext) {
         ensureOpen();
-        try {
-            MemorySegment mech = mech(mechType);
-            MemorySegment hSs = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cDecapsulateKey, session, mech, privateKey,
-                attrs(ssTmpl), (long) ssTmpl.length, bytes(ciphertext), (long) ciphertext.length, hSs),
-                "C_DecapsulateKey");
-            return hSs.get(JAVA_LONG, 0);
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment mech = mech(op, mechType);
+            BuiltAttrs builtTmpl = attrs(op, ssTmpl);
+            MemorySegment ct = bytes(op, ciphertext);
+            try {
+                MemorySegment hSs = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cDecapsulateKey, session, mech, privateKey,
+                    builtTmpl.segment(), (long) ssTmpl.length, ct, (long) ciphertext.length, hSs),
+                    "C_DecapsulateKey");
+                return hSs.get(JAVA_LONG, 0);
+            } finally {
+                zero(builtTmpl);
+                zero(ct);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -512,25 +674,29 @@ final class P11Library implements AutoCloseable {
      */
     long ecdh1Derive(long basePrivateKey, byte[] peerPublicPointRaw, Attr[] ssTmpl) {
         ensureOpen();
-        try {
-            MemorySegment pubData = bytes(peerPublicPointRaw);
-            MemorySegment params = arena.allocate(ECDH1_DERIVE_PARAMS);
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment pubData = bytes(op, peerPublicPointRaw);
+            MemorySegment params = op.allocate(ECDH1_DERIVE_PARAMS);
             params.set(JAVA_LONG, 0, 1L); // CKD_NULL (pkcs11t.h: 0x00000001)
             params.set(JAVA_LONG, 8, 0L); // ulSharedDataLen
             params.set(ADDRESS, 16, MemorySegment.NULL); // pSharedData
             params.set(JAVA_LONG, 24, (long) peerPublicPointRaw.length);
             params.set(ADDRESS, 32, pubData);
 
-            MemorySegment mech = arena.allocate(MECHANISM);
+            MemorySegment mech = op.allocate(MECHANISM);
             mech.set(JAVA_LONG, 0, P11Constants.CKM_ECDH1_DERIVE);
             mech.set(ADDRESS, 8, params);
             mech.set(JAVA_LONG, 16, ECDH1_DERIVE_PARAMS.byteSize());
 
-            MemorySegment tmpl = attrs(ssTmpl);
-            MemorySegment hKey = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cDeriveKey, session, mech, basePrivateKey,
-                tmpl, (long) ssTmpl.length, hKey), "C_DeriveKey");
-            return hKey.get(JAVA_LONG, 0);
+            BuiltAttrs builtTmpl = attrs(op, ssTmpl);
+            try {
+                MemorySegment hKey = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cDeriveKey, session, mech, basePrivateKey,
+                    builtTmpl.segment(), (long) ssTmpl.length, hKey), "C_DeriveKey");
+                return hKey.get(JAVA_LONG, 0);
+            } finally {
+                zero(builtTmpl);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -544,32 +710,40 @@ final class P11Library implements AutoCloseable {
     private static final MemoryLayout OAEP_PARAMS =
         MemoryLayout.structLayout(JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG);
 
-    /** CKM_RSA_PKCS_OAEP with no label (CKZ_DATA_SPECIFIED, empty source — the common case). */
-    MemorySegment mechOaep(long hashAlg, long mgf) {
-        MemorySegment params = arena.allocate(OAEP_PARAMS);
+    /** CKM_RSA_PKCS_OAEP with no label (CKZ_DATA_SPECIFIED, empty source — the common case). No embedded secret content — plain MemorySegment. */
+    MemorySegment mechOaep(Arena op, long hashAlg, long mgf) {
+        MemorySegment params = op.allocate(OAEP_PARAMS);
         params.set(JAVA_LONG, 0, hashAlg);
         params.set(JAVA_LONG, 8, mgf);
         params.set(JAVA_LONG, 16, 1L); // CKZ_DATA_SPECIFIED
         params.set(ADDRESS, 24, MemorySegment.NULL);
         params.set(JAVA_LONG, 32, 0L);
-        MemorySegment m = arena.allocate(MECHANISM);
+        MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, P11Constants.CKM_RSA_PKCS_OAEP);
         m.set(ADDRESS, 8, params);
         m.set(JAVA_LONG, 16, OAEP_PARAMS.byteSize());
         return m;
     }
 
-    /** C_EncryptInit + C_Encrypt (single-part), two-call sizing. */
-    byte[] encrypt(MemorySegment mech, long key, byte[] plaintext) {
+    /** C_EncryptInit + C_Encrypt (single-part), two-call sizing. Caller supplies the arena the mechanism was built in — see the class javadoc. */
+    byte[] encrypt(Arena op, MemorySegment mech, long key, byte[] plaintext) {
         ensureOpen();
         try {
-            P11Error.check(invokeRv(cEncryptInit, session, mech, key), "C_EncryptInit");
-            MemorySegment in = bytes(plaintext);
-            MemorySegment len = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cEncrypt, session, in, (long) plaintext.length, MemorySegment.NULL, len), "C_Encrypt(size)");
-            MemorySegment out = arena.allocate(len.get(JAVA_LONG, 0));
-            P11Error.check(invokeRv(cEncrypt, session, in, (long) plaintext.length, out, len), "C_Encrypt");
-            return toBytes(out, len.get(JAVA_LONG, 0));
+            MemorySegment in = bytes(op, plaintext);
+            try {
+                P11Error.check(invokeRv(cEncryptInit, session, mech, key), "C_EncryptInit");
+                MemorySegment len = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cEncrypt, session, in, (long) plaintext.length, MemorySegment.NULL, len), "C_Encrypt(size)");
+                MemorySegment out = op.allocate(len.get(JAVA_LONG, 0));
+                try {
+                    P11Error.check(invokeRv(cEncrypt, session, in, (long) plaintext.length, out, len), "C_Encrypt");
+                    return toBytes(out, len.get(JAVA_LONG, 0));
+                } finally {
+                    zero(out);
+                }
+            } finally {
+                zero(in);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -577,17 +751,25 @@ final class P11Library implements AutoCloseable {
         }
     }
 
-    /** C_DecryptInit + C_Decrypt (single-part), two-call sizing. */
-    byte[] decrypt(MemorySegment mech, long key, byte[] ciphertext) {
+    /** C_DecryptInit + C_Decrypt (single-part), two-call sizing. Caller supplies the arena the mechanism was built in. */
+    byte[] decrypt(Arena op, MemorySegment mech, long key, byte[] ciphertext) {
         ensureOpen();
         try {
-            P11Error.check(invokeRv(cDecryptInit, session, mech, key), "C_DecryptInit");
-            MemorySegment in = bytes(ciphertext);
-            MemorySegment len = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cDecrypt, session, in, (long) ciphertext.length, MemorySegment.NULL, len), "C_Decrypt(size)");
-            MemorySegment out = arena.allocate(len.get(JAVA_LONG, 0));
-            P11Error.check(invokeRv(cDecrypt, session, in, (long) ciphertext.length, out, len), "C_Decrypt");
-            return toBytes(out, len.get(JAVA_LONG, 0));
+            MemorySegment in = bytes(op, ciphertext);
+            try {
+                P11Error.check(invokeRv(cDecryptInit, session, mech, key), "C_DecryptInit");
+                MemorySegment len = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cDecrypt, session, in, (long) ciphertext.length, MemorySegment.NULL, len), "C_Decrypt(size)");
+                MemorySegment out = op.allocate(len.get(JAVA_LONG, 0));
+                try {
+                    P11Error.check(invokeRv(cDecrypt, session, in, (long) ciphertext.length, out, len), "C_Decrypt");
+                    return toBytes(out, len.get(JAVA_LONG, 0));
+                } finally {
+                    zero(out); // the decrypted PLAINTEXT — the single most sensitive buffer in this class
+                }
+            } finally {
+                zero(in);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -622,28 +804,35 @@ final class P11Library implements AutoCloseable {
      * output size) — confirmed live that the engine will not infer it,
      * the caller must compute and supply it explicitly.
      *
-     * See {@link #mechHkdf(long, boolean, boolean, long, byte[])} for the
+     * Returns a {@link BuiltMech}, not a plain MemorySegment: the salt can
+     * be a foreign key's real raw bytes, genuine secret material — tracked
+     * so the caller can zero it after the derive call completes (see the
+     * class javadoc).
+     *
+     * See {@link #mechHkdf(Arena, long, boolean, boolean, long, byte[])} for the
      * salt-by-handle (CKF_HKDF_SALT_KEY) overload, added for plan §W6/WS-A
      * once the engine gained real support for it (2026-08-25) — this
      * class's own javadoc used to say the engine "explicitly rejects
      * CKF_HKDF_SALT_KEY", true when first written, no longer true.
      */
-    MemorySegment mechHkdf(long prfHashMech, boolean extract, boolean expand, byte[] salt, byte[] info) {
-        MemorySegment params = arena.allocate(HKDF_PARAMS);
+    BuiltMech mechHkdf(Arena op, long prfHashMech, boolean extract, boolean expand, byte[] salt, byte[] info) {
+        MemorySegment params = op.allocate(HKDF_PARAMS);
         params.set(JAVA_BYTE, 0, (byte) (extract ? 1 : 0));
         params.set(JAVA_BYTE, 1, (byte) (expand ? 1 : 0));
         params.set(JAVA_LONG, 8, prfHashMech);
         params.set(JAVA_LONG, 16, salt.length > 0 ? CKF_HKDF_SALT_DATA : CKF_HKDF_SALT_NULL);
-        params.set(ADDRESS, 24, salt.length > 0 ? bytes(salt) : MemorySegment.NULL);
+        MemorySegment saltSeg = salt.length > 0 ? bytes(op, salt) : MemorySegment.NULL;
+        params.set(ADDRESS, 24, saltSeg);
         params.set(JAVA_LONG, 32, (long) salt.length);
         params.set(JAVA_LONG, 40, 0L); // hSaltKey — unused on this path, see the salt-by-handle overload
-        params.set(ADDRESS, 48, info.length > 0 ? bytes(info) : MemorySegment.NULL);
+        MemorySegment infoSeg = info.length > 0 ? bytes(op, info) : MemorySegment.NULL;
+        params.set(ADDRESS, 48, infoSeg);
         params.set(JAVA_LONG, 56, (long) info.length);
-        MemorySegment m = arena.allocate(MECHANISM);
+        MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, P11Constants.CKM_HKDF_DERIVE);
         m.set(ADDRESS, 8, params);
         m.set(JAVA_LONG, 16, HKDF_PARAMS.byteSize());
-        return m;
+        return new BuiltMech(m, new MemorySegment[]{ saltSeg, infoSeg });
     }
 
     /**
@@ -657,8 +846,8 @@ final class P11Library implements AutoCloseable {
      * before it, hSaltKey was accepted structurally but the engine
      * rejected CKF_HKDF_SALT_KEY outright.
      */
-    MemorySegment mechHkdf(long prfHashMech, boolean extract, boolean expand, long saltKeyHandle, byte[] info) {
-        MemorySegment params = arena.allocate(HKDF_PARAMS);
+    BuiltMech mechHkdf(Arena op, long prfHashMech, boolean extract, boolean expand, long saltKeyHandle, byte[] info) {
+        MemorySegment params = op.allocate(HKDF_PARAMS);
         params.set(JAVA_BYTE, 0, (byte) (extract ? 1 : 0));
         params.set(JAVA_BYTE, 1, (byte) (expand ? 1 : 0));
         params.set(JAVA_LONG, 8, prfHashMech);
@@ -666,13 +855,14 @@ final class P11Library implements AutoCloseable {
         params.set(ADDRESS, 24, MemorySegment.NULL); // pSalt — unused on this path
         params.set(JAVA_LONG, 32, 0L); // ulSaltLen — unused on this path
         params.set(JAVA_LONG, 40, saltKeyHandle);
-        params.set(ADDRESS, 48, info.length > 0 ? bytes(info) : MemorySegment.NULL);
+        MemorySegment infoSeg = info.length > 0 ? bytes(op, info) : MemorySegment.NULL;
+        params.set(ADDRESS, 48, infoSeg);
         params.set(JAVA_LONG, 56, (long) info.length);
-        MemorySegment m = arena.allocate(MECHANISM);
+        MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, P11Constants.CKM_HKDF_DERIVE);
         m.set(ADDRESS, 8, params);
         m.set(JAVA_LONG, 16, HKDF_PARAMS.byteSize());
-        return m;
+        return new BuiltMech(m, new MemorySegment[]{ infoSeg });
     }
 
     // CK_PKCS5_PBKD2_PARAMS2 { CK_PKCS5_PBKDF2_SALT_SOURCE_TYPE saltSource;
@@ -685,23 +875,25 @@ final class P11Library implements AutoCloseable {
     private static final MemoryLayout PBKDF2_PARAMS = MemoryLayout.structLayout(
         JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG);
 
-    /** CKM_PKCS5_PBKD2 (SP 800-132). Salt is always CKZ_SALT_SPECIFIED (raw bytes) — the only source type this engine supports. */
-    MemorySegment mechPbkdf2(long prf, byte[] salt, long iterations, byte[] password) {
-        MemorySegment params = arena.allocate(PBKDF2_PARAMS);
+    /** CKM_PKCS5_PBKD2 (SP 800-132). Salt is always CKZ_SALT_SPECIFIED (raw bytes) — the only source type this engine supports. Returns a BuiltMech: the password is genuine secret material. */
+    BuiltMech mechPbkdf2(Arena op, long prf, byte[] salt, long iterations, byte[] password) {
+        MemorySegment params = op.allocate(PBKDF2_PARAMS);
         params.set(JAVA_LONG, 0, P11Constants.CKZ_SALT_SPECIFIED);
-        params.set(ADDRESS, 8, bytes(salt));
+        MemorySegment saltSeg = bytes(op, salt);
+        params.set(ADDRESS, 8, saltSeg);
         params.set(JAVA_LONG, 16, (long) salt.length);
         params.set(JAVA_LONG, 24, iterations);
         params.set(JAVA_LONG, 32, prf);
         params.set(ADDRESS, 40, MemorySegment.NULL); // pPrfData — unused for the HMAC PRF family
         params.set(JAVA_LONG, 48, 0L);
-        params.set(ADDRESS, 56, bytes(password));
+        MemorySegment pwSeg = bytes(op, password);
+        params.set(ADDRESS, 56, pwSeg);
         params.set(JAVA_LONG, 64, (long) password.length);
-        MemorySegment m = arena.allocate(MECHANISM);
+        MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, P11Constants.CKM_PKCS5_PBKD2);
         m.set(ADDRESS, 8, params);
         m.set(JAVA_LONG, 16, PBKDF2_PARAMS.byteSize());
-        return m;
+        return new BuiltMech(m, new MemorySegment[]{ saltSeg, pwSeg });
     }
 
     /**
@@ -714,8 +906,8 @@ final class P11Library implements AutoCloseable {
      * (not reusing deriveKey(...) with a real handle) so a future reader
      * doesn't mistake this for a real base-key dependency.
      */
-    long deriveKeyNoBase(MemorySegment mech, Attr[] outputTmpl) {
-        return deriveKey(mech, 0L, outputTmpl);
+    long deriveKeyNoBase(Arena op, BuiltMech mech, Attr[] outputTmpl) {
+        return deriveKey(op, mech, 0L, outputTmpl);
     }
 
     // CK_PRF_DATA_PARAM { CK_PRF_DATA_TYPE type; CK_VOID_PTR pValue; CK_ULONG ulValueLen; }
@@ -748,56 +940,60 @@ final class P11Library implements AutoCloseable {
      * when fixedInput is empty, matching how an absent CK_PRF_DATA_PARAM
      * array is expressed.
      */
-    private MemorySegment prfDataParams(byte[] fixedInput) {
+    private static MemorySegment prfDataParams(Arena op, byte[] fixedInput) {
         if (fixedInput.length == 0) return MemorySegment.NULL;
-        MemorySegment seg = arena.allocate(PRF_DATA_PARAM_SIZE);
+        MemorySegment seg = op.allocate(PRF_DATA_PARAM_SIZE);
         seg.set(JAVA_LONG, 0, P11Constants.CK_SP800_108_BYTE_ARRAY);
-        seg.set(ADDRESS, 8, bytes(fixedInput));
+        seg.set(ADDRESS, 8, bytes(op, fixedInput));
         seg.set(JAVA_LONG, 16, (long) fixedInput.length);
         return seg;
     }
 
-    /** CKM_SP800_108_COUNTER_KDF (SP 800-108 §5.1). prfType must be a CKM_SHA*_HMAC constant or CKM_AES_CMAC. */
-    MemorySegment mechSp800108Counter(long prfType, byte[] fixedInput) {
-        MemorySegment params = arena.allocate(SP800_108_COUNTER_PARAMS);
+    /** CKM_SP800_108_COUNTER_KDF (SP 800-108 §5.1). prfType must be a CKM_SHA*_HMAC constant or CKM_AES_CMAC. fixedInput is a public label/context, not secret — plain MemorySegment. */
+    MemorySegment mechSp800108Counter(Arena op, long prfType, byte[] fixedInput) {
+        MemorySegment params = op.allocate(SP800_108_COUNTER_PARAMS);
         params.set(JAVA_LONG, 0, prfType);
         params.set(JAVA_LONG, 8, fixedInput.length == 0 ? 0L : 1L);
-        params.set(ADDRESS, 16, prfDataParams(fixedInput));
+        params.set(ADDRESS, 16, prfDataParams(op, fixedInput));
         params.set(JAVA_LONG, 24, 0L); // ulAdditionalDerivedKeys — not supported here
         params.set(ADDRESS, 32, MemorySegment.NULL);
-        MemorySegment m = arena.allocate(MECHANISM);
+        MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, P11Constants.CKM_SP800_108_COUNTER_KDF);
         m.set(ADDRESS, 8, params);
         m.set(JAVA_LONG, 16, SP800_108_COUNTER_PARAMS.byteSize());
         return m;
     }
 
-    /** CKM_SP800_108_FEEDBACK_KDF (SP 800-108 §5.2). iv may be empty (no seed supplied — engine default applies). */
-    MemorySegment mechSp800108Feedback(long prfType, byte[] fixedInput, byte[] iv) {
-        MemorySegment params = arena.allocate(SP800_108_FEEDBACK_PARAMS);
+    /** CKM_SP800_108_FEEDBACK_KDF (SP 800-108 §5.2). iv may be empty (no seed supplied — engine default applies). Neither fixedInput nor iv is secret — plain MemorySegment. */
+    MemorySegment mechSp800108Feedback(Arena op, long prfType, byte[] fixedInput, byte[] iv) {
+        MemorySegment params = op.allocate(SP800_108_FEEDBACK_PARAMS);
         params.set(JAVA_LONG, 0, prfType);
         params.set(JAVA_LONG, 8, fixedInput.length == 0 ? 0L : 1L);
-        params.set(ADDRESS, 16, prfDataParams(fixedInput));
+        params.set(ADDRESS, 16, prfDataParams(op, fixedInput));
         params.set(JAVA_LONG, 24, (long) iv.length);
-        params.set(ADDRESS, 32, iv.length == 0 ? MemorySegment.NULL : bytes(iv));
+        params.set(ADDRESS, 32, iv.length == 0 ? MemorySegment.NULL : bytes(op, iv));
         params.set(JAVA_LONG, 40, 0L); // ulAdditionalDerivedKeys — not supported here
         params.set(ADDRESS, 48, MemorySegment.NULL);
-        MemorySegment m = arena.allocate(MECHANISM);
+        MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, P11Constants.CKM_SP800_108_FEEDBACK_KDF);
         m.set(ADDRESS, 8, params);
         m.set(JAVA_LONG, 16, SP800_108_FEEDBACK_PARAMS.byteSize());
         return m;
     }
 
-    /** C_DeriveKey with a caller-built CK_MECHANISM (HKDF; ECDH has its own ecdh1Derive convenience above). */
-    long deriveKey(MemorySegment mech, long baseKey, Attr[] outputTmpl) {
+    /** C_DeriveKey with a caller-built CK_MECHANISM whose embedded content is public (HKDF/ECDH have their own dedicated entry points above). */
+    long deriveKey(Arena op, MemorySegment mech, long baseKey, Attr[] outputTmpl) {
         ensureOpen();
         try {
-            MemorySegment tmpl = attrs(outputTmpl);
-            MemorySegment hKey = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cDeriveKey, session, mech, baseKey,
-                tmpl, (long) outputTmpl.length, hKey), "C_DeriveKey");
-            return hKey.get(JAVA_LONG, 0);
+            BuiltAttrs builtTmpl = attrs(op, outputTmpl);
+            try {
+                MemorySegment hKey = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cDeriveKey, session, mech, baseKey,
+                    builtTmpl.segment(), (long) outputTmpl.length, hKey), "C_DeriveKey");
+                return hKey.get(JAVA_LONG, 0);
+            } finally {
+                zero(builtTmpl);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -805,14 +1001,27 @@ final class P11Library implements AutoCloseable {
         }
     }
 
+    /** Same as deriveKey(Arena, MemorySegment, long, Attr[]) but for a BuiltMech (HKDF/PBKDF2) — scrubs the mechanism's own embedded secret bytes after the derive call completes. */
+    long deriveKey(Arena op, BuiltMech mech, long baseKey, Attr[] outputTmpl) {
+        try {
+            return deriveKey(op, mech.segment(), baseKey, outputTmpl);
+        } finally {
+            zero(mech);
+        }
+    }
+
     /** C_CreateObject — imports a caller-supplied key onto the token (public keys only; see KeyFactory import). */
     long createObject(Attr[] template) {
         ensureOpen();
-        try {
-            MemorySegment tmpl = attrs(template);
-            MemorySegment hObj = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cCreateObject, session, tmpl, (long) template.length, hObj), "C_CreateObject");
-            return hObj.get(JAVA_LONG, 0);
+        try (Arena op = Arena.ofConfined()) {
+            BuiltAttrs builtTmpl = attrs(op, template);
+            try {
+                MemorySegment hObj = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cCreateObject, session, builtTmpl.segment(), (long) template.length, hObj), "C_CreateObject");
+                return hObj.get(JAVA_LONG, 0);
+            } finally {
+                zero(builtTmpl);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -823,12 +1032,16 @@ final class P11Library implements AutoCloseable {
     /** C_GenerateKey (single secret key, not a keypair — e.g. CKM_AES_KEY_GEN). */
     long generateKey(long mechType, Attr[] tmpl) {
         ensureOpen();
-        try {
-            MemorySegment mech = mech(mechType);
-            MemorySegment t = attrs(tmpl);
-            MemorySegment hKey = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cGenerateKey, session, mech, t, (long) tmpl.length, hKey), "C_GenerateKey");
-            return hKey.get(JAVA_LONG, 0);
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment mech = mech(op, mechType);
+            BuiltAttrs builtTmpl = attrs(op, tmpl);
+            try {
+                MemorySegment hKey = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cGenerateKey, session, mech, builtTmpl.segment(), (long) tmpl.length, hKey), "C_GenerateKey");
+                return hKey.get(JAVA_LONG, 0);
+            } finally {
+                zero(builtTmpl);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -853,28 +1066,30 @@ final class P11Library implements AutoCloseable {
      * to the newer C_MessageEncryptInit/C_EncryptMessage in-module-IV-generation
      * API for SP 800-38D §8.2 purposes (same DRBG either way) and needs no
      * new native function family — confirmed by reading both code paths in
-     * SoftHSM_cipher.cpp before choosing this design.
+     * SoftHSM_cipher.cpp before choosing this design. Neither the IV nor
+     * AAD is secret (both are public by GCM's own protocol design) — plain
+     * MemorySegment, nothing tracked for zeroing.
      */
-    MemorySegment mechGcm(byte[] iv, byte[] aad, int tagBits) {
-        MemorySegment params = arena.allocate(GCM_PARAMS);
-        params.set(ADDRESS, 0, bytes(iv));
+    MemorySegment mechGcm(Arena op, byte[] iv, byte[] aad, int tagBits) {
+        MemorySegment params = op.allocate(GCM_PARAMS);
+        params.set(ADDRESS, 0, bytes(op, iv));
         params.set(JAVA_LONG, 8, (long) iv.length);
         params.set(JAVA_LONG, 16, (long) iv.length * 8);
-        params.set(ADDRESS, 24, aad.length > 0 ? bytes(aad) : MemorySegment.NULL);
+        params.set(ADDRESS, 24, aad.length > 0 ? bytes(op, aad) : MemorySegment.NULL);
         params.set(JAVA_LONG, 32, (long) aad.length);
         params.set(JAVA_LONG, 40, (long) tagBits);
-        MemorySegment m = arena.allocate(MECHANISM);
+        MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, P11Constants.CKM_AES_GCM);
         m.set(ADDRESS, 8, params);
         m.set(JAVA_LONG, 16, GCM_PARAMS.byteSize());
         return m;
     }
 
-    /** CKM_AES_CBC / CKM_AES_CBC_PAD — mechanism parameter is the raw 16-byte IV, no struct. */
-    MemorySegment mechCbc(long mechType, byte[] iv) {
-        MemorySegment m = arena.allocate(MECHANISM);
+    /** CKM_AES_CBC / CKM_AES_CBC_PAD — mechanism parameter is the raw 16-byte IV, no struct. IV is not secret. */
+    MemorySegment mechCbc(Arena op, long mechType, byte[] iv) {
+        MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, mechType);
-        m.set(ADDRESS, 8, bytes(iv));
+        m.set(ADDRESS, 8, bytes(op, iv));
         m.set(JAVA_LONG, 16, (long) iv.length);
         return m;
     }
@@ -884,12 +1099,12 @@ final class P11Library implements AutoCloseable {
     private static final MemoryLayout CTR_PARAMS =
         MemoryLayout.structLayout(JAVA_LONG, MemoryLayout.sequenceLayout(16, JAVA_BYTE));
 
-    /** CKM_AES_CTR with the full 128-bit counter block treated as the counter (ulCounterBits=128). */
-    MemorySegment mechCtr(byte[] counterBlock) {
-        MemorySegment params = arena.allocate(CTR_PARAMS);
+    /** CKM_AES_CTR with the full 128-bit counter block treated as the counter (ulCounterBits=128). Not secret. */
+    MemorySegment mechCtr(Arena op, byte[] counterBlock) {
+        MemorySegment params = op.allocate(CTR_PARAMS);
         params.set(JAVA_LONG, 0, 128L);
         MemorySegment.copy(counterBlock, 0, params, JAVA_BYTE, 8, 16);
-        MemorySegment m = arena.allocate(MECHANISM);
+        MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, P11Constants.CKM_AES_CTR);
         m.set(ADDRESS, 8, params);
         m.set(JAVA_LONG, 16, CTR_PARAMS.byteSize());
@@ -899,14 +1114,18 @@ final class P11Library implements AutoCloseable {
     /** C_WrapKey — wraps a token key object (by handle) with another token key, two-call sizing. */
     byte[] wrapKey(long mechType, long wrappingKey, long keyToWrap) {
         ensureOpen();
-        try {
-            MemorySegment mech = mech(mechType);
-            MemorySegment len = arena.allocate(JAVA_LONG);
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment mech = mech(op, mechType);
+            MemorySegment len = op.allocate(JAVA_LONG);
             P11Error.check(invokeRv(cWrapKey, session, mech, wrappingKey, keyToWrap, MemorySegment.NULL, len),
                 "C_WrapKey(size)");
-            MemorySegment out = arena.allocate(len.get(JAVA_LONG, 0));
-            P11Error.check(invokeRv(cWrapKey, session, mech, wrappingKey, keyToWrap, out, len), "C_WrapKey");
-            return toBytes(out, len.get(JAVA_LONG, 0));
+            MemorySegment out = op.allocate(len.get(JAVA_LONG, 0));
+            try {
+                P11Error.check(invokeRv(cWrapKey, session, mech, wrappingKey, keyToWrap, out, len), "C_WrapKey");
+                return toBytes(out, len.get(JAVA_LONG, 0));
+            } finally {
+                zero(out);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -917,14 +1136,19 @@ final class P11Library implements AutoCloseable {
     /** C_UnwrapKey — returns a handle to the newly-imported (unwrapped) key object. */
     long unwrapKey(long mechType, long unwrappingKey, byte[] wrapped, Attr[] tmpl) {
         ensureOpen();
-        try {
-            MemorySegment mech = mech(mechType);
-            MemorySegment w = bytes(wrapped);
-            MemorySegment t = attrs(tmpl);
-            MemorySegment hKey = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cUnwrapKey, session, mech, unwrappingKey, w, (long) wrapped.length,
-                t, (long) tmpl.length, hKey), "C_UnwrapKey");
-            return hKey.get(JAVA_LONG, 0);
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment mech = mech(op, mechType);
+            MemorySegment w = bytes(op, wrapped);
+            BuiltAttrs builtTmpl = attrs(op, tmpl);
+            try {
+                MemorySegment hKey = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cUnwrapKey, session, mech, unwrappingKey, w, (long) wrapped.length,
+                    builtTmpl.segment(), (long) tmpl.length, hKey), "C_UnwrapKey");
+                return hKey.get(JAVA_LONG, 0);
+            } finally {
+                zero(w);
+                zero(builtTmpl);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -945,11 +1169,15 @@ final class P11Library implements AutoCloseable {
      */
     long copyObject(long handle, Attr[] overrideTmpl) {
         ensureOpen();
-        try {
-            MemorySegment tmpl = attrs(overrideTmpl);
-            MemorySegment hNew = arena.allocate(JAVA_LONG);
-            P11Error.check(invokeRv(cCopyObject, session, handle, tmpl, (long) overrideTmpl.length, hNew), "C_CopyObject");
-            return hNew.get(JAVA_LONG, 0);
+        try (Arena op = Arena.ofConfined()) {
+            BuiltAttrs builtTmpl = attrs(op, overrideTmpl);
+            try {
+                MemorySegment hNew = op.allocate(JAVA_LONG);
+                P11Error.check(invokeRv(cCopyObject, session, handle, builtTmpl.segment(), (long) overrideTmpl.length, hNew), "C_CopyObject");
+                return hNew.get(JAVA_LONG, 0);
+            } finally {
+                zero(builtTmpl);
+            }
         } catch (ProviderException e) {
             throw e;
         } catch (Throwable t) {
@@ -971,19 +1199,21 @@ final class P11Library implements AutoCloseable {
 
     // ── Struct builders (shared with future W2+ SPIs via package access) ──
 
-    private MemorySegment attrs(Attr[] template) {
-        MemorySegment seg = arena.allocate(ATTR_SIZE * Math.max(template.length, 1));
+    private static BuiltAttrs attrs(Arena op, Attr[] template) {
+        MemorySegment seg = op.allocate(ATTR_SIZE * Math.max(template.length, 1));
+        MemorySegment[] values = new MemorySegment[template.length];
         for (int i = 0; i < template.length; i++) {
-            MemorySegment val = bytes(template[i].value());
+            MemorySegment val = bytes(op, template[i].value());
+            values[i] = val;
             seg.set(JAVA_LONG, i * ATTR_SIZE, template[i].type());
             seg.set(ADDRESS, i * ATTR_SIZE + 8, val);
             seg.set(JAVA_LONG, i * ATTR_SIZE + 16, template[i].value().length);
         }
-        return seg;
+        return new BuiltAttrs(seg, values);
     }
 
-    MemorySegment mech(long type) {
-        MemorySegment m = arena.allocate(MECHANISM);
+    private static MemorySegment mech(Arena op, long type) {
+        MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, type);
         m.set(ADDRESS, 8, MemorySegment.NULL);
         m.set(JAVA_LONG, 16, 0L);
@@ -997,19 +1227,20 @@ final class P11Library implements AutoCloseable {
      * "all-ULONG" shape. A struct mixing ULONG and pointer/byte fields
      * (like CK_SP800_108_KDF_PARAMS's variable-length PRF-data array)
      * needs its own dedicated builder — deliberately not attempted here.
+     * All-ULONG parameters carry no raw byte content — plain MemorySegment.
      */
-    MemorySegment mechWithParams(long type, long... params) {
-        MemorySegment p = arena.allocate(JAVA_LONG, params.length);
+    MemorySegment mechWithParams(Arena op, long type, long... params) {
+        MemorySegment p = op.allocate(JAVA_LONG, params.length);
         for (int i = 0; i < params.length; i++) p.set(JAVA_LONG, i * 8L, params[i]);
-        MemorySegment m = arena.allocate(MECHANISM);
+        MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, type);
         m.set(ADDRESS, 8, p);
         m.set(JAVA_LONG, 16, params.length * 8L);
         return m;
     }
 
-    MemorySegment bytes(byte[] b) {
-        MemorySegment seg = arena.allocate(Math.max(b.length, 1));
+    private static MemorySegment bytes(Arena op, byte[] b) {
+        MemorySegment seg = op.allocate(Math.max(b.length, 1));
         MemorySegment.copy(b, 0, seg, JAVA_BYTE, 0, b.length);
         return seg;
     }

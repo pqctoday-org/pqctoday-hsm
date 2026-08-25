@@ -145,9 +145,9 @@ final class P11RSAOAEPCipherSpi extends CipherSpi {
         if (input != null && inputLen > 0) buf.write(input, inputOffset, inputLen);
         byte[] data = buf.toByteArray();
         buf.reset();
-        try {
-            var mech = lib.mechOaep(hashAlg, mgf);
-            return opmode == Cipher.ENCRYPT_MODE ? lib.encrypt(mech, keyHandle, data) : lib.decrypt(mech, keyHandle, data);
+        try (java.lang.foreign.Arena op = java.lang.foreign.Arena.ofConfined()) {
+            var mech = lib.mechOaep(op, hashAlg, mgf);
+            return opmode == Cipher.ENCRYPT_MODE ? lib.encrypt(op, mech, keyHandle, data) : lib.decrypt(op, mech, keyHandle, data);
         } catch (RuntimeException e) {
             if (opmode == Cipher.DECRYPT_MODE) throw new BadPaddingException(e.getMessage());
             throw new IllegalBlockSizeException(e.getMessage());

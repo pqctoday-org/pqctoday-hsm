@@ -264,14 +264,14 @@ final class P11AESCipherSpi extends CipherSpi {
         if (iv == null) {
             throw new IllegalStateException("Cipher not initialized with an IV");
         }
-        try {
+        try (java.lang.foreign.Arena op = java.lang.foreign.Arena.ofConfined()) {
             var mech = switch (mode) {
-                case GCM -> lib.mechGcm(iv, aad.toByteArray(), tagBits);
-                case CBC -> lib.mechCbc(CKM_AES_CBC, iv);
-                case CBC_PAD -> lib.mechCbc(CKM_AES_CBC_PAD, iv);
-                case CTR -> lib.mechCtr(iv);
+                case GCM -> lib.mechGcm(op, iv, aad.toByteArray(), tagBits);
+                case CBC -> lib.mechCbc(op, CKM_AES_CBC, iv);
+                case CBC_PAD -> lib.mechCbc(op, CKM_AES_CBC_PAD, iv);
+                case CTR -> lib.mechCtr(op, iv);
             };
-            return opmode == Cipher.ENCRYPT_MODE ? lib.encrypt(mech, keyHandle, data) : lib.decrypt(mech, keyHandle, data);
+            return opmode == Cipher.ENCRYPT_MODE ? lib.encrypt(op, mech, keyHandle, data) : lib.decrypt(op, mech, keyHandle, data);
         } catch (RuntimeException e) {
             if (opmode == Cipher.DECRYPT_MODE) throw new BadPaddingException(e.getMessage());
             throw new IllegalBlockSizeException(e.getMessage());

@@ -404,9 +404,9 @@ public final class SoftHSMv3Provider extends AuthProvider {
             P11Library.attrBool(CKA_ENCRYPT, true),
         };
         long handle = lib.createObject(tmpl);
-        try {
-            var mech = lib.mechGcm(GCM_KAT_IV, new byte[0], 128);
-            byte[] got = lib.encrypt(mech, handle, GCM_KAT_PLAINTEXT);
+        try (var op = java.lang.foreign.Arena.ofConfined()) {
+            var mech = lib.mechGcm(op, GCM_KAT_IV, new byte[0], 128);
+            byte[] got = lib.encrypt(op, mech, handle, GCM_KAT_PLAINTEXT);
             if (!java.util.Arrays.equals(got, GCM_KAT_EXPECTED_CT_TAG)) {
                 throw new IllegalStateException("AES-GCM KAT (GCM spec Appendix B Test Case 2) mismatch — expected "
                     + HexFormat.of().formatHex(GCM_KAT_EXPECTED_CT_TAG) + " got " + HexFormat.of().formatHex(got));
@@ -521,10 +521,10 @@ public final class SoftHSMv3Provider extends AuthProvider {
             P11Library.attrBool(CKA_SIGN, true),
         };
         long[] handles = lib.generateKeyPair(CKM_RSA_PKCS_KEY_PAIR_GEN, pubTmpl, prvTmpl);
-        try {
-            var pssMech = lib.mechWithParams(CKM_SHA256_RSA_PKCS_PSS, CKM_SHA256, CKG_MGF1_SHA256, 32);
-            byte[] sig = lib.sign(pssMech, handles[1], POST_SELF_TEST_MESSAGE);
-            if (!lib.verify(pssMech, handles[0], POST_SELF_TEST_MESSAGE, sig)) {
+        try (var op = java.lang.foreign.Arena.ofConfined()) {
+            var pssMech = lib.mechWithParams(op, CKM_SHA256_RSA_PKCS_PSS, CKM_SHA256, CKG_MGF1_SHA256, 32);
+            byte[] sig = lib.sign(op, pssMech, handles[1], POST_SELF_TEST_MESSAGE);
+            if (!lib.verify(op, pssMech, handles[0], POST_SELF_TEST_MESSAGE, sig)) {
                 throw new IllegalStateException("RSA-PSS pairwise consistency check failed: "
                     + "a freshly generated keypair's own signature did not verify");
             }

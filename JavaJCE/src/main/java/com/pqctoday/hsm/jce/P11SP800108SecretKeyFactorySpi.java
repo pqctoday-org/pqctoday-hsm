@@ -64,10 +64,6 @@ final class P11SP800108SecretKeyFactorySpi extends SecretKeyFactorySpi {
             throw new InvalidKeySpecException(e.getMessage(), e);
         }
 
-        var mech = feedback
-            ? lib.mechSp800108Feedback(prfMech, spec.fixedInput(), spec.iv())
-            : lib.mechSp800108Counter(prfMech, spec.fixedInput());
-
         P11Library.Attr[] outputTmpl = {
             P11Library.attrLong(CKA_CLASS, CKO_SECRET_KEY),
             P11Library.attrLong(CKA_KEY_TYPE, CKK_GENERIC_SECRET),
@@ -80,8 +76,13 @@ final class P11SP800108SecretKeyFactorySpi extends SecretKeyFactorySpi {
             P11Library.attrBool(CKA_DECRYPT, true),
             P11Library.attrBool(CKA_SIGN, true),
         };
-        long handle = lib.deriveKey(mech, baseHandle, outputTmpl);
-        return new P11Key.Secret(lib, handle, feedback ? "SP800-108-Feedback" : "SP800-108-Counter");
+        try (var op = java.lang.foreign.Arena.ofConfined()) {
+            var mech = feedback
+                ? lib.mechSp800108Feedback(op, prfMech, spec.fixedInput(), spec.iv())
+                : lib.mechSp800108Counter(op, prfMech, spec.fixedInput());
+            long handle = lib.deriveKey(op, mech, baseHandle, outputTmpl);
+            return new P11Key.Secret(lib, handle, feedback ? "SP800-108-Feedback" : "SP800-108-Counter");
+        }
     }
 
     /** Resolves the base key (Ki) to a token handle — directly for our own keys, or by importing a foreign key's raw bytes. */

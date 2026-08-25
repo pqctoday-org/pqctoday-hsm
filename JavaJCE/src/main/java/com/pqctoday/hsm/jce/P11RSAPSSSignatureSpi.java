@@ -75,8 +75,8 @@ final class P11RSAPSSSignatureSpi extends SignatureSpi {
     @Override
     protected byte[] engineSign() throws SignatureException {
         if (signKey < 0) throw new SignatureException("engineInitSign was not called");
-        try {
-            byte[] sig = lib.sign(pssMech(), signKey, buf.toByteArray());
+        try (var op = java.lang.foreign.Arena.ofConfined()) {
+            byte[] sig = lib.sign(op, pssMech(op), signKey, buf.toByteArray());
             buf.reset();
             return sig;
         } catch (RuntimeException e) {
@@ -87,8 +87,8 @@ final class P11RSAPSSSignatureSpi extends SignatureSpi {
     @Override
     protected boolean engineVerify(byte[] sigBytes) throws SignatureException {
         if (verifyKey < 0) throw new SignatureException("engineInitVerify was not called");
-        try {
-            boolean ok = lib.verify(pssMech(), verifyKey, buf.toByteArray(), sigBytes);
+        try (var op = java.lang.foreign.Arena.ofConfined()) {
+            boolean ok = lib.verify(op, pssMech(op), verifyKey, buf.toByteArray(), sigBytes);
             buf.reset();
             return ok;
         } catch (RuntimeException e) {
@@ -96,9 +96,9 @@ final class P11RSAPSSSignatureSpi extends SignatureSpi {
         }
     }
 
-    private java.lang.foreign.MemorySegment pssMech() {
+    private java.lang.foreign.MemorySegment pssMech(java.lang.foreign.Arena op) {
         long[] m = DIGEST_TO_MECH_AND_MGF.get(digestName);
-        return lib.mechWithParams(m[0], m[1], m[2], saltLen);
+        return lib.mechWithParams(op, m[0], m[1], m[2], saltLen);
     }
 
     @Override
