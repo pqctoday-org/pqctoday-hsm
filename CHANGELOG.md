@@ -8,6 +8,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- **`JavaJCE/`** — a placeholder module that never worked, removed while
+  starting a real Java JCA/JCE provider (see
+  `docs/implementation-plan-jdk27-jca-provider-2026-08-24.md`) to bridge
+  JDK 27's `javax.crypto`/`java.security` APIs to this engine's PKCS#11
+  v3.2 surface. Audit (2026-08-24) found: `MLDSASignatureSpi.engineSign()`
+  returned a hardcoded 2-byte array instead of a real ML-DSA-65 signature
+  (3309 bytes); `engineInitVerify()`/`engineVerify()` both threw
+  `UnsupportedOperationException`; `MLKEMKeyAgreementSpi.engineGenerateSecret()`
+  returned a hardcoded fake secret and `engineDoPhase()` returned the
+  input key unchanged (no encapsulation ran); `SoftHSMJCEProvider`
+  registered several services (`ClassicalSignatureSpi`,
+  `ClassicalCipherSpi`, `ClassicalKeyAgreementSpi`,
+  `ClassicalMessageDigestSpi`) whose implementing classes did not exist
+  as files; the design doc's claim of "we successfully patched the JVM
+  core (SunPKCS11 JNI)" and its `playground-physics`/`Dockerfile.physics`
+  container referenced infrastructure that did not exist anywhere in the
+  repo; `MLKEMKeyAgreementSpi` also hardcoded the wrong `CKM_ML_KEM` value
+  (`0x1058` instead of this repo's own `0x17`). None of it is carried
+  forward — the replacement is FFM-based (`java.lang.foreign`, no
+  JDK-internal APIs), generalizing the proven `P11Ffm.java` pattern
+  already verified live in pqctoday-sandbox.
+
 ### Added
 
 - **gRPC and REST PKCS#11 remoting** (new `remoting/` standalone workspace:
