@@ -776,6 +776,45 @@ workstream.
 
 ### E1 — Architecture decision (made now, validated by E0)
 
+**Correction to this section's own original text, found while starting
+E1 for real, before any code was written:** "SPKI export uses whatever
+`GenerateKeyPairResponse` returns" is wrong — re-reading the message
+shape precisely (not just confirming it's handle-based, which E0 did
+correctly) shows `GenerateKeyPairResponse` carries **only**
+`public_handle`/`private_handle`, two `uint32`s, no key-material bytes
+anywhere. There is **no verb anywhere in the proto** that returns a
+public key's real DER/SPKI bytes — `Health`/`OpenSession`/
+`CloseSession`/`GenerateKeyPair`/`Sign`/`Verify`/`Encapsulate`/
+`Decapsulate` is the complete verb list, confirmed by re-reading the
+proto's own `service Pkcs11Remote` block line by line. This is a real,
+structural Phase-1 constraint, not an oversight to route around:
+`RemoteKey.Pub.getEncoded()` must return `null`, same as
+`RemoteKey.Priv`, for a genuinely different reason than the local
+provider's own deliberate opacity design (§6.2) — here it's a wire
+protocol capability gap, not a security choice. Practical consequence:
+this remote provider can only support **self-contained** flows within
+one session (generate → sign/verify with the SAME provider instance's
+own keys, generate → encapsulate/decapsulate with the SAME instance) —
+not "export this public key, hand it to an external peer" flows. Real,
+disclosed, not silently narrowed: documented in
+`SoftHSMv3RemoteProvider`'s own class javadoc, not left implicit.
+
+**Second correction, same discovery pass:** E4's own "three-way parity
+(mirrors `three_way_parity.rs`)" bullet below describes something that
+file does not actually do. Read in full before writing anything against
+it: `remoting/acceptance/tests/three_way_parity.rs`'s real cases (a1-a5)
+each generate their OWN keypair independently per transport and verify
+**within** that same transport/session — the "three ways" are three
+**transports of the same Rust backend** (in-process verb-layer call,
+real gRPC call, real REST call), asserting the exact numeric `CKR_*`
+(or `valid`/`invalid` outcome) agrees across all three — never handing
+a key or signature from one transport to another, and certainly never
+between different **crypto engines** (C++ vs Rust vs JDK software, as
+the plan's original E4 text imagined). Given the public-key-export gap
+above, cross-engine key interop through this remote surface is not
+achievable in the first place, independent of this correction. E4 below
+is rewritten to the achievable, actually-precedented shape.
+
 **Do NOT interface-ize `P11Library` across all ~20 SPIs.** The remote
 surface is exactly Ed25519 + ML-DSA-44/65/87 + ML-KEM-512/768/1024
 (§1 correction 1) — 3 of ~20 SPI shapes. Instead:
@@ -789,8 +828,8 @@ surface is exactly Ed25519 + ML-DSA-44/65/87 + ML-KEM-512/768/1024
   registering **only** the covered services, with its own thin
   `GrpcTransport` class speaking the 8 verbs. Key objects are new
   opaque handle types (`RemoteKey.Priv/Pub`) holding the server-side
-  session/key ids; SPKI export uses whatever `GenerateKeyPairResponse`
-  returns (E0 confirms).
+  session/key ids; both report `getEncoded() == null` — see the
+  correction above for why `Pub` is included, not just `Priv`.
 - The existing generic SPI classes are reused **only if** their
   constructor dependency can be satisfied cleanly (they take
   `P11Library` today); expected outcome is small dedicated remote SPI
@@ -811,17 +850,28 @@ surface is exactly Ed25519 + ML-DSA-44/65/87 + ML-KEM-512/768/1024
   netty TLS context; fail-closed if certs are absent (no plaintext
   fallback).
 
-### E4 — Verification
+### E4 — Verification (rewritten — see E1's second correction)
 
-- Re-run the Ed25519/ML-DSA/ML-KEM slices of the existing suites
-  parameterized over the remote provider (sign/verify round-trips,
-  FIPS-size assertions, tamper rejection, KEM round-trip).
-- **Three-way parity** (mirrors `three_way_parity.rs`): for each
-  algorithm — C++-in-process signs → Rust-gRPC verifies; Rust-gRPC
-  signs → JDK software verifies; JDK signs → C++ verifies (and the KEM
-  equivalent: encapsulate on one, decapsulate on another where the
-  wire format allows). Every cell either passes or gets a recorded,
-  cited exception — no silent skips.
+- Self-contained round trips through `SoftHSMv3RemoteProvider` itself,
+  the achievable analogue of the local suites' own sign/verify/KEM
+  tests given the public-key-export gap: generate → sign → verify
+  (tamper rejection too) for Ed25519/ML-DSA-44/65/87; generate →
+  encapsulate → decapsulate with shared-secret equality for
+  ML-KEM-512/768/1024. FIPS-size assertions reused verbatim from the
+  local suite's own expected byte counts (3309 for ML-DSA-65's
+  signature, 1088 for ML-KEM-768's ciphertext, etc.) — the same wire
+  values regardless of which side of the network computed them.
+- **Cross-transport `CKR_*` parity, the real, precedented shape** (not
+  the cross-engine one the original text described): the Java gRPC
+  client must surface the exact same numeric `CKR_*` values
+  `three_way_parity.rs`'s own cases already established for the SAME
+  scenarios — wrong PIN → `CKR_PIN_INCORRECT` (0xA0), invalid session
+  handle → `CKR_SESSION_HANDLE_INVALID` (0xB3), wrong-length ciphertext
+  on decapsulate → `CKR_ARGUMENTS_BAD`, a closed-then-reused session →
+  the same code as the invalid-handle case. This is a fourth transport
+  added to that file's existing three (in-process/gRPC-from-Rust/REST),
+  not a new methodology — parsed from `Status.getDescription()`'s
+  `raw_ck_rv=0x...` substring per E0's own error-mapping finding.
 - Gate: these tests need the remoting server running → wire into the
   same opt-in gate step family as other infrastructure-dependent steps
   (WS-F), FAIL-not-skip semantics when the flag is on.
