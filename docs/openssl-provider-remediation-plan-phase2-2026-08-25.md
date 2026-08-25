@@ -173,7 +173,48 @@ both directions.
 
 ---
 
-## R4 — X25519/X448 exchange (gap ALG-5) — Priority 1, effort M
+## R4 — X25519/X448 exchange (gap ALG-5) — Priority 1, effort M — DONE
+
+**DONE (2026-08-25).** All five identified layers landed, plus a
+sixth found live during verification. Summary (full mechanism in the
+audit's ALG-5 entry): the two fabricated `exchange.c` constants were
+deleted and the key-type sniff now dispatches on real
+`CKK_EC_MONTGOMERY` + bit size; the four objects.c/store.c
+missing-case bugs were fixed; and the actual root cause of "keygen
+succeeds but the wrong key type gets created" turned out to be the
+C++ engine's `generateED()` defaulting to `CKK_EC_EDWARDS` whenever
+`CKA_KEY_TYPE` is absent from the public-key template (both mechanisms
+route to the same function, which never receives the mechanism
+itself) — found by direct object-readback, not assumed, since the
+process-level symptom was silent misclassification, not an error.
+Fixed by conditionally adding `CKA_KEY_TYPE` to the shared
+`p11prov_ec_gen`'s template only when `ctx->type == CKK_EC_MONTGOMERY`,
+leaving the already-working EC/Edwards paths byte-for-byte unchanged.
+
+**Verification, live, both curves, both directions:** X25519 and X448
+each keygen correctly (confirmed via `storeutl` showing the right
+type), then derive token-to-token (two independent SoftHSM instances)
+to a byte-identical 32-byte / 56-byte shared secret. T16/T16b added,
+both PASS, both sabotage-tested.
+
+**A sixth gap found and deliberately left open:** T8's exact pattern
+(token private key deriving against a genuinely foreign,
+default-provider-only software peer key, with OpenSSL's peer
+validation enabled) works for regular EC but fails for montgomery
+with `OSSL_PARAM_get_BN: param of incompatible type`. Traced as far as
+`EVP_PKEY_derive_set_peer_ex`'s cross-provider `EVP_PKEY_public_check`
+step falling into a legacy EC_KEY-control-translation code path
+(`crypto/evp/ctrl_params_translate.c`) that appears to assume
+Weierstrass X/Y BIGNUM coordinates unconditionally for EC-family keys
+— montgomery keys have no such coordinates. This is NOT the
+provider's derive mechanism failing (proven correct above); it is
+specific to validating a foreign peer's key under this exact
+combination. Not scoped or fixed here — noted in T16's own comment so
+it isn't lost; a future item could either add an explicit provider-side
+VALIDATE dispatch function for montgomery keymgmt (untried — might
+short-circuit before the legacy path engages) or track it as an
+upstream-adjacent OpenSSL interaction. Harness: `PASS=24 FAIL=0
+XFAIL=1 XPASS=0` — only ENV-2 (T15b, R6) remains.
 
 Five layers, in dependency order — the first four are why the phase-1
 "2-line fix" framing was wrong, layer 5 found by this pass's challenge

@@ -937,6 +937,8 @@ done:
 
 const CK_BYTE ed25519_ec_params[] = { ED25519_EC_PARAMS };
 const CK_BYTE ed448_ec_params[] = { ED448_EC_PARAMS };
+const CK_BYTE x25519_ec_params[] = { X25519_EC_PARAMS };
+const CK_BYTE x448_ec_params[] = { X448_EC_PARAMS };
 
 #define KEY_EC_PARAMS 3
 static CK_RV pre_process_ec_key_data(P11PROV_OBJ *key)
@@ -1017,6 +1019,27 @@ static CK_RV pre_process_ec_key_data(P11PROV_OBJ *key)
             } else {
                 return CKR_KEY_INDIGESTIBLE;
             }
+        }
+    } else if (type == CKK_EC_MONTGOMERY) {
+        /* remediation R4 — same PrintableString-curve-name convention as
+         * CKK_EC_EDWARDS above; "curve25519"/"curve448" verified byte-for-
+         * byte against the C++ engine's OSSLUtil.cpp::byteString2oid. */
+        if (attr->ulValueLen == X25519_EC_PARAMS_LEN
+            && memcmp(attr->pValue, x25519_ec_params, X25519_EC_PARAMS_LEN)
+                   == 0) {
+            curve_name = X25519_NAME;
+            curve_nid = NID_X25519;
+            key->data.key.bit_size = X25519_BIT_SIZE;
+            key->data.key.size = X25519_BYTE_SIZE;
+        } else if (attr->ulValueLen == X448_EC_PARAMS_LEN
+                   && memcmp(attr->pValue, x448_ec_params, X448_EC_PARAMS_LEN)
+                          == 0) {
+            curve_name = X448_NAME;
+            curve_nid = NID_X448;
+            key->data.key.bit_size = X448_BIT_SIZE;
+            key->data.key.size = X448_BYTE_SIZE;
+        } else {
+            return CKR_KEY_INDIGESTIBLE;
         }
     } else {
         return CKR_KEY_INDIGESTIBLE;
@@ -1527,6 +1550,7 @@ CK_RV p11prov_obj_from_handle(P11PROV_CTX *ctx, P11PROV_SESSION *session,
             break;
         case CKK_EC:
         case CKK_EC_EDWARDS:
+        case CKK_EC_MONTGOMERY:
             ret = fetch_ec_key(ctx, session, handle, obj);
             if (ret != CKR_OK) {
                 p11prov_obj_free(obj);
@@ -2578,6 +2602,7 @@ static int p11prov_obj_export_public_ec_key(P11PROV_OBJ *obj, bool params_only,
         nattr = 1;
         break;
     case CKK_EC_EDWARDS:
+    case CKK_EC_MONTGOMERY:
         break;
     default:
         return RET_OSSL_ERR;
@@ -2786,6 +2811,7 @@ int p11prov_obj_export_public_key(P11PROV_OBJ *obj, CK_KEY_TYPE key_type,
         return p11prov_obj_export_public_rsa_key(obj, cb_fn, cb_arg);
     case CKK_EC:
     case CKK_EC_EDWARDS:
+    case CKK_EC_MONTGOMERY:
         return p11prov_obj_export_public_ec_key(obj, params_only, cb_fn,
                                                 cb_arg);
     case CKK_ML_DSA:
@@ -2815,7 +2841,12 @@ int p11prov_obj_get_ed_pub_key(P11PROV_OBJ *obj, CK_ATTRIBUTE **pub)
         return RET_OSSL_ERR;
     }
 
-    if (obj->data.key.type != CKK_EC_EDWARDS) {
+    /* CKK_EC_MONTGOMERY added, remediation R4: same CKA_P11PROV_PUB_KEY
+     * cache, same private->associated-public walk below — the function
+     * name predates montgomery but the logic is identical, not type-
+     * specific, so widened rather than duplicated. */
+    if (obj->data.key.type != CKK_EC_EDWARDS
+        && obj->data.key.type != CKK_EC_MONTGOMERY) {
         P11PROV_raise(obj->ctx, CKR_GENERAL_ERROR, "Unsupported key type");
         return RET_OSSL_ERR;
     }
@@ -3007,7 +3038,13 @@ CK_ATTRIBUTE *p11prov_obj_get_ec_public_raw(P11PROV_OBJ *key)
         return NULL;
     }
 
-    if (key->data.key.type != CKK_EC) {
+    /* remediation R4: CKK_EC_MONTGOMERY added — its CKA_P11PROV_PUB_KEY is
+     * the raw u-coordinate (decode_ec_point already stores it un-DER-wrapped
+     * for both Edwards and Montgomery, per PKCS#11 v3.1's own rule), the
+     * exact form CK_ECDH1_DERIVE_PARAMS.pPublicData expects for CKM_X25519/
+     * CKM_X448. Before this fix, a montgomery peer key hit this gate before
+     * even reaching the mechanism dispatch in exchange.c. */
+    if (key->data.key.type != CKK_EC && key->data.key.type != CKK_EC_MONTGOMERY) {
         P11PROV_raise(key->ctx, CKR_GENERAL_ERROR, "Unsupported key type");
         return NULL;
     }
@@ -4033,6 +4070,140 @@ done:
     return rv;
 }
 
+/* remediation R4 — mirrors prep_ed_find exactly, X25519/X448 in place of
+ * Ed25519/Ed448. A separate function, not a shared one: X25519 and Ed25519
+ * are BOTH 32 bytes, so byte-size alone can't disambiguate across a single
+ * function the way it does within prep_ed_find's own Ed25519-vs-Ed448
+ * dispatch. */
+static CK_RV prep_ec_montgomery_find(P11PROV_CTX *ctx,
+                                     const OSSL_PARAM params[],
+                                     struct pool_find_ctx *findctx)
+{
+    OSSL_PARAM tmp;
+    const OSSL_PARAM *p;
+
+    data_buffer digest_data[4];
+    data_buffer digest = { 0 };
+
+    const unsigned char *ecparams = NULL;
+    int len = 0, i;
+    CK_RV rv;
+
+    if (findctx->numattrs != MAX_ATTRS_SIZE) {
+        return CKR_ARGUMENTS_BAD;
+    }
+    findctx->numattrs = 0;
+
+    switch (findctx->class) {
+    case CKO_PUBLIC_KEY:
+        p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PUB_KEY);
+        if (!p) {
+            P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE, "Missing %s",
+                          OSSL_PKEY_PARAM_PUB_KEY);
+            rv = CKR_KEY_INDIGESTIBLE;
+            goto done;
+        }
+
+        if (p->data_size == X25519_BYTE_SIZE) {
+            ecparams = x25519_ec_params;
+            len = X25519_EC_PARAMS_LEN;
+            findctx->bit_size = X25519_BIT_SIZE;
+            findctx->key_size = X25519_BYTE_SIZE;
+        } else if (p->data_size == X448_BYTE_SIZE) {
+            ecparams = x448_ec_params;
+            len = X448_EC_PARAMS_LEN;
+            findctx->bit_size = X448_BIT_SIZE;
+            findctx->key_size = X448_BYTE_SIZE;
+        } else {
+            P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE,
+                          "Public key of unknown length %lu", p->data_size);
+            rv = CKR_KEY_INDIGESTIBLE;
+            goto done;
+        }
+
+        rv = param_to_attr(ctx, params, OSSL_PKEY_PARAM_PUB_KEY,
+                           &findctx->attrs[0], CKA_P11PROV_PUB_KEY, false);
+        if (rv != CKR_OK) {
+            goto done;
+        }
+
+        findctx->numattrs++;
+
+        break;
+    case CKO_PRIVATE_KEY:
+        /* A Token would never allow us to search by private exponent,
+         * so we store a hash of the private key in CKA_ID */
+        p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PRIV_KEY);
+        if (!p) {
+            P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE, "Missing %s",
+                          OSSL_PKEY_PARAM_PRIV_KEY);
+            return CKR_KEY_INDIGESTIBLE;
+        }
+
+        i = 0;
+
+        if (p->data_size == X25519_BYTE_SIZE) {
+            ecparams = x25519_ec_params;
+            len = X25519_EC_PARAMS_LEN;
+            findctx->bit_size = X25519_BIT_SIZE;
+            findctx->key_size = X25519_BYTE_SIZE;
+        } else if (p->data_size == X448_BYTE_SIZE) {
+            ecparams = x448_ec_params;
+            len = X448_EC_PARAMS_LEN;
+            findctx->bit_size = X448_BIT_SIZE;
+            findctx->key_size = X448_BYTE_SIZE;
+        } else {
+            P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE,
+                          "Private key of unknown length %lu", p->data_size);
+            rv = CKR_KEY_INDIGESTIBLE;
+            goto done;
+        }
+
+        /* prefix */
+        digest_data[i].data = (uint8_t *)"PrivKey";
+        digest_data[i].length = 7;
+        i++;
+
+        digest_data[i].data = (CK_BYTE *)ecparams;
+        digest_data[i].length = len;
+        i++;
+
+        digest_data[i].data = p->data;
+        digest_data[i].length = p->data_size;
+        i++;
+
+        digest_data[i].data = NULL;
+
+        rv = p11prov_digest_util(ctx, "sha256", NULL, digest_data, &digest);
+        if (rv != CKR_OK) {
+            return rv;
+        }
+        findctx->attrs[0].type = CKA_ID;
+        findctx->attrs[0].pValue = digest.data;
+        findctx->attrs[0].ulValueLen = digest.length;
+        findctx->numattrs++;
+
+        break;
+    default:
+        return CKR_GENERAL_ERROR;
+    }
+
+    /* common params */
+    tmp.key = "EC Params";
+    tmp.data = (CK_BYTE *)ecparams;
+    tmp.data_size = len;
+    rv = param_to_attr(ctx, &tmp, tmp.key, &findctx->attrs[findctx->numattrs],
+                       CKA_EC_PARAMS, false);
+    if (rv != CKR_OK) {
+        goto done;
+    }
+    findctx->numattrs++;
+    rv = CKR_OK;
+
+done:
+    return rv;
+}
+
 static CK_RV prep_mldsa_find(P11PROV_CTX *ctx, const OSSL_PARAM params[],
                              struct pool_find_ctx *findctx)
 {
@@ -4262,6 +4433,14 @@ static CK_RV p11prov_obj_import_public_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
     case CKK_EC_EDWARDS:
         P11PROV_debug("obj import of ED public key %p", key);
         rv = prep_ed_find(ctx, params, &findctx);
+        if (rv != CKR_OK) {
+            goto done;
+        }
+        allocattrs = EC_ATTRS_NUM;
+        break;
+    case CKK_EC_MONTGOMERY:
+        P11PROV_debug("obj import of montgomery public key %p", key);
+        rv = prep_ec_montgomery_find(ctx, params, &findctx);
         if (rv != CKR_OK) {
             goto done;
         }
@@ -4590,6 +4769,7 @@ static CK_RV p11prov_obj_store_public_key(P11PROV_OBJ *key)
         break;
     case CKK_EC:
     case CKK_EC_EDWARDS:
+    case CKK_EC_MONTGOMERY:
         rv = p11prov_store_ec_public_key(key);
         break;
     case CKK_ML_DSA:
@@ -5039,6 +5219,12 @@ static CK_RV p11prov_obj_import_private_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
             goto done;
         }
         break;
+    case CKK_EC_MONTGOMERY:
+        rv = prep_ec_montgomery_find(ctx, params, &findctx);
+        if (rv != CKR_OK) {
+            goto done;
+        }
+        break;
     case CKK_ML_DSA:
         findctx.param_set = key->data.key.param_set;
         rv = prep_mldsa_find(ctx, params, &findctx);
@@ -5088,6 +5274,7 @@ static CK_RV p11prov_obj_import_private_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
         break;
     case CKK_EC:
     case CKK_EC_EDWARDS:
+    case CKK_EC_MONTGOMERY:
         rv = p11prov_store_ec_private_key(key, &findctx, params);
         break;
     case CKK_ML_DSA:

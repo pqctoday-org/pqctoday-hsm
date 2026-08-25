@@ -915,6 +915,8 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              ECDSA_SIG_MECHS,
                              CKM_ECDH1_DERIVE,
                              CKM_ECDH1_COFACTOR_DERIVE,
+                             CKM_X25519,
+                             CKM_X448,
                              CKM_HKDF_DERIVE,
                              DIGEST_MECHS,
                              CKM_EDDSA,
@@ -1153,11 +1155,11 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 break;
             case CKM_X25519:
                 ADD_ALGO(X25519, ecdh, exchange, prop);
-                UNCHECK_MECHS(CKM_X25519);
+                UNCHECK_MECHS(CKM_X25519, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
                 break;
             case CKM_X448:
                 ADD_ALGO(X448, ecdh, exchange, prop);
-                UNCHECK_MECHS(CKM_X448);
+                UNCHECK_MECHS(CKM_X448, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
                 break;
             case CKM_HKDF_DERIVE:
                 ADD_ALGO(HKDF, hkdf, kdf, prop);
@@ -1646,6 +1648,12 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
     ADD_ALGO(HKDF, hkdf, keymgmt, prop);
     ADD_ALGO_EXT(ED25519, keymgmt, prop, p11prov_ed25519_keymgmt_functions);
     ADD_ALGO_EXT(ED448, keymgmt, prop, p11prov_ed448_keymgmt_functions);
+    /* remediation R4: static, like every other keymgmt registration in this
+     * block — without it OpenSSL cannot load an X25519/X448 token key at
+     * all, so the mechanism-gated exchange registration alone (further up,
+     * in operations_init) is unreachable */
+    ADD_ALGO_EXT(X25519, keymgmt, prop, p11prov_x25519_keymgmt_functions);
+    ADD_ALGO_EXT(X448, keymgmt, prop, p11prov_x448_keymgmt_functions);
     ADD_ALGO_EXT(ML_DSA_44, keymgmt, prop, p11prov_mldsa44_keymgmt_functions);
     ADD_ALGO_EXT(ML_DSA_65, keymgmt, prop, p11prov_mldsa65_keymgmt_functions);
     ADD_ALGO_EXT(ML_DSA_87, keymgmt, prop, p11prov_mldsa87_keymgmt_functions);

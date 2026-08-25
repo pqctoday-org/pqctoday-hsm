@@ -135,7 +135,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | ALG-2 | XMSS/XMSS-MT | both engines (sign+verify, stateful) | `sig/xmss.c` stub, unreachable; no native OpenSSL names exist (custom names required; no CMS/TLS story) | Medium |
 | ALG-3 | HSS/LMS | both engines **sign+verify** | nothing in provider; OpenSSL 3.6 native LMS is *verify-only* → token-sign/OpenSSL-verify is a uniquely coherent split, but blocked by ENV-1 (no `enable-lms` in staged build) | Medium |
 | ALG-4 | Composite profiles 4–8 | KMIP layer has all 8 §10.4 profiles | provider `composite.c` registry has 3; missing 5 include **all four §10.4-recommended** (MLDSA44-Ed25519-SHA512, MLDSA44-ECDSA-P256-SHA256, MLDSA65-RSA3072-PSS-SHA512, MLDSA65-Ed25519-SHA512) + MLDSA65-ECDSA-P384-SHA512 | Medium–High |
-| ALG-5 | X25519/X448 key exchange | both engines advertise CKM_X25519/X448 | registration branch dead (checklist omission) — likely a 2-line fix | Medium |
+| ALG-5 | **RESOLVED (R4, 2026-08-25)** — was: registration branch dead. Turned out to need five real fixes, not the originally-guessed "2-line checklist omission": (1) two fabricated fallback constants in `exchange.c` (`CKK_X25519`/`CKK_X448` do not exist in the PKCS#11 spec — real montgomery keys are `CKK_EC_MONTGOMERY`, distinguished by curve name/size, matching Edwards' own pattern; the fake values meant the key-type sniff could never match a real key) — fixed, key-exchange mechanism now correctly resolves from bit size. (2) Four missing-case bugs across `objects.c` (fetch, export, `get_ec_public_raw`'s peer-marshalling gate, and two import/store-dispatch switches) and `store.c` (naming) — the same missing-case class found twice in R1. (3) **The actual root cause of "genpkey succeeds but the token silently creates the wrong key type"**: the C++ engine's `generateED()` (shared by `CKM_EC_EDWARDS_KEY_PAIR_GEN` and `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` — the mechanism itself is never passed into that function) determines the resulting key's `CKK_*` type solely from an explicit `CKA_KEY_TYPE` on the public-key template, defaulting to `CKK_EC_EDWARDS` when absent — found live, not assumed: `genpkey` exited 0 and created two real objects, but reading the result back showed `CKK_EC_EDWARDS` (0x40), not `CKK_EC_MONTGOMERY` (0x41). EC/Edwards never needed to send this explicitly (the engine's default already matched them); montgomery does. Fixed by conditionally adding `CKA_KEY_TYPE` to the shared `p11prov_ec_gen`'s public-key template only for montgomery (zero diff for the already-working EC/Edwards paths). Curve-parameter DER bytes (`curve25519`/`curve448` PrintableStrings) verified two independent ways: direct DER-encoding computation and byte-for-byte match against the latchset sibling's own shipped constants. **Live-verified, both curves, both directions, token-to-token**: X25519 produces a byte-identical 32-byte shared secret; X448 a byte-identical 56-byte one. **A sixth, narrower, separate gap surfaced and was left open**: deriving against a genuinely foreign (default-provider-only) peer key with OpenSSL's peer validation enabled fails with `OSSL_PARAM_get_BN: param of incompatible type` — T8's identical shape works for regular EC but not montgomery; traced to OpenSSL's cross-provider `EVP_PKEY_public_check` falling into a legacy EC_KEY-control translation path that assumes Weierstrass X/Y BIGNUM coordinates montgomery keys don't have. The provider's own derive mechanism is unaffected and proven correct; this is a peer-validation-specific interaction, documented in `T16`'s comment rather than silently dropped. | both engines advertise `CKM_X25519`/`CKM_X448`; live probe + source (`exchange.c`, `objects.c`, `store.c`, `keymgmt.c`, `SoftHSM_keygen.cpp`) | ~~Medium~~ — |
 | ALG-6 | ECDH-as-KEM | both engines flag ENCAP/DECAP on `CKM_ECDH1_DERIVE` | not exposed as an OSSL KEM | Low |
 | ALG-7 | ChaCha20 / ChaCha20-Poly1305 | both engines | cipher table is AES-only | Low |
 | ALG-8 | HMAC/CMAC/KMAC as EVP_MAC | both (CMAC C++-only, KMAC both) | see OP-1 | Medium |
@@ -223,6 +223,8 @@ trusted; unexpected PASS of an XFAIL case fails the run (ratchet).
 | T12sign_shake | SLH-DSA-SHAKE-128f token-sign, independent hash family | same, exact 17088-byte sig | **PASS** (new case, R1) |
 | T13 | TLS-GROUP gap (F36-1) | not CLI-checkable cleanly (`list -tls-groups` merges all providers) — plan-only P2; the gap itself is source-anchored (`tls.c:89-174`) | plan-only |
 | T14 | CMS RSA | CMS sign via token key → software cmsverify | PASS |
+| T16 | X25519 key exchange (ALG-5) | token-to-token derive (two independent arenas), both directions, byte-identical 32-byte secret | **PASS** (new case, R4) |
+| T16b | X448 key exchange (ALG-5) | same, 56-byte secret | **PASS** (new case, R4) |
 | T15a/b | Rust arm | provider activates over `libsofthsmrustv3.so` (PASS); multi-process functional flow (XFAIL, ENV-2) | PASS + **XFAIL** (flips on R6) |
 | P2 (plan-only, not scripted yet) | AES/SKEY cipher path, EVP_SKEY KDF chaining (F36-3), CMS KEMRecipientInfo native round-trip (needs ML-KEM cert tooling), composite COMPSIG CLI case, ML-DSA `mu`/`deterministic` parity, RAND fetch | — | design first |
 
@@ -352,6 +354,24 @@ corrupted one byte of the decapsulated secret before the comparison →
 FAIL, exit 1 — proving the byte-equality check is real, not
 decorative). Harness: `PASS=22 FAIL=0 XFAIL=1 XPASS=0`. Only
 remaining XFAIL: ENV-2 (T15b).
+
+**Further update (2026-08-25, same day) — R4 (X25519/X448) landed:**
+see ALG-5 above for the full mechanism — five real fixes, not the
+originally-guessed 2-line checklist omission, including a root-caused
+engine-interaction bug (the C++ engine's shared Edwards/Montgomery
+keygen function silently defaulted to the wrong key type without an
+explicit `CKA_KEY_TYPE`) found live via direct object-type readback,
+not assumed. T16 (X25519) and T16b (X448) added, both PASS,
+token-to-token, both directions, byte-identical shared secrets at the
+correct FIPS-equivalent sizes (32/56 bytes). Sabotage-tested both
+(T16: corrupted one byte of the compared secret → FAIL; T16b: size
+assertion flipped to an impossible value → FAIL). A sixth, narrower,
+separate gap was found and deliberately left open rather than
+silently dropped: peer-key validation against a genuinely foreign
+(non-pkcs11) key fails for montgomery specifically, traced to an
+OpenSSL legacy-compatibility interaction, not the provider's own
+derive logic (which is proven correct). Harness: `PASS=24 FAIL=0
+XFAIL=1 XPASS=0`. Only remaining XFAIL: ENV-2 (T15b, remediation R6).
 
 ## 7. Companion document
 

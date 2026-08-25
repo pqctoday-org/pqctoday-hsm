@@ -273,6 +273,68 @@ t8() { local w; w=$(mk_arena ecdh "$CPP_ENGINE_SO") && use_arena "$w" || return 
 }
 run_case T8 PASS "ECDH P-256 token derive == software derive" t8
 
+# X25519/X448 key exchange (gap ALG-5 / remediation R4). Deliberately
+# token-to-token (two independent arenas), NOT T8's software-peer pattern:
+# a montgomery token key deriving against a genuinely foreign
+# (OPENSSL_CONF=/dev/null, default-provider-only) peer key hits a real,
+# separate, narrower gap during OpenSSL's cross-provider peer VALIDATION
+# step (EVP_PKEY_public_check -> a legacy EC_KEY-control translation path
+# that assumes Weierstrass X/Y BIGNUM coordinates montgomery keys don't
+# have) — confirmed live: T8's exact "-inkey pkcs11:...;type=private
+# -peerkey <software-peer>.pem" shape works for EC but fails for X25519
+# with "OSSL_PARAM_get_BN: param of incompatible type", even though the
+# provider's own derive mechanism is fully correct (proven here). Left
+# open, not silently dropped — see the remediation plan's R4 entry.
+#
+# genpkey's own exit code is deliberately NOT gating these arenas' keygen
+# step, same reason as T4x (R3b): mk_arena sets
+# pkcs11-module-encode-provider-uri-to-pem=true, and X25519/X448 have no
+# encoder registered (same still-open gap class as ML-KEM's pre-R3 state)
+# — so genpkey reports "Error writing key(s)" even though the key
+# generates and persists on-token fine as a side effect. The subsequent
+# pubkey-export and derive steps are the real, authoritative proof.
+t16() {
+  local wa wb
+  wa=$(mk_arena x25519a "$CPP_ENGINE_SO") || return 1
+  wb=$(mk_arena x25519b "$CPP_ENGINE_SO") || return 1
+  SOFTHSM2_CONF="$wa/softhsm2.conf" OPENSSL_CONF="$wa/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm X25519 -out "$wa/ka.pem" >/dev/null 2>&1
+  SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm X25519 -out "$wb/kb.pem" >/dev/null 2>&1
+  SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
+    O pkey -in "pkcs11:token=x25519b;type=public" -pubin -pubout -out "$wb/kbpub.pem" || return 1
+  SOFTHSM2_CONF="$wa/softhsm2.conf" OPENSSL_CONF="$wa/openssl.cnf" \
+    O pkeyutl -derive -inkey "pkcs11:token=x25519a;type=private" -peerkey "$wb/kbpub.pem" -out "$wa/secretA.bin" || return 1
+  SOFTHSM2_CONF="$wa/softhsm2.conf" OPENSSL_CONF="$wa/openssl.cnf" \
+    O pkey -in "pkcs11:token=x25519a;type=public" -pubin -pubout -out "$wa/kapub.pem" || return 1
+  SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
+    O pkeyutl -derive -inkey "pkcs11:token=x25519b;type=private" -peerkey "$wa/kapub.pem" -out "$wb/secretB.bin" || return 1
+  [[ "$(stat -c%s "$wa/secretA.bin")" == "32" && "$(stat -c%s "$wb/secretB.bin")" == "32" ]] || { echo "wrong secret size"; return 1; }
+  cmp -s "$wa/secretA.bin" "$wb/secretB.bin"
+}
+run_case T16 PASS "X25519 token-to-token derive parity, 32-byte secret (gap ALG-5 / remediation R4)" t16
+
+t16b() {
+  local wa wb
+  wa=$(mk_arena x448a "$CPP_ENGINE_SO") || return 1
+  wb=$(mk_arena x448b "$CPP_ENGINE_SO") || return 1
+  SOFTHSM2_CONF="$wa/softhsm2.conf" OPENSSL_CONF="$wa/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm X448 -out "$wa/ka.pem" >/dev/null 2>&1
+  SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm X448 -out "$wb/kb.pem" >/dev/null 2>&1
+  SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
+    O pkey -in "pkcs11:token=x448b;type=public" -pubin -pubout -out "$wb/kbpub.pem" || return 1
+  SOFTHSM2_CONF="$wa/softhsm2.conf" OPENSSL_CONF="$wa/openssl.cnf" \
+    O pkeyutl -derive -inkey "pkcs11:token=x448a;type=private" -peerkey "$wb/kbpub.pem" -out "$wa/secretA.bin" || return 1
+  SOFTHSM2_CONF="$wa/softhsm2.conf" OPENSSL_CONF="$wa/openssl.cnf" \
+    O pkey -in "pkcs11:token=x448a;type=public" -pubin -pubout -out "$wa/kapub.pem" || return 1
+  SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
+    O pkeyutl -derive -inkey "pkcs11:token=x448b;type=private" -peerkey "$wa/kapub.pem" -out "$wb/secretB.bin" || return 1
+  [[ "$(stat -c%s "$wa/secretA.bin")" == "56" && "$(stat -c%s "$wb/secretB.bin")" == "56" ]] || { echo "wrong secret size"; return 1; }
+  cmp -s "$wa/secretA.bin" "$wb/secretB.bin"
+}
+run_case T16b PASS "X448 token-to-token derive parity, 56-byte secret (gap ALG-5 / remediation R4)" t16b
+
 # WART-4 root cause (confirmed live, not guessed): p11prov_query_operation()
 # returns ctx->op_digest/op_kdf/op_random/op_exchange/op_signature/
 # op_asym_cipher/op_kem directly; those are only populated by
