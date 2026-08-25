@@ -14,14 +14,17 @@ final class P11Constants {
     static final long CKM_ML_DSA               = 0x0000001dL;
     static final long CKM_SLH_DSA_KEY_PAIR_GEN = 0x0000002dL;
     static final long CKM_SLH_DSA              = 0x0000002eL;
+    static final long CKM_EC_EDWARDS_KEY_PAIR_GEN = 0x00001055L;
+    static final long CKM_EDDSA                = 0x00001057L;
 
     // ── Object classes ──────────────────────────────────────────────────
     static final long CKO_PUBLIC_KEY  = 0x00000002L;
     static final long CKO_PRIVATE_KEY = 0x00000003L;
 
     // ── Key types ────────────────────────────────────────────────────────
-    static final long CKK_ML_DSA  = 0x0000004aL;
-    static final long CKK_SLH_DSA = 0x0000004bL;
+    static final long CKK_ML_DSA     = 0x0000004aL;
+    static final long CKK_SLH_DSA    = 0x0000004bL;
+    static final long CKK_EC_EDWARDS = 0x00000040L;
 
     // ── Attributes ───────────────────────────────────────────────────────
     static final long CKA_CLASS            = 0x00000000L;
@@ -35,6 +38,15 @@ final class P11Constants {
     static final long CKA_EXTRACTABLE      = 0x00000162L;
     static final long CKA_PUBLIC_KEY_INFO  = 0x00000129L; // v3.2 §4.14: SubjectPublicKeyInfo DER
     static final long CKA_PARAMETER_SET    = 0x0000061dL;
+    static final long CKA_EC_PARAMS        = 0x00000180L;
+
+    // ── EdDSA curve OIDs (DER-encoded, RFC 8410) — the exact byte arrays
+    // already proven live in pqctoday-sandbox's C/Rust Ed25519 samples
+    // (samples/c/12_ed25519.c, samples/rust/src/12_ed25519.rs); Ed448's
+    // OID (1.3.101.113) differs from Ed25519's (1.3.101.112) only in the
+    // final arc byte, same DER TLV shape. ────────────────────────────────
+    static final byte[] ED25519_OID = { 0x06, 0x03, 0x2B, 0x65, 0x70 };
+    static final byte[] ED448_OID   = { 0x06, 0x03, 0x2B, 0x65, 0x71 };
 
     // ── ML-DSA parameter sets (CKA_PARAMETER_SET values) ────────────────
     static final long CKP_ML_DSA_44 = 0x00000001L;

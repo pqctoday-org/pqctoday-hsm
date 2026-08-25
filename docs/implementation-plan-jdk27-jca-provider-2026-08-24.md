@@ -499,10 +499,33 @@ full since both are load-bearing for W2+.
 
 ### W2 — Signatures + key generation
 
-**ML-DSA slice: DONE 2026-08-24, PASSED. SLH-DSA slice: DONE 2026-08-24,
-PASSED (all 12 parameter sets).** Remaining in W2: EC, RSA, EdDSA
-`KeyPairGeneratorSpi`/`SignatureSpi`, `KeyFactorySpi` (import side),
-`KeyStoreSpi` read path — not yet built.
+**ML-DSA: DONE. SLH-DSA (all 12 parameter sets): DONE. EdDSA
+(Ed25519/Ed448): DONE.** All 2026-08-24, all PASSED. Remaining in W2:
+EC (ECDSA), RSA, `KeyFactorySpi` (import side), `KeyStoreSpi` read path
+— not yet built.
+
+**EdDSA:**
+- New `P11EdDSAKeyPairGeneratorSpi` — **not** built on the generic
+  `P11PureSig*` base: traced `SoftHSM_keygen.cpp`'s `generateED` and
+  found EdDSA keygen identifies its curve via `CKA_EC_PARAMS` (a
+  DER-encoded curve OID), not `CKA_PARAMETER_SET` — a genuinely
+  different shape, confirmed before assuming the ML-DSA/SLH-DSA pattern
+  would transfer a third time. The curve OID byte arrays
+  (`{0x06,0x03,0x2B,0x65,0x70}` for Ed25519, `...0x71` for Ed448) are
+  the exact values already proven live in the sandbox's
+  `samples/c/12_ed25519.c` / `samples/rust/src/12_ed25519.rs` — reused,
+  not re-derived.
+- The **Signature** side, by contrast, needed no new class at all:
+  `CKM_EDDSA` is curve-agnostic (the curve lives on the key) — the exact
+  same shape `P11PureSigSignatureSpi` already handles for ML-DSA/SLH-DSA,
+  so EdDSA registration just parametrizes the existing class.
+- **Verify — all live:** `mvn test`, 40/40 total (2 new EdDSA + 38
+  existing). SPKI/signature sizes match spec exactly: Ed25519 44-byte
+  SPKI / 64-byte signature (RFC 8032), Ed448 69-byte SPKI / 114-byte
+  signature. **Cross-verified against JDK's own native `SunEC`
+  Ed25519/Ed448** (JEP 339, JDK 15+) — our SPKI export imports cleanly
+  into `KeyFactory.getInstance("Ed25519")` (no provider arg = JDK's own
+  impl) and verifies our token-produced signature, for both curves.
 
 **SLH-DSA, added on top of the ML-DSA slice:**
 - Refactored `P11MLDSAKeyPairGeneratorSpi`/`P11MLDSASignatureSpi` into

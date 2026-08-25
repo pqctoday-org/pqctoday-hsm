@@ -122,6 +122,31 @@ public final class SoftHSMv3Provider extends Provider {
         registerPureSig("SLH-DSA-SHAKE-256S", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHAKE_256S);
         registerPureSig("SLH-DSA-SHA2-256F", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHA2_256F);
         registerPureSig("SLH-DSA-SHAKE-256F", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHAKE_256F);
+
+        // W2: EdDSA — KeyPairGenerator needs CKA_EC_PARAMS (curve OID), a
+        // different shape than the pure-sig algorithms above, so it gets
+        // its own class (P11EdDSAKeyPairGeneratorSpi). Signature reuses
+        // the generic P11PureSigSignatureSpi unchanged: CKM_EDDSA is
+        // curve-agnostic, same shape ML-DSA/SLH-DSA already proved.
+        registerEdDSA("Ed25519", ED25519_OID);
+        registerEdDSA("Ed448", ED448_OID);
+    }
+
+    private void registerEdDSA(String name, byte[] curveOid) {
+        putService(new Service(this, "KeyPairGenerator", name,
+            P11EdDSAKeyPairGeneratorSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11EdDSAKeyPairGeneratorSpi(lib, name, curveOid);
+            }
+        });
+        putService(new Service(this, "Signature", name,
+            P11PureSigSignatureSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11PureSigSignatureSpi(lib, CKM_EDDSA);
+            }
+        });
     }
 
     private void registerDigest(String name, long mech) {
