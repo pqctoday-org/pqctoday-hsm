@@ -105,6 +105,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   before that arena closes. Purely an internal refactor: behaviorally
   invisible, no test needed to change, no measurable performance
   regression (1.47x vs the prior 1.48x TLS-handshake latency ratio).
+- **`JavaJCE`'s `RSASSA-PSS` now supports the full SHA-3 family**
+  (`SHA3-224`/`256`/`384`/`512`), confirmed dispatched for real by the
+  engine (mechanism table and actual `C_SignInit`/`C_VerifyInit`
+  dispatch, not just capability flags) before extending it — not
+  assumed from the existing SHA-2 support. Cross-verified against JDK's
+  own `SunRsaSign`.
 
 ### Fixed
 
