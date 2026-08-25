@@ -91,6 +91,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   per arm): token-backed adds a 1.48x mean-latency ratio over stock
   JDK (6.2ms vs 4.2ms mean) — in line with this module's own
   documented FFM-overhead expectation.
+- **`JavaJCE`'s native (off-heap) memory now scrubs secret material
+  before release, closing the one disclosed gap in the security
+  posture doc's SSP-management area.** `P11Library` previously
+  allocated every native buffer — mechanism parameters, key material,
+  plaintext, the PIN — from one `Arena.ofShared()` that lived for the
+  whole session, freed without zeroing only when the provider itself
+  closed; real secrets could sit mapped and readable for as long as
+  the session stayed open. Every operation now opens its own
+  short-lived confined arena, and every buffer carrying real byte
+  content — including decrypted plaintext, the PIN, and any raw key
+  bytes passing through an import template — is explicitly zero-filled
+  before that arena closes. Purely an internal refactor: behaviorally
+  invisible, no test needed to change, no measurable performance
+  regression (1.47x vs the prior 1.48x TLS-handshake latency ratio).
 
 ### Fixed
 
