@@ -1197,6 +1197,46 @@ running dev environment is a separate deploy-type decision, left
 unactioned per this project's own "no deploy without go-live"
 convention.
 
+**Independent re-verification, same day, after a context reset:**
+re-checked from a fresh session with no memory of the build actually
+completing (the background build task ID it had recorded was gone
+from the task registry post-reset — not evidence the build failed,
+since Docker's own state is independent of that registry). Confirmed
+via `docker buildx history ls`: four `Dockerfile.dev-sandbox` builds
+had completed in the prior hour, the last one in 1m18s (fast —
+consistent with a converged, mostly-cached build, not a fresh one
+still finding bugs). None had been `--load`ed into `docker images`
+under any tag, so nothing was directly runnable yet. Rebuilt with
+`docker build -t pqc-dev-sandbox:javajce-final --load` — fully cache-hit
+(confirmed: the loaded image's content dates to the same build,
+"49 minutes ago" at load time), so this was loading the already-proven
+build, not silently re-doing the work. Ran a **second**, independently
+fresh `docker run` off that exact tag (a new container, on the real
+`pqctoday-sandbox_pqc-mesh` network, not the long-running dev session's
+own container): `JcaProviderDemo` — all 13 steps passed again. First
+`JcaTlsHybridDemo` run genuinely failed
+(`InvalidKeyException: No installed provider supports this key`) —
+not a new bug, but a self-inflicted one: the ad-hoc re-run omitted
+`-Dsofthsmv3.jce.callerGcmIv=true`, the exact flag G2's own decision
+(§4, WS-B) already documented as required and which the sample's own
+javadoc and `samples/java-jca/README.md` already state. Re-run with
+the documented flag: both FIPS-profile groups (`SecP256r1MLKEM768`,
+`SecP384r1MLKEM1024`) handshake succeeded again, with fresh
+`P11Debug` token-side proof lines. This corroborates the original
+verify above with a genuinely independent run, not a repeat of the
+same claim, and confirms the sandbox repo's `feat/jdk27-jca-provider`
+commit `3c54a13` (already landed pre-reset — `git status` clean, no
+pending WS-G changes to commit) reflects real, working, re-provable
+state, not a stale claim.
+
+**Exit criteria WS-G:** both new samples run for real from a genuinely
+fresh container off a freshly built image, sandbox-side commit landed.
+Met, twice, independently.
+
+**WS-G: DONE 2026-08-25, PASSED — two full verification passes (one
+pre-reset, one post-reset from a fresh session with no shared memory of
+the first), same result both times.**
+
 ---
 
 ## 10. WS-H — JDK 27 GA swap (calendar-gated, ~2026-09-15)
