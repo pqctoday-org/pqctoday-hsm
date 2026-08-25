@@ -106,6 +106,7 @@ final class P11MLKEMSpi implements KEMSpi {
 
         @Override
         public KEM.Encapsulated engineEncapsulate(int from, int to, String algorithm) {
+            P11Debug.log("ML-KEM Encapsulator.engineEncapsulate() — token C_EncapsulateKey, publicKeyHandle=" + publicKeyHandle);
             P11Library.Attr[] ssTmpl = {
                 P11Library.attrLong(CKA_CLASS, CKO_SECRET_KEY),
                 P11Library.attrLong(CKA_KEY_TYPE, CKK_GENERIC_SECRET),
@@ -144,6 +145,7 @@ final class P11MLKEMSpi implements KEMSpi {
 
         @Override
         public SecretKey engineDecapsulate(byte[] encapsulation, int from, int to, String algorithm) throws DecapsulateException {
+            P11Debug.log("ML-KEM Decapsulator.engineDecapsulate() — token C_DecapsulateKey, privateKeyHandle=" + privateKeyHandle);
             P11Library.Attr[] ssTmpl = {
                 P11Library.attrLong(CKA_CLASS, CKO_SECRET_KEY),
                 P11Library.attrLong(CKA_KEY_TYPE, CKK_GENERIC_SECRET),

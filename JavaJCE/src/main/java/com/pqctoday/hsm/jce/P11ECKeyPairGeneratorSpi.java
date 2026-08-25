@@ -8,7 +8,6 @@ import java.security.ProviderException;
 import java.security.SecureRandom;
 import java.security.spec.AlgorithmParameterSpec;
 import java.security.spec.ECGenParameterSpec;
-import java.util.Map;
 
 import static com.pqctoday.hsm.jce.P11Constants.*;
 
@@ -39,13 +38,7 @@ import static com.pqctoday.hsm.jce.P11Constants.*;
 final class P11ECKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
     private final P11Library lib;
 
-    private static final Map<String, byte[]> CURVE_OIDS = Map.of(
-        "secp256r1", new byte[]{ 0x06, 0x08, 0x2a, (byte) 0x86, 0x48, (byte) 0xce, 0x3d, 0x03, 0x01, 0x07 },
-        "secp384r1", new byte[]{ 0x06, 0x05, 0x2b, (byte) 0x81, 0x04, 0x00, 0x22 },
-        "secp521r1", new byte[]{ 0x06, 0x05, 0x2b, (byte) 0x81, 0x04, 0x00, 0x23 }
-    );
-
-    private byte[] curveOid;
+    private P11EcCurves.Curve curve;
 
     P11ECKeyPairGeneratorSpi(P11Library lib) {
         this.lib = lib;
@@ -54,14 +47,14 @@ final class P11ECKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
     @Override
     public void initialize(int keysize, SecureRandom random) {
         // Matches the keysize -> curve mapping SunEC itself documents.
-        String curve = switch (keysize) {
+        String name = switch (keysize) {
             case 256 -> "secp256r1";
             case 384 -> "secp384r1";
             case 521 -> "secp521r1";
             default -> throw new InvalidParameterException(
                 "unsupported EC key size " + keysize + " (use 256, 384, or 521)");
         };
-        curveOid = CURVE_OIDS.get(curve);
+        curve = P11EcCurves.BY_NAME.get(name);
     }
 
     @Override
@@ -71,24 +64,25 @@ final class P11ECKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
             throw new InvalidAlgorithmParameterException(
                 "expected ECGenParameterSpec, got " + (params == null ? "null" : params.getClass()));
         }
-        byte[] oid = CURVE_OIDS.get(ecSpec.getName());
-        if (oid == null) {
+        P11EcCurves.Curve c = P11EcCurves.BY_NAME.get(ecSpec.getName());
+        if (c == null) {
             throw new InvalidAlgorithmParameterException(
-                "unsupported curve " + ecSpec.getName() + " — supported: " + CURVE_OIDS.keySet());
+                "unsupported curve " + ecSpec.getName() + " — supported: " + P11EcCurves.BY_NAME.keySet());
         }
-        curveOid = oid;
+        curve = c;
     }
 
     @Override
     public KeyPair generateKeyPair() {
-        if (curveOid == null) {
+        if (curve == null) {
             throw new ProviderException("EC KeyPairGenerator was not initialized with a curve "
                 + "(call initialize(new ECGenParameterSpec(\"secp256r1\"|\"secp384r1\"|\"secp521r1\")) first)");
         }
+        P11Debug.log("EC KeyPairGenerator.generateKeyPair() — token C_GenerateKeyPair, curve=" + curve.name());
         P11Library.Attr[] pubTmpl = {
             P11Library.attrLong(CKA_CLASS, CKO_PUBLIC_KEY),
             P11Library.attrLong(CKA_KEY_TYPE, CKK_EC),
-            P11Library.attr(CKA_EC_PARAMS, curveOid),
+            P11Library.attr(CKA_EC_PARAMS, curve.oidDer()),
             P11Library.attrBool(CKA_VERIFY, true),
             P11Library.attrBool(CKA_TOKEN, false),
         };
@@ -111,8 +105,16 @@ final class P11ECKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
         };
         long[] handles = lib.generateKeyPair(CKM_EC_KEY_PAIR_GEN, pubTmpl, prvTmpl);
         byte[] spki = lib.getAttributeBytes(handles[0], CKA_PUBLIC_KEY_INFO);
-        P11Key.Pub pub = new P11Key.Pub(lib, handles[0], "EC", spki);
-        P11Key.Priv priv = new P11Key.Priv(lib, handles[1], "EC");
+        // CKA_EC_POINT is a DER OCTET STRING wrapping the raw uncompressed
+        // point (same convention already proven in P11ECDHKeyAgreementSpi/
+        // P11PublicKeyFactorySpi's importEC) — unwrap it to build the real
+        // java.security.spec.ECPoint EcPub needs for JEP 527 TLS (plan §W6).
+        byte[] wrappedPoint = lib.getAttributeBytes(handles[0], CKA_EC_POINT);
+        byte[] rawPoint = org.bouncycastle.asn1.ASN1OctetString.getInstance(wrappedPoint).getOctets();
+        java.security.spec.ECPoint w = P11EcCurves.decodePoint(rawPoint, curve.coordBytes());
+        java.security.spec.ECParameterSpec ecParams = P11EcCurves.jdkParams(curve);
+        P11Key.EcPub pub = new P11Key.EcPub(lib, handles[0], spki, ecParams, w);
+        P11Key.EcPriv priv = new P11Key.EcPriv(lib, handles[1], ecParams);
         return new KeyPair(pub, priv);
     }
 }

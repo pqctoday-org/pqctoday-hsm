@@ -10,6 +10,7 @@ import java.math.BigInteger;
 import java.security.InvalidKeyException;
 import java.security.Key;
 import java.security.KeyFactorySpi;
+import java.security.spec.ECPublicKeySpec;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.KeySpec;
 import java.security.spec.X509EncodedKeySpec;
@@ -81,9 +82,6 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
     private static final String OID_ED448 = "1.3.101.113";
     private static final String OID_EC_PUBLIC_KEY = "1.2.840.10045.2.1";
     private static final String OID_RSA_ENCRYPTION = "1.2.840.113549.1.1.1";
-    private static final String OID_SECP256R1 = "1.2.840.10045.3.1.7";
-    private static final String OID_SECP384R1 = "1.3.132.0.34";
-    private static final String OID_SECP521R1 = "1.3.132.0.35";
 
     P11PublicKeyFactorySpi(P11Library lib) {
         this.lib = lib;
@@ -91,8 +89,29 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
 
     @Override
     protected java.security.PublicKey engineGeneratePublic(KeySpec keySpec) throws InvalidKeySpecException {
+        if (keySpec instanceof ECPublicKeySpec ecSpec) {
+            // Curve name/OID unknown here (ECParameterSpec carries only
+            // the raw field/curve/generator/order/cofactor values, not a
+            // name) — identified by field size, since this module
+            // supports exactly the three curves P11EcCurves knows about.
+            // Needed for JDK 27's own DHasKEM (the classical half of JEP
+            // 527 hybrid TLS groups) to deserialize a peer's key_share —
+            // its DeserializePublicKey builds exactly this KeySpec shape
+            // and calls KeyFactory.getInstance("EC").generatePublic(...)
+            // with no explicit provider, landing here once this provider
+            // is installed at top priority (plan §W6). Found live: this
+            // method previously rejected anything but X509EncodedKeySpec.
+            P11EcCurves.Curve curve;
+            try {
+                curve = P11EcCurves.byFieldSize(ecSpec.getParams());
+            } catch (IllegalArgumentException e) {
+                throw new InvalidKeySpecException(e.getMessage());
+            }
+            byte[] rawPoint = P11EcCurves.encodePoint(ecSpec.getW(), curve.coordBytes());
+            return importEC(curve, rawPoint, null);
+        }
         if (!(keySpec instanceof X509EncodedKeySpec x509Spec)) {
-            throw new InvalidKeySpecException("only X509EncodedKeySpec is supported for import");
+            throw new InvalidKeySpecException("only X509EncodedKeySpec or ECPublicKeySpec is supported for import");
         }
         SubjectPublicKeyInfo info;
         try {
@@ -117,13 +136,11 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
 
         if (oid.equals(OID_EC_PUBLIC_KEY)) {
             String curveOid = ASN1ObjectIdentifier.getInstance(info.getAlgorithm().getParameters()).getId();
-            byte[] curveOidDer = switch (curveOid) {
-                case OID_SECP256R1 -> new byte[]{ 0x06, 0x08, 0x2a, (byte) 0x86, 0x48, (byte) 0xce, 0x3d, 0x03, 0x01, 0x07 };
-                case OID_SECP384R1 -> new byte[]{ 0x06, 0x05, 0x2b, (byte) 0x81, 0x04, 0x00, 0x22 };
-                case OID_SECP521R1 -> new byte[]{ 0x06, 0x05, 0x2b, (byte) 0x81, 0x04, 0x00, 0x23 };
-                default -> throw new InvalidKeySpecException("unsupported EC curve OID " + curveOid);
-            };
-            return importEC(curveOidDer, rawKeyMaterial, x509Spec.getEncoded());
+            P11EcCurves.Curve curve = P11EcCurves.BY_OID.get(curveOid);
+            if (curve == null) {
+                throw new InvalidKeySpecException("unsupported EC curve OID " + curveOid);
+            }
+            return importEC(curve, rawKeyMaterial, x509Spec.getEncoded());
         }
 
         if (oid.equals(OID_RSA_ENCRYPTION)) {
@@ -178,27 +195,45 @@ final class P11PublicKeyFactorySpi extends KeyFactorySpi {
         return new P11Key.Pub(lib, handle, jcaName, spki);
     }
 
-    private P11Key.Pub importEC(byte[] curveOidDer, byte[] rawPoint, byte[] spki) throws InvalidKeySpecException {
+    /**
+     * @param spki the real X.509 SubjectPublicKeyInfo DER when the caller
+     *     has one (the X509EncodedKeySpec import path); {@code null} when
+     *     importing from a bare {@link ECPublicKeySpec} (no encoded form
+     *     was ever handed to us — DHasKEM's peer-key deserialization,
+     *     plan §W6) — in which case one is built here via Bouncy Castle
+     *     rather than left absent, so {@code getEncoded()} on the
+     *     resulting key stays honest instead of NPEing the first time
+     *     something calls it.
+     */
+    private P11Key.EcPub importEC(P11EcCurves.Curve curve, byte[] rawPoint, byte[] spki) throws InvalidKeySpecException {
         // Ordinary EC's CKA_EC_POINT IS a DER OCTET STRING wrapping the
         // raw point — confirmed empirically (see class javadoc), so wrap
         // it here with Bouncy Castle rather than hand-rolling the 1-2
         // byte tag+length prefix.
         byte[] wrapped;
+        byte[] effectiveSpki = spki;
         try {
             wrapped = new DEROctetString(rawPoint).getEncoded("DER");
+            if (effectiveSpki == null) {
+                var algId = new org.bouncycastle.asn1.x509.AlgorithmIdentifier(
+                    new ASN1ObjectIdentifier(OID_EC_PUBLIC_KEY), new ASN1ObjectIdentifier(curve.oid()));
+                effectiveSpki = new SubjectPublicKeyInfo(algId, rawPoint).getEncoded("DER");
+            }
         } catch (IOException e) {
-            throw new InvalidKeySpecException("failed to DER-wrap EC point", e);
+            throw new InvalidKeySpecException("failed to DER-encode EC point/SubjectPublicKeyInfo", e);
         }
         P11Library.Attr[] tmpl = {
             P11Library.attrLong(CKA_CLASS, CKO_PUBLIC_KEY),
             P11Library.attrLong(CKA_KEY_TYPE, CKK_EC),
-            P11Library.attr(CKA_EC_PARAMS, curveOidDer),
+            P11Library.attr(CKA_EC_PARAMS, curve.oidDer()),
             P11Library.attr(CKA_EC_POINT, wrapped), // DER-OCTET-STRING-wrapped — see class javadoc
             P11Library.attrBool(CKA_VERIFY, true),
             P11Library.attrBool(CKA_TOKEN, false),
         };
         long handle = lib.createObject(tmpl);
-        return new P11Key.Pub(lib, handle, "EC", spki);
+        java.security.spec.ECPoint w = P11EcCurves.decodePoint(rawPoint, curve.coordBytes());
+        java.security.spec.ECParameterSpec ecParams = P11EcCurves.jdkParams(curve);
+        return new P11Key.EcPub(lib, handle, effectiveSpki, ecParams, w);
     }
 
     private P11Key.Pub importRSA(BigInteger modulus, BigInteger exponent, byte[] spki) {

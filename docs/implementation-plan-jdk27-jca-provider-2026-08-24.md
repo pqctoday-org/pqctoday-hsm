@@ -1986,6 +1986,166 @@ scoped down honestly from a literal SunPKCS11 port.**
   (2026-09-15 target), re-verify, update the migrate-catalog row again
   (RC→GA status change).
 
+**W6 status as of 2026-08-25: IN PROGRESS, real fixes shipped, one
+genuine architectural blocker found and deliberately NOT worked around.**
+The plan's own confidence going in — "Path is provider-delegated KEM
+(confirmed, §2.3a), validated by W0.1; no `SSLContext` surgery
+expected" — turned out to be only partially true: KEM delegation itself
+works exactly as W0.1 proved, but three more integration gaps existed
+beneath that and were found only by actually running a live handshake
+against `pqc-rest`'s quantum-safe endpoint (`pqc-rest:5720`, confirmed
+from its own startup log: `TLS1.3 only; suites
+TLS13_CHACHA20_POLY1305_SHA256, TLS13_AES_256_GCM_SHA384; groups
+X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024`) with the real
+provider, not the W0.1 probe.
+
+- **Confirmed live: a plain success wouldn't have been proof by
+  itself.** `SunJCE` in this same JDK 27 RC already ships its own
+  complete software ML-KEM (`KeyPairGenerator`/`KeyFactory`/`KEM` for
+  ML-KEM-512/768/1024 and the bare `"ML-KEM"` name — checked directly by
+  enumerating `Security.getProviders()` before writing the spike, not
+  assumed). A handshake succeeding proves JEP 527 hybrid TLS works *for
+  someone's* ML-KEM, not necessarily this provider's — exactly the
+  "silent partial-bypass" risk W0.1 already flagged once. `P11Debug`
+  (new, small, permanent, opt-in logging class — `-Dsofthsmv3.jce.debug=true`,
+  silent by default) was added specifically so this spike could
+  positively confirm this provider's own `C_GenerateKeyPair`/
+  `C_EncapsulateKey`/`C_DecapsulateKey` code paths ran, which the plan's
+  own W6 text explicitly called for ("confirm via provider-side logging
+  that encap/decap ran in the token").
+- **Gap 1, found and fixed: `DHasKEM` rejects opaque EC keys outright.**
+  JDK 27's own internal classical-DH-as-KEM bridge
+  (`sun.security.ssl.DHasKEM`, extracted from `src.zip` and read in
+  full, not guessed at) needs the client's own ephemeral EC key to
+  satisfy `instanceof ECKey` (for `paramsFromKey`, to identify the named
+  curve) and the full `ECPublicKey` interface — a hard
+  `((ECPublicKey) k).getW()` cast — when serializing the client's own
+  public share into the wire `key_share`. `P11Key.Priv`/`Pub` (used for
+  every algorithm this module supports) implemented neither, so the
+  handshake failed immediately and loudly with
+  `InvalidKeyException: Unsupported key` deep inside JSSE's own code —
+  every one of the 198 existing tests still passed, since nothing
+  exercises this path outside a real TLS handshake. **Fixed** — two new
+  classes, `P11Key.EcPriv implements ECKey` and
+  `P11Key.EcPub implements ECPublicKey`, used only for the `"EC"`
+  algorithm (via `P11ECKeyPairGeneratorSpi` and
+  `P11PublicKeyFactorySpi`'s EC import paths). `EcPriv` deliberately
+  implements only the narrower `ECKey` (curve domain parameters —
+  field/curve/generator/order/cofactor, all public values), **not**
+  `ECPrivateKey`, which would additionally require `getS()` — the actual
+  private scalar, exactly what this opaque-key design exists to never
+  expose. Confirmed from `DHasKEM`'s real source that `paramsFromKey`'s
+  check really is `instanceof ECKey`, not `instanceof ECPrivateKey`, so
+  the narrower interface is genuinely sufficient, not a workaround that
+  happens to compile. `EcPub` implements the full `ECPublicKey` — safe,
+  since public key coordinates were never confidential. A new shared
+  `P11EcCurves` utility (curve name ↔ OID DER bytes ↔ coordinate byte
+  count ↔ real JDK `ECParameterSpec` via `AlgorithmParameters`, ↔
+  `ECPoint` encode/decode) now backs both `P11ECKeyPairGeneratorSpi` and
+  `P11PublicKeyFactorySpi`, replacing what had been an inline
+  `Map<String, byte[]>` duplicated in spirit across both files.
+- **Gap 2, found and fixed: the server's own ephemeral public key
+  couldn't be imported.** `DHasKEM.DeserializePublicKey` builds an
+  `ECPublicKeySpec` (raw `ECPoint` + `ECParameterSpec`, no curve name,
+  no encoded form) and calls
+  `KeyFactory.getInstance("EC").generatePublic(...)` with no explicit
+  provider — which resolves to this provider once it's installed at top
+  priority, exactly as intended, but `P11PublicKeyFactorySpi.engineGeneratePublic`
+  previously accepted only `X509EncodedKeySpec` and rejected everything
+  else outright. **Fixed** — a new branch identifies which of the three
+  supported curves the incoming `ECParameterSpec` describes purely by
+  field bit-length (256/384/521 — unambiguous, since this module
+  supports exactly those three curves), re-encodes the point into wire
+  form, and imports it through the same `importEC` path the
+  X.509-encoded route already used. Since the deserialized peer key
+  never had a real SPKI DER handed to it, `importEC` now also builds one
+  via Bouncy Castle's `SubjectPublicKeyInfo`/`AlgorithmIdentifier`
+  constructors when none is supplied, rather than leaving `getEncoded()`
+  a latent `NullPointerException` waiting for the first caller that
+  touches it.
+- **Gap 3, found and fixed: JSSE's key schedule really does delegate
+  HKDF to whichever provider owns `"HKDF-SHA256"`, and it hands this
+  provider two IKMs.** This directly *contradicts* an earlier note in
+  this same plan doc (§6 item 7: "JSSE's key schedule does not currently
+  delegate HKDF to the KEM provider") — that note is now known to be
+  wrong, corrected here rather than left standing. `KAKeyDerivation`
+  (JSSE's internal TLS 1.3 key-schedule driver) calls
+  `KDF.deriveKey("HKDF-SHA256", ...)` with `ikms()` set to exactly two
+  elements — the classical ECDH-as-KEM secret and the ML-KEM secret —
+  and `P11HKDFKDFSpi.derive` unconditionally rejected anything but
+  exactly one IKM (a deliberate W4 scope decision, not an oversight —
+  its own javadoc explained why at the time). **Fixed, and verified
+  correct, not just made to compile:** extracted
+  `com.sun.crypto.provider.HKDFKeyDerivation` (SunJCE's own real HKDF
+  implementation) from `src.zip` and read `consolidateKeyMaterial`
+  directly — for more than one IKM, JDK's own reference implementation
+  does plain concatenation (`os.writeBytes(getKeyBytes(k))` in a loop),
+  nothing more sophisticated. This provider's engine still only accepts
+  one base-key handle per `CKM_HKDF_DERIVE` call (unchanged, still a
+  real constraint), so the fix reproduces the concatenation in Java —
+  each IKM's raw bytes (all genuinely extractable in this flow: the
+  ECDH secret and ML-KEM secret are both the deliberate,
+  already-documented exceptions to this module's opaque-key rule),
+  concatenated, imported as one throwaway `CKA_EXTRACTABLE=false`
+  generic-secret object, then run through the existing single-IKM path
+  — with the Java-side concatenated intermediate explicitly zeroed
+  after import (§6.5). `HKDFTest`'s new
+  `multipleIkmsAreConcatenatedMatchingJdksOwnReferenceHkdf` proves this
+  byte-for-byte against `KDF.getInstance("HKDF-SHA256")` with **no
+  explicit provider** — i.e., against SunJCE's actual real
+  implementation, not a self-consistency check against our own prior
+  output.
+- **Gap 4, found, NOT fixed — a genuine architectural wall, not a bug to
+  patch through.** TLS 1.3's key schedule chains a *previous* HKDF
+  output back in as the **salt** for the *next* Extract step
+  (early_secret → handshake_secret → master_secret, standard TLS 1.3
+  structure). `KAKeyDerivation` calls `engineDeriveKey` for those
+  intermediate secrets, which this provider deliberately returns as an
+  opaque `P11Key.Secret` (`CKA_EXTRACTABLE=false`) — matching the exact
+  same §6.2 "no plaintext key export" design that has held throughout
+  this whole plan. When JSSE then hands that same opaque key back as the
+  **salt** for the next round, `P11HKDFKDFSpi` correctly refuses it
+  (`getEncoded()` is `null` by design), and — unlike Gap 3 — there is
+  **no Java-side trick available here**: the engine's own
+  `CKM_HKDF_DERIVE` genuinely cannot accept a salt by handle at all
+  (`CKF_HKDF_SALT_KEY` — "not supported", confirmed reading
+  `SoftHSM_keygen.cpp` back in W4, unchanged), and HKDF's salt occupies
+  HMAC's *key* position algorithmically, not a data position — there is
+  no concatenation-based equivalent the way Gap 3 had. The only path
+  through is making this provider's own TLS-key-schedule intermediate
+  secrets extractable too (the same trade-off §6 item 7 already made,
+  deliberately and narrowly, for the KEM secret specifically — "the
+  whole point is to be consumed by code outside the token") — but doing
+  that for `engineDeriveKey`'s general output would loosen this
+  provider's opacity guarantee for **every** caller of `"HKDF-SHA256"`,
+  not just this one TLS flow, and is exactly the kind of security-posture
+  trade-off this plan's whole discipline says gets decided explicitly,
+  not slipped in to make a spike go green. **Deliberately left blocked
+  and undecided here** rather than silently loosened. The genuinely
+  "correct" fix — full in-token HKDF chaining via repeated
+  `CKM_HKDF_DERIVE` calls that never bring the intermediate secret into
+  the JVM at all — is exactly what §10's "In-token TLS key schedule"
+  deferred item already named; this live spike is the first concrete
+  confirmation of *why* it was deferred, not a new discovery of scope.
+- **`JavaJCE/spikes/W6TlsHandshakeSpike.java`** (new — not part of
+  `mvn test`, same precedent as W0.1's own standalone probe; requires
+  the `pqc-rest` container reachable at `pqc-rest:5720`) — kept in the
+  repo as a real, reproducible artifact: installs this provider at
+  `Security.insertProviderAt(p, 1)`, pins
+  `jdk.tls.namedGroups=SecP256r1MLKEM768,SecP384r1MLKEM1024`, opens a
+  real `SSLSocket` to the live quantum-safe endpoint, and starts a
+  handshake. Currently fails at Gap 4 above; re-run it once Gap 4 is
+  resolved (in either direction) to confirm the full handshake actually
+  completes end to end — that verification has deliberately **not**
+  been claimed here, since it hasn't happened yet.
+- **Verify:** `mvn test`, 198/198 unchanged (Gaps 1–3's fixes touch code
+  paths — EC key generation/import, multi-IKM HKDF — already covered by
+  the existing suite plus one new HKDF test; none of the 198 tests
+  exercise a live TLS handshake, so none of them could have caught Gaps
+  1–4 in the first place, which is exactly why the live spike existed).
+  The end-to-end handshake itself: **not yet passing**, blocked on Gap
+  4's undecided trade-off.
+
 ### W7 — Phase 2: Rust engine via gRPC transport
 - `GrpcTransport` implementing the same transport interface: reuse
   `remoting/proto/proto/pkcs11_remote.proto` verbatim (grpc-java +

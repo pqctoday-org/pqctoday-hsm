@@ -84,13 +84,26 @@ class HKDFTest {
     }
 
     @Test
-    void rejectsMultipleIkms() throws Exception {
+    void multipleIkmsAreConcatenatedMatchingJdksOwnReferenceHkdf() throws Exception {
+        // Real, live need (plan §W6): JEP 527 hybrid TLS 1.3's key
+        // schedule hands this KDF a two-element ikms() list (the
+        // classical ECDH-as-KEM secret, then the PQ KEM secret) and
+        // expects "concatenate, then HKDF-Extract" — confirmed from
+        // JDK 27's own com.sun.crypto.provider.HKDFKeyDerivation source
+        // (consolidateKeyMaterial is a plain concatenation loop, nothing
+        // more), not assumed. Proven here against SunJCE's own actual
+        // reference implementation with the SAME two IKMs, not just
+        // internal self-consistency.
         SoftHSMv3Provider p = new SoftHSMv3Provider();
-        KDF kdf = KDF.getInstance("HKDF-SHA256", p);
-        SecretKey a = new SecretKeySpec(new byte[16], "Generic");
-        SecretKey b = new SecretKeySpec(new byte[16], "Generic");
+        SecretKey a = new SecretKeySpec("first-ikm-secret".getBytes(), "Generic");
+        SecretKey b = new SecretKeySpec("second-ikm-secret".getBytes(), "Generic");
         var spec = HKDFParameterSpec.ofExtract().addIKM(a).addIKM(b).extractOnly();
-        assertThrows(InvalidAlgorithmParameterException.class, () -> kdf.deriveData(spec));
+
+        byte[] ours = KDF.getInstance("HKDF-SHA256", p).deriveData(spec);
+        byte[] jdks = KDF.getInstance("HKDF-SHA256").deriveData(spec); // default SunJCE
+        assertEquals(32, ours.length);
+        assertArrayEquals(jdks, ours,
+            "multi-IKM HKDF must match JDK's own reference implementation byte-for-byte");
     }
 
     @Test

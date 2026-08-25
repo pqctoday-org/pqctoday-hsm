@@ -52,6 +52,7 @@ final class P11MLKEMKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
 
     @Override
     public KeyPair generateKeyPair() {
+        P11Debug.log("ML-KEM KeyPairGenerator.generateKeyPair() — token C_GenerateKeyPair, algorithm=" + algorithm);
         P11Library.Attr[] pubTmpl = {
             P11Library.attrLong(CKA_CLASS, CKO_PUBLIC_KEY),
             P11Library.attrLong(CKA_PARAMETER_SET, parameterSet),

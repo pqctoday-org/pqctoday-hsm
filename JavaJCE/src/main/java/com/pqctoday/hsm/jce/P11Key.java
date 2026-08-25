@@ -5,6 +5,10 @@ import javax.security.auth.DestroyFailedException;
 import javax.security.auth.Destroyable;
 import java.security.PrivateKey;
 import java.security.PublicKey;
+import java.security.interfaces.ECKey;
+import java.security.interfaces.ECPublicKey;
+import java.security.spec.ECParameterSpec;
+import java.security.spec.ECPoint;
 
 /**
  * Opaque handle-backed key objects (FIPS 140-3 L3 posture, plan §6.2): key
@@ -37,7 +41,7 @@ import java.security.PublicKey;
 final class P11Key {
     private P11Key() {}
 
-    static final class Priv implements PrivateKey, Destroyable {
+    static class Priv implements PrivateKey, Destroyable {
         @java.io.Serial private static final long serialVersionUID = 1L;
         private final transient P11Library lib;
         private final transient long handle;
@@ -72,7 +76,37 @@ final class P11Key {
         @Override public boolean isDestroyed() { return destroyed; }
     }
 
-    static final class Pub implements PublicKey, Destroyable {
+    /**
+     * EC-specific private key — adds {@link ECKey#getParams()} (curve
+     * domain parameters only — field, curve equation, generator, order,
+     * cofactor; all PUBLIC values, not secret) so JDK 27's own internal
+     * {@code sun.security.ssl.DHasKEM} (the classical half of JEP 527's
+     * hybrid TLS KEM groups) accepts this key at all: its
+     * {@code paramsFromKey} does {@code k instanceof ECKey eckey; eckey.getParams()}
+     * to identify which named curve it's dealing with — found live
+     * (`Unsupported key` / `InvalidKeyException` deep inside JSSE's own
+     * handshake code, plan §W6) when this class did not implement
+     * {@code ECKey}, not assumed in advance. Deliberately implements only
+     * {@code ECKey}, NOT the full {@code ECPrivateKey} — that would
+     * additionally require {@code getS()}, the actual private scalar,
+     * which this opaque-key design will never expose. Extracted from JDK
+     * 27's real {@code DHasKEM.java} source (not guessed) that
+     * {@code paramsFromKey}'s check is exactly {@code instanceof ECKey},
+     * not {@code instanceof ECPrivateKey} — confirming this narrower
+     * interface is sufficient.
+     */
+    static final class EcPriv extends Priv implements ECKey {
+        private final ECParameterSpec ecParams;
+
+        EcPriv(P11Library lib, long handle, ECParameterSpec ecParams) {
+            super(lib, handle, "EC");
+            this.ecParams = ecParams;
+        }
+
+        @Override public ECParameterSpec getParams() { return ecParams; }
+    }
+
+    static class Pub implements PublicKey, Destroyable {
         @java.io.Serial private static final long serialVersionUID = 1L;
         private final transient P11Library lib;
         private final transient long handle;
@@ -107,6 +141,31 @@ final class P11Key {
             }
         }
         @Override public boolean isDestroyed() { return destroyed; }
+    }
+
+    /**
+     * EC-specific public key — adds full {@link ECPublicKey} (curve
+     * params plus {@link ECPublicKey#getW()}, the point coordinates).
+     * Unlike {@link EcPriv}, this can and does implement the complete
+     * interface: a PUBLIC key's coordinates are not confidential, so
+     * there is no opaque-key design tension here. Needed because JDK
+     * 27's {@code DHasKEM.SerializePublicKey} does a hard
+     * {@code ((ECPublicKey) k).getW()} cast on the client's own ephemeral
+     * public key when building the TLS key_share extension — found live
+     * alongside the {@link EcPriv} gap (plan §W6), same root cause.
+     */
+    static final class EcPub extends Pub implements ECPublicKey {
+        private final ECParameterSpec ecParams;
+        private final ECPoint w;
+
+        EcPub(P11Library lib, long handle, byte[] spkiDer, ECParameterSpec ecParams, ECPoint w) {
+            super(lib, handle, "EC", spkiDer);
+            this.ecParams = ecParams;
+            this.w = w;
+        }
+
+        @Override public ECParameterSpec getParams() { return ecParams; }
+        @Override public ECPoint getW() { return w; }
     }
 
     /**
