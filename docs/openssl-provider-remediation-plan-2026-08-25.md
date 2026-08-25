@@ -1,4 +1,4 @@
-# OpenSSL provider remediation plan (2026-08-25) — PLAN ONLY, not executed
+# OpenSSL provider remediation plan (2026-08-25) — plan, with the P0 batch executed
 
 Companion to `docs/openssl-provider-coverage-audit-2026-08-25.md` (gap
 IDs referenced from there). Per the user's decision (2026-08-25):
@@ -9,15 +9,21 @@ completion is observable, not claimed — the harness fails on unexpected
 XFAIL passes, so landing a fix without updating the expectation is
 loudly visible, and vice versa.
 
+**Update (2026-08-25, later same day):** the user asked to start
+remediation execution with the P0 batch. R0.1/R0.2/R0.3/R0.5 landed
+(commit `3bf6f56`); R0.4 was attempted, caused a real regression, and
+was reverted before landing — see its row below. Everything below P0 is
+still plan-only, unchanged.
+
 ## Priority 0 — correctness / hygiene of what already ships
 
-| # | Item | Gap | Sketch | Effort | Proof |
-|---|---|---|---|---|---|
-| R0.1 | Quiet the token-scan attribute-type noise | WART-1 | Root-cause which side is wrong: provider queries CKA_CLASS/CKA_TOKEN/etc. with byte-string templates vs C++ `ObjectFile.cpp:181` warning on non-bytestring attrs. Fix the provider's template types (likely `fetch_attrs` shape) OR downgrade the engine log line if the probe pattern is spec-legal (`C_GetAttributeValue` type-probing is legal §5.7.5 — likely engine-side downgrade) | S | probe run's stderr is clean; harness greps for zero `ObjectFile.cpp(181)` lines |
-| R0.2 | Native build must not inhale the WASM `config.h` | WART-3 | `gen-pkcs11-provider-config-h.sh` output is for the emcc path only; native CMake should either define `P11PROV_CONFIG_NO_H` or the build should exclude/clean `src/config.h`; reconcile the 0.4.0-vs-1.1 version strings to one source of truth | S | rebuild log has no `PACKAGE_* redefined` warnings; `list -providers` version matches CMake |
-| R0.4 | Fresh-process operation fetch (lazy-init) | WART-4 | Root-cause why mechanism-gated tables don't resolve for property-targeted fetches before a token object is referenced (likely `operations_init` ordering vs `query_operation`); harness T9 flips when fixed | M | T9 XFAIL→PASS |
-| R0.5 | Document the OAEP-defaults mismatch | WART-5 | Engine rejects SHA-1-default OAEP (likely deliberate FIPS posture) — document the required `rsa_oaep_md`/`rsa_mgf1_md` pins in the provider README/HOWTO rather than "fixing" either side | S | docs |
-| R0.3 | Retire dead test assets | ENV-3 | Delete or rewrite `test_openssl_integration.sh` + `openssl_test.cnf` in favor of `scripts/test-openssl-provider.sh` (this audit's harness); note the dormant vendored meson suite in the vendor README as intentionally unwired | S | repo grep shows one provider harness, wired |
+| # | Item | Gap | Status | Sketch (original) | Effort | Proof |
+|---|---|---|---|---|---|---|
+| R0.1 | Quiet the token-scan attribute-type noise | WART-1 | **DONE** | ~~Root-cause which side is wrong: provider queries CKA_CLASS/CKA_TOKEN/etc. with byte-string templates vs C++ `ObjectFile.cpp:181` warning on non-bytestring attrs...~~ Actual root cause (found live via gdb, not the guessed "spec-legal probing"): `P11Objects.cpp`'s mandatory-attribute-check loop called `getByteStringValue()` on every attribute in the object's full schema to compute `selfEmpty`, even though only the ck14/15/16-flagged cert attributes ever read it. Gated the block on those flags. | S | **Live-verified**: 0 `ObjectFile.cpp(181)` hits on a required-propquery genpkey (was 41/key). Full C++ ctest 8/8 green. New harness regression guard added and sabotage-tested (reverted the fix on a copy → guard caught 449 hits, exit 1). |
+| R0.2 | Native build must not inhale the WASM `config.h` | WART-3 | **DONE** | ~~`gen-pkcs11-provider-config-h.sh` output is for the emcc path only...~~ Confirmed nothing in the native path ever generated `config.h` at all — a fresh checkout with no prior WASM build would fail to compile outright, not just warn. Fixed by having CMake generate it at configure time, version derived from meson.build's own `version:` field (single source of truth across native/meson/WASM). | S | **Live-verified**: `list -providers` reports `version: 1.1` (was the stale hardcoded `0.4.0`); zero `PACKAGE_*` redefined warnings in a clean rebuild. |
+| R0.4 | Fresh-process operation fetch (lazy-init) | WART-4 | **ATTEMPTED, REVERTED** | Root-cause why mechanism-gated tables don't resolve for property-targeted fetches before a token object is referenced (likely `operations_init` ordering vs `query_operation`); harness T9 flips when fixed | M | Root cause confirmed: `p11prov_query_operation()` returns `ctx->op_digest`/etc. directly, populated only by `operations_init()`, itself only triggered lazily via `p11prov_ctx_status()` from key/session code paths — a fetch with no key ever loaded gets `NULL` once, no retry. The `no_cache=1` set alongside it is the provider's own tell that it knows this answer can be wrong. **Naive fix tried and reverted**: calling `p11prov_ctx_status(ctx)` unconditionally at the top of `p11prov_query_operation()` (before the `operation_id` switch) forces full PKCS#11 module init on *every* operation-id query, including ones that fire very early/often (e.g. during `list -providers`) — live-tested and it made the provider disappear from `list -providers` entirely (a real regression, caught before commit, not shipped). Needs a narrower fix: likely gate the forced status check to only the operation_ids that actually depend on `operations_init` (DIGEST/KDF/RAND/KEYEXCH/SIGNATURE/ASYM_CIPHER/KEM, matching the existing `no_cache` switch cases), and/or understand why forcing it broke activation before retrying (gdb tracing was attempted but blocked on container ptrace/symbol-loading issues, not yet resolved). T9 stays XFAIL. |
+| R0.5 | Document the OAEP-defaults mismatch | WART-5 | **DONE** | Engine rejects SHA-1-default OAEP (likely deliberate FIPS posture) — document the required `rsa_oaep_md`/`rsa_mgf1_md` pins in the provider README/HOWTO rather than "fixing" either side | S | Added to `src/vendor/pkcs11-provider/README.md` with a working example matching harness T5. |
+| R0.3 | Retire dead test assets | ENV-3 | **DONE** | Delete or rewrite `test_openssl_integration.sh` + `openssl_test.cnf` in favor of `scripts/test-openssl-provider.sh` (this audit's harness); note the dormant vendored meson suite in the vendor README as intentionally unwired | S | Both files deleted; vendor README now documents the meson suite as intentionally unwired (assumes upstream's build layout/token backend, not this fork's). |
 
 ## Priority 1 — high-value coverage gaps
 
