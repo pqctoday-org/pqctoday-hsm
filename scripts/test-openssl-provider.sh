@@ -216,13 +216,19 @@ t4x() { local w; w=$(mk_arena mlkemgen "$CPP_ENGINE_SO") && use_arena "$w" || re
 }
 run_case T4x PASS "ML-KEM token keygen reachable through provider, verified via storeutl (gap OP-6 / remediation R3b)" t4x
 
-# Distinct from T4x above: genpkey's own `-out` PEM write, which needs a
-# PrivateKeyInfo encoder that doesn't exist yet for ML-KEM (gap OP-3 /
-# remediation R3, discovered live while landing R3b — see T4x's comment).
+# Distinct from T4x above: genpkey's own `-out` PEM write (gap OP-3 /
+# remediation R3 core, landed). The encoder never touches the actual
+# private key bytes — it PEM-wraps a pkcs11: URI reference
+# (p11prov_encoder_private_key_to_asn1 -> p11prov_obj_get_public_uri) —
+# so the assertion checks for the URI label and that no PRIVATE KEY
+# label ever appears, not just exit 0.
 t4x_encode() { local w; w=$(mk_arena mlkemenc "$CPP_ENGINE_SO") && use_arena "$w" || return 1
-  O genpkey -propquery "?provider=pkcs11" -algorithm ML-KEM-768 -out "$w/k.pem"
+  O genpkey -propquery "?provider=pkcs11" -algorithm ML-KEM-768 -out "$w/k.pem" || return 1
+  grep -q "PKCS#11 PROVIDER URI" "$w/k.pem" || { echo "no URI-PEM written"; return 1; }
+  grep -q "PRIVATE KEY" "$w/k.pem" && { echo "raw private key material written — must never happen"; return 1; }
+  return 0
 }
-run_case T4x_encode XFAIL "ML-KEM genpkey -out PrivateKeyInfo PEM write (gap OP-3 / remediation R3)" t4x_encode
+run_case T4x_encode PASS "ML-KEM genpkey -out writes a pkcs11: URI reference, never key bytes (gap OP-3 / remediation R3 core)" t4x_encode
 
 t5() { local w; w=$(mk_arena rsa "$CPP_ENGINE_SO") && use_arena "$w" || return 1
   O genpkey -propquery "?provider=pkcs11" -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$w/k.pem" || return 1

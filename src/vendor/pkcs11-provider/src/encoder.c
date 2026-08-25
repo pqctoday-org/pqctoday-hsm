@@ -1378,6 +1378,32 @@ const OSSL_DISPATCH p11prov_mldsa_encoder_text_functions[] = {
     { 0, NULL },
 };
 
+/* ML-KEM URI-PEM PrivateKeyInfo encoder (remediation R3 core). Like every
+ * other PrivateKeyInfo encoder in this file, this NEVER touches the actual
+ * private key bytes: p11prov_encoder_private_key_write_pem ->
+ * p11prov_encoder_private_key_to_asn1 calls p11prov_obj_get_public_uri(key)
+ * and PEM-wraps that pkcs11: URI string — the private key material never
+ * leaves the token. One shared function + one shared dispatch table reused
+ * across all 3 parameter sets, exactly like ML-DSA's block above (the
+ * function only needs to check CKK_ML_KEM, not which parameter set). */
+static int p11prov_mlkem_encoder_priv_key_info_pem_encode(
+    void *inctx, OSSL_CORE_BIO *cbio, const void *inkey,
+    const OSSL_PARAM key_abstract[], int selection,
+    OSSL_PASSPHRASE_CALLBACK *cb, void *cbarg)
+{
+    return p11prov_encoder_private_key_write_pem(
+        CKK_ML_KEM, inctx, cbio, inkey, key_abstract, selection, cb, cbarg);
+}
+
+const OSSL_DISPATCH p11prov_mlkem_encoder_priv_key_info_pem_functions[] = {
+    DISPATCH_BASE_ENCODER_ELEM(NEWCTX, newctx),
+    DISPATCH_BASE_ENCODER_ELEM(FREECTX, freectx),
+    DISPATCH_ENCODER_ELEM(DOES_SELECTION, common, priv_key_info, pem,
+                          does_selection),
+    DISPATCH_ENCODER_ELEM(ENCODE, mlkem, priv_key_info, pem, encode),
+    { 0, NULL },
+};
+
 /* SLH-DSA — one shared table per format across all 12 parameter sets;
  * each encode function dispatches on the key's own CKA_PARAMETER_SET at
  * runtime (p11prov_obj_get_key_param_set), same structure as ML-DSA's

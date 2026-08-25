@@ -37,7 +37,23 @@ R5-ph1 → R6**, P2 tail demand-driven.
 
 ---
 
-## R3 — ML-KEM encoders (gap OP-3) — Priority 1, effort S (core) + S (parity)
+## R3 — ML-KEM encoders (gap OP-3) — Priority 1, effort S (core, DONE) + S (parity, open)
+
+**Core: DONE (2026-08-25).** Landed exactly as scoped below — the
+private-key URI-PEM PrivateKeyInfo encoder, three variants sharing one
+function/table (`p11prov_mlkem_encoder_priv_key_info_pem_encode`,
+`encoder.c`; registered in `provider.c`'s `encode_pkey_as_pk11_uri`
+block). Live-verified: `genpkey -algorithm ML-KEM-768 -out k.pem`
+exits 0 and the file decodes to a `pkcs11:...type=private` URI —
+never raw key bytes, confirmed by both a positive assertion (URI label
+present) and a negative one (no `PRIVATE KEY` label ever present),
+both sabotage-tested. One sabotage false alarm along the way: the
+first attempt broke an unrelated test (T10) too, traced to the
+sabotage script itself using a non-scoped string replace on a line
+three test functions share verbatim — not a product bug; the
+corrected sabotage reproduced cleanly. Harness: `PASS=19 FAIL=0
+XFAIL=2 XPASS=0`. **Parity tier (SPKI/text encoders) remains open** —
+see below, unchanged from the original plan.
 
 **Core claim (what actually flips T4x_encode):** `genpkey -algorithm
 ML-KEM-* -out k.pem` exits 0 and writes a URI-PEM the R2 decoders will

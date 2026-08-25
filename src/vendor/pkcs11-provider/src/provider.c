@@ -1556,6 +1556,17 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
         SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHA2_256F)
         SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHAKE_256F)
 #undef SLHDSA_ENCODER_URI_PEM
+        /* ML-KEM (remediation R3 core) — one shared function/table across
+         * all 3 parameter sets, same as ML-DSA's block above. */
+        ADD_ALGO_EXT(ML_KEM_512, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_mlkem_encoder_priv_key_info_pem_functions);
+        ADD_ALGO_EXT(ML_KEM_768, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_mlkem_encoder_priv_key_info_pem_functions);
+        ADD_ALGO_EXT(ML_KEM_1024, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_mlkem_encoder_priv_key_info_pem_functions);
     }
 
     TERM_ALGO(encoder);

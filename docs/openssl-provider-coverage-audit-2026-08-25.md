@@ -118,7 +118,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 |---|---|---|---|
 | OP-1 | `OSSL_OP_MAC` not implemented at all — token HMAC/CMAC/KMAC unreachable from `EVP_MAC`; every MAC falls back to software | source sweep; block-list table `provider.c:1570` | Medium |
 | OP-2 | No DECODERs for ML-DSA / ML-KEM / composites → **URI-PEM round-trip broken for PQC keys** (keygen writes the PEM; loading it back fails `store_result.c:160 unsupported` — proven live). Workaround: raw `pkcs11:` URIs, which do work | live probe; `provider.c:1500-1525` | **High** |
-| OP-3 | **Confirmed live, root cause pinned down (2026-08-25, while landing R3b)** — ML-KEM has ZERO encoders registered at all (no SPKI, no text, no URI-PEM — confirmed both in source, zero `ADD_ALGO_EXT(..., encoder, ...)` lines for `ML_KEM` in `provider.c`, and live). Consequence discovered live: `genpkey -algorithm ML-KEM-768 -out k.pem` now generates and persists a real key on-token (R3b landed — see OP-6) but the `-out` write step itself fails with `Error writing key(s)`/exit 1, because writing ANY output (PEM file or `-text` to stdout) needs a PrivateKeyInfo/SPKI encoder that doesn't exist for this key type. The key is not lost — it's on the token and resolvable via its `pkcs11:` URI through STORE, a different code path from ENCODER — but genpkey's own convenience output is unusable. Latchset sibling tree has these encoders to port. | `provider.c:1395-1494` vs `vendor/latchset/src/provider.c:1445-1457`; live (T4x_encode) | Medium |
+| OP-3 | **Core RESOLVED (R3, 2026-08-25)** — was: ML-KEM had zero encoders registered, so `genpkey -algorithm ML-KEM-768 -out k.pem` generated and persisted a real key on-token (R3b) but the `-out` write step failed, `Error writing key(s)`/exit 1. **Correction to this row's own earlier wording** (found live during R3, not assumed): public-key output was never actually broken — `storeutl -text`/`pkey -pubout` already worked with zero encoders, because ML-KEM's keymgmt EXPORT function bridges the public bytes into OpenSSL's default provider, which encodes them. The real, sole functional gap was the **private**-key URI-PEM PrivateKeyInfo encoder — the one path that can't use that bridge (private material never crosses into another provider). Fixed: `p11prov_mlkem_encoder_priv_key_info_pem_encode` (`encoder.c`), registered for all 3 variants inside the `encode_pkey_as_pk11_uri` block (`provider.c`). Like every other PrivateKeyInfo encoder in this fork, it never touches raw key bytes — `p11prov_encoder_private_key_to_asn1` calls `p11prov_obj_get_public_uri(key)` and PEM-wraps that `pkcs11:` URI string; live-verified the written file decodes to a `type=private` URI, and a negative harness assertion checks no `PRIVATE KEY` label ever appears. **Remaining, deliberately separate parity tier**: SPKI/text encoders for public keys (would let public output work even in `DISALLOW_EXPORT_PUBLIC` configs, and match every other PQC family in this fork) — not functionally required, scoped as follow-up. | `encoder.c`; live (T4x_encode, T10 as network-effect control) | ~~Medium~~ — |
 | OP-4 | KEM dispatch lacks `SET_CTX_PARAMS`/`SETTABLE` | `kem/mlkem.c:259-289` | Low |
 | OP-6 | **RESOLVED (R3b, 2026-08-25)** — was: ML-KEM keys could not be GENERATED on token through the provider (ML-KEM keymgmt had no `OSSL_FUNC_KEYMGMT_GEN*` entries; ML-DSA keygen worked, so this was an asymmetry, not a design rule). Now: real `GEN_INIT`/`GEN`/`GEN_CLEANUP`/`GEN_SET_PARAMS`/`GEN_SETTABLE_PARAMS` wired into all 3 per-variant ML-KEM keymgmt tables (`kem/mlkem.c`), implemented in `keymgmt.c` (mirroring the ML-DSA block) and exported non-static since `kem/mlkem.c` is a separate translation unit. `CKA_PARAMETER_SET` is mandatory on the public-key template per the C++ engine's own `extractParameterSet` call (no silent default, matching ML-DSA's pattern); `CKA_ENCAPSULATE`/`CKA_DECAPSULATE` requested explicitly on pub/priv templates to match what a spec-correct caller sends (both engines enforce these server-side regardless of template content). Live-verified: key generates, persists on-token, and is independently confirmed via `storeutl -text` showing `ML-KEM-768 Public-Key`. Landing this surfaced OP-3 (above) as a distinct, still-open gap — genpkey's own `-out` write needs an encoder this fix does not provide. | both engines, live probe + source | ~~**High**~~ — |
 | OP-5 | KDF surface is HKDF+TLS13-KDF only; engines also offer PBKDF2 and SP800-108 counter/feedback KDFs that OpenSSL has standard fetch names for | `provider.c:1161` vs engine KDF mechs | Low–Medium |
@@ -208,7 +208,7 @@ trusted; unexpected PASS of an XFAIL case fails the run (ratchet).
 | T3a-c | ML-DSA-44/65/87 | token keygen → URI sign → **software** verify; FIPS 204 signature sizes (2420/3309/4627) | PASS |
 | T3t | Tamper | flipped-byte signature must fail software verify | PASS (reject) |
 | T4x | ML-KEM token keygen (OP-6) | provider keygen lands a key on token, confirmed via `storeutl` (not gated on genpkey's own `-out` exit code — that write needs a still-missing encoder, tracked separately below) | **PASS** (flipped by R3b, 2026-08-25) |
-| T4x_encode | ML-KEM `genpkey -out` PEM write (OP-3) | same genpkey call, but this time its own exit code IS the assertion | **XFAIL** (new case, discovered live while landing R3b; flips on R3) |
+| T4x_encode | ML-KEM `genpkey -out` PEM write (OP-3) | genpkey exit 0, URI-PEM label present, no `PRIVATE KEY` label ever present | **PASS** (flipped by R3 core, 2026-08-25) |
 | T5 | RSA-3072 | token keygen → PKCS#1 sign → software verify; software OAEP-encrypt → provider decrypt | PASS |
 | T6 | ECDSA P-256 | token keygen → sign → software verify | PASS |
 | T7 | Ed25519 | token keygen → sign → software verify | PASS |
@@ -318,7 +318,26 @@ T4x_encode, to independently track OP-3's gap so it isn't lost. Both
 sabotage-tested (T4x: broken storeutl assertion, FAIL exit 1;
 T4x_encode: swapped in a trivially-succeeding body, XPASS exit 1).
 Harness now reads `OPENSSL-PROVIDER-HARNESS: PASS=18 FAIL=0 XFAIL=3
-XPASS=0`. Remaining XFAILs: OP-3 (T4x_encode), OP-2 (T11), ENV-2 (T15b).
+XPASS=0`. Remaining XFAILs at that point: OP-3 (T4x_encode), OP-2
+(T11), ENV-2 (T15b).
+
+**Further update (2026-08-25, same day) — the phase-2 plan
+(`docs/openssl-provider-remediation-plan-phase2-2026-08-25.md`) was
+written, then adversarially challenged against the source before
+execution (v2 of that document records 8 challenge results, 5 of
+which changed scope) — see that document's own log rather than
+duplicating it here. R3's challenge (C1) corrected a claim this audit
+itself had made: ML-KEM public-key output was never actually broken;
+only the private-key URI-PEM encoder was. **R3 core is now landed**
+per that corrected scope — see OP-3 above. T4x_encode flipped to PASS.
+A negative security assertion (no `PRIVATE KEY` label ever appears in
+the written file) was added, not just the positive check, and both
+were sabotage-tested — the first sabotage attempt produced a false
+alarm (an unrelated test, T10, also failed) that traced to a mistake
+in the sabotage script itself (a non-scoped string replace hit an
+identical line shared by three test functions), not a real product
+bug; corrected and re-verified. Harness is now `PASS=19 FAIL=0
+XFAIL=2 XPASS=0`. Remaining XFAILs: OP-2 (T11), ENV-2 (T15b).
 
 ## 7. Companion document
 
