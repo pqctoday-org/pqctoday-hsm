@@ -49,6 +49,16 @@ live-confirmed description of exactly what R3 needs to fix, discovered
 because R3b's own test (T4x) turned out to be accidentally coupled to
 it. Harness is now `PASS=18 FAIL=0 XFAIL=3 XPASS=0`.
 
+**Further update (2026-08-25, same day) — phase-2 plan written:** every
+remaining item (R2/R3/R4/R5/R6 and the P2 tail) was re-explored against
+the source and re-planned in detail — several scopes changed materially
+on re-inspection (R4 in particular gained two newly found latent bugs
+and grew from S to M), and a KMIP-crate cross-reference section was
+added. **The detailed, current plan for all remaining work is
+`docs/openssl-provider-remediation-plan-phase2-2026-08-25.md`** — the
+P1/P2 rows below stand as the original record but are superseded by
+that document for execution.
+
 ## Priority 0 — correctness / hygiene of what already ships
 
 | # | Item | Gap | Status | Sketch (original) | Effort | Proof |
