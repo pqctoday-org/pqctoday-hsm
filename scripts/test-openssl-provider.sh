@@ -84,10 +84,13 @@ run_case() {
   fi
 }
 
-# mk_arena <name> <engine_so> — hermetic workdir: own tokendir + conf + one
-# token labeled <name>, so pkcs11:token=<name> URIs are unambiguous (a probe
-# during the audit showed type-only URIs match the wrong key once two
-# keypairs share a token). Echoes the workdir; caller sets the env pair.
+# mk_arena <name> <engine_so> [extra_pkcs11_sect_lines] — hermetic workdir:
+# own tokendir + conf + one token labeled <name>, so pkcs11:token=<name>
+# URIs are unambiguous (a probe during the audit showed type-only URIs
+# match the wrong key once two keypairs share a token). Echoes the
+# workdir; caller sets the env pair. extra_pkcs11_sect_lines (optional)
+# is appended verbatim into [pkcs11_sect] — used by T9 to opt into
+# pkcs11-module-load-behavior=early (see that case for why).
 mk_arena() {
   # Locals split across statements deliberately: under `set -u` bash 5.2
   # does NOT let a later expansion in the SAME `local` statement see an
@@ -95,6 +98,7 @@ mk_arena() {
   # building this harness, not theory).
   local name="$1"
   local engine="$2"
+  local extra="${3:-}"
   local w="$ROOT_WORK/$name"
   mkdir -p "$w/tokens"
   cat > "$w/softhsm2.conf" <<EOF
@@ -117,8 +121,22 @@ pkcs11-module-path = $engine
 pkcs11-module-token-pin = 1234
 pkcs11-module-encode-provider-uri-to-pem = true
 activate = 1
+$extra
 EOF
-  SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$engine" \
+  # OPENSSL_CONF=/dev/null: this runs BEFORE use_arena resets OPENSSL_CONF to
+  # THIS arena's own config, so a caller invoking mk_arena mid-run still has
+  # the PREVIOUS arena's OPENSSL_CONF exported. softhsm2-util links libcrypto,
+  # which auto-loads OPENSSL_CONF on first use if set — if that stale config
+  # activates the pkcs11-provider with pkcs11-module-load-behavior=early
+  # (as T9's does), it dlopens+C_Initializes the SAME engine .so THIS
+  # softhsm2-util invocation is also about to load directly, and the second
+  # C_Initialize legitimately fails with CKR_CRYPTOKI_ALREADY_INITIALIZED
+  # ("SoftHSM is already initialized") — reproduced live once T9 started
+  # using early-load-behavior (WART-4 / remediation R0.4): T10 and T14,
+  # which run after T9, started failing purely from environment leakage, not
+  # from anything wrong in their own arenas. Same fix T8 already uses for
+  # its software peer keygen, applied here for the same reason.
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$engine" \
     --init-token --free --label "$name" --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
   echo "$w"
 }
@@ -235,7 +253,27 @@ t8() { local w; w=$(mk_arena ecdh "$CPP_ENGINE_SO") && use_arena "$w" || return 
 }
 run_case T8 PASS "ECDH P-256 token derive == software derive" t8
 
-t9() { local w="$ROOT_WORK/t1"; use_arena "$w"
+# WART-4 root cause (confirmed live, not guessed): p11prov_query_operation()
+# returns ctx->op_digest/op_kdf/op_random/op_exchange/op_signature/
+# op_asym_cipher/op_kem directly; those are only populated by
+# operations_init(), itself only triggered lazily via p11prov_ctx_status()
+# from a key/session code path. A fetch with no key ever loaded gets NULL
+# once and gives up — no_cache=1 on that NULL only helps a LATER re-query
+# in the SAME process, which a single `openssl dgst` invocation never gets.
+# Tried forcing p11prov_ctx_status() unconditionally at the top of
+# p11prov_query_operation() itself — rebuilt and it broke provider
+# activation entirely (dropped out of `openssl list -providers`), a real
+# regression caught before landing (see the remediation plan's R0.4 row).
+# The provider already ships the actual fix for this as an opt-in config
+# directive: pkcs11-module-load-behavior=early forces the same
+# p11prov_ctx_status() call, but from OSSL_provider_init() itself (see
+# provider.c's own "PAY ATTENTION: do this as the last thing" comment)
+# rather than from inside a fetch callback — verified live to resolve this
+# exact scenario with zero source changes. Not a provider bug: lazy-by-
+# default module loading is a deliberate trade-off (don't pay for a token
+# connection when the caller never uses one), same category as WART-5's
+# OAEP default mismatch — document/configure around it, don't "fix" it.
+t9() { local w; w=$(mk_arena t9early "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
   local a b c d
   a=$(O dgst -sha256 -propquery "provider=pkcs11" -hex -r "$MSG") || return 1
   b=$(O dgst -sha256 -propquery "provider=default" -hex -r "$MSG") || return 1
@@ -243,7 +281,7 @@ t9() { local w="$ROOT_WORK/t1"; use_arena "$w"
   d=$(O dgst -sha3-256 -propquery "provider=default" -hex -r "$MSG") || return 1
   [[ "$a" == "$b" && "$c" == "$d" ]]
 }
-run_case T9 XFAIL "digest fetch via provider propquery in a fresh process (gap WART-4 upgraded / remediation R0.4)" t9
+run_case T9 PASS "digest fetch via provider propquery in a fresh process, pkcs11-module-load-behavior=early (gap WART-4 / remediation R0.4)" t9
 
 t10() { local w; w=$(mk_arena uripem "$CPP_ENGINE_SO") && use_arena "$w" || return 1
   O genpkey -propquery "?provider=pkcs11" -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$w/k.pem" || return 1
@@ -305,7 +343,13 @@ t15b() { # ENV-2: in-memory token store, no cross-process persistence — any
          # multi-process keygen+use flow MUST fail today (remediation R6)
   [[ -n "$RUST_ENGINE_SO" ]] || return 1
   local w="$ROOT_WORK/rustfunc"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
-  "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+  # OPENSSL_CONF=/dev/null: same reason as mk_arena's own init-token call
+  # (see its comment) — without it this would inherit whatever prior
+  # arena's OPENSSL_CONF is still exported, which can make an unrelated
+  # config's pkcs11-module-load-behavior=early collide with this direct
+  # module load and mask ENV-2's real failure behind
+  # CKR_CRYPTOKI_ALREADY_INITIALIZED instead.
+  OPENSSL_CONF=/dev/null "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
     --init-token --free --label rustarm --so-pin 1234 --pin 1234 >/dev/null 2>&1 || true  # state dies with this process
   OPENSSL_CONF="$w/openssl.cnf" \
     O genpkey -propquery "?provider=pkcs11" -algorithm ML-DSA-65 -out "$w/k.pem" 2>/dev/null \

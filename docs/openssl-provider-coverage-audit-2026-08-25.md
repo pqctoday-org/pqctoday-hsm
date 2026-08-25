@@ -124,7 +124,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | OP-5 | KDF surface is HKDF+TLS13-KDF only; engines also offer PBKDF2 and SP800-108 counter/feedback KDFs that OpenSSL has standard fetch names for | `provider.c:1161` vs engine KDF mechs | Low–Medium |
 | WART-1 | Every provider token scan spams the C++ engine log: `ObjectFile.cpp(181): The attribute is not a byte string: 0x0/0x1/0x2/0x86/0x100/0x170-0x172/0x601` — provider queries CKA_CLASS/CKA_TOKEN/CKA_PRIVATE/CKA_TRUSTED/CKA_KEY_TYPE/CKA_MODIFIABLE/CKA_COPYABLE/CKA_DESTROYABLE/etc. with byte-string templates | observed on every live probe | Low (noise; masks real errors) |
 | WART-3 | Build hygiene: the gitignored WASM-generated `src/config.h` leaks into the **native** CMake build — compile warnings `"PACKAGE_MAJOR redefined"` and the live provider reports version **1.1** (config.h) while CMake defines **0.4.0** | observed in gate build log + live `list -providers` | Low |
-| WART-4 | Mechanism-gated operation tables are invisible to fresh-process fetches: `openssl list` shows nothing `@ pkcs11` for signature/KEM, AND a strict property-targeted fetch (`dgst -sha256 -propquery provider=pkcs11`) **functionally fails** in a fresh process (`inner_evp_generic_fetch:unsupported`) — operations only resolve once a token object forces module init in-process (URI-loaded keys work; standalone digest/MAC-style fetches do not). Upgraded from cosmetic after the harness proved the fetch failure | live probes (T9) | Medium |
+| WART-4 | **RESOLVED (R0.4, 2026-08-25 later same day)** — was: mechanism-gated operation tables are invisible to fresh-process fetches: `openssl list` shows nothing `@ pkcs11` for signature/KEM, AND a strict property-targeted fetch (`dgst -sha256 -propquery provider=pkcs11`) **functionally fails** in a fresh process (`inner_evp_generic_fetch:unsupported`) — operations only resolve once a token object forces module init in-process. Fix: the provider already ships `pkcs11-module-load-behavior = early` for exactly this case (forces the same lazy-init call from inside `OSSL_provider_init()` instead of leaving it to a key-object path); wired into the harness's T9 arena. See `docs/openssl-provider-remediation-plan-2026-08-25.md` R0.4 for the full story, including a real `mk_arena()` ordering bug it exposed and fixed along the way. | live probes (T9) | ~~Medium~~ |
 | WART-5 | The C++ engine rejects OpenSSL's SHA-1 OAEP defaults (`Invalid hashAlg/mgf combination for RSA-OAEP`, `SoftHSM_keygen.cpp:8056`) — plain `-pkeyopt rsa_padding_mode:oaep` against a token key fails until the caller pins `rsa_oaep_md`/`rsa_mgf1_md` (sha256 verified working). Likely deliberate FIPS posture; needs documenting, not fixing | live (T5's first run) | Low (interop caveat) |
 
 ### B. Backend algorithms not exposed
@@ -212,7 +212,7 @@ trusted; unexpected PASS of an XFAIL case fails the run (ratchet).
 | T6 | ECDSA P-256 | token keygen → sign → software verify | PASS |
 | T7 | Ed25519 | token keygen → sign → software verify | PASS |
 | T8 | ECDH P-256 | provider derive vs software derive — same shared secret | PASS |
-| T9 | Digest fetch (WART-4) | `dgst -propquery provider=pkcs11` in a fresh process | **XFAIL** (flips on R0.4) |
+| T9 | Digest fetch (WART-4) | `dgst -propquery provider=pkcs11` in a fresh process, dedicated arena with `pkcs11-module-load-behavior=early` | **PASS** (flipped by R0.4, 2026-08-25) |
 | T10 | URI-PEM round-trip, EC (control) | genpkey URI-PEM → load back → sign | PASS |
 | T11 | URI-PEM round-trip, ML-DSA (OP-2) | same flow | **XFAIL** (flips on R2) |
 | T12 | SLH-DSA reachability (ALG-1) | provider-propquery SLH-DSA-SHA2-128s keygen | **XFAIL** (flips on R1) |
@@ -270,6 +270,15 @@ harness's own T0 preflight rather than skipping silently). Verified live
 the full gate run (the mandatory core steps 1-7 are unrelated and slow;
 this reproduces the identical command path `run_step` uses) — real exit
 code 0, `OPENSSL-PROVIDER-HARNESS: PASS=13 FAIL=0 XFAIL=5 XPASS=0`.
+
+**Update (2026-08-25, later same day) — P0 remediation batch executed:**
+R0.1/R0.2/R0.3/R0.4/R0.5 all landed (R0.4 on a second, careful attempt
+after a first attempt regressed provider activation and was reverted —
+see the remediation plan for the full story). The harness now reads
+`OPENSSL-PROVIDER-HARNESS: PASS=14 FAIL=0 XFAIL=4 XPASS=0` — T9 flipped
+from XFAIL to PASS; WART-4 is resolved (§4A above); WART-1/3/5 are
+resolved/documented. Remaining XFAILs: OP-6 (T4x), OP-2 (T11), ALG-1
+(T12), ENV-2 (T15b) — all still plan-only, Priority 1/2 items.
 
 ## 7. Companion document
 

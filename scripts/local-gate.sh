@@ -22,7 +22,7 @@
 #  12. (--javajce) JavaJCE provider suite (mvn test) in pqc-dev-sandbox  [opt-in]
 #  13. (--javajce-remote) JavaJCE-remote gRPC provider suite vs live pqc-grpc  [opt-in]
 #  14. (--openssl-provider) vendored pkcs11-provider vs real OpenSSL 3.6, both
-#                            engines (13 PASS / 0 FAIL / 5 XFAIL / 0 XPASS)  [opt-in]
+#                            engines (14 PASS / 0 FAIL / 4 XFAIL / 0 XPASS)  [opt-in]
 #
 # Steps 6-7 (Rust PKCS#11 conformance, differential harness) were opt-in
 # until 2026-08-23 — both are core PKCS#11 v3.2 evidence, and both had gone
@@ -300,7 +300,7 @@ if [[ $RUN_OPENSSL_PROVIDER == 1 ]]; then
   # if the build is absent, the harness's own T0 preflight fails loudly with
   # a clear "run the --cpp gate step / cmake build first" message rather than
   # silently skipping.
-  run_step "OpenSSL provider coverage (13 PASS / 0 FAIL / 5 XFAIL / 0 XPASS)" \
+  run_step "OpenSSL provider coverage (14 PASS / 0 FAIL / 4 XFAIL / 0 XPASS)" \
     "cd /ag/pqctoday-hsm && bash scripts/test-openssl-provider.sh"
 fi
 
