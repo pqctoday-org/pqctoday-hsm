@@ -1986,8 +1986,22 @@ scoped down honestly from a literal SunPKCS11 port.**
   (2026-09-15 target), re-verify, update the migrate-catalog row again
   (RC→GA status change).
 
-**W6 status as of 2026-08-25: IN PROGRESS, real fixes shipped, one
-genuine architectural blocker found and deliberately NOT worked around.**
+**W6 status as of 2026-08-25: COMPLETE.** Gap 4 below (originally left
+deliberately blocked, pending an explicit user decision) was resolved
+the same day by an engine-side fix
+(`docs/implementation-plan-jca-remaining-gaps-2026-08-25.md` §3, WS-A:
+`CKM_HKDF_DERIVE` gained `CKF_HKDF_SALT_KEY` support, so the opaque
+intermediate secret can chain in as the next Extract's salt by handle,
+never leaving the token — the "genuinely correct fix" this doc's own
+Gap 4 text below already named, not the opacity-loosening trade-off it
+was weighing). Resolving Gap 4 then exposed four more real integration
+gaps only visible once an actual handshake attempt got past it —
+`docs/implementation-plan-jca-remaining-gaps-2026-08-25.md` §4 (WS-B)
+has the full writeup. End state: both FIPS-profile groups now complete
+live handshakes against `pqc-rest` with token-side proof, plus the
+required benchmark. Summary folded in below; kept short here since the
+remaining-gaps doc is now the detailed record for this slice of work,
+matching how this doc already treats Gaps 1-3.
 The plan's own confidence going in — "Path is provider-delegated KEM
 (confirmed, §2.3a), validated by W0.1; no `SSLContext` surgery
 expected" — turned out to be only partially true: KEM delegation itself
@@ -2095,7 +2109,9 @@ provider, not the W0.1 probe.
   explicit provider** — i.e., against SunJCE's actual real
   implementation, not a self-consistency check against our own prior
   output.
-- **Gap 4, found, NOT fixed — a genuine architectural wall, not a bug to
+- **Gap 4, found, RESOLVED 2026-08-25 (full writeup:
+  `docs/implementation-plan-jca-remaining-gaps-2026-08-25.md` §3,
+  WS-A) — a genuine architectural wall, not a bug to
   patch through.** TLS 1.3's key schedule chains a *previous* HKDF
   output back in as the **salt** for the *next* Extract step
   (early_secret → handshake_secret → master_secret, standard TLS 1.3
@@ -2121,30 +2137,40 @@ provider, not the W0.1 probe.
   not just this one TLS flow, and is exactly the kind of security-posture
   trade-off this plan's whole discipline says gets decided explicitly,
   not slipped in to make a spike go green. **Deliberately left blocked
-  and undecided here** rather than silently loosened. The genuinely
-  "correct" fix — full in-token HKDF chaining via repeated
-  `CKM_HKDF_DERIVE` calls that never bring the intermediate secret into
-  the JVM at all — is exactly what §10's "In-token TLS key schedule"
-  deferred item already named; this live spike is the first concrete
-  confirmation of *why* it was deferred, not a new discovery of scope.
-- **`JavaJCE/spikes/W6TlsHandshakeSpike.java`** (new — not part of
+  and undecided here** rather than silently loosened, at the time this
+  text was written. **Resolved 2026-08-25 without that trade-off**: the
+  genuinely "correct" fix this paragraph already named — full in-token
+  HKDF chaining that never brings the intermediate secret into the JVM
+  at all — is exactly what shipped, via engine support for
+  `CKF_HKDF_SALT_KEY` (§10's "In-token TLS key schedule" deferred item,
+  pulled forward once this live spike confirmed it was actually load-
+  bearing rather than a hypothetical future need). This provider's
+  opacity guarantee for `"HKDF-SHA256"` callers in general was never
+  loosened. Full details:
+  `docs/implementation-plan-jca-remaining-gaps-2026-08-25.md` §3.
+- **`JavaJCE/spikes/W6TlsHandshakeSpike.java`** (updated 2026-08-25 —
+  the hybrid group is now `argv[0]`, default `SecP256r1MLKEM768`, so
+  both FIPS groups run without editing the file; not part of
   `mvn test`, same precedent as W0.1's own standalone probe; requires
   the `pqc-rest` container reachable at `pqc-rest:5720`) — kept in the
   repo as a real, reproducible artifact: installs this provider at
   `Security.insertProviderAt(p, 1)`, pins
   `jdk.tls.namedGroups=SecP256r1MLKEM768,SecP384r1MLKEM1024`, opens a
   real `SSLSocket` to the live quantum-safe endpoint, and starts a
-  handshake. Currently fails at Gap 4 above; re-run it once Gap 4 is
-  resolved (in either direction) to confirm the full handshake actually
-  completes end to end — that verification has deliberately **not**
-  been claimed here, since it hasn't happened yet.
-- **Verify:** `mvn test`, 198/198 unchanged (Gaps 1–3's fixes touch code
-  paths — EC key generation/import, multi-IKM HKDF — already covered by
-  the existing suite plus one new HKDF test; none of the 198 tests
-  exercise a live TLS handshake, so none of them could have caught Gaps
-  1–4 in the first place, which is exactly why the live spike existed).
-  The end-to-end handshake itself: **not yet passing**, blocked on Gap
-  4's undecided trade-off.
+  handshake. **Now succeeds end to end for both FIPS-profile groups**
+  (`SecP256r1MLKEM768`, `SecP384r1MLKEM1024`), with `P11Debug` proof
+  the token's own code path ran — the four more gaps that stood between
+  Gap 4's resolution and an actual completed handshake (record-cipher
+  caller-IV policy, HKDF-output key typing, an exact-output-size
+  contract bug, and an unrelated shutdown-hook JVM crash found along
+  the way) are documented in
+  `docs/implementation-plan-jca-remaining-gaps-2026-08-25.md` §4, WS-B.
+- **Verify:** `mvn test`, 203/203 (198 prior + 5 new across Gaps 1-3's
+  original coverage and WS-B's caller-IV/HKDF-AES-reimport/exact-
+  output-size tests). The end-to-end handshake: **passing**, live
+  against `pqc-rest:5720`, both FIPS-profile groups, plus a required
+  benchmark (token-backed adds a 1.48x mean-latency ratio over stock
+  JDK — see the remaining-gaps doc §4 for the full table).
 
 ### W7 — Phase 2: Rust engine via gRPC transport
 - `GrpcTransport` implementing the same transport interface: reuse

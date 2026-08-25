@@ -71,8 +71,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`DeriveTests::testHkdfDerive`) — `CKM_HKDF_DERIVE` had no prior
   native test coverage at all. The Rust engine (`softhsmrustv3`)
   already implemented this correctly; no cross-engine divergence.
+- **`JavaJCE` completes real, live TLS 1.3 handshakes through this
+  provider**, both FIPS-profile hybrid groups (`SecP256r1MLKEM768`,
+  `SecP384r1MLKEM1024`), proven against a live `pqc-rest` endpoint with
+  token-side (`P11Debug`) proof — not just key agreement in isolation.
+  New opt-in flag `-Dsofthsmv3.jce.callerGcmIv=true` (default off,
+  non-FIPS): JDK 27's TLS 1.3 record cipher must supply its own RFC
+  8446 deterministic per-record nonce, which this provider's GCM
+  `Cipher` refuses by default under SP 800-38D §8.2 policy — confirmed
+  from JDK's own `SSLCipher.java` that this is mandatory protocol
+  structure, not caller laziness, before adding the flag.
+  `CKM_HKDF_DERIVE`-derived keys can now be requested as `"AES"` and
+  come back as a genuine, usable `CKK_AES` object (re-imported from the
+  engine's own always-`CKK_GENERIC_SECRET` HKDF output) rather than
+  failing the record cipher with `CKR_KEY_TYPE_INCONSISTENT` — needed
+  because JDK 27's key schedule genuinely requests `"AES"` for the
+  traffic key. New benchmark spike
+  (`JavaJCE/spikes/W6TlsHandshakeBenchmark.java`, N=50 real handshakes
+  per arm): token-backed adds a 1.48x mean-latency ratio over stock
+  JDK (6.2ms vs 4.2ms mean) — in line with this module's own
+  documented FFM-overhead expectation.
 
 ### Fixed
+
+- **A JVM shutdown-hook race in `JavaJCE`'s own zeroization work
+  (`1ed4965`) crashed the JVM outright** — one hook `Thread` per
+  constructed `SoftHSMv3Provider`, all run concurrently by the JVM at
+  exit, meant 100+ concurrent native `C_CloseSession` calls in this
+  module's own test suite, corrupting engine-internal state
+  (`SIGSEGV` in `std::_Rb_tree_increment` inside `libsofthsmv3.so`)
+  despite each engine-side manager already holding its own mutex.
+  Fixed with a single JVM-wide lock serializing every `close()` call —
+  teardown-only, never a hot path, so free in practice. Found live
+  while pursuing the TLS-handshake item above, not introduced by it.
+- **`JavaJCE`'s `engineGetOutputSize` for AES-GCM/CBC/CTR returned a
+  padded upper bound instead of the exact output size**, invisible to
+  every byte[]-based caller in this module's existing 200+ tests but a
+  hard failure (`"Cipher buffering error"`) against JDK 27's own
+  `ByteBuffer`-based `Cipher.doFinal` bridging, which strictly checks
+  the real written length against it. Now returns the exact size for
+  GCM/CBC/CTR; only CBC+PKCS5 decrypt keeps a safe upper bound (the
+  true unpadded length isn't knowable before decrypting).
 
 - **`bench-harness`'s keygen templates for Ed25519/X25519/RSA-with-
   parameter-set had gone stale against two already-shipped engine
