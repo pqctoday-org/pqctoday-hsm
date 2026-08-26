@@ -995,3 +995,343 @@ const OSSL_DISPATCH p11prov_tls13_kdf_functions[] = {
 #endif
     { 0, NULL },
 };
+
+/* ===========================================================================
+ *  PBKDF2 (phase 4 R10) — CKM_PKCS5_PBKD2, C_DeriveKey-based, no base key.
+ *
+ * Unlike HKDF, PBKDF2 needs no input-key-material object: the password
+ * travels directly in CK_PKCS5_PBKD2_PARAMS2, and the engine's own
+ * C_DeriveKey (SoftHSM_keygen.cpp) special-cases CKM_PKCS5_PBKD2 BEFORE
+ * validating hBaseKey — confirmed by reading that dispatch, not assumed:
+ * the mechanism switch admits it, then an early `if (mechanism ==
+ * CKM_PKCS5_PBKD2)` block runs before any base-key object lookup. So this
+ * calls p11prov_DeriveKey directly (hBaseKey = CK_INVALID_HANDLE) rather
+ * than reusing HKDF's p11prov_derive_key, which requires and dereferences
+ * a real P11PROV_OBJ key handle this operation has no equivalent of.
+ * ===========================================================================
+ */
+
+struct p11prov_pbkdf2_ctx {
+    P11PROV_CTX *provctx;
+    uint8_t *pass;
+    size_t passlen;
+    uint8_t *salt;
+    size_t saltlen;
+    uint64_t iter;
+    CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE prf;
+    P11PROV_SESSION *session;
+};
+typedef struct p11prov_pbkdf2_ctx P11PROV_PBKDF2_CTX;
+
+static void *p11prov_pbkdf2_newctx(void *provctx)
+{
+    P11PROV_CTX *ctx = (P11PROV_CTX *)provctx;
+    P11PROV_PBKDF2_CTX *pctx;
+    CK_RV ret;
+
+    P11PROV_debug("pbkdf2 newctx");
+
+    ret = p11prov_ctx_status(ctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    pctx = OPENSSL_zalloc(sizeof(P11PROV_PBKDF2_CTX));
+    if (pctx == NULL) {
+        return NULL;
+    }
+    pctx->provctx = ctx;
+    /* draft-19-unrelated default: PKCS#5 v2.0's own RFC 8018 default PRF
+     * is HMAC-SHA1 when OSSL_KDF_PARAM_DIGEST is never set, matching the
+     * default provider's own PBKDF2 behavior. */
+    pctx->prf = CKP_PKCS5_PBKD2_HMAC_SHA1;
+    return pctx;
+}
+
+static void p11prov_pbkdf2_freectx(void *ctx)
+{
+    P11PROV_PBKDF2_CTX *pctx = (P11PROV_PBKDF2_CTX *)ctx;
+
+    P11PROV_debug("pbkdf2 freectx (ctx:%p)", ctx);
+
+    if (pctx == NULL) {
+        return;
+    }
+    if (pctx->session) {
+        p11prov_return_session(pctx->session);
+    }
+    OPENSSL_clear_free(pctx->pass, pctx->passlen);
+    OPENSSL_clear_free(pctx->salt, pctx->saltlen);
+    OPENSSL_free(pctx);
+}
+
+static void p11prov_pbkdf2_reset(void *ctx)
+{
+    P11PROV_PBKDF2_CTX *pctx = (P11PROV_PBKDF2_CTX *)ctx;
+    P11PROV_CTX *provctx;
+
+    P11PROV_debug("pbkdf2 reset (ctx:%p)", ctx);
+
+    if (pctx == NULL) {
+        return;
+    }
+    provctx = pctx->provctx;
+    if (pctx->session) {
+        p11prov_return_session(pctx->session);
+    }
+    OPENSSL_clear_free(pctx->pass, pctx->passlen);
+    OPENSSL_clear_free(pctx->salt, pctx->saltlen);
+    memset(pctx, 0, sizeof(*pctx));
+    pctx->provctx = provctx;
+    pctx->prf = CKP_PKCS5_PBKD2_HMAC_SHA1;
+}
+
+static int p11prov_pbkdf2_set_ctx_params(void *ctx, const OSSL_PARAM params[])
+{
+    P11PROV_PBKDF2_CTX *pctx = (P11PROV_PBKDF2_CTX *)ctx;
+    const OSSL_PARAM *p;
+    int ret;
+
+    P11PROV_debug("pbkdf2 set ctx params (ctx=%p, params=%p)", pctx, params);
+
+    if (params == NULL) {
+        return RET_OSSL_OK;
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_PASSWORD);
+    if (p) {
+        OPENSSL_clear_free(pctx->pass, pctx->passlen);
+        pctx->pass = NULL;
+        pctx->passlen = 0;
+        ret = OSSL_PARAM_get_octet_string(p, (void **)&pctx->pass, 0,
+                                          &pctx->passlen);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_SALT);
+    if (p) {
+        OPENSSL_clear_free(pctx->salt, pctx->saltlen);
+        pctx->salt = NULL;
+        pctx->saltlen = 0;
+        ret = OSSL_PARAM_get_octet_string(p, (void **)&pctx->salt, 0,
+                                          &pctx->saltlen);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_ITER);
+    if (p) {
+        uint64_t iter;
+        ret = OSSL_PARAM_get_uint64(p, &iter);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+        if (iter == 0 || iter > (uint64_t)ULONG_MAX) {
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_ITERATION_COUNT);
+            return RET_OSSL_ERR;
+        }
+        pctx->iter = iter;
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_DIGEST);
+    if (p) {
+        const char *digest = NULL;
+        CK_MECHANISM_TYPE hash_mech;
+        CK_RV rv;
+
+        ret = OSSL_PARAM_get_utf8_string_ptr(p, &digest);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+        rv = p11prov_digest_get_by_name(digest, &hash_mech);
+        if (rv != CKR_OK) {
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_DIGEST);
+            return RET_OSSL_ERR;
+        }
+        switch (hash_mech) {
+        case CKM_SHA_1:
+            pctx->prf = CKP_PKCS5_PBKD2_HMAC_SHA1;
+            break;
+        case CKM_SHA224:
+            pctx->prf = CKP_PKCS5_PBKD2_HMAC_SHA224;
+            break;
+        case CKM_SHA256:
+            pctx->prf = CKP_PKCS5_PBKD2_HMAC_SHA256;
+            break;
+        case CKM_SHA384:
+            pctx->prf = CKP_PKCS5_PBKD2_HMAC_SHA384;
+            break;
+        case CKM_SHA512:
+            pctx->prf = CKP_PKCS5_PBKD2_HMAC_SHA512;
+            break;
+        default:
+            /* Engine-supported PRFs only (SoftHSM_keygen.cpp's own PRF
+             * switch) — anything else would fail at C_DeriveKey time
+             * with a less clear error, reject it here instead. */
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_DIGEST);
+            return RET_OSSL_ERR;
+        }
+        P11PROV_debug("set prf to %lu", (unsigned long)pctx->prf);
+    }
+
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_pbkdf2_settable_ctx_params(void *ctx,
+                                                             void *prov)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_PROPERTIES, NULL, 0),
+        OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_DIGEST, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_KDF_PARAM_PASSWORD, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_KDF_PARAM_SALT, NULL, 0),
+        OSSL_PARAM_uint64(OSSL_KDF_PARAM_ITER, NULL),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+static int p11prov_pbkdf2_get_ctx_params(void *ctx, OSSL_PARAM *params)
+{
+    OSSL_PARAM *p;
+
+    if (params == NULL) {
+        return RET_OSSL_OK;
+    }
+    p = OSSL_PARAM_locate(params, OSSL_KDF_PARAM_SIZE);
+    if (p) {
+        return OSSL_PARAM_set_size_t(p, SIZE_MAX);
+    }
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_pbkdf2_gettable_ctx_params(void *ctx,
+                                                             void *prov)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_size_t(OSSL_KDF_PARAM_SIZE, NULL),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+static int p11prov_pbkdf2_derive(void *ctx, unsigned char *key, size_t keylen,
+                                 const OSSL_PARAM params[])
+{
+    P11PROV_PBKDF2_CTX *pctx = (P11PROV_PBKDF2_CTX *)ctx;
+    CK_PKCS5_PBKD2_PARAMS2 ck_params = { 0 };
+    CK_MECHANISM mechanism = {
+        .mechanism = CKM_PKCS5_PBKD2,
+        .pParameter = &ck_params,
+        .ulParameterLen = sizeof(ck_params),
+    };
+    CK_OBJECT_CLASS class = CKO_SECRET_KEY;
+    CK_KEY_TYPE key_type = CKK_GENERIC_SECRET;
+    CK_BBOOL val_false = CK_FALSE;
+    CK_BBOOL val_true = CK_TRUE;
+    CK_ULONG key_size = keylen;
+    CK_ATTRIBUTE key_template[6] = {
+        { CKA_CLASS, &class, sizeof(class) },
+        { CKA_TOKEN, &val_false, sizeof(val_false) },
+        { CKA_VALUE_LEN, &key_size, sizeof(key_size) },
+        { CKA_KEY_TYPE, &key_type, sizeof(key_type) },
+        { CKA_SENSITIVE, &val_false, sizeof(val_false) },
+        { CKA_EXTRACTABLE, &val_true, sizeof(val_true) },
+    };
+    CK_SLOT_ID slotid = CK_UNAVAILABLE_INFORMATION;
+    CK_OBJECT_HANDLE dkey_handle = CK_INVALID_HANDLE;
+    struct fetch_attrs attrs[1];
+    int num = 0;
+    CK_ULONG got_size;
+    CK_RV ret;
+    int err;
+
+    P11PROV_debug("pbkdf2 derive (ctx:%p, key:%p[%zu], params:%p)", ctx, key,
+                  keylen, params);
+
+    err = p11prov_pbkdf2_set_ctx_params(ctx, params);
+    if (err != RET_OSSL_OK) {
+        return err;
+    }
+
+    if (pctx->pass == NULL || key == NULL) {
+        ERR_raise(ERR_LIB_PROV, PROV_R_MISSING_PASS);
+        return RET_OSSL_ERR;
+    }
+    if (pctx->iter == 0) {
+        ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_ITERATION_COUNT);
+        return RET_OSSL_ERR;
+    }
+    if (keylen == 0) {
+        ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_KEY_LENGTH);
+        return RET_OSSL_ERR;
+    }
+
+    ck_params.saltSource = CKZ_SALT_SPECIFIED;
+    ck_params.pSaltSourceData = pctx->salt;
+    ck_params.ulSaltSourceDataLen = (CK_ULONG)pctx->saltlen;
+    ck_params.iterations = (CK_ULONG)pctx->iter;
+    ck_params.prf = pctx->prf;
+    ck_params.pPassword = (CK_UTF8CHAR *)pctx->pass;
+    ck_params.ulPasswordLen = (CK_ULONG)pctx->passlen;
+
+    if (pctx->session == NULL) {
+        /* reqlogin=true: C_DeriveKey's write-authorization check
+         * (SoftHSM_keygen.cpp's haveWrite) rejects a session-object
+         * create from an unauthenticated session with CKR_USER_NOT_
+         * LOGGED_IN — reproduced live even for the pre-existing, already-
+         * working HKDF derive path under the same bare conditions (no
+         * prior operation on the session), so this is a general
+         * C_DeriveKey requirement, not a PBKDF2-specific one HKDF's own
+         * false/false session-acquisition call happens to duck only
+         * because its real callers (e.g. TLS handshakes) already have a
+         * logged-in session by the time HKDF runs. */
+        ret = p11prov_get_session(pctx->provctx, &slotid, NULL, NULL,
+                                  CKM_PKCS5_PBKD2, NULL, NULL, true, false,
+                                  &pctx->session);
+        if (ret != CKR_OK) {
+            P11PROV_raise(pctx->provctx, ret, "Failed to acquire session");
+            return RET_OSSL_ERR;
+        }
+    }
+
+    ret = p11prov_DeriveKey(pctx->provctx, p11prov_session_handle(pctx->session),
+                            &mechanism, CK_INVALID_HANDLE, key_template, 6,
+                            &dkey_handle);
+    if (ret != CKR_OK) {
+        P11PROV_raise(pctx->provctx, ret, "PBKDF2 C_DeriveKey failed");
+        return RET_OSSL_ERR;
+    }
+
+    FA_SET_BUF_VAL(attrs, num, CKA_VALUE, key, keylen, true);
+    ret = p11prov_fetch_attributes(pctx->provctx, pctx->session, dkey_handle,
+                                   attrs, num);
+    if (ret != CKR_OK) {
+        P11PROV_raise(pctx->provctx, ret, "Failed to retrieve derived key");
+        return RET_OSSL_ERR;
+    }
+    FA_GET_LEN(attrs, 0, got_size);
+    if (got_size != keylen) {
+        P11PROV_raise(pctx->provctx, CKR_GENERAL_ERROR,
+                      "Expected derived key of len %zu, but got %lu", keylen,
+                      got_size);
+        return RET_OSSL_ERR;
+    }
+
+    return RET_OSSL_OK;
+}
+
+const OSSL_DISPATCH p11prov_pbkdf2_kdf_functions[] = {
+    DISPATCH_HKDF_ELEM(pbkdf2, NEWCTX, newctx),
+    DISPATCH_HKDF_ELEM(pbkdf2, FREECTX, freectx),
+    DISPATCH_HKDF_ELEM(pbkdf2, RESET, reset),
+    DISPATCH_HKDF_ELEM(pbkdf2, DERIVE, derive),
+    DISPATCH_HKDF_ELEM(pbkdf2, SET_CTX_PARAMS, set_ctx_params),
+    DISPATCH_HKDF_ELEM(pbkdf2, SETTABLE_CTX_PARAMS, settable_ctx_params),
+    DISPATCH_HKDF_ELEM(pbkdf2, GET_CTX_PARAMS, get_ctx_params),
+    DISPATCH_HKDF_ELEM(pbkdf2, GETTABLE_CTX_PARAMS, gettable_ctx_params),
+    { 0, NULL },
+};

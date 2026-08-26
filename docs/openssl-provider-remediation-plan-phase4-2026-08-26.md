@@ -1,4 +1,4 @@
-# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R7+R8+R18+R19+R21.1 EXECUTED, R9-R11/R20/rest-of-R21 still plan-only
+# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R7+R8+R10(PBKDF2)+R18+R19+R21.1 EXECUTED, R9/R11/R20/rest-of-R21/R10(SP800-108) still plan-only
 
 **Execution update (2026-08-26):** R7, R8, R18, R19, and R21.1 have
 been executed and landed — see
@@ -36,14 +36,32 @@ entry for the full account, including a fifth item (plain SIGN/VERIFY
 dispatch was entirely missing, so `pkeyutl -rawin` — the API this
 project's own harness already uses for every other hash-internal
 algorithm — could never reach composite at all) that is a genuine
-capability gap rather than a bug in existing behavior. R8/R18/R19/
-R21.1/R7's own sections below are left as originally written (the
+capability gap rather than a bug in existing behavior. **R10's own two
+probes each corrected a plan premise rather than confirming it**: the
+plan called `set_skey`/`derive_skey` "dispatch stubs" — they were
+real, complete, already-working implementations (T13's own harness
+case already exercises the SKEY path live, via TLS 1.3's key
+schedule), so probe (b) needed zero work, just a documentation fix.
+Probe (a) held on the substance (PBKDF2/SP800-108 genuinely need
+provider-side work) but the C++ engine's own `C_DeriveKey` support for
+both turned out to be real and complete, not just advertised in
+`C_GetMechanismInfo` — re-verified by reading `SoftHSM_keygen.cpp`
+directly rather than trusting a first grep of `SoftHSM_slots.cpp`
+alone. Scoped work was PBKDF2 only, per the plan's own stated priority
+("PBKDF2 first ... SP800-108 second"); SP800-108 deferred. A real,
+non-obvious authorization requirement surfaced building the harness
+case (`CKR_USER_NOT_LOGGED_IN` on a bare session) and was confirmed
+NOT PBKDF2-specific before being treated as a fix — the pre-existing
+HKDF path hits the identical failure under the same bare conditions,
+it just never surfaces in real use because TLS handshake callers
+already have a logged-in session by the time HKDF runs. R8/R18/R19/
+R21.1/R7/R10's own sections below are left as originally written (the
 plan, not the result) per this project's append-only convention; do
-not edit them to match the outcome. **Harness: `PASS=47 FAIL=0
-XFAIL=0 XPASS=0`** — sixteen cases gained total since this plan's
+not edit them to match the outcome. **Harness: `PASS=52 FAIL=0
+XFAIL=0 XPASS=0`** — twenty-one cases gained total since this plan's
 starting point (T18/T18b/T18c/T18d, T20/T20b/T20c/T20d,
-T21a–T21h). R9–R11, R20, and the rest of R21 remain plan-only,
-not executed.
+T21a–T21h, T22/T22b/T22c/T22d/T22e). R9, R11, R20, the rest of R21,
+and R10's SP800-108 half remain plan-only, not executed.
 
 Scope: everything still open after phase 3 closed R12–R17 in full
 (branch `feat/jdk27-jca-provider`, commit `8f3fb8e`, unpushed; harness

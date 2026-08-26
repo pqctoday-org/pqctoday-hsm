@@ -114,6 +114,13 @@
 #define P11PROV_NAME_HKDF "HKDF"
 #define P11PROV_NAMES_HKDF P11PROV_NAME_HKDF
 #define P11PROV_DESCS_HKDF "PKCS11 HKDF Implementation"
+/* Phase 4 R10: matches the default provider's own "PBKDF2" name +
+ * id-PBKDF2 OID — confirmed live via `openssl list -kdf-algorithms
+ * -provider default` (`{ 1.2.840.113549.1.5.12, PBKDF2 } @ default`),
+ * the same check R8 (MAC) made before assuming a name convention. */
+#define P11PROV_NAME_PBKDF2 "PBKDF2"
+#define P11PROV_NAMES_PBKDF2 "PBKDF2:1.2.840.113549.1.5.12"
+#define P11PROV_DESCS_PBKDF2 "PKCS11 PBKDF2 Implementation"
 #define P11PROV_NAMES_ED25519 "ED25519:1.3.101.112"
 #define P11PROV_NAME_ED25519 "ED25519"
 #define P11PROV_DESCS_ED25519 "PKCS11 ED25519 Implementation"

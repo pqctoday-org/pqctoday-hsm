@@ -1314,6 +1314,106 @@ existing harness case negotiates a composite sigalg at all, including
 for the three pre-existing profiles, so this is a pre-existing gap
 this item did not close, not a new one it introduced.
 
+**Phase 4, R10 (KDF widening — PBKDF2), DONE (PBKDF2 only; SP800-108
+deferred):** two probes, both re-verifying the plan's own premise
+before scoping any work, per the plan's own "probes first" framing.
+
+**Probe (a) — PBKDF2/SP800-108 engine support**: the plan's premise
+("the C++ engine advertises CKM_PKCS5_PBKD2 and
+CKM_SP800_108_COUNTER_KDF/_FEEDBACK_KDF") looked, on a first grep of
+`SoftHSM_slots.cpp`, like it might only be a `C_GetMechanismInfo`
+advertisement with no real `C_DeriveKey` handling behind it (a "fake
+advertisement" gap that would have meant the actual work belonged in
+the C++ engine, not the provider) — re-checked in `SoftHSM_keygen.cpp`
+before trusting that read, and the premise held: PBKDF2 and both
+SP800-108 variants (Counter, Feedback) are fully implemented in
+`C_DeriveKey`, with real PRF/parameter validation. The gap is
+provider-only, exactly as scoped — `kdf.c` implemented only HKDF/
+TLS13-KDF, nothing registered CKM_PKCS5_PBKD2 at the `OSSL_OP_KDF`
+level at all.
+
+**Probe (b) — `EVP_KDF_derive_SKEY` opaque-handoff viability**: the
+plan called `set_skey`/`derive_skey` "dispatch stubs (lines 43-44)" —
+those line numbers are only the `DISPATCH_HKDF_FN` forward
+declarations; the actual `p11prov_hkdf_set_skey`/`derive_skey`/
+`p11prov_tls13_kdf_derive_skey` functions have real, complete bodies
+already. Not a stub needing implementation — and not just
+code-present-but-unproven either: T13's own harness case already
+exercises this path live ("token performs KEM ops + TLS13-KDF derives,
+engine-log verified"), since OpenSSL's TLS 1.3 key-schedule machinery
+chains HKDF/TLS13-KDF secrets via the SKEY API internally. No work
+needed; this probe's finding is a documentation correction; the plan's
+own claim of stub status was wrong.
+
+**Scoped work**: PBKDF2 only, per the plan's own stated priority
+("PBKDF2 first — highest caller demand — SP800-108 second"); SP800-108
+deferred to keep this item's diff and proof scoped to what was built
+and verified, matching R8's own precedent for AES-CMAC/KMAC. New
+PBKDF2 section in `kdf.c` (`struct p11prov_pbkdf2_ctx`,
+newctx/freectx/reset/set_ctx_params/settable_ctx_params/
+get_ctx_params/gettable_ctx_params/derive, new
+`p11prov_pbkdf2_kdf_functions[]` dispatch table), wired into
+`provider.c`'s checklist-driven mechanism discovery (new
+`CKM_PKCS5_PBKD2` checklist entry and registration case) and
+`provider.h` (name `"PBKDF2:1.2.840.113549.1.5.12"` — matches the
+default provider's own name + OID, confirmed live via `openssl list
+-kdf-algorithms -provider default` before assuming, the same check R8
+made).
+
+**Structurally different from HKDF, not just a copy with renamed
+fields**: PBKDF2 needs no input-key-material object — the password
+travels directly in `CK_PKCS5_PBKD2_PARAMS2`, and the engine's own
+`C_DeriveKey` special-cases `CKM_PKCS5_PBKD2` *before* validating
+`hBaseKey` (confirmed by reading that dispatch, not assumed). HKDF's
+existing `p11prov_derive_key` helper requires and dereferences a real
+`P11PROV_OBJ` key handle this operation has no equivalent of, so
+`derive()` calls `p11prov_DeriveKey` directly with `hBaseKey =
+CK_INVALID_HANDLE` instead of reusing that helper.
+
+**A genuine, non-obvious authorization requirement, caught live and
+confirmed NOT provider-specific before treating it as a fix**: the
+first working build failed every case with `CKR_USER_NOT_LOGGED_IN`
+("User is not authorized") from `SoftHSM_keygen.cpp`'s `haveWrite`
+check on a bare, freshly-initialized session. Before assuming this was
+a PBKDF2-specific gap, reproduced the identical failure against the
+pre-existing, already-shipped HKDF path under the same bare conditions
+(`openssl kdf HKDF ...` with no prior session activity) — it fails
+identically. This is a general `C_DeriveKey` requirement HKDF's own
+real callers (TLS handshakes) never hit because the session is already
+logged in by the time HKDF runs, not a template or dispatch gap PBKDF2
+introduced. Fixed by requesting a logged-in session
+(`p11prov_get_session(..., reqlogin=true, ...)`, vs HKDF's own
+`false` — the two operations' actual call sites just have different
+authentication preconditions, this isn't a case of one being "more
+correct" than the other).
+
+**Proof**: five new harness cases (T22/T22b/T22c/T22d/T22e, one per
+supported PRF — SHA-1/224/256/384/512, the engine's own PRF switch in
+`SoftHSM_keygen.cpp`), each cross-checking token output against
+software PBKDF2 byte-for-byte AND requiring engine-log evidence
+("Created new object" — the same class of proof T13/T15/T18/T20
+established, not output equality, since PBKDF2 is deterministic and a
+silent wrong-provider fallback would be invisible in the value alone),
+with an R13 negative-control twin. Own dedicated arena per case (not
+shared `mk_arena`), same reason as T20's own — `mk_arena` hardcodes
+`log.level = ERROR`, which would hide the debug-level marker this
+proof depends on. Sabotage-tested at the harness level per the plan's
+own prescription: corrupting only the SHA-256 PRF mapping (mapping it
+to `CKP_PKCS5_PBKD2_HMAC_SHA1` instead) broke only T22c, all four other
+digests stayed green.
+
+Both engines' full test suites remain green (C++: 8/8 CTest suites;
+Rust: unaffected — no code under `rust/` changed by this item).
+**Harness: `PASS=52 FAIL=0 XFAIL=0 XPASS=0`** — five cases gained
+(T22/T22b/T22c/T22d/T22e), zero regressions.
+
+**Deferred, not started**: SP800-108 Counter/Feedback KDFs (both fully
+implemented in the engine per probe (a) above — same shape of work as
+this item, not attempted here to keep the diff scoped); `EVP_SKEY`
+support for PBKDF2 itself (HKDF/TLS13-KDF already have it per probe
+(b); PBKDF2's own `derive_skey` was out of this item's "PBKDF2 first"
+scoping).
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:

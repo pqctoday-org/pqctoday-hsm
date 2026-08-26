@@ -1161,6 +1161,77 @@ run_case T21g PASS "composite id-MLDSA65-Ed25519-SHA512 (.48, new profile, phase
 t21h() { compsig_case "1.3.6.1.5.5.7.6.46" ML-DSA-65 EC -pkeyopt group:P-384; }
 run_case T21h PASS "composite id-MLDSA65-ECDSA-P384-SHA512 (.46, new profile, phase-4 R7): cross-checked against the external raw-signature KAT vector; real token sign+verify, both sabotage controls rejected" t21h
 
+# ─── T22: PBKDF2 KDF (remediation R10) ───────────────────────────────────────
+# CKM_PKCS5_PBKD2 is a genuinely new OSSL_OP_KDF algorithm for this provider
+# (kdf.c previously implemented only HKDF/TLS13-KDF). Own dedicated arena for
+# the same reason T20's own does: mk_arena hardcodes log.level=ERROR, which
+# would hide the "Created new object" marker this proof depends on.
+t22_case() { # $1 = SHA1|SHA224|SHA256|SHA384|SHA512
+  local dig="$1" w
+  w="$ROOT_WORK/r10${dig}"
+  mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = DEBUG
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $CPP_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-load-behavior = early
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$CPP_ENGINE_SO" \
+    --init-token --free --label "r10${dig}" --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+
+  # ── Positive: propquery pinned, token must do the work ──
+  local tokout swout
+  tokout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O kdf \
+    -provider pkcs11 -propquery "?provider=pkcs11" -keylen 32 \
+    -kdfopt pass:testpass -kdfopt salt:hex:0102030405060708 -kdfopt iter:1000 \
+    -kdfopt digest:"$dig" PBKDF2 2>"$w/tok.err.log") || return 1
+  swout=$(OPENSSL_CONF=/dev/null O kdf -keylen 32 \
+    -kdfopt pass:testpass -kdfopt salt:hex:0102030405060708 -kdfopt iter:1000 \
+    -kdfopt digest:"$dig" PBKDF2 2>/dev/null) || return 1
+  [[ -n "$tokout" && "$tokout" == "$swout" ]] || return 1
+  # Engine-log evidence, not exit code or output value (R13): PBKDF2 is
+  # deterministic, so a silent wrong-provider fallback is invisible in the
+  # output alone — only the token creating the derived session key object
+  # is the arbiter that it, not the default provider, computed it.
+  grep -q "Created new object" "$w/tok.err.log" || return 1
+
+  # ── Negative control (R13): same arena, propquery removed ──
+  local ctrlout
+  ctrlout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O kdf \
+    -keylen 32 -kdfopt pass:testpass -kdfopt salt:hex:0102030405060708 \
+    -kdfopt iter:1000 -kdfopt digest:"$dig" PBKDF2 2>"$w/ctrl.err.log") || return 1
+  [[ "$ctrlout" == "$swout" ]] || return 1
+  if grep -q "Created new object" "$w/ctrl.err.log"; then
+    return 1
+  fi
+  return 0
+}
+t22() { t22_case SHA1; }
+run_case T22 PASS "token PBKDF2 (HMAC-SHA1 PRF) == software PBKDF2, engine-log verified (remediation R10); negative-control twin (R13)" t22
+t22b() { t22_case SHA224; }
+run_case T22b PASS "token PBKDF2 (HMAC-SHA224 PRF) == software PBKDF2, engine-log verified (remediation R10); negative-control twin (R13)" t22b
+t22c() { t22_case SHA256; }
+run_case T22c PASS "token PBKDF2 (HMAC-SHA256 PRF) == software PBKDF2, engine-log verified (remediation R10); negative-control twin (R13)" t22c
+t22d() { t22_case SHA384; }
+run_case T22d PASS "token PBKDF2 (HMAC-SHA384 PRF) == software PBKDF2, engine-log verified (remediation R10); negative-control twin (R13)" t22d
+t22e() { t22_case SHA512; }
+run_case T22e PASS "token PBKDF2 (HMAC-SHA512 PRF) == software PBKDF2, engine-log verified (remediation R10); negative-control twin (R13)" t22e
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 

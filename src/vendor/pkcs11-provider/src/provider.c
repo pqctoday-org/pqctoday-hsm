@@ -925,6 +925,7 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              CKM_X25519,
                              CKM_X448,
                              CKM_HKDF_DERIVE,
+                             CKM_PKCS5_PBKD2,
                              DIGEST_MECHS,
                              HMAC_MECHS,
                              CKM_EDDSA,
@@ -1175,6 +1176,13 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 ADD_ALGO(TLS13_KDF, tls13, kdf, prop);
                 ADD_ALGO(HKDF, hkdf, exchange, prop);
                 UNCHECK_MECHS(CKM_HKDF_DERIVE);
+                break;
+            /* Phase 4 R10: CKM_PKCS5_PBKD2 needs no base-key object (the
+             * password travels in the mechanism params), so unlike HKDF
+             * it gets no matching `exchange` registration. */
+            case CKM_PKCS5_PBKD2:
+                ADD_ALGO(PBKDF2, pbkdf2, kdf, prop);
+                UNCHECK_MECHS(CKM_PKCS5_PBKD2);
                 break;
             case CKM_SHA_1:
                 ADD_ALGO(SHA1, sha1, digest, prop);
