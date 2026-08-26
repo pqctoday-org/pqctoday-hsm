@@ -426,6 +426,7 @@ extern const OSSL_DISPATCH p11prov_mlkem1024_keymgmt_functions[];
 #include "kdf.h"
 #include "encoder.h"
 #include "digests.h"
+#include "mac.h"
 #include "util.h"
 #include "session.h"
 #include "slot.h"

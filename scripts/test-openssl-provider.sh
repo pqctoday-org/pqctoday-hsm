@@ -966,6 +966,96 @@ run_case T18c PASS "TLS 1.3 handshake, token-backed SERVER negotiating X25519 (s
 r18d() { r18_server_case X448; }
 run_case T18d PASS "TLS 1.3 handshake, token-backed SERVER negotiating X448 (server-role mirror of T18b), engine-log verified (remediation R18); negative-control twin (R13)" r18d
 
+# t20/t20b/t20c/t20d — token HMAC (remediation R8, phase-4 plan): bytes-in
+# mode only (OSSL_MAC_PARAM_KEY -> ephemeral session secret key object ->
+# C_SignInit/Update/Final), no SKEYMGMT dependency, per the plan's own C5
+# scoping. Registered as a single generic "HMAC" algorithm (matching the
+# default provider's own naming — confirmed live via
+# `openssl list -mac-algorithms -provider default`, one bare "HMAC" name,
+# not one per digest) with the digest chosen at runtime via
+# OSSL_MAC_PARAM_DIGEST, exactly like `openssl mac -digest SHA256 HMAC`
+# already does against the default provider. A first attempt registered
+# one pre-bound name per digest (HMAC-SHA2-256 etc.) — real, spec-correct
+# algorithm identities, but unreachable by the exact CLI form this proof
+# uses; caught live, not by a wrong value (HMAC output is deterministic,
+# so a silent default-provider fallback produces byte-identical output —
+# only the engine log tells the two apart, matching R13's own founding
+# lesson applied to a brand new operation type for the first time).
+# Own arena (not mk_arena), same reason as T13/T15/T18: mk_arena hardcodes
+# log.level=ERROR, which suppresses the "Created new object" DEBUG-level
+# line this case's engine-log evidence needs — reproduced live, not
+# assumed, the same mistake T13/T15's own comments already flagged for
+# anyone tempted to reach for mk_arena's convenience here. Minimum key
+# sizes are a real, deliberate engine constraint (FIPS 198-1: key length
+# >= digest length — SoftHSM_slots.cpp declares ulMinKeySize per
+# mechanism accordingly), not a provider bug — the 64-byte key below
+# satisfies all four variants' minimums at once.
+t20_case() { # $1 = SHA1|SHA256|SHA384|SHA512
+  local dig="$1" w
+  w="$ROOT_WORK/r8${dig}"
+  mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = DEBUG
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $CPP_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-load-behavior = early
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$CPP_ENGINE_SO" \
+    --init-token --free --label "r8${dig}" --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+
+  local key="0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627"
+  echo "hmac harness message" > "$w/msg.txt"
+
+  # ── Positive: propquery pinned, token must do the work ──
+  local tokout swout
+  tokout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "key:$key" \
+    -digest "$dig" -in "$w/msg.txt" HMAC 2>"$w/tok.err.log") || return 1
+  swout=$(OPENSSL_CONF=/dev/null O mac -macopt "key:$key" \
+    -digest "$dig" -in "$w/msg.txt" HMAC 2>/dev/null) || return 1
+  [[ -n "$tokout" && "$tokout" == "$swout" ]] || return 1
+  # Engine-log evidence, not exit code or output value: the token creating
+  # the ephemeral session secret key object is the arbiter that it — not
+  # the default provider — computed the HMAC.
+  grep -q "Created new object" "$w/tok.err.log" || return 1
+
+  # ── Negative control (R13): same arena, propquery removed ──
+  local ctrlout
+  ctrlout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -macopt "key:$key" -digest "$dig" -in "$w/msg.txt" HMAC \
+    2>"$w/ctrl.err.log") || return 1
+  [[ "$ctrlout" == "$swout" ]] || return 1
+  # The hazard confirmed: output is still correct — but must show ZERO
+  # token object-creation activity, or the positive case proves nothing.
+  if grep -q "Created new object" "$w/ctrl.err.log"; then
+    return 1
+  fi
+  return 0
+}
+t20() { t20_case SHA1; }
+run_case T20 PASS "token HMAC-SHA1 via generic 'HMAC' algorithm (OSSL_MAC_PARAM_DIGEST-selected, matching the default provider's own naming) == software HMAC, engine-log verified (remediation R8); negative-control twin (R13)" t20
+t20b() { t20_case SHA256; }
+run_case T20b PASS "token HMAC-SHA256 == software HMAC, engine-log verified (remediation R8); negative-control twin (R13)" t20b
+t20c() { t20_case SHA384; }
+run_case T20c PASS "token HMAC-SHA384 == software HMAC, engine-log verified (remediation R8); negative-control twin (R13)" t20c
+t20d() { t20_case SHA512; }
+run_case T20d PASS "token HMAC-SHA512 == software HMAC, engine-log verified (remediation R8); negative-control twin (R13)" t20d
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 

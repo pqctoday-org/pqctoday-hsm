@@ -1071,6 +1071,93 @@ regression from this change). **Harness: `PASS=35 FAIL=0 XFAIL=0
 XPASS=0`**, unchanged. C++: 8/8 CTest suites on retry. Rust
 unaffected (C-provider-side only).
 
+**Phase 4, R8 (`OSSL_OP_MAC`: token HMAC, bytes-in mode), DONE:** a
+genuinely new operation type for this provider — `OSSL_OP_MAC` had no
+`op_mac` arm in `p11prov_query_operation` at all before this, so every
+`EVP_MAC` fetch fell through to the default provider unconditionally.
+Bytes-in mode only, no `SKEYMGMT` dependency, exactly as scoped —
+`OSSL_MAC_PARAM_KEY` arrives as raw bytes, becomes an ephemeral
+session secret key object (new `p11prov_create_mac_key`, objects.c —
+written as a new function rather than parameterizing the existing
+`p11prov_create_secret_key`, which has exactly one caller (`kdf.c`)
+and hardcodes `CKA_DERIVE`, not the `CKA_SIGN` capability HMAC needs),
+then `C_SignInit`/`C_SignUpdate`/`C_SignFinal` with the matching
+`CKM_SHA*_HMAC` mechanism compute the MAC on-token. New `mac.c`/
+`mac.h`, wired into `provider.c`'s checklist-driven mechanism
+discovery and `CMakeLists.txt`.
+
+**A real design correction, caught live before it shipped wrong:**
+the first implementation registered one pre-bound algorithm name per
+digest (`HMAC-SHA2-256`, `HMAC-SHA2-384`, ...), modeled directly on
+`digests.c`'s own per-variant `DISPATCH` pattern — a legitimate,
+correctly-named algorithm identity per NIST convention, but not what
+the plan's own proof command (`openssl mac -propquery
+"?provider=pkcs11" ...`) actually resolves to. OpenSSL's own default
+provider registers a *single* generic `"HMAC"` name and takes the
+digest as a runtime parameter (`OSSL_MAC_PARAM_DIGEST`, the same one
+`openssl mac -digest SHA256 HMAC` sets) — confirmed live via `openssl
+list -mac-algorithms -provider default` before assuming, not after
+guessing. Under the per-digest design, `mac HMAC -digest SHA256`
+silently resolved to `HMAC @ default` even with propquery pinned,
+because nothing pkcs11-registered was named bare `"HMAC"` — and the
+output was still byte-identical to the correct answer, because HMAC
+is deterministic, so a wrong-provider silent fallback here produces
+*no observable symptom in the value at all*. Only checking the engine
+log (zero token activity) caught it — the exact same class of false
+pass R13 exists to prevent, now confirmed live for the first
+genuinely new operation type added since R13 was written, not just
+carried forward by analogy. Rewritten to match: one `"HMAC"`
+algorithm, digest selected dynamically via `mac_set_digest`
+(`p11prov_digest_get_by_name` -> a small `CKM_SHA*` -> `CKM_SHA*_HMAC`
+mapping table), key and digest choice both deferred and cached until
+the first real operation (`C_SignInit` lazily invoked from
+`update()`/`final()`, since neither the key nor the digest choice is
+guaranteed to have arrived by the time `init()` returns — OpenSSL's
+own `mac` app and `EVP_MAC_init` can supply either via `init()`'s own
+arguments or a later `set_ctx_params()` call, and this provider does
+not get to assume which).
+
+**Minimum key sizes are a real, deliberate engine constraint, not a
+provider bug** — surfaced while building the harness case, chased
+down before being dismissed: `SoftHSM_slots.cpp` declares
+`ulMinKeySize` per HMAC mechanism equal to that digest's own output
+length (20/32/48/64 bytes for SHA-1/256/384/512), matching FIPS
+198-1's own key-length guidance. A too-short test key produces a
+genuine, correct `CKR_KEY_SIZE_RANGE` rejection from the engine, not
+a provider defect; the harness case's key is sized to satisfy all
+four digests' minimums at once.
+
+Four new harness cases (T20/T20b/T20c/T20d, one per digest), each
+proving token computation via engine-log evidence (`"Created new
+object"` — the ephemeral session key, the same class of proof T13/T15
+established) rather than output equality, with an R13 negative-
+control twin. Each needed its **own** dedicated arena, not the shared
+`mk_arena` helper — `mk_arena` hardcodes `log.level = ERROR`, which
+silently suppresses exactly the debug-level log line this proof
+depends on; T13/T15/T18's own comments already documented this
+precise trap, and it was hit again live here before being caught,
+underscoring why those comments exist rather than being redundant
+with this entry. Sabotage-tested independently: reverting the
+SHA2-256 mechanism mapping alone breaks only T20b, the other three
+digests stay green; reverting the ephemeral key's `CKA_PRIVATE`
+attribute alone (the same class of bug R15 first found, confirmed to
+recur in genuinely new code, not copy-pasted from a fixed instance)
+breaks all four T20 cases uniformly, since they share the same
+key-creation helper.
+
+Both engines' full test suites remain green (C++: 8/8 CTest suites;
+Rust unaffected, confirmed — this item's changes are C-provider-side
+only). **Harness: `PASS=39 FAIL=0 XFAIL=0 XPASS=0`** — four cases
+gained (T20/T20b/T20c/T20d), zero regressions.
+
+**Deferred, not started**: `EVP_MAC_init_SKEY` opaque-token-key mode
+(a separate, later step per the plan's own C5 scoping — bytes-in mode
+is complete in itself); AES-CMAC and KMAC128/256 (both mechanisms
+this provider's engines already advertise per `SoftHSM_slots.cpp`,
+same `mac.c` shape should extend cleanly, not attempted in this pass
+to keep this item's own diff and proof scoped to what was actually
+built and verified).
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:

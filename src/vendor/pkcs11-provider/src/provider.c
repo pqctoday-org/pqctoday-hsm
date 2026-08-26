@@ -48,6 +48,7 @@ struct p11prov_ctx {
     P11PROV_SLOTS_CTX *slots;
 
     OSSL_ALGORITHM *op_digest;
+    OSSL_ALGORITHM *op_mac;
     OSSL_ALGORITHM *op_kdf;
     OSSL_ALGORITHM *op_random;
     OSSL_ALGORITHM *op_exchange;
@@ -540,6 +541,7 @@ static void p11prov_ctx_free(P11PROV_CTX *ctx)
     }
 
     OPENSSL_free(ctx->op_digest);
+    OPENSSL_free(ctx->op_mac);
     OPENSSL_free(ctx->op_kdf);
     OPENSSL_free(ctx->op_random);
     OPENSSL_free(ctx->op_exchange);
@@ -836,6 +838,11 @@ static CK_RV alg_set_op(OSSL_ALGORITHM **op, int idx, OSSL_ALGORITHM *alg)
     CKM_SHA_1, CKM_SHA224, CKM_SHA256, CKM_SHA384, CKM_SHA512, CKM_SHA512_224, \
         CKM_SHA512_256, CKM_SHA3_224, CKM_SHA3_256, CKM_SHA3_384, CKM_SHA3_512
 
+/* R8 (OSSL_OP_MAC), phase-4 plan: bytes-in mode HMAC only for now
+ * (CMAC/KMAC deferred — see the plan's own phasing). */
+#define HMAC_MECHS \
+    CKM_SHA_1_HMAC, CKM_SHA256_HMAC, CKM_SHA384_HMAC, CKM_SHA512_HMAC
+
 #define RSA_SIG_MECHS \
     CKM_RSA_PKCS, CKM_SHA1_RSA_PKCS, CKM_SHA224_RSA_PKCS, CKM_SHA256_RSA_PKCS, \
         CKM_SHA384_RSA_PKCS, CKM_SHA512_RSA_PKCS, CKM_SHA3_224_RSA_PKCS, \
@@ -919,6 +926,7 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              CKM_X448,
                              CKM_HKDF_DERIVE,
                              DIGEST_MECHS,
+                             HMAC_MECHS,
                              CKM_EDDSA,
                              PQC_MECHS,
 #if SKEY_SUPPORT == 1
@@ -930,6 +938,7 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
     bool add_ecdsasig = false;
     int cl_size = sizeof(checklist) / sizeof(CK_ULONG);
     int digest_idx = 0;
+    int mac_idx = 0;
     int kdf_idx = 0;
     int random_idx = 0;
     int exchange_idx = 0;
@@ -1211,6 +1220,25 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 ADD_ALGO(SHA3_512, sha3_512, digest, prop);
                 UNCHECK_MECHS(CKM_SHA3_512);
                 break;
+            case CKM_SHA_1_HMAC:
+                UNCHECK_MECHS(CKM_SHA_1_HMAC);
+                break;
+            case CKM_SHA256_HMAC:
+                /* Gate the single generic "HMAC" registration on this
+                 * one mechanism — mac.c's own runtime digest selection
+                 * (OSSL_MAC_PARAM_DIGEST) defaults to SHA2-256 and
+                 * checks CKM_SHA*_HMAC availability itself at
+                 * C_SignInit time for whichever digest is actually
+                 * requested, so one registration covers all four. */
+                ADD_ALGO(HMAC, hmac, mac, prop);
+                UNCHECK_MECHS(CKM_SHA256_HMAC);
+                break;
+            case CKM_SHA384_HMAC:
+                UNCHECK_MECHS(CKM_SHA384_HMAC);
+                break;
+            case CKM_SHA512_HMAC:
+                UNCHECK_MECHS(CKM_SHA512_HMAC);
+                break;
             case CKM_EDDSA:
                 ADD_ALGO_EXT(ED25519, signature, prop,
                              p11prov_ed25519_signature_functions);
@@ -1387,6 +1415,7 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
     }
     /* terminations */
     TERM_ALGO(digest);
+    TERM_ALGO(mac);
     TERM_ALGO(kdf);
     TERM_ALGO(exchange);
     TERM_ALGO(signature);
@@ -1773,6 +1802,9 @@ p11prov_query_operation(void *provctx, int operation_id, int *no_cache)
     case OSSL_OP_DIGEST:
         *no_cache = ctx->status == P11PROV_UNINITIALIZED ? 1 : 0;
         return ctx->op_digest;
+    case OSSL_OP_MAC:
+        *no_cache = ctx->status == P11PROV_UNINITIALIZED ? 1 : 0;
+        return ctx->op_mac;
     case OSSL_OP_KDF:
         *no_cache = ctx->status == P11PROV_UNINITIALIZED ? 1 : 0;
         return ctx->op_kdf;

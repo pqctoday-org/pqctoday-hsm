@@ -71,6 +71,7 @@ set(PROVIDER_SOURCES
     src/exchange.c
     src/kdf.c
     src/keymgmt.c
+    src/mac.c
     src/pk11_uri.c
     src/interface.c
     src/objects.c

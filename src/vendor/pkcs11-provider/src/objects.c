@@ -2020,6 +2020,90 @@ P11PROV_OBJ *p11prov_create_secret_key(P11PROV_CTX *provctx,
     return obj;
 }
 
+/* R8 (OSSL_OP_MAC, bytes-in mode): mac.c needs an ephemeral secret key
+ * object created from raw caller-supplied bytes to hand to C_SignInit
+ * with an HMAC/CMAC mechanism — the same shape p11prov_create_secret_key
+ * already provides for CKM_HKDF_DERIVE, but that function hardcodes
+ * CKA_DERIVE=true and never sets CKA_SIGN, so a key it creates cannot be
+ * used with C_SignInit at all. Written as a separate function rather
+ * than parameterizing the existing one: p11prov_create_secret_key has
+ * exactly one caller (kdf.c) and no reason to risk its already-working
+ * shape for a capability set (sign, not derive) it was never meant to
+ * carry. Explicit CKA_PRIVATE=false, same R15 lesson as every other
+ * ephemeral-object template in this provider: the C++ engine defaults
+ * CKA_PRIVATE to true when a template omits it, which would demand a
+ * login a bytes-in MAC session — never having touched a private key —
+ * was never given. */
+P11PROV_OBJ *p11prov_create_mac_key(P11PROV_CTX *provctx,
+                                    P11PROV_SESSION *session,
+                                    const unsigned char *secret,
+                                    size_t secretlen)
+{
+    CK_SESSION_HANDLE sess = CK_INVALID_HANDLE;
+    CK_SESSION_INFO session_info;
+    CK_OBJECT_CLASS key_class = CKO_SECRET_KEY;
+    CK_KEY_TYPE key_type = CKK_GENERIC_SECRET;
+    CK_BBOOL val_true = CK_TRUE;
+    CK_BBOOL val_false = CK_FALSE;
+    CK_ATTRIBUTE key_template[6] = {
+        { CKA_CLASS, &key_class, sizeof(key_class) },
+        { CKA_KEY_TYPE, &key_type, sizeof(key_type) },
+        { CKA_TOKEN, &val_false, sizeof(val_false) },
+        { CKA_PRIVATE, &val_false, sizeof(val_false) },
+        { CKA_SIGN, &val_true, sizeof(val_true) },
+        { CKA_VALUE, (void *)secret, secretlen },
+    };
+    CK_OBJECT_HANDLE key_handle;
+    P11PROV_OBJ *obj;
+    struct fetch_attrs attrs[SECRET_KEY_ATTRS];
+    int num;
+    CK_RV ret;
+
+    sess = p11prov_session_handle(session);
+
+    P11PROV_debug("keys: create mac key (session:%lu secret:%p[%zu])", sess,
+                  (const void *)secret, secretlen);
+
+    ret = p11prov_GetSessionInfo(provctx, sess, &session_info);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    ret = p11prov_CreateObject(provctx, sess, key_template, 6, &key_handle);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    obj = p11prov_obj_new(provctx, session_info.slotID, key_handle, key_class);
+    if (obj == NULL) {
+        return NULL;
+    }
+    obj->data.key.type = key_type;
+    obj->data.key.size = secretlen;
+
+    obj->attrs = OPENSSL_zalloc(SECRET_KEY_ATTRS * sizeof(CK_ATTRIBUTE));
+    if (obj->attrs == NULL) {
+        P11PROV_raise(provctx, CKR_HOST_MEMORY, "Allocation failure");
+        p11prov_obj_free(obj);
+        return NULL;
+    }
+
+    num = 0;
+    FA_SET_BUF_ALLOC(attrs, num, CKA_ID, false);
+    FA_SET_BUF_ALLOC(attrs, num, CKA_LABEL, false);
+    ret = p11prov_fetch_attributes(provctx, session, key_handle, attrs, num);
+    if (ret == CKR_OK) {
+        obj->numattrs = 0;
+        p11prov_move_alloc_attrs(attrs, num, obj->attrs, &obj->numattrs);
+    } else {
+        P11PROV_debug("Failed to query object attributes (%lu)", ret);
+        p11prov_fetch_attrs_free(attrs, num);
+        p11prov_obj_free(obj);
+        obj = NULL;
+    }
+    return obj;
+}
+
 CK_RV p11prov_derive_key(P11PROV_OBJ *key, CK_MECHANISM *mechanism,
                          CK_ATTRIBUTE *template, CK_ULONG nattrs,
                          P11PROV_SESSION **_session, CK_OBJECT_HANDLE *dkey)
