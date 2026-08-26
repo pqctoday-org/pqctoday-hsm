@@ -1,5 +1,12 @@
 # Remoting v3.2 mirror — remaining-gaps remediation plan (2026-08-26)
 
+**Status: COMPLETE. RW6a, RW6b, RW4, RW5, and RW-T all executed and
+green (2026-08-26) — see the "Execution log" at the end of each
+workstream's section for exactly what shipped. 99 of 104 `pkcs11f.h`
+functions are live RPCs; the remaining 5 are genuinely N/A-local
+(documented in `remoting/coverage_ledger.json`). Six commits on
+`feat/remoting-v32-mirror`, local only, not pushed.**
+
 Detailed, execution-ready plan for everything still open after RW0–RW3 of
 `docs/remoting-pkcs11-v32-full-coverage-plan-2026-08-26.md` (the master
 plan; its §3 category matrix and §9 definition-of-done remain normative).
@@ -572,3 +579,90 @@ individually (V4/V20/V19 respectively).
 `pkcs11f.h` functions live — the plan's own end-state target (§5,
 "effort & rpc accounting").** RW-T (ledger, ratchet, generated coverage
 report, docs regeneration) is next and last.
+
+### 2026-08-26 — RW-T (ledger, ratchet, generated coverage report, docs
+regeneration — the program's terminal workstream)
+
+Shipped, all live-verified, plus one real gap found and closed along the
+way — 99 of 104 functions live by the end of this workstream, not 96.
+
+**`remoting/coverage_ledger.json`**: one row per category in
+`cpp_compliance_report.json` (63 real categories, cross-checked against
+the actual JSON file, not just the master plan's own §3 summary table —
+the two matched exactly). Each row: `disposition` (`RPC` / `N/A-local`),
+`case_ids` referencing real test functions (`v32_parity::vNN_...` or
+`core::fn_name`), and a `justification` that names the actual `C_*`
+functions involved — including, honestly, several rows with an EMPTY
+`case_ids` array where the underlying generic verb is implemented and
+proven for OTHER mechanisms in the same family but this specific category
+was never the target of a dedicated case (AES-CTR/ChaCha20 reachable via
+the same `C_EncryptInit` RW3 already proved for AES-ECB; RSA-OAEP and the
+AES-GCM-authenticated-wrap positive round trip genuinely NOT covered,
+both needing RW-P structs out of RW3/RW4's stated scope — stated plainly,
+not glossed over).
+
+**`remoting/scripts/check_coverage_ledger.py`**: the ratchet, exactly the
+three checks the plan specified — (a) every compliance-report category
+has a row, (b) every `case_ids` entry resolves to a real function in the
+file it claims, (c) every RPC declared on the `Pkcs11V32` proto service
+is mentioned somewhere in the ledger. Check (c), run against the
+FIRST-DRAFT ledger, immediately flagged 69 RPCs with zero mention
+anywhere — the ledger's prose had referenced test names and general
+concepts but not literal `C_*` function names. Rather than loosen the
+check to accommodate that, every affected row's justification was
+enriched with the actual function names it covers — a genuine
+improvement to the ledger's value as documentation, not just a
+check-satisfying formality. The ratchet is now wired into the existing
+"remoting gRPC+REST services + three-transport parity" gate step.
+
+**A real, load-bearing finding from doing this exercise properly**: while
+tracing which `pkcs11f.h` functions had zero RPC (to fill in the
+`pkcs11f_h_function_count` block), 3 turned up that were NOT in the "5
+deliberately N/A-local" set — `C_VerifySignatureUpdate`,
+`C_VerifySignatureFinal` (the multipart continuation of the pre-bound
+verify-with-signature RW6a already built one-shot), and
+`C_GetSessionValidationFlags`. All three are real, working engine
+capabilities (verified directly against `ffi.rs`) that RW6a's original
+audit of that function family simply missed. Closed immediately rather
+than just documented around: 3 new RPCs, `verbs_v32.rs` verbs, gRPC/REST
+wiring, a new core unit test (37/37 core green — a multipart
+verify-with-signature round trip matching the one-shot form on both a
+good and tampered signature, plus `CKS_LAST_VALIDATION_OK`'s real,
+honest, empty flag set and the real `CKR_ARGUMENTS_BAD` on an undefined
+type), and a new three-transport parity case (V22). This is exactly the
+kind of gap the ledger exercise exists to surface — proof the process
+works, caught on its very first real run.
+
+**`remoting/scripts/generate_coverage_report.py`** → generates
+`remoting/REMOTE_P11_V32_COVERAGE.md`. Deliberately, structurally
+deterministic: the ledger is static human-authored JSON with nothing
+live-varying in it (no KCVs, RNG samples, PIDs, timestamps), so the
+generator never shells out to `cargo test` or embeds anything from a live
+run — confirmed by running it twice and diffing (byte-identical). This is
+the v0.25.0 freshness-checker lesson applied from day one rather than
+rediscovered: a generated report is only trustworthy for a "is this
+stale" check if nothing in its own generation path can vary run to run.
+
+**`docs/PKCS11_REMOTING.md`**: added a new section introducing the
+`Pkcs11V32` mirror and pointing at the ledger/report/ratchet, explicitly
+distinguishing it from the pre-existing "v3.2-derived acceptance
+coverage" table above it (which describes the FROZEN, narrow 7-verb
+`Pkcs11Remote` service and remains accurate for that service — not
+touched, not confused with the new mirror).
+
+**Whole remoting workspace green: 37 core + 7 legacy-parity (no
+regression) + 21 v32-parity (1 explicitly `#[ignore]`d) + 2 posture.**
+
+**Final cumulative RPC count: 99 of 104 `pkcs11f.h` functions live as
+RPCs across RW0–RW6b + RW-T's audit fix.** The remaining 5
+(`C_Initialize`, `C_Finalize`, `C_GetFunctionList`, `C_GetInterface`,
+`C_GetInterfaceList`) are genuinely, deliberately N/A-local — documented
+in the ledger's own `pkcs11f_h_function_count` block, not silently
+absent. **This closes the remoting v3.2 coverage program** — RW0 through
+RW-T, six commits (`ee2b97c` bootstrap through this one), all local to
+`feat/remoting-v32-mirror`, not pushed. Two genuinely open items remain
+outside this program's scope, both already flagged in earlier execution
+log entries: the `JavaJCE-remote` cross-repo gate step (needs a live
+`pqc-grpc` + Maven, unavailable in this environment) and the
+`spawn_blocking`-vs-REST benchmark (plan §7, risk 2) — both are
+verification/benchmarking follow-ups, not missing functionality.

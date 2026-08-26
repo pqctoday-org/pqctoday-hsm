@@ -121,6 +121,9 @@ pub fn router(state: V32State) -> Router {
         .route("/v32/derive-key", post(derive_key))
         .route("/v32/encapsulate-key", post(encapsulate_key))
         .route("/v32/decapsulate-key", post(decapsulate_key))
+        .route("/v32/verify-signature-update", post(verify_signature_update))
+        .route("/v32/verify-signature-final", post(verify_signature_final))
+        .route("/v32/get-session-validation-flags", post(get_session_validation_flags))
         .with_state(state)
 }
 
@@ -534,6 +537,16 @@ async fn decapsulate_key(Json(r): Json<DecapsulateKeyReq>) -> Json<ObjectHandleR
         v32::decapsulate_key(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.private_key_handle, &r.ciphertext, &template)
             .into(),
     )
+}
+
+async fn verify_signature_update(Json(r): Json<DataReq>) -> Json<StatusResp> {
+    Json(v32::verify_signature_update(r.session_handle, &r.data).into())
+}
+async fn verify_signature_final(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::verify_signature_final(r.session_handle).into())
+}
+async fn get_session_validation_flags(Json(r): Json<GetSessionValidationFlagsReq>) -> Json<GetSessionValidationFlagsResp> {
+    Json(v32::get_session_validation_flags(r.session_handle, r.validation_type).into())
 }
 
 // Small shared request shapes used by several routes.

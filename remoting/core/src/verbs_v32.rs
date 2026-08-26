@@ -888,6 +888,31 @@ pub fn verify_signature(session: u32, data: &[u8]) -> u32 {
     ffi::C_VerifySignature(session, data.as_ptr() as *mut u8, data.len() as u32)
 }
 
+/// §5.12.4 multipart continuation of `verify_signature_init`/
+/// `verify_signature` — found during RW-T's coverage-ledger audit,
+/// missed in RW6a's original sweep of this function family (the engine
+/// implements it; the mirror simply never called it). Accumulates `part`
+/// into the pending verify-with-signature context.
+pub fn verify_signature_update(session: u32, part: &[u8]) -> u32 {
+    ffi::C_VerifySignatureUpdate(session, part.as_ptr() as *mut u8, part.len() as u32)
+}
+
+/// Same RW-T finding as `verify_signature_update`. Finalizes the
+/// accumulated message against the signature captured at Init time.
+pub fn verify_signature_final(session: u32) -> u32 {
+    ffi::C_VerifySignatureFinal(session)
+}
+
+/// §5.6.9 — `CKS_LAST_VALIDATION_OK` is the only defined `type_`; this
+/// engine performs no FIPS/validation-authority checks, so the returned
+/// flag set is always empty (0), not `CKR_FUNCTION_NOT_SUPPORTED` — a
+/// real, honest answer, same class of finding as `verify_signature_update`.
+pub fn get_session_validation_flags(session: u32, validation_type: u32) -> (u32, u32) {
+    let mut flags: u32 = 0;
+    let rv = ffi::C_GetSessionValidationFlags(session, validation_type, &mut flags);
+    (rv, flags)
+}
+
 // ── dual-function quartet (RW6a slice) ───────────────────────────────────
 
 pub fn digest_encrypt_update(session: u32, part: &[u8]) -> (u32, Vec<u8>) {
@@ -2019,6 +2044,53 @@ mod tests {
             verify_recover_init(session, u64::from(ck::CKM_ML_DSA), &[], pub_h),
             ck::CKR_MECHANISM_INVALID
         );
+
+        close_session(session);
+        crate::verbs::close_session(fixture).ok();
+    }
+
+    /// RW-T coverage-ledger audit finding: C_VerifySignatureUpdate/
+    /// C_VerifySignatureFinal (the multipart continuation of
+    /// verify_signature_init/verify_signature) and
+    /// C_GetSessionValidationFlags both exist in the engine but were
+    /// missed by RW6a's original sweep of this function family.
+    #[test]
+    #[serial]
+    fn verify_signature_multipart_and_session_validation_flags() {
+        crate::test_support::ensure_bootstrapped();
+        let fixture = crate::test_support::fresh_session();
+        let (pub_h, prv_h) =
+            crate::verbs::generate_key_pair(fixture, crate::Algorithm::MlDsa65, b"rw-t", "rw-t").expect("keygen fixture");
+
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        assert_eq!(sign_init(session, u64::from(ck::CKM_ML_DSA), &[], prv_h), 0);
+        let (rv, sig) = sign(session, b"part-one part-two");
+        assert_eq!(rv, 0);
+
+        // Multipart: the signature travels at Init time; the message is
+        // built up via Update/Final, must match the one-shot verify above.
+        assert_eq!(verify_signature_init(session, u64::from(ck::CKM_ML_DSA), &[], pub_h, &sig), 0);
+        assert_eq!(verify_signature_update(session, b"part-one "), 0);
+        assert_eq!(verify_signature_update(session, b"part-two"), 0);
+        assert_eq!(verify_signature_final(session), 0, "multipart-assembled message must verify against the one-shot signature");
+
+        // A tampered signature must be rejected the same way one-shot does.
+        let mut bad = sig.clone();
+        bad[2] ^= 0xFF;
+        assert_eq!(verify_signature_init(session, u64::from(ck::CKM_ML_DSA), &[], pub_h, &bad), 0);
+        assert_eq!(verify_signature_update(session, b"part-one part-two"), 0);
+        assert_ne!(verify_signature_final(session), 0);
+
+        // §5.6.9: CKS_LAST_VALIDATION_OK (type 1) — this engine performs
+        // no FIPS/validation-authority checks, so the flag set is real,
+        // honest, and empty (0), not a made-up "not supported" code.
+        const CKS_LAST_VALIDATION_OK: u32 = 1;
+        let (rv, flags) = get_session_validation_flags(session, CKS_LAST_VALIDATION_OK);
+        assert_eq!(rv, 0);
+        assert_eq!(flags, 0);
+        // §5.6.9 defines only type 1 — anything else is a real CKR_ARGUMENTS_BAD.
+        let (rv, _) = get_session_validation_flags(session, 99);
+        assert_eq!(rv, CKR_ARGUMENTS_BAD);
 
         close_session(session);
         crate::verbs::close_session(fixture).ok();

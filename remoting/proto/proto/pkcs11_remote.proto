@@ -534,6 +534,21 @@ service Pkcs11V32 {
   // Pkcs11Remote.Encapsulate, which stays frozen ──
   rpc C_EncapsulateKey(V32EncapsulateKeyRequest) returns (V32EncapsulateKeyResponse);
   rpc C_DecapsulateKey(V32DecapsulateKeyRequest) returns (V32ObjectHandleResponse);
+
+  // ── RW-T coverage-ledger audit finding: real engine capabilities RW6a's
+  // sweep of the verify-with-signature/session family missed ──
+  rpc C_VerifySignatureUpdate(V32DataRequest) returns (V32StatusResponse);
+  rpc C_VerifySignatureFinal(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_GetSessionValidationFlags(V32GetSessionValidationFlagsRequest) returns (V32GetSessionValidationFlagsResponse);
+}
+
+message V32GetSessionValidationFlagsRequest {
+  uint32 session_handle = 1;
+  uint32 validation_type = 2; // §5.6.9 — only CKS_LAST_VALIDATION_OK (1) is defined
+}
+message V32GetSessionValidationFlagsResponse {
+  uint32 ck_rv = 1;
+  uint32 flags = 2;
 }
 
 message V32EncapsulateKeyRequest {

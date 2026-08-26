@@ -184,6 +184,55 @@ remaining 32 are N/A because this service's 7-verb surface has no
 corresponding endpoint. Nothing here is silently skipped — every N/A row
 states why.
 
+## The `Pkcs11V32` C_* mirror (2026-08-26 — a separate, additive service)
+
+Everything above this section describes the **original 7-verb service**
+(`Pkcs11Remote` in the proto — `Health`/`OpenSession`/`CloseSession`/
+`GenerateKeyPair`/`Sign`/`Verify`/`Encapsulate`/`Decapsulate`, plus
+`GetSelfSignedCertificate` added 2026-08-25), which stays **frozen
+byte-for-byte** — the bench harness and JavaJCE-remote depend on it
+unchanged. The "v3.2-derived acceptance coverage" table above is about
+that service specifically and remains accurate for it; do not confuse it
+with the coverage described here.
+
+`docs/remoting-pkcs11-v32-full-coverage-plan-2026-08-26.md` and its
+successor `docs/remoting-pkcs11-v32-remaining-gaps-plan-2026-08-26.md`
+built a second, **additive** gRPC+REST service (`Pkcs11V32`, same proto
+file, same two binaries) that mirrors the PKCS#11 v3.2 `C_*` API 1:1 —
+one unary RPC per C function, `ck_rv` carried as a response FIELD (never
+a transport error), raw `CKM_*`/`CKA_*`/`CKR_*` codepoints on the wire
+(no enums). Where the original 7-verb service exposes a curated,
+representative slice, this one exposes essentially the whole engine.
+
+**Coverage is tracked as a live, checked artifact, not prose**:
+
+- `remoting/coverage_ledger.json` — one row per category in
+  `cpp_compliance_report.json` (63 categories), each with a disposition
+  (`RPC` / `N/A-local` / `N/A-engine` / `SUITE-GAP`), the test case(s)
+  that exercise it, and why.
+- `remoting/REMOTE_P11_V32_COVERAGE.md` — generated from the ledger via
+  `python3 remoting/scripts/generate_coverage_report.py`; never hand-edit
+  it.
+- `remoting/scripts/check_coverage_ledger.py` — the ratchet: fails if a
+  compliance category has no ledger row, a `case_ids` entry names a test
+  that doesn't exist, or an RPC on `Pkcs11V32` has zero mention anywhere
+  in the ledger. Wired into `scripts/local-gate.sh`'s existing
+  "remoting gRPC+REST services + three-transport parity" step.
+
+As of RW-T's coverage-ledger audit (2026-08-26, after RW5): **99 of 104
+`pkcs11f.h` functions are live RPCs** (61 of 63 compliance categories
+dispositioned `RPC`; 2 are `N/A-local` — Fork's RNG-divergence intent, and
+`Init`'s `C_Initialize`/`C_Finalize` server lifecycle). The remaining 5
+functions (`C_Initialize`, `C_Finalize`, `C_GetFunctionList`,
+`C_GetInterface`, `C_GetInterfaceList`) are all deliberately N/A-local —
+see the ledger's `pkcs11f_h_function_count` block for why. See the
+generated report for the full per-category breakdown, and the
+coverage-gap plan's "Execution log" for what shipped in each workstream
+(RW0–RW6b, RW-T) and the real findings each one turned up — including
+RW-T's own audit catching `C_VerifySignatureUpdate`/
+`C_VerifySignatureFinal`/`C_GetSessionValidationFlags`, three real engine
+capabilities RW6a's original sweep missed.
+
 ## Ports, certs, image (Step 2 — not built yet)
 
 Suggested ports 5710 (gRPC) / 5720 (REST), both free on `pqc-mesh`. The

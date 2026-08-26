@@ -726,3 +726,21 @@ pub struct DecapsulateKeyReq {
     #[serde(default)]
     pub template: Vec<V32AttributeInDto>,
 }
+
+// ── RW-T coverage-ledger audit finding ────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct GetSessionValidationFlagsReq {
+    pub session_handle: u32,
+    pub validation_type: u32,
+}
+#[derive(Serialize)]
+pub struct GetSessionValidationFlagsResp {
+    pub ck_rv: u32,
+    pub flags: u32,
+}
+impl From<(u32, u32)> for GetSessionValidationFlagsResp {
+    fn from((ck_rv, flags): (u32, u32)) -> Self {
+        Self { ck_rv, flags }
+    }
+}

@@ -188,9 +188,17 @@ run_step "rust engine cargo test" \
 # Pkcs11V32 C_* mirror work (docs/remoting-pkcs11-v32-full-coverage-plan-
 # 2026-08-26.md, RW0). Standalone workspace ⇒ its own `cargo test`; the
 # first grep catches any FAILED summary, the second reports the aggregate.
+# Grown in RW-T (docs/remoting-pkcs11-v32-remaining-gaps-plan-2026-08-26.md)
+# with the coverage-ledger ratchet: `cargo test` intentionally does NOT run
+# the #[ignore]d XMSS/HSS algorithm-cell sweep (326s at this engine's
+# smallest XMSS parameter set — see that test's own doc comment), so it
+# stays out of the routine gate; the ledger still accounts for it via
+# case_ids, and the ratchet below checks the LEDGER, not live execution of
+# every ignored test.
 run_step "remoting gRPC+REST services + three-transport parity" \
   "cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+   cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}' && \
+   cd $AG_CONTAINER_ROOT/remoting && python3 scripts/check_coverage_ledger.py"
 
 # Cheap, and it runs BEFORE the replay on purpose: if the corpus is not the
 # corpus we think it is, the replay figure below is measuring something else.

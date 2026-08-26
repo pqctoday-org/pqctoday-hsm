@@ -1077,6 +1077,36 @@ impl Pkcs11V32 for Pkcs11V32Service {
         .await?;
         Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
     }
+
+    // ── RW-T coverage-ledger audit finding ───────────────────────────────
+
+    async fn c_verify_signature_update(
+        &self,
+        request: Request<V32DataRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::verify_signature_update(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_verify_signature_final(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::verify_signature_final(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_get_session_validation_flags(
+        &self,
+        request: Request<V32GetSessionValidationFlagsRequest>,
+    ) -> Result<Response<V32GetSessionValidationFlagsResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, flags) = blocking(move || {
+            v32::get_session_validation_flags(req.session_handle, req.validation_type)
+        })
+        .await?;
+        Ok(Response::new(V32GetSessionValidationFlagsResponse { ck_rv, flags }))
+    }
 }
 
 use pqctoday_pkcs11_remote_proto::v32_derive_key_request::Structured;

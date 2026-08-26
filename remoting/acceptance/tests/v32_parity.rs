@@ -1564,3 +1564,68 @@ fn v21_slh_dsa_xmss_hss_sign_verify_parity() {
         v32::close_session(ks);
     });
 }
+
+// ── V22: RW-T coverage-ledger audit finding — C_VerifySignatureUpdate/
+// C_VerifySignatureFinal (multipart verify-with-signature) and
+// C_GetSessionValidationFlags, missed by RW6a's original sweep ─────────
+
+#[test]
+fn v22_verify_signature_multipart_and_session_validation_flags_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let fixture = pqctoday_pkcs11_remote_core::verbs::open_session("1234").unwrap();
+        let (pub_h, prv_h) = pqctoday_pkcs11_remote_core::verbs::generate_key_pair(
+            fixture, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, b"v22", "v22",
+        ).unwrap();
+
+        let (_rv, s) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        assert_eq!(v32::sign_init(s, CKM_ML_DSA, &[], prv_h), 0);
+        let (rv, sig) = v32::sign(s, b"part-one part-two");
+        assert_eq!(rv, 0);
+        assert_eq!(v32::verify_signature_init(s, CKM_ML_DSA, &[], pub_h, &sig), 0);
+        assert_eq!(v32::verify_signature_update(s, b"part-one "), 0);
+        let rv_good_ctl = v32::verify_signature_update(s, b"part-two");
+        let rv_final_ctl = v32::verify_signature_final(s);
+        assert_eq!(rv_good_ctl, 0);
+        assert_eq!(rv_final_ctl, 0);
+        const CKS_LAST_VALIDATION_OK: u32 = 1;
+        let (rv_flags_ctl, flags_ctl) = v32::get_session_validation_flags(s, CKS_LAST_VALIDATION_OK);
+        assert_eq!(rv_flags_ctl, 0);
+        assert_eq!(flags_ctl, 0);
+        v32::close_session(s);
+
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        g.c_verify_signature_init(proto::V32VerifySignatureInitRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![] }),
+            key_handle: pub_h,
+            signature: sig.clone(),
+        }).await.unwrap();
+        g.c_verify_signature_update(proto::V32DataRequest { session_handle: gs.session_handle, data: b"part-one ".to_vec() }).await.unwrap();
+        let gu = g.c_verify_signature_update(proto::V32DataRequest { session_handle: gs.session_handle, data: b"part-two".to_vec() }).await.unwrap().into_inner();
+        assert_eq!(gu.ck_rv, rv_good_ctl);
+        let gf = g.c_verify_signature_final(proto::V32SessionRequest { session_handle: gs.session_handle }).await.unwrap().into_inner();
+        assert_eq!(gf.ck_rv, rv_final_ctl);
+        let gflags = g.c_get_session_validation_flags(proto::V32GetSessionValidationFlagsRequest { session_handle: gs.session_handle, validation_type: CKS_LAST_VALIDATION_OK }).await.unwrap().into_inner();
+        assert_eq!(gflags.ck_rv, rv_flags_ctl);
+        assert_eq!(gflags.flags, flags_ctl);
+
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        rest_post(&base, "verify-signature-init", json!({
+            "session_handle": sh, "mechanism": {"mechanism": CKM_ML_DSA, "parameter": ""}, "key_handle": pub_h, "signature": b64(&sig),
+        })).await;
+        rest_post(&base, "verify-signature-update", json!({"session_handle": sh, "data": b64(b"part-one ")})).await;
+        let ru = rest_post(&base, "verify-signature-update", json!({"session_handle": sh, "data": b64(b"part-two")})).await;
+        assert_eq!(ru["ck_rv"].as_u64().unwrap() as u32, rv_good_ctl);
+        let rf = rest_post(&base, "verify-signature-final", json!({"session_handle": sh})).await;
+        assert_eq!(rf["ck_rv"].as_u64().unwrap() as u32, rv_final_ctl);
+        let rflags = rest_post(&base, "get-session-validation-flags", json!({"session_handle": sh, "validation_type": CKS_LAST_VALIDATION_OK})).await;
+        assert_eq!(rflags["ck_rv"].as_u64().unwrap() as u32, rv_flags_ctl);
+        assert_eq!(rflags["flags"].as_u64().unwrap() as u32, flags_ctl);
+
+        pqctoday_pkcs11_remote_core::verbs::close_session(fixture).ok();
+    });
+}

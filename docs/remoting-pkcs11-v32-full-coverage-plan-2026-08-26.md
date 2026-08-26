@@ -1,13 +1,13 @@
 # Remoting full PKCS#11 v3.2 coverage plan — gRPC + REST C_* mirror (2026-08-26)
 
-**Status: RW0 + RW1 + RW2 + RW3 EXECUTED and green (2026-08-26). For the
-remaining work, `docs/remoting-pkcs11-v32-remaining-gaps-plan-2026-08-26.md`
-supersedes this document's §5 rows and execution notes for RW4/RW5/RW6 —
-re-sequenced to RW6 → RW4 → RW5 → RW-T (terminal ledger/docs), with both
-assumed engine prerequisites found already satisfied at the ffi layer and
-a new prerequisite slice (RW-P: structured mechanism-parameter wire
-mapping for pointer-bearing param structs). See the "Execution log" at the
-end for exactly what shipped.**
+**Status: COMPLETE (2026-08-26). RW0-RW3 executed here; RW6a, RW6b, RW4,
+RW5, and RW-T executed in
+`docs/remoting-pkcs11-v32-remaining-gaps-plan-2026-08-26.md`, which
+supersedes this document's §5 rows and execution notes for RW4/RW5/RW6.
+99 of 104 `pkcs11f.h` functions are live RPCs — see that document's own
+status header and execution log for the full program's final state. See
+the "Execution log" at the end of THIS document for what shipped in
+RW0-RW3 specifically.**
 
 Decisions locked with the user (2026-08-26):
 
