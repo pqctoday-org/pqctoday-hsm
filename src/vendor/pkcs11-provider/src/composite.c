@@ -786,18 +786,16 @@ static void *p11prov_composite_sig_newctx_impl(
     void *provctx,
     const struct p11prov_composite_profile *profile)
 {
-    fprintf(stderr,
-            "[composite-sig-newctx] FIRED provctx=%p profile=%s\n",
-            provctx,
-            profile ? profile->label : "(null)");
+    P11PROV_debug("composite sig newctx provctx=%p profile=%s", provctx,
+                  profile ? profile->label : "(null)");
     P11PROV_COMPOSITE_SIG_CTX *ctx = OPENSSL_zalloc(sizeof(*ctx));
     if (ctx == NULL) {
-        fprintf(stderr, "[composite-sig-newctx] OPENSSL_zalloc FAILED\n");
+        P11PROV_debug("composite sig newctx: OPENSSL_zalloc failed");
         return NULL;
     }
     ctx->provctx = (P11PROV_CTX *)provctx;
     ctx->profile = profile;
-    fprintf(stderr, "[composite-sig-newctx] OK ctx=%p\n", (void *)ctx);
+    P11PROV_debug("composite sig newctx: ok ctx=%p", (void *)ctx);
     return ctx;
 }
 
@@ -896,21 +894,20 @@ static int composite_digest_op_init(
     P11PROV_COMPOSITE_OBJ *key = (P11PROV_COMPOSITE_OBJ *)keydata;
     CK_RV rv;
 
-    fprintf(stderr, "[composite-sig-init] op=%lu ctx=%p key=%p\n",
-            operation, (void *)ctx, (void *)key);
+    P11PROV_debug("composite sig init op=%lu ctx=%p key=%p", operation,
+                  (void *)ctx, (void *)key);
     if (ctx == NULL || key == NULL) {
-        fprintf(stderr, "[composite-sig-init] NULL ctx or key\n");
+        P11PROV_debug("composite sig init: NULL ctx or key");
         return RET_OSSL_ERR;
     }
     if (key->profile != ctx->profile) {
-        fprintf(stderr, "[composite-sig-init] profile mismatch key=%p ctx=%p\n",
-                (void *)key->profile, (void *)ctx->profile);
+        P11PROV_debug("composite sig init: profile mismatch key=%p ctx=%p",
+                      (void *)key->profile, (void *)ctx->profile);
         return RET_OSSL_ERR;
     }
     if (key->pq_obj == NULL || key->classical_obj == NULL) {
-        fprintf(stderr,
-                "[composite-sig-init] subkey missing pq=%p classical=%p\n",
-                (void *)key->pq_obj, (void *)key->classical_obj);
+        P11PROV_debug("composite sig init: subkey missing pq=%p classical=%p",
+                      (void *)key->pq_obj, (void *)key->classical_obj);
         return RET_OSSL_ERR;
     }
 
@@ -920,19 +917,19 @@ static int composite_digest_op_init(
     /* Allocate PQ sub-sigctx */
     ctx->pq_sigctx = p11prov_sig_newctx(ctx->provctx, CKM_ML_DSA, NULL);
     if (ctx->pq_sigctx == NULL) {
-        fprintf(stderr, "[composite-sig-init] PQ sig_newctx FAILED\n");
+        P11PROV_debug("composite sig init: PQ sig_newctx failed");
         return RET_OSSL_ERR;
     }
     if (!composite_setup_pq_sigctx(ctx)) {
-        fprintf(stderr, "[composite-sig-init] PQ setup_sigctx FAILED\n");
+        P11PROV_debug("composite sig init: PQ setup_sigctx failed");
         return RET_OSSL_ERR;
     }
     rv = p11prov_sig_op_init(ctx->pq_sigctx, key->pq_obj, operation, NULL);
     if (rv != CKR_OK) {
-        fprintf(stderr, "[composite-sig-init] PQ sig_op_init rv=0x%lx\n", rv);
+        P11PROV_debug("composite sig init: PQ sig_op_init rv=0x%lx", rv);
         return RET_OSSL_ERR;
     }
-    fprintf(stderr, "[composite-sig-init] PQ sub-sigctx ready\n");
+    P11PROV_debug("composite sig init: PQ sub-sigctx ready");
 
     /* Allocate classical sub-sigctx. mechtype passed to p11prov_sig_newctx
      * is the family — set to actual mech via composite_setup_classical_sigctx. */
@@ -941,20 +938,21 @@ static int composite_digest_op_init(
         ctx->profile->pre_hash_nid == NID_sha256 ? CKM_RSA_PKCS_PSS : CKM_ECDSA,
         NULL);
     if (ctx->classical_sigctx == NULL) {
-        fprintf(stderr, "[composite-sig-init] classical sig_newctx FAILED\n");
+        P11PROV_debug("composite sig init: classical sig_newctx failed");
         return RET_OSSL_ERR;
     }
     if (!composite_setup_classical_sigctx(ctx)) {
-        fprintf(stderr, "[composite-sig-init] classical setup_sigctx FAILED\n");
+        P11PROV_debug("composite sig init: classical setup_sigctx failed");
         return RET_OSSL_ERR;
     }
     rv = p11prov_sig_op_init(ctx->classical_sigctx, key->classical_obj,
                              operation, NULL);
     if (rv != CKR_OK) {
-        fprintf(stderr, "[composite-sig-init] classical sig_op_init rv=0x%lx\n", rv);
+        P11PROV_debug("composite sig init: classical sig_op_init rv=0x%lx",
+                      rv);
         return RET_OSSL_ERR;
     }
-    fprintf(stderr, "[composite-sig-init] classical sub-sigctx ready\n");
+    P11PROV_debug("composite sig init: classical sub-sigctx ready");
 
     /* Apply OpenSSL-side params (e.g. context-string for the composite
      * application ctx) if provided. */
@@ -1964,39 +1962,33 @@ static int p11prov_composite_decoder_decode(
     (void)pw_cb;
     (void)pw_cbarg;
 
-    fprintf(stderr,
-            "[composite-decoder] enter profile=%s selection=0x%x ctx=%p\n",
-            ctx && ctx->profile ? ctx->profile->label : "(null)",
-            selection, (void *)ctx);
+    P11PROV_debug("composite decoder enter profile=%s selection=0x%x ctx=%p",
+                  ctx && ctx->profile ? ctx->profile->label : "(null)",
+                  selection, (void *)ctx);
     if (ctx == NULL || ctx->profile == NULL) {
         return RET_OSSL_CARRY_ON_DECODING;
     }
     if ((selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) == 0) {
-        fprintf(stderr, "[composite-decoder] no PUBLIC_KEY in selection — carry-on\n");
+        P11PROV_debug("composite decoder: no PUBLIC_KEY in selection, carry-on");
         return RET_OSSL_CARRY_ON_DECODING;
     }
 
     bin = BIO_new_from_core_bio(p11prov_ctx_get_libctx(ctx->provctx), cin);
     if (bin == NULL) {
-        fprintf(stderr, "[composite-decoder] BIO_new_from_core_bio FAILED\n");
+        P11PROV_debug("composite decoder: BIO_new_from_core_bio failed");
         return RET_OSSL_CARRY_ON_DECODING;
     }
     der_len = BIO_get_mem_data(bin, &der);
-    fprintf(stderr, "[composite-decoder] BIO_get_mem_data der_len=%ld\n", der_len);
-    fflush(stderr);
+    P11PROV_debug("composite decoder: BIO_get_mem_data der_len=%ld", der_len);
     if (der_len <= 0 || der == NULL) {
         BIO_free(bin);
         return RET_OSSL_CARRY_ON_DECODING;
     }
 
-    fprintf(stderr, "[composite-decoder] about to call decode_spki\n");
-    fflush(stderr);
     ret = p11prov_composite_decode_spki(ctx->profile, ctx->provctx,
                                         der, der_len, &obj);
-    fprintf(stderr,
-            "[composite-decoder] decode_spki ret=%d obj=%p\n",
-            ret, (void *)obj);
-    fflush(stderr);
+    P11PROV_debug("composite decoder: decode_spki ret=%d obj=%p", ret,
+                  (void *)obj);
     BIO_free(bin);
     if (ret != RET_OSSL_OK || obj == NULL) {
         return ret;
@@ -2011,9 +2003,8 @@ static int p11prov_composite_decoder_decode(
         OSSL_OBJECT_PARAM_REFERENCE, &obj, sizeof(obj));
     params[3] = OSSL_PARAM_construct_end();
     int cb_ret = data_cb(params, data_cbarg);
-    fprintf(stderr,
-            "[composite-decoder] data_cb returned %d, obj after cb=%p\n",
-            cb_ret, (void *)obj);
+    P11PROV_debug("composite decoder: data_cb returned %d, obj after cb=%p",
+                  cb_ret, (void *)obj);
     if (cb_ret != 1) {
         if (obj != NULL) {
             p11prov_composite_keymgmt_free(obj);
@@ -2213,39 +2204,40 @@ EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
 
     if (provctx == NULL || profile == NULL || pq_uri == NULL
         || classical_uri == NULL) {
-        fprintf(stderr, "[composite-bridge] bad args: provctx=%p profile=%p "
-                "pq_uri=%p classical_uri=%p\n",
-                (void *)provctx, (const void *)profile,
-                (const void *)pq_uri, (const void *)classical_uri);
+        P11PROV_debug(
+            "composite bridge: bad args provctx=%p profile=%p pq_uri=%p "
+            "classical_uri=%p",
+            (void *)provctx, (const void *)profile, (const void *)pq_uri,
+            (const void *)classical_uri);
         return NULL;
     }
 
-    fprintf(stderr, "[composite-bridge] starting label=%s pq=%s cl=%s\n",
-            profile->label, pq_uri, classical_uri);
+    P11PROV_debug("composite bridge: starting label=%s pq=%s cl=%s",
+                  profile->label, pq_uri, classical_uri);
 
     pq_obj = composite_load_subkey_by_uri(provctx, pq_uri);
     if (pq_obj == NULL) {
-        fprintf(stderr, "[composite-bridge] PQ subkey load FAILED for %s\n",
-                pq_uri);
+        P11PROV_debug("composite bridge: PQ subkey load failed for %s",
+                      pq_uri);
         ERR_print_errors_fp(stderr);
         goto done;
     }
     classical_obj = composite_load_subkey_by_uri(provctx, classical_uri);
     if (classical_obj == NULL) {
-        fprintf(stderr, "[composite-bridge] classical subkey load FAILED for %s\n",
-                classical_uri);
+        P11PROV_debug("composite bridge: classical subkey load failed for %s",
+                      classical_uri);
         ERR_print_errors_fp(stderr);
         goto done;
     }
-    fprintf(stderr, "[composite-bridge] both subkeys loaded\n");
+    P11PROV_debug("composite bridge: both subkeys loaded");
 
     composite_obj = p11prov_composite_obj_new_from_subkeys(
         provctx, profile, pq_obj, classical_obj);
     if (composite_obj == NULL) {
-        fprintf(stderr, "[composite-bridge] obj_new_from_subkeys FAILED\n");
+        P11PROV_debug("composite bridge: obj_new_from_subkeys failed");
         goto done;
     }
-    fprintf(stderr, "[composite-bridge] composite obj built\n");
+    P11PROV_debug("composite bridge: composite obj built");
 
     /* Use the global default libctx (NULL) so EVP_PKEY_CTX_new_from_name
      * sees BOTH the default provider (for RSA/EC primitives during
@@ -2255,13 +2247,14 @@ EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
      * default leads to keymgmt fetch failure. */
     pctx = EVP_PKEY_CTX_new_from_name(NULL, profile->label, NULL);
     if (pctx == NULL) {
-        fprintf(stderr, "[composite-bridge] EVP_PKEY_CTX_new_from_name "
-                "FAILED for label=%s\n", profile->label);
+        P11PROV_debug(
+            "composite bridge: EVP_PKEY_CTX_new_from_name failed for label=%s",
+            profile->label);
         ERR_print_errors_fp(stderr);
         goto done;
     }
     if (EVP_PKEY_fromdata_init(pctx) != 1) {
-        fprintf(stderr, "[composite-bridge] EVP_PKEY_fromdata_init FAILED\n");
+        P11PROV_debug("composite bridge: EVP_PKEY_fromdata_init failed");
         ERR_print_errors_fp(stderr);
         goto done;
     }
@@ -2272,12 +2265,12 @@ EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
     import_params[1] = OSSL_PARAM_construct_end();
 
     if (EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_KEYPAIR, import_params) != 1) {
-        fprintf(stderr, "[composite-bridge] EVP_PKEY_fromdata FAILED\n");
+        P11PROV_debug("composite bridge: EVP_PKEY_fromdata failed");
         ERR_print_errors_fp(stderr);
         pkey = NULL;
         goto done;
     }
-    fprintf(stderr, "[composite-bridge] composite EVP_PKEY built OK\n");
+    P11PROV_debug("composite bridge: composite EVP_PKEY built ok");
     /* IMPORT took ownership on success — null our local handle so cleanup
      * below does not double-free. */
     composite_obj = NULL;

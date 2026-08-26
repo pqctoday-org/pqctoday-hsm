@@ -1049,6 +1049,28 @@ No harness changes for R19 (nothing to sabotage-test — no code
 changed). Both engines' suites unaffected (no code touched).
 **Harness: `PASS=35 FAIL=0 XFAIL=0 XPASS=0`**, unchanged from R18.
 
+**Phase 4, R21.1 (composite.c stray debug output), DONE:** the 33
+committed `fprintf(stderr, "[composite-...]")` lines found while
+drafting the phase-4 plan — present on both `main` and this feature
+branch, predating phase 3 entirely — converted to `P11PROV_debug`,
+this provider's own gated debug macro (silent unless
+`PKCS11_PROVIDER_DEBUG` is set), matching every other diagnostic
+message in this codebase. Purely mechanical: same messages, same
+format arguments, no logic touched. Landed deliberately before R7
+(composite profiles 4–8) so that item's own diff stays legible rather
+than drowning in an unrelated cleanup. `ERR_print_errors_fp(stderr)`
+calls on genuine failure paths were left alone — those are real
+diagnostic output on an actual error, not debug narration, and
+outside this item's scope. Clean rebuild, no format-string warnings.
+No harness case exists for composite signatures yet (that is R7's own
+scope) so this was verified by clean compile plus the full existing
+suite (a flaky, unrelated `p11test` X448-derive failure appeared once
+and did not reproduce on retry — confirmed pre-existing test flake
+under this session's heavy concurrent container load, not a
+regression from this change). **Harness: `PASS=35 FAIL=0 XFAIL=0
+XPASS=0`**, unchanged. C++: 8/8 CTest suites on retry. Rust
+unaffected (C-provider-side only).
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:
