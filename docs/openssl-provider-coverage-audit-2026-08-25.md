@@ -2860,6 +2860,55 @@ routes through the provider), **C++ CTest 8/8**, **Rust `cargo test
 This closes phase 8's R39. R40, R41 remain open; R33 and R27 remain
 parked.
 
+**Phase 8, R40 (ML-KEM public SPKI/text encoders), DONE — no code
+needed, R16 (phase 3) already shipped it; this item closed R16's own
+flagged proof gap instead.** The phase-8 plan's own R40 section
+described building the ML-KEM SPKI-DER + text encoder pair from
+scratch — live-checking before writing any code found both already
+exist, already registered (`p11prov_mlkem_encoder_spki_der_*`/
+`p11prov_mlkem_encoder_text_functions`, `encoder.c`+`provider.c`), with
+harness case `T4x_spki` already green. The registration site's own
+source comment says why: **remediation R16**, phase 3 of this project
+— this section's own "Further update... phase-3 execution continued"
+narrative above documents the identical encoder pair, built for the
+identical stated reason. The remaining-gaps report R40 was drawn from
+was stale by the time it reached this plan.
+
+What R16's own narrative had explicitly flagged but left unresolved —
+"the SPKI half was not separately sabotage-tested... a broken SPKI
+encoder wouldn't currently be observable through this harness's own
+assertions since the generic path would still answer" — is what this
+item actually closed. Live-confirmed via `PKCS11_PROVIDER_DEBUG`:
+`T4x_spki`'s own `pkey -pubout` **never** reaches the dedicated SPKI
+encoder (trace count 0, both by default and with an explicit
+`-propquery "?provider=pkcs11"`) — confirmed the identical result for
+ML-DSA's own dedicated SPKI encoder as a control, so this is not
+ML-KEM-specific, it's how OpenSSL core's own encoder-selection treats
+every PQC family in this fork. Testing the one config the original R40
+grounding predicted would need the dedicated encoder —
+`pkcs11-module-allow-export = 1` (`DISALLOW_EXPORT_PUBLIC`, blocking
+the generic export bridge) — found a genuinely new, permanent
+limitation: `-text` DOES reach the dedicated text encoder under this
+config (engine-log verified, renders correctly — the text half is
+genuinely load-bearing) but `-pubout` fails cleanly (no crash, no
+output) rather than falling back to the dedicated SPKI-DER encoder,
+which OpenSSL's own core encoder-selection never tries for a keymgmt
+whose algorithm name maps to a well-known OID — an OpenSSL-core-level
+behavior, not a registration bug this provider can fix. New permanent
+harness case `T4x_spki_noexport` covers both findings.
+
+Full regression: **harness 85/85** (one new case, zero regressions),
+**C++ CTest 8/8** (no source changed). No Rust change.
+
+This closes phase 8's R40 — and, per its own new permanent-limitation
+finding above, adds a fifth item to the audit's permanent-limitations
+list (§ "Explicitly NOT in this phase" in the phase-8 plan): SPKI-DER
+public-key export under `DISALLOW_EXPORT_PUBLIC` has no working path
+for ML-DSA/ML-KEM (the dedicated encoder exists but OpenSSL core never
+selects it), only `-text` remains available in that configuration.
+Only R41 remains open; R33 and R27 remain parked (R27 is what R41
+itself un-parks).
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:

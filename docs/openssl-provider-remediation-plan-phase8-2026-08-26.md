@@ -492,6 +492,61 @@ for the same key (the bridge IS the oracle); decode-back via the R2
 decoder round-trips to a working encapsulation. Regression: full
 harness, CTest.
 
+**Grounding correction (2026-08-26, found live-checking before writing
+any code — this section's own "Work" above is stale):** the ML-KEM
+SPKI-DER + text encoder pair this item describes building **already
+exists and is already registered** — `p11prov_mlkem_encoder_spki_der_*`
+/ `p11prov_mlkem_encoder_text_functions` (`encoder.c`), wired into
+`provider.c`'s `ADD_ALGO_EXT(ML_KEM_512/768/1024, encoder, ...)` table,
+with its own harness case `T4x_spki` already green. A source comment
+right at the registration site says why: **remediation R16**, phase 3
+of this same project — this item "un-parks R33" from a remaining-gaps
+report that itself was stale by the time it fed this plan, repeating a
+gap R16 had already closed. `docs/openssl-provider-coverage-audit-
+2026-08-25.md`'s own R16 narrative (§ "Further update... phase-3
+execution continued") documents the exact same encoder pair, built for
+the identical reason this section restates.
+
+**Execution update (2026-08-26):** no new encoder code — none was
+missing. What R16's OWN narrative had flagged but not resolved (the
+proof-plan gap this section's own "verify via PKCS11_PROVIDER_DEBUG
+that the provider encoder ran" line targets) *was* still open, and
+closed here:
+
+- Live-confirmed `T4x_spki`'s own `pkey -pubout` **never** reaches
+  `p11prov_mlkem_encoder_spki_der_encode` (`PKCS11_PROVIDER_DEBUG`
+  trace count 0, both with default config and with an explicit
+  `-propquery "?provider=pkcs11"` forcing pkcs11-only algorithm
+  selection) — OpenSSL core's own generic keymgmt-export bridge
+  produces the SPKI PEM every time, exactly as R16's own honest
+  self-assessment predicted. Confirmed the SAME is true for ML-DSA's
+  own dedicated SPKI encoder too (control check) — this is not
+  ML-KEM-specific, it's how OpenSSL core's encoder selection treats
+  every PQC family in this fork alike.
+- Tested the one config the original grounding named as the case where
+  the dedicated encoder should matter: `pkcs11-module-allow-export = 1`
+  sets `DISALLOW_EXPORT_PUBLIC` (`provider.h`), blocking
+  `OSSL_PKEY_PARAM_PUB_KEY` export and therefore the generic bridge.
+  Result, live-confirmed: `-text` **does** reach the dedicated text
+  encoder (`p11prov_mlkem_encoder_encode_text`, engine-log verified)
+  and still renders correctly — the text half is genuinely
+  load-bearing. `-pubout` **fails cleanly** (no output file, no crash,
+  exit 1) — the dedicated SPKI-DER encoder is registered but OpenSSL's
+  own encoder-selection machinery never falls back to it even when the
+  bridge is the only other option. This is an OpenSSL-core-level
+  encoder-selection behavior (choosing not to try a 3rd-party
+  `ENCODER` for a keymgmt whose algorithm name maps to a well-known
+  OID), not a registration bug fixable inside this provider — added to
+  the audit's own permanent-limitations list rather than left silently
+  unproven.
+- New permanent harness case `T4x_spki_noexport`: both findings above,
+  engine-log-verified for the text half, clean-failure-asserted for
+  the SPKI half.
+
+Full regression: **harness 85/85** (one new case, zero regressions),
+**C++ CTest 8/8** (no source changed, sanity-reconfirmed). No Rust
+change — this item never touched Rust.
+
 ---
 
 ### R41 — XMSS/XMSS-MT provider surface (un-parks R27, closes ALG-2) — effort L
@@ -578,6 +633,14 @@ its documentation:
   posture; documented workaround shipped in the provider README.
 - **WART-6** (benign ASN.1 error-queue noise during provider-active
   TLS): cosmetic, root-caused, documented interop caveat.
+- **SPKI-DER export under `DISALLOW_EXPORT_PUBLIC`** (found executing
+  R40): ML-DSA/ML-KEM's dedicated SPKI-DER encoders exist and are
+  registered, but OpenSSL core's own encoder-selection never falls
+  back to a 3rd-party `ENCODER` for a keymgmt whose algorithm name maps
+  to a well-known OID — `pkey -pubout` fails cleanly with no path
+  available once the generic export bridge is blocked. `-text` is
+  unaffected (its own dedicated encoder IS reached, confirmed). Not
+  fixable inside this provider — OpenSSL-core-level selection behavior.
 
 ## Phase-8 exit criteria
 

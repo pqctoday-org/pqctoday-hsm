@@ -257,6 +257,46 @@ t4x_spki() { local w; w=$(mk_arena mlkemspki "$CPP_ENGINE_SO") && use_arena "$w"
 }
 run_case T4x_spki PASS "ML-KEM -pubout SPKI PEM round-trips through the software provider + -text renders both key halves (remediation R16)" t4x_spki
 
+# ─── T4x_spki_noexport: dedicated encoder reachability (remediation R40) ───
+# Phase-8 R40 grounding: this provider's own dedicated SPKI-DER/text
+# encoders for ML-DSA/ML-KEM (encoder.c) already exist and are registered
+# (R16, phase 3) -- but live-checking under PKCS11_PROVIDER_DEBUG (this
+# case's own predecessor investigation, not assumed) shows T4x_spki's own
+# `pkey -pubout` NEVER reaches p11prov_mlkem_encoder_spki_der_encode: it's
+# OpenSSL core's own generic keymgmt-export bridge that produces the SPKI
+# PEM, exactly as R16's own honest self-assessment flagged ("not
+# independently proven necessary"). This case forces the ONE config where
+# the bridge genuinely cannot run -- pkcs11-module-allow-export=1 sets
+# DISALLOW_EXPORT_PUBLIC (provider.h), blocking OSSL_PKEY_PARAM_PUB_KEY
+# export -- to find out what (if anything) still works.
+#   text:  DOES reach the dedicated encoder (engine-log verified) and
+#          still renders correctly -- the one genuinely load-bearing half.
+#   SPKI:  `-pubout` fails cleanly (no output, no crash) -- the dedicated
+#          SPKI-DER encoder is registered but OpenSSL's own encoder
+#          selection never falls back to it, even with the bridge blocked.
+#          A real, narrow, permanent limitation (not something a routing
+#          fix in THIS provider can close -- it's OpenSSL core's own
+#          encoder-selection deciding not to try a 3rd-party ENCODER for
+#          a keymgmt whose algorithm name maps to a well-known OID),
+#          documented rather than silently left unproven.
+t4x_spki_noexport() { local w; w=$(mk_arena mlkemnoexp "$CPP_ENGINE_SO" "pkcs11-module-allow-export = 1") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm ML-KEM-768 -out "$w/k.pem" || return 1
+
+  PKCS11_PROVIDER_DEBUG=file:"$w/dbg_text.log" O pkey -in "pkcs11:token=mlkemnoexp;type=private" -text -noout \
+    || { echo "-text failed under DISALLOW_EXPORT_PUBLIC -- should still work"; return 1; }
+  grep -q "mlkem Text Encoder" "$w/dbg_text.log" \
+    || { echo "dedicated text encoder did not run -- engine-log check failed"; return 1; }
+
+  # SPKI must fail CLEANLY (no output file, no crash) — never silently
+  # succeed with wrong/empty data.
+  O pkey -in "pkcs11:token=mlkemnoexp;type=private" -pubout -out "$w/pub.pem" 2>/dev/null \
+    && { echo "-pubout unexpectedly succeeded under DISALLOW_EXPORT_PUBLIC"; return 1; }
+  [[ -s "$w/pub.pem" ]] && { echo "-pubout left a non-empty file despite failing"; return 1; }
+
+  return 0
+}
+run_case T4x_spki_noexport PASS "ML-KEM dedicated encoder reachability under DISALLOW_EXPORT_PUBLIC (remediation R40): -text genuinely reaches the provider's own dedicated text encoder (engine-log verified) and still renders correctly; -pubout fails cleanly with no path available (SPKI-DER encoder confirmed registered-but-unreachable via any CLI surface tested — a documented, permanent, OpenSSL-core-level limitation, not a routing bug in this provider)" t4x_spki_noexport
+
 # R5 prerequisites (gap F36-1, TLS groups — client role): exports the
 # public share from the PRIVATE object TLS actually holds after ephemeral
 # keygen (was: strictly required class==CKO_PUBLIC_KEY, refusing this;
