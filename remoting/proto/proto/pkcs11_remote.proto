@@ -6,9 +6,13 @@
 // is what makes widening the cell set config, not code.
 //
 // Verb parity with the REST service (remoting/rest) is intentional — the
-// two surfaces expose the same seven verbs so a benchmark can compare
-// framing/transport cost alone (WP5a's error-mapping contract depends on
-// this parity: the same CKR_* outcome must be representable on both wires).
+// two surfaces expose the same verbs (eight as of 2026-08-25 —
+// GetSelfSignedCertificate added per pqctoday-hsm's own JCA-provider
+// remaining-gaps plan §7/WS-E, a real capability gap found live: no
+// other verb here returns a public key's bytes at all) so a benchmark
+// can compare framing/transport cost alone (WP5a's error-mapping
+// contract depends on this parity: the same CKR_* outcome must be
+// representable on both wires).
 syntax = "proto3";
 package pqctoday.pkcs11remote.v1;
 
@@ -126,6 +130,29 @@ message DecapsulateResponse {
   bytes shared_secret = 1;
 }
 
+// The 8th verb, added 2026-08-25 (pqctoday-hsm plan
+// docs/implementation-plan-jca-remaining-gaps-2026-08-25.md §7 E1's own
+// second correction) — the only verb that returns a public key's real
+// bytes at all. Signature-capable algorithms only (Ed25519, ML-DSA-*):
+// a KEM key cannot sign its own certificate, so ALGORITHM_UNSPECIFIED
+// or an ML-KEM value here is CKR_ARGUMENTS_BAD, mirroring Sign/Verify's
+// own algorithm.is_signature() assertion. Returns a real, self-signed
+// (issuer == subject) X.509 certificate, DER-encoded — see
+// remoting/core/src/cert.rs for the construction (built independently
+// of pqctoday-kmip's own Certify, which does not support Ed25519 as a
+// signing algorithm).
+message GetSelfSignedCertificateRequest {
+  uint32 session_handle = 1;
+  uint32 public_handle = 2;
+  uint32 private_handle = 3;
+  Algorithm algorithm = 4;
+  string subject_cn = 5;
+  int64 validity_days = 6;
+}
+message GetSelfSignedCertificateResponse {
+  bytes certificate_der = 1;
+}
+
 service Pkcs11Remote {
   rpc Health(HealthRequest) returns (HealthResponse);
   rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
@@ -135,4 +162,5 @@ service Pkcs11Remote {
   rpc Verify(VerifyRequest) returns (VerifyResponse);
   rpc Encapsulate(EncapsulateRequest) returns (EncapsulateResponse);
   rpc Decapsulate(DecapsulateRequest) returns (DecapsulateResponse);
+  rpc GetSelfSignedCertificate(GetSelfSignedCertificateRequest) returns (GetSelfSignedCertificateResponse);
 }

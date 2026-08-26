@@ -19,13 +19,31 @@
 #   9. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
 #  10. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
 #  11. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
+#  12. (--javajce) JavaJCE provider suite (mvn test) in pqc-dev-sandbox  [opt-in]
+#  13. (--javajce-remote) JavaJCE-remote gRPC provider suite vs live pqc-grpc  [opt-in]
 #
 # Steps 6-7 (Rust PKCS#11 conformance, differential harness) were opt-in
 # until 2026-08-23 — both are core PKCS#11 v3.2 evidence, and both had gone
 # stale invisibly while opt-in (the Rust report 45 source-commits behind
 # HEAD; the differential harness never run at all outside a manual
 # invocation). --cpp stays opt-in: unlike the other two, its slow step is a
-# full CMake+ctest build, not proportionate to run on every push.
+# full CMake+ctest build, not proportionate to run on every push. --javajce
+# stays opt-in too, for a different reason (plan
+# docs/implementation-plan-jca-remaining-gaps-2026-08-25.md §WS-F): it needs
+# a second container ($SANDBOX_CONTAINER, pqc-dev-sandbox — JDK 27 RC, a
+# different glibc than $RUST_CONTAINER, so binaries are NOT interchangeable
+# between them, see JavaJCE/README.md), which not every gate run has
+# available — FAIL-never-skip semantics when the flag IS passed, matching
+# --tls-interop's own precedent.
+#
+# --javajce-remote (plan §7, WS-E) is separate from --javajce, not folded
+# into it: it exercises the gRPC client module (JavaJCE-remote/) against a
+# genuinely running pqc-grpc server over real mTLS — a network-dependent
+# integration suite, not the local-FFM unit suite --javajce runs. It needs
+# BOTH $SANDBOX_CONTAINER (JDK 27 RC, same reason as --javajce) AND the
+# pqc-grpc/admin-certs stack from pqctoday-sandbox's docker-compose.yml
+# already up — checked explicitly below and failed loudly (not skipped)
+# if pqc-grpc isn't reachable, same FAIL-never-skip semantics.
 #
 # On success it writes .gate-ok-<HEAD-sha> (with the flag set that produced
 # it) so a pre-push hook can verify the gate ran on the current commit —
@@ -36,23 +54,40 @@
 #   bash scripts/local-gate.sh --cpp           # + C++ ctest
 #   bash scripts/local-gate.sh --acvp-wasm     # + ACVP wasm harness
 #   bash scripts/local-gate.sh --release-xmss  # + XMSS/XMSS^MT vs release wasm build
+#   bash scripts/local-gate.sh --javajce       # + JavaJCE provider suite (needs pqc-dev-sandbox)
+#   bash scripts/local-gate.sh --javajce-remote  # + JavaJCE-remote suite (needs pqc-dev-sandbox + live pqc-grpc)
 #   bash scripts/local-gate.sh --all           # everything (required before a release — see RELEASING.md)
 #   RUST_CONTAINER=pqc-rust bash scripts/local-gate.sh
 #
 # Rust steps run inside the warm OrbStack container ($RUST_CONTAINER, default
 # pqc-rust) which mounts ~/Antigravity → /ag with a prebuilt cargo cache.
+# The --javajce step runs inside a SEPARATE container ($SANDBOX_CONTAINER,
+# default pqc-dev-sandbox) instead — that is where JDK 27 actually lives.
 
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_CONTAINER="${RUST_CONTAINER:-pqc-rust}"
-AG_KMIP="/ag/pqctoday-hsm/kmip"
-AG_RUST="/ag/pqctoday-hsm/rust"
+SANDBOX_CONTAINER="${SANDBOX_CONTAINER:-pqc-dev-sandbox}"
+# Worktree-local override: these two are normally hardcoded to the shared
+# main-tree container path, which is correct for that tree but WRONG when
+# this exact script is invoked from an isolated `git worktree` checkout —
+# it would silently test the main tree's (possibly concurrently-edited)
+# kmip/rust source instead of this worktree's pinned commit. AG_CONTAINER_ROOT
+# lets a worktree invocation point these at itself; unset, behavior is
+# unchanged (the original hardcoded main-tree path).
+AG_CONTAINER_ROOT="${AG_CONTAINER_ROOT:-/ag/pqctoday-hsm}"
+AG_KMIP="$AG_CONTAINER_ROOT/kmip"
+AG_RUST="$AG_CONTAINER_ROOT/rust"
+JAVAJCE_DIR="$ROOT/JavaJCE"
+JAVAJCE_REMOTE_DIR="$ROOT/JavaJCE-remote"
 
 RUN_CPP=0
 RUN_ACVP_WASM=0
 RUN_TLS_INTEROP=0
 RUN_RELEASE_XMSS=0
+RUN_JAVAJCE=0
+RUN_JAVAJCE_REMOTE=0
 for arg in "$@"; do
   case "$arg" in
     --cpp) RUN_CPP=1 ;;
@@ -60,7 +95,9 @@ for arg in "$@"; do
     --rust-p11) : ;; # now always runs (step 6); flag kept accepted, no-op, for muscle memory
     --tls-interop) RUN_TLS_INTEROP=1 ;;
     --release-xmss) RUN_RELEASE_XMSS=1 ;;
-    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_TLS_INTEROP=1; RUN_RELEASE_XMSS=1 ;;
+    --javajce) RUN_JAVAJCE=1 ;;
+    --javajce-remote) RUN_JAVAJCE_REMOTE=1 ;;
+    --all) RUN_CPP=1; RUN_ACVP_WASM=1; RUN_TLS_INTEROP=1; RUN_RELEASE_XMSS=1; RUN_JAVAJCE=1; RUN_JAVAJCE_REMOTE=1 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -89,6 +126,23 @@ ensure_container() {
     say "starting container $RUST_CONTAINER"
     docker start "$RUST_CONTAINER" >/dev/null 2>&1 || {
       echo "cannot start $RUST_CONTAINER — is OrbStack running?" >&2; exit 3; }
+  fi
+}
+
+# $SANDBOX_CONTAINER (pqc-dev-sandbox) is a DIFFERENT container than
+# $RUST_CONTAINER — different glibc, JDK 27 RC lives only here — so this is
+# a separate exec/ensure pair, not a parameter on the existing ones. See
+# JavaJCE/README.md and the --javajce header comment above for why a
+# binary built in one container cannot simply run in the other.
+dexec_sandbox() {
+  docker exec "$SANDBOX_CONTAINER" bash -c "set -o pipefail; $1"
+}
+
+ensure_sandbox_container() {
+  if ! docker exec "$SANDBOX_CONTAINER" true 2>/dev/null; then
+    say "starting container $SANDBOX_CONTAINER"
+    docker start "$SANDBOX_CONTAINER" >/dev/null 2>&1 || {
+      echo "cannot start $SANDBOX_CONTAINER — is OrbStack running?" >&2; exit 3; }
   fi
 }
 
@@ -147,7 +201,7 @@ run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
 # later when someone tried to rebuild the bundle. A type-check is cheap; a full
 # wasm build is not, so this checks rather than builds.
 run_step "wasm target still compiles (cargo check)" \
-  "cd /ag/pqctoday-hsm/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6 && exit 1; echo '  wasm32 type-check clean'"
+  "cd $AG_CONTAINER_ROOT/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6 && exit 1; echo '  wasm32 type-check clean'"
 
 # wasm smoke runs on the HOST (node lives there, not in the Rust container).
 # Runs the STAGED bundle — see the check above for why that is not sufficient on
@@ -212,12 +266,29 @@ if [[ $RUN_CPP == 1 ]]; then
   # build/ — ctest's own add_test invocation (CMakeLists.txt) writes into
   # build/ and that copy is discarded; this explicit run is what regenerates
   # the checked-in copy, with the freshness guard immediately after it.
+  #
+  # OpenSSL >= 3.6 is required to even COMPILE now, not just for
+  # --tls-interop's own proof below: src/vendor/pkcs11-provider's ML-KEM
+  # CMS-decrypt code (commit 2cca4f0) uses
+  # OSSL_PKEY_PARAM_CMS_RI_TYPE/CMS_RECIPINFO_KEM — real OpenSSL RFC 9629
+  # KEMRecipientInfo support that landed in 3.6, confirmed absent from
+  # 3.5.6's own headers (undeclared-identifier compile errors, not a
+  # warning — found live running the real --all gate, 2026-08-25). Same
+  # env-var override pattern and default path as --tls-interop below, so
+  # a host that already staged that build for TLS interop needs no extra
+  # setup. -DBUILD_TESTS=ON is also required and was previously missing
+  # here entirely — CMakeLists.txt defaults it OFF, so this step only
+  # ever found tests because a stale, undocumented `build/` from long ago
+  # happened to have it cached; the `test -d build ||` guard below means
+  # a truly fresh checkout would have silently found zero tests.
+  OSSL_ROOT="${OPENSSL_ROOT_DIR:-/usr/local/ssl}"
+  OSSL_LIB="${OPENSSL_LIB_DIR:-/usr/local/ssl/lib}"
   run_step "C++ ctest (incl. PKCS#11 v3.2 compliance harness) + report freshness" \
-    "cd /ag/pqctoday-hsm && (test -d build || cmake -S . -B build -DWITH_RIPEMD160=ON >/dev/null) && \
-     cmake --build build -j\$(nproc) >/dev/null && cd build && ctest --output-on-failure && \
-     cd /ag/pqctoday-hsm && \
+    "cd $AG_CONTAINER_ROOT && (test -d build || cmake -S . -B build -DWITH_RIPEMD160=ON -DBUILD_TESTS=ON -DOPENSSL_ROOT_DIR=$OSSL_ROOT >/dev/null) && \
+     LD_LIBRARY_PATH=$OSSL_LIB cmake --build build -j\$(nproc) >/dev/null && cd build && LD_LIBRARY_PATH=$OSSL_LIB ctest --output-on-failure && \
+     cd $AG_CONTAINER_ROOT && \
      ENGINE=./build/src/lib/libsofthsmv3.so; [ -f \"\$ENGINE\" ] || ENGINE=./build/src/lib/libsofthsmv3.dylib; \
-     ./build/p11_v32_compliance_test --engine \"\$ENGINE\" \
+     LD_LIBRARY_PATH=$OSSL_LIB ./build/p11_v32_compliance_test --engine \"\$ENGINE\" \
        --workdir ./build/p11_v32_compliance_workdir --report ./cpp_compliance_report \
        --engine-commit \$(git rev-parse HEAD) >/dev/null && \
      python3 scripts/check_pkcs11_reports_fresh.py --cpp"
@@ -225,7 +296,7 @@ fi
 
 if [[ $RUN_ACVP_WASM == 1 ]]; then
   run_step "ACVP wasm harness (20 suites, cross-engine)" \
-    "cd /ag/pqctoday-hsm && npm run test:acvp 2>&1 | tail -5"
+    "cd $AG_CONTAINER_ROOT && npm run test:acvp 2>&1 | tail -5"
 fi
 
 if [[ $RUN_RELEASE_XMSS == 1 ]]; then
@@ -264,6 +335,98 @@ if [[ $RUN_TLS_INTEROP == 1 ]]; then
      cargo test --quiet --test secp384r1mlkem1024_interop -- --ignored --test-threads=1"
 fi
 
+if [[ $RUN_JAVAJCE == 1 ]]; then
+  # JDK 27's javax.crypto.KDF (JEP 478) and the JEP 527 TLS 1.3 hybrid-KEM
+  # path this provider bridges to both need the JDK 27 RC — only
+  # $SANDBOX_CONTAINER has it, so this step syncs source in fresh each
+  # run (docker cp, not a bind mount — same flow used throughout the
+  # provider's own development, see the implementation plan docs) rather
+  # than assuming a stale prior copy is still current.
+  STEP=$((STEP+1)); say "step $STEP: JavaJCE provider suite (mvn test, pqc-dev-sandbox)"
+  ensure_sandbox_container
+  GATE_DEST=/tmp/hsm-javajce-gate
+  # Maven emits real ANSI color escapes even under `docker exec` with no
+  # TTY (confirmed live — `[INFO]` is genuinely `\x1b[1;34mINFO\x1b[m]` on
+  # the wire, not just a terminal-rendering artifact) — strip them before
+  # writing the log so both this grep and a human reading the file later
+  # see plain text, not escape-code noise wrapping the very line being
+  # matched against.
+  # `rm -rf $GATE_DEST/JavaJCE` (the WHOLE thing, not just target/) before
+  # the copy — real bug caught by a sabotage test while writing this step:
+  # `docker cp SRC container:DEST` copies SRC AS A SUBDIRECTORY of DEST
+  # when DEST already exists (rather than overwriting DEST's contents in
+  # place), so a second run without this would silently nest the new
+  # source under the stale prior copy and test THAT instead — a false
+  # green that would have gone undetected without deliberately re-running
+  # with a flipped assertion first.
+  # The success grep below must match ONLY the final aggregate summary
+  # line, not one of the 25 per-suite "Tests run: N, Failures: 0..." lines
+  # Surefire prints along the way (real bug caught live: an early version
+  # of this pattern had no end-anchor, so it happily matched any passing
+  # suite's own line even when a LATER suite failed and the real
+  # aggregate read "Failures: 1" — a sabotage test with one flipped
+  # assertion still reported green until this was anchored). The
+  # aggregate line is the only one with no trailing
+  # ", Time elapsed: ... -- in <ClassName>" text, hence the `$` anchor;
+  # it is tagged [ERROR] instead of [INFO] on a real failure, hence
+  # matching either prefix (a genuine failure still won't match the
+  # "Failures: 0" requirement itself).
+  AGG_PATTERN='^\[(INFO|ERROR)\][[:space:]]+Tests run: [0-9]+, Failures: 0, Errors: 0, Skipped: [0-9]+$'
+  if dexec_sandbox "rm -rf $GATE_DEST/JavaJCE && mkdir -p $GATE_DEST" \
+     && docker cp "$JAVAJCE_DIR" "$SANDBOX_CONTAINER:$GATE_DEST/JavaJCE" >/dev/null 2>&1 \
+     && dexec_sandbox "cd $GATE_DEST/JavaJCE && \
+          export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
+          mvn -o test 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' > /tmp/javajce-gate.log; \
+          grep -E '$AGG_PATTERN' /tmp/javajce-gate.log >/dev/null"; then
+    ok "JavaJCE provider suite ($(dexec_sandbox "grep -E '$AGG_PATTERN' /tmp/javajce-gate.log | tail -1"))"
+  else
+    bad "JavaJCE provider suite — see /tmp/javajce-gate.log inside $SANDBOX_CONTAINER for the real failure"
+  fi
+fi
+
+if [[ $RUN_JAVAJCE_REMOTE == 1 ]]; then
+  # Unlike --javajce (local FFM, no network), this step's whole point is a
+  # real network round trip against the live pqc-grpc server over real
+  # mTLS — same "run it for real, never mock" discipline as
+  # remoting/acceptance/tests/three_way_parity.rs on the Rust side. That
+  # server isn't part of $SANDBOX_CONTAINER itself (it's the pqc-grpc
+  # container from pqctoday-sandbox's docker-compose.yml, reached over the
+  # shared playground-network) — checked explicitly so a missing stack
+  # fails loudly with a clear reason instead of a confusing mvn stack
+  # trace three steps later.
+  STEP=$((STEP+1)); say "step $STEP: JavaJCE-remote gRPC provider suite (mvn test, pqc-dev-sandbox, live pqc-grpc)"
+  ensure_sandbox_container
+  if ! dexec_sandbox "getent hosts pqc-grpc >/dev/null 2>&1"; then
+    bad "JavaJCE-remote provider suite — pqc-grpc is not reachable from $SANDBOX_CONTAINER (start it: cd pqctoday-sandbox && docker compose up -d pqc-grpc)"
+  elif ! dexec_sandbox "[[ -f /admin-certs/client.crt && -f /admin-certs/client.key && -f /admin-certs/ca.crt ]]"; then
+    bad "JavaJCE-remote provider suite — /admin-certs mTLS material missing inside $SANDBOX_CONTAINER"
+  else
+    GATE_DEST_REMOTE=/tmp/hsm-javajce-remote-gate
+    # protoSourceRoot in JavaJCE-remote/pom.xml is ../remoting/proto/proto
+    # (consumed verbatim from the real Rust schema, never copied into the
+    # module's own tree — see that pom's own header comment) — staged at
+    # the matching relative path here, same fix as the original ad-hoc
+    # staging bug (a bare parent dir doesn't exist by default under
+    # docker cp; the intermediate dirs must be made first).
+    if dexec_sandbox "rm -rf $GATE_DEST_REMOTE && mkdir -p $GATE_DEST_REMOTE/remoting/proto/proto" \
+       && docker cp "$JAVAJCE_DIR" "$SANDBOX_CONTAINER:$GATE_DEST_REMOTE/JavaJCE" >/dev/null 2>&1 \
+       && docker cp "$JAVAJCE_REMOTE_DIR" "$SANDBOX_CONTAINER:$GATE_DEST_REMOTE/JavaJCE-remote" >/dev/null 2>&1 \
+       && docker cp "$ROOT/remoting/proto/proto/pkcs11_remote.proto" \
+            "$SANDBOX_CONTAINER:$GATE_DEST_REMOTE/remoting/proto/proto/pkcs11_remote.proto" >/dev/null 2>&1 \
+       && dexec_sandbox "cd $GATE_DEST_REMOTE/JavaJCE && \
+            export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
+            mvn -o install -DskipTests -q" \
+       && dexec_sandbox "cd $GATE_DEST_REMOTE/JavaJCE-remote && \
+            export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
+            mvn -o test 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' > /tmp/javajce-remote-gate.log; \
+            grep -E '$AGG_PATTERN' /tmp/javajce-remote-gate.log >/dev/null"; then
+      ok "JavaJCE-remote provider suite ($(dexec_sandbox "grep -E '$AGG_PATTERN' /tmp/javajce-remote-gate.log | tail -1"))"
+    else
+      bad "JavaJCE-remote provider suite — see /tmp/javajce-remote-gate.log inside $SANDBOX_CONTAINER for the real failure"
+    fi
+  fi
+fi
+
 # ── verdict ─────────────────────────────────────────────────────────────────
 echo
 if [[ ${#FAILED[@]} -eq 0 ]]; then
@@ -274,6 +437,8 @@ if [[ ${#FAILED[@]} -eq 0 ]]; then
   [[ $RUN_ACVP_WASM == 1 ]] && FLAGS="$FLAGS,acvp-wasm"
   [[ $RUN_TLS_INTEROP == 1 ]] && FLAGS="$FLAGS,tls-interop"
   [[ $RUN_RELEASE_XMSS == 1 ]] && FLAGS="$FLAGS,release-xmss"
+  [[ $RUN_JAVAJCE == 1 ]] && FLAGS="$FLAGS,javajce"
+  [[ $RUN_JAVAJCE_REMOTE == 1 ]] && FLAGS="$FLAGS,javajce-remote"
   {
     echo "date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "flags: $FLAGS"

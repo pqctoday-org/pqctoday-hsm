@@ -16,6 +16,7 @@ pub fn router() -> Router {
         .route("/v1/keys/{id}/verify", post(verify))
         .route("/v1/keys/{id}/encapsulate", post(encapsulate))
         .route("/v1/keys/{id}/decapsulate", post(decapsulate))
+        .route("/v1/keys/{id}/certificate", post(get_self_signed_certificate))
 }
 
 async fn healthz() -> Json<HealthResponse> {
@@ -69,4 +70,22 @@ async fn decapsulate(
 ) -> Result<Json<DecapsulateResponse>, ApiError> {
     let ss = verbs::decapsulate(req.session_handle, id, req.algorithm.into(), &req.ciphertext)?;
     Ok(Json(DecapsulateResponse { shared_secret: ss }))
+}
+
+/// The 8th verb. `{id}` in the path is the private-key handle (same
+/// convention as `sign` above — this operation signs too), the body's
+/// `public_handle` is the other half needed to read the SPKI.
+async fn get_self_signed_certificate(
+    Path(id): Path<u32>,
+    Json(req): Json<GetSelfSignedCertificateRequest>,
+) -> Result<Json<GetSelfSignedCertificateResponse>, ApiError> {
+    let der = verbs::get_self_signed_certificate(
+        req.session_handle,
+        req.public_handle,
+        id,
+        req.algorithm.into(),
+        &req.subject_cn,
+        req.validity_days,
+    )?;
+    Ok(Json(GetSelfSignedCertificateResponse { certificate_der: der }))
 }

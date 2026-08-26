@@ -95,4 +95,22 @@ impl Pkcs11Remote for Pkcs11RemoteService {
             verbs::decapsulate(req.session_handle, req.private_handle, algo, &req.ciphertext).map_err(to_status)?;
         Ok(Response::new(DecapsulateResponse { shared_secret: ss }))
     }
+
+    async fn get_self_signed_certificate(
+        &self,
+        request: Request<GetSelfSignedCertificateRequest>,
+    ) -> Result<Response<GetSelfSignedCertificateResponse>, Status> {
+        let req = request.into_inner();
+        let algo = to_core_algo(req.algorithm)?;
+        let der = verbs::get_self_signed_certificate(
+            req.session_handle,
+            req.public_handle,
+            req.private_handle,
+            algo,
+            &req.subject_cn,
+            req.validity_days,
+        )
+        .map_err(to_status)?;
+        Ok(Response::new(GetSelfSignedCertificateResponse { certificate_der: der }))
+    }
 }

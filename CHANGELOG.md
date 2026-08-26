@@ -8,13 +8,90 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-08-25
+
+### Fixed
+
+- **`scripts/local-gate.sh --cpp`** never actually ran any tests on a
+  fresh checkout — `CMakeLists.txt` defaults `BUILD_TESTS` to `OFF` and
+  the step's own `cmake` invocation never turned it on; it only ever
+  worked because a stale, undocumented `build/` directory from long ago
+  happened to have it cached. Found running the real `--all` gate for
+  this release, not hypothesized. Separately, `src/vendor/pkcs11-provider`'s
+  ML-KEM CMS-decrypt code needs real OpenSSL RFC 9629 KEMRecipientInfo
+  support (`OSSL_PKEY_PARAM_CMS_RI_TYPE`/`CMS_RECIPINFO_KEM`), which
+  landed in OpenSSL 3.6 — this environment's system OpenSSL is 3.5.6,
+  which doesn't declare either symbol at all. Both fixed: `-DBUILD_TESTS=ON`
+  added explicitly, and the step now points at an OpenSSL >= 3.6 build
+  via the same `OPENSSL_ROOT_DIR`/`OPENSSL_LIB_DIR` env-var pattern
+  `--tls-interop` already established. Neither issue is related to any
+  work in this release — both are pre-existing gaps in opt-in
+  infrastructure this release's own changes never touched.
+
+### Removed
+
+- **`JavaJCE/`** — a placeholder module that never worked, removed while
+  starting a real Java JCA/JCE provider (see
+  `docs/implementation-plan-jdk27-jca-provider-2026-08-24.md`) to bridge
+  JDK 27's `javax.crypto`/`java.security` APIs to this engine's PKCS#11
+  v3.2 surface. Audit (2026-08-24) found: `MLDSASignatureSpi.engineSign()`
+  returned a hardcoded 2-byte array instead of a real ML-DSA-65 signature
+  (3309 bytes); `engineInitVerify()`/`engineVerify()` both threw
+  `UnsupportedOperationException`; `MLKEMKeyAgreementSpi.engineGenerateSecret()`
+  returned a hardcoded fake secret and `engineDoPhase()` returned the
+  input key unchanged (no encapsulation ran); `SoftHSMJCEProvider`
+  registered several services (`ClassicalSignatureSpi`,
+  `ClassicalCipherSpi`, `ClassicalKeyAgreementSpi`,
+  `ClassicalMessageDigestSpi`) whose implementing classes did not exist
+  as files; the design doc's claim of "we successfully patched the JVM
+  core (SunPKCS11 JNI)" and its `playground-physics`/`Dockerfile.physics`
+  container referenced infrastructure that did not exist anywhere in the
+  repo; `MLKEMKeyAgreementSpi` also hardcoded the wrong `CKM_ML_KEM` value
+  (`0x1058` instead of this repo's own `0x17`). None of it is carried
+  forward — the replacement is FFM-based (`java.lang.foreign`, no
+  JDK-internal APIs), generalizing the proven `P11Ffm.java` pattern
+  already verified live in pqctoday-sandbox.
+
 ### Added
 
+- **A real Java JCA/JCE provider** (`JavaJCE/`, `com.pqctoday.hsm.jce.SoftHSMv3Provider`)
+  replacing the placeholder documented under Removed above — FFM-based
+  (`java.lang.foreign`, no JDK-internal APIs), targeting JDK 24+ (JDK 27
+  for TLS specifically, see below). Real, working coverage: `SecureRandom`
+  (token DRBG), digests (SHA-2/SHA-3), signatures (ML-DSA-44/65/87,
+  SLH-DSA — all 12 FIPS 205 parameter sets, Ed25519/Ed448, EC P-256/384/521,
+  RSA PKCS#1 v1.5 and RSASSA-PSS), `KeyPairGenerator`/`KeyFactory` for every
+  algorithm above plus ML-KEM-512/768/1024 (public-key import; private-key
+  import is refused by FIPS 140-3 L3 policy — keys are generated on-token),
+  `KEM` (ML-KEM, including under the bare `"ML-KEM"` name JDK 27's own JEP
+  527 hybrid-TLS path requests), `Cipher` (RSA-OAEP, AES-GCM/CBC/CTR,
+  AES-KeyWrap/KeyWrapPad), `KeyAgreement` (ECDH), `KeyGenerator`/`Mac`
+  (AES, HMAC-SHA-2/SHA-3, KMAC128/256, AES-CMAC), `KDF` (HKDF-SHA256/384/512,
+  JEP 478), `SecretKeyFactory` (PBKDF2, SP 800-108 counter/feedback),
+  `KeyStore` (full read/write/delete, real PKIX trust-path validation
+  against it), and `AuthProvider` (real `login()`/`logout()`). Every
+  generated/derived key is opaque (`getEncoded()` returns `null`) except a
+  small, disclosed set of deliberate exceptions where the whole point of
+  the primitive is to leave the token (ML-KEM's decapsulated secret,
+  ECDH's derived secret); `Destroyable` is implemented on every key type
+  with real `C_DestroyObject` behind it, not just a Java-side flag. A full
+  pre-operational self-test battery (real published KATs, a DRBG check,
+  and pairwise-consistency checks per asymmetric family) runs before any
+  service is exposed and fails closed. See `JavaJCE/README.md` for the
+  full algorithm table and known limitations, and
+  `docs/jdk27-jca-provider-security-posture.md` for the section-by-section
+  FIPS 140-3 area mapping. Deliberately excluded by FIPS 140-3 L3 policy
+  (never registered, not merely discouraged): SHA-1/MD5/RIPEMD-160/
+  Keccak-256, raw/PKCS#1-v1.5-as-Cipher, ChaCha20, AES-ECB, X25519/X448,
+  BIP32, standalone CONCATENATE/SHAKE-256-KDF, and stateful HSS/XMSS/
+  XMSS-MT (deferred pending their own state-management design, not an
+  oversight).
 - **gRPC and REST PKCS#11 remoting** (new `remoting/` standalone workspace:
   `proto`/`core`/`grpc`/`rest`/`acceptance`) — two new network-facing access
   paths to the engine (`pqc-grpc-pkcs11`, `pqc-rest-pkcs11`), alongside the
-  existing in-process and KMIP paths. 7 verbs: OpenSession, CloseSession,
-  GenerateKeyPair, Sign, Verify, Encapsulate, Decapsulate. Both services
+  existing in-process and KMIP paths. 8 verbs: OpenSession, CloseSession,
+  GenerateKeyPair, Sign, Verify, Encapsulate, Decapsulate,
+  GetSelfSignedCertificate (added 2026-08-25 — see below). Both services
   share the KMIP listener's quantum-safe TLS posture through a new
   `pqctoday-tls` crate — `SecP384r1MLKEM1024` (locally composed, since
   rustls 0.23 lacks it natively) extracted verbatim out of `pqctoday-kmip`
@@ -33,8 +110,132 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   against the same algorithm matrix as the existing KMIP arm, sharing its
   twin-container interleaved A/B comparison mechanism (`--compare-tls`,
   real min/max spread across repeats, `interleaved:true` per row).
+- **`GetSelfSignedCertificate`, an 8th remoting verb** (`remoting/core/src/cert.rs`) —
+  a real, self-signed X.509 certificate for a signature-capable keypair
+  already on the token (Ed25519, ML-DSA-44/65/87), reading the genuine
+  `SubjectPublicKeyInfo` via `CKA_PUBLIC_KEY_INFO` and signing through the
+  already-proven `Sign` path. Closes a real gap found live while building
+  the gRPC Java client (`JavaJCE-remote/`, below): none of the original 7
+  verbs return a public key's bytes at all, so a remote-generated key had
+  no way to leave the server as usable material. ML-KEM keys are rejected
+  with `CKR_ARGUMENTS_BAD` (a KEM key cannot sign its own certificate).
+  Two new `three_way_parity.rs` cases re-verify the embedded signature
+  across all three transports, not just DER-parse it.
+- **`JavaJCE-remote/`** — a second, separate Java provider module
+  (`com.pqctoday.hsm.jce.remote.SoftHSMv3RemoteProvider`, JCA name
+  `SoftHSMv3-Remote`) bridging `javax.crypto`/`java.security` to the
+  engine over the gRPC remoting surface above, rather than the local FFM
+  path `JavaJCE/` uses — a separate artifact by design, so the core
+  provider keeps zero network dependencies. Covers the remote surface's
+  narrower algorithm set (Ed25519, ML-DSA-44/65/87, ML-KEM-512/768/1024;
+  no SLH-DSA/EC/RSA/symmetric — a real proto contract limit, not an
+  omission) plus certificate export via the new verb above. mTLS is
+  mandatory at construction (fail-closed, no plaintext fallback), reusing
+  the same `/admin-certs` material every other admin-facing client in
+  this repo already uses. Verified with a 14-case JUnit suite against the
+  real running `pqc-grpc` container (not a mock): per-algorithm
+  sign/verify/tamper-rejection, per-algorithm certificate round trip
+  validated with real `PKIXParameters`/`CertPathValidator`, per-algorithm
+  KEM round trip, and real-error-code assertions (`CKR_PIN_INCORRECT`,
+  the mTLS fail-closed path). `scripts/local-gate.sh` gained a matching
+  opt-in `--javajce-remote` step (network-dependent, separate from the
+  local-only `--javajce` step).
+- **`CKM_HKDF_DERIVE` now supports `CKF_HKDF_SALT_KEY`** (salt supplied
+  as a key handle rather than raw data) — previously rejected outright
+  with `CKR_MECHANISM_PARAM_INVALID`. Needed so a caller can chain a
+  previous derived (opaque/non-extractable) secret back in as the next
+  HKDF-Extract's salt without exporting it — the exact shape JDK 27's
+  JEP 527 hybrid TLS 1.3 key schedule requires, and the gap the
+  `JavaJCE` provider's own live TLS handshake spike found directly.
+  Proven correct by equivalence (salt as `CKF_HKDF_SALT_DATA` vs the
+  identical bytes as `CKF_HKDF_SALT_KEY` → byte-identical output),
+  including through a private/sensitive salt key (exercises the
+  existing decrypt-on-read path). New C++ unit test coverage
+  (`DeriveTests::testHkdfDerive`) — `CKM_HKDF_DERIVE` had no prior
+  native test coverage at all. The Rust engine (`softhsmrustv3`)
+  already implemented this correctly; no cross-engine divergence.
+- **`JavaJCE` completes real, live TLS 1.3 handshakes through this
+  provider**, both FIPS-profile hybrid groups (`SecP256r1MLKEM768`,
+  `SecP384r1MLKEM1024`), proven against a live `pqc-rest` endpoint with
+  token-side (`P11Debug`) proof — not just key agreement in isolation.
+  New opt-in flag `-Dsofthsmv3.jce.callerGcmIv=true` (default off,
+  non-FIPS): JDK 27's TLS 1.3 record cipher must supply its own RFC
+  8446 deterministic per-record nonce, which this provider's GCM
+  `Cipher` refuses by default under SP 800-38D §8.2 policy — confirmed
+  from JDK's own `SSLCipher.java` that this is mandatory protocol
+  structure, not caller laziness, before adding the flag.
+  `CKM_HKDF_DERIVE`-derived keys can now be requested as `"AES"` and
+  come back as a genuine, usable `CKK_AES` object (re-imported from the
+  engine's own always-`CKK_GENERIC_SECRET` HKDF output) rather than
+  failing the record cipher with `CKR_KEY_TYPE_INCONSISTENT` — needed
+  because JDK 27's key schedule genuinely requests `"AES"` for the
+  traffic key. New benchmark spike
+  (`JavaJCE/spikes/W6TlsHandshakeBenchmark.java`, N=50 real handshakes
+  per arm): token-backed adds a 1.48x mean-latency ratio over stock
+  JDK (6.2ms vs 4.2ms mean) — in line with this module's own
+  documented FFM-overhead expectation.
+- **`JavaJCE`'s native (off-heap) memory now scrubs secret material
+  before release, closing the one disclosed gap in the security
+  posture doc's SSP-management area.** `P11Library` previously
+  allocated every native buffer — mechanism parameters, key material,
+  plaintext, the PIN — from one `Arena.ofShared()` that lived for the
+  whole session, freed without zeroing only when the provider itself
+  closed; real secrets could sit mapped and readable for as long as
+  the session stayed open. Every operation now opens its own
+  short-lived confined arena, and every buffer carrying real byte
+  content — including decrypted plaintext, the PIN, and any raw key
+  bytes passing through an import template — is explicitly zero-filled
+  before that arena closes. Purely an internal refactor: behaviorally
+  invisible, no test needed to change, no measurable performance
+  regression (1.47x vs the prior 1.48x TLS-handshake latency ratio).
+- **`JavaJCE`'s `RSASSA-PSS` now supports the full SHA-3 family**
+  (`SHA3-224`/`256`/`384`/`512`), confirmed dispatched for real by the
+  engine (mechanism table and actual `C_SignInit`/`C_VerifyInit`
+  dispatch, not just capability flags) before extending it — not
+  assumed from the existing SHA-2 support. Cross-verified against JDK's
+  own `SunRsaSign`.
 
 ### Fixed
+
+- **A JVM shutdown-hook race in `JavaJCE`'s own zeroization work
+  (`1ed4965`) crashed the JVM outright** — one hook `Thread` per
+  constructed `SoftHSMv3Provider`, all run concurrently by the JVM at
+  exit, meant 100+ concurrent native `C_CloseSession` calls in this
+  module's own test suite, corrupting engine-internal state
+  (`SIGSEGV` in `std::_Rb_tree_increment` inside `libsofthsmv3.so`)
+  despite each engine-side manager already holding its own mutex.
+  Fixed with a single JVM-wide lock serializing every `close()` call —
+  teardown-only, never a hot path, so free in practice. Found live
+  while pursuing the TLS-handshake item above, not introduced by it.
+- **`JavaJCE`'s `engineGetOutputSize` for AES-GCM/CBC/CTR returned a
+  padded upper bound instead of the exact output size**, invisible to
+  every byte[]-based caller in this module's existing 200+ tests but a
+  hard failure (`"Cipher buffering error"`) against JDK 27's own
+  `ByteBuffer`-based `Cipher.doFinal` bridging, which strictly checks
+  the real written length against it. Now returns the exact size for
+  GCM/CBC/CTR; only CBC+PKCS5 decrypt keeps a safe upper bound (the
+  true unpadded length isn't knowable before decrypting).
+- **Engine: `C_EncryptInit`/`C_DecryptInit` rejected every SHA-3 OAEP
+  combination with `CKR_ARGUMENTS_BAD`** — found while building the
+  `JavaJCE` provider's RSA-OAEP support and fixed at the root (not
+  worked around) per explicit instruction. Root cause:
+  `SoftHSM_keygen.cpp`'s `MechParamCheckRSAPKCSOAEP` hardcoded a
+  `validCombo` allow-list covering only `{SHA-1, SHA224, SHA256, SHA384,
+  SHA512}`. Verified against the real OASIS PKCS#11 v3.2 Standard PDF
+  (§6.1.8) that `CK_RSA_PKCS_OAEP_PARAMS.hashAlg` has no spec-mandated
+  hash-family restriction and `CKG_MGF1_SHA3_224/256/384/512` sit in the
+  same normative MGF table as the SHA-2 variants — a genuine engine
+  completeness gap, not a spec restriction. Fixed across four sites in
+  three files (`AsymmetricAlgorithm.h`'s `AsymMech::Type` enum,
+  `OSSLRSA.cpp`'s encrypt/decrypt padding-check and MD-selection logic,
+  `SoftHSM_cipher.cpp`'s mechanism-to-`AsymMech` mapping,
+  `SoftHSM_keygen.cpp`'s `validCombo` check), reusing the same
+  `EVP_sha3_*()` pattern already proven elsewhere in this engine
+  (ECDSA, HMAC). Note: SHA-3 OAEP cannot be cross-verified against the
+  JDK at all — `SunJCE`'s OAEP transformation-string parser doesn't
+  recognize a `SHA3-*` digest name and throws `NoSuchPaddingException`
+  unconditionally — so `JavaJCE`'s SHA-3 OAEP coverage is a self-round-trip
+  test plus a Bouncy Castle cross-check, not a JDK cross-verify.
 
 - **`bench-harness`'s keygen templates for Ed25519/X25519/RSA-with-
   parameter-set had gone stale against two already-shipped engine

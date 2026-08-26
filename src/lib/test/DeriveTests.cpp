@@ -1044,3 +1044,150 @@ void DeriveTests::testMiscDerivations() {
 #undef ASSERT_KEY_IS_EXTRACTABLE
 }
 
+// CKM_HKDF_DERIVE (PKCS#11 v3.2 §6.62) had NO prior C++ unit-test coverage
+// at all before this — the engine's HKDF path had only ever been exercised
+// through the JavaJCE FFM layer and ad hoc isolated-C probes. Written
+// specifically to cover the CKF_HKDF_SALT_KEY addition (plan WS-A,
+// 2026-08-25): salt supplied as a key handle rather than raw data, added
+// because JEP 527 hybrid TLS 1.3's key schedule needs to chain a previous
+// derived (opaque) secret back in as the next Extract step's salt, which
+// this engine previously rejected outright (CKR_MECHANISM_PARAM_INVALID).
+void DeriveTests::testHkdfDerive()
+{
+	CK_RV rv;
+	CK_SESSION_HANDLE hSessionRW;
+
+	CRYPTOKI_F_PTR( C_Finalize(NULL_PTR) );
+	rv = CRYPTOKI_F_PTR( C_Initialize(NULL_PTR) );
+	CPPUNIT_ASSERT(rv == CKR_OK);
+	rv = CRYPTOKI_F_PTR( C_OpenSession(m_initializedTokenSlotID, CKF_SERIAL_SESSION | CKF_RW_SESSION, NULL_PTR, NULL_PTR, &hSessionRW) );
+	CPPUNIT_ASSERT(rv == CKR_OK);
+	rv = CRYPTOKI_F_PTR( C_Login(hSessionRW, CKU_USER, m_userPin1, m_userPin1Length) );
+	CPPUNIT_ASSERT(rv == CKR_OK);
+
+	CK_OBJECT_CLASS secretClass = CKO_SECRET_KEY;
+	CK_KEY_TYPE genKeyType = CKK_GENERIC_SECRET;
+	CK_BBOOL bTrue = CK_TRUE;
+	CK_BBOOL bFalse = CK_FALSE;
+
+	// A fixed 32-byte IKM — content is irrelevant, only needs to be a
+	// real, known value both derivations below share.
+	CK_BYTE ikmValue[32];
+	for (int i = 0; i < 32; i++) ikmValue[i] = (CK_BYTE)(0xA0 + i);
+	CK_ATTRIBUTE ikmAttribs[] = {
+		{ CKA_CLASS, &secretClass, sizeof(secretClass) },
+		{ CKA_KEY_TYPE, &genKeyType, sizeof(genKeyType) },
+		{ CKA_VALUE, ikmValue, sizeof(ikmValue) },
+		{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+		{ CKA_PRIVATE, &bFalse, sizeof(bFalse) },
+		{ CKA_SENSITIVE, &bFalse, sizeof(bFalse) },
+		{ CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+		{ CKA_DERIVE, &bTrue, sizeof(bTrue) },
+	};
+	CK_OBJECT_HANDLE hIkm = CK_INVALID_HANDLE;
+	rv = CRYPTOKI_F_PTR( C_CreateObject(hSessionRW, ikmAttribs, sizeof(ikmAttribs)/sizeof(CK_ATTRIBUTE), &hIkm) );
+	CPPUNIT_ASSERT(rv == CKR_OK);
+
+	// A fixed 16-byte salt, imported once as a public key object and once
+	// as a private one — same bytes, so the two derivations below (data
+	// form vs key-handle form, and public-salt-key form vs private-salt-key
+	// form) are all expected to agree byte-for-byte.
+	CK_BYTE saltValue[16];
+	for (int i = 0; i < 16; i++) saltValue[i] = (CK_BYTE)(0x10 + i);
+
+	CK_ATTRIBUTE saltKeyAttribsPublic[] = {
+		{ CKA_CLASS, &secretClass, sizeof(secretClass) },
+		{ CKA_KEY_TYPE, &genKeyType, sizeof(genKeyType) },
+		{ CKA_VALUE, saltValue, sizeof(saltValue) },
+		{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+		{ CKA_PRIVATE, &bFalse, sizeof(bFalse) },
+		{ CKA_SENSITIVE, &bFalse, sizeof(bFalse) },
+		{ CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+	};
+	CK_OBJECT_HANDLE hSaltKeyPublic = CK_INVALID_HANDLE;
+	rv = CRYPTOKI_F_PTR( C_CreateObject(hSessionRW, saltKeyAttribsPublic, sizeof(saltKeyAttribsPublic)/sizeof(CK_ATTRIBUTE), &hSaltKeyPublic) );
+	CPPUNIT_ASSERT(rv == CKR_OK);
+
+	CK_ATTRIBUTE saltKeyAttribsPrivate[] = {
+		{ CKA_CLASS, &secretClass, sizeof(secretClass) },
+		{ CKA_KEY_TYPE, &genKeyType, sizeof(genKeyType) },
+		{ CKA_VALUE, saltValue, sizeof(saltValue) },
+		{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+		{ CKA_PRIVATE, &bTrue, sizeof(bTrue) },
+		{ CKA_SENSITIVE, &bTrue, sizeof(bTrue) },
+		{ CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+	};
+	CK_OBJECT_HANDLE hSaltKeyPrivate = CK_INVALID_HANDLE;
+	rv = CRYPTOKI_F_PTR( C_CreateObject(hSessionRW, saltKeyAttribsPrivate, sizeof(saltKeyAttribsPrivate)/sizeof(CK_ATTRIBUTE), &hSaltKeyPrivate) );
+	CPPUNIT_ASSERT(rv == CKR_OK);
+
+	CK_ULONG outLen = 32; // SHA-256 output size
+	CK_ATTRIBUTE outAttribs[] = {
+		// CKA_CLASS/CKA_KEY_TYPE must be present even though the HKDF-specific
+		// code path later forces both to CKO_SECRET_KEY/CKK_GENERIC_SECRET
+		// regardless of what's supplied — C_DeriveKey's own generic
+		// extractObjectInformation() pre-check (reached before the
+		// mechanism-specific dispatch) rejects an incomplete template
+		// without them. Same requirement already documented on the JavaJCE
+		// side (P11HKDFKDFSpi's outputTmpl) — re-derived here the hard way
+		// once, then written down so it isn't re-derived a second time.
+		{ CKA_CLASS, &secretClass, sizeof(secretClass) },
+		{ CKA_KEY_TYPE, &genKeyType, sizeof(genKeyType) },
+		{ CKA_VALUE_LEN, &outLen, sizeof(outLen) },
+		{ CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+	};
+
+	auto deriveAndRead = [&](CK_HKDF_PARAMS& params, CK_BYTE* out) -> CK_RV {
+		CK_MECHANISM mechanism = { CKM_HKDF_DERIVE, &params, sizeof(params) };
+		CK_OBJECT_HANDLE hDerived = CK_INVALID_HANDLE;
+		CK_RV drv = CRYPTOKI_F_PTR( C_DeriveKey(hSessionRW, &mechanism, hIkm,
+			outAttribs, sizeof(outAttribs)/sizeof(CK_ATTRIBUTE), &hDerived) );
+		if (drv != CKR_OK) return drv;
+		CK_ATTRIBUTE readAttribs[] = { { CKA_VALUE, out, 32 } };
+		return CRYPTOKI_F_PTR( C_GetAttributeValue(hSessionRW, hDerived, readAttribs, 1) );
+	};
+
+	// (1) Salt supplied as CKF_HKDF_SALT_DATA — the pre-existing, already-working path.
+	CK_HKDF_PARAMS paramsData = { CK_TRUE, CK_FALSE, CKM_SHA256,
+		CKF_HKDF_SALT_DATA, saltValue, sizeof(saltValue), CK_INVALID_HANDLE, NULL_PTR, 0 };
+	CK_BYTE outData[32];
+	rv = deriveAndRead(paramsData, outData);
+	CPPUNIT_ASSERT(rv == CKR_OK);
+
+	// (2) The SAME salt bytes supplied as CKF_HKDF_SALT_KEY via a public
+	// salt-key object — must produce byte-identical output to (1). This is
+	// the decisive equivalence oracle for the new code path.
+	CK_HKDF_PARAMS paramsKeyPublic = { CK_TRUE, CK_FALSE, CKM_SHA256,
+		CKF_HKDF_SALT_KEY, NULL_PTR, 0, hSaltKeyPublic, NULL_PTR, 0 };
+	CK_BYTE outKeyPublic[32];
+	rv = deriveAndRead(paramsKeyPublic, outKeyPublic);
+	CPPUNIT_ASSERT(rv == CKR_OK);
+	CPPUNIT_ASSERT(memcmp(outData, outKeyPublic, 32) == 0);
+
+	// (3) Same again with a PRIVATE/SENSITIVE salt key — exercises the
+	// token->decrypt() branch — must still agree byte-for-byte.
+	CK_HKDF_PARAMS paramsKeyPrivate = { CK_TRUE, CK_FALSE, CKM_SHA256,
+		CKF_HKDF_SALT_KEY, NULL_PTR, 0, hSaltKeyPrivate, NULL_PTR, 0 };
+	CK_BYTE outKeyPrivate[32];
+	rv = deriveAndRead(paramsKeyPrivate, outKeyPrivate);
+	CPPUNIT_ASSERT(rv == CKR_OK);
+	CPPUNIT_ASSERT(memcmp(outData, outKeyPrivate, 32) == 0);
+
+	// (4) An invalid salt-key handle must fail cleanly with
+	// CKR_KEY_HANDLE_INVALID (GAP 6.5's own precedent for the base-key
+	// handle applies identically here), not crash or silently ignore the salt.
+	CK_HKDF_PARAMS paramsBadHandle = { CK_TRUE, CK_FALSE, CKM_SHA256,
+		CKF_HKDF_SALT_KEY, NULL_PTR, 0, (CK_OBJECT_HANDLE)0x7fffffff, NULL_PTR, 0 };
+	CK_BYTE outBadHandle[32];
+	rv = deriveAndRead(paramsBadHandle, outBadHandle);
+	CPPUNIT_ASSERT(rv == CKR_KEY_HANDLE_INVALID);
+
+	// (5) An invalid ulSaltType value must be rejected, not silently
+	// treated as CKF_HKDF_SALT_NULL.
+	CK_HKDF_PARAMS paramsBadType = { CK_TRUE, CK_FALSE, CKM_SHA256,
+		0x99999999UL, NULL_PTR, 0, CK_INVALID_HANDLE, NULL_PTR, 0 };
+	CK_BYTE outBadType[32];
+	rv = deriveAndRead(paramsBadType, outBadType);
+	CPPUNIT_ASSERT(rv == CKR_MECHANISM_PARAM_INVALID);
+}
+

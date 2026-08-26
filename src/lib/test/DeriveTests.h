@@ -48,6 +48,7 @@ class DeriveTests : public TestsBase
 #endif
 	CPPUNIT_TEST(testSymDerive);
 	CPPUNIT_TEST(testMiscDerivations);
+	CPPUNIT_TEST(testHkdfDerive);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
@@ -60,6 +61,7 @@ public:
 #endif
 	void testSymDerive();
     void testMiscDerivations();
+    void testHkdfDerive();
 
 protected:
 	CK_RV generateDhKeyPair(CK_SESSION_HANDLE hSession, CK_BBOOL bTokenPuk, CK_BBOOL bPrivatePuk, CK_BBOOL bTokenPrk, CK_BBOOL bPrivatePrk, CK_OBJECT_HANDLE &hPuk, CK_OBJECT_HANDLE &hPrk);
