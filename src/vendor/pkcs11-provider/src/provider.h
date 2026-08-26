@@ -121,6 +121,13 @@
 #define P11PROV_NAME_PBKDF2 "PBKDF2"
 #define P11PROV_NAMES_PBKDF2 "PBKDF2:1.2.840.113549.1.5.12"
 #define P11PROV_DESCS_PBKDF2 "PKCS11 PBKDF2 Implementation"
+/* Phase 5 R22: no OID alias — confirmed live via `openssl list
+ * -kdf-algorithms -provider default` (plain "KBKDF @ default", unlike
+ * PBKDF2's OID-qualified entry above), the same check made before
+ * assuming a name convention. */
+#define P11PROV_NAME_KBKDF "KBKDF"
+#define P11PROV_NAMES_KBKDF "KBKDF"
+#define P11PROV_DESCS_KBKDF "PKCS11 SP800-108 KBKDF Implementation"
 #define P11PROV_NAMES_ED25519 "ED25519:1.3.101.112"
 #define P11PROV_NAME_ED25519 "ED25519"
 #define P11PROV_DESCS_ED25519 "PKCS11 ED25519 Implementation"

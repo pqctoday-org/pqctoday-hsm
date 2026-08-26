@@ -107,27 +107,29 @@ static void p11prov_hkdf_reset(void *ctx)
  * operation, for the HKDF case it doesn't really matter whether the
  * CKM_HKDF_DERIVE or the CKM_HKDF_DATA mechanisms are requested, any token
  * that supports one SHOULD support the other too */
-static CK_RV inner_pkcs11_key(P11PROV_KDF_CTX *hkdfctx,
+/* provctx/session taken directly (not a P11PROV_KDF_CTX*) so this is
+ * reusable by KBKDF's own, differently-shaped context struct (phase 5
+ * R22) — was HKDF-only before, three call sites updated below. */
+static CK_RV inner_pkcs11_key(P11PROV_CTX *provctx, P11PROV_SESSION **session,
                               CK_MECHANISM_TYPE mech_type, const uint8_t *key,
                               size_t keylen, P11PROV_OBJ **keyobj)
 {
     CK_SLOT_ID slotid = CK_UNAVAILABLE_INFORMATION;
     CK_RV ret;
 
-    if (hkdfctx->session == NULL) {
-        ret = p11prov_get_session(hkdfctx->provctx, &slotid, NULL, NULL,
-                                  mech_type, NULL, NULL, false, false,
-                                  &hkdfctx->session);
+    if (*session == NULL) {
+        ret = p11prov_get_session(provctx, &slotid, NULL, NULL, mech_type,
+                                  NULL, NULL, false, false, session);
         if (ret != CKR_OK) {
             return ret;
         }
     }
-    if (hkdfctx->session == NULL) {
+    if (*session == NULL) {
         return CKR_SESSION_HANDLE_INVALID;
     }
 
-    *keyobj = p11prov_create_secret_key(hkdfctx->provctx, hkdfctx->session,
-                                        true, (void *)key, keylen);
+    *keyobj = p11prov_create_secret_key(provctx, *session, true, (void *)key,
+                                        keylen);
     if (*keyobj == NULL) {
         return CKR_KEY_HANDLE_INVALID;
     }
@@ -181,7 +183,15 @@ static int inner_derive_key(P11PROV_CTX *ctx, P11PROV_OBJ *key,
     CK_ULONG key_tmpl_len = 0;
     CK_RV ret;
 
-    if (mechanism->mechanism == CKM_HKDF_DERIVE) {
+    if (mechanism->mechanism == CKM_HKDF_DERIVE
+        || mechanism->mechanism == CKM_SP800_108_COUNTER_KDF
+        || mechanism->mechanism == CKM_SP800_108_FEEDBACK_KDF) {
+        /* SP800-108 (phase 5 R22) reuses HKDF_DERIVE's own output shape:
+         * a generic secret key, session-only, non-sensitive+extractable
+         * so the classic derive() API can read its bytes back — matches
+         * the engine's own CKM_SP800_108_*_KDF handler (SoftHSM_
+         * keygen.cpp), which hardcodes CKK_GENERIC_SECRET regardless of
+         * the caller-supplied CKA_KEY_TYPE, same as it does for HKDF. */
         class = CKO_SECRET_KEY;
         key_tmpl_len = 6;
     } else if (mechanism->mechanism == CKM_HKDF_DATA) {
@@ -523,8 +533,9 @@ static CK_RV p11prov_tls13_derive_secret(P11PROV_KDF_CTX *hkdfctx,
         }
 
         /* In OpenSSL the salt is used as the derivation key */
-        ret = inner_pkcs11_key(hkdfctx, CKM_HKDF_DATA, hkdfctx->salt,
-                               hkdfctx->saltlen, &ek);
+        ret = inner_pkcs11_key(hkdfctx->provctx, &hkdfctx->session,
+                               CKM_HKDF_DATA, hkdfctx->salt, hkdfctx->saltlen,
+                               &ek);
         if (ret != CKR_OK) {
             return ret;
         }
@@ -549,7 +560,8 @@ static CK_RV p11prov_tls13_derive_secret(P11PROV_KDF_CTX *hkdfctx,
     params.ulSaltLen = saltlen;
 
     if (!keyobj) {
-        ret = inner_pkcs11_key(hkdfctx, mech_type, zerobuf, hashlen, &zerokey);
+        ret = inner_pkcs11_key(hkdfctx->provctx, &hkdfctx->session, mech_type,
+                               zerobuf, hashlen, &zerokey);
         if (ret != CKR_OK) {
             return ret;
         }
@@ -778,7 +790,8 @@ static int p11prov_hkdf_set_ctx_params(void *ctx, const OSSL_PARAM params[])
 
         /* Create Session and key from key material */
         p11prov_obj_free(hkdfctx->key);
-        ret = inner_pkcs11_key(hkdfctx, CKM_HKDF_DERIVE, secret, secret_len,
+        ret = inner_pkcs11_key(hkdfctx->provctx, &hkdfctx->session,
+                               CKM_HKDF_DERIVE, secret, secret_len,
                                &hkdfctx->key);
         if (ret != CKR_OK) {
             return RET_OSSL_ERR;
@@ -1333,5 +1346,517 @@ const OSSL_DISPATCH p11prov_pbkdf2_kdf_functions[] = {
     DISPATCH_HKDF_ELEM(pbkdf2, SETTABLE_CTX_PARAMS, settable_ctx_params),
     DISPATCH_HKDF_ELEM(pbkdf2, GET_CTX_PARAMS, get_ctx_params),
     DISPATCH_HKDF_ELEM(pbkdf2, GETTABLE_CTX_PARAMS, gettable_ctx_params),
+    { 0, NULL },
+};
+
+/* ===========================================================================
+ *  KBKDF / SP 800-108 Counter + Feedback (phase 5 R22) —
+ *  CKM_SP800_108_COUNTER_KDF / CKM_SP800_108_FEEDBACK_KDF, C_DeriveKey-
+ *  based with a real base-key object (unlike PBKDF2, like HKDF) — reuses
+ *  inner_pkcs11_key/inner_derive_key/inner_extract_key_value, extended
+ *  above to accept these two mechanisms with HKDF_DERIVE's own output
+ *  shape (the engine hardcodes CKK_GENERIC_SECRET for all three anyway).
+ *
+ *  The OSSL_PARAM <-> CK_PRF_DATA_PARAM[] mapping below is grounded in
+ *  the C++ engine's OWN CKM_SP800_108_*_KDF handlers (SoftHSM_keygen.cpp,
+ *  read directly, not guessed) — which themselves derive via OpenSSL's
+ *  own "KBKDF" fetch, so the shape this file's caller-facing side
+ *  produces is provably the one the token-side software actually reads
+ *  on the other end of C_DeriveKey:
+ *    OSSL_KDF_PARAM_MODE "COUNTER"/"FEEDBACK"   -> mechanism choice
+ *    OSSL_KDF_PARAM_MAC "HMAC"/"CMAC"           -> prfType family
+ *    OSSL_KDF_PARAM_DIGEST (HMAC) / _CIPHER (CMAC) -> prfType mechanism
+ *    OSSL_KDF_PARAM_KEY                          -> base key object
+ *    OSSL_KDF_PARAM_SALT (fixed input)           -> one CK_SP800_108_
+ *                                                    BYTE_ARRAY entry
+ *    OSSL_KDF_PARAM_KBKDF_R (COUNTER only)       -> CK_SP800_108_
+ *                                                    ITERATION_VARIABLE /
+ *                                                    CK_SP800_108_
+ *                                                    COUNTER_FORMAT
+ *    OSSL_KDF_PARAM_SEED (FEEDBACK only)         -> CK_SP800_108_
+ *                                                    FEEDBACK_KDF_PARAMS.
+ *                                                    pIV directly (its
+ *                                                    own struct field,
+ *                                                    not the data-params
+ *                                                    array — matches the
+ *                                                    engine's own struct)
+ *
+ *  CMAC's own OSSL_KDF_PARAM_CIPHER name is validated, not forwarded:
+ *  the engine always derives its actual CMAC cipher choice from the
+ *  imported base key's OWN byte length (SoftHSM_keygen.cpp's own
+ *  switch(kbkIKM.size())), via plain CKM_AES_CMAC regardless of which
+ *  AES-CBC variant name a caller sends — forwarding a mismatched name
+ *  would silently diverge from what actually runs, so anything that
+ *  isn't a plain AES-*-CBC name is rejected up front instead.
+ *
+ *  OSSL_KDF_PARAM_KBKDF_USE_L / _USE_SEPARATOR are deliberately NOT
+ *  settable here: the engine's own KBKDF call never sets either (so the
+ *  token side always gets OpenSSL KBKDF's own default for both,
+ *  regardless of what a caller of THIS provider might ask for), and
+ *  DKM_LENGTH / KEY_HANDLE data-param types are silently skipped by the
+ *  engine's own parser ("DKM_LENGTH, KEY_HANDLE not supported — skip",
+ *  its own comment) — accepting either from a caller here would create
+ *  exactly the silent-divergence hazard R10/F36-6 already established
+ *  this project rejects loudly instead of accepting-and-ignoring.
+ * ===========================================================================
+ */
+
+#define KBKDF_MODE_COUNTER 1
+#define KBKDF_MODE_FEEDBACK 2
+
+struct p11prov_kbkdf_ctx {
+    P11PROV_CTX *provctx;
+    P11PROV_OBJ *key;
+    P11PROV_SESSION *session;
+    int mode;
+    bool use_cmac;
+    CK_MECHANISM_TYPE prf_mech;
+    uint8_t *salt;
+    size_t saltlen;
+    uint8_t *seed;
+    size_t seedlen;
+    CK_ULONG r_bits;
+};
+typedef struct p11prov_kbkdf_ctx P11PROV_KBKDF_CTX;
+
+static CK_MECHANISM_TYPE kbkdf_hmac_mech_for_digest(CK_MECHANISM_TYPE digest)
+{
+    /* Matches the engine's own ckmHmacPrfToDigestName() table exactly —
+     * deliberately no SHA-1 entry (unlike PBKDF2, which does have one):
+     * this project's own SP800-108 handler simply never wires it up. */
+    switch (digest) {
+    case CKM_SHA224:
+        return CKM_SHA224_HMAC;
+    case CKM_SHA256:
+        return CKM_SHA256_HMAC;
+    case CKM_SHA384:
+        return CKM_SHA384_HMAC;
+    case CKM_SHA512:
+        return CKM_SHA512_HMAC;
+    case CKM_SHA3_224:
+        return CKM_SHA3_224_HMAC;
+    case CKM_SHA3_256:
+        return CKM_SHA3_256_HMAC;
+    case CKM_SHA3_384:
+        return CKM_SHA3_384_HMAC;
+    case CKM_SHA3_512:
+        return CKM_SHA3_512_HMAC;
+    default:
+        return CK_UNAVAILABLE_INFORMATION;
+    }
+}
+
+static void *p11prov_kbkdf_newctx(void *provctx)
+{
+    P11PROV_CTX *ctx = (P11PROV_CTX *)provctx;
+    P11PROV_KBKDF_CTX *kctx;
+    CK_RV ret;
+
+    P11PROV_debug("kbkdf newctx");
+
+    ret = p11prov_ctx_status(ctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    kctx = OPENSSL_zalloc(sizeof(P11PROV_KBKDF_CTX));
+    if (kctx == NULL) {
+        return NULL;
+    }
+    kctx->provctx = ctx;
+    /* SP800-108's own default counter width when CK_SP800_108_ITERATION_
+     * VARIABLE is absent — matches the engine's own default. */
+    kctx->r_bits = 32;
+    return kctx;
+}
+
+static void p11prov_kbkdf_freectx(void *ctx)
+{
+    P11PROV_KBKDF_CTX *kctx = (P11PROV_KBKDF_CTX *)ctx;
+
+    P11PROV_debug("kbkdf freectx (ctx:%p)", ctx);
+
+    if (kctx == NULL) {
+        return;
+    }
+    p11prov_obj_free(kctx->key);
+    if (kctx->session) {
+        p11prov_return_session(kctx->session);
+    }
+    OPENSSL_clear_free(kctx->salt, kctx->saltlen);
+    OPENSSL_clear_free(kctx->seed, kctx->seedlen);
+    OPENSSL_free(kctx);
+}
+
+static void p11prov_kbkdf_reset(void *ctx)
+{
+    P11PROV_KBKDF_CTX *kctx = (P11PROV_KBKDF_CTX *)ctx;
+    P11PROV_CTX *provctx;
+
+    P11PROV_debug("kbkdf reset (ctx:%p)", ctx);
+
+    if (kctx == NULL) {
+        return;
+    }
+    provctx = kctx->provctx;
+    p11prov_obj_free(kctx->key);
+    if (kctx->session) {
+        p11prov_return_session(kctx->session);
+    }
+    OPENSSL_clear_free(kctx->salt, kctx->saltlen);
+    OPENSSL_clear_free(kctx->seed, kctx->seedlen);
+    memset(kctx, 0, sizeof(*kctx));
+    kctx->provctx = provctx;
+    kctx->r_bits = 32;
+}
+
+static int p11prov_kbkdf_set_ctx_params(void *ctx, const OSSL_PARAM params[])
+{
+    P11PROV_KBKDF_CTX *kctx = (P11PROV_KBKDF_CTX *)ctx;
+    const OSSL_PARAM *p;
+    int ret;
+
+    P11PROV_debug("kbkdf set ctx params (ctx=%p, params=%p)", kctx, params);
+
+    if (params == NULL) {
+        return RET_OSSL_OK;
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_MODE);
+    if (p) {
+        const char *mode = NULL;
+
+        ret = OSSL_PARAM_get_utf8_string_ptr(p, &mode);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+        if (OPENSSL_strcasecmp(mode, "COUNTER") == 0) {
+            kctx->mode = KBKDF_MODE_COUNTER;
+        } else if (OPENSSL_strcasecmp(mode, "FEEDBACK") == 0) {
+            kctx->mode = KBKDF_MODE_FEEDBACK;
+        } else {
+            /* "DOUBLE_PIPELINE" and friends: the engine implements only
+             * Counter and Feedback (SoftHSM_keygen.cpp's own mechanism
+             * switch has no double-pipeline case) — reject rather than
+             * silently mapping to something the token can't do. */
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_MODE);
+            return RET_OSSL_ERR;
+        }
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_MAC);
+    if (p) {
+        const char *mac = NULL;
+
+        ret = OSSL_PARAM_get_utf8_string_ptr(p, &mac);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+        if (OPENSSL_strcasecmp(mac, "HMAC") == 0) {
+            kctx->use_cmac = false;
+        } else if (OPENSSL_strcasecmp(mac, "CMAC") == 0) {
+            kctx->use_cmac = true;
+        } else {
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_MAC);
+            return RET_OSSL_ERR;
+        }
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_DIGEST);
+    if (p) {
+        const char *digest = NULL;
+        CK_MECHANISM_TYPE digest_mech;
+        CK_RV rv;
+
+        ret = OSSL_PARAM_get_utf8_string_ptr(p, &digest);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+        rv = p11prov_digest_get_by_name(digest, &digest_mech);
+        if (rv != CKR_OK) {
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_DIGEST);
+            return RET_OSSL_ERR;
+        }
+        kctx->prf_mech = kbkdf_hmac_mech_for_digest(digest_mech);
+        if (kctx->prf_mech == CK_UNAVAILABLE_INFORMATION) {
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_DIGEST);
+            return RET_OSSL_ERR;
+        }
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_CIPHER);
+    if (p) {
+        const char *cipher = NULL;
+
+        ret = OSSL_PARAM_get_utf8_string_ptr(p, &cipher);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+        if (OPENSSL_strcasecmp(cipher, "AES-128-CBC") != 0
+            && OPENSSL_strcasecmp(cipher, "AES-192-CBC") != 0
+            && OPENSSL_strcasecmp(cipher, "AES-256-CBC") != 0) {
+            ERR_raise(ERR_LIB_PROV, PROV_R_MISSING_CIPHER);
+            return RET_OSSL_ERR;
+        }
+        kctx->prf_mech = CKM_AES_CMAC;
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_SALT);
+    if (p) {
+        OPENSSL_clear_free(kctx->salt, kctx->saltlen);
+        kctx->salt = NULL;
+        ret = OSSL_PARAM_get_octet_string(p, (void **)&kctx->salt, 0,
+                                          &kctx->saltlen);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_SEED);
+    if (p) {
+        OPENSSL_clear_free(kctx->seed, kctx->seedlen);
+        kctx->seed = NULL;
+        ret = OSSL_PARAM_get_octet_string(p, (void **)&kctx->seed, 0,
+                                          &kctx->seedlen);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_KBKDF_R);
+    if (p) {
+        int r;
+
+        ret = OSSL_PARAM_get_int(p, &r);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+        if (r <= 0 || r > 64) {
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_KEY_LENGTH);
+            return RET_OSSL_ERR;
+        }
+        kctx->r_bits = (CK_ULONG)r;
+    }
+
+    /* Deliberately rejected rather than silently accepted-and-ignored —
+     * see this section's own header comment for why. */
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_KBKDF_USE_L);
+    if (p) {
+        int use_l = 1;
+
+        ret = OSSL_PARAM_get_int(p, &use_l);
+        if (ret == RET_OSSL_OK && !use_l) {
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_MODE);
+            return RET_OSSL_ERR;
+        }
+    }
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR);
+    if (p) {
+        int use_sep = 1;
+
+        ret = OSSL_PARAM_get_int(p, &use_sep);
+        if (ret == RET_OSSL_OK && !use_sep) {
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_MODE);
+            return RET_OSSL_ERR;
+        }
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_KDF_PARAM_KEY);
+    if (p) {
+        const void *secret = NULL;
+        size_t secret_len;
+        CK_RV rv;
+
+        ret = OSSL_PARAM_get_octet_string_ptr(p, &secret, &secret_len);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+
+        /* reqlogin=true, acquired here (before inner_pkcs11_key's own
+         * internal, non-logged-in session acquisition can run first and
+         * claim the slot) — C_DeriveKey's write-authorization check
+         * (SoftHSM_keygen.cpp's haveWrite) rejects a session-object
+         * create from an unauthenticated session with CKR_USER_NOT_
+         * LOGGED_IN. This is the exact same general C_DeriveKey
+         * requirement R10 found and fixed for PBKDF2 (see that item's
+         * own comment on p11prov_pbkdf2_derive, a few hundred lines
+         * above) — HKDF's own bare inner_pkcs11_key call only avoids it
+         * in practice because its real callers (TLS handshakes) always
+         * have an already-logged-in session from an earlier operation;
+         * a KBKDF call as the first operation in a session does not. */
+        if (kctx->session == NULL) {
+            CK_SLOT_ID slotid = CK_UNAVAILABLE_INFORMATION;
+            CK_MECHANISM_TYPE login_mech = kctx->mode == KBKDF_MODE_FEEDBACK
+                                               ? CKM_SP800_108_FEEDBACK_KDF
+                                               : CKM_SP800_108_COUNTER_KDF;
+
+            rv = p11prov_get_session(kctx->provctx, &slotid, NULL, NULL,
+                                     login_mech, NULL, NULL, true, true,
+                                     &kctx->session);
+            if (rv != CKR_OK) {
+                P11PROV_raise(kctx->provctx, rv,
+                              "Failed to get PKCS#11 session");
+                return RET_OSSL_ERR;
+            }
+        }
+
+        p11prov_obj_free(kctx->key);
+        kctx->key = NULL;
+        rv = inner_pkcs11_key(kctx->provctx, &kctx->session,
+                              CKM_SP800_108_COUNTER_KDF, secret, secret_len,
+                              &kctx->key);
+        if (rv != CKR_OK) {
+            return RET_OSSL_ERR;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_kbkdf_settable_ctx_params(void *ctx,
+                                                            void *prov)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_MODE, NULL, 0),
+        OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_MAC, NULL, 0),
+        OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_DIGEST, NULL, 0),
+        OSSL_PARAM_utf8_string(OSSL_KDF_PARAM_CIPHER, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_KDF_PARAM_KEY, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_KDF_PARAM_SALT, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_KDF_PARAM_SEED, NULL, 0),
+        OSSL_PARAM_int(OSSL_KDF_PARAM_KBKDF_R, NULL),
+        OSSL_PARAM_int(OSSL_KDF_PARAM_KBKDF_USE_L, NULL),
+        OSSL_PARAM_int(OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR, NULL),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+static int p11prov_kbkdf_get_ctx_params(void *ctx, OSSL_PARAM *params)
+{
+    OSSL_PARAM *p;
+
+    if (params == NULL) {
+        return RET_OSSL_OK;
+    }
+    p = OSSL_PARAM_locate(params, OSSL_KDF_PARAM_SIZE);
+    if (p) {
+        return OSSL_PARAM_set_size_t(p, SIZE_MAX);
+    }
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_kbkdf_gettable_ctx_params(void *ctx,
+                                                            void *prov)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_size_t(OSSL_KDF_PARAM_SIZE, NULL),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+static int p11prov_kbkdf_derive(void *ctx, unsigned char *key, size_t keylen,
+                                const OSSL_PARAM params[])
+{
+    P11PROV_KBKDF_CTX *kctx = (P11PROV_KBKDF_CTX *)ctx;
+    CK_SP800_108_KDF_PARAMS counter_params = { 0 };
+    CK_SP800_108_FEEDBACK_KDF_PARAMS feedback_params = { 0 };
+    CK_PRF_DATA_PARAM data_params[2];
+    CK_ULONG num_data_params = 0;
+    CK_SP800_108_COUNTER_FORMAT counter_fmt;
+    CK_MECHANISM mechanism = { 0 };
+    CK_OBJECT_HANDLE dkey_handle;
+    CK_RV ret;
+    int err;
+
+    P11PROV_debug("kbkdf derive (ctx:%p, key:%p[%zu], params:%p)", ctx, key,
+                  keylen, params);
+
+    err = p11prov_kbkdf_set_ctx_params(ctx, params);
+    if (err != RET_OSSL_OK) {
+        return err;
+    }
+
+    if (kctx->key == NULL || key == NULL) {
+        ERR_raise(ERR_LIB_PROV, PROV_R_MISSING_KEY);
+        return RET_OSSL_ERR;
+    }
+    if (kctx->mode == 0) {
+        ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_MODE);
+        return RET_OSSL_ERR;
+    }
+    if (kctx->prf_mech == 0 || kctx->prf_mech == CK_UNAVAILABLE_INFORMATION) {
+        ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_MAC);
+        return RET_OSSL_ERR;
+    }
+    if (keylen == 0) {
+        ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_KEY_LENGTH);
+        return RET_OSSL_ERR;
+    }
+
+    if (kctx->salt != NULL && kctx->saltlen > 0) {
+        data_params[num_data_params].type = CK_SP800_108_BYTE_ARRAY;
+        data_params[num_data_params].pValue = kctx->salt;
+        data_params[num_data_params].ulValueLen = (CK_ULONG)kctx->saltlen;
+        num_data_params++;
+    }
+
+    if (kctx->mode == KBKDF_MODE_COUNTER) {
+        counter_fmt.bLittleEndian = CK_FALSE;
+        counter_fmt.ulWidthInBits = kctx->r_bits;
+        data_params[num_data_params].type = CK_SP800_108_ITERATION_VARIABLE;
+        data_params[num_data_params].pValue = &counter_fmt;
+        data_params[num_data_params].ulValueLen = sizeof(counter_fmt);
+        num_data_params++;
+
+        counter_params.prfType = kctx->prf_mech;
+        counter_params.ulNumberOfDataParams = num_data_params;
+        counter_params.pDataParams = data_params;
+        counter_params.ulAdditionalDerivedKeys = 0;
+        counter_params.pAdditionalDerivedKeys = NULL;
+
+        mechanism.mechanism = CKM_SP800_108_COUNTER_KDF;
+        mechanism.pParameter = &counter_params;
+        mechanism.ulParameterLen = sizeof(counter_params);
+    } else {
+        feedback_params.prfType = kctx->prf_mech;
+        feedback_params.ulNumberOfDataParams = num_data_params;
+        feedback_params.pDataParams = data_params;
+        feedback_params.pIV = kctx->seed;
+        feedback_params.ulIVLen = (CK_ULONG)kctx->seedlen;
+        feedback_params.ulAdditionalDerivedKeys = 0;
+        feedback_params.pAdditionalDerivedKeys = NULL;
+
+        mechanism.mechanism = CKM_SP800_108_FEEDBACK_KDF;
+        mechanism.pParameter = &feedback_params;
+        mechanism.ulParameterLen = sizeof(feedback_params);
+    }
+
+    ret = inner_derive_key(kctx->provctx, kctx->key, &kctx->session,
+                           &mechanism, CKK_GENERIC_SECRET, keylen,
+                           &dkey_handle);
+    if (ret != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    ret = inner_extract_key_value(kctx->provctx, kctx->session, dkey_handle,
+                                  key, keylen);
+    if (ret != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    return RET_OSSL_OK;
+}
+
+const OSSL_DISPATCH p11prov_kbkdf_kdf_functions[] = {
+    DISPATCH_HKDF_ELEM(kbkdf, NEWCTX, newctx),
+    DISPATCH_HKDF_ELEM(kbkdf, FREECTX, freectx),
+    DISPATCH_HKDF_ELEM(kbkdf, RESET, reset),
+    DISPATCH_HKDF_ELEM(kbkdf, DERIVE, derive),
+    DISPATCH_HKDF_ELEM(kbkdf, SET_CTX_PARAMS, set_ctx_params),
+    DISPATCH_HKDF_ELEM(kbkdf, SETTABLE_CTX_PARAMS, settable_ctx_params),
+    DISPATCH_HKDF_ELEM(kbkdf, GET_CTX_PARAMS, get_ctx_params),
+    DISPATCH_HKDF_ELEM(kbkdf, GETTABLE_CTX_PARAMS, gettable_ctx_params),
     { 0, NULL },
 };

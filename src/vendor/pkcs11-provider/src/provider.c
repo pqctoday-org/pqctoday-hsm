@@ -926,6 +926,8 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              CKM_X448,
                              CKM_HKDF_DERIVE,
                              CKM_PKCS5_PBKD2,
+                             CKM_SP800_108_COUNTER_KDF,
+                             CKM_SP800_108_FEEDBACK_KDF,
                              DIGEST_MECHS,
                              HMAC_MECHS,
                              CKM_EDDSA,
@@ -1183,6 +1185,15 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
             case CKM_PKCS5_PBKD2:
                 ADD_ALGO(PBKDF2, pbkdf2, kdf, prop);
                 UNCHECK_MECHS(CKM_PKCS5_PBKD2);
+                break;
+            /* Phase 5 R22: like PBKDF2 above, no matching `exchange`
+             * registration — OpenSSL's own "KBKDF" name is a KDF-only
+             * fetch, not a key-exchange one. */
+            case CKM_SP800_108_COUNTER_KDF:
+            case CKM_SP800_108_FEEDBACK_KDF:
+                ADD_ALGO(KBKDF, kbkdf, kdf, prop);
+                UNCHECK_MECHS(CKM_SP800_108_COUNTER_KDF,
+                              CKM_SP800_108_FEEDBACK_KDF);
                 break;
             case CKM_SHA_1:
                 ADD_ALGO(SHA1, sha1, digest, prop);

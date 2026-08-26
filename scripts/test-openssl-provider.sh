@@ -1236,6 +1236,150 @@ run_case T22d PASS "token PBKDF2 (HMAC-SHA384 PRF) == software PBKDF2, engine-lo
 t22e() { t22_case SHA512; }
 run_case T22e PASS "token PBKDF2 (HMAC-SHA512 PRF) == software PBKDF2, engine-log verified (remediation R10); negative-control twin (R13)" t22e
 
+# ─── T25: SP800-108 Counter/Feedback KDF a.k.a. KBKDF (remediation R22) ──────
+# Mirrors t22_case's own structure exactly (own arena, load-behavior=early
+# per WART-4 — openssl's own `kdf` CLI subcommand never forces the lazy
+# provider init the way genpkey/pkeyutl's key-object creation does as a
+# side effect, confirmed live: even HKDF, already proven working elsewhere
+# in this harness, silently falls back to the default provider through
+# `openssl kdf` without this flag), engine-log positive assertion +
+# negative-control twin (R13), sabotage (wrong salt -> different output).
+t25_case() { # $1=mode(COUNTER|FEEDBACK) $2=mac(HMAC|CMAC) $3=digest-or-cipher $4=keylen $5=extra kdfopt (seed, optional)
+  local mode="$1" mac="$2" dc="$3" keylen="$4" extra="${5:-}" w
+  w="$ROOT_WORK/r22${mode}${mac}"
+  mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = DEBUG
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $CPP_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-load-behavior = early
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$CPP_ENGINE_SO" \
+    --init-token --free --label "r22${mode}${mac}" --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+
+  local key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+  local salt=73616c743031323304
+  local dcopt macopt
+  if [[ "$mac" == CMAC ]]; then macopt="cipher"; else macopt="digest"; fi
+
+  # ── Positive: propquery pinned, token must do the work ──
+  local tokout swout
+  tokout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O kdf \
+    -provider pkcs11 -propquery "?provider=pkcs11" -keylen "$keylen" \
+    -kdfopt mode:"$mode" -kdfopt mac:"$mac" -kdfopt "$macopt":"$dc" \
+    -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" $extra \
+    KBKDF 2>"$w/tok.err.log") || return 1
+  swout=$(OPENSSL_CONF=/dev/null O kdf -keylen "$keylen" \
+    -kdfopt mode:"$mode" -kdfopt mac:"$mac" -kdfopt "$macopt":"$dc" \
+    -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" $extra \
+    KBKDF 2>/dev/null) || return 1
+  [[ -n "$tokout" && "$tokout" == "$swout" ]] || return 1
+  # Engine-log evidence (R13): KBKDF is deterministic, so a silent
+  # wrong-provider fallback is invisible in the output value alone.
+  grep -q "Created new object" "$w/tok.err.log" || return 1
+
+  # ── Negative control (R13): same arena, propquery removed ──
+  local ctrlout
+  ctrlout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O kdf \
+    -keylen "$keylen" -kdfopt mode:"$mode" -kdfopt mac:"$mac" \
+    -kdfopt "$macopt":"$dc" -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" \
+    $extra KBKDF 2>"$w/ctrl.err.log") || return 1
+  [[ "$ctrlout" == "$swout" ]] || return 1
+  if grep -q "Created new object" "$w/ctrl.err.log"; then
+    return 1
+  fi
+
+  # ── Sabotage: a different salt must NOT produce the same output ──
+  local sabout
+  sabout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O kdf \
+    -provider pkcs11 -propquery "?provider=pkcs11" -keylen "$keylen" \
+    -kdfopt mode:"$mode" -kdfopt mac:"$mac" -kdfopt "$macopt":"$dc" \
+    -kdfopt hexkey:"$key" -kdfopt hexsalt:ffffffffffffffffff $extra \
+    KBKDF 2>/dev/null) || return 1
+  [[ "$sabout" != "$tokout" ]] || { echo "sabotage: different salt produced the SAME output"; return 1; }
+
+  return 0
+}
+t25() { t25_case COUNTER HMAC SHA256 32; }
+run_case T25 PASS "token SP800-108 Counter-KDF (HMAC-SHA256 PRF) == software KBKDF, engine-log verified, sabotage control rejected (remediation R22); negative-control twin (R13)" t25
+t25b() { t25_case COUNTER HMAC SHA3-256 32; }
+run_case T25b PASS "token SP800-108 Counter-KDF (HMAC-SHA3-256 PRF) == software KBKDF (remediation R22)" t25b
+t25c() { t25_case COUNTER CMAC AES-256-CBC 32; }
+run_case T25c PASS "token SP800-108 Counter-KDF (CMAC-AES-256 PRF) == software KBKDF (remediation R22)" t25c
+t25f() { t25_case FEEDBACK HMAC SHA384 48 "-kdfopt hexseed:$(printf 'aa%.0s' {1..48})"; }
+run_case T25f PASS "token SP800-108 Feedback-KDF (HMAC-SHA384 PRF, with IV/seed) == software KBKDF (remediation R22)" t25f
+
+# ─── T25r: KBKDF rejection controls — inputs the C++ engine's own SP800-108
+# handler cannot honor must fail loudly, never silently degrade (R10/F36-6
+# precedent this item's own kdf.c section documents in full) ─────────────
+t25r() {
+  local w; w="$ROOT_WORK/r22reject"; mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = ERROR
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $CPP_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-load-behavior = early
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$CPP_ENGINE_SO" \
+    --init-token --free --label r22reject --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  use_arena "$w"
+  local key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+  local salt=73616c743031323304
+  # SHA-1: the engine's own PRF table has no SHA-1 entry for SP800-108
+  # (unlike PBKDF2, which does) -- must be rejected, not silently mapped.
+  if O kdf -provider pkcs11 -propquery "?provider=pkcs11" -keylen 32 \
+    -kdfopt mode:COUNTER -kdfopt mac:HMAC -kdfopt digest:SHA1 \
+    -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" KBKDF >/dev/null 2>&1
+  then echo "SHA-1 PRF was accepted (should be rejected)"; return 1; fi
+  # A non-CBC AES cipher: the engine always derives its CMAC cipher from
+  # the base key's own byte length via plain CKM_AES_CMAC -- forwarding a
+  # caller's mismatched cipher name would silently diverge from that.
+  if O kdf -provider pkcs11 -propquery "?provider=pkcs11" -keylen 32 \
+    -kdfopt mode:COUNTER -kdfopt mac:CMAC -kdfopt cipher:AES-256-GCM \
+    -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" KBKDF >/dev/null 2>&1
+  then echo "non-CBC cipher was accepted (should be rejected)"; return 1; fi
+  # use-l:0: the engine's own KBKDF call never sets this, so honoring a
+  # caller's request to disable it would silently diverge from what the
+  # token actually computes.
+  if O kdf -provider pkcs11 -propquery "?provider=pkcs11" -keylen 32 \
+    -kdfopt mode:COUNTER -kdfopt mac:HMAC -kdfopt digest:SHA256 \
+    -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" -kdfopt use-l:0 \
+    KBKDF >/dev/null 2>&1
+  then echo "use-l:0 was accepted (should be rejected)"; return 1; fi
+  return 0
+}
+run_case T25r PASS "KBKDF rejects SHA-1 PRF, non-CBC CMAC cipher, and use-l:0 -- none are honorable by the engine's own SP800-108 handler (remediation R22)" t25r
+
 # ─── T23: NIST security-category PKEY param (remediation R20 / F36-5) ───────
 # One representative param set per PQC family, cross-checked against the
 # FIPS 203/204/205 category each is required to report (1/2/3/5 — category 4

@@ -15,5 +15,7 @@ extern const OSSL_DISPATCH p11prov_hkdf_kdf_functions[];
 extern const OSSL_DISPATCH p11prov_tls13_kdf_functions[];
 /* Phase 4 R10: CKM_PKCS5_PBKD2, no base-key object involved. */
 extern const OSSL_DISPATCH p11prov_pbkdf2_kdf_functions[];
+/* Phase 5 R22: CKM_SP800_108_COUNTER_KDF / CKM_SP800_108_FEEDBACK_KDF. */
+extern const OSSL_DISPATCH p11prov_kbkdf_kdf_functions[];
 
 #endif /* _KDF_H */

@@ -56,6 +56,30 @@ plan-only — execution is a separate, later instruction.
 
 ### R22 — SP800-108 Counter/Feedback KDF ("KBKDF") — effort M
 
+**Execution update (2026-08-26):** R22 executed and landed — see
+`docs/openssl-provider-coverage-audit-2026-08-25.md`'s "Phase 5, R22"
+entry for the full mechanism. Byte-identical to software across both
+Counter and Feedback modes and both HMAC/CMAC PRF families, live-
+verified, sabotage-tested. Two real bugs found and fixed along the
+way, neither anticipated by this plan: a general C_DeriveKey write-
+authorization requirement R10's own PBKDF2 fix had already documented
+but never applied to another base-key-object derive path (HKDF's own
+bare session-acquisition call only avoided it because its real callers
+always logged in first for other reasons); and a `CKA_KEY_TYPE =
+CK_UNAVAILABLE_INFORMATION` output-template value that HKDF's own
+engine handler silently ignores but SP800-108's does not
+(`CKR_TEMPLATE_INCONSISTENT`), fixed by passing `CKK_GENERIC_SECRET`
+explicitly on KBKDF's own call site only. Also surfaced and worth
+carrying forward to R23/R25/R26: `openssl kdf`'s CLI subcommand needs
+`pkcs11-module-load-behavior=early` to reach this provider at all
+(same WART-4 class of gap as the original finding, just for a
+previously-unexercised code path) — its absence produces a SILENT
+fallback to the default provider that looks byte-identical and error-
+free, the exact hazard R13 exists to catch; budget time for it in any
+item whose harness cases drive `openssl kdf` directly. Base HKDF's own
+call site deliberately left unchanged by the second fix (its current
+behavior is proven working; there was no reason to touch it).
+
 **Premise, re-verified from source (not carried):** both engines fully
 implement it, not just advertise it. C++: advertised
 (`SoftHSM_slots.cpp:471-472`, mech-info `:1178-1179`) AND really

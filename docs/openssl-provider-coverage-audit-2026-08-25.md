@@ -121,7 +121,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | OP-3 | **Core RESOLVED (R3, 2026-08-25)** — was: ML-KEM had zero encoders registered, so `genpkey -algorithm ML-KEM-768 -out k.pem` generated and persisted a real key on-token (R3b) but the `-out` write step failed, `Error writing key(s)`/exit 1. **Correction to this row's own earlier wording** (found live during R3, not assumed): public-key output was never actually broken — `storeutl -text`/`pkey -pubout` already worked with zero encoders, because ML-KEM's keymgmt EXPORT function bridges the public bytes into OpenSSL's default provider, which encodes them. The real, sole functional gap was the **private**-key URI-PEM PrivateKeyInfo encoder — the one path that can't use that bridge (private material never crosses into another provider). Fixed: `p11prov_mlkem_encoder_priv_key_info_pem_encode` (`encoder.c`), registered for all 3 variants inside the `encode_pkey_as_pk11_uri` block (`provider.c`). Like every other PrivateKeyInfo encoder in this fork, it never touches raw key bytes — `p11prov_encoder_private_key_to_asn1` calls `p11prov_obj_get_public_uri(key)` and PEM-wraps that `pkcs11:` URI string; live-verified the written file decodes to a `type=private` URI, and a negative harness assertion checks no `PRIVATE KEY` label ever appears. **Remaining, deliberately separate parity tier**: SPKI/text encoders for public keys (would let public output work even in `DISALLOW_EXPORT_PUBLIC` configs, and match every other PQC family in this fork) — not functionally required, scoped as follow-up. | `encoder.c`; live (T4x_encode, T10 as network-effect control) | ~~Medium~~ — |
 | OP-4 | **CLOSED, no gap (R20, 2026-08-26)** — investigated by reading OpenSSL's own CMS source (`crypto/cms/cms_kemri.c`) rather than inferring from the CLI: the real KEMRecipientInfo call sites (`EVP_PKEY_encapsulate_init`/`decapsulate_init`) pass a NULL params argument unconditionally for every KEM algorithm — `OSSL_KEM_PARAM_OPERATION` is a generic-KEM-wrapper concept for RSA/DH keys with no CMS caller and no meaning for a natively-implemented algorithm like ML-KEM. No gap exists; closed without code. | ~~`kem/mlkem.c:259-289`~~ — | ~~Low~~ — |
 | OP-6 | **RESOLVED (R3b, 2026-08-25)** — was: ML-KEM keys could not be GENERATED on token through the provider (ML-KEM keymgmt had no `OSSL_FUNC_KEYMGMT_GEN*` entries; ML-DSA keygen worked, so this was an asymmetry, not a design rule). Now: real `GEN_INIT`/`GEN`/`GEN_CLEANUP`/`GEN_SET_PARAMS`/`GEN_SETTABLE_PARAMS` wired into all 3 per-variant ML-KEM keymgmt tables (`kem/mlkem.c`), implemented in `keymgmt.c` (mirroring the ML-DSA block) and exported non-static since `kem/mlkem.c` is a separate translation unit. `CKA_PARAMETER_SET` is mandatory on the public-key template per the C++ engine's own `extractParameterSet` call (no silent default, matching ML-DSA's pattern); `CKA_ENCAPSULATE`/`CKA_DECAPSULATE` requested explicitly on pub/priv templates to match what a spec-correct caller sends (both engines enforce these server-side regardless of template content). Live-verified: key generates, persists on-token, and is independently confirmed via `storeutl -text` showing `ML-KEM-768 Public-Key`. Landing this surfaced OP-3 (above) as a distinct, still-open gap — genpkey's own `-out` write needs an encoder this fix does not provide. | both engines, live probe + source | ~~**High**~~ — |
-| OP-5 | **PARTIALLY RESOLVED (R10, 2026-08-25)** — was: KDF surface is HKDF+TLS13-KDF only; engines also offer PBKDF2 and SP800-108 counter/feedback KDFs that OpenSSL has standard fetch names for. Now: real `CKM_PKCS5_PBKD2` PBKDF2 support (`kdf.c`), live-verified byte-identical to software PBKDF2 across five PRFs (HMAC-SHA1/224/256/384/512, harness T22/T22b-e), engine-log confirmed. **SP800-108 counter/feedback KDFs remain genuinely unreached** — confirmed fully implemented in both engines by the same probe, deliberately deferred (not attempted) to keep this item's diff scoped to PBKDF2 first, per its own stated "same shape of work as this item" reasoning; still open. | `provider.c:1161` vs engine KDF mechs | ~~Low–Medium~~ Low (SP800-108 only) |
+| OP-5 | **RESOLVED (R10 + R22, 2026-08-25/26)** — was: KDF surface is HKDF+TLS13-KDF only; engines also offer PBKDF2 and SP800-108 counter/feedback KDFs that OpenSSL has standard fetch names for. R10: real `CKM_PKCS5_PBKD2` PBKDF2 support, live-verified byte-identical to software PBKDF2 across five PRFs (T22/T22b-e). R22: real `CKM_SP800_108_COUNTER_KDF`/`CKM_SP800_108_FEEDBACK_KDF` support ("KBKDF" fetch name), live-verified byte-identical to software KBKDF across Counter+Feedback modes, HMAC (SHA-256/SHA3-256/SHA-384) and CMAC PRFs, engine-log confirmed, sabotage-tested, three deliberate-divergence inputs rejected (T25/T25b/T25c/T25f/T25r). | `provider.c:1161` vs engine KDF mechs | ~~Low–Medium~~ — |
 | WART-1 | **RESOLVED (R0.1, 2026-08-25 later same day; re-verified R21, 2026-08-26)** — was: `ObjectFile.cpp(181): The attribute is not a byte string: 0x0/0x1/0x2/0x86/0x100/0x170-0x172/0x601` — provider queries CKA_CLASS/CKA_TOKEN/CKA_PRIVATE/CKA_TRUSTED/CKA_KEY_TYPE/CKA_MODIFIABLE/CKA_COPYABLE/CKA_DESTROYABLE/etc. with byte-string templates. Fix: `P11Objects.cpp`'s mandatory-attribute-check loop gated on ck14\|ck15\|ck16 actually being set, not called for every attribute in an object's full schema; harness's own tail section now regression-guards zero `ObjectFile.cpp(181)` lines across every case log. | observed on every live probe | ~~Low~~ — |
 | WART-3 | **RESOLVED (R0.2, 2026-08-25 later same day; re-verified R21, 2026-08-26)** — was: build hygiene: the gitignored WASM-generated `src/config.h` leaks into the **native** CMake build — compile warnings `"PACKAGE_MAJOR redefined"` and the live provider reports version **1.1** (config.h) while CMake defines **0.4.0**. Fix: CMakeLists.txt now generates a real `config.h` at configure time deriving `P11PROV_VERSION` from `meson.build`'s own `version:` field — single source of truth across native/meson/WASM builds; re-verified live: `list -providers` reports `1.1`, matching, zero redefinition warnings. | observed in gate build log + live `list -providers` | ~~Low~~ — |
 | WART-4 | **RESOLVED (R0.4, 2026-08-25 later same day)** — was: mechanism-gated operation tables are invisible to fresh-process fetches: `openssl list` shows nothing `@ pkcs11` for signature/KEM, AND a strict property-targeted fetch (`dgst -sha256 -propquery provider=pkcs11`) **functionally fails** in a fresh process (`inner_evp_generic_fetch:unsupported`) — operations only resolve once a token object forces module init in-process. Fix: the provider already ships `pkcs11-module-load-behavior = early` for exactly this case (forces the same lazy-init call from inside `OSSL_provider_init()` instead of leaving it to a key-object path); wired into the harness's T9 arena. See `docs/openssl-provider-remediation-plan-2026-08-25.md` R0.4 for the full story, including a real `mk_arena()` ordering bug it exposed and fixed along the way. | live probes (T9) | ~~Medium~~ |
@@ -1837,6 +1837,100 @@ Full regression: **C++ CTest 8/8 passed**; Rust `cargo test` not
 re-run (no `rust/` source touched by this item). **Harness:
 `PASS=57 FAIL=0 XFAIL=0 XPASS=0`** — one case gained (T24b), zero
 regressions.
+
+**Phase 5, R22 (SP800-108 Counter/Feedback KDF, "KBKDF"), DONE —
+byte-identical to software across both modes, both PRF families, one
+real bug found and fixed.** New `kdf.c` section wires up
+`CKM_SP800_108_COUNTER_KDF`/`CKM_SP800_108_FEEDBACK_KDF` under
+OpenSSL's standard `KBKDF` fetch name, reusing HKDF's own
+`inner_pkcs11_key`/`inner_derive_key`/`inner_extract_key_value` helpers
+(the first, refactored to take `provctx`/`session` directly instead of
+an HKDF-specific context struct, so KBKDF's differently-shaped one
+could reuse it too — three call sites updated, HKDF's own behavior
+unchanged).
+
+**The OSSL_PARAM ↔ `CK_PRF_DATA_PARAM[]` mapping is grounded in the
+C++ engine's own handler, not designed independently and hoped to
+match**: `SoftHSM_keygen.cpp`'s `CKM_SP800_108_COUNTER_KDF`/
+`FEEDBACK_KDF` handlers, read directly, themselves derive via OpenSSL's
+own `KBKDF` fetch — so the shape this provider's caller-facing side
+produces is provably the one the token-side software actually reads on
+the other end of `C_DeriveKey`. That reading also surfaced the exact
+scope of what's honorable: `OSSL_KDF_PARAM_KBKDF_USE_L`/
+`_USE_SEPARATOR` are not settable here (the engine's own KBKDF call
+never sets either, so the token always gets OpenSSL KBKDF's own
+default regardless of what a caller of this provider asks for), CMAC's
+`OSSL_KDF_PARAM_CIPHER` name is validated but never forwarded (the
+engine always derives its actual CMAC cipher from the imported base
+key's own byte length via plain `CKM_AES_CMAC`), and SHA-1 is rejected
+as an HMAC PRF (the engine's own `ckmHmacPrfToDigestName()` table has
+no SHA-1 entry for SP800-108, unlike PBKDF2, which does) — all three
+enforced by rejecting loudly rather than silently accepting and
+diverging, the R10/F36-6 pattern this section's own header comment
+cites explicitly.
+
+**Two real bugs found and fixed, both via live-trace, neither guessed:**
+1. **A general C_DeriveKey write-authorization requirement, already
+   documented by R10's own comment on `p11prov_pbkdf2_derive`** (a few
+   hundred lines above this section in `kdf.c`) but not yet applied to
+   any *other* real base-key-object derive path: HKDF's own bare
+   `inner_pkcs11_key` call only avoids `CKR_USER_NOT_LOGGED_IN` in
+   practice because its real callers (TLS handshakes) always already
+   have a logged-in session from an earlier operation — a KBKDF call as
+   the first operation in a session does not. Confirmed live before
+   writing the fix, not assumed: HKDF was made to fail the identical
+   way via the identical bare-session `openssl kdf` invocation this
+   item's own harness cases use, ruling out "HKDF secretly doesn't need
+   this" as an explanation. Fixed by pre-acquiring a logged-in,
+   read-write session (`p11prov_get_session(..., true, true, ...)`)
+   *before* the base-key import step, so `inner_pkcs11_key`'s own
+   internal (non-logged-in) session acquisition finds one already
+   present and reuses it for both the import and the later derive.
+2. **`CKA_KEY_TYPE = CK_UNAVAILABLE_INFORMATION` in the output key
+   template, harmless for `CKM_HKDF_DERIVE` (the engine's own HKDF
+   handler explicitly skips CKA_CLASS/TOKEN/PRIVATE/KEY_TYPE from the
+   caller's template, using hardcoded values instead — confirmed by
+   reading it directly), fatal for `CKM_SP800_108_COUNTER_KDF`/
+   `FEEDBACK_KDF`** (`CKR_TEMPLATE_INCONSISTENT` from `C_DeriveKey`,
+   reproduced live). `inner_derive_key`'s shared output template passes
+   its `key_type` argument straight through as `CKA_KEY_TYPE`; HKDF's
+   own call site has always passed `CK_UNAVAILABLE_INFORMATION` there
+   (untested against SP800-108's own, evidently less permissive,
+   template validation until now). Fixed on the KBKDF call site only —
+   passing `CKK_GENERIC_SECRET` explicitly, matching what the engine
+   hardcodes as the output type regardless — confirmed live, both
+   before (fails) and after (succeeds, byte-identical to software) the
+   one-line change; HKDF's own call site deliberately left unchanged
+   (matches its own working behavior, no reason to touch it).
+
+**A methodology trap worth recording, not just the bugs it hid**: this
+item's own first pass of manual smoke tests all "passed" — byte-
+identical to software, no errors — with zero code changes, before
+either bug fix existed. Every one of them had silently computed the
+result through the *default* provider, not the token: `openssl kdf`'s
+own CLI subcommand never forces this provider's lazy module/slots init
+the way `genpkey`/`pkeyutl`'s key-object creation does as a side
+effect (the same WART-4/R0.4 class of gap, just for a code path — bare
+KDF fetch — nothing had exercised that way before), so a soft
+`?provider=pkcs11` propquery fell through to `default` with no visible
+error, and `default` trivially matched `default`. Caught only by
+checking the provider's own debug trace for `kbkdf` dispatch lines and
+finding none — the exact discipline R13 established (engine-log
+evidence, not exit code or output value, is the arbiter) — before
+declaring anything working. `pkcs11-module-load-behavior = early` in
+every T25 arena (T22's own PBKDF2 arena already carries it) is the
+fix; both bugs above were found only *after* applying it and watching
+the CLI genuinely fail against the token for the first time.
+
+Five new harness cases: T25 (Counter, HMAC-SHA256, sabotage-tested),
+T25b (Counter, HMAC-SHA3-256), T25c (Counter, CMAC-AES-256), T25f
+(Feedback, HMAC-SHA384, with IV/seed), T25r (three rejection controls:
+SHA-1 PRF, non-CBC CMAC cipher, `use-l:0`). Full regression: **C++
+CTest 8/8 passed** (no C++ engine source changed by this item — the
+mapping was grounded in reading its existing SP800-108 handler, not
+modifying it); Rust `cargo test` not re-run (no `rust/` source touched).
+**Harness: `PASS=62 FAIL=0 XFAIL=0 XPASS=0`** — five cases gained,
+zero regressions.
 
 ## 7. Companion document
 
