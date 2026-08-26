@@ -1,6 +1,8 @@
 # Remoting full PKCS#11 v3.2 coverage plan — gRPC + REST C_* mirror (2026-08-26)
 
-**Status: PLAN, ready to execute. Nothing below is built yet.**
+**Status: RW0 + RW1 + first RW2/RW3 slices EXECUTED and green (2026-08-26).
+Later workstreams remain planned. See the "Execution log" at the end for
+exactly what shipped.**
 
 Decisions locked with the user (2026-08-26):
 
@@ -273,3 +275,58 @@ from the ledger and is committed fresh; the gate runs the whole suite;
 N/A reason is "no verb exists" (each is either a real RPC now or a
 justified N/A-local/N/A-engine); the 9 legacy verbs, bench-harness JSON
 schema, and `JavaJCE-remote` behavior are byte-identical to v0.25.0.
+
+
+---
+
+## Execution log
+
+### 2026-08-26 — RW0 + RW1 + first RW2/RW3 slices (branch feat/remoting-v32-mirror off v0.25.0)
+
+Shipped, all live-verified (no mocks — every test drives the real engine
+through the real transports):
+
+**Proto:** new `Pkcs11V32` service alongside the frozen `Pkcs11Remote`
+(purely additive — `git diff` shows zero removed lines from the legacy
+block). `ck_rv` is a response field on every message; mechanisms/attributes
+travel as raw `uint64` codepoints + parameter bytes; 24 C_* RPCs declared.
+
+**core (`verbs_v32.rs`):** raw-`CK_RV`-returning layer over the engine's
+native-width `ffi::C_*` entry points (proven natively callable — the
+differential harness dlopens these same symbols). Implemented: C_OpenSession/
+CloseSession/Login/Logout/GetSessionInfo/GetTokenInfo/GetMechanismList/
+GetMechanismInfo/GenerateRandom/SeedRandom, the Digest FSM + one-shot, the
+Sign/Verify FSM + one-shot, multi-attr C_GetAttributeValue (real §5.7.5
+consolidated codes), C_DestroyObject. 6 new unit tests (15/15 core green).
+One live finding baked in: ulong attribute VALUES come back at native
+CK_ULONG width (8 bytes LP64) — documented, wire consumers read the low 4.
+
+**gRPC + REST:** full `Pkcs11V32` service on both transports, mounted in the
+existing binaries (16 MiB message limits set explicitly, retiring the silent
+4 MiB/2 MB defaults). `--enable-destructive` flag (default OFF → C_DestroyObject
+answers CKR_FUNCTION_NOT_SUPPORTED); acceptance/gate run it ON. gRPC handlers
+dispatch through `spawn_blocking`.
+
+**Validation:** `remoting/acceptance/tests/v32_parity.rs` — 6 three-transport
+parity cases (session lifecycle + double-close CKR, SHA-256 digest byte
+equality, ML-DSA sign→verify + real CKR_SIGNATURE_INVALID on tamper,
+C_GetAttributeValue §5.7.5 sensitive-code parity, mechanism list/info parity,
+C_DestroyObject parity) — control captured in-process, never hardcoded,
+asserted equal across in-process/gRPC/REST. Plus a destructive-OFF posture
+unit test in the grpc crate. **Whole remoting workspace green: 15 core + 7
+legacy-parity (no regression) + 6 v32-parity + 1 posture.**
+
+**Gate (RW0's key fix):** added the `remoting gRPC+REST services +
+three-transport parity` step to `scripts/local-gate.sh` — the remoting
+workspace ran in NO gate step before today.
+
+### Still planned (RW2 remainder → RW6)
+
+Template-form C_GenerateKey/C_CreateObject/C_GenerateKeyPair, C_SetAttributeValue,
+C_FindObjects trio, encrypt/decrypt FSMs, wrap/unwrap, C_DeriveKey (needs new
+native:: wrappers for PBKDF2/SP800-108), v3.2 C_EncapsulateKey/DecapsulateKey
+(key-object form), the 20-function message-based API, dual-function, async
+honest-not-supported codes, the coverage_ledger.json ratchet + generated
+remote-conformance report, and the docs/PKCS11_REMOTING.md applicability-table
+regeneration. Each lands with its three-transport parity cases per the
+per-RPC checklist above.

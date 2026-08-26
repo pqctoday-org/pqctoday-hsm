@@ -164,3 +164,199 @@ service Pkcs11Remote {
   rpc Decapsulate(DecapsulateRequest) returns (DecapsulateResponse);
   rpc GetSelfSignedCertificate(GetSelfSignedCertificateRequest) returns (GetSelfSignedCertificateResponse);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pkcs11V32 — the 1:1 C_* mirror service (docs/remoting-pkcs11-v32-full-
+// coverage-plan-2026-08-26.md). Design rules, each deliberate:
+//
+//   1. `ck_rv` is a FIELD on every response (0 = CKR_OK), never a transport
+//      error. gRPC Status / HTTP status are reserved for transport failures.
+//      This mirrors the C ABI exactly and makes exact-CKR parity assertions
+//      trivial on both wires — no string-parsing of Status messages.
+//   2. Raw CK codepoints on the wire: mechanisms as uint64 CKM_* + parameter
+//      bytes, attributes as uint64 CKA_*, return values as CKR_* verbatim.
+//      No enums to keep in sync, no per-algorithm proto changes.
+//   3. Unary-only is PRESERVED: multipart Init/Update/Final are each their
+//      own unary RPC; operation state lives server-side keyed by session
+//      handle, exactly where the engine already keeps it.
+//   4. The legacy Pkcs11Remote service above is FROZEN (bench-harness and
+//      JavaJCE-remote compatibility); this service is additive.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CK_MECHANISM on the wire: CKM_* codepoint + raw parameter bytes (empty =
+// no parameter / NULL pParameter). The server rebuilds the native-width
+// struct; parameter STRUCTS (GCM params etc.) arrive as their native-layout
+// bytes in later workstreams — this slice's mechanisms are parameter-less.
+message V32Mechanism {
+  uint64 mechanism = 1;
+  bytes parameter = 2;
+}
+
+// Status-only response — the shape most C_* calls have.
+message V32StatusResponse {
+  uint32 ck_rv = 1;
+}
+
+// Byte-output response (C_Sign / C_Digest / C_SignFinal / C_DigestFinal /
+// C_GenerateRandom …): `data` is meaningful only when ck_rv == CKR_OK.
+message V32BytesResponse {
+  uint32 ck_rv = 1;
+  bytes data = 2;
+}
+
+message V32OpenSessionRequest {
+  uint32 slot_id = 1;
+  uint32 flags = 2; // real CKF_* — CKF_SERIAL_SESSION required by §5.6, asserted remotely
+}
+message V32OpenSessionResponse {
+  uint32 ck_rv = 1;
+  uint32 session_handle = 2;
+}
+
+message V32SessionRequest { // C_CloseSession / C_Logout / C_GetSessionInfo / C_DigestFinal / C_SignFinal
+  uint32 session_handle = 1;
+}
+
+message V32LoginRequest {
+  uint32 session_handle = 1;
+  uint32 user_type = 2; // real CKU_* codepoint
+  bytes pin = 3;
+}
+
+message V32GetSessionInfoResponse { // CK_SESSION_INFO, field for field
+  uint32 ck_rv = 1;
+  uint32 slot_id = 2;
+  uint32 state = 3;  // CKS_*
+  uint32 flags = 4;  // CKF_*
+  uint32 device_error = 5;
+}
+
+message V32SlotRequest { // C_GetTokenInfo / C_GetMechanismList
+  uint32 slot_id = 1;
+}
+
+message V32GetTokenInfoResponse { // CK_TOKEN_INFO, dynamic fields included
+  uint32 ck_rv = 1;
+  string label = 2;        // trailing-space-trimmed
+  string manufacturer = 3;
+  string model = 4;
+  string serial_number = 5;
+  uint32 flags = 6;
+  uint32 session_count = 7;
+  uint32 rw_session_count = 8;
+  uint32 max_pin_len = 9;
+  uint32 min_pin_len = 10;
+  uint32 hardware_version_major = 11;
+  uint32 hardware_version_minor = 12;
+  uint32 firmware_version_major = 13;
+  uint32 firmware_version_minor = 14;
+}
+
+message V32GetMechanismListResponse {
+  uint32 ck_rv = 1;
+  repeated uint64 mechanisms = 2; // CKM_* codepoints verbatim
+}
+
+message V32GetMechanismInfoRequest {
+  uint32 slot_id = 1;
+  uint64 mechanism = 2;
+}
+message V32GetMechanismInfoResponse { // CK_MECHANISM_INFO
+  uint32 ck_rv = 1;
+  uint32 min_key_size = 2;
+  uint32 max_key_size = 3;
+  uint32 flags = 4; // CKF_* capability bits
+}
+
+message V32GenerateRandomRequest {
+  uint32 session_handle = 1;
+  uint32 length = 2; // capped server-side at 1 MiB → CKR_ARGUMENTS_BAD beyond
+}
+
+message V32SeedRandomRequest {
+  uint32 session_handle = 1;
+  bytes seed = 2;
+}
+
+message V32MechanismSessionRequest { // C_DigestInit
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+}
+
+message V32DataRequest { // C_DigestUpdate / C_SignUpdate / C_VerifyUpdate / C_Sign(one-shot data)
+  uint32 session_handle = 1;
+  bytes data = 2;
+}
+
+message V32DigestRequest { // one-shot C_Digest
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  bytes data = 3;
+}
+
+message V32KeyedInitRequest { // C_SignInit / C_VerifyInit
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 key_handle = 3;
+}
+
+message V32VerifyRequest { // one-shot C_Verify — ck_rv carries CKR_OK vs CKR_SIGNATURE_INVALID, the real C semantics
+  uint32 session_handle = 1;
+  bytes data = 2;
+  bytes signature = 3;
+}
+
+message V32SignatureRequest { // C_VerifyFinal
+  uint32 session_handle = 1;
+  bytes signature = 2;
+}
+
+message V32GetAttributeValueRequest {
+  uint32 session_handle = 1;
+  uint32 object_handle = 2;
+  repeated uint64 attribute_types = 3; // CKA_* codepoints verbatim
+}
+message V32Attribute {
+  uint64 attribute_type = 1;
+  // false ⇔ the engine reported CK_UNAVAILABLE_INFORMATION for this entry
+  // (absent attribute, or sensitive/unextractable material) — §5.7.5's
+  // per-entry semantics preserved; the consolidated code is in ck_rv.
+  bool available = 2;
+  bytes value = 3;
+}
+message V32GetAttributeValueResponse {
+  uint32 ck_rv = 1; // consolidated §5.7.5 code: SENSITIVE > TYPE_INVALID > BUFFER_TOO_SMALL
+  repeated V32Attribute attributes = 2;
+}
+
+message V32ObjectRequest { // C_DestroyObject
+  uint32 session_handle = 1;
+  uint32 object_handle = 2;
+}
+
+service Pkcs11V32 {
+  rpc C_OpenSession(V32OpenSessionRequest) returns (V32OpenSessionResponse);
+  rpc C_CloseSession(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_Login(V32LoginRequest) returns (V32StatusResponse);
+  rpc C_Logout(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_GetSessionInfo(V32SessionRequest) returns (V32GetSessionInfoResponse);
+  rpc C_GetTokenInfo(V32SlotRequest) returns (V32GetTokenInfoResponse);
+  rpc C_GetMechanismList(V32SlotRequest) returns (V32GetMechanismListResponse);
+  rpc C_GetMechanismInfo(V32GetMechanismInfoRequest) returns (V32GetMechanismInfoResponse);
+  rpc C_GenerateRandom(V32GenerateRandomRequest) returns (V32BytesResponse);
+  rpc C_SeedRandom(V32SeedRandomRequest) returns (V32StatusResponse);
+  rpc C_DigestInit(V32MechanismSessionRequest) returns (V32StatusResponse);
+  rpc C_DigestUpdate(V32DataRequest) returns (V32StatusResponse);
+  rpc C_DigestFinal(V32SessionRequest) returns (V32BytesResponse);
+  rpc C_Digest(V32DigestRequest) returns (V32BytesResponse);
+  rpc C_SignInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_Sign(V32DataRequest) returns (V32BytesResponse);
+  rpc C_SignUpdate(V32DataRequest) returns (V32StatusResponse);
+  rpc C_SignFinal(V32SessionRequest) returns (V32BytesResponse);
+  rpc C_VerifyInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_Verify(V32VerifyRequest) returns (V32StatusResponse);
+  rpc C_VerifyUpdate(V32DataRequest) returns (V32StatusResponse);
+  rpc C_VerifyFinal(V32SignatureRequest) returns (V32StatusResponse);
+  rpc C_GetAttributeValue(V32GetAttributeValueRequest) returns (V32GetAttributeValueResponse);
+  rpc C_DestroyObject(V32ObjectRequest) returns (V32StatusResponse); // gated by --enable-destructive
+}

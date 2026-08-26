@@ -181,6 +181,17 @@ run_step "rust engine cargo test" \
   "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
    RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
+# The remoting workspace (gRPC + REST PKCS#11 services) had NO gate step at
+# all before 2026-08-26 — its three-transport parity suite
+# (remoting/acceptance) was developer-run only, so a proto/service change
+# could regress CKR parity across transports invisibly. Added with the
+# Pkcs11V32 C_* mirror work (docs/remoting-pkcs11-v32-full-coverage-plan-
+# 2026-08-26.md, RW0). Standalone workspace ⇒ its own `cargo test`; the
+# first grep catches any FAILED summary, the second reports the aggregate.
+run_step "remoting gRPC+REST services + three-transport parity" \
+  "cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+
 # Cheap, and it runs BEFORE the replay on purpose: if the corpus is not the
 # corpus we think it is, the replay figure below is measuring something else.
 run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \

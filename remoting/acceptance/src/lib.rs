@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 
 use anyhow::Result;
 use pqctoday_pkcs11_remote_proto::pkcs11_remote_client::Pkcs11RemoteClient;
+use pqctoday_pkcs11_remote_proto::pkcs11_v32_client::Pkcs11V32Client;
 use tonic::transport::{Channel, Server};
 
 /// Starts a real `pqc-grpc-pkcs11` service on an ephemeral loopback port
@@ -58,3 +59,36 @@ pub fn bootstrap_once() {
 /// The well-known benchmark PIN (see `remoting/core/src/verbs.rs`) — not a
 /// secret, shared here so every test doesn't hardcode it separately.
 pub const PIN: &str = "1234";
+
+/// Both mirror services on one ephemeral server (the `Pkcs11V32` C_*
+/// mirror plus the legacy service, matching the real binary), with the
+/// destructive flag ON — the parity suite must be able to validate
+/// C_DestroyObject-dependent categories (plan: tests ON, deployed OFF).
+/// Returns a connected `Pkcs11V32` client.
+pub async fn spawn_grpc_v32() -> Result<Pkcs11V32Client<Channel>> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let v32 = pqctoday_pkcs11_remote_proto::pkcs11_v32_server::Pkcs11V32Server::new(
+        pqc_grpc_pkcs11::service_v32::Pkcs11V32Service { destructive: true },
+    );
+    tokio::spawn(async move {
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let _ = Server::builder().add_service(v32).serve_with_incoming(incoming).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let channel = Channel::from_shared(format!("http://{addr}"))?.connect().await?;
+    Ok(Pkcs11V32Client::new(channel))
+}
+
+/// The `Pkcs11V32` REST router (destructive ON) on an ephemeral port;
+/// returns its base URL. `/v32/...` routes.
+pub async fn spawn_rest_v32() -> Result<String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr: SocketAddr = listener.local_addr()?;
+    let app = pqc_rest_pkcs11::routes::router_with(true);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app.into_make_service()).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    Ok(format!("http://{addr}"))
+}
