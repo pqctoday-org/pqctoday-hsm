@@ -57,6 +57,7 @@ P11PROV_OBJ *p11prov_create_secret_key(P11PROV_CTX *provctx,
                                        size_t secretlen);
 P11PROV_OBJ *p11prov_create_mac_key(P11PROV_CTX *provctx,
                                     P11PROV_SESSION *session,
+                                    CK_KEY_TYPE key_type,
                                     const unsigned char *secret,
                                     size_t secretlen);
 CK_RV p11prov_derive_key(P11PROV_OBJ *key, CK_MECHANISM *mechanism,

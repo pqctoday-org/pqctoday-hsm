@@ -838,8 +838,9 @@ static CK_RV alg_set_op(OSSL_ALGORITHM **op, int idx, OSSL_ALGORITHM *alg)
     CKM_SHA_1, CKM_SHA224, CKM_SHA256, CKM_SHA384, CKM_SHA512, CKM_SHA512_224, \
         CKM_SHA512_256, CKM_SHA3_224, CKM_SHA3_256, CKM_SHA3_384, CKM_SHA3_512
 
-/* R8 (OSSL_OP_MAC), phase-4 plan: bytes-in mode HMAC only for now
- * (CMAC/KMAC deferred — see the plan's own phasing). */
+/* R8 (OSSL_OP_MAC), phase-4 plan: bytes-in mode HMAC.
+ * R23 (phase 5): CMAC + KMAC-128/256 join it as real OSSL_OP_MAC
+ * implementations — the OP-1/ALG-8 remainder R8 left open. */
 #define HMAC_MECHS \
     CKM_SHA_1_HMAC, CKM_SHA256_HMAC, CKM_SHA384_HMAC, CKM_SHA512_HMAC
 
@@ -928,6 +929,9 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              CKM_PKCS5_PBKD2,
                              CKM_SP800_108_COUNTER_KDF,
                              CKM_SP800_108_FEEDBACK_KDF,
+                             CKM_AES_CMAC,
+                             CKM_KMAC_128,
+                             CKM_KMAC_256,
                              DIGEST_MECHS,
                              HMAC_MECHS,
                              CKM_EDDSA,
@@ -1257,6 +1261,18 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 break;
             case CKM_SHA512_HMAC:
                 UNCHECK_MECHS(CKM_SHA512_HMAC);
+                break;
+            case CKM_AES_CMAC:
+                ADD_ALGO(CMAC, cmac, mac, prop);
+                UNCHECK_MECHS(CKM_AES_CMAC);
+                break;
+            case CKM_KMAC_128:
+                ADD_ALGO(KMAC128, kmac128, mac, prop);
+                UNCHECK_MECHS(CKM_KMAC_128);
+                break;
+            case CKM_KMAC_256:
+                ADD_ALGO(KMAC256, kmac256, mac, prop);
+                UNCHECK_MECHS(CKM_KMAC_256);
                 break;
             case CKM_EDDSA:
                 ADD_ALGO_EXT(ED25519, signature, prop,

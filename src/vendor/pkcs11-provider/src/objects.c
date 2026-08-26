@@ -2096,13 +2096,13 @@ P11PROV_OBJ *p11prov_create_secret_key(P11PROV_CTX *provctx,
  * was never given. */
 P11PROV_OBJ *p11prov_create_mac_key(P11PROV_CTX *provctx,
                                     P11PROV_SESSION *session,
+                                    CK_KEY_TYPE key_type,
                                     const unsigned char *secret,
                                     size_t secretlen)
 {
     CK_SESSION_HANDLE sess = CK_INVALID_HANDLE;
     CK_SESSION_INFO session_info;
     CK_OBJECT_CLASS key_class = CKO_SECRET_KEY;
-    CK_KEY_TYPE key_type = CKK_GENERIC_SECRET;
     CK_BBOOL val_true = CK_TRUE;
     CK_BBOOL val_false = CK_FALSE;
     CK_ATTRIBUTE key_template[6] = {

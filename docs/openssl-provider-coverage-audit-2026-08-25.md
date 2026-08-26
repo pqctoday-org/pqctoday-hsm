@@ -116,7 +116,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 
 | ID | Gap | Evidence | Severity |
 |---|---|---|---|
-| OP-1 | **PARTIALLY RESOLVED (R8, 2026-08-25)** — was: `OSSL_OP_MAC` not implemented at all — token HMAC/CMAC/KMAC unreachable from `EVP_MAC`; every MAC falls back to software. Now: token HMAC (bytes-in mode) reaches `EVP_MAC` via a real new `OSSL_OP_MAC` implementation (`mac.c`, `p11prov_create_mac_key` + `C_SignInit`/`C_SignUpdate`/`C_SignFinal` with `CKM_SHA*_HMAC`), live-verified against all four SHA sizes with engine-log confirmation of token participation (harness T20/T20b/T20c/T20d). **CMAC and KMAC remain genuinely unreached** — scoped out of R8 deliberately (bytes-in HMAC only, no `SKEYMGMT` dependency); still open. | source sweep; block-list table `provider.c:1570` | ~~Medium~~ Low (CMAC/KMAC only) |
+| OP-1 | **RESOLVED (R8 + R23, 2026-08-25/26)** — was: `OSSL_OP_MAC` not implemented at all — token HMAC/CMAC/KMAC unreachable from `EVP_MAC`; every MAC falls back to software. R8: token HMAC (bytes-in mode), live-verified against all four SHA sizes (T20/T20b-d). R23: CMAC (AES-128/192/256, key-type-constrained to `CKK_AES` matching the engine's own table) and KMAC-128/256 (fixed 32/64-byte output, empty customization string — both non-honorable inputs rejected loudly, not silently degraded) join it, plus `OSSL_FUNC_MAC_INIT_SKEY` for all three (an R24 finding: a correctly-derived, correctly-opaque `EVP_SKEY` had nothing in this provider that could consume it natively) — live-verified byte-identical to software, engine-log confirmed, sabotage-tested (T26/T26b/T26c/T26d). | source sweep; block-list table `provider.c:1570` | ~~Medium~~ — |
 | OP-2 | **RESOLVED (R2, 2026-08-25)** — was: no DECODERs for ML-DSA/ML-KEM/SLH-DSA (composites remain intentionally unregistered — §2's table, recursion issue) → URI-PEM round-trip broken; loading a written PEM back failed. Now: 18 decoder registrations (3 ML-DSA + 3 ML-KEM + 12 SLH-DSA) in `decoder.c`/`provider.c`, using the same generic PEM→DER→store-fetch chain already proven live by T10 (the EC control). Each per-type decoder's FORMAT_NAME had to be the exact single-name string `store.c` emits as `DATA_TYPE` (e.g. `MLDSA_44` = `"ML-DSA-44"`), not the colon-separated registration list. Live-verified for all three families: ML-DSA loads back and signs; SLH-DSA loads back and signs (7856-byte signature, correct size); ML-KEM loads back and **decapsulates** correctly (matched a reference secret from a direct-URI encapsulation). **A genuinely separate gap surfaced during ML-KEM's proof**: a URI-PEM-loaded ML-KEM object identifies as `type=private`, and neither `pkey -pubout` nor `pkeyutl -encap` work against it — confirmed live (`attribute does not exist: 0x633`/CKA_ENCAPSULATE) — because the keymgmt EXPORT function requires a public-class object and does not walk private→associated-public the way ML-DSA's does. This is not a decoder bug (decapsulate, which only needs the loaded private key's own attributes, works perfectly) — it is the same prerequisite already tracked for remediation R5 (TLS groups), now confirmed by a second, independent code path. | `decoder.c`, `provider.c`; live (T11, T11slh, T11kem) | ~~**High**~~ — |
 | OP-3 | **Core RESOLVED (R3, 2026-08-25)** — was: ML-KEM had zero encoders registered, so `genpkey -algorithm ML-KEM-768 -out k.pem` generated and persisted a real key on-token (R3b) but the `-out` write step failed, `Error writing key(s)`/exit 1. **Correction to this row's own earlier wording** (found live during R3, not assumed): public-key output was never actually broken — `storeutl -text`/`pkey -pubout` already worked with zero encoders, because ML-KEM's keymgmt EXPORT function bridges the public bytes into OpenSSL's default provider, which encodes them. The real, sole functional gap was the **private**-key URI-PEM PrivateKeyInfo encoder — the one path that can't use that bridge (private material never crosses into another provider). Fixed: `p11prov_mlkem_encoder_priv_key_info_pem_encode` (`encoder.c`), registered for all 3 variants inside the `encode_pkey_as_pk11_uri` block (`provider.c`). Like every other PrivateKeyInfo encoder in this fork, it never touches raw key bytes — `p11prov_encoder_private_key_to_asn1` calls `p11prov_obj_get_public_uri(key)` and PEM-wraps that `pkcs11:` URI string; live-verified the written file decodes to a `type=private` URI, and a negative harness assertion checks no `PRIVATE KEY` label ever appears. **Remaining, deliberately separate parity tier**: SPKI/text encoders for public keys (would let public output work even in `DISALLOW_EXPORT_PUBLIC` configs, and match every other PQC family in this fork) — not functionally required, scoped as follow-up. | `encoder.c`; live (T4x_encode, T10 as network-effect control) | ~~Medium~~ — |
 | OP-4 | **CLOSED, no gap (R20, 2026-08-26)** — investigated by reading OpenSSL's own CMS source (`crypto/cms/cms_kemri.c`) rather than inferring from the CLI: the real KEMRecipientInfo call sites (`EVP_PKEY_encapsulate_init`/`decapsulate_init`) pass a NULL params argument unconditionally for every KEM algorithm — `OSSL_KEM_PARAM_OPERATION` is a generic-KEM-wrapper concept for RSA/DH keys with no CMS caller and no meaning for a natively-implemented algorithm like ML-KEM. No gap exists; closed without code. | ~~`kem/mlkem.c:259-289`~~ — | ~~Low~~ — |
@@ -139,7 +139,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | ALG-5 | **RESOLVED (R4, 2026-08-25)** — was: registration branch dead. Turned out to need five real fixes, not the originally-guessed "2-line checklist omission": (1) two fabricated fallback constants in `exchange.c` (`CKK_X25519`/`CKK_X448` do not exist in the PKCS#11 spec — real montgomery keys are `CKK_EC_MONTGOMERY`, distinguished by curve name/size, matching Edwards' own pattern; the fake values meant the key-type sniff could never match a real key) — fixed, key-exchange mechanism now correctly resolves from bit size. (2) Four missing-case bugs across `objects.c` (fetch, export, `get_ec_public_raw`'s peer-marshalling gate, and two import/store-dispatch switches) and `store.c` (naming) — the same missing-case class found twice in R1. (3) **The actual root cause of "genpkey succeeds but the token silently creates the wrong key type"**: the C++ engine's `generateED()` (shared by `CKM_EC_EDWARDS_KEY_PAIR_GEN` and `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` — the mechanism itself is never passed into that function) determines the resulting key's `CKK_*` type solely from an explicit `CKA_KEY_TYPE` on the public-key template, defaulting to `CKK_EC_EDWARDS` when absent — found live, not assumed: `genpkey` exited 0 and created two real objects, but reading the result back showed `CKK_EC_EDWARDS` (0x40), not `CKK_EC_MONTGOMERY` (0x41). EC/Edwards never needed to send this explicitly (the engine's default already matched them); montgomery does. Fixed by conditionally adding `CKA_KEY_TYPE` to the shared `p11prov_ec_gen`'s public-key template only for montgomery (zero diff for the already-working EC/Edwards paths). Curve-parameter DER bytes (`curve25519`/`curve448` PrintableStrings) verified two independent ways: direct DER-encoding computation and byte-for-byte match against the latchset sibling's own shipped constants. **Live-verified, both curves, both directions, token-to-token**: X25519 produces a byte-identical 32-byte shared secret; X448 a byte-identical 56-byte one. **A sixth, narrower, separate gap surfaced and was left open**: deriving against a genuinely foreign (default-provider-only) peer key with OpenSSL's peer validation enabled fails with `OSSL_PARAM_get_BN: param of incompatible type` — T8's identical shape works for regular EC but not montgomery; traced to OpenSSL's cross-provider `EVP_PKEY_public_check` falling into a legacy EC_KEY-control translation path that assumes Weierstrass X/Y BIGNUM coordinates montgomery keys don't have. The provider's own derive mechanism is unaffected and proven correct; this is a peer-validation-specific interaction, documented in `T16`'s comment rather than silently dropped. | both engines advertise `CKM_X25519`/`CKM_X448`; live probe + source (`exchange.c`, `objects.c`, `store.c`, `keymgmt.c`, `SoftHSM_keygen.cpp`) | ~~Medium~~ — |
 | ALG-6 | **CLOSED, deliberately unexposed (R20, 2026-08-26)** — investigated: OpenSSL 3.6 does have a standard EC KEM fetch surface (`ec_kem.c`, RFC 9180 DHKEM), but this project's own engine-level "ECDH-as-KEM" capability is **raw ECDH**, not RFC 9180's HKDF-Extract-and-Expand construction — exposing it under OpenSSL's `EC` KEM name would silently produce non-DHKEM-compliant output for any caller expecting RFC 9180 semantics. No current consumer needs the generic KEM operation type for EC (the real hybrid-KEM combiner bypasses it entirely). Deliberately unexposed; closed without code. | both engines flag ENCAP/DECAP on `CKM_ECDH1_DERIVE` | ~~not exposed as an OSSL KEM~~ — | ~~Low~~ — |
 | ALG-7 | ChaCha20 / ChaCha20-Poly1305 | both engines | cipher table is AES-only | Low |
-| ALG-8 | **PARTIALLY RESOLVED (R8, 2026-08-25)** — HMAC reaches `EVP_MAC` (see OP-1); CMAC/KMAC do not. | both (CMAC C++-only, KMAC both) | see OP-1 | ~~Medium~~ Low (CMAC/KMAC only) |
+| ALG-8 | **RESOLVED (R8 + R23, 2026-08-25/26)** — HMAC/CMAC/KMAC-128/256 all reach `EVP_MAC` (see OP-1). CMAC's own C++-only status confirmed accurate, not stale, before R23 scoped its own harness to the C++ arm only: `rust/src/crypto/handlers.rs`'s sign dispatch has no `CKM_AES_CMAC` case (the constant is used only inside its own SP800-108-PRF-selection code); KMAC-128/256 dispatch on both engines (`handlers.rs:1461/1468`). | both (CMAC C++-only, KMAC both) | see OP-1 | ~~Medium~~ — |
 | — | FrodoKEM / Classic McEliece (Rust vendor mechs), BIP32, Keccak-256, split-key | Rust engine / KMIP | deliberately out of OpenSSL scope — recorded, not gapped | — |
 
 ### C. New 3.6 features unused
@@ -1931,6 +1931,90 @@ mapping was grounded in reading its existing SP800-108 handler, not
 modifying it); Rust `cargo test` not re-run (no `rust/` source touched).
 **Harness: `PASS=62 FAIL=0 XFAIL=0 XPASS=0`** — five cases gained,
 zero regressions.
+
+**Phase 5, R23 (CMAC + KMAC-128/256 as EVP_MAC, + `OSSL_FUNC_MAC_
+INIT_SKEY` for all three MACs), DONE — closes R24's own gap, live
+end-to-end, both new algorithms sabotage-tested.** Extends `mac.c`
+(R8's own file, not a new one): CMAC and KMAC-128/256 join HMAC as
+real `OSSL_OP_MAC` implementations, and all three now register
+`OSSL_FUNC_MAC_INIT_SKEY` — the dispatch entry R24's probe found
+missing (a correctly-derived, correctly-opaque `EVP_SKEY` had nothing
+in this provider that could consume it natively; `EVP_MAC_init_SKEY`
+failed at the OpenSSL EVP layer before reaching any provider code).
+
+**CMAC**: `p11prov_create_mac_key` (`objects.c`, shared with HMAC)
+extended to take an explicit `CK_KEY_TYPE` — CMAC's ephemeral base key
+must be `CKK_AES` (the engine's own `kMacMechTable` row for
+`CKM_AES_CMAC` has `allowGenericSecret=false`, confirmed by reading it
+directly; HMAC's own `CKK_GENERIC_SECRET` default is unchanged). The
+caller's `OSSL_MAC_PARAM_CIPHER` name is validated (must be a plain
+AES-`{128,192,256}`-CBC name) but never forwarded to the token — the
+engine always derives its actual cipher choice from the imported base
+key's own byte length via plain `CKM_AES_CMAC` regardless of which
+name a caller sends, the identical reasoning and the identical three
+accepted names as R22's own KBKDF-CMAC handling.
+
+**KMAC-128/256**: fixed 32/64-byte output and an always-empty
+customization string, matching the engine's own `OSSLKMACAlgorithm`
+implementation exactly (`OSSLKMAC.h`'s `OSSLKMAC128`/`256` constructors
+hardcode `defaultSize` 32/64; `OSSLKMAC.cpp`'s own `signInit` never
+sets `OSSL_MAC_PARAM_CUSTOM` at all) — confirmed by reading the actual
+crypto class, not inferred from the mechanism table alone. A caller
+requesting a non-empty customization string or a different output
+length is rejected loudly rather than silently held at the token's own
+fixed behavior, the same R10/F36-6 pattern this file's own KBKDF
+section already established.
+
+**`OSSL_FUNC_MAC_INIT_SKEY`**: takes the SKEY's own `keydata` directly
+— for this provider's AES/GENERIC-SECRET `SKEYMGMT` (`skeymgmt.c`)
+that is already a `P11PROV_OBJ*`, the same object type every other
+sign path here uses, confirmed by reading `skeymgmt.c`'s own
+generate/import functions directly rather than assumed. No raw key
+bytes cross into the new `p11prov_mac_init_skey` at any point; it
+validates the SKEY's own key type matches what the target algorithm
+needs (`CKK_AES` for CMAC, `CKK_GENERIC_SECRET` otherwise) before
+taking its own reference and skipping straight to `C_SignInit` — no
+ephemeral key creation, because the key already exists as a real token
+object.
+
+**Closing the loop on R24, live-verified**: re-ran `skey_flow_probe`
+(built for R24, unchanged since) against the now-fixed provider —
+check 2 (`EVP_SKEY_import_raw_key` → `EVP_KDF_derive_SKEY` over HKDF →
+`EVP_MAC_init_SKEY` over HMAC) now passes end to end where it
+previously failed at the very last step, and the byte-for-byte
+cross-check against independent, pure-software HKDF+HMAC of the same
+known inputs still passes — the whole opaque chain (generate, derive,
+*and* consume) is now genuinely proven, not just two-thirds of it.
+Harness `T26d` regression-guards this specifically.
+
+**No new bugs found this item** (unlike R22/R24) — the design fell out
+cleanly from R24's own diagnosis and R8's existing `mac.c` shape.
+**Two genuine bugs in this item's own test cases were found and
+fixed**, both the same class of mistake, neither in provider code:
+the CMAC/KMAC rejection-control assertions (`T26`/`T26b`) were missing
+the `SOFTHSM2_CONF`/`OPENSSL_CONF` env-var prefix every other command
+in those same functions carries — without it, the check silently ran
+against whatever arena a PRIOR test case had left exported, not this
+one, so a rejection that should have failed loudly instead reported
+"accepted" from the wrong provider entirely. Caught immediately by
+manually reproducing the exact failing command outside the harness
+(it correctly rejected) and diffing it against the harness's own
+invocation. Separately, `T26`'s own sabotage key was 31 bytes (a
+copy/paste hex-string miscount, not a deliberate choice) — an invalid
+AES key length the engine correctly rejected, which surfaced as an
+unrelated-looking "sabotage" failure until traced to the key length
+itself; fixed with `printf 'ff%.0s' {1..32}` (matching T25f's own
+established technique for generating a byte string of an exact length,
+rather than hand-typing hex and miscounting it again).
+
+New harness cases: T26 (CMAC-AES-256, sabotage + rejection-tested),
+T26b/T26c (KMAC-128/256, C++ arm, custom-string rejection), T26d
+(closes R24's loop). Full regression: **C++ CTest 8/8 passed** (no C++
+engine source changed by this item); Rust `cargo test` not re-run (no
+`rust/` source touched — CMAC's own Rust-arm absence was reverified
+live, not assumed, before scoping the harness to C++ only). **Harness:
+`PASS=66 FAIL=0 XFAIL=0 XPASS=0`** — four cases gained, zero
+regressions.
 
 ## 7. Companion document
 

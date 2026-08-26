@@ -1061,6 +1061,178 @@ run_case T20c PASS "token HMAC-SHA384 == software HMAC, engine-log verified (rem
 t20d() { t20_case SHA512; }
 run_case T20d PASS "token HMAC-SHA512 == software HMAC, engine-log verified (remediation R8); negative-control twin (R13)" t20d
 
+# ─── T26: CMAC + KMAC-128/256 as EVP_MAC, + INIT_SKEY (remediation R23) ─────
+# CMAC is C++-only (confirmed live by reading rust/src/crypto/handlers.rs's
+# own sign dispatch: CKM_AES_CMAC appears only inside its KBKDF-PRF
+# selection code, never as a standalone C_SignInit case — matching the
+# audit's own ALG-8 row) so t26_cmac only runs against the C++ arm; KMAC
+# dispatches on both (handlers.rs:1461/1468), so t26_kmac takes the engine
+# .so as a parameter.
+t26_cmac() {
+  local w; w="$ROOT_WORK/r23cmac"; mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = DEBUG
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $CPP_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-load-behavior = early
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$CPP_ENGINE_SO" \
+    --init-token --free --label r23cmac --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+
+  local key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+  echo "cmac harness message" > "$w/msg.txt"
+
+  local tokout swout
+  tokout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" -cipher AES-256-CBC \
+    -in "$w/msg.txt" CMAC 2>"$w/tok.err.log") || return 1
+  swout=$(OPENSSL_CONF=/dev/null O mac -macopt "hexkey:$key" -cipher AES-256-CBC \
+    -in "$w/msg.txt" CMAC 2>/dev/null) || return 1
+  [[ -n "$tokout" && "$tokout" == "$swout" ]] || return 1
+  grep -q "Created new object" "$w/tok.err.log" || return 1
+
+  local ctrlout
+  ctrlout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -macopt "hexkey:$key" -cipher AES-256-CBC -in "$w/msg.txt" CMAC \
+    2>"$w/ctrl.err.log") || return 1
+  [[ "$ctrlout" == "$swout" ]] || return 1
+  grep -q "Created new object" "$w/ctrl.err.log" && return 1
+
+  # Sabotage: a different (but still valid, 32-byte) key must NOT
+  # produce the same CMAC.
+  local sabkey; sabkey=$(printf 'ff%.0s' {1..32})
+  local sabout
+  sabout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$sabkey" \
+    -cipher AES-256-CBC -in "$w/msg.txt" CMAC 2>/dev/null) || return 1
+  [[ "$sabout" != "$tokout" ]] || { echo "sabotage: different key produced the SAME CMAC"; return 1; }
+
+  # Rejection: a non-CBC AES cipher name is never honorable (the engine
+  # always derives its actual cipher from the key's own byte length).
+  if SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" \
+    -cipher AES-256-GCM -in "$w/msg.txt" CMAC >/dev/null 2>&1
+  then echo "non-CBC cipher was accepted (should be rejected)"; return 1; fi
+
+  return 0
+}
+run_case T26 PASS "token CMAC-AES-256 == software CMAC, engine-log verified, sabotage + non-CBC-cipher rejection (remediation R23); negative-control twin (R13)" t26_cmac
+
+t26_kmac() { # $1=engine.so $2=KMAC-128|KMAC-256 $3=label-suffix
+  local engine="$1" algo="$2" suffix="$3" w
+  w="$ROOT_WORK/r23kmac${suffix}"; mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = DEBUG
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $engine
+pkcs11-module-token-pin = 1234
+pkcs11-module-load-behavior = early
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$engine" \
+    --init-token --free --label "r23k${suffix}" --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+
+  local key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+  echo "kmac harness message" > "$w/msg.txt"
+
+  local tokout swout
+  tokout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" -in "$w/msg.txt" \
+    "$algo" 2>"$w/tok.err.log") || return 1
+  swout=$(OPENSSL_CONF=/dev/null O mac -macopt "hexkey:$key" -in "$w/msg.txt" \
+    "$algo" 2>/dev/null) || return 1
+  [[ -n "$tokout" && "$tokout" == "$swout" ]] || return 1
+  grep -q "Created new object" "$w/tok.err.log" || return 1
+
+  local ctrlout
+  ctrlout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -macopt "hexkey:$key" -in "$w/msg.txt" "$algo" 2>"$w/ctrl.err.log") || return 1
+  [[ "$ctrlout" == "$swout" ]] || return 1
+  grep -q "Created new object" "$w/ctrl.err.log" && return 1
+
+  # Rejection: a non-empty customization string is never honorable (the
+  # engine's own OSSLKMACAlgorithm never sets one).
+  if SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" \
+    -macopt hexcustom:aabbcc -in "$w/msg.txt" "$algo" >/dev/null 2>&1
+  then echo "non-empty custom string was accepted (should be rejected)"; return 1; fi
+
+  return 0
+}
+t26b() { t26_kmac "$CPP_ENGINE_SO" KMAC-128 128cpp; }
+run_case T26b PASS "token KMAC-128 (C++ arm) == software KMAC-128, engine-log verified, custom-string rejection (remediation R23); negative-control twin (R13)" t26b
+t26c() { t26_kmac "$CPP_ENGINE_SO" KMAC-256 256cpp; }
+run_case T26c PASS "token KMAC-256 (C++ arm) == software KMAC-256, engine-log verified (remediation R23); negative-control twin (R13)" t26c
+
+# T26d — closes the loop on R24's own finding: EVP_MAC_init_SKEY on HMAC
+# now actually works (R23's fix), so the full opaque chain (EVP_SKEY_
+# generate -> EVP_KDF_derive_SKEY -> EVP_MAC_init_SKEY, raw key material
+# never seen) succeeds end to end, cross-checked against independent
+# software HKDF+HMAC — skey_flow_probe's own check 2, unchanged since
+# R24, now genuinely passing where it previously failed at the very last
+# step ("EVP_MAC_init_SKEY(derived) failed ... mac.c's HMAC implementation
+# has never registered OSSL_FUNC_MAC_INIT_SKEY").
+t26d() {
+  local w; w="$ROOT_WORK/r23skey"; mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = ERROR
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $CPP_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-load-behavior = early
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$CPP_ENGINE_SO" \
+    --init-token --free --label r23skey --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  local out="$w/probe.out"
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" "$SKEY_FLOW_PROBE" >"$out" 2>&1
+  grep -q "\[HKDF\] chained-consume (EVP_MAC_init_SKEY) succeeded" "$out" || { echo "EVP_MAC_init_SKEY chained-consume did not succeed"; cat "$out"; return 1; }
+  grep -q "\[HKDF\] cross-check PASSED" "$out" || { echo "cross-check vs independent software HKDF+HMAC did not pass"; cat "$out"; return 1; }
+  return 0
+}
+run_case T26d PASS "EVP_MAC_init_SKEY(HMAC) closes R24's own gap: full opaque generate->derive_SKEY->init_SKEY chain now succeeds, cross-checked vs independent software HKDF+HMAC (remediation R23)" t26d
+
 # ─── T21: composite signatures (remediation R7) ─────────────────────────────
 # The standard openssl CLI cannot drive a composite sign/verify (no keymgmt
 # GEN for composite keys — see composite.h's own comment on

@@ -35,13 +35,28 @@
  * digest choice) arrives first and defers the actual C_SignInit to the
  * first update() call, once both are certainly known. */
 
+/* Phase 5 R23: CMAC and KMAC-128/256 join HMAC as real OSSL_OP_MAC
+ * implementations, plus OSSL_FUNC_MAC_INIT_SKEY for all three (an R24
+ * finding — a correctly-derived, correctly-opaque EVP_SKEY had nothing
+ * in this provider that could consume it natively; HMAC never having
+ * registered init_skey since R8 was the gap). */
+enum p11prov_mac_algo {
+    MAC_ALGO_HMAC = 0,
+    MAC_ALGO_CMAC,
+    MAC_ALGO_KMAC128,
+    MAC_ALGO_KMAC256,
+};
+
 struct p11prov_mac_ctx {
     P11PROV_CTX *provctx;
-    CK_MECHANISM_TYPE mechtype; /* CKM_SHA*_HMAC, chosen via set_digest */
+    enum p11prov_mac_algo algo;
+    CK_MECHANISM_TYPE mechtype; /* CKM_SHA*_HMAC / CKM_AES_CMAC / CKM_KMAC_* */
     size_t mac_size;
 
     P11PROV_SESSION *session;
     P11PROV_OBJ *key;
+    bool key_is_skey; /* true: macctx->key is a caller-owned SKEY object
+                       * (init_skey) — never created/destroyed here. */
 
     unsigned char *keybuf;
     size_t keylen;
@@ -67,7 +82,7 @@ static CK_MECHANISM_TYPE hmac_mech_for_digest(CK_MECHANISM_TYPE digest_mech)
     }
 }
 
-static void *p11prov_hmac_mac_newctx(void *provctx)
+static void *mac_newctx_common(void *provctx, enum p11prov_mac_algo algo)
 {
     P11PROV_MAC_CTX *macctx = OPENSSL_zalloc(sizeof(P11PROV_MAC_CTX));
 
@@ -75,8 +90,48 @@ static void *p11prov_hmac_mac_newctx(void *provctx)
         return NULL;
     }
     macctx->provctx = (P11PROV_CTX *)provctx;
+    macctx->algo = algo;
     macctx->mechtype = CK_UNAVAILABLE_INFORMATION;
+    switch (algo) {
+    case MAC_ALGO_CMAC:
+        macctx->mechtype = CKM_AES_CMAC;
+        break;
+    case MAC_ALGO_KMAC128:
+        macctx->mechtype = CKM_KMAC_128;
+        macctx->mac_size = 32; /* fixed — see this file's own header
+                                * comment on why KMAC's variable output
+                                * length and customization string are
+                                * not honored here. */
+        break;
+    case MAC_ALGO_KMAC256:
+        macctx->mechtype = CKM_KMAC_256;
+        macctx->mac_size = 64;
+        break;
+    case MAC_ALGO_HMAC:
+    default:
+        break;
+    }
     return macctx;
+}
+
+static void *p11prov_hmac_mac_newctx(void *provctx)
+{
+    return mac_newctx_common(provctx, MAC_ALGO_HMAC);
+}
+
+static void *p11prov_cmac_mac_newctx(void *provctx)
+{
+    return mac_newctx_common(provctx, MAC_ALGO_CMAC);
+}
+
+static void *p11prov_kmac128_mac_newctx(void *provctx)
+{
+    return mac_newctx_common(provctx, MAC_ALGO_KMAC128);
+}
+
+static void *p11prov_kmac256_mac_newctx(void *provctx)
+{
+    return mac_newctx_common(provctx, MAC_ALGO_KMAC256);
 }
 
 static void p11prov_mac_freectx(void *vctx)
@@ -88,6 +143,12 @@ static void p11prov_mac_freectx(void *vctx)
     if (macctx == NULL) {
         return;
     }
+    /* Both the raw-bytes-import path and init_skey take their own
+     * p11prov_obj_ref (skeymgmt.c's own AES/GENERIC-SECRET keydata is a
+     * P11PROV_OBJ*, refcounted the same way everywhere else in this
+     * provider), so this free is unconditional and symmetric either
+     * way — never a double-free against the caller's own EVP_SKEY_free,
+     * which drops a SEPARATE reference. */
     p11prov_obj_free(macctx->key);
     p11prov_return_session(macctx->session);
     OPENSSL_clear_free(macctx->keybuf, macctx->keylen);
@@ -134,6 +195,33 @@ static int mac_set_digest(P11PROV_MAC_CTX *macctx, const char *digestname)
     return RET_OSSL_OK;
 }
 
+/* CMAC's own OSSL_MAC_PARAM_CIPHER name is validated, not forwarded to
+ * the token: the engine always derives its actual CMAC cipher choice
+ * from the imported base key's OWN byte length (SoftHSM_sign.cpp's own
+ * kMacMechTable row for CKM_AES_CMAC has no per-cipher-variant split —
+ * a single mechanism, `CryptoFactory`'s own `OSSLCMACAES` picks the AES
+ * variant from the key it's handed), via plain CKM_AES_CMAC regardless
+ * of which AES-CBC name a caller sends. Forwarding a mismatched name
+ * would silently diverge from what actually runs — same reasoning, same
+ * three accepted names, as R22's own KBKDF-CMAC handling. CMAC's own
+ * output is always one AES block (16 bytes) regardless of key size. */
+static int mac_set_cipher(P11PROV_MAC_CTX *macctx, const char *ciphername)
+{
+    if (OPENSSL_strcasecmp(ciphername, "AES-128-CBC") != 0
+        && OPENSSL_strcasecmp(ciphername, "AES-192-CBC") != 0
+        && OPENSSL_strcasecmp(ciphername, "AES-256-CBC") != 0) {
+        P11PROV_raise(macctx->provctx, CKR_MECHANISM_INVALID,
+                      "Cipher '%s' is not a plain AES-CBC name this "
+                      "provider's CMAC can validate against the token's "
+                      "own CKM_AES_CMAC",
+                      ciphername);
+        return RET_OSSL_ERR;
+    }
+    macctx->mechtype = CKM_AES_CMAC;
+    macctx->mac_size = 16;
+    return RET_OSSL_OK;
+}
+
 static int p11prov_mac_set_ctx_params(void *vctx, const OSSL_PARAM params[])
 {
     P11PROV_MAC_CTX *macctx = (P11PROV_MAC_CTX *)vctx;
@@ -162,6 +250,55 @@ static int p11prov_mac_set_ctx_params(void *vctx, const OSSL_PARAM params[])
         }
     }
 
+    p = OSSL_PARAM_locate_const(params, OSSL_MAC_PARAM_CIPHER);
+    if (p != NULL) {
+        char ciphername[32] = { 0 };
+        char *namep = ciphername;
+
+        if (OSSL_PARAM_get_utf8_string(p, &namep, sizeof(ciphername))
+            != RET_OSSL_OK) {
+            return RET_OSSL_ERR;
+        }
+        if (mac_set_cipher(macctx, ciphername) != RET_OSSL_OK) {
+            return RET_OSSL_ERR;
+        }
+    }
+
+    /* KMAC's own customization string S and variable output length are
+     * not honorable — the engine's OSSLKMACAlgorithm always uses an
+     * empty S and a fixed size per variant (OSSLKMAC.h: KMAC-128 -> 32,
+     * KMAC-256 -> 64, confirmed by reading it directly, not assumed).
+     * Reject a caller's attempt to set either to something else, rather
+     * than silently keeping the token's own fixed behavior while
+     * claiming to have honored the request. */
+    p = OSSL_PARAM_locate_const(params, OSSL_MAC_PARAM_CUSTOM);
+    if (p != NULL) {
+        if (p->data_size != 0) {
+            P11PROV_raise(macctx->provctx, CKR_MECHANISM_PARAM_INVALID,
+                          "This provider's KMAC has no way to pass a "
+                          "customization string to the token — only an "
+                          "empty one is honorable");
+            return RET_OSSL_ERR;
+        }
+    }
+    p = OSSL_PARAM_locate_const(params, OSSL_MAC_PARAM_SIZE);
+    if (p != NULL && (macctx->algo == MAC_ALGO_KMAC128
+                      || macctx->algo == MAC_ALGO_KMAC256)) {
+        size_t want;
+
+        if (OSSL_PARAM_get_size_t(p, &want) != RET_OSSL_OK) {
+            return RET_OSSL_ERR;
+        }
+        if (want != macctx->mac_size) {
+            P11PROV_raise(macctx->provctx, CKR_MECHANISM_PARAM_INVALID,
+                          "This provider's KMAC output length is fixed "
+                          "at %zu bytes by the token — %zu is not "
+                          "honorable",
+                          macctx->mac_size, want);
+            return RET_OSSL_ERR;
+        }
+    }
+
     p = OSSL_PARAM_locate_const(params, OSSL_MAC_PARAM_KEY);
     if (p != NULL) {
         if (p->data_type != OSSL_PARAM_OCTET_STRING) {
@@ -181,6 +318,9 @@ static const OSSL_PARAM *p11prov_mac_settable_ctx_params(void *vctx,
     static const OSSL_PARAM params[] = {
         OSSL_PARAM_octet_string(OSSL_MAC_PARAM_KEY, NULL, 0),
         OSSL_PARAM_utf8_string(OSSL_MAC_PARAM_DIGEST, NULL, 0),
+        OSSL_PARAM_utf8_string(OSSL_MAC_PARAM_CIPHER, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_MAC_PARAM_CUSTOM, NULL, 0),
+        OSSL_PARAM_size_t(OSSL_MAC_PARAM_SIZE, NULL),
         OSSL_PARAM_END,
     };
     return params;
@@ -216,17 +356,25 @@ static int mac_ensure_signinit(P11PROV_MAC_CTX *macctx)
     if (macctx->signinit_done) {
         return RET_OSSL_OK;
     }
-    if (macctx->keybuf == NULL) {
+    if (!macctx->key_is_skey && macctx->keybuf == NULL) {
         P11PROV_raise(macctx->provctx, CKR_KEY_INDIGESTIBLE,
                       "MAC key was never set");
         return RET_OSSL_ERR;
     }
-    if (macctx->mechtype == CK_UNAVAILABLE_INFORMATION) {
+    if (macctx->algo == MAC_ALGO_HMAC
+        && macctx->mechtype == CK_UNAVAILABLE_INFORMATION) {
         /* No OSSL_MAC_PARAM_DIGEST arrived — default to SHA2-256,
          * matching the default provider's own HMAC default digest. */
         if (mac_set_digest(macctx, "SHA2-256") != RET_OSSL_OK) {
             return RET_OSSL_ERR;
         }
+    }
+    if (macctx->algo == MAC_ALGO_CMAC && macctx->mac_size == 0) {
+        /* CMAC has no sensible default cipher (unlike HMAC's digest) —
+         * the AES key size is intrinsic to the key, not guessable. */
+        P11PROV_raise(macctx->provctx, CKR_MECHANISM_PARAM_INVALID,
+                      "CMAC requires OSSL_MAC_PARAM_CIPHER to be set");
+        return RET_OSSL_ERR;
     }
 
     ret = p11prov_get_session(macctx->provctx, &slotid, NULL, NULL,
@@ -238,10 +386,16 @@ static int mac_ensure_signinit(P11PROV_MAC_CTX *macctx)
     }
     sess = p11prov_session_handle(macctx->session);
 
-    macctx->key = p11prov_create_mac_key(macctx->provctx, macctx->session,
-                                         macctx->keybuf, macctx->keylen);
-    if (macctx->key == NULL) {
-        return RET_OSSL_ERR;
+    /* init_skey already supplied a real, existing token key object —
+     * nothing to create, and the raw bytes were never seen. */
+    if (!macctx->key_is_skey) {
+        macctx->key = p11prov_create_mac_key(
+            macctx->provctx, macctx->session,
+            macctx->algo == MAC_ALGO_CMAC ? CKK_AES : CKK_GENERIC_SECRET,
+            macctx->keybuf, macctx->keylen);
+        if (macctx->key == NULL) {
+            return RET_OSSL_ERR;
+        }
     }
     hkey = p11prov_obj_get_handle(macctx->key);
 
@@ -253,6 +407,49 @@ static int mac_ensure_signinit(P11PROV_MAC_CTX *macctx)
     }
     macctx->signinit_done = true;
     return RET_OSSL_OK;
+}
+
+/* OSSL_FUNC_MAC_INIT_SKEY (phase 5 R23, an R24 finding): `provkey` is
+ * this provider's own SKEYMGMT keydata — for AES/GENERIC-SECRET
+ * (skeymgmt.c) that IS a P11PROV_OBJ*, the exact same object type this
+ * file already signs with, confirmed by reading skeymgmt.c's own
+ * generate/import functions directly (they return P11PROV_OBJ* as their
+ * void* keydata). No raw bytes ever cross into this function — the key
+ * stays opaque end to end, closing the gap R24's probe found (a
+ * correctly-derived, correctly-opaque EVP_SKEY had nothing in this
+ * provider that could consume it natively). */
+static int p11prov_mac_init_skey(void *vctx, void *provkey,
+                                 const OSSL_PARAM params[])
+{
+    P11PROV_MAC_CTX *macctx = (P11PROV_MAC_CTX *)vctx;
+    P11PROV_OBJ *keyobj = (P11PROV_OBJ *)provkey;
+    CK_KEY_TYPE want_type;
+    CK_KEY_TYPE got_type;
+
+    P11PROV_debug("mac init_skey %p key=%p", vctx, provkey);
+
+    if (macctx == NULL || keyobj == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    want_type = macctx->algo == MAC_ALGO_CMAC ? CKK_AES : CKK_GENERIC_SECRET;
+    got_type = p11prov_obj_get_key_type(keyobj);
+    if (got_type != want_type) {
+        P11PROV_raise(macctx->provctx, CKR_KEY_TYPE_INCONSISTENT,
+                      "SKEY key type 0x%lx does not match what this MAC "
+                      "needs (0x%lx)",
+                      (unsigned long)got_type, (unsigned long)want_type);
+        return RET_OSSL_ERR;
+    }
+
+    p11prov_obj_free(macctx->key);
+    macctx->key = p11prov_obj_ref(keyobj);
+    if (macctx->key == NULL) {
+        return RET_OSSL_ERR;
+    }
+    macctx->key_is_skey = true;
+
+    return p11prov_mac_set_ctx_params(vctx, params);
 }
 
 static int p11prov_mac_update(void *vctx, const unsigned char *data,
@@ -343,6 +540,37 @@ static const OSSL_PARAM *p11prov_mac_gettable_params(void *provctx)
     return params;
 }
 
+/* CMAC/KMAC-128/KMAC-256 each have one fixed size (unlike HMAC's
+ * digest-dependent one), so their own static get_params reports it
+ * exactly rather than a generic upper bound. */
+static int mac_get_params_fixed(OSSL_PARAM params[], size_t size)
+{
+    OSSL_PARAM *p;
+
+    p = OSSL_PARAM_locate(params, OSSL_MAC_PARAM_SIZE);
+    if (p != NULL) {
+        if (OSSL_PARAM_set_size_t(p, size) != RET_OSSL_OK) {
+            return RET_OSSL_ERR;
+        }
+    }
+    return RET_OSSL_OK;
+}
+
+static int p11prov_cmac_mac_get_params(OSSL_PARAM params[])
+{
+    return mac_get_params_fixed(params, 16);
+}
+
+static int p11prov_kmac128_mac_get_params(OSSL_PARAM params[])
+{
+    return mac_get_params_fixed(params, 32);
+}
+
+static int p11prov_kmac256_mac_get_params(OSSL_PARAM params[])
+{
+    return mac_get_params_fixed(params, 64);
+}
+
 static int p11prov_mac_get_ctx_params(void *vctx, OSSL_PARAM params[])
 {
     P11PROV_MAC_CTX *macctx = (P11PROV_MAC_CTX *)vctx;
@@ -376,6 +604,7 @@ const OSSL_DISPATCH p11prov_hmac_mac_functions[] = {
     { OSSL_FUNC_MAC_NEWCTX, (void (*)(void))p11prov_hmac_mac_newctx },
     { OSSL_FUNC_MAC_FREECTX, (void (*)(void))p11prov_mac_freectx },
     { OSSL_FUNC_MAC_INIT, (void (*)(void))p11prov_mac_init },
+    { OSSL_FUNC_MAC_INIT_SKEY, (void (*)(void))p11prov_mac_init_skey },
     { OSSL_FUNC_MAC_UPDATE, (void (*)(void))p11prov_mac_update },
     { OSSL_FUNC_MAC_FINAL, (void (*)(void))p11prov_mac_final },
     { OSSL_FUNC_MAC_SET_CTX_PARAMS,
@@ -383,6 +612,71 @@ const OSSL_DISPATCH p11prov_hmac_mac_functions[] = {
     { OSSL_FUNC_MAC_SETTABLE_CTX_PARAMS,
       (void (*)(void))p11prov_mac_settable_ctx_params },
     { OSSL_FUNC_MAC_GET_PARAMS, (void (*)(void))p11prov_hmac_mac_get_params },
+    { OSSL_FUNC_MAC_GETTABLE_PARAMS,
+      (void (*)(void))p11prov_mac_gettable_params },
+    { OSSL_FUNC_MAC_GET_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_get_ctx_params },
+    { OSSL_FUNC_MAC_GETTABLE_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_gettable_ctx_params },
+    { 0, NULL },
+};
+
+const OSSL_DISPATCH p11prov_cmac_mac_functions[] = {
+    { OSSL_FUNC_MAC_NEWCTX, (void (*)(void))p11prov_cmac_mac_newctx },
+    { OSSL_FUNC_MAC_FREECTX, (void (*)(void))p11prov_mac_freectx },
+    { OSSL_FUNC_MAC_INIT, (void (*)(void))p11prov_mac_init },
+    { OSSL_FUNC_MAC_INIT_SKEY, (void (*)(void))p11prov_mac_init_skey },
+    { OSSL_FUNC_MAC_UPDATE, (void (*)(void))p11prov_mac_update },
+    { OSSL_FUNC_MAC_FINAL, (void (*)(void))p11prov_mac_final },
+    { OSSL_FUNC_MAC_SET_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_set_ctx_params },
+    { OSSL_FUNC_MAC_SETTABLE_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_settable_ctx_params },
+    { OSSL_FUNC_MAC_GET_PARAMS, (void (*)(void))p11prov_cmac_mac_get_params },
+    { OSSL_FUNC_MAC_GETTABLE_PARAMS,
+      (void (*)(void))p11prov_mac_gettable_params },
+    { OSSL_FUNC_MAC_GET_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_get_ctx_params },
+    { OSSL_FUNC_MAC_GETTABLE_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_gettable_ctx_params },
+    { 0, NULL },
+};
+
+const OSSL_DISPATCH p11prov_kmac128_mac_functions[] = {
+    { OSSL_FUNC_MAC_NEWCTX, (void (*)(void))p11prov_kmac128_mac_newctx },
+    { OSSL_FUNC_MAC_FREECTX, (void (*)(void))p11prov_mac_freectx },
+    { OSSL_FUNC_MAC_INIT, (void (*)(void))p11prov_mac_init },
+    { OSSL_FUNC_MAC_INIT_SKEY, (void (*)(void))p11prov_mac_init_skey },
+    { OSSL_FUNC_MAC_UPDATE, (void (*)(void))p11prov_mac_update },
+    { OSSL_FUNC_MAC_FINAL, (void (*)(void))p11prov_mac_final },
+    { OSSL_FUNC_MAC_SET_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_set_ctx_params },
+    { OSSL_FUNC_MAC_SETTABLE_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_settable_ctx_params },
+    { OSSL_FUNC_MAC_GET_PARAMS,
+      (void (*)(void))p11prov_kmac128_mac_get_params },
+    { OSSL_FUNC_MAC_GETTABLE_PARAMS,
+      (void (*)(void))p11prov_mac_gettable_params },
+    { OSSL_FUNC_MAC_GET_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_get_ctx_params },
+    { OSSL_FUNC_MAC_GETTABLE_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_gettable_ctx_params },
+    { 0, NULL },
+};
+
+const OSSL_DISPATCH p11prov_kmac256_mac_functions[] = {
+    { OSSL_FUNC_MAC_NEWCTX, (void (*)(void))p11prov_kmac256_mac_newctx },
+    { OSSL_FUNC_MAC_FREECTX, (void (*)(void))p11prov_mac_freectx },
+    { OSSL_FUNC_MAC_INIT, (void (*)(void))p11prov_mac_init },
+    { OSSL_FUNC_MAC_INIT_SKEY, (void (*)(void))p11prov_mac_init_skey },
+    { OSSL_FUNC_MAC_UPDATE, (void (*)(void))p11prov_mac_update },
+    { OSSL_FUNC_MAC_FINAL, (void (*)(void))p11prov_mac_final },
+    { OSSL_FUNC_MAC_SET_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_set_ctx_params },
+    { OSSL_FUNC_MAC_SETTABLE_CTX_PARAMS,
+      (void (*)(void))p11prov_mac_settable_ctx_params },
+    { OSSL_FUNC_MAC_GET_PARAMS,
+      (void (*)(void))p11prov_kmac256_mac_get_params },
     { OSSL_FUNC_MAC_GETTABLE_PARAMS,
       (void (*)(void))p11prov_mac_gettable_params },
     { OSSL_FUNC_MAC_GET_CTX_PARAMS,

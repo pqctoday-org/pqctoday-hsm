@@ -132,6 +132,21 @@ RESOLVED in the same commit.
 
 ### R23 — CMAC + KMAC-128/256 as EVP_MAC, + HMAC/CMAC/KMAC `INIT_SKEY` — effort S–M
 
+**Execution update (2026-08-26):** R23 executed and landed — see
+`docs/openssl-provider-coverage-audit-2026-08-25.md`'s "Phase 5, R23"
+entry for the full mechanism. CMAC and KMAC-128/256 both live-verified
+byte-identical to software, sabotage-tested; `OSSL_FUNC_MAC_INIT_SKEY`
+added to all three MACs, closing R24's own gap — re-ran R24's own
+`skey_flow_probe` unchanged and its previously-failing consume step
+now passes end to end, cross-checked against independent software
+HKDF+HMAC. No new provider bugs found this item (unlike R22/R24); two
+bugs in this item's own new test cases were found and fixed instead —
+a missing env-var prefix on two rejection-control assertions (silently
+checked the wrong arena) and a hand-typed sabotage key one byte short
+of a valid AES length — both caught by manually reproducing the exact
+failing command outside the harness before concluding the provider
+code was at fault.
+
 **Scope addition (from R24's own execution, 2026-08-26):** R24's probe
 found `mac.c`'s HMAC never registered `OSSL_FUNC_MAC_INIT_SKEY` — a
 correctly-derived, correctly-opaque `EVP_SKEY` (proven working via
