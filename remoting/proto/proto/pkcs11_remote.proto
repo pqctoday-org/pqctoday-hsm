@@ -519,6 +519,107 @@ service Pkcs11V32 {
   rpc C_MessageDecryptFinal(V32SessionRequest) returns (V32StatusResponse);
   rpc C_DecryptMessageBegin(V32DecryptMessageBeginRequest) returns (V32StatusResponse);
   rpc C_DecryptMessageNext(V32DecryptMessageNextRequest) returns (V32BytesResponse);
+
+  // ── wrap / unwrap (RW4) — no RW-P needed; AES-KW/CBC parameters are
+  // already fully representable via V32Mechanism's raw `parameter` bytes ──
+  rpc C_WrapKey(V32WrapKeyRequest) returns (V32BytesResponse);
+  rpc C_UnwrapKey(V32UnwrapKeyRequest) returns (V32ObjectHandleResponse);
+  rpc C_WrapKeyAuthenticated(V32WrapKeyAuthenticatedRequest) returns (V32BytesResponse);
+  rpc C_UnwrapKeyAuthenticated(V32UnwrapKeyAuthenticatedRequest) returns (V32ObjectHandleResponse);
+
+  // ── derive (RW4) — the RW-P derive-family variants ──
+  rpc C_DeriveKey(V32DeriveKeyRequest) returns (V32ObjectHandleResponse);
+}
+
+message V32WrapKeyRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 wrapping_key_handle = 3;
+  uint32 key_handle = 4;
+}
+message V32UnwrapKeyRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 unwrapping_key_handle = 3;
+  bytes wrapped_key = 4;
+  repeated V32AttributeIn template = 5;
+}
+message V32WrapKeyAuthenticatedRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 wrapping_key_handle = 3;
+  uint32 key_handle = 4;
+  bytes associated_data = 5;
+}
+message V32UnwrapKeyAuthenticatedRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 unwrapping_key_handle = 3;
+  bytes wrapped_key = 4;
+  repeated V32AttributeIn template = 5;
+  bytes associated_data = 6;
+}
+
+// RW-P derive-family structured mechanism parameters. Field names/types
+// mirror `verbs_v32::derive_params`'s builder arguments exactly — the
+// server marshals these into the native `CK_*_PARAMS` layout via
+// `ck_param`'s own declared offsets (see that module's doc for why a
+// generic byte-offset table can't be hand-written safely for these).
+
+message V32Ecdh1Params { // CK_ECDH1_DERIVE_PARAMS
+  uint32 kdf = 1; // CKD_NULL = 1; see the spec for the X9.63 KDF codepoints
+  bytes shared_data = 2;
+  bytes public_data = 3; // peer's EC public key (raw SEC1 or DER-OCTET-STRING-wrapped)
+}
+message V32HkdfParams { // CK_HKDF_PARAMS
+  bool extract = 1;
+  bool expand = 2;
+  uint64 prf_hash_mechanism = 3; // bare hash mechanism, e.g. CKM_SHA256
+  uint32 salt_type = 4; // CKF_HKDF_SALT_NULL=0 / _DATA=2 / _KEY=4
+  bytes salt = 5;
+  uint32 h_salt_key = 6;
+  bytes info = 7;
+}
+message V32Pbkdf2Params { // CK_PKCS5_PBKD2_PARAMS2
+  uint32 salt_source = 1; // CKZ_SALT_SPECIFIED = 1
+  bytes salt_source_data = 2;
+  uint32 iterations = 3; // engine enforces a real minimum of 1000
+  uint64 prf = 4; // CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE, e.g. CKP_PBKDF2_HMAC_SHA256=0x04 — NOT a CKM_* code
+  bytes prf_data = 5;
+  bytes password = 6;
+}
+message V32Sp800108Segment { // one CK_PRF_DATA_PARAM
+  uint32 prf_type = 1; // CK_SP800_108_ITERATION_VARIABLE=1/_COUNTER=2/_DKM_LENGTH=3/_BYTE_ARRAY=4
+  bytes value = 2;
+}
+message V32Sp800108CounterParams { // CK_SP800_108_KDF_PARAMS
+  uint64 prf_type = 1; // a keyed-MAC mechanism, e.g. CKM_SHA256_HMAC
+  repeated V32Sp800108Segment segments = 2;
+}
+message V32Sp800108FeedbackParams { // CK_SP800_108_FEEDBACK_KDF_PARAMS
+  uint64 prf_type = 1;
+  repeated V32Sp800108Segment segments = 2;
+  bytes iv = 3;
+}
+
+message V32DeriveKeyRequest {
+  uint32 session_handle = 1;
+  uint64 mechanism = 2;
+  uint32 base_key_handle = 3; // 0 for CKM_PKCS5_PBKD2 (password lives in params)
+  repeated V32AttributeIn template = 4;
+  // Parameterless mechanisms (CKM_SHA256_KEY_DERIVATION) or ones already
+  // fully representable as raw bytes (CKM_CONCATENATE_BASE_AND_KEY's bare
+  // handle, at native ulong width) use `raw_parameter` directly. Anything
+  // needing a real `CK_*_PARAMS` struct uses one `structured` variant —
+  // exactly one of `raw_parameter`/`structured` is meaningful per call.
+  bytes raw_parameter = 5;
+  oneof structured {
+    V32Ecdh1Params ecdh1 = 10;
+    V32HkdfParams hkdf = 11;
+    V32Pbkdf2Params pbkdf2 = 12;
+    V32Sp800108CounterParams sp800_108_counter = 13;
+    V32Sp800108FeedbackParams sp800_108_feedback = 14;
+  }
 }
 
 message V32SignMessageNextRequest {

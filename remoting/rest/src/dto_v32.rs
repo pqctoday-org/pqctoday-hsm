@@ -571,3 +571,125 @@ pub struct DecryptMessageNextReq {
     #[serde(with = "b64", default)]
     pub tag: Vec<u8>,
 }
+
+// ── wrap / unwrap (RW4) ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct WrapKeyReq {
+    pub session_handle: u32,
+    pub mechanism: V32MechanismDto,
+    pub wrapping_key_handle: u32,
+    pub key_handle: u32,
+}
+#[derive(Deserialize)]
+pub struct UnwrapKeyReq {
+    pub session_handle: u32,
+    pub mechanism: V32MechanismDto,
+    pub unwrapping_key_handle: u32,
+    #[serde(with = "b64")]
+    pub wrapped_key: Vec<u8>,
+    pub template: Vec<V32AttributeInDto>,
+}
+#[derive(Deserialize)]
+pub struct WrapKeyAuthenticatedReq {
+    pub session_handle: u32,
+    pub mechanism: V32MechanismDto,
+    pub wrapping_key_handle: u32,
+    pub key_handle: u32,
+    #[serde(with = "b64", default)]
+    pub associated_data: Vec<u8>,
+}
+#[derive(Deserialize)]
+pub struct UnwrapKeyAuthenticatedReq {
+    pub session_handle: u32,
+    pub mechanism: V32MechanismDto,
+    pub unwrapping_key_handle: u32,
+    #[serde(with = "b64")]
+    pub wrapped_key: Vec<u8>,
+    pub template: Vec<V32AttributeInDto>,
+    #[serde(with = "b64", default)]
+    pub associated_data: Vec<u8>,
+}
+
+// ── derive (RW4 — the RW-P derive-family variants) ────────────────────────
+// Field names/types mirror `verbs_v32::derive_params`'s builder arguments
+// exactly, same as the proto messages — see that module's doc for why the
+// server (not the client) must own the native-layout marshaling.
+
+#[derive(Deserialize)]
+pub struct Ecdh1ParamsDto {
+    pub kdf: u32,
+    #[serde(with = "b64", default)]
+    pub shared_data: Vec<u8>,
+    #[serde(with = "b64", default)]
+    pub public_data: Vec<u8>,
+}
+#[derive(Deserialize)]
+pub struct HkdfParamsDto {
+    pub extract: bool,
+    pub expand: bool,
+    pub prf_hash_mechanism: u64,
+    pub salt_type: u32,
+    #[serde(with = "b64", default)]
+    pub salt: Vec<u8>,
+    #[serde(default)]
+    pub h_salt_key: u32,
+    #[serde(with = "b64", default)]
+    pub info: Vec<u8>,
+}
+#[derive(Deserialize)]
+pub struct Pbkdf2ParamsDto {
+    pub salt_source: u32,
+    #[serde(with = "b64", default)]
+    pub salt_source_data: Vec<u8>,
+    pub iterations: u32,
+    pub prf: u64,
+    #[serde(with = "b64", default)]
+    pub prf_data: Vec<u8>,
+    #[serde(with = "b64", default)]
+    pub password: Vec<u8>,
+}
+#[derive(Deserialize)]
+pub struct Sp800108SegmentDto {
+    pub prf_type: u32,
+    #[serde(with = "b64", default)]
+    pub value: Vec<u8>,
+}
+#[derive(Deserialize)]
+pub struct Sp800108CounterParamsDto {
+    pub prf_type: u64,
+    pub segments: Vec<Sp800108SegmentDto>,
+}
+#[derive(Deserialize)]
+pub struct Sp800108FeedbackParamsDto {
+    pub prf_type: u64,
+    pub segments: Vec<Sp800108SegmentDto>,
+    #[serde(with = "b64", default)]
+    pub iv: Vec<u8>,
+}
+
+/// Exactly one of these should be present per call — the raw-bytes
+/// fallback for parameterless/already-raw mechanisms, or one structured
+/// variant for everything else. Mirrors the proto's `oneof` plus its
+/// `raw_parameter` sibling field.
+#[derive(Deserialize)]
+pub struct DeriveKeyReq {
+    pub session_handle: u32,
+    pub mechanism: u64,
+    #[serde(default)]
+    pub base_key_handle: u32,
+    #[serde(default)]
+    pub template: Vec<V32AttributeInDto>,
+    #[serde(with = "b64", default)]
+    pub raw_parameter: Vec<u8>,
+    #[serde(default)]
+    pub ecdh1: Option<Ecdh1ParamsDto>,
+    #[serde(default)]
+    pub hkdf: Option<HkdfParamsDto>,
+    #[serde(default)]
+    pub pbkdf2: Option<Pbkdf2ParamsDto>,
+    #[serde(default)]
+    pub sp800_108_counter: Option<Sp800108CounterParamsDto>,
+    #[serde(default)]
+    pub sp800_108_feedback: Option<Sp800108FeedbackParamsDto>,
+}

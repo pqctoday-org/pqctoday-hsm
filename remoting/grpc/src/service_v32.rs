@@ -972,6 +972,128 @@ impl Pkcs11V32 for Pkcs11V32Service {
         .await?;
         Ok(Response::new(V32BytesResponse { ck_rv, data }))
     }
+
+    // ── wrap / unwrap (RW4) ──────────────────────────────────────────────
+
+    async fn c_wrap_key(&self, request: Request<V32WrapKeyRequest>) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let (ck_rv, data) = blocking(move || {
+            v32::wrap_key(req.session_handle, mech, &param, req.wrapping_key_handle, req.key_handle)
+        })
+        .await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+    async fn c_unwrap_key(
+        &self,
+        request: Request<V32UnwrapKeyRequest>,
+    ) -> Result<Response<V32ObjectHandleResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let template = tmpl_parts(&req.template);
+        let (ck_rv, object_handle) = blocking(move || {
+            v32::unwrap_key(req.session_handle, mech, &param, req.unwrapping_key_handle, &req.wrapped_key, &template)
+        })
+        .await?;
+        Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
+    }
+    async fn c_wrap_key_authenticated(
+        &self,
+        request: Request<V32WrapKeyAuthenticatedRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let (ck_rv, data) = blocking(move || {
+            v32::wrap_key_authenticated(
+                req.session_handle, mech, &param, req.wrapping_key_handle, req.key_handle, &req.associated_data,
+            )
+        })
+        .await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+    async fn c_unwrap_key_authenticated(
+        &self,
+        request: Request<V32UnwrapKeyAuthenticatedRequest>,
+    ) -> Result<Response<V32ObjectHandleResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let template = tmpl_parts(&req.template);
+        let (ck_rv, object_handle) = blocking(move || {
+            v32::unwrap_key_authenticated(
+                req.session_handle, mech, &param, req.unwrapping_key_handle, &req.wrapped_key, &template, &req.associated_data,
+            )
+        })
+        .await?;
+        Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
+    }
+
+    // ── derive (RW4) ──────────────────────────────────────────────────────
+
+    async fn c_derive_key(
+        &self,
+        request: Request<V32DeriveKeyRequest>,
+    ) -> Result<Response<V32ObjectHandleResponse>, Status> {
+        let req = request.into_inner();
+        let template = tmpl_parts(&req.template);
+        let (ck_rv, object_handle) = blocking(move || {
+            // `params` (either variant) must outlive the `derive_key` call
+            // below — see `DeriveParamBytes`'s own doc for why an
+            // extracted `Vec<u8>` copy would NOT do (it would copy the
+            // outer struct's bytes, embedded pointer values included,
+            // without keeping what those pointers point to alive).
+            let params = derive_mechanism_params(&req.raw_parameter, req.structured);
+            v32::derive_key(req.session_handle, req.mechanism, params.as_slice(), req.base_key_handle, &template)
+        })
+        .await?;
+        Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
+    }
+}
+
+use pqctoday_pkcs11_remote_proto::v32_derive_key_request::Structured;
+
+/// Either the request's raw parameter bytes, or a live `StructBuilder`
+/// from one `v32::derive_params::*` call. Never collapsed to a bare
+/// `Vec<u8>`: a `StructBuilder`'s bytes embed raw pointers into its own
+/// `owned` buffers (see that type's doc), so the builder itself — not
+/// just its bytes — must stay alive for exactly as long as the FFI call
+/// that reads them. Keeping this as a named local through that call is
+/// what makes the borrow checker enforce that automatically.
+enum DeriveParamBytes<'a> {
+    Raw(&'a [u8]),
+    Structured(v32::StructBuilder),
+}
+impl DeriveParamBytes<'_> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            DeriveParamBytes::Raw(v) => v,
+            DeriveParamBytes::Structured(b) => b.as_slice(),
+        }
+    }
+}
+
+/// Resolves a `V32DeriveKeyRequest`'s mechanism parameter: `raw_parameter`
+/// as-is when `structured` is absent, or one `v32::derive_params::*`
+/// builder call per `structured` variant.
+fn derive_mechanism_params(raw_parameter: &[u8], structured: Option<Structured>) -> DeriveParamBytes<'_> {
+    let Some(s) = structured else { return DeriveParamBytes::Raw(raw_parameter) };
+    let builder = match s {
+        Structured::Ecdh1(p) => v32::derive_params::ecdh1(p.kdf, &p.shared_data, &p.public_data),
+        Structured::Hkdf(p) => v32::derive_params::hkdf(
+            p.extract, p.expand, p.prf_hash_mechanism, p.salt_type, &p.salt, p.h_salt_key, &p.info,
+        ),
+        Structured::Pbkdf2(p) => v32::derive_params::pbkd2(
+            p.salt_source, &p.salt_source_data, p.iterations, p.prf, &p.prf_data, &p.password,
+        ),
+        Structured::Sp800108Counter(p) => {
+            let segments = p.segments.into_iter().map(|s| v32::derive_params::Segment { prf_type: s.prf_type, value: s.value }).collect();
+            v32::derive_params::sp800_108_counter(p.prf_type, segments)
+        }
+        Structured::Sp800108Feedback(p) => {
+            let segments = p.segments.into_iter().map(|s| v32::derive_params::Segment { prf_type: s.prf_type, value: s.value }).collect();
+            v32::derive_params::sp800_108_feedback(p.prf_type, segments, &p.iv)
+        }
+    };
+    DeriveParamBytes::Structured(builder)
 }
 
 #[cfg(test)]

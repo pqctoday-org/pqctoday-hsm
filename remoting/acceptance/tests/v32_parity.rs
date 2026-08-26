@@ -53,6 +53,16 @@ const CKR_MECHANISM_INVALID: u32 = 0x0000_0070;
 const CKU_USER: u32 = 1;
 // RW6b additions.
 const CKM_AES_GCM: u64 = 0x0000_1087;
+// RW4 additions.
+const CKA_DERIVE: u64 = 0x0000_010c;
+const CKA_WRAP: u64 = 0x0000_0106;
+const CKA_UNWRAP: u64 = 0x0000_0107;
+const CKK_GENERIC_SECRET: u64 = 0x0000_0010;
+const CKM_AES_KEY_WRAP: u64 = 0x0000_2109;
+const CKM_CONCATENATE_BASE_AND_KEY: u64 = 0x0000_0360;
+const CKM_SHA256_KEY_DERIVATION: u64 = 0x0000_0393;
+const CKM_HKDF_DERIVE_LOCAL: u64 = 0x0000_402a;
+const CKR_KEY_UNEXTRACTABLE: u32 = 0x0000_006A;
 
 /// A ulong-valued template entry at native `CK_ULONG` width (8 bytes LE on
 /// this LP64 server) — the RW1 finding, applied on the wire's input side.
@@ -483,7 +493,16 @@ fn v7_generate_key_pair_template_parity() {
 
 // ── V8: C_CreateObject + the FindObjects FSM (Init/Find/Final) + C_CopyObject
 // + C_GetObjectSize — one round trip per transport ──────────────────────────
-
+//
+// `max_object_count` below is intentionally large (1000, not the ~10 this
+// started with): C_FindObjectsInit(CKA_CLASS=CKO_SECRET_KEY) searches the
+// WHOLE TOKEN, not this test's own session, and this file's tests run in
+// true parallel sharing one process-wide object store (module doc above).
+// As RW3/RW4/RW6b added more secret-key-creating parity tests, a small
+// count started intermittently missing this test's own just-created
+// object when enough OTHER tests' secret keys existed concurrently — a
+// real, load-bearing capacity assumption that broke as the suite grew,
+// not a bug in find_objects itself.
 #[test]
 fn v8_create_find_copy_object_parity() {
     bootstrap_once();
@@ -499,7 +518,7 @@ fn v8_create_find_copy_object_parity() {
         let (rv_ctl, h_ctl) = v32::create_object(s, &tmpl_ctl);
         assert_eq!(rv_ctl, 0);
         assert_eq!(v32::find_objects_init(s, &[(CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec())]), 0);
-        let (rv_find_ctl, handles_ctl) = v32::find_objects(s, 10);
+        let (rv_find_ctl, handles_ctl) = v32::find_objects(s, 1000);
         assert_eq!(rv_find_ctl, 0);
         assert!(handles_ctl.contains(&h_ctl));
         assert_eq!(v32::find_objects_final(s), 0);
@@ -527,7 +546,7 @@ fn v8_create_find_copy_object_parity() {
             session_handle: gs.session_handle,
             template: vec![ulong_attr_proto(CKA_CLASS, CKO_SECRET_KEY as u32)],
         }).await.unwrap();
-        let gf = g.c_find_objects(proto::V32FindObjectsRequest { session_handle: gs.session_handle, max_object_count: 10 }).await.unwrap().into_inner();
+        let gf = g.c_find_objects(proto::V32FindObjectsRequest { session_handle: gs.session_handle, max_object_count: 1000 }).await.unwrap().into_inner();
         assert_eq!(gf.ck_rv, rv_find_ctl);
         assert!(gf.object_handles.contains(&gc.object_handle));
         let gff = g.c_find_objects_final(proto::V32SessionRequest { session_handle: gs.session_handle }).await.unwrap().into_inner();
@@ -557,7 +576,7 @@ fn v8_create_find_copy_object_parity() {
             "session_handle": sh,
             "template": [ulong_attr(CKA_CLASS, CKO_SECRET_KEY as u32)],
         })).await;
-        let rf = rest_post(&base, "find-objects", json!({"session_handle": sh, "max_object_count": 10})).await;
+        let rf = rest_post(&base, "find-objects", json!({"session_handle": sh, "max_object_count": 1000})).await;
         assert_eq!(rf["ck_rv"].as_u64().unwrap() as u32, rv_find_ctl);
         let found: Vec<u64> = rf["object_handles"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
         assert!(found.contains(&robj.as_u64().unwrap()));
@@ -1098,6 +1117,246 @@ fn v17_message_encrypt_decrypt_kat_parity() {
         assert_eq!(rd["ck_rv"].as_u64().unwrap() as u32, rv_dec_ctl);
         assert_eq!(unb64(rd["data"].as_str().unwrap()), plaintext, "REST recovered plaintext must equal the original");
         rest_post(&base, "message-decrypt-final", json!({"session_handle": sh})).await;
+
+        v32::close_session(ks);
+    });
+}
+
+// ── V18: AES-KW wrap/unwrap round trip + the real CKR_KEY_UNEXTRACTABLE
+// negative — no RW-P needed, raw mechanism bytes only ────────────────────
+
+#[test]
+fn v18_aes_key_wrap_unwrap_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let (_rv, ks) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        let wrapping_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_AES as usize).to_le_bytes().to_vec()),
+            (CKA_VALUE_LEN, (32usize).to_le_bytes().to_vec()),
+            (CKA_WRAP, vec![1u8]),
+            (CKA_UNWRAP, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let (rv, wrapping_key) = v32::generate_key(ks, CKM_AES_KEY_GEN, &[], &wrapping_tmpl);
+        assert_eq!(rv, 0);
+        let target_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_AES as usize).to_le_bytes().to_vec()),
+            (CKA_VALUE_LEN, (16usize).to_le_bytes().to_vec()),
+            (0x0162 /* CKA_EXTRACTABLE */, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let (rv, target_key) = v32::generate_key(ks, CKM_AES_KEY_GEN, &[], &target_tmpl);
+        assert_eq!(rv, 0);
+        let locked_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_AES as usize).to_le_bytes().to_vec()),
+            (CKA_VALUE_LEN, (16usize).to_le_bytes().to_vec()),
+            (0x0162, vec![0u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let (rv, locked_key) = v32::generate_key(ks, CKM_AES_KEY_GEN, &[], &locked_tmpl);
+        assert_eq!(rv, 0);
+
+        let unwrap_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_AES as usize).to_le_bytes().to_vec()),
+            (0x0162, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+
+        // control
+        let (rv_wrap_ctl, wrapped_ctl) = v32::wrap_key(ks, CKM_AES_KEY_WRAP, &[], wrapping_key, target_key);
+        assert_eq!(rv_wrap_ctl, 0);
+        let (rv_unwrap_ctl, unwrapped_ctl) = v32::unwrap_key(ks, CKM_AES_KEY_WRAP, &[], wrapping_key, &wrapped_ctl, &unwrap_tmpl);
+        assert_eq!(rv_unwrap_ctl, 0);
+        assert_ne!(unwrapped_ctl, 0);
+        let rv_neg_ctl = v32::wrap_key(ks, CKM_AES_KEY_WRAP, &[], wrapping_key, locked_key).0;
+        assert_eq!(rv_neg_ctl, CKR_KEY_UNEXTRACTABLE);
+
+        // gRPC
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        let gw = g.c_wrap_key(proto::V32WrapKeyRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_KEY_WRAP, parameter: vec![] }),
+            wrapping_key_handle: wrapping_key,
+            key_handle: target_key,
+        }).await.unwrap().into_inner();
+        assert_eq!(gw.ck_rv, rv_wrap_ctl);
+        assert_eq!(gw.data, wrapped_ctl, "gRPC wrapped bytes must equal control (same key material, same wrap)");
+        let gu = g.c_unwrap_key(proto::V32UnwrapKeyRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_KEY_WRAP, parameter: vec![] }),
+            unwrapping_key_handle: wrapping_key,
+            wrapped_key: wrapped_ctl.clone(),
+            template: vec![
+                ulong_attr_proto(CKA_CLASS, CKO_SECRET_KEY as u32),
+                ulong_attr_proto(CKA_KEY_TYPE, CKK_AES as u32),
+                bool_attr_proto(0x0162, true),
+                bool_attr_proto(CKA_TOKEN, false),
+            ],
+        }).await.unwrap().into_inner();
+        assert_eq!(gu.ck_rv, rv_unwrap_ctl);
+        assert_ne!(gu.object_handle, 0);
+        let gn = g.c_wrap_key(proto::V32WrapKeyRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_KEY_WRAP, parameter: vec![] }),
+            wrapping_key_handle: wrapping_key,
+            key_handle: locked_key,
+        }).await.unwrap().into_inner();
+        assert_eq!(gn.ck_rv, rv_neg_ctl, "gRPC CKR_KEY_UNEXTRACTABLE must equal control");
+
+        // REST
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        let rw = rest_post(&base, "wrap-key", json!({
+            "session_handle": sh,
+            "mechanism": {"mechanism": CKM_AES_KEY_WRAP, "parameter": ""},
+            "wrapping_key_handle": wrapping_key,
+            "key_handle": target_key,
+        })).await;
+        assert_eq!(rw["ck_rv"].as_u64().unwrap() as u32, rv_wrap_ctl);
+        assert_eq!(unb64(rw["data"].as_str().unwrap()), wrapped_ctl, "REST wrapped bytes must equal control");
+        let ru = rest_post(&base, "unwrap-key", json!({
+            "session_handle": sh,
+            "mechanism": {"mechanism": CKM_AES_KEY_WRAP, "parameter": ""},
+            "unwrapping_key_handle": wrapping_key,
+            "wrapped_key": b64(&wrapped_ctl),
+            "template": [
+                ulong_attr(CKA_CLASS, CKO_SECRET_KEY as u32),
+                ulong_attr(CKA_KEY_TYPE, CKK_AES as u32),
+                bool_attr(0x0162, true),
+                bool_attr(CKA_TOKEN, false),
+            ],
+        })).await;
+        assert_eq!(ru["ck_rv"].as_u64().unwrap() as u32, rv_unwrap_ctl);
+        assert_ne!(ru["object_handle"].as_u64().unwrap(), 0);
+        let rn = rest_post(&base, "wrap-key", json!({
+            "session_handle": sh,
+            "mechanism": {"mechanism": CKM_AES_KEY_WRAP, "parameter": ""},
+            "wrapping_key_handle": wrapping_key,
+            "key_handle": locked_key,
+        })).await;
+        assert_eq!(rn["ck_rv"].as_u64().unwrap() as u32, rv_neg_ctl, "REST CKR_KEY_UNEXTRACTABLE must equal control");
+
+        v32::close_session(ks);
+    });
+}
+
+// ── V19: DeriveKey — raw-param (CONCATENATE_BASE_AND_KEY) and structured
+// (HKDF via the oneof) parity, KAT-grade byte equality ───────────────────
+
+#[test]
+fn v19_derive_key_raw_and_hkdf_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let (_rv, ks) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        let base_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_GENERIC_SECRET as usize).to_le_bytes().to_vec()),
+            (CKA_VALUE_LEN, (32usize).to_le_bytes().to_vec()),
+            (CKA_DERIVE, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let (rv, base_key) = v32::generate_key(ks, 0x0000_0350 /* CKM_GENERIC_SECRET_KEY_GEN */, &[], &base_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, second_key) = v32::generate_key(ks, CKM_AES_KEY_GEN, &[], &vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_AES as usize).to_le_bytes().to_vec()),
+            (CKA_VALUE_LEN, (16usize).to_le_bytes().to_vec()),
+            (CKA_DERIVE, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ]);
+        assert_eq!(rv, 0);
+
+        let out_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_GENERIC_SECRET as usize).to_le_bytes().to_vec()),
+            (CKA_VALUE_LEN, (32usize).to_le_bytes().to_vec()),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+
+        // control — raw-param concatenate
+        let concat_param = (second_key as usize).to_ne_bytes().to_vec();
+        let (rv_ctl, derived_ctl) = v32::derive_key(ks, CKM_CONCATENATE_BASE_AND_KEY, &concat_param, base_key, &out_tmpl);
+        assert_eq!(rv_ctl, 0);
+        let (rv, attrs_ctl) = v32::get_attribute_value(ks, derived_ctl, &[CKA_VALUE]);
+        assert_eq!(rv, 0);
+
+        // control — structured HKDF
+        let hkdf_params = pqctoday_pkcs11_remote_core::verbs_v32::derive_params::hkdf(
+            true, true, 0x0000_0251 /* CKM_SHA256_HMAC */, 0x0000_0002 /* CKF_HKDF_SALT_DATA */, b"v19-salt", 0, b"v19-info",
+        );
+        let (rv_hkdf_ctl, derived_hkdf_ctl) =
+            v32::derive_key(ks, CKM_HKDF_DERIVE_LOCAL, hkdf_params.as_slice(), base_key, &out_tmpl);
+        assert_eq!(rv_hkdf_ctl, 0);
+        let (rv, attrs_hkdf_ctl) = v32::get_attribute_value(ks, derived_hkdf_ctl, &[CKA_VALUE]);
+        assert_eq!(rv, 0);
+
+        // gRPC
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        let g_out_tmpl = vec![
+            ulong_attr_proto(CKA_CLASS, CKO_SECRET_KEY as u32),
+            ulong_attr_proto(CKA_KEY_TYPE, CKK_GENERIC_SECRET as u32),
+            ulong_attr_proto(CKA_VALUE_LEN, 32),
+            bool_attr_proto(CKA_TOKEN, false),
+        ];
+        let gc = g.c_derive_key(proto::V32DeriveKeyRequest {
+            session_handle: gs.session_handle,
+            mechanism: CKM_CONCATENATE_BASE_AND_KEY,
+            base_key_handle: base_key,
+            template: g_out_tmpl.clone(),
+            raw_parameter: concat_param.clone(),
+            structured: None,
+        }).await.unwrap().into_inner();
+        assert_eq!(gc.ck_rv, rv_ctl);
+        let ga = g.c_get_attribute_value(proto::V32GetAttributeValueRequest { session_handle: gs.session_handle, object_handle: gc.object_handle, attribute_types: vec![CKA_VALUE] }).await.unwrap().into_inner();
+        assert_eq!(ga.attributes[0].value, attrs_ctl[0].value, "gRPC concatenated key material must equal control");
+
+        let gh = g.c_derive_key(proto::V32DeriveKeyRequest {
+            session_handle: gs.session_handle,
+            mechanism: CKM_HKDF_DERIVE_LOCAL,
+            base_key_handle: base_key,
+            template: g_out_tmpl.clone(),
+            raw_parameter: vec![],
+            structured: Some(proto::v32_derive_key_request::Structured::Hkdf(proto::V32HkdfParams {
+                extract: true, expand: true, prf_hash_mechanism: 0x0000_0251, salt_type: 0x0000_0002,
+                salt: b"v19-salt".to_vec(), h_salt_key: 0, info: b"v19-info".to_vec(),
+            })),
+        }).await.unwrap().into_inner();
+        assert_eq!(gh.ck_rv, rv_hkdf_ctl);
+        let gha = g.c_get_attribute_value(proto::V32GetAttributeValueRequest { session_handle: gs.session_handle, object_handle: gh.object_handle, attribute_types: vec![CKA_VALUE] }).await.unwrap().into_inner();
+        assert_eq!(gha.attributes[0].value, attrs_hkdf_ctl[0].value, "gRPC HKDF-derived key material must equal control");
+
+        // REST
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        let r_out_tmpl = json!([
+            ulong_attr(CKA_CLASS, CKO_SECRET_KEY as u32),
+            ulong_attr(CKA_KEY_TYPE, CKK_GENERIC_SECRET as u32),
+            ulong_attr(CKA_VALUE_LEN, 32),
+            bool_attr(CKA_TOKEN, false),
+        ]);
+        let rc = rest_post(&base, "derive-key", json!({
+            "session_handle": sh, "mechanism": CKM_CONCATENATE_BASE_AND_KEY, "base_key_handle": base_key,
+            "template": r_out_tmpl, "raw_parameter": b64(&concat_param),
+        })).await;
+        assert_eq!(rc["ck_rv"].as_u64().unwrap() as u32, rv_ctl);
+        let ra = rest_post(&base, "get-attribute-value", json!({"session_handle": sh, "object_handle": rc["object_handle"], "attribute_types": [CKA_VALUE]})).await;
+        assert_eq!(unb64(ra["attributes"][0]["value"].as_str().unwrap()), attrs_ctl[0].value, "REST concatenated key material must equal control");
+
+        let rh = rest_post(&base, "derive-key", json!({
+            "session_handle": sh, "mechanism": CKM_HKDF_DERIVE_LOCAL, "base_key_handle": base_key, "template": r_out_tmpl,
+            "hkdf": {"extract": true, "expand": true, "prf_hash_mechanism": 0x251, "salt_type": 2, "salt": b64(b"v19-salt"), "h_salt_key": 0, "info": b64(b"v19-info")},
+        })).await;
+        assert_eq!(rh["ck_rv"].as_u64().unwrap() as u32, rv_hkdf_ctl);
+        let rha = rest_post(&base, "get-attribute-value", json!({"session_handle": sh, "object_handle": rh["object_handle"], "attribute_types": [CKA_VALUE]})).await;
+        assert_eq!(unb64(rha["attributes"][0]["value"].as_str().unwrap()), attrs_hkdf_ctl[0].value, "REST HKDF-derived key material must equal control");
 
         v32::close_session(ks);
     });

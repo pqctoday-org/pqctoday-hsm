@@ -32,6 +32,7 @@
 //! thread-safe from tonic/axum workers, same as `verbs.rs`.
 
 use softhsmrustv3::constants::CKR_ARGUMENTS_BAD;
+use softhsmrustv3::ck_param::{self, F};
 use softhsmrustv3::{constants, ffi};
 
 /// Engine constants re-exported for transports and tests — single source
@@ -85,6 +86,24 @@ pub mod ck {
     pub use softhsmrustv3::constants::CKM_AES_GCM;
     pub use softhsmrustv3::constants::CKR_MECHANISM_INVALID;
     pub use softhsmrustv3::constants::CKR_SESSION_EXISTS;
+    // RW4 additions.
+    pub use softhsmrustv3::constants::CKA_CHECK_VALUE;
+    pub use softhsmrustv3::constants::CKA_DERIVE;
+    pub use softhsmrustv3::constants::CKA_UNWRAP;
+    pub use softhsmrustv3::constants::CKA_WRAP;
+    pub use softhsmrustv3::constants::CKA_EXTRACTABLE;
+    pub use softhsmrustv3::constants::CKK_GENERIC_SECRET;
+    pub use softhsmrustv3::constants::CKM_AES_KEY_WRAP;
+    pub use softhsmrustv3::constants::CKM_CONCATENATE_BASE_AND_KEY;
+    pub use softhsmrustv3::constants::CKM_ECDH1_DERIVE;
+    pub use softhsmrustv3::constants::CKM_GENERIC_SECRET_KEY_GEN;
+    pub use softhsmrustv3::constants::CKM_HKDF_DERIVE;
+    pub use softhsmrustv3::constants::CKM_PKCS5_PBKD2;
+    pub use softhsmrustv3::constants::CKM_SHA256_KEY_DERIVATION;
+    pub use softhsmrustv3::constants::CKM_SP800_108_COUNTER_KDF;
+    pub use softhsmrustv3::constants::CKR_KEY_NOT_WRAPPABLE;
+    pub use softhsmrustv3::constants::CKR_KEY_UNEXTRACTABLE;
+    pub use softhsmrustv3::constants::CKR_WRAPPED_KEY_INVALID;
     pub use softhsmrustv3::constants::CKR_SESSION_READ_ONLY;
     pub use softhsmrustv3::constants::CKR_SLOT_ID_INVALID;
 }
@@ -208,6 +227,67 @@ impl GcmMessageParams {
     }
     fn tag(&self) -> &[u8] {
         &self.tag
+    }
+}
+
+/// Generic native-layout builder for any `ck_param`-declared struct (RW4's
+/// RW-P slice: ECDH1/HKDF/PBKDF2/SP800-108/key-derivation-string-data).
+/// Reuses `ck_param::offset_at`/`size_at` directly — the SAME source of
+/// truth the engine's own reader walks — so this writer cannot drift from
+/// it the way a hand-rolled word-offset table could. Every `set_*` call
+/// mirrors one `ParamReader` accessor exactly: `set_ulong`/`ulong`,
+/// `set_ptr`/`ptr`, `set_bbool`/`bbool` all write/read the same
+/// native-endian bytes at the same ABI-computed offset.
+///
+/// Pointer-typed fields point into buffers owned by `self.owned` — pushed
+/// there at `set_ptr` time so they outlive the FFI call the same way
+/// `NativeTemplate`'s `values` and `GcmMessageParams`'s `iv`/`tag` do.
+///
+/// **Load-bearing:** every `derive_params::*` function returns the whole
+/// `StructBuilder`, never just its `bytes` — extracting `.bytes` alone
+/// would drop `.owned` and leave every pointer embedded in those bytes
+/// dangling the instant the constructor returned. `as_slice()` borrows
+/// `bytes` without separating it from the buffers it points into; the
+/// caller keeps the returned `StructBuilder` alive (a named local) for
+/// exactly as long as the FFI call that reads it, the same discipline
+/// `GcmMessageParams` already follows by never being split apart either.
+pub struct StructBuilder {
+    bytes: Vec<u8>,
+    fields: &'static [F],
+    owned: Vec<Vec<u8>>,
+}
+
+impl StructBuilder {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+    fn new(fields: &'static [F]) -> Self {
+        Self { bytes: vec![0u8; ck_param::size_at(fields, ck_param::WORD)], fields, owned: Vec::new() }
+    }
+    fn set_ulong(&mut self, i: usize, value: usize) {
+        debug_assert!(matches!(self.fields[i], F::Ulong));
+        let off = ck_param::offset_at(self.fields, i, ck_param::WORD);
+        self.bytes[off..off + ck_param::WORD].copy_from_slice(&value.to_ne_bytes());
+    }
+    fn set_bbool(&mut self, i: usize, value: bool) {
+        debug_assert!(matches!(self.fields[i], F::Bbool));
+        let off = ck_param::offset_at(self.fields, i, ck_param::WORD);
+        self.bytes[off] = u8::from(value);
+    }
+    /// Stores `buf` (owned for the builder's lifetime) and writes its
+    /// address into field `i` (must be `F::Ptr`).
+    fn set_buf(&mut self, i: usize, buf: Vec<u8>) {
+        debug_assert!(matches!(self.fields[i], F::Ptr));
+        let off = ck_param::offset_at(self.fields, i, ck_param::WORD);
+        let ptr = if buf.is_empty() { 0 } else { buf.as_ptr() as usize };
+        self.bytes[off..off + ck_param::WORD].copy_from_slice(&ptr.to_ne_bytes());
+        self.owned.push(buf);
+    }
+    /// The pointer-plus-length idiom (`P_SALT`/`UL_SALT_LEN`, ...): sets
+    /// both fields from one byte slice.
+    fn set_buf_pair(&mut self, ptr_field: usize, len_field: usize, data: &[u8]) {
+        self.set_buf(ptr_field, data.to_vec());
+        self.set_ulong(len_field, data.len());
     }
 }
 
@@ -1103,6 +1183,298 @@ pub fn decrypt_message_next(
     })
 }
 
+// ── wrap / unwrap (RW4 slice) ────────────────────────────────────────────
+// Native-width audited: same shape as every other keyed-mechanism verb.
+// AES-KEY-WRAP/KWP and AES-CBC both take parameter-less-or-raw-IV bytes —
+// already fully representable via the existing `V32Mechanism` raw
+// `parameter` field, no RW-P struct needed here at all.
+
+pub fn wrap_key(session: u32, mechanism: u64, parameter: &[u8], wrapping_key: u32, key: u32) -> (u32, Vec<u8>) {
+    let mech = mech_native(mechanism, parameter);
+    two_call(|out, len| {
+        ffi::C_WrapKey(session, &mech as *const _ as *mut u8, wrapping_key, key, out, len)
+    })
+}
+
+pub fn unwrap_key(
+    session: u32,
+    mechanism: u64,
+    parameter: &[u8],
+    unwrapping_key: u32,
+    wrapped_key: &[u8],
+    template: &[AttrIn],
+) -> (u32, u32) {
+    let mech = mech_native(mechanism, parameter);
+    let mut tmpl = build_template(template);
+    let mut handle: u32 = 0;
+    let rv = ffi::C_UnwrapKey(
+        session,
+        &mech as *const _ as *mut u8,
+        unwrapping_key,
+        wrapped_key.as_ptr() as *mut u8,
+        wrapped_key.len() as u32,
+        tmpl.entries.as_mut_ptr() as *mut u8,
+        template.len() as u32,
+        &mut handle,
+    );
+    (rv, handle)
+}
+
+pub fn wrap_key_authenticated(
+    session: u32,
+    mechanism: u64,
+    parameter: &[u8],
+    wrapping_key: u32,
+    key: u32,
+    associated_data: &[u8],
+) -> (u32, Vec<u8>) {
+    let mech = mech_native(mechanism, parameter);
+    two_call(|out, len| {
+        ffi::C_WrapKeyAuthenticated(
+            session,
+            &mech as *const _ as *mut u8,
+            wrapping_key,
+            key,
+            associated_data.as_ptr() as *mut u8,
+            associated_data.len() as u32,
+            out,
+            len,
+        )
+    })
+}
+
+pub fn unwrap_key_authenticated(
+    session: u32,
+    mechanism: u64,
+    parameter: &[u8],
+    unwrapping_key: u32,
+    wrapped_key: &[u8],
+    template: &[AttrIn],
+    associated_data: &[u8],
+) -> (u32, u32) {
+    let mech = mech_native(mechanism, parameter);
+    let mut tmpl = build_template(template);
+    let mut handle: u32 = 0;
+    let rv = ffi::C_UnwrapKeyAuthenticated(
+        session,
+        &mech as *const _ as *mut u8,
+        unwrapping_key,
+        wrapped_key.as_ptr() as *mut u8,
+        wrapped_key.len() as u32,
+        tmpl.entries.as_mut_ptr() as *mut u8,
+        template.len() as u32,
+        associated_data.as_ptr() as *mut u8,
+        associated_data.len() as u32,
+        &mut handle,
+    );
+    (rv, handle)
+}
+
+// ── derive (RW4 slice — the RW-P derive-family variants) ────────────────
+//
+// `derive_key` itself is mechanism-agnostic: it takes pre-built mechanism
+// parameter bytes (from `mech_native`'s raw form OR one of the
+// `derive_params::*` builders below) and calls `ffi::C_DeriveKey`
+// directly, exactly like every other verb in this module. The complexity
+// lives entirely in constructing the RIGHT native bytes per mechanism —
+// isolated in `derive_params` so `derive_key` itself stays a two-line
+// audit-then-call function.
+
+pub fn derive_key(
+    session: u32,
+    mechanism: u64,
+    parameter: &[u8],
+    base_key: u32,
+    template: &[AttrIn],
+) -> (u32, u32) {
+    let mech = mech_native(mechanism, parameter);
+    let mut tmpl = build_template(template);
+    let mut handle: u32 = 0;
+    let rv = ffi::C_DeriveKey(
+        session,
+        &mech as *const _ as *mut u8,
+        base_key,
+        tmpl.entries.as_mut_ptr() as *mut u8,
+        template.len() as u32,
+        &mut handle,
+    );
+    (rv, handle)
+}
+
+/// RW-P derive-family mechanism-parameter builders. Each returns the
+/// native-layout bytes for one `CK_*_PARAMS` struct, built via
+/// `StructBuilder` against `softhsmrustv3::ck_param`'s own declared
+/// layouts — the same source of truth `ffi::C_DeriveKey`'s dispatch reads
+/// from, so these cannot drift from the engine's own field offsets.
+pub mod derive_params {
+    use super::{ck_param, StructBuilder};
+
+    /// `CK_ECDH1_DERIVE_PARAMS` (v3.2 §6.3.17). `kdf`: `CKD_NULL = 1` for
+    /// the raw shared secret; see the spec for the X9.63 KDF codepoints.
+    /// `public_data` is the peer's EC public key (raw SEC1 or DER-OCTET-
+    /// STRING-wrapped — the engine accepts either, per its own comment).
+    pub fn ecdh1(kdf: u32, shared_data: &[u8], public_data: &[u8]) -> StructBuilder {
+        let mut b = StructBuilder::new(ck_param::ecdh1::LAYOUT.fields);
+        b.set_ulong(ck_param::ecdh1::KDF, kdf as usize);
+        b.set_buf_pair(ck_param::ecdh1::P_SHARED_DATA, ck_param::ecdh1::UL_SHARED_DATA_LEN, shared_data);
+        b.set_buf_pair(ck_param::ecdh1::P_PUBLIC_DATA, ck_param::ecdh1::UL_PUBLIC_DATA_LEN, public_data);
+        b
+    }
+
+    /// `CK_HKDF_PARAMS` (v3.2 §6.45). `salt`/`h_salt_key`: exactly one of
+    /// these should be meaningful per `ul_salt_type`'s spec-defined values
+    /// (`CKF_HKDF_SALT_DATA = 1`, `CKF_HKDF_SALT_KEY = 2`,
+    /// `CKF_HKDF_SALT_NULL = 0`) — the caller picks which by what it fills
+    /// in; both are always written for a fixed, predictable layout.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hkdf(
+        extract: bool,
+        expand: bool,
+        prf_hash_mechanism: u64,
+        salt_type: u32,
+        salt: &[u8],
+        h_salt_key: u32,
+        info: &[u8],
+    ) -> StructBuilder {
+        let mut b = StructBuilder::new(ck_param::hkdf::LAYOUT.fields);
+        b.set_bbool(ck_param::hkdf::B_EXTRACT, extract);
+        b.set_bbool(ck_param::hkdf::B_EXPAND, expand);
+        b.set_ulong(ck_param::hkdf::PRF_HASH_MECHANISM, prf_hash_mechanism as usize);
+        b.set_ulong(ck_param::hkdf::UL_SALT_TYPE, salt_type as usize);
+        b.set_buf_pair(ck_param::hkdf::P_SALT, ck_param::hkdf::UL_SALT_LEN, salt);
+        b.set_ulong(ck_param::hkdf::H_SALT_KEY, h_salt_key as usize);
+        b.set_buf_pair(ck_param::hkdf::P_INFO, ck_param::hkdf::UL_INFO_LEN, info);
+        b
+    }
+
+    /// `CK_PKCS5_PBKD2_PARAMS2` (v3.2 §6.38). `salt_source`:
+    /// `CKZ_SALT_SPECIFIED = 1` is this spec's only defined value.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pbkd2(
+        salt_source: u32,
+        salt_source_data: &[u8],
+        iterations: u32,
+        prf: u64,
+        prf_data: &[u8],
+        password: &[u8],
+    ) -> StructBuilder {
+        let mut b = StructBuilder::new(ck_param::pbkd2::LAYOUT.fields);
+        b.set_ulong(ck_param::pbkd2::SALT_SOURCE, salt_source as usize);
+        b.set_buf_pair(ck_param::pbkd2::P_SALT_SOURCE_DATA, ck_param::pbkd2::UL_SALT_SOURCE_DATA_LEN, salt_source_data);
+        b.set_ulong(ck_param::pbkd2::ITERATIONS, iterations as usize);
+        b.set_ulong(ck_param::pbkd2::PRF, prf as usize);
+        b.set_buf_pair(ck_param::pbkd2::P_PRF_DATA, ck_param::pbkd2::UL_PRF_DATA_LEN, prf_data);
+        b.set_buf_pair(ck_param::pbkd2::P_PASSWORD, ck_param::pbkd2::UL_PASSWORD_LEN, password);
+        b
+    }
+
+    /// `CK_KEY_DERIVATION_STRING_DATA` (v3.2 §6.43.4) — the parameter for
+    /// `CKM_CONCATENATE_BASE_AND_DATA`/`CKM_XOR_BASE_AND_DATA`.
+    pub fn key_derivation_string_data(data: &[u8]) -> StructBuilder {
+        let mut b = StructBuilder::new(ck_param::key_deriv_string::LAYOUT.fields);
+        b.set_buf_pair(ck_param::key_deriv_string::P_DATA, ck_param::key_deriv_string::UL_LEN, data);
+        b
+    }
+
+    /// `CK_SP800_108_COUNTER_FORMAT` (v3.2 §6.42) — one
+    /// `CK_SP800_108_OPTIONAL_COUNTER` segment's own value bytes. Has no
+    /// pointer fields (Bbool + Ulong only), so — unlike every other
+    /// builder here — it is genuinely safe to return as a self-contained
+    /// `Vec<u8>`: nothing in it points outside itself.
+    pub fn counter_format(little_endian: bool, width_in_bits: u32) -> Vec<u8> {
+        let mut b = StructBuilder::new(ck_param::counter_format::LAYOUT.fields);
+        b.set_bbool(ck_param::counter_format::B_LITTLE_ENDIAN, little_endian);
+        b.set_ulong(ck_param::counter_format::UL_WIDTH_IN_BITS, width_in_bits as usize);
+        b.bytes
+    }
+
+    /// One SP800-108 data-parameter segment before it's packed into the
+    /// array `sp800_108_counter`/`sp800_108_feedback` build. `prf_type`:
+    /// the spec's `CK_SP800_108_*` codepoints
+    /// (`CK_SP800_108_ITERATION_VARIABLE = 1`,
+    /// `CK_SP800_108_OPTIONAL_COUNTER = 2`, `CK_SP800_108_DKM_LENGTH = 3`,
+    /// `CK_SP800_108_BYTE_ARRAY = 4`). `value`: for
+    /// `CK_SP800_108_OPTIONAL_COUNTER`, a `counter_format()` blob; for
+    /// `CK_SP800_108_BYTE_ARRAY`, raw label/context bytes;
+    /// `CK_SP800_108_ITERATION_VARIABLE` needs no value (pass `&[]`).
+    pub struct Segment {
+        pub prf_type: u32,
+        pub value: Vec<u8>,
+    }
+
+    /// Packs `segments` into one `CK_PRF_DATA_PARAM[]` array INSIDE
+    /// `owner` — every segment's `value` bytes are pushed into `owner`'s
+    /// own `owned` list first (via `set_buf`, called once per segment on
+    /// a throwaway single-field write, discarded — only its side effect
+    /// of stashing the buffer in `owner.owned` matters), so their
+    /// addresses are stable for `owner`'s entire lifetime before the
+    /// array's `pValue` entries are computed from those SAME stored
+    /// addresses. This is the two-phase "collect owned buffers, then
+    /// take pointers into them" discipline `NativeTemplate`/
+    /// `build_template` already established — a single-phase "take
+    /// pointer, push, repeat" loop here would be equally sound (moving a
+    /// `Vec<u8>` doesn't relocate its heap buffer), but keeping the two
+    /// phases explicit makes that invariant obvious at the call site
+    /// rather than relying on the reader knowing it.
+    fn pack_prf_data_params(owner: &mut StructBuilder, segments: Vec<Segment>) -> Vec<u8> {
+        let elem_fields = ck_param::prf_data_param::LAYOUT.fields;
+        let elem_size = ck_param::size_at(elem_fields, ck_param::WORD);
+        let type_off = ck_param::offset_at(elem_fields, ck_param::prf_data_param::TYPE, ck_param::WORD);
+        let ptr_off = ck_param::offset_at(elem_fields, ck_param::prf_data_param::P_VALUE, ck_param::WORD);
+        let len_off = ck_param::offset_at(elem_fields, ck_param::prf_data_param::UL_VALUE_LEN, ck_param::WORD);
+
+        // Phase 1: stash every segment's value bytes in `owner.owned` —
+        // stable addresses from this point on.
+        let first_idx = owner.owned.len();
+        for seg in &segments {
+            owner.owned.push(seg.value.clone());
+        }
+
+        // Phase 2: write the array using addresses read back from those
+        // now-stored buffers (never from `segments` itself).
+        let mut array = vec![0u8; elem_size * segments.len()];
+        for (i, seg) in segments.iter().enumerate() {
+            let base = i * elem_size;
+            array[base + type_off..base + type_off + ck_param::WORD]
+                .copy_from_slice(&(seg.prf_type as usize).to_ne_bytes());
+            let stored = &owner.owned[first_idx + i];
+            let ptr = if stored.is_empty() { 0 } else { stored.as_ptr() as usize };
+            array[base + ptr_off..base + ptr_off + ck_param::WORD].copy_from_slice(&ptr.to_ne_bytes());
+            array[base + len_off..base + len_off + ck_param::WORD]
+                .copy_from_slice(&stored.len().to_ne_bytes());
+        }
+        array
+    }
+
+    /// `CK_SP800_108_KDF_PARAMS` (v3.2 §6.42, counter-mode). This engine
+    /// reads only the first three fields (`prf_type`,
+    /// `ul_number_of_data_params`, `p_data_params`) — the
+    /// additional-derived-key tail is not implemented, so it is written as
+    /// zero (no additional keys requested).
+    pub fn sp800_108_counter(prf_type: u64, segments: Vec<Segment>) -> StructBuilder {
+        let mut b = StructBuilder::new(ck_param::sp800_108_kdf::LAYOUT.fields);
+        b.set_ulong(ck_param::sp800_108_kdf::PRF_TYPE, prf_type as usize);
+        b.set_ulong(ck_param::sp800_108_kdf::UL_NUMBER_OF_DATA_PARAMS, segments.len());
+        let array = pack_prf_data_params(&mut b, segments);
+        b.set_buf(ck_param::sp800_108_kdf::P_DATA_PARAMS, array);
+        b.set_ulong(ck_param::sp800_108_kdf::UL_ADDITIONAL_DERIVED_KEYS, 0);
+        b
+    }
+
+    /// `CK_SP800_108_FEEDBACK_KDF_PARAMS` (v3.2 §6.42) — same shape as
+    /// counter-mode plus an IV; additional-derived-keys likewise zeroed.
+    pub fn sp800_108_feedback(prf_type: u64, segments: Vec<Segment>, iv: &[u8]) -> StructBuilder {
+        let mut b = StructBuilder::new(ck_param::sp800_108_feedback::LAYOUT.fields);
+        b.set_ulong(ck_param::sp800_108_feedback::PRF_TYPE, prf_type as usize);
+        b.set_ulong(ck_param::sp800_108_feedback::UL_NUMBER_OF_DATA_PARAMS, segments.len());
+        let array = pack_prf_data_params(&mut b, segments);
+        b.set_buf(ck_param::sp800_108_feedback::P_DATA_PARAMS, array);
+        b.set_buf_pair(ck_param::sp800_108_feedback::P_IV, ck_param::sp800_108_feedback::UL_IV_LEN, iv);
+        b.set_ulong(ck_param::sp800_108_feedback::UL_ADDITIONAL_DERIVED_KEYS, 0);
+        b
+    }
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 /// PKCS#11 §5.2 two-call convention driver: NULL query for the length,
@@ -1780,6 +2152,317 @@ mod tests {
         recovered.extend_from_slice(&pt2);
         assert_eq!(recovered, b"multipart-vs-one-shot!!");
         assert_eq!(message_decrypt_final(session), 0);
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn aes_key_wrap_unwrap_round_trip_and_not_wrappable_negative() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+
+        let wrapping_key_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_WRAP), true),
+            attr_bool(u64::from(ck::CKA_UNWRAP), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, wrapping_key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &wrapping_key_tmpl);
+        assert_eq!(rv, 0);
+
+        let target_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 16),
+            attr_bool(u64::from(ck::CKA_EXTRACTABLE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, target_key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &target_tmpl);
+        assert_eq!(rv, 0);
+        let (rv_orig, orig_attrs) = get_attribute_value(session, target_key, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv_orig, 0);
+
+        let (rv, wrapped) = wrap_key(session, u64::from(ck::CKM_AES_KEY_WRAP), &[], wrapping_key, target_key);
+        assert_eq!(rv, 0);
+        assert!(!wrapped.is_empty());
+
+        let unwrap_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_bool(u64::from(ck::CKA_EXTRACTABLE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, unwrapped_key) = unwrap_key(session, u64::from(ck::CKM_AES_KEY_WRAP), &[], wrapping_key, &wrapped, &unwrap_tmpl);
+        assert_eq!(rv, 0);
+        assert_ne!(unwrapped_key, 0);
+        let (rv_rt, rt_attrs) = get_attribute_value(session, unwrapped_key, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv_rt, 0);
+        assert_eq!(rt_attrs[0].value, orig_attrs[0].value, "unwrapped key material must equal the original");
+
+        // A non-extractable key must be refused with the real spec code.
+        let non_extractable_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 16),
+            attr_bool(u64::from(ck::CKA_EXTRACTABLE), false),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, locked_key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &non_extractable_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, _) = wrap_key(session, u64::from(ck::CKM_AES_KEY_WRAP), &[], wrapping_key, locked_key);
+        assert_eq!(rv, ck::CKR_KEY_UNEXTRACTABLE, "CKA_EXTRACTABLE=false is a real CKR_KEY_UNEXTRACTABLE, distinct from the CKA_WRAP_WITH_TRUSTED policy code CKR_KEY_NOT_WRAPPABLE");
+
+        // WrapKeyAuthenticated/UnwrapKeyAuthenticated are CKM_AES_GCM-only
+        // on this engine (ffi::C_WrapKeyAuthenticated hard-rejects any
+        // other mechanism) — a full authenticated round trip needs
+        // CK_GCM_PARAMS marshaling, out of RW4's scope (not in the plan's
+        // own RW4 test list). What's proven here instead: the wire reaches
+        // the real entry point and gets the real engine's own rejection
+        // code back, not a transport-layer stub.
+        let (rv, _) = wrap_key_authenticated(session, u64::from(ck::CKM_AES_KEY_WRAP), &[], wrapping_key, target_key, b"aad");
+        assert_eq!(rv, ck::CKR_MECHANISM_INVALID);
+        let (rv, _) = unwrap_key_authenticated(session, u64::from(ck::CKM_AES_KEY_WRAP), &[], wrapping_key, &wrapped, &unwrap_tmpl, b"aad");
+        assert_eq!(rv, ck::CKR_MECHANISM_INVALID);
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn derive_key_concatenate_and_sha256_derivation() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let base_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 16),
+            attr_bool(u64::from(ck::CKA_DERIVE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, base_key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &base_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, second_key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &base_tmpl);
+        assert_eq!(rv, 0);
+
+        // CKM_CONCATENATE_BASE_AND_KEY — a bare CK_OBJECT_HANDLE parameter,
+        // native-width ulong, already fully representable as raw bytes
+        // (the RW1 ulong-width finding applied on the input side).
+        let param = (second_key as usize).to_ne_bytes().to_vec();
+        let out_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, derived) = derive_key(session, u64::from(ck::CKM_CONCATENATE_BASE_AND_KEY), &param, base_key, &out_tmpl);
+        assert_eq!(rv, 0);
+        assert_ne!(derived, 0);
+        let (rv, attrs) = get_attribute_value(session, derived, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(attrs[0].value.len(), 32, "concatenation of two 16-byte keys must be 32 bytes");
+
+        // CKM_SHA256_KEY_DERIVATION — no parameter at all.
+        let (rv, derived2) = derive_key(session, u64::from(ck::CKM_SHA256_KEY_DERIVATION), &[], base_key, &out_tmpl);
+        assert_eq!(rv, 0);
+        assert_ne!(derived2, 0);
+        let (rv, attrs2) = get_attribute_value(session, derived2, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(attrs2[0].value.len(), 32, "SHA-256 output is 32 bytes");
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn derive_key_hkdf_and_pbkdf2() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let base_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_DERIVE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, base_key) = generate_key(session, u64::from(ck::CKM_GENERIC_SECRET_KEY_GEN), &[], &base_tmpl);
+        assert_eq!(rv, 0);
+
+        let out_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+
+        // HKDF extract+expand, PRF SHA-256, raw salt, no salt-key.
+        const CKM_SHA256_HMAC: u64 = 0x0000_0251;
+        const CKF_HKDF_SALT_DATA: u32 = 0x0000_0002;
+        let hkdf_params = derive_params::hkdf(true, true, CKM_SHA256_HMAC, CKF_HKDF_SALT_DATA, b"salt-bytes", 0, b"info-bytes");
+        let (rv, derived) = derive_key(session, u64::from(ck::CKM_HKDF_DERIVE), hkdf_params.as_slice(), base_key, &out_tmpl);
+        assert_eq!(rv, 0);
+        assert_ne!(derived, 0);
+        let (rv, attrs) = get_attribute_value(session, derived, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(attrs[0].value.len(), 32);
+
+        // PBKDF2 — h_base_key MUST be 0 (password lives in the params);
+        // the engine explicitly skips the base-key check for this
+        // mechanism (verified in ffi::C_DeriveKey's own comment). `prf`
+        // is a `CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE` codepoint
+        // (`CKP_PBKDF2_HMAC_SHA256 = 0x04`) — a DIFFERENT namespace from
+        // the `CKM_*_HMAC` mechanism codes HKDF/SP800-108 use; the engine
+        // also enforces a real minimum of 1000 iterations.
+        const CKP_PBKDF2_HMAC_SHA256: u64 = 0x04;
+        const CKZ_SALT_SPECIFIED: u32 = 1;
+        let pbkdf2_params = derive_params::pbkd2(CKZ_SALT_SPECIFIED, b"pbkdf2-salt", 1000, CKP_PBKDF2_HMAC_SHA256, &[], b"correct horse battery staple");
+        let (rv, derived_pw) = derive_key(session, u64::from(ck::CKM_PKCS5_PBKD2), pbkdf2_params.as_slice(), 0, &out_tmpl);
+        assert_eq!(rv, 0);
+        assert_ne!(derived_pw, 0);
+        let (rv, attrs2) = get_attribute_value(session, derived_pw, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(attrs2[0].value.len(), 32);
+
+        // Below the engine's real 1000-iteration floor — a genuine
+        // CKR_ARGUMENTS_BAD, not a made-up code.
+        let pbkdf2_params_low = derive_params::pbkd2(CKZ_SALT_SPECIFIED, b"pbkdf2-salt", 999, CKP_PBKDF2_HMAC_SHA256, &[], b"correct horse battery staple");
+        let (rv, _) = derive_key(session, u64::from(ck::CKM_PKCS5_PBKD2), pbkdf2_params_low.as_slice(), 0, &out_tmpl);
+        assert_eq!(rv, CKR_ARGUMENTS_BAD);
+
+        // Same password/salt/PRF, one MORE iteration than the first call —
+        // must derive a DIFFERENT key (a real, meaningful check that
+        // `iterations` actually reached the engine through the wire
+        // struct, not a hardcoded default).
+        let pbkdf2_params_diff = derive_params::pbkd2(CKZ_SALT_SPECIFIED, b"pbkdf2-salt", 1001, CKP_PBKDF2_HMAC_SHA256, &[], b"correct horse battery staple");
+        let (rv, derived_pw2) = derive_key(session, u64::from(ck::CKM_PKCS5_PBKD2), pbkdf2_params_diff.as_slice(), 0, &out_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, attrs3) = get_attribute_value(session, derived_pw2, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_ne!(attrs3[0].value, attrs2[0].value, "different iteration counts must derive different keys");
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn derive_key_sp800_108_counter_and_feedback() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let base_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_DERIVE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, base_key) = generate_key(session, u64::from(ck::CKM_GENERIC_SECRET_KEY_GEN), &[], &base_tmpl);
+        assert_eq!(rv, 0);
+
+        let out_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+
+        const CKM_SHA256_HMAC: u64 = 0x0000_0251;
+        const CK_SP800_108_ITERATION_VARIABLE: u32 = 1;
+        const CK_SP800_108_OPTIONAL_COUNTER: u32 = 2;
+        const CK_SP800_108_BYTE_ARRAY: u32 = 4;
+
+        // §Table 199: the engine rejects an explicit CK_SP800_108_COUNTER
+        // (type 2) segment in Counter Mode — CK_SP800_108_ITERATION_VARIABLE
+        // (type 1) IS the counter for this mode, and it carries the exact
+        // same CK_SP800_108_COUNTER_FORMAT value (width/endianness), not
+        // an empty one (verified against ffi::parse_sp800_108_segments's
+        // own match arm for type 1).
+        let counter_value = derive_params::counter_format(false, 8);
+        let segments = vec![
+            derive_params::Segment { prf_type: CK_SP800_108_ITERATION_VARIABLE, value: counter_value },
+            derive_params::Segment { prf_type: CK_SP800_108_BYTE_ARRAY, value: b"label-context".to_vec() },
+        ];
+        let counter_params = derive_params::sp800_108_counter(CKM_SHA256_HMAC, segments);
+        let (rv, derived) = derive_key(session, u64::from(ck::CKM_SP800_108_COUNTER_KDF), counter_params.as_slice(), base_key, &out_tmpl);
+        assert_eq!(rv, 0, "SP800-108 counter-mode derive must succeed against the real engine");
+        assert_ne!(derived, 0);
+        let (rv, attrs) = get_attribute_value(session, derived, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(attrs[0].value.len(), 32);
+
+        // Feedback mode DOES allow the explicit CK_SP800_108_COUNTER
+        // (type 2) segment (Table 200) — exercised here as the
+        // counterpart to counter-mode's ITERATION_VARIABLE path above.
+        const CKM_SP800_108_FEEDBACK_KDF: u64 = 0x0000_03ad;
+        let counter_value2 = derive_params::counter_format(false, 8);
+        let segments2 = vec![
+            derive_params::Segment { prf_type: CK_SP800_108_OPTIONAL_COUNTER, value: counter_value2 },
+        ];
+        let feedback_params = derive_params::sp800_108_feedback(CKM_SHA256_HMAC, segments2, &[0xAAu8; 32]);
+        let (rv, derived_fb) = derive_key(session, CKM_SP800_108_FEEDBACK_KDF, feedback_params.as_slice(), base_key, &out_tmpl);
+        assert_eq!(rv, 0, "SP800-108 feedback-mode derive must succeed against the real engine");
+        assert_ne!(derived_fb, 0);
+        let (rv, attrs_fb) = get_attribute_value(session, derived_fb, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(attrs_fb[0].value.len(), 32);
+        assert_ne!(attrs_fb[0].value, attrs[0].value, "counter and feedback modes must derive different output");
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn derive_key_ecdh1_p256() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+
+        // NIST P-256 (secp256r1 / prime256v1) OID, DER-encoded: the
+        // standard CKA_EC_PARAMS this engine's C_GenerateKeyPair(
+        // CKM_EC_KEY_PAIR_GEN) dispatch decodes via `decode_ec_params`.
+        const P256_EC_PARAMS: [u8; 10] = [0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
+        const CKM_EC_KEY_PAIR_GEN: u64 = 0x0000_1040;
+        const CKA_EC_PARAMS: u64 = 0x0000_0180;
+        const CKA_EC_POINT: u64 = 0x0000_0181;
+        const CKK_EC: u32 = 0x0000_0003;
+
+        let make_ec_pair = || {
+            let public_tmpl = [
+                attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+                attr_ulong(u64::from(ck::CKA_KEY_TYPE), CKK_EC),
+                (CKA_EC_PARAMS, P256_EC_PARAMS.to_vec()),
+                attr_bool(u64::from(ck::CKA_TOKEN), false),
+            ];
+            let private_tmpl = [
+                attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+                attr_ulong(u64::from(ck::CKA_KEY_TYPE), CKK_EC),
+                attr_bool(u64::from(ck::CKA_DERIVE), true),
+                attr_bool(u64::from(ck::CKA_TOKEN), false),
+            ];
+            generate_key_pair(session, CKM_EC_KEY_PAIR_GEN, &[], &public_tmpl, &private_tmpl)
+        };
+
+        let (rv, _our_pub, our_prv) = make_ec_pair();
+        assert_eq!(rv, 0, "EC P-256 keygen must succeed — a prerequisite for testing ECDH1_DERIVE at all");
+        let (rv, peer_pub, _peer_prv) = make_ec_pair();
+        assert_eq!(rv, 0);
+
+        let (rv, peer_point_attrs) = get_attribute_value(session, peer_pub, &[CKA_EC_POINT]);
+        assert_eq!(rv, 0);
+        assert!(peer_point_attrs[0].available, "CKA_EC_POINT must be readable on a public key");
+
+        const CKD_NULL: u32 = 1;
+        let ecdh_params = derive_params::ecdh1(CKD_NULL, &[], &peer_point_attrs[0].value);
+        let out_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, shared) = derive_key(session, u64::from(ck::CKM_ECDH1_DERIVE), ecdh_params.as_slice(), our_prv, &out_tmpl);
+        assert_eq!(rv, 0, "ECDH1_DERIVE against a real P-256 peer point must succeed");
+        assert_ne!(shared, 0);
+        let (rv, shared_attrs) = get_attribute_value(session, shared, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(shared_attrs[0].value.len(), 32, "P-256 shared secret is 32 bytes");
 
         close_session(session);
     }

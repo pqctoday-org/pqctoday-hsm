@@ -114,6 +114,11 @@ pub fn router(state: V32State) -> Router {
         .route("/v32/message-decrypt-final", post(message_decrypt_final))
         .route("/v32/decrypt-message-begin", post(decrypt_message_begin))
         .route("/v32/decrypt-message-next", post(decrypt_message_next))
+        .route("/v32/wrap-key", post(wrap_key))
+        .route("/v32/unwrap-key", post(unwrap_key))
+        .route("/v32/wrap-key-authenticated", post(wrap_key_authenticated))
+        .route("/v32/unwrap-key-authenticated", post(unwrap_key_authenticated))
+        .route("/v32/derive-key", post(derive_key))
         .with_state(state)
 }
 
@@ -439,6 +444,82 @@ async fn decrypt_message_begin(Json(r): Json<DecryptMessageBeginReq>) -> Json<St
 }
 async fn decrypt_message_next(Json(r): Json<DecryptMessageNextReq>) -> Json<BytesResp> {
     Json(v32::decrypt_message_next(r.session_handle, &r.ciphertext_part, r.is_final, r.tag_bits, &r.tag).into())
+}
+
+async fn wrap_key(Json(r): Json<WrapKeyReq>) -> Json<BytesResp> {
+    Json(v32::wrap_key(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.wrapping_key_handle, r.key_handle).into())
+}
+async fn unwrap_key(Json(r): Json<UnwrapKeyReq>) -> Json<ObjectHandleResp> {
+    let template = tmpl_parts(&r.template);
+    Json(
+        v32::unwrap_key(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.unwrapping_key_handle, &r.wrapped_key, &template)
+            .into(),
+    )
+}
+async fn wrap_key_authenticated(Json(r): Json<WrapKeyAuthenticatedReq>) -> Json<BytesResp> {
+    Json(
+        v32::wrap_key_authenticated(
+            r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.wrapping_key_handle, r.key_handle, &r.associated_data,
+        )
+        .into(),
+    )
+}
+async fn unwrap_key_authenticated(Json(r): Json<UnwrapKeyAuthenticatedReq>) -> Json<ObjectHandleResp> {
+    let template = tmpl_parts(&r.template);
+    Json(
+        v32::unwrap_key_authenticated(
+            r.session_handle,
+            r.mechanism.mechanism,
+            &r.mechanism.parameter,
+            r.unwrapping_key_handle,
+            &r.wrapped_key,
+            &template,
+            &r.associated_data,
+        )
+        .into(),
+    )
+}
+
+/// Same ownership contract as the gRPC handler's `derive_mechanism_params`
+/// — a `v32::StructBuilder`'s bytes embed raw pointers into its own
+/// `owned` buffers, so the builder itself (not a copy of its bytes) must
+/// stay alive through the `derive_key` call. Mirrored here rather than
+/// shared across crates since the REST DTO and proto message types differ.
+enum DeriveParamBytes {
+    Raw(Vec<u8>),
+    Structured(v32::StructBuilder),
+}
+impl DeriveParamBytes {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            DeriveParamBytes::Raw(v) => v,
+            DeriveParamBytes::Structured(b) => b.as_slice(),
+        }
+    }
+}
+
+async fn derive_key(Json(r): Json<DeriveKeyReq>) -> Json<ObjectHandleResp> {
+    let template = tmpl_parts(&r.template);
+    let params = if let Some(p) = r.ecdh1 {
+        DeriveParamBytes::Structured(v32::derive_params::ecdh1(p.kdf, &p.shared_data, &p.public_data))
+    } else if let Some(p) = r.hkdf {
+        DeriveParamBytes::Structured(v32::derive_params::hkdf(
+            p.extract, p.expand, p.prf_hash_mechanism, p.salt_type, &p.salt, p.h_salt_key, &p.info,
+        ))
+    } else if let Some(p) = r.pbkdf2 {
+        DeriveParamBytes::Structured(v32::derive_params::pbkd2(
+            p.salt_source, &p.salt_source_data, p.iterations, p.prf, &p.prf_data, &p.password,
+        ))
+    } else if let Some(p) = r.sp800_108_counter {
+        let segments = p.segments.into_iter().map(|s| v32::derive_params::Segment { prf_type: s.prf_type, value: s.value }).collect();
+        DeriveParamBytes::Structured(v32::derive_params::sp800_108_counter(p.prf_type, segments))
+    } else if let Some(p) = r.sp800_108_feedback {
+        let segments = p.segments.into_iter().map(|s| v32::derive_params::Segment { prf_type: s.prf_type, value: s.value }).collect();
+        DeriveParamBytes::Structured(v32::derive_params::sp800_108_feedback(p.prf_type, segments, &p.iv))
+    } else {
+        DeriveParamBytes::Raw(r.raw_parameter)
+    };
+    Json(v32::derive_key(r.session_handle, r.mechanism, params.as_slice(), r.base_key_handle, &template).into())
 }
 
 // Small shared request shapes used by several routes.

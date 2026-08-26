@@ -405,3 +405,96 @@ key-derivation-string-data) and the first point in the remaining program
 where a real engine-crate PR was ever predicted, though F1 already found
 the crypto itself pre-existing — RW4 should confirm or refute that for
 wrap/unwrap specifically.
+
+### 2026-08-26 — RW4 (wrap/derive)
+
+Shipped, all live-verified. 5 new RPCs: `C_WrapKey`, `C_UnwrapKey`,
+`C_WrapKeyAuthenticated`, `C_UnwrapKeyAuthenticated`, `C_DeriveKey`. F1
+confirmed again for wrap/unwrap (audit-then-call, no engine change) — but
+RW4 is where the RW-P slice finally got real: 5 structured
+`CK_*_PARAMS` variants (ECDH1, HKDF, PBKDF2, SP800-108 counter + feedback)
+plus the SP800-108 data-parameter ARRAY (a struct-of-structs, each with
+its own embedded pointer), the deepest native-layout work in the whole
+program.
+
+**A real, load-bearing memory-safety bug was caught and fixed before
+anything ran**, not after: the first draft of every `derive_params::*`
+builder returned only `StructBuilder.bytes`, discarding
+`StructBuilder.owned` (the Vec of buffers each struct's embedded pointers
+point into) — which would have dropped those buffers the instant the
+constructor returned, leaving every pointer in the "returned" bytes
+dangling before any FFI call ever read them. Caught by re-deriving the
+ownership chain from first principles before compiling, not by a crash:
+`StructBuilder` was made to own the invariant instead — every
+`derive_params::*` function now returns the WHOLE `StructBuilder` (never
+just its bytes), with a `.as_slice()` accessor that borrows without
+separating bytes from the buffers they point into. The gRPC and REST
+handlers each needed the identical discipline for the `oneof`/DTO
+resolution step (a `DeriveParamBytes` enum holding either the raw bytes or
+a live `StructBuilder`) — a second draft of THAT code independently made
+the exact same mistake (`.as_slice().to_vec()`, which copies the outer
+struct's bytes, embedded pointer VALUES included, without copying what
+those pointers point to) and was caught the same way before it shipped.
+
+**core:** a generic `StructBuilder` (RW-P's real foundation) reuses
+`ck_param::offset_at`/`size_at` directly — the SAME const fns the
+engine's own `ParamReader` walks — so field offsets for
+Bbool/Ulong/Ptr-mixed structs (HKDF's two adjacent `CK_BBOOL`s, etc.)
+cannot drift from the engine's own layout the way a hand-written offset
+table could. `derive_params::{ecdh1, hkdf, pbkd2, sp800_108_counter,
+sp800_108_feedback, counter_format}` build the six derive-family structs;
+`wrap_key`/`unwrap_key`/`wrap_key_authenticated`/`unwrap_key_authenticated`/
+`derive_key` themselves stayed exactly as mechanical as every prior
+audit-then-call verb. 5 new unit tests (33/33 core green), each one
+correcting a real assumption against the live engine on first run rather
+than confirming a guess: `CKR_KEY_UNEXTRACTABLE` (not
+`CKR_KEY_NOT_WRAPPABLE`, which is the CKA_WRAP_WITH_TRUSTED-specific
+code) for a non-extractable key; `CKP_PBKDF2_HMAC_SHA256=0x04` is a
+DIFFERENT namespace from the `CKM_*_HMAC` mechanism codes HKDF/SP800-108
+use, and the engine enforces a real 1000-iteration floor;
+`CK_SP800_108_ITERATION_VARIABLE` (not a separate `OPTIONAL_COUNTER`
+segment) IS counter-mode's counter and needs a real `CK_SP800_108_
+COUNTER_FORMAT` value, while the explicit `COUNTER` segment type is
+legal only in feedback mode; `C_WrapKeyAuthenticated` is
+`CKM_AES_GCM`-only, scoped out of this pass's positive test per the
+plan's own stated RW4 scope (not required) in favor of proving the wire
+reaches the real engine's own rejection code. ECDH1 — the one variant NOT
+in the plan's explicit test list — got a full live test anyway (real
+P-256 keygen via `C_GenerateKeyPair(CKM_EC_KEY_PAIR_GEN)`, real
+`CKA_EC_POINT` exchange, real `CKD_NULL` shared-secret derivation) and
+passed on the first run, the strongest validation the `StructBuilder`
+design got in this workstream.
+
+**gRPC + REST:** all 5 RPCs/routes wired. `DeriveKey`'s structured
+parameters travel as a proto `oneof` (`V32Ecdh1Params` /
+`V32HkdfParams` / `V32Pbkdf2Params` / `V32Sp800108CounterParams` /
+`V32Sp800108FeedbackParams`) alongside a `raw_parameter` fallback for
+parameterless/already-raw mechanisms — REST mirrors it as five optional
+DTO fields, exactly one populated per call.
+
+**Validation:** 2 new three-transport parity tests. V18: AES-KW
+wrap→unwrap round trip (wrapped bytes byte-identical across transports)
+plus the real `CKR_KEY_UNEXTRACTABLE` negative. V19: `DeriveKey` via both
+the raw-parameter path (`CKM_CONCATENATE_BASE_AND_KEY`) and the
+structured `oneof` path (HKDF) — derived key material byte-identical
+across all three transports for both. **Whole remoting workspace green:
+33 core + 7 legacy-parity (no regression) + 19 v32-parity + 2 posture.**
+
+**A second real finding, this one in test infrastructure rather than
+product code:** adding V18/V19 (which create several more `CKO_SECRET_KEY`
+objects) made the pre-existing V8 test (RW2, `C_CreateObject`/
+`FindObjects` round trip) flaky — 4 of 5 runs failed. `C_FindObjectsInit
+(CKA_CLASS=CKO_SECRET_KEY)` searches the WHOLE TOKEN, not the calling
+session, and this suite's tests run in true parallel sharing one
+process-wide object store (this file's own module doc). V8's original
+`max_object_count: 10` was an implicit "only a few secret keys will exist
+concurrently" assumption that held when the suite was smaller and quietly
+stopped holding as RW3/RW6b/RW4 each added more secret-key-creating
+tests. Fixed by raising it to 1000 across all three transports (a
+one-line, low-risk fix) — confirmed stable across 8 consecutive runs
+afterward. Documented in the test file itself so the NEXT workstream
+that adds secret-key-creating tests doesn't have to rediscover this.
+
+**Cumulative RPC count after RW1+RW2+RW3+RW4+RW6a+RW6b: 94 of 104
+`pkcs11f.h` functions live.** RW5 (KEM key-object form + algorithm-cell
+sweep) is next.
