@@ -155,145 +155,210 @@ pass. One commit for this item.
 
 ---
 
-### R35 — HashML-DSA provider surface + engine PHM-conformance decision — effort M
+### R35 — HashML-DSA provider surface — effort S–M
 
-**Grounding (all verified against source while writing this plan):**
+**Grounding correction (2026-08-26, found while starting this item's
+own execution — corrected before any code was written):** this item's
+original grounding (below, struck through) claimed both engines
+deviate from the ratified spec's input contract for the entire
+`CKM_HASH_ML_DSA*` family. That was wrong, caught by re-reading the
+ratified text itself instead of trusting an earlier partial read.
+PKCS#11 v3.2 draws a sharp, deliberate line the earlier pass missed:
 
-1. **The mechanism family is fully standard and fully implemented in
-   BOTH engines, and the provider registers none of it.** Ratified spec
-   §6.67.6: `CKM_HASH_ML_DSA` (generic, digest selected via
-   `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash`) plus ten hash-specific
-   codepoints (`0x23`–`0x2c`). C++ engine: `isMLDSAMechanism()` in
-   `OSSLMLDSA.cpp` accepts all 11; `SoftHSM_sign.cpp` sets
-   `mldsaSignParam.preHash = true` for them. Rust engine:
-   `constants.rs:762-772` lists all 11 in the supported-mechanism
-   table; `ffi.rs`'s `remap_generic_hash_mech` maps generic→specific;
-   `handlers.rs:445-455` maps each to `fips204::Ph`. Provider:
-   `PQC_MECHS` (`provider.c:867`) contains only
-   `CKM_ML_DSA`/`CKM_SLH_DSA`/`CKM_HSS` + keygens — zero
-   `CKM_HASH_*`; repo-wide grep of `src/vendor/pkcs11-provider/`
-   confirms not a single reference.
+- **§6.67.6, `CKM_HASH_ML_DSA` (the one GENERIC mechanism)**: *"The
+  data passed in is an already hashed message PHM."* Input length
+  "Length of hash". This one genuinely wants a pre-hashed input.
+- **§6.67.7, `CKM_HASH_ML_DSA_<hash>` (the TEN hash-specific
+  mechanisms — `_SHA224` through `_SHAKE256`)**: *"This mechanism
+  computes the entire HashML-DSA specification, **including the
+  hashing on token**. The data passed in is the message M."* — a
+  **separate, standard PKCS#11 pattern** ("mechanism with hashing"),
+  the same shape RSA/DSA/ECDSA already use elsewhere in this spec
+  (§6.1.14, §6.2.12, §6.3.13). SLH-DSA mirrors this exactly at
+  §6.69.6/§6.69.7. **Independently confirmed against the OASIS PKCS#11
+  TC's own v3.3 working draft** (`oasis-tcs/pkcs11` GitHub repo,
+  `working/doc/spec/ml_dsa.md`) — identical §6.67.7 wording verbatim,
+  including the "SHA-224 through SHAKE256" hash table, so this isn't a
+  drafting quirk of one revision.
 
-2. **The OpenSSL-facing hook already exists and is currently a silent
-   no-op.** `p11prov_sig_op_init` (`sig/signature.c:276-282`) parses a
+Both engines' `preHash=true` dispatch (`HASH_MLDSA_CASE` macro in C++,
+`Ph`-mapped `try_hash_sign` in Rust) is the §6.67.7 "with hashing"
+shape — **already spec-correct for all 10 hash-specific mechanisms**.
+The real, narrower gap: neither engine's dispatch sets `preHash=true`
+for the *bare* generic `CKM_HASH_ML_DSA`/`CKM_HASH_SLH_DSA` (only the
+`HASH_MLDSA_CASE`-macro'd specific mechanisms do), so that ONE
+mechanism per family would currently mis-treat an already-hashed PHM
+input as a raw message needing full encoding — genuinely wrong, but
+affecting 2 of the 22 total codepoints (ML-DSA + SLH-DSA combined), not
+all of them. This also **removes the "decision point"** the original
+plan flagged: there is no conformance trade-off to make, no risk to
+the hub playground's real dependency on the `_<hash>`-specific
+mechanisms (confirmed by a live consumer-inventory sweep before this
+correction landed — `pqctoday-hub`'s Sign/Verify Playground drives
+`CKM_HASH_ML_DSA_*`/`CKM_HASH_SLH_DSA_*` with raw typed text, exactly
+the input shape §6.67.7 already promises), and nothing to ask the user
+about.
+
+<details><summary>Original (incorrect) grounding — kept for the audit
+trail, not for reference</summary>
+
+~~NEW FINDING — both engines deviate identically from the ratified
+spec's input contract, and nothing has ever caught it because all
+existing tests are cross-engine. Spec §6.67.6 is unambiguous: "The
+data passed in is an already hashed message PHM." But C++'s
+`buildPreHashEncoding()` and Rust's `try_hash_sign()` both hash the
+raw message internally regardless of which of the 11 mechanisms was
+requested — same failure-mode class as the audit's own "LLM verdicts /
+row-level ratchet" lessons.~~ (Wrong: this only actually applies to the
+1-of-11 bare generic mechanism per family; the other 10 are the
+"with hashing" pattern and correctly hash on token by design.)
+
+</details>
+
+**Grounding (still accurate):**
+
+1. Provider registers none of the 22 codepoints (11 × ML-DSA, handled
+   here; 11 × SLH-DSA, R36). `PQC_MECHS` (`provider.c:867`) has only
+   `CKM_ML_DSA`/`CKM_SLH_DSA`/`CKM_HSS` + keygens.
+2. `p11prov_sig_op_init` (`sig/signature.c:276-282`) already parses a
    caller-supplied digest name into `sigctx->digest` — but
    `p11prov_mldsa_set_mechanism` (`sig/mldsa.c:42`) unconditionally
-   sets `CKM_ML_DSA` and never reads it. So a caller doing
-   `EVP_DigestSignInit(ctx, "SHA256", …)` against an ML-DSA pkcs11 key
-   today apparently gets pure ML-DSA over the raw message with the
-   digest silently ignored — **confirm live as step 1** (it may error
-   somewhere else downstream; do not trust this static read). Whatever
-   the confirmed behavior is, it is wrong: either silently-ignored
-   (worst) or an unexplained error (merely unhelpful). Note OpenSSL's
-   own default provider REJECTS a digest for ML-DSA ("OpenSSL
-   explicitly does not implement pre-hash HashML-DSA" — audit §1), so
-   there is no name-collision or interop hazard in giving the digest
-   real meaning here: any caller passing one against a pkcs11 ML-DSA
-   key is already off the default provider's map.
+   sets `CKM_ML_DSA` and never reads it. **Live-confirmed** (this
+   plan's own execution): `openssl dgst -sha256 -sign` against a
+   pkcs11 ML-DSA key today returns success silently, but verifies as a
+   *plain, unhashed* ML-DSA signature over the raw message — the
+   `-sha256` flag is completely and silently ignored, not merely
+   unsupported. Worst of the two hypothesized outcomes, now confirmed
+   rather than assumed.
 
-3. **NEW FINDING — both engines deviate identically from the ratified
-   spec's input contract, and nothing has ever caught it because all
-   existing tests are cross-engine.** Spec §6.67.6 is unambiguous:
-   *"The data passed in is an already hashed message PHM."* But:
-   - C++: `buildPreHashEncoding()` (`OSSLMLDSA.cpp:145-230`) takes the
-     incoming data as the RAW message and **hashes it itself**
-     (`EVP_Digest(message…)`) before building
-     `M' = 0x01 ‖ ctxlen ‖ ctx ‖ OID ‖ PH(M)`.
-   - Rust: `handlers.rs` maps to `fips204::Ph` and calls the crate's
-     `try_hash_sign(message, ctx, ph)` — whose own doc comment reads
-     *"Attempt to sign the **hash of the given message**"*: it also
-     takes the raw message and hashes internally.
-   A spec-conforming caller sending a 32-byte PHM would have that PHM
-   hashed AGAIN — producing a signature no conforming implementation
-   can verify. The deviation is symmetric across both engines, so every
-   cross-engine test passes while both are wrong against the standard.
-   (Same failure-mode class as the audit's own "LLM verdicts /
-   row-level ratchet" lessons: mutually-consistent implementations
-   proving each other correct.) The SLH-DSA arms (`OSSLSLHDSA.cpp:304`,
-   `fips205::Ph`) share the identical shape — handled in R36, decided
-   here.
+**Work, in order (no decision point — proceed directly):**
 
-**Work, in order:**
+1. **Provider wiring, the 10 hash-specific mechanisms (main
+   deliverable).** In `p11prov_mldsa_set_mechanism`, when
+   `sigctx->digest != 0`, select the matching `CKM_HASH_ML_DSA_<hash>`
+   codepoint (`CKM_SHA256`→`CKM_HASH_ML_DSA_SHA256`, … , SHAKE
+   included; unmappable digest → loud `CKR_MECHANISM_INVALID`, never
+   silent fallback to pure). Parameter: `CK_SIGN_ADDITIONAL_CONTEXT`,
+   unchanged from what the engines already expect for these
+   mechanisms. Data flow: the caller's raw message streams through
+   exactly like plain `CKM_ML_DSA` today (both engines already hash it
+   on-token correctly) — no new engine-side hashing logic needed for
+   this part at all. Add the 10 mechanisms to `PQC_MECHS`, gated the
+   same way as everything else (present only if the token advertises
+   them).
+2. **Bare generic `CKM_HASH_ML_DSA` — small, separate engine fix.**
+   Both engines need a real (not `preHash`-macro'd) code path that
+   treats the incoming data as an already-complete PHM: build
+   `M' = 0x01 ‖ ctxlen ‖ ctx ‖ OID ‖ PHM` directly from the caller's
+   bytes, skipping the internal `EVP_Digest`/hash call entirely
+   (C++: a `useRawEncoding`-style branch in `OSSLMLDSA.cpp` that skips
+   `buildPreHashEncoding`'s own hashing step; Rust: needs a
+   `fips204-patched` entry point taking a pre-hashed PHM directly —
+   the crate's internal Eq. 6c path already exists as an unexported
+   internal function, same shape as R34's `ext_mu` discovery). Lower
+   priority than item 1 — no confirmed live consumer of the *bare*
+   generic mechanism specifically (the hub uses the hash-specific
+   ones) — do this after item 1 lands and regresses clean, not before.
+3. **Registration surface**: no new OpenSSL algorithm names for either
+   item. The existing `ML-DSA-44/65/87` signature registrations gain
+   real digest-parameter support, reachable via the standard
+   `EVP_DigestSignInit(ctx, "SHA256", …)` / `pkeyutl -digest sha256`
+   API with `provider=pkcs11` pinned. Document in the provider README
+   that this selects HashML-DSA (FIPS 204 §5.4) semantics, which the
+   default provider deliberately does not implement.
 
-1. **Live-confirm grounding item 2**: what actually happens today when
-   an OpenSSL caller passes a digest name for a pkcs11 ML-DSA key
-   (sign AND verify, one-shot AND update/final). Record it before
-   changing it.
-2. **Settle the PHM conformance question — decision point, likely
-   AskUserQuestion material.** Options:
-   - (a) **Fix both engines to spec**: `CKM_HASH_ML_DSA*` input becomes
-     PHM (already-hashed); engines stop hashing internally (C++: build
-     M' from the incoming bytes directly; Rust: needs a
-     `fips204-patched` entry that accepts PHM — the crate's internal
-     Eq. 6c path takes `phm` directly, so this is the same
-     thread-it-through shape as R34's `ext_mu`). Spec-correct,
-     matches what any third-party PKCS#11 client will send, and is the
-     whole point of the mechanism (short input to the token). Risk:
-     breaks any EXISTING consumer of these mechanisms via KMIP/wasm —
-     inventory first (`grep` KMIP server + hub wasm surface for
-     `CKM_HASH_ML_DSA`/`HASH_MLDSA` usage; if nothing consumes them
-     yet, the fix is free).
-   - (b) Keep engine behavior, document the deviation. Rejected-by-
-     default: it makes the token wire-incompatible with every
-     conforming PKCS#11 client for these codepoints, forever.
-   Recommendation: (a), gated on the consumer inventory coming back
-   empty or migratable.
-3. **Provider wiring** (after 2 lands): in
-   `p11prov_mldsa_set_mechanism`, when `sigctx->digest != 0` select the
-   matching hash-specific mechanism (`CKM_SHA256`→
-   `CKM_HASH_ML_DSA_SHA256`, …, SHAKE included; unmappable digest →
-   loud `CKR_MECHANISM_INVALID`, never silent fallback to pure).
-   Parameter: `CK_SIGN_ADDITIONAL_CONTEXT` as today (spec: the
-   hash-specific mechanisms take the same optional param; only generic
-   `CKM_HASH_ML_DSA` needs `CK_HASH_SIGN_ADDITIONAL_CONTEXT` — using
-   the specific codepoints avoids the second struct entirely). Data
-   flow per the digest paths: provider hashes the streamed message in
-   software (public data — same precedent as the existing
-   `fallback_digest` path) and sends the PHM in a single `C_Sign`,
-   exactly the accumulate-then-single-call shape `sig/hss.c` already
-   established. Add the 11 mechanisms to `PQC_MECHS` gated the same
-   way everything else is (present only if the token advertises them).
-4. **Registration surface**: no new OpenSSL algorithm names. The
-   existing `ML-DSA-44/65/87` signature registrations gain real
-   digest-parameter support — reachable via the standard
-   `EVP_DigestSignInit(ctx, "SHA256", …)` /
-   `pkeyutl -digest sha256`-style API with `provider=pkcs11` pinned.
-   Document in the provider README that this selects HashML-DSA
-   (FIPS 204 §5.4) semantics, which the default provider deliberately
-   does not implement.
+**Proof plan:** ACVP/NIST HashML-DSA KAT vectors exist for the
+hash-specific mechanisms — verify at least one (param-set, digest)
+pair against official vectors in both engines (not just cross-engine —
+the exact blind spot the corrected grounding above flags as a
+methodology lesson even though the original finding was wrong). New
+harness case: token HashML-DSA sign via `EVP_DigestSign` → verify via
+the provider. Sabotage twins: tampered message, wrong digest at
+verify, context mismatch. Negative control: default provider (no
+propquery) must reject the same digest-ML-DSA call — proving the
+harness case genuinely exercises pkcs11. Regression: full harness,
+CTest, `cargo test --release` (only if item 2 touches `rust/`).
 
-**Proof plan:** the PHM fix (step 2a) gets KAT-grade verification:
-ACVP/NIST HashML-DSA vectors exist — verify at least one
-(param-set, digest) pair against official vectors in BOTH engines, not
-just cross-engine (the exact blind spot grounding item 3 exposed).
-Provider path: new harness case — token HashML-DSA sign via
-`EVP_DigestSign` → verify via the provider AND cross-check the M'
-construction independently (script recomputes M' + verifies with the
-engine's raw `C_Verify` on a second arena). Sabotage twins: tampered
-PHM, wrong digest at verify, context mismatch. Negative control:
-default provider (no propquery) must REJECT the same digest-ML-DSA
-call — proving the harness case genuinely exercises pkcs11.
-Regression: full harness, CTest, `cargo test --release`.
+**Execution update (2026-08-26):** item 1 (the real deliverable) done
+and live-verified; item 2 (bare generic `CKM_HASH_ML_DSA` PHM fix)
+deferred — no confirmed consumer, tracked as its own follow-up rather
+than folded into this commit. `p11prov_mldsa_set_mechanism` now maps
+`sigctx->digest` (already parsed by `p11prov_sig_op_init`, previously
+never read) to the matching `CKM_HASH_ML_DSA_<hash>` codepoint for the
+8 digests reachable through `p11prov_digest_get_by_name` today
+(SHA224/256/384/512, SHA3-224/256/384/512 — SHAKE128/256 stay
+unreachable via this path because the provider's own digest-name
+table, `digests.c`, has no entry for them yet; a separate, pre-existing
+limitation, not a regression). Loud `CKR_MECHANISM_INVALID` for
+anything unmapped, never a silent fallback to pure ML-DSA.
+
+Live-confirmed before the fix, not assumed: `openssl dgst -sha256
+-sign` against a pkcs11 ML-DSA key returned success and produced a
+signature that verified as a **plain, unhashed** raw-message
+signature — the digest was completely and silently discarded, the
+worse of the two hypothesized outcomes. After the fix: the same
+signature no longer verifies as a raw-message signature (proving the
+digest is genuinely honored) and round-trips correctly through
+`dgst -sha256 -verify`. Negative control confirmed: the default
+provider explicitly refuses ("Explicit digest not supported for
+ML-DSA operations"), so no ambiguity about which provider produced the
+result. Two sabotage controls pass: wrong digest at verify, tampered
+message.
+
+One real bug found in the Rust arm, same class as R34's: the ten
+hash-specific mechanisms are explicitly single- **and** multi-part per
+§6.67.7, and OpenSSL's own `EVP_DigestSign` machinery drives even a
+one-shot `dgst -sign` through `C_SignUpdate`/`C_SignFinal` internally
+— the C++ arm's `HASH_MLDSA_CASE` macro has always set
+`bAllowMultiPartOp` for these (pre-existing, unrelated to this item),
+but Rust's own `sign_mech_supports_multipart` allowlist never included
+them, so `dgst -sha256 -sign` against the Rust arm failed at the very
+first `C_SignUpdate`. Fixed by adding `is_prehash_ml_dsa(mech)` (an
+already-existing helper covering exactly the 10 hash-specific
+mechanisms, correctly excluding the single-part-only bare generic one)
+to the allowlist — no new accumulate logic needed, same
+accumulate-then-single-call machinery R34 already proved out.
+
+No independent third-party oracle was available to cross-verify
+against for this item (unlike R34's µ, where OpenSSL's own default
+provider could serve as the check) — the default provider explicitly
+refuses HashML-DSA entirely. The underlying `preHash`/`Ph`-based crypto
+in both engines is separately covered by the Rust crate's own
+pre-existing ACVP KAT tests (`native::prehash_kat`,
+`native::prehash_kat_slh`, bypassing PKCS#11 entirely); what this item
+adds and proves is the provider's own routing, verified via
+sign/verify round-trip, negative control, and sabotage.
+
+New permanent harness cases `T29` (C++) and `T29b` (Rust, twin — no
+Rust engine change was needed beyond the multipart allowlist fix,
+proving the provider's shared C routing reaches both engines
+identically). Full regression: harness 80/80 (two cases gained, zero
+regressions), C++ CTest 8/8, `cargo test --release` full pass (Rust
+touched). One commit for this item.
 
 ---
 
 ### R36 — HashSLH-DSA twin — effort S–M
 
-**Grounding:** identical shape to R35, verified: ratified spec defines
-`CKM_HASH_SLH_DSA` (generic, `0x34`) + ten specific codepoints
-(`0x36`–`0x3f`); both engines implement all of it
+**Grounding:** identical shape to R35's *corrected* understanding,
+verified: ratified spec defines `CKM_HASH_SLH_DSA` (§6.69.6, generic,
+`0x34`, PHM input) + ten specific "with hashing" codepoints (§6.69.7,
+`0x36`–`0x3f`, raw message, hash-on-token). Both engines already
+implement the §6.69.7 shape correctly for the 10 specific mechanisms
 (`OSSLSLHDSA.cpp:304/429` `preHash` branches; `constants.rs:776-787` +
-`fips205::Ph` mapping in `handlers.rs:462+`); provider has zero
-references; OpenSSL's default provider likewise does not implement
-pre-hash SLH-DSA, so the digest hook is free here too. Both engines
-share R35's same hash-internally deviation (the `Ph` pattern is
-literally the same code shape), so **R35's step-2 decision is binding
-here** — do not re-litigate it, apply it.
+`fips205::Ph` mapping in `handlers.rs:462+`) — same "already correct,
+just unregistered" situation as ML-DSA, not the hash-internally
+deviation the original (wrong) R35 grounding claimed. Provider has
+zero references; OpenSSL's default provider likewise does not
+implement pre-hash SLH-DSA, so the digest hook is free here too. No
+decision point here either, for the same reason R35 no longer has one.
 
-**Work:** pattern-copy of R35 steps 2–4 onto `sig/slhdsa.c` and the
-SLH-DSA arms of both engines (12 parameter sets × the digest map;
-`sig/slhdsa.c` already follows `mldsa.c`'s structure from R1, so the
-diff shape is known). KAT verification for at least one
+**Work:** pattern-copy of R35's corrected work items 1–3 onto
+`sig/slhdsa.c` and the SLH-DSA arms of both engines (12 parameter
+sets × the digest map; `sig/slhdsa.c` already follows `mldsa.c`'s
+structure from R1, so the diff shape is known). Item 2 (bare generic
+`CKM_HASH_SLH_DSA` PHM fix) carries the same low-priority, no-confirmed-
+consumer status as ML-DSA's. KAT verification for at least one
 (param-set, digest) pair from official vectors, both engines. Same
 proof plan and controls as R35, SLH-DSA-flavored (7856-byte /
 SHA2-128s baseline sizes already proven in T12sign).

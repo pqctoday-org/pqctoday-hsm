@@ -1881,6 +1881,57 @@ open('$w/sig_bad.bin','wb').write(bytes(d))"
 }
 run_case T28 PASS "ML-DSA external-µ vendor mechanism (CKM_PQCTODAY_ML_DSA_MU): independently-computed µ signs through the vendor mechanism, verifies both via the mechanism itself AND — the real proof — OpenSSL's completely independent native ML-DSA implementation against the ORIGINAL message; four sabotage controls (tampered µ, tampered signature, context+mu rejected, wrong-length µ rejected) (remediation R34)" t28
 
+# ─── T29: HashML-DSA digest routing, CKM_HASH_ML_DSA_<hash> (remediation R35) ─
+# PKCS#11 v3.2 §6.67.7 "HashML-DSA Signature with hashing": these 10
+# mechanisms hash ON TOKEN, taking the raw message M -- both engines already
+# implement this correctly, but the provider's own p11prov_mldsa_set_mechanism
+# unconditionally sent CKM_ML_DSA regardless of the caller's own digest
+# choice, silently ignoring `openssl dgst -sha256 -sign` entirely (live-
+# confirmed before the fix: the resulting signature verified as a PLAIN
+# raw-message signature, not a HashML-DSA one -- the worst of the two
+# hypothesized outcomes, not the merely-unhelpful one). No engine-side change
+# needed; this is provider routing only (`sigctx->digest` was already parsed
+# and simply never read).
+t29() { local w; w=$(mk_arena hashmldsa "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm ML-DSA-65 -out "$w/k.pem" 2>/dev/null || return 1
+  echo "T29 HashML-DSA digest-routing test message" > "$w/msg.txt"
+
+  O dgst -sha256 -propquery "?provider=pkcs11" -sign "pkcs11:token=hashmldsa;type=private" \
+    -out "$w/sig.bin" "$w/msg.txt" 2>/dev/null || { echo "dgst -sha256 -sign failed"; return 1; }
+
+  # The real proof the digest is genuinely honored, not silently dropped: a
+  # signature this shape must NOT verify as a plain raw-message signature.
+  O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=hashmldsa;type=public" \
+    -in "$w/msg.txt" -sigfile "$w/sig.bin" 2>/dev/null \
+    && { echo "HashML-DSA signature verified as a PLAIN raw-message signature -- the digest was silently ignored"; return 1; }
+
+  O dgst -sha256 -propquery "?provider=pkcs11" -verify "pkcs11:token=hashmldsa;type=public" \
+    -signature "$w/sig.bin" "$w/msg.txt" 2>/dev/null || { echo "HashML-DSA round-trip verify failed"; return 1; }
+
+  # Negative control: the default provider explicitly refuses an explicit
+  # digest for ML-DSA (audit-confirmed, "does not implement pre-hash
+  # HashML-DSA") -- proves this case genuinely exercises pkcs11, not a
+  # coincidental default-provider path (R13 discipline).
+  O pkey -pubin -propquery "?provider=pkcs11" -in "pkcs11:token=hashmldsa;type=public" \
+    -pubout -out "$w/pub.pem" 2>/dev/null || return 1
+  O dgst -sha256 -provider default -verify "$w/pub.pem" -signature "$w/sig.bin" "$w/msg.txt" 2>/dev/null \
+    && { echo "default provider accepted an explicit digest for ML-DSA -- expected refusal"; return 1; }
+
+  # Sabotage 1: wrong digest at verify time must fail.
+  O dgst -sha384 -propquery "?provider=pkcs11" -verify "pkcs11:token=hashmldsa;type=public" \
+    -signature "$w/sig.bin" "$w/msg.txt" 2>/dev/null \
+    && { echo "wrong-digest verify succeeded -- must not"; return 1; }
+
+  # Sabotage 2: tampered message must fail.
+  echo "tampered" > "$w/msg_bad.txt"
+  O dgst -sha256 -propquery "?provider=pkcs11" -verify "pkcs11:token=hashmldsa;type=public" \
+    -signature "$w/sig.bin" "$w/msg_bad.txt" 2>/dev/null \
+    && { echo "tampered-message verify succeeded -- must not"; return 1; }
+
+  return 0
+}
+run_case T29 PASS "HashML-DSA digest routing (CKM_HASH_ML_DSA_<hash>, PKCS#11 v3.2 §6.67.7): 'openssl dgst -sha256 -sign' against a pkcs11 ML-DSA key now genuinely routes to HashML-DSA instead of silently signing the raw message (the worst of the two hypothesized outcomes, live-confirmed before the fix); round-trip verify, negative control (default provider refuses), two sabotage controls (wrong digest, tampered message) (remediation R35)" t29
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 
@@ -2220,6 +2271,46 @@ open('$w/mu_bad.bin','wb').write(bytes(d))"
   return 0
 }
 run_case T28b PASS "ML-DSA external-µ vendor mechanism, Rust arm: same proof as T28 over libsofthsmrustv3.so -- independently-computed µ signs, verifies via the mechanism AND OpenSSL's native implementation against the original message, tampered-µ sabotage rejected (remediation R34)" t28b
+
+# ─── T29b: HashML-DSA digest routing, Rust arm (remediation R35) ───────────
+t29b() { # Rust-arm twin of T29 -- same proof, over libsofthsmrustv3.so. No
+  # Rust-engine code change was needed for this item (its own CKM_HASH_ML_DSA_*
+  # dispatch already correctly hashed on token) -- this proves the provider's
+  # shared C routing fix reaches both engines identically.
+  [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/hashmldsarust"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label hashmldsarust --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm ML-DSA-65 -out "$w/k.pem" 2>/dev/null || return 1
+  echo "T29b HashML-DSA digest-routing RUST test message" > "$w/msg.txt"
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O dgst -sha256 -propquery "?provider=pkcs11" -sign "pkcs11:token=hashmldsarust;type=private" \
+      -out "$w/sig.bin" "$w/msg.txt" 2>/dev/null || { echo "Rust-arm dgst -sha256 -sign failed"; return 1; }
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=hashmldsarust;type=public" \
+      -in "$w/msg.txt" -sigfile "$w/sig.bin" 2>/dev/null \
+      && { echo "Rust-arm: HashML-DSA signature verified as a plain raw-message signature -- digest silently ignored"; return 1; }
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O dgst -sha256 -propquery "?provider=pkcs11" -verify "pkcs11:token=hashmldsarust;type=public" \
+      -signature "$w/sig.bin" "$w/msg.txt" 2>/dev/null || { echo "Rust-arm HashML-DSA round-trip verify failed"; return 1; }
+
+  echo "tampered" > "$w/msg_bad.txt"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O dgst -sha256 -propquery "?provider=pkcs11" -verify "pkcs11:token=hashmldsarust;type=public" \
+      -signature "$w/sig.bin" "$w/msg_bad.txt" 2>/dev/null \
+      && { echo "Rust-arm: tampered-message verify succeeded -- must not"; return 1; }
+
+  return 0
+}
+run_case T29b PASS "HashML-DSA digest routing, Rust arm: same proof as T29 over libsofthsmrustv3.so -- no engine-side change needed, proves the provider's shared routing fix reaches both engines identically; round-trip verify, tampered-message sabotage rejected (remediation R35)" t29b
 
 
 # ─── R0.1 regression guard ──────────────────────────────────────────────────

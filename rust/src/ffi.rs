@@ -9825,6 +9825,16 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SLH_DSA
             | CKM_EDDSA
     ) || hmac_general_base(mech).is_some()
+        // Remediation R35: CKM_HASH_ML_DSA_<hash> (PKCS#11 v3.2 §6.67.7,
+        // "with hashing") is explicitly single- AND multiple-part; the C++
+        // arm's own HASH_MLDSA_CASE macro has always set bAllowMultiPartOp
+        // for these, this was the one arm missing it (live-traced:
+        // OpenSSL's own EVP_DigestSign machinery drives even a one-shot
+        // `dgst -sign` through Update/Final, same discovery as R34's
+        // CKM_PQCTODAY_ML_DSA_MU). The bare generic CKM_HASH_ML_DSA
+        // (single-part only per §6.67.6) is correctly NOT included here —
+        // is_prehash_ml_dsa() only matches the 10 hash-specific mechanisms.
+        || is_prehash_ml_dsa(mech)
 }
 
 /// Shared §5.13.3/§5.15.3 gate for the four Update/Final entry points:

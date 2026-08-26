@@ -74,6 +74,64 @@ static CK_RV p11prov_mldsa_set_mechanism(P11PROV_SIG_CTX *sigctx)
         }
         return CKR_OK;
     }
+    /* Remediation R35 (phase 7): PKCS#11 v3.2 §6.67.7 "HashML-DSA
+     * Signature with hashing" -- CKM_HASH_ML_DSA_<hash> computes the
+     * ENTIRE HashML-DSA spec, including hashing ON TOKEN; the data
+     * passed in is the raw message M, exactly like plain CKM_ML_DSA.
+     * (Not to be confused with the bare generic CKM_HASH_ML_DSA,
+     * §6.67.6, which wants an already-hashed PHM -- a separate,
+     * narrower gap, not addressed by this mapping.) sigctx->digest is
+     * already populated by p11prov_sig_op_init from the caller's
+     * EVP_DigestSignInit digest name; == 0 means none was given
+     * (rsasig.c's own convention, reused here). */
+    if (sigctx->digest != 0) {
+        CK_MECHANISM_TYPE hash_mech;
+        switch (sigctx->digest) {
+        case CKM_SHA224:
+            hash_mech = CKM_HASH_ML_DSA_SHA224;
+            break;
+        case CKM_SHA256:
+            hash_mech = CKM_HASH_ML_DSA_SHA256;
+            break;
+        case CKM_SHA384:
+            hash_mech = CKM_HASH_ML_DSA_SHA384;
+            break;
+        case CKM_SHA512:
+            hash_mech = CKM_HASH_ML_DSA_SHA512;
+            break;
+        case CKM_SHA3_224:
+            hash_mech = CKM_HASH_ML_DSA_SHA3_224;
+            break;
+        case CKM_SHA3_256:
+            hash_mech = CKM_HASH_ML_DSA_SHA3_256;
+            break;
+        case CKM_SHA3_384:
+            hash_mech = CKM_HASH_ML_DSA_SHA3_384;
+            break;
+        case CKM_SHA3_512:
+            hash_mech = CKM_HASH_ML_DSA_SHA3_512;
+            break;
+        default:
+            /* Includes SHAKE128/256: p11prov_digest_get_by_name's own
+             * digest_map (digests.c) has no entry for them today, so
+             * sigctx->digest can never actually hold one yet -- this
+             * default arm exists for when that changes, not dead code
+             * against the current digest_map. Loud rejection, never a
+             * silent fallback to pure (unhashed) ML-DSA. */
+            P11PROV_raise(sigctx->provctx, CKR_MECHANISM_INVALID,
+                          "Unsupported digest for HashML-DSA");
+            return CKR_MECHANISM_INVALID;
+        }
+        sigctx->mechanism.mechanism = hash_mech;
+        if (sigctx->mldsa_params.hedgeVariant != CKH_HEDGE_PREFERRED) {
+            sigctx->mechanism.pParameter = &sigctx->mldsa_params;
+            sigctx->mechanism.ulParameterLen = sizeof(sigctx->mldsa_params);
+        } else {
+            sigctx->mechanism.pParameter = NULL;
+            sigctx->mechanism.ulParameterLen = 0;
+        }
+        return CKR_OK;
+    }
     sigctx->mechanism.mechanism = CKM_ML_DSA;
     /* Per PKCS#11 v3.2 §6.67.5, CKM_ML_DSA takes an OPTIONAL
      * CK_SIGN_ADDITIONAL_CONTEXT parameter:
