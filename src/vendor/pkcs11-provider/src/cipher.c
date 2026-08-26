@@ -377,7 +377,19 @@ static CK_RV p11prov_cipher_prep_mech(struct p11prov_cipher_ctx *ctx,
     case CKM_AES_CFB8:
         /* TODO -- unlike CTR/GCM (phase 5 R26 prerequisite), still
          * genuinely unimplemented: none of these were in this item's
-         * own scope. */
+         * own scope.
+         *
+         * remediation R32 (2026-08-26): checked both engines directly --
+         * neither implements OFB or any CFB* variant (SoftHSM.cpp's
+         * symmetric dispatch handles exactly ECB/CBC/CBC_PAD/CTR/GCM/
+         * CHACHA20/CHACHA20_POLY1305; the Rust engine has no trace of
+         * them either). This stub therefore fronts mechanisms that do
+         * not exist behind it -- finishing it here would still return
+         * CKR_MECHANISM_INVALID (or worse, a confusing failure further
+         * down) with no engine to actually drive. Implementing these for
+         * real needs engine work FIRST, in both engines, with their own
+         * test suites, before this provider-side stub is worth touching
+         * again. */
         return CKR_MECHANISM_INVALID;
 
     case CKM_AES_GCM:
@@ -1581,6 +1593,20 @@ DISPATCH_TABLE_CIPHER_FN(aes, 128, gcm, CKM_AES_GCM);
 DISPATCH_TABLE_CIPHER_FN(aes, 192, gcm, CKM_AES_GCM);
 DISPATCH_TABLE_CIPHER_FN(aes, 256, gcm, CKM_AES_GCM);
 
+/* remediation R32 (2026-08-26): these three dispatch tables register a
+ * DISPATCH_TABLE_CIPHER_FN for CKM_AES_CCM the same way every other
+ * mechanism here does, but CCM's own registration in provider.c is
+ * dead: neither the C++ engine (SoftHSM.cpp's symmetric dispatch has
+ * no CKM_AES_CCM case) nor the Rust engine implements it, so any real
+ * call routes to CKR_MECHANISM_INVALID at the engine boundary
+ * regardless of what this table sets up. Left in place (not stripped)
+ * deliberately: removing dead-but-harmless vendored dispatch tables
+ * would churn upstream-diff surface for zero behavior change; the
+ * comment carries the knowledge at near-zero risk instead. Real CCM
+ * support needs engine work first (both engines, own test suites) --
+ * and note PKCS#11's CK_CCM_PARAMS needs the total data length up
+ * front, which collides with the streaming EVP API harder than GCM's
+ * AAD-timing wrinkle (phase-6 R30) did. */
 DISPATCH_TABLE_CIPHER_FN(aes, 128, ccm, CKM_AES_CCM);
 DISPATCH_TABLE_CIPHER_FN(aes, 192, ccm, CKM_AES_CCM);
 DISPATCH_TABLE_CIPHER_FN(aes, 256, ccm, CKM_AES_CCM);

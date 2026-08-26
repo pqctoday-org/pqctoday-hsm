@@ -403,6 +403,23 @@ behind them.
 **Proof plan:** none (no behavior change). Regression run anyway
 before commit, per ground rules, since comments touch compiled files.
 
+**Execution update (2026-08-26):** disposition confirmed by the user
+(asked via the plan's own recommendation — "Annotate, don't delete") —
+executed as written, no deviation. Annotated both provider sites in
+`cipher.c`: the OFB/CFB* `/* TODO */` case in `p11prov_cipher_prep_mech`
+now states neither engine implements these mechanisms; the three CCM
+`DISPATCH_TABLE_CIPHER_FN` entries get the same note plus the
+`CK_CCM_PARAMS`/streaming-API wrinkle for any future implementer.
+Coverage audit's own "What remains" note (R26's section) and F-row
+narrative updated to point at this item rather than describing CCM/
+OFB/CFB* as open provider work. No behavior change — comment-only.
+Regression: harness 76/76; C++ CTest 8/8 (one `p11_v32_compliance`
+failure on the first post-edit run reproduced as pre-existing test
+flakiness, not a regression — a comment-only diff cannot change
+runtime behavior, and two clean reruns both came back 8/8). No `rust/`
+source touched. One commit for this item — the last of phase-6's
+active work; R33 and R27 stay parked per the plan.
+
 ---
 
 ### R33 (PARKED) — OP-3 parity tier: ML-KEM public SPKI/text encoders — sketch only

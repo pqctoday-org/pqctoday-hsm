@@ -2279,7 +2279,9 @@ five cases gained, zero regressions.
 **What remains, explicitly not done by this item:** AES-CCM (still
 genuinely unregistered, out of this item's own scope — user's choice
 named AES-CTR/GCM specifically); AES-OFB/CFB* (still the genuine `/*
-TODO */` stub, never touched); the `AEAD_DECRYPT_MAX_MSG_LEN` ceiling
+TODO */` stub, never touched — **reframed by phase-6 R32, see below:
+neither engine implements CCM or OFB/CFB\* at all, so this and the CCM
+gap above are honest, not open provider work**); the `AEAD_DECRYPT_MAX_MSG_LEN` ceiling
 itself has no dedicated over-the-limit test proving it fails cleanly
 rather than corrupting something (asserted from code reading, not
 independently live-verified — **closed by phase-6 R30, see below**);
@@ -2470,6 +2472,44 @@ this was never a real routing gap.
 Regression: **harness 76/76**, **C++ CTest 8/8**; no `rust/` source
 touched, `cargo test` not re-run. Root cause found in the first
 instrumented run — well inside the timebox, no second session needed.
+
+**Phase 6, R32 (AES-CCM / OFB / CFB\* disposition), DONE — reframed,
+not implemented; disposition only, no behavior change.** The previous
+session-end gap report listed "AES-CCM still unregistered" and
+"AES-OFB/CFB\* still a `/* TODO */` stub" as if they were provider work
+waiting to happen. Checked against both engines directly:
+**neither engine implements any of them.** `SoftHSM_cipher.cpp`'s
+symmetric dispatch handles exactly
+ECB/CBC/CBC_PAD/CTR/GCM/CHACHA20/CHACHA20_POLY1305 — no `CKM_AES_CCM`,
+`CKM_AES_OFB`, or `CKM_AES_CFB*` anywhere in the C++ engine; the Rust
+engine has no trace of them either. A provider registration for any of
+these would route to `CKR_MECHANISM_INVALID` at the engine boundary
+regardless of what the provider side does. The provider's "gaps" here
+are therefore honest, not open work: the OFB/CFB\* stub and CCM's
+unreachable dispatch tables front mechanisms that do not exist behind
+them.
+
+**Disposition (user's explicit choice, asked at this plan's own
+decision point): annotate, don't delete.** Stripping the dead CCM
+tables/`case` arms would churn vendored code for zero behavior change
+and create upstream-diff noise the comments avoid at near-zero risk.
+Annotated both provider sites so the next reader doesn't repeat this
+plan's own initial mistake of treating them as unimplemented provider
+work: the OFB/CFB\* `/* TODO */` case in `p11prov_cipher_prep_mech`
+(`cipher.c`) now states plainly that neither engine implements these
+mechanisms, so finishing the stub is pointless without engine work
+first; CCM's three `DISPATCH_TABLE_CIPHER_FN(aes, *, ccm, ...)` entries
+(`cipher.c`) get the same note, plus CCM's own extra wrinkle if anyone
+ever revisits it: PKCS#11's `CK_CCM_PARAMS` needs the total data length
+up front, which collides with the streaming EVP API harder than GCM's
+AAD-timing wrinkle (phase-6 R30) did.
+
+No behavior change — comment-only. Regression run anyway per this
+item's own ground rules, since comments touch compiled files: **harness
+76/76**, **C++ CTest 8/8** (one `p11_v32_compliance` failure on the
+first run reproduced as pre-existing flakiness — a comment-only diff
+cannot change runtime behavior — confirmed by two clean reruns, 8/8
+both times). No `rust/` source touched.
 
 ## 7. Companion document
 
