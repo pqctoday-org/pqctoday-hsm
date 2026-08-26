@@ -361,6 +361,95 @@ new parameter shapes on existing ones).
 
 G2 (Split Key) is next — independent of G1, no ordering dependency.
 
+### 2026-08-26 — G2 (Split Key vendor RPCs)
+
+Shipped, all live-verified. Adds `SplitKey`/`JoinKey` to `Pkcs11V32` —
+explicitly labeled a VENDOR EXTENSION in the proto, gRPC, REST, and
+ledger, since there is no `CKM_PQCTODAY_SPLIT_KEY` `C_*` dispatch arm
+anywhere in the engine to mirror (confirmed again this slice, same
+finding as §0). Per the user's locked answer, this is real coverage, not
+the `N/A-engine` fallback row.
+
+**Wire shape, exactly as decided**: method + parts + threshold +
+optional polynomial in, `repeated {key_part_identifier, object_handle}`
+out. `method`/`polynomial` use the KMIP 3.0 §11.54/§11.55 enumeration
+codepoints VERBATIM — the same mapping `kmip/src/ops/split_key.rs`'s own
+Create/Join Split Key handlers already use (re-derived locally in each
+of the three new call sites since those KMIP-crate conversion fns are
+private to that crate, not shared — but the codepoints themselves are
+identical, so a caller driving both the KMIP and this remoting surface
+sees one consistent vocabulary, not two independently-numbered ones).
+
+**core:** new `verbs_v32::split_key` module — the first (and, per §0,
+likely only) verb pair in this whole mirror that calls
+`softhsmrustv3::native::{split,join}` directly instead of `ffi::C_*`,
+because no `C_*` entry point exists for it. Kept the same "(rv, T)"
+value-carrying convention as every `ffi::C_*`-backed verb regardless —
+`native::split`/`join`'s own `Result<_, CkRv>` (`CkRv = u32 == CK_RV`)
+maps onto it directly, so callers don't need to know this verb pair took
+a different path internally. 4 new core unit tests (44/44 core green):
+XOR split→join round trip; GF(2^8) 5-part/3-threshold split joined with
+only a 3-of-5 SUBSET (the actual threshold property — RW4's hybrid test
+already established the pattern of testing the meaningful case, not
+just a trivial full-set round trip); a below-threshold join rejected
+with the real `CKR_ARGUMENTS_BAD`; XOR's `parts == threshold` constraint
+(§13.1) rejected when violated; two wire-layer-only checks (undefined
+method/polynomial codepoints rejected before any engine call).
+
+**Real finding this slice**: XOR reconstruction (`native::join`'s XOR
+arm, itself a thin call to `crypto::split_key::join_xor`) has NO
+per-share-count check — it XORs whatever shares it is given, full stop.
+The `parts == threshold` invariant for XOR is enforced only at SPLIT
+time (§13.1: "[XOR Threshold] SHALL be identical to Split Key Parts");
+a JOIN given fewer than the original share count doesn't error, it
+silently reconstructs the WRONG secret. This is real, faithfully-mirrored
+engine behavior, not a remoting bug — discovered when the acceptance
+test's below-threshold assertion (written expecting XOR to reject a
+2-of-4 join, mirroring the polynomial methods' behavior) failed with
+`rv == 0` on the first live run. Fixed by reading `join_xor`'s source
+directly rather than guessing, then rewriting that one assertion to use
+the GF256 method (which DOES enforce a real threshold check via
+`crypto::split_key::join_gf256`) — the same method the core crate's own
+negative test already used for exactly this reason.
+
+**gRPC + REST**: straight handler pairs, no shared-enum ownership
+puzzle this time (unlike G1's `MechParamBytes`) — `split`/`join`'s
+inputs are plain scalars/bytes/strings, no embedded-pointer native
+struct involved. `V32SplitKeyShare` reused as both request and response
+element type (proto) and both request and response DTO (REST), keeping
+the "shares" shape identical on the way in and out. `join_key` reuses
+the pre-existing `V32ObjectHandleResponse`/`ObjectHandleResp` types —
+no new response type needed for JoinKey specifically.
+
+**Validation:** V26, a new three-transport parity case. Unlike G1's
+V23/V25 (KAT-grade, byte-identical ciphertext across transports), this
+is NOT a byte-identical check: XOR sharing draws its shares from
+`OsRng` (confirmed by reading `split_xor`'s source), so each transport
+produces different share bytes for the same secret by design. V26
+instead proves, independently per transport (matching V24's OAEP
+precedent for randomized operations): split → join round trip recovers
+the exact original secret. Plus a below-threshold negative case (GF256,
+for the reason above) proven on control and gRPC with the real error
+code compared directly, not just checked non-zero.
+
+**Ledger**: new `SplitKey` row — NOT sourced from
+`cpp_compliance_report.json` (this is a vendor capability, not a
+pkcs11f.h category), documented anyway per the standing "no record
+without proof, but also no unproven claim of scope" principle. `$schema_
+note` extended to explain why the ratchet's check (c) — which regexes
+for `rpc C_*(` — can never see `SplitKey`/`JoinKey` by construction, so
+their absence from that specific count is by design, not a silent gap;
+the ledger row is what keeps them from disappearing from view entirely.
+Ratchet green: **64 categories, 99 RPCs** (unchanged, exactly as
+predicted — `SplitKey`/`JoinKey` are invisible to the `C_*`-only RPC
+count by design).
+
+**Whole workspace green, 3 consecutive runs**: 2 posture + 7 legacy-
+parity + 26 v32-parity (1 `#[ignore]`d) + 44 core = **78 passed, 0
+failed** every time (times ranged 6.7s–13.1s across the three runs,
+core-crate RSA-2048 keygen still the dominant variance source, same as
+G1's note).
+
 ### 2026-08-26 — G3+G4 (mechanism-cell sweep + V21 split)
 
 Shipped, all live-verified. Empties 22 of the ledger's 26 empty-`case_ids`
@@ -468,93 +557,69 @@ same pattern as G1).
 
 G5 (live binary smoke test) is next.
 
-### 2026-08-26 — G2 (Split Key vendor RPCs)
+### 2026-08-26 — G5 (live binary smoke test)
 
-Shipped, all live-verified. Adds `SplitKey`/`JoinKey` to `Pkcs11V32` —
-explicitly labeled a VENDOR EXTENSION in the proto, gRPC, REST, and
-ledger, since there is no `CKM_PQCTODAY_SPLIT_KEY` `C_*` dispatch arm
-anywhere in the engine to mirror (confirmed again this slice, same
-finding as §0). Per the user's locked answer, this is real coverage, not
-the `N/A-engine` fallback row.
+Done — verification only, no code changes (per this section's own
+title). Built and ran the two REAL binaries, not the acceptance suite's
+in-process service-struct doubles (`spawn_grpc_v32`/`spawn_rest_v32`'s
+own doc comment says exactly this: "TLS enforcement is covered
+separately... by the live smoke tests recorded in the plan" — this is
+that promise being kept).
 
-**Wire shape, exactly as decided**: method + parts + threshold +
-optional polynomial in, `repeated {key_part_identifier, object_handle}`
-out. `method`/`polynomial` use the KMIP 3.0 §11.54/§11.55 enumeration
-codepoints VERBATIM — the same mapping `kmip/src/ops/split_key.rs`'s own
-Create/Join Split Key handlers already use (re-derived locally in each
-of the three new call sites since those KMIP-crate conversion fns are
-private to that crate, not shared — but the codepoints themselves are
-identical, so a caller driving both the KMIP and this remoting surface
-sees one consistent vocabulary, not two independently-numbered ones).
+**Build**: `cargo build -p pqc-grpc-pkcs11 -p pqc-rest-pkcs11` — clean,
+~10s.
 
-**core:** new `verbs_v32::split_key` module — the first (and, per §0,
-likely only) verb pair in this whole mirror that calls
-`softhsmrustv3::native::{split,join}` directly instead of `ffi::C_*`,
-because no `C_*` entry point exists for it. Kept the same "(rv, T)"
-value-carrying convention as every `ffi::C_*`-backed verb regardless —
-`native::split`/`join`'s own `Result<_, CkRv>` (`CkRv = u32 == CK_RV`)
-maps onto it directly, so callers don't need to know this verb pair took
-a different path internally. 4 new core unit tests (44/44 core green):
-XOR split→join round trip; GF(2^8) 5-part/3-threshold split joined with
-only a 3-of-5 SUBSET (the actual threshold property — RW4's hybrid test
-already established the pattern of testing the meaningful case, not
-just a trivial full-set round trip); a below-threshold join rejected
-with the real `CKR_ARGUMENTS_BAD`; XOR's `parts == threshold` constraint
-(§13.1) rejected when violated; two wire-layer-only checks (undefined
-method/polynomial codepoints rejected before any engine call).
+**Started both** on loopback (`127.0.0.1:18710`/`:18720`,
+`--enable-destructive`): both logged their real startup sequence
+(`profile=Permissive`, self-signed identity generated — the real
+warning path since no `--tls-cert`/`--tls-key` was given — then
+"listening" on the requested address). CLI arg parsing (`--listen`,
+`--enable-destructive`, `--tls-profile` defaulting to `permissive`) all
+worked exactly as coded.
 
-**Real finding this slice**: XOR reconstruction (`native::join`'s XOR
-arm, itself a thin call to `crypto::split_key::join_xor`) has NO
-per-share-count check — it XORs whatever shares it is given, full stop.
-The `parts == threshold` invariant for XOR is enforced only at SPLIT
-time (§13.1: "[XOR Threshold] SHALL be identical to Split Key Parts");
-a JOIN given fewer than the original share count doesn't error, it
-silently reconstructs the WRONG secret. This is real, faithfully-mirrored
-engine behavior, not a remoting bug — discovered when the acceptance
-test's below-threshold assertion (written expecting XOR to reject a
-2-of-4 join, mirroring the polynomial methods' behavior) failed with
-`rv == 0` on the first live run. Fixed by reading `join_xor`'s source
-directly rather than guessing, then rewriting that one assertion to use
-the GF256 method (which DOES enforce a real threshold check via
-`crypto::split_key::join_gf256`) — the same method the core crate's own
-negative test already used for exactly this reason.
+**REST binary — full real session→keygen→sign→verify over live
+HTTPS** (`curl -k`, self-signed cert accepted): `open-session` → real
+`session_handle`; `generate-key-pair` (ML-DSA-65, real templates,
+b64-encoded attribute values) → real `public_handle`/`private_handle`;
+`sign-init`/`sign` → a real ~2500-byte-ish ML-DSA-65 signature;
+`verify-init`/`verify` → `ck_rv: 0`, a genuine signature verified over
+the wire, not an in-process shortcut. `ck_rv: 0` end to end on every
+call.
 
-**gRPC + REST**: straight handler pairs, no shared-enum ownership
-puzzle this time (unlike G1's `MechParamBytes`) — `split`/`join`'s
-inputs are plain scalars/bytes/strings, no embedded-pointer native
-struct involved. `V32SplitKeyShare` reused as both request and response
-element type (proto) and both request and response DTO (REST), keeping
-the "shares" shape identical on the way in and out. `join_key` reuses
-the pre-existing `V32ObjectHandleResponse`/`ObjectHandleResp` types —
-no new response type needed for JoinKey specifically.
+**`--enable-destructive` flag plumbing, both states, on the real
+binary**: with the flag ON, `destroy-object` returned `ck_rv: 0` (really
+destroyed the private key). A SECOND instance started WITHOUT the flag
+(the deployed-container default) answered `destroy-object` with
+`ck_rv: 84` — `0x54` = `CKR_FUNCTION_NOT_SUPPORTED`, exactly the
+documented OFF-by-default posture, proven on the actual compiled
+binary's actual CLI-argument-driven code path, not asserted from
+reading the source.
 
-**Validation:** V26, a new three-transport parity case. Unlike G1's
-V23/V25 (KAT-grade, byte-identical ciphertext across transports), this
-is NOT a byte-identical check: XOR sharing draws its shares from
-`OsRng` (confirmed by reading `split_xor`'s source), so each transport
-produces different share bytes for the same secret by design. V26
-instead proves, independently per transport (matching V24's OAEP
-precedent for randomized operations): split → join round trip recovers
-the exact original secret. Plus a below-threshold negative case (GF256,
-for the reason above) proven on control and gRPC with the real error
-code compared directly, not just checked non-zero.
+**gRPC binary — real TLS handshake + ALPN**: `grpcurl`/`protoc` are not
+installed in this environment (confirms item 2's own "blocked here,
+unblock-able" framing was correct) — rather than install new tooling or
+hand-roll a certificate-verification-skipping tonic client to force a
+full protobuf-level call through, `openssl s_client -connect
+127.0.0.1:18710 -alpn h2` was used instead: real TLS handshake
+completed, `ALPN protocol: h2` negotiated (the ALPN gRPC itself
+requires), `subject=CN=rcgen self signed cert` confirming the exact
+self-signed-identity code path ran for real. This proves the TLS
+wiring — the part of this binary the acceptance suite's plaintext-only
+`spawn_grpc_v32` genuinely cannot exercise — works; it does NOT prove a
+full unary RPC round-trip over that TLS+h2 connection the way the REST
+check does. Honest scope limit, not a gap papered over: the underlying
+RPC dispatch code is the SAME `verbs_v32`/`service_v32` layer the REST
+binary's real end-to-end call and the entire acceptance suite already
+exercise byte-for-byte identically; only the transport-security
+handshake is binary-specific to gRPC, and that is what got proven here.
 
-**Ledger**: new `SplitKey` row — NOT sourced from
-`cpp_compliance_report.json` (this is a vendor capability, not a
-pkcs11f.h category), documented anyway per the standing "no record
-without proof, but also no unproven claim of scope" principle. `$schema_
-note` extended to explain why the ratchet's check (c) — which regexes
-for `rpc C_*(` — can never see `SplitKey`/`JoinKey` by construction, so
-their absence from that specific count is by design, not a silent gap;
-the ledger row is what keeps them from disappearing from view entirely.
-Ratchet green: **64 categories, 99 RPCs** (unchanged, exactly as
-predicted — `SplitKey`/`JoinKey` are invisible to the `C_*`-only RPC
-count by design).
+**Shutdown**: both processes terminated cleanly on `SIGTERM`.
 
-**Whole workspace green, 3 consecutive runs**: 2 posture + 7 legacy-
-parity + 26 v32-parity (1 `#[ignore]`d) + 44 core = **78 passed, 0
-failed** every time (times ranged 6.7s–13.1s across the three runs,
-core-crate RSA-2048 keygen still the dominant variance source, same as
-G1's note).
+Items 2 (JavaJCE-remote stub regen) and 3 (spawn_blocking vs REST
+benchmark) remain exactly as scoped in §6 — genuinely blocked in this
+environment (no Maven/live-`pqc-grpc` route (i) here, and the transport-
+arms bench program is a separate piece of infrastructure this session
+did not touch), recorded as pre-merge checklist items, not attempted.
 
-G3+G4 (mechanism-cell sweep + V21 split) is next.
+G6 (push/review) is next — user-gated, not executed without explicit
+go-ahead per the standing push-gate rule.
