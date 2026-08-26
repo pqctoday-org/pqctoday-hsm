@@ -220,4 +220,22 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
     add_executable(dump_int_param scripts/dump-int-param.c)
     target_include_directories(dump_int_param PRIVATE ${OPENSSL_INCLUDE_DIR})
     target_link_libraries(dump_int_param ${OPENSSL_LIBRARIES})
+
+    # lms-xdr-verify: phase-4 R9 test helper. Verifies an HSS-token-signed
+    # signature using OpenSSL 3.6.3's own native LMS implementation,
+    # independent of the pkcs11-provider and the engine — see the file's
+    # own header comment for why the openssl CLI can't reach this path
+    # (the "xdr" LMS decoder has no PEM/DER auto-detect entry) and why two
+    # HSS-vs-bare-LMS wire-format strips are needed first. Driven by T24.
+    add_executable(lms_xdr_verify scripts/lms-xdr-verify.c)
+    target_include_directories(lms_xdr_verify PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(lms_xdr_verify ${OPENSSL_LIBRARIES})
+
+    # hss-pubkey-dump: phase-4 R9 test helper — raw CKA_VALUE export for a
+    # token's HSS public key via direct PKCS#11 calls (no SPKI encoder
+    # exists for HSS in the pkcs11-provider; see the file's own header).
+    add_executable(hss_pubkey_dump scripts/hss-pubkey-dump.c)
+    target_include_directories(hss_pubkey_dump PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11)
+    target_link_libraries(hss_pubkey_dump ${CMAKE_DL_LIBS})
 endif()

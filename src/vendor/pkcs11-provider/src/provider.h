@@ -257,6 +257,12 @@ extern const OSSL_DISPATCH
 #define P11PROV_DESCS_SLH_DSA_SHA2_256F "PKCS11 SLH-DSA-SHA2-256f Implementation"
 #define P11PROV_NAMES_SLH_DSA_SHAKE_256F "SLH-DSA-SHAKE-256f"
 #define P11PROV_DESCS_SLH_DSA_SHAKE_256F "PKCS11 SLH-DSA-SHAKE-256f Implementation"
+/* Phase 4 R9: HSS/LMS. This provider generates/signs via CKK_HSS (the
+ * project's own key type — see CLAUDE.md), a genuinely different
+ * EVP_PKEY identity from OpenSSL's own software "LMS", so it gets its
+ * own name rather than aliasing into that one. */
+#define P11PROV_NAMES_HSS "HSS"
+#define P11PROV_DESCS_HSS "PKCS11 HSS/LMS Implementation"
 /* keymgmt tables: keymgmt.h. Encoder tables: encoder.h. Signature tables:
  * sig/signature.h. Matches ML-DSA's own per-header convention. */
 

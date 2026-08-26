@@ -91,6 +91,7 @@ set(PROVIDER_SOURCES
     src/kem/mlkem.c
     src/sig/slhdsa.c
     src/sig/xmss.c
+    src/sig/hss.c
 )
 
 add_library(pkcs11-provider MODULE ${PROVIDER_SOURCES})

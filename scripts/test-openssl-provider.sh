@@ -43,6 +43,8 @@ CPP_ENGINE_SO="${CPP_ENGINE_SO:-$HSM_ROOT/build/src/lib/libsofthsmv3.so}"
 SOFTHSM_UTIL="${SOFTHSM_UTIL:-$HSM_ROOT/build/src/bin/util/softhsm2-util}"
 COMPOSITE_PROBE="${COMPOSITE_PROBE:-$HSM_ROOT/build/composite_sig_probe}"
 DUMP_INT_PARAM="${DUMP_INT_PARAM:-$HSM_ROOT/build/dump_int_param}"
+LMS_XDR_VERIFY="${LMS_XDR_VERIFY:-$HSM_ROOT/build/lms_xdr_verify}"
+HSS_PUBKEY_DUMP="${HSS_PUBKEY_DUMP:-$HSM_ROOT/build/hss_pubkey_dump}"
 if [[ -z "${RUST_ENGINE_SO:-}" ]]; then
   for c in /cargo-target/debug/libsofthsmrustv3.so /cargo-target/release/libsofthsmrustv3.so \
            "$HSM_ROOT/rust/target/debug/libsofthsmrustv3.so" "$HSM_ROOT/rust/target/release/libsofthsmrustv3.so"; do
@@ -151,7 +153,7 @@ say preflight "environment"
 VER="$(LD_LIBRARY_PATH=$OPENSSL_LIB_DIR "$OPENSSL_BIN" version 2>/dev/null)"
 case "$VER" in OpenSSL\ 3.6*|OpenSSL\ 3.7*|OpenSSL\ 4.*) : ;; *)
   echo "FATAL: need OpenSSL >= 3.6 at $OPENSSL_BIN (got: ${VER:-nothing}) — see audit ENV-1/gate --cpp note"; exit 2;; esac
-for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM"; do
+for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP"; do
   [[ -e "$f" ]] || { echo "FATAL: missing $f (run the --cpp gate step / cmake build first)"; exit 2; }
 done
 echo "  oracle: $VER; provider: $PROVIDER_SO"
@@ -1251,6 +1253,52 @@ t23b() { t23_case ML-KEM-768 3; }
 run_case T23b PASS "ML-KEM-768 reports NIST security category 3 (FIPS 203 Table 2)" t23b
 t23c() { t23_case SLH-DSA-SHA2-128s 1; }
 run_case T23c PASS "SLH-DSA-SHA2-128s reports NIST security category 1 (FIPS 205 Table 2)" t23c
+
+# ─── T24: HSS/LMS stateful hash-based signatures (remediation R9) ───────────
+# Both openssl-CLI entry points (pkeyutl -sign/-verify, with and without
+# -rawin — see sig/hss.c's own header comment for why -rawin drives
+# DIGEST_SIGN/VERIFY here, not plain SIGN/VERIFY as R7's composite.c
+# originally assumed), both sabotage controls, AND a genuine cross-
+# implementation proof: the token's own C_Sign output verified by OpenSSL
+# 3.6.3's independent, from-scratch native LMS implementation (lms_xdr_
+# verify, built expressly for this — see that file's header for the two
+# required HSS-vs-bare-LMS wire-format strips and the two non-obvious
+# OpenSSL API calls needed to reach it (EVP_PKEY_verify_message_init, the
+# "xdr" input-type decoder invoked directly since the CLI's PEM/DER
+# auto-detect chain never reaches it) — self-consistency between an
+# engine's own sign and verify would not have caught a signer that's
+# wrong in a way its own verifier is equally wrong about.
+t24() { local w; w=$(mk_arena hsssign "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm HSS -out "$w/k.pem" || return 1
+
+  # -rawin (DIGEST_SIGN/VERIFY dispatch)
+  O pkeyutl -sign -rawin -inkey "pkcs11:token=hsssign;type=private" -in "$MSG" -out "$w/sig.bin" || return 1
+  [[ "$(stat -c%s "$w/sig.bin")" == "1296" ]] || { echo "sig size $(stat -c%s "$w/sig.bin") != 1296"; return 1; }
+  O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=hsssign;type=public" -in "$MSG" -sigfile "$w/sig.bin" || return 1
+
+  # plain SIGN/VERIFY dispatch (no -rawin)
+  O pkeyutl -sign -inkey "pkcs11:token=hsssign;type=private" -in "$MSG" -out "$w/sig_plain.bin" || return 1
+  O pkeyutl -verify -pubin -inkey "pkcs11:token=hsssign;type=public" -in "$MSG" -sigfile "$w/sig_plain.bin" || return 1
+
+  # sabotage: corrupted signature and wrong message must both be rejected
+  cp "$w/sig.bin" "$w/tampered.bin"
+  printf '\x00' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  cmp -s "$w/sig.bin" "$w/tampered.bin" && printf '\xff' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  if O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=hsssign;type=public" -in "$MSG" -sigfile "$w/tampered.bin" >/dev/null 2>&1
+  then echo "tampered HSS signature VERIFIED — verifier cannot say no"; return 1; fi
+  echo "wrong message" > "$w/wrong.txt"
+  if O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=hsssign;type=public" -in "$w/wrong.txt" -sigfile "$w/sig.bin" >/dev/null 2>&1
+  then echo "HSS signature verified against the WRONG message — verifier cannot say no"; return 1; fi
+
+  # cross-implementation proof: token-signed, OpenSSL-native-LMS-verified
+  "$HSS_PUBKEY_DUMP" "$CPP_ENGINE_SO" hsssign "$w/pub.raw" >/dev/null 2>&1 || { echo "hss_pubkey_dump failed"; return 1; }
+  "$LMS_XDR_VERIFY" "$w/pub.raw" "$MSG" "$w/sig.bin" || { echo "cross-implementation LMS verify FAILED"; return 1; }
+  # and the sabotage twin: the independent verifier must reject it too
+  if "$LMS_XDR_VERIFY" "$w/pub.raw" "$MSG" "$w/tampered.bin" >/dev/null 2>&1
+  then echo "tampered HSS signature VERIFIED by the independent LMS implementation"; return 1; fi
+  return 0
+}
+run_case T24 PASS "HSS/LMS token sign (size 1296, both -rawin and plain dispatch) -> token verify, both sabotage controls rejected, AND cross-verified by OpenSSL 3.6.3's own independent native LMS implementation (remediation R9)" t24
 
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"

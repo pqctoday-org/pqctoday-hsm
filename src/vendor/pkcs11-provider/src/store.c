@@ -491,6 +491,12 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
             }
             break;
         }
+        case CKK_HSS:
+            /* Phase 4 R9: no CKA_PARAMETER_SET / per-variant name split —
+             * this keymgmt only ever generates the engine's single
+             * documented default. */
+            data_type = (char *)"HSS";
+            break;
         default:
             return RET_OSSL_ERR;
         }

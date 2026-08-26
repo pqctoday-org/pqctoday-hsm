@@ -1913,6 +1913,26 @@ const OSSL_DISPATCH p11prov_slhdsa_encoder_priv_key_info_pem_functions[] = {
     { 0, NULL },
 };
 
+/* Phase 4 R9: HSS/LMS. Same generic shared-core pattern as every other
+ * type above — the only per-type code is this one thin wrapper. */
+static int p11prov_hss_encoder_priv_key_info_pem_encode(
+    void *inctx, OSSL_CORE_BIO *cbio, const void *inkey,
+    const OSSL_PARAM key_abstract[], int selection,
+    OSSL_PASSPHRASE_CALLBACK *cb, void *cbarg)
+{
+    return p11prov_encoder_private_key_write_pem(
+        CKK_HSS, inctx, cbio, inkey, key_abstract, selection, cb, cbarg);
+}
+
+const OSSL_DISPATCH p11prov_hss_encoder_priv_key_info_pem_functions[] = {
+    DISPATCH_BASE_ENCODER_ELEM(NEWCTX, newctx),
+    DISPATCH_BASE_ENCODER_ELEM(FREECTX, freectx),
+    DISPATCH_ENCODER_ELEM(DOES_SELECTION, common, priv_key_info, pem,
+                          does_selection),
+    DISPATCH_ENCODER_ELEM(ENCODE, hss, priv_key_info, pem, encode),
+    { 0, NULL },
+};
+
 DISPATCH_TEXT_ENCODER_FN(slhdsa, encode);
 
 static int p11prov_slhdsa_encoder_encode_text(void *inctx, OSSL_CORE_BIO *cbio,

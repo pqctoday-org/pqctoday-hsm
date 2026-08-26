@@ -134,7 +134,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 |---|---|---|---|---|
 | ALG-1 | **RESOLVED (R1, 2026-08-25 later same day)** — was: SLH-DSA (all 12 sets), `sig/slhdsa.c` a `{0,NULL}` stub, registration branch unreachable. Now: real keymgmt+signature+encoders for all 12 parameter sets; keygen/store/text-and-SPKI-encode/**sign** all live-verified working, cryptographically correct (exact FIPS 205 sizes, independent software cross-verify, tamper rejection). The sign gap took two passes: registration alone worked immediately, but signing failed at OpenSSL's own fetch layer until a follow-up pass (prompted by checking the OpenSSL 3.6 documentation directly rather than continuing to guess) found the dispatch tables violated provider-signature(7)'s documented consistency contract — `GETTABLE_CTX_PARAMS` registered without its mandatory `GET_CTX_PARAMS` pair, so OpenSSL rejected the whole method at fetch time, before any provider code ran. See `docs/openssl-provider-remediation-plan-2026-08-25.md` R1 for the full trail. Two other, unrelated real bugs found and fixed along the way: `objects.c`'s and `store.c`'s key-type dispatch switches both lacked a `CKK_SLH_DSA` case. | both engines, 13 mechs each | ~~`sig/slhdsa.c` is a `{0,NULL}` stub AND the registration branch is unreachable (`CKM_SLH_DSA` absent from `checklist[]`/`PQC_MECHS`, `provider.c:859`); OpenSSL 3.6 has native names/OIDs to mirror~~ | ~~**High**~~ — |
 | ALG-2 | XMSS/XMSS-MT | both engines (sign+verify, stateful) | `sig/xmss.c` stub, unreachable; no native OpenSSL names exist (custom names required; no CMS/TLS story) | Medium |
-| ALG-3 | HSS/LMS | both engines **sign+verify** | nothing in provider; OpenSSL 3.6 native LMS is *verify-only* → token-sign/OpenSSL-verify is a uniquely coherent split, but blocked by ENV-1 (no `enable-lms` in staged build) | Medium |
+| ALG-3 | **RESOLVED (R9, 2026-08-26)** — was: nothing in provider; OpenSSL 3.6 native LMS is *verify-only* → token-sign/OpenSSL-verify is a uniquely coherent split, but blocked by ENV-1 (no `enable-lms` in staged build). Now: real `HSS` keymgmt + `sig/hss.c` (both plain SIGN/VERIFY and DIGEST_SIGN/VERIFY dispatch); ENV-1's oracle rebuild done as this item's own step 0; the token-sign/OpenSSL-verify split itself proven live via two new permanent test tools (`lms-xdr-verify`, `hss-pubkey-dump`) — a genuine engine-signed HSS signature verifies under OpenSSL 3.6.3's own independent native LMS implementation, sabotage-tested. Five sequential bugs found and fixed to reach a working sign/verify at all — see `docs/openssl-provider-remediation-plan-phase4-2026-08-26.md` R9 and this doc's own "Phase 4, R9" entry below for the full trail. The Rust-arm multi-process half of R9's original goal remains open — blocked on a genuine cross-engine default-parameter mismatch between the two engines, not a provider bug; see that same entry. | both engines **sign+verify** | ~~nothing in provider; OpenSSL 3.6 native LMS is *verify-only* → token-sign/OpenSSL-verify is a uniquely coherent split, but blocked by ENV-1 (no `enable-lms` in staged build)~~ — | ~~Medium~~ — |
 | ALG-4 | Composite profiles 4–8 | KMIP layer has all 8 §10.4 profiles | provider `composite.c` registry has 3; missing 5 include **all four §10.4-recommended** (MLDSA44-Ed25519-SHA512, MLDSA44-ECDSA-P256-SHA256, MLDSA65-RSA3072-PSS-SHA512, MLDSA65-Ed25519-SHA512) + MLDSA65-ECDSA-P384-SHA512 | Medium–High |
 | ALG-5 | **RESOLVED (R4, 2026-08-25)** — was: registration branch dead. Turned out to need five real fixes, not the originally-guessed "2-line checklist omission": (1) two fabricated fallback constants in `exchange.c` (`CKK_X25519`/`CKK_X448` do not exist in the PKCS#11 spec — real montgomery keys are `CKK_EC_MONTGOMERY`, distinguished by curve name/size, matching Edwards' own pattern; the fake values meant the key-type sniff could never match a real key) — fixed, key-exchange mechanism now correctly resolves from bit size. (2) Four missing-case bugs across `objects.c` (fetch, export, `get_ec_public_raw`'s peer-marshalling gate, and two import/store-dispatch switches) and `store.c` (naming) — the same missing-case class found twice in R1. (3) **The actual root cause of "genpkey succeeds but the token silently creates the wrong key type"**: the C++ engine's `generateED()` (shared by `CKM_EC_EDWARDS_KEY_PAIR_GEN` and `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` — the mechanism itself is never passed into that function) determines the resulting key's `CKK_*` type solely from an explicit `CKA_KEY_TYPE` on the public-key template, defaulting to `CKK_EC_EDWARDS` when absent — found live, not assumed: `genpkey` exited 0 and created two real objects, but reading the result back showed `CKK_EC_EDWARDS` (0x40), not `CKK_EC_MONTGOMERY` (0x41). EC/Edwards never needed to send this explicitly (the engine's default already matched them); montgomery does. Fixed by conditionally adding `CKA_KEY_TYPE` to the shared `p11prov_ec_gen`'s public-key template only for montgomery (zero diff for the already-working EC/Edwards paths). Curve-parameter DER bytes (`curve25519`/`curve448` PrintableStrings) verified two independent ways: direct DER-encoding computation and byte-for-byte match against the latchset sibling's own shipped constants. **Live-verified, both curves, both directions, token-to-token**: X25519 produces a byte-identical 32-byte shared secret; X448 a byte-identical 56-byte one. **A sixth, narrower, separate gap surfaced and was left open**: deriving against a genuinely foreign (default-provider-only) peer key with OpenSSL's peer validation enabled fails with `OSSL_PARAM_get_BN: param of incompatible type` — T8's identical shape works for regular EC but not montgomery; traced to OpenSSL's cross-provider `EVP_PKEY_public_check` falling into a legacy EC_KEY-control translation path that assumes Weierstrass X/Y BIGNUM coordinates montgomery keys don't have. The provider's own derive mechanism is unaffected and proven correct; this is a peer-validation-specific interaction, documented in `T16`'s comment rather than silently dropped. | both engines advertise `CKM_X25519`/`CKM_X448`; live probe + source (`exchange.c`, `objects.c`, `store.c`, `keymgmt.c`, `SoftHSM_keygen.cpp`) | ~~Medium~~ — |
 | ALG-6 | ECDH-as-KEM | both engines flag ENCAP/DECAP on `CKM_ECDH1_DERIVE` | not exposed as an OSSL KEM | Low |
@@ -147,7 +147,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | ID | Gap | Evidence | Severity |
 |---|---|---|---|
 | F36-1 | **RESOLVED for the client role (R5 phase 1 + R12, 2026-08-25)** — server role (R15) remains unbuilt, tracked separately. Was: `TLS-GROUP` capability registered zero PQC groups. Now: `MLKEM512`/`768`/`1024` registered as pure (non-hybrid) TLS 1.3 groups (`tls.c`), IANA code points and security-bits read live from the staged 3.6.3 build's own source (`0x0200`/`0x0201`/`0x0202`, 128/192/256 bits — not from memory). Two client-role prerequisites landed and live-verified: ML-KEM's `ENCODED_PUBLIC_KEY` get_params (TLS's key-share export mechanism) and relaxing its export function's class check so it works on the private object TLS actually holds post-keygen (was: strictly `CKO_PUBLIC_KEY`-only) — proven with a full simulated handshake sequence (export share from private → simulated server encapsulates → client decapsulates), byte-matched. A separate, real bug found and fixed along the way: `p11prov_common_gen_set_params`'s type switch had no case for `CKK_ML_KEM`/`CKK_SLH_DSA`, hit live by TLS's own ephemeral-keygen call path (which passes real params, unlike a bare `genpkey` CLI call). **A genuine, live TLS 1.3 handshake was run and the token demonstrably participated** — `s_client -groups MLKEM768 -propquery "?provider=pkcs11"` against a software `s_server`: `Negotiated TLS1.3 group: MLKEM768`, and the C++ engine's own log shows 6 real objects created (the ephemeral keypair) — not assumed, counted. **Both things that remained open after R5 phase 1 are now resolved by R12/R13 (2026-08-25), see the update log below for the full mechanism**: (1) full handshake completion — the `TLS13_KDF` blocker was root-caused to four layered, precisely-diagnosed bugs (not one) and fixed in both engines; a real TLS 1.3 handshake now completes end-to-end with `MLKEM768` and a genuine cipher suite negotiated; (2) the silent-software-fallback hazard is now caught mechanically — harness case T13 asserts token participation from the engine log and ships a negative-control twin proving the hazard is real, per R13. Server role (importing a peer's raw public share to encapsulate against) remains unbuilt — tracked as R15. | `tls.c`, `kem/mlkem.c`, `kdf.c` (root-caused, unchanged), `SoftHSM_keygen.cpp`, `rust/src/ffi.rs`; harness T13 | ~~**High**~~ ~~Medium~~ Low (client role complete; server role is R15) |
-| F36-2 | LMS: OpenSSL 3.6's new verify-only LMS unused (see ALG-3, ENV-1) | release notes + live build | Medium |
+| F36-2 | **RESOLVED (R9, 2026-08-26)** — was: LMS: OpenSSL 3.6's new verify-only LMS unused (see ALG-3, ENV-1). Now: OpenSSL's native LMS is exactly the independent verifier the ALG-3/R9 cross-implementation proof uses — see that entry. | ~~release notes + live build~~ — | ~~Medium~~ — |
 | F36-3 | `EVP_SKEY` KDF/KEYEXCH integration (3.6): provider has SKEYMGMT but the new `EVP_KDF_derive_SKEY`-style opaque-key flows are unprobed — token-resident secrets may not chain into OpenSSL KDFs without export | 3.6 CHANGES; needs probe (T-plan P2) | Medium |
 | F36-4 | *(positive baseline, not a gap)* CMS KEMRecipientInfo + `OSSL_PKEY_PARAM_CMS_RI_TYPE` already wired for ML-KEM (local commit `2cca4f0`) — must be regression-guarded by the new harness | `kem/mlkem.c:414-433` | — |
 | F36-5 | NIST security-category PKEY param (new 3.6) not exposed by provider keymgmt | 3.6 release notes | Low |
@@ -157,7 +157,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 
 | ID | Finding |
 |---|---|
-| ENV-1 | Staged OpenSSL 3.6.3 (`/usr/local/ssl` in `pqc-rust`) built **without** `enable-lms` — LMS test/remediation work needs a rebuilt oracle first. |
+| ENV-1 | **RESOLVED (R9, 2026-08-26)** — was: staged OpenSSL 3.6.3 (`/usr/local/ssl` in `pqc-rust`) built **without** `enable-lms` — LMS test/remediation work needs a rebuilt oracle first. Now: rebuilt from a fresh, isolated clone of the same `openssl-3.6.3` tag with `enable-lms` added to the existing `Configure` line (kept isolated from the hub's own shared/WASM-configured `openssl-3.6.3-src` tree, whose Emscripten config a reused build directory would have destroyed) — validated in an isolated prefix first (`list -tls-groups -signature-algorithms -kem-algorithms` diffed against the pre-rebuild oracle showed only `LMS @ default` added, SONAME `libcrypto.so.3` unchanged), then installed over the shared location; full harness re-confirmed 55/55 immediately after, before any HSS code was written. |
 | ENV-2 | **RESOLVED (R6 + R14, 2026-08-25/26)** — the pre-existing `softhsm2-util`/`C_GetSlotList` bug that blocked end-to-end verification is fixed; see the update log below for the full mechanism and sabotage-test result. Was: native Rust-engine arm structurally blocked, snapshot/restore wired only for WASM. Was: native Rust-engine arm structurally blocked, snapshot/restore wired only for WASM. Now: an opt-in, env-var-gated (`SOFTHSMRUST_STATE_FILE`) native persistence path added to `C_Initialize`/`C_Finalize` (`rust/src/ffi.rs`), reusing `state_snapshot.rs`'s existing `serialize_token_state`/`deserialize_token_state` verbatim (already unit-tested — `round_trip_restores_tokens_and_token_objects_only`, `truncated_snapshot_is_rejected_and_state_untouched`, both pass) and inheriting its `SHR3SNP2` refuse-don't-migrate policy unchanged. Byte-identical to today's in-memory-only behavior when the env var is unset (confirmed: the change is purely additive, gated, and does not touch any code path exercised when unset). **A separate, pre-existing bug was found and confirmed unrelated to this fix** (reproduced identically against the pre-R6 binary via `git stash`): `softhsm2-util --init-token` against the Rust engine fails with "Could not get the slot list" — traced to `C_GetSlotList`'s auto-advance-a-fresh-slot logic behaving inconsistently between the tool's two required calls (count-only, then buffered), confirmed live via a temporary debug trace (first call reports zero slots, second reports one). This blocks END-TO-END verification of R6 via the same tool T15b uses, but does not indicate the persistence code itself is wrong — not fixed here, given the risk of a blind fix to unfamiliar, pre-existing slot-management logic under time constraints. Provider+Rust coverage on the WASM static-link path (hub e2e) is unaffected either way. |
 | ENV-3 | **RESOLVED (R0.3, 2026-08-25 later same day; re-verified R21, 2026-08-26)** — was: existing provider test assets are dead: `test_openssl_integration.sh` soft-fails every functional step and is referenced by nothing; `openssl_test.cnf` hardcodes another developer's absolute `.dylib` paths; the vendored meson test suite (30 tests) is dormant — no CMake/ctest/CI/gate wiring. Now: both dead files deleted (confirmed via `git log --diff-filter=D`; repo-wide grep found no remaining live reference); the vendored meson suite documented as intentionally unwired in `src/vendor/pkcs11-provider/README.md` rather than left silently dormant. |
 
@@ -1579,6 +1579,188 @@ two README reads, and a repo-wide reference grep all independently
 confirm it). Filed as its own commit anyway, per this project's
 convention that even a zero-code closure (matching R19's own
 "proof-debt closure, DONE, no code changes" precedent) gets recorded.
+
+**Phase 4, R9 (HSS/LMS token-sign / OpenSSL-verify), DONE — new
+`sig/hss.c` and `HSS` keymgmt, real cross-implementation proof.**
+`CKM_HSS`/`CKM_HSS_KEY_PAIR_GEN` (PKCS#11 v3.2 §6.14) were previously
+unreachable through the provider at all — no keymgmt, no signature
+dispatch. This item wires up the single default variant the engine
+generates when `CK_HSS_KEY_PAIR_GEN_PARAMS` is omitted (L=1,
+LMS_SHA256_N32_H5, LMOTS_SHA256_N32_W8 — the C++ engine's own
+documented default), following five bugs found and fixed in sequence,
+each surfaced only after the previous fix changed the failure symptom
+(the same layered-discovery shape as R7's and R18's four bugs each):
+
+1. **`objects.c`'s key-type switch had no `case CKK_HSS:`** — fell to
+   `default: return CKR_ARGUMENTS_BAD`, even though the token itself
+   had genuinely created the object (`C_GenerateKeyPair` logged
+   "Created new object" twice). Fixed with a new `fetch_hss_key()`.
+2. **`store.c`'s data-type-resolution switch had no `case CKK_HSS:`**
+   — `pkeyutl -inkey pkcs11:...` failed with "Could not find private
+   key" even though the object existed. Fixed with a plain `data_type
+   = "HSS"` case (no per-variant split needed, unlike ML-DSA/SLH-DSA).
+3. **No SPKI/PrivateKeyInfo PEM encoder existed for HSS at all** —
+   `genpkey -out` failed with "Error writing key(s)". Fixed by adding
+   `p11prov_hss_encoder_priv_key_info_pem_encode`, a thin wrapper over
+   the shared, generic `p11prov_encoder_private_key_write_pem`,
+   mirroring SLH-DSA's identical pattern.
+4. **`keymgmt.c`'s `OSSL_PKEY_PARAM_BITS` handler aborted the whole
+   `get_params` call for private-key objects** (no `CKA_VALUE` on a
+   private HSS object → immediate `return RET_OSSL_ERR`), which
+   silently prevented `OSSL_PKEY_PARAM_MAX_SIZE` from ever being set
+   in the SAME call — a single early `return` inside one param's
+   handling aborts every subsequent param in that call, an OpenSSL
+   provider-API contract easy to miss. `EVP_PKEY_get_size()` then
+   failed with "unknown max size", cascading into "Error initializing
+   context" for every sign/verify attempt. Fixed by walking to the
+   associated public object (`p11prov_obj_get_associated`, matching
+   ML-KEM's own precedent) and gracefully skipping — not erroring —
+   when the public value isn't available that way.
+5. **`pkeyutl -sign -rawin` needs `DIGEST_SIGN`/`DIGEST_VERIFY`
+   dispatch, not plain `SIGN`/`VERIFY`.** Corrects a wrong assumption
+   this project's own R7 composite.c work made under the same
+   pressure: reading OpenSSL's actual `apps/pkeyutl.c` source (not
+   assumed) shows `-rawin` always calls `EVP_DigestSignInit_ex`/
+   `EVP_DigestVerifyInit_ex`, even with `mdname=NULL` — plain
+   `SIGN`/`VERIFY` is only the CLI's `-rawin`-absent branch. `sig/
+   hss.c` implements both: DIGEST_SIGN/VERIFY accumulate the raw
+   message in provider memory across update calls (mirroring
+   composite.c's own `tbs_buf` pattern from R7 — HSS's engine
+   mechanism, like every stateful signature here, is single-part-only:
+   `SoftHSM_sign.cpp`'s `StatefulSignInit` explicitly disables
+   multi-part operation), then make one real `C_Sign`/`C_Verify` at
+   FINAL time. Two of the provider's existing generic reuse candidates
+   were checked and rejected for this, not assumed unusable:
+   `p11prov_sig_digest_update`/`final` call *real* `C_SignUpdate`/
+   `C_VerifyUpdate` (unsupported here), and `P11PROV_SIG_CTX`'s
+   `fallback_digest` path pre-hashes the message in *software* before
+   signing the digest — correct for RSA/ECDSA-shaped "sign(digest)"
+   algorithms, wrong for a hash-internal algorithm like HSS/LMS whose
+   own RFC 8554 hashing must see the untouched full message.
+
+Two further bugs surfaced once sign_init/verify_init actually
+dispatched, found via live `pkeyutl -sign -rawin` runs against a real
+token key, not guessed:
+
+- **Sizing queries (`sig == NULL`) were routed through
+  `p11prov_sig_operate`, which flatly rejects a NULL `sig`
+  (`signature.c`: `if (sig == NULL) return CKR_ARGUMENTS_BAD;`).**
+  Every other algorithm here (ML-DSA's own
+  `p11prov_mldsa_sig_size()`/per-paramset table is the precedent)
+  answers a sizing query from a known constant instead of a live token
+  round trip — HSS's signature length depends only on (L, LMS,
+  LM-OTS), never message length, so `sig/hss.c` does the same via
+  `HSS_L1_DEFAULT_SIG_SIZE`. Also non-obvious and confirmed by reading
+  OpenSSL's own `EVP_DigestSign()` (`crypto/evp/m_sigver.c`): its
+  one-shot wrapper skips `DIGEST_SIGN_UPDATE` entirely when
+  `sigret == NULL`, so the sizing call's accumulator is *always*
+  empty regardless of message size — passing it through to the token
+  would have been wrong even if `p11prov_sig_operate` allowed it.
+  `HSS_L1_DEFAULT_SIG_SIZE = 1296` is derived from RFC 8554's own
+  byte-accounting for this exact parameter combination (OTS sig
+  4+32+34×32=1124; LMS sig 4+1124+4+5×32=1292; HSS sig 4+1292=1296)
+  and independently confirmed live: a real `pkeyutl -sign -rawin`
+  output file is exactly 1296 bytes.
+- **`p11prov_sig_newctx()` leaves `sigctx->mechanism.mechanism` at the
+  `CK_UNAVAILABLE_INFORMATION` sentinel** — every other algorithm sets
+  its real mechanism explicitly before calling `p11prov_sig_operate`
+  (ML-DSA's own `p11prov_mldsa_set_mechanism()` is the established
+  precedent); `sig/hss.c` never did, so the token was being queried
+  (`C_GetMechanismInfo`/`C_SignInit`) about mechanism
+  `CK_UNAVAILABLE_INFORMATION`, not `CKM_HSS` — confirmed by direct
+  comparison against a standalone raw-PKCS#11 probe that showed the
+  engine correctly advertising `CKM_HSS` with `CKF_SIGN|CKF_VERIFY`
+  (`flags=0x2800`) on the exact same slot the provider was failing
+  against. Fixed with a one-line `ctx->sigctx->mechanism.mechanism =
+  CKM_HSS;` in both `sign_init`/`verify_init` — CKM_HSS takes no
+  `CK_MECHANISM` parameter, so nothing else was needed.
+
+**Live proof (harness `T24`, all in one arena):** `genpkey -algorithm
+HSS` → `pkeyutl -sign -rawin` (1296-byte signature) → `pkeyutl -verify
+-rawin` (token-verified); the same round trip again via plain
+`SIGN`/`VERIFY` (no `-rawin`); both sabotage controls (corrupted
+signature byte, wrong message) rejected. **Then the genuine
+cross-implementation proof the plan's own R9 text calls "the whole
+point"**: the token's own `C_Sign` output verified by OpenSSL 3.6.3's
+*independent*, from-scratch native LMS implementation — never through
+the pkcs11-provider, never through the engine's own `C_Verify` (a
+signer that's wrong in a way its own verifier agrees with would pass
+self-consistency and still be broken). Two new permanent test tools
+support this (`scripts/lms-xdr-verify.c`, `scripts/hss-pubkey-dump.c`,
+both CMake targets, following `composite_sig_probe`'s established
+precedent for scaffolding the CLI can't reach):
+- `openssl` CLI genuinely cannot reach this path: the native LMS
+  decoder is registered `DECODER("LMS", xdr, lms, yes)` — no
+  `structure=` property at all (`providers/decoders.inc`, read
+  directly) — so the standard PEM→DER `OSSL_STORE` auto-detect chain
+  `pkeyutl`/`pkey` use never tries it. `lms-xdr-verify.c` calls
+  `OSSL_DECODER_CTX_new_for_pkey(..., "xdr", ...)` directly.
+- Native LMS registers `OSSL_FUNC_SIGNATURE_VERIFY_MESSAGE_INIT` (the
+  one-call "message" family for hash-internal algorithms;
+  `lms_signature.c`, read directly), not `VERIFY_INIT` or
+  `DIGEST_VERIFY_INIT` — `EVP_PKEY_verify_message_init()`, not
+  `EVP_PKEY_verify_init()` or `EVP_DigestVerifyInit_ex()`.
+- Two wire-format strips are required, both because HSS always wraps
+  LMS even at a single level (RFC 8554 §6.1/§6.2), while OpenSSL's
+  native support is bare-LMS only: the 60-byte HSS pubkey is
+  `u32str(L=1) || 56-byte LMS pubkey`; the 1296-byte HSS signature is
+  `u32str(Nspk=0) || 1292-byte LMS signature`. Both tools auto-detect
+  by length and strip the wrapper. The FIRST attempt at this cross-
+  check passed the pubkey's L-prefix stripped but the FULL
+  (unstripped) 1296-byte signature to a bare-LMS verify — decoded
+  without error, then verified **false** on a genuinely valid
+  signature/message/key triple, which (correctly) read as a possible
+  engine signing bug before the wrapper mismatch was found; stripping
+  the signature's own 4-byte `Nspk` prefix the same way fixed it.
+  Documented here because that failure shape — decodes clean, verifies
+  false — is exactly what a *real* cross-implementation bug would also
+  look like, and is worth remembering as "check the wire format before
+  trusting the crypto is wrong."
+- Sabotage-checked the cross-verifier too: a corrupted byte in the
+  bare-LMS signature and a wrong message are both rejected by the
+  independent verifier, not just by the engine's own.
+
+**Rust arm — investigated, genuine cross-engine inconsistency found,
+not fixed here (out of this plan's scope).** The plan's own R9 text
+names a multi-process stateful-counter test riding on R14's Rust CLI
+flow as a goal. A smoke test (`genpkey -algorithm HSS` /
+`pkeyutl -sign -rawin`, over `libsofthsmrustv3.so`, same provider
+code, same `HSS_L1_DEFAULT_SIG_SIZE` constant) failed
+`CKR_BUFFER_TOO_SMALL` on `C_Sign`. Root cause, confirmed by reading
+both engines' own keygen source directly: the two engines pick
+**different LM-OTS defaults** when `CK_HSS_KEY_PAIR_GEN_PARAMS` is
+omitted — the C++ engine defaults to `LMOTS_SHA256_N32_W8` (IANA
+`0x04`, 1296-byte signature, confirmed above); the Rust engine's own
+`ffi.rs` (`CKM_HSS_KEY_PAIR_GEN` arm, `Ok(None) => ...
+CKP_LMOTS_SHA256_N32_W4`) defaults to `LMOTS_SHA256_N32_W4` (IANA
+`0x03`, a 2352-byte signature — larger `p` from the smaller Winternitz
+parameter). The two engines are also inconsistent about *storing* the
+parameter set at all: the Rust engine's `CKM_HSS_KEY_PAIR_GEN` arm
+writes `CKA_LMS_PARAM_SET`/`CKA_LMOTS_PARAM_SET` on the generated
+keys; the C++ engine's (`SoftHSM_keygen.cpp`) does not — only
+`CKA_KEY_GEN_MECHANISM` and a vendor `ATTR_CKA_HSS_KEYS_REMAINING`
+counter. Reconciling either "what is the default" or "how is the
+chosen parameter set exposed back to a reader" is a decision for
+whoever owns both engines' HSS behavior — it is not a pkcs11-provider
+bug, and fixing it from the provider side (a hardcoded per-key-object
+formula reading an attribute one engine doesn't set) would be working
+around a real inconsistency rather than reporting it. Left
+undone, following this harness's own established "investigated, does
+not hold up as a mechanical fix, documented rather than forced"
+precedent (matching R17's own entry above). `T24` accordingly covers
+the C++ arm only; the Rust engine's OWN, independent HSS test coverage
+(`rust/src/native/sign.rs`, `native::parity::
+hss_ffi_and_native_advance_the_leaf_index_identically`, all passing)
+already establishes HSS correctness there — R9 does not need to
+duplicate it, only to reach it through this provider, which the
+parameter mismatch above currently blocks.
+
+Full regression, both engines: **C++ CTest 8/8 passed** (no C++
+engine source changed by this item); **Rust `cargo test --release`:
+410 passed, 0 failed, 9 ignored** (no `rust/` source changed by this
+item — the 9 ignored are pre-existing, unrelated to R9). **Harness:
+`PASS=56 FAIL=0 XFAIL=0 XPASS=0`** — one case gained (T24), zero
+regressions.
 
 ## 7. Companion document
 

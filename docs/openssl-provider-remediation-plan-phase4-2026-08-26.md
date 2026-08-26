@@ -1,4 +1,4 @@
-# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R7+R8+R10(PBKDF2)+R18+R19+R20+R21 EXECUTED IN FULL, only R9/R11/R10(SP800-108)/R20(ALG-7) still plan-only
+# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R7+R8+R9+R10(PBKDF2)+R18+R19+R20+R21 EXECUTED IN FULL (R9's Rust-arm multi-process sub-goal investigated, blocked on a cross-engine default mismatch, not fixed — see its own entry); only R11/R10(SP800-108)/R20(ALG-7) still plan-only
 
 **Execution update (2026-08-26):** R7, R8, R18, R19, and R21.1 have
 been executed and landed — see
@@ -391,6 +391,56 @@ Multi-process stateful-counter test rides on R14's now-working Rust
 CLI flow (`SOFTHSMRUST_STATE_FILE`): sign twice across two processes,
 assert the leaf counter advanced and the first signature still
 verifies. Proof + sabotage per the standard pattern.
+
+**Execution update (2026-08-26):** R9 executed and landed — see
+`docs/openssl-provider-coverage-audit-2026-08-25.md` §6's "Phase 4,
+R9" entry for the full mechanism (five sequential bugs to reach a
+working `sign_init`/`verify_init` at all — missing `objects.c`/
+`store.c` switch cases, a missing SPKI/PrivateKeyInfo encoder, a
+`get_params` early-return bug that silently dropped `MAX_SIZE` — then
+two more once dispatch was reachable: a sizing-query path that called
+into a function that rejects `sig == NULL`, and a never-initialized
+`sigctx->mechanism.mechanism` sentinel that made every token round
+trip query the wrong mechanism ID). ENV-1 (oracle rebuild with
+`enable-lms`) done as this item's own step 0, exactly as planned —
+isolated-prefix validated first (`list -tls-groups
+-signature-algorithms -kem-algorithms` diffed against the pre-rebuild
+oracle: only `LMS @ default` added, SONAME unchanged), then installed
+over the shared location; harness re-confirmed 55/55 immediately after
+before any HSS code was written.
+
+The "token sign + native-OpenSSL-verify, the split is the whole point"
+proof from this section's own text is done, and done for real — the
+token's actual `C_Sign` output verifies under OpenSSL 3.6.3's
+independent, from-scratch native LMS implementation, not through this
+provider and not through the engine's own `C_Verify`. It needed two
+new permanent test tools (`scripts/lms-xdr-verify.c`,
+`scripts/hss-pubkey-dump.c`) because the openssl CLI genuinely cannot
+reach OpenSSL's own "xdr" LMS decoder (no PEM/DER auto-detect entry —
+confirmed by reading `providers/decoders.inc`) and because HSS's own
+RFC 8554 wrapping (present even at a single level) has to be stripped
+to reach the bare-LMS format OpenSSL's native support actually speaks
+— both details the plan text above didn't anticipate, and both now in
+the audit's own R9 entry.
+
+The multi-process stateful-counter half of this item, as scoped above
+(riding on R14's Rust CLI flow), is **not done** — investigated, not
+forced. A smoke test surfaced a genuine cross-engine inconsistency
+this plan did not anticipate: the C++ and Rust engines pick *different
+default* LM-OTS parameter sets when `CK_HSS_KEY_PAIR_GEN_PARAMS` is
+omitted (W8 vs W4 — different signature sizes entirely), and only the
+Rust engine stores `CKA_LMS_PARAM_SET`/`CKA_LMOTS_PARAM_SET` back on
+the generated keys. That's a decision for whoever owns both engines'
+HSS defaults, not a pkcs11-provider bug this remediation plan's own
+charter covers — see the audit entry's own "Rust arm" paragraph for
+the full write-up, including why a provider-side workaround (reading
+an attribute one engine doesn't set) would be papering over the
+inconsistency rather than reporting it. The Rust engine's own,
+independent HSS test suite (`rust/src/native/sign.rs` and
+`native::parity`'s leaf-index-parity test, both read directly, both
+passing) already establishes correctness there without this provider
+in the loop, so R9's own goal — reach a working HSS through this
+provider, proven independently — stands fully met on the C++ arm.
 
 ### R20 — small-surface tier — effort S total, five independent micro-items
 

@@ -1400,6 +1400,59 @@ static CK_RV fetch_slhdsa_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
     return CKR_OK;
 }
 
+/* Phase 4 R9: HSS/LMS. Unlike SLH-DSA, no CKA_PARAMETER_SET / fixed
+ * per-variant size table — this provider's own keymgmt only ever
+ * generates the engine's single documented default (L=1,
+ * LMS_SHA256_N32_H5, LMOTS_SHA256_N32_W8), and the public key's XDR
+ * encoding carries its own length prefix, so size is read from the
+ * actual fetched CKA_VALUE rather than looked up by parameter set. */
+#define HSS_ATTRS_NUM 4
+static CK_RV fetch_hss_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
+                           CK_OBJECT_HANDLE object, P11PROV_OBJ *key)
+{
+    struct fetch_attrs attrs[HSS_ATTRS_NUM];
+    CK_ATTRIBUTE *value_attr;
+    int num;
+    CK_RV ret;
+
+    key->attrs = OPENSSL_zalloc(HSS_ATTRS_NUM * sizeof(CK_ATTRIBUTE));
+    if (key->attrs == NULL) {
+        return CKR_HOST_MEMORY;
+    }
+
+    num = 0;
+    if (key->class == CKO_PUBLIC_KEY) {
+        FA_SET_BUF_ALLOC(attrs, num, CKA_VALUE, true);
+    }
+    FA_SET_BUF_ALLOC(attrs, num, CKA_ID, false);
+    FA_SET_BUF_ALLOC(attrs, num, CKA_LABEL, false);
+    if (key->class == CKO_PRIVATE_KEY) {
+        FA_SET_BUF_ALLOC(attrs, num, CKA_ALWAYS_AUTHENTICATE, false);
+    }
+
+    ret = p11prov_fetch_attributes(ctx, session, object, attrs, num);
+    if (ret != CKR_OK) {
+        p11prov_fetch_attrs_free(attrs, num);
+        return ret;
+    }
+
+    key->numattrs = 0;
+    p11prov_move_alloc_attrs(attrs, num, key->attrs, &key->numattrs);
+
+    if (key->class == CKO_PUBLIC_KEY) {
+        value_attr = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!value_attr) {
+            P11PROV_raise(key->ctx, CKR_KEY_INDIGESTIBLE,
+                          "Missing public key value");
+            return CKR_KEY_INDIGESTIBLE;
+        }
+        key->data.key.size = value_attr->ulValueLen;
+        key->data.key.bit_size = key->data.key.size * 8;
+    }
+
+    return CKR_OK;
+}
+
 #define CERT_ATTRS_NUM 9
 static CK_RV fetch_certificate(P11PROV_CTX *ctx, P11PROV_SESSION *session,
                                CK_OBJECT_HANDLE object, P11PROV_OBJ *crt)
@@ -1574,6 +1627,13 @@ CK_RV p11prov_obj_from_handle(P11PROV_CTX *ctx, P11PROV_SESSION *session,
             break;
         case CKK_ML_KEM:
             ret = fetch_mlkem_key(ctx, session, handle, obj);
+            if (ret != CKR_OK) {
+                p11prov_obj_free(obj);
+                return ret;
+            }
+            break;
+        case CKK_HSS:
+            ret = fetch_hss_key(ctx, session, handle, obj);
             if (ret != CKR_OK) {
                 p11prov_obj_free(obj);
                 return ret;

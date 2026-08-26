@@ -865,7 +865,7 @@ static CK_RV alg_set_op(OSSL_ALGORITHM **op, int idx, OSSL_ALGORITHM *alg)
 
 #define PQC_MECHS \
     CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN, \
-        CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN
+        CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN, CKM_HSS, CKM_HSS_KEY_PAIR_GEN
 
 #if SKEY_SUPPORT == 1
 #define AES_MECHS \
@@ -1330,6 +1330,15 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              p11prov_slhdsa_shake_256f_signature_functions);
                 UNCHECK_MECHS(CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA);
                 break;
+            case CKM_HSS_KEY_PAIR_GEN:
+                /* Phase 4 R9: single generic "HSS" name — unlike SLH-DSA's
+                 * 12 fixed parameter sets, this keymgmt only ever generates
+                 * one (the engine's own documented default when
+                 * CK_HSS_KEY_PAIR_GEN_PARAMS is omitted), so there is no
+                 * per-variant name to register. */
+                ADD_ALGO(HSS, hss, signature, prop);
+                UNCHECK_MECHS(CKM_HSS_KEY_PAIR_GEN, CKM_HSS);
+                break;
             case CKM_ML_KEM:
             case CKM_ML_KEM_KEY_PAIR_GEN:
                 /* Register per-variant KEM entries so each variant name gets
@@ -1670,6 +1679,10 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
         SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHA2_256F)
         SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHAKE_256F)
 #undef SLHDSA_ENCODER_URI_PEM
+        /* Phase 4 R9: HSS/LMS */
+        ADD_ALGO_EXT(HSS, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_hss_encoder_priv_key_info_pem_functions);
         /* ML-KEM (remediation R3 core) — one shared function/table across
          * all 3 parameter sets, same as ML-DSA's block above. */
         ADD_ALGO_EXT(ML_KEM_512, encoder,
@@ -1793,6 +1806,8 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
                  p11prov_slhdsa_sha2_256f_keymgmt_functions);
     ADD_ALGO_EXT(SLH_DSA_SHAKE_256F, keymgmt, prop,
                  p11prov_slhdsa_shake_256f_keymgmt_functions);
+    /* Phase 4 R9: HSS/LMS */
+    ADD_ALGO(HSS, hss, keymgmt, prop);
     ADD_ALGO_EXT(ML_KEM_512, keymgmt, prop, p11prov_mlkem512_keymgmt_functions);
     ADD_ALGO_EXT(ML_KEM_768, keymgmt, prop, p11prov_mlkem768_keymgmt_functions);
     ADD_ALGO_EXT(ML_KEM_1024, keymgmt, prop, p11prov_mlkem1024_keymgmt_functions);

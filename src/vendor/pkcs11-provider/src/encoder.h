@@ -57,6 +57,8 @@ extern const OSSL_DISPATCH p11prov_mlkem_encoder_text_functions[];
  * runtime, same as ML-DSA's own encoder.c functions do. */
 extern const OSSL_DISPATCH p11prov_slhdsa_encoder_spki_der_functions[];
 extern const OSSL_DISPATCH p11prov_slhdsa_encoder_priv_key_info_pem_functions[];
+/* HSS/LMS (phase 4 R9) */
+extern const OSSL_DISPATCH p11prov_hss_encoder_priv_key_info_pem_functions[];
 extern const OSSL_DISPATCH p11prov_slhdsa_encoder_text_functions[];
 
 #endif /* _ENCODER_H */

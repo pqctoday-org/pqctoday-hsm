@@ -38,6 +38,8 @@ extern const OSSL_DISPATCH p11prov_slhdsa_sha2_256s_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_slhdsa_shake_256s_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_slhdsa_sha2_256f_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_slhdsa_shake_256f_keymgmt_functions[];
+/* HSS/LMS token keygen (phase 4 R9) */
+extern const OSSL_DISPATCH p11prov_hss_keymgmt_functions[];
 
 /* ML-KEM token keygen (defined in keymgmt.c, consumed by kem/mlkem.c's
  * per-variant OSSL_DISPATCH tables — see the comment ahead of
