@@ -41,6 +41,7 @@ OPENSSL_LIB_DIR="${OPENSSL_LIB_DIR:-/usr/local/ssl/lib}"
 PROVIDER_SO="${PROVIDER_SO:-$HSM_ROOT/build/src/vendor/pkcs11-provider/pkcs11-provider.so}"
 CPP_ENGINE_SO="${CPP_ENGINE_SO:-$HSM_ROOT/build/src/lib/libsofthsmv3.so}"
 SOFTHSM_UTIL="${SOFTHSM_UTIL:-$HSM_ROOT/build/src/bin/util/softhsm2-util}"
+COMPOSITE_PROBE="${COMPOSITE_PROBE:-$HSM_ROOT/build/composite_sig_probe}"
 if [[ -z "${RUST_ENGINE_SO:-}" ]]; then
   for c in /cargo-target/debug/libsofthsmrustv3.so /cargo-target/release/libsofthsmrustv3.so \
            "$HSM_ROOT/rust/target/debug/libsofthsmrustv3.so" "$HSM_ROOT/rust/target/release/libsofthsmrustv3.so"; do
@@ -149,7 +150,7 @@ say preflight "environment"
 VER="$(LD_LIBRARY_PATH=$OPENSSL_LIB_DIR "$OPENSSL_BIN" version 2>/dev/null)"
 case "$VER" in OpenSSL\ 3.6*|OpenSSL\ 3.7*|OpenSSL\ 4.*) : ;; *)
   echo "FATAL: need OpenSSL >= 3.6 at $OPENSSL_BIN (got: ${VER:-nothing}) — see audit ENV-1/gate --cpp note"; exit 2;; esac
-for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL"; do
+for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE"; do
   [[ -e "$f" ]] || { echo "FATAL: missing $f (run the --cpp gate step / cmake build first)"; exit 2; }
 done
 echo "  oracle: $VER; provider: $PROVIDER_SO"
@@ -1055,6 +1056,110 @@ t20c() { t20_case SHA384; }
 run_case T20c PASS "token HMAC-SHA384 == software HMAC, engine-log verified (remediation R8); negative-control twin (R13)" t20c
 t20d() { t20_case SHA512; }
 run_case T20d PASS "token HMAC-SHA512 == software HMAC, engine-log verified (remediation R8); negative-control twin (R13)" t20d
+
+# ─── T21: composite signatures (remediation R7) ─────────────────────────────
+# The standard openssl CLI cannot drive a composite sign/verify (no keymgmt
+# GEN for composite keys — see composite.h's own comment on
+# p11prov_composite_evp_pkey_from_uris) so these cases use composite_sig_probe
+# (scripts/composite-sig-probe.c), a small standalone tool that links
+# pkcs11-provider.so directly and calls that bridge itself. Each case: real
+# ML-DSA + classical keypairs generated on the token, real sign, real verify
+# against a SEPARATE public-key-URI EVP_PKEY (not the signing one — PKCS#11
+# C_VerifyInit against a private-class object fails), plus two sabotage
+# controls (wrong message, corrupted signature byte) that must both fail.
+#
+# `openssl genpkey`'s own -out writes a base64 "PKCS#11 Provider URI v1.0"
+# PEM wrapper, not a bare pkcs11: string — extract_uri unwraps it.
+extract_uri() {
+  grep -v 'BEGIN\|END' "$1" | base64 -d | strings | grep '^pkcs11:'
+}
+
+compsig_case() { # $1=oid $2=mldsa_alg $3=classical_alg $4...=classical genpkey opts
+  local oid="$1" mldsa_alg="$2" classical_alg="$3"
+  shift 3
+  local w="$ROOT_WORK/r21_${oid##*.}"
+  mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = ERROR
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $CPP_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-encode-provider-uri-to-pem = true
+pkcs11-module-load-behavior = early
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$CPP_ENGINE_SO" \
+    --init-token --free --label "r21${oid##*.}" --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O genpkey \
+    -provider pkcs11 -algorithm "$mldsa_alg" -propquery "?provider=pkcs11" \
+    -out "$w/pq.uri" >/dev/null 2>&1 || return 1
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O genpkey \
+    -provider pkcs11 -algorithm "$classical_alg" "$@" -propquery "?provider=pkcs11" \
+    -out "$w/classical.uri" >/dev/null 2>&1 || return 1
+
+  local pq_priv cl_priv pq_pub cl_pub
+  pq_priv=$(extract_uri "$w/pq.uri")
+  cl_priv=$(extract_uri "$w/classical.uri")
+  [[ -n "$pq_priv" && -n "$cl_priv" ]] || return 1
+  pq_pub="${pq_priv/type=private/type=public}"
+  cl_pub="${cl_priv/type=private/type=public}"
+
+  local msg="T21 composite probe $oid"
+  local sighex
+  sighex=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" \
+    "$COMPOSITE_PROBE" sign "$oid" "$pq_priv" "$cl_priv" "$msg" 2>"$w/sign.err")
+  [[ -n "$sighex" ]] || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" \
+    "$COMPOSITE_PROBE" verify "$oid" "$pq_pub" "$cl_pub" "$msg" "$sighex" >/dev/null 2>&1 || return 1
+
+  # Sabotage 1: wrong message must fail
+  if SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" \
+    "$COMPOSITE_PROBE" verify "$oid" "$pq_pub" "$cl_pub" "WRONG $msg" "$sighex" >/dev/null 2>&1
+  then
+    return 1
+  fi
+  # Sabotage 2: corrupted last byte must fail
+  local badsig="${sighex%??}00"
+  [[ "$badsig" == "$sighex" ]] && badsig="${sighex%??}ff"
+  if SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" \
+    "$COMPOSITE_PROBE" verify "$oid" "$pq_pub" "$cl_pub" "$msg" "$badsig" >/dev/null 2>&1
+  then
+    return 1
+  fi
+  return 0
+}
+
+t21a() { compsig_case "1.3.6.1.5.5.7.6.37" ML-DSA-44 RSA -pkeyopt rsa_keygen_bits:2048; }
+run_case T21a PASS "composite id-MLDSA44-RSA2048-PSS-SHA256 (.37): real token sign+verify, both sabotage controls rejected" t21a
+t21b() { compsig_case "1.3.6.1.5.5.7.6.45" ML-DSA-65 EC -pkeyopt group:P-256; }
+run_case T21b PASS "composite id-MLDSA65-ECDSA-P256-SHA512 (.45): classical hash fixed from SHA512 to the profile-correct SHA256 (phase-4 R7 — same bug class the Rust KMIP engine fixed 2026-08-17); real token sign+verify, both sabotage controls rejected" t21b
+t21c() { compsig_case "1.3.6.1.5.5.7.6.49" ML-DSA-87 EC -pkeyopt group:P-384; }
+run_case T21c PASS "composite id-MLDSA87-ECDSA-P384-SHA512 (.49): classical hash fixed from SHA512 to the profile-correct SHA384 (phase-4 R7); real token sign+verify, both sabotage controls rejected" t21c
+t21d() { compsig_case "1.3.6.1.5.5.7.6.39" ML-DSA-44 ED25519; }
+run_case T21d PASS "composite id-MLDSA44-Ed25519-SHA512 (.39, new profile, phase-4 R7): real token sign+verify, both sabotage controls rejected" t21d
+t21e() { compsig_case "1.3.6.1.5.5.7.6.40" ML-DSA-44 EC -pkeyopt group:P-256; }
+run_case T21e PASS "composite id-MLDSA44-ECDSA-P256-SHA256 (.40, new profile, phase-4 R7): the one profile where pre-hash and classical hash coincide, cross-checked against the external raw-signature KAT vector; real token sign+verify, both sabotage controls rejected" t21e
+t21f() { compsig_case "1.3.6.1.5.5.7.6.41" ML-DSA-65 RSA -pkeyopt rsa_keygen_bits:3072; }
+run_case T21f PASS "composite id-MLDSA65-RSA3072-PSS-SHA512 (.41, new profile, phase-4 R7): also fixed a classical-signature buffer-too-small bug (256-byte max was sized only for RSA-2048); real token sign+verify, both sabotage controls rejected" t21f
+t21g() { compsig_case "1.3.6.1.5.5.7.6.48" ML-DSA-65 ED25519; }
+run_case T21g PASS "composite id-MLDSA65-Ed25519-SHA512 (.48, new profile, phase-4 R7): real token sign+verify, both sabotage controls rejected" t21g
+t21h() { compsig_case "1.3.6.1.5.5.7.6.46" ML-DSA-65 EC -pkeyopt group:P-384; }
+run_case T21h PASS "composite id-MLDSA65-ECDSA-P384-SHA512 (.46, new profile, phase-4 R7): cross-checked against the external raw-signature KAT vector; real token sign+verify, both sabotage controls rejected" t21h
 
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"

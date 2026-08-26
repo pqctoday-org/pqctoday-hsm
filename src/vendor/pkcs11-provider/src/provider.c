@@ -1273,6 +1273,20 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              p11prov_composite_mldsa65_ecdsa_p256_sig_functions);
                 ADD_ALGO_EXT(COMPOSITE_MLDSA87_ECDSA_P384, signature, prop,
                              p11prov_composite_mldsa87_ecdsa_p384_sig_functions);
+                /* Phase 4 R7: profiles 4-8. Classical mechanisms
+                 * (CKM_ECDSA_SHA256, CKM_SHA512_RSA_PKCS_PSS, CKM_EDDSA)
+                 * are all already registered elsewhere in this function. */
+                ADD_ALGO_EXT(COMPOSITE_MLDSA44_ED25519, signature, prop,
+                             p11prov_composite_mldsa44_ed25519_sig_functions);
+                ADD_ALGO_EXT(COMPOSITE_MLDSA44_ECDSA_P256_SHA256, signature,
+                             prop,
+                             p11prov_composite_mldsa44_ecdsa_p256_sig_functions);
+                ADD_ALGO_EXT(COMPOSITE_MLDSA65_RSA3072_PSS, signature, prop,
+                             p11prov_composite_mldsa65_rsa3072_pss_sig_functions);
+                ADD_ALGO_EXT(COMPOSITE_MLDSA65_ED25519, signature, prop,
+                             p11prov_composite_mldsa65_ed25519_sig_functions);
+                ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P384, signature, prop,
+                             p11prov_composite_mldsa65_ecdsa_p384_sig_functions);
                 UNCHECK_MECHS(CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA);
                 break;
             case CKM_SLH_DSA:
@@ -1546,7 +1560,9 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
     SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHAKE_256F)
 #undef SLHDSA_ENCODER_TEXT_SPKI
     /* Composite-ML-DSA SPKI encoders (draft-lamps-19): X509_PUBKEY for
-     * the three composite OIDs in DER + PEM. */
+     * all eight composite OIDs in DER + PEM. One shared dispatch table
+     * per format — the encoder resolves the profile from the keydata
+     * itself, not from which ADD_ALGO_EXT call registered it. */
     ADD_ALGO_EXT(COMPOSITE_MLDSA44_RSA2048_PSS, encoder,
                  DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
                  p11prov_composite_encoder_spki_der_functions);
@@ -1563,6 +1579,37 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
                  DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
                  p11prov_composite_encoder_spki_der_functions);
     ADD_ALGO_EXT(COMPOSITE_MLDSA87_ECDSA_P384, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    /* Phase 4 R7: profiles 4-8 */
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ED25519, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ED25519, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ECDSA_P256_SHA256, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ECDSA_P256_SHA256, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_RSA3072_PSS, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_RSA3072_PSS, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ED25519, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ED25519, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P384, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P384, encoder,
                  DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
                  p11prov_composite_encoder_spki_pem_functions);
     if (ctx->encode_pkey_as_pk11_uri) {
@@ -1748,6 +1795,17 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
                  p11prov_composite_mldsa65_ecdsa_p256_keymgmt_functions);
     ADD_ALGO_EXT(COMPOSITE_MLDSA87_ECDSA_P384, keymgmt, prop,
                  p11prov_composite_mldsa87_ecdsa_p384_keymgmt_functions);
+    /* Phase 4 R7: profiles 4-8 */
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ED25519, keymgmt, prop,
+                 p11prov_composite_mldsa44_ed25519_keymgmt_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ECDSA_P256_SHA256, keymgmt, prop,
+                 p11prov_composite_mldsa44_ecdsa_p256_keymgmt_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_RSA3072_PSS, keymgmt, prop,
+                 p11prov_composite_mldsa65_rsa3072_pss_keymgmt_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ED25519, keymgmt, prop,
+                 p11prov_composite_mldsa65_ed25519_keymgmt_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P384, keymgmt, prop,
+                 p11prov_composite_mldsa65_ecdsa_p384_keymgmt_functions);
     TERM_ALGO(keymgmt);
 
 #if SKEY_SUPPORT == 1

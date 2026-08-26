@@ -1,36 +1,48 @@
-# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R8+R18+R19+R21.1 EXECUTED, R7/R9-R11/R20/rest-of-R21 still plan-only
+# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R7+R8+R18+R19+R21.1 EXECUTED, R9-R11/R20/rest-of-R21 still plan-only
 
-**Execution update (2026-08-26):** R8, R18, R19, and R21.1 have been
-executed and landed — see
+**Execution update (2026-08-26):** R7, R8, R18, R19, and R21.1 have
+been executed and landed — see
 `docs/openssl-provider-coverage-audit-2026-08-25.md` §6's "Phase 4,
-R18", "Phase 4, R19", "Phase 4, R21.1", and "Phase 4, R8" entries for
-the full mechanism of each. R18's own written hypothesis (EC/ECDH
-likely has ML-KEM's identical missing-SET_PARAMS gap) was wrong in
-its specifics — EC already had real, working SET_PARAMS; only
-X25519/X448 had a gap at all — but right in its instinct, and
-reproducing it surfaced four independent, layered bugs, three of them
-different from the original hypothesis, found only by getting a real
-handshake further into each role (client vs server) than the previous
-fix had. R19 needed zero code changes: all three sub-items closed
-with definitive, live-checked answers rather than fixes — the plan's
-own framing ("proven, or proven-unobservable-and-documented")
-anticipated exactly this outcome as a legitimate closure, not a
-shortfall. R21.1 was purely mechanical. **R8's own bytes-in-mode
-design ran ahead of the plan's own text in one respect**: a first
-implementation (one algorithm name per HMAC digest, modeled on
-digests.c's own pattern) was real, correct, spec-aligned code that
-nonetheless could not be reached by the plan's own stated proof
-command — caught live via engine-log evidence showing zero token
-activity despite a correct output value (HMAC is deterministic, so a
-silent wrong-provider fallback is invisible in the output alone),
-the same R13 false-pass class recurring in a genuinely new operation
-type for the first time since R13 was written. Rewritten to match
-OpenSSL's own generic single-"HMAC"-algorithm convention. R8/R18/R19/
-R21.1's own sections below are left as originally written (the plan,
-not the result) per this project's append-only convention; do not
-edit them to match the outcome. **Harness: `PASS=39 FAIL=0 XFAIL=0
-XPASS=0`** — eight cases gained total (T18/T18b/T18c/T18d, T20/T20b/
-T20c/T20d). R7, R9–R11, R20, and the rest of R21 remain plan-only,
+R18", "Phase 4, R19", "Phase 4, R21.1", "Phase 4, R8", and "Phase 4,
+R7" entries for the full mechanism of each. R18's own written
+hypothesis (EC/ECDH likely has ML-KEM's identical missing-SET_PARAMS
+gap) was wrong in its specifics — EC already had real, working
+SET_PARAMS; only X25519/X448 had a gap at all — but right in its
+instinct, and reproducing it surfaced four independent, layered bugs,
+three of them different from the original hypothesis, found only by
+getting a real handshake further into each role (client vs server)
+than the previous fix had. R19 needed zero code changes: all three
+sub-items closed with definitive, live-checked answers rather than
+fixes — the plan's own framing ("proven, or
+proven-unobservable-and-documented") anticipated exactly this outcome
+as a legitimate closure, not a shortfall. R21.1 was purely mechanical.
+**R8's own bytes-in-mode design ran ahead of the plan's own text in
+one respect**: a first implementation (one algorithm name per HMAC
+digest, modeled on digests.c's own pattern) was real, correct,
+spec-aligned code that nonetheless could not be reached by the plan's
+own stated proof command — caught live via engine-log evidence showing
+zero token activity despite a correct output value (HMAC is
+deterministic, so a silent wrong-provider fallback is invisible in the
+output alone), the same R13 false-pass class recurring in a genuinely
+new operation type for the first time since R13 was written. Rewritten
+to match OpenSSL's own generic single-"HMAC"-algorithm convention.
+**R7 found and fixed four bugs beyond its own scoped "add five
+profiles" — two of them (a wrong classical hash for the two
+PRE-EXISTING ECDSA profiles, and a raw-vs-DER wire-format mismatch
+affecting every ECDSA profile including those two) were shipped,
+undetected defects this item's KAT-cross-check step (this plan's own
+C8 gate) exposed, not new-profile-only issues**; see the audit
+entry for the full account, including a fifth item (plain SIGN/VERIFY
+dispatch was entirely missing, so `pkeyutl -rawin` — the API this
+project's own harness already uses for every other hash-internal
+algorithm — could never reach composite at all) that is a genuine
+capability gap rather than a bug in existing behavior. R8/R18/R19/
+R21.1/R7's own sections below are left as originally written (the
+plan, not the result) per this project's append-only convention; do
+not edit them to match the outcome. **Harness: `PASS=47 FAIL=0
+XFAIL=0 XPASS=0`** — sixteen cases gained total since this plan's
+starting point (T18/T18b/T18c/T18d, T20/T20b/T20c/T20d,
+T21a–T21h). R9–R11, R20, and the rest of R21 remain plan-only,
 not executed.
 
 Scope: everything still open after phase 3 closed R12–R17 in full

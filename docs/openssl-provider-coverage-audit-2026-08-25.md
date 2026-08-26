@@ -1158,6 +1158,162 @@ same `mac.c` shape should extend cleanly, not attempted in this pass
 to keep this item's own diff and proof scoped to what was actually
 built and verified).
 
+**Phase 4, R7 (composite signature profiles 4–8), DONE:** `composite.c`
+registered exactly 3 of the 8 draft-lamps-pq-composite-sigs-19 §6
+profiles (.37/.45/.49) before this item. Added the five missing
+(.39/.40/.41/.46/.48 — corrected from the phase-4 plan's own guessed
+OID digits, verified against `kmip/src/kmip30/algos.rs` and the draft
+itself), plus fixed three real bugs the new profiles' verification
+work exposed in the existing code along the way.
+
+**Bug 1 (pre-existing, .45/.49): classical hash tracked the profile
+NAME's hash instead of the classical algorithm's own conventional
+hash.** `composite.c` hardcoded `CKM_ECDSA_SHA512` for every ECDSA
+profile, reading the "SHA512" in "MLDSA65-ECDSA-P256-SHA512" as the
+classical signing hash — it is actually the M' pre-hash (draft-19 §2.2:
+`M' = Prefix||Label||len(ctx)||ctx||PH(M)`); the classical half signs
+M' using its own standard hash-then-sign convention, which for ECDSA
+tracks the curve (P-256 → SHA-256, P-384 → SHA-384), not the pre-hash.
+This is the SAME bug class the Rust KMIP engine's `composite_sig.rs`
+already found and fixed on 2026-08-17 in its own independent
+implementation of the same draft (its own comments there call out the
+exact mechanism: "Corrected 2026-08-17: was CKM_ECDSA_SHA512, which
+produced signatures that verified only against implementations sharing
+the same misreading") — this provider never got the equivalent fix,
+because no harness case existed for composite signatures at all until
+this item. Caught not by inspection but by the plan's own prescribed
+gate: independently reconstructing draft-19's M' in Python and
+verifying the external `raw_signature_vectors` KAT (4 vectors covering
+.40/.45/.46/.49) — three of four initially failed to verify under
+SHA-512, and DID verify under the curve-conventional hash, with a
+negative control confirming they fail again under any other hash.
+Fixed by adding an explicit `classical_type`/`classical_mechanism`
+field pair to `struct p11prov_composite_profile` (see bug 3) and
+setting .45→`CKM_ECDSA_SHA256`, .49→`CKM_ECDSA_SHA384`.
+
+**Bug 2 (pre-existing, all ECDSA profiles): the composite signature's
+classical component was embedded as PKCS#11's raw fixed-width r||s,
+not the DER `ECDSA-Sig-Value` draft-19's wire format actually
+carries.** Every external KAT vector's classical-signature tail parses
+as a valid DER `SEQUENCE { INTEGER r, INTEGER s }` (confirmed via
+`openssl asn1parse`); this provider's `p11prov_sig_operate` — a thin
+wrapper around raw `C_Sign`/`C_Verify` — was writing/reading that raw
+PKCS#11 output straight into the composite signature bytes with no
+conversion, even though the buffer-sizing comment already (correctly,
+if not consistently) said "ECDSA-P256 DER ≤ 72". Fixed with new
+`ecdsa_raw_to_der`/`ecdsa_der_to_raw` helpers (`ECDSA_SIG_new`/
+`ECDSA_SIG_set0`/`i2d_ECDSA_SIG` and `d2i_ECDSA_SIG`/`ECDSA_SIG_get0`/
+`BN_bn2binpad`, not hand-rolled ASN.1), wired into
+`p11prov_composite_digest_sign_final` (raw scratch buffer → DER at the
+real wire position) and `...verify_final` (DER from the wire → raw
+scratch buffer before `C_Verify`) via a new per-profile
+`ec_field_width` (32 for P-256, 48 for P-384). **Sabotage-verified**:
+disabling only the sign-side conversion (falling back to the old raw
+passthrough) breaks exactly the four ECDSA profiles (T21b/T21c/T21e/
+T21h) while the RSA-PSS and Ed25519 profiles (unaffected by this bug
+class) stay green — confirms the fix is load-bearing, not incidental.
+
+**Bug 3 (structural, would have miscompiled the new profiles even
+without bugs 1/2): the classical-family dispatch inferred RSA-vs-ECDSA
+from `mldsa_param_set` (44→RSA, 65/87→ECDSA), which the 8-profile set
+genuinely breaks** — .40 pairs MLDSA44 with ECDSA, .41 pairs MLDSA65
+with RSA-PSS, .39/.48 pair MLDSA44/65 with Ed25519. Adding any of
+these five profiles under the old inference would have silently
+selected the wrong classical algorithm entirely (not just the wrong
+hash). Replaced with an explicit `enum p11prov_composite_classical`
+field plus a concrete `classical_mechanism`/PSS-params/`ec_field_width`
+per profile, used directly by `composite_setup_classical_sigctx`,
+`composite_digest_op_init`'s family selection, and
+`p11prov_composite_obj_get_pubkey_bytes`'s pubkey-extraction dispatch
+(which gained a new `composite_get_ed25519_pubkey`, mirroring the
+existing ECDSA/RSA collectors with `CKK_EC_EDWARDS`).
+
+**Bug 4 (found building the RSA-3072 profile's own test): classical
+signature buffer sizing (`classical_sig_max = 256`,
+`p11prov_composite_keymgmt_get_params`'s matching `+ 256`) was sized
+only for RSA-2048's 256-byte signature — RSA-3072 needs 384 and failed
+sign with a buffer-too-small provider error the caller couldn't
+recover from, since the SAME constant under-reported OpenSSL's own
+sizing-query result too.** Bumped to 512 in both places (comfortably
+covers every registered profile: RSA-3072's 384 bytes, ECDSA-P384 DER's
+~104).
+
+**A fifth, genuinely new capability gap, not a bug in existing code**:
+composite.c registered ONLY `OSSL_FUNC_SIGNATURE_DIGEST_SIGN/VERIFY_*`,
+never plain `SIGN_INIT`/`SIGN`/`VERIFY_INIT`/`VERIFY` — meaning
+`openssl pkeyutl -sign/-verify -rawin`, the exact API this harness
+already relies on for every other hash-internal algorithm (ML-DSA,
+SLH-DSA, Ed25519 — see T3/T7/T12sign's own `pkeyutl -rawin` calls),
+could never reach composite signing or verification at all. Confirmed
+this is not composite-specific: `openssl dgst -verify` against a
+plain, already-shipped ML-DSA key hits the identical "no default
+digest" `do_sigver_init` failure via `EVP_DigestVerifyInit_ex`'s
+digest-name resolution — a general provider quirk on the VERIFY
+direction of the digest-wrapping API, unrelated to composite, that
+`pkeyutl -rawin`'s plain `EVP_PKEY_sign`/`verify` path sidesteps
+entirely. Added `p11prov_composite_sign_init`/`sign`/`verify_init`/
+`verify` as thin one-shot wrappers over the existing
+`composite_digest_op_init`/`digest_op_update`/`digest_sign_final`/
+`digest_verify_final` (no new signing logic — same trio the
+DIGEST_SIGN path already used, just reachable from the plain SIGN/
+VERIFY operation type OpenSSL dispatches for `pkeyutl -rawin`).
+
+**Test infrastructure, new**: the standard `openssl` CLI cannot drive
+composite sign/verify at all — there is no `OSSL_FUNC_KEYMGMT_GEN` for
+composite keys, only a two-subkey-URI bridge
+(`p11prov_composite_evp_pkey_from_uris`, exported from
+`pkcs11-provider.so` for pqctoday-hub's `cms_provider_init.c`, per
+composite.h's own comment). Added `scripts/composite-sig-probe.c` (new
+CMake target `composite_sig_probe`, top-level `CMakeLists.txt`, gated
+on `BUILD_TESTS` alongside `p11_v32_compliance_test`) — a small
+standalone tool that loads the pkcs11 + default providers, calls the
+bridge directly with real token-resident ML-DSA + classical keypairs,
+and drives `EVP_PKEY_sign`/`EVP_PKEY_verify`. Linking a MODULE-type
+CMake library (`pkcs11-provider`) into a plain executable needed the
+GNU `-l:exact-filename.so` linker form — CMake's normal
+`target_link_libraries(... pkcs11-provider)`, even wrapped in
+`$<TARGET_FILE:...>` or a literal matching path, kept re-deriving a
+bare `-lpkcs11-provider` (which the linker can't find — no `lib`
+prefix on a provider module) because CMake recognizes the path as that
+target's output regardless of how it's spelled; `-l:pkcs11-provider.so`
+plus an explicit `-L`/`-rpath` bypasses that resolution while keeping
+normal link-order placement (unlike `target_link_options`, which
+misordered the library before the object file needing its symbols).
+
+**Proof per profile** (T21a–T21h, `scripts/test-openssl-provider.sh`):
+real ML-DSA + classical keypair generation on the token, real sign via
+`composite_sig_probe`, real verify against a SEPARATE public-key-URI
+EVP_PKEY (feeding the signing private-key URIs to verify fails
+`EVP_PKEY_verify_init` with an empty OpenSSL error queue — PKCS#11
+`C_VerifyInit` against a `CKO_PRIVATE_KEY`-class object fails below the
+level this provider raises an OSSL error for, which looks like a
+silent crash until you know to check the key class), plus two sabotage
+controls per case (wrong message, corrupted signature byte) that must
+both fail. Sabotage-tested the harness itself per the plan's own
+prescription: corrupting only .39's OID constant broke only T21d,
+all seven other cases stayed green.
+
+Both engines' full test suites remain green (C++: 8/8 CTest suites;
+Rust: unaffected — confirmed no code changed under `rust/`, one
+flaky pre-existing failure in an unrelated FFI param-width test
+reproduced as a genuine one-off — passes in isolation and on rerun,
+not touched by this item). **Harness: `PASS=47 FAIL=0 XFAIL=0
+XPASS=0`** — eight cases gained (T21a–T21h), zero regressions.
+
+**Deferred, not started**: fixing composite SPKI decoder registration
+(a separately tracked, pre-existing issue — "composite decoders remain
+defined but unregistered — recursion issue", §2's table — out of this
+item's scope; cert-vector-based verify-only KAT proof for .39/.41/.48
+would need it, so those three profiles' M' construction was instead
+cross-checked directly against the certificate_vectors' extracted
+bytes in Python, independent of this provider, before writing any
+signing code); `tls.c` TLS-SIGALG entries for the five new profiles
+were added (private-use range 0xFEB3–0xFEB7, continuing R7's original
+scoping) but not harness-proven over an actual TLS handshake — no
+existing harness case negotiates a composite sigalg at all, including
+for the three pre-existing profiles, so this is a pre-existing gap
+this item did not close, not a new one it introduced.
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:

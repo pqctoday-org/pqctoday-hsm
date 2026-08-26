@@ -179,4 +179,35 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
                      --workdir ${CMAKE_BINARY_DIR}/p11_v32_compliance_workdir
                      --report ${CMAKE_BINARY_DIR}/cpp_compliance_report
              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    # composite-sig-probe: phase-4 R7 test helper for the pkcs11-provider's
+    # composite (draft-lamps-pq-composite-sigs) signature support. Links
+    # pkcs11-provider.so directly (its composite bridge exports real C
+    # symbols for exactly this — see composite.h) because the standard
+    # openssl CLI cannot reach that path: there is no keymgmt GEN for
+    # composite keys, only a two-subkey-URI bridge. Driven by
+    # scripts/test-openssl-provider.sh's T21 (COMPSIG) cases, not run
+    # under ctest directly (it needs a live per-case token arena the
+    # harness script builds, same as every other T-case).
+    add_executable(composite_sig_probe scripts/composite-sig-probe.c)
+    target_include_directories(composite_sig_probe PRIVATE
+        ${OPENSSL_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/src/vendor/pkcs11-provider
+        ${CMAKE_SOURCE_DIR}/src/vendor/pkcs11-provider/src)
+    add_dependencies(composite_sig_probe pkcs11-provider)
+    # pkcs11-provider is a MODULE library named exactly pkcs11-provider.so
+    # (no "lib" prefix, per provider-loading convention). CMake recognizes
+    # any reference to its output path — target name, $<TARGET_FILE:...>,
+    # even a hardcoded literal matching that path — as "the pkcs11-provider
+    # target" and re-derives a bare -lpkcs11-provider flag, which the
+    # linker can't resolve (it looks for libpkcs11-provider.so). The GNU
+    # ld/gold/lld -l:exact-filename form bypasses the lib-prefix
+    # assumption while staying inside target_link_libraries' normal
+    # library ordering (so it lands after the object file that needs its
+    # symbols, unlike target_link_options' flag placement).
+    target_link_libraries(composite_sig_probe
+        ${OPENSSL_LIBRARIES}
+        -L${CMAKE_BINARY_DIR}/src/vendor/pkcs11-provider
+        -l:pkcs11-provider.so
+        -Wl,-rpath,${CMAKE_BINARY_DIR}/src/vendor/pkcs11-provider)
 endif()

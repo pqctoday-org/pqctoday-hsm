@@ -349,6 +349,58 @@ int mldsa87_ecdsa_p384_max_tls = 0;
 int mldsa87_ecdsa_p384_min_dtls = -1;
 int mldsa87_ecdsa_p384_max_dtls = -1;
 
+/* Phase 4 R7: profiles 4-8. Code points continue the same private-use
+ * range (0xFEB3-0xFEB7); bump all eight when the RFC ships. */
+#define mldsa44_ed25519_iana_name "mldsa44_ed25519_sha512"
+#define mldsa44_ed25519_name "ML-DSA-44-Ed25519-SHA512"
+#define mldsa44_ed25519_oid "1.3.6.1.5.5.7.6.39"
+unsigned int mldsa44_ed25519_code_point = 0xFEB3; /* private use; draft-19 */
+unsigned int mldsa44_ed25519_sec_bits = 128;
+int mldsa44_ed25519_min_tls = TLS1_3_VERSION;
+int mldsa44_ed25519_max_tls = 0;
+int mldsa44_ed25519_min_dtls = -1;
+int mldsa44_ed25519_max_dtls = -1;
+
+#define mldsa44_ecdsa_p256_sha256_iana_name "mldsa44_ecdsa_p256_sha256"
+#define mldsa44_ecdsa_p256_sha256_name "ML-DSA-44-ECDSA-P256-SHA256"
+#define mldsa44_ecdsa_p256_sha256_oid "1.3.6.1.5.5.7.6.40"
+unsigned int mldsa44_ecdsa_p256_sha256_code_point = 0xFEB4; /* private use; draft-19 */
+unsigned int mldsa44_ecdsa_p256_sha256_sec_bits = 128;
+int mldsa44_ecdsa_p256_sha256_min_tls = TLS1_3_VERSION;
+int mldsa44_ecdsa_p256_sha256_max_tls = 0;
+int mldsa44_ecdsa_p256_sha256_min_dtls = -1;
+int mldsa44_ecdsa_p256_sha256_max_dtls = -1;
+
+#define mldsa65_rsa3072_pss_iana_name "mldsa65_rsa3072_pss_sha512"
+#define mldsa65_rsa3072_pss_name "ML-DSA-65-RSA3072-PSS-SHA512"
+#define mldsa65_rsa3072_pss_oid "1.3.6.1.5.5.7.6.41"
+unsigned int mldsa65_rsa3072_pss_code_point = 0xFEB5; /* private use; draft-19 */
+unsigned int mldsa65_rsa3072_pss_sec_bits = 192;
+int mldsa65_rsa3072_pss_min_tls = TLS1_3_VERSION;
+int mldsa65_rsa3072_pss_max_tls = 0;
+int mldsa65_rsa3072_pss_min_dtls = -1;
+int mldsa65_rsa3072_pss_max_dtls = -1;
+
+#define mldsa65_ed25519_iana_name "mldsa65_ed25519_sha512"
+#define mldsa65_ed25519_name "ML-DSA-65-Ed25519-SHA512"
+#define mldsa65_ed25519_oid "1.3.6.1.5.5.7.6.48"
+unsigned int mldsa65_ed25519_code_point = 0xFEB6; /* private use; draft-19 */
+unsigned int mldsa65_ed25519_sec_bits = 192;
+int mldsa65_ed25519_min_tls = TLS1_3_VERSION;
+int mldsa65_ed25519_max_tls = 0;
+int mldsa65_ed25519_min_dtls = -1;
+int mldsa65_ed25519_max_dtls = -1;
+
+#define mldsa65_ecdsa_p384_iana_name "mldsa65_ecdsa_p384_sha512"
+#define mldsa65_ecdsa_p384_name "ML-DSA-65-ECDSA-P384-SHA512"
+#define mldsa65_ecdsa_p384_oid "1.3.6.1.5.5.7.6.46"
+unsigned int mldsa65_ecdsa_p384_code_point = 0xFEB7; /* private use; draft-19 */
+unsigned int mldsa65_ecdsa_p384_sec_bits = 192;
+int mldsa65_ecdsa_p384_min_tls = TLS1_3_VERSION;
+int mldsa65_ecdsa_p384_max_tls = 0;
+int mldsa65_ecdsa_p384_min_dtls = -1;
+int mldsa65_ecdsa_p384_max_dtls = -1;
+
 #define TLS_SIGALG_ENTRY(pre) \
     { OSSL_PARAM_utf8_string(OSSL_CAPABILITY_TLS_SIGALG_IANA_NAME, \
                              (void *)pre##_iana_name, \
@@ -383,6 +435,17 @@ struct {
       TLS_SIGALG_ENTRY(mldsa65_ecdsa_p256) },
     { "mldsa87_ecdsa_p384_sha512",
       TLS_SIGALG_ENTRY(mldsa87_ecdsa_p384) },
+    /* Phase 4 R7: profiles 4-8 */
+    { "mldsa44_ed25519_sha512",
+      TLS_SIGALG_ENTRY(mldsa44_ed25519) },
+    { "mldsa44_ecdsa_p256_sha256",
+      TLS_SIGALG_ENTRY(mldsa44_ecdsa_p256_sha256) },
+    { "mldsa65_rsa3072_pss_sha512",
+      TLS_SIGALG_ENTRY(mldsa65_rsa3072_pss) },
+    { "mldsa65_ed25519_sha512",
+      TLS_SIGALG_ENTRY(mldsa65_ed25519) },
+    { "mldsa65_ecdsa_p384_sha512",
+      TLS_SIGALG_ENTRY(mldsa65_ecdsa_p384) },
 #endif
 };
 

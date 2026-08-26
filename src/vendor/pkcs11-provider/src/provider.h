@@ -153,15 +153,52 @@
 #define P11PROV_DESCS_COMPOSITE_MLDSA87_ECDSA_P384 \
     "PKCS11 Composite ML-DSA-87 + ECDSA-P384-SHA512 (draft-lamps-19)"
 
+/* Phase 4 R7: profiles 4-8. OIDs verified against kmip/src/kmip30/algos.rs
+ * and draft-lamps-pq-composite-sigs-19 §6. */
+#define P11PROV_NAMES_COMPOSITE_MLDSA44_ED25519 \
+    "MLDSA44-Ed25519-SHA512:id-MLDSA44-Ed25519-SHA512:1.3.6.1.5.5.7.6.39"
+#define P11PROV_DESCS_COMPOSITE_MLDSA44_ED25519 \
+    "PKCS11 Composite ML-DSA-44 + Ed25519-SHA512 (draft-lamps-19)"
+
+#define P11PROV_NAMES_COMPOSITE_MLDSA44_ECDSA_P256_SHA256 \
+    "MLDSA44-ECDSA-P256-SHA256:id-MLDSA44-ECDSA-P256-SHA256:1.3.6.1.5.5.7.6.40"
+#define P11PROV_DESCS_COMPOSITE_MLDSA44_ECDSA_P256_SHA256 \
+    "PKCS11 Composite ML-DSA-44 + ECDSA-P256-SHA256 (draft-lamps-19)"
+
+#define P11PROV_NAMES_COMPOSITE_MLDSA65_RSA3072_PSS \
+    "MLDSA65-RSA3072-PSS-SHA512:id-MLDSA65-RSA3072-PSS-SHA512:1.3.6.1.5.5.7.6.41"
+#define P11PROV_DESCS_COMPOSITE_MLDSA65_RSA3072_PSS \
+    "PKCS11 Composite ML-DSA-65 + RSA-3072-PSS-SHA512 (draft-lamps-19)"
+
+#define P11PROV_NAMES_COMPOSITE_MLDSA65_ED25519 \
+    "MLDSA65-Ed25519-SHA512:id-MLDSA65-Ed25519-SHA512:1.3.6.1.5.5.7.6.48"
+#define P11PROV_DESCS_COMPOSITE_MLDSA65_ED25519 \
+    "PKCS11 Composite ML-DSA-65 + Ed25519-SHA512 (draft-lamps-19)"
+
+#define P11PROV_NAMES_COMPOSITE_MLDSA65_ECDSA_P384 \
+    "MLDSA65-ECDSA-P384-SHA512:id-MLDSA65-ECDSA-P384-SHA512:1.3.6.1.5.5.7.6.46"
+#define P11PROV_DESCS_COMPOSITE_MLDSA65_ECDSA_P384 \
+    "PKCS11 Composite ML-DSA-65 + ECDSA-P384-SHA512 (draft-lamps-19)"
+
 /* Composite keymgmt / signature / encoder dispatch tables (composite.c) */
 extern const OSSL_DISPATCH p11prov_composite_mldsa44_rsa2048_pss_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p256_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa87_ecdsa_p384_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa44_ed25519_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa44_ecdsa_p256_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_rsa3072_pss_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_ed25519_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p384_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa44_rsa2048_pss_sig_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p256_sig_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa87_ecdsa_p384_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa44_ed25519_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa44_ecdsa_p256_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_rsa3072_pss_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_ed25519_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p384_sig_functions[];
 /* Single SPKI encoder per output format — keyed by the composite profile
- * embedded in the keydata, so one table serves all three composite OIDs. */
+ * embedded in the keydata, so one table serves all eight composite OIDs. */
 extern const OSSL_DISPATCH p11prov_composite_encoder_spki_der_functions[];
 extern const OSSL_DISPATCH p11prov_composite_encoder_spki_pem_functions[];
 /* Per-profile SPKI DER decoders — used by X509_get0_pubkey to round-trip
