@@ -289,4 +289,16 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
     add_executable(skey_flow_probe scripts/skey-flow-probe.c)
     target_include_directories(skey_flow_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
     target_link_libraries(skey_flow_probe ${OPENSSL_LIBRARIES})
+
+    # shake-sign-probe: phase-8 R38 test helper — drives EVP_DigestSign*
+    # directly with a SHAKE128/256 digest name, bypassing the openssl(1)
+    # CLI apps, both of which refuse this combination for reasons that
+    # have nothing to do with this provider (dgst: "Signing key cannot be
+    # specified for XOF" is apps/dgst.c's own hardcoded refusal; pkeyutl:
+    # -digest's algorithm allowlist doesn't include ML-DSA) — confirmed
+    # live before writing this probe, see the file's own header. Plain
+    # OpenSSL linking, same as skey-flow-probe.
+    add_executable(shake_sign_probe scripts/shake-sign-probe.c)
+    target_include_directories(shake_sign_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(shake_sign_probe ${OPENSSL_LIBRARIES})
 endif()

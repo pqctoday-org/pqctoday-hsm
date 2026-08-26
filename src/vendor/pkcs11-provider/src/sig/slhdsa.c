@@ -28,6 +28,26 @@
 #define SLH_DSA_256S_SIG_SIZE 29792
 #define SLH_DSA_256F_SIG_SIZE 49856
 
+/* Remediation R38 (phase 8): see mldsa.c's own mldsa_shake_sentinel for
+ * the full rationale -- identical need here for CKM_HASH_SLH_DSA_SHAKE128/
+ * 256 (§6.69.7), duplicated per-file rather than shared, matching this
+ * pair's existing HASH_MLDSA_CASE/HASH_SLHDSA_CASE convention. */
+static CK_MECHANISM_TYPE slhdsa_shake_sentinel(const char *digest)
+{
+    if (digest == NULL) {
+        return CK_UNAVAILABLE_INFORMATION;
+    }
+    if (OPENSSL_strcasecmp(digest, "SHAKE128") == 0
+        || OPENSSL_strcasecmp(digest, "SHAKE-128") == 0) {
+        return CKM_SHAKE_128_KEY_DERIVATION;
+    }
+    if (OPENSSL_strcasecmp(digest, "SHAKE256") == 0
+        || OPENSSL_strcasecmp(digest, "SHAKE-256") == 0) {
+        return CKM_SHAKE_256_KEY_DERIVATION;
+    }
+    return CK_UNAVAILABLE_INFORMATION;
+}
+
 DISPATCH_SLHDSA_FN(sign_init);
 DISPATCH_SLHDSA_FN(sign);
 DISPATCH_SLHDSA_FN(verify_init);
@@ -85,10 +105,16 @@ static CK_RV p11prov_slhdsa_set_mechanism(P11PROV_SIG_CTX *sigctx)
         case CKM_SHA3_512:
             hash_mech = CKM_HASH_SLH_DSA_SHA3_512;
             break;
+        /* Remediation R38: carrier sentinels from slhdsa_shake_sentinel()
+         * (above) -- see mldsa.c's identical case arms for the full
+         * rationale. */
+        case CKM_SHAKE_128_KEY_DERIVATION:
+            hash_mech = CKM_HASH_SLH_DSA_SHAKE128;
+            break;
+        case CKM_SHAKE_256_KEY_DERIVATION:
+            hash_mech = CKM_HASH_SLH_DSA_SHAKE256;
+            break;
         default:
-            /* Includes SHAKE128/256 -- see mldsa.c's identical note:
-             * digests.c's own digest_map has no entry for them yet,
-             * so sigctx->digest can never hold one today. */
             P11PROV_raise(sigctx->provctx, CKR_MECHANISM_INVALID,
                           "Unsupported digest for HashSLH-DSA");
             return CKR_MECHANISM_INVALID;
@@ -287,15 +313,25 @@ static int p11prov_slhdsa_digest_sign_init(void *ctx, const char *digest,
                                            const OSSL_PARAM params[])
 {
     P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)ctx;
+    CK_MECHANISM_TYPE shake;
     CK_RV ret;
 
     P11PROV_debug(
         "slhdsa digest sign init (ctx=%p, digest=%s, key=%p, params=%p)",
         ctx, digest ? digest : "<NULL>", provkey, params);
 
-    ret = p11prov_sig_op_init(ctx, provkey, CKF_SIGN, digest);
+    /* Remediation R38: see mldsa.c's digest_sign_init for the full
+     * rationale -- SHAKE128/256 skip p11prov_sig_op_init's own digest
+     * lookup and are set as sentinels here instead. */
+    shake = slhdsa_shake_sentinel(digest);
+    ret = p11prov_sig_op_init(ctx, provkey, CKF_SIGN,
+                              shake == CK_UNAVAILABLE_INFORMATION ? digest
+                                                                  : NULL);
     if (ret != CKR_OK) {
         return RET_OSSL_ERR;
+    }
+    if (shake != CK_UNAVAILABLE_INFORMATION) {
+        sigctx->digest = shake;
     }
 
     sigctx->digest_op = true;
@@ -369,14 +405,23 @@ static int p11prov_slhdsa_digest_verify_init(void *ctx, const char *digest,
                                              const OSSL_PARAM params[])
 {
     P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)ctx;
+    CK_MECHANISM_TYPE shake;
     CK_RV ret;
 
-    P11PROV_debug("slhdsa digest verify init (ctx=%p, key=%p, params=%p)",
-                  ctx, provkey, params);
+    P11PROV_debug(
+        "slhdsa digest verify init (ctx=%p, digest=%s, key=%p, params=%p)",
+        ctx, digest ? digest : "<NULL>", provkey, params);
 
-    ret = p11prov_sig_op_init(ctx, provkey, CKF_VERIFY, digest);
+    /* See digest_sign_init's own comment (remediation R38). */
+    shake = slhdsa_shake_sentinel(digest);
+    ret = p11prov_sig_op_init(ctx, provkey, CKF_VERIFY,
+                              shake == CK_UNAVAILABLE_INFORMATION ? digest
+                                                                  : NULL);
     if (ret != CKR_OK) {
         return RET_OSSL_ERR;
+    }
+    if (shake != CK_UNAVAILABLE_INFORMATION) {
+        sigctx->digest = shake;
     }
 
     sigctx->digest_op = true;

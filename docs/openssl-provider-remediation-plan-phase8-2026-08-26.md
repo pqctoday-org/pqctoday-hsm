@@ -123,6 +123,35 @@ must fail (digest honored, not dropped), tampered-message sabotage.
 Regression: full harness, CTest; `cargo test` only if `rust/` is
 touched (expected: not).
 
+**Execution update (2026-08-26):** done, both engines, option (a) as
+recommended. Live-confirmed before coding: *neither* CLI surface can
+drive a SHAKE prehash signature at all, for reasons unrelated to this
+provider — `dgst -shake128/-256 -sign` reaches the provider's
+`digest_sign_init` fine but `apps/dgst.c` itself hard-refuses
+("Signing key cannot be specified for XOF"); `pkeyutl -sign -digest
+shakeNNN` refuses earlier still ("-digest (prehash) is not supported
+with ML-DSA-65"). Built `scripts/shake-sign-probe.c` (new CMake target
+`shake_sign_probe`, alongside the project's other bespoke EVP-API
+probes) to drive `EVP_DigestSign*`/`EVP_DigestVerify*` directly and
+bypass both app-level gates — this became the harness's own T31/T31b
+mechanism, not just a throwaway probe. `mldsa.c`/`slhdsa.c` each gained
+a `*_shake_sentinel()` helper recognizing SHAKE128/256 digest names in
+`digest_sign_init`/`digest_verify_init`, routing around
+`p11prov_sig_op_init`'s digest_map lookup entirely (calls it with
+`digest=NULL`, sets `sigctx->digest` to the
+`CKM_SHAKE_128/256_KEY_DERIVATION` sentinel afterward) and matched by
+two new `case` arms in each existing `set_mechanism` switch. T31
+covers both algorithm families in one case (ML-DSA-65/SHAKE256,
+SLH-DSA-SHAKE-128s/SHAKE128, each on its own arena — a bare
+`type=private`/`type=public` URI is ambiguous once two keypairs share a
+token, mk_arena's own documented hazard); engine-log confirmed
+mechanism `0x2b` (`CKM_HASH_ML_DSA_SHAKE128`) genuinely dispatched, not
+a coincidental fallback. No Rust source change needed (both
+`CKM_HASH_*_SHAKE128/256` arms already existed from R35/R36) — T31b
+proves the shared routing fix reaches both engines identically. Full
+regression: harness 84/84 (two new cases, zero regressions), C++ CTest
+8/8; `cargo test` correctly not re-run (no `rust/` change).
+
 ---
 
 ### R37 — bare generic `CKM_HASH_ML_DSA` / `CKM_HASH_SLH_DSA` PHM conformance — effort M

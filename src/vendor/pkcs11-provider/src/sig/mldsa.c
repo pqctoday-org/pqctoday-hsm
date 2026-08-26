@@ -29,6 +29,39 @@
  * the full design. Remove when this project adopts v3.3 natively. */
 #define CKM_PQCTODAY_ML_DSA_MU (CKM_VENDOR_DEFINED | 0x00000013UL)
 
+/* Remediation R38 (phase 8): PKCS#11 v3.2 has no SHAKE *digest* mechanism
+ * codepoint to carry through `sigctx->digest` (only
+ * CKM_SHAKE_128/256_KEY_DERIVATION, which are KDF mechanisms, not
+ * digests) -- yet CKM_HASH_ML_DSA_SHAKE128/256 (§6.67.7) are real,
+ * ratified mechanisms the engines already implement. digests.c's own
+ * digest_map deliberately has no SHAKE entry (it also feeds
+ * p11prov_digest_get_digest_size, whose fixed-length-digest contract a
+ * variable-length XOF doesn't fit -- see the phase-8 plan's R38
+ * grounding). So SHAKE128/256 are recognized HERE, before the shared
+ * p11prov_sig_op_init() name lookup would reject them, using the two
+ * KEY_DERIVATION constants purely as carrier sentinels matched by
+ * set_mechanism()'s own switch below -- never passed to a real KDF. Live-
+ * confirmed (PKCS11_PROVIDER_DEBUG) that `openssl dgst -shake128/-shake256
+ * -sign` reaches this function with digest == "shake128"/"shake256"
+ * lowercase; OPENSSL_strcasecmp (case-insensitive, matching every other
+ * digest_map entry's own convention) also covers the OSSL_DIGEST_NAME_*
+ * "SHAKE-128"/"SHAKE-256" spelling in case a non-CLI caller uses it. */
+static CK_MECHANISM_TYPE mldsa_shake_sentinel(const char *digest)
+{
+    if (digest == NULL) {
+        return CK_UNAVAILABLE_INFORMATION;
+    }
+    if (OPENSSL_strcasecmp(digest, "SHAKE128") == 0
+        || OPENSSL_strcasecmp(digest, "SHAKE-128") == 0) {
+        return CKM_SHAKE_128_KEY_DERIVATION;
+    }
+    if (OPENSSL_strcasecmp(digest, "SHAKE256") == 0
+        || OPENSSL_strcasecmp(digest, "SHAKE-256") == 0) {
+        return CKM_SHAKE_256_KEY_DERIVATION;
+    }
+    return CK_UNAVAILABLE_INFORMATION;
+}
+
 DISPATCH_MLDSA_FN(sign_init);
 DISPATCH_MLDSA_FN(sign);
 DISPATCH_MLDSA_FN(verify_init);
@@ -111,13 +144,19 @@ static CK_RV p11prov_mldsa_set_mechanism(P11PROV_SIG_CTX *sigctx)
         case CKM_SHA3_512:
             hash_mech = CKM_HASH_ML_DSA_SHA3_512;
             break;
+        /* Remediation R38 (phase 8): these two never come from
+         * p11prov_digest_get_by_name's digest_map (it has no SHAKE entry
+         * -- see that gap's own note in digests.c) -- they arrive only
+         * as the carrier sentinels mldsa_shake_sentinel() (above) sets in
+         * digest_sign/verify_init, one layer earlier than every other
+         * case in this switch. */
+        case CKM_SHAKE_128_KEY_DERIVATION:
+            hash_mech = CKM_HASH_ML_DSA_SHAKE128;
+            break;
+        case CKM_SHAKE_256_KEY_DERIVATION:
+            hash_mech = CKM_HASH_ML_DSA_SHAKE256;
+            break;
         default:
-            /* Includes SHAKE128/256: p11prov_digest_get_by_name's own
-             * digest_map (digests.c) has no entry for them today, so
-             * sigctx->digest can never actually hold one yet -- this
-             * default arm exists for when that changes, not dead code
-             * against the current digest_map. Loud rejection, never a
-             * silent fallback to pure (unhashed) ML-DSA. */
             P11PROV_raise(sigctx->provctx, CKR_MECHANISM_INVALID,
                           "Unsupported digest for HashML-DSA");
             return CKR_MECHANISM_INVALID;
@@ -319,15 +358,27 @@ static int p11prov_mldsa_digest_sign_init(void *ctx, const char *digest,
                                           const OSSL_PARAM params[])
 {
     P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)ctx;
+    CK_MECHANISM_TYPE shake;
     CK_RV ret;
 
     P11PROV_debug(
         "mldsa digest sign init (ctx=%p, digest=%s, key=%p, params=%p)", ctx,
         digest ? digest : "<NULL>", provkey, params);
 
-    ret = p11prov_sig_op_init(ctx, provkey, CKF_SIGN, digest);
+    /* Remediation R38: SHAKE128/256 would otherwise fail inside
+     * p11prov_sig_op_init's own p11prov_digest_get_by_name lookup (no
+     * digest_map entry) -- call it with digest=NULL to skip that lookup
+     * (still does the real key/operation setup) and set the sentinel
+     * ourselves, one layer earlier than the shared path handles it. */
+    shake = mldsa_shake_sentinel(digest);
+    ret = p11prov_sig_op_init(ctx, provkey, CKF_SIGN,
+                              shake == CK_UNAVAILABLE_INFORMATION ? digest
+                                                                  : NULL);
     if (ret != CKR_OK) {
         return RET_OSSL_ERR;
+    }
+    if (shake != CK_UNAVAILABLE_INFORMATION) {
+        sigctx->digest = shake;
     }
 
     sigctx->digest_op = true;
@@ -401,14 +452,23 @@ static int p11prov_mldsa_digest_verify_init(void *ctx, const char *digest,
                                             const OSSL_PARAM params[])
 {
     P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)ctx;
+    CK_MECHANISM_TYPE shake;
     CK_RV ret;
 
-    P11PROV_debug("mldsa digest verify init (ctx=%p, key=%p, params=%p)", ctx,
-                  provkey, params);
+    P11PROV_debug(
+        "mldsa digest verify init (ctx=%p, digest=%s, key=%p, params=%p)",
+        ctx, digest ? digest : "<NULL>", provkey, params);
 
-    ret = p11prov_sig_op_init(ctx, provkey, CKF_VERIFY, digest);
+    /* See digest_sign_init's own comment (remediation R38). */
+    shake = mldsa_shake_sentinel(digest);
+    ret = p11prov_sig_op_init(ctx, provkey, CKF_VERIFY,
+                              shake == CK_UNAVAILABLE_INFORMATION ? digest
+                                                                  : NULL);
     if (ret != CKR_OK) {
         return RET_OSSL_ERR;
+    }
+    if (shake != CK_UNAVAILABLE_INFORMATION) {
+        sigctx->digest = shake;
     }
 
     sigctx->digest_op = true;

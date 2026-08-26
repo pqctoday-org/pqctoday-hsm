@@ -48,6 +48,7 @@ HSS_PUBKEY_DUMP="${HSS_PUBKEY_DUMP:-$HSM_ROOT/build/hss_pubkey_dump}"
 HSS_W4_KEYGEN="${HSS_W4_KEYGEN:-$HSM_ROOT/build/hss_w4_keygen}"
 HSS_FALLBACK_FIXTURE="${HSS_FALLBACK_FIXTURE:-$HSM_ROOT/build/hss_fallback_fixture}"
 SKEY_FLOW_PROBE="${SKEY_FLOW_PROBE:-$HSM_ROOT/build/skey_flow_probe}"
+SHAKE_SIGN_PROBE="${SHAKE_SIGN_PROBE:-$HSM_ROOT/build/shake_sign_probe}"
 AEAD_PROBE="${AEAD_PROBE:-$HSM_ROOT/build/aead_probe}"
 AEAD_EDGE_PROBE="${AEAD_EDGE_PROBE:-$HSM_ROOT/build/aead_edge_probe}"
 if [[ -z "${RUST_ENGINE_SO:-}" ]]; then
@@ -158,7 +159,7 @@ say preflight "environment"
 VER="$(LD_LIBRARY_PATH=$OPENSSL_LIB_DIR "$OPENSSL_BIN" version 2>/dev/null)"
 case "$VER" in OpenSSL\ 3.6*|OpenSSL\ 3.7*|OpenSSL\ 4.*) : ;; *)
   echo "FATAL: need OpenSSL >= 3.6 at $OPENSSL_BIN (got: ${VER:-nothing}) — see audit ENV-1/gate --cpp note"; exit 2;; esac
-for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$HSS_W4_KEYGEN" "$HSS_FALLBACK_FIXTURE" "$SKEY_FLOW_PROBE" "$AEAD_PROBE" "$AEAD_EDGE_PROBE"; do
+for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$HSS_W4_KEYGEN" "$HSS_FALLBACK_FIXTURE" "$SKEY_FLOW_PROBE" "$AEAD_PROBE" "$AEAD_EDGE_PROBE" "$SHAKE_SIGN_PROBE"; do
   [[ -e "$f" ]] || { echo "FATAL: missing $f (run the --cpp gate step / cmake build first)"; exit 2; }
 done
 echo "  oracle: $VER; provider: $PROVIDER_SO"
@@ -1969,6 +1970,70 @@ t30() { local w; w=$(mk_arena hashslhdsa "$CPP_ENGINE_SO") && use_arena "$w" || 
 }
 run_case T30 PASS "HashSLH-DSA digest routing (CKM_HASH_SLH_DSA_<hash>, PKCS#11 v3.2 §6.69.7): twin of T29 for SLH-DSA-SHA2-128s -- digest genuinely routes to HashSLH-DSA (7856-byte sig), round-trip verify, negative control (default provider refuses), two sabotage controls (remediation R36)" t30
 
+# ─── T31: SHAKE128/256 reachability for HashML-DSA/HashSLH-DSA (remediation R38) ─
+# CKM_HASH_ML_DSA_SHAKE128/256 and CKM_HASH_SLH_DSA_SHAKE128/256 (PKCS#11
+# v3.2 §6.67.7/§6.69.7) are real, ratified mechanisms both engines already
+# implemented (R35/R36) -- but the provider's own digest_map (digests.c)
+# has no SHAKE entry, so sigctx->digest could never hold a SHAKE value and
+# these two mechanisms were unreachable through the provider (T29/T30's own
+# dead-code note). Neither `openssl dgst -shake128/256 -sign` (apps/dgst.c
+# hard-refuses "Signing key cannot be specified for XOF", unrelated to this
+# provider) nor `pkeyutl -sign -digest shakeNNN` ("-digest (prehash) is not
+# supported with ML-DSA-65", pkeyutl's own algorithm allowlist) can drive
+# this through the CLI -- confirmed live before writing this case (phase-8
+# R38 grounding) -- so shake_sign_probe (scripts/shake-sign-probe.c) drives
+# EVP_DigestSign*/EVP_DigestVerify* directly, reaching the identical
+# provider code path T29/T30's CLI wrapper does.
+t31() { local w; w=$(mk_arena shakemldsa "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm ML-DSA-65 -out "$w/k.pem" 2>/dev/null || return 1
+  echo "T31 SHAKE256 HashML-DSA digest-routing test message" > "$w/msg.txt"
+
+  "$SHAKE_SIGN_PROBE" sign "?provider=pkcs11" "pkcs11:token=shakemldsa;type=private" \
+    SHAKE256 "$w/msg.txt" "$w/sig.bin" 2>/dev/null || { echo "ML-DSA SHAKE256 sign failed"; return 1; }
+
+  "$SHAKE_SIGN_PROBE" verify "?provider=pkcs11" "pkcs11:token=shakemldsa;type=public" \
+    SHAKE256 "$w/msg.txt" "$w/sig.bin" 2>/dev/null || { echo "ML-DSA SHAKE256 round-trip verify failed"; return 1; }
+
+  # The real proof SHAKE256 is genuinely honored, not silently dropped: a
+  # HashML-DSA signature must NOT verify as a plain raw-message signature.
+  O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=shakemldsa;type=public" \
+    -in "$w/msg.txt" -sigfile "$w/sig.bin" 2>/dev/null \
+    && { echo "ML-DSA SHAKE256 signature verified as a PLAIN raw-message signature -- digest silently ignored"; return 1; }
+
+  # Sabotage: tampered message must fail.
+  echo "tampered" > "$w/msg_bad.txt"
+  "$SHAKE_SIGN_PROBE" verify "?provider=pkcs11" "pkcs11:token=shakemldsa;type=public" \
+    SHAKE256 "$w/msg_bad.txt" "$w/sig.bin" 2>/dev/null \
+    && { echo "ML-DSA SHAKE256 tampered-message verify succeeded -- must not"; return 1; }
+
+  # Second algorithm family: SLH-DSA-SHAKE-128s + SHAKE128 (proves the
+  # routing fix is generic, not ML-DSA-specific -- mirrors T29/T30's own
+  # ML-DSA/SLH-DSA split). Own arena/token: mk_arena's own doc warns a
+  # bare type=private/type=public URI is ambiguous once two keypairs
+  # share a token (an audit-era probe hit exactly this). Same 7856-byte
+  # size as T30's SHA2-128s baseline (size is independent of hash family,
+  # T12sign_shake's own precedent).
+  local w2; w2=$(mk_arena shakeslhdsa "$CPP_ENGINE_SO") && use_arena "$w2" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHAKE-128s -out "$w2/k.pem" 2>/dev/null || return 1
+  cp "$w/msg.txt" "$w2/msg.txt"
+  cp "$w/msg_bad.txt" "$w2/msg_bad.txt"
+
+  "$SHAKE_SIGN_PROBE" sign "?provider=pkcs11" "pkcs11:token=shakeslhdsa;type=private" \
+    SHAKE128 "$w2/msg.txt" "$w2/sig.bin" 2>/dev/null || { echo "SLH-DSA-SHAKE-128s SHAKE128 sign failed"; return 1; }
+  [[ "$(stat -c%s "$w2/sig.bin" 2>/dev/null || stat -f%z "$w2/sig.bin")" == "7856" ]] \
+    || { echo "unexpected SLH-DSA-SHAKE-128s signature size"; return 1; }
+
+  "$SHAKE_SIGN_PROBE" verify "?provider=pkcs11" "pkcs11:token=shakeslhdsa;type=public" \
+    SHAKE128 "$w2/msg.txt" "$w2/sig.bin" 2>/dev/null || { echo "SLH-DSA-SHAKE-128s SHAKE128 round-trip verify failed"; return 1; }
+
+  "$SHAKE_SIGN_PROBE" verify "?provider=pkcs11" "pkcs11:token=shakeslhdsa;type=public" \
+    SHAKE128 "$w2/msg_bad.txt" "$w2/sig.bin" 2>/dev/null \
+    && { echo "SLH-DSA-SHAKE-128s tampered-message verify succeeded -- must not"; return 1; }
+
+  return 0
+}
+run_case T31 PASS "SHAKE128/256 reachability for HashML-DSA/HashSLH-DSA (CKM_HASH_ML_DSA_SHAKE256 + CKM_HASH_SLH_DSA_SHAKE128, PKCS#11 v3.2 §6.67.7/§6.69.7): digest_sign_init now recognizes SHAKE names as sentinels instead of failing p11prov_sig_op_init's digest_map lookup, un-deading both set_mechanism SHAKE arms -- round-trip verify (both families), raw-verify-must-fail + tampered-message sabotage (remediation R38)" t31
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 
@@ -2385,6 +2450,76 @@ t30b() { # Rust-arm twin of T30 -- same proof, over libsofthsmrustv3.so.
   return 0
 }
 run_case T30b PASS "HashSLH-DSA digest routing, Rust arm: same proof as T30 over libsofthsmrustv3.so -- round-trip verify, tampered-message sabotage rejected (remediation R36)" t30b
+
+# ─── T31b: SHAKE128/256 reachability, Rust arm (remediation R38) ───────────
+t31b() { # Rust-arm twin of T31 -- same proof, over libsofthsmrustv3.so. No
+  # Rust-engine code change was needed for this item either (its own
+  # CKM_HASH_ML_DSA_SHAKE128/256 and CKM_HASH_SLH_DSA_SHAKE128/256 arms
+  # already existed) -- this proves the provider's shared SHAKE-sentinel
+  # routing fix reaches both engines identically, same as T29b/T30b.
+  [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/shakemldsarust"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label shakemldsarust --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm ML-DSA-65 -out "$w/k.pem" 2>/dev/null || return 1
+  echo "T31b SHAKE256 HashML-DSA digest-routing RUST test message" > "$w/msg.txt"
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    "$SHAKE_SIGN_PROBE" sign "?provider=pkcs11" "pkcs11:token=shakemldsarust;type=private" \
+      SHAKE256 "$w/msg.txt" "$w/sig.bin" 2>/dev/null || { echo "Rust-arm ML-DSA SHAKE256 sign failed"; return 1; }
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    "$SHAKE_SIGN_PROBE" verify "?provider=pkcs11" "pkcs11:token=shakemldsarust;type=public" \
+      SHAKE256 "$w/msg.txt" "$w/sig.bin" 2>/dev/null || { echo "Rust-arm ML-DSA SHAKE256 round-trip verify failed"; return 1; }
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=shakemldsarust;type=public" \
+      -in "$w/msg.txt" -sigfile "$w/sig.bin" 2>/dev/null \
+      && { echo "Rust-arm: ML-DSA SHAKE256 signature verified as a plain raw-message signature -- digest silently ignored"; return 1; }
+
+  echo "tampered" > "$w/msg_bad.txt"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    "$SHAKE_SIGN_PROBE" verify "?provider=pkcs11" "pkcs11:token=shakemldsarust;type=public" \
+      SHAKE256 "$w/msg_bad.txt" "$w/sig.bin" 2>/dev/null \
+      && { echo "Rust-arm: ML-DSA SHAKE256 tampered-message verify succeeded -- must not"; return 1; }
+
+  # Second algorithm family, own arena (same type=private/public ambiguity
+  # reason T31 gave for its own second arena).
+  local w2="$ROOT_WORK/shakeslhdsarust"; mkdir -p "$w2/tokens"; mk_rust_cnf "$w2"
+  local statefile2="$w2/state.bin"
+  SOFTHSM2_CONF="$w2/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile2" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label shakeslhdsarust --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile2" ]] || return 1
+
+  SOFTHSM2_CONF="$w2/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile2" OPENSSL_CONF="$w2/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHAKE-128s -out "$w2/k.pem" 2>/dev/null || return 1
+  cp "$w/msg.txt" "$w2/msg.txt"
+  cp "$w/msg_bad.txt" "$w2/msg_bad.txt"
+
+  SOFTHSM2_CONF="$w2/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile2" OPENSSL_CONF="$w2/openssl.cnf" \
+    "$SHAKE_SIGN_PROBE" sign "?provider=pkcs11" "pkcs11:token=shakeslhdsarust;type=private" \
+      SHAKE128 "$w2/msg.txt" "$w2/sig.bin" 2>/dev/null || { echo "Rust-arm SLH-DSA-SHAKE-128s SHAKE128 sign failed"; return 1; }
+  [[ "$(stat -c%s "$w2/sig.bin" 2>/dev/null || stat -f%z "$w2/sig.bin")" == "7856" ]] \
+    || { echo "Rust-arm: unexpected SLH-DSA-SHAKE-128s signature size"; return 1; }
+
+  SOFTHSM2_CONF="$w2/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile2" OPENSSL_CONF="$w2/openssl.cnf" \
+    "$SHAKE_SIGN_PROBE" verify "?provider=pkcs11" "pkcs11:token=shakeslhdsarust;type=public" \
+      SHAKE128 "$w2/msg.txt" "$w2/sig.bin" 2>/dev/null || { echo "Rust-arm SLH-DSA-SHAKE-128s SHAKE128 round-trip verify failed"; return 1; }
+
+  SOFTHSM2_CONF="$w2/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile2" OPENSSL_CONF="$w2/openssl.cnf" \
+    "$SHAKE_SIGN_PROBE" verify "?provider=pkcs11" "pkcs11:token=shakeslhdsarust;type=public" \
+      SHAKE128 "$w2/msg_bad.txt" "$w2/sig.bin" 2>/dev/null \
+      && { echo "Rust-arm: SLH-DSA-SHAKE-128s tampered-message verify succeeded -- must not"; return 1; }
+
+  return 0
+}
+run_case T31b PASS "SHAKE128/256 reachability, Rust arm: same proof as T31 over libsofthsmrustv3.so -- no engine-side change needed, proves the provider's shared SHAKE-sentinel routing fix reaches both engines identically; round-trip verify (both families), raw-verify-must-fail + tampered-message sabotage (remediation R38)" t31b
 
 
 # ─── R0.1 regression guard ──────────────────────────────────────────────────

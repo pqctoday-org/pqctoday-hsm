@@ -2671,6 +2671,67 @@ new finding), **Rust `cargo test --release` 410 passed / 0 failed**.
 This closes phase 7's active work (R34, R35, R36). R33 and R27 remain
 parked, unchanged.
 
+**Phase 8, R38 (SHAKE128/256 reachability for HashML-DSA/HashSLH-DSA),
+DONE — closes the gap R35/R36 each explicitly deferred.**
+`CKM_HASH_ML_DSA_SHAKE128/256` and `CKM_HASH_SLH_DSA_SHAKE128/256`
+(PKCS#11 v3.2 §6.67.7/§6.69.7) are real, ratified mechanisms both
+engines already implemented — but `sigctx->digest` could never hold a
+SHAKE value, because `p11prov_sig_op_init`'s shared digest-name lookup
+(`digests.c`'s `digest_map`) has no SHAKE entry at all (deliberately: it
+also feeds `p11prov_digest_get_digest_size`, whose fixed-length-digest
+contract a variable-length XOF doesn't fit). Fix: `mldsa.c`/`slhdsa.c`
+each gained a small `*_shake_sentinel()` helper that recognizes
+`"SHAKE128"/"SHAKE-128"/"SHAKE256"/"SHAKE-256"` in `digest_sign_init`/
+`digest_verify_init`, one layer *before* the shared lookup would reject
+them — calling `p11prov_sig_op_init` with `digest=NULL` (skipping the
+lookup, keeping the real key/session setup) and setting
+`sigctx->digest` to `CKM_SHAKE_128/256_KEY_DERIVATION` directly, used
+purely as carrier sentinels (never passed to an actual KDF) that the
+existing `set_mechanism` switches now match with two new `case` arms
+mapping to the real `CKM_HASH_*_SHAKE128/256` mechanisms. Zero change
+to `digest_map` itself, zero impact on any other algorithm's digest
+handling.
+
+**Live-confirmed before writing the fix, not assumed**: neither CLI
+surface can drive this at all, for reasons that have nothing to do with
+this provider — `openssl dgst -shake128/-shake256 -sign` reaches the
+provider's `digest_sign_init` fine but `apps/dgst.c` itself then
+hard-refuses with `"Signing key cannot be specified for XOF"` (a
+hardcoded string in the `openssl` CLI binary, not a core EVP or
+provider check); `pkeyutl -sign -digest shakeNNN` refuses even earlier
+with `"-digest (prehash) is not supported with ML-DSA-65"` — `pkeyutl`'s
+own algorithm allowlist for `-digest` doesn't know about ML-DSA at all.
+Both are call-site restrictions in the `openssl(1)` app layer. New
+permanent test helper `shake_sign_probe` (`scripts/shake-sign-probe.c`,
+registered in `CMakeLists.txt` alongside the project's other bespoke
+EVP-API probes) drives `EVP_DigestSign*`/`EVP_DigestVerify*` directly,
+reaching the identical provider code path T29/T30's CLI wrapper does,
+sidestepping both app-level gates.
+
+**Live-proven, both mechanism families, both digests**: sign + verify
+round-trip for ML-DSA-65 under SHAKE256 and SLH-DSA-SHAKE-128s under
+SHAKE128 (engine-log-confirmed mechanism `0x2b` = `CKM_HASH_ML_DSA_
+SHAKE128` genuinely dispatched, not a coincidental fallback); raw-verify
+sabotage (a HashML-DSA signature must NOT verify as a plain raw-message
+signature — proves the digest is genuinely honored, not silently
+dropped, same shape as T29/T30's own strongest check); tampered-message
+sabotage; SLH-DSA-SHAKE-128s signature size matches T30's own
+7856-byte SHA2-128s baseline (size is independent of hash family,
+T12sign_shake's own precedent).
+
+New permanent harness cases `T31` (C++, both algorithm families) and
+`T31b` (Rust, twin — no Rust engine change needed, both
+`CKM_HASH_*_SHAKE128/256` arms already existed from R35/R36; proves the
+provider's shared SHAKE-sentinel routing fix reaches both engines
+identically).
+
+Full regression: **harness 84/84** (two new cases, zero regressions),
+**C++ CTest 8/8**. No Rust source touched, so `cargo test` was not
+re-run for this item.
+
+This closes phase 8's R38. R37, R39, R40, R41 remain open; R33 and R27
+remain parked.
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:
