@@ -581,6 +581,9 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — stopgap for
 	// PKCS#11 v3.3's own upcoming native mechanism (oasis-tcs/pkcs11#58).
 	t["CKM_PQCTODAY_ML_DSA_MU"]	= CKM_PQCTODAY_ML_DSA_MU;
+	// Token-side µ generation (remediation R39, phase 8, PQCTODAY-VENDOR-EXT-MU)
+	// — the PRODUCE half of external-µ; a C_Digest-family mechanism, not sign/verify.
+	t["CKM_PQCTODAY_ML_DSA_MU_GEN"] = CKM_PQCTODAY_ML_DSA_MU_GEN;
 
 	// SLH-DSA (FIPS 205, PKCS#11 v3.2)
 	t["CKM_SLH_DSA_KEY_PAIR_GEN"]	= CKM_SLH_DSA_KEY_PAIR_GEN;
@@ -1114,6 +1117,15 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMinKeySize = 1312;
 			pInfo->ulMaxKeySize = 2592;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			break;
+		// µ generation (remediation R39, phase 8, PQCTODAY-VENDOR-EXT-MU) —
+		// a digest-family mechanism (C_Digest/C_DigestUpdate/C_DigestFinal),
+		// same shape as the plain hash mechanisms above. Key size N/A, same
+		// as those.
+		case CKM_PQCTODAY_ML_DSA_MU_GEN:
+			pInfo->ulMinKeySize = 0;
+			pInfo->ulMaxKeySize = 0;
+			pInfo->flags = CKF_DIGEST;
 			break;
 		// SLH-DSA (FIPS 205) — ulMin/MaxKeySize are public-key BYTES per
 		// PKCS#11 v3.2 §6.69: pk = 2n, n = 16..32 → 32..64 bytes (audit V-2).

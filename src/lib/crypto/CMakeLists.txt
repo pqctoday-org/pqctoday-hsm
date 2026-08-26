@@ -94,6 +94,7 @@ set(SOURCES
     OSSLSHA384.cpp
     OSSLSHA512.cpp
     OSSLSHA3.cpp
+    OSSLMuGenDigest.cpp
     OSSLUtil.cpp
 
     # Stateful Stateful Signatures (LMS/HSS and XMSS)

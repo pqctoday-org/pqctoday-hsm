@@ -51,6 +51,42 @@
 
 #define PQCTODAY_ML_DSA_MU_LEN 64  /* FIPS 204 Eq.(2): SHAKE256 output, fixed */
 
+// ── Vendor: ML-DSA external-µ GENERATION (remediation R39, phase 8, 2026-08-26) ─
+// Stopgap for the OTHER half of PKCS#11 v3.3's own upcoming external-µ
+// support — the v3.3 working draft's CKM_ML_DSA_EXTERNAL_MU_GEN, a
+// DIGEST-type mechanism (C_Digest/C_DigestUpdate/C_DigestFinal, multi-part
+// allowed) that computes µ ON THE TOKEN from a streamed message, so a
+// caller never needs the whole message in one buffer (the Strenzke
+// memory/bandwidth motivation). R34's CKM_PQCTODAY_ML_DSA_MU above is the
+// CONSUME half (sign a caller-supplied µ); this is the PRODUCE half.
+// Engines only — deliberately NOT wired into the OpenSSL provider (an
+// OpenSSL caller already holds the public key and can compute µ in
+// software trivially; see the phase-8 plan's own R39 scope decision).
+//
+// µ = SHAKE256(tr‖0x00‖len(ctx)‖ctx‖M, 64), where tr = SHAKE256(pk_encode,
+// 64) — FIPS 204's own µ formula (Eq. 2), computed incrementally: init
+// resolves tr (from a key handle's CKA_VALUE, or the caller's own
+// precomputed tr) and seeds SHAKE256 with tr‖0x00‖len(ctx)‖ctx; update
+// streams M; final squeezes 64 bytes.
+//
+// PQCTODAY-VENDOR-EXT-MU: remove this whole block (grouped with R34's own
+// tag — both are replaced together when PKCS#11 v3.3 ratifies natively).
+
+#define CKM_PQCTODAY_ML_DSA_MU_GEN 0x80000014UL  /* vendor */
+
+// hTrKey: public key handle to derive tr from (CKA_VALUE -> SHAKE256(pk,64)).
+// pTr/ulTrLen: caller-precomputed 64-byte tr, used instead of hTrKey when
+// hTrKey is CK_INVALID_HANDLE. Exactly one of the two must be supplied.
+typedef struct CK_PQCTODAY_MU_GEN_PARAMS {
+    CK_OBJECT_HANDLE hTrKey;
+    CK_BYTE_PTR      pTr;
+    CK_ULONG         ulTrLen;
+    CK_BYTE_PTR      pContext;
+    CK_ULONG         ulContextLen;
+} CK_PQCTODAY_MU_GEN_PARAMS;
+
+typedef CK_PQCTODAY_MU_GEN_PARAMS CK_PTR CK_PQCTODAY_MU_GEN_PARAMS_PTR;
+
 // ── Vendor: stateful key attributes ──────────────────────────────────────────
 // Range: 0x80000101–0x80000105 (offset from CKM vendor range to avoid confusion)
 

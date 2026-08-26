@@ -2803,6 +2803,63 @@ failure, same root cause).
 This closes phase 8's R37. R39, R40, R41 remain open; R33 and R27
 remain parked.
 
+**Phase 8, R39 (`CKM_PQCTODAY_ML_DSA_MU_GEN`: token-side µ computation),
+DONE — the produce half of external-µ, completing what R34 started.**
+R34 (phase 7) shipped the *consume* half (sign a caller-supplied µ);
+the PKCS#11 v3.3 working draft's own second external-µ mechanism,
+`CKM_ML_DSA_EXTERNAL_MU_GEN`, computes µ ON THE TOKEN instead — a
+digest-type mechanism (`C_Digest`/`C_DigestUpdate`/`C_DigestFinal`)
+so a caller can stream an arbitrarily large message through
+`C_DigestUpdate` and get back the 64-byte µ = `SHAKE256(tr‖0x00‖len(ctx)
+‖ctx‖M, 64)` (FIPS 204 Eq. 2) without ever buffering the whole message
+or implementing the SHAKE256/`tr` derivation itself. Shipped as
+`CKM_PQCTODAY_ML_DSA_MU_GEN` (`0x80000014`, vendor range,
+`PQCTODAY-VENDOR-EXT-MU`-tagged alongside R34's own mechanism —
+**engines only, deliberately no OpenSSL-provider wiring**: an OpenSSL
+caller already holds the public key and can compute µ trivially in
+software, so provider wiring would add surface with no consumer.
+
+**C++**: first-ever SHAKE-family `HashAlgorithm` implementation in this
+engine (`OSSLMuGenDigest`) — `OSSLCryptoFactory::getHashAlgorithm` had
+no `HashAlgo::SHAKE128/256` case at all before this (confirmed by
+reading it, not assumed). Deliberately not built on the existing
+`OSSLEVPHashAlgorithm` base (its `hashFinal()` uses `EVP_DigestFinal_ex`,
+wrong for a XOF) and deliberately not registered as a general
+`HashAlgo::Type` (fixed 64-byte output only, nothing else needs a
+general SHAKE256 digest through this interface). The new
+`CKM_PQCTODAY_ML_DSA_MU_GEN` case in `C_DigestInit` resolves `tr`
+(one-shot `EVP_DigestFinalXOF` over a key handle's `CKA_VALUE`, or a
+caller-precomputed 64 bytes) and seeds the digest with `tr‖0x00‖len(ctx)
+‖ctx` before returning — `C_DigestUpdate`/`C_DigestFinal`/`C_Digest`
+needed zero changes, already generic over `HashAlgorithm`.
+
+**Rust**: `DigestCtx` gained a `MuGen(sha3::Shake256)` variant; a new
+`ck_param::mu_gen_params` layout (own both-ABI offset-table row) parses
+`CK_PQCTODAY_MU_GEN_PARAMS`; the existing exhaustive `match ctx { ... }`
+dispatch in `C_DigestUpdate`/`C_DigestFinal`/`C_Digest` picked up the
+new arm everywhere the compiler required it — exhaustiveness checking
+was the correctness guardrail here, not manual auditing.
+
+**Live-proven, both engines, first try (no fix-then-refix cycle this
+time)**: new permanent fixture `mu-gen-probe.c` (raw PKCS#11 C_Digest*
+API) proves µ from the mechanism is byte-identical to an independently
+computed `SHAKE256(SHAKE256(pk,64)‖0x00‖len(ctx)‖ctx‖M,64)`; multi-part
+`C_DigestUpdate` (2 calls) equals one-shot `C_Digest`; the
+TR-supplied and handle-supplied paths produce the identical µ for the
+same key; the token-computed µ, fed into R34's own
+`CKM_PQCTODAY_ML_DSA_MU`, signs a signature that verifies under that
+same mechanism (R34's own T28/T28b already independently proved that
+mechanism's signatures verify under OpenSSL's native ML-DSA, so this
+isn't re-derived here — re-proving it would just re-prove R34, not
+R39); both-absent and both-present `hTrKey`/`pTr` rejected loudly.
+
+Full regression: **harness 84/84** (unchanged — engines-only, nothing
+routes through the provider), **C++ CTest 8/8**, **Rust `cargo test
+--release` 410/410** — both clean on the first run.
+
+This closes phase 8's R39. R40, R41 remain open; R33 and R27 remain
+parked.
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:

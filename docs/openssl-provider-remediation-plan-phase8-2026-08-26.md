@@ -407,6 +407,63 @@ must equal one-shot. TR-supplied and handle-supplied paths both
 covered; handle-and-TR-both-absent rejected loudly. Regression: full
 harness, CTest, `cargo test --release`.
 
+**Execution update (2026-08-26):** done, both engines, first-try
+correct on both (no fix-then-refix cycle this time). New permanent
+fixture `mu-gen-probe.c` (raw PKCS#11 C_Digest* API — engines-only by
+design, nothing to reach through the provider) covers all six of this
+section's own proof-plan checks.
+
+- **C++**: new `CKM_PQCTODAY_ML_DSA_MU_GEN` case in
+  `SoftHSM_digest.cpp`'s `C_DigestInit`, resolving `tr` (one-shot
+  `EVP_DigestFinalXOF` over the `hTrKey` handle's `CKA_VALUE`, or the
+  caller's own precomputed `pTr`) then seeding a new
+  `OSSLMuGenDigest` (`HashAlgorithm` subclass, `OSSLMuGenDigest.h/.cpp`
+  — deliberately NOT built on `OSSLEVPHashAlgorithm`, whose
+  `hashFinal()` uses `EVP_DigestFinal_ex`, wrong for a XOF; nor
+  registered with `CryptoFactory::getHashAlgorithm`/`HashAlgo::Type`,
+  since nothing else needs a general SHAKE256 digest through that
+  interface) with `tr‖0x00‖len(ctx)‖ctx`. The case returns directly
+  (`session->setDigestOp(muHash)` + `CKR_OK`), bypassing the shared
+  epilogue every other digest mechanism uses — C_DigestUpdate/
+  C_DigestFinal/C_Digest needed ZERO changes, since they already
+  dispatch generically over the `HashAlgorithm` interface.
+- **Extra C++ finding, not in the original plan**: there was no prior
+  SHAKE-family `HashAlgorithm` implementation in this engine AT ALL —
+  `OSSLCryptoFactory::getHashAlgorithm`'s own switch has no
+  `HashAlgo::SHAKE128/256` case (confirmed by reading it; the audit's
+  own "SHAKE-256 derive (C++)" note refers to a KDF mechanism, a
+  completely separate dispatch path). `OSSLMuGenDigest` is the first,
+  though deliberately narrow (fixed 64-byte output, not a general XOF).
+- **Rust**: `DigestCtx` gained a `MuGen(sha3::Shake256)` variant; new
+  `init_mu_gen_digest` (`ffi.rs`) does the equivalent tr-resolution +
+  seeding, using a new `ck_param::mu_gen_params` layout (with its own
+  both-ABI offset-table row, per that module's discipline) to parse
+  `CK_PQCTODAY_MU_GEN_PARAMS`; `C_DigestUpdate`/`C_DigestFinal`/
+  `C_Digest`'s existing `match ctx { ... }` dispatch (exhaustive over
+  `DigestCtx`) picked up the new arm at every site the compiler
+  actually required — the exhaustiveness check itself was the
+  guardrail here, not manual auditing.
+- **Both engines**: `vendor_mechanisms.h`/`rust/src/constants.rs` grew
+  `CKM_PQCTODAY_ML_DSA_MU_GEN` (`0x80000014`) +
+  `CK_PQCTODAY_MU_GEN_PARAMS`, tagged `PQCTODAY-VENDOR-EXT-MU`
+  (grouped with R34's own removal tag); both engines' mechanism-list
+  and `GetMechanismInfo`/`mechanism_info` advertise it as `CKF_DIGEST`,
+  key size N/A (same shape as the plain hash mechanisms).
+- **Proof-plan deviation, deliberate**: check 4 (the end-to-end chain)
+  feeds the mu-gen mechanism's own output into `CKM_PQCTODAY_ML_DSA_MU`
+  and verifies under that SAME vendor mechanism, rather than routing
+  through OpenSSL's native ML-DSA a second time — R34's own T28/T28b
+  already independently proved `CKM_PQCTODAY_ML_DSA_MU` produces
+  signatures OpenSSL's native ML-DSA verifies; re-deriving that here
+  would just re-prove R34, not R39. Check 1's own independent SHAKE256
+  formula cross-check is what's specific to THIS mechanism's own
+  correctness.
+
+Full regression: harness 84/84 (unchanged — engines-only, nothing to
+route through the provider), **C++ CTest 8/8**, **Rust `cargo test
+--release` 410/410** — both clean on the FIRST run, no pre-existing
+wrong-assumption tests this time (unlike R37).
+
 ---
 
 ### R40 — ML-KEM public SPKI/text encoders (un-parks R33) — effort S–M

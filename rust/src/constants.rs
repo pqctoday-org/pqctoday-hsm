@@ -593,6 +593,11 @@ pub const CKM_PQCTODAY_SPLIT_KEY: u32 = 0x8000_0012;
 // PQCTODAY-VENDOR-EXT-MU: remove when this project adopts v3.3 natively.
 pub const CKM_PQCTODAY_ML_DSA_MU: u32 = 0x8000_0013;
 pub const PQCTODAY_ML_DSA_MU_LEN: usize = 64;
+// µ GENERATION (remediation R39, phase 8, 2026-08-26) — the PRODUCE half
+// of external-µ (the mechanism above is the CONSUME half); a digest-type
+// mechanism (C_Digest/C_DigestUpdate/C_DigestFinal). Same
+// PQCTODAY-VENDOR-EXT-MU removal group as the mechanism above.
+pub const CKM_PQCTODAY_ML_DSA_MU_GEN: u32 = 0x8000_0014;
 // PKCS#11 v3.2 §6.7 dedicated Montgomery-curve DH mechanisms, in the
 // CKM_VENDOR_DEFINED (0x80000000) range per the spec header:
 // CKM_X25519 = CKM_VENDOR_DEFINED | 0x1058, CKM_X448 = | 0x1059.
@@ -779,6 +784,9 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_HASH_ML_DSA_SHAKE256,
     // ML-DSA external-µ (remediation R34) — PQCTODAY-VENDOR-EXT-MU.
     CKM_PQCTODAY_ML_DSA_MU,
+    // ML-DSA external-µ GENERATION (remediation R39, phase 8) — the
+    // produce half; a digest-family mechanism, not sign/verify.
+    CKM_PQCTODAY_ML_DSA_MU_GEN,
     // SLH-DSA (FIPS 205) — pure + pre-hash.
     // Generic CKM_HASH_SLH_DSA (0x34) — same remap as CKM_HASH_ML_DSA above.
     CKM_SLH_DSA_KEY_PAIR_GEN,

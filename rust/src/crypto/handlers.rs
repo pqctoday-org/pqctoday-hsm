@@ -140,6 +140,14 @@ pub enum DigestCtx {
     Keccak256(Vec<u8>),
     /// Historical RIPEMD-160 (CKM_RIPEMD160) — 20-byte digest.
     Ripemd160(ripemd::Ripemd160),
+    /// Remediation R39 (phase 8), PQCTODAY-VENDOR-EXT-MU:
+    /// CKM_PQCTODAY_ML_DSA_MU_GEN — incremental SHAKE256 already seeded
+    /// (at C_DigestInit) with `tr || 0x00 || len(ctx) || ctx`; the
+    /// caller's message M is what flows through the normal
+    /// C_DigestUpdate/C_Digest path from here, fixed 64-byte output
+    /// (FIPS 204 Eq. 2). `Shake256::finalize_xof()` consumes `self`, so
+    /// this variant is only ever read once, at C_DigestFinal/C_Digest.
+    MuGen(sha3::Shake256),
 }
 
 pub struct FindCtx {

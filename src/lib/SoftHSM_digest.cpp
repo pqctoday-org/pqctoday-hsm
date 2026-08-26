@@ -42,6 +42,8 @@
 #include "cryptoki.h"
 #include "HashAlgorithm.h"
 #include "vendor_mechanisms.h"
+#include "OSSLMuGenDigest.h"
+#include <openssl/evp.h>
 
 CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism)
 {
@@ -114,6 +116,118 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			// G11 — Keccak-256 is implemented in the Rust engine only (tiny-keccak).
 			// The C++ OpenSSL engine does not support non-standard Keccak padding.
 			return CKR_MECHANISM_INVALID;
+		case CKM_PQCTODAY_ML_DSA_MU_GEN:
+		{
+			// Remediation R39 (phase 8), PQCTODAY-VENDOR-EXT-MU: token-side µ
+			// computation, the PRODUCE half of external-µ (R34's own
+			// CKM_PQCTODAY_ML_DSA_MU is the CONSUME half). µ = SHAKE256(tr ||
+			// 0x00 || len(ctx) || ctx || M, 64) — FIPS 204 Eq. 2 — computed
+			// incrementally via OSSLMuGenDigest so the caller never needs the
+			// whole message M in one buffer (the mechanism's whole point).
+			// This case returns directly (its own session->setDigestOp/
+			// return CKR_OK), bypassing the shared epilogue below, which
+			// expects a HashAlgo::Type this mechanism has none of.
+			if (pMechanism->pParameter == NULL_PTR ||
+			    pMechanism->ulParameterLen != sizeof(CK_PQCTODAY_MU_GEN_PARAMS))
+			{
+				ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU_GEN requires CK_PQCTODAY_MU_GEN_PARAMS");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			CK_PQCTODAY_MU_GEN_PARAMS* muParams =
+				(CK_PQCTODAY_MU_GEN_PARAMS*)pMechanism->pParameter;
+
+			bool haveTr = (muParams->pTr != NULL_PTR);
+			bool haveKey = (muParams->hTrKey != CK_INVALID_HANDLE);
+			if (haveTr == haveKey)
+			{
+				ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU_GEN requires exactly one of hTrKey or pTr");
+				return CKR_ARGUMENTS_BAD;
+			}
+
+			ByteString tr;
+			if (haveTr)
+			{
+				if (muParams->ulTrLen != 64)
+				{
+					ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU_GEN: pTr must be exactly 64 bytes");
+					return CKR_ARGUMENTS_BAD;
+				}
+				tr = ByteString(muParams->pTr, 64);
+			}
+			else
+			{
+				OSObject* osObj = (OSObject*)handleManager->getObject(muParams->hTrKey, session->getSlot()->getSlotID());
+				if (osObj == NULL)
+				{
+					ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU_GEN: hTrKey is not a valid object handle");
+					return CKR_KEY_HANDLE_INVALID;
+				}
+				ByteString pk = osObj->getByteStringValue(CKA_VALUE);
+				if (pk.size() == 0)
+				{
+					ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU_GEN: hTrKey object has no CKA_VALUE");
+					return CKR_KEY_HANDLE_INVALID;
+				}
+				// tr = SHAKE256(pk, 64) — PKCS#11 v3.2 Table 280: CKA_VALUE
+				// for an ML-DSA public key IS pk_encode(rho, t1) already, so
+				// no re-encoding is needed here. One-shot, computed directly
+				// (not through the incremental digest-op set up below).
+				EVP_MD_CTX* trCtx = EVP_MD_CTX_new();
+				EVP_MD* shake256 = (trCtx != NULL) ? EVP_MD_fetch(NULL, "SHAKE256", NULL) : NULL;
+				bool trOk = (trCtx != NULL) && (shake256 != NULL) &&
+					EVP_DigestInit_ex(trCtx, shake256, NULL) &&
+					EVP_DigestUpdate(trCtx, pk.const_byte_str(), pk.size());
+				tr.resize(64);
+				if (trOk) trOk = EVP_DigestFinalXOF(trCtx, &tr[0], 64);
+				if (shake256 != NULL) EVP_MD_free(shake256);
+				if (trCtx != NULL) EVP_MD_CTX_free(trCtx);
+				if (!trOk)
+				{
+					ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU_GEN: failed to derive tr from hTrKey");
+					return CKR_GENERAL_ERROR;
+				}
+			}
+
+			if (muParams->ulContextLen > 255)
+			{
+				ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU_GEN: context string too long (max 255)");
+				return CKR_ARGUMENTS_BAD;
+			}
+			if (muParams->ulContextLen > 0 && muParams->pContext == NULL_PTR)
+			{
+				ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU_GEN: context pointer is NULL with non-zero length");
+				return CKR_ARGUMENTS_BAD;
+			}
+
+			OSSLMuGenDigest* muHash = new OSSLMuGenDigest();
+			if (!muHash->hashInit())
+			{
+				delete muHash;
+				return CKR_GENERAL_ERROR;
+			}
+			// Seed: tr || 0x00 || len(ctx) || ctx — FIPS 204 Eq. 2's own
+			// prefix, fed once here; the caller's message M follows via
+			// C_DigestUpdate/C_Digest.
+			ByteString seed = tr;
+			seed += (unsigned char)0x00;
+			seed += (unsigned char)muParams->ulContextLen;
+			if (muParams->ulContextLen > 0)
+			{
+				seed += ByteString(muParams->pContext, muParams->ulContextLen);
+			}
+			if (!muHash->hashUpdate(seed))
+			{
+				delete muHash;
+				return CKR_GENERAL_ERROR;
+			}
+
+			session->setOpType(SESSION_OP_DIGEST);
+			session->setDigestOp(muHash);
+			session->setHashAlgo(HashAlgo::Unknown);
+			session->setAllowSinglePartOp(true);
+
+			return CKR_OK;
+		}
 		default:
 			return CKR_MECHANISM_INVALID;
 	}

@@ -579,6 +579,20 @@ ck_struct!(
 });
 
 ck_struct!(
+    /// `CK_PQCTODAY_MU_GEN_PARAMS` (remediation R39, phase 8,
+    /// PQCTODAY-VENDOR-EXT-MU vendor extension) — token-side µ generation,
+    /// the produce half of external-µ (the consume half,
+    /// CK_SIGN_ADDITIONAL_CONTEXT, is `sign_ctx` above). Exactly one of
+    /// `hTrKey`/`pTr` must be supplied.
+    mu_gen_params, "CK_PQCTODAY_MU_GEN_PARAMS", {
+    H_TR_KEY: F::Ulong,
+    P_TR: F::Ptr,
+    UL_TR_LEN: F::Ulong,
+    P_CONTEXT: F::Ptr,
+    UL_CONTEXT_LEN: F::Ulong,
+});
+
+ck_struct!(
     /// `CK_KEY_DERIVATION_STRING_DATA` (v3.2 §6.43.4).
     key_deriv_string, "CK_KEY_DERIVATION_STRING_DATA", {
     P_DATA: F::Ptr,
@@ -817,6 +831,7 @@ mod tests {
             ),
             (&sign_ctx::LAYOUT, vec![0, 4, 8], 12, vec![0, 8, 16], 24),
             (&hash_sign_ctx::LAYOUT, vec![0, 4, 8, 12], 16, vec![0, 8, 16, 24], 32),
+            (&mu_gen_params::LAYOUT, vec![0, 4, 8, 12, 16], 20, vec![0, 8, 16, 24, 32], 40),
             (&key_deriv_string::LAYOUT, vec![0, 4], 8, vec![0, 8], 16),
             (&prf_data_param::LAYOUT, vec![0, 4, 8], 12, vec![0, 8, 16], 24),
             (&counter_format::LAYOUT, vec![0, 4], 8, vec![0, 8], 16),

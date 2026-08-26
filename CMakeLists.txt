@@ -314,4 +314,13 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
     target_include_directories(generic_hash_mldsa_probe PRIVATE
         ${CMAKE_SOURCE_DIR}/src/lib/pkcs11 ${OPENSSL_INCLUDE_DIR})
     target_link_libraries(generic_hash_mldsa_probe ${CMAKE_DL_LIBS} ${OPENSSL_LIBRARIES})
+
+    # mu-gen-probe: phase-8 R39 regression fixture -- drives the raw
+    # PKCS#11 C_Digest* API directly (this vendor mechanism is engines-
+    # only by design, no OpenSSL-provider wiring) to prove
+    # CKM_PQCTODAY_ML_DSA_MU_GEN's incremental mu computation is correct.
+    add_executable(mu_gen_probe scripts/mu-gen-probe.c)
+    target_include_directories(mu_gen_probe PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11 ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(mu_gen_probe ${CMAKE_DL_LIBS} ${OPENSSL_LIBRARIES})
 endif()
