@@ -361,6 +361,113 @@ new parameter shapes on existing ones).
 
 G2 (Split Key) is next — independent of G1, no ordering dependency.
 
+### 2026-08-26 — G3+G4 (mechanism-cell sweep + V21 split)
+
+Shipped, all live-verified. Empties 22 of the ledger's 26 empty-`case_ids`
+rows (AES-CTR, ChaCha20, G2ChaCha20, Classical, DSA, DSA-CTX, ECDSA,
+EdDSA, G-DA-X, G7Sha3Rsa, GapClassical, GapEcdsaEddsa, KCV, KEMKcv, KMAC,
+KcvTemplate, MultiPart_ECDSA, MultiPart_EdDSA, Profile, RawEncoding,
+SHA-3, BIP32) — 4 remain (FIPS, G4Retcodes, Init, Invariant), all
+genuinely design-level per §0/RW-T's own framing, meeting the plan's
+"≤5" exit bar.
+
+**2 new core tests** (`mechanism_sweep_ciphers_and_classical_signing`,
+`mechanism_sweep_kcv_profile_multipart_and_fork`, 46/46 core green)
+covering, per the plan's own budget discipline (a handful of tests, not
+one per cell): AES-CTR (pointer-free `CK_AES_CTR_PARAMS`, the first
+field needing the new `StructBuilder::set_bytes` — no prior builder used
+an `F::Bytes(N)` inline field); AES-CBC/CBC-PAD (raw 16-byte IV, no
+dedicated ledger row but exercised alongside AES-CTR); ChaCha20-
+Poly1305; RSA-PKCS raw sign/verify + the positive `C_SignRecover`/
+`C_VerifyRecover` round trip (§5.13, RSA-only — RW6a proved the
+rejection, this proves the accept path); ECDSA raw and EdDSA sign/
+verify; SHA3-256 digest one-shot-vs-FSM; KMAC-128 default-params sign;
+DSA-CTX (`CK_SIGN_ADDITIONAL_CONTEXT`, deterministic-hedge reproduces
+the identical signature, a mismatched context is rejected at Verify);
+KCV/KcvTemplate/KEMKcv (`CKA_CHECK_VALUE` after keygen/unwrap/KEM-
+decapsulate); Profile (built-in `CKO_PROFILE` objects); RawEncoding
+(`CKA_EC_POINT`); MultiPart_ECDSA (`CKM_ECDSA_SHA256`, genuinely
+streamable, unlike bare `CKM_ECDSA`'s single-part-only raw form) and
+MultiPart_EdDSA (plain `CKM_EDDSA`, buffered internally across Update
+calls); BIP32 (`CKM_BIP32_MASTER_DERIVE`, curve read from the OUTPUT
+TEMPLATE's `CKA_EC_PARAMS`, no `CK_*_PARAMS` struct at all — confirmed
+by reading the dispatch arm directly rather than assuming); Fork (two
+sessions' `generate_random` draws proven to differ).
+
+**Real correction found while grounding this slice** (before writing
+any code, same discipline as §0): the plan's own text described
+"ChaCha20/G2ChaCha20" as needing a plain `CK_CHACHA20_PARAMS` builder.
+Reading `cpp_compliance_report.json`'s actual entries for those two
+categories first showed C_Encrypt output with "16 byte MAC tag" and
+"ctLen=38" — properties only the Poly1305 AEAD mechanism has; plain
+`CKM_CHACHA20` (bare stream cipher) has none. Built
+`cipher_params::chacha20_poly1305` (`CK_SALSA20_CHACHA20_POLY1305_PARAMS`)
+instead — what those two categories actually exercise — rather than
+building the mechanism the plan's own prose named but the evidence
+didn't support.
+
+**New RW-P builders** (core, `cipher_params`/new `sign_params` module):
+`aes_ctr` (pointer-free, `set_bytes`), `chacha20_poly1305`,
+`sign_params::additional_context` (`CK_SIGN_ADDITIONAL_CONTEXT`, 3
+fields as the plan predicted). **Wire**: 3 new `oneof structured`
+variants on the shared `V32Mechanism` (`aes_ctr`, `chacha20_poly1305`,
+`sign_ctx`) — one proto edit, both `mech_parts` (gRPC) and
+`mech_param_bytes` (REST) extended with 3 new match arms each (no
+21-site refactor needed this time — G1 already built that machinery;
+this slice only added variants to it). **V27**, a new three-transport
+KAT-grade parity case covering exactly these 3 new variants (all
+deterministic given fixed inputs, unlike G1's OAEP/G2's XOR) — every
+OTHER G3 cell reuses pre-existing raw-bytes-or-no-parameter wire code
+with zero new surface, so it is proven at the core-crate level only, not
+re-proven at the parity level (would just re-exercise G1's own already-
+covered `V32Mechanism.parameter` path).
+
+**G4 (V21 split, folded into this commit per the plan)**: `run_
+sign_verify_cells` extracted as a shared async helper; `v21a_slh_dsa_
+sign_verify_parity` (routine) and `v21b_xmss_hss_sign_verify_parity`
+(`#[ignore]`d, unchanged ~326s) replace the combined V21.
+
+**Real finding from live measurement** (the plan explicitly said
+"measure first" — this is why): V21a's FIRST version used the
+`CKP_SLH_DSA_*_128S` ("small") parameter sets, matching the ORIGINAL
+V21's own cell selection. Live run: **227.62s**, not fast — FIPS 205's
+"s" parameter sets trade a smaller signature for slow SIGNING
+specifically (not a keygen-cost distinction, which is what "SLH-DSA
+keygen is fast" in this plan's own G3 §4 text was really about — signing
+and keygen cost are different axes for SLH-DSA, and the "s"/"f" suffix
+governs the FORMER). Switched to `CKP_SLH_DSA_*_128F` ("fast") — same
+security level, faster signing — remeasured at **11.1–11.4s** standalone
+across 3 runs. That is over the plan's own informal "~10s" target by
+about a second; kept in the routine suite anyway (dramatically better
+than 227s, and every other gate step in `local-gate.sh` costs
+substantially more) rather than also marking it `#[ignore]`, which would
+have meant zero SLH-DSA coverage in the routine gate at all.
+`local-gate.sh`'s remoting step comment updated to name the specific
+`#[ignore]`d test and warn against re-merging V21a/V21b without
+re-measuring.
+
+**Ledger**: 22 rows filled with real `case_ids` (see above); `HBSProtect`/
+`SLHDSA`/`XMSS`/`XmssParamSet` (the pre-existing hash-based-signature
+rows) repointed from the old combined `v21_...` case name to
+`v21a_.../v21b_...` as appropriate, with justifications updated to
+describe the split. One ratchet check (c) near-miss: rewriting G-DA-X's
+justification accidentally dropped the ledger's only literal mentions of
+`C_DigestInit`/`C_SignInit` (the ratchet scans the whole ledger's raw
+JSON text for every `C_*` RPC name) — caught immediately by re-running
+the ratchet before moving on, fixed by keeping those two names in the
+rewritten text. Regenerated `REMOTE_P11_V32_COVERAGE.md`.
+
+**Whole workspace green, 3 consecutive runs** (after the 128F fix): 2
+posture + 7 legacy-parity + 27 v32-parity (1 `#[ignore]`d, was 24) + 46
+core (was 40) = **82 passed, 0 failed** every time; acceptance crate
+wall-time 11.2–11.4s (dominated by V21a's SLH-DSA-128F signing, still
+the single most expensive routine case in the suite but nowhere near
+V21b's 326s). Ratchet green: **64 categories, 99 RPCs** (RPC count
+unchanged — G3 added parameter shapes on existing RPCs, not new RPCs,
+same pattern as G1).
+
+G5 (live binary smoke test) is next.
+
 ### 2026-08-26 — G2 (Split Key vendor RPCs)
 
 Shipped, all live-verified. Adds `SplitKey`/`JoinKey` to `Pkcs11V32` —

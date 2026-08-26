@@ -199,6 +199,9 @@ message V32Mechanism {
   oneof structured {
     V32GcmParams gcm = 3;
     V32OaepParams oaep = 4;
+    V32AesCtrParams aes_ctr = 5; // G3 mechanism-cell sweep
+    V32ChaCha20Poly1305Params chacha20_poly1305 = 6; // G3
+    V32SignAdditionalContextParams sign_ctx = 7; // G3 — used on sign/verify RPCs, same shared oneof
   }
 }
 
@@ -211,6 +214,18 @@ message V32OaepParams { // CK_RSA_PKCS_OAEP_PARAMS (v3.2 §6.4.4)
   uint32 hash_alg = 1; // bare CKM_* hash code, e.g. CKM_SHA256
   uint32 mgf = 2; // CKG_MGF1_* code, e.g. CKG_MGF1_SHA256
   bytes source_data = 3; // the OAEP label; empty = no label (source left CKZ_DATA_SPECIFIED-implicit)
+}
+message V32AesCtrParams { // CK_AES_CTR_PARAMS (v3.2 §6.11.2) — pointer-free on the engine side
+  uint32 counter_bits = 1; // 0 < n <= 128, multiple of 8
+  bytes cb = 2; // MUST be exactly 16 bytes
+}
+message V32ChaCha20Poly1305Params { // CK_SALSA20_CHACHA20_POLY1305_PARAMS (v3.2 §6.21)
+  bytes nonce = 1; // MUST be exactly 12 bytes
+  bytes aad = 2;
+}
+message V32SignAdditionalContextParams { // CK_SIGN_ADDITIONAL_CONTEXT (v3.2 §6.67/§6.69) — ML-DSA/SLH-DSA
+  uint32 hedge_variant = 1; // CKH_HEDGE_PREFERRED(0)/CKH_HEDGE_REQUIRED(1) hedged; CKH_DETERMINISTIC_REQUIRED(2) deterministic
+  bytes context = 2; // <= 255 bytes
 }
 
 // Status-only response — the shape most C_* calls have.

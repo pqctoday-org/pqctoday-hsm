@@ -70,6 +70,16 @@ fn mech_parts(m: Option<&V32Mechanism>) -> (u64, MechParamBytes) {
         Some(Structured::Oaep(p)) => {
             MechParamBytes::Structured(v32::cipher_params::oaep(p.hash_alg, p.mgf, &p.source_data))
         }
+        Some(Structured::AesCtr(p)) => {
+            let cb: [u8; 16] = p.cb.as_slice().try_into().unwrap_or([0u8; 16]);
+            MechParamBytes::Structured(v32::cipher_params::aes_ctr(p.counter_bits, &cb))
+        }
+        Some(Structured::Chacha20Poly1305(p)) => {
+            MechParamBytes::Structured(v32::cipher_params::chacha20_poly1305(&p.nonce, &p.aad))
+        }
+        Some(Structured::SignCtx(p)) => {
+            MechParamBytes::Structured(v32::sign_params::additional_context(p.hedge_variant, &p.context))
+        }
     };
     (m.mechanism, bytes)
 }

@@ -527,6 +527,13 @@ fn mech_param_bytes(m: &V32MechanismDto) -> MechParamBytes {
         MechParamBytes::Structured(v32::cipher_params::gcm(&p.iv, &p.aad, p.tag_bits))
     } else if let Some(p) = &m.oaep {
         MechParamBytes::Structured(v32::cipher_params::oaep(p.hash_alg, p.mgf, &p.source_data))
+    } else if let Some(p) = &m.aes_ctr {
+        let cb: [u8; 16] = p.cb.as_slice().try_into().unwrap_or([0u8; 16]);
+        MechParamBytes::Structured(v32::cipher_params::aes_ctr(p.counter_bits, &cb))
+    } else if let Some(p) = &m.chacha20_poly1305 {
+        MechParamBytes::Structured(v32::cipher_params::chacha20_poly1305(&p.nonce, &p.aad))
+    } else if let Some(p) = &m.sign_ctx {
+        MechParamBytes::Structured(v32::sign_params::additional_context(p.hedge_variant, &p.context))
     } else {
         MechParamBytes::Raw(m.parameter.clone())
     }

@@ -17,8 +17,11 @@
   "rows": {
     "AES-CTR": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "C_EncryptInit/C_Encrypt/C_Decrypt are mechanism-agnostic (RW3) \u2014 CK_AES_CTR_PARAMS travels as raw parameter bytes read by ck_param, no new RW-P struct needed. Proven for AES-ECB (v32_parity::v10_aes_ecb_encrypt_decrypt_kat_parity, core::aes_ecb_encrypt_decrypt_round_trip_and_data_len_range); AES-CTR itself not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing",
+        "v32_parity::v27_aes_ctr_chacha20poly1305_and_dsa_ctx_structured_params_kat_parity"
+      ],
+      "justification": "CK_AES_CTR_PARAMS (pointer-free) via the new cipher_params::aes_ctr RW-P builder (G3, 2026-08-26) \u2014 StructBuilder::set_bytes, the first builder to need a fixed-size inline field. Encrypt/decrypt round trip proven in core; V27 proves KAT-grade byte-identical ciphertext across all three transports via the new oneof variant. AES-CBC (raw 16-byte IV) and AES-CBC-PAD are also exercised in the same core test (no dedicated ledger category exists for CBC)."
     },
     "Attributes": {
       "disposition": "RPC",
@@ -40,13 +43,18 @@
     },
     "BIP32": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "C_DeriveKey is mechanism-agnostic (RW4); the engine's BIP32 branch reads its parameters from the TEMPLATE (not a CK_*_PARAMS struct), which derive_key already passes through unmodified. Not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "CKM_BIP32_MASTER_DERIVE via C_DeriveKey \u2014 the engine reads its curve from the OUTPUT TEMPLATE's CKA_EC_PARAMS (no CK_*_PARAMS struct at all, confirmed by reading the dispatch arm directly), over a generic-secret 'seed' base key. Proven to produce a real 32-byte EC private key. G3, 2026-08-26."
     },
     "ChaCha20": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Same generic C_EncryptInit/C_Encrypt/C_Decrypt path as AES-CTR \u2014 reachable, not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing",
+        "v32_parity::v27_aes_ctr_chacha20poly1305_and_dsa_ctx_structured_params_kat_parity"
+      ],
+      "justification": "CKM_CHACHA20_POLY1305 (the mechanism this category's own compliance-report entry actually observes \u2014 a 16-byte MAC tag on C_Encrypt output, which only the Poly1305 AEAD variant produces; plain CKM_CHACHA20 has none) via the new cipher_params::chacha20_poly1305 RW-P builder (G3, 2026-08-26). Round trip proven in core; V27 proves KAT-grade byte-identical ciphertext across all three transports."
     },
     "CkaIdRetrieval": {
       "disposition": "RPC",
@@ -57,18 +65,25 @@
     },
     "Classical": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Generic C_GenerateKeyPair + C_SignInit/Sign/VerifyInit/Verify carries any classical (RSA/EC) mechanism the engine supports \u2014 proven for ML-DSA (v32_parity::v3), SLH-DSA/XMSS/HSS (v32_parity::v21, #[ignore]d), ECDH1 (core::derive_key_ecdh1_p256) \u2014 classical RSA/ECDSA sign itself not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "RSA-PKCS raw sign/verify (CKM_RSA_PKCS, no parameter) over a 2048-bit keypair, plus the positive C_SignRecover/C_VerifyRecover round trip (\u00a75.13, RSA-only \u2014 RW6a proved the non-RSA rejection; this is the positive half an RSA key makes possible). G3, 2026-08-26."
     },
     "DSA": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Same generic sign/verify path as Classical; DSA not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "Same generic sign/verify path as Classical \u2014 proven via the same RSA-PKCS raw sign/verify case (DSA itself is not a mechanism this engine implements; the category name maps to the generic classical-signature path, already exercised)."
     },
     "DSA-CTX": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Context-string mechanism parameters travel as raw V32Mechanism.parameter bytes (RW3 design) \u2014 not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing",
+        "v32_parity::v27_aes_ctr_chacha20poly1305_and_dsa_ctx_structured_params_kat_parity"
+      ],
+      "justification": "CK_SIGN_ADDITIONAL_CONTEXT via the new sign_params::additional_context RW-P builder (G3, 2026-08-26) \u2014 ML-DSA sign/verify with a context string and CKH_DETERMINISTIC_REQUIRED hedge. Proven in core: same key+msg+context reproduces the identical signature (real determinism), and a mismatched context at Verify time is rejected (context is bound into what's signed). V27 proves KAT-grade byte-identical signatures across all three transports."
     },
     "Discovery": {
       "disposition": "RPC",
@@ -89,13 +104,17 @@
     },
     "ECDSA": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Generic sign/verify path \u2014 not separately cased (ML-DSA/SLH-DSA/XMSS/HSS cased instead)."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "CKM_ECDSA raw (pre-hashed, no parameter, single-part-only) sign/verify over a P-256 keypair. G3, 2026-08-26."
     },
     "EdDSA": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Generic sign/verify path \u2014 not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "CKM_EDDSA (pure Ed25519, no parameter) sign/verify over an Ed25519 keypair (CKM_EC_EDWARDS_KEY_PAIR_GEN). G3, 2026-08-26."
     },
     "ErrCodes": {
       "disposition": "RPC",
@@ -120,8 +139,10 @@
     },
     "G-DA-X": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "SHA-3/KMAC digest+sign families reachable via the generic C_DigestInit/Update/Final and C_SignInit/Sign FSMs (RW1) \u2014 not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "CKM_SHA3_256 digest (via the generic C_DigestInit/C_Digest/C_DigestUpdate/C_DigestFinal FSM), one-shot and Update/Final proven to agree, plus CKM_KMAC_128 default-params sign (via the generic C_SignInit/C_Sign) on a generic-secret key. G3, 2026-08-26."
     },
     "G1Security": {
       "disposition": "RPC",
@@ -132,8 +153,11 @@
     },
     "G2ChaCha20": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Same as ChaCha20."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing",
+        "v32_parity::v27_aes_ctr_chacha20poly1305_and_dsa_ctx_structured_params_kat_parity"
+      ],
+      "justification": "Same case and same correction as ChaCha20 \u2014 keygen (CKK_CHACHA20 via CKM_CHACHA20_KEY_GEN) and the Poly1305 round trip this category's own compliance entries (Keygen_KeyType/Keygen_GenMech/ Encrypt/RoundTrip) describe."
     },
     "G2Derive": {
       "disposition": "RPC",
@@ -174,8 +198,10 @@
     },
     "G7Sha3Rsa": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Generic digest/sign path \u2014 not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "Same generic digest/sign path as G-DA-X/SHA-3 and Classical/GapClassical \u2014 both halves (SHA3-256 digest, RSA-PKCS sign) now have real case_ids; not separately cased as a combined SHA3+RSA cell."
     },
     "G8Dual": {
       "disposition": "RPC",
@@ -211,8 +237,10 @@
     },
     "GapClassical": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Same as Classical."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "Same as Classical \u2014 now has a real case_id (RSA-PKCS raw sign/verify + SignRecover/VerifyRecover)."
     },
     "GapDerive": {
       "disposition": "RPC",
@@ -223,8 +251,10 @@
     },
     "GapEcdsaEddsa": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Same as ECDSA/EdDSA."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "Same as ECDSA/EdDSA \u2014 now has real case_ids."
     },
     "GapRsaCipher": {
       "disposition": "RPC",
@@ -245,9 +275,10 @@
     "HBSProtect": {
       "disposition": "RPC",
       "case_ids": [
-        "v32_parity::v21_slh_dsa_xmss_hss_sign_verify_parity"
+        "v32_parity::v21a_slh_dsa_sign_verify_parity",
+        "v32_parity::v21b_xmss_hss_sign_verify_parity"
       ],
-      "justification": "Hash-based-signature (SLH-DSA/XMSS/HSS) sign/verify parity \u2014 the case exists, passes, and is `#[ignore]`d (documented reason: XMSS keygen ~326s at this engine's smallest parameter set) rather than wired into the routine gate."
+      "justification": "Hash-based-signature (SLH-DSA/XMSS/HSS) sign/verify parity \u2014 split in G4 (2026-08-26) by keygen cost: V21a (SLH-DSA) is fast and runs in the routine suite; V21b (XMSS/HSS) is `#[ignore]`d (documented reason: XMSS keygen ~326s at this engine's smallest parameter set) rather than wired into the routine gate."
     },
     "HybridKEM": {
       "disposition": "RPC",
@@ -268,8 +299,10 @@
     },
     "KCV": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "CKA_CHECK_VALUE is readable via the same generic C_GetAttributeValue verb G5Attrs/Attributes already prove works \u2014 not separately cased for the KCV attribute specifically."
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "CKA_CHECK_VALUE read via the generic C_GetAttributeValue verb on a freshly generated AES key \u2014 proven present and non-empty (\u00a74.11: computed on every secret-key creation). G3, 2026-08-26."
     },
     "KDF": {
       "disposition": "RPC",
@@ -288,8 +321,10 @@
     },
     "KEMKcv": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Composes from KEM + Attributes (both cased); KCV specifically on a KEM-derived key not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "Same attribute, on the shared-secret key an ML-KEM-768 C_DecapsulateKey produces \u2014 proven present and non-empty. G3, 2026-08-26."
     },
     "KEMNeg": {
       "disposition": "RPC",
@@ -307,13 +342,17 @@
     },
     "KMAC": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Generic sign path \u2014 not separately cased (needs a native wrapper per the master plan \u00a73's own note; not built here)."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "CKM_KMAC_128, absent (default) params \u2014 per \u00a70's correction, this needs no native engine wrapper; the generic sign path already dispatches it. Real MAC produced over a generic-secret key. G3, 2026-08-26."
     },
     "KcvTemplate": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Same as KCV."
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "Same attribute, on a key produced via C_UnwrapKey (template form) rather than C_GenerateKey \u2014 proven present and non-empty. G3, 2026-08-26."
     },
     "MechFlags": {
       "disposition": "RPC",
@@ -358,13 +397,17 @@
     },
     "MultiPart_ECDSA": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Same generic FSM as MultiPart \u2014 ECDSA specifically not cased (ML-DSA cased instead)."
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "CKM_ECDSA_SHA256 (hash-combined, genuinely streamable \u2014 unlike bare CKM_ECDSA's single-part-only raw form) Update/Final FSM proven byte-identical to the one-shot Sign, plus a real Verify of the result. G3, 2026-08-26."
     },
     "MultiPart_EdDSA": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Same generic FSM as MultiPart \u2014 EdDSA specifically not cased."
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "Plain CKM_EDDSA Update/Final FSM proven byte-identical to the one-shot Sign (the engine buffers the message internally across Update calls; pure Ed25519 is deterministic so this equality is a real, meaningful assertion, not a coincidence), plus a real Verify of the result. G3, 2026-08-26."
     },
     "Negative": {
       "disposition": "RPC",
@@ -385,25 +428,31 @@
     },
     "Profile": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "The engine publishes real CKO_PROFILE objects (confirmed in cpp_compliance_report.json's own Profile entries) reachable via the same generic C_FindObjectsInit/FindObjects/C_GetAttributeValue verbs V8/V4 already prove work \u2014 not separately cased for CKO_PROFILE specifically."
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "The engine's built-in CKO_PROFILE objects, found via C_FindObjectsInit/C_FindObjects and read via C_GetAttributeValue (CKA_PROFILE_ID) \u2014 pure existing-verb composition, proven to return at least one real profile object. G3, 2026-08-26."
     },
     "RawEncoding": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Same generic C_GetAttributeValue path \u2014 raw-encoding-specific assertions not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "CKA_EC_POINT read via the generic C_GetAttributeValue verb on a freshly generated EC public key \u2014 proven present and non-empty. G3, 2026-08-26."
     },
     "SHA-3": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "Same as G-DA-X \u2014 generic digest path, SHA-3 not separately cased."
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "Same as G-DA-X \u2014 CKM_SHA3_256 digest, one-shot and FSM proven to agree. G3, 2026-08-26."
     },
     "SLHDSA": {
       "disposition": "RPC",
       "case_ids": [
-        "v32_parity::v21_slh_dsa_xmss_hss_sign_verify_parity"
+        "v32_parity::v21a_slh_dsa_sign_verify_parity"
       ],
-      "justification": "Same case as HBSProtect \u2014 SLH-DSA-SHA2 and SLH-DSA-SHAKE parameter sets, both cased, `#[ignore]`d for the same documented reason as XMSS/HSS (kept in the same test for shared session/transport setup, though SLH-DSA keygen itself is fast \u2014 the mark applies to the whole sweep, not per-cell)."
+      "justification": "SLH-DSA-SHA2 and SLH-DSA-SHAKE parameter sets, both cased. Split into its own V21a case in G4 (2026-08-26, was previously sharing V21's `#[ignore]` mark with XMSS/HSS purely for shared session/transport setup) \u2014 SLH-DSA-128S keygen is fast, so this now runs in the routine suite, not `#[ignore]`d."
     },
     "Session": {
       "disposition": "RPC",
@@ -426,16 +475,16 @@
     "XMSS": {
       "disposition": "RPC",
       "case_ids": [
-        "v32_parity::v21_slh_dsa_xmss_hss_sign_verify_parity"
+        "v32_parity::v21b_xmss_hss_sign_verify_parity"
       ],
-      "justification": "Same case as HBSProtect/SLHDSA. `#[ignore]`d \u2014 measured ~326s for the whole sweep at this engine's smallest single-tree parameter set (height 10, no smaller option exists per v3.2 \u00a76.66.6)."
+      "justification": "Split into its own V21b case in G4 (2026-08-26, was V21 combined with SLH-DSA). `#[ignore]`d \u2014 measured ~326s for the whole sweep at this engine's smallest single-tree parameter set (height 10, no smaller option exists per v3.2 \u00a76.66.6)."
     },
     "XmssParamSet": {
       "disposition": "RPC",
       "case_ids": [
-        "v32_parity::v21_slh_dsa_xmss_hss_sign_verify_parity"
+        "v32_parity::v21b_xmss_hss_sign_verify_parity"
       ],
-      "justification": "Same case as XMSS \u2014 only the default parameter set (CKP_XMSS_SHA2_10_256) exercised; other XMSS/XMSSMT parameter sets reachable via the same generic C_GenerateKeyPair template but not cased (would each cost more Merkle-tree keygen time)."
+      "justification": "Same case as XMSS (V21b) \u2014 only the default parameter set (CKP_XMSS_SHA2_10_256) exercised; other XMSS/XMSSMT parameter sets reachable via the same generic C_GenerateKeyPair template but not cased (would each cost more Merkle-tree keygen time)."
     },
     "SplitKey": {
       "disposition": "RPC",

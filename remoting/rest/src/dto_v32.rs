@@ -168,6 +168,13 @@ pub struct V32MechanismDto {
     pub gcm: Option<GcmParamsDto>,
     #[serde(default)]
     pub oaep: Option<OaepParamsDto>,
+    // G3 mechanism-cell sweep.
+    #[serde(default)]
+    pub aes_ctr: Option<AesCtrParamsDto>,
+    #[serde(default)]
+    pub chacha20_poly1305: Option<ChaCha20Poly1305ParamsDto>,
+    #[serde(default)]
+    pub sign_ctx: Option<SignAdditionalContextParamsDto>,
 }
 
 #[derive(Deserialize)]
@@ -185,6 +192,25 @@ pub struct OaepParamsDto {
     pub mgf: u32,
     #[serde(with = "b64", default)]
     pub source_data: Vec<u8>,
+}
+#[derive(Deserialize)]
+pub struct AesCtrParamsDto {
+    pub counter_bits: u32,
+    #[serde(with = "b64")]
+    pub cb: Vec<u8>,
+}
+#[derive(Deserialize)]
+pub struct ChaCha20Poly1305ParamsDto {
+    #[serde(with = "b64")]
+    pub nonce: Vec<u8>,
+    #[serde(with = "b64", default)]
+    pub aad: Vec<u8>,
+}
+#[derive(Deserialize)]
+pub struct SignAdditionalContextParamsDto {
+    pub hedge_variant: u32,
+    #[serde(with = "b64", default)]
+    pub context: Vec<u8>,
 }
 
 #[derive(Deserialize)]

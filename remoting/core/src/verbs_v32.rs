@@ -114,6 +114,26 @@ pub mod ck {
     pub use softhsmrustv3::constants::CKP_ML_KEM_768;
     pub use softhsmrustv3::constants::CKR_SESSION_READ_ONLY;
     pub use softhsmrustv3::constants::CKR_SLOT_ID_INVALID;
+    // G3 additions (mechanism-cell sweep).
+    pub use softhsmrustv3::constants::CKA_PROFILE_ID;
+    pub use softhsmrustv3::constants::CKA_SIGN_RECOVER;
+    pub use softhsmrustv3::constants::CKA_VERIFY_RECOVER;
+    pub use softhsmrustv3::constants::CKH_DETERMINISTIC_REQUIRED;
+    pub use softhsmrustv3::constants::CKK_CHACHA20;
+    pub use softhsmrustv3::constants::CKK_EC;
+    pub use softhsmrustv3::constants::CKM_AES_CBC;
+    pub use softhsmrustv3::constants::CKM_AES_CBC_PAD;
+    pub use softhsmrustv3::constants::CKM_AES_CTR;
+    pub use softhsmrustv3::constants::CKM_BIP32_MASTER_DERIVE;
+    pub use softhsmrustv3::constants::CKM_CHACHA20_KEY_GEN;
+    pub use softhsmrustv3::constants::CKM_CHACHA20_POLY1305;
+    pub use softhsmrustv3::constants::CKM_EC_EDWARDS_KEY_PAIR_GEN;
+    pub use softhsmrustv3::constants::CKM_ECDSA;
+    pub use softhsmrustv3::constants::CKM_ECDSA_SHA256;
+    pub use softhsmrustv3::constants::CKM_EDDSA;
+    pub use softhsmrustv3::constants::CKM_KMAC_128;
+    pub use softhsmrustv3::constants::CKM_SHA3_256;
+    pub use softhsmrustv3::constants::CKO_PROFILE;
 }
 
 /// The bootstrap slot — same constant `verbs::bootstrap()` initializes.
@@ -296,6 +316,14 @@ impl StructBuilder {
     fn set_buf_pair(&mut self, ptr_field: usize, len_field: usize, data: &[u8]) {
         self.set_buf(ptr_field, data.to_vec());
         self.set_ulong(len_field, data.len());
+    }
+    /// `F::Bytes(N)` — a fixed-size inline byte array embedded directly in
+    /// the struct (e.g. `CK_AES_CTR_PARAMS.cb`), not a pointer+length pair.
+    /// G3 addition: no prior builder needed this field kind.
+    fn set_bytes(&mut self, i: usize, value: &[u8]) {
+        debug_assert!(matches!(self.fields[i], F::Bytes(n) if n == value.len()));
+        let off = ck_param::offset_at(self.fields, i, ck_param::WORD);
+        self.bytes[off..off + value.len()].copy_from_slice(value);
     }
 }
 
@@ -1546,6 +1574,51 @@ pub mod cipher_params {
         b.set_ulong(ck_param::oaep::MGF, mgf as usize);
         b.set_ulong(ck_param::oaep::SOURCE, CKZ_DATA_SPECIFIED);
         b.set_buf_pair(ck_param::oaep::P_SOURCE_DATA, ck_param::oaep::UL_SOURCE_DATA_LEN, source_data);
+        b
+    }
+
+    /// `CK_AES_CTR_PARAMS` (v3.2 §6.11.2) — G3 mechanism-cell sweep.
+    /// Pointer-free (`{ulCounterBits, cb[16]}`), the first builder to use
+    /// `StructBuilder::set_bytes` rather than a pointer+length pair.
+    /// `counter_bits` must be `0 < n <= 128` and a multiple of 8 (engine's
+    /// own restriction, `ffi::parse_aes_ctr_params`).
+    pub fn aes_ctr(counter_bits: u32, cb: &[u8; 16]) -> StructBuilder {
+        let mut b = StructBuilder::new(ck_param::aes_ctr::LAYOUT.fields);
+        b.set_ulong(ck_param::aes_ctr::UL_COUNTER_BITS, counter_bits as usize);
+        b.set_bytes(ck_param::aes_ctr::CB, cb);
+        b
+    }
+
+    /// `CK_SALSA20_CHACHA20_POLY1305_PARAMS` (v3.2 §6.21) — G3. `nonce`
+    /// MUST be exactly 12 bytes (`ffi::C_EncryptInit`'s CKM_CHACHA20_POLY1305
+    /// arm rejects any other length with CKR_MECHANISM_PARAM_INVALID, same
+    /// restriction as GCM's IV). The compliance report's own "ChaCha20"/
+    /// "G2ChaCha20" categories observe a 16-byte MAC tag on C_Encrypt output
+    /// (`cpp_compliance_report.json`), which only the Poly1305 AEAD
+    /// mechanism produces — plain CKM_CHACHA20 (the bare stream cipher) has
+    /// no tag, so it is NOT what those two categories are proving and this
+    /// builder targets CKM_CHACHA20_POLY1305 instead.
+    pub fn chacha20_poly1305(nonce: &[u8], aad: &[u8]) -> StructBuilder {
+        let mut b = StructBuilder::new(ck_param::salsa20_poly1305::LAYOUT.fields);
+        b.set_buf_pair(ck_param::salsa20_poly1305::P_NONCE, ck_param::salsa20_poly1305::UL_NONCE_LEN, nonce);
+        b.set_buf_pair(ck_param::salsa20_poly1305::P_AAD, ck_param::salsa20_poly1305::UL_AAD_LEN, aad);
+        b
+    }
+}
+
+/// RW-P signature-mechanism-parameter builders (G3 slice — DSA-CTX).
+pub mod sign_params {
+    use super::{ck_param, StructBuilder};
+
+    /// `CK_SIGN_ADDITIONAL_CONTEXT` (v3.2 §6.67/§6.69) — ML-DSA/SLH-DSA
+    /// sign & verify. `hedge_variant`: `CKH_HEDGE_PREFERRED(0)` /
+    /// `CKH_HEDGE_REQUIRED(1)` both sign hedged on this engine;
+    /// `CKH_DETERMINISTIC_REQUIRED(2)` selects the deterministic variant
+    /// (`ffi::parse_sign_additional_ctx`). `context` must be `<= 255` bytes.
+    pub fn additional_context(hedge_variant: u32, context: &[u8]) -> StructBuilder {
+        let mut b = StructBuilder::new(ck_param::sign_ctx::LAYOUT.fields);
+        b.set_ulong(ck_param::sign_ctx::HEDGE_VARIANT, hedge_variant as usize);
+        b.set_buf_pair(ck_param::sign_ctx::P_CONTEXT, ck_param::sign_ctx::UL_CONTEXT_LEN, context);
         b
     }
 }
@@ -3219,6 +3292,441 @@ mod tests {
         let secret_h = make_secret(session, secret);
         let (rv, _) = split_key::split(session, secret_h, 5, 3, 1, 0, b"\x02", "share");
         assert_eq!(rv, ck::CKR_ARGUMENTS_BAD, "XOR requires parts == threshold (§13.1)");
+        close_session(session);
+    }
+
+    // ── G3 mechanism-cell sweep (2026-08-26) — empties the ledger's
+    // empty-case_ids rows for mechanisms already reachable through
+    // already-shipped generic verbs, just never exercised. Grouped into a
+    // small number of tests (per the plan's own budget discipline) rather
+    // than one test per cell.
+
+    #[test]
+    #[serial]
+    fn mechanism_sweep_ciphers_and_classical_signing() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+
+        // AES-CTR — CK_AES_CTR_PARAMS is pointer-free; StructBuilder::set_bytes.
+        let aes_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_ENCRYPT), true),
+            attr_bool(u64::from(ck::CKA_DECRYPT), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, aes_key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &aes_tmpl);
+        assert_eq!(rv, 0);
+        let ctr_params = cipher_params::aes_ctr(128, &[0u8; 16]);
+        let ctr_pt = b"AES-CTR stream cipher, any length works, no block alignment needed".to_vec();
+        assert_eq!(encrypt_init(session, u64::from(ck::CKM_AES_CTR), ctr_params.as_slice(), aes_key), 0);
+        let (rv, ctr_ct) = encrypt(session, &ctr_pt);
+        assert_eq!(rv, 0);
+        assert_ne!(ctr_ct, ctr_pt);
+        let ctr_dparams = cipher_params::aes_ctr(128, &[0u8; 16]);
+        assert_eq!(decrypt_init(session, u64::from(ck::CKM_AES_CTR), ctr_dparams.as_slice(), aes_key), 0);
+        let (rv, ctr_rt) = decrypt(session, &ctr_ct);
+        assert_eq!(rv, 0);
+        assert_eq!(ctr_rt, ctr_pt);
+
+        // AES-CBC (raw 16-byte IV as `parameter`, block-aligned plaintext)
+        // and AES-CBC-PAD (same IV shape, arbitrary-length plaintext).
+        let iv16 = [0x07u8; 16];
+        let cbc_pt = vec![0x5Au8; 32];
+        assert_eq!(encrypt_init(session, u64::from(ck::CKM_AES_CBC), &iv16, aes_key), 0);
+        let (rv, cbc_ct) = encrypt(session, &cbc_pt);
+        assert_eq!(rv, 0);
+        assert_eq!(decrypt_init(session, u64::from(ck::CKM_AES_CBC), &iv16, aes_key), 0);
+        let (rv, cbc_rt) = decrypt(session, &cbc_ct);
+        assert_eq!(rv, 0);
+        assert_eq!(cbc_rt, cbc_pt);
+
+        let pad_pt = b"not a multiple of 16 bytes".to_vec();
+        assert_eq!(encrypt_init(session, u64::from(ck::CKM_AES_CBC_PAD), &iv16, aes_key), 0);
+        let (rv, pad_ct) = encrypt(session, &pad_pt);
+        assert_eq!(rv, 0);
+        assert_eq!(decrypt_init(session, u64::from(ck::CKM_AES_CBC_PAD), &iv16, aes_key), 0);
+        let (rv, pad_rt) = decrypt(session, &pad_ct);
+        assert_eq!(rv, 0);
+        assert_eq!(pad_rt, pad_pt);
+
+        // ChaCha20-Poly1305 — the mechanism the compliance report's
+        // ChaCha20/G2ChaCha20 categories actually observe (16-byte MAC tag
+        // on C_Encrypt output; plain CKM_CHACHA20 has none).
+        let (rv, chacha_key) = generate_key(session, u64::from(ck::CKM_CHACHA20_KEY_GEN), &[], &[]);
+        assert_eq!(rv, 0);
+        let nonce12 = [0x09u8; 12];
+        let aad = b"g3-chacha20-aad";
+        let chacha_pt = b"ChaCha20-Poly1305 AEAD round trip".to_vec();
+        let eparams = cipher_params::chacha20_poly1305(&nonce12, aad);
+        assert_eq!(encrypt_init(session, u64::from(ck::CKM_CHACHA20_POLY1305), eparams.as_slice(), chacha_key), 0);
+        let (rv, chacha_ct) = encrypt(session, &chacha_pt);
+        assert_eq!(rv, 0);
+        assert_ne!(chacha_ct, chacha_pt);
+        let dparams = cipher_params::chacha20_poly1305(&nonce12, aad);
+        assert_eq!(decrypt_init(session, u64::from(ck::CKM_CHACHA20_POLY1305), dparams.as_slice(), chacha_key), 0);
+        let (rv, chacha_rt) = decrypt(session, &chacha_ct);
+        assert_eq!(rv, 0);
+        assert_eq!(chacha_rt, chacha_pt);
+
+        // RSA-PKCS raw sign/verify (no parameter) + SignRecover/VerifyRecover
+        // (§5.13, RSA-only on this engine — RW6a proved the non-RSA
+        // rejection; this is the positive half that needed an RSA key).
+        const CKM_RSA_PKCS_KEY_PAIR_GEN: u64 = 0x0000_0000;
+        const CKM_RSA_PKCS: u64 = 0x0000_0001;
+        const CKA_MODULUS_BITS: u64 = 0x0000_0121;
+        const CKK_RSA: u32 = 0x0000_0000;
+        let rsa_public_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), CKK_RSA),
+            attr_ulong(CKA_MODULUS_BITS, 2048),
+            attr_bool(u64::from(ck::CKA_VERIFY), true),
+            attr_bool(u64::from(ck::CKA_VERIFY_RECOVER), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let rsa_private_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), CKK_RSA),
+            attr_bool(u64::from(ck::CKA_SIGN), true),
+            attr_bool(u64::from(ck::CKA_SIGN_RECOVER), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, rsa_pub, rsa_prv) =
+            generate_key_pair(session, CKM_RSA_PKCS_KEY_PAIR_GEN, &[], &rsa_public_tmpl, &rsa_private_tmpl);
+        assert_eq!(rv, 0);
+
+        let rsa_msg = b"G3 RSA-PKCS raw sign/verify";
+        assert_eq!(sign_init(session, CKM_RSA_PKCS, &[], rsa_prv), 0);
+        let (rv, rsa_sig) = sign(session, rsa_msg);
+        assert_eq!(rv, 0);
+        assert_eq!(verify_init(session, CKM_RSA_PKCS, &[], rsa_pub), 0);
+        assert_eq!(verify(session, rsa_msg, &rsa_sig), 0);
+
+        assert_eq!(sign_recover_init(session, CKM_RSA_PKCS, &[], rsa_prv), 0);
+        let (rv, recover_sig) = sign_recover(session, rsa_msg);
+        assert_eq!(rv, 0);
+        assert_eq!(verify_recover_init(session, CKM_RSA_PKCS, &[], rsa_pub), 0);
+        let (rv, recovered) = verify_recover(session, &recover_sig);
+        assert_eq!(rv, 0);
+        assert_eq!(recovered, rsa_msg, "VerifyRecover must recover the exact signed message");
+
+        // ECDSA raw (pre-hashed, no parameter, single-part-only) + EdDSA
+        // (pure Ed25519, no parameter) over the P-256/Ed25519 keygen
+        // mechanisms G1/RW4/RW5 already exercise.
+        const CKM_EC_KEY_PAIR_GEN: u64 = 0x0000_1040;
+        const CKA_EC_PARAMS: u64 = 0x0000_0180;
+        const P256_EC_PARAMS: [u8; 10] = [0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
+        let ec_public_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            (CKA_EC_PARAMS, P256_EC_PARAMS.to_vec()),
+            attr_bool(u64::from(ck::CKA_VERIFY), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let ec_private_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            attr_bool(u64::from(ck::CKA_SIGN), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, ec_pub, ec_prv) = generate_key_pair(session, CKM_EC_KEY_PAIR_GEN, &[], &ec_public_tmpl, &ec_private_tmpl);
+        assert_eq!(rv, 0);
+        let ecdsa_msg = b"g3 ecdsa raw sign test, token truncates internally";
+        assert_eq!(sign_init(session, u64::from(ck::CKM_ECDSA), &[], ec_prv), 0);
+        let (rv, ecdsa_sig) = sign(session, ecdsa_msg);
+        assert_eq!(rv, 0);
+        assert_eq!(verify_init(session, u64::from(ck::CKM_ECDSA), &[], ec_pub), 0);
+        assert_eq!(verify(session, ecdsa_msg, &ecdsa_sig), 0);
+
+        const CKA_EC_POINT: u64 = 0x0000_0181;
+        let (rv, ec_point_attrs) = get_attribute_value(session, ec_pub, &[CKA_EC_POINT]);
+        assert_eq!(rv, 0);
+        assert!(!ec_point_attrs[0].value.is_empty(), "RawEncoding: CKA_EC_POINT must be readable");
+
+        const ED25519_EC_PARAMS: [u8; 5] = [0x06, 0x03, 0x2B, 0x65, 0x70];
+        let eddsa_public_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            (CKA_EC_PARAMS, ED25519_EC_PARAMS.to_vec()),
+            attr_bool(u64::from(ck::CKA_VERIFY), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let eddsa_private_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            attr_bool(u64::from(ck::CKA_SIGN), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, ed_pub, ed_prv) = generate_key_pair(
+            session, u64::from(ck::CKM_EC_EDWARDS_KEY_PAIR_GEN), &[], &eddsa_public_tmpl, &eddsa_private_tmpl,
+        );
+        assert_eq!(rv, 0);
+        let eddsa_msg = b"g3 eddsa sign test";
+        assert_eq!(sign_init(session, u64::from(ck::CKM_EDDSA), &[], ed_prv), 0);
+        let (rv, eddsa_sig) = sign(session, eddsa_msg);
+        assert_eq!(rv, 0);
+        assert_eq!(verify_init(session, u64::from(ck::CKM_EDDSA), &[], ed_pub), 0);
+        assert_eq!(verify(session, eddsa_msg, &eddsa_sig), 0);
+
+        // SHA3-256 digest — one-shot and FSM must agree.
+        let sha3_data = b"g3 sha3-256 digest sweep";
+        let (rv, sha3_oneshot) = digest(session, u64::from(ck::CKM_SHA3_256), &[], sha3_data);
+        assert_eq!(rv, 0);
+        assert_eq!(digest_init(session, u64::from(ck::CKM_SHA3_256), &[]), 0);
+        assert_eq!(digest_update(session, &sha3_data[..10]), 0);
+        assert_eq!(digest_update(session, &sha3_data[10..]), 0);
+        let (rv, sha3_fsm) = digest_final(session);
+        assert_eq!(rv, 0);
+        assert_eq!(sha3_oneshot, sha3_fsm, "SHA3-256 one-shot and FSM must agree");
+
+        // KMAC-128, default (absent) params — generic-secret key, real MAC.
+        let kmac_key_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_SIGN), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, kmac_key) = generate_key(session, u64::from(ck::CKM_GENERIC_SECRET_KEY_GEN), &[], &kmac_key_tmpl);
+        assert_eq!(rv, 0);
+        assert_eq!(sign_init(session, u64::from(ck::CKM_KMAC_128), &[], kmac_key), 0);
+        let (rv, kmac_mac) = sign(session, b"g3 kmac-128 default-params sweep");
+        assert_eq!(rv, 0);
+        assert!(!kmac_mac.is_empty(), "KMAC-128 must produce a non-empty MAC");
+
+        // DSA-CTX — CK_SIGN_ADDITIONAL_CONTEXT over the ML-DSA keypair G1/
+        // RW2 already exercise. Deterministic hedge: same key+msg+context
+        // must reproduce the identical signature; a mismatched context at
+        // Verify time must fail (context is bound into what's signed).
+        let dsa_public_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_DSA),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_DSA_65),
+            attr_bool(u64::from(ck::CKA_VERIFY), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let dsa_private_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_DSA),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_DSA_65),
+            attr_bool(u64::from(ck::CKA_SIGN), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, dsa_pub, dsa_prv) =
+            generate_key_pair(session, u64::from(ck::CKM_ML_DSA_KEY_PAIR_GEN), &[], &dsa_public_tmpl, &dsa_private_tmpl);
+        assert_eq!(rv, 0);
+        let ctx_msg = b"g3 dsa-ctx deterministic sweep";
+        let ctx_a = b"context-a";
+        let ctx_a_params = sign_params::additional_context(ck::CKH_DETERMINISTIC_REQUIRED, ctx_a);
+        assert_eq!(sign_init(session, u64::from(ck::CKM_ML_DSA), ctx_a_params.as_slice(), dsa_prv), 0);
+        let (rv, ctx_sig1) = sign(session, ctx_msg);
+        assert_eq!(rv, 0);
+        let ctx_a_params2 = sign_params::additional_context(ck::CKH_DETERMINISTIC_REQUIRED, ctx_a);
+        assert_eq!(sign_init(session, u64::from(ck::CKM_ML_DSA), ctx_a_params2.as_slice(), dsa_prv), 0);
+        let (rv, ctx_sig2) = sign(session, ctx_msg);
+        assert_eq!(rv, 0);
+        assert_eq!(ctx_sig1, ctx_sig2, "CKH_DETERMINISTIC_REQUIRED must reproduce the identical signature");
+
+        let verify_a_params = sign_params::additional_context(ck::CKH_DETERMINISTIC_REQUIRED, ctx_a);
+        assert_eq!(verify_init(session, u64::from(ck::CKM_ML_DSA), verify_a_params.as_slice(), dsa_pub), 0);
+        assert_eq!(verify(session, ctx_msg, &ctx_sig1), 0);
+
+        let ctx_b = b"context-b";
+        let verify_b_params = sign_params::additional_context(ck::CKH_DETERMINISTIC_REQUIRED, ctx_b);
+        assert_eq!(verify_init(session, u64::from(ck::CKM_ML_DSA), verify_b_params.as_slice(), dsa_pub), 0);
+        let rv_wrong_ctx = verify(session, ctx_msg, &ctx_sig1);
+        assert_ne!(rv_wrong_ctx, 0, "a mismatched context must fail verification, not silently accept");
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn mechanism_sweep_kcv_profile_multipart_and_fork() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+
+        // KCV — §4.11, computed on every secret-key creation.
+        let aes_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 16),
+            attr_bool(u64::from(ck::CKA_WRAP), true),
+            attr_bool(u64::from(ck::CKA_UNWRAP), true),
+            attr_bool(u64::from(ck::CKA_EXTRACTABLE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, kcv_key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &aes_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, kcv_attrs) = get_attribute_value(session, kcv_key, &[u64::from(ck::CKA_CHECK_VALUE)]);
+        assert_eq!(rv, 0);
+        assert!(kcv_attrs[0].available && !kcv_attrs[0].value.is_empty(), "KCV: CKA_CHECK_VALUE must be present on a fresh secret key");
+
+        // KcvTemplate — same attribute, but on a key produced via C_UnwrapKey
+        // (template form) rather than C_GenerateKey.
+        let target_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 16),
+            attr_bool(u64::from(ck::CKA_EXTRACTABLE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, target_key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &target_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, wrapped) = wrap_key(session, u64::from(ck::CKM_AES_KEY_WRAP), &[], kcv_key, target_key);
+        assert_eq!(rv, 0);
+        let unwrap_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_bool(u64::from(ck::CKA_EXTRACTABLE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, unwrapped) = unwrap_key(session, u64::from(ck::CKM_AES_KEY_WRAP), &[], kcv_key, &wrapped, &unwrap_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, kcv_tmpl_attrs) = get_attribute_value(session, unwrapped, &[u64::from(ck::CKA_CHECK_VALUE)]);
+        assert_eq!(rv, 0);
+        assert!(kcv_tmpl_attrs[0].available && !kcv_tmpl_attrs[0].value.is_empty(), "KcvTemplate: CKA_CHECK_VALUE must be present on an unwrapped key");
+
+        // KEMKcv — same attribute, on the shared-secret key an ML-KEM
+        // decapsulate produces.
+        let kem_public_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_KEM),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_KEM_768),
+            attr_bool(u64::from(ck::CKA_ENCAPSULATE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let kem_private_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_KEM),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_KEM_768),
+            attr_bool(u64::from(ck::CKA_DECAPSULATE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, kem_pub, kem_prv) =
+            generate_key_pair(session, u64::from(ck::CKM_ML_KEM_KEY_PAIR_GEN), &[], &kem_public_tmpl, &kem_private_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, ciphertext, _encap_key) = encapsulate_key(session, u64::from(ck::CKM_ML_KEM), &[], kem_pub, &[]);
+        assert_eq!(rv, 0);
+        let (rv, decap_key) = decapsulate_key(session, u64::from(ck::CKM_ML_KEM), &[], kem_prv, &ciphertext, &[]);
+        assert_eq!(rv, 0);
+        let (rv, kem_kcv_attrs) = get_attribute_value(session, decap_key, &[u64::from(ck::CKA_CHECK_VALUE)]);
+        assert_eq!(rv, 0);
+        assert!(kem_kcv_attrs[0].available && !kem_kcv_attrs[0].value.is_empty(), "KEMKcv: CKA_CHECK_VALUE must be present on a KEM-derived key");
+
+        // Profile — the engine's built-in CKO_PROFILE objects survive token
+        // init by design; pure existing-verb composition (find + get-attr).
+        assert_eq!(find_objects_init(session, &[attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PROFILE)]), 0);
+        let (rv, profile_handles) = find_objects(session, 1000);
+        assert_eq!(rv, 0);
+        assert!(!profile_handles.is_empty(), "the engine must publish at least one CKO_PROFILE object");
+        assert_eq!(find_objects_final(session), 0);
+        let (rv, profile_attrs) = get_attribute_value(session, profile_handles[0], &[u64::from(ck::CKA_PROFILE_ID)]);
+        assert_eq!(rv, 0);
+        assert!(profile_attrs[0].available, "CKA_PROFILE_ID must be readable on a profile object");
+
+        // MultiPart_ECDSA — CKM_ECDSA_SHA256 (hash-combined, so genuinely
+        // streamable, unlike bare CKM_ECDSA's single-part-only raw form).
+        const CKM_EC_KEY_PAIR_GEN: u64 = 0x0000_1040;
+        const CKA_EC_PARAMS: u64 = 0x0000_0180;
+        const P256_EC_PARAMS: [u8; 10] = [0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
+        let ec_public_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            (CKA_EC_PARAMS, P256_EC_PARAMS.to_vec()),
+            attr_bool(u64::from(ck::CKA_VERIFY), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let ec_private_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            attr_bool(u64::from(ck::CKA_SIGN), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, ec_pub, ec_prv) = generate_key_pair(session, CKM_EC_KEY_PAIR_GEN, &[], &ec_public_tmpl, &ec_private_tmpl);
+        assert_eq!(rv, 0);
+        let mp_msg = b"multipart ecdsa-sha256 FSM equality sweep";
+        assert_eq!(sign_init(session, u64::from(ck::CKM_ECDSA_SHA256), &[], ec_prv), 0);
+        let (rv, mp_oneshot) = sign(session, mp_msg);
+        assert_eq!(rv, 0);
+        assert_eq!(sign_init(session, u64::from(ck::CKM_ECDSA_SHA256), &[], ec_prv), 0);
+        assert_eq!(sign_update(session, &mp_msg[..15]), 0);
+        assert_eq!(sign_update(session, &mp_msg[15..]), 0);
+        let (rv, mp_fsm) = sign_final(session);
+        assert_eq!(rv, 0);
+        // Deterministic per FIPS 186-5/RFC 6979-style hashed-ECDSA on this
+        // engine (already relied on by the plain CKM_ECDSA FSM tests
+        // elsewhere in this file) — one-shot and FSM must byte-match.
+        assert_eq!(mp_oneshot, mp_fsm, "MultiPart_ECDSA: one-shot and Update/Final FSM must agree");
+        assert_eq!(verify_init(session, u64::from(ck::CKM_ECDSA_SHA256), &[], ec_pub), 0);
+        assert_eq!(verify(session, mp_msg, &mp_fsm), 0);
+
+        // MultiPart_EdDSA — plain CKM_EDDSA buffers internally across
+        // Update calls (Ed25519 cannot be computed incrementally, but the
+        // engine can and does buffer the message until Final).
+        const ED25519_EC_PARAMS: [u8; 5] = [0x06, 0x03, 0x2B, 0x65, 0x70];
+        let eddsa_public_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            (CKA_EC_PARAMS, ED25519_EC_PARAMS.to_vec()),
+            attr_bool(u64::from(ck::CKA_VERIFY), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let eddsa_private_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            attr_bool(u64::from(ck::CKA_SIGN), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, ed_pub, ed_prv) = generate_key_pair(
+            session, u64::from(ck::CKM_EC_EDWARDS_KEY_PAIR_GEN), &[], &eddsa_public_tmpl, &eddsa_private_tmpl,
+        );
+        assert_eq!(rv, 0);
+        let mp_ed_msg = b"multipart eddsa FSM equality sweep";
+        assert_eq!(sign_init(session, u64::from(ck::CKM_EDDSA), &[], ed_prv), 0);
+        let (rv, mp_ed_oneshot) = sign(session, mp_ed_msg);
+        assert_eq!(rv, 0);
+        assert_eq!(sign_init(session, u64::from(ck::CKM_EDDSA), &[], ed_prv), 0);
+        assert_eq!(sign_update(session, &mp_ed_msg[..12]), 0);
+        assert_eq!(sign_update(session, &mp_ed_msg[12..]), 0);
+        let (rv, mp_ed_fsm) = sign_final(session);
+        assert_eq!(rv, 0);
+        assert_eq!(mp_ed_oneshot, mp_ed_fsm, "MultiPart_EdDSA: one-shot and Update/Final FSM must agree (pure Ed25519 is deterministic)");
+        assert_eq!(verify_init(session, u64::from(ck::CKM_EDDSA), &[], ed_pub), 0);
+        assert_eq!(verify(session, mp_ed_msg, &mp_ed_fsm), 0);
+
+        // BIP32 — CKM_BIP32_MASTER_DERIVE reads its curve from the OUTPUT
+        // TEMPLATE's CKA_EC_PARAMS (no CK_*_PARAMS struct at all), over a
+        // generic-secret "seed" base key.
+        let seed_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_bool(u64::from(ck::CKA_DERIVE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+            (u64::from(ck::CKA_VALUE), vec![0x24u8; 32]),
+        ];
+        let (rv, seed_h) = create_object(session, &seed_tmpl);
+        assert_eq!(rv, 0);
+        let bip32_out_tmpl = [(CKA_EC_PARAMS, P256_EC_PARAMS.to_vec()), attr_bool(u64::from(ck::CKA_EXTRACTABLE), true)];
+        let (rv, bip32_h) = derive_key(session, u64::from(ck::CKM_BIP32_MASTER_DERIVE), &[], seed_h, &bip32_out_tmpl);
+        assert_eq!(rv, 0);
+        assert_ne!(bip32_h, 0);
+        let (rv, bip32_attrs) = get_attribute_value(session, bip32_h, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(bip32_attrs[0].value.len(), 32, "BIP32 master derive must produce a 32-byte EC private key");
+
+        // Fork analogue — two independent sessions, generate_random on
+        // each, the draws must differ (no shared/reused RNG state across
+        // sessions).
+        let (_, session2) = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION);
+        let (rv, draw1) = generate_random(session, 32);
+        assert_eq!(rv, 0);
+        let (rv, draw2) = generate_random(session2, 32);
+        assert_eq!(rv, 0);
+        assert_ne!(draw1, draw2, "Fork: two sessions' random draws must differ");
+        close_session(session2);
+
         close_session(session);
     }
 }

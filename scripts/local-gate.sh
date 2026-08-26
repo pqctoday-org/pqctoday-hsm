@@ -190,11 +190,17 @@ run_step "rust engine cargo test" \
 # first grep catches any FAILED summary, the second reports the aggregate.
 # Grown in RW-T (docs/remoting-pkcs11-v32-remaining-gaps-plan-2026-08-26.md)
 # with the coverage-ledger ratchet: `cargo test` intentionally does NOT run
-# the #[ignore]d XMSS/HSS algorithm-cell sweep (326s at this engine's
-# smallest XMSS parameter set — see that test's own doc comment), so it
-# stays out of the routine gate; the ledger still accounts for it via
+# the #[ignore]d v21b_xmss_hss_sign_verify_parity case (326s at this
+# engine's smallest XMSS parameter set — see that test's own doc comment),
+# so it stays out of the routine gate; the ledger still accounts for it via
 # case_ids, and the ratchet below checks the LEDGER, not live execution of
-# every ignored test.
+# every ignored test. G4 (docs/remoting-pkcs11-v32-gap-remediation-plan-
+# 2026-08-26.md) split the original combined V21 into this slow, still-
+# ignored XMSS/HSS case and a separate fast v21a_slh_dsa_sign_verify_parity
+# case (SLH-DSA-128S keygen is fast) that DOES run here — do not re-merge
+# them without re-measuring, and do not remove #[ignore] from v21b without
+# first re-measuring its cost; 326s per run would take this step from
+# ~seconds to 5+ minutes for every contributor.
 run_step "remoting gRPC+REST services + three-transport parity" \
   "cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
    cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}' && \
