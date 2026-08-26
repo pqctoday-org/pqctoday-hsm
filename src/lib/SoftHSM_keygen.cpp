@@ -2751,6 +2751,7 @@ CK_RV SoftHSM::C_DeriveKey
 		case CKM_CONCATENATE_BASE_AND_DATA:
 		case CKM_CONCATENATE_BASE_AND_KEY:
 		case CKM_HKDF_DERIVE:
+		case CKM_HKDF_DATA:
 		case CKM_SP800_108_COUNTER_KDF:
 		case CKM_SP800_108_FEEDBACK_KDF:
 		case CKM_BIP32_MASTER_DERIVE:
@@ -3156,11 +3157,18 @@ CK_RV SoftHSM::C_DeriveKey
     }
 
 	// Report errors and/or unexpected usage.
-	if (objClass != CKO_SECRET_KEY)
-		return CKR_ATTRIBUTE_VALUE_INVALID;
-	if (keyType != CKK_GENERIC_SECRET &&
-	    keyType != CKK_AES)
-		return CKR_TEMPLATE_INCONSISTENT;
+	// CKM_HKDF_DATA legitimately produces a CKO_DATA object (§2.43), not a
+	// CKO_SECRET_KEY — its own block below (alongside CKM_HKDF_DERIVE)
+	// builds and validates that object itself, so the secret-key-only
+	// checks here don't apply to it.
+	if (pMechanism->mechanism != CKM_HKDF_DATA)
+	{
+		if (objClass != CKO_SECRET_KEY)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+		if (keyType != CKK_GENERIC_SECRET &&
+		    keyType != CKK_AES)
+			return CKR_TEMPLATE_INCONSISTENT;
+	}
 
 	// Check authorization
 	rv = haveWrite(session->getState(), isOnToken, isPrivate);
@@ -3702,27 +3710,46 @@ CK_RV SoftHSM::C_DeriveKey
 		return CKR_OK;
 	}
 
-	// HKDF derive (PKCS#11 v3.0+ §2.43, CKM_HKDF_DERIVE = 0x0000402a)
-	if (pMechanism->mechanism == CKM_HKDF_DERIVE)
+	// HKDF derive (PKCS#11 v3.0+ §2.43, CKM_HKDF_DERIVE = 0x0000402a).
+	// CKM_HKDF_DATA (0x0000402b) is the same derivation, only the output
+	// object's class differs (CKO_DATA, not CKO_SECRET_KEY) — the pkcs11-
+	// provider's TLS13-KDF byte-output path requires it (OpenSSL's own
+	// tls13_generate_secret always requests the DATA variant), and per
+	// §2.43 "any token that supports one SHOULD support the other too".
+	bool hkdfIsDataVariant = (pMechanism->mechanism == CKM_HKDF_DATA);
+	if (pMechanism->mechanism == CKM_HKDF_DERIVE || hkdfIsDataVariant)
 	{
 		if (pMechanism->pParameter == NULL_PTR ||
 		    pMechanism->ulParameterLen != sizeof(CK_HKDF_PARAMS))
 		{
-			ERROR_MSG("CKM_HKDF_DERIVE requires CK_HKDF_PARAMS");
+			ERROR_MSG("CKM_HKDF_DERIVE/DATA requires CK_HKDF_PARAMS");
 			return CKR_ARGUMENTS_BAD;
 		}
 		CK_HKDF_PARAMS* hkdfp = (CK_HKDF_PARAMS*)pMechanism->pParameter;
 
 		if (!hkdfp->bExtract && !hkdfp->bExpand)
 		{
-			ERROR_MSG("CKM_HKDF_DERIVE: at least one of bExtract/bExpand must be true");
+			ERROR_MSG("CKM_HKDF_DERIVE/DATA: at least one of bExtract/bExpand must be true");
 			return CKR_MECHANISM_PARAM_INVALID;
 		}
-		if (hkdfp->ulSaltType != CKF_HKDF_SALT_NULL &&
+		// PKCS#11 v3.2 §6.62.3: "The salt should be ignored if bExtract is
+		// false." So ulSaltType is only meaningful — and only validated —
+		// when bExtract is true; an expand-only call's ulSaltType is exempt
+		// per that sentence, whatever value it holds. (In practice this is
+		// what lets the widely-deployed pkcs11-provider vendored under
+		// src/vendor interoperate here: its internal p11prov_tls13_expand_
+		// label() helper — reproducible against the unmodified upstream
+		// openssl-projects/pkcs11-provider source, not a fork divergence —
+		// leaves CK_HKDF_PARAMS's ulSaltType as a raw zero-initialized
+		// struct field on every expand-only call it issues, rather than the
+		// named CKF_HKDF_SALT_NULL constant. §6.62.3's own "ignore if
+		// bExtract is false" is why that is spec-conformant.)
+		if (hkdfp->bExtract &&
+		    hkdfp->ulSaltType != CKF_HKDF_SALT_NULL &&
 		    hkdfp->ulSaltType != CKF_HKDF_SALT_DATA &&
 		    hkdfp->ulSaltType != CKF_HKDF_SALT_KEY)
 		{
-			ERROR_MSG("CKM_HKDF_DERIVE: invalid ulSaltType 0x%08lx", (unsigned long)hkdfp->ulSaltType);
+			ERROR_MSG("CKM_HKDF_DERIVE/DATA: invalid ulSaltType 0x%08lx", (unsigned long)hkdfp->ulSaltType);
 			return CKR_MECHANISM_PARAM_INVALID;
 		}
 
@@ -3730,7 +3757,7 @@ CK_RV SoftHSM::C_DeriveKey
 		const char* hkdfDigest = ckmToDigestName(hkdfp->prfHashMechanism);
 		if (hkdfDigest == nullptr)
 		{
-			ERROR_MSG("CKM_HKDF_DERIVE: unsupported PRF 0x%08lx", (unsigned long)hkdfp->prfHashMechanism);
+			ERROR_MSG("CKM_HKDF_DERIVE/DATA: unsupported PRF 0x%08lx", (unsigned long)hkdfp->prfHashMechanism);
 			return CKR_MECHANISM_PARAM_INVALID;
 		}
 
@@ -3848,7 +3875,7 @@ CK_RV SoftHSM::C_DeriveKey
 			}
 		}
 
-		// Build output key object (mirror PBKDF2 pattern)
+		// Build output object (mirror PBKDF2 pattern)
 		CK_BBOOL hkdfOnToken = CK_FALSE;
 		CK_BBOOL hkdfPrivate = CK_TRUE;
 		for (CK_ULONG i = 0; i < ulCount; i++)
@@ -3865,6 +3892,61 @@ CK_RV SoftHSM::C_DeriveKey
 			if (hkdfRv == CKR_USER_NOT_LOGGED_IN) INFO_MSG("User is not authorized");
 			if (hkdfRv == CKR_SESSION_READ_ONLY)  INFO_MSG("Session is read-only");
 			return hkdfRv;
+		}
+
+		// CKM_HKDF_DATA output is a CKO_DATA object: no CKA_KEY_TYPE, no
+		// key-lifecycle bookkeeping (CKA_KEY_GEN_MECHANISM/ALWAYS_SENSITIVE/
+		// NEVER_EXTRACTABLE), no check value — none of those apply to a
+		// Data object per §2 and §4.11's own scope (secret/private keys
+		// only). Handled as its own short path; the CKO_SECRET_KEY path
+		// below (CKM_HKDF_DERIVE) is unchanged.
+		if (hkdfIsDataVariant)
+		{
+			const CK_ULONG hkdfDataMaxAttribs = 32;
+			CK_OBJECT_CLASS hkdfDataObjClass = CKO_DATA;
+			CK_ATTRIBUTE hkdfDataAttribs[hkdfDataMaxAttribs] = {
+				{ CKA_CLASS,   &hkdfDataObjClass, sizeof(hkdfDataObjClass) },
+				{ CKA_TOKEN,   &hkdfOnToken,       sizeof(hkdfOnToken)     },
+				{ CKA_PRIVATE, &hkdfPrivate,       sizeof(hkdfPrivate)     },
+			};
+			CK_ULONG hkdfDataAttribsCount = 3;
+			for (CK_ULONG i = 0; i < ulCount && hkdfDataAttribsCount < hkdfDataMaxAttribs; i++)
+			{
+				switch (pTemplate[i].type)
+				{
+					case CKA_CLASS: case CKA_TOKEN: case CKA_PRIVATE:
+					case CKA_VALUE_LEN: continue;
+					default: hkdfDataAttribs[hkdfDataAttribsCount++] = pTemplate[i]; break;
+				}
+			}
+
+			hkdfRv = CreateObject(hSession, hkdfDataAttribs, hkdfDataAttribsCount, phKey, OBJECT_OP_GENERATE);
+			if (hkdfRv != CKR_OK) return hkdfRv;
+
+			OSObject* hkdfDataObj = (OSObject*)handleManager->getObject(*phKey);
+			if (hkdfDataObj == NULL_PTR || !hkdfDataObj->isValid()) return CKR_FUNCTION_FAILED;
+			if (!hkdfDataObj->startTransaction()) return CKR_FUNCTION_FAILED;
+
+			bool hkdfDataOK = true;
+			ByteString hkdfDataValue;
+			if (hkdfPrivate)
+				hkdfDataOK = hkdfDataOK && token->encrypt(hkdfOut, hkdfDataValue);
+			else
+				hkdfDataValue = hkdfOut;
+			hkdfDataOK = hkdfDataOK && hkdfDataObj->setAttribute(CKA_VALUE, hkdfDataValue);
+
+			if (hkdfDataOK)
+				hkdfDataObj->commitTransaction();
+			else
+				hkdfDataObj->abortTransaction();
+
+			if (!hkdfDataOK)
+			{
+				handleManager->destroyObject(*phKey);
+				*phKey = CK_INVALID_HANDLE;
+				return CKR_FUNCTION_FAILED;
+			}
+			return CKR_OK;
 		}
 
 		const CK_ULONG hkdfMaxAttribs = 32;

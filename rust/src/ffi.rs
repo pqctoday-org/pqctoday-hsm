@@ -1178,6 +1178,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // Key derivation functions
         CKM_PKCS5_PBKD2
         | CKM_HKDF_DERIVE
+        | CKM_HKDF_DATA
         | CKM_SP800_108_COUNTER_KDF
         | CKM_SP800_108_FEEDBACK_KDF => (1, 512, 0x00080000),
         // ── R6.2 — arms for every remaining SUPPORTED_MECHS entry ──────────
@@ -8357,7 +8358,14 @@ pub fn C_DeriveKey(
             }
 
             // ── HKDF ────────────────────────────────────────────────────────
-            CKM_HKDF_DERIVE => {
+            // CKM_HKDF_DATA (0x402b) is the same derivation as CKM_HKDF_DERIVE
+            // (0x402a) — PKCS#11 v3.2 §2.43 defines it as producing a CKO_DATA
+            // object instead of a CKO_SECRET_KEY, nothing else differs. The
+            // pkcs11-provider vendored in src/vendor requires it for its
+            // TLS13-KDF byte-output path (OpenSSL's own tls13_generate_secret
+            // always requests the DATA variant). See the CKA_CLASS branch
+            // below the match for the object-shape difference.
+            CKM_HKDF_DERIVE | CKM_HKDF_DATA => {
                 let ikm = match get_object_value(h_base_key) {
                     Some(v) => v,
                     None => return CKR_ARGUMENTS_BAD,
@@ -8374,9 +8382,24 @@ pub fn C_DeriveKey(
                 // by shifting the first word right by 8, which is the same
                 // byte on a little-endian host and the wrong one on a
                 // big-endian one; `bbool()` reads byte 1 on both.
+                let b_extract = r.bbool(ck_param::hkdf::B_EXTRACT);
                 let b_expand = r.bbool(ck_param::hkdf::B_EXPAND);
                 let prf = r.ulong32(ck_param::hkdf::PRF_HASH_MECHANISM);
                 let salt_type = r.ulong32(ck_param::hkdf::UL_SALT_TYPE);
+                // PKCS#11 v3.2 §6.62.3: "The salt should be ignored if
+                // bExtract is false" — so ulSaltType is only meaningful, and
+                // only validated, when bExtract is true. Below, an
+                // unrecognized salt_type already degrades to "no salt" by
+                // construction (the two `if`s only special-case DATA/KEY);
+                // this makes that silent fallback loud when it would matter
+                // (bExtract=true), matching the C++ engine's equivalent gate.
+                if b_extract
+                    && salt_type != CKF_HKDF_SALT_NULL
+                    && salt_type != CKF_HKDF_SALT_DATA
+                    && salt_type != CKF_HKDF_SALT_KEY
+                {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
                 // Salt-as-key (CKF_HKDF_SALT_KEY): the salt is another key
                 // handle (hSaltKey @ word5); HKDF-Extract keys HMAC on its
                 // CKA_VALUE — the keyed dual-PRF combiner form,
@@ -8554,27 +8577,43 @@ pub fn C_DeriveKey(
         let mut attrs = HashMap::new();
         let vlen = key_value.len() as u32;
         attrs.insert(CKA_VALUE, key_value);
-        store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
-        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
-        store_bool(&mut attrs, CKA_EXTRACTABLE, true);
-        store_bool(&mut attrs, CKA_SENSITIVE, false);
-        store_ulong(&mut attrs, CKA_VALUE_LEN, vlen);
-        // PKCS#11 v3.2 §4.1 defaults — caller may override via template
-        store_bool(&mut attrs, CKA_TOKEN, false);
-        store_bool(&mut attrs, CKA_PRIVATE, false);
-        absorb_template_attrs(&mut attrs, p_template, ul_attribute_count);
-        // Server-managed attributes — set AFTER absorb to override any caller-provided values.
-        // PKCS#11 v3.2 §4.3 Table 13 — a DERIVED key is NOT locally generated:
-        // CKA_LOCAL = FALSE and CKA_KEY_GEN_MECHANISM = CK_UNAVAILABLE_INFORMATION.
-        store_bool(&mut attrs, CKA_LOCAL, false);
-        store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
-        // PKCS#11 v3.2 §4.9/§4.10 — a key derived from external material can never
-        // be marked ALWAYS_SENSITIVE / NEVER_EXTRACTABLE.
-        store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
-        store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
+        // CKA_CLASS is server-managed (absorb_template_attrs never lets a
+        // caller template override it — see is_server_managed_attr), so the
+        // CKM_HKDF_DATA/CKM_HKDF_DERIVE split has to be decided here, not via
+        // the template's own CKA_CLASS.
+        if mech_type == CKM_HKDF_DATA {
+            // §2.43 — CKO_DATA output: no key-lifecycle attributes apply
+            // (no CKA_KEY_TYPE, EXTRACTABLE, SENSITIVE, ALWAYS_SENSITIVE,
+            // NEVER_EXTRACTABLE, or CHECK_VALUE — those are key-class-only
+            // per §4.9-§4.11).
+            store_ulong(&mut attrs, CKA_CLASS, CKO_DATA);
+            store_ulong(&mut attrs, CKA_VALUE_LEN, vlen);
+            store_bool(&mut attrs, CKA_TOKEN, false);
+            store_bool(&mut attrs, CKA_PRIVATE, false);
+            absorb_template_attrs(&mut attrs, p_template, ul_attribute_count);
+        } else {
+            store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+            store_bool(&mut attrs, CKA_EXTRACTABLE, true);
+            store_bool(&mut attrs, CKA_SENSITIVE, false);
+            store_ulong(&mut attrs, CKA_VALUE_LEN, vlen);
+            // PKCS#11 v3.2 §4.1 defaults — caller may override via template
+            store_bool(&mut attrs, CKA_TOKEN, false);
+            store_bool(&mut attrs, CKA_PRIVATE, false);
+            absorb_template_attrs(&mut attrs, p_template, ul_attribute_count);
+            // Server-managed attributes — set AFTER absorb to override any caller-provided values.
+            // PKCS#11 v3.2 §4.3 Table 13 — a DERIVED key is NOT locally generated:
+            // CKA_LOCAL = FALSE and CKA_KEY_GEN_MECHANISM = CK_UNAVAILABLE_INFORMATION.
+            store_bool(&mut attrs, CKA_LOCAL, false);
+            store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+            // PKCS#11 v3.2 §4.9/§4.10 — a key derived from external material can never
+            // be marked ALWAYS_SENSITIVE / NEVER_EXTRACTABLE.
+            store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
+            store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
 
-        // PKCS#11 v3.2 §4.11: KCV mandatory on every secret-key derivation result.
-        crate::state::compute_kcv(&mut attrs);
+            // PKCS#11 v3.2 §4.11: KCV mandatory on every secret-key derivation result.
+            crate::state::compute_kcv(&mut attrs);
+        }
 
         *ph_key = allocate_handle_owned(_h_session, attrs);
     }

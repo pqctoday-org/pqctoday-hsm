@@ -145,7 +145,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 
 | ID | Gap | Evidence | Severity |
 |---|---|---|---|
-| F36-1 | **PARTIAL (R5 phase 1, 2026-08-25)** — was: `TLS-GROUP` capability registered zero PQC groups. Now: `MLKEM512`/`768`/`1024` registered as pure (non-hybrid) TLS 1.3 groups (`tls.c`), IANA code points and security-bits read live from the staged 3.6.3 build's own source (`0x0200`/`0x0201`/`0x0202`, 128/192/256 bits — not from memory). Two client-role prerequisites landed and live-verified: ML-KEM's `ENCODED_PUBLIC_KEY` get_params (TLS's key-share export mechanism) and relaxing its export function's class check so it works on the private object TLS actually holds post-keygen (was: strictly `CKO_PUBLIC_KEY`-only) — proven with a full simulated handshake sequence (export share from private → simulated server encapsulates → client decapsulates), byte-matched. A separate, real bug found and fixed along the way: `p11prov_common_gen_set_params`'s type switch had no case for `CKK_ML_KEM`/`CKK_SLH_DSA`, hit live by TLS's own ephemeral-keygen call path (which passes real params, unlike a bare `genpkey` CLI call). **A genuine, live TLS 1.3 handshake was run and the token demonstrably participated** — `s_client -groups MLKEM768 -propquery "?provider=pkcs11"` against a software `s_server`: `Negotiated TLS1.3 group: MLKEM768`, and the C++ engine's own log shows 6 real objects created (the ephemeral keypair) — not assumed, counted. **Two things remain genuinely open, not silently dropped**: (1) full handshake completion is blocked by a separate, not-yet-root-caused bug in this provider's own `TLS13_KDF` implementation (`kdf.c`) — once the token genuinely participates, secret derivation fails with an ASN.1/PKCS8 parse error, traced only as far as `tls13_generate_secret`'s KDF fetch also honoring the same propquery and landing on our TLS13-KDF instead of the default's; (2) **without** the propquery preference, the identical handshake *succeeds* but silently uses the default provider's own software ML-KEM for the entire group — 0 objects created on the token — a real false-pass risk for anyone testing this casually. Server role (importing a peer's raw public share to encapsulate against) remains unbuilt, as originally scoped. | `tls.c`, `kem/mlkem.c`; live `s_client`/`s_server` + C++ engine log | ~~**High**~~ Medium (flagship story partially told) |
+| F36-1 | **RESOLVED for the client role (R5 phase 1 + R12, 2026-08-25)** — server role (R15) remains unbuilt, tracked separately. Was: `TLS-GROUP` capability registered zero PQC groups. Now: `MLKEM512`/`768`/`1024` registered as pure (non-hybrid) TLS 1.3 groups (`tls.c`), IANA code points and security-bits read live from the staged 3.6.3 build's own source (`0x0200`/`0x0201`/`0x0202`, 128/192/256 bits — not from memory). Two client-role prerequisites landed and live-verified: ML-KEM's `ENCODED_PUBLIC_KEY` get_params (TLS's key-share export mechanism) and relaxing its export function's class check so it works on the private object TLS actually holds post-keygen (was: strictly `CKO_PUBLIC_KEY`-only) — proven with a full simulated handshake sequence (export share from private → simulated server encapsulates → client decapsulates), byte-matched. A separate, real bug found and fixed along the way: `p11prov_common_gen_set_params`'s type switch had no case for `CKK_ML_KEM`/`CKK_SLH_DSA`, hit live by TLS's own ephemeral-keygen call path (which passes real params, unlike a bare `genpkey` CLI call). **A genuine, live TLS 1.3 handshake was run and the token demonstrably participated** — `s_client -groups MLKEM768 -propquery "?provider=pkcs11"` against a software `s_server`: `Negotiated TLS1.3 group: MLKEM768`, and the C++ engine's own log shows 6 real objects created (the ephemeral keypair) — not assumed, counted. **Both things that remained open after R5 phase 1 are now resolved by R12/R13 (2026-08-25), see the update log below for the full mechanism**: (1) full handshake completion — the `TLS13_KDF` blocker was root-caused to four layered, precisely-diagnosed bugs (not one) and fixed in both engines; a real TLS 1.3 handshake now completes end-to-end with `MLKEM768` and a genuine cipher suite negotiated; (2) the silent-software-fallback hazard is now caught mechanically — harness case T13 asserts token participation from the engine log and ships a negative-control twin proving the hazard is real, per R13. Server role (importing a peer's raw public share to encapsulate against) remains unbuilt — tracked as R15. | `tls.c`, `kem/mlkem.c`, `kdf.c` (root-caused, unchanged), `SoftHSM_keygen.cpp`, `rust/src/ffi.rs`; harness T13 | ~~**High**~~ ~~Medium~~ Low (client role complete; server role is R15) |
 | F36-2 | LMS: OpenSSL 3.6's new verify-only LMS unused (see ALG-3, ENV-1) | release notes + live build | Medium |
 | F36-3 | `EVP_SKEY` KDF/KEYEXCH integration (3.6): provider has SKEYMGMT but the new `EVP_KDF_derive_SKEY`-style opaque-key flows are unprobed — token-resident secrets may not chain into OpenSSL KDFs without export | 3.6 CHANGES; needs probe (T-plan P2) | Medium |
 | F36-4 | *(positive baseline, not a gap)* CMS KEMRecipientInfo + `OSSL_PKEY_PARAM_CMS_RI_TYPE` already wired for ML-KEM (local commit `2cca4f0`) — must be regression-guarded by the new harness | `kem/mlkem.c:414-433` | — |
@@ -221,7 +221,7 @@ trusted; unexpected PASS of an XFAIL case fails the run (ratchet).
 | T12 | SLH-DSA keygen/store/encode reachability (ALG-1) | genpkey (all 12 param sets registered) → storeutl confirms on-token, correctly typed/named | **PASS** (flipped by R1, 2026-08-25) |
 | T12sign | SLH-DSA-SHA2-128s token-sign (ALG-1 remainder) | `pkeyutl -sign` → software verify (exact 7856-byte sig) + tamper rejection | **PASS** (flipped by R1's `get_ctx_params` fix, 2026-08-25) |
 | T12sign_shake | SLH-DSA-SHAKE-128f token-sign, independent hash family | same, exact 17088-byte sig | **PASS** (new case, R1) |
-| T13 | TLS-GROUP gap (F36-1) | not scripted in the harness — a real handshake needs a live `s_server`/`s_client` pair plus engine-log evidence of token participation, run manually this session (see F36-1's row for the exact command and result); not yet reduced to a clean pass/fail harness case because full completion is blocked | manual, partial (see F36-1) |
+| T13 | TLS-GROUP gap (F36-1) | live `s_server`/`s_client` TLS 1.3 handshake negotiating `MLKEM768`, real cipher suite completes, engine-log evidence (token-side attribute decrypt activity) proves the token performed both the KEM ops and the TLS13-KDF derives; negative-control twin (same arena, no propquery) proves the same command silently succeeds via software with zero token activity when not pinned (R13) | **PASS** (new case, R12/R13, 2026-08-25; sabotage-tested) |
 | T4kemexport | ML-KEM public-share export from private object (R5 prerequisites) | `pkey -pubout` on a `type=private` URI → simulated server encap → client decap, byte-matched | **PASS** (new case, R5) |
 | T14 | CMS RSA | CMS sign via token key → software cmsverify | PASS |
 | T16 | X25519 key exchange (ALG-5) | token-to-token derive (two independent arenas), both directions, byte-identical 32-byte secret | **PASS** (new case, R4) |
@@ -420,6 +420,109 @@ and R6 (partial) all attempted, each reported at exactly the
 confidence level the evidence supports — full completion for the
 first three, precise partial-progress reporting for the last two.
 Harness remains `PASS=25 FAIL=0 XFAIL=1 XPASS=0`.
+
+**Further update (2026-08-25/26, phase-3 execution) — R12 (TLS13-KDF
+root cause + fix) and R13 (anti-false-pass harness rule), both DONE:**
+see F36-1 above for the current-state summary. Full mechanism, since
+this took three rounds of live instrumentation to nail precisely — the
+phase-3 plan's own written hypothesis (missing `CKM_HKDF_DATA`
+support) turned out to be only the first of four layered, independent
+bugs, each found by re-instrumenting and re-testing rather than
+guessing forward from the previous fix:
+
+1. **`CKM_HKDF_DATA` (0x402b) genuinely unimplemented in both
+   engines** — confirmed by live trace: the provider's slot-selection
+   loop silently masked this as `CKR_TOKEN_NOT_PRESENT` (from a
+   second, unrelated "spare uninitialized slot" it fell through to
+   after the real slot's mechanism check failed unprinted) — a red
+   herring that cost real investigation time before the C++ engine's
+   own log-free rejection was traced to `p11prov_check_mechanism`.
+   Fixed: identical HKDF computation reused in both engines
+   (`SoftHSM_keygen.cpp`, `rust/src/ffi.rs`), differing only in output
+   object shape (`CKO_DATA`, no key-lifecycle attributes) — matching
+   PKCS#11 v3.2 §6.62.4 exactly ("HKDF Data derive mechanism ... is
+   identical to HKDF Derive except the output is a CKO_DATA object"),
+   verified against the ratified OASIS Standard text (`pkcs11-spec-
+   v3.2-os.pdf`), not the draft.
+2. **A second, independent bug**, found only after fix #1 changed the
+   failure symptom: `C_DeriveKey`'s own top-of-function mechanism
+   whitelist `switch` (`SoftHSM_keygen.cpp`) never included
+   `CKM_HKDF_DATA` at all — a hard `default: return
+   CKR_MECHANISM_INVALID` gate upstream of fix #1's own code, entirely
+   separate from the mechanism-capability check in #1.
+3. **A third, independent bug**, found only after fix #2 changed the
+   symptom again: a *shared* pre-check (`extractObjectInformation` +
+   `if (objClass != CKO_SECRET_KEY) return
+   CKR_ATTRIBUTE_VALUE_INVALID`) applies to every mechanism reaching
+   that point in `C_DeriveKey`, including the new one — correct for
+   `CKM_HKDF_DERIVE` (whose template requests `CKO_SECRET_KEY`) but
+   wrong for `CKM_HKDF_DATA` (whose template correctly requests
+   `CKO_DATA` per the spec). Carved out an explicit exemption.
+4. **A fourth bug**, surfaced only once the first derive call fully
+   succeeded and a *second* one — never reached before — ran: the
+   vendored provider's own `p11prov_tls13_expand_label()` helper
+   (confirmed identical in the unmodified upstream
+   `openssl-projects/pkcs11-provider` source, not a fork divergence)
+   leaves `CK_HKDF_PARAMS.ulSaltType` as a raw zero-initialized struct
+   field on every expand-only call, rather than the named
+   `CKF_HKDF_SALT_NULL` constant (which is `0x1`, not `0`, per
+   `pkcs11t.h`). The engine's strict three-value `ulSaltType`
+   allow-list rejected this as `CKR_MECHANISM_PARAM_INVALID`. Fixed
+   with direct spec grounding, not a guess: PKCS#11 v3.2 §6.62.3
+   states verbatim "The salt should be ignored if bExtract is false"
+   — so `ulSaltType` is only meaningful, and only validated, when
+   `bExtract` is true; the gate now reads `if (hkdfp->bExtract &&
+   ulSaltType not in {NULL,DATA,KEY}) reject`. Same gate added to the
+   Rust engine for parity (it had no equivalent strict check at all,
+   so it wasn't broken, just inconsistent) — `CKF_HKDF_SALT_NULL` was
+   missing from `rust/src/constants.rs` entirely and had to be added.
+
+**No new PKCS#11 constants or mechanisms were invented anywhere in
+this fix** — every constant (`CKM_HKDF_DATA`, `CKO_DATA`,
+`CKF_HKDF_SALT_NULL`) was cross-checked against both the canonical
+`pkcs11t.h` and the ratified OASIS PKCS#11 v3.2 spec text before use;
+Table 265 in the spec confirms `CKM_HKDF_DATA` supports only the
+Derive function, matching this implementation's scope exactly.
+
+**Result**: a real TLS 1.3 handshake with `-groups MLKEM768
+-propquery "?provider=pkcs11"` now completes end-to-end — `Negotiated
+TLS1.3 group: MLKEM768`, `New, TLSv1.3, Cipher is
+TLS_AES_256_GCM_SHA384` — the first time in this remediation effort a
+full, real cipher suite has been negotiated with the token performing
+both the KEM operations and the key-schedule derivation. R13 (the
+anti-false-pass harness rule from the phase-3 plan) is folded directly
+into the new harness case rather than built separately: T13 asserts
+token participation from engine-log evidence (at-rest attribute
+decrypt activity), not exit codes alone, and ships a negative-control
+twin (same arena, `propquery` removed) proving the identical command
+silently succeeds via the default provider's software ML-KEM with
+zero token activity when not pinned — making the phase-2/phase-3
+false-pass hazard an executable, permanent fact instead of prose.
+T13 was sabotage-tested: reverting fix #2 (the mechanism whitelist
+entry) in a working copy makes T13 — and only T13 — fail; restoring it
+makes T13 pass again. Both engines' full test suites pass with zero
+regressions (C++: 8/8 CTest suites including `p11_v32_compliance`;
+Rust: 410/410 unit tests). Harness: `PASS=26 FAIL=0 XFAIL=1 XPASS=0`
+— one case gained (T13), the sole remaining XFAIL (T15b) unchanged
+and out of scope for this fix (blocked by the separate, pre-existing
+R14 `C_GetSlotList` bug in the Rust engine, still open).
+
+**Not investigated as part of this fix, noted for completeness**: a
+small residual `asn1_check_tlen`/`PKCS8_PRIV_KEY_INFO` error queue
+entry still appears in the client's stderr even on the now-passing
+handshake. Traced only as far as: it does *not* appear in an
+equivalent pure-software control run (no provider active at all), so
+it is specific to having pkcs11's decoders registered — most likely
+benign OpenSSL provider-decoder-chain probe noise (R2's new DER
+decoders being tried against the peer's plain RSA certificate,
+correctly rejecting it, but pushing an expected-failure ASN.1 error
+onto the queue before the real RSA decoder succeeds — a well-
+understood OpenSSL provider framework pattern). Does not affect the
+handshake outcome (cipher suite negotiates, `Verify return code: 18`
+is the correct answer for an untrusted self-signed test cert, not a
+parse failure) and was not chased further, per the same
+instrument-before-fixing discipline as everything else in this
+session — flagged rather than silently ignored or blindly patched.
 
 ## 7. Companion document
 

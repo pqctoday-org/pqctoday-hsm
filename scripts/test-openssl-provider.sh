@@ -508,6 +508,89 @@ t14() { local w; w=$(mk_arena cms "$CPP_ENGINE_SO") && use_arena "$w" || return 
 }
 run_case T14 PASS "CMS sign via token RSA key -> software cms -verify" t14
 
+# t13 — real TLS 1.3 handshake negotiating MLKEM768, token performing both
+# the client-side KEM ops AND the TLS13-KDF byte derives (gap F36-1,
+# remediation R5 phase 1 + R12's CKM_HKDF_DATA fix). Needs its own arena
+# (not mk_arena) because it requires log.level=DEBUG, not mk_arena's
+# hardcoded ERROR, to get engine-log evidence of token participation.
+#
+# R13 discipline (silent-software-fallback false-pass hazard, confirmed
+# live during R12): a green handshake proves nothing on its own — without
+# -propquery pinning fetches to pkcs11, the identical command succeeds
+# using the DEFAULT provider's own software ML-KEM, zero token objects
+# touched. Every positive TLS case therefore ships with its negative-
+# control twin: same arena, same command, propquery removed — must still
+# succeed (the hazard is real) but with zero token decrypt activity in the
+# engine log (proving the positive case's log evidence isn't background
+# noise from arena setup).
+t13() {
+  local w="$ROOT_WORK/t13"
+  mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = DEBUG
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $CPP_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-encode-provider-uri-to-pem = true
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$CPP_ENGINE_SO" \
+    --init-token --free --label t13 --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  OPENSSL_CONF=/dev/null "$OPENSSL_BIN" req -x509 -newkey rsa:2048 -nodes -keyout "$w/server.key" \
+    -out "$w/server.crt" -days 1 -subj "/CN=t13" >/dev/null 2>&1 || return 1
+
+  # ── Positive: propquery pinned, token must do the work ──
+  local port=14713
+  OPENSSL_CONF=/dev/null "$OPENSSL_BIN" s_server -cert "$w/server.crt" -key "$w/server.key" \
+    -accept "$port" -naccept 1 -tls1_3 -groups MLKEM768 -quiet >"$w/server.log" 2>&1 &
+  local spid=$!
+  sleep 1.5
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" timeout 10 "$OPENSSL_BIN" \
+    s_client -connect "127.0.0.1:$port" -tls1_3 -groups MLKEM768 -propquery "?provider=pkcs11" \
+    </dev/null >"$w/client.log" 2>"$w/client.err.log"
+  wait "$spid" 2>/dev/null
+
+  grep -q "Negotiated TLS1.3 group: MLKEM768" "$w/client.log" || return 1
+  grep -q "Cipher is TLS_" "$w/client.log" || return 1
+  # Engine-log evidence, not exit code: the token decrypting its own
+  # at-rest attributes is the arbiter that it — not the default provider —
+  # performed the KEM decapsulation and the TLS13-KDF derives.
+  grep -qE "Decrypting [0-9]+ bytes into buffer of [0-9]+ bytes" "$w/client.err.log" || return 1
+
+  # ── Negative control (R13): same arena, propquery removed ──
+  local port2=14714
+  OPENSSL_CONF=/dev/null "$OPENSSL_BIN" s_server -cert "$w/server.crt" -key "$w/server.key" \
+    -accept "$port2" -naccept 1 -tls1_3 -groups MLKEM768 -quiet >"$w/server2.log" 2>&1 &
+  local spid2=$!
+  sleep 1.5
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" timeout 10 "$OPENSSL_BIN" \
+    s_client -connect "127.0.0.1:$port2" -tls1_3 -groups MLKEM768 </dev/null \
+    >"$w/client2.log" 2>"$w/client2.err.log"
+  wait "$spid2" 2>/dev/null
+
+  grep -q "Negotiated TLS1.3 group: MLKEM768" "$w/client2.log" || return 1
+  # The hazard confirmed: it still negotiates MLKEM768 — but must show ZERO
+  # token decrypt activity, or the positive case above proves nothing.
+  if grep -qE "Decrypting [0-9]+ bytes into buffer of [0-9]+ bytes" "$w/client2.err.log"; then
+    return 1
+  fi
+  return 0
+}
+run_case T13 PASS "TLS 1.3 handshake negotiates MLKEM768, token performs KEM ops + TLS13-KDF derives, engine-log verified (gap F36-1 / remediation R5+R12); negative-control twin proves it (R13)" t13
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 

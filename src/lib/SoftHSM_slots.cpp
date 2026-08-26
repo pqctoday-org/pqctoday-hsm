@@ -465,6 +465,7 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 
 	// HKDF (PKCS#11 v3.0+ §2.43)
 	t["CKM_HKDF_DERIVE"]		= CKM_HKDF_DERIVE;
+	t["CKM_HKDF_DATA"]		= CKM_HKDF_DATA;
 
 	// NIST SP 800-108 KBKDFs (PKCS#11 v3.2 §2.44)
 	t["CKM_SP800_108_COUNTER_KDF"]	= CKM_SP800_108_COUNTER_KDF;
@@ -1173,6 +1174,7 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 	        break;
 	    case CKM_PKCS5_PBKD2:
 	    case CKM_HKDF_DERIVE:
+	    case CKM_HKDF_DATA:
 	    case CKM_SP800_108_COUNTER_KDF:
 	    case CKM_SP800_108_FEEDBACK_KDF:
 	    case CKM_SHAKE_256_KEY_DERIVATION:

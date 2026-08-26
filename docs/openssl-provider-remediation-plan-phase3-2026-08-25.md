@@ -1,4 +1,15 @@
-# OpenSSL provider remediation plan, phase 3 (2026-08-25) — PLAN ONLY, not executed
+# OpenSSL provider remediation plan, phase 3 (2026-08-25) — R12/R13 EXECUTED, remainder still plan-only
+
+**Execution update (2026-08-25/26):** R12 and R13 have been executed
+and landed — see `docs/openssl-provider-coverage-audit-2026-08-25.md`
+§6's "R12 (TLS13-KDF root cause + fix) and R13" entry for the full
+mechanism (four layered bugs found and fixed, not the one this plan
+originally hypothesized — the plan's own "confirm before fixing" rule
+is exactly why the wrong first hypothesis didn't ship). R12/R13's own
+sections below are left as originally written (the plan, not the
+result) per this project's append-only convention; do not edit them to
+match the outcome. Harness: `PASS=26 FAIL=0 XFAIL=1 XPASS=0`. R14–R17
+remain plan-only, not executed.
 
 Scope: the gaps that remain **after** the phase-2 execution run
 (commits `97420e8` R3-core, `1e6576b` R2, `493d354` R4, `183e775`

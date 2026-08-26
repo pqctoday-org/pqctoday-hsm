@@ -102,6 +102,9 @@ pub const CKA_SEED: u32 = 0x0000_0637;
 /// this engine; WTLS/X.509-attribute-certificate types are recognized (to
 /// reject cleanly) but not implemented — no consumer in this workspace and
 /// no KMIP 3.0 counterpart.
+/// PKCS#11 v3.2 §4.5 — a generic data object (raw CKA_VALUE, no key
+/// semantics). The CKM_HKDF_DATA derive result lands here (§2.43).
+pub const CKO_DATA: u32 = 0x0000_0000;
 pub const CKO_CERTIFICATE: u32 = 0x0000_0001;
 pub const CKO_PUBLIC_KEY: u32 = 0x0000_0002;
 pub const CKO_PRIVATE_KEY: u32 = 0x0000_0003;
@@ -463,6 +466,9 @@ pub const CKM_PKCS5_PBKD2: u32 = 0x0000_03b0;
 pub const CKM_SP800_108_COUNTER_KDF: u32 = 0x0000_03ac;
 pub const CKM_SP800_108_FEEDBACK_KDF: u32 = 0x0000_03ad;
 pub const CKM_HKDF_DERIVE: u32 = 0x0000_402a;
+/// PKCS#11 v3.2 §2.43 — same HKDF computation as CKM_HKDF_DERIVE, output as
+/// a CKO_DATA object instead of a CKO_SECRET_KEY.
+pub const CKM_HKDF_DATA: u32 = 0x0000_402b;
 // Simple key-derivation mechanisms (PKCS#11 v3.2 §6.43 "Miscellaneous simple
 // key derivation"). Values verified against the vendored pkcs11t.h. The
 // composable building blocks for hybrid-KEM combiners (classical ‖ PQC),
@@ -491,6 +497,10 @@ pub const CKM_SHA3_512_KEY_DERIVATION: u32 = 0x0000_039a;
 // CKF_HKDF_SALT_DATA. Lets HKDF-Extract key on ANOTHER key's value (salt =
 // key handle), i.e. HMAC(salt_key, base) — the keyed dual-PRF combiner form.
 pub const CKF_HKDF_SALT_KEY: u32 = 0x0000_0004;
+// PKCS#11 v3.2 §6.62.2 — "no salt is supplied". Used only to validate
+// ulSaltType when bExtract is true (§6.62.3); the derive itself already
+// treats any non-DATA/non-KEY value as "no salt" by construction.
+pub const CKF_HKDF_SALT_NULL: u32 = 0x0000_0001;
 
 // ML-DSA pre-hash mechanisms (PKCS#11 v3.2, pkcs11t.h §1221-1231)
 pub const CKM_HASH_ML_DSA_SHA224: u32 = 0x0000_0023;
@@ -836,6 +846,7 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     // Key derivation
     CKM_PKCS5_PBKD2,
     CKM_HKDF_DERIVE,
+    CKM_HKDF_DATA,
     CKM_SP800_108_COUNTER_KDF,
     CKM_SP800_108_FEEDBACK_KDF,
     // Hybrid-KEM combiner building blocks — concatenate (key/data) + digest
