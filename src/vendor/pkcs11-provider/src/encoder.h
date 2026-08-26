@@ -41,6 +41,8 @@ extern const OSSL_DISPATCH p11prov_ec_encoder_priv_key_info_pem_functions[];
 extern const OSSL_DISPATCH
     p11prov_ec_edwards_encoder_priv_key_info_pem_functions[];
 extern const OSSL_DISPATCH p11prov_ec_edwards_encoder_text_functions[];
+extern const OSSL_DISPATCH
+    p11prov_montgomery_encoder_priv_key_info_pem_functions[];
 extern const OSSL_DISPATCH p11prov_mldsa_encoder_pkcs1_der_functions[];
 extern const OSSL_DISPATCH p11prov_mldsa_encoder_pkcs1_pem_functions[];
 extern const OSSL_DISPATCH p11prov_mldsa_encoder_spki_der_functions[];
@@ -48,6 +50,8 @@ extern const OSSL_DISPATCH p11prov_mldsa_encoder_spki_pem_functions[];
 extern const OSSL_DISPATCH p11prov_mldsa_encoder_priv_key_info_pem_functions[];
 extern const OSSL_DISPATCH p11prov_mldsa_encoder_text_functions[];
 extern const OSSL_DISPATCH p11prov_mlkem_encoder_priv_key_info_pem_functions[];
+extern const OSSL_DISPATCH p11prov_mlkem_encoder_spki_der_functions[];
+extern const OSSL_DISPATCH p11prov_mlkem_encoder_text_functions[];
 /* One shared table per format across all 12 SLH-DSA variants — the
  * encode functions dispatch on the key's own CKA_PARAMETER_SET at
  * runtime, same as ML-DSA's own encoder.c functions do. */

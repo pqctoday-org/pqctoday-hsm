@@ -749,6 +749,114 @@ Both engines' full test suites remain green (C++: 8/8 CTest suites; Rust:
 **Harness: `PASS=28 FAIL=0 XFAIL=0 XPASS=0`** — one case gained (T15),
 zero regressions, zero remaining known gaps.
 
+**Further update (2026-08-26, phase-3 execution continued) — R16
+(encoder-parity tier), DONE:** both leftovers from R3/R4 closed. Same
+"live-instrumentation-before-declaring-done" discipline as every other
+item in this phase surfaced a genuine correction to the plan's own
+premise for the first item below — reported honestly rather than
+folded silently into a "both closed" narrative.
+
+1. **ML-KEM SPKI + text encoders.** The plan described both as missing;
+   only the **text** encoder actually was. Checked live before writing
+   any code (the same discipline this session has used throughout):
+   `pkey -pubout` on a token ML-KEM key already produced a correct,
+   standards-shaped SubjectPublicKeyInfo PEM *before* any of this
+   item's code existed — some pre-existing, provider-agnostic path
+   (most plausibly OpenSSL's own generic `OSSL_ENCODER` SPKI builder,
+   driven off the keymgmt's `OSSL_PKEY_PARAM_PUB_KEY` export and the
+   NID the *default* provider already registers for the standardized
+   ML-KEM OIDs) already covered it — confirmed by fully reverting this
+   item's `encoder.c`/`encoder.h`/`provider.c` changes in a working
+   copy and re-running `pkey -pubout`: still exit 0, still a valid SPKI
+   PEM. `-text`, in the same revert, failed outright (exit 1, no
+   output) — that half was the one genuine gap. Added both anyway,
+   modeled directly on ML-DSA's own SPKI-DER + text encoder pair (same
+   `X509_PUBKEY`-construction helper shape, same NID switch on
+   `CKA_PARAMETER_SET`) — the SPKI encoder is kept as parity/hardening
+   with the rest of this provider's key types, consistent with how
+   every other asymmetric type here has one, but is reported at its
+   true confidence: not independently proven necessary, since the
+   pre-existing generic path already covers the case this harness
+   exercises. Sabotage-tested each half separately: breaking only the
+   text encoder's type check reproduces the exact `-text` failure and
+   only `T4x_spki` fails; restoring it fixes it again (the SPKI half
+   was not separately sabotage-tested, for the reason just given — a
+   broken SPKI encoder wouldn't currently be observable through this
+   harness's own assertions since the generic path would still answer).
+   New case **T4x_spki**: `-pubout` SPKI PEM round-trips through the
+   pure software provider (`OPENSSL_CONF=/dev/null`, no pkcs11 active
+   at all — proving the DER structure is standards-correct, not merely
+   readable by this provider's own decoder), plus `-text` renders both
+   the private-key placeholder line and, on a public-key object, the
+   decoded key bytes.
+2. **X25519/X448 URI-PEM private-key encoders.** Genuinely missing, as
+   the plan stated: `genpkey -out` for a montgomery token key
+   previously reported `Error writing key(s)` (the key generated and
+   persisted on-token fine as a side effect, but the write-to-file step
+   had nothing registered to call) — the same gap class ML-KEM had
+   before R3. Added `p11prov_montgomery_encoder_priv_key_info_pem_functions`,
+   modeled directly on Ed25519/Ed448's own `ec_edwards` encoder (a
+   distinct PKCS#11 key type, `CKK_EC_MONTGOMERY` vs `CKK_EC_EDWARDS`,
+   sharing the same generic `p11prov_encoder_private_key_write_pem`
+   helper everything else in this file uses — PEM-wraps a `pkcs11:` URI,
+   never touches the private key bytes). **T16/T16b re-gated on the
+   `genpkey` exit code** and now assert the URI label + absence of any
+   `PRIVATE KEY` block, exactly like `T4x_encode`, replacing the
+   previous exit-code-suppressed workaround. Sabotage-tested: reverting
+   the key-type constant to `CKK_EC_EDWARDS` in a working copy makes
+   both T16 and T16b fail on their new `genpkey` gate (they share one
+   encoder function) while T4x_spki and T7 (Ed25519, the *other*
+   encoder) stay green; restoring it fixes both again.
+
+Both engines' full test suites remain green (C++: 8/8 CTest suites;
+Rust: unaffected by this item — pkcs11-provider changes are C-side
+only, backend-agnostic to which engine sits underneath). **Harness:
+`PASS=29 FAIL=0 XFAIL=0 XPASS=0`** — one case gained (T4x_spki), zero
+regressions, zero remaining known gaps.
+
+**Further update (2026-08-26, phase-3 execution continued) — R17
+(montgomery software-peer interop), INVESTIGATED, no code change
+needed:** the plan's own investigate-first framing turned out to be
+exactly the right call — the described gap does not reproduce.
+
+The plan recorded a real, specific failure: a token X25519/X448 key
+deriving against a genuinely foreign (default-provider-only, no
+`pkcs11:` URI) software peer key, via `OSSL_PARAM_get_BN "param of
+incompatible type"` from a legacy `EC_KEY`-control translation path
+that assumes Weierstrass X/Y `BIGNUM` coordinates montgomery keys
+don't have. Reproduced the exact shape the plan describes — before
+writing any fix — at two separate points to rule out this session's
+own R16 work being an accidental cause: the current tree (R16's
+montgomery URI-PEM encoder in place) and a working copy fully reverted
+to the R15-only baseline (R16's encoder code completely absent, tested
+by temporarily discarding `encoder.c`/`encoder.h`/`provider.c` and
+rebuilding). **Both derive cleanly in both directions, both curves**:
+token-private-key-derives-against-software-peer and the reverse
+pairing (software-private-key-derives-against-token peer), X25519
+(32-byte secret) and X448 (56-byte secret), secrets equal across the
+pairing in every case. Since it doesn't reproduce even without R16's
+changes, R16 isn't what closed it; most plausibly R4 (this provider's
+original X25519/X448 keyexch work, landed in phase 2, before this
+session) already fixed it as a side effect of its own implementation,
+and the phase-3 plan's written finding — carried forward from an
+earlier observation — simply predates that landing without being
+re-verified against the final, landed R4 code. Not a case of "looked
+but couldn't find it": the exact reproduction shape from the plan was
+run, twice, at two different points in this session's own history, and
+came back clean both times.
+
+No product code was touched for this item. Two new harness cases,
+**T17** and **T17b**, exist so this is a permanent, checked assertion
+rather than a one-off CLI transcript that could silently bit-rot:
+token key generated via the provider, independent software key
+generated via the plain default provider, `pkeyutl -derive` run in
+both directions, non-empty-and-correct-size guard on both outputs (the
+same lesson phase 2 already learned the hard way), `cmp` for equality.
+Harness: **`PASS=31 FAIL=0 XFAIL=0 XPASS=0`** — two cases gained
+(T17, T17b), zero regressions. **This closes the entire R12→R17
+phase-3 remediation plan — zero remaining known gaps of any kind in
+this harness.**
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:

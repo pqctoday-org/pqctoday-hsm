@@ -1476,6 +1476,26 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
     ADD_ALGO_EXT(ML_DSA_87, encoder,
                  DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
                  p11prov_mldsa_encoder_spki_der_functions);
+    /* ML-KEM SPKI + text encoders (remediation R16) — one shared
+     * function/table across all 3 parameter sets, same as ML-DSA's block
+     * above; unconditional (not gated behind encode_pkey_as_pk11_uri,
+     * unlike the priv_key_info block further down), since encoding the
+     * PUBLIC key never touches private key material either way. */
+    ADD_ALGO_EXT(ML_KEM_512, encoder, DEFAULT_PROPERTY(",output=text"),
+                 p11prov_mlkem_encoder_text_functions);
+    ADD_ALGO_EXT(ML_KEM_512, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_mlkem_encoder_spki_der_functions);
+    ADD_ALGO_EXT(ML_KEM_768, encoder, DEFAULT_PROPERTY(",output=text"),
+                 p11prov_mlkem_encoder_text_functions);
+    ADD_ALGO_EXT(ML_KEM_768, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_mlkem_encoder_spki_der_functions);
+    ADD_ALGO_EXT(ML_KEM_1024, encoder, DEFAULT_PROPERTY(",output=text"),
+                 p11prov_mlkem_encoder_text_functions);
+    ADD_ALGO_EXT(ML_KEM_1024, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_mlkem_encoder_spki_der_functions);
 #define SLHDSA_ENCODER_TEXT_SPKI(NAME) \
     ADD_ALGO_EXT(NAME, encoder, DEFAULT_PROPERTY(",output=text"), \
                  p11prov_slhdsa_encoder_text_functions); \
@@ -1532,6 +1552,14 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
         ADD_ALGO_EXT(ED448, encoder,
                      DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
                      p11prov_ec_edwards_encoder_priv_key_info_pem_functions);
+        /* X25519/X448 (remediation R16) — same shared-table pattern as
+         * Ed25519/Ed448 just above. */
+        ADD_ALGO_EXT(X25519, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_montgomery_encoder_priv_key_info_pem_functions);
+        ADD_ALGO_EXT(X448, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_montgomery_encoder_priv_key_info_pem_functions);
         ADD_ALGO_EXT(ML_DSA_44, encoder,
                      DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
                      p11prov_mldsa_encoder_priv_key_info_pem_functions);

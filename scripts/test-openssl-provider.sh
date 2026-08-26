@@ -230,6 +230,23 @@ t4x_encode() { local w; w=$(mk_arena mlkemenc "$CPP_ENGINE_SO") && use_arena "$w
 }
 run_case T4x_encode PASS "ML-KEM genpkey -out writes a pkcs11: URI reference, never key bytes (gap OP-3 / remediation R3 core)" t4x_encode
 
+# ML-KEM SPKI + text encoders (remediation R16 encoder-parity tier): public
+# key PEM output and -text rendering, matching what ML-DSA already had.
+# Proof per the plan: pkey -pubout and -text on a token ML-KEM key; round-
+# trip the SPKI through the software provider (OPENSSL_CONF=/dev/null, no
+# pkcs11 active at all) to prove the DER structure is standards-correct,
+# not just readable by this provider's own decoder.
+t4x_spki() { local w; w=$(mk_arena mlkemspki "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm ML-KEM-768 -out "$w/k.pem" || return 1
+  O pkey -in "pkcs11:token=mlkemspki;type=private" -pubout -out "$w/pub.pem" || return 1
+  grep -q "BEGIN PUBLIC KEY" "$w/pub.pem" || { echo "no SPKI PEM written"; return 1; }
+  OPENSSL_CONF=/dev/null O pkey -pubin -in "$w/pub.pem" -text -noout \
+    | grep -q "ML-KEM-768 Public-Key" || { echo "software provider couldn't read the SPKI"; return 1; }
+  O pkey -in "pkcs11:token=mlkemspki;type=private" -text -noout \
+    | grep -q "PKCS11 ML-KEM-768 Private Key" || { echo "private-key -text rendering missing"; return 1; }
+}
+run_case T4x_spki PASS "ML-KEM -pubout SPKI PEM round-trips through the software provider + -text renders both key halves (remediation R16)" t4x_spki
+
 # R5 prerequisites (gap F36-1, TLS groups — client role): exports the
 # public share from the PRIVATE object TLS actually holds after ephemeral
 # keygen (was: strictly required class==CKO_PUBLIC_KEY, refusing this;
@@ -307,23 +324,24 @@ run_case T8 PASS "ECDH P-256 token derive == software derive" t8
 # -peerkey <software-peer>.pem" shape works for EC but fails for X25519
 # with "OSSL_PARAM_get_BN: param of incompatible type", even though the
 # provider's own derive mechanism is fully correct (proven here). Left
-# open, not silently dropped — see the remediation plan's R4 entry.
+# open, not silently dropped — see the remediation plan's R17 entry.
 #
-# genpkey's own exit code is deliberately NOT gating these arenas' keygen
-# step, same reason as T4x (R3b): mk_arena sets
-# pkcs11-module-encode-provider-uri-to-pem=true, and X25519/X448 have no
-# encoder registered (same still-open gap class as ML-KEM's pre-R3 state)
-# — so genpkey reports "Error writing key(s)" even though the key
-# generates and persists on-token fine as a side effect. The subsequent
-# pubkey-export and derive steps are the real, authoritative proof.
+# genpkey's own exit code now GATES these arenas' keygen step (remediation
+# R16 core: X25519/X448 previously had no URI-PEM encoder at all — same
+# gap class ML-KEM had pre-R3 — so genpkey reported "Error writing
+# key(s)" even though the key generated and persisted on-token fine as a
+# side effect; that's why this used to swallow the exit code). Also
+# asserts the URI label + no PRIVATE KEY block, same as T4x_encode.
 t16() {
   local wa wb
   wa=$(mk_arena x25519a "$CPP_ENGINE_SO") || return 1
   wb=$(mk_arena x25519b "$CPP_ENGINE_SO") || return 1
   SOFTHSM2_CONF="$wa/softhsm2.conf" OPENSSL_CONF="$wa/openssl.cnf" \
-    O genpkey -propquery "?provider=pkcs11" -algorithm X25519 -out "$wa/ka.pem" >/dev/null 2>&1
+    O genpkey -propquery "?provider=pkcs11" -algorithm X25519 -out "$wa/ka.pem" || return 1
   SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
-    O genpkey -propquery "?provider=pkcs11" -algorithm X25519 -out "$wb/kb.pem" >/dev/null 2>&1
+    O genpkey -propquery "?provider=pkcs11" -algorithm X25519 -out "$wb/kb.pem" || return 1
+  grep -q "PKCS#11 PROVIDER URI" "$wa/ka.pem" || { echo "no URI-PEM written"; return 1; }
+  grep -q "PRIVATE KEY" "$wa/ka.pem" && { echo "raw private key material written — must never happen"; return 1; }
   SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
     O pkey -in "pkcs11:token=x25519b;type=public" -pubin -pubout -out "$wb/kbpub.pem" || return 1
   SOFTHSM2_CONF="$wa/softhsm2.conf" OPENSSL_CONF="$wa/openssl.cnf" \
@@ -335,16 +353,18 @@ t16() {
   [[ "$(stat -c%s "$wa/secretA.bin")" == "32" && "$(stat -c%s "$wb/secretB.bin")" == "32" ]] || { echo "wrong secret size"; return 1; }
   cmp -s "$wa/secretA.bin" "$wb/secretB.bin"
 }
-run_case T16 PASS "X25519 token-to-token derive parity, 32-byte secret (gap ALG-5 / remediation R4)" t16
+run_case T16 PASS "X25519 token-to-token derive parity, 32-byte secret (gap ALG-5 / remediation R4); genpkey URI-PEM encoder gated on exit code (remediation R16)" t16
 
 t16b() {
   local wa wb
   wa=$(mk_arena x448a "$CPP_ENGINE_SO") || return 1
   wb=$(mk_arena x448b "$CPP_ENGINE_SO") || return 1
   SOFTHSM2_CONF="$wa/softhsm2.conf" OPENSSL_CONF="$wa/openssl.cnf" \
-    O genpkey -propquery "?provider=pkcs11" -algorithm X448 -out "$wa/ka.pem" >/dev/null 2>&1
+    O genpkey -propquery "?provider=pkcs11" -algorithm X448 -out "$wa/ka.pem" || return 1
   SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
-    O genpkey -propquery "?provider=pkcs11" -algorithm X448 -out "$wb/kb.pem" >/dev/null 2>&1
+    O genpkey -propquery "?provider=pkcs11" -algorithm X448 -out "$wb/kb.pem" || return 1
+  grep -q "PKCS#11 PROVIDER URI" "$wa/ka.pem" || { echo "no URI-PEM written"; return 1; }
+  grep -q "PRIVATE KEY" "$wa/ka.pem" && { echo "raw private key material written — must never happen"; return 1; }
   SOFTHSM2_CONF="$wb/softhsm2.conf" OPENSSL_CONF="$wb/openssl.cnf" \
     O pkey -in "pkcs11:token=x448b;type=public" -pubin -pubout -out "$wb/kbpub.pem" || return 1
   SOFTHSM2_CONF="$wa/softhsm2.conf" OPENSSL_CONF="$wa/openssl.cnf" \
@@ -356,7 +376,47 @@ t16b() {
   [[ "$(stat -c%s "$wa/secretA.bin")" == "56" && "$(stat -c%s "$wb/secretB.bin")" == "56" ]] || { echo "wrong secret size"; return 1; }
   cmp -s "$wa/secretA.bin" "$wb/secretB.bin"
 }
-run_case T16b PASS "X448 token-to-token derive parity, 56-byte secret (gap ALG-5 / remediation R4)" t16b
+run_case T16b PASS "X448 token-to-token derive parity, 56-byte secret (gap ALG-5 / remediation R4); genpkey URI-PEM encoder gated on exit code (remediation R16)" t16b
+
+# R17 (montgomery software-peer interop, investigate-first in the phase-3
+# plan): T16/T16b are deliberately token-to-token, not software-peer,
+# because the plan recorded a real, separately-observed failure deriving
+# a montgomery token key against a genuinely foreign (default-provider-
+# only) peer key — OSSL_PARAM_get_BN "param of incompatible type" from a
+# legacy EC_KEY-control path assuming Weierstrass X/Y coordinates. Traced
+# live before writing this case: that failure does NOT reproduce, in
+# either curve or either direction, checked at two points — the current
+# tree (with R16's montgomery URI-PEM encoder in place) and a working
+# copy reverted to the R15-only baseline (R16's encoder code fully
+# absent). Since it doesn't reproduce even without R16's changes, R16
+# isn't what fixed it; most plausibly R4 (this provider's original
+# X25519/X448 keyexch work, landed before this session) already closed
+# it as a side effect and the plan's own written finding simply predates
+# that landing. No code change was needed for R17 — this case exists so
+# that fact is a permanent, checked assertion instead of a one-off CLI
+# transcript, per this project's own "proof means a harness case, not a
+# transcript" standard.
+r17_case() { # $1 = X25519|X448, $2 = expected secret size
+  local alg="$1" size="$2" w
+  w=$(mk_arena "r17${alg}" "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm "$alg" -out "$w/tok.pem" || return 1
+  OPENSSL_CONF=/dev/null O genpkey -algorithm "$alg" -out "$w/sw.pem" || return 1
+  OPENSSL_CONF=/dev/null O pkey -in "$w/sw.pem" -pubout -out "$w/sw_pub.pem" || return 1
+  O pkey -in "pkcs11:token=r17${alg};type=public" -pubin -pubout -out "$w/tok_pub.pem" || return 1
+  # token derives against the software peer
+  O pkeyutl -derive -inkey "pkcs11:token=r17${alg};type=private" \
+    -peerkey "$w/sw_pub.pem" -out "$w/secret_tok.bin" || return 1
+  # the reverse pairing: software derives against the token's public key
+  OPENSSL_CONF=/dev/null O pkeyutl -derive -inkey "$w/sw.pem" \
+    -peerkey "$w/tok_pub.pem" -out "$w/secret_sw.bin" || return 1
+  [[ "$(stat -c%s "$w/secret_tok.bin")" == "$size" && "$(stat -c%s "$w/secret_sw.bin")" == "$size" ]] \
+    || { echo "wrong secret size"; return 1; }
+  cmp -s "$w/secret_tok.bin" "$w/secret_sw.bin"
+}
+r17() { r17_case X25519 32; }
+run_case T17 PASS "X25519 token<->software-peer derive interop, both directions, 32-byte secret (remediation R17 — investigated, does not reproduce, no code change needed)" r17
+r17b() { r17_case X448 56; }
+run_case T17b PASS "X448 token<->software-peer derive interop, both directions, 56-byte secret (remediation R17 — investigated, does not reproduce, no code change needed)" r17b
 
 # WART-4 root cause (confirmed live, not guessed): p11prov_query_operation()
 # returns ctx->op_digest/op_kdf/op_random/op_exchange/op_signature/

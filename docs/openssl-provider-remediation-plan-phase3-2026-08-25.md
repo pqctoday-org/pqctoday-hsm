@@ -1,26 +1,38 @@
-# OpenSSL provider remediation plan, phase 3 (2026-08-25) — R12/R13/R14/R15 EXECUTED, R16-R17 still plan-only
+# OpenSSL provider remediation plan, phase 3 (2026-08-25) — R12-R17 ALL EXECUTED, plan CLOSED
 
-**Execution update (2026-08-25/26):** R12, R13, R14, and R15 have been
-executed and landed — see
+**Execution update (2026-08-25/26):** R12 through R17 — the entire
+phase-3 plan — have been executed. See
 `docs/openssl-provider-coverage-audit-2026-08-25.md` §6's "R12 (TLS13-
 KDF root cause + fix) and R13", "R14 (Rust `C_GetSlotList` root
-cause + fix)", and "R15 (fully token-backed TLS server role)" entries
-for the full mechanism of each. R12's own written hypothesis (missing
-`CKM_HKDF_DATA` support) turned out to be only the first of four
-layered bugs, not the whole picture; R14's own written hypothesis
+cause + fix)", "R15 (fully token-backed TLS server role)", "R16
+(encoder-parity tier)", and "R17 (montgomery software-peer interop)"
+entries for the full mechanism of each. R12's own written hypothesis
+(missing `CKM_HKDF_DATA` support) turned out to be only the first of
+four layered bugs, not the whole picture; R14's own written hypothesis
 correctly named two candidate defects but did not know which one (or
 both) actually mattered until sabotage-testing settled it (one did, one
 didn't but was kept as a real hardening); R15's own written hypothesis
 (peer-share import into the ML-KEM keymgmt) named the real, largest gap
 but the actual mechanism turned out to be the generic `SET_PARAMS`
 dispatch, not keymgmt IMPORT, plus five more independent bugs surfaced
-only by getting further into a real handshake each time — the plan's
-own "confirm before fixing" rule is exactly why no wrong or incomplete
-first hypothesis shipped unverified. R12/R13/R14/R15's own sections
-below are left as originally written (the plan, not the result) per
-this project's append-only convention; do not edit them to match the
-outcome. **Harness: `PASS=28 FAIL=0 XFAIL=0 XPASS=0` — zero remaining
-known gaps.** R16–R17 remain plan-only, not executed.
+only by getting further into a real handshake each time; R16's own
+written premise ("ML-KEM SPKI + text encoders" both missing) was half
+wrong — SPKI already worked via a pre-existing generic path, confirmed
+by reverting the new code and re-testing before trusting the plan's own
+description — only the text encoder was a genuine gap; **R17's own
+"investigate-first" framing was fully vindicated** — the described
+peer-interop failure does not reproduce at all (checked at two separate
+points, including with R16's own new code fully absent, to rule out
+this session's work being the accidental cause), most plausibly already
+resolved by R4 in an earlier phase, and the item closed with zero
+product code changes — only permanent harness proof that it stays
+closed. The plan's own "confirm before fixing" rule is exactly why no
+wrong or incomplete first hypothesis or premise — including "this needs
+a fix at all" — shipped unverified. R12–R17's own sections below are
+left as originally written (the plan, not the result) per this
+project's append-only convention; do not edit them to match the
+outcome. **Harness: `PASS=31 FAIL=0 XFAIL=0 XPASS=0` — zero remaining
+known gaps. This closes the phase-3 plan in full.**
 
 Scope: the gaps that remain **after** the phase-2 execution run
 (commits `97420e8` R3-core, `1e6576b` R2, `493d354` R4, `183e775`
