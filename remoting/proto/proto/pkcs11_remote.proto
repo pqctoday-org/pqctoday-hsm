@@ -187,9 +187,30 @@ service Pkcs11Remote {
 // no parameter / NULL pParameter). The server rebuilds the native-width
 // struct; parameter STRUCTS (GCM params etc.) arrive as their native-layout
 // bytes in later workstreams — this slice's mechanisms are parameter-less.
+// `parameter` (raw bytes) and `structured` are mutually exclusive per
+// call — exactly one is meaningful; a caller with a structured param
+// shape should never also populate `parameter`. Adding a new variant
+// here (rather than a per-RPC oneof) is a single edit that reaches
+// every mechanism-taking RPC at once — G1's gap-remediation choice
+// (docs/remoting-pkcs11-v32-gap-remediation-plan-2026-08-26.md).
 message V32Mechanism {
   uint64 mechanism = 1;
   bytes parameter = 2;
+  oneof structured {
+    V32GcmParams gcm = 3;
+    V32OaepParams oaep = 4;
+  }
+}
+
+message V32GcmParams { // CK_GCM_PARAMS (v3.2 §6.27.7)
+  bytes iv = 1; // MUST be exactly 12 bytes (this engine's own requirement)
+  bytes aad = 2;
+  uint32 tag_bits = 3; // one of {0(=128), 32, 64, 96, 104, 112, 120, 128}
+}
+message V32OaepParams { // CK_RSA_PKCS_OAEP_PARAMS (v3.2 §6.4.4)
+  uint32 hash_alg = 1; // bare CKM_* hash code, e.g. CKM_SHA256
+  uint32 mgf = 2; // CKG_MGF1_* code, e.g. CKG_MGF1_SHA256
+  bytes source_data = 3; // the OAEP label; empty = no label (source left CKZ_DATA_SPECIFIED-implicit)
 }
 
 // Status-only response — the shape most C_* calls have.

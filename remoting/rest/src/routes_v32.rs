@@ -159,7 +159,8 @@ async fn seed_random(Json(r): Json<SeedRandomReq>) -> Json<StatusResp> {
     Json(v32::seed_random(r.session_handle, &r.seed).into())
 }
 async fn digest_init(Json(r): Json<MechanismSessionReq>) -> Json<StatusResp> {
-    Json(v32::digest_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::digest_init(r.session_handle, r.mechanism.mechanism, params.as_slice()).into())
 }
 async fn digest_update(Json(r): Json<DataReq>) -> Json<StatusResp> {
     Json(v32::digest_update(r.session_handle, &r.data).into())
@@ -168,10 +169,12 @@ async fn digest_final(Json(r): Json<DatalessSession>) -> Json<BytesResp> {
     Json(v32::digest_final(r.session_handle).into())
 }
 async fn digest(Json(r): Json<DigestReq>) -> Json<BytesResp> {
-    Json(v32::digest(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, &r.data).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::digest(r.session_handle, r.mechanism.mechanism, params.as_slice(), &r.data).into())
 }
 async fn sign_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
-    Json(v32::sign_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::sign_init(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.key_handle).into())
 }
 async fn sign(Json(r): Json<DataReq>) -> Json<BytesResp> {
     Json(v32::sign(r.session_handle, &r.data).into())
@@ -183,7 +186,8 @@ async fn sign_final(Json(r): Json<DatalessSession>) -> Json<BytesResp> {
     Json(v32::sign_final(r.session_handle).into())
 }
 async fn verify_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
-    Json(v32::verify_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::verify_init(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.key_handle).into())
 }
 async fn verify(Json(r): Json<VerifyReq>) -> Json<StatusResp> {
     Json(v32::verify(r.session_handle, &r.data, &r.signature).into())
@@ -206,16 +210,18 @@ async fn destroy_object(State(st): State<V32State>, Json(r): Json<ObjectReq>) ->
 
 async fn generate_key(Json(r): Json<GenerateKeyReq>) -> Json<ObjectHandleResp> {
     let template = tmpl_parts(&r.template);
-    Json(v32::generate_key(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, &template).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::generate_key(r.session_handle, r.mechanism.mechanism, params.as_slice(), &template).into())
 }
 async fn generate_key_pair(Json(r): Json<GenerateKeyPairReq>) -> Json<GenerateKeyPairResp> {
     let public_template = tmpl_parts(&r.public_key_template);
     let private_template = tmpl_parts(&r.private_key_template);
+    let params = mech_param_bytes(&r.mechanism);
     Json(
         v32::generate_key_pair(
             r.session_handle,
             r.mechanism.mechanism,
-            &r.mechanism.parameter,
+            params.as_slice(),
             &public_template,
             &private_template,
         )
@@ -255,7 +261,8 @@ async fn find_objects_final(Json(r): Json<DatalessSession>) -> Json<StatusResp> 
 }
 
 async fn encrypt_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
-    Json(v32::encrypt_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::encrypt_init(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.key_handle).into())
 }
 async fn encrypt(Json(r): Json<DataReq>) -> Json<BytesResp> {
     Json(v32::encrypt(r.session_handle, &r.data).into())
@@ -267,7 +274,8 @@ async fn encrypt_final(Json(r): Json<DatalessSession>) -> Json<BytesResp> {
     Json(v32::encrypt_final(r.session_handle).into())
 }
 async fn decrypt_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
-    Json(v32::decrypt_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::decrypt_init(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.key_handle).into())
 }
 async fn decrypt(Json(r): Json<DataReq>) -> Json<BytesResp> {
     Json(v32::decrypt(r.session_handle, &r.data).into())
@@ -346,23 +354,26 @@ async fn async_join(Json(r): Json<AsyncJoinReq>) -> Json<StatusResp> {
 }
 
 async fn sign_recover_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
-    Json(v32::sign_recover_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::sign_recover_init(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.key_handle).into())
 }
 async fn sign_recover(Json(r): Json<DataReq>) -> Json<BytesResp> {
     Json(v32::sign_recover(r.session_handle, &r.data).into())
 }
 async fn verify_recover_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
-    Json(v32::verify_recover_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::verify_recover_init(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.key_handle).into())
 }
 async fn verify_recover(Json(r): Json<SignatureReq>) -> Json<BytesResp> {
     Json(v32::verify_recover(r.session_handle, &r.signature).into())
 }
 async fn verify_signature_init(Json(r): Json<VerifySignatureInitReq>) -> Json<StatusResp> {
+    let params = mech_param_bytes(&r.mechanism);
     Json(
         v32::verify_signature_init(
             r.session_handle,
             r.mechanism.mechanism,
-            &r.mechanism.parameter,
+            params.as_slice(),
             r.key_handle,
             &r.signature,
         )
@@ -387,7 +398,8 @@ async fn decrypt_verify_update(Json(r): Json<DataReq>) -> Json<BytesResp> {
 }
 
 async fn message_sign_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
-    Json(v32::message_sign_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::message_sign_init(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.key_handle).into())
 }
 async fn sign_message(Json(r): Json<DataReq>) -> Json<BytesResp> {
     Json(v32::sign_message(r.session_handle, &r.data).into())
@@ -403,7 +415,8 @@ async fn sign_message_next(Json(r): Json<SignMessageNextReq>) -> Json<BytesResp>
 }
 
 async fn message_verify_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
-    Json(v32::message_verify_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::message_verify_init(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.key_handle).into())
 }
 async fn verify_message(Json(r): Json<VerifyReq>) -> Json<StatusResp> {
     Json(v32::verify_message(r.session_handle, &r.data, &r.signature).into())
@@ -420,7 +433,8 @@ async fn verify_message_next(Json(r): Json<VerifyMessageNextReq>) -> Json<Status
 }
 
 async fn message_encrypt_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
-    Json(v32::message_encrypt_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::message_encrypt_init(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.key_handle).into())
 }
 async fn encrypt_message(Json(r): Json<EncryptMessageReq>) -> Json<EncryptMessageResp> {
     Json(v32::encrypt_message(r.session_handle, &r.iv, r.iv_generator, &r.aad, &r.plaintext, r.tag_bits).into())
@@ -436,7 +450,8 @@ async fn encrypt_message_next(Json(r): Json<EncryptMessageNextReq>) -> Json<Encr
 }
 
 async fn message_decrypt_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
-    Json(v32::message_decrypt_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::message_decrypt_init(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.key_handle).into())
 }
 async fn decrypt_message(Json(r): Json<DecryptMessageReq>) -> Json<BytesResp> {
     Json(v32::decrypt_message(r.session_handle, &r.iv, &r.aad, &r.ciphertext, r.tag_bits, &r.tag).into())
@@ -452,30 +467,34 @@ async fn decrypt_message_next(Json(r): Json<DecryptMessageNextReq>) -> Json<Byte
 }
 
 async fn wrap_key(Json(r): Json<WrapKeyReq>) -> Json<BytesResp> {
-    Json(v32::wrap_key(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.wrapping_key_handle, r.key_handle).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::wrap_key(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.wrapping_key_handle, r.key_handle).into())
 }
 async fn unwrap_key(Json(r): Json<UnwrapKeyReq>) -> Json<ObjectHandleResp> {
     let template = tmpl_parts(&r.template);
+    let params = mech_param_bytes(&r.mechanism);
     Json(
-        v32::unwrap_key(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.unwrapping_key_handle, &r.wrapped_key, &template)
+        v32::unwrap_key(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.unwrapping_key_handle, &r.wrapped_key, &template)
             .into(),
     )
 }
 async fn wrap_key_authenticated(Json(r): Json<WrapKeyAuthenticatedReq>) -> Json<BytesResp> {
+    let params = mech_param_bytes(&r.mechanism);
     Json(
         v32::wrap_key_authenticated(
-            r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.wrapping_key_handle, r.key_handle, &r.associated_data,
+            r.session_handle, r.mechanism.mechanism, params.as_slice(), r.wrapping_key_handle, r.key_handle, &r.associated_data,
         )
         .into(),
     )
 }
 async fn unwrap_key_authenticated(Json(r): Json<UnwrapKeyAuthenticatedReq>) -> Json<ObjectHandleResp> {
     let template = tmpl_parts(&r.template);
+    let params = mech_param_bytes(&r.mechanism);
     Json(
         v32::unwrap_key_authenticated(
             r.session_handle,
             r.mechanism.mechanism,
-            &r.mechanism.parameter,
+            params.as_slice(),
             r.unwrapping_key_handle,
             &r.wrapped_key,
             &template,
@@ -483,6 +502,32 @@ async fn unwrap_key_authenticated(Json(r): Json<UnwrapKeyAuthenticatedReq>) -> J
         )
         .into(),
     )
+}
+
+/// G1 gap-remediation (docs/remoting-pkcs11-v32-gap-remediation-plan-
+/// 2026-08-26.md) — same ownership contract as `DeriveParamBytes` below:
+/// a `v32::StructBuilder`'s bytes embed raw pointers into its own `owned`
+/// buffers, so the builder itself must stay alive through the FFI call.
+enum MechParamBytes {
+    Raw(Vec<u8>),
+    Structured(v32::StructBuilder),
+}
+impl MechParamBytes {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            MechParamBytes::Raw(v) => v,
+            MechParamBytes::Structured(b) => b.as_slice(),
+        }
+    }
+}
+fn mech_param_bytes(m: &V32MechanismDto) -> MechParamBytes {
+    if let Some(p) = &m.gcm {
+        MechParamBytes::Structured(v32::cipher_params::gcm(&p.iv, &p.aad, p.tag_bits))
+    } else if let Some(p) = &m.oaep {
+        MechParamBytes::Structured(v32::cipher_params::oaep(p.hash_alg, p.mgf, &p.source_data))
+    } else {
+        MechParamBytes::Raw(m.parameter.clone())
+    }
 }
 
 /// Same ownership contract as the gRPC handler's `derive_mechanism_params`
@@ -529,12 +574,14 @@ async fn derive_key(Json(r): Json<DeriveKeyReq>) -> Json<ObjectHandleResp> {
 
 async fn encapsulate_key(Json(r): Json<EncapsulateKeyReq>) -> Json<EncapsulateKeyResp> {
     let template = tmpl_parts(&r.template);
-    Json(v32::encapsulate_key(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle, &template).into())
+    let params = mech_param_bytes(&r.mechanism);
+    Json(v32::encapsulate_key(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.key_handle, &template).into())
 }
 async fn decapsulate_key(Json(r): Json<DecapsulateKeyReq>) -> Json<ObjectHandleResp> {
     let template = tmpl_parts(&r.template);
+    let params = mech_param_bytes(&r.mechanism);
     Json(
-        v32::decapsulate_key(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.private_key_handle, &r.ciphertext, &template)
+        v32::decapsulate_key(r.session_handle, r.mechanism.mechanism, params.as_slice(), r.private_key_handle, &r.ciphertext, &template)
             .into(),
     )
 }

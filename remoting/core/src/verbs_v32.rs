@@ -1508,6 +1508,48 @@ pub mod derive_params {
     }
 }
 
+/// G1 gap-remediation RW-P builders: `CK_GCM_PARAMS` and
+/// `CK_RSA_PKCS_OAEP_PARAMS`, the two structured cipher-parameter shapes
+/// closing AuthWrap's and GapRsaCipher's remaining functional gaps. Same
+/// `StructBuilder` discipline as `derive_params` — every function here
+/// returns the whole builder, never just its bytes.
+pub mod cipher_params {
+    use super::{ck_param, StructBuilder};
+
+    /// `CK_GCM_PARAMS` (v3.2 §6.27.7). `iv` MUST be exactly 12 bytes —
+    /// this engine's own requirement (`ffi::C_EncryptInit`'s CKM_AES_GCM
+    /// arm rejects any other length with CKR_MECHANISM_PARAM_INVALID).
+    /// `ul_iv_bits` is always written 0 (means "unchecked" — the engine
+    /// only rejects a NONZERO value that disagrees with `iv.len()*8`, so
+    /// leaving it 0 is always accepted and carries no information the
+    /// wire needs to send separately). `tag_bits`: one of
+    /// `{0(=128), 32, 64, 96, 104, 112, 120, 128}`.
+    pub fn gcm(iv: &[u8], aad: &[u8], tag_bits: u32) -> StructBuilder {
+        let mut b = StructBuilder::new(ck_param::gcm::LAYOUT.fields);
+        b.set_buf_pair(ck_param::gcm::P_IV, ck_param::gcm::UL_IV_LEN, iv);
+        b.set_ulong(ck_param::gcm::UL_IV_BITS, 0);
+        b.set_buf_pair(ck_param::gcm::P_AAD, ck_param::gcm::UL_AAD_LEN, aad);
+        b.set_ulong(ck_param::gcm::UL_TAG_BITS, tag_bits as usize);
+        b
+    }
+
+    /// `CK_RSA_PKCS_OAEP_PARAMS` (v3.2 §6.4.4). `source_data` is the OAEP
+    /// label; when non-empty, `source` MUST be `CKZ_DATA_SPECIFIED = 1`
+    /// (the engine's own `parse_oaep_params` rejects any other value with
+    /// a non-empty label) — always written that way here since an empty
+    /// label with a different `source` code has no meaningful
+    /// interpretation this engine implements.
+    pub fn oaep(hash_alg: u32, mgf: u32, source_data: &[u8]) -> StructBuilder {
+        const CKZ_DATA_SPECIFIED: usize = 1;
+        let mut b = StructBuilder::new(ck_param::oaep::LAYOUT.fields);
+        b.set_ulong(ck_param::oaep::HASH_ALG, hash_alg as usize);
+        b.set_ulong(ck_param::oaep::MGF, mgf as usize);
+        b.set_ulong(ck_param::oaep::SOURCE, CKZ_DATA_SPECIFIED);
+        b.set_buf_pair(ck_param::oaep::P_SOURCE_DATA, ck_param::oaep::UL_SOURCE_DATA_LEN, source_data);
+        b
+    }
+}
+
 // ── KEM key-object form (RW5 slice) ──────────────────────────────────────
 // Native-width audited: both entry points already exist with the full
 // v3.2 key-object-form signatures (confirmed in the plan's F1 finding).
@@ -2809,6 +2851,184 @@ mod tests {
             combined_a_attrs[0].value, combined_b_attrs[0].value,
             "the hybrid composition (ECDH-as-KEM ‖ ML-KEM, concatenated) must agree on both sides — the real property under test, not either half alone"
         );
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn aes_gcm_encrypt_decrypt_round_trip_and_tag_tamper_rejected() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let key_template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_ENCRYPT), true),
+            attr_bool(u64::from(ck::CKA_DECRYPT), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &key_template);
+        assert_eq!(rv, 0);
+
+        let iv = vec![0x07u8; 12];
+        let aad = b"gcm-aad";
+        let plaintext = b"AES-GCM one-shot round trip via the G1 RW-P builder";
+        let params = cipher_params::gcm(&iv, aad, 128);
+
+        assert_eq!(encrypt_init(session, u64::from(ck::CKM_AES_GCM), params.as_slice(), key), 0);
+        let (rv, ciphertext) = encrypt(session, plaintext);
+        assert_eq!(rv, 0);
+        // GCM's ciphertext output includes the appended tag (16 bytes for
+        // tag_bits=128) per this engine's one-shot Encrypt/Decrypt convention.
+        assert_eq!(ciphertext.len(), plaintext.len() + 16);
+
+        let dparams = cipher_params::gcm(&iv, aad, 128);
+        assert_eq!(decrypt_init(session, u64::from(ck::CKM_AES_GCM), dparams.as_slice(), key), 0);
+        let (rv, recovered) = decrypt(session, &ciphertext);
+        assert_eq!(rv, 0);
+        assert_eq!(recovered, plaintext);
+
+        // A tampered tag must be rejected — the FSM form too.
+        let mut bad_ct = ciphertext.clone();
+        let last = bad_ct.len() - 1;
+        bad_ct[last] ^= 0xFF;
+        let dparams2 = cipher_params::gcm(&iv, aad, 128);
+        assert_eq!(decrypt_init(session, u64::from(ck::CKM_AES_GCM), dparams2.as_slice(), key), 0);
+        let (rv, _) = decrypt(session, &bad_ct);
+        assert_ne!(rv, 0, "a tampered GCM tag must be rejected, not silently decrypted");
+
+        // Encrypt/Decrypt FSM (Init/Update/Final) must match the one-shot.
+        let eparams3 = cipher_params::gcm(&iv, aad, 128);
+        assert_eq!(encrypt_init(session, u64::from(ck::CKM_AES_GCM), eparams3.as_slice(), key), 0);
+        let (rv, part1) = encrypt_update(session, &plaintext[..20]);
+        assert_eq!(rv, 0);
+        let (rv, part2) = encrypt_update(session, &plaintext[20..]);
+        assert_eq!(rv, 0);
+        let (rv, part3) = encrypt_final(session);
+        assert_eq!(rv, 0);
+        let mut fsm_ct = part1;
+        fsm_ct.extend_from_slice(&part2);
+        fsm_ct.extend_from_slice(&part3);
+        assert_eq!(fsm_ct, ciphertext, "FSM ciphertext must equal the one-shot ciphertext byte-for-byte (same key/iv/aad/plaintext)");
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn rsa_oaep_encrypt_decrypt_round_trip_and_mgf_changes_ciphertext() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+
+        const CKM_RSA_PKCS_KEY_PAIR_GEN: u64 = 0x0000_0000;
+        const CKM_RSA_PKCS_OAEP: u64 = 0x0000_0009;
+        const CKA_MODULUS_BITS: u64 = 0x0000_0121;
+        const CKK_RSA: u32 = 0x0000_0000;
+        const CKG_MGF1_SHA256: u32 = 0x0000_0002;
+        const CKM_SHA256: u32 = 0x0000_0250;
+
+        let public_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), CKK_RSA),
+            attr_ulong(CKA_MODULUS_BITS, 2048),
+            attr_bool(u64::from(ck::CKA_ENCRYPT), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let private_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), CKK_RSA),
+            attr_bool(u64::from(ck::CKA_DECRYPT), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, pub_h, prv_h) = generate_key_pair(session, CKM_RSA_PKCS_KEY_PAIR_GEN, &[], &public_tmpl, &private_tmpl);
+        assert_eq!(rv, 0, "RSA-2048 keygen must succeed — a prerequisite for testing OAEP at all");
+
+        let plaintext = b"RSA-OAEP round trip via the G1 RW-P builder";
+        let params = cipher_params::oaep(CKM_SHA256, CKG_MGF1_SHA256, b"");
+        assert_eq!(encrypt_init(session, CKM_RSA_PKCS_OAEP, params.as_slice(), pub_h), 0);
+        let (rv, ciphertext) = encrypt(session, plaintext);
+        assert_eq!(rv, 0);
+
+        let dparams = cipher_params::oaep(CKM_SHA256, CKG_MGF1_SHA256, b"");
+        assert_eq!(decrypt_init(session, CKM_RSA_PKCS_OAEP, dparams.as_slice(), prv_h), 0);
+        let (rv, recovered) = decrypt(session, &ciphertext);
+        assert_eq!(rv, 0);
+        assert_eq!(recovered, plaintext);
+
+        // OAEP is randomized (fresh seed per call) — encrypting the SAME
+        // plaintext twice under the SAME params must NOT reproduce the
+        // same ciphertext bytes (a real property of OAEP, not incidental).
+        let params2 = cipher_params::oaep(CKM_SHA256, CKG_MGF1_SHA256, b"");
+        assert_eq!(encrypt_init(session, CKM_RSA_PKCS_OAEP, params2.as_slice(), pub_h), 0);
+        let (rv, ciphertext2) = encrypt(session, plaintext);
+        assert_eq!(rv, 0);
+        assert_ne!(ciphertext, ciphertext2, "OAEP re-randomizes its seed every call");
+        let dparams2 = cipher_params::oaep(CKM_SHA256, CKG_MGF1_SHA256, b"");
+        assert_eq!(decrypt_init(session, CKM_RSA_PKCS_OAEP, dparams2.as_slice(), prv_h), 0);
+        let (rv, recovered2) = decrypt(session, &ciphertext2);
+        assert_eq!(rv, 0);
+        assert_eq!(recovered2, plaintext, "both independently-randomized ciphertexts must still decrypt to the same plaintext");
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn aes_gcm_authenticated_wrap_unwrap_round_trip_and_aad_tamper_rejected() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+
+        let wrapping_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_WRAP), true),
+            attr_bool(u64::from(ck::CKA_UNWRAP), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, wrapping_key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &wrapping_tmpl);
+        assert_eq!(rv, 0);
+
+        let target_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 16),
+            attr_bool(u64::from(ck::CKA_EXTRACTABLE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, target_key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &target_tmpl);
+        assert_eq!(rv, 0);
+        let (rv_orig, orig_attrs) = get_attribute_value(session, target_key, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv_orig, 0);
+
+        let iv = vec![0x0Cu8; 12];
+        let aad = b"auth-wrap-aad";
+        let params = cipher_params::gcm(&iv, aad, 128);
+        let (rv, wrapped) = wrap_key_authenticated(session, u64::from(ck::CKM_AES_GCM), params.as_slice(), wrapping_key, target_key, aad);
+        assert_eq!(rv, 0, "the compliance suite's own NIST_SP800_38D_KAT check — the positive path RW4 scoped out");
+        assert!(!wrapped.is_empty());
+
+        let unwrap_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_bool(u64::from(ck::CKA_EXTRACTABLE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let dparams = cipher_params::gcm(&iv, aad, 128);
+        let (rv, unwrapped_key) = unwrap_key_authenticated(session, u64::from(ck::CKM_AES_GCM), dparams.as_slice(), wrapping_key, &wrapped, &unwrap_tmpl, aad);
+        assert_eq!(rv, 0);
+        assert_ne!(unwrapped_key, 0);
+        let (rv_rt, rt_attrs) = get_attribute_value(session, unwrapped_key, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv_rt, 0);
+        assert_eq!(rt_attrs[0].value, orig_attrs[0].value, "unwrapped key material must equal the original — the real AuthWrap round-trip property");
+
+        // Tampering the AAD at unwrap time must be rejected — the whole
+        // point of "authenticated" wrap is that AAD is bound into the tag.
+        let bad_aad = b"different-aad";
+        let dparams2 = cipher_params::gcm(&iv, bad_aad, 128);
+        let (rv, _) = unwrap_key_authenticated(session, u64::from(ck::CKM_AES_GCM), dparams2.as_slice(), wrapping_key, &wrapped, &unwrap_tmpl, bad_aad);
+        assert_ne!(rv, 0, "mismatched AAD must be rejected, not silently unwrapped");
 
         close_session(session);
     }

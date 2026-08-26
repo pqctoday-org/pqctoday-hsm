@@ -77,6 +77,12 @@ const CKM_XMSS_KEY_PAIR_GEN: u64 = 0x0000_4034;
 const CKM_XMSS: u64 = 0x0000_4036;
 const CKM_HSS_KEY_PAIR_GEN: u64 = 0x0000_4032;
 const CKM_HSS: u64 = 0x0000_4033;
+// G1 gap-remediation additions.
+const CKM_RSA_PKCS_KEY_PAIR_GEN: u64 = 0x0000_0000;
+const CKM_RSA_PKCS_OAEP: u64 = 0x0000_0009;
+const CKA_MODULUS_BITS: u64 = 0x0000_0121;
+const CKK_RSA: u32 = 0x0000_0000;
+const CKG_MGF1_SHA256: u32 = 0x0000_0002;
 
 /// A ulong-valued template entry at native `CK_ULONG` width (8 bytes LE on
 /// this LP64 server) — the RW1 finding, applied on the wire's input side.
@@ -190,7 +196,7 @@ fn v2_digest_output_bytes_identical_all_transports() {
         let gd = g
             .c_digest(proto::V32DigestRequest {
                 session_handle: gs.session_handle,
-                mechanism: Some(proto::V32Mechanism { mechanism: CKM_SHA256, parameter: vec![] }),
+                mechanism: Some(proto::V32Mechanism { mechanism: CKM_SHA256, parameter: vec![], structured: None }),
                 data: data.to_vec(),
             })
             .await.unwrap().into_inner();
@@ -241,10 +247,10 @@ fn v3_ml_dsa_sign_verify_and_tamper_ckr_parity() {
         // gRPC: verify BOTH the good signature (ck_rv==good) and the tampered one (==bad)
         let mut g = spawn_grpc_v32().await.unwrap();
         let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
-        g.c_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![] }), key_handle: pub_h }).await.unwrap();
+        g.c_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![], structured: None }), key_handle: pub_h }).await.unwrap();
         let gg = g.c_verify(proto::V32VerifyRequest { session_handle: gs.session_handle, data: b"msg".to_vec(), signature: sig.clone() }).await.unwrap().into_inner();
         assert_eq!(gg.ck_rv, rv_good_ctl);
-        g.c_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![] }), key_handle: pub_h }).await.unwrap();
+        g.c_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![], structured: None }), key_handle: pub_h }).await.unwrap();
         let gb = g.c_verify(proto::V32VerifyRequest { session_handle: gs.session_handle, data: b"msg".to_vec(), signature: bad.clone() }).await.unwrap().into_inner();
         assert_eq!(gb.ck_rv, rv_bad_ctl, "gRPC tamper CKR must equal control's CKR_SIGNATURE_INVALID");
 
@@ -441,7 +447,7 @@ fn v7_generate_key_pair_template_parity() {
         ];
         let gg = g.c_generate_key_pair(proto::V32GenerateKeyPairRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA_KEY_PAIR_GEN, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA_KEY_PAIR_GEN, parameter: vec![], structured: None }),
             public_key_template: good_pub_p.clone(),
             private_key_template: good_prv_p,
         }).await.unwrap().into_inner();
@@ -456,7 +462,7 @@ fn v7_generate_key_pair_template_parity() {
         ];
         let gb = g.c_generate_key_pair(proto::V32GenerateKeyPairRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA_KEY_PAIR_GEN, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA_KEY_PAIR_GEN, parameter: vec![], structured: None }),
             public_key_template: good_pub_p,
             private_key_template: bad_prv_p,
         }).await.unwrap().into_inner();
@@ -630,7 +636,7 @@ fn v9_generate_key_and_set_attribute_value_parity() {
         let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
         let gk = g.c_generate_key(proto::V32GenerateKeyRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_KEY_GEN, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_KEY_GEN, parameter: vec![], structured: None }),
             template: vec![
                 ulong_attr_proto(CKA_CLASS, CKO_SECRET_KEY as u32),
                 ulong_attr_proto(CKA_KEY_TYPE, CKK_AES as u32),
@@ -711,7 +717,7 @@ fn v10_aes_ecb_encrypt_decrypt_kat_parity() {
         let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
         g.c_encrypt_init(proto::V32KeyedInitRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_ECB, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_ECB, parameter: vec![], structured: None }),
             key_handle: key,
         }).await.unwrap();
         let ge = g.c_encrypt(proto::V32DataRequest { session_handle: gs.session_handle, data: plaintext.clone() }).await.unwrap().into_inner();
@@ -719,7 +725,7 @@ fn v10_aes_ecb_encrypt_decrypt_kat_parity() {
         assert_eq!(ge.data, ciphertext_ctl, "gRPC AES-ECB ciphertext bytes must equal control (shared key)");
         g.c_decrypt_init(proto::V32KeyedInitRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_ECB, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_ECB, parameter: vec![], structured: None }),
             key_handle: key,
         }).await.unwrap();
         let gd = g.c_decrypt(proto::V32DataRequest { session_handle: gs.session_handle, data: ciphertext_ctl.clone() }).await.unwrap().into_inner();
@@ -914,7 +920,7 @@ fn v14_verify_signature_and_recover_reject_parity() {
         let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
         g.c_verify_signature_init(proto::V32VerifySignatureInitRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![], structured: None }),
             key_handle: pub_h,
             signature: sig.clone(),
         }).await.unwrap();
@@ -922,7 +928,7 @@ fn v14_verify_signature_and_recover_reject_parity() {
         assert_eq!(gvs.ck_rv, rv_vs_ctl);
         let gr = g.c_sign_recover_init(proto::V32KeyedInitRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![], structured: None }),
             key_handle: prv_h,
         }).await.unwrap().into_inner();
         assert_eq!(gr.ck_rv, rv_recover_ctl, "gRPC Sign/VerifyRecover on a non-RSA mechanism must equal control");
@@ -977,8 +983,8 @@ fn v15_dual_function_digest_encrypt_parity() {
         // gRPC — same key handle, shared bootstrap session `ks` stays open.
         let mut g = spawn_grpc_v32().await.unwrap();
         let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
-        g.c_digest_init(proto::V32MechanismSessionRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_SHA256, parameter: vec![] }) }).await.unwrap();
-        g.c_encrypt_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_ECB, parameter: vec![] }), key_handle: key }).await.unwrap();
+        g.c_digest_init(proto::V32MechanismSessionRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_SHA256, parameter: vec![], structured: None }) }).await.unwrap();
+        g.c_encrypt_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_ECB, parameter: vec![], structured: None }), key_handle: key }).await.unwrap();
         let gd = g.c_digest_encrypt_update(proto::V32DataRequest { session_handle: gs.session_handle, data: part.clone() }).await.unwrap().into_inner();
         assert_eq!(gd.ck_rv, rv_ctl);
         assert_eq!(gd.data, cipher_expected, "gRPC dual-function ciphertext must equal the separate-FSM oracle");
@@ -1027,15 +1033,15 @@ fn v16_message_sign_verify_one_shot_parity() {
 
         let mut g = spawn_grpc_v32().await.unwrap();
         let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
-        g.c_message_sign_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![] }), key_handle: prv_h }).await.unwrap();
+        g.c_message_sign_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![], structured: None }), key_handle: prv_h }).await.unwrap();
         let gsig = g.c_sign_message(proto::V32DataRequest { session_handle: gs.session_handle, data: b"v16 message".to_vec() }).await.unwrap().into_inner();
         assert_eq!(gsig.ck_rv, 0);
         g.c_message_sign_final(proto::V32SessionRequest { session_handle: gs.session_handle }).await.unwrap();
-        g.c_message_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![] }), key_handle: pub_h }).await.unwrap();
+        g.c_message_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![], structured: None }), key_handle: pub_h }).await.unwrap();
         let gg = g.c_verify_message(proto::V32VerifyRequest { session_handle: gs.session_handle, data: b"v16 message".to_vec(), signature: gsig.data.clone() }).await.unwrap().into_inner();
         assert_eq!(gg.ck_rv, rv_good_ctl);
         g.c_message_verify_final(proto::V32SessionRequest { session_handle: gs.session_handle }).await.unwrap();
-        g.c_message_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![] }), key_handle: pub_h }).await.unwrap();
+        g.c_message_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![], structured: None }), key_handle: pub_h }).await.unwrap();
         let gb = g.c_verify_message(proto::V32VerifyRequest { session_handle: gs.session_handle, data: b"v16 message".to_vec(), signature: bad.clone() }).await.unwrap().into_inner();
         assert_eq!(gb.ck_rv, rv_bad_ctl, "gRPC tamper CKR must equal control");
 
@@ -1096,7 +1102,7 @@ fn v17_message_encrypt_decrypt_kat_parity() {
         // gRPC — same key handle (shared bootstrap session `ks` stays open)
         let mut g = spawn_grpc_v32().await.unwrap();
         let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
-        g.c_message_encrypt_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_GCM, parameter: vec![] }), key_handle: key }).await.unwrap();
+        g.c_message_encrypt_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_GCM, parameter: vec![], structured: None }), key_handle: key }).await.unwrap();
         let ge = g.c_encrypt_message(proto::V32EncryptMessageRequest {
             session_handle: gs.session_handle, iv: iv.clone(), iv_generator: 0, aad: aad.clone(), plaintext: plaintext.clone(), tag_bits: 128,
         }).await.unwrap().into_inner();
@@ -1104,7 +1110,7 @@ fn v17_message_encrypt_decrypt_kat_parity() {
         assert_eq!(ge.ciphertext, ciphertext_ctl, "gRPC ciphertext must equal control");
         assert_eq!(ge.tag, tag_ctl, "gRPC tag must equal control");
         g.c_message_encrypt_final(proto::V32SessionRequest { session_handle: gs.session_handle }).await.unwrap();
-        g.c_message_decrypt_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_GCM, parameter: vec![] }), key_handle: key }).await.unwrap();
+        g.c_message_decrypt_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_GCM, parameter: vec![], structured: None }), key_handle: key }).await.unwrap();
         let gd = g.c_decrypt_message(proto::V32DecryptMessageRequest {
             session_handle: gs.session_handle, iv: iv.clone(), aad: aad.clone(), ciphertext: ciphertext_ctl.clone(), tag_bits: 128, tag: tag_ctl.clone(),
         }).await.unwrap().into_inner();
@@ -1194,7 +1200,7 @@ fn v18_aes_key_wrap_unwrap_parity() {
         let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
         let gw = g.c_wrap_key(proto::V32WrapKeyRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_KEY_WRAP, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_KEY_WRAP, parameter: vec![], structured: None }),
             wrapping_key_handle: wrapping_key,
             key_handle: target_key,
         }).await.unwrap().into_inner();
@@ -1202,7 +1208,7 @@ fn v18_aes_key_wrap_unwrap_parity() {
         assert_eq!(gw.data, wrapped_ctl, "gRPC wrapped bytes must equal control (same key material, same wrap)");
         let gu = g.c_unwrap_key(proto::V32UnwrapKeyRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_KEY_WRAP, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_KEY_WRAP, parameter: vec![], structured: None }),
             unwrapping_key_handle: wrapping_key,
             wrapped_key: wrapped_ctl.clone(),
             template: vec![
@@ -1216,7 +1222,7 @@ fn v18_aes_key_wrap_unwrap_parity() {
         assert_ne!(gu.object_handle, 0);
         let gn = g.c_wrap_key(proto::V32WrapKeyRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_KEY_WRAP, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_KEY_WRAP, parameter: vec![], structured: None }),
             wrapping_key_handle: wrapping_key,
             key_handle: locked_key,
         }).await.unwrap().into_inner();
@@ -1420,7 +1426,7 @@ fn v20_ml_kem_768_cross_transport_encapsulate_decapsulate() {
         let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
         let ge = g.c_encapsulate_key(proto::V32EncapsulateKeyRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_KEM, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_KEM, parameter: vec![], structured: None }),
             key_handle: pub_h,
             template: vec![],
         }).await.unwrap().into_inner();
@@ -1537,13 +1543,13 @@ fn v21_slh_dsa_xmss_hss_sign_verify_parity() {
             // so a fresh signature is the correct cross-transport check,
             // not byte-equality with the control's), verify parity both ways.
             let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
-            g.c_sign_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: cell.mechanism, parameter: vec![] }), key_handle: cell.private_key }).await.unwrap();
+            g.c_sign_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: cell.mechanism, parameter: vec![], structured: None }), key_handle: cell.private_key }).await.unwrap();
             let gsig = g.c_sign(proto::V32DataRequest { session_handle: gs.session_handle, data: msg.clone() }).await.unwrap().into_inner();
             assert_eq!(gsig.ck_rv, 0, "{}: gRPC sign", cell.name);
-            g.c_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: cell.mechanism, parameter: vec![] }), key_handle: cell.public_key }).await.unwrap();
+            g.c_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: cell.mechanism, parameter: vec![], structured: None }), key_handle: cell.public_key }).await.unwrap();
             let gg = g.c_verify(proto::V32VerifyRequest { session_handle: gs.session_handle, data: msg.clone(), signature: gsig.data }).await.unwrap().into_inner();
             assert_eq!(gg.ck_rv, rv_good_ctl, "{}: gRPC verify-good must match control", cell.name);
-            g.c_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: cell.mechanism, parameter: vec![] }), key_handle: cell.public_key }).await.unwrap();
+            g.c_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: cell.mechanism, parameter: vec![], structured: None }), key_handle: cell.public_key }).await.unwrap();
             let gb = g.c_verify(proto::V32VerifyRequest { session_handle: gs.session_handle, data: msg.clone(), signature: bad_sig.clone() }).await.unwrap().into_inner();
             assert_eq!(gb.ck_rv, rv_bad_ctl, "{}: gRPC verify-tamper must match control", cell.name);
 
@@ -1598,7 +1604,7 @@ fn v22_verify_signature_multipart_and_session_validation_flags_parity() {
         let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
         g.c_verify_signature_init(proto::V32VerifySignatureInitRequest {
             session_handle: gs.session_handle,
-            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![] }),
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![], structured: None }),
             key_handle: pub_h,
             signature: sig.clone(),
         }).await.unwrap();
@@ -1627,5 +1633,303 @@ fn v22_verify_signature_multipart_and_session_validation_flags_parity() {
         assert_eq!(rflags["flags"].as_u64().unwrap() as u32, flags_ctl);
 
         pqctoday_pkcs11_remote_core::verbs::close_session(fixture).ok();
+    });
+}
+
+// ── V23: AES-GCM one-shot via the structured V32GcmParams oneof (G1
+// gap-remediation) — shared key, KAT-grade ciphertext byte equality ────
+
+#[test]
+fn v23_aes_gcm_structured_params_kat_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let (_rv, ks) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        let key_template: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_AES as usize).to_le_bytes().to_vec()),
+            (CKA_VALUE_LEN, (32usize).to_le_bytes().to_vec()),
+            (CKA_ENCRYPT, vec![1u8]),
+            (CKA_DECRYPT, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let (rv_key, key) = v32::generate_key(ks, CKM_AES_KEY_GEN, &[], &key_template);
+        assert_eq!(rv_key, 0);
+
+        let iv = vec![0x11u8; 12];
+        let aad = b"v23-aad".to_vec();
+        let plaintext = b"v23 AES-GCM structured-oneof parity".to_vec();
+        let gcm_params = pqctoday_pkcs11_remote_core::verbs_v32::cipher_params::gcm(&iv, &aad, 128);
+
+        // control
+        assert_eq!(v32::encrypt_init(ks, CKM_AES_GCM, gcm_params.as_slice(), key), 0);
+        let (rv_ctl, ciphertext_ctl) = v32::encrypt(ks, &plaintext);
+        assert_eq!(rv_ctl, 0);
+        let gcm_dparams = pqctoday_pkcs11_remote_core::verbs_v32::cipher_params::gcm(&iv, &aad, 128);
+        assert_eq!(v32::decrypt_init(ks, CKM_AES_GCM, gcm_dparams.as_slice(), key), 0);
+        let (rv_dec_ctl, recovered_ctl) = v32::decrypt(ks, &ciphertext_ctl);
+        assert_eq!(rv_dec_ctl, 0);
+        assert_eq!(recovered_ctl, plaintext);
+
+        // gRPC — same key handle, GCM params sent via the structured oneof.
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        g.c_encrypt_init(proto::V32KeyedInitRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism {
+                mechanism: CKM_AES_GCM,
+                parameter: vec![],
+                structured: Some(proto::v32_mechanism::Structured::Gcm(proto::V32GcmParams { iv: iv.clone(), aad: aad.clone(), tag_bits: 128 })),
+            }),
+            key_handle: key,
+        }).await.unwrap();
+        let ge = g.c_encrypt(proto::V32DataRequest { session_handle: gs.session_handle, data: plaintext.clone() }).await.unwrap().into_inner();
+        assert_eq!(ge.ck_rv, rv_ctl);
+        assert_eq!(ge.data, ciphertext_ctl, "gRPC structured-GCM ciphertext must equal control byte-for-byte");
+        g.c_decrypt_init(proto::V32KeyedInitRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism {
+                mechanism: CKM_AES_GCM,
+                parameter: vec![],
+                structured: Some(proto::v32_mechanism::Structured::Gcm(proto::V32GcmParams { iv: iv.clone(), aad: aad.clone(), tag_bits: 128 })),
+            }),
+            key_handle: key,
+        }).await.unwrap();
+        let gd = g.c_decrypt(proto::V32DataRequest { session_handle: gs.session_handle, data: ciphertext_ctl.clone() }).await.unwrap().into_inner();
+        assert_eq!(gd.ck_rv, rv_dec_ctl);
+        assert_eq!(gd.data, plaintext);
+
+        // REST — same key handle, GCM params sent via the mechanism.gcm field.
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        rest_post(&base, "encrypt-init", json!({
+            "session_handle": sh,
+            "mechanism": {"mechanism": CKM_AES_GCM, "gcm": {"iv": b64(&iv), "aad": b64(&aad), "tag_bits": 128}},
+            "key_handle": key,
+        })).await;
+        let re = rest_post(&base, "encrypt", json!({"session_handle": sh, "data": b64(&plaintext)})).await;
+        assert_eq!(re["ck_rv"].as_u64().unwrap() as u32, rv_ctl);
+        assert_eq!(unb64(re["data"].as_str().unwrap()), ciphertext_ctl, "REST structured-GCM ciphertext must equal control");
+        rest_post(&base, "decrypt-init", json!({
+            "session_handle": sh,
+            "mechanism": {"mechanism": CKM_AES_GCM, "gcm": {"iv": b64(&iv), "aad": b64(&aad), "tag_bits": 128}},
+            "key_handle": key,
+        })).await;
+        let rd = rest_post(&base, "decrypt", json!({"session_handle": sh, "data": re["data"].clone()})).await;
+        assert_eq!(rd["ck_rv"].as_u64().unwrap() as u32, rv_dec_ctl);
+        assert_eq!(unb64(rd["data"].as_str().unwrap()), plaintext);
+
+        v32::close_session(ks);
+    });
+}
+
+// ── V24: RSA-OAEP encrypt/decrypt via the structured V32OaepParams oneof
+// (G1 gap-remediation) — OAEP is randomized, so each transport encrypts
+// its own ciphertext; the real property under test is that each one's
+// own decrypt recovers the same plaintext ────────────────────────────────
+
+#[test]
+fn v24_rsa_oaep_structured_params_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let (_rv, ks) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        let public_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_PUBLIC_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_RSA as usize).to_le_bytes().to_vec()),
+            (CKA_MODULUS_BITS, (2048usize).to_le_bytes().to_vec()),
+            (CKA_ENCRYPT, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let private_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_PRIVATE_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_RSA as usize).to_le_bytes().to_vec()),
+            (CKA_DECRYPT, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let (rv, pub_h, prv_h) = v32::generate_key_pair(ks, CKM_RSA_PKCS_KEY_PAIR_GEN, &[], &public_tmpl, &private_tmpl);
+        assert_eq!(rv, 0, "RSA-2048 keygen must succeed — a prerequisite for testing OAEP at all");
+
+        let plaintext = b"v24 RSA-OAEP structured-oneof parity".to_vec();
+
+        // control
+        let ctl_params = pqctoday_pkcs11_remote_core::verbs_v32::cipher_params::oaep(CKM_SHA256 as u32, CKG_MGF1_SHA256, &[]);
+        assert_eq!(v32::encrypt_init(ks, CKM_RSA_PKCS_OAEP, ctl_params.as_slice(), pub_h), 0);
+        let (rv_ctl, ciphertext_ctl) = v32::encrypt(ks, &plaintext);
+        assert_eq!(rv_ctl, 0);
+        let ctl_dparams = pqctoday_pkcs11_remote_core::verbs_v32::cipher_params::oaep(CKM_SHA256 as u32, CKG_MGF1_SHA256, &[]);
+        assert_eq!(v32::decrypt_init(ks, CKM_RSA_PKCS_OAEP, ctl_dparams.as_slice(), prv_h), 0);
+        let (rv_dec_ctl, recovered_ctl) = v32::decrypt(ks, &ciphertext_ctl);
+        assert_eq!(rv_dec_ctl, 0);
+        assert_eq!(recovered_ctl, plaintext);
+
+        // gRPC — own OAEP ciphertext (randomized seed), own decrypt.
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        g.c_encrypt_init(proto::V32KeyedInitRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism {
+                mechanism: CKM_RSA_PKCS_OAEP,
+                parameter: vec![],
+                structured: Some(proto::v32_mechanism::Structured::Oaep(proto::V32OaepParams { hash_alg: CKM_SHA256 as u32, mgf: CKG_MGF1_SHA256, source_data: vec![] })),
+            }),
+            key_handle: pub_h,
+        }).await.unwrap();
+        let ge = g.c_encrypt(proto::V32DataRequest { session_handle: gs.session_handle, data: plaintext.clone() }).await.unwrap().into_inner();
+        assert_eq!(ge.ck_rv, rv_ctl);
+        g.c_decrypt_init(proto::V32KeyedInitRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism {
+                mechanism: CKM_RSA_PKCS_OAEP,
+                parameter: vec![],
+                structured: Some(proto::v32_mechanism::Structured::Oaep(proto::V32OaepParams { hash_alg: CKM_SHA256 as u32, mgf: CKG_MGF1_SHA256, source_data: vec![] })),
+            }),
+            key_handle: prv_h,
+        }).await.unwrap();
+        let gd = g.c_decrypt(proto::V32DataRequest { session_handle: gs.session_handle, data: ge.data }).await.unwrap().into_inner();
+        assert_eq!(gd.ck_rv, rv_dec_ctl);
+        assert_eq!(gd.data, plaintext, "gRPC's own OAEP round trip must recover the original plaintext");
+
+        // REST — same shape.
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        rest_post(&base, "encrypt-init", json!({
+            "session_handle": sh,
+            "mechanism": {"mechanism": CKM_RSA_PKCS_OAEP, "oaep": {"hash_alg": CKM_SHA256 as u32, "mgf": CKG_MGF1_SHA256, "source_data": ""}},
+            "key_handle": pub_h,
+        })).await;
+        let re = rest_post(&base, "encrypt", json!({"session_handle": sh, "data": b64(&plaintext)})).await;
+        assert_eq!(re["ck_rv"].as_u64().unwrap() as u32, rv_ctl);
+        rest_post(&base, "decrypt-init", json!({
+            "session_handle": sh,
+            "mechanism": {"mechanism": CKM_RSA_PKCS_OAEP, "oaep": {"hash_alg": CKM_SHA256 as u32, "mgf": CKG_MGF1_SHA256, "source_data": ""}},
+            "key_handle": prv_h,
+        })).await;
+        let rd = rest_post(&base, "decrypt", json!({"session_handle": sh, "data": re["data"].clone()})).await;
+        assert_eq!(rd["ck_rv"].as_u64().unwrap() as u32, rv_dec_ctl);
+        assert_eq!(unb64(rd["data"].as_str().unwrap()), plaintext, "REST's own OAEP round trip must recover the original plaintext");
+
+        v32::close_session(ks);
+    });
+}
+
+// ── V25: AES-GCM authenticated wrap/unwrap (G1 gap-remediation, the
+// AuthWrap positive path RW4 scoped out) — shared wrapping+target keys,
+// KAT-grade wrapped-bytes byte equality ──────────────────────────────────
+
+#[test]
+fn v25_aes_gcm_authenticated_wrap_unwrap_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let (_rv, ks) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        let wrapping_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_AES as usize).to_le_bytes().to_vec()),
+            (CKA_VALUE_LEN, (32usize).to_le_bytes().to_vec()),
+            (CKA_WRAP, vec![1u8]),
+            (CKA_UNWRAP, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let (rv, wrapping_key) = v32::generate_key(ks, CKM_AES_KEY_GEN, &[], &wrapping_tmpl);
+        assert_eq!(rv, 0);
+        let target_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_AES as usize).to_le_bytes().to_vec()),
+            (CKA_VALUE_LEN, (16usize).to_le_bytes().to_vec()),
+            (0x0162 /* CKA_EXTRACTABLE */, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let (rv, target_key) = v32::generate_key(ks, CKM_AES_KEY_GEN, &[], &target_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, orig_attrs) = v32::get_attribute_value(ks, target_key, &[CKA_VALUE]);
+        assert_eq!(rv, 0);
+
+        let iv = vec![0x22u8; 12];
+        let aad = b"v25-authwrap-aad".to_vec();
+        let unwrap_tmpl_ctl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_AES as usize).to_le_bytes().to_vec()),
+            (0x0162, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+
+        // control
+        let ctl_params = pqctoday_pkcs11_remote_core::verbs_v32::cipher_params::gcm(&iv, &aad, 128);
+        let (rv_wrap_ctl, wrapped_ctl) = v32::wrap_key_authenticated(ks, CKM_AES_GCM, ctl_params.as_slice(), wrapping_key, target_key, &aad);
+        assert_eq!(rv_wrap_ctl, 0);
+        let ctl_dparams = pqctoday_pkcs11_remote_core::verbs_v32::cipher_params::gcm(&iv, &aad, 128);
+        let (rv_unwrap_ctl, unwrapped_ctl) = v32::unwrap_key_authenticated(ks, CKM_AES_GCM, ctl_dparams.as_slice(), wrapping_key, &wrapped_ctl, &unwrap_tmpl_ctl, &aad);
+        assert_eq!(rv_unwrap_ctl, 0);
+        assert_ne!(unwrapped_ctl, 0);
+
+        // gRPC
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        let gw = g.c_wrap_key_authenticated(proto::V32WrapKeyAuthenticatedRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism {
+                mechanism: CKM_AES_GCM,
+                parameter: vec![],
+                structured: Some(proto::v32_mechanism::Structured::Gcm(proto::V32GcmParams { iv: iv.clone(), aad: aad.clone(), tag_bits: 128 })),
+            }),
+            wrapping_key_handle: wrapping_key,
+            key_handle: target_key,
+            associated_data: aad.clone(),
+        }).await.unwrap().into_inner();
+        assert_eq!(gw.ck_rv, rv_wrap_ctl);
+        assert_eq!(gw.data, wrapped_ctl, "gRPC authenticated-wrap bytes must equal control (same key/iv/aad)");
+        let gu = g.c_unwrap_key_authenticated(proto::V32UnwrapKeyAuthenticatedRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism {
+                mechanism: CKM_AES_GCM,
+                parameter: vec![],
+                structured: Some(proto::v32_mechanism::Structured::Gcm(proto::V32GcmParams { iv: iv.clone(), aad: aad.clone(), tag_bits: 128 })),
+            }),
+            unwrapping_key_handle: wrapping_key,
+            wrapped_key: wrapped_ctl.clone(),
+            template: vec![
+                ulong_attr_proto(CKA_CLASS, CKO_SECRET_KEY as u32),
+                ulong_attr_proto(CKA_KEY_TYPE, CKK_AES as u32),
+                bool_attr_proto(0x0162, true),
+                bool_attr_proto(CKA_TOKEN, false),
+            ],
+            associated_data: aad.clone(),
+        }).await.unwrap().into_inner();
+        assert_eq!(gu.ck_rv, rv_unwrap_ctl);
+        assert_ne!(gu.object_handle, 0);
+        let ga = g.c_get_attribute_value(proto::V32GetAttributeValueRequest { session_handle: gs.session_handle, object_handle: gu.object_handle, attribute_types: vec![CKA_VALUE] }).await.unwrap().into_inner();
+        assert_eq!(ga.attributes[0].value, orig_attrs[0].value, "gRPC unwrapped key material must equal the original");
+
+        // REST
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        let rw = rest_post(&base, "wrap-key-authenticated", json!({
+            "session_handle": sh,
+            "mechanism": {"mechanism": CKM_AES_GCM, "gcm": {"iv": b64(&iv), "aad": b64(&aad), "tag_bits": 128}},
+            "wrapping_key_handle": wrapping_key,
+            "key_handle": target_key,
+            "associated_data": b64(&aad),
+        })).await;
+        assert_eq!(rw["ck_rv"].as_u64().unwrap() as u32, rv_wrap_ctl);
+        assert_eq!(unb64(rw["data"].as_str().unwrap()), wrapped_ctl, "REST authenticated-wrap bytes must equal control");
+        let ru = rest_post(&base, "unwrap-key-authenticated", json!({
+            "session_handle": sh,
+            "mechanism": {"mechanism": CKM_AES_GCM, "gcm": {"iv": b64(&iv), "aad": b64(&aad), "tag_bits": 128}},
+            "unwrapping_key_handle": wrapping_key,
+            "wrapped_key": b64(&wrapped_ctl),
+            "template": [
+                ulong_attr(CKA_CLASS, CKO_SECRET_KEY as u32),
+                ulong_attr(CKA_KEY_TYPE, CKK_AES as u32),
+                bool_attr(0x0162, true),
+                bool_attr(CKA_TOKEN, false),
+            ],
+            "associated_data": b64(&aad),
+        })).await;
+        assert_eq!(ru["ck_rv"].as_u64().unwrap() as u32, rv_unwrap_ctl);
+        let ra = rest_post(&base, "get-attribute-value", json!({"session_handle": sh, "object_handle": ru["object_handle"], "attribute_types": [CKA_VALUE]})).await;
+        assert_eq!(unb64(ra["attributes"][0]["value"].as_str().unwrap()), orig_attrs[0].value, "REST unwrapped key material must equal the original");
+
+        v32::close_session(ks);
     });
 }

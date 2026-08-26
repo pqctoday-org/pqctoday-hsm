@@ -21,8 +21,8 @@
     },
     "AuthWrap": {
       "disposition": "RPC",
-      "case_ids": ["core::aes_key_wrap_unwrap_round_trip_and_not_wrappable_negative"],
-      "justification": "C_WrapKeyAuthenticated/C_UnwrapKeyAuthenticated are wired and reachable (RW4); this engine restricts them to CKM_AES_GCM, and the case proves the wire reaches the real rejection code for a non-GCM mechanism. The full AES-GCM authenticated positive round trip (this category's actual NIST_SP800_38D_KAT check) needs a CK_GCM_PARAMS RW-P variant not yet built here — out of RW4's stated scope, genuinely not covered end to end."
+      "case_ids": ["core::aes_key_wrap_unwrap_round_trip_and_not_wrappable_negative", "core::aes_gcm_authenticated_wrap_unwrap_round_trip_and_aad_tamper_rejected", "v32_parity::v25_aes_gcm_authenticated_wrap_unwrap_parity"],
+      "justification": "C_WrapKeyAuthenticated/C_UnwrapKeyAuthenticated, restricted by this engine to CKM_AES_GCM, proven via the real CKR_MECHANISM_INVALID rejection for a non-GCM mechanism (RW4) AND the full authenticated-wrap positive round trip — the compliance suite's own NIST_SP800_38D_KAT check — closed in G1 gap-remediation via the CK_GCM_PARAMS RW-P builder: unwrapped key material equals the original, and a tampered AAD is rejected. Wrapped bytes proven byte-identical across all three transports."
     },
     "BIP32": {
       "disposition": "RPC",
@@ -151,8 +151,8 @@
     },
     "GapAes": {
       "disposition": "RPC",
-      "case_ids": ["v32_parity::v10_aes_ecb_encrypt_decrypt_kat_parity"],
-      "justification": "Same as AES-CTR — AES-ECB cased, other AES cipher modes reachable via the same generic verb."
+      "case_ids": ["v32_parity::v10_aes_ecb_encrypt_decrypt_kat_parity", "v32_parity::v23_aes_gcm_structured_params_kat_parity", "core::aes_gcm_encrypt_decrypt_round_trip_and_tag_tamper_rejected"],
+      "justification": "AES-ECB (RW3) and now AES-GCM (G1 gap-remediation, via the CK_GCM_PARAMS RW-P builder) both cased: one-shot round trip, FSM byte-equality against the one-shot, and real tag-tamper rejection. AES-CTR/CBC not separately cased — reachable via the same generic verb, CK_AES_CTR_PARAMS is pointer-free and needs no RW-P builder at all."
     },
     "GapClassical": {
       "disposition": "RPC",
@@ -171,8 +171,8 @@
     },
     "GapRsaCipher": {
       "disposition": "RPC",
-      "case_ids": [],
-      "justification": "C_EncryptInit(RSA-OAEP)/C_Decrypt is mechanism-agnostic at the verb level, but CK_RSA_PKCS_OAEP_PARAMS (a pointer-bearing struct) has no RW-P builder yet — genuinely not covered end to end; scoped out of RW3's stated test list the same way AuthWrap's full GCM round trip was scoped out of RW4's."
+      "case_ids": ["core::rsa_oaep_encrypt_decrypt_round_trip_and_mgf_changes_ciphertext", "v32_parity::v24_rsa_oaep_structured_params_parity"],
+      "justification": "C_EncryptInit(RSA-OAEP)/C_Decrypt via the CK_RSA_PKCS_OAEP_PARAMS RW-P builder (G1 gap-remediation): real RSA-2048 keygen, OAEP encrypt/decrypt round trip, and OAEP's own re-randomization property (encrypting the same plaintext twice never reproduces the same ciphertext, both still decrypt correctly) — proven in-process and confirmed independently on both gRPC and REST (each transport's own randomized ciphertext decrypts correctly on that same transport)."
     },
     "GapRsaSign": {
       "disposition": "RPC",

@@ -38,11 +38,40 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
         .map_err(|e| Status::internal(format!("engine dispatch task failed: {e}")))
 }
 
-fn mech_parts(m: Option<&V32Mechanism>) -> (u64, Vec<u8>) {
-    match m {
-        Some(m) => (m.mechanism, m.parameter.clone()),
-        None => (0, Vec::new()), // mechanism 0 matches nothing → the engine's own invalid-mechanism path
+/// Same ownership contract as `derive_mechanism_params`'s `DeriveParamBytes`
+/// below (G1 gap-remediation: `docs/remoting-pkcs11-v32-gap-remediation-
+/// plan-2026-08-26.md`) — a `v32::StructBuilder`'s bytes embed raw
+/// pointers into its own `owned` buffers, so the builder itself, not a
+/// copy of its bytes, must stay alive through the FFI call. `V32Mechanism`
+/// carries `parameter` (raw bytes) and an optional `structured` oneof
+/// (`gcm`/`oaep`); exactly one is meaningful per call.
+enum MechParamBytes {
+    Raw(Vec<u8>),
+    Structured(v32::StructBuilder),
+}
+impl MechParamBytes {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            MechParamBytes::Raw(v) => v,
+            MechParamBytes::Structured(b) => b.as_slice(),
+        }
     }
+}
+
+fn mech_parts(m: Option<&V32Mechanism>) -> (u64, MechParamBytes) {
+    use pqctoday_pkcs11_remote_proto::v32_mechanism::Structured;
+    let Some(m) = m else {
+        // mechanism 0 matches nothing → the engine's own invalid-mechanism path
+        return (0, MechParamBytes::Raw(Vec::new()));
+    };
+    let bytes = match &m.structured {
+        None => MechParamBytes::Raw(m.parameter.clone()),
+        Some(Structured::Gcm(p)) => MechParamBytes::Structured(v32::cipher_params::gcm(&p.iv, &p.aad, p.tag_bits)),
+        Some(Structured::Oaep(p)) => {
+            MechParamBytes::Structured(v32::cipher_params::oaep(p.hash_alg, p.mgf, &p.source_data))
+        }
+    };
+    (m.mechanism, bytes)
 }
 
 fn tmpl_parts(t: &[V32AttributeIn]) -> Vec<v32::AttrIn> {
@@ -164,7 +193,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
     ) -> Result<Response<V32StatusResponse>, Status> {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
-        let ck_rv = blocking(move || v32::digest_init(req.session_handle, mech, &param)).await?;
+        let ck_rv = blocking(move || v32::digest_init(req.session_handle, mech, param.as_slice())).await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
     }
 
@@ -190,7 +219,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let (ck_rv, data) =
-            blocking(move || v32::digest(req.session_handle, mech, &param, &req.data)).await?;
+            blocking(move || v32::digest(req.session_handle, mech, param.as_slice(), &req.data)).await?;
         Ok(Response::new(V32BytesResponse { ck_rv, data }))
     }
 
@@ -201,7 +230,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let ck_rv =
-            blocking(move || v32::sign_init(req.session_handle, mech, &param, req.key_handle)).await?;
+            blocking(move || v32::sign_init(req.session_handle, mech, param.as_slice(), req.key_handle)).await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
     }
 
@@ -236,7 +265,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let ck_rv =
-            blocking(move || v32::verify_init(req.session_handle, mech, &param, req.key_handle)).await?;
+            blocking(move || v32::verify_init(req.session_handle, mech, param.as_slice(), req.key_handle)).await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
     }
 
@@ -310,7 +339,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let template = tmpl_parts(&req.template);
         let (ck_rv, object_handle) =
-            blocking(move || v32::generate_key(req.session_handle, mech, &param, &template)).await?;
+            blocking(move || v32::generate_key(req.session_handle, mech, param.as_slice(), &template)).await?;
         Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
     }
 
@@ -323,7 +352,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let public_template = tmpl_parts(&req.public_key_template);
         let private_template = tmpl_parts(&req.private_key_template);
         let (ck_rv, public_handle, private_handle) = blocking(move || {
-            v32::generate_key_pair(req.session_handle, mech, &param, &public_template, &private_template)
+            v32::generate_key_pair(req.session_handle, mech, param.as_slice(), &public_template, &private_template)
         })
         .await?;
         Ok(Response::new(V32GenerateKeyPairResponse { ck_rv, public_handle, private_handle }))
@@ -416,7 +445,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let ck_rv =
-            blocking(move || v32::encrypt_init(req.session_handle, mech, &param, req.key_handle)).await?;
+            blocking(move || v32::encrypt_init(req.session_handle, mech, param.as_slice(), req.key_handle)).await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
     }
 
@@ -451,7 +480,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let ck_rv =
-            blocking(move || v32::decrypt_init(req.session_handle, mech, &param, req.key_handle)).await?;
+            blocking(move || v32::decrypt_init(req.session_handle, mech, param.as_slice(), req.key_handle)).await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
     }
 
@@ -664,7 +693,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let ck_rv = blocking(move || {
-            v32::sign_recover_init(req.session_handle, mech, &param, req.key_handle)
+            v32::sign_recover_init(req.session_handle, mech, param.as_slice(), req.key_handle)
         })
         .await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
@@ -684,7 +713,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let ck_rv = blocking(move || {
-            v32::verify_recover_init(req.session_handle, mech, &param, req.key_handle)
+            v32::verify_recover_init(req.session_handle, mech, param.as_slice(), req.key_handle)
         })
         .await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
@@ -705,7 +734,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let ck_rv = blocking(move || {
-            v32::verify_signature_init(req.session_handle, mech, &param, req.key_handle, &req.signature)
+            v32::verify_signature_init(req.session_handle, mech, param.as_slice(), req.key_handle, &req.signature)
         })
         .await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
@@ -767,7 +796,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let ck_rv = blocking(move || {
-            v32::message_sign_init(req.session_handle, mech, &param, req.key_handle)
+            v32::message_sign_init(req.session_handle, mech, param.as_slice(), req.key_handle)
         })
         .await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
@@ -814,7 +843,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let ck_rv = blocking(move || {
-            v32::message_verify_init(req.session_handle, mech, &param, req.key_handle)
+            v32::message_verify_init(req.session_handle, mech, param.as_slice(), req.key_handle)
         })
         .await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
@@ -866,7 +895,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let ck_rv = blocking(move || {
-            v32::message_encrypt_init(req.session_handle, mech, &param, req.key_handle)
+            v32::message_encrypt_init(req.session_handle, mech, param.as_slice(), req.key_handle)
         })
         .await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
@@ -926,7 +955,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let ck_rv = blocking(move || {
-            v32::message_decrypt_init(req.session_handle, mech, &param, req.key_handle)
+            v32::message_decrypt_init(req.session_handle, mech, param.as_slice(), req.key_handle)
         })
         .await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
@@ -979,7 +1008,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let req = request.into_inner();
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let (ck_rv, data) = blocking(move || {
-            v32::wrap_key(req.session_handle, mech, &param, req.wrapping_key_handle, req.key_handle)
+            v32::wrap_key(req.session_handle, mech, param.as_slice(), req.wrapping_key_handle, req.key_handle)
         })
         .await?;
         Ok(Response::new(V32BytesResponse { ck_rv, data }))
@@ -992,7 +1021,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let template = tmpl_parts(&req.template);
         let (ck_rv, object_handle) = blocking(move || {
-            v32::unwrap_key(req.session_handle, mech, &param, req.unwrapping_key_handle, &req.wrapped_key, &template)
+            v32::unwrap_key(req.session_handle, mech, param.as_slice(), req.unwrapping_key_handle, &req.wrapped_key, &template)
         })
         .await?;
         Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
@@ -1005,7 +1034,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let (ck_rv, data) = blocking(move || {
             v32::wrap_key_authenticated(
-                req.session_handle, mech, &param, req.wrapping_key_handle, req.key_handle, &req.associated_data,
+                req.session_handle, mech, param.as_slice(), req.wrapping_key_handle, req.key_handle, &req.associated_data,
             )
         })
         .await?;
@@ -1020,7 +1049,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let template = tmpl_parts(&req.template);
         let (ck_rv, object_handle) = blocking(move || {
             v32::unwrap_key_authenticated(
-                req.session_handle, mech, &param, req.unwrapping_key_handle, &req.wrapped_key, &template, &req.associated_data,
+                req.session_handle, mech, param.as_slice(), req.unwrapping_key_handle, &req.wrapped_key, &template, &req.associated_data,
             )
         })
         .await?;
@@ -1058,7 +1087,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let template = tmpl_parts(&req.template);
         let (ck_rv, ciphertext, object_handle) = blocking(move || {
-            v32::encapsulate_key(req.session_handle, mech, &param, req.key_handle, &template)
+            v32::encapsulate_key(req.session_handle, mech, param.as_slice(), req.key_handle, &template)
         })
         .await?;
         Ok(Response::new(V32EncapsulateKeyResponse { ck_rv, ciphertext, object_handle }))
@@ -1072,7 +1101,7 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let (mech, param) = mech_parts(req.mechanism.as_ref());
         let template = tmpl_parts(&req.template);
         let (ck_rv, object_handle) = blocking(move || {
-            v32::decapsulate_key(req.session_handle, mech, &param, req.private_key_handle, &req.ciphertext, &template)
+            v32::decapsulate_key(req.session_handle, mech, param.as_slice(), req.private_key_handle, &req.ciphertext, &template)
         })
         .await?;
         Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))

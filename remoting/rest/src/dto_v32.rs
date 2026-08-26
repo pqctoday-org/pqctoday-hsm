@@ -160,6 +160,31 @@ pub struct V32MechanismDto {
     pub mechanism: u64,
     #[serde(with = "b64", default)]
     pub parameter: Vec<u8>,
+    // `parameter` and these structured fields are mutually exclusive per
+    // call — G1 gap-remediation (docs/remoting-pkcs11-v32-gap-remediation-
+    // plan-2026-08-26.md), mirroring the proto's `oneof structured` on
+    // V32Mechanism.
+    #[serde(default)]
+    pub gcm: Option<GcmParamsDto>,
+    #[serde(default)]
+    pub oaep: Option<OaepParamsDto>,
+}
+
+#[derive(Deserialize)]
+pub struct GcmParamsDto {
+    #[serde(with = "b64")]
+    pub iv: Vec<u8>,
+    #[serde(with = "b64", default)]
+    pub aad: Vec<u8>,
+    #[serde(default)]
+    pub tag_bits: u32,
+}
+#[derive(Deserialize)]
+pub struct OaepParamsDto {
+    pub hash_alg: u32,
+    pub mgf: u32,
+    #[serde(with = "b64", default)]
+    pub source_data: Vec<u8>,
 }
 
 #[derive(Deserialize)]

@@ -1,5 +1,7 @@
 # Remoting v3.2 mirror — gap remediation plan (2026-08-26, post-program)
 
+**G1 EXECUTED and green (2026-08-26).** See "Execution log" at the end.
+
 Execution-ready plan for every gap left open at the close of the
 remoting v3.2 coverage program (RW0–RW-T, 11 commits on
 `feat/remoting-v32-mirror`). Source of truth for what the gaps ARE:
@@ -289,3 +291,72 @@ NOT `C_*`-named, so check (c) won't see them — add them to the
 - No new gate steps — everything lands inside the existing remoting
   step, keeping gate wall-time flat (the V21 split may even help).
 - No push, no CI, no deploy — G6 stays behind the user's explicit gate.
+
+## Execution log
+
+### 2026-08-26 — G1 (GCM + OAEP RW-P builders)
+
+Shipped, all live-verified. Closes AuthWrap's and GapRsaCipher's
+functional gaps for real, plus a bonus: AES-GCM one-shot/FSM joins
+AES-ECB in the GapAes/AES-CTR row.
+
+**Wire shape, exactly as decided**: `oneof structured { V32GcmParams gcm;
+V32OaepParams oaep; }` added directly to `V32Mechanism` itself — one
+proto edit reached every mechanism-taking RPC. `V32MechanismDto` grew the
+matching `gcm`/`oaep` optional fields for REST.
+
+**core:** `cipher_params::gcm`/`oaep` — same `StructBuilder` discipline
+as `derive_params`, built from `ck_param::gcm`/`ck_param::oaep`'s
+already-existing layouts. `verbs_v32`'s own signatures (`encrypt_init`,
+`wrap_key_authenticated`, etc.) needed ZERO changes — they already took
+`parameter: &[u8]`; only the callers changed what they pass. 3 new unit
+tests (40/40 core green): AES-GCM one-shot round trip + FSM byte-equality
+against the one-shot + real tag-tamper rejection; RSA-2048 OAEP round
+trip + OAEP's own re-randomization property (same plaintext, same
+params, twice → different ciphertexts, both still decrypt); AES-GCM
+authenticated wrap/unwrap round trip + real AAD-tamper rejection — the
+compliance suite's own `NIST_SP800_38D_KAT` check, finally exercised.
+
+**gRPC + REST — the widest mechanical refactor in the whole program, and
+the cleanest**: `mech_parts` (gRPC) and a new `mech_param_bytes` (REST)
+now resolve the oneof into a `MechParamBytes` enum (`Raw(Vec<u8>)` |
+`Structured(StructBuilder)`) — same ownership contract as `DeriveKey`'s
+existing `DeriveParamBytes`, independently re-derived for REST rather
+than shared across crates (the DTO and proto types differ). 21 call
+sites in EACH crate needed `&param`/`&r.mechanism.parameter` changed to
+`.as_slice()` — done via `perl -pi -e` (macOS `sed`'s `\b` doesn't match
+GNU's), then verified by grep that zero old-pattern occurrences
+remained. Both crates compiled clean on the FIRST build after the
+mechanical pass — the uniform call-site pattern (proven by grep before
+touching anything) made the blanket edit safe.
+
+**Test file fallout, expected and mechanical**: adding a `oneof` field
+to a prost message makes it non-`Default`-constructible via plain struct
+literals without every field named. 26 pre-existing `V32Mechanism { ...
+}` literals across `v32_parity.rs` needed `, structured: None` appended
+— one `perl` pass, verified by grep that every match legitimately
+belonged to a `V32Mechanism` literal (not a coincidentally-similar
+struct) before running it.
+
+**Validation:** 3 new three-transport parity cases. V23: AES-GCM via the
+structured oneof, ciphertext byte-identical across all three transports
+(KAT-grade, shared key). V24: RSA-OAEP via the structured oneof — OAEP
+re-randomizes its seed every call, so each transport's own ciphertext is
+independently verified to decrypt back to the original plaintext (not
+byte-equality with a control, which would be the wrong assertion for a
+randomized scheme). V25: AES-GCM authenticated wrap/unwrap, wrapped
+bytes byte-identical across all three transports, unwrapped key material
+equal to the original. **Whole remoting workspace green: 40 core + 7
+legacy-parity (no regression) + 24 v32-parity (1 still `#[ignore]`d) + 2
+posture.** RSA-2048 keygen (2 core tests, 1 parity test) adds real but
+modest time to the suite (whole-workspace runs now 1.6–8.4s, driven
+mostly by RSA keygen variance) — nowhere near XMSS's 326s, no `#[ignore]`
+warranted.
+
+**Ledger**: `AuthWrap` and `GapRsaCipher` now carry real `case_ids` and
+updated justifications; `GapAes` gained the AES-GCM cases alongside its
+existing AES-ECB ones. Regenerated `REMOTE_P11_V32_COVERAGE.md`. Ratchet
+green: 63 categories, 99 RPCs (unchanged — G1 added zero new RPCs, only
+new parameter shapes on existing ones).
+
+G2 (Split Key) is next — independent of G1, no ordering dependency.
