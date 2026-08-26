@@ -1,4 +1,4 @@
-# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R7+R8+R10(PBKDF2)+R18+R19+R20+R21.1 EXECUTED, R9/R11/rest-of-R21/R10(SP800-108)/R20(ALG-7) still plan-only
+# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R7+R8+R10(PBKDF2)+R18+R19+R20+R21 EXECUTED IN FULL, only R9/R11/R10(SP800-108)/R20(ALG-7) still plan-only
 
 **Execution update (2026-08-26):** R7, R8, R18, R19, and R21.1 have
 been executed and landed — see
@@ -80,11 +80,26 @@ item was pulled out and deferred rather than rushed under a five-item
 "effort S" budget it was never sized for. R8/R18/R19/R21.1/R7/R10/R20's
 own sections below are left as originally written (the plan, not the
 result) per this project's append-only convention; do not edit them to
-match the outcome. **Harness: `PASS=55 FAIL=0 XFAIL=0 XPASS=0`** —
-twenty-four cases gained total since this plan's starting point
-(T18/T18b/T18c/T18d, T20/T20b/T20c/T20d, T21a–T21h,
-T22/T22b/T22c/T22d/T22e, T23/T23b/T23c). R9, R11, the rest of R21,
-R10's SP800-108 half, and R20's ALG-7 remain plan-only, not executed.
+match the outcome. **R21's own remaining four items (WART-1, WART-3,
+WART-5, ENV-3) needed zero code**: all four turned out to already be
+fixed by an earlier "P0 hygiene batch" (commit `3bf6f56`, R0.1–R0.5,
+2026-08-25) that this plan's own gap list never checked against before
+re-listing them as open work — the oldest instance of the
+stale-premise-carry-forward pattern this whole execution kept finding
+in fresher form (R10's SP800-108 "advertised only" guess, F36-6's
+`set_skey`/`derive_skey` "stub" claim). Re-verified each of the four
+directly (a live version check, two README reads, a repo-wide
+reference grep, and the harness's own standing R0.1 regression guard,
+which has been passing on every run this entire session) rather than
+trusting the earlier commit message alone; corrected the gap matrix's
+own WART-1/WART-3/WART-5/ENV-3 rows to say RESOLVED, since they still
+read as open despite WART-4's row in the same table already showing
+the RESOLVED-marker convention. **Harness: `PASS=55 FAIL=0 XFAIL=0
+XPASS=0`** — twenty-four cases gained total since this plan's starting
+point (T18/T18b/T18c/T18d, T20/T20b/T20c/T20d, T21a–T21h,
+T22/T22b/T22c/T22d/T22e, T23/T23b/T23c). Only R9, R11, R10's
+SP800-108 half, and R20's ALG-7 remain plan-only, not executed — every
+other item in this plan is closed.
 
 Scope: everything still open after phase 3 closed R12–R17 in full
 (branch `feat/jdk27-jca-provider`, commit `8f3fb8e`, unpushed; harness

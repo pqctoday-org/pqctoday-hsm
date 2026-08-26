@@ -122,10 +122,10 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | OP-4 | KEM dispatch lacks `SET_CTX_PARAMS`/`SETTABLE` | `kem/mlkem.c:259-289` | Low |
 | OP-6 | **RESOLVED (R3b, 2026-08-25)** — was: ML-KEM keys could not be GENERATED on token through the provider (ML-KEM keymgmt had no `OSSL_FUNC_KEYMGMT_GEN*` entries; ML-DSA keygen worked, so this was an asymmetry, not a design rule). Now: real `GEN_INIT`/`GEN`/`GEN_CLEANUP`/`GEN_SET_PARAMS`/`GEN_SETTABLE_PARAMS` wired into all 3 per-variant ML-KEM keymgmt tables (`kem/mlkem.c`), implemented in `keymgmt.c` (mirroring the ML-DSA block) and exported non-static since `kem/mlkem.c` is a separate translation unit. `CKA_PARAMETER_SET` is mandatory on the public-key template per the C++ engine's own `extractParameterSet` call (no silent default, matching ML-DSA's pattern); `CKA_ENCAPSULATE`/`CKA_DECAPSULATE` requested explicitly on pub/priv templates to match what a spec-correct caller sends (both engines enforce these server-side regardless of template content). Live-verified: key generates, persists on-token, and is independently confirmed via `storeutl -text` showing `ML-KEM-768 Public-Key`. Landing this surfaced OP-3 (above) as a distinct, still-open gap — genpkey's own `-out` write needs an encoder this fix does not provide. | both engines, live probe + source | ~~**High**~~ — |
 | OP-5 | KDF surface is HKDF+TLS13-KDF only; engines also offer PBKDF2 and SP800-108 counter/feedback KDFs that OpenSSL has standard fetch names for | `provider.c:1161` vs engine KDF mechs | Low–Medium |
-| WART-1 | Every provider token scan spams the C++ engine log: `ObjectFile.cpp(181): The attribute is not a byte string: 0x0/0x1/0x2/0x86/0x100/0x170-0x172/0x601` — provider queries CKA_CLASS/CKA_TOKEN/CKA_PRIVATE/CKA_TRUSTED/CKA_KEY_TYPE/CKA_MODIFIABLE/CKA_COPYABLE/CKA_DESTROYABLE/etc. with byte-string templates | observed on every live probe | Low (noise; masks real errors) |
-| WART-3 | Build hygiene: the gitignored WASM-generated `src/config.h` leaks into the **native** CMake build — compile warnings `"PACKAGE_MAJOR redefined"` and the live provider reports version **1.1** (config.h) while CMake defines **0.4.0** | observed in gate build log + live `list -providers` | Low |
+| WART-1 | **RESOLVED (R0.1, 2026-08-25 later same day; re-verified R21, 2026-08-26)** — was: `ObjectFile.cpp(181): The attribute is not a byte string: 0x0/0x1/0x2/0x86/0x100/0x170-0x172/0x601` — provider queries CKA_CLASS/CKA_TOKEN/CKA_PRIVATE/CKA_TRUSTED/CKA_KEY_TYPE/CKA_MODIFIABLE/CKA_COPYABLE/CKA_DESTROYABLE/etc. with byte-string templates. Fix: `P11Objects.cpp`'s mandatory-attribute-check loop gated on ck14\|ck15\|ck16 actually being set, not called for every attribute in an object's full schema; harness's own tail section now regression-guards zero `ObjectFile.cpp(181)` lines across every case log. | observed on every live probe | ~~Low~~ — |
+| WART-3 | **RESOLVED (R0.2, 2026-08-25 later same day; re-verified R21, 2026-08-26)** — was: build hygiene: the gitignored WASM-generated `src/config.h` leaks into the **native** CMake build — compile warnings `"PACKAGE_MAJOR redefined"` and the live provider reports version **1.1** (config.h) while CMake defines **0.4.0**. Fix: CMakeLists.txt now generates a real `config.h` at configure time deriving `P11PROV_VERSION` from `meson.build`'s own `version:` field — single source of truth across native/meson/WASM builds; re-verified live: `list -providers` reports `1.1`, matching, zero redefinition warnings. | observed in gate build log + live `list -providers` | ~~Low~~ — |
 | WART-4 | **RESOLVED (R0.4, 2026-08-25 later same day)** — was: mechanism-gated operation tables are invisible to fresh-process fetches: `openssl list` shows nothing `@ pkcs11` for signature/KEM, AND a strict property-targeted fetch (`dgst -sha256 -propquery provider=pkcs11`) **functionally fails** in a fresh process (`inner_evp_generic_fetch:unsupported`) — operations only resolve once a token object forces module init in-process. Fix: the provider already ships `pkcs11-module-load-behavior = early` for exactly this case (forces the same lazy-init call from inside `OSSL_provider_init()` instead of leaving it to a key-object path); wired into the harness's T9 arena. See `docs/openssl-provider-remediation-plan-2026-08-25.md` R0.4 for the full story, including a real `mk_arena()` ordering bug it exposed and fixed along the way. | live probes (T9) | ~~Medium~~ |
-| WART-5 | The C++ engine rejects OpenSSL's SHA-1 OAEP defaults (`Invalid hashAlg/mgf combination for RSA-OAEP`, `SoftHSM_keygen.cpp:8056`) — plain `-pkeyopt rsa_padding_mode:oaep` against a token key fails until the caller pins `rsa_oaep_md`/`rsa_mgf1_md` (sha256 verified working). Likely deliberate FIPS posture; needs documenting, not fixing | live (T5's first run) | Low (interop caveat) |
+| WART-5 | **RESOLVED (R0.5, 2026-08-25 later same day; re-verified R21, 2026-08-26)** — was: the C++ engine rejects OpenSSL's SHA-1 OAEP defaults (`Invalid hashAlg/mgf combination for RSA-OAEP`, `SoftHSM_keygen.cpp:8056`) — plain `-pkeyopt rsa_padding_mode:oaep` against a token key fails until the caller pins `rsa_oaep_md`/`rsa_mgf1_md` (sha256 verified working). Deliberate FIPS posture, documented not fixed: `src/vendor/pkcs11-provider/README.md` has a working `-pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256` example matching harness T5. | live (T5's first run) | ~~Low~~ — |
 | WART-6 | **RESOLVED-AS-DOCUMENTED (R19c, 2026-08-26)** — a real TLS 1.3 handshake with this provider active and propquery pinning the client leaves `asn1_check_tlen`/`PKCS8_PRIV_KEY_INFO` errors on the error queue even though the handshake succeeds. Confirmed benign: absent with the provider inactive (control run), present whenever active regardless of group; live-traced to a genuine RSA object create/free cycle through this provider's own keymgmt while processing the peer's plain RSA certificate — one of several normal trial-decode attempts OpenSSL's generic multi-format decoder-chain framework makes, not an over-claiming `does_selection`. Not fixed (nothing to fix); documented as an interop caveat: callers must check the operation's own return code, not merely whether the error queue is empty | live (T13/T19c reproduction + no-provider control) | Low (interop caveat) |
 
 ### B. Backend algorithms not exposed
@@ -159,7 +159,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 |---|---|
 | ENV-1 | Staged OpenSSL 3.6.3 (`/usr/local/ssl` in `pqc-rust`) built **without** `enable-lms` — LMS test/remediation work needs a rebuilt oracle first. |
 | ENV-2 | **RESOLVED (R6 + R14, 2026-08-25/26)** — the pre-existing `softhsm2-util`/`C_GetSlotList` bug that blocked end-to-end verification is fixed; see the update log below for the full mechanism and sabotage-test result. Was: native Rust-engine arm structurally blocked, snapshot/restore wired only for WASM. Was: native Rust-engine arm structurally blocked, snapshot/restore wired only for WASM. Now: an opt-in, env-var-gated (`SOFTHSMRUST_STATE_FILE`) native persistence path added to `C_Initialize`/`C_Finalize` (`rust/src/ffi.rs`), reusing `state_snapshot.rs`'s existing `serialize_token_state`/`deserialize_token_state` verbatim (already unit-tested — `round_trip_restores_tokens_and_token_objects_only`, `truncated_snapshot_is_rejected_and_state_untouched`, both pass) and inheriting its `SHR3SNP2` refuse-don't-migrate policy unchanged. Byte-identical to today's in-memory-only behavior when the env var is unset (confirmed: the change is purely additive, gated, and does not touch any code path exercised when unset). **A separate, pre-existing bug was found and confirmed unrelated to this fix** (reproduced identically against the pre-R6 binary via `git stash`): `softhsm2-util --init-token` against the Rust engine fails with "Could not get the slot list" — traced to `C_GetSlotList`'s auto-advance-a-fresh-slot logic behaving inconsistently between the tool's two required calls (count-only, then buffered), confirmed live via a temporary debug trace (first call reports zero slots, second reports one). This blocks END-TO-END verification of R6 via the same tool T15b uses, but does not indicate the persistence code itself is wrong — not fixed here, given the risk of a blind fix to unfamiliar, pre-existing slot-management logic under time constraints. Provider+Rust coverage on the WASM static-link path (hub e2e) is unaffected either way. |
-| ENV-3 | Existing provider test assets are dead: `test_openssl_integration.sh` soft-fails every functional step and is referenced by nothing; `openssl_test.cnf` hardcodes another developer's absolute `.dylib` paths; the vendored meson test suite (30 tests) is dormant — no CMake/ctest/CI/gate wiring. |
+| ENV-3 | **RESOLVED (R0.3, 2026-08-25 later same day; re-verified R21, 2026-08-26)** — was: existing provider test assets are dead: `test_openssl_integration.sh` soft-fails every functional step and is referenced by nothing; `openssl_test.cnf` hardcodes another developer's absolute `.dylib` paths; the vendored meson test suite (30 tests) is dormant — no CMake/ctest/CI/gate wiring. Now: both dead files deleted (confirmed via `git log --diff-filter=D`; repo-wide grep found no remaining live reference); the vendored meson suite documented as intentionally unwired in `src/vendor/pkcs11-provider/README.md` rather than left silently dormant. |
 
 ---
 
@@ -1526,6 +1526,59 @@ Both engines' full test suites remain green (C++: 8/8 CTest suites;
 Rust: unaffected — no code under `rust/` changed by this item).
 **Harness: `PASS=55 FAIL=0 XFAIL=0 XPASS=0`** — three cases gained
 (T23/T23b/T23c), zero regressions.
+
+**Phase 4, R21 (hygiene tier, remaining four items), CLOSED —
+already resolved before this plan was written; zero code changes.**
+Item 1 of R21 (composite.c stray debug output) was executed earlier
+this session as R21.1. The other four — WART-1, WART-3, WART-5, ENV-3
+— turned out to be stale carryovers: all four were already fixed by a
+"P0 hygiene batch" (commit `3bf6f56`, R0.1–R0.5, dated 2026-08-25,
+same day as this audit but predating the phase-4 plan) that the
+phase-4 plan's own gap list did not check against before listing these
+as open work — the same class of stale-premise carry-forward this
+session already caught for R10 (SP800-108's real status) and F36-6's
+`set_skey`/`derive_skey` "stub" claim, just older. Re-verified each
+claim directly rather than trusting the commit message alone:
+- **WART-1**: `P11Objects.cpp`'s mandatory-attribute-check loop no
+  longer calls `getByteStringValue()` on non-byte-string attributes
+  (root-caused via gdb per R0.1's own commit message, not guessed).
+  The harness's own tail section (`test-openssl-provider.sh`) already
+  greps every case log for `ObjectFile.cpp(181)` and fails the run if
+  any appear — this exact assertion has been passing on every harness
+  run this entire session (R7 through R20's 55/55), which is itself
+  live, repeated confirmation the fix holds.
+- **WART-3**: `src/vendor/pkcs11-provider/CMakeLists.txt` generates a
+  real `config.h` at configure time (deriving `P11PROV_VERSION` from
+  the same `meson.build` `version:` field the WASM generator parses —
+  single source of truth), replacing the previous silent dependency on
+  a stale WASM-generated file happening to already sit on disk.
+  Re-verified live this session (R20 investigation): `openssl list
+  -providers` reports version `1.1`, matching `meson.build`'s own
+  declared version — no mismatch, no redefinition warnings.
+- **WART-5**: `src/vendor/pkcs11-provider/README.md` documents the
+  RSA-OAEP SHA-1-default-vs-engine-FIPS-posture mismatch with a
+  working `-pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256`
+  example matching harness T5 — read directly, confirmed present and
+  accurate, not just claimed.
+- **ENV-3**: `test_openssl_integration.sh` and `openssl_test.cnf` are
+  genuinely deleted (`git log --diff-filter=D` confirms, same P0
+  batch) — grepped the whole repo (scripts, CI configs, `docs/`) for
+  any remaining reference; only historical mentions in `CHANGELOG.md`
+  and the plan/audit docs themselves remain, no live/broken reference.
+  The vendored meson test suite (30 tests) is documented as
+  intentionally unwired in `src/vendor/pkcs11-provider/README.md`
+  ("assumes upstream's build layout and a SoftHSM2/NSS-softokn token
+  backend... would need real adaptation work rather than a flag flip")
+  — the gap matrix's ENV-3 row (§4.A) still reads as an open gap and
+  should be corrected to RESOLVED to match.
+
+No commit needed beyond this documentation update — there is no code
+to change; the fixes already exist and are already proven (the
+harness's own standing R0.1 regression guard, a live version check,
+two README reads, and a repo-wide reference grep all independently
+confirm it). Filed as its own commit anyway, per this project's
+convention that even a zero-code closure (matching R19's own
+"proof-debt closure, DONE, no code changes" precedent) gets recorded.
 
 ## 7. Companion document
 
