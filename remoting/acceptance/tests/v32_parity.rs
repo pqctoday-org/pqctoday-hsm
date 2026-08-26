@@ -1933,3 +1933,139 @@ fn v25_aes_gcm_authenticated_wrap_unwrap_parity() {
         v32::close_session(ks);
     });
 }
+
+// G2 gap-remediation (2026-08-26) — SplitKey/JoinKey, VENDOR EXTENSION (not
+// pkcs11f.h; not on the ledger's C_*-scanned RPC count). XOR split uses a
+// real RNG for its shares (softhsmrustv3::crypto::split_key::split_xor), so
+// unlike the KAT-style V23/V25 cases, this is NOT a byte-identical-across-
+// transports check — each transport's own split->join round trip is
+// verified independently to recover the original secret, same reasoning as
+// V24's OAEP case.
+#[test]
+fn v26_split_key_xor_round_trip_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let (_rv, s) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        let secret = b"a 32-byte secret key material!!".to_vec();
+        let mk_secret_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_GENERIC_SECRET as usize).to_le_bytes().to_vec()),
+            (CKA_TOKEN, vec![0u8]),
+            (CKA_VALUE, secret.clone()),
+        ];
+
+        // control (in-process)
+        let (rv_ctl, secret_h_ctl) = v32::create_object(s, &mk_secret_tmpl);
+        assert_eq!(rv_ctl, 0);
+        let (rv_split_ctl, shares_ctl) = v32::split_key::split(s, secret_h_ctl, 4, 4, 1, 0, b"\x02", "share");
+        assert_eq!(rv_split_ctl, 0);
+        assert_eq!(shares_ctl.len(), 4);
+        let (rv_join_ctl, joined_ctl) = v32::split_key::join(s, &shares_ctl, 4, 1, 0, secret.len() as u32, b"\x03", "joined");
+        assert_eq!(rv_join_ctl, 0);
+        let (rv_attrs_ctl, attrs_ctl) = v32::get_attribute_value(s, joined_ctl, &[CKA_VALUE]);
+        assert_eq!(rv_attrs_ctl, 0);
+        assert_eq!(attrs_ctl[0].value, secret, "control: joined secret must equal the original");
+
+        // gRPC
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        let (_rv, secret_h_g) = v32::create_object(gs.session_handle, &mk_secret_tmpl);
+        assert_eq!(_rv, 0);
+        let gsplit = g.split_key(proto::V32SplitKeyRequest {
+            session_handle: gs.session_handle,
+            secret_handle: secret_h_g,
+            parts: 4,
+            threshold: 4,
+            method: 1,
+            polynomial: 0,
+            cka_id_prefix: vec![0x02],
+            label: "share".to_string(),
+        }).await.unwrap().into_inner();
+        assert_eq!(gsplit.ck_rv, 0);
+        assert_eq!(gsplit.shares.len(), 4);
+        let gjoin = g.join_key(proto::V32JoinKeyRequest {
+            session_handle: gs.session_handle,
+            shares: gsplit.shares,
+            threshold: 4,
+            method: 1,
+            polynomial: 0,
+            expected_len: secret.len() as u32,
+            cka_id: vec![0x03],
+            label: "joined".to_string(),
+        }).await.unwrap().into_inner();
+        assert_eq!(gjoin.ck_rv, 0);
+        assert_ne!(gjoin.object_handle, 0);
+        let ga = g.c_get_attribute_value(proto::V32GetAttributeValueRequest { session_handle: gs.session_handle, object_handle: gjoin.object_handle, attribute_types: vec![CKA_VALUE] }).await.unwrap().into_inner();
+        assert_eq!(ga.attributes[0].value, secret, "gRPC: joined secret must equal the original");
+
+        // REST
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        let (_rv, secret_h_r) = v32::create_object(sh.as_u64().unwrap() as u32, &mk_secret_tmpl);
+        assert_eq!(_rv, 0);
+        let rsplit = rest_post(&base, "split-key", json!({
+            "session_handle": sh,
+            "secret_handle": secret_h_r,
+            "parts": 4,
+            "threshold": 4,
+            "method": 1,
+            "polynomial": 0,
+            "cka_id_prefix": b64(&[0x02]),
+            "label": "share",
+        })).await;
+        assert_eq!(rsplit["ck_rv"].as_u64().unwrap() as u32, 0);
+        let rshares = rsplit["shares"].clone();
+        assert_eq!(rshares.as_array().unwrap().len(), 4);
+        let rjoin = rest_post(&base, "join-key", json!({
+            "session_handle": sh,
+            "shares": rshares,
+            "threshold": 4,
+            "method": 1,
+            "polynomial": 0,
+            "expected_len": secret.len() as u32,
+            "cka_id": b64(&[0x03]),
+            "label": "joined",
+        })).await;
+        assert_eq!(rjoin["ck_rv"].as_u64().unwrap() as u32, 0);
+        let ra = rest_post(&base, "get-attribute-value", json!({"session_handle": sh, "object_handle": rjoin["object_handle"], "attribute_types": [CKA_VALUE]})).await;
+        assert_eq!(unb64(ra["attributes"][0]["value"].as_str().unwrap()), secret, "REST: joined secret must equal the original");
+
+        // Below-threshold join must fail with the real engine error code —
+        // XOR itself has no per-share threshold check (native::join's XOR
+        // arm just XORs whatever it's given; parts==threshold is enforced
+        // only at split time, per §13.1), so this uses the GF256 method,
+        // which DOES reject an insufficient share count. Proven identically
+        // on control and gRPC (REST already proven correct-path above; the
+        // negative wire path is the same MechParamBytes-free plain-JSON
+        // shape, so it is not re-checked a third time here).
+        let (_, gf_shares_ctl) = v32::split_key::split(s, secret_h_ctl, 5, 3, 4, 1, b"\x05", "gfshare");
+        let (rv_bad_ctl, _) = v32::split_key::join(s, &gf_shares_ctl[..2], 3, 4, 1, secret.len() as u32, b"\x06", "bad");
+        assert_ne!(rv_bad_ctl, 0);
+
+        let gfsplit = g.split_key(proto::V32SplitKeyRequest {
+            session_handle: gs.session_handle,
+            secret_handle: secret_h_g,
+            parts: 5,
+            threshold: 3,
+            method: 4,
+            polynomial: 1,
+            cka_id_prefix: vec![0x05],
+            label: "gfshare".to_string(),
+        }).await.unwrap().into_inner();
+        assert_eq!(gfsplit.ck_rv, 0);
+        let gbad = g.join_key(proto::V32JoinKeyRequest {
+            session_handle: gs.session_handle,
+            shares: gfsplit.shares[..2].to_vec(),
+            threshold: 3,
+            method: 4,
+            polynomial: 1,
+            expected_len: secret.len() as u32,
+            cka_id: vec![0x06],
+            label: "bad".to_string(),
+        }).await.unwrap().into_inner();
+        assert_eq!(gbad.ck_rv, rv_bad_ctl, "gRPC below-threshold rejection must match the engine's own code");
+
+        v32::close_session(s);
+    });
+}

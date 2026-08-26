@@ -360,3 +360,94 @@ green: 63 categories, 99 RPCs (unchanged — G1 added zero new RPCs, only
 new parameter shapes on existing ones).
 
 G2 (Split Key) is next — independent of G1, no ordering dependency.
+
+### 2026-08-26 — G2 (Split Key vendor RPCs)
+
+Shipped, all live-verified. Adds `SplitKey`/`JoinKey` to `Pkcs11V32` —
+explicitly labeled a VENDOR EXTENSION in the proto, gRPC, REST, and
+ledger, since there is no `CKM_PQCTODAY_SPLIT_KEY` `C_*` dispatch arm
+anywhere in the engine to mirror (confirmed again this slice, same
+finding as §0). Per the user's locked answer, this is real coverage, not
+the `N/A-engine` fallback row.
+
+**Wire shape, exactly as decided**: method + parts + threshold +
+optional polynomial in, `repeated {key_part_identifier, object_handle}`
+out. `method`/`polynomial` use the KMIP 3.0 §11.54/§11.55 enumeration
+codepoints VERBATIM — the same mapping `kmip/src/ops/split_key.rs`'s own
+Create/Join Split Key handlers already use (re-derived locally in each
+of the three new call sites since those KMIP-crate conversion fns are
+private to that crate, not shared — but the codepoints themselves are
+identical, so a caller driving both the KMIP and this remoting surface
+sees one consistent vocabulary, not two independently-numbered ones).
+
+**core:** new `verbs_v32::split_key` module — the first (and, per §0,
+likely only) verb pair in this whole mirror that calls
+`softhsmrustv3::native::{split,join}` directly instead of `ffi::C_*`,
+because no `C_*` entry point exists for it. Kept the same "(rv, T)"
+value-carrying convention as every `ffi::C_*`-backed verb regardless —
+`native::split`/`join`'s own `Result<_, CkRv>` (`CkRv = u32 == CK_RV`)
+maps onto it directly, so callers don't need to know this verb pair took
+a different path internally. 4 new core unit tests (44/44 core green):
+XOR split→join round trip; GF(2^8) 5-part/3-threshold split joined with
+only a 3-of-5 SUBSET (the actual threshold property — RW4's hybrid test
+already established the pattern of testing the meaningful case, not
+just a trivial full-set round trip); a below-threshold join rejected
+with the real `CKR_ARGUMENTS_BAD`; XOR's `parts == threshold` constraint
+(§13.1) rejected when violated; two wire-layer-only checks (undefined
+method/polynomial codepoints rejected before any engine call).
+
+**Real finding this slice**: XOR reconstruction (`native::join`'s XOR
+arm, itself a thin call to `crypto::split_key::join_xor`) has NO
+per-share-count check — it XORs whatever shares it is given, full stop.
+The `parts == threshold` invariant for XOR is enforced only at SPLIT
+time (§13.1: "[XOR Threshold] SHALL be identical to Split Key Parts");
+a JOIN given fewer than the original share count doesn't error, it
+silently reconstructs the WRONG secret. This is real, faithfully-mirrored
+engine behavior, not a remoting bug — discovered when the acceptance
+test's below-threshold assertion (written expecting XOR to reject a
+2-of-4 join, mirroring the polynomial methods' behavior) failed with
+`rv == 0` on the first live run. Fixed by reading `join_xor`'s source
+directly rather than guessing, then rewriting that one assertion to use
+the GF256 method (which DOES enforce a real threshold check via
+`crypto::split_key::join_gf256`) — the same method the core crate's own
+negative test already used for exactly this reason.
+
+**gRPC + REST**: straight handler pairs, no shared-enum ownership
+puzzle this time (unlike G1's `MechParamBytes`) — `split`/`join`'s
+inputs are plain scalars/bytes/strings, no embedded-pointer native
+struct involved. `V32SplitKeyShare` reused as both request and response
+element type (proto) and both request and response DTO (REST), keeping
+the "shares" shape identical on the way in and out. `join_key` reuses
+the pre-existing `V32ObjectHandleResponse`/`ObjectHandleResp` types —
+no new response type needed for JoinKey specifically.
+
+**Validation:** V26, a new three-transport parity case. Unlike G1's
+V23/V25 (KAT-grade, byte-identical ciphertext across transports), this
+is NOT a byte-identical check: XOR sharing draws its shares from
+`OsRng` (confirmed by reading `split_xor`'s source), so each transport
+produces different share bytes for the same secret by design. V26
+instead proves, independently per transport (matching V24's OAEP
+precedent for randomized operations): split → join round trip recovers
+the exact original secret. Plus a below-threshold negative case (GF256,
+for the reason above) proven on control and gRPC with the real error
+code compared directly, not just checked non-zero.
+
+**Ledger**: new `SplitKey` row — NOT sourced from
+`cpp_compliance_report.json` (this is a vendor capability, not a
+pkcs11f.h category), documented anyway per the standing "no record
+without proof, but also no unproven claim of scope" principle. `$schema_
+note` extended to explain why the ratchet's check (c) — which regexes
+for `rpc C_*(` — can never see `SplitKey`/`JoinKey` by construction, so
+their absence from that specific count is by design, not a silent gap;
+the ledger row is what keeps them from disappearing from view entirely.
+Ratchet green: **64 categories, 99 RPCs** (unchanged, exactly as
+predicted — `SplitKey`/`JoinKey` are invisible to the `C_*`-only RPC
+count by design).
+
+**Whole workspace green, 3 consecutive runs**: 2 posture + 7 legacy-
+parity + 26 v32-parity (1 `#[ignore]`d) + 44 core = **78 passed, 0
+failed** every time (times ranged 6.7s–13.1s across the three runs,
+core-crate RSA-2048 keygen still the dominant variance source, same as
+G1's note).
+
+G3+G4 (mechanism-cell sweep + V21 split) is next.

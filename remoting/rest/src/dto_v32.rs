@@ -769,3 +769,55 @@ impl From<(u32, u32)> for GetSessionValidationFlagsResp {
         Self { ck_rv, flags }
     }
 }
+
+// ── G2 (gap-remediation) — Split Key, VENDOR EXTENSION (not pkcs11f.h) ────
+// `method`/`polynomial` use the KMIP 3.0 §11.54/§11.55 enumeration
+// codepoints verbatim (same mapping `kmip/src/ops/split_key.rs` uses).
+
+#[derive(Deserialize, Serialize)]
+pub struct SplitKeyShareDto {
+    pub key_part_identifier: u32,
+    pub object_handle: u32,
+}
+#[derive(Deserialize)]
+pub struct SplitKeyReq {
+    pub session_handle: u32,
+    pub secret_handle: u32,
+    pub parts: u32,
+    pub threshold: u32,
+    pub method: u32,
+    #[serde(default)]
+    pub polynomial: u32,
+    #[serde(with = "b64", default)]
+    pub cka_id_prefix: Vec<u8>,
+    #[serde(default)]
+    pub label: String,
+}
+#[derive(Serialize)]
+pub struct SplitKeyResp {
+    pub ck_rv: u32,
+    pub shares: Vec<SplitKeyShareDto>,
+}
+impl From<(u32, Vec<(u32, u32)>)> for SplitKeyResp {
+    fn from((ck_rv, shares): (u32, Vec<(u32, u32)>)) -> Self {
+        let shares = shares
+            .into_iter()
+            .map(|(key_part_identifier, object_handle)| SplitKeyShareDto { key_part_identifier, object_handle })
+            .collect();
+        Self { ck_rv, shares }
+    }
+}
+#[derive(Deserialize)]
+pub struct JoinKeyReq {
+    pub session_handle: u32,
+    pub shares: Vec<SplitKeyShareDto>,
+    pub threshold: u32,
+    pub method: u32,
+    #[serde(default)]
+    pub polynomial: u32,
+    pub expected_len: u32,
+    #[serde(with = "b64", default)]
+    pub cka_id: Vec<u8>,
+    #[serde(default)]
+    pub label: String,
+}

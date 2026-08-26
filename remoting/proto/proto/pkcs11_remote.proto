@@ -561,6 +561,16 @@ service Pkcs11V32 {
   rpc C_VerifySignatureUpdate(V32DataRequest) returns (V32StatusResponse);
   rpc C_VerifySignatureFinal(V32SessionRequest) returns (V32StatusResponse);
   rpc C_GetSessionValidationFlags(V32GetSessionValidationFlagsRequest) returns (V32GetSessionValidationFlagsResponse);
+
+  // ── G2 (gap-remediation, 2026-08-26) — VENDOR EXTENSION, not part of
+  // pkcs11f.h. Mirrors softhsmrustv3::native::split/join (the same calls
+  // behind KMIP 3.0 §6.1.12/§6.1.33 Create/Join Split Key) so this
+  // remoting surface has parity with the KMIP server's own secret-
+  // sharing capability. There is no CKM_PQCTODAY_SPLIT_KEY C_* dispatch
+  // arm anywhere in the engine, so these two RPCs call native:: directly
+  // instead of going through ffi::C_* like every other RPC in this file.
+  rpc SplitKey(V32SplitKeyRequest) returns (V32SplitKeyResponse);
+  rpc JoinKey(V32JoinKeyRequest) returns (V32ObjectHandleResponse);
 }
 
 message V32GetSessionValidationFlagsRequest {
@@ -618,6 +628,40 @@ message V32UnwrapKeyAuthenticatedRequest {
   bytes wrapped_key = 4;
   repeated V32AttributeIn template = 5;
   bytes associated_data = 6;
+}
+
+// G2 vendor extension (Split Key) — field names mirror
+// softhsmrustv3::native::split/join's own parameter names exactly.
+// `method`/`polynomial` use the KMIP 3.0 §11.54/§11.55 enumeration
+// codepoints verbatim (the same mapping kmip/src/ops/split_key.rs uses),
+// not values invented for this wire format.
+message V32SplitKeyShare {
+  uint32 key_part_identifier = 1; // §4.30 index / finite-field x-coordinate
+  uint32 object_handle = 2;
+}
+message V32SplitKeyRequest {
+  uint32 session_handle = 1;
+  uint32 secret_handle = 2;
+  uint32 parts = 3;
+  uint32 threshold = 4;
+  uint32 method = 5; // §11.54: 1=XOR, 2=PolynomialGF65536, 3=PolynomialPrimeField, 4=PolynomialGF256
+  uint32 polynomial = 6; // §11.55: 0=absent, 1=Polynomial283, 2=Polynomial285; required for methods 2/4
+  bytes cka_id_prefix = 7; // each share's CKA_ID = this prefix || big-endian share index
+  string label = 8;
+}
+message V32SplitKeyResponse {
+  uint32 ck_rv = 1;
+  repeated V32SplitKeyShare shares = 2;
+}
+message V32JoinKeyRequest {
+  uint32 session_handle = 1;
+  repeated V32SplitKeyShare shares = 2;
+  uint32 threshold = 3;
+  uint32 method = 4;
+  uint32 polynomial = 5;
+  uint32 expected_len = 6; // original secret's byte length; de-pads the GF(2^16)/Prime-Field reconstructions
+  bytes cka_id = 7;
+  string label = 8;
 }
 
 // RW-P derive-family structured mechanism parameters. Field names/types

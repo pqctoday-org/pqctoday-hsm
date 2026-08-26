@@ -1613,6 +1613,96 @@ pub fn decapsulate_key(
     (rv, handle)
 }
 
+// ── split key (G2 gap-remediation slice) — VENDOR EXTENSION ─────────────
+// Not part of pkcs11f.h: there is no CKM_PQCTODAY_SPLIT_KEY C_* dispatch
+// arm anywhere in the engine (verified against ffi.rs directly), so unlike
+// every other verb in this module, `split_key::split`/`join` call
+// `softhsmrustv3::native::{split,join}` directly rather than `ffi::C_*`.
+// Those native fns already return `Result<_, CkRv>` where `CkRv = u32`
+// (== CK_RV), so `Ok`/`Err` map onto this module's own "(rv, T)" — the
+// same value-carrying convention every ffi::C_*-backed verb uses, kept
+// here purely because it is the right shape, not for parity with ffi::C_*.
+pub mod split_key {
+    use super::ck;
+    use softhsmrustv3::crypto::split_key::{Gf256Polynomial, SplitKeyMethod};
+    use softhsmrustv3::native;
+
+    /// KMIP 3.0 §11.54 Split Key Method Enumeration codepoints — the same
+    /// mapping `kmip/src/ops/split_key.rs`'s own Create/Join Split Key
+    /// handlers use, so a caller driving both the KMIP and this remoting
+    /// surface sees one wire vocabulary, not two independently-numbered
+    /// ones.
+    fn method_from_wire(v: u32) -> Option<SplitKeyMethod> {
+        match v {
+            1 => Some(SplitKeyMethod::Xor),
+            2 => Some(SplitKeyMethod::PolynomialGf65536),
+            3 => Some(SplitKeyMethod::PolynomialPrimeField),
+            4 => Some(SplitKeyMethod::PolynomialGf256),
+            _ => None,
+        }
+    }
+
+    /// §11.55 Split Key Polynomial Enumeration. `0` means "absent" (legal
+    /// for XOR/Prime-Field, which ignore it); `native::split`/`join`
+    /// themselves reject `None` for the two GF methods with
+    /// `CKR_ARGUMENTS_BAD` — this wire layer only rejects a value outside
+    /// the defined vocabulary, and lets the engine enforce the rest.
+    fn polynomial_from_wire(v: u32) -> Option<Option<Gf256Polynomial>> {
+        match v {
+            0 => Some(None),
+            1 => Some(Some(Gf256Polynomial::Polynomial283)),
+            2 => Some(Some(Gf256Polynomial::Polynomial285)),
+            _ => None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn split(
+        session: u32,
+        secret_handle: u32,
+        parts: u32,
+        threshold: u32,
+        method: u32,
+        polynomial: u32,
+        cka_id_prefix: &[u8],
+        label: &str,
+    ) -> (u32, Vec<(u32, u32)>) {
+        let Some(method) = method_from_wire(method) else {
+            return (ck::CKR_ARGUMENTS_BAD, Vec::new());
+        };
+        let Some(polynomial) = polynomial_from_wire(polynomial) else {
+            return (ck::CKR_ARGUMENTS_BAD, Vec::new());
+        };
+        match native::split(session, secret_handle, parts, threshold, method, polynomial, cka_id_prefix, label) {
+            Ok(shares) => (ck::CKR_OK, shares),
+            Err(rv) => (rv, Vec::new()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn join(
+        session: u32,
+        shares: &[(u32, u32)],
+        threshold: u32,
+        method: u32,
+        polynomial: u32,
+        expected_len: u32,
+        cka_id: &[u8],
+        label: &str,
+    ) -> (u32, u32) {
+        let Some(method) = method_from_wire(method) else {
+            return (ck::CKR_ARGUMENTS_BAD, 0);
+        };
+        let Some(polynomial) = polynomial_from_wire(polynomial) else {
+            return (ck::CKR_ARGUMENTS_BAD, 0);
+        };
+        match native::join(session, shares, threshold, method, polynomial, expected_len as usize, cka_id, label) {
+            Ok(handle) => (ck::CKR_OK, handle),
+            Err(rv) => (rv, 0),
+        }
+    }
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 /// PKCS#11 §5.2 two-call convention driver: NULL query for the length,
@@ -3030,6 +3120,105 @@ mod tests {
         let (rv, _) = unwrap_key_authenticated(session, u64::from(ck::CKM_AES_GCM), dparams2.as_slice(), wrapping_key, &wrapped, &unwrap_tmpl, bad_aad);
         assert_ne!(rv, 0, "mismatched AAD must be rejected, not silently unwrapped");
 
+        close_session(session);
+    }
+
+    // ── split key (G2 slice) ────────────────────────────────────────────
+
+    fn make_secret(session: u32, value: &[u8]) -> u32 {
+        let template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+            (u64::from(ck::CKA_VALUE), value.to_vec()),
+        ];
+        let (rv, handle) = create_object(session, &template);
+        assert_eq!(rv, 0);
+        handle
+    }
+
+    #[test]
+    #[serial]
+    fn split_key_xor_split_then_join_round_trip_recovers_secret() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let secret = b"a 32-byte secret key material!!";
+        let secret_h = make_secret(session, secret);
+
+        // §11.54 method 1 = XOR; §11.55 polynomial 0 = absent (XOR ignores it).
+        let (rv, shares) = split_key::split(session, secret_h, 4, 4, 1, 0, b"\x02", "share");
+        assert_eq!(rv, 0);
+        assert_eq!(shares.len(), 4);
+
+        let (rv, joined) = split_key::join(session, &shares, 4, 1, 0, secret.len() as u32, b"\x03", "joined");
+        assert_eq!(rv, 0);
+        assert_ne!(joined, 0);
+        let (rv, attrs) = get_attribute_value(session, joined, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(attrs[0].value, secret, "joined secret must equal the original");
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn split_key_gf256_threshold_subset_join_recovers_secret() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let secret = b"AES-256 key material, 32 bytes!";
+        let secret_h = make_secret(session, secret);
+
+        // method 4 = PolynomialGF256; polynomial 1 = Polynomial283 (AES/FIPS197).
+        let (rv, shares) = split_key::split(session, secret_h, 5, 3, 4, 1, b"\x02", "share");
+        assert_eq!(rv, 0);
+        assert_eq!(shares.len(), 5);
+
+        // Join with only 3 of the 5 shares — the whole point of a threshold scheme.
+        let subset = &shares[1..4];
+        let (rv, joined) = split_key::join(session, subset, 3, 4, 1, secret.len() as u32, b"\x03", "joined");
+        assert_eq!(rv, 0);
+        let (rv, attrs) = get_attribute_value(session, joined, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(attrs[0].value, secret);
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn split_key_join_below_threshold_and_bad_wire_codes_rejected() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let secret = b"secret16bytes!!!";
+        let secret_h = make_secret(session, secret);
+
+        let (rv, shares) = split_key::split(session, secret_h, 5, 4, 4, 1, b"\x02", "share");
+        assert_eq!(rv, 0);
+
+        // Two shares of a 4-of-5 scheme — must fail with the real engine
+        // error code, not silently reconstruct garbage.
+        let (rv, _) = split_key::join(session, &shares[..2], 4, 4, 1, secret.len() as u32, b"\x03", "joined");
+        assert_eq!(rv, ck::CKR_ARGUMENTS_BAD);
+
+        // An undefined method/polynomial codepoint is rejected at the wire
+        // layer itself, before any engine call.
+        let (rv, _) = split_key::split(session, secret_h, 5, 4, 99, 0, b"\x02", "share");
+        assert_eq!(rv, ck::CKR_ARGUMENTS_BAD, "undefined §11.54 method code");
+        let (rv, _) = split_key::split(session, secret_h, 5, 4, 4, 99, b"\x02", "share");
+        assert_eq!(rv, ck::CKR_ARGUMENTS_BAD, "undefined §11.55 polynomial code");
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn split_key_xor_rejects_parts_not_equal_threshold() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let secret = b"secret16bytes!!!";
+        let secret_h = make_secret(session, secret);
+        let (rv, _) = split_key::split(session, secret_h, 5, 3, 1, 0, b"\x02", "share");
+        assert_eq!(rv, ck::CKR_ARGUMENTS_BAD, "XOR requires parts == threshold (§13.1)");
         close_session(session);
     }
 }

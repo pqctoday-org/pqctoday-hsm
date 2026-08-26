@@ -1136,6 +1136,43 @@ impl Pkcs11V32 for Pkcs11V32Service {
         .await?;
         Ok(Response::new(V32GetSessionValidationFlagsResponse { ck_rv, flags }))
     }
+
+    // ── G2 (gap-remediation) — Split Key, VENDOR EXTENSION (not pkcs11f.h) ──
+
+    async fn split_key(
+        &self,
+        request: Request<V32SplitKeyRequest>,
+    ) -> Result<Response<V32SplitKeyResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, shares) = blocking(move || {
+            v32::split_key::split(
+                req.session_handle, req.secret_handle, req.parts, req.threshold, req.method, req.polynomial,
+                &req.cka_id_prefix, &req.label,
+            )
+        })
+        .await?;
+        let shares = shares
+            .into_iter()
+            .map(|(key_part_identifier, object_handle)| V32SplitKeyShare { key_part_identifier, object_handle })
+            .collect();
+        Ok(Response::new(V32SplitKeyResponse { ck_rv, shares }))
+    }
+
+    async fn join_key(
+        &self,
+        request: Request<V32JoinKeyRequest>,
+    ) -> Result<Response<V32ObjectHandleResponse>, Status> {
+        let req = request.into_inner();
+        let shares: Vec<(u32, u32)> = req.shares.iter().map(|s| (s.key_part_identifier, s.object_handle)).collect();
+        let (ck_rv, object_handle) = blocking(move || {
+            v32::split_key::join(
+                req.session_handle, &shares, req.threshold, req.method, req.polynomial, req.expected_len,
+                &req.cka_id, &req.label,
+            )
+        })
+        .await?;
+        Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
+    }
 }
 
 use pqctoday_pkcs11_remote_proto::v32_derive_key_request::Structured;

@@ -124,6 +124,8 @@ pub fn router(state: V32State) -> Router {
         .route("/v32/verify-signature-update", post(verify_signature_update))
         .route("/v32/verify-signature-final", post(verify_signature_final))
         .route("/v32/get-session-validation-flags", post(get_session_validation_flags))
+        .route("/v32/split-key", post(split_key))
+        .route("/v32/join-key", post(join_key))
         .with_state(state)
 }
 
@@ -594,6 +596,24 @@ async fn verify_signature_final(Json(r): Json<DatalessSession>) -> Json<StatusRe
 }
 async fn get_session_validation_flags(Json(r): Json<GetSessionValidationFlagsReq>) -> Json<GetSessionValidationFlagsResp> {
     Json(v32::get_session_validation_flags(r.session_handle, r.validation_type).into())
+}
+
+// ── G2 (gap-remediation) — Split Key, VENDOR EXTENSION (not pkcs11f.h) ────
+
+async fn split_key(Json(r): Json<SplitKeyReq>) -> Json<SplitKeyResp> {
+    Json(
+        v32::split_key::split(
+            r.session_handle, r.secret_handle, r.parts, r.threshold, r.method, r.polynomial, &r.cka_id_prefix, &r.label,
+        )
+        .into(),
+    )
+}
+async fn join_key(Json(r): Json<JoinKeyReq>) -> Json<ObjectHandleResp> {
+    let shares: Vec<(u32, u32)> = r.shares.iter().map(|s| (s.key_part_identifier, s.object_handle)).collect();
+    Json(
+        v32::split_key::join(r.session_handle, &shares, r.threshold, r.method, r.polynomial, r.expected_len, &r.cka_id, &r.label)
+            .into(),
+    )
 }
 
 // Small shared request shapes used by several routes.
