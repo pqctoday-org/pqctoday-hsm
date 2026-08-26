@@ -138,7 +138,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | ALG-4 | **RESOLVED (R7, 2026-08-26)** — was: provider `composite.c` registry had 3 of the 8 draft-lamps-pq-composite-sigs-19 §6 profiles; missing 5 included all four §10.4-recommended plus MLDSA65-ECDSA-P384-SHA512. Now: all 8 profiles registered and live-verified (real token sign+verify, both sabotage controls rejected, per profile — harness T21a-h). Landing them also fixed two pre-existing bugs in the original 3 (classical-hash-tracked-profile-name-not-classical-algorithm's-own-convention, affecting .45/.49) and an RSA-3072 signature-buffer sizing bug. | KMIP layer has all 8 §10.4 profiles | ~~provider `composite.c` registry has 3; missing 5 include **all four §10.4-recommended** (MLDSA44-Ed25519-SHA512, MLDSA44-ECDSA-P256-SHA256, MLDSA65-RSA3072-PSS-SHA512, MLDSA65-Ed25519-SHA512) + MLDSA65-ECDSA-P384-SHA512~~ — | ~~Medium–High~~ — |
 | ALG-5 | **RESOLVED (R4, 2026-08-25)** — was: registration branch dead. Turned out to need five real fixes, not the originally-guessed "2-line checklist omission": (1) two fabricated fallback constants in `exchange.c` (`CKK_X25519`/`CKK_X448` do not exist in the PKCS#11 spec — real montgomery keys are `CKK_EC_MONTGOMERY`, distinguished by curve name/size, matching Edwards' own pattern; the fake values meant the key-type sniff could never match a real key) — fixed, key-exchange mechanism now correctly resolves from bit size. (2) Four missing-case bugs across `objects.c` (fetch, export, `get_ec_public_raw`'s peer-marshalling gate, and two import/store-dispatch switches) and `store.c` (naming) — the same missing-case class found twice in R1. (3) **The actual root cause of "genpkey succeeds but the token silently creates the wrong key type"**: the C++ engine's `generateED()` (shared by `CKM_EC_EDWARDS_KEY_PAIR_GEN` and `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` — the mechanism itself is never passed into that function) determines the resulting key's `CKK_*` type solely from an explicit `CKA_KEY_TYPE` on the public-key template, defaulting to `CKK_EC_EDWARDS` when absent — found live, not assumed: `genpkey` exited 0 and created two real objects, but reading the result back showed `CKK_EC_EDWARDS` (0x40), not `CKK_EC_MONTGOMERY` (0x41). EC/Edwards never needed to send this explicitly (the engine's default already matched them); montgomery does. Fixed by conditionally adding `CKA_KEY_TYPE` to the shared `p11prov_ec_gen`'s public-key template only for montgomery (zero diff for the already-working EC/Edwards paths). Curve-parameter DER bytes (`curve25519`/`curve448` PrintableStrings) verified two independent ways: direct DER-encoding computation and byte-for-byte match against the latchset sibling's own shipped constants. **Live-verified, both curves, both directions, token-to-token**: X25519 produces a byte-identical 32-byte shared secret; X448 a byte-identical 56-byte one. **A sixth, narrower, separate gap surfaced and was left open**: deriving against a genuinely foreign (default-provider-only) peer key with OpenSSL's peer validation enabled fails with `OSSL_PARAM_get_BN: param of incompatible type` — T8's identical shape works for regular EC but not montgomery; traced to OpenSSL's cross-provider `EVP_PKEY_public_check` falling into a legacy EC_KEY-control translation path that assumes Weierstrass X/Y BIGNUM coordinates montgomery keys don't have. The provider's own derive mechanism is unaffected and proven correct; this is a peer-validation-specific interaction, documented in `T16`'s comment rather than silently dropped. | both engines advertise `CKM_X25519`/`CKM_X448`; live probe + source (`exchange.c`, `objects.c`, `store.c`, `keymgmt.c`, `SoftHSM_keygen.cpp`) | ~~Medium~~ — |
 | ALG-6 | **CLOSED, deliberately unexposed (R20, 2026-08-26)** — investigated: OpenSSL 3.6 does have a standard EC KEM fetch surface (`ec_kem.c`, RFC 9180 DHKEM), but this project's own engine-level "ECDH-as-KEM" capability is **raw ECDH**, not RFC 9180's HKDF-Extract-and-Expand construction — exposing it under OpenSSL's `EC` KEM name would silently produce non-DHKEM-compliant output for any caller expecting RFC 9180 semantics. No current consumer needs the generic KEM operation type for EC (the real hybrid-KEM combiner bypasses it entirely). Deliberately unexposed; closed without code. | both engines flag ENCAP/DECAP on `CKM_ECDH1_DERIVE` | ~~not exposed as an OSSL KEM~~ — | ~~Low~~ — |
-| ALG-7 | ChaCha20 / ChaCha20-Poly1305 | both engines | cipher table is AES-only | Low |
+| ALG-7 | **RESOLVED (R26, 2026-08-26)** — was: cipher table is AES-only. Now: `chacha.c` implements CKM_CHACHA20 (bare stream) and CKM_CHACHA20_POLY1305 (AEAD), reusing cipher.c's own generic newctx/freectx/update/final/skey_init entry points (had to become genuinely cross-family for this, not AES-private) plus new shared AEAD deferred-mechanism-parameter machinery (see the item's own narrative for why deferred). **A real prerequisite surfaced first and was fixed as part of this item**: neither `CKM_AES_CTR` (a genuine unfinished `/* TODO */` stub) nor `CKM_AES_GCM` (dead registration code, missing from the mechanism checklist that makes anything reachable) had ever actually worked through this provider's OP_CIPHER interface — both fixed, both live-proven byte-identical to software (CTR) or cross-implementation-tag-matched (GCM), same rigor as ChaCha20/ChaCha20-Poly1305 themselves. | both engines | ~~cipher table is AES-only~~ — | ~~Low~~ — |
 | ALG-8 | **RESOLVED (R8 + R23, 2026-08-25/26)** — HMAC/CMAC/KMAC-128/256 all reach `EVP_MAC` (see OP-1). CMAC's own C++-only status confirmed accurate, not stale, before R23 scoped its own harness to the C++ arm only: `rust/src/crypto/handlers.rs`'s sign dispatch has no `CKM_AES_CMAC` case (the constant is used only inside its own SP800-108-PRF-selection code); KMAC-128/256 dispatch on both engines (`handlers.rs:1461/1468`). | both (CMAC C++-only, KMAC both) | see OP-1 | ~~Medium~~ — |
 | — | FrodoKEM / Classic McEliece (Rust vendor mechs), BIP32, Keccak-256, split-key | Rust engine / KMIP | deliberately out of OpenSSL scope — recorded, not gapped | — |
 
@@ -2113,6 +2113,178 @@ HSS is still unexercised by anything in this codebase (both engines'
 own keygen only ever produces L=1 today, and `hss_sig_size()`'s
 multi-level math is accordingly unverified beyond the formula itself);
 XMSS/XMSS-MT (R27) remains untouched and parked.
+
+**Phase 5, R26 (ChaCha20 + ChaCha20-Poly1305, ALG-7), DONE — a real
+prerequisite bug found and fixed first (AES-CTR/GCM never actually
+worked through this provider), three more real bugs found and fixed
+while building ChaCha20 on top of the now-shared plumbing, one genuine
+architectural limitation found and accommodated by design.**
+
+**The prerequisite, found while designing chacha.c's own shape (before
+writing any ChaCha20 code):** `p11prov_cipher_prep_mech`'s own
+`CKM_AES_CTR` case was a literal `/* TODO */` stub returning
+`CKR_MECHANISM_INVALID` unconditionally — never finished, not broken by
+anything this session touched. Separately, `CKM_AES_GCM`'s own
+registration code in `provider.c` was present but **dead**: `AES_MECHS`
+(the checklist that determines which mechanisms actually get scanned
+into a slot's algorithm table) never included it, so the `ADD_ALGO`
+block for GCM was unreachable regardless of correctness. Neither gap
+was ever caught because nothing in this harness — or, per a live check,
+anything else in this project — had ever exercised AES-CTR or AES-GCM
+through this provider's own `OSSL_OP_CIPHER` interface before. Both
+engines' own native PKCS#11 handling of these mechanisms (confirmed by
+reading `SoftHSM_cipher.cpp` and `rust/src/ffi.rs` directly) was never
+in question — this was purely a provider-side gap.
+
+**Fixed, and made genuinely shared** (chacha.c needed the exact same
+machinery, so this had to stop being AES-private): CTR now builds a
+real `CK_AES_CTR_PARAMS` (`ulCounterBits=128`, matching OpenSSL's own
+whole-128-bit-counter CTR semantics) instead of misapplying CBC's bare-
+IV pattern. GCM's checklist gap is fixed; its own `get_params` gained a
+`case MODE_gcm` it never had (the function returned an error for GCM
+unconditionally before); its `get_ctx_params`/`set_ctx_params` gained
+real `OSSL_CIPHER_PARAM_AEAD_TAG`/`AEAD_TAGLEN` handling that did not
+exist anywhere in this provider before this item, plus the AAD-
+accumulation and deferred-mechanism-construction machinery described
+below.
+
+**The core design problem, and why it applies equally to AES-GCM and
+ChaCha20-Poly1305:** PKCS#11's own `CK_GCM_PARAMS`/`CK_SALSA20_
+CHACHA20_POLY1305_PARAMS` need the COMPLETE AAD baked into the
+mechanism parameter at `C_EncryptInit`/`C_DecryptInit` time. OpenSSL's
+own EVP AEAD convention delivers AAD via zero or more `update(out=
+NULL)` calls made AFTER `encrypt_init`/`decrypt_init` has already
+returned — the mechanism literally cannot be built at the point PKCS#11
+wants it built. Solved by deferring the real `CK_*_PARAMS` construction
+(and the real `C_EncryptInit`/`C_DecryptInit` call) from `prep_mech` to
+a new `p11prov_cipher_ensure_session()`, invoked from the first REAL
+(non-AAD) `update()` call or from `final()` if there was none — by
+which point all AAD has necessarily arrived. New ctx fields (`is_aead`,
+`aead_iv`/`aead_ivlen`, `aad`/`aadlen`, `tag`/`taglen`/`tag_set`) carry
+the state across that gap. `update()`'s own `out==NULL` branch now
+means "accumulate AAD," matching the EVP convention, and is rejected
+loudly (not silently dropped) if it arrives after real data has already
+started, or on a non-AEAD mechanism.
+
+**Four real bugs found and fixed while building this, three of them the
+same class of mistake — case-label/timing traps that only show up once
+something is actually exercised, not visible from reading the code
+statically:**
+
+1. `case MODE_gcm:`/`case MODE_poly1305:` never matched their own
+   switch expression. `MODE_gcm`'s own macro value already carries
+   `MODE_flag_aead`, but the `switch (mode & MODE_modes_mask)` above it
+   masks that bit off before comparing — the case label needed the same
+   mask (`case MODE_gcm & MODE_modes_mask:`) or it silently fell to
+   `default` every time. Caught live: a HARD-propquery `EVP_CIPHER_
+   fetch()` of AES-256-GCM failed outright where a SOFT one had masked
+   the failure by quietly falling back to software (see finding 3
+   below) — chacha.c's own equivalent was rewritten to switch on the
+   real `mechanism` constant instead, sidestepping the whole bitmask
+   class of bug rather than just patching this one instance.
+2. `get_ctx_params(OSSL_CIPHER_PARAM_IVLEN)` read `cctx->is_aead`/
+   `aead_ivlen` to decide what IV length to report — but OpenSSL's own
+   `EVP_CIPHER_CTX_get_iv_length()` (confirmed by reading `evp_lib.c`
+   directly) calls THIS function to compute the `ivlen` it then passes
+   TO `encrypt_init`/`decrypt_init` — i.e. it runs before `prep_mech`'s
+   own `set_aead_iv()` has ever set `is_aead` true, so it always saw the
+   pre-init default and silently reported the wrong length (this
+   provider's own generic 16 instead of GCM/ChaCha20-Poly1305's real
+   12) — no error anywhere, just a wrong length quietly flowing into
+   `encrypt_init`'s own `ivlen` argument. Caught by adding targeted
+   `P11PROV_debug()` tracing and watching `aead_ivlen` arrive at
+   `prep_mech` as 16, not 12, mid-operation — not visible from reading
+   either function in isolation. Fixed by keying off `cctx->mech.
+   mechanism` (reliably set from `newctx()` onward) for the mechanism's
+   own default, preferring the real negotiated value only once one
+   exists.
+3. Manual live testing initially used a SOFT propquery (`"?provider=
+   pkcs11"`) — with this provider's own "ChaCha20-Poly1305"/"AES-256-
+   GCM" registered under the exact same names OpenSSL's default
+   provider already uses, `EVP_CIPHER_fetch()` silently resolved to
+   software with zero token involvement, every single time, including
+   passing a cross-implementation tag comparison against real software
+   (trivially, since it secretly WAS software on both sides) — the R22
+   "openssl kdf CLI" trap rediscovered one layer down, in `EVP_CIPHER_
+   fetch()` instead of a CLI subcommand. Fixed by switching to a HARD
+   propquery (`"provider=pkcs11"`) for this item's own new test tooling
+   (`aead-probe.c`) and harness cases, which immediately turned the
+   silent wrong-answer into a loud, honest fetch failure — surfacing
+   findings 1 and 4 that the soft propquery had been hiding.
+4. The new harness cases (`T27`/`T27b`/`T27c`/`T27d`) initially failed
+   outright even after the case-label and IVLEN fixes and the switch to
+   a hard propquery — `EVP_CIPHER_fetch()` failed with "unsupported"
+   because none of the four new arenas set `pkcs11-module-load-behavior
+   = early`, the exact WART-4/R0.4 lesson this project's own R22
+   narrative already documents (a hard propquery with no early module
+   load means the provider's own algorithm registry is still empty at
+   fetch time, since nothing has yet triggered the lazy module/slot
+   scan) — written down once already, not re-applied to this item's own
+   new arenas until it broke live. Fixed; all four arenas now set it.
+
+**A genuine architectural limitation found and accommodated, not
+patched around — decided by the user (2026-08-26):** GCM/ChaCha20-
+Poly1305 decrypt on this engine (`OSSLEVPSymmetricAlgorithm.cpp`)
+deliberately withholds ALL plaintext until the tag is verified — a
+correct security design (never hand back unauthenticated data) — and
+releases the entire message at once once it is. OpenSSL's own
+`EVP_DecryptFinal_ex` (confirmed by reading `crypto/evp/evp_enc.c`
+directly) hardcodes the buffer it gives a provider's `final()` callback
+to exactly `EVP_CIPHER_CTX_get_block_size(ctx)`, with no per-message way
+to enlarge it — the two designs are incompatible for any message whose
+plaintext doesn't fit in one declared block. (Encrypt never hits this:
+ciphertext streams out via `update()` immediately, with no
+authentication gate on release.) Accommodated by reporting a generous
+but FIXED `AEAD_DECRYPT_MAX_MSG_LEN` (65536 bytes, `cipher.h`) as both
+mechanisms' own decrypt-side block size — ordinary messages now work
+through the standard `update()`/`final()` API; anything larger fails
+cleanly with `CKR_BUFFER_TOO_SMALL`, not silent truncation or
+corruption. Documented here as a known, deliberate ceiling, not a bug.
+
+**Live-proven, both mechanisms, both new and prerequisite:** AES-256-
+CTR and ChaCha20 (bare stream) byte-identical to software across 200+
+bytes (crossing the counter-increment seam past one AES/ChaCha block —
+a wrong counter/nonce split would only show up past that point).
+AES-256-GCM and ChaCha20-Poly1305 full AEAD workflows (`aead-probe.c`,
+a new permanent tool — `openssl enc` itself refuses AEAD ciphers
+outright, an unrelated, long-standing CLI limitation): AAD, real
+`EVP_CTRL_AEAD_GET_TAG`/`SET_TAG`, both tampered-tag and tampered-
+ciphertext sabotage controls rejected BY THE TOKEN ITSELF (confirmed via
+engine-log: `Error 64 returned by C_DecryptFinal` on both sabotage
+paths, not a software-side check). Cross-implementation proof: same
+key/IV/AAD/plaintext through the pkcs11 and default providers produces
+byte-identical tags for both mechanisms — genuine cryptographic
+correctness, not just internal self-consistency.
+
+**Object-store side-effect, needed for the legacy bytes-in key-import
+path both `openssl enc -K <hex>` and `aead-probe.c` exercise:**
+`p11prov_cipher_legacy_init` (now shared, was AES-only) hardcoded
+`CKK_AES` for every imported key regardless of mechanism — harmless
+while only AES existed, wrong for ChaCha20 (the engine's own type check
+rejects a `CKK_AES`-typed key for `CKM_CHACHA20`/`_POLY1305`). Fixed to
+switch on `cctx->mech.mechanism`. `p11prov_store_aes_key` (`objects.c`)
+took an explicit `CK_KEY_TYPE` parameter (was hardcoded `CKK_AES`
+internally too) so `CKK_CHACHA20` import shares it rather than
+duplicating it, the same pattern R23 already established for CMAC's own
+`CKK_AES`-only base key via `p11prov_create_mac_key`.
+
+New harness cases: `T27` (AES-256-CTR, software-parity + round-trip),
+`T27_negctl` (R13 negative-control twin), `T27b` (AES-256-GCM full AEAD
+workflow), `T27c` (ChaCha20 stream, software-parity + round-trip),
+`T27d` (ChaCha20-Poly1305 full AEAD workflow). Full regression: **C++
+CTest 8/8 passed**; Rust `cargo test` not re-run (no `rust/` source
+touched by this item). **Harness: `PASS=72 FAIL=0 XFAIL=0 XPASS=0`** —
+five cases gained, zero regressions.
+
+**What remains, explicitly not done by this item:** AES-CCM (still
+genuinely unregistered, out of this item's own scope — user's choice
+named AES-CTR/GCM specifically); AES-OFB/CFB* (still the genuine `/*
+TODO */` stub, never touched); the `AEAD_DECRYPT_MAX_MSG_LEN` ceiling
+itself has no dedicated over-the-limit test proving it fails cleanly
+rather than corrupting something (asserted from code reading, not
+independently live-verified); ChaCha20's own AAD-only / zero-length-
+plaintext edge case is untested (the four new harness cases all use
+non-empty plaintext).
 
 ## 7. Companion document
 

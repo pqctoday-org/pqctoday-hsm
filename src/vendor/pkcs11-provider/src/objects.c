@@ -5851,13 +5851,17 @@ CK_RV p11prov_obj_import_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
 
 #if SKEY_SUPPORT
 
+/* Phase 5 R26: took an explicit CK_KEY_TYPE (was hardcoded CKK_AES) so
+ * CKK_CHACHA20's own bytes-in import can share this rather than
+ * duplicating it -- same reasoning as R23's own p11prov_create_mac_key
+ * (mac.c) extension for CMAC's CKK_AES-only base key. */
 static CK_RV p11prov_store_aes_key(P11PROV_CTX *provctx, P11PROV_OBJ **ret,
+                                   CK_KEY_TYPE key_type,
                                    const unsigned char *secret,
                                    size_t secretlen, char *label,
                                    CK_FLAGS usage, bool session_key)
 {
     CK_OBJECT_CLASS key_class = CKO_SECRET_KEY;
-    CK_KEY_TYPE key_type = CKK_AES;
     CK_SLOT_ID slot = CK_UNAVAILABLE_INFORMATION;
     P11PROV_SLOTS_CTX *slots = NULL;
     P11PROV_SESSION *session = NULL;
@@ -6047,7 +6051,9 @@ P11PROV_OBJ *p11prov_obj_import_secret_key(P11PROV_CTX *ctx, CK_KEY_TYPE type,
 
     switch (type) {
     case CKK_AES:
-        rv = p11prov_store_aes_key(ctx, &obj, key, keylen, NULL, usage, true);
+    case CKK_CHACHA20:
+        rv = p11prov_store_aes_key(ctx, &obj, type, key, keylen, NULL, usage,
+                                   true);
         if (rv != CKR_OK) {
             P11PROV_raise(ctx, rv, "Failed to import");
             goto done;

@@ -869,9 +869,18 @@ static CK_RV alg_set_op(OSSL_ALGORITHM **op, int idx, OSSL_ALGORITHM *alg)
         CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN, CKM_HSS, CKM_HSS_KEY_PAIR_GEN
 
 #if SKEY_SUPPORT == 1
+/* phase 5 R26 prerequisite: CKM_AES_GCM was missing from this checklist,
+ * so it was never scanned into a slot's mechanism list and the ADD_ALGO
+ * registration below (case CKM_AES_GCM:) was unreachable dead code --
+ * a different kind of gap than CTR's own genuine unfinished-stub bug,
+ * fixed in p11prov_cipher_prep_mech() (cipher.c). */
 #define AES_MECHS \
     CKM_AES_ECB, CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_CTR, CKM_AES_CTS, \
-        CKM_AES_OFB, CKM_AES_CFB8, CKM_AES_CFB128, CKM_AES_CFB1
+        CKM_AES_OFB, CKM_AES_CFB8, CKM_AES_CFB128, CKM_AES_CFB1, \
+        CKM_AES_GCM
+
+/* phase 5 R26 */
+#define CHACHA_MECHS CKM_CHACHA20, CKM_CHACHA20_POLY1305
 #endif
 
 static void alg_rm_mechs(CK_ULONG *checklist, CK_ULONG *rmlist, int *clsize,
@@ -937,7 +946,8 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              CKM_EDDSA,
                              PQC_MECHS,
 #if SKEY_SUPPORT == 1
-                             AES_MECHS
+                             AES_MECHS,
+                             CHACHA_MECHS
 #endif
     };
     bool add_rsasig = false;
@@ -1450,6 +1460,15 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 ADD_ALGO(AES_192_CCM, aes192ccm, cipher, prop);
                 ADD_ALGO(AES_128_CCM, aes128ccm, cipher, prop);
                 UNCHECK_MECHS(CKM_AES_CCM);
+                break;
+            /* phase 5 R26 */
+            case CKM_CHACHA20:
+                ADD_ALGO(CHACHA20, chacha20256stream, cipher, prop);
+                UNCHECK_MECHS(CKM_CHACHA20);
+                break;
+            case CKM_CHACHA20_POLY1305:
+                ADD_ALGO(CHACHA20_POLY1305, chacha20256poly1305, cipher, prop);
+                UNCHECK_MECHS(CKM_CHACHA20_POLY1305);
                 break;
 #endif
             default:

@@ -376,6 +376,14 @@ extern const OSSL_DISPATCH
 #define P11PROV_DESCS_AES_192_CCM "AES-192 CCM PKCS11 Provider Implementation"
 #define P11PROV_NAMES_AES_128_CCM "AES-128-CCM:id-aes128-CCM"
 #define P11PROV_DESCS_AES_128_CCM "AES-128 CCM PKCS11 Provider Implementation"
+/* Phase 5 R26. Names confirmed live against `openssl list -cipher-
+ * algorithms -provider default` -- no OID alias for either, unlike most
+ * AES variants above. */
+#define P11PROV_NAMES_CHACHA20 "ChaCha20"
+#define P11PROV_DESCS_CHACHA20 "ChaCha20 PKCS11 Provider Implementation"
+#define P11PROV_NAMES_CHACHA20_POLY1305 "ChaCha20-Poly1305"
+#define P11PROV_DESCS_CHACHA20_POLY1305 \
+    "ChaCha20-Poly1305 PKCS11 Provider Implementation"
 #define P11PROV_NAME_GENERIC_SECRET "GENERIC-SECRET"
 #define P11PROV_NAMES_GENERIC_SECRET P11PROV_NAME_GENERIC_SECRET
 #define P11PROV_DESCS_GENERIC_SECRET "PKCS11 Generic Secret Implementation"

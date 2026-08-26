@@ -250,6 +250,14 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src/lib/pkcs11)
     target_link_libraries(hss_w4_keygen ${CMAKE_DL_LIBS})
 
+    # aead-probe: phase-5 R26 test helper — exercises the full EVP AEAD
+    # workflow (AAD, tag get/set, both sabotage controls) for
+    # CKM_AES_GCM / CKM_CHACHA20_POLY1305, since `openssl enc` refuses
+    # AEAD ciphers outright (see the file's own header).
+    add_executable(aead_probe scripts/aead-probe.c)
+    target_include_directories(aead_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(aead_probe ${OPENSSL_LIBRARIES})
+
     # skey-flow-probe: phase-5 R24 (F36-3) test helper — exercises the
     # EVP_SKEY opaque-key API (generate/derive_SKEY/init_SKEY) against
     # this provider's SKEYMGMT/HKDF/HMAC, cross-checking the derived

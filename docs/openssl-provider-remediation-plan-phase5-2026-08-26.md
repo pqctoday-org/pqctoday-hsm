@@ -375,6 +375,45 @@ today; read `cipher.c`'s key handling before deciding).
 AND AAD-corruption rejection; engine-log + negative twin; sabotage the
 counter/nonce packing. Harness T27/T27b. ALG-7 flips RESOLVED.
 
+**Execution update (2026-08-26):** R26 executed and landed — see
+`docs/openssl-provider-coverage-audit-2026-08-25.md`'s "Phase 5, R26"
+entry for the full mechanism. A real prerequisite surfaced BEFORE any
+ChaCha20 code was written: neither `CKM_AES_CTR` (a genuine unfinished
+`/* TODO */` stub) nor `CKM_AES_GCM` (dead registration, missing from
+the mechanism checklist) had ever worked through this provider's own
+cipher interface. User's own choice (2026-08-26, asked live once this
+was found): fix both properly first, then build ChaCha20 sharing that
+now-real AEAD infrastructure, rather than shipping ChaCha20 alone or
+descoping to document-only. `chacha.c` reuses cipher.c's own generic
+newctx/freectx/update/final/skey_init (had to become genuinely cross-
+family, not AES-private, for this to work) plus new shared AEAD
+deferred-mechanism-parameter machinery (AAD must be complete before
+PKCS#11's own mechanism param can be built, but OpenSSL's own AAD
+delivery happens after encrypt_init/decrypt_init already returned — see
+the coverage-audit's own narrative for the resolution). Four real bugs
+found and fixed (a case-label/bitmask trap, a chicken-and-egg IVLEN
+timing bug, a SECOND independent instance of R22's own "soft propquery
+silently prefers default" trap, and R22's own load-behavior=early
+lesson not yet applied to this item's own new arenas). One genuine
+architectural limitation found and accommodated by explicit user
+decision, not silently patched around: this engine's own GCM/ChaCha20-
+Poly1305 decrypt withholds all plaintext until the tag verifies
+(correct security design) but OpenSSL's own `EVP_DecryptFinal_ex`
+hardcodes a fixed, per-message-unenlargeable output buffer sized to the
+cipher's own declared block_size — accommodated with a documented
+65536-byte ceiling (`AEAD_DECRYPT_MAX_MSG_LEN`, `cipher.h`), not a
+silent truncation. New permanent tool `aead-probe.c` (`openssl enc`
+itself refuses AEAD ciphers outright). Both AES-CTR/ChaCha20 (stream)
+proven byte-identical to software across the >64-byte counter seam; both
+AES-GCM/ChaCha20-Poly1305 (AEAD) proven via full workflow (AAD, real
+tag get/set, both sabotage controls rejected BY THE TOKEN ITSELF per
+engine-log) AND cross-implementation tag-matched against software.
+New harness cases T27/T27_negctl/T27b/T27c/T27d (T27_negctl added
+beyond this plan's own T27/T27b naming, an R13 negative-control twin).
+Full regression: C++ CTest 8/8, Rust not re-run (no rust/ touched),
+harness `PASS=72 FAIL=0` (five cases gained, zero regressions). ALG-7
+flips RESOLVED, as planned.
+
 ---
 
 ### R27 (PARKED) — XMSS/XMSS-MT — sketch only, demand-driven

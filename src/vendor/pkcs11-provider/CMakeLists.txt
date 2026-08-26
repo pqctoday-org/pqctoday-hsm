@@ -62,6 +62,7 @@ file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/src/config.h"
 
 set(PROVIDER_SOURCES
     src/asymmetric_cipher.c
+    src/chacha.c
     src/cipher.c
     src/composite.c
     src/debug.c

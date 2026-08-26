@@ -47,6 +47,7 @@ LMS_XDR_VERIFY="${LMS_XDR_VERIFY:-$HSM_ROOT/build/lms_xdr_verify}"
 HSS_PUBKEY_DUMP="${HSS_PUBKEY_DUMP:-$HSM_ROOT/build/hss_pubkey_dump}"
 HSS_W4_KEYGEN="${HSS_W4_KEYGEN:-$HSM_ROOT/build/hss_w4_keygen}"
 SKEY_FLOW_PROBE="${SKEY_FLOW_PROBE:-$HSM_ROOT/build/skey_flow_probe}"
+AEAD_PROBE="${AEAD_PROBE:-$HSM_ROOT/build/aead_probe}"
 if [[ -z "${RUST_ENGINE_SO:-}" ]]; then
   for c in /cargo-target/debug/libsofthsmrustv3.so /cargo-target/release/libsofthsmrustv3.so \
            "$HSM_ROOT/rust/target/debug/libsofthsmrustv3.so" "$HSM_ROOT/rust/target/release/libsofthsmrustv3.so"; do
@@ -155,7 +156,7 @@ say preflight "environment"
 VER="$(LD_LIBRARY_PATH=$OPENSSL_LIB_DIR "$OPENSSL_BIN" version 2>/dev/null)"
 case "$VER" in OpenSSL\ 3.6*|OpenSSL\ 3.7*|OpenSSL\ 4.*) : ;; *)
   echo "FATAL: need OpenSSL >= 3.6 at $OPENSSL_BIN (got: ${VER:-nothing}) — see audit ENV-1/gate --cpp note"; exit 2;; esac
-for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$HSS_W4_KEYGEN" "$SKEY_FLOW_PROBE"; do
+for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$HSS_W4_KEYGEN" "$SKEY_FLOW_PROBE" "$AEAD_PROBE"; do
   [[ -e "$f" ]] || { echo "FATAL: missing $f (run the --cpp gate step / cmake build first)"; exit 2; }
 done
 echo "  oracle: $VER; provider: $PROVIDER_SO"
@@ -1679,6 +1680,86 @@ t24b() { local w; w=$(mk_arena skeyprobe "$CPP_ENGINE_SO") && use_arena "$w" || 
   return 0
 }
 run_case T24b PASS "EVP_SKEY generate (AES + GENERIC-SECRET) and HKDF derive_SKEY stay token-resident, regression guard for a real ctx_status-ordering bug SKEYMGMT alone had (remediation R24)" t24b
+
+# T27/T27b/T27c/T27d -- phase-5 R26. R26 itself (ChaCha20/ChaCha20-
+# Poly1305) turned out to need a real prerequisite fix first: AES-CTR's
+# own mechanism-parameter construction was an unfinished `/* TODO */`
+# stub (always failed), and AES-GCM's registration was dead code (missing
+# from the mechanism checklist that makes it reachable at all) -- neither
+# had ever been reachable through this provider's OP_CIPHER interface
+# before this item. All four cases here use a HARD propquery
+# ("provider=pkcs11", no leading "?") deliberately: a soft one let this
+# provider's own "ChaCha20-Poly1305"/"AES-256-GCM" registrations
+# silently lose to the default provider's identically-named
+# implementations during EVP_CIPHER_fetch(), so early manual testing
+# "passed" against pure software with zero token involvement (see
+# aead-probe.c's own header for the full account) -- carrying forward
+# R22's own "soft propquery can silently prefer default" lesson into a
+# second, independently-discovered instance of it.
+t27() { local w; w=$(mk_arena aesctr "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
+  local key; key=$(python3 -c "import os;print(os.urandom(32).hex())")
+  local iv; iv=$(python3 -c "import os;print(os.urandom(16).hex())")
+  O enc -aes-256-ctr -propquery "provider=pkcs11" -K "$key" -iv "$iv" -in "$MSG" -out "$w/ct.bin" -nosalt || return 1
+  OPENSSL_CONF=/dev/null O enc -aes-256-ctr -K "$key" -iv "$iv" -in "$MSG" -out "$w/ct_sw.bin" -nosalt || return 1
+  cmp -s "$w/ct.bin" "$w/ct_sw.bin" || { echo "AES-256-CTR ciphertext differs from software"; return 1; }
+  O enc -aes-256-ctr -propquery "provider=pkcs11" -d -K "$key" -iv "$iv" -in "$w/ct.bin" -out "$w/pt.bin" -nosalt || return 1
+  cmp -s "$w/pt.bin" "$MSG" || { echo "AES-256-CTR decrypt did not round-trip"; return 1; }
+  return 0
+}
+run_case T27 PASS "AES-256-CTR token encrypt == software (byte-identical), token decrypt round-trips -- CK_AES_CTR_PARAMS construction was a genuine unfinished /* TODO */ stub before this item (remediation R26 prerequisite)" t27
+
+t27_negctl() { local w; w=$(mk_arena aesctrneg "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
+  local key; key=$(python3 -c "import os;print(os.urandom(32).hex())")
+  local iv; iv=$(python3 -c "import os;print(os.urandom(16).hex())")
+  # R13: same command, propquery removed -- must NOT silently produce
+  # pkcs11-identical output via some other path; asserting the command
+  # itself still succeeds (goes to default) is enough to prove this
+  # arena isn't just broken outright.
+  O enc -aes-256-ctr -K "$key" -iv "$iv" -in "$MSG" -out "$w/ct.bin" -nosalt || return 1
+  return 0
+}
+run_case T27_negctl PASS "negative-control twin for T27: same arena, propquery removed, still succeeds via default provider (R13)" t27_negctl
+
+t27b() { local w; w=$(mk_arena aesgcm "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
+  local key; key=$(python3 -c "import os;print(os.urandom(32).hex())")
+  local iv; iv=$(python3 -c "import os;print(os.urandom(12).hex())")
+  local aad; aad=$(python3 -c "print('deadbeef'*4)")
+  local out; out=$("$AEAD_PROBE" AES-256-GCM "$key" "$iv" "$aad" "$MSG" pkcs11) || { echo "$out"; return 1; }
+  echo "$out" | grep -q "^encrypt OK" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "^decrypt OK" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "tampered tag correctly rejected" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "tampered ciphertext correctly rejected" || { echo "$out"; return 1; }
+  return 0
+}
+run_case T27b PASS "AES-256-GCM full AEAD workflow (AAD, tag get/set, both sabotage controls) genuinely through the token -- registration was dead code before this item, unreachable regardless of correctness (remediation R26 prerequisite)" t27b
+
+t27c() { local w; w=$(mk_arena chacha20 "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
+  local key; key=$(python3 -c "import os;print(os.urandom(32).hex())")
+  local iv; iv=$(python3 -c "import os;print(os.urandom(16).hex())")
+  python3 -c "print('A'*200)" > "$w/msg200.txt"
+  O enc -chacha20 -propquery "provider=pkcs11" -K "$key" -iv "$iv" -in "$w/msg200.txt" -out "$w/ct.bin" -nosalt || return 1
+  OPENSSL_CONF=/dev/null O enc -chacha20 -K "$key" -iv "$iv" -in "$w/msg200.txt" -out "$w/ct_sw.bin" -nosalt || return 1
+  # >64 bytes: exercises the counter-increment seam -- a wrong counter/
+  # nonce split in CK_CHACHA20_PARAMS would only show up past byte 64.
+  cmp -s "$w/ct.bin" "$w/ct_sw.bin" || { echo "ChaCha20 ciphertext differs from software (>64B)"; return 1; }
+  O enc -chacha20 -propquery "provider=pkcs11" -d -K "$key" -iv "$iv" -in "$w/ct.bin" -out "$w/pt.bin" -nosalt || return 1
+  cmp -s "$w/pt.bin" "$w/msg200.txt" || { echo "ChaCha20 decrypt did not round-trip"; return 1; }
+  return 0
+}
+run_case T27c PASS "ChaCha20 (bare stream, CKM_CHACHA20) token encrypt == software (byte-identical, >64B counter-seam), token decrypt round-trips (remediation R26)" t27c
+
+t27d() { local w; w=$(mk_arena chacha20poly "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
+  local key; key=$(python3 -c "import os;print(os.urandom(32).hex())")
+  local iv; iv=$(python3 -c "import os;print(os.urandom(12).hex())")
+  local aad; aad=$(python3 -c "print('cafebabe'*4)")
+  local out; out=$("$AEAD_PROBE" ChaCha20-Poly1305 "$key" "$iv" "$aad" "$MSG" pkcs11) || { echo "$out"; return 1; }
+  echo "$out" | grep -q "^encrypt OK" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "^decrypt OK" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "tampered tag correctly rejected" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "tampered ciphertext correctly rejected" || { echo "$out"; return 1; }
+  return 0
+}
+run_case T27d PASS "ChaCha20-Poly1305 full AEAD workflow (AAD, tag get/set, both sabotage controls) genuinely through the token (remediation R26, ALG-7 RESOLVED)" t27d
 
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
