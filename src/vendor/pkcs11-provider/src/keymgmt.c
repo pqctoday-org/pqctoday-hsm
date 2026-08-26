@@ -2246,8 +2246,23 @@ static void *p11prov_montgomery_gen_init_int(void *provctx, int selection,
     ctx->provctx = (P11PROV_CTX *)provctx;
     ctx->type = CKK_EC_MONTGOMERY;
 
+    /* R18 — server role: a domain/other-parameters-only selection (TLS's
+     * server-side ECDHE placeholder object, confirmed live —
+     * selection=0x84) must leave the mechanism at the CK_UNAVAILABLE_
+     * INFORMATION sentinel so p11prov_ec_gen's mock-object branch fires,
+     * same as p11prov_ec_gen_init's own else branch already does for
+     * plain EC. This function had no else branch at all: the struct's
+     * zero-initialized default (mechanism 0) leaked through instead,
+     * and p11prov_ec_gen's `if (mechanism == CK_UNAVAILABLE_INFORMATION)`
+     * check — comparing against the real sentinel, not 0 — never matched,
+     * so it fell into the REAL keygen path with mechanism 0 and the
+     * montgomery-shaped template, which the engine correctly rejected as
+     * "conflicting attributes". Live-traced: selection=0x84,
+     * mechanism ended up 0x0 instead of 0xffffffffffffffff. */
     if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) != 0) {
         ctx->mechanism.mechanism = CKM_EC_MONTGOMERY_KEY_PAIR_GEN;
+    } else {
+        ctx->mechanism.mechanism = CK_UNAVAILABLE_INFORMATION;
     }
 
     ret = p11prov_common_gen_set_params(ctx, curve);
@@ -2448,6 +2463,39 @@ static int p11prov_montgomery_get_params(void *keydata, OSSL_PARAM params[])
             memcpy(p->data, pub->pValue, pub->ulValueLen);
         }
     }
+    /* R18 — server role: TLS reads a key's own share via
+     * EVP_PKEY_get1_encoded_public_key (this param), the same gap R5
+     * already found and fixed for ML-KEM (kem/mlkem.c) — "only EC
+     * keymgmt had it before" per that fix's own comment; montgomery
+     * apparently never got the same treatment. For X25519/X448 the
+     * encoded form IS the raw public key, byte for byte (no point-
+     * compression step, unlike Weierstrass EC) — same accessor as the
+     * PUB_KEY branch just above, which already walks private->
+     * associated-public via p11prov_obj_get_ed_pub_key. Live-traced:
+     * without this, tls_construct_stoc_key_share fails trying to parse
+     * whatever garbage was in the uninitialized OSSL_PARAM buffer as
+     * ASN.1 DER ("header too long"/"bad object header") — the server
+     * generated a real keypair (R18's first fix) but had no way to hand
+     * its own public half back to TLS. */
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY);
+    if (p) {
+        CK_ATTRIBUTE *pub;
+
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) {
+            return RET_OSSL_ERR;
+        }
+        ret = p11prov_obj_get_ed_pub_key(key, &pub);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+        p->return_size = pub->ulValueLen;
+        if (p->data) {
+            if (p->data_size < pub->ulValueLen) {
+                return RET_OSSL_ERR;
+            }
+            memcpy(p->data, pub->pValue, pub->ulValueLen);
+        }
+    }
     return RET_OSSL_OK;
 }
 
@@ -2458,6 +2506,56 @@ static const OSSL_PARAM *p11prov_montgomery_gettable_params(void *provctx)
         OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
         OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+/* R18 — client role: unlike EC (which never reaches
+ * p11prov_obj_set_ec_encoded_public_key in this bare-object shape — see
+ * that function's own comment), montgomery's peer key arrives as a bare
+ * keymgmt NEW() object with no type/class established at all. Reusing
+ * p11prov_ec_set_params directly (as first tried) fails for exactly that
+ * reason: it delegates straight to the type-dispatch switch, which sees
+ * an unset object and rejects it. This wrapper establishes the object's
+ * type first — via p11prov_obj_ensure_ec_type, which each per-curve
+ * function passes its own known-at-compile-time CKK_EC_MONTGOMERY —
+ * before falling through to the exact same install logic EC's own
+ * function uses. */
+static int p11prov_montgomery_set_params(void *keydata,
+                                         const OSSL_PARAM params[])
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    const OSSL_PARAM *p;
+
+    P11PROV_debug("montgomery set params %p", keydata);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY);
+    if (p) {
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) {
+            return RET_OSSL_ERR;
+        }
+        if (p11prov_obj_ensure_ec_type(key, CKK_EC_MONTGOMERY) != CKR_OK) {
+            return RET_OSSL_ERR;
+        }
+        if (p11prov_obj_set_ec_encoded_public_key(key, p->data, p->data_size)
+            != CKR_OK) {
+            return RET_OSSL_ERR;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_montgomery_settable_params(void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, NULL, 0),
         OSSL_PARAM_END,
     };
     return params;
@@ -2487,6 +2585,20 @@ const OSSL_DISPATCH p11prov_x25519_keymgmt_functions[] = {
       (void (*)(void))p11prov_montgomery_get_params },
     { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS,
       (void (*)(void))p11prov_montgomery_gettable_params },
+    /* R18 — server + client role: montgomery's own set_params/
+     * settable_params (not EC's directly reused — see
+     * p11prov_montgomery_set_params's own comment for why a thin
+     * wrapper is needed instead of the straight reuse first tried).
+     * This is the piece the "No SET_PARAMS/SETTABLE_PARAMS" comment on
+     * p11prov_montgomery_gen_init_int said wasn't worth reusing/
+     * stubbing — that reasoning covered ML-DSA and Ed's own no-op
+     * stubs, but missed that EC's underlying install logic
+     * (p11prov_obj_set_ec_encoded_public_key) is real, working code
+     * directly reusable here, once the object's type is established. */
+    { OSSL_FUNC_KEYMGMT_SET_PARAMS,
+      (void (*)(void))p11prov_montgomery_set_params },
+    { OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_montgomery_settable_params },
     { 0, NULL },
 };
 
@@ -2514,6 +2626,20 @@ const OSSL_DISPATCH p11prov_x448_keymgmt_functions[] = {
       (void (*)(void))p11prov_montgomery_get_params },
     { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS,
       (void (*)(void))p11prov_montgomery_gettable_params },
+    /* R18 — server + client role: montgomery's own set_params/
+     * settable_params (not EC's directly reused — see
+     * p11prov_montgomery_set_params's own comment for why a thin
+     * wrapper is needed instead of the straight reuse first tried).
+     * This is the piece the "No SET_PARAMS/SETTABLE_PARAMS" comment on
+     * p11prov_montgomery_gen_init_int said wasn't worth reusing/
+     * stubbing — that reasoning covered ML-DSA and Ed's own no-op
+     * stubs, but missed that EC's underlying install logic
+     * (p11prov_obj_set_ec_encoded_public_key) is real, working code
+     * directly reusable here, once the object's type is established. */
+    { OSSL_FUNC_KEYMGMT_SET_PARAMS,
+      (void (*)(void))p11prov_montgomery_set_params },
+    { OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_montgomery_settable_params },
     { 0, NULL },
 };
 

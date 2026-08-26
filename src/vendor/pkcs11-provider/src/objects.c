@@ -5877,6 +5877,48 @@ done:
 
 #endif /* SKEY_SUPPORT */
 
+/* R18 — client role, montgomery peer-key install: TLS's peer-key
+ * construction for X25519/X448 goes through a route the domain-params-
+ * only server placeholder (mock_pub_ec_key) never touches — a bare
+ * keymgmt NEW() object straight into SET_PARAMS, no gen_init/gen in
+ * between at all. Live-traced: key->data.key.type == 0 (never set —
+ * numerically collides with CKK_RSA, which is why this gates on class
+ * instead) and key->class == CK_UNAVAILABLE_INFORMATION. Weierstrass EC
+ * never reaches p11prov_obj_set_ec_encoded_public_key in this bare-object
+ * shape at all — a legacy, non-provider-native EC_KEY fallback path
+ * exists in OpenSSL for it; montgomery/PQC types have no such fallback —
+ * so this exact shape was never exercised before. Called only from a
+ * per-curve wrapper that knows its own fixed key type (montgomery's own
+ * set_params, keymgmt.c); establishes the same two fields
+ * mock_pub_ec_key already sets for the server-placeholder route, so
+ * downstream code sees an identical shape regardless of which route
+ * built the object. Gating on class (always a real value once anything
+ * — gen(), mock, import — has touched the object) rather than type
+ * sidesteps the CKK_RSA-is-0 ambiguity entirely. */
+CK_RV p11prov_obj_ensure_ec_type(P11PROV_OBJ *key, CK_KEY_TYPE type)
+{
+    if (key->class == CK_UNAVAILABLE_INFORMATION) {
+        key->class = CKO_PUBLIC_KEY;
+        key->data.key.type = type;
+    } else if (key->data.key.type != type) {
+        P11PROV_raise(key->ctx, CKR_KEY_INDIGESTIBLE,
+                      "Key type mismatch installing peer public key");
+        return CKR_KEY_INDIGESTIBLE;
+    }
+    return CKR_OK;
+}
+
+/* R18 — server role for montgomery TLS groups (X25519/X448): the
+ * CKK_EC_MONTGOMERY case was simply absent from this switch, so this
+ * function — the one p11prov_ec_set_params calls to install a peer's
+ * public share into the domain-params-only mock object gen_init/gen
+ * built — unconditionally rejected every montgomery key with "Invalid
+ * Key type, not an EC/ED key", even though montgomery keymgmt never
+ * registered SET_PARAMS at all until this fix (see keymgmt.c), so the
+ * rejection was never actually reachable before now. The rest of this
+ * function needs no montgomery-specific branch: CKA_EC_POINT is always
+ * a DER-encoded OCTET STRING per the PKCS#11 spec regardless of curve
+ * family, matching Edwards' own already-working case just above. */
 CK_RV p11prov_obj_set_ec_encoded_public_key(P11PROV_OBJ *key,
                                             const void *pubkey,
                                             size_t pubkey_len)
@@ -5904,6 +5946,7 @@ CK_RV p11prov_obj_set_ec_encoded_public_key(P11PROV_OBJ *key,
     switch (key->data.key.type) {
     case CKK_EC:
     case CKK_EC_EDWARDS:
+    case CKK_EC_MONTGOMERY:
         /* if class is still "domain parameters" convert it to
          * a public key */
         if (key->class == CKO_DOMAIN_PARAMETERS) {

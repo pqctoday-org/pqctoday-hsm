@@ -1,9 +1,27 @@
-# OpenSSL provider remediation plan, phase 4 (2026-08-26) — the complete remaining-gap closure
+# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R18 EXECUTED, R7-R11/R19-R21 still plan-only
+
+**Execution update (2026-08-26):** R18 has been executed and landed —
+see `docs/openssl-provider-coverage-audit-2026-08-25.md` §6's "Phase
+4, R18 (EC/ECDH/montgomery generic SET_PARAMS — the latent server-role
+gap R15 flagged)" entry for the full mechanism. R18's own written
+hypothesis (EC/ECDH likely has ML-KEM's identical missing-SET_PARAMS
+gap) was wrong in its specifics — EC already had real, working
+SET_PARAMS; only X25519/X448 had a gap at all — but right in its
+instinct, and reproducing it surfaced four independent, layered bugs,
+three of them different from the original hypothesis, found only by
+getting a real handshake further into each role (client vs server)
+than the previous fix had. R18's own section below is left as
+originally written (the plan, not the result) per this project's
+append-only convention; do not edit it to match the outcome.
+**Harness: `PASS=35 FAIL=0 XFAIL=0 XPASS=0`** — four cases gained
+(T18/T18b/T18c/T18d). R19–R21 and the R7–R11 tail remain plan-only,
+not executed.
 
 Scope: everything still open after phase 3 closed R12–R17 in full
 (branch `feat/jdk27-jca-provider`, commit `8f3fb8e`, unpushed; harness
-`PASS=31 FAIL=0 XFAIL=0 XPASS=0`). This plan covers three families of
-gaps:
+`PASS=31 FAIL=0 XFAIL=0 XPASS=0` — status **as of when this plan was
+written**; see the execution update above for the current count). This
+plan covers three families of gaps:
 
 1. the **R7–R11 tail** carried forward twice already (phase-2 doc
    §"Priority 2 tail", never started);

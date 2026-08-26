@@ -95,6 +95,8 @@ CK_RV p11prov_obj_set_ec_encoded_public_key(P11PROV_OBJ *key,
                                             const void *pubkey,
                                             size_t pubkey_len);
 
+CK_RV p11prov_obj_ensure_ec_type(P11PROV_OBJ *key, CK_KEY_TYPE type);
+
 CK_RV p11prov_obj_copy_specific_attr(P11PROV_OBJ *pub_key,
                                      P11PROV_OBJ *priv_key,
                                      CK_ATTRIBUTE_TYPE type);

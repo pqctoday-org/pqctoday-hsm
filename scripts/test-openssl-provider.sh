@@ -775,6 +775,197 @@ EOF
 }
 run_case T15 PASS "TLS 1.3 handshake with a fully token-backed server: token-resident ML-DSA cert signs CertificateVerify AND token performs the ML-KEM encapsulation, both independently engine-log verified (remediation R15); negative-control twin proves the KEM half (R13)" t15
 
+# t18/t18b — real TLS 1.3 handshake with a token-backed SERVER negotiating a
+# classic ECDHE-style montgomery group (remediation R18, found while
+# investigating whether EC/ECDH had R15's same latent server-role gap —
+# they didn't; X25519/X448 did, but for THREE different, independent
+# reasons, not the one hypothesized). Plain software RSA cert, same shape
+# as T13 (not T15's token-resident cert): unlike ML-KEM's pure-KEM
+# asymmetry, an ECDHE-style group needs BOTH sides to generate a REAL
+# ephemeral keypair, so there's no cert-signing noise to route around and
+# T13's own generic "Decrypting N bytes" marker is precise here.
+#
+# Three independent, live-traced bugs, all in code paths ML-KEM's own
+# server-role fix (R15) never touched, none of them the SET_PARAMS gap
+# R18 was originally scoped to investigate (that WAS also missing here —
+# see fix 3 — but it was the last of three, not the only one):
+#   1. p11prov_montgomery_gen_init_int had no `else` branch setting the
+#      CK_UNAVAILABLE_INFORMATION sentinel when the requested selection is
+#      domain/other-parameters-only (TLS's own placeholder-object pattern,
+#      selection=0x84, live-confirmed) — unlike p11prov_ec_gen_init's own
+#      else branch. The struct's zero-initialized mechanism (0x0) leaked
+#      through instead, so p11prov_ec_gen's mock-object check (which
+#      compares against the REAL sentinel, not 0) never matched, and the
+#      real-keygen path ran with mechanism 0 against a montgomery-shaped
+#      template — the engine correctly rejected it as "conflicting
+#      attributes" (keymgmt.c:1388, live-traced).
+#   2. p11prov_montgomery_get_params/gettable_params never exposed
+#      OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY — the param TLS reads via
+#      EVP_PKEY_get1_encoded_public_key to hand its own generated public
+#      share back for the server's key_share response. Live-traced:
+#      tls_construct_stoc_key_share failed parsing uninitialized OSSL_PARAM
+#      data as ASN.1 DER ("header too long"/"bad object header").
+#   3. The gap this item was scoped to check: montgomery's keymgmt
+#      registered no SET_PARAMS/SETTABLE_PARAMS at all (a real, prior
+#      comment in this file said as much and reasoned it wasn't worth
+#      adding — reasoning that held for ML-DSA and Ed's own no-op stubs,
+#      but missed that EC's own set_params is real working code directly
+#      reusable here), so installing the CLIENT's public share into the
+#      server's own placeholder object had no code path at all —
+#      ssl_derive failed the same ASN.1-parsing way as fix 2, for the
+#      peer's share instead of the server's own.
+# Fixed 1+2 in keymgmt.c; fix 3 reuses p11prov_ec_set_params/
+# settable_params directly (same translation unit) plus one missing
+# CKK_EC_MONTGOMERY case in objects.c's
+# p11prov_obj_set_ec_encoded_public_key (the function fix 3's reused
+# set_params calls into — CKA_EC_POINT is always a DER-wrapped OCTET
+# STRING regardless of curve family, so no montgomery-specific encoding
+# was needed there, only the missing case label).
+r18_case() { # $1 = X25519|X448
+  local grp="$1" w
+  w="$ROOT_WORK/r18${grp}"
+  mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = DEBUG
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $CPP_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-encode-provider-uri-to-pem = true
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$CPP_ENGINE_SO" \
+    --init-token --free --label "r18${grp}" --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  OPENSSL_CONF=/dev/null "$OPENSSL_BIN" req -x509 -newkey rsa:2048 -nodes -keyout "$w/server.key" \
+    -out "$w/server.crt" -days 1 -subj "/CN=r18${grp}" >/dev/null 2>&1 || return 1
+
+  # ── Positive: propquery pinned, token must generate + derive ──
+  local port=$((14717 + RANDOM % 1000))
+  OPENSSL_CONF=/dev/null "$OPENSSL_BIN" s_server -cert "$w/server.crt" -key "$w/server.key" \
+    -accept "$port" -naccept 1 -tls1_3 -groups "$grp" -quiet >"$w/server.log" 2>&1 &
+  local spid=$!
+  sleep 1.5
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" timeout 10 "$OPENSSL_BIN" \
+    s_client -connect "127.0.0.1:$port" -tls1_3 -groups "$grp" -propquery "?provider=pkcs11" \
+    </dev/null >"$w/client.log" 2>"$w/client.err.log"
+  wait "$spid" 2>/dev/null
+
+  grep -q "Cipher is TLS_" "$w/client.log" || return 1
+  grep -qE "Decrypting [0-9]+ bytes into buffer of [0-9]+ bytes" "$w/client.err.log" || return 1
+
+  # ── Negative control (R13): same arena, propquery removed ──
+  local port2=$((14718 + RANDOM % 1000))
+  OPENSSL_CONF=/dev/null "$OPENSSL_BIN" s_server -cert "$w/server.crt" -key "$w/server.key" \
+    -accept "$port2" -naccept 1 -tls1_3 -groups "$grp" -quiet >"$w/server2.log" 2>&1 &
+  local spid2=$!
+  sleep 1.5
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" timeout 10 "$OPENSSL_BIN" \
+    s_client -connect "127.0.0.1:$port2" -tls1_3 -groups "$grp" </dev/null \
+    >"$w/client2.log" 2>"$w/client2.err.log"
+  wait "$spid2" 2>/dev/null
+
+  grep -q "Cipher is TLS_" "$w/client2.log" || return 1
+  if grep -qE "Decrypting [0-9]+ bytes into buffer of [0-9]+ bytes" "$w/client2.err.log"; then
+    return 1
+  fi
+  return 0
+}
+r18() { r18_case X25519; }
+run_case T18 PASS "TLS 1.3 handshake with a token-backed server negotiating X25519 (ECDHE-style, not KEM): server generates its own ephemeral keypair AND installs the peer's share on-token, engine-log verified (remediation R18); negative-control twin (R13)" r18
+r18b() { r18_case X448; }
+run_case T18b PASS "TLS 1.3 handshake with a token-backed server negotiating X448 (ECDHE-style, not KEM): server generates its own ephemeral keypair AND installs the peer's share on-token, engine-log verified (remediation R18); negative-control twin (R13)" r18b
+
+# t18c/t18d — the SERVER-role mirror of t18/t18b (server token-backed,
+# client plain software — T15's own shape, not T13's). Necessary, not
+# redundant: sabotage-tested live before writing this — reverting R18
+# fix #1 (gen_init's else branch, which sets the CK_UNAVAILABLE_
+# INFORMATION sentinel for a domain/other-parameters-only selection) does
+# NOT make t18/t18b fail, because a token-backed CLIENT never calls
+# gen_init with anything but a full OSSL_KEYMGMT_SELECT_KEYPAIR selection
+# for its own key (it generates immediately, no placeholder phase) — only
+# the SERVER's own key generation goes through the params-only-first
+# pattern that else branch exists for. t18/t18b alone would let a
+# regression in that specific branch ship silently.
+r18_server_case() { # $1 = X25519|X448
+  local grp="$1" w
+  w="$ROOT_WORK/r18srv${grp}"
+  mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = DEBUG
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $CPP_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-encode-provider-uri-to-pem = true
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$CPP_ENGINE_SO" \
+    --init-token --free --label "r18s${grp}" --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  OPENSSL_CONF=/dev/null "$OPENSSL_BIN" req -x509 -newkey rsa:2048 -nodes -keyout "$w/server.key" \
+    -out "$w/server.crt" -days 1 -subj "/CN=r18s${grp}" >/dev/null 2>&1 || return 1
+
+  # ── Positive: propquery pinned on the SERVER, token must generate + derive ──
+  local port=$((14719 + RANDOM % 1000))
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" "$OPENSSL_BIN" s_server \
+    -cert "$w/server.crt" -key "$w/server.key" -accept "$port" -naccept 1 -tls1_3 \
+    -groups "$grp" -quiet -propquery "?provider=pkcs11" >"$w/server.log" 2>"$w/server.err.log" &
+  local spid=$!
+  sleep 1.5
+  OPENSSL_CONF=/dev/null timeout 10 "$OPENSSL_BIN" \
+    s_client -connect "127.0.0.1:$port" -tls1_3 -groups "$grp" </dev/null \
+    >"$w/client.log" 2>"$w/client.err.log"
+  wait "$spid" 2>/dev/null
+
+  grep -q "Cipher is TLS_" "$w/client.log" || return 1
+  grep -qE "Decrypting [0-9]+ bytes into buffer of [0-9]+ bytes" "$w/server.err.log" || return 1
+
+  # ── Negative control (R13): same arena, propquery removed ──
+  local port2=$((14720 + RANDOM % 1000))
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" "$OPENSSL_BIN" s_server \
+    -cert "$w/server.crt" -key "$w/server.key" -accept "$port2" -naccept 1 -tls1_3 \
+    -groups "$grp" -quiet >"$w/server2.log" 2>"$w/server2.err.log" &
+  local spid2=$!
+  sleep 1.5
+  OPENSSL_CONF=/dev/null timeout 10 "$OPENSSL_BIN" \
+    s_client -connect "127.0.0.1:$port2" -tls1_3 -groups "$grp" </dev/null \
+    >"$w/client2.log" 2>"$w/client2.err.log"
+  wait "$spid2" 2>/dev/null
+
+  grep -q "Cipher is TLS_" "$w/client2.log" || return 1
+  if grep -qE "Decrypting [0-9]+ bytes into buffer of [0-9]+ bytes" "$w/server2.err.log"; then
+    return 1
+  fi
+  return 0
+}
+r18c() { r18_server_case X25519; }
+run_case T18c PASS "TLS 1.3 handshake, token-backed SERVER negotiating X25519 (server-role mirror of T18 — exercises gen_init's params-only placeholder path T18's client-role structure cannot reach), engine-log verified (remediation R18); negative-control twin (R13)" r18c
+r18d() { r18_server_case X448; }
+run_case T18d PASS "TLS 1.3 handshake, token-backed SERVER negotiating X448 (server-role mirror of T18b), engine-log verified (remediation R18); negative-control twin (R13)" r18d
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 

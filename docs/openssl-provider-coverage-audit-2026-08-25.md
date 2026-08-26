@@ -857,6 +857,116 @@ Harness: **`PASS=31 FAIL=0 XFAIL=0 XPASS=0`** — two cases gained
 phase-3 remediation plan — zero remaining known gaps of any kind in
 this harness.**
 
+**Phase 4, R18 (EC/ECDH/montgomery generic `SET_PARAMS` — the
+latent server-role gap R15 flagged), DONE:** the investigation R15
+flagged — "no keymgmt but ML-KEM's own three tables had `SET_PARAMS`
+before this; EC/ECDH's own server role likely has the identical
+latent gap" — turned out to be wrong in its specifics but right in
+its instinct. EC (Weierstrass) already had a real, working
+`SET_PARAMS`/`SETTABLE_PARAMS` pair (`p11prov_ec_set_params`,
+confirmed live: `prime256v1` server-role and client-role both
+handshake cleanly with zero changes). Ed25519/Ed448 have their own
+(no-op, by design — EdDSA keys are never used for key exchange, so
+TLS never asks them to install a peer share). **Only X25519/X448 had
+the gap** — and reproducing it surfaced four independent, layered
+bugs, three of them different from what R15's own SET_PARAMS
+hypothesis anticipated, each found only after the previous fix
+changed the failure symptom (the by-now-familiar pattern from every
+item in this plan):
+
+1. **`p11prov_montgomery_gen_init_int` had no `else` branch** setting
+   the `CK_UNAVAILABLE_INFORMATION` sentinel for a domain/other-
+   parameters-only selection (TLS's server-side placeholder pattern,
+   `selection=0x84`, live-confirmed — the same selection R15 found
+   for ML-KEM's server role). Unlike `p11prov_ec_gen_init`'s own else
+   branch, this one was simply missing; the struct's zero-initialized
+   mechanism (`0x0`) leaked through, `p11prov_ec_gen`'s mock-object
+   check (which compares against the real sentinel, not `0`) never
+   matched, and the real-keygen path ran with mechanism `0` against a
+   montgomery-shaped template — the engine correctly rejected it as
+   "conflicting attributes" (`keymgmt.c:1388`, live-traced exact file:
+   line before any fix). Fixed by adding the else branch, matching
+   EC's own pattern exactly.
+2. **`p11prov_montgomery_get_params`/`gettable_params` never exposed
+   `OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY`** — the param TLS reads via
+   `EVP_PKEY_get1_encoded_public_key` to hand a locally-generated
+   key's own public half back for the key_share extension (server's
+   *own* response, or the client's *own* ClientHello share — needed
+   by both roles, confirmed by sabotage: reverting only this fix
+   breaks all four new harness cases, not just one role's). Only
+   `OSSL_PKEY_PARAM_PUB_KEY` was handled; TLS asks for a differently-
+   named param. Live-traced: `tls_construct_stoc_key_share` (or the
+   client-side equivalent) failed parsing uninitialized `OSSL_PARAM`
+   data as ASN.1 DER (`"header too long"`/`"bad object header"`).
+   Fixed by adding the same branch as the existing `PUB_KEY` one — for
+   montgomery keys the encoded form *is* the raw public key, byte for
+   byte, no point-compression step, so the same accessor
+   (`p11prov_obj_get_ed_pub_key`) serves both params unchanged.
+3. **Montgomery's keymgmt registered no `SET_PARAMS`/`SETTABLE_PARAMS`
+   at all** — the gap this item was actually scoped to check, and the
+   only one of the four that matches R15's original hypothesis.
+   A pre-existing comment in this file explicitly said as much and
+   reasoned it wasn't worth adding ("ML-DSA's keymgmt tables omit them
+   too and Ed's own versions are no-op stubs, so there is nothing
+   worth reusing or stubbing") — reasoning that held for those two
+   cases but missed that EC's own `set_params` is real, working code
+   directly reusable here. First attempt: register EC's functions
+   directly in both montgomery dispatch tables (same translation
+   unit, same generic-enough signature). This alone fixed the
+   server-role scenario completely — but not the client-role one (see
+   fix 4).
+4. **A fourth bug, found only via the harness's own client-role test
+   case, not the manual server-role reproduction that had already
+   confirmed fixes 1–3 sufficient**: a token-backed *client* installs
+   the server's peer share through a genuinely different construction
+   route than the server-role placeholder ever touches — a bare
+   keymgmt `NEW()` object straight into `SET_PARAMS`, no
+   `gen_init`/`gen` in between at all. Live-traced:
+   `key->data.key.type == 0` (never set — numerically collides with
+   `CKK_RSA`, confirmed against `pkcs11t.h` before relying on it) and
+   `key->class == CK_UNAVAILABLE_INFORMATION`. Weierstrass EC never
+   reaches `p11prov_obj_set_ec_encoded_public_key` in this bare-object
+   shape at all — a legacy, non-provider-native `EC_KEY` fallback path
+   in OpenSSL almost certainly handles peer-key installation for it
+   instead (not confirmed by reading that path directly, but the only
+   explanation consistent with every other piece of live evidence:
+   EC's own `set_params` code, which has no type-establishment logic
+   of any kind, cannot otherwise explain EC working here while
+   montgomery — running the identical function — did not). Fixed with
+   a small montgomery-specific `set_params` wrapper
+   (`p11prov_montgomery_set_params`) and a new shared helper,
+   `p11prov_obj_ensure_ec_type` (gates on `class`, not `type`,
+   specifically to sidestep the `CKK_RSA`-is-`0` ambiguity), that
+   establishes the object's type/class before falling through to the
+   same install logic EC's function already uses — replacing the
+   direct-reuse-of-EC's-functions from fix 3 rather than adding a
+   second registration.
+
+**Also flagged, not chased**: `p11prov_obj_set_ec_encoded_public_key`'s
+own type switch also lacked a `CKK_EC_MONTGOMERY` case (a fifth,
+trivially small fix, same commit) — a second independent instance of
+the "missing-case-in-a-switch" bug class this provider has now hit
+several times across different phases (R1, R4, and now R18).
+
+Four new harness cases, matching R15's own client/T15-vs-T13-style
+split exactly, because sabotage-testing showed the split is not
+cosmetic: **T18/T18b** (client token-backed, server plain software —
+T13's shape) catch fixes 2 and 4; **T18c/T18d** (server token-backed,
+client plain software — T15's shape) catch fixes 1 and 2. Reverting
+fix 1 alone leaves T18/T18b green and only breaks T18c/T18d;
+reverting fix 4 alone leaves T18c/T18d green and only breaks
+T18/T18b — each of the four fixes independently sabotage-tested and
+confirmed caught by exactly the case(s) that should catch it, none
+by the others. Both server-role and client-role scenarios manually
+verified working end-to-end with the final build (`Cipher is
+TLS_AES_256_GCM_SHA384`, clean shutdown) in addition to the permanent
+harness proof.
+
+Both engines' full test suites remain green (C++: 8/8 CTest suites;
+Rust: unaffected — this item's changes are C-provider-side only).
+**Harness: `PASS=35 FAIL=0 XFAIL=0 XPASS=0`** — four cases gained
+(T18, T18b, T18c, T18d), zero regressions.
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:
