@@ -258,6 +258,15 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
     target_include_directories(aead_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
     target_link_libraries(aead_probe ${OPENSSL_LIBRARIES})
 
+    # aead-edge-probe: phase-6 R30 test helper — over-ceiling decrypt
+    # (must fail cleanly, never crash/corrupt) and AAD-only/empty-
+    # plaintext AEAD decrypt, purpose-built rather than folded into
+    # aead-probe.c's own happy-path+sabotage shape (see the file's own
+    # header).
+    add_executable(aead_edge_probe scripts/aead-edge-probe.c)
+    target_include_directories(aead_edge_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(aead_edge_probe ${OPENSSL_LIBRARIES})
+
     # skey-flow-probe: phase-5 R24 (F36-3) test helper — exercises the
     # EVP_SKEY opaque-key API (generate/derive_SKEY/init_SKEY) against
     # this provider's SKEYMGMT/HKDF/HMAC, cross-checking the derived

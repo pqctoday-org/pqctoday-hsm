@@ -48,6 +48,7 @@ HSS_PUBKEY_DUMP="${HSS_PUBKEY_DUMP:-$HSM_ROOT/build/hss_pubkey_dump}"
 HSS_W4_KEYGEN="${HSS_W4_KEYGEN:-$HSM_ROOT/build/hss_w4_keygen}"
 SKEY_FLOW_PROBE="${SKEY_FLOW_PROBE:-$HSM_ROOT/build/skey_flow_probe}"
 AEAD_PROBE="${AEAD_PROBE:-$HSM_ROOT/build/aead_probe}"
+AEAD_EDGE_PROBE="${AEAD_EDGE_PROBE:-$HSM_ROOT/build/aead_edge_probe}"
 if [[ -z "${RUST_ENGINE_SO:-}" ]]; then
   for c in /cargo-target/debug/libsofthsmrustv3.so /cargo-target/release/libsofthsmrustv3.so \
            "$HSM_ROOT/rust/target/debug/libsofthsmrustv3.so" "$HSM_ROOT/rust/target/release/libsofthsmrustv3.so"; do
@@ -156,7 +157,7 @@ say preflight "environment"
 VER="$(LD_LIBRARY_PATH=$OPENSSL_LIB_DIR "$OPENSSL_BIN" version 2>/dev/null)"
 case "$VER" in OpenSSL\ 3.6*|OpenSSL\ 3.7*|OpenSSL\ 4.*) : ;; *)
   echo "FATAL: need OpenSSL >= 3.6 at $OPENSSL_BIN (got: ${VER:-nothing}) — see audit ENV-1/gate --cpp note"; exit 2;; esac
-for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$HSS_W4_KEYGEN" "$SKEY_FLOW_PROBE" "$AEAD_PROBE"; do
+for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$HSS_W4_KEYGEN" "$SKEY_FLOW_PROBE" "$AEAD_PROBE" "$AEAD_EDGE_PROBE"; do
   [[ -e "$f" ]] || { echo "FATAL: missing $f (run the --cpp gate step / cmake build first)"; exit 2; }
 done
 echo "  oracle: $VER; provider: $PROVIDER_SO"
@@ -1760,6 +1761,37 @@ t27d() { local w; w=$(mk_arena chacha20poly "$CPP_ENGINE_SO" "pkcs11-module-load
   return 0
 }
 run_case T27d PASS "ChaCha20-Poly1305 full AEAD workflow (AAD, tag get/set, both sabotage controls) genuinely through the token (remediation R26, ALG-7 RESOLVED)" t27d
+
+# T27e -- phase-6 R30. R26's own "not done" list left two AEAD decrypt
+# edge cases honestly unproven: the AEAD_DECRYPT_MAX_MSG_LEN ceiling
+# (asserted from code reading only) and the AAD-only/empty-plaintext
+# path through ensure_session()-from-final(). Both real: the ceiling
+# check found a genuine bug (this case's own "at the promised ceiling"
+# sub-case failed before the fix -- see cipher.h's own updated
+# AEAD_DECRYPT_MAX_MSG_LEN comment for the mechanism) and the fix
+# landed as part of writing this case, not before it.
+t27e() { local w; w=$(mk_arena aeadedge "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
+  local key; key=$(python3 -c "import os;print(os.urandom(32).hex())")
+  local iv12; iv12=$(python3 -c "import os;print(os.urandom(12).hex())")
+  local aad; aad=$(python3 -c "print('cafebabe'*4)")
+
+  for cipher in AES-256-GCM ChaCha20-Poly1305; do
+    # at the promised ceiling: must succeed (this exact case failed
+    # before the AEAD_DECRYPT_MAX_MSG_LEN fix -- both engines need one
+    # tag's worth of headroom beyond the promised plaintext length,
+    # surfacing at different internal call points per mechanism)
+    "$AEAD_EDGE_PROBE" "$cipher" "$key" "$iv12" "$aad" 65536 pkcs11 decrypt-ok || { echo "$cipher failed AT the promised 65536-byte ceiling"; return 1; }
+    # well over the ceiling: must fail cleanly, not crash or truncate
+    "$AEAD_EDGE_PROBE" "$cipher" "$key" "$iv12" "$aad" 100000 pkcs11 decrypt-fail || { echo "$cipher did not fail cleanly over the ceiling"; return 1; }
+    # AAD-only (empty plaintext, nonempty AAD): exercises final()'s own
+    # zero-real-update()-calls lazy-init path
+    "$AEAD_EDGE_PROBE" "$cipher" "$key" "$iv12" "$aad" 0 pkcs11 decrypt-ok || { echo "$cipher AAD-only case failed"; return 1; }
+    # fully empty (empty plaintext, empty AAD): same path, no AAD at all
+    "$AEAD_EDGE_PROBE" "$cipher" "$key" "$iv12" "" 0 pkcs11 decrypt-ok || { echo "$cipher fully-empty case failed"; return 1; }
+  done
+  return 0
+}
+run_case T27e PASS "AEAD decrypt edge cases (AES-256-GCM + ChaCha20-Poly1305): the promised 65536-byte ceiling genuinely works (a real bug here, fixed by this case), well-over-ceiling fails cleanly not silently, AAD-only and fully-empty both work (remediation R30)" t27e
 
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"

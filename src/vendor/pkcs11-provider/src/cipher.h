@@ -4,23 +4,43 @@
 #ifndef _CIPHER_H
 #define _CIPHER_H
 
-/* Phase 5 R26. This engine's own CKM_AES_GCM/CKM_CHACHA20_POLY1305
- * decrypt (SoftHSM_cipher.cpp) never releases plaintext until the tag
- * is verified -- a correct security design (never hand back
- * unauthenticated data) -- and releases the WHOLE message at once once
- * it is. OpenSSL's own EVP_DecryptFinal_ex (crypto/evp/evp_enc.c)
- * hardcodes the buffer it gives a provider's final() callback to
- * EVP_CIPHER_CTX_get_block_size(ctx) -- confirmed by reading that
- * source directly, not guessed -- with no per-message way to enlarge
- * it, so the two designs collide for any message whose full plaintext
- * doesn't fit in one declared block. Reporting this generous-but-fixed
- * value as AEAD decrypt's own block_size (real work: cipher.c's own
- * p11prov_aes_get_params GCM case, chacha.c's own poly1305 case) is the
- * chosen (user, 2026-08-26) accommodation: it makes ordinary messages
- * work through the standard update()/final() API, at the honest cost of
- * a hard ceiling -- anything larger fails cleanly with
- * CKR_BUFFER_TOO_SMALL, not silent truncation or corruption. */
-#define AEAD_DECRYPT_MAX_MSG_LEN 65536
+/* Phase 5 R26 / phase 6 R30. This engine's own CKM_AES_GCM/CKM_
+ * CHACHA20_POLY1305 decrypt (SoftHSM_cipher.cpp) never releases
+ * plaintext until the tag is verified -- a correct security design
+ * (never hand back unauthenticated data) -- and releases the WHOLE
+ * message at once once it is. OpenSSL's own EVP_DecryptFinal_ex
+ * (crypto/evp/evp_enc.c) hardcodes the buffer it gives a provider's
+ * final() callback to EVP_CIPHER_CTX_get_block_size(ctx) -- confirmed
+ * by reading that source directly, not guessed -- with no per-message
+ * way to enlarge it, so the two designs collide for any message whose
+ * full plaintext doesn't fit in one declared block. Reporting a
+ * generous-but-fixed value as AEAD decrypt's own block_size (real
+ * work: cipher.c's own p11prov_aes_get_params GCM case, chacha.c's own
+ * poly1305 case) is the chosen (user, 2026-08-26) accommodation: it
+ * makes ordinary messages work through the standard update()/final()
+ * API, at the honest cost of a hard ceiling -- anything larger fails
+ * cleanly with CKR_BUFFER_TOO_SMALL, not silent truncation or
+ * corruption.
+ *
+ * R30 found (live, via PKCS#11's own two-pass CKR_BUFFER_TOO_SMALL
+ * convention: the failing call reports the buffer size it actually
+ * needed) that the USABLE plaintext ceiling is this constant MINUS 16
+ * (the tag length), not equal to it -- both engines' own AEAD decrypt
+ * need one tag's worth of headroom beyond the real plaintext they
+ * release, just at different call points (ChaCha20-Poly1305 reports it
+ * needing msglen+taglen bytes at the tag-carrying DecryptUpdate call;
+ * AES-GCM instead needs the full outsize at DecryptFinal, after
+ * DecryptUpdate itself returns 0 -- same net effect via two different
+ * internal shapes, confirmed by tracing both live rather than assuming
+ * they'd match). AEAD_DECRYPT_MAX_MSG_LEN is therefore the DECLARED
+ * block_size, deliberately larger than the promised usable ceiling by
+ * a safety margin (64 bytes -- covers the observed 16-byte tag
+ * overhead with room to spare for anything else not yet observed);
+ * AEAD_DECRYPT_MAX_PLAINTEXT_LEN is the actual promise made to
+ * callers. Do not use AEAD_DECRYPT_MAX_MSG_LEN as if it were the
+ * usable ceiling -- messages at exactly that size will fail. */
+#define AEAD_DECRYPT_MAX_PLAINTEXT_LEN 65536
+#define AEAD_DECRYPT_MAX_MSG_LEN (AEAD_DECRYPT_MAX_PLAINTEXT_LEN + 64)
 
 /* Shared by every cipher.c/chacha.c OSSL_OP_CIPHER implementation --
  * moved here (was cipher.c-private) in phase 5 R26 so chacha.c's own

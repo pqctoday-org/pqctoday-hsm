@@ -2282,9 +2282,74 @@ named AES-CTR/GCM specifically); AES-OFB/CFB* (still the genuine `/*
 TODO */` stub, never touched); the `AEAD_DECRYPT_MAX_MSG_LEN` ceiling
 itself has no dedicated over-the-limit test proving it fails cleanly
 rather than corrupting something (asserted from code reading, not
-independently live-verified); ChaCha20's own AAD-only / zero-length-
-plaintext edge case is untested (the four new harness cases all use
-non-empty plaintext).
+independently live-verified — **closed by phase-6 R30, see below**);
+ChaCha20's own AAD-only / zero-length-plaintext edge case is untested
+(the four new harness cases all use non-empty plaintext — **closed by
+phase-6 R30**).
+
+**Phase 6, R30 (AEAD decrypt edge cases), DONE — a real bug found and
+fixed exactly where the plan expected one might be, test-first.** Both
+edge cases R26 left honestly undone: the `AEAD_DECRYPT_MAX_MSG_LEN`
+ceiling had no dedicated over-the-limit test, and ChaCha20-Poly1305's
+own AAD-only/empty-plaintext path (the `ensure_session()`-from-`final()`
+branch written for zero real `update()` calls) had never actually been
+exercised.
+
+**The bug, found by the very first edge-case probe run:** a message at
+*exactly* the documented 65536-byte ceiling — the size the ceiling is
+supposed to promise WORKS — failed to decrypt. Traced via PKCS#11's own
+two-pass `CKR_BUFFER_TOO_SMALL` convention (a failing call reports the
+buffer size it actually needed): for a 65535-byte ChaCha20-Poly1305
+message, the tag-carrying `DecryptUpdate` call reported needing 65551
+bytes — exactly `msglen + 16` (the tag length) — not `msglen` alone.
+AES-256-GCM has a genuinely different internal release shape (traced
+live, not assumed to match ChaCha20-Poly1305): its own `DecryptUpdate`
+call for the tag always returns 0, and the ENTIRE plaintext is released
+at `DecryptFinal` instead — but needs that SAME `+16` of headroom there
+too (confirmed live: 65520 bytes succeeds, 65521 fails). Same net
+effect, two different internal shapes — worth tracing both explicitly
+rather than assuming one mechanism's behavior generalizes to the other,
+the same lesson R26's own case-label fix already taught this session.
+**Root cause:** `AEAD_DECRYPT_MAX_MSG_LEN` was reported as both the
+declared block_size AND treated as if it were the usable plaintext
+ceiling — it needed to be strictly larger than the promise, not equal
+to it. Fixed: split into `AEAD_DECRYPT_MAX_PLAINTEXT_LEN` (65536, the
+actual promise) and `AEAD_DECRYPT_MAX_MSG_LEN` (`+64`, the declared
+block_size — a safety margin over the observed 16-byte tag overhead,
+not just exactly 16, in case some other overhead exists that this
+session's own two data points didn't surface).
+
+**Live-proven, both mechanisms:** encrypt has no ceiling at all (100000
+bytes succeeds, matches R26's own finding that ciphertext streams out
+via `update()` immediately with no authentication gate on release).
+Decrypt at exactly the promised 65536-byte ceiling now succeeds for
+both AES-256-GCM and ChaCha20-Poly1305; decrypt well over the ceiling
+(100000 bytes) fails cleanly — the process stays alive, reports exactly
+which EVP call failed, and never returns a truncated-but-"successful"
+plaintext (the silent-corruption failure mode this test was written to
+rule out, not just "does it error"). AAD-only (empty plaintext, real
+AAD) and fully-empty (both empty) both decrypt correctly for both
+mechanisms, exercising the zero-real-`update()`-calls path for the
+first time.
+
+New permanent tool `aead-edge-probe.c` (deliberately separate from
+`aead-probe.c` — different shape: takes a byte COUNT instead of a
+message file, and asserts an `expect: decrypt-ok|decrypt-fail`
+outcome rather than always expecting success). Built once with
+AddressSanitizer to look for silent memory corruption at the buffer
+boundary under test; found incompatible with this provider's own
+`RTLD_DEEPBIND` dlopen flag for the engine `.so` (a known,
+documented sanitizer limitation, not a workaround-able provider issue)
+— fell back to the plain build, whose own "process alive + exact
+failure point reported" check remains meaningful evidence against
+both crash and silent-corruption failure modes, just not as strong as
+ASan would have been.
+
+New harness case `T27e` (both mechanisms, all four sub-cases in one
+parameterized case, matching `t26_kmac`'s own style). Full regression:
+**C++ CTest 8/8 passed**; Rust `cargo test` not re-run (no `rust/`
+source touched). **Harness: `PASS=73 FAIL=0 XFAIL=0 XPASS=0`** — one
+case gained, zero regressions.
 
 ## 7. Companion document
 

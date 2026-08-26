@@ -202,6 +202,29 @@ style). Sabotage where applicable. No doc-row changes (ALG-7 stays
 RESOLVED; these are hardening proofs, and the audit's R26 narrative
 already discloses the gaps — append the outcome there).
 
+**Execution update (2026-08-26):** R30 executed and landed — see
+`docs/openssl-provider-coverage-audit-2026-08-25.md`'s "Phase 6, R30"
+entry for the full mechanism. Found the bug this section's own
+"test-first" framing anticipated might exist, on the FIRST probe run:
+a message at exactly the promised 65536-byte ceiling failed to
+decrypt. Root cause: `AEAD_DECRYPT_MAX_MSG_LEN` was being used as both
+the declared block_size and the promised usable ceiling, but both
+mechanisms' own decrypt need one tag's worth (+16 bytes) of headroom
+beyond the promise -- traced live via PKCS#11's own two-pass
+CKR_BUFFER_TOO_SMALL convention, confirmed for both mechanisms (which
+turned out to have genuinely different internal release shapes --
+ChaCha20-Poly1305 releases at the tag-carrying DecryptUpdate,
+AES-256-GCM at DecryptFinal instead -- same root cause, worth tracing
+both rather than assuming). Fixed by splitting the constant into the
+promise (`AEAD_DECRYPT_MAX_PLAINTEXT_LEN`, unchanged at 65536) and the
+declared block_size (`+64` margin). New tool `aead-edge-probe.c`
+(built once with AddressSanitizer -- found incompatible with the
+provider's own RTLD_DEEPBIND dlopen flag for the engine .so, a known
+sanitizer limitation, not a provider bug; fell back to the plain
+build). New harness case T27e. Full regression: C++ CTest 8/8, Rust
+not re-run (no rust/ touched), harness `PASS=73 FAIL=0` (one case
+gained, zero regressions).
+
 ---
 
 ### R31 — TLS13-KDF `derive_SKEY` mode-routing anomaly — effort S–M (timeboxed)
