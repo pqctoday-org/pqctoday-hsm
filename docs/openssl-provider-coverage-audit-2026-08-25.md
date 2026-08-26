@@ -157,7 +157,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | ID | Finding |
 |---|---|
 | ENV-1 | Staged OpenSSL 3.6.3 (`/usr/local/ssl` in `pqc-rust`) built **without** `enable-lms` — LMS test/remediation work needs a rebuilt oracle first. |
-| ENV-2 | **Partially addressed (R6, 2026-08-25) — reported precisely, not claimed done.** Was: native Rust-engine arm structurally blocked, snapshot/restore wired only for WASM. Now: an opt-in, env-var-gated (`SOFTHSMRUST_STATE_FILE`) native persistence path added to `C_Initialize`/`C_Finalize` (`rust/src/ffi.rs`), reusing `state_snapshot.rs`'s existing `serialize_token_state`/`deserialize_token_state` verbatim (already unit-tested — `round_trip_restores_tokens_and_token_objects_only`, `truncated_snapshot_is_rejected_and_state_untouched`, both pass) and inheriting its `SHR3SNP2` refuse-don't-migrate policy unchanged. Byte-identical to today's in-memory-only behavior when the env var is unset (confirmed: the change is purely additive, gated, and does not touch any code path exercised when unset). **A separate, pre-existing bug was found and confirmed unrelated to this fix** (reproduced identically against the pre-R6 binary via `git stash`): `softhsm2-util --init-token` against the Rust engine fails with "Could not get the slot list" — traced to `C_GetSlotList`'s auto-advance-a-fresh-slot logic behaving inconsistently between the tool's two required calls (count-only, then buffered), confirmed live via a temporary debug trace (first call reports zero slots, second reports one). This blocks END-TO-END verification of R6 via the same tool T15b uses, but does not indicate the persistence code itself is wrong — not fixed here, given the risk of a blind fix to unfamiliar, pre-existing slot-management logic under time constraints. Provider+Rust coverage on the WASM static-link path (hub e2e) is unaffected either way. |
+| ENV-2 | **RESOLVED (R6 + R14, 2026-08-25/26)** — the pre-existing `softhsm2-util`/`C_GetSlotList` bug that blocked end-to-end verification is fixed; see the update log below for the full mechanism and sabotage-test result. Was: native Rust-engine arm structurally blocked, snapshot/restore wired only for WASM. Was: native Rust-engine arm structurally blocked, snapshot/restore wired only for WASM. Now: an opt-in, env-var-gated (`SOFTHSMRUST_STATE_FILE`) native persistence path added to `C_Initialize`/`C_Finalize` (`rust/src/ffi.rs`), reusing `state_snapshot.rs`'s existing `serialize_token_state`/`deserialize_token_state` verbatim (already unit-tested — `round_trip_restores_tokens_and_token_objects_only`, `truncated_snapshot_is_rejected_and_state_untouched`, both pass) and inheriting its `SHR3SNP2` refuse-don't-migrate policy unchanged. Byte-identical to today's in-memory-only behavior when the env var is unset (confirmed: the change is purely additive, gated, and does not touch any code path exercised when unset). **A separate, pre-existing bug was found and confirmed unrelated to this fix** (reproduced identically against the pre-R6 binary via `git stash`): `softhsm2-util --init-token` against the Rust engine fails with "Could not get the slot list" — traced to `C_GetSlotList`'s auto-advance-a-fresh-slot logic behaving inconsistently between the tool's two required calls (count-only, then buffered), confirmed live via a temporary debug trace (first call reports zero slots, second reports one). This blocks END-TO-END verification of R6 via the same tool T15b uses, but does not indicate the persistence code itself is wrong — not fixed here, given the risk of a blind fix to unfamiliar, pre-existing slot-management logic under time constraints. Provider+Rust coverage on the WASM static-link path (hub e2e) is unaffected either way. |
 | ENV-3 | Existing provider test assets are dead: `test_openssl_integration.sh` soft-fails every functional step and is referenced by nothing; `openssl_test.cnf` hardcodes another developer's absolute `.dylib` paths; the vendored meson test suite (30 tests) is dormant — no CMake/ctest/CI/gate wiring. |
 
 ---
@@ -226,7 +226,7 @@ trusted; unexpected PASS of an XFAIL case fails the run (ratchet).
 | T14 | CMS RSA | CMS sign via token key → software cmsverify | PASS |
 | T16 | X25519 key exchange (ALG-5) | token-to-token derive (two independent arenas), both directions, byte-identical 32-byte secret | **PASS** (new case, R4) |
 | T16b | X448 key exchange (ALG-5) | same, 56-byte secret | **PASS** (new case, R4) |
-| T15a/b | Rust arm | provider activates over `libsofthsmrustv3.so` (PASS); multi-process functional flow (XFAIL, ENV-2) | PASS + **XFAIL** (R6 code landed, PARTIAL — see ENV-2; a separate pre-existing `softhsm2-util`/Rust-engine slot-list bug, confirmed unrelated to R6, blocks flipping this) |
+| T15a/b | Rust arm | provider activates over `libsofthsmrustv3.so`; multi-process functional flow — 4 wholly separate process invocations round-trip a real ML-DSA-65 key through `SOFTHSMRUST_STATE_FILE` (init-token → genpkey → sign → pubout), software-verified | **PASS + PASS** (R6 + R14, 2026-08-25/26; sabotage-tested) |
 | P2 (plan-only, not scripted yet) | AES/SKEY cipher path, EVP_SKEY KDF chaining (F36-3), CMS KEMRecipientInfo native round-trip (needs ML-KEM cert tooling), composite COMPSIG CLI case, ML-DSA `mu`/`deterministic` parity, RAND fetch | — | design first |
 
 **First full run (2026-08-25, C++ arm + Rust arm, ~40s):**
@@ -523,6 +523,79 @@ is the correct answer for an untrusted self-signed test cert, not a
 parse failure) and was not chased further, per the same
 instrument-before-fixing discipline as everything else in this
 session — flagged rather than silently ignored or blindly patched.
+
+**Further update (2026-08-26, phase-3 execution continued) — R14
+(Rust `C_GetSlotList` root cause + fix), DONE, finishing R6/ENV-2:**
+see ENV-2 above for the current-state summary. Full mechanism:
+
+`softhsm2-util --init-token` failed against the Rust engine with
+"Could not get the slot list." Root-caused precisely, then
+sabotage-tested to confirm which of two candidate defects actually
+mattered (the phase-3 plan flagged both as plausible without knowing
+which):
+
+1. **The confirmed, necessary fix**: `C_GetSlotList` conflated "token
+   present" with "token initialized" — two genuinely distinct PKCS#11
+   concepts (`CKF_TOKEN_PRESENT` lives on `CK_SLOT_INFO`,
+   `CKF_TOKEN_INITIALIZED` on `CK_TOKEN_INFO` — separate flags, separate
+   structs, confirmed against the canonical `pkcs11t.h`). The tool's own
+   `findSlot()` (`src/bin/common/findslot.cpp`) queries the size with
+   `CK_TRUE` and fills with `CK_FALSE` — the fill call never filtered in
+   either version, so the conflated `CK_TRUE` size call alone
+   under-reporting the always-present-but-uninitialized slot 0 (`engine
+   seeds it at start via init_token_store()`) against the correct,
+   larger `CK_FALSE` fill count triggered `CKR_BUFFER_TOO_SMALL` —
+   exactly the tool's literal error text. Fixed to match the C++
+   engine's own reference semantics (`SlotManager::getSlotList`,
+   `src/lib/slot_mgr/SlotManager.cpp`), which filters on
+   `isTokenPresent()`, never `isInitialized()`. Sabotage-tested in
+   isolation: reverting only this fix reproduces the exact original
+   failure; restoring it fixes it again.
+2. **A second fix, kept but reported at its true confidence, not
+   overclaimed**: the "always keep one spare uninitialized slot"
+   auto-advance now mutates the store only on the size-query call, not
+   the fill call too — matching the ratified OASIS PKCS#11 v3.2 spec's
+   own §5.5.1 language ("the set of slots... is checked at the time
+   that C_GetSlotList, for list length prediction (NULL pSlotList
+   argument), is called") and the C++ engine's reference gating.
+   Sabotage-tested independently: reverting only this one did **not**
+   reproduce any failure — `TOKEN_STORE` persists across both calls
+   within a process, so the previous code's redundant re-check on the
+   fill call was, empirically, always idempotent in every scenario this
+   session could construct. Kept as a genuine, spec-aligned hardening;
+   documented plainly as not independently proven necessary, rather
+   than folded silently into a single "found the bug" narrative.
+
+A third, separate finding (not a bug — a discovered dependency): the
+tool's own `--init-token` flow does an internal `C_Finalize`/
+`C_Initialize` reload within the same process to re-discover the
+newly-initialized token by serial+label. This requires
+`SOFTHSMRUST_STATE_FILE` (R6's own opt-in native persistence, landed
+2026-08-25) to be set for *that* invocation too, or the reload
+legitimately loses the token it just created — the Rust engine is
+deliberately in-memory-only by design, not a compliance gap.
+
+**Compliance check performed on request**: the tool's use of
+`C_GetSlotList`, `CK_TOKEN_INFO`, `C_InitToken`, `C_Finalize`, and
+`C_Initialize` was verified against the canonical `pkcs11f.h`/
+`pkcs11t.h` and the ratified OASIS PKCS#11 v3.2 spec text
+(`pkcs11-spec-v3.2-os.pdf`) — none of these have changed shape or
+semantics between PKCS#11 v2.x and v3.2; the tool's own
+reload-then-rediscover design is not a version-compatibility gap.
+
+Harness case T15b — previously the sole permanent `XFAIL` — is
+rewritten as a real, sabotage-tested multi-process proof: four wholly
+separate process invocations (`softhsm2-util --init-token` → `genpkey
+ML-DSA-65` → `pkeyutl -sign` → `pkey -pubout`), bridged only by the
+state file, no in-memory continuity between any of them, followed by a
+software cross-verify of the signature against the exported public key
+— the same proven cross-check pattern `mldsa_case` (T3a-c) already
+uses, just split across process boundaries. Flipped `XFAIL → PASS`.
+Both engines' full test suites remain green (C++ unaffected by this
+item; Rust: 410/410, zero regressions from either `C_GetSlotList`
+fix). **Harness: `PASS=27 FAIL=0 XFAIL=0 XPASS=0`** — zero remaining
+known gaps in this harness for the first time in this remediation
+effort's history.
 
 ## 7. Companion document
 

@@ -337,52 +337,84 @@ pub fn C_GetSlotList(token_present: u8, p_slot_list: *mut u32, pul_count: *mut u
     if pul_count.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
-    let token_present_bool = token_present != 0;
+    // token_present is a no-op filter here: every TOKEN_STORE entry already
+    // represents a slot with a token physically present, initialized or
+    // not — this engine has no separate "empty slot, no token at all"
+    // state to filter out. Matches the C++ engine's reference semantics
+    // (SlotManager::getSlotList, src/lib/slot_mgr/SlotManager.cpp): its
+    // tokenPresent==TRUE filter checks isTokenPresent() (a token object
+    // exists in the slot), never isInitialized() — those are different
+    // questions (PKCS#11 v3.2 pkcs11t.h: CKF_TOKEN_PRESENT lives on
+    // CK_SLOT_INFO, CKF_TOKEN_INITIALIZED on CK_TOKEN_INFO — genuinely
+    // separate flags on separate structs). CONFIRMED root cause, not a
+    // guess: the previous code conflated them (`t.initialized`), and
+    // softhsm2-util's own findSlot() (src/bin/common/findslot.cpp) calls
+    // C_GetSlotList(CK_TRUE, NULL, ...) for its size query, then
+    // C_GetSlotList(CK_FALSE, buf, ...) to fill — CK_FALSE never filtered
+    // in either version, so the size call alone under-reporting (0
+    // instead of 1, with init_token_store() always seeding slot 0 as
+    // initialized:false at engine start) against the fill call's
+    // correct, unfiltered count triggered CKR_BUFFER_TOO_SMALL — exactly
+    // "Could not get the slot list", softhsm2-util's literal error text.
+    // Sabotage-tested (harness T15b): reverting just this filter, with
+    // the auto-advance gating below left fixed, reproduces the failure
+    // on its own — this is the necessary fix.
+    let _ = token_present;
 
-    // Auto-advance slots if needed (mimic SoftHSMv2/v3 shift: always provide 1 uninitialized token)
-    TOKEN_STORE.with(|ts| {
-        let mut store = ts.borrow_mut();
-        let all_initialized = store.values().all(|t| t.initialized);
-        if all_initialized {
-            let next_slot = store.keys().max().unwrap_or(&0) + 1;
-            store.insert(
-                next_slot,
-                TokenState {
-                    slot_id: next_slot,
-                    initialized: false,
-                    label: [0x20; 32],
-                    login_state: LoginState::Public,
-                    so_pin_salt: [0u8; 16],
-                    so_pin_hash: [0u8; 32],
-                    user_pin_salt: None,
-                    user_pin_hash: None,
-                },
-            );
+    // Auto-advance ("always keep one spare uninitialized slot") mutates
+    // the store ONLY on the count-query call (p_slot_list is null) —
+    // mirroring SlotManager::getSlotList's own gating (its insertion is
+    // inside the `if (pSlotList == NULL)` branch, never the fill branch)
+    // and the spec's own language (§5.5.1: "the set of slots... is
+    // checked at the time that C_GetSlotList, for list length
+    // prediction (NULL pSlotList argument) is called"). Kept as a
+    // spec-aligned hardening, NOT a second proven bug: TOKEN_STORE
+    // persists across both calls within a process, so the previous
+    // code's redundant re-check on the fill call was, empirically,
+    // always idempotent in every scenario this session could construct
+    // (sabotage-tested — reverting only this gating did not reproduce
+    // any failure). Reported at exactly this confidence, not overclaimed.
+    if p_slot_list.is_null() {
+        TOKEN_STORE.with(|ts| {
+            let mut store = ts.borrow_mut();
+            let all_initialized = store.values().all(|t| t.initialized);
+            if all_initialized {
+                let next_slot = store.keys().max().unwrap_or(&0) + 1;
+                store.insert(
+                    next_slot,
+                    TokenState {
+                        slot_id: next_slot,
+                        initialized: false,
+                        label: [0x20; 32],
+                        login_state: LoginState::Public,
+                        so_pin_salt: [0u8; 16],
+                        so_pin_hash: [0u8; 32],
+                        user_pin_salt: None,
+                        user_pin_hash: None,
+                    },
+                );
+            }
+        });
+        let count = TOKEN_STORE.with(|ts| ts.borrow().len() as u32);
+        unsafe {
+            *pul_count = count;
         }
-    });
+        return CKR_OK;
+    }
 
-    let mut slots: Vec<u32> = TOKEN_STORE.with(|ts| {
-        ts.borrow()
-            .values()
-            .filter(|t| !token_present_bool || t.initialized)
-            .map(|t| t.slot_id)
-            .collect()
-    });
+    let mut slots: Vec<u32> =
+        TOKEN_STORE.with(|ts| ts.borrow().values().map(|t| t.slot_id).collect());
     slots.sort_unstable();
 
     unsafe {
-        if p_slot_list.is_null() {
+        if *pul_count < slots.len() as u32 {
             *pul_count = slots.len() as u32;
-        } else {
-            if *pul_count < slots.len() as u32 {
-                *pul_count = slots.len() as u32;
-                return CKR_BUFFER_TOO_SMALL;
-            }
-            for (i, &slot_id) in slots.iter().enumerate() {
-                *p_slot_list.add(i) = slot_id;
-            }
-            *pul_count = slots.len() as u32;
+            return CKR_BUFFER_TOO_SMALL;
         }
+        for (i, &slot_id) in slots.iter().enumerate() {
+            *p_slot_list.add(i) = slot_id;
+        }
+        *pul_count = slots.len() as u32;
     }
     CKR_OK
 }

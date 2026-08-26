@@ -609,6 +609,7 @@ activate = 1
 module = $PROVIDER_SO
 pkcs11-module-path = $RUST_ENGINE_SO
 pkcs11-module-token-pin = 1234
+pkcs11-module-encode-provider-uri-to-pem = true
 activate = 1
 EOF
 }
@@ -620,37 +621,81 @@ t15a() { # provider must at least activate over the Rust cdylib
 }
 run_case T15a PASS "provider activates over the native Rust cdylib" t15a
 
-t15b() { # ENV-2: in-memory token store, no cross-process persistence — any
-         # multi-process keygen+use flow MUST fail today (remediation R6).
-         # R6 (2026-08-25) landed opt-in native persistence
-         # (SOFTHSMRUST_STATE_FILE) but could NOT be verified end-to-end
-         # through THIS test: a separate, pre-existing bug (confirmed via
-         # git-stash against the pre-R6 binary, so not something R6
-         # introduced) makes `softhsm2-util --init-token` fail against the
-         # Rust engine with "Could not get the slot list" — its two
-         # required C_GetSlotList calls (count-only, then buffered) return
-         # inconsistent slot counts, confirmed live via a temporary debug
-         # trace (first call: 0 slots; second call: 1). Until that's
-         # fixed, this test's own `|| true` on the init-token line means
-         # it was already never getting a real token before R6 either —
-         # not scripted as a persistence proof, since it can't currently
-         # even prove the non-persistence half cleanly.
+t15b() { # ENV-2/R6/R14 — genuine multi-process persistence proof.
+         # Four wholly separate process invocations, bridged only by
+         # SOFTHSMRUST_STATE_FILE (R6's opt-in stash-on-C_Finalize /
+         # restore-on-C_Initialize) and the object store's own PIN — no
+         # two of these processes share any in-memory state at all:
+         #   A: softhsm2-util --init-token  (creates the token)
+         #   B: genpkey ML-DSA-65           (restores A's token, adds a real key)
+         #   C: pkeyutl -sign               (restores B's token, signs with the private key)
+         #   D: pkey -pubout                (restores B/C's token, exports the public key)
+         # then software-verifies C's signature against D's exported
+         # public key — the exact cross-check pattern already proven in
+         # mldsa_case (T3a-c), just split across process boundaries by
+         # the state file instead of staying in one arena. This can only
+         # pass if the SAME key genuinely round-tripped through the file
+         # across all four processes.
+         #
+         # R14 (2026-08-25/26) root-caused and fixed what blocked this.
+         # CONFIRMED, sabotage-proven cause: C_GetSlotList conflated
+         # "token present" with "token initialized" (two distinct PKCS#11
+         # concepts — CKF_TOKEN_PRESENT lives on CK_SLOT_INFO,
+         # CKF_TOKEN_INITIALIZED on CK_TOKEN_INFO). softhsm2-util's own
+         # findSlot() (src/bin/common/findslot.cpp) queries the SIZE with
+         # CK_TRUE, then FILLS with CK_FALSE (which never filtered, in
+         # either version) — so the conflated CK_TRUE size call alone
+         # under-reporting the always-present-but-uninitialized slot 0
+         # against the correct, larger CK_FALSE fill count triggered
+         # CKR_BUFFER_TOO_SMALL — exactly softhsm2-util's literal
+         # "Could not get the slot list" error. Reverting just this fix
+         # (with the item below left in place) reproduces the failure on
+         # its own — sabotage-tested, this is the necessary fix.
+         # Also fixed, kept as a spec-aligned hardening but NOT a second
+         # proven bug (said plainly, not overclaimed): the "always keep
+         # one spare uninitialized slot" auto-advance now mutates the
+         # store only on the size-query call, not the fill call too,
+         # matching the spec's own "the set of slots... is checked at the
+         # time... the NULL pSlotList argument is used" (§5.5.1) and the
+         # C++ engine's reference implementation (SlotManager::
+         # getSlotList). Sabotage-testing this one in isolation did NOT
+         # reproduce any failure — TOKEN_STORE persists across both calls
+         # within a process, so the previous code's redundant re-check on
+         # the fill call was, empirically, always idempotent in every
+         # scenario this session could construct.
+         # Separately (not a bug, a discovered dependency): softhsm2-
+         # util's own --init-token flow does an internal C_Finalize/
+         # C_Initialize reload within the same process to re-discover the
+         # newly initialized token by serial+label — which requires
+         # SOFTHSMRUST_STATE_FILE to be set for THAT invocation too, or
+         # the reload legitimately loses the token it just created.
   [[ -n "$RUST_ENGINE_SO" ]] || return 1
   local w="$ROOT_WORK/rustfunc"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
   # OPENSSL_CONF=/dev/null: same reason as mk_arena's own init-token call
   # (see its comment) — without it this would inherit whatever prior
   # arena's OPENSSL_CONF is still exported, which can make an unrelated
   # config's pkcs11-module-load-behavior=early collide with this direct
-  # module load and mask ENV-2's real failure behind
+  # module load and mask a real failure behind
   # CKR_CRYPTOKI_ALREADY_INITIALIZED instead.
-  OPENSSL_CONF=/dev/null "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
-    --init-token --free --label rustarm --so-pin 1234 --pin 1234 >/dev/null 2>&1 || true  # state dies with this process
-  OPENSSL_CONF="$w/openssl.cnf" \
-    O genpkey -propquery "?provider=pkcs11" -algorithm ML-DSA-65 -out "$w/k.pem" 2>/dev/null \
-    && OPENSSL_CONF="$w/openssl.cnf" \
-       O pkeyutl -sign -inkey "pkcs11:type=private" -rawin -in "$MSG" -out "$w/sig.bin" 2>/dev/null
+  SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rustarm --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+
+  SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm ML-DSA-65 -out "$w/k.pem" 2>/dev/null || return 1
+  SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -sign -propquery "?provider=pkcs11" -inkey "pkcs11:token=rustarm;type=private" \
+      -rawin -in "$MSG" -out "$w/sig.bin" 2>/dev/null || return 1
+  SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkey -propquery "?provider=pkcs11" -in "pkcs11:token=rustarm;type=public" \
+      -pubin -pubout -out "$w/pub.pem" 2>/dev/null || return 1
+
+  [[ -s "$w/sig.bin" && -s "$w/pub.pem" ]] || return 1
+  O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" -sigfile "$w/sig.bin"
 }
-run_case T15b XFAIL "Rust arm functional flow (blocked by ENV-2 / remediation R6)" t15b
+run_case T15b PASS "Rust arm multi-process persistence: 4 separate processes round-trip a real ML-DSA-65 key through SOFTHSMRUST_STATE_FILE (gap ENV-2 / remediation R6+R14)" t15b
 
 # ─── R0.1 regression guard ──────────────────────────────────────────────────
 # The token-scan attribute-type noise (WART-1) was a real bug, not spec-legal
