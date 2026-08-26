@@ -69,8 +69,16 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST_CONTAINER="${RUST_CONTAINER:-pqc-rust}"
 SANDBOX_CONTAINER="${SANDBOX_CONTAINER:-pqc-dev-sandbox}"
-AG_KMIP="/ag/pqctoday-hsm/kmip"
-AG_RUST="/ag/pqctoday-hsm/rust"
+# Worktree-local override: these two are normally hardcoded to the shared
+# main-tree container path, which is correct for that tree but WRONG when
+# this exact script is invoked from an isolated `git worktree` checkout —
+# it would silently test the main tree's (possibly concurrently-edited)
+# kmip/rust source instead of this worktree's pinned commit. AG_CONTAINER_ROOT
+# lets a worktree invocation point these at itself; unset, behavior is
+# unchanged (the original hardcoded main-tree path).
+AG_CONTAINER_ROOT="${AG_CONTAINER_ROOT:-/ag/pqctoday-hsm}"
+AG_KMIP="$AG_CONTAINER_ROOT/kmip"
+AG_RUST="$AG_CONTAINER_ROOT/rust"
 JAVAJCE_DIR="$ROOT/JavaJCE"
 JAVAJCE_REMOTE_DIR="$ROOT/JavaJCE-remote"
 
@@ -193,7 +201,7 @@ run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
 # later when someone tried to rebuild the bundle. A type-check is cheap; a full
 # wasm build is not, so this checks rather than builds.
 run_step "wasm target still compiles (cargo check)" \
-  "cd /ag/pqctoday-hsm/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6 && exit 1; echo '  wasm32 type-check clean'"
+  "cd $AG_CONTAINER_ROOT/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6 && exit 1; echo '  wasm32 type-check clean'"
 
 # wasm smoke runs on the HOST (node lives there, not in the Rust container).
 # Runs the STAGED bundle — see the check above for why that is not sufficient on
@@ -276,9 +284,9 @@ if [[ $RUN_CPP == 1 ]]; then
   OSSL_ROOT="${OPENSSL_ROOT_DIR:-/usr/local/ssl}"
   OSSL_LIB="${OPENSSL_LIB_DIR:-/usr/local/ssl/lib}"
   run_step "C++ ctest (incl. PKCS#11 v3.2 compliance harness) + report freshness" \
-    "cd /ag/pqctoday-hsm && (test -d build || cmake -S . -B build -DWITH_RIPEMD160=ON -DBUILD_TESTS=ON -DOPENSSL_ROOT_DIR=$OSSL_ROOT >/dev/null) && \
+    "cd $AG_CONTAINER_ROOT && (test -d build || cmake -S . -B build -DWITH_RIPEMD160=ON -DBUILD_TESTS=ON -DOPENSSL_ROOT_DIR=$OSSL_ROOT >/dev/null) && \
      LD_LIBRARY_PATH=$OSSL_LIB cmake --build build -j\$(nproc) >/dev/null && cd build && LD_LIBRARY_PATH=$OSSL_LIB ctest --output-on-failure && \
-     cd /ag/pqctoday-hsm && \
+     cd $AG_CONTAINER_ROOT && \
      ENGINE=./build/src/lib/libsofthsmv3.so; [ -f \"\$ENGINE\" ] || ENGINE=./build/src/lib/libsofthsmv3.dylib; \
      LD_LIBRARY_PATH=$OSSL_LIB ./build/p11_v32_compliance_test --engine \"\$ENGINE\" \
        --workdir ./build/p11_v32_compliance_workdir --report ./cpp_compliance_report \
@@ -288,7 +296,7 @@ fi
 
 if [[ $RUN_ACVP_WASM == 1 ]]; then
   run_step "ACVP wasm harness (20 suites, cross-engine)" \
-    "cd /ag/pqctoday-hsm && npm run test:acvp 2>&1 | tail -5"
+    "cd $AG_CONTAINER_ROOT && npm run test:acvp 2>&1 | tail -5"
 fi
 
 if [[ $RUN_RELEASE_XMSS == 1 ]]; then
