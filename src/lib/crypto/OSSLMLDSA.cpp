@@ -43,6 +43,7 @@
 #include <openssl/core_names.h>
 #include <openssl/params.h>
 #include <string.h>
+#include "../vendor_mechanisms.h"  // PQCTODAY_ML_DSA_MU_LEN (remediation R34)
 
 // ─── Pre-hash support (FIPS 204 §5.4, HashML-DSA) ──────────────────────────
 
@@ -244,6 +245,7 @@ static bool isMLDSAMechanism(AsymMech::Type mech)
 		case AsymMech::HASH_MLDSA_SHA3_512:
 		case AsymMech::HASH_MLDSA_SHAKE128:
 		case AsymMech::HASH_MLDSA_SHAKE256:
+		case AsymMech::MLDSA_EXTERNAL_MU:  // remediation R34, PQCTODAY-VENDOR-EXT-MU
 			return true;
 		default:
 			return false;
@@ -279,6 +281,17 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	const MLDSA_SIGN_PARAMS* mldsaParams = NULL;
 	if (param != NULL && paramLen == sizeof(MLDSA_SIGN_PARAMS))
 		mldsaParams = (const MLDSA_SIGN_PARAMS*)param;
+
+	// Remediation R34, PQCTODAY-VENDOR-EXT-MU: dataToSign is the caller's
+	// 64-byte µ (FIPS 204 Eq. 2), not a message — validated here, not left
+	// to OpenSSL's own length assumptions.
+	bool isExternalMu = (mechanism == AsymMech::MLDSA_EXTERNAL_MU);
+	if (isExternalMu && dataToSign.size() != PQCTODAY_ML_DSA_MU_LEN)
+	{
+		ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU requires exactly %u bytes of µ (got %zu)",
+			PQCTODAY_ML_DSA_MU_LEN, dataToSign.size());
+		return false;
+	}
 
 	// For pre-hash mechanisms: hash message and build encoded M'
 	const unsigned char* signData;
@@ -323,10 +336,11 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	// Set OpenSSL signature parameters (context, hedging, encoding mode)
 	if (mldsaParams)
 	{
-		OSSL_PARAM osslParams[4];  // max 3 params + terminator
+		OSSL_PARAM osslParams[4];  // max: DETERMINISTIC + one-of{MESSAGE_ENCODING,MU} + terminator
 		int nParams = 0;
 		int deterministic = 0;
 		int msgEncoding = 1;  // 1 = pure message (default)
+		int mu = 1;
 
 		// Hedging control: CKH_DETERMINISTIC_REQUIRED → set deterministic=1
 		if (mldsaParams->deterministic)
@@ -350,6 +364,15 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 			msgEncoding = 0;  // 0 = raw / pre-encoded
 			osslParams[nParams++] = OSSL_PARAM_construct_int(
 				OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, &msgEncoding);
+		}
+
+		// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU): tell OpenSSL
+		// the input IS µ already, skip its own H(tr‖M') computation entirely.
+		// Mutually exclusive with useRawEncoding (different mechanisms).
+		if (isExternalMu)
+		{
+			osslParams[nParams++] = OSSL_PARAM_construct_int(
+				OSSL_SIGNATURE_PARAM_MU, &mu);
 		}
 
 		if (nParams > 0)
@@ -435,6 +458,15 @@ bool OSSLMLDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	if (param != NULL && paramLen == sizeof(MLDSA_SIGN_PARAMS))
 		mldsaParams = (const MLDSA_SIGN_PARAMS*)param;
 
+	// Remediation R34, PQCTODAY-VENDOR-EXT-MU — see sign()'s own comment.
+	bool isExternalMu = (mechanism == AsymMech::MLDSA_EXTERNAL_MU);
+	if (isExternalMu && originalData.size() != PQCTODAY_ML_DSA_MU_LEN)
+	{
+		ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU requires exactly %u bytes of µ (got %zu)",
+			PQCTODAY_ML_DSA_MU_LEN, originalData.size());
+		return false;
+	}
+
 	// For pre-hash mechanisms: hash message and build encoded M'
 	const unsigned char* verifyData;
 	size_t verifyDataLen;
@@ -475,9 +507,10 @@ bool OSSLMLDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	// Note: deterministic flag is irrelevant for verification
 	if (mldsaParams)
 	{
-		OSSL_PARAM osslParams[3];  // max 2 params + terminator
+		OSSL_PARAM osslParams[4];  // max: CONTEXT_STRING + one-of{MESSAGE_ENCODING,MU} + terminator
 		int nParams = 0;
 		int msgEncoding = 1;
+		int mu = 1;
 
 		// Context string — only for pure ML-DSA
 		if (mldsaParams->contextLen > 0 && !useRawEncoding)
@@ -493,6 +526,14 @@ bool OSSLMLDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 			msgEncoding = 0;
 			osslParams[nParams++] = OSSL_PARAM_construct_int(
 				OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, &msgEncoding);
+		}
+
+		// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — see sign()'s
+		// own comment.
+		if (isExternalMu)
+		{
+			osslParams[nParams++] = OSSL_PARAM_construct_int(
+				OSSL_SIGNATURE_PARAM_MU, &mu);
 		}
 
 		if (nParams > 0)

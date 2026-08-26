@@ -41,6 +41,12 @@ struct p11prov_sig_ctx {
     /* ML-DSA param data */
     CK_ML_DSA_PARAMETER_SET_TYPE mldsa_paramset;
     CK_SIGN_ADDITIONAL_CONTEXT mldsa_params;
+    /* External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU): caller set
+     * OSSL_SIGNATURE_PARAM_MU=1. Routes to the vendor mechanism
+     * CKM_PQCTODAY_ML_DSA_MU instead of CKM_ML_DSA — stopgap for PKCS#11
+     * v3.3's own upcoming native mechanism (oasis-tcs/pkcs11#58). Remove
+     * when this project adopts v3.3 natively. */
+    bool mldsa_external_mu;
 
     /* SLH-DSA param data (PKCS#11 v3.2 §6.68: CKM_SLH_DSA accepts the same
      * optional CK_SIGN_ADDITIONAL_CONTEXT as CKM_ML_DSA — FIPS 205 §9.2

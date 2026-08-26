@@ -1837,6 +1837,13 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
             CKP_ML_DSA_87 => 4627,
             _ => 3309,
         },
+        // External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — same
+        // signature format/size as pure ML-DSA, only the input path differs.
+        CKM_PQCTODAY_ML_DSA_MU => match ps {
+            CKP_ML_DSA_44 => 2420,
+            CKP_ML_DSA_87 => 4627,
+            _ => 3309,
+        },
         CKM_SLH_DSA => match ps {
             CKP_SLH_DSA_SHA2_128S | CKP_SLH_DSA_SHAKE_128S => 7856,
             CKP_SLH_DSA_SHA2_128F | CKP_SLH_DSA_SHAKE_128F => 17088,

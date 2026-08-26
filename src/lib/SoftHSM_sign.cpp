@@ -958,6 +958,37 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE128, HASH_MLDSA_SHAKE128, SHAKE128)
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE256, HASH_MLDSA_SHAKE256, SHAKE256)
 #undef HASH_MLDSA_CASE
+		case CKM_PQCTODAY_ML_DSA_MU:
+		{
+			// Remediation R34, PQCTODAY-VENDOR-EXT-MU. Reuses
+			// CK_SIGN_ADDITIONAL_CONTEXT verbatim (parseMLDSASignContext,
+			// same as plain CKM_ML_DSA) -- only hedgeVariant is meaningful.
+			// The caller's 64-byte µ travels via the normal C_Sign/C_Verify
+			// data argument, not the mechanism parameter (see
+			// vendor_mechanisms.h's own comment on this mechanism).
+			// bAllowMultiPartOp=true: live-traced (2026-08-26) -- OpenSSL's own
+			// EVP_DigestSign machinery drives even a "one-shot" pkeyutl -sign
+			// through C_SignInit/C_SignUpdate/C_SignFinal for ML-DSA, never a
+			// single C_Sign call, so this MUST accept multi-part or every
+			// caller fails at the first C_SignUpdate (CKR_OPERATION_NOT_INITIALIZED).
+			// Same accumulate-then-single-sign shape as plain CKM_ML_DSA:
+			// OSSLMLDSA::sign() sees the fully-accumulated buffer at Final time
+			// either way, so this needed no engine-side change beyond the flag.
+			mechanism = AsymMech::MLDSA_EXTERNAL_MU;
+			bAllowMultiPartOp = true;
+			isMLDSA = true;
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
+			if (rv2 != CKR_OK) return rv2;
+			if (mldsaSignParam.contextLen > 0)
+			{
+				ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU takes no context -- µ already "
+					"folds it in (FIPS 204)");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			param = &mldsaSignParam;
+			paramLen = sizeof(mldsaSignParam);
+			break;
+		}
 		case CKM_SLH_DSA:
 			// PKCS#11 v3.2: CKM_SLH_DSA accepts optional CK_SIGN_ADDITIONAL_CONTEXT
 			// for context string (FIPS 205 §9.2) and deterministic mode (FIPS 205 §10).
@@ -2580,6 +2611,37 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE128, HASH_MLDSA_SHAKE128, SHAKE128)
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE256, HASH_MLDSA_SHAKE256, SHAKE256)
 #undef HASH_MLDSA_CASE
+		case CKM_PQCTODAY_ML_DSA_MU:
+		{
+			// Remediation R34, PQCTODAY-VENDOR-EXT-MU. Reuses
+			// CK_SIGN_ADDITIONAL_CONTEXT verbatim (parseMLDSASignContext,
+			// same as plain CKM_ML_DSA) -- only hedgeVariant is meaningful.
+			// The caller's 64-byte µ travels via the normal C_Sign/C_Verify
+			// data argument, not the mechanism parameter (see
+			// vendor_mechanisms.h's own comment on this mechanism).
+			// bAllowMultiPartOp=true: live-traced (2026-08-26) -- OpenSSL's own
+			// EVP_DigestSign machinery drives even a "one-shot" pkeyutl -sign
+			// through C_SignInit/C_SignUpdate/C_SignFinal for ML-DSA, never a
+			// single C_Sign call, so this MUST accept multi-part or every
+			// caller fails at the first C_SignUpdate (CKR_OPERATION_NOT_INITIALIZED).
+			// Same accumulate-then-single-sign shape as plain CKM_ML_DSA:
+			// OSSLMLDSA::sign() sees the fully-accumulated buffer at Final time
+			// either way, so this needed no engine-side change beyond the flag.
+			mechanism = AsymMech::MLDSA_EXTERNAL_MU;
+			bAllowMultiPartOp = true;
+			isMLDSA = true;
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
+			if (rv2 != CKR_OK) return rv2;
+			if (mldsaSignParam.contextLen > 0)
+			{
+				ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU takes no context -- µ already "
+					"folds it in (FIPS 204)");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			param = &mldsaSignParam;
+			paramLen = sizeof(mldsaSignParam);
+			break;
+		}
 		case CKM_SLH_DSA:
 			// PKCS#11 v3.2: CKM_SLH_DSA accepts optional CK_SIGN_ADDITIONAL_CONTEXT
 			// for context string (FIPS 205 §9.2) and deterministic mode (FIPS 205 §10).

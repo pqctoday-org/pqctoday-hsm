@@ -1120,6 +1120,10 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY —
         // C_MessageSign/Verify* are implemented for these (pkcs11t.h 0x8/0x10).
         CKM_ML_DSA => (1312, 2592, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
+        // ML-DSA external-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — same
+        // key-size range as CKM_ML_DSA; CKF_SIGN | CKF_VERIFY only, no
+        // C_MessageSign/Verify* support for this vendor mechanism.
+        CKM_PQCTODAY_ML_DSA_MU => (1312, 2592, 0x00000800 | 0x00002000),
         // SLH-DSA pk: 32 B (128-bit sets) … 64 B (256-bit sets) — FIPS 205 Table 2.
         CKM_SLH_DSA_KEY_PAIR_GEN => (32, 64, 0x00010000),
         CKM_SLH_DSA => (32, 64, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
@@ -4862,10 +4866,13 @@ unsafe fn remap_generic_hash_mech(p_mechanism: *const u8, mech_type: u32) -> Res
 }
 
 /// True when `mech` takes a CK_SIGN_ADDITIONAL_CONTEXT parameter
-/// (PKCS#11 v3.2 §6.67/§6.69 — ML-DSA and SLH-DSA, pure and pre-hash).
+/// (PKCS#11 v3.2 §6.67/§6.69 — ML-DSA and SLH-DSA, pure and pre-hash),
+/// plus CKM_PQCTODAY_ML_DSA_MU (remediation R34, PQCTODAY-VENDOR-EXT-MU),
+/// which reuses the same struct for its hedgeVariant field.
 fn takes_sign_additional_ctx(mech: u32) -> bool {
     mech == CKM_ML_DSA
         || mech == CKM_SLH_DSA
+        || mech == CKM_PQCTODAY_ML_DSA_MU
         || is_prehash_ml_dsa(mech)
         || is_prehash_slh_dsa(mech)
 }
@@ -4924,7 +4931,16 @@ unsafe fn parse_sign_mech_params(
     let m = ck_param::mech(p_mechanism);
     if takes_sign_additional_ctx(mech_type) {
         // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
-        // (PKCS#11 v3.2 §6.67/§6.69). Overlong ctx / bad hedge → error.
+        // (PKCS#11 v3.2 §6.67/§6.69), PLUS CKM_PQCTODAY_ML_DSA_MU
+        // (remediation R34, PQCTODAY-VENDOR-EXT-MU): the vendor mechanism
+        // reuses this exact struct rather than defining its own — µ itself
+        // travels via the normal C_Sign/C_Verify data argument (same
+        // convention as every other mechanism here, and as PKCS#11's own
+        // CKM_HASH_ML_DSA), so only hedgeVariant is meaningful; a non-empty
+        // context is rejected at the C_Sign/C_Verify dispatch (no defined
+        // meaning once µ is already computed — FIPS 204 folds context into
+        // µ before the caller ever gets here). Overlong ctx / bad hedge →
+        // error either way.
         return parse_sign_additional_ctx(p_mechanism);
     }
     if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
@@ -5242,6 +5258,30 @@ fn C_Sign_impl(
             m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
                 sign_ml_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic)
             }
+            CKM_PQCTODAY_ML_DSA_MU => {
+                // Remediation R34, PQCTODAY-VENDOR-EXT-MU. `msg` here is the
+                // caller's 64-byte µ (FIPS 204 Eq. 2), not a message — see
+                // takes_sign_additional_ctx's own comment for why this
+                // reuses CK_SIGN_ADDITIONAL_CONTEXT rather than a new
+                // struct. `ctx_bytes` carries hedgeVariant's context field,
+                // which has no meaning once µ already exists — reject
+                // non-empty rather than silently ignore it.
+                if !ctx_bytes.is_empty() {
+                    Err(CKR_MECHANISM_PARAM_INVALID)
+                } else if msg.len() != PQCTODAY_ML_DSA_MU_LEN {
+                    Err(CKR_ARGUMENTS_BAD)
+                } else {
+                    let rnd: [u8; 32] = if deterministic {
+                        [0u8; 32]
+                    } else {
+                        use rand::RngCore;
+                        let mut b = [0u8; 32];
+                        rand::rngs::OsRng.fill_bytes(&mut b);
+                        b
+                    };
+                    sign_ml_dsa_external_mu(ps, &sk_bytes, msg, rnd)
+                }
+            }
             m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
                 sign_slh_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic)
             }
@@ -5516,6 +5556,17 @@ pub fn C_Verify(
         let rv = match match eff_mech {
             m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
                 verify_ml_dsa(m, ps, &pk_bytes, msg, sig_bytes, &ctx_bytes)
+            }
+            CKM_PQCTODAY_ML_DSA_MU => {
+                // Remediation R34, PQCTODAY-VENDOR-EXT-MU — counterpart to
+                // C_Sign's own arm above; see its comment for the design.
+                if !ctx_bytes.is_empty() {
+                    Err(CKR_MECHANISM_PARAM_INVALID)
+                } else if msg.len() != PQCTODAY_ML_DSA_MU_LEN {
+                    Err(CKR_ARGUMENTS_BAD)
+                } else {
+                    verify_ml_dsa_external_mu(ps, &pk_bytes, msg, sig_bytes)
+                }
             }
             m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
                 verify_slh_dsa(m, ps, &pk_bytes, msg, sig_bytes, &ctx_bytes)
@@ -9770,6 +9821,7 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_KMAC_128
             | CKM_KMAC_256
             | CKM_ML_DSA
+            | CKM_PQCTODAY_ML_DSA_MU
             | CKM_SLH_DSA
             | CKM_EDDSA
     ) || hmac_general_base(mech).is_some()

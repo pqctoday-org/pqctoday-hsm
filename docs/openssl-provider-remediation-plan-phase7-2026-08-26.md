@@ -124,6 +124,35 @@ arms (C++ + Rust). Full regression incl. `cargo test --release`
 point when v3.3 ratifies and this project adopts it. The provider-side
 change is additive (widens a rejection), so removal is a clean revert.
 
+**Execution update (2026-08-26):** done, both engines, fully
+live-verified. No bespoke C test tool needed in the end — the scope
+doc's own §6 raw-PKCS#11 tool plan was replaced with something simpler
+that proves the same thing: independent µ computation in Python
+(`hashlib.shake_256`) plus OpenSSL's own standard `pkeyutl -pkeyopt
+mu:1` CLI flag, which already exists and needed no new client-facing
+surface. Two design corrections surfaced live before commit (full
+detail in the scope doc's own §8 execution update, not repeated here):
+(1) µ travels via the normal `C_Sign`/`C_Verify` data argument, not an
+embedded struct field — no new `ck_param` layout needed after all; (2)
+the mechanism needed multi-part support (`bAllowMultiPartOp` / Rust's
+`sign_mech_supports_multipart`) because OpenSSL's own `EVP_DigestSign`
+machinery drives *every* ML-DSA sign through Update/Final internally,
+even one-shot `pkeyutl` calls — discovered via `PKCS11_PROVIDER_DEBUG`
+tracing after the Rust arm failed at `C_SignUpdate` while the C++ arm
+(coincidentally) passed on an uninitialized boolean. Both engines now
+set the flag explicitly.
+
+Cross-implementation proof, both arms: signature produced via the
+vendor mechanism verifies against OpenSSL's completely independent
+native ML-DSA implementation (`-provider default`) checked against the
+original raw message — byte-equivalent to a direct pure-ML-DSA
+signature, exactly as the design requires. Four sabotage controls
+(tampered µ, tampered signature, context+mu rejected, wrong-length µ
+rejected) pass on both arms. New permanent harness cases `T28` (C++)
+and `T28b` (Rust, twin). Full regression: harness 78/78 (two cases
+gained, zero regressions), C++ CTest 8/8, `cargo test --release` full
+pass. One commit for this item.
+
 ---
 
 ### R35 — HashML-DSA provider surface + engine PHM-conformance decision — effort M

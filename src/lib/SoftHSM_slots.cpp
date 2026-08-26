@@ -578,6 +578,9 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_HASH_ML_DSA_SHA3_512"]	= CKM_HASH_ML_DSA_SHA3_512;
 	t["CKM_HASH_ML_DSA_SHAKE128"]	= CKM_HASH_ML_DSA_SHAKE128;
 	t["CKM_HASH_ML_DSA_SHAKE256"]	= CKM_HASH_ML_DSA_SHAKE256;
+	// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — stopgap for
+	// PKCS#11 v3.3's own upcoming native mechanism (oasis-tcs/pkcs11#58).
+	t["CKM_PQCTODAY_ML_DSA_MU"]	= CKM_PQCTODAY_ML_DSA_MU;
 
 	// SLH-DSA (FIPS 205, PKCS#11 v3.2)
 	t["CKM_SLH_DSA_KEY_PAIR_GEN"]	= CKM_SLH_DSA_KEY_PAIR_GEN;
@@ -1103,6 +1106,14 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMaxKeySize = 2592;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY |
 			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+			break;
+		// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — CKF_SIGN |
+		// CKF_VERIFY only, no C_MessageSign/Verify* support for this vendor
+		// mechanism.
+		case CKM_PQCTODAY_ML_DSA_MU:
+			pInfo->ulMinKeySize = 1312;
+			pInfo->ulMaxKeySize = 2592;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		// SLH-DSA (FIPS 205) — ulMin/MaxKeySize are public-key BYTES per
 		// PKCS#11 v3.2 §6.69: pk = 2n, n = 16..32 → 32..64 bytes (audit V-2).

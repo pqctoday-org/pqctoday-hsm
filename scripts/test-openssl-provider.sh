@@ -1794,6 +1794,93 @@ t27e() { local w; w=$(mk_arena aeadedge "$CPP_ENGINE_SO" "pkcs11-module-load-beh
 }
 run_case T27e PASS "AEAD decrypt edge cases (AES-256-GCM + ChaCha20-Poly1305): the promised 65536-byte ceiling genuinely works (a real bug here, fixed by this case), well-over-ceiling fails cleanly not silently, AAD-only and fully-empty both work (remediation R30)" t27e
 
+# ─── T28: ML-DSA external-µ vendor mechanism (remediation R34) ─────────────
+# CKM_PQCTODAY_ML_DSA_MU -- stopgap for PKCS#11 v3.3's own upcoming native
+# external-µ mechanism (oasis-tcs/pkcs11#58, not yet ratified). Computes µ
+# independently in Python per FIPS 204 Eq. (1)-(2) -- SHAKE256(pk_encode(pk),
+# 64) for tr, then SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64) for µ,
+# exactly as both engines' own underlying crypto does (verified live against
+# OpenSSL's own crypto/ml_dsa/ml_dsa_sign.c and the Rust fips204-patched
+# crate's ml_dsa.rs before this item was built, not assumed) -- signs that µ
+# through the vendor mechanism (`pkeyutl -pkeyopt mu:1`, the STANDARD OpenSSL
+# param name; no new client-facing API), then proves it two ways: the
+# mechanism's own verify, and — the real proof — OpenSSL's completely
+# independent NATIVE ML-DSA implementation (-provider default, no pkcs11 at
+# all) verifying against the ORIGINAL raw message. A byte-equivalence result
+# there proves the µ-signed signature is indistinguishable from a direct pure
+# ML-DSA signature of that message, exactly as R34's design requires.
+mldsa_mu_extract_and_compute() { # $1=arena dir, writes pub.der/mu.bin/msg.bin
+  local w="$1"
+  O pkey -pubin -propquery "?provider=pkcs11" -in "pkcs11:token=$(basename "$w");type=public" \
+    -pubout -outform DER -out "$w/pub.der" 2>/dev/null || return 1
+  python3 -c "
+import hashlib
+data = open('$w/pub.der','rb').read()
+# SPKI header for ML-DSA-65 is a fixed 22 bytes (SEQUENCE+AlgId+BIT STRING
+# tag/len/unused-bits byte) -- verified once by direct ASN.1 inspection
+# against this exact build's own genpkey output, not assumed from a spec
+# table. pk_encode(pk) IS the raw CKA_VALUE per PKCS#11 v3.2 Table 280.
+raw_pk = data[22:22+1952]
+assert len(raw_pk) == 1952, f'unexpected pubkey length {len(raw_pk)}'
+tr = hashlib.shake_256(raw_pk).digest(64)
+msg = b'openssl-provider harness T28 external-mu message'
+mp = b'\x00' + bytes([0]) + msg  # ctx empty
+mu = hashlib.shake_256(tr + mp).digest(64)
+open('$w/mu.bin','wb').write(mu)
+open('$w/msg.bin','wb').write(msg)
+"
+}
+
+t28() { local w; w=$(mk_arena mldsamu "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm ML-DSA-65 -out "$w/k.pem" 2>/dev/null || return 1
+  mldsa_mu_extract_and_compute "$w" || { echo "µ computation failed"; return 1; }
+
+  O pkeyutl -sign -propquery "?provider=pkcs11" -rawin -inkey "pkcs11:token=mldsamu;type=private" \
+    -pkeyopt mu:1 -in "$w/mu.bin" -out "$w/sig.bin" 2>/dev/null || { echo "external-µ sign failed"; return 1; }
+  [[ -s "$w/sig.bin" ]] || { echo "no signature produced"; return 1; }
+
+  O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=mldsamu;type=public" \
+    -pkeyopt mu:1 -in "$w/mu.bin" -sigfile "$w/sig.bin" 2>/dev/null || { echo "external-µ verify (own mechanism) failed"; return 1; }
+
+  # The real proof: OpenSSL's completely independent native ML-DSA verifies
+  # the µ-signed signature against the ORIGINAL raw message.
+  OPENSSL_CONF=/dev/null O pkeyutl -verify -provider default -rawin -pubin \
+    -inkey "$w/pub.der" -keyform DER -in "$w/msg.bin" -sigfile "$w/sig.bin" 2>/dev/null \
+    || { echo "native (non-pkcs11) verify of the µ-signed signature against the original message failed -- not byte-equivalent to a pure ML-DSA signature"; return 1; }
+
+  # Sabotage 1: tampered µ must fail.
+  python3 -c "
+d = bytearray(open('$w/mu.bin','rb').read()); d[0] ^= 0xff
+open('$w/mu_bad.bin','wb').write(bytes(d))"
+  O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=mldsamu;type=public" \
+    -pkeyopt mu:1 -in "$w/mu_bad.bin" -sigfile "$w/sig.bin" 2>/dev/null \
+    && { echo "tampered µ verified -- must not"; return 1; }
+
+  # Sabotage 2: tampered signature must fail.
+  python3 -c "
+d = bytearray(open('$w/sig.bin','rb').read()); d[10] ^= 0xff
+open('$w/sig_bad.bin','wb').write(bytes(d))"
+  O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=mldsamu;type=public" \
+    -pkeyopt mu:1 -in "$w/mu.bin" -sigfile "$w/sig_bad.bin" 2>/dev/null \
+    && { echo "tampered signature verified -- must not"; return 1; }
+
+  # Sabotage 3: non-empty context has no meaning once µ exists -- must be
+  # rejected loudly, not silently ignored.
+  O pkeyutl -sign -propquery "?provider=pkcs11" -rawin -inkey "pkcs11:token=mldsamu;type=private" \
+    -pkeyopt mu:1 -pkeyopt context-string:deadbeef -in "$w/mu.bin" -out "$w/sig_ctx.bin" 2>/dev/null \
+    && { echo "mu=1 with a context string was accepted -- must be rejected"; return 1; }
+
+  # Sabotage 4: wrong-length µ (FIPS 204 defines exactly 64 bytes) must be
+  # rejected loudly, not silently truncated/padded.
+  head -c 63 "$w/mu.bin" > "$w/mu_short.bin"
+  O pkeyutl -sign -propquery "?provider=pkcs11" -rawin -inkey "pkcs11:token=mldsamu;type=private" \
+    -pkeyopt mu:1 -in "$w/mu_short.bin" -out "$w/sig_short.bin" 2>/dev/null \
+    && { echo "63-byte (short) µ was accepted -- must be rejected"; return 1; }
+
+  return 0
+}
+run_case T28 PASS "ML-DSA external-µ vendor mechanism (CKM_PQCTODAY_ML_DSA_MU): independently-computed µ signs through the vendor mechanism, verifies both via the mechanism itself AND — the real proof — OpenSSL's completely independent native ML-DSA implementation against the ORIGINAL message; four sabotage controls (tampered µ, tampered signature, context+mu rejected, wrong-length µ rejected) (remediation R34)" t28
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 
@@ -2081,6 +2168,59 @@ t24f() {
   return 0
 }
 run_case T24f PASS "HSS fallback path (parse CKA_VALUE, no official attrs) genuinely engages and computes the correct size for a non-default W4 key (2352 bytes, not the 1296 last-resort constant), sabotage rejected (R25's own untested fallback leg, remediation R29)" t24f
+
+# ─── T28b: ML-DSA external-µ, Rust arm (remediation R34) ───────────────────
+t28b() { # Rust-arm twin of T28 -- same proof, over libsofthsmrustv3.so.
+  [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/mldsamurust"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label mldsamurust --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm ML-DSA-65 -out "$w/k.pem" 2>/dev/null || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkey -pubin -propquery "?provider=pkcs11" -in "pkcs11:token=mldsamurust;type=public" \
+      -pubout -outform DER -out "$w/pub.der" 2>/dev/null || return 1
+  python3 -c "
+import hashlib
+data = open('$w/pub.der','rb').read()
+raw_pk = data[22:22+1952]
+assert len(raw_pk) == 1952
+tr = hashlib.shake_256(raw_pk).digest(64)
+msg = b'openssl-provider harness T28b external-mu RUST message'
+mu = hashlib.shake_256(tr + b'\x00' + bytes([0]) + msg).digest(64)
+open('$w/mu.bin','wb').write(mu)
+open('$w/msg.bin','wb').write(msg)
+"
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -sign -propquery "?provider=pkcs11" -rawin -inkey "pkcs11:token=mldsamurust;type=private" \
+      -pkeyopt mu:1 -in "$w/mu.bin" -out "$w/sig.bin" 2>/dev/null || { echo "Rust-arm external-µ sign failed"; return 1; }
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=mldsamurust;type=public" \
+      -pkeyopt mu:1 -in "$w/mu.bin" -sigfile "$w/sig.bin" 2>/dev/null || { echo "Rust-arm external-µ verify (own mechanism) failed"; return 1; }
+
+  OPENSSL_CONF=/dev/null O pkeyutl -verify -provider default -rawin -pubin \
+    -inkey "$w/pub.der" -keyform DER -in "$w/msg.bin" -sigfile "$w/sig.bin" 2>/dev/null \
+    || { echo "Rust-arm: native verify of µ-signed signature against original message failed"; return 1; }
+
+  python3 -c "
+d = bytearray(open('$w/mu.bin','rb').read()); d[0] ^= 0xff
+open('$w/mu_bad.bin','wb').write(bytes(d))"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=mldsamurust;type=public" \
+      -pkeyopt mu:1 -in "$w/mu_bad.bin" -sigfile "$w/sig.bin" 2>/dev/null \
+      && { echo "Rust-arm: tampered µ verified -- must not"; return 1; }
+
+  return 0
+}
+run_case T28b PASS "ML-DSA external-µ vendor mechanism, Rust arm: same proof as T28 over libsofthsmrustv3.so -- independently-computed µ signs, verifies via the mechanism AND OpenSSL's native implementation against the original message, tampered-µ sabotage rejected (remediation R34)" t28b
+
 
 # ─── R0.1 regression guard ──────────────────────────────────────────────────
 # The token-scan attribute-type noise (WART-1) was a real bug, not spec-legal

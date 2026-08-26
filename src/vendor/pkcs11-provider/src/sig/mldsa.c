@@ -18,6 +18,17 @@
 #define ML_DSA_87_PK_SIZE 2592
 #define ML_DSA_87_SIG_SIZE 4627
 
+/* Remediation R34, PQCTODAY-VENDOR-EXT-MU: vendor mechanism for external-µ
+ * signing, a stopgap for PKCS#11 v3.3's own upcoming native mechanism
+ * (oasis-tcs/pkcs11#58, not yet ratified). Mirrors the numeric allocation
+ * in src/lib/vendor_mechanisms.h (CKM_VENDOR_DEFINED | 0x13) -- kept as a
+ * local #define here rather than a shared header, matching this
+ * provider's own existing pattern for vendor mechanisms (e.g. mac.h's
+ * CKM_KMAC_128). See
+ * docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md for
+ * the full design. Remove when this project adopts v3.3 natively. */
+#define CKM_PQCTODAY_ML_DSA_MU (CKM_VENDOR_DEFINED | 0x00000013UL)
+
 DISPATCH_MLDSA_FN(sign_init);
 DISPATCH_MLDSA_FN(sign);
 DISPATCH_MLDSA_FN(verify_init);
@@ -41,6 +52,28 @@ DISPATCH_MLDSA_FN(settable_ctx_params);
 
 static CK_RV p11prov_mldsa_set_mechanism(P11PROV_SIG_CTX *sigctx)
 {
+    /* Remediation R34, PQCTODAY-VENDOR-EXT-MU. µ has no defined meaning
+     * for a context string (FIPS 204 folds context into µ before the
+     * caller ever computes it) -- reject rather than silently drop it. */
+    if (sigctx->mldsa_external_mu) {
+        if (sigctx->mldsa_params.pContext != NULL
+            && sigctx->mldsa_params.ulContextLen > 0) {
+            P11PROV_raise(sigctx->provctx, CKR_ARGUMENTS_BAD,
+                          "'context-string' has no meaning with 'mu' set");
+            return CKR_ARGUMENTS_BAD;
+        }
+        sigctx->mechanism.mechanism = CKM_PQCTODAY_ML_DSA_MU;
+        /* hedgeVariant is the only meaningful field; same "only plumb the
+         * struct through when non-default" rule as CKM_ML_DSA below. */
+        if (sigctx->mldsa_params.hedgeVariant != CKH_HEDGE_PREFERRED) {
+            sigctx->mechanism.pParameter = &sigctx->mldsa_params;
+            sigctx->mechanism.ulParameterLen = sizeof(sigctx->mldsa_params);
+        } else {
+            sigctx->mechanism.pParameter = NULL;
+            sigctx->mechanism.ulParameterLen = 0;
+        }
+        return CKR_OK;
+    }
     sigctx->mechanism.mechanism = CKM_ML_DSA;
     /* Per PKCS#11 v3.2 §6.67.5, CKM_ML_DSA takes an OPTIONAL
      * CK_SIGN_ADDITIONAL_CONTEXT parameter:
@@ -539,11 +572,20 @@ static int p11prov_mldsa_set_ctx_params(void *ctx, const OSSL_PARAM params[])
         if (ret != RET_OSSL_OK) {
             return ret;
         }
-        if (mu != 0) {
+        /* Remediation R34, PQCTODAY-VENDOR-EXT-MU: mu=1 routes to the
+         * vendor mechanism CKM_PQCTODAY_ML_DSA_MU (see
+         * p11prov_mldsa_set_mechanism) instead of being rejected -- a
+         * stopgap for PKCS#11 v3.3's own upcoming native external-µ
+         * mechanism (oasis-tcs/pkcs11#58). The caller's 64-byte µ itself
+         * travels via the normal sign/verify data argument, exactly like
+         * OpenSSL's own convention for this parameter -- nothing extra
+         * to capture here beyond the flag. */
+        if (mu != 0 && mu != 1) {
             P11PROV_raise(sigctx->provctx, CKR_ARGUMENTS_BAD,
                           "Unsupported 'mu' parameter");
             return RET_OSSL_ERR;
         }
+        sigctx->mldsa_external_mu = (mu == 1);
     }
 
 #if defined(OSSL_SIGNATURE_PARAM_SIGNATURE)

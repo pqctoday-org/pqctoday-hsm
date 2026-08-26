@@ -28,6 +28,29 @@
 
 #define CKM_PQCTODAY_SPLIT_KEY 0x80000012UL  /* vendor */
 
+// ── Vendor: ML-DSA external-µ signing (remediation R34, 2026-08-26) ─────────
+// Stopgap for PKCS#11 v3.3's own upcoming external-µ mechanism —
+// oasis-tcs/pkcs11#58, not yet ratified. See
+// docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md for the
+// full design rationale (why this preserves pure ML-DSA's security
+// assumptions, why a vendor stopgap is industry-precedented).
+//
+// No new parameter struct: this mechanism reuses CK_SIGN_ADDITIONAL_CONTEXT
+// verbatim (only hedgeVariant is meaningful; pContext/ulContextLen must be
+// empty — context has no defined meaning once µ already exists, FIPS 204
+// folds it in before the caller ever computes µ). The caller's 64-byte µ
+// travels via the normal C_Sign/C_Verify data argument, exactly like
+// CKM_HASH_ML_DSA's PHM and every other mechanism here — not embedded in
+// the mechanism parameter.
+//
+// PQCTODAY-VENDOR-EXT-MU: remove this whole block, both engines' dispatch
+// arms, and the provider's routing when this project adopts PKCS#11 v3.3
+// natively. Search this exact tag project-wide to find every site.
+
+#define CKM_PQCTODAY_ML_DSA_MU 0x80000013UL  /* vendor */
+
+#define PQCTODAY_ML_DSA_MU_LEN 64  /* FIPS 204 Eq.(2): SHAKE256 output, fixed */
+
 // ── Vendor: stateful key attributes ──────────────────────────────────────────
 // Range: 0x80000101–0x80000105 (offset from CKM vendor range to avoid confusion)
 

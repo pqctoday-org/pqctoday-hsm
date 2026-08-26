@@ -1,9 +1,11 @@
 # ML-DSA external-µ — vendor-extension scope (2026-08-26)
 
 Companion to `docs/openssl-provider-coverage-audit-2026-08-25.md` (F36-6)
-and `docs/openssl-provider-remediation-plan-phase6-2026-08-26.md`. This is
-a **scope document, not an execution plan** — design and sequencing only,
-written per explicit request, not yet approved for implementation.
+and `docs/openssl-provider-remediation-plan-phase6-2026-08-26.md`. This
+started as a **scope document, design and sequencing only** — it was
+executed the same day as remediation R34 (phase 7); see the "Execution
+update" section at the end for what actually shipped, including two
+corrections to the design below that live-testing found.
 
 ## 1. Why this exists
 
@@ -209,3 +211,65 @@ cross-implementation verify):
 
 Total: **effort M**, no component individually risky. Not scheduled;
 this document scopes it for a future execution decision.
+
+## 8. Execution update (2026-08-26, remediation R34, phase 7)
+
+Executed the same day, immediately after this scope was written. Fully
+live-verified, both engines: independently-computed µ (Python,
+`hashlib.shake_256`, replicating the exact `tr`/`M′`/µ construction
+verified against both engines' own source in §1) signs through
+`CKM_PQCTODAY_ML_DSA_MU` and — the real proof — the resulting signature
+verifies against OpenSSL's completely independent **native** ML-DSA
+implementation (`-provider default`, no pkcs11 at all) checked against
+the *original raw message*, for both the C++ arm and the Rust arm. All
+four sabotage controls (tampered µ, tampered signature, context+mu
+rejected, wrong-length µ rejected) confirmed live on both arms. Full
+regression: harness 78/78 (two new cases, T28 + T28b, zero
+regressions), C++ CTest 8/8, `cargo test --release` full pass (Rust
+touched).
+
+**Two corrections to §3–§4's own design, both found live, before any
+commit:**
+
+1. **No `CK_PQCTODAY_ML_DSA_MU_PARAMS` struct — the µ bytes travel via
+   the normal C_Sign/C_Verify data argument, not the mechanism
+   parameter.** The design above planned a new fixed-size struct
+   embedding µ directly. Live inspection of OpenSSL's own
+   `ossl_ml_dsa_sign` (`ml_dsa_sig.c`) showed `mu=1` is purely a *flag*
+   — the 64 bytes OpenSSL hands to `EVP_DigestSign`/`C_Sign` as "the
+   data" already **are** µ; nothing else carries it. Reusing
+   `CK_SIGN_ADDITIONAL_CONTEXT` verbatim (rejecting a non-empty context,
+   since none is meaningful once µ exists) needed zero new struct, zero
+   new `ck_param` layout, and made the provider-side change a pure
+   narrowing of an existing rejection rather than new plumbing. Simpler
+   at every layer than what was scoped; the mechanism ID and constant
+   name are otherwise unchanged from §3.
+2. **The vendor mechanism needed multi-part support after all.** §4
+   said "single-part only, deliberately narrower scope than plain
+   CKM_ML_DSA" (no `bAllowMultiPartOp` in the C++ arm, no entry in
+   Rust's `sign_mech_supports_multipart`). Live-traced
+   (`PKCS11_PROVIDER_DEBUG`) after the Rust arm's first sign attempt
+   failed at `C_SignUpdate` (`CKR_OPERATION_NOT_INITIALIZED`): OpenSSL's
+   own `EVP_DigestSign` machinery drives *every* ML-DSA sign through
+   `digest_sign_init → digest_sign_update → digest_sign_final` —
+   `C_SignInit`/`C_SignUpdate`/`C_SignFinal`, never a single `C_Sign`
+   call — even for what a caller experiences as one-shot `pkeyutl
+   -sign`. Confirmed by tracing the C++ arm's own (passing) run
+   side-by-side: identical dispatch shape. Plain `CKM_ML_DSA` already
+   relies on this (`bAllowMultiPartOp=true`), so the fix was adding the
+   new mechanism to the same allow-list on both engines — no new
+   accumulate/buffer logic needed, since both engines' existing
+   accumulate-then-single-call machinery (`OSSLMLDSA::signFinal` →
+   `sign()`; Rust's `SIGN_MULTIPART_ACC` → the one-shot `C_Sign`
+   handler) already routes the fully-buffered µ into the exact code
+   this item had already written. Caught a second, genuine bug in the
+   same spot: the C++ arm's `bAllowMultiPartOp` local was **read
+   uninitialized** in the original (single-part-only) version of this
+   case — undefined behavior that happened to evaluate truthy on the
+   first test run, masking the design gap until the Rust arm's
+   (correct, deterministic) rejection exposed it. Both engines now set
+   the flag explicitly.
+
+No change to `vendor_mechanisms.h`'s mechanism constant/value, the
+provider's mechanism-ID routing, or the removal-tag discipline —
+`PQCTODAY-VENDOR-EXT-MU` still marks every touch point.

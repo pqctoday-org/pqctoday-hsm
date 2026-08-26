@@ -151,7 +151,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | F36-3 | **RESOLVED (R24 probe + R23 consume-side, 2026-08-25/26)** — R28 correction (2026-08-26): this row previously called the `mac.c` INIT_SKEY gap "still-open... handed to R23" — stale; R23 executed and closed it (see OP-1's own row: "`OSSL_FUNC_MAC_INIT_SKEY` for all three [MAC families]... live-verified byte-identical to software, engine-log confirmed, sabotage-tested"), and harness **T26d** re-runs R24's own probe specifically to prove the previously-failing consume step now passes end to end. Was: provider has SKEYMGMT but the new `EVP_KDF_derive_SKEY`-style opaque-key flows are unprobed. Now: `EVP_SKEY_generate` (AES + GENERIC-SECRET) and HKDF's `derive_SKEY` → `EVP_MAC_init_SKEY` chain both exercised live via a new permanent probe tool (`skey-flow-probe.c`) — HKDF's derived key is cryptographically CORRECT and stays fully token-resident, cross-checked against independent pure-software HKDF+HMAC of the same known inputs (never exporting the intermediate DKM), and (since R23) the derived key can be CONSUMED natively too. Found and fixed a real bug along the way: `skeymgmt.c`'s four entry points (AES/GENERIC-SECRET generate/import) never called `p11prov_ctx_status()` before touching slots/sessions — every other operation type does, and it only failed (`CKR_GENERAL_ERROR`) when SKEYMGMT was the FIRST pkcs11 operation in a process, which nothing in this harness had ever done before this probe. TLS13-KDF's own `derive_SKEY` hit an unexplained mode-routing anomaly (reached the EXPAND_ONLY branch despite EXTRACT_ONLY being requested) — investigated, not root-caused, not pursued further within R24's own budget (HKDF's already-verified proof answers this item's core question; matches this project's own precedent for not forcing an inconclusive investigation, see ALG-6/R17 above); a bounded follow-up attempt is planned as phase-6 R31. PBKDF2 (R10) correctly still lacks `derive_SKEY` (negative control), confirming R10's own documented scoping stands unchanged. **R31 correction (2026-08-26): the "anomaly" was never a mode-routing bug — see phase-6 R31 below.** TLS 1.3's own Derive-Secret construction is itself built from HKDF-Expand-Label, so `EXTRACT_ONLY`'s correct implementation legitimately calls the same internal helper R24's trace saw; the real (and only) issue was the probe never supplying the `PREFIX`/`LABEL` params that call requires, which the provider correctly rejected. Fixed at the probe level; check 3 is now a full mode-verified derive → consume chain, not existence-only. | 3.6 CHANGES; harness T24b, T26d | ~~Low~~ ~~—~~ — (R31 correction: was never a real gap, see below) |
 | F36-4 | *(positive baseline, not a gap)* CMS KEMRecipientInfo + `OSSL_PKEY_PARAM_CMS_RI_TYPE` already wired for ML-KEM (local commit `2cca4f0`) — must be regression-guarded by the new harness | `kem/mlkem.c:414-433` | — |
 | F36-5 | **RESOLVED (R20, 2026-08-26)** — was: NIST security-category PKEY param (new 3.6) not exposed by provider keymgmt. Now: `OSSL_PKEY_PARAM_SECURITY_CATEGORY` added to ML-DSA/ML-KEM/SLH-DSA `get_params`/`gettable_params`, values per FIPS 203/204/205, live-verified across all 8 algorithm variants (new `dump_int_param` tool, harness T23/T23b/T23c), sabotage-tested. | ~~3.6 release notes~~ — | ~~Low~~ — |
-| F36-6 | **INVESTIGATED, one divergence corrected from "unfixable" to "not yet standardized" (R20, 2026-08-26; correction 2026-08-26)** — was: `mu`/`message-encoding`/`deterministic` parity vs software unverified. Now: `deterministic` verified genuinely functional (byte-identical signatures when set, varying when not, matching `CK_SIGN_ADDITIONAL_CONTEXT.hedgeVariant`) — no gap. `message-encoding=0` (arbitrary pre-encoded M') stays correctly rejected — no well-defined shape exists to accept it under plain `CKM_ML_DSA` (the one standard mechanism that DOES cover a well-shaped pre-hash case, `CKM_HASH_ML_DSA`, is a separate, real, previously-unflagged provider gap: both engines fully implement its 11-variant mechanism family, the provider registers none of it — candidate for its own item, not addressed here). **Correction to this row's own earlier claim**: externally-supplied `mu` was called "not fixable... regardless of provider-side code" — verified against the *ratified* PKCS#11 v3.2 OASIS Standard text directly (not the draft this row originally cited): confirmed no field for it exists today, so that part stands. But it is not a permanent limitation — PKCS#11 v3.3 (in progress, OASIS TC tracking issue [oasis-tcs/pkcs11#58](https://github.com/oasis-tcs/pkcs11/issues/58)) will add native external-µ for ML-DSA; it preserves pure-ML-DSA's own security assumptions (confirmed via FIPS 204's own Sign_internal/Verify_internal and NIST's FAQ addendum, not a weakening), and a vendor-private mechanism is a real, precedented option today (Thales ships a proprietary PKCS#11 extension for the closely related XMSS/LMS short-message-representative problem). Scoped, not executed: `docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md` — a vendor mechanism (`CKM_PQCTODAY_ML_DSA_MU`) designed to be deleted wholesale (tagged `PQCTODAY-VENDOR-EXT-MU` at every touch point) once v3.3 ratifies and this project adopts it natively. | source + EVP_SIGNATURE-ML-DSA(7); scope: `docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md` | Low (scoped stopgap available; not scheduled) |
+| F36-6 | **`mu` RESOLVED via vendor stopgap (R34, phase 7, 2026-08-26); `deterministic` no gap; `message-encoding=0` correctly stays rejected** — was: `mu`/`message-encoding`/`deterministic` parity vs software unverified. `deterministic` verified genuinely functional (byte-identical signatures when set, varying when not, matching `CK_SIGN_ADDITIONAL_CONTEXT.hedgeVariant`) — no gap. `message-encoding=0` (arbitrary pre-encoded M') stays correctly rejected under plain `CKM_ML_DSA` — no well-defined shape exists to accept it there (the one standard mechanism that DOES cover a well-shaped pre-hash case, `CKM_HASH_ML_DSA`, is a separate, real, previously-unflagged provider gap: both engines fully implement its 11-variant mechanism family, the provider registers none of it — tracked as phase-7 R35). Externally-supplied `mu` was originally called "not fixable... regardless of provider-side code" — wrong: confirmed against the *ratified* PKCS#11 v3.2 OASIS Standard no field exists *today*, but PKCS#11 v3.3 (OASIS TC tracking issue [oasis-tcs/pkcs11#58](https://github.com/oasis-tcs/pkcs11/issues/58)) will add it natively, it preserves pure-ML-DSA's own security assumptions (FIPS 204's own Sign_internal/Verify_internal + NIST's FAQ addendum — not a weakening), and a vendor-private stopgap is industry-precedented (Thales's own proprietary PKCS#11 extension for the related XMSS/LMS problem). **Now shipped**: `CKM_PQCTODAY_ML_DSA_MU`, both engines, tagged `PQCTODAY-VENDOR-EXT-MU` at every site for wholesale deletion once v3.3 ratifies. Live-verified, both arms: a signature produced via the vendor mechanism from independently-computed µ verifies against OpenSSL's completely independent native ML-DSA implementation checked against the original raw message — byte-equivalent to a direct pure signature. Full design + execution trail: `docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md`; narrative below. | source + EVP_SIGNATURE-ML-DSA(7); harness T28/T28b; `docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md` | ~~Low~~ — |
 
 ### Environment / infrastructure findings
 
@@ -2510,6 +2510,70 @@ item's own ground rules, since comments touch compiled files: **harness
 first run reproduced as pre-existing flakiness — a comment-only diff
 cannot change runtime behavior — confirmed by two clean reruns, 8/8
 both times). No `rust/` source touched.
+
+**Phase 7, R34 (ML-DSA external-µ vendor mechanism), DONE — F36-6's
+"not fixable" claim corrected and shipped as a stopgap.** A user-driven
+re-audit of F36-6 found the original claim overstated: PKCS#11 v3.2
+(ratified) genuinely has no field for a caller-supplied µ, but PKCS#11
+v3.3 will add one natively (OASIS TC tracking issue
+[oasis-tcs/pkcs11#58](https://github.com/oasis-tcs/pkcs11/issues/58)),
+external-µ preserves pure ML-DSA's own security assumptions rather than
+weakening them (FIPS 204's Sign_internal/Verify_internal + NIST's own
+FAQ addendum), and a vendor-private stopgap is industry-precedented
+(Thales's own proprietary PKCS#11 extension for the related XMSS/LMS
+short-message-representative problem). Full research trail and design:
+`docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md`.
+
+**Shipped**: `CKM_PQCTODAY_ML_DSA_MU` (`vendor_mechanisms.h`,
+`0x80000013`), both engines, provider routing in `sig/mldsa.c`. No new
+OpenSSL-facing API — `OSSL_SIGNATURE_PARAM_MU` is already a standard
+param name; the provider previously declared it settable only to
+reject any non-default value, and now honors it. Two design corrections
+surfaced live before commit (full detail in the scope doc's own
+execution-update section): (1) µ travels via the normal
+`C_Sign`/`C_Verify` data argument — exactly how OpenSSL's own
+`ossl_ml_dsa_sign` treats `mu=1` (a flag, not a value-carrying param) —
+so the mechanism reuses `CK_SIGN_ADDITIONAL_CONTEXT` verbatim
+(rejecting a non-empty context, since none is meaningful once µ
+exists) rather than a new struct; (2) the mechanism needed multi-part
+(`C_SignUpdate`/`C_SignFinal`) support after all — live-traced via
+`PKCS11_PROVIDER_DEBUG` after the Rust arm failed at `C_SignUpdate`:
+OpenSSL's own `EVP_DigestSign` machinery drives *every* ML-DSA sign
+through Update/Final internally, even a one-shot `pkeyutl -sign` call.
+The C++ arm's own first attempt at this item passed only because an
+uninitialized `bAllowMultiPartOp` boolean happened to evaluate truthy —
+a real bug, caught by the Rust arm's deterministic rejection exposing
+what the C++ arm's own undefined behavior was masking. Both engines now
+set the flag explicitly, reusing their existing accumulate-then-single-
+sign machinery (already proven correct for plain `CKM_ML_DSA`) with no
+new buffering logic.
+
+**Live-proven, both arms**: independently-computed µ (Python
+`hashlib.shake_256`, replicating `tr = SHAKE256(pk_encode, 64)` then
+`µ = SHAKE256(tr‖0x00‖len(ctx)‖ctx‖M, 64)` — verified byte-for-byte
+against both engines' own underlying crypto source, `ossl_ml_dsa_sign`
+in OpenSSL's `crypto/ml_dsa/ml_dsa_sign.c` for the C++ arm and the
+`fips204-patched` crate's `ml_dsa.rs` for the Rust arm, before this
+item was built) signs through the vendor mechanism and — the real
+cross-implementation proof — the resulting signature verifies against
+OpenSSL's **completely independent native** ML-DSA implementation
+(`-provider default`, no pkcs11 involvement at all) checked against the
+*original raw message*: byte-equivalent to a direct pure-ML-DSA
+signature, exactly as the design requires. Four sabotage controls pass
+on both arms: tampered µ, tampered signature, non-empty context+mu
+rejected, wrong-length µ rejected — all loud, none silent.
+
+New permanent harness cases `T28` (C++ arm) and `T28b` (Rust arm,
+twin) — no bespoke C test tool needed; the proof runs entirely on
+Python (µ computation) plus OpenSSL's own standard `pkeyutl -pkeyopt
+mu:1` CLI flag. Every touch point across both engines and the provider
+carries the literal tag `PQCTODAY-VENDOR-EXT-MU`, so the whole
+extension is one `grep` away from wholesale deletion once this project
+adopts ratified PKCS#11 v3.3 natively.
+
+Full regression: **harness 78/78** (two new cases, zero regressions),
+**C++ CTest 8/8**, **Rust `cargo test --release` 410 passed / 0
+failed**.
 
 ## 7. Companion document
 

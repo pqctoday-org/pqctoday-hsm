@@ -586,6 +586,13 @@ pub const CKM_EC_MONTGOMERY_KEY_DERIVE: u32 = 0x8000_0011;
 // codepoints, mirroring how CKM_HSS_KEY_PAIR_GEN carries its levels/
 // param-set choice in one mechanism.
 pub const CKM_PQCTODAY_SPLIT_KEY: u32 = 0x8000_0012;
+// ML-DSA external-µ signing (remediation R34, 2026-08-26). Stopgap for
+// PKCS#11 v3.3's own upcoming external-µ mechanism (oasis-tcs/pkcs11#58,
+// not yet ratified) — see
+// docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md.
+// PQCTODAY-VENDOR-EXT-MU: remove when this project adopts v3.3 natively.
+pub const CKM_PQCTODAY_ML_DSA_MU: u32 = 0x8000_0013;
+pub const PQCTODAY_ML_DSA_MU_LEN: usize = 64;
 // PKCS#11 v3.2 §6.7 dedicated Montgomery-curve DH mechanisms, in the
 // CKM_VENDOR_DEFINED (0x80000000) range per the spec header:
 // CKM_X25519 = CKM_VENDOR_DEFINED | 0x1058, CKM_X448 = | 0x1059.
@@ -770,6 +777,8 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_HASH_ML_DSA_SHA3_512,
     CKM_HASH_ML_DSA_SHAKE128,
     CKM_HASH_ML_DSA_SHAKE256,
+    // ML-DSA external-µ (remediation R34) — PQCTODAY-VENDOR-EXT-MU.
+    CKM_PQCTODAY_ML_DSA_MU,
     // SLH-DSA (FIPS 205) — pure + pre-hash.
     // Generic CKM_HASH_SLH_DSA (0x34) — same remap as CKM_HASH_ML_DSA above.
     CKM_SLH_DSA_KEY_PAIR_GEN,
