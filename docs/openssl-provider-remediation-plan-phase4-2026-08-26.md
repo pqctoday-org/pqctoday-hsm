@@ -1,21 +1,27 @@
-# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R18 EXECUTED, R7-R11/R19-R21 still plan-only
+# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R18+R19 EXECUTED, R7-R11/R20-R21 still plan-only
 
-**Execution update (2026-08-26):** R18 has been executed and landed —
-see `docs/openssl-provider-coverage-audit-2026-08-25.md` §6's "Phase
-4, R18 (EC/ECDH/montgomery generic SET_PARAMS — the latent server-role
-gap R15 flagged)" entry for the full mechanism. R18's own written
-hypothesis (EC/ECDH likely has ML-KEM's identical missing-SET_PARAMS
-gap) was wrong in its specifics — EC already had real, working
-SET_PARAMS; only X25519/X448 had a gap at all — but right in its
-instinct, and reproducing it surfaced four independent, layered bugs,
-three of them different from the original hypothesis, found only by
-getting a real handshake further into each role (client vs server)
-than the previous fix had. R18's own section below is left as
-originally written (the plan, not the result) per this project's
-append-only convention; do not edit it to match the outcome.
-**Harness: `PASS=35 FAIL=0 XFAIL=0 XPASS=0`** — four cases gained
-(T18/T18b/T18c/T18d). R19–R21 and the R7–R11 tail remain plan-only,
-not executed.
+**Execution update (2026-08-26):** R18 and R19 have been executed and
+landed — see `docs/openssl-provider-coverage-audit-2026-08-25.md` §6's
+"Phase 4, R18 (EC/ECDH/montgomery generic SET_PARAMS — the latent
+server-role gap R15 flagged)" and "Phase 4, R19 (proof-debt closure)"
+entries for the full mechanism of each. R18's own written hypothesis
+(EC/ECDH likely has ML-KEM's identical missing-SET_PARAMS gap) was
+wrong in its specifics — EC already had real, working SET_PARAMS;
+only X25519/X448 had a gap at all — but right in its instinct, and
+reproducing it surfaced four independent, layered bugs, three of them
+different from the original hypothesis, found only by getting a real
+handshake further into each role (client vs server) than the previous
+fix had. R19 needed zero code changes: all three sub-items (the
+decapsulate `CKA_PRIVATE` proof, the SPKI encoder's load-bearing
+question, the residual ASN.1 noise) closed with definitive,
+live-checked answers rather than fixes — the plan's own framing
+("proven, or proven-unobservable-and-documented") anticipated exactly
+this outcome as a legitimate closure, not a shortfall. R18/R19's own
+sections below are left as originally written (the plan, not the
+result) per this project's append-only convention; do not edit them
+to match the outcome. **Harness: `PASS=35 FAIL=0 XFAIL=0 XPASS=0`**
+— four cases gained (T18/T18b/T18c/T18d), unchanged by R19. R20–R21
+and the R7–R11 tail remain plan-only, not executed.
 
 Scope: everything still open after phase 3 closed R12–R17 in full
 (branch `feat/jdk27-jca-provider`, commit `8f3fb8e`, unpushed; harness

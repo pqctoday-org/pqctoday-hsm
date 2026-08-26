@@ -126,6 +126,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 | WART-3 | Build hygiene: the gitignored WASM-generated `src/config.h` leaks into the **native** CMake build — compile warnings `"PACKAGE_MAJOR redefined"` and the live provider reports version **1.1** (config.h) while CMake defines **0.4.0** | observed in gate build log + live `list -providers` | Low |
 | WART-4 | **RESOLVED (R0.4, 2026-08-25 later same day)** — was: mechanism-gated operation tables are invisible to fresh-process fetches: `openssl list` shows nothing `@ pkcs11` for signature/KEM, AND a strict property-targeted fetch (`dgst -sha256 -propquery provider=pkcs11`) **functionally fails** in a fresh process (`inner_evp_generic_fetch:unsupported`) — operations only resolve once a token object forces module init in-process. Fix: the provider already ships `pkcs11-module-load-behavior = early` for exactly this case (forces the same lazy-init call from inside `OSSL_provider_init()` instead of leaving it to a key-object path); wired into the harness's T9 arena. See `docs/openssl-provider-remediation-plan-2026-08-25.md` R0.4 for the full story, including a real `mk_arena()` ordering bug it exposed and fixed along the way. | live probes (T9) | ~~Medium~~ |
 | WART-5 | The C++ engine rejects OpenSSL's SHA-1 OAEP defaults (`Invalid hashAlg/mgf combination for RSA-OAEP`, `SoftHSM_keygen.cpp:8056`) — plain `-pkeyopt rsa_padding_mode:oaep` against a token key fails until the caller pins `rsa_oaep_md`/`rsa_mgf1_md` (sha256 verified working). Likely deliberate FIPS posture; needs documenting, not fixing | live (T5's first run) | Low (interop caveat) |
+| WART-6 | **RESOLVED-AS-DOCUMENTED (R19c, 2026-08-26)** — a real TLS 1.3 handshake with this provider active and propquery pinning the client leaves `asn1_check_tlen`/`PKCS8_PRIV_KEY_INFO` errors on the error queue even though the handshake succeeds. Confirmed benign: absent with the provider inactive (control run), present whenever active regardless of group; live-traced to a genuine RSA object create/free cycle through this provider's own keymgmt while processing the peer's plain RSA certificate — one of several normal trial-decode attempts OpenSSL's generic multi-format decoder-chain framework makes, not an over-claiming `does_selection`. Not fixed (nothing to fix); documented as an interop caveat: callers must check the operation's own return code, not merely whether the error queue is empty | live (T13/T19c reproduction + no-provider control) | Low (interop caveat) |
 
 ### B. Backend algorithms not exposed
 
@@ -966,6 +967,87 @@ Both engines' full test suites remain green (C++: 8/8 CTest suites;
 Rust: unaffected — this item's changes are C-provider-side only).
 **Harness: `PASS=35 FAIL=0 XFAIL=0 XPASS=0`** — four cases gained
 (T18, T18b, T18c, T18d), zero regressions.
+
+**Phase 4, R19 (proof-debt closure), DONE — no code changes,
+documentation only:** all three sub-items closed with definitive
+answers rather than fixes; each investigated live, not assumed.
+
+**R19a — decapsulate's `CKA_PRIVATE` fix, independent proof.**
+Structurally unreachable through this provider, not merely
+unobserved. `p11prov_kem_decapsulate` always operates on the
+*private* key first (`kemctx->key` — the opposite of encapsulate's
+*public* peer key), and PKCS#11's own object model requires a
+logged-in session to obtain a handle to any `CKA_PRIVATE=true`
+object, independent of any provider config — confirmed by reading
+`PUBKEY_LOGIN_AUTO`/`PUBKEY_LOGIN_ALWAYS` (`session.c`), which govern
+only whether *public*-key access also triggers a login (the exact
+knob R15's encapsulate scenario needed relaxed — a public peer key
+needs no login by default, so the output secret's own missing
+`CKA_PRIVATE` created a real auth gap there). No equivalent knob
+relaxes the requirement for *private* keys — there structurally isn't
+one to relax. By the time `p11prov_kem_decapsulate` successfully
+obtains `hKey` for the private key, the session is necessarily
+already logged in, so the output secret's own missing `CKA_PRIVATE`
+template entry can never independently cause an authorization
+failure. Confirmed further: ML-KEM's own keymgmt exposes no settable
+param that could force a private key to `CKA_PRIVATE=false` at
+creation (only `P11PROV_PARAM_URI`/`P11PROV_PARAM_KEY_USAGE` are
+settable), so even a deliberately-adversarial test setup has no way
+to construct the scenario through this provider's own tooling. The
+fix is kept (it is still spec-correct and harmless), but is now
+documented as unobservable-and-explained rather than merely
+unproven.
+
+**R19b — is the ML-KEM SPKI encoder ever load-bearing?** Checked
+against the one condition that could make it so: public-key export
+disallowed via `pkcs11-module-allow-export` (`DISALLOW_EXPORT_PUBLIC`,
+checked live at `montgomery_export`'s own gate and, by the same
+pattern, ML-KEM's). Result: `pkey -pubout` fails **entirely** under
+that config — exit 1, empty output file, no error queue entry at all
+— meaning the export-blocking check intercepts before any encoder
+(generic or this provider's own) is ever reached. Combined with the
+earlier finding (the default-config case: `-pubout` already succeeds
+via a pre-existing generic path with zero code from this item), both
+of the two configurations this provider supports were checked and
+neither exercises the new SPKI encoder as the sole path to an
+answer. The encoder remains genuinely inert in this provider's
+current design — real, correct, round-trip-tested code kept for
+parity with every other asymmetric type here, but with no live
+scenario in which it is load-bearing. Reported at exactly that
+confidence; not a reason to remove it (parity has its own value, and
+a future OpenSSL/decoder-framework change could make the generic path
+stop covering this case without warning).
+
+**R19c — the residual `asn1_check_tlen`/`PKCS8_PRIV_KEY_INFO` noise.**
+Confirmed benign OpenSSL decoder-framework probe noise, not a defect
+in any of this provider's own `does_selection` functions. Reproduced
+live (T13's own exact shape) and isolated with a control run: the
+noise is **absent** when this provider is inactive (`OPENSSL_CONF=
+/dev/null` on both ends) and **present** whenever it's active with
+propquery pinning the client to it, regardless of which specific
+group is negotiated. `PKCS11_PROVIDER_DEBUG` tracing around the exact
+moment the error appears shows a real, successful RSA object
+create/free cycle through this provider's own keymgmt
+(`p11prov_rsa_free`, `keymgmt.c:737`) immediately adjacent to the
+error — the peer's plain RSA certificate genuinely gets processed
+through this provider (an expected consequence of propquery pinning
+essentially all operations to it, not a bug), and the ASN.1 error is
+one of several normal trial-decode attempts OpenSSL's own generic
+multi-format decoder-chain framework makes while determining which
+concrete format a given blob of key material is in — a well-
+documented, expected pattern (`man OSSL_DECODER_CTX`: a decoder chain
+tries each compatible decoder in turn; failed trials populate the
+error queue even though the overall operation succeeds). Not a
+provider-side bug to fix; documented as an interop caveat instead
+(new `WART-6`, §4.A): callers that treat a non-empty OpenSSL error
+queue as a hard failure signal, rather than checking the actual
+return code of the operation they care about, will misdiagnose a
+successful handshake as broken when this provider is active with a
+broad propquery.
+
+No harness changes for R19 (nothing to sabotage-test — no code
+changed). Both engines' suites unaffected (no code touched).
+**Harness: `PASS=35 FAIL=0 XFAIL=0 XPASS=0`**, unchanged from R18.
 
 ## 7. Companion document
 
