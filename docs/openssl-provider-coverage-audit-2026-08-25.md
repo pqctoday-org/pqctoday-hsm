@@ -2732,6 +2732,77 @@ re-run for this item.
 This closes phase 8's R38. R37, R39, R40, R41 remain open; R33 and R27
 remain parked.
 
+**Phase 8, R37 (bare generic `CKM_HASH_ML_DSA`/`CKM_HASH_SLH_DSA` PHM
+conformance), DONE — both engines had the SAME bug, confirmed live
+before coding (not the two-different-bugs claim the phase-8 plan's own
+first-pass grounding made).** PKCS#11 v3.2 §6.67.6/§6.69.6 define the
+bare generic mechanism's data argument as an ALREADY-HASHED PHM ("Length
+of hash") — distinct from the ten hash-specific §6.67.7/§6.69.7
+mechanisms (R35/R36), which hash a raw message ON TOKEN. New permanent
+fixture `generic-hash-mldsa-probe` (raw PKCS#11 C_* API, bypassing the
+provider entirely — nothing routes to the generic mechanism through it
+by design) found, for BOTH engines: a generic-mechanism signature over
+a known PHM verified successfully under the hash-specific mechanism's
+own verify fed the PHM *as if it were the message* — i.e. both engines
+hashed the caller's already-hashed PHM a SECOND time before the
+`0x01‖ctx‖OID‖…` encoding. (This corrects the plan document's own
+static-read grounding, which had guessed a DIFFERENT, "pure path" bug
+for the C++ engine — struck through with the correction in place,
+`docs/openssl-provider-remediation-plan-phase8-2026-08-26.md`'s own R37
+section.)
+
+**Fix, both engines:** C++ — `parseMLDSASignContext`/
+`parseSLHDSASignContext`'s own `CK_HASH_SIGN_ADDITIONAL_CONTEXT` branch
+(fires only for the generic mechanism) now sets a new `phmInput` flag
+instead of the wrong `preHash`; `OSSLMLDSA`/`OSSLSLHDSA` `sign()`/
+`verify()` build `M′` directly from the caller's PHM via a new
+`buildMPrimeFromPHM`/`buildSLHDSAMPrimeFromPHM` (sharing the existing
+encoding tail, skipping the internal hash step), with PHM-length
+validation against the hash's own digest length; all four
+generic-mechanism dispatch sites now correctly set
+`bAllowMultiPartOp = false` (single-part only — this mechanism is
+unreachable via OpenSSL's Update/Final machinery at all, unlike R34's
+own first, wrong attempt at a similar flag). Rust — `remap_generic_hash
+_mech` no longer collapses the generic mechanism onto a hash-specific
+one; new `try_hash_sign_with_rng_phm`/`hash_verify_phm` trait methods
+in both vendored `fips204-patched`/`fips205-patched` crates reuse the
+existing internal oid/phm-direct signing primitives (the same shape
+R34's own `ext_mu` entry points already established); a new
+session-keyed `GENERIC_HASH_STATE` side-table (kept separate from
+`SIGN_STATE`/`VERIFY_STATE`'s own tuple shape, same rationale as the
+pre-existing `SIGN_RECOVER_STATE`) carries the caller's chosen digest
+from `*Init` to `C_Sign`/`C_Verify` now that `mech_type` itself no
+longer encodes it.
+
+**Two pre-existing tests were themselves built on the same wrong
+assumption R37 fixes, and only started failing once the bug they
+(accidentally) depended on was gone** — `p11_v32_compliance_test.cpp`'s
+two generic-mechanism cases and one Rust FFI unit test all fed the
+generic mechanism a raw message; their prior green result was evidence
+of the double-hash bug, not of correctness. Both fixed to feed a
+genuine SHA-256 PHM (full detail in the plan doc's own execution
+update).
+
+**Live-proven, both engines, both algorithm families**: a
+generic-mechanism signature over a known PHM now verifies correctly
+under the hash-specific mechanism's own verify fed the original message
+(the conformant oracle — the two mechanisms are defined to be
+verify-interchangeable for `PHM = H(M)`, the strongest available check
+since OpenSSL has no HashML-DSA/HashSLH-DSA at all); neither the
+"pure path" nor the "double-hash" bug hypothesis reproduces post-fix;
+wrong-length PHM rejected loudly on both engines; multi-part
+(`C_SignUpdate`) correctly rejected on both.
+
+Full regression: **harness 84/84** (unchanged — the generic mechanism
+isn't reachable through the provider, so no new harness case), **C++
+CTest 8/8** (after fixing `p11_v32_compliance_test.cpp`'s own wrong
+assumption — first run surfaced 2 genuine new failures, root-caused to
+the test), **Rust `cargo test --release` 410/410** (same story, 1
+failure, same root cause).
+
+This closes phase 8's R37. R39, R40, R41 remain open; R33 and R27
+remain parked.
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:

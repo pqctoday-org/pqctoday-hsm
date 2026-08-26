@@ -145,6 +145,41 @@ void OSSLMLDSA_cleanupPreHashCache()
 
 // Build HashML-DSA encoding: M' = 0x01 || len(ctx) || ctx || OID || PH(M)
 // per FIPS 204 §5.4
+// Build M' = 0x01 || contextLen || context || AlgId_DER || digest, from an
+// ALREADY-COMPUTED digest of the given length (caller must have already
+// validated digestLen against info->digestLen -- see the two call sites).
+// Split out of buildPreHashEncoding (remediation R37, phase 8) so the bare
+// generic CKM_HASH_ML_DSA mechanism (PKCS#11 v3.2 §6.67.6 -- caller supplies
+// an already-hashed PHM directly, must NOT be hashed again) can share this
+// encoding step without buildPreHashEncoding's own internal EVP_Digest call.
+static bool buildMPrimeFromDigest(const unsigned char* digest, size_t digestLen,
+                                  const PreHashInfo* info,
+                                  const MLDSA_SIGN_PARAMS* params,
+                                  ByteString& encoded)
+{
+	// Overflow guard: contextLen <= 255, algIdDerLen <= 15, digestLen <= 64 (max 336).
+	size_t totalLen = 1 + 1;
+	if (params->contextLen > SIZE_MAX - totalLen) return false;
+	totalLen += params->contextLen;
+	if (info->algIdDerLen > SIZE_MAX - totalLen) return false;
+	totalLen += info->algIdDerLen;
+	if (digestLen > SIZE_MAX - totalLen) return false;
+	totalLen += digestLen;
+	encoded.resize(totalLen);
+	size_t off = 0;
+	encoded[off++] = 0x01;  // pre-hash domain separator
+	encoded[off++] = (unsigned char)params->contextLen;
+	if (params->contextLen > 0)
+	{
+		memcpy(&encoded[off], params->context, params->contextLen);
+		off += params->contextLen;
+	}
+	memcpy(&encoded[off], info->algIdDer, info->algIdDerLen);
+	off += info->algIdDerLen;
+	memcpy(&encoded[off], digest, digestLen);
+	return true;
+}
+
 static bool buildPreHashEncoding(const ByteString& message,
                                  const MLDSA_SIGN_PARAMS* params,
                                  ByteString& encoded)
@@ -202,30 +237,31 @@ static bool buildPreHashEncoding(const ByteString& message,
 		}
 	}
 
-	// Build M' = 0x01 || contextLen || context || AlgId_DER || H(M)
-	// Overflow guard: contextLen <= 255, algIdDerLen <= 15, digestLen <= 64 (max 336).
-	size_t totalLen = 1 + 1;
-	if (params->contextLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += params->contextLen;
-	if (info->algIdDerLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += info->algIdDerLen;
-	if (info->digestLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += info->digestLen;
-	encoded.resize(totalLen);
-	size_t off = 0;
-	encoded[off++] = 0x01;  // pre-hash domain separator
-	encoded[off++] = (unsigned char)params->contextLen;
-	if (params->contextLen > 0)
-	{
-		memcpy(&encoded[off], params->context, params->contextLen);
-		off += params->contextLen;
-	}
-	memcpy(&encoded[off], info->algIdDer, info->algIdDerLen);
-	off += info->algIdDerLen;
-	memcpy(&encoded[off], digest, info->digestLen);
+	bool ok = buildMPrimeFromDigest(digest, info->digestLen, info, params, encoded);
 	OPENSSL_cleanse(digest, sizeof(digest));
+	return ok;
+}
 
-	return true;
+// PKCS#11 v3.2 §6.67.6, bare generic CKM_HASH_ML_DSA: dataToSign IS the PHM
+// (already hashed by the caller) -- build M' directly, no internal hashing.
+// Loudly rejects a wrong-length PHM rather than truncating/padding.
+static bool buildMPrimeFromPHM(const ByteString& phm,
+                               const MLDSA_SIGN_PARAMS* params,
+                               ByteString& encoded)
+{
+	const PreHashInfo* info = getPreHashInfo(params->hashAlg);
+	if (!info)
+	{
+		ERROR_MSG("Unknown hash algorithm for generic HashML-DSA");
+		return false;
+	}
+	if (phm.size() != info->digestLen)
+	{
+		ERROR_MSG("CKM_HASH_ML_DSA: PHM length %zu does not match %s digest "
+		         "length %zu", phm.size(), info->evpName, info->digestLen);
+		return false;
+	}
+	return buildMPrimeFromDigest(phm.const_byte_str(), phm.size(), info, params, encoded);
 }
 
 // Check if mechanism is an ML-DSA family mechanism
@@ -302,6 +338,16 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	if (mldsaParams && mldsaParams->preHash)
 	{
 		if (!buildPreHashEncoding(dataToSign, mldsaParams, preHashEncoded))
+			return false;
+		signData = preHashEncoded.const_byte_str();
+		signDataLen = preHashEncoded.size();
+		useRawEncoding = true;
+	}
+	else if (mldsaParams && mldsaParams->phmInput)
+	{
+		// Remediation R37 (phase 8): bare generic CKM_HASH_ML_DSA -- dataToSign
+		// IS the PHM already, never hash it again.
+		if (!buildMPrimeFromPHM(dataToSign, mldsaParams, preHashEncoded))
 			return false;
 		signData = preHashEncoded.const_byte_str();
 		signDataLen = preHashEncoded.size();
@@ -476,6 +522,15 @@ bool OSSLMLDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	if (mldsaParams && mldsaParams->preHash)
 	{
 		if (!buildPreHashEncoding(originalData, mldsaParams, preHashEncoded))
+			return false;
+		verifyData = preHashEncoded.const_byte_str();
+		verifyDataLen = preHashEncoded.size();
+		useRawEncoding = true;
+	}
+	else if (mldsaParams && mldsaParams->phmInput)
+	{
+		// Remediation R37 (phase 8): see sign()'s identical comment.
+		if (!buildMPrimeFromPHM(originalData, mldsaParams, preHashEncoded))
 			return false;
 		verifyData = preHashEncoded.const_byte_str();
 		verifyDataLen = preHashEncoded.size();

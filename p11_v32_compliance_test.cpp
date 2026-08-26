@@ -4079,9 +4079,19 @@ void test_g7_sha3_384_rsa() {
  * message is passed RAW to C_Sign (the engine does the pre-hash internally,
  * per parseMLDSASignContext / the HASH_MLDSA_CASE / HASH_SLHDSA_CASE dispatch
  * macros in SoftHSM_sign.cpp — confirmed by reading the dispatch code, not
- * assumed). The generic form additionally exercises the
- * CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash parameter path that the specific
- * mechanisms bypass.
+ * assumed).
+ *
+ * Remediation R37 (phase 8) correction: this comment used to say the
+ * generic form "additionally exercises the CK_HASH_SIGN_ADDITIONAL_
+ * CONTEXT.hash parameter path" over the SAME raw message as the specific
+ * variants — wrong. PKCS#11 v3.2 §6.67.6/§6.69.6 define the bare generic
+ * mechanism's data argument as an ALREADY-HASHED PHM, not a raw message
+ * (the ten specific §6.67.7/§6.69.7 variants hash the message ON TOKEN;
+ * the generic one does not hash at all). Both engines had a double-hash
+ * bug that happened to make a raw message "work" here by accident before
+ * R37's fix (verified live via generic-hash-mldsa-probe) — this test
+ * passing was itself evidence of the bug, not of correctness. The two
+ * generic-mechanism calls below now feed a genuine SHA-256 PHM.
  * ------------------------------------------------------------------------- */
 void test_g2_prehash_mechanisms() {
     CK_BYTE msg[] = "PKCS#11 v3.2 pre-hash coverage-gap round trip";
@@ -4089,11 +4099,14 @@ void test_g2_prehash_mechanisms() {
 
     auto signVerifyRoundTrip = [&](const std::string& category, const std::string& name,
                                     CK_OBJECT_HANDLE priv, CK_OBJECT_HANDLE pub,
-                                    CK_MECHANISM_TYPE mechType, CK_VOID_PTR param, CK_ULONG paramLen) {
+                                    CK_MECHANISM_TYPE mechType, CK_VOID_PTR param, CK_ULONG paramLen,
+                                    CK_BYTE_PTR dataOverride = NULL_PTR, CK_ULONG dataOverrideLen = 0) {
         if (!mech_advertised(mechType)) {
             record_result(category, name, "SKIP", "mechanism not advertised");
             return;
         }
+        CK_BYTE_PTR data = dataOverride ? dataOverride : msg;
+        CK_ULONG dataLen = dataOverride ? dataOverrideLen : msgLen;
         CK_MECHANISM mech = { mechType, param, paramLen };
         CK_RV rv = fl->C_SignInit(hSess, &mech, priv);
         if (rv != CKR_OK) {
@@ -4102,17 +4115,23 @@ void test_g2_prehash_mechanisms() {
         }
         CK_BYTE sig[50000];
         CK_ULONG sigLen = sizeof(sig);
-        rv = fl->C_Sign(hSess, msg, msgLen, sig, &sigLen);
+        rv = fl->C_Sign(hSess, data, dataLen, sig, &sigLen);
         if (rv != CKR_OK) {
             record_result(category, name, "FAIL", "C_Sign RV=" + std::to_string(rv));
             return;
         }
         rv = fl->C_VerifyInit(hSess, &mech, pub);
-        if (rv == CKR_OK) rv = fl->C_Verify(hSess, msg, msgLen, sig, sigLen);
+        if (rv == CKR_OK) rv = fl->C_Verify(hSess, data, dataLen, sig, sigLen);
         record_result(category, name, rv == CKR_OK ? "PASS" : "FAIL",
                       rv == CKR_OK ? "real sign+verify round trip OK, sigLen=" + std::to_string(sigLen)
                                    : "verify failed RV=" + std::to_string(rv));
     };
+
+    // Remediation R37: PHM for the two generic-mechanism calls below —
+    // SHA-256 of the same `msg` the specific variants hash on-token.
+    CK_BYTE phmSha256[32];
+    unsigned int phmSha256Len = 0;
+    EVP_Digest(msg, msgLen, phmSha256, &phmSha256Len, EVP_sha256(), NULL);
 
     // ---- ML-DSA pre-hash family (9 previously-untested mechanisms) ----
     {
@@ -4144,10 +4163,12 @@ void test_g2_prehash_mechanisms() {
         } else {
             record_result("DSA", "PreHashGap_GenerateKey_65", "PASS", "Gen ML-DSA-65 for pre-hash coverage");
 
-            // Generic CKM_HASH_ML_DSA needs an explicit CK_HASH_SIGN_ADDITIONAL_CONTEXT.
+            // Generic CKM_HASH_ML_DSA needs an explicit CK_HASH_SIGN_ADDITIONAL_CONTEXT,
+            // and (remediation R37) a real PHM, not the raw message.
             CK_HASH_SIGN_ADDITIONAL_CONTEXT genCtx = { CKH_HEDGE_PREFERRED, NULL_PTR, 0, CKM_SHA256 };
             signVerifyRoundTrip("DSA", "PreHash65_Generic_HASH_ML_DSA_explicitSHA256",
-                                 hPriv, hPub, CKM_HASH_ML_DSA, &genCtx, sizeof(genCtx));
+                                 hPriv, hPub, CKM_HASH_ML_DSA, &genCtx, sizeof(genCtx),
+                                 phmSha256, phmSha256Len);
 
             // The 8 specific pre-hash variants not already covered by test_pqc_dsa
             // (SHA512 and SHA3_512 are covered there).
@@ -4197,9 +4218,11 @@ void test_g2_prehash_mechanisms() {
             record_result("SLHDSA", "PreHashGap_GenerateKey_128S", "PASS",
                           "Gen SLH-DSA-SHA2-128S for pre-hash coverage");
 
+            // Remediation R37: a real PHM, not the raw message (see the ML-DSA arm above).
             CK_HASH_SIGN_ADDITIONAL_CONTEXT genCtx = { CKH_HEDGE_PREFERRED, NULL_PTR, 0, CKM_SHA256 };
             signVerifyRoundTrip("SLHDSA", "PreHashSLH_Generic_HASH_SLH_DSA_explicitSHA256",
-                                 hPriv, hPub, CKM_HASH_SLH_DSA, &genCtx, sizeof(genCtx));
+                                 hPriv, hPub, CKM_HASH_SLH_DSA, &genCtx, sizeof(genCtx),
+                                 phmSha256, phmSha256Len);
 
             struct { CK_MECHANISM_TYPE mech; const char* name; } specific[] = {
                 { CKM_HASH_SLH_DSA_SHA224,   "PreHashSLH_SHA224"   },

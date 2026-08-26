@@ -4818,7 +4818,7 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
         // remap onto the concrete hash-specific mechanism via their
         // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param.
-        mech_type = match remap_generic_hash_mech(p_mechanism, mech_type) {
+        mech_type = match remap_generic_hash_mech(h_session, p_mechanism, mech_type) {
             Ok(m) => m,
             Err(rv) => return rv,
         };
@@ -4837,19 +4837,36 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
 }
 
 /// If `mech_type` is a GENERIC pre-hash mechanism (CKM_HASH_ML_DSA /
-/// CKM_HASH_SLH_DSA, §6.67.7/§6.69.7), parse
-/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` and remap onto the concrete
-/// hash-specific mechanism so the rest of the sign/verify pipeline
-/// (`takes_sign_additional_ctx` / `parse_sign_additional_ctx` / dispatch)
-/// runs unchanged — same idiom as the CKM_EDDSA -> CKM_EDDSA_PH phFlag
-/// remap just above each call site. Returns `mech_type` unchanged for every
-/// other mechanism.
+/// CKM_HASH_SLH_DSA, §6.67.6/§6.69.6), parse
+/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` and stash it in
+/// `GENERIC_HASH_STATE` for `h_session`.
+///
+/// Remediation R37 (phase 8): `mech_type` is now returned UNCHANGED for
+/// the generic mechanisms too -- this function used to remap `mech_type`
+/// onto the matching hash-SPECIFIC mechanism (§6.67.7/§6.69.7) so the rest
+/// of the pipeline ran unchanged (same idiom as the CKM_EDDSA ->
+/// CKM_EDDSA_PH phFlag remap just above each call site), but that
+/// collapsed two mechanisms with genuinely different semantics into one:
+/// the generic mechanism's data argument IS an already-hashed PHM, while
+/// the hash-specific one hashes a raw message on token. Remapping meant
+/// the hash-specific handler hashed the caller's PHM a SECOND time
+/// (confirmed live via generic-hash-mldsa-probe before this fix). The
+/// stashed `hash` lets C_Sign/C_Verify re-derive `Ph` for the generic
+/// mechanism's own PHM-input dispatch (`sign_ml_dsa_phm` etc.) without
+/// mech_type having to carry it. `map_generic_hash_mech` is still used
+/// here PURELY to validate `hash` is one of the eight legal digest
+/// mechanisms (same Init-time rejection as before) -- its returned
+/// (unused) mechanism value is discarded.
 ///
 /// `CK_HASH_SIGN_ADDITIONAL_CONTEXT` shares `CK_SIGN_ADDITIONAL_CONTEXT`'s
 /// first 3 fields (hedgeVariant, pContext, ulContextLen — read later by
 /// `parse_sign_additional_ctx` against this same pointer) plus a trailing
 /// `hash` (CK_MECHANISM_TYPE) at native width; this only extracts `hash`.
-unsafe fn remap_generic_hash_mech(p_mechanism: *const u8, mech_type: u32) -> Result<u32, u32> {
+unsafe fn remap_generic_hash_mech(
+    h_session: u32,
+    p_mechanism: *const u8,
+    mech_type: u32,
+) -> Result<u32, u32> {
     if mech_type != CKM_HASH_ML_DSA && mech_type != CKM_HASH_SLH_DSA {
         return Ok(mech_type);
     }
@@ -4862,7 +4879,13 @@ unsafe fn remap_generic_hash_mech(p_mechanism: *const u8, mech_type: u32) -> Res
         )
         .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
     let hash = r.ulong32(ck_param::hash_sign_ctx::HASH);
-    map_generic_hash_mech(mech_type, hash).ok_or(CKR_MECHANISM_PARAM_INVALID)
+    if map_generic_hash_mech(mech_type, hash).is_none() {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    GENERIC_HASH_STATE.with(|s| {
+        s.borrow_mut().insert(h_session, hash);
+    });
+    Ok(mech_type)
 }
 
 /// True when `mech` takes a CK_SIGN_ADDITIONAL_CONTEXT parameter
@@ -5255,6 +5278,26 @@ fn C_Sign_impl(
         let eff_mech = mech;
         let eff_msg = msg;
         let result = match eff_mech {
+            // Remediation R37 (phase 8), PKCS#11 v3.2 §6.67.6/§6.69.6: the
+            // bare generic mechanisms are no longer remapped onto a
+            // hash-specific one at *SignInit time (see
+            // remap_generic_hash_mech's own R37 note) -- `msg` here IS the
+            // caller's already-hashed PHM, and `hash` (the caller's own
+            // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash) was stashed in
+            // GENERIC_HASH_STATE at Init time since mech_type alone can no
+            // longer carry it.
+            CKM_HASH_ML_DSA => {
+                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                    Some(hash) => sign_ml_dsa_phm(ps, &sk_bytes, msg, &ctx_bytes, hash, deterministic),
+                    None => Err(CKR_MECHANISM_PARAM_INVALID),
+                }
+            }
+            CKM_HASH_SLH_DSA => {
+                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                    Some(hash) => sign_slh_dsa_phm(ps, hash, &sk_bytes, msg, &ctx_bytes, deterministic),
+                    None => Err(CKR_MECHANISM_PARAM_INVALID),
+                }
+            }
             m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
                 sign_ml_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic)
             }
@@ -5412,7 +5455,7 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
         // remap onto the concrete hash-specific mechanism via their
         // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param.
-        mech_type = match remap_generic_hash_mech(p_mechanism, mech_type) {
+        mech_type = match remap_generic_hash_mech(h_session, p_mechanism, mech_type) {
             Ok(m) => m,
             Err(rv) => return rv,
         };
@@ -5554,6 +5597,19 @@ pub fn C_Verify(
         let eff_mech = mech;
         let eff_msg = msg;
         let rv = match match eff_mech {
+            // Remediation R37 (phase 8): see C_Sign's identical comment.
+            CKM_HASH_ML_DSA => {
+                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                    Some(hash) => verify_ml_dsa_phm(ps, &pk_bytes, msg, sig_bytes, &ctx_bytes, hash),
+                    None => Err(CKR_MECHANISM_PARAM_INVALID),
+                }
+            }
+            CKM_HASH_SLH_DSA => {
+                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                    Some(hash) => verify_slh_dsa_phm(ps, hash, &pk_bytes, msg, sig_bytes, &ctx_bytes),
+                    None => Err(CKR_MECHANISM_PARAM_INVALID),
+                }
+            }
             m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
                 verify_ml_dsa(m, ps, &pk_bytes, msg, sig_bytes, &ctx_bytes)
             }
@@ -5988,7 +6044,7 @@ pub fn C_VerifySignatureInit(
         // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
         // remap onto the concrete hash-specific mechanism via their
         // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param.
-        mech_type = match remap_generic_hash_mech(p_mechanism, mech_type) {
+        mech_type = match remap_generic_hash_mech(h_session, p_mechanism, mech_type) {
             Ok(m) => m,
             Err(rv) => return rv,
         };
@@ -16495,6 +16551,18 @@ mod generic_prehash_mech_ffi_tests {
         let _guard = test_lock::acquire();
         let (session, pub_h, priv_h) = setup();
         let msg = b"generic pre-hash ML-DSA end-to-end";
+        // Remediation R37 (phase 8): PKCS#11 v3.2 §6.67.6 — the GENERIC
+        // mechanism's data argument IS an already-hashed PHM, never a raw
+        // message (only the ten §6.67.7 hash-SPECIFIC mechanisms hash on
+        // token). This test originally fed the raw message straight to the
+        // generic mechanism and asserted CKR_OK, which only "worked"
+        // because of the double-hash bug R37 fixed (the generic mechanism
+        // used to be silently remapped onto the hash-specific one, which
+        // then hashed its input) — that CKR_OK was evidence of the bug,
+        // not of correctness (confirmed live via generic-hash-mldsa-probe
+        // before the fix). Feeds a genuine SHA-256 PHM now.
+        use sha2::Digest;
+        let phm = sha2::Sha256::digest(msg);
 
         let (mut m, ctx) = hash_mech(CKM_HASH_ML_DSA, CKM_SHA256);
         m[1] = ctx.as_ptr() as usize;
@@ -16502,7 +16570,7 @@ mod generic_prehash_mech_ffi_tests {
         let mut sig = vec![0u8; 8192];
         let mut sig_len = sig.len() as u32;
         assert_eq!(
-            C_Sign(session, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_mut_ptr(), &mut sig_len),
+            C_Sign(session, phm.as_ptr() as *mut u8, phm.len() as u32, sig.as_mut_ptr(), &mut sig_len),
             CKR_OK
         );
         sig.truncate(sig_len as usize);
@@ -16511,13 +16579,16 @@ mod generic_prehash_mech_ffi_tests {
         m2[1] = ctx2.as_ptr() as usize;
         assert_eq!(C_VerifyInit(session, m2.as_mut_ptr() as *mut u8, pub_h), CKR_OK);
         assert_eq!(
-            C_Verify(session, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_ptr() as *mut u8, sig.len() as u32),
+            C_Verify(session, phm.as_ptr() as *mut u8, phm.len() as u32, sig.as_ptr() as *mut u8, sig.len() as u32),
             CKR_OK
         );
 
-        // Interop: a signature made via the GENERIC mechanism verifies
-        // under the SPECIFIC mechanism name too (remap makes them the same
-        // internal mech_type).
+        // Interop: a signature made via the GENERIC mechanism (over PHM)
+        // verifies under the SPECIFIC mechanism name too, fed the
+        // ORIGINAL message (which the specific mechanism hashes on token
+        // itself) — the two are defined to be verify-interchangeable for
+        // PHM=H(M) (remediation R37's own strongest oracle, no remap
+        // involved any more).
         let mut m3: [usize; 3] = [CKM_HASH_ML_DSA_SHA256 as usize, 0, 0];
         assert_eq!(C_VerifyInit(session, m3.as_mut_ptr() as *mut u8, pub_h), CKR_OK);
         assert_eq!(

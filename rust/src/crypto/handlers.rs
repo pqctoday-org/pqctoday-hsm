@@ -474,6 +474,43 @@ pub fn get_slh_dsa_ph(mech: u32) -> Option<fips205::Ph> {
     }
 }
 
+/// Remediation R37 (phase 8): maps `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` (a
+/// raw digest mechanism, e.g. `CKM_SHA256`) to `Ph`, for the bare generic
+/// `CKM_HASH_ML_DSA`'s own PHM-input path -- distinct from
+/// [`get_ml_dsa_ph`], which maps the TEN hash-SPECIFIC
+/// `CKM_HASH_ML_DSA_<hash>` mechanisms instead. SHAKE128/256 excluded: no
+/// standalone `CKM_` digest identifier exists for them (see
+/// `map_generic_hash_mech`'s own note), so the generic mechanism cannot
+/// select them.
+pub fn ph_from_digest_mech_ml_dsa(hash: u32) -> Option<fips204::Ph> {
+    match hash {
+        crate::constants::CKM_SHA224 => Some(fips204::Ph::SHA224),
+        crate::constants::CKM_SHA256 => Some(fips204::Ph::SHA256),
+        crate::constants::CKM_SHA384 => Some(fips204::Ph::SHA384),
+        crate::constants::CKM_SHA512 => Some(fips204::Ph::SHA512),
+        crate::constants::CKM_SHA3_224 => Some(fips204::Ph::SHA3_224),
+        crate::constants::CKM_SHA3_256 => Some(fips204::Ph::SHA3_256),
+        crate::constants::CKM_SHA3_384 => Some(fips204::Ph::SHA3_384),
+        crate::constants::CKM_SHA3_512 => Some(fips204::Ph::SHA3_512),
+        _ => None,
+    }
+}
+
+/// SLH-DSA twin of [`ph_from_digest_mech_ml_dsa`] (remediation R37, phase 8).
+pub fn ph_from_digest_mech_slh_dsa(hash: u32) -> Option<fips205::Ph> {
+    match hash {
+        crate::constants::CKM_SHA224 => Some(fips205::Ph::SHA224),
+        crate::constants::CKM_SHA256 => Some(fips205::Ph::SHA256),
+        crate::constants::CKM_SHA384 => Some(fips205::Ph::SHA384),
+        crate::constants::CKM_SHA512 => Some(fips205::Ph::SHA512),
+        crate::constants::CKM_SHA3_224 => Some(fips205::Ph::SHA3_224),
+        crate::constants::CKM_SHA3_256 => Some(fips205::Ph::SHA3_256),
+        crate::constants::CKM_SHA3_384 => Some(fips205::Ph::SHA3_384),
+        crate::constants::CKM_SHA3_512 => Some(fips205::Ph::SHA3_512),
+        _ => None,
+    }
+}
+
 pub unsafe fn write_fixed_str(buf: *mut u8, offset: usize, s: &str, max_len: usize) {
     let bytes = s.as_bytes();
     let copy_len = bytes.len().min(max_len);
@@ -582,6 +619,51 @@ macro_rules! slh_dsa_verify {
                     Err(CKR_SIGNATURE_INVALID)
                 }
             }
+        }
+    }};
+}
+
+/// Remediation R37 (phase 8): [`slh_dsa_sign`]'s twin for the bare generic
+/// `CKM_HASH_SLH_DSA` -- `$phm` is already hashed, `$hash` is the caller's
+/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` (mapped via
+/// [`crate::crypto::handlers::ph_from_digest_mech_slh_dsa`]), no `None`
+/// (pure-mode) arm -- the generic mechanism is always pre-hash by
+/// definition.
+#[macro_export]
+macro_rules! slh_dsa_sign_phm {
+    ($ps:ty, $hash:expr, $sk_bytes:expr, $phm:expr, $ctx:expr, $deterministic:expr) => {{
+        use fips205::traits::Signer;
+        let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
+            .try_into()
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let ph = crate::crypto::handlers::ph_from_digest_mech_slh_dsa($hash)
+            .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+        sk.try_hash_sign_phm($phm, $ctx, &ph, !$deterministic)
+            .map_err(|_| CKR_FUNCTION_FAILED)
+            .map(|s| Into::<Vec<u8>>::into(s))
+    }};
+}
+
+/// Verify counterpart to [`slh_dsa_sign_phm`] (remediation R37, phase 8).
+#[macro_export]
+macro_rules! slh_dsa_verify_phm {
+    ($ps:ty, $hash:expr, $pk_bytes:expr, $phm:expr, $sig_bytes:expr, $ctx:expr) => {{
+        use fips205::traits::Verifier;
+        let pk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $pk_bytes
+            .try_into()
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let vk = <$ps as fips205::traits::SerDes>::try_from_bytes(pk_arr)
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let sig: <$ps as fips205::traits::Verifier>::Signature =
+            $sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+        let ph = crate::crypto::handlers::ph_from_digest_mech_slh_dsa($hash)
+            .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+        if vk.hash_verify_phm($phm, &sig, $ctx, &ph) {
+            Ok(())
+        } else {
+            Err(CKR_SIGNATURE_INVALID)
         }
     }};
 }
@@ -1123,6 +1205,47 @@ pub fn sign_ml_dsa(
     }
 }
 
+/// Remediation R37 (phase 8), PKCS#11 v3.2 §6.67.6: sign an ALREADY-HASHED
+/// PHM directly, for the bare generic `CKM_HASH_ML_DSA` mechanism -- twin
+/// of [`sign_ml_dsa`], which hashes a raw message. `hash` is the caller's
+/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` field (a raw digest mechanism,
+/// e.g. `CKM_SHA256`), mapped via [`ph_from_digest_mech_ml_dsa`].
+pub fn sign_ml_dsa_phm(
+    ps: u32,
+    sk_bytes: &[u8],
+    phm: &[u8],
+    ctx: &[u8],
+    hash: u32,
+    deterministic: bool,
+) -> Result<Vec<u8>, u32> {
+    use fips204::traits::Signer;
+    let ph = ph_from_digest_mech_ml_dsa(hash).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    macro_rules! ml_dsa_sign_phm {
+        ($variant:path) => {{
+            type Sk = <$variant as KeyGen>::PrivateKey;
+            let sk_arr: &<Sk as fips204::traits::SerDes>::ByteArray =
+                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sk = <Sk as fips204::traits::SerDes>::try_from_bytes(*sk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let result = if deterministic {
+                sk.try_hash_sign_with_rng_phm(&mut ZeroRng, phm, ctx, &ph)
+            } else {
+                sk.try_hash_sign_phm(phm, ctx, &ph)
+            };
+            result
+                .map_err(|_| CKR_FUNCTION_FAILED)
+                .map(|s| Into::<Vec<u8>>::into(s))
+        }};
+    }
+    use fips204::traits::KeyGen;
+    match ps {
+        CKP_ML_DSA_44 => ml_dsa_sign_phm!(fips204::ml_dsa_44::KG),
+        CKP_ML_DSA_65 | 0 => ml_dsa_sign_phm!(fips204::ml_dsa_65::KG),
+        CKP_ML_DSA_87 => ml_dsa_sign_phm!(fips204::ml_dsa_87::KG),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
 /// ML-DSA **internal-interface** signing — ACVP `signatureInterface="internal"`
 /// / OASIS interop `<Internal value="true"/>` (FIPS 204 `ML-DSA.Sign_internal`):
 /// signs `message` directly as M′, WITHOUT the external
@@ -1396,6 +1519,59 @@ pub fn sign_slh_dsa(
             ctx,
             deterministic
         ),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// Remediation R37 (phase 8), PKCS#11 v3.2 §6.69.6: sign an ALREADY-HASHED
+/// PHM directly, for the bare generic `CKM_HASH_SLH_DSA` mechanism -- twin
+/// of [`sign_slh_dsa`], which hashes a raw message. `hash` is the caller's
+/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` field.
+pub fn sign_slh_dsa_phm(
+    ps: u32,
+    hash: u32,
+    sk_bytes: &[u8],
+    phm: &[u8],
+    ctx: &[u8],
+    deterministic: bool,
+) -> Result<Vec<u8>, u32> {
+    match ps {
+        CKP_SLH_DSA_SHA2_128S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_128s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_128S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_128s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHA2_128F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_128f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_128F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_128f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHA2_192S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_192s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_192S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_192s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHA2_192F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_192f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_192F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_192f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHA2_256S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_256s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_256S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_256s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHA2_256F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_256f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_256F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_256f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
 }
@@ -2110,6 +2286,41 @@ pub fn verify_ml_dsa(
     }
 }
 
+/// Remediation R37 (phase 8): verify counterpart to [`sign_ml_dsa_phm`] --
+/// bare generic `CKM_HASH_ML_DSA`, `phm` already hashed by the caller.
+pub fn verify_ml_dsa_phm(
+    ps: u32,
+    pk_bytes: &[u8],
+    phm: &[u8],
+    sig_bytes: &[u8],
+    ctx: &[u8],
+    hash: u32,
+) -> Result<(), u32> {
+    use fips204::traits::Verifier;
+    let ph = ph_from_digest_mech_ml_dsa(hash).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    macro_rules! ml_dsa_verify_phm {
+        ($variant:ty) => {{
+            let pk_arr: &<$variant as fips204::traits::SerDes>::ByteArray =
+                pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let pk = <$variant as fips204::traits::SerDes>::try_from_bytes(*pk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig: <$variant as fips204::traits::Verifier>::Signature =
+                sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            if pk.hash_verify_phm(phm, &sig, ctx, &ph) {
+                Ok(())
+            } else {
+                Err(CKR_SIGNATURE_INVALID)
+            }
+        }};
+    }
+    match ps {
+        CKP_ML_DSA_44 => ml_dsa_verify_phm!(fips204::ml_dsa_44::PublicKey),
+        CKP_ML_DSA_65 | 0 => ml_dsa_verify_phm!(fips204::ml_dsa_65::PublicKey),
+        CKP_ML_DSA_87 => ml_dsa_verify_phm!(fips204::ml_dsa_87::PublicKey),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
 pub fn verify_slh_dsa(
     mech: u32,
     ps: u32,
@@ -2215,6 +2426,57 @@ pub fn verify_slh_dsa(
             sig_bytes,
             ctx
         ),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// Remediation R37 (phase 8): verify counterpart to [`sign_slh_dsa_phm`] --
+/// bare generic `CKM_HASH_SLH_DSA`, `phm` already hashed by the caller.
+pub fn verify_slh_dsa_phm(
+    ps: u32,
+    hash: u32,
+    pk_bytes: &[u8],
+    phm: &[u8],
+    sig_bytes: &[u8],
+    ctx: &[u8],
+) -> Result<(), u32> {
+    match ps {
+        CKP_SLH_DSA_SHA2_128S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_128s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_128S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_128s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHA2_128F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_128f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_128F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_128f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHA2_192S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_192s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_192S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_192s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHA2_192F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_192f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_192F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_192f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHA2_256S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_256s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_256S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_256s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHA2_256F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_256f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_256F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_256f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
 }

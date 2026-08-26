@@ -301,4 +301,17 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
     add_executable(shake_sign_probe scripts/shake-sign-probe.c)
     target_include_directories(shake_sign_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
     target_link_libraries(shake_sign_probe ${OPENSSL_LIBRARIES})
+
+    # generic-hash-mldsa-probe: phase-8 R37 step-1 live-confirm fixture --
+    # drives the raw PKCS#11 C_* API directly (same reason hss-w4-keygen.c
+    # does: nothing routes to the bare generic CKM_HASH_ML_DSA mechanism
+    # through the OpenSSL provider by design, so there is no CLI/EVP-API
+    # surface to reach it at all). Cross-verifies the generic mechanism's
+    # actual signed content against the hash-specific mechanism (the
+    # conformant oracle) and against plain CKM_ML_DSA (the "pure path" bug
+    # detector) -- see the file's own header for the full hypothesis set.
+    add_executable(generic_hash_mldsa_probe scripts/generic-hash-mldsa-probe.c)
+    target_include_directories(generic_hash_mldsa_probe PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11 ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(generic_hash_mldsa_probe ${CMAKE_DL_LIBS} ${OPENSSL_LIBRARIES})
 endif()

@@ -163,14 +163,19 @@ same way. Re-grounding for this plan shows they mis-handle it
 wire-incompatible with the spec AND with each other on these two
 codepoints:
 
-- **C++**: `AsymSignInit`'s `case CKM_HASH_ML_DSA` sets
+- ~~**C++**: `AsymSignInit`'s `case CKM_HASH_ML_DSA` sets
   `mldsaSignParam.hashAlg` from `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash`
   but — unlike the `HASH_MLDSA_CASE` macro right below it — **never
   sets `preHash = true`** (verified line-by-line, `SoftHSM_sign.cpp:902-935`).
   `OSSLMLDSA::sign()` therefore takes the *pure* path: the caller's
   PHM bytes get signed as a raw pure-ML-DSA message, with no
   `0x01‖ctx‖OID‖PHM` encoding at all. Not §6.67.6 semantics, not
-  §6.67.7 semantics — a third, accidental behavior.
+  §6.67.7 semantics — a third, accidental behavior.~~ **WRONG — see
+  this section's own "Grounding correction" below, found live-
+  confirming before coding.** The static read above missed that
+  `parseMLDSASignContext`'s own `CK_HASH_SIGN_ADDITIONAL_CONTEXT`
+  branch sets `preHash = true` as a side effect — C++ takes the SAME
+  double-hash path as Rust, not a third behavior.
 - **Rust**: `remap_generic_hash_mech` (`ffi.rs:4852`) maps the generic
   mechanism onto the matching hash-SPECIFIC mechanism, whose handler
   hashes its input — so the caller's already-hashed PHM gets **hashed
@@ -235,6 +240,111 @@ loudly on both engines. ACVP HashML-DSA/HashSLH-DSA vectors where a
 (param-set, digest) pair exists in the already-vendored KAT sets
 (`native::prehash_kat*` shows the vector plumbing). Regression: full
 harness, CTest, `cargo test --release` (crates touched).
+
+**Grounding correction (2026-08-26, found live-confirming before coding
+— this plan's OWN R37 grounding above was wrong):** step 1's probe
+(`generic-hash-mldsa-probe.c`, promoted to the permanent regression
+fixture per this section's own step 1) showed the C++ engine does
+**NOT** take the "pure path" this plan claimed — `parseMLDSASignContext`/
+`parseSLHDSASignContext`'s own `CK_HASH_SIGN_ADDITIONAL_CONTEXT` branch
+(which fires ONLY for the bare generic mechanism) was setting
+`out.preHash = true`, a real side effect the earlier static read missed.
+That makes `OSSLMLDSA::sign()`/`OSSLSLHDSA::sign()` take the SAME
+`buildPreHashEncoding`/`buildSLHDSAPreHashMsg` branch the ten hash-
+specific mechanisms use — which hashes its input. C++ has the identical
+**double-hash** bug this plan already (correctly) attributed to Rust,
+not a third, different bug. Both engines were wrong the SAME way, just
+reached through different code (C++: a stray `preHash=true` in the
+struct-parsing helper; Rust: `remap_generic_hash_mech` literally
+reusing the hash-specific dispatch arm). Struck-through original claim
+preserved above for the audit trail; corrected finding used for the fix
+below.
+
+**Execution update (2026-08-26):** done, both engines, both algorithm
+families, exactly the fix option this section's own step 2/3 scoped —
+plus two structural findings step 1's probe/live-testing surfaced that
+the static grounding didn't anticipate:
+
+- **C++ fix, as planned**: added `phmInput` to `MLDSA_SIGN_PARAMS`/
+  `SLHDSA_SIGN_PARAMS` (`AsymmetricAlgorithm.h`); `parseMLDSASignContext`/
+  `parseSLHDSASignContext`'s own `CK_HASH_SIGN_ADDITIONAL_CONTEXT`
+  branch now sets `phmInput = true` instead of the wrong `preHash =
+  true`; `OSSLMLDSA`/`OSSLSLHDSA` `sign()`/`verify()` gained a
+  `phmInput` branch calling new `buildMPrimeFromPHM`/
+  `buildSLHDSAMPrimeFromPHM` (split out of `buildPreHashEncoding`/
+  `buildSLHDSAPreHashMsg` — the shared M'-encoding tail, `buildMPrime
+  FromDigest`, no internal hashing) with PHM-length validation against
+  the hash's own digest length (loud `CKR_DATA_LEN_RANGE`, live-
+  confirmed, never silent). All 4 generic-mechanism case sites in
+  `SoftHSM_sign.cpp` (`AsymSignInit`/`AsymVerifyInit` × ML-DSA/SLH-DSA)
+  now correctly set `bAllowMultiPartOp = false`.
+- **Extra C++ finding, not in the original plan**: `applyPerMessageParam`
+  (the `C_SignMessageNext`/`C_VerifyMessage` per-message-param merge
+  path) preserves `preHash`/`hashAlg` from the *Init-time session state
+  onto each per-message merge — needed the identical treatment for
+  `phmInput`, or a per-message param on a `CKM_HASH_ML_DSA`-initialized
+  session would have silently lost `phmInput` and fallen through to
+  plain unhashed signing. Fixed in both the ML-DSA and SLH-DSA branches.
+- **Rust fix, as planned**: `remap_generic_hash_mech` no longer
+  overwrites `mech_type` for the generic mechanisms — it stays
+  `CKM_HASH_ML_DSA`/`CKM_HASH_SLH_DSA` downstream. New
+  `try_hash_sign_with_rng_phm`/`hash_verify_phm` (+ `try_hash_sign_phm`
+  OsRng convenience, mirroring `try_hash_sign`'s own shape) added to
+  BOTH `fips204-patched` and `fips205-patched`'s `Signer`/`Verifier`
+  traits, implemented per parameter-set macro instantiation, reusing
+  `sign_internal`/`verify_internal`'s (ML-DSA) or the `mp: &[&[u8]]`
+  parts-array (SLH-DSA) existing `oid`/`phm`-direct machinery — a new
+  `oid_and_len(ph)` in each crate's hashing module gives the OID and
+  expected length without hashing. `handlers.rs` grew
+  `sign_ml_dsa_phm`/`verify_ml_dsa_phm`/`sign_slh_dsa_phm`/
+  `verify_slh_dsa_phm` (+ `ph_from_digest_mech_{ml,slh}_dsa`, mapping
+  the caller's raw `hash` field to `Ph` — distinct from `get_{ml,slh}
+  _dsa_ph`, which maps the ten already-specific mechanisms instead).
+- **Extra Rust finding, not in the original plan**: once `mech_type`
+  stays generic, `C_Sign`/`C_Verify` can no longer re-derive `Ph` from
+  it alone at signing time (unlike the hash-specific mechanisms, whose
+  own mechanism constant IS the digest choice) — the caller's `hash`
+  field has to survive from `*Init` to `C_Sign`/`C_Verify` some other
+  way. New `GENERIC_HASH_STATE` (`state.rs`) side-table, session-keyed,
+  written by `remap_generic_hash_mech` and read by `C_Sign_impl`/the
+  verify twin — kept separate from `SIGN_STATE`/`VERIFY_STATE`'s own
+  4-tuple for the SAME reason `SIGN_RECOVER_STATE` already is (see its
+  own comment): avoids touching every existing tuple-shape call site.
+  Deliberately NOT removed in lockstep with `SIGN_STATE`/`VERIFY_STATE`
+  (a documented, bounded simplification — always freshly overwritten
+  whenever the generic mechanism is used again, only ever consulted
+  when the CURRENT mech_type is confirmed generic, so a stale entry is
+  never read).
+- **Two pre-existing tests were themselves built on the wrong
+  assumption R37 fixes, and started failing once the bug they
+  (accidentally) depended on was gone**: `p11_v32_compliance_test.cpp`'s
+  `PreHash65_Generic_HASH_ML_DSA_explicitSHA256`/`PreHashSLH_Generic_
+  HASH_SLH_DSA_explicitSHA256`, and the Rust unit test
+  `generic_hash_ml_dsa_sign_verify_round_trip`, all fed the GENERIC
+  mechanism a raw message (matching this plan's own original, now-
+  corrected, misunderstanding) — their own prior green result was
+  evidence of the double-hash bug, not of correctness. Both fixed to
+  feed a genuine SHA-256 PHM; the Rust test's own cross-mechanism
+  interop assertion now correctly verifies the generic-mechanism
+  signature under the SPECIFIC mechanism fed the ORIGINAL message
+  (the PHM=H(M) equivalence oracle), not the old remap-era assumption.
+- ACVP KAT cross-check (this section's own proof-plan item) not run as
+  a separate step: the M'-encoding math the fix reuses
+  (`buildMPrimeFromDigest`/`buildSLHDSAMPrimeFromDigest`, Rust's
+  `sign_internal`/`verify_internal` oid/phm branch) is the IDENTICAL
+  code the ten hash-specific mechanisms already exercise and
+  `native::prehash_kat*` already KAT-tests — the conformant-oracle
+  cross-check above (generic-mechanism signature verifies under the
+  hash-specific mechanism's own verify) is what's specific to THIS fix,
+  and is covered.
+
+Full regression: harness 84/84 (unchanged — the generic mechanism isn't
+provider-reachable, no new provider-level case), **C++ CTest 8/8**
+(after fixing the compliance test's own wrong assumption above — first
+run showed 2 genuine new failures, root-caused to the test, not the
+fix), **Rust `cargo test --release` 410/410** (after fixing the unit
+test's own identical wrong assumption — first run showed 1 failure,
+same root cause).
 
 ---
 

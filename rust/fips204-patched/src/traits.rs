@@ -267,6 +267,35 @@ pub trait Signer {
     ) -> Result<Self::Signature, &'static str>;
 
 
+    /// Remediation R37 (phase 8), PKCS#11 v3.2 SS6.67.6: sign an
+    /// ALREADY-HASHED PHM directly, without hashing it again. `phm` must
+    /// be exactly the digest length `ph` produces -- a caller who has
+    /// already computed `PH(M)` (e.g. a bare `CKM_HASH_ML_DSA` mechanism)
+    /// uses this instead of [`Signer::try_hash_sign_with_rng`], which
+    /// expects the raw, unhashed message and hashes it internally.
+    ///
+    /// # Errors
+    /// Returns an error when the random number generator fails, `ctx` is
+    /// longer than 255 bytes, or `phm`'s length does not match `ph`.
+    fn try_hash_sign_with_rng_phm(
+        &self, rng: &mut impl CryptoRngCore, phm: &[u8], ctx: &[u8], ph: &Ph,
+    ) -> Result<Self::Signature, &'static str>;
+
+
+    /// [`Signer::try_hash_sign_with_rng_phm`] using the **default OS**
+    /// random number generator -- the PHM-input twin of
+    /// [`Signer::try_hash_sign`].
+    ///
+    /// # Errors
+    /// See [`Signer::try_hash_sign_with_rng_phm`].
+    #[cfg(feature = "default-rng")]
+    fn try_hash_sign_phm(
+        &self, phm: &[u8], ctx: &[u8], ph: &Ph,
+    ) -> Result<Self::Signature, &'static str> {
+        self.try_hash_sign_with_rng_phm(&mut OsRng, phm, ctx, ph)
+    }
+
+
     /// Attempt to sign the hash of the given message, returning a digital signature on success,
     /// something went wrong. This function utilizes the **provided seed to support (less common)
     /// deterministic signatures**. This function operates in constant-time relative to secret data
@@ -359,6 +388,13 @@ pub trait Verifier {
     /// Verifies a digital signature on the hash of a message with respect to a `PublicKey`. As this
     /// function operates on purely public data, it need/does not provide constant-time assurances.
     fn hash_verify(&self, message: &[u8], sig: &Self::Signature, ctx: &[u8], ph: &Ph) -> bool;
+
+
+    /// Remediation R37 (phase 8), PKCS#11 v3.2 SS6.67.6 counterpart to
+    /// [`Signer::try_hash_sign_with_rng_phm`]: verify against an
+    /// ALREADY-HASHED PHM directly, without hashing it again. Returns
+    /// `false` (not a panic) for a wrong-length `phm`.
+    fn hash_verify_phm(&self, phm: &[u8], sig: &Self::Signature, ctx: &[u8], ph: &Ph) -> bool;
 }
 
 

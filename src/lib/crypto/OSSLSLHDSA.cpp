@@ -142,6 +142,39 @@ void OSSLSLHDSA_cleanupPreHashCache()
 
 // Build HashSLH-DSA message: M' = 0x01 || len(ctx) || ctx || OID || PH(M)
 // per FIPS 205 §10.1
+// See OSSLMLDSA.cpp's identical buildMPrimeFromDigest for the full
+// rationale (remediation R37, phase 8) -- split out of
+// buildSLHDSAPreHashMsg so the bare generic CKM_HASH_SLH_DSA (PKCS#11
+// v3.2 §6.69.6) can share the encoding step without re-hashing an
+// already-hashed PHM.
+static bool buildSLHDSAMPrimeFromDigest(const unsigned char* digest, size_t digestLen,
+                                        const SLHDSAPreHashInfo* info,
+                                        const SLHDSA_SIGN_PARAMS* params,
+                                        ByteString& encoded)
+{
+	// Overflow guard: contextLen <= 255, algIdDerLen <= 15, digestLen <= 64 (max 336).
+	size_t totalLen = 1 + 1;
+	if (params->contextLen > SIZE_MAX - totalLen) return false;
+	totalLen += params->contextLen;
+	if (info->algIdDerLen > SIZE_MAX - totalLen) return false;
+	totalLen += info->algIdDerLen;
+	if (digestLen > SIZE_MAX - totalLen) return false;
+	totalLen += digestLen;
+	encoded.resize(totalLen);
+	size_t off = 0;
+	encoded[off++] = 0x01;  // pre-hash domain separator (FIPS 205 §10.1)
+	encoded[off++] = (unsigned char)params->contextLen;
+	if (params->contextLen > 0)
+	{
+		memcpy(&encoded[off], params->context, params->contextLen);
+		off += params->contextLen;
+	}
+	memcpy(&encoded[off], info->algIdDer, info->algIdDerLen);
+	off += info->algIdDerLen;
+	memcpy(&encoded[off], digest, digestLen);
+	return true;
+}
+
 static bool buildSLHDSAPreHashMsg(const ByteString& message,
                                    const SLHDSA_SIGN_PARAMS* params,
                                    ByteString& encoded)
@@ -197,30 +230,31 @@ static bool buildSLHDSAPreHashMsg(const ByteString& message,
 		}
 	}
 
-	// Build M' = 0x01 || len(ctx) || ctx || AlgId_DER || H(M)
-	// Overflow guard: contextLen <= 255, algIdDerLen <= 15, digestLen <= 64 (max 336).
-	size_t totalLen = 1 + 1;
-	if (params->contextLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += params->contextLen;
-	if (info->algIdDerLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += info->algIdDerLen;
-	if (info->digestLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += info->digestLen;
-	encoded.resize(totalLen);
-	size_t off = 0;
-	encoded[off++] = 0x01;  // pre-hash domain separator (FIPS 205 §10.1)
-	encoded[off++] = (unsigned char)params->contextLen;
-	if (params->contextLen > 0)
-	{
-		memcpy(&encoded[off], params->context, params->contextLen);
-		off += params->contextLen;
-	}
-	memcpy(&encoded[off], info->algIdDer, info->algIdDerLen);
-	off += info->algIdDerLen;
-	memcpy(&encoded[off], digest, info->digestLen);
+	bool ok = buildSLHDSAMPrimeFromDigest(digest, info->digestLen, info, params, encoded);
 	OPENSSL_cleanse(digest, sizeof(digest));
+	return ok;
+}
 
-	return true;
+// PKCS#11 v3.2 §6.69.6, bare generic CKM_HASH_SLH_DSA: dataToSign IS the
+// PHM (already hashed by the caller) -- build M' directly, no internal
+// hashing. Loudly rejects a wrong-length PHM.
+static bool buildSLHDSAMPrimeFromPHM(const ByteString& phm,
+                                     const SLHDSA_SIGN_PARAMS* params,
+                                     ByteString& encoded)
+{
+	const SLHDSAPreHashInfo* info = getSLHDSAPreHashInfo(params->hashAlg);
+	if (!info)
+	{
+		ERROR_MSG("Unknown hash algorithm for generic HashSLH-DSA");
+		return false;
+	}
+	if (phm.size() != info->digestLen)
+	{
+		ERROR_MSG("CKM_HASH_SLH_DSA: PHM length %zu does not match %s digest "
+		         "length %zu", phm.size(), info->evpName, info->digestLen);
+		return false;
+	}
+	return buildSLHDSAMPrimeFromDigest(phm.const_byte_str(), phm.size(), info, params, encoded);
 }
 
 // Check if mechanism is a supported SLH-DSA family mechanism
@@ -304,6 +338,15 @@ bool OSSLSLHDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	if (slhdsaParams && slhdsaParams->preHash)
 	{
 		if (!buildSLHDSAPreHashMsg(dataToSign, slhdsaParams, preHashMsg))
+			return false;
+		signData    = preHashMsg.const_byte_str();
+		signDataLen = preHashMsg.size();
+	}
+	else if (slhdsaParams && slhdsaParams->phmInput)
+	{
+		// Remediation R37 (phase 8): bare generic CKM_HASH_SLH_DSA --
+		// dataToSign IS the PHM already, never hash it again.
+		if (!buildSLHDSAMPrimeFromPHM(dataToSign, slhdsaParams, preHashMsg))
 			return false;
 		signData    = preHashMsg.const_byte_str();
 		signDataLen = preHashMsg.size();
@@ -429,6 +472,14 @@ bool OSSLSLHDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	if (slhdsaParams && slhdsaParams->preHash)
 	{
 		if (!buildSLHDSAPreHashMsg(originalData, slhdsaParams, preHashMsg))
+			return false;
+		verifyData    = preHashMsg.const_byte_str();
+		verifyDataLen = preHashMsg.size();
+	}
+	else if (slhdsaParams && slhdsaParams->phmInput)
+	{
+		// Remediation R37 (phase 8): see sign()'s identical comment.
+		if (!buildSLHDSAMPrimeFromPHM(originalData, slhdsaParams, preHashMsg))
 			return false;
 		verifyData    = preHashMsg.const_byte_str();
 		verifyDataLen = preHashMsg.size();

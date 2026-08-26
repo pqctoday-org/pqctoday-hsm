@@ -342,6 +342,29 @@ macro_rules! functionality {
             }
 
 
+            // Documented in traits.rs (remediation R37, phase 8). Same as
+            // try_hash_sign_with_rng above, except `phm` is used AS-IS
+            // instead of calling hashing::hash_message on a raw message --
+            // the OID still needs computing (hashing::oid_and_len, which
+            // ALSO gives the expected PHM length for validation).
+            fn try_hash_sign_with_rng_phm(
+                &self, rng: &mut impl CryptoRngCore, phm: &[u8], ctx: &[u8], ph: &types::Ph,
+            ) -> Result<Self::Signature, &'static str> {
+                helpers::ensure!(ctx.len() < 256, "HashML-DSA.Sign: ctx too long");
+                let (oid, expected_len) = hashing::oid_and_len(ph);
+                helpers::ensure!(phm.len() == expected_len, "HashML-DSA.Sign: PHM length mismatch");
+
+                let mut rnd = [0u8; 32];
+                rng.try_fill_bytes(&mut rnd).map_err(|_| "HashML-DSA.Sign: random number generator failed")?;
+
+                let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
+                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, &[], ctx, &oid, phm, rnd, false, None
+                );
+
+                Ok(sig)
+            }
+
+
             // Documented in traits.rs
             #[allow(clippy::cast_lossless)]
             fn get_public_key(&self) -> Self::PublicKey {
@@ -407,6 +430,23 @@ macro_rules! functionality {
                 // 19: return ML-DSA.Verify_internal(𝑝𝑘, 𝑀′ , 𝜎)
                 ml_dsa::verify_internal::<CTEST, K, L, LAMBDA_DIV4, PK_LEN, SIG_LEN, W1_LEN>(
                     BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, &message, &sig, ctx, &oid, &phm[0..phm_len], false, None
+                )
+            }
+
+
+            // Documented in traits.rs (remediation R37, phase 8). Same as
+            // hash_verify above, except `phm` is used AS-IS -- see
+            // try_hash_sign_with_rng_phm's identical comment.
+            fn hash_verify_phm(&self, phm: &[u8], sig: &Self::Signature, ctx: &[u8], ph: &types::Ph) -> bool {
+                if ctx.len() > 255 {
+                    return false;
+                };
+                let (oid, expected_len) = hashing::oid_and_len(ph);
+                if phm.len() != expected_len {
+                    return false;
+                }
+                ml_dsa::verify_internal::<CTEST, K, L, LAMBDA_DIV4, PK_LEN, SIG_LEN, W1_LEN>(
+                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, &[], &sig, ctx, &oid, phm, false, None
                 )
             }
         }

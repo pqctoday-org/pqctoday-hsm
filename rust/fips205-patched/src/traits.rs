@@ -366,6 +366,35 @@ pub trait Signer {
     ) -> Result<Self::Signature, &'static str>;
 
 
+    /// Remediation R37 (phase 8), PKCS#11 v3.2 SS6.69.6: sign an
+    /// ALREADY-HASHED PHM directly, without hashing it again. `phm` must
+    /// be exactly the digest length `ph` produces -- a caller who has
+    /// already computed `PH(M)` (e.g. a bare `CKM_HASH_SLH_DSA` mechanism)
+    /// uses this instead of [`Signer::try_hash_sign_with_rng`], which
+    /// expects the raw, unhashed message and hashes it internally.
+    ///
+    /// # Errors
+    /// Returns an error when `ctx` is longer than 255 bytes or `phm`'s
+    /// length does not match `ph`.
+    fn try_hash_sign_with_rng_phm(
+        &self, rng: &mut impl CryptoRngCore, phm: &[u8], ctx: &[u8], ph: &Ph, hedged: bool,
+    ) -> Result<Self::Signature, &'static str>;
+
+
+    /// [`Signer::try_hash_sign_with_rng_phm`] using the **default OS**
+    /// random number generator -- the PHM-input twin of
+    /// [`Signer::try_hash_sign`].
+    ///
+    /// # Errors
+    /// See [`Signer::try_hash_sign_with_rng_phm`].
+    #[cfg(feature = "default-rng")]
+    fn try_hash_sign_phm(
+        &self, phm: &[u8], ctx: &[u8], ph: &Ph, hedged: bool,
+    ) -> Result<Self::Signature, &'static str> {
+        self.try_hash_sign_with_rng_phm(&mut OsRng, phm, ctx, ph, hedged)
+    }
+
+
     /// Retrieves the public key associated with this private/secret key
     /// # Examples
     /// ```rust
@@ -487,6 +516,15 @@ pub trait Verifier {
     /// ```
     #[must_use]
     fn hash_verify(&self, message: &[u8], signature: &Self::Signature, ctx: &[u8], ph: &Ph)
+        -> bool;
+
+
+    /// Remediation R37 (phase 8), PKCS#11 v3.2 SS6.69.6 counterpart to
+    /// [`Signer::try_hash_sign_with_rng_phm`]: verify against an
+    /// ALREADY-HASHED PHM directly, without hashing it again. Returns
+    /// `false` (not a panic) for a wrong-length `phm`.
+    #[must_use]
+    fn hash_verify_phm(&self, phm: &[u8], signature: &Self::Signature, ctx: &[u8], ph: &Ph)
         -> bool;
 
 

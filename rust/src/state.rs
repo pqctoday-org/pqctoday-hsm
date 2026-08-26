@@ -81,6 +81,23 @@ lazy_static! {
     /// are mutually exclusive per session (checked at *Init time) but have
     /// different single-part-only lifecycle rules, and this avoids touching
     /// every existing SIGN_STATE/VERIFY_STATE call site's tuple shape.
+    /// Remediation R37 (phase 8): the caller's `CK_HASH_SIGN_ADDITIONAL_
+    /// CONTEXT.hash` field, for sessions whose SIGN_STATE/VERIFY_STATE
+    /// mech_type is the bare generic `CKM_HASH_ML_DSA`/`CKM_HASH_SLH_DSA`
+    /// (§6.67.6/§6.69.6) -- unlike the ten hash-SPECIFIC mechanisms, the
+    /// generic one can't re-derive its hash algorithm from mech_type
+    /// alone at C_Sign/C_Verify time, since mech_type stays the generic
+    /// constant (no longer remapped onto a concrete mechanism -- see
+    /// remap_generic_hash_mech's own R37 note in ffi.rs). Kept separate
+    /// from SIGN_STATE/VERIFY_STATE's 4-tuple for the SAME reason
+    /// SIGN_RECOVER_STATE is (see its own comment) -- only written at
+    /// *Init time, only ever consulted when SIGN_STATE/VERIFY_STATE's
+    /// OWN current mech_type is freshly confirmed generic, so a stale
+    /// leftover entry from an earlier session use is never read; not
+    /// removed in lockstep with SIGN_STATE/VERIFY_STATE (a deliberate,
+    /// bounded simplification -- at most one u32 per session that has
+    /// ever used the generic mechanism, not a per-operation leak).
+    pub static ref GENERIC_HASH_STATE: GlobalState<HashMap<u32, u32>> = GlobalState::new(HashMap::new());
     pub static ref SIGN_RECOVER_STATE: GlobalState<HashMap<u32, (u32, u32)>> = GlobalState::new(HashMap::new());
     pub static ref VERIFY_RECOVER_STATE: GlobalState<HashMap<u32, (u32, u32)>> = GlobalState::new(HashMap::new());
     pub static ref VERIFY_SIG_STATE: GlobalState<HashMap<u32, VerifySigCtx>> = GlobalState::new(HashMap::new());

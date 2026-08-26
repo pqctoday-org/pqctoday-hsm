@@ -75,7 +75,7 @@ const LEN2: u32 = 3;
 // This common functionality is injected into each parameter set module
 macro_rules! functionality {
     () => {
-        use crate::hashers::hash_message;
+        use crate::hashers::{hash_message, oid_and_len};
         use crate::traits::{KeyGen, SerDes, Signer, Verifier};
         use crate::types::{Ph, SlhDsaSig, SlhPrivateKey, SlhPublicKey};
         use rand_core::CryptoRngCore;
@@ -245,6 +245,33 @@ macro_rules! functionality {
                 sig.map(|s| s.serialize())
             }
 
+            // Documented in traits.rs (remediation R37, phase 8). Same as
+            // try_hash_sign_with_rng above, except `phm` is used AS-IS
+            // instead of calling hash_message on a raw message.
+            fn try_hash_sign_with_rng_phm(
+                &self, rng: &mut impl CryptoRngCore, phm: &[u8], ctx: &[u8], ph: &Ph,
+                hedged: bool,
+            ) -> Result<Self::Signature, &'static str> {
+                if ctx.len() > 255 {
+                    return Err("ctx must be less than 256 bytes");
+                };
+                let (oid, expected_len) = oid_and_len(ph);
+                if phm.len() != expected_len {
+                    return Err("PHM length does not match ph");
+                }
+                let mp: &[&[u8]] = &[
+                    &[1u8],
+                    &[ctx.len().to_le_bytes()[0]],
+                    ctx,
+                    &oid,
+                    phm,
+                ];
+                let sig = crate::slh::slh_sign_with_rng::<A, D, H, HP, K, LEN, M, N>(
+                    rng, &HASHERS, &mp, &self.0, hedged,
+                );
+                sig.map(|s| s.serialize())
+            }
+
             // Documented in traits.rs
             fn get_public_key(&self) -> Self::PublicKey {
                 PublicKey(SlhPublicKey{pk_seed: self.0.pk_seed, pk_root: self.0.pk_root})
@@ -306,6 +333,32 @@ macro_rules! functionality {
                     ctx,
                     &oid,
                     &phm[0..phm_len],
+                ];
+                let res = crate::slh::slh_verify::<A, D, H, HP, K, LEN, M, N>(
+                    &HASHERS, &mp, &sig, &self.0,
+                );
+                res
+            }
+
+            // Documented in traits.rs (remediation R37, phase 8). Same as
+            // hash_verify above, except `phm` is used AS-IS.
+            fn hash_verify_phm(
+                &self, phm: &[u8], sig_bytes: &Self::Signature, ctx: &[u8], ph: &Ph,
+            ) -> bool {
+                if ctx.len() > 255 {
+                    return false;
+                };
+                let (oid, expected_len) = oid_and_len(ph);
+                if phm.len() != expected_len {
+                    return false;
+                }
+                let sig = SlhDsaSig::<A, D, HP, K, LEN, N>::deserialize(sig_bytes);
+                let mp: &[&[u8]] = &[
+                    &[1u8],
+                    &[ctx.len().to_le_bytes()[0]],
+                    ctx,
+                    &oid,
+                    phm,
                 ];
                 let res = crate::slh::slh_verify::<A, D, H, HP, K, LEN, M, N>(
                     &HASHERS, &mp, &sig, &self.0,

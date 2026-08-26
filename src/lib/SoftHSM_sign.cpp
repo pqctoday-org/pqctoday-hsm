@@ -363,7 +363,17 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 			if (ctx->pContext == NULL_PTR) return CKR_ARGUMENTS_BAD;
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
-		out.preHash = true;
+		// Remediation R37 (phase 8): this branch (CK_HASH_SIGN_ADDITIONAL_
+		// CONTEXT) fires ONLY for the bare generic CKM_HASH_ML_DSA
+		// (isHashMech, above) -- §6.67.6, caller supplies an already-hashed
+		// PHM. phmInput, NOT preHash: preHash means "hash the message on
+		// token" (§6.67.7's ten CKM_HASH_ML_DSA_<hash> mechanisms, which
+		// reach this function via the OTHER branch and set preHash=true
+		// themselves, in the HASH_MLDSA_CASE macro). Was wrongly preHash=
+		// true here before R37 -- caused OSSLMLDSA::sign()/verify() to hash
+		// the caller's PHM a second time (live-confirmed via
+		// generic-hash-mldsa-probe before this fix).
+		out.phmInput = true;
 	}
 	return CKR_OK;
 }
@@ -453,7 +463,10 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 			if (ctx->pContext == NULL_PTR) return CKR_ARGUMENTS_BAD;
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
-		out.preHash = true;
+		// Remediation R37 (phase 8): see parseMLDSASignContext's identical
+		// note -- this branch fires only for the bare generic
+		// CKM_HASH_SLH_DSA (§6.69.6, PHM input); phmInput, not preHash.
+		out.phmInput = true;
 		// hash algorithm is set by the caller after this function returns
 	}
 	return CKR_OK;
@@ -908,7 +921,13 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				return CKR_ARGUMENTS_BAD;
 			}
 			mechanism = AsymMech::HASH_MLDSA;
-			bAllowMultiPartOp = true;
+			// Remediation R37 (phase 8): genuinely single-part -- the
+			// caller's data argument IS the complete PHM, there is no
+			// message to stream, and (unlike R34's own first, wrong
+			// attempt at this) this mechanism is unreachable via OpenSSL's
+			// own Update/Final-driving EVP_DigestSign machinery at all
+			// (the provider never routes to the bare generic mechanism).
+			bAllowMultiPartOp = false;
 			isMLDSA = true;
 			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
 			if (rv2 != CKR_OK) return rv2;
@@ -1012,7 +1031,9 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				return CKR_ARGUMENTS_BAD;
 			}
 			mechanism = AsymMech::HASH_SLHDSA;
-			bAllowMultiPartOp = true;
+			// Remediation R37 (phase 8): see the CKM_HASH_ML_DSA case's
+			// identical comment above -- genuinely single-part.
+			bAllowMultiPartOp = false;
 			isSLHDSA = true;
 			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam);
 			if (rv2 != CKR_OK) return rv2;
@@ -2562,7 +2583,9 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				return CKR_ARGUMENTS_BAD;
 			}
 			mechanism = AsymMech::HASH_MLDSA;
-			bAllowMultiPartOp = true;
+			// Remediation R37 (phase 8): genuinely single-part -- see the
+			// AsymSignInit case's identical comment.
+			bAllowMultiPartOp = false;
 			isMLDSA = true;
 			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
 			if (rv2 != CKR_OK) return rv2;
@@ -2665,7 +2688,9 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				return CKR_ARGUMENTS_BAD;
 			}
 			mechanism = AsymMech::HASH_SLHDSA;
-			bAllowMultiPartOp = true;
+			// Remediation R37 (phase 8): see the CKM_HASH_ML_DSA case's
+			// identical comment above -- genuinely single-part.
+			bAllowMultiPartOp = false;
 			isSLHDSA = true;
 			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam);
 			if (rv2 != CKR_OK) return rv2;
@@ -3353,11 +3378,19 @@ static CK_RV applyPerMessageParam(Session* session,
 		CK_RV rv2 = parseMLDSASignContext(&fakeMech, mldsaParam);
 		if (rv2 != CKR_OK) return rv2;
 
-		// Preserve preHash / hashAlg set by the init mechanism
+		// Preserve preHash / phmInput / hashAlg set by the init mechanism.
+		// phmInput (remediation R37, phase 8) needs the same treatment as
+		// preHash here: fakeMech.mechanism is hardcoded to CKM_ML_DSA above,
+		// so parseMLDSASignContext's own isHashMech branch (the only place
+		// that sets phmInput) never fires for this call -- without this
+		// line, a per-message param on a CKM_HASH_ML_DSA-initialized
+		// session would silently lose phmInput and fall through to plain
+		// (unhashed-message) signing.
 		if (existing && existingLen == sizeof(MLDSA_SIGN_PARAMS))
 		{
 			MLDSA_SIGN_PARAMS* initParams = (MLDSA_SIGN_PARAMS*)existing;
 			mldsaParam.preHash = initParams->preHash;
+			mldsaParam.phmInput = initParams->phmInput;
 			mldsaParam.hashAlg = initParams->hashAlg;
 		}
 		if (!session->setParameters(&mldsaParam, sizeof(mldsaParam)))
@@ -3376,11 +3409,13 @@ static CK_RV applyPerMessageParam(Session* session,
 		CK_RV rv2 = parseSLHDSASignContext(&fakeMech, slhdsaParam);
 		if (rv2 != CKR_OK) return rv2;
 
-		// Preserve preHash / hashAlg set by the init mechanism
+		// Preserve preHash / phmInput / hashAlg -- see the ML-DSA branch's
+		// identical comment above (remediation R37, phase 8).
 		if (existing && existingLen == sizeof(SLHDSA_SIGN_PARAMS))
 		{
 			SLHDSA_SIGN_PARAMS* initParams = (SLHDSA_SIGN_PARAMS*)existing;
 			slhdsaParam.preHash = initParams->preHash;
+			slhdsaParam.phmInput = initParams->phmInput;
 			slhdsaParam.hashAlg = initParams->hashAlg;
 		}
 		if (!session->setParameters(&slhdsaParam, sizeof(slhdsaParam)))
