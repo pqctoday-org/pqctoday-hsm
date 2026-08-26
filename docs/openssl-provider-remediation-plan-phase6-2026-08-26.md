@@ -319,6 +319,44 @@ expand-label semantics regardless of what it asked for.
    and close the item as documented-unexplained. Do not let it absorb
    a second session — precedent: ALG-6/R17.
 
+**Execution update (2026-08-26):** root-caused within the first probe
+pass — there was never a mode-routing bug. `P11PROV_debug` tracing
+added at `p11prov_tls13_kdf_derive_skey`'s mode switch (kdf.c:676)
+showed `hkdfctx->mode` correctly read `EXTRACT_ONLY` and the switch
+correctly took the `EXTRACT_ONLY` case — hypothesis (b), a split-brain
+ctx bug, is dead. But the live trace then showed
+`p11prov_tls13_expand_label` being called anyway, immediately followed
+by `EVP_KDF_derive_SKEY` returning NULL. Reading
+`p11prov_tls13_derive_secret()` (the `EXTRACT_ONLY` implementation)
+explains why: TLS 1.3's own Derive-Secret construction (RFC 8446 §7.1)
+is *itself* built from HKDF-Expand-Label — the function legitimately
+calls `p11prov_tls13_expand_label()` internally to turn the caller's
+salt into a derivation key, regardless of which top-level mode the
+caller requested. R24's original read of "reached
+`p11prov_tls13_expand_label`, the EXPAND_ONLY branch" (line 292-293 of
+this item's own grounding, above) mistook this legitimate internal
+sub-call for evidence of the wrong top-level branch running — the two
+are unrelated. Hypothesis (a) from the work list was the real one, but
+not quite as framed: not the probe's params array ordering/lifetime,
+but a genuine **missing** param. `p11prov_tls13_expand_label()`
+unconditionally requires a non-empty prefix+label pair (part of the
+RFC 8446 `HkdfLabel` wire format) and `skey-flow-probe.c`'s own
+TLS13-KDF params never supplied `OSSL_KDF_PARAM_PREFIX`/
+`OSSL_KDF_PARAM_LABEL` — its own header comment explicitly (and,
+per this finding, wrongly) claimed `EXTRACT_ONLY` didn't need them.
+**No provider fix needed — the provider's rejection of a NULL
+prefix/label was correct behavior.** Fixed the probe instead: added
+TLS 1.3's own real "tls13 " prefix and "derived" label (the exact pair
+used between the Early and Handshake Secret stages of the actual key
+schedule), which took check 3 from "derive_SKEY returns NULL" all the
+way to a full derive → token-resident-key → `EVP_MAC_init_SKEY` chain,
+genuinely mode-verified now rather than existence-only. F36-3's row
+gets its own correction below (the item was never really a routing
+bug, so there is nothing to leave open). Regression: harness 76/76,
+C++ CTest 8/8; no `rust/` source touched, `cargo test` not re-run.
+Stayed well inside the timebox — root cause found in the first
+instrumented run, no second session needed.
+
 ---
 
 ### R32 — AES-CCM / OFB / CFB* disposition — effort S

@@ -153,7 +153,7 @@ static int check_derive_skey_chain(const char *kdfname, int full_crosscheck)
     EVP_SKEY *derived = NULL;
     EVP_MAC *mac = NULL;
     EVP_MAC_CTX *mctx = NULL;
-    OSSL_PARAM kparams[4];
+    OSSL_PARAM kparams[6];
     OSSL_PARAM mparams[2];
     unsigned char token_mac[EVP_MAX_MD_SIZE];
     unsigned char sw_mac[EVP_MAX_MD_SIZE];
@@ -185,12 +185,28 @@ static int check_derive_skey_chain(const char *kdfname, int full_crosscheck)
         goto done;
     }
 
-    /* TLS13-KDF's own derive_skey rejects the default mode (EXTRACT_
-     * AND_EXPAND is HKDF-only there) — EXTRACT_ONLY takes just a salt,
-     * the shape this probe already has on hand, and is enough to prove
-     * opacity without needing a full HKDF-Expand-Label prefix/label/data
-     * triple (kdf.c: p11prov_tls13_kdf_derive_skey's mode switch). */
+    /* R31 correction (2026-08-26): the comment this replaced claimed
+     * EXTRACT_ONLY needed just a salt, "without needing a full
+     * HKDF-Expand-Label prefix/label/data triple" — that was the actual
+     * source of the "TLS13-KDF derive_SKEY returned NULL" anomaly this
+     * probe's own header flagged as unexplained. It's wrong:
+     * p11prov_tls13_derive_secret() (kdf.c) — EXTRACT_ONLY's own
+     * implementation — internally converts the caller's salt into a
+     * derivation key via a p11prov_tls13_expand_label() sub-call (TLS
+     * 1.3's Derive-Secret is itself built from HKDF-Expand-Label, RFC
+     * 8446 §7.1), which unconditionally requires prefix+label and
+     * rejects a NULL/empty pair. That internal call is legitimate
+     * behavior, not a mode-routing bug — the live debug trace "reaching
+     * p11prov_tls13_expand_label" while in the EXTRACT_ONLY branch (which
+     * a prior investigation read as evidence of the WRONG branch running)
+     * is exactly this expected sub-call. Supply a real prefix/label pair
+     * (TLS 1.3's own "tls13 " prefix and "derived" label, the exact pair
+     * used between the Early and Handshake Secret stages of the real key
+     * schedule) so this check actually exercises and verifies the derive,
+     * not just its existence. */
     if (strcmp(kdfname, "TLS13-KDF") == 0) {
+        static const unsigned char tls13_prefix[] = "tls13 ";
+        static const unsigned char tls13_label[] = "derived";
         kparams[0] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST,
                                                       "SHA256", 0);
         kparams[1] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE,
@@ -198,7 +214,13 @@ static int check_derive_skey_chain(const char *kdfname, int full_crosscheck)
         kparams[2] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT,
                                                        (void *)SALT,
                                                        sizeof(SALT));
-        kparams[3] = OSSL_PARAM_construct_end();
+        kparams[3] = OSSL_PARAM_construct_octet_string(
+            OSSL_KDF_PARAM_PREFIX, (void *)tls13_prefix,
+            sizeof(tls13_prefix) - 1);
+        kparams[4] = OSSL_PARAM_construct_octet_string(
+            OSSL_KDF_PARAM_LABEL, (void *)tls13_label,
+            sizeof(tls13_label) - 1);
+        kparams[5] = OSSL_PARAM_construct_end();
     } else {
         kparams[0] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST,
                                                       "SHA256", 0);
