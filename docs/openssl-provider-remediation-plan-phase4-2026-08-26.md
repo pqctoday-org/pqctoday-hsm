@@ -1,5 +1,11 @@
 # OpenSSL provider remediation plan, phase 4 (2026-08-26) — R7+R8+R9+R10(PBKDF2)+R18+R19+R20+R21 EXECUTED IN FULL (R9's Rust-arm multi-process sub-goal investigated, blocked on a cross-engine default mismatch, not fixed — see its own entry); only R11/R10(SP800-108)/R20(ALG-7) still plan-only
 
+> **Successor:** the remaining items (SP800-108, CMAC/KMAC, ChaCha20,
+> EVP_SKEY probe, the R9 cross-engine carry-over, and R11's XMSS/XMSS-MT
+> as a parked sketch) are re-planned in detail as phase 5 —
+> `docs/openssl-provider-remediation-plan-phase5-2026-08-26.md` (R22–R27,
+> plan only, nothing executed).
+
 **Execution update (2026-08-26):** R7, R8, R18, R19, and R21.1 have
 been executed and landed — see
 `docs/openssl-provider-coverage-audit-2026-08-25.md` §6's "Phase 4,
