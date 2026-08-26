@@ -119,6 +119,8 @@ pub fn router(state: V32State) -> Router {
         .route("/v32/wrap-key-authenticated", post(wrap_key_authenticated))
         .route("/v32/unwrap-key-authenticated", post(unwrap_key_authenticated))
         .route("/v32/derive-key", post(derive_key))
+        .route("/v32/encapsulate-key", post(encapsulate_key))
+        .route("/v32/decapsulate-key", post(decapsulate_key))
         .with_state(state)
 }
 
@@ -520,6 +522,18 @@ async fn derive_key(Json(r): Json<DeriveKeyReq>) -> Json<ObjectHandleResp> {
         DeriveParamBytes::Raw(r.raw_parameter)
     };
     Json(v32::derive_key(r.session_handle, r.mechanism, params.as_slice(), r.base_key_handle, &template).into())
+}
+
+async fn encapsulate_key(Json(r): Json<EncapsulateKeyReq>) -> Json<EncapsulateKeyResp> {
+    let template = tmpl_parts(&r.template);
+    Json(v32::encapsulate_key(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle, &template).into())
+}
+async fn decapsulate_key(Json(r): Json<DecapsulateKeyReq>) -> Json<ObjectHandleResp> {
+    let template = tmpl_parts(&r.template);
+    Json(
+        v32::decapsulate_key(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.private_key_handle, &r.ciphertext, &template)
+            .into(),
+    )
 }
 
 // Small shared request shapes used by several routes.

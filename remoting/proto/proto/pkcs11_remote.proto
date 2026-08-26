@@ -529,6 +529,30 @@ service Pkcs11V32 {
 
   // ── derive (RW4) — the RW-P derive-family variants ──
   rpc C_DeriveKey(V32DeriveKeyRequest) returns (V32ObjectHandleResponse);
+
+  // ── KEM key-object form (RW5) — named apart from the legacy bytes-form
+  // Pkcs11Remote.Encapsulate, which stays frozen ──
+  rpc C_EncapsulateKey(V32EncapsulateKeyRequest) returns (V32EncapsulateKeyResponse);
+  rpc C_DecapsulateKey(V32DecapsulateKeyRequest) returns (V32ObjectHandleResponse);
+}
+
+message V32EncapsulateKeyRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 key_handle = 3; // the peer's public key
+  repeated V32AttributeIn template = 4; // for the derived shared-secret object
+}
+message V32EncapsulateKeyResponse {
+  uint32 ck_rv = 1;
+  bytes ciphertext = 2;
+  uint32 object_handle = 3; // the derived shared-secret key
+}
+message V32DecapsulateKeyRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 private_key_handle = 3;
+  bytes ciphertext = 4;
+  repeated V32AttributeIn template = 5;
 }
 
 message V32WrapKeyRequest {

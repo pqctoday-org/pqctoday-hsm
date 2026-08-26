@@ -60,9 +60,23 @@ const CKA_UNWRAP: u64 = 0x0000_0107;
 const CKK_GENERIC_SECRET: u64 = 0x0000_0010;
 const CKM_AES_KEY_WRAP: u64 = 0x0000_2109;
 const CKM_CONCATENATE_BASE_AND_KEY: u64 = 0x0000_0360;
-const CKM_SHA256_KEY_DERIVATION: u64 = 0x0000_0393;
 const CKM_HKDF_DERIVE_LOCAL: u64 = 0x0000_402a;
 const CKR_KEY_UNEXTRACTABLE: u32 = 0x0000_006A;
+// RW5 additions.
+const CKK_ML_KEM: u64 = 0x0000_0049;
+const CKM_ML_KEM: u64 = 0x0000_0017;
+const CKM_ML_KEM_KEY_PAIR_GEN: u64 = 0x0000_000F;
+const CKP_ML_KEM_768: u32 = 0x2;
+const CKA_ENCAPSULATE: u64 = 0x0000_0633;
+const CKA_DECAPSULATE: u64 = 0x0000_0634;
+const CKM_SLH_DSA_KEY_PAIR_GEN: u64 = 0x0000_002D;
+const CKM_SLH_DSA: u64 = 0x0000_002E;
+const CKP_SLH_DSA_SHA2_128S: u32 = 0x01;
+const CKP_SLH_DSA_SHAKE_128S: u32 = 0x02;
+const CKM_XMSS_KEY_PAIR_GEN: u64 = 0x0000_4034;
+const CKM_XMSS: u64 = 0x0000_4036;
+const CKM_HSS_KEY_PAIR_GEN: u64 = 0x0000_4032;
+const CKM_HSS: u64 = 0x0000_4033;
 
 /// A ulong-valued template entry at native `CK_ULONG` width (8 bytes LE on
 /// this LP64 server) — the RW1 finding, applied on the wire's input side.
@@ -1357,6 +1371,195 @@ fn v19_derive_key_raw_and_hkdf_parity() {
         assert_eq!(rh["ck_rv"].as_u64().unwrap() as u32, rv_hkdf_ctl);
         let rha = rest_post(&base, "get-attribute-value", json!({"session_handle": sh, "object_handle": rh["object_handle"], "attribute_types": [CKA_VALUE]})).await;
         assert_eq!(unb64(rha["attributes"][0]["value"].as_str().unwrap()), attrs_hkdf_ctl[0].value, "REST HKDF-derived key material must equal control");
+
+        v32::close_session(ks);
+    });
+}
+
+// ── V20: ML-KEM-768 encapsulate on gRPC, decapsulate on REST, against the
+// SAME shared keypair — a stronger assertion than a same-transport round
+// trip, and the plan's own stated positive-parity design for RW5 ────────
+
+#[test]
+fn v20_ml_kem_768_cross_transport_encapsulate_decapsulate() {
+    bootstrap_once();
+    rt().block_on(async {
+        let (_rv, ks) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        let public_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_PUBLIC_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_ML_KEM as usize).to_le_bytes().to_vec()),
+            (CKA_PARAMETER_SET, (CKP_ML_KEM_768 as usize).to_le_bytes().to_vec()),
+            (CKA_ENCAPSULATE, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let private_tmpl: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_PRIVATE_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_ML_KEM as usize).to_le_bytes().to_vec()),
+            (CKA_PARAMETER_SET, (CKP_ML_KEM_768 as usize).to_le_bytes().to_vec()),
+            (CKA_DECAPSULATE, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let (rv, pub_h, prv_h) =
+            v32::generate_key_pair(ks, CKM_ML_KEM_KEY_PAIR_GEN, &[], &public_tmpl, &private_tmpl);
+        assert_eq!(rv, 0);
+
+        // control: same-transport round trip, as the oracle for "this IS a
+        // real, functioning KEM pair" before crossing transports.
+        let (rv_ctl, ct_ctl, encap_ctl) = v32::encapsulate_key(ks, CKM_ML_KEM, &[], pub_h, &[]);
+        assert_eq!(rv_ctl, 0);
+        let (rv_dec_ctl, decap_ctl) = v32::decapsulate_key(ks, CKM_ML_KEM, &[], prv_h, &ct_ctl, &[]);
+        assert_eq!(rv_dec_ctl, 0);
+        let (rv, ss_encap_ctl) = v32::get_attribute_value(ks, encap_ctl, &[CKA_VALUE]);
+        assert_eq!(rv, 0);
+        let (rv, ss_decap_ctl) = v32::get_attribute_value(ks, decap_ctl, &[CKA_VALUE]);
+        assert_eq!(rv, 0);
+        assert_eq!(ss_encap_ctl[0].value, ss_decap_ctl[0].value, "control same-transport KEM must agree on the shared secret");
+
+        // gRPC encapsulates against the peer's public key...
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        let ge = g.c_encapsulate_key(proto::V32EncapsulateKeyRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_KEM, parameter: vec![] }),
+            key_handle: pub_h,
+            template: vec![],
+        }).await.unwrap().into_inner();
+        assert_eq!(ge.ck_rv, 0);
+        assert_ne!(ge.object_handle, 0);
+        let ge_attrs = g.c_get_attribute_value(proto::V32GetAttributeValueRequest {
+            session_handle: gs.session_handle, object_handle: ge.object_handle, attribute_types: vec![CKA_VALUE],
+        }).await.unwrap().into_inner();
+
+        // ...REST decapsulates the SAME ciphertext against the SAME
+        // private key, on a COMPLETELY DIFFERENT session/transport.
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        let rd = rest_post(&base, "decapsulate-key", json!({
+            "session_handle": sh,
+            "mechanism": {"mechanism": CKM_ML_KEM, "parameter": ""},
+            "private_key_handle": prv_h,
+            "ciphertext": b64(&ge.ciphertext),
+        })).await;
+        assert_eq!(rd["ck_rv"], 0);
+        let rd_obj = rd["object_handle"].clone();
+        assert_ne!(rd_obj.as_u64().unwrap(), 0);
+        let rd_attrs = rest_post(&base, "get-attribute-value", json!({"session_handle": sh, "object_handle": rd_obj, "attribute_types": [CKA_VALUE]})).await;
+
+        // NOTE: encapsulation is randomized (with_rng!), so gRPC's own
+        // encapsulate draws independent randomness from the control's —
+        // its ciphertext/secret are NOT expected to equal the control's.
+        // The real cross-transport correctness property is: whatever
+        // gRPC encapsulated, REST's decapsulate of THAT SAME ciphertext
+        // must recover THAT SAME shared secret.
+        assert_eq!(
+            ge_attrs.attributes[0].value,
+            unb64(rd_attrs["attributes"][0]["value"].as_str().unwrap()),
+            "gRPC's encapsulated shared secret must equal REST's decapsulated shared secret — cross-transport KEM correctness, not just wire plumbing"
+        );
+        assert_eq!(ge_attrs.attributes[0].value.len(), ss_encap_ctl[0].value.len(), "both must derive a shared secret of the same real length");
+
+        v32::close_session(ks);
+    });
+}
+
+// ── V21: algorithm-cell sweep — SLH-DSA (SHA2 + SHAKE), XMSS, HSS
+// sign/verify parity, over the SAME sign_init/sign/verify_init/verify
+// verbs every other signature cell already uses ────────────────────────
+//
+// #[ignore] — measured ~326s end to end (first live run). XMSS keygen
+// builds a full height-10 Merkle tree (1024 WOTS+ leaf keys); §6.66.6's
+// smallest single-tree parameter set this engine offers is already
+// height 10, so there is no faster real cell to substitute. Every other
+// test in this suite runs in well under a second; folding this one into
+// the routine run would take the remoting gate step from ~0.5s to 5+
+// minutes for every contributor. Run explicitly with
+// `cargo test -- --ignored v21_slh_dsa_xmss_hss_sign_verify_parity`
+// (or `--include-ignored` for the whole suite) — not wired into
+// `scripts/local-gate.sh`'s routine step.
+#[test]
+#[ignore]
+fn v21_slh_dsa_xmss_hss_sign_verify_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let (_rv, ks) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+
+        struct Cell {
+            name: &'static str,
+            mechanism: u64,
+            public_key: u32,
+            private_key: u32,
+        }
+
+        let mut cells = Vec::new();
+        for (name, ps) in [("slh-dsa-sha2", CKP_SLH_DSA_SHA2_128S), ("slh-dsa-shake", CKP_SLH_DSA_SHAKE_128S)] {
+            let public_tmpl: Vec<(u64, Vec<u8>)> = vec![
+                (CKA_CLASS, (CKO_PUBLIC_KEY as usize).to_le_bytes().to_vec()),
+                (CKA_PARAMETER_SET, (ps as usize).to_le_bytes().to_vec()),
+                (CKA_TOKEN, vec![0u8]),
+            ];
+            let private_tmpl: Vec<(u64, Vec<u8>)> = vec![(CKA_CLASS, (CKO_PRIVATE_KEY as usize).to_le_bytes().to_vec()), (CKA_TOKEN, vec![0u8])];
+            let (rv, pub_h, prv_h) = v32::generate_key_pair(ks, CKM_SLH_DSA_KEY_PAIR_GEN, &[], &public_tmpl, &private_tmpl);
+            assert_eq!(rv, 0, "{name} keygen must succeed");
+            cells.push(Cell { name, mechanism: CKM_SLH_DSA, public_key: pub_h, private_key: prv_h });
+        }
+        {
+            let (rv, pub_h, prv_h) = v32::generate_key_pair(ks, CKM_XMSS_KEY_PAIR_GEN, &[], &[], &[]);
+            assert_eq!(rv, 0, "xmss keygen (default parameter set) must succeed");
+            cells.push(Cell { name: "xmss", mechanism: CKM_XMSS, public_key: pub_h, private_key: prv_h });
+        }
+        {
+            let (rv, pub_h, prv_h) = v32::generate_key_pair(ks, CKM_HSS_KEY_PAIR_GEN, &[], &[], &[]);
+            assert_eq!(rv, 0, "hss keygen (default single-level LMS) must succeed");
+            cells.push(Cell { name: "hss", mechanism: CKM_HSS, public_key: pub_h, private_key: prv_h });
+        }
+
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let base = spawn_rest_v32().await.unwrap();
+
+        for cell in &cells {
+            let msg = format!("v21 {} algorithm cell", cell.name).into_bytes();
+
+            // control
+            assert_eq!(v32::sign_init(ks, cell.mechanism, &[], cell.private_key), 0, "{}: sign_init", cell.name);
+            let (rv, sig_ctl) = v32::sign(ks, &msg);
+            assert_eq!(rv, 0, "{}: sign", cell.name);
+            assert_eq!(v32::verify_init(ks, cell.mechanism, &[], cell.public_key), 0, "{}: verify_init", cell.name);
+            let rv_good_ctl = v32::verify(ks, &msg, &sig_ctl);
+            assert_eq!(rv_good_ctl, 0, "{}: verify must accept its own signature", cell.name);
+            let mut bad_sig = sig_ctl.clone();
+            bad_sig[0] ^= 0xFF;
+            assert_eq!(v32::verify_init(ks, cell.mechanism, &[], cell.public_key), 0);
+            let rv_bad_ctl = v32::verify(ks, &msg, &bad_sig);
+            assert_ne!(rv_bad_ctl, 0, "{}: a tampered signature must be rejected", cell.name);
+
+            // gRPC — sign fresh (these schemes may be randomized/stateful,
+            // so a fresh signature is the correct cross-transport check,
+            // not byte-equality with the control's), verify parity both ways.
+            let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+            g.c_sign_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: cell.mechanism, parameter: vec![] }), key_handle: cell.private_key }).await.unwrap();
+            let gsig = g.c_sign(proto::V32DataRequest { session_handle: gs.session_handle, data: msg.clone() }).await.unwrap().into_inner();
+            assert_eq!(gsig.ck_rv, 0, "{}: gRPC sign", cell.name);
+            g.c_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: cell.mechanism, parameter: vec![] }), key_handle: cell.public_key }).await.unwrap();
+            let gg = g.c_verify(proto::V32VerifyRequest { session_handle: gs.session_handle, data: msg.clone(), signature: gsig.data }).await.unwrap().into_inner();
+            assert_eq!(gg.ck_rv, rv_good_ctl, "{}: gRPC verify-good must match control", cell.name);
+            g.c_verify_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: cell.mechanism, parameter: vec![] }), key_handle: cell.public_key }).await.unwrap();
+            let gb = g.c_verify(proto::V32VerifyRequest { session_handle: gs.session_handle, data: msg.clone(), signature: bad_sig.clone() }).await.unwrap().into_inner();
+            assert_eq!(gb.ck_rv, rv_bad_ctl, "{}: gRPC verify-tamper must match control", cell.name);
+
+            // REST — same shape.
+            let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+            let sh = rs["session_handle"].clone();
+            rest_post(&base, "sign-init", json!({"session_handle": sh, "mechanism": {"mechanism": cell.mechanism, "parameter": ""}, "key_handle": cell.private_key})).await;
+            let rsig = rest_post(&base, "sign", json!({"session_handle": sh, "data": b64(&msg)})).await;
+            assert_eq!(rsig["ck_rv"], 0, "{}: REST sign", cell.name);
+            rest_post(&base, "verify-init", json!({"session_handle": sh, "mechanism": {"mechanism": cell.mechanism, "parameter": ""}, "key_handle": cell.public_key})).await;
+            let rg = rest_post(&base, "verify", json!({"session_handle": sh, "data": b64(&msg), "signature": rsig["data"]})).await;
+            assert_eq!(rg["ck_rv"].as_u64().unwrap() as u32, rv_good_ctl, "{}: REST verify-good must match control", cell.name);
+            rest_post(&base, "verify-init", json!({"session_handle": sh, "mechanism": {"mechanism": cell.mechanism, "parameter": ""}, "key_handle": cell.public_key})).await;
+            let rb = rest_post(&base, "verify", json!({"session_handle": sh, "data": b64(&msg), "signature": b64(&bad_sig)})).await;
+            assert_eq!(rb["ck_rv"].as_u64().unwrap() as u32, rv_bad_ctl, "{}: REST verify-tamper must match control", cell.name);
+        }
 
         v32::close_session(ks);
     });

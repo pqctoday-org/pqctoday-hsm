@@ -498,3 +498,77 @@ that adds secret-key-creating tests doesn't have to rediscover this.
 **Cumulative RPC count after RW1+RW2+RW3+RW4+RW6a+RW6b: 94 of 104
 `pkcs11f.h` functions live.** RW5 (KEM key-object form + algorithm-cell
 sweep) is next.
+
+### 2026-08-26 — RW5 (KEM key-object form + algorithm-cell sweep)
+
+Shipped, all live-verified. 2 new RPCs: `C_EncapsulateKey`,
+`C_DecapsulateKey` — F1 confirmed a third time (audit-then-call, no
+engine change; both entry points already carried the full v3.2
+key-object-form signature). Named apart from the frozen legacy
+`Pkcs11Remote.Encapsulate` per the plan's own naming-trap warning.
+
+**core:** `encapsulate_key`/`decapsulate_key`, same two-call/direct-call
+shapes as every other verb; the length-query call returns before any
+encapsulation math runs (verified against `ffi::C_EncapsulateKey_impl`'s
+early return), so exactly one real encapsulation happens per logical
+call, same guarantee every other two-call verb already relies on. 3 new
+unit tests (36/36 core green): ML-KEM-768 encapsulate/decapsulate
+agreeing on the shared secret (the actual KEM correctness property, not
+just "no error"), including a tampered-ciphertext case proving ML-KEM's
+implicit-rejection property (a corrupted ciphertext decapsulates to a
+*different*, deterministic-pseudorandom secret — never an error code, and
+never the real one); deterministic `CKA_SEED` keygen producing
+byte-identical public keys across repeated calls with the same seed, and
+different keys for a different seed; and — the plan's own documented
+example, not just described but built and run — the full ECDH-as-KEM ‖
+ML-KEM hybrid composition via `CKM_CONCATENATE_BASE_AND_KEY`, proving
+sender-side (encapsulate twice, concatenate) and receiver-side
+(decapsulate twice, concatenate) agree on the SAME combined secret. That
+last test needed one real fix on first run: the derived shared-secret
+objects default to `CKA_DERIVE=false` (PKCS#11 v3.2 §4.1's own default),
+so `CKM_CONCATENATE_BASE_AND_KEY` (which requires `CKA_DERIVE` on both
+operands) rejected them with `CKR_KEY_FUNCTION_NOT_PERMITTED` until the
+`encapsulate_key`/`decapsulate_key` output templates explicitly set it —
+a real, caller-controllable template requirement, not a wire bug.
+
+**gRPC + REST:** both RPCs/routes wired, calling the core verbs directly.
+
+**Validation:** V20, a genuine cross-transport KEM proof — gRPC
+encapsulates against an ML-KEM-768 public key, REST decapsulates that
+SAME ciphertext against the SAME private key on a
+completely different session, and both shared secrets are asserted
+byte-equal. Encapsulation is randomized (`with_rng!`), so this does NOT
+assert byte-equality with the in-process control's own (independently
+randomized) encapsulation — only that gRPC's own output and REST's own
+recovery of it agree, which is the real KEM property this workstream
+exists to prove. **Whole remoting workspace green: 36 core + 7
+legacy-parity (no regression) + 20 v32-parity + 2 posture.**
+
+**Algorithm-cell sweep (V21) — built, passes, and is `#[ignore]`d with a
+documented reason, not silently dropped.** SLH-DSA (SHA2 + SHAKE
+parameter sets), XMSS, and HSS sign/verify cells all work correctly over
+the EXISTING `sign_init`/`sign`/`verify_init`/`verify` verbs (zero new
+code needed there — these are all just more mechanisms flowing through
+verbs RW1 already shipped). The real finding: XMSS keygen at this
+engine's SMALLEST available single-tree parameter set
+(`CKP_XMSS_SHA2_10_256`, height 10 → 1024 WOTS+ leaf keys — v3.2 §6.66.6
+offers no smaller single-tree option) took the sweep's live first run to
+**326 seconds** end to end. Every other test in this 522-test-and-growing
+suite runs in well under a second; folding V21 into the routine run would
+take the remoting gate step from ~0.5s to 5+ minutes for every
+contributor on every commit. Marked `#[ignore]` with the measured timing
+and the reason in the test's own doc comment — run explicitly via `cargo
+test -- --ignored`, not wired into `scripts/local-gate.sh`. Coverage is
+real (it passed) and documented, not quietly missing.
+
+The hybrid-cell part of the sweep is covered by the core crate's fast
+(sub-second) `hybrid_ecdh_ml_kem_concatenate_composition` test above
+instead of a three-transport parity case — the composition mechanics are
+what needed proving, and every mechanism in the chain (ECDH1_DERIVE,
+CKM_ML_KEM, CONCATENATE_BASE_AND_KEY) already has its own parity coverage
+individually (V4/V20/V19 respectively).
+
+**Cumulative RPC count after RW1+RW2+RW3+RW4+RW5+RW6a+RW6b: 96 of 104
+`pkcs11f.h` functions live — the plan's own end-state target (§5,
+"effort & rpc accounting").** RW-T (ledger, ratchet, generated coverage
+report, docs regeneration) is next and last.

@@ -1047,6 +1047,36 @@ impl Pkcs11V32 for Pkcs11V32Service {
         .await?;
         Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
     }
+
+    // ── KEM key-object form (RW5) ─────────────────────────────────────────
+
+    async fn c_encapsulate_key(
+        &self,
+        request: Request<V32EncapsulateKeyRequest>,
+    ) -> Result<Response<V32EncapsulateKeyResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let template = tmpl_parts(&req.template);
+        let (ck_rv, ciphertext, object_handle) = blocking(move || {
+            v32::encapsulate_key(req.session_handle, mech, &param, req.key_handle, &template)
+        })
+        .await?;
+        Ok(Response::new(V32EncapsulateKeyResponse { ck_rv, ciphertext, object_handle }))
+    }
+
+    async fn c_decapsulate_key(
+        &self,
+        request: Request<V32DecapsulateKeyRequest>,
+    ) -> Result<Response<V32ObjectHandleResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let template = tmpl_parts(&req.template);
+        let (ck_rv, object_handle) = blocking(move || {
+            v32::decapsulate_key(req.session_handle, mech, &param, req.private_key_handle, &req.ciphertext, &template)
+        })
+        .await?;
+        Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
+    }
 }
 
 use pqctoday_pkcs11_remote_proto::v32_derive_key_request::Structured;

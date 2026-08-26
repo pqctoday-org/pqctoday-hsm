@@ -693,3 +693,36 @@ pub struct DeriveKeyReq {
     #[serde(default)]
     pub sp800_108_feedback: Option<Sp800108FeedbackParamsDto>,
 }
+
+// ── KEM key-object form (RW5) ─────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct EncapsulateKeyReq {
+    pub session_handle: u32,
+    pub mechanism: V32MechanismDto,
+    pub key_handle: u32,
+    #[serde(default)]
+    pub template: Vec<V32AttributeInDto>,
+}
+#[derive(Serialize)]
+pub struct EncapsulateKeyResp {
+    pub ck_rv: u32,
+    #[serde(with = "b64")]
+    pub ciphertext: Vec<u8>,
+    pub object_handle: u32,
+}
+impl From<(u32, Vec<u8>, u32)> for EncapsulateKeyResp {
+    fn from((ck_rv, ciphertext, object_handle): (u32, Vec<u8>, u32)) -> Self {
+        Self { ck_rv, ciphertext, object_handle }
+    }
+}
+#[derive(Deserialize)]
+pub struct DecapsulateKeyReq {
+    pub session_handle: u32,
+    pub mechanism: V32MechanismDto,
+    pub private_key_handle: u32,
+    #[serde(with = "b64")]
+    pub ciphertext: Vec<u8>,
+    #[serde(default)]
+    pub template: Vec<V32AttributeInDto>,
+}

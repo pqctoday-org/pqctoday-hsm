@@ -104,6 +104,14 @@ pub mod ck {
     pub use softhsmrustv3::constants::CKR_KEY_NOT_WRAPPABLE;
     pub use softhsmrustv3::constants::CKR_KEY_UNEXTRACTABLE;
     pub use softhsmrustv3::constants::CKR_WRAPPED_KEY_INVALID;
+    // RW5 additions.
+    pub use softhsmrustv3::constants::CKA_DECAPSULATE;
+    pub use softhsmrustv3::constants::CKA_ENCAPSULATE;
+    pub use softhsmrustv3::constants::CKA_SEED;
+    pub use softhsmrustv3::constants::CKK_ML_KEM;
+    pub use softhsmrustv3::constants::CKM_ML_KEM;
+    pub use softhsmrustv3::constants::CKM_ML_KEM_KEY_PAIR_GEN;
+    pub use softhsmrustv3::constants::CKP_ML_KEM_768;
     pub use softhsmrustv3::constants::CKR_SESSION_READ_ONLY;
     pub use softhsmrustv3::constants::CKR_SLOT_ID_INVALID;
 }
@@ -1475,6 +1483,69 @@ pub mod derive_params {
     }
 }
 
+// ── KEM key-object form (RW5 slice) ──────────────────────────────────────
+// Native-width audited: both entry points already exist with the full
+// v3.2 key-object-form signatures (confirmed in the plan's F1 finding).
+// Named apart from the legacy bytes-form `verbs::encapsulate` — that verb
+// stays frozen on the legacy 9-verb service; these mirror the v3.2
+// `C_EncapsulateKey`/`C_DecapsulateKey` entry points that produce a KEYED
+// object (a new CKO_SECRET_KEY handle) rather than raw bytes.
+
+/// `C_EncapsulateKey`. Two-call for the ciphertext (§5.2); the derived
+/// shared-secret key handle is only ever written by the SECOND (real)
+/// call — the length-query call returns before any encapsulation math
+/// runs (verified against `ffi::C_EncapsulateKey_impl`'s own early
+/// return), so there is exactly one real encapsulation per logical call,
+/// same as every other two-call verb here.
+pub fn encapsulate_key(
+    session: u32,
+    mechanism: u64,
+    parameter: &[u8],
+    key: u32,
+    template: &[AttrIn],
+) -> (u32, Vec<u8>, u32) {
+    let mech = mech_native(mechanism, parameter);
+    let mut tmpl = build_template(template);
+    let mut key_handle: u32 = 0;
+    let (rv, ciphertext) = two_call(|out, len| {
+        ffi::C_EncapsulateKey(
+            session,
+            &mech as *const _ as *mut u8,
+            key,
+            tmpl.entries.as_mut_ptr() as *mut u8,
+            template.len() as u32,
+            out,
+            len,
+            &mut key_handle,
+        )
+    });
+    (rv, ciphertext, key_handle)
+}
+
+pub fn decapsulate_key(
+    session: u32,
+    mechanism: u64,
+    parameter: &[u8],
+    private_key: u32,
+    ciphertext: &[u8],
+    template: &[AttrIn],
+) -> (u32, u32) {
+    let mech = mech_native(mechanism, parameter);
+    let mut tmpl = build_template(template);
+    let mut handle: u32 = 0;
+    let rv = ffi::C_DecapsulateKey(
+        session,
+        &mech as *const _ as *mut u8,
+        private_key,
+        tmpl.entries.as_mut_ptr() as *mut u8,
+        template.len() as u32,
+        ciphertext.as_ptr() as *mut u8,
+        ciphertext.len() as u32,
+        &mut handle,
+    );
+    (rv, handle)
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 /// PKCS#11 §5.2 two-call convention driver: NULL query for the length,
@@ -2463,6 +2534,209 @@ mod tests {
         let (rv, shared_attrs) = get_attribute_value(session, shared, &[u64::from(ck::CKA_VALUE)]);
         assert_eq!(rv, 0);
         assert_eq!(shared_attrs[0].value.len(), 32, "P-256 shared secret is 32 bytes");
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn ml_kem_768_encapsulate_decapsulate_round_trip() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+
+        let public_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_KEM),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_KEM_768),
+            attr_bool(u64::from(ck::CKA_ENCAPSULATE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let private_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_KEM),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_KEM_768),
+            attr_bool(u64::from(ck::CKA_DECAPSULATE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, pub_h, prv_h) =
+            generate_key_pair(session, u64::from(ck::CKM_ML_KEM_KEY_PAIR_GEN), &[], &public_tmpl, &private_tmpl);
+        assert_eq!(rv, 0);
+
+        let (rv, ciphertext, encap_key) = encapsulate_key(session, u64::from(ck::CKM_ML_KEM), &[], pub_h, &[]);
+        assert_eq!(rv, 0);
+        assert_eq!(ciphertext.len(), 1088, "ML-KEM-768 ciphertext is 1088 bytes");
+        assert_ne!(encap_key, 0);
+
+        let (rv, decap_key) = decapsulate_key(session, u64::from(ck::CKM_ML_KEM), &[], prv_h, &ciphertext, &[]);
+        assert_eq!(rv, 0);
+        assert_ne!(decap_key, 0);
+
+        let (rv, encap_attrs) = get_attribute_value(session, encap_key, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        let (rv, decap_attrs) = get_attribute_value(session, decap_key, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(
+            encap_attrs[0].value, decap_attrs[0].value,
+            "encapsulate/decapsulate must agree on the shared secret — the actual KEM correctness property"
+        );
+        assert_eq!(encap_attrs[0].value.len(), 32, "ML-KEM-768 shared secret is 32 bytes");
+
+        // A tampered ciphertext must not silently agree with the real
+        // shared secret (ML-KEM's implicit-rejection property — the
+        // decapsulated value under a corrupted ciphertext is deterministic
+        // pseudorandom, not an error code, but it must differ).
+        let mut bad_ct = ciphertext.clone();
+        bad_ct[0] ^= 0xFF;
+        let (rv, bad_decap_key) = decapsulate_key(session, u64::from(ck::CKM_ML_KEM), &[], prv_h, &bad_ct, &[]);
+        assert_eq!(rv, 0);
+        let (rv, bad_attrs) = get_attribute_value(session, bad_decap_key, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_ne!(bad_attrs[0].value, encap_attrs[0].value, "a tampered ciphertext must not decapsulate to the real shared secret");
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn ml_kem_768_deterministic_seed_keygen_matches_across_calls() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+
+        // PKCS#11 v3.2 §6.68.2: CKA_SEED = d ‖ z, 64 bytes, makes
+        // C_GenerateKeyPair(CKM_ML_KEM_KEY_PAIR_GEN) deterministic.
+        let seed = vec![0x42u8; 64];
+        let make_pair = |seed: &[u8]| {
+            let public_tmpl = [
+                attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+                attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_KEM),
+                attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_KEM_768),
+                attr_bool(u64::from(ck::CKA_ENCAPSULATE), true),
+                attr_bool(u64::from(ck::CKA_TOKEN), false),
+                (u64::from(ck::CKA_SEED), seed.to_vec()),
+            ];
+            let private_tmpl = [
+                attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+                attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_KEM),
+                attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_KEM_768),
+                attr_bool(u64::from(ck::CKA_DECAPSULATE), true),
+                attr_bool(u64::from(ck::CKA_TOKEN), false),
+            ];
+            generate_key_pair(session, u64::from(ck::CKM_ML_KEM_KEY_PAIR_GEN), &[], &public_tmpl, &private_tmpl)
+        };
+
+        let (rv1, pub1, _prv1) = make_pair(&seed);
+        assert_eq!(rv1, 0);
+        let (rv2, pub2, _prv2) = make_pair(&seed);
+        assert_eq!(rv2, 0);
+        let (rv, attrs1) = get_attribute_value(session, pub1, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        let (rv, attrs2) = get_attribute_value(session, pub2, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_eq!(attrs1[0].value, attrs2[0].value, "the same CKA_SEED must produce the same public key, deterministically");
+
+        let (rv3, pub3, _prv3) = make_pair(&[0x99u8; 64]);
+        assert_eq!(rv3, 0);
+        let (rv, attrs3) = get_attribute_value(session, pub3, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+        assert_ne!(attrs1[0].value, attrs3[0].value, "a different seed must produce a different key");
+
+        close_session(session);
+    }
+
+    /// Hybrid KEM composition (CLAUDE.md's documented pattern): the
+    /// generic ECDH-as-KEM path (`C_Encapsulate/DecapsulateKey` under
+    /// `CKM_ECDH1_DERIVE`) combined with `CKM_ML_KEM` and
+    /// `CKM_CONCATENATE_BASE_AND_KEY`, proving the composition — not just
+    /// each half individually — derives the SAME combined secret on both
+    /// sides. Test-code only, no new RPCs: every verb here already
+    /// shipped in RW4/RW5.
+    #[test]
+    #[serial]
+    fn hybrid_ecdh_ml_kem_concatenate_composition() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+
+        const P256_EC_PARAMS: [u8; 10] = [0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
+        const CKM_EC_KEY_PAIR_GEN: u64 = 0x0000_1040;
+        const CKA_EC_PARAMS: u64 = 0x0000_0180;
+        const CKK_EC: u32 = 0x0000_0003;
+        const CKM_ECDH1_DERIVE: u64 = 0x0000_1050;
+
+        let ec_public_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), CKK_EC),
+            (CKA_EC_PARAMS, P256_EC_PARAMS.to_vec()),
+            attr_bool(u64::from(ck::CKA_ENCAPSULATE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let ec_private_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), CKK_EC),
+            attr_bool(u64::from(ck::CKA_DECAPSULATE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, ec_pub, ec_prv) = generate_key_pair(session, CKM_EC_KEY_PAIR_GEN, &[], &ec_public_tmpl, &ec_private_tmpl);
+        assert_eq!(rv, 0, "EC P-256 keygen for the ECDH-as-KEM half must succeed");
+
+        let kem_public_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_KEM),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_KEM_768),
+            attr_bool(u64::from(ck::CKA_ENCAPSULATE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let kem_private_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_KEM),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_KEM_768),
+            attr_bool(u64::from(ck::CKA_DECAPSULATE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, kem_pub, kem_prv) =
+            generate_key_pair(session, u64::from(ck::CKM_ML_KEM_KEY_PAIR_GEN), &[], &kem_public_tmpl, &kem_private_tmpl);
+        assert_eq!(rv, 0, "ML-KEM-768 keygen for the PQ half must succeed");
+
+        // The derived shared-secret objects default to CKA_DERIVE=false
+        // (PKCS#11 v3.2 §4.1's own default) — must be overridden via the
+        // template so the CONCATENATE step below can use them as base/
+        // second keys (both sides of that mechanism require CKA_DERIVE).
+        let derivable_tmpl = [attr_bool(u64::from(ck::CKA_DERIVE), true)];
+
+        // "Sender": encapsulate against both public keys.
+        let (rv, ec_ct, ec_ss_a) = encapsulate_key(session, CKM_ECDH1_DERIVE, &[], ec_pub, &derivable_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, kem_ct, kem_ss_a) = encapsulate_key(session, u64::from(ck::CKM_ML_KEM), &[], kem_pub, &derivable_tmpl);
+        assert_eq!(rv, 0);
+
+        // Combine: CKM_CONCATENATE_BASE_AND_KEY's parameter is a bare
+        // CK_OBJECT_HANDLE at native ulong width (the RW1 finding, input
+        // side) — concatenate ml-kem's secret onto ecdh's.
+        let concat_param_a = (kem_ss_a as usize).to_ne_bytes().to_vec();
+        let out_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, combined_a) = derive_key(session, u64::from(ck::CKM_CONCATENATE_BASE_AND_KEY), &concat_param_a, ec_ss_a, &out_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, combined_a_attrs) = get_attribute_value(session, combined_a, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+
+        // "Receiver": decapsulate both, combine the same way.
+        let (rv, ec_ss_b) = decapsulate_key(session, CKM_ECDH1_DERIVE, &[], ec_prv, &ec_ct, &derivable_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, kem_ss_b) = decapsulate_key(session, u64::from(ck::CKM_ML_KEM), &[], kem_prv, &kem_ct, &derivable_tmpl);
+        assert_eq!(rv, 0);
+        let concat_param_b = (kem_ss_b as usize).to_ne_bytes().to_vec();
+        let (rv, combined_b) = derive_key(session, u64::from(ck::CKM_CONCATENATE_BASE_AND_KEY), &concat_param_b, ec_ss_b, &out_tmpl);
+        assert_eq!(rv, 0);
+        let (rv, combined_b_attrs) = get_attribute_value(session, combined_b, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv, 0);
+
+        assert_eq!(
+            combined_a_attrs[0].value, combined_b_attrs[0].value,
+            "the hybrid composition (ECDH-as-KEM ‖ ML-KEM, concatenated) must agree on both sides — the real property under test, not either half alone"
+        );
 
         close_session(session);
     }
