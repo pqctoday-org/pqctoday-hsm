@@ -591,6 +591,130 @@ EOF
 }
 run_case T13 PASS "TLS 1.3 handshake negotiates MLKEM768, token performs KEM ops + TLS13-KDF derives, engine-log verified (gap F36-1 / remediation R5+R12); negative-control twin proves it (R13)" t13
 
+# t15 — real TLS 1.3 handshake with a FULLY token-backed SERVER (remediation
+# R15): unlike T13 (token only on the client/decapsulate side, server cert
+# is plain software RSA), here the server's own certificate key is a
+# token-resident ML-DSA-65 key (CertificateVerify signs on the token) AND
+# -propquery pins the server's ephemeral ML-KEM group keygen/encapsulate to
+# the token too — both halves of "fully token-backed", not a minimal
+# encap-only proof. Needs its own arena for the same log.level=DEBUG reason
+# as T13.
+#
+# Neither operation has a dedicated success-path engine log line (checked
+# live: SoftHSM_kem.cpp only logs on error, and there is no sign-success
+# log at all) — so, same standard T13 already set, this asserts two
+# independently attributable proxies instead of a direct log line:
+#   - sign: "Peer signature type: mldsa65" + "Verify return code: 0 (ok)"
+#     on the client is cryptographic proof the token's private key signed
+#     CertificateVerify — that key was generated via
+#     `genpkey -propquery "?provider=pkcs11"` and, per this project's own
+#     no-fake-copy design, never leaves the token, so a valid client-side
+#     verify has no other possible source.
+#   - encapsulate: the SAME "Decrypting N bytes into buffer of M bytes"
+#     TLS13-KDF marker T13 uses, but read from server.err.log (R15 is the
+#     server's own KDF chain, not the client's) — those derives only run
+#     against a token object in the first place if the ML-KEM shared
+#     secret they're derived from was itself a token object, i.e. if the
+#     token performed the encapsulation.
+# A regression in either op breaks a different one of these two
+# assertions, keeping them attributable per-op as the plan requires.
+#
+# R13 discipline applies here too, and the hazard is DIFFERENT from T13's:
+# the cert key's own pkcs11: URI identity forces ML-DSA signing onto the
+# token regardless of propquery, so the negative control still shows a
+# valid mldsa65 signature — propquery only controls whether the *KEM*
+# side (no fixed provider identity of its own; a fresh ephemeral keygen
+# each handshake) lands on the token or silently falls back to the
+# default provider's own software ML-KEM. The negative control's real
+# job is proving THAT specific fallback, via the same zero-KDF-decrypt
+# check T13 uses.
+t15() {
+  local w="$ROOT_WORK/t15"
+  mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = DEBUG
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $CPP_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-encode-provider-uri-to-pem = true
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$CPP_ENGINE_SO" \
+    --init-token --free --label t15 --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" "$OPENSSL_BIN" genpkey \
+    -propquery "?provider=pkcs11" -algorithm ML-DSA-65 -out "$w/k.pem" >/dev/null 2>&1 || return 1
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" "$OPENSSL_BIN" req -new -x509 \
+    -key "pkcs11:token=t15;type=private" -subj "/CN=t15" -days 1 -out "$w/cert.pem" >/dev/null 2>&1 \
+    || return 1
+
+  # ── Positive: propquery pinned, token must sign AND encapsulate ──
+  local port=14715
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" "$OPENSSL_BIN" s_server \
+    -accept "$port" -cert "$w/cert.pem" -key "$w/k.pem" -groups MLKEM768 -tls1_3 -no_ticket \
+    -naccept 1 -quiet -propquery "?provider=pkcs11" >"$w/server.log" 2>"$w/server.err.log" &
+  local spid=$!
+  sleep 1.5
+  OPENSSL_CONF=/dev/null timeout 10 "$OPENSSL_BIN" \
+    s_client -connect "127.0.0.1:$port" -tls1_3 -groups MLKEM768 -CAfile "$w/cert.pem" \
+    </dev/null >"$w/client.log" 2>"$w/client.err.log"
+  wait "$spid" 2>/dev/null
+
+  grep -q "Negotiated TLS1.3 group: MLKEM768" "$w/client.log" || return 1
+  grep -q "Cipher is TLS_" "$w/client.log" || return 1
+  grep -q "Peer signature type: mldsa65" "$w/client.log" || return 1
+  grep -q "Verify return code: 0 (ok)" "$w/client.log" || return 1
+  # NOT the generic "Decrypting N bytes" regex T13 uses: on the server
+  # role, that also fires (in BOTH cases below) for the cert's own
+  # ML-DSA-65 private key being unwrapped from at-rest storage to sign
+  # with — a propquery-independent operation the cert key's own pkcs11:
+  # URI identity forces regardless, so it can't distinguish the KEM/KDF
+  # question T15 actually cares about. Empirically distinguishing size
+  # (checked live against both arms below): the later key-schedule
+  # derives that only touch the token when the shared secret feeding them
+  # is ITSELF a token object show as "64 bytes into buffer of 80" — 74
+  # occurrences with propquery pinned, 0 without.
+  grep -q "Decrypting 64 bytes into buffer of 80 bytes" "$w/server.err.log" || return 1
+
+  # ── Negative control (R13): same arena, propquery removed ──
+  local port2=14716
+  SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" "$OPENSSL_BIN" s_server \
+    -accept "$port2" -cert "$w/cert.pem" -key "$w/k.pem" -groups MLKEM768 -tls1_3 -no_ticket \
+    -naccept 1 -quiet >"$w/server2.log" 2>"$w/server2.err.log" &
+  local spid2=$!
+  sleep 1.5
+  OPENSSL_CONF=/dev/null timeout 10 "$OPENSSL_BIN" \
+    s_client -connect "127.0.0.1:$port2" -tls1_3 -groups MLKEM768 -CAfile "$w/cert.pem" \
+    </dev/null >"$w/client2.log" 2>"$w/client2.err.log"
+  wait "$spid2" 2>/dev/null
+
+  grep -q "Negotiated TLS1.3 group: MLKEM768" "$w/client2.log" || return 1
+  grep -q "Peer signature type: mldsa65" "$w/client2.log" || return 1
+  grep -q "Verify return code: 0 (ok)" "$w/client2.log" || return 1
+  # The hazard confirmed: the cert key's own URI identity still forces a
+  # valid token signature (and, with it, some propquery-independent key-
+  # unwrap decrypt noise — see the comment on the positive case above) —
+  # but the KEM/KDF-specific "64 into 80" marker must be ZERO, or the
+  # positive case's evidence above proves nothing.
+  if grep -q "Decrypting 64 bytes into buffer of 80 bytes" "$w/server2.err.log"; then
+    return 1
+  fi
+  return 0
+}
+run_case T15 PASS "TLS 1.3 handshake with a fully token-backed server: token-resident ML-DSA cert signs CertificateVerify AND token performs the ML-KEM encapsulation, both independently engine-log verified (remediation R15); negative-control twin proves the KEM half (R13)" t15
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 

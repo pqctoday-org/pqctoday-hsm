@@ -276,6 +276,7 @@ done:
 }
 
 static CK_RV p11prov_obj_store_public_key(P11PROV_OBJ *key);
+static CK_RV p11prov_store_mlkem_public_key(P11PROV_OBJ *key);
 
 P11PROV_OBJ *p11prov_obj_new(P11PROV_CTX *ctx, CK_SLOT_ID slotid,
                              CK_OBJECT_HANDLE handle, CK_OBJECT_CLASS class)
@@ -4297,6 +4298,71 @@ static CK_RV prep_mldsa_find(P11PROV_CTX *ctx, const OSSL_PARAM params[],
     return CKR_OK;
 }
 
+/* R15 — server role: import a peer's raw ML-KEM public share (arriving as
+ * plain octet-string bytes from a TLS ClientHello, not any existing token
+ * object) so C_EncapsulateKey has something to operate on. Modeled directly
+ * on prep_mldsa_find above — same shape, only the key-size table and the
+ * absence of a private-key case (not needed for the server encapsulate
+ * role R15 scopes; ML-KEM keygen already produces private keys via the
+ * existing R3b path). */
+static CK_RV prep_mlkem_find(P11PROV_CTX *ctx, const OSSL_PARAM params[],
+                             struct pool_find_ctx *findctx)
+{
+    CK_RV rv;
+
+    if (findctx->numattrs != MAX_ATTRS_SIZE) {
+        return CKR_ARGUMENTS_BAD;
+    }
+    findctx->numattrs = 0;
+
+    switch (findctx->param_set) {
+    case CKP_ML_KEM_512:
+        findctx->key_size = ML_KEM_512_PK_SIZE;
+        break;
+    case CKP_ML_KEM_768:
+        findctx->key_size = ML_KEM_768_PK_SIZE;
+        break;
+    case CKP_ML_KEM_1024:
+        findctx->key_size = ML_KEM_1024_PK_SIZE;
+        break;
+    default:
+        return CKR_KEY_INDIGESTIBLE;
+    }
+
+    if (findctx->class != CKO_PUBLIC_KEY) {
+        return CKR_GENERAL_ERROR;
+    }
+
+    rv = param_to_attr(ctx, params, OSSL_PKEY_PARAM_PUB_KEY,
+                       &findctx->attrs[0], CKA_VALUE, false);
+    if (rv != CKR_OK) {
+        return rv;
+    }
+    findctx->numattrs++;
+    if (findctx->key_size != findctx->attrs[0].ulValueLen) {
+        P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE,
+                      "Unexpected public key size %lu (expected %lu)",
+                      findctx->attrs[0].ulValueLen, findctx->key_size);
+        return CKR_KEY_INDIGESTIBLE;
+    }
+
+    /* common params */
+    findctx->attrs[findctx->numattrs].type = CKA_PARAMETER_SET;
+    findctx->attrs[findctx->numattrs].pValue =
+        OPENSSL_malloc(sizeof(findctx->param_set));
+    if (!findctx->attrs[findctx->numattrs].pValue) {
+        return CKR_HOST_MEMORY;
+    }
+    memcpy(findctx->attrs[findctx->numattrs].pValue, &findctx->param_set,
+           sizeof(findctx->param_set));
+    findctx->attrs[findctx->numattrs].ulValueLen = sizeof(findctx->param_set);
+    findctx->numattrs++;
+
+    findctx->bit_size = findctx->key_size * 8;
+
+    return CKR_OK;
+}
+
 static CK_RV return_dup_key(P11PROV_OBJ *dst, P11PROV_OBJ *src)
 {
     CK_RV rv;
@@ -4454,6 +4520,18 @@ static CK_RV p11prov_obj_import_public_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
             goto done;
         }
         allocattrs = MLDSA_ATTRS_NUM;
+        break;
+
+    case CKK_ML_KEM:
+        /* R15 — server role: peer share import. See prep_mlkem_find's own
+         * comment for why this is scoped to the public-key case only. */
+        P11PROV_debug("obj import of ML-KEM public key %p", key);
+        findctx.param_set = key->data.key.param_set;
+        rv = prep_mlkem_find(ctx, params, &findctx);
+        if (rv != CKR_OK) {
+            goto done;
+        }
+        allocattrs = findctx.numattrs;
         break;
 
     default:
@@ -4775,6 +4853,9 @@ static CK_RV p11prov_obj_store_public_key(P11PROV_OBJ *key)
     case CKK_ML_DSA:
         rv = p11prov_store_mldsa_public_key(key);
         break;
+    case CKK_ML_KEM:
+        rv = p11prov_store_mlkem_public_key(key);
+        break;
 
     default:
         P11PROV_raise(key->ctx, CKR_GENERAL_ERROR,
@@ -4789,6 +4870,101 @@ static CK_RV p11prov_obj_store_public_key(P11PROV_OBJ *key)
         (void)obj_add_to_pool(key);
     }
 
+    return rv;
+}
+
+/* R15 — server role: materialize the imported peer public share as a real
+ * ephemeral session object on the token, on demand (called from
+ * p11prov_obj_get_handle when a mock ML-KEM public key is asked for its
+ * real handle — the same lazy-materialize point ECDH already uses for
+ * peer public keys). Modeled directly on p11prov_store_mldsa_public_key
+ * above: CKA_ENCAPSULATE is ML-KEM's analog of ML-DSA's CKA_VERIFY — the
+ * capability a public key needs for the operation it's actually used for
+ * (PKCS#11 v3.2 §6.63, Table 265's own KEM-only Function column already
+ * scopes this — see CLAUDE.md's own CKA_ENCAPSULATE = 0x00000633). */
+static CK_RV p11prov_store_mlkem_public_key(P11PROV_OBJ *key)
+{
+    CK_BBOOL val_true = CK_TRUE;
+    CK_BBOOL val_false = CK_FALSE;
+    CK_ATTRIBUTE template[] = {
+        { CKA_CLASS, &key->class, sizeof(CK_OBJECT_CLASS) },
+        { CKA_KEY_TYPE, &key->data.key.type, sizeof(CK_KEY_TYPE) },
+        { CKA_ENCAPSULATE, &val_true, sizeof(val_true) },
+        /* public key part */
+        { CKA_PARAMETER_SET, NULL, 0 },
+        { CKA_VALUE, NULL, 0 },
+        { CKA_TOKEN, &val_false, sizeof(val_false) },
+        /* R15 fix: the C++ engine defaults CKA_PRIVATE to true when a
+         * template omits it (SoftHSM_objects.cpp's getBooleanValue(...,
+         * true) default, confirmed by reading the engine source directly
+         * — not assumed), which made this public key's own creation
+         * require a login it was never given (CKR_USER_NOT_LOGGED_IN,
+         * "User is not authorized"), live-observed via a real handshake
+         * before this line was added. p11prov_store_mldsa_public_key
+         * (this function's own template) has the identical omission,
+         * confirmed by reading it — a latent bug there too, never
+         * triggered because nothing in this project exercises ML-DSA's
+         * mock-materialize-a-peer-public-key path the way R15 exercises
+         * ML-KEM's. */
+        { CKA_PRIVATE, &val_false, sizeof(val_false) },
+    };
+    int na = sizeof(template) / sizeof(CK_ATTRIBUTE);
+    CK_ATTRIBUTE *a;
+    P11PROV_SLOTS_CTX *slots = NULL;
+    CK_SLOT_ID slot = CK_UNAVAILABLE_INFORMATION;
+    P11PROV_SESSION *session = NULL;
+    CK_RV rv = CKR_GENERAL_ERROR;
+
+    a = p11prov_obj_get_attr(key, CKA_PARAMETER_SET);
+    if (!a) {
+        return CKR_GENERAL_ERROR;
+    }
+    template[3].pValue = a->pValue;
+    template[3].ulValueLen = a->ulValueLen;
+
+    a = p11prov_obj_get_attr(key, CKA_VALUE);
+    if (!a) {
+        return CKR_GENERAL_ERROR;
+    }
+    template[4].pValue = a->pValue;
+    template[4].ulValueLen = a->ulValueLen;
+
+    slots = p11prov_ctx_get_slots(key->ctx);
+    if (!slots) {
+        rv = CKR_GENERAL_ERROR;
+        goto done;
+    }
+
+    slot = p11prov_get_default_slot(slots);
+    if (slot == CK_UNAVAILABLE_INFORMATION) {
+        rv = CKR_GENERAL_ERROR;
+        goto done;
+    }
+
+    rv = p11prov_get_session(key->ctx, &slot, NULL, key->refresh_uri,
+                             CK_UNAVAILABLE_INFORMATION, NULL, NULL, false,
+                             true, &session);
+    if (rv != CKR_OK) {
+        goto done;
+    }
+
+    rv = p11prov_CreateObject(key->ctx, p11prov_session_handle(session),
+                              template, na, &key->handle);
+    if (rv != CKR_OK) {
+        goto done;
+    }
+
+    key->slotid = slot;
+
+    rv = CKR_OK;
+
+done:
+    if (rv == CKR_OK) {
+        /* we just created an ephemeral key on this session, ensure the
+        * session is not closed until the key goes away */
+        p11prov_obj_set_session_ref(key, session);
+    }
+    p11prov_return_session(session);
     return rv;
 }
 
@@ -5452,7 +5628,7 @@ CK_RV p11prov_obj_import_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
         return CKR_ARGUMENTS_BAD;
     }
 
-    if (type == CKK_ML_DSA || type == CKK_SLH_DSA) {
+    if (type == CKK_ML_DSA || type == CKK_SLH_DSA || type == CKK_ML_KEM) {
         key->data.key.param_set = param_set;
     }
 
@@ -5893,6 +6069,52 @@ P11PROV_OBJ *mock_pub_ec_key(P11PROV_CTX *ctx, CK_ATTRIBUTE_TYPE type,
         p11prov_obj_free(key);
         return NULL;
     }
+
+    return key;
+}
+
+/* R15 — server role: mirrors mock_pub_ec_key above, for the identical
+ * reason (see p11prov_ec_gen_init's comment and p11prov_mlkem_gen_init_int's
+ * own copy of it) — OpenSSL's TLS server-side KEM group handling requests
+ * a parameters-only object (empirically observed: selection ==
+ * OSSL_KEYMGMT_SELECT_ALL_PARAMETERS, not OSSL_KEYMGMT_SELECT_KEYPAIR) to
+ * hold the negotiated group's shape before the peer's actual public share
+ * arrives via import. Unlike EC there is no curve/params blob to carry —
+ * only the ML-KEM parameter set (512/768/1024), already known from which
+ * per-variant gen_init ran. */
+P11PROV_OBJ *mock_pub_mlkem_key(P11PROV_CTX *ctx,
+                                CK_ML_KEM_PARAMETER_SET_TYPE param_set)
+{
+    P11PROV_OBJ *key;
+    CK_ULONG key_size;
+
+    switch (param_set) {
+    case CKP_ML_KEM_512:
+        key_size = ML_KEM_512_PK_SIZE;
+        break;
+    case CKP_ML_KEM_768:
+        key_size = ML_KEM_768_PK_SIZE;
+        break;
+    case CKP_ML_KEM_1024:
+        key_size = ML_KEM_1024_PK_SIZE;
+        break;
+    default:
+        P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE, "Unknown ML-KEM param set");
+        return NULL;
+    }
+
+    key =
+        p11prov_obj_new(ctx, CK_UNAVAILABLE_INFORMATION,
+                        CK_P11PROV_IMPORTED_HANDLE, CK_UNAVAILABLE_INFORMATION);
+    if (!key) {
+        return NULL;
+    }
+
+    key->class = CKO_PUBLIC_KEY;
+    key->data.key.type = CKK_ML_KEM;
+    key->data.key.param_set = param_set;
+    key->data.key.size = key_size;
+    key->data.key.bit_size = key_size * 8;
 
     return key;
 }

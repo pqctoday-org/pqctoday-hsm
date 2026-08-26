@@ -1,21 +1,26 @@
-# OpenSSL provider remediation plan, phase 3 (2026-08-25) — R12/R13/R14 EXECUTED, R15-R17 still plan-only
+# OpenSSL provider remediation plan, phase 3 (2026-08-25) — R12/R13/R14/R15 EXECUTED, R16-R17 still plan-only
 
-**Execution update (2026-08-25/26):** R12, R13, and R14 have been
+**Execution update (2026-08-25/26):** R12, R13, R14, and R15 have been
 executed and landed — see
 `docs/openssl-provider-coverage-audit-2026-08-25.md` §6's "R12 (TLS13-
-KDF root cause + fix) and R13" and "R14 (Rust `C_GetSlotList` root
-cause + fix)" entries for the full mechanism of each. R12's own written
-hypothesis (missing `CKM_HKDF_DATA` support) turned out to be only the
-first of four layered bugs, not the whole picture; R14's own written
-hypothesis correctly named two candidate defects but did not know which
-one (or both) actually mattered until sabotage-testing settled it (one
-did, one didn't but was kept as a real hardening) — the plan's own
-"confirm before fixing" rule is exactly why neither wrong or incomplete
-first hypothesis shipped unverified. R12/R13/R14's own sections below
-are left as originally written (the plan, not the result) per this
-project's append-only convention; do not edit them to match the
-outcome. **Harness: `PASS=27 FAIL=0 XFAIL=0 XPASS=0` — zero remaining
-known gaps.** R15–R17 remain plan-only, not executed.
+KDF root cause + fix) and R13", "R14 (Rust `C_GetSlotList` root
+cause + fix)", and "R15 (fully token-backed TLS server role)" entries
+for the full mechanism of each. R12's own written hypothesis (missing
+`CKM_HKDF_DATA` support) turned out to be only the first of four
+layered bugs, not the whole picture; R14's own written hypothesis
+correctly named two candidate defects but did not know which one (or
+both) actually mattered until sabotage-testing settled it (one did, one
+didn't but was kept as a real hardening); R15's own written hypothesis
+(peer-share import into the ML-KEM keymgmt) named the real, largest gap
+but the actual mechanism turned out to be the generic `SET_PARAMS`
+dispatch, not keymgmt IMPORT, plus five more independent bugs surfaced
+only by getting further into a real handshake each time — the plan's
+own "confirm before fixing" rule is exactly why no wrong or incomplete
+first hypothesis shipped unverified. R12/R13/R14/R15's own sections
+below are left as originally written (the plan, not the result) per
+this project's append-only convention; do not edit them to match the
+outcome. **Harness: `PASS=28 FAIL=0 XFAIL=0 XPASS=0` — zero remaining
+known gaps.** R16–R17 remain plan-only, not executed.
 
 Scope: the gaps that remain **after** the phase-2 execution run
 (commits `97420e8` R3-core, `1e6576b` R2, `493d354` R4, `183e775`

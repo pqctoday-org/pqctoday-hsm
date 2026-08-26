@@ -80,6 +80,26 @@ static int p11prov_kem_encapsulate(void *ctx, unsigned char *out, size_t *outlen
         return 0;
     }
 
+    /* R15 — server role: materialize the peer's public key onto a real
+     * slot BEFORE any session lookup keyed by that slot. A freshly
+     * imported/mock peer key (see mock_pub_mlkem_key /
+     * p11prov_mlkem_keymgmt_set_params_fn) has slotid ==
+     * CK_UNAVAILABLE_INFORMATION until p11prov_obj_get_handle triggers
+     * its lazy on-token materialization — but p11prov_try_session_ref
+     * reads the object's CURRENT slotid to validate the mechanism
+     * against that slot (p11prov_check_mechanism), and CK_UNAVAILABLE_
+     * INFORMATION never matches a real slot's id, so it silently fails
+     * with CKR_MECHANISM_INVALID before ever reaching the object's own
+     * materialization step. Live-traced: p11prov_kem_init succeeds and
+     * is reached with the correctly populated object, but this function
+     * returned 0 here with zero log output, immediately after — every
+     * existing decapsulate-exercising test never hit this ordering
+     * issue because its key was always already materialized (a real
+     * token object from keygen), never a fresh mock. Getting the handle
+     * first — same as decapsulate already does a few lines below in
+     * this same file — fixes the ordering for both.  */
+    hKey = p11prov_obj_get_handle(kemctx->key);
+
     if (kemctx->session == NULL) {
         ret = p11prov_try_session_ref(kemctx->key, kemctx->mechtype, false, false, &kemctx->session);
         if (ret != CKR_OK || kemctx->session == NULL) {
@@ -88,9 +108,8 @@ static int p11prov_kem_encapsulate(void *ctx, unsigned char *out, size_t *outlen
     }
 
     session = p11prov_session_handle(kemctx->session);
-    hKey = p11prov_obj_get_handle(kemctx->key);
 
-    /* 
+    /*
      * PKCS#11 v3.2 C_EncapsulateKey Size querying:
      * If out is NULL, returns required length of ciphertext in outlen
      */
@@ -102,16 +121,30 @@ static int p11prov_kem_encapsulate(void *ctx, unsigned char *out, size_t *outlen
             return 0;
         }
         *outlen = ctlen;
+        /* R15: encapsulate's size-query must report BOTH output sizes —
+         * the ciphertext (outlen, above) AND the shared secret
+         * (secretlen) — matching FIPS 203's fixed 32-byte ML-KEM shared
+         * secret (same constant p11prov_kem_decapsulate uses a few
+         * lines below for its own size query). Leaving secretlen
+         * untouched left it at the caller's zero-initialized default;
+         * OpenSSL's ssl_encapsulate() (ssl/s3_lib.c) treats pmslen==0
+         * as a hard failure even though ctlen was already correct —
+         * live-traced: the PKCS#11 call itself succeeded (ctlen=1088,
+         * CKR_OK) and this was still the reason the handshake failed. */
+        if (secretlen != NULL) {
+            *secretlen = 32;
+        }
         return 1;
     }
 
     /* Actually Encapsulate */
     CK_ULONG out_len_ck = *outlen;
-    CK_ATTRIBUTE ts[3];
+    CK_ATTRIBUTE ts[4];
     CK_ULONG tlen = 0;
     CK_OBJECT_CLASS class = CKO_SECRET_KEY;
     CK_KEY_TYPE type = CKK_GENERIC_SECRET;
     CK_BBOOL extractable = CK_TRUE;
+    CK_BBOOL not_private = CK_FALSE;
 
     ts[0].type = CKA_CLASS;
     ts[0].pValue = &class;
@@ -122,7 +155,18 @@ static int p11prov_kem_encapsulate(void *ctx, unsigned char *out, size_t *outlen
     ts[2].type = CKA_EXTRACTABLE;
     ts[2].pValue = &extractable;
     ts[2].ulValueLen = sizeof(extractable);
-    tlen = 3;
+    /* R15: the C++ engine defaults CKA_PRIVATE to true when a template
+     * omits it, requiring a login this session was never given (server
+     * role: no private-key op of its own precedes this, unlike every
+     * existing decapsulate-exercising test, which happens to always run
+     * after a keygen/URI-decode that already logged the token in — the
+     * identical omission there is a latent bug too, just never
+     * triggered). Live-observed via a real handshake before this line
+     * was added. */
+    ts[3].type = CKA_PRIVATE;
+    ts[3].pValue = &not_private;
+    ts[3].ulValueLen = sizeof(not_private);
+    tlen = 4;
 
     ret = p11prov_EncapsulateKey(kemctx->provctx, session, &mech, hKey, ts, tlen, out, &out_len_ck, &hSecretHandle);
     if (ret != CKR_OK) {
@@ -199,11 +243,12 @@ static int p11prov_kem_decapsulate(void *ctx, unsigned char *out, size_t *outlen
     session = p11prov_session_handle(kemctx->session);
     hKey = p11prov_obj_get_handle(kemctx->key);
 
-    CK_ATTRIBUTE ts[3];
+    CK_ATTRIBUTE ts[4];
     CK_ULONG tlen = 0;
     CK_OBJECT_CLASS class = CKO_SECRET_KEY;
     CK_KEY_TYPE type = CKK_GENERIC_SECRET;
     CK_BBOOL extractable = CK_TRUE;
+    CK_BBOOL not_private = CK_FALSE;
 
     ts[0].type = CKA_CLASS;
     ts[0].pValue = &class;
@@ -214,7 +259,13 @@ static int p11prov_kem_decapsulate(void *ctx, unsigned char *out, size_t *outlen
     ts[2].type = CKA_EXTRACTABLE;
     ts[2].pValue = &extractable;
     ts[2].ulValueLen = sizeof(extractable);
-    tlen = 3;
+    /* R15 consistency fix: same CKA_PRIVATE-defaults-true omission as
+     * encapsulate's template above — latent here too (masked by every
+     * existing test running after a login-requiring keygen/decode). */
+    ts[3].type = CKA_PRIVATE;
+    ts[3].pValue = &not_private;
+    ts[3].ulValueLen = sizeof(not_private);
+    tlen = 4;
 
     ret = p11prov_DecapsulateKey(kemctx->provctx, session, &mech, hKey, ts, tlen, (unsigned char*)in, inlen, &hSecretHandle);
     if (ret != CKR_OK) {
@@ -320,9 +371,10 @@ static void *p11prov_mlkem_keymgmt_new_fn(void *provctx)
     P11PROV_CTX *ctx = (P11PROV_CTX *)provctx;
     CK_RV ret = p11prov_ctx_status(ctx);
     if (ret != CKR_OK) return NULL;
-    return p11prov_obj_new(provctx, CK_UNAVAILABLE_INFORMATION,
-                           CK_P11PROV_IMPORTED_HANDLE,
-                           CK_UNAVAILABLE_INFORMATION);
+    void *k = p11prov_obj_new(provctx, CK_UNAVAILABLE_INFORMATION,
+                              CK_P11PROV_IMPORTED_HANDLE,
+                              CK_UNAVAILABLE_INFORMATION);
+    return k;
 }
 
 static void p11prov_mlkem_keymgmt_free_fn(void *key)
@@ -515,6 +567,172 @@ static const OSSL_PARAM *p11prov_mlkem_keymgmt_export_types_fn(int selection)
     return NULL;
 }
 
+/* R15 — server role: import a peer's raw public share (arrives as plain
+ * octet-string bytes from a TLS ClientHello, not any existing token
+ * object) so C_EncapsulateKey has something to operate on. Modeled on
+ * keymgmt.c's p11prov_mldsa_import — the actual work (attribute template
+ * construction, spec-size validation, lazy on-token materialization at
+ * the point a real handle is first requested) lives in objects.c's
+ * prep_mlkem_find / p11prov_store_mlkem_public_key, reached generically
+ * through p11prov_obj_import_key. Scoped to the public-key case only:
+ * ML-KEM private keys already exist via the R3b keygen path, so import
+ * only needs to cover the one new case TLS's server role actually needs. */
+static int p11prov_mlkem_keymgmt_import_fn(void *keydata, int selection,
+                                           const OSSL_PARAM params[],
+                                           CK_ML_KEM_PARAMETER_SET_TYPE param_set)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    CK_RV rv;
+
+    P11PROV_debug("mlkem import %p", key);
+
+    if (!key) {
+        return RET_OSSL_ERR;
+    }
+    if ((selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) == 0) {
+        P11PROV_raise(p11prov_obj_get_prov_ctx(key), CKR_KEY_INDIGESTIBLE,
+                      "ML-KEM import only supports the public key (server "
+                      "peer-share role) — private keys come from keygen");
+        return RET_OSSL_ERR;
+    }
+
+    rv = p11prov_obj_import_key(key, CKK_ML_KEM, CKO_PUBLIC_KEY, param_set,
+                                params);
+    if (rv != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+    return RET_OSSL_OK;
+}
+
+/* R15 — server role, the actual missing piece: TLS 1.3's server-side
+ * key_share processing does NOT call keymgmt IMPORT to receive the
+ * client's public share. Traced directly against the real OpenSSL 3.6.3
+ * source (ssl/statem/extensions_srvr.c:tls_accept_ksgroup ->
+ * ssl/t1_lib.c:tls13_set_encoded_pub_key ->
+ * crypto/evp/p_lib.c:EVP_PKEY_set1_encoded_public_key): for a
+ * provider-native key it calls EVP_PKEY_set_octet_string_param(pkey,
+ * OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, ...), which dispatches to the
+ * keymgmt's plain OSSL_FUNC_KEYMGMT_SET_PARAMS — a generic function that
+ * fills in an ALREADY-EXISTING key object (the one gen_init/gen just
+ * built as an empty parameters-only placeholder), not IMPORT (which is
+ * for constructing a brand-new object and explicitly refuses to run on
+ * one that already has a class set — p11prov_obj_import_key's own "Non
+ * empty object" guard). No keymgmt in this whole provider registered
+ * SET_PARAMS before this — likely also affects EC/ECDH's own server
+ * role, not just ML-KEM, though that's a separate finding, not chased
+ * here. Populates the mock object's attrs directly rather than routing
+ * through p11prov_obj_import_key, for exactly the reason above. */
+static int p11prov_mlkem_keymgmt_set_params_fn(void *keydata,
+                                               const OSSL_PARAM params[])
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    const OSSL_PARAM *p;
+    CK_ATTRIBUTE value_attr = { 0 };
+    CK_ATTRIBUTE pset_attr = { 0 };
+    CK_ULONG key_size;
+    CK_ULONG param_set;
+    CK_RV rv;
+
+    if (!key) {
+        return RET_OSSL_ERR;
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY);
+    if (!p) {
+        /* Nothing relevant in this params[] batch; not an error — other
+         * keymgmts' SET_PARAMS handlers behave the same way for params
+         * they don't recognize. */
+        return RET_OSSL_OK;
+    }
+    if (p->data == NULL || p->data_size == 0) {
+        P11PROV_raise(p11prov_obj_get_prov_ctx(key), CKR_KEY_INDIGESTIBLE,
+                      "Empty ML-KEM encoded public key");
+        return RET_OSSL_ERR;
+    }
+    key_size = p11prov_obj_get_key_size(key);
+    if (p->data_size != key_size) {
+        P11PROV_raise(p11prov_obj_get_prov_ctx(key), CKR_KEY_INDIGESTIBLE,
+                      "Unexpected ML-KEM public key size %zu (expected %lu)",
+                      p->data_size, (unsigned long)key_size);
+        return RET_OSSL_ERR;
+    }
+
+    /* Mock object from gen(): class/type/param_set/size already set
+     * (mock_pub_mlkem_key), no attrs yet — add the two the rest of this
+     * provider's ML-KEM code expects to find (prep_mlkem_find /
+     * p11prov_store_mlkem_public_key both read CKA_VALUE + CKA_
+     * PARAMETER_SET off the object directly). */
+    value_attr.type = CKA_VALUE;
+    value_attr.pValue = OPENSSL_memdup(p->data, p->data_size);
+    if (!value_attr.pValue) {
+        return RET_OSSL_ERR;
+    }
+    value_attr.ulValueLen = p->data_size;
+
+    param_set = p11prov_obj_get_key_param_set(key);
+    pset_attr.type = CKA_PARAMETER_SET;
+    pset_attr.pValue = OPENSSL_memdup(&param_set, sizeof(param_set));
+    if (!pset_attr.pValue) {
+        OPENSSL_free(value_attr.pValue);
+        return RET_OSSL_ERR;
+    }
+    pset_attr.ulValueLen = sizeof(param_set);
+
+    rv = p11prov_obj_add_attr(key, &value_attr);
+    if (rv != CKR_OK) {
+        OPENSSL_free(value_attr.pValue);
+        OPENSSL_free(pset_attr.pValue);
+        return RET_OSSL_ERR;
+    }
+    rv = p11prov_obj_add_attr(key, &pset_attr);
+    if (rv != CKR_OK) {
+        OPENSSL_free(pset_attr.pValue);
+        return RET_OSSL_ERR;
+    }
+
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_mlkem_keymgmt_settable_params_fn(void *provctx)
+{
+    static const OSSL_PARAM settable[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return settable;
+}
+
+static int p11prov_mlkem512_import(void *keydata, int selection,
+                                   const OSSL_PARAM params[])
+{
+    return p11prov_mlkem_keymgmt_import_fn(keydata, selection, params,
+                                           CKP_ML_KEM_512);
+}
+
+static int p11prov_mlkem768_import(void *keydata, int selection,
+                                   const OSSL_PARAM params[])
+{
+    return p11prov_mlkem_keymgmt_import_fn(keydata, selection, params,
+                                           CKP_ML_KEM_768);
+}
+
+static int p11prov_mlkem1024_import(void *keydata, int selection,
+                                    const OSSL_PARAM params[])
+{
+    return p11prov_mlkem_keymgmt_import_fn(keydata, selection, params,
+                                           CKP_ML_KEM_1024);
+}
+
+static const OSSL_PARAM *p11prov_mlkem_keymgmt_import_types_fn(int selection)
+{
+    static const OSSL_PARAM types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) return types;
+    return NULL;
+}
+
 /* Shared keymgmt table (umbrella — kept for internal use).
  * Per-variant aliases below are what OpenSSL's algorithm fetch machinery
  * needs: each variant must be registered under its own name so that
@@ -562,6 +780,13 @@ const OSSL_DISPATCH p11prov_mlkem512_keymgmt_functions[] = {
     { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))p11prov_mlkem_keymgmt_export_fn },
     { OSSL_FUNC_KEYMGMT_EXPORT_TYPES,
       (void (*)(void))p11prov_mlkem_keymgmt_export_types_fn },
+    { OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))p11prov_mlkem512_import },
+    { OSSL_FUNC_KEYMGMT_IMPORT_TYPES,
+      (void (*)(void))p11prov_mlkem_keymgmt_import_types_fn },
+    { OSSL_FUNC_KEYMGMT_SET_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_set_params_fn },
+    { OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_settable_params_fn },
     { 0, NULL },
 };
 
@@ -586,6 +811,13 @@ const OSSL_DISPATCH p11prov_mlkem768_keymgmt_functions[] = {
     { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))p11prov_mlkem_keymgmt_export_fn },
     { OSSL_FUNC_KEYMGMT_EXPORT_TYPES,
       (void (*)(void))p11prov_mlkem_keymgmt_export_types_fn },
+    { OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))p11prov_mlkem768_import },
+    { OSSL_FUNC_KEYMGMT_IMPORT_TYPES,
+      (void (*)(void))p11prov_mlkem_keymgmt_import_types_fn },
+    { OSSL_FUNC_KEYMGMT_SET_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_set_params_fn },
+    { OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_settable_params_fn },
     { 0, NULL },
 };
 
@@ -610,5 +842,12 @@ const OSSL_DISPATCH p11prov_mlkem1024_keymgmt_functions[] = {
     { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))p11prov_mlkem_keymgmt_export_fn },
     { OSSL_FUNC_KEYMGMT_EXPORT_TYPES,
       (void (*)(void))p11prov_mlkem_keymgmt_export_types_fn },
+    { OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))p11prov_mlkem1024_import },
+    { OSSL_FUNC_KEYMGMT_IMPORT_TYPES,
+      (void (*)(void))p11prov_mlkem_keymgmt_import_types_fn },
+    { OSSL_FUNC_KEYMGMT_SET_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_set_params_fn },
+    { OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_mlkem_keymgmt_settable_params_fn },
     { 0, NULL },
 };

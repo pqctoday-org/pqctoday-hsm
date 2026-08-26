@@ -3017,7 +3017,13 @@ static void *p11prov_mlkem_gen_init_int(void *provctx, int selection,
         return NULL;
     }
 
-    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) == 0) {
+    /* R15 — server role: accept a domain/other-parameters-only selection
+     * too, not just a full keypair request. OpenSSL's TLS server-side KEM
+     * group handling does exactly this (same reasoning as
+     * p11prov_ec_gen_init's own comment for ECDH): set the expected
+     * parameters (which ML-KEM param set / group) first, then import the
+     * peer's public share into the resulting object once it arrives. */
+    if ((selection & OSSL_KEYMGMT_SELECT_ALL) == 0) {
         P11PROV_raise(provctx, CKR_ARGUMENTS_BAD, "Unsupported selection");
         return NULL;
     }
@@ -3032,7 +3038,11 @@ static void *p11prov_mlkem_gen_init_int(void *provctx, int selection,
     ctx->type = CKK_ML_KEM;
     ctx->data.mlkem.param_set = param_set;
 
-    ctx->mechanism.mechanism = CKM_ML_KEM_KEY_PAIR_GEN;
+    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) != 0) {
+        ctx->mechanism.mechanism = CKM_ML_KEM_KEY_PAIR_GEN;
+    } else {
+        ctx->mechanism.mechanism = CK_UNAVAILABLE_INFORMATION;
+    }
 
     ret = p11prov_common_gen_set_params(ctx, params);
     if (ret != RET_OSSL_OK) {
@@ -3098,6 +3108,14 @@ void *p11prov_mlkem_gen(void *genctx, OSSL_CALLBACK *cb_fn, void *cb_arg)
     int privtsize = MLKEM_PRIVKEY_TMPL_SIZE;
 
     P11PROV_debug("mlkem gen %p %p %p", ctx, cb_fn, cb_arg);
+
+    if (ctx->mechanism.mechanism == CK_UNAVAILABLE_INFORMATION) {
+        /* R15 — server role: OpenSSL asked for a parameters-only object
+         * (see p11prov_mlkem_gen_init_int's comment) that it will fill
+         * with the peer's public share later via import. Same pattern as
+         * p11prov_ec_gen's own CK_UNAVAILABLE_INFORMATION branch. */
+        return mock_pub_mlkem_key(ctx->provctx, ctx->data.mlkem.param_set);
+    }
 
     ret = p11prov_common_gen(ctx, pubkey_template, privkey_template, pubtsize,
                              privtsize, cb_fn, cb_arg, &key);

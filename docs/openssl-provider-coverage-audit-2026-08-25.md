@@ -597,6 +597,158 @@ fix). **Harness: `PASS=27 FAIL=0 XFAIL=0 XPASS=0`** — zero remaining
 known gaps in this harness for the first time in this remediation
 effort's history.
 
+**Further update (2026-08-26, phase-3 execution continued) — R15 (fully
+token-backed TLS server role), DONE:** the phase-3 plan's own stated gate
+(user decision 2026-08-25: token-resident ML-DSA certificate key AND
+token-performed KEM encapsulation, not a minimal encap-only proof) is now
+met end-to-end. No prior server-role code existed in this provider at all
+before this item — everything below is genuinely new, not a fix to
+something that previously half-worked. Six independent, root-caused bugs,
+each found by re-instrumenting and re-testing after the previous fix
+changed the failure symptom, matching this session's standing "confirm
+before fixing" discipline:
+
+1. **`gen_init` rejected the TLS server's actual selection value.**
+   `p11prov_mlkem_gen_init_int` required `OSSL_KEYMGMT_SELECT_KEYPAIR`;
+   live trace showed OpenSSL passes `selection=0x84`
+   (`OSSL_KEYMGMT_SELECT_ALL`, i.e. domain+other-parameters-only) when
+   building the server-side placeholder object for the peer's eventual
+   public share. Widened the accepted-selection check to
+   `OSSL_KEYMGMT_SELECT_ALL` and branched the mechanism assignment,
+   modeled directly on the already-working `p11prov_ec_gen_init`.
+2. **The generic keymgmt `SET_PARAMS`/`SETTABLE_PARAMS` functions were
+   entirely absent** — the actual missing piece, confirmed by tracing the
+   real call chain in the OpenSSL 3.6.3 source
+   (`ssl/statem/extensions_srvr.c:tls_accept_ksgroup` →
+   `ssl/t1_lib.c:tls13_set_encoded_pub_key` →
+   `crypto/evp/p_lib.c:EVP_PKEY_set1_encoded_public_key` →
+   `EVP_PKEY_set_octet_string_param(..., OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY,
+   ...)`), not guessed from a hunch. TLS 1.3's server-side key_share
+   processing installs the peer's public key into the placeholder object
+   gen_init/gen already built via this generic dispatch pair — not via
+   keymgmt IMPORT, which explicitly refuses to run on an already-non-empty
+   object. Added `p11prov_mlkem_keymgmt_set_params_fn` +
+   `..._settable_params_fn`, registered in all three ML-KEM param-set
+   dispatch tables. **Noted, not chased**: no keymgmt in this whole
+   provider appears to have registered `SET_PARAMS` before this — EC/ECDH's
+   own server role likely has the identical latent gap. Flagged as a
+   separate, out-of-scope finding rather than silently left undocumented.
+3. **Two independent `CKA_PRIVATE` gaps**, both live-traced to the C++
+   engine's own default (`CK_BBOOL getBooleanValue(CKA_PRIVATE, true)` —
+   confirmed via direct grep across `SoftHSM_objects.cpp`): any
+   object-creation template omitting an explicit `CKA_PRIVATE` entry
+   silently becomes private, requiring a login the current session may
+   never have established.
+   - `objects.c`'s `p11prov_store_mlkem_public_key` (materializing the
+     peer's public share onto a real token object) was missing it —
+     fixed by adding an explicit `{ CKA_PRIVATE, &val_false, ... }` entry,
+     modeled on the sibling `p11prov_store_mldsa_public_key`.
+   - `kem/mlkem.c`'s `p11prov_kem_encapsulate`'s own output-secret
+     template (`ts[3]`) was missing it too — a second, independent
+     instance of the same class of bug, not a duplicate report — fixed by
+     widening to `ts[4]` with the same explicit `CKA_PRIVATE = CK_FALSE`
+     entry. Applied the identical fix to `p11prov_kem_decapsulate`'s
+     matching template for consistency, but that half was **not**
+     independently sabotage-tested — reported at that true confidence
+     level, not folded into the encapsulate finding's stronger proof.
+   - **A red herring along the way**: the first "User is not authorized"
+     observed while chasing this traced, on exhaustive instrumentation, to
+     an unrelated cause — the test setup's own plain-software RSA
+     certificate key being routed through the provider (global
+     `propquery=pkcs11`) for an operation that had nothing to do with
+     ML-KEM. Not a bug; a test-design issue, resolved by switching to the
+     properly-scoped token-resident-certificate setup R15's own gate
+     requires anyway.
+4. **`p11prov_kem_encapsulate` looked up its session before the key was
+   materialized onto a real slot.** A freshly built mock/placeholder
+   object (from fix #1/#2's path) has `slotid ==
+   CK_UNAVAILABLE_INFORMATION` until `p11prov_obj_get_handle` triggers its
+   lazy on-token materialization — but the session lookup
+   (`p11prov_try_session_ref`) read the object's slotid to validate the
+   mechanism against that slot, and `CK_UNAVAILABLE_INFORMATION` never
+   matches a real slot, silently failing `CKR_MECHANISM_INVALID` before
+   materialization ever ran. Fixed by moving the `get_handle` call before
+   the session lookup — every existing decapsulate-exercising test never
+   hit this because its key was always already materialized (a real token
+   object from keygen), never a fresh mock.
+5. **The encapsulate size-query branch never reported the shared-secret
+   length.** `EVP_PKEY_encapsulate`'s query call
+   (`ssl/s3_lib.c:ssl_encapsulate`) checks `pmslen == 0` as a hard failure;
+   the size-query path set `*outlen` (ciphertext size) but left
+   `*secretlen` untouched at the caller's zero default. Live-traced: the
+   PKCS#11 call itself succeeded (`ctlen=1088, CKR_OK`) and this was still
+   why the handshake failed. Fixed by setting `*secretlen = 32` — FIPS
+   203's fixed ML-KEM shared-secret size for all three parameter sets.
+6. **The digest `dupctx` fallback silently emptied the running TLS
+   transcript hash after its first use.** Found only after fixes #1–#5
+   got the handshake past a successful encapsulate to a new failure,
+   `ssl_handshake_hash: internal error` (`ssl/ssl_lib.c`, the
+   `EVP_MD_CTX_copy_ex`/`EVP_DigestFinal_ex` branch specifically — pinned
+   by exact line number against the real `openssl-3.5.6` and `3.6.3`
+   sources, not inferred). Root cause, confirmed via
+   `PKCS11_PROVIDER_DEBUG` trace: SoftHSM correctly returns
+   `CKR_STATE_UNSAVEABLE` (84) from `C_GetOperationState` for an in-flight
+   digest session (most tokens can't export mid-stream digest state — the
+   vendored `digests.c`'s own comment already anticipated this). The
+   existing fallback on that failure *moved* the live session to the
+   duplicate and left the original with none — correct for a duplicate
+   that's used once and discarded, but TLS 1.3 duplicates the SAME running
+   transcript-hash context twice (once for CertificateVerify, again for
+   Finished): the second duplication found an already-empty original and
+   `C_DigestFinal` failed with `CKR_SESSION_HANDLE_INVALID` (179) — traced
+   to that exact PKCS#11 return code, not guessed. This is a pre-existing
+   gap in the vendored `pkcs11-provider` itself, exposed for the first
+   time by R15 because no earlier scenario duplicated a token-backed
+   running digest more than once. Fixed by adding a software shadow buffer
+   of everything fed to `update()`, consulted only by `dupctx()`'s
+   fallback: when `GetOperationState` fails, replay the shadow into a
+   freshly opened session for the *copy*, leaving the original session
+   and context completely untouched. This is the one fix in this list
+   that was independently **sabotage-tested**: reverting only this change
+   (`git stash` on `digests.c` alone, everything else in place) reproduces
+   T15's exact original failure and only T15 fails — 27 other harness
+   cases, including T13 (which also exercises `dupctx` but never
+   duplicates the same live context twice), stay green; restoring it makes
+   T15 pass again.
+
+**A second false-pass hazard, distinct from R13's original finding**: the
+very first end-to-end handshake attempt against a completely fresh test
+arena succeeded cleanly with zero errors — but with **zero** token KEM
+activity, because nothing forced the server's ephemeral ML-KEM
+group-keygen/encapsulate through the token; OpenSSL's own `default`
+provider implements ML-KEM natively (`openssl list -kem-algorithms
+-provider default` lists `MLKEM768` and friends) and silently won that
+selection with no `-propquery` pinning it. The certificate's own
+`pkcs11:`-URI-identified ML-DSA key forces signing onto the token
+regardless of propquery, so a green handshake with a valid signature is
+*not* sufficient evidence the KEM half is token-backed either — exactly
+the class of false pass R13 exists to prevent, now confirmed live a
+second time in a scenario R13's own T13 case doesn't cover. T15 pins
+`-propquery "?provider=pkcs11"` on the server and ships the same
+negative-control-twin discipline. One adaptation was needed: T13's plain
+`"Decrypting N bytes"` regex isn't precise enough here, because the same
+generic log line *also* fires (in both the positive and negative arms)
+for the certificate's own ML-DSA private key being unwrapped from at-rest
+storage to sign with — a propquery-independent operation. Checked live
+against both arms' full decrypt-size histograms: `"Decrypting 64 bytes
+into buffer of 80 bytes"` is the one pattern that appears only when the
+KEM-derived secret itself is a token object (74 occurrences pinned, 0
+unpinned) — that exact string is T15's marker instead.
+
+**Result**: `s_server`/`s_client` with a token-resident ML-DSA-65
+certificate and `-groups MLKEM768 -propquery "?provider=pkcs11"` on the
+server now completes a full TLS 1.3 handshake —
+`Negotiated TLS1.3 group: MLKEM768`, `Peer signature type: mldsa65`,
+`New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384`, `Verify return code: 0
+(ok)` — with the CertificateVerify signature and the KEM encapsulation
+both independently engine-log verified, matching the plan's own stated
+proof requirement verbatim. All temporary diagnostic instrumentation
+(`R15TRACE-*` and friends) was stripped before this was considered done.
+Both engines' full test suites remain green (C++: 8/8 CTest suites; Rust:
+410/410 unit tests, zero regressions from the `digests.c` change).
+**Harness: `PASS=28 FAIL=0 XFAIL=0 XPASS=0`** — one case gained (T15),
+zero regressions, zero remaining known gaps.
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:
