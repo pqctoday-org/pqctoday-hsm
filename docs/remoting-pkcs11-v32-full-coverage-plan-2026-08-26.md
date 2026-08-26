@@ -157,78 +157,192 @@ categories gets a one-line disposition in a machine-readable ledger
 if a compliance-report category exists with no ledger entry — the same
 "no silent gaps" ratchet the row-level-ratchet feedback taught.
 
-## 4. Engine prerequisites (the real cost driver)
+## 4. Engine prerequisites — REVISED after RW0/RW1 execution (2026-08-26)
 
-The engine's `native::` layer (safe, handle-based) covers much of the
-need; the rest exists only behind the wasm-ABI `ffi::C_*` entry points
-(pointer-based, unsafe on 64-bit hosts) and needs thin `native::`
-wrappers added in the `rust/` workspace **first** (its own gate step
-already covers them):
+**The original framing of this section was pessimistic and is now
+corrected by hard evidence.** It assumed every `ffi::C_*` entry point is
+"wasm-ABI, pointer-based, unsafe on 64-bit hosts" and therefore each verb
+needs a new `native::` wrapper added to the `rust/` crate first. RW0/RW1
+proved otherwise: `verbs_v32` calls `ffi::C_DigestInit/Update/Final`,
+`C_Sign*`, `C_Verify*`, `C_GetAttributeValue`, `C_GetMechanismList/Info`,
+`C_GetSessionInfo/TokenInfo`, `C_GenerateRandom`, `C_OpenSession` **directly
+at native width** and every three-transport parity case passed. The reason:
+the `ck_param` rework (see `rust/src/ck_param.rs`'s module doc) already
+made mechanism-parameter reads ABI-width-correct, and `C_GetAttributeValue`
+walks its template as `*mut usize` (native width). The differential harness
+`dlopen`s these same symbols natively on every gate run — the native C ABI
+path is tested, load-bearing infrastructure, not a hazard.
 
-Already available (wrap directly): object destroy/find/get/set-attribute,
-AES + generic-secret keygen, full asymmetric keygen incl. seeded variants,
-the entire key-import/register family, encrypt/decrypt (GCM/ECB/CBC/CTR/
-ChaCha20(-Poly1305)/RSA-OAEP), raw-KEK AES key wrap/unwrap, deterministic
-KEM, digest one-shot (SHA-256/384/512), concat/digest-derivation/combiner,
-ECDH agree, hybrid KEM, split-key, session lifecycle incl. login/logout,
-PSS-salt and full-knob PQC sign variants, `SUPPORTED_MECHS` (public const).
+**So the real per-function gate is a NATIVE-WIDTH AUDIT, not a wrapper
+rewrite.** For each not-yet-mirrored `C_*`, before wiring a verb:
 
-Needs new `native::` wrappers (ordered by how many categories they
-unblock): **(a)** generic `C_DeriveKey` incl. PBKDF2 + SP800-108 (today
-FFI-private) and public HKDF; **(b)** digest FSM + SHA-3/KMAC surface;
-**(c)** sign/verify/encrypt/decrypt Init/Update/Final FSMs (state
-machinery exists in `rust/src/state.rs`, needs safe entry points);
-**(d)** template-form `C_GenerateKey`/`C_CreateObject`/
-`C_GetAttributeValue` (multi-attr); **(e)** handle-based
-`C_WrapKey`/`C_UnwrapKey` (+authenticated); **(f)** v3.2
-`C_EncapsulateKey`/`C_DecapsulateKey` (key-object+template form);
-**(g)** message-based §5.20 family; **(h)** `C_GenerateRandom` (trivial);
-**(i)** `C_GetMechanismInfo`, token/session info getters.
+1. Read the entry point's parameter reads. If every caller-pointer read
+   goes through `ck_param` (mechanisms, param structs) or an explicit
+   `*mut usize` walk (attribute templates), the verb calls it **directly**
+   — zero engine-crate change. This was true for the entire RW0/RW1 slice.
+2. If any read is a raw `*(p as *const u32)` cast of a `CK_ULONG`/pointer
+   field, that entry point is width-buggy on LP64 and MUST NOT be called
+   natively as-is. Two options, in preference order: (a) fix the read to
+   go through `ck_param` in the `rust/` crate (a real engine bug fix,
+   gated by the rust-engine test step — the `ck_param` module doc lists
+   four such fixes already made, so this is a known, bounded activity), or
+   (b) if the fix is out of scope for this program, add a thin typed
+   `native::` wrapper that marshals correctly and call THAT. Prefer (a):
+   it fixes the bug for every caller, not just remoting.
+
+**Genuinely still FFI-private (no native OR safe ABI-clean path yet)** —
+these need engine-crate work regardless, and are the true prerequisites:
+- **PBKDF2 + SP800-108 KBKDF**: only inside `C_DeriveKey`'s private helpers
+  (`rust/src/ffi.rs:7711/7736/7769`), no `native::` surface at all. RW4
+  blocker.
+- **v3.2 `C_EncapsulateKey`/`C_DecapsulateKey` key-OBJECT form**
+  (`ffi.rs:17086/17144`): `native::encapsulate` returns raw `(ct, ss)`
+  bytes; there is no native path that mints a keyed object from a template.
+  RW5 blocker (the current legacy Encapsulate/Decapsulate verbs are the
+  bytes form and stay frozen).
+
+**Everything else the original list called a "needed wrapper" is actually
+a native-width audit away from a direct call** — digest FSM (done), sign/
+verify FSM (done), template `C_GenerateKey`/`C_CreateObject`/`C_GetAttributeValue`
+(get-attr done; the two keygen/create ones write a `CK_ATTRIBUTE` template
+the same `*mut usize` way get-attr reads one — audit then call), handle
+`C_WrapKey`/`C_UnwrapKey`, the message-based family, `C_FindObjects`. The
+audit is cheap (read one function) and usually passes; budget it as the
+first task of each workstream, not a separate engine sub-project.
 
 ## 5. Workstreams (execute in order; each ends with three-transport parity tests green + ledger updated + docs row flipped)
 
-| WS | Scope | Engine prereq | New RPCs (≈) | Effort |
-|---|---|---|---|---|
-| **RW0** | Foundations: `Pkcs11V32` proto service + `ck_rv`-as-field convention; Attribute/Mechanism passthrough types; 16 MiB size limits both stacks; `--enable-destructive` flag; **add the remoting-workspace `cargo test` step to the core local gate** (it's missing today); fix the verb-count/doc drift; parity-suite scaffolding for the new service + `coverage_ledger.json` ratchet | — | 0 | S–M |
-| **RW1** | Sessions & login: OpenSession/CloseSession/Login/Logout/GetSessionInfo/GetTokenInfo(+SlotInfo); Session/Init category ledger split | session.rs wrappers exist; info getters (i) | ~7 | M |
-| **RW2** | Objects & discovery: CreateObject, DestroyObject†, GetAttributeValue (multi-attr), SetAttributeValue†, FindObjects trio, GenerateKey, template-form GenerateKeyPair (full mechanism set), GetMechanismList/Info; KCV + attribute categories | (d), (h), (i) | ~10 | L |
-| **RW3** | Core crypto FSMs: Encrypt/Decrypt Init/Update/Final + one-shot; Digest FSM (+SHA-3, DigestKey); Sign/Verify FSM (+Recover where engine advertises); GenerateRandom; OPERATION_ACTIVE mixing-guard checks | (b), (c), (h) | ~18 | L–XL |
-| **RW4** | Wrap/derive: WrapKey/UnwrapKey (+authenticated), DeriveKey (ECDH1/HKDF/PBKDF2/SP800-108/concat/BIP32/SHA*-derive) | (a), (e) | ~5 | L |
-| **RW5** | v3.2 KEM proper + PQC breadth: EncapsulateKey/DecapsulateKey (template form), hybrid-KEM cells, SLH-DSA/XMSS/HSS sign cells with parameter/context passthrough, seeded-keygen KAT support | (f) | ~4 | M–L |
-| **RW6** | Message-based §5.19/§5.20 (all 20 C_Message* calls as unary RPCs), dual-function, async honest-not-supported codes, Fork-analogue randomness checks, profile objects, cheap SUITE-GAP closures; final ledger sweep + regenerate `docs/PKCS11_REMOTING.md` applicability table from the ledger. Risk is LOWER than it looks: the Rust engine already implements and passes the full 20-function message surface locally (conformance §G1, 45 checks green) — prerequisite (g) is thin safe wrappers, not new crypto | (g) | ~24 | L |
+| WS | Status | Scope | True prereq | New RPCs (≈) | Effort |
+|---|---|---|---|---|---|
+| **RW0** | ✅ DONE | Foundations (service, ck_rv-as-field, size limits, flag, gate step, scaffolding) | — | 0 | done |
+| **RW1** | ✅ DONE | Sessions/login/info + discovery + random + digest FSM + sign/verify FSM + get-attr + destroy (24 RPCs) | none — all native-width-clean | 24 | done |
+| **RW2** | next | Object & keygen templates: `C_GenerateKey`, template `C_GenerateKeyPair`, `C_CreateObject`, `C_SetAttributeValue`†, `C_CopyObject`, `C_GetObjectSize`, `C_FindObjectsInit/FindObjects/FindObjectsFinal` | native-width audit only (writes/reads CK_ATTRIBUTE the same `*mut usize` way get-attr already does) | ~9 | L |
+| **RW3** | after RW2 | Encrypt/decrypt: `C_EncryptInit/Encrypt/Update/Final`, `C_Decrypt*` incl. GCM/CTR/OAEP params (CK_GCM_PARAMS etc. via `ck_param`) | native-width audit of the cipher entry points | ~8 | L |
+| **RW4** | after RW3 | Wrap + derive: `C_WrapKey`/`C_UnwrapKey`(+authenticated), `C_DeriveKey` (ECDH1/HKDF/concat/BIP32/SHA-derive **now**; PBKDF2/SP800-108 **after** the engine wrapper lands) | **PBKDF2/SP800-108 native wrapper (real engine work)**; wrap/unwrap audit | ~5 | L |
+| **RW5** | after RW4 | v3.2 KEM key-object form: `C_EncapsulateKey`/`C_DecapsulateKey` (template form) + hybrid cells + SLH-DSA/XMSS/HSS sign cells + seeded-keygen KAT parity | **key-object EncapsulateKey native wrapper (real engine work)** | ~4 | M–L |
+| **RW6** | after RW5 | Message API §5.19/§5.20 (20 `C_Message*` RPCs), dual-function, `C_SignRecover`/`C_VerifyRecover`, async honest-not-supported codes, profile objects, cheap SUITE-GAP closures; **then** the ledger + report + docs regeneration | audit only — engine passes all of §G1 locally (45 checks) | ~24 | L |
 
-† behind `--enable-destructive`.
+† behind `--enable-destructive` (default OFF → `CKR_FUNCTION_NOT_SUPPORTED`).
 
-Per-RPC mechanical checklist (from the source sweep — applies to every
-row above): proto messages + rpc → codegen is automatic but **reshapes
-`JavaJCE-remote`'s generated stubs too** (its gate step runs against a
-live `pqc-grpc`; run it after every proto change) → `verbs_v32.rs`
-function (new module; never extend the frozen `verbs.rs`) → gRPC handler
-(tonic trait is exhaustive — the build breaks until every rpc is
-implemented, which is our friend) → REST DTO + route (convention: session
-handle in body, primary object handle in path, everything base64) →
-three-transport parity case: in-process control first, capture its exact
-`ck_rv`, assert both wires equal it (never hardcode CKR values —
-established rule) → ledger entry → docs table row.
+**Two — and only two — genuine engine-crate prerequisites remain**
+(PBKDF2/SP800-108 in RW4, key-object EncapsulateKey in RW5). Everything
+else is a native-width audit + the mechanical per-RPC checklist below.
+This is the material change from the pre-execution plan, which over-
+counted engine work across every workstream.
+
+Per-RPC mechanical checklist (unchanged, now battle-tested across 24 RPCs):
+proto messages + rpc → codegen is automatic **but reshapes JavaJCE-remote's
+generated stubs too** (run its gate step against a live `pqc-grpc` after
+any proto change — this is the one cross-repo blast-radius edge) →
+`verbs_v32.rs` fn returning raw `CK_RV` (never extend the frozen `verbs.rs`)
+→ gRPC handler in `service_v32.rs` (tonic's trait is exhaustive — the build
+won't compile until every rpc is implemented, so nothing is silently
+forgotten) → REST DTO in `dto_v32.rs` + route in `routes_v32.rs` (flat
+`/v32/<c-fn>`, session handle in body, base64 bytes) → three-transport
+parity case in `v32_parity.rs` (capture the in-process `ck_rv`, assert
+gRPC == REST == it; never hardcode a CKR) → ledger entry → docs row.
+
+### Per-workstream execution notes (concrete, for whoever picks this up)
+
+**RW2 — templates are the unlock.** The one new shape is the CK_ATTRIBUTE
+template on the *input* side (`C_GenerateKey`/`C_CreateObject` READ a
+template; RW1's get-attr WROTE lengths into one). Same `*mut usize`
+three-word layout, built from a `repeated V32Attribute {type,value}` proto
+field. Watch: value bytes for ulong-typed attributes must be written at
+native `CK_ULONG` width (the RW1 finding, in reverse) — the wire carries
+whatever bytes the caller sent, so the DTO must document "ulong attribute
+values are 8-byte LE on this LP64 server". Parity KATs to reuse verbatim
+from the compliance suite: G3Keygen's `CKR_TEMPLATE_INCONSISTENT` on
+mismatched key-type, `CKR_TEMPLATE_INCOMPLETE` on missing CKA_PARAMETER_SET
+— assert those exact codes three ways. FindObjects is a 3-RPC FSM
+(Init/Find/Final) with server-held search state keyed by session, exactly
+like the digest FSM already shipped.
+
+**RW3 — cipher params travel as bytes.** Reuse the existing `V32Mechanism
+{mechanism, parameter}` message unchanged: CK_GCM_PARAMS / CK_CTR_PARAMS /
+CK_RSA_PKCS_OAEP_PARAMS go in `parameter` as native-layout bytes and
+`ck_param` reads them (its module doc lists these as already-handled). The
+Encrypt/Decrypt Init/Update/Final FSM is the digest FSM's shape with a key
+handle — near-mechanical given RW1. Positive parity: GCM tag-length honored
+(conformance E3, 11 checks); negative: zero-IV → `CKR_MECHANISM_PARAM_INVALID`.
+
+**RW4 — the first real engine task.** Steps: (1) add
+`native::pbkdf2_derive` + `native::sp800_108_derive` to the `rust/` crate
+wrapping the private helpers at `ffi.rs:7711/7736/7769` (gated by the
+rust-engine test step); (2) the wrap/unwrap verbs are audit-then-call.
+`C_WrapKey`'s output is bytes; the KCV-on-result categories (KcvTemplate,
+39 checks) need `C_GetAttributeValue(CKA_CHECK_VALUE)` on the unwrapped
+handle — already have that verb, so those parity cases compose from RW1+RW4.
+
+**RW5 — the second real engine task, and a naming trap.** `native::
+encapsulate` (bytes) already exists and is what the FROZEN legacy verb
+uses; the v3.2 key-object form (`C_EncapsulateKey` producing a keyed
+object + template) has NO native path — add one. Keep the two clearly
+named apart in `verbs_v32` (`c_encapsulate_key` vs the legacy
+`encapsulate`) so nobody wires the wrong one. Deterministic-KEM coins
+(`native::encapsulate_deterministic`, `ffi/encrypt.rs:154`) enable
+KAT-grade POSITIVE parity — assert identical ciphertext bytes three ways,
+not just matching secrets.
+
+**RW6 — biggest RPC count, smallest risk.** The engine passes all 20
+message-based functions locally (conformance §G1, 45 checks green), so
+every verb is audit-then-call. Do the 20 C_Message* as five FSM families
+(EncryptMessage/DecryptMessage/SignMessage/VerifyMessage each Init/Begin/
+Next/Final + one-shot). Async is three trivial honest-not-supported RPCs
+(`CKR_FUNCTION_NOT_SUPPORTED`/`CKR_SESSION_ASYNC_NOT_SUPPORTED` — pure
+code parity). Fork has no network analogue: its ledger row is N/A-local,
+but its *intent* (independent clients' RNG diverges) becomes a real
+parity-adjacent case — two sessions, `C_GenerateRandom` on each, assert
+distinct. **RW6 ends the program**: only after its verbs land do the
+ledger ratchet, the generated `REMOTE_P11_V32_COVERAGE.md`, and the
+`docs/PKCS11_REMOTING.md` applicability-table regeneration get built — they
+must describe the finished surface, not a moving one.
 
 ## 6. Validation & evidence
 
-- The extended `three_way_parity.rs` remains the single source of parity
-  truth. Every RW adds its cases there; positive paths assert outputs
-  byte-equal across transports where deterministic (deterministic-KEM
-  coins, seeded keygen make KAT-grade positive parity possible — use
-  them), negative paths assert exact `ck_rv` equality.
-- A generated **remote conformance report**
-  (`remoting/REMOTE_P11_V32_COVERAGE.md`) rendered from
-  `coverage_ledger.json`: per compliance category — covered-by-RPC (with
-  case ids) / N/A-local (with justification) / N/A-engine. The freshness
-  discipline copies `check_pkcs11_reports_fresh.py` **including its
-  nondeterminism allowlist lesson** — normalize any run-varying fields
-  from day one.
+- `remoting/acceptance/tests/v32_parity.rs` (built in RW1) is the single
+  source of parity truth. Every RW adds cases there; positive paths assert
+  outputs byte-equal across transports where deterministic (SHA-256 digest
+  already does; deterministic-KEM coins and seeded keygen make KAT-grade
+  positive parity possible in RW2/RW5 — use them), negative paths assert
+  exact `ck_rv` equality with the control captured in-process, never a
+  hardcoded codepoint.
+- **The `coverage_ledger.json` + generated report land in RW6, NOT
+  incrementally.** Rationale corrected from the original plan: a ledger
+  that ratchets ("fail the suite if a compliance category has no entry")
+  is only meaningful once the surface is complete — building it mid-program
+  would either block every intermediate commit or encode a moving target.
+  Until RW6, coverage is tracked in this doc's execution log (category →
+  RW that covers it). RW6 builds: (a) `coverage_ledger.json` — one row per
+  compliance category with `{disposition: RPC|N/A-local|N/A-engine|SUITE-GAP,
+  case_ids: [...], justification: "..."}`; (b) a check that fails if any
+  `cpp_compliance_report.md` category is missing a row (the ratchet);
+  (c) a generated `remoting/REMOTE_P11_V32_COVERAGE.md` rendered from it;
+  (d) freshness discipline copying `check_pkcs11_reports_fresh.py`
+  **including its nondeterminism allowlist lesson** — the ML-DSA/ML-KEM
+  random-key-byte and KCV fields that broke the C++ report's own freshness
+  check will appear here too; normalize them from the first commit, do not
+  rediscover the same bug.
 - Gate: the remoting `cargo test` step added in RW0 runs the whole suite
-  on every gate invocation (it is fast: in-process servers on ephemeral
-  ports, no docker). The JavaJCE-remote live step continues to catch
-  proto regressions against a real container.
+  on every gate invocation (fast — in-process servers on ephemeral ports,
+  no docker). The JavaJCE-remote live step continues to catch proto
+  regressions against a real container.
+
+### Effort & sequencing (revised post-RW1)
+
+RW0+RW1 (done) removed the biggest unknown — the architecture and the
+native-width reality are proven, so RW2/RW3/RW6 are now "mechanical at
+volume" (audit + checklist × N functions), and only RW4/RW5 carry genuine
+engine-crate work (two wrappers total). Suggested order and gating:
+- **RW2 → RW3 → RW6** can run back-to-back with no engine changes (pure
+  remoting-crate + audit). Largest RPC volume, lowest risk.
+- **RW4, RW5** each begin with a `rust/`-crate PR (the wrapper), gated by
+  the rust-engine test step, BEFORE the remoting verbs — keep those two
+  engine changes small, reviewed, and separately committed from the
+  transport work so a wrapper bug is not tangled with a proto change.
+- Every workstream is independently shippable (its parity cases green, the
+  frozen legacy surface + bench JSON + JavaJCE-remote untouched), so the
+  program can pause cleanly after any RW.
 
 ## 7. Risks / constraints carried from the source sweep
 
@@ -236,11 +350,15 @@ established rule) → ledger entry → docs table row.
    keyed by session handle; the mirror must reject cross-session misuse
    with the spec's own CKR codes (that's a feature — it's what MultiPart
    categories test) and document that one session's FSM is single-caller.
-2. **No spawn_blocking today**: long engine ops block tokio workers.
-   With FSM verbs multiplying call counts, RW0 wraps verb dispatch in
-   `spawn_blocking` for both services (measured, not assumed, via the
-   bench harness before/after — its JSON schema is a compatibility
-   surface and must not change).
+2. **spawn_blocking**: DONE for the `Pkcs11V32` gRPC handlers in RW1
+   (the legacy service is unchanged — its verbs are short and the bench
+   measures it, so its behavior stays frozen). **Not yet measured**: the
+   RW1 claim that spawn_blocking is net-beneficial under FSM call volume
+   is asserted, not benchmarked — an open verification item, run the bench
+   harness before/after once RW3's multi-call FSMs exist (its JSON schema
+   is a compatibility surface and must not change). REST handlers do NOT
+   use spawn_blocking (axum/ureq path); revisit if a REST-arm latency
+   regression shows up.
 3. **Single-tenant trust model is unchanged** — bare u32 handles, no
    per-request identity. The `--enable-destructive` flag is a tripwire,
    not an authorization system. Stated in docs and in the plan's own
@@ -320,13 +438,12 @@ legacy-parity (no regression) + 6 v32-parity + 1 posture.**
 three-transport parity` step to `scripts/local-gate.sh` — the remoting
 workspace ran in NO gate step before today.
 
-### Still planned (RW2 remainder → RW6)
+### Still planned (RW2 → RW6)
 
-Template-form C_GenerateKey/C_CreateObject/C_GenerateKeyPair, C_SetAttributeValue,
-C_FindObjects trio, encrypt/decrypt FSMs, wrap/unwrap, C_DeriveKey (needs new
-native:: wrappers for PBKDF2/SP800-108), v3.2 C_EncapsulateKey/DecapsulateKey
-(key-object form), the 20-function message-based API, dual-function, async
-honest-not-supported codes, the coverage_ledger.json ratchet + generated
-remote-conformance report, and the docs/PKCS11_REMOTING.md applicability-table
-regeneration. Each lands with its three-transport parity cases per the
-per-RPC checklist above.
+See §4 (revised prerequisites) and §5's per-workstream execution notes —
+refined 2026-08-26 after RW0/RW1 shipped. Headline: only **two** genuine
+engine-crate prerequisites remain (PBKDF2/SP800-108 for RW4, key-object
+EncapsulateKey for RW5); everything else is a native-width audit + the
+proven per-RPC checklist. RW2→RW3→RW6 need no engine changes and can run
+back-to-back; the ledger/report/docs-regeneration are RW6-terminal, not
+incremental.
