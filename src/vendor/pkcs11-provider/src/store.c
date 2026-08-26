@@ -497,6 +497,18 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
              * documented default. */
             data_type = (char *)"HSS";
             break;
+        case CKK_XMSS:
+            /* Remediation R41 (phase 8): same "single algorithm name, no
+             * per-variant split" choice as HSS above. */
+            data_type = (char *)"XMSS";
+            break;
+        case CKK_XMSSMT:
+            /* Canonical first name only (matches the single-name-per-type
+             * convention every other case in this switch uses) — the
+             * ":XMSS-MT" alias in P11PROV_NAMES_XMSSMT is for OSSL_ALGORITHM
+             * registration, not this store data_type field. */
+            data_type = (char *)"XMSSMT";
+            break;
         default:
             return RET_OSSL_ERR;
         }

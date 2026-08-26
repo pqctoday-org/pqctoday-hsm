@@ -2074,6 +2074,89 @@ t31() { local w; w=$(mk_arena shakemldsa "$CPP_ENGINE_SO") && use_arena "$w" || 
 }
 run_case T31 PASS "SHAKE128/256 reachability for HashML-DSA/HashSLH-DSA (CKM_HASH_ML_DSA_SHAKE256 + CKM_HASH_SLH_DSA_SHAKE128, PKCS#11 v3.2 §6.67.7/§6.69.7): digest_sign_init now recognizes SHAKE names as sentinels instead of failing p11prov_sig_op_init's digest_map lookup, un-deading both set_mechanism SHAKE arms -- round-trip verify (both families), raw-verify-must-fail + tampered-message sabotage (remediation R38)" t31
 
+# ─── T32: XMSS/XMSS^MT (remediation R41, phase 8) ───────────────────────────
+# sig/xmss.c superseded a 20-line stub with empty OSSL_DISPATCH tables that
+# was already wired into provider.c's registration -- meaning pre-R41, this
+# provider advertised a usable "XMSS" algorithm while every real operation
+# failed outright. Same shape as T24's own HSS proof: -rawin and plain
+# dispatch, both sabotage controls. No independent from-scratch verifier
+# exists for XMSS in this repo (unlike HSS/LMS's lms_xdr_verify against
+# OpenSSL's own native LMS) -- deferred, see the R41 doc note. T32c (Rust-arm
+# smoke) lives down in the Rust arm section below; T32/T32b/T32d all use the
+# C++ engine and belong here.
+t32() { local w; w=$(mk_arena xmsssign "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm XMSS -out "$w/k.pem" || return 1
+
+  O pkeyutl -sign -rawin -inkey "pkcs11:token=xmsssign;type=private" -in "$MSG" -out "$w/sig.bin" || return 1
+  O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=xmsssign;type=public" -in "$MSG" -sigfile "$w/sig.bin" || return 1
+
+  O pkeyutl -sign -inkey "pkcs11:token=xmsssign;type=private" -in "$MSG" -out "$w/sig_plain.bin" || return 1
+  O pkeyutl -verify -pubin -inkey "pkcs11:token=xmsssign;type=public" -in "$MSG" -sigfile "$w/sig_plain.bin" || return 1
+
+  cp "$w/sig.bin" "$w/tampered.bin"
+  printf '\x00' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  cmp -s "$w/sig.bin" "$w/tampered.bin" && printf '\xff' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  if O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=xmsssign;type=public" -in "$MSG" -sigfile "$w/tampered.bin" >/dev/null 2>&1
+  then echo "tampered XMSS signature VERIFIED — verifier cannot say no"; return 1; fi
+  echo "wrong message" > "$w/wrong.txt"
+  if O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=xmsssign;type=public" -in "$w/wrong.txt" -sigfile "$w/sig.bin" >/dev/null 2>&1
+  then echo "XMSS signature verified against the WRONG message — verifier cannot say no"; return 1; fi
+  return 0
+}
+run_case T32 PASS "XMSS token sign (default param set XMSS-SHA2_10_256, size 2500 -- both -rawin and plain dispatch) -> token verify, both sabotage controls rejected (remediation R41)" t32
+
+t32b() { local w; w=$(mk_arena xmssmtsign "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm XMSSMT -out "$w/k.pem" || return 1
+
+  O pkeyutl -sign -rawin -inkey "pkcs11:token=xmssmtsign;type=private" -in "$MSG" -out "$w/sig.bin" || return 1
+  O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=xmssmtsign;type=public" -in "$MSG" -sigfile "$w/sig.bin" || return 1
+
+  O pkeyutl -sign -inkey "pkcs11:token=xmssmtsign;type=private" -in "$MSG" -out "$w/sig_plain.bin" || return 1
+  O pkeyutl -verify -pubin -inkey "pkcs11:token=xmssmtsign;type=public" -in "$MSG" -sigfile "$w/sig_plain.bin" || return 1
+
+  cp "$w/sig.bin" "$w/tampered.bin"
+  printf '\x00' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  cmp -s "$w/sig.bin" "$w/tampered.bin" && printf '\xff' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  if O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=xmssmtsign;type=public" -in "$MSG" -sigfile "$w/tampered.bin" >/dev/null 2>&1
+  then echo "tampered XMSS^MT signature VERIFIED — verifier cannot say no"; return 1; fi
+  echo "wrong message" > "$w/wrong.txt"
+  if O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=xmssmtsign;type=public" -in "$w/wrong.txt" -sigfile "$w/sig.bin" >/dev/null 2>&1
+  then echo "XMSS^MT signature verified against the WRONG message — verifier cannot say no"; return 1; fi
+  return 0
+}
+run_case T32b PASS "XMSS^MT token sign (default param set XMSSMT-SHA2_20/2_256, size 4963 -- both -rawin and plain dispatch) -> token verify, both sabotage controls rejected (remediation R41)" t32b
+
+t32d() { # multi-process stateful-counter proof, mirroring T24e's shape for
+  # HSS. Unlike the Rust engine (SOFTHSMRUST_STATE_FILE-bridged, T24e),
+  # the C++ engine persists key state through its own on-disk token
+  # store (directories.tokendir), so two wholly separate pkeyutl
+  # invocations sharing the same SOFTHSM2_CONF is sufficient -- no
+  # extra state-bridging env var needed for this arm.
+  local w; w=$(mk_arena xmssctr "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm XMSS -out "$w/k.pem" || return 1
+
+  # process B: first signature
+  O pkeyutl -sign -rawin -inkey "pkcs11:token=xmssctr;type=private" -in "$MSG" -out "$w/sig1.bin" || return 1
+  # process C: second signature, wholly separate invocation, same token dir
+  O pkeyutl -sign -rawin -inkey "pkcs11:token=xmssctr;type=private" -in "$MSG" -out "$w/sig2.bin" || return 1
+
+  cmp -s "$w/sig1.bin" "$w/sig2.bin" && { echo "two XMSS signatures over the same message are byte-identical — leaf index did not advance"; return 1; }
+
+  # RFC 8391 §4.1.9: the XMSS signature's first 4 bytes are the leaf
+  # index idx_sig, big-endian. It must have advanced 0 -> 1.
+  q1=$(python3 -c "d=open('$w/sig1.bin','rb').read(); print(int.from_bytes(d[0:4],'big'))")
+  q2=$(python3 -c "d=open('$w/sig2.bin','rb').read(); print(int.from_bytes(d[0:4],'big'))")
+  [[ "$q1" == "0" ]] || { echo "first XMSS signature idx=$q1, expected 0"; return 1; }
+  [[ "$q2" == "1" ]] || { echo "second XMSS signature idx=$q2, expected 1 (leaf index did not advance)"; return 1; }
+
+  # process D: the FIRST signature (idx=0) must still verify after the
+  # SECOND signing consumed leaf idx=1.
+  O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=xmssctr;type=public" -in "$MSG" -sigfile "$w/sig1.bin" || { echo "first signature (idx=0) failed to verify after a second signing"; return 1; }
+  O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=xmssctr;type=public" -in "$MSG" -sigfile "$w/sig2.bin" || { echo "second signature (idx=1) failed to verify"; return 1; }
+  return 0
+}
+run_case T32d PASS "XMSS multi-process stateful-counter proof: leaf index idx genuinely advances 0->1 across two wholly separate processes sharing only the on-disk token store, first signature still verifies after the second (remediation R41)" t32d
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 
@@ -2560,6 +2643,44 @@ t31b() { # Rust-arm twin of T31 -- same proof, over libsofthsmrustv3.so. No
   return 0
 }
 run_case T31b PASS "SHAKE128/256 reachability, Rust arm: same proof as T31 over libsofthsmrustv3.so -- no engine-side change needed, proves the provider's shared SHAKE-sentinel routing fix reaches both engines identically; round-trip verify (both families), raw-verify-must-fail + tampered-message sabotage (remediation R38)" t31b
+
+# ─── T32c: XMSS Rust-arm smoke (remediation R41, phase 8) ──────────────────
+# T32/T32b/T32d (C++-engine XMSS/XMSS^MT proofs) live up in the C++ arm
+# section, right after T31 -- this one alone belongs here since it's the
+# genuinely Rust-arm case.
+t32c() { # Rust-arm smoke: proves the provider's XMSS sign/signature.c dispatch
+  # is genuinely engine-agnostic (raw PKCS#11 C_Sign/C_Verify), not
+  # incidentally coupled to the C++ engine's own object layout -- same
+  # precedent as T24d for HSS.
+  [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/rustxmss"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rustxmss --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm XMSS -out "$w/k.pem" 2>/dev/null || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -sign -propquery "?provider=pkcs11" -rawin \
+      -inkey "pkcs11:token=rustxmss;type=private" -in "$MSG" -out "$w/sig.bin" 2>/dev/null || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin \
+      -inkey "pkcs11:token=rustxmss;type=public" -in "$MSG" -sigfile "$w/sig.bin" 2>/dev/null || return 1
+
+  cp "$w/sig.bin" "$w/tampered.bin"
+  printf '\x00' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  cmp -s "$w/sig.bin" "$w/tampered.bin" && printf '\xff' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  if SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin \
+      -inkey "pkcs11:token=rustxmss;type=public" -in "$MSG" -sigfile "$w/tampered.bin" >/dev/null 2>&1
+  then echo "tampered Rust-arm XMSS signature VERIFIED — verifier cannot say no"; return 1; fi
+  return 0
+}
+run_case T32c PASS "XMSS Rust-arm token sign -> token verify, sabotage control rejected -- proves the provider's XMSS dispatch is genuinely engine-agnostic (remediation R41)" t32c
 
 
 # ─── R0.1 regression guard ──────────────────────────────────────────────────

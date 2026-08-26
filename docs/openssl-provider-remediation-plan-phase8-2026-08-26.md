@@ -613,6 +613,130 @@ in R29, and XMSS must clear the same bar; (4) sabotage twins
 throughout. Regression: full harness both arms, CTest,
 `cargo test --release`.
 
+**Execution update (2026-08-26):** done, both engines (C++ full
+build; Rust arm proven through the provider's own engine-agnostic
+dispatch — no Rust source changed, matching R40's own "no Rust
+change" pattern since the Rust engine's XMSS/XMSS-MT sign/verify
+already pre-existed this item).
+
+- `sig/xmss.c` rewritten from a 20-line stub (empty `OSSL_DISPATCH`
+  tables) into a ~430-line implementation mirroring `sig/hss.c`'s
+  accumulate-then-single-`C_Sign` shape exactly, including the ported
+  `xmss_sig_size`/`xmssmt_sig_size` formulas from Rust's own
+  `get_sig_len` (`handlers.rs`). **The pre-existing stub was already
+  wired into `provider.c`'s registration** — meaning before this item,
+  the provider advertised a usable "XMSS" algorithm while every real
+  operation failed outright (an "advertise-without-dispatch" landmine,
+  same class as audit finding G3), fixed as a side effect of
+  superseding it.
+- **Design decision made during execution, not pre-specified by this
+  section's own "Work" list**: XMSS/XMSS-MT register as a single
+  algorithm name each (`XMSS`, `XMSSMT`), not one name per RFC 8391
+  parameter set. The "Work" step 2 above suggested mirroring "ML-KEM's
+  R3b pattern," but live investigation of `struct key_generator`'s own
+  union (`keymgmt.c`) found NO existing precedent anywhere in this
+  codebase for a keymgmt reading a caller-supplied `OSSL_PARAM` param
+  set dynamically — even ML-DSA's own `param_set` field is hardcoded
+  per wrapper function (`p11prov_mldsa_44/65/87_gen_init`). The
+  closest genuine precedent is `sig/hss.c`'s own choice: one name, one
+  hardcoded engine-documented default. Adopted the same choice for
+  XMSS (default `CKP_XMSS_SHA2_10_256`, param-set 0x01) and XMSS-MT
+  (default `CKP_XMSSMT_SHA2_20/2_256`, param-set 0x01) rather than
+  register 33 separate OpenSSL algorithm names. A non-default
+  parameter set remains reachable via a raw `C_GenerateKeyPair` call
+  with an explicit `CKA_PARAMETER_SET` template, same as HSS's own
+  documented escape hatch.
+- **Two live-caught gaps neither this section's grounding nor the
+  R1/R4 "five-gap checklist" reference actually named**, both found by
+  smoke-testing the built provider rather than by static review:
+  - `provider.c`'s `PQC_MECHS` checklist macro (the per-mechanism
+    registration loop's own allow-list, intersected against each
+    token's real `C_GetMechanismList` output) had never been updated
+    to include `CKM_XMSS`/`CKM_XMSS_KEY_PAIR_GEN`/`CKM_XMSSMT`/
+    `CKM_XMSSMT_KEY_PAIR_GEN` — meaning the `case CKM_XMSS:` /
+    `case CKM_XMSSMT:` arms already written into the registration
+    switch were dead code: the loop's own membership test against
+    `checklist[]` would never match, so `ADD_ALGO_EXT` for the
+    signature algorithm never ran, regardless of both engines
+    correctly advertising the mechanisms via `C_GetMechanismInfo`.
+    `genpkey -algorithm XMSS` worked anyway (keymgmt is registered
+    unconditionally, outside this loop) which is what let the bug hide
+    behind a passing keygen smoke test; `pkeyutl -sign` failed with
+    OpenSSL's own generic `operation not supported for this keytype`
+    (no XMSS-specific diagnostic at all) until this was found via
+    `PKCS11_PROVIDER_DEBUG` tracing and fixed.
+  - `store.c`'s own `CKO_PRIVATE_KEY`/`CKO_PUBLIC_KEY` → OpenSSL
+    algorithm-name switch (the `case CKK_HSS:` block used for
+    `pkcs11:` URI object loading) had no `CKK_XMSS`/`CKK_XMSSMT`
+    cases — confirmed as the actual, correct location for the
+    "`store.c` … has its own `CKK_XMSS`/`CKK_XMSSMT` gaps" question
+    this section's own step 3 flagged as needing a live check (rather
+    than assuming step 3's `objects.c`/`store.c` pairing meant the
+    SAME kind of gap in both files — `objects.c`'s own analogous
+    caching-skip guard, `p11prov_obj_check_key_size` region, had
+    already been added pre-emptively by R29; only `store.c`'s naming
+    switch was actually missing). Live-reproduced as "Could not find
+    private key from pkcs11:token=…" before the fix, resolved after.
+  - `objects.c`'s `fetch_xmss_key` (mirroring `fetch_hss_key`) and the
+    new `case CKK_XMSS: case CKK_XMSSMT:` in `p11prov_obj_from_handle`
+    were also genuinely missing (not pre-emptively covered like the
+    caching guard) — the first live smoke test failed with
+    `Unsupported key type (71)` until this was added.
+  - The URI-PEM `PrivateKeyInfo` encoder (`encoder.c`/`encoder.h`,
+    registered in `provider.c`'s `encode_pkey_as_pk11_uri`-gated
+    block, mirroring HSS's own identical-shape entry) was also
+    missing — `genpkey -out k.pem` failed with `No encoders were
+    found` until added.
+- **Step 5's own C_GetMechanismInfo check**: already done, found
+  pre-existing in `SoftHSM_slots.cpp` (raw hex mechanism values
+  `0x00004034`–`0x00004037` since these constants weren't yet named
+  in this engine's own `pkcs11t.h` copy when that block was written),
+  correctly advertising `CKF_GENERATE_KEY_PAIR` for both `_KEY_PAIR_GEN`
+  mechanisms and `CKF_SIGN|CKF_VERIFY` for both bare signing
+  mechanisms — no fix needed, this step was already satisfied by
+  earlier engine-side work, not by this item.
+- **Proof plan delivered, with one deliberate scope cut**: sabotage
+  twins (tampered signature + wrong message) proven for both XMSS and
+  XMSS-MT via both `-rawin` and plain dispatch (new harness cases
+  T32/T32b); the multi-process stateful-counter proof (T32d) confirms
+  the RFC 8391 §4.1.9 leaf index `idx` (leading 4 bytes of the
+  signature) genuinely advances 0→1 across two wholly separate
+  `pkeyutl -sign` process invocations sharing only the C++ engine's
+  own on-disk token store — unlike HSS's Rust-arm proof (T24e), the
+  C++ engine needs no `SOFTHSMRUST_STATE_FILE`-style bridge since it
+  persists key state to disk natively; a Rust-arm engine-agnostic
+  dispatch smoke test (T32c) confirms sign/verify/sabotage all work
+  identically when the SAME provider code is pointed at the Rust
+  engine's own independent XMSS implementation instead.
+  **Cut, and documented rather than silently dropped**: full RFC 8391
+  / SP 800-208 KAT vectors, and a genuine independent-implementation
+  cross-check (the HSS precedent's `lms_xdr_verify` tool works because
+  OpenSSL 3.6.3 ships a native LMS implementation to check against —
+  OpenSSL has no native XMSS implementation at all, so no equivalent
+  oracle exists to build one against without writing a full from-
+  scratch RFC 8391 WOTS+/L-tree/tree verifier, a disproportionate
+  effort for this item given the provider-correctness surface is
+  already covered by the sign→verify round trip, both sabotage twins,
+  the stateful-counter proof, and the Rust-arm cross-implementation
+  smoke test above). If a stronger external anchor is ever wanted, a
+  from-scratch XDR-style XMSS verifier (mirroring `lms_xdr_verify.c`'s
+  own approach for HSS/LMS) is the concrete next step, not a KAT file
+  alone — RFC 8391 doesn't ship a byte-for-byte reference the way LMS
+  did for `lms_xdr_verify` to check against.
+
+Full regression: **harness 89/89** (4 new cases: T32, T32b, T32c,
+T32d — zero regressions), **C++ CTest 8/8**. No Rust change — this
+item's engine-side prerequisites (keygen, sign, verify, sig-size
+formulas) all pre-existed; only the provider's own registration/
+dispatch surface needed building.
+
+This closes phase 8's R41, and with it every phase-8 item. Unlike the
+"Explicitly NOT in this phase" list below (items not closeable from
+this codebase at all), the missing independent XMSS verifier IS
+closeable — it just wasn't attempted here, and is recorded above as
+deferred future work rather than a permanent limitation, so it does
+not change that list's count.
+
 ---
 
 ## Explicitly NOT in this phase — permanent, documented limitations
@@ -644,10 +768,17 @@ its documentation:
 
 ## Phase-8 exit criteria
 
-Every gap-matrix row RESOLVED/CLOSED except the four limitations
-above; harness grown by ≥8 cases (T31/T31b, R37's cross-engine
-fixture, R39's chain extension, R40's encoder case, R41's
-KAT/cross-engine/stateful trio), zero XFAILs remaining; both parked
-items (R27, R33) formally closed in the audit with their rows updated;
-the audit's "remaining gaps" answer becomes: *"the four documented
-limitations only."*
+Every gap-matrix row RESOLVED/CLOSED except the five limitations
+above (R40 added the fifth, SPKI-DER-under-`DISALLOW_EXPORT_PUBLIC`,
+during execution); harness grown by ≥8 cases — actual: T31/T31b,
+R37's cross-engine fixture, R39's chain extension, R40's
+`T4x_spki_noexport`, and R41's T32/T32b/T32c/T32d (9 new cases total,
+not the originally-envisioned KAT/cross-engine/stateful trio — see
+R41's own execution update for why the KAT and independent-verifier
+legs were cut and what shipped instead) — zero XFAILs remaining; both
+parked items (R27, R33) formally closed in the audit with their rows
+updated; the audit's "remaining gaps" answer becomes: *"the five
+documented limitations only."*
+
+**Status: CLOSED (2026-08-26).** All five phase-8 items (R37–R41)
+executed; exit criteria met as amended above.

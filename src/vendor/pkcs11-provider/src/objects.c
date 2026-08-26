@@ -1535,6 +1535,60 @@ static CK_RV fetch_hss_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
     return CKR_OK;
 }
 
+/* Remediation R41 (phase 8): XMSS/XMSS^MT. CKA_PARAMETER_SET is already
+ * fetched generically for every key object (p11prov_obj_from_handle's own
+ * CKA_PARAMETER_SET entry, above the switch this function is called
+ * from) -- no per-type extra vars needed here, unlike HSS's own
+ * CKA_HSS_LEVELS/LMS_TYPE/LMOTS_TYPE trio, since PKCS#11 v3.2 SS6.66
+ * carries the whole XMSS/XMSS^MT parameter choice in that single
+ * standard attribute. The private half's own stateful key material lives
+ * in CKA_PRIV_STATEFUL_KEY_STATE, fetched directly by the sign path (both
+ * engines), never cached here -- mirrors fetch_hss_key's own identical
+ * choice for the same reason (kept opaque to this layer). */
+#define XMSS_ATTRS_NUM (BASE_KEY_ATTRS_NUM + 1)
+static CK_RV fetch_xmss_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
+                            CK_OBJECT_HANDLE object, P11PROV_OBJ *key)
+{
+    struct fetch_attrs attrs[XMSS_ATTRS_NUM];
+    CK_ATTRIBUTE *value_attr;
+    int num;
+    CK_RV ret;
+
+    key->attrs = OPENSSL_zalloc(XMSS_ATTRS_NUM * sizeof(CK_ATTRIBUTE));
+    if (key->attrs == NULL) {
+        return CKR_HOST_MEMORY;
+    }
+
+    num = 0;
+    if (key->class == CKO_PUBLIC_KEY) {
+        FA_SET_BUF_ALLOC(attrs, num, CKA_VALUE, true);
+    }
+    FA_SET_BUF_ALLOC(attrs, num, CKA_ID, false);
+    FA_SET_BUF_ALLOC(attrs, num, CKA_LABEL, false);
+
+    ret = p11prov_fetch_attributes(ctx, session, object, attrs, num);
+    if (ret != CKR_OK) {
+        p11prov_fetch_attrs_free(attrs, num);
+        return ret;
+    }
+
+    key->numattrs = 0;
+    p11prov_move_alloc_attrs(attrs, num, key->attrs, &key->numattrs);
+
+    if (key->class == CKO_PUBLIC_KEY) {
+        value_attr = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!value_attr) {
+            P11PROV_raise(key->ctx, CKR_KEY_INDIGESTIBLE,
+                          "Missing public key value");
+            return CKR_KEY_INDIGESTIBLE;
+        }
+        key->data.key.size = value_attr->ulValueLen;
+        key->data.key.bit_size = key->data.key.size * 8;
+    }
+
+    return CKR_OK;
+}
+
 #define CERT_ATTRS_NUM 9
 static CK_RV fetch_certificate(P11PROV_CTX *ctx, P11PROV_SESSION *session,
                                CK_OBJECT_HANDLE object, P11PROV_OBJ *crt)
@@ -1716,6 +1770,14 @@ CK_RV p11prov_obj_from_handle(P11PROV_CTX *ctx, P11PROV_SESSION *session,
             break;
         case CKK_HSS:
             ret = fetch_hss_key(ctx, session, handle, obj);
+            if (ret != CKR_OK) {
+                p11prov_obj_free(obj);
+                return ret;
+            }
+            break;
+        case CKK_XMSS:
+        case CKK_XMSSMT:
+            ret = fetch_xmss_key(ctx, session, handle, obj);
             if (ret != CKR_OK) {
                 p11prov_obj_free(obj);
                 return ret;

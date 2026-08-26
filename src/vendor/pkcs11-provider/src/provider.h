@@ -286,6 +286,10 @@ extern const OSSL_DISPATCH
 #define P11PROV_NAMES_XMSS "XMSS"
 #define P11PROV_NAME_XMSS P11PROV_NAMES_XMSS
 #define P11PROV_DESCS_XMSS "PKCS11 XMSS Implementation"
+/* Remediation R41 (phase 8) */
+#define P11PROV_NAMES_XMSSMT "XMSSMT:XMSS-MT"
+#define P11PROV_NAME_XMSSMT P11PROV_NAMES_XMSSMT
+#define P11PROV_DESCS_XMSSMT "PKCS11 XMSS^MT Implementation"
 
 #define P11PROV_NAMES_RAND "PKCS11-RAND"
 #define P11PROV_DESCS_RAND "PKCS11 Random Generator"
@@ -471,7 +475,6 @@ int p11prov_pop_error_to_mark(P11PROV_CTX *ctx);
     static OSSL_FUNC_##type##_##name##_fn prefix##_##name
 
 extern const OSSL_DISPATCH p11prov_slhdsa_signature_functions[];
-extern const OSSL_DISPATCH p11prov_xmss_signature_functions[];
 extern const OSSL_DISPATCH p11prov_mlkem_kem_functions[];
 extern const OSSL_DISPATCH p11prov_mlkem512_kem_functions[];
 extern const OSSL_DISPATCH p11prov_mlkem768_kem_functions[];
@@ -511,5 +514,13 @@ int tls_sigalg_capabilities(OSSL_CALLBACK *cb, void *arg);
  * shared with keymgmt.c's own OSSL_PKEY_PARAM_MAX_SIZE so the two never
  * drift apart. */
 size_t hss_sig_size_for_key(P11PROV_OBJ *key);
+
+/* Remediation R41 (phase 8): real RFC 8391/SP 800-208 XMSS/XMSS^MT
+ * signature size for a given key (sig/xmss.c), shared with keymgmt.c's
+ * own OSSL_PKEY_PARAM_MAX_SIZE -- same reason as hss_sig_size_for_key
+ * above. Reads CKA_PARAMETER_SET off the key; `is_mt` selects the
+ * XMSS vs XMSS^MT formula (the two have different parameter-set value
+ * spaces and different signature layouts, RFC 8391 SS4.2 vs SS4.2.3). */
+size_t xmss_sig_size_for_key(P11PROV_OBJ *key, bool is_mt);
 
 #endif /* _PROVIDER_H */

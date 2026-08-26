@@ -136,6 +136,22 @@ struct key_generator {
         struct {
             CK_ML_KEM_PARAMETER_SET_TYPE param_set;
         } mlkem;
+        /* Remediation R41 (phase 8): CKA_PARAMETER_SET (RFC 8391 oid) is
+         * MANDATORY on the generated public key template per PKCS#11 v3.2
+         * SS6.66.6 -- both engines require it (or, for Rust, silently
+         * default; the provider itself always sets it explicitly, never
+         * relying on either engine's own default behavior). One hardcoded
+         * default oid each for XMSS/XMSS^MT (same "single documented
+         * default" scope sig/hss.c's own keymgmt already established for
+         * HSS -- XMSS/XMSS^MT between them have 33 RFC 8391 combinations,
+         * too many for a per-variant algorithm-name split the way
+         * ML-DSA/SLH-DSA/ML-KEM use; a non-default set is reachable the
+         * same way hss-w4-keygen.c's own precedent already established
+         * for HSS -- direct C_GenerateKeyPair with an explicit
+         * CK_XMSS_KEY_PAIR_GEN template, bypassing this keymgmt). */
+        struct {
+            CK_ULONG param_set;
+        } xmss;
     } data;
 
     OSSL_CALLBACK *cb_fn;
@@ -312,6 +328,12 @@ int p11prov_common_gen_set_params(void *genctx, const OSSL_PARAM params[])
          * the same reasoning — fixed together. Neither type has anything
          * curve/exponent-specific to parse here (mirrors ML-DSA's own
          * no-op case, already correct). */
+        break;
+    case CKK_XMSS:
+    case CKK_XMSSMT:
+        /* Remediation R41 (phase 8): same R5 lesson as above — nothing
+         * curve/exponent-specific to parse here either; the param_set
+         * default was already set by gen_init before this function ran. */
         break;
     default:
         P11PROV_raise(ctx->provctx, CKR_ARGUMENTS_BAD,
@@ -4164,6 +4186,511 @@ const OSSL_DISPATCH p11prov_hss_keymgmt_functions[] = {
     DISPATCH_KEYMGMT_ELEM(hss, EXPORT_TYPES, export_types),
     DISPATCH_KEYMGMT_ELEM(hss, GET_PARAMS, get_params),
     DISPATCH_KEYMGMT_ELEM(hss, GETTABLE_PARAMS, gettable_params),
+    { 0, NULL },
+};
+
+/* ─── XMSS / XMSS^MT (remediation R41, phase 8) ─────────────────────────── */
+/* Mirrors sig/hss.c's own file-header rationale and the HSS keymgmt block
+ * directly above it: ONE algorithm name each for XMSS/XMSS^MT (not a
+ * per-variant split the way ML-DSA/SLH-DSA/ML-KEM use — XMSS + XMSS^MT
+ * between them have 33 RFC 8391 combinations, too many for that pattern),
+ * ONE hardcoded default parameter set each (PKCS#11 v3.2 SS6.66.6 makes
+ * CKA_PARAMETER_SET mandatory on the public template regardless of which
+ * oid is used — this keymgmt always sets it explicitly, on both halves).
+ * A non-default oid is reachable via direct C_GenerateKeyPair with an
+ * explicit template (hss-w4-keygen.c's own established precedent for the
+ * identical "this keymgmt has no dynamic param surface" situation). */
+
+DISPATCH_KEYMGMT_FN(xmss, new);
+DISPATCH_KEYMGMT_FN(xmss, free);
+DISPATCH_KEYMGMT_FN(xmss, load);
+DISPATCH_KEYMGMT_FN(xmss, has);
+DISPATCH_KEYMGMT_FN(xmss, match);
+DISPATCH_KEYMGMT_FN(xmss, gen_init);
+DISPATCH_KEYMGMT_FN(xmssmt, gen_init);
+DISPATCH_KEYMGMT_FN(xmss, gen);
+DISPATCH_KEYMGMT_FN(xmss, gen_settable_params);
+DISPATCH_KEYMGMT_FN(xmss, import);
+DISPATCH_KEYMGMT_FN(xmss, import_types);
+DISPATCH_KEYMGMT_FN(xmss, export);
+DISPATCH_KEYMGMT_FN(xmss, export_types);
+DISPATCH_KEYMGMT_FN(xmss, get_params);
+DISPATCH_KEYMGMT_FN(xmss, gettable_params);
+
+DISPATCH_KEYMGMT_FN(xmssmt, new);
+DISPATCH_KEYMGMT_FN(xmssmt, free);
+DISPATCH_KEYMGMT_FN(xmssmt, load);
+DISPATCH_KEYMGMT_FN(xmssmt, has);
+DISPATCH_KEYMGMT_FN(xmssmt, match);
+DISPATCH_KEYMGMT_FN(xmssmt, import);
+DISPATCH_KEYMGMT_FN(xmssmt, import_types);
+DISPATCH_KEYMGMT_FN(xmssmt, export);
+DISPATCH_KEYMGMT_FN(xmssmt, export_types);
+DISPATCH_KEYMGMT_FN(xmssmt, get_params);
+
+static void *p11prov_xmss_new_int(void *provctx, CK_KEY_TYPE type)
+{
+    P11PROV_CTX *ctx = (P11PROV_CTX *)provctx;
+    CK_RV ret;
+
+    P11PROV_debug("xmss new (type=%lu)", type);
+
+    ret = p11prov_ctx_status(ctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    return p11prov_obj_new(provctx, CK_UNAVAILABLE_INFORMATION,
+                           CK_P11PROV_IMPORTED_HANDLE,
+                           CK_UNAVAILABLE_INFORMATION);
+}
+
+static void *p11prov_xmss_new(void *provctx)
+{
+    return p11prov_xmss_new_int(provctx, CKK_XMSS);
+}
+
+static void *p11prov_xmssmt_new(void *provctx)
+{
+    return p11prov_xmss_new_int(provctx, CKK_XMSSMT);
+}
+
+static void p11prov_xmss_free(void *key)
+{
+    P11PROV_debug("xmss free %p", key);
+    p11prov_obj_free((P11PROV_OBJ *)key);
+}
+
+static void p11prov_xmssmt_free(void *key)
+{
+    p11prov_xmss_free(key);
+}
+
+static void *p11prov_xmss_load(const void *reference, size_t reference_sz)
+{
+    P11PROV_debug("xmss load %p, %ld", reference, reference_sz);
+    return p11prov_obj_from_typed_reference(reference, reference_sz,
+                                            CKK_XMSS);
+}
+
+static void *p11prov_xmssmt_load(const void *reference, size_t reference_sz)
+{
+    P11PROV_debug("xmssmt load %p, %ld", reference, reference_sz);
+    return p11prov_obj_from_typed_reference(reference, reference_sz,
+                                            CKK_XMSSMT);
+}
+
+static int p11prov_xmss_has(const void *keydata, int selection)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+
+    P11PROV_debug("xmss has %p %d", key, selection);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        if (p11prov_obj_get_class(key) != CKO_PRIVATE_KEY) {
+            return RET_OSSL_ERR;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static int p11prov_xmssmt_has(const void *keydata, int selection)
+{
+    return p11prov_xmss_has(keydata, selection);
+}
+
+static int p11prov_xmss_match(const void *keydata1, const void *keydata2,
+                              int selection)
+{
+    P11PROV_debug("xmss match %p %p %d", keydata1, keydata2, selection);
+
+    return p11prov_common_match(keydata1, keydata2, CKK_XMSS, selection);
+}
+
+static int p11prov_xmssmt_match(const void *keydata1, const void *keydata2,
+                                int selection)
+{
+    P11PROV_debug("xmssmt match %p %p %d", keydata1, keydata2, selection);
+
+    return p11prov_common_match(keydata1, keydata2, CKK_XMSSMT, selection);
+}
+
+static void *xmss_gen_init_int(void *provctx, int selection,
+                               const OSSL_PARAM params[], CK_KEY_TYPE type,
+                               CK_MECHANISM_TYPE mechanism,
+                               CK_ULONG default_param_set)
+{
+    struct key_generator *ctx = NULL;
+    int ret;
+
+    P11PROV_debug("xmss gen_init %p (type=%lu)", provctx, type);
+
+    ret = p11prov_ctx_status(provctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) == 0) {
+        P11PROV_raise(provctx, CKR_ARGUMENTS_BAD, "Unsupported selection");
+        return NULL;
+    }
+
+    ctx = OPENSSL_zalloc(sizeof(struct key_generator));
+    if (ctx == NULL) {
+        P11PROV_raise(provctx, CKR_HOST_MEMORY,
+                      "Failed to allocate key_generator structure");
+        return NULL;
+    }
+    ctx->provctx = (P11PROV_CTX *)provctx;
+    ctx->type = type;
+    ctx->data.xmss.param_set = default_param_set;
+    ctx->mechanism.mechanism = mechanism;
+
+    ret = p11prov_common_gen_set_params(ctx, params);
+    if (ret != RET_OSSL_OK) {
+        p11prov_common_gen_cleanup(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+static void *p11prov_xmss_gen_init(void *provctx, int selection,
+                                   const OSSL_PARAM params[])
+{
+    /* Default oid 0x01 = XMSS-SHA2_10_256 (RFC 8391 IANA registry / SP
+     * 800-208 SS4) — the smallest, fastest-to-test tree, and both engines'
+     * own xmss-reference vendoring default to it when nothing else is
+     * specified. */
+    return xmss_gen_init_int(provctx, selection, params, CKK_XMSS,
+                             CKM_XMSS_KEY_PAIR_GEN, 0x01UL);
+}
+
+static void *p11prov_xmssmt_gen_init(void *provctx, int selection,
+                                     const OSSL_PARAM params[])
+{
+    /* Default oid 0x01 = XMSSMT-SHA2_20/2_256 — the smallest XMSS^MT tree
+     * (2 layers, height 20), matching Rust's own get_sig_len() fallback
+     * default exactly (handlers.rs). */
+    return xmss_gen_init_int(provctx, selection, params, CKK_XMSSMT,
+                             CKM_XMSSMT_KEY_PAIR_GEN, 0x01UL);
+}
+
+static void *p11prov_xmss_gen(void *genctx, OSSL_CALLBACK *cb_fn,
+                              void *cb_arg)
+{
+    struct key_generator *ctx = (struct key_generator *)genctx;
+    void *key;
+    CK_RV ret;
+    CK_ULONG param_set;
+
+#define XMSS_PUBKEY_TMPL_SIZE 3
+    CK_ATTRIBUTE pubkey_template[XMSS_PUBKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_VERIFY, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_PARAMETER_SET, NULL, sizeof(CK_ULONG) },
+    };
+#define XMSS_PRIVKEY_TMPL_SIZE 4
+    CK_ATTRIBUTE privkey_template[XMSS_PRIVKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_PRIVATE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SENSITIVE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SIGN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+    };
+    int pubtsize = XMSS_PUBKEY_TMPL_SIZE;
+    int privtsize = XMSS_PRIVKEY_TMPL_SIZE;
+
+    P11PROV_debug("xmss gen %p %p %p", ctx, cb_fn, cb_arg);
+
+    param_set = ctx->data.xmss.param_set;
+    pubkey_template[2].pValue = &param_set;
+
+    ret = p11prov_common_gen(ctx, pubkey_template, privkey_template, pubtsize,
+                             privtsize, cb_fn, cb_arg, &key);
+    if (ret != CKR_OK) {
+        P11PROV_raise(ctx->provctx, ret, "xmss Key generation failed");
+        return NULL;
+    }
+    return key;
+}
+
+static const OSSL_PARAM *p11prov_xmss_gen_settable_params(void *genctx,
+                                                            void *provctx)
+{
+    static OSSL_PARAM p11prov_xmss_params[] = {
+        OSSL_PARAM_utf8_string(P11PROV_PARAM_URI, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return p11prov_xmss_params;
+}
+
+static int xmss_import_int(void *keydata, int selection,
+                           const OSSL_PARAM params[], CK_KEY_TYPE type)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    CK_OBJECT_CLASS class = CK_UNAVAILABLE_INFORMATION;
+    CK_RV rv;
+
+    P11PROV_debug("xmss import %p (type=%lu)", key, type);
+
+    if (!key) {
+        return RET_OSSL_ERR;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        class = CKO_PRIVATE_KEY;
+    } else if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        class = CKO_PUBLIC_KEY;
+    } else if (selection & OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS) {
+        class = CKO_DOMAIN_PARAMETERS;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        const OSSL_PARAM *p;
+        p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PRIV_KEY);
+        if (!p) {
+            /* not really a private key */
+            class = CKO_PUBLIC_KEY;
+        }
+    }
+
+    /* param_set not threaded through import here (mirrors sig/hss.c's own
+     * keymgmt) -- the key's own wire format is self-describing (RFC 8391:
+     * a 4-byte oid prefix precedes the core key material), so the actual
+     * parameter set is recoverable from CKA_VALUE itself if ever needed,
+     * same reasoning hss_parse_pubkey_top_level() already established for
+     * HSS's own self-describing wire format. */
+    rv = p11prov_obj_import_key(key, type, class, 0, params);
+    if (rv != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+    return RET_OSSL_OK;
+}
+
+static int p11prov_xmss_import(void *keydata, int selection,
+                               const OSSL_PARAM params[])
+{
+    return xmss_import_int(keydata, selection, params, CKK_XMSS);
+}
+
+static int p11prov_xmssmt_import(void *keydata, int selection,
+                                 const OSSL_PARAM params[])
+{
+    return xmss_import_int(keydata, selection, params, CKK_XMSSMT);
+}
+
+static const OSSL_PARAM *p11prov_xmss_import_types(int selection)
+{
+    static const OSSL_PARAM p11prov_xmss_imp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PRIV_KEY, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    P11PROV_debug("xmss import types");
+    if (selection & OSSL_KEYMGMT_SELECT_KEYPAIR) {
+        return p11prov_xmss_imp_key_types;
+    }
+    return NULL;
+}
+
+static const OSSL_PARAM *p11prov_xmssmt_import_types(int selection)
+{
+    return p11prov_xmss_import_types(selection);
+}
+
+static int xmss_export_int(void *keydata, int selection, OSSL_CALLBACK *cb_fn,
+                           void *cb_arg, CK_KEY_TYPE type)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    P11PROV_CTX *ctx = p11prov_obj_get_prov_ctx(key);
+    CK_OBJECT_CLASS class = p11prov_obj_get_class(key);
+
+    P11PROV_debug("xmss export %p, selection=%d (type=%lu)", keydata,
+                  selection, type);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    if (p11prov_ctx_allow_export(ctx) & DISALLOW_EXPORT_PUBLIC) {
+        return RET_OSSL_ERR;
+    }
+
+    if ((class == CKO_PUBLIC_KEY) || (selection & ~(PUBLIC_PARAMS)) == 0) {
+        return p11prov_obj_export_public_key(key, type, true, false, cb_fn,
+                                             cb_arg);
+    }
+
+    return RET_OSSL_ERR;
+}
+
+static int p11prov_xmss_export(void *keydata, int selection,
+                               OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    return xmss_export_int(keydata, selection, cb_fn, cb_arg, CKK_XMSS);
+}
+
+static int p11prov_xmssmt_export(void *keydata, int selection,
+                                 OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    return xmss_export_int(keydata, selection, cb_fn, cb_arg, CKK_XMSSMT);
+}
+
+static const OSSL_PARAM *p11prov_xmss_export_types(int selection)
+{
+    static const OSSL_PARAM p11prov_xmss_exp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    P11PROV_debug("xmss export types");
+    if (selection == OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        return p11prov_xmss_exp_key_types;
+    }
+    return NULL;
+}
+
+static const OSSL_PARAM *p11prov_xmssmt_export_types(int selection)
+{
+    return p11prov_xmss_export_types(selection);
+}
+
+static int xmss_get_params_int(void *keydata, OSSL_PARAM params[],
+                                bool is_mt)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    OSSL_PARAM *p;
+    int ret;
+
+    P11PROV_debug("xmss get params %p (is_mt=%d)", keydata, is_mt);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    /* Same CKA_VALUE-on-public-half / walk-to-associated-public-object
+     * fallback as sig/hss.c's own keymgmt -- see that file's identical
+     * comment. */
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_BITS);
+    if (p) {
+        P11PROV_OBJ *pub_obj = key;
+        CK_ATTRIBUTE *pub = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!pub && p11prov_obj_get_class(key) == CKO_PRIVATE_KEY) {
+            P11PROV_OBJ *assoc = p11prov_obj_get_associated(key);
+            if (assoc) {
+                pub_obj = assoc;
+                pub = p11prov_obj_get_attr(pub_obj, CKA_VALUE);
+            }
+        }
+        if (pub) {
+            ret = OSSL_PARAM_set_int(p, (int)(pub->ulValueLen * 8));
+            if (ret != RET_OSSL_OK) {
+                return ret;
+            }
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
+    if (p) {
+        ret = OSSL_PARAM_set_int(p, (int)xmss_sig_size_for_key(key, is_mt));
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MANDATORY_DIGEST);
+    if (p) {
+        /* XMSS/XMSS^MT is hash-internal (RFC 8391) — no external digest. */
+        ret = OSSL_PARAM_set_utf8_string(p, "");
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_PUB_KEY);
+    if (p) {
+        CK_ATTRIBUTE *pub;
+
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) {
+            return RET_OSSL_ERR;
+        }
+        pub = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!pub) {
+            return RET_OSSL_ERR;
+        }
+
+        p->return_size = pub->ulValueLen;
+        if (p->data) {
+            if (p->data_size < pub->ulValueLen) {
+                return RET_OSSL_ERR;
+            }
+            memcpy(p->data, pub->pValue, pub->ulValueLen);
+            p->data_size = pub->ulValueLen;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static int p11prov_xmss_get_params(void *keydata, OSSL_PARAM params[])
+{
+    return xmss_get_params_int(keydata, params, false);
+}
+
+static int p11prov_xmssmt_get_params(void *keydata, OSSL_PARAM params[])
+{
+    return xmss_get_params_int(keydata, params, true);
+}
+
+static const OSSL_PARAM *p11prov_xmss_gettable_params(void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
+        OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_MANDATORY_DIGEST, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+const OSSL_DISPATCH p11prov_xmss_keymgmt_functions[] = {
+    DISPATCH_KEYMGMT_ELEM(xmss, NEW, new),
+    DISPATCH_KEYMGMT_ELEM(xmss, GEN_INIT, gen_init),
+    DISPATCH_KEYMGMT_ELEM(xmss, GEN, gen),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_CLEANUP, gen_cleanup),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_SET_PARAMS, gen_set_params),
+    DISPATCH_KEYMGMT_ELEM(xmss, GEN_SETTABLE_PARAMS, gen_settable_params),
+    DISPATCH_KEYMGMT_ELEM(xmss, LOAD, load),
+    DISPATCH_KEYMGMT_ELEM(xmss, FREE, free),
+    DISPATCH_KEYMGMT_ELEM(xmss, HAS, has),
+    DISPATCH_KEYMGMT_ELEM(xmss, MATCH, match),
+    DISPATCH_KEYMGMT_ELEM(xmss, IMPORT, import),
+    DISPATCH_KEYMGMT_ELEM(xmss, IMPORT_TYPES, import_types),
+    DISPATCH_KEYMGMT_ELEM(xmss, EXPORT, export),
+    DISPATCH_KEYMGMT_ELEM(xmss, EXPORT_TYPES, export_types),
+    DISPATCH_KEYMGMT_ELEM(xmss, GET_PARAMS, get_params),
+    DISPATCH_KEYMGMT_ELEM(xmss, GETTABLE_PARAMS, gettable_params),
+    { 0, NULL },
+};
+
+const OSSL_DISPATCH p11prov_xmssmt_keymgmt_functions[] = {
+    DISPATCH_KEYMGMT_ELEM(xmssmt, NEW, new),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, GEN_INIT, gen_init),
+    DISPATCH_KEYMGMT_ELEM(xmss, GEN, gen),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_CLEANUP, gen_cleanup),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_SET_PARAMS, gen_set_params),
+    DISPATCH_KEYMGMT_ELEM(xmss, GEN_SETTABLE_PARAMS, gen_settable_params),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, LOAD, load),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, FREE, free),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, HAS, has),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, MATCH, match),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, IMPORT, import),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, IMPORT_TYPES, import_types),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, EXPORT, export),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, EXPORT_TYPES, export_types),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, GET_PARAMS, get_params),
+    DISPATCH_KEYMGMT_ELEM(xmss, GETTABLE_PARAMS, gettable_params),
     { 0, NULL },
 };
 

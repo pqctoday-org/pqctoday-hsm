@@ -866,7 +866,8 @@ static CK_RV alg_set_op(OSSL_ALGORITHM **op, int idx, OSSL_ALGORITHM *alg)
 
 #define PQC_MECHS \
     CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN, \
-        CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN, CKM_HSS, CKM_HSS_KEY_PAIR_GEN
+        CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN, CKM_HSS, CKM_HSS_KEY_PAIR_GEN, \
+        CKM_XMSS, CKM_XMSS_KEY_PAIR_GEN, CKM_XMSSMT, CKM_XMSSMT_KEY_PAIR_GEN
 
 #if SKEY_SUPPORT == 1
 /* phase 5 R26 prerequisite: CKM_AES_GCM was missing from this checklist,
@@ -1393,10 +1394,22 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 UNCHECK_MECHS(CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM);
                 break;
             case CKM_XMSS:
-                // Scaffolding: Map XMSS to SoftHSMv3 (Validation / Verification only)
+                /* Remediation R41 (phase 8): full sign+verify, mirroring
+                 * HSS's own shape (sig/xmss.c). Supersedes the earlier
+                 * "verify-only, keygen/sign not exposed" scaffolding note
+                 * that used to sit here -- that comment described a stub
+                 * with empty OSSL_DISPATCH tables (never actually
+                 * functional, and would have advertised "XMSS" as usable
+                 * while every real operation failed), not a considered
+                 * scope decision this item needed to preserve. */
                 ADD_ALGO_EXT(XMSS, signature, prop,
                              p11prov_xmss_signature_functions);
                 UNCHECK_MECHS(CKM_XMSS);
+                break;
+            case CKM_XMSSMT:
+                ADD_ALGO_EXT(XMSSMT, signature, prop,
+                             p11prov_xmssmt_signature_functions);
+                UNCHECK_MECHS(CKM_XMSSMT);
                 break;
 #if SKEY_SUPPORT == 1
             case CKM_AES_ECB:
@@ -1729,6 +1742,13 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
         ADD_ALGO_EXT(HSS, encoder,
                      DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
                      p11prov_hss_encoder_priv_key_info_pem_functions);
+        /* Remediation R41 (phase 8): XMSS/XMSS-MT */
+        ADD_ALGO_EXT(XMSS, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_xmss_encoder_priv_key_info_pem_functions);
+        ADD_ALGO_EXT(XMSSMT, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_xmssmt_encoder_priv_key_info_pem_functions);
         /* ML-KEM (remediation R3 core) — one shared function/table across
          * all 3 parameter sets, same as ML-DSA's block above. */
         ADD_ALGO_EXT(ML_KEM_512, encoder,
@@ -1854,6 +1874,9 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
                  p11prov_slhdsa_shake_256f_keymgmt_functions);
     /* Phase 4 R9: HSS/LMS */
     ADD_ALGO(HSS, hss, keymgmt, prop);
+    /* Remediation R41 (phase 8): XMSS/XMSS^MT */
+    ADD_ALGO(XMSS, xmss, keymgmt, prop);
+    ADD_ALGO(XMSSMT, xmssmt, keymgmt, prop);
     ADD_ALGO_EXT(ML_KEM_512, keymgmt, prop, p11prov_mlkem512_keymgmt_functions);
     ADD_ALGO_EXT(ML_KEM_768, keymgmt, prop, p11prov_mlkem768_keymgmt_functions);
     ADD_ALGO_EXT(ML_KEM_1024, keymgmt, prop, p11prov_mlkem1024_keymgmt_functions);

@@ -59,6 +59,9 @@ extern const OSSL_DISPATCH p11prov_slhdsa_encoder_spki_der_functions[];
 extern const OSSL_DISPATCH p11prov_slhdsa_encoder_priv_key_info_pem_functions[];
 /* HSS/LMS (phase 4 R9) */
 extern const OSSL_DISPATCH p11prov_hss_encoder_priv_key_info_pem_functions[];
+/* Remediation R41 (phase 8) */
+extern const OSSL_DISPATCH p11prov_xmss_encoder_priv_key_info_pem_functions[];
+extern const OSSL_DISPATCH p11prov_xmssmt_encoder_priv_key_info_pem_functions[];
 extern const OSSL_DISPATCH p11prov_slhdsa_encoder_text_functions[];
 
 #endif /* _ENCODER_H */

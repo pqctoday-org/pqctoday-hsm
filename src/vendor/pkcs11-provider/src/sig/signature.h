@@ -86,4 +86,8 @@ extern const OSSL_DISPATCH p11prov_slhdsa_shake_256f_signature_functions[];
 #define DISPATCH_HSS_FN(name) DECL_DISPATCH_FUNC(signature, p11prov_hss, name)
 extern const OSSL_DISPATCH p11prov_hss_signature_functions[];
 
+/* xmss / xmss^mt sig functions (remediation R41, phase 8) */
+extern const OSSL_DISPATCH p11prov_xmss_signature_functions[];
+extern const OSSL_DISPATCH p11prov_xmssmt_signature_functions[];
+
 #endif /* _SIGNATURE_H */
