@@ -452,4 +452,93 @@ service Pkcs11V32 {
   rpc C_Decrypt(V32DataRequest) returns (V32BytesResponse);
   rpc C_DecryptUpdate(V32DataRequest) returns (V32BytesResponse);
   rpc C_DecryptFinal(V32SessionRequest) returns (V32BytesResponse);
+
+  // ── admin / info (RW6a) ──
+  rpc C_GetInfo(V32Empty) returns (V32BytesResponse);
+  rpc C_GetSlotList(V32GetSlotListRequest) returns (V32GetSlotListResponse);
+  rpc C_GetSlotInfo(V32SlotRequest) returns (V32BytesResponse);
+  rpc C_WaitForSlotEvent(V32SlotEventRequest) returns (V32StatusResponse);
+  rpc C_CloseAllSessions(V32SlotRequest) returns (V32StatusResponse);
+  rpc C_SessionCancel(V32SessionFlagsRequest) returns (V32StatusResponse);
+  rpc C_LoginUser(V32LoginRequest) returns (V32StatusResponse);
+
+  // ── destructive-gated admin (RW6a) ──
+  rpc C_InitToken(V32InitTokenRequest) returns (V32StatusResponse); // gated by --enable-destructive
+  rpc C_InitPIN(V32InitPinRequest) returns (V32StatusResponse); // gated by --enable-destructive
+  rpc C_SetPIN(V32SetPinRequest) returns (V32StatusResponse); // gated by --enable-destructive
+
+  // ── honest-code stubs (RW6a) — always the same spec-mandated code ──
+  rpc C_DigestKey(V32ObjectRequest) returns (V32StatusResponse);
+  rpc C_GetOperationState(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_SetOperationState(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_GetFunctionStatus(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_CancelFunction(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_AsyncComplete(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_AsyncGetID(V32SessionRequest) returns (V32AsyncGetIdResponse);
+  rpc C_AsyncJoin(V32AsyncJoinRequest) returns (V32StatusResponse);
+
+  // ── recover + verify-with-signature (RW6a) ──
+  rpc C_SignRecoverInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_SignRecover(V32DataRequest) returns (V32BytesResponse);
+  rpc C_VerifyRecoverInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_VerifyRecover(V32SignatureRequest) returns (V32BytesResponse);
+  rpc C_VerifySignatureInit(V32VerifySignatureInitRequest) returns (V32StatusResponse);
+  rpc C_VerifySignature(V32DataRequest) returns (V32StatusResponse);
+
+  // ── dual-function quartet (RW6a) — reuses V32DataRequest/V32BytesResponse ──
+  rpc C_DigestEncryptUpdate(V32DataRequest) returns (V32BytesResponse);
+  rpc C_DecryptDigestUpdate(V32DataRequest) returns (V32BytesResponse);
+  rpc C_SignEncryptUpdate(V32DataRequest) returns (V32BytesResponse);
+  rpc C_DecryptVerifyUpdate(V32DataRequest) returns (V32BytesResponse);
+}
+
+message V32Empty {}
+
+message V32GetSlotListRequest {
+  bool token_present = 1;
+}
+message V32GetSlotListResponse {
+  uint32 ck_rv = 1;
+  repeated uint32 slot_ids = 2;
+}
+
+message V32SlotEventRequest {
+  uint32 flags = 1;
+}
+
+message V32SessionFlagsRequest {
+  uint32 session_handle = 1;
+  uint32 flags = 2;
+}
+
+message V32InitTokenRequest { // gated by --enable-destructive
+  uint32 slot_id = 1;
+  bytes pin = 2;
+  bytes label = 3; // MUST be exactly 32 bytes — see verbs_v32::init_token's doc
+}
+message V32InitPinRequest { // gated by --enable-destructive
+  uint32 session_handle = 1;
+  bytes pin = 2;
+}
+message V32SetPinRequest { // gated by --enable-destructive
+  uint32 session_handle = 1;
+  bytes old_pin = 2;
+  bytes new_pin = 3;
+}
+
+message V32AsyncGetIdResponse {
+  uint32 ck_rv = 1;
+  uint32 id = 2;
+}
+message V32AsyncJoinRequest {
+  uint32 session_handle = 1;
+  uint32 id = 2;
+  bytes data = 3;
+}
+
+message V32VerifySignatureInitRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 key_handle = 3;
+  bytes signature = 4;
 }

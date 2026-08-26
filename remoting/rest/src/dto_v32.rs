@@ -355,3 +355,89 @@ impl From<(u32, Vec<u32>)> for FindObjectsResp {
         Self { ck_rv, object_handles }
     }
 }
+
+// ── admin / info (RW6a) ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct GetSlotListReq {
+    #[serde(default)]
+    pub token_present: bool,
+}
+#[derive(Serialize)]
+pub struct GetSlotListResp {
+    pub ck_rv: u32,
+    pub slot_ids: Vec<u32>,
+}
+impl From<(u32, Vec<u32>)> for GetSlotListResp {
+    fn from((ck_rv, slot_ids): (u32, Vec<u32>)) -> Self {
+        Self { ck_rv, slot_ids }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SlotEventReq {
+    pub flags: u32,
+}
+
+#[derive(Deserialize)]
+pub struct SessionFlagsReq {
+    pub session_handle: u32,
+    pub flags: u32,
+}
+
+// ── destructive-gated admin (RW6a) ───────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct InitTokenReq {
+    pub slot_id: u32,
+    #[serde(with = "b64")]
+    pub pin: Vec<u8>,
+    /// MUST be exactly 32 bytes — see `verbs_v32::init_token`'s doc.
+    #[serde(with = "b64")]
+    pub label: Vec<u8>,
+}
+#[derive(Deserialize)]
+pub struct InitPinReq {
+    pub session_handle: u32,
+    #[serde(with = "b64")]
+    pub pin: Vec<u8>,
+}
+#[derive(Deserialize)]
+pub struct SetPinReq {
+    pub session_handle: u32,
+    #[serde(with = "b64")]
+    pub old_pin: Vec<u8>,
+    #[serde(with = "b64")]
+    pub new_pin: Vec<u8>,
+}
+
+// ── honest-code stubs (RW6a) ─────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct AsyncGetIdResp {
+    pub ck_rv: u32,
+    pub id: u32,
+}
+impl From<u32> for AsyncGetIdResp {
+    fn from(ck_rv: u32) -> Self {
+        Self { ck_rv, id: 0 }
+    }
+}
+#[derive(Deserialize)]
+pub struct AsyncJoinReq {
+    pub session_handle: u32,
+    pub id: u32,
+    #[serde(with = "b64")]
+    pub data: Vec<u8>,
+}
+
+// ── recover + verify-with-signature (RW6a) ───────────────────────────────
+
+#[derive(Deserialize)]
+pub struct VerifySignatureInitReq {
+    pub session_handle: u32,
+    pub mechanism: V32MechanismDto,
+    pub key_handle: u32,
+    #[serde(with = "b64")]
+    pub signature: Vec<u8>,
+}

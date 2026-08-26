@@ -478,6 +478,285 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let (ck_rv, data) = blocking(move || v32::decrypt_final(req.session_handle)).await?;
         Ok(Response::new(V32BytesResponse { ck_rv, data }))
     }
+
+    // ── admin / info (RW6a) ──────────────────────────────────────────────
+
+    async fn c_get_info(&self, _request: Request<V32Empty>) -> Result<Response<V32BytesResponse>, Status> {
+        let (ck_rv, data) = blocking(v32::get_info).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+
+    async fn c_get_slot_list(
+        &self,
+        request: Request<V32GetSlotListRequest>,
+    ) -> Result<Response<V32GetSlotListResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, slot_ids) = blocking(move || v32::get_slot_list(req.token_present)).await?;
+        Ok(Response::new(V32GetSlotListResponse { ck_rv, slot_ids }))
+    }
+
+    async fn c_get_slot_info(
+        &self,
+        request: Request<V32SlotRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || v32::get_slot_info(req.slot_id)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+
+    async fn c_wait_for_slot_event(
+        &self,
+        request: Request<V32SlotEventRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::wait_for_slot_event(req.flags)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    async fn c_close_all_sessions(
+        &self,
+        request: Request<V32SlotRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::close_all_sessions(req.slot_id)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    async fn c_session_cancel(
+        &self,
+        request: Request<V32SessionFlagsRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::session_cancel(req.session_handle, req.flags)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    async fn c_login_user(
+        &self,
+        request: Request<V32LoginRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv =
+            blocking(move || v32::login_user(req.session_handle, req.user_type, &req.pin)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    // ── destructive-gated admin (RW6a) ───────────────────────────────────
+
+    async fn c_init_token(
+        &self,
+        request: Request<V32InitTokenRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        if !self.destructive {
+            return Ok(Response::new(V32StatusResponse {
+                ck_rv: v32::ck::CKR_FUNCTION_NOT_SUPPORTED,
+            }));
+        }
+        let req = request.into_inner();
+        let ck_rv =
+            blocking(move || v32::init_token(req.slot_id, &req.pin, &req.label)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    async fn c_init_pin(
+        &self,
+        request: Request<V32InitPinRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        if !self.destructive {
+            return Ok(Response::new(V32StatusResponse {
+                ck_rv: v32::ck::CKR_FUNCTION_NOT_SUPPORTED,
+            }));
+        }
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::init_pin(req.session_handle, &req.pin)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    async fn c_set_pin(
+        &self,
+        request: Request<V32SetPinRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        if !self.destructive {
+            return Ok(Response::new(V32StatusResponse {
+                ck_rv: v32::ck::CKR_FUNCTION_NOT_SUPPORTED,
+            }));
+        }
+        let req = request.into_inner();
+        let ck_rv =
+            blocking(move || v32::set_pin(req.session_handle, &req.old_pin, &req.new_pin)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    // ── honest-code stubs (RW6a) ──────────────────────────────────────────
+
+    async fn c_digest_key(
+        &self,
+        request: Request<V32ObjectRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::digest_key(req.session_handle, req.object_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_get_operation_state(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::get_operation_state(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_set_operation_state(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::set_operation_state(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_get_function_status(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::get_function_status(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_cancel_function(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::cancel_function(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_async_complete(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::async_complete(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_async_get_id(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32AsyncGetIdResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::async_get_id(req.session_handle)).await?;
+        Ok(Response::new(V32AsyncGetIdResponse { ck_rv, id: 0 }))
+    }
+    async fn c_async_join(
+        &self,
+        request: Request<V32AsyncJoinRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv =
+            blocking(move || v32::async_join(req.session_handle, req.id, &req.data)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    // ── recover + verify-with-signature (RW6a) ───────────────────────────
+
+    async fn c_sign_recover_init(
+        &self,
+        request: Request<V32KeyedInitRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let ck_rv = blocking(move || {
+            v32::sign_recover_init(req.session_handle, mech, &param, req.key_handle)
+        })
+        .await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_sign_recover(
+        &self,
+        request: Request<V32DataRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || v32::sign_recover(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+    async fn c_verify_recover_init(
+        &self,
+        request: Request<V32KeyedInitRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let ck_rv = blocking(move || {
+            v32::verify_recover_init(req.session_handle, mech, &param, req.key_handle)
+        })
+        .await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_verify_recover(
+        &self,
+        request: Request<V32SignatureRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) =
+            blocking(move || v32::verify_recover(req.session_handle, &req.signature)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+    async fn c_verify_signature_init(
+        &self,
+        request: Request<V32VerifySignatureInitRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let ck_rv = blocking(move || {
+            v32::verify_signature_init(req.session_handle, mech, &param, req.key_handle, &req.signature)
+        })
+        .await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_verify_signature(
+        &self,
+        request: Request<V32DataRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::verify_signature(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    // ── dual-function quartet (RW6a) ──────────────────────────────────────
+
+    async fn c_digest_encrypt_update(
+        &self,
+        request: Request<V32DataRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) =
+            blocking(move || v32::digest_encrypt_update(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+    async fn c_decrypt_digest_update(
+        &self,
+        request: Request<V32DataRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) =
+            blocking(move || v32::decrypt_digest_update(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+    async fn c_sign_encrypt_update(
+        &self,
+        request: Request<V32DataRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) =
+            blocking(move || v32::sign_encrypt_update(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+    async fn c_decrypt_verify_update(
+        &self,
+        request: Request<V32DataRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) =
+            blocking(move || v32::decrypt_verify_update(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
 }
 
 #[cfg(test)]

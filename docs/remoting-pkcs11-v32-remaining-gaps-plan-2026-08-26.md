@@ -286,3 +286,61 @@ locked coverage decision.
 4. **Ledger ratchet false-greens**: check (b)/(c) above exist precisely so
    the ledger can't drift from the test file or the proto (row-level
    ratchets hiding gaps is a known failure mode in this workspace).
+
+## Execution log
+
+### 2026-08-26 — RW6a (flat/trivial functions)
+
+Shipped, all live-verified. 28 new RPCs: admin/info (7), destructive-gated
+admin (3), honest-code stubs (8), recover + verify-with-signature (6),
+dual-function quartet (4). Zero engine-crate changes, as predicted.
+
+**core:** `get_info`/`get_slot_list`/`get_slot_info` return raw CK_INFO/
+CK_SLOT_INFO bytes (not typed messages — a deliberate call, consistent
+with this mirror's existing "no enums, raw codepoints" convention, cheaper
+than one-off typed messages for two fixed documented layouts).
+`init_token` rejects any `label` that isn't exactly 32 bytes with
+`CKR_ARGUMENTS_BAD` BEFORE calling `ffi::C_InitToken` — a real
+native-width-audit finding: that entry point reads a fixed
+`CK_UTF8CHAR label[32]` with no length parameter, so a shorter wire
+payload would be an out-of-bounds read at the FFI boundary, not a
+PKCS#11-level error. 5 new unit tests (25/25 core green).
+
+**A real, load-bearing test-isolation finding**, not hypothetical:
+`C_CloseAllSessions` closing the LAST session on a slot triggers §5.6.3's
+login-state reset AND `invalidate_private_handles_on_slot` (ffi.rs) —
+genuinely destructive, process-wide. This process's ONE shared bootstrap
+"keep-alive" session (`native::bootstrap_default_token` opens it, logs it
+in as USER, and deliberately never closes it) lives on the same slot every
+test uses. Two different fixes were needed for the two different test
+harnesses in this repo:
+- **core crate** (`#[serial]`, one test at a time): the admin unit test
+  restores the keep-alive invariant itself (open + login) immediately
+  after exercising the destructive call, so every later serial test still
+  sees a logged-in token.
+- **acceptance crate** (true parallel execution by design — see this
+  file's own module doc): no safe moment exists to run the real
+  destructive path at all, since concurrently-running parity tests would
+  already observe the corruption before any restore could land. V12 was
+  redesigned to cover only the real `CKR_SLOT_ID_INVALID` negative path
+  (touches no shared state); the positive path stays covered by the core
+  crate's serialized test only.
+
+**gRPC + REST:** all 28 RPCs/routes wired; `C_InitToken`/`C_InitPIN`/
+`C_SetPIN` gated by `--enable-destructive`, same posture as
+`C_DestroyObject`/`C_SetAttributeValue`.
+
+**Validation:** 5 new three-transport parity tests (V11-V15): admin/info +
+session lifecycle, close-all-sessions negative path, honest-code stubs (8
+codes, 3 transports), verify-with-signature-matches-verify +
+Sign/VerifyRecover's real `CKR_MECHANISM_INVALID` on a non-RSA mechanism,
+and the dual-function quartet (`C_DigestEncryptUpdate` ciphertext
+byte-identical to running Digest+Encrypt as separate FSMs). **Whole
+remoting workspace green: 25 core + 7 legacy-parity (no regression) + 15
+v32-parity + 2 posture.**
+
+**Not yet done:** the JavaJCE-remote cross-repo gate step (`--javajce-remote`
+in `local-gate.sh`) needs a live `pqc-grpc` + `pqc-dev-sandbox` and a Maven
+toolchain not present in this environment — flagged per the plan's own
+cross-cutting constraint, deferred to whoever runs the full gate before
+merging. RW6b (message API) is next.

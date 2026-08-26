@@ -66,6 +66,34 @@ pub fn router(state: V32State) -> Router {
         .route("/v32/decrypt", post(decrypt))
         .route("/v32/decrypt-update", post(decrypt_update))
         .route("/v32/decrypt-final", post(decrypt_final))
+        .route("/v32/get-info", post(get_info))
+        .route("/v32/get-slot-list", post(get_slot_list))
+        .route("/v32/get-slot-info", post(get_slot_info))
+        .route("/v32/wait-for-slot-event", post(wait_for_slot_event))
+        .route("/v32/close-all-sessions", post(close_all_sessions))
+        .route("/v32/session-cancel", post(session_cancel))
+        .route("/v32/login-user", post(login_user))
+        .route("/v32/init-token", post(init_token))
+        .route("/v32/init-pin", post(init_pin))
+        .route("/v32/set-pin", post(set_pin))
+        .route("/v32/digest-key", post(digest_key))
+        .route("/v32/get-operation-state", post(get_operation_state))
+        .route("/v32/set-operation-state", post(set_operation_state))
+        .route("/v32/get-function-status", post(get_function_status))
+        .route("/v32/cancel-function", post(cancel_function))
+        .route("/v32/async-complete", post(async_complete))
+        .route("/v32/async-get-id", post(async_get_id))
+        .route("/v32/async-join", post(async_join))
+        .route("/v32/sign-recover-init", post(sign_recover_init))
+        .route("/v32/sign-recover", post(sign_recover))
+        .route("/v32/verify-recover-init", post(verify_recover_init))
+        .route("/v32/verify-recover", post(verify_recover))
+        .route("/v32/verify-signature-init", post(verify_signature_init))
+        .route("/v32/verify-signature", post(verify_signature))
+        .route("/v32/digest-encrypt-update", post(digest_encrypt_update))
+        .route("/v32/decrypt-digest-update", post(decrypt_digest_update))
+        .route("/v32/sign-encrypt-update", post(sign_encrypt_update))
+        .route("/v32/decrypt-verify-update", post(decrypt_verify_update))
         .with_state(state)
 }
 
@@ -219,6 +247,113 @@ async fn decrypt_update(Json(r): Json<DataReq>) -> Json<BytesResp> {
 }
 async fn decrypt_final(Json(r): Json<DatalessSession>) -> Json<BytesResp> {
     Json(v32::decrypt_final(r.session_handle).into())
+}
+
+async fn get_info() -> Json<BytesResp> {
+    Json(v32::get_info().into())
+}
+async fn get_slot_list(Json(r): Json<GetSlotListReq>) -> Json<GetSlotListResp> {
+    Json(v32::get_slot_list(r.token_present).into())
+}
+async fn get_slot_info(Json(r): Json<SlotReq>) -> Json<BytesResp> {
+    Json(v32::get_slot_info(r.slot_id).into())
+}
+async fn wait_for_slot_event(Json(r): Json<SlotEventReq>) -> Json<StatusResp> {
+    Json(v32::wait_for_slot_event(r.flags).into())
+}
+async fn close_all_sessions(Json(r): Json<SlotReq>) -> Json<StatusResp> {
+    Json(v32::close_all_sessions(r.slot_id).into())
+}
+async fn session_cancel(Json(r): Json<SessionFlagsReq>) -> Json<StatusResp> {
+    Json(v32::session_cancel(r.session_handle, r.flags).into())
+}
+async fn login_user(Json(r): Json<LoginReq>) -> Json<StatusResp> {
+    Json(v32::login_user(r.session_handle, r.user_type, &r.pin).into())
+}
+
+async fn init_token(State(st): State<V32State>, Json(r): Json<InitTokenReq>) -> Json<StatusResp> {
+    if !st.destructive {
+        return Json(StatusResp { ck_rv: v32::ck::CKR_FUNCTION_NOT_SUPPORTED });
+    }
+    Json(v32::init_token(r.slot_id, &r.pin, &r.label).into())
+}
+async fn init_pin(State(st): State<V32State>, Json(r): Json<InitPinReq>) -> Json<StatusResp> {
+    if !st.destructive {
+        return Json(StatusResp { ck_rv: v32::ck::CKR_FUNCTION_NOT_SUPPORTED });
+    }
+    Json(v32::init_pin(r.session_handle, &r.pin).into())
+}
+async fn set_pin(State(st): State<V32State>, Json(r): Json<SetPinReq>) -> Json<StatusResp> {
+    if !st.destructive {
+        return Json(StatusResp { ck_rv: v32::ck::CKR_FUNCTION_NOT_SUPPORTED });
+    }
+    Json(v32::set_pin(r.session_handle, &r.old_pin, &r.new_pin).into())
+}
+
+async fn digest_key(Json(r): Json<ObjectReq>) -> Json<StatusResp> {
+    Json(v32::digest_key(r.session_handle, r.object_handle).into())
+}
+async fn get_operation_state(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::get_operation_state(r.session_handle).into())
+}
+async fn set_operation_state(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::set_operation_state(r.session_handle).into())
+}
+async fn get_function_status(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::get_function_status(r.session_handle).into())
+}
+async fn cancel_function(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::cancel_function(r.session_handle).into())
+}
+async fn async_complete(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::async_complete(r.session_handle).into())
+}
+async fn async_get_id(Json(r): Json<DatalessSession>) -> Json<AsyncGetIdResp> {
+    Json(v32::async_get_id(r.session_handle).into())
+}
+async fn async_join(Json(r): Json<AsyncJoinReq>) -> Json<StatusResp> {
+    Json(v32::async_join(r.session_handle, r.id, &r.data).into())
+}
+
+async fn sign_recover_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
+    Json(v32::sign_recover_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+}
+async fn sign_recover(Json(r): Json<DataReq>) -> Json<BytesResp> {
+    Json(v32::sign_recover(r.session_handle, &r.data).into())
+}
+async fn verify_recover_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
+    Json(v32::verify_recover_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+}
+async fn verify_recover(Json(r): Json<SignatureReq>) -> Json<BytesResp> {
+    Json(v32::verify_recover(r.session_handle, &r.signature).into())
+}
+async fn verify_signature_init(Json(r): Json<VerifySignatureInitReq>) -> Json<StatusResp> {
+    Json(
+        v32::verify_signature_init(
+            r.session_handle,
+            r.mechanism.mechanism,
+            &r.mechanism.parameter,
+            r.key_handle,
+            &r.signature,
+        )
+        .into(),
+    )
+}
+async fn verify_signature(Json(r): Json<DataReq>) -> Json<StatusResp> {
+    Json(v32::verify_signature(r.session_handle, &r.data).into())
+}
+
+async fn digest_encrypt_update(Json(r): Json<DataReq>) -> Json<BytesResp> {
+    Json(v32::digest_encrypt_update(r.session_handle, &r.data).into())
+}
+async fn decrypt_digest_update(Json(r): Json<DataReq>) -> Json<BytesResp> {
+    Json(v32::decrypt_digest_update(r.session_handle, &r.data).into())
+}
+async fn sign_encrypt_update(Json(r): Json<DataReq>) -> Json<BytesResp> {
+    Json(v32::sign_encrypt_update(r.session_handle, &r.data).into())
+}
+async fn decrypt_verify_update(Json(r): Json<DataReq>) -> Json<BytesResp> {
+    Json(v32::decrypt_verify_update(r.session_handle, &r.data).into())
 }
 
 // Small shared request shapes used by several routes.

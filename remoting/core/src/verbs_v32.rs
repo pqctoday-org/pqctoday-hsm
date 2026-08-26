@@ -76,6 +76,16 @@ pub mod ck {
     pub use softhsmrustv3::constants::CKA_ENCRYPT;
     pub use softhsmrustv3::constants::CKM_AES_ECB;
     pub use softhsmrustv3::constants::CKR_DATA_LEN_RANGE;
+    // RW6a additions.
+    pub use softhsmrustv3::constants::CKF_DONT_BLOCK;
+    pub use softhsmrustv3::constants::CKF_TOKEN_INITIALIZED;
+    pub use softhsmrustv3::constants::CKR_FUNCTION_NOT_PARALLEL;
+    pub use softhsmrustv3::constants::CKR_NO_EVENT;
+    pub use softhsmrustv3::constants::CKR_PIN_LEN_RANGE;
+    pub use softhsmrustv3::constants::CKR_MECHANISM_INVALID;
+    pub use softhsmrustv3::constants::CKR_SESSION_EXISTS;
+    pub use softhsmrustv3::constants::CKR_SESSION_READ_ONLY;
+    pub use softhsmrustv3::constants::CKR_SLOT_ID_INVALID;
 }
 
 /// The bootstrap slot — same constant `verbs::bootstrap()` initializes.
@@ -579,6 +589,187 @@ pub fn decrypt_final(session: u32) -> (u32, Vec<u8>) {
     two_call(|out, len| ffi::C_DecryptFinal(session, out, len))
 }
 
+// ── admin / info (RW6a slice) ────────────────────────────────────────────
+//
+// CK_INFO (72 bytes) and CK_SLOT_INFO (104 bytes) travel as raw bytes —
+// consistent with this mirror's "no enums, raw codepoints" convention
+// rather than a one-off typed message for two fixed, documented layouts
+// (offsets in `ffi::C_GetInfo`/`C_GetSlotInfo`'s own comments).
+
+pub fn get_info() -> (u32, Vec<u8>) {
+    let mut buf = vec![0u8; 72];
+    let rv = ffi::C_GetInfo(buf.as_mut_ptr());
+    (rv, buf)
+}
+
+pub fn get_slot_list(token_present: bool) -> (u32, Vec<u32>) {
+    let mut count: u32 = 0;
+    let rv = ffi::C_GetSlotList(u8::from(token_present), core::ptr::null_mut(), &mut count);
+    if rv != 0 {
+        return (rv, Vec::new());
+    }
+    let mut slots = vec![0u32; count as usize];
+    let rv = ffi::C_GetSlotList(
+        u8::from(token_present),
+        if slots.is_empty() { core::ptr::null_mut() } else { slots.as_mut_ptr() },
+        &mut count,
+    );
+    slots.truncate(count as usize);
+    (rv, slots)
+}
+
+pub fn get_slot_info(slot_id: u32) -> (u32, Vec<u8>) {
+    let mut buf = vec![0u8; 104];
+    let rv = ffi::C_GetSlotInfo(slot_id, buf.as_mut_ptr());
+    (rv, buf)
+}
+
+pub fn wait_for_slot_event(flags: u32) -> u32 {
+    ffi::C_WaitForSlotEvent(flags, core::ptr::null_mut(), core::ptr::null_mut())
+}
+
+pub fn close_all_sessions(slot_id: u32) -> u32 {
+    ffi::C_CloseAllSessions(slot_id)
+}
+
+pub fn session_cancel(session: u32, flags: u32) -> u32 {
+    ffi::C_SessionCancel(session, flags)
+}
+
+pub fn login_user(session: u32, user_type: u32, pin: &[u8]) -> u32 {
+    ffi::C_LoginUser(
+        session,
+        user_type,
+        pin.as_ptr() as *mut u8,
+        pin.len() as u32,
+        core::ptr::null_mut(),
+        0,
+    )
+}
+
+// ── destructive-gated admin (RW6a slice) ─────────────────────────────────
+// Gated by `--enable-destructive` at the transport layer, same posture as
+// C_DestroyObject/C_SetAttributeValue.
+
+/// `label` MUST be exactly 32 bytes: `ffi::C_InitToken` reads a fixed
+/// `CK_UTF8CHAR label[32]` with no length parameter, so anything shorter
+/// is an out-of-bounds read at the FFI boundary, not a PKCS#11 error code
+/// — this is caught here, before the call, not left to the engine.
+pub fn init_token(slot_id: u32, pin: &[u8], label: &[u8]) -> u32 {
+    if label.len() != 32 {
+        return CKR_ARGUMENTS_BAD;
+    }
+    ffi::C_InitToken(slot_id, pin.as_ptr() as *mut u8, pin.len() as u32, label.as_ptr() as *mut u8)
+}
+
+pub fn init_pin(session: u32, pin: &[u8]) -> u32 {
+    ffi::C_InitPIN(session, pin.as_ptr() as *mut u8, pin.len() as u32)
+}
+
+pub fn set_pin(session: u32, old_pin: &[u8], new_pin: &[u8]) -> u32 {
+    ffi::C_SetPIN(
+        session,
+        old_pin.as_ptr() as *mut u8,
+        old_pin.len() as u32,
+        new_pin.as_ptr() as *mut u8,
+        new_pin.len() as u32,
+    )
+}
+
+// ── honest-code stubs (RW6a slice) ───────────────────────────────────────
+// PKCS#11 v3.2 §11.17-mandated entry points this engine does not
+// implement. The CODE is the contract under test here — every one below
+// always returns the same spec-legal value regardless of arguments.
+
+pub fn digest_key(session: u32, key: u32) -> u32 {
+    ffi::C_DigestKey(session, key)
+}
+pub fn get_operation_state(session: u32) -> u32 {
+    ffi::C_GetOperationState(session, core::ptr::null_mut(), core::ptr::null_mut())
+}
+pub fn set_operation_state(session: u32) -> u32 {
+    ffi::C_SetOperationState(session, core::ptr::null_mut(), 0, 0, 0)
+}
+pub fn get_function_status(session: u32) -> u32 {
+    ffi::C_GetFunctionStatus(session)
+}
+pub fn cancel_function(session: u32) -> u32 {
+    ffi::C_CancelFunction(session)
+}
+pub fn async_complete(session: u32) -> u32 {
+    ffi::C_AsyncComplete(session, core::ptr::null_mut(), core::ptr::null_mut())
+}
+pub fn async_get_id(session: u32) -> u32 {
+    let mut id: u32 = 0;
+    ffi::C_AsyncGetID(session, core::ptr::null_mut(), &mut id)
+}
+pub fn async_join(session: u32, id: u32, data: &[u8]) -> u32 {
+    ffi::C_AsyncJoin(session, core::ptr::null_mut(), id, data.as_ptr() as *mut u8, data.len() as u32)
+}
+
+// ── recover + verify-with-signature (RW6a slice) ─────────────────────────
+
+pub fn sign_recover_init(session: u32, mechanism: u64, parameter: &[u8], key: u32) -> u32 {
+    let mech = mech_native(mechanism, parameter);
+    ffi::C_SignRecoverInit(session, &mech as *const _ as *mut u8, key)
+}
+pub fn sign_recover(session: u32, data: &[u8]) -> (u32, Vec<u8>) {
+    two_call(|out, len| {
+        ffi::C_SignRecover(session, data.as_ptr() as *mut u8, data.len() as u32, out, len)
+    })
+}
+pub fn verify_recover_init(session: u32, mechanism: u64, parameter: &[u8], key: u32) -> u32 {
+    let mech = mech_native(mechanism, parameter);
+    ffi::C_VerifyRecoverInit(session, &mech as *const _ as *mut u8, key)
+}
+pub fn verify_recover(session: u32, signature: &[u8]) -> (u32, Vec<u8>) {
+    two_call(|out, len| {
+        ffi::C_VerifyRecover(session, signature.as_ptr() as *mut u8, signature.len() as u32, out, len)
+    })
+}
+pub fn verify_signature_init(
+    session: u32,
+    mechanism: u64,
+    parameter: &[u8],
+    key: u32,
+    signature: &[u8],
+) -> u32 {
+    let mech = mech_native(mechanism, parameter);
+    ffi::C_VerifySignatureInit(
+        session,
+        &mech as *const _ as *mut u8,
+        key,
+        signature.as_ptr() as *mut u8,
+        signature.len() as u32,
+    )
+}
+pub fn verify_signature(session: u32, data: &[u8]) -> u32 {
+    ffi::C_VerifySignature(session, data.as_ptr() as *mut u8, data.len() as u32)
+}
+
+// ── dual-function quartet (RW6a slice) ───────────────────────────────────
+
+pub fn digest_encrypt_update(session: u32, part: &[u8]) -> (u32, Vec<u8>) {
+    two_call(|out, len| {
+        ffi::C_DigestEncryptUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, out, len)
+    })
+}
+pub fn decrypt_digest_update(session: u32, part: &[u8]) -> (u32, Vec<u8>) {
+    two_call(|out, len| {
+        ffi::C_DecryptDigestUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, out, len)
+    })
+}
+pub fn sign_encrypt_update(session: u32, part: &[u8]) -> (u32, Vec<u8>) {
+    two_call(|out, len| {
+        ffi::C_SignEncryptUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, out, len)
+    })
+}
+pub fn decrypt_verify_update(session: u32, part: &[u8]) -> (u32, Vec<u8>) {
+    two_call(|out, len| {
+        ffi::C_DecryptVerifyUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, out, len)
+    })
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 /// PKCS#11 §5.2 two-call convention driver: NULL query for the length,
@@ -938,6 +1129,163 @@ mod tests {
         assert_eq!(encrypt_init(session, u64::from(ck::CKM_AES_ECB), &[], key), 0);
         let (rv, _) = encrypt(session, &[0x01u8; 5]);
         assert_eq!(rv, ck::CKR_DATA_LEN_RANGE);
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn admin_info_and_slot_functions_are_real() {
+        crate::test_support::ensure_bootstrapped();
+        let (rv, info) = get_info();
+        assert_eq!(rv, 0);
+        assert_eq!(info.len(), 72);
+        assert_eq!(&info[0..2], &[3, 2], "cryptokiVersion major.minor per C_GetInfo's own doc");
+
+        let (rv, slots) = get_slot_list(false);
+        assert_eq!(rv, 0);
+        assert!(slots.contains(&SLOT));
+
+        let (rv, slot_info) = get_slot_info(SLOT);
+        assert_eq!(rv, 0);
+        assert_eq!(slot_info.len(), 104);
+        let (rv, _) = get_slot_info(9999);
+        assert_eq!(rv, ck::CKR_SLOT_ID_INVALID);
+
+        // §5.5: non-blocking poll on a token with no events → CKR_NO_EVENT.
+        assert_eq!(wait_for_slot_event(ck::CKF_DONT_BLOCK), ck::CKR_NO_EVENT);
+
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        assert_eq!(session_cancel(session, 0), 0);
+        assert_eq!(close_all_sessions(SLOT), 0);
+        // The session this test opened is gone — closing again is the
+        // engine's own real invalid-handle code, not a mapped one.
+        assert_eq!(close_session(session), ck::CKR_SESSION_HANDLE_INVALID);
+
+        // §5.6.3: closing the LAST session on a slot resets the token's
+        // login state to Public and invalidates every private-key handle
+        // on it (`reset_login_state_if_no_sessions` /
+        // `invalidate_private_handles_on_slot`, ffi.rs). This process's
+        // ONE shared bootstrap ("keep-alive") session lives on this same
+        // slot (`native::bootstrap_default_token` opens it, logs it in as
+        // USER, and never closes it — see `verbs::bootstrap`'s own doc) —
+        // so `close_all_sessions` above just closed it too, real and
+        // correctly. Every OTHER test in this binary depends on that
+        // keep-alive login surviving for the process's lifetime, so this
+        // test — the only one that legitimately exercises
+        // C_CloseAllSessions — must restore it exactly as bootstrap
+        // itself does: a fresh session, logged in as USER, left open.
+        let (rv, keepalive) = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION);
+        assert_eq!(rv, 0);
+        assert_eq!(login(keepalive, ck::CKU_USER, b"1234"), 0);
+    }
+
+    #[test]
+    #[serial]
+    fn honest_code_stubs_return_spec_mandated_codes() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        assert_eq!(digest_key(session, 0), ck::CKR_FUNCTION_NOT_SUPPORTED);
+        assert_eq!(get_operation_state(session), ck::CKR_FUNCTION_NOT_SUPPORTED);
+        assert_eq!(set_operation_state(session), ck::CKR_FUNCTION_NOT_SUPPORTED);
+        assert_eq!(get_function_status(session), ck::CKR_FUNCTION_NOT_PARALLEL);
+        assert_eq!(cancel_function(session), ck::CKR_FUNCTION_NOT_PARALLEL);
+        assert_eq!(async_complete(session), ck::CKR_FUNCTION_NOT_SUPPORTED);
+        assert_eq!(async_get_id(session), ck::CKR_FUNCTION_NOT_SUPPORTED);
+        assert_eq!(async_join(session, 0, &[]), ck::CKR_FUNCTION_NOT_SUPPORTED);
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn verify_signature_matches_verify_and_recover_rejects_non_rsa() {
+        crate::test_support::ensure_bootstrapped();
+        let fixture = crate::test_support::fresh_session();
+        let (pub_h, prv_h) = crate::verbs::generate_key_pair(
+            fixture,
+            crate::Algorithm::MlDsa65,
+            b"rw6a",
+            "rw6a",
+        )
+        .expect("keygen fixture");
+
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        assert_eq!(sign_init(session, u64::from(ck::CKM_ML_DSA), &[], prv_h), 0);
+        let (rv, sig) = sign(session, b"verify-signature RW6a");
+        assert_eq!(rv, 0);
+
+        // C_VerifySignatureInit/C_VerifySignature — the signature travels at
+        // Init time instead of Verify time; must agree with the plain
+        // Verify path on both the good signature and a tampered one.
+        assert_eq!(
+            verify_signature_init(session, u64::from(ck::CKM_ML_DSA), &[], pub_h, &sig),
+            0
+        );
+        assert_eq!(verify_signature(session, b"verify-signature RW6a"), 0);
+
+        let mut bad = sig.clone();
+        bad[5] ^= 0xFF;
+        assert_eq!(
+            verify_signature_init(session, u64::from(ck::CKM_ML_DSA), &[], pub_h, &bad),
+            0
+        );
+        let rv_bad = verify_signature(session, b"verify-signature RW6a");
+        assert_ne!(rv_bad, 0);
+        assert_eq!(verify_init(session, u64::from(ck::CKM_ML_DSA), &[], pub_h), 0);
+        assert_eq!(verify(session, b"verify-signature RW6a", &bad), rv_bad, "must match the plain-Verify code exactly");
+
+        // §5.13: Sign/VerifyRecover are RSA-only on this engine — a non-RSA
+        // mechanism is a real CKR_MECHANISM_INVALID, not a made-up code.
+        assert_eq!(
+            sign_recover_init(session, u64::from(ck::CKM_ML_DSA), &[], prv_h),
+            ck::CKR_MECHANISM_INVALID
+        );
+        assert_eq!(
+            verify_recover_init(session, u64::from(ck::CKM_ML_DSA), &[], pub_h),
+            ck::CKR_MECHANISM_INVALID
+        );
+
+        close_session(session);
+        crate::verbs::close_session(fixture).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn dual_function_quartet_matches_separate_fsm_output() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let key_template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_ENCRYPT), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &key_template);
+        assert_eq!(rv, 0);
+
+        let part = vec![0x55u8; 16];
+
+        // Separate FSMs, independently, as the oracle.
+        assert_eq!(digest_init(session, u64::from(ck::CKM_SHA256), &[]), 0);
+        assert_eq!(digest_update(session, &part), 0);
+        let (rv, digest_expected) = digest_final(session);
+        assert_eq!(rv, 0);
+        assert_eq!(encrypt_init(session, u64::from(ck::CKM_AES_ECB), &[], key), 0);
+        let (rv, cipher_expected) = encrypt(session, &part);
+        assert_eq!(rv, 0);
+
+        // C_DigestEncryptUpdate: one call, both effects.
+        assert_eq!(digest_init(session, u64::from(ck::CKM_SHA256), &[]), 0);
+        assert_eq!(encrypt_init(session, u64::from(ck::CKM_AES_ECB), &[], key), 0);
+        let (rv, cipher_dual) = digest_encrypt_update(session, &part);
+        assert_eq!(rv, 0);
+        assert_eq!(cipher_dual, cipher_expected, "dual-function ciphertext must equal the separate-FSM oracle");
+        let (rv, digest_dual) = digest_final(session);
+        assert_eq!(rv, 0);
+        assert_eq!(digest_dual, digest_expected, "dual-function digest must equal the separate-FSM oracle");
+        let (rv, _) = encrypt_final(session);
+        assert_eq!(rv, 0);
+
         close_session(session);
     }
 }

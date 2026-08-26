@@ -44,6 +44,13 @@ const CKP_ML_DSA_65: u64 = 0x2;
 const CKA_ENCRYPT: u64 = 0x0000_0104;
 const CKA_DECRYPT: u64 = 0x0000_0105;
 const CKM_AES_ECB: u64 = 0x0000_1081;
+// RW6a additions.
+const CKF_DONT_BLOCK: u32 = 0x0000_0001;
+const CKR_NO_EVENT: u32 = 0x0000_0008;
+const CKR_FUNCTION_NOT_SUPPORTED: u32 = 0x0000_0054;
+const CKR_FUNCTION_NOT_PARALLEL: u32 = 0x0000_0051;
+const CKR_MECHANISM_INVALID: u32 = 0x0000_0070;
+const CKU_USER: u32 = 1;
 
 /// A ulong-valued template entry at native `CK_ULONG` width (8 bytes LE on
 /// this LP64 server) — the RW1 finding, applied on the wire's input side.
@@ -702,5 +709,255 @@ fn v10_aes_ecb_encrypt_decrypt_kat_parity() {
         assert_eq!(unb64(rd["data"].as_str().unwrap()), plaintext, "REST AES-ECB round trip must equal the original plaintext");
 
         v32::close_session(fixture);
+    });
+}
+
+// ── V11: admin/info + session lifecycle (RW6a) ───────────────────────────
+
+#[test]
+fn v11_admin_info_and_session_lifecycle_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let (rv_info_ctl, info_ctl) = v32::get_info();
+        assert_eq!(rv_info_ctl, 0);
+        let (rv_slots_ctl, slots_ctl) = v32::get_slot_list(false);
+        assert_eq!(rv_slots_ctl, 0);
+        let (rv_slotinfo_ctl, slotinfo_ctl) = v32::get_slot_info(v32::SLOT);
+        assert_eq!(rv_slotinfo_ctl, 0);
+        let rv_event_ctl = v32::wait_for_slot_event(CKF_DONT_BLOCK);
+        assert_eq!(rv_event_ctl, CKR_NO_EVENT);
+
+        let (_rv, s) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        let rv_cancel_ctl = v32::session_cancel(s, 0);
+        assert_eq!(rv_cancel_ctl, 0);
+        let rv_login_ctl = v32::login_user(s, CKU_USER, b"1234");
+        v32::close_session(s);
+
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gi = g.c_get_info(proto::V32Empty {}).await.unwrap().into_inner();
+        assert_eq!(gi.ck_rv, rv_info_ctl);
+        assert_eq!(gi.data.len(), info_ctl.len());
+        let gsl = g.c_get_slot_list(proto::V32GetSlotListRequest { token_present: false }).await.unwrap().into_inner();
+        assert_eq!(gsl.ck_rv, 0);
+        assert_eq!(gsl.slot_ids.len(), slots_ctl.len());
+        let gsi = g.c_get_slot_info(proto::V32SlotRequest { slot_id: v32::SLOT }).await.unwrap().into_inner();
+        assert_eq!(gsi.ck_rv, rv_slotinfo_ctl);
+        assert_eq!(gsi.data.len(), slotinfo_ctl.len());
+        let gev = g.c_wait_for_slot_event(proto::V32SlotEventRequest { flags: CKF_DONT_BLOCK }).await.unwrap().into_inner();
+        assert_eq!(gev.ck_rv, rv_event_ctl);
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        let gc = g.c_session_cancel(proto::V32SessionFlagsRequest { session_handle: gs.session_handle, flags: 0 }).await.unwrap().into_inner();
+        assert_eq!(gc.ck_rv, rv_cancel_ctl);
+        let gl = g.c_login_user(proto::V32LoginRequest { session_handle: gs.session_handle, user_type: CKU_USER, pin: b"1234".to_vec() }).await.unwrap().into_inner();
+        assert_eq!(gl.ck_rv, rv_login_ctl, "gRPC login-user CKR must equal control (already-logged-in code included)");
+        g.c_close_session(proto::V32SessionRequest { session_handle: gs.session_handle }).await.unwrap();
+
+        let base = spawn_rest_v32().await.unwrap();
+        let ri = rest_post(&base, "get-info", json!({})).await;
+        assert_eq!(ri["ck_rv"].as_u64().unwrap() as u32, rv_info_ctl);
+        assert_eq!(unb64(ri["data"].as_str().unwrap()).len(), info_ctl.len());
+        let rsl = rest_post(&base, "get-slot-list", json!({"token_present": false})).await;
+        assert_eq!(rsl["slot_ids"].as_array().unwrap().len(), slots_ctl.len());
+        let rsi = rest_post(&base, "get-slot-info", json!({"slot_id": v32::SLOT})).await;
+        assert_eq!(rsi["ck_rv"].as_u64().unwrap() as u32, rv_slotinfo_ctl);
+        let rev = rest_post(&base, "wait-for-slot-event", json!({"flags": CKF_DONT_BLOCK})).await;
+        assert_eq!(rev["ck_rv"].as_u64().unwrap() as u32, rv_event_ctl);
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        let rc = rest_post(&base, "session-cancel", json!({"session_handle": sh, "flags": 0})).await;
+        assert_eq!(rc["ck_rv"].as_u64().unwrap() as u32, rv_cancel_ctl);
+        let rl = rest_post(&base, "login-user", json!({"session_handle": sh, "user_type": CKU_USER, "pin": b64(b"1234")})).await;
+        assert_eq!(rl["ck_rv"].as_u64().unwrap() as u32, rv_login_ctl, "REST login-user CKR must equal control");
+        rest_post(&base, "close-session", json!({"session_handle": sh})).await;
+    });
+}
+
+// ── V12: C_CloseAllSessions negative path only ──────────────────────────
+//
+// The positive path closes EVERY session on a slot — including this
+// process's shared bootstrap "keep-alive" session (§5.6.3's login-state
+// reset, `reset_login_state_if_no_sessions` / `invalidate_private_handles_
+// on_slot` in ffi.rs) — which would corrupt every OTHER test's private-key
+// handles if it fired on the shared SLOT while they run. Unlike the core
+// crate's #[serial] unit tests, THIS suite runs its tests in true
+// parallel by design (see this file's module doc), so there is no safe
+// moment to invoke the real destructive path here at all — not even with
+// a restore-afterward, since concurrently-running tests would already
+// have observed the corrupted state. The positive path is proven safely
+// in `verbs_v32::tests::admin_info_and_slot_functions_are_real`
+// (core crate, `#[serial]`). This test covers what parity testing here
+// CAN safely prove: the real `CKR_SLOT_ID_INVALID` on a bad slot, which
+// touches no shared state.
+#[test]
+fn v12_close_all_sessions_invalid_slot_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let rv_ctl = v32::close_all_sessions(0xDEAD_BEEF);
+        assert_ne!(rv_ctl, 0);
+
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gcl = g.c_close_all_sessions(proto::V32SlotRequest { slot_id: 0xDEAD_BEEF }).await.unwrap().into_inner();
+        assert_eq!(gcl.ck_rv, rv_ctl);
+
+        let base = spawn_rest_v32().await.unwrap();
+        let rcl = rest_post(&base, "close-all-sessions", json!({"slot_id": 0xDEAD_BEEFu32})).await;
+        assert_eq!(rcl["ck_rv"].as_u64().unwrap() as u32, rv_ctl);
+    });
+}
+
+// ── V13: honest-code stubs (RW6a) — every one always the same spec code ──
+
+#[test]
+fn v13_honest_code_stubs_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let (_rv, s) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        let codes_ctl = (
+            v32::digest_key(s, 0),
+            v32::get_operation_state(s),
+            v32::set_operation_state(s),
+            v32::get_function_status(s),
+            v32::cancel_function(s),
+            v32::async_complete(s),
+            v32::async_get_id(s),
+            v32::async_join(s, 0, &[]),
+        );
+        assert_eq!(codes_ctl.0, CKR_FUNCTION_NOT_SUPPORTED);
+        assert_eq!(codes_ctl.3, CKR_FUNCTION_NOT_PARALLEL);
+        v32::close_session(s);
+
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        let sh = gs.session_handle;
+        assert_eq!(g.c_digest_key(proto::V32ObjectRequest { session_handle: sh, object_handle: 0 }).await.unwrap().into_inner().ck_rv, codes_ctl.0);
+        assert_eq!(g.c_get_operation_state(proto::V32SessionRequest { session_handle: sh }).await.unwrap().into_inner().ck_rv, codes_ctl.1);
+        assert_eq!(g.c_set_operation_state(proto::V32SessionRequest { session_handle: sh }).await.unwrap().into_inner().ck_rv, codes_ctl.2);
+        assert_eq!(g.c_get_function_status(proto::V32SessionRequest { session_handle: sh }).await.unwrap().into_inner().ck_rv, codes_ctl.3);
+        assert_eq!(g.c_cancel_function(proto::V32SessionRequest { session_handle: sh }).await.unwrap().into_inner().ck_rv, codes_ctl.4);
+        assert_eq!(g.c_async_complete(proto::V32SessionRequest { session_handle: sh }).await.unwrap().into_inner().ck_rv, codes_ctl.5);
+        assert_eq!(g.c_async_get_id(proto::V32SessionRequest { session_handle: sh }).await.unwrap().into_inner().ck_rv, codes_ctl.6);
+        assert_eq!(g.c_async_join(proto::V32AsyncJoinRequest { session_handle: sh, id: 0, data: vec![] }).await.unwrap().into_inner().ck_rv, codes_ctl.7);
+
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        assert_eq!(rest_post(&base, "digest-key", json!({"session_handle": sh, "object_handle": 0})).await["ck_rv"].as_u64().unwrap() as u32, codes_ctl.0);
+        assert_eq!(rest_post(&base, "get-operation-state", json!({"session_handle": sh})).await["ck_rv"].as_u64().unwrap() as u32, codes_ctl.1);
+        assert_eq!(rest_post(&base, "set-operation-state", json!({"session_handle": sh})).await["ck_rv"].as_u64().unwrap() as u32, codes_ctl.2);
+        assert_eq!(rest_post(&base, "get-function-status", json!({"session_handle": sh})).await["ck_rv"].as_u64().unwrap() as u32, codes_ctl.3);
+        assert_eq!(rest_post(&base, "cancel-function", json!({"session_handle": sh})).await["ck_rv"].as_u64().unwrap() as u32, codes_ctl.4);
+        assert_eq!(rest_post(&base, "async-complete", json!({"session_handle": sh})).await["ck_rv"].as_u64().unwrap() as u32, codes_ctl.5);
+        assert_eq!(rest_post(&base, "async-get-id", json!({"session_handle": sh})).await["ck_rv"].as_u64().unwrap() as u32, codes_ctl.6);
+        assert_eq!(rest_post(&base, "async-join", json!({"session_handle": sh, "id": 0, "data": b64(&[])})).await["ck_rv"].as_u64().unwrap() as u32, codes_ctl.7);
+    });
+}
+
+// ── V14: verify-with-signature matches plain Verify; Sign/VerifyRecover
+// reject a non-RSA mechanism with the engine's real code ────────────────
+
+#[test]
+fn v14_verify_signature_and_recover_reject_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let fixture = pqctoday_pkcs11_remote_core::verbs::open_session("1234").unwrap();
+        let (pub_h, prv_h) = pqctoday_pkcs11_remote_core::verbs::generate_key_pair(
+            fixture, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, b"v32rw6a", "v32rw6a",
+        ).unwrap();
+
+        let (_rv, s) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        assert_eq!(v32::sign_init(s, CKM_ML_DSA, &[], prv_h), 0);
+        let (rv, sig) = v32::sign(s, b"v14 verify-signature");
+        assert_eq!(rv, 0);
+        assert_eq!(v32::verify_signature_init(s, CKM_ML_DSA, &[], pub_h, &sig), 0);
+        let rv_vs_ctl = v32::verify_signature(s, b"v14 verify-signature");
+        assert_eq!(rv_vs_ctl, 0);
+        let rv_recover_ctl = v32::sign_recover_init(s, CKM_ML_DSA, &[], prv_h);
+        assert_eq!(rv_recover_ctl, CKR_MECHANISM_INVALID);
+        v32::close_session(s);
+
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        g.c_verify_signature_init(proto::V32VerifySignatureInitRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![] }),
+            key_handle: pub_h,
+            signature: sig.clone(),
+        }).await.unwrap();
+        let gvs = g.c_verify_signature(proto::V32DataRequest { session_handle: gs.session_handle, data: b"v14 verify-signature".to_vec() }).await.unwrap().into_inner();
+        assert_eq!(gvs.ck_rv, rv_vs_ctl);
+        let gr = g.c_sign_recover_init(proto::V32KeyedInitRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_ML_DSA, parameter: vec![] }),
+            key_handle: prv_h,
+        }).await.unwrap().into_inner();
+        assert_eq!(gr.ck_rv, rv_recover_ctl, "gRPC Sign/VerifyRecover on a non-RSA mechanism must equal control");
+
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        rest_post(&base, "verify-signature-init", json!({
+            "session_handle": sh, "mechanism": {"mechanism": CKM_ML_DSA, "parameter": ""}, "key_handle": pub_h, "signature": b64(&sig),
+        })).await;
+        let rvs = rest_post(&base, "verify-signature", json!({"session_handle": sh, "data": b64(b"v14 verify-signature")})).await;
+        assert_eq!(rvs["ck_rv"].as_u64().unwrap() as u32, rv_vs_ctl);
+        let rr = rest_post(&base, "sign-recover-init", json!({
+            "session_handle": sh, "mechanism": {"mechanism": CKM_ML_DSA, "parameter": ""}, "key_handle": prv_h,
+        })).await;
+        assert_eq!(rr["ck_rv"].as_u64().unwrap() as u32, rv_recover_ctl, "REST Sign/VerifyRecover on a non-RSA mechanism must equal control");
+
+        pqctoday_pkcs11_remote_core::verbs::close_session(fixture).ok();
+    });
+}
+
+// ── V15: dual-function quartet — C_DigestEncryptUpdate's ciphertext must
+// equal running Digest and Encrypt as two separate FSMs ──────────────────
+
+#[test]
+fn v15_dual_function_digest_encrypt_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let (_rv, ks) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        let key_template: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_AES as usize).to_le_bytes().to_vec()),
+            (CKA_VALUE_LEN, (32usize).to_le_bytes().to_vec()),
+            (CKA_ENCRYPT, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let (rv_key, key) = v32::generate_key(ks, CKM_AES_KEY_GEN, &[], &key_template);
+        assert_eq!(rv_key, 0);
+
+        let part = vec![0x24u8; 16];
+        assert_eq!(v32::encrypt_init(ks, CKM_AES_ECB, &[], key), 0);
+        let (rv, cipher_expected) = v32::encrypt(ks, &part);
+        assert_eq!(rv, 0);
+
+        // control
+        assert_eq!(v32::digest_init(ks, CKM_SHA256, &[]), 0);
+        assert_eq!(v32::encrypt_init(ks, CKM_AES_ECB, &[], key), 0);
+        let (rv_ctl, cipher_ctl) = v32::digest_encrypt_update(ks, &part);
+        assert_eq!(rv_ctl, 0);
+        assert_eq!(cipher_ctl, cipher_expected);
+
+        // gRPC — same key handle, shared bootstrap session `ks` stays open.
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        g.c_digest_init(proto::V32MechanismSessionRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_SHA256, parameter: vec![] }) }).await.unwrap();
+        g.c_encrypt_init(proto::V32KeyedInitRequest { session_handle: gs.session_handle, mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_ECB, parameter: vec![] }), key_handle: key }).await.unwrap();
+        let gd = g.c_digest_encrypt_update(proto::V32DataRequest { session_handle: gs.session_handle, data: part.clone() }).await.unwrap().into_inner();
+        assert_eq!(gd.ck_rv, rv_ctl);
+        assert_eq!(gd.data, cipher_expected, "gRPC dual-function ciphertext must equal the separate-FSM oracle");
+
+        // REST
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        rest_post(&base, "digest-init", json!({"session_handle": sh, "mechanism": {"mechanism": CKM_SHA256, "parameter": ""}})).await;
+        rest_post(&base, "encrypt-init", json!({"session_handle": sh, "mechanism": {"mechanism": CKM_AES_ECB, "parameter": ""}, "key_handle": key})).await;
+        let rd = rest_post(&base, "digest-encrypt-update", json!({"session_handle": sh, "data": b64(&part)})).await;
+        assert_eq!(rd["ck_rv"].as_u64().unwrap() as u32, rv_ctl);
+        assert_eq!(unb64(rd["data"].as_str().unwrap()), cipher_expected, "REST dual-function ciphertext must equal the separate-FSM oracle");
+
+        v32::close_session(ks);
     });
 }
