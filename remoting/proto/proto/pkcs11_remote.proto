@@ -334,6 +334,77 @@ message V32ObjectRequest { // C_DestroyObject
   uint32 object_handle = 2;
 }
 
+// ── RW2: object & keygen templates ──────────────────────────────────────────
+//
+// Template ATTRIBUTE VALUES for ulong-typed attributes (CKA_CLASS,
+// CKA_KEY_TYPE, CKA_PARAMETER_SET, ...) travel at native CK_ULONG width
+// (8 bytes, little-endian, on this LP64 server) — the same convention
+// V32GetAttributeValueResponse's output values already use (RW1 finding,
+// mirrored here on the input side). Boolean attributes (CKA_TOKEN,
+// CKA_SENSITIVE, ...) are a single byte, 0x00/0x01.
+
+message V32AttributeIn {
+  uint64 attribute_type = 1;
+  bytes value = 2;
+}
+
+message V32GenerateKeyRequest { // C_GenerateKey
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  repeated V32AttributeIn template = 3;
+}
+message V32ObjectHandleResponse { // C_GenerateKey / C_CreateObject / C_CopyObject
+  uint32 ck_rv = 1;
+  uint32 object_handle = 2;
+}
+
+message V32GenerateKeyPairRequest { // C_GenerateKeyPair (template form)
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  repeated V32AttributeIn public_key_template = 3;
+  repeated V32AttributeIn private_key_template = 4;
+}
+message V32GenerateKeyPairResponse {
+  uint32 ck_rv = 1;
+  uint32 public_handle = 2;
+  uint32 private_handle = 3;
+}
+
+message V32CreateObjectRequest { // C_CreateObject
+  uint32 session_handle = 1;
+  repeated V32AttributeIn template = 2;
+}
+
+message V32SetAttributeValueRequest { // C_SetAttributeValue†
+  uint32 session_handle = 1;
+  uint32 object_handle = 2;
+  repeated V32AttributeIn template = 3;
+}
+
+message V32CopyObjectRequest { // C_CopyObject
+  uint32 session_handle = 1;
+  uint32 object_handle = 2;
+  repeated V32AttributeIn template = 3;
+}
+
+message V32GetObjectSizeResponse { // C_GetObjectSize
+  uint32 ck_rv = 1;
+  uint32 size = 2;
+}
+
+message V32FindObjectsInitRequest { // C_FindObjectsInit
+  uint32 session_handle = 1;
+  repeated V32AttributeIn template = 2;
+}
+message V32FindObjectsRequest { // C_FindObjects
+  uint32 session_handle = 1;
+  uint32 max_object_count = 2;
+}
+message V32FindObjectsResponse {
+  uint32 ck_rv = 1;
+  repeated uint32 object_handles = 2;
+}
+
 service Pkcs11V32 {
   rpc C_OpenSession(V32OpenSessionRequest) returns (V32OpenSessionResponse);
   rpc C_CloseSession(V32SessionRequest) returns (V32StatusResponse);
@@ -359,4 +430,13 @@ service Pkcs11V32 {
   rpc C_VerifyFinal(V32SignatureRequest) returns (V32StatusResponse);
   rpc C_GetAttributeValue(V32GetAttributeValueRequest) returns (V32GetAttributeValueResponse);
   rpc C_DestroyObject(V32ObjectRequest) returns (V32StatusResponse); // gated by --enable-destructive
+  rpc C_GenerateKey(V32GenerateKeyRequest) returns (V32ObjectHandleResponse);
+  rpc C_GenerateKeyPair(V32GenerateKeyPairRequest) returns (V32GenerateKeyPairResponse);
+  rpc C_CreateObject(V32CreateObjectRequest) returns (V32ObjectHandleResponse);
+  rpc C_SetAttributeValue(V32SetAttributeValueRequest) returns (V32StatusResponse); // gated by --enable-destructive
+  rpc C_CopyObject(V32CopyObjectRequest) returns (V32ObjectHandleResponse);
+  rpc C_GetObjectSize(V32ObjectRequest) returns (V32GetObjectSizeResponse);
+  rpc C_FindObjectsInit(V32FindObjectsInitRequest) returns (V32StatusResponse);
+  rpc C_FindObjects(V32FindObjectsRequest) returns (V32FindObjectsResponse);
+  rpc C_FindObjectsFinal(V32SessionRequest) returns (V32StatusResponse);
 }

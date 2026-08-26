@@ -45,6 +45,10 @@ fn mech_parts(m: Option<&V32Mechanism>) -> (u64, Vec<u8>) {
     }
 }
 
+fn tmpl_parts(t: &[V32AttributeIn]) -> Vec<v32::AttrIn> {
+    t.iter().map(|a| (a.attribute_type, a.value.clone())).collect()
+}
+
 #[tonic::async_trait]
 impl Pkcs11V32 for Pkcs11V32Service {
     async fn c_open_session(
@@ -295,6 +299,113 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let ck_rv = blocking(move || v32::destroy_object(req.session_handle, req.object_handle)).await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
     }
+
+    // ── object & keygen templates (RW2) ─────────────────────────────────
+
+    async fn c_generate_key(
+        &self,
+        request: Request<V32GenerateKeyRequest>,
+    ) -> Result<Response<V32ObjectHandleResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let template = tmpl_parts(&req.template);
+        let (ck_rv, object_handle) =
+            blocking(move || v32::generate_key(req.session_handle, mech, &param, &template)).await?;
+        Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
+    }
+
+    async fn c_generate_key_pair(
+        &self,
+        request: Request<V32GenerateKeyPairRequest>,
+    ) -> Result<Response<V32GenerateKeyPairResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let public_template = tmpl_parts(&req.public_key_template);
+        let private_template = tmpl_parts(&req.private_key_template);
+        let (ck_rv, public_handle, private_handle) = blocking(move || {
+            v32::generate_key_pair(req.session_handle, mech, &param, &public_template, &private_template)
+        })
+        .await?;
+        Ok(Response::new(V32GenerateKeyPairResponse { ck_rv, public_handle, private_handle }))
+    }
+
+    async fn c_create_object(
+        &self,
+        request: Request<V32CreateObjectRequest>,
+    ) -> Result<Response<V32ObjectHandleResponse>, Status> {
+        let req = request.into_inner();
+        let template = tmpl_parts(&req.template);
+        let (ck_rv, object_handle) =
+            blocking(move || v32::create_object(req.session_handle, &template)).await?;
+        Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
+    }
+
+    async fn c_set_attribute_value(
+        &self,
+        request: Request<V32SetAttributeValueRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        if !self.destructive {
+            return Ok(Response::new(V32StatusResponse {
+                ck_rv: v32::ck::CKR_FUNCTION_NOT_SUPPORTED,
+            }));
+        }
+        let req = request.into_inner();
+        let template = tmpl_parts(&req.template);
+        let ck_rv =
+            blocking(move || v32::set_attribute_value(req.session_handle, req.object_handle, &template))
+                .await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    async fn c_copy_object(
+        &self,
+        request: Request<V32CopyObjectRequest>,
+    ) -> Result<Response<V32ObjectHandleResponse>, Status> {
+        let req = request.into_inner();
+        let template = tmpl_parts(&req.template);
+        let (ck_rv, object_handle) =
+            blocking(move || v32::copy_object(req.session_handle, req.object_handle, &template)).await?;
+        Ok(Response::new(V32ObjectHandleResponse { ck_rv, object_handle }))
+    }
+
+    async fn c_get_object_size(
+        &self,
+        request: Request<V32ObjectRequest>,
+    ) -> Result<Response<V32GetObjectSizeResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, size) =
+            blocking(move || v32::get_object_size(req.session_handle, req.object_handle)).await?;
+        Ok(Response::new(V32GetObjectSizeResponse { ck_rv, size }))
+    }
+
+    async fn c_find_objects_init(
+        &self,
+        request: Request<V32FindObjectsInitRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let template = tmpl_parts(&req.template);
+        let ck_rv = blocking(move || v32::find_objects_init(req.session_handle, &template)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    async fn c_find_objects(
+        &self,
+        request: Request<V32FindObjectsRequest>,
+    ) -> Result<Response<V32FindObjectsResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, object_handles) =
+            blocking(move || v32::find_objects(req.session_handle, req.max_object_count)).await?;
+        Ok(Response::new(V32FindObjectsResponse { ck_rv, object_handles }))
+    }
+
+    async fn c_find_objects_final(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::find_objects_final(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
 }
 
 #[cfg(test)]
@@ -311,6 +422,21 @@ mod tests {
         let svc = Pkcs11V32Service { destructive: false };
         let resp = svc
             .c_destroy_object(tonic::Request::new(V32ObjectRequest { session_handle: 0, object_handle: 0 }))
+            .await
+            .expect("transport ok")
+            .into_inner();
+        assert_eq!(resp.ck_rv, v32::ck::CKR_FUNCTION_NOT_SUPPORTED);
+    }
+
+    #[tokio::test]
+    async fn set_attribute_value_off_posture_returns_function_not_supported() {
+        let svc = Pkcs11V32Service { destructive: false };
+        let resp = svc
+            .c_set_attribute_value(tonic::Request::new(V32SetAttributeValueRequest {
+                session_handle: 0,
+                object_handle: 0,
+                template: vec![],
+            }))
             .await
             .expect("transport ok")
             .into_inner();

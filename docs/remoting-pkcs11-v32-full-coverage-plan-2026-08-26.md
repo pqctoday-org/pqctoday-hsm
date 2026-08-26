@@ -1,8 +1,7 @@
 # Remoting full PKCS#11 v3.2 coverage plan — gRPC + REST C_* mirror (2026-08-26)
 
-**Status: RW0 + RW1 + first RW2/RW3 slices EXECUTED and green (2026-08-26).
-Later workstreams remain planned. See the "Execution log" at the end for
-exactly what shipped.**
+**Status: RW0 + RW1 + RW2 EXECUTED and green (2026-08-26). RW3-RW6 remain
+planned. See the "Execution log" at the end for exactly what shipped.**
 
 Decisions locked with the user (2026-08-26):
 
@@ -216,8 +215,8 @@ first task of each workstream, not a separate engine sub-project.
 |---|---|---|---|---|---|
 | **RW0** | ✅ DONE | Foundations (service, ck_rv-as-field, size limits, flag, gate step, scaffolding) | — | 0 | done |
 | **RW1** | ✅ DONE | Sessions/login/info + discovery + random + digest FSM + sign/verify FSM + get-attr + destroy (24 RPCs) | none — all native-width-clean | 24 | done |
-| **RW2** | next | Object & keygen templates: `C_GenerateKey`, template `C_GenerateKeyPair`, `C_CreateObject`, `C_SetAttributeValue`†, `C_CopyObject`, `C_GetObjectSize`, `C_FindObjectsInit/FindObjects/FindObjectsFinal` | native-width audit only (writes/reads CK_ATTRIBUTE the same `*mut usize` way get-attr already does) | ~9 | L |
-| **RW3** | after RW2 | Encrypt/decrypt: `C_EncryptInit/Encrypt/Update/Final`, `C_Decrypt*` incl. GCM/CTR/OAEP params (CK_GCM_PARAMS etc. via `ck_param`) | native-width audit of the cipher entry points | ~8 | L |
+| **RW2** | ✅ DONE | Object & keygen templates: `C_GenerateKey`, template `C_GenerateKeyPair`, `C_CreateObject`, `C_SetAttributeValue`†, `C_CopyObject`, `C_GetObjectSize`, `C_FindObjectsInit/FindObjects/FindObjectsFinal` | none — confirmed native-width-clean (writes CK_ATTRIBUTE the same `*mut usize` way get-attr already reads it) | 9 | done |
+| **RW3** | next | Encrypt/decrypt: `C_EncryptInit/Encrypt/Update/Final`, `C_Decrypt*` incl. GCM/CTR/OAEP params (CK_GCM_PARAMS etc. via `ck_param`) | native-width audit of the cipher entry points | ~8 | L |
 | **RW4** | after RW3 | Wrap + derive: `C_WrapKey`/`C_UnwrapKey`(+authenticated), `C_DeriveKey` (ECDH1/HKDF/concat/BIP32/SHA-derive **now**; PBKDF2/SP800-108 **after** the engine wrapper lands) | **PBKDF2/SP800-108 native wrapper (real engine work)**; wrap/unwrap audit | ~5 | L |
 | **RW5** | after RW4 | v3.2 KEM key-object form: `C_EncapsulateKey`/`C_DecapsulateKey` (template form) + hybrid cells + SLH-DSA/XMSS/HSS sign cells + seeded-keygen KAT parity | **key-object EncapsulateKey native wrapper (real engine work)** | ~4 | M–L |
 | **RW6** | after RW5 | Message API §5.19/§5.20 (20 `C_Message*` RPCs), dual-function, `C_SignRecover`/`C_VerifyRecover`, async honest-not-supported codes, profile objects, cheap SUITE-GAP closures; **then** the ledger + report + docs regeneration | audit only — engine passes all of §G1 locally (45 checks) | ~24 | L |
@@ -438,12 +437,48 @@ legacy-parity (no regression) + 6 v32-parity + 1 posture.**
 three-transport parity` step to `scripts/local-gate.sh` — the remoting
 workspace ran in NO gate step before today.
 
-### Still planned (RW2 → RW6)
+### 2026-08-26 — RW2 (object & keygen templates)
+
+Shipped, all live-verified. Confirms §4's revised prediction: zero
+engine-crate changes needed — a native-width audit of all nine ffi entry
+points (all walk `CK_ATTRIBUTE` templates as the same `*mut usize`
+three-word layout RW1's get-attr already relies on) was the entire
+prerequisite.
+
+**core (`verbs_v32.rs`):** added `AttrIn`/`attr_ulong`/`attr_bool` and a
+`build_template` helper (owns the native `*mut usize` backing storage +
+value buffers for the lifetime of one FFI call — the input-side mirror of
+RW1's output-side template walk). Nine new verbs: `generate_key`,
+`generate_key_pair` (template form), `create_object`,
+`set_attribute_value`, `copy_object`, `get_object_size`,
+`find_objects_init/find_objects/find_objects_final`. 5 new unit tests
+(20/20 core green), including the real §G3Keygen `CKR_TEMPLATE_INCONSISTENT`
+(mismatched key-type) and `CKR_TEMPLATE_INCOMPLETE` (missing
+CKA_PARAMETER_SET) codes, asserted against the live engine on first run.
+
+**Proto:** `V32AttributeIn` + 8 new request/response messages, 9 new RPCs
+on `Pkcs11V32` — purely additive.
+
+**gRPC + REST:** all nine RPCs/routes wired, calling the core verbs
+directly (same pattern as RW1). `C_SetAttributeValue` gated by
+`--enable-destructive` on both transports (mirrors `C_DestroyObject`'s
+posture: OFF ⇒ `CKR_FUNCTION_NOT_SUPPORTED`), with its own OFF-posture
+unit test in the grpc crate.
+
+**Validation:** 3 new three-transport parity tests in `v32_parity.rs` —
+template `C_GenerateKeyPair` positive round-trip + `TEMPLATE_INCONSISTENT`
+negative (V7), `C_CreateObject`/FindObjects FSM/`C_CopyObject`/
+`C_GetObjectSize` round trip (V8), `C_GenerateKey` (AES) +
+`C_SetAttributeValue` with destructive ON (V9). **Whole remoting workspace
+green: 20 core + 7 legacy-parity (no regression) + 9 v32-parity + 2
+posture.**
+
+### Still planned (RW3 → RW6)
 
 See §4 (revised prerequisites) and §5's per-workstream execution notes —
-refined 2026-08-26 after RW0/RW1 shipped. Headline: only **two** genuine
-engine-crate prerequisites remain (PBKDF2/SP800-108 for RW4, key-object
-EncapsulateKey for RW5); everything else is a native-width audit + the
-proven per-RPC checklist. RW2→RW3→RW6 need no engine changes and can run
-back-to-back; the ledger/report/docs-regeneration are RW6-terminal, not
-incremental.
+refined 2026-08-26 after RW0/RW1 shipped, confirmed again by RW2. Headline:
+only **two** genuine engine-crate prerequisites remain (PBKDF2/SP800-108
+for RW4, key-object EncapsulateKey for RW5); everything else is a
+native-width audit + the proven per-RPC checklist. RW3→RW6 need no engine
+changes and can run back-to-back; the ledger/report/docs-regeneration are
+RW6-terminal, not incremental.

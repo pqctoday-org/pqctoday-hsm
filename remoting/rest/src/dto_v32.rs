@@ -247,3 +247,111 @@ pub struct ObjectReq {
     pub session_handle: u32,
     pub object_handle: u32,
 }
+
+// ── keygen templates (RW2) ───────────────────────────────────────────────────
+
+/// One template entry over the wire. Ulong-typed attribute VALUES
+/// (CKA_CLASS, CKA_KEY_TYPE, CKA_PARAMETER_SET, ...) must be native
+/// `CK_ULONG` width — 8 bytes little-endian on this LP64 server — the same
+/// convention `get_attribute_value`'s OUTPUT already documents, applied
+/// here on the input side.
+#[derive(Deserialize)]
+pub struct V32AttributeInDto {
+    pub attribute_type: u64,
+    #[serde(with = "b64")]
+    pub value: Vec<u8>,
+}
+
+pub(crate) fn tmpl_parts(t: &[V32AttributeInDto]) -> Vec<v32::AttrIn> {
+    t.iter().map(|a| (a.attribute_type, a.value.clone())).collect()
+}
+
+#[derive(Serialize)]
+pub struct ObjectHandleResp {
+    pub ck_rv: u32,
+    pub object_handle: u32,
+}
+impl From<(u32, u32)> for ObjectHandleResp {
+    fn from((ck_rv, object_handle): (u32, u32)) -> Self {
+        Self { ck_rv, object_handle }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct GenerateKeyReq {
+    pub session_handle: u32,
+    pub mechanism: V32MechanismDto,
+    pub template: Vec<V32AttributeInDto>,
+}
+
+#[derive(Deserialize)]
+pub struct GenerateKeyPairReq {
+    pub session_handle: u32,
+    pub mechanism: V32MechanismDto,
+    pub public_key_template: Vec<V32AttributeInDto>,
+    pub private_key_template: Vec<V32AttributeInDto>,
+}
+#[derive(Serialize)]
+pub struct GenerateKeyPairResp {
+    pub ck_rv: u32,
+    pub public_handle: u32,
+    pub private_handle: u32,
+}
+impl From<(u32, u32, u32)> for GenerateKeyPairResp {
+    fn from((ck_rv, public_handle, private_handle): (u32, u32, u32)) -> Self {
+        Self { ck_rv, public_handle, private_handle }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CreateObjectReq {
+    pub session_handle: u32,
+    pub template: Vec<V32AttributeInDto>,
+}
+
+#[derive(Deserialize)]
+pub struct SetAttributeValueReq {
+    pub session_handle: u32,
+    pub object_handle: u32,
+    pub template: Vec<V32AttributeInDto>,
+}
+
+#[derive(Deserialize)]
+pub struct CopyObjectReq {
+    pub session_handle: u32,
+    pub object_handle: u32,
+    pub template: Vec<V32AttributeInDto>,
+}
+
+#[derive(Serialize)]
+pub struct GetObjectSizeResp {
+    pub ck_rv: u32,
+    pub size: u32,
+}
+impl From<(u32, u32)> for GetObjectSizeResp {
+    fn from((ck_rv, size): (u32, u32)) -> Self {
+        Self { ck_rv, size }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct FindObjectsInitReq {
+    pub session_handle: u32,
+    pub template: Vec<V32AttributeInDto>,
+}
+
+#[derive(Deserialize)]
+pub struct FindObjectsReq {
+    pub session_handle: u32,
+    pub max_object_count: u32,
+}
+#[derive(Serialize)]
+pub struct FindObjectsResp {
+    pub ck_rv: u32,
+    pub object_handles: Vec<u32>,
+}
+impl From<(u32, Vec<u32>)> for FindObjectsResp {
+    fn from((ck_rv, object_handles): (u32, Vec<u32>)) -> Self {
+        Self { ck_rv, object_handles }
+    }
+}

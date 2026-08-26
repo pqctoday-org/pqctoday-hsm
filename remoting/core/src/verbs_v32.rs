@@ -53,6 +53,24 @@ pub mod ck {
     pub use softhsmrustv3::constants::CKR_RANDOM_SEED_NOT_SUPPORTED;
     pub use softhsmrustv3::constants::CKR_SESSION_PARALLEL_NOT_SUPPORTED;
     pub use softhsmrustv3::constants::CKR_USER_ALREADY_LOGGED_IN;
+    // RW2 additions.
+    pub use softhsmrustv3::constants::CKA_KEY_TYPE;
+    pub use softhsmrustv3::constants::CKA_PARAMETER_SET;
+    pub use softhsmrustv3::constants::CKA_SIGN;
+    pub use softhsmrustv3::constants::CKA_TOKEN;
+    pub use softhsmrustv3::constants::CKA_VALUE_LEN;
+    pub use softhsmrustv3::constants::CKA_VERIFY;
+    pub use softhsmrustv3::constants::CKK_AES;
+    pub use softhsmrustv3::constants::CKK_ML_DSA;
+    pub use softhsmrustv3::constants::CKM_AES_KEY_GEN;
+    pub use softhsmrustv3::constants::CKM_ML_DSA_KEY_PAIR_GEN;
+    pub use softhsmrustv3::constants::CKO_PRIVATE_KEY;
+    pub use softhsmrustv3::constants::CKO_PUBLIC_KEY;
+    pub use softhsmrustv3::constants::CKO_SECRET_KEY;
+    pub use softhsmrustv3::constants::CKP_ML_DSA_65;
+    pub use softhsmrustv3::constants::CKR_OPERATION_NOT_INITIALIZED;
+    pub use softhsmrustv3::constants::CKR_TEMPLATE_INCOMPLETE;
+    pub use softhsmrustv3::constants::CKR_TEMPLATE_INCONSISTENT;
 }
 
 /// The bootstrap slot — same constant `verbs::bootstrap()` initializes.
@@ -82,6 +100,47 @@ fn mech_native(mechanism: u64, parameter: &[u8]) -> CkMechanismNative {
         p_parameter: if parameter.is_empty() { core::ptr::null() } else { parameter.as_ptr() },
         ul_parameter_len: parameter.len(),
     }
+}
+
+/// One template entry over the wire: `(attribute_type, value_bytes)`.
+/// Ulong-typed attribute VALUES (CKA_CLASS, CKA_KEY_TYPE, CKA_PARAMETER_SET,
+/// ...) must be native `CK_ULONG` width (8 bytes LP64) — the same
+/// convention `get_attribute_value`'s OUTPUT already uses, applied here on
+/// the input side. `attr_ulong`/`attr_bool` below build entries correctly;
+/// callers building entries by hand (transports) must match.
+pub type AttrIn = (u64, Vec<u8>);
+
+/// A ulong-valued template entry at native width.
+pub fn attr_ulong(attr_type: u64, value: u32) -> AttrIn {
+    (attr_type, (value as usize).to_le_bytes().to_vec())
+}
+/// A single-byte boolean template entry (CK_BBOOL: 0x00/0x01).
+pub fn attr_bool(attr_type: u64, value: bool) -> AttrIn {
+    (attr_type, vec![u8::from(value)])
+}
+
+/// Owns the native CK_ATTRIBUTE[] backing storage for the lifetime of one
+/// FFI call: the three-word entries hold raw pointers into `values`, so
+/// both must outlive the call. Built once, reused by every template-taking
+/// verb below — the same `*mut usize` three-word-per-entry layout
+/// `C_CreateObject`/`C_SetAttributeValue`/`C_CopyObject`/
+/// `C_FindObjectsInit` all read (native-width-audited, see this module's
+/// doc and the plan's §4).
+struct NativeTemplate {
+    entries: Vec<usize>,
+    #[allow(dead_code)] // kept alive for entries' raw pointers to stay valid
+    values: Vec<Vec<u8>>,
+}
+
+fn build_template(attrs: &[AttrIn]) -> NativeTemplate {
+    let mut entries = vec![0usize; attrs.len() * 3];
+    let mut values: Vec<Vec<u8>> = attrs.iter().map(|(_, v)| v.clone()).collect();
+    for (i, (attr_type, _)) in attrs.iter().enumerate() {
+        entries[i * 3] = *attr_type as usize;
+        entries[i * 3 + 1] = if values[i].is_empty() { 0 } else { values[i].as_mut_ptr() as usize };
+        entries[i * 3 + 2] = values[i].len();
+    }
+    NativeTemplate { entries, values }
 }
 
 // ── sessions & login (RW1) ─────────────────────────────────────────────────
@@ -357,6 +416,114 @@ pub fn destroy_object(session: u32, object: u32) -> u32 {
     ffi::C_DestroyObject(session, object)
 }
 
+// ── object & keygen templates (RW2 slice) ───────────────────────────────────
+//
+// Native-width audited (2026-08-26): C_GenerateKey, C_GenerateKeyPair,
+// C_CreateObject, C_SetAttributeValue, C_CopyObject, C_FindObjectsInit all
+// walk their CK_ATTRIBUTE templates as `*mut usize` three-word entries —
+// the exact layout `build_template` produces and `get_attribute_value`
+// above already relies on for its OUTPUT template. No engine-crate change
+// needed for any of the nine functions below (plan §4/§5, RW2 notes).
+
+pub fn generate_key(session: u32, mechanism: u64, parameter: &[u8], template: &[AttrIn]) -> (u32, u32) {
+    let mech = mech_native(mechanism, parameter);
+    let mut tmpl = build_template(template);
+    let mut handle: u32 = 0;
+    let rv = ffi::C_GenerateKey(
+        session,
+        &mech as *const CkMechanismNative as *mut u8,
+        tmpl.entries.as_mut_ptr() as *mut u8,
+        template.len() as u32,
+        &mut handle,
+    );
+    (rv, handle)
+}
+
+pub fn generate_key_pair(
+    session: u32,
+    mechanism: u64,
+    parameter: &[u8],
+    public_template: &[AttrIn],
+    private_template: &[AttrIn],
+) -> (u32, u32, u32) {
+    let mech = mech_native(mechanism, parameter);
+    let mut pub_tmpl = build_template(public_template);
+    let mut priv_tmpl = build_template(private_template);
+    let mut pub_handle: u32 = 0;
+    let mut priv_handle: u32 = 0;
+    let rv = ffi::C_GenerateKeyPair(
+        session,
+        &mech as *const CkMechanismNative as *mut u8,
+        pub_tmpl.entries.as_mut_ptr() as *mut u8,
+        public_template.len() as u32,
+        priv_tmpl.entries.as_mut_ptr() as *mut u8,
+        private_template.len() as u32,
+        &mut pub_handle,
+        &mut priv_handle,
+    );
+    (rv, pub_handle, priv_handle)
+}
+
+pub fn create_object(session: u32, template: &[AttrIn]) -> (u32, u32) {
+    let mut tmpl = build_template(template);
+    let mut handle: u32 = 0;
+    let rv = ffi::C_CreateObject(
+        session,
+        tmpl.entries.as_mut_ptr() as *mut u8,
+        template.len() as u32,
+        &mut handle,
+    );
+    (rv, handle)
+}
+
+/// Mutates a live object — gated by `--enable-destructive` at the transport
+/// layer (default OFF in deployed containers, ON in tests/acceptance).
+pub fn set_attribute_value(session: u32, object: u32, template: &[AttrIn]) -> u32 {
+    let mut tmpl = build_template(template);
+    ffi::C_SetAttributeValue(session, object, tmpl.entries.as_mut_ptr() as *mut u8, template.len() as u32)
+}
+
+pub fn copy_object(session: u32, object: u32, template: &[AttrIn]) -> (u32, u32) {
+    let mut tmpl = build_template(template);
+    let mut handle: u32 = 0;
+    let rv = ffi::C_CopyObject(
+        session,
+        object,
+        tmpl.entries.as_mut_ptr() as *mut u8,
+        template.len() as u32,
+        &mut handle,
+    );
+    (rv, handle)
+}
+
+pub fn get_object_size(session: u32, object: u32) -> (u32, u32) {
+    let mut size: u32 = 0;
+    let rv = ffi::C_GetObjectSize(session, object, &mut size);
+    (rv, size)
+}
+
+pub fn find_objects_init(session: u32, template: &[AttrIn]) -> u32 {
+    let mut tmpl = build_template(template);
+    ffi::C_FindObjectsInit(session, tmpl.entries.as_mut_ptr() as *mut u8, template.len() as u32)
+}
+
+pub fn find_objects(session: u32, max_count: u32) -> (u32, Vec<u32>) {
+    let mut handles = vec![0u32; max_count as usize];
+    let mut found: u32 = 0;
+    let rv = ffi::C_FindObjects(
+        session,
+        if handles.is_empty() { core::ptr::null_mut() } else { handles.as_mut_ptr() },
+        max_count,
+        &mut found,
+    );
+    handles.truncate(found as usize);
+    (rv, handles)
+}
+
+pub fn find_objects_final(session: u32) -> u32 {
+    ffi::C_FindObjectsFinal(session)
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 /// PKCS#11 §5.2 two-call convention driver: NULL query for the length,
@@ -531,6 +698,155 @@ mod tests {
         assert_eq!(seed_random(session, b"seed"), ck::CKR_RANDOM_SEED_NOT_SUPPORTED);
         let (rv, _) = generate_random(session, MAX_RANDOM_LEN + 1);
         assert_eq!(rv, ck::CKR_ARGUMENTS_BAD);
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn generate_key_pair_template_signs_and_verifies_round_trip() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let public_template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_DSA),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_DSA_65),
+            attr_bool(u64::from(ck::CKA_VERIFY), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let private_template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_DSA),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_DSA_65),
+            attr_bool(u64::from(ck::CKA_SIGN), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, pub_h, prv_h) = generate_key_pair(
+            session,
+            u64::from(ck::CKM_ML_DSA_KEY_PAIR_GEN),
+            &[],
+            &public_template,
+            &private_template,
+        );
+        assert_eq!(rv, 0);
+        assert_ne!(pub_h, 0);
+        assert_ne!(prv_h, 0);
+
+        let msg = b"RW2 template keygen round trip";
+        assert_eq!(sign_init(session, u64::from(ck::CKM_ML_DSA), &[], prv_h), 0);
+        let (rv, sig) = sign(session, msg);
+        assert_eq!(rv, 0);
+        assert_eq!(verify_init(session, u64::from(ck::CKM_ML_DSA), &[], pub_h), 0);
+        assert_eq!(verify(session, msg, &sig), 0);
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn generate_key_pair_template_reports_inconsistent_and_incomplete() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        // §G3Keygen: mismatched key-type between the two halves.
+        let public_template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_DSA),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_DSA_65),
+        ];
+        let private_template_wrong_type = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_PARAMETER_SET), ck::CKP_ML_DSA_65),
+        ];
+        let (rv, _, _) = generate_key_pair(
+            session,
+            u64::from(ck::CKM_ML_DSA_KEY_PAIR_GEN),
+            &[],
+            &public_template,
+            &private_template_wrong_type,
+        );
+        assert_eq!(rv, ck::CKR_TEMPLATE_INCONSISTENT);
+
+        // §G3Keygen: CKA_PARAMETER_SET missing entirely.
+        let public_template_incomplete =
+            [attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY), attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_DSA)];
+        let private_template_incomplete =
+            [attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY), attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_ML_DSA)];
+        let (rv, _, _) = generate_key_pair(
+            session,
+            u64::from(ck::CKM_ML_DSA_KEY_PAIR_GEN),
+            &[],
+            &public_template_incomplete,
+            &private_template_incomplete,
+        );
+        assert_eq!(rv, ck::CKR_TEMPLATE_INCOMPLETE);
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn generate_key_aes_symmetric_and_object_size() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, handle) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &template);
+        assert_eq!(rv, 0);
+        assert_ne!(handle, 0);
+        let (rv, size) = get_object_size(session, handle);
+        assert_eq!(rv, 0);
+        assert!(size > 0);
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn create_object_find_objects_and_copy_object_round_trip() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let key_bytes = vec![0x11u8; 16];
+        let template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+            (u64::from(ck::CKA_VALUE), key_bytes),
+        ];
+        let (rv, handle) = create_object(session, &template);
+        assert_eq!(rv, 0);
+        assert_ne!(handle, 0);
+
+        let find_template = [attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY)];
+        assert_eq!(find_objects_init(session, &find_template), 0);
+        let (rv, handles) = find_objects(session, 10);
+        assert_eq!(rv, 0);
+        assert!(handles.contains(&handle));
+        assert_eq!(find_objects_final(session), 0);
+
+        let (rv, copy_handle) = copy_object(session, handle, &[]);
+        assert_eq!(rv, 0);
+        assert_ne!(copy_handle, handle);
+        let (rv, _) = get_object_size(session, copy_handle);
+        assert_eq!(rv, 0);
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn set_attribute_value_empty_template_ok_invalid_object_is_handle_invalid() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+            (u64::from(ck::CKA_VALUE), vec![0x22u8; 16]),
+        ];
+        let (rv, handle) = create_object(session, &template);
+        assert_eq!(rv, 0);
+        assert_eq!(set_attribute_value(session, handle, &[]), 0);
+        assert_eq!(set_attribute_value(session, 0xFFFF_FFFE, &[]), ck::CKR_OBJECT_HANDLE_INVALID);
         close_session(session);
     }
 }

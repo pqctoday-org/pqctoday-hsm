@@ -49,6 +49,15 @@ pub fn router(state: V32State) -> Router {
         .route("/v32/verify-final", post(verify_final))
         .route("/v32/get-attribute-value", post(get_attribute_value))
         .route("/v32/destroy-object", post(destroy_object))
+        .route("/v32/generate-key", post(generate_key))
+        .route("/v32/generate-key-pair", post(generate_key_pair))
+        .route("/v32/create-object", post(create_object))
+        .route("/v32/set-attribute-value", post(set_attribute_value))
+        .route("/v32/copy-object", post(copy_object))
+        .route("/v32/get-object-size", post(get_object_size))
+        .route("/v32/find-objects-init", post(find_objects_init))
+        .route("/v32/find-objects", post(find_objects))
+        .route("/v32/find-objects-final", post(find_objects_final))
         .with_state(state)
 }
 
@@ -127,6 +136,56 @@ async fn destroy_object(State(st): State<V32State>, Json(r): Json<ObjectReq>) ->
         return Json(StatusResp { ck_rv: v32::ck::CKR_FUNCTION_NOT_SUPPORTED });
     }
     Json(v32::destroy_object(r.session_handle, r.object_handle).into())
+}
+
+async fn generate_key(Json(r): Json<GenerateKeyReq>) -> Json<ObjectHandleResp> {
+    let template = tmpl_parts(&r.template);
+    Json(v32::generate_key(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, &template).into())
+}
+async fn generate_key_pair(Json(r): Json<GenerateKeyPairReq>) -> Json<GenerateKeyPairResp> {
+    let public_template = tmpl_parts(&r.public_key_template);
+    let private_template = tmpl_parts(&r.private_key_template);
+    Json(
+        v32::generate_key_pair(
+            r.session_handle,
+            r.mechanism.mechanism,
+            &r.mechanism.parameter,
+            &public_template,
+            &private_template,
+        )
+        .into(),
+    )
+}
+async fn create_object(Json(r): Json<CreateObjectReq>) -> Json<ObjectHandleResp> {
+    let template = tmpl_parts(&r.template);
+    Json(v32::create_object(r.session_handle, &template).into())
+}
+async fn set_attribute_value(
+    State(st): State<V32State>,
+    Json(r): Json<SetAttributeValueReq>,
+) -> Json<StatusResp> {
+    if !st.destructive {
+        return Json(StatusResp { ck_rv: v32::ck::CKR_FUNCTION_NOT_SUPPORTED });
+    }
+    let template = tmpl_parts(&r.template);
+    Json(v32::set_attribute_value(r.session_handle, r.object_handle, &template).into())
+}
+async fn copy_object(Json(r): Json<CopyObjectReq>) -> Json<ObjectHandleResp> {
+    let template = tmpl_parts(&r.template);
+    Json(v32::copy_object(r.session_handle, r.object_handle, &template).into())
+}
+async fn get_object_size(Json(r): Json<ObjectReq>) -> Json<GetObjectSizeResp> {
+    Json(v32::get_object_size(r.session_handle, r.object_handle).into())
+}
+async fn find_objects_init(Json(r): Json<FindObjectsInitReq>) -> Json<StatusResp> {
+    let template = tmpl_parts(&r.template);
+    Json(v32::find_objects_init(r.session_handle, &template).into())
+}
+async fn find_objects(Json(r): Json<FindObjectsReq>) -> Json<FindObjectsResp> {
+    Json(v32::find_objects(r.session_handle, r.max_object_count).into())
+}
+async fn find_objects_final(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::find_objects_final(r.session_handle).into())
 }
 
 // Small shared request shapes used by several routes.
