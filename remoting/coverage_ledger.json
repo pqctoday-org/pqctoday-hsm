@@ -128,14 +128,15 @@
     "FIPS": {
       "disposition": "RPC",
       "case_ids": [],
-      "justification": "Partial per the master plan (\u00a73): self-test/POST surface where exposed is RPC-reachable via the same generic verbs; process-startup aspects are N/A-local. Not separately cased."
+      "justification": "Partial per the master plan (\u00a73): self-test/POST surface where exposed is RPC-reachable via the same generic verbs; process-startup aspects are N/A-local. Not separately cased. Deliberately empty \u2014 decision recorded in the residual-gaps plan \u00a73 (docs/remoting-pkcs11-v32-residual-gaps-plan-2026-08-26.md)."
     },
     "Fork": {
       "disposition": "N/A-local",
       "case_ids": [
-        "core::random_and_seed_codes_are_the_engines_own"
+        "core::random_and_seed_codes_are_the_engines_own",
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
       ],
-      "justification": "fork(2) semantics cannot exist across a network boundary (master plan \u00a73). The category's intent \u2014 independent clients' RNG does not share state \u2014 has a real remote analogue (two sessions' C_GenerateRandom draws must differ) but was not built as its own dedicated case; core::random_and_seed_codes_are_the_engines_own asserts two C_GenerateRandom/C_SeedRandom draws differ within one session, not cross-session."
+      "justification": "fork(2) semantics cannot exist across a network boundary (master plan \u00a73) \u2014 disposition stays N/A-local for that reason alone. But the category's remote analogue (independent clients' RNG does not share state) IS cased: core::random_and_seed_codes_are_the_engines_own proves two C_GenerateRandom/C_SeedRandom draws differ within one session; core::mechanism_sweep_kcv_profile_multipart_and_fork's own 'Fork analogue' block (G3, 2026-08-26) opens TWO independent sessions and proves their C_GenerateRandom draws differ \u2014 the actual cross-session property this row's name refers to. (Residual-gaps plan H1, 2026-08-26: this case existed since G3 but was never linked here, because G3's ledger pass only targeted rows with empty case_ids and this row already had one.)"
     },
     "G-DA-X": {
       "disposition": "RPC",
@@ -187,7 +188,7 @@
     "G4Retcodes": {
       "disposition": "RPC",
       "case_ids": [],
-      "justification": "Same design-level guarantee as ErrCodes \u2014 not separately cased beyond what ErrCodes already lists."
+      "justification": "Same design-level guarantee as ErrCodes \u2014 not separately cased beyond what ErrCodes already lists. Deliberately empty \u2014 decision recorded in the residual-gaps plan \u00a73 (docs/remoting-pkcs11-v32-residual-gaps-plan-2026-08-26.md)."
     },
     "G5Attrs": {
       "disposition": "RPC",
@@ -290,12 +291,12 @@
     "Init": {
       "disposition": "N/A-local",
       "case_ids": [],
-      "justification": "C_Initialize/C_Finalize are server-process bootstrap lifecycle (master plan \u00a73 'Split' row) \u2014 no per-request network analogue; documented, not silently dropped."
+      "justification": "C_Initialize/C_Finalize are server-process bootstrap lifecycle (master plan \u00a73 'Split' row) \u2014 no per-request network analogue; documented, not silently dropped. Deliberately empty \u2014 decision recorded in the residual-gaps plan \u00a73 (docs/remoting-pkcs11-v32-residual-gaps-plan-2026-08-26.md)."
     },
     "Invariant": {
       "disposition": "RPC",
       "case_ids": [],
-      "justification": "Same design-level guarantee as ErrCodes/Negative."
+      "justification": "Same design-level guarantee as ErrCodes/Negative. Deliberately empty \u2014 decision recorded in the residual-gaps plan \u00a73 (docs/remoting-pkcs11-v32-residual-gaps-plan-2026-08-26.md)."
     },
     "KCV": {
       "disposition": "RPC",

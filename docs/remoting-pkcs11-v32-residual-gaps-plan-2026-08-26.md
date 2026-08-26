@@ -189,3 +189,27 @@ per-commit discipline.
 - No engine-crate or wire-format changes of any kind — H2's client is
   a consumer of the existing proto, nothing more.
 - No push, no CI, no deploy — H6 stays behind the user's explicit gate.
+
+## Execution log
+
+### 2026-08-26 — H1+H3 (Fork ledger fix + no-action markers)
+
+Shipped. `Fork` row now cites BOTH the pre-existing single-session case
+and `core::mechanism_sweep_kcv_profile_multipart_and_fork` (its own
+"Fork analogue" block, built in G3 but never linked here since G3's
+ledger pass only touched rows with empty `case_ids`); justification
+rewritten to state plainly that the cross-session property IS cased,
+disposition unchanged (`N/A-local` — fork(2) itself still can't cross a
+network boundary, that part was never in question). `FIPS`/
+`G4Retcodes`/`Init`/`Invariant` each got one added sentence pointing at
+this plan's §3 decision, so a future audit finds the reasoning instead
+of re-litigating whether they're gaps. No proxy case_ids added to any
+of the four — per §3's own point, citing an adjacent-but-wrong case
+(e.g. V22 for FIPS) would be measuring a proxy, not fixing anything.
+
+Regenerated `REMOTE_P11_V32_COVERAGE.md`. Ratchet green: 64 categories,
+99 RPCs (unchanged — no new RPCs, this slice only corrects
+documentation of existing coverage). Whole workspace green: 82 passed,
+0 failed.
+
+H2 (pinned-cert gRPC smoke client) is next.
