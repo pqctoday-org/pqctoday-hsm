@@ -387,6 +387,32 @@ static void cache_key(P11PROV_OBJ *obj)
         return;
     }
 
+    /* remediation R29 (2026-08-26) -- a cached key is a CKA_TOKEN=FALSE
+     * C_CopyObject clone (see the template just below): a distinct object
+     * with its own fresh CKA_UNIQUE_ID, kept only in the session's
+     * volatile memory and discarded when the session/process ends. Every
+     * operation against this P11PROV_OBJ (see p11prov_obj_ref, above)
+     * then targets obj->cached rather than the real token object. For an
+     * ordinary key that is harmless -- the copy's material is identical
+     * and signing is idempotent. For a one-time-signature scheme
+     * (HSS/LMS, and XMSS/XMSS^MT the moment either is wired up) it is
+     * not: the leaf-index advance-and-persist a stateful sign performs
+     * (softhsmrustv3::native::hbs::sign_commit / the C++ engine's
+     * equivalent) lands on the cached clone, which is never written back
+     * to the original token object and vanishes with it. Every later
+     * process that re-resolves the same key by URI starts from the
+     * original's own still-unadvanced state, so the SAME leaf gets
+     * reused across signatures -- exactly the property a one-time
+     * signature scheme cannot tolerate. Skip caching for these key types
+     * so C_Sign always targets the real token object directly; found via
+     * T24e (a genuinely new multi-process leaf-advance proof -- R9's own
+     * original goal was never actually tested against either engine
+     * before this). */
+    if (obj->data.key.type == CKK_HSS || obj->data.key.type == CKK_XMSS
+        || obj->data.key.type == CKK_XMSSMT) {
+        return;
+    }
+
     ret = supports_caching(obj->ctx, obj->slotid, GET_ATTR, &can_cache);
     if (ret != CKR_OK) {
         P11PROV_raise(obj->ctx, ret, "Failed to get quirk");

@@ -2351,6 +2351,84 @@ parameterized case, matching `t26_kmac`'s own style). Full regression:
 source touched). **Harness: `PASS=73 FAIL=0 XFAIL=0 XPASS=0`** — one
 case gained, zero regressions.
 
+**Phase 6, R29 (HSS follow-up bundle), DONE — a real, provider-level
+bug found, affecting both engines.** R9's original goal — proving an
+HSS/LMS key's leaf-index counter genuinely advances across two
+separate signing operations, the one property that makes a stateful
+signature scheme dangerous to get wrong — had never actually been
+achieved for either engine before this item; the C++ arm's own T24
+signs exactly once, and no harness case anywhere signed the same
+stateful key twice and checked the leaf advanced.
+
+**Two test-infrastructure bugs surfaced first, both fixed before the
+real one was reachable.** (1) `mk_rust_cnf` never actually set
+`SOFTHSM2_CONF`, despite its own comment claiming self-containment —
+`softhsm2-util --init-token` is a C++-linked CLI binary that needs a
+real config file to complete its own startup regardless of which
+engine `--module` points it at. T15a/T15b only ever passed because, in
+a full harness run, an earlier C++-arm case had left a real
+`SOFTHSM2_CONF` exported and never cleared — order-dependent, and it
+broke the moment a Rust-arm case ran standalone. (2) The harness's own
+`RUST_ENGINE_SO` auto-discovery prefers the debug build over release;
+only `cargo build --release` had been run after R25's own source fix
+landed, so the debug `.so` silently predated it and every
+default-discovery test was exercising pre-R25 Rust code.
+
+**The real bug, in `src/vendor/pkcs11-provider/src/objects.c`, not
+either engine.** With both test-infra bugs fixed, T24e (two signs in
+two separate processes sharing one `SOFTHSMRUST_STATE_FILE`) still
+produced byte-identical signatures — leaf index `q=0` both times.
+Traced by instrumenting `hbs::sign_commit` directly (confirmed it
+correctly advances `CKA_PRIV_LEAF_INDEX` on whatever handle it
+receives) and capturing a backtrace at the point a second HSS object
+got created mid-process: `p11prov_hss_digest_sign_init` →
+`p11prov_sig_op_init` → `p11prov_obj_ref` → `cache_key` →
+`C_CopyObject`. `cache_key()` (`objects.c:368`) opportunistically
+clones a token key into a `CKA_TOKEN=FALSE` session object the first
+time a session references it, as a speed optimization for tokens that
+support it (`P11PROV_OBJ.cached`) — and every later operation against
+that object, including `C_Sign`, targets the clone, not the original.
+For an ordinary key this is invisible: the clone is cryptographically
+identical and signing is idempotent. For a one-time-signature scheme
+it is not — the leaf-index advance a stateful sign performs lands on
+the clone, which is session-scoped and is discarded, never written
+back to the real token object, when the session/process ends. Every
+new process that re-resolves the same key by URI gets the original's
+own still-unadvanced state and reuses the same leaf. Confirmed this is
+engine-agnostic, not a Rust defect: `C_CopyObject` in the C++ engine
+(`SoftHSM_objects.cpp`) mints a fresh `CKA_UNIQUE_ID` session-object
+copy the exact same way (verified by reading both implementations
+side by side) — the C++ arm was simply never tested against this
+exact failure mode. Also confirmed the OUID-generation mechanism
+itself is sound and consistent between engines (both correctly mint a
+fresh, spec-correct `CKA_UNIQUE_ID` on every copy) — the defect is
+entirely in choosing to cache/sign against the copy at all for a
+stateful key type, not in how either engine implements copying.
+
+**Fix:** `cache_key()` now skips caching for `CKK_HSS`, and
+pre-emptively for `CKK_XMSS`/`CKK_XMSSMT` (XMSS remains unimplemented
+per R27, but the same defect would apply the moment it lands), so
+`C_Sign` always targets the real token object directly for these key
+types. **Live-verified:** manual two-process repro now gives `q1=0`,
+`q2=1`; the first signature still verifies after the second consumed
+the next leaf.
+
+New permanent harness cases `T24d` (Rust-arm HSS sign/verify, asserts
+the real 2352-byte W4 size — proving the provider reads the actual
+parameter set, not an assumed default), `T24e` (the multi-process
+counter proof itself), and `T24f` (the fallback-path fixture:
+verifies a real W4 signature against a public-key object holding
+`CKA_VALUE` but deliberately none of the official
+`CKA_HSS_LEVELS`/`LMS_TYPE`/`LMOTS_TYPE` attrs, proving R25's
+parse-from-`CKA_VALUE` fallback leg genuinely engages rather than
+silently agreeing with the 1296-byte last-resort constant). The
+parked L>1 multi-level sub-item stays parked, unchanged, per the
+plan's own sketch.
+
+Full regression: **harness 76/76** (both arms; three new cases, zero
+regressions), **C++ CTest 8/8**, **Rust `cargo test --release` 410+
+passed / 0 failed**.
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:

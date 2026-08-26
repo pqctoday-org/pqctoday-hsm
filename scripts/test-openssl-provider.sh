@@ -46,6 +46,7 @@ DUMP_INT_PARAM="${DUMP_INT_PARAM:-$HSM_ROOT/build/dump_int_param}"
 LMS_XDR_VERIFY="${LMS_XDR_VERIFY:-$HSM_ROOT/build/lms_xdr_verify}"
 HSS_PUBKEY_DUMP="${HSS_PUBKEY_DUMP:-$HSM_ROOT/build/hss_pubkey_dump}"
 HSS_W4_KEYGEN="${HSS_W4_KEYGEN:-$HSM_ROOT/build/hss_w4_keygen}"
+HSS_FALLBACK_FIXTURE="${HSS_FALLBACK_FIXTURE:-$HSM_ROOT/build/hss_fallback_fixture}"
 SKEY_FLOW_PROBE="${SKEY_FLOW_PROBE:-$HSM_ROOT/build/skey_flow_probe}"
 AEAD_PROBE="${AEAD_PROBE:-$HSM_ROOT/build/aead_probe}"
 AEAD_EDGE_PROBE="${AEAD_EDGE_PROBE:-$HSM_ROOT/build/aead_edge_probe}"
@@ -157,7 +158,7 @@ say preflight "environment"
 VER="$(LD_LIBRARY_PATH=$OPENSSL_LIB_DIR "$OPENSSL_BIN" version 2>/dev/null)"
 case "$VER" in OpenSSL\ 3.6*|OpenSSL\ 3.7*|OpenSSL\ 4.*) : ;; *)
   echo "FATAL: need OpenSSL >= 3.6 at $OPENSSL_BIN (got: ${VER:-nothing}) — see audit ENV-1/gate --cpp note"; exit 2;; esac
-for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$HSS_W4_KEYGEN" "$SKEY_FLOW_PROBE" "$AEAD_PROBE" "$AEAD_EDGE_PROBE"; do
+for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$HSS_W4_KEYGEN" "$HSS_FALLBACK_FIXTURE" "$SKEY_FLOW_PROBE" "$AEAD_PROBE" "$AEAD_EDGE_PROBE"; do
   [[ -e "$f" ]] || { echo "FATAL: missing $f (run the --cpp gate step / cmake build first)"; exit 2; }
 done
 echo "  oracle: $VER; provider: $PROVIDER_SO"
@@ -1796,8 +1797,30 @@ run_case T27e PASS "AEAD decrypt edge cases (AES-256-GCM + ChaCha20-Poly1305): t
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 
-mk_rust_cnf() { # self-contained (no dependency on another case's arena)
+mk_rust_cnf() { # R29 fix: was NOT actually self-contained despite its own
+  # comment's claim -- softhsm2-util (a C++-linked CLI binary) needs a
+  # real SOFTHSM2_CONF to complete its own --init-token startup even when
+  # --module points it at the Rust engine, which doesn't otherwise use
+  # this file's content at all (it persists via SOFTHSMRUST_STATE_FILE
+  # instead). Without one, --init-token silently returns nonzero and the
+  # state file never gets written -- every later command then fails with
+  # "the token was not present in its slot", which reads like a keygen
+  # bug, not an init failure. T15a/T15b happened to work anyway because
+  # by the time they run (after every C++-arm test), some EARLIER
+  # use_arena() call had left a real SOFTHSM2_CONF exported and never
+  # cleared -- accidental, order-dependent, and silently broke the first
+  # time a Rust-arm case was added (T24d/T24e) without that same
+  # accidental leakage lining up the same way. Caller must export
+  # SOFTHSM2_CONF="$w/softhsm2.conf" on every softhsm2-util invocation now
+  # (openssl's own commands don't need it -- only the C++-linked CLI
+  # utility does).
   local w="$1"
+  mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = ERROR
+EOF
   cat > "$w/openssl.cnf" <<EOF
 openssl_conf = openssl_init
 [openssl_init]
@@ -1880,17 +1903,17 @@ t15b() { # ENV-2/R6/R14 — genuine multi-process persistence proof.
   # config's pkcs11-module-load-behavior=early collide with this direct
   # module load and mask a real failure behind
   # CKR_CRYPTOKI_ALREADY_INITIALIZED instead.
-  SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
     "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
     --init-token --free --label rustarm --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
   [[ -s "$statefile" ]] || return 1
 
-  SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
     O genpkey -propquery "?provider=pkcs11" -algorithm ML-DSA-65 -out "$w/k.pem" 2>/dev/null || return 1
-  SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
     O pkeyutl -sign -propquery "?provider=pkcs11" -inkey "pkcs11:token=rustarm;type=private" \
       -rawin -in "$MSG" -out "$w/sig.bin" 2>/dev/null || return 1
-  SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
     O pkey -propquery "?provider=pkcs11" -in "pkcs11:token=rustarm;type=public" \
       -pubin -pubout -out "$w/pub.pem" 2>/dev/null || return 1
 
@@ -1898,6 +1921,166 @@ t15b() { # ENV-2/R6/R14 — genuine multi-process persistence proof.
   O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" -sigfile "$w/sig.bin"
 }
 run_case T15b PASS "Rust arm multi-process persistence: 4 separate processes round-trip a real ML-DSA-65 key through SOFTHSMRUST_STATE_FILE (gap ENV-2 / remediation R6+R14)" t15b
+
+# T24d/T24e -- phase-6 R29. R9's own original goal (a Rust-arm twin of
+# T24 plus a multi-process stateful-counter test) was parked on a
+# genuine cross-engine parameter-set mismatch; R25 (phase 5) fixed the
+# provider to read a key's real parameter set instead of assuming the
+# C++ engine's own default, unblocking both -- but neither was wired
+# up as a permanent test until now. Naming note (already flagged in the
+# phase-5 plan's own R25 execution update): the phase-4/5 plans' text
+# called these "T24b/T24c", but both IDs were already taken by the time
+# R25 landed (R24's own EVP_SKEY guard, R25's own W4 case) -- using
+# T24d/T24e instead, as that update already directed.
+#
+# Every command below carries the SAME SOFTHSMRUST_STATE_FILE +
+# OPENSSL_CONF pair, matching T15b's own established pattern -- the
+# Rust engine's own state is in-memory only by default (R6's opt-in
+# stash-on-C_Finalize/restore-on-C_Initialize), so a single dropped env
+# var on any one command loses everything the prior commands built,
+# not just that one call.
+t24d() {
+  [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/rusths"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rusths --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm HSS -out "$w/k.pem" 2>/dev/null || return 1
+
+  # Rust's own CKM_HSS_KEY_PAIR_GEN default is LMOTS_SHA256_N32_W4 (not
+  # the C++ engine's W8) -- 2352 bytes is the size assert that actually
+  # proves the provider read this key's real parameter set (R25)
+  # rather than assuming the C++ default's 1296.
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -sign -propquery "?provider=pkcs11" -rawin \
+      -inkey "pkcs11:token=rusths;type=private" -in "$MSG" -out "$w/sig.bin" 2>/dev/null || return 1
+  [[ "$(stat -c%s "$w/sig.bin")" == "2352" ]] || { echo "Rust-arm HSS sig size $(stat -c%s "$w/sig.bin") != 2352"; return 1; }
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin \
+      -inkey "pkcs11:token=rusths;type=public" -in "$MSG" -sigfile "$w/sig.bin" 2>/dev/null || return 1
+
+  # sabotage: corrupted signature and wrong message must both be rejected
+  cp "$w/sig.bin" "$w/tampered.bin"
+  printf '\x00' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  cmp -s "$w/sig.bin" "$w/tampered.bin" && printf '\xff' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  if SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin \
+      -inkey "pkcs11:token=rusths;type=public" -in "$MSG" -sigfile "$w/tampered.bin" >/dev/null 2>&1
+  then echo "tampered Rust-arm HSS signature VERIFIED — verifier cannot say no"; return 1; fi
+  echo "wrong message" > "$w/wrong.txt"
+  if SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin \
+      -inkey "pkcs11:token=rusths;type=public" -in "$w/wrong.txt" -sigfile "$w/sig.bin" >/dev/null 2>&1
+  then echo "Rust-arm HSS signature verified against the WRONG message — verifier cannot say no"; return 1; fi
+
+  # cross-implementation proof: Rust-token-signed, OpenSSL-native-LMS-verified
+  # (hss_pubkey_dump/lms_xdr_verify are engine-agnostic raw-PKCS11/pure-math
+  # tools -- same binaries T24 already uses, just pointed at the Rust .so)
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" "$HSS_PUBKEY_DUMP" "$RUST_ENGINE_SO" rusths "$w/pub.raw" >/dev/null 2>&1 || { echo "hss_pubkey_dump failed (Rust arm)"; return 1; }
+  "$LMS_XDR_VERIFY" "$w/pub.raw" "$MSG" "$w/sig.bin" || { echo "Rust-arm cross-implementation LMS verify FAILED"; return 1; }
+  if "$LMS_XDR_VERIFY" "$w/pub.raw" "$MSG" "$w/tampered.bin" >/dev/null 2>&1
+  then echo "tampered Rust-arm HSS signature VERIFIED by the independent LMS implementation"; return 1; fi
+  return 0
+}
+run_case T24d PASS "Rust-arm HSS/LMS token sign (size 2352, Rust's own LMOTS W4 default) -> token verify, both sabotage controls rejected, AND cross-verified by OpenSSL's independent native LMS implementation -- proves the provider reads the real parameter set (R9's own parked goal, unblocked by R25, remediation R29)" t24d
+
+t24e() { # R9's own original multi-process stateful-counter goal: the
+         # LMS leaf counter q must genuinely advance across two wholly
+         # separate process invocations bridged only by
+         # SOFTHSMRUST_STATE_FILE, and the FIRST signature must still
+         # verify after the SECOND one was produced -- the one property
+         # that makes a stateful signature scheme dangerous to get
+         # wrong, and nothing in this provider-facing test surface
+         # exercised state persistence across processes for HSS before
+         # this case.
+  [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/rusthsstate"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rustcnt --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm HSS -out "$w/k.pem" 2>/dev/null || return 1
+
+  # process B: first signature
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -sign -propquery "?provider=pkcs11" -rawin \
+      -inkey "pkcs11:token=rustcnt;type=private" -in "$MSG" -out "$w/sig1.bin" 2>/dev/null || return 1
+
+  # process C: second signature, wholly separate invocation, same statefile
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -sign -propquery "?provider=pkcs11" -rawin \
+      -inkey "pkcs11:token=rustcnt;type=private" -in "$MSG" -out "$w/sig2.bin" 2>/dev/null || return 1
+
+  # bytes 4-8 of the BARE LMS signature (i.e. after stripping the HSS
+  # u32str(Nspk) 4-byte prefix -- the same strip lms-xdr-verify.c's own
+  # header documents) hold the leaf index q, big-endian. It must have
+  # advanced 0 -> 1.
+  q1=$(python3 -c "import sys; d=open('$w/sig1.bin','rb').read(); print(int.from_bytes(d[4:8],'big'))")
+  q2=$(python3 -c "import sys; d=open('$w/sig2.bin','rb').read(); print(int.from_bytes(d[4:8],'big'))")
+  [[ "$q1" == "0" ]] || { echo "first Rust-arm HSS signature q=$q1, expected 0"; return 1; }
+  [[ "$q2" == "1" ]] || { echo "second Rust-arm HSS signature q=$q2, expected 1 (counter did not advance)"; return 1; }
+
+  # process D: the FIRST signature (q=0) must still verify after the
+  # SECOND signing consumed leaf q=1 -- proves the state advanced
+  # forward without corrupting or replaying an already-used leaf.
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin \
+      -inkey "pkcs11:token=rustcnt;type=public" -in "$MSG" -sigfile "$w/sig1.bin" 2>/dev/null || { echo "first signature (q=0) failed to verify after a second signing"; return 1; }
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin \
+      -inkey "pkcs11:token=rustcnt;type=public" -in "$MSG" -sigfile "$w/sig2.bin" 2>/dev/null || { echo "second signature (q=1) failed to verify"; return 1; }
+  return 0
+}
+run_case T24e PASS "Rust-arm HSS multi-process stateful-counter proof: leaf index q genuinely advances 0->1 across two wholly separate processes bridged only by SOFTHSMRUST_STATE_FILE, first signature still verifies after the second (R9's own original goal, remediation R29)" t24e
+
+# T24f -- phase-6 R29. R25's own three-step fallback chain (official
+# attrs -> parse CKA_VALUE -> HSS_L1_DEFAULT_SIG_SIZE constant) only had
+# its first leg live-proven; R25 skipped the CKA_VALUE-parsing leg for
+# want of a pre-standardization/imported-key fixture. Built one instead
+# of waiting for one: hss-fallback-fixture.c creates a real public HSS
+# key object holding genuine CKA_VALUE bytes but deliberately WITHOUT
+# the official CKA_HSS_LEVELS/LMS_TYPE/LMOTS_TYPE attrs.
+#
+# Deliberately built from a W4 key (hss-w4-keygen, the same tool T24c
+# already uses), not the C++ engine's own W8 default: a W4 signature is
+# 2352 bytes, genuinely different from HSS_L1_DEFAULT_SIG_SIZE's own
+# 1296. If verify against this attrs-less fixture only "worked" by
+# coincidentally landing on the same constant both paths agree on (as
+# it would for a W8 key), that would prove nothing about which fallback
+# leg actually ran -- a real W4 signature verifying here is the only
+# way to know the parse-from-CKA_VALUE leg genuinely engaged.
+t24f() {
+  local wsrc; wsrc=$(mk_arena hssfbsrc "$CPP_ENGINE_SO") && use_arena "$wsrc" || return 1
+  "$HSS_W4_KEYGEN" "$CPP_ENGINE_SO" hssfbsrc || { echo "hss_w4_keygen failed"; return 1; }
+  O pkeyutl -sign -rawin -inkey "pkcs11:token=hssfbsrc;type=private" -in "$MSG" -out "$wsrc/sig.bin" || return 1
+  [[ "$(stat -c%s "$wsrc/sig.bin")" == "2352" ]] || { echo "source W4 sig size $(stat -c%s "$wsrc/sig.bin") != 2352"; return 1; }
+  "$HSS_PUBKEY_DUMP" "$CPP_ENGINE_SO" hssfbsrc "$wsrc/pub.raw" >/dev/null 2>&1 || { echo "hss_pubkey_dump failed"; return 1; }
+
+  # fresh, SEPARATE token: the ONLY HSS object on it is the bare fixture
+  local wfix; wfix=$(mk_arena hssfallback "$CPP_ENGINE_SO") && use_arena "$wfix" || return 1
+  "$HSS_FALLBACK_FIXTURE" "$CPP_ENGINE_SO" hssfallback "$wsrc/pub.raw" || { echo "hss_fallback_fixture creation failed"; return 1; }
+
+  O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=hssfallback;type=public" -in "$MSG" -sigfile "$wsrc/sig.bin" || { echo "verify against attrs-less fallback fixture FAILED -- CKA_VALUE-parsing leg did not engage"; return 1; }
+
+  # sabotage: the fallback path must reject a tampered signature exactly
+  # like the official-attrs path already does (T24/T24c)
+  cp "$wsrc/sig.bin" "$wsrc/tampered.bin"
+  printf '\x00' | dd of="$wsrc/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  cmp -s "$wsrc/sig.bin" "$wsrc/tampered.bin" && printf '\xff' | dd of="$wsrc/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  use_arena "$wfix"
+  if O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=hssfallback;type=public" -in "$MSG" -sigfile "$wsrc/tampered.bin" >/dev/null 2>&1
+  then echo "tampered signature VERIFIED against the fallback fixture — verifier cannot say no"; return 1; fi
+  return 0
+}
+run_case T24f PASS "HSS fallback path (parse CKA_VALUE, no official attrs) genuinely engages and computes the correct size for a non-default W4 key (2352 bytes, not the 1296 last-resort constant), sabotage rejected (R25's own untested fallback leg, remediation R29)" t24f
 
 # ─── R0.1 regression guard ──────────────────────────────────────────────────
 # The token-scan attribute-type noise (WART-1) was a real bug, not spec-legal

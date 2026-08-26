@@ -250,6 +250,18 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src/lib/pkcs11)
     target_link_libraries(hss_w4_keygen ${CMAKE_DL_LIBS})
 
+    # hss-fallback-fixture: phase-6 R29 test helper — creates a public
+    # HSS key object via direct C_CreateObject holding a real CKA_VALUE
+    # but WITHOUT the official CKA_HSS_LEVELS/LMS_TYPE/LMOTS_TYPE attrs,
+    # simulating a pre-R25-engine or imported key so hss_sig_size_for_
+    # key()'s own CKA_VALUE-parsing fallback leg (never live-tested when
+    # R25 landed, for want of a fixture) can finally be proven (see the
+    # file's own header for why it's built from a W4, not W8, key).
+    add_executable(hss_fallback_fixture scripts/hss-fallback-fixture.c)
+    target_include_directories(hss_fallback_fixture PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11)
+    target_link_libraries(hss_fallback_fixture ${CMAKE_DL_LIBS})
+
     # aead-probe: phase-5 R26 test helper — exercises the full EVP AEAD
     # workflow (AAD, tag get/set, both sabotage controls) for
     # CKM_AES_GCM / CKM_CHACHA20_POLY1305, since `openssl enc` refuses

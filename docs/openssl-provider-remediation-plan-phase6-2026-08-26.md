@@ -163,6 +163,65 @@ Regression: full harness both arms; `cargo test --release` if any
 `rust/` source ends up touched (expected: none — but every prior HSS
 item said that too).
 
+**Execution update (2026-08-26):** all three items done, T24d/T24e/T24f
+now permanent harness cases; the parked L>1 sub-item stays parked. Two
+genuine, unrelated bugs surfaced along the way, plus one real bug this
+work exists to find:
+
+- **Test-infra bug 1 — `mk_rust_cnf` never actually set `SOFTHSM2_CONF`.**
+  `softhsm2-util --init-token` is a C++-linked CLI binary that needs a
+  real `SOFTHSM2_CONF` to complete its own config-loading startup,
+  independent of which engine `.so` `--module` points it at. T15a/T15b
+  only ever worked because, in a full harness run, an earlier C++-arm
+  `use_arena()` call had left a real `SOFTHSM2_CONF` exported and never
+  cleared — order-dependent and accidental, and it broke the moment
+  T24d/T24e ran standalone. Fixed: `mk_rust_cnf` now also writes a real
+  `softhsm2.conf`; every `softhsm2-util` invocation in `t15b`/`t24d`/`t24e`
+  exports it explicitly.
+- **Test-infra bug 2 — stale debug build of the Rust engine.** The
+  harness's own `RUST_ENGINE_SO` auto-discovery prefers
+  `/cargo-target/debug/libsofthsmrustv3.so` over the release build; only
+  `cargo build --release` had been run after R25's own source fix, so
+  the debug `.so` silently predated it and every default-discovery test
+  was exercising pre-R25 Rust code. A plain `cargo build` (debug
+  profile) picked up the fix; T24d passed immediately after.
+- **Real bug — R29's own actual find, in `src/vendor/pkcs11-provider`,
+  affects BOTH engines.** T24e (two signs in two separate processes,
+  bridged only by `SOFTHSMRUST_STATE_FILE`) kept producing byte-identical
+  signatures — `q1=0`, `q2=0` — even after both test-infra bugs above
+  were fixed. Root cause, found by tracing `hbs::sign_commit` (confirmed
+  it correctly advances `CKA_PRIV_LEAF_INDEX` on whatever handle it's
+  given) and then `objects.c`'s `cache_key()`/`p11prov_obj_ref`: the
+  vendored provider opportunistically caches a `CKA_TOKEN=FALSE`
+  `C_CopyObject` clone of a token key the first time a session uses it
+  (`cache_key`, `objects.c:368`), and every operation against that
+  `P11PROV_OBJ` — including `C_Sign` — then targets the clone, not the
+  original token object. For an ordinary key this is harmless (the copy
+  is cryptographically identical and signing is idempotent). For a
+  one-time-signature scheme it is not: the leaf-index advance-and-persist
+  a stateful sign performs lands on the clone, which is session-scoped
+  and vanishes with the session/process, never written back to the real
+  token object. Every new process that re-resolves the same key by URI
+  gets a fresh, still-unadvanced original and reuses the same leaf. This
+  is provider-side, engine-agnostic code — confirmed it applies equally
+  to the C++ engine (its own `C_CopyObject`, `SoftHSM_objects.cpp`, mints
+  a fresh `CKA_UNIQUE_ID` session-object copy the same way) — it was
+  simply never caught before because no test in this codebase, for
+  either engine, had ever signed the same stateful key twice and checked
+  the leaf actually advanced. R9's original goal (this exact proof) was
+  never actually achieved for either engine until this item. Confirmed
+  the OUID-generation mechanism itself is sound and consistent between
+  engines (both correctly mint a fresh `CKA_UNIQUE_ID` on copy, per spec)
+  — the defect is entirely in choosing to cache/sign against the copy at
+  all for a stateful key type. Fix: `cache_key()` now skips caching for
+  `CKK_HSS`/`CKK_XMSS`/`CKK_XMSSMT` (the latter two guarded pre-emptively;
+  XMSS remains unimplemented per R27), so `C_Sign` always targets the
+  real token object directly. Verified live: manual two-process repro
+  now gives `q1=0`, `q2=1`, first signature still verifies after the
+  second. Full regression after the fix: harness 76/76 (both arms,
+  T24d/T24e/T24f all new and passing), C++ CTest 8/8, `cargo test
+  --release` 410+ passed/0 failed. One commit for this item.
+
 ---
 
 ### R30 — AEAD edge-case proofs — effort S–M
