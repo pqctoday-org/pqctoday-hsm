@@ -1647,7 +1647,9 @@ pub fn register_hss_private_key(
     let mut attrs: Attributes = HashMap::new();
     store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
     store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_HSS);
-    store_ulong(&mut attrs, CKA_HSS_LMS_TYPE, 1); // levels — single-level HSS = LMS
+    store_ulong(&mut attrs, CKA_HSS_LEVELS, 1); // single-level HSS = LMS
+    store_ulong(&mut attrs, CKA_HSS_LMS_TYPE, lms_param);
+    store_ulong(&mut attrs, CKA_HSS_LMOTS_TYPE, lmots_param);
     store_ulong(&mut attrs, CKA_LMS_PARAM_SET, lms_param);
     store_ulong(&mut attrs, CKA_LMOTS_PARAM_SET, lmots_param);
     store_ulong(&mut attrs, CKA_HSS_KEYS_REMAINING, total_sigs);
@@ -1684,7 +1686,9 @@ pub fn register_hss_public_key(
     let mut attrs: Attributes = HashMap::new();
     store_ulong(&mut attrs, CKA_CLASS, CKO_PUBLIC_KEY);
     store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_HSS);
-    store_ulong(&mut attrs, CKA_HSS_LMS_TYPE, 1);
+    store_ulong(&mut attrs, CKA_HSS_LEVELS, 1);
+    store_ulong(&mut attrs, CKA_HSS_LMS_TYPE, lms_param);
+    store_ulong(&mut attrs, CKA_HSS_LMOTS_TYPE, lmots_param);
     store_ulong(&mut attrs, CKA_LMS_PARAM_SET, lms_param);
     store_ulong(&mut attrs, CKA_LMOTS_PARAM_SET, lmots_param);
     store_bool(&mut attrs, CKA_TOKEN, false);

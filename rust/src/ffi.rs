@@ -2753,7 +2753,14 @@ fn C_GenerateKeyPair_impl(
                 // Public key attributes
                 store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
                 store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_HSS);
-                store_ulong(&mut pub_attrs, CKA_HSS_LMS_TYPE, levels as u32);
+                // Phase 5 R25: CKA_HSS_LEVELS carries the level count (spec-
+                // correct home; was wrongly CKA_HSS_LMS_TYPE); CKA_HSS_LMS_TYPE/
+                // LMOTS_TYPE carry the top level's actual param-set IDs, same as
+                // the vendor CKA_LMS_PARAM_SET/CKA_LMOTS_PARAM_SET below (kept
+                // unchanged -- Rust's own ACVP flow reads those).
+                store_ulong(&mut pub_attrs, CKA_HSS_LEVELS, levels as u32);
+                store_ulong(&mut pub_attrs, CKA_HSS_LMS_TYPE, lms_params[0]);
+                store_ulong(&mut pub_attrs, CKA_HSS_LMOTS_TYPE, lmots_params[0]);
                 store_ulong(&mut pub_attrs, CKA_LMS_PARAM_SET, lms_params[0]);
                 store_ulong(&mut pub_attrs, CKA_LMOTS_PARAM_SET, lmots_params[0]);
                 store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_HSS_KEY_PAIR_GEN);
@@ -2765,7 +2772,9 @@ fn C_GenerateKeyPair_impl(
                 // Private key attributes
                 store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
                 store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_HSS);
-                store_ulong(&mut prv_attrs, CKA_HSS_LMS_TYPE, levels as u32);
+                store_ulong(&mut prv_attrs, CKA_HSS_LEVELS, levels as u32);
+                store_ulong(&mut prv_attrs, CKA_HSS_LMS_TYPE, lms_params[0]);
+                store_ulong(&mut prv_attrs, CKA_HSS_LMOTS_TYPE, lmots_params[0]);
                 store_ulong(&mut prv_attrs, CKA_LMS_PARAM_SET, lms_params[0]);
                 store_ulong(&mut prv_attrs, CKA_LMOTS_PARAM_SET, lmots_params[0]);
                 store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_HSS_KEY_PAIR_GEN);

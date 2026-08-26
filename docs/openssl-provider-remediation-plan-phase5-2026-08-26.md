@@ -309,6 +309,35 @@ watch: `fetch_hss_key` attribute additions against OLD tokens lacking
 the attrs (the fallback path IS the regression test — keep one
 pre-standardization token fixture in the case).
 
+**Execution update (2026-08-26):** R25 executed and landed — see
+`docs/openssl-provider-coverage-audit-2026-08-25.md`'s "Phase 5, R25"
+entry for the full mechanism. Both engines standardized on the
+official `CKA_HSS_LEVELS`/`LMS_TYPE`/`LMOTS_TYPE` attrs (the Rust spec
+bug fixed as part of this — it held the level count under
+`CKA_HSS_LMS_TYPE`); `sig/hss.c` gained a real `hss_sig_size()` shared
+with `keymgmt.c` (which had its own separate hardcoded-1536 under-
+sizing bug for W4 keys, found and fixed along the way); live-proven
+across two genuinely different parameter sets (1296/W8, 2352/W4),
+cross-verified by OpenSSL's own independent native LMS implementation
+via the now-generalized `lms-xdr-verify.c`. New tool `hss-w4-keygen.c`
+(no provider `gen_set_params` growth, per this section's own
+direction); new harness case `T24c`. Full regression: C++ CTest 8/8,
+Rust `cargo test --release` 410/410 (no dedicated Rust-side HSS
+attribute unit test exists — a documented gap, not a silent one),
+harness `PASS=67 FAIL=0` (one case gained, zero regressions). **Not
+done, by design or deferral:** the formula-corruption sabotage variant
+from this section's own proof plan (superseded in practice by two
+independently hand-derived-and-confirmed parameter sets giving
+different, correct answers — judged sufficient rather than pursued
+further); the pre-standardization-token fallback-path regression test
+(no such fixture exists in this repo to test against); the Rust-arm
+T24 twin and the R9-parked multi-process test (item 4 above) — both
+still open, now unblocked at the attribute layer but not yet wired up
+as harness cases; `lms-xdr-verify.c`'s naming in this plan's own item 4
+(`T24b`/`T24c`) collided with R24's own already-taken `T24b` and this
+item's own new `T24c` — whoever picks those up next needs fresh,
+non-colliding IDs (e.g. `T24d`/`T24e`).
+
 ### R26 — ChaCha20 + ChaCha20-Poly1305 cipher family — effort M–L
 
 **Premise, re-verified (R20's scope correction stands):** both engines

@@ -239,6 +239,17 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src/lib/pkcs11)
     target_link_libraries(hss_pubkey_dump ${CMAKE_DL_LIBS})
 
+    # hss-w4-keygen: phase-5 R25 test helper — generates an HSS keypair
+    # with explicit non-default CK_HSS_KEY_PAIR_GEN_PARAMS (LMOTS W4) via
+    # direct PKCS#11 calls, proving sig/hss.c's hss_sig_size() computes a
+    # genuinely different, per-parameter-set signature length rather than
+    # a constant that happens to be right once (see the file's own
+    # header). Driven by T24c.
+    add_executable(hss_w4_keygen scripts/hss-w4-keygen.c)
+    target_include_directories(hss_w4_keygen PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11)
+    target_link_libraries(hss_w4_keygen ${CMAKE_DL_LIBS})
+
     # skey-flow-probe: phase-5 R24 (F36-3) test helper — exercises the
     # EVP_SKEY opaque-key API (generate/derive_SKEY/init_SKEY) against
     # this provider's SKEYMGMT/HKDF/HMAC, cross-checking the derived

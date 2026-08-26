@@ -1930,7 +1930,7 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
                 get_object_attr_u32(hkey, CKA_LMS_PARAM_SET).unwrap_or(CKP_LMS_SHA256_M32_H5);
             let lmots_param =
                 get_object_attr_u32(hkey, CKA_LMOTS_PARAM_SET).unwrap_or(CKP_LMOTS_SHA256_N32_W4);
-            let levels = get_object_attr_u32(hkey, CKA_HSS_LMS_TYPE).unwrap_or(1);
+            let levels = get_object_attr_u32(hkey, CKA_HSS_LEVELS).unwrap_or(1);
             hss_sig_len(levels, lms_param, lmots_param)
         }
         CKM_SHA256_HMAC | CKM_SHA3_256_HMAC => 32,

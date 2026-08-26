@@ -954,8 +954,13 @@ pub const CKA_LMOTS_PARAM_SET: u32 = 0x8000_0103; // CKP_LMOTS_SHA256_N32_W* val
 pub const CKA_XMSS_PARAM_SET: u32 = 0x8000_0104; // CKP_XMSS_* value
 pub const CKA_XMSSMT_PARAM_SET: u32 = 0x8000_0107; // CKP_XMSSMT_* value (RFC 8391 OID)
 
-// Standard multi-level HSS level-type attribute (PKCS#11 v3.2 §6.14)
+// Official PKCS#11 v3.2 §6.14 HSS attributes (pkcs11t.h:636-638). Phase 5
+// R25: CKA_HSS_LEVELS was previously missing and CKA_HSS_LMS_TYPE was
+// misused locally to hold the level count instead of the actual LMS type —
+// fixed to match the spec (and the C++ engine's own convention).
+pub const CKA_HSS_LEVELS: u32 = 0x0000_0617;
 pub const CKA_HSS_LMS_TYPE: u32 = 0x0000_0618;
+pub const CKA_HSS_LMOTS_TYPE: u32 = 0x0000_0619;
 pub const CKA_HSS_KEYS_REMAINING: u32 = 0x0000_061c;
 
 // ── LMS / LMOTS Parameter Set Constants ─────────────────────────────────────

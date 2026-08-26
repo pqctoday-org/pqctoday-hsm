@@ -45,6 +45,7 @@ COMPOSITE_PROBE="${COMPOSITE_PROBE:-$HSM_ROOT/build/composite_sig_probe}"
 DUMP_INT_PARAM="${DUMP_INT_PARAM:-$HSM_ROOT/build/dump_int_param}"
 LMS_XDR_VERIFY="${LMS_XDR_VERIFY:-$HSM_ROOT/build/lms_xdr_verify}"
 HSS_PUBKEY_DUMP="${HSS_PUBKEY_DUMP:-$HSM_ROOT/build/hss_pubkey_dump}"
+HSS_W4_KEYGEN="${HSS_W4_KEYGEN:-$HSM_ROOT/build/hss_w4_keygen}"
 SKEY_FLOW_PROBE="${SKEY_FLOW_PROBE:-$HSM_ROOT/build/skey_flow_probe}"
 if [[ -z "${RUST_ENGINE_SO:-}" ]]; then
   for c in /cargo-target/debug/libsofthsmrustv3.so /cargo-target/release/libsofthsmrustv3.so \
@@ -154,7 +155,7 @@ say preflight "environment"
 VER="$(LD_LIBRARY_PATH=$OPENSSL_LIB_DIR "$OPENSSL_BIN" version 2>/dev/null)"
 case "$VER" in OpenSSL\ 3.6*|OpenSSL\ 3.7*|OpenSSL\ 4.*) : ;; *)
   echo "FATAL: need OpenSSL >= 3.6 at $OPENSSL_BIN (got: ${VER:-nothing}) — see audit ENV-1/gate --cpp note"; exit 2;; esac
-for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$SKEY_FLOW_PROBE"; do
+for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$HSS_W4_KEYGEN" "$SKEY_FLOW_PROBE"; do
   [[ -e "$f" ]] || { echo "FATAL: missing $f (run the --cpp gate step / cmake build first)"; exit 2; }
 done
 echo "  oracle: $VER; provider: $PROVIDER_SO"
@@ -1616,6 +1617,44 @@ t24() { local w; w=$(mk_arena hsssign "$CPP_ENGINE_SO") && use_arena "$w" || ret
   return 0
 }
 run_case T24 PASS "HSS/LMS token sign (size 1296, both -rawin and plain dispatch) -> token verify, both sabotage controls rejected, AND cross-verified by OpenSSL 3.6.3's own independent native LMS implementation (remediation R9)" t24
+
+# T24c — phase-5 R25 (HSS param-set awareness). T24 above only ever
+# exercises the C++ engine's own documented default (LMOTS W8); this
+# proves sig/hss.c's hss_sig_size() genuinely computes a DIFFERENT size
+# for a DIFFERENT parameter set (LMOTS W4, matching the Rust engine's own
+# default) rather than a constant that happens to be right once. No
+# gen_set_params surface exists on this provider's HSS keymgmt (R25's own
+# scope decision), so the W4 key is generated with explicit
+# CK_HSS_KEY_PAIR_GEN_PARAMS via the raw-PKCS11 hss_w4_keygen tool
+# (scripts/hss-w4-keygen.c) rather than `openssl genpkey` — the resulting
+# key still flows through the provider normally for every step below.
+t24c() { local w; w=$(mk_arena hssw4 "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  "$HSS_W4_KEYGEN" "$CPP_ENGINE_SO" hssw4 || { echo "hss_w4_keygen failed"; return 1; }
+
+  O pkeyutl -sign -rawin -inkey "pkcs11:token=hssw4;type=private" -in "$MSG" -out "$w/sig.bin" || return 1
+  [[ "$(stat -c%s "$w/sig.bin")" == "2352" ]] || { echo "W4 sig size $(stat -c%s "$w/sig.bin") != 2352"; return 1; }
+  O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=hssw4;type=public" -in "$MSG" -sigfile "$w/sig.bin" || return 1
+
+  # sabotage: corrupted signature and wrong message must both be rejected
+  cp "$w/sig.bin" "$w/tampered.bin"
+  printf '\x00' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  cmp -s "$w/sig.bin" "$w/tampered.bin" && printf '\xff' | dd of="$w/tampered.bin" bs=1 seek=100 count=1 conv=notrunc 2>/dev/null
+  if O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=hssw4;type=public" -in "$MSG" -sigfile "$w/tampered.bin" >/dev/null 2>&1
+  then echo "tampered W4 HSS signature VERIFIED — verifier cannot say no"; return 1; fi
+  echo "wrong message" > "$w/wrong.txt"
+  if O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=hssw4;type=public" -in "$w/wrong.txt" -sigfile "$w/sig.bin" >/dev/null 2>&1
+  then echo "W4 HSS signature verified against the WRONG message — verifier cannot say no"; return 1; fi
+
+  # cross-implementation proof (lms-xdr-verify.c is now param-set-aware,
+  # deriving expected sizes from the decoded key's own lms/lmots type
+  # rather than a single hardcoded default -- also part of R25)
+  "$HSS_PUBKEY_DUMP" "$CPP_ENGINE_SO" hssw4 "$w/pub.raw" >/dev/null 2>&1 || { echo "hss_pubkey_dump failed"; return 1; }
+  "$LMS_XDR_VERIFY" "$w/pub.raw" "$MSG" "$w/sig.bin" || { echo "W4 cross-implementation LMS verify FAILED"; return 1; }
+  if "$LMS_XDR_VERIFY" "$w/pub.raw" "$MSG" "$w/tampered.bin" >/dev/null 2>&1
+  then echo "tampered W4 HSS signature VERIFIED by the independent LMS implementation"; return 1; fi
+  return 0
+}
+run_case T24c PASS "HSS/LMS token sign with EXPLICIT non-default params (LMOTS W4, matching the Rust engine's own default; size 2352) -> token verify, both sabotage controls rejected, AND cross-verified by OpenSSL's independent native LMS implementation via the now-param-set-aware lms-xdr-verify.c (remediation R25)" t24c
 
 # T24b — phase-5 R24 (F36-3 EVP_SKEY probe). Regression guard for the real
 # bug the probe found: skeymgmt.c's four entry points (aes/generic_secret

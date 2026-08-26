@@ -37,7 +37,19 @@
  *     standard PEM->DER OSSL_STORE auto-detect chain pkeyutl/pkey use
  *     never reaches it — hence this tool calls OSSL_DECODER_CTX_new_for_
  *     pkey() directly with input_type="xdr" rather than shelling out to
- *     the openssl CLI. */
+ *     the openssl CLI.
+ *
+ * Phase 5 R25: pubkey length is fixed at 56 bytes (60 HSS-wrapped)
+ * regardless of parameter set — LM-OTS type only affects SIGNATURE size,
+ * never the public key — so the pubkey-side dispatch below is unchanged.
+ * The signature length used to be asserted against a single hardcoded
+ * pair (1296/1292, the L=1/H5/W8 default); now the expected bare-LMS
+ * signature length is computed from the (lms_type, lmots_type) already
+ * sitting in the first 8 bytes of the decoded LMS public key itself (RFC
+ * 8554 §5.3), via the same RFC 8554/SP 800-208 table this session ported
+ * into the provider's own sig/hss.c hss_sig_size() and the Rust engine's
+ * handlers.rs lms_single_sig_len() — so a signature of any parameter set
+ * either engine can produce is recognized, not just the one default. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,8 +59,58 @@
 
 #define HSS_L1_PUBKEY_LEN 60  /* u32str(L=1) + LMS_pubkey(56) */
 #define LMS_PUBKEY_LEN 56
-#define HSS_L1_SIG_LEN 1296   /* u32str(Nspk=0) + LMS_sig(1292) */
-#define LMS_SIG_LEN 1292
+
+static uint32_t read_be32(const unsigned char *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+        | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+/* RFC 8554 §5.4 LMS/LM-OTS type -> (n, h)/(n, w, p), IANA "Leighton-Micali
+ * Signatures" registry (RFC 8554 + SP 800-208) — same table as
+ * sig/hss.c's lms_single_sig_len() / handlers.rs's lms_single_sig_len(). */
+static size_t lms_single_sig_len(uint32_t lms_type, uint32_t lmots_type)
+{
+    size_t n, h, p;
+
+    switch (lms_type) {
+    case 0x05: case 0x06: case 0x07: case 0x08: case 0x09:
+    case 0x0F: case 0x10: case 0x11: case 0x12: case 0x13:
+        n = 32;
+        break;
+    case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0E:
+    case 0x14: case 0x15: case 0x16: case 0x17: case 0x18:
+        n = 24;
+        break;
+    default:
+        n = 32;
+        break;
+    }
+
+    switch (lmots_type) {
+    case 0x01: case 0x09: p = 265; break;
+    case 0x02: case 0x0A: p = 133; break;
+    case 0x03: case 0x0B: p = 67; break;
+    case 0x04: case 0x0C: p = 34; break;
+    case 0x05: case 0x0D: p = 200; break;
+    case 0x06: case 0x0E: p = 101; break;
+    case 0x07: case 0x0F: p = 51; break;
+    case 0x08: case 0x10: p = 26; break;
+    default: p = 67; break;
+    }
+
+    switch (lms_type) {
+    case 0x05: case 0x0A: case 0x0F: case 0x14: h = 5; break;
+    case 0x06: case 0x0B: case 0x10: case 0x15: h = 10; break;
+    case 0x07: case 0x0C: case 0x11: case 0x16: h = 15; break;
+    case 0x08: case 0x0D: case 0x12: case 0x17: h = 20; break;
+    case 0x09: case 0x0E: case 0x13: case 0x18: h = 25; break;
+    default: h = 5; break;
+    }
+
+    size_t lmots_sig_len = 4 + n + p * n;
+    return 4 + lmots_sig_len + 4 + h * n;
+}
 
 static unsigned char *read_file(const char *path, size_t *len)
 {
@@ -105,19 +167,28 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    /* pk_lms[0:4]=lms_type, pk_lms[4:8]=lmots_type (RFC 8554 §5.3) --
+     * the expected bare-LMS signature length for THIS key's own
+     * parameter set, not a single hardcoded default. */
+    uint32_t lms_type = read_be32(pk_lms);
+    uint32_t lmots_type = read_be32(pk_lms + 4);
+    size_t expect_lms_sig_len = lms_single_sig_len(lms_type, lmots_type);
+    size_t expect_hss_sig_len = 4 + expect_lms_sig_len; /* u32str(Nspk=0) */
+
     unsigned char *sig_lms;
     size_t sig_lms_len;
-    if (siglen == HSS_L1_SIG_LEN) {
+    if (siglen == expect_hss_sig_len) {
         sig_lms = sig_hss + 4;
-        sig_lms_len = LMS_SIG_LEN;
-    } else if (siglen == LMS_SIG_LEN) {
+        sig_lms_len = expect_lms_sig_len;
+    } else if (siglen == expect_lms_sig_len) {
         sig_lms = sig_hss;
-        sig_lms_len = LMS_SIG_LEN;
+        sig_lms_len = expect_lms_sig_len;
     } else {
         fprintf(stderr,
-                "sigfile is %zu bytes, expected %d (HSS L=1) or %d (bare "
-                "LMS)\n",
-                siglen, HSS_L1_SIG_LEN, LMS_SIG_LEN);
+                "sigfile is %zu bytes, expected %zu (HSS L=1, lms_type=%u "
+                "lmots_type=%u) or %zu (bare LMS)\n",
+                siglen, expect_hss_sig_len, lms_type, lmots_type,
+                expect_lms_sig_len);
         return 2;
     }
 

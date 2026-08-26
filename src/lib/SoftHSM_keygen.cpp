@@ -676,7 +676,18 @@ CK_RV SoftHSM::generateKeyPairImpl
 		CK_KEY_TYPE keyType = 0;
 		CK_ULONG remainingSigs = 32;
 		const CK_ATTRIBUTE_TYPE ATTR_CKA_HSS_KEYS_REMAINING = 0x0000061cUL;
-		
+		// Phase 5 R25: official PKCS#11 v3.2 §4.x HSS attributes
+		// (pkcs11t.h:636-638), not vendor ones — hoisted to this wider
+		// scope (mirroring remainingSigs's own pattern above) so they
+		// survive past the CKM_HSS_KEY_PAIR_GEN block below to the
+		// attribute-setting code near this function's end.
+		const CK_ATTRIBUTE_TYPE ATTR_CKA_HSS_LEVELS = 0x00000617UL;
+		const CK_ATTRIBUTE_TYPE ATTR_CKA_HSS_LMS_TYPE = 0x00000618UL;
+		const CK_ATTRIBUTE_TYPE ATTR_CKA_HSS_LMOTS_TYPE = 0x00000619UL;
+		CK_ULONG hss_levels_out = 1;
+		CK_ULONG hss_lms_type_out = 0;
+		CK_ULONG hss_lmots_type_out = 0;
+
 		CK_ULONG parameterSet = 0x00000001UL;
 		if (pMechanism->mechanism == CKM_XMSS_KEY_PAIR_GEN || pMechanism->mechanism == CKM_XMSSMT_KEY_PAIR_GEN) {
 			// W4 (2026-08-13). PKCS#11 v3.2 §6.66.6: "This mechanism does not
@@ -785,6 +796,15 @@ CK_RV SoftHSM::generateKeyPairImpl
 			pub_len = hss_get_public_key_len(hss_levels, lm_type, lm_ots_type);
 			priv_len = hss_get_private_key_len(hss_levels, lm_type, lm_ots_type);
 			if (pub_len == 0 || priv_len == 0) return CKR_FUNCTION_FAILED;
+
+			// Phase 5 R25: capture for the official CKA_HSS_LEVELS/
+			// LMS_TYPE/LMOTS_TYPE attributes set below — top level
+			// (index 0), the only one RFC 8554's own public key format
+			// exposes directly, and the only one this keymgmt's own
+			// L=1-only scope ever generates.
+			hss_levels_out = hss_levels;
+			hss_lms_type_out = lm_type[0];
+			hss_lmots_type_out = lm_ots_type[0];
 
 			// CKA_HSS_KEYS_REMAINING = total OTS signatures available =
 			// 2^(sum of LMS tree heights) (audit V-21). Reject unknown LMS types.
@@ -925,6 +945,9 @@ CK_RV SoftHSM::generateKeyPairImpl
 				}
 				if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN) {
 					osPub->setAttribute(ATTR_CKA_HSS_KEYS_REMAINING, (unsigned long)remainingSigs);
+					osPub->setAttribute(ATTR_CKA_HSS_LEVELS, hss_levels_out);
+					osPub->setAttribute(ATTR_CKA_HSS_LMS_TYPE, hss_lms_type_out);
+					osPub->setAttribute(ATTR_CKA_HSS_LMOTS_TYPE, hss_lmots_type_out);
 				}
 				osPub->commitTransaction();
 			}
@@ -937,6 +960,9 @@ CK_RV SoftHSM::generateKeyPairImpl
 				}
 				if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN) {
 					osPriv->setAttribute(ATTR_CKA_HSS_KEYS_REMAINING, (unsigned long)remainingSigs);
+					osPriv->setAttribute(ATTR_CKA_HSS_LEVELS, hss_levels_out);
+					osPriv->setAttribute(ATTR_CKA_HSS_LMS_TYPE, hss_lms_type_out);
+					osPriv->setAttribute(ATTR_CKA_HSS_LMOTS_TYPE, hss_lmots_type_out);
 				}
 				osPriv->commitTransaction();
 			}

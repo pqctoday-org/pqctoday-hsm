@@ -499,4 +499,9 @@ extern const OSSL_DISPATCH p11prov_mlkem1024_keymgmt_functions[];
 int tls_group_capabilities(OSSL_CALLBACK *cb, void *arg);
 int tls_sigalg_capabilities(OSSL_CALLBACK *cb, void *arg);
 
+/* Phase 5 R25: real RFC 8554 HSS signature size for a given key (sig/hss.c),
+ * shared with keymgmt.c's own OSSL_PKEY_PARAM_MAX_SIZE so the two never
+ * drift apart. */
+size_t hss_sig_size_for_key(P11PROV_OBJ *key);
+
 #endif /* _PROVIDER_H */

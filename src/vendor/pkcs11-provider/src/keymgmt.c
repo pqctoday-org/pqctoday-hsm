@@ -4090,13 +4090,14 @@ static int p11prov_hss_get_params(void *keydata, OSSL_PARAM params[])
     }
     p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
     if (p) {
-        /* HSS(L=1)/LMS_SHA256_N32_H5/LMOTS_SHA256_N32_W8 signature is
-         * 1296 bytes — confirmed both by RFC 8554 byte-accounting
-         * (sig/hss.c's own HSS_L1_DEFAULT_SIG_SIZE derivation) and live,
-         * by inspecting a real pkeyutl -sign -rawin output file; 1536
-         * leaves headroom rather than hardcoding the exact figure here
-         * too. */
-        ret = OSSL_PARAM_set_int(p, 1536);
+        /* Phase 5 R25: was a hardcoded 1536 ("headroom" over the L=1/W8
+         * default's 1296) -- wrong for the Rust engine's own W4 default,
+         * whose real size (2352) exceeds that "headroom". Now shares
+         * sig/hss.c's real RFC 8554 formula via the key's own
+         * CKA_HSS_LEVELS/LMS_TYPE/LMOTS_TYPE (or its documented
+         * CKA_VALUE-parsing fallback), so it can never again undersize a
+         * parameter set this hardcode never accounted for. */
+        ret = OSSL_PARAM_set_int(p, (int)hss_sig_size_for_key(key));
         if (ret != RET_OSSL_OK) {
             return ret;
         }

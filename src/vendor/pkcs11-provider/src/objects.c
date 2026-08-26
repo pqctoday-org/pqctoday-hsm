@@ -22,6 +22,12 @@ struct p11prov_key {
     CK_ULONG bit_size;
     CK_ULONG size;
     CK_ULONG param_set;
+    /* Phase 5 R25: official HSS attrs (PKCS#11 v3.2 §6.14). CK_UNAVAILABLE_
+     * INFORMATION when absent (pre-fix engine, imported key) -- hss_sig_size()
+     * has its own fallback for that case. */
+    CK_ULONG hss_levels;
+    CK_ULONG hss_lms_type;
+    CK_ULONG hss_lmots_type;
 };
 
 struct p11prov_crt {
@@ -723,6 +729,43 @@ CK_ULONG p11prov_obj_get_key_param_set(P11PROV_OBJ *obj)
     return CK_UNAVAILABLE_INFORMATION;
 }
 
+/* Phase 5 R25 */
+CK_ULONG p11prov_obj_get_key_hss_levels(P11PROV_OBJ *obj)
+{
+    if (obj) {
+        switch (obj->class) {
+        case CKO_PRIVATE_KEY:
+        case CKO_PUBLIC_KEY:
+            return obj->data.key.hss_levels;
+        }
+    }
+    return CK_UNAVAILABLE_INFORMATION;
+}
+
+CK_ULONG p11prov_obj_get_key_hss_lms_type(P11PROV_OBJ *obj)
+{
+    if (obj) {
+        switch (obj->class) {
+        case CKO_PRIVATE_KEY:
+        case CKO_PUBLIC_KEY:
+            return obj->data.key.hss_lms_type;
+        }
+    }
+    return CK_UNAVAILABLE_INFORMATION;
+}
+
+CK_ULONG p11prov_obj_get_key_hss_lmots_type(P11PROV_OBJ *obj)
+{
+    if (obj) {
+        switch (obj->class) {
+        case CKO_PRIVATE_KEY:
+        case CKO_PUBLIC_KEY:
+            return obj->data.key.hss_lmots_type;
+        }
+    }
+    return CK_UNAVAILABLE_INFORMATION;
+}
+
 void p11prov_obj_to_store_reference(P11PROV_OBJ *obj, void **reference,
                                     size_t *reference_sz)
 {
@@ -1400,13 +1443,16 @@ static CK_RV fetch_slhdsa_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
     return CKR_OK;
 }
 
-/* Phase 4 R9: HSS/LMS. Unlike SLH-DSA, no CKA_PARAMETER_SET / fixed
- * per-variant size table — this provider's own keymgmt only ever
- * generates the engine's single documented default (L=1,
- * LMS_SHA256_N32_H5, LMOTS_SHA256_N32_W8), and the public key's XDR
- * encoding carries its own length prefix, so size is read from the
- * actual fetched CKA_VALUE rather than looked up by parameter set. */
-#define HSS_ATTRS_NUM 4
+/* Phase 4 R9 / Phase 5 R25: HSS/LMS. Unlike SLH-DSA, no CKA_PARAMETER_SET
+ * / fixed per-variant size table — the public key's XDR encoding carries
+ * its own length prefix, so its size is read from the actual fetched
+ * CKA_VALUE rather than looked up by parameter set. The official
+ * CKA_HSS_LEVELS/LMS_TYPE/LMOTS_TYPE attrs (R25) are fetched here too, so
+ * sig/hss.c's hss_sig_size() can size a PRIVATE key's signature (no
+ * CKA_VALUE there) for parameter sets other than the engines' own
+ * defaults -- optional (`false`) since a pre-R25-engine or imported key
+ * won't carry them; left at CK_UNAVAILABLE_INFORMATION in that case. */
+#define HSS_ATTRS_NUM 7
 static CK_RV fetch_hss_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
                            CK_OBJECT_HANDLE object, P11PROV_OBJ *key)
 {
@@ -1420,6 +1466,10 @@ static CK_RV fetch_hss_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
         return CKR_HOST_MEMORY;
     }
 
+    key->data.key.hss_levels = CK_UNAVAILABLE_INFORMATION;
+    key->data.key.hss_lms_type = CK_UNAVAILABLE_INFORMATION;
+    key->data.key.hss_lmots_type = CK_UNAVAILABLE_INFORMATION;
+
     num = 0;
     if (key->class == CKO_PUBLIC_KEY) {
         FA_SET_BUF_ALLOC(attrs, num, CKA_VALUE, true);
@@ -1429,6 +1479,12 @@ static CK_RV fetch_hss_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
     if (key->class == CKO_PRIVATE_KEY) {
         FA_SET_BUF_ALLOC(attrs, num, CKA_ALWAYS_AUTHENTICATE, false);
     }
+    FA_SET_VAR_VAL(attrs, num, CKA_HSS_LEVELS, key->data.key.hss_levels,
+                   false);
+    FA_SET_VAR_VAL(attrs, num, CKA_HSS_LMS_TYPE, key->data.key.hss_lms_type,
+                   false);
+    FA_SET_VAR_VAL(attrs, num, CKA_HSS_LMOTS_TYPE,
+                   key->data.key.hss_lmots_type, false);
 
     ret = p11prov_fetch_attributes(ctx, session, object, attrs, num);
     if (ret != CKR_OK) {

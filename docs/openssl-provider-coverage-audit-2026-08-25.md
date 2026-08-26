@@ -134,7 +134,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 |---|---|---|---|---|
 | ALG-1 | **RESOLVED (R1, 2026-08-25 later same day)** — was: SLH-DSA (all 12 sets), `sig/slhdsa.c` a `{0,NULL}` stub, registration branch unreachable. Now: real keymgmt+signature+encoders for all 12 parameter sets; keygen/store/text-and-SPKI-encode/**sign** all live-verified working, cryptographically correct (exact FIPS 205 sizes, independent software cross-verify, tamper rejection). The sign gap took two passes: registration alone worked immediately, but signing failed at OpenSSL's own fetch layer until a follow-up pass (prompted by checking the OpenSSL 3.6 documentation directly rather than continuing to guess) found the dispatch tables violated provider-signature(7)'s documented consistency contract — `GETTABLE_CTX_PARAMS` registered without its mandatory `GET_CTX_PARAMS` pair, so OpenSSL rejected the whole method at fetch time, before any provider code ran. See `docs/openssl-provider-remediation-plan-2026-08-25.md` R1 for the full trail. Two other, unrelated real bugs found and fixed along the way: `objects.c`'s and `store.c`'s key-type dispatch switches both lacked a `CKK_SLH_DSA` case. | both engines, 13 mechs each | ~~`sig/slhdsa.c` is a `{0,NULL}` stub AND the registration branch is unreachable (`CKM_SLH_DSA` absent from `checklist[]`/`PQC_MECHS`, `provider.c:859`); OpenSSL 3.6 has native names/OIDs to mirror~~ | ~~**High**~~ — |
 | ALG-2 | XMSS/XMSS-MT | both engines (sign+verify, stateful) | `sig/xmss.c` stub, unreachable; no native OpenSSL names exist (custom names required; no CMS/TLS story) | Medium |
-| ALG-3 | **RESOLVED (R9, 2026-08-26)** — was: nothing in provider; OpenSSL 3.6 native LMS is *verify-only* → token-sign/OpenSSL-verify is a uniquely coherent split, but blocked by ENV-1 (no `enable-lms` in staged build). Now: real `HSS` keymgmt + `sig/hss.c` (both plain SIGN/VERIFY and DIGEST_SIGN/VERIFY dispatch); ENV-1's oracle rebuild done as this item's own step 0; the token-sign/OpenSSL-verify split itself proven live via two new permanent test tools (`lms-xdr-verify`, `hss-pubkey-dump`) — a genuine engine-signed HSS signature verifies under OpenSSL 3.6.3's own independent native LMS implementation, sabotage-tested. Five sequential bugs found and fixed to reach a working sign/verify at all — see `docs/openssl-provider-remediation-plan-phase4-2026-08-26.md` R9 and this doc's own "Phase 4, R9" entry below for the full trail. The Rust-arm multi-process half of R9's original goal remains open — blocked on a genuine cross-engine default-parameter mismatch between the two engines, not a provider bug; see that same entry. | both engines **sign+verify** | ~~nothing in provider; OpenSSL 3.6 native LMS is *verify-only* → token-sign/OpenSSL-verify is a uniquely coherent split, but blocked by ENV-1 (no `enable-lms` in staged build)~~ — | ~~Medium~~ — |
+| ALG-3 | **RESOLVED (R9, 2026-08-26)** — was: nothing in provider; OpenSSL 3.6 native LMS is *verify-only* → token-sign/OpenSSL-verify is a uniquely coherent split, but blocked by ENV-1 (no `enable-lms` in staged build). Now: real `HSS` keymgmt + `sig/hss.c` (both plain SIGN/VERIFY and DIGEST_SIGN/VERIFY dispatch); ENV-1's oracle rebuild done as this item's own step 0; the token-sign/OpenSSL-verify split itself proven live via two new permanent test tools (`lms-xdr-verify`, `hss-pubkey-dump`) — a genuine engine-signed HSS signature verifies under OpenSSL 3.6.3's own independent native LMS implementation, sabotage-tested. Five sequential bugs found and fixed to reach a working sign/verify at all — see `docs/openssl-provider-remediation-plan-phase4-2026-08-26.md` R9 and this doc's own "Phase 4, R9" entry below for the full trail. **Update (R25, 2026-08-26):** the cross-engine default-parameter mismatch itself is resolved — both engines now standardize on the official `CKA_HSS_LEVELS`/`LMS_TYPE`/`LMOTS_TYPE` attrs (a real Rust spec bug fixed along the way: it stored the level count under `CKA_HSS_LMS_TYPE`, which per spec is the LMS *type*), and the provider reads the key's own real parameter set (`hss_sig_size()`, RFC 8554 formula) instead of assuming one — live-proven across two genuinely different parameter sets (1296 bytes/LMOTS-W8, 2352 bytes/LMOTS-W4), both cross-verified by OpenSSL's own independent native LMS implementation. See this doc's own "Phase 5, R25" entry below. The Rust-arm harness case itself (running the same sign/verify through `libsofthsmrustv3.so`) is still not wired up — that was never blocked on the mismatch alone and remains a separate follow-up. | both engines **sign+verify** | ~~nothing in provider; OpenSSL 3.6 native LMS is *verify-only* → token-sign/OpenSSL-verify is a uniquely coherent split, but blocked by ENV-1 (no `enable-lms` in staged build)~~ — | ~~Medium~~ — |
 | ALG-4 | **RESOLVED (R7, 2026-08-26)** — was: provider `composite.c` registry had 3 of the 8 draft-lamps-pq-composite-sigs-19 §6 profiles; missing 5 included all four §10.4-recommended plus MLDSA65-ECDSA-P384-SHA512. Now: all 8 profiles registered and live-verified (real token sign+verify, both sabotage controls rejected, per profile — harness T21a-h). Landing them also fixed two pre-existing bugs in the original 3 (classical-hash-tracked-profile-name-not-classical-algorithm's-own-convention, affecting .45/.49) and an RSA-3072 signature-buffer sizing bug. | KMIP layer has all 8 §10.4 profiles | ~~provider `composite.c` registry has 3; missing 5 include **all four §10.4-recommended** (MLDSA44-Ed25519-SHA512, MLDSA44-ECDSA-P256-SHA256, MLDSA65-RSA3072-PSS-SHA512, MLDSA65-Ed25519-SHA512) + MLDSA65-ECDSA-P384-SHA512~~ — | ~~Medium–High~~ — |
 | ALG-5 | **RESOLVED (R4, 2026-08-25)** — was: registration branch dead. Turned out to need five real fixes, not the originally-guessed "2-line checklist omission": (1) two fabricated fallback constants in `exchange.c` (`CKK_X25519`/`CKK_X448` do not exist in the PKCS#11 spec — real montgomery keys are `CKK_EC_MONTGOMERY`, distinguished by curve name/size, matching Edwards' own pattern; the fake values meant the key-type sniff could never match a real key) — fixed, key-exchange mechanism now correctly resolves from bit size. (2) Four missing-case bugs across `objects.c` (fetch, export, `get_ec_public_raw`'s peer-marshalling gate, and two import/store-dispatch switches) and `store.c` (naming) — the same missing-case class found twice in R1. (3) **The actual root cause of "genpkey succeeds but the token silently creates the wrong key type"**: the C++ engine's `generateED()` (shared by `CKM_EC_EDWARDS_KEY_PAIR_GEN` and `CKM_EC_MONTGOMERY_KEY_PAIR_GEN` — the mechanism itself is never passed into that function) determines the resulting key's `CKK_*` type solely from an explicit `CKA_KEY_TYPE` on the public-key template, defaulting to `CKK_EC_EDWARDS` when absent — found live, not assumed: `genpkey` exited 0 and created two real objects, but reading the result back showed `CKK_EC_EDWARDS` (0x40), not `CKK_EC_MONTGOMERY` (0x41). EC/Edwards never needed to send this explicitly (the engine's default already matched them); montgomery does. Fixed by conditionally adding `CKA_KEY_TYPE` to the shared `p11prov_ec_gen`'s public-key template only for montgomery (zero diff for the already-working EC/Edwards paths). Curve-parameter DER bytes (`curve25519`/`curve448` PrintableStrings) verified two independent ways: direct DER-encoding computation and byte-for-byte match against the latchset sibling's own shipped constants. **Live-verified, both curves, both directions, token-to-token**: X25519 produces a byte-identical 32-byte shared secret; X448 a byte-identical 56-byte one. **A sixth, narrower, separate gap surfaced and was left open**: deriving against a genuinely foreign (default-provider-only) peer key with OpenSSL's peer validation enabled fails with `OSSL_PARAM_get_BN: param of incompatible type` — T8's identical shape works for regular EC but not montgomery; traced to OpenSSL's cross-provider `EVP_PKEY_public_check` falling into a legacy EC_KEY-control translation path that assumes Weierstrass X/Y BIGNUM coordinates montgomery keys don't have. The provider's own derive mechanism is unaffected and proven correct; this is a peer-validation-specific interaction, documented in `T16`'s comment rather than silently dropped. | both engines advertise `CKM_X25519`/`CKM_X448`; live probe + source (`exchange.c`, `objects.c`, `store.c`, `keymgmt.c`, `SoftHSM_keygen.cpp`) | ~~Medium~~ — |
 | ALG-6 | **CLOSED, deliberately unexposed (R20, 2026-08-26)** — investigated: OpenSSL 3.6 does have a standard EC KEM fetch surface (`ec_kem.c`, RFC 9180 DHKEM), but this project's own engine-level "ECDH-as-KEM" capability is **raw ECDH**, not RFC 9180's HKDF-Extract-and-Expand construction — exposing it under OpenSSL's `EC` KEM name would silently produce non-DHKEM-compliant output for any caller expecting RFC 9180 semantics. No current consumer needs the generic KEM operation type for EC (the real hybrid-KEM combiner bypasses it entirely). Deliberately unexposed; closed without code. | both engines flag ENCAP/DECAP on `CKM_ECDH1_DERIVE` | ~~not exposed as an OSSL KEM~~ — | ~~Low~~ — |
@@ -2015,6 +2015,104 @@ engine source changed by this item); Rust `cargo test` not re-run (no
 live, not assumed, before scoping the harness to C++ only). **Harness:
 `PASS=66 FAIL=0 XFAIL=0 XPASS=0`** — four cases gained, zero
 regressions.
+
+**Phase 5, R25 (HSS param-set-aware provider + cross-engine attribute
+standardization), DONE — one real Rust spec bug fixed, one real
+under-sizing bug found and fixed in `keymgmt.c`.** Chosen direction
+(user, 2026-08-26): keep both engines' differing LM-OTS defaults (C++
+W8, Rust W4) and make the provider read the key's ACTUAL parameter set
+instead of assuming one.
+
+**The Rust spec bug (found while grounding the plan, confirmed by
+reading `ffi.rs` directly):** PKCS#11 v3.2 defines official HSS
+attributes (`pkcs11t.h:636-641` in this repo's own vendored copy):
+`CKA_HSS_LEVELS` (0x617), `CKA_HSS_LMS_TYPE` (0x618), `CKA_HSS_LMOTS_
+TYPE` (0x619). The Rust engine's `CKM_HSS_KEY_PAIR_GEN` arm stored the
+LEVEL COUNT under `CKA_HSS_LMS_TYPE`, which per spec is the LMS *type*
+— internally self-consistent (its own `handlers.rs` sig-size lookup
+read the same attribute back as "levels"), but spec-non-conformant, and
+inconsistent with what the C++ engine would need to store for this
+item's own read side to work. The C++ engine stored neither official
+attribute at all (only `CKA_KEY_GEN_MECHANISM` + a vendor
+`ATTR_CKA_HSS_KEYS_REMAINING` counter).
+
+**Fix, both engines (`SoftHSM_keygen.cpp`'s `CKM_HSS_KEY_PAIR_GEN`
+block; `ffi.rs`'s same arm; `native/keygen.rs`'s two KMIP-import
+registration functions; `handlers.rs`'s sig-size reader retargeted from
+`CKA_HSS_LMS_TYPE` to the new `CKA_HSS_LEVELS`):** both now write
+`CKA_HSS_LEVELS` = L, `CKA_HSS_LMS_TYPE`/`CKA_HSS_LMOTS_TYPE` = the
+top-level IANA type IDs, on both key halves — verified live for the
+C++ engine via a throwaway raw-PKCS11 attribute-dump tool (read back
+1/5/4 off both public and private objects, matching the documented L=1/
+H5/W8 default exactly) before touching any provider code. Rust's own
+vendor attrs (`CKA_LMS_PARAM_SET`/`CKA_LMOTS_PARAM_SET`) are kept
+unchanged — its ACVP flow reads them.
+
+**Provider reads them (`objects.c`, `sig/hss.c`, `keymgmt.c`):**
+`fetch_hss_key` fetches the three official attrs into three new
+`struct p11prov_key` fields (optional — `CK_UNAVAILABLE_INFORMATION`
+when absent, e.g. a pre-R25-engine or imported key), exposed via three
+new accessors (`p11prov_obj_get_key_hss_levels`/`_lms_type`/
+`_lmots_type`). `sig/hss.c` gained a real `hss_sig_size(levels,
+lms_type, lmots_type)` — the RFC 8554 §5.4/§6.3 formula, ported from
+the SAME type-id table already live in the Rust engine's own
+`handlers.rs::lms_single_sig_len`/`hss_sig_len` (so the two stay
+provably in sync rather than independently re-derived) — replacing the
+`HSS_L1_DEFAULT_SIG_SIZE` constant at both sizing-query call sites.
+`hss_sig_size_for_key()` wraps it with a documented three-step fallback
+for a key lacking the attrs: parse the top-level `u32(L) || lms_type(4)
+|| lmots_type(4)` straight out of the (public, or the private key's
+own associated public via `p11prov_obj_get_associated`) `CKA_VALUE` —
+self-describing per RFC 8554 §5.3/§6.1 — else the original 1296-byte
+constant as a last resort, which is honest: it's the only combination
+any key created before this session's attribute fix could have. **Real
+bug found along the way:** `keymgmt.c`'s `p11prov_hss_get_params` had a
+hardcoded `OSSL_PKEY_PARAM_MAX_SIZE` of 1536 ("headroom" over the W8
+default's 1296) — silently WRONG for a W4 key (2352 bytes, already
+exceeding that "headroom"), which would have undersized every W4
+caller's signature buffer. Fixed to share `hss_sig_size_for_key()` with
+`sig/hss.c` (declared in `provider.h`, defined non-static in
+`sig/hss.c`) so the two can't drift apart again.
+
+**Live proof across two genuinely different parameter sets, not
+asserted from a single case that happens to match by coincidence.**
+The provider's own HSS keymgmt has no `gen_set_params` surface (kept
+that way per this item's own scope decision — a raw tool is smaller);
+a new permanent test tool (`scripts/hss-w4-keygen.c`, CMake target
+`hss_w4_keygen`) generates a second keypair with EXPLICIT non-default
+`CK_HSS_KEY_PAIR_GEN_PARAMS` (LMOTS W4) via direct `C_GenerateKeyPair`,
+then the key flows through the provider normally for every later step.
+Both parameter sets sign/verify correctly through the provider with
+the CORRECT, formula-computed, hand-derived-and-confirmed size (W8:
+1296 bytes, matching R9's original derivation; W4: 2352 bytes),
+cross-verified by OpenSSL's own independent native LMS implementation,
+both sabotage twins (tampered signature, wrong message) rejected by
+both the provider and the independent verifier. `scripts/lms-xdr-
+verify.c` — previously hardcoded to the single 1296/1292-byte L=1/W8
+pair — was generalized to derive its own expected signature length
+from the (lms_type, lmots_type) already sitting in the decoded public
+key's own first 8 bytes, via the identical ported table, so it now
+recognizes a signature from either parameter set rather than only the
+one default.
+
+New harness case `T24c` (own arena, `hss_w4_keygen` then sign/verify/
+sabotage/cross-verify, mirroring `T24`'s own structure). Full
+regression: **C++ CTest 8/8 passed**; **Rust `cargo test --release`:
+410 passed, 0 failed, 9 ignored** (no HSS-specific Rust unit test
+exists to exercise the attribute fix directly — covered here only by
+"the whole suite still passes" plus this item's own live raw-PKCS11
+checks against the C++ engine; a dedicated Rust-side HSS attribute
+test remains a gap, not just the harness case noted below). **Harness:
+`PASS=67 FAIL=0 XFAIL=0 XPASS=0`** — one case gained, zero regressions.
+
+**What remains, explicitly not done by this item:** the Rust-arm
+harness case itself (same sign/verify through `libsofthsmrustv3.so`,
+now technically unblocked but not yet wired up as a permanent test);
+the R9-parked multi-process stateful-counter test; multi-level (L>1)
+HSS is still unexercised by anything in this codebase (both engines'
+own keygen only ever produces L=1 today, and `hss_sig_size()`'s
+multi-level math is accordingly unverified beyond the formula itself);
+XMSS/XMSS-MT (R27) remains untouched and parked.
 
 ## 7. Companion document
 

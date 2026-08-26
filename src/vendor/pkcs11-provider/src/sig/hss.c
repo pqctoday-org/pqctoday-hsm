@@ -46,26 +46,150 @@
  * sizing query) always arrives at FINAL with an empty accumulator, real
  * message bytes only showing up on the second, real-sigret call. So,
  * matching ML-DSA's own p11prov_mldsa_sig_size()/CKP_ML_DSA_* table
- * precedent, sizing answers a fixed constant instead of touching the
- * token: HSS signature length depends only on (L, LMS, LM-OTS), never
- * on message length, and this provider currently only ever generates
- * the engine's single default combination (L=1, LMS_SHA256_N32_H5,
- * LMOTS_SHA256_N32_W8) — see HSS_L1_DEFAULT_SIG_SIZE below for the
- * RFC 8554 byte-accounting that produces 1296. */
+ * precedent, sizing never touches the token — but (phase 5 R25) it is no
+ * longer a single fixed constant: HSS signature length depends on (L,
+ * LMS, LM-OTS), and the two engines' own keygen defaults differ
+ * (C++: LMOTS_SHA256_N32_W8; Rust: _W4). hss_sig_size_for_key() below
+ * reads the key's own CKA_HSS_LEVELS/LMS_TYPE/LMOTS_TYPE (fetch_hss_key,
+ * objects.c) and computes the real RFC 8554 size; HSS_L1_DEFAULT_SIG_SIZE
+ * survives only as the last-resort fallback for a key with none of that
+ * (pre-R25 engine build, or an imported key) — see its own byte-accounting
+ * comment below for why that fallback is 1296. */
 #include "provider.h"
 #include "sig/internal.h"
 #include <string.h>
 #include "openssl/evp.h"
 #include "openssl/err.h"
 
-/* RFC 8554 §4.3/§4.5/§4.6, engine default params (L=1, LMS_SHA256_N32_H5,
- * LMOTS_SHA256_N32_W8; n=32, h=5, w=8, p=34):
+/* RFC 8554 §4.3/§4.5/§4.6, R9's originally-hardcoded params (L=1,
+ * LMS_SHA256_N32_H5, LMOTS_SHA256_N32_W8; n=32, h=5, w=8, p=34):
  *   LM-OTS sig = u32str(type) + C[n] + y[p][n]  = 4 + 32 + 34*32 = 1124
  *   LMS sig    = u32str(q) + ots_sig + u32str(type) + path[h][n]
  *              = 4 + 1124 + 4 + 5*32                          = 1292
  *   HSS sig    = u32str(Nspk=L-1=0) + lms_sig                 = 4 + 1292
- *              = 1296 */
+ *              = 1296
+ * Kept only as hss_sig_size_for_key()'s last-resort fallback -- see there. */
 #define HSS_L1_DEFAULT_SIG_SIZE 1296
+
+/* RFC 8554 §5.4 LM-OTS/LMS type -> (n, h) and LM-OTS type -> (n, w, p),
+ * per the IANA "Leighton-Micali Signatures" registry (RFC 8554 + SP
+ * 800-208). Ported from the Rust engine's own lms_single_sig_len()
+ * (rust/src/crypto/handlers.rs) -- same type-id ranges, same table --
+ * so both engines' size math stays provably in sync. */
+static size_t lms_single_sig_len(CK_ULONG lms_type, CK_ULONG lmots_type)
+{
+    size_t n, h, p;
+
+    switch (lms_type) {
+    case 0x05: case 0x06: case 0x07: case 0x08: case 0x09:
+    case 0x0F: case 0x10: case 0x11: case 0x12: case 0x13:
+        n = 32;
+        break;
+    case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x0E:
+    case 0x14: case 0x15: case 0x16: case 0x17: case 0x18:
+        n = 24;
+        break;
+    default:
+        n = 32;
+        break;
+    }
+
+    switch (lmots_type) {
+    case 0x01: case 0x09: p = 265; break; /* N32/N24 W1 */
+    case 0x02: case 0x0A: p = 133; break; /* W2 */
+    case 0x03: case 0x0B: p = 67; break; /* W4 */
+    case 0x04: case 0x0C: p = 34; break; /* W8 */
+    case 0x05: case 0x0D: p = 200; break;
+    case 0x06: case 0x0E: p = 101; break;
+    case 0x07: case 0x0F: p = 51; break;
+    case 0x08: case 0x10: p = 26; break;
+    default: p = 67; break;
+    }
+
+    switch (lms_type) {
+    case 0x05: case 0x0A: case 0x0F: case 0x14: h = 5; break;
+    case 0x06: case 0x0B: case 0x10: case 0x15: h = 10; break;
+    case 0x07: case 0x0C: case 0x11: case 0x16: h = 15; break;
+    case 0x08: case 0x0D: case 0x12: case 0x17: h = 20; break;
+    case 0x09: case 0x0E: case 0x13: case 0x18: h = 25; break;
+    default: h = 5; break;
+    }
+
+    size_t lmots_sig_len = 4 + n + p * n; /* typecode + C + y[] */
+    return 4 + lmots_sig_len + 4 + h * n; /* q + ots_sig + typecode + path[] */
+}
+
+/* RFC 8554 §6.3. Assumes the SAME (lms_type, lmots_type) at every one of
+ * the L levels -- the only shape either engine's keygen can produce today
+ * (both store a single top-level param pair, never a per-level array);
+ * revisit if a future keygen ever lets levels carry different params. */
+static size_t hss_sig_size(CK_ULONG levels, CK_ULONG lms_type,
+                           CK_ULONG lmots_type)
+{
+    size_t lms_sig = lms_single_sig_len(lms_type, lmots_type);
+    size_t lms_pub = 56; /* lms_type(4)+lmots_type(4)+I(16)+T[1](32), §5.3 */
+    CK_ULONG l = levels < 1 ? 1 : levels;
+    return 4 + (size_t)(l - 1) * (lms_pub + lms_sig) + lms_sig;
+}
+
+/* Fallback for a key with no CKA_HSS_LEVELS/LMS_TYPE/LMOTS_TYPE (pre-R25
+ * engine build, or an imported key): the HSS public key wire format is
+ * self-describing at the top level (u32str(L) || lms_type(4) ||
+ * lmots_type(4) || I(16) || K(n), RFC 8554 §5.3/§6.1 -- same layout
+ * lms-xdr-verify.c's own header documents), so parse it straight out of
+ * CKA_VALUE. Reads only the top level -- correct for L=1, the only depth
+ * either engine's keygen has ever produced (matches this file's own
+ * pre-R25 scope note above sig/verify). */
+static bool hss_parse_pubkey_top_level(const unsigned char *val, size_t len,
+                                       CK_ULONG *levels, CK_ULONG *lms_type,
+                                       CK_ULONG *lmots_type)
+{
+    if (!val || len < 12) {
+        return false;
+    }
+    *levels = ((CK_ULONG)val[0] << 24) | ((CK_ULONG)val[1] << 16)
+        | ((CK_ULONG)val[2] << 8) | (CK_ULONG)val[3];
+    *lms_type = ((CK_ULONG)val[4] << 24) | ((CK_ULONG)val[5] << 16)
+        | ((CK_ULONG)val[6] << 8) | (CK_ULONG)val[7];
+    *lmots_type = ((CK_ULONG)val[8] << 24) | ((CK_ULONG)val[9] << 16)
+        | ((CK_ULONG)val[10] << 8) | (CK_ULONG)val[11];
+    return true;
+}
+
+/* The one entry point sign/verify sizing actually calls. Tries, in order:
+ * (1) the key's own official attrs; (2) parsing CKA_VALUE off this key if
+ * it's public, or off its associated public key if private (keymgmt.c
+ * always pairs the two via p11prov_obj_set_associated at generation
+ * time); (3) HSS_L1_DEFAULT_SIG_SIZE, the only combination any key
+ * created before this session's R25 attribute fix could have. */
+size_t hss_sig_size_for_key(P11PROV_OBJ *key)
+{
+    CK_ULONG levels = p11prov_obj_get_key_hss_levels(key);
+    CK_ULONG lms_type = p11prov_obj_get_key_hss_lms_type(key);
+    CK_ULONG lmots_type = p11prov_obj_get_key_hss_lmots_type(key);
+
+    if (levels != CK_UNAVAILABLE_INFORMATION
+        && lms_type != CK_UNAVAILABLE_INFORMATION
+        && lmots_type != CK_UNAVAILABLE_INFORMATION) {
+        return hss_sig_size(levels, lms_type, lmots_type);
+    }
+
+    P11PROV_OBJ *pub = key;
+    if (p11prov_obj_get_class(key) != CKO_PUBLIC_KEY) {
+        pub = p11prov_obj_get_associated(key);
+    }
+    if (pub) {
+        CK_ATTRIBUTE *value_attr = p11prov_obj_get_attr(pub, CKA_VALUE);
+        if (value_attr
+            && hss_parse_pubkey_top_level(value_attr->pValue,
+                                          value_attr->ulValueLen, &levels,
+                                          &lms_type, &lmots_type)) {
+            return hss_sig_size(levels, lms_type, lmots_type);
+        }
+    }
+
+    return HSS_L1_DEFAULT_SIG_SIZE;
+}
 
 struct p11prov_hss_ctx {
     P11PROV_CTX *provctx;
@@ -195,7 +319,7 @@ static int p11prov_hss_sign(void *vctx, unsigned char *sig, size_t *siglen,
         if (siglen == NULL) {
             return RET_OSSL_ERR;
         }
-        *siglen = HSS_L1_DEFAULT_SIG_SIZE;
+        *siglen = hss_sig_size_for_key(ctx->sigctx->key);
         return RET_OSSL_OK;
     }
 
@@ -285,9 +409,9 @@ static int p11prov_hss_digest_sign_final(void *vctx, unsigned char *sig,
         /* Sizing query: per the file-header comment, this arrives with
          * an empty accumulator (EVP_DigestSign()'s one-shot wrapper
          * skips UPDATE when sigret==NULL) and p11prov_sig_operate()
-         * itself refuses a NULL sig outright — so answer from the fixed
-         * RFC 8554 size, no token round trip. */
-        *siglen = HSS_L1_DEFAULT_SIG_SIZE;
+         * itself refuses a NULL sig outright — so answer from the key's
+         * own real RFC 8554 size, no token round trip. */
+        *siglen = hss_sig_size_for_key(ctx->sigctx->key);
         return RET_OSSL_OK;
     }
 
