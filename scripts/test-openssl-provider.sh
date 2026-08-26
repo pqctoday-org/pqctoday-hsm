@@ -45,6 +45,7 @@ COMPOSITE_PROBE="${COMPOSITE_PROBE:-$HSM_ROOT/build/composite_sig_probe}"
 DUMP_INT_PARAM="${DUMP_INT_PARAM:-$HSM_ROOT/build/dump_int_param}"
 LMS_XDR_VERIFY="${LMS_XDR_VERIFY:-$HSM_ROOT/build/lms_xdr_verify}"
 HSS_PUBKEY_DUMP="${HSS_PUBKEY_DUMP:-$HSM_ROOT/build/hss_pubkey_dump}"
+SKEY_FLOW_PROBE="${SKEY_FLOW_PROBE:-$HSM_ROOT/build/skey_flow_probe}"
 if [[ -z "${RUST_ENGINE_SO:-}" ]]; then
   for c in /cargo-target/debug/libsofthsmrustv3.so /cargo-target/release/libsofthsmrustv3.so \
            "$HSM_ROOT/rust/target/debug/libsofthsmrustv3.so" "$HSM_ROOT/rust/target/release/libsofthsmrustv3.so"; do
@@ -153,7 +154,7 @@ say preflight "environment"
 VER="$(LD_LIBRARY_PATH=$OPENSSL_LIB_DIR "$OPENSSL_BIN" version 2>/dev/null)"
 case "$VER" in OpenSSL\ 3.6*|OpenSSL\ 3.7*|OpenSSL\ 4.*) : ;; *)
   echo "FATAL: need OpenSSL >= 3.6 at $OPENSSL_BIN (got: ${VER:-nothing}) — see audit ENV-1/gate --cpp note"; exit 2;; esac
-for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP"; do
+for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$SKEY_FLOW_PROBE"; do
   [[ -e "$f" ]] || { echo "FATAL: missing $f (run the --cpp gate step / cmake build first)"; exit 2; }
 done
 echo "  oracle: $VER; provider: $PROVIDER_SO"
@@ -1299,6 +1300,30 @@ t24() { local w; w=$(mk_arena hsssign "$CPP_ENGINE_SO") && use_arena "$w" || ret
   return 0
 }
 run_case T24 PASS "HSS/LMS token sign (size 1296, both -rawin and plain dispatch) -> token verify, both sabotage controls rejected, AND cross-verified by OpenSSL 3.6.3's own independent native LMS implementation (remediation R9)" t24
+
+# T24b — phase-5 R24 (F36-3 EVP_SKEY probe). Regression guard for the real
+# bug the probe found: skeymgmt.c's four entry points (aes/generic_secret
+# generate/import) never called p11prov_ctx_status() before touching
+# slots/sessions — every other operation type does, and every existing
+# harness case always does a keygen/sign BEFORE anything else in its arena,
+# which triggers the lazy module+slots init as a side effect, so this only
+# broke when SKEYMGMT was the FIRST pkcs11 operation in a process (which
+# nothing in this harness had ever done — EVP_SKEY was entirely unprobed
+# before R24). Asserts on specific probe output lines, not the whole binary's
+# exit code: check 3 (TLS13-KDF) and the HMAC-consume half of check 2 hit
+# two SEPARATE, already-documented gaps (an unexplained TLS13-KDF mode-
+# routing issue not root-caused, and mac.c never registering
+# OSSL_FUNC_MAC_INIT_SKEY) that make the probe's own exit code nonzero
+# without indicating a regression in the fix this case actually guards.
+t24b() { local w; w=$(mk_arena skeyprobe "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  local out="$w/probe.out"
+  "$SKEY_FLOW_PROBE" >"$out" 2>&1
+  grep -q "AES *generate: provider=pkcs11" "$out" || { echo "AES SKEY generate did not report provider=pkcs11"; cat "$out"; return 1; }
+  grep -q "GENERIC-SECRET *generate: provider=pkcs11" "$out" || { echo "GENERIC-SECRET SKEY generate did not report provider=pkcs11"; return 1; }
+  grep -q "\[HKDF\] derive_SKEY PASSED" "$out" || { echo "HKDF derive_SKEY did not pass"; cat "$out"; return 1; }
+  return 0
+}
+run_case T24b PASS "EVP_SKEY generate (AES + GENERIC-SECRET) and HKDF derive_SKEY stay token-resident, regression guard for a real ctx_status-ordering bug SKEYMGMT alone had (remediation R24)" t24b
 
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"

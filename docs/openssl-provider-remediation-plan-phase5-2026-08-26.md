@@ -106,7 +106,19 @@ digest→PRF mapping, exactly one case must fail. Harness cases T25
 (counter, per-digest) / T25f (feedback). Gap-matrix OP-5 flips to fully
 RESOLVED in the same commit.
 
-### R23 — CMAC + KMAC-128/256 as EVP_MAC — effort S–M
+### R23 — CMAC + KMAC-128/256 as EVP_MAC, + HMAC/CMAC/KMAC `INIT_SKEY` — effort S–M
+
+**Scope addition (from R24's own execution, 2026-08-26):** R24's probe
+found `mac.c`'s HMAC never registered `OSSL_FUNC_MAC_INIT_SKEY` — a
+correctly-derived, correctly-opaque `EVP_SKEY` (proven working via
+HKDF's `derive_SKEY`) has nothing in this provider that can consume it
+natively; `EVP_MAC_init_SKEY` fails at the OpenSSL EVP layer before
+reaching any provider code. Add `INIT_SKEY` dispatch to `mac.c` for
+HMAC (existing, R8) alongside the new CMAC/KMAC entries below — same
+file, same class of gap, and this was already the next item touching
+it. Proof: repeat R24's own HKDF-derive→consume cross-check
+(independent software HKDF+HMAC of known inputs), this time actually
+reaching the consume step; extend to CMAC/KMAC once those land.
 
 **Premise, re-verified:** the C++ engine's MAC table
 (`SoftHSM_sign.cpp:134-136`) really dispatches all three: `CKM_AES_CMAC`
@@ -145,6 +157,25 @@ proving the table constraint is real. Harness T26/T26b/T26c. OP-1 and
 ALG-8 flip to fully RESOLVED in the same commit.
 
 ### R24 — `EVP_SKEY` opaque-key flow probe (F36-3) — effort S, probe-first
+
+**Execution update (2026-08-26):** R24 executed and landed — see
+`docs/openssl-provider-coverage-audit-2026-08-25.md`'s "Phase 5, R24"
+entry for the full mechanism. One real bug found and fixed
+(`skeymgmt.c`'s four entry points never called `p11prov_ctx_status()`,
+so `EVP_SKEY` was broken as the first pkcs11 operation in a process —
+masked until now because every other test always does a keygen/sign
+first); one real gap found and folded into R23's scope instead of
+treated separately (`mac.c`'s HMAC never registered
+`OSSL_FUNC_MAC_INIT_SKEY`, so a correctly-derived, correctly-opaque
+SKEY has nothing in this provider that can consume it yet); one
+investigation not pursued to a conclusion (TLS13-KDF's own
+`derive_SKEY` mode routing — logged, not chased, per this plan's own
+ALG-6/R17-style precedent). HKDF's derive_SKEY → EVP_MAC_init_SKEY
+chain is proven cryptographically correct AND fully opaque via an
+independent software cross-check. Harness `T24b` added as a regression
+guard. **R23 now additionally scopes: add `INIT_SKEY` dispatch to
+`mac.c` for HMAC (existing) and the new CMAC/KMAC (planned) alike** —
+see R23's own section below, updated to reflect this.
 
 **The question** (unprobed through all of phases 1–4): the provider
 registers SKEYMGMT for `AES` and `GENERIC-SECRET` (`provider.c:

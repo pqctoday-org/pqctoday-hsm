@@ -34,6 +34,18 @@ static void *p11prov_aes_import(void *provctx, int selection,
         return NULL;
     }
 
+    /* Every other operation type calls this before touching slots/
+     * sessions (sig_op_init, cipher.c's init); SKEYMGMT's four entry
+     * points here were the one place that didn't, and only failed
+     * loudly (CKR_GENERAL_ERROR, "Failed to get PKCS#11 session"/
+     * "Failed to import") when invoked as the FIRST pkcs11 operation in
+     * a process — every existing test always does a keygen/sign first,
+     * which triggers this as a side effect, so it never reproduced
+     * before a standalone EVP_SKEY probe hit it (phase-5 R24). */
+    if (p11prov_ctx_status(ctx) != CKR_OK) {
+        return NULL;
+    }
+
     if (!(selection & OSSL_SKEYMGMT_SELECT_SECRET_KEY)) {
         /* TODO: check for hack import uri */
         return NULL;
@@ -157,6 +169,13 @@ static void *p11prov_aes_generate(void *provctx, const OSSL_PARAM params[])
     P11PROV_debug("aes generate");
 
     if (!ctx) {
+        return NULL;
+    }
+
+    /* See p11prov_aes_import's comment: SKEYMGMT's entry points must
+     * trigger lazy module/slots init themselves, same as every other
+     * operation type does. */
+    if (p11prov_ctx_status(ctx) != CKR_OK) {
         return NULL;
     }
 
@@ -325,6 +344,11 @@ static void *p11prov_generic_secret_import(void *provctx, int selection,
     P11PROV_debug("generic_secret import");
 
     if (!ctx) {
+        return NULL;
+    }
+
+    /* See p11prov_aes_import's comment. */
+    if (p11prov_ctx_status(ctx) != CKR_OK) {
         return NULL;
     }
 
@@ -519,6 +543,11 @@ static void *p11prov_generic_secret_generate(void *provctx,
     P11PROV_debug("generic_secret generate");
 
     if (!ctx) {
+        return NULL;
+    }
+
+    /* See p11prov_aes_import's comment. */
+    if (p11prov_ctx_status(ctx) != CKR_OK) {
         return NULL;
     }
 

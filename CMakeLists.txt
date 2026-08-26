@@ -238,4 +238,15 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
     target_include_directories(hss_pubkey_dump PRIVATE
         ${CMAKE_SOURCE_DIR}/src/lib/pkcs11)
     target_link_libraries(hss_pubkey_dump ${CMAKE_DL_LIBS})
+
+    # skey-flow-probe: phase-5 R24 (F36-3) test helper — exercises the
+    # EVP_SKEY opaque-key API (generate/derive_SKEY/init_SKEY) against
+    # this provider's SKEYMGMT/HKDF/HMAC, cross-checking the derived
+    # key's correctness against independent software computation without
+    # ever exporting the intermediate key material. Plain OpenSSL linking
+    # (loads pkcs11-provider at runtime like any application), no
+    # provider-internal symbols needed.
+    add_executable(skey_flow_probe scripts/skey-flow-probe.c)
+    target_include_directories(skey_flow_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(skey_flow_probe ${OPENSSL_LIBRARIES})
 endif()

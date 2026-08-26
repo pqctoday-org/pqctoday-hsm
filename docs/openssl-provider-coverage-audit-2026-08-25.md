@@ -148,7 +148,7 @@ all 8 §10.4 profiles; provider `composite.c`: 3 profiles) from
 |---|---|---|---|
 | F36-1 | **RESOLVED for the client role (R5 phase 1 + R12, 2026-08-25)** — server role (R15) remains unbuilt, tracked separately. Was: `TLS-GROUP` capability registered zero PQC groups. Now: `MLKEM512`/`768`/`1024` registered as pure (non-hybrid) TLS 1.3 groups (`tls.c`), IANA code points and security-bits read live from the staged 3.6.3 build's own source (`0x0200`/`0x0201`/`0x0202`, 128/192/256 bits — not from memory). Two client-role prerequisites landed and live-verified: ML-KEM's `ENCODED_PUBLIC_KEY` get_params (TLS's key-share export mechanism) and relaxing its export function's class check so it works on the private object TLS actually holds post-keygen (was: strictly `CKO_PUBLIC_KEY`-only) — proven with a full simulated handshake sequence (export share from private → simulated server encapsulates → client decapsulates), byte-matched. A separate, real bug found and fixed along the way: `p11prov_common_gen_set_params`'s type switch had no case for `CKK_ML_KEM`/`CKK_SLH_DSA`, hit live by TLS's own ephemeral-keygen call path (which passes real params, unlike a bare `genpkey` CLI call). **A genuine, live TLS 1.3 handshake was run and the token demonstrably participated** — `s_client -groups MLKEM768 -propquery "?provider=pkcs11"` against a software `s_server`: `Negotiated TLS1.3 group: MLKEM768`, and the C++ engine's own log shows 6 real objects created (the ephemeral keypair) — not assumed, counted. **Both things that remained open after R5 phase 1 are now resolved by R12/R13 (2026-08-25), see the update log below for the full mechanism**: (1) full handshake completion — the `TLS13_KDF` blocker was root-caused to four layered, precisely-diagnosed bugs (not one) and fixed in both engines; a real TLS 1.3 handshake now completes end-to-end with `MLKEM768` and a genuine cipher suite negotiated; (2) the silent-software-fallback hazard is now caught mechanically — harness case T13 asserts token participation from the engine log and ships a negative-control twin proving the hazard is real, per R13. Server role (importing a peer's raw public share to encapsulate against) remains unbuilt — tracked as R15. | `tls.c`, `kem/mlkem.c`, `kdf.c` (root-caused, unchanged), `SoftHSM_keygen.cpp`, `rust/src/ffi.rs`; harness T13 | ~~**High**~~ ~~Medium~~ Low (client role complete; server role is R15) |
 | F36-2 | **RESOLVED (R9, 2026-08-26)** — was: LMS: OpenSSL 3.6's new verify-only LMS unused (see ALG-3, ENV-1). Now: OpenSSL's native LMS is exactly the independent verifier the ALG-3/R9 cross-implementation proof uses — see that entry. | ~~release notes + live build~~ — | ~~Medium~~ — |
-| F36-3 | `EVP_SKEY` KDF/KEYEXCH integration (3.6): provider has SKEYMGMT but the new `EVP_KDF_derive_SKEY`-style opaque-key flows are unprobed — token-resident secrets may not chain into OpenSSL KDFs without export | 3.6 CHANGES; needs probe (T-plan P2) | Medium |
+| F36-3 | **PROBED, one real bug found and fixed, one real gap found and documented (R24, 2026-08-26)** — was: provider has SKEYMGMT but the new `EVP_KDF_derive_SKEY`-style opaque-key flows are unprobed. Now: `EVP_SKEY_generate` (AES + GENERIC-SECRET) and HKDF's `derive_SKEY` → `EVP_MAC_init_SKEY` chain both exercised live via a new permanent probe tool (`skey-flow-probe.c`) — HKDF's derived key is cryptographically CORRECT and stays fully token-resident, cross-checked against independent pure-software HKDF+HMAC of the same known inputs (never exporting the intermediate DKM). Found and fixed a real bug along the way: `skeymgmt.c`'s four entry points (AES/GENERIC-SECRET generate/import) never called `p11prov_ctx_status()` before touching slots/sessions — every other operation type does, and it only failed (`CKR_GENERAL_ERROR`) when SKEYMGMT was the FIRST pkcs11 operation in a process, which nothing in this harness had ever done before this probe. **A separate, still-open gap**: `mac.c`'s HMAC never registered `OSSL_FUNC_MAC_INIT_SKEY`, so `EVP_MAC_init_SKEY` fails at the OpenSSL EVP layer before reaching any provider code — the derived key is correct and opaque but nothing in this provider can yet CONSUME an SKEY natively; handed to R23 (which already touches `mac.c` for CMAC/KMAC) as an added scope item. TLS13-KDF's own `derive_SKEY` hit an unexplained mode-routing anomaly (reached the EXPAND_ONLY branch despite EXTRACT_ONLY being requested) — investigated, not root-caused, not pursued further (HKDF's already-verified proof answers this item's core question; matches this project's own precedent for not forcing an inconclusive investigation, see ALG-6/R17 above). PBKDF2 (R10) correctly still lacks `derive_SKEY` (negative control), confirming R10's own documented scoping stands unchanged. | 3.6 CHANGES; harness T24b | Low (consume-side gap tracked under R23) |
 | F36-4 | *(positive baseline, not a gap)* CMS KEMRecipientInfo + `OSSL_PKEY_PARAM_CMS_RI_TYPE` already wired for ML-KEM (local commit `2cca4f0`) — must be regression-guarded by the new harness | `kem/mlkem.c:414-433` | — |
 | F36-5 | **RESOLVED (R20, 2026-08-26)** — was: NIST security-category PKEY param (new 3.6) not exposed by provider keymgmt. Now: `OSSL_PKEY_PARAM_SECURITY_CATEGORY` added to ML-DSA/ML-KEM/SLH-DSA `get_params`/`gettable_params`, values per FIPS 203/204/205, live-verified across all 8 algorithm variants (new `dump_int_param` tool, harness T23/T23b/T23c), sabotage-tested. | ~~3.6 release notes~~ — | ~~Low~~ — |
 | F36-6 | **INVESTIGATED, one real divergence found and documented as structurally unfixable (R20, 2026-08-26)** — was: `mu`/`message-encoding`/`deterministic` parity vs software unverified. Now: `deterministic` verified genuinely functional (byte-identical signatures when set, varying when not, matching `CK_SIGN_ADDITIONAL_CONTEXT.hedgeVariant`) — no gap. `message-encoding=0` (pre-encoded M', bypassing FIPS 204's standard construction) and externally-supplied `mu` are both real divergences from the default provider, and **not fixable**: `CK_SIGN_ADDITIONAL_CONTEXT` has fields only for `hedgeVariant`/`pContext`/`ulContextLen`, none for either bypass — no PKCS#11-v3.2-compliant token can accept this input regardless of provider-side code. Documented as a permanent, spec-rooted limitation (same category as WART-5), not an open to-do. | source + EVP_SIGNATURE-ML-DSA(7) | Low (documented limitation, not actionable) |
@@ -1760,6 +1760,82 @@ engine source changed by this item); **Rust `cargo test --release`:
 410 passed, 0 failed, 9 ignored** (no `rust/` source changed by this
 item — the 9 ignored are pre-existing, unrelated to R9). **Harness:
 `PASS=56 FAIL=0 XFAIL=0 XPASS=0`** — one case gained (T24), zero
+regressions.
+
+**Phase 5, R24 (`EVP_SKEY` opaque-key flow probe, F36-3), DONE — one
+real bug found and fixed, one real gap found and handed to R23.** The
+plan's own framing was "probe first, code only if a real gap with a
+real consumer path emerges" — both halves of that happened. New
+permanent test tool `scripts/skey-flow-probe.c` (CMake target
+`skey_flow_probe`, plain OpenSSL linking, no provider-internal
+symbols — loads pkcs11-provider at runtime like any application)
+exercises, in order: `EVP_SKEY_generate` over this provider's AES and
+GENERIC-SECRET SKEYMGMT; `EVP_KDF_derive_SKEY` over HKDF, with the
+derived key consumed by `EVP_MAC_init_SKEY` (HMAC) and cross-checked
+byte-for-byte against an independent, pure-software HKDF+HMAC
+computation of the SAME known input/salt/info/digest — never exporting
+the intermediate derived key material at any point; the identical
+chain over TLS13-KDF (existence + opacity only, lighter check); and a
+negative control confirming PBKDF2 (R10) still correctly lacks
+`derive_SKEY`.
+
+**Bug found and fixed: `skeymgmt.c`'s four entry points never called
+`p11prov_ctx_status()`.** First run failed both `EVP_SKEY_generate`
+calls and the HKDF chain's own key-import step with
+`CKR_GENERAL_ERROR`/"Failed to get PKCS#11 session" — traced via
+`PKCS11_PROVIDER_DEBUG` to `p11prov_get_session()` never even being
+reached; `p11prov_take_slots()` returned `CKR_GENERAL_ERROR`
+immediately (no debug trace of its own) because
+`p11prov_ctx_get_slots(ctx)` returned NULL — the provider's lazy
+module-init (`dlopen`+`C_Initialize`+slot enumeration,
+`p11prov_module_init` in `interface.c`) had never run. Every OTHER
+operation type in this provider calls `p11prov_ctx_status(ctx)` first
+specifically to trigger that lazy init on demand (confirmed directly:
+`sig/signature.c`'s `p11prov_sig_op_init` does it as its first line;
+`cipher.c`'s init functions do it too) — `skeymgmt.c`'s four entry
+points (`p11prov_aes_generate`/`import`, `p11prov_generic_secret_
+generate`/`import`) were the one place in the whole provider that
+skipped it, and it only broke when SKEYMGMT was the FIRST pkcs11
+operation in a process. Every existing test in this project's harness
+always does a keygen or sign before anything else in its arena, which
+triggers the lazy init as a side effect — masking this bug completely
+until a probe that does nothing BUT exercise `EVP_SKEY` first hit it.
+Fixed by adding the same `p11prov_ctx_status()` check, in the same
+place, to all four functions. Regression-guarded by harness `T24b`.
+
+**Gap found, not fixed here, handed to R23**: `mac.c`'s HMAC
+implementation (R8) never registered `OSSL_FUNC_MAC_INIT_SKEY` — only
+the classic raw-bytes `OSSL_FUNC_MAC_INIT`. `EVP_MAC_init_SKEY`'s own
+precondition check (`ctx->meth->init_skey != NULL`, confirmed by
+reading `crypto/evp/mac_lib.c` directly) fails before any provider
+code runs, so a correctly-derived, correctly-opaque SKEY (proven
+above) has nothing in this provider that can consume it natively.
+R23's own plan already touches `mac.c` for CMAC/KMAC — adding
+`INIT_SKEY` support there (for HMAC and the new algorithms both) is
+now folded into that item's scope rather than treated as a separate
+R-item, since it's the same file, the same kind of dispatch-table gap,
+and R23 was already next in the execution order.
+
+**Investigated, not pursued: TLS13-KDF's `derive_SKEY` mode routing.**
+Setting `OSSL_KDF_PARAM_MODE` to `"EXTRACT_ONLY"` (a UTF8_STRING param,
+matching `p11prov_hkdf_set_ctx_params`'s own string-parsing branch,
+read directly) still reached `p11prov_tls13_expand_label` — the
+EXPAND_ONLY branch — per a live debug trace, not assumed. Read
+`EVP_KDF_derive_SKEY`'s own OpenSSL-core source
+(`crypto/evp/kdf_lib.c`) to rule out params being merged or reordered
+before reaching the provider — they aren't; `params` reaches
+`derive_skey` unmodified. Root cause not found within this item's
+probe-first budget. Not chased further: HKDF's already-complete,
+independently-cross-checked proof answers R24's actual question (does
+a genuinely opaque, correct chain exist at all — yes), and TLS13-KDF's
+own check was scoped as the lighter of the two from the start. Matches
+this project's own established precedent for an investigation that
+doesn't resolve cleanly (ALG-6/R17, above) — logged plainly rather than
+either forced to a conclusion or silently dropped.
+
+Full regression: **C++ CTest 8/8 passed**; Rust `cargo test` not
+re-run (no `rust/` source touched by this item). **Harness:
+`PASS=57 FAIL=0 XFAIL=0 XPASS=0`** — one case gained (T24b), zero
 regressions.
 
 ## 7. Companion document
