@@ -213,3 +213,44 @@ documentation of existing coverage). Whole workspace green: 82 passed,
 0 failed.
 
 H2 (pinned-cert gRPC smoke client) is next.
+
+### 2026-08-26 — H2 (pinned-cert gRPC smoke client)
+
+Shipped and RUN LIVE against the real binary — closes G5's own honest
+scope limit. New `remoting/grpc/examples/smoke_client.rs`; zero
+manifest changes, `tonic` was already present with `features =
+["transport", "tls-aws-lc"]` in both the grpc crate's `[dependencies]`
+and `[dev-dependencies]` (examples build against dev-deps).
+
+**Real finding while running it, live**: the first cert
+(`openssl req -x509 ...` with no `basicConstraints`) failed the
+connection with `InvalidCertificate(CaUsedAsEndEntity)` — openssl's
+default `-x509` self-signed cert is `CA:TRUE`, and rustls-webpki
+correctly refuses a `CA:TRUE` certificate presented as a leaf/end-entity
+cert, which is exactly what this setup does (the SAME cert serves as
+both the server's identity AND the client's pinned trust root — a leaf
+cert self-signed by itself). Fixed by regenerating with
+`basicConstraints=critical,CA:FALSE` + an explicit `keyUsage`; the
+example's own doc-comment usage instructions were updated with the
+working `openssl` invocation and an explanation, so the next person to
+run this doesn't rediscover the same error.
+
+**Live run, full transcript**: started the real `pqc-grpc-pkcs11`
+binary with `--tls-cert`/`--tls-key` pointing at the fixed cert (this
+ALSO exercised `load_or_generate_identity`'s file-loading arm and the
+`--tls-cert`+`--tls-key`-must-come-together CLI validation for the
+first time on the live binary — G5 only ever hit the no-args
+self-signed-generation path). `smoke_client` connected over real TLS
+with the server's cert actually chain-verified against the pinned CA
+(not a `danger_accept_invalid_certs`-style bypass), then drove
+`C_OpenSession` → `C_GenerateKeyPair` (ML-DSA-65) →
+`C_SignInit`/`C_Sign` (produced a real 3309-byte signature) →
+`C_VerifyInit`/`C_Verify` (real verification succeeded) →
+`C_CloseSession`, every `ck_rv == 0`, exit code 0, printed `SMOKE OK`.
+Binary shut down cleanly afterward.
+
+No ledger impact (no new RPCs, no new categories — this is a dev tool,
+not a coverage case). Whole workspace still green: 82 passed, 0 failed.
+
+H4/H5/H6 are no-action/checklist/user-gated, as scoped in §4-§6 above —
+nothing further to execute from this plan without a push go-ahead.
