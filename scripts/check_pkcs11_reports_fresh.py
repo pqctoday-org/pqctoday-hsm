@@ -18,6 +18,23 @@ and 15 missing categories; the Rust report's own header admitted a
 "refresh" that never re-ran the harness, measuring an engine commit 45
 source-commits behind HEAD. (2026-08-23)
 
+A SECOND false-positive class, found live 2026-08-26 (v0.25.0 release
+validation): a handful of the C++ suite's own tests deliberately report
+freshly-generated, non-deterministic material in their `details` string —
+child PIDs (fork tests), RNG divergence samples, and Key Check Values
+computed from a freshly generated key each run (every `*_KCV_*` test).
+These are not bugs — reporting a different KCV each run IS the test
+passing (a repeated KCV across independent key generations would BE the
+defect). But it means the naive committed-vs-fresh text comparison could
+never converge: four consecutive full gate runs against an otherwise
+byte-identical, fully isolated worktree all "failed" on this alone. Fixed
+the same way as the commit-hash/date fields above: name-based allowlist
+(_NONDETERMINISTIC_TESTS) of tests whose `details` legitimately vary,
+normalized before comparing — everything else (status, and every other
+test's details, including stable capability flags like
+`CKM_RSA_PKCS_advertises_SIGN_RECOVER`'s `flags=0x424704`) still compares
+byte-exact, so a real regression there still fails the guard.
+
 This does NOT regenerate anything. Run it immediately after the report
 generator (ctest / p11_v32_compliance_test, or node test_p11_conformance.js)
 has already written a fresh copy into the working tree. Exit 0 means a
@@ -67,15 +84,97 @@ _MD_DATE = re.compile(r"^\*\*Date:\*\* .*$", re.MULTILINE)
 _MD_ENGINE = re.compile(r"^\*\*Engine:\*\* .*$", re.MULTILINE)
 _MD_COMMIT = re.compile(r"^\*\*Engine commit:\*\* `([0-9a-f]+)`", re.MULTILINE)
 
+# Tests whose own `details` string is BY DESIGN different every run — see
+# the module docstring's second false-positive class. Exhaustively found by
+# scanning a real report for every entry containing a hex run (>=6 chars)
+# or "pid", then hand-verifying each hit: KCV-family entries all compute a
+# check value over a freshly generated key/secret; the two RNG_diverge
+# entries print raw divergence samples; the one fork-PID entry prints a
+# live PID. Everything else that matched the raw scan (e.g.
+# CKM_RSA_PKCS_advertises_SIGN_RECOVER's `flags=0x424704`,
+# CKA_PROFILE_ID_absent_on_ordinary_object's sentinel value) is a STABLE
+# capability/constant and is deliberately NOT in this set — it must keep
+# comparing byte-exact.
+_NONDETERMINISTIC_TESTS = frozenset({
+    "Child_survived_and_reported",
+    "Sibling_children_RNG_diverge",
+    "Parent_and_child_RNG_diverge",
+    "AES_Generate_KCV_Present",
+    "AES_Generate_KCV_Equals_OracleEcbZeroBlock",
+    "AES_Unwrap_KCV_Present",
+    "AES_Unwrap_KCV_Equals_Original",
+    "HKDF_Derive_KCV_Present",
+    "HKDF_Derive_KCV_Equals_OracleSha1",
+    "PBKD2_Derive_KCV_Present",
+    "PBKD2_Derive_KCV_Equals_OracleSha1",
+    "SP800_108_Counter_Derive_KCV_Present",
+    "SP800_108_Counter_Derive_KCV_Equals_OracleSha1",
+    "SP800_108_Feedback_Derive_KCV_Present",
+    "SP800_108_Feedback_Derive_KCV_Equals_OracleSha1",
+    "Encap_KCV_equals_SHA1_oracle",
+    "Decap_KCV_equals_SHA1_oracle",
+    "Encap_and_Decap_KCV_agree",
+    "ECDH_Encap_KCV_equals_SHA1_oracle",
+    "ECDH_Decap_KCV_equals_SHA1_oracle",
+    "GenerateKey_AES_KCV_matches_oracle",
+    "GenerateKey_Generic_KCV_matches_oracle",
+    "UnwrapKey_AES_KCV_matches_oracle",
+    "UnwrapKey_AES_correct_value_accepted",
+    "DeriveKey_HKDF_KCV_matches_oracle",
+    "DeriveKey_HKDF_correct_value_accepted",
+    "DeriveKey_ECDH_KCV_matches_oracle",
+    "DeriveKey_ECDH_correct_value_accepted",
+    "DeriveKey_PBKD2_KCV_matches_oracle",
+    "DeriveKey_PBKD2_correct_value_accepted",
+    "DeriveKey_SP800108_KCV_matches_oracle",
+    "DeriveKey_SP800108_correct_value_accepted",
+    "DeriveKey_Concat_KCV_matches_oracle",
+    "DeriveKey_Concat_correct_value_accepted",
+    "DeriveKey_X25519_KCV_matches_oracle",
+    "DeriveKey_X25519_correct_value_accepted",
+    # Found via a direct empirical diff of two independent real runs
+    # (2026-08-26), not the original hex-scan pass: these print the first
+    # byte of a freshly generated key's raw CKA_VALUE, which varies with
+    # the key just like the KCV entries above.
+    "ML_DSA_44_CKA_VALUE_not_DER_wrapped",
+    "ML_KEM_768_CKA_VALUE_not_DER_wrapped",
+    "SLH_DSA_CKA_VALUE_not_DER_wrapped",
+})
+
+# Markdown table row: | TestName | Status | Details |
+_MD_ROW = re.compile(r"^\| ([^\|]+) \| (.+?) \| (.+) \|$", re.MULTILINE)
+
+
+def _normalize_md_row(m: "re.Match[str]") -> str:
+    name = m.group(1).strip()
+    if name in _NONDETERMINISTIC_TESTS:
+        return f"| {name} | {m.group(2)} | <NORMALIZED> |"
+    return m.group(0)
+
 
 def normalize_cpp_md(text: str) -> str:
     text = _MD_DATE.sub("**Date:** <NORMALIZED>", text)
     text = _MD_ENGINE.sub("**Engine:** <NORMALIZED>", text)
     text = _MD_COMMIT.sub("**Engine commit:** `<NORMALIZED>`", text)
+    text = _MD_ROW.sub(_normalize_md_row, text)
     return text
 
 
 _HEX = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def _normalize_json_entries(obj):
+    """Recursively normalize `details` on any {"test": ..., "details": ...}
+    entry whose test name is in _NONDETERMINISTIC_TESTS — same allowlist
+    and rationale as the Markdown normalizer above."""
+    if isinstance(obj, dict):
+        if obj.get("test") in _NONDETERMINISTIC_TESTS and "details" in obj:
+            obj["details"] = "<NORMALIZED>"
+        for v in obj.values():
+            _normalize_json_entries(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            _normalize_json_entries(v)
 
 
 def normalize_cpp_json(text: str) -> tuple[str, str | None]:
@@ -89,6 +188,7 @@ def normalize_cpp_json(text: str) -> tuple[str, str | None]:
     if isinstance(obj, dict) and "_summary" in obj:
         obj["_summary"]["engine"] = "<NORMALIZED>"
         obj["_summary"]["engine_commit"] = "<NORMALIZED>"
+    _normalize_json_entries(obj)
     return json.dumps(obj, indent=4, sort_keys=False), commit
 
 
