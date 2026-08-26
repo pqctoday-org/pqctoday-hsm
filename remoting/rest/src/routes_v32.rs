@@ -94,6 +94,26 @@ pub fn router(state: V32State) -> Router {
         .route("/v32/decrypt-digest-update", post(decrypt_digest_update))
         .route("/v32/sign-encrypt-update", post(sign_encrypt_update))
         .route("/v32/decrypt-verify-update", post(decrypt_verify_update))
+        .route("/v32/message-sign-init", post(message_sign_init))
+        .route("/v32/sign-message", post(sign_message))
+        .route("/v32/message-sign-final", post(message_sign_final))
+        .route("/v32/sign-message-begin", post(sign_message_begin))
+        .route("/v32/sign-message-next", post(sign_message_next))
+        .route("/v32/message-verify-init", post(message_verify_init))
+        .route("/v32/verify-message", post(verify_message))
+        .route("/v32/message-verify-final", post(message_verify_final))
+        .route("/v32/verify-message-begin", post(verify_message_begin))
+        .route("/v32/verify-message-next", post(verify_message_next))
+        .route("/v32/message-encrypt-init", post(message_encrypt_init))
+        .route("/v32/encrypt-message", post(encrypt_message))
+        .route("/v32/message-encrypt-final", post(message_encrypt_final))
+        .route("/v32/encrypt-message-begin", post(encrypt_message_begin))
+        .route("/v32/encrypt-message-next", post(encrypt_message_next))
+        .route("/v32/message-decrypt-init", post(message_decrypt_init))
+        .route("/v32/decrypt-message", post(decrypt_message))
+        .route("/v32/message-decrypt-final", post(message_decrypt_final))
+        .route("/v32/decrypt-message-begin", post(decrypt_message_begin))
+        .route("/v32/decrypt-message-next", post(decrypt_message_next))
         .with_state(state)
 }
 
@@ -354,6 +374,71 @@ async fn sign_encrypt_update(Json(r): Json<DataReq>) -> Json<BytesResp> {
 }
 async fn decrypt_verify_update(Json(r): Json<DataReq>) -> Json<BytesResp> {
     Json(v32::decrypt_verify_update(r.session_handle, &r.data).into())
+}
+
+async fn message_sign_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
+    Json(v32::message_sign_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+}
+async fn sign_message(Json(r): Json<DataReq>) -> Json<BytesResp> {
+    Json(v32::sign_message(r.session_handle, &r.data).into())
+}
+async fn message_sign_final(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::message_sign_final(r.session_handle).into())
+}
+async fn sign_message_begin(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::sign_message_begin(r.session_handle).into())
+}
+async fn sign_message_next(Json(r): Json<SignMessageNextReq>) -> Json<BytesResp> {
+    Json(v32::sign_message_next(r.session_handle, &r.part, r.is_final).into())
+}
+
+async fn message_verify_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
+    Json(v32::message_verify_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+}
+async fn verify_message(Json(r): Json<VerifyReq>) -> Json<StatusResp> {
+    Json(v32::verify_message(r.session_handle, &r.data, &r.signature).into())
+}
+async fn message_verify_final(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::message_verify_final(r.session_handle).into())
+}
+async fn verify_message_begin(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::verify_message_begin(r.session_handle).into())
+}
+async fn verify_message_next(Json(r): Json<VerifyMessageNextReq>) -> Json<StatusResp> {
+    let sig = if r.is_final { Some(r.signature.as_slice()) } else { None };
+    Json(v32::verify_message_next(r.session_handle, &r.part, sig).into())
+}
+
+async fn message_encrypt_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
+    Json(v32::message_encrypt_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+}
+async fn encrypt_message(Json(r): Json<EncryptMessageReq>) -> Json<EncryptMessageResp> {
+    Json(v32::encrypt_message(r.session_handle, &r.iv, r.iv_generator, &r.aad, &r.plaintext, r.tag_bits).into())
+}
+async fn message_encrypt_final(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::message_encrypt_final(r.session_handle).into())
+}
+async fn encrypt_message_begin(Json(r): Json<EncryptMessageBeginReq>) -> Json<EncryptMessageBeginResp> {
+    Json(v32::encrypt_message_begin(r.session_handle, &r.iv, r.iv_generator, &r.aad, r.tag_bits).into())
+}
+async fn encrypt_message_next(Json(r): Json<EncryptMessageNextReq>) -> Json<EncryptMessageNextResp> {
+    Json(v32::encrypt_message_next(r.session_handle, &r.plaintext_part, r.is_final, r.tag_bits).into())
+}
+
+async fn message_decrypt_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
+    Json(v32::message_decrypt_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+}
+async fn decrypt_message(Json(r): Json<DecryptMessageReq>) -> Json<BytesResp> {
+    Json(v32::decrypt_message(r.session_handle, &r.iv, &r.aad, &r.ciphertext, r.tag_bits, &r.tag).into())
+}
+async fn message_decrypt_final(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
+    Json(v32::message_decrypt_final(r.session_handle).into())
+}
+async fn decrypt_message_begin(Json(r): Json<DecryptMessageBeginReq>) -> Json<StatusResp> {
+    Json(v32::decrypt_message_begin(r.session_handle, &r.iv, &r.aad, r.tag_bits).into())
+}
+async fn decrypt_message_next(Json(r): Json<DecryptMessageNextReq>) -> Json<BytesResp> {
+    Json(v32::decrypt_message_next(r.session_handle, &r.ciphertext_part, r.is_final, r.tag_bits, &r.tag).into())
 }
 
 // Small shared request shapes used by several routes.

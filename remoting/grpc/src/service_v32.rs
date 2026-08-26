@@ -757,6 +757,221 @@ impl Pkcs11V32 for Pkcs11V32Service {
             blocking(move || v32::decrypt_verify_update(req.session_handle, &req.data)).await?;
         Ok(Response::new(V32BytesResponse { ck_rv, data }))
     }
+
+    // ── message sign (RW6b) ──────────────────────────────────────────────
+
+    async fn c_message_sign_init(
+        &self,
+        request: Request<V32KeyedInitRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let ck_rv = blocking(move || {
+            v32::message_sign_init(req.session_handle, mech, &param, req.key_handle)
+        })
+        .await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_sign_message(&self, request: Request<V32DataRequest>) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || v32::sign_message(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+    async fn c_message_sign_final(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::message_sign_final(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_sign_message_begin(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::sign_message_begin(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_sign_message_next(
+        &self,
+        request: Request<V32SignMessageNextRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || {
+            v32::sign_message_next(req.session_handle, &req.part, req.is_final)
+        })
+        .await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+
+    // ── message verify (RW6b) ────────────────────────────────────────────
+
+    async fn c_message_verify_init(
+        &self,
+        request: Request<V32KeyedInitRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let ck_rv = blocking(move || {
+            v32::message_verify_init(req.session_handle, mech, &param, req.key_handle)
+        })
+        .await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_verify_message(
+        &self,
+        request: Request<V32VerifyRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv =
+            blocking(move || v32::verify_message(req.session_handle, &req.data, &req.signature)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_message_verify_final(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::message_verify_final(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_verify_message_begin(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::verify_message_begin(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_verify_message_next(
+        &self,
+        request: Request<V32VerifyMessageNextRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || {
+            let sig = if req.is_final { Some(req.signature.as_slice()) } else { None };
+            v32::verify_message_next(req.session_handle, &req.part, sig)
+        })
+        .await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    // ── message encrypt (RW6b) ───────────────────────────────────────────
+
+    async fn c_message_encrypt_init(
+        &self,
+        request: Request<V32KeyedInitRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let ck_rv = blocking(move || {
+            v32::message_encrypt_init(req.session_handle, mech, &param, req.key_handle)
+        })
+        .await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_encrypt_message(
+        &self,
+        request: Request<V32EncryptMessageRequest>,
+    ) -> Result<Response<V32EncryptMessageResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, ciphertext, tag, iv_used) = blocking(move || {
+            v32::encrypt_message(req.session_handle, &req.iv, req.iv_generator, &req.aad, &req.plaintext, req.tag_bits)
+        })
+        .await?;
+        Ok(Response::new(V32EncryptMessageResponse { ck_rv, ciphertext, tag, iv_used }))
+    }
+    async fn c_message_encrypt_final(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::message_encrypt_final(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_encrypt_message_begin(
+        &self,
+        request: Request<V32EncryptMessageBeginRequest>,
+    ) -> Result<Response<V32EncryptMessageBeginResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, iv_used) = blocking(move || {
+            v32::encrypt_message_begin(req.session_handle, &req.iv, req.iv_generator, &req.aad, req.tag_bits)
+        })
+        .await?;
+        Ok(Response::new(V32EncryptMessageBeginResponse { ck_rv, iv_used }))
+    }
+    async fn c_encrypt_message_next(
+        &self,
+        request: Request<V32EncryptMessageNextRequest>,
+    ) -> Result<Response<V32EncryptMessageNextResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, ciphertext_part, tag) = blocking(move || {
+            v32::encrypt_message_next(req.session_handle, &req.plaintext_part, req.is_final, req.tag_bits)
+        })
+        .await?;
+        Ok(Response::new(V32EncryptMessageNextResponse {
+            ck_rv,
+            ciphertext_part,
+            tag: tag.unwrap_or_default(),
+        }))
+    }
+
+    // ── message decrypt (RW6b) ───────────────────────────────────────────
+
+    async fn c_message_decrypt_init(
+        &self,
+        request: Request<V32KeyedInitRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let ck_rv = blocking(move || {
+            v32::message_decrypt_init(req.session_handle, mech, &param, req.key_handle)
+        })
+        .await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_decrypt_message(
+        &self,
+        request: Request<V32DecryptMessageRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || {
+            v32::decrypt_message(req.session_handle, &req.iv, &req.aad, &req.ciphertext, req.tag_bits, &req.tag)
+        })
+        .await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+    async fn c_message_decrypt_final(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || v32::message_decrypt_final(req.session_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_decrypt_message_begin(
+        &self,
+        request: Request<V32DecryptMessageBeginRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let ck_rv = blocking(move || {
+            v32::decrypt_message_begin(req.session_handle, &req.iv, &req.aad, req.tag_bits)
+        })
+        .await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+    async fn c_decrypt_message_next(
+        &self,
+        request: Request<V32DecryptMessageNextRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || {
+            v32::decrypt_message_next(req.session_handle, &req.ciphertext_part, req.is_final, req.tag_bits, &req.tag)
+        })
+        .await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
 }
 
 #[cfg(test)]

@@ -344,3 +344,64 @@ in `local-gate.sh`) needs a live `pqc-grpc` + `pqc-dev-sandbox` and a Maven
 toolchain not present in this environment — flagged per the plan's own
 cross-cutting constraint, deferred to whoever runs the full gate before
 merging. RW6b (message API) is next.
+
+### 2026-08-26 — RW6b (message-based API)
+
+Shipped, all live-verified. 20 new RPCs: message sign (5), message verify
+(5), message encrypt (5), message decrypt (5). Zero engine-crate changes.
+Confirms F1's "audit-then-call" prediction AND scopes RW-P down further
+than planned: `ffi::msg_encrypt_init_internal` hard-rejects every
+mechanism except `CKM_AES_GCM`, so `GcmMessageParams` — the ONE RW-P
+variant this workstream needed — is also the ONLY structured
+mechanism-parameter shape the entire message API will ever need on this
+engine.
+
+**core:** `GcmMessageParams` — a 6-`usize`-word native `CK_GCM_MESSAGE_
+PARAMS` builder (`pIv@0, ulIvLen@1, ulIvBits@2 (unused), ivGenerator@3,
+pTag@4, ulTagBits@5`, verified byte-for-byte against `ffi::
+parse_gcm_msg_params`'s own doc comment), owning the IV and tag buffers
+for one FFI call's lifetime — the same ownership pattern RW2's
+`NativeTemplate` established, extended to a field-typed struct instead of
+a repeated triplet. `pTag` is a real OUT field on encrypt (the engine
+writes `tag_bits/8` bytes into it) and a real IN field on decrypt (the
+engine reads the caller's expected tag to verify, zeroizing the plaintext
+server-side on mismatch) — both directions verified against `ffi::
+aes_gcm_exec`'s own body, not assumed. `ivGenerator != 0` (server-
+generated IV) is fully supported: the engine writes the fresh IV in place
+into the SAME buffer the caller sized, and the verb layer reads it back
+out so the caller can decrypt later. 20 new verbs (10 sign/verify, 10
+encrypt/decrypt including full Begin/Next multipart FSMs) + 4 new unit
+tests (28/28 core green): sign/verify one-shot AND multipart round trip;
+encrypt/decrypt one-shot round trip plus real tag-tamper rejection;
+generated-IV round trip; and — the strongest correctness check in this
+slice — multipart `EncryptMessageBegin`/`EncryptMessageNext` ciphertext
+and tag proven byte-IDENTICAL to the one-shot `EncryptMessage` call for
+the same key/iv/aad/plaintext (AES-GCM's own determinism as the oracle),
+then decrypted back through the multipart `DecryptMessageBegin`/`Next`
+FSM.
+
+**Proto:** 15 new messages (mostly per-call request/response shapes for
+the encrypt/decrypt family; sign/verify reuse RW1/RW2's `V32DataRequest`/
+`V32VerifyRequest`/`V32KeyedInitRequest`/`V32StatusResponse` entirely — no
+new messages needed there at all), 20 new RPCs.
+
+**gRPC + REST:** all 20 RPCs/routes wired, calling the core verbs
+directly.
+
+**Validation:** 2 new three-transport parity tests. V16: message
+sign/verify one-shot round trip + tamper detection, ML-DSA, shared keypair
+across transports. V17: message encrypt/decrypt one-shot, shared AES key
+— ciphertext AND tag proven byte-identical across in-process/gRPC/REST
+(KAT-grade, like V2's digest case and V10's AES-ECB case), then decrypted
+back on each transport to recover the original plaintext. **Whole
+remoting workspace green: 28 core + 7 legacy-parity (no regression) + 17
+v32-parity + 2 posture.**
+
+**Cumulative RPC count after RW1+RW2+RW3+RW6a+RW6b: 89 of 104
+`pkcs11f.h` functions live.** RW4 (wrap/derive) is next — the first
+workstream that touches genuinely new RW-P territory (the derive-family
+mechanism-parameter variants: ECDH1, HKDF, PBKDF2, SP800-108,
+key-derivation-string-data) and the first point in the remaining program
+where a real engine-crate PR was ever predicted, though F1 already found
+the crypto itself pre-existing — RW4 should confirm or refute that for
+wrap/unwrap specifically.

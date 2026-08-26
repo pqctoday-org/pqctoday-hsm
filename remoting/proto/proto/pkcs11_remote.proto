@@ -490,6 +490,110 @@ service Pkcs11V32 {
   rpc C_DecryptDigestUpdate(V32DataRequest) returns (V32BytesResponse);
   rpc C_SignEncryptUpdate(V32DataRequest) returns (V32BytesResponse);
   rpc C_DecryptVerifyUpdate(V32DataRequest) returns (V32BytesResponse);
+
+  // ── message sign (RW6b) — pParam is always ignored by this engine ──
+  rpc C_MessageSignInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_SignMessage(V32DataRequest) returns (V32BytesResponse);
+  rpc C_MessageSignFinal(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_SignMessageBegin(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_SignMessageNext(V32SignMessageNextRequest) returns (V32BytesResponse);
+
+  // ── message verify (RW6b) ──
+  rpc C_MessageVerifyInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_VerifyMessage(V32VerifyRequest) returns (V32StatusResponse);
+  rpc C_MessageVerifyFinal(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_VerifyMessageBegin(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_VerifyMessageNext(V32VerifyMessageNextRequest) returns (V32StatusResponse);
+
+  // ── message encrypt (RW6b — CKM_AES_GCM only, this engine's one
+  // message-AEAD mechanism) ──
+  rpc C_MessageEncryptInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_EncryptMessage(V32EncryptMessageRequest) returns (V32EncryptMessageResponse);
+  rpc C_MessageEncryptFinal(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_EncryptMessageBegin(V32EncryptMessageBeginRequest) returns (V32EncryptMessageBeginResponse);
+  rpc C_EncryptMessageNext(V32EncryptMessageNextRequest) returns (V32EncryptMessageNextResponse);
+
+  // ── message decrypt (RW6b) ──
+  rpc C_MessageDecryptInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_DecryptMessage(V32DecryptMessageRequest) returns (V32BytesResponse);
+  rpc C_MessageDecryptFinal(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_DecryptMessageBegin(V32DecryptMessageBeginRequest) returns (V32StatusResponse);
+  rpc C_DecryptMessageNext(V32DecryptMessageNextRequest) returns (V32BytesResponse);
+}
+
+message V32SignMessageNextRequest {
+  uint32 session_handle = 1;
+  bytes part = 2;
+  bool is_final = 3;
+}
+message V32VerifyMessageNextRequest {
+  uint32 session_handle = 1;
+  bytes part = 2;
+  bool is_final = 3;
+  bytes signature = 4; // only read when is_final
+}
+
+// CK_GCM_MESSAGE_PARAMS travels field-by-field (RW-P "GcmMessage" variant
+// — see verbs_v32::GcmMessageParams's doc for the native layout and the
+// pTag in/out contract). `tag_bits` is repeated on every request in this
+// family because each maps to one real FFI call that needs it.
+message V32EncryptMessageRequest {
+  uint32 session_handle = 1;
+  bytes iv = 2; // desired length even when iv_generator != 0; contents ignored then
+  uint32 iv_generator = 3; // 0 = caller-supplied iv; nonzero = engine generates
+  bytes aad = 4;
+  bytes plaintext = 5;
+  uint32 tag_bits = 6;
+}
+message V32EncryptMessageResponse {
+  uint32 ck_rv = 1;
+  bytes ciphertext = 2;
+  bytes tag = 3;
+  bytes iv_used = 4; // echoes `iv` when iv_generator == 0; the engine-written IV otherwise
+}
+message V32EncryptMessageBeginRequest {
+  uint32 session_handle = 1;
+  bytes iv = 2;
+  uint32 iv_generator = 3;
+  bytes aad = 4;
+  uint32 tag_bits = 5;
+}
+message V32EncryptMessageBeginResponse {
+  uint32 ck_rv = 1;
+  bytes iv_used = 2;
+}
+message V32EncryptMessageNextRequest {
+  uint32 session_handle = 1;
+  bytes plaintext_part = 2;
+  bool is_final = 3;
+  uint32 tag_bits = 4; // only meaningful when is_final
+}
+message V32EncryptMessageNextResponse {
+  uint32 ck_rv = 1;
+  bytes ciphertext_part = 2;
+  bytes tag = 3; // empty unless is_final
+}
+
+message V32DecryptMessageRequest {
+  uint32 session_handle = 1;
+  bytes iv = 2;
+  bytes aad = 3;
+  bytes ciphertext = 4;
+  uint32 tag_bits = 5;
+  bytes tag = 6; // caller-supplied EXPECTED tag — the engine verifies against it
+}
+message V32DecryptMessageBeginRequest {
+  uint32 session_handle = 1;
+  bytes iv = 2;
+  bytes aad = 3;
+  uint32 tag_bits = 4;
+}
+message V32DecryptMessageNextRequest {
+  uint32 session_handle = 1;
+  bytes ciphertext_part = 2;
+  bool is_final = 3;
+  uint32 tag_bits = 4; // only meaningful when is_final
+  bytes tag = 5; // only meaningful when is_final
 }
 
 message V32Empty {}

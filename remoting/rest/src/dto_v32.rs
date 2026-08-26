@@ -441,3 +441,133 @@ pub struct VerifySignatureInitReq {
     #[serde(with = "b64")]
     pub signature: Vec<u8>,
 }
+
+// ── message sign / verify (RW6b) ─────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct SignMessageNextReq {
+    pub session_handle: u32,
+    #[serde(with = "b64")]
+    pub part: Vec<u8>,
+    pub is_final: bool,
+}
+#[derive(Deserialize)]
+pub struct VerifyMessageNextReq {
+    pub session_handle: u32,
+    #[serde(with = "b64")]
+    pub part: Vec<u8>,
+    pub is_final: bool,
+    #[serde(with = "b64", default)]
+    pub signature: Vec<u8>,
+}
+
+// ── message encrypt / decrypt (RW6b — CK_GCM_MESSAGE_PARAMS) ─────────────
+
+#[derive(Deserialize)]
+pub struct EncryptMessageReq {
+    pub session_handle: u32,
+    #[serde(with = "b64")]
+    pub iv: Vec<u8>,
+    #[serde(default)]
+    pub iv_generator: u32,
+    #[serde(with = "b64", default)]
+    pub aad: Vec<u8>,
+    #[serde(with = "b64")]
+    pub plaintext: Vec<u8>,
+    pub tag_bits: u32,
+}
+#[derive(Serialize)]
+pub struct EncryptMessageResp {
+    pub ck_rv: u32,
+    #[serde(with = "b64")]
+    pub ciphertext: Vec<u8>,
+    #[serde(with = "b64")]
+    pub tag: Vec<u8>,
+    #[serde(with = "b64")]
+    pub iv_used: Vec<u8>,
+}
+impl From<(u32, Vec<u8>, Vec<u8>, Vec<u8>)> for EncryptMessageResp {
+    fn from((ck_rv, ciphertext, tag, iv_used): (u32, Vec<u8>, Vec<u8>, Vec<u8>)) -> Self {
+        Self { ck_rv, ciphertext, tag, iv_used }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct EncryptMessageBeginReq {
+    pub session_handle: u32,
+    #[serde(with = "b64")]
+    pub iv: Vec<u8>,
+    #[serde(default)]
+    pub iv_generator: u32,
+    #[serde(with = "b64", default)]
+    pub aad: Vec<u8>,
+    pub tag_bits: u32,
+}
+#[derive(Serialize)]
+pub struct EncryptMessageBeginResp {
+    pub ck_rv: u32,
+    #[serde(with = "b64")]
+    pub iv_used: Vec<u8>,
+}
+impl From<(u32, Vec<u8>)> for EncryptMessageBeginResp {
+    fn from((ck_rv, iv_used): (u32, Vec<u8>)) -> Self {
+        Self { ck_rv, iv_used }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct EncryptMessageNextReq {
+    pub session_handle: u32,
+    #[serde(with = "b64")]
+    pub plaintext_part: Vec<u8>,
+    pub is_final: bool,
+    #[serde(default)]
+    pub tag_bits: u32,
+}
+#[derive(Serialize)]
+pub struct EncryptMessageNextResp {
+    pub ck_rv: u32,
+    #[serde(with = "b64")]
+    pub ciphertext_part: Vec<u8>,
+    #[serde(with = "b64")]
+    pub tag: Vec<u8>,
+}
+impl From<(u32, Vec<u8>, Option<Vec<u8>>)> for EncryptMessageNextResp {
+    fn from((ck_rv, ciphertext_part, tag): (u32, Vec<u8>, Option<Vec<u8>>)) -> Self {
+        Self { ck_rv, ciphertext_part, tag: tag.unwrap_or_default() }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DecryptMessageReq {
+    pub session_handle: u32,
+    #[serde(with = "b64")]
+    pub iv: Vec<u8>,
+    #[serde(with = "b64", default)]
+    pub aad: Vec<u8>,
+    #[serde(with = "b64")]
+    pub ciphertext: Vec<u8>,
+    pub tag_bits: u32,
+    #[serde(with = "b64")]
+    pub tag: Vec<u8>,
+}
+#[derive(Deserialize)]
+pub struct DecryptMessageBeginReq {
+    pub session_handle: u32,
+    #[serde(with = "b64")]
+    pub iv: Vec<u8>,
+    #[serde(with = "b64", default)]
+    pub aad: Vec<u8>,
+    pub tag_bits: u32,
+}
+#[derive(Deserialize)]
+pub struct DecryptMessageNextReq {
+    pub session_handle: u32,
+    #[serde(with = "b64")]
+    pub ciphertext_part: Vec<u8>,
+    pub is_final: bool,
+    #[serde(default)]
+    pub tag_bits: u32,
+    #[serde(with = "b64", default)]
+    pub tag: Vec<u8>,
+}

@@ -82,6 +82,7 @@ pub mod ck {
     pub use softhsmrustv3::constants::CKR_FUNCTION_NOT_PARALLEL;
     pub use softhsmrustv3::constants::CKR_NO_EVENT;
     pub use softhsmrustv3::constants::CKR_PIN_LEN_RANGE;
+    pub use softhsmrustv3::constants::CKM_AES_GCM;
     pub use softhsmrustv3::constants::CKR_MECHANISM_INVALID;
     pub use softhsmrustv3::constants::CKR_SESSION_EXISTS;
     pub use softhsmrustv3::constants::CKR_SESSION_READ_ONLY;
@@ -156,6 +157,58 @@ fn build_template(attrs: &[AttrIn]) -> NativeTemplate {
         entries[i * 3 + 2] = values[i].len();
     }
     NativeTemplate { entries, values }
+}
+
+/// `CK_GCM_MESSAGE_PARAMS` at native width (RW-P, RW6b's one prerequisite
+/// variant): 6 `usize` words — `pIv@0, ulIvLen@1, ulIvBits@2 (unused by
+/// this engine), ivGenerator@3, pTag@4, ulTagBits@5` (verified against
+/// `ffi::parse_gcm_msg_params`'s own doc comment). Owns the IV and tag
+/// buffers for the FFI call's lifetime, same pattern as `NativeTemplate`.
+///
+/// `pTag` is a genuine OUT field on ENCRYPT — `ffi::aes_gcm_exec` writes
+/// `tag_bits/8` bytes into it — and a genuine IN field on DECRYPT, where
+/// the engine reads the CALLER-supplied expected tag from it to verify
+/// (auth failure zeroizes the plaintext before returning). Callers must
+/// pass the expected tag as `tag_in` on decrypt; `tag()` after an encrypt
+/// call returns what the engine wrote.
+///
+/// `iv_generator != 0` asks the engine to fill `pIv` with a fresh random
+/// IV of the caller-requested length (`parse_gcm_msg_params` writes into
+/// the SAME buffer the caller allocated) — `iv()` after the call returns
+/// whatever IV was actually used, which the caller must have to decrypt
+/// later. On `iv_generator == 0` the caller's `iv` bytes are used as-is
+/// and never written.
+struct GcmMessageParams {
+    words: [usize; 6],
+    iv: Vec<u8>,
+    tag: Vec<u8>,
+}
+
+impl GcmMessageParams {
+    fn new(iv: &[u8], iv_generator: u32, tag_bits: u32, tag_in: &[u8]) -> Self {
+        let mut iv_buf = iv.to_vec();
+        let tag_bytes = (tag_bits as usize) / 8;
+        let mut tag_buf = tag_in.to_vec();
+        tag_buf.resize(tag_bytes, 0);
+        let words = [
+            if iv_buf.is_empty() { 0 } else { iv_buf.as_mut_ptr() as usize },
+            iv_buf.len(),
+            0,
+            iv_generator as usize,
+            if tag_buf.is_empty() { 0 } else { tag_buf.as_mut_ptr() as usize },
+            tag_bits as usize,
+        ];
+        Self { words, iv: iv_buf, tag: tag_buf }
+    }
+    fn as_ptr(&self) -> *mut u8 {
+        &self.words as *const [usize; 6] as *mut u8
+    }
+    fn iv(&self) -> &[u8] {
+        &self.iv
+    }
+    fn tag(&self) -> &[u8] {
+        &self.tag
+    }
 }
 
 // ── sessions & login (RW1) ─────────────────────────────────────────────────
@@ -770,6 +823,286 @@ pub fn decrypt_verify_update(session: u32, part: &[u8]) -> (u32, Vec<u8>) {
     })
 }
 
+// ── message sign (RW6b slice) ────────────────────────────────────────────
+// §5.14: pParam/ulParamLen are always ignored by this engine for sign
+// mechanisms (verified against `ffi::C_SignMessage`/`C_SignMessageNext`'s
+// own `_p_param` naming) — every call below passes NULL/0.
+
+pub fn message_sign_init(session: u32, mechanism: u64, parameter: &[u8], key: u32) -> u32 {
+    let mech = mech_native(mechanism, parameter);
+    ffi::C_MessageSignInit(session, &mech as *const _ as *mut u8, key)
+}
+pub fn sign_message(session: u32, data: &[u8]) -> (u32, Vec<u8>) {
+    two_call(|out, len| {
+        ffi::C_SignMessage(session, core::ptr::null_mut(), 0, data.as_ptr() as *mut u8, data.len() as u32, out, len)
+    })
+}
+pub fn message_sign_final(session: u32) -> u32 {
+    ffi::C_MessageSignFinal(session)
+}
+pub fn sign_message_begin(session: u32) -> u32 {
+    ffi::C_SignMessageBegin(session, core::ptr::null_mut(), 0)
+}
+/// `is_final = false`: accumulate `part`, return `(ck_rv, Vec::new())`.
+/// `is_final = true`: assemble the accumulated message + `part`, sign, and
+/// return the signature — the engine restores sign state across the
+/// internal two-call length-query/produce pair itself (§5.14), so this is
+/// exactly `two_call` over `C_SignMessageNext`'s final-part form.
+pub fn sign_message_next(session: u32, part: &[u8], is_final: bool) -> (u32, Vec<u8>) {
+    if !is_final {
+        let rv = ffi::C_SignMessageNext(
+            session,
+            core::ptr::null_mut(),
+            0,
+            part.as_ptr() as *mut u8,
+            part.len() as u32,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        return (rv, Vec::new());
+    }
+    two_call(|out, len| {
+        ffi::C_SignMessageNext(session, core::ptr::null_mut(), 0, part.as_ptr() as *mut u8, part.len() as u32, out, len)
+    })
+}
+
+// ── message verify (RW6b slice) ──────────────────────────────────────────
+
+pub fn message_verify_init(session: u32, mechanism: u64, parameter: &[u8], key: u32) -> u32 {
+    let mech = mech_native(mechanism, parameter);
+    ffi::C_MessageVerifyInit(session, &mech as *const _ as *mut u8, key)
+}
+pub fn verify_message(session: u32, data: &[u8], signature: &[u8]) -> u32 {
+    ffi::C_VerifyMessage(
+        session,
+        core::ptr::null_mut(),
+        0,
+        data.as_ptr() as *mut u8,
+        data.len() as u32,
+        signature.as_ptr() as *mut u8,
+        signature.len() as u32,
+    )
+}
+pub fn message_verify_final(session: u32) -> u32 {
+    ffi::C_MessageVerifyFinal(session)
+}
+pub fn verify_message_begin(session: u32) -> u32 {
+    ffi::C_VerifyMessageBegin(session, core::ptr::null_mut(), 0)
+}
+/// `signature: None` — accumulate `part` (non-final). `signature: Some(_)`
+/// — assemble accumulated + `part` and verify against it (final).
+pub fn verify_message_next(session: u32, part: &[u8], signature: Option<&[u8]>) -> u32 {
+    match signature {
+        None => ffi::C_VerifyMessageNext(
+            session,
+            core::ptr::null_mut(),
+            0,
+            part.as_ptr() as *mut u8,
+            part.len() as u32,
+            core::ptr::null_mut(),
+            0,
+        ),
+        Some(sig) => ffi::C_VerifyMessageNext(
+            session,
+            core::ptr::null_mut(),
+            0,
+            part.as_ptr() as *mut u8,
+            part.len() as u32,
+            sig.as_ptr() as *mut u8,
+            sig.len() as u32,
+        ),
+    }
+}
+
+// ── message encrypt (RW6b slice — GcmMessage, see `GcmMessageParams`) ────
+// This engine supports exactly one message-AEAD mechanism, CKM_AES_GCM
+// (`ffi::msg_encrypt_init_internal` hard-rejects anything else with
+// CKR_MECHANISM_INVALID) — the RW-P "GcmMessage" variant is therefore the
+// ONLY structured mechanism-parameter shape RW6b needs.
+
+pub fn message_encrypt_init(session: u32, mechanism: u64, parameter: &[u8], key: u32) -> u32 {
+    let mech = mech_native(mechanism, parameter);
+    ffi::C_MessageEncryptInit(session, &mech as *const _ as *mut u8, key)
+}
+
+/// One-shot `C_EncryptMessage`. Returns `(ck_rv, ciphertext, tag, iv_used)`
+/// — `iv_used` echoes back the caller's `iv` unchanged when
+/// `iv_generator == 0`, or the engine-generated IV when it doesn't (the
+/// caller needs it to decrypt later either way).
+pub fn encrypt_message(
+    session: u32,
+    iv: &[u8],
+    iv_generator: u32,
+    aad: &[u8],
+    plaintext: &[u8],
+    tag_bits: u32,
+) -> (u32, Vec<u8>, Vec<u8>, Vec<u8>) {
+    let params = GcmMessageParams::new(iv, iv_generator, tag_bits, &[]);
+    let (rv, ciphertext) = two_call(|out, len| {
+        ffi::C_EncryptMessage(
+            session,
+            params.as_ptr(),
+            0,
+            aad.as_ptr(),
+            aad.len() as u32,
+            plaintext.as_ptr(),
+            plaintext.len() as u32,
+            out,
+            len,
+        )
+    });
+    (rv, ciphertext, params.tag().to_vec(), params.iv().to_vec())
+}
+
+pub fn message_encrypt_final(session: u32) -> u32 {
+    ffi::C_MessageEncryptFinal(session)
+}
+
+/// `C_EncryptMessageBegin`. Returns `(ck_rv, iv_used)` — `tag_bits` is
+/// carried through to the armed stream for the final `Next` call to use;
+/// it is otherwise unread at Begin time (verified against
+/// `ffi::C_EncryptMessageBegin`'s own `_p_tag` discard).
+pub fn encrypt_message_begin(
+    session: u32,
+    iv: &[u8],
+    iv_generator: u32,
+    aad: &[u8],
+    tag_bits: u32,
+) -> (u32, Vec<u8>) {
+    let params = GcmMessageParams::new(iv, iv_generator, tag_bits, &[]);
+    let rv = ffi::C_EncryptMessageBegin(session, params.as_ptr(), 0, aad.as_ptr(), aad.len() as u32);
+    (rv, params.iv().to_vec())
+}
+
+/// `C_EncryptMessageNext`. `is_final = false`: ordinary streamed part, no
+/// mechanism-parameter struct needed (verified — the engine only
+/// dereferences `pParameter` when `CKF_END_OF_MESSAGE` is set). `is_final
+/// = true`: needs a `GcmMessageParams` whose `pTag` (word 4) is a real
+/// writable buffer — only that one field is read at this call (verified
+/// against the native-width offset comment in `ffi::C_EncryptMessageNext`
+/// itself); the other words are unused here. Returns `(ck_rv,
+/// ciphertext_part, tag_if_final)`.
+pub fn encrypt_message_next(
+    session: u32,
+    plaintext_part: &[u8],
+    is_final: bool,
+    tag_bits: u32,
+) -> (u32, Vec<u8>, Option<Vec<u8>>) {
+    const CKF_END_OF_MESSAGE: u32 = 0x0000_0001;
+    if !is_final {
+        let (rv, ct) = two_call(|out, len| {
+            ffi::C_EncryptMessageNext(
+                session,
+                core::ptr::null_mut(),
+                0,
+                plaintext_part.as_ptr(),
+                plaintext_part.len() as u32,
+                out,
+                len,
+                0,
+            )
+        });
+        return (rv, ct, None);
+    }
+    let params = GcmMessageParams::new(&[], 0, tag_bits, &[]);
+    let (rv, ct) = two_call(|out, len| {
+        ffi::C_EncryptMessageNext(
+            session,
+            params.as_ptr(),
+            0,
+            plaintext_part.as_ptr(),
+            plaintext_part.len() as u32,
+            out,
+            len,
+            CKF_END_OF_MESSAGE,
+        )
+    });
+    (rv, ct, Some(params.tag().to_vec()))
+}
+
+// ── message decrypt (RW6b slice) ─────────────────────────────────────────
+
+pub fn message_decrypt_init(session: u32, mechanism: u64, parameter: &[u8], key: u32) -> u32 {
+    let mech = mech_native(mechanism, parameter);
+    ffi::C_MessageDecryptInit(session, &mech as *const _ as *mut u8, key)
+}
+
+/// One-shot `C_DecryptMessage`. `tag` is the CALLER-supplied expected tag
+/// (the engine reads it to verify — auth failure zeroizes the plaintext
+/// server-side before returning a non-OK code, per `ffi::aes_gcm_exec`).
+pub fn decrypt_message(
+    session: u32,
+    iv: &[u8],
+    aad: &[u8],
+    ciphertext: &[u8],
+    tag_bits: u32,
+    tag: &[u8],
+) -> (u32, Vec<u8>) {
+    let params = GcmMessageParams::new(iv, 0, tag_bits, tag);
+    two_call(|out, len| {
+        ffi::C_DecryptMessage(
+            session,
+            params.as_ptr(),
+            0,
+            aad.as_ptr(),
+            aad.len() as u32,
+            ciphertext.as_ptr(),
+            ciphertext.len() as u32,
+            out,
+            len,
+        )
+    })
+}
+
+pub fn message_decrypt_final(session: u32) -> u32 {
+    ffi::C_MessageDecryptFinal(session)
+}
+
+pub fn decrypt_message_begin(session: u32, iv: &[u8], aad: &[u8], tag_bits: u32) -> u32 {
+    let params = GcmMessageParams::new(iv, 0, tag_bits, &[]);
+    ffi::C_DecryptMessageBegin(session, params.as_ptr(), 0, aad.as_ptr(), aad.len() as u32)
+}
+
+/// `is_final = true` needs the CALLER-supplied expected `tag` (see
+/// `decrypt_message`'s doc) at word 4 — same one-field-only shape as
+/// `encrypt_message_next`.
+pub fn decrypt_message_next(
+    session: u32,
+    ciphertext_part: &[u8],
+    is_final: bool,
+    tag_bits: u32,
+    tag: &[u8],
+) -> (u32, Vec<u8>) {
+    const CKF_END_OF_MESSAGE: u32 = 0x0000_0001;
+    if !is_final {
+        return two_call(|out, len| {
+            ffi::C_DecryptMessageNext(
+                session,
+                core::ptr::null_mut(),
+                0,
+                ciphertext_part.as_ptr(),
+                ciphertext_part.len() as u32,
+                out,
+                len,
+                0,
+            )
+        });
+    }
+    let params = GcmMessageParams::new(&[], 0, tag_bits, tag);
+    two_call(|out, len| {
+        ffi::C_DecryptMessageNext(
+            session,
+            params.as_ptr(),
+            0,
+            ciphertext_part.as_ptr(),
+            ciphertext_part.len() as u32,
+            out,
+            len,
+            CKF_END_OF_MESSAGE,
+        )
+    })
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 /// PKCS#11 §5.2 two-call convention driver: NULL query for the length,
@@ -1285,6 +1618,168 @@ mod tests {
         assert_eq!(digest_dual, digest_expected, "dual-function digest must equal the separate-FSM oracle");
         let (rv, _) = encrypt_final(session);
         assert_eq!(rv, 0);
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn message_sign_verify_one_shot_and_multipart_round_trip() {
+        crate::test_support::ensure_bootstrapped();
+        let fixture = crate::test_support::fresh_session();
+        let (pub_h, prv_h) =
+            crate::verbs::generate_key_pair(fixture, crate::Algorithm::MlDsa65, b"rw6b-msg", "rw6b-msg")
+                .expect("keygen fixture");
+
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        assert_eq!(message_sign_init(session, u64::from(ck::CKM_ML_DSA), &[], prv_h), 0);
+        let (rv, sig) = sign_message(session, b"one-shot message");
+        assert_eq!(rv, 0);
+        assert_eq!(message_verify_init(session, u64::from(ck::CKM_ML_DSA), &[], pub_h), 0);
+        assert_eq!(verify_message(session, b"one-shot message", &sig), 0);
+        assert_eq!(message_sign_final(session), 0);
+        assert_eq!(message_verify_final(session), 0);
+
+        // Multipart: Begin, two non-final Next accumulations, one final.
+        assert_eq!(message_sign_init(session, u64::from(ck::CKM_ML_DSA), &[], prv_h), 0);
+        assert_eq!(sign_message_begin(session), 0);
+        let (rv, empty) = sign_message_next(session, b"part-one ", false);
+        assert_eq!(rv, 0);
+        assert!(empty.is_empty());
+        let (rv, sig_multi) = sign_message_next(session, b"part-two", true);
+        assert_eq!(rv, 0);
+        assert_eq!(message_sign_final(session), 0);
+
+        assert_eq!(message_verify_init(session, u64::from(ck::CKM_ML_DSA), &[], pub_h), 0);
+        assert_eq!(verify_message(session, b"part-one part-two", &sig_multi), 0, "multipart-assembled signature must verify against the concatenated message");
+        assert_eq!(message_verify_final(session), 0);
+
+        // Multipart verify FSM, same shape.
+        assert_eq!(message_sign_init(session, u64::from(ck::CKM_ML_DSA), &[], prv_h), 0);
+        let (rv, sig2) = sign_message(session, b"verify-fsm message");
+        assert_eq!(rv, 0);
+        assert_eq!(message_sign_final(session), 0);
+        assert_eq!(message_verify_init(session, u64::from(ck::CKM_ML_DSA), &[], pub_h), 0);
+        assert_eq!(verify_message_begin(session), 0);
+        assert_eq!(verify_message_next(session, b"verify-fsm ", None), 0);
+        assert_eq!(verify_message_next(session, b"message", Some(&sig2)), 0);
+        assert_eq!(message_verify_final(session), 0);
+
+        close_session(session);
+        crate::verbs::close_session(fixture).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn message_encrypt_decrypt_one_shot_round_trip_and_tamper_detection() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let key_template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_ENCRYPT), true),
+            attr_bool(u64::from(ck::CKA_DECRYPT), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &key_template);
+        assert_eq!(rv, 0);
+
+        let iv = vec![0x01u8; 12];
+        let aad = b"aad-context";
+        let plaintext = b"message-based AEAD round trip";
+
+        assert_eq!(message_encrypt_init(session, u64::from(ck::CKM_AES_GCM), &[], key), 0);
+        let (rv, ciphertext, tag, iv_used) = encrypt_message(session, &iv, 0, aad, plaintext, 128);
+        assert_eq!(rv, 0);
+        assert_eq!(iv_used, iv, "iv_generator=0 must echo the caller's IV unchanged");
+        assert_eq!(tag.len(), 16);
+        assert_eq!(message_encrypt_final(session), 0);
+
+        assert_eq!(message_decrypt_init(session, u64::from(ck::CKM_AES_GCM), &[], key), 0);
+        let (rv, recovered) = decrypt_message(session, &iv, aad, &ciphertext, 128, &tag);
+        assert_eq!(rv, 0);
+        assert_eq!(recovered, plaintext);
+        assert_eq!(message_decrypt_final(session), 0);
+
+        // A tampered tag must be rejected — a real engine auth failure.
+        assert_eq!(message_decrypt_init(session, u64::from(ck::CKM_AES_GCM), &[], key), 0);
+        let mut bad_tag = tag.clone();
+        bad_tag[0] ^= 0xFF;
+        let (rv, _) = decrypt_message(session, &iv, aad, &ciphertext, 128, &bad_tag);
+        assert_ne!(rv, 0);
+        assert_eq!(message_decrypt_final(session), 0);
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn message_encrypt_generated_iv_and_multipart_matches_one_shot() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let key_template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_ENCRYPT), true),
+            attr_bool(u64::from(ck::CKA_DECRYPT), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &key_template);
+        assert_eq!(rv, 0);
+
+        // iv_generator != 0 (any nonzero value — the engine does not
+        // discriminate among CKG_GENERATE/_COUNTER/_RANDOM): the 12-byte
+        // placeholder is overwritten in place with a fresh random IV.
+        let placeholder_iv = vec![0u8; 12];
+        assert_eq!(message_encrypt_init(session, u64::from(ck::CKM_AES_GCM), &[], key), 0);
+        let (rv, ciphertext, tag, iv_used) = encrypt_message(session, &placeholder_iv, 1, b"", b"generated-iv test", 128);
+        assert_eq!(rv, 0);
+        assert_ne!(iv_used, placeholder_iv, "the engine must have written a fresh IV in place");
+        assert_eq!(iv_used.len(), 12);
+        assert_eq!(message_encrypt_final(session), 0);
+
+        assert_eq!(message_decrypt_init(session, u64::from(ck::CKM_AES_GCM), &[], key), 0);
+        let (rv, recovered) = decrypt_message(session, &iv_used, b"", &ciphertext, 128, &tag);
+        assert_eq!(rv, 0);
+        assert_eq!(recovered, b"generated-iv test");
+        assert_eq!(message_decrypt_final(session), 0);
+
+        // Multipart Begin/Next must produce byte-identical ciphertext+tag
+        // to the one-shot call above (same key/iv/aad/plaintext — AES-GCM
+        // is deterministic given those inputs).
+        let iv = vec![0x02u8; 12];
+        assert_eq!(message_encrypt_init(session, u64::from(ck::CKM_AES_GCM), &[], key), 0);
+        let (rv, one_shot_ct, one_shot_tag, _) = encrypt_message(session, &iv, 0, b"aad", b"multipart-vs-one-shot!!", 128);
+        assert_eq!(rv, 0);
+        assert_eq!(message_encrypt_final(session), 0);
+
+        assert_eq!(message_encrypt_init(session, u64::from(ck::CKM_AES_GCM), &[], key), 0);
+        let (rv, _) = encrypt_message_begin(session, &iv, 0, b"aad", 128);
+        assert_eq!(rv, 0);
+        let (rv, ct1, tag1) = encrypt_message_next(session, b"multipart-vs-one-", false, 128);
+        assert_eq!(rv, 0);
+        assert!(tag1.is_none());
+        let (rv, ct2, tag2) = encrypt_message_next(session, b"shot!!", true, 128);
+        assert_eq!(rv, 0);
+        let mut multipart_ct = ct1;
+        multipart_ct.extend_from_slice(&ct2);
+        assert_eq!(multipart_ct, one_shot_ct, "multipart ciphertext must equal the one-shot ciphertext byte-for-byte");
+        assert_eq!(tag2.unwrap(), one_shot_tag, "multipart tag must equal the one-shot tag byte-for-byte");
+        assert_eq!(message_encrypt_final(session), 0);
+
+        // Multipart decrypt FSM, verifying the assembled ciphertext.
+        assert_eq!(message_decrypt_init(session, u64::from(ck::CKM_AES_GCM), &[], key), 0);
+        assert_eq!(decrypt_message_begin(session, &iv, b"aad", 128), 0);
+        let (rv, pt1) = decrypt_message_next(session, &multipart_ct[..17], false, 128, &[]);
+        assert_eq!(rv, 0);
+        let (rv, pt2) = decrypt_message_next(session, &multipart_ct[17..], true, 128, &one_shot_tag);
+        assert_eq!(rv, 0);
+        let mut recovered = pt1;
+        recovered.extend_from_slice(&pt2);
+        assert_eq!(recovered, b"multipart-vs-one-shot!!");
+        assert_eq!(message_decrypt_final(session), 0);
 
         close_session(session);
     }
