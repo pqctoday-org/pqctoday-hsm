@@ -1,7 +1,8 @@
 # Remoting full PKCS#11 v3.2 coverage plan — gRPC + REST C_* mirror (2026-08-26)
 
-**Status: RW0 + RW1 + RW2 EXECUTED and green (2026-08-26). RW3-RW6 remain
-planned. See the "Execution log" at the end for exactly what shipped.**
+**Status: RW0 + RW1 + RW2 + RW3 EXECUTED and green (2026-08-26). RW4-RW6
+remain planned. See the "Execution log" at the end for exactly what
+shipped.**
 
 Decisions locked with the user (2026-08-26):
 
@@ -216,8 +217,8 @@ first task of each workstream, not a separate engine sub-project.
 | **RW0** | ✅ DONE | Foundations (service, ck_rv-as-field, size limits, flag, gate step, scaffolding) | — | 0 | done |
 | **RW1** | ✅ DONE | Sessions/login/info + discovery + random + digest FSM + sign/verify FSM + get-attr + destroy (24 RPCs) | none — all native-width-clean | 24 | done |
 | **RW2** | ✅ DONE | Object & keygen templates: `C_GenerateKey`, template `C_GenerateKeyPair`, `C_CreateObject`, `C_SetAttributeValue`†, `C_CopyObject`, `C_GetObjectSize`, `C_FindObjectsInit/FindObjects/FindObjectsFinal` | none — confirmed native-width-clean (writes CK_ATTRIBUTE the same `*mut usize` way get-attr already reads it) | 9 | done |
-| **RW3** | next | Encrypt/decrypt: `C_EncryptInit/Encrypt/Update/Final`, `C_Decrypt*` incl. GCM/CTR/OAEP params (CK_GCM_PARAMS etc. via `ck_param`) | native-width audit of the cipher entry points | ~8 | L |
-| **RW4** | after RW3 | Wrap + derive: `C_WrapKey`/`C_UnwrapKey`(+authenticated), `C_DeriveKey` (ECDH1/HKDF/concat/BIP32/SHA-derive **now**; PBKDF2/SP800-108 **after** the engine wrapper lands) | **PBKDF2/SP800-108 native wrapper (real engine work)**; wrap/unwrap audit | ~5 | L |
+| **RW3** | ✅ DONE | Encrypt/decrypt: `C_EncryptInit/Encrypt/Update/Final`, `C_Decrypt*` | none — confirmed native-width-clean, same shape as sign/verify; cipher params (GCM/CTR/OAEP) travel unchanged in the existing `V32Mechanism.parameter` bytes, no new proto messages needed at all | 8 | done |
+| **RW4** | next | Wrap + derive: `C_WrapKey`/`C_UnwrapKey`(+authenticated), `C_DeriveKey` (ECDH1/HKDF/concat/BIP32/SHA-derive **now**; PBKDF2/SP800-108 **after** the engine wrapper lands) | **PBKDF2/SP800-108 native wrapper (real engine work)**; wrap/unwrap audit | ~5 | L |
 | **RW5** | after RW4 | v3.2 KEM key-object form: `C_EncapsulateKey`/`C_DecapsulateKey` (template form) + hybrid cells + SLH-DSA/XMSS/HSS sign cells + seeded-keygen KAT parity | **key-object EncapsulateKey native wrapper (real engine work)** | ~4 | M–L |
 | **RW6** | after RW5 | Message API §5.19/§5.20 (20 `C_Message*` RPCs), dual-function, `C_SignRecover`/`C_VerifyRecover`, async honest-not-supported codes, profile objects, cheap SUITE-GAP closures; **then** the ledger + report + docs regeneration | audit only — engine passes all of §G1 locally (45 checks) | ~24 | L |
 
@@ -473,12 +474,47 @@ negative (V7), `C_CreateObject`/FindObjects FSM/`C_CopyObject`/
 green: 20 core + 7 legacy-parity (no regression) + 9 v32-parity + 2
 posture.**
 
-### Still planned (RW3 → RW6)
+### 2026-08-26 — RW3 (encrypt/decrypt)
+
+Shipped, all live-verified. Confirms §4 again: zero engine-crate changes
+— `C_EncryptInit/DecryptInit` are the exact same shape as
+`C_SignInit/VerifyInit` (`p_mechanism: *mut u8`, key handle), and the rest
+are the digest FSM's shape. **No new proto messages were needed at all** —
+Init reuses `V32KeyedInitRequest`, Update/one-shot reuse `V32DataRequest`,
+Final reuses `V32SessionRequest`/`V32BytesResponse`; only 8 new `rpc` lines
+were added.
+
+**core:** `encrypt_init/encrypt/encrypt_update/encrypt_final`,
+`decrypt_init/decrypt/decrypt_update/decrypt_final` over `ffi::C_Encrypt*`/
+`C_Decrypt*`. 1 new unit test (21/21 core green) — AES-ECB round trip plus
+the real `CKR_DATA_LEN_RANGE` on a non-block-multiple length (ECB has no
+padding). Cipher parameters (CK_GCM_PARAMS etc.) need no new wire shape —
+they already travel as bytes in `V32Mechanism.parameter`, read by the
+existing `ck_param` reader.
+
+**gRPC + REST:** all eight RPCs/routes wired, reusing existing DTOs
+end-to-end (zero new `dto_v32.rs` structs).
+
+**Validation:** 1 new three-transport parity test — AES-ECB encrypt then
+decrypt with a SHARED key handle (created once in-process, only the
+handle crosses the wire, exactly like V3/V4/V6's shared-keypair pattern),
+asserting ciphertext bytes are byte-identical across all three transports
+(a KAT-grade positive, like V2's digest case) and the round trip recovers
+the original plaintext on every transport. One real bug caught by this
+test on first run: the key was generated as a session object
+(CKA_TOKEN=false) in a session that was then closed before the other
+transports used its handle — PKCS#11 §5.8 destroys session objects when
+their creating session closes, so the handle went invalid
+(CKR_KEY_HANDLE_INVALID). Fixed by keeping that session open for the
+test's duration, same as the existing shared-fixture tests already do.
+**Whole remoting workspace green: 21 core + 7 legacy-parity (no
+regression) + 10 v32-parity + 2 posture.**
+
+### Still planned (RW4 → RW6)
 
 See §4 (revised prerequisites) and §5's per-workstream execution notes —
-refined 2026-08-26 after RW0/RW1 shipped, confirmed again by RW2. Headline:
-only **two** genuine engine-crate prerequisites remain (PBKDF2/SP800-108
-for RW4, key-object EncapsulateKey for RW5); everything else is a
-native-width audit + the proven per-RPC checklist. RW3→RW6 need no engine
-changes and can run back-to-back; the ledger/report/docs-regeneration are
-RW6-terminal, not incremental.
+refined 2026-08-26 after RW0/RW1 shipped, confirmed again by RW2 and RW3.
+Headline: only **two** genuine engine-crate prerequisites remain
+(PBKDF2/SP800-108 for RW4, key-object EncapsulateKey for RW5); RW6 needs
+none. The ledger/report/docs-regeneration are RW6-terminal, not
+incremental.

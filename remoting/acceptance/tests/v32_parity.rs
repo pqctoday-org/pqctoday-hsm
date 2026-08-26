@@ -40,6 +40,10 @@ const CKO_SECRET_KEY: u64 = 0x0000_0004;
 const CKM_ML_DSA_KEY_PAIR_GEN: u64 = 0x0000_001C;
 const CKM_AES_KEY_GEN: u64 = 0x0000_1080;
 const CKP_ML_DSA_65: u64 = 0x2;
+// RW3 additions.
+const CKA_ENCRYPT: u64 = 0x0000_0104;
+const CKA_DECRYPT: u64 = 0x0000_0105;
+const CKM_AES_ECB: u64 = 0x0000_1081;
 
 /// A ulong-valued template entry at native `CK_ULONG` width (8 bytes LE on
 /// this LP64 server) — the RW1 finding, applied on the wire's input side.
@@ -619,5 +623,84 @@ fn v9_generate_key_and_set_attribute_value_parity() {
             "session_handle": sh, "object_handle": rk["object_handle"], "template": [],
         })).await;
         assert_eq!(rset["ck_rv"].as_u64().unwrap() as u32, rv_set_ctl, "REST set-attribute-value (destructive ON) must equal control");
+    });
+}
+
+// ── V10: AES-ECB encrypt/decrypt — a SHARED key handle (created once,
+// in-process) means ciphertext bytes must be IDENTICAL across all three
+// transports, exactly like V2's digest KAT ────────────────────────────────
+
+#[test]
+fn v10_aes_ecb_encrypt_decrypt_kat_parity() {
+    bootstrap_once();
+    rt().block_on(async {
+        let plaintext = vec![0x37u8; 32];
+
+        // Shared key, created once in-process — only its handle crosses the
+        // wire. §5.8: a session object (CKA_TOKEN=false) is destroyed when
+        // its creating session closes, so the fixture session must outlive
+        // every transport's use of the key handle (same pattern V3/V4/V6
+        // use for their shared keypair fixture).
+        let (_rv, fixture) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        let key_template: Vec<(u64, Vec<u8>)> = vec![
+            (CKA_CLASS, (CKO_SECRET_KEY as usize).to_le_bytes().to_vec()),
+            (CKA_KEY_TYPE, (CKK_AES as usize).to_le_bytes().to_vec()),
+            (CKA_VALUE_LEN, (32usize).to_le_bytes().to_vec()),
+            (CKA_ENCRYPT, vec![1u8]),
+            (CKA_DECRYPT, vec![1u8]),
+            (CKA_TOKEN, vec![0u8]),
+        ];
+        let (rv_key, key) = v32::generate_key(fixture, CKM_AES_KEY_GEN, &[], &key_template);
+        assert_eq!(rv_key, 0);
+
+        // control
+        let (_rv, s) = v32::open_session(v32::SLOT, CKF_SERIAL_SESSION | CKF_RW_SESSION);
+        assert_eq!(v32::encrypt_init(s, CKM_AES_ECB, &[], key), 0);
+        let (rv_enc_ctl, ciphertext_ctl) = v32::encrypt(s, &plaintext);
+        assert_eq!(rv_enc_ctl, 0);
+        assert_eq!(v32::decrypt_init(s, CKM_AES_ECB, &[], key), 0);
+        let (rv_dec_ctl, roundtrip_ctl) = v32::decrypt(s, &ciphertext_ctl);
+        assert_eq!(rv_dec_ctl, 0);
+        assert_eq!(roundtrip_ctl, plaintext);
+        v32::close_session(s);
+
+        // gRPC
+        let mut g = spawn_grpc_v32().await.unwrap();
+        let gs = g.c_open_session(proto::V32OpenSessionRequest { slot_id: v32::SLOT, flags: CKF_SERIAL_SESSION | CKF_RW_SESSION }).await.unwrap().into_inner();
+        g.c_encrypt_init(proto::V32KeyedInitRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_ECB, parameter: vec![] }),
+            key_handle: key,
+        }).await.unwrap();
+        let ge = g.c_encrypt(proto::V32DataRequest { session_handle: gs.session_handle, data: plaintext.clone() }).await.unwrap().into_inner();
+        assert_eq!(ge.ck_rv, rv_enc_ctl);
+        assert_eq!(ge.data, ciphertext_ctl, "gRPC AES-ECB ciphertext bytes must equal control (shared key)");
+        g.c_decrypt_init(proto::V32KeyedInitRequest {
+            session_handle: gs.session_handle,
+            mechanism: Some(proto::V32Mechanism { mechanism: CKM_AES_ECB, parameter: vec![] }),
+            key_handle: key,
+        }).await.unwrap();
+        let gd = g.c_decrypt(proto::V32DataRequest { session_handle: gs.session_handle, data: ciphertext_ctl.clone() }).await.unwrap().into_inner();
+        assert_eq!(gd.ck_rv, rv_dec_ctl);
+        assert_eq!(gd.data, plaintext, "gRPC AES-ECB round trip must equal the original plaintext");
+
+        // REST
+        let base = spawn_rest_v32().await.unwrap();
+        let rs = rest_post(&base, "open-session", json!({"slot_id": v32::SLOT, "flags": CKF_SERIAL_SESSION | CKF_RW_SESSION})).await;
+        let sh = rs["session_handle"].clone();
+        rest_post(&base, "encrypt-init", json!({
+            "session_handle": sh, "mechanism": {"mechanism": CKM_AES_ECB, "parameter": ""}, "key_handle": key,
+        })).await;
+        let re = rest_post(&base, "encrypt", json!({"session_handle": sh, "data": b64(&plaintext)})).await;
+        assert_eq!(re["ck_rv"].as_u64().unwrap() as u32, rv_enc_ctl);
+        assert_eq!(unb64(re["data"].as_str().unwrap()), ciphertext_ctl, "REST AES-ECB ciphertext bytes must equal control");
+        rest_post(&base, "decrypt-init", json!({
+            "session_handle": sh, "mechanism": {"mechanism": CKM_AES_ECB, "parameter": ""}, "key_handle": key,
+        })).await;
+        let rd = rest_post(&base, "decrypt", json!({"session_handle": sh, "data": re["data"].clone()})).await;
+        assert_eq!(rd["ck_rv"].as_u64().unwrap() as u32, rv_dec_ctl);
+        assert_eq!(unb64(rd["data"].as_str().unwrap()), plaintext, "REST AES-ECB round trip must equal the original plaintext");
+
+        v32::close_session(fixture);
     });
 }

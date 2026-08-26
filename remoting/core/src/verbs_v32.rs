@@ -71,6 +71,11 @@ pub mod ck {
     pub use softhsmrustv3::constants::CKR_OPERATION_NOT_INITIALIZED;
     pub use softhsmrustv3::constants::CKR_TEMPLATE_INCOMPLETE;
     pub use softhsmrustv3::constants::CKR_TEMPLATE_INCONSISTENT;
+    // RW3 additions.
+    pub use softhsmrustv3::constants::CKA_DECRYPT;
+    pub use softhsmrustv3::constants::CKA_ENCRYPT;
+    pub use softhsmrustv3::constants::CKM_AES_ECB;
+    pub use softhsmrustv3::constants::CKR_DATA_LEN_RANGE;
 }
 
 /// The bootstrap slot — same constant `verbs::bootstrap()` initializes.
@@ -524,6 +529,56 @@ pub fn find_objects_final(session: u32) -> u32 {
     ffi::C_FindObjectsFinal(session)
 }
 
+// ── encrypt / decrypt FSM + one-shot (RW3 slice) ────────────────────────────
+//
+// Native-width audited (2026-08-26): same shape as the sign/verify FSM
+// above — `p_mechanism: *mut u8` read via `ck_param`, no CK_ATTRIBUTE
+// templates involved. Cipher parameters (CK_GCM_PARAMS, CK_CTR_PARAMS,
+// ...) travel as raw bytes in `parameter`, exactly like every other
+// mechanism here — no new wire shape needed.
+
+pub fn encrypt_init(session: u32, mechanism: u64, parameter: &[u8], key: u32) -> u32 {
+    let mech = mech_native(mechanism, parameter);
+    ffi::C_EncryptInit(session, &mech as *const _ as *mut u8, key)
+}
+
+pub fn encrypt(session: u32, data: &[u8]) -> (u32, Vec<u8>) {
+    two_call(|out, len| {
+        ffi::C_Encrypt(session, data.as_ptr() as *mut u8, data.len() as u32, out, len)
+    })
+}
+
+pub fn encrypt_update(session: u32, part: &[u8]) -> (u32, Vec<u8>) {
+    two_call(|out, len| {
+        ffi::C_EncryptUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, out, len)
+    })
+}
+
+pub fn encrypt_final(session: u32) -> (u32, Vec<u8>) {
+    two_call(|out, len| ffi::C_EncryptFinal(session, out, len))
+}
+
+pub fn decrypt_init(session: u32, mechanism: u64, parameter: &[u8], key: u32) -> u32 {
+    let mech = mech_native(mechanism, parameter);
+    ffi::C_DecryptInit(session, &mech as *const _ as *mut u8, key)
+}
+
+pub fn decrypt(session: u32, data: &[u8]) -> (u32, Vec<u8>) {
+    two_call(|out, len| {
+        ffi::C_Decrypt(session, data.as_ptr() as *mut u8, data.len() as u32, out, len)
+    })
+}
+
+pub fn decrypt_update(session: u32, part: &[u8]) -> (u32, Vec<u8>) {
+    two_call(|out, len| {
+        ffi::C_DecryptUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, out, len)
+    })
+}
+
+pub fn decrypt_final(session: u32) -> (u32, Vec<u8>) {
+    two_call(|out, len| ffi::C_DecryptFinal(session, out, len))
+}
+
 // ── helpers ────────────────────────────────────────────────────────────────
 
 /// PKCS#11 §5.2 two-call convention driver: NULL query for the length,
@@ -847,6 +902,42 @@ mod tests {
         assert_eq!(rv, 0);
         assert_eq!(set_attribute_value(session, handle, &[]), 0);
         assert_eq!(set_attribute_value(session, 0xFFFF_FFFE, &[]), ck::CKR_OBJECT_HANDLE_INVALID);
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn aes_ecb_encrypt_decrypt_round_trip_and_data_len_range() {
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+        let template = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_ENCRYPT), true),
+            attr_bool(u64::from(ck::CKA_DECRYPT), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &template);
+        assert_eq!(rv, 0);
+
+        let plaintext = vec![0x42u8; 32]; // two AES blocks — CKM_AES_ECB needs no IV/param
+        assert_eq!(encrypt_init(session, u64::from(ck::CKM_AES_ECB), &[], key), 0);
+        let (rv, ciphertext) = encrypt(session, &plaintext);
+        assert_eq!(rv, 0);
+        assert_eq!(ciphertext.len(), plaintext.len());
+        assert_ne!(ciphertext, plaintext);
+
+        assert_eq!(decrypt_init(session, u64::from(ck::CKM_AES_ECB), &[], key), 0);
+        let (rv, roundtrip) = decrypt(session, &ciphertext);
+        assert_eq!(rv, 0);
+        assert_eq!(roundtrip, plaintext);
+
+        // §5.2: ECB has no padding — a non-block-multiple length is a real
+        // engine-reported error, not a wire-layer guess.
+        assert_eq!(encrypt_init(session, u64::from(ck::CKM_AES_ECB), &[], key), 0);
+        let (rv, _) = encrypt(session, &[0x01u8; 5]);
+        assert_eq!(rv, ck::CKR_DATA_LEN_RANGE);
         close_session(session);
     }
 }

@@ -406,6 +406,78 @@ impl Pkcs11V32 for Pkcs11V32Service {
         let ck_rv = blocking(move || v32::find_objects_final(req.session_handle)).await?;
         Ok(Response::new(V32StatusResponse { ck_rv }))
     }
+
+    // ── encrypt / decrypt FSM + one-shot (RW3) ──────────────────────────
+
+    async fn c_encrypt_init(
+        &self,
+        request: Request<V32KeyedInitRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let ck_rv =
+            blocking(move || v32::encrypt_init(req.session_handle, mech, &param, req.key_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    async fn c_encrypt(&self, request: Request<V32DataRequest>) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || v32::encrypt(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+
+    async fn c_encrypt_update(
+        &self,
+        request: Request<V32DataRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || v32::encrypt_update(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+
+    async fn c_encrypt_final(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || v32::encrypt_final(req.session_handle)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+
+    async fn c_decrypt_init(
+        &self,
+        request: Request<V32KeyedInitRequest>,
+    ) -> Result<Response<V32StatusResponse>, Status> {
+        let req = request.into_inner();
+        let (mech, param) = mech_parts(req.mechanism.as_ref());
+        let ck_rv =
+            blocking(move || v32::decrypt_init(req.session_handle, mech, &param, req.key_handle)).await?;
+        Ok(Response::new(V32StatusResponse { ck_rv }))
+    }
+
+    async fn c_decrypt(&self, request: Request<V32DataRequest>) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || v32::decrypt(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+
+    async fn c_decrypt_update(
+        &self,
+        request: Request<V32DataRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || v32::decrypt_update(req.session_handle, &req.data)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
+
+    async fn c_decrypt_final(
+        &self,
+        request: Request<V32SessionRequest>,
+    ) -> Result<Response<V32BytesResponse>, Status> {
+        let req = request.into_inner();
+        let (ck_rv, data) = blocking(move || v32::decrypt_final(req.session_handle)).await?;
+        Ok(Response::new(V32BytesResponse { ck_rv, data }))
+    }
 }
 
 #[cfg(test)]

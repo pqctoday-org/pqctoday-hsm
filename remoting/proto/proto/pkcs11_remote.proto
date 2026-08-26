@@ -439,4 +439,17 @@ service Pkcs11V32 {
   rpc C_FindObjectsInit(V32FindObjectsInitRequest) returns (V32StatusResponse);
   rpc C_FindObjects(V32FindObjectsRequest) returns (V32FindObjectsResponse);
   rpc C_FindObjectsFinal(V32SessionRequest) returns (V32StatusResponse);
+
+  // ── encrypt / decrypt FSM + one-shot (RW3) ──
+  // Reuses existing message shapes — no new proto types needed:
+  // Init takes a mechanism + key handle (same as sign/verify Init), the
+  // rest carry only session + bytes.
+  rpc C_EncryptInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_Encrypt(V32DataRequest) returns (V32BytesResponse);
+  rpc C_EncryptUpdate(V32DataRequest) returns (V32BytesResponse);
+  rpc C_EncryptFinal(V32SessionRequest) returns (V32BytesResponse);
+  rpc C_DecryptInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_Decrypt(V32DataRequest) returns (V32BytesResponse);
+  rpc C_DecryptUpdate(V32DataRequest) returns (V32BytesResponse);
+  rpc C_DecryptFinal(V32SessionRequest) returns (V32BytesResponse);
 }

@@ -58,6 +58,14 @@ pub fn router(state: V32State) -> Router {
         .route("/v32/find-objects-init", post(find_objects_init))
         .route("/v32/find-objects", post(find_objects))
         .route("/v32/find-objects-final", post(find_objects_final))
+        .route("/v32/encrypt-init", post(encrypt_init))
+        .route("/v32/encrypt", post(encrypt))
+        .route("/v32/encrypt-update", post(encrypt_update))
+        .route("/v32/encrypt-final", post(encrypt_final))
+        .route("/v32/decrypt-init", post(decrypt_init))
+        .route("/v32/decrypt", post(decrypt))
+        .route("/v32/decrypt-update", post(decrypt_update))
+        .route("/v32/decrypt-final", post(decrypt_final))
         .with_state(state)
 }
 
@@ -186,6 +194,31 @@ async fn find_objects(Json(r): Json<FindObjectsReq>) -> Json<FindObjectsResp> {
 }
 async fn find_objects_final(Json(r): Json<DatalessSession>) -> Json<StatusResp> {
     Json(v32::find_objects_final(r.session_handle).into())
+}
+
+async fn encrypt_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
+    Json(v32::encrypt_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+}
+async fn encrypt(Json(r): Json<DataReq>) -> Json<BytesResp> {
+    Json(v32::encrypt(r.session_handle, &r.data).into())
+}
+async fn encrypt_update(Json(r): Json<DataReq>) -> Json<BytesResp> {
+    Json(v32::encrypt_update(r.session_handle, &r.data).into())
+}
+async fn encrypt_final(Json(r): Json<DatalessSession>) -> Json<BytesResp> {
+    Json(v32::encrypt_final(r.session_handle).into())
+}
+async fn decrypt_init(Json(r): Json<KeyedInitReq>) -> Json<StatusResp> {
+    Json(v32::decrypt_init(r.session_handle, r.mechanism.mechanism, &r.mechanism.parameter, r.key_handle).into())
+}
+async fn decrypt(Json(r): Json<DataReq>) -> Json<BytesResp> {
+    Json(v32::decrypt(r.session_handle, &r.data).into())
+}
+async fn decrypt_update(Json(r): Json<DataReq>) -> Json<BytesResp> {
+    Json(v32::decrypt_update(r.session_handle, &r.data).into())
+}
+async fn decrypt_final(Json(r): Json<DatalessSession>) -> Json<BytesResp> {
+    Json(v32::decrypt_final(r.session_handle).into())
 }
 
 // Small shared request shapes used by several routes.
