@@ -1414,6 +1414,119 @@ support for PBKDF2 itself (HKDF/TLS13-KDF already have it per probe
 (b); PBKDF2's own `derive_skey` was out of this item's "PBKDF2 first"
 scoping).
 
+**Phase 4, R20 (small-surface tier, five independent micro-items),
+DONE — two shipped with code, three closed by investigation:**
+
+**OP-4 (KEM SET_CTX_PARAMS) — investigated, no gap, no code.** The
+plan's premise was that CMS `-encrypt`/`-decrypt` to an ML-KEM cert
+might need `kem/mlkem.c` to handle `OSSL_KEM_PARAM_OPERATION` via
+`SET_CTX_PARAMS`/`SETTABLE_CTX_PARAMS`, neither of which exist there.
+Settled definitively by reading OpenSSL's own CMS source
+(`crypto/cms/cms_kemri.c` in the vendored 3.6.3 tree) rather than
+inferring from the CLI: the real call sites are
+`EVP_PKEY_encapsulate_init(kemri->pctx, NULL)` and
+`EVP_PKEY_decapsulate_init(pctx, NULL)` — both pass a **NULL** params
+argument, unconditionally, for every KEM algorithm. `OSSL_KEM_PARAM_
+OPERATION` (the `-kemop DHKEM`/`RSASVE` values `pkeyutl`'s own CLI
+flag sets) is a generic-KEM-wrapper concept for RSA/DH keys routed
+through OpenSSL's own `ec_kem.c`/RSA-KEM code; it has no CMS caller
+and no meaning for a natively-implemented algorithm like ML-KEM. No
+gap exists for CMS KEMRecipientInfo; closing without code.
+
+**F36-5 (NIST security-category param) — DONE.** Added
+`OSSL_PKEY_PARAM_SECURITY_CATEGORY` to ML-DSA (`keymgmt.c`), ML-KEM
+(`kem/mlkem.c`), and SLH-DSA (`keymgmt.c`) `get_params`/
+`gettable_params`, values per FIPS 203 Table 2 / FIPS 204 Table 1 /
+FIPS 205 Table 2: ML-KEM-512/768/1024 → 1/3/5; ML-DSA-44/65/87 →
+2/3/5; SLH-DSA (all 12 parameter sets, uniform across SHA2/SHAKE and
+s/f — the category tracks the hash-output size, not the speed/size
+tradeoff) → 1 (128-bit) / 3 (192-bit) / 5 (256-bit). New
+`scripts/dump-int-param.c` (CMake target `dump_int_param`, gated on
+`BUILD_TESTS`) — a generic `EVP_PKEY_get_int_param` reader, since no
+`openssl` CLI subcommand dumps an arbitrary int param (`pkey -text` is
+algorithm-specific and only prints what that algorithm's own print
+function was written to show). Verified live for all 8 algorithm
+variants (all three ML-DSA, all three ML-KEM, two representative
+SLH-DSA variants) before writing the harness case; three new cases
+(T23/T23b/T23c, one per PQC family) in the harness itself.
+Sabotage-tested: corrupting ML-DSA-44's category value alone broke
+only T23, T23b/T23c stayed green.
+
+**F36-6 (ML-DSA signature-param parity) — investigated, one real
+divergence found and documented (not fixed — not fixable within
+PKCS#11 v3.2).** `deterministic`/`message-encoding`/`mu` are already
+implemented in `sig/mldsa.c` (`p11prov_mldsa_set_ctx_params`), not
+absent as the plan's framing might suggest — the real question was
+whether they're *correct*, not present.
+- `deterministic`: verified genuinely functional, not just
+  accepted-and-ignored — signing the same message twice with
+  `deterministic:1` produces byte-identical signatures; with
+  `deterministic:0` (hedged) it produces different signatures each
+  time, matching `CKH_DETERMINISTIC_REQUIRED` vs `CKH_HEDGE_REQUIRED`
+  in the underlying `CK_SIGN_ADDITIONAL_CONTEXT.hedgeVariant`. No gap.
+- `message-encoding`: this provider accepts only value `1` (rejects
+  anything else); the default provider's `ml_dsa_sign.c` documents
+  `encode=0` as "M' is provided raw [pre-encoded], the following
+  parameters are ignored" — i.e. the caller supplies the already-
+  encoded message representative directly, bypassing FIPS 204's
+  standard `M' = Prefix||ctx||M` construction. Confirmed this is a
+  real divergence (default provider accepts it, this one doesn't) —
+  and confirmed it is **not fixable** short of a non-standard PKCS#11
+  extension: `CK_SIGN_ADDITIONAL_CONTEXT` (the v3.2 mechanism param
+  struct `mldsa_params` uses) has fields only for `hedgeVariant`/
+  `pContext`/`ulContextLen` — no field for a pre-encoded M' bypass, so
+  no PKCS#11-v3.2-compliant ML-DSA token can accept this input at the
+  mechanism level regardless of provider-side code. Documenting as a
+  known, spec-rooted limitation (same category of finding as R21's
+  WART-5, below).
+- `mu`: same root cause and same conclusion — externally-supplied `mu`
+  (bypassing both the encoding step AND ML-DSA's own internal SHAKE256
+  hash) has no `CK_SIGN_ADDITIONAL_CONTEXT` field either. Documented,
+  not fixed, for the same structural reason.
+
+**ALG-6 (ECDH-as-KEM) — investigated, deliberately unexposed, no
+code.** OpenSSL 3.6 does have a standard KEM fetch surface for EC keys
+(`ec_kem.c`, RFC 9180 DHKEM — confirmed via `openssl list
+-kem-algorithms -provider default`, which lists bare `EC` alongside
+ML-KEM). But this project's own engine-level "ECDH-as-KEM" capability
+(`CKM_ECDH1_DERIVE` under `C_Encapsulate`/`DecapsulateKey`, per
+`CLAUDE.md`'s own description — a building block the KMIP/hub hybrid
+combiner drives directly, not through this generic KEM op) is **raw
+ECDH**, not RFC 9180's HKDF-Extract-and-Expand construction. Exposing
+it under OpenSSL's `EC` KEM algorithm name would silently produce
+non-DHKEM-compliant output for any caller fetching `"EC"` as a KEM and
+expecting RFC 9180 semantics — a correctness hazard, not a safe
+drop-in registration. No current consumer needs the generic KEM
+operation type for EC (the real hybrid-KEM combiner path bypasses it
+entirely). Deliberately unexposed; closing without code, per the
+plan's own suggested fallback for this item.
+
+**ALG-7 (ChaCha20/ChaCha20-Poly1305) — investigated, scope corrected,
+deferred as its own item.** Re-verified the carried premise first, per
+the plan's own instruction: both engines genuinely implement it, not
+just advertise it — confirmed via `OSSLChaCha20.cpp` (a real,
+dedicated crypto class, C++ engine) and `rust/src/constants.rs`'s own
+mechanism table (Rust engine), the same "advertised vs. actually
+dispatched" distinction R10's PBKDF2 probe drew. Where the plan's
+"straightforward... mirroring the AES entries" characterization did
+not hold up: `cipher.c` (1074 lines) is AES-block-cipher-specific
+machinery throughout — hardcoded `aes`-prefixed dispatch function
+names, an `AESBLOCK`/padding-oriented context struct, CBC/CTS-specific
+logic — not a generic symmetric-cipher framework a stream cipher
+(ChaCha20, no block/pad concept) or its AEAD mode (ChaCha20-Poly1305,
+needs its own tag-length/nonce-size handling, distinct from
+`CKM_AES_GCM`'s) could mechanically "mirror." Wiring this in correctly
+needs new cipher-family plumbing, not a mechanism-table entry — the
+same class of scope correction R8 (MAC) and R10 (KDF) each made when a
+"small" item's real implementation surface turned out larger than
+billed. Deferred as its own future item rather than rushed under this
+tier's effort budget, matching R10's own precedent for SP800-108.
+
+Both engines' full test suites remain green (C++: 8/8 CTest suites;
+Rust: unaffected — no code under `rust/` changed by this item).
+**Harness: `PASS=55 FAIL=0 XFAIL=0 XPASS=0`** — three cases gained
+(T23/T23b/T23c), zero regressions.
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:

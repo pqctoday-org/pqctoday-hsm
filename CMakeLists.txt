@@ -210,4 +210,14 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
         -L${CMAKE_BINARY_DIR}/src/vendor/pkcs11-provider
         -l:pkcs11-provider.so
         -Wl,-rpath,${CMAKE_BINARY_DIR}/src/vendor/pkcs11-provider)
+
+    # dump-int-param: phase-4 R20 (F36-5) test helper — reads back an
+    # arbitrary EVP_PKEY int param (OSSL_PKEY_PARAM_SECURITY_CATEGORY)
+    # via the standard EVP API. Unlike composite_sig_probe this needs no
+    # pkcs11-provider.so internal symbols — the provider is loaded at
+    # runtime via openssl.cnf like any normal application, so plain
+    # OpenSSL linking is enough.
+    add_executable(dump_int_param scripts/dump-int-param.c)
+    target_include_directories(dump_int_param PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(dump_int_param ${OPENSSL_LIBRARIES})
 endif()

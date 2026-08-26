@@ -1,4 +1,4 @@
-# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R7+R8+R10(PBKDF2)+R18+R19+R21.1 EXECUTED, R9/R11/R20/rest-of-R21/R10(SP800-108) still plan-only
+# OpenSSL provider remediation plan, phase 4 (2026-08-26) — R7+R8+R10(PBKDF2)+R18+R19+R20+R21.1 EXECUTED, R9/R11/rest-of-R21/R10(SP800-108)/R20(ALG-7) still plan-only
 
 **Execution update (2026-08-26):** R7, R8, R18, R19, and R21.1 have
 been executed and landed — see
@@ -54,14 +54,37 @@ case (`CKR_USER_NOT_LOGGED_IN` on a bare session) and was confirmed
 NOT PBKDF2-specific before being treated as a fix — the pre-existing
 HKDF path hits the identical failure under the same bare conditions,
 it just never surfaces in real use because TLS handshake callers
-already have a logged-in session by the time HKDF runs. R8/R18/R19/
-R21.1/R7/R10's own sections below are left as originally written (the
-plan, not the result) per this project's append-only convention; do
-not edit them to match the outcome. **Harness: `PASS=52 FAIL=0
-XFAIL=0 XPASS=0`** — twenty-one cases gained total since this plan's
-starting point (T18/T18b/T18c/T18d, T20/T20b/T20c/T20d,
-T21a–T21h, T22/T22b/T22c/T22d/T22e). R9, R11, R20, the rest of R21,
-and R10's SP800-108 half remain plan-only, not executed.
+already have a logged-in session by the time HKDF runs. **R20's five
+micro-items split two shipped-with-code, three closed-by-investigation
+— none guessed.** F36-5 (security-category param) shipped clean, no
+surprises, verified live across all 8 PQC algorithm variants before
+the harness case was even written. The other four each either closed
+a real question or corrected the plan's own premise: OP-4 turned out
+to be no gap at all — reading OpenSSL's own `cms_kemri.c` directly
+showed CMS's real KEM calls pass NULL params unconditionally, so the
+`SET_CTX_PARAMS` the plan worried about has no caller to serve. F36-6
+found a real divergence (`message-encoding`/`mu` bypass modes) and
+also found why it can't be fixed — `CK_SIGN_ADDITIONAL_CONTEXT` (PKCS#11
+v3.2's own mechanism param struct) has no field for either, a spec-level
+ceiling, not a provider gap. ALG-6 found OpenSSL 3.6 DOES have a
+standard EC-as-KEM surface (DHKEM/RFC 9180) but registering this
+project's OWN ECDH-as-KEM under that name would be actively wrong
+(raw ECDH masquerading as RFC 9180's HKDF construction) — closed
+deliberately unexposed, not because no surface exists but because the
+surface that exists doesn't match what this engine actually does.
+ALG-7's "straightforward... mirroring the AES entries" premise did not
+survive contact with `cipher.c`: 1074 lines of AES-block-cipher-
+specific machinery, not a generic symmetric-cipher framework — a
+stream cipher and its AEAD mode need real new plumbing, so this one
+item was pulled out and deferred rather than rushed under a five-item
+"effort S" budget it was never sized for. R8/R18/R19/R21.1/R7/R10/R20's
+own sections below are left as originally written (the plan, not the
+result) per this project's append-only convention; do not edit them to
+match the outcome. **Harness: `PASS=55 FAIL=0 XFAIL=0 XPASS=0`** —
+twenty-four cases gained total since this plan's starting point
+(T18/T18b/T18c/T18d, T20/T20b/T20c/T20d, T21a–T21h,
+T22/T22b/T22c/T22d/T22e, T23/T23b/T23c). R9, R11, the rest of R21,
+R10's SP800-108 half, and R20's ALG-7 remain plan-only, not executed.
 
 Scope: everything still open after phase 3 closed R12–R17 in full
 (branch `feat/jdk27-jca-provider`, commit `8f3fb8e`, unpushed; harness

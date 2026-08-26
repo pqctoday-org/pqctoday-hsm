@@ -42,6 +42,7 @@ PROVIDER_SO="${PROVIDER_SO:-$HSM_ROOT/build/src/vendor/pkcs11-provider/pkcs11-pr
 CPP_ENGINE_SO="${CPP_ENGINE_SO:-$HSM_ROOT/build/src/lib/libsofthsmv3.so}"
 SOFTHSM_UTIL="${SOFTHSM_UTIL:-$HSM_ROOT/build/src/bin/util/softhsm2-util}"
 COMPOSITE_PROBE="${COMPOSITE_PROBE:-$HSM_ROOT/build/composite_sig_probe}"
+DUMP_INT_PARAM="${DUMP_INT_PARAM:-$HSM_ROOT/build/dump_int_param}"
 if [[ -z "${RUST_ENGINE_SO:-}" ]]; then
   for c in /cargo-target/debug/libsofthsmrustv3.so /cargo-target/release/libsofthsmrustv3.so \
            "$HSM_ROOT/rust/target/debug/libsofthsmrustv3.so" "$HSM_ROOT/rust/target/release/libsofthsmrustv3.so"; do
@@ -150,7 +151,7 @@ say preflight "environment"
 VER="$(LD_LIBRARY_PATH=$OPENSSL_LIB_DIR "$OPENSSL_BIN" version 2>/dev/null)"
 case "$VER" in OpenSSL\ 3.6*|OpenSSL\ 3.7*|OpenSSL\ 4.*) : ;; *)
   echo "FATAL: need OpenSSL >= 3.6 at $OPENSSL_BIN (got: ${VER:-nothing}) — see audit ENV-1/gate --cpp note"; exit 2;; esac
-for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE"; do
+for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM"; do
   [[ -e "$f" ]] || { echo "FATAL: missing $f (run the --cpp gate step / cmake build first)"; exit 2; }
 done
 echo "  oracle: $VER; provider: $PROVIDER_SO"
@@ -1231,6 +1232,25 @@ t22d() { t22_case SHA384; }
 run_case T22d PASS "token PBKDF2 (HMAC-SHA384 PRF) == software PBKDF2, engine-log verified (remediation R10); negative-control twin (R13)" t22d
 t22e() { t22_case SHA512; }
 run_case T22e PASS "token PBKDF2 (HMAC-SHA512 PRF) == software PBKDF2, engine-log verified (remediation R10); negative-control twin (R13)" t22e
+
+# ─── T23: NIST security-category PKEY param (remediation R20 / F36-5) ───────
+# One representative param set per PQC family, cross-checked against the
+# FIPS 203/204/205 category each is required to report (1/2/3/5 — category 4
+# is never used by any standard ML-KEM/ML-DSA/SLH-DSA parameter set).
+t23_case() { # $1=alg $2=expected_category
+  local alg="$1" expect="$2" w
+  w=$(mk_arena "r23$(echo "$alg" | tr -cd '[:alnum:]')" "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -provider pkcs11 -algorithm "$alg" -propquery "?provider=pkcs11" -out "$w/k.uri" || return 1
+  local got
+  got=$("$DUMP_INT_PARAM" "$w/k.uri" security-category) || return 1
+  [[ "$got" == "$expect" ]] || return 1
+}
+t23() { t23_case ML-DSA-44 2; }
+run_case T23 PASS "ML-DSA-44 reports NIST security category 2 (FIPS 204 Table 1)" t23
+t23b() { t23_case ML-KEM-768 3; }
+run_case T23b PASS "ML-KEM-768 reports NIST security category 3 (FIPS 203 Table 2)" t23b
+t23c() { t23_case SLH-DSA-SHA2-128s 1; }
+run_case T23c PASS "SLH-DSA-SHA2-128s reports NIST security category 1 (FIPS 205 Table 2)" t23c
 
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"

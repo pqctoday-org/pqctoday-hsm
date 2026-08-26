@@ -438,6 +438,21 @@ static int p11prov_mlkem_keymgmt_get_params_fn(void *keydata, OSSL_PARAM params[
         ret = OSSL_PARAM_set_int(p, secbits);
         if (ret != RET_OSSL_OK) return ret;
     }
+    /* Phase 4 R20 (F36-5): NIST claimed security category, FIPS 203
+     * Table 2 (1/3/5 for ML-KEM-512/768/1024 — category 2/4 are ML-DSA/
+     * SLH-DSA-only, never used here). */
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_CATEGORY);
+    if (p) {
+        int category = 0;
+        switch (param_set) {
+        case CKP_ML_KEM_512:  category = 1; break;
+        case CKP_ML_KEM_768:  category = 3; break;
+        case CKP_ML_KEM_1024: category = 5; break;
+        }
+        if (category == 0) return RET_OSSL_ERR;
+        ret = OSSL_PARAM_set_int(p, category);
+        if (ret != RET_OSSL_OK) return ret;
+    }
     p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
     if (p) {
         int ctsize = 0;
@@ -516,6 +531,7 @@ static const OSSL_PARAM *p11prov_mlkem_keymgmt_gettable_params_fn(void *provctx)
         OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, NULL, 0),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_CATEGORY, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_CMS_RI_TYPE, NULL),
         OSSL_PARAM_END,

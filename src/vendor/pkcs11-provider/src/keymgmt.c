@@ -2994,6 +2994,30 @@ static int p11prov_mldsa_get_params(void *keydata, OSSL_PARAM params[])
             return ret;
         }
     }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_CATEGORY);
+    if (p) {
+        /* Phase 4 R20 (F36-5): NIST claimed security category, FIPS 204
+         * Table 1 (2/3/5 for ML-DSA-44/65/87). */
+        int category = 0;
+        switch (param_set) {
+        case CKP_ML_DSA_44:
+            category = 2;
+            break;
+        case CKP_ML_DSA_65:
+            category = 3;
+            break;
+        case CKP_ML_DSA_87:
+            category = 5;
+            break;
+        }
+        if (category == 0) {
+            return RET_OSSL_ERR;
+        }
+        ret = OSSL_PARAM_set_int(p, category);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
     p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
     if (p) {
         int sigsize = 0;
@@ -3055,6 +3079,7 @@ static const OSSL_PARAM *p11prov_mldsa_gettable_params(void *provctx)
         OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_CATEGORY, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
         OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_MANDATORY_DIGEST, NULL, 0),
         OSSL_PARAM_END,
@@ -3609,6 +3634,41 @@ static int p11prov_slhdsa_get_params(void *keydata, OSSL_PARAM params[])
             return ret;
         }
     }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_CATEGORY);
+    if (p) {
+        /* Phase 4 R20 (F36-5): NIST claimed security category, FIPS 205
+         * Table 2 (1/3/5 for the 128/192/256-bit parameter sets, uniform
+         * across SHA2/SHAKE and s/f — the category tracks the hash output
+         * size, not the speed/size tradeoff). */
+        int category = 0;
+        switch (param_set) {
+        case CKP_SLH_DSA_SHA2_128S:
+        case CKP_SLH_DSA_SHAKE_128S:
+        case CKP_SLH_DSA_SHA2_128F:
+        case CKP_SLH_DSA_SHAKE_128F:
+            category = 1;
+            break;
+        case CKP_SLH_DSA_SHA2_192S:
+        case CKP_SLH_DSA_SHAKE_192S:
+        case CKP_SLH_DSA_SHA2_192F:
+        case CKP_SLH_DSA_SHAKE_192F:
+            category = 3;
+            break;
+        case CKP_SLH_DSA_SHA2_256S:
+        case CKP_SLH_DSA_SHAKE_256S:
+        case CKP_SLH_DSA_SHA2_256F:
+        case CKP_SLH_DSA_SHAKE_256F:
+            category = 5;
+            break;
+        }
+        if (category == 0) {
+            return RET_OSSL_ERR;
+        }
+        ret = OSSL_PARAM_set_int(p, category);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
     p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
     if (p) {
         int sigsize = 0;
@@ -3685,6 +3745,7 @@ static const OSSL_PARAM *p11prov_slhdsa_gettable_params(void *provctx)
         OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_CATEGORY, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
         OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_MANDATORY_DIGEST, NULL, 0),
         OSSL_PARAM_END,
