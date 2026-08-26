@@ -2650,6 +2650,27 @@ Full regression: **harness 80/80** (two new cases, zero regressions),
 **C++ CTest 8/8**, **Rust `cargo test --release` 410 passed / 0
 failed**.
 
+**Phase 7, R36 (HashSLH-DSA provider surface), DONE — low-surprise
+replay of R35, exactly as predicted.** Same shape as ML-DSA's §6.67.6/
+§6.67.7 split, mirrored at §6.69.6/§6.69.7 for SLH-DSA: the ten
+hash-specific `CKM_HASH_SLH_DSA_<hash>` mechanisms are the "with
+hashing" pattern both engines already implement correctly; only the
+routing was missing. `p11prov_slhdsa_set_mechanism` gained the
+identical digest→mechanism mapping R35 built for ML-DSA; Rust's
+multi-part allowlist gained `is_prehash_slh_dsa(mech)`, the SLH-DSA
+twin of R35's `is_prehash_ml_dsa` fix. No new findings — both `T30`
+(C++, SLH-DSA-SHA2-128s, 7856-byte baseline matching T12sign) and
+`T30b` (Rust, twin) passed on the first run.
+
+Full regression: **harness 82/82** (two new cases, zero regressions),
+**C++ CTest 8/8** (one `p11test` failure on the first post-change run
+reproduced as pre-existing flakiness, confirmed via two clean reruns —
+same class as phase-6 R32's own `p11_v32_compliance` flakiness, not a
+new finding), **Rust `cargo test --release` 410 passed / 0 failed**.
+
+This closes phase 7's active work (R34, R35, R36). R33 and R27 remain
+parked, unchanged.
+
 ## 7. Companion document
 
 Remediation priorities, effort estimates and sequencing:

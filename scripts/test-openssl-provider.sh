@@ -1932,6 +1932,43 @@ t29() { local w; w=$(mk_arena hashmldsa "$CPP_ENGINE_SO") && use_arena "$w" || r
 }
 run_case T29 PASS "HashML-DSA digest routing (CKM_HASH_ML_DSA_<hash>, PKCS#11 v3.2 §6.67.7): 'openssl dgst -sha256 -sign' against a pkcs11 ML-DSA key now genuinely routes to HashML-DSA instead of silently signing the raw message (the worst of the two hypothesized outcomes, live-confirmed before the fix); round-trip verify, negative control (default provider refuses), two sabotage controls (wrong digest, tampered message) (remediation R35)" t29
 
+# ─── T30: HashSLH-DSA digest routing, CKM_HASH_SLH_DSA_<hash> (remediation R36) ─
+# Twin of T29 for SLH-DSA (PKCS#11 v3.2 §6.69.7). SLH-DSA-SHA2-128s chosen
+# to match T12sign's already-proven 7856-byte baseline.
+t30() { local w; w=$(mk_arena hashslhdsa "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHA2-128s -out "$w/k.pem" 2>/dev/null || return 1
+  echo "T30 HashSLH-DSA digest-routing test message" > "$w/msg.txt"
+
+  O dgst -sha256 -propquery "?provider=pkcs11" -sign "pkcs11:token=hashslhdsa;type=private" \
+    -out "$w/sig.bin" "$w/msg.txt" 2>/dev/null || { echo "dgst -sha256 -sign failed"; return 1; }
+  [[ "$(stat -c%s "$w/sig.bin" 2>/dev/null || stat -f%z "$w/sig.bin")" == "7856" ]] \
+    || { echo "unexpected signature size"; return 1; }
+
+  O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=hashslhdsa;type=public" \
+    -in "$w/msg.txt" -sigfile "$w/sig.bin" 2>/dev/null \
+    && { echo "HashSLH-DSA signature verified as a PLAIN raw-message signature -- the digest was silently ignored"; return 1; }
+
+  O dgst -sha256 -propquery "?provider=pkcs11" -verify "pkcs11:token=hashslhdsa;type=public" \
+    -signature "$w/sig.bin" "$w/msg.txt" 2>/dev/null || { echo "HashSLH-DSA round-trip verify failed"; return 1; }
+
+  O pkey -pubin -propquery "?provider=pkcs11" -in "pkcs11:token=hashslhdsa;type=public" \
+    -pubout -out "$w/pub.pem" 2>/dev/null || return 1
+  O dgst -sha256 -provider default -verify "$w/pub.pem" -signature "$w/sig.bin" "$w/msg.txt" 2>/dev/null \
+    && { echo "default provider accepted an explicit digest for SLH-DSA -- expected refusal"; return 1; }
+
+  O dgst -sha384 -propquery "?provider=pkcs11" -verify "pkcs11:token=hashslhdsa;type=public" \
+    -signature "$w/sig.bin" "$w/msg.txt" 2>/dev/null \
+    && { echo "wrong-digest verify succeeded -- must not"; return 1; }
+
+  echo "tampered" > "$w/msg_bad.txt"
+  O dgst -sha256 -propquery "?provider=pkcs11" -verify "pkcs11:token=hashslhdsa;type=public" \
+    -signature "$w/sig.bin" "$w/msg_bad.txt" 2>/dev/null \
+    && { echo "tampered-message verify succeeded -- must not"; return 1; }
+
+  return 0
+}
+run_case T30 PASS "HashSLH-DSA digest routing (CKM_HASH_SLH_DSA_<hash>, PKCS#11 v3.2 §6.69.7): twin of T29 for SLH-DSA-SHA2-128s -- digest genuinely routes to HashSLH-DSA (7856-byte sig), round-trip verify, negative control (default provider refuses), two sabotage controls (remediation R36)" t30
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 
@@ -2311,6 +2348,43 @@ t29b() { # Rust-arm twin of T29 -- same proof, over libsofthsmrustv3.so. No
   return 0
 }
 run_case T29b PASS "HashML-DSA digest routing, Rust arm: same proof as T29 over libsofthsmrustv3.so -- no engine-side change needed, proves the provider's shared routing fix reaches both engines identically; round-trip verify, tampered-message sabotage rejected (remediation R35)" t29b
+
+# ─── T30b: HashSLH-DSA digest routing, Rust arm (remediation R36) ──────────
+t30b() { # Rust-arm twin of T30 -- same proof, over libsofthsmrustv3.so.
+  [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/hashslhdsarust"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label hashslhdsarust --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm SLH-DSA-SHA2-128s -out "$w/k.pem" 2>/dev/null || return 1
+  echo "T30b HashSLH-DSA digest-routing RUST test message" > "$w/msg.txt"
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O dgst -sha256 -propquery "?provider=pkcs11" -sign "pkcs11:token=hashslhdsarust;type=private" \
+      -out "$w/sig.bin" "$w/msg.txt" 2>/dev/null || { echo "Rust-arm dgst -sha256 -sign failed"; return 1; }
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -verify -propquery "?provider=pkcs11" -rawin -pubin -inkey "pkcs11:token=hashslhdsarust;type=public" \
+      -in "$w/msg.txt" -sigfile "$w/sig.bin" 2>/dev/null \
+      && { echo "Rust-arm: HashSLH-DSA signature verified as a plain raw-message signature -- digest silently ignored"; return 1; }
+
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O dgst -sha256 -propquery "?provider=pkcs11" -verify "pkcs11:token=hashslhdsarust;type=public" \
+      -signature "$w/sig.bin" "$w/msg.txt" 2>/dev/null || { echo "Rust-arm HashSLH-DSA round-trip verify failed"; return 1; }
+
+  echo "tampered" > "$w/msg_bad.txt"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O dgst -sha256 -propquery "?provider=pkcs11" -verify "pkcs11:token=hashslhdsarust;type=public" \
+      -signature "$w/sig.bin" "$w/msg_bad.txt" 2>/dev/null \
+      && { echo "Rust-arm: tampered-message verify succeeded -- must not"; return 1; }
+
+  return 0
+}
+run_case T30b PASS "HashSLH-DSA digest routing, Rust arm: same proof as T30 over libsofthsmrustv3.so -- round-trip verify, tampered-message sabotage rejected (remediation R36)" t30b
 
 
 # ─── R0.1 regression guard ──────────────────────────────────────────────────

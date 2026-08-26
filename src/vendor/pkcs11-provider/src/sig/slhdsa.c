@@ -51,6 +51,58 @@ DISPATCH_SLHDSA_FN(settable_ctx_params);
 
 static CK_RV p11prov_slhdsa_set_mechanism(P11PROV_SIG_CTX *sigctx)
 {
+    /* Remediation R36 (phase 7): PKCS#11 v3.2 §6.69.7 "HashSLH-DSA
+     * Signature with hashing" -- CKM_HASH_SLH_DSA_<hash> computes the
+     * ENTIRE HashSLH-DSA spec, including hashing ON TOKEN; data passed
+     * in is the raw message M, exactly like plain CKM_SLH_DSA. See
+     * mldsa.c's own p11prov_mldsa_set_mechanism (R35) for the full
+     * rationale and why the bare generic CKM_HASH_SLH_DSA, §6.69.6,
+     * PHM-input, is deliberately NOT handled here. */
+    if (sigctx->digest != 0) {
+        CK_MECHANISM_TYPE hash_mech;
+        switch (sigctx->digest) {
+        case CKM_SHA224:
+            hash_mech = CKM_HASH_SLH_DSA_SHA224;
+            break;
+        case CKM_SHA256:
+            hash_mech = CKM_HASH_SLH_DSA_SHA256;
+            break;
+        case CKM_SHA384:
+            hash_mech = CKM_HASH_SLH_DSA_SHA384;
+            break;
+        case CKM_SHA512:
+            hash_mech = CKM_HASH_SLH_DSA_SHA512;
+            break;
+        case CKM_SHA3_224:
+            hash_mech = CKM_HASH_SLH_DSA_SHA3_224;
+            break;
+        case CKM_SHA3_256:
+            hash_mech = CKM_HASH_SLH_DSA_SHA3_256;
+            break;
+        case CKM_SHA3_384:
+            hash_mech = CKM_HASH_SLH_DSA_SHA3_384;
+            break;
+        case CKM_SHA3_512:
+            hash_mech = CKM_HASH_SLH_DSA_SHA3_512;
+            break;
+        default:
+            /* Includes SHAKE128/256 -- see mldsa.c's identical note:
+             * digests.c's own digest_map has no entry for them yet,
+             * so sigctx->digest can never hold one today. */
+            P11PROV_raise(sigctx->provctx, CKR_MECHANISM_INVALID,
+                          "Unsupported digest for HashSLH-DSA");
+            return CKR_MECHANISM_INVALID;
+        }
+        sigctx->mechanism.mechanism = hash_mech;
+        if (sigctx->slhdsa_params.hedgeVariant != CKH_HEDGE_PREFERRED) {
+            sigctx->mechanism.pParameter = &sigctx->slhdsa_params;
+            sigctx->mechanism.ulParameterLen = sizeof(sigctx->slhdsa_params);
+        } else {
+            sigctx->mechanism.pParameter = NULL;
+            sigctx->mechanism.ulParameterLen = 0;
+        }
+        return CKR_OK;
+    }
     sigctx->mechanism.mechanism = CKM_SLH_DSA;
     /* See mldsa.c's own p11prov_mldsa_set_mechanism for why the parameter
      * is only plumbed through when the caller deviated from defaults. */

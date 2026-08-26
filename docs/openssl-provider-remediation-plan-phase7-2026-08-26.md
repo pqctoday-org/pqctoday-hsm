@@ -369,6 +369,24 @@ should be a low-surprise replay. If R35's consumer inventory or KAT
 work surfaces anything structural, R36 absorbs it for free instead of
 duplicating the churn.
 
+**Execution update (2026-08-26):** low-surprise replay, exactly as
+predicted — no new findings, both `T30`/`T30b` passed on the first
+run. `p11prov_slhdsa_set_mechanism` gained the identical
+digest→`CKM_HASH_SLH_DSA_<hash>` mapping as R35's ML-DSA fix (8 of 10
+digests reachable; SHAKE128/256 unreachable for the same pre-existing
+`digests.c` reason); Rust's `sign_mech_supports_multipart` gained
+`is_prehash_slh_dsa(mech)` (the SLH-DSA twin of R35's ML-DSA helper).
+Item 2 (bare generic `CKM_HASH_SLH_DSA` PHM fix) deferred with R35's
+own, same reasoning — no confirmed consumer. New harness cases `T30`
+(C++, SLH-DSA-SHA2-128s, 7856-byte baseline matching T12sign) and
+`T30b` (Rust, twin). Full regression: harness 82/82 (two cases gained,
+zero regressions), C++ CTest 8/8 (one `p11test` failure on the first
+post-change run reproduced as pre-existing flakiness — confirmed via
+two clean reruns, matching phase-6 R32's own `p11_v32_compliance`
+precedent, not a new finding), `cargo test --release` full pass. One
+commit for this item — the last of phase-7's active work; R33 and R27
+stay parked.
+
 ---
 
 ### R33 (PARKED) — OP-3 parity tier: ML-KEM public SPKI/text encoders

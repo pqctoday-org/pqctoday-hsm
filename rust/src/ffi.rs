@@ -9835,6 +9835,9 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
         // (single-part only per §6.67.6) is correctly NOT included here —
         // is_prehash_ml_dsa() only matches the 10 hash-specific mechanisms.
         || is_prehash_ml_dsa(mech)
+        // Remediation R36: same reasoning as R35's is_prehash_ml_dsa entry
+        // above, for the SLH-DSA family (PKCS#11 v3.2 §6.69.7).
+        || is_prehash_slh_dsa(mech)
 }
 
 /// Shared §5.13.3/§5.15.3 gate for the four Update/Final entry points:
