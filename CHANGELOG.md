@@ -8,6 +8,89 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.26.0] — 2026-08-26
+
+**A new `Pkcs11V32` gRPC+REST service mirrors PKCS#11 v3.2 1:1 — 99 of 104
+`pkcs11f.h` functions live as RPCs, plus 2 vendor RPCs for Split Key —
+alongside the existing legacy 9-verb remoting service, which is unchanged.**
+
+### Added
+
+- **`Pkcs11V32` gRPC + REST service** (`remoting/`): unlike the legacy
+  `Pkcs11Remote` service (9 hand-picked verbs, `ck_rv` mapped through a
+  translation layer), this mirrors the C ABI directly — one unary RPC per
+  `C_*` function, server-held FSM state, raw `CKM`/`CKA`/`CKR` codepoints on
+  the wire, `ck_rv` as a response FIELD (never a transport error). 99 of 104
+  `pkcs11f.h` functions are live; the remaining 5
+  (`C_Initialize`/`C_Finalize`/`C_GetFunctionList`/`C_GetInterface`/
+  `C_GetInterfaceList`) are genuinely N/A over a network and documented as
+  such, not silently dropped. The legacy service is untouched and still
+  frozen byte-for-byte — every commit that touched the new service also ran
+  its own parity tests against the old one.
+- **`SplitKey`/`JoinKey` vendor RPCs** — explicitly labeled as a vendor
+  extension outside `pkcs11f.h` (there is no `CKM_PQCTODAY_SPLIT_KEY` `C_*`
+  dispatch arm in the engine to mirror), wrapping the same
+  `native::split`/`native::join` calls that back KMIP 3.0's Create/Join
+  Split Key. `method`/`polynomial` use the KMIP 3.0 §11.54/§11.55
+  enumeration codepoints verbatim, so a caller driving both surfaces sees
+  one wire vocabulary.
+- **A coverage ledger with a real ratchet**, not a static table:
+  `remoting/coverage_ledger.json` maps every category in the C++ engine's
+  own compliance report to a disposition (RPC / N/A-local) and the exact
+  test(s) that prove it, cross-checked by `remoting/scripts/
+  check_coverage_ledger.py` against the real proto service and the real
+  test files — a case_id naming a function that doesn't exist, or an RPC
+  with zero ledger mention, fails the gate. Regenerates
+  `remoting/REMOTE_P11_V32_COVERAGE.md` deterministically.
+- **A live-binary gRPC smoke-test tool** (`remoting/grpc/examples/
+  smoke_client.rs`): pins the real server's TLS certificate as a trusted CA
+  root (genuine certificate verification, not a bypass) and drives a real
+  `OpenSession → GenerateKeyPair → Sign → Verify → CloseSession` sequence
+  against the actual compiled binary — the "run the app, not the test
+  suite" check the service never had before.
+
+### Verification
+
+- Real findings caught and fixed during development, not shipped: XOR
+  secret-sharing reconstruction has no per-share-count check at join time
+  (only enforced at split time, KMIP 3.0 §13.1) — the negative test for it
+  had to use a different method; FIPS 205's SLH-DSA "s"/"f" parameter-set
+  suffix governs signing SPEED specifically (not keygen cost as first
+  assumed), which turned an intended-to-be-fast test case into a measured
+  227-second one before the fix; the engine's own compliance evidence
+  showed the "ChaCha20" test categories actually exercise the
+  Poly1305-AEAD variant, not the plain stream cipher the initial plan
+  assumed.
+- Whole remoting workspace: **82 passed, 0 failed** (2 posture + 7
+  legacy-parity + 27 three-transport parity cases, 1 `#[ignore]`d (XMSS/HSS
+  sign/verify — ~326s at this engine's smallest parameter set, run
+  on-demand, not in the routine gate) + 46 core unit tests), stable across
+  repeated runs.
+- Full release gate (`bash scripts/local-gate.sh --all`) green end to end:
+  kmip 894 passed, rust engine 417 passed, OASIS KMIP 3.0 replay 97 PASS /
+  0 FAIL / 5 SKIP_DEPRECATED, cross-engine PKCS#11 differential harness 49
+  scenarios / 3945 observations / 0 uncovered divergences, C++ ctest suite
+  (incl. the v3.2 compliance harness, 779 pass / 0 fail / 36 documented
+  skip) 100% passing, 20-suite ACVP wasm harness 133 pass / 0 fail / 1
+  skip, XMSS/XMSS^MT vs release wasm 18 passed, §3.3.3 hybrid TLS groups
+  vs real OpenSSL 3.6 passing, JavaJCE provider suite 208 passed, and
+  JavaJCE-remote gRPC provider suite (against a live `pqc-grpc`) 14
+  passed.
+
+### Fixed
+
+- **README.md's checked-in compliance figures had drifted well behind the
+  actual reports** they cite — the C++ compliance validator's own report
+  now reads 779 pass / 0 fail / 36 documented skip, not the 193 / 0 / 1
+  README still quoted (which also mis-described the single skip as
+  "legacy RIPEMD-160" — that mechanism now passes outright); the Rust
+  engine's conformance evidence now reads 976 passed / 0 failed across 51
+  sections, not the 257/257 across 40 sections figure previously
+  published. Neither drift was introduced by this release; both predate
+  it. Reconciled here per this repo's own `RELEASING.md` checklist, which
+  exists specifically so a reviewer greps the release diff and finds one
+  figure per suite, not three disagreeing ones.
+
 ## [0.25.0] — 2026-08-25
 
 ### Fixed

@@ -181,6 +181,31 @@ run_step "rust engine cargo test" \
   "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
    RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
+# The remoting workspace (gRPC + REST PKCS#11 services) had NO gate step at
+# all before 2026-08-26 — its three-transport parity suite
+# (remoting/acceptance) was developer-run only, so a proto/service change
+# could regress CKR parity across transports invisibly. Added with the
+# Pkcs11V32 C_* mirror work (docs/remoting-pkcs11-v32-full-coverage-plan-
+# 2026-08-26.md, RW0). Standalone workspace ⇒ its own `cargo test`; the
+# first grep catches any FAILED summary, the second reports the aggregate.
+# Grown in RW-T (docs/remoting-pkcs11-v32-remaining-gaps-plan-2026-08-26.md)
+# with the coverage-ledger ratchet: `cargo test` intentionally does NOT run
+# the #[ignore]d v21b_xmss_hss_sign_verify_parity case (326s at this
+# engine's smallest XMSS parameter set — see that test's own doc comment),
+# so it stays out of the routine gate; the ledger still accounts for it via
+# case_ids, and the ratchet below checks the LEDGER, not live execution of
+# every ignored test. G4 (docs/remoting-pkcs11-v32-gap-remediation-plan-
+# 2026-08-26.md) split the original combined V21 into this slow, still-
+# ignored XMSS/HSS case and a separate fast v21a_slh_dsa_sign_verify_parity
+# case (SLH-DSA-128S keygen is fast) that DOES run here — do not re-merge
+# them without re-measuring, and do not remove #[ignore] from v21b without
+# first re-measuring its cost; 326s per run would take this step from
+# ~seconds to 5+ minutes for every contributor.
+run_step "remoting gRPC+REST services + three-transport parity" \
+  "cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}' && \
+   cd $AG_CONTAINER_ROOT/remoting && python3 scripts/check_coverage_ledger.py"
+
 # Cheap, and it runs BEFORE the replay on purpose: if the corpus is not the
 # corpus we think it is, the replay figure below is measuring something else.
 run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \

@@ -32,6 +32,11 @@ struct Cli {
     /// rule. Under other profiles it is honored if given but not required.
     #[arg(long, env = "PKCS11_REMOTE_TLS_CLIENT_CA")]
     tls_client_ca: Option<PathBuf>,
+
+    /// Enable destructive Pkcs11V32 RPCs — see the gRPC binary's flag of
+    /// the same name. OFF by default (plan RW0 posture).
+    #[arg(long = "enable-destructive", env = "PKCS11_REMOTE_ENABLE_DESTRUCTIVE", default_value_t = false)]
+    enable_destructive: bool,
 }
 
 #[tokio::main]
@@ -57,7 +62,10 @@ async fn main() -> anyhow::Result<()> {
     let server_config = build_server_config(&cli)?;
     let rustls_config = RustlsConfig::from_config(Arc::new(server_config));
 
-    let app = routes::router();
+    // 16 MiB body limit, explicit: axum's 2 MB default (×1.33 base64) would
+    // silently reject legitimate mirror payloads — plan RW0 rule 5.
+    let app = routes::router_with(cli.enable_destructive)
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024));
     tracing::info!(addr = %cli.listen, "pqc-rest-pkcs11 listening (HTTP/1.1 only)");
     axum_server::bind_rustls(cli.listen, rustls_config)
         .serve(app.into_make_service())

@@ -7,6 +7,13 @@ use crate::dto::*;
 use crate::error::ApiError;
 
 pub fn router() -> Router {
+    router_with(false)
+}
+
+/// Router with the v32 mirror mounted; `destructive` gates C_DestroyObject
+/// and future destructive RPCs (plan RW0 posture — ON in tests, OFF in
+/// deployed containers).
+pub fn router_with(destructive: bool) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/sessions", post(open_session))
@@ -17,6 +24,7 @@ pub fn router() -> Router {
         .route("/v1/keys/{id}/encapsulate", post(encapsulate))
         .route("/v1/keys/{id}/decapsulate", post(decapsulate))
         .route("/v1/keys/{id}/certificate", post(get_self_signed_certificate))
+        .merge(crate::routes_v32::router(crate::routes_v32::V32State { destructive }))
 }
 
 async fn healthz() -> Json<HealthResponse> {
