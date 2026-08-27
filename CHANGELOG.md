@@ -8,6 +8,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.26.1] — 2026-08-27
+
+**Patch release: fixes a real SEGFAULT that `v0.26.0`'s own tagged commit
+carries.** `v0.26.0` was tagged and merged before this defect was found —
+anyone building from that tag gets a crashing `p11_v32_compliance` test.
+No feature changes; this release exists solely to carry the fix.
+
+### Fixed
+
+- **`p11_v32_compliance` SEGFAULT in `test_bip32_wallets`, real and
+  deterministic, not an environment flake.** `HDWalletDerivation::hmacSha512`
+  passed `(size_t*)&macLen` to `EVP_MAC_final()`, but `macLen` was declared
+  `unsigned int` (4 bytes) while OpenSSL's real signature writes through a
+  `size_t*` (8 bytes on any LP64 target) — a genuine stack buffer overflow
+  that stomped the adjacent `EVP_MAC*` local, corrupting it before
+  `EVP_MAC_free()` dereferenced it. Reproduced 3/3 under CI's exact config
+  (`CMAKE_BUILD_TYPE=Debug`, OpenSSL 3.6.3) and 0/3 under the Release +
+  OpenSSL 3.5.6 config `local-gate.sh --cpp` had validated `v0.26.0` with —
+  which is why that release's own "100% passing" C++ ctest figure and
+  GitHub's red CI were both true statements about the same commit. Fixed by
+  declaring `macLen` as `size_t` and dropping the cast; verified 5/5 clean
+  on the previously-crashing test and 8/8 on the full C++ ctest suite, both
+  in CI's exact config, on both arm64 and real amd64 (QEMU). Introduced in
+  `cc559f3` (the BIP32/SLIP-0010 feature), unrelated to `v0.26.0`'s remoting
+  work — the only occurrence of this cast pattern anywhere in the repo.
+- A single post-fix CI run additionally showed `[BIP32] Child_Derive: FAIL
+  (RV=6)` — investigated rather than dismissed: this exact code path had
+  never once executed on CI before (dead/untested until 2026-08-23, then
+  blocked by the SEGFAULT above ever since), so this may have been its
+  first real execution anywhere. A true SLIP-10 rejection here is
+  statistically near-impossible (~2⁻¹²⁸); ruled out as a deterministic bug
+  via 15/15 clean reproductions across arm64 and real amd64 (QEMU) in CI's
+  exact build config, then confirmed as a one-off by a clean CI re-run.
+  Tracked as a known flake, not fixed further — no reproducible cause
+  found.
+
 ## [0.26.0] — 2026-08-26
 
 **A new `Pkcs11V32` gRPC+REST service mirrors PKCS#11 v3.2 1:1 — 99 of 104
@@ -79,21 +115,6 @@ alongside the existing legacy 9-verb remoting service, which is unchanged.**
 
 ### Fixed
 
-- **`p11_v32_compliance` SEGFAULT in `test_bip32_wallets`, real and
-  deterministic, not an environment flake.** `HDWalletDerivation::hmacSha512`
-  passed `(size_t*)&macLen` to `EVP_MAC_final()`, but `macLen` was declared
-  `unsigned int` (4 bytes) while OpenSSL's real signature writes through a
-  `size_t*` (8 bytes on any LP64 target) — a genuine stack buffer overflow
-  that stomped the adjacent `EVP_MAC*` local, corrupting it before
-  `EVP_MAC_free()` dereferenced it. Reproduced 3/3 under CI's exact config
-  (`CMAKE_BUILD_TYPE=Debug`, OpenSSL 3.6.3) and 0/3 under the Release +
-  OpenSSL 3.5.6 config `local-gate.sh --cpp` had validated with — which is
-  why this release's own "100% passing" C++ ctest figure above and GitHub's
-  red CI were both true statements about the same commit. Fixed by declaring
-  `macLen` as `size_t` and dropping the cast; verified 5/5 clean in the
-  CI-matching config after the fix. Introduced in `cc559f3` (the BIP32/
-  SLIP-0010 feature), unrelated to this release's remoting work — the only
-  occurrence of this cast pattern anywhere in the repo.
 - **README.md's checked-in compliance figures had drifted well behind the
   actual reports** they cite — the C++ compliance validator's own report
   now reads 779 pass / 0 fail / 36 documented skip, not the 193 / 0 / 1
