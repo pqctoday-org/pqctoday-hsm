@@ -17,7 +17,7 @@ const std::string OID_P256 = "06082A8648CE3D030107";
 const std::string OID_ED25519 = "06032B6570";
 
 bool HDWalletDerivation::hmacSha512(const ByteString& key, const ByteString& data, ByteString& outMac) {
-    unsigned int macLen = 64;
+    size_t macLen = 64;
     unsigned char mac[64];
     
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
@@ -32,7 +32,7 @@ bool HDWalletDerivation::hmacSha512(const ByteString& key, const ByteString& dat
     
     if (EVP_MAC_init(ctx, key.const_byte_str(), key.size(), params) <= 0 ||
         EVP_MAC_update(ctx, data.const_byte_str(), data.size()) <= 0 ||
-        EVP_MAC_final(ctx, mac, (size_t*)&macLen, sizeof(mac)) <= 0) {
+        EVP_MAC_final(ctx, mac, &macLen, sizeof(mac)) <= 0) {
         EVP_MAC_CTX_free(ctx);
         EVP_MAC_free(mac_alg);
         return false;

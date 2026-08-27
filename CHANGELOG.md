@@ -79,6 +79,21 @@ alongside the existing legacy 9-verb remoting service, which is unchanged.**
 
 ### Fixed
 
+- **`p11_v32_compliance` SEGFAULT in `test_bip32_wallets`, real and
+  deterministic, not an environment flake.** `HDWalletDerivation::hmacSha512`
+  passed `(size_t*)&macLen` to `EVP_MAC_final()`, but `macLen` was declared
+  `unsigned int` (4 bytes) while OpenSSL's real signature writes through a
+  `size_t*` (8 bytes on any LP64 target) — a genuine stack buffer overflow
+  that stomped the adjacent `EVP_MAC*` local, corrupting it before
+  `EVP_MAC_free()` dereferenced it. Reproduced 3/3 under CI's exact config
+  (`CMAKE_BUILD_TYPE=Debug`, OpenSSL 3.6.3) and 0/3 under the Release +
+  OpenSSL 3.5.6 config `local-gate.sh --cpp` had validated with — which is
+  why this release's own "100% passing" C++ ctest figure above and GitHub's
+  red CI were both true statements about the same commit. Fixed by declaring
+  `macLen` as `size_t` and dropping the cast; verified 5/5 clean in the
+  CI-matching config after the fix. Introduced in `cc559f3` (the BIP32/
+  SLIP-0010 feature), unrelated to this release's remoting work — the only
+  occurrence of this cast pattern anywhere in the repo.
 - **README.md's checked-in compliance figures had drifted well behind the
   actual reports** they cite — the C++ compliance validator's own report
   now reads 779 pass / 0 fail / 36 documented skip, not the 193 / 0 / 1
