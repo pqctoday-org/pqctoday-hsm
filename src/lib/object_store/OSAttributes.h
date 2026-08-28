@@ -46,5 +46,21 @@
 #define CKA_OS_SOPIN		(CKA_VENDOR_SOFTHSM + 4)
 #define CKA_OS_USERPIN		(CKA_VENDOR_SOFTHSM + 5)
 
+// WS-11 (2026-08-28) — a per-object creation-order marker, stored as an
+// 8-byte big-endian std::chrono::steady_clock nanosecond timestamp
+// (OSToken::createObject / SessionObjectStore::createObject). Object
+// *handles* only reflect discovery order within one C_Initialize/
+// C_Finalize lifetime — the HandleManager (and its handle counter) is
+// destroyed on every C_Finalize and rebuilt from scratch on the next
+// C_Initialize, so a rediscovered token object gets a brand-new handle in
+// whatever order the object store's std::set<OSObject*> (pointer-address
+// order) happens to iterate, which is unrelated to when the object was
+// actually created. This attribute survives C_Finalize (it is real,
+// persisted object-file data, not HandleManager bookkeeping), so
+// C_FindObjectsInit's ordering sort (SoftHSM_objects.cpp) uses it instead
+// of the handle whenever it is present. Internal only — never registered
+// with P11Attributes, so it is invisible to C_GetAttributeValue.
+#define CKA_OS_CREATIONSEQ	(CKA_VENDOR_SOFTHSM + 6)
+
 #endif // !_SOFTHSM_V2_OSATTRIBUTES_H
 

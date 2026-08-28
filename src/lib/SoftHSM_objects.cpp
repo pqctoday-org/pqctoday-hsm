@@ -36,7 +36,9 @@
  *****************************************************************************/
 
 #include "config.h"
+#include "OSAttributes.h"
 #include <algorithm>
+#include <cstdint>
 #include <vector>
 #include "log.h"
 #include "access.h"
@@ -779,16 +781,35 @@ CK_RV SoftHSM::C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pT
 	token->getObjects(allObjects);
 	sessionObjectStore->getObjects(slot->getSlotID(),allObjects);
 
-	// WS-11 Phase 2 (2026-08-28) — (isProfileObject, handle) pairs, sorted
-	// below before handing to FindOperation. Profiles v3.2 §5.7.8 leaves
-	// C_FindObjects order unspecified, but a plain ascending-handle order
-	// (the old std::set<CK_OBJECT_HANDLE>'s only option) put library-
-	// descriptor CKO_PROFILE objects FIRST — they are published at token
-	// init, before any application object exists, so they always claim the
-	// lowest handles. OASIS's own CERT-M-1-32 mandatory test case expects
-	// the opposite (application objects first); see D3 in the WS-11
-	// Extended/Auth/Cert implementation plan.
-	std::vector<std::pair<bool, CK_OBJECT_HANDLE> > orderedHandles;
+	// WS-11 Phase 2 (2026-08-28) — (isProfileObject, creationSeq, handle)
+	// triples, sorted below before handing to FindOperation. Profiles v3.2
+	// §5.7.8 leaves C_FindObjects order unspecified, but a plain ascending-
+	// handle order (the old std::set<CK_OBJECT_HANDLE>'s only option) put
+	// library-descriptor CKO_PROFILE objects FIRST — they are published at
+	// token init, before any application object exists, so they always
+	// claim the lowest handles. OASIS's own CERT-M-1-32 mandatory test case
+	// expects the opposite (application objects first); see D3 in the
+	// WS-11 Extended/Auth/Cert implementation plan.
+	//
+	// WS-11 Phase 3 follow-up (2026-08-28) — sorting the app-object group
+	// by handle alone was still wrong: CK_OBJECT_HANDLE only reflects
+	// discovery order within one C_Initialize/C_Finalize lifetime. The
+	// HandleManager (and its handle counter) is destroyed on every
+	// C_Finalize and rebuilt from scratch on the next C_Initialize, so a
+	// rediscovered token object gets a brand-new handle in whatever order
+	// this function's std::set<OSObject*> iteration (pointer-address
+	// order) happens to produce — unrelated to when the object was
+	// actually created. Proven nondeterministic empirically: the same
+	// fixture, provisioned identically, produced a different find order on
+	// repeated runs whenever a C_Finalize/C_Initialize cycle intervened
+	// (exactly what every OASIS mandatory test case does as its own first
+	// step). CKA_OS_CREATIONSEQ (OSAttributes.h) is real, persisted
+	// object-file data stamped once at C_CreateObject time — it survives
+	// C_Finalize, so it is the correct sort key; CK_OBJECT_HANDLE is only
+	// the final tiebreaker (objects lacking the attribute, or an
+	// impossible same-nanosecond collision, still sort deterministically
+	// rather than crash or reorder randomly).
+	std::vector<std::pair<bool, std::pair<uint64_t, CK_OBJECT_HANDLE> > > orderedHandles;
 	std::set<OSObject*>::iterator it;
 	for (it=allObjects.begin(); it != allObjects.end(); ++it)
 	{
@@ -886,18 +907,31 @@ CK_RV SoftHSM::C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pT
 				return CKR_GENERAL_ERROR;
 			}
 			bool isProfileObject = (*it)->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) == CKO_PROFILE;
-			orderedHandles.push_back(std::make_pair(isProfileObject, hObject));
+			uint64_t creationSeq = 0;
+			if ((*it)->attributeExists(CKA_OS_CREATIONSEQ))
+			{
+				ByteString seqBytes = (*it)->getByteStringValue(CKA_OS_CREATIONSEQ);
+				if (seqBytes.size() == 8)
+				{
+					const unsigned char* b = seqBytes.const_byte_str();
+					for (int i = 0; i < 8; ++i)
+						creationSeq = (creationSeq << 8) | b[i];
+				}
+			}
+			orderedHandles.push_back(
+				std::make_pair(isProfileObject, std::make_pair(creationSeq, hObject)));
 		}
 	}
 
-	// Stable sort: application objects (by handle, i.e. discovery order)
-	// before CKO_PROFILE markers (by handle) — see the ordering comment
-	// above where orderedHandles is declared.
+	// Stable sort: application objects before CKO_PROFILE markers, each
+	// group ordered by true creation time (CKA_OS_CREATIONSEQ), handle as
+	// the final tiebreaker — see the ordering comment above where
+	// orderedHandles is declared.
 	std::stable_sort(orderedHandles.begin(), orderedHandles.end());
 	std::vector<CK_OBJECT_HANDLE> handles;
 	handles.reserve(orderedHandles.size());
 	for (size_t i = 0; i < orderedHandles.size(); ++i)
-		handles.push_back(orderedHandles[i].second);
+		handles.push_back(orderedHandles[i].second.second);
 
 	// Storing the object handles for the find will protect the library
 	// whenever a stale object handle is used to access the library.
