@@ -242,6 +242,20 @@ ml-kem = "0.2.3"
 # ship in a `cargo build`, so this has zero effect on the wasm bundle).
 rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser"] }
 
+# kmip's own tests share slot 0 with two different PIN literal
+# conventions across fixtures (certify.rs/create.rs/register_import_
+# export.rs use "so-pin"/"user-pin"; catalyst.rs/chameleon.rs/
+# create_key_pair.rs/related_certs.rs/spki_verify.rs/validate.rs use
+# "so"/"user") and used to get a de facto clean slate between them only
+# because production `C_Finalize` used to (wrongly) wipe the engine's
+# `TOKEN_STORE` — removed as a real PKCS#11 v3.2 §5.4.2 non-conformance
+# fix. `test-support` exposes the engine's own test-reset function
+# (`native::test_lock`'s exact mechanism) to `helpers::engine_lock()`
+# below, same "never in `cargo build`" reasoning as the rcgen entry
+# above — this is a second, feature-enabled copy of the `[dependencies]`
+# entry, dev-only.
+softhsmrustv3 = { path = "../rust", features = ["test-support"] }
+
 # Mirror the patches from `pqctoday-hsm/rust/Cargo.toml` so the `softhsmrustv3`
 # path dep above gets the FIPS-204 / FIPS-205 `Ph::SHA{224,384,3_*}` / `SHAKE256`
 # variants it needs for PKCS#11 v3.2 §6.67.7 HashML-DSA + §6.69.7 HashSLH-DSA

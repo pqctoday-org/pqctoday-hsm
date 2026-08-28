@@ -1135,11 +1135,24 @@ export function hkdf(M, hSession, ikmHandle, hashMech, extract, expand, salt, in
 
 // Create an Emscripten-compatible shim around a wasm-bindgen module.
 // Adds HEAPU8, setValue, getValue on top of the _C_ / _malloc / _free exports.
-function shimWasmBindgen(mod, wasmMemory) {
+function shimWasmBindgen(mod, wasmMemory, indirectFunctionTable) {
   const shim = {}
   for (const [key, val] of Object.entries(mod)) {
     if (typeof val === 'function') shim[key] = val
   }
+  // The current wasm-bindgen toolchain's generated `_free(ptr, _js_size)`
+  // takes a second (size-hint) argument it validates with `_assertNum` —
+  // every caller in this file (and the rest of the test suite) only ever
+  // passes one. Matches the hub's own softhsm.ts loader, which already
+  // wraps this the same way for the same reason.
+  if (typeof shim._free === 'function') {
+    const rawFree = shim._free
+    shim._free = (ptr) => rawFree(ptr, 1)
+  }
+  // Real WASM funcref table (see rust/patch_export_table.py) — C_GetFunctionList
+  // (PKCS#11 v3.2 §5.4.4) returns a CK_FUNCTION_LIST whose fields are indices
+  // into this table; a caller invokes one via `table.get(idx)(args)`.
+  if (indirectFunctionTable) shim.__indirect_function_table = indirectFunctionTable
   shim.setValue = (ptr, val, type) => {
     const dv = new DataView(wasmMemory.buffer)
     if (type === 'i32') dv.setInt32(ptr, val, true)
@@ -1308,7 +1321,7 @@ export async function loadEngine(engine) {
     const wasmInstance = new WebAssembly.Instance(wasmModule, { './softhsmrustv3_bg.js': bgMod })
     bgMod.__wbg_set_wasm(wasmInstance.exports)
     wasmInstance.exports.__wbindgen_start?.()
-    return shimWasmBindgen(bgMod, wasmInstance.exports.memory)
+    return shimWasmBindgen(bgMod, wasmInstance.exports.memory, wasmInstance.exports.__indirect_function_table)
   }
   // Default: C++ Emscripten module (already has HEAPU8, setValue, getValue)
   const cppJsPath = path.resolve(WASM_DIR, 'softhsm.js')

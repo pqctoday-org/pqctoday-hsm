@@ -119,12 +119,28 @@ pub(crate) mod test_lock {
     //!
     //! Acquire at the top of every `#[test]` body that calls
     //! `native::*`: `let _guard = test_lock::acquire();`.
+    //!
+    //! Also performs a full engine-state reset (including `TOKEN_STORE`)
+    //! on every acquisition. Production `C_Finalize` deliberately stopped
+    //! doing this (2026-08-28 — PKCS#11 v3.2 §5.4.1/§5.4.2 never says
+    //! Finalize should wipe token contents; a token is meant to persist
+    //! like a smart card across a driver unload/reload, and the old
+    //! blanket wipe was a real non-conformance WS-11's Tier A conformance
+    //! runner caught). Many tests' own `reset_engine()`-style helpers
+    //! (`C_Finalize` + `C_Initialize`) were unknowingly relying on that
+    //! wipe as their de facto test-isolation mechanism; this restores the
+    //! same guarantee explicitly and centrally, for tests only, so every
+    //! caller of the already-established `test_lock::acquire()` pattern
+    //! keeps working without per-test changes.
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     pub fn acquire() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        let guard = LOCK
+            .get_or_init(|| Mutex::new(()))
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| e.into_inner());
+        crate::ffi::reset_all_engine_state_for_test();
+        guard
     }
 }

@@ -191,6 +191,91 @@ enum OpFamily {
     VerifySignature,
 }
 
+/// PKCS#11 v3.2 §5.4.4 C_GetFunctionList — the classic 68-entry v2.40
+/// CK_FUNCTION_LIST. Field order matches ck_abi.rs's `FnListV240` exactly
+/// (pkcs11f.h's canonical order, asserted by tests there) — reused
+/// verbatim rather than re-derived.
+///
+/// Each field is a real WASM indirect-function-table index. Verified
+/// 2026-08-28 with a standalone probe: a value obtained this way,
+/// invoked from JS as `__indirect_function_table.get(idx)(args)`,
+/// produces byte-identical CK_RV results to calling the same function's
+/// named wasm-bindgen export — CKR_OK then CKR_CRYPTOKI_ALREADY_
+/// INITIALIZED across two calls, exactly matching the spec's own
+/// C_GetFunctionList example (`(*pC_Initialize)(NULL_PTR)`). The prior
+/// belief that "C function pointers cannot cross wasm-bindgen" (see
+/// lib.rs's `ck_abi` module gate) was correct about wasm-bindgen-cli's
+/// default JS glue not exposing the table, but conflated that with
+/// genuine platform impossibility — wasm32's indirect function table is
+/// real and exportable; the build just needed `--export-table` on the
+/// linker plus a post-processing step re-adding the export
+/// wasm-bindgen-cli otherwise strips (see build-wasm-bundle.sh, same
+/// pattern already used there for `__wbg_get_memory`).
+///
+/// Written by explicit byte offset (not a native `#[repr(C)]` struct) to
+/// avoid compiler-inserted alignment padding — CK_VERSION's 2 bytes would
+/// otherwise misalign the first u32 field by 2 bytes on a naturally-
+/// aligned struct (the exact bug this session found and fixed in the
+/// browser-side CK_INFO decoder for the C++ engine's own struct). Matches
+/// how CK_INFO/CK_SLOT_INFO/CK_TOKEN_INFO are already hand-written
+/// elsewhere in this file.
+fn function_list_bytes() -> &'static [u8] {
+    static LIST: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut buf = vec![0u8; 2 + 68 * 4];
+        buf[0] = 3; // CryptokiVersion.major
+        buf[1] = 2; // CryptokiVersion.minor
+        macro_rules! idx {
+            ($f:expr) => {
+                ($f as *const ()) as usize as u32
+            };
+        }
+        #[rustfmt::skip]
+        let entries: [u32; 68] = [
+            idx!(C_Initialize), idx!(C_Finalize), idx!(C_GetInfo), idx!(C_GetFunctionList),
+            idx!(C_GetSlotList), idx!(C_GetSlotInfo), idx!(C_GetTokenInfo),
+            idx!(C_GetMechanismList), idx!(C_GetMechanismInfo), idx!(C_InitToken),
+            idx!(C_InitPIN), idx!(C_SetPIN), idx!(C_OpenSession), idx!(C_CloseSession),
+            idx!(C_CloseAllSessions), idx!(C_GetSessionInfo), idx!(C_GetOperationState),
+            idx!(C_SetOperationState), idx!(C_Login), idx!(C_Logout), idx!(C_CreateObject),
+            idx!(C_CopyObject), idx!(C_DestroyObject), idx!(C_GetObjectSize),
+            idx!(C_GetAttributeValue), idx!(C_SetAttributeValue), idx!(C_FindObjectsInit),
+            idx!(C_FindObjects), idx!(C_FindObjectsFinal), idx!(C_EncryptInit), idx!(C_Encrypt),
+            idx!(C_EncryptUpdate), idx!(C_EncryptFinal), idx!(C_DecryptInit), idx!(C_Decrypt),
+            idx!(C_DecryptUpdate), idx!(C_DecryptFinal), idx!(C_DigestInit), idx!(C_Digest),
+            idx!(C_DigestUpdate), idx!(C_DigestKey), idx!(C_DigestFinal), idx!(C_SignInit),
+            idx!(C_Sign), idx!(C_SignUpdate), idx!(C_SignFinal), idx!(C_SignRecoverInit),
+            idx!(C_SignRecover), idx!(C_VerifyInit), idx!(C_Verify), idx!(C_VerifyUpdate),
+            idx!(C_VerifyFinal), idx!(C_VerifyRecoverInit), idx!(C_VerifyRecover),
+            idx!(C_DigestEncryptUpdate), idx!(C_DecryptDigestUpdate), idx!(C_SignEncryptUpdate),
+            idx!(C_DecryptVerifyUpdate), idx!(C_GenerateKey), idx!(C_GenerateKeyPair),
+            idx!(C_WrapKey), idx!(C_UnwrapKey), idx!(C_DeriveKey), idx!(C_SeedRandom),
+            idx!(C_GenerateRandom), idx!(C_GetFunctionStatus), idx!(C_CancelFunction),
+            idx!(C_WaitForSlotEvent),
+        ];
+        for (i, v) in entries.iter().enumerate() {
+            buf[2 + i * 4..2 + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        buf
+    })
+}
+
+/// PKCS#11 v3.2 §5.4.4. "It's OK to call C_GetFunctionList before calling
+/// C_Initialize" — no `require_init!()` guard, matching that requirement
+/// (also matches C_GetInterfaceList/C_GetInterface just below, and the
+/// C++ engine's own C_GetFunctionList).
+#[wasm_bindgen(js_name = _C_GetFunctionList)]
+pub fn C_GetFunctionList(pp_function_list: *mut u8) -> u32 {
+    if pp_function_list.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let ptr = function_list_bytes().as_ptr() as u32;
+    unsafe {
+        (pp_function_list as *mut u32).write(ptr);
+    }
+    CKR_OK
+}
+
 #[wasm_bindgen(js_name = _C_Initialize)]
 pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
     // PKCS#11 v3.2 §5.6 — a second C_Initialize without an intervening
@@ -291,9 +376,100 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().clear());
     ACVP_RNG.with(|r| *r.borrow_mut() = None);
     SESSIONS.with(|s| s.borrow_mut().clear());
-    TOKEN_STORE.with(|ts| ts.borrow_mut().clear());
+    // §5.4.2/§5.4.1 (checked directly against the OASIS spec text, 2026-08-28,
+    // not assumed): C_Initialize/C_Finalize govern the application's
+    // relationship with the *library* ("initialize its internal memory
+    // buffers, or any other resources it requires" / "the last Cryptoki
+    // call made by an application") — neither section mentions tokens,
+    // objects, or persistent state at all. A token is meant to behave like
+    // persistent storage (a smart card that stays inserted while the
+    // driver unloads/reloads), so wiping TOKEN_STORE here was a real
+    // non-conformance: WS-11's Tier A conformance runner caught it via
+    // BL-M-1-32 (Profiles v3.2 §5.1.1), which assumes a token already
+    // TOKEN_INITIALIZED/USER_PIN_INITIALIZED survives a fresh
+    // C_Initialize — confirmed by a standalone probe (1 slot reporting
+    // tokenPresent=1 before C_Finalize, 0 after C_Finalize + re-
+    // C_Initialize with no intervening C_InitToken) and by contrast with
+    // the C++ engine, which correctly retains token state across the same
+    // cycle. Every session is gone at this point (cleared just above), so
+    // each token's `login_state` still needs resetting — reuse the same
+    // per-slot helper C_CloseAllSessions already uses for exactly this,
+    // rather than the blanket `.clear()` that used to sit here.
+    let all_slots: Vec<u32> = TOKEN_STORE.with(|ts| ts.borrow().keys().copied().collect());
+    for slot_id in all_slots {
+        reset_login_state_if_no_sessions(slot_id);
+    }
     crate::state::set_initialized(false);
     CKR_OK
+}
+
+/// Test-only full reset, including `TOKEN_STORE` — the wipe `C_Finalize`
+/// used to (wrongly) do in production. `OBJECTS`/`SESSIONS`/`TOKEN_STORE`
+/// are genuinely global (`lazy_static! GlobalState<T>`, a `Mutex` wrapper —
+/// see `native::test_lock`'s own doc comment), so `cargo test`'s parallel
+/// runner shares this state across every test unless serialized; every
+/// `#[test]` here already takes `test_lock::acquire()` first for exactly
+/// that reason. Before this function existed, individual tests' own
+/// `reset_engine()` helpers got a guaranteed-clean slate as a side effect
+/// of C_Finalize's now-removed TOKEN_STORE wipe — this restores that
+/// guarantee explicitly, for tests only, without depending on production
+/// C_Finalize behavior (which correctly no longer provides it). Does not
+/// go through C_Finalize/`require_init!()` at all, unlike the individual
+/// `reset_engine()` helpers that call this — a test that panicked without
+/// finalizing must still get a truly clean slate, not a silent no-op.
+///
+/// `pub`, gated by `feature = "test-support"` in addition to `cfg(test)`:
+/// kmip's own test suite (a downstream crate) hit the exact same
+/// cross-test poisoning this function was built to prevent — its
+/// fixtures share slot 0 with two different PIN literal conventions, and
+/// used to get away with it only because production `C_Finalize` quietly
+/// wiped `TOKEN_STORE`. `#[cfg(test)]` alone is crate-local and cannot
+/// expose this to kmip's test binary, so `test-support` (opt-in,
+/// dev-dependency only — see `Cargo.toml`) makes it a real, always-
+/// compiled function for that one purpose without touching the
+/// production `[dependencies]` build.
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_all_engine_state_for_test() {
+    OBJECTS.with(|o| {
+        let mut store = o.borrow_mut();
+        for attrs in store.values_mut() {
+            if let Some(val) = attrs.get_mut(&CKA_VALUE) {
+                val.zeroize();
+            }
+        }
+        store.clear();
+    });
+    NEXT_HANDLE.store(100, std::sync::atomic::Ordering::Relaxed);
+    SIGN_STATE.with(|s| s.borrow_mut().clear());
+    VERIFY_STATE.with(|s| s.borrow_mut().clear());
+    VERIFY_SIG_STATE.with(|s| s.borrow_mut().clear());
+    ENCRYPT_STATE.with(|s| s.borrow_mut().clear());
+    DECRYPT_STATE.with(|s| s.borrow_mut().clear());
+    MESSAGE_ENCRYPT_STATE.with(|s| {
+        let mut m = s.borrow_mut();
+        for ctx in m.values_mut() {
+            ctx.wipe();
+        }
+        m.clear();
+    });
+    MESSAGE_DECRYPT_STATE.with(|s| {
+        let mut m = s.borrow_mut();
+        for ctx in m.values_mut() {
+            ctx.wipe();
+        }
+        m.clear();
+    });
+    DIGEST_STATE.with(|s| s.borrow_mut().clear());
+    DIGEST_MULTIPART.with(|s| s.borrow_mut().clear());
+    FIND_STATE.with(|s| s.borrow_mut().clear());
+    MESSAGE_SIGN_ACC.with(|s| s.borrow_mut().clear());
+    MESSAGE_VERIFY_ACC.with(|s| s.borrow_mut().clear());
+    SIGN_MULTIPART_ACC.with(|s| s.borrow_mut().clear());
+    VERIFY_MULTIPART_ACC.with(|s| s.borrow_mut().clear());
+    ACVP_RNG.with(|r| *r.borrow_mut() = None);
+    SESSIONS.with(|s| s.borrow_mut().clear());
+    TOKEN_STORE.with(|ts| ts.borrow_mut().clear());
+    crate::state::set_initialized(false);
 }
 
 #[wasm_bindgen(js_name = _C_GetSlotList)]
@@ -18219,6 +18395,10 @@ mod param_struct_width_tests {
     /// the template's absent parameter set falls to the token's default.
     #[test]
     fn xmss_keygen_ignores_a_mechanism_parameter() {
+        // Hardcodes slot_id=0, which needs test_lock's reset guarantee (a
+        // slot really does exist, uninitialized) now that C_Finalize no
+        // longer wipes TOKEN_STORE — see test_lock's own doc comment.
+        let _guard = crate::native::test_lock::acquire();
         // Other tests in this binary share the process, so the library may
         // already be initialised — both answers are correct here.
         let rv_init = C_Initialize(core::ptr::null_mut());
@@ -18304,6 +18484,10 @@ mod param_struct_width_tests {
     fn bip32_child_derive_reads_flags_and_index_past_pnext() {
         use crate::crypto::HDCurve;
 
+        // Hardcodes slot_id=0, which needs test_lock's reset guarantee (a
+        // slot really does exist, uninitialized) now that C_Finalize no
+        // longer wipes TOKEN_STORE — see test_lock's own doc comment.
+        let _guard = crate::native::test_lock::acquire();
         let rv_init = C_Initialize(core::ptr::null_mut());
         assert!(rv_init == CKR_OK || rv_init == CKR_CRYPTOKI_ALREADY_INITIALIZED);
         let mut sess: u32 = 0;

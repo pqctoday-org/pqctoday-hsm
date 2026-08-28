@@ -35,6 +35,89 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   succeeds and produces a genuinely 57-byte key (not a silently-substituted
   Ed25519 one); a new round-trip test proves Ed448 and Ed25519 keys don't
   cross-verify through the shared length-based dispatch.
+- **Rust engine (browser WASM target): real `C_GetFunctionList`.** WS-11's
+  Tier A conformance runner caught this as a genuine Baseline Provider
+  §5.1 gap specific to the `wasm32-unknown-unknown` build — no
+  `_C_GetFunctionList` export existed at all, while the C++ engine and the
+  Rust engine's own native/`wasm32-unknown-emscripten` builds (via the
+  pre-existing `ck_abi.rs`) already had one. §5.4.4's own worked example
+  dereferences and calls a returned `CK_FUNCTION_LIST` entry directly
+  (`pC_Initialize = pFunctionList->C_Initialize; (*pC_Initialize)(NULL_PTR)`),
+  so a spec-faithful implementation needs real, callable function
+  references, not a struct of placeholder values. `wasm-bindgen` doesn't
+  let Rust code hand a C function pointer to JS, but raw
+  `wasm32-unknown-unknown` output does export a real call target: each
+  function's address is an index into the module's WASM indirect-call
+  table (`__indirect_function_table`), retrievable and invocable from JS as
+  `table.get(idx)(...)` — a standard WASM/JS interop mechanism,
+  independent of wasm-bindgen. The gap was that `wasm-bindgen-cli`'s own
+  postprocessing pass strips that table's export even when the raw
+  `rustc`/`wasm-ld` output correctly includes it (`-C
+  link-arg=--export-table`, added in both `rust/.cargo/config.toml` and
+  `build-wasm-bundle.sh`'s `RUSTFLAGS` — the two don't merge, so both
+  needed it independently); `build-wasm-bundle.sh` now runs a new
+  disassemble/patch/reassemble step (`patch_export_table.py`, via the
+  project's existing Binaryen toolchain) to restore the export post
+  wasm-bindgen. `_C_GetFunctionList` returns a cached 68-entry
+  `CK_FUNCTION_LIST` (v2.40 layout, field order matching `ck_abi.rs`)
+  built from real table indices, is legal to call before `C_Initialize`
+  per §5.4.4, and is covered by `tests/c-get-function-list.mjs` — a
+  full Initialize→InitToken→OpenSession→Login→InitPIN→Login→Digest→Finalize
+  session driven entirely through `table.get(idx)(...)` calls, with the
+  digest result cross-checked against Node's own `crypto` module as an
+  independent oracle. (Release builds legitimately fold
+  `C_GetFunctionStatus`/`C_CancelFunction` — byte-identical bodies per
+  §5.21 — onto one shared table index via normal identical-code-folding;
+  the test asserts this is the only collision.)
+
+### Fixed
+
+- **Rust engine: `C_Finalize` no longer wipes token state.** WS-11's Tier A
+  conformance runner caught this with a standalone probe: one slot present
+  before `C_Finalize`, zero slots after `C_Finalize` + a re-`C_Initialize`
+  with no intervening `C_InitToken` call. Neither §5.4.1 (`C_Initialize`)
+  nor §5.4.2 (`C_Finalize`) says anything about token contents — those
+  functions govern the library session, and a token is meant to behave
+  like persistent storage (a smart card that stays inserted across a
+  driver unload/reload); the C++ engine, run through the identical
+  sequence, already retains the token correctly. Fixed by removing the
+  blanket `TOKEN_STORE.clear()` from `C_Finalize` and replacing it with the
+  narrower, already-correct per-slot behavior `C_CloseAllSessions` uses:
+  `reset_login_state_if_no_sessions` resets only session-scoped login
+  state, leaving each `TokenState`'s persistent identity (label, PINs)
+  untouched. All other `C_Finalize` cleanup (zeroizing `OBJECTS`, clearing
+  every operation-state map, clearing `SESSIONS`) is unchanged. Verified
+  with two independent standalone probes (token persistence; per-slot
+  login-state reset) plus the full native (`cargo test`) and WASM ACVP
+  suites. Several existing native tests turned out to rely on the old
+  wipe as their de facto isolation mechanism between runs (their own
+  `reset_engine()` helpers were just `C_Finalize` + `C_Initialize`); fixed
+  centrally by having the existing `#[cfg(test)]` `native::test_lock`
+  (already acquired by ~100+ tests to serialize access to the engine's
+  genuinely global — not `thread_local!` — `Mutex`-backed state) perform a
+  full state reset on every acquisition, plus adding the lock to the two
+  tests that had no prior serialization at all. The same de facto reliance
+  turned up in a second, separate location after this landed: `kmip/`'s own
+  test fixtures share slot 0 across two different PIN literal conventions
+  (`certify.rs`/`create.rs`/`register_import_export.rs` use `"so-pin"`/
+  `"user-pin"`; the other engine-touching test modules use `"so"`/`"user"`),
+  and used to get a de facto clean slate between them the same way — once
+  removed, whichever convention initialized slot 0 first made every test
+  using the other one fail `CKR_PIN_INCORRECT` (correctly, per §5.5.7:
+  reinitializing an already-initialized token requires the *existing* SO
+  PIN — a separate, earlier fix, not new). Deterministic per test-binary
+  scheduling, not a true data race, which is why it surfaced as ~31
+  failures under the default parallel `cargo test` and 0 under
+  `--test-threads=1`. Fixed the same way: `rust`'s
+  `reset_all_engine_state_for_test` is now also `pub`, gated by a new
+  opt-in `test-support` feature (`cfg(any(test, feature = "test-support"))`
+  — `cfg(test)` alone cannot cross a crate boundary) so kmip's own
+  `helpers::engine_lock()` can call it on every acquisition, mirroring
+  `native::test_lock::acquire()` exactly. `test-support` is a dev-
+  dependency-only feature enable in `kmip/Cargo.toml` — never reaches the
+  production `[dependencies]` entry or the shipped `pqctoday-kmip` binary.
+  Verified with two consecutive full `cargo test` runs in `kmip/` (688
+  passed / 0 failed each) plus a full `local-gate.sh` core-gate rerun.
 
 ## [0.26.1] — 2026-08-27
 

@@ -1,0 +1,20 @@
+# Scoped to this crate's own isolated workspace ([workspace] members =
+# ["bench-harness"] in Cargo.toml — not part of a repo-wide workspace, so
+# this cannot affect kmip/remoting's separate wasm32 builds).
+#
+# --export-table: exports the wasm32 module's indirect function table as
+# `__indirect_function_table`, which C_GetFunctionList needs — a caller
+# reads a real function-table index out of the returned CK_FUNCTION_LIST
+# struct and invokes it via `table.get(idx)(args)`, the standard
+# WebAssembly/JS mechanism for calling a funcref retrieved from linear
+# memory. Without this flag the table exists internally (wasm32 always
+# needs one for Rust's own indirect calls) but isn't reachable from JS at
+# all, which is what made C_GetFunctionList impossible in the first place.
+#
+# This is the fallback for invocations that don't set RUSTFLAGS explicitly
+# (cargo test/check, rust-analyzer). build-wasm-bundle.sh — the actual
+# shipped-artifact build — sets RUSTFLAGS directly, which Cargo does NOT
+# merge with this file's rustflags (whichever is set wins outright), so
+# that script carries its own copy of --export-table too. Keep both in sync.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--export-table"]
