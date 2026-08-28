@@ -1,0 +1,30 @@
+{
+  "algorithm": "ECDSA",
+  "mode": "sigVer",
+  "revision": "FIPS186-5",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ECDSA-SigVer-FIPS186-5/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-27",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "45f9e9425e68b099d9c029e0e75ec04e9cc5943b60fa24cdb4d5af778f350b63",
+    "note": "tgId 23 (curve=P-521, hashAlg=SHA2-512), tcId 156, the group's only testPassed=true case. Independently re-verified against Node's crypto (OpenSSL) oracle before use, same as every other vector in this directory. Replaces the prior self-consistency-only Functional Sign+Verify test (WS-4/D-3): that test proved the engine's own sign+verify agree with each other, not that verify accepts an externally-signed, NIST-known-good signature — exactly the blind spot the gap report's H-4 finding named."
+  },
+  "testGroups": [
+    {
+      "curve": "P-521",
+      "hashAlg": "SHA-512",
+      "tests": [
+        {
+          "qx": "00b6d8e1bf57041690bbf8029f5cff95942abb39d33cd6f033fd9b2d2aca8bcd8bfca21c4a2c4321d9c51702b7ddbd5ce45ce8618a80ab420cd5b4399f6390b070f8",
+          "qy": "00fec2cb9f014166aece1d92cdfbd0e285873202822bfb0d02635d9a58ee9ba0d25bdbd776b5fb6d467c51006ae3e159738208bc3621d5934601b5abec313c82254f",
+          "message": "455e95a9cefece7a48b7ee471138b35d17913fef6b59ee22c96b063507bd49530ec751f1207fd3f401a6d2abb936778525d2df53e2c48f974fb529a1f2d0201a63a77e89bed82ff6e422b4faf03ed7f30df90527d8acfb8c510fc95076b817b5a1c3e99129857f2afab700dd50e0a619059f5a0985c1de4c39a70e3d032aaee5",
+          "r": "00e9cdac23167602f30787bfeb087788e2f3426551cea49425e6018827eccc9b70d03c497d8c1d7fe567856b89448d56bca36801e20117a61fad5b555a03e1c4629e",
+          "s": "0034dfda1159871c4dc7d06c176f0325b9c535fcf33830d9a9e7613ae7701423f30dcd85ab1ebc4a65e3ebeab9651bd6b95534035417d738a45982cabcaefc186afc",
+          "testPassed": true,
+          "tcId": 156
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "algorithm": "EDDSA",
+  "mode": "sigVer",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/EDDSA-SigVer-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-27",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "8556b9c48ef7ff209a9f866ed83e3c3881cfdd3c4c1ee1abe2602da69c1e97b0",
+    "note": "tgId 3 (curve=ED-448, pure mode, i.e. preHash=False), tcId 14, the group's first testPassed=true case. Independently re-verified against Node's crypto (OpenSSL) oracle before use (Node supports Ed448 natively since v12). Previously a dead file with zero importers (gap report G13/H-6) — this vector file existed but nothing read it, and no Ed448 signature test of any kind ran in the ACVP tab (only X448 ECDH is tested). Wired as a new test category, not a replacement (D-3)."
+  },
+  "testGroups": [
+    {
+      "curve": "Ed448",
+      "tests": [
+        {
+          "pk": "bb7ea666fa9a7df1fb16f661fadd4376714fd8c01d978119d77f6bcebad5a4555c1cfe8d7ba443bb30adae979d0dff9a76bf116c21325c7280",
+          "message": "f61a8343a32f9bede12aa3553b08050b8c83ba7528d6696b39efc1f65d2f179db58d5706f3b20eef9c071341283b5e05166e00cfaed48b4d2176f6b21e37f5f46ccc90990d1b7a8c53684ab3248be22fa2e02d52238469462664226d3f6158e6bb37cc0b6a00e543c12453171bb2b243e43514761db02b39d7fb99f25e3bb1a6",
+          "signature": "98355b77d2f5ca16fe3170745551897da0fdc79fba19d617e2e88a962343cd5b8e0d3dcda63bd28ec9c9becd7df669db07229a0388891a6900f5e1300e9eebda3b583eea9fd92f604f4368cedd51db30711fe2e46ea457fc707bdd582cecbe984d3be071daa4c91fe8de5ce4ac1379e23a00",
+          "testPassed": true,
+          "tcId": 14
+        }
+      ]
+    }
+  ]
+}
