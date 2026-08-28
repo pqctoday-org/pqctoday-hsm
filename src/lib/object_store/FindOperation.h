@@ -37,6 +37,7 @@
 #include "config.h"
 
 #include <set>
+#include <vector>
 #include "OSObject.h"
 
 class FindOperation
@@ -48,8 +49,16 @@ public:
     // Hand this operation back to the factory for recycling.
     void recycle();
 
-    // Add the objects from thet set that match the attributes in the given template to the find operation.
-    void setHandles(const std::set<CK_OBJECT_HANDLE> &handles);
+    // WS-11 Phase 2 (2026-08-28) — a vector, not a std::set: the caller
+    // (SoftHSM::C_FindObjectsInit) now hands over handles in a deliberate
+    // order (application objects before library-descriptor CKO_PROFILE
+    // objects — Profiles v3.2 §5.7.8 leaves C_FindObjects order
+    // unspecified, but OASIS's own CERT-M-1-32 mandatory test case
+    // implicitly depends on it, same as the cross-engine differential
+    // harness). A std::set would silently re-sort back to ascending handle
+    // order and undo that. Duplicate-free by construction: each candidate
+    // object is visited exactly once by the caller's enumeration.
+    void setHandles(const std::vector<CK_OBJECT_HANDLE> &handles);
 
     // Retrieve handles
     CK_ULONG retrieveHandles(CK_OBJECT_HANDLE_PTR phObject, CK_ULONG ulCount);
@@ -61,7 +70,7 @@ protected:
     // Use a protected constructor to force creation via factory method.
     FindOperation();
 
-    std::set<CK_OBJECT_HANDLE> _handles;
+    std::vector<CK_OBJECT_HANDLE> _handles;
 };
 
 #endif // _SOFTHSM_V2_FINDOPERATION_H

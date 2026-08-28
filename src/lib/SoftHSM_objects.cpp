@@ -36,6 +36,8 @@
  *****************************************************************************/
 
 #include "config.h"
+#include <algorithm>
+#include <vector>
 #include "log.h"
 #include "access.h"
 #include "SoftHSM.h"
@@ -777,7 +779,16 @@ CK_RV SoftHSM::C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pT
 	token->getObjects(allObjects);
 	sessionObjectStore->getObjects(slot->getSlotID(),allObjects);
 
-	std::set<CK_OBJECT_HANDLE> handles;
+	// WS-11 Phase 2 (2026-08-28) — (isProfileObject, handle) pairs, sorted
+	// below before handing to FindOperation. Profiles v3.2 §5.7.8 leaves
+	// C_FindObjects order unspecified, but a plain ascending-handle order
+	// (the old std::set<CK_OBJECT_HANDLE>'s only option) put library-
+	// descriptor CKO_PROFILE objects FIRST — they are published at token
+	// init, before any application object exists, so they always claim the
+	// lowest handles. OASIS's own CERT-M-1-32 mandatory test case expects
+	// the opposite (application objects first); see D3 in the WS-11
+	// Extended/Auth/Cert implementation plan.
+	std::vector<std::pair<bool, CK_OBJECT_HANDLE> > orderedHandles;
 	std::set<OSObject*>::iterator it;
 	for (it=allObjects.begin(); it != allObjects.end(); ++it)
 	{
@@ -874,9 +885,19 @@ CK_RV SoftHSM::C_FindObjectsInit(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pT
 				session->resetOp();
 				return CKR_GENERAL_ERROR;
 			}
-			handles.insert(hObject);
+			bool isProfileObject = (*it)->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) == CKO_PROFILE;
+			orderedHandles.push_back(std::make_pair(isProfileObject, hObject));
 		}
 	}
+
+	// Stable sort: application objects (by handle, i.e. discovery order)
+	// before CKO_PROFILE markers (by handle) — see the ordering comment
+	// above where orderedHandles is declared.
+	std::stable_sort(orderedHandles.begin(), orderedHandles.end());
+	std::vector<CK_OBJECT_HANDLE> handles;
+	handles.reserve(orderedHandles.size());
+	for (size_t i = 0; i < orderedHandles.size(); ++i)
+		handles.push_back(orderedHandles[i].second);
 
 	// Storing the object handles for the find will protect the library
 	// whenever a stale object handle is used to access the library.
@@ -984,6 +1005,26 @@ std::vector<CK_ULONG> SoftHSM::computeSupportedProfiles()
 		fl->C_Logout           != NULL_PTR;
 	if (extended)
 		profiles.push_back(CKP_EXTENDED_PROVIDER);
+
+	// Profiles v3.2 §5.4 — Authentication Token: Baseline + CKO_PRIVATE_KEY/
+	// CKO_PUBLIC_KEY objects (structural, P11Object already supports both) +
+	// Login/LoginUser/Logout (shared with Extended above) + C_SignInit +
+	// (C_Sign and/or C_SignUpdate+C_SignFinal). WS-11 Phase 2 (2026-08-28).
+	const bool authentication =
+		fl->C_Login    != NULL_PTR && fl->C_LoginUser != NULL_PTR &&
+		fl->C_Logout   != NULL_PTR && fl->C_SignInit  != NULL_PTR &&
+		(fl->C_Sign != NULL_PTR || (fl->C_SignUpdate != NULL_PTR && fl->C_SignFinal != NULL_PTR));
+	if (authentication)
+		profiles.push_back(CKP_AUTHENTICATION_TOKEN);
+
+	// Profiles v3.2 §5.5 — Public Certificates Token: Baseline + CKO_CERTIFICATE
+	// objects. This build's CreateObject dispatch (case CKO_CERTIFICATE,
+	// SoftHSM_objects.cpp) is unconditional — no WITH_* flag gates certificate
+	// support the way mechanisms are gated — so this claim needs no runtime
+	// probe beyond Baseline itself. cond. 8 (public findability, CKA_ID
+	// linkage) is a caller-provisioning discipline, not something the engine
+	// enforces structurally; the conformance runner's fixtures satisfy it.
+	profiles.push_back(CKP_PUBLIC_CERTIFICATES_TOKEN);
 
 	// CKP_COMPLETE_PROVIDER is deliberately NOT claimed: §5.2 requires support
 	// for ALL mechanisms in [PKCS11_Spec] section 6, which this build does not
