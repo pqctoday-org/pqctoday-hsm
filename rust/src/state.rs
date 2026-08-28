@@ -216,33 +216,65 @@ pub fn ensure_slot(slot_id: u32) {
     }
 }
 
+/// Profiles v3.2 §5 — the profile IDs this build genuinely satisfies every
+/// numbered condition of, computed rather than hard-coded so a future build
+/// that drops a required entry point stops claiming the profile that needs
+/// it (same discipline as the C++ engine's `computeSupportedProfiles`,
+/// SoftHSM_objects.cpp). This crate has no `#ifdef`-style conditional
+/// compilation over its PKCS#11 C-ABI surface the way the C++ build does
+/// (every `_C_*` export below is always present), so "computed" here means
+/// "audited against every condition in Profiles v3.2 §5.x", not "probed via
+/// a null function pointer" — the audit trail lives in
+/// rust/RUST_P11_V32_CONFORMANCE_REPORT.md; keep this list in lockstep with
+/// it, never ahead of it.
+///
+/// - Baseline (§5.1): the original claim, unconditional.
+/// - Extended (§5.3): C_GetMechanismList/Info + Login/LoginUser/Logout are
+///   real (never stubs); RSA_PKCS_KEY_PAIR_GEN/RSA_PKCS now advertise the
+///   full 512-16384 range with CKF_WRAP|CKF_UNWRAP genuinely backed by
+///   C_WrapKey/C_UnwrapKey (WS-11 Phase 1, closing the EXT-M-1-32 gap).
+/// - Authentication Token (§5.4): CKO_PRIVATE_KEY/CKO_PUBLIC_KEY objects,
+///   Login/LoginUser/Logout, and C_SignInit+C_Sign are all real.
+/// - Public Certificates Token (§5.5): CKO_CERTIFICATE creation (X.509
+///   only) enforces §4.6's footnotes (CKA_CERTIFICATE_TYPE/CKA_SUBJECT
+///   required, CKA_VALUE-or-CKA_URL+hashes), and can_access_object already
+///   makes non-private objects findable pre-login (cond. 8a).
+fn supported_profiles() -> [u32; 4] {
+    [
+        CKP_BASELINE_PROVIDER,
+        CKP_EXTENDED_PROVIDER,
+        CKP_AUTHENTICATION_TOKEN,
+        CKP_PUBLIC_CERTIFICATES_TOKEN,
+    ]
+}
+
 /// PKCS#11 Profiles v3.2 §3 — materialize this token's built-in `CKO_PROFILE`
 /// object(s) at slot creation: token-resident, public (no CKA_PRIVATE, so
 /// visible to C_FindObjects without login per can_access_object), and
 /// read-only (CKA_MODIFIABLE/COPYABLE/DESTROYABLE all FALSE — apply_object_defaults
-/// would otherwise default them to TRUE). Baseline Provider is the only
-/// profile this engine currently claims conformance to; add further profile
-/// objects here only after auditing every Profiles v3.2 requirement for
-/// that profile (see rust/RUST_P11_V32_CONFORMANCE_REPORT.md).
+/// would otherwise default them to TRUE). One object per `supported_profiles()`
+/// entry — WS-11 Phase 1 widened this from Baseline-only after auditing
+/// Extended/Authentication/Public-Certificates against every condition in
+/// Profiles v3.2 §5.3/§5.4/§5.5 (see rust/RUST_P11_V32_CONFORMANCE_REPORT.md).
 fn init_profile_objects(slot_id: u32) {
-    let mut attrs: Attributes = HashMap::new();
-    // store_ulong, NOT u32::to_le_bytes. §5.7.7 makes C_FindObjects "an exact
-    // byte-for-byte match with all attributes in the template", so a four-byte
-    // CKA_CLASS cannot match the eight-byte CK_OBJECT_CLASS an LP64 caller
-    // supplies — which is why the differential harness saw Rust publish ZERO
-    // findable CKO_PROFILE objects while C++ published two. The object existed
-    // the whole time and was simply unfindable at native width; C_InitToken
-    // never destroyed it (CKA_DESTROYABLE=FALSE already protects it, and
-    // destroy_destroyable_objects_on_slot honours that). Every other object in
-    // this engine goes through store_ulong; this one was the outlier.
-    store_ulong(&mut attrs, CKA_CLASS, CKO_PROFILE);
-    store_ulong(&mut attrs, CKA_PROFILE_ID, CKP_BASELINE_PROVIDER);
-    attrs.insert(CKA_TOKEN, vec![1]);
-    attrs.insert(CKA_PRIV_SLOT_ID, slot_id.to_le_bytes().to_vec());
-    store_bool(&mut attrs, CKA_MODIFIABLE, false);
-    store_bool(&mut attrs, CKA_COPYABLE, false);
-    store_bool(&mut attrs, CKA_DESTROYABLE, false);
-    allocate_handle(attrs);
+    for profile_id in supported_profiles() {
+        let mut attrs: Attributes = HashMap::new();
+        // store_ulong, NOT u32::to_le_bytes. §5.7.7 makes C_FindObjects "an
+        // exact byte-for-byte match with all attributes in the template", so
+        // a four-byte CKA_CLASS cannot match the eight-byte CK_OBJECT_CLASS
+        // an LP64 caller supplies — which is why the differential harness
+        // once saw Rust publish ZERO findable CKO_PROFILE objects while C++
+        // published two. Every other object in this engine goes through
+        // store_ulong; this one was the outlier, now fixed.
+        store_ulong(&mut attrs, CKA_CLASS, CKO_PROFILE);
+        store_ulong(&mut attrs, CKA_PROFILE_ID, profile_id);
+        attrs.insert(CKA_TOKEN, vec![1]);
+        attrs.insert(CKA_PRIV_SLOT_ID, slot_id.to_le_bytes().to_vec());
+        store_bool(&mut attrs, CKA_MODIFIABLE, false);
+        store_bool(&mut attrs, CKA_COPYABLE, false);
+        store_bool(&mut attrs, CKA_DESTROYABLE, false);
+        allocate_handle(attrs);
+    }
 }
 
 pub struct EncryptCtx {

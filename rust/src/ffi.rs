@@ -1192,7 +1192,15 @@ const EC_CAPABILITY_FLAGS: u32 =
 
 pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
     let info = match mech_type {
-        CKM_RSA_PKCS_KEY_PAIR_GEN => (1024, 4096, 0x00010000u32),
+        // WS-11 Phase 1 (2026-08-28) widened 1024-4096 to 512-16384 — the
+        // Extended Provider mandatory test case (EXT-M-1-32) records these
+        // exact bounds from the OASIS example (itself SoftHSM2's own
+        // advertised range, matching this engine's C++ sibling,
+        // OSSLRSA::getMinKeySize/getMaxKeySize). 512-bit RSA is
+        // cryptographically weak and never the default (rsa_keygen's own
+        // floor comment already says so) — advertising it is not
+        // recommending it, and RSA-1024-4096 test coverage is unaffected.
+        CKM_RSA_PKCS_KEY_PAIR_GEN => (512, 16384, 0x00010000u32),
         // Raw RSA PKCS#1 v1.5 — sign/verify + encrypt/decrypt + (2026-07-25)
         // sign-recover/verify-recover (CKF_SIGN_RECOVER 0x1000 |
         // CKF_VERIFY_RECOVER 0x4000; C_SignRecover reuses this mechanism's
@@ -1202,10 +1210,21 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // was accurate in intent from 2026-07-25 but the dispatch match
         // didn't back it until now; the decrypt arm carries a reviewed,
         // accepted padding-oracle risk decision, documented in full there.
+        // WS-11 Phase 1: CKF_WRAP|CKF_UNWRAP (0x00020000|0x00040000) added
+        // alongside real CKM_RSA_PKCS support in C_WrapKey/C_UnwrapKey
+        // (same under-advertised-capability class as the CKM_RSA_PKCS_OAEP
+        // arm below) — EXT-M-1-32 expects both bits set.
         CKM_RSA_PKCS => (
-            1024,
-            4096,
-            0x00000800 | 0x00002000 | 0x00000100 | 0x00000200 | 0x00001000 | 0x00004000,
+            512,
+            16384,
+            0x00000800
+                | 0x00002000
+                | 0x00000100
+                | 0x00000200
+                | 0x00001000
+                | 0x00004000
+                | 0x00020000
+                | 0x00040000,
         ),
         // CKM_RSA_X_509 — raw RSASP1/RSAVP1, no padding. Added 2026-07-25
         // for sign-recover/verify-recover ONLY; CKF_SIGN/CKF_VERIFY/
@@ -2252,12 +2271,22 @@ fn C_GenerateKeyPair_impl(
                     CKA_MODULUS_BITS,
                 )
                 .unwrap_or(2048) as usize;
-                // Floor at 1024: 2048+ is the recommended/default size, but the
-                // conformance suite mints a throwaway 1024-bit key to exercise
-                // the negative key-usage policy paths (CKA_SIGN=false,
-                // CKA_EXTRACTABLE=false). 1024 is cryptographically weak and
-                // never the default — callers should use >= 2048.
-                if !(1024..=4096).contains(&bits) {
+                // WS-11 Phase 1 (2026-08-28): widened 1024-4096 to 512-16384
+                // to genuinely back the range mechanism_info now advertises
+                // for CKM_RSA_PKCS_KEY_PAIR_GEN (Extended Provider,
+                // EXT-M-1-32 — the OASIS example's bounds, matching the C++
+                // engine's non-FIPS OSSLRSA::getMinKeySize()==512 floor).
+                // 2048+ remains the recommended/default size; the
+                // conformance suite mints a throwaway 1024-bit key to
+                // exercise negative key-usage policy paths
+                // (CKA_SIGN=false, CKA_EXTRACTABLE=false). Every size below
+                // 2048 is cryptographically weak and never the default —
+                // advertising the range is not recommending a point in it;
+                // callers should use >= 2048. 16384-bit generation is slow
+                // (seconds, not the sub-100ms this engine's other sizes
+                // manage) — exercised only by a native, #[ignore]-marked
+                // test, never by the browser's own default-key paths.
+                if !(512..=16384).contains(&bits) {
                     return CKR_ARGUMENTS_BAD;
                 }
                 let private_key =
@@ -7547,7 +7576,7 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
             }
         }
     }
-    let matching = OBJECTS.with(|objs| {
+    let mut matching = OBJECTS.with(|objs| {
         objs.borrow()
             .iter()
             .filter(|(_, attrs)| {
@@ -7562,9 +7591,22 @@ pub fn C_FindObjectsInit(h_session: u32, p_template: *mut u8, ul_count: u32) -> 
                     // wrap-matching cannot drift apart.
                     && crate::state::attrs_match_template(attrs, &match_attrs)
             })
-            .map(|(handle, _)| *handle)
-            .collect::<Vec<u32>>()
+            .map(|(handle, attrs)| {
+                (*handle, crate::state::get_object_attr_u32_from(attrs, CKA_CLASS))
+            })
+            .collect::<Vec<(u32, Option<u32>)>>()
     });
+    // WS-11 Phase 1 (2026-08-28) — §5.7.8 specifies no result order, but
+    // OBJECTS is a HashMap: iteration order was arbitrary, which OASIS's
+    // CERT-M-1-32 mandatory test case (implicitly, by asserting on
+    // Object.Object[0]/[1]) and the cross-engine differential harness both
+    // depend on being stable. Deterministic order: application objects
+    // first (by handle, i.e. creation order), library-descriptor objects
+    // (CKO_PROFILE — the only one this engine has; CKO_VALIDATION isn't
+    // implemented) last, since those are metadata ABOUT the token rather
+    // than something the caller asked for.
+    matching.sort_unstable_by_key(|(handle, class)| (*class == Some(CKO_PROFILE), *handle));
+    let matching: Vec<u32> = matching.into_iter().map(|(handle, _)| handle).collect();
     FIND_STATE.with(|s| {
         s.borrow_mut().insert(
             h_session,
@@ -9068,8 +9110,17 @@ pub fn C_WrapKey(
         let is_kwp = mech_type == CKM_AES_KEY_WRAP_KWP || mech_type == CKM_AES_KEY_WRAP_PAD;
         let is_aes_wrap = mech_type == CKM_AES_KEY_WRAP || is_kwp;
         let is_rsa_oaep = mech_type == CKM_RSA_PKCS_OAEP;
+        // WS-11 Phase 1 (2026-08-28) — raw RSA PKCS#1 v1.5 wrap, closing the
+        // Extended Provider (EXT-M-1-32) gap: mechanism_info advertised
+        // CKF_WRAP|CKF_UNWRAP for CKM_RSA_PKCS with neither backed by a real
+        // dispatch arm — an application checking capabilities before use
+        // would have concluded the engine could do what it in fact could
+        // not, the exact under-advertised-capability class already fixed
+        // for CKM_RSA_PKCS_OAEP/AES_CBC above. Same PKCS1v15 padding
+        // primitive C_Encrypt/C_Decrypt's CKM_RSA_PKCS arms already use.
+        let is_rsa_pkcs = mech_type == CKM_RSA_PKCS;
         let is_aes_cbc = mech_type == CKM_AES_CBC || mech_type == CKM_AES_CBC_PAD;
-        if !is_aes_wrap && !is_rsa_oaep && !is_aes_cbc {
+        if !is_aes_wrap && !is_rsa_oaep && !is_rsa_pkcs && !is_aes_cbc {
             return CKR_MECHANISM_INVALID;
         }
 
@@ -9207,6 +9258,33 @@ pub fn C_WrapKey(
                     Err(_) => return CKR_FUNCTION_FAILED,
                 }
             })
+        } else if is_rsa_pkcs {
+            // Raw RSA PKCS#1 v1.5 wrap — same packed-modulus wrapping-key
+            // parse as the OAEP arm above, PKCS1v15 padding instead of OAEP.
+            if wrapping_key.len() < 8 {
+                return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            let n_len = u32::from_le_bytes([
+                wrapping_key[0],
+                wrapping_key[1],
+                wrapping_key[2],
+                wrapping_key[3],
+            ]) as usize;
+            if wrapping_key.len() < 4 + n_len + 1 {
+                return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            let n = rsa::BigUint::from_bytes_be(&wrapping_key[4..4 + n_len]);
+            let e = rsa::BigUint::from_bytes_be(&wrapping_key[4 + n_len..]);
+            let pk = match rsa::RsaPublicKey::new(n, e) {
+                Ok(k) => k,
+                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+            };
+            with_rng!(rng, {
+                match pk.encrypt(&mut rng, rsa::Pkcs1v15Encrypt, &key_to_wrap) {
+                    Ok(ct) => ct,
+                    Err(_) => return CKR_FUNCTION_FAILED,
+                }
+            })
         } else if is_kwp {
             use aes::cipher::generic_array::GenericArray;
             // AES-KWP (RFC 5649) — supports arbitrary-length data
@@ -9292,8 +9370,10 @@ pub fn C_UnwrapKey(
         let is_kwp = mech_type == CKM_AES_KEY_WRAP_KWP || mech_type == CKM_AES_KEY_WRAP_PAD;
         let is_aes_wrap = mech_type == CKM_AES_KEY_WRAP || is_kwp;
         let is_rsa_oaep = mech_type == CKM_RSA_PKCS_OAEP;
+        // WS-11 Phase 1 — mirrors C_WrapKey's is_rsa_pkcs above.
+        let is_rsa_pkcs = mech_type == CKM_RSA_PKCS;
         let is_aes_cbc = mech_type == CKM_AES_CBC || mech_type == CKM_AES_CBC_PAD;
-        if !is_aes_wrap && !is_rsa_oaep && !is_aes_cbc {
+        if !is_aes_wrap && !is_rsa_oaep && !is_rsa_pkcs && !is_aes_cbc {
             return CKR_MECHANISM_INVALID;
         }
 
@@ -9356,6 +9436,19 @@ pub fn C_UnwrapKey(
                 Err(rv) => return rv,
             };
             match sk.decrypt(oaep, wrapped_data) {
+                Ok(pt) => pt,
+                // §6.16 — wrapped-key decode failure (uniform code).
+                Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+            }
+        } else if is_rsa_pkcs {
+            // Raw RSA PKCS#1 v1.5 unwrap — same PKCS8 private-key parse as
+            // the OAEP arm above, PKCS1v15 padding instead of OAEP.
+            use rsa::pkcs8::DecodePrivateKey;
+            let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&unwrapping_key) {
+                Ok(k) => k,
+                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+            };
+            match sk.decrypt(rsa::Pkcs1v15Encrypt, wrapped_data) {
                 Ok(pt) => pt,
                 // §6.16 — wrapped-key decode failure (uniform code).
                 Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
@@ -16452,15 +16545,29 @@ mod profile_object_ffi_tests {
     fn baseline_profile_object_is_public_and_findable() {
         let _guard = test_lock::acquire();
         setup();
+        // WS-11 Phase 1 widened this engine's claim from Baseline-only to
+        // Baseline+Extended+Authentication+Public-Certificates (see
+        // state::supported_profiles) — one CKO_PROFILE object per claim.
         let found = find_by_class(SESSION, CKO_PROFILE);
-        assert_eq!(found.len(), 1, "exactly one CKO_PROFILE object expected");
-        let h = found[0];
-        let profile_id = OBJECTS
-            .with(|o| o.borrow().get(&h).and_then(|a| a.get(&CKA_PROFILE_ID).cloned()))
-            .expect("CKA_PROFILE_ID present");
+        assert_eq!(found.len(), 4, "one CKO_PROFILE object per claimed profile");
+        let mut ids: Vec<u32> = found
+            .iter()
+            .map(|h| {
+                let profile_id = OBJECTS
+                    .with(|o| o.borrow().get(h).and_then(|a| a.get(&CKA_PROFILE_ID).cloned()))
+                    .expect("CKA_PROFILE_ID present");
+                u32::from_le_bytes([profile_id[0], profile_id[1], profile_id[2], profile_id[3]])
+            })
+            .collect();
+        ids.sort_unstable();
         assert_eq!(
-            u32::from_le_bytes([profile_id[0], profile_id[1], profile_id[2], profile_id[3]]),
-            CKP_BASELINE_PROVIDER
+            ids,
+            vec![
+                CKP_BASELINE_PROVIDER,
+                CKP_EXTENDED_PROVIDER,
+                CKP_AUTHENTICATION_TOKEN,
+                CKP_PUBLIC_CERTIFICATES_TOKEN,
+            ]
         );
     }
 
@@ -16692,6 +16799,270 @@ mod finalize_object_persistence_ffi_tests {
             OBJECTS.with(|o| o.borrow().contains_key(&h_survivor)),
             "the survivor must still be intact, not silently overwritten by the collision"
         );
+    }
+}
+
+#[cfg(test)]
+mod rsa_pkcs_wrap_ffi_tests {
+    //! WS-11 Phase 1 — mechanism_info advertised CKF_WRAP|CKF_UNWRAP for
+    //! CKM_RSA_PKCS with no dispatch arm behind it (Extended Provider,
+    //! EXT-M-1-32). Proves the real round trip, both key sizes the widened
+    //! 512-16384 range now spans at its edges.
+    use super::*;
+    use crate::native::test_lock;
+
+    /// A real, USER-logged-in session — needed because the wrapping key
+    /// pair's private half is CKA_PRIVATE=TRUE, invisible to
+    /// can_access_object without a login (unlike profile_object_ffi_tests'
+    /// setup(), which only ever touches public objects). Same
+    /// C_InitToken -> SO login -> C_InitPIN -> logout -> USER login
+    /// sequence as finalize_object_persistence_ffi_tests::boot_and_login,
+    /// duplicated locally per this file's existing per-module test-helper
+    /// convention.
+    fn setup_session() -> u32 {
+        assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
+        crate::state::ensure_slot(0);
+        let so_pin = b"12345678";
+        assert_eq!(
+            C_InitToken(0, so_pin.as_ptr() as *mut u8, so_pin.len() as u32, [0u8; 32].as_mut_ptr()),
+            CKR_OK
+        );
+        let mut session = 0u32;
+        assert_eq!(
+            C_OpenSession(0, 0x00000004 | 0x00000002, std::ptr::null_mut(), std::ptr::null_mut(), &mut session),
+            CKR_OK
+        );
+        assert_eq!(C_Login(session, 0, so_pin.as_ptr() as *mut u8, so_pin.len() as u32), CKR_OK);
+        let user_pin = b"user1234";
+        assert_eq!(C_InitPIN(session, user_pin.as_ptr() as *mut u8, user_pin.len() as u32), CKR_OK);
+        assert_eq!(C_Logout(session), CKR_OK);
+        assert_eq!(C_Login(session, 1, user_pin.as_ptr() as *mut u8, user_pin.len() as u32), CKR_OK);
+        session
+    }
+
+    fn wrap_unwrap_round_trip(rsa_bits: u32) {
+        let _guard = test_lock::acquire();
+        let session = setup_session();
+
+        // native::keygen::generate_rsa_keypair deliberately stays scoped to
+        // 2048-4096 (its own tested boundary, unrelated to this test — see
+        // its rsa_invalid_bits_returns_err test) even though mechanism_info
+        // now advertises 512-16384 for the raw FFI C_GenerateKeyPair
+        // dispatch this fixes wrap/unwrap for; this helper is only used at
+        // rsa_bits values within its own supported range.
+        let (h_pub, h_priv) =
+            crate::native::keygen::generate_rsa_keypair(session, rsa_bits, b"wrap-kek", "wrap-kek")
+                .expect("RSA keygen for the wrapping key pair");
+
+        let h_secret = crate::native::keygen::generate_aes_key(session, 256, b"payload", "payload")
+            .expect("AES-256 payload key");
+        // CKM_RSA_PKCS wraps the RAW key value (§6.7) — must fit the
+        // PKCS1v15 padding envelope (modulus_bytes - 11), true for AES-256
+        // (32 bytes) against every RSA size this test exercises.
+        assert_eq!(crate::state::set_object_attr_checked(h_secret, CKA_EXTRACTABLE, vec![1]), Ok(()));
+
+        let mech: [usize; 3] = [CKM_RSA_PKCS as usize, 0, 0];
+        let mut wrapped_len = 0u32;
+        assert_eq!(
+            C_WrapKey(
+                session,
+                mech.as_ptr() as *mut u8,
+                h_pub,
+                h_secret,
+                std::ptr::null_mut(),
+                &mut wrapped_len
+            ),
+            CKR_OK
+        );
+        assert_eq!(wrapped_len as usize, rsa_bits as usize / 8, "PKCS1v15-wrapped output is one modulus wide");
+        let mut wrapped = vec![0u8; wrapped_len as usize];
+        assert_eq!(
+            C_WrapKey(session, mech.as_ptr() as *mut u8, h_pub, h_secret, wrapped.as_mut_ptr(), &mut wrapped_len),
+            CKR_OK
+        );
+
+        let class = CKO_SECRET_KEY;
+        let key_type = CKK_AES;
+        let attrs: Vec<(u32, *const u8, usize)> = vec![
+            (CKA_CLASS, &class as *const _ as *const u8, std::mem::size_of_val(&class)),
+            (CKA_KEY_TYPE, &key_type as *const _ as *const u8, std::mem::size_of_val(&key_type)),
+        ];
+        let tmpl: Vec<usize> =
+            attrs.iter().flat_map(|(t, p, l)| [*t as usize, *p as usize, *l]).collect();
+        let mut h_unwrapped = 0u32;
+        assert_eq!(
+            C_UnwrapKey(
+                session,
+                mech.as_ptr() as *mut u8,
+                h_priv,
+                wrapped.as_mut_ptr(),
+                wrapped.len() as u32,
+                tmpl.as_ptr() as *mut u8,
+                attrs.len() as u32,
+                &mut h_unwrapped
+            ),
+            CKR_OK
+        );
+
+        let original = OBJECTS
+            .with(|o| o.borrow().get(&h_secret).and_then(|a| a.get(&CKA_VALUE).cloned()))
+            .expect("original AES key value present");
+        let round_tripped = OBJECTS
+            .with(|o| o.borrow().get(&h_unwrapped).and_then(|a| a.get(&CKA_VALUE).cloned()))
+            .expect("unwrapped AES key value present");
+        assert_eq!(round_tripped, original, "unwrapped key must equal the original 32-byte AES value");
+    }
+
+    #[test]
+    fn rsa_2048_pkcs_wrap_unwrap_round_trips_aes256() {
+        wrap_unwrap_round_trip(2048);
+    }
+
+    /// The 512-16384 range mechanism_info now advertises for
+    /// CKM_RSA_PKCS_KEY_PAIR_GEN is backed by the raw FFI dispatch
+    /// (C_GenerateKeyPair's own CKA_MODULUS_BITS check), independent of
+    /// native::keygen::generate_rsa_keypair's separate 2048-4096 scope.
+    #[test]
+    fn ffi_keygen_honors_the_widened_512_to_16384_range() {
+        let _guard = test_lock::acquire();
+        let session = setup_session();
+
+        let mech: [usize; 3] = [CKM_RSA_PKCS_KEY_PAIR_GEN as usize, 0, 0];
+        // CKA_MODULUS_BITS is a CK_ULONG — get_attr_ulong strictly requires
+        // ulValueLen == sizeof(CK_ULONG) (native width, 8 bytes on this
+        // 64-bit host) and returns None (not an error) on any other length,
+        // which the keygen dispatch's own `.unwrap_or(2048)` then silently
+        // papers over. A raw u32 (4 bytes) here would fail width-matching
+        // and default to 2048 regardless of the value supplied, making both
+        // assertions below pass for the wrong reason.
+        let bits: usize = 512;
+        let pub_attrs: Vec<(u32, *const u8, usize)> = vec![(
+            CKA_MODULUS_BITS,
+            &bits as *const _ as *const u8,
+            std::mem::size_of_val(&bits),
+        )];
+        let pub_tmpl: Vec<usize> =
+            pub_attrs.iter().flat_map(|(t, p, l)| [*t as usize, *p as usize, *l]).collect();
+        let mut h_pub = 0u32;
+        let mut h_priv = 0u32;
+        assert_eq!(
+            C_GenerateKeyPair(
+                session,
+                mech.as_ptr() as *mut u8,
+                pub_tmpl.as_ptr() as *mut u8,
+                pub_attrs.len() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut h_pub,
+                &mut h_priv,
+            ),
+            CKR_OK,
+            "512-bit RSA keygen must succeed now that mechanism_info advertises it"
+        );
+
+        let too_small: usize = 256;
+        let bad_attrs: Vec<(u32, *const u8, usize)> = vec![(
+            CKA_MODULUS_BITS,
+            &too_small as *const _ as *const u8,
+            std::mem::size_of_val(&too_small),
+        )];
+        let bad_tmpl: Vec<usize> =
+            bad_attrs.iter().flat_map(|(t, p, l)| [*t as usize, *p as usize, *l]).collect();
+        let mut h_pub2 = 0u32;
+        let mut h_priv2 = 0u32;
+        assert_ne!(
+            C_GenerateKeyPair(
+                session,
+                mech.as_ptr() as *mut u8,
+                bad_tmpl.as_ptr() as *mut u8,
+                bad_attrs.len() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut h_pub2,
+                &mut h_priv2,
+            ),
+            CKR_OK,
+            "below-512-bit RSA keygen must still be rejected"
+        );
+    }
+}
+
+#[cfg(test)]
+mod find_objects_ordering_ffi_tests {
+    //! WS-11 Phase 1 (D3) — §5.7.8 specifies no C_FindObjects result order,
+    //! but OBJECTS is a HashMap, so iteration order used to be arbitrary.
+    //! CERT-M-1-32 assumes application objects surface before the token's
+    //! own CKO_PROFILE markers; this proves that ordering is now stable
+    //! across repeated runs, not a one-off pass.
+    use super::*;
+    use crate::native::test_lock;
+
+    // See finalize_object_persistence_ffi_tests' identical comment: these
+    // are private re-exports in native::keygen, not reachable from here.
+    const CKA_LABEL: u32 = 0x0000_0003;
+    const CKO_DATA: u32 = 0x0000_0000;
+
+    #[test]
+    fn application_objects_precede_profile_objects_and_order_is_stable() {
+        let _guard = test_lock::acquire();
+        crate::state::set_initialized(true);
+        crate::state::ensure_slot(0);
+        let session = 0x5439_3001;
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(
+                session,
+                crate::state::SessionState { slot_id: 0, rw_session: true },
+            );
+        });
+
+        // Two public CKO_DATA objects, created in a known order.
+        let mut app_handles = Vec::new();
+        for label in [b"first".as_slice(), b"second".as_slice()] {
+            let class = CKO_DATA;
+            let attrs: Vec<(u32, *const u8, usize)> = vec![
+                (CKA_CLASS, &class as *const _ as *const u8, std::mem::size_of_val(&class)),
+                (CKA_TOKEN, [1u8].as_ptr(), 1),
+                (CKA_LABEL, label.as_ptr(), label.len()),
+            ];
+            let tmpl: Vec<usize> =
+                attrs.iter().flat_map(|(t, p, l)| [*t as usize, *p as usize, *l]).collect();
+            let mut h = 0u32;
+            assert_eq!(
+                C_CreateObject(session, tmpl.as_ptr() as *mut u8, attrs.len() as u32, &mut h),
+                CKR_OK
+            );
+            app_handles.push(h);
+        }
+
+        // Find everything public and token-resident: the 2 CKO_DATA objects
+        // plus this build's 4 CKO_PROFILE markers.
+        let tmpl: [usize; 3] = [CKA_TOKEN as usize, [1u8].as_ptr() as usize, 1];
+        assert_eq!(C_FindObjectsInit(session, tmpl.as_ptr() as *mut u8, 1), CKR_OK);
+        let mut handles = [0u32; 8];
+        let mut count = 0u32;
+        assert_eq!(C_FindObjects(session, handles.as_mut_ptr(), 8, &mut count), CKR_OK);
+        assert_eq!(C_FindObjectsFinal(session), CKR_OK);
+        assert_eq!(count, 6, "2 application objects + 4 profile objects");
+
+        let found = &handles[..count as usize];
+        assert_eq!(
+            &found[..2],
+            app_handles.as_slice(),
+            "application objects must sort first, by creation order"
+        );
+        for h in &found[2..] {
+            let class = OBJECTS
+                .with(|o| crate::state::get_object_attr_u32_from(o.borrow().get(h).unwrap(), CKA_CLASS));
+            assert_eq!(class, Some(CKO_PROFILE), "everything after must be a profile marker");
+        }
+
+        // Repeat: order must be identical, not merely "profiles last" by luck.
+        assert_eq!(C_FindObjectsInit(session, tmpl.as_ptr() as *mut u8, 1), CKR_OK);
+        let mut handles2 = [0u32; 8];
+        let mut count2 = 0u32;
+        assert_eq!(C_FindObjects(session, handles2.as_mut_ptr(), 8, &mut count2), CKR_OK);
+        assert_eq!(C_FindObjectsFinal(session), CKR_OK);
+        assert_eq!(&handles[..count as usize], &handles2[..count2 as usize], "order must be stable across repeated finds");
     }
 }
 
