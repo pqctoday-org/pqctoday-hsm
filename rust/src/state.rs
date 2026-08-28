@@ -492,9 +492,14 @@ pub fn user_pin_initialized(token: &TokenState) -> bool {
 ///   until C_InitPIN + C_Login). The flag matches that enforcement.
 /// * `CKF_TOKEN_INITIALIZED` — from [`token_initialized`].
 /// * `CKF_USER_PIN_INITIALIZED` — from [`user_pin_initialized`].
+/// * `CKF_RESTORE_KEY_NOT_NEEDED` — always: a software-only token never
+///   backs a saved cryptographic-operation state with external/removable
+///   key material it could fail to persist (WS-11, 2026-08-28 — the C++
+///   engine (`Token::getTokenInfo`) has always set this unconditionally;
+///   Rust never did, a real parity gap this closes).
 /// * `CKF_WRITE_PROTECTED` — never set: the token is writable.
 pub fn token_info_flags(token: &TokenState) -> u32 {
-    let mut flags = CKF_RNG | CKF_LOGIN_REQUIRED;
+    let mut flags = CKF_RNG | CKF_LOGIN_REQUIRED | CKF_RESTORE_KEY_NOT_NEEDED;
     if token_initialized(token) {
         flags |= CKF_TOKEN_INITIALIZED;
     }

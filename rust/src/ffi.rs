@@ -15119,21 +15119,26 @@ mod token_info_tests {
     }
 
     /// H-15 — CKF_TOKEN_INITIALIZED / CKF_USER_PIN_INITIALIZED follow the
-    /// real TokenState; CKF_WRITE_PROTECTED is never set.
+    /// real TokenState; CKF_WRITE_PROTECTED is never set. WS-11 (2026-08-28)
+    /// — CKF_RESTORE_KEY_NOT_NEEDED is now always on (parity with the C++
+    /// engine, which has always set it unconditionally).
     #[test]
     fn flags_reflect_token_and_pin_state() {
         let _guard = test_lock::acquire();
         reset_engine();
         // Fresh built-in token: uninitialized, no user PIN — but login is
         // still required for private objects, so CKF_LOGIN_REQUIRED is on.
-        assert_eq!(flags_of(&get_token_info()), CKF_RNG | CKF_LOGIN_REQUIRED);
+        assert_eq!(
+            flags_of(&get_token_info()),
+            CKF_RNG | CKF_LOGIN_REQUIRED | CKF_RESTORE_KEY_NOT_NEEDED
+        );
 
         TOKEN_STORE.with(|ts| {
             ts.borrow_mut().get_mut(&0).unwrap().initialized = true;
         });
         assert_eq!(
             flags_of(&get_token_info()),
-            CKF_RNG | CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED
+            CKF_RNG | CKF_LOGIN_REQUIRED | CKF_RESTORE_KEY_NOT_NEEDED | CKF_TOKEN_INITIALIZED
         );
 
         TOKEN_STORE.with(|ts| {
@@ -15145,7 +15150,11 @@ mod token_info_tests {
         let flags = flags_of(&get_token_info());
         assert_eq!(
             flags,
-            CKF_RNG | CKF_LOGIN_REQUIRED | CKF_TOKEN_INITIALIZED | CKF_USER_PIN_INITIALIZED
+            CKF_RNG
+                | CKF_LOGIN_REQUIRED
+                | CKF_RESTORE_KEY_NOT_NEEDED
+                | CKF_TOKEN_INITIALIZED
+                | CKF_USER_PIN_INITIALIZED
         );
         assert_eq!(flags & CKF_WRITE_PROTECTED, 0, "token must not claim write protection");
 
