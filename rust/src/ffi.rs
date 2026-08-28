@@ -335,17 +335,42 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     // See state_snapshot.rs and openssl-studio-pkcs11-wiring-plan-07242026.md.
     #[cfg(target_os = "emscripten")]
     crate::state_snapshot::stash_before_finalize();
-    // Zeroize all key material (CKA_VALUE) before clearing object store
+    // §5.6 doesn't call for token objects to be destroyed by C_Finalize —
+    // only session objects don't survive past a session's lifetime, and a
+    // session can't outlive Finalize. Token objects (CKA_TOKEN=TRUE, e.g.
+    // the built-in CKO_PROFILE from init_profile_objects) must persist
+    // across a library unload/reload, same as C_InitToken already respects
+    // via CKA_DESTROYABLE in destroy_destroyable_objects_on_slot. A prior
+    // fix (e6d9668) stopped TOKEN_STORE from being wiped here but missed
+    // this second store — WS-11's conformance runner caught it: a token
+    // freshly re-initialized after Finalize came back with zero CKO_PROFILE
+    // objects. CKA_TOKEN defaults to CK_FALSE (session object) when absent.
     OBJECTS.with(|o| {
         let mut store = o.borrow_mut();
-        for attrs in store.values_mut() {
-            if let Some(val) = attrs.get_mut(&CKA_VALUE) {
-                val.zeroize();
+        let session_objects: Vec<u32> = store
+            .iter()
+            .filter(|(_, attrs)| {
+                !attrs
+                    .get(&CKA_TOKEN)
+                    .map(|v| v.first().copied().unwrap_or(0) != 0)
+                    .unwrap_or(false)
+            })
+            .map(|(h, _)| *h)
+            .collect();
+        for h in session_objects {
+            if let Some(mut attrs) = store.remove(&h) {
+                if let Some(val) = attrs.get_mut(&CKA_VALUE) {
+                    val.zeroize();
+                }
             }
         }
-        store.clear();
     });
-    NEXT_HANDLE.store(100, std::sync::atomic::Ordering::Relaxed);
+    // NEXT_HANDLE is intentionally NOT reset here anymore: token objects
+    // above can now survive Finalize, so resetting the counter to 100 would
+    // let the next allocate_handle() collide with (and silently overwrite)
+    // a surviving object's handle. Handles keep counting up monotonically
+    // across Finalize/Initialize cycles instead — matching a real token,
+    // whose object handles don't reset just because the library reloaded.
     SIGN_STATE.with(|s| s.borrow_mut().clear());
     VERIFY_STATE.with(|s| s.borrow_mut().clear());
     VERIFY_SIG_STATE.with(|s| s.borrow_mut().clear());
@@ -16479,6 +16504,193 @@ mod profile_object_ffi_tests {
         assert!(
             OBJECTS.with(|o| o.borrow().contains_key(&h)),
             "the profile object must survive the rejected destroy"
+        );
+    }
+}
+
+#[cfg(test)]
+mod finalize_object_persistence_ffi_tests {
+    //! WS-11 gap: production `C_Finalize` used to unconditionally clear
+    //! every object in `OBJECTS`, including token objects and the
+    //! built-in `CKO_PROFILE` marker — the same non-conformance
+    //! `profile_object_ffi_tests` documents C_InitToken already respects
+    //! via CKA_DESTROYABLE. These tests call the real `_C_*` FFI
+    //! (not `test_lock`'s reset helper) so they exercise production
+    //! `C_Finalize` exactly as a browser session does.
+    use super::*;
+
+    // native::keygen re-exports these from constants.rs as private imports
+    // (fine for that module's own use, not for an outside caller) — local
+    // copies rather than fighting visibility for a handful of test-only
+    // values. CKA_ID and CKO_DATA have no `pub` copy anywhere else in this
+    // crate at all; values per pkcs11t-canonical-v3.2.h.
+    const CKA_ID: u32 = 0x0000_0102;
+    const CKA_KEY_TYPE: u32 = 0x0000_0100;
+    const CKA_VALUE: u32 = 0x0000_0011;
+    const CKA_LABEL: u32 = 0x0000_0003;
+    const CKK_GENERIC_SECRET: u32 = 0x0000_0010;
+    const CKO_DATA: u32 = 0x0000_0000;
+
+    fn boot_and_login() -> (u32, u32) {
+        assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
+        crate::state::ensure_slot(0);
+        let so_pin = b"12345678";
+        assert_eq!(
+            C_InitToken(0, so_pin.as_ptr() as *mut u8, so_pin.len() as u32, [0u8; 32].as_mut_ptr()),
+            CKR_OK
+        );
+        let mut h_session = 0u32;
+        assert_eq!(
+            C_OpenSession(0, 0x00000004 | 0x00000002, std::ptr::null_mut(), std::ptr::null_mut(), &mut h_session),
+            CKR_OK
+        );
+        // §5.6.1 — the token has no user PIN yet after a fresh C_InitToken;
+        // it must be set by the SO before a USER can log in (same sequence
+        // hub-side hsm_openUserSession follows: SO login -> C_InitPIN ->
+        // logout -> USER login).
+        assert_eq!(C_Login(h_session, 0, so_pin.as_ptr() as *mut u8, so_pin.len() as u32), CKR_OK);
+        let user_pin = b"user1234";
+        assert_eq!(C_InitPIN(h_session, user_pin.as_ptr() as *mut u8, user_pin.len() as u32), CKR_OK);
+        assert_eq!(C_Logout(h_session), CKR_OK);
+        assert_eq!(C_Login(h_session, 1, user_pin.as_ptr() as *mut u8, user_pin.len() as u32), CKR_OK);
+        (0, h_session)
+    }
+
+    /// A CKA_TOKEN=TRUE object created before Finalize is still findable,
+    /// by the SAME handle, after Finalize -> Initialize -> a fresh session.
+    #[test]
+    fn token_object_survives_finalize_initialize_cycle() {
+        let _guard = crate::native::test_lock::acquire();
+        let (slot_id, h_session) = boot_and_login();
+
+        let id_bytes = b"persist-probe";
+        let value_bytes = [0x42u8; 16];
+        let class = CKO_SECRET_KEY;
+        let key_type = CKK_GENERIC_SECRET;
+        let attrs: Vec<(u32, *const u8, usize)> = vec![
+            (CKA_CLASS, &class as *const _ as *const u8, std::mem::size_of_val(&class)),
+            (CKA_KEY_TYPE, &key_type as *const _ as *const u8, std::mem::size_of_val(&key_type)),
+            (CKA_TOKEN, [1u8].as_ptr(), 1),
+            (CKA_ID, id_bytes.as_ptr(), id_bytes.len()),
+            (CKA_VALUE, value_bytes.as_ptr(), value_bytes.len()),
+        ];
+        let tmpl: Vec<usize> = attrs
+            .iter()
+            .flat_map(|(t, p, l)| [*t as usize, *p as usize, *l])
+            .collect();
+        let mut h_object = 0u32;
+        assert_eq!(
+            C_CreateObject(h_session, tmpl.as_ptr() as *mut u8, attrs.len() as u32, &mut h_object),
+            CKR_OK
+        );
+        assert!(h_object > 0);
+
+        assert_eq!(C_Finalize(std::ptr::null_mut()), CKR_OK);
+        assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
+        let mut h_session2 = 0u32;
+        assert_eq!(
+            C_OpenSession(slot_id, 0x00000004, std::ptr::null_mut(), std::ptr::null_mut(), &mut h_session2),
+            CKR_OK
+        );
+
+        let still_there = OBJECTS.with(|o| o.borrow().contains_key(&h_object));
+        assert!(still_there, "token object must survive Finalize/Initialize (PKCS#11 v3.2 §5.4.1/§5.4.2)");
+
+        let id_type = CKA_ID;
+        let tmpl2: [usize; 3] = [id_type as usize, id_bytes.as_ptr() as usize, id_bytes.len()];
+        assert_eq!(C_FindObjectsInit(h_session2, tmpl2.as_ptr() as *mut u8, 1), CKR_OK);
+        let mut handles = [0u32; 4];
+        let mut count = 0u32;
+        assert_eq!(C_FindObjects(h_session2, handles.as_mut_ptr(), 4, &mut count), CKR_OK);
+        assert_eq!(C_FindObjectsFinal(h_session2), CKR_OK);
+        assert_eq!(count, 1, "the surviving token object must be findable post-reload");
+        assert_eq!(handles[0], h_object, "its handle must not have changed");
+    }
+
+    /// A session object (CKA_TOKEN default/FALSE) does NOT survive
+    /// Finalize -- only token objects are exempted from the wipe.
+    #[test]
+    fn session_object_does_not_survive_finalize() {
+        let _guard = crate::native::test_lock::acquire();
+        let (_slot_id, h_session) = boot_and_login();
+
+        let value_bytes = [0x99u8; 16];
+        let class = CKO_SECRET_KEY;
+        let key_type = CKK_GENERIC_SECRET;
+        let attrs: Vec<(u32, *const u8, usize)> = vec![
+            (CKA_CLASS, &class as *const _ as *const u8, std::mem::size_of_val(&class)),
+            (CKA_KEY_TYPE, &key_type as *const _ as *const u8, std::mem::size_of_val(&key_type)),
+            (CKA_VALUE, value_bytes.as_ptr(), value_bytes.len()),
+        ];
+        let tmpl: Vec<usize> = attrs
+            .iter()
+            .flat_map(|(t, p, l)| [*t as usize, *p as usize, *l])
+            .collect();
+        let mut h_object = 0u32;
+        assert_eq!(
+            C_CreateObject(h_session, tmpl.as_ptr() as *mut u8, attrs.len() as u32, &mut h_object),
+            CKR_OK
+        );
+
+        assert_eq!(C_Finalize(std::ptr::null_mut()), CKR_OK);
+
+        assert!(
+            !OBJECTS.with(|o| o.borrow().contains_key(&h_object)),
+            "a session object must NOT survive C_Finalize"
+        );
+    }
+
+    /// NEXT_HANDLE must not reset across Finalize: a surviving token
+    /// object's handle must never be reissued to a freshly-created object.
+    #[test]
+    fn handle_counter_does_not_collide_after_finalize() {
+        let _guard = crate::native::test_lock::acquire();
+        let (slot_id, h_session) = boot_and_login();
+
+        let class = CKO_DATA;
+        let label = b"survivor";
+        let attrs: Vec<(u32, *const u8, usize)> = vec![
+            (CKA_CLASS, &class as *const _ as *const u8, std::mem::size_of_val(&class)),
+            (CKA_TOKEN, [1u8].as_ptr(), 1),
+            (CKA_LABEL, label.as_ptr(), label.len()),
+        ];
+        let tmpl: Vec<usize> = attrs
+            .iter()
+            .flat_map(|(t, p, l)| [*t as usize, *p as usize, *l])
+            .collect();
+        let mut h_survivor = 0u32;
+        assert_eq!(
+            C_CreateObject(h_session, tmpl.as_ptr() as *mut u8, attrs.len() as u32, &mut h_survivor),
+            CKR_OK
+        );
+
+        assert_eq!(C_Finalize(std::ptr::null_mut()), CKR_OK);
+        assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
+        let mut h_session2 = 0u32;
+        assert_eq!(
+            C_OpenSession(slot_id, 0x00000004, std::ptr::null_mut(), std::ptr::null_mut(), &mut h_session2),
+            CKR_OK
+        );
+
+        let label2 = b"newcomer";
+        let attrs2: Vec<(u32, *const u8, usize)> = vec![
+            (CKA_CLASS, &class as *const _ as *const u8, std::mem::size_of_val(&class)),
+            (CKA_LABEL, label2.as_ptr(), label2.len()),
+        ];
+        let tmpl2: Vec<usize> = attrs2
+            .iter()
+            .flat_map(|(t, p, l)| [*t as usize, *p as usize, *l])
+            .collect();
+        let mut h_newcomer = 0u32;
+        assert_eq!(
+            C_CreateObject(h_session2, tmpl2.as_ptr() as *mut u8, attrs2.len() as u32, &mut h_newcomer),
+            CKR_OK
+        );
+
+        assert_ne!(h_newcomer, h_survivor, "the new object must not reuse the surviving object's handle");
+        assert!(
+            OBJECTS.with(|o| o.borrow().contains_key(&h_survivor)),
+            "the survivor must still be intact, not silently overwritten by the collision"
         );
     }
 }
