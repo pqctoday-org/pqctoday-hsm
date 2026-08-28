@@ -10,6 +10,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **CACP: modular crypto-agility policies — several small, non-conflicting
+  files instead of one that keeps growing.** A single enterprise-wide policy
+  governing signing AND key-establishment AND encryption AND every
+  mechanism constraint becomes one file nobody wants to touch, because a
+  change to one team's signing rules risks breaking another team's
+  encryption rules three hundred lines away. Schema v3 lets a policy
+  declare `metadata.scopes: [signing]` (or `key-establishment` /
+  `encryption` / `mac-hash` / `ingress` / `lifecycle` / `global`), and
+  several such files can now be active on the engine **at once** — each
+  owning its own slice of the request surface, verified at load time
+  (`check_scope_containment`) so a signing-scoped file can't sneak in an
+  encryption rule. `Engine::activate`/`deactivate`/`set_module_enabled`/
+  `clear_modules` manage the set; a scope can only ever be claimed by one
+  named module at a time (deactivate the incumbent to swap it), so modules
+  compose instead of needing a priority order. The original single-policy
+  `Engine::activate` is renamed `replace_all` and stays fully supported,
+  indefinitely, as the simpler path for a policy that doesn't need
+  splitting. New native-server flags: `--module <name>` (repeatable) and
+  `--uncovered-ops deny|allow` (an op no active module's scope covers is
+  denied by default, same fail-closed posture as no policy loaded at all).
+  New admin routes: `GET/POST/DELETE /api/v1/active-modules`,
+  `DELETE/PATCH /api/v1/active-modules/{name}`, `GET/PUT
+  /api/v1/config/uncovered-ops` (`kmip/cryptopolicy-manager/openapi.yaml`).
+  Eleven of the shipped example policies (`classical`, `pqc`,
+  `auto-migrate-on-use`, the three `migration-*` estates,
+  `pqc-migration-2030`, `hybrid-migration-window`, `cnsa-2.0`, `fips-only`,
+  `bsi-tr-02102`) now ship both as their original single file and as a
+  per-scope module set, and the in-browser playground's policy catalog can
+  activate either form — picking a preset backed by modules composes them
+  atomically and the UI reports it exactly like a single-file activation
+  (catalog highlighting, dry-run, disposition matrix, Compare all work
+  unchanged; the Visual graph editor shows a multi-file preset read-only
+  rather than silently mis-merging four files' worth of rules into one).
+  Full reference: `kmip/policies/README.md`'s "Modular policies" section;
+  `kmip/docs/CACP_GUIDE.md` §2.8 for the short version.
+
 - **Rust engine: real Ed448 support (keygen, sign, verify, both pure and
   pre-hash).** Previously the only Rust-engine gap against the C++ engine's
   full Ed25519/Ed448 coverage: `CKM_EC_EDWARDS_KEY_PAIR_GEN` explicitly

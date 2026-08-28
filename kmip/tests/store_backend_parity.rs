@@ -29,7 +29,7 @@ fn deps_for(store: Arc<dyn KeyStore>, engine_session: u32) -> Deps {
     let ring = Arc::new(RingSink::new(64));
     let sink: Arc<dyn AuditSink> = ring;
     let engine = Engine::with_global_sink(sink.clone());
-    engine.activate(load_from_str(POLICY, std::path::Path::new("<t>")).unwrap()).unwrap();
+    engine.replace_all(load_from_str(POLICY, std::path::Path::new("<t>")).unwrap()).unwrap();
     // S-2 hardening makes Create fail-closed without an engine session, so the
     // parity test drives a real engine. The caller bootstraps the slot-0 token
     // ONCE and shares the session across both backends — a second C_InitToken

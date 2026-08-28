@@ -50,7 +50,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
-use crate::policy::{Decision, Engine, PolicyRequest, PolicyStore, StoreError};
+use crate::policy::{Decision, Engine, PolicyRequest, PolicyStore, StoreError, UncoveredOps};
 
 /// Cap on a single admin request (headers + body). Policies are small YAML.
 const MAX_REQUEST: usize = 1 << 20; // 1 MiB
@@ -321,7 +321,10 @@ fn admin_route_pattern(path: &str) -> &'static str {
         "/api/v1/dry-run" => "/api/v1/dry-run",
         "/api/v1/audit" => "/api/v1/audit",
         "/api/v1/audit/stream" => "/api/v1/audit/stream",
+        "/api/v1/active-modules" => "/api/v1/active-modules",
+        "/api/v1/config/uncovered-ops" => "/api/v1/config/uncovered-ops",
         p if p.starts_with("/api/v1/policies/") => "/api/v1/policies/{name}",
+        p if p.starts_with("/api/v1/active-modules/") => "/api/v1/active-modules/{name}",
         _ => "unknown",
     }
 }
@@ -424,6 +427,109 @@ fn route(
                 Err(_) => problem(400, r#"body must be JSON {"name":"<policy-name>"}"#),
             }
         }
+
+        // ── Modular policy set (2026-08-28 plan) ────────────────────────────
+        // Mutually exclusive with /api/v1/active (legacy) — see
+        // `Engine::activate`/`replace_all`'s doc comments. Security-critical
+        // the same way PUT /active is: these swap the LIVE enforcement set.
+        ("GET", "/api/v1/active-modules") => match store.read_active_modules() {
+            Ok(Some(m)) => (200, json!({ "uncovered_ops": m.uncovered_ops, "modules": m.modules })),
+            Ok(None) => (200, json!({ "uncovered_ops": "deny", "modules": [] })),
+            Err(e) => store_err(e),
+        },
+
+        // Add/upsert a module. Body: {"name": "<policy-name>"}
+        ("POST", "/api/v1/active-modules") => match serde_json::from_slice::<Value>(body) {
+            Ok(req) => match req.get("name").and_then(Value::as_str).map(str::to_owned) {
+                Some(name) => match store.activate_module_with_engine(&name, engine) {
+                    Ok(()) => {
+                        tracing::warn!(
+                            "admin: LIVE module activated name={name:?} by cn={client_cn:?}"
+                        );
+                        (200, json!({ "activated": name }))
+                    }
+                    Err(e) => store_err(e),
+                },
+                None => problem(400, r#"missing "name" field"#),
+            },
+            Err(_) => problem(400, r#"body must be JSON {"name":"<policy-name>"}"#),
+        },
+
+        // Clear the entire modular set — the fail-closed OFF.
+        ("DELETE", "/api/v1/active-modules") => match store.clear_modules_with_engine(engine) {
+            Ok(()) => {
+                tracing::warn!("admin: LIVE module set CLEARED by cn={client_cn:?}");
+                (200, json!({ "cleared": true }))
+            }
+            Err(e) => store_err(e),
+        },
+
+        // Deactivate one module by name.
+        ("DELETE", p) if p.starts_with("/api/v1/active-modules/") => {
+            let name = &p["/api/v1/active-modules/".len()..];
+            match store.deactivate_module_with_engine(name, engine) {
+                Ok(found) => {
+                    tracing::warn!(
+                        "admin: LIVE module deactivated name={name:?} found={found} by cn={client_cn:?}"
+                    );
+                    (200, json!({ "deactivated": name, "found": found }))
+                }
+                Err(e) => store_err(e),
+            }
+        }
+
+        // Enable/disable one module in place. Body: {"enabled": true|false}
+        ("PATCH", p) if p.starts_with("/api/v1/active-modules/") => {
+            let name = &p["/api/v1/active-modules/".len()..];
+            match serde_json::from_slice::<Value>(body) {
+                Ok(req) => match req.get("enabled").and_then(Value::as_bool) {
+                    Some(enabled) => {
+                        match store.set_module_enabled_with_engine(name, enabled, engine) {
+                            Ok(found) => {
+                                tracing::warn!(
+                                    "admin: LIVE module enabled={enabled} name={name:?} found={found} by cn={client_cn:?}"
+                                );
+                                (200, json!({ "name": name, "enabled": enabled, "found": found }))
+                            }
+                            Err(e) => store_err(e),
+                        }
+                    }
+                    None => problem(400, r#"missing boolean "enabled" field"#),
+                },
+                Err(_) => problem(400, r#"body must be JSON {"enabled":true|false}"#),
+            }
+        }
+
+        // ── Uncovered-ops mode (modular set only) ───────────────────────────
+        ("GET", "/api/v1/config/uncovered-ops") => {
+            (200, json!({ "uncovered_ops": match engine.uncovered_ops() {
+                UncoveredOps::Deny => "deny",
+                UncoveredOps::Allow => "allow",
+            }}))
+        }
+
+        // Body: {"mode": "deny"|"allow"}. Validated HERE (client input,
+        // 400 on a bad value) rather than inside the store method, whose
+        // own `BadMarker` error means genuine on-disk corruption (500) —
+        // conflating the two gave a bad mode string a 500 instead of a 400.
+        ("PUT", "/api/v1/config/uncovered-ops") => match serde_json::from_slice::<Value>(body) {
+            Ok(req) => match req.get("mode").and_then(Value::as_str).map(str::to_owned) {
+                Some(mode) if mode == "deny" || mode == "allow" => {
+                    match store.set_uncovered_ops_with_engine(&mode, engine) {
+                        Ok(()) => {
+                            tracing::warn!(
+                                "admin: uncovered-ops mode set to {mode:?} by cn={client_cn:?}"
+                            );
+                            (200, json!({ "uncovered_ops": mode }))
+                        }
+                        Err(e) => store_err(e),
+                    }
+                }
+                Some(other) => problem(400, &format!(r#""mode" must be "deny" or "allow", got {other:?}"#)),
+                None => problem(400, r#"missing "mode" field"#),
+            },
+            Err(_) => problem(400, r#"body must be JSON {"mode":"deny"|"allow"}"#),
+        },
 
         // ── Validation & dry-run ─────────────────────────────────────────────
         ("POST", "/api/v1/validate") => match std::str::from_utf8(body) {
@@ -529,8 +635,14 @@ fn problem_value(status: u16, detail: &str) -> Value {
 fn is_mutating(method: &str, path: &str) -> bool {
     matches!(
         (method, path),
-        ("POST", "/api/v1/policies") | ("PUT", "/api/v1/active")
+        ("POST", "/api/v1/policies")
+            | ("PUT", "/api/v1/active")
+            | ("POST", "/api/v1/active-modules")
+            | ("DELETE", "/api/v1/active-modules")
+            | ("PUT", "/api/v1/config/uncovered-ops")
     ) || (method == "PUT" && path.starts_with("/api/v1/policies/"))
+        || ((method == "DELETE" || method == "PATCH")
+            && path.starts_with("/api/v1/active-modules/"))
 }
 
 /// S-1 — is the verified client-cert CN allowed to perform writes? Default-deny:
@@ -768,6 +880,162 @@ mod tests {
         assert_eq!(status, 400);
         assert!(body["detail"].as_str().unwrap().contains("name"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Modular policy set routes (2026-08-28 plan) ─────────────────────
+
+    const SIGNING_MODULE: &str = "schema_version: 3\nmetadata:\n  name: sig\n  description: d\n  authority: a\n  effective: always\n  scopes: [signing]\nrules: []\n";
+
+    fn store_with_module(tag: &str) -> (PathBuf, PolicyStore) {
+        let dir = std::env::temp_dir().join(format!("pqc-admin-test-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sig.yaml"), SIGNING_MODULE).unwrap();
+        (dir.clone(), PolicyStore::new(&dir))
+    }
+
+    #[test]
+    fn route_active_modules_empty_is_deny_and_empty_list() {
+        let (dir, store) = store_with_module("mods-empty");
+        let ring = crate::auditlog::RingSink::new(8);
+        let (status, body) = route(
+            &store, &dir, &Engine::deny_all(), &ring, "GET", "/api/v1/active-modules", b"", None,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(body["uncovered_ops"], "deny");
+        assert!(body["modules"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn route_activate_module_then_list_and_deactivate() {
+        let (dir, store) = store_with_module("mods-lifecycle");
+        let engine = Engine::deny_all();
+        let ring = crate::auditlog::RingSink::new(8);
+
+        let (status, body) = route(
+            &store,
+            &dir,
+            &engine,
+            &ring,
+            "POST",
+            "/api/v1/active-modules",
+            br#"{"name":"sig"}"#,
+            None,
+        );
+        assert_eq!(status, 200, "body: {body}");
+        assert_eq!(body["activated"], "sig");
+        assert_eq!(engine.modules().len(), 1);
+
+        let (status, body) = route(
+            &store, &dir, &engine, &ring, "GET", "/api/v1/active-modules", b"", None,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(body["modules"][0]["name"], "sig");
+
+        let (status, body) = route(
+            &store,
+            &dir,
+            &engine,
+            &ring,
+            "PATCH",
+            "/api/v1/active-modules/sig",
+            br#"{"enabled":false}"#,
+            None,
+        );
+        assert_eq!(status, 200, "body: {body}");
+        assert_eq!(body["enabled"], false);
+
+        let (status, body) = route(
+            &store, &dir, &engine, &ring, "DELETE", "/api/v1/active-modules/sig", b"", None,
+        );
+        assert_eq!(status, 200, "body: {body}");
+        assert_eq!(body["found"], true);
+        assert!(engine.modules().is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn route_activate_module_missing_name_400() {
+        let (dir, store) = store_with_module("mods-bad");
+        let ring = crate::auditlog::RingSink::new(8);
+        let (status, body) = route(
+            &store,
+            &dir,
+            &Engine::deny_all(),
+            &ring,
+            "POST",
+            "/api/v1/active-modules",
+            b"{}",
+            None,
+        );
+        assert_eq!(status, 400);
+        assert!(body["detail"].as_str().unwrap().contains("name"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn route_clear_active_modules() {
+        let (dir, store) = store_with_module("mods-clear");
+        let engine = Engine::deny_all();
+        let ring = crate::auditlog::RingSink::new(8);
+        route(&store, &dir, &engine, &ring, "POST", "/api/v1/active-modules", br#"{"name":"sig"}"#, None);
+        let (status, _) =
+            route(&store, &dir, &engine, &ring, "DELETE", "/api/v1/active-modules", b"", None);
+        assert_eq!(status, 200);
+        assert!(engine.modules().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn route_uncovered_ops_get_and_put() {
+        let (dir, store) = store_with_module("uncov");
+        let engine = Engine::deny_all();
+        let ring = crate::auditlog::RingSink::new(8);
+
+        let (status, body) = route(
+            &store, &dir, &engine, &ring, "GET", "/api/v1/config/uncovered-ops", b"", None,
+        );
+        assert_eq!(status, 200);
+        assert_eq!(body["uncovered_ops"], "deny");
+
+        let (status, body) = route(
+            &store,
+            &dir,
+            &engine,
+            &ring,
+            "PUT",
+            "/api/v1/config/uncovered-ops",
+            br#"{"mode":"allow"}"#,
+            None,
+        );
+        assert_eq!(status, 200, "body: {body}");
+        assert_eq!(engine.uncovered_ops(), UncoveredOps::Allow);
+
+        let (status, body) = route(
+            &store,
+            &dir,
+            &engine,
+            &ring,
+            "PUT",
+            "/api/v1/config/uncovered-ops",
+            br#"{"mode":"sideways"}"#,
+            None,
+        );
+        assert_eq!(status, 400, "body: {body}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn active_modules_routes_are_mutation_gated() {
+        assert!(is_mutating("POST", "/api/v1/active-modules"));
+        assert!(is_mutating("DELETE", "/api/v1/active-modules"));
+        assert!(is_mutating("DELETE", "/api/v1/active-modules/sig"));
+        assert!(is_mutating("PATCH", "/api/v1/active-modules/sig"));
+        assert!(is_mutating("PUT", "/api/v1/config/uncovered-ops"));
+        assert!(!is_mutating("GET", "/api/v1/active-modules"));
+        assert!(!is_mutating("GET", "/api/v1/config/uncovered-ops"));
     }
 
     #[test]

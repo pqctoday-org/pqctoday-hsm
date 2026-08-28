@@ -50,6 +50,7 @@ mod tests {
                 outcome: super::super::event::DecisionSummary::Allow {
                     algorithm_override: None,
                     substituted_by_rule: None,
+                    cp_override: None,
                 },
                 policy_fingerprint: "sha256:0".into(),
             },

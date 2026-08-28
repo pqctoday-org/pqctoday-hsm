@@ -60,6 +60,7 @@ Makefile.in
 *~
 .vscode/
 .idea/
+.worktrees/
 rust/target/
 rust/bench-harness/target/
 openmls-provider/target/

@@ -50,7 +50,7 @@ fn build_deps() -> (Arc<RingSink>, Deps) {
     let sink: Arc<dyn AuditSink> = ring.clone();
     let engine = Engine::with_global_sink(sink.clone());
     engine
-        .activate(load_from_file(&policies_dir().join("migration-classical.yaml")).unwrap())
+        .replace_all(load_from_file(&policies_dir().join("migration-classical.yaml")).unwrap())
         .unwrap();
 
     let deps = Deps::new(engine, Arc::new(MemoryStore::new()), sink, DepsConfig::default())
@@ -60,7 +60,7 @@ fn build_deps() -> (Arc<RingSink>, Deps) {
 
 fn load(deps: &Deps, file: &str) {
     deps.engine
-        .activate(load_from_file(&policies_dir().join(file)).unwrap())
+        .replace_all(load_from_file(&policies_dir().join(file)).unwrap())
         .expect("policy activation");
 }
 

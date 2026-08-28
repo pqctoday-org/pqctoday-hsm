@@ -52,21 +52,23 @@ driving the server + reading back the decision trail from Python, see
 
 ## 3. Configuring & applying a policy
 
-A policy is one YAML file. Library of ready-made ones:
-[`../policies/`](../policies/) (`training-permissive`, `classical`, `pqc`,
-`fips-only`, `cnsa-2.0`, `aead-only`, `fips-hashing`,
-`deterministic-signing`, `pqc-migration-2030`, `hybrid-migration-window`).
+A policy is one YAML file. Library of ready-made ones: see
+[`../policies/README.md`](../policies/README.md) for the full, current
+catalog and its "Modular policies (schema v3)" section — the list is not
+duplicated here because it grows too often to keep two copies in sync.
 
 ### File shape
 
 ```yaml
-schema_version: 1
+schema_version: 3                   # 1 = base; 2 adds `expires`; 3 adds `scopes`
 metadata:
   name: my-policy
   description: |
     Human-readable intent.
   authority: my-org
-  effective: always                 # or a time window
+  effective: always                 # or a date, or "immediate"
+  expires: never                    # optional (schema v2+); or a date
+  scopes: [signing]                 # optional (schema v3+) — see §3.2
   compliance_mapping:               # optional, informational
     - { framework: "FIPS 140-3", status: aligned }
 rules:
@@ -76,35 +78,103 @@ rules:
 
 An **empty `rules: []` allows everything** at Plane 1 (that is what
 `training-permissive` is). Rules then *gate* (deny), *force* (rewrite a
-parameter), or *migrate* (substitute / rekey). Rule order matters: Pass-1
-algorithm resolution is **last-match-wins**; Pass-2 gates all apply.
+parameter), or *migrate* (substitute / rekey). Rule order matters, but
+differently for each pass — corrected here 2026-08-28, this section
+previously described one blanket "last-match-wins" rule for all of Pass 1:
 
-> **Fail-safe default:** if the server has *no* active policy at all, every
-> request is **denied**. A loaded policy with no rules allows everything; the
-> two are different states.
+- **Pass 0 — `algorithm_default`.** Only runs when the request omits the
+  algorithm. First matching default wins, and every `name_pattern` rule is
+  checked (in file order) before any generic (no-`name_pattern`) rule —
+  a label-specific default always beats a generic one for the same op,
+  regardless of listing order.
+- **Pass 1 — `algorithm_substitution`.** Walks every rule in file order
+  against the Pass-0 result; each match rewrites the running value, so
+  **last match wins** and rules can chain.
+- **Pass 2 — gating.** Walks gating rules in declaration order against the
+  Pass 0/1-resolved algorithm; **first Deny wins** (short-circuits).
 
-### Apply it
+A policy also has a **validity window**: `effective`/`expires` are checked
+per request, not just at load time. A request timestamped outside
+`[effective, expires]` is denied — the policy is treated as fully inert for
+that request, the same fail-closed posture as no policy loaded at all.
+
+> **Fail-safe default:** if the server has *no* active policy/module at all,
+> every request is **denied**. A loaded policy with no rules allows
+> everything; the two are different states.
+
+### 3.1 Apply it
 
 ```bash
 pqctoday-kmip \
   --listen 127.0.0.1:5696 --store-memory \
   --policy-dir policies \        # directory of *.yaml policies
-  --policy aead-only \           # which one to activate at boot
+  --policy aead-only \           # single-file activation at boot
   --audit-log /tmp/agility.jsonl # three-plane decision log (see §6)
 ```
 
 - `--policy-dir` — the policy library directory.
-- `--policy <name>` — activate `<name>.yaml` at boot and write the
+- `--policy <name>` — activate `<name>.yaml` at boot (the legacy,
+  single-policy mode — see §3.2 for the modular alternative) and write the
   `.active` marker.
-- Omit `--policy` and the server resumes the `.active` marker if present,
-  else loads the built-in permissive fallback (with a warning).
-- The `PolicyStore` Rust API (`list / load / validate_draft / dry_run / save /
-  activate_with_engine / resume_active`) backs all of this; there is no network
-  management surface (a server-side HTTP admin facade is a separate, parked
-  decision).
+- Omit `--policy`/`--module` and the server resumes whichever marker
+  (`.active` or `.active-modules`) is present, else loads the built-in
+  permissive fallback and logs a boxed, multi-line warning naming the exact
+  flags to fix it — worth grepping your server logs for on every deploy.
 
-**Changing the active policy today requires a (re)launch** — there is no live
-hot-swap over the wire.
+### 3.2 Modular policies — multiple active modules, no priority stack
+
+Added 2026-08-28. A policy can declare `metadata.scopes` (a list drawn from
+`signing`, `key-establishment`, `encryption`, `mac-hash`, `ingress`,
+`lifecycle`, `global`) instead of governing every operation. Several such
+files can be active **at once**, each owning its own slice of the request
+surface — no priority number, because a scope can only ever be claimed by
+one named module, so modules compose instead of needing an order. `global`
+is exempt from scope containment (it can gate any op, including a bare,
+unrefined one) but cannot itself resolve an algorithm default/substitution.
+
+```bash
+pqctoday-kmip \
+  --policy-dir policies \
+  --module classical-signing --module classical-key-establishment \
+  --module classical-encryption --module classical-global \
+  --uncovered-ops deny            # default; `allow` is playground-only
+```
+
+`--module <name>` is repeatable and mutually exclusive with `--policy` — a
+server runs either the legacy single-policy mode or the modular mode, never
+both. `--uncovered-ops` decides what happens to a request whose op no
+active module's scope covers; `deny` (fail closed) is the only value a
+production deployment should use. Full reference (containment rules, the
+non-conflict model, the engine API): `policies/README.md`'s "Modular
+policies" section.
+
+### 3.3 Live management — the admin API
+
+**Corrected 2026-08-28** — this section previously said "there is no
+network management surface… requires a (re)launch"; that was false even
+before this session (the admin facade below has existed since before this
+plan started) and is more false now that it also covers the modular set.
+
+`cryptopolicy-manager` is a live, mTLS-protected HTTP admin facade — the
+server does NOT require a restart to change its active policy. Every
+mutating route requires a client certificate whose CN is on the
+server's write allowlist (mTLS + X25519MLKEM768 hybrid KEM, TLS 1.3 only).
+Key routes (full request/response shapes:
+[`../cryptopolicy-manager/openapi.yaml`](../cryptopolicy-manager/openapi.yaml)):
+
+| Route | Effect |
+|---|---|
+| `GET/PUT/DELETE /api/v1/active` | Legacy single-policy slot: read, hot-swap, or clear (deny-all) the live policy — no restart. |
+| `GET/POST/DELETE /api/v1/active-modules` | Modular set: list, activate/upsert one module, or clear the whole set. |
+| `DELETE/PATCH /api/v1/active-modules/{name}` | Deactivate one module, or enable/disable it in place. |
+| `GET/PUT /api/v1/config/uncovered-ops` | Read/set the modular fallback mode. |
+| `GET/POST/PUT /api/v1/policies[/{name}]` | List / create / update a policy file in the store. |
+| `POST /api/v1/validate`, `POST /api/v1/dry-run` | Validate a draft, or dry-run it against a sample request, without activating anything. |
+
+Every activation records a p1 audit event carrying SHA-256 fingerprints of
+the prior and new policy — this is the security-critical surface operators
+most need to know exists and to lock down (the write-CN allowlist), not the
+part of this guide most likely to be skipped.
 
 ---
 
@@ -124,7 +194,7 @@ the exact YAML `type:` values.
 | `type` | Denies when |
 |--------|-------------|
 | `algorithm_allowlist` | `op ∈ ops` and `algorithm ∉ algorithms` |
-| `algorithm_denylist` | `op ∈ ops` and `algorithm ∈ algorithms` (optional `unless` custom-attribute escape hatch) |
+| `algorithm_denylist` | `op ∈ ops` and `algorithm ∈ algorithms` (optional `exception_custom_attribute: { name, value }` escape hatch — the request carrying that attribute suppresses the deny) |
 | `min_key_length` | `algorithm` matches and `key_length < min_bits` |
 | `require_usage_mask` | creating `algorithm` without all `flags` set |
 | `require_custom_attribute` | creating any of `algorithms` without `x-<attribute_name>` set |
@@ -143,7 +213,7 @@ the exact YAML `type:` values.
 | `type` | Effect |
 |--------|--------|
 | `temporal_cutoff` | after `after`, deny `op` for an `algorithm_class` (`classical`/`pqc`) — optionally narrowed to `algorithms`. |
-| `max_key_age_days` | deny `op` when the key is older than `days`. *(Stub: needs object-store timestamps; logs a warning, never fires today.)* |
+| `max_key_age_days` | deny `op` when the key is older than `days`, checked against the stored object's real Activation Date. **Genuinely enforced** (corrected 2026-08-28 — this row previously called it a stub that never fires; that stopped being true once Sign/Encrypt/Decrypt/Encapsulate/Decapsulate started populating the object's activation date). Only fires for ops that target an already-activated key. |
 | `hybrid_dual_sign_requirement` | during `effective`, require a composite `primary + secondary` algorithm. |
 | `compliance_profile_gate` | informational profile marker (`FIPS-140-3` / `CNSA-2.0` / …); actual enforcement is composed from the allow/deny rules above. |
 
@@ -158,8 +228,19 @@ the exact YAML `type:` values.
 - **Deny** — the op fails with KMIP `PermissionDenied` and the rule's reason;
   **no engine call happens**.
 - **RekeyAndProceed** — policy substituted the algorithm and the stored key
-  doesn't match; surfaced as a typed rekey-required error (the inline op
-  handlers do not execute the multi-op rekey transaction).
+  doesn't match. **Genuinely executed end to end** for `Sign` and
+  `Encapsulate` (corrected 2026-08-28 — this used to say the multi-op
+  rekey transaction wasn't executed; it is): the op handler generates a
+  fresh key under the new algorithm, activates it, moves the original key
+  to KMIP's real `Deactivated` state, links the two via the custom
+  `x-pqctoday-supersedes` attribute, then re-issues the original op against
+  the new key — transparent migration from classical to PQC at next use.
+  For every other op, `RekeyAndProceed` is structurally impossible (there
+  is no existing object to rekey at `Create`/`CreateKeyPair`, and
+  substitution rules must never target a "consumer" op like
+  `Decrypt`/`Decapsulate`/`DeriveKey` — the loader rejects such a rule), so
+  the handler treats seeing it there as an internal-error bug marker, not
+  a designed path.
 
 **Operations routed through Plane 1:** Create, CreateKeyPair, Encrypt, Decrypt,
 Sign, SignatureVerify, Hash, MAC, **Encapsulate, Decapsulate**, Derive, and the

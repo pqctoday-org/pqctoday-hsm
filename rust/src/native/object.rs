@@ -33,6 +33,13 @@ pub fn destroy_object(session: u32, handle: u32) -> Result<(), CkRv> {
     // for a missing handle, now also covering cross-slot / not-logged-in.
     let access = resolve_session_access(session)?;
     let mut attrs = take_object_checked(&access, handle)?;
+    // Persist the deletion BEFORE zeroising CKA_VALUE below — not that it
+    // matters for correctness here (the delete doesn't read attribute
+    // values), but keeping "was this ever a token object" checked against
+    // the still-intact attrs is simpler than tracking it separately.
+    if crate::state::read_bool_attr(&attrs, CKA_TOKEN) {
+        crate::store::persist_delete(crate::state::object_slot_of(&attrs), handle);
+    }
     // Zeroise key material before deallocation (RS-02 — matches
     // ffi::C_DestroyObject).
     if let Some(val) = attrs.get_mut(&CKA_VALUE) {

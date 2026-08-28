@@ -91,10 +91,12 @@ impl PolicyAudit {
             Decision::Allow {
                 algorithm_override,
                 substituted_by_rule,
-                cp_override: _,
+                cp_override,
+                warnings: _,
             } => DecisionSummary::Allow {
                 algorithm_override: algorithm_override.clone(),
                 substituted_by_rule: *substituted_by_rule,
+                cp_override: cp_override.clone(),
             },
             Decision::Deny {
                 human,
@@ -124,6 +126,23 @@ impl PolicyAudit {
                 policy_fingerprint: policy_fp.into(),
             },
         ));
+
+        // A1 (2026-08-28) — one PolicyWarned event per severity:warn rule
+        // that matched, same "separate event alongside PolicyDecided"
+        // convention RekeyPlanned below already uses.
+        for warning in decision.warnings() {
+            self.sink.emit(AuditEvent::at(
+                req.ts,
+                Plane::Agility,
+                req.correlation_id.to_string(),
+                EventPayload::PolicyWarned {
+                    rule_index: warning.rule_index,
+                    reason: warning.reason.clone(),
+                    policy: warning.policy.clone(),
+                    policy_fingerprint: policy_fp.into(),
+                },
+            ));
+        }
 
         if let Decision::RekeyAndProceed {
             original_uid,
@@ -157,7 +176,43 @@ impl PolicyAudit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::decision::CpOverride;
     use std::collections::HashMap;
+
+    #[test]
+    fn allow_carries_cp_override_into_the_audit_event() {
+        // C4 (2026-08-28 gaps-remediation plan) — was dropped here entirely
+        // (`cp_override: _`); a forcing rule's rewrite was invisible in the
+        // audit trail even though the engine itself tracked it correctly.
+        let audit = PolicyAudit::new(8);
+        let attrs = HashMap::new();
+        let req = PolicyRequest::minimal(
+            "Sign",
+            Some("ML-DSA-65"),
+            OffsetDateTime::UNIX_EPOCH,
+            "corr-cp",
+            &attrs,
+        );
+        audit.record_decision(
+            &req,
+            &Decision::Allow {
+                algorithm_override: None,
+                substituted_by_rule: None,
+                cp_override: Some(CpOverride { deterministic: Some(true), ..Default::default() }),
+                warnings: Vec::new(),
+            },
+            "sha256:fp",
+        );
+        let snap = audit.snapshot();
+        assert_eq!(snap.len(), 1);
+        match &snap[0].event {
+            EventPayload::PolicyDecided {
+                outcome: DecisionSummary::Allow { cp_override: Some(ov), .. },
+                ..
+            } => assert_eq!(ov.deterministic, Some(true)),
+            other => panic!("expected PolicyDecided/Allow with cp_override, got {other:?}"),
+        }
+    }
 
     #[test]
     fn activation_logged() {
@@ -188,6 +243,7 @@ mod tests {
                 new_algorithm: "ML-DSA-65".into(),
                 triggered_by_rule: 2,
                 human: "rekey".into(),
+                warnings: Vec::new(),
             },
             "sha256:fp",
         );
@@ -233,6 +289,7 @@ mod tests {
                 algorithm_override: None,
                 substituted_by_rule: None,
                 cp_override: None,
+                warnings: Vec::new(),
             },
             "sha256:fp",
         );

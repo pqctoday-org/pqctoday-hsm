@@ -236,6 +236,48 @@ pub fn bootstrap_default_token(
     open_session(slot, user_pin)
 }
 
+/// Like [`bootstrap_default_token`], but safe to call every time a
+/// long-lived server process starts, against a slot that may already hold
+/// a durable, rehydrated token (see `store::configure_persistent_store`,
+/// called before this by an embedder that wants persistence).
+///
+/// The difference: `C_InitToken` is called ONLY if the slot is not already
+/// initialized. `bootstrap_default_token` calls it unconditionally, which
+/// is correct for its callers (tests, ephemeral/sandbox runs that want a
+/// guaranteed-fresh token) but would be actively destructive here —
+/// PKCS#11 §5.5.7 makes every `C_InitToken` destroy every destroyable
+/// object on the token, so calling it on a token a store just rehydrated
+/// would silently wipe everything back out on every single restart,
+/// making the whole persistence engine pointless without ever raising an
+/// error. `C_InitPIN`, by contrast, is safe to (re)run: it does not touch
+/// existing objects, and `ffi::C_InitPIN`'s master-key handling re-wraps
+/// the SAME cached master key under the (typically unchanged) user PIN
+/// rather than generating a new one — see that function's doc.
+///
+/// Kept separate from `bootstrap_default_token` rather than changing that
+/// function's behavior: it has other callers (tests, benchmarks) that may
+/// rely on every call producing a guaranteed-fresh token, and this
+/// persistence-aware variant should not silently change what they get.
+pub fn bootstrap_persistent_token(
+    slot: u32,
+    so_pin: &str,
+    user_pin: &str,
+    label: &str,
+) -> Result<u32, CkRv> {
+    init()?;
+    let already_initialized = crate::state::is_token_initialized(slot);
+    if !already_initialized {
+        init_token(slot, so_pin, label)?;
+    }
+    let so = open_session_so(slot, so_pin)?;
+    if !already_initialized {
+        init_pin(so, user_pin)?;
+    }
+    logout(so)?;
+    close_session(so)?;
+    open_session(slot, user_pin)
+}
+
 // Suppress unused-import warning when only some constants are referenced
 // (cfg-dependent paths may consume only a subset).
 #[allow(dead_code)]
