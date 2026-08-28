@@ -8,6 +8,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Rust engine: real Ed448 support (keygen, sign, verify, both pure and
+  pre-hash).** Previously the only Rust-engine gap against the C++ engine's
+  full Ed25519/Ed448 coverage: `CKM_EC_EDWARDS_KEY_PAIR_GEN` explicitly
+  rejected an Ed448 request with `CKR_CURVE_NOT_SUPPORTED` (§6.3.14 permits
+  supporting only one of the two curves; this engine had chosen Ed25519
+  only), and `CKM_EDDSA`/`CKM_EDDSA_PH`'s sign/verify paths were hardcoded
+  to Ed25519's fixed 32-byte key / 64-byte signature sizes with no Ed448
+  branch anywhere. An externally-imported Ed448 public key hit an
+  incidental (not curve-aware) `CKR_SIGNATURE_LEN_RANGE` rejection in
+  `C_Verify`'s §5.12.6 fixed-length precheck, since `get_sig_len` also
+  hardcoded 64 bytes for `CKM_EDDSA`/`_PH` regardless of curve — mirrors a
+  bug the ECDSA arm two cases above it had already been fixed for
+  ("size MUST come from the key's curve, not the hash mechanism").
+  `ed448-goldilocks` was already a transitive dependency (pulled in by
+  `x448`, used there only for its Montgomery/X448 arm) and mirrors
+  `ed25519-dalek`'s API closely enough that `sign_eddsa`/`verify_eddsa`/
+  `_ph` now dispatch on the stored key's length (32B Ed25519 vs 57B Ed448)
+  rather than threading curve identity through every call site. Ed448ph
+  pre-hashes with SHAKE256 to a 64-byte output (RFC 8032 §5.2), not
+  SHA-512 — a different algorithm from Ed25519ph, not just a different key
+  size. New conformance coverage: `w2_edwards_keygen_reads_ec_params`
+  flipped from asserting Ed448 keygen fails cleanly to asserting it
+  succeeds and produces a genuinely 57-byte key (not a silently-substituted
+  Ed25519 one); a new round-trip test proves Ed448 and Ed25519 keys don't
+  cross-verify through the shared length-based dispatch.
+
 ## [0.26.1] — 2026-08-27
 
 **Patch release: fixes a real SEGFAULT that `v0.26.0`'s own tagged commit

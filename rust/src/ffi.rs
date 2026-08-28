@@ -1087,8 +1087,10 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
             0x00080000 | 0x10000000 | 0x20000000 | EC_CAPABILITY_FLAGS,
         ),
         CKM_ECDH1_COFACTOR_DERIVE => (256, 521, 0x00080000 | EC_CAPABILITY_FLAGS),
-        CKM_EC_EDWARDS_KEY_PAIR_GEN => (255, 255, 0x00010000 | EC_CAPABILITY_FLAGS),
-        CKM_EDDSA => (255, 255, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
+        // Ed25519 (255-bit) and Ed448 (448-bit) — both curves implemented
+        // (2026-08-27), mirroring the Montgomery arm's range just below.
+        CKM_EC_EDWARDS_KEY_PAIR_GEN => (255, 448, 0x00010000 | EC_CAPABILITY_FLAGS),
+        CKM_EDDSA => (255, 448, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // PKCS#11 v3.2 §6.7 — Montgomery-curve key pair generation (X25519=255-bit, X448=448-bit)
         CKM_EC_MONTGOMERY_KEY_PAIR_GEN => (255, 448, 0x00010000 | EC_CAPABILITY_FLAGS),
         // PKCS#11 v3.2 §6.7 — Montgomery key derivation (X25519 or X448)
@@ -1150,8 +1152,8 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         //  return CKR_MECHANISM_INVALID here — keep the two in sync)
         // Raw ECDSA (§6.3.12) — pre-hashed input, sign/verify only
         CKM_ECDSA => (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
-        // Ed25519ph (pkcs11t.h CKM_EDDSA_PH 0x80001057)
-        CKM_EDDSA_PH => (255, 255, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
+        // Ed25519ph / Ed448ph (pkcs11t.h CKM_EDDSA_PH 0x80001057)
+        CKM_EDDSA_PH => (255, 448, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // Parametrized pre-hash mechanisms (hash chosen via param, §6.67.7/§6.69.7)
         CKM_HASH_ML_DSA => (1312, 2592, 0x00000800 | 0x00002000),
         CKM_HASH_SLH_DSA => (32, 64, 0x00000800 | 0x00002000),
@@ -2412,12 +2414,23 @@ fn C_GenerateKeyPair_impl(
                 // EC key pair generation mechanism will fail with
                 // CKR_CURVE_NOT_SUPPORTED." This arm never read the attribute
                 // at all and hardcoded Ed25519, so an Ed448 request returned
-                // an Ed25519 key with success. §6.3.14 permits supporting only
-                // one of the two — this engine implements Ed25519 and
-                // advertises min = max = 255 accordingly.
+                // an Ed25519 key with success.
                 //
                 // The Montgomery arm below already switched on the attribute,
                 // which is why Edwards was the outlier rather than a position.
+                //
+                // Ed448 (2026-08-27) — §6.3.14 permits supporting only one of
+                // the two, and this engine initially chose Ed25519-only
+                // (CKR_CURVE_NOT_SUPPORTED for an Ed448 request). Both curves
+                // are now implemented: `ed448-goldilocks` was already a
+                // transitive dependency (pulled in by `x448` below, for its
+                // Montgomery/X448 arm only) and mirrors `ed25519-dalek`'s API
+                // closely enough that both branches share this arm's
+                // attribute scaffolding, just not the key material or its
+                // fixed sizes (32B key / 64B sig for Ed25519, 57B key / 114B
+                // sig for Ed448 — see get_sig_len and verify_eddsa/PH, which
+                // both dispatch on the stored key's length rather than the
+                // mechanism alone, since CKM_EDDSA covers both curves).
                 let ed_params = get_attr_bytes(
                     p_public_key_template,
                     ul_public_key_attribute_count,
@@ -2434,14 +2447,12 @@ fn C_GenerateKeyPair_impl(
                     Some(p) => p,
                     None => return CKR_TEMPLATE_INCOMPLETE,
                 };
-                match crate::crypto::handlers::decode_ec_params(&ed_params) {
-                    Ok(CURVE_ED25519) => {}
-                    // Ed448 is recognised and deliberately not implemented.
+                let is_ed448 = match crate::crypto::handlers::decode_ec_params(&ed_params) {
+                    Ok(CURVE_ED25519) => false,
+                    Ok(CURVE_ED448) => true,
                     Ok(_) => return CKR_CURVE_NOT_SUPPORTED,
                     Err(rv) => return rv,
-                }
-                let sk = with_rng!(rng, { ed25519_dalek::SigningKey::generate(&mut rng) });
-                let vk = sk.verifying_key();
+                };
 
                 let mut pub_attrs = HashMap::new();
                 let mut prv_attrs = HashMap::new();
@@ -2479,8 +2490,6 @@ fn C_GenerateKeyPair_impl(
                     CKA_KEY_GEN_MECHANISM,
                     CKM_EC_EDWARDS_KEY_PAIR_GEN,
                 );
-                let vk_bytes = vk.to_bytes().to_vec();
-                prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
                 // E4 (2026-08-13) — the Edwards public-key table says "Public
                 // key bytes in little endian order as defined in [RFC 8032]",
                 // deliberately different wording from the Weierstrass table's
@@ -2488,14 +2497,39 @@ fn C_GenerateKeyPair_impl(
                 // difference IS the specification. This arm previously put
                 // the key in CKA_VALUE with no EC point and no parameters at
                 // all — the worst of the three engines' variants. Now:
-                // CKA_EC_POINT holds the BARE 32 bytes, CKA_EC_PARAMS is
+                // CKA_EC_POINT holds the BARE key bytes, CKA_EC_PARAMS is
                 // present, and there is no CKA_VALUE on a public key.
-                pub_attrs.insert(CKA_EC_POINT, vk_bytes.clone());
-                pub_attrs.insert(CKA_EC_PARAMS, vec![0x06, 0x03, 0x2b, 0x65, 0x70]);
-                prv_attrs.insert(CKA_EC_PARAMS, vec![0x06, 0x03, 0x2b, 0x65, 0x70]);
-                // SubjectPublicKeyInfo DER for Ed25519 (32-byte key)
-                // 30 2a 30 05 06 03 2b6570 03 22 00 <32 bytes>
-                let spki = build_ed25519_spki(&vk_bytes);
+                let (vk_bytes, ec_params_oid, spki) = if is_ed448 {
+                    use ed448_goldilocks::elliptic_curve::Generate;
+                    use getrandom_0_4::rand_core::UnwrapErr;
+                    use getrandom_0_4::SysRng;
+                    let mut rng = UnwrapErr(SysRng);
+                    let sk = ed448_goldilocks::SigningKey::generate_from_rng(&mut rng);
+                    let vk = sk.verifying_key();
+                    let vk_bytes = vk.to_bytes().to_vec();
+                    prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+                    // OID 1.3.101.113 — id-Ed448 (RFC 8410)
+                    let oid = vec![0x06, 0x03, 0x2b, 0x65, 0x71];
+                    // SubjectPublicKeyInfo DER for Ed448 (57-byte key)
+                    // 30 43 30 05 06 03 2b6571 03 3a 00 <57 bytes>
+                    let alg_id: &[u8] = &[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x71];
+                    let spki = build_spki_from_parts(alg_id, &vk_bytes);
+                    (vk_bytes, oid, spki)
+                } else {
+                    let sk = with_rng!(rng, { ed25519_dalek::SigningKey::generate(&mut rng) });
+                    let vk = sk.verifying_key();
+                    let vk_bytes = vk.to_bytes().to_vec();
+                    prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+                    // OID 1.3.101.112 — id-Ed25519 (RFC 8410)
+                    let oid = vec![0x06, 0x03, 0x2b, 0x65, 0x70];
+                    // SubjectPublicKeyInfo DER for Ed25519 (32-byte key)
+                    // 30 2a 30 05 06 03 2b6570 03 22 00 <32 bytes>
+                    let spki = build_ed25519_spki(&vk_bytes);
+                    (vk_bytes, oid, spki)
+                };
+                pub_attrs.insert(CKA_EC_POINT, vk_bytes);
+                pub_attrs.insert(CKA_EC_PARAMS, ec_params_oid.clone());
+                prv_attrs.insert(CKA_EC_PARAMS, ec_params_oid);
                 pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                 absorb_template_attrs(
                     &mut pub_attrs,
