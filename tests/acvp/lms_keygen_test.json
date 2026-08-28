@@ -1845,5 +1845,13 @@
         }
       ]
     }
-  ]
+  ],
+  "_provenance": {
+    "source_url": "https://github.com/usnistgov/ACVP-Server/tree/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/LMS-keyGen-1.0",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d (structural reference only \u2014 see note)",
+    "retrieved": "2026-08-28",
+    "producer": "NIST ACVP-Server (LMS keyGen/sigVer AFT vectors, vsId 351653 \u2014 exact pull session predates this project's tracking; see note)",
+    "source_sha256": null,
+    "note": "WS-10(d) (2026-08-28): backfilled provenance. This file's schema (algorithm/mode/revision/testGroups[].tgId/testType/lmsMode/lmOtsMode/tests[].tcId/seed/i) was confirmed to exactly match NIST ACVP-Server's real LMS keyGen v1.0 generation module (gen-val/src/generation/.../LMS/v1_0/KeyGen at usnistgov/ACVP-Server), and the vsId (351653) and isSample=true marker are consistent with a genuine ACVP demo/session pull, not project-generated data. However, LMS keyGen is an AFT test type whose seeds are freshly randomized on every generation pass, so there is no stable public reference to byte-match against \u2014 the public repo's own checked-in sample (gen-val/json-files/LMS-keyGen-1.0, pinned 975de31eb83d87039ec88934fdc47d8c312b892d) shares this file's exact structure but none of its 240 seed/i/publicKey triples, which is expected for this test type, not a discrepancy. RFC 8554 Appendix F's own published test vectors are HSS (multi-level), not this file's plain single-level LMS shape, so they are not a substitutable source either. Functional correctness is independently corroborated: both the C++ and Rust engines derive matching public keys from these seeds and pass 100% (tests/acvp-wasm.mjs). Origin predates this project's provenance tracking; this note documents what could and could not be established, per this repo's no-record-without-proof standard."
+  }
 }

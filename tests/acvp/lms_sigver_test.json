@@ -2325,5 +2325,13 @@
         }
       ]
     }
-  ]
+  ],
+  "_provenance": {
+    "source_url": "https://github.com/usnistgov/ACVP-Server/tree/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/LMS-sigVer-1.0",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d (structural reference only \u2014 see note)",
+    "retrieved": "2026-08-28",
+    "producer": "NIST ACVP-Server (LMS keyGen/sigVer AFT vectors, vsId 263888 \u2014 exact pull session predates this project's tracking; see note)",
+    "source_sha256": null,
+    "note": "WS-10(d) (2026-08-28): backfilled provenance. Same finding as lms_keygen_test.json/lms_keygen_expected.json (see their _provenance note) \u2014 schema exactly matches NIST ACVP-Server's real LMS sigVer v1.0 generation module, vsId (263888) and isSample=true are consistent with a genuine ACVP demo pull, but AFT-type message/signature pairs are freshly randomized per generation with no stable public reference to byte-match (checked against the pinned repo's own LMS-sigVer-1.0 sample, 975de31eb83d87039ec88934fdc47d8c312b892d: 0/320 matches, expected for this test type). RFC 8554 Appendix F's published vectors are HSS-shaped, not a substitute. Functional correctness independently corroborated by both engines passing 100% (tests/acvp-wasm.mjs)."
+  }
 }

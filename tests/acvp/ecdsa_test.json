@@ -1,21 +1,29 @@
 {
   "algorithm": "ECDSA",
   "mode": "sigVer",
-  "source": "Generated via Node.js crypto (OpenSSL backend), ECDSA P-256 with SHA-256",
+  "source": "RFC 6979 Appendix A.2.5 (ECDSA P-256, SHA-256, message \"sample\"); verified with the node crypto (OpenSSL) oracle",
   "testGroups": [
     {
       "curve": "P-256",
       "hashAlg": "SHA-256",
       "tests": [
         {
-          "qx": "4cfb8d7ba520246a030cd8b37d3e2b82d002eee4cc7e613414264e3d17ffad0f",
-          "qy": "bdefda6ce7f6c010c7d6a63b43478f9ea8174159fb3630cc9eb734fb9f23c9aa",
-          "msg": "ACVP ECDSA P-256 SigVer test vector",
-          "r": "ce567dd7d2fad3cce860d50e79d1a8d4473fb946e8eda251480a8c37c0dd703a",
-          "s": "895358d335518537c9e45b43d3705d985030ae8215e2e06e21e5973e0e3c638b",
+          "qx": "60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6",
+          "qy": "7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299",
+          "msg": "sample",
+          "r": "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716",
+          "s": "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8",
           "testPassed": true
         }
       ]
     }
-  ]
+  ],
+  "_provenance": {
+    "source_url": "https://www.rfc-editor.org/rfc/rfc6979",
+    "source_release": null,
+    "retrieved": null,
+    "producer": "RFC 6979 Appendix A.2.5 (published KAT sample, not from ACVP)",
+    "source_sha256": null,
+    "note": "WS-10(c) (2026-08-28): backfilled provenance for evidence-tier derivation. ECDSA P-256/SHA-256 deterministic-signature test vector is RFC 6979's own published Appendix A test vector, not ACVP-Server-generated \u2014 a published-standard KAT. Independently re-verified (DER-encoded r,s over msg \"sample\") against the Node crypto (OpenSSL) oracle before backfill."
+  }
 }

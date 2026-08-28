@@ -51,28 +51,25 @@ HUB_ACVP_DIR = os.path.join(HUB_REPO_PATH, "src", "data", "acvp")
 # yet" is fine as long as it says so explicitly, per this check's whole
 # purpose (an unexplained divergence is exactly what went unnoticed for 15
 # files before this check existed).
-ACCEPTED_DIVERGENCES = {
-    "aesctr_test.json": "Hub's own copy is also self-generated (no _provenance) — "
-    "re-sourcing both needs fresh NIST ACVP-AES-CTR vector research (WS-10(c), "
-    "2026-08-28 continuation plan), not a copy from the hub.",
-    "aesgcm_test.json": "Same as aesctr_test.json — hub's own copy lacks "
-    "_provenance too; needs fresh vector research (WS-10(c)).",
-    "aeskw_test.json": "Content is already identical between the two repos "
-    "(confirmed 2026-08-28) but neither has _provenance — needs fresh vector "
-    "research (WS-10(c)), tracked separately from content divergence.",
-    "ecdsa_p384_test.json": "Hub's own copy lacks _provenance — needs fresh "
-    "vector research (WS-10(c)).",
-    "ecdsa_test.json": "Hub's own copy lacks _provenance — needs fresh vector "
-    "research (WS-10(c)).",
-    "eddsa_test.json": "Hub's own copy lacks _provenance — needs fresh vector "
-    "research (WS-10(c)).",
-    "rsapss_test.json": "Hub's own copy is self-consistency tier by design "
-    "(NIST's ACVP-RSA-SigVer PSS reference vectors use hash families neither "
-    "engine's PSS path implements — SHA-1/SHA2-224/SHA3-256/SHAKE vs this "
-    "engine's SHA-256/384/512/SHA3-384; see the 2026-08-28 continuation "
-    "plan's WS-7 section). Not a copy candidate until an engine gains one of "
-    "those hash families.",
-}
+#
+# WS-10(c) (2026-08-28) closed out the 7 entries this dict used to carry
+# (aesctr/aesgcm/aeskw/ecdsa_p384/ecdsa/eddsa/rsapss): the hub backfilled
+# real _provenance (published-standard tier for the first 6, self-consistency
+# for rsapss — no NIST ACVP-RSA-SigVer PSS vector matches either engine's
+# supported hash families) and this repo re-synced from the hub, so they're
+# identical now — nothing left to exempt.
+#
+# The 4 LMS files (lms_keygen_test/expected.json, lms_sigver_test/
+# expected.json) have no hub counterpart at all — see WS-10(d): their
+# schema exactly matches NIST ACVP-Server's real LMS keyGen/sigVer v1.0
+# generation modules and their vsId/isSample markers are consistent with a
+# genuine ACVP pull, but AFT-type seeds are randomized per generation with
+# no stable public source to byte-match, and RFC 8554's own published
+# vectors are HSS-shaped (not this file's plain LMS shape) so aren't a
+# substitute. Provenance is backfilled documenting exactly this; see each
+# file's own _provenance.note. They stay hsm-only (not an accepted
+# divergence — there's no hub file to diverge from).
+ACCEPTED_DIVERGENCES = {}
 
 
 def load_json(path):
