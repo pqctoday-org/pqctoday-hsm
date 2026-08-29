@@ -35,6 +35,12 @@ pub mod native;
 /// the call sites) is cfg-gated away from `wasm32-unknown-unknown`.
 pub mod oplog;
 pub mod state;
+/// Native, encrypted-at-rest persistence for the engine's own slots/tokens/
+/// objects. Separate from `state_snapshot.rs` (the Emscripten-only debug
+/// blob, untouched by this module) and from the KMIP crate's own store
+/// (KMIP-level metadata only, not PKCS#11 key material). See the module
+/// doc in `store/mod.rs`.
+pub mod store;
 /// Token-state snapshot/restore — persistence surface for the emscripten
 /// staticlib embedding (openssl.wasm tears the runtime down per command);
 /// serialization halves are target-neutral so native tests cover the seam.

@@ -140,7 +140,7 @@ impl KmipPlayground {
         )
         .map_err(|e| JsError::new(&format!("permissive policy parse: {e}")))?;
         engine
-            .activate(loaded)
+            .replace_all(loaded)
             .map_err(|e| JsError::new(&format!("permissive policy activate: {e}")))?;
 
         // Plane 2 — volatile object store.
@@ -558,7 +558,7 @@ impl KmipPlayground {
         match pqctoday_kmip::policy::loader::load_from_str(yaml, std::path::Path::new("<wasm>")) {
             Ok(loaded) => {
                 let warnings = loaded.warnings.clone();
-                match self.deps.engine.activate(loaded) {
+                match self.deps.engine.replace_all(loaded) {
                     Ok(_) => json!({ "ok": true, "warnings": warnings }).to_string(),
                     Err(e) => json!({ "ok": false, "error": format!("{e}") }).to_string(),
                 }
@@ -581,6 +581,114 @@ impl KmipPlayground {
             })
             .to_string(),
             None => json!({ "active": false }).to_string(),
+        }
+    }
+
+    /// Release the legacy single-policy slot ([`load_policy`](Self::load_policy))
+    /// without loading a replacement. [`activate_policy_module`](Self::activate_policy_module)
+    /// refuses while it is occupied — the playground boots with a legacy
+    /// permissive policy active, so switching to a multi-file modular preset
+    /// must call this first.
+    #[wasm_bindgen]
+    pub fn release_legacy_policy(&self) {
+        self.deps.engine.release_legacy();
+    }
+
+    /// Modular-policy plan (2026-08-28) — activate ONE scoped module
+    /// alongside whatever else is already active, instead of replacing the
+    /// whole engine state. Multiple modules (e.g. a policy split into
+    /// `-signing.yaml`/`-key-establishment.yaml`/`-encryption.yaml`/
+    /// `-global.yaml`) compose into one working policy. Returns
+    /// `{ ok, warnings, error? }`. Refused (ok:false) if the file has no
+    /// `metadata.scopes`, if a legacy ([`load_policy`](Self::load_policy))
+    /// policy is active, or if its scope is already claimed by a
+    /// differently-named module — call
+    /// [`clear_policy_modules`](Self::clear_policy_modules) first to switch
+    /// presets.
+    #[wasm_bindgen]
+    pub fn activate_policy_module(&self, yaml: &str) -> String {
+        match pqctoday_kmip::policy::loader::load_from_str(yaml, std::path::Path::new("<wasm>")) {
+            Ok(loaded) => {
+                let warnings = loaded.warnings.clone();
+                match self.deps.engine.activate(loaded) {
+                    Ok(_) => json!({ "ok": true, "warnings": warnings }).to_string(),
+                    Err(e) => json!({ "ok": false, "error": format!("{e}") }).to_string(),
+                }
+            }
+            Err(e) => json!({ "ok": false, "error": format!("{e}") }).to_string(),
+        }
+    }
+
+    /// Deactivate one named module. Returns `{ ok }` — `ok:false` means no
+    /// module by that name was active.
+    #[wasm_bindgen]
+    pub fn deactivate_policy_module(&self, name: &str) -> String {
+        json!({ "ok": self.deps.engine.deactivate(name) }).to_string()
+    }
+
+    /// Enable/disable one active module without unloading it — a disabled
+    /// module's rules are skipped during evaluation but stay activated (its
+    /// scope stays claimed). Returns `{ ok }` — `ok:false` means no module
+    /// by that name was active.
+    #[wasm_bindgen]
+    pub fn set_policy_module_enabled(&self, name: &str, enabled: bool) -> String {
+        json!({ "ok": self.deps.engine.set_module_enabled(name, enabled) }).to_string()
+    }
+
+    /// Deactivate every module (does not touch a legacy
+    /// [`load_policy`](Self::load_policy) policy). Call before activating a
+    /// different multi-file preset.
+    #[wasm_bindgen]
+    pub fn clear_policy_modules(&self) {
+        self.deps.engine.clear_modules();
+    }
+
+    /// Every currently-active module: `{ modules: [{ name, fingerprint,
+    /// scopes, rules, enabled }], uncoveredOps }`.
+    #[wasm_bindgen]
+    pub fn policy_modules_status(&self) -> String {
+        let modules: Vec<Json> = self
+            .deps
+            .engine
+            .modules()
+            .into_iter()
+            .map(|(policy, enabled)| {
+                json!({
+                    "name": policy.policy.metadata.name,
+                    "fingerprint": policy.source_fingerprint,
+                    "scopes": policy.scopes().iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    "rules": policy.policy.rules.len(),
+                    "enabled": enabled,
+                })
+            })
+            .collect();
+        let uncovered_ops = match self.deps.engine.uncovered_ops() {
+            pqctoday_kmip::policy::UncoveredOps::Deny => "deny",
+            pqctoday_kmip::policy::UncoveredOps::Allow => "allow",
+        };
+        json!({ "modules": modules, "uncoveredOps": uncovered_ops }).to_string()
+    }
+
+    /// Set what the engine does with a request whose op no active module's
+    /// scope covers (modular mode only) — `mode` is `"deny"` (fail closed,
+    /// the server default) or `"allow"` (fail open; playground/incremental
+    /// adoption only). Returns `{ ok, error? }`.
+    #[wasm_bindgen]
+    pub fn set_uncovered_ops(&self, mode: &str) -> String {
+        match mode {
+            "deny" => {
+                self.deps.engine.set_uncovered_ops(pqctoday_kmip::policy::UncoveredOps::Deny);
+                json!({ "ok": true }).to_string()
+            }
+            "allow" => {
+                self.deps.engine.set_uncovered_ops(pqctoday_kmip::policy::UncoveredOps::Allow);
+                json!({ "ok": true }).to_string()
+            }
+            other => json!({
+                "ok": false,
+                "error": format!("unknown uncovered-ops mode '{other}' — expected 'deny' or 'allow'")
+            })
+            .to_string(),
         }
     }
 
@@ -692,9 +800,15 @@ impl KmipPlayground {
 
         let (decision, trace) = self.deps.engine.evaluate_traced(&pr);
         let mut out = match decision {
-            Decision::Allow { algorithm_override, substituted_by_rule, .. } => json!({
-                "kind": "Allow", "algorithm": algorithm_override, "rule": substituted_by_rule,
-            }),
+            Decision::Allow { algorithm_override, substituted_by_rule, cp_override, .. } => {
+                json!({
+                    "kind": "Allow", "algorithm": algorithm_override, "rule": substituted_by_rule,
+                    // C4 (2026-08-28 gaps-remediation plan) — was dropped here
+                    // entirely; a forcing rule's rewrite was invisible in the
+                    // teaching UI. `null` when no forcing rule fired.
+                    "cpOverride": cp_override.map(cp_override_json),
+                })
+            }
             Decision::Deny { human, fired_rule_index, kmip_reason } => json!({
                 "kind": "Deny", "reason": human, "rule": fired_rule_index,
                 "denyReason": format!("{kmip_reason:?}"),
@@ -714,6 +828,28 @@ impl KmipPlayground {
             obj.insert("trace".into(), Json::Array(trace_json));
         }
         out.to_string()
+    }
+
+    /// C3 (2026-08-28 gaps-remediation plan) — every value-level lint finding
+    /// for a policy draft, fatal and advisory alike (not just the first fatal
+    /// one `load_policy` itself stops at). Structural failures (bad YAML,
+    /// unknown top-level field, bad schema version) still come back as a
+    /// single `{ ok: false, error }` — those are genuinely single-valued (no
+    /// "second" malformed document) and the visual editor's own generator
+    /// never produces one anyway. Returns
+    /// `{ ok: true, findings: [{ ruleIndex, field, value, fatal, message }] }`.
+    #[wasm_bindgen]
+    pub fn lint_policy_draft(&self, yaml: &str) -> String {
+        match pqctoday_kmip::policy::parse_and_structurally_validate(
+            yaml,
+            std::path::Path::new("<draft>"),
+        ) {
+            Ok(policy) => {
+                let findings = pqctoday_kmip::policy::lint_rules(&policy.rules, true);
+                json!({ "ok": true, "findings": findings }).to_string()
+            }
+            Err(e) => json!({ "ok": false, "error": format!("{e}") }).to_string(),
+        }
     }
 
     /// Every object in the KMIP store (Plane 2 keystore view) as a JSON array.
@@ -1462,6 +1598,25 @@ fn frame_json(f: &TtlvFrame) -> Json {
 
 fn error_json(msg: &str) -> String {
     json!({ "ok": false, "status": "Error", "message": msg }).to_string()
+}
+
+/// C4 (2026-08-28 gaps-remediation plan) — a forced `CpOverride` as
+/// human-readable JSON, so the Playground can render "Allow — parameters
+/// forced: …" instead of the caller having to know the raw KMIP codepoints.
+/// Only the fields a forcing rule actually set are non-null; `tagLength`/
+/// `saltLength` are already plain byte counts (no name table to reverse).
+fn cp_override_json(cp: pqctoday_kmip::policy::CpOverride) -> Json {
+    use pqctoday_kmip::policy::{
+        block_cipher_mode_code_to_name, hash_code_to_name, padding_method_code_to_name,
+    };
+    json!({
+        "hashingAlgorithm": cp.hashing_algorithm.and_then(hash_code_to_name),
+        "blockCipherMode": cp.block_cipher_mode.and_then(block_cipher_mode_code_to_name),
+        "paddingMethod": cp.padding_method.and_then(padding_method_code_to_name),
+        "deterministic": cp.deterministic,
+        "tagLength": cp.tag_length,
+        "saltLength": cp.salt_length,
+    })
 }
 
 fn to_hex(bytes: &[u8]) -> String {

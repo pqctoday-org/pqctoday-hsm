@@ -74,7 +74,7 @@ impl DenyReason {
 /// (HashingAlgorithm / BlockCipherMode / PaddingMethod); `deterministic` is the
 /// CSD02 PQC flag. Parallel to `Decision::Allow::algorithm_override`, but for
 /// the mechanism dimension.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpOverride {
     pub hashing_algorithm: Option<u32>,
     pub block_cipher_mode: Option<u32>,
@@ -137,6 +137,26 @@ impl CpOverride {
 /// [`Decision::RekeyAndProceed`] when policy's resolved algorithm differs
 /// from the stored object's algorithm. The dispatcher (Phase 5) implements
 /// the multi-op rekey transaction.
+/// A `severity: warn` gating rule matched but did NOT deny (A1,
+/// 2026-08-28 gaps-remediation plan) — attached to `Allow`/`RekeyAndProceed`
+/// so a policy can flag "this would be denied under a stricter posture"
+/// without actually blocking the request yet. The recommended deprecation
+/// pattern is the SAME condition written twice: `severity: warn` today,
+/// `severity: deny` with a future `effective_from` — see
+/// `policies/README.md`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyWarning {
+    /// 1-based index of the warn-severity rule that matched (matches policy
+    /// file line order, same convention as `Deny::fired_rule_index`).
+    pub rule_index: usize,
+    /// Human reason pulled from the rule's `reason:` field.
+    pub reason: String,
+    /// The policy (legacy `replace_all` mode) or module (modular mode) name
+    /// that owns the rule — modular mode has more than one policy active at
+    /// once, so a bare rule index alone doesn't say which file to look in.
+    pub policy: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     /// Request may proceed. If `algorithm_override` is `Some(canonical)`,
@@ -153,6 +173,9 @@ pub enum Decision {
         /// Mechanism parameters the policy forces (hash / mode / padding /
         /// deterministic). `None` when no forcing rule fired (plan P3).
         cp_override: Option<CpOverride>,
+        /// `severity: warn` rules that matched during Pass 2 gating without
+        /// denying (A1, 2026-08-28). Empty when none fired.
+        warnings: Vec<PolicyWarning>,
     },
 
     /// Policy says the request should proceed under a different algorithm
@@ -178,6 +201,9 @@ pub enum Decision {
         triggered_by_rule: usize,
         /// Human reason for the audit log (rule's `reason:` field).
         human: String,
+        /// `severity: warn` rules that matched during Pass 2 gating without
+        /// denying (A1, 2026-08-28). Empty when none fired.
+        warnings: Vec<PolicyWarning>,
     },
 
     /// Request denied. Dispatcher emits a KMIP `OperationFailed` response.
@@ -199,6 +225,16 @@ impl Decision {
             algorithm_override: None,
             substituted_by_rule: None,
             cp_override: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Every `PolicyWarning` attached to this decision — empty for `Deny`
+    /// (a denied request has nothing further to warn about).
+    pub fn warnings(&self) -> &[PolicyWarning] {
+        match self {
+            Decision::Allow { warnings, .. } | Decision::RekeyAndProceed { warnings, .. } => warnings,
+            Decision::Deny { .. } => &[],
         }
     }
 
@@ -282,6 +318,7 @@ mod tests {
             algorithm_override: Some("ML-KEM-1024".into()),
             substituted_by_rule: Some(3),
             cp_override: None,
+            warnings: Vec::new(),
         };
         assert_eq!(d.algorithm_override(), Some("ML-KEM-1024"));
     }

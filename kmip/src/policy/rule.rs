@@ -24,6 +24,29 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::{decision::CpOverride, decision::DenyReason, request::PolicyRequest};
+use super::lint::is_ml_dsa_composite_tail;
+
+/// Deprecation warn-tier (A1, 2026-08-28 gaps-remediation plan). Available
+/// on the five gating rule types where "flag it, don't block it yet" is a
+/// meaningful authoring intent: `AlgorithmDenylist`, `MechanismDenylist`,
+/// `HashAlgorithmAllowlist`, `TemporalCutoff`, `MechanismParameterConstraint`.
+/// The recommended pattern is the SAME condition written twice — one
+/// `severity: warn` rule today, a second `severity: deny` copy with a future
+/// `effective_from` — see `policies/README.md`'s worked example
+/// (`pqc-migration-2030`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    /// The rule's usual behavior: a match denies the request. Default —
+    /// every existing policy file (no `severity:` field at all) keeps its
+    /// exact current behavior.
+    #[default]
+    Deny,
+    /// A match attaches a [`super::decision::PolicyWarning`] to the
+    /// eventual `Allow`/`RekeyAndProceed` instead of denying — Pass 2
+    /// keeps walking subsequent rules rather than short-circuiting.
+    Warn,
+}
 
 /// One row in the policy file's `rules:` list. The `#[serde(tag = "type")]`
 /// pattern matches the YAML shape exactly (see `policies/*.yaml`).
@@ -118,6 +141,10 @@ pub enum Rule {
         /// Skip this rule if request has `x-<name> == value`.
         #[serde(default)]
         exception_custom_attribute: Option<AttrPredicate>,
+        /// A1 (2026-08-28) — `warn` attaches a warning instead of denying.
+        /// Default `deny`, so every existing file's behavior is unchanged.
+        #[serde(default)]
+        severity: Severity,
     },
 
     /// `algorithm == algorithm` AND `key_length < min_bits` → Deny.
@@ -212,6 +239,9 @@ pub enum Rule {
         /// policy author didn't cite one.
         #[serde(default)]
         clause: Option<String>,
+        /// A1 (2026-08-28) — `warn` attaches a warning instead of denying.
+        #[serde(default)]
+        severity: Severity,
     },
 
     /// `op == op` AND `state ∉ allowed_states` → Deny.
@@ -287,6 +317,9 @@ pub enum Rule {
         effective_from: Option<TimeBound>,
         #[serde(default)]
         effective_until: Option<TimeBound>,
+        /// A1 (2026-08-28) — `warn` attaches a warning instead of denying.
+        #[serde(default)]
+        severity: Severity,
     },
 
     /// Constrain KMIP `CryptographicParameters` per op (G2/G4). Any *present*
@@ -312,6 +345,9 @@ pub enum Rule {
         /// policy author didn't cite one.
         #[serde(default)]
         clause: Option<String>,
+        /// A1 (2026-08-28) — `warn` attaches a warning instead of denying.
+        #[serde(default)]
+        severity: Severity,
     },
 
     /// Gate the MAC mechanism family (G1, MAC side). `op ∈ ops` AND the
@@ -399,6 +435,9 @@ pub enum Rule {
         /// policy author didn't cite one.
         #[serde(default)]
         clause: Option<String>,
+        /// A1 (2026-08-28) — `warn` attaches a warning instead of denying.
+        #[serde(default)]
+        severity: Severity,
     },
 }
 
@@ -428,9 +467,19 @@ impl TimeBound {
         }
     }
 
-    /// Parse `"always"` or `"YYYY-MM-DD"` into a `TimeBound`.
+    /// Parse `"always"`/`"immediate"`/`"never"` or `"YYYY-MM-DD"` into a
+    /// `TimeBound`. The three unbounded synonyms are matched
+    /// case-insensitively and are fully interchangeable (A5.3 + A2,
+    /// 2026-08-28 audit) — one parser serves `Metadata::effective`
+    /// ("immediate" reads naturally there), the new `Metadata::expires`
+    /// ("never" reads naturally there), and rule-level `effective_from`/
+    /// `effective_until`/`after` windows, rather than three different rules
+    /// for what "unbounded" means depending on which field you're writing.
     pub fn parse_str(s: &str) -> Result<Self, String> {
-        if s == "always" {
+        if s.eq_ignore_ascii_case("always")
+            || s.eq_ignore_ascii_case("immediate")
+            || s.eq_ignore_ascii_case("never")
+        {
             return Ok(TimeBound::Always);
         }
         // Accept "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SSZ" (truncate to date).
@@ -535,6 +584,23 @@ impl Rule {
             Rule::AlgorithmDefault { name_pattern: Some(_), .. }
                 | Rule::AlgorithmSubstitution { name_pattern: Some(_), .. }
         )
+    }
+
+    /// A1 (2026-08-28) — this rule's deprecation-warn severity. `Deny` for
+    /// every rule type that doesn't carry a `severity:` field at all (Pass 0
+    /// resolution rules, and the gating types where "warn instead of deny"
+    /// isn't a meaningful authoring intent) — same as the field's own serde
+    /// default, so a rule type gaining `severity` later needs no call site
+    /// here to change.
+    pub fn severity(&self) -> Severity {
+        match self {
+            Rule::AlgorithmDenylist { severity, .. }
+            | Rule::MechanismDenylist { severity, .. }
+            | Rule::HashAlgorithmAllowlist { severity, .. }
+            | Rule::TemporalCutoff { severity, .. }
+            | Rule::MechanismParameterConstraint { severity, .. } => *severity,
+            _ => Severity::Deny,
+        }
     }
 
     /// Pass 0 (F-2): resolve `AlgorithmDefault` — fill the request's algorithm
@@ -1128,9 +1194,12 @@ pub fn is_consumer_op(op: &str) -> bool {
 /// the request side is always specific; only the policy entry may be a family.
 ///
 /// An entry *covers* a request when (Y3):
-/// - it equals the request exactly (`AES-256` covers `AES-256`), or
+/// - it equals the request exactly (`AES-256` covers `AES-256`, and a
+///   composite entry like `ML-DSA-87-ECDSA-P384` covers only that exact
+///   composite — see the composite exclusion below), or
 /// - it is a family prefix and the request is a hyphen-suffixed member
-///   (`AES` covers `AES-256`; `ECDSA` covers `ECDSA-P256`).
+///   (`AES` covers `AES-256`; `ECDSA` covers `ECDSA-P256`) **that is not
+///   itself a composite name**.
 ///
 /// It does NOT match in the reverse direction: `AES-256` never covers a bare
 /// `AES`, and `AES-128` never covers `AES-256`. Using the same predicate for
@@ -1138,6 +1207,16 @@ pub fn is_consumer_op(op: &str) -> bool {
 /// denylisting `AES-128` leaves `AES-256` allowed; allowlisting the family
 /// `AES` admits every AES size; denylisting the family `SLH-DSA` catches every
 /// parameter set.
+///
+/// **Composite exclusion (A6.1, 2026-08-28 gaps-remediation plan).** Before
+/// this fix, a bare/sized family entry like `ML-DSA-87` silently covered the
+/// composite `ML-DSA-87-ECDSA-P384` too — the family-prefix rule doesn't
+/// distinguish "a bigger member of my own family" from "a different
+/// algorithm entirely that happens to start with my name". That made a
+/// `cnsa-2.0`/`fips-only`-style allowlist of `ML-DSA-87` unintentionally
+/// ADMIT the composite, and a denylist of a classical family unintentionally
+/// DENY a composite that legitimately includes it. A composite is now
+/// matched/denied only by its own full name — see [`is_composite_algorithm_name`].
 ///
 /// Case-insensitive (CACP A-grade review, 2026-07-03): algorithm names have no
 /// case-significant vocabulary — nothing in this codebase distinguishes two
@@ -1152,6 +1231,9 @@ pub fn algo_matches(policy_entry: &str, request_algo: &str) -> bool {
     if policy_entry.eq_ignore_ascii_case(request_algo) {
         return true;
     }
+    if is_composite_algorithm_name(request_algo) {
+        return false;
+    }
     // Family prefix: every algorithm name in this vocabulary is ASCII, so byte
     // indexing is safe and case-folding per byte is correct (no multi-byte /
     // Unicode-casing pitfalls to worry about).
@@ -1161,12 +1243,44 @@ pub fn algo_matches(policy_entry: &str, request_algo: &str) -> bool {
         && request_algo.as_bytes()[policy_entry.len()] == b'-'
 }
 
+/// `true` if `name` is a KMIP 3.0 LAMPS composite algorithm name —
+/// `ML-DSA-<level>-<classical tail>` (e.g. `ML-DSA-87-ECDSA-P384`,
+/// `ML-DSA-44-RSA2048-PSS`). A6.1, 2026-08-28 gaps-remediation plan.
+///
+/// Every real composite this codebase can produce is
+/// `KmipAlgorithm::CompositeMlDsa*` (`kmip30/algos.rs`) — there is no
+/// composite KEM or other composite family — so this is deliberately
+/// ML-DSA-specific rather than a generic "any two independently-known
+/// halves" heuristic. That generic version was tried first and rejected: it
+/// missed the RSA-PSS-tailed composites (`RSA2048-PSS` etc. are valid only
+/// as a composite tail, not as a standalone `is_known_algorithm_name`), and
+/// it flagged the unrelated legacy identifier `ECDSA-SHA1` as a false
+/// composite (both `ECDSA` and the bare legacy-algorithm-name `SHA1` are
+/// independently known). Reuses [`is_ml_dsa_composite_tail`] — the same
+/// tail set [`is_ml_dsa_suffix`] validates — instead of a second,
+/// hand-maintained copy.
+fn is_composite_algorithm_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("ML-DSA-") else {
+        return false;
+    };
+    let mut parts = rest.splitn(2, '-');
+    let level = parts.next().unwrap_or("");
+    let tail = parts.next().unwrap_or("");
+    matches!(level, "44" | "65" | "87") && is_ml_dsa_composite_tail(tail)
+}
+
 /// `true` if `ts` falls within `[from, until]`. Either bound may be absent.
 ///
 /// Method-naming convention on [`TimeBound`]: `b.matches_at_or_after(ts)`
 /// reads as "this bound matches a `ts` that is at-or-after it" — i.e.
 /// `ts >= bound`. Window membership therefore is "ts ≥ from AND ts ≤ until".
-fn window_active(
+/// `pub(super)` (not private) since A2 (2026-08-28 audit) reuses this exact
+/// function for `metadata.effective`/`metadata.expires` in `engine.rs`, for
+/// the same inclusive-both-ends semantics every rule-level window already
+/// uses — a policy is live through the end of its `expires` date, not up to
+/// but excluding it, matching `effective_until`'s existing behavior rather
+/// than introducing a second, different date-boundary convention.
+pub(super) fn window_active(
     from: Option<&TimeBound>,
     until: Option<&TimeBound>,
     ts: OffsetDateTime,
@@ -1196,6 +1310,27 @@ pub fn hash_name_to_code(name: &str) -> Option<u32> {
     })
 }
 
+/// Reverse of [`hash_name_to_code`] — C4 (2026-08-28 gaps-remediation plan)
+/// needs a human name for a `cp_override.hashing_algorithm` codepoint to
+/// render an "Allow — parameters forced: …" badge; nothing before this
+/// needed to go from codepoint back to name.
+pub fn hash_code_to_name(code: u32) -> Option<&'static str> {
+    Some(match code {
+        0x04 => "SHA-1",
+        0x05 => "SHA-224",
+        0x06 => "SHA-256",
+        0x07 => "SHA-384",
+        0x08 => "SHA-512",
+        0x0c => "SHA-512/224",
+        0x0d => "SHA-512/256",
+        0x0e => "SHA3-224",
+        0x0f => "SHA3-256",
+        0x10 => "SHA3-384",
+        0x11 => "SHA3-512",
+        _ => return None,
+    })
+}
+
 /// KMIP `Block Cipher Mode` name → enum codepoint (spec §11, verified).
 pub fn block_cipher_mode_name_to_code(name: &str) -> Option<u32> {
     Some(match name {
@@ -1208,6 +1343,22 @@ pub fn block_cipher_mode_name_to_code(name: &str) -> Option<u32> {
         "CCM" => 0x08,
         "GCM" => 0x09,
         "XTS" => 0x0b,
+        _ => return None,
+    })
+}
+
+/// Reverse of [`block_cipher_mode_name_to_code`] — see [`hash_code_to_name`].
+pub fn block_cipher_mode_code_to_name(code: u32) -> Option<&'static str> {
+    Some(match code {
+        0x01 => "CBC",
+        0x02 => "ECB",
+        0x04 => "CFB",
+        0x05 => "OFB",
+        0x06 => "CTR",
+        0x07 => "CMAC",
+        0x08 => "CCM",
+        0x09 => "GCM",
+        0x0b => "XTS",
         _ => return None,
     })
 }
@@ -1230,6 +1381,19 @@ pub fn padding_method_name_to_code(name: &str) -> Option<u32> {
         "PKCS1 v1.5" => 0x08,
         "X9.31" => 0x09,
         "PSS" => 0x0a,
+        _ => return None,
+    })
+}
+
+/// Reverse of [`padding_method_name_to_code`] — see [`hash_code_to_name`].
+pub fn padding_method_code_to_name(code: u32) -> Option<&'static str> {
+    Some(match code {
+        0x01 => "None",
+        0x02 => "OAEP",
+        0x03 => "PKCS5",
+        0x08 => "PKCS1 v1.5",
+        0x09 => "X9.31",
+        0x0a => "PSS",
         _ => return None,
     })
 }
@@ -1306,6 +1470,20 @@ pub fn ckm_name_to_code(name: &str) -> Option<u32> {
         "CKM_PKCS5_PBKD2" => c::CKM_PKCS5_PBKD2,
         "CKM_SP800_108_COUNTER_KDF" => c::CKM_SP800_108_COUNTER_KDF,
         "CKM_SP800_108_FEEDBACK_KDF" => c::CKM_SP800_108_FEEDBACK_KDF,
+        // A6.3 (2026-08-28 gaps-remediation plan) — previously ungateable by
+        // name: the generic ECDH-as-KEM path (CKM_ECDH1_DERIVE under
+        // C_Encapsulate/DecapsulateKey, combined with CKM_ML_KEM +
+        // CKM_CONCATENATE_BASE_AND_KEY to build a hybrid — see the
+        // CLAUDE.md hybrid-KEM note) and the stateful hash-based signature
+        // mechanisms.
+        "CKM_ECDH1_DERIVE" => c::CKM_ECDH1_DERIVE,
+        "CKM_CONCATENATE_BASE_AND_KEY" => c::CKM_CONCATENATE_BASE_AND_KEY,
+        "CKM_HSS_KEY_PAIR_GEN" => c::CKM_HSS_KEY_PAIR_GEN,
+        "CKM_HSS" => c::CKM_HSS,
+        "CKM_XMSS_KEY_PAIR_GEN" => c::CKM_XMSS_KEY_PAIR_GEN,
+        "CKM_XMSS" => c::CKM_XMSS,
+        "CKM_XMSSMT_KEY_PAIR_GEN" => c::CKM_XMSSMT_KEY_PAIR_GEN,
+        "CKM_XMSSMT" => c::CKM_XMSSMT,
         _ => return None,
     })
 }
@@ -1381,6 +1559,283 @@ pub fn is_known_mask_generator(name: &str) -> bool {
 /// `true` if `class` is one of the three classifier classes (Y4/Y6).
 pub fn is_known_algorithm_class(class: &str) -> bool {
     matches!(class, "pqc" | "symmetric" | "classical")
+}
+
+/// Field names a rule of type `type_tag` (the serde `type:` value) accepts,
+/// for the loader's S-6 fail-closed unknown-field guard. Per-variant rather
+/// than the old cross-variant union (A5.2, 2026-08-28 audit): the union let
+/// a field name valid on SOME variant silently pass — and be silently
+/// dropped, doing nothing — on every OTHER variant (e.g. `effective_from:`
+/// written on a `mechanism_denylist` rule loaded clean under the old check
+/// and enforced no window at all). `"type"` itself is valid everywhere and
+/// is not repeated in each list; the caller skips it explicitly. Returns
+/// `None` for an unrecognised tag — unreachable in practice, since the
+/// caller only runs this after the typed `Policy` parse already accepted
+/// the tag, but handled defensively rather than assumed.
+///
+/// Kept honest by construction, not by discipline: [`tests::rule_field_lists_match_declared_struct_fields`]
+/// builds one fully-populated instance of every variant and asserts its
+/// serialized key set equals this table — and because that test constructs
+/// each variant as a struct literal with every field named, adding a new
+/// field to a `Rule` variant is a compile error here until this table is
+/// updated too, not just a silent test failure.
+pub fn known_fields_for_rule_type(type_tag: &str) -> Option<&'static [&'static str]> {
+    Some(match type_tag {
+        "algorithm_default" => &["ops", "default_algorithm", "reason", "clause", "name_pattern"],
+        "algorithm_substitution" => &["ops", "from", "to", "reason", "clause", "name_pattern"],
+        "algorithm_allowlist" => {
+            &["ops", "algorithms", "reason", "clause", "effective_from", "effective_until"]
+        }
+        "algorithm_denylist" => &[
+            "ops", "algorithms", "reason", "clause", "effective_from", "effective_until",
+            "exception_custom_attribute", "severity",
+        ],
+        "min_key_length" => &["algorithm", "min_bits", "reason", "clause"],
+        "max_key_age_days" => &["ops", "days", "reason", "clause"],
+        "require_usage_mask" => &["algorithm", "flags", "ops", "reason", "clause"],
+        "require_custom_attribute" => &["attribute_name", "algorithms", "ops", "reason", "clause"],
+        "temporal_cutoff" => {
+            &["op", "algorithm_class", "algorithms", "after", "reason", "clause", "severity"]
+        }
+        "lifecycle_state_gate" => &["op", "allowed_states", "reason", "clause"],
+        "hybrid_dual_sign_requirement" => &[
+            "primary", "secondary", "effective_from", "effective_until", "ops_affected",
+            "composite_oid", "triggered_by_custom_attribute", "reason", "clause",
+        ],
+        "compliance_profile_gate" => &["profile", "ops", "reason", "clause"],
+        "hash_algorithm_allowlist" => &[
+            "ops", "hashing_algorithms", "reason", "clause", "effective_from", "effective_until",
+            "severity",
+        ],
+        "mechanism_parameter_constraint" => &[
+            "ops", "algorithm", "allowed_block_cipher_modes", "allowed_padding_methods",
+            "require_deterministic", "reason", "clause", "severity",
+        ],
+        "mechanism_parameter_default" => &[
+            "ops", "algorithm", "hashing_algorithm", "block_cipher_mode", "padding_method",
+            "deterministic", "mask_generator", "tag_length", "salt_length", "reason", "clause",
+        ],
+        "mac_mechanism_policy" => &["ops", "mac_algorithms", "reason", "clause"],
+        "mechanism_allowlist" => &["ops", "mechanisms", "reason", "clause"],
+        "mechanism_denylist" => &["ops", "mechanisms", "reason", "clause", "severity"],
+        _ => return None,
+    })
+}
+
+/// The seven policy domains a module can declare (the modular-policy plan,
+/// 2026-08-28 — supersedes the earlier priority-stack design, see
+/// `cacp-modular-policy-plan-08282026.md`). Every gated KMIP op belongs to
+/// exactly one of the first six; `Global` is not an op-owning scope at all —
+/// a file naming it may GATE any op but may never RESOLVE an algorithm for
+/// one (enforced at load time — see the loader's gating-only check). A file
+/// declares one or more scopes in `Metadata::scopes`; a single-scope file is
+/// what "a module" means throughout the plan, but a file naming several (up
+/// to all seven) is equally valid — splitting vs. not splitting is the
+/// author's choice, not a legacy/modern distinction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Scope {
+    Signing,
+    KeyEstablishment,
+    Encryption,
+    MacHash,
+    Ingress,
+    Lifecycle,
+    Global,
+}
+
+impl Scope {
+    /// Every value, in a fixed display order — used for error messages and
+    /// admin-API listings.
+    pub const ALL: [Scope; 7] = [
+        Scope::Signing,
+        Scope::KeyEstablishment,
+        Scope::Encryption,
+        Scope::MacHash,
+        Scope::Ingress,
+        Scope::Lifecycle,
+        Scope::Global,
+    ];
+
+    /// The wire/YAML spelling (mirrors `#[serde(rename_all = "kebab-case")]`
+    /// above; kept as an explicit match rather than relying on serde's
+    /// internals for error-message text, which must not depend on a
+    /// serialization detail continuing to hold).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Signing => "signing",
+            Scope::KeyEstablishment => "key-establishment",
+            Scope::Encryption => "encryption",
+            Scope::MacHash => "mac-hash",
+            Scope::Ingress => "ingress",
+            Scope::Lifecycle => "lifecycle",
+            Scope::Global => "global",
+        }
+    }
+}
+
+/// The fixed op set `scope` owns (empty for [`Scope::Global`], which owns no
+/// op — it gates within every scope but originates none). Single source of
+/// truth for both the loader's containment check
+/// (`policy::loader::check_scope_containment`) and the engine's
+/// owning-module lookup. `CreateKeyPair`/`ReKeyKeyPair` appear only in their
+/// colon-refined forms (`CreateKeyPair:Sign`, not bare `CreateKeyPair`) —
+/// see [`op_scope`], which is what actually resolves an arbitrary op string
+/// and explicitly rejects the unrefined form as ambiguous rather than
+/// guessing.
+pub fn scope_ops(scope: Scope) -> &'static [&'static str] {
+    match scope {
+        Scope::Signing => {
+            &["Sign", "SignatureVerify", "CreateKeyPair:Sign", "ReKeyKeyPair:Sign"]
+        }
+        Scope::KeyEstablishment => &[
+            "Encapsulate",
+            "Decapsulate",
+            "DeriveKey",
+            "CreateKeyPair:KeyAgreement",
+            "ReKeyKeyPair:KeyAgreement",
+        ],
+        Scope::Encryption => {
+            &["Encrypt", "Decrypt", "Create", "ReKey", "CreateKeyPair:Encrypt", "ReKeyKeyPair:Encrypt"]
+        }
+        Scope::MacHash => &["MAC", "MACVerify", "Hash"],
+        Scope::Ingress => &["Register", "Import"],
+        Scope::Lifecycle => &[
+            "Get",
+            "Locate",
+            "Destroy",
+            "Activate",
+            "Deactivate",
+            "Revoke",
+            "GetAttributes",
+            "GetAttributeList",
+            "AddAttribute",
+            "ModifyAttribute",
+            "DeleteAttribute",
+            "SetAttribute",
+            "AdjustAttribute",
+        ],
+        Scope::Global => &[],
+    }
+}
+
+/// Reverse lookup: which scope owns the EXACT op string `op` (already
+/// colon-refined if it needs to be)? `None` for an op the taxonomy doesn't
+/// cover at all — a known-but-ungated op (`is_known_but_ungated_op`;
+/// already rejected upstream by the op lint before a scope check would ever
+/// run on it) or a bare `CreateKeyPair`/`ReKeyKeyPair` (see [`op_scope`],
+/// which handles that case with a specific ambiguity error instead of
+/// silently returning `None`).
+fn scope_of_op(op: &str) -> Option<Scope> {
+    Scope::ALL
+        .iter()
+        .find(|&&s| s != Scope::Global && scope_ops(s).contains(&op))
+        .copied()
+}
+
+/// Resolve the scope that owns `op`, for the loader's scope-containment
+/// check on a scoped policy file. Distinguishes two failure shapes: a bare
+/// `CreateKeyPair`/`ReKeyKeyPair` is AMBIGUOUS (it could belong to any of
+/// three scopes depending on refinement) and must be refined by the policy
+/// author rather than guessed at; anything else the taxonomy doesn't
+/// recognise is simply UNOWNED. Both are reported as `Err` — the containment
+/// check needs to reject the rule either way, just with a clearer message
+/// for the ambiguous case.
+pub fn op_scope(op: &str) -> Result<Scope, String> {
+    let base = op.split(':').next().unwrap_or(op);
+    if !op.contains(':') && matches!(base, "CreateKeyPair" | "ReKeyKeyPair") {
+        return Err(format!(
+            "{op:?} is ambiguous in a scoped policy — refine it (e.g. {base:?} + \":Sign\" / \":KeyAgreement\" / \":Encrypt\")"
+        ));
+    }
+    scope_of_op(op).ok_or_else(|| format!("{op:?} has no scope in the modular policy taxonomy"))
+}
+
+/// Every op string a rule references, across whichever field(s) that
+/// variant carries (`ops`, the singular `op`, or `ops_affected`) — the
+/// modular-policy plan's scope-containment check needs this same
+/// extraction `lint.rs`'s `lint_one` already does per-variant, generalised
+/// into one function both can eventually share (`lint.rs` still does its
+/// own per-variant match today; this is additive, not a refactor of it).
+pub fn referenced_ops(rule: &Rule) -> Vec<&str> {
+    match rule {
+        Rule::AlgorithmDefault { ops, .. }
+        | Rule::AlgorithmSubstitution { ops, .. }
+        | Rule::AlgorithmAllowlist { ops, .. }
+        | Rule::AlgorithmDenylist { ops, .. }
+        | Rule::MaxKeyAgeDays { ops, .. }
+        | Rule::RequireUsageMask { ops, .. }
+        | Rule::RequireCustomAttribute { ops, .. }
+        | Rule::ComplianceProfileGate { ops, .. }
+        | Rule::HashAlgorithmAllowlist { ops, .. }
+        | Rule::MechanismParameterConstraint { ops, .. }
+        | Rule::MechanismParameterDefault { ops, .. }
+        | Rule::MacMechanismPolicy { ops, .. }
+        | Rule::MechanismAllowlist { ops, .. }
+        | Rule::MechanismDenylist { ops, .. } => ops.iter().map(String::as_str).collect(),
+        Rule::TemporalCutoff { op, .. } | Rule::LifecycleStateGate { op, .. } => vec![op.as_str()],
+        Rule::HybridDualSignRequirement { ops_affected, .. } => {
+            ops_affected.iter().map(String::as_str).collect()
+        }
+        // No op field at all — this rule gates by algorithm/key-length only,
+        // so it has no scope of its own to check (the loader's containment
+        // check treats an empty list as "nothing to verify", not a
+        // violation).
+        Rule::MinKeyLength { .. } => vec![],
+    }
+}
+
+/// `true` if `rule` is a Pass 0/1 ALGORITHM-RESOLUTION rule (fills in or
+/// rewrites WHICH algorithm a request uses) rather than a Pass 2 GATING
+/// rule or a Pass 1b mechanism-PARAMETER-forcing rule. Used by the loader's
+/// global-gating-only check — a file naming [`Scope::Global`] may never
+/// pick an algorithm on a domain's behalf (that would compete with whatever
+/// domain module owns the op), but MAY force a mechanism parameter, same as
+/// it may gate one: forcing "always sign deterministically" or "always use
+/// AES-GCM" doesn't claim ownership of an op's algorithm choice, it layers
+/// a constraint on top of whichever domain module already made that
+/// choice — exactly as composable as a deny.
+///
+/// `MechanismParameterDefault` (mechanism-parameter forcing) was
+/// incorrectly included here originally (2026-08-28, caught while assigning
+/// `deterministic-signing.yaml`'s scope in the library-split wave — that
+/// file's own pre-existing description says it was deliberately kept
+/// unscoped so it composes with ANY signing policy, which is exactly what
+/// `Scope::Global` is for, and this function was wrongly refusing it).
+pub fn is_resolution_rule(rule: &Rule) -> bool {
+    matches!(rule, Rule::AlgorithmDefault { .. } | Rule::AlgorithmSubstitution { .. })
+}
+
+/// `true` if `op` is a canonical operation name the dispatcher actually
+/// evaluates against the policy engine (A5.1, 2026-08-28 audit finding: op
+/// names were the one value dimension `lint_rules` never checked, so
+/// `ops: ["Sing"]` loaded clean — even under `strict` — and silently
+/// disabled the rule forever). A bare name (`"Sign"`) or a colon-refined
+/// variant of one (`"CreateKeyPair:Sign"`) both pass — only the segment
+/// before `:` is checked, mirroring [`op_matches`]'s own refinement rule.
+pub fn is_known_op(op: &str) -> bool {
+    let base = op.split(':').next().unwrap_or(op);
+    matches!(
+        base,
+        "Create" | "CreateKeyPair" | "Sign" | "SignatureVerify" | "Encrypt" | "Decrypt"
+            | "Encapsulate" | "Decapsulate" | "DeriveKey" | "MAC" | "MACVerify" | "Hash"
+            | "Register" | "Import" | "ReKey" | "ReKeyKeyPair" | "Get" | "Locate" | "Destroy"
+            | "Activate" | "Deactivate" | "Revoke" | "GetAttributes" | "GetAttributeList"
+            | "AddAttribute" | "ModifyAttribute" | "DeleteAttribute" | "SetAttribute"
+            | "AdjustAttribute"
+    )
+}
+
+/// `true` if `op` names a real KMIP 3.0 operation this server implements but
+/// the dispatcher never routes through [`super::Engine::evaluate`] (Certify,
+/// Validate, JoinSplitKey, Export, Query — see the six-requirement audit's
+/// grammar report, "ungated ops"). A policy rule naming one is not a typo,
+/// but the rule can never fire either way; kept distinct from
+/// [`is_known_op`] purely so the lint message says "not policy-gated"
+/// instead of "typo?".
+pub fn is_known_but_ungated_op(op: &str) -> bool {
+    let base = op.split(':').next().unwrap_or(op);
+    matches!(base, "Certify" | "Validate" | "JoinSplitKey" | "Export" | "Query")
 }
 
 /// `true` if `flag` is a KMIP Cryptographic Usage Mask flag name (Y6).
@@ -1509,6 +1964,193 @@ mod tests {
         PolicyRequest::minimal(op, algo, OffsetDateTime::UNIX_EPOCH, "corr-1", attrs)
     }
 
+    /// A5.2 drift guard: one fully-populated instance of every `Rule`
+    /// variant (every `Option` is `Some`, every `Vec` non-empty), serialized
+    /// and checked against [`known_fields_for_rule_type`]. Because each
+    /// instance below is a struct literal naming every field, adding a new
+    /// field to a variant in this enum is a compile error in THIS test until
+    /// both this literal and the table are updated — the mismatch can't
+    /// silently persist the way the old cross-variant union let it.
+    #[test]
+    fn rule_field_lists_match_declared_struct_fields() {
+        let instances: Vec<Rule> = vec![
+            Rule::AlgorithmDefault {
+                ops: vec!["Sign".into()],
+                default_algorithm: "ML-DSA-65".into(),
+                reason: "t".into(),
+                clause: Some("c".into()),
+                name_pattern: Some("*".into()),
+            },
+            Rule::AlgorithmSubstitution {
+                ops: vec!["Sign".into()],
+                from: "ECDSA-P256".into(),
+                to: "ML-DSA-65".into(),
+                reason: "t".into(),
+                clause: Some("c".into()),
+                name_pattern: Some("*".into()),
+            },
+            Rule::AlgorithmAllowlist {
+                ops: vec!["Create".into()],
+                algorithms: vec!["AES-256".into()],
+                reason: "t".into(),
+                clause: Some("c".into()),
+                effective_from: Some(TimeBound::Always),
+                effective_until: Some(TimeBound::Always),
+            },
+            Rule::AlgorithmDenylist {
+                ops: vec!["Create".into()],
+                algorithms: vec!["RSA".into()],
+                reason: "t".into(),
+                clause: Some("c".into()),
+                effective_from: Some(TimeBound::Always),
+                effective_until: Some(TimeBound::Always),
+                exception_custom_attribute: Some(AttrPredicate {
+                    name: "n".into(),
+                    value: "v".into(),
+                }),
+                severity: Severity::Warn,
+            },
+            Rule::MinKeyLength {
+                algorithm: "RSA".into(),
+                min_bits: 2048,
+                reason: "t".into(),
+                clause: Some("c".into()),
+            },
+            Rule::MaxKeyAgeDays {
+                ops: vec!["Sign".into()],
+                days: 90,
+                reason: "t".into(),
+                clause: Some("c".into()),
+            },
+            Rule::RequireUsageMask {
+                algorithm: "RSA".into(),
+                flags: vec!["Sign".into()],
+                ops: vec!["Create".into()],
+                reason: "t".into(),
+                clause: Some("c".into()),
+            },
+            Rule::RequireCustomAttribute {
+                attribute_name: "x-owner".into(),
+                algorithms: vec!["RSA".into()],
+                ops: vec!["Create".into()],
+                reason: "t".into(),
+                clause: Some("c".into()),
+            },
+            Rule::TemporalCutoff {
+                op: "Sign".into(),
+                algorithm_class: "classical".into(),
+                algorithms: vec!["RSA".into()],
+                after: TimeBound::Always,
+                reason: "t".into(),
+                clause: Some("c".into()),
+                severity: Severity::Warn,
+            },
+            Rule::LifecycleStateGate {
+                op: "Sign".into(),
+                allowed_states: vec!["Active".into()],
+                reason: "t".into(),
+                clause: Some("c".into()),
+            },
+            Rule::HybridDualSignRequirement {
+                primary: "ML-DSA-65".into(),
+                secondary: "Ed25519".into(),
+                effective_from: TimeBound::Always,
+                effective_until: TimeBound::Always,
+                ops_affected: vec!["Sign".into()],
+                composite_oid: Some("1.2.3".into()),
+                triggered_by_custom_attribute: Some(AttrPredicate {
+                    name: "n".into(),
+                    value: "v".into(),
+                }),
+                reason: "t".into(),
+                clause: Some("c".into()),
+            },
+            Rule::ComplianceProfileGate {
+                profile: "FIPS-140-3".into(),
+                ops: vec!["Sign".into()],
+                reason: "t".into(),
+                clause: Some("c".into()),
+            },
+            Rule::HashAlgorithmAllowlist {
+                ops: vec!["Sign".into()],
+                hashing_algorithms: vec!["SHA-256".into()],
+                reason: "t".into(),
+                clause: Some("c".into()),
+                effective_from: Some(TimeBound::Always),
+                effective_until: Some(TimeBound::Always),
+                severity: Severity::Warn,
+            },
+            Rule::MechanismParameterConstraint {
+                ops: vec!["Encrypt".into()],
+                algorithm: Some("AES".into()),
+                allowed_block_cipher_modes: vec!["GCM".into()],
+                allowed_padding_methods: vec!["OAEP".into()],
+                require_deterministic: Some(true),
+                reason: "t".into(),
+                clause: Some("c".into()),
+                severity: Severity::Warn,
+            },
+            Rule::MechanismParameterDefault {
+                ops: vec!["Encrypt".into()],
+                algorithm: Some("AES".into()),
+                hashing_algorithm: Some("SHA-256".into()),
+                block_cipher_mode: Some("GCM".into()),
+                padding_method: Some("OAEP".into()),
+                deterministic: Some(true),
+                mask_generator: Some("MGF1".into()),
+                tag_length: Some(16),
+                salt_length: Some(32),
+                reason: "t".into(),
+                clause: Some("c".into()),
+            },
+            Rule::MacMechanismPolicy {
+                ops: vec!["MAC".into()],
+                mac_algorithms: vec!["HMAC-SHA-256".into()],
+                reason: "t".into(),
+                clause: Some("c".into()),
+            },
+            Rule::MechanismAllowlist {
+                ops: vec!["Sign".into()],
+                mechanisms: vec!["CKM_ML_DSA".into()],
+                reason: "t".into(),
+                clause: Some("c".into()),
+            },
+            Rule::MechanismDenylist {
+                ops: vec!["Sign".into()],
+                mechanisms: vec!["CKM_RSA_PKCS".into()],
+                reason: "t".into(),
+                clause: Some("c".into()),
+                severity: Severity::Warn,
+            },
+        ];
+
+        assert_eq!(instances.len(), 18, "update this test when a variant is added or removed");
+
+        for rule in &instances {
+            let value = serde_yaml::to_value(rule).expect("Rule must serialize");
+            let map = value.as_mapping().expect("Rule serializes as a mapping");
+            let type_tag = map
+                .get("type")
+                .and_then(|v| v.as_str())
+                .expect("every Rule carries a type tag")
+                .to_string();
+            let mut keys: Vec<String> = map
+                .keys()
+                .filter_map(|k| k.as_str())
+                .filter(|k| *k != "type")
+                .map(|k| k.to_string())
+                .collect();
+            keys.sort();
+            let mut expected: Vec<String> = known_fields_for_rule_type(&type_tag)
+                .unwrap_or_else(|| panic!("no known_fields_for_rule_type entry for {type_tag:?}"))
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            expected.sort();
+            assert_eq!(keys, expected, "field-list mismatch for rule type {type_tag:?}");
+        }
+    }
+
     // ── Y2: op_matches — CreateKeyPair:<purpose> vs family names ──────────
     #[test]
     fn op_matches_truth_table() {
@@ -1560,8 +2202,102 @@ mod tests {
         assert!(algo_matches("ML-DSA-65-Ed25519", "ML-DSA-65-ED25519"));
         assert!(algo_matches("ML-DSA-65-ED25519", "ML-DSA-65-Ed25519"));
         assert!(algo_matches("aes", "AES-256"), "case-insensitive family prefix");
+        // A6.1 (2026-08-28): a sized family entry must not silently admit a
+        // composite built on that family — composites are matched/denied
+        // only by their own full name.
+        assert!(
+            !algo_matches("ML-DSA-87", "ML-DSA-87-ECDSA-P384"),
+            "family entry must not cover a composite built on that family"
+        );
+        assert!(!algo_matches("ML-DSA-44", "ML-DSA-44-RSA2048-PSS"));
+        // The composite's own full name still matches itself exactly —
+        // "composites must be allowlisted explicitly" (A6.1) means the
+        // explicit entry, not the family shortcut, is how you cover one.
+        assert!(algo_matches("ML-DSA-87-ECDSA-P384", "ML-DSA-87-ECDSA-P384"));
+        assert!(algo_matches("ML-DSA-87-ECDSA-P384", "ml-dsa-87-ecdsa-p384"));
         // Still respects the hyphen-boundary rule under case-folding.
         assert!(!algo_matches("aes", "AESX"));
+    }
+
+    #[test]
+    fn a6_3_ckm_vocabulary_additions_resolve() {
+        // 2026-08-28 gaps-remediation plan — a lockdown policy can now name
+        // the ECDH-as-KEM path and the stateful hash-based signature
+        // mechanisms, previously ungateable by name.
+        for ckm in [
+            "CKM_ECDH1_DERIVE",
+            "CKM_CONCATENATE_BASE_AND_KEY",
+            "CKM_HSS_KEY_PAIR_GEN",
+            "CKM_HSS",
+            "CKM_XMSS_KEY_PAIR_GEN",
+            "CKM_XMSS",
+            "CKM_XMSSMT_KEY_PAIR_GEN",
+            "CKM_XMSSMT",
+        ] {
+            assert!(is_known_ckm_name(ckm), "should resolve {ckm}");
+        }
+    }
+
+    #[test]
+    fn c4_mechanism_code_to_name_round_trips_with_the_forward_table() {
+        // C4 (2026-08-28 gaps-remediation plan) — every reverse lookup must
+        // agree with its forward counterpart, for every entry, both ways.
+        for name in ["SHA-1", "SHA-224", "SHA-256", "SHA-384", "SHA-512", "SHA-512/224",
+            "SHA-512/256", "SHA3-224", "SHA3-256", "SHA3-384", "SHA3-512"]
+        {
+            let code = hash_name_to_code(name).unwrap();
+            assert_eq!(hash_code_to_name(code), Some(name), "hash {name} (0x{code:02x})");
+        }
+        for name in ["CBC", "ECB", "CFB", "OFB", "CTR", "CMAC", "CCM", "GCM", "XTS"] {
+            let code = block_cipher_mode_name_to_code(name).unwrap();
+            assert_eq!(
+                block_cipher_mode_code_to_name(code),
+                Some(name),
+                "block cipher mode {name} (0x{code:02x})"
+            );
+        }
+        for name in ["None", "OAEP", "PKCS5", "PKCS1 v1.5", "X9.31", "PSS"] {
+            let code = padding_method_name_to_code(name).unwrap();
+            assert_eq!(
+                padding_method_code_to_name(code),
+                Some(name),
+                "padding method {name} (0x{code:02x})"
+            );
+        }
+        // Unknown codes must not panic or fabricate a name.
+        assert_eq!(hash_code_to_name(0xffff), None);
+        assert_eq!(block_cipher_mode_code_to_name(0xffff), None);
+        assert_eq!(padding_method_code_to_name(0xffff), None);
+    }
+
+    #[test]
+    fn is_composite_algorithm_name_detects_every_real_variant() {
+        // Every tail is_ml_dsa_composite_tail (lint.rs) accepts, at every level.
+        for level in ["44", "65", "87"] {
+            for tail in [
+                "Ed25519", "ED25519", "Ed448", "ECDSA-P256", "ECDSA-P384", "ECDSA-P521",
+                "RSA2048-PSS", "RSA3072-PSS", "RSA4096-PSS",
+            ] {
+                let name = format!("ML-DSA-{level}-{tail}");
+                assert!(is_composite_algorithm_name(&name), "should detect {name}");
+            }
+        }
+        // Ordinary qualified names, and unrelated identifiers that merely
+        // start with "ML-DSA-" or contain hyphens elsewhere, are not composites.
+        assert!(!is_composite_algorithm_name("AES-256"));
+        assert!(!is_composite_algorithm_name("ECDSA-P256"));
+        assert!(!is_composite_algorithm_name("SLH-DSA-SHAKE-128f"));
+        assert!(!is_composite_algorithm_name("HMAC-SHA-256"));
+        assert!(!is_composite_algorithm_name("ML-KEM-1024"));
+        assert!(!is_composite_algorithm_name("ML-DSA-87")); // bare level, no tail
+        assert!(!is_composite_algorithm_name("ML-DSA-12-Ed25519")); // not a real level
+        assert!(!is_composite_algorithm_name("ML-DSA-87-Falcon-512")); // not a real tail
+        // Not ML-DSA-prefixed at all — including the combined classical
+        // identifier `ECDSA-SHA1`, which a broader "any two independently
+        // known halves" design (tried first, rejected) would have
+        // misidentified as composite.
+        assert!(!is_composite_algorithm_name("RSA"));
+        assert!(!is_composite_algorithm_name("ECDSA-SHA1"));
     }
 
     // ── Y4: three-way classifier (symmetric ≠ classical) ──────────────────
@@ -1600,6 +2336,7 @@ mod tests {
             effective_from: None,
             effective_until: None,
             clause: None,
+            severity: Severity::Deny,
         };
         // SHA-1 (0x04) → deny.
         let mut r = req("Sign", Some("RSA"), &attrs);
@@ -1628,6 +2365,7 @@ mod tests {
             require_deterministic: None,
             reason: "AEAD only".into(),
             clause: None,
+            severity: Severity::Deny,
         };
         // CBC (0x01) → deny.
         let mut r = req("Encrypt", Some("AES"), &attrs);
@@ -1654,6 +2392,7 @@ mod tests {
             require_deterministic: Some(true),
             reason: "deterministic signing required".into(),
             clause: None,
+            severity: Severity::Deny,
         };
         // deterministic=true → allow.
         let mut r = req("Sign", Some("ML-DSA-65"), &attrs);
@@ -1784,6 +2523,7 @@ mod tests {
             mechanisms: vec!["CKM_AES_CBC".into(), "CKM_AES_ECB".into()],
             reason: "AEAD only".into(),
             clause: None,
+            severity: Severity::Deny,
         };
         let mut r = req("Encrypt", Some("AES"), &attrs);
         r.mechanism.canonical_mech = Some(c::CKM_AES_CBC);
@@ -1838,6 +2578,7 @@ mod tests {
                 value: "research".into(),
             }),
             clause: None,
+            severity: Severity::Deny,
         };
         let allow = r.check_pass2(&req("Create", Some("ML-DSA-65"), &attrs), Some("ML-DSA-65"));
         assert!(allow.is_none(), "exception attribute should suppress deny");
@@ -1989,6 +2730,7 @@ mod tests {
             after: TimeBound::At(time::Date::from_calendar_date(2030, time::Month::January, 1).unwrap()),
             reason: "Post-2030 classical banned".into(),
             clause: None,
+            severity: Severity::Deny,
         };
         let ts_pre = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(); // 2023
         let ts_post = OffsetDateTime::from_unix_timestamp(2_000_000_000).unwrap(); // 2033

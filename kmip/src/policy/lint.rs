@@ -17,7 +17,14 @@
 //!   strict);
 //! - unknown mechanism / hash / class / state / mode / usage-flag names are
 //!   always hard errors regardless of position — those vocabularies are bounded
-//!   by the engine, so an unknown one is unambiguously a typo/no-op.
+//!   by the engine, so an unknown one is unambiguously a typo/no-op;
+//! - unknown **op** names (A5.1, 2026-08-28 audit) are likewise always hard
+//!   errors regardless of position: an op typo disables the *entire rule*, so
+//!   there is no allow-position lenient tier the way there is for algorithm
+//!   names. A real-but-currently-ungated KMIP op (Certify, Validate,
+//!   JoinSplitKey, Export, Query — the dispatcher never routes these through
+//!   `evaluate`) gets a distinct message from an outright typo, but is
+//!   rejected the same way: either way the rule can never fire.
 //!
 //! Algorithm names are special: a denylist may legitimately name a real but
 //! *unimplemented* algorithm (e.g. `FrodoKEM-1344`) as defence-in-depth, so
@@ -26,13 +33,15 @@
 //! engine's `KmipAlgorithm` enum.
 
 use super::rule::{
-    is_known_algorithm_class, is_known_block_cipher_mode, is_known_ckm_name, is_known_hash_name,
-    is_known_mask_generator, is_known_padding_method, is_known_usage_flag, Rule,
+    is_known_algorithm_class, is_known_block_cipher_mode, is_known_but_ungated_op,
+    is_known_ckm_name, is_known_hash_name, is_known_mask_generator, is_known_op,
+    is_known_padding_method, is_known_usage_flag, Rule, Severity,
 };
 
 /// A lint finding: which rule, which field, the offending value, and whether it
 /// is fatal at the current strictness.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Finding {
     pub rule_index: usize, // 1-based
     pub field: &'static str,
@@ -50,7 +59,59 @@ pub fn lint_rules(rules: &[Rule], strict: bool) -> Vec<Finding> {
         let idx = i + 1;
         lint_one(idx, rule, strict, &mut out);
     }
+    lint_warn_severity_sunsets(rules, &mut out);
     out
+}
+
+/// A1 (2026-08-28 gaps-remediation plan) — a `severity: warn` rule that will
+/// never actually escalate to a deny looks like the first half of the
+/// recommended deprecation pattern (the SAME condition written twice: `warn`
+/// today, a dated `deny` copy later) with the second half forgotten.
+/// Advisory, never fatal — a permanently warn-only rule is also a legitimate,
+/// deliberate choice (e.g. "flag this forever, never actually ban it"), so
+/// this is a nudge, not an error.
+///
+/// Deliberately coarse rather than matching the exact same condition
+/// (`ops`/`algorithms`) across rules: any sibling rule of the SAME type
+/// (`std::mem::discriminant`) at `severity: deny` counts as the escalation
+/// path, and a rule's own dated `effective_from` counts too, for the one
+/// type (`hash_algorithm_allowlist`, `algorithm_denylist`) that carries one.
+/// Exact-condition matching would be more precise but is a much larger check
+/// for a marginal accuracy gain on an advisory-only finding.
+fn lint_warn_severity_sunsets(rules: &[Rule], out: &mut Vec<Finding>) {
+    let has_dated_escalation = |r: &Rule| -> bool {
+        matches!(
+            r,
+            Rule::AlgorithmDenylist { effective_from: Some(_), .. }
+                | Rule::HashAlgorithmAllowlist { effective_from: Some(_), .. }
+        )
+    };
+    for (i, rule) in rules.iter().enumerate() {
+        if rule.severity() != Severity::Warn {
+            continue;
+        }
+        if has_dated_escalation(rule) {
+            continue;
+        }
+        let has_deny_sibling = rules
+            .iter()
+            .any(|other| std::mem::discriminant(other) == std::mem::discriminant(rule)
+                && other.severity() == Severity::Deny);
+        if has_deny_sibling {
+            continue;
+        }
+        out.push(Finding {
+            rule_index: i + 1,
+            field: "severity",
+            value: "warn".to_string(),
+            fatal: false,
+            message: "deprecation with no sunset — this warn-severity rule has neither its own \
+                      dated escalation (effective_from) nor a sibling severity:deny rule of the \
+                      same type; it will warn forever and never actually deny. If that's \
+                      deliberate, ignore this; otherwise add the deny half of the pattern."
+                .to_string(),
+        });
+    }
 }
 
 fn algo(idx: usize, field: &'static str, value: &str, fatal: bool, out: &mut Vec<Finding>) {
@@ -65,6 +126,36 @@ fn algo(idx: usize, field: &'static str, value: &str, fatal: bool, out: &mut Vec
                  it will never match (a typo here silently disables the rule)"
             ),
         });
+    }
+}
+
+/// Validate a single op string (A5.1). Always fatal, regardless of the
+/// rule's allow/deny position — unlike an algorithm-name typo (which is only
+/// dangerous in a deny position), an op-name typo silently disables the
+/// *entire rule* no matter what it does, so there is no lenient tier.
+fn lint_op(idx: usize, field: &'static str, value: &str, out: &mut Vec<Finding>) {
+    if is_known_op(value) {
+        return;
+    }
+    let message = if is_known_but_ungated_op(value) {
+        format!(
+            "{value:?} is a real KMIP operation, but the dispatcher never \
+             evaluates it against the policy engine — this rule can never fire \
+             for it (not a typo; a currently-ungated operation)"
+        )
+    } else {
+        format!(
+            "unknown operation {value:?} — not a recognised KMIP operation name; \
+             it will never match (a typo here silently disables the rule)"
+        )
+    };
+    out.push(Finding { rule_index: idx, field, value: value.to_string(), fatal: true, message });
+}
+
+/// [`lint_op`] over a rule's `ops`/`ops_affected` list.
+fn lint_ops(idx: usize, field: &'static str, values: &[String], out: &mut Vec<Finding>) {
+    for v in values {
+        lint_op(idx, field, v, out);
     }
 }
 
@@ -89,13 +180,15 @@ fn bounded(
 
 fn lint_one(idx: usize, rule: &Rule, strict: bool, out: &mut Vec<Finding>) {
     match rule {
-        Rule::AlgorithmDefault { default_algorithm, .. } => {
+        Rule::AlgorithmDefault { ops, default_algorithm, .. } => {
             algo(idx, "default_algorithm", default_algorithm, strict, out);
+            lint_ops(idx, "ops", ops, out);
         }
         Rule::AlgorithmSubstitution { ops, from, to, .. } => {
             // `from` is a deny-position match target → fatal; `to` is allow.
             algo(idx, "from", from, true, out);
             algo(idx, "to", to, strict, out);
+            lint_ops(idx, "ops", ops, out);
             // 2026-07-05 (classical-KEM crypto-agility design review) —
             // consumer ops (Decapsulate/DeriveKey/Decrypt) can never
             // coherently execute a rekey: their input was already fixed to a
@@ -123,29 +216,34 @@ fn lint_one(idx: usize, rule: &Rule, strict: bool, out: &mut Vec<Finding>) {
                 }
             }
         }
-        Rule::AlgorithmAllowlist { algorithms, .. } => {
+        Rule::AlgorithmAllowlist { ops, algorithms, .. } => {
             for a in algorithms {
                 algo(idx, "algorithms", a, strict, out);
             }
+            lint_ops(idx, "ops", ops, out);
         }
-        Rule::AlgorithmDenylist { algorithms, .. } => {
+        Rule::AlgorithmDenylist { ops, algorithms, .. } => {
             for a in algorithms {
                 algo(idx, "algorithms", a, true, out); // fail-open if typo'd
             }
+            lint_ops(idx, "ops", ops, out);
         }
+        // No `ops` field on this rule (it gates by algorithm + key_length only).
         Rule::MinKeyLength { algorithm, .. } => algo(idx, "algorithm", algorithm, strict, out),
-        Rule::RequireUsageMask { algorithm, flags, .. } => {
+        Rule::RequireUsageMask { algorithm, flags, ops, .. } => {
             algo(idx, "algorithm", algorithm, strict, out);
             for f in flags {
                 bounded(idx, "flags", f, is_known_usage_flag(f), "usage-mask flag", out);
             }
+            lint_ops(idx, "ops", ops, out);
         }
-        Rule::RequireCustomAttribute { algorithms, .. } => {
+        Rule::RequireCustomAttribute { algorithms, ops, .. } => {
             for a in algorithms {
                 algo(idx, "algorithms", a, strict, out);
             }
+            lint_ops(idx, "ops", ops, out);
         }
-        Rule::TemporalCutoff { algorithm_class, algorithms, .. } => {
+        Rule::TemporalCutoff { op, algorithm_class, algorithms, .. } => {
             bounded(
                 idx,
                 "algorithm_class",
@@ -157,22 +255,27 @@ fn lint_one(idx: usize, rule: &Rule, strict: bool, out: &mut Vec<Finding>) {
             for a in algorithms {
                 algo(idx, "algorithms", a, true, out); // narrows a deny → fatal
             }
+            lint_op(idx, "op", op, out);
         }
-        Rule::LifecycleStateGate { allowed_states, .. } => {
+        Rule::LifecycleStateGate { op, allowed_states, .. } => {
             for s in allowed_states {
                 bounded(idx, "allowed_states", s, is_known_state(s), "lifecycle state", out);
             }
+            lint_op(idx, "op", op, out);
         }
-        Rule::HybridDualSignRequirement { primary, secondary, .. } => {
+        Rule::HybridDualSignRequirement { primary, secondary, ops_affected, .. } => {
             algo(idx, "primary", primary, strict, out);
             algo(idx, "secondary", secondary, strict, out);
+            lint_ops(idx, "ops_affected", ops_affected, out);
         }
-        Rule::HashAlgorithmAllowlist { hashing_algorithms, .. } => {
+        Rule::HashAlgorithmAllowlist { ops, hashing_algorithms, .. } => {
             for h in hashing_algorithms {
                 bounded(idx, "hashing_algorithms", h, is_known_hash_name(h), "hash algorithm", out);
             }
+            lint_ops(idx, "ops", ops, out);
         }
         Rule::MechanismParameterConstraint {
+            ops,
             algorithm,
             allowed_block_cipher_modes,
             allowed_padding_methods,
@@ -187,8 +290,10 @@ fn lint_one(idx: usize, rule: &Rule, strict: bool, out: &mut Vec<Finding>) {
             for p in allowed_padding_methods {
                 bounded(idx, "allowed_padding_methods", p, is_known_padding_method(p), "padding method", out);
             }
+            lint_ops(idx, "ops", ops, out);
         }
         Rule::MechanismParameterDefault {
+            ops,
             algorithm,
             hashing_algorithm,
             block_cipher_mode,
@@ -211,27 +316,31 @@ fn lint_one(idx: usize, rule: &Rule, strict: bool, out: &mut Vec<Finding>) {
             if let Some(g) = mask_generator {
                 bounded(idx, "mask_generator", g, is_known_mask_generator(g), "mask generator", out);
             }
+            lint_ops(idx, "ops", ops, out);
         }
-        Rule::MacMechanismPolicy { mac_algorithms, .. } => {
+        Rule::MacMechanismPolicy { ops, mac_algorithms, .. } => {
             // mac_mechanism_policy is an allowlist (only these MACs pass), so a
             // typo over-broadly DENIES rather than failing open → advisory.
             // Names are qualified algorithm names (HMAC-SHA-256).
             for a in mac_algorithms {
                 algo(idx, "mac_algorithms", a, strict, out);
             }
+            lint_ops(idx, "ops", ops, out);
         }
-        Rule::MechanismAllowlist { mechanisms, .. } => {
+        Rule::MechanismAllowlist { ops, mechanisms, .. } => {
             for m in mechanisms {
                 bounded(idx, "mechanisms", m, is_known_ckm_name(m), "CKM_* mechanism", out);
             }
+            lint_ops(idx, "ops", ops, out);
         }
-        Rule::MechanismDenylist { mechanisms, .. } => {
+        Rule::MechanismDenylist { ops, mechanisms, .. } => {
             for m in mechanisms {
                 bounded(idx, "mechanisms", m, is_known_ckm_name(m), "CKM_* mechanism", out);
             }
+            lint_ops(idx, "ops", ops, out);
         }
-        // No lintable value fields (ops-only / documentational).
-        Rule::MaxKeyAgeDays { .. } | Rule::ComplianceProfileGate { .. } => {}
+        Rule::MaxKeyAgeDays { ops, .. } => lint_ops(idx, "ops", ops, out),
+        Rule::ComplianceProfileGate { ops, .. } => lint_ops(idx, "ops", ops, out),
     }
 }
 
@@ -259,6 +368,20 @@ pub fn is_known_algorithm_name(name: &str) -> bool {
         "Ed25519", "Ed448", "X25519", "X448", "RSA-PKCS1-v1_5", "ECDSA-SHA1",
         // K6 hybrid KEMs (KMIP 3.0 CSD02).
         "X25519MLKEM768", "SecP256r1MLKEM768",
+        // A6.2 (2026-08-28 gaps-remediation plan): SecP384r1MLKEM1024 — the
+        // OpenSSL 3.6 hybrid interop group this workspace already exercises
+        // elsewhere (`pqc-ev-test`), previously unnameable in a policy at all.
+        "SecP384r1MLKEM1024",
+        // A6.2: real-but-unimplemented algorithms a denylist must still be
+        // able to name (same rationale as the existing DES/3DES entries —
+        // "this engine can't generate it" is not "a policy can't ban it").
+        // Brainpool curves (RFC 5639), named the way TLS/crypto tooling
+        // conventionally does.
+        "brainpoolP256r1", "brainpoolP384r1", "brainpoolP512r1",
+        // Camellia (RFC 3713) and ARIA (RFC 5794) — AES-alternative block ciphers.
+        "Camellia", "ARIA",
+        // China's SM2 (ECC signature/key-exchange) and SM4 (block cipher, GB/T 32907).
+        "SM2", "SM4",
     ];
     if BARE.contains(&name) {
         return true;
@@ -318,15 +441,23 @@ fn is_ml_dsa_suffix(s: &str) -> bool {
         _ => {
             let mut parts = s.splitn(2, '-');
             let level = parts.next().unwrap_or("");
-            let tail = parts.next().unwrap_or("").to_ascii_uppercase();
-            matches!(level, "44" | "65" | "87")
-                && matches!(
-                    tail.as_str(),
-                    "ED25519" | "ED448" | "ECDSA-P256" | "ECDSA-P384" | "ECDSA-P521"
-                        | "RSA2048-PSS" | "RSA3072-PSS" | "RSA4096-PSS"
-                )
+            let tail = parts.next().unwrap_or("");
+            matches!(level, "44" | "65" | "87") && is_ml_dsa_composite_tail(tail)
         }
     }
+}
+
+/// The classical half of an `ML-DSA-<level>-<tail>` LAMPS composite name —
+/// factored out of [`is_ml_dsa_suffix`] so `rule::is_composite_algorithm_name`
+/// (A6.1, 2026-08-28 gaps-remediation plan) can recognise a full composite
+/// name without a second, hand-maintained copy of this tail set. Case-folded
+/// (KMIP 3.0 spells it `Ed25519`; legacy policy YAML may spell it `ED25519`).
+pub(crate) fn is_ml_dsa_composite_tail(tail: &str) -> bool {
+    matches!(
+        tail.to_ascii_uppercase().as_str(),
+        "ED25519" | "ED448" | "ECDSA-P256" | "ECDSA-P384" | "ECDSA-P521"
+            | "RSA2048-PSS" | "RSA3072-PSS" | "RSA4096-PSS"
+    )
 }
 
 /// SLH-DSA suffix: `<hash>-<size><s|f>`, e.g. `SHA2-128s`, `SHAKE-256f`.
@@ -344,7 +475,7 @@ fn is_slh_dsa_suffix(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::rule::TimeBound;
+    use super::super::rule::{Severity, TimeBound};
 
     #[test]
     fn known_algorithm_names_accepts_real_and_qualified() {
@@ -356,6 +487,10 @@ mod tests {
             "Falcon-1024", "HQC-192", "BIKE-L3", "FrodoKEM-1344", "Classic-McEliece-8192128",
             "Ed25519", "X25519", "SHA-256", "RSA-PKCS1-v1_5", "ECDSA-SHA1",
             "X25519MLKEM768", "SecP256r1MLKEM768",
+            // A6.2 (2026-08-28 gaps-remediation plan).
+            "SecP384r1MLKEM1024",
+            "brainpoolP256r1", "brainpoolP384r1", "brainpoolP512r1",
+            "Camellia", "ARIA", "SM2", "SM4",
         ] {
             assert!(is_known_algorithm_name(ok), "should accept {ok}");
         }
@@ -412,7 +547,47 @@ mod tests {
             effective_from: None,
             effective_until: None,
             exception_custom_attribute: None,
+            severity: Severity::Deny,
         }
+    }
+
+    #[test]
+    fn warn_severity_with_no_sunset_is_advisory_not_fatal() {
+        let mut warn_only = deny_rule(&["RSA"]);
+        if let Rule::AlgorithmDenylist { severity, .. } = &mut warn_only {
+            *severity = Severity::Warn;
+        }
+        let findings = lint_rules(&[warn_only], false);
+        let f = findings
+            .iter()
+            .find(|f| f.field == "severity")
+            .expect("a sunset-less warn rule should be flagged");
+        assert!(!f.fatal, "the sunset advisory must never be fatal");
+        assert!(f.message.contains("no sunset"));
+    }
+
+    #[test]
+    fn warn_severity_with_dated_escalation_is_not_flagged() {
+        let mut warn_with_date = deny_rule(&["RSA"]);
+        if let Rule::AlgorithmDenylist { severity, effective_from, .. } = &mut warn_with_date {
+            *severity = Severity::Warn;
+            *effective_from = Some(TimeBound::At(
+                time::Date::from_calendar_date(2030, time::Month::January, 1).unwrap(),
+            ));
+        }
+        let findings = lint_rules(&[warn_with_date], false);
+        assert!(!findings.iter().any(|f| f.field == "severity"));
+    }
+
+    #[test]
+    fn warn_severity_with_a_deny_sibling_of_the_same_type_is_not_flagged() {
+        let mut warn_rule = deny_rule(&["RSA"]);
+        if let Rule::AlgorithmDenylist { severity, .. } = &mut warn_rule {
+            *severity = Severity::Warn;
+        }
+        let deny_sibling = deny_rule(&["ECDSA-P256"]); // different condition, same TYPE — still counts
+        let findings = lint_rules(&[warn_rule, deny_sibling], false);
+        assert!(!findings.iter().any(|f| f.field == "severity"));
     }
 
     fn allow_rule(algos: &[&str]) -> Rule {
@@ -459,6 +634,109 @@ mod tests {
     }
 
     #[test]
+    fn op_typo_is_always_fatal_regardless_of_rule_position() {
+        // Allow-position rule (algorithm_default) — an algorithm typo here
+        // would be advisory, but an OP typo must still be fatal: the whole
+        // rule is disabled either way.
+        let default_rule = Rule::AlgorithmDefault {
+            ops: vec!["Sing".into()], // typo of "Sign"
+            default_algorithm: "AES-256".into(),
+            reason: "t".into(),
+            clause: None,
+            name_pattern: None,
+        };
+        let findings = lint_rules(&[default_rule], false);
+        assert!(
+            findings.iter().any(|f| f.fatal && f.field == "ops" && f.value == "Sing"),
+            "an op typo must be fatal even in an allow-position rule"
+        );
+
+        // Deny-position rule too, and under strict — no lenient tier at all.
+        let deny_rule = Rule::AlgorithmDenylist {
+            ops: vec!["Encrypt".into(), "Decyrpt".into()], // typo of "Decrypt"
+            algorithms: vec!["AES-256".into()],
+            reason: "t".into(),
+            clause: None,
+            effective_from: None,
+            effective_until: None,
+            exception_custom_attribute: None,
+            severity: Severity::Deny,
+        };
+        for strict in [false, true] {
+            let findings = lint_rules(&[deny_rule.clone()], strict);
+            assert!(
+                findings.iter().any(|f| f.fatal && f.field == "ops" && f.value == "Decyrpt"),
+                "op typo must be fatal under strict={strict}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_but_ungated_op_is_fatal_with_a_distinct_message() {
+        let rule = Rule::TemporalCutoff {
+            op: "Query".into(), // real KMIP op, never routed through evaluate()
+            algorithm_class: "classical".into(),
+            algorithms: vec![],
+            after: TimeBound::Always,
+            reason: "t".into(),
+            clause: None,
+            severity: Severity::Deny,
+        };
+        let findings = lint_rules(&[rule], false);
+        let f = findings.iter().find(|f| f.field == "op").expect("Query should be flagged");
+        assert!(f.fatal);
+        assert!(f.message.contains("not policy-gated") || f.message.contains("never evaluates"),
+            "message should distinguish 'ungated op' from a typo, got: {}", f.message);
+    }
+
+    #[test]
+    fn colon_refined_op_validates_only_the_base_segment() {
+        let rule = Rule::AlgorithmSubstitution {
+            ops: vec!["CreateKeyPair:Sign".into(), "CreateKeyPair:SomeNewPurpose".into()],
+            from: "ECDSA-P256".into(),
+            to: "ML-DSA-65".into(),
+            reason: "t".into(),
+            clause: None,
+            name_pattern: None,
+        };
+        let findings = lint_rules(&[rule], false);
+        assert!(
+            findings.iter().all(|f| f.field != "ops"),
+            "a colon-refined op with a known base should not be flagged just because \
+             the suffix after ':' is a novel refinement: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn hybrid_dual_sign_ops_affected_is_linted() {
+        let rule = Rule::HybridDualSignRequirement {
+            primary: "ML-DSA-65".into(),
+            secondary: "Ed25519".into(),
+            effective_from: TimeBound::Always,
+            effective_until: TimeBound::Always,
+            ops_affected: vec!["Sign".into(), "Sing".into()],
+            composite_oid: None,
+            triggered_by_custom_attribute: None,
+            reason: "t".into(),
+            clause: None,
+        };
+        let findings = lint_rules(&[rule], false);
+        assert!(findings.iter().any(|f| f.fatal && f.field == "ops_affected" && f.value == "Sing"));
+    }
+
+    #[test]
+    fn max_key_age_days_ops_is_linted() {
+        let rule = Rule::MaxKeyAgeDays {
+            ops: vec!["Sign".into(), "Encrypy".into()],
+            days: 90,
+            reason: "t".into(),
+            clause: None,
+        };
+        let findings = lint_rules(&[rule], false);
+        assert!(findings.iter().any(|f| f.fatal && f.field == "ops" && f.value == "Encrypy"));
+    }
+
+    #[test]
     fn unknown_class_and_state_are_fatal() {
         let cutoff = Rule::TemporalCutoff {
             op: "Sign".into(),
@@ -467,6 +745,7 @@ mod tests {
             after: TimeBound::Always,
             reason: "t".into(),
             clause: None,
+            severity: Severity::Deny,
         };
         assert!(lint_rules(&[cutoff], false).iter().any(|f| f.fatal && f.value == "quantum"));
 

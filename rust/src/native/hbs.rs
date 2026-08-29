@@ -24,7 +24,9 @@ use crate::constants::{
     CKA_HSS_KEYS_REMAINING, CKA_PRIV_LEAF_INDEX, CKA_LMS_PARAM_SET, CKA_PRIV_STATEFUL_KEY_STATE,
     CKR_FUNCTION_FAILED, CKR_KEY_TYPE_INCONSISTENT,
 };
-use crate::state::{get_object_attr_bytes, get_object_attr_u32, get_object_attr_u64, set_object_attr_bytes};
+use crate::state::{
+    get_object_attr_bytes, get_object_attr_u32, get_object_attr_u64, set_object_attrs_bytes_batch,
+};
 
 /// A computed HSS/LMS signature plus the not-yet-persisted next private-key
 /// state needed to commit it. Dropping this without calling [`sign_commit`]
@@ -58,14 +60,24 @@ pub(crate) fn sign_prepare(handle: u32, msg: &[u8]) -> Result<Prepared, u32> {
 /// stored private-key state, advance the leaf index, and decrement the
 /// remaining-signatures counter (PKCS#11 v3.2 §6.14). Call exactly once
 /// per `Prepared` value that is actually delivered to the caller.
+///
+/// All three fields are ONE logical state transition ("this leaf was
+/// consumed") and are written via [`set_object_attrs_bytes_batch`] in a
+/// single coalesced call — both the in-memory update (one `OBJECTS` lock
+/// instead of three) and, when a durable store is configured, the disk
+/// write are atomic across all three fields. Three separate writes would
+/// let a crash between them leave disk and memory disagreeing about which
+/// leaf was last used, which is exactly the one-time-signature reuse
+/// hazard this module exists to prevent.
 pub(crate) fn sign_commit(handle: u32, prepared: &Prepared) {
-    set_object_attr_bytes(handle, CKA_PRIV_STATEFUL_KEY_STATE, prepared.new_priv_state.clone());
+    let mut changes = vec![(CKA_PRIV_STATEFUL_KEY_STATE, prepared.new_priv_state.clone())];
     let old_idx = get_object_attr_u64(handle, CKA_PRIV_LEAF_INDEX).unwrap_or(0);
-    set_object_attr_bytes(handle, CKA_PRIV_LEAF_INDEX, (old_idx + 1).to_le_bytes().to_vec());
+    changes.push((CKA_PRIV_LEAF_INDEX, (old_idx + 1).to_le_bytes().to_vec()));
     if let Some(mut remaining) = get_object_attr_u32(handle, CKA_HSS_KEYS_REMAINING) {
         if remaining > 0 {
             remaining -= 1;
-            set_object_attr_bytes(handle, CKA_HSS_KEYS_REMAINING, remaining.to_le_bytes().to_vec());
+            changes.push((CKA_HSS_KEYS_REMAINING, remaining.to_le_bytes().to_vec()));
         }
     }
+    set_object_attrs_bytes_batch(handle, &changes);
 }

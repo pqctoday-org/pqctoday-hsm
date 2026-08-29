@@ -38,6 +38,28 @@ metadata: { name: built-in-permissive, description: "Fallback when no --policy i
 rules: []
 "#;
 
+/// A6.4 (2026-08-28 gaps-remediation plan) — a single `tracing::warn!` line
+/// among the rest of boot logging is easy to miss; booting fully permissive
+/// (every KMIP op unconditionally allowed) is exactly the kind of misboot an
+/// operator needs to see immediately, not find later while debugging why a
+/// policy that should have been enforced wasn't. `why` is the specific
+/// reason this boot fell through to permissive.
+fn warn_permissive_fallback(why: &str) {
+    tracing::warn!(
+        "\n\
+         ################################################################\n\
+         # WARNING: booting with the PERMISSIVE fallback policy.       #\n\
+         # Every KMIP operation will be allowed, unconditionally.      #\n\
+         #                                                              #\n\
+         # Reason: {why}\n\
+         #                                                              #\n\
+         # Fix by passing ONE of:                                      #\n\
+         #   --policy-dir <dir> --policy <name>                        #\n\
+         #   --policy-dir <dir> --module <name> [--module <name> ...]  #\n\
+         ################################################################"
+    );
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "pqctoday-kmip", version, about = "KMIP 3.0 server with Plane-1 crypto-agility engine")]
 struct Cli {
@@ -50,8 +72,25 @@ struct Cli {
     policy_dir: Option<PathBuf>,
 
     /// Activate this policy by name on startup (overrides the `.active` marker).
+    /// Legacy single-policy mode — mutually exclusive with `--module`.
     #[arg(long)]
     policy: Option<String>,
+
+    /// Activate this policy as a MODULE on startup (repeatable — e.g.
+    /// `--module pqc-signing --module pqc-key-establishment`). Modular
+    /// policy plan (2026-08-28): mutually exclusive with `--policy` (the
+    /// engine refuses to mix legacy and modular modes — see
+    /// `Engine::activate`'s doc comment). Overrides the `.active-modules`
+    /// marker, same relationship `--policy` has with `.active`.
+    #[arg(long = "module", conflicts_with = "policy")]
+    modules: Vec<String>,
+
+    /// What happens to a request whose op no active module's scope covers
+    /// (modular mode only; ignored in legacy `--policy` mode). Default
+    /// `deny` — fail closed everywhere. The browser playground is the
+    /// only intended `allow` caller.
+    #[arg(long = "uncovered-ops", default_value = "deny", value_parser = ["deny", "allow"])]
+    uncovered_ops: String,
 
     /// SQLite store path. If omitted, defaults to `--store-memory` (volatile).
     #[arg(long)]
@@ -60,6 +99,18 @@ struct Cli {
     /// Use the volatile in-memory store (sandbox / dev).
     #[arg(long, conflicts_with = "store")]
     store_memory: bool,
+
+    /// Directory for the PKCS#11 engine's OWN durable store — the actual
+    /// key material (encrypted at rest), as opposed to `--store`, which is
+    /// this server's KMIP-level metadata only (UID, lifecycle state,
+    /// dates — see `softhsmrustv3::store`'s module doc for why these are
+    /// two separate stores, never merged). Omitted ⇒ the engine stays
+    /// memory-only regardless of `--store`: KMIP metadata can be durable
+    /// while the keys it describes are not, which is exactly the G2 gap
+    /// this flag exists to close. One `.db` file per PKCS#11 slot is
+    /// created under this directory.
+    #[arg(long)]
+    engine_store: Option<PathBuf>,
 
     /// Append-only JSONL audit log. Combined with the in-memory ring via CompositeSink.
     #[arg(long)]
@@ -266,24 +317,47 @@ async fn main() -> anyhow::Result<()> {
     let sink: Arc<dyn AuditSink> = Arc::new(CompositeSink::new(sink_legs));
 
     // ── Engine + initial policy ─────────────────────────────────────────
+    // Modular-policy plan (2026-08-28) — `--module` (repeatable) activates
+    // the modular set instead of the legacy single `--policy`; clap's
+    // `conflicts_with` on `--module` already refuses both together. With
+    // neither flag given, boot tries to resume whichever marker exists —
+    // `.active-modules` first (a prior modular boot), then legacy `.active`
+    // — before falling back to the built-in permissive policy.
     let engine = Engine::with_global_sink(sink.clone());
+    engine.set_uncovered_ops(match cli.uncovered_ops.as_str() {
+        "allow" => pqctoday_kmip::policy::UncoveredOps::Allow,
+        _ => pqctoday_kmip::policy::UncoveredOps::Deny,
+    });
     if let Some(dir) = cli.policy_dir.as_ref() {
         let store = PolicyStore::new(dir);
-        if let Some(name) = cli.policy.as_ref() {
+        if !cli.modules.is_empty() {
+            for name in &cli.modules {
+                store.activate_module_with_engine(name, &engine)?;
+                tracing::info!("activated module {name:?} from {dir:?}");
+            }
+        } else if let Some(name) = cli.policy.as_ref() {
             store.activate_with_engine(name, &engine)?;
             tracing::info!("activated policy {name:?} from {dir:?}");
+        } else if let Some(marker) = store.resume_active_modules(&engine)? {
+            tracing::info!(
+                "resumed {} module(s) from {dir:?} (uncovered_ops={})",
+                marker.modules.len(),
+                marker.uncovered_ops
+            );
         } else {
             match store.resume_active(&engine)? {
                 Some(marker) => tracing::info!("resumed policy {:?} (fp={})", marker.name, marker.fingerprint),
                 None => {
-                    tracing::warn!("no --policy and no .active marker in {dir:?} — loading built-in permissive");
-                    engine.activate(load_from_str(PERMISSIVE_FALLBACK, std::path::Path::new("<built-in>"))?)?;
+                    warn_permissive_fallback(&format!(
+                        "no --policy/--module and no .active(-modules) marker in {dir:?}"
+                    ));
+                    engine.replace_all(load_from_str(PERMISSIVE_FALLBACK, std::path::Path::new("<built-in>"))?)?;
                 }
             }
         }
     } else {
-        tracing::warn!("no --policy-dir — loading built-in permissive policy");
-        engine.activate(load_from_str(PERMISSIVE_FALLBACK, std::path::Path::new("<built-in>"))?)?;
+        warn_permissive_fallback("no --policy-dir given");
+        engine.replace_all(load_from_str(PERMISSIVE_FALLBACK, std::path::Path::new("<built-in>"))?)?;
     }
 
     // ── Object store ────────────────────────────────────────────────────
@@ -296,12 +370,28 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(SqliteStore::open(&path).map_err(|e| anyhow::anyhow!("sqlite open: {e}"))?)
     };
 
+    // ── Engine store (the PKCS#11 engine's OWN durable store — key
+    // material, separate from the KMIP metadata `store` above) ──────────
+    // Configured and rehydrated BEFORE bootstrap below, so that if `--slot`
+    // already holds an initialized, persisted token, bootstrap sees it as
+    // already-initialized and skips C_InitToken (which would otherwise
+    // destroy every object on it — see bootstrap_persistent_token's doc).
+    if let Some(dir) = &cli.engine_store {
+        softhsmrustv3::store::configure_persistent_store(dir)
+            .map_err(|e| anyhow::anyhow!("engine store open {dir:?}: {e}"))?;
+        tracing::info!("engine store: durable SQLite at {dir:?} (key material persists across restarts)");
+    } else {
+        tracing::info!("engine store: volatile (no --engine-store; key material does not survive a restart)");
+    }
+
     // ── Engine session (Phase 7b — real bridge to softhsmrustv3) ────────
-    // Bootstrap a fresh token on `--slot` and open a long-lived user
-    // session. The handle is shared across all per-connection tasks
-    // (`softhsmrustv3` storage is Mutex-protected globals — safe across
-    // threads, serialised internally).
-    let engine_session = softhsmrustv3::native::session::bootstrap_default_token(
+    // Bootstrap on `--slot` and open a long-lived user session. The handle
+    // is shared across all per-connection tasks (`softhsmrustv3` storage
+    // is Mutex-protected globals — safe across threads, serialised
+    // internally). `bootstrap_persistent_token` (not `bootstrap_default_
+    // token`) so a rehydrated token from `--engine-store` above is logged
+    // into rather than reinitialized out from under itself.
+    let engine_session = softhsmrustv3::native::session::bootstrap_persistent_token(
         cli.slot,
         "so-pin",
         &cli.pin,

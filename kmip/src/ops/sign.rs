@@ -432,7 +432,7 @@ mod tests {
         let sink: Arc<dyn crate::auditlog::AuditSink> = ring.clone();
         let engine = Engine::with_global_sink(sink.clone());
         engine
-            .activate(load_from_str(yaml, std::path::Path::new("<test>")).unwrap())
+            .replace_all(load_from_str(yaml, std::path::Path::new("<test>")).unwrap())
             .unwrap();
         (
             ring,

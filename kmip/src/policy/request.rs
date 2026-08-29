@@ -24,13 +24,24 @@
 //!
 //! ## `op` field
 //!
-//! Opaque string matched against rule `ops`. Canonical names mirror the KMIP
-//! op set: `"Create"`, `"CreateKeyPair"`, `"Sign"`, `"SignatureVerify"`,
-//! `"Encrypt"`, `"Decrypt"`, `"Encapsulate"`, `"Decapsulate"`, `"Activate"`,
-//! `"Revoke"`, `"Destroy"`, `"Get"`, `"Locate"`. The dispatcher is responsible
-//! for aliasing (e.g. KMIP 3.0 reuses `Encrypt` for ML-KEM encapsulation, but
-//! the dispatcher can pass `"Encapsulate"` to the engine for clearer policy
-//! authoring).
+//! Opaque string matched against rule `ops`. **Corrected 2026-08-28** — this
+//! list previously named 13 ops and claimed the dispatcher *aliases*
+//! `Encrypt` to `Encapsulate` for ML-KEM; both were stale (KMIP 3.0 has a
+//! real, dedicated Encapsulate/Decapsulate operation, no aliasing involved).
+//! The authoritative list is [`super::rule::is_known_op`] (kept in sync by
+//! the loader's own op-name lint, so this comment can't drift from it
+//! silently again): `Create`, `CreateKeyPair` (optionally refined
+//! `CreateKeyPair:Sign`/`:KeyAgreement`/`:Encrypt` — see
+//! [`crate::dispatcher::purpose_suffix_from_mask`]), `Sign`,
+//! `SignatureVerify`, `Encrypt`, `Decrypt`, `Encapsulate`, `Decapsulate`,
+//! `DeriveKey`, `MAC`, `MACVerify`, `Hash`, `Register`, `Import`, `ReKey`,
+//! `ReKeyKeyPair` (same optional refinement as `CreateKeyPair`), `Get`,
+//! `Locate`, `Destroy`, `Activate`, `Deactivate`, `Revoke`, `GetAttributes`,
+//! `GetAttributeList`, `AddAttribute`, `ModifyAttribute`, `DeleteAttribute`,
+//! `SetAttribute`, `AdjustAttribute`. A handful of real KMIP 3.0 operations
+//! this server implements are deliberately never routed through
+//! [`super::Engine::evaluate`] at all (Certify, Validate, JoinSplitKey,
+//! Export, Query) — see [`super::rule::is_known_but_ungated_op`].
 
 use std::collections::HashMap;
 use time::OffsetDateTime;
