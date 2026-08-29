@@ -1898,20 +1898,39 @@ section('G2a — SLH-DSA baseline + v3.2 pre-hash ML-DSA/SLH-DSA round trips (§
     return new Uint8Array(new Uint32Array([hedge, ctxPtr, ctxBytes ? ctxBytes.length : 0, hash]).buffer);
   }
 
+  // Remediation R37 (phase 8, 2026-08-26): the GENERIC mechanism's data
+  // argument is an ALREADY-HASHED PHM whose length MUST equal the chosen
+  // hash's own digest length (§6.67.6/§6.69.6, "Length of hash") — never a
+  // raw message. This section's `phMsg` is a raw 39-byte string, correct
+  // for the hash-SPECIFIC mechanisms above (which hash on token) but wrong
+  // for the generic form below it, which used to silently remap onto the
+  // hash-specific mechanism (pre-R37) and so tolerated a raw message too.
+  // Two other test suites (p11_v32_compliance_test.cpp,
+  // generic_hash_ml_dsa_sign_verify_round_trip in ffi.rs) carried the same
+  // stale assumption and were fixed when R37 landed; this JS harness case
+  // predates R37 (commit 415935d, 2026-08-23) and was missed. Feed a real
+  // SHA-256 digest of phMsg (32 bytes) as the PHM instead — the raw
+  // `phMsgP`/`phMsg.length` pair is still correct, and stays in use, for
+  // the cross-check against the concrete CKM_HASH_ML_DSA_SHA256/
+  // CKM_HASH_SLH_DSA_SHA256 mechanisms below (those hash on token).
+  const crypto = require('crypto');
+  const phMsgSha256 = crypto.createHash('sha256').update(Buffer.from(phMsg)).digest();
+  const phMsgSha256P = alloc(phMsgSha256.length); writeBytes(phMsgSha256P, phMsgSha256);
+
   check('SignInit(CKM_HASH_ML_DSA generic, hash=SHA256, previously untested) → OK',
     w._C_SignInit(hS, buildMech(CKM.HASH_ML_DSA, hashSignCtxParam(0, null, CKM.SHA256)), mlKp.prv), CKR.OK);
   const gSlP = alloc(4); writeU32(gSlP, 0);
-  w._C_Sign(hS, phMsgP, phMsg.length, 0, gSlP);
+  w._C_Sign(hS, phMsgSha256P, phMsgSha256.length, 0, gSlP);
   const gSigP = alloc(readU32(gSlP));
-  check('Sign(CKM_HASH_ML_DSA generic) → OK', w._C_Sign(hS, phMsgP, phMsg.length, gSigP, gSlP), CKR.OK);
+  check('Sign(CKM_HASH_ML_DSA generic) → OK', w._C_Sign(hS, phMsgSha256P, phMsgSha256.length, gSigP, gSlP), CKR.OK);
   check('VerifyInit(CKM_HASH_ML_DSA generic, hash=SHA256) → OK',
     w._C_VerifyInit(hS, buildMech(CKM.HASH_ML_DSA, hashSignCtxParam(0, null, CKM.SHA256)), mlKp.pub), CKR.OK);
   check('Verify(CKM_HASH_ML_DSA generic) round trip → OK',
-    w._C_Verify(hS, phMsgP, phMsg.length, gSigP, readU32(gSlP)), CKR.OK);
-  // remap_generic_hash_mech() maps this generic form onto the SAME concrete
-  // CKM_HASH_ML_DSA_SHA256 code path — proving that by cross-verifying under
-  // the concrete mechanism spelling too (a real check on the remap, not an
-  // assumption about it).
+    w._C_Verify(hS, phMsgSha256P, phMsgSha256.length, gSigP, readU32(gSlP)), CKR.OK);
+  // The generic mechanism's PHM=H(M) is defined to be verify-interchangeable
+  // with the hash-specific mechanism fed the ORIGINAL message (which hashes
+  // it on token) — proving that is a real check on the two mechanisms'
+  // equivalence, not an assumption about a remap (R37 removed the remap).
   check('generic-form signature ALSO verifies under CKM_HASH_ML_DSA_SHA256 → OK',
     (() => {
       const rv1 = w._C_VerifyInit(hS, buildMech(CKM.HASH_ML_DSA_SHA256), mlKp.pub);
@@ -1922,13 +1941,13 @@ section('G2a — SLH-DSA baseline + v3.2 pre-hash ML-DSA/SLH-DSA round trips (§
   check('SignInit(CKM_HASH_SLH_DSA generic, hash=SHA256, previously untested) → OK',
     w._C_SignInit(hS, buildMech(CKM.HASH_SLH_DSA, hashSignCtxParam(0, null, CKM.SHA256)), slh.prv), CKR.OK);
   const gSlP2 = alloc(4); writeU32(gSlP2, 0);
-  w._C_Sign(hS, phMsgP, phMsg.length, 0, gSlP2);
+  w._C_Sign(hS, phMsgSha256P, phMsgSha256.length, 0, gSlP2);
   const gSigP2 = alloc(readU32(gSlP2));
-  check('Sign(CKM_HASH_SLH_DSA generic) → OK', w._C_Sign(hS, phMsgP, phMsg.length, gSigP2, gSlP2), CKR.OK);
+  check('Sign(CKM_HASH_SLH_DSA generic) → OK', w._C_Sign(hS, phMsgSha256P, phMsgSha256.length, gSigP2, gSlP2), CKR.OK);
   check('VerifyInit(CKM_HASH_SLH_DSA generic, hash=SHA256) → OK',
     w._C_VerifyInit(hS, buildMech(CKM.HASH_SLH_DSA, hashSignCtxParam(0, null, CKM.SHA256)), slh.pub), CKR.OK);
   check('Verify(CKM_HASH_SLH_DSA generic) round trip → OK',
-    w._C_Verify(hS, phMsgP, phMsg.length, gSigP2, readU32(gSlP2)), CKR.OK);
+    w._C_Verify(hS, phMsgSha256P, phMsgSha256.length, gSigP2, readU32(gSlP2)), CKR.OK);
   check('generic-form signature ALSO verifies under CKM_HASH_SLH_DSA_SHA256 → OK',
     (() => {
       const rv1 = w._C_VerifyInit(hS, buildMech(CKM.HASH_SLH_DSA_SHA256), slh.pub);

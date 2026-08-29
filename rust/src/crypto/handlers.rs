@@ -2057,6 +2057,24 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
             CKP_ML_DSA_87 => 4627,
             _ => 3309,
         },
+        // Bare generic CKM_HASH_ML_DSA (remediation R37, phase 8) — this arm
+        // was MISSING when R37 added the mechanism's own C_Sign/C_Verify
+        // dispatch (sign_ml_dsa_phm et al.), so it fell through to the
+        // generic `_ => 512` default below. That's the SAME class of gap
+        // CKM_XMSSMT's own comment above documents: the two-call size-query
+        // idiom (pSignature=NULL, allocate exactly the reported length, call
+        // again) reported 512 bytes for an ML-DSA-65 signature (real length
+        // 3309) and returned CKR_BUFFER_TOO_SMALL on the second call for any
+        // correctly-written caller — found via test_p11_conformance.js once
+        // its own stale pre-R37 test fixture (raw message instead of a PHM)
+        // was corrected and the real Sign call could get past PHM-length
+        // validation far enough to reach this bug. Same signature format/size
+        // as pure ML-DSA — only the input path (PHM vs. raw message) differs.
+        CKM_HASH_ML_DSA => match ps {
+            CKP_ML_DSA_44 => 2420,
+            CKP_ML_DSA_87 => 4627,
+            _ => 3309,
+        },
         CKM_SLH_DSA => match ps {
             CKP_SLH_DSA_SHA2_128S | CKP_SLH_DSA_SHAKE_128S => 7856,
             CKP_SLH_DSA_SHA2_128F | CKP_SLH_DSA_SHAKE_128F => 17088,
@@ -2067,6 +2085,17 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         },
         // Pre-hash SLH-DSA variants produce the same signature length as pure SLH-DSA
         m if is_prehash_slh_dsa(m) => match ps {
+            CKP_SLH_DSA_SHA2_128S | CKP_SLH_DSA_SHAKE_128S => 7856,
+            CKP_SLH_DSA_SHA2_128F | CKP_SLH_DSA_SHAKE_128F => 17088,
+            CKP_SLH_DSA_SHA2_192S | CKP_SLH_DSA_SHAKE_192S => 16224,
+            CKP_SLH_DSA_SHA2_192F | CKP_SLH_DSA_SHAKE_192F => 35664,
+            CKP_SLH_DSA_SHA2_256S | CKP_SLH_DSA_SHAKE_256S => 29792,
+            _ => 49856,
+        },
+        // Bare generic CKM_HASH_SLH_DSA (remediation R37, phase 8) — SLH-DSA
+        // twin of the CKM_HASH_ML_DSA arm above; same missing-arm gap, same
+        // fix. Same signature format/size as pure SLH-DSA.
+        CKM_HASH_SLH_DSA => match ps {
             CKP_SLH_DSA_SHA2_128S | CKP_SLH_DSA_SHAKE_128S => 7856,
             CKP_SLH_DSA_SHA2_128F | CKP_SLH_DSA_SHAKE_128F => 17088,
             CKP_SLH_DSA_SHA2_192S | CKP_SLH_DSA_SHAKE_192S => 16224,
