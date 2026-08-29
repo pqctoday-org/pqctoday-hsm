@@ -138,6 +138,47 @@ ByteString computeSecretKeyKCV(CK_KEY_TYPE keyType, const ByteString& keyBits)
 	return symKey.getKeyCheckValue();
 }
 
+// WS-1.1 (2026-08-29) — RSA-OAEP hashAlg → AsymMech + hash length.
+//
+// The single place the wrap/unwrap path resolves CK_RSA_PKCS_OAEP_PARAMS.
+// Before this existed, WrapKeyAsym/UnwrapKeyAsym ignored pParameter entirely
+// and always used SHA-1 while MechParamCheckRSAPKCSOAEP happily accepted
+// SHA-224/256/384/512 and SHA3-224/256/384/512 — a silent wrong answer that
+// no round-trip test could see, because both directions substituted the same
+// wrong hash. C_EncryptInit/C_DecryptInit (SoftHSM_cipher.cpp) already carried
+// this mapping; this is that mapping, hoisted so both paths share one copy.
+//
+// Also returns hLen so the RFC 8017 §7.1.1 input bound (k - 2 - 2*hLen) can be
+// derived from the hash actually selected instead of SHA-1's 20 bytes.
+//
+// Returns false for a hashAlg/mgf pair this engine does not implement. Callers
+// on the C_WrapKey/C_UnwrapKey path reach here only after
+// MechParamCheckRSAPKCSOAEP or MechParamCheckRSAAESKEYWRAP has validated the
+// pair, so false here is a genuine internal inconsistency, not user input —
+// but it is enforced anyway rather than silently defaulting to SHA-1, which is
+// the exact failure mode being removed.
+static bool resolveOAEPHash(CK_RSA_PKCS_OAEP_PARAMS_PTR params,
+                            AsymMech::Type& mech, size_t& hashLen)
+{
+	if (params == NULL_PTR) return false;
+	switch (params->hashAlg)
+	{
+		case CKM_SHA_1:    mech = AsymMech::RSA_PKCS_OAEP;        hashLen = 20; break;
+		case CKM_SHA224:   mech = AsymMech::RSA_PKCS_OAEP_SHA224; hashLen = 28; break;
+		case CKM_SHA256:   mech = AsymMech::RSA_PKCS_OAEP_SHA256; hashLen = 32; break;
+		case CKM_SHA384:   mech = AsymMech::RSA_PKCS_OAEP_SHA384; hashLen = 48; break;
+		case CKM_SHA512:   mech = AsymMech::RSA_PKCS_OAEP_SHA512; hashLen = 64; break;
+		case CKM_SHA3_224: mech = AsymMech::RSA_PKCS_OAEP_SHA3_224; hashLen = 28; break;
+		case CKM_SHA3_256: mech = AsymMech::RSA_PKCS_OAEP_SHA3_256; hashLen = 32; break;
+		case CKM_SHA3_384: mech = AsymMech::RSA_PKCS_OAEP_SHA3_384; hashLen = 48; break;
+		case CKM_SHA3_512: mech = AsymMech::RSA_PKCS_OAEP_SHA3_512; hashLen = 64; break;
+		default:
+			ERROR_MSG("Unsupported RSA-OAEP hashAlg 0x%lx", (unsigned long)params->hashAlg);
+			return false;
+	}
+	return true;
+}
+
 // KDF helpers: map PKCS#11 v3.2 CKD_* identifiers to OpenSSL digest names (for X9.63 KDF)
 static const char* ckdToDigestName(CK_ULONG kdf)
 {
@@ -1178,12 +1219,31 @@ CK_RV SoftHSM::WrapKeyAsym
 			break;
 
 		case CKM_RSA_PKCS_OAEP:
-			mech = AsymMech::RSA_PKCS_OAEP;
-			// SHA-1 is the only supported option
-			// PKCS#11 2.40 draft 2 section 2.1.8: input length <= k-2-2hashLen
-			if (keydata.size() > modulus_length - 2 - 2 * 160 / 8)
+		{
+			// WS-1.1 (2026-08-29): this arm used to hardcode
+			// AsymMech::RSA_PKCS_OAEP and never look at pParameter, with the
+			// comment "SHA-1 is the only supported option" and a hardcoded
+			// 2*160/8 size bound. That was a SILENT WRONG ANSWER: a caller
+			// requesting OAEP-SHA-256 through C_WrapKey got OAEP-SHA-1 and was
+			// never told, because MechParamCheckRSAPKCSOAEP accepts SHA-224/
+			// 256/384/512 and SHA3-224/256/384/512 and returns CKR_OK. Wrap and
+			// unwrap substituted the same wrong hash, so every round trip
+			// self-consistently passed while the blob was non-interoperable
+			// with any conforming module. C_EncryptInit/C_DecryptInit already
+			// mapped hashAlg correctly (SoftHSM_cipher.cpp) — this is that
+			// same switch, which the wrap path never adopted.
+			CK_RSA_PKCS_OAEP_PARAMS_PTR oaepP =
+				(CK_RSA_PKCS_OAEP_PARAMS_PTR)pMechanism->pParameter;
+			size_t hashLen = 0;
+			if (!resolveOAEPHash(oaepP, mech, hashLen))
+				return CKR_MECHANISM_PARAM_INVALID;
+			// PKCS#11 v3.2 §6.1.8 / RFC 8017 §7.1.1: input length <= k-2-2hLen,
+			// with hLen the length of the ACTUALLY SELECTED hash, not SHA-1's.
+			if (modulus_length < 2 + 2 * hashLen ||
+			    keydata.size() > modulus_length - 2 - 2 * hashLen)
 				return CKR_KEY_SIZE_RANGE;
 			break;
+		}
 
 		default:
 			return CKR_MECHANISM_INVALID;
@@ -1788,9 +1848,21 @@ CK_RV SoftHSM::UnwrapKeyAsym
 			break;
 
 		case CKM_RSA_PKCS_OAEP:
+		{
+			// WS-1.1 (2026-08-29): see the matching comment in WrapKeyAsym.
+			// This arm hardcoded AsymMech::RSA_PKCS_OAEP and never read
+			// pParameter, so an unwrap requested under OAEP-SHA-256 silently
+			// used SHA-1. Because the wrap side made the same substitution the
+			// round trip always agreed, which is exactly why no existing test
+			// could see it.
 			algo = AsymAlgo::RSA;
-			mode = AsymMech::RSA_PKCS_OAEP;
+			CK_RSA_PKCS_OAEP_PARAMS_PTR oaepP =
+				(CK_RSA_PKCS_OAEP_PARAMS_PTR)pMechanism->pParameter;
+			size_t hashLen = 0;
+			if (!resolveOAEPHash(oaepP, mode, hashLen))
+				return CKR_MECHANISM_PARAM_INVALID;
 			break;
+		}
 
 		default:
 			return CKR_MECHANISM_INVALID;
@@ -8114,10 +8186,28 @@ CK_RV SoftHSM::MechParamCheckRSAAESKEYWRAP(CK_MECHANISM_PTR pMechanism)
 		ERROR_MSG("pOAEPParams must be of type CK_RSA_PKCS_OAEP_PARAMS");
 		return CKR_ARGUMENTS_BAD;
 	}
-	if (params->pOAEPParams->mgf < 1UL || params->pOAEPParams->mgf > 5UL)
+	// WS-1.1 (2026-08-29): this used to check ONLY that mgf fell in 1..5 and
+	// never looked at hashAlg at all — so CKM_RSA_AES_KEY_WRAP accepted any
+	// hashAlg whatsoever, including combinations the OAEP half of the
+	// mechanism cannot implement, and inherited the SHA-1 substitution the
+	// wrap/unwrap helpers used to make. Now the inner CK_RSA_PKCS_OAEP_PARAMS
+	// is validated to exactly the same hashAlg/mgf pairing rule
+	// MechParamCheckRSAPKCSOAEP applies to a standalone CKM_RSA_PKCS_OAEP —
+	// one rule, both entry points, no path where an unvalidated hashAlg can
+	// reach resolveOAEPHash. Note this also narrows the accepted mgf set: the
+	// old 1..5 range admitted CKG_MGF1_SHA224/256/384/512 paired with ANY
+	// hashAlg, which is not a combination the OAEP encoding permits.
 	{
-		ERROR_MSG("mgf not supported");
-		return CKR_ARGUMENTS_BAD;
+		CK_MECHANISM oaepProbe;
+		oaepProbe.mechanism      = CKM_RSA_PKCS_OAEP;
+		oaepProbe.pParameter     = params->pOAEPParams;
+		oaepProbe.ulParameterLen = sizeof(CK_RSA_PKCS_OAEP_PARAMS);
+		CK_RV oaepRv = MechParamCheckRSAPKCSOAEP(&oaepProbe);
+		if (oaepRv != CKR_OK)
+		{
+			ERROR_MSG("Invalid pOAEPParams inside CK_RSA_AES_KEY_WRAP_PARAMS");
+			return oaepRv;
+		}
 	}
 	if (params->pOAEPParams->source != CKZ_DATA_SPECIFIED)
 	{

@@ -142,6 +142,62 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **BREAKING (C++ engine): `C_WrapKey`/`C_UnwrapKey` under
+  `CKM_RSA_PKCS_OAEP` now use the `hashAlg` you asked for, instead of
+  silently substituting SHA-1.** This is a correctness fix with a
+  compatibility consequence, so read the second paragraph before upgrading.
+  `MechParamCheckRSAPKCSOAEP` has long accepted — and returned `CKR_OK`
+  for — `hashAlg` values of SHA-224/256/384/512 and SHA3-224/256/384/512,
+  but the two helpers that actually perform the operation,
+  `WrapKeyAsym` and `UnwrapKeyAsym` (`src/lib/SoftHSM_keygen.cpp`), never
+  read `pParameter` at all: both hardcoded `AsymMech::RSA_PKCS_OAEP`, whose
+  OpenSSL default OAEP digest is SHA-1, next to a comment reading "SHA-1 is
+  the only supported option" and a message-length bound hardcoded to
+  SHA-1's `2 * 160 / 8`. A caller who correctly requested OAEP-SHA-256 got
+  OAEP-SHA-1 and was never told. Nothing in the test suite could see it:
+  wrap and unwrap made the *same* substitution, so every round trip agreed
+  with itself, and the only vector file that could have caught it
+  (`tests/acvp/rsa_oaep_test.json`) was loaded by no harness — and was
+  itself Node-generated rather than NIST-sourced. `C_EncryptInit`/
+  `C_DecryptInit` (`src/lib/SoftHSM_cipher.cpp`) already mapped `hashAlg`
+  onto the right `AsymMech`; the wrap path had simply never adopted that
+  switch. Both paths now share one resolver (`resolveOAEPHash`), the
+  RFC 8017 §7.1.1 input bound `k - 2 - 2*hLen` is derived from the selected
+  hash, and `MechParamCheckRSAAESKEYWRAP` — which previously validated only
+  `mgf ∈ 1..5` and never looked at `hashAlg` — now validates its inner
+  `CK_RSA_PKCS_OAEP_PARAMS` through exactly the same rule, closing the last
+  path by which an unvalidated `hashAlg` could reach the wrap helpers.
+  `CKM_RSA_AES_KEY_WRAP` inherits the fix, since it wraps its ephemeral AES
+  key through those same helpers. A *third* gate had to be widened as well,
+  and only the new KAT found it: `AsymmetricAlgorithm::isWrappingMech`
+  (`src/lib/crypto/AsymmetricAlgorithm.cpp`) is a whitelist every wrap and
+  unwrap passes through, and it admitted only the bare `RSA_PKCS_OAEP`.
+  While the helpers above hardcoded that same value the omission was
+  invisible; the moment they began honouring `hashAlg` it would have turned
+  the silent SHA-1 substitution into a hard `CKR_GENERAL_ERROR` /
+  `CKR_WRAPPED_KEY_INVALID` for every non-SHA-1 OAEP wrap. All eight
+  hash-qualified variants are now admitted — v3.2 §6.1.8 ticks
+  `CKM_RSA_PKCS_OAEP` for Wrap&Unwrap without restricting `hashAlg`.
+  **Compatibility: this is a breaking fix, deliberately with no
+  transitional flag and no legacy opt-in.** Any blob wrapped by an earlier
+  build under a *non*-SHA-1 `hashAlg` was in fact wrapped under SHA-1, and
+  this build will not unwrap it under the `hashAlg` it was nominally
+  created with — such blobs must be re-wrapped. (They can still be
+  recovered by this build by asking for `CKM_SHA_1`/`CKG_MGF1_SHA1`
+  explicitly, which is what they actually are.) Blobs wrapped under
+  SHA-1 are unaffected. The old behaviour was not interoperable with any
+  conforming PKCS#11 module in either direction, so preserving it behind a
+  flag would only have kept a silent wrong answer permanently reachable.
+  New evidence, replacing the orphaned Node-generated file: real NIST ACVP
+  `KTS-IFC-Sp800-56Br2` key-transport vectors (pinned at ACVP-Server commit
+  `975de31`, `source_sha256` recorded, 20 cases across OAEP-SHA-512 and
+  OAEP-SHA-1, each independently re-verified before adoption), driven
+  through `C_WrapKey`/`C_UnwrapKey` — not `C_Encrypt`/`C_Decrypt`, which
+  were always correct — plus a negative case that wraps under SHA-512 and
+  proves the resulting blob is *not* unwrappable under SHA-1. On the old
+  code that negative case succeeds, which is the whole bug in one
+  assertion.
+
 - **Rust engine: `C_Finalize` no longer wipes token state.** WS-11's Tier A
   conformance runner caught this with a standalone probe: one slot present
   before `C_Finalize`, zero slots after `C_Finalize` + a re-`C_Initialize`

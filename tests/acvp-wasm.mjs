@@ -25,6 +25,8 @@ import {
   importAESKey,
   importHMACKey,
   importRSAPublicKey,
+  importRSAPrivateKey,
+  generateRSAKeyPair,
   importECPublicKey,
   importMLDSAPublicKey,
   importMLKEMPrivateKey,
@@ -57,6 +59,10 @@ import {
   extractKeyValue,
   wrapKey,
   unwrapKey,
+  unwrapKeyRaw,
+  buildOAEPParams,
+  buildRsaAesKeyWrapParams,
+  CKG_MGF1,
   pbkdf2,
   hkdf,
   generateHSSKeyPair,
@@ -92,6 +98,7 @@ const aesKwVec = loadJson('aeskw_test.json')
 const slhdsaCtxVec = loadJson('slhdsa_ctx_test.json')
 const lmsSigverVec = loadJson('lms_sigver_test.json')
 const lmsSigverExp = loadJson('lms_sigver_expected.json')
+const rsaOaepVec = loadJson('rsa_oaep_test.json')
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function arrEq(a, b) {
@@ -551,6 +558,161 @@ async function runSuite(engineName) {
         addResult('aeskwp', 'AES-KWP-256', 'Wrap+Unwrap Round-Trip', 'FAIL', e.message)
       }
     }
+    // ── 20.5 RSA-OAEP key transport through C_WrapKey / C_UnwrapKey ──────
+    //
+    // WS-1.1 (2026-08-29). Deliberately exercised through the WRAP path, not
+    // C_Encrypt/C_Decrypt: those already mapped CK_RSA_PKCS_OAEP_PARAMS.hashAlg
+    // onto the right AsymMech, while WrapKeyAsym/UnwrapKeyAsym never read
+    // pParameter at all and always used SHA-1. Both directions substituted the
+    // same wrong hash, so no round-trip test could see it — only a vector, and
+    // a cross-hash negative case, can.
+    //
+    // Vectors: NIST ACVP KTS-IFC-Sp800-56Br2 (see the file's _provenance).
+    // Only the decrypt/unwrap direction is a KAT — OAEP encryption is
+    // randomised, so the wrap direction is pinned by the negative case below.
+    {
+      const OAEP_HASH_CKM = { 'SHA-1': CK.CKM_SHA_1, 'SHA2-512': CK.CKM_SHA512 }
+      for (const g of rsaOaepVec.testGroups) {
+        const hashMech = OAEP_HASH_CKM[g.hashAlg]
+        const mgf = CKG_MGF1[g.ckmHashAlg]
+        const label = `RSA-${g.modLen}-OAEP-${g.hashAlg}`
+        if (hashMech === undefined || mgf === undefined) {
+          addResult('rsaoaep-kat', label, 'Unwrap KAT', 'FAIL',
+            `vector names an OAEP hash this harness cannot map: ${g.hashAlg}/${g.ckmHashAlg}`)
+          continue
+        }
+        if (mechs.size > 0 && !mechs.has(CK.CKM_RSA_PKCS_OAEP)) {
+          addResult('rsaoaep-kat', label, 'Unwrap KAT', 'SKIP', 'mechanism not supported')
+          continue
+        }
+        let pass = 0, failDetail = ''
+        for (const tv of g.tests) {
+          let p = null
+          try {
+            p = buildOAEPParams(M, hashMech, mgf)
+            const privH = importRSAPrivateKey(M, hSession, {
+              n: hexToBytes(tv.n), e: hexToBytes(tv.e), d: hexToBytes(tv.d),
+              p: hexToBytes(tv.p), q: hexToBytes(tv.q),
+              dp: hexToBytes(tv.dp), dq: hexToBytes(tv.dq), qi: hexToBytes(tv.qi),
+            })
+            const h = unwrapKey(M, hSession, CK.CKM_RSA_PKCS_OAEP, privH, hexToBytes(tv.ct), [
+              { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+              { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+              { type: CK.CKA_TOKEN, value: false },
+              { type: CK.CKA_EXTRACTABLE, value: true },
+              { type: CK.CKA_SENSITIVE, value: false },
+            ], p)
+            const got = extractKeyValue(M, hSession, h)
+            if (arrEq(got, hexToBytes(tv.pt))) pass++
+            else if (!failDetail)
+              failDetail = `tcId ${tv.tcId}: got ${bytesToHex(got, 12)} want ${bytesToHex(hexToBytes(tv.pt), 12)}`
+          } catch (e) {
+            if (!failDetail) failDetail = `tcId ${tv.tcId}: ${e.message}`
+          } finally {
+            if (p) M._free(p.ptr)
+          }
+        }
+        const ok = pass === g.tests.length
+        addResult('rsaoaep-kat', label, `Unwrap KAT (ACVP tgId ${g.tgId}, ${g.tests.length} cases)`,
+          ok ? 'PASS' : 'FAIL', ok ? `${pass}/${g.tests.length} recovered` : failDetail)
+      }
+    }
+
+    // ── 20.6 RSA-OAEP wrap/unwrap hashAlg binding (negative) ─────────────
+    //
+    // The assertion that actually fails on the pre-WS-1.1 code: a blob wrapped
+    // under OAEP-SHA-512 must NOT be unwrappable under OAEP-SHA-1. When the
+    // wrap path ignored hashAlg, both operations were really SHA-1 and this
+    // cross-hash unwrap succeeded.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_RSA_PKCS_OAEP)) {
+      addResult('rsaoaep-bind', 'RSA-2048-OAEP', 'hashAlg binding (negative)', 'SKIP',
+        'mechanism not supported')
+    } else {
+      let p512 = null, p1 = null
+      try {
+        p512 = buildOAEPParams(M, CK.CKM_SHA512, CKG_MGF1.CKM_SHA512)
+        p1 = buildOAEPParams(M, CK.CKM_SHA_1, CKG_MGF1.CKM_SHA_1)
+        const { pubHandle: pubH, privHandle: privH } = generateRSAKeyPair(M, hSession, 2048)
+        const targetH = generateAESKey(M, hSession, 256, {
+          encrypt: false, decrypt: false, wrap: false, unwrap: false, derive: false, extractable: true,
+        })
+        const orig = extractKeyValue(M, hSession, targetH)
+        const wrapped = wrapKey(M, hSession, CK.CKM_RSA_PKCS_OAEP, pubH, targetH, p512)
+        const tpl = [
+          { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+          { type: CK.CKA_KEY_TYPE, value: CK.CKK_AES },
+          { type: CK.CKA_TOKEN, value: false },
+          { type: CK.CKA_EXTRACTABLE, value: true },
+          { type: CK.CKA_SENSITIVE, value: false },
+        ]
+        // Same hash → must succeed and recover the original bytes.
+        const same = unwrapKeyRaw(M, hSession, CK.CKM_RSA_PKCS_OAEP, privH, wrapped, tpl, p512)
+        const roundTripped =
+          same.rv === 0 && arrEq(extractKeyValue(M, hSession, same.handle), orig)
+        // Different hash → must fail.
+        const cross = unwrapKeyRaw(M, hSession, CK.CKM_RSA_PKCS_OAEP, privH, wrapped, tpl, p1)
+        const crossRejected = cross.rv !== 0
+        const ok = roundTripped && crossRejected
+        addResult('rsaoaep-bind', 'RSA-2048-OAEP', 'hashAlg binding (SHA-512 wrap ⇏ SHA-1 unwrap)',
+          ok ? 'PASS' : 'FAIL',
+          `sha512_unwrap=${roundTripped} sha1_unwrap_rv=0x${cross.rv.toString(16)} (must be non-zero)`)
+      } catch (e) {
+        addResult('rsaoaep-bind', 'RSA-2048-OAEP', 'hashAlg binding (SHA-512 wrap ⇏ SHA-1 unwrap)',
+          'FAIL', e.message)
+      } finally {
+        if (p512) M._free(p512.ptr)
+        if (p1) M._free(p1.ptr)
+      }
+    }
+
+    // ── 20.7 CKM_RSA_AES_KEY_WRAP inherits the same hashAlg binding ──────
+    //
+    // It wraps its ephemeral AES key through the very same WrapKeyAsym /
+    // UnwrapKeyAsym helpers, and MechParamCheckRSAAESKEYWRAP used to validate
+    // only mgf ∈ 1..5 — never hashAlg — so it carried the bug twice over.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_RSA_AES_KEY_WRAP)) {
+      addResult('rsaaeskw-bind', 'RSA-AES-KEY-WRAP', 'hashAlg binding + param validation', 'SKIP',
+        'mechanism not supported')
+    } else {
+      let w512 = null, w1 = null, wBad = null
+      try {
+        w512 = buildRsaAesKeyWrapParams(M, 256, CK.CKM_SHA512, CKG_MGF1.CKM_SHA512)
+        w1 = buildRsaAesKeyWrapParams(M, 256, CK.CKM_SHA_1, CKG_MGF1.CKM_SHA_1)
+        // hashAlg/mgf pair that does not correspond — rejected only since the
+        // WS-1.1 validation fix; the old check saw mgf=2 in 1..5 and passed it.
+        wBad = buildRsaAesKeyWrapParams(M, 256, CK.CKM_SHA512, CKG_MGF1.CKM_SHA256)
+        const { pubHandle: pubH, privHandle: privH } = generateRSAKeyPair(M, hSession, 2048)
+        const targetH = generateAESKey(M, hSession, 256, {
+          encrypt: false, decrypt: false, wrap: false, unwrap: false, derive: false, extractable: true,
+        })
+        const orig = extractKeyValue(M, hSession, targetH)
+        const wrapped = wrapKey(M, hSession, CK.CKM_RSA_AES_KEY_WRAP, pubH, targetH, w512)
+        const tpl = [
+          { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+          { type: CK.CKA_KEY_TYPE, value: CK.CKK_AES },
+          { type: CK.CKA_TOKEN, value: false },
+          { type: CK.CKA_EXTRACTABLE, value: true },
+          { type: CK.CKA_SENSITIVE, value: false },
+        ]
+        const same = unwrapKeyRaw(M, hSession, CK.CKM_RSA_AES_KEY_WRAP, privH, wrapped, tpl, w512)
+        const roundTripped =
+          same.rv === 0 && arrEq(extractKeyValue(M, hSession, same.handle), orig)
+        const cross = unwrapKeyRaw(M, hSession, CK.CKM_RSA_AES_KEY_WRAP, privH, wrapped, tpl, w1)
+        const crossRejected = cross.rv !== 0
+        const bad = unwrapKeyRaw(M, hSession, CK.CKM_RSA_AES_KEY_WRAP, privH, wrapped, tpl, wBad)
+        const badRejected = bad.rv !== 0
+        const ok = roundTripped && crossRejected && badRejected
+        addResult('rsaaeskw-bind', 'RSA-AES-KEY-WRAP-256', 'hashAlg binding + param validation',
+          ok ? 'PASS' : 'FAIL',
+          `sha512_rt=${roundTripped} sha1_rv=0x${cross.rv.toString(16)} mismatched_pair_rv=0x${bad.rv.toString(16)}`)
+      } catch (e) {
+        addResult('rsaaeskw-bind', 'RSA-AES-KEY-WRAP-256', 'hashAlg binding + param validation',
+          'FAIL', e.message)
+      } finally {
+        for (const w of [w512, w1, wBad]) if (w) { M._free(w.oaep.ptr); M._free(w.ptr) }
+      }
+    }
+
     // ── 21. SLH-DSA context binding Sign+Verify (FIPS 205 §9.2) ────────
     // Generate fresh key pair; sign with context_A; verify same/diff ctx.
     // NIST reference tcId / vector preserved in slhdsa_ctx_test.json for audit.
