@@ -536,6 +536,15 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_AES_KEY_WRAP"]		= CKM_AES_KEY_WRAP;
 #ifdef HAVE_AES_KEY_WRAP_PAD
 	t["CKM_AES_KEY_WRAP_PAD"]	= CKM_AES_KEY_WRAP_PAD;
+	// PKCS#11 v3.2 §6.16.3: "The CKM_AES_KEY_WRAP_PAD mechanism is deprecated.
+	// CKM_AES_KEY_WRAP_KWP resp. CKM_AES_KEY_WRAP_PKCS7 shall be used instead."
+	// KWP is the same RFC 5649 construction ("zero-padded and wrapped as
+	// defined in section 6.3 of [AES KEYWRAP], which produces same results as
+	// RFC 5649") that CKM_AES_KEY_WRAP_PAD has always run here via
+	// SymWrap::AES_KEYWRAP_PAD / EVP_aes_*_wrap_pad() — only the mechanism ID
+	// was missing, so callers written against v3.0+ (which no longer name the
+	// deprecated one) could not reach a working implementation.
+	t["CKM_AES_KEY_WRAP_KWP"]	= CKM_AES_KEY_WRAP_KWP;
 #endif
 	t["CKM_AES_ECB_ENCRYPT_DATA"]	= CKM_AES_ECB_ENCRYPT_DATA;
 	t["CKM_AES_CBC_ENCRYPT_DATA"]	= CKM_AES_CBC_ENCRYPT_DATA;
@@ -1002,7 +1011,10 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->flags = CKF_WRAP | CKF_UNWRAP;
 			break;
 #ifdef HAVE_AES_KEY_WRAP_PAD
+		// Same RFC 5649 construction; KWP is the v3.0+ name for it and
+		// CKM_AES_KEY_WRAP_PAD is the deprecated spelling (v3.2 §6.16.3).
 		case CKM_AES_KEY_WRAP_PAD:
+		case CKM_AES_KEY_WRAP_KWP:
 			pInfo->ulMinKeySize = 1;
 			pInfo->ulMaxKeySize = UNLIMITED_KEY_SIZE;
 			pInfo->flags = CKF_WRAP | CKF_UNWRAP;
