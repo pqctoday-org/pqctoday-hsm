@@ -88,17 +88,21 @@ pub mod store;
 
 pub use audit::PolicyAudit;
 pub use decision::{CpOverride, Decision, DenyReason};
-pub use engine::{ActivePolicy, Engine, TraceEntry};
+pub use engine::{ActivateError, ActivePolicy, Engine, TraceEntry, UncoveredOps};
 pub use lint::{lint_rules, Finding};
 pub use loader::{
-    load_from_file, load_from_str, load_from_str_strict, validate, validate_strict, LoadedPolicy,
-    LoaderError,
+    load_from_file, load_from_str, load_from_str_strict, parse_and_structurally_validate,
+    validate, validate_strict, LoadedPolicy, LoaderError,
 };
 pub use policy::{ComplianceMapping, Metadata, Policy};
 pub use request::{MechanismParams, PolicyRequest};
 pub use rule::{
-    block_cipher_mode_name_to_code, ckm_name_to_code, hash_name_to_code,
-    padding_method_name_to_code, usage_flag_name_to_bit, AttrPredicate, GatingDeny, Rule,
-    Substitution, TimeBound,
+    block_cipher_mode_code_to_name, block_cipher_mode_name_to_code, ckm_name_to_code,
+    hash_code_to_name, hash_name_to_code, op_scope, padding_method_code_to_name,
+    padding_method_name_to_code, scope_ops, usage_flag_name_to_bit, AttrPredicate, GatingDeny,
+    Rule, Scope, Substitution, TimeBound,
 };
-pub use store::{ActiveMarker, PolicyStore, StoreError, POLICY_STORE_ACTIVE_FILE};
+pub use store::{
+    ActiveMarker, ActiveModulesMarker, ModuleMarker, PolicyStore, StoreError,
+    POLICY_STORE_ACTIVE_FILE, POLICY_STORE_ACTIVE_MODULES_FILE,
+};

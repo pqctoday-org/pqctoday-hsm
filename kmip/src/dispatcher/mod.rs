@@ -1095,7 +1095,23 @@ fn canonical_create_key_pair_op(req: &CreateKeyPairRequest) -> String {
             mask |= *m;
         }
     }
-    let suffix = if mask.contains(UsageMask::KEY_AGREEMENT) {
+    format!("CreateKeyPair:{}", purpose_suffix_from_mask(mask))
+}
+
+/// Same purpose discrimination as [`canonical_create_key_pair_op`], factored
+/// out (modular-policy plan, 2026-08-28) so `ReKeyKeyPair` can be
+/// canonicalised into `ReKeyKeyPair:<purpose>` too —
+/// `ops/rekey.rs::rekey_key_pair` calls this directly with the STORED
+/// object's usage mask (a rekey targets an existing pair, so the mask is
+/// already known — there is no request template to scan the way
+/// `CreateKeyPair` has one). Before this, `ReKeyKeyPair` was one op string
+/// used by both signing and KEM rekey substitutions, which made it
+/// impossible to place in a single scope's op set (`Scope::Signing` vs.
+/// `Scope::KeyEstablishment` vs. `Scope::Encryption`) — see
+/// `policy::rule::scope_ops`.
+pub(crate) fn purpose_suffix_from_mask(mask: crate::kmip30::UsageMask) -> &'static str {
+    use crate::kmip30::UsageMask;
+    if mask.contains(UsageMask::KEY_AGREEMENT) {
         "KeyAgreement"
     } else if mask.contains(UsageMask::SIGN) || mask.contains(UsageMask::VERIFY) {
         "Sign"
@@ -1106,8 +1122,7 @@ fn canonical_create_key_pair_op(req: &CreateKeyPairRequest) -> String {
         // `algorithm_default: CreateKeyPair:Sign` rule still matches.
         // Operators can require explicit masks via a policy gate.
         "Sign"
-    };
-    format!("CreateKeyPair:{suffix}")
+    }
 }
 
 // ── Convenience constructors for tests / external use ──────────────────────
@@ -1154,7 +1169,7 @@ mod tests {
         let sink: Arc<dyn AuditSink> = ring;
         let engine = Engine::with_global_sink(sink.clone());
         engine
-            .activate(load_from_str(
+            .replace_all(load_from_str(
                 "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n",
                 std::path::Path::new("<t>"),
             ).unwrap())
@@ -1209,6 +1224,22 @@ mod tests {
             seed: None,
         };
         assert_eq!(canonical_create_key_pair_op(&req), "CreateKeyPair:Sign");
+    }
+
+    /// Modular-policy plan (2026-08-28) — `purpose_suffix_from_mask` is the
+    /// shared logic behind BOTH `canonical_create_key_pair_op` (request
+    /// template mask) and `ops/rekey.rs::rekey_key_pair`'s
+    /// `ReKeyKeyPair:<purpose>` refinement (stored object mask). Covers
+    /// every branch, including the no-mask-hint fallback.
+    #[test]
+    fn purpose_suffix_from_mask_covers_every_branch() {
+        use crate::kmip30::UsageMask;
+        assert_eq!(purpose_suffix_from_mask(UsageMask::KEY_AGREEMENT), "KeyAgreement");
+        assert_eq!(purpose_suffix_from_mask(UsageMask::SIGN), "Sign");
+        assert_eq!(purpose_suffix_from_mask(UsageMask::VERIFY), "Sign");
+        assert_eq!(purpose_suffix_from_mask(UsageMask::ENCRYPT), "Encrypt");
+        assert_eq!(purpose_suffix_from_mask(UsageMask::DECRYPT), "Encrypt");
+        assert_eq!(purpose_suffix_from_mask(UsageMask::empty()), "Sign");
     }
 
     // ── K3 — recognized-but-unsupported operations ─────────────────────────
@@ -2863,7 +2894,7 @@ mod tests {
         let sink: Arc<dyn AuditSink> = ring;
         let engine = Engine::with_global_sink(sink.clone());
         engine
-            .activate(load_from_str(yaml, std::path::Path::new("<t>")).unwrap())
+            .replace_all(load_from_str(yaml, std::path::Path::new("<t>")).unwrap())
             .unwrap();
         Deps::new(engine, Arc::new(MemoryStore::new()), sink, DepsConfig::default())
     }

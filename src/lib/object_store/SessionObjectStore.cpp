@@ -44,6 +44,24 @@
 #include <set>
 #include <map>
 #include <list>
+#include <chrono>
+
+// WS-11 (2026-08-28) — see CKA_OS_CREATIONSEQ in OSAttributes.h. Duplicated
+// from OSToken.cpp (both are small, file-local helpers over the same
+// steady_clock encoding; a shared header felt like more machinery than a
+// six-line function warrants).
+static ByteString sessionCreationSeqNow()
+{
+	int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+	unsigned char bytes[8];
+	for (int i = 7; i >= 0; --i)
+	{
+		bytes[i] = (unsigned char)(ns & 0xFF);
+		ns >>= 8;
+	}
+	return ByteString(bytes, 8);
+}
 
 // Constructor
 SessionObjectStore::SessionObjectStore()
@@ -113,6 +131,12 @@ SessionObject* SessionObjectStore::createObject(CK_SLOT_ID slotID, CK_SESSION_HA
 		delete newObject;
 
 		return NULL;
+	}
+
+	// WS-11 (2026-08-28) — see CKA_OS_CREATIONSEQ in OSAttributes.h.
+	if (!newObject->setAttribute(CKA_OS_CREATIONSEQ, OSAttribute(sessionCreationSeqNow())))
+	{
+		ERROR_MSG("Failed to stamp creation sequence on new session object");
 	}
 
 	// Now add it to the set of objects

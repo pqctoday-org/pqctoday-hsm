@@ -44,6 +44,19 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 default = []
 acvp = []
 
+# Exposes `reset_all_engine_state_for_test` as a normal `pub fn` (it is
+# already always available under `#[cfg(test)]` for this crate's own
+# tests) so a DIFFERENT crate's test build — kmip's — can reset the
+# engine's global (`lazy_static!`) OBJECTS/SESSIONS/TOKEN_STORE state
+# between its own tests, the same way `native::test_lock::acquire()`
+# already does here. `#[cfg(test)]` alone cannot cross a crate boundary:
+# it only applies to a crate's own test binary, never to a downstream
+# crate depending on it normally. OPT-IN, dev-dependency only (see
+# kmip/Cargo.toml) — never enabled by the production `[dependencies]`
+# entry, so it never reaches the shipped `pqctoday-kmip` binary or any
+# other consumer of this crate.
+test-support = []
+
 [dependencies]
 wasm-bindgen = "0.2.117"
 js-sys = "0.3.69"
@@ -159,6 +172,20 @@ frodo-kem = { version = "0.1", default-features = false, features = [
 # (verified directly against both sources' source code — see the FrodoKEM/
 # Classic-McEliece/HQC implementation plan).
 classic-mceliece-rust = { version = "3", default-features = false, features = ["mceliece6688128", "alloc", "zeroize"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native store backend (`store::sqlite`) — target-gated as a DEPENDENCY,
+# not a Cargo feature someone has to remember to omit. `target_arch =
+# "wasm32"` covers both wasm32-unknown-unknown (the hub's embedded
+# playground build, `pqctoday-hub/src/wasm/softhsmrustv3_bg.wasm`) and
+# wasm32-unknown-emscripten (the openssl.wasm staticlib) in one predicate,
+# so rusqlite's bundled C SQLite is never even in the dependency graph for
+# either wasm target — matching the C++ engine's own decision to force its
+# `WITH_OBJECTSTORE_BACKEND_DB` off for its WebAssembly build
+# (`CMakeLists.txt:21-22`) rather than trying to cross-compile SQLite
+# through emcc. kmip/Cargo.toml gates rusqlite the same way, via its
+# `native` feature, for the identical reason.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 # NIST ACVP keyGen KAT parsing (T7 seed-deterministic keygen tests reads

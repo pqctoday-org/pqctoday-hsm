@@ -27,7 +27,16 @@ PROFILE="release"; OUT="pkg-release"
 # encapsulate/decapsulate handle it via on-stack buffers. 8MB covers both
 # with headroom; applied to every profile, not just --dev, since the
 # vendor-KEM overflow reproduces in release too.
-EXTRA_RUSTFLAGS='-C link-arg=-zstack-size=8388608'
+#
+# --export-table: exports the wasm32 module's indirect function table as
+# `__indirect_function_table` — C_GetFunctionList needs it (a caller reads a
+# real function-table index out of the returned CK_FUNCTION_LIST struct and
+# invokes it via `table.get(idx)(args)`, the standard WebAssembly/JS way to
+# call a funcref retrieved from linear memory). Note: this env var wins over
+# rust/.cargo/config.toml's own rustflags entirely (Cargo does not merge
+# RUSTFLAGS with config.toml rustflags — whichever is set here is what the
+# shipped artifact actually gets), so both must stay in sync.
+EXTRA_RUSTFLAGS='-C link-arg=-zstack-size=8388608 -C link-arg=--export-table'
 if [[ "${1:-}" == "--dev" ]]; then
   PROFILE="dev"; OUT="pkg"
 fi
@@ -74,6 +83,24 @@ else
   perl -0pi -e 's/(export \{\s*\n\s*)/${1}__wbg_get_memory,\n    /' "$WRAP"
   grep -q "__wbg_get_memory" "$WRAP" || { echo "✗ wrapper re-export patch failed" >&2; exit 1; }
 fi
+
+# ── Re-export __indirect_function_table (wasm-bindgen-cli strips it even
+#    though rustc/wasm-ld correctly export it — see patch_export_table.py's
+#    own header for the full story). C_GetFunctionList needs this: its
+#    CK_FUNCTION_LIST entries are real funcref table indices a JS caller
+#    retrieves with `table.get(idx)(args)`. Not idempotency-guarded like the
+#    __wbg_get_memory shim above — this script always starts from a fresh
+#    wasm-pack build, so there is never an already-patched binary to detect.
+WASM="$OUT/softhsmrustv3_bg.wasm"
+echo "▶ re-exporting __indirect_function_table in $WASM"
+python3 patch_export_table.py "$WASM" "$WASM.patched"
+mv "$WASM.patched" "$WASM"
+node -e "
+  const m = new WebAssembly.Module(require('fs').readFileSync('$WASM'));
+  const has = WebAssembly.Module.exports(m).some(e => e.kind === 'table' && e.name === '__indirect_function_table');
+  if (!has) { console.error('✗ __indirect_function_table export missing after patch — aborting'); process.exit(1); }
+  console.log('✓ __indirect_function_table export present');
+"
 
 # ── Refresh the tracked bundler artifact (release only) ──────────────────────
 if [[ "$PROFILE" == "release" ]]; then

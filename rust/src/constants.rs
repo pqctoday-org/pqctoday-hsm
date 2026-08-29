@@ -704,6 +704,15 @@ pub const CKF_RNG: u32 = 0x0000_0001;
 pub const CKF_WRITE_PROTECTED: u32 = 0x0000_0002;
 pub const CKF_LOGIN_REQUIRED: u32 = 0x0000_0004;
 pub const CKF_USER_PIN_INITIALIZED: u32 = 0x0000_0008;
+// PKCS#11 v3.2 pkcs11t.h — "If it is set, that means that *every* time the
+// state of cryptographic operations of a session is successfully saved,
+// all keys needed to continue those operations are stored in the state."
+// Unconditionally true for a software-only token: no operation state is
+// ever backed by external/removable key material this engine could fail
+// to persist. The C++ engine (Token::getTokenInfo) sets this
+// unconditionally for the same reason — this keeps the two engines at
+// parity.
+pub const CKF_RESTORE_KEY_NOT_NEEDED: u32 = 0x0000_0020;
 pub const CKF_TOKEN_INITIALIZED: u32 = 0x0000_0400;
 /// PKCS#11 v3.2 §4.2 — `CK_UNAVAILABLE_INFORMATION` is `(~0UL)`, i.e.
 /// 0xFFFF_FFFF on this 32-bit (wasm) CK_ULONG ABI. Used by C_GetTokenInfo

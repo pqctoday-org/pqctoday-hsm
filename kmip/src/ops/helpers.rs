@@ -1523,10 +1523,27 @@ pub fn unwrap_key_value(
 /// invalidating a handle another test is mid-use with). This ONE shared
 /// lock, used by every such module (`certify.rs`, `spki_verify.rs`, …),
 /// is what actually prevents that.
+///
+/// Also resets the engine's global state on every acquisition, mirroring
+/// `native::test_lock::acquire()` in the `rust` crate's own test suite
+/// exactly (`softhsmrustv3::reset_all_engine_state_for_test`, exposed
+/// cross-crate via the dev-only `test-support` feature — see
+/// `Cargo.toml`). Found necessary, not theoretical: kmip's fixtures
+/// share slot 0 across two different PIN literal conventions
+/// ("so"/"user" vs "so-pin"/"user-pin"), and used to get away with it
+/// only because production `C_Finalize` quietly wiped `TOKEN_STORE` —
+/// once that non-conformance was fixed, whichever PIN convention
+/// initialized slot 0 first made every later test using the other
+/// convention fail `CKR_PIN_INCORRECT` (PKCS#11 v3.2 §5.5.7: re-
+/// initializing an already-initialized token requires the *existing* SO
+/// PIN). Deterministic per test-binary scheduling, not a true data race
+/// — which is why `--test-threads=1` "fixed" it by accident.
 #[cfg(test)]
 pub(crate) fn engine_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    let guard = LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner());
+    softhsmrustv3::reset_all_engine_state_for_test();
+    guard
 }
 
 #[cfg(test)]
@@ -1966,7 +1983,7 @@ mod tests {
         let ring = Arc::new(RingSink::new(64));
         let sink: Arc<dyn AuditSink> = ring.clone();
         let engine = Engine::with_global_sink(sink.clone());
-        engine.activate(load_from_str(
+        engine.replace_all(load_from_str(
             "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n",
             std::path::Path::new("<t>"),
         ).unwrap()).unwrap();

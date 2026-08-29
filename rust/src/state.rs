@@ -192,6 +192,15 @@ pub fn pad_label_32(label: &str) -> [u8; 32] {
     out
 }
 
+/// Is `slot`'s token already initialized? Exposed for
+/// `native::session::bootstrap_persistent_token`, which must NOT call
+/// `C_InitToken` on a token a durable store just rehydrated — §5.5.7
+/// destroys every destroyable object on init, which would silently wipe
+/// everything the store just loaded back in.
+pub fn is_token_initialized(slot: u32) -> bool {
+    TOKEN_STORE.with(|ts| ts.borrow().get(&slot).map(|t| t.initialized).unwrap_or(false))
+}
+
 pub fn init_token_store() {
     let empty = TOKEN_STORE.with(|ts| ts.borrow().is_empty());
     if empty {
@@ -233,33 +242,65 @@ pub fn ensure_slot(slot_id: u32) {
     }
 }
 
+/// Profiles v3.2 §5 — the profile IDs this build genuinely satisfies every
+/// numbered condition of, computed rather than hard-coded so a future build
+/// that drops a required entry point stops claiming the profile that needs
+/// it (same discipline as the C++ engine's `computeSupportedProfiles`,
+/// SoftHSM_objects.cpp). This crate has no `#ifdef`-style conditional
+/// compilation over its PKCS#11 C-ABI surface the way the C++ build does
+/// (every `_C_*` export below is always present), so "computed" here means
+/// "audited against every condition in Profiles v3.2 §5.x", not "probed via
+/// a null function pointer" — the audit trail lives in
+/// rust/RUST_P11_V32_CONFORMANCE_REPORT.md; keep this list in lockstep with
+/// it, never ahead of it.
+///
+/// - Baseline (§5.1): the original claim, unconditional.
+/// - Extended (§5.3): C_GetMechanismList/Info + Login/LoginUser/Logout are
+///   real (never stubs); RSA_PKCS_KEY_PAIR_GEN/RSA_PKCS now advertise the
+///   full 512-16384 range with CKF_WRAP|CKF_UNWRAP genuinely backed by
+///   C_WrapKey/C_UnwrapKey (WS-11 Phase 1, closing the EXT-M-1-32 gap).
+/// - Authentication Token (§5.4): CKO_PRIVATE_KEY/CKO_PUBLIC_KEY objects,
+///   Login/LoginUser/Logout, and C_SignInit+C_Sign are all real.
+/// - Public Certificates Token (§5.5): CKO_CERTIFICATE creation (X.509
+///   only) enforces §4.6's footnotes (CKA_CERTIFICATE_TYPE/CKA_SUBJECT
+///   required, CKA_VALUE-or-CKA_URL+hashes), and can_access_object already
+///   makes non-private objects findable pre-login (cond. 8a).
+fn supported_profiles() -> [u32; 4] {
+    [
+        CKP_BASELINE_PROVIDER,
+        CKP_EXTENDED_PROVIDER,
+        CKP_AUTHENTICATION_TOKEN,
+        CKP_PUBLIC_CERTIFICATES_TOKEN,
+    ]
+}
+
 /// PKCS#11 Profiles v3.2 §3 — materialize this token's built-in `CKO_PROFILE`
 /// object(s) at slot creation: token-resident, public (no CKA_PRIVATE, so
 /// visible to C_FindObjects without login per can_access_object), and
 /// read-only (CKA_MODIFIABLE/COPYABLE/DESTROYABLE all FALSE — apply_object_defaults
-/// would otherwise default them to TRUE). Baseline Provider is the only
-/// profile this engine currently claims conformance to; add further profile
-/// objects here only after auditing every Profiles v3.2 requirement for
-/// that profile (see rust/RUST_P11_V32_CONFORMANCE_REPORT.md).
+/// would otherwise default them to TRUE). One object per `supported_profiles()`
+/// entry — WS-11 Phase 1 widened this from Baseline-only after auditing
+/// Extended/Authentication/Public-Certificates against every condition in
+/// Profiles v3.2 §5.3/§5.4/§5.5 (see rust/RUST_P11_V32_CONFORMANCE_REPORT.md).
 fn init_profile_objects(slot_id: u32) {
-    let mut attrs: Attributes = HashMap::new();
-    // store_ulong, NOT u32::to_le_bytes. §5.7.7 makes C_FindObjects "an exact
-    // byte-for-byte match with all attributes in the template", so a four-byte
-    // CKA_CLASS cannot match the eight-byte CK_OBJECT_CLASS an LP64 caller
-    // supplies — which is why the differential harness saw Rust publish ZERO
-    // findable CKO_PROFILE objects while C++ published two. The object existed
-    // the whole time and was simply unfindable at native width; C_InitToken
-    // never destroyed it (CKA_DESTROYABLE=FALSE already protects it, and
-    // destroy_destroyable_objects_on_slot honours that). Every other object in
-    // this engine goes through store_ulong; this one was the outlier.
-    store_ulong(&mut attrs, CKA_CLASS, CKO_PROFILE);
-    store_ulong(&mut attrs, CKA_PROFILE_ID, CKP_BASELINE_PROVIDER);
-    attrs.insert(CKA_TOKEN, vec![1]);
-    attrs.insert(CKA_PRIV_SLOT_ID, slot_id.to_le_bytes().to_vec());
-    store_bool(&mut attrs, CKA_MODIFIABLE, false);
-    store_bool(&mut attrs, CKA_COPYABLE, false);
-    store_bool(&mut attrs, CKA_DESTROYABLE, false);
-    allocate_handle(attrs);
+    for profile_id in supported_profiles() {
+        let mut attrs: Attributes = HashMap::new();
+        // store_ulong, NOT u32::to_le_bytes. §5.7.7 makes C_FindObjects "an
+        // exact byte-for-byte match with all attributes in the template", so
+        // a four-byte CKA_CLASS cannot match the eight-byte CK_OBJECT_CLASS
+        // an LP64 caller supplies — which is why the differential harness
+        // once saw Rust publish ZERO findable CKO_PROFILE objects while C++
+        // published two. Every other object in this engine goes through
+        // store_ulong; this one was the outlier, now fixed.
+        store_ulong(&mut attrs, CKA_CLASS, CKO_PROFILE);
+        store_ulong(&mut attrs, CKA_PROFILE_ID, profile_id);
+        attrs.insert(CKA_TOKEN, vec![1]);
+        attrs.insert(CKA_PRIV_SLOT_ID, slot_id.to_le_bytes().to_vec());
+        store_bool(&mut attrs, CKA_MODIFIABLE, false);
+        store_bool(&mut attrs, CKA_COPYABLE, false);
+        store_bool(&mut attrs, CKA_DESTROYABLE, false);
+        allocate_handle(attrs);
+    }
 }
 
 pub struct EncryptCtx {
@@ -477,9 +518,14 @@ pub fn user_pin_initialized(token: &TokenState) -> bool {
 ///   until C_InitPIN + C_Login). The flag matches that enforcement.
 /// * `CKF_TOKEN_INITIALIZED` — from [`token_initialized`].
 /// * `CKF_USER_PIN_INITIALIZED` — from [`user_pin_initialized`].
+/// * `CKF_RESTORE_KEY_NOT_NEEDED` — always: a software-only token never
+///   backs a saved cryptographic-operation state with external/removable
+///   key material it could fail to persist (WS-11, 2026-08-28 — the C++
+///   engine (`Token::getTokenInfo`) has always set this unconditionally;
+///   Rust never did, a real parity gap this closes).
 /// * `CKF_WRITE_PROTECTED` — never set: the token is writable.
 pub fn token_info_flags(token: &TokenState) -> u32 {
-    let mut flags = CKF_RNG | CKF_LOGIN_REQUIRED;
+    let mut flags = CKF_RNG | CKF_LOGIN_REQUIRED | CKF_RESTORE_KEY_NOT_NEEDED;
     if token_initialized(token) {
         flags |= CKF_TOKEN_INITIALIZED;
     }
@@ -1224,9 +1270,23 @@ pub fn allocate_handle(mut attrs: Attributes) -> u32 {
         Ok(prev) => prev,
         Err(_) => return 0,
     };
+    // Snapshot BEFORE the move into OBJECTS below — only when a durable
+    // store is actually configured AND this is a token object. Checking
+    // `crate::store::is_persistent()` FIRST matters: in memory-only mode
+    // (the default) this is a cheap `false` and the `Attributes` clone
+    // below never happens at all, rather than happening and then being
+    // thrown away inside `persist_object`.
+    let persist = if crate::store::is_persistent() && read_bool_attr(&attrs, CKA_TOKEN) {
+        Some((object_slot_of(&attrs), attrs.clone()))
+    } else {
+        None
+    };
     OBJECTS.with(|objs| {
         objs.borrow_mut().insert(current, attrs);
     });
+    if let Some((slot, snapshot)) = persist {
+        crate::store::persist_object(slot, current, &snapshot);
+    }
     current
 }
 
@@ -1374,16 +1434,105 @@ pub(crate) fn get_object_attr_u64(handle: u32, attr_type: u32) -> Option<u64> {
 }
 
 /// Overwrite an attribute on an existing object in the store. Returns true on success.
+///
+/// Thin wrapper over [`set_object_attrs_bytes_batch`] — every caller that
+/// needs to change more than one attribute as a single logical state
+/// transition (HSS/LMS and XMSS leaf-advance-and-persist) must call the
+/// batch form directly instead of this one multiple times in a row: two
+/// separate calls here are two separate persisted writes, and a crash
+/// between them can leave disk and memory disagreeing about which leaf was
+/// last used — exactly the one-time-signature reuse hazard stateful-key
+/// code exists to prevent.
 pub(crate) fn set_object_attr_bytes(handle: u32, attr_type: u32, value: Vec<u8>) -> bool {
-    OBJECTS.with(|objs| {
+    set_object_attrs_bytes_batch(handle, &[(attr_type, value)])
+}
+
+/// Apply every `(attr_type, value)` change to `handle` under ONE `OBJECTS`
+/// lock acquisition, then — if the object is a token object and a durable
+/// store is configured — persist the object's resulting full attribute set
+/// in ONE write. This is the coalescing point for any mutation that is
+/// really a single logical state transition split across multiple stored
+/// fields (see [`set_object_attr_bytes`]'s doc).
+pub(crate) fn set_object_attrs_bytes_batch(handle: u32, changes: &[(u32, Vec<u8>)]) -> bool {
+    // Checked BEFORE the lock, not inside it: in memory-only mode (the
+    // default) this is a cheap `false` and the `Attributes` clone below —
+    // one per attribute mutation, including every HBS/XMSS signing
+    // operation on a stateful key — never happens at all.
+    let persistent = crate::store::is_persistent();
+    let outcome: Option<Option<(u32, Attributes)>> = OBJECTS.with(|objs| {
         let mut store = objs.borrow_mut();
-        if let Some(attrs) = store.get_mut(&handle) {
-            attrs.insert(attr_type, value);
-            true
-        } else {
-            false
+        match store.get_mut(&handle) {
+            Some(attrs) => {
+                for (ty, val) in changes {
+                    attrs.insert(*ty, val.clone());
+                }
+                Some(if persistent && read_bool_attr(attrs, CKA_TOKEN) {
+                    Some((object_slot_of(attrs), attrs.clone()))
+                } else {
+                    None
+                })
+            }
+            None => None,
         }
-    })
+    });
+    match outcome {
+        None => false,
+        Some(persist) => {
+            if let Some((slot, attrs)) = persist {
+                crate::store::persist_object(slot, handle, &attrs);
+            }
+            true
+        }
+    }
+}
+
+/// Has `handle` already been loaded into `OBJECTS`? Used by rehydration to
+/// avoid re-inserting an object a second login in the same process already
+/// loaded.
+pub fn object_exists(handle: u32) -> bool {
+    OBJECTS.with(|objs| objs.borrow().contains_key(&handle))
+}
+
+/// Insert a rehydrated object directly, bypassing [`allocate_handle`]'s
+/// fresh-`CKA_UNIQUE_ID`/handle assignment — the object already has both
+/// from its previous life. Bumps `NEXT_HANDLE` past this handle so a
+/// subsequently created object can never collide with it.
+pub fn rehydrate_insert(handle: u32, attrs: Attributes) {
+    OBJECTS.with(|objs| {
+        objs.borrow_mut().insert(handle, attrs);
+    });
+    NEXT_HANDLE.fetch_max(handle.saturating_add(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Restore a slot's durable token metadata (everything [`TokenState`] holds
+/// except `login_state`, which never persists — PKCS#11 §5.6, sessions do
+/// not survive a restart) from a [`crate::store::PersistedToken`]. Also
+/// bumps `NEXT_HANDLE`/`UNIQUE_ID_COUNTER` past whatever this token had
+/// reached, so newly created objects this process life can't collide with
+/// rehydrated ones.
+pub fn rehydrate_token(slot: u32, pt: &crate::store::PersistedToken) {
+    TOKEN_STORE.with(|ts| {
+        let mut store = ts.borrow_mut();
+        let entry = store.entry(slot).or_insert_with(|| TokenState {
+            slot_id: slot,
+            initialized: false,
+            label: [0x20u8; 32],
+            login_state: LoginState::Public,
+            so_pin_salt: [0u8; 16],
+            so_pin_hash: [0u8; 32],
+            user_pin_salt: None,
+            user_pin_hash: None,
+        });
+        entry.initialized = pt.initialized;
+        entry.label = pt.label;
+        entry.so_pin_salt = pt.so_pin_salt;
+        entry.so_pin_hash = pt.so_pin_hash;
+        entry.user_pin_salt = pt.user_pin_salt;
+        entry.user_pin_hash = pt.user_pin_hash;
+        entry.login_state = LoginState::Public;
+    });
+    NEXT_HANDLE.fetch_max(pt.next_handle, std::sync::atomic::Ordering::Relaxed);
+    UNIQUE_ID_COUNTER.fetch_max(pt.unique_id_counter, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Store parameter set as a 4-byte LE value in the attributes map.

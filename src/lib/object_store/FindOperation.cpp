@@ -48,7 +48,7 @@ void FindOperation::recycle()
     delete this;
 }
 
-void FindOperation::setHandles(const std::set<CK_OBJECT_HANDLE> &handles)
+void FindOperation::setHandles(const std::vector<CK_OBJECT_HANDLE> &handles)
 {
     _handles = handles;
 }
@@ -56,7 +56,7 @@ void FindOperation::setHandles(const std::set<CK_OBJECT_HANDLE> &handles)
 CK_ULONG FindOperation::retrieveHandles(CK_OBJECT_HANDLE_PTR phObject, CK_ULONG ulCount)
 {
     CK_ULONG ulReturn = 0;
-    std::set<CK_OBJECT_HANDLE>::const_iterator it;
+    std::vector<CK_OBJECT_HANDLE>::const_iterator it;
     for (it=_handles.begin(); it != _handles.end(); ++it) {
         if (ulReturn >= ulCount) break;
 
@@ -67,14 +67,11 @@ CK_ULONG FindOperation::retrieveHandles(CK_OBJECT_HANDLE_PTR phObject, CK_ULONG 
 
 CK_ULONG FindOperation::eraseHandles(CK_ULONG ulIndex, CK_ULONG ulCount)
 {
-    std::set<CK_OBJECT_HANDLE>::const_iterator it;
-    for (it=_handles.begin(); it != _handles.end() && ulIndex != 0; --ulIndex) {
-        ++it;
-    }
+    if (ulIndex >= _handles.size()) return 0;
 
-    CK_ULONG ulReturn = 0;
-    for ( ; it != _handles.end() && ulReturn < ulCount; ++ulReturn) {
-        _handles.erase(it++);
-    }
+    std::vector<CK_OBJECT_HANDLE>::iterator eraseBegin = _handles.begin() + ulIndex;
+    CK_ULONG available = (CK_ULONG)(_handles.size() - ulIndex);
+    CK_ULONG ulReturn = (ulCount < available) ? ulCount : available;
+    _handles.erase(eraseBegin, eraseBegin + ulReturn);
     return ulReturn;
 }

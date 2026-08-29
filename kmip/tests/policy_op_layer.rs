@@ -45,7 +45,7 @@ fn deps_for(policy_file: &str) -> Deps {
     let sink: Arc<dyn AuditSink> = ring.clone();
     let engine = Engine::with_global_sink(sink.clone());
     engine
-        .activate(load_from_str(&yaml, &path).unwrap_or_else(|e| panic!("{policy_file}: {e}")))
+        .replace_all(load_from_str(&yaml, &path).unwrap_or_else(|e| panic!("{policy_file}: {e}")))
         .unwrap_or_else(|e| panic!("activate {policy_file}: {e:?}"));
     Deps::new(engine, Arc::new(MemoryStore::new()), sink, DepsConfig::default())
 }

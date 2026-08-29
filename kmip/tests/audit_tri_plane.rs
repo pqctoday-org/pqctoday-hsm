@@ -57,7 +57,7 @@ fn one_request_three_planes_one_correlation_id() {
     let (ring, sink) = build_sink_pair();
     let engine = Engine::with_global_sink(sink.clone());
     engine
-        .activate(load_from_str(PQC_POLICY, std::path::Path::new("<test>")).unwrap())
+        .replace_all(load_from_str(PQC_POLICY, std::path::Path::new("<test>")).unwrap())
         .unwrap();
 
     let correlation_id = "req-abc-123";
@@ -170,7 +170,7 @@ fn composite_sink_writes_ring_plus_jsonl() {
 
     let engine = Engine::with_global_sink(composite);
     engine
-        .activate(load_from_str(PQC_POLICY, std::path::Path::new("<test>")).unwrap())
+        .replace_all(load_from_str(PQC_POLICY, std::path::Path::new("<test>")).unwrap())
         .unwrap();
 
     let attrs = HashMap::new();
@@ -195,7 +195,7 @@ fn hub_ui_can_filter_per_plane() {
     let (ring, sink) = build_sink_pair();
     let engine = Engine::with_global_sink(sink.clone());
     engine
-        .activate(load_from_str(PQC_POLICY, std::path::Path::new("<test>")).unwrap())
+        .replace_all(load_from_str(PQC_POLICY, std::path::Path::new("<test>")).unwrap())
         .unwrap();
 
     let attrs = HashMap::new();
@@ -248,6 +248,7 @@ fn event_payloads_serialise_to_committed_wire_format() {
             outcome: pqctoday_kmip::auditlog::DecisionSummary::Allow {
                 algorithm_override: Some("ML-DSA-87".into()),
                 substituted_by_rule: Some(2),
+                cp_override: None,
             },
             policy_fingerprint: "sha256:abc".into(),
         },

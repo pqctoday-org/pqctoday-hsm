@@ -49,6 +49,23 @@
 #include <map>
 #include <list>
 #include <stdio.h>
+#include <chrono>
+
+// WS-11 (2026-08-28) — see CKA_OS_CREATIONSEQ in OSAttributes.h. Encodes a
+// steady_clock nanosecond count as 8 big-endian bytes so later lexicographic
+// or integer comparison both agree on ordering.
+static ByteString creationSeqNow()
+{
+	int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+	unsigned char bytes[8];
+	for (int i = 7; i >= 0; --i)
+	{
+		bytes[i] = (unsigned char)(ns & 0xFF);
+		ns >>= 8;
+	}
+	return ByteString(bytes, 8);
+}
 
 // Constructor
 OSToken::OSToken(const std::string inTokenPath, int inUmask)
@@ -360,6 +377,12 @@ OSObject* OSToken::createObject()
 		delete newObject;
 
 		return NULL;
+	}
+
+	// WS-11 (2026-08-28) — see CKA_OS_CREATIONSEQ in OSAttributes.h.
+	if (!newObject->setAttribute(CKA_OS_CREATIONSEQ, OSAttribute(creationSeqNow())))
+	{
+		ERROR_MSG("Failed to stamp creation sequence on new object %s", objectPath.c_str());
 	}
 
 	// Now add it to the set of objects

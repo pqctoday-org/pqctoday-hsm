@@ -1,8 +1,8 @@
 # PKCS#11 v3.2 Compliance Report
 
-**Engine:** `./src/lib/libsofthsmv3.so`
-**Engine commit:** `457b48f45e9d58b3884df5a333628c011104ebd6`
-**Date:** 2026-08-27 04:59:55 UTC
+**Engine:** `./build_union/src/lib/libsofthsmv3.dylib`
+**Engine commit:** `94720ea92f6f705709196550779b90fc61deb006`
+**Date:** 2026-08-28 17:25:30 CDT
 
 ## Summary
 - **Total PASS:** 779
@@ -221,7 +221,7 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 
 | Test | Status | Details |
 |---|---|---|
-| Child_survived_and_reported | ✅ PASS | child pid 564615 exited status 0 |
+| Child_survived_and_reported | ✅ PASS | child pid 36411 exited status 0 |
 | Child_session_handle_resolves | ✅ PASS | C_GetSessionInfo RV=0 |
 | Child_login_state_preserved | ✅ PASS | child state=3 parent state=3 (CKS_RW_USER_FUNCTIONS=3) |
 | Child_session_object_readable | ✅ PASS | RV=0 len=8 |
@@ -229,10 +229,10 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Child_inherits_active_encryption_state | ✅ PASS | parent init RV=0 update RV=0 child final RV=0 len=16 |
 | Parent_encryption_state_independent | ✅ PASS | parent C_EncryptFinal after child's RV=0 |
 | Child_writes_do_not_reach_parent | ✅ PASS | child C_SetAttributeValue RV=0; parent label len=11 intact=1 |
-| Sibling_children_RNG_diverge | ✅ PASS | 8 sibling pairs, all distinct=1 childA=50C4DCCC90080221… childB=2C1B57849A9670C9… (identical output would repeat ECDSA nonces) |
+| Sibling_children_RNG_diverge | ✅ PASS | 8 sibling pairs, all distinct=1 childA=440CDFB05051AE3E… childB=5EB7D1B6D35EAF82… (identical output would repeat ECDSA nonces) |
 | Fork_safe_flag_declared_in_interface_list | ✅ PASS | 3 interfaces, CKF_INTERFACE_FORK_SAFE declared=1 |
 | Fork_safe_interface_retrievable | ✅ PASS | C_GetInterface(flags=CKF_INTERFACE_FORK_SAFE) RV=0 |
-| Parent_and_child_RNG_diverge | ✅ PASS | child=8D7AB6890CC69FCB… parent=D9F9CDE599064ED7… preFork=69D8AF80A224E1D0… |
+| Parent_and_child_RNG_diverge | ✅ PASS | child=12D440ED8DD563FA… parent=0FFA6EC6A80C9204… preFork=A103BB762EF12FDD… |
 
 ### G-DA-X
 
@@ -756,10 +756,10 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 
 | Test | Status | Details |
 |---|---|---|
-| AES_Generate_KCV_Present | ✅ PASS | 3 bytes: 048ACF |
-| AES_Generate_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | HSM=048ACF == oracle=048ACF |
-| AES_Unwrap_KCV_Present | ✅ PASS | 3 bytes: B5518C |
-| AES_Unwrap_KCV_Equals_Original | ✅ PASS | original=B5518C unwrapped=B5518C |
+| AES_Generate_KCV_Present | ✅ PASS | 3 bytes: 8F24C4 |
+| AES_Generate_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | HSM=8F24C4 == oracle=8F24C4 |
+| AES_Unwrap_KCV_Present | ✅ PASS | 3 bytes: 08AEF6 |
+| AES_Unwrap_KCV_Equals_Original | ✅ PASS | original=08AEF6 unwrapped=08AEF6 |
 | AES_Unwrap_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | matches AES-ECB(zero block)[0:3] oracle |
 | HKDF_Derive_KCV_Present | ✅ PASS | 3 bytes: BEEF61 |
 | HKDF_Derive_KCV_Equals_OracleSha1 | ✅ PASS | HSM=BEEF61 == oracle=BEEF61 |
@@ -801,16 +801,16 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Test | Status | Details |
 |---|---|---|
 | Encap_KCV_present | ✅ PASS | got 3 bytes (§4.11 SHALL be supplied) |
-| Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=55E744 oracle=55E744 |
+| Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=4A4BDB oracle=4A4BDB |
 | Decap_KCV_present | ✅ PASS | got 3 bytes |
-| Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=55E744 oracle=55E744 |
-| Encap_and_Decap_KCV_agree | ✅ PASS | encap=55E744 decap=55E744 |
+| Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=4A4BDB oracle=4A4BDB |
+| Encap_and_Decap_KCV_agree | ✅ PASS | encap=4A4BDB decap=4A4BDB |
 | Decap_correct_caller_KCV_accepted | ✅ PASS | RV=0 (§4.11: a matching supplied value is legal) |
 | Decap_wrong_caller_KCV_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | Decap_zero_length_KCV_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
 | ECDH_Encap_KCV_present | ✅ PASS | got 3 bytes |
-| ECDH_Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=273C49 oracle=273C49 |
-| ECDH_Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=273C49 oracle=273C49 |
+| ECDH_Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=0872C3 oracle=0872C3 |
+| ECDH_Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=0872C3 oracle=0872C3 |
 
 ### KEMNeg
 
@@ -858,40 +858,40 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 
 | Test | Status | Details |
 |---|---|---|
-| GenerateKey_AES_KCV_matches_oracle | ✅ PASS | engine=9FDEBD oracle=9FDEBD |
+| GenerateKey_AES_KCV_matches_oracle | ✅ PASS | engine=C848E6 oracle=C848E6 |
 | GenerateKey_AES_correct_value_accepted | ⚠️ SKIP | output is freshly random each call, so the caller cannot know the check value in advance |
 | GenerateKey_AES_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | GenerateKey_AES_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| GenerateKey_Generic_KCV_matches_oracle | ✅ PASS | engine=988E27 oracle=988E27 |
+| GenerateKey_Generic_KCV_matches_oracle | ✅ PASS | engine=EDA260 oracle=EDA260 |
 | GenerateKey_Generic_correct_value_accepted | ⚠️ SKIP | output is freshly random each call, so the caller cannot know the check value in advance |
 | GenerateKey_Generic_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | GenerateKey_Generic_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| UnwrapKey_AES_KCV_matches_oracle | ✅ PASS | engine=BC092F oracle=BC092F |
-| UnwrapKey_AES_correct_value_accepted | ✅ PASS | RV=0 readback=BC092F |
+| UnwrapKey_AES_KCV_matches_oracle | ✅ PASS | engine=54AAB0 oracle=54AAB0 |
+| UnwrapKey_AES_correct_value_accepted | ✅ PASS | RV=0 readback=54AAB0 |
 | UnwrapKey_AES_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | UnwrapKey_AES_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_HKDF_KCV_matches_oracle | ✅ PASS | engine=F9C7F2 oracle=F9C7F2 |
-| DeriveKey_HKDF_correct_value_accepted | ✅ PASS | RV=0 readback=F9C7F2 |
+| DeriveKey_HKDF_KCV_matches_oracle | ✅ PASS | engine=E80311 oracle=E80311 |
+| DeriveKey_HKDF_correct_value_accepted | ✅ PASS | RV=0 readback=E80311 |
 | DeriveKey_HKDF_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_HKDF_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_ECDH_KCV_matches_oracle | ✅ PASS | engine=C6D91E oracle=C6D91E |
-| DeriveKey_ECDH_correct_value_accepted | ✅ PASS | RV=0 readback=C6D91E |
+| DeriveKey_ECDH_KCV_matches_oracle | ✅ PASS | engine=216ECE oracle=216ECE |
+| DeriveKey_ECDH_correct_value_accepted | ✅ PASS | RV=0 readback=216ECE |
 | DeriveKey_ECDH_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_ECDH_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
 | DeriveKey_PBKD2_KCV_matches_oracle | ✅ PASS | engine=8422AA oracle=8422AA |
 | DeriveKey_PBKD2_correct_value_accepted | ✅ PASS | RV=0 readback=8422AA |
 | DeriveKey_PBKD2_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_PBKD2_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_SP800108_KCV_matches_oracle | ✅ PASS | engine=0DF6F8 oracle=0DF6F8 |
-| DeriveKey_SP800108_correct_value_accepted | ✅ PASS | RV=0 readback=0DF6F8 |
+| DeriveKey_SP800108_KCV_matches_oracle | ✅ PASS | engine=80C8DF oracle=80C8DF |
+| DeriveKey_SP800108_correct_value_accepted | ✅ PASS | RV=0 readback=80C8DF |
 | DeriveKey_SP800108_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_SP800108_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_Concat_KCV_matches_oracle | ⚠️ SKIP | CKA_VALUE unreadable (RV=17), engine KCV=28B59C |
-| DeriveKey_Concat_correct_value_accepted | ✅ PASS | RV=0 readback=28B59C |
+| DeriveKey_Concat_KCV_matches_oracle | ⚠️ SKIP | CKA_VALUE unreadable (RV=17), engine KCV=FA7EE3 |
+| DeriveKey_Concat_correct_value_accepted | ✅ PASS | RV=0 readback=FA7EE3 |
 | DeriveKey_Concat_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_Concat_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_X25519_KCV_matches_oracle | ✅ PASS | engine=B0EACF oracle=B0EACF |
-| DeriveKey_X25519_correct_value_accepted | ✅ PASS | RV=0 readback=B0EACF |
+| DeriveKey_X25519_KCV_matches_oracle | ✅ PASS | engine=F5B2B5 oracle=F5B2B5 |
+| DeriveKey_X25519_correct_value_accepted | ✅ PASS | RV=0 readback=F5B2B5 |
 | DeriveKey_X25519_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_X25519_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
 | SetAttributeValue_correct_accepted | ✅ PASS | RV=0 |
@@ -1012,14 +1012,14 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Test | Status | Details |
 |---|---|---|
 | ML_DSA_44_CKA_VALUE_is_raw_FIPS_length | ✅ PASS | len=2560 (want 2560) |
-| ML_DSA_44_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0x79 len=2560 |
+| ML_DSA_44_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0xdd len=2560 |
 | ML_DSA_44_CKA_SEED_contributed | ✅ PASS | RV=0 len=32 (want 32) |
 | ML_DSA_44_sign_verify_round_trip | ✅ PASS | sign RV=0 verify RV=0 |
 | ML_KEM_768_CKA_VALUE_is_raw_FIPS_length | ✅ PASS | len=2400 (want 2400) |
-| ML_KEM_768_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0x17 len=2400 |
+| ML_KEM_768_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0x30 len=2400 |
 | ML_KEM_768_CKA_SEED_contributed | ✅ PASS | RV=0 len=64 (want 64) |
 | SLH_DSA_CKA_VALUE_is_raw_FIPS_length | ✅ PASS | len=64 (want 64) |
-| SLH_DSA_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0xa8 len=64 |
+| SLH_DSA_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0x07 len=64 |
 | SLH_DSA_CKA_SEED_absent | ✅ PASS | RV=0 len=0 |
 | SLH_DSA_sign_verify_round_trip | ✅ PASS | sign RV=0 verify RV=0 |
 
@@ -1027,9 +1027,9 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 
 | Test | Status | Details |
 |---|---|---|
-| Token_publishes_a_CKO_PROFILE_object | ✅ PASS | found 2 (Profiles v3.2 §5.1 cond. 4 requires at least one) |
-| CKP_BASELINE_PROVIDER_present | ✅ PASS | profile ids: [ 1 2 ] |
-| No_profile_object_carries_CKP_INVALID_ID | ✅ PASS | profile ids: [ 1 2 ] |
+| Token_publishes_a_CKO_PROFILE_object | ✅ PASS | found 4 (Profiles v3.2 §5.1 cond. 4 requires at least one) |
+| CKP_BASELINE_PROVIDER_present | ✅ PASS | profile ids: [ 1 2 3 4 ] |
+| No_profile_object_carries_CKP_INVALID_ID | ✅ PASS | profile ids: [ 1 2 3 4 ] |
 | Extended_provider_claim_recorded | ✅ PASS | CKP_EXTENDED_PROVIDER claimed; C_LoginUser exported (§5.3 satisfiable) |
 | Application_cannot_create_CKO_PROFILE | ✅ PASS | RV=16 (want CKR_ATTRIBUTE_READ_ONLY=0x10) |
 | CKA_PROFILE_ID_absent_on_ordinary_object | ✅ PASS | RV=18 value=3735928559 (want CKR_ATTRIBUTE_TYPE_INVALID=0x12; 0 is CKP_INVALID_ID) |
