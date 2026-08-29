@@ -572,13 +572,22 @@ export function generateEdDSAKeyPair(M, hSession, curve = 'Ed25519') {
 
 // ── Crypto Operations ───────────────────────────────────────────────────────
 
-/** AES-GCM or AES-CBC decrypt */
+/**
+ * AES-GCM or AES-CBC decrypt. mode: 'gcm' | 'cbc' (CKM_AES_CBC_PAD) |
+ * 'cbc-raw' (CKM_AES_CBC, no PKCS#7 — what NIST's ACVP-AES-CBC KATs test;
+ * see hub softhsm.ts's hsm_aesDecrypt for the same distinction and why
+ * 'cbc' isn't repurposed).
+ */
 export function aesDecrypt(M, hSession, handle, ct, iv, mode = 'gcm') {
   let mechPtr, extraPtrs = []
   if (mode === 'gcm') {
     const gcm = buildGCMParams(M, iv)
     mechPtr = buildMech(M, CK.CKM_AES_GCM, gcm.ptr, gcm.size)
     extraPtrs = [gcm.ptr, gcm.ivPtr]
+  } else if (mode === 'cbc-raw') {
+    const ivPtr = writeBytes(M, iv)
+    mechPtr = buildMech(M, CK.CKM_AES_CBC, ivPtr, iv.length)
+    extraPtrs = [ivPtr]
   } else {
     // CBC — IV is the 16-byte param
     const ivPtr = writeBytes(M, iv)
@@ -632,6 +641,29 @@ export function hmacVerify(M, hSession, handle, msg, mac, mechType = CK.CKM_SHA2
   M._free(msgPtr)
   M._free(macPtr)
   M._free(mechPtr)
+  return rv === CK.CKR_OK
+}
+
+/**
+ * Verify a truncated HMAC via CKM_*_HMAC_GENERAL (CK_MAC_GENERAL_PARAMS —
+ * a single CK_ULONG giving the desired MAC length in bytes). NIST's
+ * ACVP-HMAC reference vectors test SP 800-107 truncation lengths shorter
+ * than the full digest, which the exact-length-only CKM_*_HMAC can't
+ * exercise — mirrors the hub's hsm_hmacVerifyGeneral. mechType MUST be
+ * the _GENERAL variant; mac.length supplies the truncation length.
+ */
+export function hmacVerifyGeneral(M, hSession, handle, msg, mac, mechType) {
+  const paramPtr = allocUlong(M)
+  M.setValue(paramPtr, mac.length, 'i32')
+  const mechPtr = buildMech(M, mechType, paramPtr, 4)
+  check('C_VerifyInit(HMAC_GENERAL)', M._C_VerifyInit(hSession, mechPtr, handle))
+  const msgPtr = writeBytes(M, msg)
+  const macPtr = writeBytes(M, mac)
+  const rv = M._C_Verify(hSession, msgPtr, msg.length, macPtr, mac.length)
+  M._free(msgPtr)
+  M._free(macPtr)
+  M._free(mechPtr)
+  freePtr(M, paramPtr)
   return rv === CK.CKR_OK
 }
 

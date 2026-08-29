@@ -164,3 +164,705 @@ service Pkcs11Remote {
   rpc Decapsulate(DecapsulateRequest) returns (DecapsulateResponse);
   rpc GetSelfSignedCertificate(GetSelfSignedCertificateRequest) returns (GetSelfSignedCertificateResponse);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pkcs11V32 — the 1:1 C_* mirror service (docs/remoting-pkcs11-v32-full-
+// coverage-plan-2026-08-26.md). Design rules, each deliberate:
+//
+//   1. `ck_rv` is a FIELD on every response (0 = CKR_OK), never a transport
+//      error. gRPC Status / HTTP status are reserved for transport failures.
+//      This mirrors the C ABI exactly and makes exact-CKR parity assertions
+//      trivial on both wires — no string-parsing of Status messages.
+//   2. Raw CK codepoints on the wire: mechanisms as uint64 CKM_* + parameter
+//      bytes, attributes as uint64 CKA_*, return values as CKR_* verbatim.
+//      No enums to keep in sync, no per-algorithm proto changes.
+//   3. Unary-only is PRESERVED: multipart Init/Update/Final are each their
+//      own unary RPC; operation state lives server-side keyed by session
+//      handle, exactly where the engine already keeps it.
+//   4. The legacy Pkcs11Remote service above is FROZEN (bench-harness and
+//      JavaJCE-remote compatibility); this service is additive.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CK_MECHANISM on the wire: CKM_* codepoint + raw parameter bytes (empty =
+// no parameter / NULL pParameter). The server rebuilds the native-width
+// struct; parameter STRUCTS (GCM params etc.) arrive as their native-layout
+// bytes in later workstreams — this slice's mechanisms are parameter-less.
+// `parameter` (raw bytes) and `structured` are mutually exclusive per
+// call — exactly one is meaningful; a caller with a structured param
+// shape should never also populate `parameter`. Adding a new variant
+// here (rather than a per-RPC oneof) is a single edit that reaches
+// every mechanism-taking RPC at once — G1's gap-remediation choice
+// (docs/remoting-pkcs11-v32-gap-remediation-plan-2026-08-26.md).
+message V32Mechanism {
+  uint64 mechanism = 1;
+  bytes parameter = 2;
+  oneof structured {
+    V32GcmParams gcm = 3;
+    V32OaepParams oaep = 4;
+    V32AesCtrParams aes_ctr = 5; // G3 mechanism-cell sweep
+    V32ChaCha20Poly1305Params chacha20_poly1305 = 6; // G3
+    V32SignAdditionalContextParams sign_ctx = 7; // G3 — used on sign/verify RPCs, same shared oneof
+  }
+}
+
+message V32GcmParams { // CK_GCM_PARAMS (v3.2 §6.27.7)
+  bytes iv = 1; // MUST be exactly 12 bytes (this engine's own requirement)
+  bytes aad = 2;
+  uint32 tag_bits = 3; // one of {0(=128), 32, 64, 96, 104, 112, 120, 128}
+}
+message V32OaepParams { // CK_RSA_PKCS_OAEP_PARAMS (v3.2 §6.4.4)
+  uint32 hash_alg = 1; // bare CKM_* hash code, e.g. CKM_SHA256
+  uint32 mgf = 2; // CKG_MGF1_* code, e.g. CKG_MGF1_SHA256
+  bytes source_data = 3; // the OAEP label; empty = no label (source left CKZ_DATA_SPECIFIED-implicit)
+}
+message V32AesCtrParams { // CK_AES_CTR_PARAMS (v3.2 §6.11.2) — pointer-free on the engine side
+  uint32 counter_bits = 1; // 0 < n <= 128, multiple of 8
+  bytes cb = 2; // MUST be exactly 16 bytes
+}
+message V32ChaCha20Poly1305Params { // CK_SALSA20_CHACHA20_POLY1305_PARAMS (v3.2 §6.21)
+  bytes nonce = 1; // MUST be exactly 12 bytes
+  bytes aad = 2;
+}
+message V32SignAdditionalContextParams { // CK_SIGN_ADDITIONAL_CONTEXT (v3.2 §6.67/§6.69) — ML-DSA/SLH-DSA
+  uint32 hedge_variant = 1; // CKH_HEDGE_PREFERRED(0)/CKH_HEDGE_REQUIRED(1) hedged; CKH_DETERMINISTIC_REQUIRED(2) deterministic
+  bytes context = 2; // <= 255 bytes
+}
+
+// Status-only response — the shape most C_* calls have.
+message V32StatusResponse {
+  uint32 ck_rv = 1;
+}
+
+// Byte-output response (C_Sign / C_Digest / C_SignFinal / C_DigestFinal /
+// C_GenerateRandom …): `data` is meaningful only when ck_rv == CKR_OK.
+message V32BytesResponse {
+  uint32 ck_rv = 1;
+  bytes data = 2;
+}
+
+message V32OpenSessionRequest {
+  uint32 slot_id = 1;
+  uint32 flags = 2; // real CKF_* — CKF_SERIAL_SESSION required by §5.6, asserted remotely
+}
+message V32OpenSessionResponse {
+  uint32 ck_rv = 1;
+  uint32 session_handle = 2;
+}
+
+message V32SessionRequest { // C_CloseSession / C_Logout / C_GetSessionInfo / C_DigestFinal / C_SignFinal
+  uint32 session_handle = 1;
+}
+
+message V32LoginRequest {
+  uint32 session_handle = 1;
+  uint32 user_type = 2; // real CKU_* codepoint
+  bytes pin = 3;
+}
+
+message V32GetSessionInfoResponse { // CK_SESSION_INFO, field for field
+  uint32 ck_rv = 1;
+  uint32 slot_id = 2;
+  uint32 state = 3;  // CKS_*
+  uint32 flags = 4;  // CKF_*
+  uint32 device_error = 5;
+}
+
+message V32SlotRequest { // C_GetTokenInfo / C_GetMechanismList
+  uint32 slot_id = 1;
+}
+
+message V32GetTokenInfoResponse { // CK_TOKEN_INFO, dynamic fields included
+  uint32 ck_rv = 1;
+  string label = 2;        // trailing-space-trimmed
+  string manufacturer = 3;
+  string model = 4;
+  string serial_number = 5;
+  uint32 flags = 6;
+  uint32 session_count = 7;
+  uint32 rw_session_count = 8;
+  uint32 max_pin_len = 9;
+  uint32 min_pin_len = 10;
+  uint32 hardware_version_major = 11;
+  uint32 hardware_version_minor = 12;
+  uint32 firmware_version_major = 13;
+  uint32 firmware_version_minor = 14;
+}
+
+message V32GetMechanismListResponse {
+  uint32 ck_rv = 1;
+  repeated uint64 mechanisms = 2; // CKM_* codepoints verbatim
+}
+
+message V32GetMechanismInfoRequest {
+  uint32 slot_id = 1;
+  uint64 mechanism = 2;
+}
+message V32GetMechanismInfoResponse { // CK_MECHANISM_INFO
+  uint32 ck_rv = 1;
+  uint32 min_key_size = 2;
+  uint32 max_key_size = 3;
+  uint32 flags = 4; // CKF_* capability bits
+}
+
+message V32GenerateRandomRequest {
+  uint32 session_handle = 1;
+  uint32 length = 2; // capped server-side at 1 MiB → CKR_ARGUMENTS_BAD beyond
+}
+
+message V32SeedRandomRequest {
+  uint32 session_handle = 1;
+  bytes seed = 2;
+}
+
+message V32MechanismSessionRequest { // C_DigestInit
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+}
+
+message V32DataRequest { // C_DigestUpdate / C_SignUpdate / C_VerifyUpdate / C_Sign(one-shot data)
+  uint32 session_handle = 1;
+  bytes data = 2;
+}
+
+message V32DigestRequest { // one-shot C_Digest
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  bytes data = 3;
+}
+
+message V32KeyedInitRequest { // C_SignInit / C_VerifyInit
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 key_handle = 3;
+}
+
+message V32VerifyRequest { // one-shot C_Verify — ck_rv carries CKR_OK vs CKR_SIGNATURE_INVALID, the real C semantics
+  uint32 session_handle = 1;
+  bytes data = 2;
+  bytes signature = 3;
+}
+
+message V32SignatureRequest { // C_VerifyFinal
+  uint32 session_handle = 1;
+  bytes signature = 2;
+}
+
+message V32GetAttributeValueRequest {
+  uint32 session_handle = 1;
+  uint32 object_handle = 2;
+  repeated uint64 attribute_types = 3; // CKA_* codepoints verbatim
+}
+message V32Attribute {
+  uint64 attribute_type = 1;
+  // false ⇔ the engine reported CK_UNAVAILABLE_INFORMATION for this entry
+  // (absent attribute, or sensitive/unextractable material) — §5.7.5's
+  // per-entry semantics preserved; the consolidated code is in ck_rv.
+  bool available = 2;
+  bytes value = 3;
+}
+message V32GetAttributeValueResponse {
+  uint32 ck_rv = 1; // consolidated §5.7.5 code: SENSITIVE > TYPE_INVALID > BUFFER_TOO_SMALL
+  repeated V32Attribute attributes = 2;
+}
+
+message V32ObjectRequest { // C_DestroyObject
+  uint32 session_handle = 1;
+  uint32 object_handle = 2;
+}
+
+// ── RW2: object & keygen templates ──────────────────────────────────────────
+//
+// Template ATTRIBUTE VALUES for ulong-typed attributes (CKA_CLASS,
+// CKA_KEY_TYPE, CKA_PARAMETER_SET, ...) travel at native CK_ULONG width
+// (8 bytes, little-endian, on this LP64 server) — the same convention
+// V32GetAttributeValueResponse's output values already use (RW1 finding,
+// mirrored here on the input side). Boolean attributes (CKA_TOKEN,
+// CKA_SENSITIVE, ...) are a single byte, 0x00/0x01.
+
+message V32AttributeIn {
+  uint64 attribute_type = 1;
+  bytes value = 2;
+}
+
+message V32GenerateKeyRequest { // C_GenerateKey
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  repeated V32AttributeIn template = 3;
+}
+message V32ObjectHandleResponse { // C_GenerateKey / C_CreateObject / C_CopyObject
+  uint32 ck_rv = 1;
+  uint32 object_handle = 2;
+}
+
+message V32GenerateKeyPairRequest { // C_GenerateKeyPair (template form)
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  repeated V32AttributeIn public_key_template = 3;
+  repeated V32AttributeIn private_key_template = 4;
+}
+message V32GenerateKeyPairResponse {
+  uint32 ck_rv = 1;
+  uint32 public_handle = 2;
+  uint32 private_handle = 3;
+}
+
+message V32CreateObjectRequest { // C_CreateObject
+  uint32 session_handle = 1;
+  repeated V32AttributeIn template = 2;
+}
+
+message V32SetAttributeValueRequest { // C_SetAttributeValue†
+  uint32 session_handle = 1;
+  uint32 object_handle = 2;
+  repeated V32AttributeIn template = 3;
+}
+
+message V32CopyObjectRequest { // C_CopyObject
+  uint32 session_handle = 1;
+  uint32 object_handle = 2;
+  repeated V32AttributeIn template = 3;
+}
+
+message V32GetObjectSizeResponse { // C_GetObjectSize
+  uint32 ck_rv = 1;
+  uint32 size = 2;
+}
+
+message V32FindObjectsInitRequest { // C_FindObjectsInit
+  uint32 session_handle = 1;
+  repeated V32AttributeIn template = 2;
+}
+message V32FindObjectsRequest { // C_FindObjects
+  uint32 session_handle = 1;
+  uint32 max_object_count = 2;
+}
+message V32FindObjectsResponse {
+  uint32 ck_rv = 1;
+  repeated uint32 object_handles = 2;
+}
+
+service Pkcs11V32 {
+  rpc C_OpenSession(V32OpenSessionRequest) returns (V32OpenSessionResponse);
+  rpc C_CloseSession(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_Login(V32LoginRequest) returns (V32StatusResponse);
+  rpc C_Logout(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_GetSessionInfo(V32SessionRequest) returns (V32GetSessionInfoResponse);
+  rpc C_GetTokenInfo(V32SlotRequest) returns (V32GetTokenInfoResponse);
+  rpc C_GetMechanismList(V32SlotRequest) returns (V32GetMechanismListResponse);
+  rpc C_GetMechanismInfo(V32GetMechanismInfoRequest) returns (V32GetMechanismInfoResponse);
+  rpc C_GenerateRandom(V32GenerateRandomRequest) returns (V32BytesResponse);
+  rpc C_SeedRandom(V32SeedRandomRequest) returns (V32StatusResponse);
+  rpc C_DigestInit(V32MechanismSessionRequest) returns (V32StatusResponse);
+  rpc C_DigestUpdate(V32DataRequest) returns (V32StatusResponse);
+  rpc C_DigestFinal(V32SessionRequest) returns (V32BytesResponse);
+  rpc C_Digest(V32DigestRequest) returns (V32BytesResponse);
+  rpc C_SignInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_Sign(V32DataRequest) returns (V32BytesResponse);
+  rpc C_SignUpdate(V32DataRequest) returns (V32StatusResponse);
+  rpc C_SignFinal(V32SessionRequest) returns (V32BytesResponse);
+  rpc C_VerifyInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_Verify(V32VerifyRequest) returns (V32StatusResponse);
+  rpc C_VerifyUpdate(V32DataRequest) returns (V32StatusResponse);
+  rpc C_VerifyFinal(V32SignatureRequest) returns (V32StatusResponse);
+  rpc C_GetAttributeValue(V32GetAttributeValueRequest) returns (V32GetAttributeValueResponse);
+  rpc C_DestroyObject(V32ObjectRequest) returns (V32StatusResponse); // gated by --enable-destructive
+  rpc C_GenerateKey(V32GenerateKeyRequest) returns (V32ObjectHandleResponse);
+  rpc C_GenerateKeyPair(V32GenerateKeyPairRequest) returns (V32GenerateKeyPairResponse);
+  rpc C_CreateObject(V32CreateObjectRequest) returns (V32ObjectHandleResponse);
+  rpc C_SetAttributeValue(V32SetAttributeValueRequest) returns (V32StatusResponse); // gated by --enable-destructive
+  rpc C_CopyObject(V32CopyObjectRequest) returns (V32ObjectHandleResponse);
+  rpc C_GetObjectSize(V32ObjectRequest) returns (V32GetObjectSizeResponse);
+  rpc C_FindObjectsInit(V32FindObjectsInitRequest) returns (V32StatusResponse);
+  rpc C_FindObjects(V32FindObjectsRequest) returns (V32FindObjectsResponse);
+  rpc C_FindObjectsFinal(V32SessionRequest) returns (V32StatusResponse);
+
+  // ── encrypt / decrypt FSM + one-shot (RW3) ──
+  // Reuses existing message shapes — no new proto types needed:
+  // Init takes a mechanism + key handle (same as sign/verify Init), the
+  // rest carry only session + bytes.
+  rpc C_EncryptInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_Encrypt(V32DataRequest) returns (V32BytesResponse);
+  rpc C_EncryptUpdate(V32DataRequest) returns (V32BytesResponse);
+  rpc C_EncryptFinal(V32SessionRequest) returns (V32BytesResponse);
+  rpc C_DecryptInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_Decrypt(V32DataRequest) returns (V32BytesResponse);
+  rpc C_DecryptUpdate(V32DataRequest) returns (V32BytesResponse);
+  rpc C_DecryptFinal(V32SessionRequest) returns (V32BytesResponse);
+
+  // ── admin / info (RW6a) ──
+  rpc C_GetInfo(V32Empty) returns (V32BytesResponse);
+  rpc C_GetSlotList(V32GetSlotListRequest) returns (V32GetSlotListResponse);
+  rpc C_GetSlotInfo(V32SlotRequest) returns (V32BytesResponse);
+  rpc C_WaitForSlotEvent(V32SlotEventRequest) returns (V32StatusResponse);
+  rpc C_CloseAllSessions(V32SlotRequest) returns (V32StatusResponse);
+  rpc C_SessionCancel(V32SessionFlagsRequest) returns (V32StatusResponse);
+  rpc C_LoginUser(V32LoginRequest) returns (V32StatusResponse);
+
+  // ── destructive-gated admin (RW6a) ──
+  rpc C_InitToken(V32InitTokenRequest) returns (V32StatusResponse); // gated by --enable-destructive
+  rpc C_InitPIN(V32InitPinRequest) returns (V32StatusResponse); // gated by --enable-destructive
+  rpc C_SetPIN(V32SetPinRequest) returns (V32StatusResponse); // gated by --enable-destructive
+
+  // ── honest-code stubs (RW6a) — always the same spec-mandated code ──
+  rpc C_DigestKey(V32ObjectRequest) returns (V32StatusResponse);
+  rpc C_GetOperationState(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_SetOperationState(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_GetFunctionStatus(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_CancelFunction(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_AsyncComplete(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_AsyncGetID(V32SessionRequest) returns (V32AsyncGetIdResponse);
+  rpc C_AsyncJoin(V32AsyncJoinRequest) returns (V32StatusResponse);
+
+  // ── recover + verify-with-signature (RW6a) ──
+  rpc C_SignRecoverInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_SignRecover(V32DataRequest) returns (V32BytesResponse);
+  rpc C_VerifyRecoverInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_VerifyRecover(V32SignatureRequest) returns (V32BytesResponse);
+  rpc C_VerifySignatureInit(V32VerifySignatureInitRequest) returns (V32StatusResponse);
+  rpc C_VerifySignature(V32DataRequest) returns (V32StatusResponse);
+
+  // ── dual-function quartet (RW6a) — reuses V32DataRequest/V32BytesResponse ──
+  rpc C_DigestEncryptUpdate(V32DataRequest) returns (V32BytesResponse);
+  rpc C_DecryptDigestUpdate(V32DataRequest) returns (V32BytesResponse);
+  rpc C_SignEncryptUpdate(V32DataRequest) returns (V32BytesResponse);
+  rpc C_DecryptVerifyUpdate(V32DataRequest) returns (V32BytesResponse);
+
+  // ── message sign (RW6b) — pParam is always ignored by this engine ──
+  rpc C_MessageSignInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_SignMessage(V32DataRequest) returns (V32BytesResponse);
+  rpc C_MessageSignFinal(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_SignMessageBegin(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_SignMessageNext(V32SignMessageNextRequest) returns (V32BytesResponse);
+
+  // ── message verify (RW6b) ──
+  rpc C_MessageVerifyInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_VerifyMessage(V32VerifyRequest) returns (V32StatusResponse);
+  rpc C_MessageVerifyFinal(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_VerifyMessageBegin(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_VerifyMessageNext(V32VerifyMessageNextRequest) returns (V32StatusResponse);
+
+  // ── message encrypt (RW6b — CKM_AES_GCM only, this engine's one
+  // message-AEAD mechanism) ──
+  rpc C_MessageEncryptInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_EncryptMessage(V32EncryptMessageRequest) returns (V32EncryptMessageResponse);
+  rpc C_MessageEncryptFinal(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_EncryptMessageBegin(V32EncryptMessageBeginRequest) returns (V32EncryptMessageBeginResponse);
+  rpc C_EncryptMessageNext(V32EncryptMessageNextRequest) returns (V32EncryptMessageNextResponse);
+
+  // ── message decrypt (RW6b) ──
+  rpc C_MessageDecryptInit(V32KeyedInitRequest) returns (V32StatusResponse);
+  rpc C_DecryptMessage(V32DecryptMessageRequest) returns (V32BytesResponse);
+  rpc C_MessageDecryptFinal(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_DecryptMessageBegin(V32DecryptMessageBeginRequest) returns (V32StatusResponse);
+  rpc C_DecryptMessageNext(V32DecryptMessageNextRequest) returns (V32BytesResponse);
+
+  // ── wrap / unwrap (RW4) — no RW-P needed; AES-KW/CBC parameters are
+  // already fully representable via V32Mechanism's raw `parameter` bytes ──
+  rpc C_WrapKey(V32WrapKeyRequest) returns (V32BytesResponse);
+  rpc C_UnwrapKey(V32UnwrapKeyRequest) returns (V32ObjectHandleResponse);
+  rpc C_WrapKeyAuthenticated(V32WrapKeyAuthenticatedRequest) returns (V32BytesResponse);
+  rpc C_UnwrapKeyAuthenticated(V32UnwrapKeyAuthenticatedRequest) returns (V32ObjectHandleResponse);
+
+  // ── derive (RW4) — the RW-P derive-family variants ──
+  rpc C_DeriveKey(V32DeriveKeyRequest) returns (V32ObjectHandleResponse);
+
+  // ── KEM key-object form (RW5) — named apart from the legacy bytes-form
+  // Pkcs11Remote.Encapsulate, which stays frozen ──
+  rpc C_EncapsulateKey(V32EncapsulateKeyRequest) returns (V32EncapsulateKeyResponse);
+  rpc C_DecapsulateKey(V32DecapsulateKeyRequest) returns (V32ObjectHandleResponse);
+
+  // ── RW-T coverage-ledger audit finding: real engine capabilities RW6a's
+  // sweep of the verify-with-signature/session family missed ──
+  rpc C_VerifySignatureUpdate(V32DataRequest) returns (V32StatusResponse);
+  rpc C_VerifySignatureFinal(V32SessionRequest) returns (V32StatusResponse);
+  rpc C_GetSessionValidationFlags(V32GetSessionValidationFlagsRequest) returns (V32GetSessionValidationFlagsResponse);
+
+  // ── G2 (gap-remediation, 2026-08-26) — VENDOR EXTENSION, not part of
+  // pkcs11f.h. Mirrors softhsmrustv3::native::split/join (the same calls
+  // behind KMIP 3.0 §6.1.12/§6.1.33 Create/Join Split Key) so this
+  // remoting surface has parity with the KMIP server's own secret-
+  // sharing capability. There is no CKM_PQCTODAY_SPLIT_KEY C_* dispatch
+  // arm anywhere in the engine, so these two RPCs call native:: directly
+  // instead of going through ffi::C_* like every other RPC in this file.
+  rpc SplitKey(V32SplitKeyRequest) returns (V32SplitKeyResponse);
+  rpc JoinKey(V32JoinKeyRequest) returns (V32ObjectHandleResponse);
+}
+
+message V32GetSessionValidationFlagsRequest {
+  uint32 session_handle = 1;
+  uint32 validation_type = 2; // §5.6.9 — only CKS_LAST_VALIDATION_OK (1) is defined
+}
+message V32GetSessionValidationFlagsResponse {
+  uint32 ck_rv = 1;
+  uint32 flags = 2;
+}
+
+message V32EncapsulateKeyRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 key_handle = 3; // the peer's public key
+  repeated V32AttributeIn template = 4; // for the derived shared-secret object
+}
+message V32EncapsulateKeyResponse {
+  uint32 ck_rv = 1;
+  bytes ciphertext = 2;
+  uint32 object_handle = 3; // the derived shared-secret key
+}
+message V32DecapsulateKeyRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 private_key_handle = 3;
+  bytes ciphertext = 4;
+  repeated V32AttributeIn template = 5;
+}
+
+message V32WrapKeyRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 wrapping_key_handle = 3;
+  uint32 key_handle = 4;
+}
+message V32UnwrapKeyRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 unwrapping_key_handle = 3;
+  bytes wrapped_key = 4;
+  repeated V32AttributeIn template = 5;
+}
+message V32WrapKeyAuthenticatedRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 wrapping_key_handle = 3;
+  uint32 key_handle = 4;
+  bytes associated_data = 5;
+}
+message V32UnwrapKeyAuthenticatedRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 unwrapping_key_handle = 3;
+  bytes wrapped_key = 4;
+  repeated V32AttributeIn template = 5;
+  bytes associated_data = 6;
+}
+
+// G2 vendor extension (Split Key) — field names mirror
+// softhsmrustv3::native::split/join's own parameter names exactly.
+// `method`/`polynomial` use the KMIP 3.0 §11.54/§11.55 enumeration
+// codepoints verbatim (the same mapping kmip/src/ops/split_key.rs uses),
+// not values invented for this wire format.
+message V32SplitKeyShare {
+  uint32 key_part_identifier = 1; // §4.30 index / finite-field x-coordinate
+  uint32 object_handle = 2;
+}
+message V32SplitKeyRequest {
+  uint32 session_handle = 1;
+  uint32 secret_handle = 2;
+  uint32 parts = 3;
+  uint32 threshold = 4;
+  uint32 method = 5; // §11.54: 1=XOR, 2=PolynomialGF65536, 3=PolynomialPrimeField, 4=PolynomialGF256
+  uint32 polynomial = 6; // §11.55: 0=absent, 1=Polynomial283, 2=Polynomial285; required for methods 2/4
+  bytes cka_id_prefix = 7; // each share's CKA_ID = this prefix || big-endian share index
+  string label = 8;
+}
+message V32SplitKeyResponse {
+  uint32 ck_rv = 1;
+  repeated V32SplitKeyShare shares = 2;
+}
+message V32JoinKeyRequest {
+  uint32 session_handle = 1;
+  repeated V32SplitKeyShare shares = 2;
+  uint32 threshold = 3;
+  uint32 method = 4;
+  uint32 polynomial = 5;
+  uint32 expected_len = 6; // original secret's byte length; de-pads the GF(2^16)/Prime-Field reconstructions
+  bytes cka_id = 7;
+  string label = 8;
+}
+
+// RW-P derive-family structured mechanism parameters. Field names/types
+// mirror `verbs_v32::derive_params`'s builder arguments exactly — the
+// server marshals these into the native `CK_*_PARAMS` layout via
+// `ck_param`'s own declared offsets (see that module's doc for why a
+// generic byte-offset table can't be hand-written safely for these).
+
+message V32Ecdh1Params { // CK_ECDH1_DERIVE_PARAMS
+  uint32 kdf = 1; // CKD_NULL = 1; see the spec for the X9.63 KDF codepoints
+  bytes shared_data = 2;
+  bytes public_data = 3; // peer's EC public key (raw SEC1 or DER-OCTET-STRING-wrapped)
+}
+message V32HkdfParams { // CK_HKDF_PARAMS
+  bool extract = 1;
+  bool expand = 2;
+  uint64 prf_hash_mechanism = 3; // bare hash mechanism, e.g. CKM_SHA256
+  uint32 salt_type = 4; // CKF_HKDF_SALT_NULL=0 / _DATA=2 / _KEY=4
+  bytes salt = 5;
+  uint32 h_salt_key = 6;
+  bytes info = 7;
+}
+message V32Pbkdf2Params { // CK_PKCS5_PBKD2_PARAMS2
+  uint32 salt_source = 1; // CKZ_SALT_SPECIFIED = 1
+  bytes salt_source_data = 2;
+  uint32 iterations = 3; // engine enforces a real minimum of 1000
+  uint64 prf = 4; // CK_PKCS5_PBKD2_PSEUDO_RANDOM_FUNCTION_TYPE, e.g. CKP_PBKDF2_HMAC_SHA256=0x04 — NOT a CKM_* code
+  bytes prf_data = 5;
+  bytes password = 6;
+}
+message V32Sp800108Segment { // one CK_PRF_DATA_PARAM
+  uint32 prf_type = 1; // CK_SP800_108_ITERATION_VARIABLE=1/_COUNTER=2/_DKM_LENGTH=3/_BYTE_ARRAY=4
+  bytes value = 2;
+}
+message V32Sp800108CounterParams { // CK_SP800_108_KDF_PARAMS
+  uint64 prf_type = 1; // a keyed-MAC mechanism, e.g. CKM_SHA256_HMAC
+  repeated V32Sp800108Segment segments = 2;
+}
+message V32Sp800108FeedbackParams { // CK_SP800_108_FEEDBACK_KDF_PARAMS
+  uint64 prf_type = 1;
+  repeated V32Sp800108Segment segments = 2;
+  bytes iv = 3;
+}
+
+message V32DeriveKeyRequest {
+  uint32 session_handle = 1;
+  uint64 mechanism = 2;
+  uint32 base_key_handle = 3; // 0 for CKM_PKCS5_PBKD2 (password lives in params)
+  repeated V32AttributeIn template = 4;
+  // Parameterless mechanisms (CKM_SHA256_KEY_DERIVATION) or ones already
+  // fully representable as raw bytes (CKM_CONCATENATE_BASE_AND_KEY's bare
+  // handle, at native ulong width) use `raw_parameter` directly. Anything
+  // needing a real `CK_*_PARAMS` struct uses one `structured` variant —
+  // exactly one of `raw_parameter`/`structured` is meaningful per call.
+  bytes raw_parameter = 5;
+  oneof structured {
+    V32Ecdh1Params ecdh1 = 10;
+    V32HkdfParams hkdf = 11;
+    V32Pbkdf2Params pbkdf2 = 12;
+    V32Sp800108CounterParams sp800_108_counter = 13;
+    V32Sp800108FeedbackParams sp800_108_feedback = 14;
+  }
+}
+
+message V32SignMessageNextRequest {
+  uint32 session_handle = 1;
+  bytes part = 2;
+  bool is_final = 3;
+}
+message V32VerifyMessageNextRequest {
+  uint32 session_handle = 1;
+  bytes part = 2;
+  bool is_final = 3;
+  bytes signature = 4; // only read when is_final
+}
+
+// CK_GCM_MESSAGE_PARAMS travels field-by-field (RW-P "GcmMessage" variant
+// — see verbs_v32::GcmMessageParams's doc for the native layout and the
+// pTag in/out contract). `tag_bits` is repeated on every request in this
+// family because each maps to one real FFI call that needs it.
+message V32EncryptMessageRequest {
+  uint32 session_handle = 1;
+  bytes iv = 2; // desired length even when iv_generator != 0; contents ignored then
+  uint32 iv_generator = 3; // 0 = caller-supplied iv; nonzero = engine generates
+  bytes aad = 4;
+  bytes plaintext = 5;
+  uint32 tag_bits = 6;
+}
+message V32EncryptMessageResponse {
+  uint32 ck_rv = 1;
+  bytes ciphertext = 2;
+  bytes tag = 3;
+  bytes iv_used = 4; // echoes `iv` when iv_generator == 0; the engine-written IV otherwise
+}
+message V32EncryptMessageBeginRequest {
+  uint32 session_handle = 1;
+  bytes iv = 2;
+  uint32 iv_generator = 3;
+  bytes aad = 4;
+  uint32 tag_bits = 5;
+}
+message V32EncryptMessageBeginResponse {
+  uint32 ck_rv = 1;
+  bytes iv_used = 2;
+}
+message V32EncryptMessageNextRequest {
+  uint32 session_handle = 1;
+  bytes plaintext_part = 2;
+  bool is_final = 3;
+  uint32 tag_bits = 4; // only meaningful when is_final
+}
+message V32EncryptMessageNextResponse {
+  uint32 ck_rv = 1;
+  bytes ciphertext_part = 2;
+  bytes tag = 3; // empty unless is_final
+}
+
+message V32DecryptMessageRequest {
+  uint32 session_handle = 1;
+  bytes iv = 2;
+  bytes aad = 3;
+  bytes ciphertext = 4;
+  uint32 tag_bits = 5;
+  bytes tag = 6; // caller-supplied EXPECTED tag — the engine verifies against it
+}
+message V32DecryptMessageBeginRequest {
+  uint32 session_handle = 1;
+  bytes iv = 2;
+  bytes aad = 3;
+  uint32 tag_bits = 4;
+}
+message V32DecryptMessageNextRequest {
+  uint32 session_handle = 1;
+  bytes ciphertext_part = 2;
+  bool is_final = 3;
+  uint32 tag_bits = 4; // only meaningful when is_final
+  bytes tag = 5; // only meaningful when is_final
+}
+
+message V32Empty {}
+
+message V32GetSlotListRequest {
+  bool token_present = 1;
+}
+message V32GetSlotListResponse {
+  uint32 ck_rv = 1;
+  repeated uint32 slot_ids = 2;
+}
+
+message V32SlotEventRequest {
+  uint32 flags = 1;
+}
+
+message V32SessionFlagsRequest {
+  uint32 session_handle = 1;
+  uint32 flags = 2;
+}
+
+message V32InitTokenRequest { // gated by --enable-destructive
+  uint32 slot_id = 1;
+  bytes pin = 2;
+  bytes label = 3; // MUST be exactly 32 bytes — see verbs_v32::init_token's doc
+}
+message V32InitPinRequest { // gated by --enable-destructive
+  uint32 session_handle = 1;
+  bytes pin = 2;
+}
+message V32SetPinRequest { // gated by --enable-destructive
+  uint32 session_handle = 1;
+  bytes old_pin = 2;
+  bytes new_pin = 3;
+}
+
+message V32AsyncGetIdResponse {
+  uint32 ck_rv = 1;
+  uint32 id = 2;
+}
+message V32AsyncJoinRequest {
+  uint32 session_handle = 1;
+  uint32 id = 2;
+  bytes data = 3;
+}
+
+message V32VerifySignatureInitRequest {
+  uint32 session_handle = 1;
+  V32Mechanism mechanism = 2;
+  uint32 key_handle = 3;
+  bytes signature = 4;
+}

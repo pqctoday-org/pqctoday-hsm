@@ -44,6 +44,14 @@ struct Cli {
     /// rule (`pqctoday-kmip/bin/pqctoday-kmip.rs:336-345`).
     #[arg(long, env = "PKCS11_REMOTE_TLS_CLIENT_CA")]
     tls_client_ca: Option<PathBuf>,
+
+    /// Enable destructive Pkcs11V32 RPCs (C_DestroyObject, and later
+    /// C_SetAttributeValue / C_InitToken / C_InitPIN). OFF by default:
+    /// without it those RPCs answer CKR_FUNCTION_NOT_SUPPORTED. The
+    /// acceptance/gate environment turns it ON; deployed containers stay
+    /// OFF until explicitly decided otherwise (plan RW0 posture).
+    #[arg(long = "enable-destructive", env = "PKCS11_REMOTE_ENABLE_DESTRUCTIVE", default_value_t = false)]
+    enable_destructive: bool,
 }
 
 #[tokio::main]
@@ -90,15 +98,27 @@ async fn main() -> anyhow::Result<()> {
         .set_serving::<pqctoday_pkcs11_remote_proto::pkcs11_remote_server::Pkcs11RemoteServer<service::Pkcs11RemoteService>>()
         .await;
 
+    // 16 MiB on both directions, explicitly: the implicit 4 MiB default
+    // would silently reject legitimate mirror payloads (large C_Encrypt
+    // inputs, ~1 MB Classic McEliece public keys) — plan RW0 rule 5.
+    const MAX_MSG: usize = 16 * 1024 * 1024;
     let svc = pqctoday_pkcs11_remote_proto::pkcs11_remote_server::Pkcs11RemoteServer::new(
         service::Pkcs11RemoteService::default(),
-    );
+    )
+    .max_decoding_message_size(MAX_MSG)
+    .max_encoding_message_size(MAX_MSG);
+    let svc_v32 = pqctoday_pkcs11_remote_proto::pkcs11_v32_server::Pkcs11V32Server::new(
+        pqc_grpc_pkcs11::service_v32::Pkcs11V32Service { destructive: cli.enable_destructive },
+    )
+    .max_decoding_message_size(MAX_MSG)
+    .max_encoding_message_size(MAX_MSG);
 
     tracing::info!(addr = %cli.listen, "pqc-grpc-pkcs11 listening");
     Server::builder()
         .tls_config(tls)?
         .add_service(health_service)
         .add_service(svc)
+        .add_service(svc_v32)
         .serve(cli.listen)
         .await?;
     Ok(())

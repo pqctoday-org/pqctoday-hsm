@@ -1,0 +1,502 @@
+{
+  "$schema_note": "One row per category in cpp_compliance_report.json (63 real categories, excluding _summary). disposition: RPC (remotely reachable via the Pkcs11V32 mirror) | N/A-local (inherently in-process, no network analogue) | SUITE-GAP (function untouched by either local compliance harness). case_ids reference either an acceptance-crate three-transport parity test (v32_parity::vNN_...) or a core-crate unit test (core::fn_name) that exercises the RPC(s) this category maps to. An empty case_ids array with disposition RPC means: the underlying verb(s) are implemented, wired, and proven correct for OTHER mechanisms/algorithms in the same generic RPC family, but this specific category was not the target of a dedicated case \u2014 never silently implied as tested when it wasn't. Two RPCs on the Pkcs11V32 service \u2014 SplitKey/JoinKey (G2 gap-remediation, 2026-08-26) \u2014 are VENDOR EXTENSIONS, not part of pkcs11f.h: they mirror softhsmrustv3::native::split/join (the same calls behind KMIP 3.0 \u00a76.1.12/\u00a76.1.33 Create/Join Split Key) since the engine has no CKM_PQCTODAY_SPLIT_KEY C_* dispatch arm to mirror instead. The ratchet's check (c) only scans for rpc C_*(...) declarations, so these two are invisible to it by design (they cannot regress a pkcs11f.h coverage count they were never part of) \u2014 the SplitKey row below documents them anyway, for the same reason every other row exists: so a real capability can never silently drop out of scope.",
+  "generated_after_workstream": "RW5 (built during RW-T, the program's terminal workstream)",
+  "generated_by": "docs/remoting-pkcs11-v32-remaining-gaps-plan-2026-08-26.md",
+  "pkcs11f_h_function_count": {
+    "total": 104,
+    "live_rpcs": 99,
+    "not_mirrored": [
+      "C_Initialize",
+      "C_Finalize",
+      "C_GetFunctionList",
+      "C_GetInterface",
+      "C_GetInterfaceList"
+    ],
+    "not_mirrored_justification": "All five are N/A-local, not gaps: C_Initialize/C_Finalize are server-process bootstrap lifecycle with no per-request network analogue (see the 'Init' row below); C_GetFunctionList/C_GetInterface/C_GetInterfaceList return function-pointer tables, which are meaningless over a wire \u2014 a remote client cannot call through a returned pointer. None of the five map to a named category in cpp_compliance_report.json, so they have no row in `rows` below; documented here instead so the ratchet's silence about them is a deliberate, checked design choice rather than an oversight."
+  },
+  "rows": {
+    "AES-CTR": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing",
+        "v32_parity::v27_aes_ctr_chacha20poly1305_and_dsa_ctx_structured_params_kat_parity"
+      ],
+      "justification": "CK_AES_CTR_PARAMS (pointer-free) via the new cipher_params::aes_ctr RW-P builder (G3, 2026-08-26) \u2014 StructBuilder::set_bytes, the first builder to need a fixed-size inline field. Encrypt/decrypt round trip proven in core; V27 proves KAT-grade byte-identical ciphertext across all three transports via the new oneof variant. AES-CBC (raw 16-byte IV) and AES-CBC-PAD are also exercised in the same core test (no dedicated ledger category exists for CBC)."
+    },
+    "Attributes": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v4_get_attribute_value_sensitive_code_parity",
+        "v32_parity::v6_destroy_object_parity_with_flag_on",
+        "core::get_attribute_value_consolidated_codes_match_spec_5_7_5"
+      ],
+      "justification": "C_GetAttributeValue/C_SetAttributeValue with real \u00a75.7.5 consolidated codes (SENSITIVE > TYPE_INVALID > BUFFER_TOO_SMALL); C_DestroyObject (destructive-gated) cased in v6."
+    },
+    "AuthWrap": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::aes_key_wrap_unwrap_round_trip_and_not_wrappable_negative",
+        "core::aes_gcm_authenticated_wrap_unwrap_round_trip_and_aad_tamper_rejected",
+        "v32_parity::v25_aes_gcm_authenticated_wrap_unwrap_parity"
+      ],
+      "justification": "C_WrapKeyAuthenticated/C_UnwrapKeyAuthenticated, restricted by this engine to CKM_AES_GCM, proven via the real CKR_MECHANISM_INVALID rejection for a non-GCM mechanism (RW4) AND the full authenticated-wrap positive round trip \u2014 the compliance suite's own NIST_SP800_38D_KAT check \u2014 closed in G1 gap-remediation via the CK_GCM_PARAMS RW-P builder: unwrapped key material equals the original, and a tampered AAD is rejected. Wrapped bytes proven byte-identical across all three transports."
+    },
+    "BIP32": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "CKM_BIP32_MASTER_DERIVE via C_DeriveKey \u2014 the engine reads its curve from the OUTPUT TEMPLATE's CKA_EC_PARAMS (no CK_*_PARAMS struct at all, confirmed by reading the dispatch arm directly), over a generic-secret 'seed' base key. Proven to produce a real 32-byte EC private key. G3, 2026-08-26."
+    },
+    "ChaCha20": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing",
+        "v32_parity::v27_aes_ctr_chacha20poly1305_and_dsa_ctx_structured_params_kat_parity"
+      ],
+      "justification": "CKM_CHACHA20_POLY1305 (the mechanism this category's own compliance-report entry actually observes \u2014 a 16-byte MAC tag on C_Encrypt output, which only the Poly1305 AEAD variant produces; plain CKM_CHACHA20 has none) via the new cipher_params::chacha20_poly1305 RW-P builder (G3, 2026-08-26). Round trip proven in core; V27 proves KAT-grade byte-identical ciphertext across all three transports."
+    },
+    "CkaIdRetrieval": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v8_create_find_copy_object_parity"
+      ],
+      "justification": "C_CreateObject, C_FindObjectsInit/C_FindObjects/C_FindObjectsFinal, C_CopyObject, C_GetObjectSize \u2014 generic template search; CKA_ID specifically not the case's search key, but the same FSM."
+    },
+    "Classical": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "RSA-PKCS raw sign/verify (CKM_RSA_PKCS, no parameter) over a 2048-bit keypair, plus the positive C_SignRecover/C_VerifyRecover round trip (\u00a75.13, RSA-only \u2014 RW6a proved the non-RSA rejection; this is the positive half an RSA key makes possible). G3, 2026-08-26."
+    },
+    "DSA": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "Same generic sign/verify path as Classical \u2014 proven via the same RSA-PKCS raw sign/verify case (DSA itself is not a mechanism this engine implements; the category name maps to the generic classical-signature path, already exercised)."
+    },
+    "DSA-CTX": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing",
+        "v32_parity::v27_aes_ctr_chacha20poly1305_and_dsa_ctx_structured_params_kat_parity"
+      ],
+      "justification": "CK_SIGN_ADDITIONAL_CONTEXT via the new sign_params::additional_context RW-P builder (G3, 2026-08-26) \u2014 ML-DSA sign/verify with a context string and CKH_DETERMINISTIC_REQUIRED hedge. Proven in core: same key+msg+context reproduces the identical signature (real determinism), and a mismatched context at Verify time is rejected (context is bound into what's signed). V27 proves KAT-grade byte-identical signatures across all three transports."
+    },
+    "Discovery": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v5_mechanism_list_and_info_parity",
+        "v32_parity::v11_admin_info_and_session_lifecycle_parity",
+        "core::mechanism_list_and_info_match_the_engine_table"
+      ],
+      "justification": "C_GetMechanismList/C_GetMechanismInfo/C_GetTokenInfo (v5); C_GetInfo/C_GetSlotList/C_GetSlotInfo/C_WaitForSlotEvent (v11)."
+    },
+    "ECDH": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::derive_key_ecdh1_p256",
+        "core::hybrid_ecdh_ml_kem_concatenate_composition"
+      ],
+      "justification": "CKM_ECDH1_DERIVE via C_DeriveKey (RW4, real P-256 keygen + CKA_EC_POINT exchange) and via C_Encapsulate/DecapsulateKey's ECDH-as-KEM path (RW5)."
+    },
+    "ECDSA": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "CKM_ECDSA raw (pre-hashed, no parameter, single-part-only) sign/verify over a P-256 keypair. G3, 2026-08-26."
+    },
+    "EdDSA": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "CKM_EDDSA (pure Ed25519, no parameter) sign/verify over an Ed25519 keypair (CKM_EC_EDWARDS_KEY_PAIR_GEN). G3, 2026-08-26."
+    },
+    "ErrCodes": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v1_open_close_and_double_close_ckr_parity",
+        "v32_parity::v7_generate_key_pair_template_parity",
+        "v32_parity::v9_generate_key_and_set_attribute_value_parity"
+      ],
+      "justification": "ck_rv is a response FIELD on every RPC (design-level, not per-category) \u2014 every negative-path case across V1-V21 asserts exact CKR codes, never hardcoded, always captured from an in-process control."
+    },
+    "FIPS": {
+      "disposition": "RPC",
+      "case_ids": [],
+      "justification": "Partial per the master plan (\u00a73): self-test/POST surface where exposed is RPC-reachable via the same generic verbs; process-startup aspects are N/A-local. Not separately cased. Deliberately empty \u2014 decision recorded in the residual-gaps plan \u00a73 (docs/remoting-pkcs11-v32-residual-gaps-plan-2026-08-26.md)."
+    },
+    "Fork": {
+      "disposition": "N/A-local",
+      "case_ids": [
+        "core::random_and_seed_codes_are_the_engines_own",
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "fork(2) semantics cannot exist across a network boundary (master plan \u00a73) \u2014 disposition stays N/A-local for that reason alone. But the category's remote analogue (independent clients' RNG does not share state) IS cased: core::random_and_seed_codes_are_the_engines_own proves two C_GenerateRandom/C_SeedRandom draws differ within one session; core::mechanism_sweep_kcv_profile_multipart_and_fork's own 'Fork analogue' block (G3, 2026-08-26) opens TWO independent sessions and proves their C_GenerateRandom draws differ \u2014 the actual cross-session property this row's name refers to. (Residual-gaps plan H1, 2026-08-26: this case existed since G3 but was never linked here, because G3's ledger pass only targeted rows with empty case_ids and this row already had one.)"
+    },
+    "G-DA-X": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "CKM_SHA3_256 digest (via the generic C_DigestInit/C_Digest/C_DigestUpdate/C_DigestFinal FSM), one-shot and Update/Final proven to agree, plus CKM_KMAC_128 default-params sign (via the generic C_SignInit/C_Sign) on a generic-secret key. G3, 2026-08-26."
+    },
+    "G1Security": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v4_get_attribute_value_sensitive_code_parity"
+      ],
+      "justification": "Partial per master plan \u00a73: sensitive-attribute blocking and login gating are RPC-assertable (cased); process/memory isolation aspects are N/A-local."
+    },
+    "G2ChaCha20": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing",
+        "v32_parity::v27_aes_ctr_chacha20poly1305_and_dsa_ctx_structured_params_kat_parity"
+      ],
+      "justification": "Same case and same correction as ChaCha20 \u2014 keygen (CKK_CHACHA20 via CKM_CHACHA20_KEY_GEN) and the Poly1305 round trip this category's own compliance entries (Keygen_KeyType/Keygen_GenMech/ Encrypt/RoundTrip) describe."
+    },
+    "G2Derive": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v19_derive_key_raw_and_hkdf_parity",
+        "core::derive_key_hkdf_and_pbkdf2",
+        "core::derive_key_sp800_108_counter_and_feedback",
+        "core::derive_key_concatenate_and_sha256_derivation"
+      ],
+      "justification": "C_DeriveKey across CONCATENATE_BASE_AND_KEY, SHA256_KEY_DERIVATION, HKDF, PBKDF2, SP800-108 counter+feedback."
+    },
+    "G2MechTable": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v5_mechanism_list_and_info_parity"
+      ],
+      "justification": "Same as Discovery \u2014 mechanism table flags/ranges."
+    },
+    "G3Keygen": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v7_generate_key_pair_template_parity",
+        "core::generate_key_pair_template_reports_inconsistent_and_incomplete"
+      ],
+      "justification": "The real CKR_TEMPLATE_INCONSISTENT (mismatched key-type) and CKR_TEMPLATE_INCOMPLETE (missing CKA_PARAMETER_SET) codes, asserted three ways."
+    },
+    "G4Retcodes": {
+      "disposition": "RPC",
+      "case_ids": [],
+      "justification": "Same design-level guarantee as ErrCodes \u2014 not separately cased beyond what ErrCodes already lists. Deliberately empty \u2014 decision recorded in the residual-gaps plan \u00a73 (docs/remoting-pkcs11-v32-residual-gaps-plan-2026-08-26.md)."
+    },
+    "G5Attrs": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v4_get_attribute_value_sensitive_code_parity"
+      ],
+      "justification": "Same as Attributes."
+    },
+    "G7Sha3Rsa": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "Same generic digest/sign path as G-DA-X/SHA-3 and Classical/GapClassical \u2014 both halves (SHA3-256 digest, RSA-PKCS sign) now have real case_ids; not separately cased as a combined SHA3+RSA cell."
+    },
+    "G8Dual": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v15_dual_function_digest_encrypt_parity",
+        "core::dual_function_quartet_matches_separate_fsm_output"
+      ],
+      "justification": "C_DigestEncryptUpdate proven byte-identical to running Digest+Encrypt as separate FSMs, three ways; C_DecryptDigestUpdate/C_SignEncryptUpdate/C_DecryptVerifyUpdate wired the same way (core case), not separately byte-verified."
+    },
+    "GAsync": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v13_honest_code_stubs_parity",
+        "core::honest_code_stubs_return_spec_mandated_codes"
+      ],
+      "justification": "C_AsyncComplete/C_AsyncGetID/C_AsyncJoin \u2192 CKR_FUNCTION_NOT_SUPPORTED; C_GetFunctionStatus/C_CancelFunction \u2192 CKR_FUNCTION_NOT_PARALLEL; C_DigestKey/C_GetOperationState/C_SetOperationState \u2192 CKR_FUNCTION_NOT_SUPPORTED \u2014 all asserted three ways, matching the C++ suite's own honest-not-supported design for this category."
+    },
+    "GIsolation": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v4_get_attribute_value_sensitive_code_parity"
+      ],
+      "justification": "Same partial disposition as G1Security."
+    },
+    "GapAes": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v10_aes_ecb_encrypt_decrypt_kat_parity",
+        "v32_parity::v23_aes_gcm_structured_params_kat_parity",
+        "core::aes_gcm_encrypt_decrypt_round_trip_and_tag_tamper_rejected"
+      ],
+      "justification": "AES-ECB (RW3) and now AES-GCM (G1 gap-remediation, via the CK_GCM_PARAMS RW-P builder) both cased: one-shot round trip, FSM byte-equality against the one-shot, and real tag-tamper rejection. AES-CTR/CBC not separately cased \u2014 reachable via the same generic verb, CK_AES_CTR_PARAMS is pointer-free and needs no RW-P builder at all."
+    },
+    "GapClassical": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "Same as Classical \u2014 now has a real case_id (RSA-PKCS raw sign/verify + SignRecover/VerifyRecover)."
+    },
+    "GapDerive": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v19_derive_key_raw_and_hkdf_parity"
+      ],
+      "justification": "Same as G2Derive."
+    },
+    "GapEcdsaEddsa": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "Same as ECDSA/EdDSA \u2014 now has real case_ids."
+    },
+    "GapRsaCipher": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::rsa_oaep_encrypt_decrypt_round_trip_and_mgf_changes_ciphertext",
+        "v32_parity::v24_rsa_oaep_structured_params_parity"
+      ],
+      "justification": "C_EncryptInit(RSA-OAEP)/C_Decrypt via the CK_RSA_PKCS_OAEP_PARAMS RW-P builder (G1 gap-remediation): real RSA-2048 keygen, OAEP encrypt/decrypt round trip, and OAEP's own re-randomization property (encrypting the same plaintext twice never reproduces the same ciphertext, both still decrypt correctly) \u2014 proven in-process and confirmed independently on both gRPC and REST (each transport's own randomized ciphertext decrypts correctly on that same transport)."
+    },
+    "GapRsaSign": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v14_verify_signature_and_recover_reject_parity",
+        "v32_parity::v22_verify_signature_multipart_and_session_validation_flags_parity"
+      ],
+      "justification": "C_VerifySignatureInit/C_VerifySignature (pre-bound verify) proven to match plain C_Verify's own code; C_VerifySignatureUpdate/C_VerifySignatureFinal (the multipart continuation \u2014 an RW-T coverage-ledger audit finding, missed by RW6a's original sweep) proven to agree with the one-shot form on both a good and a tampered signature. C_SignRecoverInit/C_VerifyRecoverInit wired and reachable, proven via the real CKR_MECHANISM_INVALID they return for a non-RSA mechanism (this engine restricts Sign/VerifyRecover to RSA) \u2014 the RSA-positive recover round trip itself not cased. C_SignRecover/C_VerifyRecover wired, reached only via the negative path above."
+    },
+    "HBSProtect": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v21a_slh_dsa_sign_verify_parity",
+        "v32_parity::v21b_xmss_hss_sign_verify_parity"
+      ],
+      "justification": "Hash-based-signature (SLH-DSA/XMSS/HSS) sign/verify parity \u2014 split in G4 (2026-08-26) by keygen cost: V21a (SLH-DSA) is fast and runs in the routine suite; V21b (XMSS/HSS) is `#[ignore]`d (documented reason: XMSS keygen ~326s at this engine's smallest parameter set) rather than wired into the routine gate."
+    },
+    "HybridKEM": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::hybrid_ecdh_ml_kem_concatenate_composition"
+      ],
+      "justification": "ECDH-as-KEM \u2016 ML-KEM combined via CKM_CONCATENATE_BASE_AND_KEY \u2014 sender/receiver sides proven to agree on the same combined secret."
+    },
+    "Init": {
+      "disposition": "N/A-local",
+      "case_ids": [],
+      "justification": "C_Initialize/C_Finalize are server-process bootstrap lifecycle (master plan \u00a73 'Split' row) \u2014 no per-request network analogue; documented, not silently dropped. Deliberately empty \u2014 decision recorded in the residual-gaps plan \u00a73 (docs/remoting-pkcs11-v32-residual-gaps-plan-2026-08-26.md)."
+    },
+    "Invariant": {
+      "disposition": "RPC",
+      "case_ids": [],
+      "justification": "Same design-level guarantee as ErrCodes/Negative. Deliberately empty \u2014 decision recorded in the residual-gaps plan \u00a73 (docs/remoting-pkcs11-v32-residual-gaps-plan-2026-08-26.md)."
+    },
+    "KCV": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "CKA_CHECK_VALUE read via the generic C_GetAttributeValue verb on a freshly generated AES key \u2014 proven present and non-empty (\u00a74.11: computed on every secret-key creation). G3, 2026-08-26."
+    },
+    "KDF": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v19_derive_key_raw_and_hkdf_parity"
+      ],
+      "justification": "Same as G2Derive."
+    },
+    "KEM": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v20_ml_kem_768_cross_transport_encapsulate_decapsulate",
+        "core::ml_kem_768_encapsulate_decapsulate_round_trip"
+      ],
+      "justification": "C_EncapsulateKey/C_DecapsulateKey (v3.2 key-object form) \u2014 cross-transport shared-secret agreement proven, plus same-transport round trip and implicit-rejection on a tampered ciphertext."
+    },
+    "KEMKcv": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "Same attribute, on the shared-secret key an ML-KEM-768 C_DecapsulateKey produces \u2014 proven present and non-empty. G3, 2026-08-26."
+    },
+    "KEMNeg": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::ml_kem_768_encapsulate_decapsulate_round_trip"
+      ],
+      "justification": "The tampered-ciphertext sub-case proves ML-KEM's real implicit-rejection property (a corrupted ciphertext decapsulates to a different, deterministic-pseudorandom secret, never an error code)."
+    },
+    "KEMValueLen": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::ml_kem_768_encapsulate_decapsulate_round_trip"
+      ],
+      "justification": "The case asserts the real ML-KEM-768 ciphertext length (1088 bytes) and shared-secret length (32 bytes)."
+    },
+    "KMAC": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "CKM_KMAC_128, absent (default) params \u2014 per \u00a70's correction, this needs no native engine wrapper; the generic sign path already dispatches it. Real MAC produced over a generic-secret key. G3, 2026-08-26."
+    },
+    "KcvTemplate": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "Same attribute, on a key produced via C_UnwrapKey (template form) rather than C_GenerateKey \u2014 proven present and non-empty. G3, 2026-08-26."
+    },
+    "MechFlags": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v5_mechanism_list_and_info_parity"
+      ],
+      "justification": "Same as Discovery/G2MechTable \u2014 C_GetMechanismInfo's flags field is part of the parity assertion."
+    },
+    "MsgCrypt": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v17_message_encrypt_decrypt_kat_parity",
+        "core::message_encrypt_decrypt_one_shot_round_trip_and_tamper_detection",
+        "core::message_encrypt_generated_iv_and_multipart_matches_one_shot"
+      ],
+      "justification": "C_MessageEncryptInit/C_EncryptMessage/C_EncryptMessageBegin/C_EncryptMessageNext/C_MessageEncryptFinal and the C_*Decrypt* equivalents (C_MessageDecryptInit/C_DecryptMessage/C_DecryptMessageBegin/C_DecryptMessageNext/C_MessageDecryptFinal) \u2014 one-shot + Begin/Next multipart, including the GcmMessageParams RW-P variant with real tag OUT/IN semantics and generated-IV round trip."
+    },
+    "MsgSign": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v16_message_sign_verify_one_shot_parity",
+        "core::message_sign_verify_one_shot_and_multipart_round_trip"
+      ],
+      "justification": "C_MessageSignInit/C_SignMessage/C_SignMessageBegin/C_SignMessageNext/C_MessageSignFinal, one-shot and multipart."
+    },
+    "MsgVerify": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v16_message_sign_verify_one_shot_parity",
+        "core::message_sign_verify_one_shot_and_multipart_round_trip"
+      ],
+      "justification": "C_MessageVerifyInit/C_VerifyMessage/C_VerifyMessageBegin/C_VerifyMessageNext/C_MessageVerifyFinal, one-shot and multipart."
+    },
+    "MultiPart": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::digest_matches_local_oracle_and_fsm_equals_one_shot",
+        "core::ml_dsa_sign_fsm_and_one_shot_verify_with_real_signature_invalid_code",
+        "core::aes_ecb_encrypt_decrypt_round_trip_and_data_len_range"
+      ],
+      "justification": "C_DigestUpdate/C_DigestFinal, C_SignUpdate/C_SignFinal, C_VerifyInit/C_Verify/C_VerifyUpdate/C_VerifyFinal, C_EncryptUpdate/C_EncryptFinal, C_DecryptInit/C_DecryptUpdate/C_DecryptFinal \u2014 Init/Update/Final FSMs, including CKR_OPERATION_ACTIVE mixing guards."
+    },
+    "MultiPart_ECDSA": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "CKM_ECDSA_SHA256 (hash-combined, genuinely streamable \u2014 unlike bare CKM_ECDSA's single-part-only raw form) Update/Final FSM proven byte-identical to the one-shot Sign, plus a real Verify of the result. G3, 2026-08-26."
+    },
+    "MultiPart_EdDSA": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "Plain CKM_EDDSA Update/Final FSM proven byte-identical to the one-shot Sign (the engine buffers the message internally across Update calls; pure Ed25519 is deterministic so this equality is a real, meaningful assertion, not a coincidence), plus a real Verify of the result. G3, 2026-08-26."
+    },
+    "Negative": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v3_ml_dsa_sign_verify_and_tamper_ckr_parity",
+        "v32_parity::v9_generate_key_and_set_attribute_value_parity",
+        "v32_parity::v18_aes_key_wrap_unwrap_parity"
+      ],
+      "justification": "Every negative-path case across V1-V21 captures its expected CKR from an in-process control, never a hardcoded literal."
+    },
+    "PQKeyBytes": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v4_get_attribute_value_sensitive_code_parity",
+        "v32_parity::v7_generate_key_pair_template_parity"
+      ],
+      "justification": "PQ (ML-DSA) public/private key attribute reads via the same generic C_GetAttributeValue path."
+    },
+    "Profile": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_kcv_profile_multipart_and_fork"
+      ],
+      "justification": "The engine's built-in CKO_PROFILE objects, found via C_FindObjectsInit/C_FindObjects and read via C_GetAttributeValue (CKA_PROFILE_ID) \u2014 pure existing-verb composition, proven to return at least one real profile object. G3, 2026-08-26."
+    },
+    "RawEncoding": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "CKA_EC_POINT read via the generic C_GetAttributeValue verb on a freshly generated EC public key \u2014 proven present and non-empty. G3, 2026-08-26."
+    },
+    "SHA-3": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::mechanism_sweep_ciphers_and_classical_signing"
+      ],
+      "justification": "Same as G-DA-X \u2014 CKM_SHA3_256 digest, one-shot and FSM proven to agree. G3, 2026-08-26."
+    },
+    "SLHDSA": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v21a_slh_dsa_sign_verify_parity"
+      ],
+      "justification": "SLH-DSA-SHA2 and SLH-DSA-SHAKE parameter sets, both cased. Split into its own V21a case in G4 (2026-08-26, was previously sharing V21's `#[ignore]` mark with XMSS/HSS purely for shared session/transport setup) \u2014 SLH-DSA-128S keygen is fast, so this now runs in the routine suite, not `#[ignore]`d."
+    },
+    "Session": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v1_open_close_and_double_close_ckr_parity",
+        "v32_parity::v11_admin_info_and_session_lifecycle_parity",
+        "v32_parity::v12_close_all_sessions_invalid_slot_parity",
+        "v32_parity::v22_verify_signature_multipart_and_session_validation_flags_parity"
+      ],
+      "justification": "C_OpenSession/C_CloseSession/C_Login/C_Logout/C_GetSessionInfo/C_LoginUser/C_SessionCancel/C_CloseAllSessions, plus the destructive-gated C_InitToken/C_InitPIN/C_SetPIN \u2014 the RPC half of the master plan \u00a73 'Init, Session \u2192 Split' row. C_GetSessionValidationFlags (an RW-T audit finding) proven to return the real, honest empty flag set (this engine performs no FIPS/validation-authority checks) plus the real CKR_ARGUMENTS_BAD on an undefined type. C_CloseAllSessions's real destructive path (closing this process's shared bootstrap session) is proven only in the core crate's serialized admin_info_and_slot_functions_are_real (not referenced by case_id here since it wasn't the plan's chosen exemplar), not in the parallel acceptance suite \u2014 see the RW6a execution log entry for why."
+    },
+    "WrapTemplate": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v18_aes_key_wrap_unwrap_parity",
+        "core::aes_key_wrap_unwrap_round_trip_and_not_wrappable_negative"
+      ],
+      "justification": "C_UnwrapKey's template form, including the real CKR_KEY_UNEXTRACTABLE negative."
+    },
+    "XMSS": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v21b_xmss_hss_sign_verify_parity"
+      ],
+      "justification": "Split into its own V21b case in G4 (2026-08-26, was V21 combined with SLH-DSA). `#[ignore]`d \u2014 measured ~326s for the whole sweep at this engine's smallest single-tree parameter set (height 10, no smaller option exists per v3.2 \u00a76.66.6)."
+    },
+    "XmssParamSet": {
+      "disposition": "RPC",
+      "case_ids": [
+        "v32_parity::v21b_xmss_hss_sign_verify_parity"
+      ],
+      "justification": "Same case as XMSS (V21b) \u2014 only the default parameter set (CKP_XMSS_SHA2_10_256) exercised; other XMSS/XMSSMT parameter sets reachable via the same generic C_GenerateKeyPair template but not cased (would each cost more Merkle-tree keygen time)."
+    },
+    "SplitKey": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::split_key_xor_split_then_join_round_trip_recovers_secret",
+        "core::split_key_gf256_threshold_subset_join_recovers_secret",
+        "core::split_key_join_below_threshold_and_bad_wire_codes_rejected",
+        "core::split_key_xor_rejects_parts_not_equal_threshold",
+        "v32_parity::v26_split_key_xor_round_trip_parity"
+      ],
+      "justification": "VENDOR EXTENSION (not a pkcs11f.h category; not in cpp_compliance_report.json). SplitKey/JoinKey RPCs added in G2 gap-remediation (2026-08-26), wrapping softhsmrustv3::native::split/join directly (no CKM_PQCTODAY_SPLIT_KEY C_* dispatch arm exists to go through, unlike every other row in this ledger). method/polynomial use the KMIP 3.0 \u00a711.54/\u00a711.55 enumeration codepoints verbatim. Proven: XOR split\u2192join round trip recovering the original secret; GF(2^8) 5-part/3-threshold split with a JOIN using only a 3-of-5 subset (the actual threshold property, not just a full-set round trip); a below-threshold join rejected with the real CKR_ARGUMENTS_BAD; XOR's parts==threshold constraint (\u00a713.1) rejected when violated; undefined method/polynomial wire codes rejected before any engine call."
+    }
+  }
+}

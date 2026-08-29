@@ -1335,25 +1335,42 @@ fn w1_ec_params_are_decoded_never_defaulted() {
 }
 
 // ── W2 — Ed448 must not silently yield Ed25519 ──────────────────────────
+//
+// Originally asserted Ed448 keygen failed cleanly (CKR_CURVE_NOT_SUPPORTED)
+// rather than silently substituting an Ed25519 key — §6.3.14 permits
+// supporting only one of the two curves, and this engine chose Ed25519-only
+// at the time. Ed448 is now genuinely implemented (2026-08-27,
+// `ed448-goldilocks`, already a transitive dep via `x448` below for its
+// Montgomery arm), so the assertion flips: an Ed448 request must now
+// SUCCEED and produce a real, distinctly-Ed448-shaped key (57-byte private
+// scalar / 57-byte public point, not 32), not fail and not silently return
+// an Ed25519 key either. The "not silently yield Ed25519" guarantee this
+// test protects is unchanged — only which outcome satisfies it.
 
 #[test]
 fn w2_edwards_keygen_reads_ec_params() {
     let _guard = test_lock::acquire();
     w_setup();
 
-    // Ed448 — 1.3.101.113. §6.3.14 lets a token support only one of the two.
-    let (rv, _, _) = gen_ec(Some(oid(&[0x2b, 0x65, 0x71])), CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    // Ed448 — 1.3.101.113. Both legal CKA_EC_PARAMS forms must produce a
+    // genuine Ed448 key, not an Ed25519 substitute and not a clean failure.
+    let (rv, hp, hs) = gen_ec(Some(oid(&[0x2b, 0x65, 0x71])), CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    assert_eq!(rv, CKR_OK, "an Ed448 request must succeed now that it's implemented");
     assert_eq!(
-        rv, CKR_CURVE_NOT_SUPPORTED,
-        "an Ed448 request must fail, not return an Ed25519 key"
+        obj_attr(hs, CKA_VALUE).unwrap().len(),
+        57,
+        "a substituted Ed25519 key would be 32 bytes, not Ed448's 57"
     );
-    let (rv, _, _) = gen_ec(
+    assert_eq!(obj_attr(hp, CKA_EC_POINT).unwrap().len(), 57);
+    let (rv, _, hs) = gen_ec(
         Some(curve_name("edwards448")),
         CKM_EC_EDWARDS_KEY_PAIR_GEN,
     );
-    assert_eq!(rv, CKR_CURVE_NOT_SUPPORTED, "…in the curveName form too");
+    assert_eq!(rv, CKR_OK, "…in the curveName form too");
+    assert_eq!(obj_attr(hs, CKA_VALUE).unwrap().len(), 57);
 
-    // Ed25519 in both legal forms still works.
+    // Ed25519 in both legal forms still works, and is unaffected by Ed448
+    // now sharing this arm (distinguished by length, not a separate mech).
     let (rv, _, hs) = gen_ec(Some(oid(&[0x2b, 0x65, 0x70])), CKM_EC_EDWARDS_KEY_PAIR_GEN);
     assert_eq!(rv, CKR_OK);
     assert_eq!(obj_attr(hs, CKA_VALUE).unwrap().len(), 32);
@@ -1366,6 +1383,97 @@ fn w2_edwards_keygen_reads_ec_params() {
     // Absent attribute.
     let (rv, _, _) = gen_ec(None, CKM_EC_EDWARDS_KEY_PAIR_GEN);
     assert_eq!(rv, CKR_TEMPLATE_INCOMPLETE);
+}
+
+// ── Ed448 sign/verify round trip, plus mixed-curve non-interference ─────
+
+#[test]
+fn ed448_sign_verify_round_trip_and_curves_do_not_cross_contaminate() {
+    let _guard = test_lock::acquire();
+    w_setup();
+    // The generated private keys are CKA_PRIVATE=TRUE (§4.4/§5.6), so
+    // C_SignInit requires the session's token to be logged in as User —
+    // poke TOKEN_STORE directly rather than the full C_InitToken/C_Login
+    // PIN dance, mirroring how s6_bring_up_token's own setup pokes
+    // `login_state` directly elsewhere in this file.
+    crate::state::TOKEN_STORE.with(|ts| {
+        if let Some(t) = ts.borrow_mut().get_mut(&0) {
+            t.login_state = crate::state::LoginState::User;
+        }
+    });
+
+    let (rv, hp448, hs448) =
+        gen_ec(Some(oid(&[0x2b, 0x65, 0x71])), CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    assert_eq!(rv, CKR_OK);
+    let (rv, hp25519, hs25519) =
+        gen_ec(Some(oid(&[0x2b, 0x65, 0x70])), CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    assert_eq!(rv, CKR_OK);
+
+    let msg = b"W2 follow-up: Ed448 is now real, not just rejected cleanly";
+    let mut m: [usize; 3] = [CKM_EDDSA as usize, 0, 0];
+
+    // Ed448 signs and verifies against its own key.
+    assert_eq!(C_SignInit(W_SESSION, m.as_mut_ptr() as *mut u8, hs448), CKR_OK);
+    let mut sig = vec![0u8; 1024];
+    let mut sig_len: u32 = 1024;
+    let rv = C_Sign(
+        W_SESSION,
+        msg.as_ptr() as *mut u8,
+        msg.len() as u32,
+        sig.as_mut_ptr(),
+        &mut sig_len,
+    );
+    assert_eq!(rv, CKR_OK);
+    sig.truncate(sig_len as usize);
+    assert_eq!(sig.len(), 114, "Ed448 signatures are 114 bytes, not Ed25519's 64");
+
+    assert_eq!(C_VerifyInit(W_SESSION, m.as_mut_ptr() as *mut u8, hp448), CKR_OK);
+    let rv = C_Verify(
+        W_SESSION,
+        msg.as_ptr() as *mut u8,
+        msg.len() as u32,
+        sig.as_ptr() as *mut u8,
+        sig.len() as u32,
+    );
+    assert_eq!(rv, CKR_OK, "a genuine Ed448 signature must verify against its own Ed448 key");
+
+    // The Ed448 signature must NOT verify under the unrelated Ed25519 key
+    // (proves the two curves aren't cross-wired through the shared 32-vs-57
+    // length dispatch in sign_eddsa/verify_eddsa).
+    assert_eq!(C_VerifyInit(W_SESSION, m.as_mut_ptr() as *mut u8, hp25519), CKR_OK);
+    let rv = C_Verify(
+        W_SESSION,
+        msg.as_ptr() as *mut u8,
+        msg.len() as u32,
+        sig.as_ptr() as *mut u8,
+        sig.len() as u32,
+    );
+    assert_ne!(rv, CKR_OK, "an Ed448 signature must not verify under an Ed25519 key");
+
+    // Ed25519 still signs/verifies correctly on its own, unaffected.
+    assert_eq!(C_SignInit(W_SESSION, m.as_mut_ptr() as *mut u8, hs25519), CKR_OK);
+    let mut sig25519 = vec![0u8; 1024];
+    let mut sig25519_len: u32 = 1024;
+    let rv = C_Sign(
+        W_SESSION,
+        msg.as_ptr() as *mut u8,
+        msg.len() as u32,
+        sig25519.as_mut_ptr(),
+        &mut sig25519_len,
+    );
+    assert_eq!(rv, CKR_OK);
+    sig25519.truncate(sig25519_len as usize);
+    assert_eq!(sig25519.len(), 64);
+
+    assert_eq!(C_VerifyInit(W_SESSION, m.as_mut_ptr() as *mut u8, hp25519), CKR_OK);
+    let rv = C_Verify(
+        W_SESSION,
+        msg.as_ptr() as *mut u8,
+        msg.len() as u32,
+        sig25519.as_ptr() as *mut u8,
+        sig25519.len() as u32,
+    );
+    assert_eq!(rv, CKR_OK);
 }
 
 // ── W3 — XMSS sign/verify source the STANDARD parameter set ─────────────

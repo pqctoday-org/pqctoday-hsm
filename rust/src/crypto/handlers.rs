@@ -1969,29 +1969,58 @@ pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<
     }
 }
 
+// Ed448 (2026-08-27) — CKM_EDDSA covers both curves (§6.3.14); dispatch on
+// the stored private key's length (32B Ed25519 seed vs 57B Ed448 seed)
+// rather than threading curve identity through every call site, mirroring
+// how verify_eddsa/PH below dispatch on the public key's length.
 pub fn sign_eddsa(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
-    if sk_bytes.len() != 32 {
-        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    match sk_bytes.len() {
+        32 => {
+            let mut key_bytes = [0u8; 32];
+            key_bytes.copy_from_slice(sk_bytes);
+            let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+            use ed25519_dalek::Signer;
+            Ok(sk.sign(msg).to_bytes().to_vec())
+        }
+        57 => {
+            let sk = ed448_goldilocks::SigningKey::try_from(sk_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            Ok(sk.sign_raw(msg).to_bytes().to_vec())
+        }
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
-    let mut key_bytes = [0u8; 32];
-    key_bytes.copy_from_slice(sk_bytes);
-    let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
-    use ed25519_dalek::Signer;
-    Ok(sk.sign(msg).to_bytes().to_vec())
 }
 
 pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
-    use sha2::Digest;
-    if sk_bytes.len() != 32 {
-        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    match sk_bytes.len() {
+        32 => {
+            use sha2::Digest;
+            let mut key_bytes = [0u8; 32];
+            key_bytes.copy_from_slice(sk_bytes);
+            let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+            let prehash = sha2::Sha512::new().chain_update(msg);
+            sk.sign_prehashed(prehash, None)
+                .map(|sig| sig.to_bytes().to_vec())
+                .map_err(|_| CKR_FUNCTION_FAILED)
+        }
+        57 => {
+            // Ed448ph (RFC 8032 §5.2) pre-hashes with SHAKE256 to a 64-byte
+            // output, NOT SHA-512 (that's Ed25519ph, above) — must use
+            // `ed448_goldilocks::shake` (its own re-exported SHAKE-only
+            // crate), not this crate's own direct `sha3` dependency used
+            // elsewhere: `PreHasherXof`'s trait bounds are tied to the exact
+            // digest crate instance ed448-goldilocks was compiled against.
+            use ed448_goldilocks::PreHasherXof;
+            use ed448_goldilocks::shake::{Shake256, digest::Update};
+            let sk = ed448_goldilocks::SigningKey::try_from(sk_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let prehash: PreHasherXof<Shake256> = Shake256::default().chain(msg).into();
+            sk.sign_prehashed(None, prehash)
+                .map(|sig| sig.to_bytes().to_vec())
+                .map_err(|_| CKR_FUNCTION_FAILED)
+        }
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
-    let mut key_bytes = [0u8; 32];
-    key_bytes.copy_from_slice(sk_bytes);
-    let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
-    let prehash = sha2::Sha512::new().chain_update(msg);
-    sk.sign_prehashed(prehash, None)
-        .map(|sig| sig.to_bytes().to_vec())
-        .map_err(|_| CKR_FUNCTION_FAILED)
 }
 
 /// Map a CKM_*_HMAC_GENERAL mechanism to (base full-length HMAC mechanism,
@@ -2150,7 +2179,21 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
             CURVE_P384 => 96,
             _ => 64, // CURVE_P256, CURVE_K256, and default
         },
-        CKM_EDDSA | CKM_EDDSA_PH => 64,
+        // Ed448 (2026-08-27) — CKM_EDDSA/_PH cover both curves (§6.3.14), and
+        // their signature sizes differ (RFC 8032): Ed25519 = 64 bytes,
+        // Ed448 = 114 bytes. This used to hardcode 64 unconditionally, which
+        // silently misclassified an Ed448 signature's length as wrong even
+        // when it was correct — mirrors the ECDSA arm above's own "size MUST
+        // come from the key's curve" comment. CKA_PRIV_PARAM_SET (`ps`,
+        // above) isn't populated for EdDSA objects, so this reads
+        // CKA_EC_PARAMS directly instead.
+        CKM_EDDSA | CKM_EDDSA_PH => {
+            match get_object_attr_bytes(hkey, CKA_EC_PARAMS).and_then(|p| decode_ec_params(&p).ok())
+            {
+                Some(CURVE_ED448) => 114,
+                _ => 64,
+            }
+        }
         _ => 512,
     }
 }
@@ -2812,25 +2855,61 @@ pub fn verify_ecdsa(
 }
 
 pub fn verify_eddsa(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(), u32> {
-    let pk_arr: &[u8; 32] = pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-    let sig_arr: &[u8; 64] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
-    let vk =
-        ed25519_dalek::VerifyingKey::from_bytes(pk_arr).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-    let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
-    use ed25519_dalek::Verifier;
-    vk.verify(msg, &sig).map_err(|_| CKR_SIGNATURE_INVALID)
+    match pk_bytes.len() {
+        32 => {
+            let pk_arr: &[u8; 32] =
+                pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig_arr: &[u8; 64] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(pk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
+            use ed25519_dalek::Verifier;
+            vk.verify(msg, &sig).map_err(|_| CKR_SIGNATURE_INVALID)
+        }
+        57 => {
+            let pk_arr: &[u8; 57] =
+                pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig_arr: &[u8; 114] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            let vk = ed448_goldilocks::VerifyingKey::from_bytes(pk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
+            vk.verify_raw(&sig, msg).map_err(|_| CKR_SIGNATURE_INVALID)
+        }
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
 }
 
 pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(), u32> {
-    use sha2::Digest;
-    let pk_arr: &[u8; 32] = pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-    let sig_arr: &[u8; 64] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
-    let vk =
-        ed25519_dalek::VerifyingKey::from_bytes(pk_arr).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-    let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
-    let prehash = sha2::Sha512::new().chain_update(msg);
-    vk.verify_prehashed(prehash, None, &sig)
-        .map_err(|_| CKR_SIGNATURE_INVALID)
+    match pk_bytes.len() {
+        32 => {
+            use sha2::Digest;
+            let pk_arr: &[u8; 32] =
+                pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig_arr: &[u8; 64] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(pk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
+            let prehash = sha2::Sha512::new().chain_update(msg);
+            vk.verify_prehashed(prehash, None, &sig)
+                .map_err(|_| CKR_SIGNATURE_INVALID)
+        }
+        57 => {
+            // Ed448ph — SHAKE256 prehash, see sign_eddsa_ph's comment on why
+            // this must be ed448_goldilocks's re-exported `shake`.
+            use ed448_goldilocks::PreHasherXof;
+            use ed448_goldilocks::shake::{Shake256, digest::Update};
+            let pk_arr: &[u8; 57] =
+                pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig_arr: &[u8; 114] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            let vk = ed448_goldilocks::VerifyingKey::from_bytes(pk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
+            let prehash: PreHasherXof<Shake256> = Shake256::default().chain(msg).into();
+            vk.verify_prehashed(&sig, None, prehash)
+                .map_err(|_| CKR_SIGNATURE_INVALID)
+        }
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
 }
 
 #[cfg(test)]

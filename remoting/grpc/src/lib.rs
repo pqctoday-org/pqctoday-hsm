@@ -5,3 +5,4 @@
 
 pub mod error;
 pub mod service;
+pub mod service_v32;

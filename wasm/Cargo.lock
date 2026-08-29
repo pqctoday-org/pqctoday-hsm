@@ -665,15 +665,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ed448"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae112a25f86ae3598d4e8533ed1e65149cec6eb21918e7a6f4c06dddec370263"
+dependencies = [
+ "pkcs8 0.11.0",
+ "signature 3.0.0",
+]
+
+[[package]]
 name = "ed448-goldilocks"
 version = "0.14.0-pre.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8be3c3dac25c52fc0f2f193687d09efa1e4c8981f6b8544acc9faffc1c29bd0"
 dependencies = [
+ "ed448",
  "elliptic-curve 0.14.0-rc.35",
  "hash2curve",
  "rand_core 0.10.1",
+ "serdect",
  "shake",
+ "signature 3.0.0",
  "subtle",
 ]
 
@@ -1696,6 +1709,10 @@ name = "signature"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
+dependencies = [
+ "digest 0.11.3",
+ "rand_core 0.10.1",
+]
 
 [[package]]
 name = "smallvec"
@@ -1718,6 +1735,7 @@ dependencies = [
  "console_error_panic_hook",
  "ctr",
  "ed25519-dalek",
+ "ed448-goldilocks",
  "fips204",
  "fips205",
  "frodo-kem",

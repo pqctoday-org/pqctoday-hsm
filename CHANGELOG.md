@@ -8,6 +8,153 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Rust engine: real Ed448 support (keygen, sign, verify, both pure and
+  pre-hash).** Previously the only Rust-engine gap against the C++ engine's
+  full Ed25519/Ed448 coverage: `CKM_EC_EDWARDS_KEY_PAIR_GEN` explicitly
+  rejected an Ed448 request with `CKR_CURVE_NOT_SUPPORTED` (§6.3.14 permits
+  supporting only one of the two curves; this engine had chosen Ed25519
+  only), and `CKM_EDDSA`/`CKM_EDDSA_PH`'s sign/verify paths were hardcoded
+  to Ed25519's fixed 32-byte key / 64-byte signature sizes with no Ed448
+  branch anywhere. An externally-imported Ed448 public key hit an
+  incidental (not curve-aware) `CKR_SIGNATURE_LEN_RANGE` rejection in
+  `C_Verify`'s §5.12.6 fixed-length precheck, since `get_sig_len` also
+  hardcoded 64 bytes for `CKM_EDDSA`/`_PH` regardless of curve — mirrors a
+  bug the ECDSA arm two cases above it had already been fixed for
+  ("size MUST come from the key's curve, not the hash mechanism").
+  `ed448-goldilocks` was already a transitive dependency (pulled in by
+  `x448`, used there only for its Montgomery/X448 arm) and mirrors
+  `ed25519-dalek`'s API closely enough that `sign_eddsa`/`verify_eddsa`/
+  `_ph` now dispatch on the stored key's length (32B Ed25519 vs 57B Ed448)
+  rather than threading curve identity through every call site. Ed448ph
+  pre-hashes with SHAKE256 to a 64-byte output (RFC 8032 §5.2), not
+  SHA-512 — a different algorithm from Ed25519ph, not just a different key
+  size. New conformance coverage: `w2_edwards_keygen_reads_ec_params`
+  flipped from asserting Ed448 keygen fails cleanly to asserting it
+  succeeds and produces a genuinely 57-byte key (not a silently-substituted
+  Ed25519 one); a new round-trip test proves Ed448 and Ed25519 keys don't
+  cross-verify through the shared length-based dispatch.
+
+## [0.26.1] — 2026-08-27
+
+**Patch release: fixes a real SEGFAULT that `v0.26.0`'s own tagged commit
+carries.** `v0.26.0` was tagged and merged before this defect was found —
+anyone building from that tag gets a crashing `p11_v32_compliance` test.
+No feature changes; this release exists solely to carry the fix.
+
+### Fixed
+
+- **`p11_v32_compliance` SEGFAULT in `test_bip32_wallets`, real and
+  deterministic, not an environment flake.** `HDWalletDerivation::hmacSha512`
+  passed `(size_t*)&macLen` to `EVP_MAC_final()`, but `macLen` was declared
+  `unsigned int` (4 bytes) while OpenSSL's real signature writes through a
+  `size_t*` (8 bytes on any LP64 target) — a genuine stack buffer overflow
+  that stomped the adjacent `EVP_MAC*` local, corrupting it before
+  `EVP_MAC_free()` dereferenced it. Reproduced 3/3 under CI's exact config
+  (`CMAKE_BUILD_TYPE=Debug`, OpenSSL 3.6.3) and 0/3 under the Release +
+  OpenSSL 3.5.6 config `local-gate.sh --cpp` had validated `v0.26.0` with —
+  which is why that release's own "100% passing" C++ ctest figure and
+  GitHub's red CI were both true statements about the same commit. Fixed by
+  declaring `macLen` as `size_t` and dropping the cast; verified 5/5 clean
+  on the previously-crashing test and 8/8 on the full C++ ctest suite, both
+  in CI's exact config, on both arm64 and real amd64 (QEMU). Introduced in
+  `cc559f3` (the BIP32/SLIP-0010 feature), unrelated to `v0.26.0`'s remoting
+  work — the only occurrence of this cast pattern anywhere in the repo.
+- A single post-fix CI run additionally showed `[BIP32] Child_Derive: FAIL
+  (RV=6)` — investigated rather than dismissed: this exact code path had
+  never once executed on CI before (dead/untested until 2026-08-23, then
+  blocked by the SEGFAULT above ever since), so this may have been its
+  first real execution anywhere. A true SLIP-10 rejection here is
+  statistically near-impossible (~2⁻¹²⁸); ruled out as a deterministic bug
+  via 15/15 clean reproductions across arm64 and real amd64 (QEMU) in CI's
+  exact build config, then confirmed as a one-off by a clean CI re-run.
+  Tracked as a known flake, not fixed further — no reproducible cause
+  found.
+
+## [0.26.0] — 2026-08-26
+
+**A new `Pkcs11V32` gRPC+REST service mirrors PKCS#11 v3.2 1:1 — 99 of 104
+`pkcs11f.h` functions live as RPCs, plus 2 vendor RPCs for Split Key —
+alongside the existing legacy 9-verb remoting service, which is unchanged.**
+
+### Added
+
+- **`Pkcs11V32` gRPC + REST service** (`remoting/`): unlike the legacy
+  `Pkcs11Remote` service (9 hand-picked verbs, `ck_rv` mapped through a
+  translation layer), this mirrors the C ABI directly — one unary RPC per
+  `C_*` function, server-held FSM state, raw `CKM`/`CKA`/`CKR` codepoints on
+  the wire, `ck_rv` as a response FIELD (never a transport error). 99 of 104
+  `pkcs11f.h` functions are live; the remaining 5
+  (`C_Initialize`/`C_Finalize`/`C_GetFunctionList`/`C_GetInterface`/
+  `C_GetInterfaceList`) are genuinely N/A over a network and documented as
+  such, not silently dropped. The legacy service is untouched and still
+  frozen byte-for-byte — every commit that touched the new service also ran
+  its own parity tests against the old one.
+- **`SplitKey`/`JoinKey` vendor RPCs** — explicitly labeled as a vendor
+  extension outside `pkcs11f.h` (there is no `CKM_PQCTODAY_SPLIT_KEY` `C_*`
+  dispatch arm in the engine to mirror), wrapping the same
+  `native::split`/`native::join` calls that back KMIP 3.0's Create/Join
+  Split Key. `method`/`polynomial` use the KMIP 3.0 §11.54/§11.55
+  enumeration codepoints verbatim, so a caller driving both surfaces sees
+  one wire vocabulary.
+- **A coverage ledger with a real ratchet**, not a static table:
+  `remoting/coverage_ledger.json` maps every category in the C++ engine's
+  own compliance report to a disposition (RPC / N/A-local) and the exact
+  test(s) that prove it, cross-checked by `remoting/scripts/
+  check_coverage_ledger.py` against the real proto service and the real
+  test files — a case_id naming a function that doesn't exist, or an RPC
+  with zero ledger mention, fails the gate. Regenerates
+  `remoting/REMOTE_P11_V32_COVERAGE.md` deterministically.
+- **A live-binary gRPC smoke-test tool** (`remoting/grpc/examples/
+  smoke_client.rs`): pins the real server's TLS certificate as a trusted CA
+  root (genuine certificate verification, not a bypass) and drives a real
+  `OpenSession → GenerateKeyPair → Sign → Verify → CloseSession` sequence
+  against the actual compiled binary — the "run the app, not the test
+  suite" check the service never had before.
+
+### Verification
+
+- Real findings caught and fixed during development, not shipped: XOR
+  secret-sharing reconstruction has no per-share-count check at join time
+  (only enforced at split time, KMIP 3.0 §13.1) — the negative test for it
+  had to use a different method; FIPS 205's SLH-DSA "s"/"f" parameter-set
+  suffix governs signing SPEED specifically (not keygen cost as first
+  assumed), which turned an intended-to-be-fast test case into a measured
+  227-second one before the fix; the engine's own compliance evidence
+  showed the "ChaCha20" test categories actually exercise the
+  Poly1305-AEAD variant, not the plain stream cipher the initial plan
+  assumed.
+- Whole remoting workspace: **82 passed, 0 failed** (2 posture + 7
+  legacy-parity + 27 three-transport parity cases, 1 `#[ignore]`d (XMSS/HSS
+  sign/verify — ~326s at this engine's smallest parameter set, run
+  on-demand, not in the routine gate) + 46 core unit tests), stable across
+  repeated runs.
+- Full release gate (`bash scripts/local-gate.sh --all`) green end to end:
+  kmip 894 passed, rust engine 417 passed, OASIS KMIP 3.0 replay 97 PASS /
+  0 FAIL / 5 SKIP_DEPRECATED, cross-engine PKCS#11 differential harness 49
+  scenarios / 3945 observations / 0 uncovered divergences, C++ ctest suite
+  (incl. the v3.2 compliance harness, 779 pass / 0 fail / 36 documented
+  skip) 100% passing, 20-suite ACVP wasm harness 133 pass / 0 fail / 1
+  skip, XMSS/XMSS^MT vs release wasm 18 passed, §3.3.3 hybrid TLS groups
+  vs real OpenSSL 3.6 passing, JavaJCE provider suite 208 passed, and
+  JavaJCE-remote gRPC provider suite (against a live `pqc-grpc`) 14
+  passed.
+
+### Fixed
+
+- **README.md's checked-in compliance figures had drifted well behind the
+  actual reports** they cite — the C++ compliance validator's own report
+  now reads 779 pass / 0 fail / 36 documented skip, not the 193 / 0 / 1
+  README still quoted (which also mis-described the single skip as
+  "legacy RIPEMD-160" — that mechanism now passes outright); the Rust
+  engine's conformance evidence now reads 976 passed / 0 failed across 51
+  sections, not the 257/257 across 40 sections figure previously
+  published. Neither drift was introduced by this release; both predate
+  it. Reconciled here per this repo's own `RELEASING.md` checklist, which
+  exists specifically so a reviewer greps the release diff and finds one
+  figure per suite, not three disagreeing ones.
+
 ## [0.25.0] — 2026-08-25
 
 ### Fixed

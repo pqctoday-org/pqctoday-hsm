@@ -4,5 +4,7 @@
 //! bootstrap.
 
 pub mod dto;
+pub mod dto_v32;
 pub mod error;
 pub mod routes;
+pub mod routes_v32;

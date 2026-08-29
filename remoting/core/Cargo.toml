@@ -28,3 +28,6 @@ time = "0.3"
 
 [dev-dependencies]
 serial_test = "3"
+# Independent digest oracle for verbs_v32's own tests — assertions are
+# against sha2's output, not the engine hashing itself.
+sha2 = "0.10"

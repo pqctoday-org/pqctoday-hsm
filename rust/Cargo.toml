@@ -82,6 +82,15 @@ ripemd = "0.1"
 # one-shot only; `ghash` lets us stream the authentication tag.
 ghash = "0.5"
 ed25519-dalek = { version = "2.1", features = ["rand_core", "digest"] }
+# Ed448 (RFC 8032 §5.2 / PKCS#11 v3.2 §6.3.14's other permitted Edwards
+# curve) — already present transitively via `x448` below (that crate only
+# uses its Montgomery/X448 pieces); promoted to a direct dependency, pinned
+# to the exact version already resolved in Cargo.lock so this doesn't shift
+# x448's own resolution. `default-features = false` drops `std` (this crate
+# targets wasm32) and `getrandom`/`pkcs8` (unused — keygen sources entropy
+# via the same `getrandom_0_4`/`SysRng` path FrodoKEM already uses below,
+# see the CKM_EC_EDWARDS_KEY_PAIR_GEN Ed448 arm in ffi.rs).
+ed448-goldilocks = { version = "0.14.0-pre.11", default-features = false, features = ["alloc", "signing"] }
 hmac = "0.12.1"
 sp800-185 = "0.2.0"
 pbkdf2 = "0.12"

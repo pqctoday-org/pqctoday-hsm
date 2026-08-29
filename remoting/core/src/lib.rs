@@ -8,6 +8,7 @@ mod cert;
 pub mod algorithm;
 pub mod error;
 pub mod verbs;
+pub mod verbs_v32;
 
 pub use algorithm::Algorithm;
 pub use error::CkError;

@@ -37,6 +37,7 @@ import {
   aesDecrypt,
   aesCtrDecrypt,
   hmacVerify,
+  hmacVerifyGeneral,
   rsaVerify,
   ecdsaVerify,
   verifyBytes,
@@ -145,17 +146,22 @@ async function runSuite(engineName) {
       }
     }
 
-    // ── 2. HMAC-SHA256 Verify KAT (RFC 4231) ──────────────────────────────
-    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA256_HMAC)) {
-      addResult('hmac256', 'HMAC-SHA256', 'Verify KAT', 'SKIP', 'mechanism not supported')
+    // ── 2. HMAC-SHA256 Verify KAT (NIST ACVP, truncated) ──────────────────
+    // WS-10 (2026-08-28): NIST's ACVP-HMAC reference vectors test SP 800-107
+    // truncation lengths shorter than the full digest (this sample tops out
+    // at 160 bits), so this uses CKM_SHA256_HMAC_GENERAL rather than the
+    // exact-length-only CKM_SHA256_HMAC — see hmacVerifyGeneral / the hub's
+    // matching hsm_hmacVerifyGeneral for the same reasoning.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA256_HMAC_GENERAL)) {
+      addResult('hmac256', 'HMAC-SHA256', 'Verify KAT (NIST ACVP, truncated)', 'SKIP', 'mechanism not supported')
     } else {
       const tv = hmacVec.testGroups[0].tests[0]
       try {
         const h = importHMACKey(M, hSession, hexToBytes(tv.key), { sign: false, verify: true })
-        const ok = hmacVerify(M, hSession, h, hexToBytes(tv.msg), hexToBytes(tv.mac))
-        addResult('hmac256', 'HMAC-SHA256', 'Verify KAT', ok ? 'PASS' : 'FAIL', `MAC[${tv.mac.length / 2}B]`)
+        const ok = hmacVerifyGeneral(M, hSession, h, hexToBytes(tv.msg), hexToBytes(tv.mac), CK.CKM_SHA256_HMAC_GENERAL)
+        addResult('hmac256', 'HMAC-SHA256', 'Verify KAT (NIST ACVP, truncated)', ok ? 'PASS' : 'FAIL', `MAC[${tv.mac.length / 2}B, ${tv.macLen}-bit]`)
       } catch (e) {
-        addResult('hmac256', 'HMAC-SHA256', 'Verify KAT', 'FAIL', e.message)
+        addResult('hmac256', 'HMAC-SHA256', 'Verify KAT (NIST ACVP, truncated)', 'FAIL', e.message)
       }
     }
 
@@ -350,18 +356,22 @@ async function runSuite(engineName) {
       }
     }
 
-    // ── 11. AES-CBC-256 Decrypt KAT (SP 800-38A) ─────────────────────────
-    if (mechs.size > 0 && !mechs.has(CK.CKM_AES_CBC_PAD)) {
-      addResult('aescbc', 'AES-CBC-256', 'Decrypt KAT', 'SKIP', 'mechanism not supported')
+    // ── 11. AES-CBC-256 Decrypt KAT (NIST ACVP-AES-CBC) ───────────────────
+    // WS-10 (2026-08-28): NIST's ACVP-AES-CBC vectors are raw block-cipher
+    // (no PKCS#7 padding) — uses CKM_AES_CBC ('cbc-raw' mode), not the
+    // padded CKM_AES_CBC_PAD. See aesDecrypt's doc comment / the hub's
+    // matching hsm_aesDecrypt('cbc-raw') for the same reasoning.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_AES_CBC)) {
+      addResult('aescbc', 'AES-CBC-256', 'Decrypt KAT (NIST ACVP)', 'SKIP', 'mechanism not supported')
     } else {
       const tv = aesCbcVec.testGroups[0].tests[0]
       try {
         const h = importAESKey(M, hSession, hexToBytes(tv.key), { encrypt: false, decrypt: true, wrap: false, unwrap: false, derive: false })
-        const pt = aesDecrypt(M, hSession, h, hexToBytes(tv.ct), hexToBytes(tv.iv), 'cbc')
+        const pt = aesDecrypt(M, hSession, h, hexToBytes(tv.ct), hexToBytes(tv.iv), 'cbc-raw')
         const ok = arrEq(pt, hexToBytes(tv.pt))
-        addResult('aescbc', 'AES-CBC-256', 'Decrypt KAT', ok ? 'PASS' : 'FAIL', `PT[${pt.length}B]: ${bytesToHex(pt, 16)}`)
+        addResult('aescbc', 'AES-CBC-256', 'Decrypt KAT (NIST ACVP)', ok ? 'PASS' : 'FAIL', `PT[${pt.length}B]: ${bytesToHex(pt, 16)}`)
       } catch (e) {
-        addResult('aescbc', 'AES-CBC-256', 'Decrypt KAT', 'FAIL', e.message)
+        addResult('aescbc', 'AES-CBC-256', 'Decrypt KAT (NIST ACVP)', 'FAIL', e.message)
       }
     }
 
@@ -381,31 +391,31 @@ async function runSuite(engineName) {
       }
     }
 
-    // ── 13. HMAC-SHA384 Verify KAT ────────────────────────────────────────
-    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA384_HMAC)) {
-      addResult('hmac384', 'HMAC-SHA384', 'Verify KAT', 'SKIP', 'mechanism not supported')
+    // ── 13. HMAC-SHA384 Verify KAT (NIST ACVP, truncated) ─────────────────
+    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA384_HMAC_GENERAL)) {
+      addResult('hmac384', 'HMAC-SHA384', 'Verify KAT (NIST ACVP, truncated)', 'SKIP', 'mechanism not supported')
     } else {
       const tv = hmac384Vec.testGroups[0].tests[0]
       try {
         const h = importHMACKey(M, hSession, hexToBytes(tv.key), { sign: false, verify: true })
-        const ok = hmacVerify(M, hSession, h, hexToBytes(tv.msg), hexToBytes(tv.mac), CK.CKM_SHA384_HMAC)
-        addResult('hmac384', 'HMAC-SHA384', 'Verify KAT', ok ? 'PASS' : 'FAIL', `MAC[${tv.mac.length / 2}B]`)
+        const ok = hmacVerifyGeneral(M, hSession, h, hexToBytes(tv.msg), hexToBytes(tv.mac), CK.CKM_SHA384_HMAC_GENERAL)
+        addResult('hmac384', 'HMAC-SHA384', 'Verify KAT (NIST ACVP, truncated)', ok ? 'PASS' : 'FAIL', `MAC[${tv.mac.length / 2}B, ${tv.macLen}-bit]`)
       } catch (e) {
-        addResult('hmac384', 'HMAC-SHA384', 'Verify KAT', 'FAIL', e.message)
+        addResult('hmac384', 'HMAC-SHA384', 'Verify KAT (NIST ACVP, truncated)', 'FAIL', e.message)
       }
     }
 
-    // ── 14. HMAC-SHA512 Verify KAT ────────────────────────────────────────
-    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512_HMAC)) {
-      addResult('hmac512', 'HMAC-SHA512', 'Verify KAT', 'SKIP', 'mechanism not supported')
+    // ── 14. HMAC-SHA512 Verify KAT (NIST ACVP, truncated) ─────────────────
+    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512_HMAC_GENERAL)) {
+      addResult('hmac512', 'HMAC-SHA512', 'Verify KAT (NIST ACVP, truncated)', 'SKIP', 'mechanism not supported')
     } else {
       const tv = hmac512Vec.testGroups[0].tests[0]
       try {
         const h = importHMACKey(M, hSession, hexToBytes(tv.key), { sign: false, verify: true })
-        const ok = hmacVerify(M, hSession, h, hexToBytes(tv.msg), hexToBytes(tv.mac), CK.CKM_SHA512_HMAC)
-        addResult('hmac512', 'HMAC-SHA512', 'Verify KAT', ok ? 'PASS' : 'FAIL', `MAC[${tv.mac.length / 2}B]`)
+        const ok = hmacVerifyGeneral(M, hSession, h, hexToBytes(tv.msg), hexToBytes(tv.mac), CK.CKM_SHA512_HMAC_GENERAL)
+        addResult('hmac512', 'HMAC-SHA512', 'Verify KAT (NIST ACVP, truncated)', ok ? 'PASS' : 'FAIL', `MAC[${tv.mac.length / 2}B, ${tv.macLen}-bit]`)
       } catch (e) {
-        addResult('hmac512', 'HMAC-SHA512', 'Verify KAT', 'FAIL', e.message)
+        addResult('hmac512', 'HMAC-SHA512', 'Verify KAT (NIST ACVP, truncated)', 'FAIL', e.message)
       }
     }
 
@@ -589,8 +599,12 @@ async function runSuite(engineName) {
     }
 
     // ── 23. SLH-DSA SigVer KAT (FIPS 205) ──────────────────────────
-    if (slhdsaCtxVec && slhdsaCtxVec.sigVer) {
-      const tv = slhdsaCtxVec.sigVer
+    // WS-10 (2026-08-28): the hub's slhdsa_ctx_test.json generalized .sigVer
+    // from a single flat object to a map keyed by parameter-set name (all
+    // 12 SLH-DSA sets) — pick the one this test already exercises
+    // (SLH-DSA-SHA2-128f, matching the CKP_SLH_DSA_SHA2_128F import below).
+    if (slhdsaCtxVec && slhdsaCtxVec.sigVer && slhdsaCtxVec.sigVer['SLH-DSA-SHA2-128f']) {
+      const tv = slhdsaCtxVec.sigVer['SLH-DSA-SHA2-128f']
       try {
         const pk = hexToBytes(tv.pk)
         const msg = hexToBytes(tv.message)
@@ -610,8 +624,8 @@ async function runSuite(engineName) {
     // specific in their internal hedgedRandomness seeding. The sigVer KAT (test #23)
     // remains a valid cross-implementation validation since it verifies a Botan
     // signature using our engine's independent verify path.
-    if (slhdsaCtxVec && slhdsaCtxVec.sigGen) {
-      const tv = slhdsaCtxVec.sigGen
+    if (slhdsaCtxVec && slhdsaCtxVec.sigGen && slhdsaCtxVec.sigGen['SLH-DSA-SHA2-128f']) {
+      const tv = slhdsaCtxVec.sigGen['SLH-DSA-SHA2-128f']
       if (engineName === 'cpp') {
         try {
           const pk = hexToBytes(tv.pk)
