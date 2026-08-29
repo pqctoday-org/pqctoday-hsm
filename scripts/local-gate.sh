@@ -178,8 +178,8 @@ ensure_container
 # step. --skip matches by substring, so this also skips nothing else by
 # accident: no other test name contains this string.
 run_step "kmip cargo test" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | tee /dev/stderr | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
 # Progress-logged separately (not folded into the step above) so a slow run
 # reads as "12 parameter sets in flight," not silence — --nocapture shows the
@@ -194,9 +194,13 @@ run_step "kmip local-only suites (--include-ignored)" \
   "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
    RUST_MIN_STACK=134217728 cargo test --quiet --test policy_op_layer -- --include-ignored 2>&1 | grep -E 'test result'"
 
+# tee before each grep below: cargo's own "test X has been running for over
+# 60 seconds" liveness warning survives --quiet but was being discarded by
+# the grep filtering (same fix as kmip cargo test above) — pass/fail still
+# comes from the grep/awk exit codes via dexec's pipefail, unchanged.
 run_step "rust engine cargo test" \
-  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | tee /dev/stderr | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
 # The remoting workspace (gRPC + REST PKCS#11 services) had NO gate step at
 # all before 2026-08-26 — its three-transport parity suite
@@ -325,20 +329,31 @@ if [[ $RUN_CPP == 1 ]]; then
   # a truly fresh checkout would have silently found zero tests.
   OSSL_ROOT="${OPENSSL_ROOT_DIR:-/usr/local/ssl}"
   OSSL_LIB="${OPENSSL_LIB_DIR:-/usr/local/ssl/lib}"
+  # >/dev/null removed from the build/compliance-test sub-steps below (was
+  # silencing a multi-minute build + a several-hundred-case conformance
+  # binary with zero live output — indistinguishable from a hang). Safe:
+  # pass/fail here has always come from `&&`-chained exit codes, never from
+  # matching this output, so surfacing it changes nothing but visibility.
   run_step "C++ ctest (incl. PKCS#11 v3.2 compliance harness) + report freshness" \
-    "cd $AG_CONTAINER_ROOT && (test -d build || cmake -S . -B build -DWITH_RIPEMD160=ON -DBUILD_TESTS=ON -DOPENSSL_ROOT_DIR=$OSSL_ROOT >/dev/null) && \
-     LD_LIBRARY_PATH=$OSSL_LIB cmake --build build -j\$(nproc) >/dev/null && cd build && LD_LIBRARY_PATH=$OSSL_LIB ctest --output-on-failure && \
+    "cd $AG_CONTAINER_ROOT && (test -d build || cmake -S . -B build -DWITH_RIPEMD160=ON -DBUILD_TESTS=ON -DOPENSSL_ROOT_DIR=$OSSL_ROOT) && \
+     LD_LIBRARY_PATH=$OSSL_LIB cmake --build build -j\$(nproc) && cd build && LD_LIBRARY_PATH=$OSSL_LIB ctest --output-on-failure && \
      cd $AG_CONTAINER_ROOT && \
      ENGINE=./build/src/lib/libsofthsmv3.so; [ -f \"\$ENGINE\" ] || ENGINE=./build/src/lib/libsofthsmv3.dylib; \
      LD_LIBRARY_PATH=$OSSL_LIB ./build/p11_v32_compliance_test --engine \"\$ENGINE\" \
        --workdir ./build/p11_v32_compliance_workdir --report ./cpp_compliance_report \
-       --engine-commit \$(git rev-parse HEAD) >/dev/null && \
+       --engine-commit \$(git rev-parse HEAD) && \
      python3 scripts/check_pkcs11_reports_fresh.py --cpp"
 fi
 
 if [[ $RUN_ACVP_WASM == 1 ]]; then
+  # tee before the tail: `tail -5` was discarding the live suite-by-suite
+  # progress this harness already prints, leaving several minutes of
+  # silence before the final summary — pass/fail here comes from
+  # `npm run test:acvp`'s own exit code (dexec's pipefail propagates it
+  # through tee/tail regardless), not from matching this output, so this
+  # only adds visibility.
   run_step "ACVP wasm harness (20 suites, cross-engine)" \
-    "cd $AG_CONTAINER_ROOT && npm run test:acvp 2>&1 | tail -5"
+    "cd $AG_CONTAINER_ROOT && npm run test:acvp 2>&1 | tee /dev/stderr | tail -5"
 fi
 
 if [[ $RUN_RELEASE_XMSS == 1 ]]; then
