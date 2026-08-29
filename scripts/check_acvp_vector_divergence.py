@@ -69,7 +69,21 @@ HUB_ACVP_DIR = os.path.join(HUB_REPO_PATH, "src", "data", "acvp")
 # substitute. Provenance is backfilled documenting exactly this; see each
 # file's own _provenance.note. They stay hsm-only (not an accepted
 # divergence — there's no hub file to diverge from).
-ACCEPTED_DIVERGENCES = {}
+ACCEPTED_DIVERGENCES = {
+    "hmac_sha384_test.json": (
+        "Same NIST file and release as the hub's copy "
+        "(HMAC-SHA2-384-2.0/internalProjection.json @ 975de31), different tcId. "
+        "The hub uses tgId 1 / tcId 5, whose key is 26 bytes; this engine "
+        "enforces a 48-byte minimum for SHA-384-HMAC keys (kMacMechTable "
+        "minKeyBytes, src/lib/SoftHSM_sign.cpp), stricter than PKCS#11 v3.2 "
+        "6.23.3's suggested FIPS-198 floor of 24, so tcId 5 answers "
+        "CKR_KEY_SIZE_RANGE here. This repo uses tcId 25 instead: same 160-bit "
+        "macLen the hub selected for, 121-byte key. See the file's own "
+        "_provenance.note. Resolve by either relaxing the engine's floor to the "
+        "spec's 24 bytes (a deliberate policy change, not done here) or by the "
+        "hub re-selecting to a >=48-byte-key case."
+    ),
+}
 
 
 def load_json(path):
