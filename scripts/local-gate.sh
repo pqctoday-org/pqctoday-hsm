@@ -333,8 +333,13 @@ if [[ $RUN_OPENSSL_PROVIDER == 1 ]]; then
   # if the build is absent, the harness's own T0 preflight fails loudly with
   # a clear "run the --cpp gate step / cmake build first" message rather than
   # silently skipping.
-  run_step "OpenSSL provider coverage (27 PASS / 0 FAIL / 0 XFAIL / 0 XPASS)" \
-    "cd /ag/pqctoday-hsm && bash scripts/test-openssl-provider.sh"
+  # Count is 89 as of phase-8 R41, not the 27 this label carried from the
+  # audit's original phase-0 harness — a stale expectation that has already
+  # cost one misdiagnosis (a real PASS=16/FAIL=74 run was read against "27"
+  # as if 27 were still the target). The gate keys off the harness's own
+  # exit status, never this string; keep it honest anyway.
+  run_step "OpenSSL provider coverage (89 PASS / 0 FAIL / 0 XFAIL / 0 XPASS)" \
+    "cd $AG_CONTAINER_ROOT && bash scripts/test-openssl-provider.sh"
 fi
 
 if [[ $RUN_ACVP_WASM == 1 ]]; then

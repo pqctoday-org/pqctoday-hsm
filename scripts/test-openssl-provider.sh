@@ -24,7 +24,7 @@
 # Environment (defaults match the pqc-rust container; override via env):
 #   OPENSSL_BIN        (default /usr/local/ssl/bin/openssl — must be >= 3.6)
 #   OPENSSL_LIB_DIR    (default /usr/local/ssl/lib)
-#   HSM_ROOT           (default /ag/pqctoday-hsm)
+#   HSM_ROOT           (default: this script's own repo root — see below)
 #   PROVIDER_SO        (default $HSM_ROOT/build/src/vendor/pkcs11-provider/pkcs11-provider.so)
 #   CPP_ENGINE_SO      (default $HSM_ROOT/build/src/lib/libsofthsmv3.so)
 #   RUST_ENGINE_SO     (default: newest libsofthsmrustv3.so under /cargo-target or rust/target)
@@ -35,7 +35,18 @@
 
 set -u
 
-HSM_ROOT="${HSM_ROOT:-/ag/pqctoday-hsm}"
+# HSM_ROOT defaults to THIS SCRIPT's own repo root, not a hardcoded
+# /ag/pqctoday-hsm. The old hardcoded default silently tested the MAIN
+# checkout's binaries whenever the harness was run from a git worktree
+# (`cd <worktree> && bash scripts/test-openssl-provider.sh` loaded
+# /ag/pqctoday-hsm/build/.../pkcs11-provider.so + libsofthsmv3.so), because
+# nothing here is cwd-relative — every artifact path below hangs off
+# HSM_ROOT. Symptom: PASS=16 FAIL=74, with only the baseline RSA/ECDSA/
+# Ed25519/ECDH cases surviving (main's provider has none of this branch's
+# PQC/TLS/store work) plus a spurious "R0.1-REGRESSION ... noise is back"
+# from main's engine, which does not carry the R0.1 P11Objects.cpp fix.
+# Same self-locating idiom as scripts/build-strongswan-wasm.sh.
+HSM_ROOT="${HSM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 OPENSSL_BIN="${OPENSSL_BIN:-/usr/local/ssl/bin/openssl}"
 OPENSSL_LIB_DIR="${OPENSSL_LIB_DIR:-/usr/local/ssl/lib}"
 PROVIDER_SO="${PROVIDER_SO:-$HSM_ROOT/build/src/vendor/pkcs11-provider/pkcs11-provider.so}"
