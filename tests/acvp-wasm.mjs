@@ -27,6 +27,18 @@ import {
   importRSAPublicKey,
   importRSAPrivateKey,
   generateRSAKeyPair,
+  importEdDSAPublicKey,
+  importEdDSAPrivateKey,
+  buildEdDSAParams,
+  freeEdDSAParams,
+  eddsaSignBytesParams,
+  eddsaVerifyBytesParams,
+  buildMech,
+  writeBytes,
+  allocUlong,
+  readUlong,
+  freePtr,
+  check,
   importECPublicKey,
   importMLDSAPublicKey,
   importMLKEMPrivateKey,
@@ -99,6 +111,8 @@ const slhdsaCtxVec = loadJson('slhdsa_ctx_test.json')
 const lmsSigverVec = loadJson('lms_sigver_test.json')
 const lmsSigverExp = loadJson('lms_sigver_expected.json')
 const rsaOaepVec = loadJson('rsa_oaep_test.json')
+const eddsaVec = loadJson('eddsa_test.json')
+const eddsaEd448Vec = loadJson('eddsa_ed448_test.json')
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function arrEq(a, b) {
@@ -472,6 +486,156 @@ async function runSuite(engineName) {
         addResult('eddsaph', 'Ed25519ph', 'Pre-hash Functional', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
       } catch (e) {
         addResult('eddsaph', 'Ed25519ph', 'Pre-hash Functional', 'FAIL', e.message)
+      }
+    }
+
+    // ── 16.6 CKM_EDDSA + CK_EDDSA_PARAMS — RFC 8032 scheme selection ─────
+    //
+    // WS-1.3 (2026-08-29). PKCS#11 v3.2 §6.3.14 Table 73 maps the presence,
+    // phFlag and context of CK_EDDSA_PARAMS onto RFC 8032's five signature
+    // schemes. Until this change the C++ engine read that structure nowhere:
+    // AsymSignInit's CKM_EDDSA case left param NULL and a guard rejected any
+    // non-NULL pParameter, so Ed25519ph/Ed448ph were reachable only through
+    // the vendor-range CKM_EDDSA_PH and context strings not at all.
+    //
+    // Vectors: NIST ACVP EDDSA-SigGen-1.0 where it publishes the case
+    // (Tier 1), RFC 8032 §7 where it does not — notably Ed25519ctx, which
+    // ACVP's sample set contains no case for. See each file's _provenance.
+    for (const vecFile of [eddsaVec, eddsaEd448Vec]) {
+      const curve = vecFile.curve
+      if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA)) {
+        addResult('eddsa-params', curve, 'CK_EDDSA_PARAMS KAT', 'SKIP', 'CKM_EDDSA not supported')
+        continue
+      }
+      for (const vs of vecFile.vectorSets) {
+        let genOk = 0, verOk = 0, detail = ''
+        for (const tv of vs.tests) {
+          let ep = null
+          try {
+            const msg = hexToBytes(tv.message)
+            const ctx = tv.context ? hexToBytes(tv.context) : null
+            ep = vs.useParams ? buildEdDSAParams(M, vs.phFlag, ctx) : null
+            const privH = importEdDSAPrivateKey(M, hSession, curve, hexToBytes(tv.d))
+            const pubH = importEdDSAPublicKey(M, hSession, curve, hexToBytes(tv.q))
+            // sigGen — EdDSA is deterministic, so the bytes must match exactly.
+            const s = eddsaSignBytesParams(M, hSession, privH, msg, ep)
+            if (s.rv === CK.CKR_OK && s.signature && arrEq(s.signature, hexToBytes(tv.signature))) genOk++
+            else if (!detail)
+              detail = `${tv.id} sigGen rv=0x${s.rv.toString(16)}` +
+                (s.signature ? ` got ${bytesToHex(s.signature, 8)} want ${bytesToHex(hexToBytes(tv.signature), 8)}` : '')
+            // sigVer — the vector's own signature must verify.
+            const vrv = eddsaVerifyBytesParams(M, hSession, pubH, msg, hexToBytes(tv.signature), ep)
+            if (vrv === CK.CKR_OK) verOk++
+            else if (!detail) detail = `${tv.id} sigVer rv=0x${vrv.toString(16)}`
+          } catch (e) {
+            if (!detail) detail = `${tv.id}: ${e.message}`
+          } finally {
+            freeEdDSAParams(M, ep)
+          }
+        }
+        const n = vs.tests.length
+        const ok = genOk === n && verOk === n
+        addResult('eddsa-params', `${vs.scheme} (Tier ${vs.tier})`,
+          `SigGen+SigVer KAT — ${vs.source}`,
+          ok ? 'PASS' : 'FAIL',
+          ok ? `sigGen ${genOk}/${n}, sigVer ${verOk}/${n}` : detail)
+      }
+    }
+
+    // ── 16.7 CK_EDDSA_PARAMS binding — the negative half ─────────────────
+    //
+    // A context string that is not bound into the signature would leave every
+    // §16.6 case above still passing, so these four assertions are what make
+    // that suite mean something.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA)) {
+      addResult('eddsa-params-bind', 'Ed25519', 'CK_EDDSA_PARAMS binding', 'SKIP',
+        'CKM_EDDSA not supported')
+    } else {
+      const ctxSet = eddsaVec.vectorSets.find((v) => v.scheme === 'Ed25519ctx')
+      const phSet = eddsaVec.vectorSets.find((v) => v.scheme === 'Ed25519ph' && v.tier === 3)
+      const tv = ctxSet.tests[0]
+      let pFoo = null, pBar = null, pPh = null
+      try {
+        const msg = hexToBytes(tv.message)
+        const privH = importEdDSAPrivateKey(M, hSession, 'Ed25519', hexToBytes(tv.d))
+        const pubH = importEdDSAPublicKey(M, hSession, 'Ed25519', hexToBytes(tv.q))
+        pFoo = buildEdDSAParams(M, false, hexToBytes(tv.context))
+        pBar = buildEdDSAParams(M, false, new TextEncoder().encode('bar'))
+        const sig = hexToBytes(tv.signature)
+        // 1. right context verifies; 2. a different context must not;
+        // 3. no parameter at all (= pure Ed25519) must not.
+        const okSame = eddsaVerifyBytesParams(M, hSession, pubH, msg, sig, pFoo) === CK.CKR_OK
+        const okDiff = eddsaVerifyBytesParams(M, hSession, pubH, msg, sig, pBar) === CK.CKR_OK
+        const okNone = eddsaVerifyBytesParams(M, hSession, pubH, msg, sig, null) === CK.CKR_OK
+        // 4. CKM_EDDSA + phFlag=TRUE must produce exactly what the vendor
+        //    CKM_EDDSA_PH mechanism produces — i.e. the standard spelling of
+        //    Ed25519ph now reaches the same scheme, which is the concrete
+        //    thing a conforming caller was refused before this change.
+        const phTv = phSet.tests[0]
+        const phMsg = hexToBytes(phTv.message)
+        const phPriv = importEdDSAPrivateKey(M, hSession, 'Ed25519', hexToBytes(phTv.d))
+        pPh = buildEdDSAParams(M, true, null)
+        const viaParams = eddsaSignBytesParams(M, hSession, phPriv, phMsg, pPh)
+        const viaVendor = eddsaSignBytesParams(M, hSession, phPriv, phMsg, null, CK.CKM_EDDSA_PH)
+        const phAgree =
+          viaParams.rv === CK.CKR_OK && viaVendor.rv === CK.CKR_OK &&
+          arrEq(viaParams.signature, viaVendor.signature) &&
+          arrEq(viaParams.signature, hexToBytes(phTv.signature))
+        const ok = okSame && !okDiff && !okNone && phAgree
+        addResult('eddsa-params-bind', 'Ed25519ctx / Ed25519ph',
+          'Context binding + phFlag reaches Ed25519ph',
+          ok ? 'PASS' : 'FAIL',
+          `sameCtx=${okSame} diffCtx=${okDiff} noParams=${okNone} phFlag==CKM_EDDSA_PH==RFC8032=${phAgree}`)
+      } catch (e) {
+        addResult('eddsa-params-bind', 'Ed25519ctx / Ed25519ph',
+          'Context binding + phFlag reaches Ed25519ph', 'FAIL', e.message)
+      } finally {
+        freeEdDSAParams(M, pFoo); freeEdDSAParams(M, pBar); freeEdDSAParams(M, pPh)
+      }
+    }
+
+    // ── 16.8 CK_EDDSA_PARAMS survives the multi-part path ────────────────
+    //
+    // signInit stores the params and signFinal replays them; without that
+    // copy a C_SignUpdate/C_SignFinal sequence would silently drop the
+    // context and emit a pure-mode signature that still "verifies" against
+    // itself. Compared against the single-part RFC 8032 answer, not against
+    // another multi-part call.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA)) {
+      addResult('eddsa-params-multipart', 'Ed25519ctx', 'Multi-part context binding', 'SKIP',
+        'CKM_EDDSA not supported')
+    } else {
+      const tv = eddsaVec.vectorSets.find((v) => v.scheme === 'Ed25519ctx').tests[0]
+      let ep = null
+      try {
+        const msg = hexToBytes(tv.message)
+        const privH = importEdDSAPrivateKey(M, hSession, 'Ed25519', hexToBytes(tv.d))
+        ep = buildEdDSAParams(M, false, hexToBytes(tv.context))
+        const mechPtr = buildMech(M, CK.CKM_EDDSA, ep.ptr, ep.size)
+        check('C_SignInit(multipart)', M._C_SignInit(hSession, mechPtr, privH))
+        const half = Math.floor(msg.length / 2)
+        for (const part of [msg.slice(0, half), msg.slice(half)]) {
+          const p = writeBytes(M, part)
+          check('C_SignUpdate', M._C_SignUpdate(hSession, p, part.length))
+          M._free(p)
+        }
+        const lenPtr = allocUlong(M)
+        check('C_SignFinal(len)', M._C_SignFinal(hSession, 0, lenPtr))
+        const sigLen = readUlong(M, lenPtr)
+        const sigPtr = M._malloc(sigLen)
+        M.setValue(lenPtr, sigLen, 'i32')
+        check('C_SignFinal', M._C_SignFinal(hSession, sigPtr, lenPtr))
+        const sig = new Uint8Array(M.HEAPU8.buffer, sigPtr, readUlong(M, lenPtr)).slice()
+        M._free(sigPtr); freePtr(M, lenPtr); M._free(mechPtr)
+        const ok = arrEq(sig, hexToBytes(tv.signature))
+        addResult('eddsa-params-multipart', 'Ed25519ctx',
+          'Multi-part sign keeps the context (RFC 8032 §7.2)',
+          ok ? 'PASS' : 'FAIL', `sig[${sig.length}B] ${bytesToHex(sig, 8)}`)
+      } catch (e) {
+        addResult('eddsa-params-multipart', 'Ed25519ctx',
+          'Multi-part sign keeps the context (RFC 8032 §7.2)', 'FAIL', e.message)
+      } finally {
+        freeEdDSAParams(M, ep)
       }
     }
 

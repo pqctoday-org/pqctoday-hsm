@@ -177,6 +177,27 @@ struct MLDSA_SIGN_PARAMS
 	unsigned char context[255];  // FIPS 204 max context length
 };
 
+// EdDSA sign/verify parameters (PKCS#11 v3.2 §6.3.14 Table 73 / RFC 8032).
+//
+// Carries what CK_EDDSA_PARAMS supplies, resolved into this engine's own
+// representation. Inline 255-byte context buffer for the same reason the
+// ML-DSA/SLH-DSA structs use one: Session::setParameters memcpy's the struct,
+// so a pointer into the caller's CK_EDDSA_PARAMS would dangle by the time
+// C_Sign runs.
+//
+// Added 2026-08-29 (WS-1.3). Until then CK_EDDSA_PARAMS was declared in
+// pkcs11t.h and read by nothing: AsymSignInit's CKM_EDDSA case left param
+// NULL and a guard rejected any non-NULL pParameter outright, so a conforming
+// caller asking for Ed25519ph the standard way was refused, and RFC 8032
+// context strings were unreachable in either direction.
+struct EDDSA_SIGN_PARAMS
+{
+	bool hasParams;              // caller supplied a CK_EDDSA_PARAMS at all
+	bool preHash;                // CK_EDDSA_PARAMS.phFlag
+	size_t contextLen;           // 0-255 (v3.2 §6.3.16 bounds it explicitly)
+	unsigned char context[255];
+};
+
 // SLH-DSA sign/verify parameters (PKCS#11 v3.2, FIPS 205)
 // Inline 255-byte context buffer avoids dangling pointers from Session::setParameters memcpy.
 struct SLHDSA_SIGN_PARAMS

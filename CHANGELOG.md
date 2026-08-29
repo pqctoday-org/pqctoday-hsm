@@ -198,6 +198,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   code that negative case succeeds, which is the whole bug in one
   assertion.
 
+- **C++ engine: `CKM_EDDSA` now reads `CK_EDDSA_PARAMS`, so Ed25519ph,
+  Ed448ph and RFC 8032 context strings are reachable the standard way.**
+  PKCS#11 v3.2 §6.3.14 Table 73 maps the presence, `phFlag` and context data
+  of `CK_EDDSA_PARAMS` onto RFC 8032's five signature schemes. The structure
+  was declared in this repo's own `pkcs11t.h` and read nowhere:
+  `AsymSignInit`/`AsymVerifyInit`'s `CKM_EDDSA` case left `param` NULL, and a
+  guard a hundred lines below then rejected any non-NULL `pParameter` with
+  `CKR_MECHANISM_PARAM_INVALID`. Two consequences, both of them a conforming
+  caller being refused rather than a wrong answer: requesting Ed25519ph the
+  way the spec defines it (`CKM_EDDSA` + `phFlag=CK_TRUE`) failed outright —
+  only the vendor-range `CKM_EDDSA_PH` worked — and Ed25519ctx and
+  context-carrying Ed448 signatures could be neither produced nor verified at
+  all. `parseEdDSAParams` (`src/lib/SoftHSM_sign.cpp`) now parses the
+  structure for both sign and verify, and `OSSLEDDSA::resolveInstance`
+  resolves key curve + `phFlag` + context into the OpenSSL instance name
+  (`Ed25519` / `Ed25519ctx` / `Ed25519ph` / `Ed448` / `Ed448ph`) and context
+  string. The parameters are also carried through `signInit`→`signFinal`, so
+  a `C_SignUpdate`/`C_SignFinal` sequence keeps its context instead of
+  silently emitting a pure-mode signature. `CKM_EDDSA_PH` is deliberately
+  left parameterless — everything it expresses is now reachable through the
+  standard mechanism. Two readings of Table 73 are recorded in the code
+  rather than left implicit: `phFlag=CK_FALSE` with an *empty* context on an
+  Ed25519 key resolves to plain Ed25519, not Ed25519ctx (RFC 8032 §5.1: "For
+  Ed25519ctx … The context input SHOULD NOT be empty", and OpenSSL 3.6
+  refuses to sign that combination); and Ed448 with no parameter at all stays
+  plain Ed448, as this engine already behaved. New evidence: 61 known-answer
+  cases across nine vector sets, Tier 1 from NIST ACVP `EDDSA-SigGen-1.0`
+  (pinned at `975de31`) for Ed25519/Ed25519ph/Ed448/Ed448ph, Tier 3 from
+  RFC 8032 §7.1-§7.5 — including Ed25519ctx, for which ACVP's sample set
+  publishes no case at all. Both vector files were re-sourced: the Ed448 one
+  previously declared "Generated via Node.js crypto (OpenSSL backend)", and
+  neither was loaded by any harness. Sign and verify are both exercised, plus
+  a negative set proving a context is genuinely bound into the signature (a
+  different context and no-parameters-at-all must both fail to verify) and
+  that `CKM_EDDSA` + `phFlag` produces byte-identical output to
+  `CKM_EDDSA_PH` and to RFC 8032 §7.3.
+
 - **Cross-engine differential harness: `CKA_VALUE` sensitivity is now
   asserted on asymmetric private keys, and a defect entry that overstated a
   divergence is corrected.** The only prior probe of the §4.9 note-7 rule

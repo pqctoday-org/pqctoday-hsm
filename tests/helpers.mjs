@@ -39,6 +39,8 @@ const EC_OID = {
   'P-256': new Uint8Array([0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]),
   'P-384': new Uint8Array([0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22]),
   Ed25519: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x70]),
+  // id-Ed448 = 1.3.101.113 (RFC 8410 §3)
+  Ed448: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x71]),
 }
 
 // ── Utilities ───────────────────────────────────────────────────────────────
@@ -188,6 +190,32 @@ export function buildRsaAesKeyWrapParams(M, aesKeyBits, hashMech, mgf) {
   M.setValue(ptr + 0, aesKeyBits, 'i32')
   M.setValue(ptr + 4, oaep.ptr, 'i32')
   return { ptr, size: 8, oaep }
+}
+
+/**
+ * CK_EDDSA_PARAMS (pkcs11t.h:2539-2543) — 12 bytes on 32-bit WASM:
+ *   phFlag(CK_BBOOL, 1B at offset 0, 3B padding) ulContextDataLen(4B at 4)
+ *   pContextData(4B at 8)
+ * Offsets confirmed by compiling offsetof() against src/lib/pkcs11/cryptoki.h
+ * with the project's own emcc toolchain, not assumed.
+ */
+export function buildEdDSAParams(M, phFlag, contextBytes = null) {
+  const ctxPtr = contextBytes && contextBytes.length ? writeBytes(M, contextBytes) : 0
+  const ctxLen = contextBytes ? contextBytes.length : 0
+  const ptr = M._malloc(12)
+  M.setValue(ptr + 0, phFlag ? 1 : 0, 'i8')
+  M.setValue(ptr + 1, 0, 'i8')
+  M.setValue(ptr + 2, 0, 'i8')
+  M.setValue(ptr + 3, 0, 'i8')
+  M.setValue(ptr + 4, ctxLen, 'i32')
+  M.setValue(ptr + 8, ctxPtr, 'i32')
+  return { ptr, size: 12, ctxPtr }
+}
+
+export function freeEdDSAParams(M, p) {
+  if (!p) return
+  if (p.ctxPtr) M._free(p.ctxPtr)
+  M._free(p.ptr)
 }
 
 export function buildPSSParams(M, hashMech, mgf, sLen) {
@@ -997,6 +1025,87 @@ export function slhdsaVerifyBytesCtx(M, hSession, handle, msgBytes, sigBytes, ct
 }
 
 /** EdDSA sign (text message) */
+/** Import an Edwards public key (raw point) — Ed25519 or Ed448. */
+export function importEdDSAPublicKey(M, hSession, curve, pubBytes) {
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_PUBLIC_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_EC_EDWARDS },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_VERIFY, value: true },
+    { type: CK.CKA_EC_PARAMS, value: EC_OID[curve] },
+    { type: CK.CKA_EC_POINT, value: pubBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(Ed-Pub)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/** Import an Edwards private key from its raw RFC 8032 seed (32B / 57B). */
+export function importEdDSAPrivateKey(M, hSession, curve, seedBytes) {
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_PRIVATE_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_EC_EDWARDS },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_PRIVATE, value: false },
+    { type: CK.CKA_SIGN, value: true },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_EC_PARAMS, value: EC_OID[curve] },
+    { type: CK.CKA_VALUE, value: seedBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(Ed-Priv)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/**
+ * C_Sign over raw bytes with an optional CK_EDDSA_PARAMS.
+ * `edParams` is a { ptr, size } from buildEdDSAParams, or null for the
+ * parameterless form. Returns { rv, signature } — rv is NOT thrown on, since
+ * "this parameter combination must be refused" is itself an assertion here.
+ */
+export function eddsaSignBytesParams(M, hSession, handle, msgBytes, edParams = null,
+                                     mechType = CK.CKM_EDDSA) {
+  const mechPtr = buildMech(M, mechType, edParams ? edParams.ptr : 0, edParams ? edParams.size : 0)
+  let rv = M._C_SignInit(hSession, mechPtr, handle)
+  if (rv !== CK.CKR_OK) { M._free(mechPtr); return { rv, signature: null } }
+  const msgPtr = writeBytes(M, msgBytes)
+  const sigLenPtr = allocUlong(M)
+  rv = M._C_Sign(hSession, msgPtr, msgBytes.length, 0, sigLenPtr)
+  if (rv !== CK.CKR_OK) {
+    M._free(msgPtr); freePtr(M, sigLenPtr); M._free(mechPtr); return { rv, signature: null }
+  }
+  const sigLen = readUlong(M, sigLenPtr)
+  const sigPtr = M._malloc(sigLen)
+  M.setValue(sigLenPtr, sigLen, 'i32')
+  rv = M._C_Sign(hSession, msgPtr, msgBytes.length, sigPtr, sigLenPtr)
+  const actualLen = rv === CK.CKR_OK ? readUlong(M, sigLenPtr) : 0
+  const signature = rv === CK.CKR_OK
+    ? new Uint8Array(M.HEAPU8.buffer, sigPtr, actualLen).slice()
+    : null
+  M._free(msgPtr); M._free(sigPtr); freePtr(M, sigLenPtr); M._free(mechPtr)
+  return { rv, signature }
+}
+
+/** C_Verify over raw bytes with an optional CK_EDDSA_PARAMS → rv. */
+export function eddsaVerifyBytesParams(M, hSession, handle, msgBytes, sig, edParams = null,
+                                       mechType = CK.CKM_EDDSA) {
+  const mechPtr = buildMech(M, mechType, edParams ? edParams.ptr : 0, edParams ? edParams.size : 0)
+  let rv = M._C_VerifyInit(hSession, mechPtr, handle)
+  if (rv !== CK.CKR_OK) { M._free(mechPtr); return rv }
+  const msgPtr = writeBytes(M, msgBytes)
+  const sigPtr = writeBytes(M, sig)
+  rv = M._C_Verify(hSession, msgPtr, msgBytes.length, sigPtr, sig.length)
+  M._free(msgPtr); M._free(sigPtr); M._free(mechPtr)
+  return rv
+}
+
 export function eddsaSign(M, hSession, handle, textMsg) {
   return sign(M, hSession, handle, textMsg, CK.CKM_EDDSA)
 }
