@@ -198,6 +198,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   code that negative case succeeds, which is the whole bug in one
   assertion.
 
+- **Cross-engine differential harness: `CKA_VALUE` sensitivity is now
+  asserted on asymmetric private keys, and a defect entry that overstated a
+  divergence is corrected.** The only prior probe of the §4.9 note-7 rule
+  ("cannot be revealed if `CKA_SENSITIVE` is true or `CKA_EXTRACTABLE` is
+  false") used an AES secret key, even though the EC and Edwards private-key
+  tables define `CKA_VALUE` as the private scalar — the single most
+  sensitive byte string either engine holds. New scenario
+  `security.private_key_value_sensitivity` covers a generated EC key, a
+  generated Ed25519 key and a key recovered through `C_UnwrapKey`, under
+  both legs of the rule. Result: both engines answer
+  `CKR_ATTRIBUTE_SENSITIVE` with `CK_UNAVAILABLE_INFORMATION` in all six
+  cases. Consequently `DEFECT-RUST-CKA_VALUE-ON-ASYMMETRIC-KEYS` has had its
+  sensitivity sub-claim withdrawn: it read "on the unwrapped private key it
+  is readable in the clear where C++ answers `CKR_ATTRIBUTE_SENSITIVE`",
+  which framed an enforcement failure that does not exist. The divergence
+  that sentence described comes entirely from the probing scenario's own
+  template (`CKA_SENSITIVE=CK_FALSE`, `CKA_EXTRACTABLE` unset) meeting two
+  different token-specific defaults — already adjudicated as
+  `LEGAL-UNWRAPPED-KEY-EXTRACTABLE-DEFAULT`. The entry keeps its
+  attribute-presence claim and its E5 deferral unchanged. No engine code
+  changed for this item.
+
 - **Rust engine: `C_Finalize` no longer wipes token state.** WS-11's Tier A
   conformance runner caught this with a standalone probe: one slot present
   before `C_Finalize`, zero slots after `C_Finalize` + a re-`C_Initialize`
