@@ -17,14 +17,6 @@
   ],
   "entries": [
     {
-      "id": "LEGAL-RESTORE-KEY-NOT-NEEDED",
-      "status": "legal",
-      "scenario": "env.token_info",
-      "path": "flag.CKF_RESTORE_KEY_NOT_NEEDED",
-      "justification": "The flag describes whether C_SetOperationState needs the key handles supplied again. Operation-state save/restore is itself optional and both engines may decline it, so either value is honest.",
-      "citation": "PKCS#11 v3.2 §5.5.4; §5.7 makes no function individually mandatory — 'function not supported' is the specification's own prescribed answer."
-    },
-    {
       "id": "LEGAL-WEAK-PRIMITIVES-ABSENT-IN-RUST",
       "status": "legal",
       "scenario": "env.mechanism_set",
@@ -88,14 +80,6 @@
       "path": "manufacturerID|libraryDescription",
       "justification": "manufacturerID and libraryDescription are the engines' own names; they are informational and no interoperable behaviour depends on them. Deliberately NOT scoped to the whole env.library_info scenario: cryptokiVersion and the library flags in that same scenario are real conformance signals and must keep failing if they ever diverge.",
       "citation": "PKCS#11 v3.2 §5.5.2 CK_INFO — these fields are descriptive, blank-padded strings with no constrained content."
-    },
-    {
-      "id": "LEGAL-PROFILE-SET-CLAIMED",
-      "status": "legal",
-      "scenario": "env.profile_objects",
-      "path": "count|profile_ids",
-      "justification": "C++ publishes CKO_PROFILE ids 1 and 2 (Baseline Provider and Extended Provider); Rust publishes id 1 only. Which profiles a provider CLAIMS is the provider's own conformance statement, and claiming one it does not meet would be the advertise-without-implement fault this programme exists to prevent. Both engines publish at least CKP_BASELINE_PROVIDER, which is the condition that actually matters. This entry REPLACES DEFECT-RUST-NO-PROFILE-OBJECT-AFTER-INIT-TOKEN, whose real cause was not C_InitToken at all: Rust stored the profile object's CKA_CLASS as four bytes, so an LP64 caller's find template could never byte-match it and the object was unfindable, not absent.",
-      "citation": "PKCS#11 v3.2 §7.2: 'An implementation is a conforming PKCS#11 Provider if the implementation meets the conditions specified in ONE OR MORE provider profiles specified in [PKCS11-Prof].' Profiles v3.2 §5.1 condition 5 requires CKO_PROFILE with CKP_BASELINE_PROVIDER; §5.3 condition 5 requires CKP_EXTENDED_PROVIDER for the separate Extended profile."
     },
     {
       "id": "LEGAL-UNWRAPPED-KEY-EXTRACTABLE-DEFAULT",
