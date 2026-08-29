@@ -64,6 +64,11 @@ public:
 	// Return the MAC size
 	virtual size_t getMacSize() const = 0;
 
+	// General-length HMAC (CKM_*_HMAC_GENERAL): accept a truncated output
+	// length of 1..getMacSize() bytes; signFinal()/verifyFinal() then take
+	// that many bytes from the start of the full HMAC.
+	virtual bool setTruncatedMacSize(size_t bytes);
+
 protected:
 	// Return the right hash for the operation
 	virtual const EVP_MD* getEVPHash() const = 0;

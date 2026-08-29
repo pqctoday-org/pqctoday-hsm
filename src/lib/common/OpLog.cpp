@@ -216,6 +216,20 @@ const char* OpLog::mechName(CK_MECHANISM_TYPE mech)
 		case CKM_SHA3_384_HMAC:           return "CKM_SHA3_384_HMAC";
 		case CKM_SHA3_512_HMAC:           return "CKM_SHA3_512_HMAC";
 		case CKM_RIPEMD160_HMAC:          return "CKM_RIPEMD160_HMAC";
+		// General-length HMAC (CK_MAC_GENERAL_PARAMS output length). C_SignInit
+		// and C_VerifyInit dispatch these, so they need names here or the op
+		// log records "CKM_UNKNOWN" for a mechanism the token advertises.
+		case CKM_MD5_HMAC_GENERAL:        return "CKM_MD5_HMAC_GENERAL";
+		case CKM_SHA_1_HMAC_GENERAL:      return "CKM_SHA_1_HMAC_GENERAL";
+		case CKM_SHA224_HMAC_GENERAL:     return "CKM_SHA224_HMAC_GENERAL";
+		case CKM_SHA256_HMAC_GENERAL:     return "CKM_SHA256_HMAC_GENERAL";
+		case CKM_SHA384_HMAC_GENERAL:     return "CKM_SHA384_HMAC_GENERAL";
+		case CKM_SHA512_HMAC_GENERAL:     return "CKM_SHA512_HMAC_GENERAL";
+		case CKM_SHA3_224_HMAC_GENERAL:   return "CKM_SHA3_224_HMAC_GENERAL";
+		case CKM_SHA3_256_HMAC_GENERAL:   return "CKM_SHA3_256_HMAC_GENERAL";
+		case CKM_SHA3_384_HMAC_GENERAL:   return "CKM_SHA3_384_HMAC_GENERAL";
+		case CKM_SHA3_512_HMAC_GENERAL:   return "CKM_SHA3_512_HMAC_GENERAL";
+		case CKM_RIPEMD160_HMAC_GENERAL:  return "CKM_RIPEMD160_HMAC_GENERAL";
 
 		default:                          return "CKM_UNKNOWN";
 	}
