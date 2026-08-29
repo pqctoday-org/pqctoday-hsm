@@ -322,8 +322,19 @@ pub fn rekey_key_pair(
         let stored_attrs = super::helpers::strip_x_prefixes(&old_priv.custom_attributes);
         let algo_name =
             super::helpers::qualified_name(old_priv.algorithm, old_priv.cryptographic_length);
+        // Modular-policy plan (2026-08-28) — refine the bare "ReKeyKeyPair"
+        // op into "ReKeyKeyPair:<purpose>" from the STORED pair's usage
+        // mask (a rekey targets an existing pair, so unlike CreateKeyPair
+        // there is no request template to scan). This is what lets a
+        // scoped signing/key-establishment/encryption module's rules name
+        // this op at all — see `dispatcher::purpose_suffix_from_mask` and
+        // `policy::rule::scope_ops`.
+        let op_canonical = format!(
+            "ReKeyKeyPair:{}",
+            crate::dispatcher::purpose_suffix_from_mask(old_priv.usage_mask)
+        );
         let mut p_req = PolicyRequest::minimal(
-            "ReKeyKeyPair",
+            &op_canonical,
             Some(&algo_name),
             started,
             correlation_id,
@@ -645,7 +656,7 @@ mod tests {
         let sink: Arc<dyn AuditSink> = ring.clone();
         let engine = Engine::with_global_sink(sink.clone());
         engine
-            .activate(load_from_str(OPEN_POLICY, std::path::Path::new("<t>")).unwrap())
+            .replace_all(load_from_str(OPEN_POLICY, std::path::Path::new("<t>")).unwrap())
             .unwrap();
         Deps::new(engine, Arc::new(MemoryStore::new()), sink, super::super::deps::DepsConfig::default())
     }

@@ -120,7 +120,7 @@ rules:
 fn engine_with(yaml: &str) -> Engine {
     let eng = Engine::deny_all();
     let loaded = load_from_str(yaml, Path::new("<demo>")).expect("test policy must parse");
-    eng.activate(loaded).expect("test policy must activate");
+    eng.replace_all(loaded).expect("test policy must activate");
     eng
 }
 

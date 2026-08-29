@@ -111,7 +111,11 @@ mod tests {
             EventPayload::PolicyDecided {
                 op: "t".into(),
                 algorithm: None,
-                outcome: DecisionSummary::Allow { algorithm_override: None, substituted_by_rule: None },
+                outcome: DecisionSummary::Allow {
+                    algorithm_override: None,
+                    substituted_by_rule: None,
+                    cp_override: None,
+                },
                 policy_fingerprint: "test".into(),
             },
         ));

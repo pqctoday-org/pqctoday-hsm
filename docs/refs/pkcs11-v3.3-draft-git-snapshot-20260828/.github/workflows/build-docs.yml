@@ -1,0 +1,63 @@
+---
+name: Build Docs
+
+on:
+  push:
+    branches: ["master"]
+    paths:
+      - 'working/doc/spec/**'
+  pull_request:
+    branches: ["master"]
+    paths:
+      - '.github/workflows/**'
+      - 'working/doc/spec/**'
+
+jobs:
+  build:
+    name: Automatic Docs build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    container: fedora:latest
+    steps:
+      - name: Install Dependencies
+        run: |
+           dnf -y install \
+                  make pandoc \
+                  dejavu-sans-fonts \
+                  dejavu-sans-mono-fonts \
+                  dejavu-serif-fonts \
+                  texlive-amsfonts \
+                  texlive-bookmark \
+                  texlive-booktabs \
+                  texlive-enumitem \
+                  texlive-fancyvrb \
+                  texlive-fontspec \
+                  texlive-framed \
+                  texlive-geometry \
+                  texlive-latex \
+                  texlive-lua-ul \
+                  texlive-luacolor \
+                  texlive-luahbtex \
+                  texlive-mdwtools \
+                  texlive-multirow \
+                  texlive-newunicodechar \
+                  texlive-sectsty \
+                  texlive-selnolig \
+                  texlive-unicode-math
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build docs
+        run: |
+          cd working/doc/spec
+          make
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Rendered-docs
+          path: |
+            working/doc/spec/*pdf
+            working/doc/spec/*html
+

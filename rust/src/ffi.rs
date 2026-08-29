@@ -424,6 +424,13 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     for slot_id in all_slots {
         reset_login_state_if_no_sessions(slot_id);
     }
+    // UNLOCKED_MASTER_KEYS is a deliberately separate cache from TOKEN_STORE
+    // (see its own doc comment in store/mod.rs) with one job — zeroize on
+    // logout/finalize. Clearing it here is orthogonal to the TOKEN_STORE
+    // persistence fix above: the token's objects survive Finalize, but any
+    // unwrapped durable-storage master key an active session had cached
+    // must not.
+    crate::store::clear_all_unlocked_master_keys();
     crate::state::set_initialized(false);
     CKR_OK
 }
@@ -621,6 +628,36 @@ pub fn C_InitToken(slot_id: u32, p_pin: *mut u8, ul_pin_len: u32, p_label: *mut 
     });
     if !success {
         return CKR_SLOT_ID_INVALID;
+    }
+
+    // Encryption-at-rest master key: only when a durable store is
+    // configured (memory-only mode does no PBKDF2/AES-GCM work at all).
+    // Always FRESH here, on both first init and reinit — §5.5.7 already
+    // destroys every destroyable object on this path, so there is no
+    // surviving ciphertext a preserved key would need to keep decrypting;
+    // generating fresh is simpler and strictly safer than trying to detect
+    // "is this genuinely the first init" and branch.
+    if crate::store::is_persistent() {
+        if let Ok(master_key) = crate::store::crypto::generate_master_key() {
+            if let Ok(so_wrapped) = crate::store::crypto::wrap_master_key(pin_bytes, &master_key) {
+                crate::store::active().put_token(
+                    slot_id,
+                    &crate::store::PersistedToken {
+                        initialized: true,
+                        label,
+                        so_pin_salt: salt,
+                        so_pin_hash,
+                        user_pin_salt: None,
+                        user_pin_hash: None,
+                        master_key_so_wrapped: Some(so_wrapped),
+                        master_key_user_wrapped: None,
+                        next_handle: 0,
+                        unique_id_counter: 0,
+                    },
+                );
+                crate::store::set_unlocked_master_key(slot_id, master_key);
+            }
+        }
     }
 
     // §5.5.7 — "When a token is initialized, all objects that can be
@@ -889,7 +926,7 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
     });
     let pin_bytes = unsafe { std::slice::from_raw_parts(p_pin, ul_pin_len as usize) };
 
-    TOKEN_STORE.with(|ts| {
+    let rv = TOKEN_STORE.with(|ts| {
         let mut store = ts.borrow_mut();
         let token = match store.get_mut(&slot_id) {
             Some(t) => t,
@@ -935,7 +972,34 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
             _ => return CKR_USER_TYPE_INVALID,
         }
         CKR_OK
-    })
+    });
+    if rv == CKR_OK && crate::store::is_persistent() {
+        // Unlock: fetch this role's wrapped master-key blob and open it
+        // with the PIN just verified above. Outside the TOKEN_STORE lock —
+        // PBKDF2 (210k iterations) + AES-GCM open have no business running
+        // under a global mutex. A missing/unopenable blob is not an error
+        // here: an older token created before persistence was configured,
+        // or one whose PIN was set before this slot ever pointed at a
+        // store, simply has nothing to unlock yet.
+        let role = if user_type == CKU_SO {
+            crate::store::PinRole::So
+        } else {
+            crate::store::PinRole::User
+        };
+        if let Some(token) = crate::store::active().get_token(slot_id) {
+            let wrapped = match role {
+                crate::store::PinRole::So => token.master_key_so_wrapped,
+                crate::store::PinRole::User => token.master_key_user_wrapped,
+            };
+            if let Some(wrapped) = wrapped {
+                if let Ok(master_key) = crate::store::crypto::unwrap_master_key(pin_bytes, &wrapped) {
+                    crate::store::set_unlocked_master_key(slot_id, master_key);
+                    crate::store::rehydrate_private_objects(slot_id, &master_key);
+                }
+            }
+        }
+    }
+    rv
 }
 
 #[wasm_bindgen(js_name = _C_Logout)]
@@ -964,6 +1028,7 @@ pub fn C_Logout(h_session: u32) -> u32 {
         // state::invalidate_private_handles_on_slot for why token objects are
         // re-keyed rather than marked.
         crate::state::invalidate_private_handles_on_slot(slot_id);
+        crate::store::clear_unlocked_master_key(slot_id);
         CKR_OK
     } else {
         CKR_USER_NOT_LOGGED_IN
@@ -993,6 +1058,7 @@ fn reset_login_state_if_no_sessions(slot_id: u32) {
     });
     if was_logged_in {
         crate::state::invalidate_private_handles_on_slot(slot_id);
+        crate::store::clear_unlocked_master_key(slot_id);
     }
 }
 
@@ -1022,8 +1088,13 @@ pub fn C_InitPIN(h_session: u32, p_pin: *mut u8, ul_pin_len: u32) -> u32 {
         return CKR_SESSION_READ_ONLY;
     }
     let slot_id = session.slot_id;
+    let pin_bytes = unsafe { std::slice::from_raw_parts(p_pin, ul_pin_len as usize) };
     let mut success = false;
     let mut not_logged_in = false;
+    // Snapshot for persistence, captured from inside the same lock that
+    // makes the change (cheap — no I/O under the lock), used after it
+    // releases.
+    let mut snapshot: Option<crate::store::PersistedToken> = None;
     TOKEN_STORE.with(|ts| {
         let mut store = ts.borrow_mut();
         if let Some(token) = store.get_mut(&slot_id) {
@@ -1035,16 +1106,45 @@ pub fn C_InitPIN(h_session: u32, p_pin: *mut u8, ul_pin_len: u32) -> u32 {
             if getrandom::getrandom(&mut salt).is_err() {
                 return;
             }
-            let pin_bytes = unsafe { std::slice::from_raw_parts(p_pin, ul_pin_len as usize) };
             token.user_pin_hash = Some(hash_pin(pin_bytes, &salt));
             token.user_pin_salt = Some(salt);
             success = true;
+            if crate::store::is_persistent() {
+                snapshot = Some(crate::store::PersistedToken {
+                    initialized: token.initialized,
+                    label: token.label,
+                    so_pin_salt: token.so_pin_salt,
+                    so_pin_hash: token.so_pin_hash,
+                    user_pin_salt: token.user_pin_salt,
+                    user_pin_hash: token.user_pin_hash,
+                    master_key_so_wrapped: None, // filled in below, unchanged
+                    master_key_user_wrapped: None, // filled in below
+                    next_handle: 0,
+                    unique_id_counter: 0,
+                });
+            }
         }
     });
     if not_logged_in {
         return CKR_USER_NOT_LOGGED_IN;
     }
-    if success { CKR_OK } else { CKR_GENERAL_ERROR }
+    if !success {
+        return CKR_GENERAL_ERROR;
+    }
+    if let Some(mut snap) = snapshot {
+        // SO is required to be logged in above, so the master key is
+        // already unlocked for this slot — wrap it under the new User PIN
+        // too, keeping the existing SO wrap untouched.
+        let existing = crate::store::active().get_token(slot_id);
+        snap.master_key_so_wrapped = existing.and_then(|t| t.master_key_so_wrapped);
+        if let Some(master_key) = crate::store::unlocked_master_key(slot_id) {
+            if let Ok(wrapped) = crate::store::crypto::wrap_master_key(pin_bytes, &master_key) {
+                snap.master_key_user_wrapped = Some(wrapped);
+            }
+        }
+        crate::store::active().put_token(slot_id, &snap);
+    }
+    CKR_OK
 }
 
 #[wasm_bindgen(js_name = _C_GetSessionInfo)]
@@ -4867,9 +4967,13 @@ pub fn C_DestroyObject(h_session: u32, h_object: u32) -> u32 {
             return CKR_ACTION_PROHIBITED;
         }
     }
+    let mut removed_slot: Option<u32> = None;
     let removed = OBJECTS.with(|objs| {
         let mut store = objs.borrow_mut();
         if let Some(mut attrs) = store.remove(&h_object) {
+            if read_bool_attr(&attrs, CKA_TOKEN) {
+                removed_slot = Some(crate::state::object_slot_of(&attrs));
+            }
             // Zeroize key material before deallocation (RS-02)
             if let Some(val) = attrs.get_mut(&CKA_VALUE) {
                 val.zeroize();
@@ -4879,6 +4983,9 @@ pub fn C_DestroyObject(h_session: u32, h_object: u32) -> u32 {
             false
         }
     });
+    if let Some(slot) = removed_slot {
+        crate::store::persist_delete(slot, h_object);
+    }
     if removed {
         // PKCS#11 v3.2: clean up any active operation state referencing the destroyed key.
         // Without this, a session that called C_SignInit then C_DestroyObject would hold a
@@ -5368,9 +5475,16 @@ fn C_Sign_impl(
                         return CKR_BUFFER_TOO_SMALL;
                     }
                     // Buffer is adequate — now atomically advance and persist the
-                    // key state, then emit the signature.
+                    // key state, then emit the signature. Both fields (state blob
+                    // + remaining-keys counter) are ONE logical "this leaf was
+                    // consumed" transition — coalesced into one
+                    // set_object_attrs_bytes_batch call so a crash between them
+                    // can't leave disk/memory disagreeing about the last-used
+                    // leaf (same hazard native::hbs::sign_commit guards against
+                    // for HSS/LMS).
                     if let Some(ref new_priv_bytes) = new_state {
-                        set_object_attr_bytes(hkey, CKA_PRIV_STATEFUL_KEY_STATE, new_priv_bytes.clone());
+                        let mut changes =
+                            vec![(CKA_PRIV_STATEFUL_KEY_STATE, new_priv_bytes.clone())];
 
                         if mech == CKM_XMSSMT {
                             // XMSS^MT: derive remaining from the MT signing-key
@@ -5382,11 +5496,10 @@ fn C_Sign_impl(
                                 new_priv_bytes,
                             )
                             .min(u32::MAX as u64) as u32;
-                            set_object_attr_bytes(
-                                hkey,
+                            changes.push((
                                 CKA_PRIV_XMSS_KEYS_REMAINING,
                                 remaining.to_le_bytes().to_vec(),
-                            );
+                            ));
                         } else {
                             // XMSS: derive remaining from the updated signing key state.
                             // The xmss crate stores the leaf index as big-endian bytes at offset 4
@@ -5398,12 +5511,12 @@ fn C_Sign_impl(
                                 xmss_param,
                                 new_priv_bytes,
                             );
-                            set_object_attr_bytes(
-                                hkey,
+                            changes.push((
                                 CKA_PRIV_XMSS_KEYS_REMAINING,
                                 remaining.to_le_bytes().to_vec(),
-                            );
+                            ));
                         }
+                        crate::state::set_object_attrs_bytes_batch(hkey, &changes);
                     }
                     std::ptr::copy_nonoverlapping(sig.as_ptr(), p_signature, sig.len());
                     *pul_signature_len = sig.len() as u32;
@@ -11064,19 +11177,23 @@ pub fn C_SetPIN(
     if getrandom::getrandom(&mut salt).is_err() {
         return CKR_GENERAL_ERROR;
     }
-    TOKEN_STORE.with(|ts| {
+    let slot_id = session.slot_id;
+    let mut changed_role: Option<crate::store::PinRole> = None;
+    let mut snapshot: Option<crate::store::PersistedToken> = None;
+    let rv = TOKEN_STORE.with(|ts| {
         let mut store = ts.borrow_mut();
-        let token = match store.get_mut(&session.slot_id) {
+        let token = match store.get_mut(&slot_id) {
             Some(t) => t,
             None => return CKR_GENERAL_ERROR,
         };
-        match token.login_state {
+        let rv = match token.login_state {
             LoginState::SO => {
                 if hash_pin(old_pin, &token.so_pin_salt) != token.so_pin_hash {
                     return CKR_PIN_INCORRECT;
                 }
                 token.so_pin_salt = salt;
                 token.so_pin_hash = hash_pin(new_pin, &salt);
+                changed_role = Some(crate::store::PinRole::So);
                 CKR_OK
             }
             // §5.6.7 table — both the user session AND the public session
@@ -11093,10 +11210,80 @@ pub fn C_SetPIN(
                 }
                 token.user_pin_salt = Some(salt);
                 token.user_pin_hash = Some(hash_pin(new_pin, &salt));
+                changed_role = Some(crate::store::PinRole::User);
                 CKR_OK
             }
+        };
+        if rv == CKR_OK && crate::store::is_persistent() {
+            snapshot = Some(crate::store::PersistedToken {
+                initialized: token.initialized,
+                label: token.label,
+                so_pin_salt: token.so_pin_salt,
+                so_pin_hash: token.so_pin_hash,
+                user_pin_salt: token.user_pin_salt,
+                user_pin_hash: token.user_pin_hash,
+                master_key_so_wrapped: None,   // filled in below
+                master_key_user_wrapped: None, // filled in below
+                next_handle: 0,
+                unique_id_counter: 0,
+            });
         }
-    })
+        rv
+    });
+    if let (Some(mut snap), Some(role)) = (snapshot, changed_role) {
+        // The old PIN was just verified above (in whichever branch ran),
+        // regardless of session login state — including the Public-session
+        // "reset my own user PIN with the current one" path, which has no
+        // cached unlocked master key to fall back on. So unwrap with
+        // old_pin here rather than relying on the login-time cache.
+        let existing = crate::store::active().get_token(slot_id);
+        let (so_wrapped, user_wrapped) = existing
+            .map(|t| (t.master_key_so_wrapped, t.master_key_user_wrapped))
+            .unwrap_or((None, None));
+        let old_wrapped = match role {
+            crate::store::PinRole::So => &so_wrapped,
+            crate::store::PinRole::User => &user_wrapped,
+        };
+        match old_wrapped {
+            Some(old_wrapped) => {
+                match crate::store::crypto::unwrap_master_key(old_pin, old_wrapped)
+                    .and_then(|master_key| {
+                        crate::store::crypto::wrap_master_key(new_pin, &master_key)
+                            .map(|w| (master_key, w))
+                    }) {
+                    Ok((master_key, new_wrapped)) => {
+                        match role {
+                            crate::store::PinRole::So => {
+                                snap.master_key_so_wrapped = Some(new_wrapped);
+                                snap.master_key_user_wrapped = user_wrapped;
+                            }
+                            crate::store::PinRole::User => {
+                                snap.master_key_user_wrapped = Some(new_wrapped);
+                                snap.master_key_so_wrapped = so_wrapped;
+                            }
+                        }
+                        crate::store::set_unlocked_master_key(slot_id, master_key);
+                    }
+                    Err(_) => {
+                        // Should not happen (old_pin was just verified against
+                        // the PIN hash above) — leave both wraps as they were
+                        // rather than risk persisting a half-updated pair.
+                        snap.master_key_so_wrapped = so_wrapped;
+                        snap.master_key_user_wrapped = user_wrapped;
+                    }
+                }
+            }
+            None => {
+                // Nothing wrapped yet for this role (e.g. persistence was
+                // configured after this PIN was first set) — persist the
+                // PIN hash change; there is no master key to re-wrap.
+                snap.master_key_so_wrapped = so_wrapped;
+                snap.master_key_user_wrapped = user_wrapped;
+            }
+        }
+        crate::store::active().put_token(slot_id, &snap);
+    }
+    rv
 }
 
 /// Engine core of `C_CopyObject` — clone + template overlay with §4.1.2/§4.1.3

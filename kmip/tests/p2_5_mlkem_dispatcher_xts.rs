@@ -84,7 +84,7 @@ fn build_deps_with_real_engine() -> Deps {
     let sink: Arc<dyn AuditSink> = ring.clone();
     let policy_engine = Engine::with_global_sink(sink.clone());
     policy_engine
-        .activate(load_from_str(PERMISSIVE_POLICY, std::path::Path::new("<p2.5>")).unwrap())
+        .replace_all(load_from_str(PERMISSIVE_POLICY, std::path::Path::new("<p2.5>")).unwrap())
         .unwrap();
 
     Deps::new(policy_engine, Arc::new(MemoryStore::new()), sink, DepsConfig::default())

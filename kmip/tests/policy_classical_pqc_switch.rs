@@ -22,7 +22,7 @@ fn engine_for(file: &str) -> Engine {
     let loaded = load_from_file(&policies_dir().join(file))
         .unwrap_or_else(|e| panic!("loading {file}: {e}"));
     let eng = Engine::deny_all();
-    eng.activate(loaded).expect("activation must succeed");
+    eng.replace_all(loaded).expect("activation must succeed");
     eng
 }
 

@@ -96,7 +96,7 @@ fn build_deps_with_real_engine_and_ring() -> (Arc<RingSink>, Deps) {
     let sink: Arc<dyn AuditSink> = ring.clone();
     let policy_engine = Engine::with_global_sink(sink.clone());
     policy_engine
-        .activate(load_from_str(PERMISSIVE_POLICY, std::path::Path::new("<e2e>")).unwrap())
+        .replace_all(load_from_str(PERMISSIVE_POLICY, std::path::Path::new("<e2e>")).unwrap())
         .unwrap();
 
     let deps = Deps::new(
@@ -955,7 +955,7 @@ fn login_ticket_authenticates_a_later_dispatched_request() {
     let sink: Arc<dyn AuditSink> = ring;
     let engine = Engine::with_global_sink(sink.clone());
     engine
-        .activate(load_from_str(
+        .replace_all(load_from_str(
             "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n",
             std::path::Path::new("<t>"),
         ).unwrap())
@@ -1165,7 +1165,7 @@ fn certify_issues_certificate_get_able_with_links() {
     let sink: Arc<dyn AuditSink> = ring.clone();
     let policy = Engine::with_global_sink(sink.clone());
     policy
-        .activate(load_from_str(
+        .replace_all(load_from_str(
             "schema_version: 1\nmetadata: { name: p, description: p, authority: t, effective: \"always\" }\nrules: []\n",
             std::path::Path::new("<e2e>"),
         ).unwrap())

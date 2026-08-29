@@ -43,13 +43,23 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use super::{
-    engine::Engine,
+    engine::{Engine, UncoveredOps},
+    lint::{lint_rules, Finding},
     loader::{load_from_file, load_from_str, LoadedPolicy, LoaderError},
 };
 
 /// Filename for the active-policy marker. Conventionally a dotfile so the
 /// `*.yaml` filter in [`PolicyStore::list`] ignores it.
 pub const POLICY_STORE_ACTIVE_FILE: &str = ".active";
+
+/// Filename for the modular-policy-set marker (2026-08-28 plan). A SEPARATE
+/// file from [`POLICY_STORE_ACTIVE_FILE`] rather than a versioned/migrated
+/// unified format — deliberately: the legacy marker's shape, and every
+/// method that reads/writes it, stay byte-for-byte unchanged (zero risk to
+/// their existing tests), and the two are mutually exclusive on the engine
+/// side anyway (`Engine::replace_all` vs `Engine::activate` — see
+/// `engine.rs`'s module docs), so there is nothing to migrate between them.
+pub const POLICY_STORE_ACTIVE_MODULES_FILE: &str = ".active-modules";
 
 /// On-disk record of which policy is currently active. Written by
 /// [`PolicyStore::write_active`] / [`PolicyStore::activate_with_engine`].
@@ -64,6 +74,27 @@ pub struct ActiveMarker {
     /// fingerprint-mismatched file (see [`PolicyStore::resume_active`]).
     pub fingerprint: String,
     /// UTC timestamp when the marker was written.
+    #[serde(with = "time::serde::rfc3339")]
+    pub activated_at: OffsetDateTime,
+}
+
+/// On-disk record of the modular policy set (2026-08-28 plan). Written by
+/// [`PolicyStore::activate_module_with_engine`] and friends.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveModulesMarker {
+    /// `"deny"` or `"allow"` — mirrors [`UncoveredOps`] as a plain string so
+    /// the marker file stays a stable, hand-readable JSON shape independent
+    /// of the Rust enum's internals.
+    pub uncovered_ops: String,
+    pub modules: Vec<ModuleMarker>,
+}
+
+/// One entry in [`ActiveModulesMarker::modules`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModuleMarker {
+    pub name: String,
+    pub fingerprint: String,
+    pub enabled: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub activated_at: OffsetDateTime,
 }
@@ -142,6 +173,23 @@ impl PolicyStore {
         Ok(super::loader::load_from_str_strict(yaml, Path::new("<draft>"))?)
     }
 
+    /// C3 (2026-08-28 gaps-remediation plan) — every value-level lint
+    /// finding for a draft, fatal and advisory alike, instead of
+    /// `validate_draft_strict`'s pass/fail `Result` (which — like every
+    /// other `LoaderError`-returning path — reports only the FIRST fatal
+    /// finding it hits: 3 rules each with a typo'd algorithm name meant
+    /// fix-reload-see-the-next-one, 3 times, in the editor's Check tab).
+    /// Structural failures (bad YAML, unknown top-level field, bad schema
+    /// version) still short-circuit as a single `StoreError` — those come
+    /// from parsing the document itself, before there is a rule list to
+    /// lint at all, and the visual editor's own generator never produces
+    /// one anyway (its `EditablePolicy` model always serializes a
+    /// structurally well-formed document).
+    pub fn lint_draft(&self, yaml: &str) -> Result<Vec<Finding>, StoreError> {
+        let policy = super::loader::parse_and_structurally_validate(yaml, Path::new("<draft>"))?;
+        Ok(lint_rules(&policy.rules, true))
+    }
+
     /// Save a (presumably already-validated) draft to disk under `name`.
     /// Atomic on POSIX: writes to a tempfile, then renames.
     pub fn save(&self, name: &str, yaml: &str) -> Result<(), StoreError> {
@@ -170,7 +218,7 @@ impl PolicyStore {
     ) -> Result<super::Decision, StoreError> {
         let loaded = self.validate_draft(yaml)?;
         let engine = Engine::deny_all();
-        engine.activate(loaded).expect("activation in dry_run must succeed");
+        engine.replace_all(loaded).expect("activation in dry_run must succeed");
         Ok(engine.evaluate(req))
     }
 
@@ -246,7 +294,7 @@ impl PolicyStore {
         let fingerprint = super::policy::Policy::fingerprint(&loaded.source);
         let prior = self.read_active()?;
         engine
-            .activate(loaded)
+            .replace_all(loaded)
             .map_err(|e| StoreError::BadMarker(format!("engine activate: {e}")))?;
         self.write_active(name, &fingerprint)?;
         Ok(prior)
@@ -276,8 +324,187 @@ impl PolicyStore {
             });
         }
         engine
+            .replace_all(loaded)
+            .map_err(|e| StoreError::BadMarker(format!("engine activate: {e}")))?;
+        Ok(Some(marker))
+    }
+
+    // ── Modular policy set persistence (.active-modules marker,
+    // 2026-08-28 plan) — parallels the legacy methods above one-for-one,
+    // over the separate marker file and `Engine::activate`/`deactivate`/
+    // `set_module_enabled`/`clear_modules` instead of `replace_all`. ──────
+
+    /// Path to the modules marker file inside the store root.
+    pub fn active_modules_marker_path(&self) -> PathBuf {
+        self.root.join(POLICY_STORE_ACTIVE_MODULES_FILE)
+    }
+
+    /// Read the on-disk modules marker, if present. `Ok(None)` — no
+    /// modules have ever been activated (or [`Self::clear_modules_with_engine`]
+    /// ran).
+    pub fn read_active_modules(&self) -> Result<Option<ActiveModulesMarker>, StoreError> {
+        let path = self.active_modules_marker_path();
+        let body = match std::fs::read_to_string(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(StoreError::Io { path, source }),
+        };
+        let marker: ActiveModulesMarker =
+            serde_json::from_str(&body).map_err(|e| StoreError::BadMarker(e.to_string()))?;
+        Ok(Some(marker))
+    }
+
+    fn write_active_modules(&self, marker: &ActiveModulesMarker) -> Result<(), StoreError> {
+        let body = serde_json::to_string_pretty(marker)
+            .map_err(|e| StoreError::BadMarker(e.to_string()))?;
+        let target = self.active_modules_marker_path();
+        let tmp = self.root.join(format!("{POLICY_STORE_ACTIVE_MODULES_FILE}.tmp"));
+        std::fs::write(&tmp, body).map_err(|source| StoreError::Io { path: tmp.clone(), source })?;
+        std::fs::rename(&tmp, &target).map_err(|source| StoreError::Io { path: target, source })?;
+        Ok(())
+    }
+
+    /// Delete the modules marker. Idempotent.
+    pub fn clear_active_modules(&self) -> Result<(), StoreError> {
+        let path = self.active_modules_marker_path();
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StoreError::Io { path, source }),
+        }
+    }
+
+    /// Activate `name` as a module on `engine` and upsert it into the
+    /// modules marker (creating the file with `uncovered_ops: "deny"` if
+    /// this is the first module ever activated in this store). Mirrors
+    /// [`Self::activate_with_engine`]'s shape but for the additive,
+    /// non-replacing `Engine::activate`.
+    pub fn activate_module_with_engine(&self, name: &str, engine: &Engine) -> Result<(), StoreError> {
+        let loaded = self.load(name)?;
+        let fingerprint = super::policy::Policy::fingerprint(&loaded.source);
+        engine
             .activate(loaded)
             .map_err(|e| StoreError::BadMarker(format!("engine activate: {e}")))?;
+        let mut marker = self.read_active_modules()?.unwrap_or_else(|| ActiveModulesMarker {
+            uncovered_ops: "deny".to_string(),
+            modules: Vec::new(),
+        });
+        marker.modules.retain(|m| m.name != name);
+        marker.modules.push(ModuleMarker {
+            name: name.to_string(),
+            fingerprint,
+            enabled: true,
+            activated_at: OffsetDateTime::now_utc(),
+        });
+        self.write_active_modules(&marker)
+    }
+
+    /// Deactivate (remove) `name` from both the engine and the marker.
+    /// `true` if it was present on the engine.
+    pub fn deactivate_module_with_engine(
+        &self,
+        name: &str,
+        engine: &Engine,
+    ) -> Result<bool, StoreError> {
+        let removed = engine.deactivate(name);
+        if let Some(mut marker) = self.read_active_modules()? {
+            let before = marker.modules.len();
+            marker.modules.retain(|m| m.name != name);
+            if marker.modules.len() != before {
+                self.write_active_modules(&marker)?;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Enable/disable `name` on both the engine and the marker. `true` if
+    /// the name was found on the engine.
+    pub fn set_module_enabled_with_engine(
+        &self,
+        name: &str,
+        enabled: bool,
+        engine: &Engine,
+    ) -> Result<bool, StoreError> {
+        let found = engine.set_module_enabled(name, enabled);
+        if found {
+            if let Some(mut marker) = self.read_active_modules()? {
+                if let Some(m) = marker.modules.iter_mut().find(|m| m.name == name) {
+                    m.enabled = enabled;
+                    self.write_active_modules(&marker)?;
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Clear every module from both the engine and the marker — the
+    /// fail-closed OFF (see `Engine::clear_modules`'s doc comment).
+    pub fn clear_modules_with_engine(&self, engine: &Engine) -> Result<(), StoreError> {
+        engine.clear_modules();
+        self.clear_active_modules()
+    }
+
+    /// Set the uncovered-ops mode on both the engine and the marker.
+    /// `mode` must be `"deny"` or `"allow"`.
+    pub fn set_uncovered_ops_with_engine(
+        &self,
+        mode: &str,
+        engine: &Engine,
+    ) -> Result<(), StoreError> {
+        let parsed = match mode {
+            "deny" => UncoveredOps::Deny,
+            "allow" => UncoveredOps::Allow,
+            other => {
+                return Err(StoreError::BadMarker(format!(
+                    "unknown uncovered_ops mode {other:?} (expected \"deny\" or \"allow\")"
+                )))
+            }
+        };
+        engine.set_uncovered_ops(parsed);
+        let mut marker = self.read_active_modules()?.unwrap_or_else(|| ActiveModulesMarker {
+            uncovered_ops: "deny".to_string(),
+            modules: Vec::new(),
+        });
+        marker.uncovered_ops = mode.to_string();
+        self.write_active_modules(&marker)
+    }
+
+    /// Boot path: read the modules marker (if present) and re-activate
+    /// every entry on `engine`, restoring `uncovered_ops` and each
+    /// module's `enabled` flag. Same fingerprint-drift protection as
+    /// [`Self::resume_active`] — an out-of-band edit to a module's YAML
+    /// refuses to resume rather than silently activating the edited file.
+    /// Returns the resumed marker, or `Ok(None)` if no modules marker
+    /// exists on disk.
+    pub fn resume_active_modules(
+        &self,
+        engine: &Engine,
+    ) -> Result<Option<ActiveModulesMarker>, StoreError> {
+        let marker = match self.read_active_modules()? {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        engine.set_uncovered_ops(if marker.uncovered_ops == "allow" {
+            UncoveredOps::Allow
+        } else {
+            UncoveredOps::Deny
+        });
+        for m in &marker.modules {
+            let loaded = self.load(&m.name)?;
+            let current_fp = super::policy::Policy::fingerprint(&loaded.source);
+            if current_fp != m.fingerprint {
+                return Err(StoreError::FingerprintDrift {
+                    marker_fp: m.fingerprint.clone(),
+                    disk_fp: current_fp,
+                });
+            }
+            engine
+                .activate(loaded)
+                .map_err(|e| StoreError::BadMarker(format!("engine activate: {e}")))?;
+            if !m.enabled {
+                engine.set_module_enabled(&m.name, false);
+            }
+        }
         Ok(Some(marker))
     }
 
@@ -383,6 +610,53 @@ rules:
         assert!(d.is_deny());
         // Verify no file was written.
         assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn lint_draft_reports_every_finding_not_just_the_first() {
+        // C3 (2026-08-28 gaps-remediation plan) — two INDEPENDENT typos, in
+        // two different rules. `validate_draft_strict` would surface only
+        // the first as a hard `Err`; `lint_draft` must return both.
+        let dir = tmp_dir("lint-draft");
+        let store = PolicyStore::new(&dir);
+        let yaml = r#"
+schema_version: 1
+metadata:
+  name: two-typos
+  description: t
+  authority: t
+  effective: "always"
+rules:
+  - type: algorithm_denylist
+    ops: [Sign]
+    algorithms: [RSAA]
+    reason: "typo one"
+  - type: algorithm_denylist
+    ops: [Encrypt]
+    algorithms: [AES-2566]
+    reason: "typo two"
+"#;
+        let findings = store.lint_draft(yaml).unwrap();
+        let fatal: Vec<_> = findings.iter().filter(|f| f.fatal).collect();
+        assert_eq!(fatal.len(), 2, "both typos must be reported, got {fatal:?}");
+        assert!(fatal.iter().any(|f| f.value == "RSAA"));
+        assert!(fatal.iter().any(|f| f.value == "AES-2566"));
+
+        // A clean draft reports no findings at all.
+        let clean = r#"
+schema_version: 1
+metadata:
+  name: clean
+  description: t
+  authority: t
+  effective: "always"
+rules:
+  - type: algorithm_denylist
+    ops: [Sign]
+    algorithms: [RSA]
+    reason: "real algorithm name"
+"#;
+        assert!(store.lint_draft(clean).unwrap().is_empty());
     }
 
     #[test]
@@ -532,5 +806,173 @@ rules:
         assert!(matches!(err, StoreError::FingerprintDrift { .. }));
         // Engine NOT activated (refused to silently load drifted policy).
         assert!(engine2.active().is_none());
+    }
+
+    // ── Modular policy set persistence (.active-modules, 2026-08-28 plan) ──
+
+    fn write_module_yaml(dir: &Path, name: &str, scope: &str) {
+        std::fs::write(
+            dir.join(format!("{name}.yaml")),
+            format!(
+                "schema_version: 3\nmetadata: {{ name: {name}, description: {name}, authority: t, effective: always, scopes: [{scope}] }}\nrules: []\n",
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn activate_module_with_engine_writes_marker_and_engine_observes_it() {
+        let dir = tmp_dir("mod-activate");
+        write_module_yaml(&dir, "sig", "signing");
+        let store = PolicyStore::new(&dir);
+        let engine = super::super::Engine::deny_all();
+
+        store.activate_module_with_engine("sig", &engine).unwrap();
+        assert_eq!(engine.modules().len(), 1);
+        let marker = store.read_active_modules().unwrap().expect("marker must exist");
+        assert_eq!(marker.modules.len(), 1);
+        assert_eq!(marker.modules[0].name, "sig");
+        assert!(marker.modules[0].enabled);
+        assert_eq!(marker.uncovered_ops, "deny");
+    }
+
+    #[test]
+    fn activate_module_with_engine_upserts_by_name() {
+        let dir = tmp_dir("mod-upsert");
+        write_module_yaml(&dir, "sig", "signing");
+        let store = PolicyStore::new(&dir);
+        let engine = super::super::Engine::deny_all();
+        store.activate_module_with_engine("sig", &engine).unwrap();
+        store.activate_module_with_engine("sig", &engine).unwrap(); // re-activate, not a duplicate
+        assert_eq!(engine.modules().len(), 1);
+        let marker = store.read_active_modules().unwrap().unwrap();
+        assert_eq!(marker.modules.len(), 1);
+    }
+
+    #[test]
+    fn deactivate_module_with_engine_removes_from_both() {
+        let dir = tmp_dir("mod-deactivate");
+        write_module_yaml(&dir, "sig", "signing");
+        let store = PolicyStore::new(&dir);
+        let engine = super::super::Engine::deny_all();
+        store.activate_module_with_engine("sig", &engine).unwrap();
+
+        assert!(store.deactivate_module_with_engine("sig", &engine).unwrap());
+        assert!(engine.modules().is_empty());
+        assert!(store.read_active_modules().unwrap().unwrap().modules.is_empty());
+        // Deactivating something absent is a clean `false`, not an error.
+        assert!(!store.deactivate_module_with_engine("sig", &engine).unwrap());
+    }
+
+    #[test]
+    fn set_module_enabled_with_engine_updates_both() {
+        let dir = tmp_dir("mod-enable");
+        write_module_yaml(&dir, "sig", "signing");
+        let store = PolicyStore::new(&dir);
+        let engine = super::super::Engine::deny_all();
+        store.activate_module_with_engine("sig", &engine).unwrap();
+
+        assert!(store.set_module_enabled_with_engine("sig", false, &engine).unwrap());
+        let marker = store.read_active_modules().unwrap().unwrap();
+        assert!(!marker.modules[0].enabled);
+        assert!(!store.set_module_enabled_with_engine("nope", false, &engine).unwrap());
+    }
+
+    #[test]
+    fn clear_modules_with_engine_empties_both() {
+        let dir = tmp_dir("mod-clear");
+        write_module_yaml(&dir, "sig", "signing");
+        write_module_yaml(&dir, "kem", "key-establishment");
+        let store = PolicyStore::new(&dir);
+        let engine = super::super::Engine::deny_all();
+        store.activate_module_with_engine("sig", &engine).unwrap();
+        store.activate_module_with_engine("kem", &engine).unwrap();
+
+        store.clear_modules_with_engine(&engine).unwrap();
+        assert!(engine.modules().is_empty());
+        assert!(store.read_active_modules().unwrap().is_none());
+    }
+
+    #[test]
+    fn set_uncovered_ops_with_engine_persists_and_applies() {
+        let dir = tmp_dir("mod-uncov");
+        let store = PolicyStore::new(&dir);
+        let engine = super::super::Engine::deny_all();
+
+        store.set_uncovered_ops_with_engine("allow", &engine).unwrap();
+        assert_eq!(engine.uncovered_ops(), super::super::UncoveredOps::Allow);
+        assert_eq!(store.read_active_modules().unwrap().unwrap().uncovered_ops, "allow");
+
+        let err = store.set_uncovered_ops_with_engine("sideways", &engine).unwrap_err();
+        assert!(matches!(err, StoreError::BadMarker(_)));
+    }
+
+    #[test]
+    fn resume_active_modules_replays_the_full_set_on_boot() {
+        let dir = tmp_dir("mod-resume");
+        write_module_yaml(&dir, "sig", "signing");
+        write_module_yaml(&dir, "kem", "key-establishment");
+        let store = PolicyStore::new(&dir);
+
+        let engine1 = super::super::Engine::deny_all();
+        store.activate_module_with_engine("sig", &engine1).unwrap();
+        store.activate_module_with_engine("kem", &engine1).unwrap();
+        store.set_module_enabled_with_engine("kem", false, &engine1).unwrap();
+        store.set_uncovered_ops_with_engine("allow", &engine1).unwrap();
+
+        let engine2 = super::super::Engine::deny_all();
+        let resumed = store.resume_active_modules(&engine2).unwrap().expect("marker must resume");
+        assert_eq!(resumed.modules.len(), 2);
+        assert_eq!(engine2.modules().len(), 2);
+        assert_eq!(engine2.uncovered_ops(), super::super::UncoveredOps::Allow);
+        let kem_entry = engine2
+            .modules()
+            .into_iter()
+            .find(|(p, _)| p.policy.metadata.name == "kem")
+            .expect("kem must be present");
+        assert!(!kem_entry.1, "kem's disabled state must survive resume");
+    }
+
+    #[test]
+    fn resume_active_modules_rejects_drifted_module() {
+        let dir = tmp_dir("mod-resume-drift");
+        write_module_yaml(&dir, "sig", "signing");
+        let store = PolicyStore::new(&dir);
+        let engine1 = super::super::Engine::deny_all();
+        store.activate_module_with_engine("sig", &engine1).unwrap();
+
+        // Out-of-band edit after the marker was written.
+        std::fs::write(
+            dir.join("sig.yaml"),
+            "schema_version: 3\nmetadata: { name: sig, description: edited, authority: t, effective: always, scopes: [signing] }\nrules: []\n",
+        )
+        .unwrap();
+
+        let engine2 = super::super::Engine::deny_all();
+        let err = store.resume_active_modules(&engine2).unwrap_err();
+        assert!(matches!(err, StoreError::FingerprintDrift { .. }));
+        assert!(engine2.modules().is_empty(), "refused resume must not partially activate");
+    }
+
+    #[test]
+    fn resume_active_modules_returns_none_when_no_marker() {
+        let dir = tmp_dir("mod-resume-none");
+        let store = PolicyStore::new(&dir);
+        let engine = super::super::Engine::deny_all();
+        assert!(store.resume_active_modules(&engine).unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_active_modules_is_idempotent() {
+        let dir = tmp_dir("mod-clear-idempotent");
+        let store = PolicyStore::new(&dir);
+        store.clear_active_modules().unwrap(); // no-op when absent
+        write_module_yaml(&dir, "sig", "signing");
+        let engine = super::super::Engine::deny_all();
+        store.activate_module_with_engine("sig", &engine).unwrap();
+        assert!(store.read_active_modules().unwrap().is_some());
+        store.clear_active_modules().unwrap();
+        assert!(store.read_active_modules().unwrap().is_none());
+        store.clear_active_modules().unwrap(); // still a no-op
     }
 }

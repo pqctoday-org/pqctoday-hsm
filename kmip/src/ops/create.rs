@@ -421,7 +421,7 @@ mod tests {
         let ring = Arc::new(RingSink::new(64));
         let sink: Arc<dyn AuditSink> = ring.clone();
         let engine = Engine::with_global_sink(sink.clone());
-        engine.activate(load_from_str(yaml, std::path::Path::new("<t>")).unwrap()).unwrap();
+        engine.replace_all(load_from_str(yaml, std::path::Path::new("<t>")).unwrap()).unwrap();
         Deps::new(engine, Arc::new(MemoryStore::new()), sink, super::super::deps::DepsConfig::default())
     }
 

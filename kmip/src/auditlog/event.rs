@@ -145,6 +145,17 @@ pub enum EventPayload {
         triggered_by_rule: usize,
         policy_fingerprint: String,
     },
+    /// A `severity: warn` gating rule matched without denying the request
+    /// (A1, 2026-08-28 gaps-remediation plan) — one event per warning, same
+    /// "separate event alongside `PolicyDecided`" convention `RekeyPlanned`
+    /// already uses. `policy` is the policy (legacy mode) or module
+    /// (modular mode) name the rule belongs to.
+    PolicyWarned {
+        rule_index: usize,
+        reason: String,
+        policy: String,
+        policy_fingerprint: String,
+    },
 
     // ── Plane 2 — KMIP ────────────────────────────────────────────────────
     /// KMIP request landed at the dispatcher. Phase 5 emits.
@@ -195,6 +206,12 @@ pub enum DecisionSummary {
     Allow {
         algorithm_override: Option<String>,
         substituted_by_rule: Option<usize>,
+        /// C4 (2026-08-28 gaps-remediation plan) — was dropped here entirely;
+        /// a forcing rule's rewrite was invisible in the audit trail.
+        /// `#[serde(default)]` so an audit log entry written before this
+        /// field existed still deserializes.
+        #[serde(default)]
+        cp_override: Option<crate::policy::CpOverride>,
     },
     Deny {
         reason: String,
@@ -244,6 +261,7 @@ mod tests {
                 outcome: DecisionSummary::Allow {
                     algorithm_override: None,
                     substituted_by_rule: None,
+                    cp_override: None,
                 },
             },
         );

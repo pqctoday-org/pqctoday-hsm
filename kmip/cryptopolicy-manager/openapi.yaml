@@ -185,6 +185,183 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/active-modules:
+    get:
+      operationId: getActiveModules
+      summary: |
+        List every active module (modular-policy plan, 2026-08-28) — mutually
+        exclusive with `/api/v1/active` (legacy single-policy slot); whichever
+        is non-empty is the one enforcing.
+      responses:
+        "200":
+          description: Active module set, or an empty set if none are active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActiveModulesResponse"
+    post:
+      operationId: activateModule
+      summary: |
+        Activate (push/upsert) one scoped module. Refused (400) if the named
+        policy has no `metadata.scopes`, if a legacy policy is active via
+        `PUT /api/v1/active`, or if its scope is already claimed by a
+        differently-named active module — deactivate that one first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: Name of an existing, scoped policy in the store
+              example:
+                name: cnsa-2.0-signing
+      responses:
+        "200":
+          description: Module activated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [activated]
+                properties:
+                  activated:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: clearActiveModules
+      summary: Deactivate every module at once (the fail-closed OFF switch)
+      responses:
+        "200":
+          description: Module set cleared
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cleared]
+                properties:
+                  cleared:
+                    type: boolean
+                    enum: [true]
+
+  /api/v1/active-modules/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        example: cnsa-2.0-signing
+    delete:
+      operationId: deactivateModule
+      summary: Deactivate one module by name
+      responses:
+        "200":
+          description: |
+            Always 200, even if no module by that name was active — check
+            `found` to tell the two cases apart.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deactivated, found]
+                properties:
+                  deactivated:
+                    type: string
+                  found:
+                    type: boolean
+    patch:
+      operationId: setModuleEnabled
+      summary: |
+        Enable/disable one active module in place without unloading it — a
+        disabled module's rules stop applying but its scope stays claimed
+        (nothing else can take it over while it's merely disabled).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled:
+                  type: boolean
+      responses:
+        "200":
+          description: |
+            Always 200, even if no module by that name was active — check
+            `found`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, enabled, found]
+                properties:
+                  name:
+                    type: string
+                  enabled:
+                    type: boolean
+                  found:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/v1/config/uncovered-ops:
+    get:
+      operationId: getUncoveredOps
+      summary: |
+        Current fallback for a request whose op no active module's scope
+        covers (modular mode only)
+      responses:
+        "200":
+          description: Current mode
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [uncovered_ops]
+                properties:
+                  uncovered_ops:
+                    type: string
+                    enum: [deny, allow]
+    put:
+      operationId: setUncoveredOps
+      summary: |
+        Set the uncovered-ops fallback. `deny` (fail closed) is the only
+        value a production deployment should use; `allow` (fail open) exists
+        for the wasm playground and incremental adoption.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [deny, allow]
+      responses:
+        "200":
+          description: Mode set
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [uncovered_ops]
+                properties:
+                  uncovered_ops:
+                    type: string
+                    enum: [deny, allow]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
   /api/v1/validate:
     post:
       operationId: validatePolicy
@@ -337,6 +514,37 @@ components:
           type: string
           nullable: true
           description: Fingerprint of the newly active policy
+
+    ModuleMarker:
+      type: object
+      required: [name, fingerprint, enabled, activated_at]
+      properties:
+        name:
+          type: string
+        fingerprint:
+          type: string
+          description: SHA-256 hex digest of the module's policy YAML
+        enabled:
+          type: boolean
+          description: |
+            False if disabled in place via PATCH /api/v1/active-modules/{name}
+            — the module stays activated (its scope stays claimed) but its
+            rules are skipped during evaluation.
+        activated_at:
+          type: string
+          format: date-time
+
+    ActiveModulesResponse:
+      type: object
+      required: [uncovered_ops, modules]
+      properties:
+        uncovered_ops:
+          type: string
+          enum: [deny, allow]
+        modules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModuleMarker"
 
     DryRunRequest:
       type: object

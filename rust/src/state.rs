@@ -175,6 +175,15 @@ pub fn pad_label_32(label: &str) -> [u8; 32] {
     out
 }
 
+/// Is `slot`'s token already initialized? Exposed for
+/// `native::session::bootstrap_persistent_token`, which must NOT call
+/// `C_InitToken` on a token a durable store just rehydrated — §5.5.7
+/// destroys every destroyable object on init, which would silently wipe
+/// everything the store just loaded back in.
+pub fn is_token_initialized(slot: u32) -> bool {
+    TOKEN_STORE.with(|ts| ts.borrow().get(&slot).map(|t| t.initialized).unwrap_or(false))
+}
+
 pub fn init_token_store() {
     let empty = TOKEN_STORE.with(|ts| ts.borrow().is_empty());
     if empty {
@@ -1244,9 +1253,23 @@ pub fn allocate_handle(mut attrs: Attributes) -> u32 {
         Ok(prev) => prev,
         Err(_) => return 0,
     };
+    // Snapshot BEFORE the move into OBJECTS below — only when a durable
+    // store is actually configured AND this is a token object. Checking
+    // `crate::store::is_persistent()` FIRST matters: in memory-only mode
+    // (the default) this is a cheap `false` and the `Attributes` clone
+    // below never happens at all, rather than happening and then being
+    // thrown away inside `persist_object`.
+    let persist = if crate::store::is_persistent() && read_bool_attr(&attrs, CKA_TOKEN) {
+        Some((object_slot_of(&attrs), attrs.clone()))
+    } else {
+        None
+    };
     OBJECTS.with(|objs| {
         objs.borrow_mut().insert(current, attrs);
     });
+    if let Some((slot, snapshot)) = persist {
+        crate::store::persist_object(slot, current, &snapshot);
+    }
     current
 }
 
@@ -1394,16 +1417,105 @@ pub(crate) fn get_object_attr_u64(handle: u32, attr_type: u32) -> Option<u64> {
 }
 
 /// Overwrite an attribute on an existing object in the store. Returns true on success.
+///
+/// Thin wrapper over [`set_object_attrs_bytes_batch`] — every caller that
+/// needs to change more than one attribute as a single logical state
+/// transition (HSS/LMS and XMSS leaf-advance-and-persist) must call the
+/// batch form directly instead of this one multiple times in a row: two
+/// separate calls here are two separate persisted writes, and a crash
+/// between them can leave disk and memory disagreeing about which leaf was
+/// last used — exactly the one-time-signature reuse hazard stateful-key
+/// code exists to prevent.
 pub(crate) fn set_object_attr_bytes(handle: u32, attr_type: u32, value: Vec<u8>) -> bool {
-    OBJECTS.with(|objs| {
+    set_object_attrs_bytes_batch(handle, &[(attr_type, value)])
+}
+
+/// Apply every `(attr_type, value)` change to `handle` under ONE `OBJECTS`
+/// lock acquisition, then — if the object is a token object and a durable
+/// store is configured — persist the object's resulting full attribute set
+/// in ONE write. This is the coalescing point for any mutation that is
+/// really a single logical state transition split across multiple stored
+/// fields (see [`set_object_attr_bytes`]'s doc).
+pub(crate) fn set_object_attrs_bytes_batch(handle: u32, changes: &[(u32, Vec<u8>)]) -> bool {
+    // Checked BEFORE the lock, not inside it: in memory-only mode (the
+    // default) this is a cheap `false` and the `Attributes` clone below —
+    // one per attribute mutation, including every HBS/XMSS signing
+    // operation on a stateful key — never happens at all.
+    let persistent = crate::store::is_persistent();
+    let outcome: Option<Option<(u32, Attributes)>> = OBJECTS.with(|objs| {
         let mut store = objs.borrow_mut();
-        if let Some(attrs) = store.get_mut(&handle) {
-            attrs.insert(attr_type, value);
-            true
-        } else {
-            false
+        match store.get_mut(&handle) {
+            Some(attrs) => {
+                for (ty, val) in changes {
+                    attrs.insert(*ty, val.clone());
+                }
+                Some(if persistent && read_bool_attr(attrs, CKA_TOKEN) {
+                    Some((object_slot_of(attrs), attrs.clone()))
+                } else {
+                    None
+                })
+            }
+            None => None,
         }
-    })
+    });
+    match outcome {
+        None => false,
+        Some(persist) => {
+            if let Some((slot, attrs)) = persist {
+                crate::store::persist_object(slot, handle, &attrs);
+            }
+            true
+        }
+    }
+}
+
+/// Has `handle` already been loaded into `OBJECTS`? Used by rehydration to
+/// avoid re-inserting an object a second login in the same process already
+/// loaded.
+pub fn object_exists(handle: u32) -> bool {
+    OBJECTS.with(|objs| objs.borrow().contains_key(&handle))
+}
+
+/// Insert a rehydrated object directly, bypassing [`allocate_handle`]'s
+/// fresh-`CKA_UNIQUE_ID`/handle assignment — the object already has both
+/// from its previous life. Bumps `NEXT_HANDLE` past this handle so a
+/// subsequently created object can never collide with it.
+pub fn rehydrate_insert(handle: u32, attrs: Attributes) {
+    OBJECTS.with(|objs| {
+        objs.borrow_mut().insert(handle, attrs);
+    });
+    NEXT_HANDLE.fetch_max(handle.saturating_add(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Restore a slot's durable token metadata (everything [`TokenState`] holds
+/// except `login_state`, which never persists — PKCS#11 §5.6, sessions do
+/// not survive a restart) from a [`crate::store::PersistedToken`]. Also
+/// bumps `NEXT_HANDLE`/`UNIQUE_ID_COUNTER` past whatever this token had
+/// reached, so newly created objects this process life can't collide with
+/// rehydrated ones.
+pub fn rehydrate_token(slot: u32, pt: &crate::store::PersistedToken) {
+    TOKEN_STORE.with(|ts| {
+        let mut store = ts.borrow_mut();
+        let entry = store.entry(slot).or_insert_with(|| TokenState {
+            slot_id: slot,
+            initialized: false,
+            label: [0x20u8; 32],
+            login_state: LoginState::Public,
+            so_pin_salt: [0u8; 16],
+            so_pin_hash: [0u8; 32],
+            user_pin_salt: None,
+            user_pin_hash: None,
+        });
+        entry.initialized = pt.initialized;
+        entry.label = pt.label;
+        entry.so_pin_salt = pt.so_pin_salt;
+        entry.so_pin_hash = pt.so_pin_hash;
+        entry.user_pin_salt = pt.user_pin_salt;
+        entry.user_pin_hash = pt.user_pin_hash;
+        entry.login_state = LoginState::Public;
+    });
+    NEXT_HANDLE.fetch_max(pt.next_handle, std::sync::atomic::Ordering::Relaxed);
+    UNIQUE_ID_COUNTER.fetch_max(pt.unique_id_counter, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Store parameter set as a 4-byte LE value in the attributes map.

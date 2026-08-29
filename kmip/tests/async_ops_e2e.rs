@@ -48,7 +48,7 @@ fn build_deps() -> Arc<Deps> {
     let sink: Arc<dyn AuditSink> = ring;
     let engine = Engine::with_global_sink(sink.clone());
     engine
-        .activate(load_from_str(PERMISSIVE_POLICY, std::path::Path::new("<t>")).unwrap())
+        .replace_all(load_from_str(PERMISSIVE_POLICY, std::path::Path::new("<t>")).unwrap())
         .unwrap();
     let deps = Arc::new(Deps::new(engine, Arc::new(MemoryStore::new()), sink, DepsConfig::default()));
     // The whole point of this test file: without this call every job

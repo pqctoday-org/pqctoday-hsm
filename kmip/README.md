@@ -356,3 +356,18 @@ explained in [`DEPRECATED.md`](DEPRECATED.md).
 | `kat/` | Known-answer-test vectors |
 | `docs/` | Architecture, conformance, and interop plans |
 | `DEPRECATED.md` | Deprecated-algorithm policy + OASIS skip rationale |
+
+## 8. `pqctoday-hub` depends on this checkout's *location*, not just its wasm build
+
+The hub's CACP visual policy editor doesn't only consume the built wasm
+bundle (`scripts/build-kmip-wasm.sh`'s output) — its own test suite reads
+`src/policy/rule.rs` **directly off disk** at test time, as a drift guard:
+`ruleCatalog.local.test.ts` compares the editor's rule-type/field catalog
+and `Scope` list against this file's `known_fields_for_rule_type` and
+`Scope::ALL` so the two can't silently drift apart. That guard (and
+`gate:cacp`, which the hub's `pre-push` hook now runs on every push —
+2026-08-28) hardcodes the relative path `../pqctoday-hsm/kmip/src/policy/
+rule.rs` from the hub repo root — there is no environment variable for
+it. **Keep this repo and `pqctoday-hub` as sibling directories** (the same
+layout `openssh-pkcs11/scripts/copy-to-hub.sh` already assumes, §Build
+above) or that guard fails loudly rather than silently skipping.

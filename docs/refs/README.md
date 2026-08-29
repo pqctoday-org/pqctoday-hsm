@@ -28,6 +28,19 @@ v3.2 moved the session-state model, the user/login model and the object-access m
 
 Note the process asymmetry: the Usage Guide is a non-standards-track Committee Note that the Standard nevertheless cites normatively. That is easy to misread as "informative, therefore optional". It is not.
 
+## PKCS#11 v3.3 — unpublished, working-draft only
+
+There is **no published v3.3** on `docs.oasis-open.org` as of 2026-08-28 —
+but the OASIS PKCS 11 TC's public git repository (`github.com/oasis-tcs/pkcs11`,
+`master` branch) already carries v3.3 as its working title
+(`working/doc/spec/Abstract.md`). A snapshot of that working tree, pinned to
+commit `2b25dd8` (2026-08-26), is vendored at
+[`pkcs11-v3.3-draft-git-snapshot-20260828/`](pkcs11-v3.3-draft-git-snapshot-20260828/) —
+see that directory's `PROVENANCE.md` before citing anything from it as fact.
+Unlike the v3.2 table above, this is not a stage document with a SHA-256 to
+verify against a publisher artifact; it is a live, mutable git branch, and
+every fact in it is subject to change before ratification.
+
 ## Refreshing these
 
 PKCS#11 moves faster than it looks — CSD01 to ratified Standard took roughly seven months. Before citing any status, re-check the publisher rather than trusting this table:

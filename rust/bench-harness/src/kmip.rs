@@ -639,7 +639,7 @@ impl InProcessKmip {
         let sink: Arc<dyn AuditSink> = Arc::new(RingSink::new(64));
         let engine = Engine::with_global_sink(sink.clone());
         engine
-            .activate(
+            .replace_all(
                 load_from_str(CONTROL_POLICY, std::path::Path::new("<bench>"))
                     .map_err(|e| anyhow!("control policy parse: {e}"))?,
             )

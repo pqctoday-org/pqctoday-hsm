@@ -16,7 +16,7 @@ fn engine() -> Engine {
         .join("migration-classical.yaml");
     let loaded = load_from_file(&path).unwrap_or_else(|e| panic!("loading policy: {e}"));
     let eng = Engine::deny_all();
-    eng.activate(loaded).expect("activation must succeed");
+    eng.replace_all(loaded).expect("activation must succeed");
     eng
 }
 

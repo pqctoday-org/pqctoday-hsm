@@ -173,6 +173,20 @@ frodo-kem = { version = "0.1", default-features = false, features = [
 # Classic-McEliece/HQC implementation plan).
 classic-mceliece-rust = { version = "3", default-features = false, features = ["mceliece6688128", "alloc", "zeroize"] }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native store backend (`store::sqlite`) — target-gated as a DEPENDENCY,
+# not a Cargo feature someone has to remember to omit. `target_arch =
+# "wasm32"` covers both wasm32-unknown-unknown (the hub's embedded
+# playground build, `pqctoday-hub/src/wasm/softhsmrustv3_bg.wasm`) and
+# wasm32-unknown-emscripten (the openssl.wasm staticlib) in one predicate,
+# so rusqlite's bundled C SQLite is never even in the dependency graph for
+# either wasm target — matching the C++ engine's own decision to force its
+# `WITH_OBJECTSTORE_BACKEND_DB` off for its WebAssembly build
+# (`CMakeLists.txt:21-22`) rather than trying to cross-compile SQLite
+# through emcc. kmip/Cargo.toml gates rusqlite the same way, via its
+# `native` feature, for the identical reason.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 [dev-dependencies]
 # NIST ACVP keyGen KAT parsing (T7 seed-deterministic keygen tests reads
 # the internalProjection.json vector files shipped with the patched forks).

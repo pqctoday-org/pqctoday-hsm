@@ -200,7 +200,7 @@ mod tests {
         let sink: Arc<dyn AuditSink> = ring;
         let engine = Engine::with_global_sink(sink.clone());
         engine
-            .activate(
+            .replace_all(
                 load_from_str(
                     "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n",
                     std::path::Path::new("<t>"),

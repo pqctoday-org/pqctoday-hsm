@@ -1983,7 +1983,7 @@ mod tests {
         let ring = Arc::new(RingSink::new(64));
         let sink: Arc<dyn AuditSink> = ring.clone();
         let engine = Engine::with_global_sink(sink.clone());
-        engine.activate(load_from_str(
+        engine.replace_all(load_from_str(
             "schema_version: 1\nmetadata: {name: t, description: t, authority: t, effective: always}\nrules: []\n",
             std::path::Path::new("<t>"),
         ).unwrap()).unwrap();
