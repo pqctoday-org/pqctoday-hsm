@@ -155,6 +155,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Verified with two consecutive full `cargo test` runs in `kmip/` (688
   passed / 0 failed each) plus a full `local-gate.sh` core-gate rerun.
 
+- **CACP: `Activate`/`Revoke`/`Destroy`/`Get`/`Locate` and the other
+  `Scope::Lifecycle` ops were refused under every named modular policy.**
+  Found via the hub's CACP playground: `Create` succeeds under the
+  `Classical` preset, then `Activate` is refused with `"No active module
+  covers op Activate; denying by default (uncovered-ops=deny)"`. Root
+  cause: none of the ~15 shipped presets declare `metadata.scopes:
+  [lifecycle]` — every one covers `signing`/`encryption`/
+  `key-establishment`/`global` only, since a crypto-agility policy has
+  never had anything to say about ops with no algorithm dimension. Under
+  the engine's default `uncovered-ops: Deny`, an op with no owning module
+  is refused outright, so basic key housekeeping was unreachable the
+  moment any named preset (not just `Classical`) was active — not a
+  deliberate policy choice, just no preset author having written the
+  necessarily-empty `lifecycle` module. Fixed structurally in
+  `Engine::evaluate_modular`: the whole `Lifecycle` scope is now exempt
+  from the uncovered-ops default, rather than requiring every current and
+  future preset to remember an empty scope declaration. Considered
+  leaving the attribute-write ops (`AddAttribute`/`ModifyAttribute`/
+  `SetAttribute`/etc.) gated as a hedge against post-creation tampering
+  with a `require_custom_attribute`-tagged key, but the one attribute
+  that would actually matter for crypto-agility — `CryptographicAlgorithm`
+  — is already protocol-level read-only
+  (`ops::attribute_mutate::attribute_is_read_only`), independent of
+  policy, so gating these ops here would not have protected anything
+  real. Two new engine tests pin the exemption's exact boundary (all 13
+  lifecycle ops allow through an otherwise-uncovered policy; a genuinely
+  uncovered op from any other scope still denies). `kmip/` full suite:
+  762 passed / 0 failed.
+
 ## [0.26.1] — 2026-08-27
 
 **Patch release: fixes a real SEGFAULT that `v0.26.0`'s own tagged commit
