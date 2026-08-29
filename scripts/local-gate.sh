@@ -169,9 +169,26 @@ run_step_host() { # name, command(run on host) — for node/wasm steps
 # ── steps ───────────────────────────────────────────────────────────────────
 ensure_container
 
+# slh_dsa_sigver_and_siggen is excluded here (-- --skip) and run separately
+# below with --nocapture: it's the one genuinely slow test in this suite
+# (12 SLH-DSA parameter sets, parallelized across threads but still ~200s
+# dominated by the slowest "s" set — 633s before parallelizing), and running
+# it a second time here would silently double real wall-clock cost every
+# gate invocation for no benefit — it's already exercised, just not in this
+# step. --skip matches by substring, so this also skips nothing else by
+# accident: no other test name contains this string.
 run_step "kmip cargo test" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+
+# Progress-logged separately (not folded into the step above) so a slow run
+# reads as "12 parameter sets in flight," not silence — --nocapture shows the
+# eprintln! lines cargo otherwise captures and discards on a passing test;
+# `tee /dev/stderr` preserves them in the gate log (which redirects both
+# stdout+stderr) while still letting grep see the stream for fail-detection.
+run_step "kmip known-slow mechanisms (live progress)" \
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet --test acvp_roundtrip slh_dsa_sigver_and_siggen -- --nocapture 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   true"
 
 run_step "kmip local-only suites (--include-ignored)" \
   "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
