@@ -310,7 +310,17 @@ export function getMechanismSet(M, slotId) {
   const rv = M._C_GetMechanismList(slotId, 0, cntPtr)
   if (rv !== CK.CKR_OK) {
     freePtr(M, cntPtr)
-    return new Set()
+    // WS-0.2: this used to return an empty Set here, which every caller's
+    // own `mechs.size > 0 && !mechs.has(...)` skip-guard reads as "this
+    // engine just advertises nothing" rather than "this engine is broken" —
+    // the guard's `size > 0` check goes false, so instead of skipping it
+    // falls through to attempting the real crypto call against an engine
+    // that cannot even report C_GetMechanismList. Fail closed: an engine
+    // that cannot report its mechanism set is a hard error, not a silent
+    // "advertises nothing."
+    throw new Error(
+      `getMechanismSet: C_GetMechanismList(slot=${slotId}) returned 0x${rv.toString(16)} — engine cannot report its mechanism set`
+    )
   }
   const count = readUlong(M, cntPtr)
   const listPtr = M._malloc(count * 4)
