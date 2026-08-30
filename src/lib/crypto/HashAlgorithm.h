@@ -48,6 +48,8 @@ struct HashAlgo
 		SHA256,
 		SHA384,
 		SHA512,
+		SHA512_224,
+		SHA512_256,
 		SHA3_224,
 		SHA3_256,
 		SHA3_384,

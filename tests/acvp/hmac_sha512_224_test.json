@@ -1,0 +1,27 @@
+{
+  "algorithm": "HMAC-SHA2-512-224",
+  "mode": "AFT",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/HMAC-SHA2-512-224-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "9456856d4249cfb6f290b4079ed616233c806bfcc337564dc8295e7f068cd614",
+    "note": "WS-6.3 (2026-08-30): new mechanism, implementation and KAT land together. tgId 1, tcId 1 \u2014 the largest macLen available in this sample set at a key length above this engine minKeyBytes=digest-length floor."
+  },
+  "testGroups": [
+    {
+      "tgId": 1,
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0E8794313E1CA40F325D939656BD2FB37BBE68145EF0487A982723B8B58C360F852D1448F99C189A7E1FA213F6DBCE6333715A96AD5D6C23CF8DCE56B7232ED5708A7125206325D5551671CA131808667EDADBE462A79AF75235AC1F726DB0F0EAB62BFF414D3D0F55BC3D4855BE587BAD40C46713188C9C89B3725E737A92925EC7896C94B5A64241EFFDEE4323AAC4931F9904000EB77323C0B4E88F7FFE52AA816B0083EC9B4645C475CA8CAF5C3D9B02DD72CD3D14C9C70C592FFCEC07B7B9899D9F6146C77091674214D87E807CEFB0D49736B8DC4820",
+          "msg": "326AC0B2CA7C43A73F7ABCCD5F9ED73F",
+          "mac": "F6754CA8FDBF8BB00034A4190259DC8C73840D65",
+          "macLen": 160
+        }
+      ]
+    }
+  ]
+}

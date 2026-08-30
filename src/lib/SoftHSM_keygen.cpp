@@ -2856,6 +2856,8 @@ CK_RV SoftHSM::C_DeriveKey
 		case CKM_SHA256_KEY_DERIVATION:
 		case CKM_SHA384_KEY_DERIVATION:
 		case CKM_SHA512_KEY_DERIVATION:
+		case CKM_SHA512_224_KEY_DERIVATION:
+		case CKM_SHA512_256_KEY_DERIVATION:
 		case CKM_SHA3_256_KEY_DERIVATION:
 		case CKM_SHA3_384_KEY_DERIVATION:
 		case CKM_SHA3_512_KEY_DERIVATION:
@@ -3246,6 +3248,8 @@ CK_RV SoftHSM::C_DeriveKey
 			pMechanism->mechanism == CKM_SHA256_KEY_DERIVATION ||
 			pMechanism->mechanism == CKM_SHA384_KEY_DERIVATION ||
 			pMechanism->mechanism == CKM_SHA512_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA512_224_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA512_256_KEY_DERIVATION ||
 			pMechanism->mechanism == CKM_SHA3_256_KEY_DERIVATION ||
 			pMechanism->mechanism == CKM_SHA3_384_KEY_DERIVATION ||
 			pMechanism->mechanism == CKM_SHA3_512_KEY_DERIVATION;
@@ -4079,6 +4083,8 @@ CK_RV SoftHSM::C_DeriveKey
 	    pMechanism->mechanism == CKM_SHA256_KEY_DERIVATION ||
 	    pMechanism->mechanism == CKM_SHA384_KEY_DERIVATION ||
 	    pMechanism->mechanism == CKM_SHA512_KEY_DERIVATION ||
+	    pMechanism->mechanism == CKM_SHA512_224_KEY_DERIVATION ||
+	    pMechanism->mechanism == CKM_SHA512_256_KEY_DERIVATION ||
 	    pMechanism->mechanism == CKM_SHA3_256_KEY_DERIVATION ||
 	    pMechanism->mechanism == CKM_SHA3_384_KEY_DERIVATION ||
 	    pMechanism->mechanism == CKM_SHA3_512_KEY_DERIVATION)
@@ -6722,6 +6728,8 @@ CK_RV SoftHSM::deriveSymmetric
 	    pMechanism->mechanism != CKM_SHA256_KEY_DERIVATION &&
 	    pMechanism->mechanism != CKM_SHA384_KEY_DERIVATION &&
 	    pMechanism->mechanism != CKM_SHA512_KEY_DERIVATION &&
+	    pMechanism->mechanism != CKM_SHA512_224_KEY_DERIVATION &&
+	    pMechanism->mechanism != CKM_SHA512_256_KEY_DERIVATION &&
 	    pMechanism->mechanism != CKM_SHA3_256_KEY_DERIVATION &&
 	    pMechanism->mechanism != CKM_SHA3_384_KEY_DERIVATION &&
 	    pMechanism->mechanism != CKM_SHA3_512_KEY_DERIVATION)
@@ -6809,6 +6817,8 @@ CK_RV SoftHSM::deriveSymmetric
 	else if (pMechanism->mechanism == CKM_SHA256_KEY_DERIVATION ||
 		 pMechanism->mechanism == CKM_SHA384_KEY_DERIVATION ||
 		 pMechanism->mechanism == CKM_SHA512_KEY_DERIVATION ||
+		 pMechanism->mechanism == CKM_SHA512_224_KEY_DERIVATION ||
+		 pMechanism->mechanism == CKM_SHA512_256_KEY_DERIVATION ||
 		 pMechanism->mechanism == CKM_SHA3_256_KEY_DERIVATION ||
 		 pMechanism->mechanism == CKM_SHA3_384_KEY_DERIVATION ||
 		 pMechanism->mechanism == CKM_SHA3_512_KEY_DERIVATION)
@@ -6931,6 +6941,8 @@ CK_RV SoftHSM::deriveSymmetric
 	    case CKM_SHA256_KEY_DERIVATION:
 	    case CKM_SHA384_KEY_DERIVATION:
 	    case CKM_SHA512_KEY_DERIVATION:
+	    case CKM_SHA512_224_KEY_DERIVATION:
+	    case CKM_SHA512_256_KEY_DERIVATION:
 	    case CKM_SHA3_256_KEY_DERIVATION:
 	    case CKM_SHA3_384_KEY_DERIVATION:
 	    case CKM_SHA3_512_KEY_DERIVATION:
@@ -6956,6 +6968,8 @@ CK_RV SoftHSM::deriveSymmetric
 			pMechanism->mechanism == CKM_SHA256_KEY_DERIVATION ||
 			pMechanism->mechanism == CKM_SHA384_KEY_DERIVATION ||
 			pMechanism->mechanism == CKM_SHA512_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA512_224_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA512_256_KEY_DERIVATION ||
 			pMechanism->mechanism == CKM_SHA3_256_KEY_DERIVATION ||
 			pMechanism->mechanism == CKM_SHA3_384_KEY_DERIVATION ||
 			pMechanism->mechanism == CKM_SHA3_512_KEY_DERIVATION) {
@@ -7022,6 +7036,8 @@ CK_RV SoftHSM::deriveSymmetric
 		} else if (pMechanism->mechanism == CKM_SHA256_KEY_DERIVATION ||
 				pMechanism->mechanism == CKM_SHA384_KEY_DERIVATION ||
 				pMechanism->mechanism == CKM_SHA512_KEY_DERIVATION ||
+				pMechanism->mechanism == CKM_SHA512_224_KEY_DERIVATION ||
+				pMechanism->mechanism == CKM_SHA512_256_KEY_DERIVATION ||
 				pMechanism->mechanism == CKM_SHA3_256_KEY_DERIVATION ||
 				pMechanism->mechanism == CKM_SHA3_384_KEY_DERIVATION ||
 				pMechanism->mechanism == CKM_SHA3_512_KEY_DERIVATION) {
@@ -7042,6 +7058,8 @@ CK_RV SoftHSM::deriveSymmetric
 				case CKM_SHA256_KEY_DERIVATION:    md = EVP_sha256();   break;
 				case CKM_SHA384_KEY_DERIVATION:    md = EVP_sha384();   break;
 				case CKM_SHA512_KEY_DERIVATION:    md = EVP_sha512();   break;
+				case CKM_SHA512_224_KEY_DERIVATION: md = EVP_sha512_224(); break;
+				case CKM_SHA512_256_KEY_DERIVATION: md = EVP_sha512_256(); break;
 				case CKM_SHA3_256_KEY_DERIVATION:  md = EVP_sha3_256(); break;
 				case CKM_SHA3_384_KEY_DERIVATION:  md = EVP_sha3_384(); break;
 				case CKM_SHA3_512_KEY_DERIVATION:  md = EVP_sha3_512(); break;

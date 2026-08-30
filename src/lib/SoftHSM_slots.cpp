@@ -435,6 +435,13 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_SHA256"]			= CKM_SHA256;
 	t["CKM_SHA384"]			= CKM_SHA384;
 	t["CKM_SHA512"]			= CKM_SHA512;
+	// WS-6.3 (2026-08-30): FIPS 180-4 truncated variants — distinct initial
+	// hash values (not SHA-512 output truncated post-hoc). CKM_SHA512_T
+	// (arbitrary caller-specified truncation length) is not implemented:
+	// OpenSSL has no generic parameterized EVP_MD for it, only these two
+	// standardized fixed lengths.
+	t["CKM_SHA512_224"]		= CKM_SHA512_224;
+	t["CKM_SHA512_256"]		= CKM_SHA512_256;
 	t["CKM_SHA3_224"]		= CKM_SHA3_224;
 	t["CKM_SHA3_256"]		= CKM_SHA3_256;
 	t["CKM_SHA3_384"]		= CKM_SHA3_384;
@@ -457,6 +464,8 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_SHA256_HMAC"]		= CKM_SHA256_HMAC;
 	t["CKM_SHA384_HMAC"]		= CKM_SHA384_HMAC;
 	t["CKM_SHA512_HMAC"]		= CKM_SHA512_HMAC;
+	t["CKM_SHA512_224_HMAC"]	= CKM_SHA512_224_HMAC;
+	t["CKM_SHA512_256_HMAC"]	= CKM_SHA512_256_HMAC;
 	t["CKM_SHA3_224_HMAC"]		= CKM_SHA3_224_HMAC;
 	t["CKM_SHA3_256_HMAC"]		= CKM_SHA3_256_HMAC;
 	t["CKM_SHA3_384_HMAC"]		= CKM_SHA3_384_HMAC;
@@ -473,6 +482,8 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_SHA256_HMAC_GENERAL"]	= CKM_SHA256_HMAC_GENERAL;
 	t["CKM_SHA384_HMAC_GENERAL"]	= CKM_SHA384_HMAC_GENERAL;
 	t["CKM_SHA512_HMAC_GENERAL"]	= CKM_SHA512_HMAC_GENERAL;
+	t["CKM_SHA512_224_HMAC_GENERAL"]	= CKM_SHA512_224_HMAC_GENERAL;
+	t["CKM_SHA512_256_HMAC_GENERAL"]	= CKM_SHA512_256_HMAC_GENERAL;
 	t["CKM_SHA3_224_HMAC_GENERAL"]	= CKM_SHA3_224_HMAC_GENERAL;
 	t["CKM_SHA3_256_HMAC_GENERAL"]	= CKM_SHA3_256_HMAC_GENERAL;
 	t["CKM_SHA3_384_HMAC_GENERAL"]	= CKM_SHA3_384_HMAC_GENERAL;
@@ -500,6 +511,10 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_SHA3_256_KEY_DERIVATION"]	= CKM_SHA3_256_KEY_DERIVATION;
 	t["CKM_SHA3_384_KEY_DERIVATION"]	= CKM_SHA3_384_KEY_DERIVATION;
 	t["CKM_SHA3_512_KEY_DERIVATION"]	= CKM_SHA3_512_KEY_DERIVATION;
+	// WS-6.3 (2026-08-30): same construction, the two FIPS 180-4 truncated
+	// SHA-512 variants.
+	t["CKM_SHA512_224_KEY_DERIVATION"]	= CKM_SHA512_224_KEY_DERIVATION;
+	t["CKM_SHA512_256_KEY_DERIVATION"]	= CKM_SHA512_256_KEY_DERIVATION;
 
 	// RSA
 	t["CKM_RSA_PKCS_KEY_PAIR_GEN"]	= CKM_RSA_PKCS_KEY_PAIR_GEN;
@@ -828,6 +843,8 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_SHA256:
 		case CKM_SHA384:
 		case CKM_SHA512:
+		case CKM_SHA512_224:
+		case CKM_SHA512_256:
 		case CKM_SHA3_224:
 		case CKM_SHA3_256:
 		case CKM_SHA3_384:
@@ -884,6 +901,18 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_SHA512_HMAC:
 		case CKM_SHA512_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 64;
+			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			break;
+		case CKM_SHA512_224_HMAC:
+		case CKM_SHA512_224_HMAC_GENERAL:
+			pInfo->ulMinKeySize = 28;
+			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			break;
+		case CKM_SHA512_256_HMAC:
+		case CKM_SHA512_256_HMAC_GENERAL:
+			pInfo->ulMinKeySize = 32;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
@@ -1237,6 +1266,8 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 	    case CKM_SHA3_256_KEY_DERIVATION:
 	    case CKM_SHA3_384_KEY_DERIVATION:
 	    case CKM_SHA3_512_KEY_DERIVATION:
+	    case CKM_SHA512_224_KEY_DERIVATION:
+	    case CKM_SHA512_256_KEY_DERIVATION:
 	        pInfo->ulMinKeySize = 1;
 	        pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 	        pInfo->flags = CKF_DERIVE;

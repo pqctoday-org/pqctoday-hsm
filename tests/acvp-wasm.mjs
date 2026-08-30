@@ -118,6 +118,10 @@ const ecdsaP521Vec = loadJson('ecdsa_p521_test.json')
 const sha384Vec = loadJson('sha384_test.json')
 const sha512Vec = loadJson('sha512_test.json')
 const kmacVec = loadJson('kmac_test.json')
+const sha512_224Vec = loadJson('sha512_224_test.json')
+const sha512_256Vec = loadJson('sha512_256_test.json')
+const hmacSha512_224Vec = loadJson('hmac_sha512_224_test.json')
+const hmacSha512_256Vec = loadJson('hmac_sha512_256_test.json')
 const aesKwVec = loadJson('aeskw_test.json')
 const slhdsaCtxVec = loadJson('slhdsa_ctx_test.json')
 const lmsSigverVec = loadJson('lms_sigver_test.json')
@@ -551,6 +555,68 @@ async function runSuite(engineName) {
       }
     }
 
+    // ── 10.6.5b. SHA-512/224, SHA-512/256 Digest KAT (FIPS 180-4 §5.3.6) ───
+    // WS-6.3 (2026-08-30): new mechanism — implementation and KAT land
+    // together. Distinct initial hash values, not SHA-512 output truncated
+    // post-hoc (OpenSSL's EVP_sha512_224/256 already compute the correct
+    // FIPS-defined IV).
+    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512_224)) {
+      addResult('sha512-224', 'SHA-512/224', 'Digest KAT', 'SKIP', 'mechanism not supported')
+    } else {
+      for (const test of sha512_224Vec.testGroups[0].tests) {
+        try {
+          const d = digest(M, hSession, hexToBytes(test.msg), CK.CKM_SHA512_224)
+          const expected = hexToBytes(test.md)
+          const ok = arrEq(d, expected)
+          addResult(`sha512-224-${test.tcId}`, 'SHA-512/224', `Digest KAT tc=${test.tcId}`, ok ? 'PASS' : 'FAIL', `MD[${d.length}B]: ${bytesToHex(d, 16)}`)
+        } catch (e) {
+          addResult(`sha512-224-${test.tcId}`, 'SHA-512/224', `Digest KAT tc=${test.tcId}`, 'FAIL', e.message)
+        }
+      }
+    }
+
+    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512_256)) {
+      addResult('sha512-256', 'SHA-512/256', 'Digest KAT', 'SKIP', 'mechanism not supported')
+    } else {
+      for (const test of sha512_256Vec.testGroups[0].tests) {
+        try {
+          const d = digest(M, hSession, hexToBytes(test.msg), CK.CKM_SHA512_256)
+          const expected = hexToBytes(test.md)
+          const ok = arrEq(d, expected)
+          addResult(`sha512-256-${test.tcId}`, 'SHA-512/256', `Digest KAT tc=${test.tcId}`, ok ? 'PASS' : 'FAIL', `MD[${d.length}B]: ${bytesToHex(d, 16)}`)
+        } catch (e) {
+          addResult(`sha512-256-${test.tcId}`, 'SHA-512/256', `Digest KAT tc=${test.tcId}`, 'FAIL', e.message)
+        }
+      }
+    }
+
+    // ── 10.6.5c. HMAC-SHA512/224, HMAC-SHA512/256 Verify KAT (NIST ACVP) ───
+    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512_224_HMAC_GENERAL)) {
+      addResult('hmac512-224', 'HMAC-SHA512/224', 'Verify KAT (NIST ACVP, truncated)', 'SKIP', 'mechanism not supported')
+    } else {
+      const tv = hmacSha512_224Vec.testGroups[0].tests[0]
+      try {
+        const h = importHMACKey(M, hSession, hexToBytes(tv.key), { sign: false, verify: true })
+        const ok = hmacVerifyGeneral(M, hSession, h, hexToBytes(tv.msg), hexToBytes(tv.mac), CK.CKM_SHA512_224_HMAC_GENERAL)
+        addResult('hmac512-224', 'HMAC-SHA512/224', 'Verify KAT (NIST ACVP, truncated)', ok ? 'PASS' : 'FAIL', `MAC[${tv.mac.length / 2}B, ${tv.macLen}-bit]`)
+      } catch (e) {
+        addResult('hmac512-224', 'HMAC-SHA512/224', 'Verify KAT (NIST ACVP, truncated)', 'FAIL', e.message)
+      }
+    }
+
+    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512_256_HMAC_GENERAL)) {
+      addResult('hmac512-256', 'HMAC-SHA512/256', 'Verify KAT (NIST ACVP, truncated)', 'SKIP', 'mechanism not supported')
+    } else {
+      const tv = hmacSha512_256Vec.testGroups[0].tests[0]
+      try {
+        const h = importHMACKey(M, hSession, hexToBytes(tv.key), { sign: false, verify: true })
+        const ok = hmacVerifyGeneral(M, hSession, h, hexToBytes(tv.msg), hexToBytes(tv.mac), CK.CKM_SHA512_256_HMAC_GENERAL)
+        addResult('hmac512-256', 'HMAC-SHA512/256', 'Verify KAT (NIST ACVP, truncated)', ok ? 'PASS' : 'FAIL', `MAC[${tv.mac.length / 2}B, ${tv.macLen}-bit]`)
+      } catch (e) {
+        addResult('hmac512-256', 'HMAC-SHA512/256', 'Verify KAT (NIST ACVP, truncated)', 'FAIL', e.message)
+      }
+    }
+
     // ── 10.6.6. KMAC-128 MVT negative KAT (NIST ACVP) ──────────────────────
     // WS-4 (2026-08-30): kmac_test.json was on disk, real provenance,
     // loaded by nothing — zero KMAC evidence existed anywhere in this
@@ -591,6 +657,10 @@ async function runSuite(engineName) {
       ['CKM_SHA256_KEY_DERIVATION', CK.CKM_SHA256],
       ['CKM_SHA384_KEY_DERIVATION', CK.CKM_SHA384],
       ['CKM_SHA512_KEY_DERIVATION', CK.CKM_SHA512],
+      // WS-6.3 (2026-08-30): same cross-check pattern for the two new
+      // FIPS 180-4 truncated-variant KDF mechanisms.
+      ['CKM_SHA512_224_KEY_DERIVATION', CK.CKM_SHA512_224],
+      ['CKM_SHA512_256_KEY_DERIVATION', CK.CKM_SHA512_256],
       ['CKM_SHA3_256_KEY_DERIVATION', CK.CKM_SHA3_256],
       ['CKM_SHA3_384_KEY_DERIVATION', CK.CKM_SHA3_384],
       ['CKM_SHA3_512_KEY_DERIVATION', CK.CKM_SHA3_512],
