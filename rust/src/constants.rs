@@ -163,6 +163,7 @@ pub const CKK_RSA: u32 = 0x0000_0000;
 pub const CKK_EC: u32 = 0x0000_0003; // ECDSA (P-256, P-384)
 pub const CKK_GENERIC_SECRET: u32 = 0x0000_0010;
 pub const CKK_AES: u32 = 0x0000_001f;
+pub const CKK_AES_XTS: u32 = 0x0000_0035;
 pub const CKK_EC_EDWARDS: u32 = 0x0000_0040; // EdDSA (Ed25519)
 pub const CKK_EC_MONTGOMERY: u32 = 0x0000_0041; // X25519 (PKCS#11 v3.2 §6.7)
 pub const CKK_ML_KEM: u32 = 0x0000_0049;
@@ -600,6 +601,8 @@ pub const CKM_EDDSA_PH: u32 = 0x8000_1057;
 
 // AES
 pub const CKM_AES_KEY_GEN: u32 = 0x0000_1080;
+pub const CKM_AES_XTS: u32 = 0x0000_1071;
+pub const CKM_AES_XTS_KEY_GEN: u32 = 0x0000_1072;
 /// PKCS#11 v3.2 §6.10 — AES-ECB. No IV; plaintext MUST be a multiple
 /// of 16 bytes (no padding); ciphertext same length.
 pub const CKM_AES_ECB: u32     = 0x0000_1081;
@@ -858,6 +861,8 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_AES_CFB8,
     CKM_AES_CFB128,
     CKM_AES_CFB1,
+    CKM_AES_XTS,
+    CKM_AES_XTS_KEY_GEN,
     CKM_AES_KEY_WRAP,
     CKM_AES_KEY_WRAP_KWP,
     CKM_AES_KEY_WRAP_PAD,

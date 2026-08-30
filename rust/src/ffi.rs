@@ -1441,6 +1441,8 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
             (16, 32, 0x00000100 | 0x00000200)
         }
         CKM_AES_CCM => (16, 32, 0x00000100 | 0x00000200),
+        CKM_AES_XTS => (32, 64, 0x00000100 | 0x00000200),
+        CKM_AES_XTS_KEY_GEN => (32, 64, 0x00008000),
         // ML-DSA pre-hash variants — same sign/verify capabilities as pure ML-DSA
         CKM_HASH_ML_DSA_SHA224
         | CKM_HASH_ML_DSA_SHA256
@@ -3540,6 +3542,7 @@ pub fn C_GenerateKey(
         // generation mechanism is CKR_TEMPLATE_INCONSISTENT.
         let expected_kt = match mech_type {
             CKM_AES_KEY_GEN => Some(CKK_AES),
+            CKM_AES_XTS_KEY_GEN => Some(CKK_AES_XTS),
             CKM_CHACHA20_KEY_GEN => Some(CKK_CHACHA20),
             CKM_GENERIC_SECRET_KEY_GEN => Some(CKK_GENERIC_SECRET),
             _ => None,
@@ -3619,6 +3622,45 @@ pub fn C_GenerateKey(
                 store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_AES_KEY_GEN); // PKCS#11 v3.2 §4.3
                 absorb_template_attrs(&mut attrs, p_template, ul_count);
                 finalize_private_key_attrs(&mut attrs); // sets CKA_ALWAYS_SENSITIVE + CKA_NEVER_EXTRACTABLE
+                compute_kcv(&mut attrs);
+                *ph_key = allocate_handle_owned(_h_session, attrs);
+                CKR_OK
+            }
+            CKM_AES_XTS_KEY_GEN => {
+                // §6.15 — double-length key (K1||K2): 32 bytes for
+                // AES-128-XTS, 64 for AES-256-XTS. No 24-byte (AES-192)
+                // variant — XTS is only defined over AES-128/256.
+                let key_len = match get_attr_ulong(p_template, ul_count, CKA_VALUE_LEN) {
+                    Some(l) => l as usize,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                if key_len != 32 && key_len != 64 {
+                    return CKR_ATTRIBUTE_VALUE_INVALID;
+                }
+                let mut key = vec![0u8; key_len];
+                if getrandom::getrandom(&mut key).is_err() {
+                    return CKR_FUNCTION_FAILED;
+                }
+                let mut attrs = HashMap::new();
+                attrs.insert(CKA_VALUE, key);
+                store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+                store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES_XTS);
+                store_ulong(&mut attrs, CKA_VALUE_LEN, key_len as u32);
+                store_bool(&mut attrs, CKA_TOKEN, false);
+                store_bool(&mut attrs, CKA_PRIVATE, false);
+                store_bool(&mut attrs, CKA_SENSITIVE, false);
+                store_bool(&mut attrs, CKA_EXTRACTABLE, false);
+                store_bool(&mut attrs, CKA_ENCRYPT, true);
+                store_bool(&mut attrs, CKA_DECRYPT, true);
+                store_bool(&mut attrs, CKA_WRAP, false);
+                store_bool(&mut attrs, CKA_UNWRAP, false);
+                store_bool(&mut attrs, CKA_SIGN, false);
+                store_bool(&mut attrs, CKA_VERIFY, false);
+                store_bool(&mut attrs, CKA_DERIVE, false);
+                store_bool(&mut attrs, CKA_LOCAL, true);
+                store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_AES_XTS_KEY_GEN);
+                absorb_template_attrs(&mut attrs, p_template, ul_count);
+                finalize_private_key_attrs(&mut attrs);
                 compute_kcv(&mut attrs);
                 *ph_key = allocate_handle_owned(_h_session, attrs);
                 CKR_OK
@@ -4719,7 +4761,7 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
         Some(kt) => kt,
     };
     // KEY_TYPE ↔ CLASS consistency (§4.1.1 — CKR_TEMPLATE_INCONSISTENT).
-    let secret_only = key_type == CKK_AES || key_type == CKK_GENERIC_SECRET
+    let secret_only = key_type == CKK_AES || key_type == CKK_AES_XTS || key_type == CKK_GENERIC_SECRET
         || key_type == 0x33 /* CKK_CHACHA20 */;
     let asym_only = key_type == CKK_RSA
         || key_type == CKK_EC
@@ -4744,6 +4786,14 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID);
         }
         if key_type == CKK_AES && !matches!(val.len(), 16 | 24 | 32) {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+        }
+        // §6.15 — CKK_AES_XTS is a double-length key (K1||K2): 32 bytes for
+        // AES-128-XTS, 64 for AES-256-XTS. Deliberately a distinct key type
+        // from CKK_AES (not a 32/64-byte CKK_AES value) so a caller can
+        // never accidentally use the XTS double-key material as a single
+        // ordinary AES key elsewhere.
+        if key_type == CKK_AES_XTS && !matches!(val.len(), 32 | 64) {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID);
         }
     } else if class == CKO_PUBLIC_KEY && key_type == CKK_RSA {
@@ -6629,7 +6679,9 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             }
             // OFB/CFB1/CFB8/CFB128 (§6.11 variants) — plain 16-byte IV, same
             // shape as CBC. No mechanism-specific params beyond the IV.
-            CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 => {
+            // XTS's mechanism param (§6.15) is likewise a bare 16-byte
+            // value (the Data Unit Sequence Number / tweak) — same shape.
+            CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 | CKM_AES_XTS => {
                 if p_param.is_null() || ul_param_len < 16 {
                     return CKR_ARGUMENTS_BAD;
                 }
@@ -7012,6 +7064,54 @@ pub fn C_Encrypt(
                 };
                 ccm_encrypt(&key, &iv, &aad, plaintext, tag_bits as usize)
             }
+            CKM_AES_XTS => {
+                // §6.15 — a distinct CKK_AES_XTS key type is required (not
+                // merely a 32/64-byte CKK_AES value): a 32-byte value is a
+                // VALID plain CKK_AES-256 key too, and the two must never be
+                // interchangeable. "No final part" — ciphertext-stealing
+                // (xts-mode) makes output length == input length exactly,
+                // no separate finalize step, so this is one-shot only.
+                if get_object_attr_u32(key_handle, CKA_KEY_TYPE) != Some(CKK_AES_XTS) {
+                    return CKR_KEY_TYPE_INCONSISTENT;
+                }
+                if plaintext.len() < 16 {
+                    return CKR_DATA_LEN_RANGE;
+                }
+                let tweak: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(t) => t,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut buf = plaintext.to_vec();
+                use aes::cipher::KeyInit;
+                use aes::{Aes128, Aes256};
+                use xts_mode::Xts128;
+                match key_bytes.len() {
+                    32 => {
+                        let k1 = match Aes128::new_from_slice(&key_bytes[..16]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        let k2 = match Aes128::new_from_slice(&key_bytes[16..]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        Xts128::<Aes128>::new(k1, k2).encrypt_sector(&mut buf, tweak);
+                    }
+                    64 => {
+                        let k1 = match Aes256::new_from_slice(&key_bytes[..32]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        let k2 = match Aes256::new_from_slice(&key_bytes[32..]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        Xts128::<Aes256>::new(k1, k2).encrypt_sector(&mut buf, tweak);
+                    }
+                    _ => return CKR_KEY_SIZE_RANGE,
+                }
+                buf
+            }
             CKM_RSA_PKCS_OAEP => {
                 if key_bytes.len() < 8 {
                     return CKR_KEY_TYPE_INCONSISTENT;
@@ -7310,7 +7410,9 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             }
             // OFB/CFB1/CFB8/CFB128 (§6.11 variants) — plain 16-byte IV, same
             // shape as CBC. No mechanism-specific params beyond the IV.
-            CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 => {
+            // XTS's mechanism param (§6.15) is likewise a bare 16-byte
+            // value (the Data Unit Sequence Number / tweak) — same shape.
+            CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 | CKM_AES_XTS => {
                 if p_param.is_null() || ul_param_len < 16 {
                     return CKR_ARGUMENTS_BAD;
                 }
@@ -7581,6 +7683,48 @@ pub fn C_Decrypt(
                     Ok(pt) => pt,
                     Err(rv) => return rv,
                 }
+            }
+            CKM_AES_XTS => {
+                if get_object_attr_u32(key_handle, CKA_KEY_TYPE) != Some(CKK_AES_XTS) {
+                    return CKR_KEY_TYPE_INCONSISTENT;
+                }
+                if ciphertext.len() < 16 {
+                    return CKR_ENCRYPTED_DATA_LEN_RANGE;
+                }
+                let tweak: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(t) => t,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut buf = ciphertext.to_vec();
+                use aes::cipher::KeyInit;
+                use aes::{Aes128, Aes256};
+                use xts_mode::Xts128;
+                match key_bytes.len() {
+                    32 => {
+                        let k1 = match Aes128::new_from_slice(&key_bytes[..16]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        let k2 = match Aes128::new_from_slice(&key_bytes[16..]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        Xts128::<Aes128>::new(k1, k2).decrypt_sector(&mut buf, tweak);
+                    }
+                    64 => {
+                        let k1 = match Aes256::new_from_slice(&key_bytes[..32]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        let k2 = match Aes256::new_from_slice(&key_bytes[32..]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        Xts128::<Aes256>::new(k1, k2).decrypt_sector(&mut buf, tweak);
+                    }
+                    _ => return CKR_KEY_SIZE_RANGE,
+                }
+                buf
             }
             CKM_RSA_PKCS_OAEP => {
                 use rsa::pkcs8::DecodePrivateKey;
