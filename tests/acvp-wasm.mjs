@@ -37,6 +37,7 @@ import {
   writeBytes,
   allocUlong,
   readUlong,
+  buildTemplate,
   freePtr,
   check,
   importECPublicKey,
@@ -453,6 +454,72 @@ async function runSuite(engineName) {
         } catch (e) {
           addResult(`sha3_512-${test.tcId}`, 'SHA3-512', `Digest KAT tc=${test.tcId}`, 'FAIL', e.message)
         }
+      }
+    }
+
+    // ── 10.7. SHA*_KEY_DERIVATION (PKCS#11 v3.2 §2.42) — 6 mechanisms ──────
+    // WS-6.2 (2026-08-30): C++ had none of these 6 digest-KDF mechanisms at
+    // all (CKR_MECHANISM_INVALID on every one); Rust already had them
+    // working. Ported to C++. Cross-checks C_DeriveKey's output against
+    // this same engine's C_Digest — which the KATs above already hold to
+    // real Tier-1 ACVP evidence — rather than introducing an external
+    // oracle: per §2.42 the derived value IS defined as digest(base key),
+    // so the two operations must agree by spec, and C_Digest's own
+    // correctness is independently already proven in this file.
+    for (const [name, mechDigest] of [
+      ['CKM_SHA256_KEY_DERIVATION', CK.CKM_SHA256],
+      ['CKM_SHA384_KEY_DERIVATION', CK.CKM_SHA384],
+      ['CKM_SHA512_KEY_DERIVATION', CK.CKM_SHA512],
+      ['CKM_SHA3_256_KEY_DERIVATION', CK.CKM_SHA3_256],
+      ['CKM_SHA3_384_KEY_DERIVATION', CK.CKM_SHA3_384],
+      ['CKM_SHA3_512_KEY_DERIVATION', CK.CKM_SHA3_512],
+    ]) {
+      const mechDerive = CK[name]
+      if (mechs.size > 0 && !mechs.has(mechDerive)) {
+        addResult(`shakd-${name}`, name, 'Derive vs Digest cross-check', 'SKIP', 'mechanism not supported')
+        continue
+      }
+      try {
+        const baseVal = new Uint8Array(32).fill(0x42)
+        const baseTpl = buildTemplate(M, [
+          { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+          { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+          { type: CK.CKA_TOKEN, value: false },
+          { type: CK.CKA_SENSITIVE, value: false },
+          { type: CK.CKA_EXTRACTABLE, value: true },
+          { type: CK.CKA_DERIVE, value: true },
+          { type: CK.CKA_VALUE, value: baseVal },
+        ])
+        const baseHPtr = allocUlong(M)
+        check('C_CreateObject(base secret)', M._C_CreateObject(hSession, baseTpl.arrPtr, baseTpl.count, baseHPtr))
+        const baseH = readUlong(M, baseHPtr)
+
+        const expected = digest(M, hSession, baseVal, mechDigest)
+
+        const mechPtr = M._malloc(12)
+        M.setValue(mechPtr + 0, mechDerive, 'i32')
+        M.setValue(mechPtr + 4, 0, 'i32')
+        M.setValue(mechPtr + 8, 0, 'i32')
+        const derivedTpl = buildTemplate(M, [
+          { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+          { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+          { type: CK.CKA_TOKEN, value: false },
+          { type: CK.CKA_SENSITIVE, value: false },
+          { type: CK.CKA_EXTRACTABLE, value: true },
+          { type: CK.CKA_VALUE_LEN, value: expected.length },
+        ])
+        const outHPtr = allocUlong(M)
+        check('C_DeriveKey', M._C_DeriveKey(hSession, mechPtr, baseH, derivedTpl.arrPtr, derivedTpl.count, outHPtr))
+        const derivedH = readUlong(M, outHPtr)
+
+        const valAttr = buildTemplate(M, [{ type: CK.CKA_VALUE, value: new Uint8Array(expected.length) }])
+        check('C_GetAttributeValue(derived)', M._C_GetAttributeValue(hSession, derivedH, valAttr.arrPtr, 1))
+        const derived = new Uint8Array(M.HEAPU8.buffer, M.getValue(valAttr.arrPtr + 4, 'i32'), expected.length).slice()
+
+        const ok = arrEq(derived, expected)
+        addResult(`shakd-${name}`, name, 'Derive vs Digest cross-check', ok ? 'PASS' : 'FAIL', `[${derived.length}B]: ${bytesToHex(derived, 16)}`)
+      } catch (e) {
+        addResult(`shakd-${name}`, name, 'Derive vs Digest cross-check', 'FAIL', e.message)
       }
     }
 

@@ -2848,6 +2848,17 @@ CK_RV SoftHSM::C_DeriveKey
 		// expansion has to happen outside the token, which would put private
 		// key derivation in software while claiming an HSM-backed key.
 		case CKM_SHAKE_256_KEY_DERIVATION:
+		// WS-6.2 (2026-08-30): PKCS#11 v3.2 §2.42 digest key derivation —
+		// derived value = HASH(base key's CKA_VALUE), same family as the
+		// SHAKE-256 XOF case above but a fixed-length ordinary digest.
+		// Ported from Rust (rust/src/ffi.rs), which already had these six
+		// working and ACVP-proven; C++ had none of them.
+		case CKM_SHA256_KEY_DERIVATION:
+		case CKM_SHA384_KEY_DERIVATION:
+		case CKM_SHA512_KEY_DERIVATION:
+		case CKM_SHA3_256_KEY_DERIVATION:
+		case CKM_SHA3_384_KEY_DERIVATION:
+		case CKM_SHA3_512_KEY_DERIVATION:
 			break;
 
 		default:
@@ -3228,7 +3239,16 @@ CK_RV SoftHSM::C_DeriveKey
 			// family, but unlike them it still REQUIRES CKA_VALUE_LEN: an XOF
 			// has no natural output length to fall back on, so "no length
 			// given" is a template error rather than something to infer.
-			pMechanism->mechanism == CKM_SHAKE_256_KEY_DERIVATION;
+			pMechanism->mechanism == CKM_SHAKE_256_KEY_DERIVATION ||
+			// WS-6.2: the SHA2/SHA3 digest KDFs default to a generic secret
+			// too, but DO have a natural output length (the digest size),
+			// so — unlike SHAKE-256 — omitting CKA_VALUE_LEN is not an error.
+			pMechanism->mechanism == CKM_SHA256_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA384_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA512_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA3_256_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA3_384_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA3_512_KEY_DERIVATION;
     if (isImplicit) {
         // PKCS#11 2.40 section 2.31.5: if no key type is provided then the key produced by this mechanism will
         // be a generic secret key
@@ -4055,7 +4075,13 @@ CK_RV SoftHSM::C_DeriveKey
 	    pMechanism->mechanism == CKM_CONCATENATE_DATA_AND_BASE ||
 	    pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_DATA ||
 	    pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY ||
-	    pMechanism->mechanism == CKM_SHAKE_256_KEY_DERIVATION)
+	    pMechanism->mechanism == CKM_SHAKE_256_KEY_DERIVATION ||
+	    pMechanism->mechanism == CKM_SHA256_KEY_DERIVATION ||
+	    pMechanism->mechanism == CKM_SHA384_KEY_DERIVATION ||
+	    pMechanism->mechanism == CKM_SHA512_KEY_DERIVATION ||
+	    pMechanism->mechanism == CKM_SHA3_256_KEY_DERIVATION ||
+	    pMechanism->mechanism == CKM_SHA3_384_KEY_DERIVATION ||
+	    pMechanism->mechanism == CKM_SHA3_512_KEY_DERIVATION)
 	{
 		// Check key class and type
 		CK_KEY_TYPE baseKeyType = key->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED);
@@ -6692,7 +6718,13 @@ CK_RV SoftHSM::deriveSymmetric
 	// input is the base key and CKA_VALUE_LEN — so it is exempt rather than
 	// being made to pass an empty parameter it has no use for.
 	if (pMechanism->pParameter == NULL_PTR &&
-	    pMechanism->mechanism != CKM_SHAKE_256_KEY_DERIVATION)
+	    pMechanism->mechanism != CKM_SHAKE_256_KEY_DERIVATION &&
+	    pMechanism->mechanism != CKM_SHA256_KEY_DERIVATION &&
+	    pMechanism->mechanism != CKM_SHA384_KEY_DERIVATION &&
+	    pMechanism->mechanism != CKM_SHA512_KEY_DERIVATION &&
+	    pMechanism->mechanism != CKM_SHA3_256_KEY_DERIVATION &&
+	    pMechanism->mechanism != CKM_SHA3_384_KEY_DERIVATION &&
+	    pMechanism->mechanism != CKM_SHA3_512_KEY_DERIVATION)
 	{
 		DEBUG_MSG("pParameter must be supplied");
 		return CKR_MECHANISM_PARAM_INVALID;
@@ -6773,6 +6805,17 @@ CK_RV SoftHSM::deriveSymmetric
 		// value alone. The strict form (a non-NULL parameter is an error) is
 		// enforced in the derivation branch itself, not here, so that a caller
 		// passing junk gets a specific message rather than this generic one.
+	}
+	else if (pMechanism->mechanism == CKM_SHA256_KEY_DERIVATION ||
+		 pMechanism->mechanism == CKM_SHA384_KEY_DERIVATION ||
+		 pMechanism->mechanism == CKM_SHA512_KEY_DERIVATION ||
+		 pMechanism->mechanism == CKM_SHA3_256_KEY_DERIVATION ||
+		 pMechanism->mechanism == CKM_SHA3_384_KEY_DERIVATION ||
+		 pMechanism->mechanism == CKM_SHA3_512_KEY_DERIVATION)
+	{
+		// Same shape as SHAKE-256 above: no parameter, `data` stays empty,
+		// the digest KDF consumes only the base key value. The strict form
+		// is enforced in the derivation branch itself.
 	}
 	else
 	{
@@ -6885,6 +6928,12 @@ CK_RV SoftHSM::deriveSymmetric
 	    case CKM_CONCATENATE_BASE_AND_DATA:
 	    case CKM_CONCATENATE_BASE_AND_KEY:
 	    case CKM_SHAKE_256_KEY_DERIVATION:
+	    case CKM_SHA256_KEY_DERIVATION:
+	    case CKM_SHA384_KEY_DERIVATION:
+	    case CKM_SHA512_KEY_DERIVATION:
+	    case CKM_SHA3_256_KEY_DERIVATION:
+	    case CKM_SHA3_384_KEY_DERIVATION:
+	    case CKM_SHA3_512_KEY_DERIVATION:
 	        break;
 		default:
 			return CKR_MECHANISM_INVALID;
@@ -6903,7 +6952,13 @@ CK_RV SoftHSM::deriveSymmetric
     if (pMechanism->mechanism == CKM_CONCATENATE_DATA_AND_BASE ||
 			pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_DATA ||
 			pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_KEY ||
-			pMechanism->mechanism == CKM_SHAKE_256_KEY_DERIVATION) {
+			pMechanism->mechanism == CKM_SHAKE_256_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA256_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA384_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA512_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA3_256_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA3_384_KEY_DERIVATION ||
+			pMechanism->mechanism == CKM_SHA3_512_KEY_DERIVATION) {
         // Get the key data
         ByteString keydata;
 
@@ -6964,6 +7019,60 @@ CK_RV SoftHSM::deriveSymmetric
 			secretValue.resize(byteLen);
 			memcpy(&secretValue[0], out.data(), byteLen);
 			OPENSSL_cleanse(out.data(), out.size());
+		} else if (pMechanism->mechanism == CKM_SHA256_KEY_DERIVATION ||
+				pMechanism->mechanism == CKM_SHA384_KEY_DERIVATION ||
+				pMechanism->mechanism == CKM_SHA512_KEY_DERIVATION ||
+				pMechanism->mechanism == CKM_SHA3_256_KEY_DERIVATION ||
+				pMechanism->mechanism == CKM_SHA3_384_KEY_DERIVATION ||
+				pMechanism->mechanism == CKM_SHA3_512_KEY_DERIVATION) {
+			// WS-6.2 (2026-08-30): PKCS#11 v3.2 §2.42 — derived value is a
+			// plain digest of the base key value, optionally left-truncated
+			// to an explicit CKA_VALUE_LEN. Unlike SHAKE-256 above, a fixed-
+			// length digest DOES have a natural output size, so byteLen==0
+			// means "use the full digest", not a template error. Ported
+			// from Rust (rust/src/native/derive.rs's digest_of), which
+			// already had this working and ACVP-proven for all six.
+			if (pMechanism->pParameter != NULL_PTR || pMechanism->ulParameterLen != 0) {
+				INFO_MSG("SHA*_KEY_DERIVATION takes no mechanism parameter");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+
+			const EVP_MD* md = NULL;
+			switch (pMechanism->mechanism) {
+				case CKM_SHA256_KEY_DERIVATION:    md = EVP_sha256();   break;
+				case CKM_SHA384_KEY_DERIVATION:    md = EVP_sha384();   break;
+				case CKM_SHA512_KEY_DERIVATION:    md = EVP_sha512();   break;
+				case CKM_SHA3_256_KEY_DERIVATION:  md = EVP_sha3_256(); break;
+				case CKM_SHA3_384_KEY_DERIVATION:  md = EVP_sha3_384(); break;
+				case CKM_SHA3_512_KEY_DERIVATION:  md = EVP_sha3_512(); break;
+				default: break; // unreachable — outer condition already narrowed this
+			}
+
+			EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+			if (ctx == NULL) return CKR_HOST_MEMORY;
+
+			unsigned int digestLen = 0;
+			std::vector<unsigned char> out(EVP_MAX_MD_SIZE);
+			if (EVP_DigestInit_ex(ctx, md, NULL) != 1 ||
+			    EVP_DigestUpdate(ctx, keydata.const_byte_str(), keydata.size()) != 1 ||
+			    EVP_DigestFinal_ex(ctx, out.data(), &digestLen) != 1)
+			{
+				EVP_MD_CTX_free(ctx);
+				ERROR_MSG("SHA*_KEY_DERIVATION digest failed");
+				return CKR_FUNCTION_FAILED;
+			}
+			EVP_MD_CTX_free(ctx);
+
+			size_t outLen = (byteLen != 0) ? byteLen : (size_t)digestLen;
+			if (outLen > digestLen) {
+				INFO_MSG("SHA*_KEY_DERIVATION CKA_VALUE_LEN exceeds the digest size");
+				OPENSSL_cleanse(out.data(), out.size());
+				return CKR_TEMPLATE_INCONSISTENT;
+			}
+			secretValue.resize(outLen);
+			memcpy(&secretValue[0], out.data(), outLen);
+			OPENSSL_cleanse(out.data(), out.size());
+			byteLen = outLen; // so the "computed size" fallback below is a no-op
         } else {
         	return CKR_MECHANISM_INVALID;
         }

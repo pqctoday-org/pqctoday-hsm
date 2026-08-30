@@ -491,6 +491,16 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	// decapsulation key expands to 96 bytes of ML-KEM + X25519 key material.
 	t["CKM_SHAKE_256_KEY_DERIVATION"]	= CKM_SHAKE_256_KEY_DERIVATION;
 
+	// WS-6.2 (2026-08-30): digest key derivation (PKCS#11 v3.2 §2.42) —
+	// derived value = HASH(base key). Rust already had these six and
+	// proved them correct against ACVP; C++ had none.
+	t["CKM_SHA256_KEY_DERIVATION"]		= CKM_SHA256_KEY_DERIVATION;
+	t["CKM_SHA384_KEY_DERIVATION"]		= CKM_SHA384_KEY_DERIVATION;
+	t["CKM_SHA512_KEY_DERIVATION"]		= CKM_SHA512_KEY_DERIVATION;
+	t["CKM_SHA3_256_KEY_DERIVATION"]	= CKM_SHA3_256_KEY_DERIVATION;
+	t["CKM_SHA3_384_KEY_DERIVATION"]	= CKM_SHA3_384_KEY_DERIVATION;
+	t["CKM_SHA3_512_KEY_DERIVATION"]	= CKM_SHA3_512_KEY_DERIVATION;
+
 	// RSA
 	t["CKM_RSA_PKCS_KEY_PAIR_GEN"]	= CKM_RSA_PKCS_KEY_PAIR_GEN;
 	t["CKM_RSA_PKCS"]		= CKM_RSA_PKCS;
@@ -1221,6 +1231,12 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 	    case CKM_SP800_108_COUNTER_KDF:
 	    case CKM_SP800_108_FEEDBACK_KDF:
 	    case CKM_SHAKE_256_KEY_DERIVATION:
+	    case CKM_SHA256_KEY_DERIVATION:
+	    case CKM_SHA384_KEY_DERIVATION:
+	    case CKM_SHA512_KEY_DERIVATION:
+	    case CKM_SHA3_256_KEY_DERIVATION:
+	    case CKM_SHA3_384_KEY_DERIVATION:
+	    case CKM_SHA3_512_KEY_DERIVATION:
 	        pInfo->ulMinKeySize = 1;
 	        pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 	        pInfo->flags = CKF_DERIVE;
