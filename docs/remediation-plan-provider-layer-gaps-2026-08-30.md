@@ -1,8 +1,8 @@
 # Provider-Layer Coverage Remediation Plan — JavaJCE + OpenSSL provider
 
-**Date:** 2026-08-30 (revised same day — see §0 and §3 for what changed and why)
+**Date:** 2026-08-30 (revised same day — see §0, §3, and §7 for what changed and why)
 **Supersedes/extends:** WS-10 in `docs/remediation-plan-pkcs11-v32-coverage-2026-08-29.md`, which checked both providers against only 4 engine-level fixes. This document re-verifies those 4 and adds 7 new items surfaced by today's Rust WS-8 mechanism work.
-**Status:** PLAN ONLY — nothing in this document has been executed. The *engine-side* work it depends on (`fix/ws1-4-and-ws2-rust-gaps`) is now fully committed locally (HEAD `fe88c79`, includes a CHANGELOG entry and `docs/remediation-plan-rust-pkcs11-v32-gaps-2026-08-30.md` as evidence) — stable and unpushed, ready to be a merge input whenever Q-0 below happens, but still not merged anywhere.
+**Status:** PLAN ONLY — nothing in this document has been executed. The *engine-side* work it depends on (`fix/ws1-4-and-ws2-rust-gaps`) has moved since §0/§3 were written — see §7 for the current, re-verified state. As of this revision it is merged with current `main` (HEAD `f337cf7`), its own local gate is in progress, and it is not yet pushed or merged into `main` itself. Q-0 below is revised accordingly in §7.4.
 
 ## 0. Branch topology — read this before touching anything
 
@@ -126,3 +126,41 @@ The OpenSSL provider's own code (`asymmetric_cipher.c`, `eddsa.c`) is real and c
 
 - Every item in §2 and the still-open rows of §1 has either a registered JCA `Service` (JavaJCE) or a `checklist[]` entry with real (non-stub) dispatch (OpenSSL provider), verified by the same kind of file:line evidence this document cites — not by trusting either provider's own inline comments without independently re-checking the engine source, per §3.
 - Whichever merge/rebase resolves §0 must re-run both providers' existing test suites (JavaJCE's live-TLS and zeroization tests from WS-B/C; the OpenSSL provider's `tests/`) plus the cross-engine differential harness (`scripts/run-differential-harness.sh`) before any item here is marked done, so a provider fix built against one engine is confirmed reachable through the other too.
+
+---
+
+## 7. Revision 2026-08-30 (later same day) — branch topology re-verified, Q-0 simplified
+
+Ownership of this planning document changed hands after §0–§6 were written. Re-verified every branch-relationship claim directly against `git log`/`git merge-base` rather than trusting the prior draft's numbers, since those numbers are exactly what §7.1–§7.3 found had moved.
+
+### 7.1 — `main` has moved twice since §0's table was built
+
+§0 stated `main` has `85f0cd8` (#189) and `7a8b4d7` (#190). Both are still there, but `main` has since taken two more merges:
+
+```
+git log feat/jdk27-jca-provider..main --oneline
+6ec2726  fix(tests): WS-0/WS-3.2/3.3/5.4 — close C++ ACVP/WASM evidence-integrity gaps (#192)
+e2a644f  docs: PKCS#11 v3.2 coverage remediation plan (C++ + Rust engines + providers) (#191)
+7a8b4d7  fix(pkcs11): RSA-OAEP hash selection, EdDSA context/prehash, private-key sensitivity check (#190)
+85f0cd8  fix(pkcs11): CKM_*_HMAC_GENERAL, CKM_AES_KEY_WRAP_KWP, ACVP vector resync (#189)
+```
+
+`feat/jdk27-jca-provider` is therefore **4 commits behind `main`, not 2** — everything §1/§3.2 said about it missing #189/#190's engine dispatch still holds, and now also misses #191 (a docs-only PR, no engine effect) and #192 (C++ ACVP/WASM test-harness evidence-integrity fixes — no new mechanisms, so no additional provider-facing gap, but the commit-count gap itself widens whatever Q-0a's rebase has to carry).
+
+### 7.2 — `fix/ws1-4-and-ws2-rust-gaps` is no longer just "unpushed, ready to be a merge input"
+
+Since §0 was written, this branch was itself brought up to date with `main` (merge commit `f337cf7`, merging in `6ec2726`/`e2a644f` — i.e. everything in §7.1's list). Its own CHANGELOG entry was also corrected in the process: an earlier commit on this branch (`fe88c79`) had documented only the Rust-side half of today's work; `f7b2e0e` extended it to credit the C++-side WS-3.3/4/5.1/5.3/6.2/6.3/8 work this document's §2 and §3.1 already describe. Neither change alters any fact this document's §1–§6 rely on — the WS-8 mechanism set, its single-branch-only status, and the fix sketches are unaffected — but it means the branch this plan calls a "merge input" is now current against `main` in a way it wasn't when §0 was drafted, and it is queued for its own PR into `main` (local gate in progress at the time of this revision, not yet pushed).
+
+### 7.3 — what this does and doesn't change about §0's core finding
+
+§0's central claim — "no branch has the newest engine mechanisms, the `main`-baseline engine fixes, and the newest provider code all together" — is **still true right now**: `fix/ws1-4-and-ws2-rust-gaps` has the first two but not the provider code; `feat/jdk27-jca-provider` has the provider code but neither of the first two (and is further behind than §0 recorded). Nothing in §7.1/§7.2 closes that gap yet — it closes it once `fix/ws1-4-and-ws2-rust-gaps` itself lands in `main`, which is in progress but not done as of this revision.
+
+### 7.4 — Q-0 simplifies from two steps to one once the pending merge lands
+
+§5's Q-0a/Q-0b split existed because, at the time, the plan was to merge `fix/ws1-4-and-ws2-rust-gaps` into whatever `feat/jdk27-jca-provider` becomes after its own rebase — a branch-onto-branch merge with its own conflict surface. That is no longer the plan: `fix/ws1-4-and-ws2-rust-gaps` is headed into `main` directly (§7.2), not into `feat/jdk27-jca-provider`. Once that lands, `main` alone carries everything §2's mechanism table needs, and §5 collapses to:
+
+| Phase | Contents | Rationale |
+|---|---|---|
+| **Q-0** | Rebase `feat/jdk27-jca-provider` onto `main`, once `main` contains `fix/ws1-4-and-ws2-rust-gaps` (§7.2's pending merge). | Picks up #189–#192 *and* the full WS-8 mechanism set in one rebase, instead of two sequential merges onto an intermediate branch. Still required before any of §1's "still open" verdicts or §2's fix sketches can be built against a real, current engine. |
+
+Q-1 through Q-8 are unaffected — they're keyed to mechanisms and fix sketches, not to which branch currently holds them.
