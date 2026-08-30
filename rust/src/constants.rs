@@ -610,6 +610,7 @@ pub const CKM_AES_CBC: u32     = 0x0000_1082;
 pub const CKM_AES_CBC_PAD: u32 = 0x0000_1085;
 pub const CKM_AES_CTR: u32 = 0x0000_1086;
 pub const CKM_AES_GCM: u32 = 0x0000_1087;
+pub const CKM_AES_CCM: u32 = 0x0000_1088;
 pub const CKM_AES_GMAC: u32 = 0x0000_108E;
 // §6.11 stream-cipher variants. No CKM_AES_CFB64 — no ACVP dataset exists
 // for it, deliberately excluded (matching this session's C++-side scope).
@@ -851,6 +852,7 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_AES_CBC_PAD,
     CKM_AES_CTR,
     CKM_AES_GCM,
+    CKM_AES_CCM,
     CKM_AES_GMAC,
     CKM_AES_OFB,
     CKM_AES_CFB8,

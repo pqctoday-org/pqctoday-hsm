@@ -485,6 +485,17 @@ ck_struct!(
 });
 
 ck_struct!(
+    /// `CK_CCM_PARAMS` (v3.2 §6.11.3).
+    ccm, "CK_CCM_PARAMS", {
+    UL_DATA_LEN: F::Ulong,
+    P_NONCE: F::Ptr,
+    UL_NONCE_LEN: F::Ulong,
+    P_AAD: F::Ptr,
+    UL_AAD_LEN: F::Ulong,
+    UL_MAC_LEN: F::Ulong,
+});
+
+ck_struct!(
     /// `CK_CHACHA20_PARAMS` (v3.2 §6.20).
     chacha20, "CK_CHACHA20_PARAMS", {
     P_BLOCK_COUNTER: F::Ptr,

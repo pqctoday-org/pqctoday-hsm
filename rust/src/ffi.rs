@@ -1440,6 +1440,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 => {
             (16, 32, 0x00000100 | 0x00000200)
         }
+        CKM_AES_CCM => (16, 32, 0x00000100 | 0x00000200),
         // ML-DSA pre-hash variants — same sign/verify capabilities as pure ML-DSA
         CKM_HASH_ML_DSA_SHA224
         | CKM_HASH_ML_DSA_SHA256
@@ -6563,6 +6564,46 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 };
                 (iv, aad, tag_bits)
             }
+            CKM_AES_CCM => {
+                // CK_CCM_PARAMS (§6.11.3). ulDataLen is not threaded through
+                // — this engine's CCM is single-shot only (see
+                // crypto/multipart.rs's CCM section), so the real
+                // plaintext/ciphertext length is always known directly from
+                // the C_Encrypt/C_Decrypt buffer, making the separate
+                // upfront declaration redundant here.
+                let ccm = match ParamReader::new(
+                    p_param,
+                    ul_param_len,
+                    &ck_param::ccm::LAYOUT,
+                    ck_param::ccm::FIELD_COUNT,
+                ) {
+                    Ok(r) => r,
+                    Err(_) => return CKR_ARGUMENTS_BAD,
+                };
+                let nonce_ptr = ccm.ptr(ck_param::ccm::P_NONCE);
+                let nonce_len = ccm.ulong(ck_param::ccm::UL_NONCE_LEN);
+                let aad_ptr = ccm.ptr(ck_param::ccm::P_AAD);
+                let aad_len = ccm.ulong(ck_param::ccm::UL_AAD_LEN);
+                let mac_len = ccm.ulong32(ck_param::ccm::UL_MAC_LEN);
+                // SP 800-38C: nonce length 7..=13 bytes (q = 15-len(N) must
+                // be 2..=8); MAC length one of {4,6,8,10,12,14,16}.
+                if nonce_ptr.is_null() || !(7..=13).contains(&nonce_len) {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                if !matches!(mac_len, 4 | 6 | 8 | 10 | 12 | 14 | 16) {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                let nonce = std::slice::from_raw_parts(nonce_ptr, nonce_len).to_vec();
+                let aad = if !aad_ptr.is_null() && aad_len > 0 {
+                    std::slice::from_raw_parts(aad_ptr, aad_len).to_vec()
+                } else {
+                    Vec::new()
+                };
+                // tag_bits slot repurposed to carry mac_len in BYTES
+                // (CK_CCM_PARAMS.ulMACLen is already an octet count, unlike
+                // CK_GCM_PARAMS.ulTagBits).
+                (nonce, aad, mac_len)
+            }
             // §6.27.2 — ECB takes no mechanism parameter.
             CKM_AES_ECB => (Vec::new(), Vec::new(), 0),
             CKM_AES_CBC | CKM_AES_CBC_PAD => {
@@ -6961,6 +7002,16 @@ pub fn C_Encrypt(
                 let mut cfb = Cfb1State::new(key, ivb, CipherDirection::Encrypt);
                 cfb.update_public(plaintext)
             }
+            CKM_AES_CCM => {
+                // iv/aad/tag_bits here are (nonce, aad, mac_len_bytes) — see
+                // this mechanism's CK_CCM_PARAMS parsing arm above.
+                use crate::crypto::multipart::{AesKey, ccm_encrypt};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                ccm_encrypt(&key, &iv, &aad, plaintext, tag_bits as usize)
+            }
             CKM_RSA_PKCS_OAEP => {
                 if key_bytes.len() < 8 {
                     return CKR_KEY_TYPE_INCONSISTENT;
@@ -7193,6 +7244,46 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     Vec::new()
                 };
                 (iv, aad, tag_bits)
+            }
+            CKM_AES_CCM => {
+                // CK_CCM_PARAMS (§6.11.3). ulDataLen is not threaded through
+                // — this engine's CCM is single-shot only (see
+                // crypto/multipart.rs's CCM section), so the real
+                // plaintext/ciphertext length is always known directly from
+                // the C_Encrypt/C_Decrypt buffer, making the separate
+                // upfront declaration redundant here.
+                let ccm = match ParamReader::new(
+                    p_param,
+                    ul_param_len,
+                    &ck_param::ccm::LAYOUT,
+                    ck_param::ccm::FIELD_COUNT,
+                ) {
+                    Ok(r) => r,
+                    Err(_) => return CKR_ARGUMENTS_BAD,
+                };
+                let nonce_ptr = ccm.ptr(ck_param::ccm::P_NONCE);
+                let nonce_len = ccm.ulong(ck_param::ccm::UL_NONCE_LEN);
+                let aad_ptr = ccm.ptr(ck_param::ccm::P_AAD);
+                let aad_len = ccm.ulong(ck_param::ccm::UL_AAD_LEN);
+                let mac_len = ccm.ulong32(ck_param::ccm::UL_MAC_LEN);
+                // SP 800-38C: nonce length 7..=13 bytes (q = 15-len(N) must
+                // be 2..=8); MAC length one of {4,6,8,10,12,14,16}.
+                if nonce_ptr.is_null() || !(7..=13).contains(&nonce_len) {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                if !matches!(mac_len, 4 | 6 | 8 | 10 | 12 | 14 | 16) {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                let nonce = std::slice::from_raw_parts(nonce_ptr, nonce_len).to_vec();
+                let aad = if !aad_ptr.is_null() && aad_len > 0 {
+                    std::slice::from_raw_parts(aad_ptr, aad_len).to_vec()
+                } else {
+                    Vec::new()
+                };
+                // tag_bits slot repurposed to carry mac_len in BYTES
+                // (CK_CCM_PARAMS.ulMACLen is already an octet count, unlike
+                // CK_GCM_PARAMS.ulTagBits).
+                (nonce, aad, mac_len)
             }
             // §6.27.2 — ECB takes no mechanism parameter.
             CKM_AES_ECB => (Vec::new(), Vec::new(), 0),
@@ -7479,6 +7570,17 @@ pub fn C_Decrypt(
                 };
                 let mut cfb = Cfb1State::new(key, ivb, CipherDirection::Decrypt);
                 cfb.update_public(ciphertext)
+            }
+            CKM_AES_CCM => {
+                use crate::crypto::multipart::{AesKey, ccm_decrypt};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                match ccm_decrypt(&key, &iv, &aad, ciphertext, tag_bits as usize) {
+                    Ok(pt) => pt,
+                    Err(rv) => return rv,
+                }
             }
             CKM_RSA_PKCS_OAEP => {
                 use rsa::pkcs8::DecodePrivateKey;
