@@ -551,6 +551,33 @@ async function runSuite(engineName) {
       }
     }
 
+    // ── 10.6.6. KMAC-128 MVT negative KAT (NIST ACVP) ──────────────────────
+    // WS-4 (2026-08-30): kmac_test.json was on disk, real provenance,
+    // loaded by nothing — zero KMAC evidence existed anywhere in this
+    // harness before this. The vector's only case is testType=MVT,
+    // testPassed=false: a deliberately-wrong mac that a correct
+    // implementation must reject. It uses an empty customization string,
+    // so it exercises this engine's current OSSLKMAC.cpp implementation
+    // faithfully (which sets only OSSL_MAC_PARAM_SIZE, matching KMAC's own
+    // empty-S default) — it does NOT exercise a non-empty customization
+    // string, since OSSLKMAC.cpp doesn't parse CK_KMAC_PARAMS at all yet
+    // (a real, separate, and much smaller gap given CKM_KMAC_128/256 sit
+    // in the vendor range — PKCS#11 v3.2 defines no KMAC mechanism, so
+    // this isn't a v3.2 compliance item, just documented honestly here).
+    if (mechs.size > 0 && !mechs.has(CK.CKM_KMAC_128)) {
+      addResult('kmac128', 'KMAC-128', 'MVT KAT (negative)', 'SKIP', 'mechanism not supported')
+    } else {
+      const tv = kmacVec.testGroups[0].tests[0]
+      try {
+        const h = importHMACKey(M, hSession, hexToBytes(tv.key), { sign: false, verify: true })
+        const verified = hmacVerify(M, hSession, h, hexToBytes(tv.msg), hexToBytes(tv.mac), CK.CKM_KMAC_128)
+        const ok = verified === tv.testPassed // testPassed=false: must correctly reject
+        addResult('kmac128', 'KMAC-128', `MVT KAT tc=${tv.tcId} (negative)`, ok ? 'PASS' : 'FAIL', `expected reject, verify=${verified}`)
+      } catch (e) {
+        addResult('kmac128', 'KMAC-128', `MVT KAT tc=${tv.tcId} (negative)`, 'FAIL', e.message)
+      }
+    }
+
     // ── 10.7. SHA*_KEY_DERIVATION (PKCS#11 v3.2 §2.42) — 6 mechanisms ──────
     // WS-6.2 (2026-08-30): C++ had none of these 6 digest-KDF mechanisms at
     // all (CKR_MECHANISM_INVALID on every one); Rust already had them
