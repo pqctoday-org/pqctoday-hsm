@@ -3,7 +3,7 @@
   "mode": "hash",
   "revision": "1.0",
   "_provenance": {
-    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/SHA2-512/224-1.0/internalProjection.json",
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/SHA2-512-224-1.0/internalProjection.json",
     "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
     "retrieved": "2026-08-30",
     "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
