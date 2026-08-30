@@ -140,17 +140,22 @@ export function buildMech(M, type, paramPtr = 0, paramLen = 0) {
   return ptr
 }
 
-/** CK_GCM_PARAMS: pIv(4) ulIvLen(4) ulIvBits(4) pAAD(4) ulAADLen(4) ulTagBits(4) = 24B */
-export function buildGCMParams(M, iv) {
+/**
+ * CK_GCM_PARAMS: pIv(4) ulIvLen(4) ulIvBits(4) pAAD(4) ulAADLen(4) ulTagBits(4) = 24B
+ * `aad` and `tagBits` are optional (default: no AAD, 128-bit tag) so every
+ * existing caller keeps its prior behaviour unchanged.
+ */
+export function buildGCMParams(M, iv, aad = new Uint8Array(0), tagBits = 128) {
   const ivPtr = writeBytes(M, iv)
+  const aadPtr = aad.length > 0 ? writeBytes(M, aad) : 0
   const ptr = M._malloc(24)
   M.setValue(ptr + 0, ivPtr, 'i32')
   M.setValue(ptr + 4, iv.length, 'i32')
   M.setValue(ptr + 8, iv.length * 8, 'i32')
-  M.setValue(ptr + 12, 0, 'i32') // pAAD
-  M.setValue(ptr + 16, 0, 'i32') // ulAADLen
-  M.setValue(ptr + 20, 128, 'i32') // ulTagBits
-  return { ptr, size: 24, ivPtr }
+  M.setValue(ptr + 12, aadPtr, 'i32') // pAAD
+  M.setValue(ptr + 16, aad.length, 'i32') // ulAADLen
+  M.setValue(ptr + 20, tagBits, 'i32') // ulTagBits
+  return { ptr, size: 24, ivPtr, aadPtr }
 }
 
 /** CK_AES_CTR_PARAMS: ulCounterBits(4) cb[16] = 20B */
@@ -733,14 +738,15 @@ export function generateEdDSAKeyPair(M, hSession, curve = 'Ed25519') {
  * AES-GCM or AES-CBC decrypt. mode: 'gcm' | 'cbc' (CKM_AES_CBC_PAD) |
  * 'cbc-raw' (CKM_AES_CBC, no PKCS#7 — what NIST's ACVP-AES-CBC KATs test;
  * see hub softhsm.ts's hsm_aesDecrypt for the same distinction and why
- * 'cbc' isn't repurposed).
+ * 'cbc' isn't repurposed). `aad`/`tagBits` only apply to mode 'gcm' and
+ * default to buildGCMParams's own defaults (no AAD, 128-bit tag).
  */
-export function aesDecrypt(M, hSession, handle, ct, iv, mode = 'gcm') {
+export function aesDecrypt(M, hSession, handle, ct, iv, mode = 'gcm', aad = new Uint8Array(0), tagBits = 128) {
   let mechPtr, extraPtrs = []
   if (mode === 'gcm') {
-    const gcm = buildGCMParams(M, iv)
+    const gcm = buildGCMParams(M, iv, aad, tagBits)
     mechPtr = buildMech(M, CK.CKM_AES_GCM, gcm.ptr, gcm.size)
-    extraPtrs = [gcm.ptr, gcm.ivPtr]
+    extraPtrs = gcm.aadPtr ? [gcm.ptr, gcm.ivPtr, gcm.aadPtr] : [gcm.ptr, gcm.ivPtr]
   } else if (mode === 'cbc-raw') {
     const ivPtr = writeBytes(M, iv)
     mechPtr = buildMech(M, CK.CKM_AES_CBC, ivPtr, iv.length)

@@ -53,7 +53,6 @@ import {
   hmacVerify,
   hmacVerifyGeneral,
   rsaVerify,
-  ecdsaVerify,
   verifyBytes,
   sign,
   verify,
@@ -144,14 +143,22 @@ async function runSuite(engineName) {
   const mechs = getMechanismSet(M, slotId)
 
   try {
-    // ── 1. AES-GCM-256 Decrypt KAT (SP 800-38D) ───────────────────────────
+    // ── 1. AES-GCM-128 Decrypt KAT (NIST ACVP-AES-GCM) ────────────────────
+    // WS-0.5 (2026-08-30): the ACVP sample vector set used here (see
+    // aesgcm_test.json's _provenance.note) only publishes a 128-bit key
+    // group with a non-zero payload, with a non-default IV length (120
+    // bits), tag length (32 bits) and a non-empty AAD — buildGCMParams /
+    // aesDecrypt take aad/tagBits so this vector is exercised as-is
+    // rather than silently ignoring its AAD and mismatching its tag size.
     if (mechs.size > 0 && !mechs.has(CK.CKM_AES_GCM)) {
-      addResult('aesgcm', 'AES-GCM-256', 'Decrypt KAT', 'SKIP', 'mechanism not supported')
+      addResult('aesgcm', 'AES-GCM-128', 'Decrypt KAT', 'SKIP', 'mechanism not supported')
     } else {
-      const tv = aesGcmVec.testGroups[0].tests[0]
+      const tg = aesGcmVec.testGroups[0]
+      const tv = tg.tests[0]
       try {
         const keyBytes = hexToBytes(tv.key)
         const ivBytes = hexToBytes(tv.iv)
+        const aadBytes = hexToBytes(tv.aad || '')
         const ctBytes = hexToBytes(tv.ct)
         const tagBytes = hexToBytes(tv.tag)
         const expectedPt = hexToBytes(tv.pt)
@@ -159,11 +166,11 @@ async function runSuite(engineName) {
         const ctWithTag = new Uint8Array(ctBytes.length + tagBytes.length)
         ctWithTag.set(ctBytes)
         ctWithTag.set(tagBytes, ctBytes.length)
-        const pt = aesDecrypt(M, hSession, aesH, ctWithTag, ivBytes, 'gcm')
+        const pt = aesDecrypt(M, hSession, aesH, ctWithTag, ivBytes, 'gcm', aadBytes, tg.tagLen)
         const ok = arrEq(pt, expectedPt)
-        addResult('aesgcm', 'AES-GCM-256', 'Decrypt KAT', ok ? 'PASS' : 'FAIL', `PT[${pt.length}B]: ${bytesToHex(pt, 16)}`)
+        addResult('aesgcm', 'AES-GCM-128', 'Decrypt KAT', ok ? 'PASS' : 'FAIL', `PT[${pt.length}B]: ${bytesToHex(pt, 16)}`)
       } catch (e) {
-        addResult('aesgcm', 'AES-GCM-256', 'Decrypt KAT', 'FAIL', e.message)
+        addResult('aesgcm', 'AES-GCM-128', 'Decrypt KAT', 'FAIL', e.message)
       }
     }
 
@@ -212,7 +219,7 @@ async function runSuite(engineName) {
         const sig = new Uint8Array(rB.length + sB.length)
         sig.set(rB)
         sig.set(sB, rB.length)
-        const ok = ecdsaVerify(M, hSession, h, tv.msg, sig)
+        const ok = verifyBytes(M, hSession, h, hexToBytes(tv.msg), sig, CK.CKM_ECDSA_SHA256)
         addResult('ecdsa256', 'ECDSA P-256', 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
       } catch (e) {
         addResult('ecdsa256', 'ECDSA P-256', 'SigVer KAT', 'FAIL', e.message)
@@ -452,7 +459,7 @@ async function runSuite(engineName) {
         const sig = new Uint8Array(rB.length + sB.length)
         sig.set(rB)
         sig.set(sB, rB.length)
-        const ok = ecdsaVerify(M, hSession, h, tv.msg, sig, CK.CKM_ECDSA_SHA384)
+        const ok = verifyBytes(M, hSession, h, hexToBytes(tv.msg), sig, CK.CKM_ECDSA_SHA384)
         addResult('ecdsa384', 'ECDSA P-384', 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
       } catch (e) {
         addResult('ecdsa384', 'ECDSA P-384', 'SigVer KAT', 'FAIL', e.message)
