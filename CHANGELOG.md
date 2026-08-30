@@ -106,7 +106,156 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   §5.21 — onto one shared table index via normal identical-code-folding;
   the test asserts this is the only collision.)
 
+- **C++ engine: general-length HMAC (`CKM_*_HMAC_GENERAL`) — MACs you can
+  ask for a shorter answer from.** SP 800-107 lets a protocol truncate an
+  HMAC to fewer bytes than the hash produces, and PKCS#11 gives every HMAC
+  a second mechanism for exactly that: it takes a `CK_MAC_GENERAL_PARAMS`
+  output length and returns that many bytes from the start of the full MAC
+  (v3.2 §6.20.3 and its per-hash siblings). The engine had none of them, so
+  a caller with a 20-byte MAC to verify — the length NIST's own ACVP-HMAC
+  reference vectors use — had no mechanism to verify it with. Implemented
+  for real, sign and verify, single-part and multi-part: `MacAlgorithm`
+  gained a truncation length that `OSSLEVPMacAlgorithm` applies to both
+  `signFinal` (truncate) and `verifyFinal` (compare only the requested
+  prefix), and `kMacMechTable` gained one column pairing each HMAC with its
+  general-length twin. The rule is one line and has no exceptions: the
+  general-length variant is now supported exactly where the plain variant
+  is (SHA-1, SHA-224/256/384/512, SHA3-224/256/384/512, plus MD5 in
+  non-FIPS builds and RIPEMD-160 in legacy-provider builds), so nobody
+  finds `CKM_SHA256_HMAC_GENERAL` working while `CKM_SHA_1_HMAC_GENERAL` is
+  rejected. A missing, zero, or over-length parameter answers
+  `CKR_MECHANISM_PARAM_INVALID` rather than quietly returning a full-length
+  MAC, and verify enforces the requested length (`CKR_SIGNATURE_LEN_RANGE`)
+  rather than accepting the untruncated one.
+
+- **C++ engine: `CKM_AES_KEY_WRAP_KWP` — the current name for RFC 5649 key
+  wrap.** PKCS#11 v3.2 §6.16.3 states plainly that `CKM_AES_KEY_WRAP_PAD`
+  "is deprecated. `CKM_AES_KEY_WRAP_KWP` … shall be used instead", and both
+  denote the same construction. The engine implemented the padded wrap
+  correctly but only answered to the deprecated name, so any caller written
+  against v3.0 or later — which no longer names the old one — could not
+  reach a working implementation. `CKM_AES_KEY_WRAP_KWP` is now accepted
+  everywhere its deprecated twin is (advertised in the mechanism list and
+  `C_GetMechanismInfo`, wrap and unwrap, with the same key-type checks),
+  running the identical `EVP_aes_*_wrap_pad()` path; a new conformance test
+  asserts the two produce byte-identical output.
+
 ### Fixed
+
+- **BREAKING (C++ engine): `C_WrapKey`/`C_UnwrapKey` under
+  `CKM_RSA_PKCS_OAEP` now use the `hashAlg` you asked for, instead of
+  silently substituting SHA-1.** This is a correctness fix with a
+  compatibility consequence, so read the second paragraph before upgrading.
+  `MechParamCheckRSAPKCSOAEP` has long accepted — and returned `CKR_OK`
+  for — `hashAlg` values of SHA-224/256/384/512 and SHA3-224/256/384/512,
+  but the two helpers that actually perform the operation,
+  `WrapKeyAsym` and `UnwrapKeyAsym` (`src/lib/SoftHSM_keygen.cpp`), never
+  read `pParameter` at all: both hardcoded `AsymMech::RSA_PKCS_OAEP`, whose
+  OpenSSL default OAEP digest is SHA-1, next to a comment reading "SHA-1 is
+  the only supported option" and a message-length bound hardcoded to
+  SHA-1's `2 * 160 / 8`. A caller who correctly requested OAEP-SHA-256 got
+  OAEP-SHA-1 and was never told. Nothing in the test suite could see it:
+  wrap and unwrap made the *same* substitution, so every round trip agreed
+  with itself, and the only vector file that could have caught it
+  (`tests/acvp/rsa_oaep_test.json`) was loaded by no harness — and was
+  itself Node-generated rather than NIST-sourced. `C_EncryptInit`/
+  `C_DecryptInit` (`src/lib/SoftHSM_cipher.cpp`) already mapped `hashAlg`
+  onto the right `AsymMech`; the wrap path had simply never adopted that
+  switch. Both paths now share one resolver (`resolveOAEPHash`), the
+  RFC 8017 §7.1.1 input bound `k - 2 - 2*hLen` is derived from the selected
+  hash, and `MechParamCheckRSAAESKEYWRAP` — which previously validated only
+  `mgf ∈ 1..5` and never looked at `hashAlg` — now validates its inner
+  `CK_RSA_PKCS_OAEP_PARAMS` through exactly the same rule, closing the last
+  path by which an unvalidated `hashAlg` could reach the wrap helpers.
+  `CKM_RSA_AES_KEY_WRAP` inherits the fix, since it wraps its ephemeral AES
+  key through those same helpers. A *third* gate had to be widened as well,
+  and only the new KAT found it: `AsymmetricAlgorithm::isWrappingMech`
+  (`src/lib/crypto/AsymmetricAlgorithm.cpp`) is a whitelist every wrap and
+  unwrap passes through, and it admitted only the bare `RSA_PKCS_OAEP`.
+  While the helpers above hardcoded that same value the omission was
+  invisible; the moment they began honouring `hashAlg` it would have turned
+  the silent SHA-1 substitution into a hard `CKR_GENERAL_ERROR` /
+  `CKR_WRAPPED_KEY_INVALID` for every non-SHA-1 OAEP wrap. All eight
+  hash-qualified variants are now admitted — v3.2 §6.1.8 ticks
+  `CKM_RSA_PKCS_OAEP` for Wrap&Unwrap without restricting `hashAlg`.
+  **Compatibility: this is a breaking fix, deliberately with no
+  transitional flag and no legacy opt-in.** Any blob wrapped by an earlier
+  build under a *non*-SHA-1 `hashAlg` was in fact wrapped under SHA-1, and
+  this build will not unwrap it under the `hashAlg` it was nominally
+  created with — such blobs must be re-wrapped. (They can still be
+  recovered by this build by asking for `CKM_SHA_1`/`CKG_MGF1_SHA1`
+  explicitly, which is what they actually are.) Blobs wrapped under
+  SHA-1 are unaffected. The old behaviour was not interoperable with any
+  conforming PKCS#11 module in either direction, so preserving it behind a
+  flag would only have kept a silent wrong answer permanently reachable.
+  New evidence, replacing the orphaned Node-generated file: real NIST ACVP
+  `KTS-IFC-Sp800-56Br2` key-transport vectors (pinned at ACVP-Server commit
+  `975de31`, `source_sha256` recorded, 20 cases across OAEP-SHA-512 and
+  OAEP-SHA-1, each independently re-verified before adoption), driven
+  through `C_WrapKey`/`C_UnwrapKey` — not `C_Encrypt`/`C_Decrypt`, which
+  were always correct — plus a negative case that wraps under SHA-512 and
+  proves the resulting blob is *not* unwrappable under SHA-1. On the old
+  code that negative case succeeds, which is the whole bug in one
+  assertion.
+
+- **C++ engine: `CKM_EDDSA` now reads `CK_EDDSA_PARAMS`, so Ed25519ph,
+  Ed448ph and RFC 8032 context strings are reachable the standard way.**
+  PKCS#11 v3.2 §6.3.14 Table 73 maps the presence, `phFlag` and context data
+  of `CK_EDDSA_PARAMS` onto RFC 8032's five signature schemes. The structure
+  was declared in this repo's own `pkcs11t.h` and read nowhere:
+  `AsymSignInit`/`AsymVerifyInit`'s `CKM_EDDSA` case left `param` NULL, and a
+  guard a hundred lines below then rejected any non-NULL `pParameter` with
+  `CKR_MECHANISM_PARAM_INVALID`. Two consequences, both of them a conforming
+  caller being refused rather than a wrong answer: requesting Ed25519ph the
+  way the spec defines it (`CKM_EDDSA` + `phFlag=CK_TRUE`) failed outright —
+  only the vendor-range `CKM_EDDSA_PH` worked — and Ed25519ctx and
+  context-carrying Ed448 signatures could be neither produced nor verified at
+  all. `parseEdDSAParams` (`src/lib/SoftHSM_sign.cpp`) now parses the
+  structure for both sign and verify, and `OSSLEDDSA::resolveInstance`
+  resolves key curve + `phFlag` + context into the OpenSSL instance name
+  (`Ed25519` / `Ed25519ctx` / `Ed25519ph` / `Ed448` / `Ed448ph`) and context
+  string. The parameters are also carried through `signInit`→`signFinal`, so
+  a `C_SignUpdate`/`C_SignFinal` sequence keeps its context instead of
+  silently emitting a pure-mode signature. `CKM_EDDSA_PH` is deliberately
+  left parameterless — everything it expresses is now reachable through the
+  standard mechanism. Two readings of Table 73 are recorded in the code
+  rather than left implicit: `phFlag=CK_FALSE` with an *empty* context on an
+  Ed25519 key resolves to plain Ed25519, not Ed25519ctx (RFC 8032 §5.1: "For
+  Ed25519ctx … The context input SHOULD NOT be empty", and OpenSSL 3.6
+  refuses to sign that combination); and Ed448 with no parameter at all stays
+  plain Ed448, as this engine already behaved. New evidence: 61 known-answer
+  cases across nine vector sets, Tier 1 from NIST ACVP `EDDSA-SigGen-1.0`
+  (pinned at `975de31`) for Ed25519/Ed25519ph/Ed448/Ed448ph, Tier 3 from
+  RFC 8032 §7.1-§7.5 — including Ed25519ctx, for which ACVP's sample set
+  publishes no case at all. Both vector files were re-sourced: the Ed448 one
+  previously declared "Generated via Node.js crypto (OpenSSL backend)", and
+  neither was loaded by any harness. Sign and verify are both exercised, plus
+  a negative set proving a context is genuinely bound into the signature (a
+  different context and no-parameters-at-all must both fail to verify) and
+  that `CKM_EDDSA` + `phFlag` produces byte-identical output to
+  `CKM_EDDSA_PH` and to RFC 8032 §7.3.
+
+- **Cross-engine differential harness: `CKA_VALUE` sensitivity is now
+  asserted on asymmetric private keys, and a defect entry that overstated a
+  divergence is corrected.** The only prior probe of the §4.9 note-7 rule
+  ("cannot be revealed if `CKA_SENSITIVE` is true or `CKA_EXTRACTABLE` is
+  false") used an AES secret key, even though the EC and Edwards private-key
+  tables define `CKA_VALUE` as the private scalar — the single most
+  sensitive byte string either engine holds. New scenario
+  `security.private_key_value_sensitivity` covers a generated EC key, a
+  generated Ed25519 key and a key recovered through `C_UnwrapKey`, under
+  both legs of the rule. Result: both engines answer
+  `CKR_ATTRIBUTE_SENSITIVE` with `CK_UNAVAILABLE_INFORMATION` in all six
+  cases. Consequently `DEFECT-RUST-CKA_VALUE-ON-ASYMMETRIC-KEYS` has had its
+  sensitivity sub-claim withdrawn: it read "on the unwrapped private key it
+  is readable in the clear where C++ answers `CKR_ATTRIBUTE_SENSITIVE`",
+  which framed an enforcement failure that does not exist. The divergence
+  that sentence described comes entirely from the probing scenario's own
+  template (`CKA_SENSITIVE=CK_FALSE`, `CKA_EXTRACTABLE` unset) meeting two
+  different token-specific defaults — already adjudicated as
+  `LEGAL-UNWRAPPED-KEY-EXTRACTABLE-DEFAULT`. The entry keeps its
+  attribute-presence claim and its E5 deferral unchanged. No engine code
+  changed for this item.
 
 - **Rust engine: `C_Finalize` no longer wipes token state.** WS-11's Tier A
   conformance runner caught this with a standalone probe: one slot present
@@ -154,6 +303,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   production `[dependencies]` entry or the shipped `pqctoday-kmip` binary.
   Verified with two consecutive full `cargo test` runs in `kmip/` (688
   passed / 0 failed each) plus a full `local-gate.sh` core-gate rerun.
+
+- **C++ engine: closed real evidence-integrity gaps in the ACVP/WASM test
+  harness (WS-0, WS-3.2/3.3/5.4).** Several checks that looked green were
+  either not running the vectors they claimed to, or would have failed
+  silently instead of loudly:
+  - `getMechanismSet` returned an empty `Set` on `C_GetMechanismList`
+    failure, indistinguishable from a healthy engine that legitimately
+    advertises nothing — every caller's `mechs.size > 0 && !mechs.has(...)`
+    skip-guard read a broken engine as "advertises nothing, skip" instead
+    of failing loudly. Now throws immediately with the real `CKR_*` code.
+  - `tests/parity-wasm.mjs` (the cross-engine C++/Rust parity check) had
+    never actually run — it looked for WASM bundle paths that don't exist
+    (path drift), always hit its `existsSync` guard and exited 0 SKIPPED.
+    Repaired to reuse the proven `loadEngine()`; its first-ever real run
+    surfaced and fixed a genuine test bug (a malformed Rust ML-KEM keygen
+    template) and confirmed cross-engine ML-KEM/ML-DSA parity for real.
+  - `smoke-wasm.mjs` had declared an ML-DSA-65 keygen→sign→verify check in
+    its header since it was written, but the test body never implemented
+    it. Now implemented for real.
+  - New provenance-enforcement gate (`scripts/check_acvp_provenance.py`,
+    wired into `local-gate.sh`) verifies every `tests/acvp/*.json` file
+    carries a real `_provenance`/`_provenance_tier3` block whose
+    `source_sha256` matches a live re-fetch of `source_url` — closing 9
+    files (AES-CTR/GCM/KW, ECDSA P-256/384/521, KMAC, PBKDF2, RSA-PSS)
+    that were self-generated or fabricated with real NIST ACVP material;
+    29/29 vector files now pass. One P-521 ECDSA vector is real but
+    deliberately left unwired (`importECPublicKey`'s DER length encoding
+    can't yet represent its 133-byte point) — documented, not papered
+    over.
+  - SLH-DSA SigVer/SigGen now iterates all 12 `slhdsa_ctx_test.json`
+    parameter sets instead of 1; SHA3-256/512 now check real ACVP cases
+    instead of a single hand-typed constant; ML-DSA context-mode SigVer
+    (FIPS 204 tr1) is wired in via a new `verifyBytesMLDSAContext()`
+    helper. C++ ACVP harness total: 150 → 180 PASS, 0 FAIL, 0 SKIP.
+  - Removed ~69 dead DES/DES3 references (functions, KAT blobs, mechanism
+    case-labels) from the legacy CppUnit suite — DES was never in this
+    fork's retained-algorithm set.
+
+  Known gaps surfaced, not fixed here: Rust has no PBKDF2-SHA224 PRF arm;
+  running the ACVP harness against Rust for the first time also surfaced
+  15 pre-existing failures (all 5 EdDSA variants, both RSA-OAEP unwrap
+  KATs) — real defects for the Rust WS-2 gap-remediation pass, not this
+  branch's scope. KMAC has real Tier-1 evidence but no harness helper yet.
+  SHA3-384 still has no ACVP vector file at all.
 
 ## [0.26.1] — 2026-08-27
 

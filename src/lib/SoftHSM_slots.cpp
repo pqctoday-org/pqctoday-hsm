@@ -444,11 +444,13 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 #ifndef WITH_FIPS
 	// MD5-HMAC dispatches via resolveMacMech() in non-FIPS builds (audit G5).
 	t["CKM_MD5_HMAC"]		= CKM_MD5_HMAC;
+	t["CKM_MD5_HMAC_GENERAL"]	= CKM_MD5_HMAC_GENERAL;
 #endif
 #ifdef WITH_RIPEMD160
 	// HMAC-RIPEMD-160 dispatches via kMacMechTable on native builds (G-DA-X);
 	// absent (== rejected) on the WASM/no-legacy build (advertise == dispatch).
 	t["CKM_RIPEMD160_HMAC"]		= CKM_RIPEMD160_HMAC;
+	t["CKM_RIPEMD160_HMAC_GENERAL"]	= CKM_RIPEMD160_HMAC_GENERAL;
 #endif
 	t["CKM_SHA_1_HMAC"]		= CKM_SHA_1_HMAC;
 	t["CKM_SHA224_HMAC"]		= CKM_SHA224_HMAC;
@@ -459,6 +461,22 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_SHA3_256_HMAC"]		= CKM_SHA3_256_HMAC;
 	t["CKM_SHA3_384_HMAC"]		= CKM_SHA3_384_HMAC;
 	t["CKM_SHA3_512_HMAC"]		= CKM_SHA3_512_HMAC;
+
+	// General-length HMAC (PKCS#11 v3.2 §6.20.3 and its per-hash siblings):
+	// same construction as the plain mechanism above, plus a
+	// CK_MAC_GENERAL_PARAMS output length that Mac{Sign,Verify}Init reads and
+	// applies. Advertised exactly where the plain variant is — kMacMechTable
+	// carries both in one row, so advertise == dispatch stays true by
+	// construction.
+	t["CKM_SHA_1_HMAC_GENERAL"]	= CKM_SHA_1_HMAC_GENERAL;
+	t["CKM_SHA224_HMAC_GENERAL"]	= CKM_SHA224_HMAC_GENERAL;
+	t["CKM_SHA256_HMAC_GENERAL"]	= CKM_SHA256_HMAC_GENERAL;
+	t["CKM_SHA384_HMAC_GENERAL"]	= CKM_SHA384_HMAC_GENERAL;
+	t["CKM_SHA512_HMAC_GENERAL"]	= CKM_SHA512_HMAC_GENERAL;
+	t["CKM_SHA3_224_HMAC_GENERAL"]	= CKM_SHA3_224_HMAC_GENERAL;
+	t["CKM_SHA3_256_HMAC_GENERAL"]	= CKM_SHA3_256_HMAC_GENERAL;
+	t["CKM_SHA3_384_HMAC_GENERAL"]	= CKM_SHA3_384_HMAC_GENERAL;
+	t["CKM_SHA3_512_HMAC_GENERAL"]	= CKM_SHA3_512_HMAC_GENERAL;
 
 	// PBKDF2 (PKCS#11 v3.2 §5.7.3.1)
 	t["CKM_PKCS5_PBKD2"]		= CKM_PKCS5_PBKD2;
@@ -519,6 +537,15 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_AES_KEY_WRAP"]		= CKM_AES_KEY_WRAP;
 #ifdef HAVE_AES_KEY_WRAP_PAD
 	t["CKM_AES_KEY_WRAP_PAD"]	= CKM_AES_KEY_WRAP_PAD;
+	// PKCS#11 v3.2 §6.16.3: "The CKM_AES_KEY_WRAP_PAD mechanism is deprecated.
+	// CKM_AES_KEY_WRAP_KWP resp. CKM_AES_KEY_WRAP_PKCS7 shall be used instead."
+	// KWP is the same RFC 5649 construction ("zero-padded and wrapped as
+	// defined in section 6.3 of [AES KEYWRAP], which produces same results as
+	// RFC 5649") that CKM_AES_KEY_WRAP_PAD has always run here via
+	// SymWrap::AES_KEYWRAP_PAD / EVP_aes_*_wrap_pad() — only the mechanism ID
+	// was missing, so callers written against v3.0+ (which no longer name the
+	// deprecated one) could not reach a working implementation.
+	t["CKM_AES_KEY_WRAP_KWP"]	= CKM_AES_KEY_WRAP_KWP;
 #endif
 	t["CKM_AES_ECB_ENCRYPT_DATA"]	= CKM_AES_ECB_ENCRYPT_DATA;
 	t["CKM_AES_CBC_ENCRYPT_DATA"]	= CKM_AES_CBC_ENCRYPT_DATA;
@@ -807,8 +834,13 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMaxKeySize = 0;
 			pInfo->flags = CKF_DIGEST;
 			break;
+		// The general-length twin of each HMAC below (CKM_*_HMAC_GENERAL) has
+		// identical key-size and function constraints — it differs only in
+		// taking a CK_MAC_GENERAL_PARAMS output length — so each pairs with
+		// its plain mechanism here (PKCS#11 v3.2 §6.20.3 and siblings).
 #ifndef WITH_FIPS
 		case CKM_MD5_HMAC:
+		case CKM_MD5_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 16;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
@@ -816,52 +848,62 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 #endif
 #ifdef WITH_RIPEMD160
 		case CKM_RIPEMD160_HMAC:
+		case CKM_RIPEMD160_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 20;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 #endif
 		case CKM_SHA_1_HMAC:
+		case CKM_SHA_1_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 20;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA224_HMAC:
+		case CKM_SHA224_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 28;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA256_HMAC:
+		case CKM_SHA256_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 32;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA384_HMAC:
+		case CKM_SHA384_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 48;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA512_HMAC:
+		case CKM_SHA512_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 64;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA3_224_HMAC:
+		case CKM_SHA3_224_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 28;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA3_256_HMAC:
+		case CKM_SHA3_256_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 32;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA3_384_HMAC:
+		case CKM_SHA3_384_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 48;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA3_512_HMAC:
+		case CKM_SHA3_512_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 64;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
@@ -976,7 +1018,10 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->flags = CKF_WRAP | CKF_UNWRAP;
 			break;
 #ifdef HAVE_AES_KEY_WRAP_PAD
+		// Same RFC 5649 construction; KWP is the v3.0+ name for it and
+		// CKM_AES_KEY_WRAP_PAD is the deprecated spelling (v3.2 §6.16.3).
 		case CKM_AES_KEY_WRAP_PAD:
+		case CKM_AES_KEY_WRAP_KWP:
 			pInfo->ulMinKeySize = 1;
 			pInfo->ulMaxKeySize = UNLIMITED_KEY_SIZE;
 			pInfo->flags = CKF_WRAP | CKF_UNWRAP;

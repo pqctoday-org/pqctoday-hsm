@@ -833,44 +833,6 @@ CK_RV SignVerifyTests::generateKey(CK_SESSION_HANDLE hSession, CK_KEY_TYPE keyTy
 	return CRYPTOKI_F_PTR( C_CreateObject(hSession, kAttribs, 8, &hKey) );
 }
 
-CK_RV SignVerifyTests::generateDes2Key(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey)
-{
-	CK_MECHANISM mechanism = { CKM_DES2_KEY_GEN, NULL_PTR, 0 };
-	// CK_BBOOL bFalse = CK_FALSE;
-	CK_BBOOL bTrue = CK_TRUE;
-	CK_ATTRIBUTE keyAttribs[] = {
-		{ CKA_TOKEN, &bToken, sizeof(bToken) },
-		{ CKA_PRIVATE, &bPrivate, sizeof(bPrivate) },
-		{ CKA_SENSITIVE, &bTrue, sizeof(bTrue) },
-		{ CKA_VERIFY, &bTrue, sizeof(bTrue) },
-		{ CKA_SIGN, &bTrue, sizeof(bTrue) }
-	};
-
-	hKey = CK_INVALID_HANDLE;
-	return CRYPTOKI_F_PTR( C_GenerateKey(hSession, &mechanism,
-			     keyAttribs, sizeof(keyAttribs)/sizeof(CK_ATTRIBUTE),
-			     &hKey) );
-}
-
-CK_RV SignVerifyTests::generateDes3Key(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey)
-{
-	CK_MECHANISM mechanism = { CKM_DES3_KEY_GEN, NULL_PTR, 0 };
-	// CK_BBOOL bFalse = CK_FALSE;
-	CK_BBOOL bTrue = CK_TRUE;
-	CK_ATTRIBUTE keyAttribs[] = {
-		{ CKA_TOKEN, &bToken, sizeof(bToken) },
-		{ CKA_PRIVATE, &bPrivate, sizeof(bPrivate) },
-		{ CKA_SENSITIVE, &bTrue, sizeof(bTrue) },
-		{ CKA_VERIFY, &bTrue, sizeof(bTrue) },
-		{ CKA_SIGN, &bTrue, sizeof(bTrue) }
-	};
-
-	hKey = CK_INVALID_HANDLE;
-	return CRYPTOKI_F_PTR( C_GenerateKey(hSession, &mechanism,
-			     keyAttribs, sizeof(keyAttribs)/sizeof(CK_ATTRIBUTE),
-			     &hKey) );
-}
-
 CK_RV SignVerifyTests::generateAesKey(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey)
 {
 	CK_MECHANISM mechanism = { CKM_AES_KEY_GEN, NULL_PTR, 0 };
@@ -988,14 +950,6 @@ void SignVerifyTests::testMacSignVerify()
 	CPPUNIT_ASSERT(rv == CKR_OK);
 	macSignVerify(CKM_SHA512_HMAC, hSessionRO, hKey);
 
-	rv = generateDes2Key(hSessionRW,IN_SESSION,IS_PUBLIC,hKey);
-	CPPUNIT_ASSERT(rv == CKR_OK);
-	macSignVerify(CKM_DES3_CMAC, hSessionRO, hKey);
-
-	rv = generateDes3Key(hSessionRW,IN_SESSION,IS_PUBLIC,hKey);
-	CPPUNIT_ASSERT(rv == CKR_OK);
-	macSignVerify(CKM_DES3_CMAC, hSessionRO, hKey);
-
 	rv = generateAesKey(hSessionRW,IN_SESSION,IS_PUBLIC,hKey);
 	CPPUNIT_ASSERT(rv == CKR_OK);
 	macSignVerify(CKM_AES_CMAC, hSessionRO, hKey);
@@ -1027,13 +981,6 @@ void SignVerifyTests::testMacSignVerify()
 	CPPUNIT_ASSERT(rv == CKR_OK);
 	macSignVerify(CKM_SHA512_HMAC, hSessionRW, hKey);
 
-	rv = generateDes2Key(hSessionRW,IN_SESSION,IS_PRIVATE,hKey);
-	CPPUNIT_ASSERT(rv == CKR_OK);
-	macSignVerify(CKM_DES3_CMAC, hSessionRO, hKey);
-
-	rv = generateDes3Key(hSessionRW,IN_SESSION,IS_PRIVATE,hKey);
-	CPPUNIT_ASSERT(rv == CKR_OK);
-	macSignVerify(CKM_DES3_CMAC, hSessionRO, hKey);
 
 	rv = generateAesKey(hSessionRW,IN_SESSION,IS_PRIVATE,hKey);
 	CPPUNIT_ASSERT(rv == CKR_OK);
@@ -1066,13 +1013,6 @@ void SignVerifyTests::testMacSignVerify()
 	CPPUNIT_ASSERT(rv == CKR_OK);
 	macSignVerify(CKM_SHA512_HMAC, hSessionRW, hKey);
 
-	rv = generateDes2Key(hSessionRW,ON_TOKEN,IS_PUBLIC,hKey);
-	CPPUNIT_ASSERT(rv == CKR_OK);
-	macSignVerify(CKM_DES3_CMAC, hSessionRO, hKey);
-
-	rv = generateDes3Key(hSessionRW,ON_TOKEN,IS_PUBLIC,hKey);
-	CPPUNIT_ASSERT(rv == CKR_OK);
-	macSignVerify(CKM_DES3_CMAC, hSessionRO, hKey);
 
 	rv = generateAesKey(hSessionRW,ON_TOKEN,IS_PUBLIC,hKey);
 	CPPUNIT_ASSERT(rv == CKR_OK);
@@ -1105,13 +1045,6 @@ void SignVerifyTests::testMacSignVerify()
 	CPPUNIT_ASSERT(rv == CKR_OK);
 	macSignVerify(CKM_SHA512_HMAC, hSessionRW, hKey);
 
-	rv = generateDes2Key(hSessionRW,ON_TOKEN,IS_PRIVATE,hKey);
-	CPPUNIT_ASSERT(rv == CKR_OK);
-	macSignVerify(CKM_DES3_CMAC, hSessionRO, hKey);
-
-	rv = generateDes3Key(hSessionRW,ON_TOKEN,IS_PRIVATE,hKey);
-	CPPUNIT_ASSERT(rv == CKR_OK);
-	macSignVerify(CKM_DES3_CMAC, hSessionRO, hKey);
 
 	rv = generateAesKey(hSessionRW,ON_TOKEN,IS_PRIVATE,hKey);
 	CPPUNIT_ASSERT(rv == CKR_OK);

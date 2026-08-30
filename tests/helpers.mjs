@@ -17,15 +17,34 @@ const WASM_DIR = path.resolve(__dirname, '../wasm')
 // ── Additional constants not (yet) in constants.js ──────────────────────────
 const CKG_MGF1_SHA256 = 0x00000002
 const CKG_MGF1_SHA384 = 0x00000003
+// RSA-OAEP mask-generation functions and label source (pkcs11t.h:1601-1621).
+export const CKG_MGF1 = {
+  CKM_SHA_1: 0x00000001,
+  CKM_SHA256: 0x00000002,
+  CKM_SHA384: 0x00000003,
+  CKM_SHA512: 0x00000004,
+  CKM_SHA224: 0x00000005,
+  CKM_SHA3_224: 0x00000006,
+  CKM_SHA3_256: 0x00000007,
+  CKM_SHA3_384: 0x00000008,
+  CKM_SHA3_512: 0x00000009,
+}
+const CKZ_DATA_SPECIFIED = 0x00000001
 const CKF_HKDF_SALT_DATA = 2
 const CKS_PKCS5_PBKD2_SALT_SPECIFIED = 1
 const CKP_PKCS5_PBKD2_HMAC_SHA512 = 0x00000006
+// pkcs11t.h:2098 — real ACVP PBKDF-1.0 evidence at the pinned commit used by
+// tests/acvp/pbkdf2_test.json is SHA2-224 only (see that file's _provenance
+// note); C++ supports this PRF, Rust does not.
+export const CKP_PKCS5_PBKD2_HMAC_SHA224 = 0x00000003
 
 // EC curve OIDs (DER-encoded)
 const EC_OID = {
   'P-256': new Uint8Array([0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]),
   'P-384': new Uint8Array([0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22]),
   Ed25519: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x70]),
+  // id-Ed448 = 1.3.101.113 (RFC 8410 §3)
+  Ed448: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x71]),
 }
 
 // ── Utilities ───────────────────────────────────────────────────────────────
@@ -125,17 +144,22 @@ export function buildMech(M, type, paramPtr = 0, paramLen = 0) {
   return ptr
 }
 
-/** CK_GCM_PARAMS: pIv(4) ulIvLen(4) ulIvBits(4) pAAD(4) ulAADLen(4) ulTagBits(4) = 24B */
-export function buildGCMParams(M, iv) {
+/**
+ * CK_GCM_PARAMS: pIv(4) ulIvLen(4) ulIvBits(4) pAAD(4) ulAADLen(4) ulTagBits(4) = 24B
+ * `aad` and `tagBits` are optional (default: no AAD, 128-bit tag) so every
+ * existing caller keeps its prior behaviour unchanged.
+ */
+export function buildGCMParams(M, iv, aad = new Uint8Array(0), tagBits = 128) {
   const ivPtr = writeBytes(M, iv)
+  const aadPtr = aad.length > 0 ? writeBytes(M, aad) : 0
   const ptr = M._malloc(24)
   M.setValue(ptr + 0, ivPtr, 'i32')
   M.setValue(ptr + 4, iv.length, 'i32')
   M.setValue(ptr + 8, iv.length * 8, 'i32')
-  M.setValue(ptr + 12, 0, 'i32') // pAAD
-  M.setValue(ptr + 16, 0, 'i32') // ulAADLen
-  M.setValue(ptr + 20, 128, 'i32') // ulTagBits
-  return { ptr, size: 24, ivPtr }
+  M.setValue(ptr + 12, aadPtr, 'i32') // pAAD
+  M.setValue(ptr + 16, aad.length, 'i32') // ulAADLen
+  M.setValue(ptr + 20, tagBits, 'i32') // ulTagBits
+  return { ptr, size: 24, ivPtr, aadPtr }
 }
 
 /** CK_AES_CTR_PARAMS: ulCounterBits(4) cb[16] = 20B */
@@ -147,6 +171,62 @@ export function buildCTRParams(M, iv, counterBits) {
 }
 
 /** CK_RSA_PKCS_PSS_PARAMS: hashAlg(4) mgf(4) sLen(4) = 12B */
+/**
+ * CK_RSA_PKCS_OAEP_PARAMS (pkcs11t.h:1626-1632) — 20 bytes on 32-bit WASM:
+ *   hashAlg(4) mgf(4) source(4) pSourceData(4) ulSourceDataLen(4)
+ * The label is always empty (pSourceData=NULL, ulSourceDataLen=0): both this
+ * engine's MechParamCheckRSAPKCSOAEP and the NIST KTS-IFC cases selected for
+ * tests/acvp/rsa_oaep_test.json require it.
+ */
+export function buildOAEPParams(M, hashMech, mgf) {
+  const ptr = M._malloc(20)
+  M.setValue(ptr + 0, hashMech, 'i32')
+  M.setValue(ptr + 4, mgf, 'i32')
+  M.setValue(ptr + 8, CKZ_DATA_SPECIFIED, 'i32')
+  M.setValue(ptr + 12, 0, 'i32') // pSourceData = NULL
+  M.setValue(ptr + 16, 0, 'i32') // ulSourceDataLen = 0
+  return { ptr, size: 20 }
+}
+
+/**
+ * CK_RSA_AES_KEY_WRAP_PARAMS (pkcs11t.h:2369-2372) — 8 bytes on 32-bit WASM:
+ *   ulAESKeyBits(4) pOAEPParams(4, pointer)
+ * Returns { ptr, size, oaep } — the caller frees `oaep.ptr` too.
+ */
+export function buildRsaAesKeyWrapParams(M, aesKeyBits, hashMech, mgf) {
+  const oaep = buildOAEPParams(M, hashMech, mgf)
+  const ptr = M._malloc(8)
+  M.setValue(ptr + 0, aesKeyBits, 'i32')
+  M.setValue(ptr + 4, oaep.ptr, 'i32')
+  return { ptr, size: 8, oaep }
+}
+
+/**
+ * CK_EDDSA_PARAMS (pkcs11t.h:2539-2543) — 12 bytes on 32-bit WASM:
+ *   phFlag(CK_BBOOL, 1B at offset 0, 3B padding) ulContextDataLen(4B at 4)
+ *   pContextData(4B at 8)
+ * Offsets confirmed by compiling offsetof() against src/lib/pkcs11/cryptoki.h
+ * with the project's own emcc toolchain, not assumed.
+ */
+export function buildEdDSAParams(M, phFlag, contextBytes = null) {
+  const ctxPtr = contextBytes && contextBytes.length ? writeBytes(M, contextBytes) : 0
+  const ctxLen = contextBytes ? contextBytes.length : 0
+  const ptr = M._malloc(12)
+  M.setValue(ptr + 0, phFlag ? 1 : 0, 'i8')
+  M.setValue(ptr + 1, 0, 'i8')
+  M.setValue(ptr + 2, 0, 'i8')
+  M.setValue(ptr + 3, 0, 'i8')
+  M.setValue(ptr + 4, ctxLen, 'i32')
+  M.setValue(ptr + 8, ctxPtr, 'i32')
+  return { ptr, size: 12, ctxPtr }
+}
+
+export function freeEdDSAParams(M, p) {
+  if (!p) return
+  if (p.ctxPtr) M._free(p.ctxPtr)
+  M._free(p.ptr)
+}
+
 export function buildPSSParams(M, hashMech, mgf, sLen) {
   const ptr = M._malloc(12)
   M.setValue(ptr + 0, hashMech, 'i32')
@@ -239,7 +319,17 @@ export function getMechanismSet(M, slotId) {
   const rv = M._C_GetMechanismList(slotId, 0, cntPtr)
   if (rv !== CK.CKR_OK) {
     freePtr(M, cntPtr)
-    return new Set()
+    // WS-0.2: this used to return an empty Set here, which every caller's
+    // own `mechs.size > 0 && !mechs.has(...)` skip-guard reads as "this
+    // engine just advertises nothing" rather than "this engine is broken" —
+    // the guard's `size > 0` check goes false, so instead of skipping it
+    // falls through to attempting the real crypto call against an engine
+    // that cannot even report C_GetMechanismList. Fail closed: an engine
+    // that cannot report its mechanism set is a hard error, not a silent
+    // "advertises nothing."
+    throw new Error(
+      `getMechanismSet: C_GetMechanismList(slot=${slotId}) returned 0x${rv.toString(16)} — engine cannot report its mechanism set`
+    )
   }
   const count = readUlong(M, cntPtr)
   const listPtr = M._malloc(count * 4)
@@ -308,19 +398,58 @@ export function importRSAPublicKey(
   hSession,
   modBytes,
   expBytes,
-  { encrypt = true } = {}
+  { encrypt = true, wrap = false } = {}
 ) {
   const tpl = buildTemplate(M, [
     { type: CK.CKA_CLASS, value: CK.CKO_PUBLIC_KEY },
     { type: CK.CKA_KEY_TYPE, value: CK.CKK_RSA },
     { type: CK.CKA_TOKEN, value: false },
     { type: CK.CKA_ENCRYPT, value: encrypt },
+    { type: CK.CKA_WRAP, value: wrap },
     { type: CK.CKA_VERIFY, value: true },
     { type: CK.CKA_MODULUS, value: modBytes },
     { type: CK.CKA_PUBLIC_EXPONENT, value: expBytes },
   ])
   const hPtr = allocUlong(M)
   check('C_CreateObject(RSA-Pub)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/**
+ * Import an RSA private key from its full CRT parameter set.
+ *
+ * Added for the NIST KTS-IFC RSA-OAEP wrap/unwrap KAT: an OAEP *decrypt*
+ * known-answer test needs the vector's own private key, and until now the
+ * only RSA import helper here was the public half. All eight components are
+ * supplied because the C++ engine's getRSAPrivateKey reconstructs an
+ * EVP_PKEY from CKA_PRIME_1/2, CKA_EXPONENT_1/2 and CKA_COEFFICIENT as well
+ * as the modulus and private exponent.
+ */
+export function importRSAPrivateKey(M, hSession, k, { unwrap = true, decrypt = false } = {}) {
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_PRIVATE_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_RSA },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_PRIVATE, value: false },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_DECRYPT, value: decrypt },
+    { type: CK.CKA_UNWRAP, value: unwrap },
+    { type: CK.CKA_SIGN, value: false },
+    { type: CK.CKA_MODULUS, value: k.n },
+    { type: CK.CKA_PUBLIC_EXPONENT, value: k.e },
+    { type: CK.CKA_PRIVATE_EXPONENT, value: k.d },
+    { type: CK.CKA_PRIME_1, value: k.p },
+    { type: CK.CKA_PRIME_2, value: k.q },
+    { type: CK.CKA_EXPONENT_1, value: k.dp },
+    { type: CK.CKA_EXPONENT_2, value: k.dq },
+    { type: CK.CKA_COEFFICIENT, value: k.qi },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(RSA-Priv)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
   const handle = readUlong(M, hPtr)
   freeTemplate(M, tpl)
   freePtr(M, hPtr)
@@ -550,6 +679,43 @@ export function generateSLHDSAKeyPair(M, hSession, ckp) {
   )
 }
 
+/**
+ * Generate an RSA key pair usable for C_WrapKey / C_UnwrapKey.
+ *
+ * A *generated* pair, not an imported one, deliberately: the C++ engine's
+ * WrapKeyAsym reads the wrapping key's CKA_MODULUS_BITS and fails with
+ * CKR_GENERAL_ERROR if it is absent, while CKA_MODULUS_BITS carries the `ck2`
+ * check ("MUST not be specified when object is created with C_CreateObject",
+ * P11Attributes.h:1117) — so a C_CreateObject-imported RSA public key can
+ * never carry it and can never be a wrapping key on this engine. Noted here
+ * rather than worked around silently.
+ */
+export function generateRSAKeyPair(M, hSession, modulusBits = 2048) {
+  const pubExp = new Uint8Array([0x01, 0x00, 0x01])
+  return generateKeyPair(
+    M,
+    hSession,
+    CK.CKM_RSA_PKCS_KEY_PAIR_GEN,
+    [
+      { type: CK.CKA_TOKEN, value: false },
+      { type: CK.CKA_ENCRYPT, value: true },
+      { type: CK.CKA_WRAP, value: true },
+      { type: CK.CKA_VERIFY, value: true },
+      { type: CK.CKA_MODULUS_BITS, value: modulusBits },
+      { type: CK.CKA_PUBLIC_EXPONENT, value: pubExp },
+    ],
+    [
+      { type: CK.CKA_TOKEN, value: false },
+      { type: CK.CKA_PRIVATE, value: false },
+      { type: CK.CKA_DECRYPT, value: true },
+      { type: CK.CKA_UNWRAP, value: true },
+      { type: CK.CKA_SIGN, value: true },
+      { type: CK.CKA_SENSITIVE, value: false },
+      { type: CK.CKA_EXTRACTABLE, value: true },
+    ]
+  )
+}
+
 export function generateEdDSAKeyPair(M, hSession, curve = 'Ed25519') {
   const oid = EC_OID[curve]
   return generateKeyPair(
@@ -576,14 +742,15 @@ export function generateEdDSAKeyPair(M, hSession, curve = 'Ed25519') {
  * AES-GCM or AES-CBC decrypt. mode: 'gcm' | 'cbc' (CKM_AES_CBC_PAD) |
  * 'cbc-raw' (CKM_AES_CBC, no PKCS#7 — what NIST's ACVP-AES-CBC KATs test;
  * see hub softhsm.ts's hsm_aesDecrypt for the same distinction and why
- * 'cbc' isn't repurposed).
+ * 'cbc' isn't repurposed). `aad`/`tagBits` only apply to mode 'gcm' and
+ * default to buildGCMParams's own defaults (no AAD, 128-bit tag).
  */
-export function aesDecrypt(M, hSession, handle, ct, iv, mode = 'gcm') {
+export function aesDecrypt(M, hSession, handle, ct, iv, mode = 'gcm', aad = new Uint8Array(0), tagBits = 128) {
   let mechPtr, extraPtrs = []
   if (mode === 'gcm') {
-    const gcm = buildGCMParams(M, iv)
+    const gcm = buildGCMParams(M, iv, aad, tagBits)
     mechPtr = buildMech(M, CK.CKM_AES_GCM, gcm.ptr, gcm.size)
-    extraPtrs = [gcm.ptr, gcm.ivPtr]
+    extraPtrs = gcm.aadPtr ? [gcm.ptr, gcm.ivPtr, gcm.aadPtr] : [gcm.ptr, gcm.ivPtr]
   } else if (mode === 'cbc-raw') {
     const ivPtr = writeBytes(M, iv)
     mechPtr = buildMech(M, CK.CKM_AES_CBC, ivPtr, iv.length)
@@ -667,8 +834,16 @@ export function hmacVerifyGeneral(M, hSession, handle, msg, mac, mechType) {
   return rv === CK.CKR_OK
 }
 
-/** RSA-PSS verify (text message — encoded with TextEncoder) */
-export function rsaVerify(M, hSession, handle, textMsg, sig, mechType = CK.CKM_SHA256_RSA_PKCS_PSS) {
+/**
+ * RSA-PSS verify (raw message bytes).
+ * `sLenOverride`, when given, pins CK_RSA_PKCS_PSS_PARAMS.sLen to that exact
+ * value instead of the mechanism's conventional digest-length default — real
+ * ACVP PSS samples don't all use sLen=hashLen (e.g. tests/acvp/rsapss_test.json's
+ * FIPS 186-5 sigGen vector uses sLen=8), and both engines' verify paths treat
+ * the caller's sLen as authoritative (no "try digest-length too" fallback
+ * once a param is supplied), so the harness must pass the real value through.
+ */
+export function rsaVerify(M, hSession, handle, msgBytes, sig, mechType = CK.CKM_SHA256_RSA_PKCS_PSS, sLenOverride = null) {
   // Build PSS params based on mechanism type
   let hashMech, mgf, sLen
   if (mechType === CK.CKM_SHA256_RSA_PKCS_PSS) {
@@ -684,10 +859,10 @@ export function rsaVerify(M, hSession, handle, textMsg, sig, mechType = CK.CKM_S
     mgf = CKG_MGF1_SHA256
     sLen = 32
   }
+  if (sLenOverride !== null) sLen = sLenOverride
   const pss = buildPSSParams(M, hashMech, mgf, sLen)
   const mechPtr = buildMech(M, mechType, pss.ptr, pss.size)
   check('C_VerifyInit(RSA-PSS)', M._C_VerifyInit(hSession, mechPtr, handle))
-  const msgBytes = new TextEncoder().encode(textMsg)
   const msgPtr = writeBytes(M, msgBytes)
   const sigPtr = writeBytes(M, sig)
   const rv = M._C_Verify(hSession, msgPtr, msgBytes.length, sigPtr, sig.length)
@@ -722,6 +897,34 @@ export function verifyBytes(M, hSession, handle, msgBytes, sig, mechType = CK.CK
   M._free(msgPtr)
   M._free(sigPtr)
   M._free(mechPtr)
+  return rv === CK.CKR_OK
+}
+
+/**
+ * ML-DSA verify with a CK_SIGN_ADDITIONAL_CONTEXT parameter (PKCS#11 v3.2
+ * §6.61 for the ML-DSA sigGen/sigVer context-string case — SoftHSM_sign.cpp
+ * parses this as { hedgeVariant: CK_HEDGE_TYPE(4B), pContext: ptr(4B),
+ * ulContextLen: CK_ULONG(4B) }, 12 bytes total). hedgeVariant doesn't affect
+ * verification (it only governs signature generation's randomness), so
+ * CKH_HEDGE_PREFERRED (0) is always correct here.
+ */
+export function verifyBytesMLDSAContext(M, hSession, handle, msgBytes, sig, contextBytes, mechType = CK.CKM_ML_DSA) {
+  const CKH_HEDGE_PREFERRED = 0
+  const ctxPtr = contextBytes.length ? writeBytes(M, contextBytes) : 0
+  const paramPtr = M._malloc(12)
+  M.setValue(paramPtr + 0, CKH_HEDGE_PREFERRED, 'i32')
+  M.setValue(paramPtr + 4, ctxPtr, 'i32')
+  M.setValue(paramPtr + 8, contextBytes.length, 'i32')
+  const mechPtr = buildMech(M, mechType, paramPtr, 12)
+  check('C_VerifyInit', M._C_VerifyInit(hSession, mechPtr, handle))
+  const msgPtr = writeBytes(M, msgBytes)
+  const sigPtr = writeBytes(M, sig)
+  const rv = M._C_Verify(hSession, msgPtr, msgBytes.length, sigPtr, sig.length)
+  M._free(msgPtr)
+  M._free(sigPtr)
+  M._free(mechPtr)
+  M._free(paramPtr)
+  if (ctxPtr) M._free(ctxPtr)
   return rv === CK.CKR_OK
 }
 
@@ -878,6 +1081,87 @@ export function slhdsaVerifyBytesCtx(M, hSession, handle, msgBytes, sigBytes, ct
 }
 
 /** EdDSA sign (text message) */
+/** Import an Edwards public key (raw point) — Ed25519 or Ed448. */
+export function importEdDSAPublicKey(M, hSession, curve, pubBytes) {
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_PUBLIC_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_EC_EDWARDS },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_VERIFY, value: true },
+    { type: CK.CKA_EC_PARAMS, value: EC_OID[curve] },
+    { type: CK.CKA_EC_POINT, value: pubBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(Ed-Pub)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/** Import an Edwards private key from its raw RFC 8032 seed (32B / 57B). */
+export function importEdDSAPrivateKey(M, hSession, curve, seedBytes) {
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_PRIVATE_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_EC_EDWARDS },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_PRIVATE, value: false },
+    { type: CK.CKA_SIGN, value: true },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_EC_PARAMS, value: EC_OID[curve] },
+    { type: CK.CKA_VALUE, value: seedBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(Ed-Priv)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/**
+ * C_Sign over raw bytes with an optional CK_EDDSA_PARAMS.
+ * `edParams` is a { ptr, size } from buildEdDSAParams, or null for the
+ * parameterless form. Returns { rv, signature } — rv is NOT thrown on, since
+ * "this parameter combination must be refused" is itself an assertion here.
+ */
+export function eddsaSignBytesParams(M, hSession, handle, msgBytes, edParams = null,
+                                     mechType = CK.CKM_EDDSA) {
+  const mechPtr = buildMech(M, mechType, edParams ? edParams.ptr : 0, edParams ? edParams.size : 0)
+  let rv = M._C_SignInit(hSession, mechPtr, handle)
+  if (rv !== CK.CKR_OK) { M._free(mechPtr); return { rv, signature: null } }
+  const msgPtr = writeBytes(M, msgBytes)
+  const sigLenPtr = allocUlong(M)
+  rv = M._C_Sign(hSession, msgPtr, msgBytes.length, 0, sigLenPtr)
+  if (rv !== CK.CKR_OK) {
+    M._free(msgPtr); freePtr(M, sigLenPtr); M._free(mechPtr); return { rv, signature: null }
+  }
+  const sigLen = readUlong(M, sigLenPtr)
+  const sigPtr = M._malloc(sigLen)
+  M.setValue(sigLenPtr, sigLen, 'i32')
+  rv = M._C_Sign(hSession, msgPtr, msgBytes.length, sigPtr, sigLenPtr)
+  const actualLen = rv === CK.CKR_OK ? readUlong(M, sigLenPtr) : 0
+  const signature = rv === CK.CKR_OK
+    ? new Uint8Array(M.HEAPU8.buffer, sigPtr, actualLen).slice()
+    : null
+  M._free(msgPtr); M._free(sigPtr); freePtr(M, sigLenPtr); M._free(mechPtr)
+  return { rv, signature }
+}
+
+/** C_Verify over raw bytes with an optional CK_EDDSA_PARAMS → rv. */
+export function eddsaVerifyBytesParams(M, hSession, handle, msgBytes, sig, edParams = null,
+                                       mechType = CK.CKM_EDDSA) {
+  const mechPtr = buildMech(M, mechType, edParams ? edParams.ptr : 0, edParams ? edParams.size : 0)
+  let rv = M._C_VerifyInit(hSession, mechPtr, handle)
+  if (rv !== CK.CKR_OK) { M._free(mechPtr); return rv }
+  const msgPtr = writeBytes(M, msgBytes)
+  const sigPtr = writeBytes(M, sig)
+  rv = M._C_Verify(hSession, msgPtr, msgBytes.length, sigPtr, sig.length)
+  M._free(msgPtr); M._free(sigPtr); M._free(mechPtr)
+  return rv
+}
+
 export function eddsaSign(M, hSession, handle, textMsg) {
   return sign(M, hSession, handle, textMsg, CK.CKM_EDDSA)
 }
@@ -1021,9 +1305,15 @@ export function decapsulate(M, hSession, privHandle, ct, variant) {
 
 // ── Key Wrapping ────────────────────────────────────────────────────────────
 
-/** Wrap key → wrappedBytes */
-export function wrapKey(M, hSession, mechType, wrappingHandle, targetHandle) {
-  const mechPtr = buildMech(M, mechType)
+/**
+ * Wrap key → wrappedBytes
+ * `mechParam` is an optional { ptr, size } from buildOAEPParams /
+ * buildRsaAesKeyWrapParams — required for CKM_RSA_PKCS_OAEP and
+ * CKM_RSA_AES_KEY_WRAP, which carry a mechanism parameter. The caller owns
+ * and frees it.
+ */
+export function wrapKey(M, hSession, mechType, wrappingHandle, targetHandle, mechParam = null) {
+  const mechPtr = buildMech(M, mechType, mechParam ? mechParam.ptr : 0, mechParam ? mechParam.size : 0)
   const lenPtr = allocUlong(M)
   // Query wrapped length
   check('C_WrapKey(len)', M._C_WrapKey(hSession, mechPtr, wrappingHandle, targetHandle, 0, lenPtr))
@@ -1042,31 +1332,45 @@ export function wrapKey(M, hSession, mechType, wrappingHandle, targetHandle) {
   return result
 }
 
-/** Unwrap key → handle */
-export function unwrapKey(M, hSession, mechType, unwrappingHandle, wrapped, attrs) {
-  const mechPtr = buildMech(M, mechType)
+/**
+ * Unwrap key → handle. Throws on any rv != CKR_OK.
+ * `mechParam` — see wrapKey.
+ */
+export function unwrapKey(M, hSession, mechType, unwrappingHandle, wrapped, attrs, mechParam = null) {
+  const { rv, handle } = unwrapKeyRaw(M, hSession, mechType, unwrappingHandle, wrapped, attrs, mechParam)
+  check('C_UnwrapKey', rv)
+  return handle
+}
+
+/**
+ * Unwrap key → { rv, handle }, WITHOUT throwing on failure.
+ *
+ * Needed for negative tests, where the failure IS the assertion: wrapping
+ * under one OAEP hashAlg and unwrapping under another must not succeed. The
+ * throwing variant above cannot express that — a caught exception is
+ * indistinguishable from a harness bug.
+ */
+export function unwrapKeyRaw(M, hSession, mechType, unwrappingHandle, wrapped, attrs, mechParam = null) {
+  const mechPtr = buildMech(M, mechType, mechParam ? mechParam.ptr : 0, mechParam ? mechParam.size : 0)
   const wrappedPtr = writeBytes(M, wrapped)
   const tpl = buildTemplate(M, attrs)
   const hPtr = allocUlong(M)
-  check(
-    'C_UnwrapKey',
-    M._C_UnwrapKey(
-      hSession,
-      mechPtr,
-      unwrappingHandle,
-      wrappedPtr,
-      wrapped.length,
-      tpl.arrPtr,
-      tpl.count,
-      hPtr
-    )
+  const rv = M._C_UnwrapKey(
+    hSession,
+    mechPtr,
+    unwrappingHandle,
+    wrappedPtr,
+    wrapped.length,
+    tpl.arrPtr,
+    tpl.count,
+    hPtr
   )
-  const handle = readUlong(M, hPtr)
+  const handle = rv === 0 ? readUlong(M, hPtr) : 0
   M._free(wrappedPtr)
   freeTemplate(M, tpl)
   freePtr(M, hPtr)
   M._free(mechPtr)
-  return handle
+  return { rv, handle }
 }
 
 // ── KDF Operations ──────────────────────────────────────────────────────────
@@ -1077,8 +1381,11 @@ export function unwrapKey(M, hSession, mechType, unwrappingHandle, wrapped, attr
  *   saltSource(4) pSaltSourceData(4) ulSaltSourceDataLen(4)
  *   iterations(4) prf(4) pPrfData(4) ulPrfDataLen(4)
  *   pPassword(4) ulPasswordLen(4)
+ * `prf` defaults to HMAC-SHA512 (the only PRF this helper's two call sites
+ * needed before tests/acvp/pbkdf2_test.json got real evidence, an SHA2-224
+ * ACVP sample — pass CKP_PKCS5_PBKD2_HMAC_SHA224 explicitly for that KAT).
  */
-export function pbkdf2(M, hSession, password, salt, iterations, keyLen) {
+export function pbkdf2(M, hSession, password, salt, iterations, keyLen, prf = CKP_PKCS5_PBKD2_HMAC_SHA512) {
   const saltPtr = writeBytes(M, salt)
   const pwdPtr = writeBytes(M, password)
   const paramsPtr = M._malloc(36)
@@ -1086,7 +1393,7 @@ export function pbkdf2(M, hSession, password, salt, iterations, keyLen) {
   M.setValue(paramsPtr + 4, saltPtr, 'i32')
   M.setValue(paramsPtr + 8, salt.length, 'i32')
   M.setValue(paramsPtr + 12, iterations, 'i32')
-  M.setValue(paramsPtr + 16, CKP_PKCS5_PBKD2_HMAC_SHA512, 'i32')
+  M.setValue(paramsPtr + 16, prf, 'i32')
   M.setValue(paramsPtr + 20, 0, 'i32') // pPrfData = NULL
   M.setValue(paramsPtr + 24, 0, 'i32') // ulPrfDataLen = 0
   M.setValue(paramsPtr + 28, pwdPtr, 'i32')

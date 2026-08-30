@@ -76,8 +76,26 @@ public:
 	virtual AsymmetricParameters* newParameters();
 
 private:
+	// WS-1.3 (2026-08-29): resolve a key length + AsymMech + optional
+	// CK_EDDSA_PARAMS into the OpenSSL EdDSA "instance" name (RFC 8032's five
+	// schemes) and the context string to hand it. Shared by sign() and
+	// verify() so the two can never disagree about which scheme a given
+	// parameter set means.
+	//
+	// Returns false when the combination has no RFC 8032 scheme — e.g. a
+	// non-empty context on pure Ed25519, which Table 73 does not define and
+	// OpenSSL rejects outright.
+	static bool resolveInstance(size_t orderLen, AsymMech::Type mechanism,
+	                            const void* param, size_t paramLen,
+	                            const char*& instance,
+	                            const unsigned char*& context, size_t& contextLen);
+
 	ByteString m_signMsg;
 	ByteString m_verifyMsg;
+	EDDSA_SIGN_PARAMS m_signParams;
+	EDDSA_SIGN_PARAMS m_verifyParams;
+	bool m_hasSignParams = false;
+	bool m_hasVerifyParams = false;
 };
 
 #endif // !_SOFTHSM_V2_OSSLEDDSA_H

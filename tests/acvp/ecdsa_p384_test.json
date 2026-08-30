@@ -1,18 +1,28 @@
 {
   "algorithm": "ECDSA",
   "mode": "sigVer",
-  "source": "RFC 6979 Appendix A.2.6 (ECDSA P-384, SHA-384, message \"sample\"); verified with the node crypto (OpenSSL) oracle",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ECDSA-SigVer-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "b987739127a54ff86c1018771390b8124b440d0d6011610f21eccfd74754e430",
+    "note": "tgId 37, tcId 256 (curve P-384, hashAlg SHA2-384) — the group's sole testPassed=true case among its 7 (the other 6 are deliberate negative cases: modify r, modify key, modify s, zero r, modify message, zero s). qx/qy/r/s are each exactly 48 bytes (canonical P-384 field/order width), matching OSSLECDSA::verify's `signature.size() != 2 * orderLen` check and tests/helpers.mjs importECPublicKey's fixed-width point construction with no leading-zero stripping required. Independently re-verified against Python's cryptography library (49.0.0) before use: EllipticCurvePublicNumbers(qx, qy, SECP384R1()).public_key().verify(encode_dss_signature(r, s), message_bytes, ec.ECDSA(hashes.SHA384())) raised no exception — VALID, matching ACVP's own testPassed=true label. REPLACES a file that carried no _provenance block and declared `\"source\": \"RFC 6979 Appendix A.2.6 (ECDSA P-384, SHA-384, message \\\"sample\\\")\"` — real published RFC values, but Tier-3 material used where Tier-1 ACVP coverage exists for this exact algorithm/curve/hash, which the remediation plan's §1 ladder does not permit. `message` is 128 bytes of ACVP-generated pseudorandom data (hex-encoded), not literal text like the RFC 6979 vector's \"sample\". Same source file and same source_sha256 as ecdsa_test.json (P-256) and ecdsa_p521_test.json (P-521) — ECDSA-SigVer-1.0/internalProjection.json covers all NIST-standard prime curves in one document, so all three files pin the same fetch. tests/acvp-wasm.mjs's ECDSA P-384 block previously passed `msg` through `new TextEncoder().encode(textMsg)` (literal-text encoding via the `ecdsaVerify` helper), which only worked because the old vector's message happened to be printable ASCII. Rewired the call site to hex-decode `msg` and dispatch through the existing generic `verifyBytes(M, hSession, h, hexToBytes(tv.msg), sig, CK.CKM_ECDSA_SHA384)` helper, matching the pattern already used for the ML-DSA SigVer KAT in the same file."
+  },
   "testGroups": [
     {
+      "tgId": 37,
       "curve": "P-384",
-      "hashAlg": "SHA-384",
+      "hashAlg": "SHA2-384",
       "tests": [
         {
-          "qx": "ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64def8f0ea9055866064a254515480bc13",
-          "qy": "8015d9b72d7d57244ea8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1288b231c3ae0d4fe7344fd2533264720",
-          "msg": "sample",
-          "r": "94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe46",
-          "s": "99ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8",
+          "tcId": 256,
+          "qx": "35178B13894CF9A62345989B5E62297E31D2CC085F25791866C7D66056F96212EF78B92B8442E76A8BA34ADA651A1C38",
+          "qy": "50D2605C29E3C4D9B0158D5AC178B51ACAC435D73E671F09BBA7E0F7C741E502B34FE348083DDB22955CF4E2BEC92CD1",
+          "msg": "8B7AE2C9B43B3150F3DA84628B155B1C6D6980DEA90D21C34768E0CF71FE6C4E75FCA4B297440B43A0B40D11C55E92B13691E1CD3D8165302C7A0EC07ED20400EC4AC01DC692AD4E37BD600F3D4D3E55285EA275FF5898361A6B444493430001C34A5F03B4BA0FD906E026D5B8809B70BFA1037FD3C74B4B4E75D8D66BB32F5D",
+          "r": "51C098F7285711BB5B17427482F58D2633C530D6FFBE1D8EFB117A30F59E3072D4EB3FDB8DB5372C2B4D83C2D6051D58",
+          "s": "1481A2669EFEE8546625ADB6703F8C8946343473CB69D54DBC86AC689ED71E03F47B88E8D49B5C02B92730B7AA44E80E",
           "testPassed": true
         }
       ]

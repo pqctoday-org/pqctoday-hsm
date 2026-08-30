@@ -148,6 +148,27 @@ bool AsymmetricAlgorithm::isWrappingMech(AsymMech::Type padding)
 		case AsymMech::RSA:
 		case AsymMech::RSA_PKCS:
 		case AsymMech::RSA_PKCS_OAEP:
+		// WS-1.1 (2026-08-29): the hash-qualified OAEP variants belong here too.
+		// This whitelist is a *third* gate on the wrap path, in addition to
+		// WrapKeyAsym/UnwrapKeyAsym's own mechanism switch, and it only ever
+		// admitted the bare RSA_PKCS_OAEP (SHA-1). While those helpers
+		// hardcoded that same value the omission was invisible; the moment
+		// they started honouring CK_RSA_PKCS_OAEP_PARAMS.hashAlg it turned a
+		// silent SHA-1 substitution into a hard CKR_GENERAL_ERROR /
+		// CKR_WRAPPED_KEY_INVALID for every non-SHA-1 OAEP wrap. Caught by the
+		// NIST KTS-IFC OAEP-SHA-512 unwrap KAT added in the same change; no
+		// existing test reached this line with a hash-qualified mechanism.
+		// PKCS#11 v3.2 §6.1.8 ticks CKM_RSA_PKCS_OAEP for Wrap&Unwrap without
+		// restricting hashAlg — the mechanism is one mechanism, and the hash
+		// is a parameter of it.
+		case AsymMech::RSA_PKCS_OAEP_SHA224:
+		case AsymMech::RSA_PKCS_OAEP_SHA256:
+		case AsymMech::RSA_PKCS_OAEP_SHA384:
+		case AsymMech::RSA_PKCS_OAEP_SHA512:
+		case AsymMech::RSA_PKCS_OAEP_SHA3_224:
+		case AsymMech::RSA_PKCS_OAEP_SHA3_256:
+		case AsymMech::RSA_PKCS_OAEP_SHA3_384:
+		case AsymMech::RSA_PKCS_OAEP_SHA3_512:
 			return true;
 
 		default:

@@ -1,18 +1,28 @@
 {
   "algorithm": "ECDSA",
   "mode": "sigVer",
-  "source": "RFC 6979 Appendix A.2.5 (ECDSA P-256, SHA-256, message \"sample\"); verified with the node crypto (OpenSSL) oracle",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ECDSA-SigVer-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "b987739127a54ff86c1018771390b8124b440d0d6011610f21eccfd74754e430",
+    "note": "tgId 25, tcId 174 (curve P-256, hashAlg SHA2-256) — the group's sole testPassed=true case among its 7 (the other 6 are deliberate negative cases: modify key, modify r, modify message, zero s, zero r, modify s). qx/qy/r/s are each exactly 32 bytes (canonical P-256 field/order width), so no leading-zero stripping was needed to fit OSSLECDSA::verify's `signature.size() != 2 * orderLen` check or tests/helpers.mjs importECPublicKey's fixed-width point construction. Independently re-verified against Python's cryptography library (49.0.0) before use: EllipticCurvePublicNumbers(qx, qy, SECP256R1()).public_key().verify(encode_dss_signature(r, s), message_bytes, ec.ECDSA(hashes.SHA256())) raised no exception — VALID, matching ACVP's own testPassed=true label. REPLACES a file that carried no _provenance block and declared `\"source\": \"RFC 6979 Appendix A.2.5 (ECDSA P-256, SHA-256, message \\\"sample\\\")\"` — real published RFC values, but Tier-3 material used where Tier-1 ACVP coverage exists for this exact algorithm/curve/hash, which the remediation plan's §1 ladder does not permit (Tier 1 is mandatory wherever it exists). `message` is 128 bytes of ACVP-generated pseudorandom data (hex-encoded) — NOT literal text like the RFC 6979 vector's \"sample\" was. tests/acvp-wasm.mjs's ECDSA P-256 block previously passed this field through `new TextEncoder().encode(textMsg)` (literal-text encoding, via the `ecdsaVerify` helper), which only worked because the old vector's message happened to be printable ASCII; a real ACVP message is not. Rewired the call site to hex-decode `msg` and dispatch through the existing generic `verifyBytes(M, hSession, h, hexToBytes(tv.msg), sig, CK.CKM_ECDSA_SHA256)` helper — the same helper already used for the ML-DSA SigVer KAT a few lines below it in the same file — rather than inventing a new encoding path."
+  },
   "testGroups": [
     {
+      "tgId": 25,
       "curve": "P-256",
-      "hashAlg": "SHA-256",
+      "hashAlg": "SHA2-256",
       "tests": [
         {
-          "qx": "60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6",
-          "qy": "7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299",
-          "msg": "sample",
-          "r": "efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716",
-          "s": "f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8",
+          "tcId": 174,
+          "qx": "2168DCF5E42F551D39CA7E8130375C60B93F630A5ED703985F6E726B791779BF",
+          "qy": "F9A98419376D5BD480B958113073590A4B1096EEF09A275D0E2FBC675F6B1120",
+          "msg": "BA918D7AC0C58A714EF12D97BAFD17DE604FD5D4A88BCC8B66DB58DF313952BE8DBD468FF38D9512235B487EADAC713EC4EE42A4492F560120810755D7ADCD9770DA432B3BDBCCA2F41E04FE8CED0C6D30308CFED0C299D0E8826AC02F8931275AD46BB919A26E50EC1366E2003F838A4137DE09D5286BDC945DCEAA2CB9B65A",
+          "r": "B1E61A25BEFFCAA1552491FD75BD9C62876677320684CD2147443E16B2CADDA4",
+          "s": "06FC00EBE49CB38135B135ED5B8B8DED2F1B77689BC138A5E195F38B4E6BA9D0",
           "testPassed": true
         }
       ]

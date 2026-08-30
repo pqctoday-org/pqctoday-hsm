@@ -88,9 +88,31 @@ public:
 	// Return the MAC size
 	virtual size_t getMacSize() const = 0;
 
+	// General-length ("_HMAC_GENERAL") MAC support.
+	//
+	// PKCS#11 v3.2 §6.20.3 and its per-hash siblings (§6.22.3 for SHA-256,
+	// §6.23.3 SHA-384, §6.24.3 SHA-512) define a second mechanism per HMAC
+	// that takes a CK_MAC_GENERAL_PARAMS giving the desired output length in
+	// bytes: "Signatures (MACs) produced by this mechanism will be taken from
+	// the start of the full 32-byte HMAC output."
+	//
+	// Request a truncated output of @p bytes. Returns false when this
+	// implementation cannot honour truncation (the base class default) or the
+	// length is out of range, so a caller can never silently receive — or
+	// silently verify against — a full-length MAC where a short one was asked
+	// for. Must be called before signInit()/verifyInit().
+	virtual bool setTruncatedMacSize(size_t bytes);
+
+	// Effective output length: the accepted truncated length if one was set,
+	// otherwise the algorithm's natural MAC size.
+	size_t getOutputMacSize() const;
+
 protected:
 	// The current key
 	const SymmetricKey* currentKey;
+
+	// Requested truncated MAC length in bytes; 0 means full-length output.
+	size_t truncatedMacSize;
 
 private:
 	// The current operation

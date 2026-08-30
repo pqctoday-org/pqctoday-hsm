@@ -727,54 +727,96 @@ const SLH_DSA_PARAM_SETS: [(&str, u32); 12] = [
 #[test]
 fn slh_dsa_sigver_and_siggen() {
     let doc = read("slh-dsa/slh-dsa-acvp.json");
-    let mut n_sigver = 0;
-    let mut n_siggen = 0;
+    let total = SLH_DSA_PARAM_SETS.len();
 
-    for (name, ps) in SLH_DSA_PARAM_SETS {
-        // sigVer
-        let sv = &doc["sigVer"][name];
-        assert!(!sv.is_null(), "slh-dsa sigVer vector missing for {name}");
-        let pk = hex_decode(as_str(sv, "pk"));
-        let msg = hex_decode(as_str(sv, "message"));
-        let sig = hex_decode(as_str(sv, "signature"));
-        let ctx = sv.get("context").and_then(Value::as_str).map(hex_decode).unwrap_or_default();
-        let want = expected_pass(sv, "testPassed");
-        let got = verify_slh_dsa(CKM_SLH_DSA, ps, &pk, &msg, &sig, &ctx).is_ok();
-        assert_eq!(got, want, "slh-dsa sigVer result mismatch for {name}");
-        n_sigver += 1;
+    // Each parameter set's sigVer+sigGen work is fully independent — separate
+    // sk/pk/msg, no shared mutable state — and sign_slh_dsa/verify_slh_dsa are
+    // pure functions (bytes in, bytes out; NOT the stateful PKCS#11-session
+    // path engine_lock() above guards). "s" (small-signature) sets are
+    // dramatically slower to sign than "f" ones (this loop signs TWICE per
+    // set, for a determinism check) — in an unoptimized debug build a single
+    // "s" signature can legitimately take real wall-clock time, and this
+    // function used to run all 12 sets on one core sequentially (~10 minutes)
+    // while the other 17 cores on an 18-core box sat idle. One thread per
+    // parameter set instead — cuts wall time roughly to the slowest single
+    // set, not the sum of all twelve.
+    //
+    // Progress logging: visible with `cargo test -- --nocapture` (default
+    // `cargo test` captures and discards passing-test output). eprintln!
+    // itself is line-atomic (internally locked), so concurrent threads won't
+    // garble a single line, but lines from different threads interleave in
+    // non-deterministic order — expected and fine for progress output.
+    let results: Vec<(usize, &str)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = SLH_DSA_PARAM_SETS
+            .into_iter()
+            .enumerate()
+            .map(|(i, (name, ps))| {
+                let doc = &doc;
+                scope.spawn(move || {
+                    eprintln!("[SLH-DSA {}/{total}] {name}: sigVer...", i + 1);
+                    // sigVer
+                    let sv = &doc["sigVer"][name];
+                    assert!(!sv.is_null(), "slh-dsa sigVer vector missing for {name}");
+                    let pk = hex_decode(as_str(sv, "pk"));
+                    let msg = hex_decode(as_str(sv, "message"));
+                    let sig = hex_decode(as_str(sv, "signature"));
+                    let ctx =
+                        sv.get("context").and_then(Value::as_str).map(hex_decode).unwrap_or_default();
+                    let want = expected_pass(sv, "testPassed");
+                    let got = verify_slh_dsa(CKM_SLH_DSA, ps, &pk, &msg, &sig, &ctx).is_ok();
+                    assert_eq!(got, want, "slh-dsa sigVer result mismatch for {name}");
 
-        // deterministic sigGen.
-        //
-        // Goal was byte-exact reproduction of the published `signature`. The
-        // engine's deterministic SLH-DSA path produces a VALID signature that
-        // verifies, and is reproducible run-to-run (true determinism), but it
-        // does NOT byte-match this fixture's `signature`. FIPS 205 §9.2 leaves
-        // the deterministic variant's `opt_rand` to substitute PK.seed, but the
-        // exact addrnd wiring differs between implementations, so a signature
-        // produced by a different generator (this fixture's provenance)
-        // legitimately differs byte-for-byte while remaining valid. We
-        // therefore assert the strong, provenance-independent properties —
-        // determinism + validity — and DEFER byte-exact sigGen against this
-        // particular fixture (documented above).
-        let sg = &doc["sigGen"][name];
-        assert!(!sg.is_null(), "slh-dsa sigGen vector missing for {name}");
-        let sk = hex_decode(as_str(sg, "sk"));
-        let pk_sg = hex_decode(as_str(sg, "pk"));
-        let msg2 = hex_decode(as_str(sg, "message"));
-        let ctx2 = sg.get("context").and_then(Value::as_str).map(hex_decode).unwrap_or_default();
-        let det = expected_pass(sg, "deterministic");
-        assert!(det, "slh-dsa sigGen vector is not flagged deterministic for {name}");
+                    // deterministic sigGen.
+                    //
+                    // Goal was byte-exact reproduction of the published `signature`. The
+                    // engine's deterministic SLH-DSA path produces a VALID signature that
+                    // verifies, and is reproducible run-to-run (true determinism), but it
+                    // does NOT byte-match this fixture's `signature`. FIPS 205 §9.2 leaves
+                    // the deterministic variant's `opt_rand` to substitute PK.seed, but the
+                    // exact addrnd wiring differs between implementations, so a signature
+                    // produced by a different generator (this fixture's provenance)
+                    // legitimately differs byte-for-byte while remaining valid. We
+                    // therefore assert the strong, provenance-independent properties —
+                    // determinism + validity — and DEFER byte-exact sigGen against this
+                    // particular fixture (documented above).
+                    let sg = &doc["sigGen"][name];
+                    assert!(!sg.is_null(), "slh-dsa sigGen vector missing for {name}");
+                    let sk = hex_decode(as_str(sg, "sk"));
+                    let pk_sg = hex_decode(as_str(sg, "pk"));
+                    let msg2 = hex_decode(as_str(sg, "message"));
+                    let ctx2 =
+                        sg.get("context").and_then(Value::as_str).map(hex_decode).unwrap_or_default();
+                    let det = expected_pass(sg, "deterministic");
+                    assert!(det, "slh-dsa sigGen vector is not flagged deterministic for {name}");
 
-        let sig_a = sign_slh_dsa(CKM_SLH_DSA, ps, &sk, &msg2, &ctx2, true)
-            .unwrap_or_else(|e| panic!("slh-dsa sign #1 failed for {name}: {e}"));
-        let sig_b = sign_slh_dsa(CKM_SLH_DSA, ps, &sk, &msg2, &ctx2, true)
-            .unwrap_or_else(|e| panic!("slh-dsa sign #2 failed for {name}: {e}"));
-        assert_eq!(sig_a, sig_b, "engine SLH-DSA deterministic sign is not reproducible for {name}");
-        // The engine's own signature must verify under the engine's verifier.
-        verify_slh_dsa(CKM_SLH_DSA, ps, &pk_sg, &msg2, &sig_a, &ctx2)
-            .unwrap_or_else(|e| panic!("engine SLH-DSA sigGen output does not verify for {name}: {e}"));
-        n_siggen += 1;
-    }
+                    // The actual slow step for "s" parameter sets — two full
+                    // signs, done deliberately (see determinism comment above).
+                    eprintln!("[SLH-DSA {}/{total}] {name}: sigGen (sign #1 of 2)...", i + 1);
+                    let sig_a = sign_slh_dsa(CKM_SLH_DSA, ps, &sk, &msg2, &ctx2, true)
+                        .unwrap_or_else(|e| panic!("slh-dsa sign #1 failed for {name}: {e}"));
+                    eprintln!("[SLH-DSA {}/{total}] {name}: sigGen (sign #2 of 2)...", i + 1);
+                    let sig_b = sign_slh_dsa(CKM_SLH_DSA, ps, &sk, &msg2, &ctx2, true)
+                        .unwrap_or_else(|e| panic!("slh-dsa sign #2 failed for {name}: {e}"));
+                    assert_eq!(
+                        sig_a, sig_b,
+                        "engine SLH-DSA deterministic sign is not reproducible for {name}"
+                    );
+                    // The engine's own signature must verify under the engine's verifier.
+                    verify_slh_dsa(CKM_SLH_DSA, ps, &pk_sg, &msg2, &sig_a, &ctx2)
+                        .unwrap_or_else(|e| panic!("engine SLH-DSA sigGen output does not verify for {name}: {e}"));
+                    eprintln!("[SLH-DSA {}/{total}] {name}: done", i + 1);
+                    (i, name)
+                })
+            })
+            .collect();
+        // Propagate the first panic from any thread (a joined thread's Err
+        // is a caught panic payload) rather than swallow it — a failure
+        // inside a spawned thread must still fail this test.
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let n_sigver = results.len();
+    let n_siggen = results.len();
 
     eprintln!(
         "[SLH-DSA] sigVer byte-verified ({n_sigver}/12); sigGen determinism+validity verified \

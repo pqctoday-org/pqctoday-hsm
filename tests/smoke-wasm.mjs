@@ -390,6 +390,65 @@ if (ss1 && ss2) {
     console.log('  ℹ  Skipped shared secret comparison (keys are sensitive)');
 }
 
+console.log('\n── C_GenerateKeyPair (ML-DSA-65) ──');
+const dsaPubTmpl = buildTemplate([
+    { type: CKA_TOKEN,  value: true },
+    { type: CKA_VERIFY, value: true },
+    { type: CKA_PARAMETER_SET, value: CKP_ML_DSA_65 },
+]);
+const dsaPrvTmpl = buildTemplate([
+    { type: CKA_TOKEN, value: true },
+    { type: CKA_SIGN,  value: true },
+    { type: CKA_PARAMETER_SET, value: CKP_ML_DSA_65 },
+]);
+const dsaKeygenMech = M._malloc(12);
+M.setValue(dsaKeygenMech + 0, CKM_ML_DSA_KEY_PAIR_GEN, 'i32');
+M.setValue(dsaKeygenMech + 4, 0, 'i32');
+M.setValue(dsaKeygenMech + 8, 0, 'i32');
+
+const hDsaPubPtr = allocUlong();
+const hDsaPrvPtr = allocUlong();
+check('C_GenerateKeyPair(ML-DSA-65)',
+    M._C_GenerateKeyPair(hSession, dsaKeygenMech,
+        dsaPubTmpl.arrPtr, dsaPubTmpl.count,
+        dsaPrvTmpl.arrPtr, dsaPrvTmpl.count,
+        hDsaPubPtr, hDsaPrvPtr));
+const hDsaPub = readUlong(hDsaPubPtr);
+const hDsaPrv = readUlong(hDsaPrvPtr);
+console.log(`   Public key handle: ${hDsaPub}, Private key handle: ${hDsaPrv}`);
+freeTemplate(dsaPubTmpl);
+freeTemplate(dsaPrvTmpl);
+M._free(dsaKeygenMech);
+freePtr(hDsaPubPtr);
+freePtr(hDsaPrvPtr);
+
+console.log('\n── C_Sign / C_Verify (ML-DSA-65) ──');
+const dsaSignMech = M._malloc(12);
+M.setValue(dsaSignMech + 0, CKM_ML_DSA, 'i32');
+M.setValue(dsaSignMech + 4, 0, 'i32');
+M.setValue(dsaSignMech + 8, 0, 'i32');
+
+const msgBytes = new TextEncoder().encode('SoftHSMv3 WASM smoke test — ML-DSA-65');
+const msgPtr = M._malloc(msgBytes.length);
+M.HEAPU8.set(msgBytes, msgPtr);
+
+check('C_SignInit', M._C_SignInit(hSession, dsaSignMech, hDsaPrv));
+const sigLenPtr = allocUlong();
+check('C_Sign(size query)', M._C_Sign(hSession, msgPtr, msgBytes.length, 0, sigLenPtr));
+const sigLen = readUlong(sigLenPtr);
+const sigPtr = M._malloc(sigLen);
+check('C_Sign', M._C_Sign(hSession, msgPtr, msgBytes.length, sigPtr, sigLenPtr));
+console.log(`   Signature: ${sigLen} bytes`);
+
+check('C_VerifyInit', M._C_VerifyInit(hSession, dsaSignMech, hDsaPub));
+check('C_Verify', M._C_Verify(hSession, msgPtr, msgBytes.length, sigPtr, sigLen));
+console.log('  ✓  ML-DSA-65 sign/verify round-trip matches');
+
+M._free(msgPtr);
+M._free(sigPtr);
+freePtr(sigLenPtr);
+M._free(dsaSignMech);
+
 console.log('\n── C_Logout + C_CloseSession ──');
 check('C_Logout',       M._C_Logout(hSession));
 check('C_CloseSession', M._C_CloseSession(hSession));

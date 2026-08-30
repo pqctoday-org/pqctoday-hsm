@@ -78,8 +78,10 @@ static bool isMacMechanism(CK_MECHANISM_PTR pMechanism)
 
 	switch(pMechanism->mechanism) {
 		case CKM_MD5_HMAC:
+		case CKM_MD5_HMAC_GENERAL:
 #ifdef WITH_RIPEMD160
 		case CKM_RIPEMD160_HMAC:
+		case CKM_RIPEMD160_HMAC_GENERAL:
 #endif
 		case CKM_SHA_1_HMAC:
 		case CKM_SHA224_HMAC:
@@ -90,6 +92,18 @@ static bool isMacMechanism(CK_MECHANISM_PTR pMechanism)
 		case CKM_SHA3_256_HMAC:
 		case CKM_SHA3_384_HMAC:
 		case CKM_SHA3_512_HMAC:
+		// General-length HMAC variants (PKCS#11 v3.2 §6.20.3 and siblings):
+		// same construction, plus a CK_MAC_GENERAL_PARAMS output length that
+		// Mac{Sign,Verify}Init reads and hands to the MAC implementation.
+		case CKM_SHA_1_HMAC_GENERAL:
+		case CKM_SHA224_HMAC_GENERAL:
+		case CKM_SHA256_HMAC_GENERAL:
+		case CKM_SHA384_HMAC_GENERAL:
+		case CKM_SHA512_HMAC_GENERAL:
+		case CKM_SHA3_224_HMAC_GENERAL:
+		case CKM_SHA3_256_HMAC_GENERAL:
+		case CKM_SHA3_384_HMAC_GENERAL:
+		case CKM_SHA3_512_HMAC_GENERAL:
 		case CKM_AES_CMAC:
 		case CKM_KMAC_128:
 		case CKM_KMAC_256:
@@ -106,11 +120,23 @@ static bool isMacMechanism(CK_MECHANISM_PTR pMechanism)
 // CKK_GENERIC_SECRET is an acceptable alternative (HMAC), the PKCS#11
 // minimum output length in bytes, and the internal MacAlgo identifier.
 // Adding a new MAC mechanism requires one table row and no switch edits.
+//
+// `generalMech` carries the mechanism's general-length ("_HMAC_GENERAL")
+// twin, where PKCS#11 defines one: an identical MAC construction that
+// additionally takes a CK_MAC_GENERAL_PARAMS output length and returns that
+// many bytes from the start of the full MAC (v3.2 §6.20.3 and its per-hash
+// siblings). The rule is one line, no exceptions: the general-length variant
+// is supported exactly where the plain variant is, so a caller never finds
+// CKM_SHA256_HMAC_GENERAL working while CKM_SHA_1_HMAC_GENERAL is rejected.
+// 0 means "no general-length twin" (CKM_KMAC_* take their own CK_KMAC_PARAMS
+// rather than CK_MAC_GENERAL_PARAMS, and CKM_AES_CMAC_GENERAL would need
+// truncation support in OSSLEVPCMacAlgorithm, which it does not have).
 // ---------------------------------------------------------------------------
 namespace {
 
 struct MacMechInfo {
 	CK_MECHANISM_TYPE mech;
+	CK_MECHANISM_TYPE generalMech;     ///< general-length twin, or 0 if none
 	CK_KEY_TYPE       specificKeyType; ///< e.g. CKK_SHA256_HMAC; CKK_AES for CMAC
 	bool              allowGenericSecret; ///< HMAC: true; CMAC: false
 	size_t            minKeyBytes;     ///< minimum key length (0 = no PKCS#11 minimum)
@@ -120,20 +146,20 @@ struct MacMechInfo {
 static const MacMechInfo kMacMechTable[] = {
 #ifdef WITH_RIPEMD160
 	// HMAC-RIPEMD-160 (native-only; legacy provider). Mirrors SHA-1-HMAC sizing.
-	{ CKM_RIPEMD160_HMAC,CKK_RIPEMD160_HMAC,true,  20, MacAlgo::HMAC_RIPEMD160},
+	{ CKM_RIPEMD160_HMAC,CKM_RIPEMD160_HMAC_GENERAL,CKK_RIPEMD160_HMAC,true,  20, MacAlgo::HMAC_RIPEMD160},
 #endif
-	{ CKM_SHA_1_HMAC,    CKK_SHA_1_HMAC,    true,  20, MacAlgo::HMAC_SHA1     },
-	{ CKM_SHA224_HMAC,   CKK_SHA224_HMAC,   true,  28, MacAlgo::HMAC_SHA224   },
-	{ CKM_SHA256_HMAC,   CKK_SHA256_HMAC,   true,  32, MacAlgo::HMAC_SHA256   },
-	{ CKM_SHA384_HMAC,   CKK_SHA384_HMAC,   true,  48, MacAlgo::HMAC_SHA384   },
-	{ CKM_SHA512_HMAC,   CKK_SHA512_HMAC,   true,  64, MacAlgo::HMAC_SHA512   },
-	{ CKM_SHA3_224_HMAC, CKK_SHA3_224_HMAC, true,  28, MacAlgo::HMAC_SHA3_224 },
-	{ CKM_SHA3_256_HMAC, CKK_SHA3_256_HMAC, true,  32, MacAlgo::HMAC_SHA3_256 },
-	{ CKM_SHA3_384_HMAC, CKK_SHA3_384_HMAC, true,  48, MacAlgo::HMAC_SHA3_384 },
-	{ CKM_SHA3_512_HMAC, CKK_SHA3_512_HMAC, true,  64, MacAlgo::HMAC_SHA3_512 },
-	{ CKM_AES_CMAC,      CKK_AES,           false,  0, MacAlgo::CMAC_AES      },
-	{ CKM_KMAC_128,      CKK_GENERIC_SECRET,true,  16, MacAlgo::KMAC_128      },
-	{ CKM_KMAC_256,      CKK_GENERIC_SECRET,true,  32, MacAlgo::KMAC_256      },
+	{ CKM_SHA_1_HMAC,    CKM_SHA_1_HMAC_GENERAL,    CKK_SHA_1_HMAC,    true,  20, MacAlgo::HMAC_SHA1     },
+	{ CKM_SHA224_HMAC,   CKM_SHA224_HMAC_GENERAL,   CKK_SHA224_HMAC,   true,  28, MacAlgo::HMAC_SHA224   },
+	{ CKM_SHA256_HMAC,   CKM_SHA256_HMAC_GENERAL,   CKK_SHA256_HMAC,   true,  32, MacAlgo::HMAC_SHA256   },
+	{ CKM_SHA384_HMAC,   CKM_SHA384_HMAC_GENERAL,   CKK_SHA384_HMAC,   true,  48, MacAlgo::HMAC_SHA384   },
+	{ CKM_SHA512_HMAC,   CKM_SHA512_HMAC_GENERAL,   CKK_SHA512_HMAC,   true,  64, MacAlgo::HMAC_SHA512   },
+	{ CKM_SHA3_224_HMAC, CKM_SHA3_224_HMAC_GENERAL, CKK_SHA3_224_HMAC, true,  28, MacAlgo::HMAC_SHA3_224 },
+	{ CKM_SHA3_256_HMAC, CKM_SHA3_256_HMAC_GENERAL, CKK_SHA3_256_HMAC, true,  32, MacAlgo::HMAC_SHA3_256 },
+	{ CKM_SHA3_384_HMAC, CKM_SHA3_384_HMAC_GENERAL, CKK_SHA3_384_HMAC, true,  48, MacAlgo::HMAC_SHA3_384 },
+	{ CKM_SHA3_512_HMAC, CKM_SHA3_512_HMAC_GENERAL, CKK_SHA3_512_HMAC, true,  64, MacAlgo::HMAC_SHA3_512 },
+	{ CKM_AES_CMAC,      0,                         CKK_AES,           false,  0, MacAlgo::CMAC_AES      },
+	{ CKM_KMAC_128,      0,                         CKK_GENERIC_SECRET,true,  16, MacAlgo::KMAC_128      },
+	{ CKM_KMAC_256,      0,                         CKK_GENERIC_SECRET,true,  32, MacAlgo::KMAC_256      },
 };
 
 /**
@@ -146,22 +172,32 @@ static const MacMechInfo kMacMechTable[] = {
  * @param keyType  CKA_KEY_TYPE of the supplied key object.
  * @param algo     [out] Resolved MacAlgo identifier.
  * @param minKeyBytes [out] Minimum acceptable key byte length.
+ * @param generalLength [out] True when @p mech is the general-length
+ *                      ("_HMAC_GENERAL") variant, which requires a
+ *                      CK_MAC_GENERAL_PARAMS output length from the caller.
  * @return CKR_OK, CKR_MECHANISM_INVALID, or CKR_KEY_TYPE_INCONSISTENT.
  */
 static CK_RV resolveMacMech(CK_MECHANISM_TYPE mech, CK_KEY_TYPE keyType,
-                             MacAlgo::Type& algo, size_t& minKeyBytes)
+                             MacAlgo::Type& algo, size_t& minKeyBytes,
+                             bool& generalLength)
 {
+	generalLength = false;
 #ifndef WITH_FIPS
-	if (mech == CKM_MD5_HMAC) {
+	if (mech == CKM_MD5_HMAC || mech == CKM_MD5_HMAC_GENERAL) {
 		if (keyType != CKK_GENERIC_SECRET && keyType != CKK_MD5_HMAC)
 			return CKR_KEY_TYPE_INCONSISTENT;
-		algo        = MacAlgo::HMAC_MD5;
-		minKeyBytes = 16;
+		algo          = MacAlgo::HMAC_MD5;
+		minKeyBytes   = 16;
+		generalLength = (mech == CKM_MD5_HMAC_GENERAL);
 		return CKR_OK;
 	}
 #endif
 	for (const MacMechInfo& e : kMacMechTable) {
-		if (e.mech != mech) continue;
+		// 0 is the "no general-length twin" sentinel, never a mechanism the
+		// caller can match on (CKM_RSA_PKCS_KEY_PAIR_GEN owns the value 0 and
+		// is not a MAC mechanism).
+		const bool isGeneral = (e.generalMech != 0 && mech == e.generalMech);
+		if (e.mech != mech && !isGeneral) continue;
 		if (e.allowGenericSecret) {
 			if (keyType != CKK_GENERIC_SECRET && keyType != e.specificKeyType)
 				return CKR_KEY_TYPE_INCONSISTENT;
@@ -169,11 +205,44 @@ static CK_RV resolveMacMech(CK_MECHANISM_TYPE mech, CK_KEY_TYPE keyType,
 			if (keyType != e.specificKeyType)
 				return CKR_KEY_TYPE_INCONSISTENT;
 		}
-		algo        = e.algo;
-		minKeyBytes = e.minKeyBytes;
+		algo          = e.algo;
+		minKeyBytes   = e.minKeyBytes;
+		generalLength = isGeneral;
 		return CKR_OK;
 	}
 	return CKR_MECHANISM_INVALID;
+}
+
+/**
+ * @brief Apply the general-length MAC output length to a freshly created
+ *        MacAlgorithm.
+ *
+ * CKM_*_HMAC_GENERAL carries a CK_MAC_GENERAL_PARAMS (a bare CK_ULONG) giving
+ * the desired output length in bytes; the MAC is then "taken from the start of
+ * the full ... HMAC output" (PKCS#11 v3.2 §6.22.3). A missing, wrongly sized or
+ * out-of-range parameter is CKR_MECHANISM_PARAM_INVALID rather than a silently
+ * full-length MAC.
+ *
+ * @return CKR_OK, or CKR_MECHANISM_PARAM_INVALID. @p mac is left untouched on
+ *         failure — the caller owns recycling it.
+ */
+static CK_RV applyGeneralMacLength(CK_MECHANISM_PTR pMechanism, MacAlgorithm* mac)
+{
+	if (pMechanism->pParameter == NULL_PTR ||
+	    pMechanism->ulParameterLen != sizeof(CK_MAC_GENERAL_PARAMS))
+	{
+		ERROR_MSG("General-length MAC needs a CK_MAC_GENERAL_PARAMS parameter (got %lu bytes)",
+			  (unsigned long)pMechanism->ulParameterLen);
+
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+
+	CK_MAC_GENERAL_PARAMS macLen = *(CK_MAC_GENERAL_PARAMS_PTR)pMechanism->pParameter;
+
+	if (!mac->setTruncatedMacSize((size_t)macLen))
+		return CKR_MECHANISM_PARAM_INVALID;
+
+	return CKR_OK;
 }
 
 } // anonymous namespace
@@ -201,11 +270,24 @@ CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechani
 	// Resolve mechanism → algorithm + key-type check via lookup table (H3).
 	MacAlgo::Type algo = MacAlgo::Unknown;
 	size_t minSize = 0;
-	CK_RV mechRv = resolveMacMech(pMechanism->mechanism, keyType, algo, minSize);
+	bool generalLength = false;
+	CK_RV mechRv = resolveMacMech(pMechanism->mechanism, keyType, algo, minSize, generalLength);
 	if (mechRv != CKR_OK) return mechRv;
 
 	MacAlgorithm* mac = CryptoFactory::i()->getMacAlgorithm(algo);
 	if (mac == NULL) return CKR_MECHANISM_INVALID;
+
+	// CKM_*_HMAC_GENERAL: read the requested output length before any state is
+	// built, so a bad parameter costs nothing but the algorithm object.
+	if (generalLength)
+	{
+		mechRv = applyGeneralMacLength(pMechanism, mac);
+		if (mechRv != CKR_OK)
+		{
+			CryptoFactory::i()->recycleMacAlgorithm(mac);
+			return mechRv;
+		}
+	}
 
 	SymmetricKey* privkey = new SymmetricKey();
 
@@ -256,6 +338,64 @@ CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechani
 
 // Parse CK_SIGN_ADDITIONAL_CONTEXT or CK_HASH_SIGN_ADDITIONAL_CONTEXT → MLDSA_SIGN_PARAMS
 // Deep-copies context bytes into inline buffer to avoid dangling pointers in session storage.
+#ifdef WITH_EDDSA
+/**
+ * WS-1.3 (2026-08-29) — parse CK_EDDSA_PARAMS for CKM_EDDSA.
+ *
+ * PKCS#11 v3.2 §6.3.14 declares this structure as CKM_EDDSA's optional
+ * parameter and §6.3.16 defines it; before this function existed nothing in
+ * src/lib/ read it. AsymSignInit/AsymVerifyInit left param NULL for CKM_EDDSA
+ * and a downstream guard rejected any non-NULL pParameter with
+ * CKR_MECHANISM_PARAM_INVALID, so two things were unreachable through the
+ * standard mechanism: Ed25519ph/Ed448ph via phFlag=CK_TRUE (only the
+ * vendor-range CKM_EDDSA_PH worked), and RFC 8032 context strings at all.
+ *
+ * Absent parameter is legal and means pure mode — Table 73's first row.
+ * The scheme itself is resolved later, in OSSLEDDSA::resolveInstance, which
+ * is the one place that knows the key's curve.
+ */
+static CK_RV parseEdDSAParams(CK_MECHANISM_PTR pMechanism, EDDSA_SIGN_PARAMS& out)
+{
+	memset(&out, 0, sizeof(out));
+
+	if (pMechanism->pParameter == NULL_PTR && pMechanism->ulParameterLen == 0)
+		return CKR_OK; // pure mode, no context — Table 73 row 1
+
+	if (pMechanism->pParameter == NULL_PTR ||
+	    pMechanism->ulParameterLen != sizeof(CK_EDDSA_PARAMS))
+	{
+		ERROR_MSG("pParameter must be of type CK_EDDSA_PARAMS (%lu, expected %lu)",
+			(unsigned long)pMechanism->ulParameterLen,
+			(unsigned long)sizeof(CK_EDDSA_PARAMS));
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+
+	CK_EDDSA_PARAMS_PTR p = (CK_EDDSA_PARAMS_PTR)pMechanism->pParameter;
+
+	// §6.3.16: "the length in bytes of the context data where
+	// 0 <= ulContextDataLen <= 255".
+	if (p->ulContextDataLen > 255)
+	{
+		ERROR_MSG("EdDSA context string too long (%lu, max 255)",
+			(unsigned long)p->ulContextDataLen);
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (p->ulContextDataLen > 0 && p->pContextData == NULL_PTR)
+	{
+		ERROR_MSG("EdDSA context pointer is NULL with non-zero length");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+
+	out.hasParams = true;
+	out.preHash = (p->phFlag != CK_FALSE);
+	out.contextLen = (size_t)p->ulContextDataLen;
+	if (out.contextLen > 0)
+		memcpy(out.context, p->pContextData, out.contextLen);
+
+	return CKR_OK;
+}
+#endif
+
 static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAMS& out)
 {
 	memset(&out, 0, sizeof(out));
@@ -498,6 +638,10 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 	memset(&mldsaSignParam, 0, sizeof(mldsaSignParam));
 	SLHDSA_SIGN_PARAMS slhdsaSignParam;
 	memset(&slhdsaSignParam, 0, sizeof(slhdsaSignParam));
+#ifdef WITH_EDDSA
+	EDDSA_SIGN_PARAMS eddsaSignParam;
+	memset(&eddsaSignParam, 0, sizeof(eddsaSignParam));
+#endif
 	bool bAllowMultiPartOp;
 	bool isRSA = false;
 #ifdef WITH_ECC
@@ -891,11 +1035,27 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 #endif
 #ifdef WITH_EDDSA
 		case CKM_EDDSA:
+		{
+			// WS-1.3 (2026-08-29): CKM_EDDSA's optional CK_EDDSA_PARAMS is now
+			// read. Previously this case left param NULL, so the guard below
+			// ("Reject unexpected parameters for parameterless mechanisms")
+			// refused every conforming request for Ed25519ph/Ed448ph via
+			// phFlag and made RFC 8032 context strings unreachable.
 			mechanism = AsymMech::EDDSA;
 			bAllowMultiPartOp = true;
 			isEDDSA = true;
+			CK_RV rvEd = parseEdDSAParams(pMechanism, eddsaSignParam);
+			if (rvEd != CKR_OK) return rvEd;
+			param = &eddsaSignParam;
+			paramLen = sizeof(eddsaSignParam);
 			break;
+		}
 		case CKM_EDDSA_PH:
+			// Vendor-range shorthand for the pre-hash scheme with no context.
+			// Deliberately still parameterless: everything CK_EDDSA_PARAMS can
+			// express is now reachable through the standard CKM_EDDSA above,
+			// and widening a vendor mechanism would add a second way to say
+			// the same thing.
 			mechanism = AsymMech::EDDSA_PH;
 			bAllowMultiPartOp = true;
 			isEDDSA = true;
@@ -1334,8 +1494,10 @@ static CK_RV MacSign(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK
 	if (!session->getAllowSinglePartOp())
 		return CKR_OPERATION_ACTIVE;
 
-	// Size of the signature
-	CK_ULONG size = mac->getMacSize();
+	// Size of the signature. getOutputMacSize() is the mechanism's effective
+	// output length: the full MAC, or the CK_MAC_GENERAL_PARAMS length for a
+	// CKM_*_HMAC_GENERAL operation (PKCS#11 v3.2 §6.22.3 and siblings).
+	CK_ULONG size = mac->getOutputMacSize();
 	if (pSignature == NULL_PTR)
 	{
 		*pulSignatureLen = size;
@@ -1809,8 +1971,10 @@ static CK_RV MacSignFinal(Session* session, CK_BYTE_PTR pSignature, CK_ULONG_PTR
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
 
-	// Size of the signature
-	CK_ULONG size = mac->getMacSize();
+	// Size of the signature. getOutputMacSize() is the mechanism's effective
+	// output length: the full MAC, or the CK_MAC_GENERAL_PARAMS length for a
+	// CKM_*_HMAC_GENERAL operation (PKCS#11 v3.2 §6.22.3 and siblings).
+	CK_ULONG size = mac->getOutputMacSize();
 	if (pSignature == NULL_PTR)
 	{
 		*pulSignatureLen = size;
@@ -2094,11 +2258,24 @@ CK_RV SoftHSM::MacVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 	// Resolve mechanism → algorithm + key-type check via lookup table (H3).
 	MacAlgo::Type algo = MacAlgo::Unknown;
 	size_t minSize = 0;
-	CK_RV mechRv = resolveMacMech(pMechanism->mechanism, keyType, algo, minSize);
+	bool generalLength = false;
+	CK_RV mechRv = resolveMacMech(pMechanism->mechanism, keyType, algo, minSize, generalLength);
 	if (mechRv != CKR_OK) return mechRv;
 
 	MacAlgorithm* mac = CryptoFactory::i()->getMacAlgorithm(algo);
 	if (mac == NULL) return CKR_MECHANISM_INVALID;
+
+	// CKM_*_HMAC_GENERAL: read the requested output length before any state is
+	// built, so a bad parameter costs nothing but the algorithm object.
+	if (generalLength)
+	{
+		mechRv = applyGeneralMacLength(pMechanism, mac);
+		if (mechRv != CKR_OK)
+		{
+			CryptoFactory::i()->recycleMacAlgorithm(mac);
+			return mechRv;
+		}
+	}
 
 	SymmetricKey* pubkey = new SymmetricKey();
 
@@ -2162,6 +2339,10 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 	memset(&mldsaSignParam, 0, sizeof(mldsaSignParam));
 	SLHDSA_SIGN_PARAMS slhdsaSignParam;
 	memset(&slhdsaSignParam, 0, sizeof(slhdsaSignParam));
+#ifdef WITH_EDDSA
+	EDDSA_SIGN_PARAMS eddsaSignParam;
+	memset(&eddsaSignParam, 0, sizeof(eddsaSignParam));
+#endif
 	bool bAllowMultiPartOp;
 	bool isRSA = false;
 #ifdef WITH_ECC
@@ -2553,11 +2734,27 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 #endif
 #ifdef WITH_EDDSA
 		case CKM_EDDSA:
+		{
+			// WS-1.3 (2026-08-29): CKM_EDDSA's optional CK_EDDSA_PARAMS is now
+			// read. Previously this case left param NULL, so the guard below
+			// ("Reject unexpected parameters for parameterless mechanisms")
+			// refused every conforming request for Ed25519ph/Ed448ph via
+			// phFlag and made RFC 8032 context strings unreachable.
 			mechanism = AsymMech::EDDSA;
 			bAllowMultiPartOp = true;
 			isEDDSA = true;
+			CK_RV rvEd = parseEdDSAParams(pMechanism, eddsaSignParam);
+			if (rvEd != CKR_OK) return rvEd;
+			param = &eddsaSignParam;
+			paramLen = sizeof(eddsaSignParam);
 			break;
+		}
 		case CKM_EDDSA_PH:
+			// Vendor-range shorthand for the pre-hash scheme with no context.
+			// Deliberately still parameterless: everything CK_EDDSA_PARAMS can
+			// express is now reachable through the standard CKM_EDDSA above,
+			// and widening a vendor mechanism would add a second way to say
+			// the same thing.
 			mechanism = AsymMech::EDDSA_PH;
 			bAllowMultiPartOp = true;
 			isEDDSA = true;
@@ -3050,8 +3247,10 @@ static CK_RV MacVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, 
 	if (!session->getAllowSinglePartOp())
 		return CKR_OPERATION_ACTIVE;
 
-	// Size of the signature
-	CK_ULONG size = mac->getMacSize();
+	// Size of the signature. getOutputMacSize() is the mechanism's effective
+	// output length: the full MAC, or the CK_MAC_GENERAL_PARAMS length for a
+	// CKM_*_HMAC_GENERAL operation (PKCS#11 v3.2 §6.22.3 and siblings).
+	CK_ULONG size = mac->getOutputMacSize();
 
 	// Check buffer size
 	if (ulSignatureLen != size)
@@ -3262,8 +3461,10 @@ static CK_RV MacVerifyFinal(Session* session, CK_BYTE_PTR pSignature, CK_ULONG u
 		return CKR_OPERATION_NOT_INITIALIZED;
 	}
 
-	// Size of the signature
-	CK_ULONG size = mac->getMacSize();
+	// Size of the signature. getOutputMacSize() is the mechanism's effective
+	// output length: the full MAC, or the CK_MAC_GENERAL_PARAMS length for a
+	// CKM_*_HMAC_GENERAL operation (PKCS#11 v3.2 §6.22.3 and siblings).
+	CK_ULONG size = mac->getOutputMacSize();
 
 	// Check buffer size
 	if (ulSignatureLen != size)
