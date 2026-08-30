@@ -916,21 +916,6 @@ async function runSuite(engineName) {
       }
     }
 
-    // ── 16.5. EdDSA_PH Functional Sign+Verify (Ed25519ph) ────────────────
-    if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA_PH)) {
-      addResult('eddsaph', 'Ed25519ph', 'Pre-hash Functional', 'SKIP', 'mechanism not supported')
-    } else {
-      try {
-        const { pubHandle, privHandle } = generateEdDSAKeyPair(M, hSession, 'Ed25519')
-        const msg = 'ACVP Ed25519ph pre-hash functional test'
-        const sig = sign(M, hSession, privHandle, msg, CK.CKM_EDDSA_PH)
-        const ok = verify(M, hSession, pubHandle, msg, sig, CK.CKM_EDDSA_PH)
-        addResult('eddsaph', 'Ed25519ph', 'Pre-hash Functional', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
-      } catch (e) {
-        addResult('eddsaph', 'Ed25519ph', 'Pre-hash Functional', 'FAIL', e.message)
-      }
-    }
-
     // ── 16.6 CKM_EDDSA + CK_EDDSA_PARAMS — RFC 8032 scheme selection ─────
     //
     // WS-1.3 (2026-08-29). PKCS#11 v3.2 §6.3.14 Table 73 maps the presence,
@@ -987,8 +972,8 @@ async function runSuite(engineName) {
     // ── 16.7 CK_EDDSA_PARAMS binding — the negative half ─────────────────
     //
     // A context string that is not bound into the signature would leave every
-    // §16.6 case above still passing, so these four assertions are what make
-    // that suite mean something.
+    // §16.6 case above still passing, so these assertions are what make that
+    // suite mean something.
     if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA)) {
       addResult('eddsa-params-bind', 'Ed25519', 'CK_EDDSA_PARAMS binding', 'SKIP',
         'CKM_EDDSA not supported')
@@ -996,7 +981,7 @@ async function runSuite(engineName) {
       const ctxSet = eddsaVec.vectorSets.find((v) => v.scheme === 'Ed25519ctx')
       const phSet = eddsaVec.vectorSets.find((v) => v.scheme === 'Ed25519ph' && v.tier === 3)
       const tv = ctxSet.tests[0]
-      let pFoo = null, pBar = null, pPh = null
+      let pFoo = null, pBar = null, pPh = null, pFreshPh = null
       try {
         const msg = hexToBytes(tv.message)
         const privH = importEdDSAPrivateKey(M, hSession, 'Ed25519', hexToBytes(tv.d))
@@ -1023,16 +1008,36 @@ async function runSuite(engineName) {
           viaParams.rv === CK.CKR_OK && viaVendor.rv === CK.CKR_OK &&
           arrEq(viaParams.signature, viaVendor.signature) &&
           arrEq(viaParams.signature, hexToBytes(phTv.signature))
-        const ok = okSame && !okDiff && !okNone && phAgree
+        // 5. Same check as #4, but on a freshly generated key pair rather
+        //    than only the fixed ACVP vector's imported key — folded in
+        //    from a since-removed standalone "EdDSA_PH Functional" block
+        //    that tested nothing else (self-generated key, sign-then-
+        //    verify-with-itself is Tier 4 self-consistency) so the "fresh
+        //    key material each run" angle survives without leaving a
+        //    standalone block that read as if CKM_EDDSA_PH — a vendor
+        //    convenience alias, not a PKCS#11 v3.2 mechanism name; the
+        //    spec's own Ed25519ph path is CKM_EDDSA + CK_EDDSA_PARAMS —
+        //    were the normal way to reach Ed25519ph.
+        const { pubHandle: freshPub, privHandle: freshPriv } = generateEdDSAKeyPair(M, hSession, 'Ed25519')
+        const freshMsg = new TextEncoder().encode('ACVP Ed25519ph pre-hash functional test')
+        pFreshPh = buildEdDSAParams(M, true, null)
+        const freshViaParams = eddsaSignBytesParams(M, hSession, freshPriv, freshMsg, pFreshPh)
+        const freshViaVendor = eddsaSignBytesParams(M, hSession, freshPriv, freshMsg, null, CK.CKM_EDDSA_PH)
+        const freshVerifies = freshViaParams.rv === CK.CKR_OK &&
+          eddsaVerifyBytesParams(M, hSession, freshPub, freshMsg, freshViaParams.signature, pFreshPh) === CK.CKR_OK
+        const freshPhAgree =
+          freshViaParams.rv === CK.CKR_OK && freshViaVendor.rv === CK.CKR_OK &&
+          arrEq(freshViaParams.signature, freshViaVendor.signature) && freshVerifies
+        const ok = okSame && !okDiff && !okNone && phAgree && freshPhAgree
         addResult('eddsa-params-bind', 'Ed25519ctx / Ed25519ph',
           'Context binding + phFlag reaches Ed25519ph',
           ok ? 'PASS' : 'FAIL',
-          `sameCtx=${okSame} diffCtx=${okDiff} noParams=${okNone} phFlag==CKM_EDDSA_PH==RFC8032=${phAgree}`)
+          `sameCtx=${okSame} diffCtx=${okDiff} noParams=${okNone} phFlag==CKM_EDDSA_PH==RFC8032=${phAgree} freshKeyAgree=${freshPhAgree}`)
       } catch (e) {
         addResult('eddsa-params-bind', 'Ed25519ctx / Ed25519ph',
           'Context binding + phFlag reaches Ed25519ph', 'FAIL', e.message)
       } finally {
-        freeEdDSAParams(M, pFoo); freeEdDSAParams(M, pBar); freeEdDSAParams(M, pPh)
+        freeEdDSAParams(M, pFoo); freeEdDSAParams(M, pBar); freeEdDSAParams(M, pPh); freeEdDSAParams(M, pFreshPh)
       }
     }
 
