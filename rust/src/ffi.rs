@@ -7813,10 +7813,16 @@ enum Sp800Seg {
 /// PRF type or an invalid AES-CMAC key length.
 fn sp800_108_prf_output_len(prf_type: u32, base_key_len: usize) -> Option<usize> {
     match prf_type {
+        CKM_SHA_1_HMAC => Some(20),
+        CKM_SHA224_HMAC => Some(28),
         CKM_SHA256_HMAC => Some(32),
         CKM_SHA384_HMAC => Some(48),
         CKM_SHA512_HMAC => Some(64),
+        CKM_SHA512_224_HMAC => Some(28),
+        CKM_SHA512_256_HMAC => Some(32),
+        CKM_SHA3_224_HMAC => Some(28),
         CKM_SHA3_256_HMAC => Some(32),
+        CKM_SHA3_384_HMAC => Some(48),
         CKM_SHA3_512_HMAC => Some(64),
         // CMAC output = the underlying block cipher's block size (AES = 16
         // bytes), independent of key length; base_key_len is only checked
