@@ -63,6 +63,8 @@ import {
   slhdsaSign,
   slhdsaVerify,
   importSLHDSAPublicKey,
+  importMontgomeryPrivateKey,
+  montgomeryDerive,
   importSLHDSAPrivateKey,
   slhdsaSignBytesCtx,
   slhdsaVerifyBytesCtx,
@@ -129,6 +131,7 @@ const lmsSigverExp = loadJson('lms_sigver_expected.json')
 const rsaOaepVec = loadJson('rsa_oaep_test.json')
 const eddsaVec = loadJson('eddsa_test.json')
 const eddsaEd448Vec = loadJson('eddsa_ed448_test.json')
+const x25519x448Vec = loadJson('x25519_x448_rfc7748_test.json')
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function arrEq(a, b) {
@@ -862,6 +865,39 @@ async function runSuite(engineName) {
         addResult('ecdsa521', 'ECDSA P-521', 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
       } catch (e) {
         addResult('ecdsa521', 'ECDSA P-521', 'SigVer KAT', 'FAIL', e.message)
+      }
+    }
+
+    // ── 15.6. X25519 / X448 derive KAT (RFC 7748 §5.2, via CKM_ECDH1_DERIVE) ─
+    // WS-5.3 (2026-08-30): CKM_X448 was advertised, dispatched, and never
+    // once executed — the plan's own framing named CKM_X448 specifically,
+    // but the real, complete gap is broader: neither this nor CKM_X25519
+    // had evidence, AND neither did the mechanism a spec-compliant caller
+    // actually uses. PKCS#11 v3.2 §6.3.11 defines exactly one derive
+    // mechanism for Montgomery curves — CKM_ECDH1_DERIVE, with a
+    // CKK_EC_MONTGOMERY key whose CKA_EC_PARAMS names the curve (X25519/
+    // X448 are RFC 8410 curve names, not distinct mechanism identifiers;
+    // CKM_ECDH1_COFACTOR_DERIVE is explicitly excluded for these keys).
+    // This engine also dispatches two CKM_VENDOR_DEFINED-range aliases
+    // (CKM_X25519/CKM_X448) to the identical code path, but per direction
+    // received while wiring this — prefer the standard mechanism, only
+    // reach for vendor-defined when v3.2/v3.3 has no real codification —
+    // this test targets CKM_ECDH1_DERIVE only, not the vendor aliases.
+    for (const [curve, mech, outLen] of [['X25519', CK.CKM_ECDH1_DERIVE, 32], ['X448', CK.CKM_ECDH1_DERIVE, 56]]) {
+      const label = `${curve} derive (RFC 7748, CKM_ECDH1_DERIVE)`
+      if (mechs.size > 0 && !mechs.has(mech)) {
+        addResult(`x-derive-${curve}`, label, 'Derive KAT', 'SKIP', 'mechanism not supported')
+        continue
+      }
+      try {
+        const tv = x25519x448Vec[curve.toLowerCase()]
+        const priv = importMontgomeryPrivateKey(M, hSession, curve, hexToBytes(tv.scalar))
+        const derived = montgomeryDerive(M, hSession, priv, hexToBytes(tv.peerU), mech, outLen)
+        const expected = hexToBytes(tv.expected)
+        const ok = arrEq(derived, expected)
+        addResult(`x-derive-${curve}`, label, 'Derive KAT', ok ? 'PASS' : 'FAIL', `[${derived.length}B]: ${bytesToHex(derived, 16)}`)
+      } catch (e) {
+        addResult(`x-derive-${curve}`, label, 'Derive KAT', 'FAIL', e.message)
       }
     }
 

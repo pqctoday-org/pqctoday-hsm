@@ -45,6 +45,10 @@ const EC_OID = {
   Ed25519: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x70]),
   // id-Ed448 = 1.3.101.113 (RFC 8410 §3)
   Ed448: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x71]),
+  // id-X25519 = 1.3.101.110, id-X448 = 1.3.101.111 (RFC 8410 §3) — cross-
+  // checked against rust/src/ffi.rs:2963,2986 (same OID bytes).
+  X25519: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x6e]),
+  X448: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x6f]),
 }
 
 // ── Utilities ───────────────────────────────────────────────────────────────
@@ -1198,6 +1202,70 @@ export function importEdDSAPrivateKey(M, hSession, curve, seedBytes) {
   freeTemplate(M, tpl)
   freePtr(M, hPtr)
   return handle
+}
+
+/**
+ * Import a Montgomery-curve (X25519/X448) private key from its raw scalar
+ * (32B / 56B). WS-5.3 (2026-08-30): mirrors importEdDSAPrivateKey exactly —
+ * same CKK_EC_MONTGOMERY key-object shape, CKA_DERIVE instead of CKA_SIGN
+ * since this curve family is derive-only.
+ */
+export function importMontgomeryPrivateKey(M, hSession, curve, scalarBytes) {
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_PRIVATE_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_EC_MONTGOMERY },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_PRIVATE, value: false },
+    { type: CK.CKA_DERIVE, value: true },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_EC_PARAMS, value: EC_OID[curve] },
+    { type: CK.CKA_VALUE, value: scalarBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(Montgomery-Priv)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/**
+ * X25519/X448 derive (CKM_X25519 / CKM_X448) — CK_ECDH1_DERIVE_PARAMS with
+ * kdf=CKD_NULL, no shared data, pPublicData = peer's raw u-coordinate.
+ * Returns the derived CKA_VALUE bytes.
+ */
+export function montgomeryDerive(M, hSession, privHandle, peerPubBytes, mechType, outLen) {
+  const CKD_NULL = 1
+  const peerPtr = writeBytes(M, peerPubBytes)
+  const paramPtr = M._malloc(20) // CK_ECDH1_DERIVE_PARAMS: kdf(4) + ulSharedDataLen(4) + pSharedData(4) + ulPublicDataLen(4) + pPublicData(4) — WASM32 ptrs are 4B
+  M.setValue(paramPtr + 0, CKD_NULL, 'i32')
+  M.setValue(paramPtr + 4, 0, 'i32')
+  M.setValue(paramPtr + 8, 0, 'i32')
+  M.setValue(paramPtr + 12, peerPubBytes.length, 'i32')
+  M.setValue(paramPtr + 16, peerPtr, 'i32')
+  const mechPtr = buildMech(M, mechType, paramPtr, 20)
+  const derivedTpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_VALUE_LEN, value: outLen },
+  ])
+  const outHPtr = allocUlong(M)
+  check('C_DeriveKey(Montgomery)', M._C_DeriveKey(hSession, mechPtr, privHandle, derivedTpl.arrPtr, derivedTpl.count, outHPtr))
+  const derivedH = readUlong(M, outHPtr)
+  const valAttr = buildTemplate(M, [{ type: CK.CKA_VALUE, value: new Uint8Array(outLen) }])
+  check('C_GetAttributeValue(derived)', M._C_GetAttributeValue(hSession, derivedH, valAttr.arrPtr, 1))
+  const derived = new Uint8Array(M.HEAPU8.buffer, M.getValue(valAttr.arrPtr + 4, 'i32'), outLen).slice()
+  M._free(peerPtr)
+  M._free(paramPtr)
+  M._free(mechPtr)
+  freeTemplate(M, derivedTpl)
+  freeTemplate(M, valAttr)
+  freePtr(M, outHPtr)
+  return derived
 }
 
 /**

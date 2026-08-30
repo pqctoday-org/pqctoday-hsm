@@ -322,6 +322,16 @@ module.exports = Object.freeze({
   CKM_EC_MONTGOMERY_KEY_PAIR_GEN: 0x00001056,
   CKM_EDDSA: 0x00001057,
   CKM_EDDSA_PH: 0x80001057,
+  // WS-5.3 (2026-08-30): vendor-range convenience aliases, NOT spec
+  // mechanism names — verified against docs/refs/pkcs11-spec-v3.2-os.pdf
+  // Sec6.3.11: the ratified spec's only derive mechanism for Montgomery
+  // curves is CKM_ECDH1_DERIVE (with a CKK_EC_MONTGOMERY key whose
+  // CKA_EC_PARAMS names curve25519/X25519 or curve448/X448); X25519/X448
+  // are RFC 8410 curve names, not distinct mechanism identifiers. This
+  // engine additionally dispatches these two CKM_VENDOR_DEFINED-range IDs
+  // to the identical derive code path (SoftHSM_keygen.cpp's deriveEDDSA).
+  CKM_X25519: 0x80001058,
+  CKM_X448: 0x80001059,
   CKM_XEDDSA: 0x00004029,
   CKM_KMAC_128: 0x80000100,
   CKM_KMAC_256: 0x80000101,
