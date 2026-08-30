@@ -83,6 +83,13 @@ import {
   pbkdf2,
   CKP_PKCS5_PBKD2_HMAC_SHA224,
   hkdf,
+  concatBytes,
+  importGenericSecret,
+  sp800108CounterKdf,
+  sp800108FeedbackKdf,
+  sp800108DoublePipelineKdf,
+  aesCcmEncrypt,
+  aesCcmDecrypt,
   generateHSSKeyPair,
   hssSign,
   hssVerify,
@@ -132,6 +139,14 @@ const rsaOaepVec = loadJson('rsa_oaep_test.json')
 const eddsaVec = loadJson('eddsa_test.json')
 const eddsaEd448Vec = loadJson('eddsa_ed448_test.json')
 const x25519x448Vec = loadJson('x25519_x448_rfc7748_test.json')
+const kdaHkdfVec = loadJson('kda_hkdf_sp800_56cr1_test.json')
+const kbkdfVec = loadJson('sp800_108_kbkdf_test.json')
+const dpipeVec = loadJson('sp800_108_double_pipeline_test.json')
+const aesOfbVec = loadJson('aes_ofb_test.json')
+const aesCfb1Vec = loadJson('aes_cfb1_test.json')
+const aesCfb8Vec = loadJson('aes_cfb8_test.json')
+const aesCfb128Vec = loadJson('aes_cfb128_test.json')
+const aesCcmVec = loadJson('aes_ccm_test.json')
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function arrEq(a, b) {
@@ -1137,6 +1152,229 @@ async function runSuite(engineName) {
         addResult('hkdf', 'HKDF-SHA256', 'Functional Derivation', ok ? 'PASS' : 'FAIL', `OKM[${okm1.length}B]: ${bytesToHex(okm1, 16)}`)
       } catch (e) {
         addResult('hkdf', 'HKDF-SHA256', 'Functional Derivation', 'FAIL', e.message)
+      }
+    }
+
+    // ── 18b. KDA-HKDF Sp800-56Cr1 Real ACVP KAT (SP800-56C OtherInfo) ────
+    // fixedInfo = uPartyId||ephemeralData||vPartyId||ephemeralData||BE32(l_bits),
+    // per the official ACVP KDA-HKDF spec's own "concatenation" encoding
+    // (usnistgov/ACVP repo, draft-hammett-acvp-kas-kdf-hkdf,
+    // §FixedInfoPatternConstruction) — see kda_hkdf_sp800_56cr1_test.json's
+    // _provenance for the full sourcing chain and the real ckmToDigestName()
+    // bug this evidence found (4 missing PRF hashes).
+    {
+      const HKDF_HASH_ALG_TO_MECH = {
+        'SHA2-224': CK.CKM_SHA224,
+        'SHA2-256': CK.CKM_SHA256,
+        'SHA2-384': CK.CKM_SHA384,
+        'SHA2-512': CK.CKM_SHA512,
+        'SHA2-512/224': CK.CKM_SHA512_224,
+        'SHA2-512/256': CK.CKM_SHA512_256,
+        'SHA3-224': CK.CKM_SHA3_224,
+        'SHA3-256': CK.CKM_SHA3_256,
+        'SHA3-384': CK.CKM_SHA3_384,
+        'SHA3-512': CK.CKM_SHA3_512,
+      }
+      function buildHkdfFixedInfo(partyU, partyV, lBits) {
+        const uid = hexToBytes(partyU.partyId)
+        const ued = partyU.ephemeralData ? hexToBytes(partyU.ephemeralData) : new Uint8Array(0)
+        const vid = hexToBytes(partyV.partyId)
+        const ved = partyV.ephemeralData ? hexToBytes(partyV.ephemeralData) : new Uint8Array(0)
+        const lBuf = new Uint8Array(4)
+        new DataView(lBuf.buffer).setUint32(0, lBits, false)
+        return concatBytes(uid, ued, vid, ved, lBuf)
+      }
+      for (const tg of kdaHkdfVec.testGroups) {
+        const cfg = tg.kdfConfiguration
+        const mech = HKDF_HASH_ALG_TO_MECH[cfg.hmacAlg]
+        const label = `HKDF-${cfg.hmacAlg}`
+        if (!mech) {
+          addResult('kda-hkdf', label, `tgId=${tg.tgId}`, 'SKIP', 'no mechanism mapping')
+          continue
+        }
+        for (const t of tg.tests) {
+          try {
+            const salt = hexToBytes(t.kdfParameter.salt)
+            const z = hexToBytes(t.kdfParameter.z)
+            const lBits = t.kdfParameter.l
+            const info = buildHkdfFixedInfo(t.fixedInfoPartyU, t.fixedInfoPartyV, lBits)
+            const ikmH = importGenericSecret(M, hSession, z)
+            const okm = hkdf(M, hSession, ikmH, mech, true, true, salt, info, lBits / 8)
+            const expected = hexToBytes(t.dkm)
+            const matches = arrEq(okm, expected)
+            // VAL cases can carry testPassed=false (a deliberately-wrong
+            // reference dkm) — the correct outcome there is a mismatch.
+            const wantMatch = t.testPassed !== false
+            const ok = matches === wantMatch
+            addResult('kda-hkdf', label, `${tg.testType} tgId=${tg.tgId}`, ok ? 'PASS' : 'FAIL', `DKM[${okm.length}B]: ${bytesToHex(okm, 16)}`)
+          } catch (e) {
+            addResult('kda-hkdf', label, `${tg.testType} tgId=${tg.tgId}`, 'FAIL', e.message)
+          }
+        }
+      }
+    }
+
+    // ── 18c. SP800-108 KBKDF Real ACVP KAT (Counter + Feedback, "before
+    // fixed data" only — see sp800_108_kbkdf_test.json's _provenance for why,
+    // and for the 3 real bugs this evidence found and fixed) ─────────────
+    {
+      const HMAC_PRF_TO_MECH = {
+        'HMAC-SHA-1': CK.CKM_SHA_1_HMAC,
+        'HMAC-SHA2-224': CK.CKM_SHA224_HMAC,
+        'HMAC-SHA2-256': CK.CKM_SHA256_HMAC,
+        'HMAC-SHA2-384': CK.CKM_SHA384_HMAC,
+        'HMAC-SHA2-512': CK.CKM_SHA512_HMAC,
+        'HMAC-SHA2-512/224': CK.CKM_SHA512_224_HMAC,
+        'HMAC-SHA2-512/256': CK.CKM_SHA512_256_HMAC,
+        'HMAC-SHA3-224': CK.CKM_SHA3_224_HMAC,
+        'HMAC-SHA3-256': CK.CKM_SHA3_256_HMAC,
+        'HMAC-SHA3-384': CK.CKM_SHA3_384_HMAC,
+        'HMAC-SHA3-512': CK.CKM_SHA3_512_HMAC,
+        'CMAC-AES128': CK.CKM_AES_CMAC,
+        'CMAC-AES192': CK.CKM_AES_CMAC,
+        'CMAC-AES256': CK.CKM_AES_CMAC,
+      }
+      for (const tg of kbkdfVec.testGroups) {
+        const prfType = HMAC_PRF_TO_MECH[tg.macMode]
+        const label = `SP800-108-${tg.kdfMode}-${tg.macMode}`
+        if (!prfType) {
+          addResult('sp800-108', label, `tgId=${tg.tgId}`, 'SKIP', 'no mechanism mapping')
+          continue
+        }
+        for (const t of tg.tests) {
+          try {
+            const keyIn = hexToBytes(t.keyIn)
+            const fixedData = hexToBytes(t.fixedData)
+            const outLen = tg.keyOutLength / 8
+            const baseKeyH = prfType === CK.CKM_AES_CMAC
+              ? importAESKey(M, hSession, keyIn, { encrypt: false, decrypt: false, wrap: false, unwrap: false, derive: true, extractable: false })
+              : importGenericSecret(M, hSession, keyIn)
+            let out
+            if (tg.kdfMode === 'counter') {
+              out = sp800108CounterKdf(M, hSession, baseKeyH, prfType, fixedData, tg.counterLength, outLen)
+            } else {
+              const iv = t.iv ? hexToBytes(t.iv) : new Uint8Array(0)
+              out = sp800108FeedbackKdf(M, hSession, baseKeyH, prfType, fixedData, tg.counterLength, iv, outLen)
+            }
+            const expected = hexToBytes(t.keyOut)
+            const ok = arrEq(out, expected)
+            addResult('sp800-108', label, `${tg.testType} tgId=${tg.tgId}`, ok ? 'PASS' : 'FAIL', `keyOut[${out.length}B]: ${bytesToHex(out, 16)}`)
+          } catch (e) {
+            addResult('sp800-108', label, `${tg.testType} tgId=${tg.tgId}`, 'FAIL', e.message)
+          }
+        }
+      }
+    }
+
+    // ── 18d. SP800-108 Double Pipeline KDF Real ACVP KAT — new mechanism,
+    // hand-built EVP_MAC round loop (OpenSSL's KBKDF has no meta-provider
+    // path for this mode). See sp800_108_double_pipeline_test.json's
+    // _provenance for the construction and how it was verified. ─────────
+    {
+      const HMAC_PRF_TO_MECH = {
+        'HMAC-SHA-1': CK.CKM_SHA_1_HMAC,
+        'HMAC-SHA2-224': CK.CKM_SHA224_HMAC,
+        'HMAC-SHA2-256': CK.CKM_SHA256_HMAC,
+        'HMAC-SHA2-384': CK.CKM_SHA384_HMAC,
+        'HMAC-SHA2-512': CK.CKM_SHA512_HMAC,
+        'HMAC-SHA2-512/224': CK.CKM_SHA512_224_HMAC,
+        'HMAC-SHA2-512/256': CK.CKM_SHA512_256_HMAC,
+        'HMAC-SHA3-224': CK.CKM_SHA3_224_HMAC,
+        'HMAC-SHA3-256': CK.CKM_SHA3_256_HMAC,
+        'HMAC-SHA3-384': CK.CKM_SHA3_384_HMAC,
+        'HMAC-SHA3-512': CK.CKM_SHA3_512_HMAC,
+        'CMAC-AES128': CK.CKM_AES_CMAC,
+        'CMAC-AES192': CK.CKM_AES_CMAC,
+        'CMAC-AES256': CK.CKM_AES_CMAC,
+      }
+      for (const tg of dpipeVec.testGroups) {
+        const prfType = HMAC_PRF_TO_MECH[tg.macMode]
+        const label = `SP800-108-dpipe-${tg.macMode}`
+        if (!prfType) {
+          addResult('sp800-108-dpipe', label, `tgId=${tg.tgId}`, 'SKIP', 'no mechanism mapping')
+          continue
+        }
+        for (const t of tg.tests) {
+          try {
+            const keyIn = hexToBytes(t.keyIn)
+            const fixedData = hexToBytes(t.fixedData)
+            const outLen = tg.keyOutLength / 8
+            const baseKeyH = prfType === CK.CKM_AES_CMAC
+              ? importAESKey(M, hSession, keyIn, { encrypt: false, decrypt: false, wrap: false, unwrap: false, derive: true, extractable: false })
+              : importGenericSecret(M, hSession, keyIn)
+            const out = sp800108DoublePipelineKdf(M, hSession, baseKeyH, prfType, fixedData, tg.counterLength, outLen)
+            const expected = hexToBytes(t.keyOut)
+            const ok = arrEq(out, expected)
+            addResult('sp800-108-dpipe', label, `${tg.testType} tgId=${tg.tgId}`, ok ? 'PASS' : 'FAIL', `keyOut[${out.length}B]: ${bytesToHex(out, 16)}`)
+          } catch (e) {
+            addResult('sp800-108-dpipe', label, `${tg.testType} tgId=${tg.tgId}`, 'FAIL', e.message)
+          }
+        }
+      }
+    }
+
+    // ── 18e. AES-OFB / AES-CFB1/8/128 Real ACVP KAT — new mechanisms, thin
+    // EVP_aes_*_{ofb,cfb1,cfb8,cfb128}() wrappers (WS-8, 2026-08-30) ─────
+    {
+      const SIMPLE_AES_MODES = [
+        ['ofb', aesOfbVec, CK.CKM_AES_OFB],
+        ['cfb1', aesCfb1Vec, CK.CKM_AES_CFB1],
+        ['cfb8', aesCfb8Vec, CK.CKM_AES_CFB8],
+        ['cfb128', aesCfb128Vec, CK.CKM_AES_CFB128],
+      ]
+      for (const [mode, vec, mech] of SIMPLE_AES_MODES) {
+        const label = `AES-${mode.toUpperCase()}`
+        if (mechs.size > 0 && !mechs.has(mech)) {
+          addResult(mode, label, 'Decrypt KAT', 'SKIP', 'mechanism not supported')
+          continue
+        }
+        for (const c of vec.cases) {
+          try {
+            const keyH = importAESKey(M, hSession, hexToBytes(c.key), {
+              encrypt: false, decrypt: true, wrap: false, unwrap: false, derive: false,
+            })
+            const pt = aesDecrypt(M, hSession, keyH, hexToBytes(c.ct), hexToBytes(c.iv), mode)
+            const ok = arrEq(pt, hexToBytes(c.pt))
+            addResult(mode, label, `Decrypt KAT (${c.keyLen}-bit)`, ok ? 'PASS' : 'FAIL', `PT[${pt.length}B]: ${bytesToHex(pt, 16)}`)
+          } catch (e) {
+            addResult(mode, label, `Decrypt KAT (${c.keyLen}-bit)`, 'FAIL', e.message)
+          }
+        }
+      }
+    }
+
+    // ── 18f. AES-CCM Real ACVP KAT — new mechanism, hand-built EVP CCM
+    // sequencing (WS-8, 2026-08-30; see aes_ccm_test.json's _provenance) ──
+    if (mechs.size > 0 && !mechs.has(CK.CKM_AES_CCM)) {
+      addResult('ccm', 'AES-CCM', 'KAT', 'SKIP', 'mechanism not supported')
+    } else {
+      for (const c of aesCcmVec.cases) {
+        try {
+          if (c.direction === 'encrypt') {
+            const keyH = importAESKey(M, hSession, hexToBytes(c.key), {
+              encrypt: true, decrypt: false, wrap: false, unwrap: false, derive: false,
+            })
+            const out = aesCcmEncrypt(M, hSession, keyH, hexToBytes(c.pt), hexToBytes(c.iv), hexToBytes(c.aad || ''), c.tagLen / 8)
+            const ok = arrEq(out, hexToBytes(c.ct))
+            addResult('ccm', 'AES-CCM', `Encrypt KAT (${c.keyLen}-bit)`, ok ? 'PASS' : 'FAIL', `CT[${out.length}B]: ${bytesToHex(out, 16)}`)
+          } else {
+            const keyH = importAESKey(M, hSession, hexToBytes(c.key), {
+              encrypt: false, decrypt: true, wrap: false, unwrap: false, derive: false,
+            })
+            try {
+              const pt = aesCcmDecrypt(M, hSession, keyH, hexToBytes(c.ct), hexToBytes(c.iv), hexToBytes(c.aad || ''), c.tagLen / 8)
+              const ok = c.testPassed === true && arrEq(pt, hexToBytes(c.pt))
+              addResult('ccm', 'AES-CCM', `Decrypt KAT (${c.keyLen}-bit${c.note ? ', ' + c.note : ''})`, ok ? 'PASS' : 'FAIL', `PT[${pt.length}B]: ${bytesToHex(pt, 16)}`)
+            } catch (e) {
+              // A tampered-tag case is expected to throw (auth failure) —
+              // that IS the pass condition for testPassed === false cases.
+              const ok = c.testPassed === false
+              addResult('ccm', 'AES-CCM', `Decrypt KAT (${c.keyLen}-bit${c.note ? ', ' + c.note : ''})`, ok ? 'PASS' : 'FAIL', ok ? 'correctly rejected tampered tag' : e.message)
+            }
+          }
+        } catch (e) {
+          addResult('ccm', 'AES-CCM', `${c.direction} KAT (${c.keyLen}-bit)`, 'FAIL', e.message)
+        }
       }
     }
 

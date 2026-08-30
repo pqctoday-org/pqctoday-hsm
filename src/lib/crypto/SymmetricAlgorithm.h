@@ -62,7 +62,11 @@ struct SymMode
 		GCM,
 		OFB,
 		CHACHA_POLY1305,
-		CHACHA		///< bare ChaCha20 stream cipher (CKM_CHACHA20)
+		CHACHA,		///< bare ChaCha20 stream cipher (CKM_CHACHA20)
+		CFB1,		///< CKM_AES_CFB1 (WS-8, 2026-08-30)
+		CFB8,		///< CKM_AES_CFB8
+		CFB128,		///< CKM_AES_CFB128 (CFB is kept as a legacy alias, unused)
+		CCM		///< CKM_AES_CCM
 	};
 };
 
@@ -86,12 +90,20 @@ public:
 	virtual ~SymmetricAlgorithm() { }
 
 	// Encryption functions
-	virtual bool encryptInit(const SymmetricKey* key, const SymMode::Type mode = SymMode::CBC, const ByteString& IV = ByteString(), bool padding = true, size_t counterBits = 0, const ByteString& aad = ByteString(), size_t tagBytes = 0);
+	// dataLen (WS-8, 2026-08-30): total plaintext length in bytes, required
+	// only by CKM_AES_CCM — RFC 3610/SP800-38C's CBC-MAC bakes the message
+	// length into the first block, so OpenSSL's EVP CCM implementation must
+	// be told the total length via a declare-length EVP_*Update(NULL, len)
+	// call before any AAD or real data, unlike GCM/ChaCha20-Poly1305 which
+	// need no such upfront declaration. PKCS#11's CK_CCM_PARAMS.ulDataLen
+	// supplies this value at mechanism-parameter time, so it is available at
+	// Init already — no other mode uses this parameter.
+	virtual bool encryptInit(const SymmetricKey* key, const SymMode::Type mode = SymMode::CBC, const ByteString& IV = ByteString(), bool padding = true, size_t counterBits = 0, const ByteString& aad = ByteString(), size_t tagBytes = 0, size_t dataLen = 0);
 	virtual bool encryptUpdate(const ByteString& data, ByteString& encryptedData);
 	virtual bool encryptFinal(ByteString& encryptedData);
 
 	// Decryption functions
-	virtual bool decryptInit(const SymmetricKey* key, const SymMode::Type mode = SymMode::CBC, const ByteString& IV = ByteString(), bool padding = true, size_t counterBits = 0, const ByteString& aad = ByteString(), size_t tagBytes = 0);
+	virtual bool decryptInit(const SymmetricKey* key, const SymMode::Type mode = SymMode::CBC, const ByteString& IV = ByteString(), bool padding = true, size_t counterBits = 0, const ByteString& aad = ByteString(), size_t tagBytes = 0, size_t dataLen = 0);
 	virtual bool decryptUpdate(const ByteString& encryptedData, ByteString& data);
 	virtual bool decryptFinal(ByteString& data);
 

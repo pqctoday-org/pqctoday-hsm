@@ -1,0 +1,631 @@
+{
+  "algorithm": "KDF",
+  "revision": "1.0",
+  "isSample": true,
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/KDF-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "9900da42897bc6ec6a42cd6844c37f05ff0b6ae830723cb61d53b6d560572090",
+    "note": "WS-5.2 (2026-08-30): CKM_SP800_108_COUNTER_KDF / CKM_SP800_108_FEEDBACK_KDF were already implemented (OpenSSL KBKDF-backed) but had never been tested against real vectors, and turned out to have three real bugs, all fixed alongside this evidence: (1) the caller-supplied fixed input was routed to OpenSSL's \"salt\"/label param instead of \"info\"/context, (2) OpenSSL's auto-appended L and 0x00-separator fields (use-l/use-separator, both default-on) were left enabled with nothing in this engine's dataParams model to correctly supply/suppress them, and (3) FEEDBACK_KDF silently ignored CK_SP800_108_COUNTER_FORMAT entirely (no \"r\" param was ever passed to OpenSSL, so any non-default counter width was wrong). Root-caused by directly reading providers/implementations/kdfs/kbkdf.c (openssl/openssl @master) and empirically confirmed byte-for-byte against real ACVP vectors via the openssl(1) kdf CLI's KBKDF provider before touching the C++. Documented, real, remaining limitation: OpenSSL's KBKDF hardwires counter-first placement \u2014 this engine can only produce ACVP's \"before fixed data\" counterLocation, never \"after fixed data\" or \"middle fixed data\", regardless of what order a caller's CK_PRF_DATA_PARAM array requests. Evidence below is restricted to \"before fixed data\" accordingly. \"double pipeline iteration\" kdfMode is a separate, unimplemented mechanism (CKM_SP800_108_DOUBLE_PIPELINE_KDF) and out of scope here. CMAC-TDES excluded (this engine has no 3DES-CMAC; CLAUDE.md scopes this fork to modern/retained algorithms only)."
+  },
+  "testGroups": [
+    {
+      "tgId": 1,
+      "kdfMode": "counter",
+      "macMode": "HMAC-SHA-1",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "5DDDFDF9F98A04025563415ECC17ADB11B851644",
+          "fixedData": "D2AAEC33B5F002BCDA7C54B6E988FCBE",
+          "iv": "36F1C0F0BF9A84EFC5BA53A05D826764F879720A",
+          "breakLocation": 114,
+          "keyOut": "79"
+        }
+      ]
+    },
+    {
+      "tgId": 2,
+      "kdfMode": "counter",
+      "macMode": "HMAC-SHA2-224",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "D72DEA169F2F793ED28EC34BA48F6D9BA4772EE9B4F9BE57CF941BAE",
+          "fixedData": "EA8A5998B60F413DD3C922906DB9F5EB",
+          "iv": "3526E80829B4CE8A46AAE5C53AE65197A24B611A36D4E49436F116EB",
+          "breakLocation": 35,
+          "keyOut": "38"
+        }
+      ]
+    },
+    {
+      "tgId": 3,
+      "kdfMode": "counter",
+      "macMode": "HMAC-SHA2-256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "4D32541D840CCC807250BF824D8A74D6DE3F0E371E2964619C165B52DF5786B5",
+          "fixedData": "5F4D0E54D309B62A658E8956CDB0DB32",
+          "iv": "0D7F924E865FE536F633F9A9D5B4049D5AEF2024426AAF43D44A714FB5B86A6E",
+          "breakLocation": 37,
+          "keyOut": "50"
+        }
+      ]
+    },
+    {
+      "tgId": 4,
+      "kdfMode": "counter",
+      "macMode": "HMAC-SHA2-384",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "978123788DB97B7F3F59B8435785A7672B3981F001736AB8015C910A58DEB82C94C97693DB4BCF57EDAC9B6383B7D101",
+          "fixedData": "A498C129F9E9EB216DA594AF58F7E37E",
+          "iv": "D31760ED8DE315566592F0227D22DBE89588CFD78FD89E5E735171F1EC732096D6FCAB28F8CBB57470500298485E73DF",
+          "breakLocation": 84,
+          "keyOut": "09"
+        }
+      ]
+    },
+    {
+      "tgId": 5,
+      "kdfMode": "counter",
+      "macMode": "HMAC-SHA2-512",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "69ED69B47000DC663AA6BE20640813E809A2C21627186F64BA59EA7110473E44C9F20BB5F519D09B9854B9AC3BE0C7A3C15EF7CCF51D2A75A25FCE409B74BAF4",
+          "fixedData": "2E9DAE97B3DF71B719C7C03DF1BADC21",
+          "iv": "85CEBBA4A2F62BACAA664B5DA442275A399969E8F9F64FC29A591411C1EFAF82FA05E8EA94A90D9885A88D03A20C102DD8812DA13CD6266EB9504EAF8EB15437",
+          "breakLocation": 19,
+          "keyOut": "16"
+        }
+      ]
+    },
+    {
+      "tgId": 6,
+      "kdfMode": "counter",
+      "macMode": "HMAC-SHA2-512/224",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "A887F5CE3516BEA0EFFB1F6C9A9C37514E93C48AB6E51D4789914938",
+          "fixedData": "DD6D5E25EFC159CF1CBA3D9651BA5C33",
+          "iv": "79DFD15D941141183C082D412A46CE26D5B98F2C3D12628D39F56DFB",
+          "breakLocation": 20,
+          "keyOut": "FC"
+        }
+      ]
+    },
+    {
+      "tgId": 7,
+      "kdfMode": "counter",
+      "macMode": "HMAC-SHA2-512/256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "878D6C53CD9F4497E8A79D29560699805E869A86B8538326DDFC82B999664003",
+          "fixedData": "D7EAFBC9F4B47088905580A675BCCCF6",
+          "iv": "BA8A2EE375017E9965E35601BA359BE08B9CC0FDABD334A29611EF0906F310FB",
+          "breakLocation": 107,
+          "keyOut": "D1"
+        }
+      ]
+    },
+    {
+      "tgId": 8,
+      "kdfMode": "counter",
+      "macMode": "HMAC-SHA3-224",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "6FCE16D29C2D5D2483BFF3AA78EB5EBCD760E45514E0663C6BF86F6B",
+          "fixedData": "9A93D802AF8E201E4B8F709826995B41",
+          "iv": "0ECECC3241E7865E64EA2FEDD25C0D6498B30FE5125C0D4840C50A85",
+          "breakLocation": 96,
+          "keyOut": "15"
+        }
+      ]
+    },
+    {
+      "tgId": 9,
+      "kdfMode": "counter",
+      "macMode": "HMAC-SHA3-256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "228A0F5C1FE746C259BBCED6D5F7D79A4EB34CDA4A8C451D0C17E3583B2BAFEC",
+          "fixedData": "19D04E9ED8C646EC99CF80A197FE6ABA",
+          "iv": "0EB0F8FB1179D1F31E42D662A33D555ADB81A8886D2FFD0EB0EA007F33AA424C",
+          "breakLocation": 59,
+          "keyOut": "F6"
+        }
+      ]
+    },
+    {
+      "tgId": 10,
+      "kdfMode": "counter",
+      "macMode": "HMAC-SHA3-384",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "110D797743F3B09F71613D908086DD8F7096BFB1AC458714430FD52AC61F2BD72E7A5CE52357E98A3C9B1170E38C0746",
+          "fixedData": "2B8FD5DD1ABCFDDF093A05E490F12824",
+          "iv": "B1A5776D4689158D8BA80F2632AA34799BCBCBE17A26ADCA9A9EF9D60894E752CA8BEECBE9CF49F7705003C786987E02",
+          "breakLocation": 89,
+          "keyOut": "4F"
+        }
+      ]
+    },
+    {
+      "tgId": 11,
+      "kdfMode": "counter",
+      "macMode": "HMAC-SHA3-512",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "0979A46C3E22E7FF25B90A27F9B6087B85B763670532BA902FFB0CD899CECBCE1B4C928E17D459DB2770696F3BF8DFBF3938AE2A6C03189C08BC4198FE0F6F8E",
+          "fixedData": "0E63943DD9DDBFA94AB340300E75BF05",
+          "iv": "26CA7004374CDAF3782DF4081D9CAA2794EE045F5F1502A8DCA558C47F392840EBC3BDE9F09AA812C3F453DC859B4EA278C06A37B5AAC8E3B3609EE05E9EE7CB",
+          "breakLocation": 10,
+          "keyOut": "E9"
+        }
+      ]
+    },
+    {
+      "tgId": 12,
+      "kdfMode": "counter",
+      "macMode": "CMAC-AES128",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "D8839FC145A46D526F41EB321F8F669D",
+          "fixedData": "8BE773532E4F469D518B07DE65A13E8F",
+          "iv": "E846F382B725D16CF5EA71ED4535FED3",
+          "breakLocation": 75,
+          "keyOut": "B5"
+        }
+      ]
+    },
+    {
+      "tgId": 13,
+      "kdfMode": "counter",
+      "macMode": "CMAC-AES192",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "263561C60216ADB3E940EDBFFAD411F2B2C3E387B0D89F19",
+          "fixedData": "B83437C153FBA249EE880DAAA974B177",
+          "iv": "E6C13AC7037F59987EDEADADB4254854",
+          "breakLocation": 30,
+          "keyOut": "52"
+        }
+      ]
+    },
+    {
+      "tgId": 14,
+      "kdfMode": "counter",
+      "macMode": "CMAC-AES256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": false,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "43C511145FD7C7B47C1AF6276121161F2FBCE481CF2F167E0C41935B2114871B",
+          "fixedData": "6CF8E1BC946D976D24390B13550F505D",
+          "iv": "C1893B1711EF8658CF39EF78271DB07E",
+          "breakLocation": 10,
+          "keyOut": "5E"
+        }
+      ]
+    },
+    {
+      "tgId": 15,
+      "kdfMode": "feedback",
+      "macMode": "HMAC-SHA-1",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "EBFA672616DB3CEA8B34E1B7D677DAAF6ED201DB",
+          "fixedData": "F982DF426203783090E51851203CEB45",
+          "iv": "",
+          "breakLocation": 123,
+          "keyOut": "40"
+        }
+      ]
+    },
+    {
+      "tgId": 16,
+      "kdfMode": "feedback",
+      "macMode": "HMAC-SHA2-224",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "1181E914C92D141F6E0C83F3712B346D681F96E75332A6AC7E52D8DF",
+          "fixedData": "835116EE14A85018F34EBFA03DC31B05",
+          "iv": "",
+          "breakLocation": 55,
+          "keyOut": "A1"
+        }
+      ]
+    },
+    {
+      "tgId": 17,
+      "kdfMode": "feedback",
+      "macMode": "HMAC-SHA2-256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "DFDFCDF8596286A08A89A3D1B25623942D6081CFBC15C51CC4DBAD3606EB2974",
+          "fixedData": "8A121D402D889290A9D6ADE997B97322",
+          "iv": "",
+          "breakLocation": 38,
+          "keyOut": "4C"
+        }
+      ]
+    },
+    {
+      "tgId": 18,
+      "kdfMode": "feedback",
+      "macMode": "HMAC-SHA2-384",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "C3DAA9D976B4664D66AE9F9E08F3428A495BDB5B15A9C0403775B2695F9DF9A2A240A1D370839B2C82CED67CA5AFE415",
+          "fixedData": "5026B82DBC65776E62FB5A79D91244A4",
+          "iv": "",
+          "breakLocation": 62,
+          "keyOut": "38"
+        }
+      ]
+    },
+    {
+      "tgId": 19,
+      "kdfMode": "feedback",
+      "macMode": "HMAC-SHA2-512",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "4854DFC72A5684B84B75DEAEFA0C88985B79D617A55FE6BF4C3B65D9C66A013F1016D3A26A9EE8C03014B7321763127973F5907660181F1CF64A651217B4CD03",
+          "fixedData": "E9196F574B5817D7139A2E2675210809",
+          "iv": "",
+          "breakLocation": 49,
+          "keyOut": "01"
+        }
+      ]
+    },
+    {
+      "tgId": 20,
+      "kdfMode": "feedback",
+      "macMode": "HMAC-SHA2-512/224",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "B7D6C2B3B5D4427527F041EFDDAAAE147EE17FC6172DBF5F0FDE5AD8",
+          "fixedData": "206B82CD584842C154CB60046A278B31",
+          "iv": "",
+          "breakLocation": 17,
+          "keyOut": "D3"
+        }
+      ]
+    },
+    {
+      "tgId": 21,
+      "kdfMode": "feedback",
+      "macMode": "HMAC-SHA2-512/256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "3975EB851064C8C2C21CFC8B8129055BB9CD36FD6B5E21B6FCEB622AD4049808",
+          "fixedData": "E7E3C6C7E99DFC41AE720135482D030E",
+          "iv": "",
+          "breakLocation": 44,
+          "keyOut": "DD"
+        }
+      ]
+    },
+    {
+      "tgId": 22,
+      "kdfMode": "feedback",
+      "macMode": "HMAC-SHA3-224",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "A0A9874A5D233381556D088FC4B943CEE2973641CCC0A94D129DF22A",
+          "fixedData": "2A34DC697A2FB53B5489D1E7E7D8BE62",
+          "iv": "",
+          "breakLocation": 108,
+          "keyOut": "C9"
+        }
+      ]
+    },
+    {
+      "tgId": 23,
+      "kdfMode": "feedback",
+      "macMode": "HMAC-SHA3-256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "897060D2EF6D3FE6ACD5F1B68CF4E1C8115DF527A0D7E20DD8A9FD9035F7803F",
+          "fixedData": "1DA51B2E57CE55550C503A3C8884611C",
+          "iv": "",
+          "breakLocation": 118,
+          "keyOut": "DB"
+        }
+      ]
+    },
+    {
+      "tgId": 24,
+      "kdfMode": "feedback",
+      "macMode": "HMAC-SHA3-384",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "2E43E49BBAF81FB40007B83A4AE6FD0853C51120A3ACC1DBD32987330ADE1B50D1AE6581233C523BC65404CCC8A79ED9",
+          "fixedData": "29A6B1570AECD475523FAF7B6EA1A9F4",
+          "iv": "",
+          "breakLocation": 105,
+          "keyOut": "00"
+        }
+      ]
+    },
+    {
+      "tgId": 25,
+      "kdfMode": "feedback",
+      "macMode": "HMAC-SHA3-512",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "82AD76638231F19FB9919DA38FA8B2F5393B5A54E9729AF3D2BFBEB7BC82C8D7AC3D6D8D01C4B7C6963231AAC73DCC47E786BDB68D02A8EF3B77283AF888D1EB",
+          "fixedData": "6B4148BF10D46B0C8830CA3BEDB6566A",
+          "iv": "",
+          "breakLocation": 84,
+          "keyOut": "F7"
+        }
+      ]
+    },
+    {
+      "tgId": 26,
+      "kdfMode": "feedback",
+      "macMode": "CMAC-AES128",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "2D7ACE30637BFE3FCC84528458C7A61E",
+          "fixedData": "C94BE65B45ACFDCCCD0D394B5D3A7B92",
+          "iv": "",
+          "breakLocation": 22,
+          "keyOut": "33"
+        }
+      ]
+    },
+    {
+      "tgId": 27,
+      "kdfMode": "feedback",
+      "macMode": "CMAC-AES192",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "67D6DF496C8667F1B2405549E4BA8BAF1D82D6A27DC9B184",
+          "fixedData": "3711D666B71773FE4B5758ED15D291E5",
+          "iv": "",
+          "breakLocation": 67,
+          "keyOut": "CD"
+        }
+      ]
+    },
+    {
+      "tgId": 28,
+      "kdfMode": "feedback",
+      "macMode": "CMAC-AES256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "zeroLengthIv": true,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "C5C900465C9B56CABDA3E8E576FA991BA1740594637561A63E5A4826D57BFE62",
+          "fixedData": "61030394AEDAA979439CE4EA040E6191",
+          "iv": "",
+          "breakLocation": 60,
+          "keyOut": "74"
+        }
+      ]
+    }
+  ]
+}

@@ -199,14 +199,18 @@ static const char* ckmToDigestName(CK_MECHANISM_TYPE mech)
 {
 	switch (mech)
 	{
-		case CKM_SHA_1:    return "SHA-1";
-		case CKM_SHA256:   return "SHA2-256";
-		case CKM_SHA384:   return "SHA2-384";
-		case CKM_SHA512:   return "SHA2-512";
-		case CKM_SHA3_256: return "SHA3-256";
-		case CKM_SHA3_384: return "SHA3-384";
-		case CKM_SHA3_512: return "SHA3-512";
-		default:           return nullptr;
+		case CKM_SHA_1:      return "SHA-1";
+		case CKM_SHA224:     return "SHA2-224";
+		case CKM_SHA256:     return "SHA2-256";
+		case CKM_SHA384:     return "SHA2-384";
+		case CKM_SHA512:     return "SHA2-512";
+		case CKM_SHA512_224: return "SHA2-512/224";
+		case CKM_SHA512_256: return "SHA2-512/256";
+		case CKM_SHA3_224:   return "SHA3-224";
+		case CKM_SHA3_256:   return "SHA3-256";
+		case CKM_SHA3_384:   return "SHA3-384";
+		case CKM_SHA3_512:   return "SHA3-512";
+		default:             return nullptr;
 	}
 }
 
@@ -220,15 +224,18 @@ static const char* ckmHmacPrfToDigestName(CK_MECHANISM_TYPE mech)
 {
 	switch (mech)
 	{
-		case CKM_SHA224_HMAC:   return "SHA2-224";
-		case CKM_SHA256_HMAC:   return "SHA2-256";
-		case CKM_SHA384_HMAC:   return "SHA2-384";
-		case CKM_SHA512_HMAC:   return "SHA2-512";
-		case CKM_SHA3_224_HMAC: return "SHA3-224";
-		case CKM_SHA3_256_HMAC: return "SHA3-256";
-		case CKM_SHA3_384_HMAC: return "SHA3-384";
-		case CKM_SHA3_512_HMAC: return "SHA3-512";
-		default:                return nullptr;
+		case CKM_SHA_1_HMAC:      return "SHA-1";
+		case CKM_SHA224_HMAC:     return "SHA2-224";
+		case CKM_SHA256_HMAC:     return "SHA2-256";
+		case CKM_SHA384_HMAC:     return "SHA2-384";
+		case CKM_SHA512_HMAC:     return "SHA2-512";
+		case CKM_SHA512_224_HMAC: return "SHA2-512/224";
+		case CKM_SHA512_256_HMAC: return "SHA2-512/256";
+		case CKM_SHA3_224_HMAC:   return "SHA3-224";
+		case CKM_SHA3_256_HMAC:   return "SHA3-256";
+		case CKM_SHA3_384_HMAC:   return "SHA3-384";
+		case CKM_SHA3_512_HMAC:   return "SHA3-512";
+		default:                  return nullptr;
 	}
 }
 
@@ -2839,6 +2846,7 @@ CK_RV SoftHSM::C_DeriveKey
 		case CKM_HKDF_DERIVE:
 		case CKM_SP800_108_COUNTER_KDF:
 		case CKM_SP800_108_FEEDBACK_KDF:
+		case CKM_SP800_108_DOUBLE_PIPELINE_KDF:
 		case CKM_BIP32_MASTER_DERIVE:
 		case CKM_BIP32_CHILD_DERIVE:
 		// SHAKE-256 as an extendable-output function, per PKCS#11 v3.2 §2.x.
@@ -3423,7 +3431,22 @@ CK_RV SoftHSM::C_DeriveKey
 				return CKR_FUNCTION_FAILED;
 			}
 
-			OSSL_PARAM kbkParams[8];
+			// OpenSSL's KBKDF provider hardwires the SP800-108 byte layout to
+			// counter || label || [0x00 separator] || context || [L] (see
+			// providers/implementations/kdfs/kbkdf.c derive(): the counter is
+			// always written first, regardless of CK_PRF_DATA_PARAM array order).
+			// Route the caller's fixed input through "info" (context) with an
+			// empty label, and disable the auto-appended separator/L fields —
+			// the caller's dataParams array is the single source of truth for
+			// what's in the PRF input, matching PKCS#11 v3.2 §6.26's model where
+			// CK_SP800_108_DKM_LENGTH (not implemented here) is what a caller
+			// would use to request an L field, not an implicit library default.
+			// Net effect: this engine can only produce ACVP's "before fixed
+			// data" counter placement, not "after fixed data" / "middle fixed
+			// data" — a real, documented limitation of the OpenSSL backend.
+			int kbkUseL = 0;
+			int kbkUseSep = 0;
+			OSSL_PARAM kbkParams[10];
 			int kpi = 0;
 			kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE,
 			                        const_cast<char*>(kbkModeStr), 0);
@@ -3438,9 +3461,11 @@ CK_RV SoftHSM::C_DeriveKey
 			kbkParams[kpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
 			                        kbkIKM.byte_str(), kbkIKM.size());
 			if (kbkFixedInput.size() > 0)
-				kbkParams[kpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT,
+				kbkParams[kpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
 				                        kbkFixedInput.byte_str(), kbkFixedInput.size());
 			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_R, &kbkCounterBits);
+			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_L, &kbkUseL);
+			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR, &kbkUseSep);
 			kbkParams[kpi] = OSSL_PARAM_construct_end();
 
 			int kbkRet = EVP_KDF_derive(kbkctx, kbkOut.byte_str(), kbkKeyLen, kbkParams);
@@ -3637,13 +3662,35 @@ CK_RV SoftHSM::C_DeriveKey
 			}
 		}
 
-		// Parse CK_PRF_DATA_PARAM array for BYTE_ARRAY label/context data
+		// Parse CK_PRF_DATA_PARAM array:
+		//   CK_SP800_108_BYTE_ARRAY → append to fixed-input context buffer
+		//   CK_SP800_108_COUNTER → explicit optional counter (PKCS#11 v3.2 §2.44.2:
+		//     "invalid for this KDF type" does NOT apply here — that restriction is
+		//     COUNTER_KDF-only; feedback mode's counter is CK_SP800_108_COUNTER,
+		//     distinct from CK_SP800_108_ITERATION_VARIABLE which represents K(i-1)
+		//     and is handled implicitly by OpenSSL's mode=FEEDBACK + seed below.
 		ByteString fbkFixedInput;
+		int fbkCounterBits = 32;
 		for (CK_ULONG i = 0; i < fp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dp = &fp->pDataParams[i];
-			if (dp->type == CK_SP800_108_BYTE_ARRAY && dp->pValue != NULL_PTR && dp->ulValueLen > 0)
-				fbkFixedInput += ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+			switch (dp->type)
+			{
+				case CK_SP800_108_BYTE_ARRAY:
+					if (dp->pValue != NULL_PTR && dp->ulValueLen > 0)
+						fbkFixedInput += ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+					break;
+				case CK_SP800_108_COUNTER:
+					if (dp->pValue != NULL_PTR && dp->ulValueLen == sizeof(CK_SP800_108_COUNTER_FORMAT))
+					{
+						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dp->pValue;
+						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64)
+							fbkCounterBits = (int)cf->ulWidthInBits;
+					}
+					break;
+				default:
+					break; // ITERATION_VARIABLE (implicit K(i-1)), DKM_LENGTH, KEY_HANDLE not supported — skip
+			}
 		}
 
 		// Derive via OpenSSL KBKDF feedback mode
@@ -3665,7 +3712,12 @@ CK_RV SoftHSM::C_DeriveKey
 				return CKR_FUNCTION_FAILED;
 			}
 
-			OSSL_PARAM fbkParams[9];
+			// See the matching comment in CKM_SP800_108_COUNTER_KDF above: OpenSSL's
+			// KBKDF hardwires counter placement and auto-appends L/separator unless
+			// told not to. Same fix — route fixedInput through "info", disable both.
+			int fbkUseL = 0;
+			int fbkUseSep = 0;
+			OSSL_PARAM fbkParams[11];
 			int fpi = 0;
 			fbkParams[fpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE,
 			                        const_cast<char*>(fbkModeStr), 0);
@@ -3680,12 +3732,15 @@ CK_RV SoftHSM::C_DeriveKey
 			fbkParams[fpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
 			                        fbkIKM.byte_str(), fbkIKM.size());
 			if (fbkFixedInput.size() > 0)
-				fbkParams[fpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SALT,
+				fbkParams[fpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
 				                        fbkFixedInput.byte_str(), fbkFixedInput.size());
 			// Optional IV/seed for feedback mode (PKCS#11 v3.2 §2.44.2 fp->pIV)
 			if (fp->pIV != NULL_PTR && fp->ulIVLen > 0)
 				fbkParams[fpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SEED,
 				                        fp->pIV, (size_t)fp->ulIVLen);
+			fbkParams[fpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_R, &fbkCounterBits);
+			fbkParams[fpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_L, &fbkUseL);
+			fbkParams[fpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR, &fbkUseSep);
 			fbkParams[fpi] = OSSL_PARAM_construct_end();
 
 			int fbkRet = EVP_KDF_derive(fbkctx, fbkOut.byte_str(), fbkKeyLen, fbkParams);
@@ -3804,6 +3859,283 @@ CK_RV SoftHSM::C_DeriveKey
 			fbkObj->abortTransaction();
 
 		if (!fbkOK)
+		{
+			handleManager->destroyObject(*phKey);
+			*phKey = CK_INVALID_HANDLE;
+			return CKR_FUNCTION_FAILED;
+		}
+		return CKR_OK;
+	}
+
+	// SP 800-108 Double Pipeline Iteration Mode KDF (PKCS#11 v3.2 §2.44.3,
+	// CKM_SP800_108_DOUBLE_PIPELINE_KDF = 0x000003ae). OpenSSL's KBKDF
+	// provider only implements COUNTER and FEEDBACK modes (see its kbkdf_mode
+	// enum in providers/implementations/kdfs/kbkdf.c) — double pipeline has no
+	// meta-provider path, so this hand-builds the round loop directly on
+	// EVP_MAC (the same PRF primitive OpenSSL's own KBKDF uses internally,
+	// same pattern as HDWalletDerivation.cpp/OSSLKMAC.cpp elsewhere in this
+	// codebase). Construction verified byte-for-byte against real ACVP
+	// KDF-1.0 vectors before use: A(0) = fixedInput; A(i) = PRF(Ki, A(i-1));
+	// round output = PRF(Ki, A(i) || counter || fixedInput) — the same
+	// "before fixed data" placement as this engine's COUNTER_KDF/FEEDBACK_KDF
+	// (see the comment there for why only that placement is supported).
+	if (pMechanism->mechanism == CKM_SP800_108_DOUBLE_PIPELINE_KDF)
+	{
+		if (pMechanism->pParameter == NULL_PTR ||
+		    pMechanism->ulParameterLen != sizeof(CK_SP800_108_KDF_PARAMS))
+		{
+			ERROR_MSG("CKM_SP800_108_DOUBLE_PIPELINE_KDF requires CK_SP800_108_KDF_PARAMS");
+			return CKR_ARGUMENTS_BAD;
+		}
+		CK_SP800_108_KDF_PARAMS* dpp = (CK_SP800_108_KDF_PARAMS*)pMechanism->pParameter;
+
+		bool dpUseCmac = (dpp->prfType == CKM_AES_CMAC);
+		const char* dpMacName = dpUseCmac ? "CMAC" : "HMAC";
+		const char* dpDigestName = nullptr;
+		if (!dpUseCmac)
+		{
+			dpDigestName = ckmHmacPrfToDigestName(dpp->prfType);
+			if (dpDigestName == nullptr)
+			{
+				ERROR_MSG("CKM_SP800_108_DOUBLE_PIPELINE_KDF: PRF 0x%08lx is not a keyed-MAC mechanism", (unsigned long)dpp->prfType);
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+		}
+
+		CK_ULONG dpKeyLen = 0;
+		for (CK_ULONG i = 0; i < ulCount; i++)
+		{
+			if (pTemplate[i].type == CKA_VALUE_LEN &&
+			    pTemplate[i].pValue != NULL_PTR &&
+			    pTemplate[i].ulValueLen == sizeof(CK_ULONG))
+			{
+				dpKeyLen = *(CK_ULONG*)pTemplate[i].pValue;
+				break;
+			}
+		}
+		if (dpKeyLen == 0 || dpKeyLen > 512)
+		{
+			ERROR_MSG("CKM_SP800_108_DOUBLE_PIPELINE_KDF: CKA_VALUE_LEN missing or out of range (got %lu)", (unsigned long)dpKeyLen);
+			return CKR_TEMPLATE_INCOMPLETE;
+		}
+
+		ByteString dpIKM;
+		if (isKeyPrivate)
+		{
+			if (!token->decrypt(key->getByteStringValue(CKA_VALUE), dpIKM))
+				return CKR_GENERAL_ERROR;
+		}
+		else
+		{
+			dpIKM = key->getByteStringValue(CKA_VALUE);
+		}
+
+		const char* dpCipherName = nullptr;
+		if (dpUseCmac)
+		{
+			switch (dpIKM.size())
+			{
+				case 16: dpCipherName = "AES-128-CBC"; break;
+				case 24: dpCipherName = "AES-192-CBC"; break;
+				case 32: dpCipherName = "AES-256-CBC"; break;
+				default:
+					ERROR_MSG("CKM_SP800_108_DOUBLE_PIPELINE_KDF: unsupported CMAC key size %lu bytes", (unsigned long)dpIKM.size());
+					return CKR_KEY_SIZE_RANGE;
+			}
+		}
+
+		// Parse CK_PRF_DATA_PARAM array (same shape as FEEDBACK_KDF above):
+		//   CK_SP800_108_BYTE_ARRAY → fixed input (per §2.44.3, also used as A(0))
+		//   CK_SP800_108_COUNTER → explicit optional counter width
+		ByteString dpFixedInput;
+		int dpCounterBits = 32;
+		for (CK_ULONG i = 0; i < dpp->ulNumberOfDataParams; i++)
+		{
+			CK_PRF_DATA_PARAM* dpm = &dpp->pDataParams[i];
+			switch (dpm->type)
+			{
+				case CK_SP800_108_BYTE_ARRAY:
+					if (dpm->pValue != NULL_PTR && dpm->ulValueLen > 0)
+						dpFixedInput += ByteString((CK_BYTE_PTR)dpm->pValue, dpm->ulValueLen);
+					break;
+				case CK_SP800_108_COUNTER:
+					if (dpm->pValue != NULL_PTR && dpm->ulValueLen == sizeof(CK_SP800_108_COUNTER_FORMAT))
+					{
+						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dpm->pValue;
+						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64)
+							dpCounterBits = (int)cf->ulWidthInBits;
+					}
+					break;
+				default:
+					break; // ITERATION_VARIABLE (implicit A(i)), DKM_LENGTH, KEY_HANDLE not supported — skip
+			}
+		}
+		if (dpFixedInput.size() == 0)
+		{
+			ERROR_MSG("CKM_SP800_108_DOUBLE_PIPELINE_KDF: no CK_SP800_108_BYTE_ARRAY fixed input supplied (also used as A(0))");
+			return CKR_MECHANISM_PARAM_INVALID;
+		}
+
+		ByteString dpOut;
+		{
+			EVP_MAC* dpAlgo = EVP_MAC_fetch(NULL, dpMacName, NULL);
+			if (dpAlgo == NULL)
+			{
+				ERROR_MSG("EVP_MAC_fetch %s failed: 0x%08X", dpMacName, ERR_get_error());
+				return CKR_FUNCTION_FAILED;
+			}
+
+			OSSL_PARAM dpInitParams[2];
+			int dpParamCount = 0;
+			if (!dpUseCmac)
+				dpInitParams[dpParamCount++] = OSSL_PARAM_construct_utf8_string("digest", const_cast<char*>(dpDigestName), 0);
+			else
+				dpInitParams[dpParamCount++] = OSSL_PARAM_construct_utf8_string("cipher", const_cast<char*>(dpCipherName), 0);
+			dpInitParams[dpParamCount] = OSSL_PARAM_construct_end();
+
+			auto dpRunMac = [&](const ByteString& in, ByteString& out) -> bool
+			{
+				EVP_MAC_CTX* ctx = EVP_MAC_CTX_new(dpAlgo);
+				if (ctx == NULL) return false;
+				bool ok = EVP_MAC_init(ctx, dpIKM.const_byte_str(), dpIKM.size(), dpInitParams) > 0 &&
+				          EVP_MAC_update(ctx, in.const_byte_str(), in.size()) > 0;
+				if (ok)
+				{
+					size_t macSize = EVP_MAC_CTX_get_mac_size(ctx);
+					out.resize(macSize);
+					size_t outLen = 0;
+					ok = EVP_MAC_final(ctx, out.byte_str(), &outLen, macSize) > 0;
+					if (ok) out.resize(outLen);
+				}
+				EVP_MAC_CTX_free(ctx);
+				return ok;
+			};
+
+			int dpCounterBytes = dpCounterBits / 8;
+			ByteString dpA = dpFixedInput; // A(0), PKCS#11 v3.2 §2.44.3
+			unsigned long dpCounter = 1;
+			bool dpOK = true;
+			while (dpOK && dpOut.size() < dpKeyLen)
+			{
+				ByteString dpANext;
+				if (!dpRunMac(dpA, dpANext)) { dpOK = false; break; }
+				dpA = dpANext;
+
+				ByteString dpRoundIn = dpA;
+				for (int b = dpCounterBytes - 1; b >= 0; b--)
+					dpRoundIn += (unsigned char)((dpCounter >> (8 * b)) & 0xFF);
+				dpRoundIn += dpFixedInput;
+
+				ByteString dpBlock;
+				if (!dpRunMac(dpRoundIn, dpBlock)) { dpOK = false; break; }
+				dpOut += dpBlock;
+				dpCounter++;
+			}
+			EVP_MAC_free(dpAlgo);
+			if (!dpOK)
+			{
+				ERROR_MSG("CKM_SP800_108_DOUBLE_PIPELINE_KDF: EVP_MAC round failed: 0x%08X", ERR_get_error());
+				return CKR_FUNCTION_FAILED;
+			}
+			dpOut.resize(dpKeyLen);
+		}
+
+		// Build output key object (mirrors COUNTER_KDF/FEEDBACK_KDF handlers)
+		CK_BBOOL dpOnToken = CK_FALSE;
+		CK_BBOOL dpPrivate = CK_TRUE;
+		for (CK_ULONG i = 0; i < ulCount; i++)
+		{
+			if (pTemplate[i].type == CKA_TOKEN && pTemplate[i].pValue != NULL_PTR)
+				dpOnToken = *(CK_BBOOL*)pTemplate[i].pValue;
+			if (pTemplate[i].type == CKA_PRIVATE && pTemplate[i].pValue != NULL_PTR)
+				dpPrivate = *(CK_BBOOL*)pTemplate[i].pValue;
+		}
+
+		CK_RV dpRv = haveWrite(session->getState(), dpOnToken, dpPrivate);
+		if (dpRv != CKR_OK)
+		{
+			if (dpRv == CKR_USER_NOT_LOGGED_IN) INFO_MSG("User is not authorized");
+			if (dpRv == CKR_SESSION_READ_ONLY)  INFO_MSG("Session is read-only");
+			return dpRv;
+		}
+
+		const CK_ULONG dpMaxAttribs = 32;
+		CK_OBJECT_CLASS dpObjClass = CKO_SECRET_KEY;
+		CK_KEY_TYPE     dpKeyType  = CKK_GENERIC_SECRET;
+		CK_ATTRIBUTE dpAttribs[dpMaxAttribs] = {
+			{ CKA_CLASS,    &dpObjClass, sizeof(dpObjClass) },
+			{ CKA_TOKEN,    &dpOnToken,  sizeof(dpOnToken)  },
+			{ CKA_PRIVATE,  &dpPrivate,  sizeof(dpPrivate)  },
+			{ CKA_KEY_TYPE, &dpKeyType,  sizeof(dpKeyType)  },
+		};
+		CK_ULONG dpAttribsCount = 4;
+		bool dpCheckValue = true;
+		bool dpKcvSupplied = false;
+		ByteString dpKcvWanted;
+		for (CK_ULONG i = 0; i < ulCount && dpAttribsCount < dpMaxAttribs; i++)
+		{
+			switch (pTemplate[i].type)
+			{
+				case CKA_CLASS: case CKA_TOKEN: case CKA_PRIVATE:
+				case CKA_KEY_TYPE: continue;
+				case CKA_CHECK_VALUE:
+				{
+					CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], dpCheckValue, dpKcvSupplied, dpKcvWanted);
+					if (kcvRv != CKR_OK) return kcvRv;
+					continue;
+				}
+				default: dpAttribs[dpAttribsCount++] = pTemplate[i]; break;
+			}
+		}
+
+		dpRv = CreateObject(hSession, dpAttribs, dpAttribsCount, phKey, OBJECT_OP_GENERATE);
+		if (dpRv != CKR_OK) return dpRv;
+
+		OSObject* dpObj = (OSObject*)handleManager->getObject(*phKey);
+		if (dpObj == NULL_PTR || !dpObj->isValid()) return CKR_FUNCTION_FAILED;
+		if (!dpObj->startTransaction()) return CKR_FUNCTION_FAILED;
+
+		bool dpOK2 = true;
+		dpOK2 = dpOK2 && dpObj->setAttribute(CKA_LOCAL, false);
+		CK_ULONG dpGenMech = (CK_ULONG)CKM_SP800_108_DOUBLE_PIPELINE_KDF;
+		dpOK2 = dpOK2 && dpObj->setAttribute(CKA_KEY_GEN_MECHANISM, dpGenMech);
+		bool dpAlwaysSens   = dpObj->getBooleanValue(CKA_SENSITIVE, false);
+		dpOK2 = dpOK2 && dpObj->setAttribute(CKA_ALWAYS_SENSITIVE, dpAlwaysSens);
+		bool dpNeverExtract = !dpObj->getBooleanValue(CKA_EXTRACTABLE, false);
+		dpOK2 = dpOK2 && dpObj->setAttribute(CKA_NEVER_EXTRACTABLE, dpNeverExtract);
+
+		SymmetricKey dpSymKey;
+		dpSymKey.setKeyBits(dpOut);
+		dpSymKey.setBitLen(dpKeyLen * 8);
+		ByteString dpValue;
+		if (dpPrivate)
+			dpOK2 = dpOK2 && token->encrypt(dpSymKey.getKeyBits(), dpValue);
+		else
+			dpValue = dpSymKey.getKeyBits();
+		dpOK2 = dpOK2 && dpObj->setAttribute(CKA_VALUE, dpValue);
+
+		ByteString dpKcv;
+		if (dpCheckValue)
+			dpKcv = computeSecretKeyKCV(dpKeyType, dpSymKey.getKeyBits());
+		{
+			CK_RV kcvRv = checkValueVerify(dpKcvSupplied, dpKcvWanted, dpKcv);
+			if (kcvRv != CKR_OK)
+			{
+				dpObj->abortTransaction();
+				handleManager->destroyObject(*phKey);
+				*phKey = CK_INVALID_HANDLE;
+				return kcvRv;
+			}
+		}
+		if (dpKcv.size() == 3)
+			dpOK2 = dpOK2 && dpObj->setAttribute(CKA_CHECK_VALUE, dpKcv);
+
+		if (dpOK2)
+			dpObj->commitTransaction();
+		else
+			dpObj->abortTransaction();
+
+		if (!dpOK2)
 		{
 			handleManager->destroyObject(*phKey);
 			*phKey = CK_INVALID_HANDLE;

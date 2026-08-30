@@ -1,0 +1,109 @@
+{
+  "algorithm": "ACVP-AES-CCM",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ACVP-AES-CCM-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "cb5dbd94b8eb6257ccb8d62b98f97277a29902a4be431ccdd1c932b0d34b6756",
+    "note": "WS-8 (2026-08-30): CKM_AES_CCM did not exist in this engine at all before this session. Real, non-trivial addition: OpenSSL EVP CCM requires the total plaintext length declared via a NULL-output Update call before AAD or real data (RFC 3610/SP800-38C bakes length into the first CBC-MAC block), and the tag-length ctrl must be set BEFORE the key+IV init call (confirmed empirically -- the same ctrl called after key+IV init silently produces a wrong tag). Root-caused and verified against these real ACVP vectors via standalone C programs linked directly against libcrypto (ccm_test.c / ccm_dec_test.c / ccm_dec_test2.c / ccm_zero_test.c) before touching the engine, matching the same methodology used for the SP800-108 fixes. Cases: 1 encrypt + 1 decrypt KAT per key size (128/192/256, no AAD, genuinely non-zero payload -- the naive first-match picked payloadLen=0 trivial cases initially, re-selected for real payload), 1 decrypt KAT with AAD (a payloadLen=0, AAD-only case -- CCM used GMAC-style; kept deliberately as that specific, real edge case, not swapped for a \"nicer\" one), and 1 decrypt case with a deliberately-tampered tag (testPassed=false) to confirm this engine correctly rejects it, not just that it accepts good tags."
+  },
+  "cases": [
+    {
+      "direction": "encrypt",
+      "keyLen": 128,
+      "ivLen": 104,
+      "tagLen": 128,
+      "key": "B4CE71A01A783C7851D19132B3B06E9A",
+      "iv": "73D7BCBA710C109945F7936CD4",
+      "aad": "",
+      "pt": "41E2C125D41E372DA9A4786D22A10BA4B04C3467454DA0B4B8C6920FEA641585",
+      "ct": "CAF31B083FD6EF0641713EB49F28F1CDB6FBB138251DB94F6FC59BCCDF0E23092CCD1C202526873D0CCD6053C79AEEAF"
+    },
+    {
+      "direction": "encrypt",
+      "keyLen": 192,
+      "ivLen": 104,
+      "tagLen": 128,
+      "key": "D5B5D0E41C23A2D965ED37D771F100B415EEBF5F0E96E7B2",
+      "iv": "372489E1029850F811E782EEC7",
+      "aad": "",
+      "pt": "8ED6A956C1C39600711E813969BB078C4274CD0B3C70D942A7B9D57E825FE657",
+      "ct": "85C27F693899036BC49DFD3253251F2E246165DDB7022F951CC05D6BE859AB6DFB46D50E317FA7556F5C3F32960DA24E"
+    },
+    {
+      "direction": "encrypt",
+      "keyLen": 256,
+      "ivLen": 104,
+      "tagLen": 128,
+      "key": "469C0479AD357AA89E0D15D54C1B8047DD4E08338D70D7A17EF5FE9AEF7ADB7B",
+      "iv": "8739190C88B4DCBDA98660F31E",
+      "aad": "",
+      "pt": "3FD12F99C1B5ADD71413F811BB8A7EB277AD2462DB32F07536C52F5B0D8FBC96",
+      "ct": "836906FA9F2056F327091C157992A65826DA38D4F559AD2F1661BFEF41096A94DC2021B8EDC942BB9BEC4C11BF467C65"
+    },
+    {
+      "direction": "decrypt",
+      "keyLen": 128,
+      "ivLen": 72,
+      "tagLen": 32,
+      "key": "E969A4F0C774CA0E3B6CD3FE2DF471CD",
+      "iv": "80253883D54F4B112E",
+      "aad": "",
+      "pt": "81696790CDD39D343D40957007C3A443F4925851007005E53050E2A4C696C0BB",
+      "ct": "B04BD26C19AED33BBBBFB5441AF495E738E564128F51ECB882F11EB359A8FE67A8DD802F",
+      "testPassed": true
+    },
+    {
+      "direction": "decrypt",
+      "keyLen": 192,
+      "ivLen": 72,
+      "tagLen": 32,
+      "key": "323F053EEAA06B7BC0CC18413FBEBF75DE4AE39245A502F0",
+      "iv": "A94AD76BA3F00628AC",
+      "aad": "",
+      "pt": "9C1F839CD41C0DADA22F2EF0EABF13FEA6D4DF77A2E2C9CD7440C0FEB3CADB61",
+      "ct": "C3432911BEB0D084933760A5955E7B6EC5081EA0F53D23F8564EAE0E9A211447739CA9C8",
+      "testPassed": true
+    },
+    {
+      "direction": "decrypt",
+      "keyLen": 256,
+      "ivLen": 72,
+      "tagLen": 32,
+      "key": "4AA4310A680E10B8B56A9C4545FA7D106ACFBC6570273670A4BA29C574A6229F",
+      "iv": "7D80FA974DD66563F4",
+      "aad": "",
+      "pt": "6D467C7F4B32385EE9361649CE3A38AABF0CF3F804D03AC6237D3CA16CFAEECC",
+      "ct": "7FE1CD4345E0D80647FE8A83AFC9392C73A00B554196016E121F53D650893D4A1B86583D",
+      "testPassed": true
+    },
+    {
+      "direction": "decrypt",
+      "keyLen": 128,
+      "ivLen": 72,
+      "tagLen": 32,
+      "key": "4B1F99D0ED2C990812C661752DCC60F5",
+      "iv": "F6EDA9C576572FEEFA",
+      "aad": "B73068EAC6C1915BEC047140E73F472B5B5D696C753117145EC95A134F81067D",
+      "pt": "",
+      "ct": "C4EDA4F8",
+      "testPassed": true,
+      "note": "has AAD, payloadLen=0"
+    },
+    {
+      "direction": "decrypt",
+      "keyLen": 128,
+      "ivLen": 72,
+      "tagLen": 32,
+      "key": "59F728F5AFA2ACC0F8436C487D085410",
+      "iv": "84FDB73E36D5DF6086",
+      "aad": "",
+      "pt": "",
+      "ct": "A9E9CCF0C356151CEF1A46ED208CA313E6D7A6778B8C6E686A92C8D407F72E13517AA6D8",
+      "testPassed": false,
+      "note": "expected auth failure (tampered vector)"
+    }
+  ]
+}

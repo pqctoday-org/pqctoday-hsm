@@ -166,6 +166,73 @@ export function buildGCMParams(M, iv, aad = new Uint8Array(0), tagBits = 128) {
   return { ptr, size: 24, ivPtr, aadPtr }
 }
 
+/**
+ * CK_CCM_PARAMS: ulDataLen(4) pNonce(4) ulNonceLen(4) pAAD(4) ulAADLen(4)
+ * ulMACLen(4) = 24B. `dataLen` is the plaintext length for encrypt, or the
+ * plaintext length for decrypt too (RFC 3610/SP800-38C: ciphertext and
+ * plaintext are the same length, only the appended tag differs) — see the
+ * dataLen comment on SymmetricAlgorithm::encryptInit/decryptInit in the C++.
+ */
+export function buildCCMParams(M, dataLen, nonce, aad = new Uint8Array(0), macLen = 16) {
+  const noncePtr = writeBytes(M, nonce)
+  const aadPtr = aad.length > 0 ? writeBytes(M, aad) : 0
+  const ptr = M._malloc(24)
+  M.setValue(ptr + 0, dataLen, 'i32')
+  M.setValue(ptr + 4, noncePtr, 'i32')
+  M.setValue(ptr + 8, nonce.length, 'i32')
+  M.setValue(ptr + 12, aadPtr, 'i32')
+  M.setValue(ptr + 16, aad.length, 'i32')
+  M.setValue(ptr + 20, macLen, 'i32')
+  return { ptr, size: 24, noncePtr, aadPtr }
+}
+
+/** AES-CCM encrypt (single-shot) → ciphertext||tag */
+export function aesCcmEncrypt(M, hSession, handle, pt, nonce, aad = new Uint8Array(0), macLen = 16) {
+  const ccm = buildCCMParams(M, pt.length, nonce, aad, macLen)
+  const mechPtr = buildMech(M, CK.CKM_AES_CCM, ccm.ptr, ccm.size)
+  check('C_EncryptInit(CCM)', M._C_EncryptInit(hSession, mechPtr, handle))
+  const ptPtr = writeBytes(M, pt)
+  const outLen = pt.length + macLen
+  const outPtr = M._malloc(outLen)
+  const outLenPtr = allocUlong(M)
+  M.setValue(outLenPtr, outLen, 'i32')
+  check('C_Encrypt(CCM)', M._C_Encrypt(hSession, ptPtr, pt.length, outPtr, outLenPtr))
+  const actualLen = readUlong(M, outLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, outPtr, actualLen).slice()
+  M._free(ptPtr)
+  M._free(outPtr)
+  freePtr(M, outLenPtr)
+  M._free(mechPtr)
+  M._free(ccm.ptr)
+  M._free(ccm.noncePtr)
+  if (ccm.aadPtr) M._free(ccm.aadPtr)
+  return result
+}
+
+/** AES-CCM decrypt (single-shot). `ct` includes the trailing tag. Throws on auth failure. */
+export function aesCcmDecrypt(M, hSession, handle, ct, nonce, aad = new Uint8Array(0), macLen = 16) {
+  const dataLen = ct.length - macLen
+  const ccm = buildCCMParams(M, dataLen, nonce, aad, macLen)
+  const mechPtr = buildMech(M, CK.CKM_AES_CCM, ccm.ptr, ccm.size)
+  check('C_DecryptInit(CCM)', M._C_DecryptInit(hSession, mechPtr, handle))
+  const ctPtr = writeBytes(M, ct)
+  const outLen = dataLen + 16
+  const outPtr = M._malloc(outLen)
+  const outLenPtr = allocUlong(M)
+  M.setValue(outLenPtr, outLen, 'i32')
+  check('C_Decrypt(CCM)', M._C_Decrypt(hSession, ctPtr, ct.length, outPtr, outLenPtr))
+  const actualLen = readUlong(M, outLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, outPtr, actualLen).slice()
+  M._free(ctPtr)
+  M._free(outPtr)
+  freePtr(M, outLenPtr)
+  M._free(mechPtr)
+  M._free(ccm.ptr)
+  M._free(ccm.noncePtr)
+  if (ccm.aadPtr) M._free(ccm.aadPtr)
+  return result
+}
+
 /** CK_AES_CTR_PARAMS: ulCounterBits(4) cb[16] = 20B */
 export function buildCTRParams(M, iv, counterBits) {
   const ptr = M._malloc(20)
@@ -780,6 +847,12 @@ export function generateEdDSAKeyPair(M, hSession, curve = 'Ed25519') {
  */
 export function aesDecrypt(M, hSession, handle, ct, iv, mode = 'gcm', aad = new Uint8Array(0), tagBits = 128) {
   let mechPtr, extraPtrs = []
+  const SIMPLE_IV_MECH = {
+    'ofb': CK.CKM_AES_OFB,
+    'cfb1': CK.CKM_AES_CFB1,
+    'cfb8': CK.CKM_AES_CFB8,
+    'cfb128': CK.CKM_AES_CFB128,
+  }
   if (mode === 'gcm') {
     const gcm = buildGCMParams(M, iv, aad, tagBits)
     mechPtr = buildMech(M, CK.CKM_AES_GCM, gcm.ptr, gcm.size)
@@ -787,6 +860,10 @@ export function aesDecrypt(M, hSession, handle, ct, iv, mode = 'gcm', aad = new 
   } else if (mode === 'cbc-raw') {
     const ivPtr = writeBytes(M, iv)
     mechPtr = buildMech(M, CK.CKM_AES_CBC, ivPtr, iv.length)
+    extraPtrs = [ivPtr]
+  } else if (SIMPLE_IV_MECH[mode]) {
+    const ivPtr = writeBytes(M, iv)
+    mechPtr = buildMech(M, SIMPLE_IV_MECH[mode], ivPtr, iv.length)
     extraPtrs = [ivPtr]
   } else {
     // CBC — IV is the 16-byte param
@@ -1615,6 +1692,218 @@ export function hkdf(M, hSession, ikmHandle, hashMech, extract, expand, salt, in
   M._free(paramsPtr)
   M._free(saltPtr)
   M._free(infoPtr)
+  return result
+}
+
+export function concatBytes(...arrays) {
+  const total = arrays.reduce((n, a) => n + a.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const a of arrays) {
+    out.set(a, off)
+    off += a.length
+  }
+  return out
+}
+
+// Raw CKK_GENERIC_SECRET import for use as a KDF base key (e.g. an ACVP
+// KDA/KBKDF shared secret z / keyIn value that isn't an HMAC or AES key).
+export function importGenericSecret(M, hSession, keyBytes, { derive = true } = {}) {
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_DERIVE, value: derive },
+    { type: CK.CKA_EXTRACTABLE, value: false },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_VALUE, value: keyBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(GenericSecret)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/**
+ * SP800-108 Counter Mode KDF (CKM_SP800_108_COUNTER_KDF) → raw derived bytes.
+ * dataParams = [{BYTE_ARRAY: fixedInput}, {ITERATION_VARIABLE: counterFormat}]
+ * i.e. PRF(Ki, fixedInput || counter) — the only counter placement this
+ * engine's OpenSSL KBKDF backend can produce (see SoftHSM_keygen.cpp comment
+ * at the CKM_SP800_108_COUNTER_KDF handler); matches ACVP's "before fixed
+ * data" counterLocation configuration exactly since fixedInput here plays
+ * the role of OpenSSL's "info"/context with an empty label.
+ * CK_SP800_108_COUNTER_FORMAT (8 bytes on 32-bit WASM): bLittleEndian(1)+pad(3)+ulWidthInBits(4)
+ * CK_PRF_DATA_PARAM (12 bytes): type(4)+pValue(4)+ulValueLen(4)
+ * CK_SP800_108_KDF_PARAMS (20 bytes): prfType(4)+ulNumberOfDataParams(4)+pDataParams(4)+ulAdditionalDerivedKeys(4)+pAdditionalDerivedKeys(4)
+ */
+export function sp800108CounterKdf(M, hSession, baseKeyHandle, prfType, fixedInput, counterBits, outLen) {
+  const fixedPtr = writeBytes(M, fixedInput)
+  const counterFormatPtr = M._malloc(8)
+  M.HEAPU8.fill(0, counterFormatPtr, counterFormatPtr + 8)
+  M.HEAPU8[counterFormatPtr + 0] = 0 // bLittleEndian = false (big-endian, ACVP convention)
+  M.setValue(counterFormatPtr + 4, counterBits, 'i32')
+
+  const dataParamsPtr = M._malloc(24)
+  M.setValue(dataParamsPtr + 0, CK.CK_SP800_108_BYTE_ARRAY, 'i32')
+  M.setValue(dataParamsPtr + 4, fixedPtr, 'i32')
+  M.setValue(dataParamsPtr + 8, fixedInput.length, 'i32')
+  M.setValue(dataParamsPtr + 12, CK.CK_SP800_108_ITERATION_VARIABLE, 'i32')
+  M.setValue(dataParamsPtr + 16, counterFormatPtr, 'i32')
+  M.setValue(dataParamsPtr + 20, 8, 'i32')
+
+  const kdfParamsPtr = M._malloc(20)
+  M.setValue(kdfParamsPtr + 0, prfType, 'i32')
+  M.setValue(kdfParamsPtr + 4, 2, 'i32')
+  M.setValue(kdfParamsPtr + 8, dataParamsPtr, 'i32')
+  M.setValue(kdfParamsPtr + 12, 0, 'i32')
+  M.setValue(kdfParamsPtr + 16, 0, 'i32')
+
+  const mechPtr = buildMech(M, CK.CKM_SP800_108_COUNTER_KDF, kdfParamsPtr, 20)
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_VALUE_LEN, value: outLen },
+  ])
+  const hPtr = allocUlong(M)
+  check(
+    'C_DeriveKey(SP800-108-Counter)',
+    M._C_DeriveKey(hSession, mechPtr, baseKeyHandle, tpl.arrPtr, tpl.count, hPtr)
+  )
+  const derivedHandle = readUlong(M, hPtr)
+  const result = extractKeyValue(M, hSession, derivedHandle)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  M._free(mechPtr)
+  M._free(kdfParamsPtr)
+  M._free(dataParamsPtr)
+  M._free(counterFormatPtr)
+  M._free(fixedPtr)
+  return result
+}
+
+/**
+ * SP800-108 Feedback Mode KDF (CKM_SP800_108_FEEDBACK_KDF) → raw derived bytes.
+ * dataParams = [{ITERATION_VARIABLE: NULL (K(i-1)/IV, implicit)}, {BYTE_ARRAY: fixedInput},
+ *               {COUNTER: counterFormat}] i.e. PRF(Ki, K(i-1) || counter || fixedInput),
+ * matching ACVP's "before fixed data" counterLocation for feedback mode.
+ * CK_SP800_108_FEEDBACK_KDF_PARAMS (28 bytes): prfType(4)+ulNumberOfDataParams(4)+pDataParams(4)+ulIVLen(4)+pIV(4)+ulAdditionalDerivedKeys(4)+pAdditionalDerivedKeys(4)
+ */
+export function sp800108FeedbackKdf(M, hSession, baseKeyHandle, prfType, fixedInput, counterBits, iv, outLen) {
+  const fixedPtr = writeBytes(M, fixedInput)
+  const counterFormatPtr = M._malloc(8)
+  M.HEAPU8.fill(0, counterFormatPtr, counterFormatPtr + 8)
+  M.HEAPU8[counterFormatPtr + 0] = 0
+  M.setValue(counterFormatPtr + 4, counterBits, 'i32')
+
+  const dataParamsPtr = M._malloc(36) // 3 entries * 12 bytes
+  M.setValue(dataParamsPtr + 0, CK.CK_SP800_108_ITERATION_VARIABLE, 'i32')
+  M.setValue(dataParamsPtr + 4, 0, 'i32') // pValue = NULL_PTR (K(i-1) is implicit)
+  M.setValue(dataParamsPtr + 8, 0, 'i32')
+  M.setValue(dataParamsPtr + 12, CK.CK_SP800_108_OPTIONAL_COUNTER, 'i32')
+  M.setValue(dataParamsPtr + 16, counterFormatPtr, 'i32')
+  M.setValue(dataParamsPtr + 20, 8, 'i32')
+  M.setValue(dataParamsPtr + 24, CK.CK_SP800_108_BYTE_ARRAY, 'i32')
+  M.setValue(dataParamsPtr + 28, fixedPtr, 'i32')
+  M.setValue(dataParamsPtr + 32, fixedInput.length, 'i32')
+
+  const ivPtr = writeBytes(M, iv)
+  const kdfParamsPtr = M._malloc(28)
+  M.setValue(kdfParamsPtr + 0, prfType, 'i32')
+  M.setValue(kdfParamsPtr + 4, 3, 'i32')
+  M.setValue(kdfParamsPtr + 8, dataParamsPtr, 'i32')
+  M.setValue(kdfParamsPtr + 12, iv.length, 'i32')
+  M.setValue(kdfParamsPtr + 16, iv.length > 0 ? ivPtr : 0, 'i32')
+  M.setValue(kdfParamsPtr + 20, 0, 'i32')
+  M.setValue(kdfParamsPtr + 24, 0, 'i32')
+
+  const mechPtr = buildMech(M, CK.CKM_SP800_108_FEEDBACK_KDF, kdfParamsPtr, 28)
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_VALUE_LEN, value: outLen },
+  ])
+  const hPtr = allocUlong(M)
+  check(
+    'C_DeriveKey(SP800-108-Feedback)',
+    M._C_DeriveKey(hSession, mechPtr, baseKeyHandle, tpl.arrPtr, tpl.count, hPtr)
+  )
+  const derivedHandle = readUlong(M, hPtr)
+  const result = extractKeyValue(M, hSession, derivedHandle)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  M._free(mechPtr)
+  M._free(kdfParamsPtr)
+  M._free(dataParamsPtr)
+  M._free(counterFormatPtr)
+  M._free(fixedPtr)
+  M._free(ivPtr)
+  return result
+}
+
+/**
+ * SP800-108 Double Pipeline Iteration Mode KDF (CKM_SP800_108_DOUBLE_PIPELINE_KDF)
+ * → raw derived bytes. dataParams = [{ITERATION_VARIABLE: NULL (A(i), implicit)},
+ * {BYTE_ARRAY: fixedInput}, {COUNTER: counterFormat}] i.e. A(0)=fixedInput,
+ * A(i)=PRF(Ki,A(i-1)), round = PRF(Ki, A(i) || counter || fixedInput) — same
+ * "before fixed data" placement as sp800108CounterKdf/sp800108FeedbackKdf.
+ * Uses CK_SP800_108_KDF_PARAMS (20 bytes, same struct as Counter mode — no IV field).
+ */
+export function sp800108DoublePipelineKdf(M, hSession, baseKeyHandle, prfType, fixedInput, counterBits, outLen) {
+  const fixedPtr = writeBytes(M, fixedInput)
+  const counterFormatPtr = M._malloc(8)
+  M.HEAPU8.fill(0, counterFormatPtr, counterFormatPtr + 8)
+  M.HEAPU8[counterFormatPtr + 0] = 0
+  M.setValue(counterFormatPtr + 4, counterBits, 'i32')
+
+  const dataParamsPtr = M._malloc(36) // 3 entries * 12 bytes
+  M.setValue(dataParamsPtr + 0, CK.CK_SP800_108_ITERATION_VARIABLE, 'i32')
+  M.setValue(dataParamsPtr + 4, 0, 'i32') // pValue = NULL_PTR (A(i) is implicit)
+  M.setValue(dataParamsPtr + 8, 0, 'i32')
+  M.setValue(dataParamsPtr + 12, CK.CK_SP800_108_BYTE_ARRAY, 'i32')
+  M.setValue(dataParamsPtr + 16, fixedPtr, 'i32')
+  M.setValue(dataParamsPtr + 20, fixedInput.length, 'i32')
+  M.setValue(dataParamsPtr + 24, CK.CK_SP800_108_OPTIONAL_COUNTER, 'i32')
+  M.setValue(dataParamsPtr + 28, counterFormatPtr, 'i32')
+  M.setValue(dataParamsPtr + 32, 8, 'i32')
+
+  const kdfParamsPtr = M._malloc(20)
+  M.setValue(kdfParamsPtr + 0, prfType, 'i32')
+  M.setValue(kdfParamsPtr + 4, 3, 'i32')
+  M.setValue(kdfParamsPtr + 8, dataParamsPtr, 'i32')
+  M.setValue(kdfParamsPtr + 12, 0, 'i32')
+  M.setValue(kdfParamsPtr + 16, 0, 'i32')
+
+  const mechPtr = buildMech(M, CK.CKM_SP800_108_DOUBLE_PIPELINE_KDF, kdfParamsPtr, 20)
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_VALUE_LEN, value: outLen },
+  ])
+  const hPtr = allocUlong(M)
+  check(
+    'C_DeriveKey(SP800-108-DoublePipeline)',
+    M._C_DeriveKey(hSession, mechPtr, baseKeyHandle, tpl.arrPtr, tpl.count, hPtr)
+  )
+  const derivedHandle = readUlong(M, hPtr)
+  const result = extractKeyValue(M, hSession, derivedHandle)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  M._free(mechPtr)
+  M._free(kdfParamsPtr)
+  M._free(dataParamsPtr)
+  M._free(counterFormatPtr)
+  M._free(fixedPtr)
   return result
 }
 

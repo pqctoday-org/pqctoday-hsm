@@ -262,6 +262,66 @@ const EVP_CIPHER* OSSLAES::getCipher() const
 				return EVP_aes_256_gcm();
 		};
 	}
+	else if (currentCipherMode == SymMode::OFB)
+	{
+		switch(currentKey->getBitLen())
+		{
+			case 128:
+				return EVP_aes_128_ofb();
+			case 192:
+				return EVP_aes_192_ofb();
+			case 256:
+				return EVP_aes_256_ofb();
+		};
+	}
+	else if (currentCipherMode == SymMode::CFB128)
+	{
+		switch(currentKey->getBitLen())
+		{
+			case 128:
+				return EVP_aes_128_cfb128();
+			case 192:
+				return EVP_aes_192_cfb128();
+			case 256:
+				return EVP_aes_256_cfb128();
+		};
+	}
+	else if (currentCipherMode == SymMode::CFB8)
+	{
+		switch(currentKey->getBitLen())
+		{
+			case 128:
+				return EVP_aes_128_cfb8();
+			case 192:
+				return EVP_aes_192_cfb8();
+			case 256:
+				return EVP_aes_256_cfb8();
+		};
+	}
+	else if (currentCipherMode == SymMode::CFB1)
+	{
+		switch(currentKey->getBitLen())
+		{
+			case 128:
+				return EVP_aes_128_cfb1();
+			case 192:
+				return EVP_aes_192_cfb1();
+			case 256:
+				return EVP_aes_256_cfb1();
+		};
+	}
+	else if (currentCipherMode == SymMode::CCM)
+	{
+		switch(currentKey->getBitLen())
+		{
+			case 128:
+				return EVP_aes_128_ccm();
+			case 192:
+				return EVP_aes_192_ccm();
+			case 256:
+				return EVP_aes_256_ccm();
+		};
+	}
 
 	ERROR_MSG("Invalid AES cipher mode %i", currentCipherMode);
 

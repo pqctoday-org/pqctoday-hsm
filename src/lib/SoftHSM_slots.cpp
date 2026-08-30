@@ -498,6 +498,7 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	// NIST SP 800-108 KBKDFs (PKCS#11 v3.2 §2.44)
 	t["CKM_SP800_108_COUNTER_KDF"]	= CKM_SP800_108_COUNTER_KDF;
 	t["CKM_SP800_108_FEEDBACK_KDF"]	= CKM_SP800_108_FEEDBACK_KDF;
+	t["CKM_SP800_108_DOUBLE_PIPELINE_KDF"]	= CKM_SP800_108_DOUBLE_PIPELINE_KDF;
 	// SHAKE-256 as an XOF-based KDF. Needed by X-Wing, whose 32-byte
 	// decapsulation key expands to 96 bytes of ML-KEM + X25519 key material.
 	t["CKM_SHAKE_256_KEY_DERIVATION"]	= CKM_SHAKE_256_KEY_DERIVATION;
@@ -558,6 +559,12 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_AES_CBC_PAD"]		= CKM_AES_CBC_PAD;
 	t["CKM_AES_CTR"]		= CKM_AES_CTR;
 	t["CKM_AES_GCM"]		= CKM_AES_GCM;
+	// WS-8 (2026-08-30)
+	t["CKM_AES_OFB"]		= CKM_AES_OFB;
+	t["CKM_AES_CFB1"]		= CKM_AES_CFB1;
+	t["CKM_AES_CFB8"]		= CKM_AES_CFB8;
+	t["CKM_AES_CFB128"]		= CKM_AES_CFB128;
+	t["CKM_AES_CCM"]		= CKM_AES_CCM;
 	t["CKM_AES_KEY_WRAP"]		= CKM_AES_KEY_WRAP;
 #ifdef HAVE_AES_KEY_WRAP_PAD
 	t["CKM_AES_KEY_WRAP_PAD"]	= CKM_AES_KEY_WRAP_PAD;
@@ -1020,6 +1027,10 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			/* FALLTHROUGH */
 		case CKM_AES_ECB:
 		case CKM_AES_CTR:
+		case CKM_AES_OFB:
+		case CKM_AES_CFB1:
+		case CKM_AES_CFB8:
+		case CKM_AES_CFB128:
 			pInfo->ulMinKeySize = 16;
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT;
@@ -1032,6 +1043,11 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT |
 			                CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_DECRYPT;
+			break;
+		case CKM_AES_CCM:
+			pInfo->ulMinKeySize = 16;
+			pInfo->ulMaxKeySize = 32;
+			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT;
 			break;
 		case CKM_CHACHA20_KEY_GEN:
 			pInfo->ulMinKeySize = 32;
@@ -1259,6 +1275,7 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 	    case CKM_HKDF_DERIVE:
 	    case CKM_SP800_108_COUNTER_KDF:
 	    case CKM_SP800_108_FEEDBACK_KDF:
+	    case CKM_SP800_108_DOUBLE_PIPELINE_KDF:
 	    case CKM_SHAKE_256_KEY_DERIVATION:
 	    case CKM_SHA256_KEY_DERIVATION:
 	    case CKM_SHA384_KEY_DERIVATION:

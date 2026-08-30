@@ -1,0 +1,35 @@
+{
+  "algorithm": "ACVP-AES-CFB1",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ACVP-AES-CFB1-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "0f5620e67e869e0d0b5f2bc6f1505e524e5272d8813aa287b207e74b3bf222a2",
+    "note": "WS-8 (2026-08-30): CKM_AES_CFB1 added as a thin EVP_aes_*_cfb1() wrapper. This dataset is overwhelmingly payloadLen=1 (a single BIT, byte-padded \u2014 CFB1 processes one bit per round by design), which this engine correctly computes (verified directly against libcrypto via a standalone C program, cfb1_test.c: OpenSSL processes the MSB-first bit correctly), but the JS test harness compares full bytes, not individual bits, so a payloadLen=1 case would fail on the 7 don't-care trailing bits that this engine still (correctly) continues encrypting. Selected payloadLen=8 cases instead (byte-aligned, the only other payloadLen available besides 1..10) to avoid needing bit-level masking in the harness, same precedent as excluding non-byte-aligned SHA digest cases elsewhere in this repo."
+  },
+  "cases": [
+    {
+      "keyLen": 128,
+      "key": "475F9BCC8A22601A4EF877E54DC97977",
+      "iv": "211EAE94DFAC127ED3CC367DBC094D0B",
+      "pt": "03",
+      "ct": "2F"
+    },
+    {
+      "keyLen": 192,
+      "key": "2566A667CE2107A9EEDDF896CDD6789BC7DC7D52C60EC830",
+      "iv": "66DB9C042F3F8CC918B15A580ECB9F29",
+      "pt": "59",
+      "ct": "8A"
+    },
+    {
+      "keyLen": 256,
+      "key": "80EAA265BE9EDBCC6A560EA5265C4519E00FBB036E9C4E71C181FA9FF92F79A3",
+      "iv": "F586F8607D50EBD6BE495D2803C3CF4E",
+      "pt": "C3",
+      "ct": "5D"
+    }
+  ]
+}
