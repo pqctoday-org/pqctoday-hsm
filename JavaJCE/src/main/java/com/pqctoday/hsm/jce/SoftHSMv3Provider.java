@@ -785,6 +785,13 @@ public final class SoftHSMv3Provider extends AuthProvider {
         registerAESCipher("AES/CTR/NoPadding", P11AESCipherSpi.Mode.CTR);
         registerAESWrap("AESWrap", CKM_AES_KEY_WRAP);
         registerAESWrap("AESWrapPad", CKM_AES_KEY_WRAP_PAD);
+        // PKCS#11 v3.2 §6.16.3: CKM_AES_KEY_WRAP_PAD "is deprecated.
+        // CKM_AES_KEY_WRAP_KWP ... shall be used instead" — same RFC 5649
+        // construction (the C++ engine runs the identical
+        // EVP_aes_*_wrap_pad() path for both; see CHANGELOG.md), so this
+        // is a separate JCA name pointing at the spec-current mechanism,
+        // not a new code path.
+        registerAESWrap("AESWrapKWP", CKM_AES_KEY_WRAP_KWP);
 
         // W4: MAC (HMAC-SHA*/AESCMAC/KMAC128/256) — MAC is a plain
         // C_Sign operation in PKCS#11 (confirmed reading SoftHSM_sign.cpp

@@ -53,6 +53,7 @@ final class P11Constants {
     static final long CKM_AES_GCM          = 0x00001087L;
     static final long CKM_AES_KEY_WRAP     = 0x00002109L;
     static final long CKM_AES_KEY_WRAP_PAD = 0x0000210aL;
+    static final long CKM_AES_KEY_WRAP_KWP = 0x0000210bL;
 
     // ── MAC (W4) ─────────────────────────────────────────────────────────
     static final long CKM_GENERIC_SECRET_KEY_GEN = 0x00000350L;
