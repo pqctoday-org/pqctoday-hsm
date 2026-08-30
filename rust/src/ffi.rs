@@ -8096,9 +8096,23 @@ fn sp800_108_counter_kbkdf(
 ) -> Result<Vec<u8>, u32> {
     use hmac::Hmac;
     match prf_type {
+        CKM_SHA_1_HMAC => sp800_108_run_counter::<Hmac<sha1::Sha1>>(base_key, segs, key_len),
+        CKM_SHA224_HMAC => sp800_108_run_counter::<Hmac<sha2::Sha224>>(base_key, segs, key_len),
         CKM_SHA256_HMAC => sp800_108_run_counter::<Hmac<sha2::Sha256>>(base_key, segs, key_len),
         CKM_SHA384_HMAC => sp800_108_run_counter::<Hmac<sha2::Sha384>>(base_key, segs, key_len),
         CKM_SHA512_HMAC => sp800_108_run_counter::<Hmac<sha2::Sha512>>(base_key, segs, key_len),
+        CKM_SHA512_224_HMAC => {
+            sp800_108_run_counter::<Hmac<sha2::Sha512_224>>(base_key, segs, key_len)
+        }
+        CKM_SHA512_256_HMAC => {
+            sp800_108_run_counter::<Hmac<sha2::Sha512_256>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_224_HMAC => {
+            sp800_108_run_counter::<Hmac<sha3::Sha3_224>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_384_HMAC => {
+            sp800_108_run_counter::<Hmac<sha3::Sha3_384>>(base_key, segs, key_len)
+        }
         CKM_SHA3_256_HMAC => {
             sp800_108_run_counter::<Hmac<sha3::Sha3_256>>(base_key, segs, key_len)
         }
@@ -8126,6 +8140,12 @@ fn sp800_108_feedback_kbkdf(
 ) -> Result<Vec<u8>, u32> {
     use hmac::Hmac;
     match prf_type {
+        CKM_SHA_1_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha1::Sha1>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA224_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha2::Sha224>>(base_key, iv, segs, key_len)
+        }
         CKM_SHA256_HMAC => {
             sp800_108_run_feedback::<Hmac<sha2::Sha256>>(base_key, iv, segs, key_len)
         }
@@ -8134,6 +8154,18 @@ fn sp800_108_feedback_kbkdf(
         }
         CKM_SHA512_HMAC => {
             sp800_108_run_feedback::<Hmac<sha2::Sha512>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA512_224_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha2::Sha512_224>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA512_256_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha2::Sha512_256>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA3_224_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha3::Sha3_224>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA3_384_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha3::Sha3_384>>(base_key, iv, segs, key_len)
         }
         CKM_SHA3_256_HMAC => {
             sp800_108_run_feedback::<Hmac<sha3::Sha3_256>>(base_key, iv, segs, key_len)
@@ -8759,39 +8791,36 @@ pub fn C_DeriveKey(
                 };
                 let info = r.buffer(ck_param::hkdf::P_INFO, ck_param::hkdf::UL_INFO_LEN);
                 let mut out = vec![0u8; key_len];
+                // PRF dispatch must be exhaustive over every hash this engine
+                // can name, with a hard rejection for anything else — the
+                // previous `_ => SHA-256` fallback silently substituted the
+                // wrong hash (and returned CKR_OK) for any PRF outside a
+                // 4-way allowlist, confirmed against real ACVP KDA-HKDF
+                // vectors (2026-08-30). CKR_MECHANISM_PARAM_INVALID matches
+                // the honest-failure convention already used by the
+                // SP800-108 Counter/Feedback PRF dispatch below.
                 if b_expand {
+                    macro_rules! hkdf_expand {
+                        ($H:ty) => {{
+                            let hk = hkdf::Hkdf::<$H>::new(salt_opt, &ikm);
+                            if hk.expand(info, &mut out).is_err() {
+                                return CKR_FUNCTION_FAILED;
+                            }
+                        }};
+                    }
                     match prf {
-                        CKM_SHA384 => {
-                            let hk = hkdf::Hkdf::<sha2::Sha384>::new(salt_opt, &ikm);
-                            if hk.expand(info, &mut out).is_err() {
-                                return CKR_FUNCTION_FAILED;
-                            }
-                        }
-                        CKM_SHA512 => {
-                            let hk = hkdf::Hkdf::<sha2::Sha512>::new(salt_opt, &ikm);
-                            if hk.expand(info, &mut out).is_err() {
-                                return CKR_FUNCTION_FAILED;
-                            }
-                        }
-                        CKM_SHA3_256 => {
-                            let hk = hkdf::Hkdf::<sha3::Sha3_256>::new(salt_opt, &ikm);
-                            if hk.expand(info, &mut out).is_err() {
-                                return CKR_FUNCTION_FAILED;
-                            }
-                        }
-                        CKM_SHA3_512 => {
-                            let hk = hkdf::Hkdf::<sha3::Sha3_512>::new(salt_opt, &ikm);
-                            if hk.expand(info, &mut out).is_err() {
-                                return CKR_FUNCTION_FAILED;
-                            }
-                        }
-                        _ => {
-                            // CKM_SHA256 default
-                            let hk = hkdf::Hkdf::<sha2::Sha256>::new(salt_opt, &ikm);
-                            if hk.expand(info, &mut out).is_err() {
-                                return CKR_FUNCTION_FAILED;
-                            }
-                        }
+                        CKM_SHA_1 => hkdf_expand!(sha1::Sha1),
+                        CKM_SHA224 => hkdf_expand!(sha2::Sha224),
+                        CKM_SHA256 => hkdf_expand!(sha2::Sha256),
+                        CKM_SHA384 => hkdf_expand!(sha2::Sha384),
+                        CKM_SHA512 => hkdf_expand!(sha2::Sha512),
+                        CKM_SHA512_224 => hkdf_expand!(sha2::Sha512_224),
+                        CKM_SHA512_256 => hkdf_expand!(sha2::Sha512_256),
+                        CKM_SHA3_224 => hkdf_expand!(sha3::Sha3_224),
+                        CKM_SHA3_256 => hkdf_expand!(sha3::Sha3_256),
+                        CKM_SHA3_384 => hkdf_expand!(sha3::Sha3_384),
+                        CKM_SHA3_512 => hkdf_expand!(sha3::Sha3_512),
+                        _ => return CKR_MECHANISM_PARAM_INVALID,
                     }
                 } else {
                     // extract-only: write PRK to output using the requested PRF
@@ -8803,11 +8832,18 @@ pub fn C_DeriveKey(
                         }};
                     }
                     match prf {
+                        CKM_SHA_1 => hkdf_extract!(sha1::Sha1),
+                        CKM_SHA224 => hkdf_extract!(sha2::Sha224),
+                        CKM_SHA256 => hkdf_extract!(sha2::Sha256),
                         CKM_SHA384 => hkdf_extract!(sha2::Sha384),
                         CKM_SHA512 => hkdf_extract!(sha2::Sha512),
+                        CKM_SHA512_224 => hkdf_extract!(sha2::Sha512_224),
+                        CKM_SHA512_256 => hkdf_extract!(sha2::Sha512_256),
+                        CKM_SHA3_224 => hkdf_extract!(sha3::Sha3_224),
                         CKM_SHA3_256 => hkdf_extract!(sha3::Sha3_256),
+                        CKM_SHA3_384 => hkdf_extract!(sha3::Sha3_384),
                         CKM_SHA3_512 => hkdf_extract!(sha3::Sha3_512),
-                        _ => hkdf_extract!(sha2::Sha256), // CKM_SHA256 default
+                        _ => return CKR_MECHANISM_PARAM_INVALID,
                     }
                 }
                 out

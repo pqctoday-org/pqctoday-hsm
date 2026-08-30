@@ -399,13 +399,22 @@ pub const CKM_HASH_SLH_DSA: u32 = 0x0000_0034;
 pub const CKH_DETERMINISTIC_REQUIRED: u32 = 0x0000_0002;
 
 // SHA Digest
+pub const CKM_SHA_1: u32 = 0x0000_0220;
+pub const CKM_SHA_1_HMAC: u32 = 0x0000_0221;
 pub const CKM_SHA256: u32 = 0x0000_0250;
 pub const CKM_SHA224: u32 = 0x0000_0255;
+pub const CKM_SHA224_HMAC: u32 = 0x0000_0256;
 pub const CKM_SHA384: u32 = 0x0000_0260;
 pub const CKM_SHA512: u32 = 0x0000_0270;
+pub const CKM_SHA512_224: u32 = 0x0000_0048;
+pub const CKM_SHA512_224_HMAC: u32 = 0x0000_0049;
+pub const CKM_SHA512_256: u32 = 0x0000_004C;
+pub const CKM_SHA512_256_HMAC: u32 = 0x0000_004D;
 pub const CKM_SHA3_256: u32 = 0x0000_02B0;
 pub const CKM_SHA3_224: u32 = 0x0000_02B5;
+pub const CKM_SHA3_224_HMAC: u32 = 0x0000_02B6;
 pub const CKM_SHA3_384: u32 = 0x0000_02C0;
+pub const CKM_SHA3_384_HMAC: u32 = 0x0000_02C1;
 pub const CKM_SHA3_512: u32 = 0x0000_02D0;
 // RIPEMD-160 (historical) — digest + HMAC.
 pub const CKM_RIPEMD160: u32 = 0x0000_0240;
