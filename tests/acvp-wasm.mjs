@@ -90,6 +90,8 @@ import {
   sp800108DoublePipelineKdf,
   aesCcmEncrypt,
   aesCcmDecrypt,
+  gmacSign,
+  gmacVerify,
   generateHSSKeyPair,
   hssSign,
   hssVerify,
@@ -147,6 +149,7 @@ const aesCfb1Vec = loadJson('aes_cfb1_test.json')
 const aesCfb8Vec = loadJson('aes_cfb8_test.json')
 const aesCfb128Vec = loadJson('aes_cfb128_test.json')
 const aesCcmVec = loadJson('aes_ccm_test.json')
+const aesGmacVec = loadJson('aes_gmac_test.json')
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function arrEq(a, b) {
@@ -1374,6 +1377,34 @@ async function runSuite(engineName) {
           }
         } catch (e) {
           addResult('ccm', 'AES-CCM', `${c.direction} KAT (${c.keyLen}-bit)`, 'FAIL', e.message)
+        }
+      }
+    }
+
+    // ── 18g. AES-GMAC Real ACVP KAT — new mechanism, OpenSSL EVP_MAC
+    // "GMAC" (WS-8, 2026-08-30; see aes_gmac_test.json's _provenance) ────
+    if (mechs.size > 0 && !mechs.has(CK.CKM_AES_GMAC)) {
+      addResult('gmac', 'AES-GMAC', 'KAT', 'SKIP', 'mechanism not supported')
+    } else {
+      for (const c of aesGmacVec.cases) {
+        try {
+          if (c.op === 'sign') {
+            const keyH = importAESKey(M, hSession, hexToBytes(c.key), {
+              encrypt: false, decrypt: false, wrap: false, unwrap: false, derive: false, sign: true,
+            })
+            const tag = gmacSign(M, hSession, keyH, hexToBytes(c.aad), hexToBytes(c.iv), c.tagLen)
+            const ok = arrEq(tag, hexToBytes(c.tag))
+            addResult('gmac', 'AES-GMAC', `Sign KAT (${c.keyLen}-bit)`, ok ? 'PASS' : 'FAIL', `Tag[${tag.length}B]: ${bytesToHex(tag, 16)}`)
+          } else {
+            const keyH = importAESKey(M, hSession, hexToBytes(c.key), {
+              encrypt: false, decrypt: false, wrap: false, unwrap: false, derive: false, verify: true,
+            })
+            const matched = gmacVerify(M, hSession, keyH, hexToBytes(c.aad), hexToBytes(c.iv), hexToBytes(c.tag), c.tagLen)
+            const ok = matched === (c.testPassed === true)
+            addResult('gmac', 'AES-GMAC', `Verify KAT (${c.keyLen}-bit, testPassed=${c.testPassed})`, ok ? 'PASS' : 'FAIL', `matched=${matched}`)
+          }
+        } catch (e) {
+          addResult('gmac', 'AES-GMAC', `${c.op} KAT (${c.keyLen}-bit)`, 'FAIL', e.message)
         }
       }
     }

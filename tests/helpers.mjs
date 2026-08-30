@@ -233,6 +233,48 @@ export function aesCcmDecrypt(M, hSession, handle, ct, nonce, aad = new Uint8Arr
   return result
 }
 
+/**
+ * AES-GMAC sign/verify (CKM_AES_GMAC, PKCS#11 v3.2 §6.13.6). `data` IS the
+ * AAD — GMAC has no separate plaintext/ciphertext. Reuses CK_GCM_PARAMS
+ * (buildGCMParams) with an empty pAAD field, since GMAC ignores it.
+ */
+export function gmacSign(M, hSession, handle, data, iv, tagBits = 128) {
+  const gcm = buildGCMParams(M, iv, new Uint8Array(0), tagBits)
+  const mechPtr = buildMech(M, CK.CKM_AES_GMAC, gcm.ptr, gcm.size)
+  check('C_SignInit(GMAC)', M._C_SignInit(hSession, mechPtr, handle))
+  const dataPtr = writeBytes(M, data)
+  const outLen = tagBits / 8
+  const outPtr = M._malloc(outLen)
+  const outLenPtr = allocUlong(M)
+  M.setValue(outLenPtr, outLen, 'i32')
+  check('C_Sign(GMAC)', M._C_Sign(hSession, dataPtr, data.length, outPtr, outLenPtr))
+  const actualLen = readUlong(M, outLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, outPtr, actualLen).slice()
+  M._free(dataPtr)
+  M._free(outPtr)
+  freePtr(M, outLenPtr)
+  M._free(mechPtr)
+  M._free(gcm.ptr)
+  M._free(gcm.ivPtr)
+  return result
+}
+
+/** AES-GMAC verify → true/false (does not throw on a bad tag) */
+export function gmacVerify(M, hSession, handle, data, iv, tag, tagBits = 128) {
+  const gcm = buildGCMParams(M, iv, new Uint8Array(0), tagBits)
+  const mechPtr = buildMech(M, CK.CKM_AES_GMAC, gcm.ptr, gcm.size)
+  check('C_VerifyInit(GMAC)', M._C_VerifyInit(hSession, mechPtr, handle))
+  const dataPtr = writeBytes(M, data)
+  const tagPtr = writeBytes(M, tag)
+  const rv = M._C_Verify(hSession, dataPtr, data.length, tagPtr, tag.length)
+  M._free(dataPtr)
+  M._free(tagPtr)
+  M._free(mechPtr)
+  M._free(gcm.ptr)
+  M._free(gcm.ivPtr)
+  return rv === CK.CKR_OK
+}
+
 /** CK_AES_CTR_PARAMS: ulCounterBits(4) cb[16] = 20B */
 export function buildCTRParams(M, iv, counterBits) {
   const ptr = M._malloc(20)
@@ -418,7 +460,7 @@ export function importAESKey(
   M,
   hSession,
   keyBytes,
-  { encrypt = true, decrypt = true, wrap = true, unwrap = true, derive = true, extractable = true } = {}
+  { encrypt = true, decrypt = true, wrap = true, unwrap = true, derive = true, extractable = true, sign = false, verify = false } = {}
 ) {
   const tpl = buildTemplate(M, [
     { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
@@ -429,6 +471,8 @@ export function importAESKey(
     { type: CK.CKA_WRAP, value: wrap },
     { type: CK.CKA_UNWRAP, value: unwrap },
     { type: CK.CKA_DERIVE, value: derive },
+    { type: CK.CKA_SIGN, value: sign },
+    { type: CK.CKA_VERIFY, value: verify },
     { type: CK.CKA_EXTRACTABLE, value: extractable },
     { type: CK.CKA_SENSITIVE, value: !extractable },
     { type: CK.CKA_VALUE, value: keyBytes },

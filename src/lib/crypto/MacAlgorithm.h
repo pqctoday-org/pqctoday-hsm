@@ -59,7 +59,8 @@ struct MacAlgo
 		CMAC_DES,
 		CMAC_AES,
 		KMAC_128,
-		KMAC_256
+		KMAC_256,
+		GMAC_AES
 	};
 };
 
@@ -108,6 +109,13 @@ public:
 	// Effective output length: the accepted truncated length if one was set,
 	// otherwise the algorithm's natural MAC size.
 	size_t getOutputMacSize() const;
+
+	// CKM_AES_GMAC (WS-8, 2026-08-30): the only MAC mechanism in this codebase
+	// that takes an IV (PKCS#11 v3.2 §6.13.6 — CK_GCM_PARAMS.pIv/ulIvLen).
+	// Same "must be called before signInit()/verifyInit()" contract as
+	// setTruncatedMacSize(); returns false when this implementation has no
+	// use for an IV (the base class default — every non-GMAC MAC).
+	virtual bool setIV(const ByteString& iv);
 
 protected:
 	// The current key

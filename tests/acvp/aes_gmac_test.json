@@ -1,0 +1,43 @@
+{
+  "algorithm": "ACVP-AES-GMAC",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ACVP-AES-GMAC-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "cf8dc167c74179468f0a428d6f235fba6957bb50c0a65d46ec7c50a38b86b200",
+    "note": "WS-8 (2026-08-30): CKM_AES_GMAC did not exist in this engine at all before this session. PKCS#11 v3.2 Sec6.13.6: GMAC is C_Sign/C_Verify where pData IS the AAD (no plaintext/ciphertext). Implemented via OpenSSL EVP_MAC \"GMAC\" (OSSL_MAC_NAME_GMAC) -- verified this data==AAD reading directly against a real ACVP vector via the openssl(1) mac CLI before writing any C++, matching the methodology used throughout this session's WS-8/5.2 work. Required extending MacAlgorithm with a new setIV() virtual (GMAC is the only MAC mechanism here that takes one) -- setTruncatedMacSize, already present for *_HMAC_GENERAL, covers ulTagBits truncation without further changes. This sample dataset only covers 128-bit keys (no 192/256 groups exist in it). 1 sign case (with AAD) + 1 verify-pass + 1 verify-fail case (testPassed=false, confirming rejection is real, not just that matches pass)."
+  },
+  "cases": [
+    {
+      "op": "sign",
+      "keyLen": 128,
+      "tagLen": 128,
+      "key": "8FA89CE32BAFD241E64FED4EC3622043",
+      "iv": "06A1D52255A40CBED2A86FFF4B1435",
+      "aad": "04857D11758185BC30BEFFD1562144",
+      "tag": "B6FD5B21FE257AFB531B0C35B0A45FA2"
+    },
+    {
+      "op": "verify",
+      "keyLen": 128,
+      "tagLen": 128,
+      "key": "347026F63EC77C409CFAFC2A99D21369",
+      "iv": "4C488F70B33239DA24B0DF7F",
+      "aad": "",
+      "tag": "D61806586FAD3E6C64F120BD86D15B9D",
+      "testPassed": true
+    },
+    {
+      "op": "verify",
+      "keyLen": 128,
+      "tagLen": 128,
+      "key": "841189C64897CCA598228A61A6E86583",
+      "iv": "0034DFEAADEE7FD50D5F3B11",
+      "aad": "",
+      "tag": "F8A6A21327EC2DB39A4C43A0AC3458A8",
+      "testPassed": false
+    }
+  ]
+}

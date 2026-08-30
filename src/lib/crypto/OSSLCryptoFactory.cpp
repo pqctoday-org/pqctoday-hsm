@@ -54,6 +54,7 @@
 #include "OSSLSHA3.h"
 #include "OSSLCMAC.h"
 #include "OSSLKMAC.h"
+#include "OSSLGMAC.h"
 #include "OSSLHMAC.h"
 #include "OSSLRSA.h"
 #include "OSSLECDH.h"
@@ -268,6 +269,8 @@ MacAlgorithm* OSSLCryptoFactory::getMacAlgorithm(MacAlgo::Type algorithm)
 			return new OSSLKMAC128();
 		case MacAlgo::KMAC_256:
 			return new OSSLKMAC256();
+		case MacAlgo::GMAC_AES:
+			return new OSSLGMAC();
 		default:
 			break;
 	}

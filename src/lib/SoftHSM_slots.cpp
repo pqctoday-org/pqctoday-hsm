@@ -581,6 +581,7 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_AES_ECB_ENCRYPT_DATA"]	= CKM_AES_ECB_ENCRYPT_DATA;
 	t["CKM_AES_CBC_ENCRYPT_DATA"]	= CKM_AES_CBC_ENCRYPT_DATA;
 	t["CKM_AES_CMAC"]		= CKM_AES_CMAC;
+	t["CKM_AES_GMAC"]		= CKM_AES_GMAC;
 
 	// ChaCha20 — bare stream (CKM_CHACHA20) and AEAD (CKM_CHACHA20_POLY1305)
 	// are both dispatched (audit V-10 fixed by implementing the bare stream).
@@ -1089,6 +1090,7 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->flags = CKF_DERIVE;
 			break;
 		case CKM_AES_CMAC:
+		case CKM_AES_GMAC:
 			pInfo->ulMinKeySize = 16;
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
