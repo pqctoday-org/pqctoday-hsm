@@ -109,7 +109,7 @@
     {
       "id": "LEGAL-SENSITIVE-DEFAULT-SLH-DSA",
       "status": "legal",
-      "scenario": "create.generate_key_pair.slh_dsa",
+      "scenario": "create.generate_key_pair.slh_dsa|create.generate_key_pair.slh_dsa_all_params|create.sign_verify.slh_dsa_all_params",
       "path": "*CKA_*SENSITIVE*",
       "justification": "Rust makes an SLH-DSA private key sensitive by default and C++ does not. §6.69 attaches the MUST-be-sensitive rule to HSS and XMSS only, so both are permitted; Rust's choice is the safer one.",
       "citation": "PKCS#11 v3.2 §6.65.3 and §6.66.4/§6.66.5 impose CKA_SENSITIVE on the hash-based families; §6.69 (SLH-DSA) imposes nothing."
@@ -235,7 +235,7 @@
       "path": "*CKA_*CAPSULATE*",
       "justification": "Both engines expose CKA_ENCAPSULATE/CKA_DECAPSULATE on key classes that cannot encapsulate — C++ on EC/Edwards/Montgomery, Rust on ML-DSA and SLH-DSA — in opposite directions, always with value false. Confusing, not constrained. Deliberately scoped to the NON-KEM scenarios: a divergence in these flags on an actual ML-KEM key would be a real capability disagreement and must keep failing.",
       "citation": "PKCS#11 v3.2 §4.9: these are boolean usage flags whose default is token-specific; a false flag advertises no capability.",
-      "scenario": "create.generate_key_pair.ec_p256|create.generate_key_pair.ed25519|create.generate_key_pair.x25519|create.generate_key_pair.ml_dsa_44|create.generate_key_pair.slh_dsa|encoding.wrap_private_key_pkcs8"
+      "scenario": "create.generate_key_pair.ec_p256|create.generate_key_pair.ed25519|create.generate_key_pair.x25519|create.generate_key_pair.ml_dsa_44|create.generate_key_pair.ml_dsa_all_params|create.generate_key_pair.slh_dsa|create.generate_key_pair.slh_dsa_all_params|encoding.wrap_private_key_pkcs8"
     },
     {
       "id": "LEGAL-ON-DISK-STORAGE-AND-TENANCY",
