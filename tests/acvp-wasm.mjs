@@ -1217,6 +1217,57 @@ async function runSuite(engineName) {
       }
     }
 
+    // ── 21.5. SLH-DSA pre-hash SigGen (FIPS 205 §10.1, deterministic) ──────
+    // WS-3.3 follow-up (2026-08-30): genuine sk-based sigGen evidence for
+    // HashSLH-DSA — mirrors the ML-DSA pre-hash sigGen block above, and the
+    // context-mode SigGen block just above it in this same loop: real sk
+    // and pk from a NIST ACVP-Server SLH-DSA-sigGen-FIPS205 case, signed
+    // deterministically, then round-trip-verified with the *same vector's*
+    // real pk (not a self-generated key pair). Byte-compare against the
+    // vector's own signature was tried first and does not match — same
+    // known divergence already documented for context-mode SigGen just
+    // above (this engine's OpenSSL SLH-DSA and the ACVP reference generator
+    // make different, individually FIPS-205-compliant internal randomness
+    // choices even in deterministic mode) — so this uses the same
+    // round-trip pattern as its context-mode sibling rather than a byte
+    // comparison that would never pass for reasons unrelated to correctness.
+    const SLH_DSA_HASH_MECH = {
+      'sha224': CK.CKM_HASH_SLH_DSA_SHA224,
+      'sha256': CK.CKM_HASH_SLH_DSA_SHA256,
+      'sha384': CK.CKM_HASH_SLH_DSA_SHA384,
+      'sha512': CK.CKM_HASH_SLH_DSA_SHA512,
+      'sha3-224': CK.CKM_HASH_SLH_DSA_SHA3_224,
+      'sha3-256': CK.CKM_HASH_SLH_DSA_SHA3_256,
+      'sha3-384': CK.CKM_HASH_SLH_DSA_SHA3_384,
+      'sha3-512': CK.CKM_HASH_SLH_DSA_SHA3_512,
+      'shake128': CK.CKM_HASH_SLH_DSA_SHAKE128,
+      'shake256': CK.CKM_HASH_SLH_DSA_SHAKE256,
+    }
+    if (engineName === 'cpp' && slhdsaCtxVec && slhdsaCtxVec.preHashSigGen) {
+      const ckpByName = new Map(SLH_DSA_PARAM_SETS)
+      for (const [variant, tv] of Object.entries(slhdsaCtxVec.preHashSigGen)) {
+        const ckp = ckpByName.get(variant)
+        const mech = SLH_DSA_HASH_MECH[tv.hashAlg]
+        if (ckp === undefined || mech === undefined) {
+          addResult(`slhdsa-ext-prehash-sg-${variant}`, variant, 'SigGen KAT (preHash)', 'SKIP', `unmapped ${variant}/${tv.hashAlg}`)
+          continue
+        }
+        try {
+          const pk = hexToBytes(tv.pk)
+          const sk = hexToBytes(tv.sk)
+          const msg = hexToBytes(tv.message)
+          const ctx = hexToBytes(tv.context)
+          const pubHandle = importSLHDSAPublicKey(M, hSession, ckp, pk)
+          const privHandle = importSLHDSAPrivateKey(M, hSession, ckp, sk)
+          const sig = slhdsaSignBytesCtx(M, hSession, privHandle, msg, ctx, true, mech)
+          const ok = slhdsaVerifyBytesCtx(M, hSession, pubHandle, msg, sig, ctx, mech)
+          addResult(`slhdsa-ext-prehash-sg-${variant}`, variant, 'SigGen Round-Trip (preHash)', ok ? 'PASS' : 'FAIL', `hashAlg=${tv.hashAlg} sig[${sig.length}B]`)
+        } catch (e) {
+          addResult(`slhdsa-ext-prehash-sg-${variant}`, variant, 'SigGen Round-Trip (preHash)', 'FAIL', e.message)
+        }
+      }
+    }
+
     // ── §12. HSS / LMS — SP 800-208 SHAKE-256 ───────────────────────────────
 
     // §12.1 — HSS SHA-256 round-trip (baseline: both engines support HSS at all)

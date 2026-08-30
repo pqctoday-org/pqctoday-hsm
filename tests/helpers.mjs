@@ -1102,11 +1102,13 @@ export function buildSlhDsaCtxParam(M, ctxBytes, deterministic = false) {
 
 /**
  * SLH-DSA sign raw bytes with optional context + deterministic mode (FIPS 205 §9.2 / §10).
- * Uses C_SignInit + C_Sign with CK_SIGN_ADDITIONAL_CONTEXT parameter on CKM_SLH_DSA.
+ * Uses C_SignInit + C_Sign with CK_SIGN_ADDITIONAL_CONTEXT parameter. Defaults
+ * to CKM_SLH_DSA (context mode); pass one of the CKM_HASH_SLH_DSA_* mechanisms
+ * for pre-hash (HashSLH-DSA) mode sigGen KATs.
  */
-export function slhdsaSignBytesCtx(M, hSession, handle, msgBytes, ctxBytes, deterministic = false) {
+export function slhdsaSignBytesCtx(M, hSession, handle, msgBytes, ctxBytes, deterministic = false, mechType = CK.CKM_SLH_DSA) {
   const ctxParam = buildSlhDsaCtxParam(M, ctxBytes, deterministic)
-  const mechPtr = buildMech(M, CK.CKM_SLH_DSA, ctxParam.paramPtr, ctxParam.paramLen)
+  const mechPtr = buildMech(M, mechType, ctxParam.paramPtr, ctxParam.paramLen)
   check('C_SignInit(SLH-DSA-ctx)', M._C_SignInit(hSession, mechPtr, handle))
   const msgPtr = writeBytes(M, msgBytes)
   const sigLenPtr = allocUlong(M)
@@ -1129,9 +1131,9 @@ export function slhdsaSignBytesCtx(M, hSession, handle, msgBytes, ctxBytes, dete
  * SLH-DSA verify raw bytes with optional context string (FIPS 205 §9.2).
  * Uses C_VerifyInit + C_Verify with CK_SIGN_ADDITIONAL_CONTEXT parameter on CKM_SLH_DSA.
  */
-export function slhdsaVerifyBytesCtx(M, hSession, handle, msgBytes, sigBytes, ctxBytes) {
+export function slhdsaVerifyBytesCtx(M, hSession, handle, msgBytes, sigBytes, ctxBytes, mechType = CK.CKM_SLH_DSA) {
   const ctxParam = buildSlhDsaCtxParam(M, ctxBytes, false)
-  const mechPtr = buildMech(M, CK.CKM_SLH_DSA, ctxParam.paramPtr, ctxParam.paramLen)
+  const mechPtr = buildMech(M, mechType, ctxParam.paramPtr, ctxParam.paramLen)
   check('C_VerifyInit(SLH-DSA-ctx)', M._C_VerifyInit(hSession, mechPtr, handle))
   const msgPtr = writeBytes(M, msgBytes)
   const sigPtr = writeBytes(M, sigBytes)
