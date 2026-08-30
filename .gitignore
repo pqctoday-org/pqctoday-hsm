@@ -1,3 +1,6 @@
+# Node dependencies (installed via package.json, e.g. asn1js for tests/)
+node_modules/
+
 # Build outputs
 build/
 build-wasm/

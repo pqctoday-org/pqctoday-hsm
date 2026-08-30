@@ -8,6 +8,7 @@ import { createRequire } from 'module'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import path from 'path'
+import { OctetString } from 'asn1js'
 const require = createRequire(import.meta.url)
 const CK = require('../constants.js')
 
@@ -42,6 +43,7 @@ export const CKP_PKCS5_PBKD2_HMAC_SHA224 = 0x00000003
 const EC_OID = {
   'P-256': new Uint8Array([0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]),
   'P-384': new Uint8Array([0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22]),
+  'P-521': new Uint8Array([0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23]),
   Ed25519: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x70]),
   // id-Ed448 = 1.3.101.113 (RFC 8410 §3)
   Ed448: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x71]),
@@ -459,14 +461,17 @@ export function importRSAPrivateKey(M, hSession, k, { unwrap = true, decrypt = f
 export function importECPublicKey(M, hSession, qx, qy, curve = 'P-256') {
   const oid = EC_OID[curve]
   if (!oid) throw new Error(`Unsupported curve: ${curve}`)
-  // CKA_EC_POINT = DER OCTET STRING wrapping 04 || x || y
-  const pointLen = 1 + qx.length + qy.length // 04 + x + y
-  const derPoint = new Uint8Array(2 + pointLen)
-  derPoint[0] = 0x04 // OCTET STRING tag
-  derPoint[1] = pointLen
-  derPoint[2] = 0x04 // uncompressed
-  derPoint.set(qx, 3)
-  derPoint.set(qy, 3 + qx.length)
+  // CKA_EC_POINT = DER OCTET STRING wrapping 04 || x || y (the ANSI X9.62
+  // uncompressed point). Built with asn1js rather than hand-rolled length
+  // bytes — a manual `len < 128` assumption here previously broke silently
+  // on P-521's 133-byte point (DER length needs the long form >= 128) and
+  // was never exercised until P-521 was the first curve tested with a
+  // point that large.
+  const rawPoint = new Uint8Array(1 + qx.length + qy.length)
+  rawPoint[0] = 0x04 // uncompressed
+  rawPoint.set(qx, 1)
+  rawPoint.set(qy, 1 + qx.length)
+  const derPoint = new Uint8Array(new OctetString({ valueHex: rawPoint }).toBER(false))
   const tpl = buildTemplate(M, [
     { type: CK.CKA_CLASS, value: CK.CKO_PUBLIC_KEY },
     { type: CK.CKA_KEY_TYPE, value: CK.CKK_EC },

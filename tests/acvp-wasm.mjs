@@ -114,6 +114,10 @@ const aesCtrVec = loadJson('aesctr_test.json')
 const hmac384Vec = loadJson('hmac_sha384_test.json')
 const hmac512Vec = loadJson('hmac_sha512_test.json')
 const ecdsaP384Vec = loadJson('ecdsa_p384_test.json')
+const ecdsaP521Vec = loadJson('ecdsa_p521_test.json')
+const sha384Vec = loadJson('sha384_test.json')
+const sha512Vec = loadJson('sha512_test.json')
+const kmacVec = loadJson('kmac_test.json')
 const aesKwVec = loadJson('aeskw_test.json')
 const slhdsaCtxVec = loadJson('slhdsa_ctx_test.json')
 const lmsSigverVec = loadJson('lms_sigver_test.json')
@@ -513,6 +517,40 @@ async function runSuite(engineName) {
       }
     }
 
+    // ── 10.6.5. SHA-384/SHA-512 Digest KAT (FIPS 180-4) — real ACVP cases ──
+    // WS-4 (2026-08-30): both files carried real, provenance-verified ACVP
+    // cases loaded by nothing — SHA-384/512 previously had zero digest
+    // evidence in this harness at all (only HMAC-SHA384/512 were covered).
+    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA384)) {
+      addResult('sha384', 'SHA-384', 'Digest KAT', 'SKIP', 'mechanism not supported')
+    } else {
+      for (const test of sha384Vec.testGroups[0].tests) {
+        try {
+          const d = digest(M, hSession, hexToBytes(test.msg), CK.CKM_SHA384)
+          const expected = hexToBytes(test.md)
+          const ok = arrEq(d, expected)
+          addResult(`sha384-${test.tcId}`, 'SHA-384', `Digest KAT tc=${test.tcId}`, ok ? 'PASS' : 'FAIL', `MD[${d.length}B]: ${bytesToHex(d, 16)}`)
+        } catch (e) {
+          addResult(`sha384-${test.tcId}`, 'SHA-384', `Digest KAT tc=${test.tcId}`, 'FAIL', e.message)
+        }
+      }
+    }
+
+    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA512)) {
+      addResult('sha512', 'SHA-512', 'Digest KAT', 'SKIP', 'mechanism not supported')
+    } else {
+      for (const test of sha512Vec.testGroups[0].tests) {
+        try {
+          const d = digest(M, hSession, hexToBytes(test.msg), CK.CKM_SHA512)
+          const expected = hexToBytes(test.md)
+          const ok = arrEq(d, expected)
+          addResult(`sha512-${test.tcId}`, 'SHA-512', `Digest KAT tc=${test.tcId}`, ok ? 'PASS' : 'FAIL', `MD[${d.length}B]: ${bytesToHex(d, 16)}`)
+        } catch (e) {
+          addResult(`sha512-${test.tcId}`, 'SHA-512', `Digest KAT tc=${test.tcId}`, 'FAIL', e.message)
+        }
+      }
+    }
+
     // ── 10.7. SHA*_KEY_DERIVATION (PKCS#11 v3.2 §2.42) — 6 mechanisms ──────
     // WS-6.2 (2026-08-30): C++ had none of these 6 digest-KDF mechanisms at
     // all (CKR_MECHANISM_INVALID on every one); Rust already had them
@@ -658,6 +696,28 @@ async function runSuite(engineName) {
         addResult('ecdsa384', 'ECDSA P-384', 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
       } catch (e) {
         addResult('ecdsa384', 'ECDSA P-384', 'SigVer KAT', 'FAIL', e.message)
+      }
+    }
+
+    // ── 15.5. ECDSA P-521 SigVer KAT (FIPS 186-5) ───────────────────────
+    // WS-4 (2026-08-30): real, provenance-verified ACVP vector was on disk
+    // and loaded by nothing — P-521 previously had zero digital-signature
+    // evidence in this harness (mechanism-list presence only).
+    if (mechs.size > 0 && !mechs.has(CK.CKM_ECDSA_SHA512)) {
+      addResult('ecdsa521', 'ECDSA P-521', 'SigVer KAT', 'SKIP', 'mechanism not supported')
+    } else {
+      const tv = ecdsaP521Vec.testGroups[0].tests[0]
+      try {
+        const h = importECPublicKey(M, hSession, hexToBytes(tv.qx), hexToBytes(tv.qy), 'P-521')
+        const rB = hexToBytes(tv.r)
+        const sB = hexToBytes(tv.s)
+        const sig = new Uint8Array(rB.length + sB.length)
+        sig.set(rB)
+        sig.set(sB, rB.length)
+        const ok = verifyBytes(M, hSession, h, hexToBytes(tv.msg), sig, CK.CKM_ECDSA_SHA512)
+        addResult('ecdsa521', 'ECDSA P-521', 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
+      } catch (e) {
+        addResult('ecdsa521', 'ECDSA P-521', 'SigVer KAT', 'FAIL', e.message)
       }
     }
 
