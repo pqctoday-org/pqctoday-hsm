@@ -229,6 +229,53 @@ async function runSuite(engineName) {
       }
     }
 
+    // ── 3.5. RSA signature KAT — remaining hash/padding combinations ──────
+    // WS-5.1 (2026-08-30): rsapss_test.json grew from 1 testGroup (tgId 9,
+    // already covered above) to 9 — tgId 100-107 cover 8 more of the 22
+    // advertised RSA signature mechanisms with real ACVP evidence, going
+    // from 1/22 real KATs to 9/22 (the rest remain engine-internal
+    // round-trips; SHA-384 and SHA3-224/384 have no ACVP sample coverage
+    // in any of the 4 revisions checked — see rsapss_test.json's
+    // _provenance note for which revisions and why).
+    const RSA_PKCS_HASH_MECH = {
+      'SHA-1': CK.CKM_SHA1_RSA_PKCS, 'SHA2-224': CK.CKM_SHA224_RSA_PKCS,
+      'SHA2-256': CK.CKM_SHA256_RSA_PKCS, 'SHA2-384': CK.CKM_SHA384_RSA_PKCS,
+      'SHA2-512': CK.CKM_SHA512_RSA_PKCS, 'SHA3-224': CK.CKM_SHA3_224_RSA_PKCS,
+      'SHA3-256': CK.CKM_SHA3_256_RSA_PKCS, 'SHA3-384': CK.CKM_SHA3_384_RSA_PKCS,
+      'SHA3-512': CK.CKM_SHA3_512_RSA_PKCS,
+    }
+    const RSA_PSS_HASH_MECH = {
+      'SHA-1': CK.CKM_SHA1_RSA_PKCS_PSS, 'SHA2-224': CK.CKM_SHA224_RSA_PKCS_PSS,
+      'SHA2-256': CK.CKM_SHA256_RSA_PKCS_PSS, 'SHA2-384': CK.CKM_SHA384_RSA_PKCS_PSS,
+      'SHA2-512': CK.CKM_SHA512_RSA_PKCS_PSS, 'SHA3-224': CK.CKM_SHA3_224_RSA_PKCS_PSS,
+      'SHA3-256': CK.CKM_SHA3_256_RSA_PKCS_PSS, 'SHA3-384': CK.CKM_SHA3_384_RSA_PKCS_PSS,
+      'SHA3-512': CK.CKM_SHA3_512_RSA_PKCS_PSS,
+    }
+    for (const tg of rsaPssVec.testGroups) {
+      if (tg.tgId === 9) continue // already covered above
+      const isPss = tg.sigType === 'pss'
+      const mech = (isPss ? RSA_PSS_HASH_MECH : RSA_PKCS_HASH_MECH)[tg.hashAlg]
+      const label = `RSA-${isPss ? 'PSS' : 'PKCS1v1.5'}-${tg.hashAlg}`
+      if (mech === undefined) {
+        addResult(`rsasig-tg${tg.tgId}`, label, 'SigVer KAT', 'SKIP', `unmapped hashAlg ${tg.hashAlg}`)
+        continue
+      }
+      if (mechs.size > 0 && !mechs.has(mech)) {
+        addResult(`rsasig-tg${tg.tgId}`, label, 'SigVer KAT', 'SKIP', 'mechanism not supported')
+        continue
+      }
+      const tv = tg.tests[0]
+      try {
+        const h = importRSAPublicKey(M, hSession, hexToBytes(tg.n), hexToBytes(tg.e), { encrypt: false })
+        const ok = isPss
+          ? rsaVerify(M, hSession, h, hexToBytes(tv.message), hexToBytes(tv.signature), mech, tg.saltLen)
+          : verifyBytes(M, hSession, h, hexToBytes(tv.message), hexToBytes(tv.signature), mech)
+        addResult(`rsasig-tg${tg.tgId}`, label, `SigVer KAT tc=${tv.tcId}`, ok ? 'PASS' : 'FAIL', `sig[${tv.signature.length / 2}B]`)
+      } catch (e) {
+        addResult(`rsasig-tg${tg.tgId}`, label, `SigVer KAT tc=${tv.tcId}`, 'FAIL', e.message)
+      }
+    }
+
     // ── 4. ECDSA P-256 SigVer KAT (FIPS 186-5) ───────────────────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_ECDSA_SHA256)) {
       addResult('ecdsa256', 'ECDSA P-256', 'SigVer KAT', 'SKIP', 'mechanism not supported')

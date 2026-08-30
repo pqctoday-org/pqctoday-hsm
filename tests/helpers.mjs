@@ -16,8 +16,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const WASM_DIR = path.resolve(__dirname, '../wasm')
 
 // ── Additional constants not (yet) in constants.js ──────────────────────────
-const CKG_MGF1_SHA256 = 0x00000002
-const CKG_MGF1_SHA384 = 0x00000003
 // RSA-OAEP mask-generation functions and label source (pkcs11t.h:1601-1621).
 export const CKG_MGF1 = {
   CKM_SHA_1: 0x00000001,
@@ -874,23 +872,35 @@ export function hmacVerifyGeneral(M, hSession, handle, msg, mac, mechType) {
  * the caller's sLen as authoritative (no "try digest-length too" fallback
  * once a param is supplied), so the harness must pass the real value through.
  */
+// WS-5.1 (2026-08-30): every advertised CKM_SHA*_RSA_PKCS_PSS variant, not
+// just the two this engine's test suite happened to exercise first — the
+// prior 3-case if/else silently mapped anything else to SHA-256/32, which
+// would have been a wrong-but-passing PSS verify for any caller of this
+// helper that forgot mechType matched neither branch.
+const RSA_PSS_HASH = {
+  [CK.CKM_SHA1_RSA_PKCS_PSS]: CK.CKM_SHA_1,
+  [CK.CKM_SHA224_RSA_PKCS_PSS]: CK.CKM_SHA224,
+  [CK.CKM_SHA256_RSA_PKCS_PSS]: CK.CKM_SHA256,
+  [CK.CKM_SHA384_RSA_PKCS_PSS]: CK.CKM_SHA384,
+  [CK.CKM_SHA512_RSA_PKCS_PSS]: CK.CKM_SHA512,
+  [CK.CKM_SHA3_224_RSA_PKCS_PSS]: CK.CKM_SHA3_224,
+  [CK.CKM_SHA3_256_RSA_PKCS_PSS]: CK.CKM_SHA3_256,
+  [CK.CKM_SHA3_384_RSA_PKCS_PSS]: CK.CKM_SHA3_384,
+  [CK.CKM_SHA3_512_RSA_PKCS_PSS]: CK.CKM_SHA3_512,
+}
+const RSA_MGF1_NAME = {
+  [CK.CKM_SHA_1]: 'CKM_SHA_1', [CK.CKM_SHA224]: 'CKM_SHA224', [CK.CKM_SHA256]: 'CKM_SHA256',
+  [CK.CKM_SHA384]: 'CKM_SHA384', [CK.CKM_SHA512]: 'CKM_SHA512',
+  [CK.CKM_SHA3_224]: 'CKM_SHA3_224', [CK.CKM_SHA3_256]: 'CKM_SHA3_256',
+  [CK.CKM_SHA3_384]: 'CKM_SHA3_384', [CK.CKM_SHA3_512]: 'CKM_SHA3_512',
+}
+
 export function rsaVerify(M, hSession, handle, msgBytes, sig, mechType = CK.CKM_SHA256_RSA_PKCS_PSS, sLenOverride = null) {
-  // Build PSS params based on mechanism type
-  let hashMech, mgf, sLen
-  if (mechType === CK.CKM_SHA256_RSA_PKCS_PSS) {
-    hashMech = CK.CKM_SHA256
-    mgf = CKG_MGF1_SHA256
-    sLen = 32
-  } else if (mechType === CK.CKM_SHA384_RSA_PKCS_PSS) {
-    hashMech = CK.CKM_SHA384
-    mgf = CKG_MGF1_SHA384
-    sLen = 48
-  } else {
-    hashMech = CK.CKM_SHA256
-    mgf = CKG_MGF1_SHA256
-    sLen = 32
-  }
-  if (sLenOverride !== null) sLen = sLenOverride
+  const hashMech = RSA_PSS_HASH[mechType]
+  if (hashMech === undefined) throw new Error(`rsaVerify: unmapped PSS mechanism 0x${mechType.toString(16)}`)
+  const mgf = CKG_MGF1[RSA_MGF1_NAME[hashMech]]
+  if (sLenOverride === null) throw new Error('rsaVerify: sLen (salt length) must be supplied — PSS has no universal default')
+  const sLen = sLenOverride
   const pss = buildPSSParams(M, hashMech, mgf, sLen)
   const mechPtr = buildMech(M, mechType, pss.ptr, pss.size)
   check('C_VerifyInit(RSA-PSS)', M._C_VerifyInit(hSession, mechPtr, handle))
