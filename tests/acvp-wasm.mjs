@@ -75,6 +75,7 @@ import {
   buildRsaAesKeyWrapParams,
   CKG_MGF1,
   pbkdf2,
+  CKP_PKCS5_PBKD2_HMAC_SHA224,
   hkdf,
   generateHSSKeyPair,
   hssSign,
@@ -98,6 +99,7 @@ const mldsaVec = loadJson('mldsa_test.json')
 const aesGcmVec = loadJson('aesgcm_test.json')
 const hmacVec = loadJson('hmac_test.json')
 const rsaPssVec = loadJson('rsapss_test.json')
+const pbkdf2Vec = loadJson('pbkdf2_test.json')
 const ecdsaVec = loadJson('ecdsa_test.json')
 const sha256Vec = loadJson('sha256_test.json')
 const aesCbcVec = loadJson('aescbc_test.json')
@@ -193,14 +195,19 @@ async function runSuite(engineName) {
       }
     }
 
-    // ── 3. RSA-PSS-2048 SigVer KAT (FIPS 186-5) ──────────────────────────
+    // ── 3. RSA-PSS-2048 SigVer KAT (FIPS 186-5, real ACVP sigGen sample) ──
+    // tgId 9's saltLen is 8 (NIST's sample, not the conventional digest
+    // length) — pass it through explicitly rather than relying on
+    // rsaVerify's default, and pass the real message bytes (hex-decoded,
+    // not TextEncoder'd — ACVP message bytes aren't necessarily valid text).
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA256_RSA_PKCS_PSS)) {
       addResult('rsapss', 'RSA-PSS-2048', 'SigVer KAT', 'SKIP', 'mechanism not supported')
     } else {
-      const tv = rsaPssVec.testGroups[0].tests[0]
+      const tg = rsaPssVec.testGroups[0]
+      const tv = tg.tests[0]
       try {
-        const h = importRSAPublicKey(M, hSession, hexToBytes(tv.n), hexToBytes(tv.e), { encrypt: false })
-        const ok = rsaVerify(M, hSession, h, tv.msg, hexToBytes(tv.signature))
+        const h = importRSAPublicKey(M, hSession, hexToBytes(tg.n), hexToBytes(tg.e), { encrypt: false })
+        const ok = rsaVerify(M, hSession, h, hexToBytes(tv.message), hexToBytes(tv.signature), CK.CKM_SHA256_RSA_PKCS_PSS, tg.saltLen)
         addResult('rsapss', 'RSA-PSS-2048', 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${tv.signature.length / 2}B]`)
       } catch (e) {
         addResult('rsapss', 'RSA-PSS-2048', 'SigVer KAT', 'FAIL', e.message)
@@ -659,6 +666,27 @@ async function runSuite(engineName) {
         addResult('pbkdf2', 'PBKDF2-HMAC-SHA512', 'Functional Derivation', ok ? 'PASS' : 'FAIL', `DK[${dk1.length}B]: ${bytesToHex(dk1, 16)}`)
       } catch (e) {
         addResult('pbkdf2', 'PBKDF2-HMAC-SHA512', 'Functional Derivation', 'FAIL', e.message)
+      }
+    }
+
+    // ── 17.5. PBKDF2-HMAC-SHA224 Derive KAT (SP 800-132, real ACVP) ──────
+    // tests/acvp/pbkdf2_test.json's only real ACVP evidence at its pinned
+    // commit is SHA2-224 (see that file's _provenance note) — expected to
+    // FAIL on the Rust engine, which has no SHA224 PRF arm at all
+    // (rust/src/ffi.rs's CKM_PKCS5_PBKD2 match only covers SHA256/384/512);
+    // that is a real, documented engine gap, not a harness bug.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_PKCS5_PBKD2)) {
+      addResult('pbkdf2-224', 'PBKDF2-HMAC-SHA224', 'Derive KAT', 'SKIP', 'mechanism not supported')
+    } else {
+      const tv = pbkdf2Vec.testGroups[0].tests[0]
+      try {
+        const password = new TextEncoder().encode(tv.password)
+        const salt = hexToBytes(tv.salt)
+        const dk = pbkdf2(M, hSession, password, salt, tv.iterationCount, tv.keyLen / 8, CKP_PKCS5_PBKD2_HMAC_SHA224)
+        const ok = arrEq(dk, hexToBytes(tv.derivedKey))
+        addResult('pbkdf2-224', 'PBKDF2-HMAC-SHA224', 'Derive KAT', ok ? 'PASS' : 'FAIL', `DK[${dk.length}B]: ${bytesToHex(dk, 16)}`)
+      } catch (e) {
+        addResult('pbkdf2-224', 'PBKDF2-HMAC-SHA224', 'Derive KAT', 'FAIL', e.message)
       }
     }
 

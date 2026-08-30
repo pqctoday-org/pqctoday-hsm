@@ -33,6 +33,10 @@ const CKZ_DATA_SPECIFIED = 0x00000001
 const CKF_HKDF_SALT_DATA = 2
 const CKS_PKCS5_PBKD2_SALT_SPECIFIED = 1
 const CKP_PKCS5_PBKD2_HMAC_SHA512 = 0x00000006
+// pkcs11t.h:2098 — real ACVP PBKDF-1.0 evidence at the pinned commit used by
+// tests/acvp/pbkdf2_test.json is SHA2-224 only (see that file's _provenance
+// note); C++ supports this PRF, Rust does not.
+export const CKP_PKCS5_PBKD2_HMAC_SHA224 = 0x00000003
 
 // EC curve OIDs (DER-encoded)
 const EC_OID = {
@@ -830,8 +834,16 @@ export function hmacVerifyGeneral(M, hSession, handle, msg, mac, mechType) {
   return rv === CK.CKR_OK
 }
 
-/** RSA-PSS verify (text message — encoded with TextEncoder) */
-export function rsaVerify(M, hSession, handle, textMsg, sig, mechType = CK.CKM_SHA256_RSA_PKCS_PSS) {
+/**
+ * RSA-PSS verify (raw message bytes).
+ * `sLenOverride`, when given, pins CK_RSA_PKCS_PSS_PARAMS.sLen to that exact
+ * value instead of the mechanism's conventional digest-length default — real
+ * ACVP PSS samples don't all use sLen=hashLen (e.g. tests/acvp/rsapss_test.json's
+ * FIPS 186-5 sigGen vector uses sLen=8), and both engines' verify paths treat
+ * the caller's sLen as authoritative (no "try digest-length too" fallback
+ * once a param is supplied), so the harness must pass the real value through.
+ */
+export function rsaVerify(M, hSession, handle, msgBytes, sig, mechType = CK.CKM_SHA256_RSA_PKCS_PSS, sLenOverride = null) {
   // Build PSS params based on mechanism type
   let hashMech, mgf, sLen
   if (mechType === CK.CKM_SHA256_RSA_PKCS_PSS) {
@@ -847,10 +859,10 @@ export function rsaVerify(M, hSession, handle, textMsg, sig, mechType = CK.CKM_S
     mgf = CKG_MGF1_SHA256
     sLen = 32
   }
+  if (sLenOverride !== null) sLen = sLenOverride
   const pss = buildPSSParams(M, hashMech, mgf, sLen)
   const mechPtr = buildMech(M, mechType, pss.ptr, pss.size)
   check('C_VerifyInit(RSA-PSS)', M._C_VerifyInit(hSession, mechPtr, handle))
-  const msgBytes = new TextEncoder().encode(textMsg)
   const msgPtr = writeBytes(M, msgBytes)
   const sigPtr = writeBytes(M, sig)
   const rv = M._C_Verify(hSession, msgPtr, msgBytes.length, sigPtr, sig.length)
@@ -1341,8 +1353,11 @@ export function unwrapKeyRaw(M, hSession, mechType, unwrappingHandle, wrapped, a
  *   saltSource(4) pSaltSourceData(4) ulSaltSourceDataLen(4)
  *   iterations(4) prf(4) pPrfData(4) ulPrfDataLen(4)
  *   pPassword(4) ulPasswordLen(4)
+ * `prf` defaults to HMAC-SHA512 (the only PRF this helper's two call sites
+ * needed before tests/acvp/pbkdf2_test.json got real evidence, an SHA2-224
+ * ACVP sample — pass CKP_PKCS5_PBKD2_HMAC_SHA224 explicitly for that KAT).
  */
-export function pbkdf2(M, hSession, password, salt, iterations, keyLen) {
+export function pbkdf2(M, hSession, password, salt, iterations, keyLen, prf = CKP_PKCS5_PBKD2_HMAC_SHA512) {
   const saltPtr = writeBytes(M, salt)
   const pwdPtr = writeBytes(M, password)
   const paramsPtr = M._malloc(36)
@@ -1350,7 +1365,7 @@ export function pbkdf2(M, hSession, password, salt, iterations, keyLen) {
   M.setValue(paramsPtr + 4, saltPtr, 'i32')
   M.setValue(paramsPtr + 8, salt.length, 'i32')
   M.setValue(paramsPtr + 12, iterations, 'i32')
-  M.setValue(paramsPtr + 16, CKP_PKCS5_PBKD2_HMAC_SHA512, 'i32')
+  M.setValue(paramsPtr + 16, prf, 'i32')
   M.setValue(paramsPtr + 20, 0, 'i32') // pPrfData = NULL
   M.setValue(paramsPtr + 24, 0, 'i32') // ulPrfDataLen = 0
   M.setValue(paramsPtr + 28, pwdPtr, 'i32')
