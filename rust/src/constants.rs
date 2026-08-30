@@ -609,6 +609,7 @@ pub const CKM_AES_CBC: u32     = 0x0000_1082;
 pub const CKM_AES_CBC_PAD: u32 = 0x0000_1085;
 pub const CKM_AES_CTR: u32 = 0x0000_1086;
 pub const CKM_AES_GCM: u32 = 0x0000_1087;
+pub const CKM_AES_GMAC: u32 = 0x0000_108E;
 pub const CKM_AES_KEY_WRAP: u32 = 0x0000_2109;
 // RFC 5649 AES Key Wrap with Padding. Both names denote the same RFC 5649
 // scheme; `_PAD` is the deprecated v2.40 name (was 0x1091), `_KWP` the v3.x
@@ -843,6 +844,7 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_AES_CBC_PAD,
     CKM_AES_CTR,
     CKM_AES_GCM,
+    CKM_AES_GMAC,
     CKM_AES_KEY_WRAP,
     CKM_AES_KEY_WRAP_KWP,
     CKM_AES_KEY_WRAP_PAD,

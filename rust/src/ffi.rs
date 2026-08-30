@@ -1387,6 +1387,9 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_SHA3_256_HMAC_GENERAL
         | CKM_SHA3_512_HMAC_GENERAL => (16, 64, 0x00000800 | 0x00002000),
         CKM_KMAC_128 | CKM_KMAC_256 => (16, 64, 0x00000800 | 0x00002000),
+        // AES-GMAC (v3.2 Sec6.13.6) — CKF_SIGN | CKF_VERIFY, key sizes match
+        // the other AES mechanisms (16/24/32-byte keys, table stores bytes).
+        CKM_AES_GMAC => (16, 32, 0x00000800 | 0x00002000),
         CKM_GENERIC_SECRET_KEY_GEN => (1, 512, 0x00008000),
         // Engine generates P-256/P-384/P-521 (+ secp256k1) — range unified
         // with CKM_ECDSA below (compliance-audit P-15).
@@ -5295,6 +5298,27 @@ unsafe fn parse_sign_mech_params(
             None => (Vec::new(), false),
         });
     }
+    if mech_type == CKM_AES_GMAC {
+        // CK_GCM_PARAMS (v3.2 Sec6.27.7) — only pIv/ulIvLen and ulTagBits
+        // are meaningful for GMAC; pAAD/ulAADLen are unused (see sign_gmac).
+        let r = m
+            .params(&ck_param::gcm::LAYOUT, ck_param::gcm::FIELD_COUNT)
+            .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+        let tag_bits = r.ulong32(ck_param::gcm::UL_TAG_BITS);
+        if tag_bits == 0 || tag_bits > 128 || tag_bits % 8 != 0 {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        let iv = r.buffer(ck_param::gcm::P_IV, ck_param::gcm::UL_IV_LEN);
+        if iv.is_empty() {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        // ctx layout: tag_len_bytes(4, LE) || iv — same "leading LE u32"
+        // convention as hmac_general/KMAC below, read back by both the
+        // C_Sign size-query path and the C_Sign/C_Verify dispatch arms.
+        let mut v = (tag_bits / 8).to_le_bytes().to_vec();
+        v.extend_from_slice(iv);
+        return Ok((v, false));
+    }
     if let Some((_, digest_len)) = hmac_general_base(mech_type) {
         // CK_MAC_GENERAL_PARAMS — INSTANCE 4. A bare `typedef CK_ULONG`, so
         // the whole "struct" is one native-width word. The old reading took
@@ -5374,7 +5398,9 @@ fn C_Sign_impl(
 
     unsafe {
         if p_signature.is_null() {
-            *pul_signature_len = if hmac_general_base(mech).is_some() && ctx_bytes.len() >= 4 {
+            *pul_signature_len = if (hmac_general_base(mech).is_some() || mech == CKM_AES_GMAC)
+                && ctx_bytes.len() >= 4
+            {
                 u32::from_le_bytes([ctx_bytes[0], ctx_bytes[1], ctx_bytes[2], ctx_bytes[3]])
             } else {
                 get_sig_len(mech, hkey)
@@ -5571,6 +5597,19 @@ fn C_Sign_impl(
                     sign_kmac_ext(eff_mech, &sk_bytes, eff_msg, &ctx_bytes[4..], out_len)
                 } else {
                     sign_kmac(eff_mech, &sk_bytes, eff_msg)
+                }
+            }
+            CKM_AES_GMAC => {
+                if ctx_bytes.len() < 4 {
+                    Err(CKR_MECHANISM_PARAM_INVALID)
+                } else {
+                    let tag_len = u32::from_le_bytes([
+                        ctx_bytes[0],
+                        ctx_bytes[1],
+                        ctx_bytes[2],
+                        ctx_bytes[3],
+                    ]) as usize;
+                    sign_gmac(&sk_bytes, eff_msg, &ctx_bytes[4..], tag_len)
                 }
             }
             CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
@@ -5865,6 +5904,27 @@ pub fn C_Verify(
                 Ok(sig) => {
                     use subtle::ConstantTimeEq;
                     if sig.len() == sig_bytes.len() && sig.ct_eq(sig_bytes).into() {
+                        Ok(())
+                    } else {
+                        Err(CKR_SIGNATURE_INVALID)
+                    }
+                }
+                Err(e) => Err(e),
+            },
+            CKM_AES_GMAC => match if ctx_bytes.len() < 4 {
+                Err(CKR_MECHANISM_PARAM_INVALID)
+            } else {
+                let tag_len = u32::from_le_bytes([
+                    ctx_bytes[0],
+                    ctx_bytes[1],
+                    ctx_bytes[2],
+                    ctx_bytes[3],
+                ]) as usize;
+                sign_gmac(&pk_bytes, eff_msg, &ctx_bytes[4..], tag_len)
+            } {
+                Ok(tag) => {
+                    use subtle::ConstantTimeEq;
+                    if tag.len() == sig_bytes.len() && tag.ct_eq(sig_bytes).into() {
                         Ok(())
                     } else {
                         Err(CKR_SIGNATURE_INVALID)
@@ -12002,6 +12062,23 @@ pub fn aes_gcm_exec(
             }
         }
     }
+}
+
+/// AES-GMAC (PKCS#11 v3.2 Sec6.13.6): GCM with zero plaintext — the
+/// C_Sign/C_Verify `pData` argument IS the authenticated data (GMAC has no
+/// separate AAD channel of its own; `CK_GCM_PARAMS.pAAD`/`ulAADLen` are
+/// unused here, matching how this session's C++ OSSLGMAC treats the sign
+/// data as the MAC's "data" input). `GcmState` already derives J0 correctly
+/// for any IV length per SP 800-38D Sec7.1 (not just 96-bit), which real
+/// ACVP AES-GMAC vectors exercise. `tag_len` in bytes.
+fn sign_gmac(key: &[u8], data: &[u8], iv: &[u8], tag_len: usize) -> Result<Vec<u8>, u32> {
+    use crate::crypto::multipart::{AesKey, CipherDirection, GcmState};
+    if iv.is_empty() || tag_len == 0 || tag_len > 16 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let aes = AesKey::new(key).ok_or(CKR_KEY_SIZE_RANGE)?;
+    let gcm = GcmState::new(aes, iv, data, (tag_len as u32) * 8, CipherDirection::Encrypt);
+    Ok(gcm.msg_compute_tag())
 }
 
 #[wasm_bindgen(js_name = _C_MessageEncryptInit)]
