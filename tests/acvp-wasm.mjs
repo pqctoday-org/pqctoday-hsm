@@ -269,13 +269,36 @@ async function runSuite(engineName) {
       'shake128': CK.CKM_HASH_ML_DSA_SHAKE128,
       'shake256': CK.CKM_HASH_ML_DSA_SHAKE256,
     }
-    // Pre-hash mode (CKM_HASH_ML_DSA_*) is NOT wired yet: a first attempt
-    // using the same verifyBytesMLDSAContext() helper with the specific
-    // hash mechanism produced CKR_OK but a signature mismatch on all 3
-    // parameter sets, while the identical helper/struct-building code
-    // genuinely passes for context mode below — the discrepancy hasn't
-    // been root-caused (needs more than the "small, obvious" bar this
-    // pass was scoped to). MLDSA_HASH_MECH is kept for that follow-up.
+    // Pre-hash mode (CKM_HASH_ML_DSA_*): root-caused 2026-08-30 — the C++
+    // engine's buildPreHashEncoding() (OSSLMLDSA.cpp) wrapped the FIPS 204
+    // Table 1 OID in an X.509 AlgorithmIdentifier SEQUENCE (15 bytes)
+    // instead of using the raw 11-byte OID FIPS 204 §5.4 actually calls
+    // for, which produced a structurally valid but byte-wrong M' — hence
+    // CKR_OK with a signature mismatch on every parameter set. Fixed; this
+    // reuses the same verifyBytesMLDSAContext() helper the context-mode
+    // block below already proved correct, since CK_SIGN_ADDITIONAL_CONTEXT
+    // is the same 12-byte struct for both — only the mechanism differs.
+    if (mldsaExtVec && mldsaExtVec.preHash) {
+      for (const variant of ['ML-DSA-44', 'ML-DSA-65', 'ML-DSA-87']) {
+        const tv = mldsaExtVec.preHash[variant]
+        if (!tv) continue
+        const v = parseInt(variant.split('-')[2])
+        const mech = MLDSA_HASH_MECH[tv.hashAlg]
+        if (mech === undefined) {
+          addResult(`mldsa-ext-prehash-${v}`, variant, 'SigVer KAT (preHash)', 'SKIP', `unmapped hashAlg ${tv.hashAlg}`)
+          continue
+        }
+        try {
+          const h = importMLDSAPublicKey(M, hSession, v, hexToBytes(tv.pk))
+          const ok = verifyBytesMLDSAContext(
+            M, hSession, h, hexToBytes(tv.message), hexToBytes(tv.signature), hexToBytes(tv.context), mech)
+          addResult(`mldsa-ext-prehash-${v}`, variant, 'SigVer KAT (preHash)', ok ? 'PASS' : 'FAIL', `hashAlg=${tv.hashAlg} sig[${tv.signature.length / 2}B]`)
+        } catch (e) {
+          addResult(`mldsa-ext-prehash-${v}`, variant, 'SigVer KAT (preHash)', 'FAIL', e.message)
+        }
+      }
+    }
+
     if (mldsaExtVec && mldsaExtVec.context) {
       for (const variant of ['ML-DSA-44', 'ML-DSA-65', 'ML-DSA-87']) {
         const tv = mldsaExtVec.context[variant]

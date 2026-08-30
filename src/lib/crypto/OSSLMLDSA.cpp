@@ -56,55 +56,62 @@ struct PreHashInfo
 	mutable EVP_MD* md;  // cached after first EVP_MD_fetch; NULL until first use
 };
 
-// DER-encoded AlgorithmIdentifier for each hash: SEQUENCE { OID [, NULL] }
-// SHA-2/SHA-3: SEQUENCE { OID, NULL }  (15 bytes)
-// SHAKE:       SEQUENCE { OID }        (13 bytes, absent parameters)
-static const unsigned char ALGID_SHA224[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x04, 0x05,0x00
+// FIPS 204 §5.4 (Algorithm 4 step 23 / Algorithm 5 step 18) OID: the raw
+// DER encoding of the hash function's object identifier alone (tag + length
+// + 9-byte OID value = 11 bytes for every choice, including SHAKE) — NOT an
+// X.509 AlgorithmIdentifier SEQUENCE. Byte-for-byte matches
+// rust/fips204-patched/src/hashing.rs:319-427 ("OIDs are per FIPS 204 Table 1
+// / RFC 8017 / IANA AlgorithmIdentifier registry"), which this engine's own
+// M' construction must agree with since sign and verify only interoperate if
+// both sides use the same OID bytes.
+static const unsigned char OID_SHA224[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x04
 };
-static const unsigned char ALGID_SHA256[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01, 0x05,0x00
+static const unsigned char OID_SHA256[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01
 };
-static const unsigned char ALGID_SHA384[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02, 0x05,0x00
+static const unsigned char OID_SHA384[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02
 };
-static const unsigned char ALGID_SHA512[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03, 0x05,0x00
+static const unsigned char OID_SHA512[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03
 };
-static const unsigned char ALGID_SHA3_224[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x07, 0x05,0x00
+static const unsigned char OID_SHA3_224[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x07
 };
-static const unsigned char ALGID_SHA3_256[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x08, 0x05,0x00
+static const unsigned char OID_SHA3_256[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x08
 };
-static const unsigned char ALGID_SHA3_384[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x09, 0x05,0x00
+static const unsigned char OID_SHA3_384[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x09
 };
-static const unsigned char ALGID_SHA3_512[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0a, 0x05,0x00
+static const unsigned char OID_SHA3_512[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0a
 };
-static const unsigned char ALGID_SHAKE128[] = {
-	0x30,0x0b, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0b
+static const unsigned char OID_SHAKE128[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0b
 };
-static const unsigned char ALGID_SHAKE256[] = {
-	0x30,0x0b, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0c
+static const unsigned char OID_SHAKE256[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0c
 };
+
+static const size_t OID_DER_LEN = 11; // every entry above is the same length
 
 static const PreHashInfo* getPreHashInfo(HashAlgo::Type hashAlg)
 {
 	// SHAKE output lengths per FIPS 204: SHAKE128 → 32 bytes, SHAKE256 → 64 bytes
 	// md is lazily populated on first use; NULL here means "not yet fetched".
 	static const PreHashInfo table[] = {
-		{ "SHA2-224",  ALGID_SHA224,    15, 28, false, NULL },
-		{ "SHA2-256",  ALGID_SHA256,    15, 32, false, NULL },
-		{ "SHA2-384",  ALGID_SHA384,    15, 48, false, NULL },
-		{ "SHA2-512",  ALGID_SHA512,    15, 64, false, NULL },
-		{ "SHA3-224",  ALGID_SHA3_224,  15, 28, false, NULL },
-		{ "SHA3-256",  ALGID_SHA3_256,  15, 32, false, NULL },
-		{ "SHA3-384",  ALGID_SHA3_384,  15, 48, false, NULL },
-		{ "SHA3-512",  ALGID_SHA3_512,  15, 64, false, NULL },
-		{ "SHAKE128",  ALGID_SHAKE128,  13, 32, true,  NULL },
-		{ "SHAKE256",  ALGID_SHAKE256,  13, 64, true,  NULL },
+		{ "SHA2-224",  OID_SHA224,    OID_DER_LEN, 28, false, NULL },
+		{ "SHA2-256",  OID_SHA256,    OID_DER_LEN, 32, false, NULL },
+		{ "SHA2-384",  OID_SHA384,    OID_DER_LEN, 48, false, NULL },
+		{ "SHA2-512",  OID_SHA512,    OID_DER_LEN, 64, false, NULL },
+		{ "SHA3-224",  OID_SHA3_224,  OID_DER_LEN, 28, false, NULL },
+		{ "SHA3-256",  OID_SHA3_256,  OID_DER_LEN, 32, false, NULL },
+		{ "SHA3-384",  OID_SHA3_384,  OID_DER_LEN, 48, false, NULL },
+		{ "SHA3-512",  OID_SHA3_512,  OID_DER_LEN, 64, false, NULL },
+		{ "SHAKE128",  OID_SHAKE128,  OID_DER_LEN, 32, true,  NULL },
+		{ "SHAKE256",  OID_SHAKE256,  OID_DER_LEN, 64, true,  NULL },
 	};
 
 	switch (hashAlg)
@@ -202,7 +209,7 @@ static bool buildPreHashEncoding(const ByteString& message,
 	}
 
 	// Build M' = 0x01 || contextLen || context || AlgId_DER || H(M)
-	// Overflow guard: contextLen <= 255, algIdDerLen <= 15, digestLen <= 64 (max 336).
+	// Overflow guard: contextLen <= 255, algIdDerLen == 11, digestLen <= 64 (max 332).
 	size_t totalLen = 1 + 1;
 	if (params->contextLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
 	totalLen += params->contextLen;
