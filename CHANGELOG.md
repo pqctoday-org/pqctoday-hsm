@@ -140,25 +140,112 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   running the identical `EVP_aes_*_wrap_pad()` path; a new conformance test
   asserts the two produce byte-identical output.
 
-- **Rust engine (`softhsmrustv3`): closed 7 of the C++ engine's WS-8
-  mechanism-parity gaps, plus `CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS`
-  (FIPS 186-5 A.2.2), each backed by real ACVP vectors.** `CKM_AES_GMAC`
-  (GCM's tag-only path over `aes-gcm`, already a direct dependency) and
-  `CKM_SP800_108_DOUBLE_PIPELINE_KDF` needed zero new dependencies;
-  `CKM_AES_CCM` (`ccm` crate), `CKM_AES_XTS`/`CKM_AES_XTS_KEY_GEN`
-  (`xts-mode` crate, including a 5909-byte ciphertext-stealing case), and
-  `CKM_AES_OFB`/`CFB128`/`CFB8`/`CFB1` (dedicated RustCrypto crates, `CFB1`
-  hand-rolled — no published crate exists for it) each added one. EC
-  extra-bits keygen is implemented for P-256/P-384/P-521 only —
-  `secp256k1` isn't governed by FIPS 186-5 at all, so there's no ACVP
-  evidence for it under this mode. Full regression suite
-  (`rust/test_p11_conformance.js`) went from 978/0 to **995/0**; see
-  `docs/remediation-plan-rust-pkcs11-v32-gaps-2026-08-30.md` for the full
-  per-item evidence table. `CKM_ECMQV_DERIVE` is deliberately held back
-  (same protocol-risk reasoning as the C++ engine, independent of
-  language).
+- **C++ engine: 6 new `*_KEY_DERIVATION` mechanisms
+  (`CKM_SHA{256,384,512,3_256,3_384,3_512}_KEY_DERIVATION`, WS-6.2).**
+  `C_GetMechanismList` never advertised any of them and `C_DeriveKey`
+  answered `CKR_MECHANISM_INVALID` for all six — Rust already had the
+  identical set, ACVP-proven. Ported into `SoftHSM_keygen.cpp` mirroring
+  the existing `CKM_SHAKE_256_KEY_DERIVATION` arm's four touch points
+  (mechanism-accept switch, generic-secret-default condition, key-class
+  check, parameter-shape validation), registered in the mechanism table
+  and `C_GetMechanismInfo`. Each derive is cross-checked against this
+  same engine's own `C_Digest` output for the same hash (per spec the
+  two must be byte-identical), grounding correctness in evidence already
+  proven elsewhere rather than a new external oracle. ACVP: 180 → 186
+  PASS.
+
+- **C++ engine: SHA-512/224 and SHA-512/256 (WS-6.3) — digest, HMAC,
+  HMAC_GENERAL, and `*_KEY_DERIVATION`, all four.** FIPS 180-4's
+  truncated SHA-512 variants (distinct standardized initial hash
+  values, not SHA-512 output truncated post-hoc — via OpenSSL's
+  `EVP_sha512_224()`/`EVP_sha512_256()`) were entirely absent from C++;
+  Rust already partly had them. `CKM_SHA512_T` (arbitrary
+  caller-specified truncation length) is deliberately NOT implemented —
+  OpenSSL has no generic parameterized `EVP_MD` for it, would need a
+  from-scratch FIPS 180-4 §5.3.6 IV computation — documented, not
+  silently skipped. Wired against real Tier-1 ACVP digest and HMAC
+  KATs. ACVP: 209 → 219 PASS.
+
+- **Both engines: the WS-8 cipher-mechanism set — AES-GMAC, AES-XTS
+  (+`CKM_AES_XTS_KEY_GEN`), AES-OFB/CFB128/CFB8/CFB1, and the SP800-108
+  Double-Pipeline KDF — landed in C++ first this session, then ported to
+  Rust for parity, each backed by real ACVP vectors.** C++: new
+  `CKK_AES_XTS` key type threaded through the object model wherever
+  `CKK_AES` was hardcoded (`P11Attributes.cpp` check-value computation,
+  `SoftHSM_objects.cpp`'s object factory, `OSSLAES.cpp`'s AES bit-length
+  gate); GMAC via OpenSSL's `EVP_MAC` "GMAC" (required a new `setIV()`
+  virtual on `MacAlgorithm` and a `setTruncatedMacSize()` override,
+  caught by real ACVP evidence after the first pass silently failed
+  every truncated call). Rust: `CKM_AES_GMAC`/`CKM_SP800_108_DOUBLE_PIPELINE_KDF`
+  needed zero new dependencies; `CKM_AES_CCM` (`ccm` crate),
+  `CKM_AES_XTS`/`_KEY_GEN` (`xts-mode` crate, incl. a 5909-byte
+  ciphertext-stealing case), and `CKM_AES_OFB`/`CFB128`/`CFB8`/`CFB1`
+  (RustCrypto crates, `CFB1` hand-rolled — no published crate exists for
+  it) each added one; also closes `CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS`
+  (FIPS 186-5 A.2.2, P-256/384/521 — `secp256k1` isn't governed by
+  FIPS 186-5, so no ACVP evidence exists for it under this mode). C++
+  ACVP: 314 PASS after landing; Rust full regression suite
+  (`rust/test_p11_conformance.js`) 978/0 → **995/0**. See
+  `docs/remediation-plan-rust-pkcs11-v32-gaps-2026-08-30.md` for the
+  Rust side's per-item evidence table. `CKM_ECMQV_DERIVE` is
+  deliberately held back in both engines (protocol-risk gated).
 
 ### Fixed
+
+- **C++/test-harness: corrected the HashML-DSA/HashSLH-DSA pre-hash OID
+  encoding (WS-3.3) — a same-engine-blind-spot bug, not a test gap.**
+  `buildPreHashEncoding()` (`OSSLMLDSA.cpp` and its `OSSLSLHDSA.cpp`
+  twin) wrapped the FIPS 204/205 hash OID in a full X.509
+  `AlgorithmIdentifier` SEQUENCE instead of the raw OID both specs
+  actually call for in `M' = 0x01 || ctxLen || ctx || OID || PH(M)`.
+  Sign and verify used the same wrong bytes, so a same-engine round trip
+  stayed self-consistent — invisible until compared against the
+  vendored `fips204-patched`/`fips205-patched` reference crates. Real
+  deterministic sigGen KATs added for both ML-DSA (5 cases,
+  tgId 2/4/6/10/12) and SLH-DSA (7 cases, one per parameter set) —
+  byte-exact match isn't achievable for SLH-DSA sigGen (this engine's
+  OpenSSL backend and the ACVP reference generator make different,
+  individually FIPS-205-compliant randomness choices even in
+  deterministic mode — documented, verified via round-trip instead).
+  ACVP: 186 → 201 PASS across the three commits.
+
+- **Test harness: closed all 13 of WS-4's originally-orphaned ACVP
+  vector files** (real provenance on disk, zero test coverage) —
+  SHA-384/512 digest, ECDSA P-521, and a KMAC-128 negative KAT were the
+  final 6. Wiring P-521 surfaced a real bug in `importECPublicKey()`:
+  it hand-built the `CKA_EC_POINT` DER OCTET STRING with a single
+  length byte, correct only under 128 bytes — P-521's 133-byte point is
+  the first case to exceed that, silently corrupting the point and
+  failing every P-521 verify. Fixed with a real DER encoder (`asn1js`)
+  instead of patching the one-off overflow. ACVP: 201 → 209 PASS.
+
+- **Test harness: RSA signature KATs, 1/22 → 9/22 real evidence
+  (WS-5.1), plus a silent-wrong-answer bug in the test helper itself.**
+  `rsaVerify()` was a 3-case if/else hardcoding SHA-256/384 and silently
+  defaulting any other hash to SHA-256 with `sLen=32` — a wrong-but-
+  passing verify waiting to happen for any caller that hit the
+  fallback. Replaced with a full 9-hash PSS lookup table and removed
+  the silent salt-length default (PSS has no universal salt length).
+  ACVP: 219 → 227 PASS.
+
+- **Test harness: real X25519/X448 derive KAT via the actual spec
+  mechanism, `CKM_ECDH1_DERIVE` (WS-5.3) — `CKM_X448` had been
+  advertised and dispatched but never once executed.** The engine's
+  `CKM_X25519`/`CKM_X448` are vendor-range convenience aliases;
+  PKCS#11 v3.2 §6.3.11 defines exactly one derive mechanism for
+  Montgomery curves — `CKM_ECDH1_DERIVE` with a `CKK_EC_MONTGOMERY`
+  key — and that spec-compliant path had zero evidence too. Added
+  Montgomery-key import/derive helpers and the RFC 8410 `CKA_EC_PARAMS`
+  OIDs; vectors are RFC 7748 §5.2's iteration-1 case. ACVP: 227 → 229
+  PASS.
+
+- **Cross-engine differential harness: 6 new exhaustive scenarios**
+  giving full per-parameter-set coverage of ML-KEM keygen/encapsulate,
+  ML-DSA keygen/sign-verify, and SLH-DSA keygen/sign-verify across both
+  engines, plus a fix to the SP800-108 Double-Pipeline scenario (it was
+  driving `CK_SP800_108_ITERATION_VARIABLE`, not the
+  `CK_SP800_108_COUNTER` segment type C++ actually recognizes for that
+  mode). 4693 observations compared, 0 uncovered divergences.
 
 - **BREAKING (C++ engine): `C_WrapKey`/`C_UnwrapKey` under
   `CKM_RSA_PKCS_OAEP` now use the `hashAlg` you asked for, instead of
