@@ -46,10 +46,92 @@
 #include <openssl/core_names.h>
 #include <string.h>
 
+// WS-1.3 (2026-08-29) — CK_EDDSA_PARAMS → RFC 8032 signature scheme.
+//
+// PKCS#11 v3.2 §6.3.14 Table 73 "Mapping to RFC 8032 Signature Schemes":
+//
+//   Scheme       Mechanism Param   phFlag   Context Data
+//   Ed25519      Not Required      N/A      N/A
+//   Ed25519ctx   Required          False    Optional
+//   Ed25519ph    Required          True     Optional
+//   Ed448        Required          False    Optional
+//   Ed448ph      Required          True     Optional
+//
+// Two deliberate readings, both recorded here rather than left implicit:
+//
+//  1. Ed25519 + params + phFlag=FALSE + EMPTY context resolves to plain
+//     Ed25519, not Ed25519ctx. RFC 8032 §5.1 states "For Ed25519ctx,
+//     phflag=0. The context input SHOULD NOT be empty", and OpenSSL 3.6
+//     refuses to sign under the Ed25519ctx instance with a zero-length
+//     context (verified against 3.6.3 before this was written). Table 73
+//     calls Context Data "Optional" for Ed25519ctx, so the empty case has to
+//     land somewhere; plain Ed25519 is the only scheme that has no context at
+//     all, and it is what a caller supplying a zeroed CK_EDDSA_PARAMS means.
+//  2. Ed448 with NO parameter stays plain Ed448, though Table 73 marks the
+//     parameter "Required" there. That is the behaviour this engine already
+//     shipped for CKM_EDDSA on an Ed448 key, it is unambiguous (Ed448 with an
+//     empty context is exactly what RFC 8032 §7.4's own "Blank" vector
+//     signs), and tightening it would break existing callers for no
+//     correctness gain.
+//
+// A non-empty context on pure Ed25519 has no RFC 8032 scheme at all and is
+// refused, matching OpenSSL.
+bool OSSLEDDSA::resolveInstance(size_t orderLen, AsymMech::Type mechanism,
+                                const void* param, size_t paramLen,
+                                const char*& instance,
+                                const unsigned char*& context, size_t& contextLen)
+{
+	const bool isEd448 = (orderLen == 57);
+	const EDDSA_SIGN_PARAMS* p = NULL;
+	if (param != NULL && paramLen == sizeof(EDDSA_SIGN_PARAMS))
+		p = (const EDDSA_SIGN_PARAMS*)param;
+
+	context = NULL;
+	contextLen = 0;
+
+	// CKM_EDDSA_PH is this engine's vendor-range shorthand for the pre-hash
+	// scheme with no context. It predates CK_EDDSA_PARAMS support and keeps
+	// taking no parameter (SoftHSM_sign.cpp still rejects one for it), so it
+	// resolves without consulting p.
+	if (mechanism == AsymMech::EDDSA_PH)
+	{
+		instance = isEd448 ? "Ed448ph" : "Ed25519ph";
+		return true;
+	}
+
+	const bool preHash = (p != NULL && p->hasParams && p->preHash);
+	const size_t ctxLen = (p != NULL && p->hasParams) ? p->contextLen : 0;
+
+	if (isEd448)
+	{
+		instance = preHash ? "Ed448ph" : "Ed448";
+	}
+	else if (preHash)
+	{
+		instance = "Ed25519ph";
+	}
+	else if (ctxLen > 0)
+	{
+		instance = "Ed25519ctx";
+	}
+	else
+	{
+		instance = "Ed25519";
+	}
+
+	if (ctxLen > 0)
+	{
+		// Only reachable with p != NULL && p->hasParams.
+		context = p->context;
+		contextLen = ctxLen;
+	}
+	return true;
+}
+
 // Signing functions
 bool OSSLEDDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 		     ByteString& signature, const AsymMech::Type mechanism,
-		     const void* /* param = NULL */, const size_t /* paramLen = 0 */)
+		     const void* param /* = NULL */, const size_t paramLen /* = 0 */)
 {
 	if (mechanism != AsymMech::EDDSA && mechanism != AsymMech::EDDSA_PH)
 	{
@@ -82,31 +164,43 @@ bool OSSLEDDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 		ERROR_MSG("Could not get the order length");
 		return false;
 	}
-	// gap remediation (2026-08-24): the PH instance name depends on which
-	// curve the key actually is. getOrderLength() returns 32 for Ed25519,
-	// 57 for Ed448 (OSSLEDPrivateKey::getOrderLength, ED448_KEYLEN) — read
-	// it BEFORE doubling below. This used to be hardcoded to "Ed25519ph"
+	// gap remediation (2026-08-24): the instance name depends on which curve
+	// the key actually is. getOrderLength() returns 32 for Ed25519, 57 for
+	// Ed448 (OSSLEDPrivateKey::getOrderLength, ED448_KEYLEN) — read it BEFORE
+	// doubling below. The PH name used to be hardcoded to "Ed25519ph"
 	// unconditionally, so an Ed448 key handed to CKM_EDDSA_PH got the wrong
 	// OpenSSL instance name; EVP_DigestSignInit_ex silently rejects the
 	// mismatch (Ed448ph instance requires an Ed448 key), which would have
 	// made CKM_EDDSA_PH's real dispatch path unreachable for Ed448 despite
 	// the mechanism being advertised. Found while adding real round-trip
 	// coverage for CKM_EDDSA_PH (previously untested by any mechanism name).
-	const char* phInstance = (len == 57) ? "Ed448ph" : "Ed25519ph";
+	//
+	// WS-1.3 (2026-08-29): the scheme selection now also honours
+	// CK_EDDSA_PARAMS — see resolveInstance above for the Table 73 mapping.
+	const char* instance = NULL;
+	const unsigned char* eddsaCtx = NULL;
+	size_t eddsaCtxLen = 0;
+	if (!resolveInstance(len, mechanism, param, paramLen, instance, eddsaCtx, eddsaCtxLen))
+	{
+		ERROR_MSG("EDDSA parameters do not name an RFC 8032 signature scheme");
+		return false;
+	}
 	len *= 2;
 	signature.resize(len);
 	memset(&signature[0], 0, len);
 	EVP_MD_CTX* ctx = EVP_MD_CTX_new();
 	bool init_ok = false;
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
-	if (mechanism == AsymMech::EDDSA_PH) {
-		OSSL_PARAM params[2];
-		params[0] = OSSL_PARAM_construct_utf8_string(
-			OSSL_SIGNATURE_PARAM_INSTANCE, (char*)phInstance, 0);
-		params[1] = OSSL_PARAM_construct_end();
+	{
+		OSSL_PARAM params[3];
+		int n = 0;
+		params[n++] = OSSL_PARAM_construct_utf8_string(
+			OSSL_SIGNATURE_PARAM_INSTANCE, (char*)instance, 0);
+		if (eddsaCtxLen > 0)
+			params[n++] = OSSL_PARAM_construct_octet_string(
+				OSSL_SIGNATURE_PARAM_CONTEXT_STRING, (void*)eddsaCtx, eddsaCtxLen);
+		params[n] = OSSL_PARAM_construct_end();
 		init_ok = EVP_DigestSignInit_ex(ctx, NULL, NULL, NULL, NULL, pkey, params);
-	} else {
-		init_ok = EVP_DigestSignInit(ctx, NULL, NULL, NULL, pkey);
 	}
 #else
 	init_ok = EVP_DigestSignInit(ctx, NULL, NULL, NULL, pkey);
@@ -132,6 +226,14 @@ bool OSSLEDDSA::signInit(PrivateKey* privateKey, const AsymMech::Type mechanism,
 {
 	if (!AsymmetricAlgorithm::signInit(privateKey, mechanism, param, paramLen))
 		return false;
+	// WS-1.3: keep the caller's CK_EDDSA_PARAMS for the multi-part path.
+	// signFinal() re-enters sign(), which is where the scheme is resolved,
+	// so without this copy a C_SignUpdate/C_SignFinal sequence would silently
+	// drop the context and produce a pure-mode signature. Copied by value
+	// (the struct carries its context inline) — the caller's buffer is not
+	// guaranteed to outlive this call.
+	m_hasSignParams = (param != NULL && paramLen == sizeof(EDDSA_SIGN_PARAMS));
+	if (m_hasSignParams) memcpy(&m_signParams, param, sizeof(EDDSA_SIGN_PARAMS));
 	m_signMsg.wipe();
 	return true;
 }
@@ -150,7 +252,9 @@ bool OSSLEDDSA::signFinal(ByteString& signature)
 	AsymMech::Type m  = currentMechanism;
 	if (!AsymmetricAlgorithm::signFinal(signature))
 		return false;
-	bool ok = sign(pk, m_signMsg, signature, m);
+	bool ok = sign(pk, m_signMsg, signature, m,
+	               m_hasSignParams ? &m_signParams : NULL,
+	               m_hasSignParams ? sizeof(m_signParams) : 0);
 	m_signMsg.wipe();
 	return ok;
 }
@@ -158,7 +262,7 @@ bool OSSLEDDSA::signFinal(ByteString& signature)
 // Verification functions
 bool OSSLEDDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 		       const ByteString& signature, const AsymMech::Type mechanism,
-		       const void* /* param = NULL */, const size_t /* paramLen = 0 */)
+		       const void* param /* = NULL */, const size_t paramLen /* = 0 */)
 {
 	if (mechanism != AsymMech::EDDSA && mechanism != AsymMech::EDDSA_PH)
 	{
@@ -191,10 +295,19 @@ bool OSSLEDDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 		ERROR_MSG("Could not get the order length");
 		return false;
 	}
-	// gap remediation (2026-08-24): see the matching comment in sign() —
-	// the PH instance name must track the actual key curve (32 => Ed25519,
-	// 57 => Ed448), not a hardcoded "Ed25519ph".
-	const char* phInstance = (len == 57) ? "Ed448ph" : "Ed25519ph";
+	// gap remediation (2026-08-24) / WS-1.3 (2026-08-29): see the matching
+	// comment in sign() — the instance name must track the actual key curve
+	// (32 => Ed25519, 57 => Ed448) and the caller's CK_EDDSA_PARAMS, not a
+	// hardcoded "Ed25519ph". Verify has to resolve the scheme identically to
+	// sign or a correctly produced signature would fail to verify.
+	const char* instance = NULL;
+	const unsigned char* eddsaCtx = NULL;
+	size_t eddsaCtxLen = 0;
+	if (!resolveInstance(len, mechanism, param, paramLen, instance, eddsaCtx, eddsaCtxLen))
+	{
+		ERROR_MSG("EDDSA parameters do not name an RFC 8032 signature scheme");
+		return false;
+	}
 	len *= 2;
 	if (signature.size() != len)
 	{
@@ -204,14 +317,16 @@ bool OSSLEDDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	EVP_MD_CTX* ctx = EVP_MD_CTX_new();
 	bool init_ok = false;
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
-	if (mechanism == AsymMech::EDDSA_PH) {
-		OSSL_PARAM params[2];
-		params[0] = OSSL_PARAM_construct_utf8_string(
-			OSSL_SIGNATURE_PARAM_INSTANCE, (char*)phInstance, 0);
-		params[1] = OSSL_PARAM_construct_end();
+	{
+		OSSL_PARAM params[3];
+		int n = 0;
+		params[n++] = OSSL_PARAM_construct_utf8_string(
+			OSSL_SIGNATURE_PARAM_INSTANCE, (char*)instance, 0);
+		if (eddsaCtxLen > 0)
+			params[n++] = OSSL_PARAM_construct_octet_string(
+				OSSL_SIGNATURE_PARAM_CONTEXT_STRING, (void*)eddsaCtx, eddsaCtxLen);
+		params[n] = OSSL_PARAM_construct_end();
 		init_ok = EVP_DigestVerifyInit_ex(ctx, NULL, NULL, NULL, NULL, pkey, params);
-	} else {
-		init_ok = EVP_DigestVerifyInit(ctx, NULL, NULL, NULL, pkey);
 	}
 #else
 	init_ok = EVP_DigestVerifyInit(ctx, NULL, NULL, NULL, pkey);
@@ -239,6 +354,10 @@ bool OSSLEDDSA::verifyInit(PublicKey* publicKey, const AsymMech::Type mechanism,
 {
 	if (!AsymmetricAlgorithm::verifyInit(publicKey, mechanism, param, paramLen))
 		return false;
+	// WS-1.3: see signInit — the multi-part verify path must resolve the same
+	// scheme the signer used, so the parameters have to survive to verifyFinal.
+	m_hasVerifyParams = (param != NULL && paramLen == sizeof(EDDSA_SIGN_PARAMS));
+	if (m_hasVerifyParams) memcpy(&m_verifyParams, param, sizeof(EDDSA_SIGN_PARAMS));
 	m_verifyMsg.wipe();
 	return true;
 }
@@ -257,7 +376,9 @@ bool OSSLEDDSA::verifyFinal(const ByteString& signature)
 	AsymMech::Type m  = currentMechanism;
 	if (!AsymmetricAlgorithm::verifyFinal(signature))
 		return false;
-	bool ok = verify(pk, m_verifyMsg, signature, m);
+	bool ok = verify(pk, m_verifyMsg, signature, m,
+	                 m_hasVerifyParams ? &m_verifyParams : NULL,
+	                 m_hasVerifyParams ? sizeof(m_verifyParams) : 0);
 	m_verifyMsg.wipe();
 	return ok;
 }

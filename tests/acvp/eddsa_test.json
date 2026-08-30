@@ -1,22 +1,306 @@
 {
-  "algorithm": "EdDSA",
-  "mode": "sigVer",
-  "source": "RFC 8032 Section 7.1 (Ed25519) published test vectors — tests[0]=Test 2, tests[1]=Test 1; verified with the node crypto (OpenSSL) oracle",
-  "testGroups": [
+  "algorithm": "EDDSA",
+  "curve": "Ed25519",
+  "purpose": "CKM_EDDSA with CK_EDDSA_PARAMS through the PKCS#11 ABI: the three RFC 8032 Ed25519 schemes (pure / ctx / ph) selected by the mechanism parameter, per PKCS#11 v3.2 \u00a76.3.14 Table 73.",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/EDDSA-SigGen-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-29",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "794d58fb39f08de4f852d63cb98b95c39bcc38ea42c7d42d09e92c15dadd5d81",
+    "note": "vsId 1 AFT groups. tgId 1 = Ed25519 pure (contextLength 0 on all 10 cases); tgId 2 = Ed25519 preHash with a per-case non-empty context; tgId 3 = Ed448 with a per-case non-empty context; tgId 4 = Ed448 preHash with a per-case context. Every selected case was independently re-verified against OpenSSL 3.6.3 through OSSL_SIGNATURE_PARAM_INSTANCE + OSSL_SIGNATURE_PARAM_CONTEXT_STRING before adoption - 40/40 byte-exact. NOTE ON COVERAGE: ACVP EDDSA-SigGen-1.0's sample set contains NO Ed25519ctx case (tgId 1's contexts are all empty, which is pure Ed25519, and every preHash group is Ed25519ph), so Ed25519ctx is carried at Tier 3 from RFC 8032 \u00a77.2 below - the one place on this surface where Tier 1 genuinely does not reach."
+  },
+  "_provenance_tier3": {
+    "source_url": "https://www.rfc-editor.org/rfc/rfc8032.txt",
+    "source_release": "RFC 8032 (January 2017), Josefsson & Liusvaara",
+    "retrieved": "2026-08-29",
+    "producer": "IETF RFC 8032 \u00a77 published test vectors (Tier 3 - used only where NIST ACVP does not publish an equivalent case)",
+    "source_sha256": "ed63657ff389301282b169b0abde9b5dd2c7e4d524fdfa5da6ff3094fc93c4c3",
+    "note": "Parsed directly from the canonical rfc-editor.org text, not transcribed by hand. All 21 \u00a77.1-\u00a77.5 vectors were re-verified against OpenSSL 3.6.3 through the same instance/context API this engine uses - 21/21 byte-exact. REPLACES, for the Ed448 file, a prior file that declared \"Generated via Node.js crypto (OpenSSL backend), Ed448 (RFC 8032)\": self-generated material, inadmissible as sole evidence under the remediation plan's \u00a71 ladder, and orphaned (loaded by nothing) besides."
+  },
+  "vectorSets": [
     {
-      "curve": "Ed25519",
+      "scheme": "Ed25519",
+      "tier": 1,
+      "source": "NIST ACVP EDDSA-SigGen-1.0 tgId 1 (curve ED-25519, preHash False)",
+      "phFlag": false,
+      "useParams": false,
       "tests": [
         {
-          "pk": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
-          "msg": "72",
-          "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
-          "testPassed": true
+          "id": "acvp-tc1",
+          "d": "60b9c57ea605c9147656883781ed28c847682faa3c7ad8fbe2fd9daf263c803c",
+          "q": "b3ebfe9ad81341a6c0eeea0b3f49115684d97f165535b2027cb5afce53ff944a",
+          "message": "f495660a1fc6a591b0e2fb90574e3a28e485152ecf6c5745c137e2c53e619832d58a5f101b3eeaf88887df1552ab16613e87aa4f38c91453a5824809be2e198ff84e3c6eaf79af8fd44ef7e4c0fdc70941a0f457f1908011f80e89cbcebe47806c9f131ab5580132de9be0b9db0d622f4d16c805ae852f0b68f1c6b1ab8e2bb4",
+          "context": "",
+          "signature": "f9593859640fd47fa3a67f6cf00184b9696a2928f0013a72411325d7356af72460c26ddeb3b6a6c1bc89224179f72f75c8e3be6d2f9ef6002f29bce680c0b203"
         },
         {
-          "pk": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-          "msg": "",
-          "signature": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
-          "testPassed": true
+          "id": "acvp-tc2",
+          "d": "60b9c57ea605c9147656883781ed28c847682faa3c7ad8fbe2fd9daf263c803c",
+          "q": "b3ebfe9ad81341a6c0eeea0b3f49115684d97f165535b2027cb5afce53ff944a",
+          "message": "6baba4cfeef3c747f71e43fd41438a081cb9262b3c51e813854acfc33f71c34165376e914b69e45e20f226ac133b858202a9725713ac42da3df038d252e73a1ecb5639c7c58db18e1039d77e2b2503bd1d21aa7a8f8e989efe341ffdf8f498f77151d216f9a3a4ad2402e6ab4a400f5ced30c7ebdeac709d6d326a6a3ad591f6",
+          "context": "",
+          "signature": "35059ced0a61b1580d0b19299c8217e747ff6421a40448355f22340badc0b10ec42a9bfcf32d96eb10c44d1ee71a2111daeefd872e8fb99279a82bd17de4a609"
+        },
+        {
+          "id": "acvp-tc3",
+          "d": "60b9c57ea605c9147656883781ed28c847682faa3c7ad8fbe2fd9daf263c803c",
+          "q": "b3ebfe9ad81341a6c0eeea0b3f49115684d97f165535b2027cb5afce53ff944a",
+          "message": "08d3f2222c15200aa6a2dd209ce903bfbf3459f9734f545ec13f2fd663a8d5bcbc7ca3dfcd2263a6103c5503e4f14b98c72959804ae731abb3bf4490bb3146fca6c111e782cae819b5a3e1a4fb071e06cfeb07a9a47b7dcd6425a9b63b194af2e0500a02f71b84cfd3fefcc7b595d15d7580a90623274cb1c309020699bc18b2",
+          "context": "",
+          "signature": "f4aa3101e0206353340736ade692153f155c82d49d87c0ad21916cb5de832c621cabcac532a46b034a080c0910a4e8dd711205917c081d5e4fce9e8f92b17b0a"
+        },
+        {
+          "id": "acvp-tc4",
+          "d": "60b9c57ea605c9147656883781ed28c847682faa3c7ad8fbe2fd9daf263c803c",
+          "q": "b3ebfe9ad81341a6c0eeea0b3f49115684d97f165535b2027cb5afce53ff944a",
+          "message": "832e91f7fe7642e01a05e7311b81288b44f5d70486c8c94c122430498b7b48d21a372ba87e6e6481bccbb4fca17f09b9fd8409c63de814aed60f6563f7ffaccf0188b1253b25104ebb15ed9a769f5b77872749374b495acb5c66ce8ebc2096aa652b9cfcf791e146bc541098b47014a59d22838ea912fa9d85a8b61c6ccca2cc",
+          "context": "",
+          "signature": "a07e6d2aa865c4a029664839bdf4e6a00d235b76f051469d819b67aa1ca4cf0566f35b4915634cbc310c3819f00c2c387ee58b583b61720701229f9f871d2b02"
+        },
+        {
+          "id": "acvp-tc5",
+          "d": "60b9c57ea605c9147656883781ed28c847682faa3c7ad8fbe2fd9daf263c803c",
+          "q": "b3ebfe9ad81341a6c0eeea0b3f49115684d97f165535b2027cb5afce53ff944a",
+          "message": "b9c891968269fbc12c682a82c8236c84119aa3ad5ff222102a674027bf73b06c6a4404ce418aef92016c065e38d5d37493499dbb411213bd97d22072fcfc2d33c763579b97ffceaf56e4c072b0b9e34ad93c23eda677cfc2df9bce0f394577c1dfb6181b20acb1b637443310d5f35965e25ab773be0deadf7f784849b605f48a",
+          "context": "",
+          "signature": "89b542ce49289fce2e2186e578549e1442b1f801f194b4b7a778d212f2fe241fc69956c548c885bed1c350b197713deda6cf6b58a2ad7c8f640029a785448e09"
+        },
+        {
+          "id": "acvp-tc6",
+          "d": "60b9c57ea605c9147656883781ed28c847682faa3c7ad8fbe2fd9daf263c803c",
+          "q": "b3ebfe9ad81341a6c0eeea0b3f49115684d97f165535b2027cb5afce53ff944a",
+          "message": "d369d566b676d0e904e6b3e9131f134a966abbe064fb87f6a5c1f85c6d69cd1ec0d9c4e16e910a33d54716c1926db545df592b62f0d07e974b43f8c1aaa5301ba84557c864f3a4c1ccabb0e293d2399d82a2029e85756417a128d41252d7de862aa994cb0a37e7e1f8b0d854e720c020564a98892c5bc53c1161004cd49c71a4",
+          "context": "",
+          "signature": "c3e9b9a3c5b909b51e265a2b0ef45aade817656829f1949d5b424105151516c86088536c077864b1605d9fa936925f17943c6c8dd5a34c4b0d5ea907b00b460a"
+        },
+        {
+          "id": "acvp-tc7",
+          "d": "60b9c57ea605c9147656883781ed28c847682faa3c7ad8fbe2fd9daf263c803c",
+          "q": "b3ebfe9ad81341a6c0eeea0b3f49115684d97f165535b2027cb5afce53ff944a",
+          "message": "9cd1620b674aed81cc46b81a0b30a61abe25a4e8bb52bdd8c10d32d4b34726b7072c943481051ca5990e33981f28665649b920ef9bbba53006e31084f0869000dfd8437187f0d3de1540a46082c3bbd291225a4347068f4b9e1b2454e431e53d6fb65cdbfbf779a4fd67f52b07434c2a38f5b6d5c3ffb63bb33f690094d1460a",
+          "context": "",
+          "signature": "e955c1058a9662673dd535dd6ae9c222fa518cf366155f29ff0254b0003aac2a4b972b60deac42aadb308960c8d27e859edd57e3502e97e2bf496ecdd2f8dd0e"
+        },
+        {
+          "id": "acvp-tc8",
+          "d": "60b9c57ea605c9147656883781ed28c847682faa3c7ad8fbe2fd9daf263c803c",
+          "q": "b3ebfe9ad81341a6c0eeea0b3f49115684d97f165535b2027cb5afce53ff944a",
+          "message": "65b02cda9f07c5451e0c601d8bcd6ecad99d7165771986d458ef7f36c34db57260b73e01029ee4dfb5307f04154dc1fca55ef94ade5eaea4b12f7884e77a759e11756b4dca1429d2e850c425be3804d07367b139ecc7e7cc0509162c70cd3079563e3c191e35635797e511c62ab3adc75ce85117f4ccdc4d8e8a832d6bc1b8fa",
+          "context": "",
+          "signature": "888129ed9cd76401557d6434be84ce63383d273b315af231be33910cee7d0c7ef60aef2f5a41878af8c12463fc7c2bc47e233699187c22f05b894e6b0ed8b00d"
+        },
+        {
+          "id": "acvp-tc9",
+          "d": "60b9c57ea605c9147656883781ed28c847682faa3c7ad8fbe2fd9daf263c803c",
+          "q": "b3ebfe9ad81341a6c0eeea0b3f49115684d97f165535b2027cb5afce53ff944a",
+          "message": "e522bf3a82f1ede40d8927002b06d1689e59d289eb7e19318c5407e787b1374b0211b11ca9adb5c0b9b369f8ddfcf1751af21b71219308973e69e837b1a798768205fd1d7ceb5bbacbf41cf415579a748cb98e1f28b950ff2f2d08046781b4d6a87e5077717e2fa911432b719338c5476d50b8657d40f5d27c6e9bab956cfdf6",
+          "context": "",
+          "signature": "91a4f07ad83374d2f84696f606c5906927f1b3f946b7ce4f0a8f9c4f530f3899162c114661a46c54406dd5a4619fbf1b92cfe2f6023cd60c26a4604f5430dc07"
+        },
+        {
+          "id": "acvp-tc10",
+          "d": "60b9c57ea605c9147656883781ed28c847682faa3c7ad8fbe2fd9daf263c803c",
+          "q": "b3ebfe9ad81341a6c0eeea0b3f49115684d97f165535b2027cb5afce53ff944a",
+          "message": "ada10a8b44f99a0bb6f24945e7e07313833a5b5fec444c70b6e1f6919c9838069af878288398dff9816fd3f582b17f7b3953b5a5d23cc426ca8e2424f31b7a89e7ccf6665cad6638df2e9cb16b16feda05e9ad172120d2905fd4d5e9d1bf271d213e0b818c8465e66ad6c5a5cd23fba078f5e31b399cc8f34d82ebc194d10fa5",
+          "context": "",
+          "signature": "390d70c93699be9084328646eece105c1b323152b1fb4d82bf87753a6dc15032e723815053cd1e7ae2e08650dfde5cf433b701957afa42f0c6f296a8c26d070d"
+        }
+      ]
+    },
+    {
+      "scheme": "Ed25519",
+      "tier": 3,
+      "source": "RFC 8032 \u00a77.1 (Ed25519)",
+      "phFlag": false,
+      "useParams": false,
+      "tests": [
+        {
+          "id": "rfc8032-TEST_1",
+          "d": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+          "q": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+          "message": "",
+          "context": "",
+          "signature": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+        },
+        {
+          "id": "rfc8032-TEST_2",
+          "d": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+          "q": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+          "message": "72",
+          "context": "",
+          "signature": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
+        },
+        {
+          "id": "rfc8032-TEST_3",
+          "d": "c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7",
+          "q": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+          "message": "af82",
+          "context": "",
+          "signature": "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a"
+        },
+        {
+          "id": "rfc8032-TEST_1024",
+          "d": "f5e5767cf153319517630f226876b86c8160cc583bc013744c6bf255f5cc0ee5",
+          "q": "278117fc144c72340f67d0f2316e8386ceffbf2b2428c9c51fef7c597f1d426e",
+          "message": "08b8b2b733424243760fe426a4b54908632110a66c2f6591eabd3345e3e4eb98fa6e264bf09efe12ee50f8f54e9f77b1e355f6c50544e23fb1433ddf73be84d879de7c0046dc4996d9e773f4bc9efe5738829adb26c81b37c93a1b270b20329d658675fc6ea534e0810a4432826bf58c941efb65d57a338bbd2e26640f89ffbc1a858efcb8550ee3a5e1998bd177e93a7363c344fe6b199ee5d02e82d522c4feba15452f80288a821a579116ec6dad2b3b310da903401aa62100ab5d1a36553e06203b33890cc9b832f79ef80560ccb9a39ce767967ed628c6ad573cb116dbefefd75499da96bd68a8a97b928a8bbc103b6621fcde2beca1231d206be6cd9ec7aff6f6c94fcd7204ed3455c68c83f4a41da4af2b74ef5c53f1d8ac70bdcb7ed185ce81bd84359d44254d95629e9855a94a7c1958d1f8ada5d0532ed8a5aa3fb2d17ba70eb6248e594e1a2297acbbb39d502f1a8c6eb6f1ce22b3de1a1f40cc24554119a831a9aad6079cad88425de6bde1a9187ebb6092cf67bf2b13fd65f27088d78b7e883c8759d2c4f5c65adb7553878ad575f9fad878e80a0c9ba63bcbcc2732e69485bbc9c90bfbd62481d9089beccf80cfe2df16a2cf65bd92dd597b0707e0917af48bbb75fed413d238f5555a7a569d80c3414a8d0859dc65a46128bab27af87a71314f318c782b23ebfe808b82b0ce26401d2e22f04d83d1255dc51addd3b75a2b1ae0784504df543af8969be3ea7082ff7fc9888c144da2af58429ec96031dbcad3dad9af0dcbaaaf268cb8fcffead94f3c7ca495e056a9b47acdb751fb73e666c6c655ade8297297d07ad1ba5e43f1bca32301651339e22904cc8c42f58c30c04aafdb038dda0847dd988dcda6f3bfd15c4b4c4525004aa06eeff8ca61783aacec57fb3d1f92b0fe2fd1a85f6724517b65e614ad6808d6f6ee34dff7310fdc82aebfd904b01e1dc54b2927094b2db68d6f903b68401adebf5a7e08d78ff4ef5d63653a65040cf9bfd4aca7984a74d37145986780fc0b16ac451649de6188a7dbdf191f64b5fc5e2ab47b57f7f7276cd419c17a3ca8e1b939ae49e488acba6b965610b5480109c8b17b80e1b7b750dfc7598d5d5011fd2dcc5600a32ef5b52a1ecc820e308aa342721aac0943bf6686b64b2579376504ccc493d97e6aed3fb0f9cd71a43dd497f01f17c0e2cb3797aa2a2f256656168e6c496afc5fb93246f6b1116398a346f1a641f3b041e989f7914f90cc2c7fff357876e506b50d334ba77c225bc307ba537152f3f1610e4eafe595f6d9d90d11faa933a15ef1369546868a7f3a45a96768d40fd9d03412c091c6315cf4fde7cb68606937380db2eaaa707b4c4185c32eddcdd306705e4dc1ffc872eeee475a64dfac86aba41c0618983f8741c5ef68d3a101e8a3b8cac60c905c15fc910840b94c00a0b9d0",
+          "context": "",
+          "signature": "0aab4c900501b3e24d7cdf4663326a3a87df5e4843b2cbdb67cbf6e460fec350aa5371b1508f9f4528ecea23c436d94b5e8fcd4f681e30a6ac00a9704a188a03"
+        },
+        {
+          "id": "rfc8032-TEST_SHA(abc)",
+          "d": "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42",
+          "q": "ec172b93ad5e563bf4932c70e1245034c35467ef2efd4d64ebf819683467e2bf",
+          "message": "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+          "context": "",
+          "signature": "dc2a4459e7369633a52b1bf277839a00201009a3efbf3ecb69bea2186c26b58909351fc9ac90b3ecfdfbc7c66431e0303dca179c138ac17ad9bef1177331a704"
+        }
+      ]
+    },
+    {
+      "scheme": "Ed25519ctx",
+      "tier": 3,
+      "source": "RFC 8032 \u00a77.2 (Ed25519ctx)",
+      "phFlag": false,
+      "useParams": true,
+      "tests": [
+        {
+          "id": "rfc8032-foo",
+          "d": "0305334e381af78f141cb666f6199f57bc3495335a256a95bd2a55bf546663f6",
+          "q": "dfc9425e4f968f7f0c29f0259cf5f9aed6851c2bb4ad8bfb860cfee0ab248292",
+          "message": "f726936d19c800494e3fdaff20b276a8",
+          "context": "666f6f",
+          "signature": "55a4cc2f70a54e04288c5f4cd1e45a7bb520b36292911876cada7323198dd87a8b36950b95130022907a7fb7c4e9b2d5f6cca685a587b4b21f4b888e4e7edb0d"
+        },
+        {
+          "id": "rfc8032-bar",
+          "d": "0305334e381af78f141cb666f6199f57bc3495335a256a95bd2a55bf546663f6",
+          "q": "dfc9425e4f968f7f0c29f0259cf5f9aed6851c2bb4ad8bfb860cfee0ab248292",
+          "message": "f726936d19c800494e3fdaff20b276a8",
+          "context": "626172",
+          "signature": "fc60d5872fc46b3aa69f8b5b4351d5808f92bcc044606db097abab6dbcb1aee3216c48e8b3b66431b5b186d1d28f8ee15a5ca2df6668346291c2043d4eb3e90d"
+        },
+        {
+          "id": "rfc8032-foo2",
+          "d": "0305334e381af78f141cb666f6199f57bc3495335a256a95bd2a55bf546663f6",
+          "q": "dfc9425e4f968f7f0c29f0259cf5f9aed6851c2bb4ad8bfb860cfee0ab248292",
+          "message": "508e9e6882b979fea900f62adceaca35",
+          "context": "666f6f",
+          "signature": "8b70c1cc8310e1de20ac53ce28ae6e7207f33c3295e03bb5c0732a1d20dc64908922a8b052cf99b7c4fe107a5abb5b2c4085ae75890d02df26269d8945f84b0b"
+        },
+        {
+          "id": "rfc8032-foo3",
+          "d": "ab9c2853ce297ddab85c993b3ae14bcad39b2c682beabc27d6d4eb20711d6560",
+          "q": "0f1d1274943b91415889152e893d80e93275a1fc0b65fd71b4b0dda10ad7d772",
+          "message": "f726936d19c800494e3fdaff20b276a8",
+          "context": "666f6f",
+          "signature": "21655b5f1aa965996b3f97b3c849eafba922a0a62992f73b3d1b73106a84ad85e9b86a7b6005ea868337ff2d20a7f5fbd4cd10b0be49a68da2b2e0dc0ad8960f"
+        }
+      ]
+    },
+    {
+      "scheme": "Ed25519ph",
+      "tier": 1,
+      "source": "NIST ACVP EDDSA-SigGen-1.0 tgId 2 (curve ED-25519, preHash True)",
+      "phFlag": true,
+      "useParams": true,
+      "tests": [
+        {
+          "id": "acvp-tc11",
+          "d": "2af03e7691051d68c7423e541d62b99983c21207f18ac0226681f01b4c26a7cd",
+          "q": "67becded71a8e11186f7ff68dff8a974464f641d70ba7f8b60f5902992f0daf2",
+          "message": "e6bd522fb23aab7c0628e12f40faca29c1db25a23e5c978f09ff8839f9727728c8438b3aeb51e96cec1c4c95ed7c0e32715723e5b20b6071f83d819ba6989952becfac4f2c3b81e5c0d8ad9ece8fcc8a9b2ed192c436f77492b7766c36a9459abb1a25ba07aa6143eae81caa80f2296ea9b745ec33546de489b3f98d7e6bcedc",
+          "context": "e7e7ca4f58b5061f8cac39a85a2cdd5525c4ddd240def77fa0aaebbd7a252199c25baae2451e43a91a564d90a0a4f3619e162a82bb305092ca106d9b5f2075d93cd94d4e8d7c6b4f4799029070c28f0e464adef0fe5e730fa9385eb16d8a431d",
+          "signature": "7b10b072b07b5896c0fccf620f3f699eb348761ad9b33b82cc073fe6e79592bca46f3ff3316653bd4086f5d14818e96af7b2b5dfe22c387d7167c1cd1ff21709"
+        },
+        {
+          "id": "acvp-tc12",
+          "d": "2af03e7691051d68c7423e541d62b99983c21207f18ac0226681f01b4c26a7cd",
+          "q": "67becded71a8e11186f7ff68dff8a974464f641d70ba7f8b60f5902992f0daf2",
+          "message": "25a415d671eb5991b87cf42fedf08b7ae004a1dba57cbdd9d93fa38cadf11c75d47ab377fa0e588d2ddafa794cf9517c604774eec70735d91b10e4c978876bb3f540283f6cebc155f369e2da56d9e9be091c1419a412b6fdba1f63bb634bf610b4505235b75b98756019017e04eff97fcc48156f9820044876e09b0560216ef4",
+          "context": "47d084e1dd5333078ea0a6c8a9ae233e3ede3983b753cdacebbf2ca018b41f3cbd231c8d8d32417fc0916875bd4a55d0f87db682f5d7fa645d12131ed3f498f7156313fe7f1bbcf4602e5bb2b72bbfffdeff94b0ab359fd0229ba94a26a2ae1c4320a17d4933d08d2e62b895a81c00075c3ac18110db17b6e05d314fa9ea5719c303ceb7321c399f81a58cc3ec802d54eb52347dbb721f12d8d49983d25132ba",
+          "signature": "a1b952121b943c794689e10090f31e6a7a97a18d6bf72124c0b60f9baf287e84001aa90a5305c9d6a4a2935972b01d0f0ea7d64c4ed30e997d3db5b3c19b6a0e"
+        },
+        {
+          "id": "acvp-tc13",
+          "d": "2af03e7691051d68c7423e541d62b99983c21207f18ac0226681f01b4c26a7cd",
+          "q": "67becded71a8e11186f7ff68dff8a974464f641d70ba7f8b60f5902992f0daf2",
+          "message": "c34e91875c75585e408bc1c8de15c78d035e03fa9a0107b029b901ad1ae993ce98f5f716e6e76ececdaf1473be4ff50b0726a9b6d72877ba64776ecb43260e55ff7f18d420ceb3ac14db2212bb6c28988545d3283e934eb0c918e59a9483a9efc2d0e0e7e87b50da4fe84926d840d34912024fed16d025e067004f71a902955e",
+          "context": "095a0bbf22098f82",
+          "signature": "b4b3cc3ffc6ce520690ed843a91fb6785c36cfc435683e3dbd80e9640349f298c80705962107c1176015208ae2834d0cb19b2335091882648076e00d8b0cf809"
+        },
+        {
+          "id": "acvp-tc14",
+          "d": "2af03e7691051d68c7423e541d62b99983c21207f18ac0226681f01b4c26a7cd",
+          "q": "67becded71a8e11186f7ff68dff8a974464f641d70ba7f8b60f5902992f0daf2",
+          "message": "8ef9e6064078ecfca0cefdbc41b5a753ad34e604118a67575a373f4b59bfd694c06f03cc3a463c61f4ab77b75e83492d1b3f111ff161c292c5214d7dd9e1a817865b408be3c293bf53d865d31c2d79a8b4192c02d65cef00fae78fce058f395a7f94e5d72bfe464841e87ce162bd7955ef530d133b28ab6b336b892a0bd4a7cf",
+          "context": "3cb481902bd533343a39b5a220181fcbe47c40d69af31ca7dfaa408d533ad1ba43525760f19d9a6f0114eab4a5bbf175a8ec41b0e8e4eb9315732dc545344825ee5b5d118ec7b8252c28ba8586311a0d7085c29c5fbf15a163e528aac3c697bb9971e5bfc861fa6b88a16ffd854f783d1df08cdcf0e296d41a2672883341c69c2540d4ff6e37fefc62b37ef6942fc8d66e5beb8963bdfc6d7054f7c75e5c1e0797042d4d25e798087af09aec50072811edd0e552485da053",
+          "signature": "602d75a143e3a38b76db2e133eb671a49eb08ad8966eee7076d4401c6565530abe6fe27fc101d9cf98f0132ffb0d724f7aa01bf2c73d94f5eb188eec19230e03"
+        },
+        {
+          "id": "acvp-tc15",
+          "d": "2af03e7691051d68c7423e541d62b99983c21207f18ac0226681f01b4c26a7cd",
+          "q": "67becded71a8e11186f7ff68dff8a974464f641d70ba7f8b60f5902992f0daf2",
+          "message": "3a56d3833045016e8f0acd4068f7fb4fb90b74b508509e69a51f28472563d69c5de4eb04bb33d201f5585cbaf902d78af888a96b3552d5265a8eb70346f6c6ebc4c6423f81f3d86276aa08dd77f8f85d226e3eec4f9b639f246df7939649abfd36d3b3f15ffaf83674f80799f2f99452214d4cf1f4fcbf78b7a1397a294c5b7e",
+          "context": "9522eee346b6d4cccf1c7cf4096b79c78c3f4f0c1c8f5cb862b062459598f5f0",
+          "signature": "3ca6f529a5531770e36d0af452f6be9ad3ff3e74bb787ce1fcace17c28f78f28aa80620d769819f45e4d17ae09aff604d18e16d5a5132eb1a226b017c4f06601"
+        },
+        {
+          "id": "acvp-tc16",
+          "d": "2af03e7691051d68c7423e541d62b99983c21207f18ac0226681f01b4c26a7cd",
+          "q": "67becded71a8e11186f7ff68dff8a974464f641d70ba7f8b60f5902992f0daf2",
+          "message": "68ab53643e7887a2c2fb2ce3c3d946fce86c44116e2340b0c4c64c8de649dd3d01a49e979427d9cc224454e51420e938a0a7e68ee905170743e78c1844aae616e04003ad12e7a3cefa2d17852a849751df9038cc5fbe7e0451b17e37f6d4f93ac97e69ac71c8c9d974464d680a69b8c21f83ed3ee4b0954aec7475dbc0171547",
+          "context": "fddf6639e520410800b4e57362785989219614077cd47a312aa50bfe6bfad2bf37cd8c26b199401bd7544b36c9aae18f0084b6889e42d2890617d3263b185d4beaae1e4307590ed71eb24a4f5e8049fdcb4617c946bc6e5610947fc0715fcd21a3aab612a8acd6174dfd450c99e31d86d84585093a01f6a0c1c7f0de715cd563bfe4327c062143515051ca3d5d2f1d0172f11c46c28c05d627bc34ebfe2669183aa23bb6e48f77f58b489640d71d5df5b3ef04da750f06fa9b170c7d16ce9ae691a25aba24d0f076cc9156c887a0ed333a4aba980cfbbb955d6087d4064386e2111ee0c551983f6d8711d630a4635b22eb12c19db1ab0472",
+          "signature": "42773dd61d113b6b6e8e518ca81778731a16920a745037e4374aba2b764998120ff8f2bbe63bbbd87aaed1e4c54ba94623317e3d198d39bf2f36fa7dcb3dfc01"
+        },
+        {
+          "id": "acvp-tc17",
+          "d": "2af03e7691051d68c7423e541d62b99983c21207f18ac0226681f01b4c26a7cd",
+          "q": "67becded71a8e11186f7ff68dff8a974464f641d70ba7f8b60f5902992f0daf2",
+          "message": "277a950fb14679a76fb2d3bb4f7af70684ce9a36dd9832a190f70c1d5f0578d81d4d566dc41ec38f68312e21feacac5bbae8fe10e2ce727de85a2e74d5e1d89ed4d167fcd6b2ee83df7c054f151afbbe6be1ff37a34caa85492c1fb3a2a20c6d81443cf96b183db91fa25c8c54bca9080dd016e14f59e310cbd314136c0e253b",
+          "context": "0562fddb75be9af4f4315396ef5d1cb54f9d89f99709b124",
+          "signature": "e17736923d2a2671625ace527b45c8624497383b7390ca62dc538d0c9815d700249f22eaddb9beb5057415449788d15e00460e01e14a69d16e68c5bd5bbaa600"
+        },
+        {
+          "id": "acvp-tc18",
+          "d": "2af03e7691051d68c7423e541d62b99983c21207f18ac0226681f01b4c26a7cd",
+          "q": "67becded71a8e11186f7ff68dff8a974464f641d70ba7f8b60f5902992f0daf2",
+          "message": "58e4798f662967f298f5c241843deeea3eecd82264c4a85b55d9cc66e48fb20117e137da16b80a2299295d2fd43ba68cdb020b37ad714e8fbe8f47704b011cf524967c2bcac9ed4a248693b25466ea9d4a18680084d698930c02a303022fa82ddcb196bfd8f1a54303900e45045b9162934a9ff42ff9a6ba56541c700df0da33",
+          "context": "4977c5988679e5ccbf741e7c85ac5a6d",
+          "signature": "96c80c0cf84b507f904bbe123ca9aec3ef0289f49971b4311bf0a2c331ce7a8a45c09c7532859c1b2afb161ca013483b408f8d541268cc452aa8474c15a8f30a"
+        },
+        {
+          "id": "acvp-tc19",
+          "d": "2af03e7691051d68c7423e541d62b99983c21207f18ac0226681f01b4c26a7cd",
+          "q": "67becded71a8e11186f7ff68dff8a974464f641d70ba7f8b60f5902992f0daf2",
+          "message": "018f592cac764207dd0940944fa25babb6fc9dba665a02b4681c44520ded80b1ef03a44aeb8a495be9b2ed55ed9657ca681c1891d4c8aba5d945b7f5d12bbacb5f2e2aa66dc3c7cf8d728311ffdcf91f12157ec7b8dfdf1aaa110db35ad6ce6cc3ed32e7b669e0e6e3d170b4e355b7e7f911cc9f987db89115e1104da9aba1fd",
+          "context": "dd1651108845cefde26295805b7cf71ac952f035d9511e6d50fbc7238a94bc2ee5bf5b2b748975cd7aa5506da227a65aae8724b519c8bf3942c59afe1349a232cf38a802d6a5a2ed080afd998a6032ebf9da6c2dc78b668dc132d116777dd7783edbcdd513a0341bb5eb418056816b13db117bebc1e10e9c0dbba20bc057d9498a531af6730efd75c62e0fd5287449643e916e50c762cb59d241e41015fb49c4c069f49fe5aaa44962434d8d3ae0def1cbb8060a1c9ab27ef3ffa018585fb814bb4ab50766141c449b8aea7ae0be58725a3c6fce0f050f76705ab401ef40d44dbd2e4c9353392e3b86160f2b1123d9a7",
+          "signature": "cce427ca7ad3fdd7f101050602b6be2f2462f19eb95f377e7ec7f4e7f3213de471124bfdb2e4f67beb0c307ce8c3e3548b25de559da87a7d0470ebe02bfb2b01"
+        },
+        {
+          "id": "acvp-tc20",
+          "d": "2af03e7691051d68c7423e541d62b99983c21207f18ac0226681f01b4c26a7cd",
+          "q": "67becded71a8e11186f7ff68dff8a974464f641d70ba7f8b60f5902992f0daf2",
+          "message": "052a34bfdd873d0c1355086f144a51dd250da33668fa8e8913410270e03a121843b9d655e8369ab8f3cb7871c35164bcf64cda585a3cf3dc7f1cf5784031d78cc7cbc079064729ff66fd735bd60ea608ba43a1b8c6d9e30433dd9d123501b667264f7f6a5a1fff9704a1323e4126b91d2f2a7af798fddb46351a9806df2ea098",
+          "context": "b9866ba04542f939",
+          "signature": "e5862ab43d63d645e81091268c0c80f4bb5af086d4d6391c98e5fbf94d2f84ee9c3f3763dd08ede96b3dc72c2384d575cd84288f93ae3a6374d944f1ac2c3e05"
+        }
+      ]
+    },
+    {
+      "scheme": "Ed25519ph",
+      "tier": 3,
+      "source": "RFC 8032 \u00a77.3 (Ed25519ph)",
+      "phFlag": true,
+      "useParams": true,
+      "tests": [
+        {
+          "id": "rfc8032-TEST_abc",
+          "d": "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42",
+          "q": "ec172b93ad5e563bf4932c70e1245034c35467ef2efd4d64ebf819683467e2bf",
+          "message": "616263",
+          "context": "",
+          "signature": "98a70222f0b8121aa9d30f813d683f809e462b469c7ff87639499bb94e6dae4131f85042463c2a355a2003d062adf5aaa10b8c61e636062aaad11c2a26083406"
         }
       ]
     }

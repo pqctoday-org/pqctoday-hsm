@@ -338,6 +338,64 @@ CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechani
 
 // Parse CK_SIGN_ADDITIONAL_CONTEXT or CK_HASH_SIGN_ADDITIONAL_CONTEXT → MLDSA_SIGN_PARAMS
 // Deep-copies context bytes into inline buffer to avoid dangling pointers in session storage.
+#ifdef WITH_EDDSA
+/**
+ * WS-1.3 (2026-08-29) — parse CK_EDDSA_PARAMS for CKM_EDDSA.
+ *
+ * PKCS#11 v3.2 §6.3.14 declares this structure as CKM_EDDSA's optional
+ * parameter and §6.3.16 defines it; before this function existed nothing in
+ * src/lib/ read it. AsymSignInit/AsymVerifyInit left param NULL for CKM_EDDSA
+ * and a downstream guard rejected any non-NULL pParameter with
+ * CKR_MECHANISM_PARAM_INVALID, so two things were unreachable through the
+ * standard mechanism: Ed25519ph/Ed448ph via phFlag=CK_TRUE (only the
+ * vendor-range CKM_EDDSA_PH worked), and RFC 8032 context strings at all.
+ *
+ * Absent parameter is legal and means pure mode — Table 73's first row.
+ * The scheme itself is resolved later, in OSSLEDDSA::resolveInstance, which
+ * is the one place that knows the key's curve.
+ */
+static CK_RV parseEdDSAParams(CK_MECHANISM_PTR pMechanism, EDDSA_SIGN_PARAMS& out)
+{
+	memset(&out, 0, sizeof(out));
+
+	if (pMechanism->pParameter == NULL_PTR && pMechanism->ulParameterLen == 0)
+		return CKR_OK; // pure mode, no context — Table 73 row 1
+
+	if (pMechanism->pParameter == NULL_PTR ||
+	    pMechanism->ulParameterLen != sizeof(CK_EDDSA_PARAMS))
+	{
+		ERROR_MSG("pParameter must be of type CK_EDDSA_PARAMS (%lu, expected %lu)",
+			(unsigned long)pMechanism->ulParameterLen,
+			(unsigned long)sizeof(CK_EDDSA_PARAMS));
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+
+	CK_EDDSA_PARAMS_PTR p = (CK_EDDSA_PARAMS_PTR)pMechanism->pParameter;
+
+	// §6.3.16: "the length in bytes of the context data where
+	// 0 <= ulContextDataLen <= 255".
+	if (p->ulContextDataLen > 255)
+	{
+		ERROR_MSG("EdDSA context string too long (%lu, max 255)",
+			(unsigned long)p->ulContextDataLen);
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (p->ulContextDataLen > 0 && p->pContextData == NULL_PTR)
+	{
+		ERROR_MSG("EdDSA context pointer is NULL with non-zero length");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+
+	out.hasParams = true;
+	out.preHash = (p->phFlag != CK_FALSE);
+	out.contextLen = (size_t)p->ulContextDataLen;
+	if (out.contextLen > 0)
+		memcpy(out.context, p->pContextData, out.contextLen);
+
+	return CKR_OK;
+}
+#endif
+
 static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAMS& out)
 {
 	memset(&out, 0, sizeof(out));
@@ -567,6 +625,10 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 	memset(&mldsaSignParam, 0, sizeof(mldsaSignParam));
 	SLHDSA_SIGN_PARAMS slhdsaSignParam;
 	memset(&slhdsaSignParam, 0, sizeof(slhdsaSignParam));
+#ifdef WITH_EDDSA
+	EDDSA_SIGN_PARAMS eddsaSignParam;
+	memset(&eddsaSignParam, 0, sizeof(eddsaSignParam));
+#endif
 	bool bAllowMultiPartOp;
 	bool isRSA = false;
 #ifdef WITH_ECC
@@ -960,11 +1022,27 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 #endif
 #ifdef WITH_EDDSA
 		case CKM_EDDSA:
+		{
+			// WS-1.3 (2026-08-29): CKM_EDDSA's optional CK_EDDSA_PARAMS is now
+			// read. Previously this case left param NULL, so the guard below
+			// ("Reject unexpected parameters for parameterless mechanisms")
+			// refused every conforming request for Ed25519ph/Ed448ph via
+			// phFlag and made RFC 8032 context strings unreachable.
 			mechanism = AsymMech::EDDSA;
 			bAllowMultiPartOp = true;
 			isEDDSA = true;
+			CK_RV rvEd = parseEdDSAParams(pMechanism, eddsaSignParam);
+			if (rvEd != CKR_OK) return rvEd;
+			param = &eddsaSignParam;
+			paramLen = sizeof(eddsaSignParam);
 			break;
+		}
 		case CKM_EDDSA_PH:
+			// Vendor-range shorthand for the pre-hash scheme with no context.
+			// Deliberately still parameterless: everything CK_EDDSA_PARAMS can
+			// express is now reachable through the standard CKM_EDDSA above,
+			// and widening a vendor mechanism would add a second way to say
+			// the same thing.
 			mechanism = AsymMech::EDDSA_PH;
 			bAllowMultiPartOp = true;
 			isEDDSA = true;
@@ -2209,6 +2287,10 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 	memset(&mldsaSignParam, 0, sizeof(mldsaSignParam));
 	SLHDSA_SIGN_PARAMS slhdsaSignParam;
 	memset(&slhdsaSignParam, 0, sizeof(slhdsaSignParam));
+#ifdef WITH_EDDSA
+	EDDSA_SIGN_PARAMS eddsaSignParam;
+	memset(&eddsaSignParam, 0, sizeof(eddsaSignParam));
+#endif
 	bool bAllowMultiPartOp;
 	bool isRSA = false;
 #ifdef WITH_ECC
@@ -2600,11 +2682,27 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 #endif
 #ifdef WITH_EDDSA
 		case CKM_EDDSA:
+		{
+			// WS-1.3 (2026-08-29): CKM_EDDSA's optional CK_EDDSA_PARAMS is now
+			// read. Previously this case left param NULL, so the guard below
+			// ("Reject unexpected parameters for parameterless mechanisms")
+			// refused every conforming request for Ed25519ph/Ed448ph via
+			// phFlag and made RFC 8032 context strings unreachable.
 			mechanism = AsymMech::EDDSA;
 			bAllowMultiPartOp = true;
 			isEDDSA = true;
+			CK_RV rvEd = parseEdDSAParams(pMechanism, eddsaSignParam);
+			if (rvEd != CKR_OK) return rvEd;
+			param = &eddsaSignParam;
+			paramLen = sizeof(eddsaSignParam);
 			break;
+		}
 		case CKM_EDDSA_PH:
+			// Vendor-range shorthand for the pre-hash scheme with no context.
+			// Deliberately still parameterless: everything CK_EDDSA_PARAMS can
+			// express is now reachable through the standard CKM_EDDSA above,
+			// and widening a vendor mechanism would add a second way to say
+			// the same thing.
 			mechanism = AsymMech::EDDSA_PH;
 			bAllowMultiPartOp = true;
 			isEDDSA = true;

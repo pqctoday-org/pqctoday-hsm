@@ -25,6 +25,20 @@ import {
   importAESKey,
   importHMACKey,
   importRSAPublicKey,
+  importRSAPrivateKey,
+  generateRSAKeyPair,
+  importEdDSAPublicKey,
+  importEdDSAPrivateKey,
+  buildEdDSAParams,
+  freeEdDSAParams,
+  eddsaSignBytesParams,
+  eddsaVerifyBytesParams,
+  buildMech,
+  writeBytes,
+  allocUlong,
+  readUlong,
+  freePtr,
+  check,
   importECPublicKey,
   importMLDSAPublicKey,
   importMLKEMPrivateKey,
@@ -57,6 +71,10 @@ import {
   extractKeyValue,
   wrapKey,
   unwrapKey,
+  unwrapKeyRaw,
+  buildOAEPParams,
+  buildRsaAesKeyWrapParams,
+  CKG_MGF1,
   pbkdf2,
   hkdf,
   generateHSSKeyPair,
@@ -92,6 +110,9 @@ const aesKwVec = loadJson('aeskw_test.json')
 const slhdsaCtxVec = loadJson('slhdsa_ctx_test.json')
 const lmsSigverVec = loadJson('lms_sigver_test.json')
 const lmsSigverExp = loadJson('lms_sigver_expected.json')
+const rsaOaepVec = loadJson('rsa_oaep_test.json')
+const eddsaVec = loadJson('eddsa_test.json')
+const eddsaEd448Vec = loadJson('eddsa_ed448_test.json')
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function arrEq(a, b) {
@@ -468,6 +489,156 @@ async function runSuite(engineName) {
       }
     }
 
+    // ── 16.6 CKM_EDDSA + CK_EDDSA_PARAMS — RFC 8032 scheme selection ─────
+    //
+    // WS-1.3 (2026-08-29). PKCS#11 v3.2 §6.3.14 Table 73 maps the presence,
+    // phFlag and context of CK_EDDSA_PARAMS onto RFC 8032's five signature
+    // schemes. Until this change the C++ engine read that structure nowhere:
+    // AsymSignInit's CKM_EDDSA case left param NULL and a guard rejected any
+    // non-NULL pParameter, so Ed25519ph/Ed448ph were reachable only through
+    // the vendor-range CKM_EDDSA_PH and context strings not at all.
+    //
+    // Vectors: NIST ACVP EDDSA-SigGen-1.0 where it publishes the case
+    // (Tier 1), RFC 8032 §7 where it does not — notably Ed25519ctx, which
+    // ACVP's sample set contains no case for. See each file's _provenance.
+    for (const vecFile of [eddsaVec, eddsaEd448Vec]) {
+      const curve = vecFile.curve
+      if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA)) {
+        addResult('eddsa-params', curve, 'CK_EDDSA_PARAMS KAT', 'SKIP', 'CKM_EDDSA not supported')
+        continue
+      }
+      for (const vs of vecFile.vectorSets) {
+        let genOk = 0, verOk = 0, detail = ''
+        for (const tv of vs.tests) {
+          let ep = null
+          try {
+            const msg = hexToBytes(tv.message)
+            const ctx = tv.context ? hexToBytes(tv.context) : null
+            ep = vs.useParams ? buildEdDSAParams(M, vs.phFlag, ctx) : null
+            const privH = importEdDSAPrivateKey(M, hSession, curve, hexToBytes(tv.d))
+            const pubH = importEdDSAPublicKey(M, hSession, curve, hexToBytes(tv.q))
+            // sigGen — EdDSA is deterministic, so the bytes must match exactly.
+            const s = eddsaSignBytesParams(M, hSession, privH, msg, ep)
+            if (s.rv === CK.CKR_OK && s.signature && arrEq(s.signature, hexToBytes(tv.signature))) genOk++
+            else if (!detail)
+              detail = `${tv.id} sigGen rv=0x${s.rv.toString(16)}` +
+                (s.signature ? ` got ${bytesToHex(s.signature, 8)} want ${bytesToHex(hexToBytes(tv.signature), 8)}` : '')
+            // sigVer — the vector's own signature must verify.
+            const vrv = eddsaVerifyBytesParams(M, hSession, pubH, msg, hexToBytes(tv.signature), ep)
+            if (vrv === CK.CKR_OK) verOk++
+            else if (!detail) detail = `${tv.id} sigVer rv=0x${vrv.toString(16)}`
+          } catch (e) {
+            if (!detail) detail = `${tv.id}: ${e.message}`
+          } finally {
+            freeEdDSAParams(M, ep)
+          }
+        }
+        const n = vs.tests.length
+        const ok = genOk === n && verOk === n
+        addResult('eddsa-params', `${vs.scheme} (Tier ${vs.tier})`,
+          `SigGen+SigVer KAT — ${vs.source}`,
+          ok ? 'PASS' : 'FAIL',
+          ok ? `sigGen ${genOk}/${n}, sigVer ${verOk}/${n}` : detail)
+      }
+    }
+
+    // ── 16.7 CK_EDDSA_PARAMS binding — the negative half ─────────────────
+    //
+    // A context string that is not bound into the signature would leave every
+    // §16.6 case above still passing, so these four assertions are what make
+    // that suite mean something.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA)) {
+      addResult('eddsa-params-bind', 'Ed25519', 'CK_EDDSA_PARAMS binding', 'SKIP',
+        'CKM_EDDSA not supported')
+    } else {
+      const ctxSet = eddsaVec.vectorSets.find((v) => v.scheme === 'Ed25519ctx')
+      const phSet = eddsaVec.vectorSets.find((v) => v.scheme === 'Ed25519ph' && v.tier === 3)
+      const tv = ctxSet.tests[0]
+      let pFoo = null, pBar = null, pPh = null
+      try {
+        const msg = hexToBytes(tv.message)
+        const privH = importEdDSAPrivateKey(M, hSession, 'Ed25519', hexToBytes(tv.d))
+        const pubH = importEdDSAPublicKey(M, hSession, 'Ed25519', hexToBytes(tv.q))
+        pFoo = buildEdDSAParams(M, false, hexToBytes(tv.context))
+        pBar = buildEdDSAParams(M, false, new TextEncoder().encode('bar'))
+        const sig = hexToBytes(tv.signature)
+        // 1. right context verifies; 2. a different context must not;
+        // 3. no parameter at all (= pure Ed25519) must not.
+        const okSame = eddsaVerifyBytesParams(M, hSession, pubH, msg, sig, pFoo) === CK.CKR_OK
+        const okDiff = eddsaVerifyBytesParams(M, hSession, pubH, msg, sig, pBar) === CK.CKR_OK
+        const okNone = eddsaVerifyBytesParams(M, hSession, pubH, msg, sig, null) === CK.CKR_OK
+        // 4. CKM_EDDSA + phFlag=TRUE must produce exactly what the vendor
+        //    CKM_EDDSA_PH mechanism produces — i.e. the standard spelling of
+        //    Ed25519ph now reaches the same scheme, which is the concrete
+        //    thing a conforming caller was refused before this change.
+        const phTv = phSet.tests[0]
+        const phMsg = hexToBytes(phTv.message)
+        const phPriv = importEdDSAPrivateKey(M, hSession, 'Ed25519', hexToBytes(phTv.d))
+        pPh = buildEdDSAParams(M, true, null)
+        const viaParams = eddsaSignBytesParams(M, hSession, phPriv, phMsg, pPh)
+        const viaVendor = eddsaSignBytesParams(M, hSession, phPriv, phMsg, null, CK.CKM_EDDSA_PH)
+        const phAgree =
+          viaParams.rv === CK.CKR_OK && viaVendor.rv === CK.CKR_OK &&
+          arrEq(viaParams.signature, viaVendor.signature) &&
+          arrEq(viaParams.signature, hexToBytes(phTv.signature))
+        const ok = okSame && !okDiff && !okNone && phAgree
+        addResult('eddsa-params-bind', 'Ed25519ctx / Ed25519ph',
+          'Context binding + phFlag reaches Ed25519ph',
+          ok ? 'PASS' : 'FAIL',
+          `sameCtx=${okSame} diffCtx=${okDiff} noParams=${okNone} phFlag==CKM_EDDSA_PH==RFC8032=${phAgree}`)
+      } catch (e) {
+        addResult('eddsa-params-bind', 'Ed25519ctx / Ed25519ph',
+          'Context binding + phFlag reaches Ed25519ph', 'FAIL', e.message)
+      } finally {
+        freeEdDSAParams(M, pFoo); freeEdDSAParams(M, pBar); freeEdDSAParams(M, pPh)
+      }
+    }
+
+    // ── 16.8 CK_EDDSA_PARAMS survives the multi-part path ────────────────
+    //
+    // signInit stores the params and signFinal replays them; without that
+    // copy a C_SignUpdate/C_SignFinal sequence would silently drop the
+    // context and emit a pure-mode signature that still "verifies" against
+    // itself. Compared against the single-part RFC 8032 answer, not against
+    // another multi-part call.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_EDDSA)) {
+      addResult('eddsa-params-multipart', 'Ed25519ctx', 'Multi-part context binding', 'SKIP',
+        'CKM_EDDSA not supported')
+    } else {
+      const tv = eddsaVec.vectorSets.find((v) => v.scheme === 'Ed25519ctx').tests[0]
+      let ep = null
+      try {
+        const msg = hexToBytes(tv.message)
+        const privH = importEdDSAPrivateKey(M, hSession, 'Ed25519', hexToBytes(tv.d))
+        ep = buildEdDSAParams(M, false, hexToBytes(tv.context))
+        const mechPtr = buildMech(M, CK.CKM_EDDSA, ep.ptr, ep.size)
+        check('C_SignInit(multipart)', M._C_SignInit(hSession, mechPtr, privH))
+        const half = Math.floor(msg.length / 2)
+        for (const part of [msg.slice(0, half), msg.slice(half)]) {
+          const p = writeBytes(M, part)
+          check('C_SignUpdate', M._C_SignUpdate(hSession, p, part.length))
+          M._free(p)
+        }
+        const lenPtr = allocUlong(M)
+        check('C_SignFinal(len)', M._C_SignFinal(hSession, 0, lenPtr))
+        const sigLen = readUlong(M, lenPtr)
+        const sigPtr = M._malloc(sigLen)
+        M.setValue(lenPtr, sigLen, 'i32')
+        check('C_SignFinal', M._C_SignFinal(hSession, sigPtr, lenPtr))
+        const sig = new Uint8Array(M.HEAPU8.buffer, sigPtr, readUlong(M, lenPtr)).slice()
+        M._free(sigPtr); freePtr(M, lenPtr); M._free(mechPtr)
+        const ok = arrEq(sig, hexToBytes(tv.signature))
+        addResult('eddsa-params-multipart', 'Ed25519ctx',
+          'Multi-part sign keeps the context (RFC 8032 §7.2)',
+          ok ? 'PASS' : 'FAIL', `sig[${sig.length}B] ${bytesToHex(sig, 8)}`)
+      } catch (e) {
+        addResult('eddsa-params-multipart', 'Ed25519ctx',
+          'Multi-part sign keeps the context (RFC 8032 §7.2)', 'FAIL', e.message)
+      } finally {
+        freeEdDSAParams(M, ep)
+      }
+    }
+
     // ── 17. PBKDF2 Functional Derivation (PKCS#5 v2.1) ───────────────────
     if (mechs.size > 0 && !mechs.has(CK.CKM_PKCS5_PBKD2)) {
       addResult('pbkdf2', 'PBKDF2-HMAC-SHA512', 'Functional Derivation', 'SKIP', 'mechanism not supported')
@@ -551,6 +722,161 @@ async function runSuite(engineName) {
         addResult('aeskwp', 'AES-KWP-256', 'Wrap+Unwrap Round-Trip', 'FAIL', e.message)
       }
     }
+    // ── 20.5 RSA-OAEP key transport through C_WrapKey / C_UnwrapKey ──────
+    //
+    // WS-1.1 (2026-08-29). Deliberately exercised through the WRAP path, not
+    // C_Encrypt/C_Decrypt: those already mapped CK_RSA_PKCS_OAEP_PARAMS.hashAlg
+    // onto the right AsymMech, while WrapKeyAsym/UnwrapKeyAsym never read
+    // pParameter at all and always used SHA-1. Both directions substituted the
+    // same wrong hash, so no round-trip test could see it — only a vector, and
+    // a cross-hash negative case, can.
+    //
+    // Vectors: NIST ACVP KTS-IFC-Sp800-56Br2 (see the file's _provenance).
+    // Only the decrypt/unwrap direction is a KAT — OAEP encryption is
+    // randomised, so the wrap direction is pinned by the negative case below.
+    {
+      const OAEP_HASH_CKM = { 'SHA-1': CK.CKM_SHA_1, 'SHA2-512': CK.CKM_SHA512 }
+      for (const g of rsaOaepVec.testGroups) {
+        const hashMech = OAEP_HASH_CKM[g.hashAlg]
+        const mgf = CKG_MGF1[g.ckmHashAlg]
+        const label = `RSA-${g.modLen}-OAEP-${g.hashAlg}`
+        if (hashMech === undefined || mgf === undefined) {
+          addResult('rsaoaep-kat', label, 'Unwrap KAT', 'FAIL',
+            `vector names an OAEP hash this harness cannot map: ${g.hashAlg}/${g.ckmHashAlg}`)
+          continue
+        }
+        if (mechs.size > 0 && !mechs.has(CK.CKM_RSA_PKCS_OAEP)) {
+          addResult('rsaoaep-kat', label, 'Unwrap KAT', 'SKIP', 'mechanism not supported')
+          continue
+        }
+        let pass = 0, failDetail = ''
+        for (const tv of g.tests) {
+          let p = null
+          try {
+            p = buildOAEPParams(M, hashMech, mgf)
+            const privH = importRSAPrivateKey(M, hSession, {
+              n: hexToBytes(tv.n), e: hexToBytes(tv.e), d: hexToBytes(tv.d),
+              p: hexToBytes(tv.p), q: hexToBytes(tv.q),
+              dp: hexToBytes(tv.dp), dq: hexToBytes(tv.dq), qi: hexToBytes(tv.qi),
+            })
+            const h = unwrapKey(M, hSession, CK.CKM_RSA_PKCS_OAEP, privH, hexToBytes(tv.ct), [
+              { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+              { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+              { type: CK.CKA_TOKEN, value: false },
+              { type: CK.CKA_EXTRACTABLE, value: true },
+              { type: CK.CKA_SENSITIVE, value: false },
+            ], p)
+            const got = extractKeyValue(M, hSession, h)
+            if (arrEq(got, hexToBytes(tv.pt))) pass++
+            else if (!failDetail)
+              failDetail = `tcId ${tv.tcId}: got ${bytesToHex(got, 12)} want ${bytesToHex(hexToBytes(tv.pt), 12)}`
+          } catch (e) {
+            if (!failDetail) failDetail = `tcId ${tv.tcId}: ${e.message}`
+          } finally {
+            if (p) M._free(p.ptr)
+          }
+        }
+        const ok = pass === g.tests.length
+        addResult('rsaoaep-kat', label, `Unwrap KAT (ACVP tgId ${g.tgId}, ${g.tests.length} cases)`,
+          ok ? 'PASS' : 'FAIL', ok ? `${pass}/${g.tests.length} recovered` : failDetail)
+      }
+    }
+
+    // ── 20.6 RSA-OAEP wrap/unwrap hashAlg binding (negative) ─────────────
+    //
+    // The assertion that actually fails on the pre-WS-1.1 code: a blob wrapped
+    // under OAEP-SHA-512 must NOT be unwrappable under OAEP-SHA-1. When the
+    // wrap path ignored hashAlg, both operations were really SHA-1 and this
+    // cross-hash unwrap succeeded.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_RSA_PKCS_OAEP)) {
+      addResult('rsaoaep-bind', 'RSA-2048-OAEP', 'hashAlg binding (negative)', 'SKIP',
+        'mechanism not supported')
+    } else {
+      let p512 = null, p1 = null
+      try {
+        p512 = buildOAEPParams(M, CK.CKM_SHA512, CKG_MGF1.CKM_SHA512)
+        p1 = buildOAEPParams(M, CK.CKM_SHA_1, CKG_MGF1.CKM_SHA_1)
+        const { pubHandle: pubH, privHandle: privH } = generateRSAKeyPair(M, hSession, 2048)
+        const targetH = generateAESKey(M, hSession, 256, {
+          encrypt: false, decrypt: false, wrap: false, unwrap: false, derive: false, extractable: true,
+        })
+        const orig = extractKeyValue(M, hSession, targetH)
+        const wrapped = wrapKey(M, hSession, CK.CKM_RSA_PKCS_OAEP, pubH, targetH, p512)
+        const tpl = [
+          { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+          { type: CK.CKA_KEY_TYPE, value: CK.CKK_AES },
+          { type: CK.CKA_TOKEN, value: false },
+          { type: CK.CKA_EXTRACTABLE, value: true },
+          { type: CK.CKA_SENSITIVE, value: false },
+        ]
+        // Same hash → must succeed and recover the original bytes.
+        const same = unwrapKeyRaw(M, hSession, CK.CKM_RSA_PKCS_OAEP, privH, wrapped, tpl, p512)
+        const roundTripped =
+          same.rv === 0 && arrEq(extractKeyValue(M, hSession, same.handle), orig)
+        // Different hash → must fail.
+        const cross = unwrapKeyRaw(M, hSession, CK.CKM_RSA_PKCS_OAEP, privH, wrapped, tpl, p1)
+        const crossRejected = cross.rv !== 0
+        const ok = roundTripped && crossRejected
+        addResult('rsaoaep-bind', 'RSA-2048-OAEP', 'hashAlg binding (SHA-512 wrap ⇏ SHA-1 unwrap)',
+          ok ? 'PASS' : 'FAIL',
+          `sha512_unwrap=${roundTripped} sha1_unwrap_rv=0x${cross.rv.toString(16)} (must be non-zero)`)
+      } catch (e) {
+        addResult('rsaoaep-bind', 'RSA-2048-OAEP', 'hashAlg binding (SHA-512 wrap ⇏ SHA-1 unwrap)',
+          'FAIL', e.message)
+      } finally {
+        if (p512) M._free(p512.ptr)
+        if (p1) M._free(p1.ptr)
+      }
+    }
+
+    // ── 20.7 CKM_RSA_AES_KEY_WRAP inherits the same hashAlg binding ──────
+    //
+    // It wraps its ephemeral AES key through the very same WrapKeyAsym /
+    // UnwrapKeyAsym helpers, and MechParamCheckRSAAESKEYWRAP used to validate
+    // only mgf ∈ 1..5 — never hashAlg — so it carried the bug twice over.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_RSA_AES_KEY_WRAP)) {
+      addResult('rsaaeskw-bind', 'RSA-AES-KEY-WRAP', 'hashAlg binding + param validation', 'SKIP',
+        'mechanism not supported')
+    } else {
+      let w512 = null, w1 = null, wBad = null
+      try {
+        w512 = buildRsaAesKeyWrapParams(M, 256, CK.CKM_SHA512, CKG_MGF1.CKM_SHA512)
+        w1 = buildRsaAesKeyWrapParams(M, 256, CK.CKM_SHA_1, CKG_MGF1.CKM_SHA_1)
+        // hashAlg/mgf pair that does not correspond — rejected only since the
+        // WS-1.1 validation fix; the old check saw mgf=2 in 1..5 and passed it.
+        wBad = buildRsaAesKeyWrapParams(M, 256, CK.CKM_SHA512, CKG_MGF1.CKM_SHA256)
+        const { pubHandle: pubH, privHandle: privH } = generateRSAKeyPair(M, hSession, 2048)
+        const targetH = generateAESKey(M, hSession, 256, {
+          encrypt: false, decrypt: false, wrap: false, unwrap: false, derive: false, extractable: true,
+        })
+        const orig = extractKeyValue(M, hSession, targetH)
+        const wrapped = wrapKey(M, hSession, CK.CKM_RSA_AES_KEY_WRAP, pubH, targetH, w512)
+        const tpl = [
+          { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+          { type: CK.CKA_KEY_TYPE, value: CK.CKK_AES },
+          { type: CK.CKA_TOKEN, value: false },
+          { type: CK.CKA_EXTRACTABLE, value: true },
+          { type: CK.CKA_SENSITIVE, value: false },
+        ]
+        const same = unwrapKeyRaw(M, hSession, CK.CKM_RSA_AES_KEY_WRAP, privH, wrapped, tpl, w512)
+        const roundTripped =
+          same.rv === 0 && arrEq(extractKeyValue(M, hSession, same.handle), orig)
+        const cross = unwrapKeyRaw(M, hSession, CK.CKM_RSA_AES_KEY_WRAP, privH, wrapped, tpl, w1)
+        const crossRejected = cross.rv !== 0
+        const bad = unwrapKeyRaw(M, hSession, CK.CKM_RSA_AES_KEY_WRAP, privH, wrapped, tpl, wBad)
+        const badRejected = bad.rv !== 0
+        const ok = roundTripped && crossRejected && badRejected
+        addResult('rsaaeskw-bind', 'RSA-AES-KEY-WRAP-256', 'hashAlg binding + param validation',
+          ok ? 'PASS' : 'FAIL',
+          `sha512_rt=${roundTripped} sha1_rv=0x${cross.rv.toString(16)} mismatched_pair_rv=0x${bad.rv.toString(16)}`)
+      } catch (e) {
+        addResult('rsaaeskw-bind', 'RSA-AES-KEY-WRAP-256', 'hashAlg binding + param validation',
+          'FAIL', e.message)
+      } finally {
+        for (const w of [w512, w1, wBad]) if (w) { M._free(w.oaep.ptr); M._free(w.ptr) }
+      }
+    }
+
     // ── 21. SLH-DSA context binding Sign+Verify (FIPS 205 §9.2) ────────
     // Generate fresh key pair; sign with context_A; verify same/diff ctx.
     // NIST reference tcId / vector preserved in slhdsa_ctx_test.json for audit.

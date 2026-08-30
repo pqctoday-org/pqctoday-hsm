@@ -1160,6 +1160,154 @@ add({"security.sensitive_value_hidden", "security",
          r.rv("upgrade_extractable", e.fl->C_SetAttributeValue(s, h, &ext, 1));
      }});
 
+// WS-1.2 (2026-08-29) — CKA_VALUE sensitivity on ASYMMETRIC private keys.
+//
+// Why this exists: the only prior probe of the §4.9 note-7 rule
+// (security.sensitive_value_hidden, just above) uses an AES secret key. The
+// PKCS#11 v3.2 EC / Edwards private-key tables define CKA_VALUE too — it is
+// the private scalar d, and it is exactly the material a sensitive key must
+// never disclose — but nothing asserted the rule there, on either engine, for
+// either a generated or an unwrapped key. That gap is what let
+// DEFECT-RUST-CKA_VALUE-ON-ASYMMETRIC-KEYS bundle a sensitivity claim in with
+// its formatting claims without anyone being able to test the two apart.
+//
+// Four cases, each pinning one leg of the rule:
+//   gen_sensitive     CKA_SENSITIVE=TRUE,  CKA_EXTRACTABLE=TRUE  (sensitive leg)
+//   gen_unextractable CKA_SENSITIVE=FALSE, CKA_EXTRACTABLE=FALSE (extractable leg)
+//   unwrapped_*       the same two, on a key that arrived via C_UnwrapKey
+//
+// The unwrap templates set BOTH attributes explicitly rather than relying on a
+// default, deliberately: LEGAL-UNWRAPPED-KEY-EXTRACTABLE-DEFAULT already
+// records that the two engines pick different CKA_EXTRACTABLE defaults for an
+// unwrapped key, so a probe that left it unset would measure that adjudicated
+// difference instead of the enforcement rule this scenario is about.
+static auto probe_value_sensitivity = [](Engine& e, Recorder& r, CK_SESSION_HANDLE s,
+                                         const std::string& tag, CK_OBJECT_HANDLE h) {
+    if (h == CK_INVALID_HANDLE) return;
+    CK_BYTE buf[4096];
+    CK_ATTRIBUTE a = { CKA_VALUE, buf, sizeof buf };
+    CK_RV rv = e.fl->C_GetAttributeValue(s, h, &a, 1);
+    r.rv(tag + ".CKA_VALUE", rv);
+    // A normalised verdict alongside the raw code: CKR_ATTRIBUTE_SENSITIVE and
+    // CKR_ATTRIBUTE_TYPE_INVALID are both refusals, and which one an engine
+    // picks depends on whether it materialises CKA_VALUE for this key type at
+    // all — a separate question, already covered by its own exception entry.
+    // What must never differ is whether the bytes came out.
+    const char* verdict = (rv == CKR_OK && a.ulValueLen != (CK_ULONG)-1)
+                        ? "DISCLOSED" : "REFUSED";
+    r.put(tag + ".CKA_VALUE.disclosure", verdict);
+};
+
+add({"security.private_key_value_sensitivity", "security",
+     "A sensitive or unextractable EC/Edwards private key must not disclose CKA_VALUE — generated or unwrapped (WS-1.2)",
+     {CKM_EC_KEY_PAIR_GEN, CKM_EC_EDWARDS_KEY_PAIR_GEN, CKM_AES_KEY_GEN, CKM_AES_KEY_WRAP_PAD}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         // ---- generated keys, both legs of the rule, both curve families ----
+         struct Case { const char* tag; CK_BBOOL sens; CK_BBOOL extr; };
+         const Case cases[] = {
+             { "gen_sensitive",     CK_TRUE,  CK_TRUE  },
+             { "gen_unextractable", CK_FALSE, CK_FALSE },
+         };
+         for (const auto& c : cases) {
+             CK_BBOOL sens = c.sens, extr = c.extr;
+             {
+                 CK_ATTRIBUTE pub[] = {
+                     ATTR(CKA_CLASS,     &clPublic, sizeof clPublic),
+                     ATTR(CKA_KEY_TYPE,  &ktEc,     sizeof ktEc),
+                     ATTR(CKA_EC_PARAMS, kOidP256,  sizeof kOidP256),
+                     ATTR(CKA_TOKEN,     &bFalse,   sizeof bFalse),
+                     ATTR(CKA_VERIFY,    &bTrue,    sizeof bTrue),
+                 };
+                 CK_ATTRIBUTE priv[] = {
+                     ATTR(CKA_CLASS,       &clPrivate, sizeof clPrivate),
+                     ATTR(CKA_KEY_TYPE,    &ktEc,      sizeof ktEc),
+                     ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+                     ATTR(CKA_SIGN,        &bTrue,     sizeof bTrue),
+                     ATTR(CKA_SENSITIVE,   &sens,      sizeof sens),
+                     ATTR(CKA_EXTRACTABLE, &extr,      sizeof extr),
+                 };
+                 CK_MECHANISM km = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+                 CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+                 std::string tag = std::string("ec.") + c.tag;
+                 CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 6, &hPub, &hPriv);
+                 r.rv(tag, rv);
+                 if (rv == CKR_OK) probe_value_sensitivity(e, r, s, tag, hPriv);
+             }
+             {
+                 CK_ATTRIBUTE pub[] = {
+                     ATTR(CKA_CLASS,     &clPublic,   sizeof clPublic),
+                     ATTR(CKA_KEY_TYPE,  &ktEdwards,  sizeof ktEdwards),
+                     ATTR(CKA_EC_PARAMS, kOidEd25519, sizeof kOidEd25519),
+                     ATTR(CKA_TOKEN,     &bFalse,     sizeof bFalse),
+                     ATTR(CKA_VERIFY,    &bTrue,      sizeof bTrue),
+                 };
+                 CK_ATTRIBUTE priv[] = {
+                     ATTR(CKA_CLASS,       &clPrivate, sizeof clPrivate),
+                     ATTR(CKA_KEY_TYPE,    &ktEdwards, sizeof ktEdwards),
+                     ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+                     ATTR(CKA_SIGN,        &bTrue,     sizeof bTrue),
+                     ATTR(CKA_SENSITIVE,   &sens,      sizeof sens),
+                     ATTR(CKA_EXTRACTABLE, &extr,      sizeof extr),
+                 };
+                 CK_MECHANISM km = { CKM_EC_EDWARDS_KEY_PAIR_GEN, NULL_PTR, 0 };
+                 CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+                 std::string tag = std::string("ed25519.") + c.tag;
+                 CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 6, &hPub, &hPriv);
+                 r.rv(tag, rv);
+                 if (rv == CKR_OK) probe_value_sensitivity(e, r, s, tag, hPriv);
+             }
+         }
+
+         // ---- the same rule on a key that arrived through C_UnwrapKey ----
+         // Wrap a deliberately non-sensitive, extractable P-256 private key
+         // (the only kind that CAN be wrapped), then unwrap it back under
+         // templates that DO assert the rule.
+         CK_BBOOL kekSens = CK_FALSE;
+         CK_OBJECT_HANDLE kek = make_fixed_aes(e, s, true, &kekSens);
+         if (kek == CK_INVALID_HANDLE) return;
+         CK_ATTRIBUTE pub[] = {
+             ATTR(CKA_CLASS,     &clPublic, sizeof clPublic),
+             ATTR(CKA_KEY_TYPE,  &ktEc,     sizeof ktEc),
+             ATTR(CKA_EC_PARAMS, kOidP256,  sizeof kOidP256),
+             ATTR(CKA_TOKEN,     &bFalse,   sizeof bFalse),
+             ATTR(CKA_VERIFY,    &bTrue,    sizeof bTrue),
+         };
+         CK_ATTRIBUTE priv[] = {
+             ATTR(CKA_CLASS,       &clPrivate, sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,    &ktEc,      sizeof ktEc),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_SIGN,        &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+             ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+         };
+         CK_MECHANISM km = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+         CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+         CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 6, &hPub, &hPriv);
+         r.rv("wrappable_keygen", rv);
+         if (rv != CKR_OK) return;
+         CK_MECHANISM wm = { CKM_AES_KEY_WRAP_PAD, NULL_PTR, 0 };
+         CK_BYTE out[4096]; CK_ULONG olen = sizeof out;
+         rv = e.fl->C_WrapKey(s, &wm, kek, hPriv, out, &olen);
+         r.rv("wrap_private", rv);
+         if (rv != CKR_OK) return;
+         for (const auto& c : cases) {
+             CK_BBOOL sens = c.sens, extr = c.extr;
+             CK_ATTRIBUTE ut[] = {
+                 ATTR(CKA_CLASS,       &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,    &ktEc,      sizeof ktEc),
+                 ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,        &bTrue,     sizeof bTrue),
+                 ATTR(CKA_SENSITIVE,   &sens,      sizeof sens),
+                 ATTR(CKA_EXTRACTABLE, &extr,      sizeof extr),
+             };
+             CK_OBJECT_HANDLE hu = CK_INVALID_HANDLE;
+             std::string tag = std::string("ec.unwrapped_") + (c.sens ? "sensitive" : "unextractable");
+             CK_RV urv = e.fl->C_UnwrapKey(s, &wm, kek, out, olen, ut, 6, &hu);
+             r.rv(tag, urv);
+             if (urv == CKR_OK) probe_value_sensitivity(e, r, s, tag, hu);
+         }
+     }});
+
 add({"security.allowed_mechanisms", "security",
      "S9: a key restricted to one mechanism must refuse every other one",
      {CKM_AES_KEY_GEN, CKM_AES_CBC, CKM_AES_ECB}, true, true,
