@@ -1,32 +1,38 @@
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { createRequire } from 'module';
 import { existsSync } from 'fs';
+import { loadEngine } from './helpers.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// We load both WASM modules. They execute independently in V8.
-const cppPath = path.resolve(__dirname, '../wasm/cpp/softhsm.js');
-const rustPath = path.resolve(__dirname, '../wasm/rust/softhsmrustv3.js');
+// WS-0.1 (2026-08-30): this file previously hand-rolled its own module
+// loading against paths that never existed (`wasm/cpp/softhsm.js`,
+// `wasm/rust/softhsmrustv3.js` — the real files are `wasm/softhsm.js` and
+// `rust/pkg/softhsmrustv3_bg.{js,wasm}`, and the Rust one is wasm-bindgen's
+// split-bundle format, not a single default-export factory), so this
+// harness always hit the existsSync guard below and exited 0 with SKIPPED
+// — it has never actually run since whenever those paths drifted.
+// loadEngine() (helpers.mjs) already gets both paths and the Rust
+// split-bundle instantiation right — every other ACVP/differential harness
+// in this repo uses it. Delegating here instead of re-deriving the paths
+// a second time keeps this file from drifting out of sync with that one
+// again.
+const cppPath = path.resolve(__dirname, '../wasm/softhsm.js');
+const rustBgPath = path.resolve(__dirname, '../rust/pkg/softhsmrustv3_bg.js');
 
-// The C++ emscripten bundle (wasm/cpp/softhsm.{js,wasm}) is a build output
-// of scripts/build-wasm.sh and is not checked in; building it is out of
-// scope for the JS harness slice. Without it this parity test cannot run,
-// so exit 0 with an explicit SKIPPED marker instead of crashing — it must
-// not look like a pass.
-if (!existsSync(cppPath) || !existsSync(rustPath)) {
-    console.log('SKIPPED: parity-wasm.mjs — wasm/cpp emscripten bundle not built '
-        + '(out of scope here; run scripts/build-wasm.sh to enable C++↔Rust parity).');
+if (!existsSync(cppPath) || !existsSync(rustBgPath)) {
+    console.log('SKIPPED: parity-wasm.mjs — wasm build output missing '
+        + `(need ${cppPath} and ${rustBgPath}; run scripts/build-wasm.sh and `
+        + 'wasm-pack build --target bundler --out-dir pkg in rust/ to enable C++<->Rust parity).');
     process.exit(0);
 }
 
-const { default: createCppModule } = await import(cppPath);
-const { default: createRustModule } = await import(rustPath);
-
 console.log('[Parity] Loading C++ WASM...');
-const C = await createCppModule();
+const C = await loadEngine('cpp');
 console.log('[Parity] Loading Rust WASM...');
-const R = await createRustModule();
+const R = await loadEngine('rust');
+
+let anyFail = false;
 
 // Constants
 const CKR_OK = 0;
@@ -39,12 +45,16 @@ const CKA_KEY_TYPE = 0x00000100;
 const CKA_ENCRYPT = 0x00000104;
 const CKA_SENSITIVE = 0x00000103; // ADDED
 const CKA_ENCAPSULATE = 0x00000633;
+const CKA_DECAPSULATE = 0x00000634;
+const CKA_DECRYPT = 0x00000105;
 const CKA_EXTRACTABLE = 0x00000162;
 const CKA_VALUE_LEN = 0x00000161; // ADDED
 const CKM_ML_KEM_KEY_PAIR_GEN = 0x0000000F;
 const CKM_ML_KEM = 0x00000017;
 const CKK_ML_KEM = 0x00000049;
 const CKK_GENERIC_SECRET = 0x00000010; // ADDED
+const CKA_PARAMETER_SET = 0x0000061D;
+const CKP_ML_KEM_768 = 0x00000002;
 
 // Helpers
 function check(label, rv) {
@@ -167,8 +177,24 @@ const rSession = setupHSM('R', R);
 
 console.log('\n── TEST: RUST Generate -> CPP Encapsulate -> RUST Decapsulate ──');
 // Rust Generates Key
-const rPubTmpl = buildTemplate(R, [{ type: CKA_VALUE, value: new Uint8Array(1184) }]);
-const rPrvTmpl = buildTemplate(R, [{ type: CKA_VALUE, value: new Uint8Array(2400) }]);
+// WS-0.1: this previously passed CKA_VALUE (an output-only attribute) as
+// the input template, then bypassed even that by passing 0 for both
+// attribute counts — the engine correctly rejected it with
+// CKR_TEMPLATE_INCOMPLETE, which the harness never ran far enough to see
+// before today. Real template, matching generateMLKEMKeyPair in
+// helpers.mjs (the pattern every other harness in this repo uses).
+const rPubTmpl = buildTemplate(R, [
+    { type: CKA_TOKEN, value: false },
+    { type: CKA_ENCRYPT, value: true },
+    { type: CKA_ENCAPSULATE, value: true },
+    { type: CKA_PARAMETER_SET, value: CKP_ML_KEM_768 },
+]);
+const rPrvTmpl = buildTemplate(R, [
+    { type: CKA_TOKEN, value: false },
+    { type: CKA_DECRYPT, value: true },
+    { type: CKA_DECAPSULATE, value: true },
+    { type: CKA_PARAMETER_SET, value: CKP_ML_KEM_768 },
+]);
 
 const rMech = R._malloc(12);
 R.setValue(rMech + 0, CKM_ML_KEM_KEY_PAIR_GEN, 'i32');
@@ -176,7 +202,7 @@ R.setValue(rMech + 0, CKM_ML_KEM_KEY_PAIR_GEN, 'i32');
 const rPubPtr = R._malloc(4);
 const rPrvPtr = R._malloc(4);
 
-check('RUST C_GenerateKeyPair', R._C_GenerateKeyPair(rSession, rMech, rPubTmpl.arrPtr, 0 /* we ignore templates in our mock */, rPrvTmpl.arrPtr, 0, rPubPtr, rPrvPtr));
+check('RUST C_GenerateKeyPair', R._C_GenerateKeyPair(rSession, rMech, rPubTmpl.arrPtr, rPubTmpl.count, rPrvTmpl.arrPtr, rPrvTmpl.count, rPubPtr, rPrvPtr));
 const rPubHandle = R.getValue(rPubPtr, 'i32');
 const rPrvHandle = R.getValue(rPrvPtr, 'i32');
 
@@ -185,20 +211,8 @@ const rExtractTmpl = buildTemplate(R, [{ type: CKA_VALUE, value: new Uint8Array(
 check('RUST C_GetAttributeValue(PubKey)', R._C_GetAttributeValue(rSession, rPubHandle, rExtractTmpl.arrPtr, 1));
 const pubKeyBytes = new Uint8Array(R.HEAPU8.buffer, R.getValue(rExtractTmpl.arrPtr + 4, 'i32'), 1184).slice();
 
-// Import PubKey to C++
-const cImportTmpl = buildTemplate(C, [
-    { type: CKA_CLASS, value: CKO_PUBLIC_KEY },
-    { type: CKA_KEY_TYPE, value: CKK_ML_KEM },
-    { type: CKA_TOKEN, value: false },
-    { type: CKA_ENCRYPT, value: true },
-    { type: CKA_ENCAPSULATE, value: true },
-    { type: CKA_VALUE, value: pubKeyBytes }
-]);
+// Import PubKey to C++. SoftHSM C++ requires CKA_PARAMETER_SET for ML-KEM.
 const cImportHandlePtr = C._malloc(4);
-// wait, CPP C_CreateObject might not support ML-KEM completely without parametrizing CKP_ML_KEM_768
-// SoftHSM C++ module is strict! We need CKA_PARAMETER_SET for ML-KEM
-const CKP_ML_KEM_768 = 0x00000002;
-const CKA_PARAMETER_SET = 0x0000061D;
 const cImportTmplFull = buildTemplate(C, [
     { type: CKA_CLASS, value: CKO_PUBLIC_KEY },
     { type: CKA_KEY_TYPE, value: CKK_ML_KEM },
@@ -270,6 +284,7 @@ for (let i = 0; i < 32; i++) {
 console.log("\nCPP  SS:", Buffer.from(cppSharedSecret).toString('hex'));
 console.log("RUST SS:", Buffer.from(rustSharedSecret).toString('hex'));
 console.log("\nParity verification:", match ? "SUCCESS!" : "FAILED!");
+if (!match) anyFail = true;
 
 console.log('\n── TEST: ML-DSA RUST Generate -> CPP Sign -> RUST Verify ──');
 const CKO_PRIVATE_KEY = 0x00000003;
@@ -360,4 +375,7 @@ try {
     console.log("\nML-DSA Parity verification: SUCCESS!");
 } catch (e) {
     console.log("\nML-DSA Parity verification: FAILED! " + e.message);
+    anyFail = true;
 }
+
+process.exit(anyFail ? 1 : 0);
