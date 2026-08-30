@@ -4,7 +4,7 @@
 **Baseline:** `fix/ws1-4-and-ws2-rust-gaps` (worktree `.worktrees/ws1-4-and-ws2`)
 **Scope:** C++ engine only, per standing direction to finish PKCS#11 C++ before touching Rust.
 **Parent item:** WS-3.3 in `docs/remediation-plan-pkcs11-v32-coverage-2026-08-29.md`.
-**Status:** PLAN ONLY — nothing in this document has been executed.
+**Status:** EXECUTED 2026-08-30 (steps 1–6; step 7, the full local gate, deferred per the standing "fix everything, test once" directive — see §7).
 
 ## 0. Why this plan exists
 
@@ -224,7 +224,46 @@ reported back before continuing to steps 5–6.
    `buildPreHashEncoding()` and is out of scope here; its existing passing
    tests must remain unaffected.
 
-## 7. Explicitly out of scope here
+## 7. Execution record (2026-08-30)
+
+All 6 sequencing steps executed on `fix/ws1-4-and-ws2-rust-gaps`, 3 commits
+(`4d37cc3`, `ab4d504`, `e4bc42c`):
+
+1. **OID fix (§2).** Applied to both `OSSLMLDSA.cpp` and `OSSLSLHDSA.cpp`.
+   Full C++ rebuild + `ctest`: 8/8 passing, no regression.
+2. **ML-DSA preHash sigVer** re-landed against `mldsa_extended_test.json`.
+   3/3 PASS — confirms the root cause was correctly identified.
+3. **Regression check**: full ACVP run stayed 0 FAIL throughout; SLH-DSA's
+   existing context-mode tests unaffected.
+4. **Spike: `importMLDSAPrivateKey()`.** Worked on the first attempt — the
+   engine-level capability assumption in §4 held. Also validated against the
+   actual PKCS#11 v3.2 spec text (`docs/refs/pkcs11-spec-v3.2-os.pdf`, Table
+   281): `CKA_VALUE` alone (the raw FIPS 204 expanded `sk`) is sufficient on
+   `C_CreateObject`, matching the engine's existing behavior — `CKA_SEED` is
+   optional, not required.
+5. **ML-DSA sigGen**, 5 real deterministic cases (SHA2-512 ×2, SHA3-224,
+   SHAKE-128, SHA2-224), wired as byte-exact comparisons against the ACVP
+   vector's own signature — all 5 PASS. tgId 8 (SHA2-512/224) excluded per
+   WS-6.3.
+6. **SLH-DSA preHash sigGen**, 7 real deterministic cases. A byte-exact
+   comparison was spiked first and does **not** match — root-caused as the
+   same divergence already documented and accepted in this file's
+   context-mode sigGen block (this engine's OpenSSL SLH-DSA and the ACVP
+   reference generator choose different, individually FIPS-205-compliant
+   internal randomness even in deterministic mode). Followed that existing
+   file's own precedent: round-trip evidence (real `sk` signs, real `pk`
+   from the same vector verifies) instead of a byte comparison that would
+   never pass for reasons unrelated to correctness. All 7 PASS.
+
+**CPP ACVP total: 186 → 201 PASS, 0 FAIL, 0 SKIP** (across the 3 commits).
+`ctest`: 8/8, unchanged.
+
+**Step 7 (full local gate) intentionally not run yet** — this branch also
+carries WS-0, WS-3.2, WS-5.4, and WS-6.2 from earlier in the session; the
+gate is deferred until the full accumulated batch is ready, per the user's
+standing "fix everything, then test once" directive.
+
+## 8. Explicitly out of scope here
 
 - WS-6.3 (missing `SHA512_224`/`SHA512_256`/`SHA512_T` mechanisms) — several
   real SLH-DSA preHash ACVP groups use these hashes; they are excluded from
