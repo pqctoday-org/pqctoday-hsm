@@ -1469,7 +1469,8 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_PKCS5_PBKD2
         | CKM_HKDF_DERIVE
         | CKM_SP800_108_COUNTER_KDF
-        | CKM_SP800_108_FEEDBACK_KDF => (1, 512, 0x00080000),
+        | CKM_SP800_108_FEEDBACK_KDF
+        | CKM_SP800_108_DOUBLE_PIPELINE_KDF => (1, 512, 0x00080000),
         // ── R6.2 — arms for every remaining SUPPORTED_MECHS entry ──────────
         // (a unit test iterates SUPPORTED_MECHS and asserts none of them
         //  return CKR_MECHANISM_INVALID here — keep the two in sync)
@@ -8039,6 +8040,21 @@ unsafe fn parse_sp800_108_segments(
     Ok(out)
 }
 
+/// The FixedInputData portion of a segment list — every segment EXCEPT the
+/// counter, in order. Double-Pipeline mode's A(i) chain (SP 800-108 §5.3)
+/// is defined over FixedInputData alone: A(0) = FixedInputData, A(i) =
+/// PRF(K, A(i-1)) — the counter only appears inside each round's PRF call
+/// (see `sp800_108_feedback_input`, reused for that), never in the chain.
+fn sp800_108_fixed_only(segs: &[Sp800Seg]) -> Vec<Vec<u8>> {
+    segs.iter()
+        .filter_map(|s| match s {
+            Sp800Seg::Counter(..) => None,
+            Sp800Seg::DkmLength(b) => Some(b.clone()),
+            Sp800Seg::Bytes(b) => Some(b.clone()),
+        })
+        .collect()
+}
+
 /// Feedback-mode per-iteration input: segments in order, NO implicit
 /// counter when ITERATION_VARIABLE is absent (SP 800-108 §4.2 makes the
 /// counter optional in feedback mode).
@@ -8148,6 +8164,101 @@ where
     }
     out.truncate(key_len);
     Ok(out)
+}
+
+/// Double-Pipeline Iteration Mode KBKDF core (SP 800-108 §5.3):
+/// A(0) = FixedInputData; A(i) = PRF(base_key, A(i-1)); K(i) = PRF(base_key,
+/// A(i) ‖ round_input(segs, i)), where round_input carries the optional
+/// counter (wherever the caller positioned it, per this engine's literal
+/// segment-order convention) plus the same fixed segments used to seed the
+/// A(i) chain — reuses `sp800_108_feedback_input` since its "counter
+/// optional, segments in caller order" behavior is exactly what a
+/// Double-Pipeline round needs.
+fn sp800_108_run_double_pipeline<M>(
+    base_key: &[u8],
+    segs: &[Sp800Seg],
+    key_len: usize,
+) -> Result<Vec<u8>, u32>
+where
+    M: hmac::Mac + hmac::digest::KeyInit,
+{
+    use hmac::Mac;
+    let fixed = sp800_108_fixed_only(segs);
+    let mut a = {
+        let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
+        for piece in &fixed {
+            mac.update(piece);
+        }
+        mac.finalize().into_bytes().to_vec()
+    };
+    let mut out = Vec::new();
+    let mut counter: u32 = 1;
+    while out.len() < key_len {
+        let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
+        mac.update(&a);
+        for piece in sp800_108_feedback_input(segs, counter) {
+            mac.update(&piece);
+        }
+        out.extend_from_slice(&mac.finalize().into_bytes());
+        let mut a_mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
+        a_mac.update(&a);
+        a = a_mac.finalize().into_bytes().to_vec();
+        counter += 1;
+    }
+    out.truncate(key_len);
+    Ok(out)
+}
+
+/// Double-Pipeline-mode twin of [`sp800_108_counter_kbkdf`]; same PRF policy.
+fn sp800_108_double_pipeline_kbkdf(
+    prf_type: u32,
+    base_key: &[u8],
+    segs: &[Sp800Seg],
+    key_len: usize,
+) -> Result<Vec<u8>, u32> {
+    use hmac::Hmac;
+    match prf_type {
+        CKM_SHA_1_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha1::Sha1>>(base_key, segs, key_len)
+        }
+        CKM_SHA224_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha224>>(base_key, segs, key_len)
+        }
+        CKM_SHA256_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha256>>(base_key, segs, key_len)
+        }
+        CKM_SHA384_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha384>>(base_key, segs, key_len)
+        }
+        CKM_SHA512_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha512>>(base_key, segs, key_len)
+        }
+        CKM_SHA512_224_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha512_224>>(base_key, segs, key_len)
+        }
+        CKM_SHA512_256_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha512_256>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_224_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha3::Sha3_224>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_384_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha3::Sha3_384>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_256_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha3::Sha3_256>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_512_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha3::Sha3_512>>(base_key, segs, key_len)
+        }
+        CKM_AES_CMAC => match base_key.len() {
+            16 => sp800_108_run_double_pipeline::<cmac::Cmac<aes::Aes128>>(base_key, segs, key_len),
+            24 => sp800_108_run_double_pipeline::<cmac::Cmac<aes::Aes192>>(base_key, segs, key_len),
+            32 => sp800_108_run_double_pipeline::<cmac::Cmac<aes::Aes256>>(base_key, segs, key_len),
+            _ => Err(CKR_KEY_SIZE_RANGE),
+        },
+        _ => Err(CKR_MECHANISM_PARAM_INVALID),
+    }
 }
 
 /// PKCS#11 v3.2 §6.26 — the SP 800-108 PRF must be a keyed-MAC mechanism
@@ -9000,6 +9111,42 @@ pub fn C_DeriveKey(
                 };
                 // K(i) = PRF(base_key, K(i-1) || [i] || fixed || [L])
                 match sp800_108_feedback_kbkdf(prf_type, &base_key, &iv, &segs, key_len) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
+                }
+            }
+
+            // ── SP 800-108 Double-Pipeline KBKDF ─────────────────────────────
+            CKM_SP800_108_DOUBLE_PIPELINE_KDF => {
+                let base_key = match get_object_value(h_base_key) {
+                    Some(v) => v,
+                    None => return CKR_ARGUMENTS_BAD,
+                };
+                // CK_SP800_108_KDF_PARAMS — same struct as Counter mode (no
+                // IV field); only the first three fields are required.
+                let r = match ck_param::mech(p_mechanism)
+                    .params(&ck_param::sp800_108_kdf::LAYOUT, 3)
+                {
+                    Ok(r) => r,
+                    Err(ck_param::ParamErr::Absent) => return CKR_ARGUMENTS_BAD,
+                    Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let prf_type = r.ulong32(ck_param::sp800_108_kdf::PRF_TYPE);
+                let num_segs = r.ulong(ck_param::sp800_108_kdf::UL_NUMBER_OF_DATA_PARAMS);
+                let p_segs = r.ptr(ck_param::sp800_108_kdf::P_DATA_PARAMS);
+                // SP 800-108 §5.3 — counter optional, like Feedback mode.
+                let segs = match parse_sp800_108_segments(
+                    p_segs,
+                    num_segs,
+                    key_len,
+                    prf_type,
+                    base_key.len(),
+                    /* allow_explicit_counter */ true,
+                ) {
+                    Ok(s) => s,
+                    Err(rv) => return rv,
+                };
+                match sp800_108_double_pipeline_kbkdf(prf_type, &base_key, &segs, key_len) {
                     Ok(v) => v,
                     Err(rv) => return rv,
                 }

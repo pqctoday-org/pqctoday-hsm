@@ -471,6 +471,7 @@ pub const CKM_UNAVAILABLE_INFORMATION: u32 = 0xFFFF_FFFF; // PKCS#11 v3.2 §4.3 
 pub const CKM_PKCS5_PBKD2: u32 = 0x0000_03b0;
 pub const CKM_SP800_108_COUNTER_KDF: u32 = 0x0000_03ac;
 pub const CKM_SP800_108_FEEDBACK_KDF: u32 = 0x0000_03ad;
+pub const CKM_SP800_108_DOUBLE_PIPELINE_KDF: u32 = 0x0000_03ae;
 pub const CKM_HKDF_DERIVE: u32 = 0x0000_402a;
 // Simple key-derivation mechanisms (PKCS#11 v3.2 §6.43 "Miscellaneous simple
 // key derivation"). Values verified against the vendored pkcs11t.h. The
@@ -858,6 +859,7 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_HKDF_DERIVE,
     CKM_SP800_108_COUNTER_KDF,
     CKM_SP800_108_FEEDBACK_KDF,
+    CKM_SP800_108_DOUBLE_PIPELINE_KDF,
     // Hybrid-KEM combiner building blocks — concatenate (key/data) + digest
     // key-derivation, all standard PKCS#11 v3.2 derive mechanisms composed
     // in-HSM (v3.2 has no dedicated hybrid-KEM mechanism). §6.43 / §6.22 / §6.29.
