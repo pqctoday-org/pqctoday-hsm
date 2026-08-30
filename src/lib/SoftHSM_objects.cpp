@@ -133,7 +133,15 @@ static CK_RV newP11Object(CK_OBJECT_CLASS objClass, CK_KEY_TYPE keyType, CK_CERT
 			    (keyType == CKK_SHA224_HMAC) ||
 			    (keyType == CKK_SHA256_HMAC) ||
 			    (keyType == CKK_SHA384_HMAC) ||
-			    (keyType == CKK_SHA512_HMAC))
+			    (keyType == CKK_SHA512_HMAC) ||
+			    // CKK_AES_XTS (WS-8, 2026-08-30): PKCS#11 v3.2 Table 124 defines
+			    // only CKA_VALUE/CKA_VALUE_LEN beyond the generic secret-key
+			    // attributes — the identical shape P11GenericSecretKeyObj
+			    // already provides for every key type above (its init() is
+			    // byte-for-byte the same as P11AESSecretKeyObj::init() except
+			    // for the hardcoded CKK_AES vs. this dynamic setKeyType()), so
+			    // no new P11Object subclass is needed.
+			    (keyType == CKK_AES_XTS))
 			{
 				P11GenericSecretKeyObj* key = new P11GenericSecretKeyObj();
 				*p11object = key;

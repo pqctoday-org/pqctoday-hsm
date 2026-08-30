@@ -45,7 +45,7 @@ SymmetricAlgorithm::SymmetricAlgorithm()
 	currentBufferSize = 0;
 }
 
-bool SymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMode::Type mode /* = SymMode::CBC */, const ByteString& /*IV = ByteString() */, bool padding /* = true */, size_t counterBits /* = 0 */, const ByteString& /*aad = ByteString()*/, size_t tagBytes /* = 0 */)
+bool SymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMode::Type mode /* = SymMode::CBC */, const ByteString& /*IV = ByteString() */, bool padding /* = true */, size_t counterBits /* = 0 */, const ByteString& /*aad = ByteString()*/, size_t tagBytes /* = 0 */, size_t /*dataLen = 0*/)
 {
 	if ((key == NULL) || (currentOperation != NONE))
 	{
@@ -93,7 +93,7 @@ bool SymmetricAlgorithm::encryptFinal(ByteString& /*encryptedData*/)
 	return true;
 }
 
-bool SymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMode::Type mode /* = SymMode::CBC */, const ByteString& /*IV = ByteString() */, bool padding /* = true */, size_t counterBits /* = 0 */, const ByteString& /*aad = ByteString()*/, size_t tagBytes /* = 0 */)
+bool SymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMode::Type mode /* = SymMode::CBC */, const ByteString& /*IV = ByteString() */, bool padding /* = true */, size_t counterBits /* = 0 */, const ByteString& /*aad = ByteString()*/, size_t tagBytes /* = 0 */, size_t /*dataLen = 0*/)
 {
 	if ((key == NULL) || (currentOperation != NONE))
 	{
@@ -125,7 +125,8 @@ bool SymmetricAlgorithm::decryptUpdate(const ByteString& encryptedData, ByteStri
 	// where the tag is split off and verified. ChaCha20-Poly1305 is AEAD too —
 	// gating only on GCM left its buffer empty, so decryptFinal could not locate
 	// the tag and returned CKR_ENCRYPTED_DATA_INVALID.
-	if (currentCipherMode == SymMode::GCM || currentCipherMode == SymMode::CHACHA_POLY1305) {
+	if (currentCipherMode == SymMode::GCM || currentCipherMode == SymMode::CHACHA_POLY1305 ||
+	    currentCipherMode == SymMode::CCM) {
 		currentAEADBuffer += encryptedData;
 	}
 
@@ -209,8 +210,12 @@ bool SymmetricAlgorithm::isStreamCipher()
 	switch (currentCipherMode)
 	{
 		case SymMode::CFB:
+		case SymMode::CFB1:
+		case SymMode::CFB8:
+		case SymMode::CFB128:
 		case SymMode::CTR:
 		case SymMode::GCM:
+		case SymMode::CCM:
 		case SymMode::OFB:
 			return true;
 		default:

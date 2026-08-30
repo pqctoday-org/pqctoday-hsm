@@ -50,6 +50,11 @@ bool MacAlgorithm::setTruncatedMacSize(size_t /*bytes*/)
 	return false;
 }
 
+bool MacAlgorithm::setIV(const ByteString& /*iv*/)
+{
+	return false;
+}
+
 size_t MacAlgorithm::getOutputMacSize() const
 {
 	return (truncatedMacSize > 0) ? truncatedMacSize : getMacSize();

@@ -166,6 +166,7 @@ pub const CKK_RSA: u32 = 0x0000_0000;
 pub const CKK_EC: u32 = 0x0000_0003; // ECDSA (P-256, P-384)
 pub const CKK_GENERIC_SECRET: u32 = 0x0000_0010;
 pub const CKK_AES: u32 = 0x0000_001f;
+pub const CKK_AES_XTS: u32 = 0x0000_0035;
 pub const CKK_EC_EDWARDS: u32 = 0x0000_0040; // EdDSA (Ed25519)
 pub const CKK_EC_MONTGOMERY: u32 = 0x0000_0041; // X25519 (PKCS#11 v3.2 §6.7)
 pub const CKK_ML_KEM: u32 = 0x0000_0049;
@@ -402,13 +403,22 @@ pub const CKM_HASH_SLH_DSA: u32 = 0x0000_0034;
 pub const CKH_DETERMINISTIC_REQUIRED: u32 = 0x0000_0002;
 
 // SHA Digest
+pub const CKM_SHA_1: u32 = 0x0000_0220;
+pub const CKM_SHA_1_HMAC: u32 = 0x0000_0221;
 pub const CKM_SHA256: u32 = 0x0000_0250;
 pub const CKM_SHA224: u32 = 0x0000_0255;
+pub const CKM_SHA224_HMAC: u32 = 0x0000_0256;
 pub const CKM_SHA384: u32 = 0x0000_0260;
 pub const CKM_SHA512: u32 = 0x0000_0270;
+pub const CKM_SHA512_224: u32 = 0x0000_0048;
+pub const CKM_SHA512_224_HMAC: u32 = 0x0000_0049;
+pub const CKM_SHA512_256: u32 = 0x0000_004C;
+pub const CKM_SHA512_256_HMAC: u32 = 0x0000_004D;
 pub const CKM_SHA3_256: u32 = 0x0000_02B0;
 pub const CKM_SHA3_224: u32 = 0x0000_02B5;
+pub const CKM_SHA3_224_HMAC: u32 = 0x0000_02B6;
 pub const CKM_SHA3_384: u32 = 0x0000_02C0;
+pub const CKM_SHA3_384_HMAC: u32 = 0x0000_02C1;
 pub const CKM_SHA3_512: u32 = 0x0000_02D0;
 // RIPEMD-160 (historical) — digest + HMAC.
 pub const CKM_RIPEMD160: u32 = 0x0000_0240;
@@ -465,6 +475,7 @@ pub const CKM_UNAVAILABLE_INFORMATION: u32 = 0xFFFF_FFFF; // PKCS#11 v3.2 §4.3 
 pub const CKM_PKCS5_PBKD2: u32 = 0x0000_03b0;
 pub const CKM_SP800_108_COUNTER_KDF: u32 = 0x0000_03ac;
 pub const CKM_SP800_108_FEEDBACK_KDF: u32 = 0x0000_03ad;
+pub const CKM_SP800_108_DOUBLE_PIPELINE_KDF: u32 = 0x0000_03ae;
 pub const CKM_HKDF_DERIVE: u32 = 0x0000_402a;
 /// PKCS#11 v3.2 §2.43 — same HKDF computation as CKM_HKDF_DERIVE, output as
 /// a CKO_DATA object instead of a CKO_SECRET_KEY.
@@ -556,6 +567,7 @@ pub const CKM_BIP32_CHILD_DERIVE_LEGACY: u32 = 0x0000_105C;
 pub const CKF_BIP32_HARDENED: u32 = 0x8000_0000;
 
 pub const CKM_EC_KEY_PAIR_GEN: u32 = 0x0000_1040;
+pub const CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS: u32 = 0x0000_140B;
 pub const CKM_ECDSA: u32 = 0x0000_1041; // PKCS#11 v3.2 §6.3.12 — raw (pre-hashed), no parameter, single-part only, token truncates internally
 pub const CKM_ECDSA_SHA256: u32 = 0x0000_1044;
 pub const CKM_ECDSA_SHA384: u32 = 0x0000_1045;
@@ -612,6 +624,8 @@ pub const CKM_EDDSA_PH: u32 = 0x8000_1057;
 
 // AES
 pub const CKM_AES_KEY_GEN: u32 = 0x0000_1080;
+pub const CKM_AES_XTS: u32 = 0x0000_1071;
+pub const CKM_AES_XTS_KEY_GEN: u32 = 0x0000_1072;
 /// PKCS#11 v3.2 §6.10 — AES-ECB. No IV; plaintext MUST be a multiple
 /// of 16 bytes (no padding); ciphertext same length.
 pub const CKM_AES_ECB: u32     = 0x0000_1081;
@@ -622,6 +636,14 @@ pub const CKM_AES_CBC: u32     = 0x0000_1082;
 pub const CKM_AES_CBC_PAD: u32 = 0x0000_1085;
 pub const CKM_AES_CTR: u32 = 0x0000_1086;
 pub const CKM_AES_GCM: u32 = 0x0000_1087;
+pub const CKM_AES_CCM: u32 = 0x0000_1088;
+pub const CKM_AES_GMAC: u32 = 0x0000_108E;
+// §6.11 stream-cipher variants. No CKM_AES_CFB64 — no ACVP dataset exists
+// for it, deliberately excluded (matching this session's C++-side scope).
+pub const CKM_AES_OFB: u32 = 0x0000_2104;
+pub const CKM_AES_CFB8: u32 = 0x0000_2106;
+pub const CKM_AES_CFB128: u32 = 0x0000_2107;
+pub const CKM_AES_CFB1: u32 = 0x0000_2108;
 pub const CKM_AES_KEY_WRAP: u32 = 0x0000_2109;
 // RFC 5649 AES Key Wrap with Padding. Both names denote the same RFC 5649
 // scheme; `_PAD` is the deprecated v2.40 name (was 0x1091), `_KWP` the v3.x
@@ -837,6 +859,7 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_GENERIC_SECRET_KEY_GEN,
     // EC / ECDSA / EdDSA
     CKM_EC_KEY_PAIR_GEN,
+    CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS,
     CKM_ECDSA,
     CKM_ECDSA_SHA256,
     CKM_ECDSA_SHA384,
@@ -861,6 +884,14 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_AES_CBC_PAD,
     CKM_AES_CTR,
     CKM_AES_GCM,
+    CKM_AES_CCM,
+    CKM_AES_GMAC,
+    CKM_AES_OFB,
+    CKM_AES_CFB8,
+    CKM_AES_CFB128,
+    CKM_AES_CFB1,
+    CKM_AES_XTS,
+    CKM_AES_XTS_KEY_GEN,
     CKM_AES_KEY_WRAP,
     CKM_AES_KEY_WRAP_KWP,
     CKM_AES_KEY_WRAP_PAD,
@@ -875,6 +906,7 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_HKDF_DATA,
     CKM_SP800_108_COUNTER_KDF,
     CKM_SP800_108_FEEDBACK_KDF,
+    CKM_SP800_108_DOUBLE_PIPELINE_KDF,
     // Hybrid-KEM combiner building blocks — concatenate (key/data) + digest
     // key-derivation, all standard PKCS#11 v3.2 derive mechanisms composed
     // in-HSM (v3.2 has no dedicated hybrid-KEM mechanism). §6.43 / §6.22 / §6.29.

@@ -81,6 +81,7 @@ set(SOURCES
     OSSLEVPSymmetricAlgorithm.cpp
     OSSLHMAC.cpp
     OSSLKMAC.cpp
+    OSSLGMAC.cpp
     OSSLMD5.cpp
     OSSLRNG.cpp
     OSSLRSA.cpp

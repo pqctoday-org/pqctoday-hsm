@@ -88,6 +88,8 @@ static bool isMacMechanism(CK_MECHANISM_PTR pMechanism)
 		case CKM_SHA256_HMAC:
 		case CKM_SHA384_HMAC:
 		case CKM_SHA512_HMAC:
+		case CKM_SHA512_224_HMAC:
+		case CKM_SHA512_256_HMAC:
 		case CKM_SHA3_224_HMAC:
 		case CKM_SHA3_256_HMAC:
 		case CKM_SHA3_384_HMAC:
@@ -100,6 +102,8 @@ static bool isMacMechanism(CK_MECHANISM_PTR pMechanism)
 		case CKM_SHA256_HMAC_GENERAL:
 		case CKM_SHA384_HMAC_GENERAL:
 		case CKM_SHA512_HMAC_GENERAL:
+		case CKM_SHA512_224_HMAC_GENERAL:
+		case CKM_SHA512_256_HMAC_GENERAL:
 		case CKM_SHA3_224_HMAC_GENERAL:
 		case CKM_SHA3_256_HMAC_GENERAL:
 		case CKM_SHA3_384_HMAC_GENERAL:
@@ -107,6 +111,7 @@ static bool isMacMechanism(CK_MECHANISM_PTR pMechanism)
 		case CKM_AES_CMAC:
 		case CKM_KMAC_128:
 		case CKM_KMAC_256:
+		case CKM_AES_GMAC:
 			return true;
 		default:
 			return false;
@@ -153,6 +158,10 @@ static const MacMechInfo kMacMechTable[] = {
 	{ CKM_SHA256_HMAC,   CKM_SHA256_HMAC_GENERAL,   CKK_SHA256_HMAC,   true,  32, MacAlgo::HMAC_SHA256   },
 	{ CKM_SHA384_HMAC,   CKM_SHA384_HMAC_GENERAL,   CKK_SHA384_HMAC,   true,  48, MacAlgo::HMAC_SHA384   },
 	{ CKM_SHA512_HMAC,   CKM_SHA512_HMAC_GENERAL,   CKK_SHA512_HMAC,   true,  64, MacAlgo::HMAC_SHA512   },
+	// WS-6.3 (2026-08-30): FIPS 180-4 truncated variants, same minKeyBytes
+	// convention as every other row (key length = digest output length).
+	{ CKM_SHA512_224_HMAC, CKM_SHA512_224_HMAC_GENERAL, CKK_SHA512_224_HMAC, true, 28, MacAlgo::HMAC_SHA512_224 },
+	{ CKM_SHA512_256_HMAC, CKM_SHA512_256_HMAC_GENERAL, CKK_SHA512_256_HMAC, true, 32, MacAlgo::HMAC_SHA512_256 },
 	{ CKM_SHA3_224_HMAC, CKM_SHA3_224_HMAC_GENERAL, CKK_SHA3_224_HMAC, true,  28, MacAlgo::HMAC_SHA3_224 },
 	{ CKM_SHA3_256_HMAC, CKM_SHA3_256_HMAC_GENERAL, CKK_SHA3_256_HMAC, true,  32, MacAlgo::HMAC_SHA3_256 },
 	{ CKM_SHA3_384_HMAC, CKM_SHA3_384_HMAC_GENERAL, CKK_SHA3_384_HMAC, true,  48, MacAlgo::HMAC_SHA3_384 },
@@ -160,6 +169,10 @@ static const MacMechInfo kMacMechTable[] = {
 	{ CKM_AES_CMAC,      0,                         CKK_AES,           false,  0, MacAlgo::CMAC_AES      },
 	{ CKM_KMAC_128,      0,                         CKK_GENERIC_SECRET,true,  16, MacAlgo::KMAC_128      },
 	{ CKM_KMAC_256,      0,                         CKK_GENERIC_SECRET,true,  32, MacAlgo::KMAC_256      },
+	// WS-8 (2026-08-30): CK_GCM_PARAMS-driven IV + tag length are applied by
+	// applyGmacParams() below, not this table (minKeyBytes=0: PKCS#11 v3.2
+	// §6.13.6 constrains key size only via CK_MECHANISM_INFO's AES range).
+	{ CKM_AES_GMAC,      0,                         CKK_AES,           false,  0, MacAlgo::GMAC_AES      },
 };
 
 /**
@@ -245,6 +258,44 @@ static CK_RV applyGeneralMacLength(CK_MECHANISM_PTR pMechanism, MacAlgorithm* ma
 	return CKR_OK;
 }
 
+/**
+ * @brief Apply CKM_AES_GMAC's CK_GCM_PARAMS (IV + tag length) to a freshly
+ *        created MacAlgorithm (WS-8, 2026-08-30).
+ *
+ * PKCS#11 v3.2 §6.13.6: "The IV length is determined by ... ulIvLen. ... the
+ * tag's length is determined by ... ulTagBits." pAAD/ulAADLen are NOT used
+ * for GMAC — the data authenticated is pData itself (the C_Sign/C_Verify
+ * argument), not a separate AAD field within the params struct.
+ */
+static CK_RV applyGmacParams(CK_MECHANISM_PTR pMechanism, MacAlgorithm* mac)
+{
+	if (pMechanism->pParameter == NULL_PTR ||
+	    pMechanism->ulParameterLen != sizeof(CK_GCM_PARAMS))
+	{
+		ERROR_MSG("CKM_AES_GMAC requires CK_GCM_PARAMS");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	CK_GCM_PARAMS_PTR gcmp = CK_GCM_PARAMS_PTR(pMechanism->pParameter);
+
+	if (gcmp->ulIvLen == 0 || gcmp->pIv == NULL_PTR)
+	{
+		ERROR_MSG("CKM_AES_GMAC: pIv/ulIvLen missing");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (!mac->setIV(ByteString(gcmp->pIv, gcmp->ulIvLen)))
+		return CKR_MECHANISM_PARAM_INVALID;
+
+	if (gcmp->ulTagBits == 0 || gcmp->ulTagBits > 128 || gcmp->ulTagBits % 8 != 0)
+	{
+		ERROR_MSG("CKM_AES_GMAC: invalid ulTagBits");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (!mac->setTruncatedMacSize((size_t)(gcmp->ulTagBits / 8)))
+		return CKR_MECHANISM_PARAM_INVALID;
+
+	return CKR_OK;
+}
+
 } // anonymous namespace
 
 // MacAlgorithm version of C_SignInit
@@ -282,6 +333,15 @@ CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechani
 	if (generalLength)
 	{
 		mechRv = applyGeneralMacLength(pMechanism, mac);
+		if (mechRv != CKR_OK)
+		{
+			CryptoFactory::i()->recycleMacAlgorithm(mac);
+			return mechRv;
+		}
+	}
+	if (pMechanism->mechanism == CKM_AES_GMAC)
+	{
+		mechRv = applyGmacParams(pMechanism, mac);
 		if (mechRv != CKR_OK)
 		{
 			CryptoFactory::i()->recycleMacAlgorithm(mac);
@@ -2270,6 +2330,15 @@ CK_RV SoftHSM::MacVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 	if (generalLength)
 	{
 		mechRv = applyGeneralMacLength(pMechanism, mac);
+		if (mechRv != CKR_OK)
+		{
+			CryptoFactory::i()->recycleMacAlgorithm(mac);
+			return mechRv;
+		}
+	}
+	if (pMechanism->mechanism == CKM_AES_GMAC)
+	{
+		mechRv = applyGmacParams(pMechanism, mac);
 		if (mechRv != CKR_OK)
 		{
 			CryptoFactory::i()->recycleMacAlgorithm(mac);

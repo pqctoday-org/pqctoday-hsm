@@ -1019,6 +1019,11 @@ CK_RV P11AttrCheckValue::updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pV
 			case CKK_SHA256_HMAC:
 			case CKK_SHA384_HMAC:
 			case CKK_SHA512_HMAC:
+			// CKK_AES_XTS (WS-8, 2026-08-30): a double-length (32/64-byte) key
+			// with no PKCS#11-defined AES-specific check-value formula — same
+			// generic SHA-256(keyBits) bucket already used for every other
+			// symmetric key type that isn't plain CKK_AES.
+			case CKK_AES_XTS:
 				key.setKeyBits(keybits);
 				key.setBitLen(keybits.size() * 8);
 				checkValue = key.getKeyCheckValue();
@@ -1189,6 +1194,7 @@ CK_RV P11AttrValue::updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue,
 			case CKK_SHA256_HMAC:
 			case CKK_SHA384_HMAC:
 			case CKK_SHA512_HMAC:
+			case CKK_AES_XTS:
 				key.setKeyBits(plaintext);
 				key.setBitLen(plaintext.size() * 8);
 				checkValue = key.getKeyCheckValue();

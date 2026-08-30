@@ -100,6 +100,12 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 		case CKM_SHA512:
 			algo = HashAlgo::SHA512;
 			break;
+		case CKM_SHA512_224:
+			algo = HashAlgo::SHA512_224;
+			break;
+		case CKM_SHA512_256:
+			algo = HashAlgo::SHA512_256;
+			break;
 		case CKM_SHA3_224:
 			algo = HashAlgo::SHA3_224;
 			break;

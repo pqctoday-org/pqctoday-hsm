@@ -107,10 +107,10 @@ void OSSLEVPSymmetricAlgorithm::clean()
 }
 
 // Encryption functions
-bool OSSLEVPSymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMode::Type mode /* = SymMode::CBC */, const ByteString& IV /* = ByteString()*/, bool padding /* = true */, size_t counterBits /* = 0 */, const ByteString& aad /* = ByteString() */, size_t tagBytes /* = 0 */)
+bool OSSLEVPSymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMode::Type mode /* = SymMode::CBC */, const ByteString& IV /* = ByteString()*/, bool padding /* = true */, size_t counterBits /* = 0 */, const ByteString& aad /* = ByteString() */, size_t tagBytes /* = 0 */, size_t dataLen /* = 0 */)
 {
 	// Call the superclass initialiser
-	if (!SymmetricAlgorithm::encryptInit(key, mode, IV, padding, counterBits, aad, tagBytes))
+	if (!SymmetricAlgorithm::encryptInit(key, mode, IV, padding, counterBits, aad, tagBytes, dataLen))
 	{
 		return false;
 	}
@@ -118,7 +118,9 @@ bool OSSLEVPSymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMo
 	// Check the IV
 	// Bare ChaCha20 (SymMode::CHACHA) uses a 16-byte IV (counter||nonce), not
 	// getBlockSize() (which is 1 for the stream cipher); skip the block-IV check.
-	if (mode != SymMode::GCM && mode != SymMode::CHACHA_POLY1305 && mode != SymMode::CHACHA && (IV.size() > 0) && (IV.size() != getBlockSize()))
+	// CCM's nonce is 7-13 bytes (RFC 3610), never getBlockSize() (16) either.
+	if (mode != SymMode::GCM && mode != SymMode::CHACHA_POLY1305 && mode != SymMode::CHACHA &&
+	    mode != SymMode::CCM && (IV.size() > 0) && (IV.size() != getBlockSize()))
 	{
 		ERROR_MSG("Invalid IV size (%d bytes, expected %d bytes)", IV.size(), getBlockSize());
 
@@ -128,12 +130,12 @@ bool OSSLEVPSymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMo
 		return false;
 	}
 
-	// For AEAD modes (GCM / ChaCha20-Poly1305) an empty IV must never be
+	// For AEAD modes (GCM / ChaCha20-Poly1305 / CCM) an empty IV must never be
 	// silently replaced by an all-zero nonce — that is catastrophic nonce
 	// reuse. The PKCS#11 layer already rejects zero-length IVs, but defend in
 	// depth here: fail rather than zero-fill if an AEAD mode reaches this
 	// point without an IV.
-	if ((mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305) && IV.size() == 0)
+	if ((mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305 || mode == SymMode::CCM) && IV.size() == 0)
 	{
 		ERROR_MSG("Refusing to use an all-zero IV for an AEAD mode");
 
@@ -185,7 +187,7 @@ bool OSSLEVPSymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMo
 	}
 
 	int rv;
-	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305)
+	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305 || mode == SymMode::CCM)
 	{
 		rv = EVP_EncryptInit_ex(pCurCTX, cipher, NULL, NULL, NULL);
 
@@ -202,14 +204,39 @@ bool OSSLEVPSymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMo
 		{
 			// A failed SET_IVLEN leaves the context using OpenSSL's default
 			// IV length, reading the wrong bytes — must be treated as fatal.
-			if (!EVP_CIPHER_CTX_ctrl(pCurCTX, EVP_CTRL_GCM_SET_IVLEN, iv.size(), NULL))
+			int ivlenCtrl = (mode == SymMode::CCM) ? EVP_CTRL_CCM_SET_IVLEN : EVP_CTRL_GCM_SET_IVLEN;
+			if (!EVP_CIPHER_CTX_ctrl(pCurCTX, ivlenCtrl, iv.size(), NULL))
 			{
 				ERROR_MSG("Failed to set IV length: %s", ERR_error_string(ERR_get_error(), NULL));
+				rv = 0;
+			}
+			// CCM (unlike GCM) requires the tag length declared via
+			// EVP_CTRL_CCM_SET_TAG *before* the key+IV init call below —
+			// verified empirically against real ACVP-AES-CCM-1.0 vectors: the
+			// same ctrl called after key+IV init silently produces a wrong tag.
+			else if (mode == SymMode::CCM &&
+			         !EVP_CIPHER_CTX_ctrl(pCurCTX, EVP_CTRL_CCM_SET_TAG, tagBytes, NULL))
+			{
+				ERROR_MSG("Failed to set CCM tag length: %s", ERR_error_string(ERR_get_error(), NULL));
 				rv = 0;
 			}
 			else
 			{
 				rv = EVP_EncryptInit_ex(pCurCTX, NULL, NULL, (unsigned char*) currentKey->getKeyBits().const_byte_str(), iv.byte_str());
+			}
+
+			// CCM's CBC-MAC bakes the total plaintext length into its first
+			// block, so OpenSSL requires it declared via a NULL-output Update
+			// before AAD or real data (RFC 3610 / SP800-38C; PKCS#11's
+			// CK_CCM_PARAMS.ulDataLen supplies it here as dataLen).
+			if (rv && mode == SymMode::CCM)
+			{
+				int declLen = 0;
+				if (!EVP_EncryptUpdate(pCurCTX, NULL, &declLen, NULL, (int)dataLen))
+				{
+					ERROR_MSG("Failed to declare CCM data length: %s", ERR_error_string(ERR_get_error(), NULL));
+					rv = 0;
+				}
 			}
 		}
 	}
@@ -233,7 +260,7 @@ bool OSSLEVPSymmetricAlgorithm::encryptInit(const SymmetricKey* key, const SymMo
 
 	EVP_CIPHER_CTX_set_padding(pCurCTX, padding ? 1 : 0);
 
-	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305)
+	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305 || mode == SymMode::CCM)
 	{
 		int outLen = 0;
 		if (aad.size() && !EVP_EncryptUpdate(pCurCTX, NULL, &outLen, (unsigned char*) aad.const_byte_str(), aad.size()))
@@ -326,11 +353,12 @@ bool OSSLEVPSymmetricAlgorithm::encryptFinal(ByteString& encryptedData)
 	// Resize the output block
 	encryptedData.resize(outLen);
 
-	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305)
+	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305 || mode == SymMode::CCM)
 	{
 		ByteString tag;
 		tag.resize(tagBytes);
-		EVP_CIPHER_CTX_ctrl(pCurCTX, EVP_CTRL_GCM_GET_TAG, tagBytes, &tag[0]);
+		int tagCtrl = (mode == SymMode::CCM) ? EVP_CTRL_CCM_GET_TAG : EVP_CTRL_GCM_GET_TAG;
+		EVP_CIPHER_CTX_ctrl(pCurCTX, tagCtrl, tagBytes, &tag[0]);
 		encryptedData += tag;
 	}
 
@@ -340,10 +368,10 @@ bool OSSLEVPSymmetricAlgorithm::encryptFinal(ByteString& encryptedData)
 }
 
 // Decryption functions
-bool OSSLEVPSymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMode::Type mode /* = SymMode::CBC */, const ByteString& IV /* = ByteString() */, bool padding /* = true */, size_t counterBits /* = 0 */, const ByteString& aad /* = ByteString() */, size_t tagBytes /* = 0 */)
+bool OSSLEVPSymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMode::Type mode /* = SymMode::CBC */, const ByteString& IV /* = ByteString() */, bool padding /* = true */, size_t counterBits /* = 0 */, const ByteString& aad /* = ByteString() */, size_t tagBytes /* = 0 */, size_t dataLen /* = 0 */)
 {
 	// Call the superclass initialiser
-	if (!SymmetricAlgorithm::decryptInit(key, mode, IV, padding, counterBits, aad, tagBytes))
+	if (!SymmetricAlgorithm::decryptInit(key, mode, IV, padding, counterBits, aad, tagBytes, dataLen))
 	{
 		return false;
 	}
@@ -351,7 +379,9 @@ bool OSSLEVPSymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMo
 	// Check the IV
 	// Bare ChaCha20 (SymMode::CHACHA) uses a 16-byte IV (counter||nonce), not
 	// getBlockSize() (which is 1 for the stream cipher); skip the block-IV check.
-	if (mode != SymMode::GCM && mode != SymMode::CHACHA_POLY1305 && mode != SymMode::CHACHA && (IV.size() > 0) && (IV.size() != getBlockSize()))
+	// CCM's nonce is 7-13 bytes (RFC 3610), never getBlockSize() (16) either.
+	if (mode != SymMode::GCM && mode != SymMode::CHACHA_POLY1305 && mode != SymMode::CHACHA &&
+	    mode != SymMode::CCM && (IV.size() > 0) && (IV.size() != getBlockSize()))
 	{
 		ERROR_MSG("Invalid IV size (%d bytes, expected %d bytes)", IV.size(), getBlockSize());
 
@@ -361,12 +391,12 @@ bool OSSLEVPSymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMo
 		return false;
 	}
 
-	// For AEAD modes (GCM / ChaCha20-Poly1305) an empty IV must never be
+	// For AEAD modes (GCM / ChaCha20-Poly1305 / CCM) an empty IV must never be
 	// silently replaced by an all-zero nonce — that is catastrophic nonce
 	// reuse. The PKCS#11 layer already rejects zero-length IVs, but defend in
 	// depth here: fail rather than zero-fill if an AEAD mode reaches this
 	// point without an IV.
-	if ((mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305) && IV.size() == 0)
+	if ((mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305 || mode == SymMode::CCM) && IV.size() == 0)
 	{
 		ERROR_MSG("Refusing to use an all-zero IV for an AEAD mode");
 
@@ -418,7 +448,7 @@ bool OSSLEVPSymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMo
 	}
 
 	int rv;
-	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305)
+	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305 || mode == SymMode::CCM)
 	{
 		rv = EVP_DecryptInit_ex(pCurCTX, cipher, NULL, NULL, NULL);
 
@@ -435,14 +465,38 @@ bool OSSLEVPSymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMo
 		{
 			// A failed SET_IVLEN leaves the context using OpenSSL's default
 			// IV length, reading the wrong bytes — must be treated as fatal.
-			if (!EVP_CIPHER_CTX_ctrl(pCurCTX, EVP_CTRL_GCM_SET_IVLEN, iv.size(), NULL))
+			int ivlenCtrl = (mode == SymMode::CCM) ? EVP_CTRL_CCM_SET_IVLEN : EVP_CTRL_GCM_SET_IVLEN;
+			if (!EVP_CIPHER_CTX_ctrl(pCurCTX, ivlenCtrl, iv.size(), NULL))
 			{
 				ERROR_MSG("Failed to set IV length: %s", ERR_error_string(ERR_get_error(), NULL));
+				rv = 0;
+			}
+			// CCM requires a tag-length declaration (EVP_CTRL_CCM_SET_TAG,
+			// length only — the actual tag bytes aren't known yet, they arrive
+			// appended to the ciphertext and are set for real in decryptFinal)
+			// before the key+IV init call, same empirically-verified ordering
+			// requirement as the encrypt side above.
+			else if (mode == SymMode::CCM &&
+			         !EVP_CIPHER_CTX_ctrl(pCurCTX, EVP_CTRL_CCM_SET_TAG, tagBytes, NULL))
+			{
+				ERROR_MSG("Failed to set CCM tag length: %s", ERR_error_string(ERR_get_error(), NULL));
 				rv = 0;
 			}
 			else
 			{
 				rv = EVP_DecryptInit_ex(pCurCTX, NULL, NULL, (unsigned char*) currentKey->getKeyBits().const_byte_str(), iv.byte_str());
+			}
+
+			// See the matching comment on the encrypt side: CCM needs the
+			// total plaintext length declared before AAD/real data.
+			if (rv && mode == SymMode::CCM)
+			{
+				int declLen = 0;
+				if (!EVP_DecryptUpdate(pCurCTX, NULL, &declLen, NULL, (int)dataLen))
+				{
+					ERROR_MSG("Failed to declare CCM data length: %s", ERR_error_string(ERR_get_error(), NULL));
+					rv = 0;
+				}
 			}
 		}
 	}
@@ -466,7 +520,7 @@ bool OSSLEVPSymmetricAlgorithm::decryptInit(const SymmetricKey* key, const SymMo
 
 	EVP_CIPHER_CTX_set_padding(pCurCTX, padding ? 1 : 0);
 
-	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305)
+	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305 || mode == SymMode::CCM)
 	{
 		int outLen = 0;
 		if (aad.size() && !EVP_DecryptUpdate(pCurCTX, NULL, &outLen, (unsigned char*) aad.const_byte_str(), aad.size()))
@@ -500,7 +554,8 @@ bool OSSLEVPSymmetricAlgorithm::decryptUpdate(const ByteString& encryptedData, B
 	// tag bytes (buffered by the base decryptUpdate) until decryptFinal verifies
 	// the tag — handling only GCM here fed the tag through as ciphertext and made
 	// ChaCha20-Poly1305 decrypt fail with CKR_ENCRYPTED_DATA_INVALID.
-	if (currentCipherMode == SymMode::GCM || currentCipherMode == SymMode::CHACHA_POLY1305)
+	if (currentCipherMode == SymMode::GCM || currentCipherMode == SymMode::CHACHA_POLY1305 ||
+	    currentCipherMode == SymMode::CCM)
 	{
 		data.resize(0);
 		return true;
@@ -553,7 +608,7 @@ bool OSSLEVPSymmetricAlgorithm::decryptFinal(ByteString& data)
 	}
 
 	data.resize(0);
-	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305)
+	if (mode == SymMode::GCM || mode == SymMode::CHACHA_POLY1305 || mode == SymMode::CCM)
 	{
 		// Check buffer size
 		if (aeadBuffer.size() < tagBytes)
@@ -565,8 +620,15 @@ bool OSSLEVPSymmetricAlgorithm::decryptFinal(ByteString& data)
 			return false;
 		}
 
-		// Set the tag
-		EVP_CIPHER_CTX_ctrl(pCurCTX, EVP_CTRL_GCM_SET_TAG, tagBytes, &aeadBuffer[aeadBuffer.size()-tagBytes]);
+		// Set the tag. For CCM this is the SECOND SET_TAG call on this
+		// context — the first (length-only, in decryptInit) let OpenSSL
+		// validate/allocate before the real bytes were available; this one
+		// supplies the actual bytes that the CCM data-update call below will
+		// verify (CCM authenticates during EVP_DecryptUpdate itself, not a
+		// separate Final call — empirically confirmed against a real ACVP
+		// vector, including that a corrupted tag is rejected there).
+		int tagCtrl = (mode == SymMode::CCM) ? EVP_CTRL_CCM_SET_TAG : EVP_CTRL_GCM_SET_TAG;
+		EVP_CIPHER_CTX_ctrl(pCurCTX, tagCtrl, tagBytes, &aeadBuffer[aeadBuffer.size()-tagBytes]);
 
 		// Prepare the output block
 		data.resize(aeadBuffer.size() - tagBytes + getBlockSize());

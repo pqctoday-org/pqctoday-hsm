@@ -8,6 +8,7 @@ import { createRequire } from 'module'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import path from 'path'
+import { OctetString } from 'asn1js'
 const require = createRequire(import.meta.url)
 const CK = require('../constants.js')
 
@@ -15,8 +16,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const WASM_DIR = path.resolve(__dirname, '../wasm')
 
 // ── Additional constants not (yet) in constants.js ──────────────────────────
-const CKG_MGF1_SHA256 = 0x00000002
-const CKG_MGF1_SHA384 = 0x00000003
 // RSA-OAEP mask-generation functions and label source (pkcs11t.h:1601-1621).
 export const CKG_MGF1 = {
   CKM_SHA_1: 0x00000001,
@@ -42,9 +41,14 @@ export const CKP_PKCS5_PBKD2_HMAC_SHA224 = 0x00000003
 const EC_OID = {
   'P-256': new Uint8Array([0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]),
   'P-384': new Uint8Array([0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22]),
+  'P-521': new Uint8Array([0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23]),
   Ed25519: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x70]),
   // id-Ed448 = 1.3.101.113 (RFC 8410 §3)
   Ed448: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x71]),
+  // id-X25519 = 1.3.101.110, id-X448 = 1.3.101.111 (RFC 8410 §3) — cross-
+  // checked against rust/src/ffi.rs:2963,2986 (same OID bytes).
+  X25519: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x6e]),
+  X448: new Uint8Array([0x06, 0x03, 0x2b, 0x65, 0x6f]),
 }
 
 // ── Utilities ───────────────────────────────────────────────────────────────
@@ -160,6 +164,115 @@ export function buildGCMParams(M, iv, aad = new Uint8Array(0), tagBits = 128) {
   M.setValue(ptr + 16, aad.length, 'i32') // ulAADLen
   M.setValue(ptr + 20, tagBits, 'i32') // ulTagBits
   return { ptr, size: 24, ivPtr, aadPtr }
+}
+
+/**
+ * CK_CCM_PARAMS: ulDataLen(4) pNonce(4) ulNonceLen(4) pAAD(4) ulAADLen(4)
+ * ulMACLen(4) = 24B. `dataLen` is the plaintext length for encrypt, or the
+ * plaintext length for decrypt too (RFC 3610/SP800-38C: ciphertext and
+ * plaintext are the same length, only the appended tag differs) — see the
+ * dataLen comment on SymmetricAlgorithm::encryptInit/decryptInit in the C++.
+ */
+export function buildCCMParams(M, dataLen, nonce, aad = new Uint8Array(0), macLen = 16) {
+  const noncePtr = writeBytes(M, nonce)
+  const aadPtr = aad.length > 0 ? writeBytes(M, aad) : 0
+  const ptr = M._malloc(24)
+  M.setValue(ptr + 0, dataLen, 'i32')
+  M.setValue(ptr + 4, noncePtr, 'i32')
+  M.setValue(ptr + 8, nonce.length, 'i32')
+  M.setValue(ptr + 12, aadPtr, 'i32')
+  M.setValue(ptr + 16, aad.length, 'i32')
+  M.setValue(ptr + 20, macLen, 'i32')
+  return { ptr, size: 24, noncePtr, aadPtr }
+}
+
+/** AES-CCM encrypt (single-shot) → ciphertext||tag */
+export function aesCcmEncrypt(M, hSession, handle, pt, nonce, aad = new Uint8Array(0), macLen = 16) {
+  const ccm = buildCCMParams(M, pt.length, nonce, aad, macLen)
+  const mechPtr = buildMech(M, CK.CKM_AES_CCM, ccm.ptr, ccm.size)
+  check('C_EncryptInit(CCM)', M._C_EncryptInit(hSession, mechPtr, handle))
+  const ptPtr = writeBytes(M, pt)
+  const outLen = pt.length + macLen
+  const outPtr = M._malloc(outLen)
+  const outLenPtr = allocUlong(M)
+  M.setValue(outLenPtr, outLen, 'i32')
+  check('C_Encrypt(CCM)', M._C_Encrypt(hSession, ptPtr, pt.length, outPtr, outLenPtr))
+  const actualLen = readUlong(M, outLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, outPtr, actualLen).slice()
+  M._free(ptPtr)
+  M._free(outPtr)
+  freePtr(M, outLenPtr)
+  M._free(mechPtr)
+  M._free(ccm.ptr)
+  M._free(ccm.noncePtr)
+  if (ccm.aadPtr) M._free(ccm.aadPtr)
+  return result
+}
+
+/** AES-CCM decrypt (single-shot). `ct` includes the trailing tag. Throws on auth failure. */
+export function aesCcmDecrypt(M, hSession, handle, ct, nonce, aad = new Uint8Array(0), macLen = 16) {
+  const dataLen = ct.length - macLen
+  const ccm = buildCCMParams(M, dataLen, nonce, aad, macLen)
+  const mechPtr = buildMech(M, CK.CKM_AES_CCM, ccm.ptr, ccm.size)
+  check('C_DecryptInit(CCM)', M._C_DecryptInit(hSession, mechPtr, handle))
+  const ctPtr = writeBytes(M, ct)
+  const outLen = dataLen + 16
+  const outPtr = M._malloc(outLen)
+  const outLenPtr = allocUlong(M)
+  M.setValue(outLenPtr, outLen, 'i32')
+  check('C_Decrypt(CCM)', M._C_Decrypt(hSession, ctPtr, ct.length, outPtr, outLenPtr))
+  const actualLen = readUlong(M, outLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, outPtr, actualLen).slice()
+  M._free(ctPtr)
+  M._free(outPtr)
+  freePtr(M, outLenPtr)
+  M._free(mechPtr)
+  M._free(ccm.ptr)
+  M._free(ccm.noncePtr)
+  if (ccm.aadPtr) M._free(ccm.aadPtr)
+  return result
+}
+
+/**
+ * AES-GMAC sign/verify (CKM_AES_GMAC, PKCS#11 v3.2 §6.13.6). `data` IS the
+ * AAD — GMAC has no separate plaintext/ciphertext. Reuses CK_GCM_PARAMS
+ * (buildGCMParams) with an empty pAAD field, since GMAC ignores it.
+ */
+export function gmacSign(M, hSession, handle, data, iv, tagBits = 128) {
+  const gcm = buildGCMParams(M, iv, new Uint8Array(0), tagBits)
+  const mechPtr = buildMech(M, CK.CKM_AES_GMAC, gcm.ptr, gcm.size)
+  check('C_SignInit(GMAC)', M._C_SignInit(hSession, mechPtr, handle))
+  const dataPtr = writeBytes(M, data)
+  const outLen = tagBits / 8
+  const outPtr = M._malloc(outLen)
+  const outLenPtr = allocUlong(M)
+  M.setValue(outLenPtr, outLen, 'i32')
+  check('C_Sign(GMAC)', M._C_Sign(hSession, dataPtr, data.length, outPtr, outLenPtr))
+  const actualLen = readUlong(M, outLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, outPtr, actualLen).slice()
+  M._free(dataPtr)
+  M._free(outPtr)
+  freePtr(M, outLenPtr)
+  M._free(mechPtr)
+  M._free(gcm.ptr)
+  M._free(gcm.ivPtr)
+  return result
+}
+
+/** AES-GMAC verify → true/false (does not throw on a bad tag) */
+export function gmacVerify(M, hSession, handle, data, iv, tag, tagBits = 128) {
+  const gcm = buildGCMParams(M, iv, new Uint8Array(0), tagBits)
+  const mechPtr = buildMech(M, CK.CKM_AES_GMAC, gcm.ptr, gcm.size)
+  check('C_VerifyInit(GMAC)', M._C_VerifyInit(hSession, mechPtr, handle))
+  const dataPtr = writeBytes(M, data)
+  const tagPtr = writeBytes(M, tag)
+  const rv = M._C_Verify(hSession, dataPtr, data.length, tagPtr, tag.length)
+  M._free(dataPtr)
+  M._free(tagPtr)
+  M._free(mechPtr)
+  M._free(gcm.ptr)
+  M._free(gcm.ivPtr)
+  return rv === CK.CKR_OK
 }
 
 /** CK_AES_CTR_PARAMS: ulCounterBits(4) cb[16] = 20B */
@@ -347,7 +460,7 @@ export function importAESKey(
   M,
   hSession,
   keyBytes,
-  { encrypt = true, decrypt = true, wrap = true, unwrap = true, derive = true, extractable = true } = {}
+  { encrypt = true, decrypt = true, wrap = true, unwrap = true, derive = true, extractable = true, sign = false, verify = false } = {}
 ) {
   const tpl = buildTemplate(M, [
     { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
@@ -358,6 +471,8 @@ export function importAESKey(
     { type: CK.CKA_WRAP, value: wrap },
     { type: CK.CKA_UNWRAP, value: unwrap },
     { type: CK.CKA_DERIVE, value: derive },
+    { type: CK.CKA_SIGN, value: sign },
+    { type: CK.CKA_VERIFY, value: verify },
     { type: CK.CKA_EXTRACTABLE, value: extractable },
     { type: CK.CKA_SENSITIVE, value: !extractable },
     { type: CK.CKA_VALUE, value: keyBytes },
@@ -370,6 +485,66 @@ export function importAESKey(
   freeTemplate(M, tpl)
   freePtr(M, hPtr)
   return handle
+}
+
+/** CKK_AES_XTS key import (WS-8, 2026-08-30) — double-length (32/64-byte) raw key */
+export function importAESXTSKey(M, hSession, keyBytes, { encrypt = true, decrypt = true, extractable = true } = {}) {
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_AES_XTS },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_ENCRYPT, value: encrypt },
+    { type: CK.CKA_DECRYPT, value: decrypt },
+    { type: CK.CKA_EXTRACTABLE, value: extractable },
+    { type: CK.CKA_SENSITIVE, value: !extractable },
+    { type: CK.CKA_VALUE, value: keyBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(AES-XTS)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/** AES-XTS decrypt (single-shot). `tweak` is the 16-byte Data Unit Sequence Number. */
+export function aesXtsDecrypt(M, hSession, handle, ct, tweak) {
+  const tweakPtr = writeBytes(M, tweak)
+  const mechPtr = buildMech(M, CK.CKM_AES_XTS, tweakPtr, 16)
+  check('C_DecryptInit(XTS)', M._C_DecryptInit(hSession, mechPtr, handle))
+  const ctPtr = writeBytes(M, ct)
+  const outPtr = M._malloc(ct.length + 16)
+  const outLenPtr = allocUlong(M)
+  M.setValue(outLenPtr, ct.length + 16, 'i32')
+  check('C_Decrypt(XTS)', M._C_Decrypt(hSession, ctPtr, ct.length, outPtr, outLenPtr))
+  const actualLen = readUlong(M, outLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, outPtr, actualLen).slice()
+  M._free(ctPtr)
+  M._free(outPtr)
+  freePtr(M, outLenPtr)
+  M._free(mechPtr)
+  M._free(tweakPtr)
+  return result
+}
+
+/** AES-XTS encrypt (single-shot). `tweak` is the 16-byte Data Unit Sequence Number. */
+export function aesXtsEncrypt(M, hSession, handle, pt, tweak) {
+  const tweakPtr = writeBytes(M, tweak)
+  const mechPtr = buildMech(M, CK.CKM_AES_XTS, tweakPtr, 16)
+  check('C_EncryptInit(XTS)', M._C_EncryptInit(hSession, mechPtr, handle))
+  const ptPtr = writeBytes(M, pt)
+  const outPtr = M._malloc(pt.length + 16)
+  const outLenPtr = allocUlong(M)
+  M.setValue(outLenPtr, pt.length + 16, 'i32')
+  check('C_Encrypt(XTS)', M._C_Encrypt(hSession, ptPtr, pt.length, outPtr, outLenPtr))
+  const actualLen = readUlong(M, outLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, outPtr, actualLen).slice()
+  M._free(ptPtr)
+  M._free(outPtr)
+  freePtr(M, outLenPtr)
+  M._free(mechPtr)
+  M._free(tweakPtr)
+  return result
 }
 
 export function importHMACKey(M, hSession, keyBytes, { sign = true, verify = true } = {}) {
@@ -459,14 +634,17 @@ export function importRSAPrivateKey(M, hSession, k, { unwrap = true, decrypt = f
 export function importECPublicKey(M, hSession, qx, qy, curve = 'P-256') {
   const oid = EC_OID[curve]
   if (!oid) throw new Error(`Unsupported curve: ${curve}`)
-  // CKA_EC_POINT = DER OCTET STRING wrapping 04 || x || y
-  const pointLen = 1 + qx.length + qy.length // 04 + x + y
-  const derPoint = new Uint8Array(2 + pointLen)
-  derPoint[0] = 0x04 // OCTET STRING tag
-  derPoint[1] = pointLen
-  derPoint[2] = 0x04 // uncompressed
-  derPoint.set(qx, 3)
-  derPoint.set(qy, 3 + qx.length)
+  // CKA_EC_POINT = DER OCTET STRING wrapping 04 || x || y (the ANSI X9.62
+  // uncompressed point). Built with asn1js rather than hand-rolled length
+  // bytes — a manual `len < 128` assumption here previously broke silently
+  // on P-521's 133-byte point (DER length needs the long form >= 128) and
+  // was never exercised until P-521 was the first curve tested with a
+  // point that large.
+  const rawPoint = new Uint8Array(1 + qx.length + qy.length)
+  rawPoint[0] = 0x04 // uncompressed
+  rawPoint.set(qx, 1)
+  rawPoint.set(qy, 1 + qx.length)
+  const derPoint = new Uint8Array(new OctetString({ valueHex: rawPoint }).toBER(false))
   const tpl = buildTemplate(M, [
     { type: CK.CKA_CLASS, value: CK.CKO_PUBLIC_KEY },
     { type: CK.CKA_KEY_TYPE, value: CK.CKK_EC },
@@ -496,6 +674,32 @@ export function importMLDSAPublicKey(M, hSession, variant, pkBytes) {
   ])
   const hPtr = allocUlong(M)
   check('C_CreateObject(ML-DSA-Pub)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/** Import an ML-DSA private key (CKO_PRIVATE_KEY) for ACVP SigGen KATs.
+ *  Mirrors importSLHDSAPrivateKey — the C++ engine's C_CreateObject treats
+ *  CKK_ML_KEM/CKK_ML_DSA/CKK_SLH_DSA identically (SoftHSM_keygen.cpp: "PQC
+ *  key types: read CKA_VALUE directly"), so this is expected to work the
+ *  same way its two siblings already do. */
+export function importMLDSAPrivateKey(M, hSession, variant, skBytes) {
+  const ckp =
+    variant === 44 ? CK.CKP_ML_DSA_44 : variant === 65 ? CK.CKP_ML_DSA_65 : CK.CKP_ML_DSA_87
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_PRIVATE_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_ML_DSA },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_SIGN, value: true },
+    { type: CK.CKA_EXTRACTABLE, value: false },
+    { type: CK.CKA_SENSITIVE, value: true },
+    { type: CK.CKA_PARAMETER_SET, value: ckp },
+    { type: CK.CKA_VALUE, value: skBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(ML-DSA-Priv)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
   const handle = readUlong(M, hPtr)
   freeTemplate(M, tpl)
   freePtr(M, hPtr)
@@ -747,6 +951,12 @@ export function generateEdDSAKeyPair(M, hSession, curve = 'Ed25519') {
  */
 export function aesDecrypt(M, hSession, handle, ct, iv, mode = 'gcm', aad = new Uint8Array(0), tagBits = 128) {
   let mechPtr, extraPtrs = []
+  const SIMPLE_IV_MECH = {
+    'ofb': CK.CKM_AES_OFB,
+    'cfb1': CK.CKM_AES_CFB1,
+    'cfb8': CK.CKM_AES_CFB8,
+    'cfb128': CK.CKM_AES_CFB128,
+  }
   if (mode === 'gcm') {
     const gcm = buildGCMParams(M, iv, aad, tagBits)
     mechPtr = buildMech(M, CK.CKM_AES_GCM, gcm.ptr, gcm.size)
@@ -754,6 +964,10 @@ export function aesDecrypt(M, hSession, handle, ct, iv, mode = 'gcm', aad = new 
   } else if (mode === 'cbc-raw') {
     const ivPtr = writeBytes(M, iv)
     mechPtr = buildMech(M, CK.CKM_AES_CBC, ivPtr, iv.length)
+    extraPtrs = [ivPtr]
+  } else if (SIMPLE_IV_MECH[mode]) {
+    const ivPtr = writeBytes(M, iv)
+    mechPtr = buildMech(M, SIMPLE_IV_MECH[mode], ivPtr, iv.length)
     extraPtrs = [ivPtr]
   } else {
     // CBC — IV is the 16-byte param
@@ -843,23 +1057,35 @@ export function hmacVerifyGeneral(M, hSession, handle, msg, mac, mechType) {
  * the caller's sLen as authoritative (no "try digest-length too" fallback
  * once a param is supplied), so the harness must pass the real value through.
  */
+// WS-5.1 (2026-08-30): every advertised CKM_SHA*_RSA_PKCS_PSS variant, not
+// just the two this engine's test suite happened to exercise first — the
+// prior 3-case if/else silently mapped anything else to SHA-256/32, which
+// would have been a wrong-but-passing PSS verify for any caller of this
+// helper that forgot mechType matched neither branch.
+const RSA_PSS_HASH = {
+  [CK.CKM_SHA1_RSA_PKCS_PSS]: CK.CKM_SHA_1,
+  [CK.CKM_SHA224_RSA_PKCS_PSS]: CK.CKM_SHA224,
+  [CK.CKM_SHA256_RSA_PKCS_PSS]: CK.CKM_SHA256,
+  [CK.CKM_SHA384_RSA_PKCS_PSS]: CK.CKM_SHA384,
+  [CK.CKM_SHA512_RSA_PKCS_PSS]: CK.CKM_SHA512,
+  [CK.CKM_SHA3_224_RSA_PKCS_PSS]: CK.CKM_SHA3_224,
+  [CK.CKM_SHA3_256_RSA_PKCS_PSS]: CK.CKM_SHA3_256,
+  [CK.CKM_SHA3_384_RSA_PKCS_PSS]: CK.CKM_SHA3_384,
+  [CK.CKM_SHA3_512_RSA_PKCS_PSS]: CK.CKM_SHA3_512,
+}
+const RSA_MGF1_NAME = {
+  [CK.CKM_SHA_1]: 'CKM_SHA_1', [CK.CKM_SHA224]: 'CKM_SHA224', [CK.CKM_SHA256]: 'CKM_SHA256',
+  [CK.CKM_SHA384]: 'CKM_SHA384', [CK.CKM_SHA512]: 'CKM_SHA512',
+  [CK.CKM_SHA3_224]: 'CKM_SHA3_224', [CK.CKM_SHA3_256]: 'CKM_SHA3_256',
+  [CK.CKM_SHA3_384]: 'CKM_SHA3_384', [CK.CKM_SHA3_512]: 'CKM_SHA3_512',
+}
+
 export function rsaVerify(M, hSession, handle, msgBytes, sig, mechType = CK.CKM_SHA256_RSA_PKCS_PSS, sLenOverride = null) {
-  // Build PSS params based on mechanism type
-  let hashMech, mgf, sLen
-  if (mechType === CK.CKM_SHA256_RSA_PKCS_PSS) {
-    hashMech = CK.CKM_SHA256
-    mgf = CKG_MGF1_SHA256
-    sLen = 32
-  } else if (mechType === CK.CKM_SHA384_RSA_PKCS_PSS) {
-    hashMech = CK.CKM_SHA384
-    mgf = CKG_MGF1_SHA384
-    sLen = 48
-  } else {
-    hashMech = CK.CKM_SHA256
-    mgf = CKG_MGF1_SHA256
-    sLen = 32
-  }
-  if (sLenOverride !== null) sLen = sLenOverride
+  const hashMech = RSA_PSS_HASH[mechType]
+  if (hashMech === undefined) throw new Error(`rsaVerify: unmapped PSS mechanism 0x${mechType.toString(16)}`)
+  const mgf = CKG_MGF1[RSA_MGF1_NAME[hashMech]]
+  if (sLenOverride === null) throw new Error('rsaVerify: sLen (salt length) must be supplied — PSS has no universal default')
+  const sLen = sLenOverride
   const pss = buildPSSParams(M, hashMech, mgf, sLen)
   const mechPtr = buildMech(M, mechType, pss.ptr, pss.size)
   check('C_VerifyInit(RSA-PSS)', M._C_VerifyInit(hSession, mechPtr, handle))
@@ -926,6 +1152,43 @@ export function verifyBytesMLDSAContext(M, hSession, handle, msgBytes, sig, cont
   M._free(paramPtr)
   if (ctxPtr) M._free(ctxPtr)
   return rv === CK.CKR_OK
+}
+
+/**
+ * ML-DSA sign raw bytes with a CK_SIGN_ADDITIONAL_CONTEXT parameter — the
+ * sign-side counterpart of verifyBytesMLDSAContext(), for genuine sigGen
+ * KATs (deterministic sk -> signature, byte-compared against a real ACVP
+ * vector) rather than sigVer-only evidence. `deterministic=true` sets
+ * hedgeVariant to CKH_DETERMINISTIC_REQUIRED so the token must reproduce
+ * the exact vector signature or fail, per PKCS#11 v3.2 §6.67.5.
+ */
+export function signBytesMLDSAContext(M, hSession, handle, msgBytes, contextBytes, mechType = CK.CKM_ML_DSA, deterministic = false) {
+  const CKH_HEDGE_PREFERRED = 0
+  const CKH_DETERMINISTIC_REQUIRED = 2
+  const hedgeVariant = deterministic ? CKH_DETERMINISTIC_REQUIRED : CKH_HEDGE_PREFERRED
+  const ctxPtr = contextBytes.length ? writeBytes(M, contextBytes) : 0
+  const paramPtr = M._malloc(12)
+  M.setValue(paramPtr + 0, hedgeVariant, 'i32')
+  M.setValue(paramPtr + 4, ctxPtr, 'i32')
+  M.setValue(paramPtr + 8, contextBytes.length, 'i32')
+  const mechPtr = buildMech(M, mechType, paramPtr, 12)
+  check('C_SignInit', M._C_SignInit(hSession, mechPtr, handle))
+  const msgPtr = writeBytes(M, msgBytes)
+  const sigLenPtr = allocUlong(M)
+  check('C_Sign(len)', M._C_Sign(hSession, msgPtr, msgBytes.length, 0, sigLenPtr))
+  const sigLen = readUlong(M, sigLenPtr)
+  const sigPtr = M._malloc(sigLen)
+  M.setValue(sigLenPtr, sigLen, 'i32')
+  check('C_Sign', M._C_Sign(hSession, msgPtr, msgBytes.length, sigPtr, sigLenPtr))
+  const actualLen = readUlong(M, sigLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, sigPtr, actualLen).slice()
+  M._free(msgPtr)
+  M._free(sigPtr)
+  M._free(mechPtr)
+  M._free(paramPtr)
+  if (ctxPtr) M._free(ctxPtr)
+  freePtr(M, sigLenPtr)
+  return result
 }
 
 /** Generic sign (text message) */
@@ -1039,11 +1302,13 @@ export function buildSlhDsaCtxParam(M, ctxBytes, deterministic = false) {
 
 /**
  * SLH-DSA sign raw bytes with optional context + deterministic mode (FIPS 205 §9.2 / §10).
- * Uses C_SignInit + C_Sign with CK_SIGN_ADDITIONAL_CONTEXT parameter on CKM_SLH_DSA.
+ * Uses C_SignInit + C_Sign with CK_SIGN_ADDITIONAL_CONTEXT parameter. Defaults
+ * to CKM_SLH_DSA (context mode); pass one of the CKM_HASH_SLH_DSA_* mechanisms
+ * for pre-hash (HashSLH-DSA) mode sigGen KATs.
  */
-export function slhdsaSignBytesCtx(M, hSession, handle, msgBytes, ctxBytes, deterministic = false) {
+export function slhdsaSignBytesCtx(M, hSession, handle, msgBytes, ctxBytes, deterministic = false, mechType = CK.CKM_SLH_DSA) {
   const ctxParam = buildSlhDsaCtxParam(M, ctxBytes, deterministic)
-  const mechPtr = buildMech(M, CK.CKM_SLH_DSA, ctxParam.paramPtr, ctxParam.paramLen)
+  const mechPtr = buildMech(M, mechType, ctxParam.paramPtr, ctxParam.paramLen)
   check('C_SignInit(SLH-DSA-ctx)', M._C_SignInit(hSession, mechPtr, handle))
   const msgPtr = writeBytes(M, msgBytes)
   const sigLenPtr = allocUlong(M)
@@ -1066,9 +1331,9 @@ export function slhdsaSignBytesCtx(M, hSession, handle, msgBytes, ctxBytes, dete
  * SLH-DSA verify raw bytes with optional context string (FIPS 205 §9.2).
  * Uses C_VerifyInit + C_Verify with CK_SIGN_ADDITIONAL_CONTEXT parameter on CKM_SLH_DSA.
  */
-export function slhdsaVerifyBytesCtx(M, hSession, handle, msgBytes, sigBytes, ctxBytes) {
+export function slhdsaVerifyBytesCtx(M, hSession, handle, msgBytes, sigBytes, ctxBytes, mechType = CK.CKM_SLH_DSA) {
   const ctxParam = buildSlhDsaCtxParam(M, ctxBytes, false)
-  const mechPtr = buildMech(M, CK.CKM_SLH_DSA, ctxParam.paramPtr, ctxParam.paramLen)
+  const mechPtr = buildMech(M, mechType, ctxParam.paramPtr, ctxParam.paramLen)
   check('C_VerifyInit(SLH-DSA-ctx)', M._C_VerifyInit(hSession, mechPtr, handle))
   const msgPtr = writeBytes(M, msgBytes)
   const sigPtr = writeBytes(M, sigBytes)
@@ -1118,6 +1383,70 @@ export function importEdDSAPrivateKey(M, hSession, curve, seedBytes) {
   freeTemplate(M, tpl)
   freePtr(M, hPtr)
   return handle
+}
+
+/**
+ * Import a Montgomery-curve (X25519/X448) private key from its raw scalar
+ * (32B / 56B). WS-5.3 (2026-08-30): mirrors importEdDSAPrivateKey exactly —
+ * same CKK_EC_MONTGOMERY key-object shape, CKA_DERIVE instead of CKA_SIGN
+ * since this curve family is derive-only.
+ */
+export function importMontgomeryPrivateKey(M, hSession, curve, scalarBytes) {
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_PRIVATE_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_EC_MONTGOMERY },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_PRIVATE, value: false },
+    { type: CK.CKA_DERIVE, value: true },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_EC_PARAMS, value: EC_OID[curve] },
+    { type: CK.CKA_VALUE, value: scalarBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(Montgomery-Priv)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/**
+ * X25519/X448 derive (CKM_X25519 / CKM_X448) — CK_ECDH1_DERIVE_PARAMS with
+ * kdf=CKD_NULL, no shared data, pPublicData = peer's raw u-coordinate.
+ * Returns the derived CKA_VALUE bytes.
+ */
+export function montgomeryDerive(M, hSession, privHandle, peerPubBytes, mechType, outLen) {
+  const CKD_NULL = 1
+  const peerPtr = writeBytes(M, peerPubBytes)
+  const paramPtr = M._malloc(20) // CK_ECDH1_DERIVE_PARAMS: kdf(4) + ulSharedDataLen(4) + pSharedData(4) + ulPublicDataLen(4) + pPublicData(4) — WASM32 ptrs are 4B
+  M.setValue(paramPtr + 0, CKD_NULL, 'i32')
+  M.setValue(paramPtr + 4, 0, 'i32')
+  M.setValue(paramPtr + 8, 0, 'i32')
+  M.setValue(paramPtr + 12, peerPubBytes.length, 'i32')
+  M.setValue(paramPtr + 16, peerPtr, 'i32')
+  const mechPtr = buildMech(M, mechType, paramPtr, 20)
+  const derivedTpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_VALUE_LEN, value: outLen },
+  ])
+  const outHPtr = allocUlong(M)
+  check('C_DeriveKey(Montgomery)', M._C_DeriveKey(hSession, mechPtr, privHandle, derivedTpl.arrPtr, derivedTpl.count, outHPtr))
+  const derivedH = readUlong(M, outHPtr)
+  const valAttr = buildTemplate(M, [{ type: CK.CKA_VALUE, value: new Uint8Array(outLen) }])
+  check('C_GetAttributeValue(derived)', M._C_GetAttributeValue(hSession, derivedH, valAttr.arrPtr, 1))
+  const derived = new Uint8Array(M.HEAPU8.buffer, M.getValue(valAttr.arrPtr + 4, 'i32'), outLen).slice()
+  M._free(peerPtr)
+  M._free(paramPtr)
+  M._free(mechPtr)
+  freeTemplate(M, derivedTpl)
+  freeTemplate(M, valAttr)
+  freePtr(M, outHPtr)
+  return derived
 }
 
 /**
@@ -1467,6 +1796,218 @@ export function hkdf(M, hSession, ikmHandle, hashMech, extract, expand, salt, in
   M._free(paramsPtr)
   M._free(saltPtr)
   M._free(infoPtr)
+  return result
+}
+
+export function concatBytes(...arrays) {
+  const total = arrays.reduce((n, a) => n + a.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const a of arrays) {
+    out.set(a, off)
+    off += a.length
+  }
+  return out
+}
+
+// Raw CKK_GENERIC_SECRET import for use as a KDF base key (e.g. an ACVP
+// KDA/KBKDF shared secret z / keyIn value that isn't an HMAC or AES key).
+export function importGenericSecret(M, hSession, keyBytes, { derive = true } = {}) {
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_DERIVE, value: derive },
+    { type: CK.CKA_EXTRACTABLE, value: false },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_VALUE, value: keyBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(GenericSecret)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/**
+ * SP800-108 Counter Mode KDF (CKM_SP800_108_COUNTER_KDF) → raw derived bytes.
+ * dataParams = [{BYTE_ARRAY: fixedInput}, {ITERATION_VARIABLE: counterFormat}]
+ * i.e. PRF(Ki, fixedInput || counter) — the only counter placement this
+ * engine's OpenSSL KBKDF backend can produce (see SoftHSM_keygen.cpp comment
+ * at the CKM_SP800_108_COUNTER_KDF handler); matches ACVP's "before fixed
+ * data" counterLocation configuration exactly since fixedInput here plays
+ * the role of OpenSSL's "info"/context with an empty label.
+ * CK_SP800_108_COUNTER_FORMAT (8 bytes on 32-bit WASM): bLittleEndian(1)+pad(3)+ulWidthInBits(4)
+ * CK_PRF_DATA_PARAM (12 bytes): type(4)+pValue(4)+ulValueLen(4)
+ * CK_SP800_108_KDF_PARAMS (20 bytes): prfType(4)+ulNumberOfDataParams(4)+pDataParams(4)+ulAdditionalDerivedKeys(4)+pAdditionalDerivedKeys(4)
+ */
+export function sp800108CounterKdf(M, hSession, baseKeyHandle, prfType, fixedInput, counterBits, outLen) {
+  const fixedPtr = writeBytes(M, fixedInput)
+  const counterFormatPtr = M._malloc(8)
+  M.HEAPU8.fill(0, counterFormatPtr, counterFormatPtr + 8)
+  M.HEAPU8[counterFormatPtr + 0] = 0 // bLittleEndian = false (big-endian, ACVP convention)
+  M.setValue(counterFormatPtr + 4, counterBits, 'i32')
+
+  const dataParamsPtr = M._malloc(24)
+  M.setValue(dataParamsPtr + 0, CK.CK_SP800_108_BYTE_ARRAY, 'i32')
+  M.setValue(dataParamsPtr + 4, fixedPtr, 'i32')
+  M.setValue(dataParamsPtr + 8, fixedInput.length, 'i32')
+  M.setValue(dataParamsPtr + 12, CK.CK_SP800_108_ITERATION_VARIABLE, 'i32')
+  M.setValue(dataParamsPtr + 16, counterFormatPtr, 'i32')
+  M.setValue(dataParamsPtr + 20, 8, 'i32')
+
+  const kdfParamsPtr = M._malloc(20)
+  M.setValue(kdfParamsPtr + 0, prfType, 'i32')
+  M.setValue(kdfParamsPtr + 4, 2, 'i32')
+  M.setValue(kdfParamsPtr + 8, dataParamsPtr, 'i32')
+  M.setValue(kdfParamsPtr + 12, 0, 'i32')
+  M.setValue(kdfParamsPtr + 16, 0, 'i32')
+
+  const mechPtr = buildMech(M, CK.CKM_SP800_108_COUNTER_KDF, kdfParamsPtr, 20)
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_VALUE_LEN, value: outLen },
+  ])
+  const hPtr = allocUlong(M)
+  check(
+    'C_DeriveKey(SP800-108-Counter)',
+    M._C_DeriveKey(hSession, mechPtr, baseKeyHandle, tpl.arrPtr, tpl.count, hPtr)
+  )
+  const derivedHandle = readUlong(M, hPtr)
+  const result = extractKeyValue(M, hSession, derivedHandle)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  M._free(mechPtr)
+  M._free(kdfParamsPtr)
+  M._free(dataParamsPtr)
+  M._free(counterFormatPtr)
+  M._free(fixedPtr)
+  return result
+}
+
+/**
+ * SP800-108 Feedback Mode KDF (CKM_SP800_108_FEEDBACK_KDF) → raw derived bytes.
+ * dataParams = [{ITERATION_VARIABLE: NULL (K(i-1)/IV, implicit)}, {BYTE_ARRAY: fixedInput},
+ *               {COUNTER: counterFormat}] i.e. PRF(Ki, K(i-1) || counter || fixedInput),
+ * matching ACVP's "before fixed data" counterLocation for feedback mode.
+ * CK_SP800_108_FEEDBACK_KDF_PARAMS (28 bytes): prfType(4)+ulNumberOfDataParams(4)+pDataParams(4)+ulIVLen(4)+pIV(4)+ulAdditionalDerivedKeys(4)+pAdditionalDerivedKeys(4)
+ */
+export function sp800108FeedbackKdf(M, hSession, baseKeyHandle, prfType, fixedInput, counterBits, iv, outLen) {
+  const fixedPtr = writeBytes(M, fixedInput)
+  const counterFormatPtr = M._malloc(8)
+  M.HEAPU8.fill(0, counterFormatPtr, counterFormatPtr + 8)
+  M.HEAPU8[counterFormatPtr + 0] = 0
+  M.setValue(counterFormatPtr + 4, counterBits, 'i32')
+
+  const dataParamsPtr = M._malloc(36) // 3 entries * 12 bytes
+  M.setValue(dataParamsPtr + 0, CK.CK_SP800_108_ITERATION_VARIABLE, 'i32')
+  M.setValue(dataParamsPtr + 4, 0, 'i32') // pValue = NULL_PTR (K(i-1) is implicit)
+  M.setValue(dataParamsPtr + 8, 0, 'i32')
+  M.setValue(dataParamsPtr + 12, CK.CK_SP800_108_OPTIONAL_COUNTER, 'i32')
+  M.setValue(dataParamsPtr + 16, counterFormatPtr, 'i32')
+  M.setValue(dataParamsPtr + 20, 8, 'i32')
+  M.setValue(dataParamsPtr + 24, CK.CK_SP800_108_BYTE_ARRAY, 'i32')
+  M.setValue(dataParamsPtr + 28, fixedPtr, 'i32')
+  M.setValue(dataParamsPtr + 32, fixedInput.length, 'i32')
+
+  const ivPtr = writeBytes(M, iv)
+  const kdfParamsPtr = M._malloc(28)
+  M.setValue(kdfParamsPtr + 0, prfType, 'i32')
+  M.setValue(kdfParamsPtr + 4, 3, 'i32')
+  M.setValue(kdfParamsPtr + 8, dataParamsPtr, 'i32')
+  M.setValue(kdfParamsPtr + 12, iv.length, 'i32')
+  M.setValue(kdfParamsPtr + 16, iv.length > 0 ? ivPtr : 0, 'i32')
+  M.setValue(kdfParamsPtr + 20, 0, 'i32')
+  M.setValue(kdfParamsPtr + 24, 0, 'i32')
+
+  const mechPtr = buildMech(M, CK.CKM_SP800_108_FEEDBACK_KDF, kdfParamsPtr, 28)
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_VALUE_LEN, value: outLen },
+  ])
+  const hPtr = allocUlong(M)
+  check(
+    'C_DeriveKey(SP800-108-Feedback)',
+    M._C_DeriveKey(hSession, mechPtr, baseKeyHandle, tpl.arrPtr, tpl.count, hPtr)
+  )
+  const derivedHandle = readUlong(M, hPtr)
+  const result = extractKeyValue(M, hSession, derivedHandle)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  M._free(mechPtr)
+  M._free(kdfParamsPtr)
+  M._free(dataParamsPtr)
+  M._free(counterFormatPtr)
+  M._free(fixedPtr)
+  M._free(ivPtr)
+  return result
+}
+
+/**
+ * SP800-108 Double Pipeline Iteration Mode KDF (CKM_SP800_108_DOUBLE_PIPELINE_KDF)
+ * → raw derived bytes. dataParams = [{ITERATION_VARIABLE: NULL (A(i), implicit)},
+ * {BYTE_ARRAY: fixedInput}, {COUNTER: counterFormat}] i.e. A(0)=fixedInput,
+ * A(i)=PRF(Ki,A(i-1)), round = PRF(Ki, A(i) || counter || fixedInput) — same
+ * "before fixed data" placement as sp800108CounterKdf/sp800108FeedbackKdf.
+ * Uses CK_SP800_108_KDF_PARAMS (20 bytes, same struct as Counter mode — no IV field).
+ */
+export function sp800108DoublePipelineKdf(M, hSession, baseKeyHandle, prfType, fixedInput, counterBits, outLen) {
+  const fixedPtr = writeBytes(M, fixedInput)
+  const counterFormatPtr = M._malloc(8)
+  M.HEAPU8.fill(0, counterFormatPtr, counterFormatPtr + 8)
+  M.HEAPU8[counterFormatPtr + 0] = 0
+  M.setValue(counterFormatPtr + 4, counterBits, 'i32')
+
+  const dataParamsPtr = M._malloc(36) // 3 entries * 12 bytes
+  M.setValue(dataParamsPtr + 0, CK.CK_SP800_108_ITERATION_VARIABLE, 'i32')
+  M.setValue(dataParamsPtr + 4, 0, 'i32') // pValue = NULL_PTR (A(i) is implicit)
+  M.setValue(dataParamsPtr + 8, 0, 'i32')
+  M.setValue(dataParamsPtr + 12, CK.CK_SP800_108_BYTE_ARRAY, 'i32')
+  M.setValue(dataParamsPtr + 16, fixedPtr, 'i32')
+  M.setValue(dataParamsPtr + 20, fixedInput.length, 'i32')
+  M.setValue(dataParamsPtr + 24, CK.CK_SP800_108_OPTIONAL_COUNTER, 'i32')
+  M.setValue(dataParamsPtr + 28, counterFormatPtr, 'i32')
+  M.setValue(dataParamsPtr + 32, 8, 'i32')
+
+  const kdfParamsPtr = M._malloc(20)
+  M.setValue(kdfParamsPtr + 0, prfType, 'i32')
+  M.setValue(kdfParamsPtr + 4, 3, 'i32')
+  M.setValue(kdfParamsPtr + 8, dataParamsPtr, 'i32')
+  M.setValue(kdfParamsPtr + 12, 0, 'i32')
+  M.setValue(kdfParamsPtr + 16, 0, 'i32')
+
+  const mechPtr = buildMech(M, CK.CKM_SP800_108_DOUBLE_PIPELINE_KDF, kdfParamsPtr, 20)
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_GENERIC_SECRET },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_EXTRACTABLE, value: true },
+    { type: CK.CKA_SENSITIVE, value: false },
+    { type: CK.CKA_VALUE_LEN, value: outLen },
+  ])
+  const hPtr = allocUlong(M)
+  check(
+    'C_DeriveKey(SP800-108-DoublePipeline)',
+    M._C_DeriveKey(hSession, mechPtr, baseKeyHandle, tpl.arrPtr, tpl.count, hPtr)
+  )
+  const derivedHandle = readUlong(M, hPtr)
+  const result = extractKeyValue(M, hSession, derivedHandle)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  M._free(mechPtr)
+  M._free(kdfParamsPtr)
+  M._free(dataParamsPtr)
+  M._free(counterFormatPtr)
+  M._free(fixedPtr)
   return result
 }
 

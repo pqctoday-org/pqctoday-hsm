@@ -89,6 +89,21 @@ protected:
 	virtual size_t getMacSize() const;
 };
 
+// WS-6.3 (2026-08-30): FIPS 180-4 truncated variants.
+class OSSLHMACSHA512_224 : public OSSLEVPMacAlgorithm
+{
+protected:
+	virtual const EVP_MD* getEVPHash() const;
+	virtual size_t getMacSize() const;
+};
+
+class OSSLHMACSHA512_256 : public OSSLEVPMacAlgorithm
+{
+protected:
+	virtual const EVP_MD* getEVPHash() const;
+	virtual size_t getMacSize() const;
+};
+
 class OSSLHMACSHA3_224 : public OSSLEVPMacAlgorithm
 {
 protected:

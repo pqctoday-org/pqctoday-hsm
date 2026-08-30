@@ -1,0 +1,309 @@
+{
+  "algorithm": "KDF",
+  "revision": "1.0",
+  "isSample": true,
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/KDF-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "9900da42897bc6ec6a42cd6844c37f05ff0b6ae830723cb61d53b6d560572090",
+    "note": "WS-5.2 (2026-08-30): CKM_SP800_108_DOUBLE_PIPELINE_KDF did not exist in this engine at all (OpenSSL KBKDF only implements COUNTER and FEEDBACK modes \u2014 see providers/implementations/kdfs/kbkdf.c kbkdf_mode enum \u2014 double pipeline has no meta-provider path). Implemented as a hand-built EVP_MAC round loop (same PRF primitive OpenSSL uses internally): A(0)=fixedInput, A(i)=PRF(Ki,A(i-1)), round output = PRF(Ki, A(i) || counter || fixedInput). Construction verified byte-for-byte against these real ACVP vectors before writing the C++, same as the sibling COUNTER_KDF/FEEDBACK_KDF fixes' methodology. Restricted to \"before fixed data\" counterLocation for the same reason as those two (see sp800_108_kbkdf_test.json). CMAC-TDES excluded (no 3DES-CMAC in this engine)."
+  },
+  "testGroups": [
+    {
+      "tgId": 1,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "HMAC-SHA-1",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "86B979A142029CFC924FA030BC5E322466719019",
+          "fixedData": "C1D66B2A9D6CB06C0CC79CD912D7BDE5",
+          "iv": "E0ABBEAD20E9B1F2CB77F0C0A7CE0E24A1175820",
+          "breakLocation": 123,
+          "keyOut": "7E"
+        }
+      ]
+    },
+    {
+      "tgId": 2,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "HMAC-SHA2-224",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "2FEBFC965F7CAF9A1FBD36A133E09800318F4FACD9C44CFA55F1EFD1",
+          "fixedData": "EC2ABCAB978310A877109461FEBF9273",
+          "iv": "217FAEAE1AAC757009062129F5A18F617971B50823ED68AD7FA634C8",
+          "breakLocation": 83,
+          "keyOut": "06"
+        }
+      ]
+    },
+    {
+      "tgId": 3,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "HMAC-SHA2-256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "DDA089328AAD019C1ADBFAA73E71750D6F705A0EBFEEBA8A483F8E69BA47F500",
+          "fixedData": "882965A8FE75BC58FE8FBB40BC36111A",
+          "iv": "0116B4E0671D2C1A05170666EAE4C06D96D013F17552A8C8B51D0EE0B51A5288",
+          "breakLocation": 22,
+          "keyOut": "23"
+        }
+      ]
+    },
+    {
+      "tgId": 4,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "HMAC-SHA2-384",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "27314287B6B7CCF18FFAD9BA2C5389075EC728EE432CC05C65E3815F0578732B204EB05F51B2A87F209783519CE0D9AF",
+          "fixedData": "C963AD0DF9A29FBE53CA5BF934D5609A",
+          "iv": "9D386A993F362547E77CAC36CACE048E19DD2CC99313E9785165215CD64953E05731535790407AF62D4120E21BF12475",
+          "breakLocation": 87,
+          "keyOut": "A6"
+        }
+      ]
+    },
+    {
+      "tgId": 5,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "HMAC-SHA2-512",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "DE4E73F9D05F385E1AB02DF829E54295B5CE84CE3E6452D0CA46216A38842D7C80ACF3C61DFB094E0F1B4682161D7B0F1085BEB179F4F6D11491F5DAAD487961",
+          "fixedData": "FC68E28F16E841CAF042E7E85C2BE981",
+          "iv": "BE2B7473D106ADECC6D0C9EBB49595F7813880E6A5F4F79C477B4A8759F485045CD075C231DA697D4F87830E8488453ACA41DCE22F465234EDA64D3A84FC7449",
+          "breakLocation": 13,
+          "keyOut": "F7"
+        }
+      ]
+    },
+    {
+      "tgId": 6,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "HMAC-SHA2-512/224",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "6DA888C3FDFF11735D0715AAB32B43AD11BE5DD4AC5E0DAF06EBEE09",
+          "fixedData": "6EF3BFC2238629A614CCF1642743EDEE",
+          "iv": "F7C0417397E64636BA7C56439F917657A5313CBF6B81898B95B6BFDF",
+          "breakLocation": 111,
+          "keyOut": "31"
+        }
+      ]
+    },
+    {
+      "tgId": 7,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "HMAC-SHA2-512/256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "48F4F85AF1A853E40EF35B4E86E502A8F27F44326F693EF191B7F9134910F140",
+          "fixedData": "9C901765CA59BFDC8C6F75A94346204A",
+          "iv": "F937C551C06502FEE45947C500BFAECF16C2487DDBF6842D25261B82099BEE28",
+          "breakLocation": 67,
+          "keyOut": "CA"
+        }
+      ]
+    },
+    {
+      "tgId": 8,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "HMAC-SHA3-224",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "2D65B8DDCEF6418EA17C18D290AFF362F206B3948E44FE4D9B94F75E",
+          "fixedData": "69FCBE703770573470F2179894BDC501",
+          "iv": "1DFF1849FB7CCA7D8220BF3D20942EC3EAF76894F1822A82AE7E249C",
+          "breakLocation": 109,
+          "keyOut": "C0"
+        }
+      ]
+    },
+    {
+      "tgId": 9,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "HMAC-SHA3-256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "EDA097BEDD4FB0B338AD9A8EBAED44EBBF244B231997927FF5A98E1237C9959C",
+          "fixedData": "0E08158345138CCB8AE43ACD0A51A9F1",
+          "iv": "E737CB3E618391E701770B411F6A28181CEDA530971749A6607861DBEA7E18C8",
+          "breakLocation": 102,
+          "keyOut": "AC"
+        }
+      ]
+    },
+    {
+      "tgId": 10,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "HMAC-SHA3-384",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "F0DFD419C7A4D505AED112259E3EA1951E152EA6AA4A2C09B38317EC0806F21F0C41A81461E2863C86CD800DA601CD98",
+          "fixedData": "8E0D488283DFA5E44A866C08555797F5",
+          "iv": "E278EF75D754BE420F43157CDBBC594C3499BB73160358200DE6A36972CBC4700DE02235E19D4D49805E85DBFFB2CBEE",
+          "breakLocation": 100,
+          "keyOut": "4A"
+        }
+      ]
+    },
+    {
+      "tgId": 11,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "HMAC-SHA3-512",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "A78264AF4F7B7FFDADB8AA943E7B6B30F4C51B77346F558315474797B2DD4B0D854C8BE9A52E22247609AC2D632ADFD09D5367DD8FBC41326C09DD719FF6075A",
+          "fixedData": "B39771671F17E5CF286EBE957506C1AF",
+          "iv": "A0BDEDEB59FF1F46E79604EF75F372802870DFCA7FA5F1668F6A339A403FC8D21F65F7CC18B5309362F00D107E75395C08FED43DD8E015988905A089928137F5",
+          "breakLocation": 116,
+          "keyOut": "37"
+        }
+      ]
+    },
+    {
+      "tgId": 12,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "CMAC-AES128",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "F04FB1D304DEAECB32C0596866E203D8",
+          "fixedData": "0708A864ADDCFB612D032E9873AB6829",
+          "iv": "39D5EDED3B55673E33E52201A8BE8031",
+          "breakLocation": 17,
+          "keyOut": "EF"
+        }
+      ]
+    },
+    {
+      "tgId": 13,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "CMAC-AES192",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "659E6CBB33BE6948D3D99DA51B8F3BDE708DDDDFC636E626",
+          "fixedData": "BA0B81CEE59894351ABEE074AF698630",
+          "iv": "FC65C0226F941AA122AC0A2C73ACC4F3",
+          "breakLocation": 91,
+          "keyOut": "93"
+        }
+      ]
+    },
+    {
+      "tgId": 14,
+      "kdfMode": "double pipeline iteration",
+      "macMode": "CMAC-AES256",
+      "counterLocation": "before fixed data",
+      "counterLength": 8,
+      "keyOutLength": 8,
+      "testType": "AFT",
+      "tests": [
+        {
+          "l": 0,
+          "tcId": 1,
+          "deferred": true,
+          "keyIn": "4B3B2071D2D8D747141261ADDBE56C7C5CEE7003633F6AD3FA8CE377CA78AFC5",
+          "fixedData": "B389B90B9F83649D638CF35C36E5ED7B",
+          "iv": "9A234B87008723556F054B9EE50722A4",
+          "breakLocation": 77,
+          "keyOut": "A1"
+        }
+      ]
+    }
+  ]
+}

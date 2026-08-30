@@ -47,5 +47,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "asn1js": "^3.0.10"
   }
 }

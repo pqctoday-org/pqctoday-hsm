@@ -1,0 +1,35 @@
+{
+  "algorithm": "ACVP-AES-OFB",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ACVP-AES-OFB-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "185d4c824a65650481f8d62047f9b67198330f17a47b44985231439ac763c2e5",
+    "note": "WS-8 (2026-08-30): CKM_AES_OFB did not exist in this engine at all before this session (only ECB/CBC/CTR/GCM were implemented). Added as a thin OpenSSL EVP_aes_*_ofb() wrapper in OSSLAES.cpp getCipher(). 1 decrypt-direction KAT per key size (128/192/256)."
+  },
+  "cases": [
+    {
+      "keyLen": 128,
+      "key": "00000000000000000000000000000000",
+      "iv": "F34481EC3CC627BACD5DC3FB08F273E6",
+      "pt": "00000000000000000000000000000000",
+      "ct": "0336763E966D92595A567CC9CE537F5E"
+    },
+    {
+      "keyLen": 192,
+      "key": "000000000000000000000000000000000000000000000000",
+      "iv": "1B077A6AF4B7F98229DE786D7516B639",
+      "pt": "00000000000000000000000000000000",
+      "ct": "275CFC0413D8CCB70513C3859B1D0F72"
+    },
+    {
+      "keyLen": 256,
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "iv": "014730F80AC625FE84F026C60BFD547D",
+      "pt": "00000000000000000000000000000000",
+      "ct": "5C9D844ED46F9885085E5D6A4F94C7D7"
+    }
+  ]
+}

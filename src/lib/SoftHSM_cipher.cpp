@@ -57,7 +57,13 @@ static bool isSymMechanism(CK_MECHANISM_PTR pMechanism)
 		case CKM_AES_CBC:
 		case CKM_AES_CBC_PAD:
 		case CKM_AES_CTR:
+		case CKM_AES_XTS:
 		case CKM_AES_GCM:
+		case CKM_AES_OFB:
+		case CKM_AES_CFB1:
+		case CKM_AES_CFB8:
+		case CKM_AES_CFB128:
+		case CKM_AES_CCM:
 		case CKM_CHACHA20_POLY1305:
 		case CKM_CHACHA20:
 			return true;
@@ -131,6 +137,7 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 	size_t counterBits = 0;
 	ByteString aad;
 	size_t tagBytes = 0;
+	size_t dataLen = 0;
 	switch(pMechanism->mechanism) {
 		case CKM_AES_ECB:
 			if (keyType != CKK_AES)
@@ -186,6 +193,102 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			}
 			iv.resize(16);
 			memcpy(&iv[0], CK_AES_CTR_PARAMS_PTR(pMechanism->pParameter)->cb, 16);
+			break;
+		case CKM_AES_OFB:
+			if (keyType != CKK_AES)
+				return CKR_KEY_TYPE_INCONSISTENT;
+			algo = SymAlgo::AES;
+			mode = SymMode::OFB;
+			if (pMechanism->pParameter == NULL_PTR ||
+			    pMechanism->ulParameterLen != 16)
+			{
+				DEBUG_MSG("OFB mode requires a 16-byte init vector");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			iv.resize(16);
+			memcpy(&iv[0], pMechanism->pParameter, 16);
+			break;
+		case CKM_AES_CFB1:
+		case CKM_AES_CFB8:
+		case CKM_AES_CFB128:
+			if (keyType != CKK_AES)
+				return CKR_KEY_TYPE_INCONSISTENT;
+			algo = SymAlgo::AES;
+			mode = pMechanism->mechanism == CKM_AES_CFB1 ? SymMode::CFB1
+			     : pMechanism->mechanism == CKM_AES_CFB8 ? SymMode::CFB8
+			     : SymMode::CFB128;
+			if (pMechanism->pParameter == NULL_PTR ||
+			    pMechanism->ulParameterLen != 16)
+			{
+				DEBUG_MSG("CFB mode requires a 16-byte init vector");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			iv.resize(16);
+			memcpy(&iv[0], pMechanism->pParameter, 16);
+			break;
+		case CKM_AES_CCM:
+			if (keyType != CKK_AES)
+				return CKR_KEY_TYPE_INCONSISTENT;
+			algo = SymAlgo::AES;
+			mode = SymMode::CCM;
+			if (pMechanism->pParameter == NULL_PTR ||
+			    pMechanism->ulParameterLen != sizeof(CK_CCM_PARAMS))
+			{
+				DEBUG_MSG("CCM mode requires CK_CCM_PARAMS");
+				return CKR_ARGUMENTS_BAD;
+			}
+			{
+				CK_CCM_PARAMS_PTR ccmp = CK_CCM_PARAMS_PTR(pMechanism->pParameter);
+				// RFC 3610 / SP800-38C: nonce length N and tag length T are both
+				// tied to L (the length-field size) via N = 15 - L, so OpenSSL
+				// derives L directly from ulNonceLen once EVP_CTRL_CCM_SET_IVLEN
+				// is called — the valid nonce range is 7..13 bytes (L = 2..8).
+				if (ccmp->ulNonceLen < 7 || ccmp->ulNonceLen > 13)
+				{
+					DEBUG_MSG("CCM ulNonceLen must be 7..13 bytes");
+					return CKR_MECHANISM_PARAM_INVALID;
+				}
+				if (ccmp->pNonce == NULL_PTR)
+				{
+					DEBUG_MSG("CCM pNonce is NULL");
+					return CKR_ARGUMENTS_BAD;
+				}
+				if (ccmp->ulAADLen > 0 && ccmp->pAAD == NULL_PTR)
+				{
+					DEBUG_MSG("CCM pAAD is NULL with non-zero ulAADLen");
+					return CKR_ARGUMENTS_BAD;
+				}
+				if (ccmp->ulMACLen != 4 && ccmp->ulMACLen != 6 && ccmp->ulMACLen != 8 &&
+				    ccmp->ulMACLen != 10 && ccmp->ulMACLen != 12 && ccmp->ulMACLen != 14 &&
+				    ccmp->ulMACLen != 16)
+				{
+					DEBUG_MSG("Invalid CCM ulMACLen");
+					return CKR_MECHANISM_PARAM_INVALID;
+				}
+				iv.resize(ccmp->ulNonceLen);
+				memcpy(&iv[0], ccmp->pNonce, ccmp->ulNonceLen);
+				aad.resize(ccmp->ulAADLen);
+				if (ccmp->ulAADLen > 0)
+					memcpy(&aad[0], ccmp->pAAD, ccmp->ulAADLen);
+				tagBytes = ccmp->ulMACLen;
+				dataLen = ccmp->ulDataLen;
+			}
+			break;
+		case CKM_AES_XTS:
+			// PKCS#11 v3.2 §6.15.4: CKK_AES_XTS keys only (never plain CKK_AES).
+			if (keyType != CKK_AES_XTS)
+				return CKR_KEY_TYPE_INCONSISTENT;
+			algo = SymAlgo::AES;
+			mode = SymMode::XTS;
+			// Single parameter: a 16-byte Data Unit Sequence Number (the tweak).
+			if (pMechanism->pParameter == NULL_PTR ||
+			    pMechanism->ulParameterLen != 16)
+			{
+				DEBUG_MSG("XTS mode requires a 16-byte Data Unit Sequence Number");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			iv.resize(16);
+			memcpy(&iv[0], pMechanism->pParameter, 16);
 			break;
 		case CKM_AES_GCM:
 			if (keyType != CKK_AES)
@@ -303,7 +406,7 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 	secretkey->setBitLen(secretkey->getKeyBits().size() * bb);
 
 	// Initialize encryption
-	if (!cipher->encryptInit(secretkey, mode, iv, padding, counterBits, aad, tagBytes))
+	if (!cipher->encryptInit(secretkey, mode, iv, padding, counterBits, aad, tagBytes, dataLen))
 	{
 		cipher->recycleKey(secretkey);
 		CryptoFactory::i()->recycleSymmetricAlgorithm(cipher);
@@ -855,6 +958,7 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 	size_t counterBits = 0;
 	ByteString aad;
 	size_t tagBytes = 0;
+	size_t dataLen = 0;
 	switch(pMechanism->mechanism) {
 		case CKM_AES_ECB:
 			if (keyType != CKK_AES)
@@ -910,6 +1014,102 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			}
 			iv.resize(16);
 			memcpy(&iv[0], CK_AES_CTR_PARAMS_PTR(pMechanism->pParameter)->cb, 16);
+			break;
+		case CKM_AES_OFB:
+			if (keyType != CKK_AES)
+				return CKR_KEY_TYPE_INCONSISTENT;
+			algo = SymAlgo::AES;
+			mode = SymMode::OFB;
+			if (pMechanism->pParameter == NULL_PTR ||
+			    pMechanism->ulParameterLen != 16)
+			{
+				DEBUG_MSG("OFB mode requires a 16-byte init vector");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			iv.resize(16);
+			memcpy(&iv[0], pMechanism->pParameter, 16);
+			break;
+		case CKM_AES_CFB1:
+		case CKM_AES_CFB8:
+		case CKM_AES_CFB128:
+			if (keyType != CKK_AES)
+				return CKR_KEY_TYPE_INCONSISTENT;
+			algo = SymAlgo::AES;
+			mode = pMechanism->mechanism == CKM_AES_CFB1 ? SymMode::CFB1
+			     : pMechanism->mechanism == CKM_AES_CFB8 ? SymMode::CFB8
+			     : SymMode::CFB128;
+			if (pMechanism->pParameter == NULL_PTR ||
+			    pMechanism->ulParameterLen != 16)
+			{
+				DEBUG_MSG("CFB mode requires a 16-byte init vector");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			iv.resize(16);
+			memcpy(&iv[0], pMechanism->pParameter, 16);
+			break;
+		case CKM_AES_CCM:
+			if (keyType != CKK_AES)
+				return CKR_KEY_TYPE_INCONSISTENT;
+			algo = SymAlgo::AES;
+			mode = SymMode::CCM;
+			if (pMechanism->pParameter == NULL_PTR ||
+			    pMechanism->ulParameterLen != sizeof(CK_CCM_PARAMS))
+			{
+				DEBUG_MSG("CCM mode requires CK_CCM_PARAMS");
+				return CKR_ARGUMENTS_BAD;
+			}
+			{
+				CK_CCM_PARAMS_PTR ccmp = CK_CCM_PARAMS_PTR(pMechanism->pParameter);
+				// RFC 3610 / SP800-38C: nonce length N and tag length T are both
+				// tied to L (the length-field size) via N = 15 - L, so OpenSSL
+				// derives L directly from ulNonceLen once EVP_CTRL_CCM_SET_IVLEN
+				// is called — the valid nonce range is 7..13 bytes (L = 2..8).
+				if (ccmp->ulNonceLen < 7 || ccmp->ulNonceLen > 13)
+				{
+					DEBUG_MSG("CCM ulNonceLen must be 7..13 bytes");
+					return CKR_MECHANISM_PARAM_INVALID;
+				}
+				if (ccmp->pNonce == NULL_PTR)
+				{
+					DEBUG_MSG("CCM pNonce is NULL");
+					return CKR_ARGUMENTS_BAD;
+				}
+				if (ccmp->ulAADLen > 0 && ccmp->pAAD == NULL_PTR)
+				{
+					DEBUG_MSG("CCM pAAD is NULL with non-zero ulAADLen");
+					return CKR_ARGUMENTS_BAD;
+				}
+				if (ccmp->ulMACLen != 4 && ccmp->ulMACLen != 6 && ccmp->ulMACLen != 8 &&
+				    ccmp->ulMACLen != 10 && ccmp->ulMACLen != 12 && ccmp->ulMACLen != 14 &&
+				    ccmp->ulMACLen != 16)
+				{
+					DEBUG_MSG("Invalid CCM ulMACLen");
+					return CKR_MECHANISM_PARAM_INVALID;
+				}
+				iv.resize(ccmp->ulNonceLen);
+				memcpy(&iv[0], ccmp->pNonce, ccmp->ulNonceLen);
+				aad.resize(ccmp->ulAADLen);
+				if (ccmp->ulAADLen > 0)
+					memcpy(&aad[0], ccmp->pAAD, ccmp->ulAADLen);
+				tagBytes = ccmp->ulMACLen;
+				dataLen = ccmp->ulDataLen;
+			}
+			break;
+		case CKM_AES_XTS:
+			// PKCS#11 v3.2 §6.15.4: CKK_AES_XTS keys only (never plain CKK_AES).
+			if (keyType != CKK_AES_XTS)
+				return CKR_KEY_TYPE_INCONSISTENT;
+			algo = SymAlgo::AES;
+			mode = SymMode::XTS;
+			// Single parameter: a 16-byte Data Unit Sequence Number (the tweak).
+			if (pMechanism->pParameter == NULL_PTR ||
+			    pMechanism->ulParameterLen != 16)
+			{
+				DEBUG_MSG("XTS mode requires a 16-byte Data Unit Sequence Number");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			iv.resize(16);
+			memcpy(&iv[0], pMechanism->pParameter, 16);
 			break;
 		case CKM_AES_GCM:
 			if (keyType != CKK_AES)
@@ -1026,7 +1226,7 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 	secretkey->setBitLen(secretkey->getKeyBits().size() * bb);
 
 	// Initialize decryption
-	if (!cipher->decryptInit(secretkey, mode, iv, padding, counterBits, aad, tagBytes))
+	if (!cipher->decryptInit(secretkey, mode, iv, padding, counterBits, aad, tagBytes, dataLen))
 	{
 		cipher->recycleKey(secretkey);
 		CryptoFactory::i()->recycleSymmetricAlgorithm(cipher);

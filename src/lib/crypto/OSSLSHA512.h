@@ -44,5 +44,23 @@ protected:
 	virtual const EVP_MD* getEVPHash() const;
 };
 
+// FIPS 180-4 truncated variants (WS-6.3, 2026-08-30): distinct initial hash
+// values, not SHA-512 output truncated post-hoc — OpenSSL's EVP_sha512_224/
+// _256 already compute the correct FIPS-defined IV, so this is the same
+// thin wrapper pattern as OSSLSHA512 above, just a different EVP_MD.
+class OSSLSHA512_224 : public OSSLEVPHashAlgorithm
+{
+	virtual int getHashSize();
+protected:
+	virtual const EVP_MD* getEVPHash() const;
+};
+
+class OSSLSHA512_256 : public OSSLEVPHashAlgorithm
+{
+	virtual int getHashSize();
+protected:
+	virtual const EVP_MD* getEVPHash() const;
+};
+
 #endif // !_SOFTHSM_V2_OSSLSHA512_H
 

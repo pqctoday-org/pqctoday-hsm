@@ -1539,4 +1539,474 @@ add({"security.wrap_template_partition", "security",
          }
      }});
 
+// ---------------------------------------------------------------------------
+// bytes / create — WS-8 parity set (2026-08-30): AES-GMAC, AES-CCM, AES-XTS,
+// AES-OFB/CFB128/CFB8/CFB1, and SP800-108 Double-Pipeline KDF landed on BOTH
+// engines this session (C++ via WS-8, Rust via the matching remediation
+// plan) but had never been run through this harness — added here rather
+// than assumed compatible.
+//
+// CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS (FIPS 186-5 A.2.2) is Rust-only as of
+// this writing — the C++ investigation was paused mid-implementation
+// (spec text was still being read) and never actually wrote the mechanism.
+// The scenario below is added anyway: the harness's mechanism gate turns
+// that into a single legible "C++ unsupported" line per LEGAL-MECHANISM-SET
+// rather than a crash, and the scenario is then already in place the day
+// C++ catches up.
+// ---------------------------------------------------------------------------
+
+add({"bytes.aes_gmac", "bytes",
+     "CKM_AES_GMAC, fixed key + fixed IV + fixed data — byte-identical tag",
+     {CKM_AES_GMAC}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_BBOOL sens = CK_FALSE;
+         CK_OBJECT_HANDLE k = make_fixed_aes(e, s, true, &sens);
+         if (k == CK_INVALID_HANDLE) { r.put("key", "CREATE_FAILED"); return; }
+         CK_BYTE iv[12]; memcpy(iv, kFixedIv, 12);
+         CK_GCM_PARAMS p; memset(&p, 0, sizeof p);
+         p.pIv = iv; p.ulIvLen = 12; p.ulIvBits = 96;
+         p.ulTagBits = 128;
+         CK_MECHANISM m = { CKM_AES_GMAC, &p, sizeof p };
+         r.rv("sign_init", e.fl->C_SignInit(s, &m, k));
+         CK_BYTE out[16]; CK_ULONG olen = sizeof out;
+         CK_RV rv = e.fl->C_Sign(s, kPlain32, sizeof kPlain32, out, &olen);
+         r.rv("sign", rv);
+         if (rv == CKR_OK) record_bytes(r, "tag", out, olen, ByteView::BYTES);
+     }});
+
+add({"bytes.aes_ccm", "bytes",
+     "CKM_AES_CCM, fixed key + fixed nonce + fixed AAD — byte-identical ciphertext+tag",
+     {CKM_AES_CCM}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_BBOOL sens = CK_FALSE;
+         CK_OBJECT_HANDLE k = make_fixed_aes(e, s, true, &sens);
+         if (k == CK_INVALID_HANDLE) { r.put("key", "CREATE_FAILED"); return; }
+         CK_BYTE nonce[13]; memcpy(nonce, kFixedIv, 13);
+         CK_BYTE aad[4] = {'d','i','f','f'};
+         CK_CCM_PARAMS p; memset(&p, 0, sizeof p);
+         p.ulDataLen = sizeof kPlain32;
+         p.pNonce = nonce; p.ulNonceLen = sizeof nonce;
+         p.pAAD = aad; p.ulAADLen = sizeof aad;
+         p.ulMACLen = 16;
+         CK_MECHANISM m = { CKM_AES_CCM, &p, sizeof p };
+         r.rv("encrypt_init", e.fl->C_EncryptInit(s, &m, k));
+         CK_BYTE out[64]; CK_ULONG olen = sizeof out;
+         CK_RV rv = e.fl->C_Encrypt(s, kPlain32, sizeof kPlain32, out, &olen);
+         r.rv("encrypt", rv);
+         if (rv == CKR_OK) record_bytes(r, "ct_and_tag", out, olen, ByteView::BYTES);
+     }});
+
+add({"bytes.aes_xts", "bytes",
+     "CKM_AES_XTS, fixed double-length key + fixed tweak, non-block-aligned length — byte-identical incl. ciphertext stealing",
+     {CKM_AES_XTS}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         static CK_KEY_TYPE ktAesXts = CKK_AES_XTS;
+         static CK_BYTE kFixedXts[32] = {
+             0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff,0x00,
+             0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10
+         };
+         CK_ATTRIBUTE t[] = {
+             ATTR(CKA_CLASS,       &clSecret, sizeof clSecret),
+             ATTR(CKA_KEY_TYPE,    &ktAesXts, sizeof ktAesXts),
+             ATTR(CKA_TOKEN,       &bFalse,   sizeof bFalse),
+             ATTR(CKA_VALUE,       kFixedXts, sizeof kFixedXts),
+             ATTR(CKA_ENCRYPT,     &bTrue,    sizeof bTrue),
+             ATTR(CKA_DECRYPT,     &bTrue,    sizeof bTrue),
+             ATTR(CKA_EXTRACTABLE, &bTrue,    sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,   sizeof bFalse),
+         };
+         CK_OBJECT_HANDLE k = CK_INVALID_HANDLE;
+         r.rv("create_key", e.fl->C_CreateObject(s, t, 8, &k));
+         if (k == CK_INVALID_HANDLE) return;
+         CK_BYTE tweak[16]; memcpy(tweak, kFixedIv, 16);
+         CK_MECHANISM m = { CKM_AES_XTS, tweak, sizeof tweak };
+         r.rv("encrypt_init", e.fl->C_EncryptInit(s, &m, k));
+         // 20 bytes — not a multiple of the 16-byte block, so a real
+         // cross-engine mismatch in ciphertext-stealing shows up here.
+         CK_BYTE pt[20]; memcpy(pt, kPlain32, 20);
+         CK_BYTE out[32]; CK_ULONG olen = sizeof out;
+         CK_RV rv = e.fl->C_Encrypt(s, pt, sizeof pt, out, &olen);
+         r.rv("encrypt", rv);
+         if (rv == CKR_OK) record_bytes(r, "ct", out, olen, ByteView::BYTES);
+     }});
+
+add({"bytes.aes_stream_modes", "bytes",
+     "CKM_AES_OFB/CFB128/CFB8/CFB1, fixed key+IV — byte-identical per mode",
+     {CKM_AES_OFB, CKM_AES_CFB128, CKM_AES_CFB8, CKM_AES_CFB1}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_BBOOL sens = CK_FALSE;
+         struct Mode { const char* name; CK_MECHANISM_TYPE mech; };
+         const Mode modes[] = {
+             {"ofb", CKM_AES_OFB}, {"cfb128", CKM_AES_CFB128},
+             {"cfb8", CKM_AES_CFB8}, {"cfb1", CKM_AES_CFB1},
+         };
+         for (const Mode& md : modes) {
+             CK_OBJECT_HANDLE k = make_fixed_aes(e, s, true, &sens);
+             std::string tag = md.name;
+             if (k == CK_INVALID_HANDLE) { r.put(tag + ".key", "CREATE_FAILED"); continue; }
+             CK_BYTE iv[16]; memcpy(iv, kFixedIv, 16);
+             CK_MECHANISM m = { md.mech, iv, sizeof iv };
+             r.rv(tag + ".encrypt_init", e.fl->C_EncryptInit(s, &m, k));
+             CK_BYTE out[64]; CK_ULONG olen = sizeof out;
+             CK_RV rv = e.fl->C_Encrypt(s, kPlain32, sizeof kPlain32, out, &olen);
+             r.rv(tag + ".encrypt", rv);
+             if (rv == CKR_OK) record_bytes(r, tag + ".ct", out, olen, ByteView::BYTES);
+             else e.fl->C_EncryptInit(s, NULL_PTR, 0);
+         }
+     }});
+
+add({"bytes.sp800_108_double_pipeline", "bytes",
+     "CKM_SP800_108_DOUBLE_PIPELINE_KDF, fixed base key + fixed fixed-data — byte-identical DKM",
+     {CKM_SP800_108_DOUBLE_PIPELINE_KDF}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_ATTRIBUTE bt[] = {
+             ATTR(CKA_CLASS,    &clSecret,  sizeof clSecret),
+             ATTR(CKA_KEY_TYPE, &ktGeneric, sizeof ktGeneric),
+             ATTR(CKA_TOKEN,    &bFalse,    sizeof bFalse),
+             ATTR(CKA_VALUE,    kFixedAes,  sizeof kFixedAes),
+             ATTR(CKA_DERIVE,   &bTrue,     sizeof bTrue),
+         };
+         CK_OBJECT_HANDLE hBase = CK_INVALID_HANDLE;
+         r.rv("create_base", e.fl->C_CreateObject(s, bt, 5, &hBase));
+         if (hBase == CK_INVALID_HANDLE) return;
+
+         // CK_SP800_108_COUNTER (== CK_SP800_108_OPTIONAL_COUNTER, 0x2), NOT
+         // CK_SP800_108_ITERATION_VARIABLE (0x1) — found via this scenario's
+         // first run: C++'s Double-Pipeline handler only recognises the
+         // former (Table 199/200's "optional counter" for Feedback/Double-
+         // Pipeline modes), silently skipping the latter (Counter mode's
+         // REQUIRED-counter type) and falling back to a hardcoded 32-bit
+         // width, while Rust treats both types as interchangeable. Using
+         // the mode-correct constant makes both engines read the same
+         // 8-bit width. Position is placed BEFORE fixed data (index 0) —
+         // Rust honours literal order; C++ hardwires "after A(i)" for
+         // Double-Pipeline unconditionally, so position is not actually
+         // comparable here, only width and value are.
+         CK_SP800_108_COUNTER_FORMAT cf; memset(&cf, 0, sizeof cf);
+         cf.bLittleEndian = CK_FALSE; cf.ulWidthInBits = 8;
+         CK_BYTE fixedData[4] = {'d','i','f','f'};
+         CK_PRF_DATA_PARAM dps[2];
+         dps[0].type = CK_SP800_108_COUNTER;
+         dps[0].pValue = &cf; dps[0].ulValueLen = sizeof cf;
+         dps[1].type = CK_SP800_108_BYTE_ARRAY;
+         dps[1].pValue = fixedData; dps[1].ulValueLen = sizeof fixedData;
+
+         CK_SP800_108_KDF_PARAMS p; memset(&p, 0, sizeof p);
+         p.prfType = CKM_SHA256_HMAC;
+         p.ulNumberOfDataParams = 2;
+         p.pDataParams = dps;
+         CK_MECHANISM m = { CKM_SP800_108_DOUBLE_PIPELINE_KDF, &p, sizeof p };
+
+         CK_ATTRIBUTE dt[] = {
+             ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+             ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+             ATTR(CKA_VALUE_LEN,   &len32,     sizeof len32),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+         };
+         CK_OBJECT_HANDLE hd = CK_INVALID_HANDLE;
+         r.rv("derive", e.fl->C_DeriveKey(s, &m, hBase, dt, 6, &hd));
+         if (hd == CK_INVALID_HANDLE) return;
+         CK_ATTRIBUTE a = { CKA_VALUE, NULL_PTR, 0 };
+         if (e.fl->C_GetAttributeValue(s, hd, &a, 1) != CKR_OK) { r.put("dkm", "UNREADABLE"); return; }
+         std::vector<CK_BYTE> dkm(a.ulValueLen); a.pValue = dkm.data();
+         e.fl->C_GetAttributeValue(s, hd, &a, 1);
+         record_bytes(r, "dkm", dkm.data(), dkm.size(), ByteView::BYTES);
+     }});
+
+add({"create.generate_key_pair.ec_extra_bits", "create",
+     "CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS (FIPS 186-5 A.2.2) — P-256/384/521, same attribute encoding as plain CKM_EC_KEY_PAIR_GEN",
+     {CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         struct Curve { const char* name; CK_BYTE* oid; CK_ULONG oidLen; };
+         static CK_BYTE oidP384[] = {0x06,0x05,0x2b,0x81,0x04,0x00,0x22};
+         static CK_BYTE oidP521[] = {0x06,0x05,0x2b,0x81,0x04,0x00,0x23};
+         const Curve curves[] = {
+             {"p256", kOidP256, sizeof kOidP256},
+             {"p384", oidP384,  sizeof oidP384},
+             {"p521", oidP521,  sizeof oidP521},
+         };
+         for (const Curve& c : curves) {
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,     &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,  &ktEc,     sizeof ktEc),
+                 ATTR(CKA_EC_PARAMS, c.oid,     c.oidLen),
+                 ATTR(CKA_TOKEN,     &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,    &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,     &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,  &ktEc,      sizeof ktEc),
+                 ATTR(CKA_TOKEN,     &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,      &bTrue,     sizeof bTrue),
+                 ATTR(CKA_DERIVE,    &bTrue,     sizeof bTrue),
+                 ATTR(CKA_SENSITIVE, &bTrue,     sizeof bTrue),
+             };
+             gen_pair(e, r, s, std::string("gen_") + c.name,
+                      CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS, pub, 5, priv, 6);
+         }
+     }});
+
+// ---------------------------------------------------------------------------
+// Exhaustive PQC coverage (2026-08-30): every ML-DSA/ML-KEM/SLH-DSA
+// parameter set, keygen AND a real operation round trip (sign/verify or
+// encapsulate/decapsulate), not just the one representative set per family
+// the "create" group had before. Signature/ciphertext BYTES are never
+// comparable across engines here (both use fresh random key pairs, and
+// ML-DSA/SLH-DSA signing is hedged by default) — every check below is a
+// VERDICT comparison (did it succeed, does the round trip agree, is a
+// tampered value correctly rejected), the same convention
+// create.encapsulate.ml_kem_768 already established.
+// ---------------------------------------------------------------------------
+
+add({"create.generate_key_pair.ml_dsa_all_params", "create",
+     "ML-DSA keygen across all 3 FIPS 204 parameter sets (44/65/87)",
+     {CKM_ML_DSA_KEY_PAIR_GEN}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         struct PS { const char* name; CK_ULONG ps; };
+         const PS sets[] = {{"44", 1}, {"65", 2}, {"87", 3}};
+         for (const PS& p : sets) {
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      &ktMlDsa,  sizeof ktMlDsa),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,        &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      &ktMlDsa,   sizeof ktMlDsa),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+                 ATTR(CKA_SENSITIVE,     &bFalse,    sizeof bFalse),
+                 ATTR(CKA_EXTRACTABLE,   &bTrue,     sizeof bTrue),
+             };
+             gen_pair(e, r, s, std::string("gen_") + p.name, CKM_ML_DSA_KEY_PAIR_GEN, pub, 5, priv, 7);
+         }
+     }});
+
+add({"create.sign_verify.ml_dsa_all_params", "create",
+     "ML-DSA sign+verify round trip across all 3 parameter sets, plus tampered-signature rejection",
+     {CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         struct PS { const char* name; CK_ULONG ps; };
+         const PS sets[] = {{"44", 1}, {"65", 2}, {"87", 3}};
+         for (const PS& p : sets) {
+             std::string tag = p.name;
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      &ktMlDsa,  sizeof ktMlDsa),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,        &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      &ktMlDsa,   sizeof ktMlDsa),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+             };
+             CK_MECHANISM km = { CKM_ML_DSA_KEY_PAIR_GEN, NULL_PTR, 0 };
+             CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+             CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 5, &hPub, &hPriv);
+             r.rv(tag + ".keygen", rv);
+             if (rv != CKR_OK) continue;
+
+             CK_MECHANISM sm = { CKM_ML_DSA, NULL_PTR, 0 };
+             r.rv(tag + ".sign_init", e.fl->C_SignInit(s, &sm, hPriv));
+             CK_BYTE sig[16384]; CK_ULONG slen = sizeof sig;
+             rv = e.fl->C_Sign(s, kPlain32, sizeof kPlain32, sig, &slen);
+             r.rv(tag + ".sign", rv);
+             if (rv != CKR_OK) continue;
+             record_bytes(r, tag + ".sig", sig, slen, ByteView::LEN);
+
+             r.rv(tag + ".verify_init", e.fl->C_VerifyInit(s, &sm, hPub));
+             r.rv(tag + ".verify", e.fl->C_Verify(s, kPlain32, sizeof kPlain32, sig, slen));
+
+             sig[0] ^= 0xff; // flip a bit — verify MUST now reject
+             r.rv(tag + ".verify_init_tampered", e.fl->C_VerifyInit(s, &sm, hPub));
+             CK_RV trv = e.fl->C_Verify(s, kPlain32, sizeof kPlain32, sig, slen);
+             r.put(tag + ".tampered_correctly_rejected", (trv != CKR_OK) ? "yes" : "no");
+         }
+     }});
+
+add({"create.generate_key_pair.ml_kem_all_params", "create",
+     "ML-KEM keygen across all 3 FIPS 203 parameter sets (512/768/1024)",
+     {CKM_ML_KEM_KEY_PAIR_GEN}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         struct PS { const char* name; CK_ULONG ps; };
+         const PS sets[] = {{"512", 1}, {"768", 2}, {"1024", 3}};
+         for (const PS& p : sets) {
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      &ktMlKem,  sizeof ktMlKem),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+                 ATTR(CKA_ENCAPSULATE,   &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      &ktMlKem,   sizeof ktMlKem),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_DECAPSULATE,   &bTrue,     sizeof bTrue),
+                 ATTR(CKA_SENSITIVE,     &bFalse,    sizeof bFalse),
+                 ATTR(CKA_EXTRACTABLE,   &bTrue,     sizeof bTrue),
+             };
+             gen_pair(e, r, s, std::string("gen_") + p.name, CKM_ML_KEM_KEY_PAIR_GEN, pub, 5, priv, 7);
+         }
+     }});
+
+add({"create.encapsulate.ml_kem_all_params", "create",
+     "C_EncapsulateKey / C_DecapsulateKey across all 3 ML-KEM parameter sets — same convention as create.encapsulate.ml_kem_768",
+     {CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         if (!e.Encapsulate || !e.Decapsulate) { r.put("fn", "ABSENT"); return; }
+         struct PS { const char* name; CK_ULONG ps; };
+         const PS sets[] = {{"512", 1}, {"1024", 3}}; // 768 already covered by create.encapsulate.ml_kem_768
+         for (const PS& p : sets) {
+             std::string tag = p.name;
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic,  sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      &ktMlKem,   sizeof ktMlKem),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_ENCAPSULATE,   &bTrue,     sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      &ktMlKem,   sizeof ktMlKem),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_DECAPSULATE,   &bTrue,     sizeof bTrue),
+             };
+             CK_MECHANISM km = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+             CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+             CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 5, &hPub, &hPriv);
+             r.rv(tag + ".keygen", rv);
+             if (rv != CKR_OK) continue;
+             CK_ATTRIBUTE st[] = {
+                 ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+                 ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+                 ATTR(CKA_VALUE_LEN,   &len32,     sizeof len32),
+                 ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+                 ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+                 ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+             };
+             CK_MECHANISM em = { CKM_ML_KEM, NULL_PTR, 0 };
+             CK_BYTE ct[4096]; CK_ULONG ctLen = sizeof ct;
+             CK_OBJECT_HANDLE hEnc = CK_INVALID_HANDLE, hDec = CK_INVALID_HANDLE;
+             rv = e.Encapsulate(s, &em, hPub, st, 6, ct, &ctLen, &hEnc);
+             r.rv(tag + ".encapsulate", rv);
+             if (rv == CKR_OK) record_bytes(r, tag + ".ciphertext", ct, ctLen, ByteView::LEN);
+             if (rv != CKR_OK) continue;
+             rv = e.Decapsulate(s, &em, hPriv, st, 6, ct, ctLen, &hDec);
+             r.rv(tag + ".decapsulate", rv);
+             auto val = [&](CK_OBJECT_HANDLE h, std::vector<CK_BYTE>& out) {
+                 CK_ATTRIBUTE a = { CKA_VALUE, NULL_PTR, 0 };
+                 if (e.fl->C_GetAttributeValue(s, h, &a, 1) != CKR_OK || a.ulValueLen == (CK_ULONG)-1) return false;
+                 out.resize(a.ulValueLen); a.pValue = out.data();
+                 return e.fl->C_GetAttributeValue(s, h, &a, 1) == CKR_OK;
+             };
+             std::vector<CK_BYTE> v1, v2;
+             bool ok = val(hEnc, v1) && val(hDec, v2) && !v1.empty() && v1 == v2;
+             r.put(tag + ".shared_secret_agrees", ok ? "yes" : "no");
+         }
+     }});
+
+add({"create.generate_key_pair.slh_dsa_all_params", "create",
+     "SLH-DSA keygen across all 12 FIPS 205 parameter sets (SHA2/SHAKE x 128/192/256 x s/f)",
+     {CKM_SLH_DSA_KEY_PAIR_GEN}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_KEY_TYPE kt = 0x0000004bUL; // CKK_SLH_DSA
+         struct PS { const char* name; CK_ULONG ps; };
+         const PS sets[] = {
+             {"sha2_128s", 1}, {"shake_128s", 2}, {"sha2_128f", 3}, {"shake_128f", 4},
+             {"sha2_192s", 5}, {"shake_192s", 6}, {"sha2_192f", 7}, {"shake_192f", 8},
+             {"sha2_256s", 9}, {"shake_256s", 10}, {"sha2_256f", 11}, {"shake_256f", 12},
+         };
+         for (const PS& p : sets) {
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      &kt,       sizeof kt),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,        &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      &kt,        sizeof kt),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+             };
+             gen_pair(e, r, s, std::string("gen_") + p.name, CKM_SLH_DSA_KEY_PAIR_GEN, pub, 5, priv, 5);
+         }
+     }});
+
+add({"create.sign_verify.slh_dsa_all_params", "create",
+     "SLH-DSA sign+verify round trip across all 12 parameter sets, plus tampered-signature rejection",
+     {CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_KEY_TYPE kt = 0x0000004bUL; // CKK_SLH_DSA
+         struct PS { const char* name; CK_ULONG ps; };
+         const PS sets[] = {
+             {"sha2_128s", 1}, {"shake_128s", 2}, {"sha2_128f", 3}, {"shake_128f", 4},
+             {"sha2_192s", 5}, {"shake_192s", 6}, {"sha2_192f", 7}, {"shake_192f", 8},
+             {"sha2_256s", 9}, {"shake_256s", 10}, {"sha2_256f", 11}, {"shake_256f", 12},
+         };
+         for (const PS& p : sets) {
+             std::string tag = p.name;
+             // SLH-DSA sign/verify is the slow long-pole of this whole
+             // suite (hash-tree computation, worst on the "s"/small-
+             // signature sets) — this scenario is ONE unit of work to the
+             // sharder/outer progress line, so without a print per
+             // parameter set here a slow run looks indistinguishable from
+             // a hung one. cpp_or_rust label added since this runs against
+             // BOTH engines per iteration and either can be the slow one.
+             printf("      -> %s (%s) ...", tag.c_str(), e.name.c_str());
+             fflush(stdout);
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      &kt,       sizeof kt),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,        &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      &kt,        sizeof kt),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+             };
+             CK_MECHANISM km = { CKM_SLH_DSA_KEY_PAIR_GEN, NULL_PTR, 0 };
+             CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+             CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 5, &hPub, &hPriv);
+             r.rv(tag + ".keygen", rv);
+             if (rv != CKR_OK) { printf(" keygen failed\n"); fflush(stdout); continue; }
+
+             CK_MECHANISM sm = { CKM_SLH_DSA, NULL_PTR, 0 };
+             r.rv(tag + ".sign_init", e.fl->C_SignInit(s, &sm, hPriv));
+             CK_BYTE sig[64 * 1024]; CK_ULONG slen = sizeof sig;
+             rv = e.fl->C_Sign(s, kPlain32, sizeof kPlain32, sig, &slen);
+             r.rv(tag + ".sign", rv);
+             if (rv != CKR_OK) { printf(" sign failed\n"); fflush(stdout); continue; }
+             record_bytes(r, tag + ".sig", sig, slen, ByteView::LEN);
+
+             r.rv(tag + ".verify_init", e.fl->C_VerifyInit(s, &sm, hPub));
+             r.rv(tag + ".verify", e.fl->C_Verify(s, kPlain32, sizeof kPlain32, sig, slen));
+
+             sig[0] ^= 0xff;
+             r.rv(tag + ".verify_init_tampered", e.fl->C_VerifyInit(s, &sm, hPub));
+             CK_RV trv = e.fl->C_Verify(s, kPlain32, sizeof kPlain32, sig, slen);
+             r.put(tag + ".tampered_correctly_rejected", (trv != CKR_OK) ? "yes" : "no");
+             printf(" ok\n");
+             fflush(stdout);
+         }
+     }});
+
 } // register_scenarios
