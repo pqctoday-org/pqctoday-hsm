@@ -33,6 +33,10 @@ const CKZ_DATA_SPECIFIED = 0x00000001
 const CKF_HKDF_SALT_DATA = 2
 const CKS_PKCS5_PBKD2_SALT_SPECIFIED = 1
 const CKP_PKCS5_PBKD2_HMAC_SHA512 = 0x00000006
+// pkcs11t.h:2098 — real ACVP PBKDF-1.0 evidence at the pinned commit used by
+// tests/acvp/pbkdf2_test.json is SHA2-224 only (see that file's _provenance
+// note); C++ supports this PRF, Rust does not.
+export const CKP_PKCS5_PBKD2_HMAC_SHA224 = 0x00000003
 
 // EC curve OIDs (DER-encoded)
 const EC_OID = {
@@ -140,17 +144,22 @@ export function buildMech(M, type, paramPtr = 0, paramLen = 0) {
   return ptr
 }
 
-/** CK_GCM_PARAMS: pIv(4) ulIvLen(4) ulIvBits(4) pAAD(4) ulAADLen(4) ulTagBits(4) = 24B */
-export function buildGCMParams(M, iv) {
+/**
+ * CK_GCM_PARAMS: pIv(4) ulIvLen(4) ulIvBits(4) pAAD(4) ulAADLen(4) ulTagBits(4) = 24B
+ * `aad` and `tagBits` are optional (default: no AAD, 128-bit tag) so every
+ * existing caller keeps its prior behaviour unchanged.
+ */
+export function buildGCMParams(M, iv, aad = new Uint8Array(0), tagBits = 128) {
   const ivPtr = writeBytes(M, iv)
+  const aadPtr = aad.length > 0 ? writeBytes(M, aad) : 0
   const ptr = M._malloc(24)
   M.setValue(ptr + 0, ivPtr, 'i32')
   M.setValue(ptr + 4, iv.length, 'i32')
   M.setValue(ptr + 8, iv.length * 8, 'i32')
-  M.setValue(ptr + 12, 0, 'i32') // pAAD
-  M.setValue(ptr + 16, 0, 'i32') // ulAADLen
-  M.setValue(ptr + 20, 128, 'i32') // ulTagBits
-  return { ptr, size: 24, ivPtr }
+  M.setValue(ptr + 12, aadPtr, 'i32') // pAAD
+  M.setValue(ptr + 16, aad.length, 'i32') // ulAADLen
+  M.setValue(ptr + 20, tagBits, 'i32') // ulTagBits
+  return { ptr, size: 24, ivPtr, aadPtr }
 }
 
 /** CK_AES_CTR_PARAMS: ulCounterBits(4) cb[16] = 20B */
@@ -310,7 +319,17 @@ export function getMechanismSet(M, slotId) {
   const rv = M._C_GetMechanismList(slotId, 0, cntPtr)
   if (rv !== CK.CKR_OK) {
     freePtr(M, cntPtr)
-    return new Set()
+    // WS-0.2: this used to return an empty Set here, which every caller's
+    // own `mechs.size > 0 && !mechs.has(...)` skip-guard reads as "this
+    // engine just advertises nothing" rather than "this engine is broken" —
+    // the guard's `size > 0` check goes false, so instead of skipping it
+    // falls through to attempting the real crypto call against an engine
+    // that cannot even report C_GetMechanismList. Fail closed: an engine
+    // that cannot report its mechanism set is a hard error, not a silent
+    // "advertises nothing."
+    throw new Error(
+      `getMechanismSet: C_GetMechanismList(slot=${slotId}) returned 0x${rv.toString(16)} — engine cannot report its mechanism set`
+    )
   }
   const count = readUlong(M, cntPtr)
   const listPtr = M._malloc(count * 4)
@@ -723,14 +742,15 @@ export function generateEdDSAKeyPair(M, hSession, curve = 'Ed25519') {
  * AES-GCM or AES-CBC decrypt. mode: 'gcm' | 'cbc' (CKM_AES_CBC_PAD) |
  * 'cbc-raw' (CKM_AES_CBC, no PKCS#7 — what NIST's ACVP-AES-CBC KATs test;
  * see hub softhsm.ts's hsm_aesDecrypt for the same distinction and why
- * 'cbc' isn't repurposed).
+ * 'cbc' isn't repurposed). `aad`/`tagBits` only apply to mode 'gcm' and
+ * default to buildGCMParams's own defaults (no AAD, 128-bit tag).
  */
-export function aesDecrypt(M, hSession, handle, ct, iv, mode = 'gcm') {
+export function aesDecrypt(M, hSession, handle, ct, iv, mode = 'gcm', aad = new Uint8Array(0), tagBits = 128) {
   let mechPtr, extraPtrs = []
   if (mode === 'gcm') {
-    const gcm = buildGCMParams(M, iv)
+    const gcm = buildGCMParams(M, iv, aad, tagBits)
     mechPtr = buildMech(M, CK.CKM_AES_GCM, gcm.ptr, gcm.size)
-    extraPtrs = [gcm.ptr, gcm.ivPtr]
+    extraPtrs = gcm.aadPtr ? [gcm.ptr, gcm.ivPtr, gcm.aadPtr] : [gcm.ptr, gcm.ivPtr]
   } else if (mode === 'cbc-raw') {
     const ivPtr = writeBytes(M, iv)
     mechPtr = buildMech(M, CK.CKM_AES_CBC, ivPtr, iv.length)
@@ -814,8 +834,16 @@ export function hmacVerifyGeneral(M, hSession, handle, msg, mac, mechType) {
   return rv === CK.CKR_OK
 }
 
-/** RSA-PSS verify (text message — encoded with TextEncoder) */
-export function rsaVerify(M, hSession, handle, textMsg, sig, mechType = CK.CKM_SHA256_RSA_PKCS_PSS) {
+/**
+ * RSA-PSS verify (raw message bytes).
+ * `sLenOverride`, when given, pins CK_RSA_PKCS_PSS_PARAMS.sLen to that exact
+ * value instead of the mechanism's conventional digest-length default — real
+ * ACVP PSS samples don't all use sLen=hashLen (e.g. tests/acvp/rsapss_test.json's
+ * FIPS 186-5 sigGen vector uses sLen=8), and both engines' verify paths treat
+ * the caller's sLen as authoritative (no "try digest-length too" fallback
+ * once a param is supplied), so the harness must pass the real value through.
+ */
+export function rsaVerify(M, hSession, handle, msgBytes, sig, mechType = CK.CKM_SHA256_RSA_PKCS_PSS, sLenOverride = null) {
   // Build PSS params based on mechanism type
   let hashMech, mgf, sLen
   if (mechType === CK.CKM_SHA256_RSA_PKCS_PSS) {
@@ -831,10 +859,10 @@ export function rsaVerify(M, hSession, handle, textMsg, sig, mechType = CK.CKM_S
     mgf = CKG_MGF1_SHA256
     sLen = 32
   }
+  if (sLenOverride !== null) sLen = sLenOverride
   const pss = buildPSSParams(M, hashMech, mgf, sLen)
   const mechPtr = buildMech(M, mechType, pss.ptr, pss.size)
   check('C_VerifyInit(RSA-PSS)', M._C_VerifyInit(hSession, mechPtr, handle))
-  const msgBytes = new TextEncoder().encode(textMsg)
   const msgPtr = writeBytes(M, msgBytes)
   const sigPtr = writeBytes(M, sig)
   const rv = M._C_Verify(hSession, msgPtr, msgBytes.length, sigPtr, sig.length)
@@ -869,6 +897,34 @@ export function verifyBytes(M, hSession, handle, msgBytes, sig, mechType = CK.CK
   M._free(msgPtr)
   M._free(sigPtr)
   M._free(mechPtr)
+  return rv === CK.CKR_OK
+}
+
+/**
+ * ML-DSA verify with a CK_SIGN_ADDITIONAL_CONTEXT parameter (PKCS#11 v3.2
+ * §6.61 for the ML-DSA sigGen/sigVer context-string case — SoftHSM_sign.cpp
+ * parses this as { hedgeVariant: CK_HEDGE_TYPE(4B), pContext: ptr(4B),
+ * ulContextLen: CK_ULONG(4B) }, 12 bytes total). hedgeVariant doesn't affect
+ * verification (it only governs signature generation's randomness), so
+ * CKH_HEDGE_PREFERRED (0) is always correct here.
+ */
+export function verifyBytesMLDSAContext(M, hSession, handle, msgBytes, sig, contextBytes, mechType = CK.CKM_ML_DSA) {
+  const CKH_HEDGE_PREFERRED = 0
+  const ctxPtr = contextBytes.length ? writeBytes(M, contextBytes) : 0
+  const paramPtr = M._malloc(12)
+  M.setValue(paramPtr + 0, CKH_HEDGE_PREFERRED, 'i32')
+  M.setValue(paramPtr + 4, ctxPtr, 'i32')
+  M.setValue(paramPtr + 8, contextBytes.length, 'i32')
+  const mechPtr = buildMech(M, mechType, paramPtr, 12)
+  check('C_VerifyInit', M._C_VerifyInit(hSession, mechPtr, handle))
+  const msgPtr = writeBytes(M, msgBytes)
+  const sigPtr = writeBytes(M, sig)
+  const rv = M._C_Verify(hSession, msgPtr, msgBytes.length, sigPtr, sig.length)
+  M._free(msgPtr)
+  M._free(sigPtr)
+  M._free(mechPtr)
+  M._free(paramPtr)
+  if (ctxPtr) M._free(ctxPtr)
   return rv === CK.CKR_OK
 }
 
@@ -1325,8 +1381,11 @@ export function unwrapKeyRaw(M, hSession, mechType, unwrappingHandle, wrapped, a
  *   saltSource(4) pSaltSourceData(4) ulSaltSourceDataLen(4)
  *   iterations(4) prf(4) pPrfData(4) ulPrfDataLen(4)
  *   pPassword(4) ulPasswordLen(4)
+ * `prf` defaults to HMAC-SHA512 (the only PRF this helper's two call sites
+ * needed before tests/acvp/pbkdf2_test.json got real evidence, an SHA2-224
+ * ACVP sample — pass CKP_PKCS5_PBKD2_HMAC_SHA224 explicitly for that KAT).
  */
-export function pbkdf2(M, hSession, password, salt, iterations, keyLen) {
+export function pbkdf2(M, hSession, password, salt, iterations, keyLen, prf = CKP_PKCS5_PBKD2_HMAC_SHA512) {
   const saltPtr = writeBytes(M, salt)
   const pwdPtr = writeBytes(M, password)
   const paramsPtr = M._malloc(36)
@@ -1334,7 +1393,7 @@ export function pbkdf2(M, hSession, password, salt, iterations, keyLen) {
   M.setValue(paramsPtr + 4, saltPtr, 'i32')
   M.setValue(paramsPtr + 8, salt.length, 'i32')
   M.setValue(paramsPtr + 12, iterations, 'i32')
-  M.setValue(paramsPtr + 16, CKP_PKCS5_PBKD2_HMAC_SHA512, 'i32')
+  M.setValue(paramsPtr + 16, prf, 'i32')
   M.setValue(paramsPtr + 20, 0, 'i32') // pPrfData = NULL
   M.setValue(paramsPtr + 24, 0, 'i32') // ulPrfDataLen = 0
   M.setValue(paramsPtr + 28, pwdPtr, 'i32')

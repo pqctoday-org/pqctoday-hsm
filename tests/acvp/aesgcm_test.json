@@ -1,33 +1,31 @@
 {
-  "algorithm": "AES-GCM",
-  "source": "SP 800-38D (key from McGrew-Viega Test Case 16, AES-256)",
+  "algorithm": "ACVP-AES-GCM",
+  "mode": "decrypt",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ACVP-AES-GCM-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "0703118c1f751f32cdb8d32b8e54d5f80eb9bbe7bb99b83a6b0221cb40b34f0e",
+    "note": "tgId 4 (AES-128, direction=decrypt), tcId 46. This ACVP 'isSample' release is small (4 groups x 15 tests, keyLen=128 only — no 256-bit-key group exists at all in this algorithm/release) and, of its two decrypt groups, only tgId 4 carries a non-zero payload: tgId 3 (ivLen=96, tagLen=128, aadLen=0) is fixed at payloadLen=0, i.e. tag-only/GMAC-shaped cases with no real ciphertext to decrypt. tgId 4 trades the default parameters for real content: ivLen=120 bits (15B, not the usual 96), tagLen=32 bits (4B, not 128), aadLen=120 bits (15B, non-empty AAD), payloadLen=120 bits (15B). All three non-default parameters are within SP 800-38D's legal ranges and within this engine's own accepted ranges — GcmState::new (rust/src/crypto/multipart.rs) derives J0 via GHASH for any IV length other than 96 bits per SP 800-38D §7.1 step 2b; aes_gcm_encrypt/decrypt (rust/src/native/encrypt.rs) only requires tag_bits to be a positive multiple of 8 up to 128; the C++ engine's OSSLEVPSymmetricAlgorithm equivalents are OpenSSL EVP_CIPHER_CTX-based (EVP_CTRL_AEAD_SET_IVLEN / EVP_CTRL_AEAD_SET_TAG), which natively supports arbitrary GCM IV and tag lengths in this range. tests/helpers.mjs's buildGCMParams and aesDecrypt were extended with optional aad/tagBits parameters (default: no AAD, 128-bit tag, so every other existing caller is unaffected) so this vector's AAD and 32-bit tag are actually passed through C_DecryptInit/C_Decrypt instead of being silently dropped; the KAT label in tests/acvp-wasm.mjs was corrected from 'AES-GCM-256' to 'AES-GCM-128' to match this release's real key size. Independently re-verified against Python's `cryptography` (OpenSSL-backed) Cipher(algorithms.AES(key), modes.GCM(iv, tag, min_tag_length=4)) with authenticate_additional_data(aad) before use: decrypting `ct` under `key` reproduces `pt` exactly and the 32-bit tag authenticates. Replaces a real-but-unprovenanced SP 800-38D / McGrew-Viega Test Case 16 vector (had a `source` citation but no `_provenance` block, so it still failed scripts/check_acvp_provenance.py) with genuine Tier-1 NIST ACVP material per the evidence ladder in docs/remediation-plan-pkcs11-v32-coverage-2026-08-29.md §1 — ACVP-AES-GCM exists, so it is mandatory over any Tier-3/Tier-4 citation. WS-0.5 of that plan."
+  },
   "testGroups": [
     {
-      "keyLen": 256,
-      "ivLen": 96,
-      "tagLen": 128,
+      "keyLen": 128,
       "direction": "decrypt",
+      "ivLen": 120,
+      "tagLen": 32,
+      "aadLen": 120,
       "tests": [
         {
-          "key": "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308",
-          "iv": "cafebabefacedbaddecaf888",
-          "pt": "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39",
-          "ct": "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662",
-          "tag": "eb9f796c8d356fc31a8433884b696f4f"
-        },
-        {
-          "key": "36a4ed7db4d78d522c39b52bdee527b4c8ce09b474c8687225b4bd6aa13e8e75",
-          "iv": "da4c7d646411c4c7c1a0b110",
-          "pt": "4145532d3235362d47434d2041435650206578747261207465737420766563746f7220666f72206d6f64756c652d7370656369666963204b415420646966666572656e74696174696f6e",
-          "ct": "a62ce7f35358268ac9fb8e5f1406933da2c3211790748a77378169506a1b96f9abd98f6bbccc094df4524523747a7244682536c576a1be343c639ea28710853de270c352c67dccac4c12",
-          "tag": "6c4fb2ce62bcba137f251381bc379764"
-        },
-        {
-          "key": "51ec7461158bebc9a7845d0abbaf8e414a08a89bdb723d7178c0756db561872b",
-          "iv": "e2fa0b34db87fdbda55fddac",
-          "pt": "4145532d3235362d47434d2041435650206578747261207465737420766563746f7220666f72206d6f64756c652d7370656369666963204b415420646966666572656e74696174696f6e",
-          "ct": "1066e01d97daecfbffa1c5617a1ed258d9d66c5bbecb47d6b04eb18848d445abb51b3b5b5bed895edcc79401674ec00ff5452c091b8546ed9ce695f2f155254db619e90aef7177f8a725",
-          "tag": "01d836326b9d3f4bbf26d25afc5066af"
+          "tcId": 46,
+          "key": "D297F6EED6E9AD37AD24DC955ED2B2F2",
+          "iv": "FB5C735021B804184A34B400EF071F",
+          "aad": "BF353A6859EA4866ACEA44553B541B",
+          "ct": "1FD917C7F42C857953833AE109CCAD",
+          "tag": "C4C59661",
+          "pt": "A840015C977767637E951EE79F060F"
         }
       ]
     }

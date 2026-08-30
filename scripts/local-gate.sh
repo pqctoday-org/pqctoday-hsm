@@ -167,6 +167,16 @@ run_step_host() { # name, command(run on host) — for node/wasm steps
 }
 
 # ── steps ───────────────────────────────────────────────────────────────────
+
+# WS-0.4 (2026-08-30): every tests/acvp/*.json vector file must carry a real,
+# re-verifiable NIST/RFC provenance block — checked live against the actual
+# source on every run (source_sha256 re-fetch), not just structurally. Runs
+# on the host (pure Python + network, nothing container-specific needed) and
+# first, before anything else: nothing downstream is trustworthy if the
+# vectors it's testing against might be self-generated or drifted.
+run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
+  "cd $ROOT && python3 scripts/check_acvp_provenance.py"
+
 ensure_container
 
 # slh_dsa_sigver_and_siggen is excluded here (-- --skip) and run separately

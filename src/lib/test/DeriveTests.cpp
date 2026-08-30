@@ -238,62 +238,6 @@ CK_RV DeriveTests::createAesKey(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_
 	return CRYPTOKI_F_PTR(C_CreateObject(hSession, keyAttribs, sizeof(keyAttribs) / sizeof(CK_ATTRIBUTE), &hKey));
 }
 
-#ifndef WITH_FIPS
-CK_RV DeriveTests::generateDesKey(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey)
-{
-	CK_MECHANISM mechanism = { CKM_DES_KEY_GEN, NULL_PTR, 0 };
-	// CK_BBOOL bFalse = CK_FALSE;
-	CK_BBOOL bTrue = CK_TRUE;
-	CK_ATTRIBUTE keyAttribs[] = {
-		{ CKA_TOKEN, &bToken, sizeof(bToken) },
-		{ CKA_PRIVATE, &bPrivate, sizeof(bPrivate) },
-		{ CKA_SENSITIVE, &bTrue, sizeof(bTrue) },
-		{ CKA_DERIVE, &bTrue, sizeof(bTrue) }
-	};
-
-	hKey = CK_INVALID_HANDLE;
-	return CRYPTOKI_F_PTR( C_GenerateKey(hSession, &mechanism,
-			     keyAttribs, sizeof(keyAttribs)/sizeof(CK_ATTRIBUTE),
-			     &hKey) );
-}
-#endif
-
-CK_RV DeriveTests::generateDes2Key(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey)
-{
-	CK_MECHANISM mechanism = { CKM_DES2_KEY_GEN, NULL_PTR, 0 };
-	// CK_BBOOL bFalse = CK_FALSE;
-	CK_BBOOL bTrue = CK_TRUE;
-	CK_ATTRIBUTE keyAttribs[] = {
-		{ CKA_TOKEN, &bToken, sizeof(bToken) },
-		{ CKA_PRIVATE, &bPrivate, sizeof(bPrivate) },
-		{ CKA_SENSITIVE, &bTrue, sizeof(bTrue) },
-		{ CKA_DERIVE, &bTrue, sizeof(bTrue) }
-	};
-
-	hKey = CK_INVALID_HANDLE;
-	return CRYPTOKI_F_PTR( C_GenerateKey(hSession, &mechanism,
-			     keyAttribs, sizeof(keyAttribs)/sizeof(CK_ATTRIBUTE),
-			     &hKey) );
-}
-
-CK_RV DeriveTests::generateDes3Key(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey)
-{
-	CK_MECHANISM mechanism = { CKM_DES3_KEY_GEN, NULL_PTR, 0 };
-	// CK_BBOOL bFalse = CK_FALSE;
-	CK_BBOOL bTrue = CK_TRUE;
-	CK_ATTRIBUTE keyAttribs[] = {
-		{ CKA_TOKEN, &bToken, sizeof(bToken) },
-		{ CKA_PRIVATE, &bPrivate, sizeof(bPrivate) },
-		{ CKA_SENSITIVE, &bTrue, sizeof(bTrue) },
-		{ CKA_DERIVE, &bTrue, sizeof(bTrue) }
-	};
-
-	hKey = CK_INVALID_HANDLE;
-	return CRYPTOKI_F_PTR( C_GenerateKey(hSession, &mechanism,
-			     keyAttribs, sizeof(keyAttribs)/sizeof(CK_ATTRIBUTE),
-			     &hKey) );
-}
-
 void DeriveTests::dhDerive(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPublicKey, CK_OBJECT_HANDLE hPrivateKey, CK_OBJECT_HANDLE &hKey)
 {
 	CK_ATTRIBUTE valAttrib = { CKA_VALUE, NULL_PTR, 0 };
@@ -656,7 +600,6 @@ void DeriveTests::symDerive(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey, C
 	CK_MECHANISM mechanism = { mechType, NULL_PTR, 0 };
 	CK_MECHANISM mechEncrypt = { CKM_VENDOR_DEFINED, NULL_PTR, 0 };
 	CK_KEY_DERIVATION_STRING_DATA param1;
-	CK_DES_CBC_ENCRYPT_DATA_PARAMS param2;
 	CK_AES_CBC_ENCRYPT_DATA_PARAMS param3;
 
 	CK_BYTE data[] = {
@@ -669,21 +612,11 @@ void DeriveTests::symDerive(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey, C
 
 	switch (mechType)
 	{
-		case CKM_DES_ECB_ENCRYPT_DATA:
-		case CKM_DES3_ECB_ENCRYPT_DATA:
 		case CKM_AES_ECB_ENCRYPT_DATA:
 			param1.pData = &data[0];
 			param1.ulLen = sizeof(data);
 			mechanism.pParameter = &param1;
 			mechanism.ulParameterLen = sizeof(param1);
-			break;
-		case CKM_DES_CBC_ENCRYPT_DATA:
-		case CKM_DES3_CBC_ENCRYPT_DATA:
-			memcpy(param2.iv, "12345678", 8);
-			param2.pData = &data[0];
-			param2.length = sizeof(data);
-			mechanism.pParameter = &param2;
-			mechanism.ulParameterLen = sizeof(param2);
 			break;
 		case CKM_AES_CBC_ENCRYPT_DATA:
 			memcpy(param3.iv, "1234567890ABCDEF", 16);
@@ -700,13 +633,6 @@ void DeriveTests::symDerive(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey, C
 	{
 		case CKK_GENERIC_SECRET:
 			secLen = 32;
-			break;
-		case CKK_DES:
-			mechEncrypt.mechanism = CKM_DES_ECB;
-			break;
-		case CKK_DES2:
-		case CKK_DES3:
-			mechEncrypt.mechanism = CKM_DES3_ECB;
 			break;
 		case CKK_AES:
 			mechEncrypt.mechanism = CKM_AES_ECB;

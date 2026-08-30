@@ -2340,18 +2340,6 @@ void ObjectTests::testCreateSecretKey()
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06
 	};
-	CK_BYTE desKey[] = {
-		0x81, 0xdc, 0x9b, 0xdb, 0x52, 0xd0, 0x4d, 0xc2
-	};
-	CK_BYTE des2Key[] = {
-		0x81, 0xdc, 0x9b, 0xdb, 0x52, 0xd0, 0x4d, 0xc2, 0x00, 0x36,
-		0xdb, 0xd8, 0x31, 0x3e, 0xd0, 0x55
-	};
-	CK_BYTE des3Key[] = {
-		0x81, 0xdc, 0x9b, 0xdb, 0x52, 0xd0, 0x4d, 0xc2, 0x00, 0x36,
-		0xdb, 0xd8, 0x31, 0x3e, 0xd0, 0x55, 0xcc, 0x57, 0x76, 0xd1,
-		0x6a, 0x1f, 0xb6, 0xe4
-	};
 	// PKCS#11 v3.2 §6.8.2 line 39753: CKA_CHECK_VALUE for CKK_GENERIC_SECRET
 	// is the first three bytes of the SHA-1 hash of the key. The upstream
 	// SoftHSMv2 expected values prior to this commit (genericKCV = 09 3b ed)
@@ -2361,9 +2349,6 @@ void ObjectTests::testCreateSecretKey()
 	// AES KCV is AES-ECB(zero block) — unchanged across the SHA-1/SHA-256
 	// discussion. Per PKCS#11 v3.2 §6.10.2 line 40671.
 	CK_BYTE aesKCV[] =     { 0x08, 0xbd, 0x28 };
-	CK_BYTE desKCV[] =     { 0x08, 0xa1, 0x50 };
-	CK_BYTE des2KCV[] =    { 0xa9, 0x67, 0xae };
-	CK_BYTE des3KCV[] =    { 0x5c, 0x5e, 0xec };
 
 	CK_OBJECT_HANDLE hObject = CK_INVALID_HANDLE;
 	CK_BBOOL bFalse = CK_FALSE;
@@ -2405,43 +2390,5 @@ void ObjectTests::testCreateSecretKey()
 	CPPUNIT_ASSERT(memcmp(pCheckValue, aesKCV, 3) == 0);
 	rv = CRYPTOKI_F_PTR( C_DestroyObject(hSession,hObject) );
 	CPPUNIT_ASSERT_EQUAL(CKR_OK, rv);
-
-/* // DES PRUNED
-	keyType = CKK_DES;
-	attribs[0].pValue = desKey;
-	attribs[0].ulValueLen = sizeof(desKey);
-	rv = CRYPTOKI_F_PTR( C_CreateObject(hSession, attribs, sizeof(attribs)/sizeof(CK_ATTRIBUTE), &hObject) );
-	CPPUNIT_ASSERT_EQUAL(CKR_OK, rv);
-	rv = CRYPTOKI_F_PTR( C_GetAttributeValue(hSession, hObject, attribKCV, 1) );
-	CPPUNIT_ASSERT_EQUAL(CKR_OK, rv);
-	CPPUNIT_ASSERT(attribKCV[0].ulValueLen == 3);
-	CPPUNIT_ASSERT(memcmp(pCheckValue, desKCV, 3) == 0);
-	rv = CRYPTOKI_F_PTR( C_DestroyObject(hSession,hObject) );
-	CPPUNIT_ASSERT_EQUAL(CKR_OK, rv);
-
-	keyType = CKK_DES2;
-	attribs[0].pValue = des2Key;
-	attribs[0].ulValueLen = sizeof(des2Key);
-	rv = CRYPTOKI_F_PTR( C_CreateObject(hSession, attribs, sizeof(attribs)/sizeof(CK_ATTRIBUTE), &hObject) );
-	CPPUNIT_ASSERT_EQUAL(CKR_OK, rv);
-	rv = CRYPTOKI_F_PTR( C_GetAttributeValue(hSession, hObject, attribKCV, 1) );
-	CPPUNIT_ASSERT_EQUAL(CKR_OK, rv);
-	CPPUNIT_ASSERT(attribKCV[0].ulValueLen == 3);
-	CPPUNIT_ASSERT(memcmp(pCheckValue, des2KCV, 3) == 0);
-	rv = CRYPTOKI_F_PTR( C_DestroyObject(hSession,hObject) );
-	CPPUNIT_ASSERT_EQUAL(CKR_OK, rv);
-
-	keyType = CKK_DES3;
-	attribs[0].pValue = des3Key;
-	attribs[0].ulValueLen = sizeof(des3Key);
-	rv = CRYPTOKI_F_PTR( C_CreateObject(hSession, attribs, sizeof(attribs)/sizeof(CK_ATTRIBUTE), &hObject) );
-	CPPUNIT_ASSERT_EQUAL(CKR_OK, rv);
-	rv = CRYPTOKI_F_PTR( C_GetAttributeValue(hSession, hObject, attribKCV, 1) );
-	CPPUNIT_ASSERT_EQUAL(CKR_OK, rv);
-	CPPUNIT_ASSERT(attribKCV[0].ulValueLen == 3);
-	CPPUNIT_ASSERT(memcmp(pCheckValue, des3KCV, 3) == 0);
-	rv = CRYPTOKI_F_PTR( C_DestroyObject(hSession,hObject) );
-	CPPUNIT_ASSERT_EQUAL(CKR_OK, rv);
-*/
 }
 

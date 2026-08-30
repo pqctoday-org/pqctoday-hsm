@@ -1,16 +1,28 @@
 {
-  "algorithm": "AES-CTR",
-  "source": "NIST SP 800-38A Appendix F.5.6 (CTR-AES256.Decrypt) published vector; verified with the node crypto (OpenSSL) oracle",
+  "algorithm": "ACVP-AES-CTR",
+  "mode": "decrypt",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ACVP-AES-CTR-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "22cd3bb1666cc14231e5435a2f0c163e83c70a65ba353284828975a983a46a59",
+    "note": "tgId 6 (AES-256, direction=decrypt, internalTestType=RFC3686), tcId 136 — the group's shortest byte-aligned payload: payloadLen=128 bits, i.e. exactly one 16-byte AES block. Every group in this ACVP algorithm/release uses the RFC 3686 counter-block construction (4-byte nonce || 8-byte IV || 4-byte counter, counter starting at 1, only the low 32 bits ever incrementing), so this case is wired with CK_AES_CTR_PARAMS.ulCounterBits=32, matching both RFC 3686 and this engine's own ulCounterBits=32 conformance test (rust/src/ck_abi.rs, CtrState::new_with_width). A single-block payload was chosen deliberately: the counter is encrypted exactly once and never incremented, so the case's correctness does not depend on whether an implementation honours the narrower 32-bit width or (incorrectly) increments the full 128-bit block — removing that variable from this specific KAT while the mechanism's own ulCounterBits handling is separately covered by the engine's own tests referenced above. Independently re-verified against Python's `cryptography` (OpenSSL-backed) AES-CTR (modes.CTR with the full 16-byte counter block as the IV) before use: decrypting `ct` under `key`/`iv` reproduces `pt` exactly. Replaces a real-but-unprovenanced NIST SP 800-38A Appendix F.5.6 vector (had a `source` citation but no `_provenance` block, so it still failed scripts/check_acvp_provenance.py) with genuine Tier-1 NIST ACVP material per the evidence ladder in docs/remediation-plan-pkcs11-v32-coverage-2026-08-29.md §1 — ACVP-AES-CTR exists, so it is mandatory over any Tier-3 SP 800-38A citation. WS-0.5 of that plan."
+  },
   "testGroups": [
     {
       "keyLen": 256,
-      "counterBits": 128,
+      "direction": "decrypt",
+      "internalTestType": "RFC3686",
+      "counterBits": 32,
       "tests": [
         {
-          "key": "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4",
-          "iv": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
-          "pt": "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710",
-          "ct": "601ec313775789a5b7a7f504bbf3d228f443e3ca4d62b59aca84e990cacaf5c52b0930daa23de94ce87017ba2d84988ddfc9c58db67aada613c2dd08457941a6"
+          "tcId": 136,
+          "key": "D9B7DF3B17042C957A335D4F9FA5487DE0553C4D7F578458DFE5161DFC552D22",
+          "iv": "79AD4F8BA218E781CC59433500000001",
+          "ct": "A71FE0386A2D3582D04D632DCF8AA195",
+          "pt": "E342F0143752045F389961FE062E71B8"
         }
       ]
     }

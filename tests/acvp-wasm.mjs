@@ -53,8 +53,8 @@ import {
   hmacVerify,
   hmacVerifyGeneral,
   rsaVerify,
-  ecdsaVerify,
   verifyBytes,
+  verifyBytesMLDSAContext,
   sign,
   verify,
   slhdsaSign,
@@ -76,6 +76,7 @@ import {
   buildRsaAesKeyWrapParams,
   CKG_MGF1,
   pbkdf2,
+  CKP_PKCS5_PBKD2_HMAC_SHA224,
   hkdf,
   generateHSSKeyPair,
   hssSign,
@@ -99,8 +100,12 @@ const mldsaVec = loadJson('mldsa_test.json')
 const aesGcmVec = loadJson('aesgcm_test.json')
 const hmacVec = loadJson('hmac_test.json')
 const rsaPssVec = loadJson('rsapss_test.json')
+const pbkdf2Vec = loadJson('pbkdf2_test.json')
 const ecdsaVec = loadJson('ecdsa_test.json')
 const sha256Vec = loadJson('sha256_test.json')
+const sha3_256Vec = loadJson('sha3_256_test.json')
+const sha3_512Vec = loadJson('sha3_512_test.json')
+const mldsaExtVec = loadJson('mldsa_extended_test.json')
 const aesCbcVec = loadJson('aescbc_test.json')
 const aesCtrVec = loadJson('aesctr_test.json')
 const hmac384Vec = loadJson('hmac_sha384_test.json')
@@ -144,14 +149,22 @@ async function runSuite(engineName) {
   const mechs = getMechanismSet(M, slotId)
 
   try {
-    // ── 1. AES-GCM-256 Decrypt KAT (SP 800-38D) ───────────────────────────
+    // ── 1. AES-GCM-128 Decrypt KAT (NIST ACVP-AES-GCM) ────────────────────
+    // WS-0.5 (2026-08-30): the ACVP sample vector set used here (see
+    // aesgcm_test.json's _provenance.note) only publishes a 128-bit key
+    // group with a non-zero payload, with a non-default IV length (120
+    // bits), tag length (32 bits) and a non-empty AAD — buildGCMParams /
+    // aesDecrypt take aad/tagBits so this vector is exercised as-is
+    // rather than silently ignoring its AAD and mismatching its tag size.
     if (mechs.size > 0 && !mechs.has(CK.CKM_AES_GCM)) {
-      addResult('aesgcm', 'AES-GCM-256', 'Decrypt KAT', 'SKIP', 'mechanism not supported')
+      addResult('aesgcm', 'AES-GCM-128', 'Decrypt KAT', 'SKIP', 'mechanism not supported')
     } else {
-      const tv = aesGcmVec.testGroups[0].tests[0]
+      const tg = aesGcmVec.testGroups[0]
+      const tv = tg.tests[0]
       try {
         const keyBytes = hexToBytes(tv.key)
         const ivBytes = hexToBytes(tv.iv)
+        const aadBytes = hexToBytes(tv.aad || '')
         const ctBytes = hexToBytes(tv.ct)
         const tagBytes = hexToBytes(tv.tag)
         const expectedPt = hexToBytes(tv.pt)
@@ -159,11 +172,11 @@ async function runSuite(engineName) {
         const ctWithTag = new Uint8Array(ctBytes.length + tagBytes.length)
         ctWithTag.set(ctBytes)
         ctWithTag.set(tagBytes, ctBytes.length)
-        const pt = aesDecrypt(M, hSession, aesH, ctWithTag, ivBytes, 'gcm')
+        const pt = aesDecrypt(M, hSession, aesH, ctWithTag, ivBytes, 'gcm', aadBytes, tg.tagLen)
         const ok = arrEq(pt, expectedPt)
-        addResult('aesgcm', 'AES-GCM-256', 'Decrypt KAT', ok ? 'PASS' : 'FAIL', `PT[${pt.length}B]: ${bytesToHex(pt, 16)}`)
+        addResult('aesgcm', 'AES-GCM-128', 'Decrypt KAT', ok ? 'PASS' : 'FAIL', `PT[${pt.length}B]: ${bytesToHex(pt, 16)}`)
       } catch (e) {
-        addResult('aesgcm', 'AES-GCM-256', 'Decrypt KAT', 'FAIL', e.message)
+        addResult('aesgcm', 'AES-GCM-128', 'Decrypt KAT', 'FAIL', e.message)
       }
     }
 
@@ -186,14 +199,19 @@ async function runSuite(engineName) {
       }
     }
 
-    // ── 3. RSA-PSS-2048 SigVer KAT (FIPS 186-5) ──────────────────────────
+    // ── 3. RSA-PSS-2048 SigVer KAT (FIPS 186-5, real ACVP sigGen sample) ──
+    // tgId 9's saltLen is 8 (NIST's sample, not the conventional digest
+    // length) — pass it through explicitly rather than relying on
+    // rsaVerify's default, and pass the real message bytes (hex-decoded,
+    // not TextEncoder'd — ACVP message bytes aren't necessarily valid text).
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA256_RSA_PKCS_PSS)) {
       addResult('rsapss', 'RSA-PSS-2048', 'SigVer KAT', 'SKIP', 'mechanism not supported')
     } else {
-      const tv = rsaPssVec.testGroups[0].tests[0]
+      const tg = rsaPssVec.testGroups[0]
+      const tv = tg.tests[0]
       try {
-        const h = importRSAPublicKey(M, hSession, hexToBytes(tv.n), hexToBytes(tv.e), { encrypt: false })
-        const ok = rsaVerify(M, hSession, h, tv.msg, hexToBytes(tv.signature))
+        const h = importRSAPublicKey(M, hSession, hexToBytes(tg.n), hexToBytes(tg.e), { encrypt: false })
+        const ok = rsaVerify(M, hSession, h, hexToBytes(tv.message), hexToBytes(tv.signature), CK.CKM_SHA256_RSA_PKCS_PSS, tg.saltLen)
         addResult('rsapss', 'RSA-PSS-2048', 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${tv.signature.length / 2}B]`)
       } catch (e) {
         addResult('rsapss', 'RSA-PSS-2048', 'SigVer KAT', 'FAIL', e.message)
@@ -212,7 +230,7 @@ async function runSuite(engineName) {
         const sig = new Uint8Array(rB.length + sB.length)
         sig.set(rB)
         sig.set(sB, rB.length)
-        const ok = ecdsaVerify(M, hSession, h, tv.msg, sig)
+        const ok = verifyBytes(M, hSession, h, hexToBytes(tv.msg), sig, CK.CKM_ECDSA_SHA256)
         addResult('ecdsa256', 'ECDSA P-256', 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
       } catch (e) {
         addResult('ecdsa256', 'ECDSA P-256', 'SigVer KAT', 'FAIL', e.message)
@@ -230,6 +248,46 @@ async function runSuite(engineName) {
         addResult(`mldsa-sv-${v}`, algo, 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${test.sig.length / 2}B]`)
       } catch (e) {
         addResult(`mldsa-sv-${v}`, algo, 'SigVer KAT', 'FAIL', e.message)
+      }
+    }
+
+    // ── 5.5. ML-DSA extended-mode SigVer KAT (FIPS 204 tr1) — context +
+    // pre-hash, 3 parameter sets each ─────────────────────────────────────
+    // WS-3.3 (2026-08-30): mldsa_extended_test.json carried real, provenance-
+    // verified NIST ACVP-Server tr1 vectors for both the context-string and
+    // pre-hash (HashML-DSA) extended modes — loaded by nothing until now.
+    const MLDSA_HASH_MECH = {
+      'sha224': CK.CKM_HASH_ML_DSA_SHA224,
+      'sha256': CK.CKM_HASH_ML_DSA_SHA256,
+      'sha384': CK.CKM_HASH_ML_DSA_SHA384,
+      'sha512': CK.CKM_HASH_ML_DSA_SHA512,
+      'sha3-224': CK.CKM_HASH_ML_DSA_SHA3_224,
+      'sha3-256': CK.CKM_HASH_ML_DSA_SHA3_256,
+      'sha3-384': CK.CKM_HASH_ML_DSA_SHA3_384,
+      'sha3-512': CK.CKM_HASH_ML_DSA_SHA3_512,
+      'shake128': CK.CKM_HASH_ML_DSA_SHAKE128,
+      'shake256': CK.CKM_HASH_ML_DSA_SHAKE256,
+    }
+    // Pre-hash mode (CKM_HASH_ML_DSA_*) is NOT wired yet: a first attempt
+    // using the same verifyBytesMLDSAContext() helper with the specific
+    // hash mechanism produced CKR_OK but a signature mismatch on all 3
+    // parameter sets, while the identical helper/struct-building code
+    // genuinely passes for context mode below — the discrepancy hasn't
+    // been root-caused (needs more than the "small, obvious" bar this
+    // pass was scoped to). MLDSA_HASH_MECH is kept for that follow-up.
+    if (mldsaExtVec && mldsaExtVec.context) {
+      for (const variant of ['ML-DSA-44', 'ML-DSA-65', 'ML-DSA-87']) {
+        const tv = mldsaExtVec.context[variant]
+        if (!tv) continue
+        const v = parseInt(variant.split('-')[2])
+        try {
+          const h = importMLDSAPublicKey(M, hSession, v, hexToBytes(tv.pk))
+          const ok = verifyBytesMLDSAContext(
+            M, hSession, h, hexToBytes(tv.message), hexToBytes(tv.signature), hexToBytes(tv.context), CK.CKM_ML_DSA)
+          addResult(`mldsa-ext-context-${v}`, variant, 'SigVer KAT (context)', ok ? 'PASS' : 'FAIL', `sig[${tv.signature.length / 2}B]`)
+        } catch (e) {
+          addResult(`mldsa-ext-context-${v}`, variant, 'SigVer KAT (context)', 'FAIL', e.message)
+        }
       }
     }
 
@@ -360,20 +418,41 @@ async function runSuite(engineName) {
       }
     }
 
-    // ── 10.5. SHA-3-256 Digest Functional (FIPS 202) ─────────────────────
+    // ── 10.5. SHA3-256 Digest KAT (FIPS 202) — 3 real ACVP test cases ──────
+    // WS-5.4 (2026-08-30): this used to check exactly one hand-typed vector
+    // (the empty-string case, tcId 1 below) even though sha3_256_test.json
+    // already carried 3 real, provenance-verified ACVP cases unused. Wired
+    // in properly, matching the sha256Vec loop above.
     if (mechs.size > 0 && !mechs.has(CK.CKM_SHA3_256)) {
-      addResult('sha3_256', 'SHA3-256', 'Digest Functional', 'SKIP', 'mechanism not supported')
+      addResult('sha3_256', 'SHA3-256', 'Digest KAT', 'SKIP', 'mechanism not supported')
     } else {
-      try {
-        // Standard test vector for empty string SHA3-256: 
-        // a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a
-        const msg = new Uint8Array(0)
-        const expected = hexToBytes('a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a')
-        const d = digest(M, hSession, msg, CK.CKM_SHA3_256)
-        const ok = arrEq(d, expected)
-        addResult('sha3_256', 'SHA3-256', 'Digest Empty Vector', ok ? 'PASS' : 'FAIL', `MD[${d.length}B]`)
-      } catch (e) {
-        addResult('sha3_256', 'SHA3-256', 'Digest Empty Vector', 'FAIL', e.message)
+      for (const test of sha3_256Vec.testGroups[0].tests) {
+        try {
+          const d = digest(M, hSession, hexToBytes(test.msg), CK.CKM_SHA3_256)
+          const expected = hexToBytes(test.md)
+          const ok = arrEq(d, expected)
+          addResult(`sha3_256-${test.tcId}`, 'SHA3-256', `Digest KAT tc=${test.tcId}`, ok ? 'PASS' : 'FAIL', `MD[${d.length}B]: ${bytesToHex(d, 16)}`)
+        } catch (e) {
+          addResult(`sha3_256-${test.tcId}`, 'SHA3-256', `Digest KAT tc=${test.tcId}`, 'FAIL', e.message)
+        }
+      }
+    }
+
+    // ── 10.6. SHA3-512 Digest KAT (FIPS 202) — 3 real ACVP test cases ──────
+    // WS-5.4: previously had no test at all (sha3_512_test.json existed
+    // with real provenance, orphaned — loaded by nothing).
+    if (mechs.size > 0 && !mechs.has(CK.CKM_SHA3_512)) {
+      addResult('sha3_512', 'SHA3-512', 'Digest KAT', 'SKIP', 'mechanism not supported')
+    } else {
+      for (const test of sha3_512Vec.testGroups[0].tests) {
+        try {
+          const d = digest(M, hSession, hexToBytes(test.msg), CK.CKM_SHA3_512)
+          const expected = hexToBytes(test.md)
+          const ok = arrEq(d, expected)
+          addResult(`sha3_512-${test.tcId}`, 'SHA3-512', `Digest KAT tc=${test.tcId}`, ok ? 'PASS' : 'FAIL', `MD[${d.length}B]: ${bytesToHex(d, 16)}`)
+        } catch (e) {
+          addResult(`sha3_512-${test.tcId}`, 'SHA3-512', `Digest KAT tc=${test.tcId}`, 'FAIL', e.message)
+        }
       }
     }
 
@@ -452,7 +531,7 @@ async function runSuite(engineName) {
         const sig = new Uint8Array(rB.length + sB.length)
         sig.set(rB)
         sig.set(sB, rB.length)
-        const ok = ecdsaVerify(M, hSession, h, tv.msg, sig, CK.CKM_ECDSA_SHA384)
+        const ok = verifyBytes(M, hSession, h, hexToBytes(tv.msg), sig, CK.CKM_ECDSA_SHA384)
         addResult('ecdsa384', 'ECDSA P-384', 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
       } catch (e) {
         addResult('ecdsa384', 'ECDSA P-384', 'SigVer KAT', 'FAIL', e.message)
@@ -652,6 +731,27 @@ async function runSuite(engineName) {
         addResult('pbkdf2', 'PBKDF2-HMAC-SHA512', 'Functional Derivation', ok ? 'PASS' : 'FAIL', `DK[${dk1.length}B]: ${bytesToHex(dk1, 16)}`)
       } catch (e) {
         addResult('pbkdf2', 'PBKDF2-HMAC-SHA512', 'Functional Derivation', 'FAIL', e.message)
+      }
+    }
+
+    // ── 17.5. PBKDF2-HMAC-SHA224 Derive KAT (SP 800-132, real ACVP) ──────
+    // tests/acvp/pbkdf2_test.json's only real ACVP evidence at its pinned
+    // commit is SHA2-224 (see that file's _provenance note) — expected to
+    // FAIL on the Rust engine, which has no SHA224 PRF arm at all
+    // (rust/src/ffi.rs's CKM_PKCS5_PBKD2 match only covers SHA256/384/512);
+    // that is a real, documented engine gap, not a harness bug.
+    if (mechs.size > 0 && !mechs.has(CK.CKM_PKCS5_PBKD2)) {
+      addResult('pbkdf2-224', 'PBKDF2-HMAC-SHA224', 'Derive KAT', 'SKIP', 'mechanism not supported')
+    } else {
+      const tv = pbkdf2Vec.testGroups[0].tests[0]
+      try {
+        const password = new TextEncoder().encode(tv.password)
+        const salt = hexToBytes(tv.salt)
+        const dk = pbkdf2(M, hSession, password, salt, tv.iterationCount, tv.keyLen / 8, CKP_PKCS5_PBKD2_HMAC_SHA224)
+        const ok = arrEq(dk, hexToBytes(tv.derivedKey))
+        addResult('pbkdf2-224', 'PBKDF2-HMAC-SHA224', 'Derive KAT', ok ? 'PASS' : 'FAIL', `DK[${dk.length}B]: ${bytesToHex(dk, 16)}`)
+      } catch (e) {
+        addResult('pbkdf2-224', 'PBKDF2-HMAC-SHA224', 'Derive KAT', 'FAIL', e.message)
       }
     }
 
@@ -924,53 +1024,73 @@ async function runSuite(engineName) {
       }
     }
 
-    // ── 23. SLH-DSA SigVer KAT (FIPS 205) ──────────────────────────
-    // WS-10 (2026-08-28): the hub's slhdsa_ctx_test.json generalized .sigVer
-    // from a single flat object to a map keyed by parameter-set name (all
-    // 12 SLH-DSA sets) — pick the one this test already exercises
-    // (SLH-DSA-SHA2-128f, matching the CKP_SLH_DSA_SHA2_128F import below).
-    if (slhdsaCtxVec && slhdsaCtxVec.sigVer && slhdsaCtxVec.sigVer['SLH-DSA-SHA2-128f']) {
-      const tv = slhdsaCtxVec.sigVer['SLH-DSA-SHA2-128f']
-      try {
-        const pk = hexToBytes(tv.pk)
-        const msg = hexToBytes(tv.message)
-        const ctx = hexToBytes(tv.context)
-        const expectedSig = hexToBytes(tv.signature)
-        const h = importSLHDSAPublicKey(M, hSession, CK.CKP_SLH_DSA_SHA2_128F, pk)
-        const ok = slhdsaVerifyBytesCtx(M, hSession, h, msg, expectedSig, ctx)
-        addResult(`slhdsa-sv-param`, tv.parameterSet, 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${expectedSig.length}B]`)
-      } catch (e) {
-        addResult(`slhdsa-sv-param`, tv.parameterSet, 'SigVer KAT', 'FAIL', e.message)
-      }
-    }
+    // ── 23/24. SLH-DSA SigVer + SigGen KAT (FIPS 205), all 12 parameter sets ──
+    // WS-3.2 (2026-08-30): slhdsa_ctx_test.json's .sigVer/.sigGen carry all
+    // 12 SLH-DSA parameter sets (WS-10, 2026-08-28's generalization), but
+    // only SLH-DSA-SHA2-128f was ever read — the other 11 sets' vectors have
+    // sat on disk unused since that generalization. Iterate all 12; each
+    // maps directly to its CKP_SLH_DSA_* constant (constants.js:531-542).
+    const SLH_DSA_PARAM_SETS = [
+      ['SLH-DSA-SHA2-128s', CK.CKP_SLH_DSA_SHA2_128S],
+      ['SLH-DSA-SHA2-128f', CK.CKP_SLH_DSA_SHA2_128F],
+      ['SLH-DSA-SHA2-192s', CK.CKP_SLH_DSA_SHA2_192S],
+      ['SLH-DSA-SHA2-192f', CK.CKP_SLH_DSA_SHA2_192F],
+      ['SLH-DSA-SHA2-256s', CK.CKP_SLH_DSA_SHA2_256S],
+      ['SLH-DSA-SHA2-256f', CK.CKP_SLH_DSA_SHA2_256F],
+      ['SLH-DSA-SHAKE-128s', CK.CKP_SLH_DSA_SHAKE_128S],
+      ['SLH-DSA-SHAKE-128f', CK.CKP_SLH_DSA_SHAKE_128F],
+      ['SLH-DSA-SHAKE-192s', CK.CKP_SLH_DSA_SHAKE_192S],
+      ['SLH-DSA-SHAKE-192f', CK.CKP_SLH_DSA_SHAKE_192F],
+      ['SLH-DSA-SHAKE-256s', CK.CKP_SLH_DSA_SHAKE_256S],
+      ['SLH-DSA-SHAKE-256f', CK.CKP_SLH_DSA_SHAKE_256F],
+    ]
 
-    // ── 24. SLH-DSA SigGen KAT (FIPS 205) ──────────────────────────
-    // Cross-validation result: fips205 and Botan produce different byte sequences for
-    // the same deterministic inputs. Both are FIPS 205 compliant but implementation-
-    // specific in their internal hedgedRandomness seeding. The sigVer KAT (test #23)
-    // remains a valid cross-implementation validation since it verifies a Botan
-    // signature using our engine's independent verify path.
-    if (slhdsaCtxVec && slhdsaCtxVec.sigGen && slhdsaCtxVec.sigGen['SLH-DSA-SHA2-128f']) {
-      const tv = slhdsaCtxVec.sigGen['SLH-DSA-SHA2-128f']
-      if (engineName === 'cpp') {
+    for (const [name, ckp] of SLH_DSA_PARAM_SETS) {
+      // ── SigVer KAT ──
+      if (slhdsaCtxVec && slhdsaCtxVec.sigVer && slhdsaCtxVec.sigVer[name]) {
+        const tv = slhdsaCtxVec.sigVer[name]
         try {
           const pk = hexToBytes(tv.pk)
-          const sk = hexToBytes(tv.sk)
           const msg = hexToBytes(tv.message)
           const ctx = hexToBytes(tv.context)
-          const pubHandle = importSLHDSAPublicKey(M, hSession, CK.CKP_SLH_DSA_SHA2_128F, pk)
-          const privHandle = importSLHDSAPrivateKey(M, hSession, CK.CKP_SLH_DSA_SHA2_128F, sk)
-          const sig = slhdsaSignBytesCtx(M, hSession, privHandle, msg, ctx, true)
-          const ok = slhdsaVerifyBytesCtx(M, hSession, pubHandle, msg, sig, ctx)
-          addResult(`slhdsa-sg-param`, tv.parameterSet, 'SigGen Round-Trip', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
+          const expectedSig = hexToBytes(tv.signature)
+          const h = importSLHDSAPublicKey(M, hSession, ckp, pk)
+          const ok = slhdsaVerifyBytesCtx(M, hSession, h, msg, expectedSig, ctx)
+          addResult(`slhdsa-sv-param`, tv.parameterSet, 'SigVer KAT', ok ? 'PASS' : 'FAIL', `sig[${expectedSig.length}B]`)
         } catch (e) {
-          addResult(`slhdsa-sg-param`, tv.parameterSet, 'SigGen Round-Trip', 'FAIL', e.message)
+          addResult(`slhdsa-sv-param`, tv.parameterSet, 'SigVer KAT', 'FAIL', e.message)
         }
-      } else {
-        // Rust/fips205 engine: vector is Botan-specific (cross-validated: diverges at byte 0)
-        // SigVer KAT (test #23) provides the valid cross-implementation validation.
-        addResult(`slhdsa-sg-param`, tv.parameterSet, 'SigGen KAT', 'SKIP',
-          'Vector is Botan-specific; fips205 is FIPS-205-compliant but produces different deterministic bytes')
+      }
+
+      // ── SigGen (C++: round-trip against the same vector's key material;
+      // Rust: SKIP — see the cross-validation note below) ──
+      // Cross-validation result: fips205 and Botan produce different byte sequences for
+      // the same deterministic inputs. Both are FIPS 205 compliant but implementation-
+      // specific in their internal hedgedRandomness seeding. The sigVer KAT above
+      // remains a valid cross-implementation validation since it verifies a Botan
+      // signature using our engine's independent verify path.
+      if (slhdsaCtxVec && slhdsaCtxVec.sigGen && slhdsaCtxVec.sigGen[name]) {
+        const tv = slhdsaCtxVec.sigGen[name]
+        if (engineName === 'cpp') {
+          try {
+            const pk = hexToBytes(tv.pk)
+            const sk = hexToBytes(tv.sk)
+            const msg = hexToBytes(tv.message)
+            const ctx = hexToBytes(tv.context)
+            const pubHandle = importSLHDSAPublicKey(M, hSession, ckp, pk)
+            const privHandle = importSLHDSAPrivateKey(M, hSession, ckp, sk)
+            const sig = slhdsaSignBytesCtx(M, hSession, privHandle, msg, ctx, true)
+            const ok = slhdsaVerifyBytesCtx(M, hSession, pubHandle, msg, sig, ctx)
+            addResult(`slhdsa-sg-param`, tv.parameterSet, 'SigGen Round-Trip', ok ? 'PASS' : 'FAIL', `sig[${sig.length}B]`)
+          } catch (e) {
+            addResult(`slhdsa-sg-param`, tv.parameterSet, 'SigGen Round-Trip', 'FAIL', e.message)
+          }
+        } else {
+          // Rust/fips205 engine: vector is Botan-specific (cross-validated: diverges at byte 0)
+          // SigVer KAT above provides the valid cross-implementation validation.
+          addResult(`slhdsa-sg-param`, tv.parameterSet, 'SigGen KAT', 'SKIP',
+            'Vector is Botan-specific; fips205 is FIPS-205-compliant but produces different deterministic bytes')
+        }
       }
     }
 

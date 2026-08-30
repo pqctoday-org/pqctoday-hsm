@@ -44,11 +44,10 @@ class SymmetricAlgorithmTests : public TestsBase
 	CPPUNIT_TEST_SUITE(SymmetricAlgorithmTests);
 	CPPUNIT_TEST(testAesEncryptDecrypt);
 	CPPUNIT_TEST(testChaCha20EncryptDecrypt);
-	// CPPUNIT_TEST(testDesEncryptDecrypt);
 #ifdef HAVE_AES_KEY_WRAP
 	// CPPUNIT_TEST(testAesWrapUnwrap); // relies on wrapping AES with DES which is pruned
 #endif
-	// CPPUNIT_TEST(testNullTemplate); // uses DES
+	// CPPUNIT_TEST(testNullTemplate);
 	// CPPUNIT_TEST(testNonModifiableDesKeyGeneration);
 	// TODO: check CKA_CHECK_VALUE error
 	//CPPUNIT_TEST(testCheckValue);
@@ -63,9 +62,7 @@ public:
 	
 	void testAesEncryptDecrypt();
 	void testChaCha20EncryptDecrypt();
-	void testDesEncryptDecrypt();
 	void testAesWrapUnwrap();
-	void testDesWrapUnwrap();
 	void testNullTemplate();
 	void testNonModifiableDesKeyGeneration();
 	void testCheckValue();
@@ -77,11 +74,6 @@ public:
 protected:
 	CK_RV generateGenericKey(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey);
 	CK_RV generateAesKey(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey);
-#ifndef WITH_FIPS
-	CK_RV generateDesKey(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey);
-	CK_RV generateDes2Key(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey);
-#endif
-	CK_RV generateDes3Key(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey);
 	void encryptDecrypt(
 			CK_MECHANISM mechanism,
 			size_t sizeOfIV,
@@ -92,7 +84,6 @@ protected:
 	void aesWrapUnwrapGeneric(CK_MECHANISM_TYPE mechanismType, CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey);
 	void aesWrapUnwrapNonModifiableGeneric(CK_MECHANISM_TYPE mechanismType, CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey);
 	void aesWrapUnwrapRsa(CK_MECHANISM_TYPE mechanismType, CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey);
-	void desWrapUnwrapRsa(CK_MECHANISM_TYPE mechanismType, CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey);
 	CK_RV generateRsaPrivateKey(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey);
 #ifdef WITH_EDDSA
 	using EDCurveParam = const std::array<CK_BYTE, 5>;
@@ -103,11 +94,6 @@ protected:
 				   CK_OBJECT_HANDLE &hKey,
 				   EDCurveParam &curveparam);
 #endif
-#ifndef WITH_FIPS
-	CK_RV importDesKey(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey, const Bytes & vKeyValue );
-	CK_RV importDes2Key(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey, const Bytes & vKeyValue );
-#endif
-	CK_RV importDes3Key(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey, const Bytes & vKeyValue );
 	CK_RV importAesKey(CK_SESSION_HANDLE hSession, CK_BBOOL bToken, CK_BBOOL bPrivate, CK_OBJECT_HANDLE &hKey, const Bytes & vKeyValue );
 
 	void unwrapKnownKey(const CK_SESSION_HANDLE hSession, WrappedMaterial & sWrapped);

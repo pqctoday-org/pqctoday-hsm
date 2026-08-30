@@ -1,14 +1,27 @@
 {
-  "algorithm": "AES-KW",
-  "source": "RFC 3394 Section 4.6 — AES-256 Key Wrap, 256-bit key data",
+  "algorithm": "ACVP-AES-KW",
+  "mode": "encrypt",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ACVP-AES-KW-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "f3307d3245bd30ab284fb04df2f24802a3a89de437416bd429426669dc56ff89",
+    "note": "tgId 17 (KEK keyLen=256, direction=encrypt/wrap, kwCipher='cipher' — the standard RFC 3394 forward-cipher construction; this release's other tgIds also cover an 'inverse' construction variant, not used here), tcId 1601, payloadLen=128 bits (16 bytes) — the group's shortest payload, i.e. RFC 3394 §2.2.1's minimum of two 64-bit blocks, and safely within this engine's own floor (rust/src/native/encrypt.rs::aes_key_wrap requires plaintext.len() % 8 == 0 && >= 16; the C++ engine's CKM_AES_KEY_WRAP path in src/lib/SoftHSM_keygen.cpp enforces the identical wrappedlen >= 16 && wrappedlen % 8 == 0 via RFC3394Pad). Independently re-verified against Python's `cryptography.hazmat.primitives.keywrap.aes_key_wrap` before use: wrapping `keyData` under `kek` reproduces `wrapped` exactly. Replaces a real-but-unprovenanced RFC 3394 §4.6 vector (had a `source` citation but no `_provenance` block, so it still failed scripts/check_acvp_provenance.py) with genuine Tier-1 NIST ACVP material per the evidence ladder in docs/remediation-plan-pkcs11-v32-coverage-2026-08-29.md §1 — ACVP-AES-KW exists, so it is mandatory over the RFC 3394 citation alone. WS-0.5 of that plan."
+  },
   "testGroups": [
     {
       "keyLen": 256,
+      "direction": "encrypt",
+      "kwCipher": "cipher",
+      "payloadLen": 128,
       "tests": [
         {
-          "kek": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-          "keyData": "00112233445566778899aabbccddeeff000102030405060708090a0b0c0d0e0f",
-          "wrapped": "28c9f404c4b810f4cbccb35cfb87f8263f5786e2d80ed326cbc7f0e71a99f43bfb988b9b7a02dd21"
+          "tcId": 1601,
+          "kek": "CEC66703B9DEC70887BE1C30D4DB1CCFA7A0B24906280B87FA078BAB1DB4B097",
+          "keyData": "5207914442601FEDD22F274C17975B27",
+          "wrapped": "C949844B62EA0B68250687291E4EBA6E3FA2693B7018E3B6"
         }
       ]
     }

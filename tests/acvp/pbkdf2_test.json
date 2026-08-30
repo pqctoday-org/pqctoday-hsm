@@ -1,56 +1,45 @@
 {
-  "algorithm": "PBKDF2",
-  "source": "Generated via Node.js crypto (OpenSSL backend), PBKDF2-HMAC-SHA256 and PBKDF2-HMAC-SHA512",
+  "algorithm": "PBKDF",
+  "mode": "AFT",
+  "revision": "1.0",
+  "purpose": "PBKDF2 Derive KAT (SP 800-132), tests PKCS#11 CKM_PKCS5_PBKD2 (C_DeriveKey).",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/PBKDF-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "09d0742e01e1ddfa484eeb1cbae3d2061620ebd6dc85fdabdbb2679713a6269f",
+    "note": "Replaces a file with zero _provenance ('Generated via Node.js crypto (OpenSSL backend), PBKDF2-HMAC-SHA256 and PBKDF2-HMAC-SHA512' - self-generated, Tier 4, never admissible per this plan's ladder). NIST's PBKDF-1.0 algorithm is registered as PBKDF (SP 800-132), not 'KDF-Component' or a name under KDF-1.0 - confirmed against the ACVP-Server tree's real folder names at this pinned commit rather than guessed (gen-val/json-files/PBKDF-1.0/, sibling to KDF-1.0 and the separate kdf-components-* families, which cover TLS/SSH/IKEv2/etc. KDFs, not PBKDF2). This pinned commit's internalProjection.json has exactly ONE test group, hmacAlg=SHA2-224 (a real property of this specific commit's randomized generation, not a selection choice - there is no SHA2-256/384/512 group to pick from here). Engine constraints checked before selecting cases: C++ (SoftHSM_keygen.cpp:2883-2891) supports PRF HMAC-SHA1/224/256/384/512 and caps derived key length at 512 bytes (SoftHSM_keygen.cpp:2905, 'pbkdKeyLen > 512' rejected); Rust (ffi.rs:8686, 8699-8709) supports only HMAC-SHA256/384/512 (no SHA1, no SHA224) and additionally floors iterations at 1000 ('iterations < 1000' rejected). Net effect: this pinned commit's only real ACVP PBKDF2 evidence (SHA2-224) exercises the C++ engine only - Rust's PRF match arm (ffi.rs:8699-8709) has no SHA224 case at all (its constants.rs defines CKP_PBKDF2_HMAC_SHA256/384/512 only, no ...SHA224), so there is currently no real-ACVP-backed PBKDF2 coverage for the Rust engine in this repo; that is a genuine evidence gap to flag, not something this file can paper over by relabeling a SHA2-224 vector as SHA2-256. Three cases selected, all with iterationCount >= 1000 (keeping them clear of Rust's floor even though SHA224 itself isn't Rust-supported, in case that changes) and byte-aligned keyLen: tcId 37 (smallest derived key, 14 bytes, good for quick sanity reading), tcId 1 and tcId 7 (larger, more typical derived-key sizes). Independently re-verified all three against Python's hashlib.pbkdf2_hmac('sha224', password.encode('utf-8'), bytes.fromhex(salt), iterationCount, dklen=keyLen//8) immediately before writing this file - 3/3 byte-exact matches. Wired into the test harness: tests/helpers.mjs's pbkdf2() previously hardcoded PRF=CKP_PKCS5_PBKD2_HMAC_SHA512 (used only for a dk1==dk2 determinism self-check, acvp-wasm.mjs test #17 - never compared against a real expected value), so it now takes an explicit prf parameter (default unchanged, so test #17 is unaffected) and a new KAT block (#17.5) in acvp-wasm.mjs derives against tcId 1 here and compares to derivedKey."
+  },
   "testGroups": [
     {
-      "prf": "HMAC-SHA256",
-      "keyLen": 256,
+      "tgId": 1,
+      "testType": "AFT",
+      "hmacAlg": "SHA2-224",
       "tests": [
+        {
+          "tcId": 37,
+          "password": "azxMuoaGPkoDSEPzcfuGTMCLgqNUTrVqN",
+          "salt": "6B7E773ED89844835128BE617895AE1ED8619E311D8D5954F7E3C14BA1F0380DC64CCF82AFB57B",
+          "iterationCount": 8444,
+          "keyLen": 112,
+          "derivedKey": "A1234AC86A60E30A975DFC843269"
+        },
         {
           "tcId": 1,
-          "password": "70617373776f7264",
-          "salt": "73616c74",
-          "iterations": 1,
-          "dkLen": 32,
-          "dk": "120FB6CFFCF8B32C43E7225256C4F837A86548C92CCC35480805987CB70BE17B"
+          "password": "SrsQVnQvjZoVFdGvwujo",
+          "salt": "59312599E8FD2478253203BAA255F587632B44BCBA0B1E71EEB80108B2FCE080897ED3C840561C347D35EEA6F1",
+          "iterationCount": 9776,
+          "keyLen": 560,
+          "derivedKey": "1D5878F597094CFD38A81F0BBD9FD815339654356667EFC8D6F8F5EA29504C80F7B88932E297C17C679111FDE14410D35CC6C4B67193F9E960CC65D979896862DC26E40E8102"
         },
         {
-          "tcId": 2,
-          "password": "70617373776f7264",
-          "salt": "73616c74",
-          "iterations": 4096,
-          "dkLen": 32,
-          "dk": "C5E478D59288C841AA530DB6845C4C8D962893A001CE4E11A4963873AA98134A"
-        },
-        {
-          "tcId": 3,
-          "password": "70617373776f726450415353574f524470617373776f7264",
-          "salt": "73616c7453414c5473616c7453414c5473616c7453414c5473616c7453414c5473616c74",
-          "iterations": 4096,
-          "dkLen": 40,
-          "dk": "348C89DBCBD32B2F32D814B8116E84CF2B17347EBC1800181C4E2A1FB8DD53E1C635518C7DAC47E9"
-        }
-      ]
-    },
-    {
-      "prf": "HMAC-SHA512",
-      "keyLen": 512,
-      "tests": [
-        {
-          "tcId": 4,
-          "password": "70617373776f7264",
-          "salt": "73616c74",
-          "iterations": 1,
-          "dkLen": 64,
-          "dk": "867F70CF1ADE02CFF3752599A3A53DC4AF34C7A669815AE5D513554E1C8CF252C02D470A285A0501BAD999BFE943C08F050235D7D68B1DA55E63F73B60A57FCE"
-        },
-        {
-          "tcId": 5,
-          "password": "70617373776f7264",
-          "salt": "73616c74",
-          "iterations": 4096,
-          "dkLen": 64,
-          "dk": "D197B1B33DB0143E018B12F3D1D1479E6CDEBDCC97C5C0F87F6902E072F457B5143F30602641B3D55CD335988CB36B84376060ECD532E039B742A239434AF2D5"
+          "tcId": 7,
+          "password": "uhrdDKLrKRxkrYZrjal",
+          "salt": "BC0F2ACAADF2049516878B1AF50AA1281E363E25277C695C422A1281111E10058CCF",
+          "iterationCount": 1045,
+          "keyLen": 496,
+          "derivedKey": "A74C12DB2C8157FAF61B83B95E9CD5CDA327DA62DBB6321C7729EA7DC89A6CE3BF498B8B0AB6F2A7031AE4F3D99AC22C3F1C782165CB9E396A40BD19F9A7"
         }
       ]
     }
