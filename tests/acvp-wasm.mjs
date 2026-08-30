@@ -42,6 +42,7 @@ import {
   check,
   importECPublicKey,
   importMLDSAPublicKey,
+  importMLDSAPrivateKey,
   importMLKEMPrivateKey,
   importMLKEMPublicKey,
   generateAESKey,
@@ -56,6 +57,7 @@ import {
   rsaVerify,
   verifyBytes,
   verifyBytesMLDSAContext,
+  signBytesMLDSAContext,
   sign,
   verify,
   slhdsaSign,
@@ -295,6 +297,37 @@ async function runSuite(engineName) {
           addResult(`mldsa-ext-prehash-${v}`, variant, 'SigVer KAT (preHash)', ok ? 'PASS' : 'FAIL', `hashAlg=${tv.hashAlg} sig[${tv.signature.length / 2}B]`)
         } catch (e) {
           addResult(`mldsa-ext-prehash-${v}`, variant, 'SigVer KAT (preHash)', 'FAIL', e.message)
+        }
+      }
+    }
+
+    // ── 5.6. ML-DSA pre-hash SigGen KAT (FIPS 204 tr1, deterministic) ────
+    // WS-3.3 sigGen follow-up (2026-08-30): independent sign-path evidence,
+    // not just sigVer — imports the vector's real sk, signs deterministically
+    // (hedgeVariant=CKH_DETERMINISTIC_REQUIRED), and byte-compares against
+    // the vector's expected signature. Exercises importMLDSAPrivateKey(),
+    // new for this item (mirrors the already-proven importMLKEMPrivateKey /
+    // importSLHDSAPrivateKey — the C++ engine treats all three PQC private
+    // key types identically in C_CreateObject).
+    if (mldsaExtVec && mldsaExtVec.preHashSigGen) {
+      for (const [variant, cases] of Object.entries(mldsaExtVec.preHashSigGen)) {
+        const v = parseInt(variant.split('-')[2])
+        for (const tv of cases) {
+          const mech = MLDSA_HASH_MECH[tv.hashAlg]
+          if (mech === undefined) {
+            addResult(`mldsa-ext-prehash-sg-${v}-${tv.hashAlg}`, variant, 'SigGen KAT (preHash)', 'SKIP', `unmapped hashAlg ${tv.hashAlg}`)
+            continue
+          }
+          try {
+            const priv = importMLDSAPrivateKey(M, hSession, v, hexToBytes(tv.sk))
+            const sig = signBytesMLDSAContext(
+              M, hSession, priv, hexToBytes(tv.message), hexToBytes(tv.context), mech, true)
+            const expected = hexToBytes(tv.signature)
+            const ok = arrEq(sig, expected)
+            addResult(`mldsa-ext-prehash-sg-${v}-${tv.hashAlg}`, variant, 'SigGen KAT (preHash)', ok ? 'PASS' : 'FAIL', `hashAlg=${tv.hashAlg} sig[${sig.length}B]`)
+          } catch (e) {
+            addResult(`mldsa-ext-prehash-sg-${v}-${tv.hashAlg}`, variant, 'SigGen KAT (preHash)', 'FAIL', e.message)
+          }
         }
       }
     }

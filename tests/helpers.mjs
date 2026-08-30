@@ -502,6 +502,32 @@ export function importMLDSAPublicKey(M, hSession, variant, pkBytes) {
   return handle
 }
 
+/** Import an ML-DSA private key (CKO_PRIVATE_KEY) for ACVP SigGen KATs.
+ *  Mirrors importSLHDSAPrivateKey — the C++ engine's C_CreateObject treats
+ *  CKK_ML_KEM/CKK_ML_DSA/CKK_SLH_DSA identically (SoftHSM_keygen.cpp: "PQC
+ *  key types: read CKA_VALUE directly"), so this is expected to work the
+ *  same way its two siblings already do. */
+export function importMLDSAPrivateKey(M, hSession, variant, skBytes) {
+  const ckp =
+    variant === 44 ? CK.CKP_ML_DSA_44 : variant === 65 ? CK.CKP_ML_DSA_65 : CK.CKP_ML_DSA_87
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_PRIVATE_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_ML_DSA },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_SIGN, value: true },
+    { type: CK.CKA_EXTRACTABLE, value: false },
+    { type: CK.CKA_SENSITIVE, value: true },
+    { type: CK.CKA_PARAMETER_SET, value: ckp },
+    { type: CK.CKA_VALUE, value: skBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(ML-DSA-Priv)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
 export function importMLKEMPrivateKey(M, hSession, variant, skBytes) {
   const ckp =
     variant === 512
@@ -926,6 +952,43 @@ export function verifyBytesMLDSAContext(M, hSession, handle, msgBytes, sig, cont
   M._free(paramPtr)
   if (ctxPtr) M._free(ctxPtr)
   return rv === CK.CKR_OK
+}
+
+/**
+ * ML-DSA sign raw bytes with a CK_SIGN_ADDITIONAL_CONTEXT parameter — the
+ * sign-side counterpart of verifyBytesMLDSAContext(), for genuine sigGen
+ * KATs (deterministic sk -> signature, byte-compared against a real ACVP
+ * vector) rather than sigVer-only evidence. `deterministic=true` sets
+ * hedgeVariant to CKH_DETERMINISTIC_REQUIRED so the token must reproduce
+ * the exact vector signature or fail, per PKCS#11 v3.2 §6.67.5.
+ */
+export function signBytesMLDSAContext(M, hSession, handle, msgBytes, contextBytes, mechType = CK.CKM_ML_DSA, deterministic = false) {
+  const CKH_HEDGE_PREFERRED = 0
+  const CKH_DETERMINISTIC_REQUIRED = 2
+  const hedgeVariant = deterministic ? CKH_DETERMINISTIC_REQUIRED : CKH_HEDGE_PREFERRED
+  const ctxPtr = contextBytes.length ? writeBytes(M, contextBytes) : 0
+  const paramPtr = M._malloc(12)
+  M.setValue(paramPtr + 0, hedgeVariant, 'i32')
+  M.setValue(paramPtr + 4, ctxPtr, 'i32')
+  M.setValue(paramPtr + 8, contextBytes.length, 'i32')
+  const mechPtr = buildMech(M, mechType, paramPtr, 12)
+  check('C_SignInit', M._C_SignInit(hSession, mechPtr, handle))
+  const msgPtr = writeBytes(M, msgBytes)
+  const sigLenPtr = allocUlong(M)
+  check('C_Sign(len)', M._C_Sign(hSession, msgPtr, msgBytes.length, 0, sigLenPtr))
+  const sigLen = readUlong(M, sigLenPtr)
+  const sigPtr = M._malloc(sigLen)
+  M.setValue(sigLenPtr, sigLen, 'i32')
+  check('C_Sign', M._C_Sign(hSession, msgPtr, msgBytes.length, sigPtr, sigLenPtr))
+  const actualLen = readUlong(M, sigLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, sigPtr, actualLen).slice()
+  M._free(msgPtr)
+  M._free(sigPtr)
+  M._free(mechPtr)
+  M._free(paramPtr)
+  if (ctxPtr) M._free(ctxPtr)
+  freePtr(M, sigLenPtr)
+  return result
 }
 
 /** Generic sign (text message) */
