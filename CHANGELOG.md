@@ -140,6 +140,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   running the identical `EVP_aes_*_wrap_pad()` path; a new conformance test
   asserts the two produce byte-identical output.
 
+- **Rust engine (`softhsmrustv3`): closed 7 of the C++ engine's WS-8
+  mechanism-parity gaps, plus `CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS`
+  (FIPS 186-5 A.2.2), each backed by real ACVP vectors.** `CKM_AES_GMAC`
+  (GCM's tag-only path over `aes-gcm`, already a direct dependency) and
+  `CKM_SP800_108_DOUBLE_PIPELINE_KDF` needed zero new dependencies;
+  `CKM_AES_CCM` (`ccm` crate), `CKM_AES_XTS`/`CKM_AES_XTS_KEY_GEN`
+  (`xts-mode` crate, including a 5909-byte ciphertext-stealing case), and
+  `CKM_AES_OFB`/`CFB128`/`CFB8`/`CFB1` (dedicated RustCrypto crates, `CFB1`
+  hand-rolled — no published crate exists for it) each added one. EC
+  extra-bits keygen is implemented for P-256/P-384/P-521 only —
+  `secp256k1` isn't governed by FIPS 186-5 at all, so there's no ACVP
+  evidence for it under this mode. Full regression suite
+  (`rust/test_p11_conformance.js`) went from 978/0 to **995/0**; see
+  `docs/remediation-plan-rust-pkcs11-v32-gaps-2026-08-30.md` for the full
+  per-item evidence table. `CKM_ECMQV_DERIVE` is deliberately held back
+  (same protocol-risk reasoning as the C++ engine, independent of
+  language).
+
 ### Fixed
 
 - **BREAKING (C++ engine): `C_WrapKey`/`C_UnwrapKey` under
@@ -303,6 +321,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   production `[dependencies]` entry or the shipped `pqctoday-kmip` binary.
   Verified with two consecutive full `cargo test` runs in `kmip/` (688
   passed / 0 failed each) plus a full `local-gate.sh` core-gate rerun.
+
+- **BREAKING (Rust engine): `CKM_HKDF_DERIVE` no longer silently
+  substitutes SHA-256 for an unrecognized PRF.** Unlike a missing-mechanism
+  gap, which fails loudly with a `CKR_*` error, this one didn't: a caller
+  requesting HKDF with any PRF other than SHA-384/512/SHA3-256/512 (found
+  by real ACVP KAT, not inspection alone) silently got SHA-256 HKDF output
+  instead — same shape of bug as the C++ engine's OAEP hash substitution
+  fixed earlier this release. Now rejects an unrecognized PRF with the
+  correct `CKR_*` error instead of guessing.
+- **Rust engine: SP800-108 Counter/Feedback KDF was missing SHA-1,
+  SHA-224, SHA3-224, and SHA-512-224/256 as PRF options** — a coverage
+  gap that failed safely (`CKR_MECHANISM_PARAM_INVALID`) rather than
+  silently, but was invisible without real ACVP vectors exercising those
+  PRFs. All five now supported, verified against real ACVP KATs.
 
 ## [0.26.1] — 2026-08-27
 
