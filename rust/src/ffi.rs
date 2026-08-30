@@ -1394,6 +1394,9 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // Engine generates P-256/P-384/P-521 (+ secp256k1) — range unified
         // with CKM_ECDSA below (compliance-audit P-15).
         CKM_EC_KEY_PAIR_GEN => (256, 521, 0x00010000 | EC_CAPABILITY_FLAGS),
+        // FIPS 186-5 Appendix A.2.2 "extra bits" keygen — P-256/384/521 only
+        // (see the dispatch arm for why secp256k1 is out of scope here).
+        CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => (256, 521, 0x00010000 | EC_CAPABILITY_FLAGS),
         CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
             (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
         }
@@ -1874,6 +1877,95 @@ unsafe fn xmss_keygen_param_set(
     ps.unwrap_or(default_ps)
 }
 
+/// FIPS 186-5 Appendix A.2.2 "Extra Random Bits" EC private-key
+/// generation, used by CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS: generate
+/// curve_bits+64 random bits, reduce mod (order-1), add 1.
+/// `order_minus_one_be` is (curve order - 1) as a big-endian byte string
+/// (the same width `SigningKey::to_bytes()` produces for that curve);
+/// returns the resulting private scalar in that same width, ready for
+/// `SigningKey::from_slice`. Uses `num-bigint` (already a direct
+/// dependency) for the arbitrary-precision reduction rather than
+/// hand-rolling byte-level long division.
+fn ec_extra_bits_scalar(order_minus_one_be: &[u8], curve_bits: usize) -> Result<Vec<u8>, u32> {
+    let extra_bytes = (curve_bits + 64).div_ceil(8);
+    let mut raw = vec![0u8; extra_bytes];
+    if getrandom::getrandom(&mut raw).is_err() {
+        return Err(CKR_FUNCTION_FAILED);
+    }
+    ec_extra_bits_reduce(&raw, order_minus_one_be)
+}
+
+/// The deterministic half of FIPS 186-5 A.2.2, split out from
+/// `ec_extra_bits_scalar` so it's testable without mocking `getrandom`:
+/// reduce `raw` (the n+64 random bits, as bytes) mod (order-1), add 1,
+/// encode at the same big-endian width as `order_minus_one_be`.
+fn ec_extra_bits_reduce(raw: &[u8], order_minus_one_be: &[u8]) -> Result<Vec<u8>, u32> {
+    let n_minus_1 = num_bigint::BigUint::from_bytes_be(order_minus_one_be);
+    let r = num_bigint::BigUint::from_bytes_be(raw);
+    let d = (r % &n_minus_1) + num_bigint::BigUint::from(1u32);
+    let width = order_minus_one_be.len();
+    let d_bytes = d.to_bytes_be();
+    if d_bytes.len() > width {
+        // Can't happen (d <= order-1 < 2^(8*width) by construction), but
+        // never silently truncate a private scalar.
+        return Err(CKR_FUNCTION_FAILED);
+    }
+    let mut out = vec![0u8; width];
+    out[width - d_bytes.len()..].copy_from_slice(&d_bytes);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod ec_extra_bits_tests {
+    use super::*;
+
+    /// FIPS 186-5 A.2.2 over a small, hand-computed modulus: order-1 = 97
+    /// (order = 98), raw random input = 0x03E9 (1001 decimal). Expected:
+    /// 1001 mod 97 = 30 (1001 = 10*97 + 31 -> 1001 - 970 = 31, so 1001 mod
+    /// 97 = 31), d = 31 + 1 = 32. Cross-checked independently with Python:
+    /// `(1001 % 97) + 1 == 32`.
+    #[test]
+    fn reduce_matches_hand_computed_reference() {
+        let order_minus_1 = [97u8]; // width = 1 byte
+        let raw = [0x03u8, 0xE9u8]; // 1001
+        let d = ec_extra_bits_reduce(&raw, &order_minus_1).unwrap();
+        assert_eq!(d, vec![32u8]);
+    }
+
+    /// The real curve order-1 for P-256, taken from the crate's own
+    /// verified field arithmetic (not hand-transcribed), used as the
+    /// modulus for a larger cross-checked case: raw = order-1 exactly
+    /// (i.e. n_minus_1 itself) -> (n-1) mod (n-1) = 0 -> d = 1 (the
+    /// smallest valid FIPS186-5 extra-bits output, confirming the "+1"
+    /// step and the boundary case both work).
+    #[test]
+    fn reduce_boundary_raw_equals_modulus_gives_one() {
+        use p256::elliptic_curve::Field;
+        let order_minus_1 = (-p256::Scalar::ONE).to_bytes();
+        let d = ec_extra_bits_reduce(&order_minus_1, &order_minus_1).unwrap();
+        let mut expect = vec![0u8; order_minus_1.len()];
+        expect[order_minus_1.len() - 1] = 1;
+        assert_eq!(d, expect);
+    }
+
+    /// raw = 2*(order-1) -> reduces to (order-1) again -> d = order.
+    /// order mod order... wait, d must be in [1, order-1] per FIPS186-5
+    /// (never order itself, since d=order would make dG the identity).
+    /// 2*(n-1) mod (n-1) = 0 -> d = 1, same as the exact-modulus case —
+    /// confirms the reduction never emits an out-of-range scalar even
+    /// when raw is a multiple of the modulus.
+    #[test]
+    fn reduce_never_emits_order_itself() {
+        use p256::elliptic_curve::Field;
+        let order_minus_1_bytes = (-p256::Scalar::ONE).to_bytes();
+        let n_minus_1 = num_bigint::BigUint::from_bytes_be(&order_minus_1_bytes);
+        let raw = (n_minus_1 * num_bigint::BigUint::from(2u32)).to_bytes_be();
+        let d = ec_extra_bits_reduce(&raw, &order_minus_1_bytes).unwrap();
+        let d_val = num_bigint::BigUint::from_bytes_be(&d);
+        assert_eq!(d_val, num_bigint::BigUint::from(1u32));
+    }
+}
+
 fn C_GenerateKeyPair_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
@@ -1914,6 +2006,7 @@ fn C_GenerateKeyPair_impl(
             CKM_SLH_DSA_KEY_PAIR_GEN => Some(CKK_SLH_DSA),
             CKM_RSA_PKCS_KEY_PAIR_GEN => Some(CKK_RSA),
             CKM_EC_KEY_PAIR_GEN => Some(CKK_EC),
+            CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => Some(CKK_EC),
             // HSS, XMSS, and XMSS-MT keygen are all implemented below
             // (real LMS/LM-OTS / XMSS tree generation), and this FFI
             // layer's own C_Sign/C_Verify sign/verify both mechanisms
@@ -2736,6 +2829,171 @@ fn C_GenerateKeyPair_impl(
                     ul_private_key_attribute_count,
                 );
                 // E2 — engine truth, after absorb (see the curve_oid comment).
+                pub_attrs.insert(CKA_EC_PARAMS, curve_oid.clone());
+                prv_attrs.insert(CKA_EC_PARAMS, curve_oid);
+                finalize_private_key_attrs(&mut prv_attrs);
+                compute_kcv(&mut pub_attrs);
+                compute_kcv(&mut prv_attrs);
+                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
+                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                CKR_OK
+            }
+
+            CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => {
+                // FIPS 186-5 Appendix A.2.2 "Extra Random Bits" — see
+                // ec_extra_bits_scalar. Scoped to the NIST prime curves this
+                // engine supports AND that have real ACVP evidence for this
+                // secretGenerationMode (ECDSA-KeyGen-FIPS186-5, P-256/384/
+                // 521); secp256k1 isn't a FIPS186-5 curve at all, so it's
+                // out of scope here (still available via plain
+                // CKM_EC_KEY_PAIR_GEN).
+                let ec_params = get_attr_bytes(
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                    CKA_EC_PARAMS,
+                )
+                .or_else(|| {
+                    get_attr_bytes(
+                        p_private_key_template,
+                        ul_private_key_attribute_count,
+                        CKA_EC_PARAMS,
+                    )
+                });
+                let ec_params = match ec_params {
+                    Some(p) => p,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                let curve = match crate::crypto::handlers::decode_ec_params(&ec_params) {
+                    Ok(c) => c,
+                    Err(rv) => return rv,
+                };
+
+                let mut pub_attrs = HashMap::new();
+                let mut prv_attrs = HashMap::new();
+                store_algo_family(&mut pub_attrs, ALGO_ECDSA);
+                store_algo_family(&mut prv_attrs, ALGO_ECDSA);
+                store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+                store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC);
+                store_bool(&mut pub_attrs, CKA_TOKEN, false);
+                store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+                store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+                store_bool(&mut pub_attrs, CKA_VERIFY, true);
+                store_bool(&mut pub_attrs, CKA_WRAP, false);
+                store_bool(&mut pub_attrs, CKA_DERIVE, false);
+                store_bool(&mut pub_attrs, CKA_LOCAL, true);
+                store_ulong(
+                    &mut pub_attrs,
+                    CKA_KEY_GEN_MECHANISM,
+                    CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS,
+                );
+                store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+                store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC);
+                store_bool(&mut prv_attrs, CKA_TOKEN, false);
+                store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+                store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+                store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+                store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+                store_bool(&mut prv_attrs, CKA_SIGN, true);
+                store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+                store_bool(&mut prv_attrs, CKA_DERIVE, true);
+                store_bool(&mut prv_attrs, CKA_LOCAL, true);
+                store_ulong(
+                    &mut prv_attrs,
+                    CKA_KEY_GEN_MECHANISM,
+                    CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS,
+                );
+
+                let curve_oid: Vec<u8> = match curve {
+                    CURVE_P521 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23],
+                    CURVE_P384 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],
+                    CURVE_P256 => vec![
+                        0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+                    ],
+                    _ => return CKR_CURVE_NOT_SUPPORTED,
+                };
+                use p521::elliptic_curve::Field;
+                match curve {
+                    CURVE_P521 => {
+                        store_param_set(&mut pub_attrs, CURVE_P521);
+                        store_param_set(&mut prv_attrs, CURVE_P521);
+                        let n_minus_1 = (-p521::Scalar::ONE).to_bytes();
+                        let scalar = match ec_extra_bits_scalar(&n_minus_1, 521) {
+                            Ok(s) => s,
+                            Err(rv) => return rv,
+                        };
+                        let sk = match p521::ecdsa::SigningKey::from_slice(&scalar) {
+                            Ok(k) => k,
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        };
+                        let vk = p521::ecdsa::VerifyingKey::from(&sk);
+                        prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+                        let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+                        let mut ec_point = Vec::with_capacity(3 + vk_bytes.len());
+                        ec_point.push(0x04u8);
+                        ec_point.push(0x81u8);
+                        ec_point.push(vk_bytes.len() as u8);
+                        ec_point.extend_from_slice(&vk_bytes);
+                        pub_attrs.insert(CKA_EC_POINT, ec_point);
+                        let spki = build_ec_spki_p521(&vk_bytes);
+                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                    }
+                    CURVE_P384 => {
+                        store_param_set(&mut pub_attrs, CURVE_P384);
+                        store_param_set(&mut prv_attrs, CURVE_P384);
+                        let n_minus_1 = (-p384::Scalar::ONE).to_bytes();
+                        let scalar = match ec_extra_bits_scalar(&n_minus_1, 384) {
+                            Ok(s) => s,
+                            Err(rv) => return rv,
+                        };
+                        let sk = match p384::ecdsa::SigningKey::from_slice(&scalar) {
+                            Ok(k) => k,
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        };
+                        let vk = p384::ecdsa::VerifyingKey::from(&sk);
+                        prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+                        let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+                        let mut ec_point = Vec::with_capacity(2 + vk_bytes.len());
+                        ec_point.push(0x04u8);
+                        ec_point.push(vk_bytes.len() as u8);
+                        ec_point.extend_from_slice(&vk_bytes);
+                        pub_attrs.insert(CKA_EC_POINT, ec_point);
+                        let spki = build_ec_spki_p384(&vk_bytes);
+                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                    }
+                    _ => {
+                        store_param_set(&mut pub_attrs, CURVE_P256);
+                        store_param_set(&mut prv_attrs, CURVE_P256);
+                        let n_minus_1 = (-p256::Scalar::ONE).to_bytes();
+                        let scalar = match ec_extra_bits_scalar(&n_minus_1, 256) {
+                            Ok(s) => s,
+                            Err(rv) => return rv,
+                        };
+                        let sk = match p256::ecdsa::SigningKey::from_slice(&scalar) {
+                            Ok(k) => k,
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        };
+                        let vk = p256::ecdsa::VerifyingKey::from(&sk);
+                        prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+                        let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+                        let mut ec_point = Vec::with_capacity(2 + vk_bytes.len());
+                        ec_point.push(0x04u8);
+                        ec_point.push(vk_bytes.len() as u8);
+                        ec_point.extend_from_slice(&vk_bytes);
+                        pub_attrs.insert(CKA_EC_POINT, ec_point);
+                        let spki = build_ec_spki_p256(&vk_bytes);
+                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                    }
+                }
+                absorb_template_attrs(
+                    &mut pub_attrs,
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                );
+                absorb_template_attrs(
+                    &mut prv_attrs,
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                );
                 pub_attrs.insert(CKA_EC_PARAMS, curve_oid.clone());
                 prv_attrs.insert(CKA_EC_PARAMS, curve_oid);
                 finalize_private_key_attrs(&mut prv_attrs);
