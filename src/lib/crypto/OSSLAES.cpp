@@ -203,8 +203,21 @@ const EVP_CIPHER* OSSLAES::getCipher() const
 {
 	if (currentKey == NULL) return NULL;
 
-	// Check currentKey bit length; AES only supports 128, 192 or 256 bit keys
-	if ((currentKey->getBitLen() != 128) &&
+	// Check currentKey bit length; AES only supports 128, 192 or 256 bit keys.
+	// CKM_AES_XTS is the one exception (WS-8, 2026-08-30): PKCS#11 v3.2
+	// §6.15.2 defines CKA_VALUE as 32 or 64 raw bytes (256/512 bits) —
+	// internally two independent AES-128 or AES-256 sub-keys concatenated,
+	// which EVP_aes_128_xts()/EVP_aes_256_xts() below consume as one opaque
+	// double-length key exactly as PKCS#11 stores it.
+	if (currentCipherMode == SymMode::XTS)
+	{
+		if (currentKey->getBitLen() != 256 && currentKey->getBitLen() != 512)
+		{
+			ERROR_MSG("Invalid AES-XTS currentKey length (%d bits)", currentKey->getBitLen());
+			return NULL;
+		}
+	}
+	else if ((currentKey->getBitLen() != 128) &&
 	    (currentKey->getBitLen() != 192) &&
             (currentKey->getBitLen() != 256))
 	{
@@ -320,6 +333,16 @@ const EVP_CIPHER* OSSLAES::getCipher() const
 				return EVP_aes_192_ccm();
 			case 256:
 				return EVP_aes_256_ccm();
+		};
+	}
+	else if (currentCipherMode == SymMode::XTS)
+	{
+		switch(currentKey->getBitLen())
+		{
+			case 256:
+				return EVP_aes_128_xts();
+			case 512:
+				return EVP_aes_256_xts();
 		};
 	}
 

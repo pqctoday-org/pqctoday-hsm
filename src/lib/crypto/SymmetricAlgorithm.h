@@ -66,7 +66,8 @@ struct SymMode
 		CFB1,		///< CKM_AES_CFB1 (WS-8, 2026-08-30)
 		CFB8,		///< CKM_AES_CFB8
 		CFB128,		///< CKM_AES_CFB128 (CFB is kept as a legacy alias, unused)
-		CCM		///< CKM_AES_CCM
+		CCM,		///< CKM_AES_CCM
+		XTS		///< CKM_AES_XTS (double-length 256/512-bit key)
 	};
 };
 

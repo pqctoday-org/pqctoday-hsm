@@ -392,6 +392,10 @@ CK_RV SoftHSM::C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 			objClass = CKO_SECRET_KEY;
 			keyType = CKK_AES;
 			break;
+		case CKM_AES_XTS_KEY_GEN:
+			objClass = CKO_SECRET_KEY;
+			keyType = CKK_AES_XTS;
+			break;
 		case CKM_GENERIC_SECRET_KEY_GEN:
 			objClass = CKO_SECRET_KEY;
 			keyType = CKK_GENERIC_SECRET;
@@ -412,6 +416,9 @@ CK_RV SoftHSM::C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 		return CKR_ATTRIBUTE_VALUE_INVALID;
 	if (pMechanism->mechanism == CKM_AES_KEY_GEN &&
 	    (objClass != CKO_SECRET_KEY || keyType != CKK_AES))
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_AES_XTS_KEY_GEN &&
+	    (objClass != CKO_SECRET_KEY || keyType != CKK_AES_XTS))
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_GENERIC_SECRET_KEY_GEN &&
 	    (objClass != CKO_SECRET_KEY || keyType != CKK_GENERIC_SECRET))
@@ -447,6 +454,12 @@ CK_RV SoftHSM::C_GenerateKey(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 	if (pMechanism->mechanism == CKM_GENERIC_SECRET_KEY_GEN)
 	{
 		return this->generateGeneric(hSession, pTemplate, ulCount, phKey, isOnToken, isPrivate);
+	}
+
+	// Generate double-length AES-XTS secret key
+	if (pMechanism->mechanism == CKM_AES_XTS_KEY_GEN)
+	{
+		return this->generateAESXTS(hSession, pTemplate, ulCount, phKey, isOnToken, isPrivate);
 	}
 
 	return CKR_GENERAL_ERROR;
@@ -4610,6 +4623,166 @@ CK_RV SoftHSM::generateGeneric
 
 	// Clean up
 	// Remove the key that may have been created already when the function fails.
+	if (rv != CKR_OK)
+	{
+		if (*phKey != CK_INVALID_HANDLE)
+		{
+			OSObject* oskey = (OSObject*)handleManager->getObject(*phKey);
+			handleManager->destroyObject(*phKey);
+			if (oskey) oskey->destroyObject();
+			*phKey = CK_INVALID_HANDLE;
+		}
+	}
+
+	return rv;
+}
+
+// Generate a double-length AES-XTS secret key (PKCS#11 v3.2 §6.15.3,
+// CKM_AES_XTS_KEY_GEN = 0x00001072). WS-8 (2026-08-30). Deliberately NOT
+// built on generateAES()'s AESKey/OSSLAES path: AESKey::getKeyCheckValue()
+// runs an AES-ECB encrypt under the hood, and OSSLAES::getCipher() rejects
+// any key that isn't 128/192/256 bits — exactly the combined 256/512-bit
+// lengths CKK_AES_XTS keys use. This mirrors generateGeneric() instead: raw
+// RNG bytes, generic SymmetricKey (SHA-256-based) check value — the same
+// non-AES-specific KCV bucket P11Attributes.cpp and computeSecretKeyKCV()
+// already use for this key type.
+CK_RV SoftHSM::generateAESXTS
+(CK_SESSION_HANDLE hSession,
+	CK_ATTRIBUTE_PTR pTemplate,
+	CK_ULONG ulCount,
+	CK_OBJECT_HANDLE_PTR phKey,
+	CK_BBOOL isOnToken,
+	CK_BBOOL isPrivate)
+{
+	*phKey = CK_INVALID_HANDLE;
+
+	auto sessionGuard = handleManager->getSessionShared(hSession);
+	Session* session = sessionGuard.get();
+	if (session == NULL)
+		return CKR_SESSION_HANDLE_INVALID;
+
+	Token* token = session->getToken();
+	if (token == NULL)
+		return CKR_GENERAL_ERROR;
+
+	size_t keyLen = 0;
+	bool checkValue = true;
+	bool kcvSupplied = false;
+	ByteString kcvWanted;
+	for (CK_ULONG i = 0; i < ulCount; i++)
+	{
+		switch (pTemplate[i].type)
+		{
+			case CKA_VALUE_LEN:
+				if (pTemplate[i].ulValueLen != sizeof(CK_ULONG))
+				{
+					INFO_MSG("CKA_VALUE_LEN does not have the size of CK_ULONG");
+					return CKR_ATTRIBUTE_VALUE_INVALID;
+				}
+				keyLen = *(CK_ULONG*)pTemplate[i].pValue;
+				break;
+			case CKA_CHECK_VALUE:
+			{
+				CK_RV kcvRv = checkValueFromTemplate(pTemplate[i], checkValue, kcvSupplied, kcvWanted);
+				if (kcvRv != CKR_OK) return kcvRv;
+				break;
+			}
+			default:
+				break;
+		}
+	}
+
+	// PKCS#11 v3.2 §6.15.2 Table 124: "Key value (32 or 64 bytes)".
+	if (keyLen != 32 && keyLen != 64)
+	{
+		INFO_MSG("CKA_VALUE_LEN must be 32 or 64 for CKM_AES_XTS_KEY_GEN");
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+
+	RNG* rng = CryptoFactory::i()->getRNG();
+	if (rng == NULL) return CKR_GENERAL_ERROR;
+	ByteString key;
+	if (!rng->generateRandom(key, keyLen)) return CKR_GENERAL_ERROR;
+
+	CK_RV rv = CKR_OK;
+
+	const CK_ULONG maxAttribs = 32;
+	CK_OBJECT_CLASS objClass = CKO_SECRET_KEY;
+	CK_KEY_TYPE keyType = CKK_AES_XTS;
+	CK_ATTRIBUTE keyAttribs[maxAttribs] = {
+		{ CKA_CLASS, &objClass, sizeof(objClass) },
+		{ CKA_TOKEN, &isOnToken, sizeof(isOnToken) },
+		{ CKA_PRIVATE, &isPrivate, sizeof(isPrivate) },
+		{ CKA_KEY_TYPE, &keyType, sizeof(keyType) },
+	};
+	CK_ULONG keyAttribsCount = 4;
+
+	if (ulCount > (maxAttribs - keyAttribsCount))
+		rv = CKR_TEMPLATE_INCONSISTENT;
+	for (CK_ULONG i = 0; i < ulCount && rv == CKR_OK; ++i)
+	{
+		switch (pTemplate[i].type)
+		{
+			case CKA_CLASS:
+			case CKA_TOKEN:
+			case CKA_PRIVATE:
+			case CKA_KEY_TYPE:
+			case CKA_CHECK_VALUE:
+				continue;
+			default:
+				keyAttribs[keyAttribsCount++] = pTemplate[i];
+				break;
+		}
+	}
+
+	if (rv == CKR_OK)
+		rv = CreateObject(hSession, keyAttribs, keyAttribsCount, phKey, OBJECT_OP_GENERATE);
+
+	if (rv == CKR_OK)
+	{
+		OSObject* osobject = (OSObject*)handleManager->getObject(*phKey);
+		if (osobject == NULL_PTR || !osobject->isValid()) {
+			rv = CKR_FUNCTION_FAILED;
+		} else if (osobject->startTransaction()) {
+			bool bOK = true;
+
+			bOK = bOK && osobject->setAttribute(CKA_LOCAL, true);
+			CK_ULONG ulKeyGenMechanism = (CK_ULONG)CKM_AES_XTS_KEY_GEN;
+			bOK = bOK && osobject->setAttribute(CKA_KEY_GEN_MECHANISM, ulKeyGenMechanism);
+
+			bool bAlwaysSensitive = osobject->getBooleanValue(CKA_SENSITIVE, false);
+			bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, bAlwaysSensitive);
+			bool bNeverExtractable = osobject->getBooleanValue(CKA_EXTRACTABLE, false) == false;
+			bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, bNeverExtractable);
+
+			ByteString value;
+			ByteString kcv;
+			SymmetricKey symKey;
+			symKey.setKeyBits(key);
+			symKey.setBitLen(keyLen * 8);
+			if (isPrivate)
+				bOK = bOK && token->encrypt(symKey.getKeyBits(), value);
+			else
+				value = symKey.getKeyBits();
+			kcv = symKey.getKeyCheckValue();
+			bOK = bOK && osobject->setAttribute(CKA_VALUE, value);
+			CK_RV kcvRv = checkValueVerify(kcvSupplied, kcvWanted, kcv);
+			bOK = bOK && (kcvRv == CKR_OK);
+
+			if (checkValue)
+				bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+
+			if (bOK)
+				bOK = osobject->commitTransaction();
+			else
+				osobject->abortTransaction();
+
+			if (!bOK)
+				rv = (kcvRv != CKR_OK) ? kcvRv : CKR_FUNCTION_FAILED;
+		} else
+			rv = CKR_FUNCTION_FAILED;
+	}
+
 	if (rv != CKR_OK)
 	{
 		if (*phKey != CK_INVALID_HANDLE)

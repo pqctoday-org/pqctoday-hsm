@@ -92,6 +92,9 @@ import {
   aesCcmDecrypt,
   gmacSign,
   gmacVerify,
+  importAESXTSKey,
+  aesXtsEncrypt,
+  aesXtsDecrypt,
   generateHSSKeyPair,
   hssSign,
   hssVerify,
@@ -150,6 +153,7 @@ const aesCfb8Vec = loadJson('aes_cfb8_test.json')
 const aesCfb128Vec = loadJson('aes_cfb128_test.json')
 const aesCcmVec = loadJson('aes_ccm_test.json')
 const aesGmacVec = loadJson('aes_gmac_test.json')
+const aesXtsVec = loadJson('aes_xts_test.json')
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function arrEq(a, b) {
@@ -1405,6 +1409,30 @@ async function runSuite(engineName) {
           }
         } catch (e) {
           addResult('gmac', 'AES-GMAC', `${c.op} KAT (${c.keyLen}-bit)`, 'FAIL', e.message)
+        }
+      }
+    }
+
+    // ── 18h. AES-XTS Real ACVP KAT — new CKK_AES_XTS key type + mechanism
+    // (WS-8, 2026-08-30; see aes_xts_test.json's _provenance) ────────────
+    if (mechs.size > 0 && !mechs.has(CK.CKM_AES_XTS)) {
+      addResult('xts', 'AES-XTS', 'KAT', 'SKIP', 'mechanism not supported')
+    } else {
+      for (const c of aesXtsVec.cases) {
+        try {
+          if (c.direction === 'encrypt') {
+            const keyH = importAESXTSKey(M, hSession, hexToBytes(c.key), { encrypt: true, decrypt: false })
+            const ct = aesXtsEncrypt(M, hSession, keyH, hexToBytes(c.pt), hexToBytes(c.tweak))
+            const ok = arrEq(ct, hexToBytes(c.ct))
+            addResult('xts', 'AES-XTS', `Encrypt KAT (${c.keyLen}-bit, ${ct.length}B, ciphertext-stealing)`, ok ? 'PASS' : 'FAIL', `CT[${ct.length}B]: ${bytesToHex(ct, 16)}`)
+          } else {
+            const keyH = importAESXTSKey(M, hSession, hexToBytes(c.key), { encrypt: false, decrypt: true })
+            const pt = aesXtsDecrypt(M, hSession, keyH, hexToBytes(c.ct), hexToBytes(c.tweak))
+            const ok = arrEq(pt, hexToBytes(c.pt))
+            addResult('xts', 'AES-XTS', `Decrypt KAT (${c.keyLen}-bit, ${pt.length}B)`, ok ? 'PASS' : 'FAIL', `PT[${pt.length}B]: ${bytesToHex(pt, 16)}`)
+          }
+        } catch (e) {
+          addResult('xts', 'AES-XTS', `${c.direction} KAT (${c.keyLen}-bit)`, 'FAIL', e.message)
         }
       }
     }

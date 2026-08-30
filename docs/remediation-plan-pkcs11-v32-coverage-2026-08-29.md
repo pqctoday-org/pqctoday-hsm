@@ -479,6 +479,39 @@ Do not start an IN row until its `internalProjection.json` has been located; do 
 | 12 × `CKM_SHA*_KEY_GEN` | Generic-secret generation, not an algorithm under test. Low impact anyway — `CKM_GENERIC_SECRET_KEY_GEN` covers the use case, and `kMacMechTable` sets `allowGenericSecret=true` for every HMAC row (`SoftHSM_sign.cpp:125-133`) |
 | `CKM_EXTRACT_KEY_FROM_KEY` (WS-6.6) | Key-material slicing, no ACVP algorithm. **Reconsider separately** — its absence is a genuine asymmetry against the three implemented `CKM_CONCATENATE_*`, which is an argument independent of vector availability |
 
+### C++ engine — investigated 2026-08-30 (WS-8, this session)
+
+Confirmed real ACVP vectors exist for `CKM_AES_CCM`, `CKM_AES_OFB`,
+`CKM_AES_CFB1/8/128`, `CKM_AES_GMAC`, `CKM_AES_XTS`
+(`ACVP-AES-XTS-1.0`/`-2.0`), and `CKM_ECMQV_DERIVE` (`KAS-ECC-1.0` publishes
+real `fullMqv`/`onePassMqv` scheme vectors — the earlier "verify MQV schemes
+are published" open question above is now resolved: they are). C++ had
+**zero** of these six/seven mechanisms implemented before this session (only
+ECB/CBC/CTR/GCM existed on the cipher side, only HMAC/CMAC/KMAC on the MAC
+side). CCM/OFB/CFB1/CFB8/CFB128/GMAC are done — real evidence, all passing
+(see git history 2026-08-30). Two remain, assessed as follows:
+
+- **`CKM_AES_XTS`**: being implemented now (double-length `CKK_AES_XTS` key
+  type; every file that currently gates on `keyType == CKK_AES` — object
+  attribute validation, check-value computation, cipher key-length
+  validation — hard-assumes single-length 128/192/256-bit AES keys and needs
+  a parallel path for XTS's 256/512-bit combined keys).
+- **`CKM_ECMQV_DERIVE`**: **deliberately not implemented.** ACVP vectors
+  exist, but OpenSSL's EVP API exposes no MQV primitive at all — PKCS#11
+  full-MQV requires the raw private-key scalar (extractable via
+  `EVP_PKEY_get_bn_param(..., OSSL_PKEY_PARAM_PRIV_KEY, ...)`, itself a
+  lower-level escape hatch), the SP 800-56A "associate value function," and
+  hand-driven `EC_POINT`/`BN_*` point addition and scalar multiplication to
+  combine two key pairs (static + ephemeral) on each side. This is a
+  different risk class from every other WS-8 mechanism: a subtly wrong MQV
+  combiner can pass every KAT it's tested against while still being
+  cryptographically unsound (e.g. missing the standard's required public-key
+  validation / small-subgroup checks), in a way ACVP functional vectors
+  alone won't necessarily surface. Explicit user decision 2026-08-30: skip,
+  document as a real blocker rather than attempt it under this session's
+  general evidence-first methodology, which is calibrated for functional
+  correctness, not for auditing a hand-rolled cryptographic protocol.
+
 ### Rust dependency research (2026-08-29) — `CKM_AES_XTS`
 
 Unlike CCM/OFB/CFB (all covered by well-known RustCrypto `block-modes`/`AEADs` crates already used elsewhere in this codebase's dependency family), **RustCrypto has no working XTS implementation**, despite appearances:

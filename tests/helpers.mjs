@@ -487,6 +487,66 @@ export function importAESKey(
   return handle
 }
 
+/** CKK_AES_XTS key import (WS-8, 2026-08-30) — double-length (32/64-byte) raw key */
+export function importAESXTSKey(M, hSession, keyBytes, { encrypt = true, decrypt = true, extractable = true } = {}) {
+  const tpl = buildTemplate(M, [
+    { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },
+    { type: CK.CKA_KEY_TYPE, value: CK.CKK_AES_XTS },
+    { type: CK.CKA_TOKEN, value: false },
+    { type: CK.CKA_ENCRYPT, value: encrypt },
+    { type: CK.CKA_DECRYPT, value: decrypt },
+    { type: CK.CKA_EXTRACTABLE, value: extractable },
+    { type: CK.CKA_SENSITIVE, value: !extractable },
+    { type: CK.CKA_VALUE, value: keyBytes },
+  ])
+  const hPtr = allocUlong(M)
+  check('C_CreateObject(AES-XTS)', M._C_CreateObject(hSession, tpl.arrPtr, tpl.count, hPtr))
+  const handle = readUlong(M, hPtr)
+  freeTemplate(M, tpl)
+  freePtr(M, hPtr)
+  return handle
+}
+
+/** AES-XTS decrypt (single-shot). `tweak` is the 16-byte Data Unit Sequence Number. */
+export function aesXtsDecrypt(M, hSession, handle, ct, tweak) {
+  const tweakPtr = writeBytes(M, tweak)
+  const mechPtr = buildMech(M, CK.CKM_AES_XTS, tweakPtr, 16)
+  check('C_DecryptInit(XTS)', M._C_DecryptInit(hSession, mechPtr, handle))
+  const ctPtr = writeBytes(M, ct)
+  const outPtr = M._malloc(ct.length + 16)
+  const outLenPtr = allocUlong(M)
+  M.setValue(outLenPtr, ct.length + 16, 'i32')
+  check('C_Decrypt(XTS)', M._C_Decrypt(hSession, ctPtr, ct.length, outPtr, outLenPtr))
+  const actualLen = readUlong(M, outLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, outPtr, actualLen).slice()
+  M._free(ctPtr)
+  M._free(outPtr)
+  freePtr(M, outLenPtr)
+  M._free(mechPtr)
+  M._free(tweakPtr)
+  return result
+}
+
+/** AES-XTS encrypt (single-shot). `tweak` is the 16-byte Data Unit Sequence Number. */
+export function aesXtsEncrypt(M, hSession, handle, pt, tweak) {
+  const tweakPtr = writeBytes(M, tweak)
+  const mechPtr = buildMech(M, CK.CKM_AES_XTS, tweakPtr, 16)
+  check('C_EncryptInit(XTS)', M._C_EncryptInit(hSession, mechPtr, handle))
+  const ptPtr = writeBytes(M, pt)
+  const outPtr = M._malloc(pt.length + 16)
+  const outLenPtr = allocUlong(M)
+  M.setValue(outLenPtr, pt.length + 16, 'i32')
+  check('C_Encrypt(XTS)', M._C_Encrypt(hSession, ptPtr, pt.length, outPtr, outLenPtr))
+  const actualLen = readUlong(M, outLenPtr)
+  const result = new Uint8Array(M.HEAPU8.buffer, outPtr, actualLen).slice()
+  M._free(ptPtr)
+  M._free(outPtr)
+  freePtr(M, outLenPtr)
+  M._free(mechPtr)
+  M._free(tweakPtr)
+  return result
+}
+
 export function importHMACKey(M, hSession, keyBytes, { sign = true, verify = true } = {}) {
   const tpl = buildTemplate(M, [
     { type: CK.CKA_CLASS, value: CK.CKO_SECRET_KEY },

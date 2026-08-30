@@ -57,6 +57,7 @@ static bool isSymMechanism(CK_MECHANISM_PTR pMechanism)
 		case CKM_AES_CBC:
 		case CKM_AES_CBC_PAD:
 		case CKM_AES_CTR:
+		case CKM_AES_XTS:
 		case CKM_AES_GCM:
 		case CKM_AES_OFB:
 		case CKM_AES_CFB1:
@@ -272,6 +273,22 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				tagBytes = ccmp->ulMACLen;
 				dataLen = ccmp->ulDataLen;
 			}
+			break;
+		case CKM_AES_XTS:
+			// PKCS#11 v3.2 §6.15.4: CKK_AES_XTS keys only (never plain CKK_AES).
+			if (keyType != CKK_AES_XTS)
+				return CKR_KEY_TYPE_INCONSISTENT;
+			algo = SymAlgo::AES;
+			mode = SymMode::XTS;
+			// Single parameter: a 16-byte Data Unit Sequence Number (the tweak).
+			if (pMechanism->pParameter == NULL_PTR ||
+			    pMechanism->ulParameterLen != 16)
+			{
+				DEBUG_MSG("XTS mode requires a 16-byte Data Unit Sequence Number");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			iv.resize(16);
+			memcpy(&iv[0], pMechanism->pParameter, 16);
 			break;
 		case CKM_AES_GCM:
 			if (keyType != CKK_AES)
@@ -1077,6 +1094,22 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				tagBytes = ccmp->ulMACLen;
 				dataLen = ccmp->ulDataLen;
 			}
+			break;
+		case CKM_AES_XTS:
+			// PKCS#11 v3.2 §6.15.4: CKK_AES_XTS keys only (never plain CKK_AES).
+			if (keyType != CKK_AES_XTS)
+				return CKR_KEY_TYPE_INCONSISTENT;
+			algo = SymAlgo::AES;
+			mode = SymMode::XTS;
+			// Single parameter: a 16-byte Data Unit Sequence Number (the tweak).
+			if (pMechanism->pParameter == NULL_PTR ||
+			    pMechanism->ulParameterLen != 16)
+			{
+				DEBUG_MSG("XTS mode requires a 16-byte Data Unit Sequence Number");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			iv.resize(16);
+			memcpy(&iv[0], pMechanism->pParameter, 16);
 			break;
 		case CKM_AES_GCM:
 			if (keyType != CKK_AES)

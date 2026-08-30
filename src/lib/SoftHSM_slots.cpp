@@ -565,6 +565,8 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_AES_CFB8"]		= CKM_AES_CFB8;
 	t["CKM_AES_CFB128"]		= CKM_AES_CFB128;
 	t["CKM_AES_CCM"]		= CKM_AES_CCM;
+	t["CKM_AES_XTS"]		= CKM_AES_XTS;
+	t["CKM_AES_XTS_KEY_GEN"]	= CKM_AES_XTS_KEY_GEN;
 	t["CKM_AES_KEY_WRAP"]		= CKM_AES_KEY_WRAP;
 #ifdef HAVE_AES_KEY_WRAP_PAD
 	t["CKM_AES_KEY_WRAP_PAD"]	= CKM_AES_KEY_WRAP_PAD;
@@ -1049,6 +1051,21 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMinKeySize = 16;
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT;
+			break;
+		case CKM_AES_XTS:
+			// Key size is reported in BYTES for XTS (v3.2 §6.15.3), unlike every
+			// other AES mechanism above (bits, matching CK_MECHANISM_INFO's
+			// general convention) — this engine reports byte counts throughout
+			// this switch already (16/24/32 above are also bytes), so 32/64
+			// here is consistent with that, not a special case.
+			pInfo->ulMinKeySize = 32;
+			pInfo->ulMaxKeySize = 64;
+			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT;
+			break;
+		case CKM_AES_XTS_KEY_GEN:
+			pInfo->ulMinKeySize = 32;
+			pInfo->ulMaxKeySize = 64;
+			pInfo->flags = CKF_GENERATE;
 			break;
 		case CKM_CHACHA20_KEY_GEN:
 			pInfo->ulMinKeySize = 32;
