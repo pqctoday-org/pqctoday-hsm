@@ -409,6 +409,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Verified with two consecutive full `cargo test` runs in `kmip/` (688
   passed / 0 failed each) plus a full `local-gate.sh` core-gate rerun.
 
+- **C++ engine: closed real evidence-integrity gaps in the ACVP/WASM test
+  harness (WS-0, WS-3.2/3.3/5.4).** Several checks that looked green were
+  either not running the vectors they claimed to, or would have failed
+  silently instead of loudly:
+  - `getMechanismSet` returned an empty `Set` on `C_GetMechanismList`
+    failure, indistinguishable from a healthy engine that legitimately
+    advertises nothing — every caller's `mechs.size > 0 && !mechs.has(...)`
+    skip-guard read a broken engine as "advertises nothing, skip" instead
+    of failing loudly. Now throws immediately with the real `CKR_*` code.
+  - `tests/parity-wasm.mjs` (the cross-engine C++/Rust parity check) had
+    never actually run — it looked for WASM bundle paths that don't exist
+    (path drift), always hit its `existsSync` guard and exited 0 SKIPPED.
+    Repaired to reuse the proven `loadEngine()`; its first-ever real run
+    surfaced and fixed a genuine test bug (a malformed Rust ML-KEM keygen
+    template) and confirmed cross-engine ML-KEM/ML-DSA parity for real.
+  - `smoke-wasm.mjs` had declared an ML-DSA-65 keygen→sign→verify check in
+    its header since it was written, but the test body never implemented
+    it. Now implemented for real.
+  - New provenance-enforcement gate (`scripts/check_acvp_provenance.py`,
+    wired into `local-gate.sh`) verifies every `tests/acvp/*.json` file
+    carries a real `_provenance`/`_provenance_tier3` block whose
+    `source_sha256` matches a live re-fetch of `source_url` — closing 9
+    files (AES-CTR/GCM/KW, ECDSA P-256/384/521, KMAC, PBKDF2, RSA-PSS)
+    that were self-generated or fabricated with real NIST ACVP material;
+    29/29 vector files now pass. One P-521 ECDSA vector is real but
+    deliberately left unwired (`importECPublicKey`'s DER length encoding
+    can't yet represent its 133-byte point) — documented, not papered
+    over.
+  - SLH-DSA SigVer/SigGen now iterates all 12 `slhdsa_ctx_test.json`
+    parameter sets instead of 1; SHA3-256/512 now check real ACVP cases
+    instead of a single hand-typed constant; ML-DSA context-mode SigVer
+    (FIPS 204 tr1) is wired in via a new `verifyBytesMLDSAContext()`
+    helper. C++ ACVP harness total: 150 → 180 PASS, 0 FAIL, 0 SKIP.
+  - Removed ~69 dead DES/DES3 references (functions, KAT blobs, mechanism
+    case-labels) from the legacy CppUnit suite — DES was never in this
+    fork's retained-algorithm set.
+
+  Known gaps surfaced, not fixed here: Rust has no PBKDF2-SHA224 PRF arm;
+  running the ACVP harness against Rust for the first time also surfaced
+  15 pre-existing failures (all 5 EdDSA variants, both RSA-OAEP unwrap
+  KATs) — real defects for the Rust WS-2 gap-remediation pass, not this
+  branch's scope. KMAC has real Tier-1 evidence but no harness helper yet.
+  SHA3-384 still has no ACVP vector file at all.
+
 - **BREAKING (Rust engine): `CKM_HKDF_DERIVE` no longer silently
   substitutes SHA-256 for an unrecognized PRF.** Unlike a missing-mechanism
   gap, which fails loudly with a `CKR_*` error, this one didn't: a caller

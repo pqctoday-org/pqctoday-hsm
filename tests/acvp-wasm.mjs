@@ -1709,7 +1709,6 @@ async function runSuite(engineName) {
       ['SLH-DSA-SHAKE-256s', CK.CKP_SLH_DSA_SHAKE_256S],
       ['SLH-DSA-SHAKE-256f', CK.CKP_SLH_DSA_SHAKE_256F],
     ]
-
     for (const [name, ckp] of SLH_DSA_PARAM_SETS) {
       // ── SigVer KAT ──
       if (slhdsaCtxVec && slhdsaCtxVec.sigVer && slhdsaCtxVec.sigVer[name]) {
