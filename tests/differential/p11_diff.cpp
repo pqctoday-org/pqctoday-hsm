@@ -41,6 +41,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <chrono>
 #include <dlfcn.h>
 #include <getopt.h>
 
@@ -117,6 +118,16 @@ static std::string opt_exceptions = "tests/differential/exceptions.json";
 static std::string opt_only;      // substring filter on scenario id
 static std::string opt_drop_exception; // demonstration: ignore one entry by id
 static bool        opt_verbose  = false;
+// --shard I/N — round-robin partition of gScenarios (index % N == I) so N
+// worker processes can split the run across cores. Each shard dlopens BOTH
+// engines fresh and runs independently (see the single-process rationale
+// in tests/differential/README.md — that rationale is per-PROCESS, not
+// per-run, so N processes each honouring it is the safe way to add
+// parallelism without threading either engine, which neither this harness
+// nor either engine has ever been asserted safe for). -1 means unsharded
+// (run everything, the historical default).
+static int opt_shard_index = -1;
+static int opt_shard_count = 1;
 
 static const char* SO_PIN   = "12345678";
 static const char* USER_PIN = "1234";
@@ -1062,6 +1073,7 @@ int main(int argc, char** argv) {
         {"drop-exception", required_argument, 0, 7},
         {"verbose", no_argument, 0, 8},
         {"list", no_argument, 0, 9},
+        {"shard", required_argument, 0, 10},
         {"help", no_argument, 0, 'h'},
         {0,0,0,0}
     };
@@ -1077,6 +1089,21 @@ int main(int argc, char** argv) {
             case 7: opt_drop_exception = optarg; break;
             case 8: opt_verbose = true; break;
             case 9: list_only = true; break;
+            case 10: {
+                std::string v = optarg;
+                size_t slash = v.find('/');
+                if (slash == std::string::npos) {
+                    fprintf(stdout, "FATAL: --shard wants I/N, e.g. --shard 2/8\n");
+                    return 2;
+                }
+                opt_shard_index = atoi(v.substr(0, slash).c_str());
+                opt_shard_count = atoi(v.substr(slash + 1).c_str());
+                if (opt_shard_count < 1 || opt_shard_index < 0 || opt_shard_index >= opt_shard_count) {
+                    fprintf(stdout, "FATAL: --shard %s out of range (want 0 <= I < N)\n", v.c_str());
+                    return 2;
+                }
+                break;
+            }
             default: usage(); return 2;
         }
     }
@@ -1136,9 +1163,34 @@ int main(int argc, char** argv) {
     printf("cpp  mechanisms: %zu\n", gCpp.mechs.size());
     printf("rust mechanisms: %zu\n", gRust.mechs.size());
 
-    int ran = 0, skipped = 0;
-    for (const auto& sc : gScenarios) {
+    // Filter by --only (substring) and --shard (round-robin on the GLOBAL
+    // index, before filtering by --only, so a shard's membership doesn't
+    // shift depending on what --only happens to also be set to).
+    std::vector<const Scenario*> queue;
+    for (size_t i = 0; i < gScenarios.size(); i++) {
+        if (opt_shard_index >= 0 && (int)(i % opt_shard_count) != opt_shard_index) continue;
+        const auto& sc = gScenarios[i];
         if (!opt_only.empty() && sc.id.find(opt_only) == std::string::npos) continue;
+        queue.push_back(&sc);
+    }
+
+    int ran = 0, skipped = 0;
+    size_t total = queue.size();
+    for (size_t qi = 0; qi < total; qi++) {
+        const Scenario& sc = *queue[qi];
+        // Progress, printed and FLUSHED before the scenario runs — this is
+        // what shows which scenario a hang is stuck in, not just what
+        // finished before it. Prefixed so a sharded run's interleaved
+        // stdout (each worker on its own fd, not actually interleaved
+        // character-by-character, but still worth a stable prefix) reads
+        // unambiguously in a merged log.
+        std::string prefix = (opt_shard_index >= 0)
+            ? ("shard " + std::to_string(opt_shard_index) + "/" + std::to_string(opt_shard_count) + " ")
+            : "";
+        printf("%s[%zu/%zu] %-42s running...", prefix.c_str(), qi + 1, total, sc.id.c_str());
+        fflush(stdout);
+        auto t0 = std::chrono::steady_clock::now();
+
         Recorder ra, rb;
         run_scenario(sc, gCpp, ra);
         run_scenario(sc, gRust, rb);
@@ -1146,9 +1198,15 @@ int main(int argc, char** argv) {
             rb.vals.count("status") && rb.vals.at("status") == "SKIPPED_MECHANISM_ABSENT") skipped++;
         else ran++;
         compare(sc, ra, rb);
-        printf("  %-42s cpp=%-28s rust=%s\n", sc.id.c_str(),
+
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+        printf("\r%s[%zu/%zu] %-42s cpp=%-28s rust=%-28s (%lldms)\n", prefix.c_str(), qi + 1, total,
+               sc.id.c_str(),
                ra.vals.count("status") ? ra.vals.at("status").c_str() : "?",
-               rb.vals.count("status") ? rb.vals.at("status").c_str() : "?");
+               rb.vals.count("status") ? rb.vals.at("status").c_str() : "?",
+               (long long)ms);
+        fflush(stdout);
     }
 
     gCpp.fl->C_Finalize(NULL_PTR);
