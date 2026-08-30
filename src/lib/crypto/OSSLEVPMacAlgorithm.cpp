@@ -42,6 +42,26 @@ OSSLEVPMacAlgorithm::~OSSLEVPMacAlgorithm()
 	HMAC_CTX_free(curCTX);
 }
 
+// General-length HMAC (CKM_*_HMAC_GENERAL, PKCS#11 v3.2 §6.22.3 and siblings)
+bool OSSLEVPMacAlgorithm::setTruncatedMacSize(size_t bytes)
+{
+	// "This length should be in the range 1-32 (the output size of SHA-256 is
+	// 32 bytes)" — a zero-length MAC is meaningless and a length beyond the
+	// full HMAC cannot be produced by taking bytes from its start, so neither
+	// is accepted.
+	if (bytes == 0 || bytes > getMacSize())
+	{
+		ERROR_MSG("Requested general-length MAC size %zu out of range 1-%zu",
+			  bytes, getMacSize());
+
+		return false;
+	}
+
+	truncatedMacSize = bytes;
+
+	return true;
+}
+
 // Signing functions
 bool OSSLEVPMacAlgorithm::signInit(const SymmetricKey* key)
 {
@@ -124,6 +144,14 @@ bool OSSLEVPMacAlgorithm::signFinal(ByteString& signature)
 	}
 
 	signature.resize(outLen);
+
+	// General-length HMAC: "Signatures (MACs) produced by this mechanism will
+	// be taken from the start of the full 32-byte HMAC output" (PKCS#11 v3.2
+	// §6.22.3). setTruncatedMacSize() has already bounded this to 1..outLen.
+	if (truncatedMacSize > 0 && truncatedMacSize < signature.size())
+	{
+		signature.resize(truncatedMacSize);
+	}
 
 	HMAC_CTX_free(curCTX);
 	curCTX = NULL;
@@ -215,6 +243,15 @@ bool OSSLEVPMacAlgorithm::verifyFinal(ByteString& signature)
 
 	HMAC_CTX_free(curCTX);
 	curCTX = NULL;
+
+	// General-length HMAC: compare only the leading truncatedMacSize bytes,
+	// which is exactly what this mechanism's signFinal() would have produced
+	// (PKCS#11 v3.2 §6.22.3). The caller has already rejected any signature
+	// whose length differs from the mechanism's effective output length.
+	if (truncatedMacSize > 0 && truncatedMacSize < macResult.size())
+	{
+		macResult.resize(truncatedMacSize);
+	}
 
 	return macResult == signature;
 }

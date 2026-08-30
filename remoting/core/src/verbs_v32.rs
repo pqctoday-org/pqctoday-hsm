@@ -2580,6 +2580,121 @@ mod tests {
 
     #[test]
     #[serial]
+    fn aes_kwp_wrap_unwrap_round_trip_nonmultiple_length() {
+        // CKM_AES_KEY_WRAP_KWP (RFC 5649) — the current v3.2 §6.16.3 name
+        // for padded key wrap; the deprecated CKM_AES_KEY_WRAP_PAD shares
+        // the same engine implementation. Wraps a 20-byte key (NOT a
+        // multiple of 8) specifically to exercise the padding path plain
+        // CKM_AES_KEY_WRAP (see the sibling test above) never touches.
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+
+        // Not yet in the `ck` re-export module — deprecated CKM_AES_KEY_WRAP_PAD
+        // shares this value's engine implementation, but v3.2 §6.16.3 says PAD
+        // "is deprecated. CKM_AES_KEY_WRAP_KWP ... shall be used instead."
+        const CKM_AES_KEY_WRAP_KWP: u64 = 0x0000_210B;
+
+        let wrapping_key_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_AES),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_WRAP), true),
+            attr_bool(u64::from(ck::CKA_UNWRAP), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, wrapping_key) = generate_key(session, u64::from(ck::CKM_AES_KEY_GEN), &[], &wrapping_key_tmpl);
+        assert_eq!(rv, 0);
+
+        let target_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 20),
+            attr_bool(u64::from(ck::CKA_EXTRACTABLE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, target_key) = generate_key(session, u64::from(ck::CKM_GENERIC_SECRET_KEY_GEN), &[], &target_tmpl);
+        assert_eq!(rv, 0);
+        let (rv_orig, orig_attrs) = get_attribute_value(session, target_key, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv_orig, 0);
+        assert_eq!(orig_attrs[0].value.len(), 20, "target key must be the non-multiple-of-8 length under test");
+
+        let (rv, wrapped) = wrap_key(session, CKM_AES_KEY_WRAP_KWP, &[], wrapping_key, target_key);
+        assert_eq!(rv, 0);
+        assert!(!wrapped.is_empty());
+
+        let unwrap_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_bool(u64::from(ck::CKA_EXTRACTABLE), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, unwrapped_key) =
+            unwrap_key(session, CKM_AES_KEY_WRAP_KWP, &[], wrapping_key, &wrapped, &unwrap_tmpl);
+        assert_eq!(rv, 0);
+        assert_ne!(unwrapped_key, 0);
+        let (rv_rt, rt_attrs) = get_attribute_value(session, unwrapped_key, &[u64::from(ck::CKA_VALUE)]);
+        assert_eq!(rv_rt, 0);
+        assert_eq!(
+            rt_attrs[0].value, orig_attrs[0].value,
+            "RFC 5649 pad path must recover the exact original 20-byte key material"
+        );
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
+    fn hmac_general_truncation_and_verify_round_trip() {
+        // CKM_SHA256_HMAC_GENERAL — the truncatable counterpart of
+        // CKM_SHA256_HMAC. Parameter is a single native-width CK_ULONG
+        // (CK_MAC_GENERAL_PARAMS) giving the desired output length; wire
+        // encoding matches attr_ulong's convention (native LP64 width,
+        // little-endian).
+        crate::test_support::ensure_bootstrapped();
+        let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;
+
+        const CKM_SHA256_HMAC_GENERAL: u64 = 0x0000_0252;
+        const CKM_SHA256_HMAC: u64 = 0x0000_0251;
+        const TRUNCATED_LEN: usize = 16; // half of SHA-256's native 32-byte HMAC
+
+        let key_tmpl = [
+            attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_SECRET_KEY),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_GENERIC_SECRET),
+            attr_ulong(u64::from(ck::CKA_VALUE_LEN), 32),
+            attr_bool(u64::from(ck::CKA_SIGN), true),
+            attr_bool(u64::from(ck::CKA_VERIFY), true),
+            attr_bool(u64::from(ck::CKA_TOKEN), false),
+        ];
+        let (rv, key) = generate_key(session, u64::from(ck::CKM_GENERIC_SECRET_KEY_GEN), &[], &key_tmpl);
+        assert_eq!(rv, 0);
+
+        let general_params = (TRUNCATED_LEN as usize).to_le_bytes().to_vec();
+
+        assert_eq!(sign_init(session, CKM_SHA256_HMAC_GENERAL, &general_params, key), 0);
+        let (rv, mac) = sign(session, b"remoting hmac_general truncation round trip");
+        assert_eq!(rv, 0);
+        assert_eq!(mac.len(), TRUNCATED_LEN, "CKM_SHA256_HMAC_GENERAL must truncate to the requested length, not the full 32-byte HMAC");
+
+        assert_eq!(verify_init(session, CKM_SHA256_HMAC_GENERAL, &general_params, key), 0);
+        assert_eq!(verify(session, b"remoting hmac_general truncation round trip", &mac), 0, "verify must accept the exact truncated MAC sign produced");
+
+        // A full-length (untruncated) MAC handed to verify must be rejected,
+        // not silently accepted as a prefix match.
+        assert_eq!(sign_init(session, CKM_SHA256_HMAC, &[], key), 0);
+        let (rv, full_mac) = sign(session, b"remoting hmac_general truncation round trip");
+        assert_eq!(rv, 0);
+        assert_ne!(full_mac.len(), TRUNCATED_LEN);
+        assert_eq!(verify_init(session, CKM_SHA256_HMAC_GENERAL, &general_params, key), 0);
+        assert_ne!(
+            verify(session, b"remoting hmac_general truncation round trip", &full_mac), 0,
+            "a full-length MAC must not verify against a _GENERAL truncation-length context"
+        );
+
+        close_session(session);
+    }
+
+    #[test]
+    #[serial]
     fn derive_key_concatenate_and_sha256_derivation() {
         crate::test_support::ensure_bootstrapped();
         let session = open_session(SLOT, ck::CKF_SERIAL_SESSION | ck::CKF_RW_SESSION).1;

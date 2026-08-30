@@ -106,6 +106,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   §5.21 — onto one shared table index via normal identical-code-folding;
   the test asserts this is the only collision.)
 
+- **C++ engine: general-length HMAC (`CKM_*_HMAC_GENERAL`) — MACs you can
+  ask for a shorter answer from.** SP 800-107 lets a protocol truncate an
+  HMAC to fewer bytes than the hash produces, and PKCS#11 gives every HMAC
+  a second mechanism for exactly that: it takes a `CK_MAC_GENERAL_PARAMS`
+  output length and returns that many bytes from the start of the full MAC
+  (v3.2 §6.20.3 and its per-hash siblings). The engine had none of them, so
+  a caller with a 20-byte MAC to verify — the length NIST's own ACVP-HMAC
+  reference vectors use — had no mechanism to verify it with. Implemented
+  for real, sign and verify, single-part and multi-part: `MacAlgorithm`
+  gained a truncation length that `OSSLEVPMacAlgorithm` applies to both
+  `signFinal` (truncate) and `verifyFinal` (compare only the requested
+  prefix), and `kMacMechTable` gained one column pairing each HMAC with its
+  general-length twin. The rule is one line and has no exceptions: the
+  general-length variant is now supported exactly where the plain variant
+  is (SHA-1, SHA-224/256/384/512, SHA3-224/256/384/512, plus MD5 in
+  non-FIPS builds and RIPEMD-160 in legacy-provider builds), so nobody
+  finds `CKM_SHA256_HMAC_GENERAL` working while `CKM_SHA_1_HMAC_GENERAL` is
+  rejected. A missing, zero, or over-length parameter answers
+  `CKR_MECHANISM_PARAM_INVALID` rather than quietly returning a full-length
+  MAC, and verify enforces the requested length (`CKR_SIGNATURE_LEN_RANGE`)
+  rather than accepting the untruncated one.
+
+- **C++ engine: `CKM_AES_KEY_WRAP_KWP` — the current name for RFC 5649 key
+  wrap.** PKCS#11 v3.2 §6.16.3 states plainly that `CKM_AES_KEY_WRAP_PAD`
+  "is deprecated. `CKM_AES_KEY_WRAP_KWP` … shall be used instead", and both
+  denote the same construction. The engine implemented the padded wrap
+  correctly but only answered to the deprecated name, so any caller written
+  against v3.0 or later — which no longer names the old one — could not
+  reach a working implementation. `CKM_AES_KEY_WRAP_KWP` is now accepted
+  everywhere its deprecated twin is (advertised in the mechanism list and
+  `C_GetMechanismInfo`, wrap and unwrap, with the same key-type checks),
+  running the identical `EVP_aes_*_wrap_pad()` path; a new conformance test
+  asserts the two produce byte-identical output.
+
 ### Fixed
 
 - **Rust engine: `C_Finalize` no longer wipes token state.** WS-11's Tier A

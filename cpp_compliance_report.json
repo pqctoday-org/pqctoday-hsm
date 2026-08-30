@@ -6,6 +6,23 @@
             "test": "EncryptInit"
         }
     ],
+    "AesKwp": [
+        {
+            "details": "20-byte (non-multiple-of-8) key wraps to the same blob as an independent OpenSSL AES-256-wrap-pad oracle AND unwraps back byte-identical",
+            "status": "PASS",
+            "test": "KWP_roundtrip"
+        },
+        {
+            "details": "CKM_AES_KEY_WRAP_KWP and CKM_AES_KEY_WRAP_PAD produce identical output",
+            "status": "PASS",
+            "test": "KWP_matches_deprecated_PAD"
+        },
+        {
+            "details": "RV=7 (want CKR_ARGUMENTS_BAD=0x7)",
+            "status": "PASS",
+            "test": "KWP_rejects_unsupported_iv_param"
+        }
+    ],
     "Attributes": [
         {
             "details": "§1.21 G-ATTR1 check",
@@ -681,7 +698,7 @@
     ],
     "Fork": [
         {
-            "details": "child pid 36411 exited status 0",
+            "details": "child pid 408142 exited status 0",
             "status": "PASS",
             "test": "Child_survived_and_reported"
         },
@@ -721,7 +738,7 @@
             "test": "Child_writes_do_not_reach_parent"
         },
         {
-            "details": "8 sibling pairs, all distinct=1 childA=440CDFB05051AE3E… childB=5EB7D1B6D35EAF82… (identical output would repeat ECDSA nonces)",
+            "details": "8 sibling pairs, all distinct=1 childA=683067B8DFE94757… childB=EDA7145C8F6E8FE0… (identical output would repeat ECDSA nonces)",
             "status": "PASS",
             "test": "Sibling_children_RNG_diverge"
         },
@@ -736,7 +753,7 @@
             "test": "Fork_safe_interface_retrievable"
         },
         {
-            "details": "child=12D440ED8DD563FA… parent=0FFA6EC6A80C9204… preFork=A103BB762EF12FDD…",
+            "details": "child=C38FDB8F01C427B3… parent=8F3897BBFA1EEA47… preFork=0E54F982137E204E…",
             "status": "PASS",
             "test": "Parent_and_child_RNG_diverge"
         }
@@ -901,7 +918,7 @@
             "test": "Flag_SLH_DSA_MESSAGE"
         },
         {
-            "details": "127 advertised, 0 rejected by C_GetMechanismInfo",
+            "details": "139 advertised, 0 rejected by C_GetMechanismInfo",
             "status": "PASS",
             "test": "AdvertiseSubsetDispatch"
         }
@@ -1694,6 +1711,308 @@
             "test": "XMSSMT_accept_restated_SENSITIVE_true"
         }
     ],
+    "HmacGeneral": [
+        {
+            "details": "sign truncated to 16 of 20 bytes matches the leading bytes of an independent OpenSSL HMAC oracle AND engine verify succeeds",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA1"
+        },
+        {
+            "details": "RV=193 (want CKR_SIGNATURE_LEN_RANGE=0xC1)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA1_rejects_full_length_mac"
+        },
+        {
+            "details": "RV=192 (want CKR_SIGNATURE_INVALID=0xC0)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA1_rejects_tampered_message"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA1_no_param"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA1_zero_length"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA1_over_length"
+        },
+        {
+            "details": "sign truncated to 20 of 28 bytes matches the leading bytes of an independent OpenSSL HMAC oracle AND engine verify succeeds",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA224"
+        },
+        {
+            "details": "RV=193 (want CKR_SIGNATURE_LEN_RANGE=0xC1)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA224_rejects_full_length_mac"
+        },
+        {
+            "details": "RV=192 (want CKR_SIGNATURE_INVALID=0xC0)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA224_rejects_tampered_message"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA224_no_param"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA224_zero_length"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA224_over_length"
+        },
+        {
+            "details": "sign truncated to 20 of 32 bytes matches the leading bytes of an independent OpenSSL HMAC oracle AND engine verify succeeds",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA256"
+        },
+        {
+            "details": "RV=193 (want CKR_SIGNATURE_LEN_RANGE=0xC1)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA256_rejects_full_length_mac"
+        },
+        {
+            "details": "RV=192 (want CKR_SIGNATURE_INVALID=0xC0)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA256_rejects_tampered_message"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA256_no_param"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA256_zero_length"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA256_over_length"
+        },
+        {
+            "details": "sign truncated to 20 of 48 bytes matches the leading bytes of an independent OpenSSL HMAC oracle AND engine verify succeeds",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA384"
+        },
+        {
+            "details": "RV=193 (want CKR_SIGNATURE_LEN_RANGE=0xC1)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA384_rejects_full_length_mac"
+        },
+        {
+            "details": "RV=192 (want CKR_SIGNATURE_INVALID=0xC0)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA384_rejects_tampered_message"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA384_no_param"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA384_zero_length"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA384_over_length"
+        },
+        {
+            "details": "sign truncated to 20 of 64 bytes matches the leading bytes of an independent OpenSSL HMAC oracle AND engine verify succeeds",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA512"
+        },
+        {
+            "details": "RV=193 (want CKR_SIGNATURE_LEN_RANGE=0xC1)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA512_rejects_full_length_mac"
+        },
+        {
+            "details": "RV=192 (want CKR_SIGNATURE_INVALID=0xC0)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA512_rejects_tampered_message"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA512_no_param"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA512_zero_length"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA512_over_length"
+        },
+        {
+            "details": "sign truncated to 20 of 28 bytes matches the leading bytes of an independent OpenSSL HMAC oracle AND engine verify succeeds",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_224"
+        },
+        {
+            "details": "RV=193 (want CKR_SIGNATURE_LEN_RANGE=0xC1)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_224_rejects_full_length_mac"
+        },
+        {
+            "details": "RV=192 (want CKR_SIGNATURE_INVALID=0xC0)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_224_rejects_tampered_message"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_224_no_param"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_224_zero_length"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_224_over_length"
+        },
+        {
+            "details": "sign truncated to 20 of 32 bytes matches the leading bytes of an independent OpenSSL HMAC oracle AND engine verify succeeds",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_256"
+        },
+        {
+            "details": "RV=193 (want CKR_SIGNATURE_LEN_RANGE=0xC1)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_256_rejects_full_length_mac"
+        },
+        {
+            "details": "RV=192 (want CKR_SIGNATURE_INVALID=0xC0)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_256_rejects_tampered_message"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_256_no_param"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_256_zero_length"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_256_over_length"
+        },
+        {
+            "details": "sign truncated to 20 of 48 bytes matches the leading bytes of an independent OpenSSL HMAC oracle AND engine verify succeeds",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_384"
+        },
+        {
+            "details": "RV=193 (want CKR_SIGNATURE_LEN_RANGE=0xC1)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_384_rejects_full_length_mac"
+        },
+        {
+            "details": "RV=192 (want CKR_SIGNATURE_INVALID=0xC0)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_384_rejects_tampered_message"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_384_no_param"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_384_zero_length"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_384_over_length"
+        },
+        {
+            "details": "sign truncated to 20 of 64 bytes matches the leading bytes of an independent OpenSSL HMAC oracle AND engine verify succeeds",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_512"
+        },
+        {
+            "details": "RV=193 (want CKR_SIGNATURE_LEN_RANGE=0xC1)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_512_rejects_full_length_mac"
+        },
+        {
+            "details": "RV=192 (want CKR_SIGNATURE_INVALID=0xC0)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_512_rejects_tampered_message"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_512_no_param"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_512_zero_length"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_SHA3_512_over_length"
+        },
+        {
+            "details": "sign truncated to 8 of 16 bytes matches the leading bytes of an independent OpenSSL HMAC oracle AND engine verify succeeds",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_MD5"
+        },
+        {
+            "details": "RV=193 (want CKR_SIGNATURE_LEN_RANGE=0xC1)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_MD5_rejects_full_length_mac"
+        },
+        {
+            "details": "RV=192 (want CKR_SIGNATURE_INVALID=0xC0)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_MD5_rejects_tampered_message"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_MD5_no_param"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_MD5_zero_length"
+        },
+        {
+            "details": "C_SignInit RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
+            "status": "PASS",
+            "test": "HMAC_GENERAL_MD5_over_length"
+        }
+    ],
     "HybridKEM": [
         {
             "details": "",
@@ -1828,6 +2147,11 @@
             "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
             "status": "SKIP",
             "test": "OutOfScope_0x00002109"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
+            "test": "OutOfScope_0x0000210b"
         },
         {
             "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
@@ -2310,6 +2634,16 @@
             "test": "Verify_0x00000211"
         },
         {
+            "details": "C_SignInit RV=113",
+            "status": "PASS",
+            "test": "Sign_0x00000212"
+        },
+        {
+            "details": "C_VerifyInit RV=113",
+            "status": "PASS",
+            "test": "Verify_0x00000212"
+        },
+        {
             "details": "C_SignInit RV=0",
             "status": "PASS",
             "test": "Sign_0x00000005"
@@ -2363,6 +2697,16 @@
             "details": "C_VerifyInit RV=0",
             "status": "PASS",
             "test": "Verify_0x00000241"
+        },
+        {
+            "details": "C_SignInit RV=113",
+            "status": "PASS",
+            "test": "Sign_0x00000242"
+        },
+        {
+            "details": "C_VerifyInit RV=113",
+            "status": "PASS",
+            "test": "Verify_0x00000242"
         },
         {
             "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
@@ -2470,6 +2814,16 @@
             "test": "Verify_0x00000256"
         },
         {
+            "details": "C_SignInit RV=113",
+            "status": "PASS",
+            "test": "Sign_0x00000257"
+        },
+        {
+            "details": "C_VerifyInit RV=113",
+            "status": "PASS",
+            "test": "Verify_0x00000257"
+        },
+        {
             "details": "C_SignInit RV=0",
             "status": "PASS",
             "test": "Sign_0x00000046"
@@ -2503,6 +2857,16 @@
             "details": "C_VerifyInit RV=0",
             "status": "PASS",
             "test": "Verify_0x00000251"
+        },
+        {
+            "details": "C_SignInit RV=113",
+            "status": "PASS",
+            "test": "Sign_0x00000252"
+        },
+        {
+            "details": "C_VerifyInit RV=113",
+            "status": "PASS",
+            "test": "Verify_0x00000252"
         },
         {
             "details": "C_SignInit RV=0",
@@ -2540,6 +2904,16 @@
             "test": "Verify_0x00000261"
         },
         {
+            "details": "C_SignInit RV=113",
+            "status": "PASS",
+            "test": "Sign_0x00000262"
+        },
+        {
+            "details": "C_VerifyInit RV=113",
+            "status": "PASS",
+            "test": "Verify_0x00000262"
+        },
+        {
             "details": "C_SignInit RV=0",
             "status": "PASS",
             "test": "Sign_0x00000041"
@@ -2573,6 +2947,16 @@
             "details": "C_VerifyInit RV=0",
             "status": "PASS",
             "test": "Verify_0x000002b6"
+        },
+        {
+            "details": "C_SignInit RV=113",
+            "status": "PASS",
+            "test": "Sign_0x000002b7"
+        },
+        {
+            "details": "C_VerifyInit RV=113",
+            "status": "PASS",
+            "test": "Verify_0x000002b7"
         },
         {
             "details": "C_SignInit RV=0",
@@ -2610,6 +2994,16 @@
             "test": "Verify_0x000002b1"
         },
         {
+            "details": "C_SignInit RV=113",
+            "status": "PASS",
+            "test": "Sign_0x000002b2"
+        },
+        {
+            "details": "C_VerifyInit RV=113",
+            "status": "PASS",
+            "test": "Verify_0x000002b2"
+        },
+        {
             "details": "C_SignInit RV=0",
             "status": "PASS",
             "test": "Sign_0x00000060"
@@ -2643,6 +3037,16 @@
             "details": "C_VerifyInit RV=98",
             "status": "PASS",
             "test": "Verify_0x000002c1"
+        },
+        {
+            "details": "C_SignInit RV=113",
+            "status": "PASS",
+            "test": "Sign_0x000002c2"
+        },
+        {
+            "details": "C_VerifyInit RV=113",
+            "status": "PASS",
+            "test": "Verify_0x000002c2"
         },
         {
             "details": "C_SignInit RV=0",
@@ -2680,6 +3084,16 @@
             "test": "Verify_0x000002d1"
         },
         {
+            "details": "C_SignInit RV=113",
+            "status": "PASS",
+            "test": "Sign_0x000002d2"
+        },
+        {
+            "details": "C_VerifyInit RV=113",
+            "status": "PASS",
+            "test": "Verify_0x000002d2"
+        },
+        {
             "details": "C_SignInit RV=0",
             "status": "PASS",
             "test": "Sign_0x00000062"
@@ -2713,6 +3127,16 @@
             "details": "C_VerifyInit RV=98",
             "status": "PASS",
             "test": "Verify_0x00000271"
+        },
+        {
+            "details": "C_SignInit RV=113",
+            "status": "PASS",
+            "test": "Sign_0x00000272"
+        },
+        {
+            "details": "C_VerifyInit RV=113",
+            "status": "PASS",
+            "test": "Verify_0x00000272"
         },
         {
             "details": "C_SignInit RV=0",
@@ -2753,6 +3177,16 @@
             "details": "C_VerifyInit RV=0",
             "status": "PASS",
             "test": "Verify_0x00000221"
+        },
+        {
+            "details": "C_SignInit RV=113",
+            "status": "PASS",
+            "test": "Sign_0x00000222"
+        },
+        {
+            "details": "C_VerifyInit RV=113",
+            "status": "PASS",
+            "test": "Verify_0x00000222"
         },
         {
             "details": "C_SignInit RV=99",
@@ -2820,29 +3254,29 @@
             "test": "OutOfScope_0x00004034"
         },
         {
-            "details": "127 advertised, 94 mechanisms probed (181 Init calls across DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT), 33 out-of-scope (derive/generate/wrap-only), 0 answered CKR_MECHANISM_INVALID",
+            "details": "139 advertised, 105 mechanisms probed (203 Init calls across DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT), 34 out-of-scope (derive/generate/wrap-only), 0 answered CKR_MECHANISM_INVALID",
             "status": "PASS",
             "test": "Summary_AdvertisedImpliesDispatchable"
         }
     ],
     "KCV": [
         {
-            "details": "3 bytes: 8F24C4",
+            "details": "3 bytes: 3F36FD",
             "status": "PASS",
             "test": "AES_Generate_KCV_Present"
         },
         {
-            "details": "HSM=8F24C4 == oracle=8F24C4",
+            "details": "HSM=3F36FD == oracle=3F36FD",
             "status": "PASS",
             "test": "AES_Generate_KCV_Equals_OracleEcbZeroBlock"
         },
         {
-            "details": "3 bytes: 08AEF6",
+            "details": "3 bytes: DAB850",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Present"
         },
         {
-            "details": "original=08AEF6 unwrapped=08AEF6",
+            "details": "original=DAB850 unwrapped=DAB850",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Equals_Original"
         },
@@ -2983,7 +3417,7 @@
             "test": "Encap_KCV_present"
         },
         {
-            "details": "HSM=4A4BDB oracle=4A4BDB",
+            "details": "HSM=B97A87 oracle=B97A87",
             "status": "PASS",
             "test": "Encap_KCV_equals_SHA1_oracle"
         },
@@ -2993,12 +3427,12 @@
             "test": "Decap_KCV_present"
         },
         {
-            "details": "HSM=4A4BDB oracle=4A4BDB",
+            "details": "HSM=B97A87 oracle=B97A87",
             "status": "PASS",
             "test": "Decap_KCV_equals_SHA1_oracle"
         },
         {
-            "details": "encap=4A4BDB decap=4A4BDB",
+            "details": "encap=B97A87 decap=B97A87",
             "status": "PASS",
             "test": "Encap_and_Decap_KCV_agree"
         },
@@ -3023,12 +3457,12 @@
             "test": "ECDH_Encap_KCV_present"
         },
         {
-            "details": "HSM=0872C3 oracle=0872C3",
+            "details": "HSM=6CC56A oracle=6CC56A",
             "status": "PASS",
             "test": "ECDH_Encap_KCV_equals_SHA1_oracle"
         },
         {
-            "details": "HSM=0872C3 oracle=0872C3",
+            "details": "HSM=6CC56A oracle=6CC56A",
             "status": "PASS",
             "test": "ECDH_Decap_KCV_equals_SHA1_oracle"
         }
@@ -3176,7 +3610,7 @@
     ],
     "KcvTemplate": [
         {
-            "details": "engine=C848E6 oracle=C848E6",
+            "details": "engine=3E6AF9 oracle=3E6AF9",
             "status": "PASS",
             "test": "GenerateKey_AES_KCV_matches_oracle"
         },
@@ -3196,7 +3630,7 @@
             "test": "GenerateKey_AES_zero_length_suppresses"
         },
         {
-            "details": "engine=EDA260 oracle=EDA260",
+            "details": "engine=F63F23 oracle=F63F23",
             "status": "PASS",
             "test": "GenerateKey_Generic_KCV_matches_oracle"
         },
@@ -3216,12 +3650,12 @@
             "test": "GenerateKey_Generic_zero_length_suppresses"
         },
         {
-            "details": "engine=54AAB0 oracle=54AAB0",
+            "details": "engine=B5A123 oracle=B5A123",
             "status": "PASS",
             "test": "UnwrapKey_AES_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=54AAB0",
+            "details": "RV=0 readback=B5A123",
             "status": "PASS",
             "test": "UnwrapKey_AES_correct_value_accepted"
         },
@@ -3236,12 +3670,12 @@
             "test": "UnwrapKey_AES_zero_length_suppresses"
         },
         {
-            "details": "engine=E80311 oracle=E80311",
+            "details": "engine=E67FDA oracle=E67FDA",
             "status": "PASS",
             "test": "DeriveKey_HKDF_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=E80311",
+            "details": "RV=0 readback=E67FDA",
             "status": "PASS",
             "test": "DeriveKey_HKDF_correct_value_accepted"
         },
@@ -3256,12 +3690,12 @@
             "test": "DeriveKey_HKDF_zero_length_suppresses"
         },
         {
-            "details": "engine=216ECE oracle=216ECE",
+            "details": "engine=61BB1C oracle=61BB1C",
             "status": "PASS",
             "test": "DeriveKey_ECDH_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=216ECE",
+            "details": "RV=0 readback=61BB1C",
             "status": "PASS",
             "test": "DeriveKey_ECDH_correct_value_accepted"
         },
@@ -3296,12 +3730,12 @@
             "test": "DeriveKey_PBKD2_zero_length_suppresses"
         },
         {
-            "details": "engine=80C8DF oracle=80C8DF",
+            "details": "engine=0AAFEE oracle=0AAFEE",
             "status": "PASS",
             "test": "DeriveKey_SP800108_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=80C8DF",
+            "details": "RV=0 readback=0AAFEE",
             "status": "PASS",
             "test": "DeriveKey_SP800108_correct_value_accepted"
         },
@@ -3316,12 +3750,12 @@
             "test": "DeriveKey_SP800108_zero_length_suppresses"
         },
         {
-            "details": "CKA_VALUE unreadable (RV=17), engine KCV=FA7EE3",
+            "details": "CKA_VALUE unreadable (RV=17), engine KCV=1440CA",
             "status": "SKIP",
             "test": "DeriveKey_Concat_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=FA7EE3",
+            "details": "RV=0 readback=1440CA",
             "status": "PASS",
             "test": "DeriveKey_Concat_correct_value_accepted"
         },
@@ -3336,12 +3770,12 @@
             "test": "DeriveKey_Concat_zero_length_suppresses"
         },
         {
-            "details": "engine=F5B2B5 oracle=F5B2B5",
+            "details": "engine=80E1F1 oracle=80E1F1",
             "status": "PASS",
             "test": "DeriveKey_X25519_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=F5B2B5",
+            "details": "RV=0 readback=80E1F1",
             "status": "PASS",
             "test": "DeriveKey_X25519_correct_value_accepted"
         },
@@ -3739,7 +4173,7 @@
             "test": "ML_DSA_44_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0xdd len=2560",
+            "details": "first byte=0xe9 len=2560",
             "status": "PASS",
             "test": "ML_DSA_44_CKA_VALUE_not_DER_wrapped"
         },
@@ -3759,7 +4193,7 @@
             "test": "ML_KEM_768_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0x30 len=2400",
+            "details": "first byte=0xcd len=2400",
             "status": "PASS",
             "test": "ML_KEM_768_CKA_VALUE_not_DER_wrapped"
         },
@@ -3774,7 +4208,7 @@
             "test": "SLH_DSA_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0x07 len=64",
+            "details": "first byte=0x31 len=64",
             "status": "PASS",
             "test": "SLH_DSA_CKA_VALUE_not_DER_wrapped"
         },
@@ -4201,11 +4635,11 @@
         }
     ],
     "_summary": {
-        "engine": "./build_union/src/lib/libsofthsmv3.dylib",
-        "engine_commit": "94720ea92f6f705709196550779b90fc61deb006",
+        "engine": "./build/src/lib/libsofthsmv3.so",
+        "engine_commit": "99b0c5855daf355b65703342b6c554d337e388d3",
         "fail": 0,
-        "pass": 779,
-        "skip": 36,
+        "pass": 864,
+        "skip": 37,
         "xfail_known_engine_bugs": 0
     }
 }

@@ -497,6 +497,20 @@
         "v32_parity::v26_split_key_xor_round_trip_parity"
       ],
       "justification": "VENDOR EXTENSION (not a pkcs11f.h category; not in cpp_compliance_report.json). SplitKey/JoinKey RPCs added in G2 gap-remediation (2026-08-26), wrapping softhsmrustv3::native::split/join directly (no CKM_PQCTODAY_SPLIT_KEY C_* dispatch arm exists to go through, unlike every other row in this ledger). method/polynomial use the KMIP 3.0 \u00a711.54/\u00a711.55 enumeration codepoints verbatim. Proven: XOR split\u2192join round trip recovering the original secret; GF(2^8) 5-part/3-threshold split with a JOIN using only a 3-of-5 subset (the actual threshold property, not just a full-set round trip); a below-threshold join rejected with the real CKR_ARGUMENTS_BAD; XOR's parts==threshold constraint (\u00a713.1) rejected when violated; undefined method/polynomial wire codes rejected before any engine call."
+    },
+    "AesKwp": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::aes_kwp_wrap_unwrap_round_trip_nonmultiple_length"
+      ],
+      "justification": "CKM_AES_KEY_WRAP_KWP (RFC 5649, the current v3.2 \u00a76.16.3 name replacing deprecated CKM_AES_KEY_WRAP_PAD). wrap_key/unwrap_key are generic mechanism-u64 passthroughs to C_WrapKey/C_UnwrapKey (verbs_v32.rs mech_native) \u2014 no remoting-layer wiring was needed, only proof it actually works over the wire. Wraps a 20-byte (non-multiple-of-8) generic-secret key specifically to exercise the RFC 5649 padding path plain CKM_AES_KEY_WRAP never touches; round trip recovers the exact original bytes. Added 2026-08-29 alongside the native engine's own CKM_AES_KEY_WRAP_KWP support (fix/acvp-hmac-general-aes-kwp)."
+    },
+    "HmacGeneral": {
+      "disposition": "RPC",
+      "case_ids": [
+        "core::hmac_general_truncation_and_verify_round_trip"
+      ],
+      "justification": "CKM_SHA256_HMAC_GENERAL, the truncatable counterpart of CKM_SHA256_HMAC (CK_MAC_GENERAL_PARAMS: one native-width CK_ULONG truncation length). sign_init/verify_init are generic mechanism-u64 + raw-parameter-bytes passthroughs \u2014 no remoting-layer wiring was needed, only proof it actually works over the wire. Proves: (a) Sign truncates to the requested length, not the full 32-byte HMAC; (b) Verify accepts the exact truncated MAC; (c) a full-length MAC is correctly REJECTED under a truncation-length context, not silently accepted as a prefix match. Added 2026-08-29 alongside the native engine's own CKM_*_HMAC_GENERAL family (fix/acvp-hmac-general-aes-kwp)."
     }
   }
 }

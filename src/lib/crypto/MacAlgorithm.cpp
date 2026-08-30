@@ -38,6 +38,21 @@ MacAlgorithm::MacAlgorithm()
 {
 	currentOperation = NONE;
 	currentKey = NULL;
+	truncatedMacSize = 0;
+}
+
+// General-length MAC support. The base class cannot truncate anything — an
+// implementation that supports CKM_*_HMAC_GENERAL must override this. Saying
+// "no" here is deliberate: the caller then rejects the mechanism rather than
+// handing back a full-length MAC for a request that asked for a short one.
+bool MacAlgorithm::setTruncatedMacSize(size_t /*bytes*/)
+{
+	return false;
+}
+
+size_t MacAlgorithm::getOutputMacSize() const
+{
+	return (truncatedMacSize > 0) ? truncatedMacSize : getMacSize();
 }
 
 bool MacAlgorithm::signInit(const SymmetricKey* key)

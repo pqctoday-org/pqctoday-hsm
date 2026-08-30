@@ -4227,7 +4227,13 @@ void test_g2_prehash_mechanisms() {
  * prepareSupportedMechanisms() (the actual advertised list) shows NONE of
  * CKM_SHA3_*_HMAC_GENERAL, CKM_SHA{256,384,512}_HMAC_GENERAL, or
  * CKM_SHA3_{256,384,512}_KEY_DERIVATION are advertised at all — they are
- * not gaps because they are not falsely-advertised capabilities. The real
+ * not gaps because they are not falsely-advertised capabilities.
+ *
+ * UPDATE (2026-08-29): the HMAC_GENERAL half of that is no longer true. The
+ * whole CKM_*_HMAC_GENERAL family is now implemented and advertised, and
+ * carries its own coverage in test_hmac_general_mechanisms() below. The
+ * CKM_SHA3_*_KEY_DERIVATION mechanisms remain unadvertised and unimplemented,
+ * so the reasoning above still holds for them. The real
  * 13-strong tail, confirmed by grepping every CKM_ reference already in
  * this file against the advertised table, is:
  *   - 2 bare digests:      CKM_SHA3_224, CKM_SHA3_512
@@ -8515,6 +8521,305 @@ void test_gap_concatenate_data_and_base() {
                         : "readbackRV=" + std::to_string(rvv) + " len=" + std::to_string(va.ulValueLen));
 }
 
+/* =============================================================================
+ * General-length HMAC + AES-KWP coverage (2026-08-29)
+ *
+ * test_g2_sha3_mechanism_tail's header note used to record that NONE of the
+ * CKM_*_HMAC_GENERAL mechanisms were advertised, and therefore that their
+ * absence was "not a gap because they are not falsely-advertised
+ * capabilities". They are now implemented and advertised (kMacMechTable's
+ * generalMech column + MacAlgorithm::setTruncatedMacSize), so that note no
+ * longer describes the engine and this section supplies the matching
+ * evidence. Same for CKM_AES_KEY_WRAP_KWP, which the coverage census above
+ * lists only in its deprecated CKM_AES_KEY_WRAP_PAD spelling.
+ *
+ * Both follow this file's independent-oracle convention: byte-compared
+ * against OpenSSL computed in-process over the same known key material, not
+ * self-consistency between the engine's own Sign and Verify (see the
+ * convention note above test_gap_classical_digests, and 529821a).
+ *
+ * All key material here is fixed, never generated, so every `details` string
+ * this section records is deterministic run to run — a requirement of
+ * check_pkcs11_reports_fresh.py's byte-exact comparison.
+ * ========================================================================== */
+
+// One general-length HMAC mechanism: a truncated C_Sign byte-compared against
+// the leading bytes of an independently computed full-length OpenSSL HMAC,
+// a real engine C_Verify of that truncated MAC, and the parameter-validation
+// boundaries the mechanism owes its callers.
+static void general_hmac_case(CK_MECHANISM_TYPE mech, const char* name, const EVP_MD* md,
+                               const unsigned char* key, size_t keyLen,
+                               const unsigned char* msg, size_t msgLen,
+                               CK_ULONG requestedLen) {
+    const char* CAT = "HmacGeneral";
+    std::string tag = std::string("HMAC_GENERAL_") + name;
+    if (!mech_advertised(mech)) {
+        record_result(CAT, tag, "SKIP", "mechanism not advertised");
+        return;
+    }
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE genType = CKK_GENERIC_SECRET;
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+    CK_ATTRIBUTE tmpl[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &genType, sizeof(genType) },
+        { CKA_SIGN, &bTrue, sizeof(bTrue) },
+        { CKA_VERIFY, &bTrue, sizeof(bTrue) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        { CKA_VALUE, (CK_VOID_PTR)key, (CK_ULONG)keyLen },
+    };
+    CK_OBJECT_HANDLE hKey = 0;
+    CK_RV rv = fl->C_CreateObject(hSess, tmpl, 6, &hKey);
+    if (rv != CKR_OK) {
+        record_result(CAT, tag, "FAIL", "key CreateObject RV=" + std::to_string(rv));
+        return;
+    }
+
+    // Independent oracle: the FULL-length HMAC over the same key and message.
+    unsigned char oracle[64]; unsigned int oracleLen = 0;
+    HMAC(md, key, (int)keyLen, msg, msgLen, oracle, &oracleLen);
+
+    // 1. Truncated sign. PKCS#11 v3.2 §6.22.3: the MAC "will be taken from the
+    //    start of the full ... HMAC output", so the engine's output must equal
+    //    the oracle's first requestedLen bytes exactly — and be exactly that
+    //    long, which is the whole point of the mechanism.
+    CK_MAC_GENERAL_PARAMS macParam = requestedLen;
+    CK_MECHANISM m = { mech, &macParam, sizeof(macParam) };
+    rv = fl->C_SignInit(hSess, &m, hKey);
+    if (rv != CKR_OK) {
+        record_result(CAT, tag, "FAIL", "C_SignInit RV=" + std::to_string(rv));
+        return;
+    }
+    CK_BYTE mac[64]; CK_ULONG macLen = sizeof(mac);
+    rv = fl->C_Sign(hSess, (CK_BYTE_PTR)msg, (CK_ULONG)msgLen, mac, &macLen);
+    if (rv != CKR_OK) {
+        record_result(CAT, tag, "FAIL", "C_Sign RV=" + std::to_string(rv));
+        return;
+    }
+    bool truncated = (requestedLen < oracleLen); // the case actually under test
+    bool lenOk = (macLen == requestedLen);
+    bool prefixOk = lenOk && (memcmp(mac, oracle, requestedLen) == 0);
+
+    // 2. The engine's own verify accepts its own truncated MAC.
+    CK_RV rvv = fl->C_VerifyInit(hSess, &m, hKey);
+    if (rvv == CKR_OK) rvv = fl->C_Verify(hSess, (CK_BYTE_PTR)msg, (CK_ULONG)msgLen, mac, macLen);
+    bool verifyOk = (rvv == CKR_OK);
+
+    bool pass = truncated && lenOk && prefixOk && verifyOk;
+    record_result(CAT, tag, pass ? "PASS" : "FAIL",
+                  pass ? "sign truncated to " + std::to_string(requestedLen) + " of " +
+                         std::to_string(oracleLen) + " bytes matches the leading bytes of an "
+                         "independent OpenSSL HMAC oracle AND engine verify succeeds"
+                       : "truncated=" + std::string(truncated ? "yes" : "no") +
+                         " lenOk=" + std::string(lenOk ? "yes" : "no") +
+                         " prefixOk=" + std::string(prefixOk ? "yes" : "no") +
+                         " verifyRV=" + std::to_string(rvv) +
+                         " macLen=" + std::to_string(macLen));
+
+    // 3. The requested length is ENFORCED on verify, not merely accepted: the
+    //    full-length MAC (a correct MAC for the plain mechanism) must be
+    //    refused for length, or truncation would be decorative.
+    {
+        CK_RV r = fl->C_VerifyInit(hSess, &m, hKey);
+        if (r == CKR_OK) r = fl->C_Verify(hSess, (CK_BYTE_PTR)msg, (CK_ULONG)msgLen, oracle, oracleLen);
+        record_result(CAT, tag + "_rejects_full_length_mac",
+                      r == CKR_SIGNATURE_LEN_RANGE ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_SIGNATURE_LEN_RANGE=0xC1)");
+        if (r == CKR_OK) fl->C_VerifyInit(hSess, NULL_PTR, 0);
+    }
+
+    // 4. Tampered message under the same truncated length must still fail as a
+    //    signature, not silently pass on a short comparison.
+    {
+        std::vector<unsigned char> bad(msg, msg + msgLen);
+        if (!bad.empty()) bad[0] ^= 0xFF;
+        CK_RV r = fl->C_VerifyInit(hSess, &m, hKey);
+        if (r == CKR_OK) r = fl->C_Verify(hSess, bad.data(), (CK_ULONG)bad.size(), mac, macLen);
+        record_result(CAT, tag + "_rejects_tampered_message",
+                      r == CKR_SIGNATURE_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_SIGNATURE_INVALID=0xC0)");
+    }
+
+    // 5. Parameter validation. §6.22.3 gives the length as a mandatory
+    //    CK_MAC_GENERAL_PARAMS in the range 1..full: a missing parameter, a
+    //    zero length, and a length beyond the underlying HMAC are each
+    //    CKR_MECHANISM_PARAM_INVALID rather than a silent full-length MAC.
+    struct { const char* what; CK_VOID_PTR p; CK_ULONG plen; } negatives[3];
+    CK_MAC_GENERAL_PARAMS zeroLen = 0;
+    CK_MAC_GENERAL_PARAMS tooLong = (CK_MAC_GENERAL_PARAMS)oracleLen + 1;
+    negatives[0] = { "no_param",    NULL_PTR,  0 };
+    negatives[1] = { "zero_length", &zeroLen,  sizeof(zeroLen) };
+    negatives[2] = { "over_length", &tooLong,  sizeof(tooLong) };
+    for (const auto& n : negatives) {
+        CK_MECHANISM bad = { mech, n.p, n.plen };
+        CK_RV r = fl->C_SignInit(hSess, &bad, hKey);
+        record_result(CAT, tag + "_" + n.what,
+                      r == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
+                      "C_SignInit RV=" + std::to_string(r) + " (want CKR_MECHANISM_PARAM_INVALID=0x71)");
+        if (r == CKR_OK) fl->C_SignInit(hSess, NULL_PTR, 0);
+    }
+}
+
+void test_hmac_general_mechanisms() {
+    // Fixed key/message so every recorded detail is reproducible. 64 bytes
+    // clears kMacMechTable's largest HMAC minKeyBytes (SHA-512's 64).
+    unsigned char key[64];
+    for (int i = 0; i < 64; i++) key[i] = (unsigned char)(i * 5 + 9);
+    CK_BYTE msg[] = "PKCS#11 v3.2 general-length HMAC truncation round trip";
+    size_t msgLen = sizeof(msg) - 1;
+
+    // 20 bytes is the SP 800-107 truncation length NIST's own ACVP-HMAC
+    // reference vectors top out at, and is shorter than every hash below.
+    const CK_ULONG t = 20;
+    general_hmac_case(CKM_SHA_1_HMAC_GENERAL,    "SHA1",     EVP_sha1(),     key, sizeof(key), (const unsigned char*)msg, msgLen, 16);
+    general_hmac_case(CKM_SHA224_HMAC_GENERAL,   "SHA224",   EVP_sha224(),   key, sizeof(key), (const unsigned char*)msg, msgLen, t);
+    general_hmac_case(CKM_SHA256_HMAC_GENERAL,   "SHA256",   EVP_sha256(),   key, sizeof(key), (const unsigned char*)msg, msgLen, t);
+    general_hmac_case(CKM_SHA384_HMAC_GENERAL,   "SHA384",   EVP_sha384(),   key, sizeof(key), (const unsigned char*)msg, msgLen, t);
+    general_hmac_case(CKM_SHA512_HMAC_GENERAL,   "SHA512",   EVP_sha512(),   key, sizeof(key), (const unsigned char*)msg, msgLen, t);
+    general_hmac_case(CKM_SHA3_224_HMAC_GENERAL, "SHA3_224", EVP_sha3_224(), key, sizeof(key), (const unsigned char*)msg, msgLen, t);
+    general_hmac_case(CKM_SHA3_256_HMAC_GENERAL, "SHA3_256", EVP_sha3_256(), key, sizeof(key), (const unsigned char*)msg, msgLen, t);
+    general_hmac_case(CKM_SHA3_384_HMAC_GENERAL, "SHA3_384", EVP_sha3_384(), key, sizeof(key), (const unsigned char*)msg, msgLen, t);
+    general_hmac_case(CKM_SHA3_512_HMAC_GENERAL, "SHA3_512", EVP_sha3_512(), key, sizeof(key), (const unsigned char*)msg, msgLen, t);
+#ifndef WITH_FIPS
+    general_hmac_case(CKM_MD5_HMAC_GENERAL,      "MD5",      EVP_md5(),      key, sizeof(key), (const unsigned char*)msg, msgLen, 8);
+#endif
+    // CKM_RIPEMD160_HMAC_GENERAL is deliberately absent: an in-process
+    // EVP_ripemd160() oracle needs the OpenSSL legacy provider loaded into
+    // THIS process, which this harness does not do — the same reason the
+    // existing G-DA-X RIPEMD160_HMAC test settles for an engine-only round
+    // trip. Its dispatch is still covered, by test_advertise_implies_dispatch's
+    // Sign_/Verify_0x00000242 probes.
+}
+
+// CKM_AES_KEY_WRAP_KWP: RFC 5649 with a known KEK and a known 20-byte (not a
+// multiple of 8) target, byte-compared against an independent OpenSSL
+// AES-256-wrap-pad oracle, then unwrapped back through the engine. Also
+// asserts the deprecated CKM_AES_KEY_WRAP_PAD spelling produces the identical
+// blob, which is what "same construction, new name" (v3.2 §6.16.3) means.
+void test_aes_key_wrap_kwp() {
+    const char* CAT = "AesKwp";
+    if (!mech_advertised(CKM_AES_KEY_WRAP_KWP)) {
+        record_result(CAT, "KWP_roundtrip", "SKIP", "mechanism not advertised");
+        return;
+    }
+    CK_OBJECT_CLASS secClass = CKO_SECRET_KEY;
+    CK_KEY_TYPE aesType = CKK_AES, genType = CKK_GENERIC_SECRET;
+    CK_BBOOL bTrue = CK_TRUE, bFalse = CK_FALSE;
+
+    unsigned char kekBytes[32];
+    for (int i = 0; i < 32; i++) kekBytes[i] = (unsigned char)(i * 13 + 5);
+    CK_ATTRIBUTE kekTmpl[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &aesType, sizeof(aesType) },
+        { CKA_WRAP, &bTrue, sizeof(bTrue) },
+        { CKA_UNWRAP, &bTrue, sizeof(bTrue) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        { CKA_VALUE, kekBytes, sizeof(kekBytes) },
+    };
+    CK_OBJECT_HANDLE hKek = 0;
+    CK_RV rv = fl->C_CreateObject(hSess, kekTmpl, 6, &hKek);
+    if (rv != CKR_OK) {
+        record_result(CAT, "KWP_roundtrip", "FAIL", "KEK CreateObject RV=" + std::to_string(rv));
+        return;
+    }
+
+    // 20 bytes: not a multiple of the 8-byte semiblock, so the RFC 5649
+    // padding path is genuinely exercised (plain CKM_AES_KEY_WRAP zero-pads
+    // instead and could not round-trip this length).
+    unsigned char targetBytes[20];
+    for (int i = 0; i < 20; i++) targetBytes[i] = (unsigned char)(0xA0 + i);
+    CK_ATTRIBUTE targetTmpl[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &genType, sizeof(genType) },
+        { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+        { CKA_SENSITIVE, &bFalse, sizeof(bFalse) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+        { CKA_VALUE, targetBytes, sizeof(targetBytes) },
+    };
+    CK_OBJECT_HANDLE hTarget = 0;
+    rv = fl->C_CreateObject(hSess, targetTmpl, 6, &hTarget);
+    if (rv != CKR_OK) {
+        record_result(CAT, "KWP_roundtrip", "FAIL", "target CreateObject RV=" + std::to_string(rv));
+        return;
+    }
+
+    CK_MECHANISM kwp = { CKM_AES_KEY_WRAP_KWP, NULL_PTR, 0 };
+    CK_BYTE wrapped[64]; CK_ULONG wrappedLen = sizeof(wrapped);
+    CK_RV rw = fl->C_WrapKey(hSess, &kwp, hKek, hTarget, wrapped, &wrappedLen);
+
+    // Independent oracle: OpenSSL's own AES-256 key wrap with padding over the
+    // same KEK and the same 20 plaintext bytes.
+    unsigned char oracle[64]; int oOut = 0, oFin = 0;
+    EVP_CIPHER_CTX* octx = EVP_CIPHER_CTX_new();
+    bool oracleOk = octx != NULL;
+    if (oracleOk) {
+        EVP_CIPHER_CTX_set_flags(octx, EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
+        oracleOk = EVP_EncryptInit_ex(octx, EVP_aes_256_wrap_pad(), NULL, kekBytes, NULL) == 1 &&
+                   EVP_CIPHER_CTX_set_padding(octx, 0) == 1 &&
+                   EVP_EncryptUpdate(octx, oracle, &oOut, targetBytes, (int)sizeof(targetBytes)) == 1 &&
+                   EVP_EncryptFinal_ex(octx, oracle + oOut, &oFin) == 1;
+    }
+    if (octx) EVP_CIPHER_CTX_free(octx);
+    int oracleLen = oOut + oFin;
+    bool wrapMatch = oracleOk && (rw == CKR_OK) && (wrappedLen == (CK_ULONG)oracleLen) &&
+                     (memcmp(wrapped, oracle, oracleLen) == 0);
+
+    CK_ATTRIBUTE unwrapTmpl[] = {
+        { CKA_CLASS, &secClass, sizeof(secClass) },
+        { CKA_KEY_TYPE, &genType, sizeof(genType) },
+        { CKA_EXTRACTABLE, &bTrue, sizeof(bTrue) },
+        { CKA_SENSITIVE, &bFalse, sizeof(bFalse) },
+        { CKA_TOKEN, &bFalse, sizeof(bFalse) },
+    };
+    CK_OBJECT_HANDLE hUnwrapped = 0;
+    CK_RV ru = (rw == CKR_OK)
+        ? fl->C_UnwrapKey(hSess, &kwp, hKek, wrapped, wrappedLen, unwrapTmpl, 5, &hUnwrapped)
+        : CKR_GENERAL_ERROR;
+    CK_BYTE back[64]; CK_ATTRIBUTE ab = { CKA_VALUE, back, sizeof(back) };
+    CK_RV rr = (ru == CKR_OK) ? fl->C_GetAttributeValue(hSess, hUnwrapped, &ab, 1) : CKR_GENERAL_ERROR;
+    bool roundTrip = (rr == CKR_OK) && (ab.ulValueLen == sizeof(targetBytes)) &&
+                     (memcmp(back, targetBytes, sizeof(targetBytes)) == 0);
+
+    record_result(CAT, "KWP_roundtrip",
+                  (wrapMatch && roundTrip) ? "PASS" : "FAIL",
+                  (wrapMatch && roundTrip)
+                      ? "20-byte (non-multiple-of-8) key wraps to the same blob as an independent "
+                        "OpenSSL AES-256-wrap-pad oracle AND unwraps back byte-identical"
+                      : "wrapRV=" + std::to_string(rw) + " unwrapRV=" + std::to_string(ru) +
+                        " readbackRV=" + std::to_string(rr) +
+                        " wrapMatch=" + std::string(wrapMatch ? "yes" : "no") +
+                        " roundTrip=" + std::string(roundTrip ? "yes" : "no"));
+
+    // The deprecated spelling must be the very same construction, not a
+    // parallel implementation that could drift from it (v3.2 §6.16.3).
+    if (!mech_advertised(CKM_AES_KEY_WRAP_PAD)) {
+        record_result(CAT, "KWP_matches_deprecated_PAD", "SKIP", "CKM_AES_KEY_WRAP_PAD not advertised");
+    } else {
+        CK_MECHANISM pad = { CKM_AES_KEY_WRAP_PAD, NULL_PTR, 0 };
+        CK_BYTE padWrapped[64]; CK_ULONG padLen = sizeof(padWrapped);
+        CK_RV rp = fl->C_WrapKey(hSess, &pad, hKek, hTarget, padWrapped, &padLen);
+        bool same = (rp == CKR_OK) && (rw == CKR_OK) && (padLen == wrappedLen) &&
+                    (memcmp(padWrapped, wrapped, padLen) == 0);
+        record_result(CAT, "KWP_matches_deprecated_PAD", same ? "PASS" : "FAIL",
+                      same ? "CKM_AES_KEY_WRAP_KWP and CKM_AES_KEY_WRAP_PAD produce identical output"
+                           : "padRV=" + std::to_string(rp) + " padLen=" + std::to_string(padLen) +
+                             " kwpLen=" + std::to_string(wrappedLen));
+    }
+
+    // A KWP mechanism parameter is the optional 4-byte alternative initial
+    // value (§6.16.2); this engine does not implement one, and says so with
+    // CKR_ARGUMENTS_BAD rather than ignoring the caller's IV.
+    {
+        CK_BYTE iv[4] = { 0xA6, 0x59, 0x59, 0xA6 };
+        CK_MECHANISM withIv = { CKM_AES_KEY_WRAP_KWP, iv, sizeof(iv) };
+        CK_BYTE out[64]; CK_ULONG outLen = sizeof(out);
+        CK_RV r = fl->C_WrapKey(hSess, &withIv, hKek, hTarget, out, &outLen);
+        record_result(CAT, "KWP_rejects_unsupported_iv_param",
+                      r == CKR_ARGUMENTS_BAD ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_ARGUMENTS_BAD=0x7)");
+    }
+}
+
 /* -----------------------------------------------------------------------------
  * Step 3: advertise-implies-dispatch invariant (2026-08-24)
  *
@@ -10378,6 +10683,10 @@ int main(int argc, char** argv) {
         refresh_session(); test_gap_rsa_oaep_and_wrap();
         refresh_session(); test_gap_aes_family();
         refresh_session(); test_gap_concatenate_data_and_base();
+    }
+    if (opt_category == "all" || opt_category == "hmac-general-kwp") {
+        refresh_session(); test_hmac_general_mechanisms();
+        refresh_session(); test_aes_key_wrap_kwp();
     }
     if (opt_category == "all" || opt_category == "invariant") {
         refresh_session(); test_advertise_implies_dispatch();
