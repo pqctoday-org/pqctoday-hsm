@@ -1,22 +1,22 @@
 # Provider-Layer Coverage Remediation Plan — JavaJCE + OpenSSL provider
 
-**Date:** 2026-08-30
+**Date:** 2026-08-30 (revised same day — see §0 and §3 for what changed and why)
 **Supersedes/extends:** WS-10 in `docs/remediation-plan-pkcs11-v32-coverage-2026-08-29.md`, which checked both providers against only 4 engine-level fixes. This document re-verifies those 4 and adds 7 new items surfaced by today's Rust WS-8 mechanism work.
-**Status:** PLAN ONLY — nothing in this document has been executed.
+**Status:** PLAN ONLY — nothing in this document has been executed. The *engine-side* work it depends on (`fix/ws1-4-and-ws2-rust-gaps`) is now fully committed locally (HEAD `fe88c79`, includes a CHANGELOG entry and `docs/remediation-plan-rust-pkcs11-v32-gaps-2026-08-30.md` as evidence) — stable and unpushed, ready to be a merge input whenever Q-0 below happens, but still not merged anywhere.
 
 ## 0. Branch topology — read this before touching anything
 
-Provider-layer gaps here are computed across **three different, mutually unmerged branches**, not one working tree. This matters for anyone executing this plan:
+Provider-layer gaps here are computed across **three branches that have each diverged from a common ancestor in a different direction**, not one working tree, and not a simple two-line "engine vs. providers" split. An earlier draft of this document got this wrong (see §3) — the corrected picture:
 
-| Branch (all local, unpushed) | What's actually current there |
+| Branch (all local, unpushed except `main`) | What's actually current there |
 |---|---|
-| `fix/ws1-4-and-ws2-rust-gaps` (this worktree, HEAD `36ba19e`) | The Rust engine's WS-8 mechanisms (`CKM_AES_GMAC`, `CKM_AES_CCM`, `CKM_AES_XTS`/`_KEY_GEN`, `CKM_AES_OFB`/`CFB8`/`CFB128`/`CFB1`, `CKM_SP800_108_DOUBLE_PIPELINE_KDF`, `CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS`) and the exhaustive FIPS 203/204/205 cross-engine differential verification. The C++ engine is **byte-identical** between this branch and `main` (`git diff main feat/jdk27-jca-provider -- src/lib/` and the equivalent against this branch are both empty) — none of today's Rust work touches C++. |
-| `feat/jdk27-jca-provider` (63 commits ahead of `main`, 2 behind — not this worktree) | The real, current JavaJCE provider (WS-A–D) and the real, current OpenSSL provider (phase-7/8, items R8–R41). **This worktree's own `JavaJCE/` and `src/vendor/pkcs11-provider/` directories are stale `main`-level copies** — every finding below was read via `git show feat/jdk27-jca-provider:<path>`, not the working tree, for exactly that reason. |
-| `main` | Neither the WS-8 engine work nor the provider work. |
+| `main` (published baseline) | Has `85f0cd8` (#189: `CKM_*_HMAC_GENERAL`, `CKM_AES_KEY_WRAP_KWP` engine dispatch) and `7a8b4d7` (#190: RSA-OAEP hash selection, `CK_EDDSA_PARAMS` context/prehash, private-key sensitivity) already merged. Does **not** have WS-8 (GMAC/CCM/XTS/OFB/CFB/Double-Pipeline-KDF/EC-extra-bits) at all, in either engine. |
+| `fix/ws1-4-and-ws2-rust-gaps` (this worktree, HEAD `fe88c79`) | `main`'s baseline **plus** today's WS-0 through WS-8 execution: C++ gained GMAC/CCM/XTS/OFB/CFB/Double-Pipeline-KDF first (commits `35cc156`/`0763e59`/`bec7ada`, 13:57–14:19 today), then the Rust engine was brought to parity with those *same-day* C++ additions, plus `CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS` (Rust-only), plus the exhaustive FIPS 203/204/205 cross-engine differential verification. **Every WS-8 mechanism on this list exists on this one branch only** — confirmed via `git log -S` and `git branch --contains` — not on `main`, not on `feat/jdk27-jca-provider`, not anywhere else. |
+| `feat/jdk27-jca-provider` (63 commits ahead of an *older* `main` snapshot, but **2 behind current `main` — missing exactly `85f0cd8`/`7a8b4d7`**) | The real, current JavaJCE provider (WS-A–D) and the real, current OpenSSL provider (phase-7/8, items R8–R41), built on a C++ engine that **predates #189/#190**. Confirmed directly: `git show feat/jdk27-jca-provider:src/lib/SoftHSM_sign.cpp` has zero `OAEP`, zero `phFlag`/`contextData`, zero `HMAC_GENERAL` hits, and `CKM_AES_KEY_WRAP_KWP` exists only as an unused header `#define`. See §3.2 — this means two of this document's "already done" verdicts are provider-complete but engine-incomplete *on this exact branch as it stands*. **This worktree's own `JavaJCE/` and `src/vendor/pkcs11-provider/` directories are stale, older-`main`-level copies** — every provider-layer finding below was read via `git show feat/jdk27-jca-provider:<path>`, not the working tree. |
 
-**No branch currently has both the newest engine mechanisms and the newest provider code together.** Any actual fix work under this plan needs `fix/ws1-4-and-ws2-rust-gaps` merged (or rebased) onto `feat/jdk27-jca-provider` (or vice versa) first — a provider patch written against this worktree's stale `JavaJCE`/`pkcs11-provider` copies would silently regress WS-A–D and R8–R41.
+**No branch has the newest engine mechanisms, the `main`-baseline engine fixes, and the newest provider code all together.** `feat/jdk27-jca-provider` needs at minimum a rebase onto current `main` before its own §1 "done" verdicts are true end-to-end — independent of ever picking up WS-8. Picking up WS-8 itself is a second, separate merge (`fix/ws1-4-and-ws2-rust-gaps` onto whatever `feat/jdk27-jca-provider` becomes after that rebase). A provider patch written against this worktree's stale `JavaJCE`/`pkcs11-provider` copies would silently regress WS-A–D and R8–R41.
 
-Both providers are engine-agnostic at the code level (JavaJCE loads whichever `.so`/`.dylib` `PKCS11_MODULE` points at; the OpenSSL provider is a generic PKCS#11-backed OpenSSL provider) — a mechanism gap is a JCA/OpenSSL registration question, independent of which of the two engines a given deployment runs.
+Both providers are engine-agnostic at the code level (JavaJCE loads whichever `.so`/`.dylib` `PKCS11_MODULE` points at; the OpenSSL provider is a generic PKCS#11-backed OpenSSL provider) — a mechanism gap is a JCA/OpenSSL registration question, independent of which of the two engines a given deployment runs, *provided* the engine it's actually pointed at has the mechanism. §3.2 is exactly a case where that proviso fails.
 
 ---
 
@@ -26,14 +26,14 @@ Both providers are engine-agnostic at the code level (JavaJCE loads whichever `.
 |---|---|---|
 | `CKM_*_HMAC_GENERAL` | **Still open.** `P11MacSpi.engineInit` throws on any non-null param (`P11MacSpi.java:44-48`); only 8 fixed-length `Hmac*` `Mac` services registered (`SoftHSMv3Provider.java:801-808`). | **Fixed since** (item R8, commit `514e1dc`) — real `mac.c`, `case OSSL_OP_MAC:` at `provider.c:1955`. R23 (`26aeb98`) extended the same file to CMAC and KMAC-128/256. |
 | `CKM_AES_KEY_WRAP_KWP` | **Still open.** Only `"AESWrap"`/`"AESWrapPad"` registered (`SoftHSMv3Provider.java:786-787`); `P11Constants.java:54-55` has no `_KWP` constant. | **Still open, untracked.** `CKM_AES_KEY_WRAP_KWP` exists only as a `pkcs11.h` `#define` and a `debug.c` log-name string — zero hits in `checklist[]`, `cipher.c`, or `skeymgmt.c`. |
-| `CK_EDDSA_PARAMS` (context/prehash) | **Still open**, and confirmed unrelated to WS-D's "pre-hash ML-DSA/SLH-DSA disposition" commit — that commit's own javadoc scope never mentions EdDSA. `P11PureSigSignatureSpi.engineSetParameter` throws on any non-null param (`:112-116`). | **Already done.** `sig/eddsa.c:261-277,328-336` builds `phFlag`/`pContextData` from real `OSSL_SIGNATURE_PARAM_CONTEXT_STRING`. |
-| RSA-OAEP hash selection | **Never was a gap.** 6 `registerRSAOAEP` calls, SHA-256/384/512 + SHA3-256/384/512 (`SoftHSMv3Provider.java:751-756`). | **Never was a gap.** Fully dynamic both directions (`asymmetric_cipher.c:526-536,642-654`). |
+| `CK_EDDSA_PARAMS` (context/prehash) | **Still open**, and confirmed unrelated to WS-D's "pre-hash ML-DSA/SLH-DSA disposition" commit — that commit's own javadoc scope never mentions EdDSA. `P11PureSigSignatureSpi.engineSetParameter` throws on any non-null param (`:112-116`). | **Provider code done, engine underneath it isn't — see §3.2.** `sig/eddsa.c:261-277,328-336` builds `phFlag`/`pContextData` from real `OSSL_SIGNATURE_PARAM_CONTEXT_STRING`, but `feat/jdk27-jca-provider`'s own C++ engine has zero `phFlag`/`contextData` dispatch to receive it. |
+| RSA-OAEP hash selection | **Never was a gap.** 6 `registerRSAOAEP` calls, SHA-256/384/512 + SHA3-256/384/512 (`SoftHSMv3Provider.java:751-756`). | **Provider code done, engine underneath it isn't — see §3.2.** Fully dynamic both directions (`asymmetric_cipher.c:526-536,642-654`), but `feat/jdk27-jca-provider`'s own C++ engine has zero `OAEP` hits in `SoftHSM_sign.cpp` to act on it. |
 
 ---
 
-## 2. New gaps — WS-8 mechanism parity (Rust caught up to C++ today; both providers still lag)
+## 2. New gaps — WS-8 mechanism parity (all same-day, single-branch work; both providers lag an engine state that itself doesn't exist anywhere else yet)
 
-All six of these mechanisms have been reachable through the **C++ engine's** PKCS#11 surface for a while (confirmed directly in `src/lib/`: `SoftHSM_cipher.cpp`, `SoftHSM_keygen.cpp`, `SoftHSM_sign.cpp`, `crypto/OSSLAES.cpp`, `crypto/OSSLGMAC.cpp`/`.h`) — today's Rust work (this branch) brought the **Rust engine** to parity, except item 6 which is Rust-only. Neither provider has ever exposed most of them, regardless of engine.
+**Correction from this document's first draft:** these six mechanisms are not long-standing C++ features. All six were added to the C++ engine *earlier today* (commits `35cc156`/`0763e59`/`bec7ada`, 13:57–14:19), on this one branch, and Rust was brought to parity with them roughly an hour later the same day — see §3.1. Neither provider has ever had a chance to expose any of them; there is no live regression here, because nothing outside `fix/ws1-4-and-ws2-rust-gaps` has ever been able to see these mechanisms. This changes the urgency framing (§5) but not the registration facts below, which were independently grounded against the actual `feat/jdk27-jca-provider` provider source.
 
 | # | Mechanism | JavaJCE | OpenSSL provider |
 |---|---|---|---|
@@ -54,19 +54,37 @@ Rust's HKDF/SP800-108 dispatch fix (today) added honest recognition (reject inst
 
 ---
 
-## 3. Correction to the OpenSSL-provider agent's own draft finding
+## 3. Two corrections made to this document's own first draft
 
-The sub-agent that audited the OpenSSL provider initially accepted `kdf.c`'s inline comment on `CKM_SP800_108_DOUBLE_PIPELINE_KDF` — "the engine implements only Counter and Feedback" — as honest and current, on the strength of a same-session grep of `src/lib/` and `rust/`. **That grep was wrong; direct verification for this document found otherwise**:
+Both were caught by independently re-verifying claims against `git log`/`git blame`/`git show` instead of trusting a single grep or a provider's own inline comment. Recorded here in full, retraction included, rather than silently fixed, because both are exactly the kind of error that compounds if carried forward unflagged.
+
+### 3.1 — the Double-Pipeline "correction" in the first draft was itself wrong, and backwards
+
+The first draft of this document overruled the OpenSSL-provider sub-agent's finding that `kdf.c`'s comment — "the engine implements only Counter and Feedback" — was honest and current. The overrule was based on grepping `src/lib/SoftHSM_keygen.cpp` **in this worktree** and finding a real `CKM_SP800_108_DOUBLE_PIPELINE_KDF` implementation (`:2862`, `:3884-4113`), and concluding the provider's comment must be stale.
+
+That grep was real, but the conclusion drawn from it wasn't checked against *which branch* introduced that code. Re-verified with `git log --oneline --all -S "CKM_SP800_108_DOUBLE_PIPELINE_KDF" -- src/lib/SoftHSM_keygen.cpp` and `git branch --all --contains <that commit>`:
 
 ```
-src/lib/SoftHSM_keygen.cpp:2862:  case CKM_SP800_108_DOUBLE_PIPELINE_KDF:
-src/lib/SoftHSM_keygen.cpp:3884-4113:  full implementation — EVP_MAC round loop,
-  CMAC key-size validation, CK_SP800_108_KDF_PARAMS parsing, real error paths
+35cc156  2026-08-30 13:57  Close SP800-108/HKDF gaps with real evidence; add 5 WS-8 cipher mechanisms
+  → exists on fix/ws1-4-and-ws2-rust-gaps ONLY
 ```
 
-The C++ engine has had a complete Double-Pipeline implementation for a while (Rust's item 2/7 today was explicitly "WS-8 **parity**" against it). `kdf.c`'s comment is stale in exactly the same way R32's CCM/OFB/CFB comments are — not a different, accurate case. Item 5's OpenSSL-provider row above reflects this correction; the fix sketch is the same shape as items 2 and 4 (extend the existing mode-string switch, `kdf.c:1533`), not "blocked on engine work."
+`git show main:src/lib/SoftHSM_keygen.cpp | grep -c CKM_SP800_108_DOUBLE_PIPELINE_KDF` → **0**. `git show feat/jdk27-jca-provider:src/lib/SoftHSM_keygen.cpp | grep CKM_SP800_108_DOUBLE_PIPELINE_KDF` → **0 matches**. The same is true of GMAC/CCM/XTS/OFB/CFB (`OSSLGMAC.cpp`/`.h` are new files with an empty diff between `main` and `feat/jdk27-jca-provider`, but 182/40 new lines between `main` and this branch).
 
-This is flagged explicitly because it's the kind of error that compounds silently: an agent (or a person) reading only the provider's own comment, without re-checking the engine source it cites, would carry the stale claim forward into this plan.
+**Retraction:** the provider's `kdf.c` comment was accurate for any codebase state anyone besides this one branch could actually see. The first draft's "correction" had it backwards — it mistook same-day, single-branch work for an established feature the provider had simply neglected. §2's mechanism table and §5's phase ordering have been updated to reflect this (Double-Pipeline is no longer "no engine work needed" with elevated urgency — see §5, Q-2 is now correctly scoped).
+
+### 3.2 — a real gap this document's first draft missed entirely: `feat/jdk27-jca-provider` predates `main`'s own #189/#190
+
+Checking whether `feat/jdk27-jca-provider` is fully caught up to `main` (it isn't — 2 commits behind) surfaced that the 2 missing commits are exactly `85f0cd8` (#189: `CKM_*_HMAC_GENERAL`, `CKM_AES_KEY_WRAP_KWP`) and `7a8b4d7` (#190: RSA-OAEP hash selection, `CK_EDDSA_PARAMS`, private-key sensitivity). Direct confirmation against `feat/jdk27-jca-provider`'s own C++ source:
+
+```
+git show feat/jdk27-jca-provider:src/lib/SoftHSM_sign.cpp | grep -n OAEP                    → 0 hits
+git show feat/jdk27-jca-provider:src/lib/SoftHSM_sign.cpp | grep -n "phFlag\|contextData"    → 0 hits
+git show feat/jdk27-jca-provider:src/lib/SoftHSM_sign.cpp | grep -n HMAC_GENERAL             → 0 hits
+CKM_AES_KEY_WRAP_KWP on that branch                                                          → header #define only, no dispatch anywhere in src/lib/
+```
+
+The OpenSSL provider's own code (`asymmetric_cipher.c`, `eddsa.c`) is real and complete, as §1 already documents — but on `feat/jdk27-jca-provider` as it currently stands, that code has no engine dispatch to act on. Sending a non-default OAEP hash or an EdDSA context string to *that branch's own C++ build* would hit an engine that never receives or honors those params. §1's table now marks both rows accordingly instead of "nothing to do."
 
 ---
 
@@ -91,9 +109,10 @@ This is flagged explicitly because it's the kind of error that compounds silentl
 
 | Phase | Contents | Rationale |
 |---|---|---|
-| **Q-0** | Merge or rebase `fix/ws1-4-and-ws2-rust-gaps` and `feat/jdk27-jca-provider` onto a common branch. | Nothing in this plan can be safely built otherwise — see §0. Neither branch alone has both the engine mechanisms and the current provider code. |
-| **Q-1** | Correct the stale `kdf.c`/`cipher.c` inline comments (§3, and R32's CCM/OFB/CFB annotations) to reflect the engine's actual current state. | Cheap, prevents the same staleness from propagating into whoever picks up Q-2. |
-| **Q-2** | OpenSSL provider: `CKM_AES_OFB`/`CFB*` (registration already exists, only `prep_mech` is missing) and `CKM_SP800_108_DOUBLE_PIPELINE_KDF` (no engine work needed). | Cheapest real fixes — dispatch scaffolding already in place on both. |
+| **Q-0a** | Rebase `feat/jdk27-jca-provider` onto current `main` (picks up `85f0cd8`/`7a8b4d7`). | Required before §1's RSA-OAEP-hash and `CK_EDDSA_PARAMS` "done" verdicts are true end-to-end — see §3.2. Independent of WS-8; do this even if WS-8 is deferred. |
+| **Q-0b** | Merge or rebase `fix/ws1-4-and-ws2-rust-gaps` onto the result of Q-0a. | Nothing in §2 can be built otherwise — see §0. `fix/ws1-4-and-ws2-rust-gaps` is the only place any WS-8 mechanism exists, in either engine. |
+| **Q-1** | Correct the stale `kdf.c`/`cipher.c` inline comments (R32's CCM/OFB/CFB annotations, and `kdf.c`'s Double-Pipeline comment, per §3.1) to reflect the engine's actual current state **after Q-0b**, not before. | Cheap, prevents the same staleness from propagating into whoever picks up Q-2 — and per §3.1, these comments are accurate until Q-0b actually lands. |
+| **Q-2** | OpenSSL provider: `CKM_AES_OFB`/`CFB*` (registration already exists, only `prep_mech` is missing) and `CKM_SP800_108_DOUBLE_PIPELINE_KDF` (engine work already done, on the branch Q-0b brings in). | Cheapest real fixes once Q-0b lands — dispatch scaffolding already in place on both, and neither needs new engine work beyond the merge itself. |
 | **Q-3** | JavaJCE: `CKM_AES_OFB`/`CFB*`, HMAC PRF coverage (item 7), `CKM_AES_KEY_WRAP_KWP`. | Small, mechanical, reuse existing patterns 1:1. |
 | **Q-4** | Both providers: `CKM_AES_GMAC`, `CKM_AES_CCM`. | Moderate — real AEAD/MAC param-block construction, but existing GCM/CMAC code is a close structural template on both sides. |
 | **Q-5** | Both providers: `CKM_AES_XTS`/`_KEY_GEN`. | Largest of the AES items — needs new key-generation shape (double-width key), not just cipher dispatch. |
