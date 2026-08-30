@@ -4,7 +4,7 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `0c6a8587e06e` · **Generated:** 2026-08-30T20:01:33.656Z — machine-written
+**Engine commit:** `34796e0472f3` · **Generated:** 2026-08-30T20:09:07.981Z — machine-written
 by this harness itself (`writeReport()` in `test_p11_conformance.js`) at the
 end of every run, not hand-edited.
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
@@ -17,7 +17,7 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**981 passed / 0 failed** across 51 sections in this JS harness.
+**989 passed / 0 failed** across 51 sections in this JS harness.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -167,7 +167,7 @@ silently double-succeed. Regression test:
 - G6 — RIPEMD160 / bare SHA384_HMAC+SHA512_HMAC / GENERIC_SECRET / CONCATENATE / PBKDF2 (39 passed / 0 failed)
 - G7 — stateful hash-based signatures: HSS (§6.14) (7 passed / 0 failed)
 - G8 — vendor-defined mechanisms: FrodoKEM / Keccak-256 / KMAC / BIP32 (≥ CKM_VENDOR_DEFINED) (29 passed / 0 failed)
-- G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) (198 passed / 0 failed)
+- G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) (206 passed / 0 failed)
 
 ## Full transcript
 
@@ -303,7 +303,7 @@ silently double-succeed. Regression test:
   ✅ C_DigestEncryptUpdate (no active ops) → OPERATION_NOT_INITIALIZED
 
 ── F1 — mechanism table reconciliation (R6.2) ──
-  ✅ all 118 advertised mechanisms answerable → 0 missing
+  ✅ all 122 advertised mechanisms answerable → 0 missing
 
 ── R3.1 — C_CreateObject template validation (§4.1.1) ──
   ✅ no CKA_CLASS → TEMPLATE_INCOMPLETE
@@ -1057,7 +1057,7 @@ silently double-succeed. Regression test:
   ✅ BIP32 child derive (hardened): byte-equals independent HMAC-SHA512 + mod-n scalar addition
 
 ── G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) ──
-  ✅ fixture: live advertised mechanism count → 118
+  ✅ fixture: live advertised mechanism count → 122
   ✅ 0x0 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x9 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x9 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
@@ -1218,6 +1218,14 @@ silently double-succeed. Regression test:
   ✅ 0x1087 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
   ✅ 0x108e SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x108e VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2104 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x2104 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x2106 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x2106 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x2107 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x2107 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x2108 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x2108 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
   ✅ 0x2109 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x2109 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x110
   ✅ 0x210b WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
@@ -1254,7 +1262,7 @@ silently double-succeed. Regression test:
   ✅ 0x4037 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x4037 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x80000010 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ G9: probed at least one real operation for every flag-bearing advertised mechanism (196 probes total)
+  ✅ G9: probed at least one real operation for every flag-bearing advertised mechanism (204 probes total)
 
-════════ RESULT: 981 passed, 0 failed ════════
+════════ RESULT: 989 passed, 0 failed ════════
 ```

@@ -1437,6 +1437,9 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
             (16, 32, 0x00040000 | 0x00020000)
         }
         CKM_AES_CTR => (16, 32, 0x00000100 | 0x00000200),
+        CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 => {
+            (16, 32, 0x00000100 | 0x00000200)
+        }
         // ML-DSA pre-hash variants — same sign/verify capabilities as pure ML-DSA
         CKM_HASH_ML_DSA_SHA224
         | CKM_HASH_ML_DSA_SHA256
@@ -6583,6 +6586,18 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     Err(rv) => return rv,
                 }
             }
+            // OFB/CFB1/CFB8/CFB128 (§6.11 variants) — plain 16-byte IV, same
+            // shape as CBC. No mechanism-specific params beyond the IV.
+            CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 => {
+                if p_param.is_null() || ul_param_len < 16 {
+                    return CKR_ARGUMENTS_BAD;
+                }
+                (
+                    std::slice::from_raw_parts(p_param, 16).to_vec(),
+                    Vec::new(),
+                    0,
+                )
+            }
             CKM_RSA_PKCS_OAEP => {
                 // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4). EncryptCtx packing:
                 // tag_bits = hashAlg, aad = LE u32 mgf, iv = label bytes.
@@ -6894,6 +6909,58 @@ pub fn C_Encrypt(
                 let mut ctr = CtrState::new_with_width(key, cb, width);
                 ctr.update_public(plaintext)
             }
+            CKM_AES_OFB => {
+                use crate::crypto::multipart::{AesKey, OfbState};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut ofb = OfbState::new(key, ivb);
+                ofb.update_public(plaintext)
+            }
+            CKM_AES_CFB128 => {
+                use crate::crypto::multipart::{AesKey, Cfb128State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb128State::new(key, ivb, CipherDirection::Encrypt);
+                cfb.update_public(plaintext)
+            }
+            CKM_AES_CFB8 => {
+                use crate::crypto::multipart::{AesKey, Cfb8State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb8State::new(key, ivb, CipherDirection::Encrypt);
+                cfb.update_public(plaintext)
+            }
+            CKM_AES_CFB1 => {
+                use crate::crypto::multipart::{AesKey, Cfb1State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb1State::new(key, ivb, CipherDirection::Encrypt);
+                cfb.update_public(plaintext)
+            }
             CKM_RSA_PKCS_OAEP => {
                 if key_bytes.len() < 8 {
                     return CKR_KEY_TYPE_INCONSISTENT;
@@ -7150,6 +7217,18 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     Err(rv) => return rv,
                 }
             }
+            // OFB/CFB1/CFB8/CFB128 (§6.11 variants) — plain 16-byte IV, same
+            // shape as CBC. No mechanism-specific params beyond the IV.
+            CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 => {
+                if p_param.is_null() || ul_param_len < 16 {
+                    return CKR_ARGUMENTS_BAD;
+                }
+                (
+                    std::slice::from_raw_parts(p_param, 16).to_vec(),
+                    Vec::new(),
+                    0,
+                )
+            }
             CKM_RSA_PKCS_OAEP => {
                 // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4). EncryptCtx packing:
                 // tag_bits = hashAlg, aad = LE u32 mgf, iv = label bytes.
@@ -7348,6 +7427,58 @@ pub fn C_Decrypt(
                 let width = ((tag_bits.max(8)) / 8) as usize;
                 let mut ctr = CtrState::new_with_width(key, cb, width);
                 ctr.update_public(ciphertext)
+            }
+            CKM_AES_OFB => {
+                use crate::crypto::multipart::{AesKey, OfbState};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut ofb = OfbState::new(key, ivb);
+                ofb.update_public(ciphertext)
+            }
+            CKM_AES_CFB128 => {
+                use crate::crypto::multipart::{AesKey, Cfb128State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb128State::new(key, ivb, CipherDirection::Decrypt);
+                cfb.update_public(ciphertext)
+            }
+            CKM_AES_CFB8 => {
+                use crate::crypto::multipart::{AesKey, Cfb8State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb8State::new(key, ivb, CipherDirection::Decrypt);
+                cfb.update_public(ciphertext)
+            }
+            CKM_AES_CFB1 => {
+                use crate::crypto::multipart::{AesKey, Cfb1State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb1State::new(key, ivb, CipherDirection::Decrypt);
+                cfb.update_public(ciphertext)
             }
             CKM_RSA_PKCS_OAEP => {
                 use rsa::pkcs8::DecodePrivateKey;
@@ -10537,6 +10668,34 @@ fn build_multipart_cipher(
             // ulCounterBits travels in tag_bits (see EncryptCtx docs).
             let width = ((ctx.tag_bits.max(8)) / 8) as usize;
             Ok(MultipartCipher::Ctr(CtrState::new_with_width(make_key()?, cb, width)))
+        }
+        CKM_AES_OFB => {
+            let iv: [u8; 16] =
+                ctx.iv.as_slice().try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            Ok(MultipartCipher::Ofb(
+                crate::crypto::multipart::OfbState::new(make_key()?, iv),
+            ))
+        }
+        CKM_AES_CFB128 => {
+            let iv: [u8; 16] =
+                ctx.iv.as_slice().try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            Ok(MultipartCipher::Cfb128(
+                crate::crypto::multipart::Cfb128State::new(make_key()?, iv, dir),
+            ))
+        }
+        CKM_AES_CFB8 => {
+            let iv: [u8; 16] =
+                ctx.iv.as_slice().try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            Ok(MultipartCipher::Cfb8(
+                crate::crypto::multipart::Cfb8State::new(make_key()?, iv, dir),
+            ))
+        }
+        CKM_AES_CFB1 => {
+            let iv: [u8; 16] =
+                ctx.iv.as_slice().try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            Ok(MultipartCipher::Cfb1(
+                crate::crypto::multipart::Cfb1State::new(make_key()?, iv, dir),
+            ))
         }
         CKM_AES_GCM => {
             let iv: [u8; 12] =

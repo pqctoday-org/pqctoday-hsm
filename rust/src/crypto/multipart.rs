@@ -106,6 +106,10 @@ pub enum MultipartCipher {
     Cbc(CbcState),
     CbcPad(CbcPadState),
     Ctr(CtrState),
+    Ofb(OfbState),
+    Cfb128(Cfb128State),
+    Cfb8(Cfb8State),
+    Cfb1(Cfb1State),
     Gcm(GcmState),
 }
 
@@ -118,6 +122,10 @@ impl MultipartCipher {
             MultipartCipher::Cbc(s) => full_blocks(s.buf.len() + part_len),
             MultipartCipher::CbcPad(s) => s.update_len(part_len),
             MultipartCipher::Ctr(_) => part_len,
+            MultipartCipher::Ofb(_) => part_len,
+            MultipartCipher::Cfb128(s) => full_blocks(s.buf.len() + part_len),
+            MultipartCipher::Cfb8(_) => part_len,
+            MultipartCipher::Cfb1(_) => part_len,
             MultipartCipher::Gcm(s) => s.update_len(part_len),
         }
     }
@@ -127,8 +135,16 @@ impl MultipartCipher {
     /// unknowable before decryption (§5.2 permits over-estimates).
     pub fn final_len(&self) -> usize {
         match self {
-            MultipartCipher::Ecb(_) | MultipartCipher::Cbc(_) | MultipartCipher::Ctr(_) => 0,
+            MultipartCipher::Ecb(_)
+            | MultipartCipher::Cbc(_)
+            | MultipartCipher::Ctr(_)
+            | MultipartCipher::Ofb(_)
+            | MultipartCipher::Cfb8(_)
+            | MultipartCipher::Cfb1(_) => 0,
             MultipartCipher::CbcPad(_) => BLOCK,
+            // Exact: `finalize()` emits precisely the buffered short final
+            // segment, same convention as CbcPad's exact-except-decrypt note.
+            MultipartCipher::Cfb128(s) => s.buf.len(),
             MultipartCipher::Gcm(s) => match s.dir {
                 CipherDirection::Encrypt => s.tag_len,
                 CipherDirection::Decrypt => 0,
@@ -145,6 +161,10 @@ impl MultipartCipher {
             MultipartCipher::Cbc(s) => Ok(s.update(part)),
             MultipartCipher::CbcPad(s) => Ok(s.update(part)),
             MultipartCipher::Ctr(s) => Ok(s.update(part)),
+            MultipartCipher::Ofb(s) => Ok(s.update(part)),
+            MultipartCipher::Cfb128(s) => Ok(s.update(part)),
+            MultipartCipher::Cfb8(s) => Ok(s.update(part)),
+            MultipartCipher::Cfb1(s) => Ok(s.update(part)),
             MultipartCipher::Gcm(s) => Ok(s.update(part)),
         }
     }
@@ -157,6 +177,10 @@ impl MultipartCipher {
             MultipartCipher::Cbc(s) => s.finalize(),
             MultipartCipher::CbcPad(s) => s.finalize(),
             MultipartCipher::Ctr(_) => Ok(Vec::new()),
+            MultipartCipher::Ofb(_) => Ok(Vec::new()),
+            MultipartCipher::Cfb128(s) => Ok(s.finalize()),
+            MultipartCipher::Cfb8(_) => Ok(Vec::new()),
+            MultipartCipher::Cfb1(_) => Ok(Vec::new()),
             MultipartCipher::Gcm(s) => s.finalize(),
         }
     }
@@ -396,6 +420,202 @@ fn inc_be(block: &mut [u8; BLOCK], width: usize) {
         if block[i] != 0 {
             break;
         }
+    }
+}
+
+// ── OFB (§6.11, NIST SP 800-38A §6.4) ───────────────────────────────────────
+//
+// O_1 = CIPH_K(IV); O_j = CIPH_K(O_{j-1}); C_j = P_j XOR O_j. Direction-
+// symmetric like CTR (XOR is its own inverse) — no CipherDirection needed.
+
+pub struct OfbState {
+    key: AesKey,
+    register: [u8; BLOCK],
+    keystream: [u8; BLOCK],
+    ks_pos: usize,
+}
+
+impl OfbState {
+    pub fn new(key: AesKey, iv: [u8; BLOCK]) -> Self {
+        Self { key, register: iv, keystream: [0u8; BLOCK], ks_pos: BLOCK }
+    }
+
+    fn next_keystream_byte(&mut self) -> u8 {
+        if self.ks_pos == BLOCK {
+            self.key.encrypt_block(&mut self.register);
+            self.keystream = self.register;
+            self.ks_pos = 0;
+        }
+        let b = self.keystream[self.ks_pos];
+        self.ks_pos += 1;
+        b
+    }
+
+    fn update(&mut self, part: &[u8]) -> Vec<u8> {
+        part.iter().map(|&b| b ^ self.next_keystream_byte()).collect()
+    }
+
+    pub fn update_public(&mut self, part: &[u8]) -> Vec<u8> {
+        self.update(part)
+    }
+}
+
+// ── CFB-128 (§6.11, NIST SP 800-38A §6.3, segment size = block size) ───────
+//
+// O_j = CIPH_K(I_j); C_j = P_j XOR O_j (encrypt) / P_j = C_j XOR O_j
+// (decrypt); I_{j+1} = C_j (full-block feedback, always the CIPHERTEXT
+// segment regardless of direction). SP 800-38A allows a short final
+// segment; a short segment never needs its own feedback since there is no
+// following round, so `process_block` only shifts the register on a full
+// 16-byte segment.
+
+pub struct Cfb128State {
+    key: AesKey,
+    register: [u8; BLOCK],
+    dir: CipherDirection,
+    buf: Vec<u8>,
+}
+
+impl Cfb128State {
+    pub fn new(key: AesKey, iv: [u8; BLOCK], dir: CipherDirection) -> Self {
+        Self { key, register: iv, dir, buf: Vec::new() }
+    }
+
+    fn process_segment(&mut self, seg_in: &[u8]) -> Vec<u8> {
+        let mut o = self.register;
+        self.key.encrypt_block(&mut o);
+        let out: Vec<u8> = seg_in.iter().zip(o.iter()).map(|(&b, &k)| b ^ k).collect();
+        let ct_segment: &[u8] = match self.dir {
+            CipherDirection::Encrypt => &out,
+            CipherDirection::Decrypt => seg_in,
+        };
+        if ct_segment.len() == BLOCK {
+            self.register.copy_from_slice(ct_segment);
+        }
+        out
+    }
+
+    fn update(&mut self, part: &[u8]) -> Vec<u8> {
+        self.buf.extend_from_slice(part);
+        let mut out = Vec::new();
+        while self.buf.len() >= BLOCK {
+            let block: Vec<u8> = self.buf.drain(..BLOCK).collect();
+            out.extend(self.process_segment(&block));
+        }
+        out
+    }
+
+    /// Flush a genuinely short final segment (SP 800-38A permits this only
+    /// as the last segment of the message — see `process_segment`).
+    fn finalize(mut self) -> Vec<u8> {
+        if self.buf.is_empty() {
+            return Vec::new();
+        }
+        let rem = std::mem::take(&mut self.buf);
+        self.process_segment(&rem)
+    }
+
+    pub fn update_public(&mut self, part: &[u8]) -> Vec<u8> {
+        let mut out = self.update(part);
+        if !self.buf.is_empty() {
+            let rem: Vec<u8> = self.buf.drain(..).collect();
+            out.extend(self.process_segment(&rem));
+        }
+        out
+    }
+}
+
+// ── CFB-8 (§6.11, NIST SP 800-38A §6.3, segment size = 1 byte) ─────────────
+//
+// Byte-granular: every input byte costs one full AES block encryption.
+// I_{j+1} = LSB_120(I_j) || C_j (shift the 16-byte register left one byte,
+// append the ciphertext byte).
+
+pub struct Cfb8State {
+    key: AesKey,
+    register: [u8; BLOCK],
+    dir: CipherDirection,
+}
+
+impl Cfb8State {
+    pub fn new(key: AesKey, iv: [u8; BLOCK], dir: CipherDirection) -> Self {
+        Self { key, register: iv, dir }
+    }
+
+    fn step(&mut self, in_byte: u8) -> u8 {
+        let mut o = self.register;
+        self.key.encrypt_block(&mut o);
+        let out_byte = in_byte ^ o[0];
+        let ct_byte = match self.dir {
+            CipherDirection::Encrypt => out_byte,
+            CipherDirection::Decrypt => in_byte,
+        };
+        self.register.copy_within(1.., 0);
+        self.register[BLOCK - 1] = ct_byte;
+        out_byte
+    }
+
+    fn update(&mut self, part: &[u8]) -> Vec<u8> {
+        part.iter().map(|&b| self.step(b)).collect()
+    }
+
+    pub fn update_public(&mut self, part: &[u8]) -> Vec<u8> {
+        self.update(part)
+    }
+}
+
+// ── CFB-1 (§6.11, NIST SP 800-38A §6.3, segment size = 1 bit) ──────────────
+//
+// Bit-granular, MSB-first within each byte (matches this session's earlier
+// verification of OpenSSL's EVP_aes_128_cfb1 bit ordering for the C++
+// engine). I_{j+1} = the 128-bit register shifted left by 1 bit with the
+// ciphertext bit inserted at the LSB.
+
+pub struct Cfb1State {
+    key: AesKey,
+    register: [u8; BLOCK],
+    dir: CipherDirection,
+}
+
+impl Cfb1State {
+    pub fn new(key: AesKey, iv: [u8; BLOCK], dir: CipherDirection) -> Self {
+        Self { key, register: iv, dir }
+    }
+
+    fn step_bit(&mut self, in_bit: u8) -> u8 {
+        let mut o = self.register;
+        self.key.encrypt_block(&mut o);
+        let msb = (o[0] >> 7) & 1;
+        let out_bit = in_bit ^ msb;
+        let ct_bit = match self.dir {
+            CipherDirection::Encrypt => out_bit,
+            CipherDirection::Decrypt => in_bit,
+        };
+        let mut carry = ct_bit;
+        for byte in self.register.iter_mut().rev() {
+            let new_carry = (*byte >> 7) & 1;
+            *byte = (*byte << 1) | carry;
+            carry = new_carry;
+        }
+        out_bit
+    }
+
+    fn update(&mut self, part: &[u8]) -> Vec<u8> {
+        part.iter()
+            .map(|&byte_in| {
+                let mut out_byte = 0u8;
+                for i in 0..8 {
+                    let bit = (byte_in >> (7 - i)) & 1;
+                    let out_bit = self.step_bit(bit);
+                    out_byte = (out_byte << 1) | out_bit;
+                }
+                out_byte
+            })
+            .collect()
+    }
+
+    pub fn update_public(&mut self, part: &[u8]) -> Vec<u8> {
+        self.update(part)
     }
 }
 
