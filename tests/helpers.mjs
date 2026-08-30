@@ -900,6 +900,34 @@ export function verifyBytes(M, hSession, handle, msgBytes, sig, mechType = CK.CK
   return rv === CK.CKR_OK
 }
 
+/**
+ * ML-DSA verify with a CK_SIGN_ADDITIONAL_CONTEXT parameter (PKCS#11 v3.2
+ * §6.61 for the ML-DSA sigGen/sigVer context-string case — SoftHSM_sign.cpp
+ * parses this as { hedgeVariant: CK_HEDGE_TYPE(4B), pContext: ptr(4B),
+ * ulContextLen: CK_ULONG(4B) }, 12 bytes total). hedgeVariant doesn't affect
+ * verification (it only governs signature generation's randomness), so
+ * CKH_HEDGE_PREFERRED (0) is always correct here.
+ */
+export function verifyBytesMLDSAContext(M, hSession, handle, msgBytes, sig, contextBytes, mechType = CK.CKM_ML_DSA) {
+  const CKH_HEDGE_PREFERRED = 0
+  const ctxPtr = contextBytes.length ? writeBytes(M, contextBytes) : 0
+  const paramPtr = M._malloc(12)
+  M.setValue(paramPtr + 0, CKH_HEDGE_PREFERRED, 'i32')
+  M.setValue(paramPtr + 4, ctxPtr, 'i32')
+  M.setValue(paramPtr + 8, contextBytes.length, 'i32')
+  const mechPtr = buildMech(M, mechType, paramPtr, 12)
+  check('C_VerifyInit', M._C_VerifyInit(hSession, mechPtr, handle))
+  const msgPtr = writeBytes(M, msgBytes)
+  const sigPtr = writeBytes(M, sig)
+  const rv = M._C_Verify(hSession, msgPtr, msgBytes.length, sigPtr, sig.length)
+  M._free(msgPtr)
+  M._free(sigPtr)
+  M._free(mechPtr)
+  M._free(paramPtr)
+  if (ctxPtr) M._free(ctxPtr)
+  return rv === CK.CKR_OK
+}
+
 /** Generic sign (text message) */
 export function sign(M, hSession, handle, textMsg, mechType = CK.CKM_ML_DSA) {
   const mechPtr = buildMech(M, mechType)
