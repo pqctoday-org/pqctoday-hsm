@@ -1506,6 +1506,22 @@ EOF
   if [[ "$mac" == CMAC ]]; then macopt="cipher"; else macopt="digest"; fi
 
   # ── Positive: propquery pinned, token must do the work ──
+  #
+  # The software-oracle runs below pass the fixed-input bytes as `hexinfo`
+  # with use-l/use-separator disabled, NOT as `hexsalt` with OpenSSL's own
+  # defaults (use-l/use-separator both on) — found 2026-08-31 as a genuine
+  # comparison-config bug, not an engine bug: kdf.c's own p11prov_kbkdf_*
+  # treats OSSL_KDF_PARAM_SALT as "this file's own name for the fixed-input
+  # bytes" (see that file's comment at the KBKDF_MODE_PIPELINE missing-salt
+  # check) that become CK_SP800_108_BYTE_ARRAY, and SoftHSM_keygen.cpp's own
+  # CKM_SP800_108_COUNTER_KDF/FEEDBACK_KDF handlers re-derive by routing that
+  # same fixed input through OpenSSL's real KBKDF as `info` with an empty
+  # label and use-l/use-separator both forced off (that handler's own
+  # comment: "a real, documented limitation of the OpenSSL backend"). A
+  # software run using OpenSSL's real `salt` semantics (or leaving
+  # use-l/use-separator at their default-on) is not the same KBKDF call the
+  # token made, so it was never going to match — confirmed by reproducing
+  # the token's exact output with this corrected software invocation.
   local tokout swout
   tokout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O kdf \
     -provider pkcs11 -propquery "?provider=pkcs11" -keylen "$keylen" \
@@ -1514,7 +1530,8 @@ EOF
     KBKDF 2>"$w/tok.err.log") || return 1
   swout=$(OPENSSL_CONF=/dev/null O kdf -keylen "$keylen" \
     -kdfopt mode:"$mode" -kdfopt mac:"$mac" -kdfopt "$macopt":"$dc" \
-    -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" $extra \
+    -kdfopt hexkey:"$key" -kdfopt hexinfo:"$salt" \
+    -kdfopt use-l:0 -kdfopt use-separator:0 $extra \
     KBKDF 2>/dev/null) || return 1
   [[ -n "$tokout" && "$tokout" == "$swout" ]] || return 1
   # Engine-log evidence (R13): KBKDF is deterministic, so a silent
@@ -1522,10 +1539,14 @@ EOF
   grep -q "Created new object" "$w/tok.err.log" || return 1
 
   # ── Negative control (R13): same arena, propquery removed ──
+  # Same fixed-input-as-info/use-l:0/use-separator:0 config as $swout above
+  # (this compares against $swout, not $tokout, so it must use the same
+  # semantics as $swout to be a meaningful comparison).
   local ctrlout
   ctrlout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O kdf \
     -keylen "$keylen" -kdfopt mode:"$mode" -kdfopt mac:"$mac" \
-    -kdfopt "$macopt":"$dc" -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" \
+    -kdfopt "$macopt":"$dc" -kdfopt hexkey:"$key" -kdfopt hexinfo:"$salt" \
+    -kdfopt use-l:0 -kdfopt use-separator:0 \
     $extra KBKDF 2>"$w/ctrl.err.log") || return 1
   [[ "$ctrlout" == "$swout" ]] || return 1
   if grep -q "Created new object" "$w/ctrl.err.log"; then
