@@ -23,14 +23,19 @@
 //! - **Engine-resident base key** (no `key_material` in the KMIP
 //!   store, engine session wired): the HMAC-family PRFs (HMAC /
 //!   NIST800-108-C) run through `softhsmrustv3::native::sign` with
-//!   `CKM_SHA{256,384,512}_HMAC` — the base key bytes never leave the
-//!   engine. Audit names `native::sign`.
+//!   `CKM_SHA{256,384,512,3-256,3-384,3-512}_HMAC` — the base key bytes
+//!   never leave the engine. Audit names `native::sign`. HASH derivation
+//!   (2026-08-30, KMIP/CACP coverage gap-analysis item 10) runs through
+//!   `native::digest_key_derivation` (`CKM_SHA*_KEY_DERIVATION`) the same
+//!   way — the engine creates a real derived-secret object, this op reads
+//!   its value and destroys the transient object. Audit names
+//!   `native::digest_key_derivation`.
 //! - **KMIP-store-only base key** (Register'd raw bytes): in-process
 //!   `hmac` / `sha2` / `pbkdf2` crates. Audit names `soft::derive`.
-//! - PBKDF2 / HASH need the raw base bytes (no engine primitive for
-//!   "PBKDF2 over CKA_VALUE" / "digest of CKA_VALUE") — an
-//!   engine-resident base without store material fails with
-//!   `Key Value Not Present (0x13)` per Table 304.
+//! - PBKDF2 still needs the raw base bytes (no engine primitive for
+//!   "PBKDF2 over CKA_VALUE") — an engine-resident base without store
+//!   material fails with `Key Value Not Present (0x13)` per Table 304.
+//!   HASH derivation no longer has this limitation.
 //!
 //! ## Links (§6.1.18)
 //!
@@ -296,18 +301,14 @@ pub fn derive_key(
                      Cryptographic Parameters (§7.13)",
                 ))
             })?;
-            let input: Vec<u8> = match &derivation_data {
-                Some(d) => d.clone(),
-                None => base.key_material.clone().ok_or_else(|| {
-                    fail(KmipError::key_value_not_present(format!(
-                        "HASH derivation over the derivation key needs the base \
-                         object's material; {} holds none the KMIP layer can read",
-                        base.uid
-                    )))
-                })?,
-            };
-            let out = soft_digest(hash, &input).map_err(&fail)?;
-            emit_pkcs11(deps, correlation_id, "soft::derive", None, 0, "CKR_OK");
+            let out = hash_derive(
+                deps,
+                deps.resolve_tenant_session(auth.identity.as_ref()).ok(),
+                correlation_id,
+                base,
+                hash,
+                derivation_data.as_deref(),
+            )?;
             take_prefix(out, len_bytes).map_err(&fail)?
         }
 
@@ -614,6 +615,123 @@ fn soft_hmac(hash: HashingAlgorithm, key: &[u8], data: &[u8]) -> Result<Vec<u8>>
         other => Err(KmipError::unsupported_cryptographic_parameters(format!(
             "HMAC PRF hash {other:?} not supported (SHA-256/384/512)"
         ))),
+    }
+}
+
+/// `HashingAlgorithm` → `CKM_SHA*_KEY_DERIVATION` (digest-of-base-key
+/// mechanisms, PKCS#11 v3.2 §6.22/§6.29). Used only by the engine path in
+/// [`hash_derive`] below — the plain-digest constants (`CKM_SHA256` etc.)
+/// are a different mechanism family, used for the session-less
+/// Derivation-Data path via `native::digest`.
+fn hash_to_key_derivation_ckm(hash: HashingAlgorithm) -> Option<u32> {
+    use softhsmrustv3::constants as c;
+    Some(match hash {
+        HashingAlgorithm::Sha256 => c::CKM_SHA256_KEY_DERIVATION,
+        HashingAlgorithm::Sha384 => c::CKM_SHA384_KEY_DERIVATION,
+        HashingAlgorithm::Sha512 => c::CKM_SHA512_KEY_DERIVATION,
+        HashingAlgorithm::Sha3256 => c::CKM_SHA3_256_KEY_DERIVATION,
+        HashingAlgorithm::Sha3384 => c::CKM_SHA3_384_KEY_DERIVATION,
+        HashingAlgorithm::Sha3512 => c::CKM_SHA3_512_KEY_DERIVATION,
+        _ => return None,
+    })
+}
+
+/// `HashingAlgorithm` → plain `CKM_SHA*` digest mechanism. Used only by
+/// the Derivation-Data path in [`hash_derive`] — hashing caller-supplied,
+/// non-secret bytes needs no key-protection boundary, so it goes through
+/// the engine's session-less `native::digest` rather than
+/// `digest_key_derivation` (which needs a base-key handle).
+fn hash_to_digest_ckm(hash: HashingAlgorithm) -> Option<u32> {
+    use softhsmrustv3::constants as c;
+    Some(match hash {
+        HashingAlgorithm::Sha256 => c::CKM_SHA256,
+        HashingAlgorithm::Sha384 => c::CKM_SHA384,
+        HashingAlgorithm::Sha512 => c::CKM_SHA512,
+        HashingAlgorithm::Sha3256 => c::CKM_SHA3_256,
+        HashingAlgorithm::Sha3384 => c::CKM_SHA3_384,
+        HashingAlgorithm::Sha3512 => c::CKM_SHA3_512,
+        _ => return None,
+    })
+}
+
+/// §11.15 Table 546 HASH derivation. KMIP/CACP coverage gap-analysis item
+/// 10 (2026-08-30) — the engine has real `CKM_SHA*_KEY_DERIVATION` support
+/// (`native::digest_key_derivation`, itself documented as "the KMIP seam")
+/// and had zero callers anywhere before this. Mirrors [`hmac_prf`]'s exact
+/// engine-first pattern: KMIP-store-only base keys keep the existing
+/// software fallback (the bytes never entered the engine, so there is no
+/// handle to drive — the established, accepted K15 case); an
+/// engine-resident base key or explicit Derivation Data now goes through
+/// the real engine, never a crypto-library call in this crate.
+fn hash_derive(
+    deps: &Deps,
+    session: Option<u32>,
+    correlation_id: &str,
+    base: &ObjectRecord,
+    hash: HashingAlgorithm,
+    derivation_data: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let fail = move |e: KmipError| fail_err(deps, correlation_id, "DeriveKey", e);
+
+    if let Some(data) = derivation_data {
+        // Explicit, caller-supplied bytes — not secret key material, no
+        // engine handle needed, but still real engine crypto: routed
+        // through the session-less native::digest, not a crate call here.
+        let mech = hash_to_digest_ckm(hash).ok_or_else(|| {
+            fail(KmipError::unsupported_cryptographic_parameters(format!(
+                "HASH derivation hash {hash:?} not supported"
+            )))
+        })?;
+        let r = softhsmrustv3::native::digest(mech, data);
+        emit_pkcs11_result(deps, correlation_id, "native::digest", Some(mech), &r);
+        return r.map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")));
+    }
+
+    // Same (key_material, session) priority as hmac_prf: a KMIP-store-only
+    // key (has local material) always uses the software fallback,
+    // regardless of whether a session happens to be available; only an
+    // engine-resident key (no local material) reaches the engine.
+    match (&base.key_material, session) {
+        (Some(key), _) => soft_digest(hash, key).map_err(&fail),
+        (None, Some(session)) => {
+            let mech = hash_to_key_derivation_ckm(hash).ok_or_else(|| {
+                fail(KmipError::unsupported_cryptographic_parameters(format!(
+                    "HASH derivation hash {hash:?} not supported"
+                )))
+            })?;
+            let handle = super::helpers::find_handle_for_object(
+                session,
+                &base.pkcs11_cka_id,
+                base.object_type,
+            )
+            .map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")))?
+            .ok_or_else(|| fail(KmipError::object_not_found(&base.uid)))?;
+            // digest_key_derivation creates a real, persistent engine
+            // object (register_derived_secret) — extract its value, then
+            // destroy it; KMIP's own store record is this op's caller's
+            // durable representation, not a lingering engine-side twin.
+            let r = softhsmrustv3::native::digest_key_derivation(session, handle, mech, None);
+            emit_pkcs11_result(deps, correlation_id, "native::digest_key_derivation", Some(mech), &r);
+            let derived_handle =
+                r.map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")))?;
+            let value = softhsmrustv3::native::get_attribute(
+                session,
+                derived_handle,
+                softhsmrustv3::constants::CKA_VALUE,
+            );
+            let _ = softhsmrustv3::native::destroy_object(session, derived_handle);
+            value.ok_or_else(|| {
+                fail(KmipError::cryptographic_failure(
+                    "engine returned a derived-secret handle with no readable CKA_VALUE",
+                ))
+            })
+        }
+        (None, None) => Err(fail(KmipError::key_value_not_present(format!(
+            "HASH derivation over the derivation key needs the base \
+             object's material; {} holds none the KMIP layer can reach \
+             (no store bytes, no engine session)",
+            base.uid
+        )))),
     }
 }
 

@@ -2700,6 +2700,7 @@ dependencies = [
  "cmac",
  "console_error_panic_hook",
  "ctr",
+ "curve25519-dalek",
  "ed25519-dalek",
  "ed448-goldilocks",
  "fips204",
