@@ -66,8 +66,22 @@ echo "[p11prov-wasm] output      : $OUTPUT_AR"
 mkdir -p "$BUILD_DIR" "$INSTALL_LIB"
 
 # ── Source list (mirrors CMakeLists.txt PROVIDER_SOURCES) ─────────────────────
+# 2026-08-31: added chacha.c, mac.c, sig/hss.c — present in CMakeLists.txt's
+# PROVIDER_SOURCES (the source of truth this list is supposed to mirror) but
+# missing here. Latent since whenever those three files were added upstream;
+# it only became a hard build break once provider.c's function-table
+# registration started referencing p11prov_hmac_mac_functions /
+# p11prov_cmac_mac_functions / p11prov_kmac128_mac_functions /
+# p11prov_kmac256_mac_functions (mac.c), p11prov_hss_signature_functions /
+# hss_sig_size_for_key (sig/hss.c), and p11prov_chacha20_set_ctx_params /
+# p11prov_chacha20256poly1305_cipher_functions /
+# p11prov_chacha20256stream_cipher_functions (chacha.c) — wasm-ld then fails
+# with undefined symbols at the final consumer link (pqctoday-hub's
+# build-wasm.sh), not here, since this script only compiles+archives and
+# never resolves symbols against a consumer.
 SOURCES=(
     "asymmetric_cipher.c"
+    "chacha.c"
     "cipher.c"
     "composite.c"
     "debug.c"
@@ -77,6 +91,7 @@ SOURCES=(
     "exchange.c"
     "kdf.c"
     "keymgmt.c"
+    "mac.c"
     "pk11_uri.c"
     "interface.c"
     "objects.c"
@@ -96,6 +111,7 @@ SOURCES=(
     "kem/mlkem.c"
     "sig/slhdsa.c"
     "sig/xmss.c"
+    "sig/hss.c"
 )
 
 # ── Compile each source ───────────────────────────────────────────────────────
