@@ -176,7 +176,7 @@ pub fn self_signed_certificate(
     // NOT needed here); both go into the BIT STRING as-is, same as
     // pqctoday-kmip's own `issue_certificate` match arm for these two
     // algorithm families.
-    let signature = verbs::sign(session, private_handle, algorithm, &tbs_der)?;
+    let signature = verbs::sign(session, private_handle, algorithm, &tbs_der, false)?;
 
     let cert = Certificate {
         tbs_certificate: tbs,
@@ -224,7 +224,7 @@ mod tests {
         // via this same token's own Verify path against the embedded
         // TBSCertificate bytes and the same public key — not just "the
         // DER re-parses", which would pass even for a garbage signature.
-        let ok = verbs::verify(session, pub_h, Algorithm::MlDsa65, &tbs_der, sig).expect("verify");
+        let ok = verbs::verify(session, pub_h, Algorithm::MlDsa65, &tbs_der, sig, false).expect("verify");
         assert!(ok, "the certificate's own embedded signature must verify against its own TBSCertificate + public key");
     }
 

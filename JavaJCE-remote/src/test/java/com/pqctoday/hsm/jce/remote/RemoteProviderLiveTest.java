@@ -9,14 +9,17 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.ProviderException;
+import java.security.SecureRandom;
 import java.security.Security;
 import java.security.Signature;
+import java.security.SignatureException;
 import java.security.cert.CertPathValidator;
 import java.security.cert.CertificateFactory;
 import java.security.cert.PKIXParameters;
 import java.security.cert.TrustAnchor;
 import java.security.cert.X509Certificate;
 import java.security.spec.NamedParameterSpec;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import javax.crypto.KEM;
@@ -75,6 +78,98 @@ final class RemoteProviderLiveTest {
         tamperVerifier.initVerify(kp.getPublic());
         tamperVerifier.update("a different message entirely".getBytes());
         assertFalse(tamperVerifier.verify(sig), "tampered message must not verify");
+    }
+
+    // ── FIPS 204 external-µ mode (added 2026-08-31: SignRequest/
+    // VerifyRequest.external_mu on the wire, "ML-DSA-{44,65,87}-ExternalMu"
+    // Signature service names on this provider) ────────────────────────────
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ML-DSA-44", "ML-DSA-65", "ML-DSA-87"})
+    void externalMuSignVerifyRoundTripsAndTamperIsRejected(String alg) throws Exception {
+        KeyPair kp = generateKeyPair(alg);
+        byte[] mu = new byte[64]; // FIPS 204 Eq.(2): a fixed 64-byte SHAKE256 output
+        new SecureRandom().nextBytes(mu);
+
+        Signature signer = Signature.getInstance(alg + "-ExternalMu", provider);
+        signer.initSign(kp.getPrivate());
+        signer.update(mu);
+        byte[] sig = signer.sign();
+
+        Signature verifier = Signature.getInstance(alg + "-ExternalMu", provider);
+        verifier.initVerify(kp.getPublic());
+        verifier.update(mu);
+        assertTrue(verifier.verify(sig), "genuine external-mu signature must verify");
+
+        Signature tamperVerifier = Signature.getInstance(alg + "-ExternalMu", provider);
+        tamperVerifier.initVerify(kp.getPublic());
+        byte[] tamperedMu = mu.clone();
+        tamperedMu[0] ^= 0x01;
+        tamperVerifier.update(tamperedMu);
+        assertFalse(tamperVerifier.verify(sig), "tampered mu must not verify");
+    }
+
+    /**
+     * The load-bearing case for this feature: proves the server genuinely
+     * routes {@code external_mu=true} through a different signing/
+     * verification path rather than silently accepting and ignoring the
+     * flag. A server that dropped the field on the floor (e.g. an old
+     * binary predating this proto field, or a regression that stopped
+     * reading it) would still pass
+     * {@link #externalMuSignVerifyRoundTripsAndTamperIsRejected} — plain
+     * ML-DSA over 64 arbitrary bytes also signs and verifies fine — so
+     * that case alone is not proof. This one is: the SAME 64-byte buffer
+     * signed under {@code "ML-DSA-65"} (plain) and under
+     * {@code "ML-DSA-65-ExternalMu"} must produce different signature
+     * bytes, and a signature from one mode must be REJECTED when checked
+     * under the other.
+     */
+    @Test
+    void externalMuIsGenuinelyDifferentFromPlainModeNotSilentlyIgnored() throws Exception {
+        KeyPair kp = generateKeyPair("ML-DSA-65");
+        byte[] mu = new byte[64];
+        new SecureRandom().nextBytes(mu);
+
+        Signature muSigner = Signature.getInstance("ML-DSA-65-ExternalMu", provider);
+        muSigner.initSign(kp.getPrivate());
+        muSigner.update(mu);
+        byte[] sigMu = muSigner.sign();
+
+        Signature plainSigner = Signature.getInstance("ML-DSA-65", provider);
+        plainSigner.initSign(kp.getPrivate());
+        plainSigner.update(mu);
+        byte[] sigPlain = plainSigner.sign();
+
+        assertFalse(Arrays.equals(sigMu, sigPlain),
+            "the same 64 bytes signed in the two modes must not produce the same signature");
+
+        // external-mu signature checked under the PLAIN verifier must fail
+        Signature plainVerifier = Signature.getInstance("ML-DSA-65", provider);
+        plainVerifier.initVerify(kp.getPublic());
+        plainVerifier.update(mu);
+        assertFalse(plainVerifier.verify(sigMu), "an external-mu signature must NOT verify under plain mode");
+
+        // plain-mode signature checked under the EXTERNAL-MU verifier must fail
+        Signature muVerifier = Signature.getInstance("ML-DSA-65-ExternalMu", provider);
+        muVerifier.initVerify(kp.getPublic());
+        muVerifier.update(mu);
+        assertFalse(muVerifier.verify(sigPlain), "a plain-mode signature must NOT verify under external-mu mode");
+    }
+
+    @Test
+    void externalMuRejectsAMuBufferThatIsNotExactly64Bytes() throws Exception {
+        // Real end-to-end exercise of the live engine's own length check
+        // (rust/src/crypto/handlers.rs::sign_ml_dsa_external_mu returns
+        // CKR_ARGUMENTS_BAD for anything but exactly 64 bytes) reached
+        // through the full wire path: Java -> gRPC -> Rust verb layer ->
+        // native::sign_pqc -> the engine.
+        KeyPair kp = generateKeyPair("ML-DSA-65");
+
+        Signature signer = Signature.getInstance("ML-DSA-65-ExternalMu", provider);
+        signer.initSign(kp.getPrivate());
+        signer.update(new byte[63]);
+        assertThrows(SignatureException.class, signer::sign,
+            "the server must reject a 63-byte buffer under external-mu mode (CKR_ARGUMENTS_BAD)");
     }
 
     @ParameterizedTest

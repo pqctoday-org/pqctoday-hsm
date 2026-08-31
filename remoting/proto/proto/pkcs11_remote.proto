@@ -89,6 +89,23 @@ message SignRequest {
   uint32 private_handle = 2;
   Algorithm algorithm = 3;
   bytes data = 4;
+  // FIPS 204 external-µ mode (added 2026-08-31, ML-DSA-only): when true,
+  // `data` MUST be exactly the 64-byte ML-DSA message representative
+  // µ = H(tr‖M′, 512) — already computed by the caller — rather than the
+  // raw message; the server signs µ directly (softhsmrustv3::native::
+  // sign_pqc's own `external_mu` argument, which already exists
+  // independent of mechanism selection) instead of computing µ itself
+  // from `data`. CKR_MECHANISM_INVALID for Ed25519 (this mode is not
+  // meaningful outside ML-DSA). A plain `bool` (default false), not
+  // `optional` — every existing caller that never sets it keeps today's
+  // behavior byte-for-byte. Deliberately a field on this already-FROZEN
+  // message rather than a new RPC/verb or a widened Algorithm enum (see
+  // this file's own design-rule note above the Pkcs11V32 section) — the
+  // smallest change that expresses "same algorithm, different message
+  // framing", matching how the engine itself models it as a parameter,
+  // not a distinct mechanism identity, at this crate's native:: call
+  // boundary.
+  bool external_mu = 5;
 }
 message SignResponse {
   bytes signature = 1;
@@ -100,6 +117,8 @@ message VerifyRequest {
   Algorithm algorithm = 3;
   bytes data = 4;
   bytes signature = 5;
+  // Symmetric with SignRequest.external_mu — see that field's doc.
+  bool external_mu = 6;
 }
 message VerifyResponse {
   // A PROTOCOL-LEVEL answer, not an error — mirrors the engine's own

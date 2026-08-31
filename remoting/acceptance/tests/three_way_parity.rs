@@ -129,7 +129,8 @@ fn a2_invalid_session_handle_on_sign_same_ckr_all_three_transports() {
         acceptance::bootstrap_once();
         const BOGUS_SESSION: u32 = 999_999_999;
 
-        let control = verbs::sign(BOGUS_SESSION, 1, pqctoday_pkcs11_remote_core::Algorithm::Ed25519, b"x").unwrap_err();
+        let control =
+            verbs::sign(BOGUS_SESSION, 1, pqctoday_pkcs11_remote_core::Algorithm::Ed25519, b"x", false).unwrap_err();
         // Whatever the engine actually returns for an unopened handle —
         // asserted, not assumed, and then required to match on both wires.
         let expected = control.raw();
@@ -142,6 +143,7 @@ fn a2_invalid_session_handle_on_sign_same_ckr_all_three_transports() {
                 private_handle: 1,
                 algorithm: pqctoday_pkcs11_remote_proto::Algorithm::Ed25519 as i32,
                 data: b"x".to_vec(),
+                external_mu: false,
             })
             .await
             .unwrap_err();
@@ -180,11 +182,12 @@ fn a3_ml_dsa_65_sign_verify_parity_across_transports() {
         let session = verbs::open_session(acceptance::PIN).unwrap();
         let (pub_h, prv_h) =
             verbs::generate_key_pair(session, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, b"\xA1", "a3-control").unwrap();
-        let sig_control = verbs::sign(session, prv_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, msg).unwrap();
-        assert!(verbs::verify(session, pub_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, msg, &sig_control).unwrap());
+        let sig_control =
+            verbs::sign(session, prv_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, msg, false).unwrap();
+        assert!(verbs::verify(session, pub_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, msg, &sig_control, false).unwrap());
         let mut tampered = sig_control.clone();
         tampered[0] ^= 0xFF;
-        assert!(!verbs::verify(session, pub_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, msg, &tampered).unwrap());
+        assert!(!verbs::verify(session, pub_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, msg, &tampered, false).unwrap());
 
         // (b) gRPC
         let mut grpc = acceptance::spawn_grpc().await.unwrap();
@@ -205,6 +208,7 @@ fn a3_ml_dsa_65_sign_verify_parity_across_transports() {
                 private_handle: g_keys.private_handle,
                 algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
                 data: msg.to_vec(),
+                external_mu: false,
             })
             .await
             .unwrap()
@@ -217,6 +221,7 @@ fn a3_ml_dsa_65_sign_verify_parity_across_transports() {
                 algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
                 data: msg.to_vec(),
                 signature: g_sig.clone(),
+                external_mu: false,
             })
             .await
             .unwrap()
@@ -232,6 +237,7 @@ fn a3_ml_dsa_65_sign_verify_parity_across_transports() {
                 algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
                 data: msg.to_vec(),
                 signature: g_tampered,
+                external_mu: false,
             })
             .await
             .unwrap()
@@ -383,7 +389,7 @@ fn a5_closed_session_reused_same_ckr_all_three_transports() {
         let session = verbs::open_session(acceptance::PIN).unwrap();
         verbs::close_session(session).unwrap();
         let control_err =
-            verbs::sign(session, 1, pqctoday_pkcs11_remote_core::Algorithm::Ed25519, b"x").unwrap_err();
+            verbs::sign(session, 1, pqctoday_pkcs11_remote_core::Algorithm::Ed25519, b"x", false).unwrap_err();
         let expected = control_err.raw();
 
         let mut grpc = acceptance::spawn_grpc().await.unwrap();
@@ -395,6 +401,7 @@ fn a5_closed_session_reused_same_ckr_all_three_transports() {
                 private_handle: 1,
                 algorithm: pqctoday_pkcs11_remote_proto::Algorithm::Ed25519 as i32,
                 data: b"x".to_vec(),
+                external_mu: false,
             })
             .await
             .unwrap_err();
@@ -447,7 +454,7 @@ fn assert_self_signed_and_valid(session: u32, pub_h: u32, algorithm: pqctoday_pk
     let tbs_der = <x509_cert::certificate::TbsCertificate as der::Encode>::to_der(&cert.tbs_certificate)
         .expect("re-encode the parsed TBSCertificate");
     let sig = cert.signature.raw_bytes();
-    let ok = verbs::verify(session, pub_h, algorithm, &tbs_der, sig).expect("verify (control path)");
+    let ok = verbs::verify(session, pub_h, algorithm, &tbs_der, sig, false).expect("verify (control path)");
     assert!(ok, "the certificate's own embedded signature must genuinely verify — not just parse");
 }
 
@@ -622,6 +629,265 @@ fn a7_get_self_signed_certificate_rejects_ml_kem_all_three_transports() {
             .unwrap();
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(rest_raw_ck_rv(&body), Some(CKR_ARGUMENTS_BAD));
+    });
+}
+
+// ── Case A8 — ML-DSA-65 FIPS 204 external-µ sign/verify (added
+// 2026-08-31, SignRequest/VerifyRequest.external_mu): positive round
+// trip, cross-mode rejection (proves the flag genuinely changes which
+// engine path is dispatched, not just accepted and ignored), the
+// engine's real 64-byte µ length check, and Ed25519 + external_mu=true
+// rejected with CKR_MECHANISM_INVALID — asserted on all three transports.
+//
+// The cross-mode checks are the load-bearing part of this case: a
+// transport that silently dropped `external_mu` on the wire (e.g. a
+// server binary that never reads the new proto field) would still pass
+// a naive "sign then verify with the same flag" round trip, because
+// plain ML-DSA over 64 arbitrary bytes also signs and verifies just
+// fine. Only checking that the SAME bytes signed in the two modes
+// produce different signatures, and that a signature from one mode is
+// rejected under the other, actually proves the two modes are wired to
+// different engine calls end-to-end.
+
+#[test]
+fn a8_ml_dsa_65_external_mu_parity_and_cross_mode_rejection_all_three_transports() {
+    let rt = rt();
+    rt.block_on(async {
+        acceptance::bootstrap_once();
+        let mu: [u8; 64] = std::array::from_fn(|i| (i as u8) ^ 0xA8);
+
+        // (a) control
+        let session = verbs::open_session(acceptance::PIN).unwrap();
+        let (pub_h, prv_h) = verbs::generate_key_pair(
+            session, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, b"\xA8", "a8-control",
+        )
+        .unwrap();
+        let sig_mu =
+            verbs::sign(session, prv_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, &mu, true).unwrap();
+        assert!(
+            verbs::verify(session, pub_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, &mu, &sig_mu, true)
+                .unwrap(),
+            "control: external-mu round trip must verify"
+        );
+        let sig_plain =
+            verbs::sign(session, prv_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, &mu, false).unwrap();
+        assert_ne!(sig_mu, sig_plain, "control: the two modes must not produce the same signature bytes");
+        assert!(
+            !verbs::verify(session, pub_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, &mu, &sig_mu, false)
+                .unwrap(),
+            "control: an external-mu signature must NOT verify under plain mode"
+        );
+        assert!(
+            !verbs::verify(session, pub_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, &mu, &sig_plain, true)
+                .unwrap(),
+            "control: a plain-mode signature must NOT verify under external-mu mode"
+        );
+        let control_bad_len = verbs::sign(
+            session, prv_h, pqctoday_pkcs11_remote_core::Algorithm::MlDsa65, &mu[..63], true,
+        )
+        .unwrap_err();
+        assert_eq!(control_bad_len.raw(), CKR_ARGUMENTS_BAD);
+        let (_, ed_prv_h) =
+            verbs::generate_key_pair(session, pqctoday_pkcs11_remote_core::Algorithm::Ed25519, b"\xA9", "a8-ed")
+                .unwrap();
+        let control_ed_err =
+            verbs::sign(session, ed_prv_h, pqctoday_pkcs11_remote_core::Algorithm::Ed25519, &mu, true).unwrap_err();
+        assert_eq!(control_ed_err.raw(), CKR_MECHANISM_INVALID);
+
+        // (b) gRPC — same assertions through the real wire proto
+        let mut grpc = acceptance::spawn_grpc().await.unwrap();
+        let g_session = grpc_open_session(&mut grpc, acceptance::PIN).await.unwrap();
+        let g_keys = grpc
+            .generate_key_pair(pqctoday_pkcs11_remote_proto::GenerateKeyPairRequest {
+                session_handle: g_session,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
+                cka_id: vec![0xAA],
+                label: "a8-grpc".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let g_sig_mu = grpc
+            .sign(pqctoday_pkcs11_remote_proto::SignRequest {
+                session_handle: g_session,
+                private_handle: g_keys.private_handle,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
+                data: mu.to_vec(),
+                external_mu: true,
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .signature;
+        let g_valid_mu_mu = grpc
+            .verify(pqctoday_pkcs11_remote_proto::VerifyRequest {
+                session_handle: g_session,
+                public_handle: g_keys.public_handle,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
+                data: mu.to_vec(),
+                signature: g_sig_mu.clone(),
+                external_mu: true,
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .valid;
+        assert!(g_valid_mu_mu, "gRPC: external-mu round trip must verify");
+        let g_sig_plain = grpc
+            .sign(pqctoday_pkcs11_remote_proto::SignRequest {
+                session_handle: g_session,
+                private_handle: g_keys.private_handle,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
+                data: mu.to_vec(),
+                external_mu: false,
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .signature;
+        assert_ne!(g_sig_mu, g_sig_plain, "gRPC: the two modes must not produce the same signature bytes");
+        let g_valid_mu_plain = grpc
+            .verify(pqctoday_pkcs11_remote_proto::VerifyRequest {
+                session_handle: g_session,
+                public_handle: g_keys.public_handle,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
+                data: mu.to_vec(),
+                signature: g_sig_mu.clone(),
+                external_mu: false,
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .valid;
+        assert!(!g_valid_mu_plain, "gRPC: an external-mu signature must NOT verify under plain mode");
+        let g_valid_plain_mu = grpc
+            .verify(pqctoday_pkcs11_remote_proto::VerifyRequest {
+                session_handle: g_session,
+                public_handle: g_keys.public_handle,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
+                data: mu.to_vec(),
+                signature: g_sig_plain,
+                external_mu: true,
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .valid;
+        assert!(!g_valid_plain_mu, "gRPC: a plain-mode signature must NOT verify under external-mu mode");
+        let g_bad_len_err = grpc
+            .sign(pqctoday_pkcs11_remote_proto::SignRequest {
+                session_handle: g_session,
+                private_handle: g_keys.private_handle,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::MlDsa65 as i32,
+                data: mu[..63].to_vec(),
+                external_mu: true,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(grpc_raw_ck_rv(&g_bad_len_err), Some(CKR_ARGUMENTS_BAD));
+        let g_ed_keys = grpc
+            .generate_key_pair(pqctoday_pkcs11_remote_proto::GenerateKeyPairRequest {
+                session_handle: g_session,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::Ed25519 as i32,
+                cka_id: vec![0xAB],
+                label: "a8-grpc-ed".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let g_ed_err = grpc
+            .sign(pqctoday_pkcs11_remote_proto::SignRequest {
+                session_handle: g_session,
+                private_handle: g_ed_keys.private_handle,
+                algorithm: pqctoday_pkcs11_remote_proto::Algorithm::Ed25519 as i32,
+                data: mu.to_vec(),
+                external_mu: true,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(grpc_raw_ck_rv(&g_ed_err), Some(CKR_MECHANISM_INVALID));
+
+        // (c) REST — same assertions through real JSON bodies
+        let rest_base = acceptance::spawn_rest().await.unwrap();
+        let http = reqwest::Client::new();
+        let r_session: serde_json::Value = http
+            .post(format!("{rest_base}/v1/sessions"))
+            .json(&serde_json::json!({ "user_pin": acceptance::PIN }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let r_session = r_session["session_handle"].as_u64().unwrap();
+        let r_keys: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys"))
+            .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ml-dsa65", "cka_id": b64(&[0xAC]), "label": "a8-rest" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let r_prv = r_keys["private_handle"].as_u64().unwrap();
+        let r_pub = r_keys["public_handle"].as_u64().unwrap();
+
+        let r_sig_mu_resp: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys/{r_prv}/sign"))
+            .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ml-dsa65", "data": b64(&mu), "external_mu": true }))
+            .send().await.unwrap().json().await.unwrap();
+        let r_sig_mu = r_sig_mu_resp["signature"].as_str().unwrap().to_string();
+
+        let r_valid_mu_mu: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys/{r_pub}/verify"))
+            .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ml-dsa65", "data": b64(&mu), "signature": r_sig_mu, "external_mu": true }))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(r_valid_mu_mu["valid"].as_bool(), Some(true), "REST: external-mu round trip must verify");
+
+        let r_sig_plain_resp: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys/{r_prv}/sign"))
+            .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ml-dsa65", "data": b64(&mu), "external_mu": false }))
+            .send().await.unwrap().json().await.unwrap();
+        let r_sig_plain = r_sig_plain_resp["signature"].as_str().unwrap().to_string();
+        assert_ne!(r_sig_mu, r_sig_plain, "REST: the two modes must not produce the same signature bytes");
+
+        let r_valid_mu_plain: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys/{r_pub}/verify"))
+            .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ml-dsa65", "data": b64(&mu), "signature": r_sig_mu, "external_mu": false }))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(r_valid_mu_plain["valid"].as_bool(), Some(false), "REST: an external-mu signature must NOT verify under plain mode");
+
+        let r_valid_plain_mu: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys/{r_pub}/verify"))
+            .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ml-dsa65", "data": b64(&mu), "signature": r_sig_plain, "external_mu": true }))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(r_valid_plain_mu["valid"].as_bool(), Some(false), "REST: a plain-mode signature must NOT verify under external-mu mode");
+
+        let r_bad_len_body: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys/{r_prv}/sign"))
+            .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ml-dsa65", "data": b64(&mu[..63]), "external_mu": true }))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(rest_raw_ck_rv(&r_bad_len_body), Some(CKR_ARGUMENTS_BAD));
+        let r_ed_keys: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys"))
+            .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ed25519", "cka_id": b64(&[0xAD]), "label": "a8-rest-ed" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let r_ed_prv = r_ed_keys["private_handle"].as_u64().unwrap();
+        let r_ed_err_body: serde_json::Value = http
+            .post(format!("{rest_base}/v1/keys/{r_ed_prv}/sign"))
+            .json(&serde_json::json!({ "session_handle": r_session, "algorithm": "ed25519", "data": b64(&mu), "external_mu": true }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(rest_raw_ck_rv(&r_ed_err_body), Some(CKR_MECHANISM_INVALID));
     });
 }
 
