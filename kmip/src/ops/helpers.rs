@@ -501,27 +501,13 @@ pub fn strip_x_prefixes(
 /// sees the mode it asked for, not just a number. Codepoints verified
 /// against `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`.
 fn block_cipher_mode_name(v: u32) -> &'static str {
-    match v {
-        0x01 => "CBC",
-        0x02 => "ECB",
-        0x03 => "PCBC",
-        0x04 => "CFB",
-        0x05 => "OFB",
-        0x06 => "CTR",
-        0x07 => "CMAC",
-        0x08 => "CCM",
-        0x09 => "GCM",
-        0x0a => "CBC-MAC",
-        0x0b => "XTS",
-        0x0c => "AESKeyWrapPadding",
-        0x0d => "NISTKeyWrap",
-        0x0e => "X9.102 AESKW",
-        0x0f => "X9.102 TDKW",
-        0x10 => "X9.102 AKW1",
-        0x11 => "X9.102 AKW2",
-        0x12 => "AEAD",
-        _ => "unknown",
-    }
+    // KMIP/CACP coverage gap-analysis Phase 0.2 (2026-08-30): this used to
+    // be a second, independently hand-maintained copy of the same enum
+    // `crate::policy::rule::block_cipher_mode_code_to_name` already
+    // defines for CACP's policy-name grammar — a drift risk of the same
+    // shape this codebase has hit before (see algos.rs's ChaCha20 history).
+    // Deduped: this file now has zero literal copies of the enum.
+    crate::policy::rule::block_cipher_mode_code_to_name(v).unwrap_or("unknown")
 }
 
 /// Pick the PKCS#11 mechanism for AES Encrypt / Decrypt off the

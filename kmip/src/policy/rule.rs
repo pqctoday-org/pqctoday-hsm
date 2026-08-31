@@ -1336,13 +1336,27 @@ pub fn block_cipher_mode_name_to_code(name: &str) -> Option<u32> {
     Some(match name {
         "CBC" => 0x01,
         "ECB" => 0x02,
+        "PCBC" => 0x03,
         "CFB" => 0x04,
         "OFB" => 0x05,
         "CTR" => 0x06,
         "CMAC" => 0x07,
         "CCM" => 0x08,
         "GCM" => 0x09,
+        "CBC-MAC" => 0x0a,
         "XTS" => 0x0b,
+        // KMIP/CACP coverage gap-analysis Phase 0.2 (2026-08-30): these 7
+        // were previously only in ops/helpers.rs's separate, private
+        // display-only table for the same enum — deduped here as the
+        // single source of truth (see that file's block_cipher_mode_name,
+        // now a thin wrapper over this function).
+        "AESKeyWrapPadding" => 0x0c,
+        "NISTKeyWrap" => 0x0d,
+        "X9.102 AESKW" => 0x0e,
+        "X9.102 TDKW" => 0x0f,
+        "X9.102 AKW1" => 0x10,
+        "X9.102 AKW2" => 0x11,
+        "AEAD" => 0x12,
         _ => return None,
     })
 }
@@ -1352,13 +1366,22 @@ pub fn block_cipher_mode_code_to_name(code: u32) -> Option<&'static str> {
     Some(match code {
         0x01 => "CBC",
         0x02 => "ECB",
+        0x03 => "PCBC",
         0x04 => "CFB",
         0x05 => "OFB",
         0x06 => "CTR",
         0x07 => "CMAC",
         0x08 => "CCM",
         0x09 => "GCM",
+        0x0a => "CBC-MAC",
         0x0b => "XTS",
+        0x0c => "AESKeyWrapPadding",
+        0x0d => "NISTKeyWrap",
+        0x0e => "X9.102 AESKW",
+        0x0f => "X9.102 TDKW",
+        0x10 => "X9.102 AKW1",
+        0x11 => "X9.102 AKW2",
+        0x12 => "AEAD",
         _ => return None,
     })
 }
