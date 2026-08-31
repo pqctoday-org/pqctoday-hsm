@@ -8,7 +8,92 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-08-31
+
+**Consolidated release: closes the WS-0/WS-8 PKCS#11 v3.2 coverage
+remediation (both engines), a real Rust engine correctness bug
+(`CKM_HKDF_DERIVE`'s silent PRF substitution), a security-relevant EdDSA
+mechanism-gating bypass in the OpenSSL provider, a full JDK 27 JCA/JCE
+provider gap-closure pass, and the KMIP/CACP coverage audit that ties the
+KMIP protocol layer and the crypto-agility policy engine to everything the
+PKCS#11 engines gained this round.** See `RELEASING.md`'s evidence
+checklist for what's regenerated alongside this release.
+
 ### Added
+
+- **KMIP/CACP: closed a full audit's worth of gaps between the engine's
+  PKCS#11 mechanism surface and what KMIP/CACP could actually reach.** A
+  2026-08-30 coverage audit found that several mechanisms already live in
+  the PKCS#11 engines had zero path through KMIP or CACP's policy
+  registry — real capability, invisible to the product's own
+  crypto-agility control plane. Closed, each with independent evidence
+  (byte-exact against real NIST ACVP vectors or a separately-generated
+  reference, not self-consistency):
+  - **HMAC-SHA3-256/512 via the `Mac` op** — the engine has supported
+    `CKM_SHA3_{256,512}_HMAC` since before this crate existed; the op
+    layer only ever dispatched SHA-2. Wired both `KmipAlgorithm` and the
+    `Mac` op's dispatch; verified against an independent Python
+    `hashlib`/`hmac` computation.
+  - **`CKM_AES_KEY_WRAP_KWP`** — every registry (CACP's policy grammar,
+    the `CKA_ALLOWED_MECHANISMS` builder) already knew the name; the one
+    op that would use it, `wrap_key_value`/`unwrap_key_value`, hard-
+    rejected anything but plain `NISTKeyWrap` before reaching the engine.
+    New engine-level `aes_key_wrap_kwp`/`_unwrap_kwp` (RFC 5649),
+    verified against Python `cryptography`'s
+    `aes_key_wrap_with_padding` on a 60-byte, non-8-aligned plaintext
+    (proving KWP's real benefit over plain AES-KW).
+  - **EdDSA context-string (RFC 8032), both curves.** Three independent
+    reads of the engine's own `SoftHSM_sign.cpp` (this session's, and
+    two concurrent provider-layer fixes below) converged on the same
+    finding: `CKM_EDDSA_PH` is a parameterless legacy shorthand — real
+    mode selection goes through `CKM_EDDSA` + `CK_EDDSA_PARAMS`. Ed448
+    uses `ed448-goldilocks`'s own `sign_ctx`/`verify_ctx` directly.
+    **Ed25519ctx had no equivalent in the pinned `ed25519-dalek` 2.2.0
+    at all** — implemented from RFC 8032 §5.1 using only that crate's
+    public API (`ExpandedSecretKey`'s documented key expansion,
+    `curve25519-dalek`'s public `Scalar`/`EdwardsPoint`), mirroring the
+    crate's own internal dom2-prefixed scheme with the one corrected
+    domain flag. Verified byte-exact, both sign and verify, against
+    PyCryptodome (`Crypto.Signature.eddsa`, `mode='rfc8032'`) — a
+    different Ed25519 implementation entirely. Threaded through KMIP's
+    `Sign`/`SignatureVerify` via the same `context_string` field the
+    PQC-signing branch already populated.
+  - **`DeriveKey`'s HASH method now reaches the real engine.** Its
+    sibling HMAC method already preferred the engine (`hmac_prf`) when a
+    handle was available, software fallback only for KMIP-store-only
+    keys; the HASH method never tried the engine at all. Wired to the
+    engine's own `digest_key_derivation` (`CKM_SHA*_KEY_DERIVATION`,
+    itself unused by any caller before this despite existing
+    specifically for this seam) — reads the resulting derived-secret
+    object's value, then destroys the transient object.
+  - **`DeriveKey`'s SP 800-108 Double-Pipeline mode.** Same
+    architecture as Counter mode (no dedicated engine primitive needed —
+    built on the existing engine-first `hmac_prf`), construction
+    verified against this repo's real ACVP vectors and the engine's own
+    `sp800_108_run_double_pipeline`.
+  - **`CKM_AES_CCM` and `CKM_AES_OFB` via `Encrypt`/`Decrypt`.** The
+    engine's WS-8 cipher work (below) had no `native::`-level entry
+    point for either — only inline FFI dispatch. Extracted thin
+    key-bytes wrappers reusing the same clean `crypto/multipart.rs`
+    primitives the FFI path already calls (`ccm_encrypt`/`_decrypt`,
+    `OfbState`), so nothing is duplicated between the two call paths.
+    Each verified byte-exact against real NIST ACVP KATs, plus
+    tamper-detection and AAD-authentication checks for CCM. CFB
+    (128/8/1) got the same engine-level wrappers but is **not** wired
+    through KMIP: KMIP's own Block Cipher Mode wire enum has exactly one
+    generic CFB codepoint, no width distinction — picking a default
+    silently would be a real design decision, not a coding task, and is
+    left open pending one.
+  - A non-fatal loader-time warning for policy rules that name a
+    mechanism/mode CACP's grammar recognizes but the op layer can't yet
+    execute (e.g. `XTS`, `CFB`) — previously such a rule loaded silently
+    and looked like it was enforcing something.
+  - Deliberately left as documented, permanent KMIP-unreachable gaps
+    (not implementation debt): `CKM_AES_GMAC` (KMIP 3.0 has no wire
+    representation for GMAC at all) and MAC general-length/truncated-tag
+    requests (no field anywhere in the MAC Request Payload for it).
+    `CKM_ML_DSA_EXTERNAL_MU_GEN` similarly has no KMIP path — closing it
+    would need a new client-facing operation, not a registry entry.
 
 - **CACP: modular crypto-agility policies — several small, non-conflicting
   files instead of one that keeps growing.** A single enterprise-wide policy
