@@ -28,15 +28,21 @@ struct Cli {
 enum GenAlgo {
     /// MLDSA65_Ed25519 (signing).
     MlDsa65Ed25519,
+    /// MLDSA87_Ed448 (signing; remediation plan §2/Fix 1, algo 31).
+    MlDsa87Ed448,
     /// MLKEM768_X25519 (encryption).
     MlKem768X25519,
+    /// MLKEM1024_X448 (encryption; remediation plan §2/Fix 2, algo 36).
+    MlKem1024X448,
 }
 
 impl From<GenAlgo> for CompositeAlgo {
     fn from(a: GenAlgo) -> Self {
         match a {
             GenAlgo::MlDsa65Ed25519 => CompositeAlgo::MlDsa65Ed25519,
+            GenAlgo::MlDsa87Ed448 => CompositeAlgo::MlDsa87Ed448,
             GenAlgo::MlKem768X25519 => CompositeAlgo::MlKem768X25519,
+            GenAlgo::MlKem1024X448 => CompositeAlgo::MlKem1024X448,
         }
     }
 }

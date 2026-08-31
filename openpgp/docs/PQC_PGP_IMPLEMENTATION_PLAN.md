@@ -16,7 +16,7 @@ to be wrong; the corrections are called out inline).
 | Plan ID | `P0-SEQUOIA-PQC-05` |
 | Status | 🟩 **Validated** (spike PROVEN; build-grounded; execution still pending) |
 | Target standard | `draft-ietf-openpgp-pqc` **v17 (2026-01-13)** on RFC 9580 v6 packets |
-| Scheme | Composite: `MLDSA65_Ed25519` (algo **30**), `MLKEM768_X25519` (algo **35**); LibrePGP variant out of scope |
+| Scheme | Composite: `MLDSA65_Ed25519` (algo **30**), `MLDSA87_Ed448` (algo **31**), `MLKEM768_X25519` (algo **35**), `MLKEM1024_X448` (algo **36**); LibrePGP variant out of scope |
 | Base impl | Sequoia `sequoia-openpgp` **2.2.0-pqc.1**, upstream `pqc` branch |
 | Sourcing | **Path B** — pinned git dep (commit SHA). Fork **not** required (see §6) |
 | Effort | **6–9 PD** (was estimated 2–3 PD; that estimate was wrong — see §9) |
@@ -244,9 +244,16 @@ match v6.pk_algo() {
 }
 ```
 
+(This snippet is illustrative design narration from the original planning pass;
+the `MLDSA87_Ed448` arm shown above as a placeholder is now real, shipped code
+— see `signer.rs`'s actual `sign()` match — and the same two-call shape now
+also has a real `MLKEM1024_X448` decrypt arm in `decryptor.rs`, closing out
+remediation plan §2/Fix 1 and Fix 2.)
+
 `decryptor.rs` gets the symmetric ML-KEM treatment: `MLKEM768_X25519` decap is
 an X25519 ECDH op **plus** an ML-KEM-768 decapsulation (`CKM_ML_KEM`,
-`0x17`), combined per the draft's KEM combiner.
+`0x17`), combined per the draft's KEM combiner. `MLKEM1024_X448` decap follows
+the identical shape, sized up (X448 ECDH + ML-KEM-1024 decapsulation).
 
 Implication for `Op11KeyPair`: a composite keypair references **two** PKCS#11
 `ObjectHandle`s, not one. This is a structural change to the type (§5).

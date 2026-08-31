@@ -14,16 +14,21 @@ use sequoia_openpgp::types::{Curve, PublicKeyAlgorithm};
 
 use crate::{CompositeAlgo, Op11Session, COMPOSITE_PUBKEY_LABEL};
 
-// DER OID prefixes that wrap the raw 32-byte Edwards/Montgomery public point in
-// softhsmv3's CKA_EC_POINT (an ASN.1 OCTET STRING: tag 0x04, len 0x20, 32 raw
-// bytes). Proven by the generate-in-HSM probe.
-const EC_POINT_OCTET_PREFIX: &[u8] = &[0x04, 0x20];
+// softhsmv3's CKA_EC_POINT wraps the raw Edwards/Montgomery public point as an
+// ASN.1 OCTET STRING (tag 0x04, DER short-form length, raw bytes). Proven by
+// the generate-in-HSM probe (originally for the 32-byte Ed25519/X25519 case;
+// `read_ec_point` below generalizes the unwrap for Ed448/X448 too).
+const EC_POINT_OCTET_TAG: u8 = 0x04;
 
 // DER encoding of the Edwards/Montgomery curve OIDs stored as CKA_EC_PARAMS in
 // softhsmv3 (OSSLEDPrivateKey::setEC -> OSSL::byteString2oid). Proven by the
 // smoke-import probe ([C]/[D]).
 const ED25519_OID_DER: &[u8] = &[0x06, 0x03, 0x2B, 0x65, 0x70]; // 1.3.101.112
 const X25519_OID_DER: &[u8] = &[0x06, 0x03, 0x2B, 0x65, 0x6E]; // 1.3.101.110
+// RFC 8410 §3 (plan §2/Fix 1+2): the Ed448/X448 counterparts, used by the
+// MLDSA87_Ed448 / MLKEM1024_X448 composite algorithms (algo IDs 31/36).
+const ED448_OID_DER: &[u8] = &[0x06, 0x03, 0x2B, 0x65, 0x71]; // 1.3.101.113
+const X448_OID_DER: &[u8] = &[0x06, 0x03, 0x2B, 0x65, 0x6F]; // 1.3.101.111
 
 /// Turn a raw FIPS deterministic seed (ML-DSA xi, 32 B; ML-KEM d||z, 64 B) into
 /// the PKCS#8 DER softhsmv3 stores as `CKA_VALUE` for an ML-DSA/ML-KEM private
@@ -57,21 +62,32 @@ fn read_value(
 }
 
 /// Read `CKA_EC_POINT` of an Edwards/Montgomery public object and strip the
-/// `04 20` ASN.1 OCTET-STRING wrapper, returning the raw 32-byte public point.
+/// ASN.1 OCTET-STRING wrapper (`04 <len> <raw>`), returning the raw public
+/// point.
+///
+/// Generalized (plan §2/Fix 1+2) beyond the original Ed25519/X25519-only
+/// 32-byte case to also accept Ed448 (57-byte) and X448 (56-byte) points —
+/// all DER short-form lengths (< 128), so a single length octet always
+/// follows the `04` tag.
 fn read_ec_point(
     session: &cryptoki::session::Session,
     handle: ObjectHandle,
 ) -> anyhow::Result<Vec<u8>> {
     for attr in session.get_attributes(handle, &[AttributeType::EcPoint])? {
         if let Attribute::EcPoint(v) = attr {
-            // softhsmv3 wraps the 32-byte point as OCTET STRING: 04 20 <32 raw>.
-            let raw = if v.len() == 34 && v.starts_with(EC_POINT_OCTET_PREFIX) {
-                v[EC_POINT_OCTET_PREFIX.len()..].to_vec()
-            } else if v.len() == 32 {
+            let raw = if v.len() >= 2
+                && v[0] == EC_POINT_OCTET_TAG
+                && (v[1] as usize) < 0x80
+                && v.len() == 2 + v[1] as usize
+            {
+                v[2..].to_vec()
+            } else if matches!(v.len(), 32 | 56 | 57) {
+                // Some callers may already hand back an unwrapped raw point.
                 v
             } else {
                 return Err(anyhow::anyhow!(
-                    "unexpected CKA_EC_POINT length {} (want 34 wrapped or 32 raw)",
+                    "unexpected CKA_EC_POINT length {} (want a DER OCTET STRING \
+                     wrapper or a raw 32/56/57-byte point)",
                     v.len()
                 ));
             };
@@ -222,8 +238,12 @@ impl Op11Session {
     ///
     /// - `MLDSA65_Ed25519`: an Ed25519 (`CKK_EC_EDWARDS`) object + an ML-DSA-65
     ///   (`CKK_ML_DSA`) object.
+    /// - `MLDSA87_Ed448`: an Ed448 (`CKK_EC_EDWARDS`) object + an ML-DSA-87
+    ///   (`CKK_ML_DSA`) object (remediation plan §2/Fix 1, algo 31).
     /// - `MLKEM768_X25519`: an X25519 (`CKK_EC_MONTGOMERY`) object + an
     ///   ML-KEM-768 (`CKK_ML_KEM`) object.
+    /// - `MLKEM1024_X448`: an X448 (`CKK_EC_MONTGOMERY`) object + an
+    ///   ML-KEM-1024 (`CKK_ML_KEM`) object (remediation plan §2/Fix 2, algo 36).
     ///
     /// The traditional half is imported as a raw scalar (`CKA_VALUE`) + curve OID
     /// (`CKA_EC_PARAMS`); the PQC half is imported as PKCS#8 DER derived from
@@ -301,6 +321,56 @@ impl Op11Session {
                 )?;
                 Ok((trad, pqc))
             }
+            (
+                PublicKeyAlgorithm::MLDSA87_Ed448,
+                mpi::SecretKeyMaterial::MLDSA87_Ed448 { eddsa, mldsa },
+            ) => {
+                // Traditional: Ed448 raw 57-byte scalar.
+                let trad = self.create_eddsa_object(
+                    id,
+                    KeyType::EC_EDWARDS,
+                    ED448_OID_DER,
+                    &eddsa,
+                    Attribute::Sign(true),
+                    b"mldsa87-ed448-eddsa",
+                )?;
+                // PQC: ML-DSA-87 seed (xi, 32 B) -> PKCS#8 DER.
+                let der = seed_to_pkcs8_der(&mldsa, OsslKeyType::ML_DSA_87)?;
+                let pqc = self.create_ml_object(
+                    id,
+                    KeyType::ML_DSA,
+                    MlDsaParameterSetType::ML_DSA_87.into(),
+                    der,
+                    Attribute::Sign(true),
+                    b"mldsa87-ed448-mldsa",
+                )?;
+                Ok((trad, pqc))
+            }
+            (
+                PublicKeyAlgorithm::MLKEM1024_X448,
+                mpi::SecretKeyMaterial::MLKEM1024_X448 { ecdh, mlkem },
+            ) => {
+                // Traditional: X448 raw 56-byte scalar.
+                let trad = self.create_eddsa_object(
+                    id,
+                    KeyType::EC_MONTGOMERY,
+                    X448_OID_DER,
+                    &ecdh,
+                    Attribute::Derive(true),
+                    b"mlkem1024-x448-ecdh",
+                )?;
+                // PQC: ML-KEM-1024 seed (d||z, 64 B) -> PKCS#8 DER.
+                let der = seed_to_pkcs8_der(&mlkem, OsslKeyType::ML_KEM_1024)?;
+                let pqc = self.create_ml_object(
+                    id,
+                    KeyType::ML_KEM,
+                    MlKemParameterSetType::ML_KEM_1024.into(),
+                    der,
+                    Attribute::Decapsulate(true),
+                    b"mlkem1024-x448-mlkem",
+                )?;
+                Ok((trad, pqc))
+            }
             (algo, _) => Err(anyhow::anyhow!(
                 "composite upload: unsupported / mismatched composite algorithm {algo:?}"
             )),
@@ -362,8 +432,13 @@ impl Op11Session {
     ///
     /// - `MlDsa65Ed25519`: Ed25519 (`CKK_EC_EDWARDS`, sign) + ML-DSA-65
     ///   (`CKK_ML_DSA`, sign), both generated in-HSM.
+    /// - `MlDsa87Ed448`: Ed448 (`CKK_EC_EDWARDS`, sign) + ML-DSA-87
+    ///   (`CKK_ML_DSA`, sign), both generated in-HSM (remediation plan §2/Fix 1).
     /// - `MlKem768X25519`: X25519 (`CKK_EC_MONTGOMERY`, derive) + ML-KEM-768
     ///   (`CKK_ML_KEM`, decapsulate), both generated in-HSM.
+    /// - `MlKem1024X448`: X448 (`CKK_EC_MONTGOMERY`, derive) + ML-KEM-1024
+    ///   (`CKK_ML_KEM`, decapsulate), both generated in-HSM (remediation plan
+    ///   §2/Fix 2).
     ///
     /// The generated *public* halves are read back from the token, assembled into
     /// the composite OpenPGP public key, and persisted as the token-resident
@@ -469,6 +544,90 @@ impl Op11Session {
 
                 Key6::import_public_mlkem768_x25519(&mlkem, &ecdh, None)
                     .map_err(|e| anyhow::anyhow!("assemble MLKEM768_X25519 public key: {e}"))?
+            }
+            CompositeAlgo::MlDsa87Ed448 => {
+                // -- Ed448 half, generated in-HSM --
+                let mut ed_pub_t = vec![
+                    Attribute::KeyType(KeyType::EC_EDWARDS),
+                    Attribute::EcParams(ED448_OID_DER.to_vec()),
+                    Attribute::Token(true),
+                    Attribute::Verify(true),
+                    Attribute::Id(id.to_vec()),
+                ];
+                let mut ed_priv_t = sensitive();
+                ed_priv_t.push(Attribute::KeyType(KeyType::EC_EDWARDS));
+                ed_priv_t.push(Attribute::Sign(true));
+                let (ed_pub, _ed_priv) = self.session.generate_key_pair(
+                    &Mechanism::EccEdwardsKeyPairGen,
+                    &{ ed_pub_t.push(Attribute::Label(b"mldsa87-ed448-eddsa".to_vec())); ed_pub_t },
+                    &{ ed_priv_t.push(Attribute::Label(b"mldsa87-ed448-eddsa".to_vec())); ed_priv_t },
+                )?;
+                let eddsa = read_ec_point(&self.session, ed_pub)?;
+
+                // -- ML-DSA-87 half, generated in-HSM --
+                let ps: ParameterSetType = MlDsaParameterSetType::ML_DSA_87.into();
+                let mut md_pub_t = vec![
+                    Attribute::KeyType(KeyType::ML_DSA),
+                    Attribute::ParameterSet(ps),
+                    Attribute::Token(true),
+                    Attribute::Verify(true),
+                    Attribute::Id(id.to_vec()),
+                ];
+                let mut md_priv_t = sensitive();
+                md_priv_t.push(Attribute::KeyType(KeyType::ML_DSA));
+                md_priv_t.push(Attribute::ParameterSet(ps));
+                md_priv_t.push(Attribute::Sign(true));
+                let (md_pub, _md_priv) = self.session.generate_key_pair(
+                    &Mechanism::MlDsaKeyPairGen,
+                    &{ md_pub_t.push(Attribute::Label(b"mldsa87-ed448-mldsa".to_vec())); md_pub_t },
+                    &{ md_priv_t.push(Attribute::Label(b"mldsa87-ed448-mldsa".to_vec())); md_priv_t },
+                )?;
+                let mldsa = read_value(&self.session, md_pub)?;
+
+                Key6::import_public_mldsa87_ed448(&mldsa, &eddsa, None)
+                    .map_err(|e| anyhow::anyhow!("assemble MLDSA87_Ed448 public key: {e}"))?
+            }
+            CompositeAlgo::MlKem1024X448 => {
+                // -- X448 half, generated in-HSM --
+                let mut x_pub_t = vec![
+                    Attribute::KeyType(KeyType::EC_MONTGOMERY),
+                    Attribute::EcParams(X448_OID_DER.to_vec()),
+                    Attribute::Token(true),
+                    Attribute::Derive(true),
+                    Attribute::Id(id.to_vec()),
+                ];
+                let mut x_priv_t = sensitive();
+                x_priv_t.push(Attribute::KeyType(KeyType::EC_MONTGOMERY));
+                x_priv_t.push(Attribute::Derive(true));
+                let (x_pub, _x_priv) = self.session.generate_key_pair(
+                    &Mechanism::EccMontgomeryKeyPairGen,
+                    &{ x_pub_t.push(Attribute::Label(b"mlkem1024-x448-ecdh".to_vec())); x_pub_t },
+                    &{ x_priv_t.push(Attribute::Label(b"mlkem1024-x448-ecdh".to_vec())); x_priv_t },
+                )?;
+                let ecdh = read_ec_point(&self.session, x_pub)?;
+
+                // -- ML-KEM-1024 half, generated in-HSM --
+                let ps: ParameterSetType = MlKemParameterSetType::ML_KEM_1024.into();
+                let mut mk_pub_t = vec![
+                    Attribute::KeyType(KeyType::ML_KEM),
+                    Attribute::ParameterSet(ps),
+                    Attribute::Token(true),
+                    Attribute::Encapsulate(true),
+                    Attribute::Id(id.to_vec()),
+                ];
+                let mut mk_priv_t = sensitive();
+                mk_priv_t.push(Attribute::KeyType(KeyType::ML_KEM));
+                mk_priv_t.push(Attribute::ParameterSet(ps));
+                mk_priv_t.push(Attribute::Decapsulate(true));
+                let (mk_pub, _mk_priv) = self.session.generate_key_pair(
+                    &Mechanism::MlKemKeyPairGen,
+                    &{ mk_pub_t.push(Attribute::Label(b"mlkem1024-x448-mlkem".to_vec())); mk_pub_t },
+                    &{ mk_priv_t.push(Attribute::Label(b"mlkem1024-x448-mlkem".to_vec())); mk_priv_t },
+                )?;
+                let mlkem = read_value(&self.session, mk_pub)?;
+
+                Key6::import_public_mlkem1024_x448(&mlkem, &ecdh, None)
+                    .map_err(|e| anyhow::anyhow!("assemble MLKEM1024_X448 public key: {e}"))?
             }
         };
 

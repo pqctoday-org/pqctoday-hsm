@@ -61,14 +61,18 @@ pub use crate::x509::types::PgpKeyType;
 /// for the demo, in which both private halves are generated *inside* the HSM via
 /// `C_GenerateKeyPair` and never exist in software (plan task 3). The
 /// import/bring-your-own-key path ([`Op11Session::upload_key`]) accepts any
-/// composite key sequoia can produce; this enum names the two the bridge
+/// composite key sequoia can produce; this enum names the four the bridge
 /// generates natively.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompositeAlgo {
     /// `MLDSA65_Ed25519` (draft-ietf-openpgp-pqc algorithm 30) — signing.
     MlDsa65Ed25519,
+    /// `MLDSA87_Ed448` (draft-ietf-openpgp-pqc algorithm 31) — signing.
+    MlDsa87Ed448,
     /// `MLKEM768_X25519` (draft-ietf-openpgp-pqc algorithm 35) — encryption.
     MlKem768X25519,
+    /// `MLKEM1024_X448` (draft-ietf-openpgp-pqc algorithm 36) — encryption.
+    MlKem1024X448,
 }
 
 /// `CKA_LABEL` of the token-resident `CKO_DATA` object that carries a composite
@@ -1371,6 +1375,513 @@ mod live_composite_tests {
         let _ = policy;
         eprintln!(
             "PASS live_composite generate-in-HSM ML-KEM: in-HSM C_GenerateKeyPair -> \
+             encrypt -> HSM decrypt -> plaintext MATCH; private halves NON-EXTRACTABLE"
+        );
+
+        purge_id(&open_session(&e), id);
+    }
+
+    // =====================================================================
+    // Remediation plan §2/Fix 1+2 (2026-08-31): MLDSA87_Ed448 (algo 31) and
+    // MLKEM1024_X448 (algo 36). Same shapes as the MLDSA65_Ed25519 /
+    // MLKEM768_X25519 tests above, sized up.
+    // =====================================================================
+
+    /// draft-ietf-openpgp-pqc v17 codepoint for MLDSA87_Ed448.
+    const EXPECTED_ALGO_ID_MLDSA87_ED448: u8 = 31;
+
+    /// Fix 1 gate — mirrors `live_composite_mldsa65_ed25519_upload_sign_verify`
+    /// for MLDSA87_Ed448: software composite cert -> upload TWO private halves
+    /// (Ed448 + ML-DSA-87) -> resolve custody handles -> sign through the
+    /// bridge (two C_Sign calls) -> verify with a sequoia 2.x verifier.
+    /// Before this fix, `CompositeAlgo` had no `MlDsa87Ed448` variant and
+    /// `upload_composite_private` had no match arm for it, so this key could
+    /// never be provisioned even though `signer.rs`'s sign dispatch already
+    /// existed.
+    #[test]
+    fn live_composite_mldsa87_ed448_upload_sign_verify() {
+        let Some(e) = env() else {
+            eprintln!("SKIP live_composite_*: set OP11_MODULE to run against softhsmv3");
+            return;
+        };
+
+        let policy = &StandardPolicy::new();
+        let (cert, _rev) = CertBuilder::new()
+            .set_profile(Profile::RFC9580)
+            .expect("RFC9580 profile")
+            .set_cipher_suite(CipherSuite::MLDSA87_Ed448)
+            .add_userid("composite-live-87@pqctoday.test")
+            .add_signing_subkey()
+            .generate()
+            .expect("composite cert generation (MLDSA87_Ed448)");
+
+        let signing = cert
+            .keys()
+            .with_policy(policy, None)
+            .alive()
+            .revoked(false)
+            .for_signing()
+            .secret()
+            .next()
+            .expect("signing-capable secret key")
+            .key()
+            .clone();
+        assert_eq!(
+            u8::from(signing.pk_algo()),
+            EXPECTED_ALGO_ID_MLDSA87_ED448,
+            "test key must be MLDSA87_Ed448 (algo 31)"
+        );
+        let public: Key<PublicParts, UnspecifiedRole> = signing.clone().parts_into_public();
+
+        let id = b"\x05composite-live-87";
+        let sign_session = open_session(&e);
+        purge_id(&sign_session, id); // idempotent across reruns
+        sign_session
+            .upload_composite_private(id, &signing)
+            .expect("composite upload (MLDSA87_Ed448)");
+
+        let base = vec![
+            Attribute::Token(true),
+            Attribute::Private(true),
+            Attribute::Sign(true),
+            Attribute::Id(id.to_vec()),
+            Attribute::Class(ObjectClass::PRIVATE_KEY),
+        ];
+        let find_one = |kt: cryptoki::object::KeyType| -> ObjectHandle {
+            let mut tmpl = base.clone();
+            tmpl.push(Attribute::KeyType(kt));
+            let h = sign_session.session.find_objects(&tmpl).expect("find_objects");
+            assert_eq!(h.len(), 1, "expected exactly one {kt:?} handle for id");
+            h[0]
+        };
+        let ed_handle = find_one(cryptoki::object::KeyType::EC_EDWARDS);
+        let mldsa_handle = find_one(cryptoki::object::KeyType::ML_DSA);
+
+        let kp = Op11KeyPair::new_composite(
+            public,
+            ed_handle,
+            mldsa_handle,
+            Arc::new(Mutex::new(sign_session.session)),
+        );
+        let msg = b"pqctoday composite live: HSM-backed MLDSA87_Ed448 sign+verify";
+        let mut sig = Vec::new();
+        crate::signer::sign_on_card(kp, &mut &msg[..], &mut sig).expect("sign_on_card");
+
+        // Byte-level wire assertion: v6 + algorithm 31, and the composite MPI
+        // decomposes into a 114-byte Ed448 + 4627-byte ML-DSA-87 half.
+        let pile = PacketPile::from_bytes(&sig).expect("re-parse signature");
+        let mut found = None;
+        for p in pile.descendants() {
+            if let Packet::Signature(s) = p {
+                found = Some((s.version(), s.pk_algo(), s.mpis().clone()));
+            }
+        }
+        let (version, pk_algo, mpis) = found.expect("a Signature packet");
+        assert_eq!(version, 6, "composite signature must be a v6 packet (RFC 9580)");
+        assert_eq!(
+            u8::from(pk_algo),
+            EXPECTED_ALGO_ID_MLDSA87_ED448,
+            "HSM composite signature pk_algo must be 31 (MLDSA87_Ed448)"
+        );
+        assert_eq!(pk_algo, PublicKeyAlgorithm::MLDSA87_Ed448);
+        match &mpis {
+            sequoia_openpgp::crypto::mpi::Signature::MLDSA87_Ed448 { eddsa, mldsa } => {
+                assert_eq!(eddsa.len(), 114, "Ed448 half must be 114 bytes");
+                assert_eq!(mldsa.len(), 4627, "ML-DSA-87 half must be 4627 bytes");
+            }
+            other => panic!("expected MLDSA87_Ed448 composite MPI, got {other:?}"),
+        }
+
+        // Wire-byte cross-check: de-armor and confirm the v6 packet carries
+        // 0x1f (=31) at the spec offset.
+        {
+            let mut der = sequoia_openpgp::armor::Reader::from_bytes(
+                &sig,
+                sequoia_openpgp::armor::ReaderMode::Tolerant(None),
+            );
+            let mut raw = Vec::new();
+            std::io::copy(&mut der, &mut raw).expect("de-armor");
+            assert_eq!(raw[3], 0x06, "wire version octet must be 0x06 (v6)");
+            assert_eq!(raw[5], 0x1f, "wire pk-algo octet must be 0x1f (31)");
+        }
+
+        // Cryptographic interop: a sequoia 2.x verifier validates the
+        // HSM-produced signature against the same cert.
+        struct Helper(Cert);
+        impl sequoia_openpgp::parse::stream::VerificationHelper for Helper {
+            fn get_certs(
+                &mut self,
+                _ids: &[sequoia_openpgp::KeyHandle],
+            ) -> sequoia_openpgp::Result<Vec<Cert>> {
+                Ok(vec![self.0.clone()])
+            }
+            fn check(
+                &mut self,
+                structure: sequoia_openpgp::parse::stream::MessageStructure,
+            ) -> sequoia_openpgp::Result<()> {
+                use sequoia_openpgp::parse::stream::{MessageLayer, VerificationError};
+                let mut good = 0usize;
+                for layer in structure.into_iter() {
+                    if let MessageLayer::SignatureGroup { results } = layer {
+                        for r in results {
+                            match r {
+                                Ok(_) => good += 1,
+                                Err(VerificationError::MissingKey { .. }) => {}
+                                Err(e) => return Err(anyhow::anyhow!("bad signature: {e}")),
+                            }
+                        }
+                    }
+                }
+                if good >= 1 {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("no good signatures"))
+                }
+            }
+        }
+
+        let mut verifier =
+            sequoia_openpgp::parse::stream::DetachedVerifierBuilder::from_bytes(&sig)
+                .expect("DetachedVerifierBuilder")
+                .with_policy(policy, None, Helper(cert.clone()))
+                .expect("verifier with_policy");
+        verifier
+            .verify_bytes(msg)
+            .expect("sequoia 2.x must verify the HSM-backed composite signature");
+
+        eprintln!(
+            "PASS live_composite: HSM MLDSA87_Ed448 signature is v6 + algo {EXPECTED_ALGO_ID_MLDSA87_ED448}, \
+             verified by sequoia 2.x ({} bytes armored)",
+            sig.len()
+        );
+
+        purge_id(&open_session(&e), id);
+    }
+
+    /// Fix 2 gate — mirrors `live_composite_mlkem768_x25519_encrypt_decrypt`
+    /// for MLKEM1024_X448: build a composite cert, pull its MLKEM1024_X448
+    /// encryption subkey, provision its TWO private halves, software-encrypt
+    /// to the public cert, then DECRYPT through the bridge (which, before
+    /// this fix, had no `decrypt()` match arm at all for this ciphertext type
+    /// and fell straight to the "Unexpected Ciphertext type." catch-all).
+    /// Also exercises the new `x448_shared_point` helper (56-byte X448 ECDH
+    /// shared secret vs X25519's 32) and confirms the KEM combiner
+    /// generalizes to the larger sizes.
+    #[test]
+    fn live_composite_mlkem1024_x448_encrypt_decrypt() {
+        let Some(e) = env() else {
+            eprintln!("SKIP live_composite_*: set OP11_MODULE to run against softhsmv3");
+            return;
+        };
+
+        let policy = &StandardPolicy::new();
+
+        let (cert, _rev) = CertBuilder::new()
+            .set_profile(Profile::RFC9580)
+            .expect("RFC9580 profile")
+            .set_cipher_suite(CipherSuite::MLDSA87_Ed448)
+            .add_userid("composite-kem-1024@pqctoday.test")
+            .add_transport_encryption_subkey()
+            .generate()
+            .expect("composite cert with ML-KEM-1024 encryption subkey");
+
+        let enc = cert
+            .keys()
+            .with_policy(policy, None)
+            .alive()
+            .revoked(false)
+            .for_transport_encryption()
+            .secret()
+            .next()
+            .expect("encryption-capable secret subkey")
+            .key()
+            .clone();
+        assert_eq!(
+            enc.pk_algo(),
+            PublicKeyAlgorithm::MLKEM1024_X448,
+            "encryption subkey must be MLKEM1024_X448 (algo 36)"
+        );
+        assert_eq!(u8::from(enc.pk_algo()), 36);
+
+        let id = b"\x05composite-kem-1024";
+        {
+            let s1 = open_session(&e);
+            purge_id(&s1, id);
+            s1.upload_composite_private(id, &enc)
+                .expect("composite ML-KEM-1024 upload");
+        }
+
+        let plaintext = b"pqctoday fix2: ML-KEM-1024 + X448 hybrid decrypt, HSM-backed.";
+        let recipients = cert
+            .keys()
+            .with_policy(policy, None)
+            .alive()
+            .revoked(false)
+            .for_transport_encryption()
+            .map(|ka| sequoia_openpgp::serialize::stream::Recipient::new(None, None, ka.key()))
+            .collect::<Vec<_>>();
+        assert_eq!(recipients.len(), 1, "exactly one ML-KEM-1024 recipient expected");
+
+        let mut ciphertext = Vec::new();
+        {
+            use sequoia_openpgp::serialize::stream::{Armorer, Encryptor, LiteralWriter, Message};
+            let message = Message::new(&mut ciphertext);
+            let message = Armorer::new(message).build().expect("armorer");
+            let message = Encryptor::for_recipients(message, recipients)
+                .build()
+                .expect("encryptor build");
+            let mut w = LiteralWriter::new(message).build().expect("literal writer");
+            std::io::copy(&mut &plaintext[..], &mut w).expect("write plaintext");
+            w.finalize().expect("finalize encryption");
+        }
+        eprintln!(
+            "    software-encrypted {} B plaintext -> {} B armored ML-KEM-1024 message",
+            plaintext.len(),
+            ciphertext.len()
+        );
+
+        let s2 = open_session(&e);
+        let mut recovered = Vec::new();
+        s2.decrypt(id, &mut &ciphertext[..], &mut recovered, None)
+            .expect("bridge ML-KEM-1024 decrypt (C_DecapsulateKey + combiner + AES-KW)");
+
+        assert_eq!(
+            recovered.as_slice(),
+            &plaintext[..],
+            "recovered plaintext must match the original byte-for-byte"
+        );
+
+        eprintln!(
+            "PASS live_composite ML-KEM-1024 e2e: software-encrypt -> HSM decrypt \
+             (X448 ECDH + ML-KEM-1024 decap + combiner + AES-256 KW) -> plaintext MATCH"
+        );
+
+        // Regression check (plan §2 verification): confirm decrypt()'s
+        // catch-all is unchanged for a ciphertext type this bridge has never
+        // supported (ElGamal — a real sequoia `mpi::Ciphertext` variant, but
+        // not one our decrypt() match handles). This is the arm that sits
+        // immediately after the new MLKEM1024_X448 arm added by this fix, so
+        // it is the most at-risk spot for an accidental fallthrough
+        // regression. (There is no standalone, non-composite ML-DSA/ML-KEM
+        // OpenPGP algorithm ID to construct a ciphertext for — the spec only
+        // defines the composite forms, confirmed by reading sequoia's
+        // `mpi::Ciphertext`/`mpi::PublicKey` enums, which have no such
+        // variant at all.)
+        {
+            let s3 = open_session(&e);
+            let mut kp = s3
+                .keypair(id, PgpKeyType::Encrypt, None)
+                .expect("resolve composite keypair for negative-path check");
+            let bogus = sequoia_openpgp::crypto::mpi::Ciphertext::ElGamal {
+                e: sequoia_openpgp::crypto::mpi::MPI::new(&[1, 2, 3]),
+                c: sequoia_openpgp::crypto::mpi::MPI::new(&[4, 5, 6]),
+            };
+            let err =
+                <Op11KeyPair as sequoia_openpgp::crypto::Decryptor>::decrypt(&mut kp, &bogus, None)
+                    .expect_err("an ElGamal ciphertext must still be rejected");
+            assert!(
+                err.to_string().contains("Unexpected Ciphertext type"),
+                "unexpected error for unsupported ciphertext type: {err}"
+            );
+            eprintln!("    PASS regression: unsupported (ElGamal) ciphertext still rejected by the catch-all");
+        }
+
+        purge_id(&open_session(&e), id);
+    }
+
+    /// TASK 3 gate for MLDSA87_Ed448 — generate-in-HSM custody. Mirrors
+    /// `live_composite_generate_in_hsm_sign_verify_nonextractable`.
+    #[test]
+    fn live_composite_generate_in_hsm_mldsa87ed448_sign_verify_nonextractable() {
+        let Some(e) = env() else {
+            eprintln!("SKIP live_composite_*: set OP11_MODULE to run against softhsmv3");
+            return;
+        };
+
+        let id = b"\x05composite-genhsm-87";
+
+        let s1 = open_session(&e);
+        purge_id(&s1, id);
+        let generated_public = s1
+            .generate_composite_in_hsm(id, CompositeAlgo::MlDsa87Ed448)
+            .expect("generate composite in HSM (MLDSA87_Ed448)");
+        assert_eq!(
+            u8::from(generated_public.pk_algo()),
+            EXPECTED_ALGO_ID_MLDSA87_ED448,
+            "generated key must be MLDSA87_Ed448 (algo 31)"
+        );
+        let expected_fp = generated_public.fingerprint();
+        drop(s1);
+
+        let s2 = open_session(&e);
+        let public_reloaded = s2
+            .key(id, PgpKeyType::Sign, None)
+            .expect("reload generated public key from token");
+        assert_eq!(
+            public_reloaded.fingerprint(),
+            expected_fp,
+            "reloaded fingerprint must match the generated key"
+        );
+        let kp = s2
+            .keypair(id, PgpKeyType::Sign, None)
+            .expect("reload generated keypair from token");
+        let msg = b"pqctoday fix1: composite MLDSA87_Ed448 generated in-HSM, signed in-HSM";
+        let mut sig = Vec::new();
+        crate::signer::sign_on_card(kp, &mut &msg[..], &mut sig).expect("sign_on_card (generated)");
+
+        let pile = PacketPile::from_bytes(&sig).expect("re-parse signature");
+        let mut sig_packet = None;
+        for p in pile.descendants() {
+            if let Packet::Signature(s) = p {
+                sig_packet = Some(s.clone());
+            }
+        }
+        let sig_packet = sig_packet.expect("a Signature packet");
+        assert_eq!(sig_packet.version(), 6, "must be v6");
+        assert_eq!(u8::from(sig_packet.pk_algo()), EXPECTED_ALGO_ID_MLDSA87_ED448);
+        match sig_packet.mpis() {
+            sequoia_openpgp::crypto::mpi::Signature::MLDSA87_Ed448 { eddsa, mldsa } => {
+                assert_eq!(eddsa.len(), 114);
+                assert_eq!(mldsa.len(), 4627);
+            }
+            other => panic!("expected MLDSA87_Ed448 composite MPI, got {other:?}"),
+        }
+        sig_packet
+            .verify_message(&public_reloaded, msg)
+            .expect("HSM-generated composite signature must verify against the generated public key");
+
+        let s3 = open_session(&e);
+        let base = vec![
+            Attribute::Token(true),
+            Attribute::Private(true),
+            Attribute::Id(id.to_vec()),
+            Attribute::Class(ObjectClass::PRIVATE_KEY),
+        ];
+        let find_one = |kt: cryptoki::object::KeyType| -> ObjectHandle {
+            let mut t = base.clone();
+            t.push(Attribute::KeyType(kt));
+            let h = s3.session.find_objects(&t).expect("find_objects");
+            assert_eq!(h.len(), 1, "expected exactly one {kt:?} private handle");
+            h[0]
+        };
+        for (name, kt) in [
+            ("Ed448", cryptoki::object::KeyType::EC_EDWARDS),
+            ("ML-DSA-87", cryptoki::object::KeyType::ML_DSA),
+        ] {
+            let h = find_one(kt);
+            let value_released = s3
+                .session
+                .get_attributes(h, &[cryptoki::object::AttributeType::Value])
+                .map(|attrs| attrs.iter().any(|a| matches!(a, Attribute::Value(v) if !v.is_empty())))
+                .unwrap_or(false);
+            assert!(
+                !value_released,
+                "{name} private CKA_VALUE was released — key IS extractable (must not be)"
+            );
+            let mut sensitive = None;
+            let mut extractable = None;
+            for a in s3
+                .session
+                .get_attributes(
+                    h,
+                    &[
+                        cryptoki::object::AttributeType::Sensitive,
+                        cryptoki::object::AttributeType::Extractable,
+                    ],
+                )
+                .expect("get sensitive/extractable")
+            {
+                match a {
+                    Attribute::Sensitive(x) => sensitive = Some(x),
+                    Attribute::Extractable(x) => extractable = Some(x),
+                    _ => {}
+                }
+            }
+            assert_eq!(sensitive, Some(true), "{name} CKA_SENSITIVE must be true");
+            assert_eq!(extractable, Some(false), "{name} CKA_EXTRACTABLE must be false");
+            eprintln!("    {name}: CKA_VALUE refused, SENSITIVE=true, EXTRACTABLE=false");
+        }
+
+        eprintln!(
+            "PASS live_composite generate-in-HSM MLDSA87_Ed448: in-HSM C_GenerateKeyPair -> reload -> \
+             sign -> verify OK; both private halves NON-EXTRACTABLE (fp {expected_fp})"
+        );
+
+        let _ = s3;
+        purge_id(&open_session(&e), id);
+    }
+
+    /// TASK 3 gate for MLKEM1024_X448 — generate-in-HSM + full encrypt/decrypt
+    /// round trip. Mirrors
+    /// `live_composite_generate_in_hsm_mlkem_encrypt_decrypt_nonextractable`.
+    #[test]
+    fn live_composite_generate_in_hsm_mlkem1024x448_encrypt_decrypt_nonextractable() {
+        let Some(e) = env() else {
+            eprintln!("SKIP live_composite_*: set OP11_MODULE to run against softhsmv3");
+            return;
+        };
+
+        let id = b"\x05composite-genkem-1024";
+
+        let s1 = open_session(&e);
+        purge_id(&s1, id);
+        let generated_public = s1
+            .generate_composite_in_hsm(id, CompositeAlgo::MlKem1024X448)
+            .expect("generate ML-KEM-1024 composite in HSM");
+        assert_eq!(
+            generated_public.pk_algo(),
+            PublicKeyAlgorithm::MLKEM1024_X448,
+            "generated key must be MLKEM1024_X448"
+        );
+
+        for (name, kt) in [
+            ("X448", cryptoki::object::KeyType::EC_MONTGOMERY),
+            ("ML-KEM-1024", cryptoki::object::KeyType::ML_KEM),
+        ] {
+            let h = s1
+                .session
+                .find_objects(&[
+                    Attribute::Token(true),
+                    Attribute::Private(true),
+                    Attribute::Id(id.to_vec()),
+                    Attribute::Class(ObjectClass::PRIVATE_KEY),
+                    Attribute::KeyType(kt),
+                ])
+                .expect("find_objects")[0];
+            let released = s1
+                .session
+                .get_attributes(h, &[cryptoki::object::AttributeType::Value])
+                .map(|a| a.iter().any(|x| matches!(x, Attribute::Value(v) if !v.is_empty())))
+                .unwrap_or(false);
+            assert!(!released, "{name} private CKA_VALUE released (must be non-extractable)");
+        }
+
+        let plaintext = b"pqctoday fix2 ML-KEM-1024: encrypt to an in-HSM-generated key.";
+        let mut ciphertext = Vec::new();
+        {
+            use sequoia_openpgp::serialize::stream::{
+                Armorer, Encryptor, LiteralWriter, Message, Recipient,
+            };
+            let recipient = Recipient::new(None, None, &generated_public);
+            let message = Message::new(&mut ciphertext);
+            let message = Armorer::new(message).build().expect("armorer");
+            let message = Encryptor::for_recipients(message, vec![recipient])
+                .build()
+                .expect("encryptor");
+            let mut w = LiteralWriter::new(message).build().expect("literal writer");
+            std::io::copy(&mut &plaintext[..], &mut w).expect("write");
+            w.finalize().expect("finalize");
+        }
+        drop(s1);
+
+        let s2 = open_session(&e);
+        let mut recovered = Vec::new();
+        s2.decrypt(id, &mut &ciphertext[..], &mut recovered, None)
+            .expect("bridge decrypt of message to in-HSM-generated ML-KEM-1024 key");
+        assert_eq!(recovered.as_slice(), &plaintext[..], "plaintext must match");
+
+        eprintln!(
+            "PASS live_composite generate-in-HSM ML-KEM-1024: in-HSM C_GenerateKeyPair -> \
              encrypt -> HSM decrypt -> plaintext MATCH; private halves NON-EXTRACTABLE"
         );
 
