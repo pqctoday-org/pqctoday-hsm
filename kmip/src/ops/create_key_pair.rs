@@ -887,6 +887,8 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         HmacSha256 => "HMAC-SHA-256",
         HmacSha384 => "HMAC-SHA-384",
         HmacSha512 => "HMAC-SHA-512",
+        HmacSha3_256 => "HMAC-SHA3-256",
+        HmacSha3_512 => "HMAC-SHA3-512",
         Ecdh       => "ECDH",
         ChaCha20         => "ChaCha20",
         ChaCha20Poly1305 => "ChaCha20-Poly1305",

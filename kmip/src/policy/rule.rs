@@ -1452,6 +1452,22 @@ pub fn ckm_name_to_code(name: &str) -> Option<u32> {
         "CKM_SHA3_512" => c::CKM_SHA3_512,
         "CKM_SHA3_256_HMAC" => c::CKM_SHA3_256_HMAC,
         "CKM_SHA3_512_HMAC" => c::CKM_SHA3_512_HMAC,
+        // General-length (truncated-tag) HMAC variants — engine has
+        // supported these since PR #189; this registry never picked them
+        // up (KMIP/CACP coverage gap-analysis item 6, 2026-08-30).
+        "CKM_SHA256_HMAC_GENERAL" => c::CKM_SHA256_HMAC_GENERAL,
+        "CKM_SHA384_HMAC_GENERAL" => c::CKM_SHA384_HMAC_GENERAL,
+        "CKM_SHA512_HMAC_GENERAL" => c::CKM_SHA512_HMAC_GENERAL,
+        "CKM_SHA3_256_HMAC_GENERAL" => c::CKM_SHA3_256_HMAC_GENERAL,
+        "CKM_SHA3_512_HMAC_GENERAL" => c::CKM_SHA3_512_HMAC_GENERAL,
+        // Digest-based key derivation family (gap-analysis item 10,
+        // 2026-08-30) — engine support pre-existing, never registered here.
+        "CKM_SHA256_KEY_DERIVATION" => c::CKM_SHA256_KEY_DERIVATION,
+        "CKM_SHA384_KEY_DERIVATION" => c::CKM_SHA384_KEY_DERIVATION,
+        "CKM_SHA512_KEY_DERIVATION" => c::CKM_SHA512_KEY_DERIVATION,
+        "CKM_SHA3_256_KEY_DERIVATION" => c::CKM_SHA3_256_KEY_DERIVATION,
+        "CKM_SHA3_384_KEY_DERIVATION" => c::CKM_SHA3_384_KEY_DERIVATION,
+        "CKM_SHA3_512_KEY_DERIVATION" => c::CKM_SHA3_512_KEY_DERIVATION,
         // ECDSA pre-hash SHA-3 variants + EdDSA (pure / pre-hash):
         "CKM_ECDSA_SHA3_224" => c::CKM_ECDSA_SHA3_224,
         "CKM_ECDSA_SHA3_256" => c::CKM_ECDSA_SHA3_256,

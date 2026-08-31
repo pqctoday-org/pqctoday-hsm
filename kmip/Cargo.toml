@@ -150,6 +150,10 @@ prometheus = { version = "0.13", default-features = false, optional = true }
 rand        = "0.8"
 sha2        = "0.10"
 hmac        = "0.12"
+# HMAC-SHA3-256/512 (KMIP/CACP coverage gap-analysis item 6, 2026-08-30) —
+# moved here from [dev-dependencies], which only had it for spec-replay
+# tests; ops/mac_and_hash.rs now needs it in production code too.
+sha3        = "0.10.8"
 # Gap-remediation Phase A — Destroy must scrub Register/Import'd
 # ObjectRecord.key_material, not just flip the lifecycle state. Same
 # crate + `.zeroize()` discipline `rust/src/ffi.rs` already uses.
@@ -209,11 +213,9 @@ scraper = { version = "0.20", optional = true }
 [dev-dependencies]
 proptest   = "1"
 hex        = "0.4"
-# P1.2 — tests/acvp_roundtrip.rs computes SHA-3 digests to KAT the NIST
-# SHA3-256/512 vectors. Matches the engine's `../rust/Cargo.toml` pin so the
-# digest implementation under test is byte-identical to the one the engine
-# compiles against.
-sha3       = "0.10.8"
+# sha3 moved to [dependencies] 2026-08-30 (now needed by production
+# ops/mac_and_hash.rs too) — tests/acvp_roundtrip.rs's SHA3-256/512 KAT use
+# still works via that promoted dependency.
 test-case  = "3"
 assert_cmd = "2"
 predicates = "3"
