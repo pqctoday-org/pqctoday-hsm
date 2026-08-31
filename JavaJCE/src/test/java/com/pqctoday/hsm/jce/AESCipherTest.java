@@ -15,6 +15,7 @@ import java.nio.ByteBuffer;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidParameterException;
 import java.security.Security;
+import java.util.HexFormat;
 
 import static com.pqctoday.hsm.jce.P11Constants.*;
 import static org.junit.jupiter.api.Assertions.*;
@@ -454,6 +455,243 @@ class AESCipherTest {
                 System.setProperty("softhsmv3.jce.callerGcmIv", prior);
             }
         }
+    }
+
+    // ── Item 2: CKM_AES_OFB / CFB1 / CFB8 / CFB128 ─────────────────────────
+
+    @ParameterizedTest
+    @ValueSource(strings = {"AES/OFB/NoPadding", "AES/CFB1/NoPadding", "AES/CFB8/NoPadding", "AES/CFB128/NoPadding"})
+    void streamModeSelfRoundTripsArbitraryLength(String transform) throws Exception {
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        SecretKey key = KeyGenerator.getInstance("AES", p).generateKey();
+        // Deliberately NOT a multiple of the block size — these are all
+        // stream-shaped modes (isBlockCipher()==false engine-side, same as
+        // CTR), so an odd length exercises that no hidden block-alignment
+        // requirement crept in.
+        byte[] plaintext = "odd-length plaintext, 37 bytes total!".getBytes();
+        assertEquals(37, plaintext.length);
+
+        Cipher enc = Cipher.getInstance(transform, p);
+        enc.init(Cipher.ENCRYPT_MODE, key);
+        byte[] iv = enc.getIV();
+        assertNotNull(iv);
+        assertEquals(16, iv.length);
+        byte[] ct = enc.doFinal(plaintext);
+        assertEquals(plaintext.length, ct.length, transform + " must not change the data length");
+
+        Cipher dec = Cipher.getInstance(transform, p);
+        dec.init(Cipher.DECRYPT_MODE, key, new IvParameterSpec(iv));
+        assertArrayEquals(plaintext, dec.doFinal(ct));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"AES/OFB/NoPadding", "AES/CFB8/NoPadding", "AES/CFB128/NoPadding"})
+    void streamModeInteropsWithJdkSunJCEUsingAKnownImportedKey(String transform) throws Exception {
+        // Real, live JDK 27 precedent found for these three (SunJCE
+        // registers "AES/OFB/NoPadding", "AES/CFB8/NoPadding", and
+        // "AES/CFB128/NoPadding" — confirmed via a container probe before
+        // writing this test): use it as the independent oracle, same
+        // "known raw key imported into both sides" pattern the GCM/CCM
+        // Bouncy Castle interop tests above already use for the same
+        // structural reason (a token-generated AES key is never
+        // extractable). CFB1 is deliberately excluded here — the SAME
+        // probe found NEITHER SunJCE NOR Bouncy Castle 1.85.2 implements
+        // "AES/CFB1/NoPadding" at all (NoSuchAlgorithmException on both),
+        // so no live external oracle exists for it; see
+        // streamModeSelfRoundTripsArbitraryLength above for its coverage.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        byte[] rawKey = new byte[16];
+        new java.security.SecureRandom().nextBytes(rawKey);
+        SecretKey jdkKey = new SecretKeySpec(rawKey, "AES");
+        long handle = importRawAesKeyReal(p.lib, rawKey, false);
+        SecretKey ourKey = new P11Key.Secret(p.lib, handle, "AES");
+        byte[] plaintext = "JDK SunJCE stream-mode cross-verify, arbitrary!".getBytes();
+
+        // JDK encrypts, we decrypt.
+        Cipher jdkEnc = Cipher.getInstance(transform);
+        jdkEnc.init(Cipher.ENCRYPT_MODE, jdkKey);
+        byte[] jdkIv = jdkEnc.getIV();
+        byte[] jdkCt = jdkEnc.doFinal(plaintext);
+
+        Cipher ourDec = Cipher.getInstance(transform, p);
+        ourDec.init(Cipher.DECRYPT_MODE, ourKey, new IvParameterSpec(jdkIv));
+        assertArrayEquals(plaintext, ourDec.doFinal(jdkCt),
+            "our provider must decrypt JDK SunJCE's own " + transform + " ciphertext given the same raw key/IV");
+
+        // We encrypt, JDK decrypts.
+        Cipher ourEnc = Cipher.getInstance(transform, p);
+        ourEnc.init(Cipher.ENCRYPT_MODE, ourKey);
+        byte[] ourIv = ourEnc.getIV();
+        byte[] ourCt = ourEnc.doFinal(plaintext);
+
+        Cipher jdkDec = Cipher.getInstance(transform);
+        jdkDec.init(Cipher.DECRYPT_MODE, jdkKey, new IvParameterSpec(ourIv));
+        assertArrayEquals(plaintext, jdkDec.doFinal(ourCt),
+            "JDK SunJCE must decrypt our provider's own " + transform + " ciphertext given the same raw key/IV");
+    }
+
+    // ── Item 1: CKM_AES_XTS ─────────────────────────────────────────────
+    //
+    // BC/JDK naming-and-oracle finding (see P11AESCipherSpi's own javadoc
+    // for the full disclosure): a live probe of Bouncy Castle 1.85.2 (the
+    // exact pinned dependency) AND every JDK-27-bundled provider found
+    // ZERO AES-XTS support anywhere on this project's classpath — no
+    // registered JCA name, and no even-lightweight non-JCA AES-XTS
+    // implementation in BC's own crypto.modes package (only an unrelated
+    // Kuznyechik/GOST "KXTSBlockCipher"). So neither a naming precedent
+    // nor an independent-implementation oracle was available as planned.
+    // These tests use the vendored NIST ACVP AES-XTS vectors
+    // (tests/acvp/aes_xts_test.json, ACVP-AES-XTS 2.0, already used by the
+    // WS-8 engine work that added this mechanism) instead — official
+    // published test vectors, a strictly stronger oracle than a second
+    // library would have been. 3 of that file's 4 cases are reproduced
+    // here (the 4th is an ~5.9KB payload, impractical to inline); all
+    // three — like all four in the source file — have a payload length
+    // that is NOT a multiple of 16 bytes, so every one is a genuine
+    // ciphertext-stealing case, not just a round-trip on aligned data.
+
+    @Test
+    void keyGeneratorEnforcesTotalXtsKeySize() throws Exception {
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        KeyGenerator kg = KeyGenerator.getInstance("AES_XTS", p);
+        assertThrows(InvalidParameterException.class, () -> kg.init(128),
+            "128 is a valid PLAIN-AES size but not a valid TOTAL AES-XTS size");
+        assertThrows(InvalidParameterException.class, () -> kg.init(384));
+
+        kg.init(256);
+        SecretKey k256 = kg.generateKey();
+        assertEquals("AES_XTS", k256.getAlgorithm());
+        assertNull(k256.getEncoded(), "generated AES-XTS keys must be opaque too");
+
+        kg.init(512);
+        SecretKey k512 = kg.generateKey();
+        assertEquals("AES_XTS", k512.getAlgorithm());
+    }
+
+    @Test
+    void xtsSelfRoundTripsNonBlockAlignedData() throws Exception {
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        KeyGenerator kg = KeyGenerator.getInstance("AES_XTS", p);
+        kg.init(256);
+        SecretKey key = kg.generateKey();
+        byte[] tweak = new byte[16];
+        new java.security.SecureRandom().nextBytes(tweak);
+        // 40 bytes: two full 16-byte blocks plus a genuinely partial
+        // 8-byte final chunk — real ciphertext stealing, not an aligned
+        // length.
+        byte[] plaintext = "ciphertext-stealing self round trip!!!!!".getBytes();
+        assertEquals(40, plaintext.length);
+
+        Cipher enc = Cipher.getInstance("AES/XTS/NoPadding", p);
+        enc.init(Cipher.ENCRYPT_MODE, key, new IvParameterSpec(tweak));
+        byte[] ct = enc.doFinal(plaintext);
+        assertEquals(plaintext.length, ct.length, "XTS ciphertext stealing must not change the data length");
+
+        Cipher dec = Cipher.getInstance("AES/XTS/NoPadding", p);
+        dec.init(Cipher.DECRYPT_MODE, key, new IvParameterSpec(tweak));
+        assertArrayEquals(plaintext, dec.doFinal(ct));
+    }
+
+    @Test
+    void xtsMatchesNistAcvpVectorAes128EncryptDirection() throws Exception {
+        // ACVP-AES-XTS 2.0 case 0 (encrypt, keyLen=128 -> 256-bit total raw
+        // key). payloadLenBits=496 -> 62 bytes, not a multiple of 16.
+        byte[] key = HexFormat.of().parseHex(
+            "6FA0AE27860CB658B40A3D95666954442E418EE3E4565657DD08EDC69E20E5D2");
+        byte[] tweak = HexFormat.of().parseHex("C7C71AC8A3F858145B9BA0E658491AF7");
+        byte[] pt = HexFormat.of().parseHex(
+            "316F416DD8828155AAFE1EFA50361D48613E073E1B4B66B00D86A908626157D3058DCB83B1B6833580AA2F4A0663DE87115027F5F4EB60FCF2F2235BB801");
+        byte[] expectedCt = HexFormat.of().parseHex(
+            "74FCCB3C6FA20BAE9D1FBA9525519A5AEBB0BD4F2803A40C4EC0D80FBE3D5ECF53EA3D8C7456D23B4FD7772C4BC44B06C0C7A533E53747A4CB94927D4572");
+        assertEquals(62, pt.length);
+
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        long handle = importRawXtsKey(p.lib, key);
+        SecretKey ourKey = new P11Key.Secret(p.lib, handle, "AES_XTS");
+
+        Cipher enc = Cipher.getInstance("AES/XTS/NoPadding", p);
+        enc.init(Cipher.ENCRYPT_MODE, ourKey, new IvParameterSpec(tweak));
+        byte[] ct = enc.doFinal(pt);
+        assertArrayEquals(expectedCt, ct, "our AES-128-XTS encrypt must match the published NIST ACVP vector exactly");
+    }
+
+    @Test
+    void xtsMatchesNistAcvpVectorAes256EncryptDirection() throws Exception {
+        // ACVP-AES-XTS 2.0 case 1 (encrypt, keyLen=256 -> 512-bit total raw
+        // key). payloadLenBits=616 -> 77 bytes, not a multiple of 16.
+        byte[] key = HexFormat.of().parseHex(
+            "A0E54B4453A9C9D7740A8A88F4F72FB3A76F16D078197A1C69E5F69E68A710FB3555068BFE708EE35224F8CDC5B238823A2B239E5CD6A0A6704AB4E18C1CFC6D");
+        byte[] tweak = HexFormat.of().parseHex("CC82ACDF52A949538B9CC27C8E61A04A");
+        byte[] pt = HexFormat.of().parseHex(
+            "D7503A2C796ADECA0E73A619C0EA661DC683BA6414E74C708280F6DD3A9C56F83DB8B82CD0FE06F5903786A84722276627EF7DE3153A258F7C0B2A7F606E02941CED3CE7518D0D4466CF9F3A77");
+        byte[] expectedCt = HexFormat.of().parseHex(
+            "31611D514838AB07CE6167149DB16A0BCA816ED32C55C5311F6D9A3B7913243B334E01D9AC661F48D0379F641A0DCC2F8CB8C9442F2ADFDA7912CB4B5BA32563834821AD807A0BCA4AFC26E353");
+        assertEquals(77, pt.length);
+
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        long handle = importRawXtsKey(p.lib, key);
+        SecretKey ourKey = new P11Key.Secret(p.lib, handle, "AES_XTS");
+
+        Cipher enc = Cipher.getInstance("AES/XTS/NoPadding", p);
+        enc.init(Cipher.ENCRYPT_MODE, ourKey, new IvParameterSpec(tweak));
+        byte[] ct = enc.doFinal(pt);
+        assertArrayEquals(expectedCt, ct, "our AES-256-XTS encrypt must match the published NIST ACVP vector exactly");
+    }
+
+    @Test
+    void xtsMatchesNistAcvpVectorAes256DecryptDirection() throws Exception {
+        // ACVP-AES-XTS 2.0 case 3 (decrypt, keyLen=256 -> 512-bit total raw
+        // key). payloadLenBits=368 -> 46 bytes, not a multiple of 16.
+        byte[] key = HexFormat.of().parseHex(
+            "FE08576B2820261BB57EE5164416885F9B154BA446EC82E129345825E30721C87A13AC02FDE62CD5D7A34433E5EB021BE485EA54422113AA0B545154F5FDBEF9");
+        byte[] tweak = HexFormat.of().parseHex("89325D57B103C2CDC2BFA2E3327AA6FF");
+        byte[] expectedPt = HexFormat.of().parseHex(
+            "C1355EE7100214F1BF77A1D8D1B0C2229EC647806E7D8004CCA909350315A03D7D62B84DBA97CDA22359554B744B");
+        byte[] ct = HexFormat.of().parseHex(
+            "B2CA0147326DE586698DC559978E367B894E23A101D3937C5ADE6FE36C96629CFDDBC21B668B690827EC27D59D6E");
+        assertEquals(46, expectedPt.length);
+
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        long handle = importRawXtsKey(p.lib, key);
+        SecretKey ourKey = new P11Key.Secret(p.lib, handle, "AES_XTS");
+
+        Cipher dec = Cipher.getInstance("AES/XTS/NoPadding", p);
+        dec.init(Cipher.DECRYPT_MODE, ourKey, new IvParameterSpec(tweak));
+        byte[] pt = dec.doFinal(ct);
+        assertArrayEquals(expectedPt, pt, "our AES-256-XTS decrypt must match the published NIST ACVP vector exactly");
+    }
+
+    @Test
+    void xtsCipherRejectsPlainAesKeyAndPlainAesCipherRejectsXtsKey() throws Exception {
+        // The engine itself enforces CKK_AES_XTS-only for CKM_AES_XTS (and
+        // rejects CKK_AES_XTS for every plain-AES mechanism) — this proves
+        // this class's own initKey() check surfaces that as a clean
+        // InvalidKeyException rather than an opaque native failure.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        SecretKey plainAesKey = KeyGenerator.getInstance("AES", p).generateKey();
+        SecretKey xtsKey = KeyGenerator.getInstance("AES_XTS", p).generateKey();
+
+        Cipher xtsCipher = Cipher.getInstance("AES/XTS/NoPadding", p);
+        assertThrows(java.security.InvalidKeyException.class,
+            () -> xtsCipher.init(Cipher.ENCRYPT_MODE, plainAesKey, new IvParameterSpec(new byte[16])));
+
+        Cipher cbcCipher = Cipher.getInstance("AES/CBC/NoPadding", p);
+        assertThrows(java.security.InvalidKeyException.class,
+            () -> cbcCipher.init(Cipher.ENCRYPT_MODE, xtsKey, new IvParameterSpec(new byte[16])));
+    }
+
+    private static long importRawXtsKey(P11Library lib, byte[] raw) {
+        P11Library.Attr[] tmpl = {
+            P11Library.attrLong(CKA_CLASS, CKO_SECRET_KEY),
+            P11Library.attrLong(CKA_KEY_TYPE, CKK_AES_XTS),
+            P11Library.attr(CKA_VALUE, raw),
+            P11Library.attrBool(CKA_TOKEN, false),
+            P11Library.attrBool(CKA_SENSITIVE, true),
+            P11Library.attrBool(CKA_EXTRACTABLE, false),
+            P11Library.attrBool(CKA_ENCRYPT, true),
+            P11Library.attrBool(CKA_DECRYPT, true),
+        };
+        return lib.createObject(tmpl);
     }
 
     private static long importRawAesKeyReal(P11Library lib, byte[] raw, boolean extractable) {

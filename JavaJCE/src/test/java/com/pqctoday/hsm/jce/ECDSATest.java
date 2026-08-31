@@ -39,6 +39,12 @@ class ECDSATest {
 
     @ParameterizedTest
     @CsvSource({
+        // Item 4 (2026-08-30 follow-on): the two scattered ECDSA holes —
+        // CKM_ECDSA_SHA224 and CKM_ECDSA_SHA3_224 — confirmed live against
+        // real JDK 27 SunEC before registering (see SoftHSMv3Provider's
+        // own registration-site comment).
+        "secp256r1, SHA224withECDSA",
+        "secp256r1, SHA3-224withECDSA",
         "secp256r1, SHA256withECDSA",
         "secp256r1, SHA384withECDSA",
         "secp256r1, SHA512withECDSA",

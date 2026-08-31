@@ -43,6 +43,11 @@ final class P11RSAPSSSignatureSpi extends SignatureSpi {
 
     private static final Map<String, long[]> DIGEST_TO_MECH_AND_MGF = Map.of(
         // digestName -> { CKM_SHA*_RSA_PKCS_PSS, CK_RSA_PKCS_PSS_PARAMS.hashAlg, CKG_MGF1_SHA* }
+        // Item 4 (2026-08-30 follow-on): "SHA-224" was the one digest
+        // missing from this map — CKM_SHA224_RSA_PKCS_PSS is a real,
+        // engine-dispatched mechanism (SoftHSM_slots.cpp/SoftHSM_sign.cpp)
+        // and the constant simply hadn't been declared yet.
+        "SHA-224", new long[]{ CKM_SHA224_RSA_PKCS_PSS, CKM_SHA224, CKG_MGF1_SHA224 },
         "SHA-256", new long[]{ CKM_SHA256_RSA_PKCS_PSS, CKM_SHA256, CKG_MGF1_SHA256 },
         "SHA-384", new long[]{ CKM_SHA384_RSA_PKCS_PSS, CKM_SHA384, CKG_MGF1_SHA384 },
         "SHA-512", new long[]{ CKM_SHA512_RSA_PKCS_PSS, CKM_SHA512, CKG_MGF1_SHA512 },

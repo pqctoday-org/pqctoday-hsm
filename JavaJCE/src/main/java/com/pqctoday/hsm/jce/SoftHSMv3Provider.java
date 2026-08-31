@@ -590,14 +590,14 @@ public final class SoftHSMv3Provider extends AuthProvider {
             }
         });
 
-        registerDigest("SHA-224", CKM_SHA224);
-        registerDigest("SHA-256", CKM_SHA256);
-        registerDigest("SHA-384", CKM_SHA384);
-        registerDigest("SHA-512", CKM_SHA512);
-        registerDigest("SHA3-224", CKM_SHA3_224);
-        registerDigest("SHA3-256", CKM_SHA3_256);
-        registerDigest("SHA3-384", CKM_SHA3_384);
-        registerDigest("SHA3-512", CKM_SHA3_512);
+        registerDigest("SHA-224", CKM_SHA224, 28);
+        registerDigest("SHA-256", CKM_SHA256, 32);
+        registerDigest("SHA-384", CKM_SHA384, 48);
+        registerDigest("SHA-512", CKM_SHA512, 64);
+        registerDigest("SHA3-224", CKM_SHA3_224, 28);
+        registerDigest("SHA3-256", CKM_SHA3_256, 32);
+        registerDigest("SHA3-384", CKM_SHA3_384, 48);
+        registerDigest("SHA3-512", CKM_SHA3_512, 64);
         // Deliberately NOT registered: SHA-1, MD5, RIPEMD-160 — see class javadoc.
 
         // W2: ML-DSA (FIPS 204) + SLH-DSA (FIPS 205) — KeyPairGenerator +
@@ -671,9 +671,15 @@ public final class SoftHSMv3Provider extends AuthProvider {
                 return new P11ECKeyPairGeneratorSpi(lib);
             }
         });
+        // Item 4 (2026-08-30 follow-on): CKM_ECDSA_SHA224 / CKM_ECDSA_SHA3_224
+        // were the two scattered SHA-224/SHA3-224 signature holes in the
+        // ECDSA family — "SHA224withECDSA"/"SHA3-224withECDSA" confirmed
+        // live against real JDK 27's SunEC before adding.
+        registerECDSASignature("SHA224withECDSA", CKM_ECDSA_SHA224);
         registerECDSASignature("SHA256withECDSA", CKM_ECDSA_SHA256);
         registerECDSASignature("SHA384withECDSA", CKM_ECDSA_SHA384);
         registerECDSASignature("SHA512withECDSA", CKM_ECDSA_SHA512);
+        registerECDSASignature("SHA3-224withECDSA", CKM_ECDSA_SHA3_224);
         registerECDSASignature("SHA3-256withECDSA", CKM_ECDSA_SHA3_256);
         registerECDSASignature("SHA3-384withECDSA", CKM_ECDSA_SHA3_384);
         registerECDSASignature("SHA3-512withECDSA", CKM_ECDSA_SHA3_512);
@@ -698,9 +704,20 @@ public final class SoftHSMv3Provider extends AuthProvider {
                 return new P11RSAKeyPairGeneratorSpi(lib);
             }
         });
+        // Item 4 (2026-08-30 follow-on): the plain PKCS#1 v1.5 holes —
+        // CKM_SHA224_RSA_PKCS plus the full CKM_SHA3_*_RSA_PKCS family
+        // (224/256/384/512), none previously declared. "SHA224withRSA"
+        // and "SHA3-224/256/384/512withRSA" confirmed live against real
+        // JDK 27's SunRsaSign before adding — same pattern as this file's
+        // existing SHA3 PSS coverage above.
+        registerRSAPKCS1(("SHA224withRSA"), CKM_SHA224_RSA_PKCS);
         registerRSAPKCS1(("SHA256withRSA"), CKM_SHA256_RSA_PKCS);
         registerRSAPKCS1(("SHA384withRSA"), CKM_SHA384_RSA_PKCS);
         registerRSAPKCS1(("SHA512withRSA"), CKM_SHA512_RSA_PKCS);
+        registerRSAPKCS1(("SHA3-224withRSA"), CKM_SHA3_224_RSA_PKCS);
+        registerRSAPKCS1(("SHA3-256withRSA"), CKM_SHA3_256_RSA_PKCS);
+        registerRSAPKCS1(("SHA3-384withRSA"), CKM_SHA3_384_RSA_PKCS);
+        registerRSAPKCS1(("SHA3-512withRSA"), CKM_SHA3_512_RSA_PKCS);
         putService(new Service(this, "Signature", "RSASSA-PSS",
             P11RSAPSSSignatureSpi.class.getName(), List.of(), Map.of()) {
             @Override
@@ -822,6 +839,29 @@ public final class SoftHSMv3Provider extends AuthProvider {
         registerAESCipher("AES/CBC/NoPadding", P11AESCipherSpi.Mode.CBC);
         registerAESCipher("AES/CBC/PKCS5Padding", P11AESCipherSpi.Mode.CBC_PAD);
         registerAESCipher("AES/CTR/NoPadding", P11AESCipherSpi.Mode.CTR);
+        // Item 2 (2026-08-30 follow-on): CKM_AES_OFB/CFB1/CFB8/CFB128 —
+        // real standard JCA cipher modes (see P11AESCipherSpi's own
+        // javadoc for the Java Security Standard Algorithm Names
+        // confirmation and the exact transformation-string shape).
+        registerAESCipher("AES/OFB/NoPadding", P11AESCipherSpi.Mode.OFB);
+        registerAESCipher("AES/CFB1/NoPadding", P11AESCipherSpi.Mode.CFB1);
+        registerAESCipher("AES/CFB8/NoPadding", P11AESCipherSpi.Mode.CFB8);
+        registerAESCipher("AES/CFB128/NoPadding", P11AESCipherSpi.Mode.CFB128);
+        // Item 1 (2026-08-30 follow-on): CKM_AES_XTS + CKM_AES_XTS_KEY_GEN
+        // — see P11AESCipherSpi's and P11AESKeyGeneratorSpi's own javadocs
+        // for the live BC/JDK naming-precedent probe (neither registers
+        // anything AES-XTS-shaped) and the resulting disclosed, reasoned
+        // naming choice. A distinct "AES_XTS" KeyGenerator is required
+        // (not the plain "AES" one above) — CKM_AES_XTS_KEY_GEN produces a
+        // genuinely different, double-length CKK_AES_XTS key.
+        putService(new Service(this, "KeyGenerator", "AES_XTS",
+            P11AESKeyGeneratorSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11AESKeyGeneratorSpi(lib, true);
+            }
+        });
+        registerAESCipher("AES/XTS/NoPadding", P11AESCipherSpi.Mode.XTS);
         registerAESWrap("AESWrap", CKM_AES_KEY_WRAP);
         registerAESWrap("AESWrapPad", CKM_AES_KEY_WRAP_PAD);
         // PKCS#11 v3.2 §6.16.3: CKM_AES_KEY_WRAP_PAD "is deprecated.
@@ -852,6 +892,20 @@ public final class SoftHSMv3Provider extends AuthProvider {
         registerHmac("HmacSHA3-256", CKM_SHA3_256_HMAC, 32);
         registerHmac("HmacSHA3-384", CKM_SHA3_384_HMAC, 48);
         registerHmac("HmacSHA3-512", CKM_SHA3_512_HMAC, 64);
+        // Item 3 (2026-08-30 follow-on): SHA-512/224 and SHA-512/256
+        // (FIPS 180-4 §5) digest + plain-HMAC coverage — the truncated-
+        // width SHA-512 variants, genuinely different digests from plain
+        // SHA-512 (different IV per FIPS 180-4), not a display alias.
+        // "SHA-512/224"/"SHA-512/256" and "HmacSHA512/224"/"HmacSHA512/256"
+        // confirmed live against real JDK 27 (SUN/SunJCE both register
+        // exactly these names) before adding — the same "JDK is the
+        // oracle" pattern this file's other SHA-2 entries already use.
+        // The *_KEY_DERIVATION mechanism family for these two is
+        // deliberately OUT of scope (see P11Constants' own comment).
+        registerDigest("SHA-512/224", CKM_SHA512_224, 28);
+        registerDigest("SHA-512/256", CKM_SHA512_256, 32);
+        registerHmac("HmacSHA512/224", CKM_SHA512_224_HMAC, 28);
+        registerHmac("HmacSHA512/256", CKM_SHA512_256_HMAC, 32);
         registerGenericSecretKeyGenerator("KMAC128", 16);
         registerGenericSecretKeyGenerator("KMAC256", 32);
         putService(new Service(this, "Mac", "KMAC128",
@@ -1119,12 +1173,12 @@ public final class SoftHSMv3Provider extends AuthProvider {
         });
     }
 
-    private void registerDigest(String name, long mech) {
+    private void registerDigest(String name, long mech, int digestLenBytes) {
         putService(new Service(this, "MessageDigest", name,
             P11MessageDigestSpi.class.getName(), List.of(), Map.of("mechanism", Long.toString(mech))) {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
-                return new P11MessageDigestSpi(lib, mech);
+                return new P11MessageDigestSpi(lib, mech, digestLenBytes);
             }
         });
     }
@@ -1166,11 +1220,13 @@ public final class SoftHSMv3Provider extends AuthProvider {
     static final class P11MessageDigestSpi extends MessageDigestSpi {
         private final P11Library lib;
         private final long mech;
+        private final int digestLenBytes;
         private final java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
 
-        P11MessageDigestSpi(P11Library lib, long mech) {
+        P11MessageDigestSpi(P11Library lib, long mech, int digestLenBytes) {
             this.lib = lib;
             this.mech = mech;
+            this.digestLenBytes = digestLenBytes;
         }
 
         @Override protected void engineUpdate(byte input) { buf.write(input); }
@@ -1181,6 +1237,18 @@ public final class SoftHSMv3Provider extends AuthProvider {
             return out;
         }
         @Override protected void engineReset() { buf.reset(); }
+        // Real bug found live while adding item 3's SHA-512/224/256
+        // MessageDigest test (which, unlike every prior test in this
+        // module, actually checked getDigestLength()): this class never
+        // overrode it, so MessageDigestSpi's own default silently
+        // returned 0 for EVERY digest this provider has ever registered,
+        // not just the two new ones — a real, pre-existing gap, not
+        // specific to this item. Fixed at the root (this shared class)
+        // rather than only for the two algorithms that happened to
+        // surface it, via an explicit length passed at registration time
+        // (see registerDigest's own call sites) rather than guessed from
+        // the mechanism value.
+        @Override protected int engineGetDigestLength() { return digestLenBytes; }
     }
 
     /**

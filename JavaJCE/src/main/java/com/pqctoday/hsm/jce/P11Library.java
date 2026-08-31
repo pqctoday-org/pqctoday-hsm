@@ -1153,7 +1153,16 @@ final class P11Library implements AutoCloseable {
         return params;
     }
 
-    /** CKM_AES_CBC / CKM_AES_CBC_PAD — mechanism parameter is the raw 16-byte IV, no struct. IV is not secret. */
+    /**
+     * CKM_AES_CBC / CKM_AES_CBC_PAD — mechanism parameter is the raw
+     * 16-byte IV, no struct. Also reused (2026-08-30 follow-on) for
+     * CKM_AES_OFB, CKM_AES_CFB1/CFB8/CFB128, and CKM_AES_XTS (whose
+     * parameter is a 16-byte Data Unit Sequence Number/tweak rather than
+     * an IV) — confirmed reading SoftHSM_cipher.cpp that all of these
+     * parse {@code pMechanism->pParameter} identically, as a flat 16-byte
+     * blob with no struct, so one generic builder covers every one of
+     * them; the parameter is not secret in any of these mechanisms.
+     */
     MemorySegment mechCbc(Arena op, long mechType, byte[] iv) {
         MemorySegment m = op.allocate(MECHANISM);
         m.set(JAVA_LONG, 0, mechType);

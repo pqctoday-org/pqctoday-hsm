@@ -49,11 +49,29 @@ final class P11Constants {
     static final long CKM_SHA3_256_RSA_PKCS_PSS = 0x00000063L;
     static final long CKM_SHA3_384_RSA_PKCS_PSS = 0x00000064L;
     static final long CKM_SHA3_512_RSA_PKCS_PSS = 0x00000065L;
+    static final long CKM_SHA224               = 0x00000255L;
     static final long CKM_SHA256               = 0x00000250L;
     static final long CKM_SHA384               = 0x00000260L;
     static final long CKM_SHA512               = 0x00000270L;
     static final long CKM_ML_KEM_KEY_PAIR_GEN  = 0x0000000fL;
     static final long CKM_ML_KEM                = 0x00000017L;
+
+    // ── Items 3/4 (2026-08-30 follow-on) — scattered digest/signature gaps
+    // vs the merged PKCS#11 surface, grepped from pkcs11t.h. ──────────────
+    static final long CKM_SHA512_224            = 0x00000048L;
+    static final long CKM_SHA512_256            = 0x0000004cL;
+    // *_KEY_DERIVATION variants of these two (0x4b/0x4f) are deliberately
+    // NOT declared here — engine-dispatched (SoftHSM_slots.cpp) but out of
+    // scope this pass, matching the prior "digest-based KEY_DERIVATION
+    // family deferred" decision.
+    static final long CKM_ECDSA_SHA224          = 0x00001043L;
+    static final long CKM_ECDSA_SHA3_224        = 0x00001047L;
+    static final long CKM_SHA224_RSA_PKCS       = 0x00000046L;
+    static final long CKM_SHA224_RSA_PKCS_PSS   = 0x00000047L;
+    static final long CKM_SHA3_224_RSA_PKCS     = 0x00000066L;
+    static final long CKM_SHA3_256_RSA_PKCS     = 0x00000060L;
+    static final long CKM_SHA3_384_RSA_PKCS     = 0x00000061L;
+    static final long CKM_SHA3_512_RSA_PKCS     = 0x00000062L;
 
     // ── AES (W4) ─────────────────────────────────────────────────────────
     static final long CKM_AES_KEY_GEN      = 0x00001080L;
@@ -66,6 +84,22 @@ final class P11Constants {
     static final long CKM_AES_KEY_WRAP_KWP = 0x0000210bL;
     static final long CKM_AES_CCM          = 0x00001088L;
     static final long CKM_AES_GMAC         = 0x0000108eL;
+    // Item 1 (2026-08-30 follow-on): CKM_AES_XTS (IEEE 1619-2007 / PKCS#11
+    // v3.2 §6.15.4) — double-length key, CKK_AES_XTS-typed only (never
+    // plain CKK_AES). CKM_AES_XTS_KEY_GEN is its own dedicated keygen
+    // mechanism (§6.15.3), not CKM_AES_KEY_GEN.
+    static final long CKM_AES_XTS          = 0x00001071L;
+    static final long CKM_AES_XTS_KEY_GEN  = 0x00001072L;
+    // Item 2 (2026-08-30 follow-on): real standard JCA cipher modes
+    // ("OFB"/"CFBx" per the Java Security Standard Algorithm Names spec).
+    // CKM_AES_CFB64 (0x2105) exists in pkcs11t.h but is NOT declared here —
+    // the engine's own SymmetricAlgorithm.h marks the width-less legacy
+    // CFB constant "kept as an alias, unused" and SoftHSM_cipher.cpp only
+    // ever dispatches CFB1/CFB8/CFB128, never a bare/64-bit variant.
+    static final long CKM_AES_OFB          = 0x00002104L;
+    static final long CKM_AES_CFB8         = 0x00002106L;
+    static final long CKM_AES_CFB128       = 0x00002107L;
+    static final long CKM_AES_CFB1         = 0x00002108L;
 
     // ── MAC (W4) ─────────────────────────────────────────────────────────
     static final long CKM_GENERIC_SECRET_KEY_GEN = 0x00000350L;
@@ -132,6 +166,10 @@ final class P11Constants {
     static final long CKK_ML_KEM         = 0x00000049L;
     static final long CKK_GENERIC_SECRET = 0x00000010L;
     static final long CKK_AES            = 0x0000001fL;
+    // Item 1 (2026-08-30 follow-on): CKK_AES_XTS — a genuinely distinct
+    // key type from CKK_AES (double-length raw value, 32 or 64 bytes;
+    // PKCS#11 v3.2 §6.15.2 Table 124), not an AES-family alias.
+    static final long CKK_AES_XTS        = 0x00000035L;
 
     // ── Attributes ───────────────────────────────────────────────────────
     static final long CKA_CLASS            = 0x00000000L;
@@ -168,6 +206,9 @@ final class P11Constants {
     static final long CKA_SUBJECT          = 0x00000101L;
 
     // ── RSA-PSS/OAEP mechanism parameters ────────────────────────────────
+    // Item 4 (2026-08-30 follow-on): needed for P11RSAPSSSignatureSpi's
+    // missing "SHA-224" DIGEST_TO_MECH_AND_MGF entry.
+    static final long CKG_MGF1_SHA224   = 0x00000005L;
     static final long CKG_MGF1_SHA256   = 0x00000002L;
     static final long CKG_MGF1_SHA384   = 0x00000003L;
     static final long CKG_MGF1_SHA512   = 0x00000004L;

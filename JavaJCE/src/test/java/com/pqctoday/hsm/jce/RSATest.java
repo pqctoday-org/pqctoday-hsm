@@ -54,6 +54,48 @@ class RSATest {
         assertTrue(jdkVerifier.verify(sig), "JDK SunRsaSign must verify our token-produced PKCS#1 v1.5 signature");
     }
 
+    // ── Item 4 (2026-08-30 follow-on): scattered PKCS#1 v1.5 holes ────────
+    // CKM_SHA224_RSA_PKCS plus the full CKM_SHA3_*_RSA_PKCS family
+    // (224/256/384/512) — none previously declared. "SHA224withRSA" and
+    // "SHA3-224/256/384/512withRSA" confirmed live against real JDK 27
+    // SunRsaSign before registering (see SoftHSMv3Provider's own
+    // registration-site comment).
+    @ParameterizedTest
+    @CsvSource({
+        "SHA224withRSA", "SHA3-224withRSA", "SHA3-256withRSA", "SHA3-384withRSA", "SHA3-512withRSA"
+    })
+    void newPkcs1v15DigestsInteropWithJdkSunRsaSign(String alg) throws Exception {
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", p);
+        kpg.initialize(new RSAKeyGenParameterSpec(2048, RSAKeyGenParameterSpec.F4));
+        KeyPair kp = kpg.generateKeyPair();
+
+        Signature signer = Signature.getInstance(alg, p);
+        signer.initSign(kp.getPrivate());
+        byte[] msg = ("PKCS#1 v1.5 " + alg + " coverage").getBytes();
+        signer.update(msg);
+        byte[] sig = signer.sign();
+        assertEquals(2048 / 8, sig.length, "PKCS#1 v1.5 signature must be exactly one modulus-size block");
+
+        Signature verifier = Signature.getInstance(alg, p);
+        verifier.initVerify(kp.getPublic());
+        verifier.update(msg);
+        assertTrue(verifier.verify(sig));
+
+        Signature verifier2 = Signature.getInstance(alg, p);
+        verifier2.initVerify(kp.getPublic());
+        verifier2.update("tampered".getBytes());
+        assertFalse(verifier2.verify(sig));
+
+        // Cross-verify against JDK's own SunRsaSign.
+        KeyFactory kf = KeyFactory.getInstance("RSA");
+        PublicKey jdkPub = kf.generatePublic(new X509EncodedKeySpec(kp.getPublic().getEncoded()));
+        Signature jdkVerifier = Signature.getInstance(alg);
+        jdkVerifier.initVerify(jdkPub);
+        jdkVerifier.update(msg);
+        assertTrue(jdkVerifier.verify(sig), "JDK SunRsaSign must verify our token-produced " + alg + " signature");
+    }
+
     @ParameterizedTest
     @CsvSource({ "SHA256withRSA", "SHA384withRSA", "SHA512withRSA" })
     void allApprovedDigestsRoundTrip(String alg) throws Exception {
@@ -164,6 +206,49 @@ class RSATest {
         jdkVerifier.initVerify(jdkPub);
         jdkVerifier.update(msg);
         assertTrue(jdkVerifier.verify(sig), "JDK SunRsaSign must verify our token-produced " + digestName + " PSS signature");
+    }
+
+    @Test
+    void pssInteropsWithJdkSunRsaSignSha224() throws Exception {
+        // Item 4 (2026-08-30 follow-on): "SHA-224" was the one digest
+        // missing from P11RSAPSSSignatureSpi.DIGEST_TO_MECH_AND_MGF —
+        // CKM_SHA224_RSA_PKCS_PSS is real and engine-dispatched, the
+        // constant simply hadn't been declared yet.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA", p);
+        kpg.initialize(2048);
+        KeyPair kp = kpg.generateKeyPair();
+
+        PSSParameterSpec pssSpec = new PSSParameterSpec(
+            "SHA-224", "MGF1", MGF1ParameterSpec.SHA224, 28, PSSParameterSpec.TRAILER_FIELD_BC);
+
+        Signature signer = Signature.getInstance("RSASSA-PSS", p);
+        signer.setParameter(pssSpec);
+        signer.initSign(kp.getPrivate());
+        byte[] msg = "RSASSA-PSS SHA-224 interop".getBytes();
+        signer.update(msg);
+        byte[] sig = signer.sign();
+
+        Signature verifier = Signature.getInstance("RSASSA-PSS", p);
+        verifier.setParameter(pssSpec);
+        verifier.initVerify(kp.getPublic());
+        verifier.update(msg);
+        assertTrue(verifier.verify(sig));
+
+        Signature verifier2 = Signature.getInstance("RSASSA-PSS", p);
+        verifier2.setParameter(pssSpec);
+        verifier2.initVerify(kp.getPublic());
+        verifier2.update("tampered".getBytes());
+        assertFalse(verifier2.verify(sig));
+
+        // Cross-verify against JDK's own SunRsaSign RSASSA-PSS.
+        KeyFactory kf = KeyFactory.getInstance("RSA");
+        PublicKey jdkPub = kf.generatePublic(new X509EncodedKeySpec(kp.getPublic().getEncoded()));
+        Signature jdkVerifier = Signature.getInstance("RSASSA-PSS");
+        jdkVerifier.setParameter(pssSpec);
+        jdkVerifier.initVerify(jdkPub);
+        jdkVerifier.update(msg);
+        assertTrue(jdkVerifier.verify(sig), "JDK SunRsaSign must verify our token-produced SHA-224 PSS signature");
     }
 
     @Test
