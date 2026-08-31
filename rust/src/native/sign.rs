@@ -18,10 +18,11 @@
 use super::CkRv;
 use crate::constants::*;
 use crate::crypto::handlers::{
-    is_prehash_ml_dsa, is_prehash_slh_dsa, sign_ecdsa, sign_eddsa, sign_eddsa_ph, sign_hmac,
-    sign_kmac, sign_ml_dsa, sign_ml_dsa_external_mu, sign_ml_dsa_external_rnd, sign_ml_dsa_internal,
-    sign_rsa, sign_slh_dsa, sign_slh_dsa_external_rnd, sign_slh_dsa_internal, verify_ecdsa,
-    verify_eddsa, verify_eddsa_ph, verify_hmac, verify_ml_dsa, verify_ml_dsa_external_mu,
+    is_prehash_ml_dsa, is_prehash_slh_dsa, sign_ecdsa, sign_eddsa, sign_eddsa_ctx, sign_eddsa_ph,
+    sign_hmac, sign_kmac, sign_ml_dsa, sign_ml_dsa_external_mu, sign_ml_dsa_external_rnd,
+    sign_ml_dsa_internal, sign_rsa, sign_slh_dsa, sign_slh_dsa_external_rnd,
+    sign_slh_dsa_internal, verify_ecdsa, verify_eddsa, verify_eddsa_ctx, verify_eddsa_ph,
+    verify_hmac, verify_ml_dsa, verify_ml_dsa_external_mu,
     verify_ml_dsa_internal, verify_rsa, verify_slh_dsa, verify_slh_dsa_internal,
 };
 use crate::state::{
@@ -53,7 +54,7 @@ pub fn sign(
     mechanism: u32,
     data: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
-    sign_with_pss_salt(session, key_handle, mechanism, data, None)
+    sign_with_pss_salt(session, key_handle, mechanism, data, None, None)
 }
 
 /// [`sign`] with an explicit RSA-PSS salt length (bytes) — the typed
@@ -61,12 +62,20 @@ pub fn sign(
 /// path. `None` keeps the PKCS#11 v3.2 §6.2 default (salt = hash
 /// length). Ignored for non-PSS mechanisms. KMIP slice K18 threads the
 /// `Cryptographic Parameters` `Salt Length` field through here.
+///
+/// `eddsa_ctx`: RFC 8032 context string for `CKM_EDDSA` (KMIP/CACP
+/// coverage gap-analysis items 9a/9b, 2026-08-30) — threaded from
+/// `CryptographicParameters.context_string`, the same field PQC signing
+/// already uses. `None`/empty keeps ordinary EdDSA (Ed448's own default
+/// is an empty, not absent, context — [`sign_eddsa`] already does this
+/// correctly for that case). Ignored for every other mechanism.
 pub fn sign_with_pss_salt(
     session: u32,
     key_handle: u32,
     mechanism: u32,
     data: &[u8],
     pss_salt_len: Option<usize>,
+    eddsa_ctx: Option<&[u8]>,
 ) -> Result<Vec<u8>, CkRv> {
     // Isolation gate (rust-hsm-perf-bench-scenario-plan-07182026.md Part F)
     // + CKA_SIGN + CKA_ALLOWED_MECHANISMS + CKA_VALUE + CKA_PRIV_PARAM_SET,
@@ -133,7 +142,10 @@ pub fn sign_with_pss_salt(
         CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
         | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
         | CKM_ECDSA_SHA3_512 => sign_ecdsa(mechanism, ps, &sk_bytes, data),
-        CKM_EDDSA => sign_eddsa(&sk_bytes, data),
+        CKM_EDDSA => match eddsa_ctx {
+            Some(ctx) if !ctx.is_empty() => sign_eddsa_ctx(&sk_bytes, data, ctx),
+            _ => sign_eddsa(&sk_bytes, data),
+        },
         CKM_EDDSA_PH => sign_eddsa_ph(&sk_bytes, data),
         _ => Err(CKR_MECHANISM_INVALID),
     }
@@ -156,7 +168,7 @@ pub fn verify(
     data: &[u8],
     signature: &[u8],
 ) -> Result<bool, CkRv> {
-    verify_with_pss_salt(session, key_handle, mechanism, data, signature, None)
+    verify_with_pss_salt(session, key_handle, mechanism, data, signature, None, None)
 }
 
 /// [`verify`] with an explicit RSA-PSS salt length (bytes). `Some(n)`
@@ -164,6 +176,9 @@ pub fn verify(
 /// caller's parameters are authoritative); `None` keeps the historical
 /// two-candidate acceptance (salt = hash length, salt = maximal — see
 /// `crypto::handlers::verify_rsa`). Ignored for non-PSS mechanisms.
+///
+/// `eddsa_ctx`: see [`sign_with_pss_salt`]'s doc comment — same field,
+/// verify direction.
 pub fn verify_with_pss_salt(
     session: u32,
     key_handle: u32,
@@ -171,6 +186,7 @@ pub fn verify_with_pss_salt(
     data: &[u8],
     signature: &[u8],
     pss_salt_len: Option<usize>,
+    eddsa_ctx: Option<&[u8]>,
 ) -> Result<bool, CkRv> {
     // Isolation gate + CKA_VERIFY + CKA_ALLOWED_MECHANISMS + every
     // key-material shape a verify mechanism might need, ALL read from one
@@ -235,7 +251,10 @@ pub fn verify_with_pss_salt(
             Some(point) => verify_ecdsa(mechanism, ps, &point, data, signature),
             None => Err(CKR_KEY_TYPE_INCONSISTENT),
         },
-        CKM_EDDSA => verify_eddsa(&pk_bytes, data, signature),
+        CKM_EDDSA => match eddsa_ctx {
+            Some(ctx) if !ctx.is_empty() => verify_eddsa_ctx(&pk_bytes, data, signature, ctx),
+            _ => verify_eddsa(&pk_bytes, data, signature),
+        },
         CKM_EDDSA_PH => verify_eddsa_ph(&pk_bytes, data, signature),
         CKM_HSS => {
             // Stateless — RFC 8554 verification needs no key-object

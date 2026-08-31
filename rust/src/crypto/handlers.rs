@@ -1991,6 +1991,45 @@ pub fn sign_eddsa(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
     }
 }
 
+/// EdDSA with an RFC 8032 context string (Ed448ctx; Ed25519's equivalent,
+/// Ed25519ctx, is intentionally NOT implemented — see below). KMIP/CACP
+/// coverage gap-analysis items 9a/9b (2026-08-30): `CK_EDDSA_PARAMS`
+/// already carries `pContextData` in C++ and is wire-complete on KMIP's
+/// `CryptographicParameters.context_string`, but no Rust engine function
+/// accepted it until now.
+///
+/// Ed448 uses the crate's real, purpose-built `sign_ctx` — the same
+/// construction Ed448 always uses (RFC 8032 §5.2 requires a context on
+/// every Ed448 signature, empty or not), so this isn't a new signature
+/// scheme, just exposing what `ed448-goldilocks` already implements.
+///
+/// Ed25519ctx is deliberately unimplemented: `ed25519-dalek` 2.2.0 (the
+/// pinned version) has no public API for it — checked directly against the
+/// extracted crate source, not documentation. Its `Context`/`with_context`
+/// type is for Ed25519ph-with-context, a different RFC 8032 mode, and its
+/// `hazmat::raw_sign`'s `CtxDigest` type parameter is the internal
+/// SHA-512 digest for pseudorandomness, not an RFC 8032 context string —
+/// confirmed via that function's own doc comment. Hand-rolling Ed25519ctx
+/// on the `hazmat` primitives is possible but the crate's own warning on
+/// them ("do NOT use this function unless you absolutely must... can leak
+/// your signing key") makes it a real correctness/security risk, not a
+/// mechanical addition — held pending an explicit decision and an
+/// independent reference to cross-check against, the same bar
+/// `CKM_ECMQV_DERIVE` was held to.
+pub fn sign_eddsa_ctx(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec<u8>, u32> {
+    match sk_bytes.len() {
+        57 => {
+            let sk = ed448_goldilocks::SigningKey::try_from(sk_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            sk.sign_ctx(context, msg)
+                .map(|sig| sig.to_bytes().to_vec())
+                .map_err(|_| CKR_FUNCTION_FAILED)
+        }
+        32 => Err(CKR_MECHANISM_PARAM_INVALID), // Ed25519ctx — held, see doc comment above
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
 pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
     match sk_bytes.len() {
         32 => {
@@ -2908,6 +2947,24 @@ pub fn verify_eddsa(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(),
     }
 }
 
+/// Verify counterpart of [`sign_eddsa_ctx`] — same Ed448-only scope, same
+/// reason Ed25519ctx is held rather than implemented.
+pub fn verify_eddsa_ctx(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8], context: &[u8]) -> Result<(), u32> {
+    match pk_bytes.len() {
+        57 => {
+            let pk_arr: &[u8; 57] =
+                pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig_arr: &[u8; 114] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            let vk = ed448_goldilocks::VerifyingKey::from_bytes(pk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
+            vk.verify_ctx(&sig, context, msg).map_err(|_| CKR_SIGNATURE_INVALID)
+        }
+        32 => Err(CKR_MECHANISM_PARAM_INVALID), // Ed25519ctx — held
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
 pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(), u32> {
     match pk_bytes.len() {
         32 => {
@@ -2950,6 +3007,57 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    /// KMIP/CACP coverage gap-analysis items 9a/9b (2026-08-30) —
+    /// `sign_eddsa_ctx`/`verify_eddsa_ctx`, verified against an
+    /// independently-generated reference: PyCryptodome's
+    /// `Crypto.Signature.eddsa` (`mode='rfc8032'`, explicit `context=`),
+    /// a different Ed448 implementation than this crate's
+    /// `ed448-goldilocks`. Byte-exact signature match, not just a
+    /// self-consistent round trip.
+    #[test]
+    fn ed448_ctx_matches_independent_reference() {
+        let sk = decode_hex(
+            "69a63dd6e1dee15924a210893d7fa4390cc8fcda3088af5358a56148ecc222d\
+             85c4aaf07e3dbe1e9b555a88ff147e2c7232af4f756315d6416",
+        );
+        let pk = decode_hex(
+            "4bff78792f6c2446f433f5e34c905cbda776d89f9c749c2671912b751d324b\
+             edd575d7d5c93453d9eee632145894493ec66a2eb7377a188100",
+        );
+        let msg = b"hello KWP-adjacent Ed448ctx test message";
+        let ctx = b"pqctoday-test-context";
+        let expected_sig = decode_hex(
+            "20608a5bd9d05353d0851213fa016bde4a1e133e8114c5edfa36f8b49ea8305\
+             9e14080aef680f88426097dc56eda0dc882620d6c1925b86b00fb84e253266a\
+             b4732a07efd0bb4b34a715c870b792d6d28920c9d3f95b386b27d6dc04ce07e\
+             509932851d9261fc8561c456c5fe009f05f0f00",
+        );
+        let sig = sign_eddsa_ctx(&sk, msg, ctx).unwrap();
+        assert_eq!(sig, expected_sig, "must match PyCryptodome's rfc8032 Ed448ctx signature");
+        assert_eq!(sig.len(), 114);
+        verify_eddsa_ctx(&pk, msg, &sig, ctx).expect("must verify with the matching context");
+        // Wrong context must fail — proves the context actually binds the
+        // signature (domain separation), not just decoration.
+        assert!(verify_eddsa_ctx(&pk, msg, &sig, b"wrong-context").is_err());
+        // Empty/absent context (ordinary Ed448) must ALSO fail against a
+        // ctx-bound signature — the two modes are cryptographically
+        // distinct, not fallback-compatible.
+        assert!(verify_eddsa(&pk, msg, &sig).is_err());
+    }
+
+    /// Ed25519ctx is deliberately held, not implemented (see
+    /// `sign_eddsa_ctx`'s doc comment) — pins that refusal so a future
+    /// change doesn't silently start accepting it without the intended
+    /// review.
+    #[test]
+    fn ed25519_ctx_is_explicitly_refused_not_silently_ignored() {
+        let sk = [0u8; 32];
+        assert_eq!(
+            sign_eddsa_ctx(&sk, b"msg", b"some-context").unwrap_err(),
+            CKR_MECHANISM_PARAM_INVALID,
+        );
     }
 
     #[test]
