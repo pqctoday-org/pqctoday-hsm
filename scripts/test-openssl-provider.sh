@@ -1846,15 +1846,16 @@ t27e() { local w; w=$(mk_arena aeadedge "$CPP_ENGINE_SO" "pkcs11-module-load-beh
 }
 run_case T27e PASS "AEAD decrypt edge cases (AES-256-GCM + ChaCha20-Poly1305): the promised 65536-byte ceiling genuinely works (a real bug here, fixed by this case), well-over-ceiling fails cleanly not silently, AAD-only and fully-empty both work (remediation R30)" t27e
 
-# ─── T28: ML-DSA external-µ vendor mechanism (remediation R34) ─────────────
-# CKM_PQCTODAY_ML_DSA_MU -- stopgap for PKCS#11 v3.3's own upcoming native
-# external-µ mechanism (oasis-tcs/pkcs11#58, not yet ratified). Computes µ
+# ─── T28: ML-DSA external-µ mechanism (remediation R34) ────────────────────
+# CKM_ML_DSA_EXTERNAL_MU -- the real PKCS#11 v3.3 working draft's own
+# external-µ mechanism, adopted natively 2026-08-30 (still OASIS status
+# "proposed", not yet through final ballot). Computes µ
 # independently in Python per FIPS 204 Eq. (1)-(2) -- SHAKE256(pk_encode(pk),
 # 64) for tr, then SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64) for µ,
 # exactly as both engines' own underlying crypto does (verified live against
 # OpenSSL's own crypto/ml_dsa/ml_dsa_sign.c and the Rust fips204-patched
 # crate's ml_dsa.rs before this item was built, not assumed) -- signs that µ
-# through the vendor mechanism (`pkeyutl -pkeyopt mu:1`, the STANDARD OpenSSL
+# through the mechanism (`pkeyutl -pkeyopt mu:1`, the STANDARD OpenSSL
 # param name; no new client-facing API), then proves it two ways: the
 # mechanism's own verify, and — the real proof — OpenSSL's completely
 # independent NATIVE ML-DSA implementation (-provider default, no pkcs11 at
@@ -1931,7 +1932,7 @@ open('$w/sig_bad.bin','wb').write(bytes(d))"
 
   return 0
 }
-run_case T28 PASS "ML-DSA external-µ vendor mechanism (CKM_PQCTODAY_ML_DSA_MU): independently-computed µ signs through the vendor mechanism, verifies both via the mechanism itself AND — the real proof — OpenSSL's completely independent native ML-DSA implementation against the ORIGINAL message; four sabotage controls (tampered µ, tampered signature, context+mu rejected, wrong-length µ rejected) (remediation R34)" t28
+run_case T28 PASS "ML-DSA external-µ mechanism (CKM_ML_DSA_EXTERNAL_MU): independently-computed µ signs through the mechanism, verifies both via the mechanism itself AND — the real proof — OpenSSL's completely independent native ML-DSA implementation against the ORIGINAL message; four sabotage controls (tampered µ, tampered signature, context+mu rejected, wrong-length µ rejected) (remediation R34)" t28
 
 # ─── T29: HashML-DSA digest routing, CKM_HASH_ML_DSA_<hash> (remediation R35) ─
 # PKCS#11 v3.2 §6.67.7 "HashML-DSA Signature with hashing": these 10

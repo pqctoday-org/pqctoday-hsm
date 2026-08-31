@@ -28,7 +28,7 @@
  OSSLMuGenDigest.h
 
  Remediation R39 (phase 8, PQCTODAY-VENDOR-EXT-MU): incremental SHAKE256
- XOF with a fixed 64-byte output, backing CKM_PQCTODAY_ML_DSA_MU_GEN's
+ XOF with a fixed 64-byte output, backing CKM_ML_DSA_EXTERNAL_MU_GEN's
  C_DigestInit/C_DigestUpdate/C_DigestFinal dispatch (SoftHSM_digest.cpp).
  FIPS 204 Eq. 2 computes mu = SHAKE256(tr || 0x00 || len(ctx) || ctx || M,
  64) -- the caller streams M through C_DigestUpdate, this class squeezes

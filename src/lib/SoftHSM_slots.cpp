@@ -640,12 +640,13 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_HASH_ML_DSA_SHA3_512"]	= CKM_HASH_ML_DSA_SHA3_512;
 	t["CKM_HASH_ML_DSA_SHAKE128"]	= CKM_HASH_ML_DSA_SHAKE128;
 	t["CKM_HASH_ML_DSA_SHAKE256"]	= CKM_HASH_ML_DSA_SHAKE256;
-	// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — stopgap for
-	// PKCS#11 v3.3's own upcoming native mechanism (oasis-tcs/pkcs11#58).
-	t["CKM_PQCTODAY_ML_DSA_MU"]	= CKM_PQCTODAY_ML_DSA_MU;
+	// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — the v3.3 working
+	// draft's own name and codepoint, adopted natively 2026-08-30 (still
+	// OASIS status "proposed", not yet ratified; see vendor_mechanisms.h).
+	t["CKM_ML_DSA_EXTERNAL_MU"]	= CKM_ML_DSA_EXTERNAL_MU;
 	// Token-side µ generation (remediation R39, phase 8, PQCTODAY-VENDOR-EXT-MU)
 	// — the PRODUCE half of external-µ; a C_Digest-family mechanism, not sign/verify.
-	t["CKM_PQCTODAY_ML_DSA_MU_GEN"] = CKM_PQCTODAY_ML_DSA_MU_GEN;
+	t["CKM_ML_DSA_EXTERNAL_MU_GEN"] = CKM_ML_DSA_EXTERNAL_MU_GEN;
 
 	// SLH-DSA (FIPS 205, PKCS#11 v3.2)
 	t["CKM_SLH_DSA_KEY_PAIR_GEN"]	= CKM_SLH_DSA_KEY_PAIR_GEN;
@@ -1230,9 +1231,9 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
 			break;
 		// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — CKF_SIGN |
-		// CKF_VERIFY only, no C_MessageSign/Verify* support for this vendor
+		// CKF_VERIFY only, no C_MessageSign/Verify* support for this
 		// mechanism.
-		case CKM_PQCTODAY_ML_DSA_MU:
+		case CKM_ML_DSA_EXTERNAL_MU:
 			pInfo->ulMinKeySize = 1312;
 			pInfo->ulMaxKeySize = 2592;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
@@ -1241,7 +1242,7 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		// a digest-family mechanism (C_Digest/C_DigestUpdate/C_DigestFinal),
 		// same shape as the plain hash mechanisms above. Key size N/A, same
 		// as those.
-		case CKM_PQCTODAY_ML_DSA_MU_GEN:
+		case CKM_ML_DSA_EXTERNAL_MU_GEN:
 			pInfo->ulMinKeySize = 0;
 			pInfo->ulMaxKeySize = 0;
 			pInfo->flags = CKF_DIGEST;

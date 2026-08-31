@@ -1442,12 +1442,12 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_ML_DSA => (1312, 2592, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
         // ML-DSA external-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — same
         // key-size range as CKM_ML_DSA; CKF_SIGN | CKF_VERIFY only, no
-        // C_MessageSign/Verify* support for this vendor mechanism.
-        CKM_PQCTODAY_ML_DSA_MU => (1312, 2592, 0x00000800 | 0x00002000),
+        // C_MessageSign/Verify* support for this mechanism.
+        CKM_ML_DSA_EXTERNAL_MU => (1312, 2592, 0x00000800 | 0x00002000),
         // µ generation (remediation R39, phase 8, PQCTODAY-VENDOR-EXT-MU) —
         // a digest-family mechanism (CKF_DIGEST), same shape as the plain
         // hash mechanisms above; key size N/A, same as those.
-        CKM_PQCTODAY_ML_DSA_MU_GEN => (0, 0, 0x00000400),
+        CKM_ML_DSA_EXTERNAL_MU_GEN => (0, 0, 0x00000400),
         // SLH-DSA pk: 32 B (128-bit sets) … 64 B (256-bit sets) — FIPS 205 Table 2.
         CKM_SLH_DSA_KEY_PAIR_GEN => (32, 64, 0x00010000),
         CKM_SLH_DSA => (32, 64, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
@@ -5581,12 +5581,12 @@ unsafe fn remap_generic_hash_mech(
 
 /// True when `mech` takes a CK_SIGN_ADDITIONAL_CONTEXT parameter
 /// (PKCS#11 v3.2 §6.67/§6.69 — ML-DSA and SLH-DSA, pure and pre-hash),
-/// plus CKM_PQCTODAY_ML_DSA_MU (remediation R34, PQCTODAY-VENDOR-EXT-MU),
+/// plus CKM_ML_DSA_EXTERNAL_MU (remediation R34, PQCTODAY-VENDOR-EXT-MU),
 /// which reuses the same struct for its hedgeVariant field.
 fn takes_sign_additional_ctx(mech: u32) -> bool {
     mech == CKM_ML_DSA
         || mech == CKM_SLH_DSA
-        || mech == CKM_PQCTODAY_ML_DSA_MU
+        || mech == CKM_ML_DSA_EXTERNAL_MU
         || is_prehash_ml_dsa(mech)
         || is_prehash_slh_dsa(mech)
 }
@@ -5645,8 +5645,8 @@ unsafe fn parse_sign_mech_params(
     let m = ck_param::mech(p_mechanism);
     if takes_sign_additional_ctx(mech_type) {
         // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
-        // (PKCS#11 v3.2 §6.67/§6.69), PLUS CKM_PQCTODAY_ML_DSA_MU
-        // (remediation R34, PQCTODAY-VENDOR-EXT-MU): the vendor mechanism
+        // (PKCS#11 v3.2 §6.67/§6.69), PLUS CKM_ML_DSA_EXTERNAL_MU
+        // (remediation R34, PQCTODAY-VENDOR-EXT-MU): this mechanism
         // reuses this exact struct rather than defining its own — µ itself
         // travels via the normal C_Sign/C_Verify data argument (same
         // convention as every other mechanism here, and as PKCS#11's own
@@ -6021,7 +6021,7 @@ fn C_Sign_impl(
             m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
                 sign_ml_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic)
             }
-            CKM_PQCTODAY_ML_DSA_MU => {
+            CKM_ML_DSA_EXTERNAL_MU => {
                 // Remediation R34, PQCTODAY-VENDOR-EXT-MU. `msg` here is the
                 // caller's 64-byte µ (FIPS 204 Eq. 2), not a message — see
                 // takes_sign_additional_ctx's own comment for why this
@@ -6346,7 +6346,7 @@ pub fn C_Verify(
             m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
                 verify_ml_dsa(m, ps, &pk_bytes, msg, sig_bytes, &ctx_bytes)
             }
-            CKM_PQCTODAY_ML_DSA_MU => {
+            CKM_ML_DSA_EXTERNAL_MU => {
                 // Remediation R34, PQCTODAY-VENDOR-EXT-MU — counterpart to
                 // C_Sign's own arm above; see its comment for the design.
                 if !ctx_bytes.is_empty() {
@@ -8361,7 +8361,7 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
             CKM_SHA3_512 => DigestCtx::Sha3_512(sha3::Sha3_512::new()),
             CKM_KECCAK_256 => DigestCtx::Keccak256(Vec::new()),
             CKM_RIPEMD160 => DigestCtx::Ripemd160(ripemd::Ripemd160::new()),
-            CKM_PQCTODAY_ML_DSA_MU_GEN => match init_mu_gen_digest(p_mechanism) {
+            CKM_ML_DSA_EXTERNAL_MU_GEN => match init_mu_gen_digest(p_mechanism) {
                 Ok(h) => DigestCtx::MuGen(h),
                 Err(rv) => return rv,
             },
@@ -8375,7 +8375,7 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
 }
 
 /// Remediation R39 (phase 8), PQCTODAY-VENDOR-EXT-MU: parse
-/// `CK_PQCTODAY_MU_GEN_PARAMS`, resolve `tr` (either the caller's own
+/// `CK_MU_GEN_PARAMS`, resolve `tr` (either the caller's own
 /// precomputed 64 bytes, or `SHAKE256(pk, 64)` from a public-key handle's
 /// `CKA_VALUE` — PKCS#11 v3.2 Table 280's `pk_encode` IS the raw
 /// `CKA_VALUE` bytes, no re-encoding needed), and seed a fresh SHAKE256
@@ -8389,9 +8389,9 @@ unsafe fn init_mu_gen_digest(p_mechanism: *const u8) -> Result<sha3::Shake256, u
         .params(&ck_param::mu_gen_params::LAYOUT, ck_param::mu_gen_params::FIELD_COUNT)
         .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
 
-    let h_tr_key = r.ulong32(ck_param::mu_gen_params::H_TR_KEY);
+    let h_key = r.ulong32(ck_param::mu_gen_params::H_KEY);
     let tr_buf = r.buffer(ck_param::mu_gen_params::P_TR, ck_param::mu_gen_params::UL_TR_LEN);
-    let have_key = h_tr_key != 0; // CK_INVALID_HANDLE
+    let have_key = h_key != 0; // CK_INVALID_HANDLE
     let have_tr = !tr_buf.is_empty();
     if have_key == have_tr {
         return Err(CKR_ARGUMENTS_BAD);
@@ -8400,7 +8400,7 @@ unsafe fn init_mu_gen_digest(p_mechanism: *const u8) -> Result<sha3::Shake256, u
     let tr: [u8; 64] = if have_tr {
         tr_buf.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?
     } else {
-        let pk = crate::state::get_key_material(h_tr_key).ok_or(CKR_KEY_HANDLE_INVALID)?;
+        let pk = crate::state::get_key_material(h_key).ok_or(CKR_KEY_HANDLE_INVALID)?;
         let mut hasher = sha3::Shake256::default();
         Update::update(&mut hasher, &pk);
         let mut reader = sha3::digest::ExtendableOutput::finalize_xof(hasher);
@@ -8409,11 +8409,11 @@ unsafe fn init_mu_gen_digest(p_mechanism: *const u8) -> Result<sha3::Shake256, u
         tr
     };
 
-    let ctx_len = r.ulong(ck_param::mu_gen_params::UL_CONTEXT_LEN);
+    let ctx_len = r.ulong(ck_param::mu_gen_params::UL_CTX_LEN);
     if ctx_len > 255 {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let ctx_buf = r.buffer(ck_param::mu_gen_params::P_CONTEXT, ck_param::mu_gen_params::UL_CONTEXT_LEN);
+    let ctx_buf = r.buffer(ck_param::mu_gen_params::P_CTX, ck_param::mu_gen_params::UL_CTX_LEN);
     if ctx_buf.len() != ctx_len as usize {
         return Err(CKR_ARGUMENTS_BAD);
     }
@@ -11274,7 +11274,7 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_KMAC_128
             | CKM_KMAC_256
             | CKM_ML_DSA
-            | CKM_PQCTODAY_ML_DSA_MU
+            | CKM_ML_DSA_EXTERNAL_MU
             | CKM_SLH_DSA
             | CKM_EDDSA
     ) || hmac_general_base(mech).is_some()
@@ -11284,7 +11284,7 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
         // for these, this was the one arm missing it (live-traced:
         // OpenSSL's own EVP_DigestSign machinery drives even a one-shot
         // `dgst -sign` through Update/Final, same discovery as R34's
-        // CKM_PQCTODAY_ML_DSA_MU). The bare generic CKM_HASH_ML_DSA
+        // CKM_ML_DSA_EXTERNAL_MU). The bare generic CKM_HASH_ML_DSA
         // (single-part only per §6.67.6) is correctly NOT included here —
         // is_prehash_ml_dsa() only matches the 10 hash-specific mechanisms.
         || is_prehash_ml_dsa(mech)

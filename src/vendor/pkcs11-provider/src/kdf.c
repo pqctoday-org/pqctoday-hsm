@@ -185,9 +185,11 @@ static int inner_derive_key(P11PROV_CTX *ctx, P11PROV_OBJ *key,
 
     if (mechanism->mechanism == CKM_HKDF_DERIVE
         || mechanism->mechanism == CKM_SP800_108_COUNTER_KDF
-        || mechanism->mechanism == CKM_SP800_108_FEEDBACK_KDF) {
-        /* SP800-108 (phase 5 R22) reuses HKDF_DERIVE's own output shape:
-         * a generic secret key, session-only, non-sensitive+extractable
+        || mechanism->mechanism == CKM_SP800_108_FEEDBACK_KDF
+        || mechanism->mechanism == CKM_SP800_108_DOUBLE_PIPELINE_KDF) {
+        /* SP800-108 (phase 5 R22; Double-Pipeline added remediation item
+         * 2, 2026-08-30) reuses HKDF_DERIVE's own output shape: a
+         * generic secret key, session-only, non-sensitive+extractable
          * so the classic derive() API can read its bytes back — matches
          * the engine's own CKM_SP800_108_*_KDF handler (SoftHSM_
          * keygen.cpp), which hardcodes CKK_GENERIC_SECRET regardless of
@@ -1403,6 +1405,20 @@ const OSSL_DISPATCH p11prov_pbkdf2_kdf_functions[] = {
 
 #define KBKDF_MODE_COUNTER 1
 #define KBKDF_MODE_FEEDBACK 2
+/* Remediation item 2 (2026-08-30 OpenSSL-provider gap audit): the comment
+ * that used to sit on the "reject DOUBLE_PIPELINE" branch below claimed
+ * "the engine implements only Counter and Feedback (SoftHSM_keygen.cpp's
+ * own mechanism switch has no double-pipeline case)" -- stale as of this
+ * session: SoftHSM_keygen.cpp now has a full, real
+ * CKM_SP800_108_DOUBLE_PIPELINE_KDF implementation (its own header
+ * comment there: "Construction verified byte-for-byte against real ACVP
+ * KDF-1.0 vectors"), and so does the Rust engine (rust/src/ffi.rs). Uses
+ * CK_SP800_108_KDF_PARAMS -- the SAME struct type CKM_SP800_108_COUNTER_
+ * KDF uses -- but its own data-params contract differs from Counter
+ * mode's: an OPTIONAL CK_SP800_108_COUNTER (like Feedback mode), never
+ * the mandatory CK_SP800_108_ITERATION_VARIABLE Counter mode requires;
+ * see p11prov_kbkdf_derive's own KBKDF_MODE_PIPELINE branch. */
+#define KBKDF_MODE_PIPELINE 3
 
 struct p11prov_kbkdf_ctx {
     P11PROV_CTX *provctx;
@@ -1534,11 +1550,20 @@ static int p11prov_kbkdf_set_ctx_params(void *ctx, const OSSL_PARAM params[])
             kctx->mode = KBKDF_MODE_COUNTER;
         } else if (OPENSSL_strcasecmp(mode, "FEEDBACK") == 0) {
             kctx->mode = KBKDF_MODE_FEEDBACK;
+        } else if (OPENSSL_strcasecmp(mode, "DOUBLE-PIPELINE") == 0
+                   || OPENSSL_strcasecmp(mode, "DOUBLE_PIPELINE") == 0
+                   || OPENSSL_strcasecmp(mode, "PIPELINE") == 0) {
+            /* Remediation item 2: real, working mode as of this session
+             * -- see KBKDF_MODE_PIPELINE's own definition above for why
+             * this is no longer a rejection. No real OpenSSL KBKDF
+             * mode-string convention to match here (upstream's own
+             * "KBKDF" provider implementation doesn't support this mode
+             * at all, so there's no name it calls it by) -- these three
+             * spellings cover SP 800-108's own section title ("KDF in
+             * Double-Pipeline Iteration Mode") plus the obvious
+             * underscore/short variants. */
+            kctx->mode = KBKDF_MODE_PIPELINE;
         } else {
-            /* "DOUBLE_PIPELINE" and friends: the engine implements only
-             * Counter and Feedback (SoftHSM_keygen.cpp's own mechanism
-             * switch has no double-pipeline case) — reject rather than
-             * silently mapping to something the token can't do. */
             ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_MODE);
             return RET_OSSL_ERR;
         }
@@ -1686,9 +1711,15 @@ static int p11prov_kbkdf_set_ctx_params(void *ctx, const OSSL_PARAM params[])
          * a KBKDF call as the first operation in a session does not. */
         if (kctx->session == NULL) {
             CK_SLOT_ID slotid = CK_UNAVAILABLE_INFORMATION;
-            CK_MECHANISM_TYPE login_mech = kctx->mode == KBKDF_MODE_FEEDBACK
-                                               ? CKM_SP800_108_FEEDBACK_KDF
-                                               : CKM_SP800_108_COUNTER_KDF;
+            CK_MECHANISM_TYPE login_mech;
+            if (kctx->mode == KBKDF_MODE_FEEDBACK) {
+                login_mech = CKM_SP800_108_FEEDBACK_KDF;
+            } else if (kctx->mode == KBKDF_MODE_PIPELINE) {
+                /* Remediation item 2 */
+                login_mech = CKM_SP800_108_DOUBLE_PIPELINE_KDF;
+            } else {
+                login_mech = CKM_SP800_108_COUNTER_KDF;
+            }
 
             rv = p11prov_get_session(kctx->provctx, &slotid, NULL, NULL,
                                      login_mech, NULL, NULL, true, true,
@@ -1762,6 +1793,11 @@ static int p11prov_kbkdf_derive(void *ctx, unsigned char *key, size_t keylen,
     P11PROV_KBKDF_CTX *kctx = (P11PROV_KBKDF_CTX *)ctx;
     CK_SP800_108_KDF_PARAMS counter_params = { 0 };
     CK_SP800_108_FEEDBACK_KDF_PARAMS feedback_params = { 0 };
+    /* Remediation item 2: Double-Pipeline uses the SAME struct type as
+     * Counter mode (CK_SP800_108_KDF_PARAMS) but a different data-params
+     * contract -- own variable to keep that distinction visible rather
+     * than reusing counter_params for a mode that isn't Counter. */
+    CK_SP800_108_KDF_PARAMS pipeline_params = { 0 };
     CK_PRF_DATA_PARAM data_params[2];
     CK_ULONG num_data_params = 0;
     CK_SP800_108_COUNTER_FORMAT counter_fmt;
@@ -1819,7 +1855,7 @@ static int p11prov_kbkdf_derive(void *ctx, unsigned char *key, size_t keylen,
         mechanism.mechanism = CKM_SP800_108_COUNTER_KDF;
         mechanism.pParameter = &counter_params;
         mechanism.ulParameterLen = sizeof(counter_params);
-    } else {
+    } else if (kctx->mode == KBKDF_MODE_FEEDBACK) {
         feedback_params.prfType = kctx->prf_mech;
         feedback_params.ulNumberOfDataParams = num_data_params;
         feedback_params.pDataParams = data_params;
@@ -1831,6 +1867,38 @@ static int p11prov_kbkdf_derive(void *ctx, unsigned char *key, size_t keylen,
         mechanism.mechanism = CKM_SP800_108_FEEDBACK_KDF;
         mechanism.pParameter = &feedback_params;
         mechanism.ulParameterLen = sizeof(feedback_params);
+    } else {
+        /* Remediation item 2: KBKDF_MODE_PIPELINE. Unlike Counter mode,
+         * Double-Pipeline's data-params contract has NO mandatory
+         * CK_SP800_108_ITERATION_VARIABLE entry (confirmed against the
+         * engine's own CKM_SP800_108_DOUBLE_PIPELINE_KDF handler,
+         * SoftHSM_keygen.cpp: its own switch only recognizes
+         * CK_SP800_108_BYTE_ARRAY, and optionally CK_SP800_108_COUNTER
+         * -- same optional-counter shape as Feedback mode, not Counter
+         * mode's mandatory one) -- so num_data_params here is exactly
+         * what the shared salt-handling block above already built (0 or
+         * 1 entries), nothing added. The engine DOES require at least
+         * one CK_SP800_108_BYTE_ARRAY entry ("no ... fixed input
+         * supplied" is a hard error there), so fail clearly here rather
+         * than let that surface as an opaque token-side rejection. */
+        if (num_data_params == 0) {
+            /* OSSL_KDF_PARAM_SALT is this file's own name for the fixed-
+             * input bytes that become CK_SP800_108_BYTE_ARRAY -- reuse
+             * PROV_R_MISSING_SALT for the missing case, same param the
+             * caller failed to set. */
+            ERR_raise(ERR_LIB_PROV, PROV_R_MISSING_SALT);
+            return RET_OSSL_ERR;
+        }
+
+        pipeline_params.prfType = kctx->prf_mech;
+        pipeline_params.ulNumberOfDataParams = num_data_params;
+        pipeline_params.pDataParams = data_params;
+        pipeline_params.ulAdditionalDerivedKeys = 0;
+        pipeline_params.pAdditionalDerivedKeys = NULL;
+
+        mechanism.mechanism = CKM_SP800_108_DOUBLE_PIPELINE_KDF;
+        mechanism.pParameter = &pipeline_params;
+        mechanism.ulParameterLen = sizeof(pipeline_params);
     }
 
     ret = inner_derive_key(kctx->provctx, kctx->key, &kctx->session,

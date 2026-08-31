@@ -127,10 +127,10 @@ struct AsymMech
 		HASH_MLDSA_SHAKE128,// CKM_HASH_ML_DSA_SHAKE128
 		HASH_MLDSA_SHAKE256,// CKM_HASH_ML_DSA_SHAKE256
 		// Deliberately OUTSIDE the [MLDSA, HASH_MLDSA_SHAKE256] range check
-		// in SoftHSM_sign.cpp's applyPerMessageParam — this vendor mechanism
-		// does not support C_MessageSign/Verify* (remediation R34,
+		// in SoftHSM_sign.cpp's applyPerMessageParam — this mechanism does
+		// not support C_MessageSign/Verify* (remediation R34,
 		// PQCTODAY-VENDOR-EXT-MU).
-		MLDSA_EXTERNAL_MU,  // CKM_PQCTODAY_ML_DSA_MU
+		MLDSA_EXTERNAL_MU,  // CKM_ML_DSA_EXTERNAL_MU
 		SLHDSA,              // CKM_SLH_DSA pure-message sign/verify (FIPS 205)
 		HASH_SLHDSA,         // CKM_HASH_SLH_DSA (generic, hash in param)
 		HASH_SLHDSA_SHA224,  // CKM_HASH_SLH_DSA_SHA224

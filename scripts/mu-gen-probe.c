@@ -2,11 +2,16 @@
    SPDX-License-Identifier: Apache-2.0 */
 
 /* mu-gen-probe: remediation R39 (phase 8) regression fixture. Drives the
- * raw PKCS#11 C_Digest* API directly (this vendor mechanism is engines-
- * only by design -- no OpenSSL-provider wiring, see the phase-8 plan's
- * own R39 scope decision) to prove CKM_PQCTODAY_ML_DSA_MU_GEN computes
+ * raw PKCS#11 C_Digest* API directly (this mechanism is engines-only by
+ * design -- no OpenSSL-provider wiring, see the phase-8 plan's own R39
+ * scope decision) to prove CKM_ML_DSA_EXTERNAL_MU_GEN computes
  * mu = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64) correctly, where
  * tr = SHAKE256(pk_encode, 64) (FIPS 204 Eq. 2).
+ *
+ * CKM_ML_DSA_EXTERNAL_MU / CKM_ML_DSA_EXTERNAL_MU_GEN and CK_MU_GEN_PARAMS
+ * are the real PKCS#11 v3.3 working draft's own names and codepoints,
+ * adopted natively 2026-08-30 (remediation R34/R39, PQCTODAY-VENDOR-EXT-MU
+ * -- see src/lib/vendor_mechanisms.h).
  *
  * Checks:
  *   1. handle-supplied tr: mu from the mechanism == independently
@@ -17,11 +22,11 @@
  *      of a key handle) produces the SAME mu as the handle-supplied path
  *      for the same underlying key.
  *   4. end-to-end chain: feed the token-computed mu into
- *      CKM_PQCTODAY_ML_DSA_MU (R34's own consume-side mechanism) to sign,
+ *      CKM_ML_DSA_EXTERNAL_MU (R34's own consume-side mechanism) to sign,
  *      and the result verifies under OpenSSL's native ML-DSA against the
  *      ORIGINAL message -- extends T28/T28b's own chain (which computed
  *      mu in Python), replacing that step with the token's own.
- *   5. both hTrKey and pTr absent, or both present, rejected loudly.
+ *   5. both hKey and pTR absent, or both present, rejected loudly.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,16 +42,16 @@
 #endif
 #include "pkcs11.h"
 
-#define CKM_PQCTODAY_ML_DSA_MU_GEN 0x80000014UL
-#define CKM_PQCTODAY_ML_DSA_MU 0x80000013UL
+#define CKM_ML_DSA_EXTERNAL_MU_GEN 0x0000403bUL
+#define CKM_ML_DSA_EXTERNAL_MU 0x0000403cUL
 
-typedef struct CK_PQCTODAY_MU_GEN_PARAMS {
-    CK_OBJECT_HANDLE hTrKey;
-    CK_BYTE_PTR      pTr;
-    CK_ULONG         ulTrLen;
-    CK_BYTE_PTR      pContext;
-    CK_ULONG         ulContextLen;
-} CK_PQCTODAY_MU_GEN_PARAMS;
+typedef struct CK_MU_GEN_PARAMS {
+    CK_OBJECT_HANDLE hKey;
+    CK_BYTE_PTR      pTR;
+    CK_ULONG         ulTRLen;
+    CK_BYTE_PTR      pctx;
+    CK_ULONG         ulctxLen;
+} CK_MU_GEN_PARAMS;
 
 static CK_FUNCTION_LIST_PTR fl;
 static int failures = 0;
@@ -151,8 +156,8 @@ int main(int argc, char **argv)
         independent_mu(pk, getPk.ulValueLen, NULL, 0, message, msg_len, expected_mu);
 
         /* --- Check 1: handle-supplied tr, one-shot --- */
-        CK_PQCTODAY_MU_GEN_PARAMS p1 = { pub, NULL_PTR, 0, NULL_PTR, 0 };
-        CK_MECHANISM mech1 = { CKM_PQCTODAY_ML_DSA_MU_GEN, &p1, sizeof(p1) };
+        CK_MU_GEN_PARAMS p1 = { pub, NULL_PTR, 0, NULL_PTR, 0 };
+        CK_MECHANISM mech1 = { CKM_ML_DSA_EXTERNAL_MU_GEN, &p1, sizeof(p1) };
         rv = fl->C_DigestInit(sess, &mech1);
         if (rv != CKR_OK) { fprintf(stderr, "C_DigestInit(handle) rv=%lu\n", (unsigned long)rv); return 1; }
         unsigned char mu1[64]; CK_ULONG mu1_len = sizeof(mu1);
@@ -162,7 +167,7 @@ int main(int argc, char **argv)
               "handle-supplied tr: mu matches independent SHAKE256(SHAKE256(pk,64)||0x00||0||M,64)");
 
         /* --- Check 2: multi-part update == one-shot --- */
-        CK_MECHANISM mech2 = { CKM_PQCTODAY_ML_DSA_MU_GEN, &p1, sizeof(p1) };
+        CK_MECHANISM mech2 = { CKM_ML_DSA_EXTERNAL_MU_GEN, &p1, sizeof(p1) };
         rv = fl->C_DigestInit(sess, &mech2);
         if (rv != CKR_OK) { fprintf(stderr, "C_DigestInit(multipart) rv=%lu\n", (unsigned long)rv); return 1; }
         size_t half = msg_len / 2;
@@ -186,8 +191,8 @@ int main(int argc, char **argv)
         EVP_MD_CTX_free(trc);
         EVP_MD_free(shake);
 
-        CK_PQCTODAY_MU_GEN_PARAMS p3 = { CK_INVALID_HANDLE, tr, 64, NULL_PTR, 0 };
-        CK_MECHANISM mech3 = { CKM_PQCTODAY_ML_DSA_MU_GEN, &p3, sizeof(p3) };
+        CK_MU_GEN_PARAMS p3 = { CK_INVALID_HANDLE, tr, 64, NULL_PTR, 0 };
+        CK_MECHANISM mech3 = { CKM_ML_DSA_EXTERNAL_MU_GEN, &p3, sizeof(p3) };
         rv = fl->C_DigestInit(sess, &mech3);
         if (rv != CKR_OK) { fprintf(stderr, "C_DigestInit(tr) rv=%lu\n", (unsigned long)rv); return 1; }
         unsigned char mu3[64]; CK_ULONG mu3_len = sizeof(mu3);
@@ -196,9 +201,9 @@ int main(int argc, char **argv)
         CHECK(mu3_len == 64 && memcmp(mu3, mu1, 64) == 0,
               "TR-supplied path produces the SAME mu as handle-supplied path");
 
-        /* --- Check 4: end-to-end chain via CKM_PQCTODAY_ML_DSA_MU --- */
+        /* --- Check 4: end-to-end chain via CKM_ML_DSA_EXTERNAL_MU --- */
         CK_SIGN_ADDITIONAL_CONTEXT signCtx = { CKH_HEDGE_PREFERRED, NULL_PTR, 0 };
-        CK_MECHANISM signMech = { CKM_PQCTODAY_ML_DSA_MU, &signCtx, sizeof(signCtx) };
+        CK_MECHANISM signMech = { CKM_ML_DSA_EXTERNAL_MU, &signCtx, sizeof(signCtx) };
         rv = fl->C_SignInit(sess, &signMech, priv);
         if (rv != CKR_OK) { fprintf(stderr, "C_SignInit(MU) rv=%lu\n", (unsigned long)rv); return 1; }
         unsigned char sig[8192]; CK_ULONG sig_len = sizeof(sig);
@@ -207,19 +212,19 @@ int main(int argc, char **argv)
         rv = fl->C_VerifyInit(sess, &signMech, pub);
         if (rv != CKR_OK) { fprintf(stderr, "C_VerifyInit(MU) rv=%lu\n", (unsigned long)rv); return 1; }
         rv = fl->C_Verify(sess, mu1, 64, sig, sig_len);
-        CHECK(rv == CKR_OK, "token-computed mu, fed to CKM_PQCTODAY_ML_DSA_MU, "
+        CHECK(rv == CKR_OK, "token-computed mu, fed to CKM_ML_DSA_EXTERNAL_MU, "
               "signs a signature that verifies via the SAME mechanism");
 
         /* --- Check 5: both absent / both present rejected --- */
-        CK_PQCTODAY_MU_GEN_PARAMS p5a = { CK_INVALID_HANDLE, NULL_PTR, 0, NULL_PTR, 0 };
-        CK_MECHANISM mech5a = { CKM_PQCTODAY_ML_DSA_MU_GEN, &p5a, sizeof(p5a) };
+        CK_MU_GEN_PARAMS p5a = { CK_INVALID_HANDLE, NULL_PTR, 0, NULL_PTR, 0 };
+        CK_MECHANISM mech5a = { CKM_ML_DSA_EXTERNAL_MU_GEN, &p5a, sizeof(p5a) };
         rv = fl->C_DigestInit(sess, &mech5a);
-        CHECK(rv != CKR_OK, "both hTrKey and pTr absent: rejected");
+        CHECK(rv != CKR_OK, "both hKey and pTR absent: rejected");
 
-        CK_PQCTODAY_MU_GEN_PARAMS p5b = { pub, tr, 64, NULL_PTR, 0 };
-        CK_MECHANISM mech5b = { CKM_PQCTODAY_ML_DSA_MU_GEN, &p5b, sizeof(p5b) };
+        CK_MU_GEN_PARAMS p5b = { pub, tr, 64, NULL_PTR, 0 };
+        CK_MECHANISM mech5b = { CKM_ML_DSA_EXTERNAL_MU_GEN, &p5b, sizeof(p5b) };
         rv = fl->C_DigestInit(sess, &mech5b);
-        CHECK(rv != CKR_OK, "both hTrKey and pTr present: rejected");
+        CHECK(rv != CKR_OK, "both hKey and pTR present: rejected");
 
         free(pk);
         fl->C_CloseSession(sess);

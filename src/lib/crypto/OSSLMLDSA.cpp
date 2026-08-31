@@ -331,7 +331,7 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	bool isExternalMu = (mechanism == AsymMech::MLDSA_EXTERNAL_MU);
 	if (isExternalMu && dataToSign.size() != PQCTODAY_ML_DSA_MU_LEN)
 	{
-		ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU requires exactly %u bytes of µ (got %zu)",
+		ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU requires exactly %u bytes of µ (got %zu)",
 			PQCTODAY_ML_DSA_MU_LEN, dataToSign.size());
 		return false;
 	}
@@ -515,7 +515,7 @@ bool OSSLMLDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	bool isExternalMu = (mechanism == AsymMech::MLDSA_EXTERNAL_MU);
 	if (isExternalMu && originalData.size() != PQCTODAY_ML_DSA_MU_LEN)
 	{
-		ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU requires exactly %u bytes of µ (got %zu)",
+		ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU requires exactly %u bytes of µ (got %zu)",
 			PQCTODAY_ML_DSA_MU_LEN, originalData.size());
 		return false;
 	}

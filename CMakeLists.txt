@@ -315,10 +315,30 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src/lib/pkcs11 ${OPENSSL_INCLUDE_DIR})
     target_link_libraries(generic_hash_mldsa_probe ${CMAKE_DL_LIBS} ${OPENSSL_LIBRARIES})
 
+    # hash-pqc-crosscheck / hash-pqc-provider-probe: remediation item 5
+    # (2026-08-30) verification pair for the OpenSSL-provider's own NEW
+    # HASH-ML-DSA/HASH-SLH-DSA algorithms (sig/mldsa.c, sig/slhdsa.c).
+    # generic_hash_mldsa_probe above already independently confirmed the
+    # ENGINE's bare CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA mechanisms are
+    # spec-conformant; this pair cross-checks the NEW PROVIDER-layer code
+    # against that same already-proven engine, across two processes
+    # sharing one token directory: hash-pqc-crosscheck drives the raw
+    # PKCS#11 API (keygen with a fixed CKA_ID, plus sign/verify) so a
+    # signature produced by ONE side can be hex-piped into a verify call
+    # on the OTHER side.
+    add_executable(hash_pqc_crosscheck scripts/hash-pqc-crosscheck.c)
+    target_include_directories(hash_pqc_crosscheck PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11 ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(hash_pqc_crosscheck ${CMAKE_DL_LIBS} ${OPENSSL_LIBRARIES})
+
+    add_executable(hash_pqc_provider_probe scripts/hash-pqc-provider-probe.c)
+    target_include_directories(hash_pqc_provider_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(hash_pqc_provider_probe ${OPENSSL_LIBRARIES})
+
     # mu-gen-probe: phase-8 R39 regression fixture -- drives the raw
-    # PKCS#11 C_Digest* API directly (this vendor mechanism is engines-
-    # only by design, no OpenSSL-provider wiring) to prove
-    # CKM_PQCTODAY_ML_DSA_MU_GEN's incremental mu computation is correct.
+    # PKCS#11 C_Digest* API directly (this mechanism is engines-only by
+    # design, no OpenSSL-provider wiring) to prove
+    # CKM_ML_DSA_EXTERNAL_MU_GEN's incremental mu computation is correct.
     add_executable(mu_gen_probe scripts/mu-gen-probe.c)
     target_include_directories(mu_gen_probe PRIVATE
         ${CMAKE_SOURCE_DIR}/src/lib/pkcs11 ${OPENSSL_INCLUDE_DIR})

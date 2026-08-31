@@ -71,12 +71,33 @@ static CK_MECHANISM_TYPE hmac_mech_for_digest(CK_MECHANISM_TYPE digest_mech)
     switch (digest_mech) {
     case CKM_SHA_1:
         return CKM_SHA_1_HMAC;
+    case CKM_SHA224:
+        return CKM_SHA224_HMAC;
     case CKM_SHA256:
         return CKM_SHA256_HMAC;
     case CKM_SHA384:
         return CKM_SHA384_HMAC;
     case CKM_SHA512:
         return CKM_SHA512_HMAC;
+    /* Remediation item 3 (2026-08-30 OpenSSL-provider gap audit): the
+     * generic "HMAC" algorithm registers fine and is reachable with ANY
+     * digest name via OSSL_MAC_PARAM_DIGEST, but this switch only ever
+     * mapped the four digests above to their _HMAC mechanism -- every
+     * other digest this engine actually advertises an _HMAC mechanism
+     * for (values confirmed against src/lib/pkcs11/pkcs11t.h, not
+     * guessed) fell through to CK_UNAVAILABLE_INFORMATION below. */
+    case CKM_SHA512_224:
+        return CKM_SHA512_224_HMAC;
+    case CKM_SHA512_256:
+        return CKM_SHA512_256_HMAC;
+    case CKM_SHA3_224:
+        return CKM_SHA3_224_HMAC;
+    case CKM_SHA3_256:
+        return CKM_SHA3_256_HMAC;
+    case CKM_SHA3_384:
+        return CKM_SHA3_384_HMAC;
+    case CKM_SHA3_512:
+        return CKM_SHA3_512_HMAC;
     default:
         return CK_UNAVAILABLE_INFORMATION;
     }

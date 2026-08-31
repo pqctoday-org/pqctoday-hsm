@@ -590,17 +590,18 @@ ck_struct!(
 });
 
 ck_struct!(
-    /// `CK_PQCTODAY_MU_GEN_PARAMS` (remediation R39, phase 8,
-    /// PQCTODAY-VENDOR-EXT-MU vendor extension) — token-side µ generation,
-    /// the produce half of external-µ (the consume half,
+    /// `CK_MU_GEN_PARAMS` (remediation R39, phase 8, PQCTODAY-VENDOR-EXT-MU
+    /// — adopted natively 2026-08-30 from the real PKCS#11 v3.3 working
+    /// draft's own struct, `working/doc/spec/ml_dsa.md`) — token-side µ
+    /// generation, the produce half of external-µ (the consume half,
     /// CK_SIGN_ADDITIONAL_CONTEXT, is `sign_ctx` above). Exactly one of
-    /// `hTrKey`/`pTr` must be supplied.
-    mu_gen_params, "CK_PQCTODAY_MU_GEN_PARAMS", {
-    H_TR_KEY: F::Ulong,
+    /// `hKey`/`pTR` must be supplied.
+    mu_gen_params, "CK_MU_GEN_PARAMS", {
+    H_KEY: F::Ulong,
     P_TR: F::Ptr,
     UL_TR_LEN: F::Ulong,
-    P_CONTEXT: F::Ptr,
-    UL_CONTEXT_LEN: F::Ulong,
+    P_CTX: F::Ptr,
+    UL_CTX_LEN: F::Ulong,
 });
 
 ck_struct!(

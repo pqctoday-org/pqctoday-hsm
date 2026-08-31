@@ -1197,7 +1197,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE128, HASH_MLDSA_SHAKE128, SHAKE128)
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE256, HASH_MLDSA_SHAKE256, SHAKE256)
 #undef HASH_MLDSA_CASE
-		case CKM_PQCTODAY_ML_DSA_MU:
+		case CKM_ML_DSA_EXTERNAL_MU:
 		{
 			// Remediation R34, PQCTODAY-VENDOR-EXT-MU. Reuses
 			// CK_SIGN_ADDITIONAL_CONTEXT verbatim (parseMLDSASignContext,
@@ -1220,7 +1220,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			if (rv2 != CKR_OK) return rv2;
 			if (mldsaSignParam.contextLen > 0)
 			{
-				ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU takes no context -- µ already "
+				ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU takes no context -- µ already "
 					"folds it in (FIPS 204)");
 				return CKR_MECHANISM_PARAM_INVALID;
 			}
@@ -2900,7 +2900,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE128, HASH_MLDSA_SHAKE128, SHAKE128)
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE256, HASH_MLDSA_SHAKE256, SHAKE256)
 #undef HASH_MLDSA_CASE
-		case CKM_PQCTODAY_ML_DSA_MU:
+		case CKM_ML_DSA_EXTERNAL_MU:
 		{
 			// Remediation R34, PQCTODAY-VENDOR-EXT-MU. Reuses
 			// CK_SIGN_ADDITIONAL_CONTEXT verbatim (parseMLDSASignContext,
@@ -2923,7 +2923,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			if (rv2 != CKR_OK) return rv2;
 			if (mldsaSignParam.contextLen > 0)
 			{
-				ERROR_MSG("CKM_PQCTODAY_ML_DSA_MU takes no context -- µ already "
+				ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU takes no context -- µ already "
 					"folds it in (FIPS 204)");
 				return CKR_MECHANISM_PARAM_INVALID;
 			}

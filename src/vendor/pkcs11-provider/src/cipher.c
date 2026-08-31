@@ -181,6 +181,22 @@ static int p11prov_aes_get_params(OSSL_PARAM params[], int size, int mode,
          * ciphertext out immediately and never needs this headroom). */
         blocksize = AEAD_DECRYPT_MAX_MSG_LEN;
         break;
+    case MODE_ccm & MODE_modes_mask:
+        /* Remediation item 1 (2026-08-30): CCM's own get_params case was
+         * missing entirely, same shape as GCM's own gap above before
+         * phase 5 R26 -- EVP_CIPHER_fetch("AES-256-CCM") failed at
+         * algorithm-caching time (evp_cipher_from_algorithm's own "cache
+         * constants failed") even after provider.c's checklist fix made
+         * the CKM_AES_CCM case arm reachable, independent of that fix.
+         * `& MODE_modes_mask` matters here too, for the identical reason
+         * as GCM's own comment above (MODE_ccm carries MODE_flag_aead). */
+        ciph_mode = EVP_CIPH_CCM_MODE;
+        ivsize = 12; /* PKCS#11 CCM nonce is 7..13 bytes (RFC 3610); 12
+                      * matches this provider's own GCM/ChaCha20-Poly1305
+                      * convention and every CCM caller/test in this
+                      * project's own harness. */
+        blocksize = AEAD_DECRYPT_MAX_MSG_LEN;
+        break;
     default:
         ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_SET_PARAMETER);
         return RET_OSSL_ERR;
@@ -394,9 +410,19 @@ static CK_RV p11prov_cipher_prep_mech(struct p11prov_cipher_ctx *ctx,
 
     case CKM_AES_GCM:
     case CKM_CHACHA20_POLY1305:
-        /* AAD hasn't arrived yet (see set_aead_iv()'s own comment) --
-         * the mechanism parameter is built later, in
-         * p11prov_cipher_ensure_session(). */
+    case CKM_AES_CCM:
+        /* Remediation item 1 (2026-08-30): CCM was missing from this
+         * switch entirely, so prep_mech fell through to `default:
+         * return CKR_MECHANISM_INVALID;` below for every CCM
+         * encrypt_init/decrypt_init call, before finish_aead_mech's own
+         * (also newly-added) CKM_AES_CCM case ever got a chance to run --
+         * live-caught via EVP_EncryptInit_ex2 failing with the key
+         * import having already succeeded and then being torn back down
+         * (p11prov_cipher_legacy_init's own cleanup path), not a
+         * hypothetical. Same treatment as GCM/ChaCha20-Poly1305: AAD
+         * hasn't arrived yet (see set_aead_iv()'s own comment) -- the
+         * real CK_CCM_PARAMS is built later, in
+         * p11prov_cipher_ensure_session() / finish_aead_mech(). */
         rv = set_aead_iv(ctx, iv, ivlen);
         if (rv != CKR_OK) {
             return rv;
@@ -487,12 +513,22 @@ static CK_RV p11prov_cipher_op_init(void *ctx, void *keydata, CK_FLAGS op,
     return CKR_OK;
 }
 
-/* Builds the real CK_GCM_PARAMS / CK_SALSA20_CHACHA20_POLY1305_PARAMS
- * from whatever prep_mech stashed (IV) plus whatever AAD has accumulated
- * via update(out=NULL) calls since -- see set_aead_iv()'s own comment
- * for why this can't happen any earlier. No-op once already done (or for
- * a non-AEAD ctx), so callers can call this unconditionally. */
-static CK_RV p11prov_cipher_finish_aead_mech(struct p11prov_cipher_ctx *ctx)
+/* Builds the real CK_GCM_PARAMS / CK_CCM_PARAMS /
+ * CK_SALSA20_CHACHA20_POLY1305_PARAMS from whatever prep_mech stashed
+ * (IV) plus whatever AAD has accumulated via update(out=NULL) calls
+ * since -- see set_aead_iv()'s own comment for why this can't happen any
+ * earlier. No-op once already done (or for a non-AEAD ctx), so callers
+ * can call this unconditionally.
+ *
+ * `datalen` (remediation item 1, 2026-08-30) is the length of the
+ * caller's first real (non-AAD) update() call -- or 0, from final()'s
+ * own AAD-only/empty-message call site -- and is used ONLY by CCM, which
+ * unlike GCM/ChaCha20-Poly1305 needs the total data length declared in
+ * the mechanism parameter itself (CK_CCM_PARAMS.ulDataLen) before any
+ * real data is processed; see cipher.h's own ccm_datalen/ccm_fed
+ * comment. */
+static CK_RV p11prov_cipher_finish_aead_mech(struct p11prov_cipher_ctx *ctx,
+                                             size_t datalen)
 {
     if (!ctx->is_aead || ctx->aead_ready) {
         return CKR_OK;
@@ -541,6 +577,37 @@ static CK_RV p11prov_cipher_finish_aead_mech(struct p11prov_cipher_ctx *ctx)
         p->ulAADLen = ctx->aadlen;
         ctx->mech.pParameter = p;
         ctx->mech.ulParameterLen = sizeof(*p);
+        break;
+    }
+    case CKM_AES_CCM: {
+        /* Remediation item 1 (2026-08-30): was never built at all --
+         * item 1's own "cheapest fix" checklist addition made the
+         * existing case CKM_AES_CCM: arm in operations_init() reachable,
+         * but that only registers the algorithm; nothing here actually
+         * constructed CK_CCM_PARAMS, so a real encrypt/decrypt still
+         * failed even after registration. Both engines (SoftHSM_cipher.cpp,
+         * rust/src/ffi.rs) genuinely implement CKM_AES_CCM as of this
+         * session -- confirmed by reading both directly, not assumed --
+         * so this is real, working provider-side plumbing, not a stub. */
+        CK_CCM_PARAMS *p = OPENSSL_zalloc(sizeof(CK_CCM_PARAMS));
+        if (!p) {
+            return CKR_HOST_MEMORY;
+        }
+        p->pNonce = ctx->aead_iv;
+        p->ulNonceLen = ctx->aead_ivlen;
+        p->pAAD = ctx->aadlen ? ctx->aad : NULL;
+        p->ulAADLen = ctx->aadlen;
+        p->ulMACLen = 16; /* fixed 16-byte tag -- matches this provider's
+                           * own GCM/ChaCha20-Poly1305 convention above
+                           * and every AEAD test in this project's
+                           * harness; also a value the engine's own CCM
+                           * parser (SoftHSM_cipher.cpp) accepts (one of
+                           * 4/6/8/10/12/14/16). */
+        p->ulDataLen = datalen;
+        ctx->mech.pParameter = p;
+        ctx->mech.ulParameterLen = sizeof(*p);
+        ctx->ccm_datalen = datalen;
+        ctx->ccm_fed = 0;
         break;
     }
     default:
@@ -592,15 +659,20 @@ static CK_RV p11prov_cipher_session_init(struct p11prov_cipher_ctx *cctx)
 /* The one entry point update()/final() actually call to get a live
  * session: finishes the deferred AEAD mechanism parameter first (a
  * no-op for a non-AEAD ctx, or one already finished), then does the
- * real session/EncryptInit-DecryptInit as before. */
-static CK_RV p11prov_cipher_ensure_session(struct p11prov_cipher_ctx *cctx)
+ * real session/EncryptInit-DecryptInit as before.
+ *
+ * `datalen` (remediation item 1) is forwarded to
+ * p11prov_cipher_finish_aead_mech() unchanged -- see that function's own
+ * comment; ignored for every mechanism but CCM. */
+static CK_RV p11prov_cipher_ensure_session(struct p11prov_cipher_ctx *cctx,
+                                           size_t datalen)
 {
     CK_RV rv;
 
     if (cctx->session) {
         return CKR_OK;
     }
-    rv = p11prov_cipher_finish_aead_mech(cctx);
+    rv = p11prov_cipher_finish_aead_mech(cctx, datalen);
     if (rv != CKR_OK) {
         return rv;
     }
@@ -898,8 +970,21 @@ int p11prov_cipher_update(void *ctx, unsigned char *out, size_t *outl,
     }
 
     if (!cctx->session) {
-        rv = p11prov_cipher_ensure_session(cctx);
+        rv = p11prov_cipher_ensure_session(cctx, (size_t)inlen);
         if (rv != CKR_OK) {
+            return RET_OSSL_ERR;
+        }
+    } else if (cctx->mech.mechanism == CKM_AES_CCM) {
+        /* Remediation item 1: session already established, so this is at
+         * least the second real-data update() call -- CCM's ulDataLen
+         * was already declared and baked into CK_CCM_PARAMS from the
+         * FIRST such call's length (see ccm_datalen's own comment in
+         * cipher.h). A caller genuinely splitting CCM plaintext/
+         * ciphertext across more than one real update() call would
+         * silently commit to the wrong total length, so reject loudly
+         * here instead of producing corrupt output. */
+        if (cctx->ccm_fed + (size_t)inlen > cctx->ccm_datalen) {
+            ERR_raise(ERR_LIB_PROV, PROV_R_CIPHER_OPERATION_FAILED);
             return RET_OSSL_ERR;
         }
     }
@@ -980,6 +1065,10 @@ int p11prov_cipher_update(void *ctx, unsigned char *out, size_t *outl,
 
     if (rv != CKR_OK) {
         return RET_OSSL_ERR;
+    }
+
+    if (cctx->mech.mechanism == CKM_AES_CCM) {
+        cctx->ccm_fed += (size_t)inlen;
     }
 
     *outl = outlen;
@@ -1096,7 +1185,11 @@ int p11prov_cipher_final(void *ctx, unsigned char *out, size_t *outl,
         if (!cctx->is_aead) {
             return RET_OSSL_ERR;
         }
-        rv = p11prov_cipher_ensure_session(cctx);
+        /* datalen=0: no real update() call ever happened (AAD-only or
+         * genuinely empty message) -- correct for every existing AEAD
+         * mechanism, and for CCM specifically means ulDataLen=0 (an
+         * empty plaintext/ciphertext), not "unknown". */
+        rv = p11prov_cipher_ensure_session(cctx, 0);
         if (rv != CKR_OK) {
             return RET_OSSL_ERR;
         }
@@ -1177,6 +1270,20 @@ static int p11prov_aes_get_ctx_params(void *ctx, OSSL_PARAM params[])
     if (cctx->mech.mechanism == CKM_AES_ECB) {
         ivsize = 0;
     } else if (cctx->mech.mechanism == CKM_AES_GCM) {
+        ivsize = (cctx->is_aead && cctx->aead_ivlen > 0) ? cctx->aead_ivlen
+                                                          : 12;
+    } else if (cctx->mech.mechanism == CKM_AES_CCM) {
+        /* Remediation item 1 (2026-08-30): same exact gap as R26 already
+         * found and fixed for GCM in this very function (see this
+         * function's own comment above) -- CCM was missing here too, so
+         * EVP_CIPHER_CTX_get_iv_length() silently reported this
+         * function's generic 16-byte default instead of CCM's real
+         * 12-byte one, live-caught the same way R26 was: PKCS11_PROVIDER_
+         * DEBUG tracing showed aead_ivlen arriving at prep_mech/
+         * finish_aead_mech as 16 (reading 4 bytes past the caller's real
+         * 12-byte nonce buffer), which the engine's own CK_CCM_PARAMS
+         * validation then rejected as CKR_MECHANISM_PARAM_INVALID
+         * ("ulNonceLen must be 7..13 bytes" -- 16 is out of range). */
         ivsize = (cctx->is_aead && cctx->aead_ivlen > 0) ? cctx->aead_ivlen
                                                           : 12;
     }
@@ -1507,6 +1614,15 @@ static const OSSL_PARAM *p11prov_aes_gettable_ctx_params(void *vctx,
     case CKM_AES_CTS:
         return p11prov_aes_generic_gettable_ctx_params;
     case CKM_AES_GCM:
+    case CKM_AES_CCM:
+        /* Remediation item 1 (2026-08-30): CCM was missing from this
+         * switch entirely (fell through to `return NULL;` below), so
+         * OSSL_CIPHER_PARAM_AEAD_TAG could never be read back for CCM
+         * (EVP_CTRL_AEAD_GET_TAG, which OpenSSL's ctrl-to-param
+         * translation layer routes through this same gettable/
+         * get_ctx_params machinery). Same tag shape as GCM (fixed
+         * 16-byte tag, this provider's own convention), so the SAME
+         * array applies unchanged. */
         return p11prov_aes_gcm_gettable_ctx_params;
     }
     return NULL;
@@ -1557,9 +1673,14 @@ static const OSSL_PARAM *p11prov_aes_settable_ctx_params(void *vctx,
     case CKM_AES_CTS:
         return p11prov_aes_cts_settable_ctx_params;
     case CKM_AES_GCM:
-        return p11prov_aes_gcm_settable_ctx_params;
     case CKM_AES_CCM:
-        return p11prov_aes_generic_settable_ctx_params;
+        /* Remediation item 1 (2026-08-30): CCM used to return the
+         * GENERIC settable array here -- missing OSSL_CIPHER_PARAM_
+         * AEAD_TAG entirely, which silently broke EVP_CTRL_AEAD_SET_TAG
+         * (routed here by OpenSSL's own ctrl-to-param translation layer)
+         * for CCM decrypt. Same tag shape as GCM, so the SAME array
+         * applies unchanged. */
+        return p11prov_aes_gcm_settable_ctx_params;
     }
     return NULL;
 }
@@ -1593,20 +1714,30 @@ DISPATCH_TABLE_CIPHER_FN(aes, 128, gcm, CKM_AES_GCM);
 DISPATCH_TABLE_CIPHER_FN(aes, 192, gcm, CKM_AES_GCM);
 DISPATCH_TABLE_CIPHER_FN(aes, 256, gcm, CKM_AES_GCM);
 
-/* remediation R32 (2026-08-26): these three dispatch tables register a
- * DISPATCH_TABLE_CIPHER_FN for CKM_AES_CCM the same way every other
- * mechanism here does, but CCM's own registration in provider.c is
- * dead: neither the C++ engine (SoftHSM.cpp's symmetric dispatch has
- * no CKM_AES_CCM case) nor the Rust engine implements it, so any real
- * call routes to CKR_MECHANISM_INVALID at the engine boundary
- * regardless of what this table sets up. Left in place (not stripped)
- * deliberately: removing dead-but-harmless vendored dispatch tables
- * would churn upstream-diff surface for zero behavior change; the
- * comment carries the knowledge at near-zero risk instead. Real CCM
- * support needs engine work first (both engines, own test suites) --
- * and note PKCS#11's CK_CCM_PARAMS needs the total data length up
- * front, which collides with the streaming EVP API harder than GCM's
- * AAD-timing wrinkle (phase-6 R30) did. */
+/* Remediation item 1 (2026-08-30) supersedes remediation R32's own
+ * (2026-08-26) note that used to sit here: this codebase moved on in the
+ * four days since R32 was written -- both engines (SoftHSM_cipher.cpp's
+ * symmetric dispatch, and rust/src/ffi.rs) now genuinely implement
+ * CKM_AES_CCM, confirmed by reading both directly rather than trusting
+ * R32's now-stale claim. What was ACTUALLY still missing, found only by
+ * exercising this end-to-end rather than trusting R32's framing at face
+ * value: (a) CKM_AES_CCM was missing from operations_init()'s own
+ * mechanism checklist (AES_MECHS), so this dispatch table, though
+ * correctly built, was unreachable dead code exactly like R32 said, just
+ * for a different and much cheaper reason than "no engine support"; (b)
+ * p11prov_aes_get_params() had no CCM case, so even a bare
+ * EVP_CIPHER_fetch() failed at algorithm-caching time; (c)
+ * p11prov_cipher_finish_aead_mech() never built a real CK_CCM_PARAMS at
+ * all; (d) the gettable/settable ctx-params switches never advertised
+ * OSSL_CIPHER_PARAM_AEAD_TAG for CCM. All four are now real, working
+ * code (see AES_MECHS, p11prov_aes_get_params's MODE_ccm case,
+ * p11prov_cipher_finish_aead_mech's CKM_AES_CCM case, and both
+ * gettable/settable switches above) -- the CK_CCM_PARAMS.ulDataLen
+ * "collides with the streaming EVP API" problem R32 correctly
+ * identified is handled for the single-Update-call pattern this
+ * provider's own AEAD callers already use (cipher.h's own ccm_datalen/
+ * ccm_fed comment has the full account); genuine multi-call CCM
+ * streaming is rejected loudly rather than silently corrupted. */
 DISPATCH_TABLE_CIPHER_FN(aes, 128, ccm, CKM_AES_CCM);
 DISPATCH_TABLE_CIPHER_FN(aes, 192, ccm, CKM_AES_CCM);
 DISPATCH_TABLE_CIPHER_FN(aes, 256, ccm, CKM_AES_CCM);

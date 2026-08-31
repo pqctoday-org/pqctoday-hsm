@@ -869,16 +869,50 @@ static CK_RV alg_set_op(OSSL_ALGORITHM **op, int idx, OSSL_ALGORITHM *alg)
         CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN, CKM_HSS, CKM_HSS_KEY_PAIR_GEN, \
         CKM_XMSS, CKM_XMSS_KEY_PAIR_GEN, CKM_XMSSMT, CKM_XMSSMT_KEY_PAIR_GEN
 
+/* Remediation item 5 (2026-08-30 OpenSSL-provider gap audit, risk-accepted):
+ * PKCS#11 v3.2 §6.67.6/§6.67.7 HashML-DSA pre-hash family -- the bare
+ * generic CKM_HASH_ML_DSA (caller supplies an already-hashed PHM) plus its
+ * 10 "with hashing" siblings (CKM_HASH_ML_DSA_<digest>, hash computed ON
+ * TOKEN). All 11 values grepped from src/lib/pkcs11/pkcs11t.h, not
+ * guessed. This rests on OpenSSL's own documented testing-only
+ * "message-encoding=0" escape hatch for ML-DSA (EVP_SIGNATURE-ML-DSA(7):
+ * "OpenSSL does not support Pre Hash ML-DSA Signature Generation, but this
+ * may be done by the user by doing Pre hash encoding externally and then
+ * choosing the option to not encode the message" -- message-encoding=0 is
+ * documented as "used for testing", not a stable production contract) --
+ * see the HASH_ML_DSA/HASH_SLH_DSA case arm below and sig/mldsa.c's
+ * p11prov_hash_mldsa_* functions for where that caveat is preserved as a
+ * durable code comment. */
+#define HASH_MLDSA_MECHS \
+    CKM_HASH_ML_DSA, CKM_HASH_ML_DSA_SHA224, CKM_HASH_ML_DSA_SHA256, \
+        CKM_HASH_ML_DSA_SHA384, CKM_HASH_ML_DSA_SHA512, \
+        CKM_HASH_ML_DSA_SHA3_224, CKM_HASH_ML_DSA_SHA3_256, \
+        CKM_HASH_ML_DSA_SHA3_384, CKM_HASH_ML_DSA_SHA3_512, \
+        CKM_HASH_ML_DSA_SHAKE128, CKM_HASH_ML_DSA_SHAKE256
+
+/* Same family, SLH-DSA side (PKCS#11 v3.2 §6.69.6/§6.69.7). */
+#define HASH_SLHDSA_MECHS \
+    CKM_HASH_SLH_DSA, CKM_HASH_SLH_DSA_SHA224, CKM_HASH_SLH_DSA_SHA256, \
+        CKM_HASH_SLH_DSA_SHA384, CKM_HASH_SLH_DSA_SHA512, \
+        CKM_HASH_SLH_DSA_SHA3_224, CKM_HASH_SLH_DSA_SHA3_256, \
+        CKM_HASH_SLH_DSA_SHA3_384, CKM_HASH_SLH_DSA_SHA3_512, \
+        CKM_HASH_SLH_DSA_SHAKE128, CKM_HASH_SLH_DSA_SHAKE256
+
 #if SKEY_SUPPORT == 1
 /* phase 5 R26 prerequisite: CKM_AES_GCM was missing from this checklist,
  * so it was never scanned into a slot's mechanism list and the ADD_ALGO
  * registration below (case CKM_AES_GCM:) was unreachable dead code --
  * a different kind of gap than CTR's own genuine unfinished-stub bug,
  * fixed in p11prov_cipher_prep_mech() (cipher.c). */
+/* Remediation item 1 (2026-08-30 OpenSSL-provider gap audit): CKM_AES_CCM
+ * was missing from this checklist exactly like CKM_AES_GCM was above --
+ * the case CKM_AES_CCM: arm below (ADD_ALGO for AES_256/192/128_CCM) was
+ * real, correct, and completely unreachable dead code because the
+ * mechanism-scan loop never matched it against anything in checklist[]. */
 #define AES_MECHS \
     CKM_AES_ECB, CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_CTR, CKM_AES_CTS, \
         CKM_AES_OFB, CKM_AES_CFB8, CKM_AES_CFB128, CKM_AES_CFB1, \
-        CKM_AES_GCM
+        CKM_AES_GCM, CKM_AES_CCM
 
 /* phase 5 R26 */
 #define CHACHA_MECHS CKM_CHACHA20, CKM_CHACHA20_POLY1305
@@ -939,13 +973,17 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              CKM_PKCS5_PBKD2,
                              CKM_SP800_108_COUNTER_KDF,
                              CKM_SP800_108_FEEDBACK_KDF,
+                             CKM_SP800_108_DOUBLE_PIPELINE_KDF,
                              CKM_AES_CMAC,
                              CKM_KMAC_128,
                              CKM_KMAC_256,
                              DIGEST_MECHS,
                              HMAC_MECHS,
                              CKM_EDDSA,
+                             CKM_EDDSA_PH,
                              PQC_MECHS,
+                             HASH_MLDSA_MECHS,
+                             HASH_SLHDSA_MECHS,
 #if SKEY_SUPPORT == 1
                              AES_MECHS,
                              CHACHA_MECHS
@@ -1203,12 +1241,24 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 break;
             /* Phase 5 R22: like PBKDF2 above, no matching `exchange`
              * registration — OpenSSL's own "KBKDF" name is a KDF-only
-             * fetch, not a key-exchange one. */
+             * fetch, not a key-exchange one.
+             *
+             * Remediation item 2 (2026-08-30): CKM_SP800_108_DOUBLE_PIPELINE_KDF
+             * is SP800-108's third mode (Counter / Feedback / Double-Pipeline)
+             * and shares this exact same KBKDF backend -- it was missing from
+             * both this case's label list and its UNCHECK_MECHS call, so a
+             * token that supports ONLY double-pipeline (or that exposes it
+             * after the other two have already been unchecked from the
+             * checklist by an earlier scan iteration) would fall through to
+             * the `default: unhandled mechanism` arm below instead of
+             * registering KBKDF. */
             case CKM_SP800_108_COUNTER_KDF:
             case CKM_SP800_108_FEEDBACK_KDF:
+            case CKM_SP800_108_DOUBLE_PIPELINE_KDF:
                 ADD_ALGO(KBKDF, kbkdf, kdf, prop);
                 UNCHECK_MECHS(CKM_SP800_108_COUNTER_KDF,
-                              CKM_SP800_108_FEEDBACK_KDF);
+                              CKM_SP800_108_FEEDBACK_KDF,
+                              CKM_SP800_108_DOUBLE_PIPELINE_KDF);
                 break;
             case CKM_SHA_1:
                 ADD_ALGO(SHA1, sha1, digest, prop);
@@ -1292,14 +1342,41 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              p11prov_ed448_signature_functions);
                 UNCHECK_MECHS(CKM_EC_EDWARDS_KEY_PAIR_GEN, CKM_EDDSA);
 #if defined(OSSL_FUNC_SIGNATURE_SIGN_MESSAGE_INIT)
-                ADD_ALGO_EXT(ED25519ph, signature, prop,
-                             p11prov_ed25519ph_signature_functions);
+                /* Remediation item 4 (2026-08-30 OpenSSL-provider gap
+                 * audit): per real OpenSSL 4.0 docs (EVP_SIGNATURE-ED25519(7)
+                 * -- confirmed byte-identical in the vendored OpenSSL 3.6.3
+                 * tree's own doc/man7/EVP_SIGNATURE-ED25519.pod, which this
+                 * provider actually builds/links against), Ed25519,
+                 * Ed25519ctx and Ed448 are the three PureEdDSA instances --
+                 * they take the complete message and are all reachable
+                 * through the plain CKM_EDDSA mechanism (CK_EDDSA_PARAMS
+                 * with phFlag=CK_FALSE plus an optional context string), so
+                 * ED25519ctx stays gated on CKM_EDDSA here. Ed25519ph and
+                 * Ed448ph are the two HashEdDSA (pre-hash) instances --
+                 * moved to their own case arm below, gated on the real
+                 * CKM_EDDSA_PH mechanism instead of riding along
+                 * unconditionally with plain CKM_EDDSA. */
                 ADD_ALGO_EXT(ED25519ctx, signature, prop,
                              p11prov_ed25519ctx_signature_functions);
-                ADD_ALGO_EXT(ED448ph, signature, prop,
-                             p11prov_ed448ph_signature_functions);
 #endif
                 break;
+#if defined(OSSL_FUNC_SIGNATURE_SIGN_MESSAGE_INIT)
+            case CKM_EDDSA_PH:
+                /* Bug fixed here: previously Ed25519ph/Ed448ph were
+                 * registered unconditionally inside `case CKM_EDDSA:`
+                 * above, so they were advertised/functional even on a
+                 * token whose mechanism list never contained
+                 * CKM_EDDSA_PH at all. Now they are their own case arm,
+                 * gated on the real vendor-range CKM_EDDSA_PH mechanism
+                 * (src/lib/pkcs11/pkcs11t.h) -- if a token doesn't
+                 * advertise it, these two are simply never registered. */
+                ADD_ALGO_EXT(ED25519ph, signature, prop,
+                             p11prov_ed25519ph_signature_functions);
+                ADD_ALGO_EXT(ED448ph, signature, prop,
+                             p11prov_ed448ph_signature_functions);
+                UNCHECK_MECHS(CKM_EDDSA_PH);
+                break;
+#endif
             case CKM_ML_DSA:
             case CKM_ML_DSA_KEY_PAIR_GEN:
                 ADD_ALGO_EXT(ML_DSA_44, signature, prop,
@@ -1367,6 +1444,65 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 ADD_ALGO_EXT(SLH_DSA_SHAKE_256F, signature, prop,
                              p11prov_slhdsa_shake_256f_signature_functions);
                 UNCHECK_MECHS(CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA);
+                break;
+            /* Remediation item 5 (2026-08-30, risk-accepted -- see
+             * HASH_MLDSA_MECHS's own comment above for the full caveat
+             * quoted from OpenSSL's own docs): one generic "HASH-ML-DSA"
+             * algorithm, paramset-agnostic like sig/xmss.c's XMSS/XMSS^MT
+             * entries -- p11prov_hash_mldsa_sign_init/verify_init resolve
+             * the actual ML-DSA-44/65/87 parameter set from the bound key
+             * at runtime via p11prov_obj_get_key_param_set(), the same
+             * accessor ML-DSA/SLH-DSA/ML-KEM/XMSS already share, rather
+             * than baking one paramset into the algorithm's own identity
+             * the way plain ML_DSA_44/65/87 do above. Registered only when
+             * the token's mechanism list actually contains at least one of
+             * the 11 CKM_HASH_ML_DSA* mechanisms (grouped into one case
+             * arm below, same multi-label/shared-body idiom the
+             * CKM_SP800_108_* KDF arm above uses, so the UNCHECK_MECHS call
+             * fires exactly once no matter which of the 11 the token's
+             * mechanism list happens to expose first). */
+            case CKM_HASH_ML_DSA:
+            case CKM_HASH_ML_DSA_SHA224:
+            case CKM_HASH_ML_DSA_SHA256:
+            case CKM_HASH_ML_DSA_SHA384:
+            case CKM_HASH_ML_DSA_SHA512:
+            case CKM_HASH_ML_DSA_SHA3_224:
+            case CKM_HASH_ML_DSA_SHA3_256:
+            case CKM_HASH_ML_DSA_SHA3_384:
+            case CKM_HASH_ML_DSA_SHA3_512:
+            case CKM_HASH_ML_DSA_SHAKE128:
+            case CKM_HASH_ML_DSA_SHAKE256:
+                ADD_ALGO_EXT(HASH_ML_DSA, signature, prop,
+                             p11prov_hash_mldsa_signature_functions);
+                UNCHECK_MECHS(
+                    CKM_HASH_ML_DSA, CKM_HASH_ML_DSA_SHA224,
+                    CKM_HASH_ML_DSA_SHA256, CKM_HASH_ML_DSA_SHA384,
+                    CKM_HASH_ML_DSA_SHA512, CKM_HASH_ML_DSA_SHA3_224,
+                    CKM_HASH_ML_DSA_SHA3_256, CKM_HASH_ML_DSA_SHA3_384,
+                    CKM_HASH_ML_DSA_SHA3_512, CKM_HASH_ML_DSA_SHAKE128,
+                    CKM_HASH_ML_DSA_SHAKE256);
+                break;
+            /* Same idiom, SLH-DSA side. */
+            case CKM_HASH_SLH_DSA:
+            case CKM_HASH_SLH_DSA_SHA224:
+            case CKM_HASH_SLH_DSA_SHA256:
+            case CKM_HASH_SLH_DSA_SHA384:
+            case CKM_HASH_SLH_DSA_SHA512:
+            case CKM_HASH_SLH_DSA_SHA3_224:
+            case CKM_HASH_SLH_DSA_SHA3_256:
+            case CKM_HASH_SLH_DSA_SHA3_384:
+            case CKM_HASH_SLH_DSA_SHA3_512:
+            case CKM_HASH_SLH_DSA_SHAKE128:
+            case CKM_HASH_SLH_DSA_SHAKE256:
+                ADD_ALGO_EXT(HASH_SLH_DSA, signature, prop,
+                             p11prov_hash_slhdsa_signature_functions);
+                UNCHECK_MECHS(
+                    CKM_HASH_SLH_DSA, CKM_HASH_SLH_DSA_SHA224,
+                    CKM_HASH_SLH_DSA_SHA256, CKM_HASH_SLH_DSA_SHA384,
+                    CKM_HASH_SLH_DSA_SHA512, CKM_HASH_SLH_DSA_SHA3_224,
+                    CKM_HASH_SLH_DSA_SHA3_256, CKM_HASH_SLH_DSA_SHA3_384,
+                    CKM_HASH_SLH_DSA_SHA3_512, CKM_HASH_SLH_DSA_SHAKE128,
+                    CKM_HASH_SLH_DSA_SHAKE256);
                 break;
             case CKM_HSS_KEY_PAIR_GEN:
                 /* Phase 4 R9: single generic "HSS" name — unlike SLH-DSA's

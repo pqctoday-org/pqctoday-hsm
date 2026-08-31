@@ -88,6 +88,26 @@ void *p11prov_sig_dupctx(void *ctx)
         newctx->mldsa_params.pContext = OPENSSL_memdup(
             sigctx->mldsa_params.pContext, sigctx->mldsa_params.ulContextLen);
     }
+    /* Remediation item 5: HASH-ML-DSA/HASH-SLH-DSA pre-hash mode state.
+     * mldsa_hash_params/slhdsa_hash_params are only ever pointed at from
+     * pContext fields already duplicated just above/below, so a shallow
+     * copy here is sufficient -- p11prov_mldsa_set_mechanism /
+     * p11prov_slhdsa_set_mechanism rebuild these structs from
+     * mldsa_params/slhdsa_params plus the digest sentinel on every
+     * operate() call rather than relying on a stale copy surviving
+     * dupctx(). */
+    newctx->mldsa_phm_mode = sigctx->mldsa_phm_mode;
+    newctx->mldsa_hash_params = sigctx->mldsa_hash_params;
+    newctx->slhdsa_phm_mode = sigctx->slhdsa_phm_mode;
+    newctx->slhdsa_hash_params = sigctx->slhdsa_hash_params;
+
+    newctx->slhdsa_paramset = sigctx->slhdsa_paramset;
+    newctx->slhdsa_params = sigctx->slhdsa_params;
+    if (sigctx->slhdsa_params.pContext) {
+        newctx->slhdsa_params.pContext =
+            OPENSSL_memdup(sigctx->slhdsa_params.pContext,
+                          sigctx->slhdsa_params.ulContextLen);
+    }
 
     if (sigctx->signature) {
         newctx->signature =

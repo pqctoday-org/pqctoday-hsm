@@ -140,6 +140,18 @@
 #define P11PROV_DESCS_ED448 "PKCS11 ED448 Implementation"
 #define P11PROV_NAMES_ED448ph "ED448ph"
 #define P11PROV_DESCS_ED448ph "PKCS11 ED448ph implementation"
+
+/* Remediation item 4 (2026-08-30 OpenSSL-provider gap audit): CKM_EDDSA_PH
+ * is a SoftHSMv3 vendor-range mechanism (src/lib/pkcs11/pkcs11t.h:
+ * `CKM_VENDOR_DEFINED | 0x1057`, "Our internal alias for Pre-hash EdDSA
+ * (phFlag=1)") -- not part of the standard PKCS#11 v3.2 header this
+ * provider vendors (src/vendor/pkcs11-provider/src/pkcs11.h), so it has
+ * no equivalent there. Defined locally here rather than in that
+ * upstream-tracked file, same pattern mac.h already uses for
+ * CKM_KMAC_128/256. */
+#ifndef CKM_EDDSA_PH
+#define CKM_EDDSA_PH (CKM_VENDOR_DEFINED | 0x00001057UL)
+#endif
 #define P11PROV_NAMES_ML_DSA_44 \
     "ML-DSA-44:MLDSA44:2.16.840.1.101.3.4.3.17:id-ml-dsa-44"
 #define P11PROV_DESCS_ML_DSA_44 "PKCS11 ML-DSA-44 implementation"
@@ -149,6 +161,31 @@
 #define P11PROV_NAMES_ML_DSA_87 \
     "ML-DSA-87:MLDSA87:2.16.840.1.101.3.4.3.19:id-ml-dsa-87"
 #define P11PROV_DESCS_ML_DSA_87 "PKCS11 ML-DSA-87 implementation"
+
+/* Remediation item 5 (2026-08-30, risk-accepted): bespoke vendor names --
+ * unlike ML_DSA_44/65/87 above, OpenSSL itself has no native "Pre Hash
+ * ML-DSA"/"Pre Hash SLH-DSA" algorithm identity or OID to alias (real
+ * OpenSSL 4.0 docs, EVP_SIGNATURE-ML-DSA(7) / EVP_SIGNATURE-SLH-DSA(7) --
+ * confirmed byte-identical in the vendored OpenSSL 3.6.3 tree this
+ * provider actually builds against, doc/man7/EVP_SIGNATURE-ML-DSA.pod /
+ * EVP_SIGNATURE-SLH-DSA.pod: "OpenSSL does not support Pre Hash ML-DSA
+ * [/SLH-DSA] Signature Generation, but this may be done by the user by
+ * doing Pre hash encoding externally and then choosing the option to not
+ * encode the message" -- message-encoding=0 is documented as "used for
+ * testing", not a stable production contract). One generic name per
+ * family, paramset-agnostic (see sig/mldsa.c's p11prov_hash_mldsa_* /
+ * sig/slhdsa.c's p11prov_hash_slhdsa_* — paramset is resolved from the
+ * bound key at runtime, mirroring sig/xmss.c's own generic-name pattern),
+ * following this file's own COMPOSITE_*-style convention for names this
+ * provider invents rather than a real external standard/OID. */
+#define P11PROV_NAMES_HASH_ML_DSA "HASH-ML-DSA"
+#define P11PROV_DESCS_HASH_ML_DSA \
+    "PKCS11 HashML-DSA pre-hash implementation (CKM_HASH_ML_DSA* family; " \
+    "rests on OpenSSL's own testing-only message-encoding=0 escape hatch)"
+#define P11PROV_NAMES_HASH_SLH_DSA "HASH-SLH-DSA"
+#define P11PROV_DESCS_HASH_SLH_DSA \
+    "PKCS11 HashSLH-DSA pre-hash implementation (CKM_HASH_SLH_DSA* family; " \
+    "rests on OpenSSL's own testing-only message-encoding=0 escape hatch)"
 
 /* Composite-ML-DSA signature profiles per draft-ietf-lamps-pq-composite-sigs-19.
  * OIDs are stable in draft-19 §6; PKIX alg arc 1.3.6.1.5.5.7.6.{37,45,49}. */

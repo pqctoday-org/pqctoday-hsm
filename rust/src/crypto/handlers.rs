@@ -141,7 +141,7 @@ pub enum DigestCtx {
     /// Historical RIPEMD-160 (CKM_RIPEMD160) — 20-byte digest.
     Ripemd160(ripemd::Ripemd160),
     /// Remediation R39 (phase 8), PQCTODAY-VENDOR-EXT-MU:
-    /// CKM_PQCTODAY_ML_DSA_MU_GEN — incremental SHAKE256 already seeded
+    /// CKM_ML_DSA_EXTERNAL_MU_GEN — incremental SHAKE256 already seeded
     /// (at C_DigestInit) with `tr || 0x00 || len(ctx) || ctx`; the
     /// caller's message M is what flows through the normal
     /// C_DigestUpdate/C_Digest path from here, fixed 64-byte output
@@ -2052,7 +2052,7 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         },
         // External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — same
         // signature format/size as pure ML-DSA, only the input path differs.
-        CKM_PQCTODAY_ML_DSA_MU => match ps {
+        CKM_ML_DSA_EXTERNAL_MU => match ps {
             CKP_ML_DSA_44 => 2420,
             CKP_ML_DSA_87 => 4627,
             _ => 3309,

@@ -106,6 +106,26 @@ struct p11prov_cipher_ctx {
     size_t taglen;
     bool tag_set;
 
+    /* Remediation item 1 (2026-08-30): CCM (CKM_AES_CCM), unlike GCM/
+     * ChaCha20-Poly1305, needs the caller's TOTAL data length declared up
+     * front in CK_CCM_PARAMS.ulDataLen (PKCS#11 v3.2 SS6.16.4 / RFC 3610's
+     * own CBC-MAC construction bakes the length into the very first
+     * block) -- a genuine mismatch with OpenSSL's own streaming
+     * update()/final() EVP convention, which never promises the total
+     * length until the LAST real update() call. Declared here from the
+     * length of the FIRST real (non-AAD) update() call -- the same point
+     * GCM's own CK_GCM_PARAMS gets built, in
+     * p11prov_cipher_finish_aead_mech() -- covering the single-Update-
+     * call pattern this provider's own AEAD callers (and every AEAD test
+     * in this project's harness) already use. ccm_fed tracks bytes
+     * actually handed to a real Encrypt/DecryptUpdate call since; a
+     * caller genuinely splitting CCM data across more than one real
+     * update() call would silently commit to the wrong ulDataLen, so
+     * p11prov_cipher_update() rejects that loudly instead of producing
+     * corrupt output. Unused (stays 0) for every other mechanism. */
+    size_t ccm_datalen;
+    size_t ccm_fed;
+
     /* CKM_CHACHA20 (stream, not AEAD): backing bytes for the
      * CK_CHACHA20_PARAMS pBlockCounter/pNonce pointers set in
      * prep_mech's own CKM_CHACHA20 case -- see that case's comment. */

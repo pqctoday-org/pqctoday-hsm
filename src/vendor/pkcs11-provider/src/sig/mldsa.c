@@ -18,16 +18,17 @@
 #define ML_DSA_87_PK_SIZE 2592
 #define ML_DSA_87_SIG_SIZE 4627
 
-/* Remediation R34, PQCTODAY-VENDOR-EXT-MU: vendor mechanism for external-µ
- * signing, a stopgap for PKCS#11 v3.3's own upcoming native mechanism
- * (oasis-tcs/pkcs11#58, not yet ratified). Mirrors the numeric allocation
- * in src/lib/vendor_mechanisms.h (CKM_VENDOR_DEFINED | 0x13) -- kept as a
- * local #define here rather than a shared header, matching this
- * provider's own existing pattern for vendor mechanisms (e.g. mac.h's
- * CKM_KMAC_128). See
+/* Remediation R34, PQCTODAY-VENDOR-EXT-MU: mechanism for external-µ
+ * signing. Adopted natively 2026-08-30 from the real PKCS#11 v3.3 working
+ * draft's own CKM_ML_DSA_EXTERNAL_MU name and codepoint (still OASIS
+ * status "proposed", not yet through final ballot -- double-check against
+ * the final ratified v3.3 header once published). Mirrors the allocation
+ * in src/lib/vendor_mechanisms.h -- kept as a local #define here rather
+ * than a shared header, matching this provider's own existing pattern
+ * for PKCS#11 mechanism constants (e.g. mac.h's CKM_KMAC_128). See
  * docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md for
- * the full design. Remove when this project adopts v3.3 natively. */
-#define CKM_PQCTODAY_ML_DSA_MU (CKM_VENDOR_DEFINED | 0x00000013UL)
+ * the original design. */
+#define CKM_ML_DSA_EXTERNAL_MU 0x0000403cUL
 
 /* Remediation R38 (phase 8): PKCS#11 v3.2 has no SHAKE *digest* mechanism
  * codepoint to carry through `sigctx->digest` (only
@@ -85,6 +86,38 @@ DISPATCH_MLDSA_FN(settable_ctx_params);
 
 static CK_RV p11prov_mldsa_set_mechanism(P11PROV_SIG_CTX *sigctx)
 {
+    /* Remediation item 5 (2026-08-30, risk-accepted): HASH-ML-DSA pre-hash
+     * mode, set only by p11prov_hash_mldsa_newctx (never by plain
+     * ML-DSA-44/65/87). Checked first and returns unconditionally --
+     * phm_mode never falls through to the CKM_ML_DSA_EXTERNAL_MU / plain
+     * CKM_ML_DSA / CKM_HASH_ML_DSA_<digest> "with hashing" branches below,
+     * which are mutually exclusive with it by construction (a phm_mode
+     * context is never also external_mu). Requires OSSL_SIGNATURE_PARAM_
+     * DIGEST to have been set (p11prov_hash_mldsa_set_ctx_params below) so
+     * the token knows which OID to embed in M' (PKCS#11 v3.2 SS6.67.6's
+     * CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash field) -- the caller already
+     * did the actual hashing themselves, following OpenSSL's own
+     * documented (testing-only) message-encoding=0 pattern for pre-hash
+     * ML-DSA (EVP_SIGNATURE-ML-DSA(7)). */
+    if (sigctx->mldsa_phm_mode) {
+        if (sigctx->digest == 0) {
+            P11PROV_raise(sigctx->provctx, CKR_ARGUMENTS_BAD,
+                          "HASH-ML-DSA requires the 'digest' signature "
+                          "parameter (the hash algorithm used to "
+                          "pre-hash the message externally)");
+            return CKR_ARGUMENTS_BAD;
+        }
+        sigctx->mldsa_hash_params.hedgeVariant =
+            sigctx->mldsa_params.hedgeVariant;
+        sigctx->mldsa_hash_params.pContext = sigctx->mldsa_params.pContext;
+        sigctx->mldsa_hash_params.ulContextLen =
+            sigctx->mldsa_params.ulContextLen;
+        sigctx->mldsa_hash_params.hash = sigctx->digest;
+        sigctx->mechanism.mechanism = CKM_HASH_ML_DSA;
+        sigctx->mechanism.pParameter = &sigctx->mldsa_hash_params;
+        sigctx->mechanism.ulParameterLen = sizeof(sigctx->mldsa_hash_params);
+        return CKR_OK;
+    }
     /* Remediation R34, PQCTODAY-VENDOR-EXT-MU. µ has no defined meaning
      * for a context string (FIPS 204 folds context into µ before the
      * caller ever computes it) -- reject rather than silently drop it. */
@@ -95,7 +128,7 @@ static CK_RV p11prov_mldsa_set_mechanism(P11PROV_SIG_CTX *sigctx)
                           "'context-string' has no meaning with 'mu' set");
             return CKR_ARGUMENTS_BAD;
         }
-        sigctx->mechanism.mechanism = CKM_PQCTODAY_ML_DSA_MU;
+        sigctx->mechanism.mechanism = CKM_ML_DSA_EXTERNAL_MU;
         /* hedgeVariant is the only meaningful field; same "only plumb the
          * struct through when non-default" rule as CKM_ML_DSA below. */
         if (sigctx->mldsa_params.hedgeVariant != CKH_HEDGE_PREFERRED) {
@@ -690,14 +723,13 @@ static int p11prov_mldsa_set_ctx_params(void *ctx, const OSSL_PARAM params[])
         if (ret != RET_OSSL_OK) {
             return ret;
         }
-        /* Remediation R34, PQCTODAY-VENDOR-EXT-MU: mu=1 routes to the
-         * vendor mechanism CKM_PQCTODAY_ML_DSA_MU (see
-         * p11prov_mldsa_set_mechanism) instead of being rejected -- a
-         * stopgap for PKCS#11 v3.3's own upcoming native external-µ
-         * mechanism (oasis-tcs/pkcs11#58). The caller's 64-byte µ itself
-         * travels via the normal sign/verify data argument, exactly like
-         * OpenSSL's own convention for this parameter -- nothing extra
-         * to capture here beyond the flag. */
+        /* Remediation R34, PQCTODAY-VENDOR-EXT-MU: mu=1 routes to
+         * CKM_ML_DSA_EXTERNAL_MU (see p11prov_mldsa_set_mechanism) instead
+         * of being rejected -- the real PKCS#11 v3.3 working draft's own
+         * external-µ mechanism, adopted natively 2026-08-30. The caller's
+         * 64-byte µ itself travels via the normal sign/verify data
+         * argument, exactly like OpenSSL's own convention for this
+         * parameter -- nothing extra to capture here beyond the flag. */
         if (mu != 0 && mu != 1) {
             P11PROV_raise(sigctx->provctx, CKR_ARGUMENTS_BAD,
                           "Unsupported 'mu' parameter");
@@ -803,6 +835,235 @@ const OSSL_DISPATCH p11prov_mldsa_65_signature_functions[] = {
     DISPATCH_SIG_ELEM(mldsa, GETTABLE_CTX_PARAMS, gettable_ctx_params),
     DISPATCH_SIG_ELEM(mldsa, SET_CTX_PARAMS, set_ctx_params),
     DISPATCH_SIG_ELEM(mldsa, SETTABLE_CTX_PARAMS, settable_ctx_params),
+    { 0, NULL },
+};
+
+/* --------------------------------------------------------------------
+ * HASH-ML-DSA: bare generic CKM_HASH_ML_DSA pre-hash family (remediation
+ * item 5, 2026-08-30, risk-accepted -- see provider.h's
+ * P11PROV_NAMES_HASH_ML_DSA comment for the full caveat quoted from
+ * OpenSSL's own docs: this rests on EVP_SIGNATURE-ML-DSA(7)'s documented
+ * testing-only message-encoding=0 escape hatch, not a stable production
+ * contract).
+ *
+ * One provider algorithm, "HASH-ML-DSA", paramset-agnostic exactly like
+ * sig/xmss.c's XMSS/XMSS^MT: the actual ML-DSA-44/65/87 parameter set is
+ * resolved from the bound key at sign_init/verify_init time via
+ * p11prov_obj_get_key_param_set() (the same accessor ML-DSA/SLH-DSA/
+ * ML-KEM/XMSS already share), not baked into the algorithm's own
+ * identity the way plain ML_DSA_44/65/87 above are.
+ *
+ * The caller must set the standard "digest" ctx param
+ * (OSSL_SIGNATURE_PARAM_DIGEST -- the same one EVP_PKEY_CTX_set_
+ * signature_md() sets for RSA/ECDSA/DSA raw signing) to the digest
+ * algorithm they used to pre-hash the message externally; the bytes
+ * handed to sign()/verify() as "tbs" ARE that digest, not a message to
+ * be hashed here.
+ *
+ * SIGN_MESSAGE and DIGEST_SIGN streaming entry points are deliberately
+ * not registered: the engine's CKM_HASH_ML_DSA dispatch
+ * (SoftHSM_sign.cpp) is genuinely single-part only
+ * (bAllowMultiPartOp=false -- the data argument to C_Sign/C_Verify IS
+ * the complete PHM, nothing to stream), so this algorithm only supports
+ * the plain one-shot EVP_PKEY_sign_init()+EVP_PKEY_sign() /
+ * EVP_PKEY_verify_init()+EVP_PKEY_verify() calling convention, which
+ * p11prov_mldsa_sign/verify (reused verbatim below) already implement
+ * via a single p11prov_sig_operate() call. */
+
+#ifndef OSSL_SIGNATURE_PARAM_DIGEST
+#define OSSL_SIGNATURE_PARAM_DIGEST OSSL_PKEY_PARAM_DIGEST
+#endif
+
+DISPATCH_HASH_MLDSA_FN(newctx);
+DISPATCH_HASH_MLDSA_FN(sign_init);
+DISPATCH_HASH_MLDSA_FN(verify_init);
+DISPATCH_HASH_MLDSA_FN(set_ctx_params);
+DISPATCH_HASH_MLDSA_FN(settable_ctx_params);
+DISPATCH_HASH_MLDSA_FN(query_key_types);
+
+static void *p11prov_hash_mldsa_newctx(void *provctx, const char *properties)
+{
+    P11PROV_CTX *ctx = (P11PROV_CTX *)provctx;
+    P11PROV_SIG_CTX *sigctx;
+
+    sigctx = p11prov_sig_newctx(ctx, CKM_HASH_ML_DSA, properties);
+    if (sigctx == NULL) {
+        return NULL;
+    }
+
+    sigctx->mldsa_phm_mode = true;
+    sigctx->fallback_operate = &p11prov_mldsa_operate;
+
+    return sigctx;
+}
+
+static CK_RV hash_mldsa_bind_paramset(P11PROV_SIG_CTX *sigctx)
+{
+    CK_ULONG paramset = p11prov_obj_get_key_param_set(sigctx->key);
+
+    if (paramset != CKP_ML_DSA_44 && paramset != CKP_ML_DSA_65
+        && paramset != CKP_ML_DSA_87) {
+        P11PROV_raise(sigctx->provctx, CKR_KEY_TYPE_INCONSISTENT,
+                      "HASH-ML-DSA requires an ML-DSA-44/65/87 key");
+        return CKR_KEY_TYPE_INCONSISTENT;
+    }
+    sigctx->mldsa_paramset = paramset;
+    return CKR_OK;
+}
+
+static int p11prov_hash_mldsa_sign_init(void *ctx, void *provkey,
+                                        const OSSL_PARAM params[])
+{
+    P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)ctx;
+    CK_RV ret;
+
+    P11PROV_debug("hash_mldsa sign init (ctx=%p, key=%p, params=%p)", ctx,
+                  provkey, params);
+
+    ret = p11prov_sig_op_init(ctx, provkey, CKF_SIGN, NULL);
+    if (ret != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    ret = hash_mldsa_bind_paramset(sigctx);
+    if (ret != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    return p11prov_hash_mldsa_set_ctx_params(ctx, params);
+}
+
+static int p11prov_hash_mldsa_verify_init(void *ctx, void *provkey,
+                                          const OSSL_PARAM params[])
+{
+    P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)ctx;
+    CK_RV ret;
+
+    P11PROV_debug("hash_mldsa verify init (ctx=%p, key=%p, params=%p)", ctx,
+                  provkey, params);
+
+    ret = p11prov_sig_op_init(ctx, provkey, CKF_VERIFY, NULL);
+    if (ret != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    ret = hash_mldsa_bind_paramset(sigctx);
+    if (ret != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    return p11prov_hash_mldsa_set_ctx_params(ctx, params);
+}
+
+static int p11prov_hash_mldsa_set_ctx_params(void *ctx,
+                                             const OSSL_PARAM params[])
+{
+    P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)ctx;
+    const OSSL_PARAM *p;
+    int ret;
+
+    P11PROV_debug("hash_mldsa set ctx params (ctx=%p, params=%p)", sigctx,
+                  params);
+
+    /* Reuse plain ML-DSA's ctx-params handling for context-string /
+     * deterministic -- HASH-ML-DSA takes the same CK_SIGN_ADDITIONAL_
+     * CONTEXT-shaped fields, repackaged into CK_HASH_SIGN_ADDITIONAL_
+     * CONTEXT by p11prov_mldsa_set_mechanism's phm_mode branch. This
+     * also accepts (and ignores, since Pure encoding is never applied in
+     * phm_mode) message-encoding and mu -- harmless no-ops rather than
+     * new failure modes for a caller that sets them out of habit. */
+    ret = p11prov_mldsa_set_ctx_params(ctx, params);
+    if (ret != RET_OSSL_OK) {
+        return ret;
+    }
+
+    if (params == NULL) {
+        return RET_OSSL_OK;
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_DIGEST);
+    if (p) {
+        char digestname[64] = { 0 };
+        char *namep = digestname;
+        CK_MECHANISM_TYPE shake;
+
+        ret = OSSL_PARAM_get_utf8_string(p, &namep, sizeof(digestname));
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+
+        /* Same SHAKE128/256 carrier-sentinel need as the "with hashing"
+         * digest_sign_init path above -- p11prov_digest_get_by_name's
+         * digest_map has no SHAKE entry (see mldsa_shake_sentinel's own
+         * header comment). */
+        shake = mldsa_shake_sentinel(digestname);
+        if (shake != CK_UNAVAILABLE_INFORMATION) {
+            sigctx->digest = shake;
+        } else {
+            CK_MECHANISM_TYPE digest;
+            CK_RV rv = p11prov_digest_get_by_name(digestname, &digest);
+            if (rv != CKR_OK) {
+                P11PROV_raise(sigctx->provctx, rv,
+                              "Unsupported 'digest' for HASH-ML-DSA: %s",
+                              digestname);
+                return RET_OSSL_ERR;
+            }
+            sigctx->digest = digest;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_hash_mldsa_settable_ctx_params(void *ctx,
+                                                                 void *prov)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_SIGNATURE_PARAM_CONTEXT_STRING, NULL, 0),
+        OSSL_PARAM_int(OSSL_SIGNATURE_PARAM_DETERMINISTIC, 0),
+        OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_DIGEST, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+/* Remediation item 5, real bug caught only by actually exercising the
+ * explicit-fetch calling convention (EVP_SIGNATURE_fetch("HASH-ML-DSA",
+ * ...) + EVP_PKEY_sign_init_ex2) that this bespoke, non-key-type-named
+ * algorithm REQUIRES (there is no ctx-param "instance"-style override
+ * for ML-DSA the way eddsa.c has for EdDSA -- see that file's own
+ * p11prov_eddsa_instance_to_params). Without this, OpenSSL's own
+ * evp_pkey_signature_init() (crypto/evp/signature.c) refuses the
+ * operation with "signature type and key type incompatible": its
+ * fallback compatibility check only accepts a fetched signature whose
+ * OWN registered name equals the key's keymgmt name (or the keymgmt's
+ * own default signature name) -- neither is ever "HASH-ML-DSA" for an
+ * "ML-DSA-44/65/87" key. OSSL_FUNC_SIGNATURE_QUERY_KEY_TYPES is
+ * OpenSSL's own real, documented mechanism for exactly this case (a
+ * signature algorithm usable across multiple differently-named key
+ * types) -- confirmed against the real vendored OpenSSL 3.6.3 source
+ * (crypto/evp/signature.c's own query_key_types-vs-fallback branch),
+ * not guessed. */
+static const char **p11prov_hash_mldsa_query_key_types(void)
+{
+    static const char *key_types[] = { "ML-DSA-44", "ML-DSA-65", "ML-DSA-87",
+                                       NULL };
+    return key_types;
+}
+
+const OSSL_DISPATCH p11prov_hash_mldsa_signature_functions[] = {
+    DISPATCH_SIG_ELEM(hash_mldsa, NEWCTX, newctx),
+    DISPATCH_SIG_ELEM(sig, FREECTX, freectx),
+    DISPATCH_SIG_ELEM(sig, DUPCTX, dupctx),
+    DISPATCH_SIG_ELEM(hash_mldsa, SIGN_INIT, sign_init),
+    DISPATCH_SIG_ELEM(mldsa, SIGN, sign),
+    DISPATCH_SIG_ELEM(hash_mldsa, VERIFY_INIT, verify_init),
+    DISPATCH_SIG_ELEM(mldsa, VERIFY, verify),
+    DISPATCH_SIG_ELEM(mldsa, GET_CTX_PARAMS, get_ctx_params),
+    DISPATCH_SIG_ELEM(mldsa, GETTABLE_CTX_PARAMS, gettable_ctx_params),
+    DISPATCH_SIG_ELEM(hash_mldsa, SET_CTX_PARAMS, set_ctx_params),
+    DISPATCH_SIG_ELEM(hash_mldsa, SETTABLE_CTX_PARAMS, settable_ctx_params),
+    DISPATCH_SIG_ELEM(hash_mldsa, QUERY_KEY_TYPES, query_key_types),
     { 0, NULL },
 };
 

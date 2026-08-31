@@ -71,6 +71,33 @@ DISPATCH_SLHDSA_FN(settable_ctx_params);
 
 static CK_RV p11prov_slhdsa_set_mechanism(P11PROV_SIG_CTX *sigctx)
 {
+    /* Remediation item 5 (2026-08-30, risk-accepted): HASH-SLH-DSA
+     * pre-hash mode, set only by p11prov_hash_slhdsa_newctx (never by
+     * plain SLH-DSA-*). Checked first and returns unconditionally -- see
+     * mldsa.c's own identical phm_mode branch (p11prov_mldsa_set_mechanism)
+     * for the full rationale, including why this rests on OpenSSL's own
+     * documented testing-only message-encoding=0 escape hatch
+     * (EVP_SIGNATURE-SLH-DSA(7)). */
+    if (sigctx->slhdsa_phm_mode) {
+        if (sigctx->digest == 0) {
+            P11PROV_raise(sigctx->provctx, CKR_ARGUMENTS_BAD,
+                          "HASH-SLH-DSA requires the 'digest' signature "
+                          "parameter (the hash algorithm used to "
+                          "pre-hash the message externally)");
+            return CKR_ARGUMENTS_BAD;
+        }
+        sigctx->slhdsa_hash_params.hedgeVariant =
+            sigctx->slhdsa_params.hedgeVariant;
+        sigctx->slhdsa_hash_params.pContext = sigctx->slhdsa_params.pContext;
+        sigctx->slhdsa_hash_params.ulContextLen =
+            sigctx->slhdsa_params.ulContextLen;
+        sigctx->slhdsa_hash_params.hash = sigctx->digest;
+        sigctx->mechanism.mechanism = CKM_HASH_SLH_DSA;
+        sigctx->mechanism.pParameter = &sigctx->slhdsa_hash_params;
+        sigctx->mechanism.ulParameterLen =
+            sizeof(sigctx->slhdsa_hash_params);
+        return CKR_OK;
+    }
     /* Remediation R36 (phase 7): PKCS#11 v3.2 §6.69.7 "HashSLH-DSA
      * Signature with hashing" -- CKM_HASH_SLH_DSA_<hash> computes the
      * ENTIRE HashSLH-DSA spec, including hashing ON TOKEN; data passed
@@ -810,3 +837,221 @@ SLHDSA_SIG_FUNCTIONS(sha2_256s)
 SLHDSA_SIG_FUNCTIONS(shake_256s)
 SLHDSA_SIG_FUNCTIONS(sha2_256f)
 SLHDSA_SIG_FUNCTIONS(shake_256f)
+
+/* --------------------------------------------------------------------
+ * HASH-SLH-DSA: bare generic CKM_HASH_SLH_DSA pre-hash family
+ * (remediation item 5, 2026-08-30, risk-accepted). Mirrors sig/mldsa.c's
+ * own HASH-ML-DSA implementation exactly -- see that file's own top-of-
+ * block comment for the full rationale (paramset resolved from the
+ * bound key at runtime via p11prov_obj_get_key_param_set(), caller
+ * conveys the pre-hash digest via the standard OSSL_SIGNATURE_PARAM_
+ * DIGEST ctx param, single-part only since the engine's CKM_HASH_SLH_DSA
+ * dispatch is bAllowMultiPartOp=false). Same testing-only
+ * message-encoding=0 caveat as ML-DSA, this time from
+ * EVP_SIGNATURE-SLH-DSA(7). */
+
+#ifndef OSSL_SIGNATURE_PARAM_DIGEST
+#define OSSL_SIGNATURE_PARAM_DIGEST OSSL_PKEY_PARAM_DIGEST
+#endif
+
+DISPATCH_HASH_SLHDSA_FN(newctx);
+DISPATCH_HASH_SLHDSA_FN(sign_init);
+DISPATCH_HASH_SLHDSA_FN(verify_init);
+DISPATCH_HASH_SLHDSA_FN(set_ctx_params);
+DISPATCH_HASH_SLHDSA_FN(settable_ctx_params);
+DISPATCH_HASH_SLHDSA_FN(query_key_types);
+
+static void *p11prov_hash_slhdsa_newctx(void *provctx, const char *properties)
+{
+    P11PROV_CTX *ctx = (P11PROV_CTX *)provctx;
+    P11PROV_SIG_CTX *sigctx;
+
+    sigctx = p11prov_sig_newctx(ctx, CKM_HASH_SLH_DSA, properties);
+    if (sigctx == NULL) {
+        return NULL;
+    }
+
+    sigctx->slhdsa_phm_mode = true;
+    sigctx->fallback_operate = &p11prov_slhdsa_operate;
+
+    return sigctx;
+}
+
+static bool hash_slhdsa_is_valid_paramset(CK_ULONG paramset)
+{
+    switch (paramset) {
+    case CKP_SLH_DSA_SHA2_128S:
+    case CKP_SLH_DSA_SHAKE_128S:
+    case CKP_SLH_DSA_SHA2_128F:
+    case CKP_SLH_DSA_SHAKE_128F:
+    case CKP_SLH_DSA_SHA2_192S:
+    case CKP_SLH_DSA_SHAKE_192S:
+    case CKP_SLH_DSA_SHA2_192F:
+    case CKP_SLH_DSA_SHAKE_192F:
+    case CKP_SLH_DSA_SHA2_256S:
+    case CKP_SLH_DSA_SHAKE_256S:
+    case CKP_SLH_DSA_SHA2_256F:
+    case CKP_SLH_DSA_SHAKE_256F:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static CK_RV hash_slhdsa_bind_paramset(P11PROV_SIG_CTX *sigctx)
+{
+    CK_ULONG paramset = p11prov_obj_get_key_param_set(sigctx->key);
+
+    if (!hash_slhdsa_is_valid_paramset(paramset)) {
+        P11PROV_raise(sigctx->provctx, CKR_KEY_TYPE_INCONSISTENT,
+                      "HASH-SLH-DSA requires an SLH-DSA key");
+        return CKR_KEY_TYPE_INCONSISTENT;
+    }
+    sigctx->slhdsa_paramset = paramset;
+    return CKR_OK;
+}
+
+static int p11prov_hash_slhdsa_sign_init(void *ctx, void *provkey,
+                                         const OSSL_PARAM params[])
+{
+    P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)ctx;
+    CK_RV ret;
+
+    P11PROV_debug("hash_slhdsa sign init (ctx=%p, key=%p, params=%p)", ctx,
+                  provkey, params);
+
+    ret = p11prov_sig_op_init(ctx, provkey, CKF_SIGN, NULL);
+    if (ret != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    ret = hash_slhdsa_bind_paramset(sigctx);
+    if (ret != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    return p11prov_hash_slhdsa_set_ctx_params(ctx, params);
+}
+
+static int p11prov_hash_slhdsa_verify_init(void *ctx, void *provkey,
+                                           const OSSL_PARAM params[])
+{
+    P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)ctx;
+    CK_RV ret;
+
+    P11PROV_debug("hash_slhdsa verify init (ctx=%p, key=%p, params=%p)", ctx,
+                  provkey, params);
+
+    ret = p11prov_sig_op_init(ctx, provkey, CKF_VERIFY, NULL);
+    if (ret != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    ret = hash_slhdsa_bind_paramset(sigctx);
+    if (ret != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+
+    return p11prov_hash_slhdsa_set_ctx_params(ctx, params);
+}
+
+static int p11prov_hash_slhdsa_set_ctx_params(void *ctx,
+                                              const OSSL_PARAM params[])
+{
+    P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)ctx;
+    const OSSL_PARAM *p;
+    int ret;
+
+    P11PROV_debug("hash_slhdsa set ctx params (ctx=%p, params=%p)", sigctx,
+                  params);
+
+    ret = p11prov_slhdsa_set_ctx_params(ctx, params);
+    if (ret != RET_OSSL_OK) {
+        return ret;
+    }
+
+    if (params == NULL) {
+        return RET_OSSL_OK;
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_DIGEST);
+    if (p) {
+        char digestname[64] = { 0 };
+        char *namep = digestname;
+        CK_MECHANISM_TYPE shake;
+
+        ret = OSSL_PARAM_get_utf8_string(p, &namep, sizeof(digestname));
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+
+        shake = slhdsa_shake_sentinel(digestname);
+        if (shake != CK_UNAVAILABLE_INFORMATION) {
+            sigctx->digest = shake;
+        } else {
+            CK_MECHANISM_TYPE digest;
+            CK_RV rv = p11prov_digest_get_by_name(digestname, &digest);
+            if (rv != CKR_OK) {
+                P11PROV_raise(sigctx->provctx, rv,
+                              "Unsupported 'digest' for HASH-SLH-DSA: %s",
+                              digestname);
+                return RET_OSSL_ERR;
+            }
+            sigctx->digest = digest;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_hash_slhdsa_settable_ctx_params(void *ctx,
+                                                                  void *prov)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_SIGNATURE_PARAM_CONTEXT_STRING, NULL, 0),
+        OSSL_PARAM_int(OSSL_SIGNATURE_PARAM_DETERMINISTIC, 0),
+        OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_DIGEST, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+/* Remediation item 5 -- see mldsa.c's own p11prov_hash_mldsa_query_key_types
+ * for the full rationale (OpenSSL's real evp_pkey_signature_init()
+ * compatibility fallback, confirmed against the vendored OpenSSL 3.6.3
+ * source, not guessed). All 12 SLH-DSA parameter-set key type names,
+ * matching provider.h's own P11PROV_NAMES_SLH_DSA_* first alias exactly. */
+static const char **p11prov_hash_slhdsa_query_key_types(void)
+{
+    static const char *key_types[] = { "SLH-DSA-SHA2-128s",
+                                       "SLH-DSA-SHAKE-128s",
+                                       "SLH-DSA-SHA2-128f",
+                                       "SLH-DSA-SHAKE-128f",
+                                       "SLH-DSA-SHA2-192s",
+                                       "SLH-DSA-SHAKE-192s",
+                                       "SLH-DSA-SHA2-192f",
+                                       "SLH-DSA-SHAKE-192f",
+                                       "SLH-DSA-SHA2-256s",
+                                       "SLH-DSA-SHAKE-256s",
+                                       "SLH-DSA-SHA2-256f",
+                                       "SLH-DSA-SHAKE-256f",
+                                       NULL };
+    return key_types;
+}
+
+const OSSL_DISPATCH p11prov_hash_slhdsa_signature_functions[] = {
+    DISPATCH_SIG_ELEM(hash_slhdsa, NEWCTX, newctx),
+    DISPATCH_SIG_ELEM(sig, FREECTX, freectx),
+    DISPATCH_SIG_ELEM(sig, DUPCTX, dupctx),
+    DISPATCH_SIG_ELEM(hash_slhdsa, SIGN_INIT, sign_init),
+    DISPATCH_SIG_ELEM(slhdsa, SIGN, sign),
+    DISPATCH_SIG_ELEM(hash_slhdsa, VERIFY_INIT, verify_init),
+    DISPATCH_SIG_ELEM(slhdsa, VERIFY, verify),
+    DISPATCH_SIG_ELEM(slhdsa, GET_CTX_PARAMS, get_ctx_params),
+    DISPATCH_SIG_ELEM(slhdsa, GETTABLE_CTX_PARAMS, gettable_ctx_params),
+    DISPATCH_SIG_ELEM(hash_slhdsa, SET_CTX_PARAMS, set_ctx_params),
+    DISPATCH_SIG_ELEM(hash_slhdsa, SETTABLE_CTX_PARAMS,
+                      settable_ctx_params),
+    DISPATCH_SIG_ELEM(hash_slhdsa, QUERY_KEY_TYPES, query_key_types),
+    { 0, NULL },
+};

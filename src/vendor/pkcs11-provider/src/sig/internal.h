@@ -41,11 +41,20 @@ struct p11prov_sig_ctx {
     /* ML-DSA param data */
     CK_ML_DSA_PARAMETER_SET_TYPE mldsa_paramset;
     CK_SIGN_ADDITIONAL_CONTEXT mldsa_params;
-    /* External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU): caller set
-     * OSSL_SIGNATURE_PARAM_MU=1. Routes to the vendor mechanism
-     * CKM_PQCTODAY_ML_DSA_MU instead of CKM_ML_DSA — stopgap for PKCS#11
-     * v3.3's own upcoming native mechanism (oasis-tcs/pkcs11#58). Remove
-     * when this project adopts v3.3 natively. */
+    /* Remediation item 5 (2026-08-30, risk-accepted): HASH-ML-DSA pre-hash
+     * mode (bare generic CKM_HASH_ML_DSA, PKCS#11 v3.2 SS6.67.6) -- set by
+     * p11prov_hash_mldsa_newctx, never by plain p11prov_mldsa_44/65/87_newctx.
+     * When true, p11prov_mldsa_set_mechanism routes unconditionally to the
+     * bare mechanism using mldsa_hash_params (never to CKM_ML_DSA or the
+     * CKM_HASH_ML_DSA_<digest> "with hashing" family) -- see sig/mldsa.c. */
+    bool mldsa_phm_mode;
+    CK_HASH_SIGN_ADDITIONAL_CONTEXT mldsa_hash_params;
+    /* External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU; adopted natively
+     * from the real PKCS#11 v3.3 working draft 2026-08-30): caller set
+     * OSSL_SIGNATURE_PARAM_MU=1. Routes to CKM_ML_DSA_EXTERNAL_MU instead
+     * of CKM_ML_DSA — the v3.3 draft's own name and codepoint (still OASIS
+     * status "proposed", not yet through final ballot; see
+     * src/lib/vendor_mechanisms.h). */
     bool mldsa_external_mu;
 
     /* SLH-DSA param data (PKCS#11 v3.2 §6.68: CKM_SLH_DSA accepts the same
@@ -55,6 +64,11 @@ struct p11prov_sig_ctx {
      * ML-DSA's shape alone) */
     CK_SLH_DSA_PARAMETER_SET_TYPE slhdsa_paramset;
     CK_SIGN_ADDITIONAL_CONTEXT slhdsa_params;
+    /* Same HASH-*-DSA pre-hash mode as mldsa_phm_mode above, SLH-DSA side
+     * (bare generic CKM_HASH_SLH_DSA, PKCS#11 v3.2 SS6.69.6). Set by
+     * p11prov_hash_slhdsa_newctx only. See sig/slhdsa.c. */
+    bool slhdsa_phm_mode;
+    CK_HASH_SIGN_ADDITIONAL_CONTEXT slhdsa_hash_params;
 
     /* Signature to be verified, used by verify_message_final() */
     unsigned char *signature;

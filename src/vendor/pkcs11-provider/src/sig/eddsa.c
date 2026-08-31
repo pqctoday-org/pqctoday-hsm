@@ -252,6 +252,27 @@ static int p11prov_eddsa_get_ctx_params(void *ctx, OSSL_PARAM *params)
     return ret;
 }
 
+/* Remediation item 4 (2026-08-30 OpenSSL-provider gap audit): the REAL
+ * gap, found only by exercising this end-to-end -- not the one the
+ * initial fix shape assumed. Gating provider.c's registration of the
+ * "ED25519ph"/"ED448ph" ALGORITHM NAMES on CKM_EDDSA_PH (this file's own
+ * earlier fix) is necessary but not sufficient: every EdDSA algorithm
+ * name this provider registers (plain "ED25519"/"ED448" included) shares
+ * these SAME p11prov_eddsa_* dispatch functions, and
+ * p11prov_eddsa_set_ctx_params() accepts an OSSL_SIGNATURE_PARAM_
+ * INSTANCE override unconditionally, regardless of which top-level name
+ * a caller originally fetched. Live-caught: `pkeyutl -sign -inkey
+ * pkcs11:...type=private -pkeyopt instance:Ed25519ph` against the PLAIN
+ * "ED25519" algorithm (the key's own default, auto-selected -- no
+ * "ED25519ph" fetch involved at all) still produced a real, verifiable
+ * Ed25519ph signature even on a token with CKM_EDDSA_PH removed from its
+ * mechanism list (simulated via softhsm2.conf's slots.mechanisms =
+ * -CKM_EDDSA_PH) -- name-level gating alone never runs on this path.
+ * The real chokepoint is HERE: every instance resolution (whichever
+ * algorithm name got fetched, whatever ctx-params were set) passes
+ * through this one function before phFlag ever gets baked into
+ * CK_EDDSA_PARAMS, so this is where "does the token actually support
+ * pre-hash EdDSA" has to be checked, once, for both ph instances. */
 static int p11prov_eddsa_instance_to_params(void *vctx)
 {
     P11PROV_SIG_CTX *sigctx = (P11PROV_SIG_CTX *)vctx;
@@ -261,9 +282,28 @@ static int p11prov_eddsa_instance_to_params(void *vctx)
         sigctx->use_eddsa_params = CK_FALSE;
         break;
     case ED_25519_ph:
+    case ED_448_ph: {
+        CK_SLOT_ID slotid = p11prov_obj_get_slotid(sigctx->key);
+        CK_RV rv;
+
+        if (slotid == CK_UNAVAILABLE_INFORMATION) {
+            P11PROV_SLOTS_CTX *slots = p11prov_ctx_get_slots(sigctx->provctx);
+            if (!slots) {
+                return RET_OSSL_ERR;
+            }
+            slotid = p11prov_get_default_slot(slots);
+        }
+        rv = p11prov_check_mechanism(sigctx->provctx, slotid, CKM_EDDSA_PH);
+        if (rv != CKR_OK) {
+            P11PROV_raise(sigctx->provctx, rv,
+                          "CKM_EDDSA_PH unavailable -- Ed25519ph/Ed448ph "
+                          "require the token to advertise it");
+            return RET_OSSL_ERR;
+        }
         sigctx->use_eddsa_params = CK_TRUE;
         sigctx->eddsa_params.phFlag = CK_TRUE;
         break;
+    }
     case ED_25519_ctx:
         sigctx->use_eddsa_params = CK_TRUE;
         sigctx->eddsa_params.phFlag = CK_FALSE;
@@ -271,10 +311,6 @@ static int p11prov_eddsa_instance_to_params(void *vctx)
     case ED_448:
         sigctx->use_eddsa_params = CK_TRUE;
         sigctx->eddsa_params.phFlag = CK_FALSE;
-        break;
-    case ED_448_ph:
-        sigctx->use_eddsa_params = CK_TRUE;
-        sigctx->eddsa_params.phFlag = CK_TRUE;
         break;
     default:
         return RET_OSSL_ERR;
