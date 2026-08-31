@@ -268,7 +268,7 @@ dimension" advertised by `fips-hashing.yaml`, `aead-only.yaml`,
 |---|---|
 | `mechanism_allowlist` | If `op ∈ ops` AND the requested PKCS#11 mechanism ∉ `mechanisms` → Deny. |
 | `mechanism_denylist` | If `op ∈ ops` AND the requested mechanism ∈ `mechanisms` → Deny. Optional `severity: deny\|warn`. |
-| `hash_algorithm_allowlist` | Restrict the KMIP `Hashing Algorithm` for Sign/Verify to an allowed set (e.g. deny SHA-1). Optional `severity: deny\|warn`. |
+| `hash_algorithm_allowlist` | Restrict the KMIP `Hashing Algorithm` for any op listed in `ops` (not just Sign/Verify — e.g. Encrypt's RSA-OAEP hash) to an allowed set (e.g. deny SHA-1). A request with no hash carried is not gated. Optional `severity: deny\|warn`. |
 | `mac_mechanism_policy` | Constrain the MAC mechanism family (e.g. require HMAC-SHA2+). |
 | `mechanism_parameter_constraint` | Gate a mechanism parameter — e.g. AES `Block Cipher Mode` ∈ {GCM, CCM}, RSA `Padding Method` = OAEP. Optional `severity: deny\|warn`. |
 | `mechanism_parameter_default` | Resolution rule (Pass 1): *set* a mechanism parameter the request omitted — e.g. force the CSD02 `Deterministic` flag on ML-DSA/SLH-DSA. |
