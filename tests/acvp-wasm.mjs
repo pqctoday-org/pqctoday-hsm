@@ -136,6 +136,7 @@ const sha512_224Vec = loadJson('sha512_224_test.json')
 const sha512_256Vec = loadJson('sha512_256_test.json')
 const hmacSha512_224Vec = loadJson('hmac_sha512_224_test.json')
 const hmacSha512_256Vec = loadJson('hmac_sha512_256_test.json')
+const hmacShortKeyVec = loadJson('hmac_shortkey_rfc4231_test.json')
 const aesKwVec = loadJson('aeskw_test.json')
 const slhdsaCtxVec = loadJson('slhdsa_ctx_test.json')
 const lmsSigverVec = loadJson('lms_sigver_test.json')
@@ -846,6 +847,60 @@ async function runSuite(engineName) {
         addResult('hmac512', 'HMAC-SHA512', 'Verify KAT (NIST ACVP, truncated)', ok ? 'PASS' : 'FAIL', `MAC[${tv.mac.length / 2}B, ${tv.macLen}-bit]`)
       } catch (e) {
         addResult('hmac512', 'HMAC-SHA512', 'Verify KAT (NIST ACVP, truncated)', 'FAIL', e.message)
+      }
+    }
+
+    // ── 14.5. HMAC short-key Verify KAT (RFC 4231 §4.2 Test Case 1) ───────
+    // 2026-08-31: closes a real coverage gap that let commit 58be5cb4 (a
+    // kMacMechTable bug rejecting any HMAC key shorter than the mechanism's
+    // own digest output with CKR_KEY_SIZE_RANGE) ship and stay undetected.
+    // Every HMAC KAT above uses a curated NIST ACVP-Server sample whose key
+    // is >=121 bytes (hmac_test.json's is 228) — none of them exercise a
+    // key shorter than the digest, which is exactly the condition the bug
+    // hinged on. RFC 2104 places no lower bound on an HMAC key; RFC 4231
+    // §4.2 Test Case 1 is the standard's own canonical short-key vector: a
+    // 20-byte key (0x0b x20) against "Hi There", deliberately shorter than
+    // SHA-384/512's digest output. SHA2-224/256/384/512 below are the RFC's
+    // own published values; RFC 4231 doesn't define SHA-1/SHA2-512-224/
+    // 512-256/SHA3-*, so those testGroups extend the identical construction
+    // (same key, same message) with values computed via Python's hmac/
+    // hashlib, independently cross-checked against a from-scratch ipad/opad
+    // HMAC build — see hmac_shortkey_rfc4231_test.json's _provenance for
+    // exact method. Uses each mechanism's plain (non-_GENERAL, exact-
+    // length) form, since RFC 4231's published MACs are full untruncated
+    // digests — also the first KAT coverage of these mechanisms' non-
+    // GENERAL form in this harness.
+    {
+      const HMAC_SHORTKEY_MECH = {
+        'SHA-1':        CK.CKM_SHA_1_HMAC,
+        'SHA2-224':     CK.CKM_SHA224_HMAC,
+        'SHA2-256':     CK.CKM_SHA256_HMAC,
+        'SHA2-384':     CK.CKM_SHA384_HMAC,
+        'SHA2-512':     CK.CKM_SHA512_HMAC,
+        'SHA2-512/224': CK.CKM_SHA512_224_HMAC,
+        'SHA2-512/256': CK.CKM_SHA512_256_HMAC,
+        'SHA3-224':     CK.CKM_SHA3_224_HMAC,
+        'SHA3-256':     CK.CKM_SHA3_256_HMAC,
+        'SHA3-384':     CK.CKM_SHA3_384_HMAC,
+        'SHA3-512':     CK.CKM_SHA3_512_HMAC,
+      }
+      for (const tg of hmacShortKeyVec.testGroups) {
+        const mech = HMAC_SHORTKEY_MECH[tg.hashAlg]
+        const label = `HMAC-${tg.hashAlg}`
+        const id = `hmac-shortkey-${tg.hashAlg}`
+        if (mechs.size > 0 && (!mech || !mechs.has(mech))) {
+          addResult(id, label, 'Verify KAT (RFC 4231 §4.2 TC1, short key)', 'SKIP', 'mechanism not supported')
+          continue
+        }
+        for (const tv of tg.tests) {
+          try {
+            const h = importHMACKey(M, hSession, hexToBytes(tv.key), { sign: false, verify: true })
+            const ok = hmacVerify(M, hSession, h, hexToBytes(tv.msg), hexToBytes(tv.mac), mech)
+            addResult(id, label, `Verify KAT (${tv.key.length / 2}B key vs ${tv.mac.length / 2}B digest)`, ok ? 'PASS' : 'FAIL', `MAC[${tv.mac.length / 2}B]: ${bytesToHex(hexToBytes(tv.mac), 16)}`)
+          } catch (e) {
+            addResult(id, label, 'Verify KAT (RFC 4231 §4.2 TC1, short key)', 'FAIL', e.message)
+          }
+        }
       }
     }
 

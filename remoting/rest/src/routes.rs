@@ -55,12 +55,13 @@ async fn generate_key_pair(
 /// `session_handle` is what's actually used, matching the gRPC schema's
 /// flat request shape one field at a time.
 async fn sign(Path(id): Path<u32>, Json(req): Json<SignRequest>) -> Result<Json<SignResponse>, ApiError> {
-    let sig = verbs::sign(req.session_handle, id, req.algorithm.into(), &req.data)?;
+    let sig = verbs::sign(req.session_handle, id, req.algorithm.into(), &req.data, req.external_mu)?;
     Ok(Json(SignResponse { signature: sig }))
 }
 
 async fn verify(Path(id): Path<u32>, Json(req): Json<VerifyRequest>) -> Result<Json<VerifyResponse>, ApiError> {
-    let valid = verbs::verify(req.session_handle, id, req.algorithm.into(), &req.data, &req.signature)?;
+    let valid =
+        verbs::verify(req.session_handle, id, req.algorithm.into(), &req.data, &req.signature, req.external_mu)?;
     Ok(Json(VerifyResponse { valid }))
 }
 

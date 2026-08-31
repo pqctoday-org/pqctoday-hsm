@@ -313,14 +313,28 @@ pub trait PkcsOps: Send + Sync {
     // exactly how ChaCha20-Poly1305 stayed off the HSM for months.
 
     /// SHAKE-256 XOF, squeezing `out_len` bytes. Needed by X-Wing's seed
-    /// expansion.
+    /// expansion (draft-connolly-cfrg-xwing-kem §5.2/§5.6).
     fn shake256(&self, _input: &[u8], _out_len: usize) -> Result<Vec<u8>, PqcTodayError> {
         Err(PqcTodayError::Kem("SHAKE-256 not available on this backend".into()))
     }
 
-    /// SHA3-256. Needed by the X-Wing combiner.
-    fn sha3_256(&self, _data: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
-        Err(PqcTodayError::Kem("SHA3-256 not available on this backend".into()))
+    /// X-Wing combiner (draft-connolly-cfrg-xwing-kem §5.3):
+    /// `SHA3-256(ss_M ‖ ss_X ‖ ct_X ‖ pk_X ‖ XWingLabel)`. There is no bare
+    /// `sha3_256` method on this trait — a prior version had one, called
+    /// directly from `hpke.rs` via the `sha3` crate with no engine
+    /// involvement at all (no session, no mechanism dispatch), which is
+    /// exactly the silent-software-fallback failure mode the comment just
+    /// above this block warns about. This method exists instead so the
+    /// transcript-build-then-hash recipe runs as a single named operation a
+    /// real backend dispatches in full.
+    fn xwing_combine(
+        &self,
+        _ss_m: &[u8],
+        _ss_x: &[u8],
+        _ct_x: &[u8],
+        _pk_x: &[u8],
+    ) -> Result<Vec<u8>, PqcTodayError> {
+        Err(PqcTodayError::Kem("X-Wing combiner not available on this backend".into()))
     }
 
     /// ChaCha20-Poly1305 AEAD. `encrypt` seals, otherwise opens.
@@ -449,17 +463,51 @@ impl CryptokiBackend {
 #[cfg(not(target_arch = "wasm32"))]
 impl PkcsOps for CryptokiBackend {
     fn shake256(&self, input: &[u8], out_len: usize) -> Result<Vec<u8>, PqcTodayError> {
-        use sha3::digest::{ExtendableOutput, Update, XofReader};
-        let mut h = sha3::Shake256::default();
-        h.update(input);
-        let mut out = vec![0u8; out_len];
-        h.finalize_xof().read(&mut out);
-        Ok(out)
+        // softhsmrustv3::native::derive::shake256_xof — the engine's own
+        // sha3::Shake256 usage (already present in its ffi.rs/handlers.rs
+        // mu-gen path), exposed as a one-shot function. No session/handle
+        // needed: unlike xwing_combine below, this isn't composed through
+        // run_combiner (no CKM_SHAKE_256 digest-derivation codepoint exists
+        // to route through — SHAKE-256 is a XOF, not a fixed-length digest),
+        // but it is the engine's implementation, not a bare `sha3` crate
+        // dependency of this crate's own.
+        Ok(softhsmrustv3::native::derive::shake256_xof(input, out_len))
     }
 
-    fn sha3_256(&self, data: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
-        use sha3::Digest;
-        Ok(sha3::Sha3_256::digest(data).to_vec())
+    fn xwing_combine(
+        &self,
+        ss_m: &[u8],
+        ss_x: &[u8],
+        ct_x: &[u8],
+        pk_x: &[u8],
+    ) -> Result<Vec<u8>, PqcTodayError> {
+        // draft-connolly-cfrg-xwing-kem §5.3: SHA3-256(ss_M ‖ ss_X ‖ ct_X ‖
+        // pk_X ‖ XWingLabel). Runs entirely through
+        // softhsmrustv3::native::derive::run_combiner — the same
+        // Combiner::Concat + FinalizeStep machinery KMIP's hybrid-KEM
+        // combiners use, proven correct against this exact recipe by
+        // rust/src/native/derive.rs's
+        // run_combiner_xwing_sha3_256_recipe_matches_direct test. Every
+        // intermediate handle (component secrets, the concatenated-then-
+        // transcript-appended running secret) is destroyed inside
+        // run_combiner before it returns; only the final combined secret
+        // ever reaches this call site.
+        use softhsmrustv3::constants::CKM_SHA3_256_KEY_DERIVATION;
+        use softhsmrustv3::native::derive::{run_combiner, Combiner, FinalizeStep};
+
+        let sess = self.pq_session()?;
+        let mut transcript = Vec::with_capacity(ct_x.len() + pk_x.len() + crate::hpke::XWING_LABEL.len());
+        transcript.extend_from_slice(ct_x);
+        transcript.extend_from_slice(pk_x);
+        transcript.extend_from_slice(&crate::hpke::XWING_LABEL);
+        let combiner = Combiner::Concat {
+            finalize: vec![
+                FinalizeStep::ConcatData(transcript),
+                FinalizeStep::Digest(CKM_SHA3_256_KEY_DERIVATION),
+            ],
+        };
+        run_combiner(sess, &[ss_m, ss_x], &combiner)
+            .map_err(|rv| PqcTodayError::Kem(format!("X-Wing combiner failed: 0x{rv:08x}")))
     }
 
     fn chacha20_poly1305(

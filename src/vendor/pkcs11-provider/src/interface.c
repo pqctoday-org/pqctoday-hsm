@@ -76,6 +76,15 @@ struct p11prov_interface {
     CK_C_VerifyFinal VerifyFinal;
     CK_C_GenerateKey GenerateKey;
     CK_C_GenerateKeyPair GenerateKeyPair;
+    /* AES Key Wrap remediation item (2026-08-30): added so cipher.c can
+     * implement CKM_AES_KEY_WRAP/_KWP as an OSSL_OP_CIPHER by driving
+     * C_WrapKey/C_UnwrapKey directly -- this engine only ever exposed
+     * these two mechanisms via key-object wrap/unwrap semantics (never
+     * via C_Encrypt/C_Decrypt; confirmed against SoftHSM_cipher.cpp and
+     * SoftHSM_slots.cpp's own CKF_WRAP|CKF_UNWRAP-only CK_MECHANISM_INFO
+     * flags), so this provider previously had no need to call either. */
+    CK_C_WrapKey WrapKey;
+    CK_C_UnwrapKey UnwrapKey;
     CK_C_DeriveKey DeriveKey;
     CK_C_SeedRandom SeedRandom;
     CK_C_GenerateRandom GenerateRandom;
@@ -158,6 +167,8 @@ static void populate_interface(P11PROV_INTERFACE *intf, CK_INTERFACE *ck_intf)
     ASSIGN_FN(VerifyFinal);
     ASSIGN_FN(GenerateKey);
     ASSIGN_FN(GenerateKeyPair);
+    ASSIGN_FN(WrapKey);
+    ASSIGN_FN(UnwrapKey);
     ASSIGN_FN(DeriveKey);
     ASSIGN_FN(SeedRandom);
     ASSIGN_FN(GenerateRandom);

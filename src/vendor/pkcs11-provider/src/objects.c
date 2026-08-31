@@ -6140,6 +6140,17 @@ P11PROV_OBJ *p11prov_obj_import_secret_key(P11PROV_CTX *ctx, CK_KEY_TYPE type,
     switch (type) {
     case CKK_AES:
     case CKK_CHACHA20:
+    /* AES-XTS remediation item (2026-08-30): CKK_AES_XTS keys are the
+     * double-width (256 or 512-bit) raw key material PKCS#11 v3.2
+     * §6.15.2 defines for CKM_AES_XTS -- SoftHSM_cipher.cpp's own XTS
+     * dispatch requires exactly this key type (CKR_KEY_TYPE_INCONSISTENT
+     * otherwise). p11prov_store_aes_key() is already generic over both
+     * CK_KEY_TYPE and CKA_VALUE length (it just copies `type`/`key`/
+     * `keylen` verbatim into the CK_CREATE_ATTRIBUTE template), so no
+     * other change is needed here to make an arbitrary-length import
+     * work -- confirmed by reading p11prov_store_aes_key() directly
+     * rather than assuming. */
+    case CKK_AES_XTS:
         rv = p11prov_store_aes_key(ctx, &obj, type, key, keylen, NULL, usage,
                                    true);
         if (rv != CKR_OK) {

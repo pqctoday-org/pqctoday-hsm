@@ -16,11 +16,13 @@ Sibling integration to:
 | `hash` | `C_DigestInit` + `C_Digest` (SHA-256/384/512) | yes |
 | `hmac` | `C_SignInit(CKM_*_HMAC)` + `C_Sign` | yes |
 | `hkdf_extract` / `hkdf_expand` | RFC 5869 over `CKM_*_HMAC` (HSM-resident IKM/PRK) | yes |
-| `aead_encrypt` / `aead_decrypt` | `CKM_AES_GCM` | yes |
+| `aead_encrypt` / `aead_decrypt` (suites 1, 2) | `CKM_AES_GCM` | yes |
+| `aead_encrypt` / `aead_decrypt` (suite 3, X-Wing) | `CKM_CHACHA20_POLY1305` via the `softhsmrustv3` Rust engine (`backend.rs`'s `PkcsOps::chacha20_poly1305`) | yes |
 | `signature_key_gen` | `C_GenerateKeyPair(CKM_EC_EDWARDS_KEY_PAIR_GEN` / `CKM_EC_KEY_PAIR_GEN)` as **token object** | yes |
 | `sign` / `verify_signature` | `CKM_EDDSA` / `CKM_ECDSA_SHA*` | yes |
 | HPKE / `DhKem25519`+`HkdfSha256`+`AesGcm128` | `CKM_ECDH1_DERIVE` + `CKM_SHA256_HMAC` + `CKM_AES_GCM` (RFC 9180 in `hpke.rs`) | yes |
-| HPKE / other suites | `hpke-rs-rust-crypto` fallback in-process | **no — Phase 2.1** |
+| HPKE / X-Wing (ML-KEM-768 + X25519) + ChaCha20-Poly1305 | ML-KEM-768 keygen/encapsulate/decapsulate + X25519 `CKM_ECDH1_DERIVE`, SHAKE-256 seed expansion and the SHA3-256 combiner via the Rust engine's `native::derive::{shake256_xof, run_combiner}`, `CKM_CHACHA20_POLY1305` for the AEAD (draft-connolly-cfrg-xwing-kem in `hpke.rs`) | yes |
+| HPKE / other suites (`DhKemP256`/`P384`/`P521`/`448`) | `hpke-rs-rust-crypto` fallback in-process | **no — Phase 2.1** |
 
 ## Signature key custody
 
@@ -45,15 +47,26 @@ We unpack it on every `sign()` and look up the matching token object via
 `C_FindObjects({ CKA_CLASS=PRIVATE_KEY, CKA_ID=… })`. Real key bytes never
 exist in process memory.
 
-## Supported ciphersuites (v0.1)
+## Supported ciphersuites
 
 - `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`
 - `MLS_128_DHKEMP256_AES128GCM_SHA256_P256`
+- `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` (suite 3 — added
+  2026-08-10; the ChaCha20-Poly1305 record-layer AEAD was already
+  implemented for HPKE's own inner AEAD, just not declared for the record
+  layer; the WG interop rig had already exercised it under the union of
+  both peers' advertised suites)
+- `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519` (post-quantum — X-Wing
+  (ML-KEM-768 + X25519) with Ed25519 signatures; the only PQ suite the
+  released `openmls_traits` defines)
 
-These are the two MLS RFC 9420 baseline ciphersuites whose primitives all
-map cleanly onto mechanisms softhsmv3 already supports. PQ ciphersuites
-(`draft-ietf-mls-pq-ciphersuites`) wait for upstream OpenMLS to land
-the registry entries — see Phase 2 below.
+The first two are the MLS RFC 9420 baseline ciphersuites whose primitives
+map cleanly onto mechanisms softhsmv3 already supports. Suite 3 and X-Wing
+are `draft-ietf-mls-pq-ciphersuites`-adjacent constructions this provider
+wires directly against `openmls_traits::types::Ciphersuite`'s existing
+variants — see the "What runs in the HSM" table above for exactly which
+primitives each one dispatches through the engine, and Phase 4 below for
+what's still open.
 
 ## Usage
 
@@ -143,13 +156,21 @@ write-through caching if a use case demands it).
 
 ### Phase 4 — PQ ciphersuites (`draft-ietf-mls-pq-ciphersuites`)
 
-Once upstream OpenMLS registers PQ ciphersuites in
-`openmls_traits::types::Ciphersuite`, wire ML-KEM and ML-DSA through:
+**✅ KEM half done (2026-08-10).** `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`
+— the one PQ suite the released `openmls_traits` defines — is wired end to
+end: X-Wing's ML-KEM-768 half runs through `CKM_ML_KEM_KEY_PAIR_GEN` /
+`CKM_ML_KEM_ENCAPSULATE` / `CKM_ML_KEM_DECAPSULATE` (via the
+`softhsmrustv3` Rust engine — `cryptoki` 0.10's mechanism allowlist and
+function-list enum don't reach these v3.2 additions, so this path goes
+through the engine's `native::*` typed API rather than `cryptoki`), and
+its SHAKE-256/SHA3-256 combiner steps run through the same engine's
+`native::derive` module. See the "What runs in the HSM" table above.
 
-- `CKM_ML_KEM_KEY_PAIR_GEN` / `CKM_ML_KEM_ENCAPSULATE` / `CKM_ML_KEM_DECAPSULATE`
-- `CKM_ML_DSA_KEY_PAIR_GEN` / `CKM_ML_DSA`
-
-All four mechanisms are already implemented by softhsmv3 (FIPS 203 / 204).
+**Still open: PQ signatures.** This suite signs with Ed25519, not ML-DSA —
+the released `openmls_traits::types::Ciphersuite` has no ML-KEM+ML-DSA
+combination yet. When one lands, wire it through
+`CKM_ML_DSA_KEY_PAIR_GEN` / `CKM_ML_DSA`, both already implemented by
+softhsmv3 (FIPS 204).
 
 ### Phase 5 — WASM target
 
@@ -242,11 +263,11 @@ cargo run --release --bin pqctoday-mls-grpc -- --port 50053
 | Implementation | RustCrypto crates (`sha2`, `aes-gcm`, `hpke-rs`, `ed25519-dalek`, `p256`) | Cryspen libcrux (formally-verified primitives) | PKCS#11 v3.2 via `cryptoki` |
 | Backing | pure-Rust software | pure-Rust software | softhsmv3 native module (any conformant module works) |
 | Signature key custody | in-process `Vec<u8>` | in-process `Vec<u8>` | **HSM token object, `CKA_EXTRACTABLE=FALSE`** |
-| HPKE execution | in-process (`hpke-rs-rust-crypto`) | in-process (`hpke-rs-libcrux`) | **HSM-resident for X25519+SHA256+AES128GCM (Phase 2)** |
+| HPKE execution | in-process (`hpke-rs-rust-crypto`) | in-process (`hpke-rs-libcrux`) | **HSM-resident for X25519+SHA256+AES128GCM (Phase 2) and X-Wing+SHA256+ChaCha20Poly1305 (Phase 4)** |
 | Hash / HMAC / HKDF | in-process | in-process (verified) | **HSM-resident via `CKM_*`** |
-| AEAD | in-process | in-process (verified) | **HSM-resident via `CKM_AES_GCM`** |
+| AEAD | in-process | in-process (verified) | **HSM-resident via `CKM_AES_GCM`** (suites 1, 2) **/ `CKM_CHACHA20_POLY1305`** (suite 3, X-Wing) |
 | Randomness | OS `getrandom` | OS `getrandom` | **HSM DRBG via `C_GenerateRandom`** |
-| PQ KEM / signature scheme support | none | ML-KEM available in `libcrux` but not wired to OpenMLS provider yet | softhsmv3 ships `CKM_ML_KEM_*` + `CKM_ML_DSA` ready; provider exposure waits on upstream ciphersuite registry (Phase 4) |
+| PQ KEM / signature scheme support | none | ML-KEM available in `libcrux` but not wired to OpenMLS provider yet | **ML-KEM (X-Wing) wired and HSM-resident (Phase 4)**; ML-DSA signatures still open — no released `openmls_traits` ciphersuite combines them yet |
 | FIPS validation path | n/a | n/a (libcrux is formally-verified, not FIPS-validated) | **inherited from the underlying HSM** — drop in a FIPS-validated module (Luna, nCipher, Entrust) without changing the provider |
 | Browser / WASM | yes (via `openmls-wasm` wrapper) | yes | **Phase 5 complete** — `WasmPkcs11Backend` in `backend.rs` drives softhsmrustv3 `C_*` calls directly; `cargo check --target wasm32-unknown-unknown` passes clean |
 

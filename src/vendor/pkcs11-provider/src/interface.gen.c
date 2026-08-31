@@ -1298,6 +1298,70 @@ CK_RV p11prov_GenerateKeyPair(
     return ret;
 }
 
+CK_RV p11prov_WrapKey(P11PROV_CTX *ctx, CK_SESSION_HANDLE hSession,
+                      CK_MECHANISM_PTR pMechanism,
+                      CK_OBJECT_HANDLE hWrappingKey, CK_OBJECT_HANDLE hKey,
+                      CK_BYTE_PTR pWrappedKey, CK_ULONG_PTR pulWrappedKeyLen)
+{
+    P11PROV_INTERFACE *intf = p11prov_ctx_get_interface(ctx);
+    CK_RV ret = CKR_GENERAL_ERROR;
+    if (!intf) {
+        P11PROV_raise(ctx, ret, "Can't get module interfaces");
+        return ret;
+    }
+    if (p11prov_ctx_is_call_blocked(ctx, P11PROV_BLOCK_WrapKey)) {
+        P11PROV_debug("C_%s is blocked", "WrapKey");
+        return CKR_FUNCTION_NOT_SUPPORTED;
+    }
+    if (!intf->WrapKey) {
+        P11PROV_debug("C_%s is not available", "WrapKey");
+        return CKR_FUNCTION_NOT_SUPPORTED;
+    }
+    P11PROV_debug("Calling C_"
+                  "WrapKey");
+    ret = intf->WrapKey(hSession, pMechanism, hWrappingKey, hKey, pWrappedKey,
+                        pulWrappedKeyLen);
+    if (ret != CKR_OK) {
+        P11PROV_debug("Error %ld returned by C_"
+                      "WrapKey",
+                      ret);
+    }
+    return ret;
+}
+
+CK_RV p11prov_UnwrapKey(P11PROV_CTX *ctx, CK_SESSION_HANDLE hSession,
+                       CK_MECHANISM_PTR pMechanism,
+                       CK_OBJECT_HANDLE hUnwrappingKey,
+                       CK_BYTE_PTR pWrappedKey, CK_ULONG ulWrappedKeyLen,
+                       CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+                       CK_OBJECT_HANDLE_PTR phKey)
+{
+    P11PROV_INTERFACE *intf = p11prov_ctx_get_interface(ctx);
+    CK_RV ret = CKR_GENERAL_ERROR;
+    if (!intf) {
+        P11PROV_raise(ctx, ret, "Can't get module interfaces");
+        return ret;
+    }
+    if (p11prov_ctx_is_call_blocked(ctx, P11PROV_BLOCK_UnwrapKey)) {
+        P11PROV_debug("C_%s is blocked", "UnwrapKey");
+        return CKR_FUNCTION_NOT_SUPPORTED;
+    }
+    if (!intf->UnwrapKey) {
+        P11PROV_debug("C_%s is not available", "UnwrapKey");
+        return CKR_FUNCTION_NOT_SUPPORTED;
+    }
+    P11PROV_debug("Calling C_"
+                  "UnwrapKey");
+    ret = intf->UnwrapKey(hSession, pMechanism, hUnwrappingKey, pWrappedKey,
+                          ulWrappedKeyLen, pTemplate, ulAttributeCount, phKey);
+    if (ret != CKR_OK) {
+        P11PROV_debug("Error %ld returned by C_"
+                      "UnwrapKey",
+                      ret);
+    }
+    return ret;
+}
+
 CK_RV p11prov_DeriveKey(P11PROV_CTX *ctx, CK_SESSION_HANDLE hSession,
                         CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hBaseKey,
                         CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,

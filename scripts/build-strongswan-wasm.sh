@@ -98,6 +98,36 @@ cd src/libstrongswan/asn1
 perl oid.pl oid.txt oid.h oid.c
 cd "$SRC_DIR"
 
+# 4.5. OID_SECP224R1/384R1/521R1 compat aliases. This 6.0.5 tarball's own
+#      oid.txt names these three curve OIDs OID_SECT224R1/384R1/521R1 (an
+#      upstream naming quirk in this OID arc — several genuinely-secp
+#      curves in this block are prefixed OID_SECT, not OID_SECP; see
+#      oid.txt around "secp224r1"/"secp384r1"/"secp521r1"). The
+#      pqctoday-hsm strongswan-pkcs11 plugin (pkcs11_dh.c,
+#      pkcs11_public_key.c) was written against newer strongSwan
+#      (6.0.6/6.0.7) naming, which uses OID_SECP224R1 etc., so it fails
+#      with "use of undeclared identifier 'OID_SECP224R1'" against this
+#      6.0.5 oid.h unless aliased. Idempotent via grep guard.
+OID_H="src/libstrongswan/asn1/oid.h"
+if ! grep -q "WASM_OID_SECP_COMPAT" "$OID_H"; then
+    cat >> "$OID_H" <<'EOF'
+
+/* WASM_OID_SECP_COMPAT — see build-strongswan-wasm.sh step 4.5. */
+#ifndef OID_SECP224R1
+#define OID_SECP224R1 OID_SECT224R1
+#endif
+#ifndef OID_SECP384R1
+#define OID_SECP384R1 OID_SECT384R1
+#endif
+#ifndef OID_SECP521R1
+#define OID_SECP521R1 OID_SECT521R1
+#endif
+EOF
+    echo "[build]   appended OID_SECP224R1/384R1/521R1 compat aliases to $OID_H"
+else
+    echo "[build]   $OID_H already has OID_SECP compat aliases, skipping"
+fi
+
 # 5. Overlay pqctoday pkcs11 plugin (must happen before the WASM patch
 #    because the WASM patch targets pkcs11_library.c in this tree).
 echo "[build] Overlaying pqctoday pkcs11 plugin from $PLUGIN_SRC..."

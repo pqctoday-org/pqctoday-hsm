@@ -191,6 +191,30 @@ pub fn digest(mech: u32, data: &[u8]) -> Result<Vec<u8>, CkRv> {
     })
 }
 
+/// One-shot SHAKE-256 XOF (extendable-output function), squeezing `out_len`
+/// bytes. `sha3::Shake256` is already used inside this engine (`ffi.rs`'s
+/// ML-DSA external-mu digest path, `crypto/handlers.rs`'s `MuGen`); this
+/// exposes the same primitive as a plain one-shot function for a native
+/// caller that has no digest-derivation session state of its own — same
+/// motivation as [`digest`] above (get the hash from THIS engine instead of
+/// a caller-local `sha3` crate dependency). No `CKM_SHAKE_256` codepoint
+/// exists to route through `digest`/`digest_of` (both fixed-length
+/// `CKM_SHA*` families), and a XOF has no failure mode over raw bytes, so
+/// this returns `Vec<u8>` directly rather than `Result<_, CkRv>`.
+///
+/// Used by `openmls-provider`'s X-Wing key-expansion
+/// (draft-connolly-cfrg-xwing-kem §5.2 `expandDecapsulationKey`, §5.6
+/// `DeriveKeyPair`) — SHAKE-256 output is squeezed to a length that varies
+/// by call site (96 bytes / 32 bytes), not a fixed digest size.
+pub fn shake256_xof(data: &[u8], out_len: usize) -> Vec<u8> {
+    use sha3::digest::{ExtendableOutput, Update, XofReader};
+    let mut h = sha3::Shake256::default();
+    h.update(data);
+    let mut out = vec![0u8; out_len];
+    h.finalize_xof().read(&mut out);
+    out
+}
+
 /// HKDF (RFC 5869) over the PRF selected by `prf` — `Extract(salt, ikm)` then
 /// `Expand(info)` to `len` bytes. Mirrors the `hkdf` crate usage in the FFI
 /// `C_DeriveKey` HKDF arm (`ffi.rs`) so the mechanism→hasher mapping is

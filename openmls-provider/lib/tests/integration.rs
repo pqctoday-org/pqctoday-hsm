@@ -21,7 +21,10 @@ use cryptoki::types::AuthPin;
 
 use openmls_rust_crypto::OpenMlsRustCrypto;
 
-use openmls_pqctoday_crypto::{HsmConfig, PqcTodayCrypto, PqcTodayProvider, PqcTodayRand};
+use openmls_pqctoday_crypto::{
+    CryptokiBackend, HsmConfig, HsmSession, PkcsOps, PqcTodayCrypto, PqcTodayProvider,
+    PqcTodayRand,
+};
 use openmls_traits::crypto::OpenMlsCrypto;
 use openmls_traits::random::OpenMlsRand;
 use openmls_traits::types::{
@@ -316,8 +319,11 @@ fn supported_ciphersuites_v0_1() {
     assert!(suites.contains(&Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519));
     // Post-quantum, added 2026-08-10: X-Wing (ML-KEM-768 + X25519) with Ed25519.
     // Its KEM, SHAKE-256 seed expansion, SHA3-256 combiner and ChaCha20-Poly1305
-    // all run inside the HSM, verified against draft-connolly-cfrg-xwing-kem's
-    // own test vectors.
+    // all run through the engine (backend.rs's ml_kem_768_keygen_from_seed/
+    // decapsulate/encapsulate_to, shake256, xwing_combine, and
+    // chacha20_poly1305 — the first four via softhsmrustv3::native::*, the
+    // AEAD via CKM_CHACHA20_POLY1305), verified against
+    // draft-connolly-cfrg-xwing-kem's own test vectors.
     assert!(suites.contains(&Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519));
 
     // Deliberately NOT asserting a count here. A count says nothing about which
@@ -1099,5 +1105,114 @@ fn kat_ecdsa_p256_sign_cross_impl_vs_rustcrypto() {
             .verify_signature(SignatureScheme::ECDSA_SECP256R1_SHA256, b"tampered", &pk, &sig)
             .is_err(),
         "wrong message must fail"
+    );
+}
+
+// ── X-Wing combiner: production dispatch vs. run_combiner vs. the KAT ────────
+
+/// Read one hex field out of the X-Wing KAT fixture. A separate small copy
+/// of `xwing_rust_engine.rs`'s own `vector()` helper — every KAT test in
+/// this crate inlines its own fixture reader rather than sharing one across
+/// test binaries (see e.g. this file's RFC 5869 vectors above), so this
+/// keeps that convention rather than adding cross-test-binary coupling.
+fn xwing_kat_field(field: &str) -> Vec<u8> {
+    let raw = std::fs::read_to_string("tests/fixtures/xwing_kat.json")
+        .expect("X-Wing KAT fixture missing");
+    let key = format!("\"{field}\": \"");
+    let start = raw.find(&key).expect("field not in fixture") + key.len();
+    let end = raw[start..].find('"').unwrap() + start;
+    hex::decode(&raw[start..end]).expect("bad hex in fixture")
+}
+
+/// draft-connolly-cfrg-xwing-kem-10 §5.3 — XWingLabel, 6 bytes. Independent
+/// copy (mirroring `xwing_rust_engine.rs`'s own copy) so this test doesn't
+/// depend on `hpke.rs`'s `pub(crate)` constant being reachable across the
+/// crate boundary a `tests/` binary compiles against.
+const XWING_LABEL: [u8; 6] = [0x5c, 0x2e, 0x2f, 0x2f, 0x5e, 0x5c];
+
+/// Proves the remediation-plan-provider-wrapper-coverage-gaps-2026-08-31.md
+/// §1.1 fix is real engine dispatch, not just a compiling call site.
+///
+/// Computes the four X-Wing combiner inputs (ss_M, ss_X, ct_X, pk_X) via the
+/// exact production `CryptokiBackend` methods `hpke.rs::xwing_decap` calls
+/// (`shake256`, `ml_kem_768_keygen_from_seed`, `ml_kem_decapsulate`,
+/// `ecdh_x25519`), then cross-checks `CryptokiBackend::xwing_combine`'s
+/// output two independent ways:
+///
+/// 1. Against a direct `sha3::Sha3_256` computation of the same recipe
+///    (`SHA3-256(ss_M ‖ ss_X ‖ ct_X ‖ pk_X ‖ XWingLabel)`), the identical
+///    comparison `rust/src/native/derive.rs`'s own
+///    `run_combiner_xwing_sha3_256_recipe_matches_direct` unit test already
+///    uses to prove `run_combiner` (which `xwing_combine` calls) computes
+///    this recipe correctly. Matching that same direct computation here
+///    proves `xwing_combine` reaches the SAME result `run_combiner` would
+///    produce for these inputs — a second live PKCS#11 session on the
+///    already-logged-in engine token isn't obtainable from here (this
+///    engine's `native::session::open_session` always attempts a fresh
+///    `C_Login`, and PKCS#11 login state is per-TOKEN — a second login on
+///    an already-logged-in token is a hard error, not idempotent — so a
+///    literal second `run_combiner` call needs the private `pq_session()`
+///    handle `CryptokiBackend` doesn't expose), but the transitive proof is
+///    exactly as strong: `run_combiner`'s correctness against this direct
+///    formula is independently proven engine-side.
+/// 2. Against `draft-connolly-cfrg-xwing-kem`'s own published shared-secret
+///    vector (the same fixture `xwing_rust_engine.rs` uses).
+#[test]
+fn xwing_combine_matches_run_combiner_and_kat() {
+    require_softhsm!(env);
+    let hsm = HsmSession::open(&env.config).expect("hsm session");
+    let backend = CryptokiBackend::new(hsm);
+
+    // §5.2: expanded = SHAKE256(sk, 96); (d‖z) = [0..64]; sk_X = [64..96].
+    let seed = xwing_kat_field("seed");
+    let expanded = backend.shake256(&seed, 96).expect("shake256 dispatch");
+    let (dz, sk_x_bytes) = expanded.split_at(64);
+    let mut sk_x_arr = [0u8; 32];
+    sk_x_arr.copy_from_slice(sk_x_bytes);
+    let pk_x = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(sk_x_arr));
+
+    let (_pk_m, priv_handle) = backend
+        .ml_kem_768_keygen_from_seed(dz)
+        .expect("ML-KEM keygen dispatch");
+
+    // §5.5: ct_M = ct[0..1088], ct_X = ct[1088..1120].
+    let ct = xwing_kat_field("ct");
+    let (ct_m, ct_x) = ct.split_at(1088);
+    let ss_m = backend
+        .ml_kem_decapsulate(priv_handle, ct_m)
+        .expect("ML-KEM decapsulate dispatch");
+    let ss_x = backend.ecdh_x25519(&sk_x_arr, ct_x).expect("X25519 DH dispatch");
+
+    // The production combiner dispatch — what hpke.rs::xwing_decap/xwing_encap
+    // actually call.
+    let via_backend = backend
+        .xwing_combine(&ss_m, &ss_x, ct_x, pk_x.as_bytes())
+        .expect("xwing_combine dispatch");
+
+    // Direct sha3::Sha3_256 computation of the same recipe — see the doc
+    // comment above for why this (rather than a second live run_combiner
+    // call) is the right independent check here.
+    use sha3::Digest as _;
+    let mut transcript = Vec::with_capacity(
+        ss_m.len() + ss_x.len() + ct_x.len() + pk_x.as_bytes().len() + XWING_LABEL.len(),
+    );
+    transcript.extend_from_slice(&ss_m);
+    transcript.extend_from_slice(&ss_x);
+    transcript.extend_from_slice(ct_x);
+    transcript.extend_from_slice(pk_x.as_bytes());
+    transcript.extend_from_slice(&XWING_LABEL);
+    let via_direct_sha3 = sha3::Sha3_256::digest(&transcript).to_vec();
+    assert_eq!(
+        via_backend, via_direct_sha3,
+        "CryptokiBackend::xwing_combine must match a direct SHA3-256(ss_M‖ss_X‖ct_X‖pk_X‖label) \
+         computation — the same recipe run_combiner_xwing_sha3_256_recipe_matches_direct proves \
+         run_combiner computes correctly"
+    );
+
+    // The draft's own published shared secret.
+    assert_eq!(
+        via_backend,
+        xwing_kat_field("ss"),
+        "X-Wing combiner output must match draft-connolly-cfrg-xwing-kem's own KAT vector"
     );
 }

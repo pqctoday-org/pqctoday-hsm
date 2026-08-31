@@ -232,6 +232,23 @@ IMPL_INTERFACE_FN_8_ARG(GenerateKeyPair, CK_SESSION_HANDLE, hSession,
                         ulPrivateKeyAttributeCount, CK_OBJECT_HANDLE_PTR,
                         phPublicKey, CK_OBJECT_HANDLE_PTR, phPrivateKey)
 
+/* AES Key Wrap remediation item (2026-08-30): cipher.c's own AES-WRAP/
+ * AES-WRAP-PAD OSSL_OP_CIPHER registration drives these two directly --
+ * this engine only ever exposed CKM_AES_KEY_WRAP/_KWP via key-object
+ * wrap/unwrap semantics, never via C_Encrypt/C_Decrypt, so no caller
+ * needed these wrappers before now. */
+IMPL_INTERFACE_FN_6_ARG(WrapKey, CK_SESSION_HANDLE, hSession,
+                        CK_MECHANISM_PTR, pMechanism, CK_OBJECT_HANDLE,
+                        hWrappingKey, CK_OBJECT_HANDLE, hKey, CK_BYTE_PTR,
+                        pWrappedKey, CK_ULONG_PTR, pulWrappedKeyLen)
+
+IMPL_INTERFACE_FN_8_ARG(UnwrapKey, CK_SESSION_HANDLE, hSession,
+                        CK_MECHANISM_PTR, pMechanism, CK_OBJECT_HANDLE,
+                        hUnwrappingKey, CK_BYTE_PTR, pWrappedKey, CK_ULONG,
+                        ulWrappedKeyLen, CK_ATTRIBUTE_PTR, pTemplate,
+                        CK_ULONG, ulAttributeCount, CK_OBJECT_HANDLE_PTR,
+                        phKey)
+
 IMPL_INTERFACE_FN_6_ARG(DeriveKey, CK_SESSION_HANDLE, hSession,
                         CK_MECHANISM_PTR, pMechanism, CK_OBJECT_HANDLE,
                         hBaseKey, CK_ATTRIBUTE_PTR, pTemplate, CK_ULONG,

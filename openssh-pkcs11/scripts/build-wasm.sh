@@ -59,8 +59,8 @@ fi
 # Both source files must be copied BEFORE running the patch script: its S1 step
 # rewrites Makefile.in to reference ssh-mldsa.o AND ssh-slhdsa.o, so a missing
 # ssh-slhdsa.c fails the build at link time rather than here.
-echo "[openssh-pkcs11] Applying ML-DSA-65 (draft-sfluhrer-ssh-mldsa-06) +"
-echo "[openssh-pkcs11] SLH-DSA-SHA2-128s (draft-josefsson-ssh-sphincs-02) patches..."
+echo "[openssh-pkcs11] Applying ML-DSA-44/65/87 (draft-sfluhrer-ssh-mldsa-08) +"
+echo "[openssh-pkcs11] SLH-DSA 8-parameter-set (draft-josefsson-ssh-sphincs-02) patches..."
 cp "$ROOT/patches/ssh-mldsa.c"  "$OPENSSH_SRC/"
 cp "$ROOT/patches/ssh-slhdsa.c" "$OPENSSH_SRC/"
 (cd "$OPENSSH_SRC" && python3 "$ROOT/patches/apply_mldsa_patches.py")

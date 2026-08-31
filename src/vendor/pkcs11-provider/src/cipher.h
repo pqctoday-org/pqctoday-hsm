@@ -130,6 +130,19 @@ struct p11prov_cipher_ctx {
      * CK_CHACHA20_PARAMS pBlockCounter/pNonce pointers set in
      * prep_mech's own CKM_CHACHA20 case -- see that case's comment. */
     unsigned char chacha_iv_bytes[16];
+
+    /* AES Key Wrap remediation item (2026-08-30): CKM_AES_KEY_WRAP/_KWP.
+     * OpenSSL's own AES-WRAP ciphers do all their real work in a single
+     * OSSL_FUNC_CIPHER_UPDATE call ("Multiple calls to update are not
+     * allowed, since the algorithm relies on all fields being present" --
+     * confirmed against providers/implementations/ciphers/
+     * cipher_aes_wrp.c) and leave FINAL a pure no-op; wrap_done enforces
+     * the same single-call contract here. See p11prov_aes_wrap_update()'s
+     * own comment for why this mechanism family needs an entirely
+     * different backing call (C_WrapKey/C_UnwrapKey, not C_EncryptInit/
+     * C_EncryptUpdate/C_EncryptFinal) than every other cipher in this
+     * file. Unused (stays false) for every other mechanism. */
+    bool wrap_done;
 };
 
 /* Generic entry points, shared verbatim across every cipher family that
@@ -185,6 +198,26 @@ int p11prov_cipher_aead_set_tag_param(struct p11prov_cipher_ctx *ctx,
 #define MODE_cts MODE_flag_cts | MODE_cbc
 #define MODE_stream 0x80
 #define MODE_poly1305 0x81 | MODE_flag_aead
+/* AES-XTS remediation item (2026-08-30): cipher-registration only (the
+ * CKK_AES_XTS double-width key-type/keymgmt concern is separate -- see
+ * objects.c's own p11prov_obj_import_secret_key() comment). Streams like
+ * CBC/CTS (arbitrary chunks straight through to C_EncryptUpdate/
+ * C_DecryptUpdate, with the final chunk allowed to be shorter than a
+ * block -- ciphertext stealing happens inside the real OpenSSL
+ * EVP_aes_*_xts() cipher the engine calls, confirmed by reading
+ * OSSLEVPSymmetricAlgorithm::encryptUpdate/Final directly: neither
+ * function imposes any block-alignment check of its own), so it reuses
+ * DISPATCH_TABLE_CIPHER_FN unchanged -- no AEAD, no CTS flag (XTS's own
+ * stealing is unconditional, unlike CBC-CS's selectable cts_mode). */
+#define MODE_xts 0x03
+/* AES Key Wrap remediation item (2026-08-30): CKM_AES_KEY_WRAP (plain,
+ * RFC 3394) and CKM_AES_KEY_WRAP_KWP (padded, RFC 5649 -- also used for
+ * the deprecated CKM_AES_KEY_WRAP_PAD spelling; SoftHSM_keygen.cpp treats
+ * both mechanism IDs as the exact same construction). Neither is a
+ * streaming mode -- see p11prov_aes_wrap_update()'s own comment -- so
+ * these use DISPATCH_TABLE_CIPHER_WRAP_FN, not DISPATCH_TABLE_CIPHER_FN. */
+#define MODE_wrap 0x05
+#define MODE_wrappad 0x06
 
 #define DISPATCH_CIPHER_FN(alg, name) \
     DECL_DISPATCH_FUNC(cipher, p11prov_##alg, name)
@@ -211,6 +244,61 @@ int p11prov_cipher_aead_set_tag_param(struct p11prov_cipher_ctx *ctx,
           (void (*)(void))p11prov_cipher_decrypt_init }, \
         { OSSL_FUNC_CIPHER_UPDATE, (void (*)(void))p11prov_cipher_update }, \
         { OSSL_FUNC_CIPHER_FINAL, (void (*)(void))p11prov_cipher_final }, \
+        { OSSL_FUNC_CIPHER_CIPHER, \
+          (void (*)(void))p11prov_##cipher##_cipher }, \
+        { OSSL_FUNC_CIPHER_GET_PARAMS, \
+          (void (*)(void))p11prov_##cipher##size##mode##_get_params }, \
+        { OSSL_FUNC_CIPHER_GET_CTX_PARAMS, \
+          (void (*)(void))p11prov_##cipher##_get_ctx_params }, \
+        { OSSL_FUNC_CIPHER_SET_CTX_PARAMS, \
+          (void (*)(void))p11prov_##cipher##_set_ctx_params }, \
+        { OSSL_FUNC_CIPHER_GETTABLE_PARAMS, \
+          (void (*)(void))p11prov_cipher_gettable_params }, \
+        { OSSL_FUNC_CIPHER_GETTABLE_CTX_PARAMS, \
+          (void (*)(void))p11prov_##cipher##_gettable_ctx_params }, \
+        { OSSL_FUNC_CIPHER_SETTABLE_CTX_PARAMS, \
+          (void (*)(void))p11prov_##cipher##_settable_ctx_params }, \
+        { OSSL_FUNC_CIPHER_ENCRYPT_SKEY_INIT, \
+          (void (*)(void))p11prov_cipher_encrypt_skey_init }, \
+        { OSSL_FUNC_CIPHER_DECRYPT_SKEY_INIT, \
+          (void (*)(void))p11prov_cipher_decrypt_skey_init }, \
+        OSSL_DISPATCH_END \
+    };
+
+/* AES Key Wrap remediation item (2026-08-30). Identical to
+ * DISPATCH_TABLE_CIPHER_FN except UPDATE/FINAL point at the wrap-mode
+ * pair (p11prov_aes_wrap_update/p11prov_aes_wrap_final, cipher.c) instead
+ * of the generic streaming p11prov_cipher_update/p11prov_cipher_final --
+ * see MODE_wrap/MODE_wrappad's own comment above and
+ * p11prov_aes_wrap_update()'s own comment in cipher.c for why AES-WRAP
+ * needs a genuinely different backing call than every other cipher this
+ * file registers. Every other dispatch entry (newctx, init, dupctx,
+ * get/set_ctx_params, ...) is shared verbatim with the streaming macro,
+ * since key import and operation bookkeeping work identically either
+ * way. */
+#define DISPATCH_TABLE_CIPHER_WRAP_FN(cipher, size, mode, mechanism) \
+    static void *p11prov_##cipher##size##mode##_newctx(void *provctx) \
+    { \
+        return p11prov_cipher_newctx(provctx, size, mechanism); \
+    } \
+    static int p11prov_##cipher##size##mode##_get_params(OSSL_PARAM params[]) \
+    { \
+        return p11prov_##cipher##_get_params(params, size, MODE_##mode, \
+                                             mechanism); \
+    } \
+    const OSSL_DISPATCH p11prov_##cipher##size##mode##_cipher_functions[] = { \
+        { OSSL_FUNC_CIPHER_NEWCTX, \
+          (void (*)(void))p11prov_##cipher##size##mode##_newctx }, \
+        { OSSL_FUNC_CIPHER_FREECTX, (void (*)(void))p11prov_cipher_freectx }, \
+        { OSSL_FUNC_CIPHER_DUPCTX, \
+          (void (*)(void))p11prov_##cipher##_dupctx }, \
+        { OSSL_FUNC_CIPHER_ENCRYPT_INIT, \
+          (void (*)(void))p11prov_cipher_encrypt_init }, \
+        { OSSL_FUNC_CIPHER_DECRYPT_INIT, \
+          (void (*)(void))p11prov_cipher_decrypt_init }, \
+        { OSSL_FUNC_CIPHER_UPDATE, \
+          (void (*)(void))p11prov_aes_wrap_update }, \
+        { OSSL_FUNC_CIPHER_FINAL, (void (*)(void))p11prov_aes_wrap_final }, \
         { OSSL_FUNC_CIPHER_CIPHER, \
           (void (*)(void))p11prov_##cipher##_cipher }, \
         { OSSL_FUNC_CIPHER_GET_PARAMS, \
@@ -262,6 +350,25 @@ extern const OSSL_DISPATCH p11prov_aes256gcm_cipher_functions[];
 extern const OSSL_DISPATCH p11prov_aes128ccm_cipher_functions[];
 extern const OSSL_DISPATCH p11prov_aes192ccm_cipher_functions[];
 extern const OSSL_DISPATCH p11prov_aes256ccm_cipher_functions[];
+
+/* AES-XTS remediation item (2026-08-30): no 192-bit variant -- OpenSSL
+ * itself only defines AES-128-XTS/AES-256-XTS (XTS combines two AES keys,
+ * so each name's *total* key material is double its number: 256 bits =
+ * two AES-128 keys, 512 bits = two AES-256 keys). */
+extern const OSSL_DISPATCH p11prov_aes128xts_cipher_functions[];
+extern const OSSL_DISPATCH p11prov_aes256xts_cipher_functions[];
+
+/* AES Key Wrap remediation item (2026-08-30): "wrap" registrations use
+ * CKM_AES_KEY_WRAP (RFC 3394, plain); "wrappad" registrations use
+ * CKM_AES_KEY_WRAP_KWP (RFC 5649, padded) for OpenSSL's "*-WRAP-PAD"
+ * names -- see MODE_wrap/MODE_wrappad's own comment above for why a
+ * single mechanism ID covers both the KWP and deprecated PAD spellings. */
+extern const OSSL_DISPATCH p11prov_aes128wrap_cipher_functions[];
+extern const OSSL_DISPATCH p11prov_aes192wrap_cipher_functions[];
+extern const OSSL_DISPATCH p11prov_aes256wrap_cipher_functions[];
+extern const OSSL_DISPATCH p11prov_aes128wrappad_cipher_functions[];
+extern const OSSL_DISPATCH p11prov_aes192wrappad_cipher_functions[];
+extern const OSSL_DISPATCH p11prov_aes256wrappad_cipher_functions[];
 
 extern const OSSL_DISPATCH p11prov_chacha20256stream_cipher_functions[];
 extern const OSSL_DISPATCH p11prov_chacha20256poly1305_cipher_functions[];

@@ -47,7 +47,37 @@ tree) and `../scripts/build-strongswan-wasm.sh`.
    ```
 
 3. Configure an IKEv2 connection that negotiates a PQC key-exchange group
-   (ML-KEM-768) and `auth = pubkey` referencing the token cert
-   (`pkcs11:token=...;id=...;type=cert`), then initiate — the KE and the
-   authentication signature both run through the token. See
-   `../docs/softhsmv3opsguide.md` §4 for the full `swanctl.conf` example.
+   (ML-KEM-512, ML-KEM-768, or ML-KEM-1024 — all three are wired through
+   `pkcs11_kem_create()`/`PLUGIN_PROVIDE(KE, ...)`) and `auth = pubkey`
+   referencing the token cert (`pkcs11:token=...;id=...;type=cert`), then
+   initiate — the KE and the authentication signature both run through the
+   token. See `../docs/softhsmv3opsguide.md` §4 for the full
+   `swanctl.conf` example.
+
+## Hybrid key exchange (RFC 9370)
+
+This plugin's `pkcs11_kem_t` slots into strongSwan's own unmodified RFC 9370
+multi-key-exchange machinery (IKE_INTERMEDIATE, ADDKE1-7 transform types) —
+no wrapper-level hybrid logic of our own, just a `key_exchange_t`
+implementation strongSwan's real proposal parser can select for any KE
+round, including the additional ones. A proposal string that pairs an
+ML-KEM group as the initial IKE_SA_INIT key exchange with a classical ECP
+group as Additional Key Exchange 1 looks like:
+
+```
+aes256-sha256-mlkem768-ke1_ecp256
+```
+
+Any of the three registered ML-KEM sizes works as the primary KE method,
+independently of which one (if any) is layered in via `ke1_`:
+
+```
+aes256-sha256-mlkem512-ke1_ecp256
+aes256-sha256-mlkem768-ke1_ecp256
+aes256-sha256-mlkem1024-ke1_ecp256
+```
+
+`strongswan-wasm-shims/wasm_backend.c` demonstrates this proposal shape
+end-to-end (`proposal_ike_hybrid`) as part of its hybrid proposal mode; see
+`../docs/softhsmv3opsguide.md` §4 for the equivalent `swanctl.conf`
+`proposals =` line.

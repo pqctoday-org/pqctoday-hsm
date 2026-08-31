@@ -417,6 +417,33 @@ extern const OSSL_DISPATCH
 #define P11PROV_DESCS_AES_192_CCM "AES-192 CCM PKCS11 Provider Implementation"
 #define P11PROV_NAMES_AES_128_CCM "AES-128-CCM:id-aes128-CCM"
 #define P11PROV_DESCS_AES_128_CCM "AES-128 CCM PKCS11 Provider Implementation"
+/* AES-XTS remediation item (2026-08-30). Names confirmed against
+ * `docs.openssl.org/3.6/man7/EVP_CIPHER-AES/`: only 128/256-bit variants
+ * exist (XTS combines two AES keys, so there is no 192-bit XTS). */
+#define P11PROV_NAMES_AES_256_XTS "AES-256-XTS"
+#define P11PROV_DESCS_AES_256_XTS "AES-256 XTS PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_128_XTS "AES-128-XTS"
+#define P11PROV_DESCS_AES_128_XTS "AES-128 XTS PKCS11 Provider Implementation"
+/* AES Key Wrap remediation item (2026-08-30). Names confirmed against
+ * `docs.openssl.org/3.6/man7/EVP_CIPHER-AES/`. "AES-*-WRAP-PAD" (RFC
+ * 5649) is registered once, backed by CKM_AES_KEY_WRAP_KWP -- see
+ * cipher.c's own DISPATCH_TABLE_CIPHER_WRAP_FN(..., wrappad, ...) call
+ * sites for why CKM_AES_KEY_WRAP_PAD needs no separate registration. */
+#define P11PROV_NAMES_AES_256_WRAP "AES-256-WRAP:id-aes256-wrap"
+#define P11PROV_DESCS_AES_256_WRAP "AES-256 WRAP PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_192_WRAP "AES-192-WRAP:id-aes192-wrap"
+#define P11PROV_DESCS_AES_192_WRAP "AES-192 WRAP PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_128_WRAP "AES-128-WRAP:id-aes128-wrap"
+#define P11PROV_DESCS_AES_128_WRAP "AES-128 WRAP PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_256_WRAP_PAD "AES-256-WRAP-PAD:id-aes256-wrap-pad"
+#define P11PROV_DESCS_AES_256_WRAP_PAD \
+    "AES-256 WRAP-PAD PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_192_WRAP_PAD "AES-192-WRAP-PAD:id-aes192-wrap-pad"
+#define P11PROV_DESCS_AES_192_WRAP_PAD \
+    "AES-192 WRAP-PAD PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_128_WRAP_PAD "AES-128-WRAP-PAD:id-aes128-wrap-pad"
+#define P11PROV_DESCS_AES_128_WRAP_PAD \
+    "AES-128 WRAP-PAD PKCS11 Provider Implementation"
 /* Phase 5 R26. Names confirmed live against `openssl list -cipher-
  * algorithms -provider default` -- no OID alias for either, unlike most
  * AES variants above. */
