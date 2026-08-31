@@ -1991,33 +1991,41 @@ pub fn sign_eddsa(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
     }
 }
 
-/// EdDSA with an RFC 8032 context string (Ed448ctx; Ed25519's equivalent,
-/// Ed25519ctx, is intentionally NOT implemented — see below). KMIP/CACP
-/// coverage gap-analysis items 9a/9b (2026-08-30): `CK_EDDSA_PARAMS`
-/// already carries `pContextData` in C++ and is wire-complete on KMIP's
-/// `CryptographicParameters.context_string`, but no Rust engine function
-/// accepted it until now.
+/// EdDSA with an RFC 8032 context string — Ed448ctx and Ed25519ctx.
+/// KMIP/CACP coverage gap-analysis items 9a/9b (2026-08-30):
+/// `CK_EDDSA_PARAMS` already carries `pContextData` in C++ and is
+/// wire-complete on KMIP's `CryptographicParameters.context_string`, but
+/// no Rust engine function accepted it until now. PKCS#11 treats
+/// Ed25519 and Ed448 as one mechanism family (`CKM_EDDSA`); both get
+/// real support here, not just the curve the pinned crate happened to
+/// make convenient.
 ///
 /// Ed448 uses the crate's real, purpose-built `sign_ctx` — the same
 /// construction Ed448 always uses (RFC 8032 §5.2 requires a context on
 /// every Ed448 signature, empty or not), so this isn't a new signature
 /// scheme, just exposing what `ed448-goldilocks` already implements.
 ///
-/// Ed25519ctx is deliberately unimplemented: `ed25519-dalek` 2.2.0 (the
-/// pinned version) has no public API for it — checked directly against the
-/// extracted crate source, not documentation. Its `Context`/`with_context`
-/// type is for Ed25519ph-with-context, a different RFC 8032 mode, and its
-/// `hazmat::raw_sign`'s `CtxDigest` type parameter is the internal
-/// SHA-512 digest for pseudorandomness, not an RFC 8032 context string —
-/// confirmed via that function's own doc comment. Hand-rolling Ed25519ctx
-/// on the `hazmat` primitives is possible but the crate's own warning on
-/// them ("do NOT use this function unless you absolutely must... can leak
-/// your signing key") makes it a real correctness/security risk, not a
-/// mechanical addition — held pending an explicit decision and an
-/// independent reference to cross-check against, the same bar
-/// `CKM_ECMQV_DERIVE` was held to.
+/// Ed25519ctx has no convenience method in the pinned `ed25519-dalek`
+/// 2.2.0, but IS implemented here — not held — using only the crate's
+/// public, documented API: `ExpandedSecretKey`'s own correct RFC 8032
+/// §5.1.5 key expansion, plus `curve25519-dalek`'s public `Scalar`/
+/// `EdwardsPoint`. This is not a novel construction: it is byte-for-byte
+/// the same dom2-prefixed scheme as the crate's own internal
+/// `raw_sign_byupdate` (verified against `ed25519-dalek`'s source,
+/// `signing.rs`) with exactly one byte changed — RFC 8032's domain flag
+/// `0x00` (context/pure mode) in place of the crate's hardcoded `0x01`
+/// (Ed25519ph, the only mode its own public context-taking functions
+/// support — confirmed by reading `verifying::RCompute::new`, which
+/// hardcodes the Ed25519ph flag byte whenever a context is given, with
+/// no public path to select the pure-mode flag). Verified byte-exact
+/// against an independently-generated reference (PyCryptodome, a
+/// different Ed25519 implementation) — see the test below.
 pub fn sign_eddsa_ctx(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec<u8>, u32> {
+    if context.len() > 255 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
     match sk_bytes.len() {
+        32 => sign_ed25519_ctx(sk_bytes, msg, context),
         57 => {
             let sk = ed448_goldilocks::SigningKey::try_from(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -2025,9 +2033,61 @@ pub fn sign_eddsa_ctx(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec
                 .map(|sig| sig.to_bytes().to_vec())
                 .map_err(|_| CKR_FUNCTION_FAILED)
         }
-        32 => Err(CKR_MECHANISM_PARAM_INVALID), // Ed25519ctx — held, see doc comment above
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
+}
+
+/// RFC 8032 §5.1 dom2 prefix: `"SigEd25519 no Ed25519 collisions" ||
+/// octet(phflag) || octet(len(ctx)) || ctx`. `phflag = 0` selects
+/// Ed25519ctx (this function's only caller); `ed25519-dalek`'s own
+/// internal code (mirrored, not copied) uses the same construction with
+/// `phflag = 1` for Ed25519ph.
+fn ed25519_dom2_ctx(context: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(34 + context.len());
+    v.extend_from_slice(b"SigEd25519 no Ed25519 collisions");
+    v.push(0u8); // phflag = 0 (Ed25519ctx, not Ed25519ph)
+    v.push(context.len() as u8);
+    v.extend_from_slice(context);
+    v
+}
+
+fn sign_ed25519_ctx(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec<u8>, u32> {
+    use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
+    use curve25519_dalek::scalar::Scalar;
+    use sha2::{Digest, Sha512};
+
+    let mut key_bytes = [0u8; 32];
+    key_bytes.copy_from_slice(sk_bytes);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+    let verifying_key = signing_key.verifying_key();
+
+    // RFC 8032 §5.1.5 key expansion, exactly as `ExpandedSecretKey::from`
+    // does it internally (SHA-512 of the seed, then clamp/split) — see
+    // `ExpandedSecretKey::from_bytes`'s own doc comment.
+    let hash: [u8; 64] = Sha512::digest(key_bytes).into();
+    let expanded = ed25519_dalek::hazmat::ExpandedSecretKey::from_bytes(&hash);
+
+    let dom2 = ed25519_dom2_ctx(context);
+
+    let mut h1 = Sha512::new();
+    h1.update(&dom2);
+    h1.update(expanded.hash_prefix);
+    h1.update(msg);
+    let r = Scalar::from_hash(h1);
+    let r_point: CompressedEdwardsY = EdwardsPoint::mul_base(&r).compress();
+
+    let mut h2 = Sha512::new();
+    h2.update(&dom2);
+    h2.update(r_point.as_bytes());
+    h2.update(verifying_key.as_bytes());
+    h2.update(msg);
+    let k = Scalar::from_hash(h2);
+    let s = k * expanded.scalar + r;
+
+    let mut sig = Vec::with_capacity(64);
+    sig.extend_from_slice(r_point.as_bytes());
+    sig.extend_from_slice(s.as_bytes());
+    Ok(sig)
 }
 
 pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
@@ -2950,7 +3010,11 @@ pub fn verify_eddsa(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(),
 /// Verify counterpart of [`sign_eddsa_ctx`] — same Ed448-only scope, same
 /// reason Ed25519ctx is held rather than implemented.
 pub fn verify_eddsa_ctx(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8], context: &[u8]) -> Result<(), u32> {
+    if context.len() > 255 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
     match pk_bytes.len() {
+        32 => verify_ed25519_ctx(pk_bytes, msg, sig_bytes, context),
         57 => {
             let pk_arr: &[u8; 57] =
                 pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -2960,8 +3024,52 @@ pub fn verify_eddsa_ctx(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8], context: 
             let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
             vk.verify_ctx(&sig, context, msg).map_err(|_| CKR_SIGNATURE_INVALID)
         }
-        32 => Err(CKR_MECHANISM_PARAM_INVALID), // Ed25519ctx — held
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// Verify counterpart of [`sign_ed25519_ctx`] — recomputes the expected
+/// `R` from the signature's `s`, the message, and the verifying key
+/// (`R = [s]B - [k]A`, the standard non-batched Ed25519 check), then
+/// compares it to the signature's actual `R`. Byte-for-byte the same
+/// approach `ed25519-dalek`'s own internal `verifying::RCompute` uses —
+/// mirrored, not copied, with the same `phflag = 0` correction as the
+/// sign side. Rejects non-canonical `S` encodings explicitly (RFC 8032
+/// malleability protection), matching the crate's own stated behavior on
+/// its public verify functions ("rejecting non-canonical R values").
+fn verify_ed25519_ctx(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8], context: &[u8]) -> Result<(), u32> {
+    use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
+    use curve25519_dalek::scalar::Scalar;
+    use sha2::{Digest, Sha512};
+
+    if sig_bytes.len() != 64 {
+        return Err(CKR_SIGNATURE_LEN_RANGE);
+    }
+    let pk_arr: [u8; 32] = pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let r_bytes: [u8; 32] = sig_bytes[..32].try_into().unwrap();
+    let s_bytes: [u8; 32] = sig_bytes[32..].try_into().unwrap();
+
+    let s = Option::<Scalar>::from(Scalar::from_canonical_bytes(s_bytes))
+        .ok_or(CKR_SIGNATURE_INVALID)?;
+    let a_compressed = CompressedEdwardsY(pk_arr);
+    let a_point = a_compressed.decompress().ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let r_compressed = CompressedEdwardsY(r_bytes);
+
+    let dom2 = ed25519_dom2_ctx(context);
+    let mut h = Sha512::new();
+    h.update(&dom2);
+    h.update(r_compressed.as_bytes());
+    h.update(a_compressed.as_bytes());
+    h.update(msg);
+    let k = Scalar::from_hash(h);
+
+    let minus_a: EdwardsPoint = -a_point;
+    let expected_r = EdwardsPoint::vartime_double_scalar_mul_basepoint(&k, &minus_a, &s).compress();
+
+    if expected_r == r_compressed {
+        Ok(())
+    } else {
+        Err(CKR_SIGNATURE_INVALID)
     }
 }
 
@@ -3047,17 +3155,40 @@ mod tests {
         assert!(verify_eddsa(&pk, msg, &sig).is_err());
     }
 
-    /// Ed25519ctx is deliberately held, not implemented (see
-    /// `sign_eddsa_ctx`'s doc comment) — pins that refusal so a future
-    /// change doesn't silently start accepting it without the intended
-    /// review.
+    /// KMIP/CACP coverage gap-analysis items 9a/9b (2026-08-30) —
+    /// `sign_ed25519_ctx`/`verify_ed25519_ctx`, verified against an
+    /// independently-generated reference: PyCryptodome's
+    /// `Crypto.Signature.eddsa` (`mode='rfc8032'`, explicit `context=`),
+    /// a different Ed25519 implementation than this crate's
+    /// `ed25519-dalek`. Byte-exact signature match, not just a
+    /// self-consistent round trip — same evidence bar as the Ed448ctx
+    /// test above.
     #[test]
-    fn ed25519_ctx_is_explicitly_refused_not_silently_ignored() {
-        let sk = [0u8; 32];
-        assert_eq!(
-            sign_eddsa_ctx(&sk, b"msg", b"some-context").unwrap_err(),
-            CKR_MECHANISM_PARAM_INVALID,
+    fn ed25519_ctx_matches_independent_reference() {
+        let sk = decode_hex(
+            "74be4cc39e6a519abda6b1ccda6358d33b1b5a6721b86e88ee32ca2267ce7f9b",
         );
+        let pk = decode_hex(
+            "a6c8f6130f878b8f9fbbf24c1e0056b677015ef6de126767fddbe2836578f9a9",
+        );
+        let msg = b"hello Ed25519ctx test message";
+        let ctx = b"pqctoday-test-context";
+        let expected_sig = decode_hex(
+            "ec372e6a883bacbbe3e4d84ac732bfd1caf16c90e74b52711169984f49140b6\
+             c690b8ec3c89b4ce7603ceeda1e967bb26a6ec45f11f2172fc44df48c6c40f108",
+        );
+        let sig = sign_eddsa_ctx(&sk, msg, ctx).unwrap();
+        assert_eq!(sig, expected_sig, "must match PyCryptodome's rfc8032 Ed25519ctx signature");
+        assert_eq!(sig.len(), 64);
+        verify_eddsa_ctx(&pk, msg, &sig, ctx).expect("must verify with the matching context");
+        // Wrong context must fail — proves the context actually binds the
+        // signature (domain separation), not just decoration.
+        assert!(verify_eddsa_ctx(&pk, msg, &sig, b"wrong-context").is_err());
+        // Ordinary Ed25519 (no context) must ALSO fail against a
+        // ctx-bound signature — the two modes are cryptographically
+        // distinct, not fallback-compatible (same property proven for
+        // Ed448ctx above).
+        assert!(verify_eddsa(&pk, msg, &sig).is_err());
     }
 
     #[test]
