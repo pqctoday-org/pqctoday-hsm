@@ -29,8 +29,6 @@ hpke-rs = { version = "0.6", features = ["hazmat", "serialization"] }
 hpke-rs-rust-crypto = "0.6"
 hpke-rs-crypto = "0.6"
 
-# Software AEAD for cipher suites the HSM doesn't natively support (e.g. ChaCha20Poly1305).
-chacha20poly1305 = "0.10"
 aes-gcm = "0.10"
 
 tls_codec = "0.4"
@@ -50,14 +48,17 @@ cryptoki = "0.10"
 # rust/RUST_P11_V32_CONFORMANCE_REPORT.md (257+301 tests). Used for the
 # post-quantum path, where cryptoki cannot express the mechanisms at all.
 softhsmrustv3 = { path = "../../rust" }
-# SHA3-256 / SHAKE-256 for the X-Wing combiner and seed expansion. Same crate
-# the Rust engine uses internally, so both sides agree by construction.
-sha3 = "0.10"
-# Direct symbol resolution for the PKCS#11 v3.2 KEM entry points and SHA3-256,
-# neither of which `cryptoki` 0.10 can express: its function-list enum stops at
-# CK_FUNCTION_LIST_3_0, and its mechanism allowlist has no SHA3. See
-# `src/kem_ffi.rs` for the full reasoning. Same crate cryptoki itself uses, so
-# this adds no new transitive dependency.
+# SHA3-256 (X-Wing's combiner) and SHAKE-256 (X-Wing's seed expansion) both
+# run through softhsmrustv3::native::derive (run_combiner / shake256_xof) —
+# see backend.rs's CryptokiBackend::xwing_combine and ::shake256 — not a
+# `sha3` crate dependency of this crate's own; softhsmrustv3 already depends
+# on it. Same crate either way, so both sides still agree by construction.
+#
+# Not used directly by this crate's own code — `cryptoki` pulls it in
+# transitively for its own dlopen of the PKCS#11 module (`session.rs`).
+# Formerly justified here by a direct symbol-resolution path in a
+# `src/kem_ffi.rs` that no longer exists (superseded by the softhsmrustv3
+# rlib dependency above).
 libloading = "0.8"
 
 # When compiling to wasm32, force `getrandom` to use the JS RNG (Crypto API
@@ -68,9 +69,6 @@ libloading = "0.8"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
 softhsmrustv3 = { path = "../../rust" }
-# SHA3-256 / SHAKE-256 for the X-Wing combiner and seed expansion. Same crate
-# the Rust engine uses internally, so both sides agree by construction.
-sha3 = "0.10"
 
 [dev-dependencies]
 env_logger = "0.11"

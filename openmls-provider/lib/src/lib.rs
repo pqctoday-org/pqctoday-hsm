@@ -4,18 +4,20 @@
 //! [`openmls_traits::crypto::OpenMlsCrypto`] surface through a PKCS#11
 //! token — softhsmv3 by default, but any conformant module works.
 //!
-//! ## What runs in the HSM (v0.1)
+//! ## What runs in the HSM
 //!
 //! | Operation                  | PKCS#11 mechanism            | In-HSM |
 //! | -------------------------- | ---------------------------- | :----: |
 //! | `hash`                     | `CKM_SHA256` / `SHA512`      | yes    |
 //! | `hmac`                     | `CKM_SHA256_HMAC` / `SHA512` | yes    |
 //! | `hkdf_extract` / `_expand` | `CKM_HKDF_DERIVE`            | yes    |
-//! | `aead_encrypt` / `_decrypt`| `CKM_AES_GCM`                | yes    |
+//! | `aead_encrypt` / `_decrypt` (suites 1, 2) | `CKM_AES_GCM`  | yes    |
+//! | `aead_encrypt` / `_decrypt` (suite 3, X-Wing) | `CKM_CHACHA20_POLY1305` via the `softhsmrustv3` Rust engine | yes |
 //! | `signature_key_gen`        | `CKM_EC_EDWARDS_KEY_PAIR_GEN` / `CKM_EC_KEY_PAIR_GEN` | yes |
 //! | `sign` / `verify_signature`| `CKM_EDDSA` / `CKM_ECDSA`    | yes    |
 //! | HPKE / DhKem25519+SHA256+AES128GCM | `CKM_ECDH1_DERIVE` + `CKM_SHA256_HMAC` + `CKM_AES_GCM` (RFC 9180) | yes |
-//! | HPKE / all other suites    | `hpke-rs-rust-crypto` fallback | **no — Phase 2.1** |
+//! | HPKE / X-Wing (ML-KEM-768 + X25519) + ChaCha20Poly1305 | ML-KEM keygen/encap/decap + `CKM_ECDH1_DERIVE` + SHAKE-256/SHA3-256 combiner (Rust engine `native::derive`) + `CKM_CHACHA20_POLY1305` | yes |
+//! | HPKE / other suites (P-384/P-521/448 DH-KEM) | `hpke-rs-rust-crypto` fallback | **no — Phase 2.1** |
 //!
 //! ## Signature key custody
 //!
@@ -28,10 +30,12 @@
 //!
 //! ## What about PQ ciphersuites?
 //!
-//! `draft-ietf-mls-pq-ciphersuites` is not yet registered upstream in
-//! `openmls_traits::types::Ciphersuite`. When upstream lands the registry,
-//! we'll wire `CKM_ML_DSA` / `CKM_ML_KEM_*` (already supported by
-//! softhsmv3) through this provider. See README §Phase 2.
+//! `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519` — the one PQ suite the
+//! released `openmls_traits::types::Ciphersuite` defines — is wired and
+//! HSM-resident as of 2026-08-10 (see the table above and README §Phase 4).
+//! It signs with Ed25519, not ML-DSA: no released `Ciphersuite` variant
+//! combines ML-KEM with ML-DSA yet. When one lands, `CKM_ML_DSA`
+//! (already supported by softhsmv3) is what wires it through.
 
 pub mod backend;
 mod crypto;
