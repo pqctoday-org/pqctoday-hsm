@@ -148,24 +148,40 @@ struct MacMechInfo {
 	MacAlgo::Type     algo;
 };
 
+// minKeyBytes for the plain-digest HMAC rows below is 0 ("no PKCS#11
+// minimum") rather than each digest's output length. RFC 2104 places no
+// lower bound on an HMAC key's length, and RFC 4231 §4.2's own official
+// HMAC-SHA-2 known-answer vectors deliberately exercise this: Test Case 1
+// uses a 20-byte key against SHA-224/256/384/512 (all of which have a
+// longer digest output), specifically to cover "key shorter than the hash
+// output". A prior version of this table set minKeyBytes = digest output
+// length for every HMAC row (rationalized in a since-removed comment as
+// "key length = digest output length"), which made MacSignInit/
+// MacVerifyInit reject that exact RFC 4231 TC1 key with CKR_KEY_SIZE_RANGE
+// — a real, spec-non-conformant regression, not a security floor (NIST
+// SP 800-107's "key length >= hash output" is a RECOMMENDATION for callers
+// choosing a key, never a requirement the verifier may enforce on a key it
+// didn't choose). Found 2026-08-31 via openmls-provider's RFC 4231/RFC 5869
+// cross-impl integration tests (RFC 5869 HKDF is implemented in terms of
+// HMAC here, so the same bug broke HKDF's extract step through its 13-byte
+// RFC 5869 §A.1 salt too). KMAC_128/256 below keep a real, NIST SP 800-185
+// mandated minimum — that family is unaffected.
 static const MacMechInfo kMacMechTable[] = {
 #ifdef WITH_RIPEMD160
-	// HMAC-RIPEMD-160 (native-only; legacy provider). Mirrors SHA-1-HMAC sizing.
-	{ CKM_RIPEMD160_HMAC,CKM_RIPEMD160_HMAC_GENERAL,CKK_RIPEMD160_HMAC,true,  20, MacAlgo::HMAC_RIPEMD160},
+	// HMAC-RIPEMD-160 (native-only; legacy provider).
+	{ CKM_RIPEMD160_HMAC,CKM_RIPEMD160_HMAC_GENERAL,CKK_RIPEMD160_HMAC,true,   0, MacAlgo::HMAC_RIPEMD160},
 #endif
-	{ CKM_SHA_1_HMAC,    CKM_SHA_1_HMAC_GENERAL,    CKK_SHA_1_HMAC,    true,  20, MacAlgo::HMAC_SHA1     },
-	{ CKM_SHA224_HMAC,   CKM_SHA224_HMAC_GENERAL,   CKK_SHA224_HMAC,   true,  28, MacAlgo::HMAC_SHA224   },
-	{ CKM_SHA256_HMAC,   CKM_SHA256_HMAC_GENERAL,   CKK_SHA256_HMAC,   true,  32, MacAlgo::HMAC_SHA256   },
-	{ CKM_SHA384_HMAC,   CKM_SHA384_HMAC_GENERAL,   CKK_SHA384_HMAC,   true,  48, MacAlgo::HMAC_SHA384   },
-	{ CKM_SHA512_HMAC,   CKM_SHA512_HMAC_GENERAL,   CKK_SHA512_HMAC,   true,  64, MacAlgo::HMAC_SHA512   },
-	// WS-6.3 (2026-08-30): FIPS 180-4 truncated variants, same minKeyBytes
-	// convention as every other row (key length = digest output length).
-	{ CKM_SHA512_224_HMAC, CKM_SHA512_224_HMAC_GENERAL, CKK_SHA512_224_HMAC, true, 28, MacAlgo::HMAC_SHA512_224 },
-	{ CKM_SHA512_256_HMAC, CKM_SHA512_256_HMAC_GENERAL, CKK_SHA512_256_HMAC, true, 32, MacAlgo::HMAC_SHA512_256 },
-	{ CKM_SHA3_224_HMAC, CKM_SHA3_224_HMAC_GENERAL, CKK_SHA3_224_HMAC, true,  28, MacAlgo::HMAC_SHA3_224 },
-	{ CKM_SHA3_256_HMAC, CKM_SHA3_256_HMAC_GENERAL, CKK_SHA3_256_HMAC, true,  32, MacAlgo::HMAC_SHA3_256 },
-	{ CKM_SHA3_384_HMAC, CKM_SHA3_384_HMAC_GENERAL, CKK_SHA3_384_HMAC, true,  48, MacAlgo::HMAC_SHA3_384 },
-	{ CKM_SHA3_512_HMAC, CKM_SHA3_512_HMAC_GENERAL, CKK_SHA3_512_HMAC, true,  64, MacAlgo::HMAC_SHA3_512 },
+	{ CKM_SHA_1_HMAC,    CKM_SHA_1_HMAC_GENERAL,    CKK_SHA_1_HMAC,    true,   0, MacAlgo::HMAC_SHA1     },
+	{ CKM_SHA224_HMAC,   CKM_SHA224_HMAC_GENERAL,   CKK_SHA224_HMAC,   true,   0, MacAlgo::HMAC_SHA224   },
+	{ CKM_SHA256_HMAC,   CKM_SHA256_HMAC_GENERAL,   CKK_SHA256_HMAC,   true,   0, MacAlgo::HMAC_SHA256   },
+	{ CKM_SHA384_HMAC,   CKM_SHA384_HMAC_GENERAL,   CKK_SHA384_HMAC,   true,   0, MacAlgo::HMAC_SHA384   },
+	{ CKM_SHA512_HMAC,   CKM_SHA512_HMAC_GENERAL,   CKK_SHA512_HMAC,   true,   0, MacAlgo::HMAC_SHA512   },
+	{ CKM_SHA512_224_HMAC, CKM_SHA512_224_HMAC_GENERAL, CKK_SHA512_224_HMAC, true, 0, MacAlgo::HMAC_SHA512_224 },
+	{ CKM_SHA512_256_HMAC, CKM_SHA512_256_HMAC_GENERAL, CKK_SHA512_256_HMAC, true, 0, MacAlgo::HMAC_SHA512_256 },
+	{ CKM_SHA3_224_HMAC, CKM_SHA3_224_HMAC_GENERAL, CKK_SHA3_224_HMAC, true,   0, MacAlgo::HMAC_SHA3_224 },
+	{ CKM_SHA3_256_HMAC, CKM_SHA3_256_HMAC_GENERAL, CKK_SHA3_256_HMAC, true,   0, MacAlgo::HMAC_SHA3_256 },
+	{ CKM_SHA3_384_HMAC, CKM_SHA3_384_HMAC_GENERAL, CKK_SHA3_384_HMAC, true,   0, MacAlgo::HMAC_SHA3_384 },
+	{ CKM_SHA3_512_HMAC, CKM_SHA3_512_HMAC_GENERAL, CKK_SHA3_512_HMAC, true,   0, MacAlgo::HMAC_SHA3_512 },
 	{ CKM_AES_CMAC,      0,                         CKK_AES,           false,  0, MacAlgo::CMAC_AES      },
 	{ CKM_KMAC_128,      0,                         CKK_GENERIC_SECRET,true,  16, MacAlgo::KMAC_128      },
 	{ CKM_KMAC_256,      0,                         CKK_GENERIC_SECRET,true,  32, MacAlgo::KMAC_256      },
@@ -200,7 +216,9 @@ static CK_RV resolveMacMech(CK_MECHANISM_TYPE mech, CK_KEY_TYPE keyType,
 		if (keyType != CKK_GENERIC_SECRET && keyType != CKK_MD5_HMAC)
 			return CKR_KEY_TYPE_INCONSISTENT;
 		algo          = MacAlgo::HMAC_MD5;
-		minKeyBytes   = 16;
+		// No PKCS#11-mandated minimum (see kMacMechTable's comment below):
+		// HMAC accepts any key length per RFC 2104.
+		minKeyBytes   = 0;
 		generalLength = (mech == CKM_MD5_HMAC_GENERAL);
 		return CKR_OK;
 	}
@@ -359,17 +377,16 @@ CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechani
 	}
 
 	// Enforce the same per-mechanism minimum key size that MacVerifyInit
-	// enforces (kMacMechTable.minKeyBytes — 0 means "no PKCS#11 minimum",
-	// e.g. CMAC, whose key size is already constrained by its AES key type).
-	// Before this fix Sign only rejected a fully empty key (bitLen==0),
-	// while Verify already rejected anything below minKeyBytes; the two
-	// were never wired to the same rule despite resolveMacMech() supplying
-	// minSize to both. That asymmetry meant a mechanism like
-	// CKM_SHA3_384_HMAC / CKM_SHA3_512_HMAC (minKeyBytes 48 / 64) would
-	// accept a sign with a shorter key and produce a real MAC, then reject
-	// verification of that very same MAC forever — a real round trip is
-	// impossible below the minimum, and PASS/FAIL now reflects that
-	// symmetrically. Found 2026-08-23 by the Gap 2 SHA3-HMAC round-trip test.
+	// enforces (kMacMechTable.minKeyBytes — 0 means "no PKCS#11 minimum";
+	// that's every plain-digest HMAC row now, plus CMAC/GMAC whose key size
+	// is already constrained by their AES key type — see kMacMechTable's own
+	// comment for why HMAC rows read 0 rather than their digest's output
+	// length). Keeping Sign and Verify wired to the same resolveMacMech()
+	// minSize matters for mechanisms that DO carry a real minimum (e.g.
+	// KMAC_128/256's NIST SP 800-185 floor): letting Sign accept a
+	// below-minimum key that Verify then always rejects would make a real
+	// round trip impossible while looking like two independently-correct
+	// checks. Found 2026-08-23 by the Gap 2 SHA3-HMAC round-trip test.
 	privkey->setBitLen(privkey->getKeyBits().size() * 8);
 
 	if (privkey->getBitLen() < (minSize * 8))
