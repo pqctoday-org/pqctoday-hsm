@@ -1078,6 +1078,90 @@ impl KmipPlayground {
         };
         serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
     }
+
+    /// Read back a Private/Public/Secret key's REAL engine-side PKCS#11
+    /// attributes (not the KMIP store record) by its KMIP uid — the same
+    /// pattern as `engine_certificate_attributes`, generalized to key
+    /// object types via `find_handle_for_object`'s existing per-class
+    /// dispatch. `CKA_VALUE`/`CKA_SEED` are deliberately never requested
+    /// here: for a sensitive/non-extractable key they're engine-blocked
+    /// anyway (PKCS#11 v3.2 §4.9/§4.10), so this surfaces exactly the
+    /// metadata attributes a real PKCS#11 caller can always see —
+    /// including the sensitivity/extractability flags themselves, which
+    /// is the educational point (an honest "no" beats a fabricated value).
+    #[wasm_bindgen]
+    pub fn engine_key_attributes(&self, uid: &str) -> String {
+        let outcome = (|| -> std::result::Result<Json, String> {
+            let session = self
+                .deps
+                .engine_session
+                .ok_or_else(|| "no engine session".to_string())?;
+            let rec = self
+                .deps
+                .store
+                .get(uid)
+                .map_err(|e| format!("store error: {e:?}"))?
+                .ok_or_else(|| "object not found".to_string())?;
+            let handle = pqctoday_kmip::ops::helpers::find_handle_for_object(
+                session,
+                &rec.pkcs11_cka_id,
+                rec.object_type,
+            )
+            .map_err(|rv| format!("engine lookup failed, rv=0x{rv:08x}"))?
+            .ok_or_else(|| "no engine object at this key's CKA_ID".to_string())?;
+
+            use softhsmrustv3::constants as c;
+            use softhsmrustv3::native::{get_attribute, get_attribute_bool, get_attribute_u32, CKA_LABEL};
+
+            let ck_class = get_attribute_u32(session, handle, c::CKA_CLASS);
+            let ck_key_type = get_attribute_u32(session, handle, c::CKA_KEY_TYPE);
+            let ck_label =
+                get_attribute(session, handle, CKA_LABEL).map(|b| String::from_utf8_lossy(&b).into_owned());
+            let ck_unique_id = get_attribute(session, handle, c::CKA_UNIQUE_ID)
+                .map(|b| String::from_utf8_lossy(&b).into_owned());
+            let ck_local = get_attribute_bool(session, handle, c::CKA_LOCAL);
+            let ck_sensitive = get_attribute_bool(session, handle, c::CKA_SENSITIVE);
+            let ck_extractable = get_attribute_bool(session, handle, c::CKA_EXTRACTABLE);
+            let ck_always_sensitive = get_attribute_bool(session, handle, c::CKA_ALWAYS_SENSITIVE);
+            let ck_never_extractable = get_attribute_bool(session, handle, c::CKA_NEVER_EXTRACTABLE);
+            // A key's "size" is reported under a different attribute per
+            // family — CKA_VALUE_LEN (symmetric, bytes), CKA_MODULUS_BITS
+            // (RSA, bits), or CKA_PARAMETER_SET (the PQC param-set
+            // codepoint, e.g. CKP_ML_DSA_65) — report whichever one this
+            // object actually carries, so the UI doesn't have to guess
+            // the key family to pick the right one.
+            let (size_attr, size_value) =
+                if let Some(v) = get_attribute_u32(session, handle, c::CKA_VALUE_LEN) {
+                    (Some("CKA_VALUE_LEN"), Some(v))
+                } else if let Some(v) = get_attribute_u32(session, handle, c::CKA_MODULUS_BITS) {
+                    (Some("CKA_MODULUS_BITS"), Some(v))
+                } else if let Some(v) = get_attribute_u32(session, handle, c::CKA_PARAMETER_SET) {
+                    (Some("CKA_PARAMETER_SET"), Some(v))
+                } else {
+                    (None, None)
+                };
+
+            Ok(json!({
+                "ckaId": hex_encode(&rec.pkcs11_cka_id),
+                "ckClass": ck_class,
+                "ckKeyType": ck_key_type,
+                "ckLabel": ck_label,
+                "ckUniqueId": ck_unique_id,
+                "ckLocal": ck_local,
+                "ckSensitive": ck_sensitive,
+                "ckExtractable": ck_extractable,
+                "ckAlwaysSensitive": ck_always_sensitive,
+                "ckNeverExtractable": ck_never_extractable,
+                "sizeAttr": size_attr,
+                "sizeValue": size_value,
+            }))
+        })();
+        let value = match outcome {
+            Ok(v) => v,
+            Err(e) => json!({ "error": e }),
+        };
+        serde_json::to_string(&value).unwrap_or_else(|_| "{}".into())
+    }
 }
 
 fn hex_decode(s: &str) -> std::result::Result<Vec<u8>, String> {
