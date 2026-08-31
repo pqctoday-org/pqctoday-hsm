@@ -12,11 +12,13 @@
 //! | `HASH` (0x02)  | "derives a key by computing a hash over the derivation key or the derivation data" |
 //! | `PBKDF2` (0x01)| PKCS#5 / RFC 2898 — password = base object material, Salt + Iteration Count from Derivation Parameters (§7.13 Table 465) |
 //! | `NIST800-108-C` (0x05) | SP 800-108 KDF in Counter Mode — `K(i) = HMAC(K, [i]₂ ‖ DerivationData)`, 32-bit big-endian counter from 1 (same fixed-input convention as the engine's `CKM_SP800_108_COUNTER_KDF` legacy default, `rust/src/ffi.rs`) |
+//! | `NIST800-108-DPI` (0x07) | SP 800-108 KDF in Double-Pipeline Iteration Mode (2026-08-30, KMIP/CACP coverage gap-analysis item 2.1) — `A(1) = HMAC(K, DerivationData)`, `K(i) = HMAC(K, A(i) ‖ [i]₂ ‖ DerivationData)`, `A(i+1) = HMAC(K, A(i))`; verified against this repo's real ACVP vectors (`tests/acvp/sp800_108_double_pipeline_test.json`) |
+//! | `Asymmetric Key` (0x08) | ECDH/X25519/X448 key agreement — engine computes the shared secret in-HSM, the private scalar never leaves it |
 //!
-//! `ENCRYPT` / `NIST800-108-F` / `NIST800-108-DPI` / `Asymmetric Key`
-//! / `AWS Signature Version 4` / `HKDF` fail with `Operation Not
-//! Supported` — one of the §6.1.18.1 Table 304 reasons — because this
-//! stack has no honest backing for them at the KMIP layer.
+//! `ENCRYPT` / `NIST800-108-F` / `AWS Signature Version 4` / `HKDF`
+//! fail with `Operation Not Supported` — one of the §6.1.18.1 Table 304
+//! reasons — because this stack has no honest backing for them at the
+//! KMIP layer.
 //!
 //! ## Key-material routing (K15 convention, compliance-audit B-9)
 //!
@@ -397,6 +399,48 @@ pub fn derive_key(
             out
         }
 
+        // §11.15 Table 546 / NIST SP 800-108r1 §5.3 — Double-Pipeline
+        // Iteration Mode. KMIP/CACP coverage gap-analysis item 2.1
+        // (2026-08-30): wire-layer already spec-complete
+        // (DerivationMethod::Nist800_108Dpi = 0x07 decodes today); this
+        // closes the op-layer dispatch. Construction verified against
+        // this repo's own real ACVP vectors
+        // (tests/acvp/sp800_108_double_pipeline_test.json,
+        // "counterLocation: before fixed data") and the engine's own
+        // sp800_108_run_double_pipeline (rust/src/ffi.rs) — A(1) =
+        // PRF(K, FixedInputData); round i output = PRF(K, A(i) ‖
+        // counter_i ‖ FixedInputData); A(i+1) = PRF(K, A(i)). Counter is
+        // a 4-byte big-endian value, matching this file's existing
+        // Nist800_108C convention above (that engine/ACVP construction
+        // uses a narrower counter in its own test vectors too — this
+        // file has never tried to match ACVP's counter width, only its
+        // byte-order and placement).
+        DerivationMethod::Nist800_108Dpi => {
+            let data = derivation_data.as_deref().ok_or_else(|| {
+                fail(KmipError::invalid_field(
+                    "NIST800-108-DPI derivation requires Derivation Data \
+                     (Label||{0x00}||Context per §7.13)",
+                ))
+            })?;
+            let hash = request_hash
+                .or_else(|| base_key_prf_hash(base))
+                .unwrap_or(HashingAlgorithm::Sha256);
+            let prf = hmac_prf(deps, deps.resolve_tenant_session(auth.identity.as_ref()).ok(), correlation_id, base, hash)?;
+            let mut a = prf(data)?; // A(1) = PRF(K, FixedInputData)
+            let mut out: Vec<u8> = Vec::with_capacity(len_bytes);
+            let mut counter: u32 = 1;
+            while out.len() < len_bytes {
+                let mut round_input = a.clone();
+                round_input.extend_from_slice(&counter.to_be_bytes());
+                round_input.extend_from_slice(data);
+                out.extend_from_slice(&prf(&round_input)?);
+                a = prf(&a)?; // A(i+1) = PRF(K, A(i))
+                counter += 1;
+            }
+            out.truncate(len_bytes);
+            out
+        }
+
         // §7.13 — Asymmetric Key agreement (ECDH / X25519 / X448). The base
         // object is the stored EC/ECDH PRIVATE key (engine-backed,
         // non-extractable); the peer's public key is the Derivation Data. The
@@ -434,12 +478,12 @@ pub fn derive_key(
         // §6.1.18.1 Table 304 lists `Operation Not Supported` — the
         // honest reason for methods this stack cannot back (no engine
         // primitive reachable from the KMIP layer and no in-process
-        // implementation): ENCRYPT, the SP 800-108 Feedback /
-        // Double-Pipeline modes, AWS SigV4, and HKDF.
+        // implementation): ENCRYPT, SP 800-108 Feedback mode, AWS SigV4,
+        // and HKDF. Double-Pipeline mode closed 2026-08-30 (above).
         other => {
             return Err(fail(KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("Derivation Method {other:?} is not supported (K20: PBKDF2 | HASH | HMAC | NIST800-108-C)"),
+                format!("Derivation Method {other:?} is not supported (K20: PBKDF2 | HASH | HMAC | NIST800-108-C | NIST800-108-DPI)"),
             )));
         }
     };
@@ -1061,6 +1105,53 @@ mod tests {
         assert_eq!(rec.key_material.as_deref().unwrap(), &expected[..]);
     }
 
+    /// SP 800-108 Double-Pipeline Iteration Mode (KMIP/CACP coverage
+    /// gap-analysis item 2.1, 2026-08-30) — independently reconstructs
+    /// the A(i) chain and round outputs via `soft_hmac` directly (same
+    /// pinning style as the Counter-mode tests above), locking the exact
+    /// construction: A(1) = HMAC(K, data); round i = HMAC(K, A(i) ‖
+    /// [i]₂ ‖ data); A(i+1) = HMAC(K, A(i)). This construction — A(i)
+    /// chaining, counter-before-fixed-data placement — is the same one
+    /// this repo's real ACVP vectors
+    /// (tests/acvp/sp800_108_double_pipeline_test.json) and the engine's
+    /// own sp800_108_run_double_pipeline (rust/src/ffi.rs) use; this test
+    /// pins the KMIP-layer reimplementation against that construction
+    /// re-derived independently in the test, not against the
+    /// implementation's own intermediate values.
+    #[test]
+    fn nist_108_double_pipeline_matches_construction() {
+        let (_r, d) = deps();
+        let key = b"kbkdf-double-pipeline-base-key".to_vec();
+        let data = b"L\x00C".to_vec();
+        put_base(&d, "kdk", ObjectType::SymmetricKey, KmipAlgorithm::HmacSha256,
+                 Some(key.clone()), UsageMask::DERIVE_KEY, State::Active);
+        let resp = derive_key(&d, DeriveKeyRequest {
+            object_type: ObjectType::SecretData,
+            uids: vec!["kdk".into()],
+            derivation_method: DerivationMethod::Nist800_108Dpi,
+            derivation_parameters: DerivationParameters {
+                derivation_data: Some(data.clone()),
+                ..Default::default()
+            },
+            template_attribute: vec![Attribute::CryptographicLength(72 * 8)],
+        }, &AuthContext::open(), "c").unwrap();
+        let rec = d.store.get(&resp.uid).unwrap().unwrap();
+
+        let mut a = soft_hmac(HashingAlgorithm::Sha256, &key, &data).unwrap(); // A(1)
+        let mut expected = Vec::new();
+        for i in 1u32..=3 {
+            let mut round_input = a.clone();
+            round_input.extend_from_slice(&i.to_be_bytes());
+            round_input.extend_from_slice(&data);
+            expected.extend_from_slice(
+                &soft_hmac(HashingAlgorithm::Sha256, &key, &round_input).unwrap(),
+            );
+            a = soft_hmac(HashingAlgorithm::Sha256, &key, &a).unwrap(); // A(i+1)
+        }
+        expected.truncate(72);
+        assert_eq!(rec.key_material.as_deref().unwrap(), &expected[..]);
+    }
+
     // ── Error matrix ─────────────────────────────────────────────────
 
     #[test]
@@ -1124,10 +1215,12 @@ mod tests {
                  Some(b"k".to_vec()), UsageMask::DERIVE_KEY, State::Active);
         // NB: AsymmetricKey (ECDH agreement) is now SUPPORTED — it is exercised
         // by the ecdh_recommended_curve_e2e integration test, not here.
+        // NB: Nist800_108Dpi is now SUPPORTED (2026-08-30, KMIP/CACP coverage
+        // gap-analysis item 2.1) — exercised by
+        // nist_108_double_pipeline_matches_construction below, not here.
         for method in [
             DerivationMethod::Encrypt,
             DerivationMethod::Nist800_108F,
-            DerivationMethod::Nist800_108Dpi,
             DerivationMethod::AwsSigV4,
             DerivationMethod::Hkdf,
         ] {

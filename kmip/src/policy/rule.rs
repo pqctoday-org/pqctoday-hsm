@@ -1509,6 +1509,8 @@ pub fn ckm_name_to_code(name: &str) -> Option<u32> {
         "CKM_PKCS5_PBKD2" => c::CKM_PKCS5_PBKD2,
         "CKM_SP800_108_COUNTER_KDF" => c::CKM_SP800_108_COUNTER_KDF,
         "CKM_SP800_108_FEEDBACK_KDF" => c::CKM_SP800_108_FEEDBACK_KDF,
+        // KMIP/CACP coverage gap-analysis item 2.1 (2026-08-30).
+        "CKM_SP800_108_DOUBLE_PIPELINE_KDF" => c::CKM_SP800_108_DOUBLE_PIPELINE_KDF,
         // A6.3 (2026-08-28 gaps-remediation plan) — previously ungateable by
         // name: the generic ECDH-as-KEM path (CKM_ECDH1_DERIVE under
         // C_Encapsulate/DecapsulateKey, combined with CKM_ML_KEM +
