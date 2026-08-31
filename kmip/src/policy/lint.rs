@@ -159,6 +159,74 @@ fn lint_ops(idx: usize, field: &'static str, values: &[String], out: &mut Vec<Fi
     }
 }
 
+/// KMIP/CACP coverage gap-analysis Phase 0.4 (2026-08-28/30) — the
+/// "known-name trap": these names are *valid* in their respective
+/// dialects (recognised, not typos — `bounded()` passes them clean), but
+/// the op-layer dispatch that would actually execute the mechanism/mode
+/// they name doesn't exist yet. A policy referencing one loads
+/// successfully and looks like it gates something, but the rule is
+/// inert — not a security hole (the engine fails closed regardless of
+/// policy for these), but a real risk that a compliance policy claims to
+/// enforce a control that cannot fire, or that a future PR wiring one of
+/// these up silently starts honoring an old, never-reviewed rule.
+///
+/// This list is a snapshot of the 2026-08-30 KMIP/CACP coverage audit —
+/// remove an entry here in the same change that wires up its dispatch
+/// (see kmip/src/ops/helpers.rs::aes_mechanism_for for the block-cipher
+/// modes, kmip/src/ops/sign.rs's is_pqc_sign_mech/native_mech selection
+/// for CKM_EDDSA_PH), not separately.
+fn undispatched_block_cipher_mode_reason(name: &str) -> Option<&'static str> {
+    match name {
+        "CCM" | "XTS" | "OFB" | "CFB" => Some(
+            "recognised, but ops/helpers.rs::aes_mechanism_for only dispatches \
+             CBC/CBC_PAD/ECB/CTR/GCM today — this mode cannot execute yet \
+             (KMIP/CACP coverage gap-analysis Phase 2, not yet wired)",
+        ),
+        _ => None,
+    }
+}
+
+/// See [`undispatched_block_cipher_mode_reason`] — same trap, `CKM_*`
+/// mechanism-name dialect. `CKM_EDDSA_PH` is the one entry: recognised by
+/// `ckm_name_to_code`, but KMIP's Sign/SignatureVerify dispatch never
+/// selects it (the engine/provider convention settled on plain
+/// `CKM_EDDSA` + `CK_EDDSA_PARAMS` for both prehash and context modes —
+/// see the 2026-08-30 EdDSA remediation commits).
+fn undispatched_ckm_reason(name: &str) -> Option<&'static str> {
+    match name {
+        "CKM_EDDSA_PH" => Some(
+            "recognised, but KMIP's Sign/SignatureVerify dispatch never selects this \
+             mechanism — EdDSA prehash mode is requested through CKM_EDDSA's own \
+             parameters, not by naming this mechanism (a rule gating it can never fire)",
+        ),
+        _ => None,
+    }
+}
+
+/// Emits a non-fatal advisory `Finding` when `value` is a known name (not
+/// a typo — call this only after the corresponding `bounded()` check
+/// passed) but has no live dispatch path per `reason_fn`. Unlike
+/// `bounded()`, never blocks policy load — see the module doc comment on
+/// [`undispatched_block_cipher_mode_reason`] for why this is a warning,
+/// not a hard error.
+fn advise_if_undispatched(
+    idx: usize,
+    field: &'static str,
+    value: &str,
+    reason_fn: impl Fn(&str) -> Option<&'static str>,
+    out: &mut Vec<Finding>,
+) {
+    if let Some(reason) = reason_fn(value) {
+        out.push(Finding {
+            rule_index: idx,
+            field,
+            value: value.to_string(),
+            fatal: false,
+            message: format!("{value:?} is a known-but-inert value: {reason}"),
+        });
+    }
+}
+
 fn bounded(
     idx: usize,
     field: &'static str,
@@ -286,6 +354,7 @@ fn lint_one(idx: usize, rule: &Rule, strict: bool, out: &mut Vec<Finding>) {
             }
             for m in allowed_block_cipher_modes {
                 bounded(idx, "allowed_block_cipher_modes", m, is_known_block_cipher_mode(m), "block cipher mode", out);
+                advise_if_undispatched(idx, "allowed_block_cipher_modes", m, undispatched_block_cipher_mode_reason, out);
             }
             for p in allowed_padding_methods {
                 bounded(idx, "allowed_padding_methods", p, is_known_padding_method(p), "padding method", out);
@@ -309,6 +378,7 @@ fn lint_one(idx: usize, rule: &Rule, strict: bool, out: &mut Vec<Finding>) {
             }
             if let Some(m) = block_cipher_mode {
                 bounded(idx, "block_cipher_mode", m, is_known_block_cipher_mode(m), "block cipher mode", out);
+                advise_if_undispatched(idx, "block_cipher_mode", m, undispatched_block_cipher_mode_reason, out);
             }
             if let Some(p) = padding_method {
                 bounded(idx, "padding_method", p, is_known_padding_method(p), "padding method", out);
@@ -330,12 +400,14 @@ fn lint_one(idx: usize, rule: &Rule, strict: bool, out: &mut Vec<Finding>) {
         Rule::MechanismAllowlist { ops, mechanisms, .. } => {
             for m in mechanisms {
                 bounded(idx, "mechanisms", m, is_known_ckm_name(m), "CKM_* mechanism", out);
+                advise_if_undispatched(idx, "mechanisms", m, undispatched_ckm_reason, out);
             }
             lint_ops(idx, "ops", ops, out);
         }
         Rule::MechanismDenylist { ops, mechanisms, .. } => {
             for m in mechanisms {
                 bounded(idx, "mechanisms", m, is_known_ckm_name(m), "CKM_* mechanism", out);
+                advise_if_undispatched(idx, "mechanisms", m, undispatched_ckm_reason, out);
             }
             lint_ops(idx, "ops", ops, out);
         }
@@ -631,6 +703,50 @@ mod tests {
         let findings = lint_rules(&[rule], false);
         assert!(findings.iter().any(|f| f.fatal && f.value == "CKM_TYPO"),
             "an unknown CKM name is always fatal (bounded vocabulary)");
+    }
+
+    /// KMIP/CACP coverage gap-analysis Phase 0.4 (2026-08-30) — a
+    /// known-but-inert mechanism name (recognised, but no live dispatch
+    /// path) loads cleanly (not fatal, unlike a real typo) but surfaces a
+    /// non-fatal advisory finding, distinguishable from both a typo and a
+    /// clean bill of health.
+    #[test]
+    fn known_but_undispatched_mechanism_is_advisory_not_fatal() {
+        let rule = Rule::MechanismDenylist {
+            ops: vec!["Encrypt".into()],
+            mechanisms: vec!["CKM_AES_GCM".into(), "CKM_EDDSA_PH".into()],
+            reason: "t".into(),
+            clause: None,
+            severity: Severity::Deny,
+        };
+        let findings = lint_rules(&[rule], false);
+        assert!(!findings.iter().any(|f| f.fatal),
+            "a known-but-inert name must not block policy load");
+        let advisory = findings.iter().find(|f| f.value == "CKM_EDDSA_PH")
+            .expect("CKM_EDDSA_PH must surface an advisory finding");
+        assert!(!advisory.fatal);
+        assert!(advisory.message.contains("known-but-inert"));
+        assert!(!findings.iter().any(|f| f.value == "CKM_AES_GCM"),
+            "a genuinely live mechanism must not trigger the advisory");
+    }
+
+    #[test]
+    fn known_but_undispatched_block_cipher_mode_is_advisory_not_fatal() {
+        let rule = Rule::MechanismParameterConstraint {
+            ops: vec!["Encrypt".into()],
+            algorithm: None,
+            allowed_block_cipher_modes: vec!["GCM".into(), "CCM".into()],
+            allowed_padding_methods: vec![],
+            require_deterministic: None,
+            reason: "t".into(),
+            clause: None,
+            severity: Severity::Deny,
+        };
+        let findings = lint_rules(&[rule], false);
+        assert!(!findings.iter().any(|f| f.fatal));
+        assert!(findings.iter().any(|f| f.value == "CCM" && !f.fatal));
+        assert!(!findings.iter().any(|f| f.value == "GCM"),
+            "GCM is genuinely dispatched — must not trigger the advisory");
     }
 
     #[test]
