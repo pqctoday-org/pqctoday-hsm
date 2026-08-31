@@ -69,7 +69,7 @@ import static com.pqctoday.hsm.jce.P11Constants.*;
  */
 final class P11AESCipherSpi extends CipherSpi {
 
-    enum Mode { GCM, CBC, CBC_PAD, CTR }
+    enum Mode { GCM, CCM, CBC, CBC_PAD, CTR }
 
     private final P11Library lib;
     private final Mode mode;
@@ -79,7 +79,17 @@ final class P11AESCipherSpi extends CipherSpi {
     private int opmode = -1;
     private long keyHandle = -1;
     private byte[] iv;
-    private int tagBits = 128;
+    private int tagBits = 128; // GCM only — CK_GCM_PARAMS.ulTagBits is in BITS
+    // CCM only — CK_CCM_PARAMS.ulMACLen is in BYTES (a different unit than
+    // GCM's own ulTagBits, confirmed grepping pkcs11t.h before writing
+    // this — not assumed to match). Default 16 (128 bits) matches this
+    // class's own GCM default for internal consistency; DISCLOSED
+    // cross-library caveat: Bouncy Castle's own AES/CCM defaults to a
+    // 64-bit tag under a bare IvParameterSpec (confirmed live via a
+    // container probe before writing the interop test), so an interop
+    // test must always pass an explicit tag length on both sides rather
+    // than rely on this default matching BC's.
+    private int ccmTagLenBytes = 16;
 
     P11AESCipherSpi(P11Library lib, Mode mode) {
         this.lib = lib;
@@ -98,6 +108,7 @@ final class P11AESCipherSpi extends CipherSpi {
     protected void engineSetMode(String modeStr) throws NoSuchAlgorithmException {
         String want = switch (mode) {
             case GCM -> "GCM";
+            case CCM -> "CCM";
             case CBC, CBC_PAD -> "CBC";
             case CTR -> "CTR";
         };
@@ -140,6 +151,13 @@ final class P11AESCipherSpi extends CipherSpi {
             return opmode == Cipher.DECRYPT_MODE
                 ? Math.max(0, inputLen - tagBytes)
                 : inputLen + tagBytes;
+        }
+        // CCM: same exact-size reasoning as GCM above, just with the tag
+        // length already tracked in bytes (ccmTagLenBytes) rather than bits.
+        if (mode == Mode.CCM) {
+            return opmode == Cipher.DECRYPT_MODE
+                ? Math.max(0, inputLen - ccmTagLenBytes)
+                : inputLen + ccmTagLenBytes;
         }
         // CBC/CTR (NoPadding): output length equals input length exactly.
         if (mode == Mode.CBC || mode == Mode.CTR) {
@@ -187,15 +205,20 @@ final class P11AESCipherSpi extends CipherSpi {
                 "unsupported AlgorithmParameterSpec " + params.getClass() + " — use GCMParameterSpec or IvParameterSpec");
         }
 
-        if (mode == Mode.GCM && this.opmode == Cipher.ENCRYPT_MODE && callerIv != null && !callerGcmIvAllowed()) {
+        if ((mode == Mode.GCM || mode == Mode.CCM) && this.opmode == Cipher.ENCRYPT_MODE
+                && callerIv != null && !callerGcmIvAllowed()) {
             throw new InvalidAlgorithmParameterException(
-                "AES-GCM encryption IVs must be generated inside this module (SP 800-38D §8.2) — "
+                "AES-" + mode + " encryption IVs must be generated inside this module (SP 800-38D §8.2 / "
+                + "the same AEAD-nonce-uniqueness policy applied to CCM's nonce) — "
                 + "do not pass an IV via GCMParameterSpec/IvParameterSpec on ENCRYPT_MODE; "
                 + "call engineGetIV()/Cipher.getIV() after init() to retrieve the token-generated IV "
                 + "(or set -Dsofthsmv3.jce.callerGcmIv=true — see this class's javadoc for when that's appropriate)");
         }
         if (mode == Mode.GCM && callerTagBits != null) {
             this.tagBits = callerTagBits;
+        }
+        if (mode == Mode.CCM && callerTagBits != null) {
+            this.ccmTagLenBytes = callerTagBits / 8;
         }
         if (callerIv != null) {
             this.iv = callerIv.clone();
@@ -231,14 +254,17 @@ final class P11AESCipherSpi extends CipherSpi {
 
     private void generateIv() {
         // GCM: 96-bit IV, the SP 800-38D-recommended/universal size.
+        // CCM: 12-byte nonce, well within RFC 3610/SP 800-38C's valid
+        // 7..13-byte range (confirmed reading SoftHSM_cipher.cpp before
+        // choosing this) and the same size as GCM's, for consistency.
         // CBC/CTR: full 16-byte block, matching AES's block size.
-        this.iv = lib.generateRandom(mode == Mode.GCM ? 12 : 16);
+        this.iv = lib.generateRandom(mode == Mode.GCM || mode == Mode.CCM ? 12 : 16);
     }
 
     @Override
     protected void engineUpdateAAD(byte[] src, int offset, int len) {
-        if (mode != Mode.GCM) {
-            throw new UnsupportedOperationException("AAD is only meaningful for AES-GCM");
+        if (mode != Mode.GCM && mode != Mode.CCM) {
+            throw new UnsupportedOperationException("AAD is only meaningful for AES-GCM/AES-CCM");
         }
         aad.write(src, offset, len);
     }
@@ -267,6 +293,14 @@ final class P11AESCipherSpi extends CipherSpi {
         try (java.lang.foreign.Arena op = java.lang.foreign.Arena.ofConfined()) {
             var mech = switch (mode) {
                 case GCM -> lib.mechGcm(op, iv, aad.toByteArray(), tagBits);
+                // CK_CCM_PARAMS.ulDataLen is CCM's own upfront total-length
+                // declaration — plaintext length on encrypt, or
+                // ciphertext-minus-tag length on decrypt (see
+                // P11Library#mechCcm's javadoc for why the engine needs
+                // this up front, unlike GCM).
+                case CCM -> lib.mechCcm(op,
+                    opmode == Cipher.ENCRYPT_MODE ? data.length : data.length - ccmTagLenBytes,
+                    iv, aad.toByteArray(), ccmTagLenBytes);
                 case CBC -> lib.mechCbc(op, CKM_AES_CBC, iv);
                 case CBC_PAD -> lib.mechCbc(op, CKM_AES_CBC_PAD, iv);
                 case CTR -> lib.mechCtr(op, iv);

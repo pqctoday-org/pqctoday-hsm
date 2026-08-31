@@ -12,12 +12,22 @@ final class P11Constants {
     // ── Mechanisms ───────────────────────────────────────────────────────
     static final long CKM_ML_DSA_KEY_PAIR_GEN  = 0x0000001cL;
     static final long CKM_ML_DSA               = 0x0000001dL;
+    // Real PKCS#11 v3.3 working-draft codepoint (OASIS status "proposed",
+    // not yet through final ballot — see src/lib/vendor_mechanisms.h in the
+    // engine repo, NOT pkcs11t.h). Renamed 2026-08-30 from the prior
+    // vendor-range stopgap CKM_PQCTODAY_ML_DSA_MU.
+    static final long CKM_ML_DSA_EXTERNAL_MU   = 0x0000403cL;
+    static final int  ML_DSA_EXTERNAL_MU_LEN   = 64; // FIPS 204 Eq.(2): SHAKE256 output, fixed
     static final long CKM_SLH_DSA_KEY_PAIR_GEN = 0x0000002dL;
     static final long CKM_SLH_DSA              = 0x0000002eL;
     static final long CKM_EC_EDWARDS_KEY_PAIR_GEN = 0x00001055L;
     static final long CKM_EDDSA                = 0x00001057L;
+    // Vendor-range-flagged per PKCS#11 v3.2 (CKM_VENDOR_DEFINED | 0x1057) —
+    // a real, distinct mechanism (grepped in pkcs11t.h), not an alias.
+    static final long CKM_EDDSA_PH             = 0x80001057L;
     static final long CKM_EC_KEY_PAIR_GEN      = 0x00001040L;
     static final long CKM_ECDH1_DERIVE         = 0x00001050L;
+    static final long CKM_ECDH1_COFACTOR_DERIVE = 0x00001051L;
     static final long CKM_ECDSA_SHA256         = 0x00001044L;
     static final long CKM_ECDSA_SHA384         = 0x00001045L;
     static final long CKM_ECDSA_SHA512         = 0x00001046L;
@@ -54,6 +64,8 @@ final class P11Constants {
     static final long CKM_AES_KEY_WRAP     = 0x00002109L;
     static final long CKM_AES_KEY_WRAP_PAD = 0x0000210aL;
     static final long CKM_AES_KEY_WRAP_KWP = 0x0000210bL;
+    static final long CKM_AES_CCM          = 0x00001088L;
+    static final long CKM_AES_GMAC         = 0x0000108eL;
 
     // ── MAC (W4) ─────────────────────────────────────────────────────────
     static final long CKM_GENERIC_SECRET_KEY_GEN = 0x00000350L;
@@ -65,9 +77,30 @@ final class P11Constants {
     static final long CKM_SHA3_256_HMAC = 0x000002b1L;
     static final long CKM_SHA3_384_HMAC = 0x000002c1L;
     static final long CKM_SHA3_512_HMAC = 0x000002d1L;
+    // Plain (non-truncated) SHA-512/224 and SHA-512/256 HMAC — not
+    // registered as their own Mac services here (out of this item's
+    // scope), only needed as PRF entries in
+    // P11SP800108SecretKeyFactorySpi's PRF_NAMES table.
+    static final long CKM_SHA512_224_HMAC = 0x00000049L;
+    static final long CKM_SHA512_256_HMAC = 0x0000004dL;
     static final long CKM_AES_CMAC      = 0x0000108aL;
     static final long CKM_KMAC_128      = 0x80000100L; // CKM_VENDOR_DEFINED | 0x100
     static final long CKM_KMAC_256      = 0x80000101L; // CKM_VENDOR_DEFINED | 0x101
+
+    // ── HMAC general-length ("_HMAC_GENERAL") variants (item 1) ──────────
+    // CKM_SHA_1_HMAC_GENERAL is deliberately NOT declared: SHA-1-based HMAC
+    // is excluded everywhere else in this provider under the FIPS 140-3 L3
+    // policy (see SoftHSMv3Provider's class javadoc and
+    // ExcludedMechanismsTest) — a truncated-output variant of the same
+    // excluded primitive would undermine that policy, not extend it.
+    static final long CKM_SHA224_HMAC_GENERAL   = 0x00000257L;
+    static final long CKM_SHA256_HMAC_GENERAL   = 0x00000252L;
+    static final long CKM_SHA384_HMAC_GENERAL   = 0x00000262L;
+    static final long CKM_SHA512_HMAC_GENERAL   = 0x00000272L;
+    static final long CKM_SHA3_224_HMAC_GENERAL = 0x000002b7L;
+    static final long CKM_SHA3_256_HMAC_GENERAL = 0x000002b2L;
+    static final long CKM_SHA3_384_HMAC_GENERAL = 0x000002c2L;
+    static final long CKM_SHA3_512_HMAC_GENERAL = 0x000002d2L;
 
     // ── KDF (W4) ─────────────────────────────────────────────────────────
     static final long CKM_HKDF_DERIVE = 0x0000402aL;
@@ -78,6 +111,7 @@ final class P11Constants {
     static final long CKP_PKCS5_PBKD2_HMAC_SHA512 = 0x00000006L;
     static final long CKM_SP800_108_COUNTER_KDF  = 0x000003acL;
     static final long CKM_SP800_108_FEEDBACK_KDF = 0x000003adL;
+    static final long CKM_SP800_108_DOUBLE_PIPELINE_KDF = 0x000003aeL;
     static final long CK_SP800_108_BYTE_ARRAY    = 0x00000004L;
 
     // ── Object classes ──────────────────────────────────────────────────

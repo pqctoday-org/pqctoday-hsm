@@ -8,7 +8,10 @@ import org.junit.jupiter.params.provider.CsvSource;
 import javax.crypto.KeyGenerator;
 import javax.crypto.Mac;
 import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+import java.security.InvalidAlgorithmParameterException;
 import java.security.Security;
 
 import static com.pqctoday.hsm.jce.P11Constants.*;
@@ -156,5 +159,127 @@ class MacTest {
             "our " + name + " must match Bouncy Castle's own KMAC for the same key+input "
             + "(this is also the empirical check on macLength itself — W0.3's spike already found "
             + "KMAC-256's real output is 64 bytes, not a naively-guessed 32, so this value is never assumed)");
+    }
+
+    // ── Item 1: CKM_*_HMAC_GENERAL (truncated/general-length HMAC) ────────
+
+    @Test
+    void plainHmacStillRejectsAnyNonNullParameter() throws Exception {
+        // Regression guard: item 1's whole point is that the PLAIN
+        // (non-general) HMAC path stays completely untouched.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        SecretKey key = KeyGenerator.getInstance("HmacSHA256", p).generateKey();
+        Mac mac = Mac.getInstance("HmacSHA256", p);
+        assertThrows(InvalidAlgorithmParameterException.class,
+            () -> mac.init(key, new P11MacOutputLengthParameterSpec(16)),
+            "the plain \"HmacSHA256\" Mac must still reject any AlgorithmParameterSpec, general-length or not");
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "HmacSHA224General, HmacSHA224, 28, 14",
+        "HmacSHA256General, HmacSHA256, 32, 16",
+        "HmacSHA384General, HmacSHA384, 48, 24",
+        "HmacSHA512General, HmacSHA512, 64, 32",
+        "HmacSHA3-224General, HmacSHA3-224, 28, 14",
+        "HmacSHA3-256General, HmacSHA3-256, 32, 16",
+        "HmacSHA3-384General, HmacSHA3-384, 48, 24",
+        "HmacSHA3-512General, HmacSHA3-512, 64, 32",
+    })
+    void generalLengthHmacTruncatesTheRealFullMac(String generalName, String plainName, int fullLen, int truncLen)
+            throws Exception {
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        // Same key works under both names — P11MacSpi doesn't enforce
+        // key.getAlgorithm() equality (see its own javadoc).
+        SecretKey key = KeyGenerator.getInstance(plainName, p).generateKey();
+        byte[] data = "general-length HMAC round trip".getBytes();
+
+        Mac full = Mac.getInstance(plainName, p);
+        full.init(key);
+        byte[] fullMac = full.doFinal(data);
+        assertEquals(fullLen, fullMac.length);
+
+        Mac truncated = Mac.getInstance(generalName, p);
+        assertThrows(InvalidAlgorithmParameterException.class, () -> truncated.init(key, null),
+            "the general-length mechanism has no default output length — PKCS#11's own "
+            + "applyGeneralMacLength() unconditionally requires a CK_MAC_GENERAL_PARAMS");
+        truncated.init(key, new P11MacOutputLengthParameterSpec(truncLen));
+        assertEquals(truncLen, truncated.getMacLength());
+        byte[] truncMac = truncated.doFinal(data);
+        assertEquals(truncLen, truncMac.length,
+            "the general-length MAC must be exactly the requested truncated length, not the full length");
+
+        // PKCS#11 v3.2 §6.20.3: "the MAC is taken from the start of the
+        // full ... HMAC output" — a real, checkable property, not just a
+        // length check.
+        assertArrayEquals(java.util.Arrays.copyOf(fullMac, truncLen), truncMac,
+            generalName + " must be exactly the first " + truncLen + " bytes of the full " + plainName + " MAC");
+
+        // Requesting the FULL length via the general mechanism must match
+        // the plain mechanism's own output exactly (a real, live
+        // cross-check that the general variant is genuinely the same
+        // construction, not just "any truncation").
+        Mac fullViaGeneral = Mac.getInstance(generalName, p);
+        fullViaGeneral.init(key, new P11MacOutputLengthParameterSpec(fullLen));
+        assertArrayEquals(fullMac, fullViaGeneral.doFinal(data));
+    }
+
+    // ── Item 3: CKM_AES_GMAC (GMAC-as-a-MAC) ───────────────────────────────
+
+    @Test
+    void gmacRoundTripsAndDetectsTampering() throws Exception {
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        byte[] rawKey = new byte[16];
+        new java.security.SecureRandom().nextBytes(rawKey);
+        long handle = importRawSecret(p.lib, rawKey, CKK_AES);
+        SecretKey key = new P11Key.Secret(p.lib, handle, "AES");
+        byte[] iv = new byte[12];
+        new java.security.SecureRandom().nextBytes(iv);
+        byte[] data = "AES-GMAC round trip".getBytes();
+
+        Mac mac = Mac.getInstance("AES-GMAC", p);
+        mac.init(key, new IvParameterSpec(iv));
+        byte[] tag = mac.doFinal(data);
+        assertEquals(16, tag.length, "default AES-GMAC tag length must be 128 bits");
+        assertEquals(16, mac.getMacLength());
+
+        Mac mac2 = Mac.getInstance("AES-GMAC", p);
+        mac2.init(key, new IvParameterSpec(iv));
+        assertArrayEquals(tag, mac2.doFinal(data), "AES-GMAC must be deterministic for the same key+iv+input");
+
+        Mac mac3 = Mac.getInstance("AES-GMAC", p);
+        mac3.init(key, new IvParameterSpec(iv));
+        assertFalse(java.util.Arrays.equals(tag, mac3.doFinal("tampered".getBytes())),
+            "a different input must produce a different GMAC tag");
+    }
+
+    @Test
+    void gmacInteropsWithBouncyCastle() throws Exception {
+        Security.addProvider(new BouncyCastleProvider());
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        byte[] rawKey = new byte[16];
+        new java.security.SecureRandom().nextBytes(rawKey);
+        byte[] iv = new byte[12];
+        new java.security.SecureRandom().nextBytes(iv);
+        byte[] data = "AES-GMAC BC interop".getBytes();
+
+        long handle = importRawSecret(p.lib, rawKey, CKK_AES);
+        SecretKey ourKey = new P11Key.Secret(p.lib, handle, "AES");
+        SecretKey bcKey = new SecretKeySpec(rawKey, "AES");
+
+        Mac ours = Mac.getInstance("AES-GMAC", p);
+        ours.init(ourKey, new IvParameterSpec(iv));
+        byte[] ourTag = ours.doFinal(data);
+
+        // Explicit 128-bit tag length on both sides — Bouncy Castle's own
+        // "AES-GMAC" default under a bare IvParameterSpec was confirmed
+        // live (container probe, before writing this test) to ALSO be
+        // 128 bits, but this pins it explicitly rather than relying on
+        // that default matching ours by coincidence.
+        Mac bc = Mac.getInstance("AES-GMAC", "BC");
+        bc.init(bcKey, new GCMParameterSpec(128, iv));
+        byte[] bcTag = bc.doFinal(data);
+
+        assertArrayEquals(bcTag, ourTag, "our AES-GMAC must match Bouncy Castle's own AES-GMAC for the same key+iv+input");
     }
 }

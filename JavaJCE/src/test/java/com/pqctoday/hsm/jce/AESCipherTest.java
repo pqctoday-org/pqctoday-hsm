@@ -335,6 +335,127 @@ class AESCipherTest {
         assertArrayEquals(plaintext, recoveredPlaintext);
     }
 
+    // ── Item 2: CKM_AES_CCM ─────────────────────────────────────────────
+
+    @Test
+    void ccmSelfRoundTripsWithAndWithoutAad() throws Exception {
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        SecretKey key = KeyGenerator.getInstance("AES", p).generateKey();
+        byte[] plaintext = "CCM round trip, item 2".getBytes();
+        byte[] aad = "associated-data".getBytes();
+
+        for (byte[] a : new byte[][]{ new byte[0], aad }) {
+            Cipher enc = Cipher.getInstance("AES/CCM/NoPadding", p);
+            enc.init(Cipher.ENCRYPT_MODE, key);
+            if (a.length > 0) enc.updateAAD(a);
+            byte[] iv = enc.getIV();
+            assertNotNull(iv, "module must generate and expose the CCM nonce before doFinal");
+            assertEquals(12, iv.length);
+            byte[] ct = enc.doFinal(plaintext);
+            assertEquals(plaintext.length + 16, ct.length, "default CCM tag is 128 bits (16 bytes)");
+
+            Cipher dec = Cipher.getInstance("AES/CCM/NoPadding", p);
+            dec.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, iv));
+            if (a.length > 0) dec.updateAAD(a);
+            assertArrayEquals(plaintext, dec.doFinal(ct));
+        }
+    }
+
+    @Test
+    void ccmEncryptRejectsCallerSuppliedIv() throws Exception {
+        // Same SP 800-38D §8.2-derived AEAD-nonce-uniqueness policy as
+        // GCM's own rejection above, applied to CCM's nonce too.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        SecretKey key = KeyGenerator.getInstance("AES", p).generateKey();
+        Cipher enc = Cipher.getInstance("AES/CCM/NoPadding", p);
+        byte[] callerIv = new byte[12];
+        assertThrows(InvalidAlgorithmParameterException.class,
+            () -> enc.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, callerIv)));
+    }
+
+    @Test
+    void ccmOutputSizeIsExact() throws Exception {
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        SecretKey key = KeyGenerator.getInstance("AES", p).generateKey();
+        byte[] plaintext = "exact CCM output size check".getBytes();
+
+        Cipher enc = Cipher.getInstance("AES/CCM/NoPadding", p);
+        enc.init(Cipher.ENCRYPT_MODE, key);
+        assertEquals(plaintext.length + 16, enc.getOutputSize(plaintext.length));
+        byte[] ct = enc.doFinal(plaintext);
+        byte[] iv = enc.getIV();
+
+        Cipher dec = Cipher.getInstance("AES/CCM/NoPadding", p);
+        dec.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, iv));
+        assertEquals(plaintext.length, dec.getOutputSize(ct.length));
+        assertArrayEquals(plaintext, dec.doFinal(ct));
+    }
+
+    @Test
+    void ccmInteropsWithBouncyCastleUsingAKnownImportedKey() throws Exception {
+        // No standard javax.crypto.spec.CCMParameterSpec exists anywhere
+        // in the JDK (confirmed against the real javax.crypto.spec javadoc
+        // before writing this class — see P11AESCipherSpi's Mode.CCM
+        // handling for the same finding) — this Cipher reuses the
+        // standard GCMParameterSpec (nonce + tag length in bits, exactly
+        // the pair CCM needs) rather than inventing a new class, following
+        // this file's own GCM precedent. Bouncy Castle's own "CCM"/"AES/CCM/
+        // NoPadding" Cipher does NOT accept GCMParameterSpec (confirmed
+        // live via bytecode/runtime probes before writing this test — it
+        // only accepts IvParameterSpec or its own
+        // org.bouncycastle.jcajce.spec.AEADParameterSpec), and its default
+        // tag length under a bare IvParameterSpec is 64 bits, NOT this
+        // class's own 128-bit default (also confirmed live) — so this
+        // test always passes an explicit, matching 128-bit tag length on
+        // both sides rather than relying on either library's default.
+        Security.addProvider(new BouncyCastleProvider());
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        byte[] rawKey = new byte[16];
+        new java.security.SecureRandom().nextBytes(rawKey);
+        SecretKey bcKey = new SecretKeySpec(rawKey, "AES");
+        long handle = importRawAesKeyReal(p.lib, rawKey, false);
+        SecretKey ourKey = new P11Key.Secret(p.lib, handle, "AES");
+
+        byte[] plaintext = "BC AES-CCM cross-verify".getBytes();
+        byte[] aad = "aad".getBytes();
+        byte[] nonce = new byte[12];
+        new java.security.SecureRandom().nextBytes(nonce);
+
+        // BC encrypts, we decrypt.
+        Cipher bcEnc = Cipher.getInstance("AES/CCM/NoPadding", "BC");
+        bcEnc.init(Cipher.ENCRYPT_MODE, bcKey, new org.bouncycastle.jcajce.spec.AEADParameterSpec(nonce, 128, aad));
+        byte[] bcCt = bcEnc.doFinal(plaintext);
+
+        Cipher ourDec = Cipher.getInstance("AES/CCM/NoPadding", p);
+        ourDec.init(Cipher.DECRYPT_MODE, ourKey, new GCMParameterSpec(128, nonce));
+        ourDec.updateAAD(aad);
+        assertArrayEquals(plaintext, ourDec.doFinal(bcCt),
+            "our provider must decrypt Bouncy Castle's own AES-CCM ciphertext given the same raw key");
+
+        // We encrypt (caller-supplied nonce, via the same opt-in flag
+        // GCM's own interop test above uses, so both sides use the
+        // identical nonce for this comparison), BC decrypts.
+        String prior = System.getProperty("softhsmv3.jce.callerGcmIv");
+        try {
+            System.setProperty("softhsmv3.jce.callerGcmIv", "true");
+            Cipher ourEnc = Cipher.getInstance("AES/CCM/NoPadding", p);
+            ourEnc.init(Cipher.ENCRYPT_MODE, ourKey, new GCMParameterSpec(128, nonce));
+            ourEnc.updateAAD(aad);
+            byte[] ourCt = ourEnc.doFinal(plaintext);
+
+            Cipher bcDec = Cipher.getInstance("AES/CCM/NoPadding", "BC");
+            bcDec.init(Cipher.DECRYPT_MODE, bcKey, new org.bouncycastle.jcajce.spec.AEADParameterSpec(nonce, 128, aad));
+            assertArrayEquals(plaintext, bcDec.doFinal(ourCt),
+                "Bouncy Castle must decrypt our provider's own AES-CCM ciphertext given the same raw key");
+        } finally {
+            if (prior == null) {
+                System.clearProperty("softhsmv3.jce.callerGcmIv");
+            } else {
+                System.setProperty("softhsmv3.jce.callerGcmIv", prior);
+            }
+        }
+    }
+
     private static long importRawAesKeyReal(P11Library lib, byte[] raw, boolean extractable) {
         P11Library.Attr[] tmpl = {
             P11Library.attrLong(CKA_CLASS, CKO_SECRET_KEY),

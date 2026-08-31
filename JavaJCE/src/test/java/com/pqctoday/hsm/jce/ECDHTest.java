@@ -1,5 +1,6 @@
 package com.pqctoday.hsm.jce;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -90,5 +91,62 @@ class ECDHTest {
         SecretKey secret = ourKa.generateSecret("AES");
         assertNotNull(secret);
         assertTrue(secret.getEncoded().length > 0);
+    }
+
+    // ── Item 5: CKM_ECDH1_COFACTOR_DERIVE ("ECDHC") ────────────────────────
+
+    @ParameterizedTest
+    @ValueSource(strings = {"secp256r1", "secp384r1", "secp521r1"})
+    void ecdhcTwoOfOurOwnKeysAgreeOnTheSameSecret(String curve) throws Exception {
+        // See P11ECDHKeyAgreementSpi's javadoc for the disclosed h=1
+        // caveat: every curve this provider exposes has cofactor 1, so
+        // this proves the real, distinct CKM_ECDH1_COFACTOR_DERIVE
+        // mechanism round-trips correctly end-to-end (both parties agree
+        // through it), not that its output differs from plain ECDH's on
+        // any curve available here.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC", p);
+        kpg.initialize(new ECGenParameterSpec(curve));
+        KeyPair alice = kpg.generateKeyPair();
+        KeyPair bob = kpg.generateKeyPair();
+
+        KeyAgreement aliceKa = KeyAgreement.getInstance("ECDHC", p);
+        aliceKa.init(alice.getPrivate());
+        aliceKa.doPhase(bob.getPublic(), true);
+        byte[] aliceSecret = aliceKa.generateSecret();
+
+        KeyAgreement bobKa = KeyAgreement.getInstance("ECDHC", p);
+        bobKa.init(bob.getPrivate());
+        bobKa.doPhase(alice.getPublic(), true);
+        byte[] bobSecret = bobKa.generateSecret();
+
+        assertArrayEquals(aliceSecret, bobSecret, "both parties must derive the same ECDHC (cofactor) secret for " + curve);
+        assertTrue(aliceSecret.length > 0);
+    }
+
+    @Test
+    void ecdhcMatchesPlainEcdhOnTheCofactorOneCurvesThisProviderExposes() throws Exception {
+        // A direct, disclosed demonstration of the h=1 caveat above: on
+        // secp256r1 (cofactor 1), cofactor-mode ECDH and plain ECDH must
+        // produce IDENTICAL secrets for the same keypair, since
+        // multiplying by a cofactor of 1 is a no-op.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("EC", p);
+        kpg.initialize(new ECGenParameterSpec("secp256r1"));
+        KeyPair alice = kpg.generateKeyPair();
+        KeyPair bob = kpg.generateKeyPair();
+
+        KeyAgreement plain = KeyAgreement.getInstance("ECDH", p);
+        plain.init(alice.getPrivate());
+        plain.doPhase(bob.getPublic(), true);
+        byte[] plainSecret = plain.generateSecret();
+
+        KeyAgreement cofactor = KeyAgreement.getInstance("ECDHC", p);
+        cofactor.init(alice.getPrivate());
+        cofactor.doPhase(bob.getPublic(), true);
+        byte[] cofactorSecret = cofactor.generateSecret();
+
+        assertArrayEquals(plainSecret, cofactorSecret,
+            "on a cofactor-1 curve, CKM_ECDH1_COFACTOR_DERIVE and CKM_ECDH1_DERIVE must agree exactly");
     }
 }

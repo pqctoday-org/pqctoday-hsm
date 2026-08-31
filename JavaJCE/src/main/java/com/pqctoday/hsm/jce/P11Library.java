@@ -193,8 +193,14 @@ final class P11Library implements AutoCloseable {
         cEncapsulateKey, cDecapsulateKey, cDeriveKey,
         cEncryptInit, cEncrypt, cDecryptInit, cDecrypt,
         cGenerateKey, cWrapKey, cUnwrapKey,
-        cCopyObject, cDestroyObject;
+        cCopyObject, cDestroyObject, cGetMechanismInfo;
     private final long session;
+    // The slot this session's token lives on — kept only for
+    // C_GetMechanismInfo (mechanismSupported() below), which is a
+    // per-SLOT query, unlike every other bound function here which is
+    // per-SESSION. Set once in the constructor from the same
+    // C_GetSlotList call that already resolves the session's slot.
+    private final long slot;
     private volatile boolean closed;
     private volatile boolean loggedIn;
 
@@ -257,6 +263,10 @@ final class P11Library implements AutoCloseable {
             // W4 — KeyStore write path.
             cCopyObject    = h(linker, lib, "C_CopyObject", fd(JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS));
             cDestroyObject = h(linker, lib, "C_DestroyObject", fd(JAVA_LONG, JAVA_LONG));
+            // Items 6/7 (2026-08-30) — mechanism-advertisement gating for
+            // vendor/optional-adjacent mechanisms (CKM_EDDSA_PH,
+            // CKM_ML_DSA_EXTERNAL_MU), see mechanismSupported() below.
+            cGetMechanismInfo = h(linker, lib, "C_GetMechanismInfo", fd(JAVA_LONG, JAVA_LONG, ADDRESS));
 
             ensureGlobalInit(linker, lib);
 
@@ -275,6 +285,7 @@ final class P11Library implements AutoCloseable {
                 MemorySegment slots = init.allocate(JAVA_LONG, n);
                 P11Error.check(invokeRv(cGetSlotList, (byte) 1, slots, count), "C_GetSlotList");
                 long slot = slots.get(JAVA_LONG, 0);
+                this.slot = slot;
 
                 MemorySegment hSession = init.allocate(JAVA_LONG);
                 P11Error.check(invokeRv(cOpenSession, slot, CKF_SERIAL_SESSION | CKF_RW_SESSION,
@@ -673,6 +684,20 @@ final class P11Library implements AutoCloseable {
      * object's handle.
      */
     long ecdh1Derive(long basePrivateKey, byte[] peerPublicPointRaw, Attr[] ssTmpl) {
+        return ecdh1Derive(P11Constants.CKM_ECDH1_DERIVE, basePrivateKey, peerPublicPointRaw, ssTmpl);
+    }
+
+    /**
+     * Same as {@link #ecdh1Derive(long, byte[], Attr[])} but with an
+     * explicit mechanism type — item 5's CKM_ECDH1_COFACTOR_DERIVE uses
+     * the IDENTICAL CK_ECDH1_DERIVE_PARAMS struct as plain
+     * CKM_ECDH1_DERIVE (confirmed reading SoftHSM_keygen.cpp before
+     * writing this: both mechanisms share the same parameter-parsing
+     * path, differing only in whether the derive step multiplies by the
+     * curve's cofactor), so this is the same method with the mechanism
+     * type parameterized rather than new machinery.
+     */
+    long ecdh1Derive(long mechType, long basePrivateKey, byte[] peerPublicPointRaw, Attr[] ssTmpl) {
         ensureOpen();
         try (Arena op = Arena.ofConfined()) {
             MemorySegment pubData = bytes(op, peerPublicPointRaw);
@@ -684,7 +709,7 @@ final class P11Library implements AutoCloseable {
             params.set(ADDRESS, 32, pubData);
 
             MemorySegment mech = op.allocate(MECHANISM);
-            mech.set(JAVA_LONG, 0, P11Constants.CKM_ECDH1_DERIVE);
+            mech.set(JAVA_LONG, 0, mechType);
             mech.set(ADDRESS, 8, params);
             mech.set(JAVA_LONG, 16, ECDH1_DERIVE_PARAMS.byteSize());
 
@@ -951,6 +976,24 @@ final class P11Library implements AutoCloseable {
 
     /** CKM_SP800_108_COUNTER_KDF (SP 800-108 §5.1). prfType must be a CKM_SHA*_HMAC constant or CKM_AES_CMAC. fixedInput is a public label/context, not secret — plain MemorySegment. */
     MemorySegment mechSp800108Counter(Arena op, long prfType, byte[] fixedInput) {
+        return buildSp800108CounterShapedMech(op, P11Constants.CKM_SP800_108_COUNTER_KDF, prfType, fixedInput);
+    }
+
+    /**
+     * CKM_SP800_108_DOUBLE_PIPELINE_KDF (item 4, SP 800-108 §5.3) — the
+     * same KBKDF backend as counter/feedback mode, just a third mode
+     * value. Confirmed reading SoftHSM_keygen.cpp's double-pipeline
+     * branch before writing this: it parses the IDENTICAL
+     * CK_SP800_108_KDF_PARAMS struct counter mode uses (no extra IV field
+     * like feedback mode needs), differing only in mechanism type — so
+     * this shares {@link #buildSp800108CounterShapedMech} rather than
+     * duplicating the layout.
+     */
+    MemorySegment mechSp800108DoublePipeline(Arena op, long prfType, byte[] fixedInput) {
+        return buildSp800108CounterShapedMech(op, P11Constants.CKM_SP800_108_DOUBLE_PIPELINE_KDF, prfType, fixedInput);
+    }
+
+    private static MemorySegment buildSp800108CounterShapedMech(Arena op, long mechType, long prfType, byte[] fixedInput) {
         MemorySegment params = op.allocate(SP800_108_COUNTER_PARAMS);
         params.set(JAVA_LONG, 0, prfType);
         params.set(JAVA_LONG, 8, fixedInput.length == 0 ? 0L : 1L);
@@ -958,7 +1001,7 @@ final class P11Library implements AutoCloseable {
         params.set(JAVA_LONG, 24, 0L); // ulAdditionalDerivedKeys — not supported here
         params.set(ADDRESS, 32, MemorySegment.NULL);
         MemorySegment m = op.allocate(MECHANISM);
-        m.set(JAVA_LONG, 0, P11Constants.CKM_SP800_108_COUNTER_KDF);
+        m.set(JAVA_LONG, 0, mechType);
         m.set(ADDRESS, 8, params);
         m.set(JAVA_LONG, 16, SP800_108_COUNTER_PARAMS.byteSize());
         return m;
@@ -1071,6 +1114,35 @@ final class P11Library implements AutoCloseable {
      * MemorySegment, nothing tracked for zeroing.
      */
     MemorySegment mechGcm(Arena op, byte[] iv, byte[] aad, int tagBits) {
+        MemorySegment params = buildGcmParams(op, iv, aad, tagBits);
+        MemorySegment m = op.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_AES_GCM);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, GCM_PARAMS.byteSize());
+        return m;
+    }
+
+    /**
+     * CKM_AES_GMAC (item 3, GMAC-as-a-MAC, PKCS#11 v3.2 §6.13.6) — a real,
+     * distinct engine mechanism from the CKM_AES_GCM AEAD cipher above,
+     * confirmed reading SoftHSM_sign.cpp's applyGmacParams before writing
+     * this, but one that reuses the IDENTICAL CK_GCM_PARAMS struct shape
+     * for its IV/tag-length, so this shares {@link #buildGcmParams}
+     * rather than duplicating the layout. pAAD/ulAADLen are unused by the
+     * engine for this mechanism — GMAC authenticates the C_Sign data
+     * argument itself, not a separate AAD field (same source comment) —
+     * so aad is always empty here.
+     */
+    MemorySegment mechGmac(Arena op, byte[] iv, int tagBits) {
+        MemorySegment params = buildGcmParams(op, iv, new byte[0], tagBits);
+        MemorySegment m = op.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_AES_GMAC);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, GCM_PARAMS.byteSize());
+        return m;
+    }
+
+    private static MemorySegment buildGcmParams(Arena op, byte[] iv, byte[] aad, int tagBits) {
         MemorySegment params = op.allocate(GCM_PARAMS);
         params.set(ADDRESS, 0, bytes(op, iv));
         params.set(JAVA_LONG, 8, (long) iv.length);
@@ -1078,11 +1150,7 @@ final class P11Library implements AutoCloseable {
         params.set(ADDRESS, 24, aad.length > 0 ? bytes(op, aad) : MemorySegment.NULL);
         params.set(JAVA_LONG, 32, (long) aad.length);
         params.set(JAVA_LONG, 40, (long) tagBits);
-        MemorySegment m = op.allocate(MECHANISM);
-        m.set(JAVA_LONG, 0, P11Constants.CKM_AES_GCM);
-        m.set(ADDRESS, 8, params);
-        m.set(JAVA_LONG, 16, GCM_PARAMS.byteSize());
-        return m;
+        return params;
     }
 
     /** CKM_AES_CBC / CKM_AES_CBC_PAD — mechanism parameter is the raw 16-byte IV, no struct. IV is not secret. */
@@ -1108,6 +1176,72 @@ final class P11Library implements AutoCloseable {
         m.set(JAVA_LONG, 0, P11Constants.CKM_AES_CTR);
         m.set(ADDRESS, 8, params);
         m.set(JAVA_LONG, 16, CTR_PARAMS.byteSize());
+        return m;
+    }
+
+    // CK_CCM_PARAMS { CK_ULONG ulDataLen; CK_BYTE_PTR pNonce; CK_ULONG ulNonceLen;
+    //                 CK_BYTE_PTR pAAD; CK_ULONG ulAADLen; CK_ULONG ulMACLen; }
+    // Verified via the same standalone-C-probe discipline as CK_HKDF_PARAMS
+    // above (sizeof/offsetof against this repo's own pkcs11.h): 48 bytes
+    // total, every field already 8-byte aligned — no padding needed
+    // (unlike CK_EDDSA_PARAMS/CK_HKDF_PARAMS, whose leading 1-byte field
+    // does need it).
+    private static final MemoryLayout CCM_PARAMS = MemoryLayout.structLayout(
+        JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, JAVA_LONG);
+
+    /**
+     * CKM_AES_CCM (item 2). {@code dataLen} is CCM's own upfront total-length
+     * declaration (RFC 3610/SP 800-38C: CCM's CBC-MAC bakes the total
+     * plaintext length into its first block, so the engine must know it
+     * before processing starts — confirmed reading
+     * OSSLEVPSymmetricAlgorithm.cpp/SoftHSM_cipher.cpp before writing
+     * this) — the caller (P11AESCipherSpi) passes the plaintext length on
+     * ENCRYPT_MODE, or the ciphertext length MINUS the tag on
+     * DECRYPT_MODE. Nonce/AAD/tag-length are all public by protocol
+     * design, same as GCM's — plain MemorySegment, nothing tracked for
+     * zeroing.
+     */
+    MemorySegment mechCcm(Arena op, long dataLen, byte[] nonce, byte[] aad, int tagLenBytes) {
+        MemorySegment params = op.allocate(CCM_PARAMS);
+        params.set(JAVA_LONG, 0, dataLen);
+        params.set(ADDRESS, 8, bytes(op, nonce));
+        params.set(JAVA_LONG, 16, (long) nonce.length);
+        params.set(ADDRESS, 24, aad.length > 0 ? bytes(op, aad) : MemorySegment.NULL);
+        params.set(JAVA_LONG, 32, (long) aad.length);
+        params.set(JAVA_LONG, 40, (long) tagLenBytes);
+        MemorySegment m = op.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_AES_CCM);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, CCM_PARAMS.byteSize());
+        return m;
+    }
+
+    // CK_EDDSA_PARAMS { CK_BBOOL phFlag; CK_ULONG ulContextDataLen; CK_BYTE_PTR pContextData; }
+    // Verified via the same standalone-C-probe discipline as CK_HKDF_PARAMS
+    // above: 24 bytes total, 7 bytes of padding after the 1-byte phFlag to
+    // reach ulContextDataLen's 8-byte alignment (same ambiguous-layout
+    // class HKDF_PARAMS's own comment describes).
+    private static final MemoryLayout EDDSA_PARAMS = MemoryLayout.structLayout(
+        JAVA_BYTE, MemoryLayout.paddingLayout(7), JAVA_LONG, ADDRESS);
+
+    /**
+     * CKM_EDDSA with CK_EDDSA_PARAMS (item 7) — RFC 8032 mode selection
+     * (pure / Ed25519ctx-Ed448 / Ed25519ph-Ed448ph), all through the
+     * standard CKM_EDDSA mechanism; see P11PureSigSignatureSpi's javadoc
+     * for why this — not CKM_EDDSA_PH — is the mechanism this always
+     * dispatches, mirroring the parallel OpenSSL-provider fix for this
+     * exact concern. context is public protocol data (RFC 8032 context
+     * strings are not secret) — plain MemorySegment.
+     */
+    MemorySegment mechEddsaWithParams(Arena op, boolean prehash, byte[] context) {
+        MemorySegment params = op.allocate(EDDSA_PARAMS);
+        params.set(JAVA_BYTE, 0, (byte) (prehash ? 1 : 0));
+        params.set(JAVA_LONG, 8, (long) context.length);
+        params.set(ADDRESS, 16, context.length > 0 ? bytes(op, context) : MemorySegment.NULL);
+        MemorySegment m = op.allocate(MECHANISM);
+        m.set(JAVA_LONG, 0, P11Constants.CKM_EDDSA);
+        m.set(ADDRESS, 8, params);
+        m.set(JAVA_LONG, 16, EDDSA_PARAMS.byteSize());
         return m;
     }
 
@@ -1182,6 +1316,42 @@ final class P11Library implements AutoCloseable {
             throw e;
         } catch (Throwable t) {
             throw new ProviderException("copyObject failed", t);
+        }
+    }
+
+    // CK_MECHANISM_INFO { CK_ULONG ulMinKeySize; CK_ULONG ulMaxKeySize; CK_FLAGS flags; }
+    // All three fields are CK_ULONG-sized (CK_FLAGS is itself a CK_ULONG) —
+    // no padding ambiguity, unlike CK_HKDF_PARAMS/CK_EDDSA_PARAMS.
+    private static final MemoryLayout MECHANISM_INFO =
+        MemoryLayout.structLayout(JAVA_LONG, JAVA_LONG, JAVA_LONG);
+
+    /**
+     * C_GetMechanismInfo, used only as a capability probe: whether the
+     * live token actually advertises a mechanism, rather than assuming
+     * every mechanism this class knows a codepoint for is always present.
+     * Items 6/7 (2026-08-30) need this for two genuinely optional/vendor-
+     * adjacent mechanisms — CKM_ML_DSA_EXTERNAL_MU (a PKCS#11 v3.3 working
+     * draft codepoint, not yet ratified) and CKM_EDDSA_PH (vendor-range) —
+     * mirroring the identical gating check the parallel OpenSSL-provider
+     * fix for this exact concern performs
+     * (src/vendor/pkcs11-provider/src/sig/eddsa.c's
+     * p11prov_check_mechanism call, read before writing this).
+     *
+     * Returns false — never throws — for CKR_MECHANISM_INVALID (the
+     * expected result for a mechanism this token genuinely does not
+     * support) and, defensively, for any other non-OK return or native
+     * failure: this is a yes/no capability probe a caller uses to decide
+     * whether to proceed, not an operation whose own failure should ever
+     * propagate as an exception.
+     */
+    boolean mechanismSupported(long mechType) {
+        ensureOpen();
+        try (Arena op = Arena.ofConfined()) {
+            MemorySegment info = op.allocate(MECHANISM_INFO);
+            long rv = invokeRv(cGetMechanismInfo, slot, mechType, info);
+            return rv == P11Error.CKR_OK;
+        } catch (Throwable t) {
+            return false;
         }
     }
 
