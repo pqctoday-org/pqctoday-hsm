@@ -80,6 +80,13 @@ pub struct SignRequest {
     pub algorithm: Algorithm,
     #[serde(with = "b64")]
     pub data: Vec<u8>,
+    // FIPS 204 external-µ mode — mirrors the gRPC schema's
+    // SignRequest.external_mu field-for-field (see this module's own
+    // header doc on schema parity). `#[serde(default)]` so an existing
+    // REST client's JSON body (never sending this field) keeps today's
+    // plain-mode behavior unchanged.
+    #[serde(default)]
+    pub external_mu: bool,
 }
 #[derive(Serialize)]
 pub struct SignResponse {
@@ -95,6 +102,8 @@ pub struct VerifyRequest {
     pub data: Vec<u8>,
     #[serde(with = "b64")]
     pub signature: Vec<u8>,
+    #[serde(default)]
+    pub external_mu: bool,
 }
 #[derive(Serialize)]
 pub struct VerifyResponse {

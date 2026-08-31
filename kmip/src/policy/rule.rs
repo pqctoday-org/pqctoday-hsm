@@ -1336,13 +1336,27 @@ pub fn block_cipher_mode_name_to_code(name: &str) -> Option<u32> {
     Some(match name {
         "CBC" => 0x01,
         "ECB" => 0x02,
+        "PCBC" => 0x03,
         "CFB" => 0x04,
         "OFB" => 0x05,
         "CTR" => 0x06,
         "CMAC" => 0x07,
         "CCM" => 0x08,
         "GCM" => 0x09,
+        "CBC-MAC" => 0x0a,
         "XTS" => 0x0b,
+        // KMIP/CACP coverage gap-analysis Phase 0.2 (2026-08-30): these 7
+        // were previously only in ops/helpers.rs's separate, private
+        // display-only table for the same enum — deduped here as the
+        // single source of truth (see that file's block_cipher_mode_name,
+        // now a thin wrapper over this function).
+        "AESKeyWrapPadding" => 0x0c,
+        "NISTKeyWrap" => 0x0d,
+        "X9.102 AESKW" => 0x0e,
+        "X9.102 TDKW" => 0x0f,
+        "X9.102 AKW1" => 0x10,
+        "X9.102 AKW2" => 0x11,
+        "AEAD" => 0x12,
         _ => return None,
     })
 }
@@ -1352,13 +1366,22 @@ pub fn block_cipher_mode_code_to_name(code: u32) -> Option<&'static str> {
     Some(match code {
         0x01 => "CBC",
         0x02 => "ECB",
+        0x03 => "PCBC",
         0x04 => "CFB",
         0x05 => "OFB",
         0x06 => "CTR",
         0x07 => "CMAC",
         0x08 => "CCM",
         0x09 => "GCM",
+        0x0a => "CBC-MAC",
         0x0b => "XTS",
+        0x0c => "AESKeyWrapPadding",
+        0x0d => "NISTKeyWrap",
+        0x0e => "X9.102 AESKW",
+        0x0f => "X9.102 TDKW",
+        0x10 => "X9.102 AKW1",
+        0x11 => "X9.102 AKW2",
+        0x12 => "AEAD",
         _ => return None,
     })
 }
@@ -1424,6 +1447,10 @@ pub fn ckm_name_to_code(name: &str) -> Option<u32> {
         "CKM_AES_CBC_PAD" => c::CKM_AES_CBC_PAD,
         "CKM_AES_CTR" => c::CKM_AES_CTR,
         "CKM_AES_GCM" => c::CKM_AES_GCM,
+        // KMIP/CACP coverage gap-analysis item 2.2 (2026-08-30).
+        "CKM_AES_CCM" => c::CKM_AES_CCM,
+        // KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30).
+        "CKM_AES_OFB" => c::CKM_AES_OFB,
         "CKM_RSA_PKCS_OAEP" => c::CKM_RSA_PKCS_OAEP,
         "CKM_SHA256_RSA_PKCS" => c::CKM_SHA256_RSA_PKCS,
         "CKM_SHA384_RSA_PKCS" => c::CKM_SHA384_RSA_PKCS,
@@ -1452,6 +1479,22 @@ pub fn ckm_name_to_code(name: &str) -> Option<u32> {
         "CKM_SHA3_512" => c::CKM_SHA3_512,
         "CKM_SHA3_256_HMAC" => c::CKM_SHA3_256_HMAC,
         "CKM_SHA3_512_HMAC" => c::CKM_SHA3_512_HMAC,
+        // General-length (truncated-tag) HMAC variants — engine has
+        // supported these since PR #189; this registry never picked them
+        // up (KMIP/CACP coverage gap-analysis item 6, 2026-08-30).
+        "CKM_SHA256_HMAC_GENERAL" => c::CKM_SHA256_HMAC_GENERAL,
+        "CKM_SHA384_HMAC_GENERAL" => c::CKM_SHA384_HMAC_GENERAL,
+        "CKM_SHA512_HMAC_GENERAL" => c::CKM_SHA512_HMAC_GENERAL,
+        "CKM_SHA3_256_HMAC_GENERAL" => c::CKM_SHA3_256_HMAC_GENERAL,
+        "CKM_SHA3_512_HMAC_GENERAL" => c::CKM_SHA3_512_HMAC_GENERAL,
+        // Digest-based key derivation family (gap-analysis item 10,
+        // 2026-08-30) — engine support pre-existing, never registered here.
+        "CKM_SHA256_KEY_DERIVATION" => c::CKM_SHA256_KEY_DERIVATION,
+        "CKM_SHA384_KEY_DERIVATION" => c::CKM_SHA384_KEY_DERIVATION,
+        "CKM_SHA512_KEY_DERIVATION" => c::CKM_SHA512_KEY_DERIVATION,
+        "CKM_SHA3_256_KEY_DERIVATION" => c::CKM_SHA3_256_KEY_DERIVATION,
+        "CKM_SHA3_384_KEY_DERIVATION" => c::CKM_SHA3_384_KEY_DERIVATION,
+        "CKM_SHA3_512_KEY_DERIVATION" => c::CKM_SHA3_512_KEY_DERIVATION,
         // ECDSA pre-hash SHA-3 variants + EdDSA (pure / pre-hash):
         "CKM_ECDSA_SHA3_224" => c::CKM_ECDSA_SHA3_224,
         "CKM_ECDSA_SHA3_256" => c::CKM_ECDSA_SHA3_256,
@@ -1470,6 +1513,8 @@ pub fn ckm_name_to_code(name: &str) -> Option<u32> {
         "CKM_PKCS5_PBKD2" => c::CKM_PKCS5_PBKD2,
         "CKM_SP800_108_COUNTER_KDF" => c::CKM_SP800_108_COUNTER_KDF,
         "CKM_SP800_108_FEEDBACK_KDF" => c::CKM_SP800_108_FEEDBACK_KDF,
+        // KMIP/CACP coverage gap-analysis item 2.1 (2026-08-30).
+        "CKM_SP800_108_DOUBLE_PIPELINE_KDF" => c::CKM_SP800_108_DOUBLE_PIPELINE_KDF,
         // A6.3 (2026-08-28 gaps-remediation plan) — previously ungateable by
         // name: the generic ECDH-as-KEM path (CKM_ECDH1_DERIVE under
         // C_Encapsulate/DecapsulateKey, combined with CKM_ML_KEM +

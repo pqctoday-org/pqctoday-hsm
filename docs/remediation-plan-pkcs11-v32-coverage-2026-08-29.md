@@ -229,6 +229,15 @@ Determine:
 
 **Do not** treat "the tests pass with tcId 25" as closure — that is the workaround, not the answer.
 
+**RESOLVED 2026-08-30.** Traced via `git log -S`/`git show`, not assumed:
+
+1. **When introduced:** at this fork's very first commit, `db366c7` ("feat(phase-0): import SoftHSMv2 v2.7.0..."), 2026-03-02 — `ulMinKeySize = 48` and `minSize = 48` for `CKM_SHA384_HMAC` are already present in the imported upstream source, byte-identical to what exists today. Not introduced or altered by this PQC fork at any point; the later table-driven refactor (`858fc05`, "MAC lookup table") mechanically moved the same values from a switch statement into `kMacMechTable`, changing nothing.
+2. **Deliberate or unexamined:** reads as upstream SoftHSMv2's own deliberate, **uniformly applied** convention — minimum key length equals the mechanism's own digest output length, for every single HMAC variant without exception (SHA-1→20, SHA-224→28, SHA-256→32, SHA-384→48, SHA-512→64, all four SHA-3 variants matching their own digest lengths) — not a SHA-384-specific anomaly, and every later addition to the table (the SHA-3 family, KMAC-128/256) follows the identical pattern. A copy-paste mistake would not be this consistent across 9+ independently-added rows spanning multiple commits and roughly five months.
+3. **C++ vs Rust agreement: they disagree — a real, previously undocumented finding.** C++ enforces this floor symmetrically in both `MacSignInit` and `MacVerifyInit` (`SoftHSM_sign.cpp`, `kMacMechTable`). Rust's `sign_hmac` (`crypto/handlers.rs:1403-1437`) has **no minimum key-size check at all** — `Hmac::<Sha384>::new_from_slice(key_bytes)` from the RustCrypto `hmac` crate accepts any key length, since HMAC as a construction is defined for arbitrary-length keys per RFC 2104 and the crate imposes no floor itself. Rust silently accepts a 1-byte HMAC-SHA384 key that C++ would reject with `CKR_KEY_SIZE_RANGE`.
+4. **FIPS/CMVP dependency:** none found. Grepped every `docs/*.md` for `FIPS 198`/`FIPS-198` and for any CMVP/FIPS-140 security-policy document referencing an HMAC key-size floor — no compliance claim anywhere in the repo depends on this specific value (this project is not undergoing CMVP certification; see standing policy against fact-checking certification status).
+
+**Recommendation:** keep the C++ floor as-is — it is upstream's deliberate, internally consistent, five-month-stable convention, stricter than the spec's minimum but not wrong, and no evidence favors relaxing it. The real finding here is the **opposite** of D2's original hypothesis: it is not C++ that has an unexamined default, it is **Rust that has no floor at all**, silently accepting HMAC keys PKCS#11's own advertised `ulMinKeySize`/`ulMaxKeySize` range (which Rust would need to advertise consistently with C++ for this to be spec-honest) would reject on the C++ side. This is a genuine WS-6-class C++/Rust parity gap — Rust missing a validation C++ has, not C++ being overly strict — but fixing it is Rust-side work and out of scope under the current C++-only directive. Flagged here for whoever picks up WS-2/WS-6 on the Rust side; not fixed in this pass. The tcId-25 vector-selection workaround in `fix/acvp-hmac-general-aes-kwp` stands as permanent, correct policy — not a temporary one.
+
 ---
 
 ## WS-2 — Cross-engine ACVP enablement (P0, unlocks all Rust KAT evidence)
@@ -294,6 +303,8 @@ Real coverage exists but is **opt-in only** — `rust/test_xmss_release.js:186-1
 
 **Fix:** wire the orphaned LMS vectors (Tier 1, SP 800-208). Overlaps WS-4.
 
+**Investigated 2026-08-30 — sigVer vectors wired (via WS-4), keygen vectors genuinely blocked, not deferred casually.** `lms_sigver_test.json` is real KAT evidence and already loaded. `lms_keygen_test.json`/`lms_keygen_expected.json` (80 real ACVP `seed`+`I` → `publicKey` cases) require the engine to generate an LMS/HSS key pair *deterministically from a given seed* to check against — the same pattern already implemented for ML-DSA/ML-KEM/SLH-DSA via `extractSeed()` (`SoftHSM_keygen.cpp:331-345`). That function's own doc comment enumerates exactly three families (`ML-DSA xi = 32, ML-KEM d||z = 64, SLH-DSA SK.seed||SK.prf||PK.seed = 3n`) and has exactly three call sites — none for `CKM_HSS_KEY_PAIR_GEN`. The underlying library (`src/lib/crypto/stateful/hash-sigs/`, Cisco's reference LMS/HSS implementation) generates keys through `hss_generate_private_key()`, which takes a caller-supplied `generate_random` **callback**, not a fixed seed buffer — reproducing a specific ACVP vector's exact public key would require either reverse-engineering the library's internal RNG-call sequence (how many bytes it pulls, in what order, for what purpose) to feed it deterministically, or bypassing the library's high-level API and reimplementing RFC 8554 §5.3's LM-OTS/LMS key derivation directly from `SEED`+`I`. Both are real, multi-hour undertakings with genuine crypto-correctness risk if rushed — comparable in scope to WS-3.4/XMSS, not a wiring task. Deferred alongside XMSS rather than attempted under time pressure; a dedicated follow-up should scope CKA_SEED support for `CKM_HSS_KEY_PAIR_GEN` as its own item before this can close.
+
 ### 3.6 — Classic McEliece has zero conformance evidence
 
 1 of 5 parameter sets is supported (`mceliece6688128` hard-rejected otherwise, `ffi.rs:3417-3419`) — a documented scope decision, not a defect. But "MCELIECE" appears **0 times** in the conformance report; G8 covers only FrodoKEM/Keccak-256/KMAC/BIP32. Its sibling FrodoKEM has a full encap→decap SEAM test.
@@ -333,6 +344,12 @@ Exactly one RSA signature mechanism has a KAT — `CKM_SHA256_RSA_PKCS_PSS` (ACV
 Rust is no better: `ffi.rs:14393` recomputes SP 800-108 inline with the *same* `hmac` crate — self-consistency, not a vector.
 
 **Fix:** Tier-1 `KDA-HKDF`, `KDF` (counter + feedback), `PBKDF`. Tier-3 RFC 5869 / RFC 6070 as supplements where ACVP parameters don't map.
+
+**Investigated 2026-08-30 — `PBKDF` partially resolved (via WS-0.5); `KDA-HKDF` and `KDF` genuinely blocked, not attempted from memory.**
+
+- `CKM_PKCS5_PBKD2`: already has one real Tier-1 case (PBKDF2-HMAC-SHA224, `pbkdf2_test.json`, wired as `pbkdf2-224` — WS-0.5). SHA-512 still self-consistency only; not closed further this pass.
+- `CKM_HKDF_DERIVE`: fetched the only Tier-1 source at the pinned commit, `KDA-HKDF-Sp800-56Cr2` — it is **not** a standalone HKDF vector set. NIST frames it inside SP 800-56C's key-agreement construction: the "info" input a test case expects is not raw bytes but the output of a separate `OtherInfo`/fixedInfo concatenation algorithm (`fixedInfoPartyU`/`fixedInfoPartyV`, each a `{partyId, ephemeralData}` structure, combined per a length-prefixing convention SP 800-56A Rev3 defines). Implementing that correctly requires the actual SP 800-56A text; this repo has no local copy, and guessing at the prefix widths/byte order rather than reading the real algorithm is exactly the kind of fabricated-crypto-detail this plan's own standards forbid — a wrong guess would just produce a plausible-looking mismatch, not a caught error, since there is no independent way to know the encoding is wrong versus something else being wrong. Checked for a Tier-3 shortcut (RFC 5869's own simpler Appendix A vectors, which map directly onto PKCS#11's raw-salt/raw-info `CK_HKDF_PARAMS`) the same way WS-5.3 found RFC 7748 vectors already vendored in `rust/src/native/encrypt.rs` — no RFC 5869 vectors exist anywhere in this repo. Deferred; needs either the real SP 800-56A text or a legitimately-sourced RFC 5869 vector set before this can close.
+- `CKM_SP800_108_COUNTER_KDF`/`_FEEDBACK_KDF`: zero test coverage of any kind currently exists (not even self-consistency) — checked `tests/helpers.mjs` for a `CK_SP800_108_KDF_PARAMS`-building helper; none exists. Building one from scratch (the parameter shape has counter/DKM-length/context segments, `SoftHSM_keygen.cpp`'s own C_DeriveKey handling for it runs ~150 lines) plus sourcing real NIST `KDF` vectors is a real, multi-hour undertaking on the scale of WS-3.4/3.5, not attempted here.
 
 ### 5.3 — `CKM_X448` is advertised, dispatched, and never once executed
 
@@ -389,6 +406,8 @@ Strongest single parity signal in the audit: the feature is proven buildable, pr
 - Both hashers are compiled in and used: `sha3::Sha3_384` (`native/derive.rs:161`), `Sha3_224`/`Sha3_384` (`crypto/handlers.rs:1582,1584`). **Pure wiring omissions.**
 
 **C++ (12 missing):** SHA-2 truncated variants — `CKM_SHA512_224`, `CKM_SHA512_256`, `CKM_SHA512_T` plus their `_HMAC`, `_HMAC_GENERAL`, `_KEY_GEN`, `_KEY_DERIVATION`. `C_DigestInit`'s switch ends at SHA3-512 (`SoftHSM_digest.cpp:67-119`). Advertise == dispatch is honoured, so this is honest absence, not a mismatch.
+
+**RESOLVED 2026-08-30 (partial, deliberately) — `CKM_SHA512_224`/`CKM_SHA512_256` implemented; `CKM_SHA512_T` explicitly not.** Verified both mechanism names and every suffixed variant against the actual ratified spec text (`docs/refs/pkcs11-spec-v3.2-os.pdf` §6.25/§6.26), not just the local header — genuinely spec-defined, not invented. Implemented digest + `_HMAC` + `_HMAC_GENERAL` + `_KEY_DERIVATION` (8 mechanisms) using OpenSSL's built-in `EVP_sha512_224()`/`EVP_sha512_256()` (correct standardized initial hash values, not post-hoc truncation). `_KEY_GEN` deliberately excluded, consistent with this plan's own existing policy for every other `CKM_SHA*_KEY_GEN` (§WS-8, "Assessed OUT" table: no ACVP algorithm tests pure generic-secret-length key generation; `CKM_GENERIC_SECRET_KEY_GEN` already covers the use case) — confirmed C++ dispatches none of the existing SHA-2/SHA-3 `_KEY_GEN` mechanisms either before adding these two. `CKM_SHA512_T` (arbitrary caller-specified truncation) remains genuinely absent: the spec defines `CKM_SHA512_224` as literally "the same as `CKM_SHA512_T` with a parameter value of 224," but OpenSSL has no generic parameterized `EVP_MD` for arbitrary truncation lengths — implementing it would mean a from-scratch FIPS 180-4 §5.3.6 initial-hash-value computation (XOR the standard SHA-512 IV with a repeating `0xa5` pattern, then hash the ASCII string `"SHA-512/" + t` through one compression round to get the real IV), a materially different and riskier undertaking than reusing OpenSSL's audited fixed-IV support. Left out rather than rushed. Real Tier-1 ACVP evidence wired for everything implemented: `SHA2-512-224-1.0`/`SHA2-512-256-1.0` digest KATs (3 cases each), `HMAC-SHA2-512-224/256` verify KATs, and a derive-vs-digest cross-check (the same pattern WS-6.2 established) for both `_KEY_DERIVATION` mechanisms. CPP ACVP: 209 → 219 PASS, 0 FAIL, 0 SKIP.
 
 ### 6.4 — Remaining Rust mechanism gaps
 
@@ -459,6 +478,39 @@ Do not start an IN row until its `internalProjection.json` has been located; do 
 | `CKM_HKDF_DATA`, `CKM_HKDF_KEY_GEN` | PKCS#11 packaging variants; `KDA-HKDF` covers the KDF itself |
 | 12 × `CKM_SHA*_KEY_GEN` | Generic-secret generation, not an algorithm under test. Low impact anyway — `CKM_GENERIC_SECRET_KEY_GEN` covers the use case, and `kMacMechTable` sets `allowGenericSecret=true` for every HMAC row (`SoftHSM_sign.cpp:125-133`) |
 | `CKM_EXTRACT_KEY_FROM_KEY` (WS-6.6) | Key-material slicing, no ACVP algorithm. **Reconsider separately** — its absence is a genuine asymmetry against the three implemented `CKM_CONCATENATE_*`, which is an argument independent of vector availability |
+
+### C++ engine — investigated 2026-08-30 (WS-8, this session)
+
+Confirmed real ACVP vectors exist for `CKM_AES_CCM`, `CKM_AES_OFB`,
+`CKM_AES_CFB1/8/128`, `CKM_AES_GMAC`, `CKM_AES_XTS`
+(`ACVP-AES-XTS-1.0`/`-2.0`), and `CKM_ECMQV_DERIVE` (`KAS-ECC-1.0` publishes
+real `fullMqv`/`onePassMqv` scheme vectors — the earlier "verify MQV schemes
+are published" open question above is now resolved: they are). C++ had
+**zero** of these six/seven mechanisms implemented before this session (only
+ECB/CBC/CTR/GCM existed on the cipher side, only HMAC/CMAC/KMAC on the MAC
+side). CCM/OFB/CFB1/CFB8/CFB128/GMAC are done — real evidence, all passing
+(see git history 2026-08-30). Two remain, assessed as follows:
+
+- **`CKM_AES_XTS`**: being implemented now (double-length `CKK_AES_XTS` key
+  type; every file that currently gates on `keyType == CKK_AES` — object
+  attribute validation, check-value computation, cipher key-length
+  validation — hard-assumes single-length 128/192/256-bit AES keys and needs
+  a parallel path for XTS's 256/512-bit combined keys).
+- **`CKM_ECMQV_DERIVE`**: **deliberately not implemented.** ACVP vectors
+  exist, but OpenSSL's EVP API exposes no MQV primitive at all — PKCS#11
+  full-MQV requires the raw private-key scalar (extractable via
+  `EVP_PKEY_get_bn_param(..., OSSL_PKEY_PARAM_PRIV_KEY, ...)`, itself a
+  lower-level escape hatch), the SP 800-56A "associate value function," and
+  hand-driven `EC_POINT`/`BN_*` point addition and scalar multiplication to
+  combine two key pairs (static + ephemeral) on each side. This is a
+  different risk class from every other WS-8 mechanism: a subtly wrong MQV
+  combiner can pass every KAT it's tested against while still being
+  cryptographically unsound (e.g. missing the standard's required public-key
+  validation / small-subgroup checks), in a way ACVP functional vectors
+  alone won't necessarily surface. Explicit user decision 2026-08-30: skip,
+  document as a real blocker rather than attempt it under this session's
+  general evidence-first methodology, which is calibrated for functional
+  correctness, not for auditing a hand-rolled cryptographic protocol.
 
 ### Rust dependency research (2026-08-29) — `CKM_AES_XTS`
 

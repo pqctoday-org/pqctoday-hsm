@@ -30,6 +30,9 @@ CK_KEY_TYPE p11prov_obj_get_key_type(P11PROV_OBJ *obj);
 CK_ULONG p11prov_obj_get_key_bit_size(P11PROV_OBJ *obj);
 CK_ULONG p11prov_obj_get_key_size(P11PROV_OBJ *obj);
 CK_ULONG p11prov_obj_get_key_param_set(P11PROV_OBJ *obj);
+CK_ULONG p11prov_obj_get_key_hss_levels(P11PROV_OBJ *obj);
+CK_ULONG p11prov_obj_get_key_hss_lms_type(P11PROV_OBJ *obj);
+CK_ULONG p11prov_obj_get_key_hss_lmots_type(P11PROV_OBJ *obj);
 void p11prov_obj_to_store_reference(P11PROV_OBJ *obj, void **reference,
                                     size_t *reference_sz);
 P11PROV_OBJ *p11prov_obj_from_reference(const void *reference,
@@ -55,6 +58,11 @@ P11PROV_OBJ *p11prov_create_secret_key(P11PROV_CTX *provctx,
                                        P11PROV_SESSION *session,
                                        bool session_key, unsigned char *secret,
                                        size_t secretlen);
+P11PROV_OBJ *p11prov_create_mac_key(P11PROV_CTX *provctx,
+                                    P11PROV_SESSION *session,
+                                    CK_KEY_TYPE key_type,
+                                    const unsigned char *secret,
+                                    size_t secretlen);
 CK_RV p11prov_derive_key(P11PROV_OBJ *key, CK_MECHANISM *mechanism,
                          CK_ATTRIBUTE *template, CK_ULONG nattrs,
                          P11PROV_SESSION **_session, CK_OBJECT_HANDLE *dkey);
@@ -72,6 +80,8 @@ int p11prov_obj_get_ed_pub_key(P11PROV_OBJ *obj, CK_ATTRIBUTE **pub);
 CK_ATTRIBUTE *p11prov_obj_get_ec_public_raw(P11PROV_OBJ *key);
 P11PROV_OBJ *mock_pub_ec_key(P11PROV_CTX *ctx, CK_ATTRIBUTE_TYPE type,
                              CK_ATTRIBUTE *ec_params);
+P11PROV_OBJ *mock_pub_mlkem_key(P11PROV_CTX *ctx,
+                                CK_ML_KEM_PARAMETER_SET_TYPE param_set);
 bool p11prov_obj_is_rsa_pss(P11PROV_OBJ *obj);
 
 #define OBJ_CMP_KEY_TYPE 0x00
@@ -92,6 +102,8 @@ P11PROV_OBJ *p11prov_obj_import_secret_key(P11PROV_CTX *ctx, CK_KEY_TYPE type,
 CK_RV p11prov_obj_set_ec_encoded_public_key(P11PROV_OBJ *key,
                                             const void *pubkey,
                                             size_t pubkey_len);
+
+CK_RV p11prov_obj_ensure_ec_type(P11PROV_OBJ *key, CK_KEY_TYPE type);
 
 CK_RV p11prov_obj_copy_specific_attr(P11PROV_OBJ *pub_key,
                                      P11PROV_OBJ *priv_key,
@@ -120,8 +132,45 @@ P11PROV_OBJ *p11prov_obj_find_associated(P11PROV_OBJ *obj,
 extern const CK_BYTE ed25519_ec_params[];
 extern const CK_BYTE ed448_ec_params[];
 
+/* remediation R4: X25519/X448 key exchange. CKA_EC_PARAMS bytes are a DER
+ * PrintableString ("curve25519"/"curve448", PKCS#11 v3.1+ convention),
+ * verified byte-for-byte both by direct DER-encoding of the string and
+ * against the C++ engine's own parser (src/lib/crypto/OSSLUtil.cpp
+ * byteString2oid, which maps exactly these two strings to
+ * EVP_PKEY_X25519/EVP_PKEY_X448) — not assumed by analogy to ED25519/ED448
+ * alone. */
+#define X25519_NAME "X25519"
+#define X25519_BIT_SIZE 256
+#define X25519_BYTE_SIZE X25519_BIT_SIZE / 8
+#define X25519_SEC_BITS 128
+#define X25519_EC_PARAMS \
+    0x13, 0x0a, 0x63, 0x75, 0x72, 0x76, 0x65, 0x32, 0x35, 0x35, 0x31, 0x39
+#define X25519_EC_PARAMS_LEN 12
+#define X448_NAME "X448"
+#define X448_BIT_SIZE 448
+#define X448_BYTE_SIZE X448_BIT_SIZE / 8
+#define X448_SEC_BITS 224
+#define X448_EC_PARAMS \
+    0x13, 0x08, 0x63, 0x75, 0x72, 0x76, 0x65, 0x34, 0x34, 0x38
+#define X448_EC_PARAMS_LEN 10
+extern const CK_BYTE x25519_ec_params[];
+extern const CK_BYTE x448_ec_params[];
+
 #define MLDSA_44 "ML-DSA-44"
 #define MLDSA_65 "ML-DSA-65"
 #define MLDSA_87 "ML-DSA-87"
+
+#define SLHDSA_SHA2_128S "SLH-DSA-SHA2-128s"
+#define SLHDSA_SHAKE_128S "SLH-DSA-SHAKE-128s"
+#define SLHDSA_SHA2_128F "SLH-DSA-SHA2-128f"
+#define SLHDSA_SHAKE_128F "SLH-DSA-SHAKE-128f"
+#define SLHDSA_SHA2_192S "SLH-DSA-SHA2-192s"
+#define SLHDSA_SHAKE_192S "SLH-DSA-SHAKE-192s"
+#define SLHDSA_SHA2_192F "SLH-DSA-SHA2-192f"
+#define SLHDSA_SHAKE_192F "SLH-DSA-SHAKE-192f"
+#define SLHDSA_SHA2_256S "SLH-DSA-SHA2-256s"
+#define SLHDSA_SHAKE_256S "SLH-DSA-SHAKE-256s"
+#define SLHDSA_SHA2_256F "SLH-DSA-SHA2-256f"
+#define SLHDSA_SHAKE_256F "SLH-DSA-SHAKE-256f"
 
 #endif /* _OBJECTS_H */

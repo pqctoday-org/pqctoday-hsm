@@ -817,6 +817,34 @@ pub fn encrypt_with_key_bytes(
             let p = oaep.unwrap_or(&default);
             rsa_oaep_encrypt(key_bytes, plaintext, p)
         }
+        // KMIP/CACP coverage gap-analysis item 2.2 (2026-08-30). `iv` here
+        // is CCM's nonce, `tag_len` its MAC length (SP 800-38C: nonce
+        // 7..=13 bytes, tag ∈ {4,6,8,10,12,14,16}) — the same generic
+        // parameters GCM already uses for the analogous fields.
+        CKM_AES_CCM => {
+            let nonce = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_ccm_encrypt(key_bytes, nonce, plaintext, aad, tag_len)
+        }
+        // KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30). OFB is
+        // self-inverse (same keystream XOR encrypt/decrypt, like CTR
+        // above); CFB is direction-sensitive (its feedback register
+        // differs), hence CipherDirection::Encrypt here.
+        CKM_AES_OFB => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_ofb_apply(key_bytes, iv, plaintext)
+        }
+        CKM_AES_CFB128 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb128_apply(key_bytes, iv, plaintext, crate::crypto::multipart::CipherDirection::Encrypt)
+        }
+        CKM_AES_CFB8 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb8_apply(key_bytes, iv, plaintext, crate::crypto::multipart::CipherDirection::Encrypt)
+        }
+        CKM_AES_CFB1 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb1_apply(key_bytes, iv, plaintext, crate::crypto::multipart::CipherDirection::Encrypt)
+        }
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }
@@ -864,8 +892,129 @@ pub fn decrypt_with_key_bytes(
             let p = oaep.unwrap_or(&default);
             rsa_oaep_decrypt(key_bytes, ciphertext, p)
         }
+        // KMIP/CACP coverage gap-analysis item 2.2 (2026-08-30). See the
+        // encrypt-side arm above for the parameter mapping.
+        CKM_AES_CCM => {
+            let nonce = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_ccm_decrypt(key_bytes, nonce, ciphertext, aad, tag_len)
+        }
+        // KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30).
+        CKM_AES_OFB => {
+            // OFB is self-inverse — same keystream XOR both directions.
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_ofb_apply(key_bytes, iv, ciphertext)
+        }
+        CKM_AES_CFB128 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb128_apply(key_bytes, iv, ciphertext, crate::crypto::multipart::CipherDirection::Decrypt)
+        }
+        CKM_AES_CFB8 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb8_apply(key_bytes, iv, ciphertext, crate::crypto::multipart::CipherDirection::Decrypt)
+        }
+        CKM_AES_CFB1 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb1_apply(key_bytes, iv, ciphertext, crate::crypto::multipart::CipherDirection::Decrypt)
+        }
         _ => Err(CKR_MECHANISM_INVALID),
     }
+}
+
+/// KMIP/CACP coverage gap-analysis item 2.2 (2026-08-30) — thin
+/// key-bytes wrapper over [`crate::crypto::multipart::ccm_encrypt`],
+/// mirroring [`aes_gcm_encrypt`]'s exact `AesKey::new` pattern. SP
+/// 800-38C: nonce 7..=13 bytes; tag length one of {4,6,8,10,12,14,16}
+/// bytes (default 16, same convention as GCM above).
+fn aes_ccm_encrypt(
+    key: &[u8],
+    nonce: &[u8],
+    plaintext: &[u8],
+    aad: &[u8],
+    tag_len: Option<usize>,
+) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{ccm_encrypt, AesKey};
+    if !(7..=13).contains(&nonce.len()) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let tag_len = tag_len.unwrap_or(16);
+    if !matches!(tag_len, 4 | 6 | 8 | 10 | 12 | 14 | 16) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    Ok(ccm_encrypt(&k, nonce, aad, plaintext, tag_len))
+}
+
+/// Decrypt counterpart of [`aes_ccm_encrypt`].
+fn aes_ccm_decrypt(
+    key: &[u8],
+    nonce: &[u8],
+    ciphertext_and_tag: &[u8],
+    aad: &[u8],
+    tag_len: Option<usize>,
+) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{ccm_decrypt, AesKey};
+    if !(7..=13).contains(&nonce.len()) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let tag_len = tag_len.unwrap_or(16);
+    if !matches!(tag_len, 4 | 6 | 8 | 10 | 12 | 14 | 16) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    ccm_decrypt(&k, nonce, aad, ciphertext_and_tag, tag_len)
+}
+
+/// KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30) — thin
+/// key-bytes wrapper over [`crate::crypto::multipart::OfbState`],
+/// mirroring the FFI dispatch's own usage exactly (`ffi.rs`'s
+/// `CKM_AES_OFB` arms, both directions). Self-inverse: the same call
+/// serves encrypt and decrypt.
+fn aes_ofb_apply(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{AesKey, OfbState};
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let ivb: [u8; 16] = iv.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    Ok(OfbState::new(k, ivb).update_public(data))
+}
+
+/// KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30) — CFB128,
+/// direction-sensitive (unlike OFB), mirroring `ffi.rs`'s `CKM_AES_CFB128`
+/// arms exactly.
+fn aes_cfb128_apply(
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    dir: crate::crypto::multipart::CipherDirection,
+) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{AesKey, Cfb128State};
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let ivb: [u8; 16] = iv.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    Ok(Cfb128State::new(k, ivb, dir).update_public(data))
+}
+
+/// CFB8 counterpart of [`aes_cfb128_apply`].
+fn aes_cfb8_apply(
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    dir: crate::crypto::multipart::CipherDirection,
+) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{AesKey, Cfb8State};
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let ivb: [u8; 16] = iv.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    Ok(Cfb8State::new(k, ivb, dir).update_public(data))
+}
+
+/// CFB1 counterpart of [`aes_cfb128_apply`].
+fn aes_cfb1_apply(
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    dir: crate::crypto::multipart::CipherDirection,
+) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{AesKey, Cfb1State};
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let ivb: [u8; 16] = iv.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    Ok(Cfb1State::new(k, ivb, dir).update_public(data))
 }
 
 // ── RSA-OAEP ────────────────────────────────────────────────────────────────
@@ -1069,6 +1218,46 @@ pub fn aes_key_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
         _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
     };
     if ok { Ok(buf) } else { Err(CKR_ENCRYPTED_DATA_INVALID) }
+}
+
+/// AES Key Wrap with Padding (RFC 5649 / `CKM_AES_KEY_WRAP_KWP`) — the
+/// `native` counterpart of `ffi::C_WrapKey`'s `is_kwp` arm. Unlike
+/// [`aes_key_wrap`], supports arbitrary-length (non-empty) plaintext — no
+/// 8-byte-multiple/≥16-byte requirement, RFC 5649's padding handles the
+/// rest. KMIP/CACP coverage gap-analysis item 7 (2026-08-30): the engine
+/// has supported this since PR #189; KMIP's `wrap_key_value` never called
+/// it, hard-rejecting `BlockCipherMode::AESKeyWrapPadding` before ever
+/// reaching the engine.
+pub fn aes_key_wrap_kwp(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use aes::cipher::generic_array::GenericArray;
+    if plaintext.is_empty() {
+        return Err(CKR_DATA_INVALID);
+    }
+    let result = match kek.len() {
+        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
+        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
+        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    };
+    result.map_err(|_| CKR_FUNCTION_FAILED)
+}
+
+/// AES Key Unwrap with Padding (RFC 5649) — inverse of
+/// [`aes_key_wrap_kwp`]. Ciphertext must be ≥ 16 bytes and a multiple of
+/// the 8-byte semiblock (RFC 5649 §5.18.4); integrity/padding-check
+/// failure → `CKR_WRAPPED_KEY_INVALID`, matching the FFI path exactly.
+pub fn aes_key_unwrap_kwp(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use aes::cipher::generic_array::GenericArray;
+    if wrapped.len() < 16 || wrapped.len() % 8 != 0 {
+        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
+    }
+    let result = match kek.len() {
+        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
+        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
+        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    };
+    result.map_err(|_| CKR_WRAPPED_KEY_INVALID)
 }
 
 // ── AES-ECB ────────────────────────────────────────────────────────────────
@@ -1402,6 +1591,160 @@ mod tests {
         assert_eq!(aes_key_unwrap(&kek, &bad).unwrap_err(), CKR_ENCRYPTED_DATA_INVALID);
         // Non-8-multiple input rejected per RFC 3394 §2.2.1.
         assert_eq!(aes_key_wrap(&kek, &pt[..15]).unwrap_err(), CKR_DATA_LEN_RANGE);
+    }
+
+    /// KMIP/CACP coverage gap-analysis item 7 (2026-08-30) —
+    /// `CKM_AES_KEY_WRAP_KWP` (RFC 5649), verified against an
+    /// independently-computed reference: Python's `cryptography` library
+    /// (`aes_key_wrap_with_padding`/`_unwrap_with_padding`), a different
+    /// implementation than this crate's `aes_kw`. Plaintext is
+    /// deliberately not a multiple of 8 bytes to prove KWP's arbitrary-
+    /// length support, which plain AES-KW above cannot do.
+    #[test]
+    fn aes_key_wrap_kwp_matches_independent_reference() {
+        let kek = vec![0x11u8; 32];
+        let pt = b"this is a KWP test of variable length, not a multiple of 8".to_vec();
+        // Reference vector from Python's
+        // `cryptography.hazmat.primitives.keywrap.aes_key_wrap_with_padding
+        // (bytes([0x11]*32), plaintext)` — computed independently, not
+        // derived from this crate's own output.
+        let expected: [u8; 72] = [
+            0x39, 0x07, 0x83, 0xf9, 0xec, 0x5b, 0x01, 0x95,
+            0xbe, 0x01, 0xa5, 0x47, 0x64, 0x82, 0x9c, 0x78,
+            0xfd, 0x58, 0x76, 0xc7, 0xe7, 0xf5, 0x65, 0x42,
+            0xbe, 0x79, 0x1d, 0x4c, 0x60, 0xa6, 0x4b, 0xa2,
+            0x0b, 0x83, 0x67, 0x89, 0x5d, 0x65, 0xe1, 0xda,
+            0x73, 0x92, 0xe1, 0xd2, 0x57, 0xf2, 0x6d, 0x00,
+            0x7c, 0x98, 0xc3, 0x5e, 0xd9, 0xf7, 0x73, 0xfa,
+            0x1d, 0x5c, 0xa3, 0xda, 0x80, 0x7d, 0x17, 0x65,
+            0xf4, 0xc8, 0x8c, 0xba, 0xd4, 0x3c, 0xb0, 0x75,
+        ];
+        let wrapped = aes_key_wrap_kwp(&kek, &pt).unwrap();
+        assert_eq!(wrapped, expected, "must match Python cryptography's aes_key_wrap_with_padding");
+        assert_eq!(aes_key_unwrap_kwp(&kek, &wrapped).unwrap(), pt);
+        // Tampered ciphertext → integrity-check failure, same as plain KW.
+        let mut bad = wrapped.clone();
+        bad[0] ^= 1;
+        assert_eq!(aes_key_unwrap_kwp(&kek, &bad).unwrap_err(), CKR_WRAPPED_KEY_INVALID);
+        // Empty plaintext rejected.
+        assert_eq!(aes_key_wrap_kwp(&kek, &[]).unwrap_err(), CKR_DATA_INVALID);
+    }
+
+    /// KMIP/CACP coverage gap-analysis item 2.2 (2026-08-30) —
+    /// `aes_ccm_encrypt`/`aes_ccm_decrypt`, verified against a real NIST
+    /// ACVP test case (`tests/acvp/aes_ccm_test.json`, AES-128, first
+    /// encrypt case) — the same vector file and construction this
+    /// repo's own C++ WS-8 CCM fix was independently validated against
+    /// (see that file's `_provenance` note). No AAD in this specific
+    /// case; the AAD path is exercised by the tamper-detection assertion
+    /// below via a non-empty AAD round trip.
+    #[test]
+    fn aes_ccm_matches_nist_acvp_vector() {
+        let key: [u8; 16] = [
+            0xb4, 0xce, 0x71, 0xa0, 0x1a, 0x78, 0x3c, 0x78, 0x51, 0xd1, 0x91, 0x32, 0xb3, 0xb0,
+            0x6e, 0x9a,
+        ];
+        let nonce: [u8; 13] = [
+            0x73, 0xd7, 0xbc, 0xba, 0x71, 0x0c, 0x10, 0x99, 0x45, 0xf7, 0x93, 0x6c, 0xd4,
+        ];
+        let pt: [u8; 32] = [
+            0x41, 0xe2, 0xc1, 0x25, 0xd4, 0x1e, 0x37, 0x2d, 0xa9, 0xa4, 0x78, 0x6d, 0x22, 0xa1,
+            0x0b, 0xa4, 0xb0, 0x4c, 0x34, 0x67, 0x45, 0x4d, 0xa0, 0xb4, 0xb8, 0xc6, 0x92, 0x0f,
+            0xea, 0x64, 0x15, 0x85,
+        ];
+        let expected_ct: [u8; 48] = [
+            0xca, 0xf3, 0x1b, 0x08, 0x3f, 0xd6, 0xef, 0x06, 0x41, 0x71, 0x3e, 0xb4, 0x9f, 0x28,
+            0xf1, 0xcd, 0xb6, 0xfb, 0xb1, 0x38, 0x25, 0x1d, 0xb9, 0x4f, 0x6f, 0xc5, 0x9b, 0xcc,
+            0xdf, 0x0e, 0x23, 0x09, 0x2c, 0xcd, 0x1c, 0x20, 0x25, 0x26, 0x87, 0x3d, 0x0c, 0xcd,
+            0x60, 0x53, 0xc7, 0x9a, 0xee, 0xaf,
+        ];
+        let ct = aes_ccm_encrypt(&key, &nonce, &pt, &[], Some(16)).unwrap();
+        assert_eq!(ct, expected_ct, "must match the real NIST ACVP AES-128-CCM KAT");
+        let recovered = aes_ccm_decrypt(&key, &nonce, &ct, &[], Some(16)).unwrap();
+        assert_eq!(recovered, pt);
+        // Tampered tag → integrity failure, not silently-wrong plaintext.
+        let mut bad = ct.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert_eq!(aes_ccm_decrypt(&key, &nonce, &bad, &[], Some(16)).unwrap_err(), CKR_ENCRYPTED_DATA_INVALID);
+        // AAD round-trips and genuinely authenticates (wrong AAD rejected).
+        let ct_aad = aes_ccm_encrypt(&key, &nonce, &pt, b"header", Some(16)).unwrap();
+        assert_eq!(aes_ccm_decrypt(&key, &nonce, &ct_aad, b"header", Some(16)).unwrap(), pt);
+        assert!(aes_ccm_decrypt(&key, &nonce, &ct_aad, b"wrong-header", Some(16)).is_err());
+        // Nonce/tag-length range checks (SP 800-38C).
+        assert_eq!(aes_ccm_encrypt(&key, &[0u8; 6], &pt, &[], Some(16)).unwrap_err(), CKR_MECHANISM_PARAM_INVALID);
+        assert_eq!(aes_ccm_encrypt(&key, &nonce, &pt, &[], Some(15)).unwrap_err(), CKR_MECHANISM_PARAM_INVALID);
+    }
+
+    /// KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30) —
+    /// `aes_ofb_apply`/`aes_cfb128_apply`/`aes_cfb8_apply`/`aes_cfb1_apply`,
+    /// each verified byte-exact against a real NIST ACVP test case from
+    /// this repo's own vector files (`tests/acvp/aes_{ofb,cfb128,cfb8,
+    /// cfb1}_test.json`) — the same files the C++ WS-8 fix for these
+    /// exact mechanisms was validated against. The CFB1 vector is
+    /// deliberately a byte-aligned (payloadLen=8) case per that file's
+    /// own provenance note, so a plain byte comparison is valid evidence
+    /// (no bit-level masking needed).
+    #[test]
+    fn aes_ofb_cfb_family_matches_nist_acvp_vectors() {
+        // OFB — self-inverse, one call serves both directions.
+        let ofb_key: [u8; 16] = [0x00; 16];
+        let ofb_iv: [u8; 16] = [
+            0xf3, 0x44, 0x81, 0xec, 0x3c, 0xc6, 0x27, 0xba, 0xcd, 0x5d, 0xc3, 0xfb, 0x08, 0xf2,
+            0x73, 0xe6,
+        ];
+        let ofb_pt: [u8; 16] = [0x00; 16];
+        let ofb_ct: [u8; 16] = [
+            0x03, 0x36, 0x76, 0x3e, 0x96, 0x6d, 0x92, 0x59, 0x5a, 0x56, 0x7c, 0xc9, 0xce, 0x53,
+            0x7f, 0x5e,
+        ];
+        let got = aes_ofb_apply(&ofb_key, &ofb_iv, &ofb_pt).unwrap();
+        assert_eq!(got, ofb_ct, "OFB must match the NIST ACVP KAT");
+        assert_eq!(aes_ofb_apply(&ofb_key, &ofb_iv, &ofb_ct).unwrap(), ofb_pt, "OFB decrypt (same call) must recover plaintext");
+
+        // CFB128
+        use crate::crypto::multipart::CipherDirection::{Decrypt, Encrypt};
+        let cfb128_key: [u8; 16] = [0x00; 16];
+        let cfb128_iv: [u8; 16] = [
+            0x96, 0xab, 0x5c, 0x2f, 0xf6, 0x12, 0xd9, 0xdf, 0xaa, 0xe8, 0xc3, 0x1f, 0x30, 0xc4,
+            0x21, 0x68,
+        ];
+        let cfb128_pt: [u8; 16] = [0x00; 16];
+        let cfb128_ct: [u8; 16] = [
+            0xff, 0x4f, 0x83, 0x91, 0xa6, 0xa4, 0x0c, 0xa5, 0xb2, 0x5d, 0x23, 0xbe, 0xdd, 0x44,
+            0xa5, 0x97,
+        ];
+        assert_eq!(aes_cfb128_apply(&cfb128_key, &cfb128_iv, &cfb128_pt, Encrypt).unwrap(), cfb128_ct);
+        assert_eq!(aes_cfb128_apply(&cfb128_key, &cfb128_iv, &cfb128_ct, Decrypt).unwrap(), cfb128_pt);
+
+        // CFB8
+        let cfb8_key: [u8; 16] = [0x00; 16];
+        let cfb8_iv: [u8; 16] = [
+            0x97, 0x98, 0xc4, 0x64, 0x0b, 0xad, 0x75, 0xc7, 0xc3, 0x22, 0x7d, 0xb9, 0x10, 0x17,
+            0x4e, 0x72,
+        ];
+        let cfb8_pt: [u8; 1] = [0x00];
+        let cfb8_ct: [u8; 1] = [0xa9];
+        assert_eq!(aes_cfb8_apply(&cfb8_key, &cfb8_iv, &cfb8_pt, Encrypt).unwrap(), cfb8_ct);
+        assert_eq!(aes_cfb8_apply(&cfb8_key, &cfb8_iv, &cfb8_ct, Decrypt).unwrap(), cfb8_pt);
+
+        // CFB1 (payloadLen=8 case, byte-aligned)
+        let cfb1_key: [u8; 16] = [
+            0x47, 0x5f, 0x9b, 0xcc, 0x8a, 0x22, 0x60, 0x1a, 0x4e, 0xf8, 0x77, 0xe5, 0x4d, 0xc9,
+            0x79, 0x77,
+        ];
+        let cfb1_iv: [u8; 16] = [
+            0x21, 0x1e, 0xae, 0x94, 0xdf, 0xac, 0x12, 0x7e, 0xd3, 0xcc, 0x36, 0x7d, 0xbc, 0x09,
+            0x4d, 0x0b,
+        ];
+        let cfb1_pt: [u8; 1] = [0x03];
+        let cfb1_ct: [u8; 1] = [0x2f];
+        assert_eq!(aes_cfb1_apply(&cfb1_key, &cfb1_iv, &cfb1_pt, Encrypt).unwrap(), cfb1_ct);
+        assert_eq!(aes_cfb1_apply(&cfb1_key, &cfb1_iv, &cfb1_ct, Decrypt).unwrap(), cfb1_pt);
+
+        // IV length validation, shared across all four.
+        assert_eq!(aes_ofb_apply(&ofb_key, &[0u8; 15], &ofb_pt).unwrap_err(), CKR_MECHANISM_PARAM_INVALID);
+        assert_eq!(aes_cfb128_apply(&cfb128_key, &[0u8; 15], &cfb128_pt, Encrypt).unwrap_err(), CKR_MECHANISM_PARAM_INVALID);
     }
 
     fn fresh_session() -> u32 {

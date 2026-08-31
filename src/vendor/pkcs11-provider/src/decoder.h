@@ -44,5 +44,36 @@ extern const OSSL_DISPATCH p11prov_der_decoder_p11prov_rsa_functions[];
 extern const OSSL_DISPATCH p11prov_der_decoder_p11prov_ec_functions[];
 extern const OSSL_DISPATCH p11prov_der_decoder_p11prov_ed25519_functions[];
 extern const OSSL_DISPATCH p11prov_der_decoder_p11prov_ed448_functions[];
+/* remediation R2 */
+extern const OSSL_DISPATCH p11prov_der_decoder_p11prov_mldsa44_functions[];
+extern const OSSL_DISPATCH p11prov_der_decoder_p11prov_mldsa65_functions[];
+extern const OSSL_DISPATCH p11prov_der_decoder_p11prov_mldsa87_functions[];
+extern const OSSL_DISPATCH p11prov_der_decoder_p11prov_mlkem512_functions[];
+extern const OSSL_DISPATCH p11prov_der_decoder_p11prov_mlkem768_functions[];
+extern const OSSL_DISPATCH p11prov_der_decoder_p11prov_mlkem1024_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_sha2_128s_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_shake_128s_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_sha2_128f_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_shake_128f_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_sha2_192s_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_shake_192s_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_sha2_192f_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_shake_192f_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_sha2_256s_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_shake_256s_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_sha2_256f_functions[];
+extern const OSSL_DISPATCH
+    p11prov_der_decoder_p11prov_slhdsa_shake_256f_functions[];
 
 #endif /* _DECODER_H */

@@ -2452,6 +2452,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "sha3 0.10.8",
  "softhsmrustv3",
  "spki 0.7.3",
  "thiserror 1.0.69",
@@ -3289,6 +3290,7 @@ dependencies = [
  "cmac",
  "console_error_panic_hook",
  "ctr",
+ "curve25519-dalek",
  "ed25519-dalek",
  "ed448-goldilocks",
  "fips204",
@@ -3330,6 +3332,7 @@ dependencies = [
  "x25519-dalek",
  "x448",
  "xmss",
+ "xts-mode",
  "zeroize",
 ]
 
@@ -4382,6 +4385,16 @@ dependencies = [
  "subtle",
  "thiserror 2.0.18",
  "zeroize",
+]
+
+[[package]]
+name = "xts-mode"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09cbddb7545ca0b9ffa7bdc653e8743303e1712687a6918ced25f2cdbed42520"
+dependencies = [
+ "byteorder",
+ "cipher 0.4.4",
 ]
 
 [[package]]

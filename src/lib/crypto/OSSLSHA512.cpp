@@ -44,3 +44,23 @@ const EVP_MD* OSSLSHA512::getEVPHash() const
 	return EVP_sha512();
 }
 
+int OSSLSHA512_224::getHashSize()
+{
+	return 28;
+}
+
+const EVP_MD* OSSLSHA512_224::getEVPHash() const
+{
+	return EVP_sha512_224();
+}
+
+int OSSLSHA512_256::getHashSize()
+{
+	return 32;
+}
+
+const EVP_MD* OSSLSHA512_256::getEVPHash() const
+{
+	return EVP_sha512_256();
+}
+

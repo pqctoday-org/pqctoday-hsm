@@ -238,23 +238,12 @@ fn extract_and_expand(
 // secret.
 
 /// §5.3: SHA3-256(ss_M ‖ ss_X ‖ ct_X ‖ pk_X ‖ XWingLabel), label = 5c2e2f2f5e5c.
-const XWING_LABEL: [u8; 6] = [0x5c, 0x2e, 0x2f, 0x2f, 0x5e, 0x5c];
-
-fn xwing_combine(
-    ops: &dyn PkcsOps,
-    ss_m: &[u8],
-    ss_x: &[u8],
-    ct_x: &[u8],
-    pk_x: &[u8],
-) -> Result<Vec<u8>, PqcTodayError> {
-    let mut buf = Vec::with_capacity(32 * 4 + XWING_LABEL.len());
-    buf.extend_from_slice(ss_m);
-    buf.extend_from_slice(ss_x);
-    buf.extend_from_slice(ct_x);
-    buf.extend_from_slice(pk_x);
-    buf.extend_from_slice(&XWING_LABEL);
-    ops.sha3_256(&buf)
-}
+///
+/// `pub(crate)` so `backend.rs`'s `CryptokiBackend::xwing_combine` — the only
+/// place that builds the transcript and runs the combiner, via
+/// `softhsmrustv3::native::derive::run_combiner` — can reuse this constant
+/// instead of a second, driftable copy.
+pub(crate) const XWING_LABEL: [u8; 6] = [0x5c, 0x2e, 0x2f, 0x2f, 0x5e, 0x5c];
 
 /// §5.2: expandDecapsulationKey — SHAKE256(sk, 96) split into ML-KEM's
 /// (d ‖ z) and the X25519 scalar. The private key IS the 32-byte seed.
@@ -301,7 +290,7 @@ fn xwing_encap(
     let ct_x = PublicKey::from(&sec).to_bytes();
     let ss_x = dh_in_hsm(ops, &ek_x, pk_x)?;
 
-    let ss = xwing_combine(ops, &ss_m, &ss_x, &ct_x, pk_x)?;
+    let ss = ops.xwing_combine(&ss_m, &ss_x, &ct_x, pk_x)?;
     let mut enc = Vec::with_capacity(1120);
     enc.extend_from_slice(&ct_m);
     enc.extend_from_slice(&ct_x);
@@ -324,7 +313,7 @@ fn xwing_decap(ops: &dyn PkcsOps, enc: &[u8], sk: &[u8]) -> Result<Vec<u8>, PqcT
     let ss_x = dh_in_hsm(ops, &sk_x, ct_x)?;
     let pk_x = PublicKey::from(&StaticSecret::from(sk_x)).to_bytes();
 
-    xwing_combine(ops, &ss_m, &ss_x, ct_x, &pk_x)
+    ops.xwing_combine(&ss_m, &ss_x, ct_x, &pk_x)
 }
 
 /// Encapsulate. Returns `(shared_secret, enc)`.

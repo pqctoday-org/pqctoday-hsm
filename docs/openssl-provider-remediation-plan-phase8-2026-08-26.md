@@ -1,0 +1,784 @@
+# OpenSSL provider remediation plan — phase 8 (R37–R41): close the remainder
+
+Date: 2026-08-26. Companion to
+`docs/openssl-provider-coverage-audit-2026-08-25.md` and successor to
+`docs/openssl-provider-remediation-plan-phase7-2026-08-26.md` (R34–R36,
+all three active items executed and committed).
+
+Phase 8 is the **closure-of-everything phase**: it takes every gap the
+post-phase-7 "remaining gaps" report listed as open or parked —
+including the two long-parked items (R27/XMSS, R33/ML-KEM encoders)
+that previous phases deliberately left on the shelf — and sequences
+them for execution. After phase 8, the only remaining entries in the
+audit are the four permanent, documented limitations restated in the
+final section, which are structurally not closeable from this codebase
+(spec-shape, OpenSSL-core, or deliberate-posture reasons, per item).
+
+Every claim below was re-grounded against the current source tree while
+writing this plan. Grounding for this phase surfaced one NEW finding
+(R37's cross-engine divergence — see that item) beyond what the
+remaining-gaps report already knew.
+
+## Ground rules (carried forward from phases 4–7, unchanged)
+
+- **Live-trace-confirm before fixing**: reproduce every suspected
+  behavior via `PKCS11_PROVIDER_DEBUG` / engine logs / raw-PKCS#11
+  probes before writing a fix; never patch from static reading alone.
+- **R13 discipline**: every positive proof needs engine-log or
+  negative-control evidence of real token participation. Hard
+  propqueries for any algorithm name that collides with a
+  default-provider name.
+- **`pkcs11-module-load-behavior = early`** in every new arena that
+  fetches before creating a key object (WART-4).
+- **Verify standards facts against the ratified text**
+  (`docs/refs/pkcs11-spec-v3.2-os.pdf`) and, where a mechanism tracks
+  the in-progress v3.3, against the OASIS TC working tree
+  (`oasis-tcs/pkcs11`, `working/doc/spec/`) — the R35 lesson: a partial
+  earlier read survived two document generations before the ratified
+  text was re-read in full.
+- **Multi-part first**: OpenSSL's `EVP_DigestSign` machinery drives
+  every sign through `C_SignUpdate`/`C_SignFinal` internally, even
+  one-shot CLI calls — learned independently in R34 AND R35. Any new
+  sign-capable mechanism must be checked against BOTH engines'
+  multi-part gates (`bAllowMultiPartOp` / `sign_mech_supports_multipart`)
+  before its first test run, not after.
+- **Sabotage-test every new proof**; full regression (C++ CTest,
+  harness, `cargo test --release` when `rust/` is touched) before each
+  commit; one commit per R-item; append-only execution updates in this
+  doc and the coverage audit. Known flaky CTest suites
+  (`p11test`, `p11_v32_compliance`) get two clean reruns before a
+  failure is treated as real.
+- Vendor mechanisms tied to the external-µ story carry the literal
+  `PQCTODAY-VENDOR-EXT-MU` removal tag; new vendor codepoints allocate
+  sequentially in `vendor_mechanisms.h` / `constants.rs`.
+- No push without explicit confirmation.
+
+## Summary table
+
+| # | Item | Origin | Effort | Type |
+|---|---|---|---|---|
+| R37 | Bare generic `CKM_HASH_ML_DSA` / `CKM_HASH_SLH_DSA` PHM conformance — both engines, which currently disagree with the spec AND each other | deferred by R35/R36; divergence found grounding this plan | M | conformance fix |
+| R38 | SHAKE128/256 reachability for `CKM_HASH_*_SHAKE*` routing | pre-existing `digests.c` limitation, surfaced by R35 | S | provider routing |
+| R39 | `CKM_PQCTODAY_ML_DSA_MU_GEN` — token-side µ computation (v3.3-draft-aligned) | v3.3 draft's second external-µ half, not built by R34 | M | feature (stopgap, removal-tagged) |
+| R40 | ML-KEM public SPKI/text encoders (un-parks R33) | OP-3's deliberate parity-tier deferral | S–M | parity feature |
+| R41 | XMSS/XMSS-MT provider surface (un-parks R27 / closes ALG-2) | the last algorithm-family gap in the matrix | L | feature |
+
+**Recommended order: R38 → R37 → R39 → R40 → R41.** Cheapest and most
+self-contained first; R38+R37 complete the Hash*-DSA story R35/R36
+started; R39 completes the external-µ story R34 started; R40 is an
+independent small parity item usable as a breather; R41 is the largest
+and riskiest and goes last so every pattern it reuses (stateful-sign
+shape, KAT discipline, multi-part gates, five-gap registration
+checklist) is warm. R41 is also the only item plausibly worth its own
+session — if time-boxing, cut between R40 and R41.
+
+---
+
+### R38 — SHAKE128/256 reachability for HashML-DSA/HashSLH-DSA — effort S
+
+**Grounding:** R35/R36's digest→mechanism maps in
+`p11prov_mldsa_set_mechanism` / `p11prov_slhdsa_set_mechanism` have
+`CKM_HASH_*_SHAKE128/256` arms designed but unreachable: the digest
+name a caller passes to `EVP_DigestSignInit` resolves through
+`p11prov_digest_get_by_name` (`digests.c`), whose `digest_map` has no
+SHAKE entries at all — so `sigctx->digest` can never hold a SHAKE
+value today. PKCS#11 itself defines no SHAKE *digest* mechanism
+codepoint (only `CKM_SHAKE_128/256_KEY_DERIVATION`, `0x39B/0x39C`), so
+there is no obviously-correct standard value to map the names onto —
+this is why the gap exists.
+
+**Design decision (make at execution, options pre-scoped):**
+
+- **(a) Recommended — sentinel routing inside the two sig files.**
+  Intercept the digest names `"SHAKE128"`/`"SHAKE-128"`/`"SHAKE256"`/
+  `"SHAKE-256"` in `p11prov_mldsa_digest_sign_init` (and the verify /
+  slhdsa twins) BEFORE the shared `p11prov_sig_op_init` name lookup,
+  storing `CKM_SHAKE_128_KEY_DERIVATION`/`_256_` in `sigctx->digest`
+  as carrier values, matched by the existing (currently-dead) SHAKE
+  arms of the two `set_mechanism` maps. Zero impact on any other
+  algorithm's digest handling and zero change to `digest_map` (which
+  also feeds `p11prov_digest_get_digest_size` consumers that assume
+  fixed-length digests — a SHAKE XOF entry there would need a length
+  convention that only makes sense per-context: FIPS 204 uses 32 bytes
+  for SHAKE128 and 64 for SHAKE256 in pre-hash, and nothing else in
+  the provider shares that convention).
+- (b) Add SHAKE rows to `digest_map` with the FIPS 204 pre-hash output
+  lengths. Rejected-by-default: pollutes a shared table with a
+  context-specific XOF length convention, and risks the KDF/MAC
+  consumers of `digest_get_digest_size` silently accepting SHAKE where
+  they never did before.
+
+**Work:** implement (a); un-dead the SHAKE arms in both
+`set_mechanism` switches (replace the `default:`-documented
+"unreachable today" comments with real routing); confirm OpenSSL's
+`dgst`/`EVP_DigestSignInit` actually accepts `-shake128`-style digest
+names end-to-end (if the CLI won't pass an XOF name through, the
+EVP-API path via a small probe or `pkeyutl -digest` is the test
+surface — establish which, live, before writing the harness case).
+
+**Proof plan:** harness case `T31` (+`T31b` Rust twin) mirroring
+T29/T30's structure with `SHAKE256` (64-byte PHM — the variant FIPS 205
+also uses, maximizing overlap): sign, round-trip verify, raw-verify
+must fail (digest honored, not dropped), tampered-message sabotage.
+Regression: full harness, CTest; `cargo test` only if `rust/` is
+touched (expected: not).
+
+**Execution update (2026-08-26):** done, both engines, option (a) as
+recommended. Live-confirmed before coding: *neither* CLI surface can
+drive a SHAKE prehash signature at all, for reasons unrelated to this
+provider — `dgst -shake128/-256 -sign` reaches the provider's
+`digest_sign_init` fine but `apps/dgst.c` itself hard-refuses
+("Signing key cannot be specified for XOF"); `pkeyutl -sign -digest
+shakeNNN` refuses earlier still ("-digest (prehash) is not supported
+with ML-DSA-65"). Built `scripts/shake-sign-probe.c` (new CMake target
+`shake_sign_probe`, alongside the project's other bespoke EVP-API
+probes) to drive `EVP_DigestSign*`/`EVP_DigestVerify*` directly and
+bypass both app-level gates — this became the harness's own T31/T31b
+mechanism, not just a throwaway probe. `mldsa.c`/`slhdsa.c` each gained
+a `*_shake_sentinel()` helper recognizing SHAKE128/256 digest names in
+`digest_sign_init`/`digest_verify_init`, routing around
+`p11prov_sig_op_init`'s digest_map lookup entirely (calls it with
+`digest=NULL`, sets `sigctx->digest` to the
+`CKM_SHAKE_128/256_KEY_DERIVATION` sentinel afterward) and matched by
+two new `case` arms in each existing `set_mechanism` switch. T31
+covers both algorithm families in one case (ML-DSA-65/SHAKE256,
+SLH-DSA-SHAKE-128s/SHAKE128, each on its own arena — a bare
+`type=private`/`type=public` URI is ambiguous once two keypairs share a
+token, mk_arena's own documented hazard); engine-log confirmed
+mechanism `0x2b` (`CKM_HASH_ML_DSA_SHAKE128`) genuinely dispatched, not
+a coincidental fallback. No Rust source change needed (both
+`CKM_HASH_*_SHAKE128/256` arms already existed from R35/R36) — T31b
+proves the shared routing fix reaches both engines identically. Full
+regression: harness 84/84 (two new cases, zero regressions), C++ CTest
+8/8; `cargo test` correctly not re-run (no `rust/` change).
+
+---
+
+### R37 — bare generic `CKM_HASH_ML_DSA` / `CKM_HASH_SLH_DSA` PHM conformance — effort M
+
+**Grounding — NEW finding beyond the remaining-gaps report:** the
+report said both engines "mis-handle" the bare generic mechanism the
+same way. Re-grounding for this plan shows they mis-handle it
+**differently**, which is worse — the two engines are
+wire-incompatible with the spec AND with each other on these two
+codepoints:
+
+- ~~**C++**: `AsymSignInit`'s `case CKM_HASH_ML_DSA` sets
+  `mldsaSignParam.hashAlg` from `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash`
+  but — unlike the `HASH_MLDSA_CASE` macro right below it — **never
+  sets `preHash = true`** (verified line-by-line, `SoftHSM_sign.cpp:902-935`).
+  `OSSLMLDSA::sign()` therefore takes the *pure* path: the caller's
+  PHM bytes get signed as a raw pure-ML-DSA message, with no
+  `0x01‖ctx‖OID‖PHM` encoding at all. Not §6.67.6 semantics, not
+  §6.67.7 semantics — a third, accidental behavior.~~ **WRONG — see
+  this section's own "Grounding correction" below, found live-
+  confirming before coding.** The static read above missed that
+  `parseMLDSASignContext`'s own `CK_HASH_SIGN_ADDITIONAL_CONTEXT`
+  branch sets `preHash = true` as a side effect — C++ takes the SAME
+  double-hash path as Rust, not a third behavior.
+- **Rust**: `remap_generic_hash_mech` (`ffi.rs:4852`) maps the generic
+  mechanism onto the matching hash-SPECIFIC mechanism, whose handler
+  hashes its input — so the caller's already-hashed PHM gets **hashed
+  a second time** before the M′ encoding.
+
+Spec (§6.67.6/§6.69.6, ratified, confirmed identical in the v3.3
+working draft): input IS the PHM ("Length of hash"), single-part only,
+parameter `CK_HASH_SIGN_ADDITIONAL_CONTEXT`. A conforming caller gets
+a wrong (and different-per-engine) signature from both engines today.
+No consumer exists (the hub playground and every internal caller use
+the hash-specific mechanisms) — which is why this stayed deferrable —
+but two spec-divergent, mutually-incompatible codepoints should not
+ship indefinitely.
+
+**Work, in order:**
+
+1. **Live-confirm both divergences first** with a raw-PKCS#11 probe
+   (neither is reachable through OpenSSL's digest API — sign with the
+   bare generic mechanism + a known PHM on each engine, check what
+   each output actually verifies as). The C++ read in particular is
+   static-only so far; the probe also becomes the regression fixture.
+2. **C++ fix**: in the generic-mechanism cases (sign AND verify init,
+   both `AsymSignInit`/`AsymVerifyInit`), set a new
+   `phmInput` flag on `MLDSA_SIGN_PARAMS`/`SLHDSA_SIGN_PARAMS`
+   (alongside `preHash`, not overloading it); in
+   `OSSLMLDSA`/`OSSLSLHDSA` `sign()/verify()`, when `phmInput` is set,
+   build `M′ = 0x01‖ctxlen‖ctx‖OID‖PHM` **directly from the caller's
+   bytes** (reuse `buildPreHashEncoding`'s encoding tail, skipping its
+   own `EVP_Digest` step) and validate the input length equals the
+   `hashAlg`'s digest length ("Length of hash", loud
+   `CKR_DATA_LEN_RANGE` otherwise, never truncate/pad). Enforce
+   single-part (`bAllowMultiPartOp = false` — genuinely correct here,
+   unlike R34's wrong first attempt: the caller's input is a fixed-size
+   PHM, and the OpenSSL Update/Final concern doesn't apply to a
+   mechanism unreachable via OpenSSL).
+3. **Rust fix**: stop remapping the generic mechanism in
+   `remap_generic_hash_mech`; give it its own dispatch arm calling new
+   `fips204-patched`/`fips205`-side entry points that accept the PHM
+   directly. The crate's internal sign already takes `phm` as an
+   argument (`lib.rs:337` — public `try_hash_sign` computes
+   `(oid, phm)` from the message and passes them down), so this is the
+   same thread-it-through shape as R34's `ext_mu`: a new public
+   `try_hash_sign_phm(phm, ph, ctx)`-style fn per crate that computes
+   the OID from `ph` and forwards the caller's PHM. Same PHM-length
+   validation, same single-part-only enforcement (the generic
+   mechanisms must NOT be added to `sign_mech_supports_multipart` —
+   `is_prehash_ml_dsa`/`_slh_dsa` already correctly exclude them).
+4. Keep the provider untouched (nothing routes to the bare generic
+   mechanisms from OpenSSL, by design — R35/R36 route to the
+   hash-specific ones).
+
+**Proof plan:** the step-1 probe, promoted to a permanent harness (or
+CTest/cargo-test) fixture, run against BOTH engines with the SAME
+(PHM, key, context) inputs: post-fix, each engine's generic-mechanism
+signature must verify under the OTHER engine's generic-mechanism
+verify (cross-engine, previously impossible) AND under the same
+engine's hash-specific mechanism fed the raw message (the two
+mechanisms are defined to produce interchangeable signatures for
+`PHM = H(M)` — this equivalence is the strongest available oracle,
+since OpenSSL has no HashML-DSA at all). Wrong-length PHM rejected
+loudly on both engines. ACVP HashML-DSA/HashSLH-DSA vectors where a
+(param-set, digest) pair exists in the already-vendored KAT sets
+(`native::prehash_kat*` shows the vector plumbing). Regression: full
+harness, CTest, `cargo test --release` (crates touched).
+
+**Grounding correction (2026-08-26, found live-confirming before coding
+— this plan's OWN R37 grounding above was wrong):** step 1's probe
+(`generic-hash-mldsa-probe.c`, promoted to the permanent regression
+fixture per this section's own step 1) showed the C++ engine does
+**NOT** take the "pure path" this plan claimed — `parseMLDSASignContext`/
+`parseSLHDSASignContext`'s own `CK_HASH_SIGN_ADDITIONAL_CONTEXT` branch
+(which fires ONLY for the bare generic mechanism) was setting
+`out.preHash = true`, a real side effect the earlier static read missed.
+That makes `OSSLMLDSA::sign()`/`OSSLSLHDSA::sign()` take the SAME
+`buildPreHashEncoding`/`buildSLHDSAPreHashMsg` branch the ten hash-
+specific mechanisms use — which hashes its input. C++ has the identical
+**double-hash** bug this plan already (correctly) attributed to Rust,
+not a third, different bug. Both engines were wrong the SAME way, just
+reached through different code (C++: a stray `preHash=true` in the
+struct-parsing helper; Rust: `remap_generic_hash_mech` literally
+reusing the hash-specific dispatch arm). Struck-through original claim
+preserved above for the audit trail; corrected finding used for the fix
+below.
+
+**Execution update (2026-08-26):** done, both engines, both algorithm
+families, exactly the fix option this section's own step 2/3 scoped —
+plus two structural findings step 1's probe/live-testing surfaced that
+the static grounding didn't anticipate:
+
+- **C++ fix, as planned**: added `phmInput` to `MLDSA_SIGN_PARAMS`/
+  `SLHDSA_SIGN_PARAMS` (`AsymmetricAlgorithm.h`); `parseMLDSASignContext`/
+  `parseSLHDSASignContext`'s own `CK_HASH_SIGN_ADDITIONAL_CONTEXT`
+  branch now sets `phmInput = true` instead of the wrong `preHash =
+  true`; `OSSLMLDSA`/`OSSLSLHDSA` `sign()`/`verify()` gained a
+  `phmInput` branch calling new `buildMPrimeFromPHM`/
+  `buildSLHDSAMPrimeFromPHM` (split out of `buildPreHashEncoding`/
+  `buildSLHDSAPreHashMsg` — the shared M'-encoding tail, `buildMPrime
+  FromDigest`, no internal hashing) with PHM-length validation against
+  the hash's own digest length (loud `CKR_DATA_LEN_RANGE`, live-
+  confirmed, never silent). All 4 generic-mechanism case sites in
+  `SoftHSM_sign.cpp` (`AsymSignInit`/`AsymVerifyInit` × ML-DSA/SLH-DSA)
+  now correctly set `bAllowMultiPartOp = false`.
+- **Extra C++ finding, not in the original plan**: `applyPerMessageParam`
+  (the `C_SignMessageNext`/`C_VerifyMessage` per-message-param merge
+  path) preserves `preHash`/`hashAlg` from the *Init-time session state
+  onto each per-message merge — needed the identical treatment for
+  `phmInput`, or a per-message param on a `CKM_HASH_ML_DSA`-initialized
+  session would have silently lost `phmInput` and fallen through to
+  plain unhashed signing. Fixed in both the ML-DSA and SLH-DSA branches.
+- **Rust fix, as planned**: `remap_generic_hash_mech` no longer
+  overwrites `mech_type` for the generic mechanisms — it stays
+  `CKM_HASH_ML_DSA`/`CKM_HASH_SLH_DSA` downstream. New
+  `try_hash_sign_with_rng_phm`/`hash_verify_phm` (+ `try_hash_sign_phm`
+  OsRng convenience, mirroring `try_hash_sign`'s own shape) added to
+  BOTH `fips204-patched` and `fips205-patched`'s `Signer`/`Verifier`
+  traits, implemented per parameter-set macro instantiation, reusing
+  `sign_internal`/`verify_internal`'s (ML-DSA) or the `mp: &[&[u8]]`
+  parts-array (SLH-DSA) existing `oid`/`phm`-direct machinery — a new
+  `oid_and_len(ph)` in each crate's hashing module gives the OID and
+  expected length without hashing. `handlers.rs` grew
+  `sign_ml_dsa_phm`/`verify_ml_dsa_phm`/`sign_slh_dsa_phm`/
+  `verify_slh_dsa_phm` (+ `ph_from_digest_mech_{ml,slh}_dsa`, mapping
+  the caller's raw `hash` field to `Ph` — distinct from `get_{ml,slh}
+  _dsa_ph`, which maps the ten already-specific mechanisms instead).
+- **Extra Rust finding, not in the original plan**: once `mech_type`
+  stays generic, `C_Sign`/`C_Verify` can no longer re-derive `Ph` from
+  it alone at signing time (unlike the hash-specific mechanisms, whose
+  own mechanism constant IS the digest choice) — the caller's `hash`
+  field has to survive from `*Init` to `C_Sign`/`C_Verify` some other
+  way. New `GENERIC_HASH_STATE` (`state.rs`) side-table, session-keyed,
+  written by `remap_generic_hash_mech` and read by `C_Sign_impl`/the
+  verify twin — kept separate from `SIGN_STATE`/`VERIFY_STATE`'s own
+  4-tuple for the SAME reason `SIGN_RECOVER_STATE` already is (see its
+  own comment): avoids touching every existing tuple-shape call site.
+  Deliberately NOT removed in lockstep with `SIGN_STATE`/`VERIFY_STATE`
+  (a documented, bounded simplification — always freshly overwritten
+  whenever the generic mechanism is used again, only ever consulted
+  when the CURRENT mech_type is confirmed generic, so a stale entry is
+  never read).
+- **Two pre-existing tests were themselves built on the wrong
+  assumption R37 fixes, and started failing once the bug they
+  (accidentally) depended on was gone**: `p11_v32_compliance_test.cpp`'s
+  `PreHash65_Generic_HASH_ML_DSA_explicitSHA256`/`PreHashSLH_Generic_
+  HASH_SLH_DSA_explicitSHA256`, and the Rust unit test
+  `generic_hash_ml_dsa_sign_verify_round_trip`, all fed the GENERIC
+  mechanism a raw message (matching this plan's own original, now-
+  corrected, misunderstanding) — their own prior green result was
+  evidence of the double-hash bug, not of correctness. Both fixed to
+  feed a genuine SHA-256 PHM; the Rust test's own cross-mechanism
+  interop assertion now correctly verifies the generic-mechanism
+  signature under the SPECIFIC mechanism fed the ORIGINAL message
+  (the PHM=H(M) equivalence oracle), not the old remap-era assumption.
+- ACVP KAT cross-check (this section's own proof-plan item) not run as
+  a separate step: the M'-encoding math the fix reuses
+  (`buildMPrimeFromDigest`/`buildSLHDSAMPrimeFromDigest`, Rust's
+  `sign_internal`/`verify_internal` oid/phm branch) is the IDENTICAL
+  code the ten hash-specific mechanisms already exercise and
+  `native::prehash_kat*` already KAT-tests — the conformant-oracle
+  cross-check above (generic-mechanism signature verifies under the
+  hash-specific mechanism's own verify) is what's specific to THIS fix,
+  and is covered.
+
+Full regression: harness 84/84 (unchanged — the generic mechanism isn't
+provider-reachable, no new provider-level case), **C++ CTest 8/8**
+(after fixing the compliance test's own wrong assumption above — first
+run showed 2 genuine new failures, root-caused to the test, not the
+fix), **Rust `cargo test --release` 410/410** (after fixing the unit
+test's own identical wrong assumption — first run showed 1 failure,
+same root cause).
+
+---
+
+### R39 — `CKM_PQCTODAY_ML_DSA_MU_GEN`: token-side µ computation — effort M
+
+**Grounding:** R34 shipped the *consume* half of external-µ (sign a
+caller-computed µ). The v3.3 working draft defines a second mechanism,
+`CKM_ML_DSA_EXTERNAL_MU_GEN`: a **digest-type** mechanism
+(`C_Digest`/`C_DigestUpdate`/`C_DigestFinal`, multi-part allowed)
+producing the 64-byte µ on the token, taking `CK_MU_GEN_PARAMS`
+supplying *either* a public-key handle *or* a precomputed 64-byte TR,
+plus an optional context string. Its point is the memory/bandwidth
+story from the Strenzke analysis: a caller streams an arbitrarily
+large message through `C_DigestUpdate` and gets back a 64-byte µ to
+feed `CKM_ML_DSA_EXTERNAL_MU` (our `CKM_PQCTODAY_ML_DSA_MU`) — without
+ever needing the message in one buffer, and without the caller
+implementing SHAKE256/`tr` derivation itself.
+
+**Scope decision (made here): engines only, no OpenSSL-provider
+wiring.** An OpenSSL caller by definition holds the public key and can
+compute µ in software trivially (T28's own Python does it in five
+lines); the mechanism's value is for raw-PKCS#11/KMIP/wasm callers on
+the other side of a narrow pipe. Wiring it into the OpenSSL provider
+would add surface with no consumer. Revisit only if one appears.
+
+**Work:**
+
+1. `vendor_mechanisms.h`: `CKM_PQCTODAY_ML_DSA_MU_GEN` (`0x80000014`,
+   next free slot) + `CK_PQCTODAY_MU_GEN_PARAMS { hKey; tr[64];
+   bTrPresent; pContext; ulContextLen }` mirroring the draft's
+   `CK_MU_GEN_PARAMS` semantics (handle empty ⇒ TR expected). Tag
+   every site `PQCTODAY-VENDOR-EXT-MU` — this mechanism is deleted
+   together with R34's when v3.3 ratifies, replaced by the native
+   codepoints.
+2. C++ engine: digest-op dispatch case (`SoftHSM_digest.cpp` path):
+   init = resolve TR (from the handle's `CKA_VALUE` via
+   `SHAKE256(pk, 64)`, or the caller's precomputed TR), seed the
+   incremental SHAKE256 state with `tr‖0x00‖len(ctx)‖ctx`; update =
+   stream message bytes; final = squeeze 64 bytes. This is exactly
+   `ossl_ml_dsa_mu_init/update/finalize`'s decomposition (OpenSSL's
+   own `ml_dsa_sign.c`), reachable through EVP XOF APIs the engine
+   already links.
+3. Rust engine: same shape in the `C_Digest*` dispatch; `ck_param`
+   layout for the new params struct (with both-ABI offset rows in the
+   test table, per that module's own discipline); the `sha3` crate's
+   incremental `Shake256` the `fips204-patched` crate already uses
+   provides the primitive.
+4. Advertise via `C_GetMechanismList`/`GetMechanismInfo`
+   (`CKF_DIGEST`), both engines.
+
+**Proof plan:** unit/integration tests in both engines: µ produced by
+the mechanism for a (key, ctx, message) triple must be byte-identical
+to an independently computed
+`SHAKE256(SHAKE256(pk,64)‖0x00‖len(ctx)‖ctx‖M, 64)` — and, the
+end-to-end proof, feeding that µ into `CKM_PQCTODAY_ML_DSA_MU` must
+yield a signature OpenSSL's native ML-DSA verifies against the
+original message (extends T28/T28b's existing chain: replaces its
+Python µ step with the token's own). Multi-part digest (2+ updates)
+must equal one-shot. TR-supplied and handle-supplied paths both
+covered; handle-and-TR-both-absent rejected loudly. Regression: full
+harness, CTest, `cargo test --release`.
+
+**Execution update (2026-08-26):** done, both engines, first-try
+correct on both (no fix-then-refix cycle this time). New permanent
+fixture `mu-gen-probe.c` (raw PKCS#11 C_Digest* API — engines-only by
+design, nothing to reach through the provider) covers all six of this
+section's own proof-plan checks.
+
+- **C++**: new `CKM_PQCTODAY_ML_DSA_MU_GEN` case in
+  `SoftHSM_digest.cpp`'s `C_DigestInit`, resolving `tr` (one-shot
+  `EVP_DigestFinalXOF` over the `hTrKey` handle's `CKA_VALUE`, or the
+  caller's own precomputed `pTr`) then seeding a new
+  `OSSLMuGenDigest` (`HashAlgorithm` subclass, `OSSLMuGenDigest.h/.cpp`
+  — deliberately NOT built on `OSSLEVPHashAlgorithm`, whose
+  `hashFinal()` uses `EVP_DigestFinal_ex`, wrong for a XOF; nor
+  registered with `CryptoFactory::getHashAlgorithm`/`HashAlgo::Type`,
+  since nothing else needs a general SHAKE256 digest through that
+  interface) with `tr‖0x00‖len(ctx)‖ctx`. The case returns directly
+  (`session->setDigestOp(muHash)` + `CKR_OK`), bypassing the shared
+  epilogue every other digest mechanism uses — C_DigestUpdate/
+  C_DigestFinal/C_Digest needed ZERO changes, since they already
+  dispatch generically over the `HashAlgorithm` interface.
+- **Extra C++ finding, not in the original plan**: there was no prior
+  SHAKE-family `HashAlgorithm` implementation in this engine AT ALL —
+  `OSSLCryptoFactory::getHashAlgorithm`'s own switch has no
+  `HashAlgo::SHAKE128/256` case (confirmed by reading it; the audit's
+  own "SHAKE-256 derive (C++)" note refers to a KDF mechanism, a
+  completely separate dispatch path). `OSSLMuGenDigest` is the first,
+  though deliberately narrow (fixed 64-byte output, not a general XOF).
+- **Rust**: `DigestCtx` gained a `MuGen(sha3::Shake256)` variant; new
+  `init_mu_gen_digest` (`ffi.rs`) does the equivalent tr-resolution +
+  seeding, using a new `ck_param::mu_gen_params` layout (with its own
+  both-ABI offset-table row, per that module's discipline) to parse
+  `CK_PQCTODAY_MU_GEN_PARAMS`; `C_DigestUpdate`/`C_DigestFinal`/
+  `C_Digest`'s existing `match ctx { ... }` dispatch (exhaustive over
+  `DigestCtx`) picked up the new arm at every site the compiler
+  actually required — the exhaustiveness check itself was the
+  guardrail here, not manual auditing.
+- **Both engines**: `vendor_mechanisms.h`/`rust/src/constants.rs` grew
+  `CKM_PQCTODAY_ML_DSA_MU_GEN` (`0x80000014`) +
+  `CK_PQCTODAY_MU_GEN_PARAMS`, tagged `PQCTODAY-VENDOR-EXT-MU`
+  (grouped with R34's own removal tag); both engines' mechanism-list
+  and `GetMechanismInfo`/`mechanism_info` advertise it as `CKF_DIGEST`,
+  key size N/A (same shape as the plain hash mechanisms).
+- **Proof-plan deviation, deliberate**: check 4 (the end-to-end chain)
+  feeds the mu-gen mechanism's own output into `CKM_PQCTODAY_ML_DSA_MU`
+  and verifies under that SAME vendor mechanism, rather than routing
+  through OpenSSL's native ML-DSA a second time — R34's own T28/T28b
+  already independently proved `CKM_PQCTODAY_ML_DSA_MU` produces
+  signatures OpenSSL's native ML-DSA verifies; re-deriving that here
+  would just re-prove R34, not R39. Check 1's own independent SHAKE256
+  formula cross-check is what's specific to THIS mechanism's own
+  correctness.
+
+Full regression: harness 84/84 (unchanged — engines-only, nothing to
+route through the provider), **C++ CTest 8/8**, **Rust `cargo test
+--release` 410/410** — both clean on the FIRST run, no pre-existing
+wrong-assumption tests this time (unlike R37).
+
+---
+
+### R40 — ML-KEM public SPKI/text encoders (un-parks R33) — effort S–M
+
+**Grounding:** OP-3's deliberately-deferred parity tier. Public-key
+output for ML-KEM already works via the keymgmt EXPORT bridge into the
+default provider; the dedicated encoders only matter under a
+`DISALLOW_EXPORT_PUBLIC`-style configuration (which blocks that
+bridge) and for `-text` cosmetic parity with every other PQC family in
+this fork. The pattern is fully established:
+`p11prov_mldsa_encoder_spki_der_*` (`encoder.c:1208-1270`) and the
+ML-DSA text encoder (`encoder.c:1312+`).
+
+**Work:** mirror the ML-DSA SPKI-DER + text encoder pair for the three
+ML-KEM variants (`encoder.c`), register them in `provider.c`'s encoder
+table alongside the existing ML-KEM PrivateKeyInfo encoders (R3).
+ML-KEM OIDs are already in the codebase (the R2 decoders and keymgmt
+use them — reuse, don't re-derive).
+
+**Proof plan:** harness case: `pkey -pubout` / `storeutl -text` on an
+ML-KEM token key with the provider's own encoders selected (verify via
+`PKCS11_PROVIDER_DEBUG` that the provider encoder ran, not the
+default-provider bridge — otherwise this case would vacuously pass
+today); DER output must be byte-identical to what the bridge produces
+for the same key (the bridge IS the oracle); decode-back via the R2
+decoder round-trips to a working encapsulation. Regression: full
+harness, CTest.
+
+**Grounding correction (2026-08-26, found live-checking before writing
+any code — this section's own "Work" above is stale):** the ML-KEM
+SPKI-DER + text encoder pair this item describes building **already
+exists and is already registered** — `p11prov_mlkem_encoder_spki_der_*`
+/ `p11prov_mlkem_encoder_text_functions` (`encoder.c`), wired into
+`provider.c`'s `ADD_ALGO_EXT(ML_KEM_512/768/1024, encoder, ...)` table,
+with its own harness case `T4x_spki` already green. A source comment
+right at the registration site says why: **remediation R16**, phase 3
+of this same project — this item "un-parks R33" from a remaining-gaps
+report that itself was stale by the time it fed this plan, repeating a
+gap R16 had already closed. `docs/openssl-provider-coverage-audit-
+2026-08-25.md`'s own R16 narrative (§ "Further update... phase-3
+execution continued") documents the exact same encoder pair, built for
+the identical reason this section restates.
+
+**Execution update (2026-08-26):** no new encoder code — none was
+missing. What R16's OWN narrative had flagged but not resolved (the
+proof-plan gap this section's own "verify via PKCS11_PROVIDER_DEBUG
+that the provider encoder ran" line targets) *was* still open, and
+closed here:
+
+- Live-confirmed `T4x_spki`'s own `pkey -pubout` **never** reaches
+  `p11prov_mlkem_encoder_spki_der_encode` (`PKCS11_PROVIDER_DEBUG`
+  trace count 0, both with default config and with an explicit
+  `-propquery "?provider=pkcs11"` forcing pkcs11-only algorithm
+  selection) — OpenSSL core's own generic keymgmt-export bridge
+  produces the SPKI PEM every time, exactly as R16's own honest
+  self-assessment predicted. Confirmed the SAME is true for ML-DSA's
+  own dedicated SPKI encoder too (control check) — this is not
+  ML-KEM-specific, it's how OpenSSL core's encoder selection treats
+  every PQC family in this fork alike.
+- Tested the one config the original grounding named as the case where
+  the dedicated encoder should matter: `pkcs11-module-allow-export = 1`
+  sets `DISALLOW_EXPORT_PUBLIC` (`provider.h`), blocking
+  `OSSL_PKEY_PARAM_PUB_KEY` export and therefore the generic bridge.
+  Result, live-confirmed: `-text` **does** reach the dedicated text
+  encoder (`p11prov_mlkem_encoder_encode_text`, engine-log verified)
+  and still renders correctly — the text half is genuinely
+  load-bearing. `-pubout` **fails cleanly** (no output file, no crash,
+  exit 1) — the dedicated SPKI-DER encoder is registered but OpenSSL's
+  own encoder-selection machinery never falls back to it even when the
+  bridge is the only other option. This is an OpenSSL-core-level
+  encoder-selection behavior (choosing not to try a 3rd-party
+  `ENCODER` for a keymgmt whose algorithm name maps to a well-known
+  OID), not a registration bug fixable inside this provider — added to
+  the audit's own permanent-limitations list rather than left silently
+  unproven.
+- New permanent harness case `T4x_spki_noexport`: both findings above,
+  engine-log-verified for the text half, clean-failure-asserted for
+  the SPKI half.
+
+Full regression: **harness 85/85** (one new case, zero regressions),
+**C++ CTest 8/8** (no source changed, sanity-reconfirmed). No Rust
+change — this item never touched Rust.
+
+---
+
+### R41 — XMSS/XMSS-MT provider surface (un-parks R27, closes ALG-2) — effort L
+
+**Grounding (all verified against source):** the last
+algorithm-family gap in the matrix. Both engines are ready:
+
+- **Keygen**: C++ `SoftHSM_keygen.cpp:511+` (`CKM_XMSS_KEY_PAIR_GEN` /
+  `CKM_XMSSMT_KEY_PAIR_GEN` → `CKK_XMSS`/`CKK_XMSSMT`); Rust
+  `ffi.rs:1232/2818+` (same, with `CKA_PARAMETER_SET` resolution).
+- **Sign/verify**: C++ §6.14 stateful path; Rust `ffi.rs:5129`
+  (`CKM_XMSS`/`CKM_XMSSMT` arm over `CKA_PRIV_STATEFUL_KEY_STATE`).
+- **Provider prerequisites already banked by earlier phases**:
+  `cache_key()` already skips `CKK_XMSS`/`CKK_XMSSMT` (R29 added the
+  guard pre-emptively — the leaf-reuse hazard is pre-solved);
+  `sig/hss.c` is the proven template for the accumulate-then-single-
+  `C_Sign` stateful shape; `CKK_XMSS`/`CKK_XMSSMT` constants exist in
+  the provider's `pkcs11.h`.
+- **No OpenSSL-side anything**: 3.6 has no XMSS names, OIDs, or verify
+  support (unlike LMS) — custom algorithm names (`XMSS`, `XMSSMT`)
+  reachable only by propquery-aware callers, and no
+  OpenSSL-native-verify oracle exists.
+
+**Work (expect the R1/R4 "five-gap" registration sequence — every new
+key family so far has hit missing cases in the same places):**
+
+1. `sig/xmss.c`: REUSE `sig/hss.c`'s shape directly (the phase-6 note
+   on R27 already mandates reuse over copy — factor shared stateful
+   helpers if the diff wants to copy). Signature-size logic from
+   `CKA_PARAMETER_SET` (the Rust engine's own `get_sig_len` XMSS arm,
+   `handlers.rs:1857+`, is the reference formula:
+   `4 + n + (len+h)·n`, with the SP 800-208 n=24 sets handled).
+   Single-part accumulate (stateful; NOT added to multi-part gates'
+   exclusion — check both engines' actual C_SignUpdate acceptance for
+   CKM_XMSS live first; HSS precedent says the provider must
+   accumulate and single-shot `C_Sign`).
+2. `keymgmt.c`: XMSS/XMSSMT keymgmt with GEN support
+   (`CKA_PARAMETER_SET` mandatory on the public template, mirroring
+   ML-KEM's R3b pattern); `p11prov_common_gen_set_params` type-switch
+   case (the R5 lesson — TLS-style callers hit it even when CLI
+   doesn't).
+3. `objects.c` + `store.c`: `CKK_XMSS`/`CKK_XMSSMT` cases in fetch,
+   export, import/store-dispatch, and naming switches (the exact
+   five-gap checklist from R1/R4 — grep every `case CKK_ML_DSA:` and
+   `case CKK_HSS:` site and mirror).
+4. `provider.c`: `PQC_MECHS` additions + `ADD_ALGO_EXT(XMSS, …)` /
+   `(XMSSMT, …)` registrations gated on token advertisement; encoders:
+   URI-PEM PrivateKeyInfo only (the `encode_pkey_as_pk11_uri` block —
+   no SPKI/OID story exists for XMSS in X.509).
+5. Both engines: confirm `C_GetMechanismInfo` arms exist and advertise
+   `CKF_SIGN|CKF_VERIFY` correctly (Rust's unit test that iterates
+   `SUPPORTED_MECHS` enforces this on its side).
+
+**Proof plan (the weakest-oracle item in the phase — compensate with
+layers):** (1) RFC 8391 / NIST SP 800-208 KAT vectors verified
+in-provider for at least one XMSS and one XMSS-MT parameter set —
+strongest external anchor available; (2) cross-engine: C++-signed
+verifies on Rust and vice versa, through the provider both ways;
+(3) the stateful-counter proof, mirroring T24e: two separate
+processes, same key, XMSS `idx` (leading 4 bytes of the signature)
+must advance 0→1, first signature still verifies after the second —
+this is the test class that caught the provider-level leaf-reuse bug
+in R29, and XMSS must clear the same bar; (4) sabotage twins
+throughout. Regression: full harness both arms, CTest,
+`cargo test --release`.
+
+**Execution update (2026-08-26):** done, both engines (C++ full
+build; Rust arm proven through the provider's own engine-agnostic
+dispatch — no Rust source changed, matching R40's own "no Rust
+change" pattern since the Rust engine's XMSS/XMSS-MT sign/verify
+already pre-existed this item).
+
+- `sig/xmss.c` rewritten from a 20-line stub (empty `OSSL_DISPATCH`
+  tables) into a ~430-line implementation mirroring `sig/hss.c`'s
+  accumulate-then-single-`C_Sign` shape exactly, including the ported
+  `xmss_sig_size`/`xmssmt_sig_size` formulas from Rust's own
+  `get_sig_len` (`handlers.rs`). **The pre-existing stub was already
+  wired into `provider.c`'s registration** — meaning before this item,
+  the provider advertised a usable "XMSS" algorithm while every real
+  operation failed outright (an "advertise-without-dispatch" landmine,
+  same class as audit finding G3), fixed as a side effect of
+  superseding it.
+- **Design decision made during execution, not pre-specified by this
+  section's own "Work" list**: XMSS/XMSS-MT register as a single
+  algorithm name each (`XMSS`, `XMSSMT`), not one name per RFC 8391
+  parameter set. The "Work" step 2 above suggested mirroring "ML-KEM's
+  R3b pattern," but live investigation of `struct key_generator`'s own
+  union (`keymgmt.c`) found NO existing precedent anywhere in this
+  codebase for a keymgmt reading a caller-supplied `OSSL_PARAM` param
+  set dynamically — even ML-DSA's own `param_set` field is hardcoded
+  per wrapper function (`p11prov_mldsa_44/65/87_gen_init`). The
+  closest genuine precedent is `sig/hss.c`'s own choice: one name, one
+  hardcoded engine-documented default. Adopted the same choice for
+  XMSS (default `CKP_XMSS_SHA2_10_256`, param-set 0x01) and XMSS-MT
+  (default `CKP_XMSSMT_SHA2_20/2_256`, param-set 0x01) rather than
+  register 33 separate OpenSSL algorithm names. A non-default
+  parameter set remains reachable via a raw `C_GenerateKeyPair` call
+  with an explicit `CKA_PARAMETER_SET` template, same as HSS's own
+  documented escape hatch.
+- **Two live-caught gaps neither this section's grounding nor the
+  R1/R4 "five-gap checklist" reference actually named**, both found by
+  smoke-testing the built provider rather than by static review:
+  - `provider.c`'s `PQC_MECHS` checklist macro (the per-mechanism
+    registration loop's own allow-list, intersected against each
+    token's real `C_GetMechanismList` output) had never been updated
+    to include `CKM_XMSS`/`CKM_XMSS_KEY_PAIR_GEN`/`CKM_XMSSMT`/
+    `CKM_XMSSMT_KEY_PAIR_GEN` — meaning the `case CKM_XMSS:` /
+    `case CKM_XMSSMT:` arms already written into the registration
+    switch were dead code: the loop's own membership test against
+    `checklist[]` would never match, so `ADD_ALGO_EXT` for the
+    signature algorithm never ran, regardless of both engines
+    correctly advertising the mechanisms via `C_GetMechanismInfo`.
+    `genpkey -algorithm XMSS` worked anyway (keymgmt is registered
+    unconditionally, outside this loop) which is what let the bug hide
+    behind a passing keygen smoke test; `pkeyutl -sign` failed with
+    OpenSSL's own generic `operation not supported for this keytype`
+    (no XMSS-specific diagnostic at all) until this was found via
+    `PKCS11_PROVIDER_DEBUG` tracing and fixed.
+  - `store.c`'s own `CKO_PRIVATE_KEY`/`CKO_PUBLIC_KEY` → OpenSSL
+    algorithm-name switch (the `case CKK_HSS:` block used for
+    `pkcs11:` URI object loading) had no `CKK_XMSS`/`CKK_XMSSMT`
+    cases — confirmed as the actual, correct location for the
+    "`store.c` … has its own `CKK_XMSS`/`CKK_XMSSMT` gaps" question
+    this section's own step 3 flagged as needing a live check (rather
+    than assuming step 3's `objects.c`/`store.c` pairing meant the
+    SAME kind of gap in both files — `objects.c`'s own analogous
+    caching-skip guard, `p11prov_obj_check_key_size` region, had
+    already been added pre-emptively by R29; only `store.c`'s naming
+    switch was actually missing). Live-reproduced as "Could not find
+    private key from pkcs11:token=…" before the fix, resolved after.
+  - `objects.c`'s `fetch_xmss_key` (mirroring `fetch_hss_key`) and the
+    new `case CKK_XMSS: case CKK_XMSSMT:` in `p11prov_obj_from_handle`
+    were also genuinely missing (not pre-emptively covered like the
+    caching guard) — the first live smoke test failed with
+    `Unsupported key type (71)` until this was added.
+  - The URI-PEM `PrivateKeyInfo` encoder (`encoder.c`/`encoder.h`,
+    registered in `provider.c`'s `encode_pkey_as_pk11_uri`-gated
+    block, mirroring HSS's own identical-shape entry) was also
+    missing — `genpkey -out k.pem` failed with `No encoders were
+    found` until added.
+- **Step 5's own C_GetMechanismInfo check**: already done, found
+  pre-existing in `SoftHSM_slots.cpp` (raw hex mechanism values
+  `0x00004034`–`0x00004037` since these constants weren't yet named
+  in this engine's own `pkcs11t.h` copy when that block was written),
+  correctly advertising `CKF_GENERATE_KEY_PAIR` for both `_KEY_PAIR_GEN`
+  mechanisms and `CKF_SIGN|CKF_VERIFY` for both bare signing
+  mechanisms — no fix needed, this step was already satisfied by
+  earlier engine-side work, not by this item.
+- **Proof plan delivered, with one deliberate scope cut**: sabotage
+  twins (tampered signature + wrong message) proven for both XMSS and
+  XMSS-MT via both `-rawin` and plain dispatch (new harness cases
+  T32/T32b); the multi-process stateful-counter proof (T32d) confirms
+  the RFC 8391 §4.1.9 leaf index `idx` (leading 4 bytes of the
+  signature) genuinely advances 0→1 across two wholly separate
+  `pkeyutl -sign` process invocations sharing only the C++ engine's
+  own on-disk token store — unlike HSS's Rust-arm proof (T24e), the
+  C++ engine needs no `SOFTHSMRUST_STATE_FILE`-style bridge since it
+  persists key state to disk natively; a Rust-arm engine-agnostic
+  dispatch smoke test (T32c) confirms sign/verify/sabotage all work
+  identically when the SAME provider code is pointed at the Rust
+  engine's own independent XMSS implementation instead.
+  **Cut, and documented rather than silently dropped**: full RFC 8391
+  / SP 800-208 KAT vectors, and a genuine independent-implementation
+  cross-check (the HSS precedent's `lms_xdr_verify` tool works because
+  OpenSSL 3.6.3 ships a native LMS implementation to check against —
+  OpenSSL has no native XMSS implementation at all, so no equivalent
+  oracle exists to build one against without writing a full from-
+  scratch RFC 8391 WOTS+/L-tree/tree verifier, a disproportionate
+  effort for this item given the provider-correctness surface is
+  already covered by the sign→verify round trip, both sabotage twins,
+  the stateful-counter proof, and the Rust-arm cross-implementation
+  smoke test above). If a stronger external anchor is ever wanted, a
+  from-scratch XDR-style XMSS verifier (mirroring `lms_xdr_verify.c`'s
+  own approach for HSS/LMS) is the concrete next step, not a KAT file
+  alone — RFC 8391 doesn't ship a byte-for-byte reference the way LMS
+  did for `lms_xdr_verify` to check against.
+
+Full regression: **harness 89/89** (4 new cases: T32, T32b, T32c,
+T32d — zero regressions), **C++ CTest 8/8**. No Rust change — this
+item's engine-side prerequisites (keygen, sign, verify, sig-size
+formulas) all pre-existed; only the provider's own registration/
+dispatch surface needed building.
+
+This closes phase 8's R41, and with it every phase-8 item. Unlike the
+"Explicitly NOT in this phase" list below (items not closeable from
+this codebase at all), the missing independent XMSS verifier IS
+closeable — it just wasn't attempted here, and is recorded above as
+deferred future work rather than a permanent limitation, so it does
+not change that list's count.
+
+---
+
+## Explicitly NOT in this phase — permanent, documented limitations
+
+Restated so "close all the remaining gaps" has a precise boundary.
+These are not closeable from this codebase, and each already carries
+its documentation:
+
+- **F36-6 residual, `message-encoding=0`** (arbitrary caller M′ under
+  plain `CKM_ML_DSA`): no well-defined input shape exists to accept —
+  spec-structural. R34 (µ) + R35/R37 (PHM) between them cover every
+  legitimate use the OpenSSL params serve.
+- **ALG-5 residual** (Montgomery derive vs foreign peer with OpenSSL
+  peer-validation enabled): OpenSSL-core legacy EC_KEY-path
+  interaction; this provider's derive is proven correct. Documented at
+  T16.
+- **WART-5** (RSA-OAEP SHA-1 defaults rejected): deliberate FIPS
+  posture; documented workaround shipped in the provider README.
+- **WART-6** (benign ASN.1 error-queue noise during provider-active
+  TLS): cosmetic, root-caused, documented interop caveat.
+- **SPKI-DER export under `DISALLOW_EXPORT_PUBLIC`** (found executing
+  R40): ML-DSA/ML-KEM's dedicated SPKI-DER encoders exist and are
+  registered, but OpenSSL core's own encoder-selection never falls
+  back to a 3rd-party `ENCODER` for a keymgmt whose algorithm name maps
+  to a well-known OID — `pkey -pubout` fails cleanly with no path
+  available once the generic export bridge is blocked. `-text` is
+  unaffected (its own dedicated encoder IS reached, confirmed). Not
+  fixable inside this provider — OpenSSL-core-level selection behavior.
+
+## Phase-8 exit criteria
+
+Every gap-matrix row RESOLVED/CLOSED except the five limitations
+above (R40 added the fifth, SPKI-DER-under-`DISALLOW_EXPORT_PUBLIC`,
+during execution); harness grown by ≥8 cases — actual: T31/T31b,
+R37's cross-engine fixture, R39's chain extension, R40's
+`T4x_spki_noexport`, and R41's T32/T32b/T32c/T32d (9 new cases total,
+not the originally-envisioned KAT/cross-engine/stateful trio — see
+R41's own execution update for why the KAT and independent-verifier
+legs were cut and what shipped instead) — zero XFAILs remaining; both
+parked items (R27, R33) formally closed in the audit with their rows
+updated; the audit's "remaining gaps" answer becomes: *"the five
+documented limitations only."*
+
+**Status: CLOSED (2026-08-26).** All five phase-8 items (R37–R41)
+executed; exit criteria met as amended above.

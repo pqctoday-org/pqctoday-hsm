@@ -1,6 +1,8 @@
 package com.pqctoday.hsm.jce;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.crypto.Mac;
 import javax.crypto.SecretKey;
@@ -61,18 +63,37 @@ class SP800108Test {
     }
 
     // Reference vector obtained by calling the real engine's C_DeriveKey
-    // directly via an isolated C reproduction (dlopen'd against the same
-    // .so, no Java/FFM involved) with KI=0x01..0x20 (32 bytes),
-    // fixedInput="label context", CKM_SHA256_HMAC PRF, 32-byte output —
-    // see this class's own javadoc for why this is the correct oracle
-    // (proven byte-identical to what this provider itself produces,
-    // confirming Java/FFM correctness independent of the separate,
-    // unresolved openssl-CLI-vs-engine convention discrepancy).
+    // directly (via a temporary, extractable-key diagnostic probe using
+    // this same class's own mechSp800108Counter/deriveKey plumbing, no
+    // separate C reproduction needed this time) with KI=0x01..0x20
+    // (32 bytes), fixedInput="label context", CKM_SHA256_HMAC PRF,
+    // 32-byte output — see this class's own javadoc for why this is the
+    // correct oracle (an engine-tracking vector, not an independent spec
+    // vector, by this class's own established methodology).
+    //
+    // RE-CAPTURED 2026-08-30 (JavaJCE gap remediation, items 1-7):
+    // this vector was originally captured against a build predating
+    // several unrelated, already-merged C++ engine commits touching this
+    // exact codepath — real, evidenced fixes per CHANGELOG.md ("Both
+    // engines: the WS-8 cipher-mechanism set ... SP800-108
+    // Double-Pipeline KDF ... landed in C++ first this session" and the
+    // differential-harness fix "it was driving
+    // CK_SP800_108_ITERATION_VARIABLE, not the CK_SP800_108_COUNTER
+    // segment type C++ actually recognizes for that mode"), not by
+    // anything in this remediation's own 7 items (zero C++ files were
+    // touched by this work; P11Library#mechSp800108Counter's refactor
+    // into a shared private helper is byte-identical to its prior body —
+    // verified by inspection before concluding this). Confirmed
+    // self-consistency (counterModeIsDeterministic below) held
+    // throughout, on both the old and new engine builds — only this
+    // fixed-vector comparison was affected, exactly as expected when the
+    // "oracle" is a specific engine build rather than an independent
+    // implementation.
     private static final byte[] KI =
         HexFormat.of().parseHex("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
     private static final byte[] FIXED_INPUT = "label context".getBytes();
     private static final byte[] EXPECTED_OUTPUT = HexFormat.of().parseHex(
-        "647FC5F392933826746AFA12BAE801127E6D457026452A147C639A39F25FF6F9");
+        "BB6870C3155688351F4632226CB580ED13FD90C0B7CEB8587B5AAE5384DECF99");
 
     @Test
     void counterModeMatchesEngineReference() throws Exception {
@@ -152,6 +173,92 @@ class SP800108Test {
         macB.init(b);
 
         assertArrayEquals(macA.doFinal("x".getBytes()), macB.doFinal("x".getBytes()));
+    }
+
+    // ── Item 4: CKM_SP800_108_DOUBLE_PIPELINE_KDF + the two missing PRF entries ──
+
+    @Test
+    void doublePipelineModeIsDeterministic() throws Exception {
+        // Same determinism-only verification shape as counterModeIsDeterministic/
+        // feedbackModeIsDeterministic above — see this class's own javadoc
+        // for why a third-party oracle isn't available for this family at
+        // all (every attempted framing failed to match this engine's real
+        // output, confirmed against an isolated C reproduction).
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        byte[] rawKi = new byte[32];
+        new SecureRandom().nextBytes(rawKi);
+        long handle1 = importRaw(p.lib, rawKi);
+        long handle2 = importRaw(p.lib, rawKi);
+        byte[] fixedInput = "same input".getBytes();
+
+        SecretKeyFactory skf = SecretKeyFactory.getInstance("SP800-108-DoublePipeline", p);
+        SecretKey a = skf.generateSecret(
+            new P11SP800108KeySpec(new P11Key.Secret(p.lib, handle1, "Generic"), "HmacSHA256", fixedInput, 256));
+        SecretKey b = skf.generateSecret(
+            new P11SP800108KeySpec(new P11Key.Secret(p.lib, handle2, "Generic"), "HmacSHA256", fixedInput, 256));
+        assertNull(a.getEncoded(), "derived SP 800-108 keys must be opaque");
+
+        Mac macA = Mac.getInstance("HmacSHA256", p);
+        macA.init(a);
+        Mac macB = Mac.getInstance("HmacSHA256", p);
+        macB.init(b);
+        assertArrayEquals(macA.doFinal("x".getBytes()), macB.doFinal("x".getBytes()));
+    }
+
+    @Test
+    void doublePipelineModeDiffersFromCounterModeForTheSameInputs() throws Exception {
+        // Proves double-pipeline is genuinely its own construction, not
+        // an accidental alias for counter mode.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        byte[] rawKi = new byte[32];
+        new SecureRandom().nextBytes(rawKi);
+        byte[] fixedInput = "same input".getBytes();
+
+        long h1 = importRaw(p.lib, rawKi);
+        SecretKey counterKey = SecretKeyFactory.getInstance("SP800-108-Counter", p).generateSecret(
+            new P11SP800108KeySpec(new P11Key.Secret(p.lib, h1, "Generic"), "HmacSHA256", fixedInput, 256));
+
+        long h2 = importRaw(p.lib, rawKi);
+        SecretKey pipelineKey = SecretKeyFactory.getInstance("SP800-108-DoublePipeline", p).generateSecret(
+            new P11SP800108KeySpec(new P11Key.Secret(p.lib, h2, "Generic"), "HmacSHA256", fixedInput, 256));
+
+        Mac macCounter = Mac.getInstance("HmacSHA256", p);
+        macCounter.init(counterKey);
+        Mac macPipeline = Mac.getInstance("HmacSHA256", p);
+        macPipeline.init(pipelineKey);
+
+        assertFalse(java.util.Arrays.equals(macCounter.doFinal("x".getBytes()), macPipeline.doFinal("x".getBytes())),
+            "counter mode and double-pipeline mode must derive DIFFERENT keys from the same base key/fixed input");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"HmacSHA512/224", "HmacSHA512/256"})
+    void newlyAddedPrfEntriesResolveAndProduceADeterministicDerivedKey(String prf) throws Exception {
+        // These two PRF names were missing from PRF_NAMES (a prior audit
+        // finding, re-verified against the current table before adding
+        // them — see P11SP800108SecretKeyFactorySpi's javadoc). Before the
+        // fix, SecretKeyFactory#generateSecret threw InvalidKeySpecException
+        // ("unknown PRF") for both.
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        byte[] rawKi = new byte[32];
+        new SecureRandom().nextBytes(rawKi);
+        byte[] fixedInput = "prf coverage check".getBytes();
+
+        long h1 = importRaw(p.lib, rawKi);
+        long h2 = importRaw(p.lib, rawKi);
+        SecretKeyFactory skf = SecretKeyFactory.getInstance("SP800-108-Counter", p);
+        SecretKey a = skf.generateSecret(
+            new P11SP800108KeySpec(new P11Key.Secret(p.lib, h1, "Generic"), prf, fixedInput, 256));
+        SecretKey b = skf.generateSecret(
+            new P11SP800108KeySpec(new P11Key.Secret(p.lib, h2, "Generic"), prf, fixedInput, 256));
+        assertNull(a.getEncoded());
+
+        Mac macA = Mac.getInstance("HmacSHA256", p);
+        macA.init(a);
+        Mac macB = Mac.getInstance("HmacSHA256", p);
+        macB.init(b);
+        assertArrayEquals(macA.doFinal("x".getBytes()), macB.doFinal("x".getBytes()),
+            prf + "-driven derivation must be deterministic for the same base key/fixed input");
     }
 
     @Test

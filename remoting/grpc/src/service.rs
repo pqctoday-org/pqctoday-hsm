@@ -63,15 +63,23 @@ impl Pkcs11Remote for Pkcs11RemoteService {
     async fn sign(&self, request: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
         let req = request.into_inner();
         let algo = to_core_algo(req.algorithm)?;
-        let sig = verbs::sign(req.session_handle, req.private_handle, algo, &req.data).map_err(to_status)?;
+        let sig = verbs::sign(req.session_handle, req.private_handle, algo, &req.data, req.external_mu)
+            .map_err(to_status)?;
         Ok(Response::new(SignResponse { signature: sig }))
     }
 
     async fn verify(&self, request: Request<VerifyRequest>) -> Result<Response<VerifyResponse>, Status> {
         let req = request.into_inner();
         let algo = to_core_algo(req.algorithm)?;
-        let valid = verbs::verify(req.session_handle, req.public_handle, algo, &req.data, &req.signature)
-            .map_err(to_status)?;
+        let valid = verbs::verify(
+            req.session_handle,
+            req.public_handle,
+            algo,
+            &req.data,
+            &req.signature,
+            req.external_mu,
+        )
+        .map_err(to_status)?;
         Ok(Response::new(VerifyResponse { valid }))
     }
 

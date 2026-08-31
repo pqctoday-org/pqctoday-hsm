@@ -88,6 +88,8 @@ static bool isMacMechanism(CK_MECHANISM_PTR pMechanism)
 		case CKM_SHA256_HMAC:
 		case CKM_SHA384_HMAC:
 		case CKM_SHA512_HMAC:
+		case CKM_SHA512_224_HMAC:
+		case CKM_SHA512_256_HMAC:
 		case CKM_SHA3_224_HMAC:
 		case CKM_SHA3_256_HMAC:
 		case CKM_SHA3_384_HMAC:
@@ -100,6 +102,8 @@ static bool isMacMechanism(CK_MECHANISM_PTR pMechanism)
 		case CKM_SHA256_HMAC_GENERAL:
 		case CKM_SHA384_HMAC_GENERAL:
 		case CKM_SHA512_HMAC_GENERAL:
+		case CKM_SHA512_224_HMAC_GENERAL:
+		case CKM_SHA512_256_HMAC_GENERAL:
 		case CKM_SHA3_224_HMAC_GENERAL:
 		case CKM_SHA3_256_HMAC_GENERAL:
 		case CKM_SHA3_384_HMAC_GENERAL:
@@ -107,6 +111,7 @@ static bool isMacMechanism(CK_MECHANISM_PTR pMechanism)
 		case CKM_AES_CMAC:
 		case CKM_KMAC_128:
 		case CKM_KMAC_256:
+		case CKM_AES_GMAC:
 			return true;
 		default:
 			return false;
@@ -143,23 +148,47 @@ struct MacMechInfo {
 	MacAlgo::Type     algo;
 };
 
+// minKeyBytes for the plain-digest HMAC rows below is 0 ("no PKCS#11
+// minimum") rather than each digest's output length. RFC 2104 places no
+// lower bound on an HMAC key's length, and RFC 4231 §4.2's own official
+// HMAC-SHA-2 known-answer vectors deliberately exercise this: Test Case 1
+// uses a 20-byte key against SHA-224/256/384/512 (all of which have a
+// longer digest output), specifically to cover "key shorter than the hash
+// output". A prior version of this table set minKeyBytes = digest output
+// length for every HMAC row (rationalized in a since-removed comment as
+// "key length = digest output length"), which made MacSignInit/
+// MacVerifyInit reject that exact RFC 4231 TC1 key with CKR_KEY_SIZE_RANGE
+// — a real, spec-non-conformant regression, not a security floor (NIST
+// SP 800-107's "key length >= hash output" is a RECOMMENDATION for callers
+// choosing a key, never a requirement the verifier may enforce on a key it
+// didn't choose). Found 2026-08-31 via openmls-provider's RFC 4231/RFC 5869
+// cross-impl integration tests (RFC 5869 HKDF is implemented in terms of
+// HMAC here, so the same bug broke HKDF's extract step through its 13-byte
+// RFC 5869 §A.1 salt too). KMAC_128/256 below keep a real, NIST SP 800-185
+// mandated minimum — that family is unaffected.
 static const MacMechInfo kMacMechTable[] = {
 #ifdef WITH_RIPEMD160
-	// HMAC-RIPEMD-160 (native-only; legacy provider). Mirrors SHA-1-HMAC sizing.
-	{ CKM_RIPEMD160_HMAC,CKM_RIPEMD160_HMAC_GENERAL,CKK_RIPEMD160_HMAC,true,  20, MacAlgo::HMAC_RIPEMD160},
+	// HMAC-RIPEMD-160 (native-only; legacy provider).
+	{ CKM_RIPEMD160_HMAC,CKM_RIPEMD160_HMAC_GENERAL,CKK_RIPEMD160_HMAC,true,   0, MacAlgo::HMAC_RIPEMD160},
 #endif
-	{ CKM_SHA_1_HMAC,    CKM_SHA_1_HMAC_GENERAL,    CKK_SHA_1_HMAC,    true,  20, MacAlgo::HMAC_SHA1     },
-	{ CKM_SHA224_HMAC,   CKM_SHA224_HMAC_GENERAL,   CKK_SHA224_HMAC,   true,  28, MacAlgo::HMAC_SHA224   },
-	{ CKM_SHA256_HMAC,   CKM_SHA256_HMAC_GENERAL,   CKK_SHA256_HMAC,   true,  32, MacAlgo::HMAC_SHA256   },
-	{ CKM_SHA384_HMAC,   CKM_SHA384_HMAC_GENERAL,   CKK_SHA384_HMAC,   true,  48, MacAlgo::HMAC_SHA384   },
-	{ CKM_SHA512_HMAC,   CKM_SHA512_HMAC_GENERAL,   CKK_SHA512_HMAC,   true,  64, MacAlgo::HMAC_SHA512   },
-	{ CKM_SHA3_224_HMAC, CKM_SHA3_224_HMAC_GENERAL, CKK_SHA3_224_HMAC, true,  28, MacAlgo::HMAC_SHA3_224 },
-	{ CKM_SHA3_256_HMAC, CKM_SHA3_256_HMAC_GENERAL, CKK_SHA3_256_HMAC, true,  32, MacAlgo::HMAC_SHA3_256 },
-	{ CKM_SHA3_384_HMAC, CKM_SHA3_384_HMAC_GENERAL, CKK_SHA3_384_HMAC, true,  48, MacAlgo::HMAC_SHA3_384 },
-	{ CKM_SHA3_512_HMAC, CKM_SHA3_512_HMAC_GENERAL, CKK_SHA3_512_HMAC, true,  64, MacAlgo::HMAC_SHA3_512 },
+	{ CKM_SHA_1_HMAC,    CKM_SHA_1_HMAC_GENERAL,    CKK_SHA_1_HMAC,    true,   0, MacAlgo::HMAC_SHA1     },
+	{ CKM_SHA224_HMAC,   CKM_SHA224_HMAC_GENERAL,   CKK_SHA224_HMAC,   true,   0, MacAlgo::HMAC_SHA224   },
+	{ CKM_SHA256_HMAC,   CKM_SHA256_HMAC_GENERAL,   CKK_SHA256_HMAC,   true,   0, MacAlgo::HMAC_SHA256   },
+	{ CKM_SHA384_HMAC,   CKM_SHA384_HMAC_GENERAL,   CKK_SHA384_HMAC,   true,   0, MacAlgo::HMAC_SHA384   },
+	{ CKM_SHA512_HMAC,   CKM_SHA512_HMAC_GENERAL,   CKK_SHA512_HMAC,   true,   0, MacAlgo::HMAC_SHA512   },
+	{ CKM_SHA512_224_HMAC, CKM_SHA512_224_HMAC_GENERAL, CKK_SHA512_224_HMAC, true, 0, MacAlgo::HMAC_SHA512_224 },
+	{ CKM_SHA512_256_HMAC, CKM_SHA512_256_HMAC_GENERAL, CKK_SHA512_256_HMAC, true, 0, MacAlgo::HMAC_SHA512_256 },
+	{ CKM_SHA3_224_HMAC, CKM_SHA3_224_HMAC_GENERAL, CKK_SHA3_224_HMAC, true,   0, MacAlgo::HMAC_SHA3_224 },
+	{ CKM_SHA3_256_HMAC, CKM_SHA3_256_HMAC_GENERAL, CKK_SHA3_256_HMAC, true,   0, MacAlgo::HMAC_SHA3_256 },
+	{ CKM_SHA3_384_HMAC, CKM_SHA3_384_HMAC_GENERAL, CKK_SHA3_384_HMAC, true,   0, MacAlgo::HMAC_SHA3_384 },
+	{ CKM_SHA3_512_HMAC, CKM_SHA3_512_HMAC_GENERAL, CKK_SHA3_512_HMAC, true,   0, MacAlgo::HMAC_SHA3_512 },
 	{ CKM_AES_CMAC,      0,                         CKK_AES,           false,  0, MacAlgo::CMAC_AES      },
 	{ CKM_KMAC_128,      0,                         CKK_GENERIC_SECRET,true,  16, MacAlgo::KMAC_128      },
 	{ CKM_KMAC_256,      0,                         CKK_GENERIC_SECRET,true,  32, MacAlgo::KMAC_256      },
+	// WS-8 (2026-08-30): CK_GCM_PARAMS-driven IV + tag length are applied by
+	// applyGmacParams() below, not this table (minKeyBytes=0: PKCS#11 v3.2
+	// §6.13.6 constrains key size only via CK_MECHANISM_INFO's AES range).
+	{ CKM_AES_GMAC,      0,                         CKK_AES,           false,  0, MacAlgo::GMAC_AES      },
 };
 
 /**
@@ -187,7 +216,9 @@ static CK_RV resolveMacMech(CK_MECHANISM_TYPE mech, CK_KEY_TYPE keyType,
 		if (keyType != CKK_GENERIC_SECRET && keyType != CKK_MD5_HMAC)
 			return CKR_KEY_TYPE_INCONSISTENT;
 		algo          = MacAlgo::HMAC_MD5;
-		minKeyBytes   = 16;
+		// No PKCS#11-mandated minimum (see kMacMechTable's comment below):
+		// HMAC accepts any key length per RFC 2104.
+		minKeyBytes   = 0;
 		generalLength = (mech == CKM_MD5_HMAC_GENERAL);
 		return CKR_OK;
 	}
@@ -245,6 +276,44 @@ static CK_RV applyGeneralMacLength(CK_MECHANISM_PTR pMechanism, MacAlgorithm* ma
 	return CKR_OK;
 }
 
+/**
+ * @brief Apply CKM_AES_GMAC's CK_GCM_PARAMS (IV + tag length) to a freshly
+ *        created MacAlgorithm (WS-8, 2026-08-30).
+ *
+ * PKCS#11 v3.2 §6.13.6: "The IV length is determined by ... ulIvLen. ... the
+ * tag's length is determined by ... ulTagBits." pAAD/ulAADLen are NOT used
+ * for GMAC — the data authenticated is pData itself (the C_Sign/C_Verify
+ * argument), not a separate AAD field within the params struct.
+ */
+static CK_RV applyGmacParams(CK_MECHANISM_PTR pMechanism, MacAlgorithm* mac)
+{
+	if (pMechanism->pParameter == NULL_PTR ||
+	    pMechanism->ulParameterLen != sizeof(CK_GCM_PARAMS))
+	{
+		ERROR_MSG("CKM_AES_GMAC requires CK_GCM_PARAMS");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	CK_GCM_PARAMS_PTR gcmp = CK_GCM_PARAMS_PTR(pMechanism->pParameter);
+
+	if (gcmp->ulIvLen == 0 || gcmp->pIv == NULL_PTR)
+	{
+		ERROR_MSG("CKM_AES_GMAC: pIv/ulIvLen missing");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (!mac->setIV(ByteString(gcmp->pIv, gcmp->ulIvLen)))
+		return CKR_MECHANISM_PARAM_INVALID;
+
+	if (gcmp->ulTagBits == 0 || gcmp->ulTagBits > 128 || gcmp->ulTagBits % 8 != 0)
+	{
+		ERROR_MSG("CKM_AES_GMAC: invalid ulTagBits");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	if (!mac->setTruncatedMacSize((size_t)(gcmp->ulTagBits / 8)))
+		return CKR_MECHANISM_PARAM_INVALID;
+
+	return CKR_OK;
+}
+
 } // anonymous namespace
 
 // MacAlgorithm version of C_SignInit
@@ -288,6 +357,15 @@ CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechani
 			return mechRv;
 		}
 	}
+	if (pMechanism->mechanism == CKM_AES_GMAC)
+	{
+		mechRv = applyGmacParams(pMechanism, mac);
+		if (mechRv != CKR_OK)
+		{
+			CryptoFactory::i()->recycleMacAlgorithm(mac);
+			return mechRv;
+		}
+	}
 
 	SymmetricKey* privkey = new SymmetricKey();
 
@@ -299,17 +377,16 @@ CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechani
 	}
 
 	// Enforce the same per-mechanism minimum key size that MacVerifyInit
-	// enforces (kMacMechTable.minKeyBytes — 0 means "no PKCS#11 minimum",
-	// e.g. CMAC, whose key size is already constrained by its AES key type).
-	// Before this fix Sign only rejected a fully empty key (bitLen==0),
-	// while Verify already rejected anything below minKeyBytes; the two
-	// were never wired to the same rule despite resolveMacMech() supplying
-	// minSize to both. That asymmetry meant a mechanism like
-	// CKM_SHA3_384_HMAC / CKM_SHA3_512_HMAC (minKeyBytes 48 / 64) would
-	// accept a sign with a shorter key and produce a real MAC, then reject
-	// verification of that very same MAC forever — a real round trip is
-	// impossible below the minimum, and PASS/FAIL now reflects that
-	// symmetrically. Found 2026-08-23 by the Gap 2 SHA3-HMAC round-trip test.
+	// enforces (kMacMechTable.minKeyBytes — 0 means "no PKCS#11 minimum";
+	// that's every plain-digest HMAC row now, plus CMAC/GMAC whose key size
+	// is already constrained by their AES key type — see kMacMechTable's own
+	// comment for why HMAC rows read 0 rather than their digest's output
+	// length). Keeping Sign and Verify wired to the same resolveMacMech()
+	// minSize matters for mechanisms that DO carry a real minimum (e.g.
+	// KMAC_128/256's NIST SP 800-185 floor): letting Sign accept a
+	// below-minimum key that Verify then always rejects would make a real
+	// round trip impossible while looking like two independently-correct
+	// checks. Found 2026-08-23 by the Gap 2 SHA3-HMAC round-trip test.
 	privkey->setBitLen(privkey->getKeyBits().size() * 8);
 
 	if (privkey->getBitLen() < (minSize * 8))
@@ -503,7 +580,17 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 			if (ctx->pContext == NULL_PTR) return CKR_ARGUMENTS_BAD;
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
-		out.preHash = true;
+		// Remediation R37 (phase 8): this branch (CK_HASH_SIGN_ADDITIONAL_
+		// CONTEXT) fires ONLY for the bare generic CKM_HASH_ML_DSA
+		// (isHashMech, above) -- §6.67.6, caller supplies an already-hashed
+		// PHM. phmInput, NOT preHash: preHash means "hash the message on
+		// token" (§6.67.7's ten CKM_HASH_ML_DSA_<hash> mechanisms, which
+		// reach this function via the OTHER branch and set preHash=true
+		// themselves, in the HASH_MLDSA_CASE macro). Was wrongly preHash=
+		// true here before R37 -- caused OSSLMLDSA::sign()/verify() to hash
+		// the caller's PHM a second time (live-confirmed via
+		// generic-hash-mldsa-probe before this fix).
+		out.phmInput = true;
 	}
 	return CKR_OK;
 }
@@ -593,7 +680,10 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 			if (ctx->pContext == NULL_PTR) return CKR_ARGUMENTS_BAD;
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
-		out.preHash = true;
+		// Remediation R37 (phase 8): see parseMLDSASignContext's identical
+		// note -- this branch fires only for the bare generic
+		// CKM_HASH_SLH_DSA (§6.69.6, PHM input); phmInput, not preHash.
+		out.phmInput = true;
 		// hash algorithm is set by the caller after this function returns
 	}
 	return CKR_OK;
@@ -1068,7 +1158,13 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				return CKR_ARGUMENTS_BAD;
 			}
 			mechanism = AsymMech::HASH_MLDSA;
-			bAllowMultiPartOp = true;
+			// Remediation R37 (phase 8): genuinely single-part -- the
+			// caller's data argument IS the complete PHM, there is no
+			// message to stream, and (unlike R34's own first, wrong
+			// attempt at this) this mechanism is unreachable via OpenSSL's
+			// own Update/Final-driving EVP_DigestSign machinery at all
+			// (the provider never routes to the bare generic mechanism).
+			bAllowMultiPartOp = false;
 			isMLDSA = true;
 			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
 			if (rv2 != CKR_OK) return rv2;
@@ -1118,6 +1214,37 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE128, HASH_MLDSA_SHAKE128, SHAKE128)
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE256, HASH_MLDSA_SHAKE256, SHAKE256)
 #undef HASH_MLDSA_CASE
+		case CKM_ML_DSA_EXTERNAL_MU:
+		{
+			// Remediation R34, PQCTODAY-VENDOR-EXT-MU. Reuses
+			// CK_SIGN_ADDITIONAL_CONTEXT verbatim (parseMLDSASignContext,
+			// same as plain CKM_ML_DSA) -- only hedgeVariant is meaningful.
+			// The caller's 64-byte µ travels via the normal C_Sign/C_Verify
+			// data argument, not the mechanism parameter (see
+			// vendor_mechanisms.h's own comment on this mechanism).
+			// bAllowMultiPartOp=true: live-traced (2026-08-26) -- OpenSSL's own
+			// EVP_DigestSign machinery drives even a "one-shot" pkeyutl -sign
+			// through C_SignInit/C_SignUpdate/C_SignFinal for ML-DSA, never a
+			// single C_Sign call, so this MUST accept multi-part or every
+			// caller fails at the first C_SignUpdate (CKR_OPERATION_NOT_INITIALIZED).
+			// Same accumulate-then-single-sign shape as plain CKM_ML_DSA:
+			// OSSLMLDSA::sign() sees the fully-accumulated buffer at Final time
+			// either way, so this needed no engine-side change beyond the flag.
+			mechanism = AsymMech::MLDSA_EXTERNAL_MU;
+			bAllowMultiPartOp = true;
+			isMLDSA = true;
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
+			if (rv2 != CKR_OK) return rv2;
+			if (mldsaSignParam.contextLen > 0)
+			{
+				ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU takes no context -- µ already "
+					"folds it in (FIPS 204)");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			param = &mldsaSignParam;
+			paramLen = sizeof(mldsaSignParam);
+			break;
+		}
 		case CKM_SLH_DSA:
 			// PKCS#11 v3.2: CKM_SLH_DSA accepts optional CK_SIGN_ADDITIONAL_CONTEXT
 			// for context string (FIPS 205 §9.2) and deterministic mode (FIPS 205 §10).
@@ -1141,7 +1268,9 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				return CKR_ARGUMENTS_BAD;
 			}
 			mechanism = AsymMech::HASH_SLHDSA;
-			bAllowMultiPartOp = true;
+			// Remediation R37 (phase 8): see the CKM_HASH_ML_DSA case's
+			// identical comment above -- genuinely single-part.
+			bAllowMultiPartOp = false;
 			isSLHDSA = true;
 			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam);
 			if (rv2 != CKR_OK) return rv2;
@@ -2224,6 +2353,15 @@ CK_RV SoftHSM::MacVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 			return mechRv;
 		}
 	}
+	if (pMechanism->mechanism == CKM_AES_GMAC)
+	{
+		mechRv = applyGmacParams(pMechanism, mac);
+		if (mechRv != CKR_OK)
+		{
+			CryptoFactory::i()->recycleMacAlgorithm(mac);
+			return mechRv;
+		}
+	}
 
 	SymmetricKey* pubkey = new SymmetricKey();
 
@@ -2728,7 +2866,9 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				return CKR_ARGUMENTS_BAD;
 			}
 			mechanism = AsymMech::HASH_MLDSA;
-			bAllowMultiPartOp = true;
+			// Remediation R37 (phase 8): genuinely single-part -- see the
+			// AsymSignInit case's identical comment.
+			bAllowMultiPartOp = false;
 			isMLDSA = true;
 			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
 			if (rv2 != CKR_OK) return rv2;
@@ -2777,6 +2917,37 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE128, HASH_MLDSA_SHAKE128, SHAKE128)
 		HASH_MLDSA_CASE(CKM_HASH_ML_DSA_SHAKE256, HASH_MLDSA_SHAKE256, SHAKE256)
 #undef HASH_MLDSA_CASE
+		case CKM_ML_DSA_EXTERNAL_MU:
+		{
+			// Remediation R34, PQCTODAY-VENDOR-EXT-MU. Reuses
+			// CK_SIGN_ADDITIONAL_CONTEXT verbatim (parseMLDSASignContext,
+			// same as plain CKM_ML_DSA) -- only hedgeVariant is meaningful.
+			// The caller's 64-byte µ travels via the normal C_Sign/C_Verify
+			// data argument, not the mechanism parameter (see
+			// vendor_mechanisms.h's own comment on this mechanism).
+			// bAllowMultiPartOp=true: live-traced (2026-08-26) -- OpenSSL's own
+			// EVP_DigestSign machinery drives even a "one-shot" pkeyutl -sign
+			// through C_SignInit/C_SignUpdate/C_SignFinal for ML-DSA, never a
+			// single C_Sign call, so this MUST accept multi-part or every
+			// caller fails at the first C_SignUpdate (CKR_OPERATION_NOT_INITIALIZED).
+			// Same accumulate-then-single-sign shape as plain CKM_ML_DSA:
+			// OSSLMLDSA::sign() sees the fully-accumulated buffer at Final time
+			// either way, so this needed no engine-side change beyond the flag.
+			mechanism = AsymMech::MLDSA_EXTERNAL_MU;
+			bAllowMultiPartOp = true;
+			isMLDSA = true;
+			CK_RV rv2 = parseMLDSASignContext(pMechanism, mldsaSignParam);
+			if (rv2 != CKR_OK) return rv2;
+			if (mldsaSignParam.contextLen > 0)
+			{
+				ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU takes no context -- µ already "
+					"folds it in (FIPS 204)");
+				return CKR_MECHANISM_PARAM_INVALID;
+			}
+			param = &mldsaSignParam;
+			paramLen = sizeof(mldsaSignParam);
+			break;
+		}
 		case CKM_SLH_DSA:
 			// PKCS#11 v3.2: CKM_SLH_DSA accepts optional CK_SIGN_ADDITIONAL_CONTEXT
 			// for context string (FIPS 205 §9.2) and deterministic mode (FIPS 205 §10).
@@ -2800,7 +2971,9 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				return CKR_ARGUMENTS_BAD;
 			}
 			mechanism = AsymMech::HASH_SLHDSA;
-			bAllowMultiPartOp = true;
+			// Remediation R37 (phase 8): see the CKM_HASH_ML_DSA case's
+			// identical comment above -- genuinely single-part.
+			bAllowMultiPartOp = false;
 			isSLHDSA = true;
 			CK_RV rv2 = parseSLHDSASignContext(pMechanism, slhdsaSignParam);
 			if (rv2 != CKR_OK) return rv2;
@@ -3492,11 +3665,19 @@ static CK_RV applyPerMessageParam(Session* session,
 		CK_RV rv2 = parseMLDSASignContext(&fakeMech, mldsaParam);
 		if (rv2 != CKR_OK) return rv2;
 
-		// Preserve preHash / hashAlg set by the init mechanism
+		// Preserve preHash / phmInput / hashAlg set by the init mechanism.
+		// phmInput (remediation R37, phase 8) needs the same treatment as
+		// preHash here: fakeMech.mechanism is hardcoded to CKM_ML_DSA above,
+		// so parseMLDSASignContext's own isHashMech branch (the only place
+		// that sets phmInput) never fires for this call -- without this
+		// line, a per-message param on a CKM_HASH_ML_DSA-initialized
+		// session would silently lose phmInput and fall through to plain
+		// (unhashed-message) signing.
 		if (existing && existingLen == sizeof(MLDSA_SIGN_PARAMS))
 		{
 			MLDSA_SIGN_PARAMS* initParams = (MLDSA_SIGN_PARAMS*)existing;
 			mldsaParam.preHash = initParams->preHash;
+			mldsaParam.phmInput = initParams->phmInput;
 			mldsaParam.hashAlg = initParams->hashAlg;
 		}
 		if (!session->setParameters(&mldsaParam, sizeof(mldsaParam)))
@@ -3515,11 +3696,13 @@ static CK_RV applyPerMessageParam(Session* session,
 		CK_RV rv2 = parseSLHDSASignContext(&fakeMech, slhdsaParam);
 		if (rv2 != CKR_OK) return rv2;
 
-		// Preserve preHash / hashAlg set by the init mechanism
+		// Preserve preHash / phmInput / hashAlg -- see the ML-DSA branch's
+		// identical comment above (remediation R37, phase 8).
 		if (existing && existingLen == sizeof(SLHDSA_SIGN_PARAMS))
 		{
 			SLHDSA_SIGN_PARAMS* initParams = (SLHDSA_SIGN_PARAMS*)existing;
 			slhdsaParam.preHash = initParams->preHash;
+			slhdsaParam.phmInput = initParams->phmInput;
 			slhdsaParam.hashAlg = initParams->hashAlg;
 		}
 		if (!session->setParameters(&slhdsaParam, sizeof(slhdsaParam)))

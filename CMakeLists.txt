@@ -179,4 +179,190 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
                      --workdir ${CMAKE_BINARY_DIR}/p11_v32_compliance_workdir
                      --report ${CMAKE_BINARY_DIR}/cpp_compliance_report
              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+    # composite-sig-probe: phase-4 R7 test helper for the pkcs11-provider's
+    # composite (draft-lamps-pq-composite-sigs) signature support. Links
+    # pkcs11-provider.so directly (its composite bridge exports real C
+    # symbols for exactly this — see composite.h) because the standard
+    # openssl CLI cannot reach that path: there is no keymgmt GEN for
+    # composite keys, only a two-subkey-URI bridge. Driven by
+    # scripts/test-openssl-provider.sh's T21 (COMPSIG) cases, not run
+    # under ctest directly (it needs a live per-case token arena the
+    # harness script builds, same as every other T-case).
+    add_executable(composite_sig_probe scripts/composite-sig-probe.c)
+    target_include_directories(composite_sig_probe PRIVATE
+        ${OPENSSL_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/src/vendor/pkcs11-provider
+        ${CMAKE_SOURCE_DIR}/src/vendor/pkcs11-provider/src)
+    add_dependencies(composite_sig_probe pkcs11-provider)
+    # pkcs11-provider is a MODULE library named exactly pkcs11-provider.so
+    # (no "lib" prefix, per provider-loading convention). CMake recognizes
+    # any reference to its output path — target name, $<TARGET_FILE:...>,
+    # even a hardcoded literal matching that path — as "the pkcs11-provider
+    # target" and re-derives a bare -lpkcs11-provider flag, which the
+    # linker can't resolve (it looks for libpkcs11-provider.so). The GNU
+    # ld/gold/lld -l:exact-filename form bypasses the lib-prefix
+    # assumption while staying inside target_link_libraries' normal
+    # library ordering (so it lands after the object file that needs its
+    # symbols, unlike target_link_options' flag placement).
+    target_link_libraries(composite_sig_probe
+        ${OPENSSL_LIBRARIES}
+        -L${CMAKE_BINARY_DIR}/src/vendor/pkcs11-provider
+        -l:pkcs11-provider.so
+        -Wl,-rpath,${CMAKE_BINARY_DIR}/src/vendor/pkcs11-provider)
+
+    # dump-int-param: phase-4 R20 (F36-5) test helper — reads back an
+    # arbitrary EVP_PKEY int param (OSSL_PKEY_PARAM_SECURITY_CATEGORY)
+    # via the standard EVP API. Unlike composite_sig_probe this needs no
+    # pkcs11-provider.so internal symbols — the provider is loaded at
+    # runtime via openssl.cnf like any normal application, so plain
+    # OpenSSL linking is enough.
+    add_executable(dump_int_param scripts/dump-int-param.c)
+    target_include_directories(dump_int_param PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(dump_int_param ${OPENSSL_LIBRARIES})
+
+    # lms-xdr-verify: phase-4 R9 test helper. Verifies an HSS-token-signed
+    # signature using OpenSSL 3.6.3's own native LMS implementation,
+    # independent of the pkcs11-provider and the engine — see the file's
+    # own header comment for why the openssl CLI can't reach this path
+    # (the "xdr" LMS decoder has no PEM/DER auto-detect entry) and why two
+    # HSS-vs-bare-LMS wire-format strips are needed first. Driven by T24.
+    add_executable(lms_xdr_verify scripts/lms-xdr-verify.c)
+    target_include_directories(lms_xdr_verify PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(lms_xdr_verify ${OPENSSL_LIBRARIES})
+
+    # hss-pubkey-dump: phase-4 R9 test helper — raw CKA_VALUE export for a
+    # token's HSS public key via direct PKCS#11 calls (no SPKI encoder
+    # exists for HSS in the pkcs11-provider; see the file's own header).
+    add_executable(hss_pubkey_dump scripts/hss-pubkey-dump.c)
+    target_include_directories(hss_pubkey_dump PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11)
+    target_link_libraries(hss_pubkey_dump ${CMAKE_DL_LIBS})
+
+    # hss-w4-keygen: phase-5 R25 test helper — generates an HSS keypair
+    # with explicit non-default CK_HSS_KEY_PAIR_GEN_PARAMS (LMOTS W4) via
+    # direct PKCS#11 calls, proving sig/hss.c's hss_sig_size() computes a
+    # genuinely different, per-parameter-set signature length rather than
+    # a constant that happens to be right once (see the file's own
+    # header). Driven by T24c.
+    add_executable(hss_w4_keygen scripts/hss-w4-keygen.c)
+    target_include_directories(hss_w4_keygen PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11)
+    target_link_libraries(hss_w4_keygen ${CMAKE_DL_LIBS})
+
+    # hss-fallback-fixture: phase-6 R29 test helper — creates a public
+    # HSS key object via direct C_CreateObject holding a real CKA_VALUE
+    # but WITHOUT the official CKA_HSS_LEVELS/LMS_TYPE/LMOTS_TYPE attrs,
+    # simulating a pre-R25-engine or imported key so hss_sig_size_for_
+    # key()'s own CKA_VALUE-parsing fallback leg (never live-tested when
+    # R25 landed, for want of a fixture) can finally be proven (see the
+    # file's own header for why it's built from a W4, not W8, key).
+    add_executable(hss_fallback_fixture scripts/hss-fallback-fixture.c)
+    target_include_directories(hss_fallback_fixture PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11)
+    target_link_libraries(hss_fallback_fixture ${CMAKE_DL_LIBS})
+
+    # aead-probe: phase-5 R26 test helper — exercises the full EVP AEAD
+    # workflow (AAD, tag get/set, both sabotage controls) for
+    # CKM_AES_GCM / CKM_CHACHA20_POLY1305, since `openssl enc` refuses
+    # AEAD ciphers outright (see the file's own header).
+    add_executable(aead_probe scripts/aead-probe.c)
+    target_include_directories(aead_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(aead_probe ${OPENSSL_LIBRARIES})
+
+    # aead-edge-probe: phase-6 R30 test helper — over-ceiling decrypt
+    # (must fail cleanly, never crash/corrupt) and AAD-only/empty-
+    # plaintext AEAD decrypt, purpose-built rather than folded into
+    # aead-probe.c's own happy-path+sabotage shape (see the file's own
+    # header).
+    add_executable(aead_edge_probe scripts/aead-edge-probe.c)
+    target_include_directories(aead_edge_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(aead_edge_probe ${OPENSSL_LIBRARIES})
+
+    # aes-wrap-probe: OpenSSL-provider remediation item (2026-08-30) test
+    # helper for CKM_AES_KEY_WRAP/CKM_AES_KEY_WRAP_KWP -- wrap+unwrap round
+    # trip for all three AES key sizes and both plain/padded variants,
+    # plus a tampered-blob rejection check (RFC 3394/5649's own built-in
+    # integrity check). Plain OpenSSL linking -- the provider is loaded at
+    # runtime via openssl.cnf, same as aead_probe/aead_edge_probe.
+    add_executable(aes_wrap_probe scripts/aes-wrap-probe.c)
+    target_include_directories(aes_wrap_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(aes_wrap_probe ${OPENSSL_LIBRARIES})
+
+    # aes-xts-probe: OpenSSL-provider remediation item (2026-08-30) test
+    # helper for CKM_AES_XTS's own OSSL_OP_CIPHER registration -- a
+    # multi-call streaming round trip that genuinely exercises ciphertext
+    # stealing at a real update()/update() boundary (not just a single
+    # one-shot non-aligned call), cross-checked byte-for-byte against
+    # OpenSSL's own independent software AES-XTS (provider=default) to
+    # confirm the double-width raw key material is split into its two
+    # AES-XTS sub-keys correctly.
+    add_executable(aes_xts_probe scripts/aes-xts-probe.c)
+    target_include_directories(aes_xts_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(aes_xts_probe ${OPENSSL_LIBRARIES})
+
+    # skey-flow-probe: phase-5 R24 (F36-3) test helper — exercises the
+    # EVP_SKEY opaque-key API (generate/derive_SKEY/init_SKEY) against
+    # this provider's SKEYMGMT/HKDF/HMAC, cross-checking the derived
+    # key's correctness against independent software computation without
+    # ever exporting the intermediate key material. Plain OpenSSL linking
+    # (loads pkcs11-provider at runtime like any application), no
+    # provider-internal symbols needed.
+    add_executable(skey_flow_probe scripts/skey-flow-probe.c)
+    target_include_directories(skey_flow_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(skey_flow_probe ${OPENSSL_LIBRARIES})
+
+    # shake-sign-probe: phase-8 R38 test helper — drives EVP_DigestSign*
+    # directly with a SHAKE128/256 digest name, bypassing the openssl(1)
+    # CLI apps, both of which refuse this combination for reasons that
+    # have nothing to do with this provider (dgst: "Signing key cannot be
+    # specified for XOF" is apps/dgst.c's own hardcoded refusal; pkeyutl:
+    # -digest's algorithm allowlist doesn't include ML-DSA) — confirmed
+    # live before writing this probe, see the file's own header. Plain
+    # OpenSSL linking, same as skey-flow-probe.
+    add_executable(shake_sign_probe scripts/shake-sign-probe.c)
+    target_include_directories(shake_sign_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(shake_sign_probe ${OPENSSL_LIBRARIES})
+
+    # generic-hash-mldsa-probe: phase-8 R37 step-1 live-confirm fixture --
+    # drives the raw PKCS#11 C_* API directly (same reason hss-w4-keygen.c
+    # does: nothing routes to the bare generic CKM_HASH_ML_DSA mechanism
+    # through the OpenSSL provider by design, so there is no CLI/EVP-API
+    # surface to reach it at all). Cross-verifies the generic mechanism's
+    # actual signed content against the hash-specific mechanism (the
+    # conformant oracle) and against plain CKM_ML_DSA (the "pure path" bug
+    # detector) -- see the file's own header for the full hypothesis set.
+    add_executable(generic_hash_mldsa_probe scripts/generic-hash-mldsa-probe.c)
+    target_include_directories(generic_hash_mldsa_probe PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11 ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(generic_hash_mldsa_probe ${CMAKE_DL_LIBS} ${OPENSSL_LIBRARIES})
+
+    # hash-pqc-crosscheck / hash-pqc-provider-probe: remediation item 5
+    # (2026-08-30) verification pair for the OpenSSL-provider's own NEW
+    # HASH-ML-DSA/HASH-SLH-DSA algorithms (sig/mldsa.c, sig/slhdsa.c).
+    # generic_hash_mldsa_probe above already independently confirmed the
+    # ENGINE's bare CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA mechanisms are
+    # spec-conformant; this pair cross-checks the NEW PROVIDER-layer code
+    # against that same already-proven engine, across two processes
+    # sharing one token directory: hash-pqc-crosscheck drives the raw
+    # PKCS#11 API (keygen with a fixed CKA_ID, plus sign/verify) so a
+    # signature produced by ONE side can be hex-piped into a verify call
+    # on the OTHER side.
+    add_executable(hash_pqc_crosscheck scripts/hash-pqc-crosscheck.c)
+    target_include_directories(hash_pqc_crosscheck PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11 ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(hash_pqc_crosscheck ${CMAKE_DL_LIBS} ${OPENSSL_LIBRARIES})
+
+    add_executable(hash_pqc_provider_probe scripts/hash-pqc-provider-probe.c)
+    target_include_directories(hash_pqc_provider_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(hash_pqc_provider_probe ${OPENSSL_LIBRARIES})
+
+    # mu-gen-probe: phase-8 R39 regression fixture -- drives the raw
+    # PKCS#11 C_Digest* API directly (this mechanism is engines-only by
+    # design, no OpenSSL-provider wiring) to prove
+    # CKM_ML_DSA_EXTERNAL_MU_GEN's incremental mu computation is correct.
+    add_executable(mu_gen_probe scripts/mu-gen-probe.c)
+    target_include_directories(mu_gen_probe PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/pkcs11 ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(mu_gen_probe ${CMAKE_DL_LIBS} ${OPENSSL_LIBRARIES})
 endif()

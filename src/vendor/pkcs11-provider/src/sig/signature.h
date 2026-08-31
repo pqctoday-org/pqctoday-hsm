@@ -66,4 +66,42 @@ extern const OSSL_DISPATCH p11prov_mldsa_44_signature_functions[];
 extern const OSSL_DISPATCH p11prov_mldsa_65_signature_functions[];
 extern const OSSL_DISPATCH p11prov_mldsa_87_signature_functions[];
 
+/* HashML-DSA pre-hash family (remediation item 5, risk-accepted -- see
+ * provider.h's P11PROV_NAMES_HASH_ML_DSA comment for the full caveat).
+ * One generic, paramset-agnostic algorithm; see sig/mldsa.c. */
+#define DISPATCH_HASH_MLDSA_FN(name) \
+    DECL_DISPATCH_FUNC(signature, p11prov_hash_mldsa, name)
+extern const OSSL_DISPATCH p11prov_hash_mldsa_signature_functions[];
+
+/* slhdsa sig functions */
+#define DISPATCH_SLHDSA_FN(name) \
+    DECL_DISPATCH_FUNC(signature, p11prov_slhdsa, name)
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_128s_signature_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_128s_signature_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_128f_signature_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_128f_signature_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_192s_signature_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_192s_signature_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_192f_signature_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_192f_signature_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_256s_signature_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_256s_signature_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_256f_signature_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_256f_signature_functions[];
+
+/* HashSLH-DSA pre-hash family (remediation item 5, risk-accepted -- see
+ * provider.h's P11PROV_NAMES_HASH_SLH_DSA comment for the full caveat).
+ * One generic, paramset-agnostic algorithm; see sig/slhdsa.c. */
+#define DISPATCH_HASH_SLHDSA_FN(name) \
+    DECL_DISPATCH_FUNC(signature, p11prov_hash_slhdsa, name)
+extern const OSSL_DISPATCH p11prov_hash_slhdsa_signature_functions[];
+
+/* hss sig functions (phase 4 R9) */
+#define DISPATCH_HSS_FN(name) DECL_DISPATCH_FUNC(signature, p11prov_hss, name)
+extern const OSSL_DISPATCH p11prov_hss_signature_functions[];
+
+/* xmss / xmss^mt sig functions (remediation R41, phase 8) */
+extern const OSSL_DISPATCH p11prov_xmss_signature_functions[];
+extern const OSSL_DISPATCH p11prov_xmssmt_signature_functions[];
+
 #endif /* _SIGNATURE_H */

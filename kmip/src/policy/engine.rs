@@ -581,7 +581,25 @@ rules: []
             .filter(|m| live(m) && m.policy.scopes().contains(&super::rule::Scope::Global))
             .collect();
 
-        if owner.is_none() && uncovered_ops == UncoveredOps::Deny {
+        // Scope::Lifecycle ops (Activate/Deactivate/Revoke/Destroy/Get/Locate/
+        // the attribute ops) carry no algorithm choice — crypto-agility policy
+        // authoring has never covered them (checked 2026-08-29: not one of the
+        // ~15 preset file sets across every scope declares `lifecycle`), so
+        // under every named preset except the empty-ruleset permissive one,
+        // basic key housekeeping like Activate was unconditionally refused —
+        // not a deliberate policy choice, just nobody having written the
+        // (necessarily-empty, since no algorithm dimension exists to gate)
+        // module. Exempt the whole scope from the uncovered-ops default
+        // structurally, so it can never again depend on every preset author
+        // remembering to declare it. The one thing this scope *could*
+        // meaningfully gate — attribute writes bypassing a creation-time
+        // `require_custom_attribute`/`require_usage_mask` check — isn't a
+        // crypto-agility concern either: the one attribute that actually
+        // matters, CryptographicAlgorithm, is already protocol-level
+        // read-only (`ops::attribute_mutate::attribute_is_read_only`),
+        // independent of policy.
+        let is_uncovered_lifecycle = owning_scope == Some(super::rule::Scope::Lifecycle);
+        if owner.is_none() && uncovered_ops == UncoveredOps::Deny && !is_uncovered_lifecycle {
             let d = Decision::Deny {
                 kmip_reason: DenyReason::PolicyNotLoaded,
                 human: format!(
@@ -1121,6 +1139,55 @@ rules:
         }
         eng.set_uncovered_ops(UncoveredOps::Allow);
         assert!(eng.evaluate(&req).is_allow(), "Allow mode must let an uncovered op through");
+    }
+
+    #[test]
+    fn lifecycle_ops_are_exempt_from_uncovered_ops_deny() {
+        // No policy module ever declared `scopes: [lifecycle]` (checked against
+        // every preset 2026-08-29 — cacp-hub gap report), so under the default
+        // uncovered-ops=Deny, every one of these was unconditionally refused
+        // the moment ANY named policy was active — including the demo's own
+        // Create -> Activate -> Sign flow. Only a Signing module is active
+        // here (mirrors a real "Classical"/"PQC" preset, none of which cover
+        // Lifecycle either), and uncovered-ops stays at its Deny default.
+        let eng = Engine::deny_all();
+        eng.activate(signing_module("sig")).unwrap();
+        assert_eq!(eng.uncovered_ops(), UncoveredOps::Deny);
+        let attrs = HashMap::new();
+        for op in [
+            "Get",
+            "Locate",
+            "Destroy",
+            "Activate",
+            "Deactivate",
+            "Revoke",
+            "GetAttributes",
+            "GetAttributeList",
+            "AddAttribute",
+            "ModifyAttribute",
+            "DeleteAttribute",
+            "SetAttribute",
+            "AdjustAttribute",
+        ] {
+            let req = PolicyRequest::minimal(op, None, ts(), "c-lifecycle", &attrs);
+            assert!(eng.evaluate(&req).is_allow(), "{op} must be exempt from uncovered-ops=deny");
+        }
+    }
+
+    #[test]
+    fn lifecycle_exemption_does_not_widen_to_other_uncovered_scopes() {
+        // The exemption is Scope::Lifecycle-specific — an op from any other
+        // scope with no owning module must still deny by default, exactly as
+        // uncovered_op_denies_by_default_and_allows_when_configured already
+        // covers for Encrypt. This pins that the fix didn't accidentally turn
+        // into a blanket "allow anything uncovered".
+        let eng = Engine::deny_all();
+        eng.activate(signing_module("sig")).unwrap();
+        let attrs = HashMap::new();
+        for op in ["Encrypt", "Encapsulate", "MAC", "Register"] {
+            let req = PolicyRequest::minimal(op, Some("AES-256"), ts(), "c-not-lifecycle", &attrs);
+            assert!(eng.evaluate(&req).is_deny(), "{op} must still deny when genuinely uncovered");
+        }
     }
 
     #[test]

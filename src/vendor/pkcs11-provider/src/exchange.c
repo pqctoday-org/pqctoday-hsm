@@ -6,18 +6,17 @@
 #include <openssl/kdf.h>
 #include "kdf.h"
 
-#ifndef CKK_X25519
-#define CKK_X25519 0x00000045
-#endif
-#ifndef CKK_X448
-#define CKK_X448 0x00000046
-#endif
-#ifndef CKM_X25519
-#define CKM_X25519 0x0000021A
-#endif
-#ifndef CKM_X448
-#define CKM_X448 0x0000021B
-#endif
+/* remediation R4: CKK_X25519/CKK_X448 do not exist in the PKCS#11 spec at
+ * all — X25519/X448 keys are CKK_EC_MONTGOMERY, distinguished from each
+ * other by CKA_EC_PARAMS (curve name)/key size, the same way CKK_EC_EDWARDS
+ * covers both Ed25519 and Ed448. The fallback definitions this file
+ * previously carried here (0x45/0x46 for the CKK_* pair, 0x21A/0x21B for
+ * the CKM_* pair) were fabricated values that never matched a real key —
+ * neither name is defined anywhere in pkcs11.h, so the #ifndef guards
+ * always activated, and the key-type check below could never match a real
+ * montgomery key. CKM_X25519/CKM_X448 (0x80001058/0x80001059, the real
+ * vendor-arc values) already come from pkcs11.h via provider.h; no local
+ * fallback is needed or was ever correct. */
 
 struct p11prov_exch_ctx {
     P11PROV_CTX *provctx;
@@ -201,10 +200,18 @@ static int p11prov_ecdh_init(void *ctx, void *provkey,
     }
 
     CK_KEY_TYPE objType = p11prov_obj_get_key_type(ecdhctx->key);
-    if (objType == CKK_X25519) {
-        ecdhctx->mechtype = CKM_X25519;
-    } else if (objType == CKK_X448) {
-        ecdhctx->mechtype = CKM_X448;
+    if (objType == CKK_EC_MONTGOMERY) {
+        CK_ULONG bits = p11prov_obj_get_key_bit_size(ecdhctx->key);
+        if (bits == X25519_BIT_SIZE) {
+            ecdhctx->mechtype = CKM_X25519;
+        } else if (bits == X448_BIT_SIZE) {
+            ecdhctx->mechtype = CKM_X448;
+        } else {
+            P11PROV_raise(ecdhctx->provctx, CKR_ARGUMENTS_BAD,
+                          "Unrecognized montgomery curve size %lu",
+                          (unsigned long)bits);
+            return RET_OSSL_ERR;
+        }
     }
 
     return p11prov_ecdh_set_ctx_params(ctx, params);

@@ -43,6 +43,7 @@
 #include <openssl/core_names.h>
 #include <openssl/params.h>
 #include <string.h>
+#include "../vendor_mechanisms.h"  // PQCTODAY_ML_DSA_MU_LEN (remediation R34)
 
 // ─── Pre-hash support (FIPS 204 §5.4, HashML-DSA) ──────────────────────────
 
@@ -56,55 +57,62 @@ struct PreHashInfo
 	mutable EVP_MD* md;  // cached after first EVP_MD_fetch; NULL until first use
 };
 
-// DER-encoded AlgorithmIdentifier for each hash: SEQUENCE { OID [, NULL] }
-// SHA-2/SHA-3: SEQUENCE { OID, NULL }  (15 bytes)
-// SHAKE:       SEQUENCE { OID }        (13 bytes, absent parameters)
-static const unsigned char ALGID_SHA224[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x04, 0x05,0x00
+// FIPS 204 §5.4 (Algorithm 4 step 23 / Algorithm 5 step 18) OID: the raw
+// DER encoding of the hash function's object identifier alone (tag + length
+// + 9-byte OID value = 11 bytes for every choice, including SHAKE) — NOT an
+// X.509 AlgorithmIdentifier SEQUENCE. Byte-for-byte matches
+// rust/fips204-patched/src/hashing.rs:319-427 ("OIDs are per FIPS 204 Table 1
+// / RFC 8017 / IANA AlgorithmIdentifier registry"), which this engine's own
+// M' construction must agree with since sign and verify only interoperate if
+// both sides use the same OID bytes.
+static const unsigned char OID_SHA224[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x04
 };
-static const unsigned char ALGID_SHA256[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01, 0x05,0x00
+static const unsigned char OID_SHA256[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01
 };
-static const unsigned char ALGID_SHA384[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02, 0x05,0x00
+static const unsigned char OID_SHA384[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02
 };
-static const unsigned char ALGID_SHA512[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03, 0x05,0x00
+static const unsigned char OID_SHA512[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03
 };
-static const unsigned char ALGID_SHA3_224[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x07, 0x05,0x00
+static const unsigned char OID_SHA3_224[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x07
 };
-static const unsigned char ALGID_SHA3_256[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x08, 0x05,0x00
+static const unsigned char OID_SHA3_256[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x08
 };
-static const unsigned char ALGID_SHA3_384[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x09, 0x05,0x00
+static const unsigned char OID_SHA3_384[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x09
 };
-static const unsigned char ALGID_SHA3_512[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0a, 0x05,0x00
+static const unsigned char OID_SHA3_512[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0a
 };
-static const unsigned char ALGID_SHAKE128[] = {
-	0x30,0x0b, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0b
+static const unsigned char OID_SHAKE128[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0b
 };
-static const unsigned char ALGID_SHAKE256[] = {
-	0x30,0x0b, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0c
+static const unsigned char OID_SHAKE256[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0c
 };
+
+static const size_t OID_DER_LEN = 11; // every entry above is the same length
 
 static const PreHashInfo* getPreHashInfo(HashAlgo::Type hashAlg)
 {
 	// SHAKE output lengths per FIPS 204: SHAKE128 → 32 bytes, SHAKE256 → 64 bytes
 	// md is lazily populated on first use; NULL here means "not yet fetched".
 	static const PreHashInfo table[] = {
-		{ "SHA2-224",  ALGID_SHA224,    15, 28, false, NULL },
-		{ "SHA2-256",  ALGID_SHA256,    15, 32, false, NULL },
-		{ "SHA2-384",  ALGID_SHA384,    15, 48, false, NULL },
-		{ "SHA2-512",  ALGID_SHA512,    15, 64, false, NULL },
-		{ "SHA3-224",  ALGID_SHA3_224,  15, 28, false, NULL },
-		{ "SHA3-256",  ALGID_SHA3_256,  15, 32, false, NULL },
-		{ "SHA3-384",  ALGID_SHA3_384,  15, 48, false, NULL },
-		{ "SHA3-512",  ALGID_SHA3_512,  15, 64, false, NULL },
-		{ "SHAKE128",  ALGID_SHAKE128,  13, 32, true,  NULL },
-		{ "SHAKE256",  ALGID_SHAKE256,  13, 64, true,  NULL },
+		{ "SHA2-224",  OID_SHA224,    OID_DER_LEN, 28, false, NULL },
+		{ "SHA2-256",  OID_SHA256,    OID_DER_LEN, 32, false, NULL },
+		{ "SHA2-384",  OID_SHA384,    OID_DER_LEN, 48, false, NULL },
+		{ "SHA2-512",  OID_SHA512,    OID_DER_LEN, 64, false, NULL },
+		{ "SHA3-224",  OID_SHA3_224,  OID_DER_LEN, 28, false, NULL },
+		{ "SHA3-256",  OID_SHA3_256,  OID_DER_LEN, 32, false, NULL },
+		{ "SHA3-384",  OID_SHA3_384,  OID_DER_LEN, 48, false, NULL },
+		{ "SHA3-512",  OID_SHA3_512,  OID_DER_LEN, 64, false, NULL },
+		{ "SHAKE128",  OID_SHAKE128,  OID_DER_LEN, 32, true,  NULL },
+		{ "SHAKE256",  OID_SHAKE256,  OID_DER_LEN, 64, true,  NULL },
 	};
 
 	switch (hashAlg)
@@ -144,6 +152,41 @@ void OSSLMLDSA_cleanupPreHashCache()
 
 // Build HashML-DSA encoding: M' = 0x01 || len(ctx) || ctx || OID || PH(M)
 // per FIPS 204 §5.4
+// Build M' = 0x01 || contextLen || context || AlgId_DER || digest, from an
+// ALREADY-COMPUTED digest of the given length (caller must have already
+// validated digestLen against info->digestLen -- see the two call sites).
+// Split out of buildPreHashEncoding (remediation R37, phase 8) so the bare
+// generic CKM_HASH_ML_DSA mechanism (PKCS#11 v3.2 §6.67.6 -- caller supplies
+// an already-hashed PHM directly, must NOT be hashed again) can share this
+// encoding step without buildPreHashEncoding's own internal EVP_Digest call.
+static bool buildMPrimeFromDigest(const unsigned char* digest, size_t digestLen,
+                                  const PreHashInfo* info,
+                                  const MLDSA_SIGN_PARAMS* params,
+                                  ByteString& encoded)
+{
+	// Overflow guard: contextLen <= 255, algIdDerLen <= 15, digestLen <= 64 (max 336).
+	size_t totalLen = 1 + 1;
+	if (params->contextLen > SIZE_MAX - totalLen) return false;
+	totalLen += params->contextLen;
+	if (info->algIdDerLen > SIZE_MAX - totalLen) return false;
+	totalLen += info->algIdDerLen;
+	if (digestLen > SIZE_MAX - totalLen) return false;
+	totalLen += digestLen;
+	encoded.resize(totalLen);
+	size_t off = 0;
+	encoded[off++] = 0x01;  // pre-hash domain separator
+	encoded[off++] = (unsigned char)params->contextLen;
+	if (params->contextLen > 0)
+	{
+		memcpy(&encoded[off], params->context, params->contextLen);
+		off += params->contextLen;
+	}
+	memcpy(&encoded[off], info->algIdDer, info->algIdDerLen);
+	off += info->algIdDerLen;
+	memcpy(&encoded[off], digest, digestLen);
+	return true;
+}
+
 static bool buildPreHashEncoding(const ByteString& message,
                                  const MLDSA_SIGN_PARAMS* params,
                                  ByteString& encoded)
@@ -201,30 +244,31 @@ static bool buildPreHashEncoding(const ByteString& message,
 		}
 	}
 
-	// Build M' = 0x01 || contextLen || context || AlgId_DER || H(M)
-	// Overflow guard: contextLen <= 255, algIdDerLen <= 15, digestLen <= 64 (max 336).
-	size_t totalLen = 1 + 1;
-	if (params->contextLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += params->contextLen;
-	if (info->algIdDerLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += info->algIdDerLen;
-	if (info->digestLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += info->digestLen;
-	encoded.resize(totalLen);
-	size_t off = 0;
-	encoded[off++] = 0x01;  // pre-hash domain separator
-	encoded[off++] = (unsigned char)params->contextLen;
-	if (params->contextLen > 0)
-	{
-		memcpy(&encoded[off], params->context, params->contextLen);
-		off += params->contextLen;
-	}
-	memcpy(&encoded[off], info->algIdDer, info->algIdDerLen);
-	off += info->algIdDerLen;
-	memcpy(&encoded[off], digest, info->digestLen);
+	bool ok = buildMPrimeFromDigest(digest, info->digestLen, info, params, encoded);
 	OPENSSL_cleanse(digest, sizeof(digest));
+	return ok;
+}
 
-	return true;
+// PKCS#11 v3.2 §6.67.6, bare generic CKM_HASH_ML_DSA: dataToSign IS the PHM
+// (already hashed by the caller) -- build M' directly, no internal hashing.
+// Loudly rejects a wrong-length PHM rather than truncating/padding.
+static bool buildMPrimeFromPHM(const ByteString& phm,
+                               const MLDSA_SIGN_PARAMS* params,
+                               ByteString& encoded)
+{
+	const PreHashInfo* info = getPreHashInfo(params->hashAlg);
+	if (!info)
+	{
+		ERROR_MSG("Unknown hash algorithm for generic HashML-DSA");
+		return false;
+	}
+	if (phm.size() != info->digestLen)
+	{
+		ERROR_MSG("CKM_HASH_ML_DSA: PHM length %zu does not match %s digest "
+		         "length %zu", phm.size(), info->evpName, info->digestLen);
+		return false;
+	}
+	return buildMPrimeFromDigest(phm.const_byte_str(), phm.size(), info, params, encoded);
 }
 
 // Check if mechanism is an ML-DSA family mechanism
@@ -244,6 +288,7 @@ static bool isMLDSAMechanism(AsymMech::Type mech)
 		case AsymMech::HASH_MLDSA_SHA3_512:
 		case AsymMech::HASH_MLDSA_SHAKE128:
 		case AsymMech::HASH_MLDSA_SHAKE256:
+		case AsymMech::MLDSA_EXTERNAL_MU:  // remediation R34, PQCTODAY-VENDOR-EXT-MU
 			return true;
 		default:
 			return false;
@@ -280,6 +325,17 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	if (param != NULL && paramLen == sizeof(MLDSA_SIGN_PARAMS))
 		mldsaParams = (const MLDSA_SIGN_PARAMS*)param;
 
+	// Remediation R34, PQCTODAY-VENDOR-EXT-MU: dataToSign is the caller's
+	// 64-byte µ (FIPS 204 Eq. 2), not a message — validated here, not left
+	// to OpenSSL's own length assumptions.
+	bool isExternalMu = (mechanism == AsymMech::MLDSA_EXTERNAL_MU);
+	if (isExternalMu && dataToSign.size() != PQCTODAY_ML_DSA_MU_LEN)
+	{
+		ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU requires exactly %u bytes of µ (got %zu)",
+			PQCTODAY_ML_DSA_MU_LEN, dataToSign.size());
+		return false;
+	}
+
 	// For pre-hash mechanisms: hash message and build encoded M'
 	const unsigned char* signData;
 	size_t signDataLen;
@@ -289,6 +345,16 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	if (mldsaParams && mldsaParams->preHash)
 	{
 		if (!buildPreHashEncoding(dataToSign, mldsaParams, preHashEncoded))
+			return false;
+		signData = preHashEncoded.const_byte_str();
+		signDataLen = preHashEncoded.size();
+		useRawEncoding = true;
+	}
+	else if (mldsaParams && mldsaParams->phmInput)
+	{
+		// Remediation R37 (phase 8): bare generic CKM_HASH_ML_DSA -- dataToSign
+		// IS the PHM already, never hash it again.
+		if (!buildMPrimeFromPHM(dataToSign, mldsaParams, preHashEncoded))
 			return false;
 		signData = preHashEncoded.const_byte_str();
 		signDataLen = preHashEncoded.size();
@@ -323,10 +389,11 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	// Set OpenSSL signature parameters (context, hedging, encoding mode)
 	if (mldsaParams)
 	{
-		OSSL_PARAM osslParams[4];  // max 3 params + terminator
+		OSSL_PARAM osslParams[4];  // max: DETERMINISTIC + one-of{MESSAGE_ENCODING,MU} + terminator
 		int nParams = 0;
 		int deterministic = 0;
 		int msgEncoding = 1;  // 1 = pure message (default)
+		int mu = 1;
 
 		// Hedging control: CKH_DETERMINISTIC_REQUIRED → set deterministic=1
 		if (mldsaParams->deterministic)
@@ -350,6 +417,15 @@ bool OSSLMLDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 			msgEncoding = 0;  // 0 = raw / pre-encoded
 			osslParams[nParams++] = OSSL_PARAM_construct_int(
 				OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, &msgEncoding);
+		}
+
+		// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU): tell OpenSSL
+		// the input IS µ already, skip its own H(tr‖M') computation entirely.
+		// Mutually exclusive with useRawEncoding (different mechanisms).
+		if (isExternalMu)
+		{
+			osslParams[nParams++] = OSSL_PARAM_construct_int(
+				OSSL_SIGNATURE_PARAM_MU, &mu);
 		}
 
 		if (nParams > 0)
@@ -435,6 +511,15 @@ bool OSSLMLDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	if (param != NULL && paramLen == sizeof(MLDSA_SIGN_PARAMS))
 		mldsaParams = (const MLDSA_SIGN_PARAMS*)param;
 
+	// Remediation R34, PQCTODAY-VENDOR-EXT-MU — see sign()'s own comment.
+	bool isExternalMu = (mechanism == AsymMech::MLDSA_EXTERNAL_MU);
+	if (isExternalMu && originalData.size() != PQCTODAY_ML_DSA_MU_LEN)
+	{
+		ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU requires exactly %u bytes of µ (got %zu)",
+			PQCTODAY_ML_DSA_MU_LEN, originalData.size());
+		return false;
+	}
+
 	// For pre-hash mechanisms: hash message and build encoded M'
 	const unsigned char* verifyData;
 	size_t verifyDataLen;
@@ -444,6 +529,15 @@ bool OSSLMLDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	if (mldsaParams && mldsaParams->preHash)
 	{
 		if (!buildPreHashEncoding(originalData, mldsaParams, preHashEncoded))
+			return false;
+		verifyData = preHashEncoded.const_byte_str();
+		verifyDataLen = preHashEncoded.size();
+		useRawEncoding = true;
+	}
+	else if (mldsaParams && mldsaParams->phmInput)
+	{
+		// Remediation R37 (phase 8): see sign()'s identical comment.
+		if (!buildMPrimeFromPHM(originalData, mldsaParams, preHashEncoded))
 			return false;
 		verifyData = preHashEncoded.const_byte_str();
 		verifyDataLen = preHashEncoded.size();
@@ -475,9 +569,10 @@ bool OSSLMLDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	// Note: deterministic flag is irrelevant for verification
 	if (mldsaParams)
 	{
-		OSSL_PARAM osslParams[3];  // max 2 params + terminator
+		OSSL_PARAM osslParams[4];  // max: CONTEXT_STRING + one-of{MESSAGE_ENCODING,MU} + terminator
 		int nParams = 0;
 		int msgEncoding = 1;
+		int mu = 1;
 
 		// Context string — only for pure ML-DSA
 		if (mldsaParams->contextLen > 0 && !useRawEncoding)
@@ -493,6 +588,14 @@ bool OSSLMLDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 			msgEncoding = 0;
 			osslParams[nParams++] = OSSL_PARAM_construct_int(
 				OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, &msgEncoding);
+		}
+
+		// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — see sign()'s
+		// own comment.
+		if (isExternalMu)
+		{
+			osslParams[nParams++] = OSSL_PARAM_construct_int(
+				OSSL_SIGNATURE_PARAM_MU, &mu);
 		}
 
 		if (nParams > 0)

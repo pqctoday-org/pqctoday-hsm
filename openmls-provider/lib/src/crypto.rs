@@ -44,9 +44,12 @@ fn hash_len(h: HashType) -> usize {
 impl OpenMlsCrypto for PqcTodayCrypto {
     // Suite 3 added 2026-08-10. It was ALREADY WORKING and simply undeclared:
     // suite 3 is suite 1 with ChaCha20Poly1305 in place of AES-128-GCM, and this
-    // file implements ChaCha20Poly1305 explicitly for it (see sw_chacha20_encrypt
-    // below, whose own comment says "used by MLS cipher suite 3"). The primitive
-    // landed; the declaration never followed.
+    // file's aead_encrypt/aead_decrypt route ChaCha20Poly1305 through
+    // self.ops.chacha20_poly1305 (CKM_CHACHA20_POLY1305 in the engine) the
+    // same way the AesGcm128/256 arms route through self.ops.aead_encrypt —
+    // both AEADs genuinely dispatch, so this suite's record-layer AEAD is
+    // HSM-resident like every other suite's. The primitive landed; the
+    // declaration never followed.
     //
     // Evidence it works rather than an assumption that it should: the first real
     // run of the IETF WG interop rig (2026-08-09) put our client through 8 suite-3
@@ -62,9 +65,15 @@ impl OpenMlsCrypto for PqcTodayCrypto {
             | Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256
             | Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519
             // Post-quantum: X-Wing (ML-KEM-768 + X25519) with Ed25519 signatures.
-            // The only PQ suite the released openmls_traits defines; its KEM,
-            // SHAKE-256 expansion, SHA3-256 combiner and ChaCha20-Poly1305 all
-            // run inside the HSM. Verified against the draft's own vectors.
+            // The only PQ suite the released openmls_traits defines; its KEM
+            // (backend.rs's ml_kem_768_keygen_from_seed/decapsulate/
+            // encapsulate_to), SHAKE-256 expansion (backend.rs's shake256,
+            // via softhsmrustv3::native::derive::shake256_xof), SHA3-256
+            // combiner (backend.rs's xwing_combine, via
+            // softhsmrustv3::native::derive::run_combiner) and
+            // ChaCha20-Poly1305 record-layer AEAD (self.ops.chacha20_poly1305,
+            // same as suite 3 above) all run through the engine. Verified
+            // against the draft's own vectors (tests/fixtures/xwing_kat.json).
             | Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519 => Ok(()),
             _ => Err(CryptoError::UnsupportedCiphersuite),
         }
@@ -167,7 +176,10 @@ impl OpenMlsCrypto for PqcTodayCrypto {
                 .ops
                 .aead_encrypt(key, nonce, aad, data)
                 .map_err(CryptoError::from),
-            AeadType::ChaCha20Poly1305 => sw_chacha20_encrypt(key, nonce, aad, data),
+            AeadType::ChaCha20Poly1305 => self
+                .ops
+                .chacha20_poly1305(true, key, nonce, aad, data)
+                .map_err(CryptoError::from),
         }
     }
 
@@ -184,7 +196,10 @@ impl OpenMlsCrypto for PqcTodayCrypto {
                 .ops
                 .aead_decrypt(key, nonce, aad, ct)
                 .map_err(CryptoError::from),
-            AeadType::ChaCha20Poly1305 => sw_chacha20_decrypt(key, nonce, aad, ct),
+            AeadType::ChaCha20Poly1305 => self
+                .ops
+                .chacha20_poly1305(false, key, nonce, aad, ct)
+                .map_err(CryptoError::from),
         }
     }
 
@@ -370,43 +385,6 @@ impl OpenMlsCrypto for PqcTodayCrypto {
             public: pk.as_slice().to_vec(),
         })
     }
-}
-
-// ── Software AEAD for cipher suites the HSM doesn't expose ───────────────────
-//
-// ChaCha20-Poly1305 is used by MLS cipher suite 3. softhsmv3 exposes
-// AES-GCM via CKM_AES_GCM; for ChaCha20 we fall back to RustCrypto's
-// pure-software implementation which is constant-time on all platforms.
-
-fn sw_chacha20_encrypt(
-    key: &[u8],
-    nonce: &[u8],
-    aad: &[u8],
-    data: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-    use chacha20poly1305::{aead::Aead, aead::KeyInit, aead::Payload, ChaCha20Poly1305, Nonce};
-    let cipher =
-        ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::InvalidLength)?;
-    let nonce = Nonce::from_slice(nonce);
-    let ct = cipher
-        .encrypt(nonce, Payload { msg: data, aad })
-        .map_err(|_| CryptoError::HpkeEncryptionError)?;
-    Ok(ct)
-}
-
-fn sw_chacha20_decrypt(
-    key: &[u8],
-    nonce: &[u8],
-    aad: &[u8],
-    ct: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
-    use chacha20poly1305::{aead::Aead, aead::KeyInit, aead::Payload, ChaCha20Poly1305, Nonce};
-    let cipher =
-        ChaCha20Poly1305::new_from_slice(key).map_err(|_| CryptoError::InvalidLength)?;
-    let nonce = Nonce::from_slice(nonce);
-    cipher
-        .decrypt(nonce, Payload { msg: ct, aad })
-        .map_err(|_| CryptoError::HpkeDecryptionError)
 }
 
 fn mk_hpke(

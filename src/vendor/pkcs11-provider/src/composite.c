@@ -53,6 +53,7 @@
 #include <openssl/encoder.h>
 #include <openssl/core_object.h>
 #include <openssl/err.h>
+#include <openssl/ecdsa.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -70,6 +71,19 @@ static const unsigned char COMPOSITE_PREFIX[] = "CompositeAlgorithmSignatures202
 #define MLDSA_65_PK_BYTES 1952
 #define MLDSA_87_PK_BYTES 2592
 
+/* Classical-half algorithm family. NOT derivable from pre_hash_nid or
+ * mldsa_param_set alone (phase-4 R7 finding): the 8-profile set has real
+ * collisions (.37 and .40 are both SHA256/MLDSA44 but RSA-PSS vs ECDSA;
+ * .41 and .45/.46/.49 are all SHA512 but RSA-PSS vs ECDSA vs Ed25519) that
+ * the original 3-profile inference (`pre_hash_nid == NID_sha256 ?
+ * CKM_RSA_PKCS_PSS : CKM_ECDSA`, keyed only by param_set elsewhere) never
+ * had to distinguish. This field is the authoritative selector. */
+enum p11prov_composite_classical {
+    P11PROV_COMPOSITE_CLASSICAL_RSA_PSS,
+    P11PROV_COMPOSITE_CLASSICAL_ECDSA,
+    P11PROV_COMPOSITE_CLASSICAL_ED25519,
+};
+
 struct p11prov_composite_profile {
     /* Composite OID string, e.g. "1.3.6.1.5.5.7.6.45" */
     const char *composite_oid;
@@ -78,7 +92,10 @@ struct p11prov_composite_profile {
     /* Signature label used in M' and as ML-DSA mldsa_ctx parameter
      * per draft-19 §2.2 / §3.2, e.g. "COMPSIG-MLDSA65-ECDSA-P256-SHA512" */
     const char *signature_label;
-    /* Pre-hash function: NID_sha256 or NID_sha512 (see draft-19 §6) */
+    /* Pre-hash function used to build M' = Prefix||Label||len(ctx)||ctx||PH(M):
+     * NID_sha256 or NID_sha512 (see draft-19 §6). Applies uniformly regardless
+     * of classical family — including Ed25519, whose PureEdDSA signs M' whole
+     * (no second, classical-side pre-hash of M'). */
     int pre_hash_nid;
     /* PKCS#11 parameter set for the ML-DSA half */
     CK_ULONG mldsa_param_set;
@@ -91,6 +108,24 @@ struct p11prov_composite_profile {
      * (e.g. RSA-PSS, ECDSA-with-SHA512). Empty for Ed25519/Ed448 where the
      * AlgorithmIdentifier embeds the hash. */
     const char *classical_alg_oid;
+    /* Classical family selector — see enum above. */
+    enum p11prov_composite_classical classical_type;
+    /* Concrete PKCS#11 mechanism for the classical sub-sigctx. ECDSA/RSA-PSS
+     * profiles combine hash+sign atomically (CKM_ECDSA_SHA512,
+     * CKM_SHA256_RSA_PKCS_PSS, ...); Ed25519 is CKM_EDDSA (no combined-hash
+     * variant — PureEdDSA hashes internally). */
+    CK_MECHANISM_TYPE classical_mechanism;
+    /* RSA-PSS parameters (draft-19 §6: salt length == hash output size,
+     * MGF1 with the same hash). Unused (zero) for ECDSA/Ed25519 profiles. */
+    CK_MECHANISM_TYPE pss_hash_mech;
+    CK_RSA_PKCS_MGF_TYPE pss_mgf;
+    CK_ULONG pss_salt_len;
+    /* ECDSA field width in bytes (32 for P-256, 48 for P-384) — the raw
+     * r||s length PKCS#11 C_Sign/C_Verify use, vs the variable-length DER
+     * ECDSA-Sig-Value the composite wire format carries (phase-4 R7
+     * finding: see ecdsa_raw_to_der/ecdsa_der_to_raw below). Unused for
+     * RSA-PSS/Ed25519 profiles. */
+    size_t ec_field_width;
 };
 
 static const struct p11prov_composite_profile p11prov_composite_profiles[] = {
@@ -103,6 +138,11 @@ static const struct p11prov_composite_profile p11prov_composite_profiles[] = {
         .mldsa_sig_bytes = MLDSA_44_SIG_BYTES,
         .mldsa_pk_bytes = MLDSA_44_PK_BYTES,
         .classical_alg_oid = "1.2.840.113549.1.1.10", /* id-RSASSA-PSS */
+        .classical_type = P11PROV_COMPOSITE_CLASSICAL_RSA_PSS,
+        .classical_mechanism = CKM_SHA256_RSA_PKCS_PSS,
+        .pss_hash_mech = CKM_SHA256,
+        .pss_mgf = CKG_MGF1_SHA256,
+        .pss_salt_len = 32,
     },
     {
         .composite_oid = "1.3.6.1.5.5.7.6.45",
@@ -112,7 +152,20 @@ static const struct p11prov_composite_profile p11prov_composite_profiles[] = {
         .mldsa_param_set = CKP_ML_DSA_65,
         .mldsa_sig_bytes = MLDSA_65_SIG_BYTES,
         .mldsa_pk_bytes = MLDSA_65_PK_BYTES,
-        .classical_alg_oid = "1.2.840.10045.4.3.4", /* ecdsa-with-SHA512 */
+        .classical_alg_oid = "1.2.840.10045.4.3.2", /* ecdsa-with-SHA256 */
+        .classical_type = P11PROV_COMPOSITE_CLASSICAL_ECDSA,
+        /* Phase 4 R7 fix: draft-19 §6 fixes this profile's classical
+         * Traditional Signature Algorithm at ecdsa-with-SHA256 — the
+         * SHA512 in the profile NAME is only the M' pre-hash (above), not
+         * the classical hash, which tracks the P-256 curve. Was
+         * CKM_ECDSA_SHA512 (copied the pre-hash into the classical
+         * mechanism), matching a bug already found and corrected in the
+         * Rust KMIP engine's own composite_sig.rs on 2026-08-17 and
+         * cross-verified there against the Bouncy Castle IETF Hackathon r5
+         * trust anchor. Signatures produced under the old value verify
+         * only against implementations sharing the same misreading. */
+        .classical_mechanism = CKM_ECDSA_SHA256,
+        .ec_field_width = 32,
     },
     {
         .composite_oid = "1.3.6.1.5.5.7.6.49",
@@ -122,7 +175,94 @@ static const struct p11prov_composite_profile p11prov_composite_profiles[] = {
         .mldsa_param_set = CKP_ML_DSA_87,
         .mldsa_sig_bytes = MLDSA_87_SIG_BYTES,
         .mldsa_pk_bytes = MLDSA_87_PK_BYTES,
-        .classical_alg_oid = "1.2.840.10045.4.3.4", /* ecdsa-with-SHA512 */
+        .classical_alg_oid = "1.2.840.10045.4.3.3", /* ecdsa-with-SHA384 */
+        .classical_type = P11PROV_COMPOSITE_CLASSICAL_ECDSA,
+        /* Phase 4 R7 fix: same bug class as .45 above — classical hash
+         * tracks the P-384 curve (SHA-384), not the SHA512 pre-hash in
+         * the profile name. Was CKM_ECDSA_SHA512. */
+        .classical_mechanism = CKM_ECDSA_SHA384,
+        .ec_field_width = 48,
+    },
+    /* --- Phase 4 R7: profiles 4-8. OIDs verified against
+     * kmip/src/kmip30/algos.rs (which itself cross-checks the hub's
+     * certBuilder.ts constants) and draft-lamps-pq-composite-sigs-19 §6 —
+     * NOT the phase-4 plan doc's own (wrong) guessed digits. */
+    {
+        .composite_oid = "1.3.6.1.5.5.7.6.39",
+        .label = "id-MLDSA44-Ed25519-SHA512",
+        .signature_label = "COMPSIG-MLDSA44-Ed25519-SHA512",
+        .pre_hash_nid = NID_sha512,
+        .mldsa_param_set = CKP_ML_DSA_44,
+        .mldsa_sig_bytes = MLDSA_44_SIG_BYTES,
+        .mldsa_pk_bytes = MLDSA_44_PK_BYTES,
+        .classical_alg_oid = "", /* Ed25519: AlgorithmIdentifier has no params */
+        .classical_type = P11PROV_COMPOSITE_CLASSICAL_ED25519,
+        .classical_mechanism = CKM_EDDSA,
+    },
+    {
+        .composite_oid = "1.3.6.1.5.5.7.6.40",
+        .label = "id-MLDSA44-ECDSA-P256-SHA256",
+        .signature_label = "COMPSIG-MLDSA44-ECDSA-P256-SHA256",
+        .pre_hash_nid = NID_sha256,
+        .mldsa_param_set = CKP_ML_DSA_44,
+        .mldsa_sig_bytes = MLDSA_44_SIG_BYTES,
+        .mldsa_pk_bytes = MLDSA_44_PK_BYTES,
+        .classical_alg_oid = "1.2.840.10045.4.3.2", /* ecdsa-with-SHA256 */
+        .classical_type = P11PROV_COMPOSITE_CLASSICAL_ECDSA,
+        .classical_mechanism = CKM_ECDSA_SHA256,
+        .ec_field_width = 32,
+    },
+    {
+        .composite_oid = "1.3.6.1.5.5.7.6.41",
+        .label = "id-MLDSA65-RSA3072-PSS-SHA512",
+        .signature_label = "COMPSIG-MLDSA65-RSA3072-PSS-SHA512",
+        .pre_hash_nid = NID_sha512,
+        .mldsa_param_set = CKP_ML_DSA_65,
+        .mldsa_sig_bytes = MLDSA_65_SIG_BYTES,
+        .mldsa_pk_bytes = MLDSA_65_PK_BYTES,
+        .classical_alg_oid = "1.2.840.113549.1.1.10", /* id-RSASSA-PSS */
+        .classical_type = P11PROV_COMPOSITE_CLASSICAL_RSA_PSS,
+        /* Phase 4 R7 fix: draft-19 §6.1 Table 2 fixes RSASSA-PSS at
+         * SHA-256 digest + MGF1-SHA-256 + 32-byte salt at BOTH the 2048-
+         * and 3072-bit RSA sizes — same "profile-name SHA512 is the M'
+         * pre-hash, not the classical hash" bug class as the .45/.49
+         * ECDSA fix above (cross-checked against the Rust KMIP engine's
+         * composite_sig.rs, which documents .37 alone can't expose this
+         * since both its hashes happen to be SHA-256). NOT SHA-512/salt-64. */
+        .classical_mechanism = CKM_SHA256_RSA_PKCS_PSS,
+        .pss_hash_mech = CKM_SHA256,
+        .pss_mgf = CKG_MGF1_SHA256,
+        .pss_salt_len = 32,
+    },
+    {
+        .composite_oid = "1.3.6.1.5.5.7.6.48",
+        .label = "id-MLDSA65-Ed25519-SHA512",
+        .signature_label = "COMPSIG-MLDSA65-Ed25519-SHA512",
+        .pre_hash_nid = NID_sha512,
+        .mldsa_param_set = CKP_ML_DSA_65,
+        .mldsa_sig_bytes = MLDSA_65_SIG_BYTES,
+        .mldsa_pk_bytes = MLDSA_65_PK_BYTES,
+        .classical_alg_oid = "", /* Ed25519: AlgorithmIdentifier has no params */
+        .classical_type = P11PROV_COMPOSITE_CLASSICAL_ED25519,
+        .classical_mechanism = CKM_EDDSA,
+    },
+    {
+        .composite_oid = "1.3.6.1.5.5.7.6.46",
+        .label = "id-MLDSA65-ECDSA-P384-SHA512",
+        .signature_label = "COMPSIG-MLDSA65-ECDSA-P384-SHA512",
+        .pre_hash_nid = NID_sha512,
+        .mldsa_param_set = CKP_ML_DSA_65,
+        .mldsa_sig_bytes = MLDSA_65_SIG_BYTES,
+        .mldsa_pk_bytes = MLDSA_65_PK_BYTES,
+        .classical_alg_oid = "1.2.840.10045.4.3.3", /* ecdsa-with-SHA384 */
+        .classical_type = P11PROV_COMPOSITE_CLASSICAL_ECDSA,
+        /* Classical hash tracks the P-384 curve (SHA-384), not the SHA512
+         * pre-hash in the profile name — confirmed against the external
+         * KAT vector (raw_signature_vectors tcId
+         * id-MLDSA65-ECDSA-P384-SHA512: ph=SHA512, trad_hash=SHA384),
+         * matching kmip/src/ops/composite_sig.rs's own cross-check. */
+        .classical_mechanism = CKM_ECDSA_SHA384,
+        .ec_field_width = 48,
     },
 };
 
@@ -627,10 +767,15 @@ static int p11prov_composite_keymgmt_get_params(void *keydata,
     default:
         return 0;
     }
-    /* Max composite signature size: PQ sig + maximum reasonable classical sig.
-     * RSA-2048-PSS = 256 bytes, ECDSA-P256 DER ≤ 72, ECDSA-P384 DER ≤ 104.
-     * Pick a safe upper bound for each profile. */
-    max_size = (int)obj->profile->mldsa_sig_bytes + 256;
+    /* Max composite signature size: PQ sig + maximum reasonable classical
+     * sig. RSA-2048-PSS = 256 bytes, RSA-3072-PSS = 384 bytes, ECDSA-P256
+     * DER <= 72, ECDSA-P384 DER <= 104. Phase 4 R7 fix: the pre-.41 value
+     * (256, sized only for RSA-2048) was too small for RSA-3072's 384-byte
+     * signature, causing composite sign to fail with a buffer-too-small
+     * error the caller couldn't recover from since this same constant
+     * also under-reported the OpenSSL sizing-query result. 512 covers
+     * every registered profile with margin. */
+    max_size = (int)obj->profile->mldsa_sig_bytes + 512;
 
     if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_BITS)) != NULL
         && !OSSL_PARAM_set_int(p, sec_bits)) {
@@ -666,6 +811,12 @@ static int p11prov_composite_keymgmt_get_params(void *keydata,
 DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa44_rsa2048_pss, 0)
 DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa65_ecdsa_p256, 1)
 DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa87_ecdsa_p384, 2)
+/* Phase 4 R7: profiles 4-8 */
+DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa44_ed25519, 3)
+DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa44_ecdsa_p256, 4)
+DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa65_rsa3072_pss, 5)
+DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa65_ed25519, 6)
+DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa65_ecdsa_p384, 7)
 #undef DEFINE_COMPOSITE_KEYMGMT_NEW
 
 #define COMPOSITE_KEYMGMT_DISPATCH(suffix) \
@@ -695,6 +846,12 @@ DEFINE_COMPOSITE_KEYMGMT_NEW(mldsa87_ecdsa_p384, 2)
 COMPOSITE_KEYMGMT_DISPATCH(mldsa44_rsa2048_pss);
 COMPOSITE_KEYMGMT_DISPATCH(mldsa65_ecdsa_p256);
 COMPOSITE_KEYMGMT_DISPATCH(mldsa87_ecdsa_p384);
+/* Phase 4 R7: profiles 4-8 */
+COMPOSITE_KEYMGMT_DISPATCH(mldsa44_ed25519);
+COMPOSITE_KEYMGMT_DISPATCH(mldsa44_ecdsa_p256);
+COMPOSITE_KEYMGMT_DISPATCH(mldsa65_rsa3072_pss);
+COMPOSITE_KEYMGMT_DISPATCH(mldsa65_ed25519);
+COMPOSITE_KEYMGMT_DISPATCH(mldsa65_ecdsa_p384);
 #undef COMPOSITE_KEYMGMT_DISPATCH
 
 /* External dispatch tables consumed by provider.c's ADD_ALGO_EXT block.
@@ -786,18 +943,16 @@ static void *p11prov_composite_sig_newctx_impl(
     void *provctx,
     const struct p11prov_composite_profile *profile)
 {
-    fprintf(stderr,
-            "[composite-sig-newctx] FIRED provctx=%p profile=%s\n",
-            provctx,
-            profile ? profile->label : "(null)");
+    P11PROV_debug("composite sig newctx provctx=%p profile=%s", provctx,
+                  profile ? profile->label : "(null)");
     P11PROV_COMPOSITE_SIG_CTX *ctx = OPENSSL_zalloc(sizeof(*ctx));
     if (ctx == NULL) {
-        fprintf(stderr, "[composite-sig-newctx] OPENSSL_zalloc FAILED\n");
+        P11PROV_debug("composite sig newctx: OPENSSL_zalloc failed");
         return NULL;
     }
     ctx->provctx = (P11PROV_CTX *)provctx;
     ctx->profile = profile;
-    fprintf(stderr, "[composite-sig-newctx] OK ctx=%p\n", (void *)ctx);
+    P11PROV_debug("composite sig newctx: ok ctx=%p", (void *)ctx);
     return ctx;
 }
 
@@ -849,35 +1004,24 @@ static int composite_setup_pq_sigctx(P11PROV_COMPOSITE_SIG_CTX *ctx)
     return 1;
 }
 
-/* Configure the classical sub-sigctx for this profile. */
+/* Configure the classical sub-sigctx for this profile. Dispatches on the
+ * profile's explicit classical_type/classical_mechanism fields (phase-4 R7)
+ * rather than inferring from pre_hash_nid/mldsa_param_set, which collide
+ * across the 8-profile set (e.g. .37 and .40 are both SHA256+MLDSA44 but
+ * RSA-PSS vs ECDSA). The HSM-side hash makes M' → digest → sign atomic for
+ * ECDSA/RSA-PSS, so we pass M' as raw input; Ed25519 is PureEdDSA and also
+ * signs M' directly (no separate digest step). */
 static int composite_setup_classical_sigctx(P11PROV_COMPOSITE_SIG_CTX *ctx)
 {
     P11PROV_SIG_CTX *sc = ctx->classical_sigctx;
-    CK_MECHANISM_TYPE classical_mech;
+    const struct p11prov_composite_profile *profile = ctx->profile;
 
-    /* Profile → underlying CKM_* mechanism. The HSM-side hash makes M' →
-     * digest → sign atomic, so we pass M' as raw input. */
-    if (ctx->profile->pre_hash_nid == NID_sha512
-        && ctx->profile->mldsa_param_set == CKP_ML_DSA_65) {
-        classical_mech = CKM_ECDSA_SHA512; /* MLDSA65+ECDSA-P256-SHA512 */
-    } else if (ctx->profile->pre_hash_nid == NID_sha512
-               && ctx->profile->mldsa_param_set == CKP_ML_DSA_87) {
-        classical_mech = CKM_ECDSA_SHA512; /* MLDSA87+ECDSA-P384-SHA512 */
-    } else if (ctx->profile->pre_hash_nid == NID_sha256
-               && ctx->profile->mldsa_param_set == CKP_ML_DSA_44) {
-        classical_mech = CKM_SHA256_RSA_PKCS_PSS; /* MLDSA44+RSA2048-PSS-SHA256 */
-    } else {
-        return 0; /* unknown profile combination */
-    }
+    sc->mechanism.mechanism = profile->classical_mechanism;
 
-    sc->mechanism.mechanism = classical_mech;
-
-    if (classical_mech == CKM_SHA256_RSA_PKCS_PSS) {
-        /* draft-19 §6 specifies RSASSA-PSS with SHA-256, MGF1-SHA-256,
-         * salt length = 32 bytes (= hash output). */
-        ctx->classical_pss_params.hashAlg = CKM_SHA256;
-        ctx->classical_pss_params.mgf = CKG_MGF1_SHA256;
-        ctx->classical_pss_params.sLen = 32;
+    if (profile->classical_type == P11PROV_COMPOSITE_CLASSICAL_RSA_PSS) {
+        ctx->classical_pss_params.hashAlg = profile->pss_hash_mech;
+        ctx->classical_pss_params.mgf = profile->pss_mgf;
+        ctx->classical_pss_params.sLen = profile->pss_salt_len;
         sc->mechanism.pParameter = &ctx->classical_pss_params;
         sc->mechanism.ulParameterLen = sizeof(ctx->classical_pss_params);
     } else {
@@ -885,6 +1029,96 @@ static int composite_setup_classical_sigctx(P11PROV_COMPOSITE_SIG_CTX *ctx)
         sc->mechanism.ulParameterLen = 0;
     }
     return 1;
+}
+
+/* draft-19 Appendix C / §4.3: the composite signature's classical component
+ * for ECDSA is a DER-encoded ECDSA-Sig-Value (SEQUENCE { r, s }), NOT the
+ * fixed-width raw r||s PKCS#11's CKM_ECDSA-family C_Sign/C_Verify use —
+ * confirmed against the external KAT vectors (kmip/kat/composite-sigs/
+ * external-composite-vectors.json: every ECDSA classical_sig tail parses
+ * as DER, e.g. .40's 70-byte tail = `30 44 02 20 ... 02 20 ...`) and
+ * against kmip/src/ops/composite_sig.rs's own ecdsa_der_to_raw step,
+ * which exists for exactly this DER-on-the-wire/raw-for-PKCS#11 gap.
+ * Phase 4 R7 finding: this provider previously embedded PKCS#11's raw
+ * r||s directly with no conversion — the buffer-sizing comment in
+ * p11prov_composite_digest_sign_final already (correctly) assumed DER
+ * ("ECDSA-P256 DER <= 72") but the implementation never performed it,
+ * so every ECDSA-family composite signature this provider ever produced
+ * (including the pre-existing .45/.49 profiles) round-tripped only
+ * against itself, not against any standards-compliant verifier. */
+static int ecdsa_raw_to_der(const unsigned char *raw, size_t field_width,
+                            unsigned char **der_out, size_t *der_out_len)
+{
+    ECDSA_SIG *sig = NULL;
+    BIGNUM *r = NULL, *s = NULL;
+    unsigned char *der = NULL;
+    int der_len;
+    int ret = 0;
+
+    r = BN_bin2bn(raw, (int)field_width, NULL);
+    s = BN_bin2bn(raw + field_width, (int)field_width, NULL);
+    if (r == NULL || s == NULL) {
+        goto done;
+    }
+    sig = ECDSA_SIG_new();
+    if (sig == NULL) {
+        goto done;
+    }
+    /* ECDSA_SIG_set0 takes ownership of r/s on success only. */
+    if (!ECDSA_SIG_set0(sig, r, s)) {
+        goto done;
+    }
+    r = NULL;
+    s = NULL;
+
+    der_len = i2d_ECDSA_SIG(sig, &der);
+    if (der_len <= 0 || der == NULL) {
+        goto done;
+    }
+    *der_out = der;
+    *der_out_len = (size_t)der_len;
+    der = NULL;
+    ret = 1;
+
+done:
+    OPENSSL_free(der);
+    BN_free(r);
+    BN_free(s);
+    ECDSA_SIG_free(sig);
+    return ret;
+}
+
+static int ecdsa_der_to_raw(const unsigned char *der, size_t der_len,
+                            size_t field_width, unsigned char *raw_out)
+{
+    ECDSA_SIG *sig = NULL;
+    const BIGNUM *r = NULL, *s = NULL;
+    const unsigned char *p = der;
+    int ret = 0;
+
+    sig = d2i_ECDSA_SIG(NULL, &p, (long)der_len);
+    if (sig == NULL) {
+        goto done;
+    }
+    ECDSA_SIG_get0(sig, &r, &s);
+    if (r == NULL || s == NULL) {
+        goto done;
+    }
+    if ((size_t)BN_num_bytes(r) > field_width
+        || (size_t)BN_num_bytes(s) > field_width) {
+        /* r or s doesn't fit the curve's field width — malformed/foreign
+         * signature, not this curve. */
+        goto done;
+    }
+    if (BN_bn2binpad(r, raw_out, (int)field_width) < 0
+        || BN_bn2binpad(s, raw_out + field_width, (int)field_width) < 0) {
+        goto done;
+    }
+    ret = 1;
+
+done:
+    ECDSA_SIG_free(sig);
+    return ret;
 }
 
 /* Common init for digest_sign and digest_verify. operation = CKF_SIGN
@@ -896,21 +1130,20 @@ static int composite_digest_op_init(
     P11PROV_COMPOSITE_OBJ *key = (P11PROV_COMPOSITE_OBJ *)keydata;
     CK_RV rv;
 
-    fprintf(stderr, "[composite-sig-init] op=%lu ctx=%p key=%p\n",
-            operation, (void *)ctx, (void *)key);
+    P11PROV_debug("composite sig init op=%lu ctx=%p key=%p", operation,
+                  (void *)ctx, (void *)key);
     if (ctx == NULL || key == NULL) {
-        fprintf(stderr, "[composite-sig-init] NULL ctx or key\n");
+        P11PROV_debug("composite sig init: NULL ctx or key");
         return RET_OSSL_ERR;
     }
     if (key->profile != ctx->profile) {
-        fprintf(stderr, "[composite-sig-init] profile mismatch key=%p ctx=%p\n",
-                (void *)key->profile, (void *)ctx->profile);
+        P11PROV_debug("composite sig init: profile mismatch key=%p ctx=%p",
+                      (void *)key->profile, (void *)ctx->profile);
         return RET_OSSL_ERR;
     }
     if (key->pq_obj == NULL || key->classical_obj == NULL) {
-        fprintf(stderr,
-                "[composite-sig-init] subkey missing pq=%p classical=%p\n",
-                (void *)key->pq_obj, (void *)key->classical_obj);
+        P11PROV_debug("composite sig init: subkey missing pq=%p classical=%p",
+                      (void *)key->pq_obj, (void *)key->classical_obj);
         return RET_OSSL_ERR;
     }
 
@@ -920,41 +1153,49 @@ static int composite_digest_op_init(
     /* Allocate PQ sub-sigctx */
     ctx->pq_sigctx = p11prov_sig_newctx(ctx->provctx, CKM_ML_DSA, NULL);
     if (ctx->pq_sigctx == NULL) {
-        fprintf(stderr, "[composite-sig-init] PQ sig_newctx FAILED\n");
+        P11PROV_debug("composite sig init: PQ sig_newctx failed");
         return RET_OSSL_ERR;
     }
     if (!composite_setup_pq_sigctx(ctx)) {
-        fprintf(stderr, "[composite-sig-init] PQ setup_sigctx FAILED\n");
+        P11PROV_debug("composite sig init: PQ setup_sigctx failed");
         return RET_OSSL_ERR;
     }
     rv = p11prov_sig_op_init(ctx->pq_sigctx, key->pq_obj, operation, NULL);
     if (rv != CKR_OK) {
-        fprintf(stderr, "[composite-sig-init] PQ sig_op_init rv=0x%lx\n", rv);
+        P11PROV_debug("composite sig init: PQ sig_op_init rv=0x%lx", rv);
         return RET_OSSL_ERR;
     }
-    fprintf(stderr, "[composite-sig-init] PQ sub-sigctx ready\n");
+    P11PROV_debug("composite sig init: PQ sub-sigctx ready");
 
     /* Allocate classical sub-sigctx. mechtype passed to p11prov_sig_newctx
-     * is the family — set to actual mech via composite_setup_classical_sigctx. */
+     * is the family — set to actual mech via composite_setup_classical_sigctx.
+     * eddsa.c uses the same CKM_EDDSA family value for standalone Ed25519
+     * signing in this provider, confirming it's a valid newctx family. */
     ctx->classical_sigctx = p11prov_sig_newctx(
         ctx->provctx,
-        ctx->profile->pre_hash_nid == NID_sha256 ? CKM_RSA_PKCS_PSS : CKM_ECDSA,
+        ctx->profile->classical_type == P11PROV_COMPOSITE_CLASSICAL_RSA_PSS
+            ? CKM_RSA_PKCS_PSS
+            : ctx->profile->classical_type
+                      == P11PROV_COMPOSITE_CLASSICAL_ED25519
+                  ? CKM_EDDSA
+                  : CKM_ECDSA,
         NULL);
     if (ctx->classical_sigctx == NULL) {
-        fprintf(stderr, "[composite-sig-init] classical sig_newctx FAILED\n");
+        P11PROV_debug("composite sig init: classical sig_newctx failed");
         return RET_OSSL_ERR;
     }
     if (!composite_setup_classical_sigctx(ctx)) {
-        fprintf(stderr, "[composite-sig-init] classical setup_sigctx FAILED\n");
+        P11PROV_debug("composite sig init: classical setup_sigctx failed");
         return RET_OSSL_ERR;
     }
     rv = p11prov_sig_op_init(ctx->classical_sigctx, key->classical_obj,
                              operation, NULL);
     if (rv != CKR_OK) {
-        fprintf(stderr, "[composite-sig-init] classical sig_op_init rv=0x%lx\n", rv);
+        P11PROV_debug("composite sig init: classical sig_op_init rv=0x%lx",
+                      rv);
         return RET_OSSL_ERR;
     }
-    fprintf(stderr, "[composite-sig-init] classical sub-sigctx ready\n");
+    P11PROV_debug("composite sig init: classical sub-sigctx ready");
 
     /* Apply OpenSSL-side params (e.g. context-string for the composite
      * application ctx) if provided. */
@@ -1083,9 +1324,13 @@ static int p11prov_composite_digest_sign_final(
     }
 
     pq_sig_size = ctx->profile->mldsa_sig_bytes;
-    /* Classical max — RSA-2048 gives 256 bytes; ECDSA-P256 DER ≤ 72;
-     * ECDSA-P384 DER ≤ 104. Use 256 as a safe upper bound. */
-    classical_sig_max = 256;
+    /* Classical max — RSA-2048 gives 256 bytes, RSA-3072 gives 384;
+     * ECDSA-P256 DER <= 72; ECDSA-P384 DER <= 104. Phase 4 R7 fix: was
+     * 256, sized only for RSA-2048 — too small for RSA-3072's 384-byte
+     * signature (see the matching fix in
+     * p11prov_composite_keymgmt_get_params for the failure mode this
+     * caused). 512 covers every registered profile with margin. */
+    classical_sig_max = 512;
 
     if (sig == NULL) {
         /* OpenSSL sizing query */
@@ -1114,13 +1359,47 @@ static int p11prov_composite_digest_sign_final(
         goto out;
     }
 
-    /* Sign the classical half — output starts at sig[pq_sig_size]. */
-    classical_sig_size = sigsize - pq_sig_size;
-    rv = p11prov_sig_operate(ctx->classical_sigctx, sig + pq_sig_size,
-                             &classical_sig_size, classical_sig_size, mprime,
-                             mprime_len);
-    if (rv != CKR_OK) {
-        goto out;
+    /* Sign the classical half — output starts at sig[pq_sig_size]. ECDSA
+     * signs into a raw fixed-width r||s scratch buffer first (PKCS#11's
+     * native C_Sign output for CKM_ECDSA-family mechanisms), then DER-
+     * encodes into the actual wire position — the composite signature's
+     * classical component is DER, not raw (see ecdsa_raw_to_der above).
+     * RSA-PSS and Ed25519 have no such gap: their C_Sign output already
+     * is the wire format, so they sign straight into place. */
+    if (ctx->profile->classical_type == P11PROV_COMPOSITE_CLASSICAL_ECDSA) {
+        unsigned char raw_sig[2 * 66]; /* max field width (P-521) headroom */
+        size_t raw_sig_size = 2 * ctx->profile->ec_field_width;
+        unsigned char *der_sig = NULL;
+        size_t der_sig_len = 0;
+
+        rv = p11prov_sig_operate(ctx->classical_sigctx, raw_sig,
+                                 &raw_sig_size, sizeof(raw_sig), mprime,
+                                 mprime_len);
+        if (rv != CKR_OK) {
+            goto out;
+        }
+        if (raw_sig_size != 2 * ctx->profile->ec_field_width) {
+            goto out;
+        }
+        if (!ecdsa_raw_to_der(raw_sig, ctx->profile->ec_field_width, &der_sig,
+                              &der_sig_len)) {
+            goto out;
+        }
+        if (der_sig_len > sigsize - pq_sig_size) {
+            OPENSSL_free(der_sig);
+            goto out;
+        }
+        memcpy(sig + pq_sig_size, der_sig, der_sig_len);
+        classical_sig_size = der_sig_len;
+        OPENSSL_free(der_sig);
+    } else {
+        classical_sig_size = sigsize - pq_sig_size;
+        rv = p11prov_sig_operate(ctx->classical_sigctx, sig + pq_sig_size,
+                                 &classical_sig_size, classical_sig_size,
+                                 mprime, mprime_len);
+        if (rv != CKR_OK) {
+            goto out;
+        }
     }
 
     total = pq_sig_size + classical_sig_size;
@@ -1167,11 +1446,33 @@ static int p11prov_composite_digest_verify_final(void *vctx,
     if (rv != CKR_OK) {
         goto out;
     }
-    rv = p11prov_sig_operate(ctx->classical_sigctx,
-                             (unsigned char *)(sig + pq_len), &classical_len,
-                             classical_len, mprime, mprime_len);
-    if (rv != CKR_OK) {
-        goto out;
+    /* Classical half. ECDSA's wire bytes are DER (see ecdsa_der_to_raw
+     * above) — convert to the raw r||s PKCS#11's CKM_ECDSA-family
+     * C_Verify expects before calling it. RSA-PSS and Ed25519 verify
+     * straight against the wire bytes, same as they sign straight into
+     * them. */
+    if (ctx->profile->classical_type == P11PROV_COMPOSITE_CLASSICAL_ECDSA) {
+        unsigned char raw_sig[2 * 66];
+        size_t raw_sig_size = 2 * ctx->profile->ec_field_width;
+
+        if (!ecdsa_der_to_raw(sig + pq_len, classical_len,
+                              ctx->profile->ec_field_width, raw_sig)) {
+            goto out;
+        }
+        rv = p11prov_sig_operate(ctx->classical_sigctx, raw_sig,
+                                 &raw_sig_size, raw_sig_size, mprime,
+                                 mprime_len);
+        if (rv != CKR_OK) {
+            goto out;
+        }
+    } else {
+        rv = p11prov_sig_operate(ctx->classical_sigctx,
+                                 (unsigned char *)(sig + pq_len),
+                                 &classical_len, classical_len, mprime,
+                                 mprime_len);
+        if (rv != CKR_OK) {
+            goto out;
+        }
     }
 
     /* AND-combine per draft-19 §3.3 step 4: both halves must verify. */
@@ -1199,6 +1500,24 @@ static const unsigned char der_composite_mldsa65_ecdsa_p256_alg_id[] = {
 static const unsigned char der_composite_mldsa87_ecdsa_p384_alg_id[] = {
     0x30, 0x0A, 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x31
 };
+/* Phase 4 R7: profiles 4-8. Same SEQUENCE{OID} shape; final arc byte is
+ * the decimal OID suffix in hex since all values here are < 128 (single
+ * base-128 byte): .39->0x27, .40->0x28, .41->0x29, .46->0x2E, .48->0x30. */
+static const unsigned char der_composite_mldsa44_ed25519_alg_id[] = {
+    0x30, 0x0A, 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x27
+};
+static const unsigned char der_composite_mldsa44_ecdsa_p256_sha256_alg_id[] = {
+    0x30, 0x0A, 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x28
+};
+static const unsigned char der_composite_mldsa65_rsa3072_pss_alg_id[] = {
+    0x30, 0x0A, 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x29
+};
+static const unsigned char der_composite_mldsa65_ed25519_alg_id[] = {
+    0x30, 0x0A, 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x30
+};
+static const unsigned char der_composite_mldsa65_ecdsa_p384_alg_id[] = {
+    0x30, 0x0A, 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x2E
+};
 
 /* Map profile pointer → ALGORITHM_ID DER. Returns NULL/0 when unknown. */
 static void p11prov_composite_alg_id(
@@ -1219,6 +1538,21 @@ static void p11prov_composite_alg_id(
     } else if (strcmp(profile->composite_oid, "1.3.6.1.5.5.7.6.49") == 0) {
         *out = der_composite_mldsa87_ecdsa_p384_alg_id;
         *out_len = sizeof(der_composite_mldsa87_ecdsa_p384_alg_id);
+    } else if (strcmp(profile->composite_oid, "1.3.6.1.5.5.7.6.39") == 0) {
+        *out = der_composite_mldsa44_ed25519_alg_id;
+        *out_len = sizeof(der_composite_mldsa44_ed25519_alg_id);
+    } else if (strcmp(profile->composite_oid, "1.3.6.1.5.5.7.6.40") == 0) {
+        *out = der_composite_mldsa44_ecdsa_p256_sha256_alg_id;
+        *out_len = sizeof(der_composite_mldsa44_ecdsa_p256_sha256_alg_id);
+    } else if (strcmp(profile->composite_oid, "1.3.6.1.5.5.7.6.41") == 0) {
+        *out = der_composite_mldsa65_rsa3072_pss_alg_id;
+        *out_len = sizeof(der_composite_mldsa65_rsa3072_pss_alg_id);
+    } else if (strcmp(profile->composite_oid, "1.3.6.1.5.5.7.6.48") == 0) {
+        *out = der_composite_mldsa65_ed25519_alg_id;
+        *out_len = sizeof(der_composite_mldsa65_ed25519_alg_id);
+    } else if (strcmp(profile->composite_oid, "1.3.6.1.5.5.7.6.46") == 0) {
+        *out = der_composite_mldsa65_ecdsa_p384_alg_id;
+        *out_len = sizeof(der_composite_mldsa65_ecdsa_p384_alg_id);
     } else {
         *out = NULL;
         *out_len = 0;
@@ -1320,7 +1654,65 @@ static int p11prov_composite_get_ctx_params(void *vctx, OSSL_PARAM params[])
 DEFINE_COMPOSITE_SIG_NEW(mldsa44_rsa2048_pss, 0)
 DEFINE_COMPOSITE_SIG_NEW(mldsa65_ecdsa_p256, 1)
 DEFINE_COMPOSITE_SIG_NEW(mldsa87_ecdsa_p384, 2)
+/* Phase 4 R7: profiles 4-8 */
+DEFINE_COMPOSITE_SIG_NEW(mldsa44_ed25519, 3)
+DEFINE_COMPOSITE_SIG_NEW(mldsa44_ecdsa_p256, 4)
+DEFINE_COMPOSITE_SIG_NEW(mldsa65_rsa3072_pss, 5)
+DEFINE_COMPOSITE_SIG_NEW(mldsa65_ed25519, 6)
+DEFINE_COMPOSITE_SIG_NEW(mldsa65_ecdsa_p384, 7)
 #undef DEFINE_COMPOSITE_SIG_NEW
+
+/* Plain (non-digest-wrapping) SIGN/VERIFY. Phase 4 R7 finding: composite
+ * previously registered ONLY DIGEST_SIGN/DIGEST_VERIFY, which OpenSSL's
+ * `EVP_DigestVerifyInit_ex(..., mdname=NULL, ...)` + `EVP_DigestVerify`
+ * one-shot path — the natural API for a hash-internal algorithm like this
+ * — cannot actually drive: `do_sigver_init` hits "no default digest" on
+ * the VERIFY direction specifically (reproduced even for the pre-existing,
+ * shipped ML-DSA implementation via `openssl dgst -verify`, so this is a
+ * general provider quirk, not composite-specific). `EVP_PKEY_sign`/
+ * `verify` (the plain one-shot API `openssl pkeyutl -sign/-verify -rawin`
+ * uses — the SAME API this project's harness already relies on for every
+ * other hash-internal algorithm: ML-DSA, SLH-DSA, Ed25519) sidesteps that
+ * digest-name resolution entirely, but needs these SIGN/VERIFY dispatch
+ * entries, which composite never registered. Implemented as thin wrappers
+ * over the existing digest_op_init/update/final trio — one-shot, no
+ * update phase needed since the whole message arrives in one call. */
+static int p11prov_composite_sign_init(void *vctx, void *keydata,
+                                       const OSSL_PARAM params[])
+{
+    return composite_digest_op_init(vctx, keydata, params, CKF_SIGN);
+}
+
+static int p11prov_composite_verify_init(void *vctx, void *keydata,
+                                         const OSSL_PARAM params[])
+{
+    return composite_digest_op_init(vctx, keydata, params, CKF_VERIFY);
+}
+
+static int p11prov_composite_sign(void *vctx, unsigned char *sig,
+                                  size_t *siglen, size_t sigsize,
+                                  const unsigned char *tbs, size_t tbslen)
+{
+    if (sig == NULL) {
+        return p11prov_composite_digest_sign_final(vctx, NULL, siglen, 0);
+    }
+    if (tbslen > 0
+        && !p11prov_composite_digest_op_update(vctx, tbs, tbslen)) {
+        return RET_OSSL_ERR;
+    }
+    return p11prov_composite_digest_sign_final(vctx, sig, siglen, sigsize);
+}
+
+static int p11prov_composite_verify(void *vctx, const unsigned char *sig,
+                                    size_t siglen, const unsigned char *tbs,
+                                    size_t tbslen)
+{
+    if (tbslen > 0
+        && !p11prov_composite_digest_op_update(vctx, tbs, tbslen)) {
+        return RET_OSSL_ERR;
+    }
+    return p11prov_composite_digest_verify_final(vctx, sig, siglen);
+}
 
 /* Per-profile OSSL_DISPATCH tables for OSSL_OP_SIGNATURE */
 #define COMPOSITE_SIG_DISPATCH(suffix) \
@@ -1330,6 +1722,14 @@ DEFINE_COMPOSITE_SIG_NEW(mldsa87_ecdsa_p384, 2)
               (void (*)(void))p11prov_composite_##suffix##_sig_newctx }, \
             { OSSL_FUNC_SIGNATURE_FREECTX, \
               (void (*)(void))p11prov_composite_sig_freectx }, \
+            { OSSL_FUNC_SIGNATURE_SIGN_INIT, \
+              (void (*)(void))p11prov_composite_sign_init }, \
+            { OSSL_FUNC_SIGNATURE_SIGN, \
+              (void (*)(void))p11prov_composite_sign }, \
+            { OSSL_FUNC_SIGNATURE_VERIFY_INIT, \
+              (void (*)(void))p11prov_composite_verify_init }, \
+            { OSSL_FUNC_SIGNATURE_VERIFY, \
+              (void (*)(void))p11prov_composite_verify }, \
             { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT, \
               (void (*)(void))p11prov_composite_digest_sign_init }, \
             { OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE, \
@@ -1356,6 +1756,12 @@ DEFINE_COMPOSITE_SIG_NEW(mldsa87_ecdsa_p384, 2)
 COMPOSITE_SIG_DISPATCH(mldsa44_rsa2048_pss);
 COMPOSITE_SIG_DISPATCH(mldsa65_ecdsa_p256);
 COMPOSITE_SIG_DISPATCH(mldsa87_ecdsa_p384);
+/* Phase 4 R7: profiles 4-8 */
+COMPOSITE_SIG_DISPATCH(mldsa44_ed25519);
+COMPOSITE_SIG_DISPATCH(mldsa44_ecdsa_p256);
+COMPOSITE_SIG_DISPATCH(mldsa65_rsa3072_pss);
+COMPOSITE_SIG_DISPATCH(mldsa65_ed25519);
+COMPOSITE_SIG_DISPATCH(mldsa65_ecdsa_p384);
 #undef COMPOSITE_SIG_DISPATCH
 
 /* External accessors used by provider.c's ADD_ALGO_EXT block. */
@@ -1464,6 +1870,24 @@ static int composite_get_ecdsa_pubkey(P11PROV_OBJ *key,
 {
     struct composite_octet_buf buf = { 0 };
     int ret = p11prov_obj_export_public_key(key, CKK_EC, true, false,
+                                            composite_collect_pub_key, &buf);
+    if (ret != RET_OSSL_OK) {
+        OPENSSL_clear_free(buf.octet, buf.len);
+        return RET_OSSL_ERR;
+    }
+    *out = buf.octet;
+    *out_len = buf.len;
+    return RET_OSSL_OK;
+}
+
+/* Extract raw 32-byte Ed25519 public key bytes (RFC 8410 — no point-format
+ * prefix, unlike ECDSA's 0x04||X||Y) from a softhsm EC_EDWARDS public key
+ * object, per draft-19 Appendix C Ed25519 encoding. */
+static int composite_get_ed25519_pubkey(P11PROV_OBJ *key,
+                                        unsigned char **out, size_t *out_len)
+{
+    struct composite_octet_buf buf = { 0 };
+    int ret = p11prov_obj_export_public_key(key, CKK_EC_EDWARDS, true, false,
                                             composite_collect_pub_key, &buf);
     if (ret != RET_OSSL_OK) {
         OPENSSL_clear_free(buf.octet, buf.len);
@@ -1666,19 +2090,31 @@ static int p11prov_composite_obj_get_pubkey_bytes(
     if (mldsa_pk_len != obj->profile->mldsa_pk_bytes) {
         goto done;
     }
-    if (obj->profile->mldsa_param_set == CKP_ML_DSA_65
-        || obj->profile->mldsa_param_set == CKP_ML_DSA_87) {
+    /* Dispatch on the profile's explicit classical_type (phase-4 R7) — NOT
+     * mldsa_param_set, which no longer implies classical family once
+     * profiles 4-8 are registered (e.g. .40 pairs MLDSA44 with ECDSA,
+     * .41 pairs MLDSA65 with RSA-PSS). */
+    switch (obj->profile->classical_type) {
+    case P11PROV_COMPOSITE_CLASSICAL_ECDSA:
         if (composite_get_ecdsa_pubkey(obj->classical_obj, &classical_pk,
                                        &classical_pk_len) != RET_OSSL_OK) {
             goto done;
         }
-    } else if (obj->profile->mldsa_param_set == CKP_ML_DSA_44) {
+        break;
+    case P11PROV_COMPOSITE_CLASSICAL_RSA_PSS:
         if (composite_get_rsa_pubkey(obj->classical_obj, obj->provctx,
                                      &classical_pk, &classical_pk_len)
             != RET_OSSL_OK) {
             goto done;
         }
-    } else {
+        break;
+    case P11PROV_COMPOSITE_CLASSICAL_ED25519:
+        if (composite_get_ed25519_pubkey(obj->classical_obj, &classical_pk,
+                                         &classical_pk_len) != RET_OSSL_OK) {
+            goto done;
+        }
+        break;
+    default:
         goto done;
     }
     concat_len = mldsa_pk_len + classical_pk_len;
@@ -1964,39 +2400,33 @@ static int p11prov_composite_decoder_decode(
     (void)pw_cb;
     (void)pw_cbarg;
 
-    fprintf(stderr,
-            "[composite-decoder] enter profile=%s selection=0x%x ctx=%p\n",
-            ctx && ctx->profile ? ctx->profile->label : "(null)",
-            selection, (void *)ctx);
+    P11PROV_debug("composite decoder enter profile=%s selection=0x%x ctx=%p",
+                  ctx && ctx->profile ? ctx->profile->label : "(null)",
+                  selection, (void *)ctx);
     if (ctx == NULL || ctx->profile == NULL) {
         return RET_OSSL_CARRY_ON_DECODING;
     }
     if ((selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) == 0) {
-        fprintf(stderr, "[composite-decoder] no PUBLIC_KEY in selection — carry-on\n");
+        P11PROV_debug("composite decoder: no PUBLIC_KEY in selection, carry-on");
         return RET_OSSL_CARRY_ON_DECODING;
     }
 
     bin = BIO_new_from_core_bio(p11prov_ctx_get_libctx(ctx->provctx), cin);
     if (bin == NULL) {
-        fprintf(stderr, "[composite-decoder] BIO_new_from_core_bio FAILED\n");
+        P11PROV_debug("composite decoder: BIO_new_from_core_bio failed");
         return RET_OSSL_CARRY_ON_DECODING;
     }
     der_len = BIO_get_mem_data(bin, &der);
-    fprintf(stderr, "[composite-decoder] BIO_get_mem_data der_len=%ld\n", der_len);
-    fflush(stderr);
+    P11PROV_debug("composite decoder: BIO_get_mem_data der_len=%ld", der_len);
     if (der_len <= 0 || der == NULL) {
         BIO_free(bin);
         return RET_OSSL_CARRY_ON_DECODING;
     }
 
-    fprintf(stderr, "[composite-decoder] about to call decode_spki\n");
-    fflush(stderr);
     ret = p11prov_composite_decode_spki(ctx->profile, ctx->provctx,
                                         der, der_len, &obj);
-    fprintf(stderr,
-            "[composite-decoder] decode_spki ret=%d obj=%p\n",
-            ret, (void *)obj);
-    fflush(stderr);
+    P11PROV_debug("composite decoder: decode_spki ret=%d obj=%p", ret,
+                  (void *)obj);
     BIO_free(bin);
     if (ret != RET_OSSL_OK || obj == NULL) {
         return ret;
@@ -2011,9 +2441,8 @@ static int p11prov_composite_decoder_decode(
         OSSL_OBJECT_PARAM_REFERENCE, &obj, sizeof(obj));
     params[3] = OSSL_PARAM_construct_end();
     int cb_ret = data_cb(params, data_cbarg);
-    fprintf(stderr,
-            "[composite-decoder] data_cb returned %d, obj after cb=%p\n",
-            cb_ret, (void *)obj);
+    P11PROV_debug("composite decoder: data_cb returned %d, obj after cb=%p",
+                  cb_ret, (void *)obj);
     if (cb_ret != 1) {
         if (obj != NULL) {
             p11prov_composite_keymgmt_free(obj);
@@ -2213,39 +2642,40 @@ EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
 
     if (provctx == NULL || profile == NULL || pq_uri == NULL
         || classical_uri == NULL) {
-        fprintf(stderr, "[composite-bridge] bad args: provctx=%p profile=%p "
-                "pq_uri=%p classical_uri=%p\n",
-                (void *)provctx, (const void *)profile,
-                (const void *)pq_uri, (const void *)classical_uri);
+        P11PROV_debug(
+            "composite bridge: bad args provctx=%p profile=%p pq_uri=%p "
+            "classical_uri=%p",
+            (void *)provctx, (const void *)profile, (const void *)pq_uri,
+            (const void *)classical_uri);
         return NULL;
     }
 
-    fprintf(stderr, "[composite-bridge] starting label=%s pq=%s cl=%s\n",
-            profile->label, pq_uri, classical_uri);
+    P11PROV_debug("composite bridge: starting label=%s pq=%s cl=%s",
+                  profile->label, pq_uri, classical_uri);
 
     pq_obj = composite_load_subkey_by_uri(provctx, pq_uri);
     if (pq_obj == NULL) {
-        fprintf(stderr, "[composite-bridge] PQ subkey load FAILED for %s\n",
-                pq_uri);
+        P11PROV_debug("composite bridge: PQ subkey load failed for %s",
+                      pq_uri);
         ERR_print_errors_fp(stderr);
         goto done;
     }
     classical_obj = composite_load_subkey_by_uri(provctx, classical_uri);
     if (classical_obj == NULL) {
-        fprintf(stderr, "[composite-bridge] classical subkey load FAILED for %s\n",
-                classical_uri);
+        P11PROV_debug("composite bridge: classical subkey load failed for %s",
+                      classical_uri);
         ERR_print_errors_fp(stderr);
         goto done;
     }
-    fprintf(stderr, "[composite-bridge] both subkeys loaded\n");
+    P11PROV_debug("composite bridge: both subkeys loaded");
 
     composite_obj = p11prov_composite_obj_new_from_subkeys(
         provctx, profile, pq_obj, classical_obj);
     if (composite_obj == NULL) {
-        fprintf(stderr, "[composite-bridge] obj_new_from_subkeys FAILED\n");
+        P11PROV_debug("composite bridge: obj_new_from_subkeys failed");
         goto done;
     }
-    fprintf(stderr, "[composite-bridge] composite obj built\n");
+    P11PROV_debug("composite bridge: composite obj built");
 
     /* Use the global default libctx (NULL) so EVP_PKEY_CTX_new_from_name
      * sees BOTH the default provider (for RSA/EC primitives during
@@ -2255,13 +2685,14 @@ EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
      * default leads to keymgmt fetch failure. */
     pctx = EVP_PKEY_CTX_new_from_name(NULL, profile->label, NULL);
     if (pctx == NULL) {
-        fprintf(stderr, "[composite-bridge] EVP_PKEY_CTX_new_from_name "
-                "FAILED for label=%s\n", profile->label);
+        P11PROV_debug(
+            "composite bridge: EVP_PKEY_CTX_new_from_name failed for label=%s",
+            profile->label);
         ERR_print_errors_fp(stderr);
         goto done;
     }
     if (EVP_PKEY_fromdata_init(pctx) != 1) {
-        fprintf(stderr, "[composite-bridge] EVP_PKEY_fromdata_init FAILED\n");
+        P11PROV_debug("composite bridge: EVP_PKEY_fromdata_init failed");
         ERR_print_errors_fp(stderr);
         goto done;
     }
@@ -2272,12 +2703,12 @@ EVP_PKEY *p11prov_composite_evp_pkey_from_uris(
     import_params[1] = OSSL_PARAM_construct_end();
 
     if (EVP_PKEY_fromdata(pctx, &pkey, EVP_PKEY_KEYPAIR, import_params) != 1) {
-        fprintf(stderr, "[composite-bridge] EVP_PKEY_fromdata FAILED\n");
+        P11PROV_debug("composite bridge: EVP_PKEY_fromdata failed");
         ERR_print_errors_fp(stderr);
         pkey = NULL;
         goto done;
     }
-    fprintf(stderr, "[composite-bridge] composite EVP_PKEY built OK\n");
+    P11PROV_debug("composite bridge: composite EVP_PKEY built ok");
     /* IMPORT took ownership on success — null our local handle so cleanup
      * below does not double-free. */
     composite_obj = NULL;

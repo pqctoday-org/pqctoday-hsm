@@ -6,9 +6,11 @@
 //! - MACVerify §6.1.39 — verify a MAC against `data + mac_data`
 //! - Hash      §6.1.30 — keyless cryptographic hash
 //!
-//! Single-part HMAC-SHA-{256,384,512} (driven by the key's
-//! CryptographicAlgorithm) and Hash with SHA-{256,384,512}.
-//! Multi-part state-machine + SHA-1 / SHA3 / RIPEMD aren't in the OASIS
+//! Single-part HMAC-SHA-{256,384,512,3-256,3-512} (driven by the key's
+//! CryptographicAlgorithm) and Hash with SHA-{256,384,512}. SHA3-256/512
+//! HMAC wired 2026-08-30 (KMIP/CACP coverage gap-analysis item 6) — the
+//! engine has always supported them, only this op layer hadn't picked them
+//! up. Multi-part state-machine + SHA-1 / RIPEMD aren't in the OASIS
 //! corpus we test against, so they error with OperationNotSupported.
 //!
 //! ## Key-material routing (K15, compliance-audit B-9)
@@ -271,10 +273,13 @@ fn engine_hmac_target(
         KmipAlgorithm::HmacSha256 => c::CKM_SHA256_HMAC,
         KmipAlgorithm::HmacSha384 => c::CKM_SHA384_HMAC,
         KmipAlgorithm::HmacSha512 => c::CKM_SHA512_HMAC,
+        // KMIP/CACP coverage gap-analysis item 6 (2026-08-30).
+        KmipAlgorithm::HmacSha3_256 => c::CKM_SHA3_256_HMAC,
+        KmipAlgorithm::HmacSha3_512 => c::CKM_SHA3_512_HMAC,
         other => {
             return Err(fail_err(deps, correlation_id, op, KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("MAC algorithm {other:?} not supported (HmacSha256/384/512)"),
+                format!("MAC algorithm {other:?} not supported (HmacSha256/384/512/HmacSha3-256/512)"),
             )));
         }
     };
@@ -315,9 +320,24 @@ fn compute_mac(algo: KmipAlgorithm, key_bytes: &[u8], data: &[u8]) -> Result<Vec
             h.update(data);
             h.finalize().into_bytes().to_vec()
         }
+        // KMIP/CACP coverage gap-analysis item 6 (2026-08-30) — the engine
+        // has supported HMAC-SHA3-256/512 all along; this crate's op layer
+        // just never dispatched to it.
+        KmipAlgorithm::HmacSha3_256 => {
+            let mut h = <Hmac<sha3::Sha3_256> as Mac>::new_from_slice(key_bytes)
+                .map_err(|e| KmipError::failed(ResultReason::CryptographicFailure, format!("HMAC-SHA3-256 key: {e}")))?;
+            h.update(data);
+            h.finalize().into_bytes().to_vec()
+        }
+        KmipAlgorithm::HmacSha3_512 => {
+            let mut h = <Hmac<sha3::Sha3_512> as Mac>::new_from_slice(key_bytes)
+                .map_err(|e| KmipError::failed(ResultReason::CryptographicFailure, format!("HMAC-SHA3-512 key: {e}")))?;
+            h.update(data);
+            h.finalize().into_bytes().to_vec()
+        }
         other => return Err(KmipError::failed(
             ResultReason::OperationNotSupported,
-            format!("MAC algorithm {other:?} not supported (v0.1 = HmacSha256/384/512)"),
+            format!("MAC algorithm {other:?} not supported (v0.1 = HmacSha256/384/512/HmacSha3-256/512)"),
         )),
     })
 }
@@ -442,6 +462,54 @@ mod tests {
         assert_eq!(m.mac_data.len(), 32, "HMAC-SHA-256 output is 32 bytes");
         let v = mac_verify(&d, MacVerifyRequest {
             uid: "u".into(),
+            cryptographic_parameters: None,
+            data: b"hello world".to_vec(),
+            mac_data: m.mac_data,
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
+        assert_eq!(v.validity, SignatureValidity::Valid);
+    }
+
+    /// KMIP/CACP coverage gap-analysis item 6 (2026-08-30) — HMAC-SHA3-256
+    /// via the Mac op, wired for the first time. Not just a round trip:
+    /// the raw byte output is checked against an independently-computed
+    /// reference (Python's `hmac`/`hashlib`, a different implementation
+    /// than this crate's `hmac`/`sha3` crates), so a wrong-hash or
+    /// wrong-key-handling bug that happened to be self-consistent would
+    /// still be caught.
+    #[test]
+    fn hmac_sha3_256_matches_independent_reference() {
+        let d = deps_with();
+        d.store.put(ObjectRecord {
+            uid: "u3".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::HmacSha3_256,
+            cryptographic_length: 256,
+            usage_mask: UsageMask::MAC_GENERATE | UsageMask::MAC_VERIFY,
+            state: State::Active,
+            pkcs11_cka_id: vec![],
+            pkcs11_slot: 0,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            activation_date: None,
+            supersedes: None,
+            name: None,
+            links: HashMap::new(),
+            custom_attributes: HashMap::new(),
+            key_material: Some(vec![0u8; 32]),
+            key_format_type: Some(0x01),
+            ..ObjectRecord::default()
+        }).unwrap();
+        let m = mac(&d, MacRequest {
+            uid: "u3".into(),
+            cryptographic_parameters: None,
+            data: b"hello world".to_vec(),
+        }, &crate::server::auth::AuthContext::open(), "c").unwrap();
+        assert_eq!(
+            hex::encode(&m.mac_data),
+            "6deaf15552c952200416ed0781b5d81b53d7f709f8a764ce6a04ff83edf6376b",
+            "must match an independent Python hmac/hashlib(sha3_256) computation over the same 32-byte-zero key and \"hello world\""
+        );
+        let v = mac_verify(&d, MacVerifyRequest {
+            uid: "u3".into(),
             cryptographic_parameters: None,
             data: b"hello world".to_vec(),
             mac_data: m.mac_data,

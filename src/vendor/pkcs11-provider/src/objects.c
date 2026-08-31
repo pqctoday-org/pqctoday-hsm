@@ -22,6 +22,12 @@ struct p11prov_key {
     CK_ULONG bit_size;
     CK_ULONG size;
     CK_ULONG param_set;
+    /* Phase 5 R25: official HSS attrs (PKCS#11 v3.2 §6.14). CK_UNAVAILABLE_
+     * INFORMATION when absent (pre-fix engine, imported key) -- hss_sig_size()
+     * has its own fallback for that case. */
+    CK_ULONG hss_levels;
+    CK_ULONG hss_lms_type;
+    CK_ULONG hss_lmots_type;
 };
 
 struct p11prov_crt {
@@ -276,6 +282,7 @@ done:
 }
 
 static CK_RV p11prov_obj_store_public_key(P11PROV_OBJ *key);
+static CK_RV p11prov_store_mlkem_public_key(P11PROV_OBJ *key);
 
 P11PROV_OBJ *p11prov_obj_new(P11PROV_CTX *ctx, CK_SLOT_ID slotid,
                              CK_OBJECT_HANDLE handle, CK_OBJECT_CLASS class)
@@ -377,6 +384,32 @@ static void cache_key(P11PROV_OBJ *obj)
     /* We cache only keys on the token */
     if ((obj->class != CKO_PRIVATE_KEY && obj->class != CKO_PUBLIC_KEY)
         || obj->cka_token != CK_TRUE || obj->cka_copyable != CK_TRUE) {
+        return;
+    }
+
+    /* remediation R29 (2026-08-26) -- a cached key is a CKA_TOKEN=FALSE
+     * C_CopyObject clone (see the template just below): a distinct object
+     * with its own fresh CKA_UNIQUE_ID, kept only in the session's
+     * volatile memory and discarded when the session/process ends. Every
+     * operation against this P11PROV_OBJ (see p11prov_obj_ref, above)
+     * then targets obj->cached rather than the real token object. For an
+     * ordinary key that is harmless -- the copy's material is identical
+     * and signing is idempotent. For a one-time-signature scheme
+     * (HSS/LMS, and XMSS/XMSS^MT the moment either is wired up) it is
+     * not: the leaf-index advance-and-persist a stateful sign performs
+     * (softhsmrustv3::native::hbs::sign_commit / the C++ engine's
+     * equivalent) lands on the cached clone, which is never written back
+     * to the original token object and vanishes with it. Every later
+     * process that re-resolves the same key by URI starts from the
+     * original's own still-unadvanced state, so the SAME leaf gets
+     * reused across signatures -- exactly the property a one-time
+     * signature scheme cannot tolerate. Skip caching for these key types
+     * so C_Sign always targets the real token object directly; found via
+     * T24e (a genuinely new multi-process leaf-advance proof -- R9's own
+     * original goal was never actually tested against either engine
+     * before this). */
+    if (obj->data.key.type == CKK_HSS || obj->data.key.type == CKK_XMSS
+        || obj->data.key.type == CKK_XMSSMT) {
         return;
     }
 
@@ -722,6 +755,43 @@ CK_ULONG p11prov_obj_get_key_param_set(P11PROV_OBJ *obj)
     return CK_UNAVAILABLE_INFORMATION;
 }
 
+/* Phase 5 R25 */
+CK_ULONG p11prov_obj_get_key_hss_levels(P11PROV_OBJ *obj)
+{
+    if (obj) {
+        switch (obj->class) {
+        case CKO_PRIVATE_KEY:
+        case CKO_PUBLIC_KEY:
+            return obj->data.key.hss_levels;
+        }
+    }
+    return CK_UNAVAILABLE_INFORMATION;
+}
+
+CK_ULONG p11prov_obj_get_key_hss_lms_type(P11PROV_OBJ *obj)
+{
+    if (obj) {
+        switch (obj->class) {
+        case CKO_PRIVATE_KEY:
+        case CKO_PUBLIC_KEY:
+            return obj->data.key.hss_lms_type;
+        }
+    }
+    return CK_UNAVAILABLE_INFORMATION;
+}
+
+CK_ULONG p11prov_obj_get_key_hss_lmots_type(P11PROV_OBJ *obj)
+{
+    if (obj) {
+        switch (obj->class) {
+        case CKO_PRIVATE_KEY:
+        case CKO_PUBLIC_KEY:
+            return obj->data.key.hss_lmots_type;
+        }
+    }
+    return CK_UNAVAILABLE_INFORMATION;
+}
+
 void p11prov_obj_to_store_reference(P11PROV_OBJ *obj, void **reference,
                                     size_t *reference_sz)
 {
@@ -937,6 +1007,8 @@ done:
 
 const CK_BYTE ed25519_ec_params[] = { ED25519_EC_PARAMS };
 const CK_BYTE ed448_ec_params[] = { ED448_EC_PARAMS };
+const CK_BYTE x25519_ec_params[] = { X25519_EC_PARAMS };
+const CK_BYTE x448_ec_params[] = { X448_EC_PARAMS };
 
 #define KEY_EC_PARAMS 3
 static CK_RV pre_process_ec_key_data(P11PROV_OBJ *key)
@@ -1017,6 +1089,27 @@ static CK_RV pre_process_ec_key_data(P11PROV_OBJ *key)
             } else {
                 return CKR_KEY_INDIGESTIBLE;
             }
+        }
+    } else if (type == CKK_EC_MONTGOMERY) {
+        /* remediation R4 — same PrintableString-curve-name convention as
+         * CKK_EC_EDWARDS above; "curve25519"/"curve448" verified byte-for-
+         * byte against the C++ engine's OSSLUtil.cpp::byteString2oid. */
+        if (attr->ulValueLen == X25519_EC_PARAMS_LEN
+            && memcmp(attr->pValue, x25519_ec_params, X25519_EC_PARAMS_LEN)
+                   == 0) {
+            curve_name = X25519_NAME;
+            curve_nid = NID_X25519;
+            key->data.key.bit_size = X25519_BIT_SIZE;
+            key->data.key.size = X25519_BYTE_SIZE;
+        } else if (attr->ulValueLen == X448_EC_PARAMS_LEN
+                   && memcmp(attr->pValue, x448_ec_params, X448_EC_PARAMS_LEN)
+                          == 0) {
+            curve_name = X448_NAME;
+            curve_nid = NID_X448;
+            key->data.key.bit_size = X448_BIT_SIZE;
+            key->data.key.size = X448_BYTE_SIZE;
+        } else {
+            return CKR_KEY_INDIGESTIBLE;
         }
     } else {
         return CKR_KEY_INDIGESTIBLE;
@@ -1271,6 +1364,231 @@ static CK_RV fetch_mldsa_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
     return CKR_OK;
 }
 
+/* FIPS 205, Table 2 — public key is always 2n bytes (n = security param in
+ * bytes: 16/24/32 for the 128/192/256-bit families). Live-verified via
+ * `openssl asn1parse` on the real 3.6.3 native SPKI output for a
+ * representative of each family (not transcribed from the spec alone). */
+#define SLH_DSA_128_PK_SIZE 32
+#define SLH_DSA_192_PK_SIZE 48
+#define SLH_DSA_256_PK_SIZE 64
+
+#define SLHDSA_ATTRS_NUM (BASE_KEY_ATTRS_NUM + 1)
+static CK_RV fetch_slhdsa_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
+                              CK_OBJECT_HANDLE object, P11PROV_OBJ *key)
+{
+    struct fetch_attrs attrs[SLHDSA_ATTRS_NUM];
+    CK_ATTRIBUTE *value_attr;
+    int num;
+    CK_RV ret;
+
+    switch (key->data.key.param_set) {
+    case CKP_SLH_DSA_SHA2_128S:
+    case CKP_SLH_DSA_SHAKE_128S:
+    case CKP_SLH_DSA_SHA2_128F:
+    case CKP_SLH_DSA_SHAKE_128F:
+    case CKP_SLH_DSA_SHA2_192S:
+    case CKP_SLH_DSA_SHAKE_192S:
+    case CKP_SLH_DSA_SHA2_192F:
+    case CKP_SLH_DSA_SHAKE_192F:
+    case CKP_SLH_DSA_SHA2_256S:
+    case CKP_SLH_DSA_SHAKE_256S:
+    case CKP_SLH_DSA_SHA2_256F:
+    case CKP_SLH_DSA_SHAKE_256F:
+        break;
+    default:
+        ret = CKR_KEY_INDIGESTIBLE;
+        P11PROV_raise(key->ctx, ret, "Unknown SLH-DSA param set: %lu",
+                      key->data.key.param_set);
+        return ret;
+    }
+
+    key->attrs = OPENSSL_zalloc(SLHDSA_ATTRS_NUM * sizeof(CK_ATTRIBUTE));
+    if (key->attrs == NULL) {
+        return CKR_HOST_MEMORY;
+    }
+
+    num = 0;
+    if (key->class == CKO_PUBLIC_KEY) {
+        FA_SET_BUF_ALLOC(attrs, num, CKA_VALUE, true);
+    }
+    FA_SET_BUF_ALLOC(attrs, num, CKA_ID, false);
+    FA_SET_BUF_ALLOC(attrs, num, CKA_LABEL, false);
+    if (key->class == CKO_PRIVATE_KEY) {
+        FA_SET_BUF_ALLOC(attrs, num, CKA_ALWAYS_AUTHENTICATE, false);
+    }
+
+    ret = p11prov_fetch_attributes(ctx, session, object, attrs, num);
+    if (ret != CKR_OK) {
+        p11prov_fetch_attrs_free(attrs, num);
+        return ret;
+    }
+
+    key->numattrs = 0;
+    p11prov_move_alloc_attrs(attrs, num, key->attrs, &key->numattrs);
+
+    switch (key->data.key.param_set) {
+    case CKP_SLH_DSA_SHA2_128S:
+    case CKP_SLH_DSA_SHAKE_128S:
+    case CKP_SLH_DSA_SHA2_128F:
+    case CKP_SLH_DSA_SHAKE_128F:
+        key->data.key.size = SLH_DSA_128_PK_SIZE;
+        break;
+    case CKP_SLH_DSA_SHA2_192S:
+    case CKP_SLH_DSA_SHAKE_192S:
+    case CKP_SLH_DSA_SHA2_192F:
+    case CKP_SLH_DSA_SHAKE_192F:
+        key->data.key.size = SLH_DSA_192_PK_SIZE;
+        break;
+    case CKP_SLH_DSA_SHA2_256S:
+    case CKP_SLH_DSA_SHAKE_256S:
+    case CKP_SLH_DSA_SHA2_256F:
+    case CKP_SLH_DSA_SHAKE_256F:
+        key->data.key.size = SLH_DSA_256_PK_SIZE;
+        break;
+    default:
+        return CKR_KEY_INDIGESTIBLE;
+    }
+
+    if (key->class == CKO_PUBLIC_KEY) {
+        value_attr = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!value_attr) {
+            P11PROV_raise(key->ctx, CKR_KEY_INDIGESTIBLE,
+                          "Missing public key value");
+            return CKR_KEY_INDIGESTIBLE;
+        }
+        if (value_attr->ulValueLen != key->data.key.size) {
+            P11PROV_raise(key->ctx, CKR_KEY_INDIGESTIBLE,
+                          "Unexpected public key length %lu (expected %lu)",
+                          value_attr->ulValueLen, key->data.key.size);
+            return CKR_KEY_INDIGESTIBLE;
+        }
+    }
+
+    key->data.key.bit_size = key->data.key.size * 8;
+
+    return CKR_OK;
+}
+
+/* Phase 4 R9 / Phase 5 R25: HSS/LMS. Unlike SLH-DSA, no CKA_PARAMETER_SET
+ * / fixed per-variant size table — the public key's XDR encoding carries
+ * its own length prefix, so its size is read from the actual fetched
+ * CKA_VALUE rather than looked up by parameter set. The official
+ * CKA_HSS_LEVELS/LMS_TYPE/LMOTS_TYPE attrs (R25) are fetched here too, so
+ * sig/hss.c's hss_sig_size() can size a PRIVATE key's signature (no
+ * CKA_VALUE there) for parameter sets other than the engines' own
+ * defaults -- optional (`false`) since a pre-R25-engine or imported key
+ * won't carry them; left at CK_UNAVAILABLE_INFORMATION in that case. */
+#define HSS_ATTRS_NUM 7
+static CK_RV fetch_hss_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
+                           CK_OBJECT_HANDLE object, P11PROV_OBJ *key)
+{
+    struct fetch_attrs attrs[HSS_ATTRS_NUM];
+    CK_ATTRIBUTE *value_attr;
+    int num;
+    CK_RV ret;
+
+    key->attrs = OPENSSL_zalloc(HSS_ATTRS_NUM * sizeof(CK_ATTRIBUTE));
+    if (key->attrs == NULL) {
+        return CKR_HOST_MEMORY;
+    }
+
+    key->data.key.hss_levels = CK_UNAVAILABLE_INFORMATION;
+    key->data.key.hss_lms_type = CK_UNAVAILABLE_INFORMATION;
+    key->data.key.hss_lmots_type = CK_UNAVAILABLE_INFORMATION;
+
+    num = 0;
+    if (key->class == CKO_PUBLIC_KEY) {
+        FA_SET_BUF_ALLOC(attrs, num, CKA_VALUE, true);
+    }
+    FA_SET_BUF_ALLOC(attrs, num, CKA_ID, false);
+    FA_SET_BUF_ALLOC(attrs, num, CKA_LABEL, false);
+    if (key->class == CKO_PRIVATE_KEY) {
+        FA_SET_BUF_ALLOC(attrs, num, CKA_ALWAYS_AUTHENTICATE, false);
+    }
+    FA_SET_VAR_VAL(attrs, num, CKA_HSS_LEVELS, key->data.key.hss_levels,
+                   false);
+    FA_SET_VAR_VAL(attrs, num, CKA_HSS_LMS_TYPE, key->data.key.hss_lms_type,
+                   false);
+    FA_SET_VAR_VAL(attrs, num, CKA_HSS_LMOTS_TYPE,
+                   key->data.key.hss_lmots_type, false);
+
+    ret = p11prov_fetch_attributes(ctx, session, object, attrs, num);
+    if (ret != CKR_OK) {
+        p11prov_fetch_attrs_free(attrs, num);
+        return ret;
+    }
+
+    key->numattrs = 0;
+    p11prov_move_alloc_attrs(attrs, num, key->attrs, &key->numattrs);
+
+    if (key->class == CKO_PUBLIC_KEY) {
+        value_attr = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!value_attr) {
+            P11PROV_raise(key->ctx, CKR_KEY_INDIGESTIBLE,
+                          "Missing public key value");
+            return CKR_KEY_INDIGESTIBLE;
+        }
+        key->data.key.size = value_attr->ulValueLen;
+        key->data.key.bit_size = key->data.key.size * 8;
+    }
+
+    return CKR_OK;
+}
+
+/* Remediation R41 (phase 8): XMSS/XMSS^MT. CKA_PARAMETER_SET is already
+ * fetched generically for every key object (p11prov_obj_from_handle's own
+ * CKA_PARAMETER_SET entry, above the switch this function is called
+ * from) -- no per-type extra vars needed here, unlike HSS's own
+ * CKA_HSS_LEVELS/LMS_TYPE/LMOTS_TYPE trio, since PKCS#11 v3.2 SS6.66
+ * carries the whole XMSS/XMSS^MT parameter choice in that single
+ * standard attribute. The private half's own stateful key material lives
+ * in CKA_PRIV_STATEFUL_KEY_STATE, fetched directly by the sign path (both
+ * engines), never cached here -- mirrors fetch_hss_key's own identical
+ * choice for the same reason (kept opaque to this layer). */
+#define XMSS_ATTRS_NUM (BASE_KEY_ATTRS_NUM + 1)
+static CK_RV fetch_xmss_key(P11PROV_CTX *ctx, P11PROV_SESSION *session,
+                            CK_OBJECT_HANDLE object, P11PROV_OBJ *key)
+{
+    struct fetch_attrs attrs[XMSS_ATTRS_NUM];
+    CK_ATTRIBUTE *value_attr;
+    int num;
+    CK_RV ret;
+
+    key->attrs = OPENSSL_zalloc(XMSS_ATTRS_NUM * sizeof(CK_ATTRIBUTE));
+    if (key->attrs == NULL) {
+        return CKR_HOST_MEMORY;
+    }
+
+    num = 0;
+    if (key->class == CKO_PUBLIC_KEY) {
+        FA_SET_BUF_ALLOC(attrs, num, CKA_VALUE, true);
+    }
+    FA_SET_BUF_ALLOC(attrs, num, CKA_ID, false);
+    FA_SET_BUF_ALLOC(attrs, num, CKA_LABEL, false);
+
+    ret = p11prov_fetch_attributes(ctx, session, object, attrs, num);
+    if (ret != CKR_OK) {
+        p11prov_fetch_attrs_free(attrs, num);
+        return ret;
+    }
+
+    key->numattrs = 0;
+    p11prov_move_alloc_attrs(attrs, num, key->attrs, &key->numattrs);
+
+    if (key->class == CKO_PUBLIC_KEY) {
+        value_attr = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!value_attr) {
+            P11PROV_raise(key->ctx, CKR_KEY_INDIGESTIBLE,
+                          "Missing public key value");
+            return CKR_KEY_INDIGESTIBLE;
+        }
+        key->data.key.size = value_attr->ulValueLen;
+        key->data.key.bit_size = key->data.key.size * 8;
+    }
+
+    return CKR_OK;
+}
+
 #define CERT_ATTRS_NUM 9
 static CK_RV fetch_certificate(P11PROV_CTX *ctx, P11PROV_SESSION *session,
                                CK_OBJECT_HANDLE object, P11PROV_OBJ *crt)
@@ -1422,6 +1740,7 @@ CK_RV p11prov_obj_from_handle(P11PROV_CTX *ctx, P11PROV_SESSION *session,
             break;
         case CKK_EC:
         case CKK_EC_EDWARDS:
+        case CKK_EC_MONTGOMERY:
             ret = fetch_ec_key(ctx, session, handle, obj);
             if (ret != CKR_OK) {
                 p11prov_obj_free(obj);
@@ -1435,8 +1754,30 @@ CK_RV p11prov_obj_from_handle(P11PROV_CTX *ctx, P11PROV_SESSION *session,
                 return ret;
             }
             break;
+        case CKK_SLH_DSA:
+            ret = fetch_slhdsa_key(ctx, session, handle, obj);
+            if (ret != CKR_OK) {
+                p11prov_obj_free(obj);
+                return ret;
+            }
+            break;
         case CKK_ML_KEM:
             ret = fetch_mlkem_key(ctx, session, handle, obj);
+            if (ret != CKR_OK) {
+                p11prov_obj_free(obj);
+                return ret;
+            }
+            break;
+        case CKK_HSS:
+            ret = fetch_hss_key(ctx, session, handle, obj);
+            if (ret != CKR_OK) {
+                p11prov_obj_free(obj);
+                return ret;
+            }
+            break;
+        case CKK_XMSS:
+        case CKK_XMSSMT:
+            ret = fetch_xmss_key(ctx, session, handle, obj);
             if (ret != CKR_OK) {
                 p11prov_obj_free(obj);
                 return ret;
@@ -1849,6 +2190,90 @@ P11PROV_OBJ *p11prov_create_secret_key(P11PROV_CTX *provctx,
     }
 
     ret = p11prov_CreateObject(provctx, sess, key_template, 5, &key_handle);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    obj = p11prov_obj_new(provctx, session_info.slotID, key_handle, key_class);
+    if (obj == NULL) {
+        return NULL;
+    }
+    obj->data.key.type = key_type;
+    obj->data.key.size = secretlen;
+
+    obj->attrs = OPENSSL_zalloc(SECRET_KEY_ATTRS * sizeof(CK_ATTRIBUTE));
+    if (obj->attrs == NULL) {
+        P11PROV_raise(provctx, CKR_HOST_MEMORY, "Allocation failure");
+        p11prov_obj_free(obj);
+        return NULL;
+    }
+
+    num = 0;
+    FA_SET_BUF_ALLOC(attrs, num, CKA_ID, false);
+    FA_SET_BUF_ALLOC(attrs, num, CKA_LABEL, false);
+    ret = p11prov_fetch_attributes(provctx, session, key_handle, attrs, num);
+    if (ret == CKR_OK) {
+        obj->numattrs = 0;
+        p11prov_move_alloc_attrs(attrs, num, obj->attrs, &obj->numattrs);
+    } else {
+        P11PROV_debug("Failed to query object attributes (%lu)", ret);
+        p11prov_fetch_attrs_free(attrs, num);
+        p11prov_obj_free(obj);
+        obj = NULL;
+    }
+    return obj;
+}
+
+/* R8 (OSSL_OP_MAC, bytes-in mode): mac.c needs an ephemeral secret key
+ * object created from raw caller-supplied bytes to hand to C_SignInit
+ * with an HMAC/CMAC mechanism — the same shape p11prov_create_secret_key
+ * already provides for CKM_HKDF_DERIVE, but that function hardcodes
+ * CKA_DERIVE=true and never sets CKA_SIGN, so a key it creates cannot be
+ * used with C_SignInit at all. Written as a separate function rather
+ * than parameterizing the existing one: p11prov_create_secret_key has
+ * exactly one caller (kdf.c) and no reason to risk its already-working
+ * shape for a capability set (sign, not derive) it was never meant to
+ * carry. Explicit CKA_PRIVATE=false, same R15 lesson as every other
+ * ephemeral-object template in this provider: the C++ engine defaults
+ * CKA_PRIVATE to true when a template omits it, which would demand a
+ * login a bytes-in MAC session — never having touched a private key —
+ * was never given. */
+P11PROV_OBJ *p11prov_create_mac_key(P11PROV_CTX *provctx,
+                                    P11PROV_SESSION *session,
+                                    CK_KEY_TYPE key_type,
+                                    const unsigned char *secret,
+                                    size_t secretlen)
+{
+    CK_SESSION_HANDLE sess = CK_INVALID_HANDLE;
+    CK_SESSION_INFO session_info;
+    CK_OBJECT_CLASS key_class = CKO_SECRET_KEY;
+    CK_BBOOL val_true = CK_TRUE;
+    CK_BBOOL val_false = CK_FALSE;
+    CK_ATTRIBUTE key_template[6] = {
+        { CKA_CLASS, &key_class, sizeof(key_class) },
+        { CKA_KEY_TYPE, &key_type, sizeof(key_type) },
+        { CKA_TOKEN, &val_false, sizeof(val_false) },
+        { CKA_PRIVATE, &val_false, sizeof(val_false) },
+        { CKA_SIGN, &val_true, sizeof(val_true) },
+        { CKA_VALUE, (void *)secret, secretlen },
+    };
+    CK_OBJECT_HANDLE key_handle;
+    P11PROV_OBJ *obj;
+    struct fetch_attrs attrs[SECRET_KEY_ATTRS];
+    int num;
+    CK_RV ret;
+
+    sess = p11prov_session_handle(session);
+
+    P11PROV_debug("keys: create mac key (session:%lu secret:%p[%zu])", sess,
+                  (const void *)secret, secretlen);
+
+    ret = p11prov_GetSessionInfo(provctx, sess, &session_info);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    ret = p11prov_CreateObject(provctx, sess, key_template, 6, &key_handle);
     if (ret != CKR_OK) {
         return NULL;
     }
@@ -2466,6 +2891,7 @@ static int p11prov_obj_export_public_ec_key(P11PROV_OBJ *obj, bool params_only,
         nattr = 1;
         break;
     case CKK_EC_EDWARDS:
+    case CKK_EC_MONTGOMERY:
         break;
     default:
         return RET_OSSL_ERR;
@@ -2576,6 +3002,40 @@ static int p11prov_obj_export_public_mldsa_key(P11PROV_OBJ *obj,
     return ret;
 }
 
+#define SLHDSA_PUB_ATTRS 1
+static int p11prov_obj_export_public_slhdsa_key(P11PROV_OBJ *obj,
+                                                 OSSL_CALLBACK *cb_fn,
+                                                 void *cb_arg)
+{
+    CK_ATTRIBUTE attrs[SLHDSA_PUB_ATTRS] = { { 0 } };
+    OSSL_PARAM params[SLHDSA_PUB_ATTRS + 1];
+    CK_RV rv;
+    int ret, n = 0;
+
+    if (p11prov_obj_get_key_type(obj) != CKK_SLH_DSA) {
+        return RET_OSSL_ERR;
+    }
+
+    attrs[0].type = CKA_VALUE;
+
+    rv = get_public_attrs(obj, attrs, SLHDSA_PUB_ATTRS);
+    if (rv != CKR_OK) {
+        P11PROV_raise(obj->ctx, rv, "Failed to get public key attributes");
+        return RET_OSSL_ERR;
+    }
+
+    params[n++] = OSSL_PARAM_construct_octet_string(
+        OSSL_PKEY_PARAM_PUB_KEY, attrs[0].pValue, attrs[0].ulValueLen);
+    params[n++] = OSSL_PARAM_construct_end();
+
+    ret = cb_fn(params, cb_arg);
+
+    for (int i = 0; i < SLHDSA_PUB_ATTRS; i++) {
+        OPENSSL_free(attrs[i].pValue);
+    }
+    return ret;
+}
+
 #define MLKEM_PUB_ATTRS 1
 static int p11prov_obj_export_public_mlkem_key(P11PROV_OBJ *obj,
                                                OSSL_CALLBACK *cb_fn,
@@ -2640,10 +3100,13 @@ int p11prov_obj_export_public_key(P11PROV_OBJ *obj, CK_KEY_TYPE key_type,
         return p11prov_obj_export_public_rsa_key(obj, cb_fn, cb_arg);
     case CKK_EC:
     case CKK_EC_EDWARDS:
+    case CKK_EC_MONTGOMERY:
         return p11prov_obj_export_public_ec_key(obj, params_only, cb_fn,
                                                 cb_arg);
     case CKK_ML_DSA:
         return p11prov_obj_export_public_mldsa_key(obj, cb_fn, cb_arg);
+    case CKK_SLH_DSA:
+        return p11prov_obj_export_public_slhdsa_key(obj, cb_fn, cb_arg);
     case CKK_ML_KEM:
         return p11prov_obj_export_public_mlkem_key(obj, cb_fn, cb_arg);
     default:
@@ -2667,7 +3130,12 @@ int p11prov_obj_get_ed_pub_key(P11PROV_OBJ *obj, CK_ATTRIBUTE **pub)
         return RET_OSSL_ERR;
     }
 
-    if (obj->data.key.type != CKK_EC_EDWARDS) {
+    /* CKK_EC_MONTGOMERY added, remediation R4: same CKA_P11PROV_PUB_KEY
+     * cache, same private->associated-public walk below — the function
+     * name predates montgomery but the logic is identical, not type-
+     * specific, so widened rather than duplicated. */
+    if (obj->data.key.type != CKK_EC_EDWARDS
+        && obj->data.key.type != CKK_EC_MONTGOMERY) {
         P11PROV_raise(obj->ctx, CKR_GENERAL_ERROR, "Unsupported key type");
         return RET_OSSL_ERR;
     }
@@ -2859,7 +3327,13 @@ CK_ATTRIBUTE *p11prov_obj_get_ec_public_raw(P11PROV_OBJ *key)
         return NULL;
     }
 
-    if (key->data.key.type != CKK_EC) {
+    /* remediation R4: CKK_EC_MONTGOMERY added — its CKA_P11PROV_PUB_KEY is
+     * the raw u-coordinate (decode_ec_point already stores it un-DER-wrapped
+     * for both Edwards and Montgomery, per PKCS#11 v3.1's own rule), the
+     * exact form CK_ECDH1_DERIVE_PARAMS.pPublicData expects for CKM_X25519/
+     * CKM_X448. Before this fix, a montgomery peer key hit this gate before
+     * even reaching the mechanism dispatch in exchange.c. */
+    if (key->data.key.type != CKK_EC && key->data.key.type != CKK_EC_MONTGOMERY) {
         P11PROV_raise(key->ctx, CKR_GENERAL_ERROR, "Unsupported key type");
         return NULL;
     }
@@ -3885,6 +4359,140 @@ done:
     return rv;
 }
 
+/* remediation R4 — mirrors prep_ed_find exactly, X25519/X448 in place of
+ * Ed25519/Ed448. A separate function, not a shared one: X25519 and Ed25519
+ * are BOTH 32 bytes, so byte-size alone can't disambiguate across a single
+ * function the way it does within prep_ed_find's own Ed25519-vs-Ed448
+ * dispatch. */
+static CK_RV prep_ec_montgomery_find(P11PROV_CTX *ctx,
+                                     const OSSL_PARAM params[],
+                                     struct pool_find_ctx *findctx)
+{
+    OSSL_PARAM tmp;
+    const OSSL_PARAM *p;
+
+    data_buffer digest_data[4];
+    data_buffer digest = { 0 };
+
+    const unsigned char *ecparams = NULL;
+    int len = 0, i;
+    CK_RV rv;
+
+    if (findctx->numattrs != MAX_ATTRS_SIZE) {
+        return CKR_ARGUMENTS_BAD;
+    }
+    findctx->numattrs = 0;
+
+    switch (findctx->class) {
+    case CKO_PUBLIC_KEY:
+        p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PUB_KEY);
+        if (!p) {
+            P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE, "Missing %s",
+                          OSSL_PKEY_PARAM_PUB_KEY);
+            rv = CKR_KEY_INDIGESTIBLE;
+            goto done;
+        }
+
+        if (p->data_size == X25519_BYTE_SIZE) {
+            ecparams = x25519_ec_params;
+            len = X25519_EC_PARAMS_LEN;
+            findctx->bit_size = X25519_BIT_SIZE;
+            findctx->key_size = X25519_BYTE_SIZE;
+        } else if (p->data_size == X448_BYTE_SIZE) {
+            ecparams = x448_ec_params;
+            len = X448_EC_PARAMS_LEN;
+            findctx->bit_size = X448_BIT_SIZE;
+            findctx->key_size = X448_BYTE_SIZE;
+        } else {
+            P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE,
+                          "Public key of unknown length %lu", p->data_size);
+            rv = CKR_KEY_INDIGESTIBLE;
+            goto done;
+        }
+
+        rv = param_to_attr(ctx, params, OSSL_PKEY_PARAM_PUB_KEY,
+                           &findctx->attrs[0], CKA_P11PROV_PUB_KEY, false);
+        if (rv != CKR_OK) {
+            goto done;
+        }
+
+        findctx->numattrs++;
+
+        break;
+    case CKO_PRIVATE_KEY:
+        /* A Token would never allow us to search by private exponent,
+         * so we store a hash of the private key in CKA_ID */
+        p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PRIV_KEY);
+        if (!p) {
+            P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE, "Missing %s",
+                          OSSL_PKEY_PARAM_PRIV_KEY);
+            return CKR_KEY_INDIGESTIBLE;
+        }
+
+        i = 0;
+
+        if (p->data_size == X25519_BYTE_SIZE) {
+            ecparams = x25519_ec_params;
+            len = X25519_EC_PARAMS_LEN;
+            findctx->bit_size = X25519_BIT_SIZE;
+            findctx->key_size = X25519_BYTE_SIZE;
+        } else if (p->data_size == X448_BYTE_SIZE) {
+            ecparams = x448_ec_params;
+            len = X448_EC_PARAMS_LEN;
+            findctx->bit_size = X448_BIT_SIZE;
+            findctx->key_size = X448_BYTE_SIZE;
+        } else {
+            P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE,
+                          "Private key of unknown length %lu", p->data_size);
+            rv = CKR_KEY_INDIGESTIBLE;
+            goto done;
+        }
+
+        /* prefix */
+        digest_data[i].data = (uint8_t *)"PrivKey";
+        digest_data[i].length = 7;
+        i++;
+
+        digest_data[i].data = (CK_BYTE *)ecparams;
+        digest_data[i].length = len;
+        i++;
+
+        digest_data[i].data = p->data;
+        digest_data[i].length = p->data_size;
+        i++;
+
+        digest_data[i].data = NULL;
+
+        rv = p11prov_digest_util(ctx, "sha256", NULL, digest_data, &digest);
+        if (rv != CKR_OK) {
+            return rv;
+        }
+        findctx->attrs[0].type = CKA_ID;
+        findctx->attrs[0].pValue = digest.data;
+        findctx->attrs[0].ulValueLen = digest.length;
+        findctx->numattrs++;
+
+        break;
+    default:
+        return CKR_GENERAL_ERROR;
+    }
+
+    /* common params */
+    tmp.key = "EC Params";
+    tmp.data = (CK_BYTE *)ecparams;
+    tmp.data_size = len;
+    rv = param_to_attr(ctx, &tmp, tmp.key, &findctx->attrs[findctx->numattrs],
+                       CKA_EC_PARAMS, false);
+    if (rv != CKR_OK) {
+        goto done;
+    }
+    findctx->numattrs++;
+    rv = CKR_OK;
+
+done:
+    return rv;
+}
+
 static CK_RV prep_mldsa_find(P11PROV_CTX *ctx, const OSSL_PARAM params[],
                              struct pool_find_ctx *findctx)
 {
@@ -3959,6 +4567,71 @@ static CK_RV prep_mldsa_find(P11PROV_CTX *ctx, const OSSL_PARAM params[],
         break;
     default:
         return CKR_GENERAL_ERROR;
+    }
+
+    /* common params */
+    findctx->attrs[findctx->numattrs].type = CKA_PARAMETER_SET;
+    findctx->attrs[findctx->numattrs].pValue =
+        OPENSSL_malloc(sizeof(findctx->param_set));
+    if (!findctx->attrs[findctx->numattrs].pValue) {
+        return CKR_HOST_MEMORY;
+    }
+    memcpy(findctx->attrs[findctx->numattrs].pValue, &findctx->param_set,
+           sizeof(findctx->param_set));
+    findctx->attrs[findctx->numattrs].ulValueLen = sizeof(findctx->param_set);
+    findctx->numattrs++;
+
+    findctx->bit_size = findctx->key_size * 8;
+
+    return CKR_OK;
+}
+
+/* R15 — server role: import a peer's raw ML-KEM public share (arriving as
+ * plain octet-string bytes from a TLS ClientHello, not any existing token
+ * object) so C_EncapsulateKey has something to operate on. Modeled directly
+ * on prep_mldsa_find above — same shape, only the key-size table and the
+ * absence of a private-key case (not needed for the server encapsulate
+ * role R15 scopes; ML-KEM keygen already produces private keys via the
+ * existing R3b path). */
+static CK_RV prep_mlkem_find(P11PROV_CTX *ctx, const OSSL_PARAM params[],
+                             struct pool_find_ctx *findctx)
+{
+    CK_RV rv;
+
+    if (findctx->numattrs != MAX_ATTRS_SIZE) {
+        return CKR_ARGUMENTS_BAD;
+    }
+    findctx->numattrs = 0;
+
+    switch (findctx->param_set) {
+    case CKP_ML_KEM_512:
+        findctx->key_size = ML_KEM_512_PK_SIZE;
+        break;
+    case CKP_ML_KEM_768:
+        findctx->key_size = ML_KEM_768_PK_SIZE;
+        break;
+    case CKP_ML_KEM_1024:
+        findctx->key_size = ML_KEM_1024_PK_SIZE;
+        break;
+    default:
+        return CKR_KEY_INDIGESTIBLE;
+    }
+
+    if (findctx->class != CKO_PUBLIC_KEY) {
+        return CKR_GENERAL_ERROR;
+    }
+
+    rv = param_to_attr(ctx, params, OSSL_PKEY_PARAM_PUB_KEY,
+                       &findctx->attrs[0], CKA_VALUE, false);
+    if (rv != CKR_OK) {
+        return rv;
+    }
+    findctx->numattrs++;
+    if (findctx->key_size != findctx->attrs[0].ulValueLen) {
+        P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE,
+                      "Unexpected public key size %lu (expected %lu)",
+                      findctx->attrs[0].ulValueLen, findctx->key_size);
+        return CKR_KEY_INDIGESTIBLE;
     }
 
     /* common params */
@@ -4119,6 +4792,14 @@ static CK_RV p11prov_obj_import_public_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
         }
         allocattrs = EC_ATTRS_NUM;
         break;
+    case CKK_EC_MONTGOMERY:
+        P11PROV_debug("obj import of montgomery public key %p", key);
+        rv = prep_ec_montgomery_find(ctx, params, &findctx);
+        if (rv != CKR_OK) {
+            goto done;
+        }
+        allocattrs = EC_ATTRS_NUM;
+        break;
     case CKK_ML_DSA:
         P11PROV_debug("obj import of ML-DSA public key %p", key);
         findctx.param_set = key->data.key.param_set;
@@ -4127,6 +4808,18 @@ static CK_RV p11prov_obj_import_public_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
             goto done;
         }
         allocattrs = MLDSA_ATTRS_NUM;
+        break;
+
+    case CKK_ML_KEM:
+        /* R15 — server role: peer share import. See prep_mlkem_find's own
+         * comment for why this is scoped to the public-key case only. */
+        P11PROV_debug("obj import of ML-KEM public key %p", key);
+        findctx.param_set = key->data.key.param_set;
+        rv = prep_mlkem_find(ctx, params, &findctx);
+        if (rv != CKR_OK) {
+            goto done;
+        }
+        allocattrs = findctx.numattrs;
         break;
 
     default:
@@ -4442,10 +5135,14 @@ static CK_RV p11prov_obj_store_public_key(P11PROV_OBJ *key)
         break;
     case CKK_EC:
     case CKK_EC_EDWARDS:
+    case CKK_EC_MONTGOMERY:
         rv = p11prov_store_ec_public_key(key);
         break;
     case CKK_ML_DSA:
         rv = p11prov_store_mldsa_public_key(key);
+        break;
+    case CKK_ML_KEM:
+        rv = p11prov_store_mlkem_public_key(key);
         break;
 
     default:
@@ -4461,6 +5158,101 @@ static CK_RV p11prov_obj_store_public_key(P11PROV_OBJ *key)
         (void)obj_add_to_pool(key);
     }
 
+    return rv;
+}
+
+/* R15 — server role: materialize the imported peer public share as a real
+ * ephemeral session object on the token, on demand (called from
+ * p11prov_obj_get_handle when a mock ML-KEM public key is asked for its
+ * real handle — the same lazy-materialize point ECDH already uses for
+ * peer public keys). Modeled directly on p11prov_store_mldsa_public_key
+ * above: CKA_ENCAPSULATE is ML-KEM's analog of ML-DSA's CKA_VERIFY — the
+ * capability a public key needs for the operation it's actually used for
+ * (PKCS#11 v3.2 §6.63, Table 265's own KEM-only Function column already
+ * scopes this — see CLAUDE.md's own CKA_ENCAPSULATE = 0x00000633). */
+static CK_RV p11prov_store_mlkem_public_key(P11PROV_OBJ *key)
+{
+    CK_BBOOL val_true = CK_TRUE;
+    CK_BBOOL val_false = CK_FALSE;
+    CK_ATTRIBUTE template[] = {
+        { CKA_CLASS, &key->class, sizeof(CK_OBJECT_CLASS) },
+        { CKA_KEY_TYPE, &key->data.key.type, sizeof(CK_KEY_TYPE) },
+        { CKA_ENCAPSULATE, &val_true, sizeof(val_true) },
+        /* public key part */
+        { CKA_PARAMETER_SET, NULL, 0 },
+        { CKA_VALUE, NULL, 0 },
+        { CKA_TOKEN, &val_false, sizeof(val_false) },
+        /* R15 fix: the C++ engine defaults CKA_PRIVATE to true when a
+         * template omits it (SoftHSM_objects.cpp's getBooleanValue(...,
+         * true) default, confirmed by reading the engine source directly
+         * — not assumed), which made this public key's own creation
+         * require a login it was never given (CKR_USER_NOT_LOGGED_IN,
+         * "User is not authorized"), live-observed via a real handshake
+         * before this line was added. p11prov_store_mldsa_public_key
+         * (this function's own template) has the identical omission,
+         * confirmed by reading it — a latent bug there too, never
+         * triggered because nothing in this project exercises ML-DSA's
+         * mock-materialize-a-peer-public-key path the way R15 exercises
+         * ML-KEM's. */
+        { CKA_PRIVATE, &val_false, sizeof(val_false) },
+    };
+    int na = sizeof(template) / sizeof(CK_ATTRIBUTE);
+    CK_ATTRIBUTE *a;
+    P11PROV_SLOTS_CTX *slots = NULL;
+    CK_SLOT_ID slot = CK_UNAVAILABLE_INFORMATION;
+    P11PROV_SESSION *session = NULL;
+    CK_RV rv = CKR_GENERAL_ERROR;
+
+    a = p11prov_obj_get_attr(key, CKA_PARAMETER_SET);
+    if (!a) {
+        return CKR_GENERAL_ERROR;
+    }
+    template[3].pValue = a->pValue;
+    template[3].ulValueLen = a->ulValueLen;
+
+    a = p11prov_obj_get_attr(key, CKA_VALUE);
+    if (!a) {
+        return CKR_GENERAL_ERROR;
+    }
+    template[4].pValue = a->pValue;
+    template[4].ulValueLen = a->ulValueLen;
+
+    slots = p11prov_ctx_get_slots(key->ctx);
+    if (!slots) {
+        rv = CKR_GENERAL_ERROR;
+        goto done;
+    }
+
+    slot = p11prov_get_default_slot(slots);
+    if (slot == CK_UNAVAILABLE_INFORMATION) {
+        rv = CKR_GENERAL_ERROR;
+        goto done;
+    }
+
+    rv = p11prov_get_session(key->ctx, &slot, NULL, key->refresh_uri,
+                             CK_UNAVAILABLE_INFORMATION, NULL, NULL, false,
+                             true, &session);
+    if (rv != CKR_OK) {
+        goto done;
+    }
+
+    rv = p11prov_CreateObject(key->ctx, p11prov_session_handle(session),
+                              template, na, &key->handle);
+    if (rv != CKR_OK) {
+        goto done;
+    }
+
+    key->slotid = slot;
+
+    rv = CKR_OK;
+
+done:
+    if (rv == CKR_OK) {
+        /* we just created an ephemeral key on this session, ensure the
+        * session is not closed until the key goes away */
+        p11prov_obj_set_session_ref(key, session);
+    }
+    p11prov_return_session(session);
     return rv;
 }
 
@@ -4891,6 +5683,12 @@ static CK_RV p11prov_obj_import_private_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
             goto done;
         }
         break;
+    case CKK_EC_MONTGOMERY:
+        rv = prep_ec_montgomery_find(ctx, params, &findctx);
+        if (rv != CKR_OK) {
+            goto done;
+        }
+        break;
     case CKK_ML_DSA:
         findctx.param_set = key->data.key.param_set;
         rv = prep_mldsa_find(ctx, params, &findctx);
@@ -4940,6 +5738,7 @@ static CK_RV p11prov_obj_import_private_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
         break;
     case CKK_EC:
     case CKK_EC_EDWARDS:
+    case CKK_EC_MONTGOMERY:
         rv = p11prov_store_ec_private_key(key, &findctx, params);
         break;
     case CKK_ML_DSA:
@@ -5117,7 +5916,7 @@ CK_RV p11prov_obj_import_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
         return CKR_ARGUMENTS_BAD;
     }
 
-    if (type == CKK_ML_DSA) {
+    if (type == CKK_ML_DSA || type == CKK_SLH_DSA || type == CKK_ML_KEM) {
         key->data.key.param_set = param_set;
     }
 
@@ -5140,13 +5939,17 @@ CK_RV p11prov_obj_import_key(P11PROV_OBJ *key, CK_KEY_TYPE type,
 
 #if SKEY_SUPPORT
 
+/* Phase 5 R26: took an explicit CK_KEY_TYPE (was hardcoded CKK_AES) so
+ * CKK_CHACHA20's own bytes-in import can share this rather than
+ * duplicating it -- same reasoning as R23's own p11prov_create_mac_key
+ * (mac.c) extension for CMAC's CKK_AES-only base key. */
 static CK_RV p11prov_store_aes_key(P11PROV_CTX *provctx, P11PROV_OBJ **ret,
+                                   CK_KEY_TYPE key_type,
                                    const unsigned char *secret,
                                    size_t secretlen, char *label,
                                    CK_FLAGS usage, bool session_key)
 {
     CK_OBJECT_CLASS key_class = CKO_SECRET_KEY;
-    CK_KEY_TYPE key_type = CKK_AES;
     CK_SLOT_ID slot = CK_UNAVAILABLE_INFORMATION;
     P11PROV_SLOTS_CTX *slots = NULL;
     P11PROV_SESSION *session = NULL;
@@ -5336,7 +6139,20 @@ P11PROV_OBJ *p11prov_obj_import_secret_key(P11PROV_CTX *ctx, CK_KEY_TYPE type,
 
     switch (type) {
     case CKK_AES:
-        rv = p11prov_store_aes_key(ctx, &obj, key, keylen, NULL, usage, true);
+    case CKK_CHACHA20:
+    /* AES-XTS remediation item (2026-08-30): CKK_AES_XTS keys are the
+     * double-width (256 or 512-bit) raw key material PKCS#11 v3.2
+     * §6.15.2 defines for CKM_AES_XTS -- SoftHSM_cipher.cpp's own XTS
+     * dispatch requires exactly this key type (CKR_KEY_TYPE_INCONSISTENT
+     * otherwise). p11prov_store_aes_key() is already generic over both
+     * CK_KEY_TYPE and CKA_VALUE length (it just copies `type`/`key`/
+     * `keylen` verbatim into the CK_CREATE_ATTRIBUTE template), so no
+     * other change is needed here to make an arbitrary-length import
+     * work -- confirmed by reading p11prov_store_aes_key() directly
+     * rather than assuming. */
+    case CKK_AES_XTS:
+        rv = p11prov_store_aes_key(ctx, &obj, type, key, keylen, NULL, usage,
+                                   true);
         if (rv != CKR_OK) {
             P11PROV_raise(ctx, rv, "Failed to import");
             goto done;
@@ -5366,6 +6182,48 @@ done:
 
 #endif /* SKEY_SUPPORT */
 
+/* R18 — client role, montgomery peer-key install: TLS's peer-key
+ * construction for X25519/X448 goes through a route the domain-params-
+ * only server placeholder (mock_pub_ec_key) never touches — a bare
+ * keymgmt NEW() object straight into SET_PARAMS, no gen_init/gen in
+ * between at all. Live-traced: key->data.key.type == 0 (never set —
+ * numerically collides with CKK_RSA, which is why this gates on class
+ * instead) and key->class == CK_UNAVAILABLE_INFORMATION. Weierstrass EC
+ * never reaches p11prov_obj_set_ec_encoded_public_key in this bare-object
+ * shape at all — a legacy, non-provider-native EC_KEY fallback path
+ * exists in OpenSSL for it; montgomery/PQC types have no such fallback —
+ * so this exact shape was never exercised before. Called only from a
+ * per-curve wrapper that knows its own fixed key type (montgomery's own
+ * set_params, keymgmt.c); establishes the same two fields
+ * mock_pub_ec_key already sets for the server-placeholder route, so
+ * downstream code sees an identical shape regardless of which route
+ * built the object. Gating on class (always a real value once anything
+ * — gen(), mock, import — has touched the object) rather than type
+ * sidesteps the CKK_RSA-is-0 ambiguity entirely. */
+CK_RV p11prov_obj_ensure_ec_type(P11PROV_OBJ *key, CK_KEY_TYPE type)
+{
+    if (key->class == CK_UNAVAILABLE_INFORMATION) {
+        key->class = CKO_PUBLIC_KEY;
+        key->data.key.type = type;
+    } else if (key->data.key.type != type) {
+        P11PROV_raise(key->ctx, CKR_KEY_INDIGESTIBLE,
+                      "Key type mismatch installing peer public key");
+        return CKR_KEY_INDIGESTIBLE;
+    }
+    return CKR_OK;
+}
+
+/* R18 — server role for montgomery TLS groups (X25519/X448): the
+ * CKK_EC_MONTGOMERY case was simply absent from this switch, so this
+ * function — the one p11prov_ec_set_params calls to install a peer's
+ * public share into the domain-params-only mock object gen_init/gen
+ * built — unconditionally rejected every montgomery key with "Invalid
+ * Key type, not an EC/ED key", even though montgomery keymgmt never
+ * registered SET_PARAMS at all until this fix (see keymgmt.c), so the
+ * rejection was never actually reachable before now. The rest of this
+ * function needs no montgomery-specific branch: CKA_EC_POINT is always
+ * a DER-encoded OCTET STRING per the PKCS#11 spec regardless of curve
+ * family, matching Edwards' own already-working case just above. */
 CK_RV p11prov_obj_set_ec_encoded_public_key(P11PROV_OBJ *key,
                                             const void *pubkey,
                                             size_t pubkey_len)
@@ -5393,6 +6251,7 @@ CK_RV p11prov_obj_set_ec_encoded_public_key(P11PROV_OBJ *key,
     switch (key->data.key.type) {
     case CKK_EC:
     case CKK_EC_EDWARDS:
+    case CKK_EC_MONTGOMERY:
         /* if class is still "domain parameters" convert it to
          * a public key */
         if (key->class == CKO_DOMAIN_PARAMETERS) {
@@ -5558,6 +6417,52 @@ P11PROV_OBJ *mock_pub_ec_key(P11PROV_CTX *ctx, CK_ATTRIBUTE_TYPE type,
         p11prov_obj_free(key);
         return NULL;
     }
+
+    return key;
+}
+
+/* R15 — server role: mirrors mock_pub_ec_key above, for the identical
+ * reason (see p11prov_ec_gen_init's comment and p11prov_mlkem_gen_init_int's
+ * own copy of it) — OpenSSL's TLS server-side KEM group handling requests
+ * a parameters-only object (empirically observed: selection ==
+ * OSSL_KEYMGMT_SELECT_ALL_PARAMETERS, not OSSL_KEYMGMT_SELECT_KEYPAIR) to
+ * hold the negotiated group's shape before the peer's actual public share
+ * arrives via import. Unlike EC there is no curve/params blob to carry —
+ * only the ML-KEM parameter set (512/768/1024), already known from which
+ * per-variant gen_init ran. */
+P11PROV_OBJ *mock_pub_mlkem_key(P11PROV_CTX *ctx,
+                                CK_ML_KEM_PARAMETER_SET_TYPE param_set)
+{
+    P11PROV_OBJ *key;
+    CK_ULONG key_size;
+
+    switch (param_set) {
+    case CKP_ML_KEM_512:
+        key_size = ML_KEM_512_PK_SIZE;
+        break;
+    case CKP_ML_KEM_768:
+        key_size = ML_KEM_768_PK_SIZE;
+        break;
+    case CKP_ML_KEM_1024:
+        key_size = ML_KEM_1024_PK_SIZE;
+        break;
+    default:
+        P11PROV_raise(ctx, CKR_KEY_INDIGESTIBLE, "Unknown ML-KEM param set");
+        return NULL;
+    }
+
+    key =
+        p11prov_obj_new(ctx, CK_UNAVAILABLE_INFORMATION,
+                        CK_P11PROV_IMPORTED_HANDLE, CK_UNAVAILABLE_INFORMATION);
+    if (!key) {
+        return NULL;
+    }
+
+    key->class = CKO_PUBLIC_KEY;
+    key->data.key.type = CKK_ML_KEM;
+    key->data.key.param_set = param_set;
+    key->data.key.size = key_size;
+    key->data.key.bit_size = key_size * 8;
 
     return key;
 }

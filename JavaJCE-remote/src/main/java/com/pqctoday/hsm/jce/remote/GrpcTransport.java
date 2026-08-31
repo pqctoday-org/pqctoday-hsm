@@ -120,13 +120,14 @@ final class GrpcTransport implements AutoCloseable {
         }
     }
 
-    byte[] sign(long privateHandle, Algorithm algorithm, byte[] data) {
+    byte[] sign(long privateHandle, Algorithm algorithm, byte[] data, boolean externalMu) {
         try {
             SignResponse resp = stub.sign(SignRequest.newBuilder()
                 .setSessionHandle(sessionHandle)
                 .setPrivateHandle((int) privateHandle)
                 .setAlgorithm(algorithm)
                 .setData(com.google.protobuf.ByteString.copyFrom(data))
+                .setExternalMu(externalMu)
                 .build());
             return resp.getSignature().toByteArray();
         } catch (StatusRuntimeException e) {
@@ -134,7 +135,7 @@ final class GrpcTransport implements AutoCloseable {
         }
     }
 
-    boolean verify(long publicHandle, Algorithm algorithm, byte[] data, byte[] signature) {
+    boolean verify(long publicHandle, Algorithm algorithm, byte[] data, byte[] signature, boolean externalMu) {
         try {
             VerifyResponse resp = stub.verify(VerifyRequest.newBuilder()
                 .setSessionHandle(sessionHandle)
@@ -142,6 +143,7 @@ final class GrpcTransport implements AutoCloseable {
                 .setAlgorithm(algorithm)
                 .setData(com.google.protobuf.ByteString.copyFrom(data))
                 .setSignature(com.google.protobuf.ByteString.copyFrom(signature))
+                .setExternalMu(externalMu)
                 .build());
             return resp.getValid();
         } catch (StatusRuntimeException e) {

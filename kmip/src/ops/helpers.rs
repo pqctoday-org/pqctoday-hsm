@@ -249,6 +249,8 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         HmacSha256 => "HMAC-SHA-256",
         HmacSha384 => "HMAC-SHA-384",
         HmacSha512 => "HMAC-SHA-512",
+        HmacSha3_256 => "HMAC-SHA3-256",
+        HmacSha3_512 => "HMAC-SHA3-512",
         Ecdh => "ECDH",
         ChaCha20 => "ChaCha20",
         ChaCha20Poly1305 => "ChaCha20-Poly1305",
@@ -499,27 +501,13 @@ pub fn strip_x_prefixes(
 /// sees the mode it asked for, not just a number. Codepoints verified
 /// against `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`.
 fn block_cipher_mode_name(v: u32) -> &'static str {
-    match v {
-        0x01 => "CBC",
-        0x02 => "ECB",
-        0x03 => "PCBC",
-        0x04 => "CFB",
-        0x05 => "OFB",
-        0x06 => "CTR",
-        0x07 => "CMAC",
-        0x08 => "CCM",
-        0x09 => "GCM",
-        0x0a => "CBC-MAC",
-        0x0b => "XTS",
-        0x0c => "AESKeyWrapPadding",
-        0x0d => "NISTKeyWrap",
-        0x0e => "X9.102 AESKW",
-        0x0f => "X9.102 TDKW",
-        0x10 => "X9.102 AKW1",
-        0x11 => "X9.102 AKW2",
-        0x12 => "AEAD",
-        _ => "unknown",
-    }
+    // KMIP/CACP coverage gap-analysis Phase 0.2 (2026-08-30): this used to
+    // be a second, independently hand-maintained copy of the same enum
+    // `crate::policy::rule::block_cipher_mode_code_to_name` already
+    // defines for CACP's policy-name grammar — a drift risk of the same
+    // shape this codebase has hit before (see algos.rs's ChaCha20 history).
+    // Deduped: this file now has zero literal copies of the enum.
+    crate::policy::rule::block_cipher_mode_code_to_name(v).unwrap_or("unknown")
 }
 
 /// Pick the PKCS#11 mechanism for AES Encrypt / Decrypt off the
@@ -538,7 +526,8 @@ pub fn aes_mechanism_for(
     cp: Option<&crate::kmip30::CryptographicParameters>,
 ) -> Result<u32, KmipError> {
     use softhsmrustv3::constants::{
-        CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_CTR, CKM_AES_ECB, CKM_AES_GCM,
+        CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_CCM, CKM_AES_CTR, CKM_AES_ECB, CKM_AES_GCM,
+        CKM_AES_OFB,
     };
     let bcm = cp.and_then(|c| c.block_cipher_mode);
     // KMIP 3.0 §11 `Padding Method` enum — codepoint 3 = `PKCS5`
@@ -551,6 +540,16 @@ pub fn aes_mechanism_for(
         (Some(1), _) => CKM_AES_CBC,
         (Some(2), _) => CKM_AES_ECB,
         (Some(6), _) => CKM_AES_CTR,
+        // KMIP/CACP coverage gap-analysis item 2.2 (2026-08-30) — the
+        // engine has supported CKM_AES_CCM since the WS-8 remediation;
+        // this op never reached it. Tag Length (§11, Table 465's AEAD
+        // field) threads through the same generic `tag_len` param GCM
+        // already uses — nothing else in this call path needed to change.
+        (Some(8), _) => CKM_AES_CCM,
+        // KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30) — OFB has
+        // no width ambiguity (unlike CFB below), so it's unambiguous to
+        // wire. The engine has supported it since the WS-8 remediation.
+        (Some(5), _) => CKM_AES_OFB,
         (Some(9), _) | (None, _) => CKM_AES_GCM,
         (Some(other), _) => {
             return Err(KmipError::unsupported_cryptographic_parameters(format!(
@@ -1316,18 +1315,22 @@ pub fn wrap_key_value(
                 format!("Wrapping Method {:#x} not supported (only Encrypt)", spec.wrapping_method),
             )));
     }
-    // §11 Block Cipher Mode — NISTKeyWrap (0x0d) selects AES-KW. Absent
-    // CP defaults to NISTKeyWrap as well (the only supported wrap mode).
+    // §11 Block Cipher Mode — NISTKeyWrap (0x0d) selects AES-KW;
+    // AESKeyWrapPadding (0x0c, RFC 5649) selects AES-KWP (KMIP/CACP
+    // coverage gap-analysis item 7, 2026-08-30 — the engine has supported
+    // this since PR #189, this op never reached it). Absent CP defaults to
+    // NISTKeyWrap (the pre-existing default).
     let mode = spec
         .cryptographic_parameters
         .as_ref()
         .and_then(|cp| cp.block_cipher_mode)
         .unwrap_or(0x0d);
-    if mode != 0x0d {
+    let is_kwp = mode == 0x0c;
+    if mode != 0x0d && !is_kwp {
         return Err(fail_err(deps, correlation_id, op,
             KmipError::failed(
                 ResultReason::OperationNotSupported,
-                format!("Block Cipher Mode {mode:#x} not supported for wrapping (only NISTKeyWrap)"),
+                format!("Block Cipher Mode {mode:#x} not supported for wrapping (only NISTKeyWrap/AESKeyWrapPadding)"),
             )));
     }
     let kek = resolve_kek(
@@ -1337,11 +1340,24 @@ pub fn wrap_key_value(
     )?;
     // Wrap target: TTLV-encoded KeyValue (default TTLV Encoding Option);
     // TTLV framing pads to 8 bytes, satisfying AES-KW's input contract.
+    // KWP doesn't need the 8-byte alignment, but the padded TTLV frame
+    // satisfies its non-empty requirement just as well.
     let plaintext = crate::kmip30::ttlv_encode_key_value(key_material);
     // K15 — emit after the wrap call, with its real rv.
-    let r = softhsmrustv3::native::aes_key_wrap(&kek, &plaintext);
-    emit_pkcs11_result(deps, correlation_id, "native::aes_key_wrap",
-        Some(softhsmrustv3::constants::CKM_AES_KEY_WRAP), &r);
+    let (r, mech, native_name) = if is_kwp {
+        (
+            softhsmrustv3::native::aes_key_wrap_kwp(&kek, &plaintext),
+            softhsmrustv3::constants::CKM_AES_KEY_WRAP_KWP,
+            "native::aes_key_wrap_kwp",
+        )
+    } else {
+        (
+            softhsmrustv3::native::aes_key_wrap(&kek, &plaintext),
+            softhsmrustv3::constants::CKM_AES_KEY_WRAP,
+            "native::aes_key_wrap",
+        )
+    };
+    emit_pkcs11_result(deps, correlation_id, native_name, Some(mech), &r);
     r.map_err(|rv| fail_err(deps, correlation_id, op,
         ck_rv_to_kmip_error(rv, &format!("{op}:wrap"))))
 }
@@ -1444,8 +1460,9 @@ fn resolve_kek(
 /// (§2.1.5 / §6.1.50: KeyWrappingData present on an inbound KeyBlock).
 /// Reverse of [`wrap_key_value`] with the unwrap-direction gates: the
 /// KEK must be `Active` and carry `UnwrapKey (0x20)` — NOT `WrapKey`.
-/// Validates WrappingMethod=Encrypt + BlockCipherMode=NISTKeyWrap
-/// (others → `UnsupportedCryptographicParameters 0x3e`), AES-KW-unwraps
+/// Validates WrappingMethod=Encrypt + BlockCipherMode=NISTKeyWrap or
+/// AESKeyWrapPadding (others → `UnsupportedCryptographicParameters 0x3e`),
+/// AES-KW/KWP-unwraps
 /// (an integrity failure surfaces the engine's `CKR_WRAPPED_KEY_INVALID`
 /// as `CryptographicFailure` via `ck_rv_to_kmip_error`), then decodes
 /// the plaintext per §4.x `Encoding Option`: TTLV Encoding (the default
@@ -1475,16 +1492,19 @@ pub fn unwrap_key_value(
             ))));
     }
     // §11 Block Cipher Mode — NISTKeyWrap (0x0d) selects AES-KW;
-    // absent CP defaults to it (the only supported wrap mode).
+    // AESKeyWrapPadding (0x0c, RFC 5649) selects AES-KWP (KMIP/CACP
+    // coverage gap-analysis item 7, 2026-08-30). Absent CP defaults to
+    // NISTKeyWrap (the pre-existing default).
     let mode = kwd
         .cryptographic_parameters
         .as_ref()
         .and_then(|cp| cp.block_cipher_mode)
         .unwrap_or(0x0d);
-    if mode != 0x0d {
+    let is_kwp = mode == 0x0c;
+    if mode != 0x0d && !is_kwp {
         return Err(fail_err(deps, correlation_id, op,
             KmipError::unsupported_cryptographic_parameters(format!(
-                "Block Cipher Mode {mode:#x} not supported for unwrapping (only NISTKeyWrap)",
+                "Block Cipher Mode {mode:#x} not supported for unwrapping (only NISTKeyWrap/AESKeyWrapPadding)",
             ))));
     }
     let kek = resolve_kek(
@@ -1492,9 +1512,20 @@ pub fn unwrap_key_value(
         crate::kmip30::UsageMask::UNWRAP_KEY, "UnwrapKey",
         auth, correlation_id,
     )?;
-    let r = softhsmrustv3::native::aes_key_unwrap(&kek, wrapped);
-    emit_pkcs11_result(deps, correlation_id, "native::aes_key_unwrap",
-        Some(softhsmrustv3::constants::CKM_AES_KEY_WRAP), &r);
+    let (r, mech, native_name) = if is_kwp {
+        (
+            softhsmrustv3::native::aes_key_unwrap_kwp(&kek, wrapped),
+            softhsmrustv3::constants::CKM_AES_KEY_WRAP_KWP,
+            "native::aes_key_unwrap_kwp",
+        )
+    } else {
+        (
+            softhsmrustv3::native::aes_key_unwrap(&kek, wrapped),
+            softhsmrustv3::constants::CKM_AES_KEY_WRAP,
+            "native::aes_key_unwrap",
+        )
+    };
+    emit_pkcs11_result(deps, correlation_id, native_name, Some(mech), &r);
     let plaintext = r.map_err(|rv| fail_err(deps, correlation_id, op,
         ck_rv_to_kmip_error(rv, &format!("{op}:unwrap"))))?;
     // §4.x Encoding Option — values verified from the "Encoding Option"
@@ -1701,6 +1732,10 @@ mod tests {
             (Some(1), None, c::CKM_AES_CBC),
             (Some(2), None, c::CKM_AES_ECB),
             (Some(6), None, c::CKM_AES_CTR),
+            // KMIP/CACP coverage gap-analysis item 2.2 (2026-08-30).
+            (Some(8), None, c::CKM_AES_CCM),
+            // KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30).
+            (Some(5), None, c::CKM_AES_OFB),
             (Some(9), None, c::CKM_AES_GCM),
             (None, None, c::CKM_AES_GCM), // documented absent-mode default
         ];
@@ -1713,9 +1748,12 @@ mod tests {
 
     #[test]
     fn aes_mechanism_unsupported_modes_fail_0x3e() {
-        // PCBC, CFB, OFB, CMAC, CCM, CBC-MAC, XTS, AESKeyWrapPadding,
-        // NISTKeyWrap, AEAD — all must fail, never fall through to GCM.
-        for mode in [3u32, 4, 5, 7, 8, 0x0a, 0x0b, 0x0c, 0x0d, 0x12] {
+        // PCBC, CFB, CMAC, CBC-MAC, XTS, AESKeyWrapPadding, NISTKeyWrap,
+        // AEAD — all must fail, never fall through to GCM. CCM (0x08) and
+        // OFB (0x05) deliberately excluded here — wired 2026-08-30 (KMIP/
+        // CACP coverage gap-analysis items 2.2/2.4), both now genuinely
+        // supported; see aes_mechanism_supported_modes_map_exactly below.
+        for mode in [3u32, 4, 7, 0x0a, 0x0b, 0x0c, 0x0d, 0x12] {
             let err = aes_mechanism_for(Some(&cp(Some(mode), None, None)))
                 .expect_err(&format!("mode 0x{mode:02x} must fail"));
             assert_eq!(
@@ -2047,5 +2085,59 @@ mod tests {
         put_kek(&d, "kek", crate::kmip30::State::Deactivated, false);
         let err = wrap_key_value(&d, "Get", &wrap_spec("kek"), &[0u8; 32], &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
+    }
+
+    /// KMIP/CACP coverage gap-analysis item 7 (2026-08-30) —
+    /// `CKM_AES_KEY_WRAP_KWP` reachable end-to-end through
+    /// `wrap_key_value`/`unwrap_key_value` for the first time. Real
+    /// engine round trip (not a mock): wraps arbitrary-length key
+    /// material, unwraps it back, and separately proves the mode
+    /// selection is genuine — a plain-KW unwrap of KWP-wrapped bytes
+    /// fails, so this isn't accidentally falling through to the old path.
+    #[test]
+    fn wrap_unwrap_kwp_round_trips_and_is_really_selected() {
+        let d = wrap_deps();
+        use crate::store::ObjectRecord;
+        d.store.put(ObjectRecord {
+            uid: "kek".into(),
+            object_type: crate::kmip30::ObjectType::SymmetricKey,
+            algorithm: crate::kmip30::KmipAlgorithm::Aes,
+            cryptographic_length: 256,
+            usage_mask: crate::kmip30::UsageMask::WRAP_KEY | crate::kmip30::UsageMask::UNWRAP_KEY,
+            state: crate::kmip30::State::Active,
+            archived: false,
+            key_material: Some(vec![0x11; 32]),
+            ..ObjectRecord::default()
+        }).unwrap();
+        let mut spec = wrap_spec("kek");
+        spec.cryptographic_parameters = Some(crate::kmip30::CryptographicParameters {
+            block_cipher_mode: Some(0x0c), // AESKeyWrapPadding
+            ..Default::default()
+        });
+        // 60 bytes — not a multiple of 8, which plain AES-KW (item 1.2's
+        // sibling mechanism) could never wrap. Proves KWP's real benefit,
+        // not just that *a* mechanism ran.
+        let key_material = vec![0x42u8; 60];
+        let wrapped = wrap_key_value(&d, "Get", &spec, &key_material, &crate::server::auth::AuthContext::open(), "c").unwrap();
+        let recovered = unwrap_key_value(&d, "Register", &crate::kmip30::KeyWrappingSpec {
+            wrapping_method: 0x01,
+            encryption_key_uid: "kek".into(),
+            cryptographic_parameters: spec.cryptographic_parameters.clone(),
+            encoding_option: None,
+            mac_signature_key_information_present: false,
+        }, &wrapped, &crate::server::auth::AuthContext::open(), "c").unwrap();
+        assert_eq!(recovered, key_material);
+        // Cross-check the mode is genuinely selected: unwrapping the same
+        // bytes as plain NISTKeyWrap (mode absent → defaults to 0x0d)
+        // must fail, not silently succeed with garbage.
+        let plain_kw_spec = wrap_spec("kek");
+        let err = unwrap_key_value(&d, "Register", &crate::kmip30::KeyWrappingSpec {
+            wrapping_method: 0x01,
+            encryption_key_uid: "kek".into(),
+            cryptographic_parameters: plain_kw_spec.cryptographic_parameters,
+            encoding_option: None,
+            mac_signature_key_information_present: false,
+        }, &wrapped, &crate::server::auth::AuthContext::open(), "c");
+        assert!(err.is_err(), "KWP-wrapped bytes must not silently unwrap as plain NISTKeyWrap");
     }
 }

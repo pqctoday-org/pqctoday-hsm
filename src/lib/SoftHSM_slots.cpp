@@ -435,6 +435,13 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_SHA256"]			= CKM_SHA256;
 	t["CKM_SHA384"]			= CKM_SHA384;
 	t["CKM_SHA512"]			= CKM_SHA512;
+	// WS-6.3 (2026-08-30): FIPS 180-4 truncated variants — distinct initial
+	// hash values (not SHA-512 output truncated post-hoc). CKM_SHA512_T
+	// (arbitrary caller-specified truncation length) is not implemented:
+	// OpenSSL has no generic parameterized EVP_MD for it, only these two
+	// standardized fixed lengths.
+	t["CKM_SHA512_224"]		= CKM_SHA512_224;
+	t["CKM_SHA512_256"]		= CKM_SHA512_256;
 	t["CKM_SHA3_224"]		= CKM_SHA3_224;
 	t["CKM_SHA3_256"]		= CKM_SHA3_256;
 	t["CKM_SHA3_384"]		= CKM_SHA3_384;
@@ -457,6 +464,8 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_SHA256_HMAC"]		= CKM_SHA256_HMAC;
 	t["CKM_SHA384_HMAC"]		= CKM_SHA384_HMAC;
 	t["CKM_SHA512_HMAC"]		= CKM_SHA512_HMAC;
+	t["CKM_SHA512_224_HMAC"]	= CKM_SHA512_224_HMAC;
+	t["CKM_SHA512_256_HMAC"]	= CKM_SHA512_256_HMAC;
 	t["CKM_SHA3_224_HMAC"]		= CKM_SHA3_224_HMAC;
 	t["CKM_SHA3_256_HMAC"]		= CKM_SHA3_256_HMAC;
 	t["CKM_SHA3_384_HMAC"]		= CKM_SHA3_384_HMAC;
@@ -473,6 +482,8 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_SHA256_HMAC_GENERAL"]	= CKM_SHA256_HMAC_GENERAL;
 	t["CKM_SHA384_HMAC_GENERAL"]	= CKM_SHA384_HMAC_GENERAL;
 	t["CKM_SHA512_HMAC_GENERAL"]	= CKM_SHA512_HMAC_GENERAL;
+	t["CKM_SHA512_224_HMAC_GENERAL"]	= CKM_SHA512_224_HMAC_GENERAL;
+	t["CKM_SHA512_256_HMAC_GENERAL"]	= CKM_SHA512_256_HMAC_GENERAL;
 	t["CKM_SHA3_224_HMAC_GENERAL"]	= CKM_SHA3_224_HMAC_GENERAL;
 	t["CKM_SHA3_256_HMAC_GENERAL"]	= CKM_SHA3_256_HMAC_GENERAL;
 	t["CKM_SHA3_384_HMAC_GENERAL"]	= CKM_SHA3_384_HMAC_GENERAL;
@@ -483,13 +494,29 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 
 	// HKDF (PKCS#11 v3.0+ §2.43)
 	t["CKM_HKDF_DERIVE"]		= CKM_HKDF_DERIVE;
+	t["CKM_HKDF_DATA"]		= CKM_HKDF_DATA;
 
 	// NIST SP 800-108 KBKDFs (PKCS#11 v3.2 §2.44)
 	t["CKM_SP800_108_COUNTER_KDF"]	= CKM_SP800_108_COUNTER_KDF;
 	t["CKM_SP800_108_FEEDBACK_KDF"]	= CKM_SP800_108_FEEDBACK_KDF;
+	t["CKM_SP800_108_DOUBLE_PIPELINE_KDF"]	= CKM_SP800_108_DOUBLE_PIPELINE_KDF;
 	// SHAKE-256 as an XOF-based KDF. Needed by X-Wing, whose 32-byte
 	// decapsulation key expands to 96 bytes of ML-KEM + X25519 key material.
 	t["CKM_SHAKE_256_KEY_DERIVATION"]	= CKM_SHAKE_256_KEY_DERIVATION;
+
+	// WS-6.2 (2026-08-30): digest key derivation (PKCS#11 v3.2 §2.42) —
+	// derived value = HASH(base key). Rust already had these six and
+	// proved them correct against ACVP; C++ had none.
+	t["CKM_SHA256_KEY_DERIVATION"]		= CKM_SHA256_KEY_DERIVATION;
+	t["CKM_SHA384_KEY_DERIVATION"]		= CKM_SHA384_KEY_DERIVATION;
+	t["CKM_SHA512_KEY_DERIVATION"]		= CKM_SHA512_KEY_DERIVATION;
+	t["CKM_SHA3_256_KEY_DERIVATION"]	= CKM_SHA3_256_KEY_DERIVATION;
+	t["CKM_SHA3_384_KEY_DERIVATION"]	= CKM_SHA3_384_KEY_DERIVATION;
+	t["CKM_SHA3_512_KEY_DERIVATION"]	= CKM_SHA3_512_KEY_DERIVATION;
+	// WS-6.3 (2026-08-30): same construction, the two FIPS 180-4 truncated
+	// SHA-512 variants.
+	t["CKM_SHA512_224_KEY_DERIVATION"]	= CKM_SHA512_224_KEY_DERIVATION;
+	t["CKM_SHA512_256_KEY_DERIVATION"]	= CKM_SHA512_256_KEY_DERIVATION;
 
 	// RSA
 	t["CKM_RSA_PKCS_KEY_PAIR_GEN"]	= CKM_RSA_PKCS_KEY_PAIR_GEN;
@@ -533,6 +560,14 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_AES_CBC_PAD"]		= CKM_AES_CBC_PAD;
 	t["CKM_AES_CTR"]		= CKM_AES_CTR;
 	t["CKM_AES_GCM"]		= CKM_AES_GCM;
+	// WS-8 (2026-08-30)
+	t["CKM_AES_OFB"]		= CKM_AES_OFB;
+	t["CKM_AES_CFB1"]		= CKM_AES_CFB1;
+	t["CKM_AES_CFB8"]		= CKM_AES_CFB8;
+	t["CKM_AES_CFB128"]		= CKM_AES_CFB128;
+	t["CKM_AES_CCM"]		= CKM_AES_CCM;
+	t["CKM_AES_XTS"]		= CKM_AES_XTS;
+	t["CKM_AES_XTS_KEY_GEN"]	= CKM_AES_XTS_KEY_GEN;
 	t["CKM_AES_KEY_WRAP"]		= CKM_AES_KEY_WRAP;
 #ifdef HAVE_AES_KEY_WRAP_PAD
 	t["CKM_AES_KEY_WRAP_PAD"]	= CKM_AES_KEY_WRAP_PAD;
@@ -549,6 +584,7 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_AES_ECB_ENCRYPT_DATA"]	= CKM_AES_ECB_ENCRYPT_DATA;
 	t["CKM_AES_CBC_ENCRYPT_DATA"]	= CKM_AES_CBC_ENCRYPT_DATA;
 	t["CKM_AES_CMAC"]		= CKM_AES_CMAC;
+	t["CKM_AES_GMAC"]		= CKM_AES_GMAC;
 
 	// ChaCha20 — bare stream (CKM_CHACHA20) and AEAD (CKM_CHACHA20_POLY1305)
 	// are both dispatched (audit V-10 fixed by implementing the bare stream).
@@ -604,6 +640,13 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_HASH_ML_DSA_SHA3_512"]	= CKM_HASH_ML_DSA_SHA3_512;
 	t["CKM_HASH_ML_DSA_SHAKE128"]	= CKM_HASH_ML_DSA_SHAKE128;
 	t["CKM_HASH_ML_DSA_SHAKE256"]	= CKM_HASH_ML_DSA_SHAKE256;
+	// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — the v3.3 working
+	// draft's own name and codepoint, adopted natively 2026-08-30 (still
+	// OASIS status "proposed", not yet ratified; see vendor_mechanisms.h).
+	t["CKM_ML_DSA_EXTERNAL_MU"]	= CKM_ML_DSA_EXTERNAL_MU;
+	// Token-side µ generation (remediation R39, phase 8, PQCTODAY-VENDOR-EXT-MU)
+	// — the PRODUCE half of external-µ; a C_Digest-family mechanism, not sign/verify.
+	t["CKM_ML_DSA_EXTERNAL_MU_GEN"] = CKM_ML_DSA_EXTERNAL_MU_GEN;
 
 	// SLH-DSA (FIPS 205, PKCS#11 v3.2)
 	t["CKM_SLH_DSA_KEY_PAIR_GEN"]	= CKM_SLH_DSA_KEY_PAIR_GEN;
@@ -818,6 +861,8 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_SHA256:
 		case CKM_SHA384:
 		case CKM_SHA512:
+		case CKM_SHA512_224:
+		case CKM_SHA512_256:
 		case CKM_SHA3_224:
 		case CKM_SHA3_256:
 		case CKM_SHA3_384:
@@ -874,6 +919,18 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_SHA512_HMAC:
 		case CKM_SHA512_HMAC_GENERAL:
 			pInfo->ulMinKeySize = 64;
+			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			break;
+		case CKM_SHA512_224_HMAC:
+		case CKM_SHA512_224_HMAC_GENERAL:
+			pInfo->ulMinKeySize = 28;
+			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			break;
+		case CKM_SHA512_256_HMAC:
+		case CKM_SHA512_256_HMAC_GENERAL:
+			pInfo->ulMinKeySize = 32;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
@@ -981,6 +1038,10 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			/* FALLTHROUGH */
 		case CKM_AES_ECB:
 		case CKM_AES_CTR:
+		case CKM_AES_OFB:
+		case CKM_AES_CFB1:
+		case CKM_AES_CFB8:
+		case CKM_AES_CFB128:
 			pInfo->ulMinKeySize = 16;
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT;
@@ -993,6 +1054,26 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT |
 			                CKF_MESSAGE_ENCRYPT | CKF_MESSAGE_DECRYPT;
+			break;
+		case CKM_AES_CCM:
+			pInfo->ulMinKeySize = 16;
+			pInfo->ulMaxKeySize = 32;
+			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT;
+			break;
+		case CKM_AES_XTS:
+			// Key size is reported in BYTES for XTS (v3.2 §6.15.3), unlike every
+			// other AES mechanism above (bits, matching CK_MECHANISM_INFO's
+			// general convention) — this engine reports byte counts throughout
+			// this switch already (16/24/32 above are also bytes), so 32/64
+			// here is consistent with that, not a special case.
+			pInfo->ulMinKeySize = 32;
+			pInfo->ulMaxKeySize = 64;
+			pInfo->flags |= CKF_ENCRYPT | CKF_DECRYPT;
+			break;
+		case CKM_AES_XTS_KEY_GEN:
+			pInfo->ulMinKeySize = 32;
+			pInfo->ulMaxKeySize = 64;
+			pInfo->flags = CKF_GENERATE;
 			break;
 		case CKM_CHACHA20_KEY_GEN:
 			pInfo->ulMinKeySize = 32;
@@ -1034,6 +1115,7 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->flags = CKF_DERIVE;
 			break;
 		case CKM_AES_CMAC:
+		case CKM_AES_GMAC:
 			pInfo->ulMinKeySize = 16;
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
@@ -1148,6 +1230,23 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->flags = CKF_SIGN | CKF_VERIFY |
 			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
 			break;
+		// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — CKF_SIGN |
+		// CKF_VERIFY only, no C_MessageSign/Verify* support for this
+		// mechanism.
+		case CKM_ML_DSA_EXTERNAL_MU:
+			pInfo->ulMinKeySize = 1312;
+			pInfo->ulMaxKeySize = 2592;
+			pInfo->flags = CKF_SIGN | CKF_VERIFY;
+			break;
+		// µ generation (remediation R39, phase 8, PQCTODAY-VENDOR-EXT-MU) —
+		// a digest-family mechanism (C_Digest/C_DigestUpdate/C_DigestFinal),
+		// same shape as the plain hash mechanisms above. Key size N/A, same
+		// as those.
+		case CKM_ML_DSA_EXTERNAL_MU_GEN:
+			pInfo->ulMinKeySize = 0;
+			pInfo->ulMaxKeySize = 0;
+			pInfo->flags = CKF_DIGEST;
+			break;
 		// SLH-DSA (FIPS 205) — ulMin/MaxKeySize are public-key BYTES per
 		// PKCS#11 v3.2 §6.69: pk = 2n, n = 16..32 → 32..64 bytes (audit V-2).
 		case CKM_SLH_DSA_KEY_PAIR_GEN:
@@ -1218,9 +1317,19 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 	        break;
 	    case CKM_PKCS5_PBKD2:
 	    case CKM_HKDF_DERIVE:
+	    case CKM_HKDF_DATA:
 	    case CKM_SP800_108_COUNTER_KDF:
 	    case CKM_SP800_108_FEEDBACK_KDF:
+	    case CKM_SP800_108_DOUBLE_PIPELINE_KDF:
 	    case CKM_SHAKE_256_KEY_DERIVATION:
+	    case CKM_SHA256_KEY_DERIVATION:
+	    case CKM_SHA384_KEY_DERIVATION:
+	    case CKM_SHA512_KEY_DERIVATION:
+	    case CKM_SHA3_256_KEY_DERIVATION:
+	    case CKM_SHA3_384_KEY_DERIVATION:
+	    case CKM_SHA3_512_KEY_DERIVATION:
+	    case CKM_SHA512_224_KEY_DERIVATION:
+	    case CKM_SHA512_256_KEY_DERIVATION:
 	        pInfo->ulMinKeySize = 1;
 	        pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 	        pInfo->flags = CKF_DERIVE;

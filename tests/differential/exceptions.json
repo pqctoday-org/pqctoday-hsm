@@ -109,7 +109,7 @@
     {
       "id": "LEGAL-SENSITIVE-DEFAULT-SLH-DSA",
       "status": "legal",
-      "scenario": "create.generate_key_pair.slh_dsa",
+      "scenario": "create.generate_key_pair.slh_dsa|create.generate_key_pair.slh_dsa_all_params|create.sign_verify.slh_dsa_all_params",
       "path": "*CKA_*SENSITIVE*",
       "justification": "Rust makes an SLH-DSA private key sensitive by default and C++ does not. §6.69 attaches the MUST-be-sensitive rule to HSS and XMSS only, so both are permitted; Rust's choice is the safer one.",
       "citation": "PKCS#11 v3.2 §6.65.3 and §6.66.4/§6.66.5 impose CKA_SENSITIVE on the hash-based families; §6.69 (SLH-DSA) imposes nothing."
@@ -235,7 +235,7 @@
       "path": "*CKA_*CAPSULATE*",
       "justification": "Both engines expose CKA_ENCAPSULATE/CKA_DECAPSULATE on key classes that cannot encapsulate — C++ on EC/Edwards/Montgomery, Rust on ML-DSA and SLH-DSA — in opposite directions, always with value false. Confusing, not constrained. Deliberately scoped to the NON-KEM scenarios: a divergence in these flags on an actual ML-KEM key would be a real capability disagreement and must keep failing.",
       "citation": "PKCS#11 v3.2 §4.9: these are boolean usage flags whose default is token-specific; a false flag advertises no capability.",
-      "scenario": "create.generate_key_pair.ec_p256|create.generate_key_pair.ed25519|create.generate_key_pair.x25519|create.generate_key_pair.ml_dsa_44|create.generate_key_pair.slh_dsa|encoding.wrap_private_key_pkcs8"
+      "scenario": "create.generate_key_pair.ec_p256|create.generate_key_pair.ed25519|create.generate_key_pair.x25519|create.generate_key_pair.ml_dsa_44|create.generate_key_pair.ml_dsa_all_params|create.generate_key_pair.slh_dsa|create.generate_key_pair.slh_dsa_all_params|encoding.wrap_private_key_pkcs8"
     },
     {
       "id": "LEGAL-ON-DISK-STORAGE-AND-TENANCY",
@@ -290,6 +290,15 @@
       "justification": "Recorded for completeness: the two engines implement different subsets of the key-derivation function registry. The CKD_* table is a value registry, not a mandate; no value is required, not even the null KDF.",
       "citation": "PKCS#11 v3.2 §6.3.x defines CKD_* values without requiring support for any of them.",
       "unobservable": "CKD_* values appear only inside derive parameters, which no scenario enumerates"
+    },
+    {
+      "id": "LEGAL-EC-EXTRA-BITS-CPP-UNIMPLEMENTED",
+      "status": "legal",
+      "scenario": "create.generate_key_pair.ec_extra_bits",
+      "path": "*",
+      "cpp": "<absent>|ABSENT|SKIPPED_MECHANISM_ABSENT",
+      "justification": "CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS (FIPS 186-5 A.2.2 'extra random bits' EC keygen) is Rust-only as of 2026-08-30 — the C++ investigation into it was paused mid-implementation (spec text was still being read when the session moved on) and the mechanism was never actually written. Every path in this scenario cascades from that single absence: the mechanism gate, C_GenerateKeyPair's return code, and then every one of the ~50 probed attributes on both key halves across all three curves, since C++ never produces the objects to probe. Not a conformance gap in the sense this harness normally means — it's a known, tracked TODO, not a divergent behavior for an implemented mechanism.",
+      "citation": "docs/remediation-plan-rust-pkcs11-v32-gaps-2026-08-30.md, section 4 — Rust implementation done and ACVP/unit-test verified; C++ side explicitly deferred, no plan item number assigned yet since the C++ engine hasn't started it."
     },
     {
       "id": "LEGAL-USAGE-FLAG-DEFAULT-RECOVER",

@@ -45,39 +45,43 @@
 
 // ─── Pre-hash support (FIPS 205 §10.1, HashSLH-DSA) ─────────────────────────
 
-// DER-encoded AlgorithmIdentifier for each hash (same OIDs as HashML-DSA).
-// SHA-2/SHA-3: SEQUENCE { OID, NULL }  (15 bytes)
-// SHAKE:       SEQUENCE { OID }        (13 bytes, absent parameters)
-static const unsigned char SLHDSA_ALGID_SHA224[]   = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x04, 0x05,0x00
+// FIPS 205 §10.1 (HashSLH-DSA, same OID convention as FIPS 204 §5.4): the
+// raw DER encoding of the hash function's object identifier alone (tag +
+// length + 9-byte OID value = 11 bytes for every choice, including SHAKE) —
+// NOT an X.509 AlgorithmIdentifier SEQUENCE. Byte-for-byte matches
+// rust/fips205-patched/src/hashers.rs:322-427.
+static const unsigned char SLHDSA_OID_SHA224[]   = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x04
 };
-static const unsigned char SLHDSA_ALGID_SHA256[]   = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01, 0x05,0x00
+static const unsigned char SLHDSA_OID_SHA256[]   = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01
 };
-static const unsigned char SLHDSA_ALGID_SHA384[]   = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02, 0x05,0x00
+static const unsigned char SLHDSA_OID_SHA384[]   = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02
 };
-static const unsigned char SLHDSA_ALGID_SHA512[]   = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03, 0x05,0x00
+static const unsigned char SLHDSA_OID_SHA512[]   = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03
 };
-static const unsigned char SLHDSA_ALGID_SHA3_224[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x07, 0x05,0x00
+static const unsigned char SLHDSA_OID_SHA3_224[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x07
 };
-static const unsigned char SLHDSA_ALGID_SHA3_256[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x08, 0x05,0x00
+static const unsigned char SLHDSA_OID_SHA3_256[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x08
 };
-static const unsigned char SLHDSA_ALGID_SHA3_384[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x09, 0x05,0x00
+static const unsigned char SLHDSA_OID_SHA3_384[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x09
 };
-static const unsigned char SLHDSA_ALGID_SHA3_512[] = {
-	0x30,0x0d, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0a, 0x05,0x00
+static const unsigned char SLHDSA_OID_SHA3_512[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0a
 };
-static const unsigned char SLHDSA_ALGID_SHAKE128[] = {
-	0x30,0x0b, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0b
+static const unsigned char SLHDSA_OID_SHAKE128[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0b
 };
-static const unsigned char SLHDSA_ALGID_SHAKE256[] = {
-	0x30,0x0b, 0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0c
+static const unsigned char SLHDSA_OID_SHAKE256[] = {
+	0x06,0x09, 0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x0c
 };
+
+static const size_t SLHDSA_OID_DER_LEN = 11; // every entry above is the same length
 
 struct SLHDSAPreHashInfo
 {
@@ -93,16 +97,16 @@ static const SLHDSAPreHashInfo* getSLHDSAPreHashInfo(HashAlgo::Type hashAlg)
 {
 	// SHAKE output lengths per FIPS 205: SHAKE128 → 32 bytes, SHAKE256 → 64 bytes
 	static const SLHDSAPreHashInfo table[] = {
-		{ "SHA2-224",  SLHDSA_ALGID_SHA224,    15, 28, false, NULL },
-		{ "SHA2-256",  SLHDSA_ALGID_SHA256,    15, 32, false, NULL },
-		{ "SHA2-384",  SLHDSA_ALGID_SHA384,    15, 48, false, NULL },
-		{ "SHA2-512",  SLHDSA_ALGID_SHA512,    15, 64, false, NULL },
-		{ "SHA3-224",  SLHDSA_ALGID_SHA3_224,  15, 28, false, NULL },
-		{ "SHA3-256",  SLHDSA_ALGID_SHA3_256,  15, 32, false, NULL },
-		{ "SHA3-384",  SLHDSA_ALGID_SHA3_384,  15, 48, false, NULL },
-		{ "SHA3-512",  SLHDSA_ALGID_SHA3_512,  15, 64, false, NULL },
-		{ "SHAKE128",  SLHDSA_ALGID_SHAKE128,  13, 32, true,  NULL },
-		{ "SHAKE256",  SLHDSA_ALGID_SHAKE256,  13, 64, true,  NULL },
+		{ "SHA2-224",  SLHDSA_OID_SHA224,    SLHDSA_OID_DER_LEN, 28, false, NULL },
+		{ "SHA2-256",  SLHDSA_OID_SHA256,    SLHDSA_OID_DER_LEN, 32, false, NULL },
+		{ "SHA2-384",  SLHDSA_OID_SHA384,    SLHDSA_OID_DER_LEN, 48, false, NULL },
+		{ "SHA2-512",  SLHDSA_OID_SHA512,    SLHDSA_OID_DER_LEN, 64, false, NULL },
+		{ "SHA3-224",  SLHDSA_OID_SHA3_224,  SLHDSA_OID_DER_LEN, 28, false, NULL },
+		{ "SHA3-256",  SLHDSA_OID_SHA3_256,  SLHDSA_OID_DER_LEN, 32, false, NULL },
+		{ "SHA3-384",  SLHDSA_OID_SHA3_384,  SLHDSA_OID_DER_LEN, 48, false, NULL },
+		{ "SHA3-512",  SLHDSA_OID_SHA3_512,  SLHDSA_OID_DER_LEN, 64, false, NULL },
+		{ "SHAKE128",  SLHDSA_OID_SHAKE128,  SLHDSA_OID_DER_LEN, 32, true,  NULL },
+		{ "SHAKE256",  SLHDSA_OID_SHAKE256,  SLHDSA_OID_DER_LEN, 64, true,  NULL },
 	};
 
 	switch (hashAlg)
@@ -142,6 +146,39 @@ void OSSLSLHDSA_cleanupPreHashCache()
 
 // Build HashSLH-DSA message: M' = 0x01 || len(ctx) || ctx || OID || PH(M)
 // per FIPS 205 §10.1
+// See OSSLMLDSA.cpp's identical buildMPrimeFromDigest for the full
+// rationale (remediation R37, phase 8) -- split out of
+// buildSLHDSAPreHashMsg so the bare generic CKM_HASH_SLH_DSA (PKCS#11
+// v3.2 §6.69.6) can share the encoding step without re-hashing an
+// already-hashed PHM.
+static bool buildSLHDSAMPrimeFromDigest(const unsigned char* digest, size_t digestLen,
+                                        const SLHDSAPreHashInfo* info,
+                                        const SLHDSA_SIGN_PARAMS* params,
+                                        ByteString& encoded)
+{
+	// Overflow guard: contextLen <= 255, algIdDerLen <= 15, digestLen <= 64 (max 336).
+	size_t totalLen = 1 + 1;
+	if (params->contextLen > SIZE_MAX - totalLen) return false;
+	totalLen += params->contextLen;
+	if (info->algIdDerLen > SIZE_MAX - totalLen) return false;
+	totalLen += info->algIdDerLen;
+	if (digestLen > SIZE_MAX - totalLen) return false;
+	totalLen += digestLen;
+	encoded.resize(totalLen);
+	size_t off = 0;
+	encoded[off++] = 0x01;  // pre-hash domain separator (FIPS 205 §10.1)
+	encoded[off++] = (unsigned char)params->contextLen;
+	if (params->contextLen > 0)
+	{
+		memcpy(&encoded[off], params->context, params->contextLen);
+		off += params->contextLen;
+	}
+	memcpy(&encoded[off], info->algIdDer, info->algIdDerLen);
+	off += info->algIdDerLen;
+	memcpy(&encoded[off], digest, digestLen);
+	return true;
+}
+
 static bool buildSLHDSAPreHashMsg(const ByteString& message,
                                    const SLHDSA_SIGN_PARAMS* params,
                                    ByteString& encoded)
@@ -197,30 +234,31 @@ static bool buildSLHDSAPreHashMsg(const ByteString& message,
 		}
 	}
 
-	// Build M' = 0x01 || len(ctx) || ctx || AlgId_DER || H(M)
-	// Overflow guard: contextLen <= 255, algIdDerLen <= 15, digestLen <= 64 (max 336).
-	size_t totalLen = 1 + 1;
-	if (params->contextLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += params->contextLen;
-	if (info->algIdDerLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += info->algIdDerLen;
-	if (info->digestLen > SIZE_MAX - totalLen) { OPENSSL_cleanse(digest, sizeof(digest)); return false; }
-	totalLen += info->digestLen;
-	encoded.resize(totalLen);
-	size_t off = 0;
-	encoded[off++] = 0x01;  // pre-hash domain separator (FIPS 205 §10.1)
-	encoded[off++] = (unsigned char)params->contextLen;
-	if (params->contextLen > 0)
-	{
-		memcpy(&encoded[off], params->context, params->contextLen);
-		off += params->contextLen;
-	}
-	memcpy(&encoded[off], info->algIdDer, info->algIdDerLen);
-	off += info->algIdDerLen;
-	memcpy(&encoded[off], digest, info->digestLen);
+	bool ok = buildSLHDSAMPrimeFromDigest(digest, info->digestLen, info, params, encoded);
 	OPENSSL_cleanse(digest, sizeof(digest));
+	return ok;
+}
 
-	return true;
+// PKCS#11 v3.2 §6.69.6, bare generic CKM_HASH_SLH_DSA: dataToSign IS the
+// PHM (already hashed by the caller) -- build M' directly, no internal
+// hashing. Loudly rejects a wrong-length PHM.
+static bool buildSLHDSAMPrimeFromPHM(const ByteString& phm,
+                                     const SLHDSA_SIGN_PARAMS* params,
+                                     ByteString& encoded)
+{
+	const SLHDSAPreHashInfo* info = getSLHDSAPreHashInfo(params->hashAlg);
+	if (!info)
+	{
+		ERROR_MSG("Unknown hash algorithm for generic HashSLH-DSA");
+		return false;
+	}
+	if (phm.size() != info->digestLen)
+	{
+		ERROR_MSG("CKM_HASH_SLH_DSA: PHM length %zu does not match %s digest "
+		         "length %zu", phm.size(), info->evpName, info->digestLen);
+		return false;
+	}
+	return buildSLHDSAMPrimeFromDigest(phm.const_byte_str(), phm.size(), info, params, encoded);
 }
 
 // Check if mechanism is a supported SLH-DSA family mechanism
@@ -304,6 +342,15 @@ bool OSSLSLHDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	if (slhdsaParams && slhdsaParams->preHash)
 	{
 		if (!buildSLHDSAPreHashMsg(dataToSign, slhdsaParams, preHashMsg))
+			return false;
+		signData    = preHashMsg.const_byte_str();
+		signDataLen = preHashMsg.size();
+	}
+	else if (slhdsaParams && slhdsaParams->phmInput)
+	{
+		// Remediation R37 (phase 8): bare generic CKM_HASH_SLH_DSA --
+		// dataToSign IS the PHM already, never hash it again.
+		if (!buildSLHDSAMPrimeFromPHM(dataToSign, slhdsaParams, preHashMsg))
 			return false;
 		signData    = preHashMsg.const_byte_str();
 		signDataLen = preHashMsg.size();
@@ -429,6 +476,14 @@ bool OSSLSLHDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 	if (slhdsaParams && slhdsaParams->preHash)
 	{
 		if (!buildSLHDSAPreHashMsg(originalData, slhdsaParams, preHashMsg))
+			return false;
+		verifyData    = preHashMsg.const_byte_str();
+		verifyDataLen = preHashMsg.size();
+	}
+	else if (slhdsaParams && slhdsaParams->phmInput)
+	{
+		// Remediation R37 (phase 8): see sign()'s identical comment.
+		if (!buildSLHDSAMPrimeFromPHM(originalData, slhdsaParams, preHashMsg))
 			return false;
 		verifyData    = preHashMsg.const_byte_str();
 		verifyDataLen = preHashMsg.size();

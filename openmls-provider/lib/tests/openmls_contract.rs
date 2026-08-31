@@ -78,6 +78,15 @@ struct HsmEnv {
 }
 
 fn run_hsm(module: &PathBuf) -> (StateSnapshot, HsmEnv) {
+    run_hsm_for_suite(module, Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519)
+}
+
+/// Same 2-member lifecycle as [`run_hsm`], parameterised over ciphersuite so
+/// the ChaCha20-Poly1305-record-layer suites (3 and X-Wing) can be driven
+/// through the exact same real add-member / Commit / Application-message
+/// path, against the real HSM-backed provider — not a synthetic AEAD
+/// call in isolation.
+fn run_hsm_for_suite(module: &PathBuf, ciphersuite: Ciphersuite) -> (StateSnapshot, HsmEnv) {
     let tokens_dir = tempfile::tempdir().unwrap();
     let mut conf_file = tempfile::NamedTempFile::new().unwrap();
     writeln!(
@@ -105,7 +114,6 @@ fn run_hsm(module: &PathBuf) -> (StateSnapshot, HsmEnv) {
     let alice_provider = PqcTodayProvider::new(&cfg).expect("alice provider");
     let bob_provider = alice_provider.spawn_sibling(None).expect("bob provider");
 
-    let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
     let alice_signer: PqcTodayHsmSigner = alice_provider
         .generate_signer(SignatureScheme::ED25519)
         .unwrap();
@@ -341,5 +349,77 @@ fn semantic_equivalence_vs_rustcrypto() {
     eprintln!(
         "  b→a plaintext: {:?}",
         std::str::from_utf8(&hsm_state.bob_to_alice_plaintext).unwrap()
+    );
+}
+
+// ── ChaCha20-Poly1305 record-layer AEAD: suite 3 and X-Wing ─────────────────
+//
+// remediation-plan-provider-wrapper-coverage-gaps-2026-08-31.md §1.2: before
+// this fix, crypto.rs's aead_encrypt/aead_decrypt routed AeadType::
+// ChaCha20Poly1305 to a bare `chacha20poly1305` crate call
+// (sw_chacha20_encrypt/_decrypt), not the HSM/engine. That software path no
+// longer exists in the source at all (removed, not just bypassed) — so a
+// real 2-member add-member / Commit / Application-message lifecycle on
+// these two ciphersuites can ONLY succeed by going through
+// self.ops.chacha20_poly1305 (CryptokiBackend -> softhsmrustv3::native::
+// encrypt::{encrypt,decrypt}_with_key_bytes(CKM_CHACHA20_POLY1305)), the
+// same primitive xwing_rust_engine.rs's chacha20_poly1305_matches_known_answer
+// already proves byte-exact against an independent known answer.
+
+fn assert_real_group_roundtrip(state: &StateSnapshot, a2b: &[u8], b2a: &[u8], label: &str) {
+    assert_eq!(state.alice_epoch, 1, "{label}: alice epoch advanced past group creation");
+    assert_eq!(state.bob_epoch, 1, "{label}: bob epoch advanced past group creation");
+    assert_eq!(state.alice_member_count, 2, "{label}: alice sees 2 members");
+    assert_eq!(state.bob_member_count, 2, "{label}: bob sees 2 members");
+    assert!(state.group_ids_match, "{label}: alice and bob share group_id");
+    assert_eq!(
+        state.alice_to_bob_plaintext, a2b,
+        "{label}: alice→bob Application message decrypts to the original plaintext"
+    );
+    assert_eq!(
+        state.bob_to_alice_plaintext, b2a,
+        "{label}: bob→alice Application message decrypts to the original plaintext"
+    );
+}
+
+#[test]
+fn mls_group_roundtrip_suite3_chacha20poly1305() {
+    let module = match resolve_module() {
+        Some(m) => m,
+        None => {
+            eprintln!("skip: no PKCS#11 module found — set PKCS11_MODULE or build the C++ engine");
+            return;
+        }
+    };
+    let (state, _env) = run_hsm_for_suite(
+        &module,
+        Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519,
+    );
+    assert_real_group_roundtrip(
+        &state,
+        b"alice contract test message",
+        b"bob contract test reply",
+        "suite 3 (DHKemX25519 + ChaCha20Poly1305)",
+    );
+}
+
+#[test]
+fn mls_group_roundtrip_xwing_suite() {
+    let module = match resolve_module() {
+        Some(m) => m,
+        None => {
+            eprintln!("skip: no PKCS#11 module found — set PKCS11_MODULE or build the C++ engine");
+            return;
+        }
+    };
+    let (state, _env) = run_hsm_for_suite(
+        &module,
+        Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519,
+    );
+    assert_real_group_roundtrip(
+        &state,
+        b"alice contract test message",
+        b"bob contract test reply",
+        "X-Wing (ML-KEM-768 + X25519 + ChaCha20Poly1305)",
     );
 }

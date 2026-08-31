@@ -1,8 +1,13 @@
 # openssh-pkcs11 WASM build status
 
 **Status: working — real end-to-end post-quantum SSH handshake** (updated
-2026-06-27). This supersedes the earlier "scaffold" status; the notes below
+2026-08-31). This supersedes the earlier "scaffold" status; the notes below
 reflect the current bundle. See `CHANGELOG.md` for the full detail.
+
+**Algorithm coverage (2026-08-31):** ML-DSA-44/65/87 (all 3 FIPS 204
+parameter sets) and SLH-DSA-{SHA2,SHAKE}-{128,256}{s,f} (8 of the 12 FIPS 205
+parameter sets — the 192-category standard sets have no SSH wire name in the
+governing draft; see `README.md#parameter-set-coverage`).
 
 ## Build infrastructure
 
@@ -23,7 +28,7 @@ The build produces a working bundle in `dist/`:
   handle, so OpenSSH walks the **real `ssh-pkcs11.c` provider path** — not a
   bypass.
 
-## Verification — `node sm1-smoke.cjs`
+## Verification — `node sm1-smoke.cjs` / `node sm5-slhdsa-smoke.cjs` / `node sm6-paramsweep-smoke.cjs`
 
 The `sm1-smoke.cjs` harness proves a full PQ SSH session runs entirely in the
 WASM sandbox, with both private keys staying inside the in-WASM software HSM:
@@ -38,14 +43,27 @@ WASM sandbox, with both private keys staying inside the in-WASM software HSM:
   ML-DSA-65 key signs the signed-data blob (3,329-byte SSH wire format) and the
   server verifies with `sshkey_verify`.
 
+`sm5-slhdsa-smoke.cjs` repeats the same round trip for SLH-DSA-SHA2-128s.
+`sm6-paramsweep-smoke.cjs` (added 2026-08-31) generalizes the same
+KAT-length-assertion pattern across every newly-added ML-DSA/SLH-DSA
+parameter set — see `CHANGELOG.md` for the full per-parameter-set
+verification table (native, since this environment has no `emcc`; WASM
+rebuild + `sm6` still need to run wherever Emscripten is available before
+this ships).
+
 ## Configurability
 
 `set_handshake_config(kex, hostalg)` selects the profile at runtime: host keys
-`ssh-mldsa-65` (ML-DSA-65) or `ecdsa-sha2-nistp256` (ECDSA P-256), and any
-compiled KEX (`mlkem768x25519-sha256`, `curve25519-sha256`, `ecdh-sha2-nistp*`)
-— enabling a real classical-vs-PQC comparison. A PKCS#11 trace tap emits a
-`pkcs11` event per `C_Login` / `C_FindObjects` / `C_GetAttributeValue` /
-`C_SignInit` / `C_Sign` so a UI can render the genuine call sequence.
+`ssh-mldsa-44`/`-65`/`-87`, `ssh-slh-dsa-{sha2,shake}-{128,256}{s,f}`, or
+`ecdsa-sha2-nistp256` (ECDSA P-256), and any compiled KEX
+(`mlkem768x25519-sha256`, `curve25519-sha256`, `ecdh-sha2-nistp*`) — enabling
+a real classical-vs-PQC comparison. The `mlkem768x25519-sha256` method is
+stock upstream OpenSSH behavior, standardized in
+[draft-ietf-sshm-mlkem-hybrid-kex-10](https://datatracker.ietf.org/doc/draft-ietf-sshm-mlkem-hybrid-kex/)
+(WG-adopted) — this connector doesn't patch it in, it's exercised as-is. A
+PKCS#11 trace tap emits a `pkcs11` event per `C_Login` / `C_FindObjects` /
+`C_GetAttributeValue` / `C_SignInit` / `C_Sign` so a UI can render the genuine
+call sequence.
 
 ## Honest scope
 

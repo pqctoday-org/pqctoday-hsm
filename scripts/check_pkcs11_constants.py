@@ -70,6 +70,15 @@ VENDOR_BASE = 0x80000000
 #            for a vendor key type; not a codepoint, so exempt from the
 #            vendor-space (>= 0x80000000) rule (same idea as CKP_ML_DSA_*/
 #            CKP_ML_KEM_* in the OASIS header itself).
+#   pre-ratification — a mechanism the OASIS PKCS#11 TC has publicly
+#            committed to specifying in a FUTURE, not-yet-ratified version
+#            (tracked TC issue + technical writeup exist; no ratified spec
+#            text and no TC-assigned codepoint yet). This project assigns
+#            a stopgap numeric value in the legacy 0x4000-range CKM
+#            vendor-extension band (pre-dating the 0x80000000 convention,
+#            same band the ratified spec itself still uses for e.g.
+#            CKM_HKDF_DERIVE) pending official assignment; see the cited
+#            doc for the numeric-value rationale, not just the feature.
 PINNED = {
     # LMS tree parameter sets (IANA "LMS" registry, RFC 8554 §5 + SP 800-208 §4)
     "CKP_LMS_SHA256_M32_H5": (0x05, "iana"),
@@ -230,6 +239,15 @@ PINNED = {
     "CK_ATTRIBUTE_SIZE": (12, "abi"),
     "CK_MECHANISM_SIZE": (12, "abi"),
     "CK_SIGN_ADDITIONAL_CONTEXT_SIZE": (12, "abi"),
+    # ML-DSA external-mu (remediation R34, PQCTODAY-VENDOR-EXT-MU). PKCS#11
+    # v3.2 (ratified) has no field for a caller-supplied mu; the OASIS
+    # PKCS#11 TC has committed to specifying it in v3.3 (not ratified, no
+    # codepoint assigned yet) — see oasis-tcs/pkcs11#58 and
+    # docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md for
+    # the full citation trail (TC issue, IETF 123 LAMPS slides, IACR
+    # eprint 2026/617). Stopgap values pending official assignment.
+    "CKM_ML_DSA_EXTERNAL_MU": (0x0000403C, "pre-ratification"),
+    "CKM_ML_DSA_EXTERNAL_MU_GEN": (0x0000403B, "pre-ratification"),
 }
 
 # Cross-check: drift pins must equal their spec counterpart in the header.

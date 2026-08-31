@@ -40,7 +40,8 @@ public final class SoftHSMv3RemoteProvider extends Provider implements AutoClose
 
     private static final String NAME = "SoftHSMv3-Remote";
     private static final String INFO =
-        "PKCS#11 gRPC-remote JCA/JCE provider for softhsmrustv3 (Ed25519, ML-DSA-44/65/87, ML-KEM-512/768/1024)";
+        "PKCS#11 gRPC-remote JCA/JCE provider for softhsmrustv3 (Ed25519, ML-DSA-44/65/87 "
+        + "+ ExternalMu, ML-KEM-512/768/1024)";
 
     // Package-private (not private) so same-package test code can reach
     // the transport directly, same discipline as the local provider's
@@ -138,6 +139,16 @@ public final class SoftHSMv3RemoteProvider extends Provider implements AutoClose
         registerSignature("ML-DSA-65", Algorithm.ML_DSA_65);
         registerSignature("ML-DSA-87", Algorithm.ML_DSA_87);
 
+        // ── Signature: FIPS 204 external-µ mode (added 2026-08-31,
+        // SignRequest/VerifyRequest.external_mu) — fixed service names,
+        // mirroring local JavaJCE/SoftHSMv3Provider#registerMLDSAExternalMu
+        // exactly (see RemoteSignatureSpi's own javadoc for why this is
+        // the consistent choice over a parameter-based flag). ML-DSA
+        // only — external-µ is not meaningful for Ed25519.
+        registerMLDSAExternalMu("ML-DSA-44-ExternalMu", Algorithm.ML_DSA_44);
+        registerMLDSAExternalMu("ML-DSA-65-ExternalMu", Algorithm.ML_DSA_65);
+        registerMLDSAExternalMu("ML-DSA-87-ExternalMu", Algorithm.ML_DSA_87);
+
         // ── KEM: bare family name (what JDK's own JEP 527 hybrid-TLS
         // path requests, matching the local provider's own precedent)
         // plus the 3 parameter-set-specific names for direct use.
@@ -165,6 +176,15 @@ public final class SoftHSMv3RemoteProvider extends Provider implements AutoClose
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
                 return new RemoteSignatureSpi(transport, algo);
+            }
+        });
+    }
+
+    private void registerMLDSAExternalMu(String name, Algorithm algo) {
+        putService(new Service(this, "Signature", name, RemoteSignatureSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new RemoteSignatureSpi(transport, algo, true);
             }
         });
     }

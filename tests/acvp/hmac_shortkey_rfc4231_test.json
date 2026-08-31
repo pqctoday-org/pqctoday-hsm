@@ -1,0 +1,180 @@
+{
+  "algorithm": "HMAC-shortkey-RFC4231-TC1",
+  "mode": "AFT",
+  "revision": "n/a",
+  "_provenance": {
+    "source_url": "https://www.rfc-editor.org/rfc/rfc4231.txt",
+    "source_release": "RFC 4231 (December 2005), IETF -- Identifiers and Test Vectors for HMAC-SHA-224/256/384/512",
+    "retrieved": "2026-08-31",
+    "producer": "Python 3.12 hmac + hashlib (OpenSSL-backed), cross-checked against an independent from-scratch ipad/opad HMAC construction for every algorithm below (both agree exactly for all 11)",
+    "source_sha256": "72178527ce93500e730bc8eb182b857e583096d652b64ece0879c52ba1df973b",
+    "note": "RFC 4231 §4.2 Test Case 1 (SHA2-224/256/384/512); self-computed extension of the identical construction for SHA-1/SHA2-512-224/SHA2-512-256/SHA3-224/256/384/512, which RFC 4231 does not define -- Closes a real coverage gap: commit 58be5cb4 fixed a kMacMechTable bug (src/lib/SoftHSM_sign.cpp) where minKeyBytes for every plain-digest HMAC mechanism was set to that digest's own output length, so MacSignInit/MacVerifyInit rejected any key shorter than the digest with CKR_KEY_SIZE_RANGE. The bug shipped undetected because every curated ACVP-Server sample in this directory's other hmac*.json files uses a key >=121 bytes (hmac_test.json's is 228) -- none of them exercise a shorter-than-digest key, which is exactly the condition the bug hinged on. RFC 2104 places no lower bound on an HMAC key; RFC 4231 SS4.2 Test Case 1 is the standard's own canonical vector proving this: a 20-byte key (0x0b x20) against \"Hi There\", deliberately shorter than SHA-384/512's digest output. This file's SHA2-256 group matches, byte for byte, the literal expected value already hardcoded in openmls-provider/lib/tests/integration.rs's hmac_sha256_known_answer (same key/message/hash: b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7) -- that native-Rust-engine test (via PKCS#11) is what originally caught this bug; this file brings the same short-key coverage to the wasm harness (C++ engine, via raw PKCS#11 calls from Node/JS) as a genuine second, independent-runtime cross-check, not a duplicate. Uses each mechanism's plain (non-_GENERAL, exact-length) form -- RFC 4231's published MACs are full untruncated digests, unlike the truncated SP 800-107 samples the sibling hmac*.json files use with CKM_*_HMAC_GENERAL. Note: the SHA-1 group's key length (20 bytes) equals SHA-1's own digest length exactly -- it satisfies (does not violate) the old buggy minKeyBytes=digestLen check, so it does not by itself prove the regression the way the other 10 groups do; it is included only for HMAC-SHA-1 plain-mechanism KAT coverage, which this harness otherwise has none of."
+  },
+  "testGroups": [
+    {
+      "tgId": 1,
+      "hashAlg": "SHA-1",
+      "mechanism": "CKM_SHA_1_HMAC",
+      "source": "RFC-4231-§4.2-TC1-pattern (self-computed: same 20-byte 0x0b key + \"Hi There\", not in RFC 4231 itself)",
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B",
+          "msg": "4869205468657265",
+          "mac": "B617318655057264E28BC0B6FB378C8EF146BE00",
+          "macLen": 160
+        }
+      ]
+    },
+    {
+      "tgId": 2,
+      "hashAlg": "SHA2-224",
+      "mechanism": "CKM_SHA224_HMAC",
+      "source": "RFC 4231 §4.2 Test Case 1 (published)",
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B",
+          "msg": "4869205468657265",
+          "mac": "896FB1128ABBDF196832107CD49DF33F47B4B1169912BA4F53684B22",
+          "macLen": 224
+        }
+      ]
+    },
+    {
+      "tgId": 3,
+      "hashAlg": "SHA2-256",
+      "mechanism": "CKM_SHA256_HMAC",
+      "source": "RFC 4231 §4.2 Test Case 1 (published)",
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B",
+          "msg": "4869205468657265",
+          "mac": "B0344C61D8DB38535CA8AFCEAF0BF12B881DC200C9833DA726E9376C2E32CFF7",
+          "macLen": 256
+        }
+      ]
+    },
+    {
+      "tgId": 4,
+      "hashAlg": "SHA2-384",
+      "mechanism": "CKM_SHA384_HMAC",
+      "source": "RFC 4231 §4.2 Test Case 1 (published)",
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B",
+          "msg": "4869205468657265",
+          "mac": "AFD03944D84895626B0825F4AB46907F15F9DADBE4101EC682AA034C7CEBC59CFAEA9EA9076EDE7F4AF152E8B2FA9CB6",
+          "macLen": 384
+        }
+      ]
+    },
+    {
+      "tgId": 5,
+      "hashAlg": "SHA2-512",
+      "mechanism": "CKM_SHA512_HMAC",
+      "source": "RFC 4231 §4.2 Test Case 1 (published)",
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B",
+          "msg": "4869205468657265",
+          "mac": "87AA7CDEA5EF619D4FF0B4241A1D6CB02379F4E2CE4EC2787AD0B30545E17CDEDAA833B7D6B8A702038B274EAEA3F4E4BE9D914EEB61F1702E696C203A126854",
+          "macLen": 512
+        }
+      ]
+    },
+    {
+      "tgId": 6,
+      "hashAlg": "SHA2-512/224",
+      "mechanism": "CKM_SHA512_224_HMAC",
+      "source": "RFC-4231-§4.2-TC1-pattern (self-computed: same 20-byte 0x0b key + \"Hi There\", not in RFC 4231 itself)",
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B",
+          "msg": "4869205468657265",
+          "mac": "B244BA01307C0E7A8CCAAD13B1067A4CF6B961FE0C6A20BDA3D92039",
+          "macLen": 224
+        }
+      ]
+    },
+    {
+      "tgId": 7,
+      "hashAlg": "SHA2-512/256",
+      "mechanism": "CKM_SHA512_256_HMAC",
+      "source": "RFC-4231-§4.2-TC1-pattern (self-computed: same 20-byte 0x0b key + \"Hi There\", not in RFC 4231 itself)",
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B",
+          "msg": "4869205468657265",
+          "mac": "9F9126C3D9C3C330D760425CA8A217E31FEAE31BFE70196FF81642B868402EAB",
+          "macLen": 256
+        }
+      ]
+    },
+    {
+      "tgId": 8,
+      "hashAlg": "SHA3-224",
+      "mechanism": "CKM_SHA3_224_HMAC",
+      "source": "RFC-4231-§4.2-TC1-pattern (self-computed: same 20-byte 0x0b key + \"Hi There\", not in RFC 4231 itself)",
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B",
+          "msg": "4869205468657265",
+          "mac": "3B16546BBC7BE2706A031DCAFD56373D9884367641D8C59AF3C860F7",
+          "macLen": 224
+        }
+      ]
+    },
+    {
+      "tgId": 9,
+      "hashAlg": "SHA3-256",
+      "mechanism": "CKM_SHA3_256_HMAC",
+      "source": "RFC-4231-§4.2-TC1-pattern (self-computed: same 20-byte 0x0b key + \"Hi There\", not in RFC 4231 itself)",
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B",
+          "msg": "4869205468657265",
+          "mac": "BA85192310DFFA96E2A3A40E69774351140BB7185E1202CDCC917589F95E16BB",
+          "macLen": 256
+        }
+      ]
+    },
+    {
+      "tgId": 10,
+      "hashAlg": "SHA3-384",
+      "mechanism": "CKM_SHA3_384_HMAC",
+      "source": "RFC-4231-§4.2-TC1-pattern (self-computed: same 20-byte 0x0b key + \"Hi There\", not in RFC 4231 itself)",
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B",
+          "msg": "4869205468657265",
+          "mac": "68D2DCF7FD4DDD0A2240C8A437305F61FB7334CFB5D0226E1BC27DC10A2E723A20D370B47743130E26AC7E3D532886BD",
+          "macLen": 384
+        }
+      ]
+    },
+    {
+      "tgId": 11,
+      "hashAlg": "SHA3-512",
+      "mechanism": "CKM_SHA3_512_HMAC",
+      "source": "RFC-4231-§4.2-TC1-pattern (self-computed: same 20-byte 0x0b key + \"Hi There\", not in RFC 4231 itself)",
+      "tests": [
+        {
+          "tcId": 1,
+          "key": "0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B0B",
+          "msg": "4869205468657265",
+          "mac": "EB3FBD4B2EAAB8F5C504BD3A41465AACEC15770A7CABAC531E482F860B5EC7BA47CCB2C6F2AFCE8F88D22B6DC61380F23A668FD3888BB80537C0A0B86407689E",
+          "macLen": 512
+        }
+      ]
+    }
+  ]
+}

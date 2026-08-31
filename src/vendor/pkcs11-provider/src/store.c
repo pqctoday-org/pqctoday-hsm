@@ -400,6 +400,19 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
                 return RET_OSSL_ERR;
             }
             break;
+        case CKK_EC_MONTGOMERY:
+            /* remediation R4 */
+            switch (p11prov_obj_get_key_bit_size(obj)) {
+            case X448_BIT_SIZE:
+                data_type = (char *)X448_NAME;
+                break;
+            case X25519_BIT_SIZE:
+                data_type = (char *)X25519_NAME;
+                break;
+            default:
+                return RET_OSSL_ERR;
+            }
+            break;
         case CKK_ML_DSA: {
             CK_ULONG ps = p11prov_obj_get_key_param_set(obj);
             switch (ps) {
@@ -434,6 +447,68 @@ static int p11prov_store_load(void *pctx, OSSL_CALLBACK *object_cb,
             }
             break;
         }
+        case CKK_SLH_DSA: {
+            CK_ULONG ps = p11prov_obj_get_key_param_set(obj);
+            switch (ps) {
+            case CKP_SLH_DSA_SHA2_128S:
+                data_type = (char *)SLHDSA_SHA2_128S;
+                break;
+            case CKP_SLH_DSA_SHAKE_128S:
+                data_type = (char *)SLHDSA_SHAKE_128S;
+                break;
+            case CKP_SLH_DSA_SHA2_128F:
+                data_type = (char *)SLHDSA_SHA2_128F;
+                break;
+            case CKP_SLH_DSA_SHAKE_128F:
+                data_type = (char *)SLHDSA_SHAKE_128F;
+                break;
+            case CKP_SLH_DSA_SHA2_192S:
+                data_type = (char *)SLHDSA_SHA2_192S;
+                break;
+            case CKP_SLH_DSA_SHAKE_192S:
+                data_type = (char *)SLHDSA_SHAKE_192S;
+                break;
+            case CKP_SLH_DSA_SHA2_192F:
+                data_type = (char *)SLHDSA_SHA2_192F;
+                break;
+            case CKP_SLH_DSA_SHAKE_192F:
+                data_type = (char *)SLHDSA_SHAKE_192F;
+                break;
+            case CKP_SLH_DSA_SHA2_256S:
+                data_type = (char *)SLHDSA_SHA2_256S;
+                break;
+            case CKP_SLH_DSA_SHAKE_256S:
+                data_type = (char *)SLHDSA_SHAKE_256S;
+                break;
+            case CKP_SLH_DSA_SHA2_256F:
+                data_type = (char *)SLHDSA_SHA2_256F;
+                break;
+            case CKP_SLH_DSA_SHAKE_256F:
+                data_type = (char *)SLHDSA_SHAKE_256F;
+                break;
+            default:
+                return RET_OSSL_ERR;
+            }
+            break;
+        }
+        case CKK_HSS:
+            /* Phase 4 R9: no CKA_PARAMETER_SET / per-variant name split —
+             * this keymgmt only ever generates the engine's single
+             * documented default. */
+            data_type = (char *)"HSS";
+            break;
+        case CKK_XMSS:
+            /* Remediation R41 (phase 8): same "single algorithm name, no
+             * per-variant split" choice as HSS above. */
+            data_type = (char *)"XMSS";
+            break;
+        case CKK_XMSSMT:
+            /* Canonical first name only (matches the single-name-per-type
+             * convention every other case in this switch uses) — the
+             * ":XMSS-MT" alias in P11PROV_NAMES_XMSSMT is for OSSL_ALGORITHM
+             * registration, not this store data_type field. */
+            data_type = (char *)"XMSSMT";
+            break;
         default:
             return RET_OSSL_ERR;
         }

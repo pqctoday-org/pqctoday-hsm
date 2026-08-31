@@ -21,8 +21,42 @@ extern const OSSL_DISPATCH p11prov_ec_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_hkdf_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_ed25519_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_ed448_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_x25519_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_x448_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_mldsa44_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_mldsa65_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_mldsa87_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_128s_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_128s_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_128f_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_128f_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_192s_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_192s_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_192f_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_192f_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_256s_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_256s_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_sha2_256f_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_slhdsa_shake_256f_keymgmt_functions[];
+/* HSS/LMS token keygen (phase 4 R9) */
+extern const OSSL_DISPATCH p11prov_hss_keymgmt_functions[];
+/* XMSS/XMSS^MT token keygen (remediation R41, phase 8) */
+extern const OSSL_DISPATCH p11prov_xmss_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_xmssmt_keymgmt_functions[];
+
+/* ML-KEM token keygen (defined in keymgmt.c, consumed by kem/mlkem.c's
+ * per-variant OSSL_DISPATCH tables — see the comment ahead of
+ * p11prov_mlkem_gen_init_int in keymgmt.c for why these cross the file). */
+void *p11prov_mlkem512_gen_init(void *provctx, int selection,
+                                const OSSL_PARAM params[]);
+void *p11prov_mlkem768_gen_init(void *provctx, int selection,
+                                const OSSL_PARAM params[]);
+void *p11prov_mlkem1024_gen_init(void *provctx, int selection,
+                                 const OSSL_PARAM params[]);
+void *p11prov_mlkem_gen(void *genctx, OSSL_CALLBACK *cb_fn, void *cb_arg);
+const OSSL_PARAM *p11prov_mlkem_gen_settable_params(void *genctx,
+                                                     void *provctx);
+int p11prov_common_gen_set_params(void *genctx, const OSSL_PARAM params[]);
+void p11prov_common_gen_cleanup(void *genctx);
 
 #endif /* _KEYMGMT_H */

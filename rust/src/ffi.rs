@@ -317,6 +317,22 @@ pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
         }
     }
     crate::state::init_token_store();
+    // remediation R6: native, opt-in disk persistence — off by default,
+    // byte-identical to today's in-memory-only behavior when the env var
+    // is unset. Reuses state_snapshot.rs's existing serialize/deserialize
+    // pair (already compiled natively; only the emscripten wiring was
+    // missing) and inherits its SHR3SNP2 refuse-don't-migrate policy
+    // verbatim: a foreign/old-format snapshot is refused loudly here too,
+    // never half-loaded as a partially-initialized token. A missing file
+    // is not an error — first run on a fresh SOFTHSMRUST_STATE_FILE path
+    // is a normal empty token, exactly like today.
+    if let Ok(path) = std::env::var("SOFTHSMRUST_STATE_FILE") {
+        if let Ok(buf) = std::fs::read(&path) {
+            if let Err(rv) = crate::state_snapshot::deserialize_token_state(&buf) {
+                return rv;
+            }
+        }
+    }
     crate::state::set_initialized(true);
     CKR_OK
 }
@@ -335,6 +351,25 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     // See state_snapshot.rs and openssl-studio-pkcs11-wiring-plan-07242026.md.
     #[cfg(target_os = "emscripten")]
     crate::state_snapshot::stash_before_finalize();
+    // remediation R6: native counterpart to the emscripten stash above —
+    // same reasoning, same ordering (must run before the cleanup pass
+    // below), gated on the same opt-in env var C_Initialize checks rather
+    // than a build-time cfg, since this is a deliberate dev/test opt-in
+    // for any native build, not an embedding-specific requirement. Honest
+    // limitation, not hidden: unlike the C++ engine's token directory
+    // (PIN-derived encryption of sensitive attributes), this snapshot is
+    // plaintext at rest — a dev/test persistence surface, not production.
+    // Best-effort write, matching stash_before_finalize's own pattern.
+    if let Ok(path) = std::env::var("SOFTHSMRUST_STATE_FILE") {
+        let blob = crate::state_snapshot::serialize_token_state();
+        if std::fs::write(&path, &blob).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
     // §5.6 doesn't call for token objects to be destroyed by C_Finalize —
     // only session objects don't survive past a session's lifetime, and a
     // session can't outlive Finalize. Token objects (CKA_TOKEN=TRUE, e.g.
@@ -510,52 +545,84 @@ pub fn C_GetSlotList(token_present: u8, p_slot_list: *mut u32, pul_count: *mut u
     if pul_count.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
-    let token_present_bool = token_present != 0;
+    // token_present is a no-op filter here: every TOKEN_STORE entry already
+    // represents a slot with a token physically present, initialized or
+    // not — this engine has no separate "empty slot, no token at all"
+    // state to filter out. Matches the C++ engine's reference semantics
+    // (SlotManager::getSlotList, src/lib/slot_mgr/SlotManager.cpp): its
+    // tokenPresent==TRUE filter checks isTokenPresent() (a token object
+    // exists in the slot), never isInitialized() — those are different
+    // questions (PKCS#11 v3.2 pkcs11t.h: CKF_TOKEN_PRESENT lives on
+    // CK_SLOT_INFO, CKF_TOKEN_INITIALIZED on CK_TOKEN_INFO — genuinely
+    // separate flags on separate structs). CONFIRMED root cause, not a
+    // guess: the previous code conflated them (`t.initialized`), and
+    // softhsm2-util's own findSlot() (src/bin/common/findslot.cpp) calls
+    // C_GetSlotList(CK_TRUE, NULL, ...) for its size query, then
+    // C_GetSlotList(CK_FALSE, buf, ...) to fill — CK_FALSE never filtered
+    // in either version, so the size call alone under-reporting (0
+    // instead of 1, with init_token_store() always seeding slot 0 as
+    // initialized:false at engine start) against the fill call's
+    // correct, unfiltered count triggered CKR_BUFFER_TOO_SMALL — exactly
+    // "Could not get the slot list", softhsm2-util's literal error text.
+    // Sabotage-tested (harness T15b): reverting just this filter, with
+    // the auto-advance gating below left fixed, reproduces the failure
+    // on its own — this is the necessary fix.
+    let _ = token_present;
 
-    // Auto-advance slots if needed (mimic SoftHSMv2/v3 shift: always provide 1 uninitialized token)
-    TOKEN_STORE.with(|ts| {
-        let mut store = ts.borrow_mut();
-        let all_initialized = store.values().all(|t| t.initialized);
-        if all_initialized {
-            let next_slot = store.keys().max().unwrap_or(&0) + 1;
-            store.insert(
-                next_slot,
-                TokenState {
-                    slot_id: next_slot,
-                    initialized: false,
-                    label: [0x20; 32],
-                    login_state: LoginState::Public,
-                    so_pin_salt: [0u8; 16],
-                    so_pin_hash: [0u8; 32],
-                    user_pin_salt: None,
-                    user_pin_hash: None,
-                },
-            );
+    // Auto-advance ("always keep one spare uninitialized slot") mutates
+    // the store ONLY on the count-query call (p_slot_list is null) —
+    // mirroring SlotManager::getSlotList's own gating (its insertion is
+    // inside the `if (pSlotList == NULL)` branch, never the fill branch)
+    // and the spec's own language (§5.5.1: "the set of slots... is
+    // checked at the time that C_GetSlotList, for list length
+    // prediction (NULL pSlotList argument) is called"). Kept as a
+    // spec-aligned hardening, NOT a second proven bug: TOKEN_STORE
+    // persists across both calls within a process, so the previous
+    // code's redundant re-check on the fill call was, empirically,
+    // always idempotent in every scenario this session could construct
+    // (sabotage-tested — reverting only this gating did not reproduce
+    // any failure). Reported at exactly this confidence, not overclaimed.
+    if p_slot_list.is_null() {
+        TOKEN_STORE.with(|ts| {
+            let mut store = ts.borrow_mut();
+            let all_initialized = store.values().all(|t| t.initialized);
+            if all_initialized {
+                let next_slot = store.keys().max().unwrap_or(&0) + 1;
+                store.insert(
+                    next_slot,
+                    TokenState {
+                        slot_id: next_slot,
+                        initialized: false,
+                        label: [0x20; 32],
+                        login_state: LoginState::Public,
+                        so_pin_salt: [0u8; 16],
+                        so_pin_hash: [0u8; 32],
+                        user_pin_salt: None,
+                        user_pin_hash: None,
+                    },
+                );
+            }
+        });
+        let count = TOKEN_STORE.with(|ts| ts.borrow().len() as u32);
+        unsafe {
+            *pul_count = count;
         }
-    });
+        return CKR_OK;
+    }
 
-    let mut slots: Vec<u32> = TOKEN_STORE.with(|ts| {
-        ts.borrow()
-            .values()
-            .filter(|t| !token_present_bool || t.initialized)
-            .map(|t| t.slot_id)
-            .collect()
-    });
+    let mut slots: Vec<u32> =
+        TOKEN_STORE.with(|ts| ts.borrow().values().map(|t| t.slot_id).collect());
     slots.sort_unstable();
 
     unsafe {
-        if p_slot_list.is_null() {
+        if *pul_count < slots.len() as u32 {
             *pul_count = slots.len() as u32;
-        } else {
-            if *pul_count < slots.len() as u32 {
-                *pul_count = slots.len() as u32;
-                return CKR_BUFFER_TOO_SMALL;
-            }
-            for (i, &slot_id) in slots.iter().enumerate() {
-                *p_slot_list.add(i) = slot_id;
-            }
-            *pul_count = slots.len() as u32;
+            return CKR_BUFFER_TOO_SMALL;
         }
+        for (i, &slot_id) in slots.iter().enumerate() {
+            *p_slot_list.add(i) = slot_id;
+        }
+        *pul_count = slots.len() as u32;
     }
     CKR_OK
 }
@@ -1373,6 +1440,14 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY —
         // C_MessageSign/Verify* are implemented for these (pkcs11t.h 0x8/0x10).
         CKM_ML_DSA => (1312, 2592, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
+        // ML-DSA external-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — same
+        // key-size range as CKM_ML_DSA; CKF_SIGN | CKF_VERIFY only, no
+        // C_MessageSign/Verify* support for this mechanism.
+        CKM_ML_DSA_EXTERNAL_MU => (1312, 2592, 0x00000800 | 0x00002000),
+        // µ generation (remediation R39, phase 8, PQCTODAY-VENDOR-EXT-MU) —
+        // a digest-family mechanism (CKF_DIGEST), same shape as the plain
+        // hash mechanisms above; key size N/A, same as those.
+        CKM_ML_DSA_EXTERNAL_MU_GEN => (0, 0, 0x00000400),
         // SLH-DSA pk: 32 B (128-bit sets) … 64 B (256-bit sets) — FIPS 205 Table 2.
         CKM_SLH_DSA_KEY_PAIR_GEN => (32, 64, 0x00010000),
         CKM_SLH_DSA => (32, 64, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
@@ -1387,10 +1462,16 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_SHA3_256_HMAC_GENERAL
         | CKM_SHA3_512_HMAC_GENERAL => (16, 64, 0x00000800 | 0x00002000),
         CKM_KMAC_128 | CKM_KMAC_256 => (16, 64, 0x00000800 | 0x00002000),
+        // AES-GMAC (v3.2 Sec6.13.6) — CKF_SIGN | CKF_VERIFY, key sizes match
+        // the other AES mechanisms (16/24/32-byte keys, table stores bytes).
+        CKM_AES_GMAC => (16, 32, 0x00000800 | 0x00002000),
         CKM_GENERIC_SECRET_KEY_GEN => (1, 512, 0x00008000),
         // Engine generates P-256/P-384/P-521 (+ secp256k1) — range unified
         // with CKM_ECDSA below (compliance-audit P-15).
         CKM_EC_KEY_PAIR_GEN => (256, 521, 0x00010000 | EC_CAPABILITY_FLAGS),
+        // FIPS 186-5 Appendix A.2.2 "extra bits" keygen — P-256/384/521 only
+        // (see the dispatch arm for why secp256k1 is out of scope here).
+        CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => (256, 521, 0x00010000 | EC_CAPABILITY_FLAGS),
         CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
             (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
         }
@@ -1434,6 +1515,12 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
             (16, 32, 0x00040000 | 0x00020000)
         }
         CKM_AES_CTR => (16, 32, 0x00000100 | 0x00000200),
+        CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 => {
+            (16, 32, 0x00000100 | 0x00000200)
+        }
+        CKM_AES_CCM => (16, 32, 0x00000100 | 0x00000200),
+        CKM_AES_XTS => (32, 64, 0x00000100 | 0x00000200),
+        CKM_AES_XTS_KEY_GEN => (32, 64, 0x00008000),
         // ML-DSA pre-hash variants — same sign/verify capabilities as pure ML-DSA
         CKM_HASH_ML_DSA_SHA224
         | CKM_HASH_ML_DSA_SHA256
@@ -1465,8 +1552,10 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // Key derivation functions
         CKM_PKCS5_PBKD2
         | CKM_HKDF_DERIVE
+        | CKM_HKDF_DATA
         | CKM_SP800_108_COUNTER_KDF
-        | CKM_SP800_108_FEEDBACK_KDF => (1, 512, 0x00080000),
+        | CKM_SP800_108_FEEDBACK_KDF
+        | CKM_SP800_108_DOUBLE_PIPELINE_KDF => (1, 512, 0x00080000),
         // ── R6.2 — arms for every remaining SUPPORTED_MECHS entry ──────────
         // (a unit test iterates SUPPORTED_MECHS and asserts none of them
         //  return CKR_MECHANISM_INVALID here — keep the two in sync)
@@ -1864,6 +1953,95 @@ unsafe fn xmss_keygen_param_set(
     ps.unwrap_or(default_ps)
 }
 
+/// FIPS 186-5 Appendix A.2.2 "Extra Random Bits" EC private-key
+/// generation, used by CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS: generate
+/// curve_bits+64 random bits, reduce mod (order-1), add 1.
+/// `order_minus_one_be` is (curve order - 1) as a big-endian byte string
+/// (the same width `SigningKey::to_bytes()` produces for that curve);
+/// returns the resulting private scalar in that same width, ready for
+/// `SigningKey::from_slice`. Uses `num-bigint` (already a direct
+/// dependency) for the arbitrary-precision reduction rather than
+/// hand-rolling byte-level long division.
+fn ec_extra_bits_scalar(order_minus_one_be: &[u8], curve_bits: usize) -> Result<Vec<u8>, u32> {
+    let extra_bytes = (curve_bits + 64).div_ceil(8);
+    let mut raw = vec![0u8; extra_bytes];
+    if getrandom::getrandom(&mut raw).is_err() {
+        return Err(CKR_FUNCTION_FAILED);
+    }
+    ec_extra_bits_reduce(&raw, order_minus_one_be)
+}
+
+/// The deterministic half of FIPS 186-5 A.2.2, split out from
+/// `ec_extra_bits_scalar` so it's testable without mocking `getrandom`:
+/// reduce `raw` (the n+64 random bits, as bytes) mod (order-1), add 1,
+/// encode at the same big-endian width as `order_minus_one_be`.
+fn ec_extra_bits_reduce(raw: &[u8], order_minus_one_be: &[u8]) -> Result<Vec<u8>, u32> {
+    let n_minus_1 = num_bigint::BigUint::from_bytes_be(order_minus_one_be);
+    let r = num_bigint::BigUint::from_bytes_be(raw);
+    let d = (r % &n_minus_1) + num_bigint::BigUint::from(1u32);
+    let width = order_minus_one_be.len();
+    let d_bytes = d.to_bytes_be();
+    if d_bytes.len() > width {
+        // Can't happen (d <= order-1 < 2^(8*width) by construction), but
+        // never silently truncate a private scalar.
+        return Err(CKR_FUNCTION_FAILED);
+    }
+    let mut out = vec![0u8; width];
+    out[width - d_bytes.len()..].copy_from_slice(&d_bytes);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod ec_extra_bits_tests {
+    use super::*;
+
+    /// FIPS 186-5 A.2.2 over a small, hand-computed modulus: order-1 = 97
+    /// (order = 98), raw random input = 0x03E9 (1001 decimal). Expected:
+    /// 1001 mod 97 = 30 (1001 = 10*97 + 31 -> 1001 - 970 = 31, so 1001 mod
+    /// 97 = 31), d = 31 + 1 = 32. Cross-checked independently with Python:
+    /// `(1001 % 97) + 1 == 32`.
+    #[test]
+    fn reduce_matches_hand_computed_reference() {
+        let order_minus_1 = [97u8]; // width = 1 byte
+        let raw = [0x03u8, 0xE9u8]; // 1001
+        let d = ec_extra_bits_reduce(&raw, &order_minus_1).unwrap();
+        assert_eq!(d, vec![32u8]);
+    }
+
+    /// The real curve order-1 for P-256, taken from the crate's own
+    /// verified field arithmetic (not hand-transcribed), used as the
+    /// modulus for a larger cross-checked case: raw = order-1 exactly
+    /// (i.e. n_minus_1 itself) -> (n-1) mod (n-1) = 0 -> d = 1 (the
+    /// smallest valid FIPS186-5 extra-bits output, confirming the "+1"
+    /// step and the boundary case both work).
+    #[test]
+    fn reduce_boundary_raw_equals_modulus_gives_one() {
+        use p256::elliptic_curve::Field;
+        let order_minus_1 = (-p256::Scalar::ONE).to_bytes();
+        let d = ec_extra_bits_reduce(&order_minus_1, &order_minus_1).unwrap();
+        let mut expect = vec![0u8; order_minus_1.len()];
+        expect[order_minus_1.len() - 1] = 1;
+        assert_eq!(d, expect);
+    }
+
+    /// raw = 2*(order-1) -> reduces to (order-1) again -> d = order.
+    /// order mod order... wait, d must be in [1, order-1] per FIPS186-5
+    /// (never order itself, since d=order would make dG the identity).
+    /// 2*(n-1) mod (n-1) = 0 -> d = 1, same as the exact-modulus case —
+    /// confirms the reduction never emits an out-of-range scalar even
+    /// when raw is a multiple of the modulus.
+    #[test]
+    fn reduce_never_emits_order_itself() {
+        use p256::elliptic_curve::Field;
+        let order_minus_1_bytes = (-p256::Scalar::ONE).to_bytes();
+        let n_minus_1 = num_bigint::BigUint::from_bytes_be(&order_minus_1_bytes);
+        let raw = (n_minus_1 * num_bigint::BigUint::from(2u32)).to_bytes_be();
+        let d = ec_extra_bits_reduce(&raw, &order_minus_1_bytes).unwrap();
+        let d_val = num_bigint::BigUint::from_bytes_be(&d);
+        assert_eq!(d_val, num_bigint::BigUint::from(1u32));
+    }
+}
+
 fn C_GenerateKeyPair_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
@@ -1904,6 +2082,7 @@ fn C_GenerateKeyPair_impl(
             CKM_SLH_DSA_KEY_PAIR_GEN => Some(CKK_SLH_DSA),
             CKM_RSA_PKCS_KEY_PAIR_GEN => Some(CKK_RSA),
             CKM_EC_KEY_PAIR_GEN => Some(CKK_EC),
+            CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => Some(CKK_EC),
             // HSS, XMSS, and XMSS-MT keygen are all implemented below
             // (real LMS/LM-OTS / XMSS tree generation), and this FFI
             // layer's own C_Sign/C_Verify sign/verify both mechanisms
@@ -2736,6 +2915,171 @@ fn C_GenerateKeyPair_impl(
                 CKR_OK
             }
 
+            CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => {
+                // FIPS 186-5 Appendix A.2.2 "Extra Random Bits" — see
+                // ec_extra_bits_scalar. Scoped to the NIST prime curves this
+                // engine supports AND that have real ACVP evidence for this
+                // secretGenerationMode (ECDSA-KeyGen-FIPS186-5, P-256/384/
+                // 521); secp256k1 isn't a FIPS186-5 curve at all, so it's
+                // out of scope here (still available via plain
+                // CKM_EC_KEY_PAIR_GEN).
+                let ec_params = get_attr_bytes(
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                    CKA_EC_PARAMS,
+                )
+                .or_else(|| {
+                    get_attr_bytes(
+                        p_private_key_template,
+                        ul_private_key_attribute_count,
+                        CKA_EC_PARAMS,
+                    )
+                });
+                let ec_params = match ec_params {
+                    Some(p) => p,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                let curve = match crate::crypto::handlers::decode_ec_params(&ec_params) {
+                    Ok(c) => c,
+                    Err(rv) => return rv,
+                };
+
+                let mut pub_attrs = HashMap::new();
+                let mut prv_attrs = HashMap::new();
+                store_algo_family(&mut pub_attrs, ALGO_ECDSA);
+                store_algo_family(&mut prv_attrs, ALGO_ECDSA);
+                store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+                store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC);
+                store_bool(&mut pub_attrs, CKA_TOKEN, false);
+                store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+                store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+                store_bool(&mut pub_attrs, CKA_VERIFY, true);
+                store_bool(&mut pub_attrs, CKA_WRAP, false);
+                store_bool(&mut pub_attrs, CKA_DERIVE, false);
+                store_bool(&mut pub_attrs, CKA_LOCAL, true);
+                store_ulong(
+                    &mut pub_attrs,
+                    CKA_KEY_GEN_MECHANISM,
+                    CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS,
+                );
+                store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+                store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC);
+                store_bool(&mut prv_attrs, CKA_TOKEN, false);
+                store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+                store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+                store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+                store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+                store_bool(&mut prv_attrs, CKA_SIGN, true);
+                store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+                store_bool(&mut prv_attrs, CKA_DERIVE, true);
+                store_bool(&mut prv_attrs, CKA_LOCAL, true);
+                store_ulong(
+                    &mut prv_attrs,
+                    CKA_KEY_GEN_MECHANISM,
+                    CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS,
+                );
+
+                let curve_oid: Vec<u8> = match curve {
+                    CURVE_P521 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23],
+                    CURVE_P384 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],
+                    CURVE_P256 => vec![
+                        0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+                    ],
+                    _ => return CKR_CURVE_NOT_SUPPORTED,
+                };
+                use p521::elliptic_curve::Field;
+                match curve {
+                    CURVE_P521 => {
+                        store_param_set(&mut pub_attrs, CURVE_P521);
+                        store_param_set(&mut prv_attrs, CURVE_P521);
+                        let n_minus_1 = (-p521::Scalar::ONE).to_bytes();
+                        let scalar = match ec_extra_bits_scalar(&n_minus_1, 521) {
+                            Ok(s) => s,
+                            Err(rv) => return rv,
+                        };
+                        let sk = match p521::ecdsa::SigningKey::from_slice(&scalar) {
+                            Ok(k) => k,
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        };
+                        let vk = p521::ecdsa::VerifyingKey::from(&sk);
+                        prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+                        let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+                        let mut ec_point = Vec::with_capacity(3 + vk_bytes.len());
+                        ec_point.push(0x04u8);
+                        ec_point.push(0x81u8);
+                        ec_point.push(vk_bytes.len() as u8);
+                        ec_point.extend_from_slice(&vk_bytes);
+                        pub_attrs.insert(CKA_EC_POINT, ec_point);
+                        let spki = build_ec_spki_p521(&vk_bytes);
+                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                    }
+                    CURVE_P384 => {
+                        store_param_set(&mut pub_attrs, CURVE_P384);
+                        store_param_set(&mut prv_attrs, CURVE_P384);
+                        let n_minus_1 = (-p384::Scalar::ONE).to_bytes();
+                        let scalar = match ec_extra_bits_scalar(&n_minus_1, 384) {
+                            Ok(s) => s,
+                            Err(rv) => return rv,
+                        };
+                        let sk = match p384::ecdsa::SigningKey::from_slice(&scalar) {
+                            Ok(k) => k,
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        };
+                        let vk = p384::ecdsa::VerifyingKey::from(&sk);
+                        prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+                        let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+                        let mut ec_point = Vec::with_capacity(2 + vk_bytes.len());
+                        ec_point.push(0x04u8);
+                        ec_point.push(vk_bytes.len() as u8);
+                        ec_point.extend_from_slice(&vk_bytes);
+                        pub_attrs.insert(CKA_EC_POINT, ec_point);
+                        let spki = build_ec_spki_p384(&vk_bytes);
+                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                    }
+                    _ => {
+                        store_param_set(&mut pub_attrs, CURVE_P256);
+                        store_param_set(&mut prv_attrs, CURVE_P256);
+                        let n_minus_1 = (-p256::Scalar::ONE).to_bytes();
+                        let scalar = match ec_extra_bits_scalar(&n_minus_1, 256) {
+                            Ok(s) => s,
+                            Err(rv) => return rv,
+                        };
+                        let sk = match p256::ecdsa::SigningKey::from_slice(&scalar) {
+                            Ok(k) => k,
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        };
+                        let vk = p256::ecdsa::VerifyingKey::from(&sk);
+                        prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+                        let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+                        let mut ec_point = Vec::with_capacity(2 + vk_bytes.len());
+                        ec_point.push(0x04u8);
+                        ec_point.push(vk_bytes.len() as u8);
+                        ec_point.extend_from_slice(&vk_bytes);
+                        pub_attrs.insert(CKA_EC_POINT, ec_point);
+                        let spki = build_ec_spki_p256(&vk_bytes);
+                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                    }
+                }
+                absorb_template_attrs(
+                    &mut pub_attrs,
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                );
+                absorb_template_attrs(
+                    &mut prv_attrs,
+                    p_private_key_template,
+                    ul_private_key_attribute_count,
+                );
+                pub_attrs.insert(CKA_EC_PARAMS, curve_oid.clone());
+                prv_attrs.insert(CKA_EC_PARAMS, curve_oid);
+                finalize_private_key_attrs(&mut prv_attrs);
+                compute_kcv(&mut pub_attrs);
+                compute_kcv(&mut prv_attrs);
+                *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
+                *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
+                CKR_OK
+            }
+
             CKM_EC_EDWARDS_KEY_PAIR_GEN => {
                 // W2 (2026-08-13) — §6.3.10: these curves "can only be
                 // specified in the CKA_EC_PARAMS attribute of the template for
@@ -3049,7 +3393,14 @@ fn C_GenerateKeyPair_impl(
                 // Public key attributes
                 store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
                 store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_HSS);
-                store_ulong(&mut pub_attrs, CKA_HSS_LMS_TYPE, levels as u32);
+                // Phase 5 R25: CKA_HSS_LEVELS carries the level count (spec-
+                // correct home; was wrongly CKA_HSS_LMS_TYPE); CKA_HSS_LMS_TYPE/
+                // LMOTS_TYPE carry the top level's actual param-set IDs, same as
+                // the vendor CKA_LMS_PARAM_SET/CKA_LMOTS_PARAM_SET below (kept
+                // unchanged -- Rust's own ACVP flow reads those).
+                store_ulong(&mut pub_attrs, CKA_HSS_LEVELS, levels as u32);
+                store_ulong(&mut pub_attrs, CKA_HSS_LMS_TYPE, lms_params[0]);
+                store_ulong(&mut pub_attrs, CKA_HSS_LMOTS_TYPE, lmots_params[0]);
                 store_ulong(&mut pub_attrs, CKA_LMS_PARAM_SET, lms_params[0]);
                 store_ulong(&mut pub_attrs, CKA_LMOTS_PARAM_SET, lmots_params[0]);
                 store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_HSS_KEY_PAIR_GEN);
@@ -3061,7 +3412,9 @@ fn C_GenerateKeyPair_impl(
                 // Private key attributes
                 store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
                 store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_HSS);
-                store_ulong(&mut prv_attrs, CKA_HSS_LMS_TYPE, levels as u32);
+                store_ulong(&mut prv_attrs, CKA_HSS_LEVELS, levels as u32);
+                store_ulong(&mut prv_attrs, CKA_HSS_LMS_TYPE, lms_params[0]);
+                store_ulong(&mut prv_attrs, CKA_HSS_LMOTS_TYPE, lmots_params[0]);
                 store_ulong(&mut prv_attrs, CKA_LMS_PARAM_SET, lms_params[0]);
                 store_ulong(&mut prv_attrs, CKA_LMOTS_PARAM_SET, lmots_params[0]);
                 store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_HSS_KEY_PAIR_GEN);
@@ -3532,6 +3885,7 @@ pub fn C_GenerateKey(
         // generation mechanism is CKR_TEMPLATE_INCONSISTENT.
         let expected_kt = match mech_type {
             CKM_AES_KEY_GEN => Some(CKK_AES),
+            CKM_AES_XTS_KEY_GEN => Some(CKK_AES_XTS),
             CKM_CHACHA20_KEY_GEN => Some(CKK_CHACHA20),
             CKM_GENERIC_SECRET_KEY_GEN => Some(CKK_GENERIC_SECRET),
             _ => None,
@@ -3611,6 +3965,45 @@ pub fn C_GenerateKey(
                 store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_AES_KEY_GEN); // PKCS#11 v3.2 §4.3
                 absorb_template_attrs(&mut attrs, p_template, ul_count);
                 finalize_private_key_attrs(&mut attrs); // sets CKA_ALWAYS_SENSITIVE + CKA_NEVER_EXTRACTABLE
+                compute_kcv(&mut attrs);
+                *ph_key = allocate_handle_owned(_h_session, attrs);
+                CKR_OK
+            }
+            CKM_AES_XTS_KEY_GEN => {
+                // §6.15 — double-length key (K1||K2): 32 bytes for
+                // AES-128-XTS, 64 for AES-256-XTS. No 24-byte (AES-192)
+                // variant — XTS is only defined over AES-128/256.
+                let key_len = match get_attr_ulong(p_template, ul_count, CKA_VALUE_LEN) {
+                    Some(l) => l as usize,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                if key_len != 32 && key_len != 64 {
+                    return CKR_ATTRIBUTE_VALUE_INVALID;
+                }
+                let mut key = vec![0u8; key_len];
+                if getrandom::getrandom(&mut key).is_err() {
+                    return CKR_FUNCTION_FAILED;
+                }
+                let mut attrs = HashMap::new();
+                attrs.insert(CKA_VALUE, key);
+                store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+                store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES_XTS);
+                store_ulong(&mut attrs, CKA_VALUE_LEN, key_len as u32);
+                store_bool(&mut attrs, CKA_TOKEN, false);
+                store_bool(&mut attrs, CKA_PRIVATE, false);
+                store_bool(&mut attrs, CKA_SENSITIVE, false);
+                store_bool(&mut attrs, CKA_EXTRACTABLE, false);
+                store_bool(&mut attrs, CKA_ENCRYPT, true);
+                store_bool(&mut attrs, CKA_DECRYPT, true);
+                store_bool(&mut attrs, CKA_WRAP, false);
+                store_bool(&mut attrs, CKA_UNWRAP, false);
+                store_bool(&mut attrs, CKA_SIGN, false);
+                store_bool(&mut attrs, CKA_VERIFY, false);
+                store_bool(&mut attrs, CKA_DERIVE, false);
+                store_bool(&mut attrs, CKA_LOCAL, true);
+                store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_AES_XTS_KEY_GEN);
+                absorb_template_attrs(&mut attrs, p_template, ul_count);
+                finalize_private_key_attrs(&mut attrs);
                 compute_kcv(&mut attrs);
                 *ph_key = allocate_handle_owned(_h_session, attrs);
                 CKR_OK
@@ -4711,7 +5104,7 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
         Some(kt) => kt,
     };
     // KEY_TYPE ↔ CLASS consistency (§4.1.1 — CKR_TEMPLATE_INCONSISTENT).
-    let secret_only = key_type == CKK_AES || key_type == CKK_GENERIC_SECRET
+    let secret_only = key_type == CKK_AES || key_type == CKK_AES_XTS || key_type == CKK_GENERIC_SECRET
         || key_type == 0x33 /* CKK_CHACHA20 */;
     let asym_only = key_type == CKK_RSA
         || key_type == CKK_EC
@@ -4736,6 +5129,14 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID);
         }
         if key_type == CKK_AES && !matches!(val.len(), 16 | 24 | 32) {
+            return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+        }
+        // §6.15 — CKK_AES_XTS is a double-length key (K1||K2): 32 bytes for
+        // AES-128-XTS, 64 for AES-256-XTS. Deliberately a distinct key type
+        // from CKK_AES (not a 32/64-byte CKK_AES value) so a caller can
+        // never accidentally use the XTS double-key material as a single
+        // ordinary AES key elsewhere.
+        if key_type == CKK_AES_XTS && !matches!(val.len(), 32 | 64) {
             return Err(CKR_ATTRIBUTE_VALUE_INVALID);
         }
     } else if class == CKO_PUBLIC_KEY && key_type == CKK_RSA {
@@ -5108,7 +5509,7 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
         // remap onto the concrete hash-specific mechanism via their
         // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param.
-        mech_type = match remap_generic_hash_mech(p_mechanism, mech_type) {
+        mech_type = match remap_generic_hash_mech(h_session, p_mechanism, mech_type) {
             Ok(m) => m,
             Err(rv) => return rv,
         };
@@ -5127,19 +5528,36 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
 }
 
 /// If `mech_type` is a GENERIC pre-hash mechanism (CKM_HASH_ML_DSA /
-/// CKM_HASH_SLH_DSA, §6.67.7/§6.69.7), parse
-/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` and remap onto the concrete
-/// hash-specific mechanism so the rest of the sign/verify pipeline
-/// (`takes_sign_additional_ctx` / `parse_sign_additional_ctx` / dispatch)
-/// runs unchanged — same idiom as the CKM_EDDSA -> CKM_EDDSA_PH phFlag
-/// remap just above each call site. Returns `mech_type` unchanged for every
-/// other mechanism.
+/// CKM_HASH_SLH_DSA, §6.67.6/§6.69.6), parse
+/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` and stash it in
+/// `GENERIC_HASH_STATE` for `h_session`.
+///
+/// Remediation R37 (phase 8): `mech_type` is now returned UNCHANGED for
+/// the generic mechanisms too -- this function used to remap `mech_type`
+/// onto the matching hash-SPECIFIC mechanism (§6.67.7/§6.69.7) so the rest
+/// of the pipeline ran unchanged (same idiom as the CKM_EDDSA ->
+/// CKM_EDDSA_PH phFlag remap just above each call site), but that
+/// collapsed two mechanisms with genuinely different semantics into one:
+/// the generic mechanism's data argument IS an already-hashed PHM, while
+/// the hash-specific one hashes a raw message on token. Remapping meant
+/// the hash-specific handler hashed the caller's PHM a SECOND time
+/// (confirmed live via generic-hash-mldsa-probe before this fix). The
+/// stashed `hash` lets C_Sign/C_Verify re-derive `Ph` for the generic
+/// mechanism's own PHM-input dispatch (`sign_ml_dsa_phm` etc.) without
+/// mech_type having to carry it. `map_generic_hash_mech` is still used
+/// here PURELY to validate `hash` is one of the eight legal digest
+/// mechanisms (same Init-time rejection as before) -- its returned
+/// (unused) mechanism value is discarded.
 ///
 /// `CK_HASH_SIGN_ADDITIONAL_CONTEXT` shares `CK_SIGN_ADDITIONAL_CONTEXT`'s
 /// first 3 fields (hedgeVariant, pContext, ulContextLen — read later by
 /// `parse_sign_additional_ctx` against this same pointer) plus a trailing
 /// `hash` (CK_MECHANISM_TYPE) at native width; this only extracts `hash`.
-unsafe fn remap_generic_hash_mech(p_mechanism: *const u8, mech_type: u32) -> Result<u32, u32> {
+unsafe fn remap_generic_hash_mech(
+    h_session: u32,
+    p_mechanism: *const u8,
+    mech_type: u32,
+) -> Result<u32, u32> {
     if mech_type != CKM_HASH_ML_DSA && mech_type != CKM_HASH_SLH_DSA {
         return Ok(mech_type);
     }
@@ -5152,14 +5570,23 @@ unsafe fn remap_generic_hash_mech(p_mechanism: *const u8, mech_type: u32) -> Res
         )
         .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
     let hash = r.ulong32(ck_param::hash_sign_ctx::HASH);
-    map_generic_hash_mech(mech_type, hash).ok_or(CKR_MECHANISM_PARAM_INVALID)
+    if map_generic_hash_mech(mech_type, hash).is_none() {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    GENERIC_HASH_STATE.with(|s| {
+        s.borrow_mut().insert(h_session, hash);
+    });
+    Ok(mech_type)
 }
 
 /// True when `mech` takes a CK_SIGN_ADDITIONAL_CONTEXT parameter
-/// (PKCS#11 v3.2 §6.67/§6.69 — ML-DSA and SLH-DSA, pure and pre-hash).
+/// (PKCS#11 v3.2 §6.67/§6.69 — ML-DSA and SLH-DSA, pure and pre-hash),
+/// plus CKM_ML_DSA_EXTERNAL_MU (remediation R34, PQCTODAY-VENDOR-EXT-MU),
+/// which reuses the same struct for its hedgeVariant field.
 fn takes_sign_additional_ctx(mech: u32) -> bool {
     mech == CKM_ML_DSA
         || mech == CKM_SLH_DSA
+        || mech == CKM_ML_DSA_EXTERNAL_MU
         || is_prehash_ml_dsa(mech)
         || is_prehash_slh_dsa(mech)
 }
@@ -5218,7 +5645,16 @@ unsafe fn parse_sign_mech_params(
     let m = ck_param::mech(p_mechanism);
     if takes_sign_additional_ctx(mech_type) {
         // CK_SIGN_ADDITIONAL_CONTEXT — ML-DSA + SLH-DSA, pure and pre-hash
-        // (PKCS#11 v3.2 §6.67/§6.69). Overlong ctx / bad hedge → error.
+        // (PKCS#11 v3.2 §6.67/§6.69), PLUS CKM_ML_DSA_EXTERNAL_MU
+        // (remediation R34, PQCTODAY-VENDOR-EXT-MU): this mechanism
+        // reuses this exact struct rather than defining its own — µ itself
+        // travels via the normal C_Sign/C_Verify data argument (same
+        // convention as every other mechanism here, and as PKCS#11's own
+        // CKM_HASH_ML_DSA), so only hedgeVariant is meaningful; a non-empty
+        // context is rejected at the C_Sign/C_Verify dispatch (no defined
+        // meaning once µ is already computed — FIPS 204 folds context into
+        // µ before the caller ever gets here). Overlong ctx / bad hedge →
+        // error either way.
         return parse_sign_additional_ctx(p_mechanism);
     }
     if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
@@ -5294,6 +5730,27 @@ unsafe fn parse_sign_mech_params(
             }
             None => (Vec::new(), false),
         });
+    }
+    if mech_type == CKM_AES_GMAC {
+        // CK_GCM_PARAMS (v3.2 Sec6.27.7) — only pIv/ulIvLen and ulTagBits
+        // are meaningful for GMAC; pAAD/ulAADLen are unused (see sign_gmac).
+        let r = m
+            .params(&ck_param::gcm::LAYOUT, ck_param::gcm::FIELD_COUNT)
+            .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+        let tag_bits = r.ulong32(ck_param::gcm::UL_TAG_BITS);
+        if tag_bits == 0 || tag_bits > 128 || tag_bits % 8 != 0 {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        let iv = r.buffer(ck_param::gcm::P_IV, ck_param::gcm::UL_IV_LEN);
+        if iv.is_empty() {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        // ctx layout: tag_len_bytes(4, LE) || iv — same "leading LE u32"
+        // convention as hmac_general/KMAC below, read back by both the
+        // C_Sign size-query path and the C_Sign/C_Verify dispatch arms.
+        let mut v = (tag_bits / 8).to_le_bytes().to_vec();
+        v.extend_from_slice(iv);
+        return Ok((v, false));
     }
     if let Some((_, digest_len)) = hmac_general_base(mech_type) {
         // CK_MAC_GENERAL_PARAMS — INSTANCE 4. A bare `typedef CK_ULONG`, so
@@ -5374,7 +5831,9 @@ fn C_Sign_impl(
 
     unsafe {
         if p_signature.is_null() {
-            *pul_signature_len = if hmac_general_base(mech).is_some() && ctx_bytes.len() >= 4 {
+            *pul_signature_len = if (hmac_general_base(mech).is_some() || mech == CKM_AES_GMAC)
+                && ctx_bytes.len() >= 4
+            {
                 u32::from_le_bytes([ctx_bytes[0], ctx_bytes[1], ctx_bytes[2], ctx_bytes[3]])
             } else {
                 get_sig_len(mech, hkey)
@@ -5539,8 +5998,52 @@ fn C_Sign_impl(
         let eff_mech = mech;
         let eff_msg = msg;
         let result = match eff_mech {
+            // Remediation R37 (phase 8), PKCS#11 v3.2 §6.67.6/§6.69.6: the
+            // bare generic mechanisms are no longer remapped onto a
+            // hash-specific one at *SignInit time (see
+            // remap_generic_hash_mech's own R37 note) -- `msg` here IS the
+            // caller's already-hashed PHM, and `hash` (the caller's own
+            // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash) was stashed in
+            // GENERIC_HASH_STATE at Init time since mech_type alone can no
+            // longer carry it.
+            CKM_HASH_ML_DSA => {
+                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                    Some(hash) => sign_ml_dsa_phm(ps, &sk_bytes, msg, &ctx_bytes, hash, deterministic),
+                    None => Err(CKR_MECHANISM_PARAM_INVALID),
+                }
+            }
+            CKM_HASH_SLH_DSA => {
+                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                    Some(hash) => sign_slh_dsa_phm(ps, hash, &sk_bytes, msg, &ctx_bytes, deterministic),
+                    None => Err(CKR_MECHANISM_PARAM_INVALID),
+                }
+            }
             m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
                 sign_ml_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic)
+            }
+            CKM_ML_DSA_EXTERNAL_MU => {
+                // Remediation R34, PQCTODAY-VENDOR-EXT-MU. `msg` here is the
+                // caller's 64-byte µ (FIPS 204 Eq. 2), not a message — see
+                // takes_sign_additional_ctx's own comment for why this
+                // reuses CK_SIGN_ADDITIONAL_CONTEXT rather than a new
+                // struct. `ctx_bytes` carries hedgeVariant's context field,
+                // which has no meaning once µ already exists — reject
+                // non-empty rather than silently ignore it.
+                if !ctx_bytes.is_empty() {
+                    Err(CKR_MECHANISM_PARAM_INVALID)
+                } else if msg.len() != PQCTODAY_ML_DSA_MU_LEN {
+                    Err(CKR_ARGUMENTS_BAD)
+                } else {
+                    let rnd: [u8; 32] = if deterministic {
+                        [0u8; 32]
+                    } else {
+                        use rand::RngCore;
+                        let mut b = [0u8; 32];
+                        rand::rngs::OsRng.fill_bytes(&mut b);
+                        b
+                    };
+                    sign_ml_dsa_external_mu(ps, &sk_bytes, msg, rnd)
+                }
             }
             m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
                 sign_slh_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic)
@@ -5571,6 +6074,19 @@ fn C_Sign_impl(
                     sign_kmac_ext(eff_mech, &sk_bytes, eff_msg, &ctx_bytes[4..], out_len)
                 } else {
                     sign_kmac(eff_mech, &sk_bytes, eff_msg)
+                }
+            }
+            CKM_AES_GMAC => {
+                if ctx_bytes.len() < 4 {
+                    Err(CKR_MECHANISM_PARAM_INVALID)
+                } else {
+                    let tag_len = u32::from_le_bytes([
+                        ctx_bytes[0],
+                        ctx_bytes[1],
+                        ctx_bytes[2],
+                        ctx_bytes[3],
+                    ]) as usize;
+                    sign_gmac(&sk_bytes, eff_msg, &ctx_bytes[4..], tag_len)
                 }
             }
             CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
@@ -5672,7 +6188,7 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
         // remap onto the concrete hash-specific mechanism via their
         // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param.
-        mech_type = match remap_generic_hash_mech(p_mechanism, mech_type) {
+        mech_type = match remap_generic_hash_mech(h_session, p_mechanism, mech_type) {
             Ok(m) => m,
             Err(rv) => return rv,
         };
@@ -5814,8 +6330,32 @@ pub fn C_Verify(
         let eff_mech = mech;
         let eff_msg = msg;
         let rv = match match eff_mech {
+            // Remediation R37 (phase 8): see C_Sign's identical comment.
+            CKM_HASH_ML_DSA => {
+                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                    Some(hash) => verify_ml_dsa_phm(ps, &pk_bytes, msg, sig_bytes, &ctx_bytes, hash),
+                    None => Err(CKR_MECHANISM_PARAM_INVALID),
+                }
+            }
+            CKM_HASH_SLH_DSA => {
+                match GENERIC_HASH_STATE.with(|s| s.borrow().get(&h_session).copied()) {
+                    Some(hash) => verify_slh_dsa_phm(ps, hash, &pk_bytes, msg, sig_bytes, &ctx_bytes),
+                    None => Err(CKR_MECHANISM_PARAM_INVALID),
+                }
+            }
             m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
                 verify_ml_dsa(m, ps, &pk_bytes, msg, sig_bytes, &ctx_bytes)
+            }
+            CKM_ML_DSA_EXTERNAL_MU => {
+                // Remediation R34, PQCTODAY-VENDOR-EXT-MU — counterpart to
+                // C_Sign's own arm above; see its comment for the design.
+                if !ctx_bytes.is_empty() {
+                    Err(CKR_MECHANISM_PARAM_INVALID)
+                } else if msg.len() != PQCTODAY_ML_DSA_MU_LEN {
+                    Err(CKR_ARGUMENTS_BAD)
+                } else {
+                    verify_ml_dsa_external_mu(ps, &pk_bytes, msg, sig_bytes)
+                }
             }
             m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
                 verify_slh_dsa(m, ps, &pk_bytes, msg, sig_bytes, &ctx_bytes)
@@ -5865,6 +6405,27 @@ pub fn C_Verify(
                 Ok(sig) => {
                     use subtle::ConstantTimeEq;
                     if sig.len() == sig_bytes.len() && sig.ct_eq(sig_bytes).into() {
+                        Ok(())
+                    } else {
+                        Err(CKR_SIGNATURE_INVALID)
+                    }
+                }
+                Err(e) => Err(e),
+            },
+            CKM_AES_GMAC => match if ctx_bytes.len() < 4 {
+                Err(CKR_MECHANISM_PARAM_INVALID)
+            } else {
+                let tag_len = u32::from_le_bytes([
+                    ctx_bytes[0],
+                    ctx_bytes[1],
+                    ctx_bytes[2],
+                    ctx_bytes[3],
+                ]) as usize;
+                sign_gmac(&pk_bytes, eff_msg, &ctx_bytes[4..], tag_len)
+            } {
+                Ok(tag) => {
+                    use subtle::ConstantTimeEq;
+                    if tag.len() == sig_bytes.len() && tag.ct_eq(sig_bytes).into() {
                         Ok(())
                     } else {
                         Err(CKR_SIGNATURE_INVALID)
@@ -6237,7 +6798,7 @@ pub fn C_VerifySignatureInit(
         // GENERIC pre-hash mechanisms (CKM_HASH_ML_DSA/CKM_HASH_SLH_DSA)
         // remap onto the concrete hash-specific mechanism via their
         // CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash param.
-        mech_type = match remap_generic_hash_mech(p_mechanism, mech_type) {
+        mech_type = match remap_generic_hash_mech(h_session, p_mechanism, mech_type) {
             Ok(m) => m,
             Err(rv) => return rv,
         };
@@ -6499,6 +7060,46 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 };
                 (iv, aad, tag_bits)
             }
+            CKM_AES_CCM => {
+                // CK_CCM_PARAMS (§6.11.3). ulDataLen is not threaded through
+                // — this engine's CCM is single-shot only (see
+                // crypto/multipart.rs's CCM section), so the real
+                // plaintext/ciphertext length is always known directly from
+                // the C_Encrypt/C_Decrypt buffer, making the separate
+                // upfront declaration redundant here.
+                let ccm = match ParamReader::new(
+                    p_param,
+                    ul_param_len,
+                    &ck_param::ccm::LAYOUT,
+                    ck_param::ccm::FIELD_COUNT,
+                ) {
+                    Ok(r) => r,
+                    Err(_) => return CKR_ARGUMENTS_BAD,
+                };
+                let nonce_ptr = ccm.ptr(ck_param::ccm::P_NONCE);
+                let nonce_len = ccm.ulong(ck_param::ccm::UL_NONCE_LEN);
+                let aad_ptr = ccm.ptr(ck_param::ccm::P_AAD);
+                let aad_len = ccm.ulong(ck_param::ccm::UL_AAD_LEN);
+                let mac_len = ccm.ulong32(ck_param::ccm::UL_MAC_LEN);
+                // SP 800-38C: nonce length 7..=13 bytes (q = 15-len(N) must
+                // be 2..=8); MAC length one of {4,6,8,10,12,14,16}.
+                if nonce_ptr.is_null() || !(7..=13).contains(&nonce_len) {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                if !matches!(mac_len, 4 | 6 | 8 | 10 | 12 | 14 | 16) {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                let nonce = std::slice::from_raw_parts(nonce_ptr, nonce_len).to_vec();
+                let aad = if !aad_ptr.is_null() && aad_len > 0 {
+                    std::slice::from_raw_parts(aad_ptr, aad_len).to_vec()
+                } else {
+                    Vec::new()
+                };
+                // tag_bits slot repurposed to carry mac_len in BYTES
+                // (CK_CCM_PARAMS.ulMACLen is already an octet count, unlike
+                // CK_GCM_PARAMS.ulTagBits).
+                (nonce, aad, mac_len)
+            }
             // §6.27.2 — ECB takes no mechanism parameter.
             CKM_AES_ECB => (Vec::new(), Vec::new(), 0),
             CKM_AES_CBC | CKM_AES_CBC_PAD => {
@@ -6521,6 +7122,20 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     Ok((cb, bits)) => (cb, Vec::new(), bits),
                     Err(rv) => return rv,
                 }
+            }
+            // OFB/CFB1/CFB8/CFB128 (§6.11 variants) — plain 16-byte IV, same
+            // shape as CBC. No mechanism-specific params beyond the IV.
+            // XTS's mechanism param (§6.15) is likewise a bare 16-byte
+            // value (the Data Unit Sequence Number / tweak) — same shape.
+            CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 | CKM_AES_XTS => {
+                if p_param.is_null() || ul_param_len < 16 {
+                    return CKR_ARGUMENTS_BAD;
+                }
+                (
+                    std::slice::from_raw_parts(p_param, 16).to_vec(),
+                    Vec::new(),
+                    0,
+                )
             }
             CKM_RSA_PKCS_OAEP => {
                 // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4). EncryptCtx packing:
@@ -6833,6 +7448,116 @@ pub fn C_Encrypt(
                 let mut ctr = CtrState::new_with_width(key, cb, width);
                 ctr.update_public(plaintext)
             }
+            CKM_AES_OFB => {
+                use crate::crypto::multipart::{AesKey, OfbState};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut ofb = OfbState::new(key, ivb);
+                ofb.update_public(plaintext)
+            }
+            CKM_AES_CFB128 => {
+                use crate::crypto::multipart::{AesKey, Cfb128State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb128State::new(key, ivb, CipherDirection::Encrypt);
+                cfb.update_public(plaintext)
+            }
+            CKM_AES_CFB8 => {
+                use crate::crypto::multipart::{AesKey, Cfb8State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb8State::new(key, ivb, CipherDirection::Encrypt);
+                cfb.update_public(plaintext)
+            }
+            CKM_AES_CFB1 => {
+                use crate::crypto::multipart::{AesKey, Cfb1State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb1State::new(key, ivb, CipherDirection::Encrypt);
+                cfb.update_public(plaintext)
+            }
+            CKM_AES_CCM => {
+                // iv/aad/tag_bits here are (nonce, aad, mac_len_bytes) — see
+                // this mechanism's CK_CCM_PARAMS parsing arm above.
+                use crate::crypto::multipart::{AesKey, ccm_encrypt};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                ccm_encrypt(&key, &iv, &aad, plaintext, tag_bits as usize)
+            }
+            CKM_AES_XTS => {
+                // §6.15 — a distinct CKK_AES_XTS key type is required (not
+                // merely a 32/64-byte CKK_AES value): a 32-byte value is a
+                // VALID plain CKK_AES-256 key too, and the two must never be
+                // interchangeable. "No final part" — ciphertext-stealing
+                // (xts-mode) makes output length == input length exactly,
+                // no separate finalize step, so this is one-shot only.
+                if get_object_attr_u32(key_handle, CKA_KEY_TYPE) != Some(CKK_AES_XTS) {
+                    return CKR_KEY_TYPE_INCONSISTENT;
+                }
+                if plaintext.len() < 16 {
+                    return CKR_DATA_LEN_RANGE;
+                }
+                let tweak: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(t) => t,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut buf = plaintext.to_vec();
+                use aes::cipher::KeyInit;
+                use aes::{Aes128, Aes256};
+                use xts_mode::Xts128;
+                match key_bytes.len() {
+                    32 => {
+                        let k1 = match Aes128::new_from_slice(&key_bytes[..16]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        let k2 = match Aes128::new_from_slice(&key_bytes[16..]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        Xts128::<Aes128>::new(k1, k2).encrypt_sector(&mut buf, tweak);
+                    }
+                    64 => {
+                        let k1 = match Aes256::new_from_slice(&key_bytes[..32]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        let k2 = match Aes256::new_from_slice(&key_bytes[32..]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        Xts128::<Aes256>::new(k1, k2).encrypt_sector(&mut buf, tweak);
+                    }
+                    _ => return CKR_KEY_SIZE_RANGE,
+                }
+                buf
+            }
             CKM_RSA_PKCS_OAEP => {
                 if key_bytes.len() < 8 {
                     return CKR_KEY_TYPE_INCONSISTENT;
@@ -7066,6 +7791,46 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 };
                 (iv, aad, tag_bits)
             }
+            CKM_AES_CCM => {
+                // CK_CCM_PARAMS (§6.11.3). ulDataLen is not threaded through
+                // — this engine's CCM is single-shot only (see
+                // crypto/multipart.rs's CCM section), so the real
+                // plaintext/ciphertext length is always known directly from
+                // the C_Encrypt/C_Decrypt buffer, making the separate
+                // upfront declaration redundant here.
+                let ccm = match ParamReader::new(
+                    p_param,
+                    ul_param_len,
+                    &ck_param::ccm::LAYOUT,
+                    ck_param::ccm::FIELD_COUNT,
+                ) {
+                    Ok(r) => r,
+                    Err(_) => return CKR_ARGUMENTS_BAD,
+                };
+                let nonce_ptr = ccm.ptr(ck_param::ccm::P_NONCE);
+                let nonce_len = ccm.ulong(ck_param::ccm::UL_NONCE_LEN);
+                let aad_ptr = ccm.ptr(ck_param::ccm::P_AAD);
+                let aad_len = ccm.ulong(ck_param::ccm::UL_AAD_LEN);
+                let mac_len = ccm.ulong32(ck_param::ccm::UL_MAC_LEN);
+                // SP 800-38C: nonce length 7..=13 bytes (q = 15-len(N) must
+                // be 2..=8); MAC length one of {4,6,8,10,12,14,16}.
+                if nonce_ptr.is_null() || !(7..=13).contains(&nonce_len) {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                if !matches!(mac_len, 4 | 6 | 8 | 10 | 12 | 14 | 16) {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                let nonce = std::slice::from_raw_parts(nonce_ptr, nonce_len).to_vec();
+                let aad = if !aad_ptr.is_null() && aad_len > 0 {
+                    std::slice::from_raw_parts(aad_ptr, aad_len).to_vec()
+                } else {
+                    Vec::new()
+                };
+                // tag_bits slot repurposed to carry mac_len in BYTES
+                // (CK_CCM_PARAMS.ulMACLen is already an octet count, unlike
+                // CK_GCM_PARAMS.ulTagBits).
+                (nonce, aad, mac_len)
+            }
             // §6.27.2 — ECB takes no mechanism parameter.
             CKM_AES_ECB => (Vec::new(), Vec::new(), 0),
             CKM_AES_CBC | CKM_AES_CBC_PAD => {
@@ -7088,6 +7853,20 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     Ok((cb, bits)) => (cb, Vec::new(), bits),
                     Err(rv) => return rv,
                 }
+            }
+            // OFB/CFB1/CFB8/CFB128 (§6.11 variants) — plain 16-byte IV, same
+            // shape as CBC. No mechanism-specific params beyond the IV.
+            // XTS's mechanism param (§6.15) is likewise a bare 16-byte
+            // value (the Data Unit Sequence Number / tweak) — same shape.
+            CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 | CKM_AES_XTS => {
+                if p_param.is_null() || ul_param_len < 16 {
+                    return CKR_ARGUMENTS_BAD;
+                }
+                (
+                    std::slice::from_raw_parts(p_param, 16).to_vec(),
+                    Vec::new(),
+                    0,
+                )
             }
             CKM_RSA_PKCS_OAEP => {
                 // Full CK_RSA_PKCS_OAEP_PARAMS (§6.4.4). EncryptCtx packing:
@@ -7288,6 +8067,111 @@ pub fn C_Decrypt(
                 let mut ctr = CtrState::new_with_width(key, cb, width);
                 ctr.update_public(ciphertext)
             }
+            CKM_AES_OFB => {
+                use crate::crypto::multipart::{AesKey, OfbState};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut ofb = OfbState::new(key, ivb);
+                ofb.update_public(ciphertext)
+            }
+            CKM_AES_CFB128 => {
+                use crate::crypto::multipart::{AesKey, Cfb128State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb128State::new(key, ivb, CipherDirection::Decrypt);
+                cfb.update_public(ciphertext)
+            }
+            CKM_AES_CFB8 => {
+                use crate::crypto::multipart::{AesKey, Cfb8State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb8State::new(key, ivb, CipherDirection::Decrypt);
+                cfb.update_public(ciphertext)
+            }
+            CKM_AES_CFB1 => {
+                use crate::crypto::multipart::{AesKey, Cfb1State, CipherDirection};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                let ivb: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(c) => c,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut cfb = Cfb1State::new(key, ivb, CipherDirection::Decrypt);
+                cfb.update_public(ciphertext)
+            }
+            CKM_AES_CCM => {
+                use crate::crypto::multipart::{AesKey, ccm_decrypt};
+                let key = match AesKey::new(&key_bytes) {
+                    Some(k) => k,
+                    None => return CKR_KEY_TYPE_INCONSISTENT,
+                };
+                match ccm_decrypt(&key, &iv, &aad, ciphertext, tag_bits as usize) {
+                    Ok(pt) => pt,
+                    Err(rv) => return rv,
+                }
+            }
+            CKM_AES_XTS => {
+                if get_object_attr_u32(key_handle, CKA_KEY_TYPE) != Some(CKK_AES_XTS) {
+                    return CKR_KEY_TYPE_INCONSISTENT;
+                }
+                if ciphertext.len() < 16 {
+                    return CKR_ENCRYPTED_DATA_LEN_RANGE;
+                }
+                let tweak: [u8; 16] = match iv.as_slice().try_into() {
+                    Ok(t) => t,
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let mut buf = ciphertext.to_vec();
+                use aes::cipher::KeyInit;
+                use aes::{Aes128, Aes256};
+                use xts_mode::Xts128;
+                match key_bytes.len() {
+                    32 => {
+                        let k1 = match Aes128::new_from_slice(&key_bytes[..16]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        let k2 = match Aes128::new_from_slice(&key_bytes[16..]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        Xts128::<Aes128>::new(k1, k2).decrypt_sector(&mut buf, tweak);
+                    }
+                    64 => {
+                        let k1 = match Aes256::new_from_slice(&key_bytes[..32]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        let k2 = match Aes256::new_from_slice(&key_bytes[32..]) {
+                            Ok(c) => c,
+                            Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                        };
+                        Xts128::<Aes256>::new(k1, k2).decrypt_sector(&mut buf, tweak);
+                    }
+                    _ => return CKR_KEY_SIZE_RANGE,
+                }
+                buf
+            }
             CKM_RSA_PKCS_OAEP => {
                 use rsa::pkcs8::DecodePrivateKey;
                 let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&key_bytes) {
@@ -7477,6 +8361,10 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
             CKM_SHA3_512 => DigestCtx::Sha3_512(sha3::Sha3_512::new()),
             CKM_KECCAK_256 => DigestCtx::Keccak256(Vec::new()),
             CKM_RIPEMD160 => DigestCtx::Ripemd160(ripemd::Ripemd160::new()),
+            CKM_ML_DSA_EXTERNAL_MU_GEN => match init_mu_gen_digest(p_mechanism) {
+                Ok(h) => DigestCtx::MuGen(h),
+                Err(rv) => return rv,
+            },
             _ => return CKR_MECHANISM_INVALID,
         };
         DIGEST_STATE.with(|s| {
@@ -7484,6 +8372,60 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
         });
     }
     CKR_OK
+}
+
+/// Remediation R39 (phase 8), PQCTODAY-VENDOR-EXT-MU: parse
+/// `CK_MU_GEN_PARAMS`, resolve `tr` (either the caller's own
+/// precomputed 64 bytes, or `SHAKE256(pk, 64)` from a public-key handle's
+/// `CKA_VALUE` — PKCS#11 v3.2 Table 280's `pk_encode` IS the raw
+/// `CKA_VALUE` bytes, no re-encoding needed), and seed a fresh SHAKE256
+/// with `tr || 0x00 || len(ctx) || ctx` (FIPS 204 Eq. 2's own prefix) —
+/// the caller's message follows via the normal C_DigestUpdate/C_Digest
+/// path from here on, this function has no more FIPS 204 awareness past
+/// this point.
+unsafe fn init_mu_gen_digest(p_mechanism: *const u8) -> Result<sha3::Shake256, u32> {
+    use sha3::digest::Update;
+    let r = ck_param::mech(p_mechanism)
+        .params(&ck_param::mu_gen_params::LAYOUT, ck_param::mu_gen_params::FIELD_COUNT)
+        .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+
+    let h_key = r.ulong32(ck_param::mu_gen_params::H_KEY);
+    let tr_buf = r.buffer(ck_param::mu_gen_params::P_TR, ck_param::mu_gen_params::UL_TR_LEN);
+    let have_key = h_key != 0; // CK_INVALID_HANDLE
+    let have_tr = !tr_buf.is_empty();
+    if have_key == have_tr {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+
+    let tr: [u8; 64] = if have_tr {
+        tr_buf.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?
+    } else {
+        let pk = crate::state::get_key_material(h_key).ok_or(CKR_KEY_HANDLE_INVALID)?;
+        let mut hasher = sha3::Shake256::default();
+        Update::update(&mut hasher, &pk);
+        let mut reader = sha3::digest::ExtendableOutput::finalize_xof(hasher);
+        let mut tr = [0u8; 64];
+        sha3::digest::XofReader::read(&mut reader, &mut tr);
+        tr
+    };
+
+    let ctx_len = r.ulong(ck_param::mu_gen_params::UL_CTX_LEN);
+    if ctx_len > 255 {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let ctx_buf = r.buffer(ck_param::mu_gen_params::P_CTX, ck_param::mu_gen_params::UL_CTX_LEN);
+    if ctx_buf.len() != ctx_len as usize {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+
+    let mut hasher = sha3::Shake256::default();
+    Update::update(&mut hasher, &tr);
+    Update::update(&mut hasher, &[0u8]);
+    Update::update(&mut hasher, &[ctx_len as u8]);
+    if !ctx_buf.is_empty() {
+        Update::update(&mut hasher, ctx_buf);
+    }
+    Ok(hasher)
 }
 
 #[wasm_bindgen(js_name = _C_DigestUpdate)]
@@ -7514,6 +8456,7 @@ pub fn C_DigestUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
                     DigestCtx::Sha3_512(h) => h.update(data),
                     DigestCtx::Keccak256(buf) => crate::crypto::keccak::keccak256_update(buf, data),
                     DigestCtx::Ripemd160(h) => h.update(data),
+                    DigestCtx::MuGen(h) => sha3::digest::Update::update(h, data),
                 }
             }
         });
@@ -7541,6 +8484,7 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
                     DigestCtx::Sha3_512(_) => 64,
                     DigestCtx::Keccak256(_) => 32,
                     DigestCtx::Ripemd160(_) => 20,
+                    DigestCtx::MuGen(_) => 64,
                 })
             });
             return match len {
@@ -7563,6 +8507,7 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
                 DigestCtx::Sha3_512(_) => 64,
                 DigestCtx::Keccak256(_) => 32,
                 DigestCtx::Ripemd160(_) => 20,
+                DigestCtx::MuGen(_) => 64,
             })
         });
         let expected_len = match expected_len {
@@ -7586,6 +8531,12 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
             DigestCtx::Sha3_512(h) => h.finalize().to_vec(),
             DigestCtx::Keccak256(buf) => crate::crypto::keccak::keccak256_finalize(&buf).to_vec(),
             DigestCtx::Ripemd160(h) => h.finalize().to_vec(),
+            DigestCtx::MuGen(h) => {
+                let mut reader = sha3::digest::ExtendableOutput::finalize_xof(h);
+                let mut mu = [0u8; 64];
+                sha3::digest::XofReader::read(&mut reader, &mut mu);
+                mu.to_vec()
+            }
         };
         std::ptr::copy_nonoverlapping(hash.as_ptr(), p_digest, hash.len());
         *pul_digest_len = hash.len() as u32;
@@ -7625,6 +8576,7 @@ pub fn C_Digest(
                     DigestCtx::Sha3_512(_) => 64,
                     DigestCtx::Keccak256(_) => 32,
                     DigestCtx::Ripemd160(_) => 20,
+                    DigestCtx::MuGen(_) => 64,
                 })
             });
             return match len {
@@ -7813,10 +8765,16 @@ enum Sp800Seg {
 /// PRF type or an invalid AES-CMAC key length.
 fn sp800_108_prf_output_len(prf_type: u32, base_key_len: usize) -> Option<usize> {
     match prf_type {
+        CKM_SHA_1_HMAC => Some(20),
+        CKM_SHA224_HMAC => Some(28),
         CKM_SHA256_HMAC => Some(32),
         CKM_SHA384_HMAC => Some(48),
         CKM_SHA512_HMAC => Some(64),
+        CKM_SHA512_224_HMAC => Some(28),
+        CKM_SHA512_256_HMAC => Some(32),
+        CKM_SHA3_224_HMAC => Some(28),
         CKM_SHA3_256_HMAC => Some(32),
+        CKM_SHA3_384_HMAC => Some(48),
         CKM_SHA3_512_HMAC => Some(64),
         // CMAC output = the underlying block cipher's block size (AES = 16
         // bytes), independent of key length; base_key_len is only checked
@@ -7973,6 +8931,21 @@ unsafe fn parse_sp800_108_segments(
     Ok(out)
 }
 
+/// The FixedInputData portion of a segment list — every segment EXCEPT the
+/// counter, in order. Double-Pipeline mode's A(i) chain (SP 800-108 §5.3)
+/// is defined over FixedInputData alone: A(0) = FixedInputData, A(i) =
+/// PRF(K, A(i-1)) — the counter only appears inside each round's PRF call
+/// (see `sp800_108_feedback_input`, reused for that), never in the chain.
+fn sp800_108_fixed_only(segs: &[Sp800Seg]) -> Vec<Vec<u8>> {
+    segs.iter()
+        .filter_map(|s| match s {
+            Sp800Seg::Counter(..) => None,
+            Sp800Seg::DkmLength(b) => Some(b.clone()),
+            Sp800Seg::Bytes(b) => Some(b.clone()),
+        })
+        .collect()
+}
+
 /// Feedback-mode per-iteration input: segments in order, NO implicit
 /// counter when ITERATION_VARIABLE is absent (SP 800-108 §4.2 makes the
 /// counter optional in feedback mode).
@@ -8084,6 +9057,101 @@ where
     Ok(out)
 }
 
+/// Double-Pipeline Iteration Mode KBKDF core (SP 800-108 §5.3):
+/// A(0) = FixedInputData; A(i) = PRF(base_key, A(i-1)); K(i) = PRF(base_key,
+/// A(i) ‖ round_input(segs, i)), where round_input carries the optional
+/// counter (wherever the caller positioned it, per this engine's literal
+/// segment-order convention) plus the same fixed segments used to seed the
+/// A(i) chain — reuses `sp800_108_feedback_input` since its "counter
+/// optional, segments in caller order" behavior is exactly what a
+/// Double-Pipeline round needs.
+fn sp800_108_run_double_pipeline<M>(
+    base_key: &[u8],
+    segs: &[Sp800Seg],
+    key_len: usize,
+) -> Result<Vec<u8>, u32>
+where
+    M: hmac::Mac + hmac::digest::KeyInit,
+{
+    use hmac::Mac;
+    let fixed = sp800_108_fixed_only(segs);
+    let mut a = {
+        let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
+        for piece in &fixed {
+            mac.update(piece);
+        }
+        mac.finalize().into_bytes().to_vec()
+    };
+    let mut out = Vec::new();
+    let mut counter: u32 = 1;
+    while out.len() < key_len {
+        let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
+        mac.update(&a);
+        for piece in sp800_108_feedback_input(segs, counter) {
+            mac.update(&piece);
+        }
+        out.extend_from_slice(&mac.finalize().into_bytes());
+        let mut a_mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
+        a_mac.update(&a);
+        a = a_mac.finalize().into_bytes().to_vec();
+        counter += 1;
+    }
+    out.truncate(key_len);
+    Ok(out)
+}
+
+/// Double-Pipeline-mode twin of [`sp800_108_counter_kbkdf`]; same PRF policy.
+fn sp800_108_double_pipeline_kbkdf(
+    prf_type: u32,
+    base_key: &[u8],
+    segs: &[Sp800Seg],
+    key_len: usize,
+) -> Result<Vec<u8>, u32> {
+    use hmac::Hmac;
+    match prf_type {
+        CKM_SHA_1_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha1::Sha1>>(base_key, segs, key_len)
+        }
+        CKM_SHA224_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha224>>(base_key, segs, key_len)
+        }
+        CKM_SHA256_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha256>>(base_key, segs, key_len)
+        }
+        CKM_SHA384_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha384>>(base_key, segs, key_len)
+        }
+        CKM_SHA512_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha512>>(base_key, segs, key_len)
+        }
+        CKM_SHA512_224_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha512_224>>(base_key, segs, key_len)
+        }
+        CKM_SHA512_256_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha2::Sha512_256>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_224_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha3::Sha3_224>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_384_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha3::Sha3_384>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_256_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha3::Sha3_256>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_512_HMAC => {
+            sp800_108_run_double_pipeline::<Hmac<sha3::Sha3_512>>(base_key, segs, key_len)
+        }
+        CKM_AES_CMAC => match base_key.len() {
+            16 => sp800_108_run_double_pipeline::<cmac::Cmac<aes::Aes128>>(base_key, segs, key_len),
+            24 => sp800_108_run_double_pipeline::<cmac::Cmac<aes::Aes192>>(base_key, segs, key_len),
+            32 => sp800_108_run_double_pipeline::<cmac::Cmac<aes::Aes256>>(base_key, segs, key_len),
+            _ => Err(CKR_KEY_SIZE_RANGE),
+        },
+        _ => Err(CKR_MECHANISM_PARAM_INVALID),
+    }
+}
+
 /// PKCS#11 v3.2 §6.26 — the SP 800-108 PRF must be a keyed-MAC mechanism
 /// (HMAC/CMAC). Bare hashes (CKM_SHA256 etc.) and any unrecognised mechanism
 /// fail with CKR_MECHANISM_PARAM_INVALID. AES-CMAC is not implemented by
@@ -8096,9 +9164,23 @@ fn sp800_108_counter_kbkdf(
 ) -> Result<Vec<u8>, u32> {
     use hmac::Hmac;
     match prf_type {
+        CKM_SHA_1_HMAC => sp800_108_run_counter::<Hmac<sha1::Sha1>>(base_key, segs, key_len),
+        CKM_SHA224_HMAC => sp800_108_run_counter::<Hmac<sha2::Sha224>>(base_key, segs, key_len),
         CKM_SHA256_HMAC => sp800_108_run_counter::<Hmac<sha2::Sha256>>(base_key, segs, key_len),
         CKM_SHA384_HMAC => sp800_108_run_counter::<Hmac<sha2::Sha384>>(base_key, segs, key_len),
         CKM_SHA512_HMAC => sp800_108_run_counter::<Hmac<sha2::Sha512>>(base_key, segs, key_len),
+        CKM_SHA512_224_HMAC => {
+            sp800_108_run_counter::<Hmac<sha2::Sha512_224>>(base_key, segs, key_len)
+        }
+        CKM_SHA512_256_HMAC => {
+            sp800_108_run_counter::<Hmac<sha2::Sha512_256>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_224_HMAC => {
+            sp800_108_run_counter::<Hmac<sha3::Sha3_224>>(base_key, segs, key_len)
+        }
+        CKM_SHA3_384_HMAC => {
+            sp800_108_run_counter::<Hmac<sha3::Sha3_384>>(base_key, segs, key_len)
+        }
         CKM_SHA3_256_HMAC => {
             sp800_108_run_counter::<Hmac<sha3::Sha3_256>>(base_key, segs, key_len)
         }
@@ -8126,6 +9208,12 @@ fn sp800_108_feedback_kbkdf(
 ) -> Result<Vec<u8>, u32> {
     use hmac::Hmac;
     match prf_type {
+        CKM_SHA_1_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha1::Sha1>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA224_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha2::Sha224>>(base_key, iv, segs, key_len)
+        }
         CKM_SHA256_HMAC => {
             sp800_108_run_feedback::<Hmac<sha2::Sha256>>(base_key, iv, segs, key_len)
         }
@@ -8134,6 +9222,18 @@ fn sp800_108_feedback_kbkdf(
         }
         CKM_SHA512_HMAC => {
             sp800_108_run_feedback::<Hmac<sha2::Sha512>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA512_224_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha2::Sha512_224>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA512_256_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha2::Sha512_256>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA3_224_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha3::Sha3_224>>(base_key, iv, segs, key_len)
+        }
+        CKM_SHA3_384_HMAC => {
+            sp800_108_run_feedback::<Hmac<sha3::Sha3_384>>(base_key, iv, segs, key_len)
         }
         CKM_SHA3_256_HMAC => {
             sp800_108_run_feedback::<Hmac<sha3::Sha3_256>>(base_key, iv, segs, key_len)
@@ -8712,7 +9812,14 @@ pub fn C_DeriveKey(
             }
 
             // ── HKDF ────────────────────────────────────────────────────────
-            CKM_HKDF_DERIVE => {
+            // CKM_HKDF_DATA (0x402b) is the same derivation as CKM_HKDF_DERIVE
+            // (0x402a) — PKCS#11 v3.2 §2.43 defines it as producing a CKO_DATA
+            // object instead of a CKO_SECRET_KEY, nothing else differs. The
+            // pkcs11-provider vendored in src/vendor requires it for its
+            // TLS13-KDF byte-output path (OpenSSL's own tls13_generate_secret
+            // always requests the DATA variant). See the CKA_CLASS branch
+            // below the match for the object-shape difference.
+            CKM_HKDF_DERIVE | CKM_HKDF_DATA => {
                 let ikm = match get_object_value(h_base_key) {
                     Some(v) => v,
                     None => return CKR_ARGUMENTS_BAD,
@@ -8729,9 +9836,24 @@ pub fn C_DeriveKey(
                 // by shifting the first word right by 8, which is the same
                 // byte on a little-endian host and the wrong one on a
                 // big-endian one; `bbool()` reads byte 1 on both.
+                let b_extract = r.bbool(ck_param::hkdf::B_EXTRACT);
                 let b_expand = r.bbool(ck_param::hkdf::B_EXPAND);
                 let prf = r.ulong32(ck_param::hkdf::PRF_HASH_MECHANISM);
                 let salt_type = r.ulong32(ck_param::hkdf::UL_SALT_TYPE);
+                // PKCS#11 v3.2 §6.62.3: "The salt should be ignored if
+                // bExtract is false" — so ulSaltType is only meaningful, and
+                // only validated, when bExtract is true. Below, an
+                // unrecognized salt_type already degrades to "no salt" by
+                // construction (the two `if`s only special-case DATA/KEY);
+                // this makes that silent fallback loud when it would matter
+                // (bExtract=true), matching the C++ engine's equivalent gate.
+                if b_extract
+                    && salt_type != CKF_HKDF_SALT_NULL
+                    && salt_type != CKF_HKDF_SALT_DATA
+                    && salt_type != CKF_HKDF_SALT_KEY
+                {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
                 // Salt-as-key (CKF_HKDF_SALT_KEY): the salt is another key
                 // handle (hSaltKey @ word5); HKDF-Extract keys HMAC on its
                 // CKA_VALUE — the keyed dual-PRF combiner form,
@@ -8759,39 +9881,36 @@ pub fn C_DeriveKey(
                 };
                 let info = r.buffer(ck_param::hkdf::P_INFO, ck_param::hkdf::UL_INFO_LEN);
                 let mut out = vec![0u8; key_len];
+                // PRF dispatch must be exhaustive over every hash this engine
+                // can name, with a hard rejection for anything else — the
+                // previous `_ => SHA-256` fallback silently substituted the
+                // wrong hash (and returned CKR_OK) for any PRF outside a
+                // 4-way allowlist, confirmed against real ACVP KDA-HKDF
+                // vectors (2026-08-30). CKR_MECHANISM_PARAM_INVALID matches
+                // the honest-failure convention already used by the
+                // SP800-108 Counter/Feedback PRF dispatch below.
                 if b_expand {
+                    macro_rules! hkdf_expand {
+                        ($H:ty) => {{
+                            let hk = hkdf::Hkdf::<$H>::new(salt_opt, &ikm);
+                            if hk.expand(info, &mut out).is_err() {
+                                return CKR_FUNCTION_FAILED;
+                            }
+                        }};
+                    }
                     match prf {
-                        CKM_SHA384 => {
-                            let hk = hkdf::Hkdf::<sha2::Sha384>::new(salt_opt, &ikm);
-                            if hk.expand(info, &mut out).is_err() {
-                                return CKR_FUNCTION_FAILED;
-                            }
-                        }
-                        CKM_SHA512 => {
-                            let hk = hkdf::Hkdf::<sha2::Sha512>::new(salt_opt, &ikm);
-                            if hk.expand(info, &mut out).is_err() {
-                                return CKR_FUNCTION_FAILED;
-                            }
-                        }
-                        CKM_SHA3_256 => {
-                            let hk = hkdf::Hkdf::<sha3::Sha3_256>::new(salt_opt, &ikm);
-                            if hk.expand(info, &mut out).is_err() {
-                                return CKR_FUNCTION_FAILED;
-                            }
-                        }
-                        CKM_SHA3_512 => {
-                            let hk = hkdf::Hkdf::<sha3::Sha3_512>::new(salt_opt, &ikm);
-                            if hk.expand(info, &mut out).is_err() {
-                                return CKR_FUNCTION_FAILED;
-                            }
-                        }
-                        _ => {
-                            // CKM_SHA256 default
-                            let hk = hkdf::Hkdf::<sha2::Sha256>::new(salt_opt, &ikm);
-                            if hk.expand(info, &mut out).is_err() {
-                                return CKR_FUNCTION_FAILED;
-                            }
-                        }
+                        CKM_SHA_1 => hkdf_expand!(sha1::Sha1),
+                        CKM_SHA224 => hkdf_expand!(sha2::Sha224),
+                        CKM_SHA256 => hkdf_expand!(sha2::Sha256),
+                        CKM_SHA384 => hkdf_expand!(sha2::Sha384),
+                        CKM_SHA512 => hkdf_expand!(sha2::Sha512),
+                        CKM_SHA512_224 => hkdf_expand!(sha2::Sha512_224),
+                        CKM_SHA512_256 => hkdf_expand!(sha2::Sha512_256),
+                        CKM_SHA3_224 => hkdf_expand!(sha3::Sha3_224),
+                        CKM_SHA3_256 => hkdf_expand!(sha3::Sha3_256),
+                        CKM_SHA3_384 => hkdf_expand!(sha3::Sha3_384),
+                        CKM_SHA3_512 => hkdf_expand!(sha3::Sha3_512),
+                        _ => return CKR_MECHANISM_PARAM_INVALID,
                     }
                 } else {
                     // extract-only: write PRK to output using the requested PRF
@@ -8803,11 +9922,18 @@ pub fn C_DeriveKey(
                         }};
                     }
                     match prf {
+                        CKM_SHA_1 => hkdf_extract!(sha1::Sha1),
+                        CKM_SHA224 => hkdf_extract!(sha2::Sha224),
+                        CKM_SHA256 => hkdf_extract!(sha2::Sha256),
                         CKM_SHA384 => hkdf_extract!(sha2::Sha384),
                         CKM_SHA512 => hkdf_extract!(sha2::Sha512),
+                        CKM_SHA512_224 => hkdf_extract!(sha2::Sha512_224),
+                        CKM_SHA512_256 => hkdf_extract!(sha2::Sha512_256),
+                        CKM_SHA3_224 => hkdf_extract!(sha3::Sha3_224),
                         CKM_SHA3_256 => hkdf_extract!(sha3::Sha3_256),
+                        CKM_SHA3_384 => hkdf_extract!(sha3::Sha3_384),
                         CKM_SHA3_512 => hkdf_extract!(sha3::Sha3_512),
-                        _ => hkdf_extract!(sha2::Sha256), // CKM_SHA256 default
+                        _ => return CKR_MECHANISM_PARAM_INVALID,
                     }
                 }
                 out
@@ -8903,33 +10029,85 @@ pub fn C_DeriveKey(
                 }
             }
 
+            // ── SP 800-108 Double-Pipeline KBKDF ─────────────────────────────
+            CKM_SP800_108_DOUBLE_PIPELINE_KDF => {
+                let base_key = match get_object_value(h_base_key) {
+                    Some(v) => v,
+                    None => return CKR_ARGUMENTS_BAD,
+                };
+                // CK_SP800_108_KDF_PARAMS — same struct as Counter mode (no
+                // IV field); only the first three fields are required.
+                let r = match ck_param::mech(p_mechanism)
+                    .params(&ck_param::sp800_108_kdf::LAYOUT, 3)
+                {
+                    Ok(r) => r,
+                    Err(ck_param::ParamErr::Absent) => return CKR_ARGUMENTS_BAD,
+                    Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let prf_type = r.ulong32(ck_param::sp800_108_kdf::PRF_TYPE);
+                let num_segs = r.ulong(ck_param::sp800_108_kdf::UL_NUMBER_OF_DATA_PARAMS);
+                let p_segs = r.ptr(ck_param::sp800_108_kdf::P_DATA_PARAMS);
+                // SP 800-108 §5.3 — counter optional, like Feedback mode.
+                let segs = match parse_sp800_108_segments(
+                    p_segs,
+                    num_segs,
+                    key_len,
+                    prf_type,
+                    base_key.len(),
+                    /* allow_explicit_counter */ true,
+                ) {
+                    Ok(s) => s,
+                    Err(rv) => return rv,
+                };
+                match sp800_108_double_pipeline_kbkdf(prf_type, &base_key, &segs, key_len) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
+                }
+            }
+
             _ => return CKR_MECHANISM_INVALID,
         };
 
         let mut attrs = HashMap::new();
         let vlen = key_value.len() as u32;
         attrs.insert(CKA_VALUE, key_value);
-        store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
-        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
-        store_bool(&mut attrs, CKA_EXTRACTABLE, true);
-        store_bool(&mut attrs, CKA_SENSITIVE, false);
-        store_ulong(&mut attrs, CKA_VALUE_LEN, vlen);
-        // PKCS#11 v3.2 §4.1 defaults — caller may override via template
-        store_bool(&mut attrs, CKA_TOKEN, false);
-        store_bool(&mut attrs, CKA_PRIVATE, false);
-        absorb_template_attrs(&mut attrs, p_template, ul_attribute_count);
-        // Server-managed attributes — set AFTER absorb to override any caller-provided values.
-        // PKCS#11 v3.2 §4.3 Table 13 — a DERIVED key is NOT locally generated:
-        // CKA_LOCAL = FALSE and CKA_KEY_GEN_MECHANISM = CK_UNAVAILABLE_INFORMATION.
-        store_bool(&mut attrs, CKA_LOCAL, false);
-        store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
-        // PKCS#11 v3.2 §4.9/§4.10 — a key derived from external material can never
-        // be marked ALWAYS_SENSITIVE / NEVER_EXTRACTABLE.
-        store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
-        store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
+        // CKA_CLASS is server-managed (absorb_template_attrs never lets a
+        // caller template override it — see is_server_managed_attr), so the
+        // CKM_HKDF_DATA/CKM_HKDF_DERIVE split has to be decided here, not via
+        // the template's own CKA_CLASS.
+        if mech_type == CKM_HKDF_DATA {
+            // §2.43 — CKO_DATA output: no key-lifecycle attributes apply
+            // (no CKA_KEY_TYPE, EXTRACTABLE, SENSITIVE, ALWAYS_SENSITIVE,
+            // NEVER_EXTRACTABLE, or CHECK_VALUE — those are key-class-only
+            // per §4.9-§4.11).
+            store_ulong(&mut attrs, CKA_CLASS, CKO_DATA);
+            store_ulong(&mut attrs, CKA_VALUE_LEN, vlen);
+            store_bool(&mut attrs, CKA_TOKEN, false);
+            store_bool(&mut attrs, CKA_PRIVATE, false);
+            absorb_template_attrs(&mut attrs, p_template, ul_attribute_count);
+        } else {
+            store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+            store_bool(&mut attrs, CKA_EXTRACTABLE, true);
+            store_bool(&mut attrs, CKA_SENSITIVE, false);
+            store_ulong(&mut attrs, CKA_VALUE_LEN, vlen);
+            // PKCS#11 v3.2 §4.1 defaults — caller may override via template
+            store_bool(&mut attrs, CKA_TOKEN, false);
+            store_bool(&mut attrs, CKA_PRIVATE, false);
+            absorb_template_attrs(&mut attrs, p_template, ul_attribute_count);
+            // Server-managed attributes — set AFTER absorb to override any caller-provided values.
+            // PKCS#11 v3.2 §4.3 Table 13 — a DERIVED key is NOT locally generated:
+            // CKA_LOCAL = FALSE and CKA_KEY_GEN_MECHANISM = CK_UNAVAILABLE_INFORMATION.
+            store_bool(&mut attrs, CKA_LOCAL, false);
+            store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+            // PKCS#11 v3.2 §4.9/§4.10 — a key derived from external material can never
+            // be marked ALWAYS_SENSITIVE / NEVER_EXTRACTABLE.
+            store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
+            store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
 
-        // PKCS#11 v3.2 §4.11: KCV mandatory on every secret-key derivation result.
-        crate::state::compute_kcv(&mut attrs);
+            // PKCS#11 v3.2 §4.11: KCV mandatory on every secret-key derivation result.
+            crate::state::compute_kcv(&mut attrs);
+        }
 
         *ph_key = allocate_handle_owned(_h_session, attrs);
     }
@@ -10096,9 +11274,23 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_KMAC_128
             | CKM_KMAC_256
             | CKM_ML_DSA
+            | CKM_ML_DSA_EXTERNAL_MU
             | CKM_SLH_DSA
             | CKM_EDDSA
     ) || hmac_general_base(mech).is_some()
+        // Remediation R35: CKM_HASH_ML_DSA_<hash> (PKCS#11 v3.2 §6.67.7,
+        // "with hashing") is explicitly single- AND multiple-part; the C++
+        // arm's own HASH_MLDSA_CASE macro has always set bAllowMultiPartOp
+        // for these, this was the one arm missing it (live-traced:
+        // OpenSSL's own EVP_DigestSign machinery drives even a one-shot
+        // `dgst -sign` through Update/Final, same discovery as R34's
+        // CKM_ML_DSA_EXTERNAL_MU). The bare generic CKM_HASH_ML_DSA
+        // (single-part only per §6.67.6) is correctly NOT included here —
+        // is_prehash_ml_dsa() only matches the 10 hash-specific mechanisms.
+        || is_prehash_ml_dsa(mech)
+        // Remediation R36: same reasoning as R35's is_prehash_ml_dsa entry
+        // above, for the SLH-DSA family (PKCS#11 v3.2 §6.69.7).
+        || is_prehash_slh_dsa(mech)
 }
 
 /// Shared §5.13.3/§5.15.3 gate for the four Update/Final entry points:
@@ -10288,6 +11480,34 @@ fn build_multipart_cipher(
             // ulCounterBits travels in tag_bits (see EncryptCtx docs).
             let width = ((ctx.tag_bits.max(8)) / 8) as usize;
             Ok(MultipartCipher::Ctr(CtrState::new_with_width(make_key()?, cb, width)))
+        }
+        CKM_AES_OFB => {
+            let iv: [u8; 16] =
+                ctx.iv.as_slice().try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            Ok(MultipartCipher::Ofb(
+                crate::crypto::multipart::OfbState::new(make_key()?, iv),
+            ))
+        }
+        CKM_AES_CFB128 => {
+            let iv: [u8; 16] =
+                ctx.iv.as_slice().try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            Ok(MultipartCipher::Cfb128(
+                crate::crypto::multipart::Cfb128State::new(make_key()?, iv, dir),
+            ))
+        }
+        CKM_AES_CFB8 => {
+            let iv: [u8; 16] =
+                ctx.iv.as_slice().try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            Ok(MultipartCipher::Cfb8(
+                crate::crypto::multipart::Cfb8State::new(make_key()?, iv, dir),
+            ))
+        }
+        CKM_AES_CFB1 => {
+            let iv: [u8; 16] =
+                ctx.iv.as_slice().try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            Ok(MultipartCipher::Cfb1(
+                crate::crypto::multipart::Cfb1State::new(make_key()?, iv, dir),
+            ))
         }
         CKM_AES_GCM => {
             let iv: [u8; 12] =
@@ -11960,6 +13180,23 @@ pub fn aes_gcm_exec(
             }
         }
     }
+}
+
+/// AES-GMAC (PKCS#11 v3.2 Sec6.13.6): GCM with zero plaintext — the
+/// C_Sign/C_Verify `pData` argument IS the authenticated data (GMAC has no
+/// separate AAD channel of its own; `CK_GCM_PARAMS.pAAD`/`ulAADLen` are
+/// unused here, matching how this session's C++ OSSLGMAC treats the sign
+/// data as the MAC's "data" input). `GcmState` already derives J0 correctly
+/// for any IV length per SP 800-38D Sec7.1 (not just 96-bit), which real
+/// ACVP AES-GMAC vectors exercise. `tag_len` in bytes.
+fn sign_gmac(key: &[u8], data: &[u8], iv: &[u8], tag_len: usize) -> Result<Vec<u8>, u32> {
+    use crate::crypto::multipart::{AesKey, CipherDirection, GcmState};
+    if iv.is_empty() || tag_len == 0 || tag_len > 16 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let aes = AesKey::new(key).ok_or(CKR_KEY_SIZE_RANGE)?;
+    let gcm = GcmState::new(aes, iv, data, (tag_len as u32) * 8, CipherDirection::Encrypt);
+    Ok(gcm.msg_compute_tag())
 }
 
 #[wasm_bindgen(js_name = _C_MessageEncryptInit)]
@@ -17304,6 +18541,18 @@ mod generic_prehash_mech_ffi_tests {
         let _guard = test_lock::acquire();
         let (session, pub_h, priv_h) = setup();
         let msg = b"generic pre-hash ML-DSA end-to-end";
+        // Remediation R37 (phase 8): PKCS#11 v3.2 §6.67.6 — the GENERIC
+        // mechanism's data argument IS an already-hashed PHM, never a raw
+        // message (only the ten §6.67.7 hash-SPECIFIC mechanisms hash on
+        // token). This test originally fed the raw message straight to the
+        // generic mechanism and asserted CKR_OK, which only "worked"
+        // because of the double-hash bug R37 fixed (the generic mechanism
+        // used to be silently remapped onto the hash-specific one, which
+        // then hashed its input) — that CKR_OK was evidence of the bug,
+        // not of correctness (confirmed live via generic-hash-mldsa-probe
+        // before the fix). Feeds a genuine SHA-256 PHM now.
+        use sha2::Digest;
+        let phm = sha2::Sha256::digest(msg);
 
         let (mut m, ctx) = hash_mech(CKM_HASH_ML_DSA, CKM_SHA256);
         m[1] = ctx.as_ptr() as usize;
@@ -17311,7 +18560,7 @@ mod generic_prehash_mech_ffi_tests {
         let mut sig = vec![0u8; 8192];
         let mut sig_len = sig.len() as u32;
         assert_eq!(
-            C_Sign(session, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_mut_ptr(), &mut sig_len),
+            C_Sign(session, phm.as_ptr() as *mut u8, phm.len() as u32, sig.as_mut_ptr(), &mut sig_len),
             CKR_OK
         );
         sig.truncate(sig_len as usize);
@@ -17320,13 +18569,16 @@ mod generic_prehash_mech_ffi_tests {
         m2[1] = ctx2.as_ptr() as usize;
         assert_eq!(C_VerifyInit(session, m2.as_mut_ptr() as *mut u8, pub_h), CKR_OK);
         assert_eq!(
-            C_Verify(session, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_ptr() as *mut u8, sig.len() as u32),
+            C_Verify(session, phm.as_ptr() as *mut u8, phm.len() as u32, sig.as_ptr() as *mut u8, sig.len() as u32),
             CKR_OK
         );
 
-        // Interop: a signature made via the GENERIC mechanism verifies
-        // under the SPECIFIC mechanism name too (remap makes them the same
-        // internal mech_type).
+        // Interop: a signature made via the GENERIC mechanism (over PHM)
+        // verifies under the SPECIFIC mechanism name too, fed the
+        // ORIGINAL message (which the specific mechanism hashes on token
+        // itself) — the two are defined to be verify-interchangeable for
+        // PHM=H(M) (remediation R37's own strongest oracle, no remap
+        // involved any more).
         let mut m3: [usize; 3] = [CKM_HASH_ML_DSA_SHA256 as usize, 0, 0];
         assert_eq!(C_VerifyInit(session, m3.as_mut_ptr() as *mut u8, pub_h), CKR_OK);
         assert_eq!(

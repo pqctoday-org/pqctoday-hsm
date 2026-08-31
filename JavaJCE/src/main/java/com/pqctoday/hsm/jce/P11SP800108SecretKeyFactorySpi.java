@@ -10,13 +10,27 @@ import java.util.Map;
 import static com.pqctoday.hsm.jce.P11Constants.*;
 
 /**
- * SP 800-108 counter/feedback KDF — "SP800-108-Counter" and
- * "SP800-108-Feedback", one factory instance per mode (not per PRF —
- * unlike OAEP/HMAC/PBKDF2's one-service-per-digest pattern elsewhere in
- * this module, the PRF choice lives in {@link P11SP800108KeySpec}
- * instead, since a per-(mode,PRF) registration would be 18 services for
- * a low-usage feature with no standard JCA name to hang them off of
- * anyway).
+ * SP 800-108 counter/feedback/double-pipeline KDF — "SP800-108-Counter",
+ * "SP800-108-Feedback", and "SP800-108-DoublePipeline" (item 4), one
+ * factory instance per mode (not per PRF — unlike OAEP/HMAC/PBKDF2's
+ * one-service-per-digest pattern elsewhere in this module, the PRF choice
+ * lives in {@link P11SP800108KeySpec} instead, since a per-(mode,PRF)
+ * registration would be dozens of services for a low-usage feature with
+ * no standard JCA name to hang them off of anyway).
+ *
+ * Double-pipeline mode (SP 800-108 §5.3) is the SAME KBKDF backend as
+ * counter/feedback — confirmed reading SoftHSM_keygen.cpp's
+ * double-pipeline branch before adding it here: it parses the identical
+ * CK_SP800_108_KDF_PARAMS struct counter mode already uses, just a third
+ * {@code CKM_SP800_108_DOUBLE_PIPELINE_KDF} mechanism value, not new
+ * native machinery — so {@link Mode#DOUBLE_PIPELINE} reuses
+ * {@link P11Library#mechSp800108DoublePipeline} exactly the way
+ * {@link Mode#COUNTER} reuses {@link P11Library#mechSp800108Counter}.
+ *
+ * PRF_NAMES also gained {@code HmacSHA512/224}/{@code HmacSHA512/256}
+ * (item 4's second finding): a prior audit flagged these as missing;
+ * verified still genuinely absent by reading this table directly before
+ * adding them (not assumed from the audit note alone).
  *
  * Derived keys are opaque, same as every other derived/generated key in
  * this module.
@@ -28,6 +42,8 @@ final class P11SP800108SecretKeyFactorySpi extends SecretKeyFactorySpi {
         Map.entry("HmacSHA256", CKM_SHA256_HMAC),
         Map.entry("HmacSHA384", CKM_SHA384_HMAC),
         Map.entry("HmacSHA512", CKM_SHA512_HMAC),
+        Map.entry("HmacSHA512/224", CKM_SHA512_224_HMAC),
+        Map.entry("HmacSHA512/256", CKM_SHA512_256_HMAC),
         Map.entry("HmacSHA3-224", CKM_SHA3_224_HMAC),
         Map.entry("HmacSHA3-256", CKM_SHA3_256_HMAC),
         Map.entry("HmacSHA3-384", CKM_SHA3_384_HMAC),
@@ -35,12 +51,15 @@ final class P11SP800108SecretKeyFactorySpi extends SecretKeyFactorySpi {
         Map.entry("AESCMAC", CKM_AES_CMAC)
     );
 
-    private final P11Library lib;
-    private final boolean feedback;
+    /** SP 800-108 mode selector — see class javadoc. */
+    enum Mode { COUNTER, FEEDBACK, DOUBLE_PIPELINE }
 
-    P11SP800108SecretKeyFactorySpi(P11Library lib, boolean feedback) {
+    private final P11Library lib;
+    private final Mode mode;
+
+    P11SP800108SecretKeyFactorySpi(P11Library lib, Mode mode) {
         this.lib = lib;
-        this.feedback = feedback;
+        this.mode = mode;
     }
 
     @Override
@@ -77,11 +96,18 @@ final class P11SP800108SecretKeyFactorySpi extends SecretKeyFactorySpi {
             P11Library.attrBool(CKA_SIGN, true),
         };
         try (var op = java.lang.foreign.Arena.ofConfined()) {
-            var mech = feedback
-                ? lib.mechSp800108Feedback(op, prfMech, spec.fixedInput(), spec.iv())
-                : lib.mechSp800108Counter(op, prfMech, spec.fixedInput());
+            var mech = switch (mode) {
+                case COUNTER -> lib.mechSp800108Counter(op, prfMech, spec.fixedInput());
+                case FEEDBACK -> lib.mechSp800108Feedback(op, prfMech, spec.fixedInput(), spec.iv());
+                case DOUBLE_PIPELINE -> lib.mechSp800108DoublePipeline(op, prfMech, spec.fixedInput());
+            };
             long handle = lib.deriveKey(op, mech, baseHandle, outputTmpl);
-            return new P11Key.Secret(lib, handle, feedback ? "SP800-108-Feedback" : "SP800-108-Counter");
+            String label = switch (mode) {
+                case COUNTER -> "SP800-108-Counter";
+                case FEEDBACK -> "SP800-108-Feedback";
+                case DOUBLE_PIPELINE -> "SP800-108-DoublePipeline";
+            };
+            return new P11Key.Secret(lib, handle, label);
         }
     }
 

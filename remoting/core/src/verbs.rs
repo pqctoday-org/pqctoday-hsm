@@ -33,7 +33,9 @@
 
 use crate::algorithm::Algorithm;
 use crate::error::CkError;
-use softhsmrustv3::constants::{CKF_RW_SESSION, CKF_SERIAL_SESSION, CKR_OK, CKR_PIN_INCORRECT};
+use softhsmrustv3::constants::{
+    CKF_RW_SESSION, CKF_SERIAL_SESSION, CKR_MECHANISM_INVALID, CKR_OK, CKR_PIN_INCORRECT,
+};
 use softhsmrustv3::{ffi, native};
 
 /// Benchmark-only constants — not a security boundary. See module doc.
@@ -114,16 +116,34 @@ pub fn generate_key_pair(
 /// signature cell (Ed25519 or ML-DSA-*) — calling this with a KEM
 /// algorithm is a caller bug, not a wire condition, so it panics rather
 /// than manufacturing a CKR_* code that never came from the engine.
-pub fn sign(session: u32, key_handle: u32, algorithm: Algorithm, data: &[u8]) -> Result<Vec<u8>, CkError> {
+///
+/// `external_mu` (added 2026-08-31): FIPS 204 external-µ mode,
+/// ML-DSA-only — when true, `data` is treated as the already-computed
+/// 64-byte message representative µ rather than the raw message (see
+/// `SignRequest.external_mu`'s proto doc). `external_mu=true` with
+/// `Algorithm::Ed25519` is a genuine WIRE condition (a caller can trigger
+/// it from network input, unlike the KEM/signature mismatch above), so it
+/// returns `CKR_MECHANISM_INVALID` rather than asserting.
+pub fn sign(
+    session: u32,
+    key_handle: u32,
+    algorithm: Algorithm,
+    data: &[u8],
+    external_mu: bool,
+) -> Result<Vec<u8>, CkError> {
     assert!(algorithm.is_signature(), "sign() called with a KEM algorithm: {algorithm}");
+    if external_mu && algorithm == Algorithm::Ed25519 {
+        return Err(CkError(CKR_MECHANISM_INVALID));
+    }
     let mechanism = algorithm.sign_mechanism();
     let result = match algorithm {
         Algorithm::Ed25519 => native::sign(session, key_handle, mechanism, data),
         // External-hedged default (deterministic=false, internal=false,
-        // external_mu=false, random=None) — matches bench-harness's own
-        // KMIP arm convention (kmip.rs's `sign` helper), so a cross-arm
-        // comparison isn't secretly comparing different signing modes.
-        _ => native::sign_pqc(session, key_handle, mechanism, data, &[], false, false, false, None),
+        // random=None) — matches bench-harness's own KMIP arm convention
+        // (kmip.rs's `sign` helper), so a cross-arm comparison isn't
+        // secretly comparing different signing modes. `external_mu` is
+        // the one knob this verb exposes on the wire.
+        _ => native::sign_pqc(session, key_handle, mechanism, data, &[], false, false, external_mu, None),
     };
     result.map_err(CkError::from)
 }
@@ -133,20 +153,24 @@ pub fn sign(session: u32, key_handle: u32, algorithm: Algorithm, data: &[u8]) ->
 /// convention); `Err` only for a genuine fault, never for "the signature
 /// didn't check out" — `native::verify_pqc`'s `Err(CKR_SIGNATURE_INVALID)`
 /// is normalized to `Ok(false)` here so callers see one convention
-/// regardless of algorithm family.
+/// regardless of algorithm family. `external_mu` — see [`sign`]'s doc.
 pub fn verify(
     session: u32,
     key_handle: u32,
     algorithm: Algorithm,
     data: &[u8],
     signature: &[u8],
+    external_mu: bool,
 ) -> Result<bool, CkError> {
     assert!(algorithm.is_signature(), "verify() called with a KEM algorithm: {algorithm}");
+    if external_mu && algorithm == Algorithm::Ed25519 {
+        return Err(CkError(CKR_MECHANISM_INVALID));
+    }
     let mechanism = algorithm.sign_mechanism();
     match algorithm {
         Algorithm::Ed25519 => native::verify(session, key_handle, mechanism, data, signature).map_err(CkError::from),
         _ => {
-            match native::verify_pqc(session, key_handle, mechanism, data, signature, &[], false, false) {
+            match native::verify_pqc(session, key_handle, mechanism, data, signature, &[], false, external_mu) {
                 Ok(()) => Ok(true),
                 Err(rv) if rv == softhsmrustv3::constants::CKR_SIGNATURE_INVALID => Ok(false),
                 Err(e) => Err(CkError::from(e)),

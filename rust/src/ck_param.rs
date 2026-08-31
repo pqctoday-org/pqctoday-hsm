@@ -485,6 +485,17 @@ ck_struct!(
 });
 
 ck_struct!(
+    /// `CK_CCM_PARAMS` (v3.2 §6.11.3).
+    ccm, "CK_CCM_PARAMS", {
+    UL_DATA_LEN: F::Ulong,
+    P_NONCE: F::Ptr,
+    UL_NONCE_LEN: F::Ulong,
+    P_AAD: F::Ptr,
+    UL_AAD_LEN: F::Ulong,
+    UL_MAC_LEN: F::Ulong,
+});
+
+ck_struct!(
     /// `CK_CHACHA20_PARAMS` (v3.2 §6.20).
     chacha20, "CK_CHACHA20_PARAMS", {
     P_BLOCK_COUNTER: F::Ptr,
@@ -576,6 +587,21 @@ ck_struct!(
     P_CONTEXT: F::Ptr,
     UL_CONTEXT_LEN: F::Ulong,
     HASH: F::Ulong,
+});
+
+ck_struct!(
+    /// `CK_MU_GEN_PARAMS` (remediation R39, phase 8, PQCTODAY-VENDOR-EXT-MU
+    /// — adopted natively 2026-08-30 from the real PKCS#11 v3.3 working
+    /// draft's own struct, `working/doc/spec/ml_dsa.md`) — token-side µ
+    /// generation, the produce half of external-µ (the consume half,
+    /// CK_SIGN_ADDITIONAL_CONTEXT, is `sign_ctx` above). Exactly one of
+    /// `hKey`/`pTR` must be supplied.
+    mu_gen_params, "CK_MU_GEN_PARAMS", {
+    H_KEY: F::Ulong,
+    P_TR: F::Ptr,
+    UL_TR_LEN: F::Ulong,
+    P_CTX: F::Ptr,
+    UL_CTX_LEN: F::Ulong,
 });
 
 ck_struct!(
@@ -817,6 +843,7 @@ mod tests {
             ),
             (&sign_ctx::LAYOUT, vec![0, 4, 8], 12, vec![0, 8, 16], 24),
             (&hash_sign_ctx::LAYOUT, vec![0, 4, 8, 12], 16, vec![0, 8, 16, 24], 32),
+            (&mu_gen_params::LAYOUT, vec![0, 4, 8, 12, 16], 20, vec![0, 8, 16, 24, 32], 40),
             (&key_deriv_string::LAYOUT, vec![0, 4], 8, vec![0, 8], 16),
             (&prf_data_param::LAYOUT, vec![0, 4, 8], 12, vec![0, 8, 16], 24),
             (&counter_format::LAYOUT, vec![0, 4], 8, vec![0, 8], 16),

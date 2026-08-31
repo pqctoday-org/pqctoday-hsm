@@ -2760,9 +2760,17 @@ mod tests {
         ];
 
         // HKDF extract+expand, PRF SHA-256, raw salt, no salt-key.
-        const CKM_SHA256_HMAC: u64 = 0x0000_0251;
+        //
+        // prfHashMechanism names the HASH (CKM_SHA256), not an HMAC
+        // mechanism id -- unlike CK_SP800_108_KDF_PARAMS.prfType below,
+        // which per spec genuinely is an HMAC/CMAC mechanism id
+        // (CKM_SHA256_HMAC, CKM_AES_CMAC, ...). The engine's HKDF PRF
+        // dispatch is exhaustive over the plain hash constants only (real
+        // ACVP-verified fix, no longer silently substitutes SHA-256 for an
+        // unrecognized PRF) and correctly rejects CKM_SHA256_HMAC here.
+        const CKM_SHA256: u64 = 0x0000_0250;
         const CKF_HKDF_SALT_DATA: u32 = 0x0000_0002;
-        let hkdf_params = derive_params::hkdf(true, true, CKM_SHA256_HMAC, CKF_HKDF_SALT_DATA, b"salt-bytes", 0, b"info-bytes");
+        let hkdf_params = derive_params::hkdf(true, true, CKM_SHA256, CKF_HKDF_SALT_DATA, b"salt-bytes", 0, b"info-bytes");
         let (rv, derived) = derive_key(session, u64::from(ck::CKM_HKDF_DERIVE), hkdf_params.as_slice(), base_key, &out_tmpl);
         assert_eq!(rv, 0);
         assert_ne!(derived, 0);

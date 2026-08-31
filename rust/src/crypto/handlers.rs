@@ -140,6 +140,14 @@ pub enum DigestCtx {
     Keccak256(Vec<u8>),
     /// Historical RIPEMD-160 (CKM_RIPEMD160) — 20-byte digest.
     Ripemd160(ripemd::Ripemd160),
+    /// Remediation R39 (phase 8), PQCTODAY-VENDOR-EXT-MU:
+    /// CKM_ML_DSA_EXTERNAL_MU_GEN — incremental SHAKE256 already seeded
+    /// (at C_DigestInit) with `tr || 0x00 || len(ctx) || ctx`; the
+    /// caller's message M is what flows through the normal
+    /// C_DigestUpdate/C_Digest path from here, fixed 64-byte output
+    /// (FIPS 204 Eq. 2). `Shake256::finalize_xof()` consumes `self`, so
+    /// this variant is only ever read once, at C_DigestFinal/C_Digest.
+    MuGen(sha3::Shake256),
 }
 
 pub struct FindCtx {
@@ -474,6 +482,43 @@ pub fn get_slh_dsa_ph(mech: u32) -> Option<fips205::Ph> {
     }
 }
 
+/// Remediation R37 (phase 8): maps `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` (a
+/// raw digest mechanism, e.g. `CKM_SHA256`) to `Ph`, for the bare generic
+/// `CKM_HASH_ML_DSA`'s own PHM-input path -- distinct from
+/// [`get_ml_dsa_ph`], which maps the TEN hash-SPECIFIC
+/// `CKM_HASH_ML_DSA_<hash>` mechanisms instead. SHAKE128/256 excluded: no
+/// standalone `CKM_` digest identifier exists for them (see
+/// `map_generic_hash_mech`'s own note), so the generic mechanism cannot
+/// select them.
+pub fn ph_from_digest_mech_ml_dsa(hash: u32) -> Option<fips204::Ph> {
+    match hash {
+        crate::constants::CKM_SHA224 => Some(fips204::Ph::SHA224),
+        crate::constants::CKM_SHA256 => Some(fips204::Ph::SHA256),
+        crate::constants::CKM_SHA384 => Some(fips204::Ph::SHA384),
+        crate::constants::CKM_SHA512 => Some(fips204::Ph::SHA512),
+        crate::constants::CKM_SHA3_224 => Some(fips204::Ph::SHA3_224),
+        crate::constants::CKM_SHA3_256 => Some(fips204::Ph::SHA3_256),
+        crate::constants::CKM_SHA3_384 => Some(fips204::Ph::SHA3_384),
+        crate::constants::CKM_SHA3_512 => Some(fips204::Ph::SHA3_512),
+        _ => None,
+    }
+}
+
+/// SLH-DSA twin of [`ph_from_digest_mech_ml_dsa`] (remediation R37, phase 8).
+pub fn ph_from_digest_mech_slh_dsa(hash: u32) -> Option<fips205::Ph> {
+    match hash {
+        crate::constants::CKM_SHA224 => Some(fips205::Ph::SHA224),
+        crate::constants::CKM_SHA256 => Some(fips205::Ph::SHA256),
+        crate::constants::CKM_SHA384 => Some(fips205::Ph::SHA384),
+        crate::constants::CKM_SHA512 => Some(fips205::Ph::SHA512),
+        crate::constants::CKM_SHA3_224 => Some(fips205::Ph::SHA3_224),
+        crate::constants::CKM_SHA3_256 => Some(fips205::Ph::SHA3_256),
+        crate::constants::CKM_SHA3_384 => Some(fips205::Ph::SHA3_384),
+        crate::constants::CKM_SHA3_512 => Some(fips205::Ph::SHA3_512),
+        _ => None,
+    }
+}
+
 pub unsafe fn write_fixed_str(buf: *mut u8, offset: usize, s: &str, max_len: usize) {
     let bytes = s.as_bytes();
     let copy_len = bytes.len().min(max_len);
@@ -582,6 +627,51 @@ macro_rules! slh_dsa_verify {
                     Err(CKR_SIGNATURE_INVALID)
                 }
             }
+        }
+    }};
+}
+
+/// Remediation R37 (phase 8): [`slh_dsa_sign`]'s twin for the bare generic
+/// `CKM_HASH_SLH_DSA` -- `$phm` is already hashed, `$hash` is the caller's
+/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` (mapped via
+/// [`crate::crypto::handlers::ph_from_digest_mech_slh_dsa`]), no `None`
+/// (pure-mode) arm -- the generic mechanism is always pre-hash by
+/// definition.
+#[macro_export]
+macro_rules! slh_dsa_sign_phm {
+    ($ps:ty, $hash:expr, $sk_bytes:expr, $phm:expr, $ctx:expr, $deterministic:expr) => {{
+        use fips205::traits::Signer;
+        let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
+            .try_into()
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let ph = crate::crypto::handlers::ph_from_digest_mech_slh_dsa($hash)
+            .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+        sk.try_hash_sign_phm($phm, $ctx, &ph, !$deterministic)
+            .map_err(|_| CKR_FUNCTION_FAILED)
+            .map(|s| Into::<Vec<u8>>::into(s))
+    }};
+}
+
+/// Verify counterpart to [`slh_dsa_sign_phm`] (remediation R37, phase 8).
+#[macro_export]
+macro_rules! slh_dsa_verify_phm {
+    ($ps:ty, $hash:expr, $pk_bytes:expr, $phm:expr, $sig_bytes:expr, $ctx:expr) => {{
+        use fips205::traits::Verifier;
+        let pk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $pk_bytes
+            .try_into()
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let vk = <$ps as fips205::traits::SerDes>::try_from_bytes(pk_arr)
+            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        let sig: <$ps as fips205::traits::Verifier>::Signature =
+            $sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+        let ph = crate::crypto::handlers::ph_from_digest_mech_slh_dsa($hash)
+            .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+        if vk.hash_verify_phm($phm, &sig, $ctx, &ph) {
+            Ok(())
+        } else {
+            Err(CKR_SIGNATURE_INVALID)
         }
     }};
 }
@@ -1123,6 +1213,47 @@ pub fn sign_ml_dsa(
     }
 }
 
+/// Remediation R37 (phase 8), PKCS#11 v3.2 §6.67.6: sign an ALREADY-HASHED
+/// PHM directly, for the bare generic `CKM_HASH_ML_DSA` mechanism -- twin
+/// of [`sign_ml_dsa`], which hashes a raw message. `hash` is the caller's
+/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` field (a raw digest mechanism,
+/// e.g. `CKM_SHA256`), mapped via [`ph_from_digest_mech_ml_dsa`].
+pub fn sign_ml_dsa_phm(
+    ps: u32,
+    sk_bytes: &[u8],
+    phm: &[u8],
+    ctx: &[u8],
+    hash: u32,
+    deterministic: bool,
+) -> Result<Vec<u8>, u32> {
+    use fips204::traits::Signer;
+    let ph = ph_from_digest_mech_ml_dsa(hash).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    macro_rules! ml_dsa_sign_phm {
+        ($variant:path) => {{
+            type Sk = <$variant as KeyGen>::PrivateKey;
+            let sk_arr: &<Sk as fips204::traits::SerDes>::ByteArray =
+                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sk = <Sk as fips204::traits::SerDes>::try_from_bytes(*sk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let result = if deterministic {
+                sk.try_hash_sign_with_rng_phm(&mut ZeroRng, phm, ctx, &ph)
+            } else {
+                sk.try_hash_sign_phm(phm, ctx, &ph)
+            };
+            result
+                .map_err(|_| CKR_FUNCTION_FAILED)
+                .map(|s| Into::<Vec<u8>>::into(s))
+        }};
+    }
+    use fips204::traits::KeyGen;
+    match ps {
+        CKP_ML_DSA_44 => ml_dsa_sign_phm!(fips204::ml_dsa_44::KG),
+        CKP_ML_DSA_65 | 0 => ml_dsa_sign_phm!(fips204::ml_dsa_65::KG),
+        CKP_ML_DSA_87 => ml_dsa_sign_phm!(fips204::ml_dsa_87::KG),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
 /// ML-DSA **internal-interface** signing — ACVP `signatureInterface="internal"`
 /// / OASIS interop `<Internal value="true"/>` (FIPS 204 `ML-DSA.Sign_internal`):
 /// signs `message` directly as M′, WITHOUT the external
@@ -1396,6 +1527,59 @@ pub fn sign_slh_dsa(
             ctx,
             deterministic
         ),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// Remediation R37 (phase 8), PKCS#11 v3.2 §6.69.6: sign an ALREADY-HASHED
+/// PHM directly, for the bare generic `CKM_HASH_SLH_DSA` mechanism -- twin
+/// of [`sign_slh_dsa`], which hashes a raw message. `hash` is the caller's
+/// `CK_HASH_SIGN_ADDITIONAL_CONTEXT.hash` field.
+pub fn sign_slh_dsa_phm(
+    ps: u32,
+    hash: u32,
+    sk_bytes: &[u8],
+    phm: &[u8],
+    ctx: &[u8],
+    deterministic: bool,
+) -> Result<Vec<u8>, u32> {
+    match ps {
+        CKP_SLH_DSA_SHA2_128S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_128s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_128S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_128s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHA2_128F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_128f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_128F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_128f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHA2_192S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_192s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_192S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_192s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHA2_192F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_192f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_192F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_192f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHA2_256S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_256s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_256S => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_256s::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHA2_256F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_sha2_256f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
+        CKP_SLH_DSA_SHAKE_256F => {
+            slh_dsa_sign_phm!(fips205::slh_dsa_shake_256f::PrivateKey, hash, sk_bytes, phm, ctx, deterministic)
+        }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
 }
@@ -1807,6 +1991,105 @@ pub fn sign_eddsa(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
     }
 }
 
+/// EdDSA with an RFC 8032 context string — Ed448ctx and Ed25519ctx.
+/// KMIP/CACP coverage gap-analysis items 9a/9b (2026-08-30):
+/// `CK_EDDSA_PARAMS` already carries `pContextData` in C++ and is
+/// wire-complete on KMIP's `CryptographicParameters.context_string`, but
+/// no Rust engine function accepted it until now. PKCS#11 treats
+/// Ed25519 and Ed448 as one mechanism family (`CKM_EDDSA`); both get
+/// real support here, not just the curve the pinned crate happened to
+/// make convenient.
+///
+/// Ed448 uses the crate's real, purpose-built `sign_ctx` — the same
+/// construction Ed448 always uses (RFC 8032 §5.2 requires a context on
+/// every Ed448 signature, empty or not), so this isn't a new signature
+/// scheme, just exposing what `ed448-goldilocks` already implements.
+///
+/// Ed25519ctx has no convenience method in the pinned `ed25519-dalek`
+/// 2.2.0, but IS implemented here — not held — using only the crate's
+/// public, documented API: `ExpandedSecretKey`'s own correct RFC 8032
+/// §5.1.5 key expansion, plus `curve25519-dalek`'s public `Scalar`/
+/// `EdwardsPoint`. This is not a novel construction: it is byte-for-byte
+/// the same dom2-prefixed scheme as the crate's own internal
+/// `raw_sign_byupdate` (verified against `ed25519-dalek`'s source,
+/// `signing.rs`) with exactly one byte changed — RFC 8032's domain flag
+/// `0x00` (context/pure mode) in place of the crate's hardcoded `0x01`
+/// (Ed25519ph, the only mode its own public context-taking functions
+/// support — confirmed by reading `verifying::RCompute::new`, which
+/// hardcodes the Ed25519ph flag byte whenever a context is given, with
+/// no public path to select the pure-mode flag). Verified byte-exact
+/// against an independently-generated reference (PyCryptodome, a
+/// different Ed25519 implementation) — see the test below.
+pub fn sign_eddsa_ctx(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec<u8>, u32> {
+    if context.len() > 255 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    match sk_bytes.len() {
+        32 => sign_ed25519_ctx(sk_bytes, msg, context),
+        57 => {
+            let sk = ed448_goldilocks::SigningKey::try_from(sk_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            sk.sign_ctx(context, msg)
+                .map(|sig| sig.to_bytes().to_vec())
+                .map_err(|_| CKR_FUNCTION_FAILED)
+        }
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// RFC 8032 §5.1 dom2 prefix: `"SigEd25519 no Ed25519 collisions" ||
+/// octet(phflag) || octet(len(ctx)) || ctx`. `phflag = 0` selects
+/// Ed25519ctx (this function's only caller); `ed25519-dalek`'s own
+/// internal code (mirrored, not copied) uses the same construction with
+/// `phflag = 1` for Ed25519ph.
+fn ed25519_dom2_ctx(context: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(34 + context.len());
+    v.extend_from_slice(b"SigEd25519 no Ed25519 collisions");
+    v.push(0u8); // phflag = 0 (Ed25519ctx, not Ed25519ph)
+    v.push(context.len() as u8);
+    v.extend_from_slice(context);
+    v
+}
+
+fn sign_ed25519_ctx(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec<u8>, u32> {
+    use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
+    use curve25519_dalek::scalar::Scalar;
+    use sha2::{Digest, Sha512};
+
+    let mut key_bytes = [0u8; 32];
+    key_bytes.copy_from_slice(sk_bytes);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+    let verifying_key = signing_key.verifying_key();
+
+    // RFC 8032 §5.1.5 key expansion, exactly as `ExpandedSecretKey::from`
+    // does it internally (SHA-512 of the seed, then clamp/split) — see
+    // `ExpandedSecretKey::from_bytes`'s own doc comment.
+    let hash: [u8; 64] = Sha512::digest(key_bytes).into();
+    let expanded = ed25519_dalek::hazmat::ExpandedSecretKey::from_bytes(&hash);
+
+    let dom2 = ed25519_dom2_ctx(context);
+
+    let mut h1 = Sha512::new();
+    h1.update(&dom2);
+    h1.update(expanded.hash_prefix);
+    h1.update(msg);
+    let r = Scalar::from_hash(h1);
+    let r_point: CompressedEdwardsY = EdwardsPoint::mul_base(&r).compress();
+
+    let mut h2 = Sha512::new();
+    h2.update(&dom2);
+    h2.update(r_point.as_bytes());
+    h2.update(verifying_key.as_bytes());
+    h2.update(msg);
+    let k = Scalar::from_hash(h2);
+    let s = k * expanded.scalar + r;
+
+    let mut sig = Vec::with_capacity(64);
+    sig.extend_from_slice(r_point.as_bytes());
+    sig.extend_from_slice(s.as_bytes());
+    Ok(sig)
+}
+
 pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
     match sk_bytes.len() {
         32 => {
@@ -1866,6 +2149,31 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
             CKP_ML_DSA_87 => 4627,
             _ => 3309,
         },
+        // External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — same
+        // signature format/size as pure ML-DSA, only the input path differs.
+        CKM_ML_DSA_EXTERNAL_MU => match ps {
+            CKP_ML_DSA_44 => 2420,
+            CKP_ML_DSA_87 => 4627,
+            _ => 3309,
+        },
+        // Bare generic CKM_HASH_ML_DSA (remediation R37, phase 8) — this arm
+        // was MISSING when R37 added the mechanism's own C_Sign/C_Verify
+        // dispatch (sign_ml_dsa_phm et al.), so it fell through to the
+        // generic `_ => 512` default below. That's the SAME class of gap
+        // CKM_XMSSMT's own comment above documents: the two-call size-query
+        // idiom (pSignature=NULL, allocate exactly the reported length, call
+        // again) reported 512 bytes for an ML-DSA-65 signature (real length
+        // 3309) and returned CKR_BUFFER_TOO_SMALL on the second call for any
+        // correctly-written caller — found via test_p11_conformance.js once
+        // its own stale pre-R37 test fixture (raw message instead of a PHM)
+        // was corrected and the real Sign call could get past PHM-length
+        // validation far enough to reach this bug. Same signature format/size
+        // as pure ML-DSA — only the input path (PHM vs. raw message) differs.
+        CKM_HASH_ML_DSA => match ps {
+            CKP_ML_DSA_44 => 2420,
+            CKP_ML_DSA_87 => 4627,
+            _ => 3309,
+        },
         CKM_SLH_DSA => match ps {
             CKP_SLH_DSA_SHA2_128S | CKP_SLH_DSA_SHAKE_128S => 7856,
             CKP_SLH_DSA_SHA2_128F | CKP_SLH_DSA_SHAKE_128F => 17088,
@@ -1876,6 +2184,17 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         },
         // Pre-hash SLH-DSA variants produce the same signature length as pure SLH-DSA
         m if is_prehash_slh_dsa(m) => match ps {
+            CKP_SLH_DSA_SHA2_128S | CKP_SLH_DSA_SHAKE_128S => 7856,
+            CKP_SLH_DSA_SHA2_128F | CKP_SLH_DSA_SHAKE_128F => 17088,
+            CKP_SLH_DSA_SHA2_192S | CKP_SLH_DSA_SHAKE_192S => 16224,
+            CKP_SLH_DSA_SHA2_192F | CKP_SLH_DSA_SHAKE_192F => 35664,
+            CKP_SLH_DSA_SHA2_256S | CKP_SLH_DSA_SHAKE_256S => 29792,
+            _ => 49856,
+        },
+        // Bare generic CKM_HASH_SLH_DSA (remediation R37, phase 8) — SLH-DSA
+        // twin of the CKM_HASH_ML_DSA arm above; same missing-arm gap, same
+        // fix. Same signature format/size as pure SLH-DSA.
+        CKM_HASH_SLH_DSA => match ps {
             CKP_SLH_DSA_SHA2_128S | CKP_SLH_DSA_SHAKE_128S => 7856,
             CKP_SLH_DSA_SHA2_128F | CKP_SLH_DSA_SHAKE_128F => 17088,
             CKP_SLH_DSA_SHA2_192S | CKP_SLH_DSA_SHAKE_192S => 16224,
@@ -1959,7 +2278,7 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
                 get_object_attr_u32(hkey, CKA_LMS_PARAM_SET).unwrap_or(CKP_LMS_SHA256_M32_H5);
             let lmots_param =
                 get_object_attr_u32(hkey, CKA_LMOTS_PARAM_SET).unwrap_or(CKP_LMOTS_SHA256_N32_W4);
-            let levels = get_object_attr_u32(hkey, CKA_HSS_LMS_TYPE).unwrap_or(1);
+            let levels = get_object_attr_u32(hkey, CKA_HSS_LEVELS).unwrap_or(1);
             hss_sig_len(levels, lms_param, lmots_param)
         }
         CKM_SHA256_HMAC | CKM_SHA3_256_HMAC => 32,
@@ -2146,6 +2465,41 @@ pub fn verify_ml_dsa(
     }
 }
 
+/// Remediation R37 (phase 8): verify counterpart to [`sign_ml_dsa_phm`] --
+/// bare generic `CKM_HASH_ML_DSA`, `phm` already hashed by the caller.
+pub fn verify_ml_dsa_phm(
+    ps: u32,
+    pk_bytes: &[u8],
+    phm: &[u8],
+    sig_bytes: &[u8],
+    ctx: &[u8],
+    hash: u32,
+) -> Result<(), u32> {
+    use fips204::traits::Verifier;
+    let ph = ph_from_digest_mech_ml_dsa(hash).ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+    macro_rules! ml_dsa_verify_phm {
+        ($variant:ty) => {{
+            let pk_arr: &<$variant as fips204::traits::SerDes>::ByteArray =
+                pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let pk = <$variant as fips204::traits::SerDes>::try_from_bytes(*pk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig: <$variant as fips204::traits::Verifier>::Signature =
+                sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            if pk.hash_verify_phm(phm, &sig, ctx, &ph) {
+                Ok(())
+            } else {
+                Err(CKR_SIGNATURE_INVALID)
+            }
+        }};
+    }
+    match ps {
+        CKP_ML_DSA_44 => ml_dsa_verify_phm!(fips204::ml_dsa_44::PublicKey),
+        CKP_ML_DSA_65 | 0 => ml_dsa_verify_phm!(fips204::ml_dsa_65::PublicKey),
+        CKP_ML_DSA_87 => ml_dsa_verify_phm!(fips204::ml_dsa_87::PublicKey),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
 pub fn verify_slh_dsa(
     mech: u32,
     ps: u32,
@@ -2251,6 +2605,57 @@ pub fn verify_slh_dsa(
             sig_bytes,
             ctx
         ),
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// Remediation R37 (phase 8): verify counterpart to [`sign_slh_dsa_phm`] --
+/// bare generic `CKM_HASH_SLH_DSA`, `phm` already hashed by the caller.
+pub fn verify_slh_dsa_phm(
+    ps: u32,
+    hash: u32,
+    pk_bytes: &[u8],
+    phm: &[u8],
+    sig_bytes: &[u8],
+    ctx: &[u8],
+) -> Result<(), u32> {
+    match ps {
+        CKP_SLH_DSA_SHA2_128S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_128s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_128S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_128s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHA2_128F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_128f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_128F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_128f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHA2_192S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_192s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_192S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_192s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHA2_192F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_192f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_192F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_192f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHA2_256S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_256s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_256S => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_256s::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHA2_256F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_sha2_256f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
+        CKP_SLH_DSA_SHAKE_256F => {
+            slh_dsa_verify_phm!(fips205::slh_dsa_shake_256f::PublicKey, hash, pk_bytes, phm, sig_bytes, ctx)
+        }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
 }
@@ -2602,6 +3007,72 @@ pub fn verify_eddsa(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(),
     }
 }
 
+/// Verify counterpart of [`sign_eddsa_ctx`] — same Ed448-only scope, same
+/// reason Ed25519ctx is held rather than implemented.
+pub fn verify_eddsa_ctx(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8], context: &[u8]) -> Result<(), u32> {
+    if context.len() > 255 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    match pk_bytes.len() {
+        32 => verify_ed25519_ctx(pk_bytes, msg, sig_bytes, context),
+        57 => {
+            let pk_arr: &[u8; 57] =
+                pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig_arr: &[u8; 114] = sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
+            let vk = ed448_goldilocks::VerifyingKey::from_bytes(pk_arr)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
+            vk.verify_ctx(&sig, context, msg).map_err(|_| CKR_SIGNATURE_INVALID)
+        }
+        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+    }
+}
+
+/// Verify counterpart of [`sign_ed25519_ctx`] — recomputes the expected
+/// `R` from the signature's `s`, the message, and the verifying key
+/// (`R = [s]B - [k]A`, the standard non-batched Ed25519 check), then
+/// compares it to the signature's actual `R`. Byte-for-byte the same
+/// approach `ed25519-dalek`'s own internal `verifying::RCompute` uses —
+/// mirrored, not copied, with the same `phflag = 0` correction as the
+/// sign side. Rejects non-canonical `S` encodings explicitly (RFC 8032
+/// malleability protection), matching the crate's own stated behavior on
+/// its public verify functions ("rejecting non-canonical R values").
+fn verify_ed25519_ctx(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8], context: &[u8]) -> Result<(), u32> {
+    use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
+    use curve25519_dalek::scalar::Scalar;
+    use sha2::{Digest, Sha512};
+
+    if sig_bytes.len() != 64 {
+        return Err(CKR_SIGNATURE_LEN_RANGE);
+    }
+    let pk_arr: [u8; 32] = pk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let r_bytes: [u8; 32] = sig_bytes[..32].try_into().unwrap();
+    let s_bytes: [u8; 32] = sig_bytes[32..].try_into().unwrap();
+
+    let s = Option::<Scalar>::from(Scalar::from_canonical_bytes(s_bytes))
+        .ok_or(CKR_SIGNATURE_INVALID)?;
+    let a_compressed = CompressedEdwardsY(pk_arr);
+    let a_point = a_compressed.decompress().ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let r_compressed = CompressedEdwardsY(r_bytes);
+
+    let dom2 = ed25519_dom2_ctx(context);
+    let mut h = Sha512::new();
+    h.update(&dom2);
+    h.update(r_compressed.as_bytes());
+    h.update(a_compressed.as_bytes());
+    h.update(msg);
+    let k = Scalar::from_hash(h);
+
+    let minus_a: EdwardsPoint = -a_point;
+    let expected_r = EdwardsPoint::vartime_double_scalar_mul_basepoint(&k, &minus_a, &s).compress();
+
+    if expected_r == r_compressed {
+        Ok(())
+    } else {
+        Err(CKR_SIGNATURE_INVALID)
+    }
+}
+
 pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(), u32> {
     match pk_bytes.len() {
         32 => {
@@ -2644,6 +3115,80 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    /// KMIP/CACP coverage gap-analysis items 9a/9b (2026-08-30) —
+    /// `sign_eddsa_ctx`/`verify_eddsa_ctx`, verified against an
+    /// independently-generated reference: PyCryptodome's
+    /// `Crypto.Signature.eddsa` (`mode='rfc8032'`, explicit `context=`),
+    /// a different Ed448 implementation than this crate's
+    /// `ed448-goldilocks`. Byte-exact signature match, not just a
+    /// self-consistent round trip.
+    #[test]
+    fn ed448_ctx_matches_independent_reference() {
+        let sk = decode_hex(
+            "69a63dd6e1dee15924a210893d7fa4390cc8fcda3088af5358a56148ecc222d\
+             85c4aaf07e3dbe1e9b555a88ff147e2c7232af4f756315d6416",
+        );
+        let pk = decode_hex(
+            "4bff78792f6c2446f433f5e34c905cbda776d89f9c749c2671912b751d324b\
+             edd575d7d5c93453d9eee632145894493ec66a2eb7377a188100",
+        );
+        let msg = b"hello KWP-adjacent Ed448ctx test message";
+        let ctx = b"pqctoday-test-context";
+        let expected_sig = decode_hex(
+            "20608a5bd9d05353d0851213fa016bde4a1e133e8114c5edfa36f8b49ea8305\
+             9e14080aef680f88426097dc56eda0dc882620d6c1925b86b00fb84e253266a\
+             b4732a07efd0bb4b34a715c870b792d6d28920c9d3f95b386b27d6dc04ce07e\
+             509932851d9261fc8561c456c5fe009f05f0f00",
+        );
+        let sig = sign_eddsa_ctx(&sk, msg, ctx).unwrap();
+        assert_eq!(sig, expected_sig, "must match PyCryptodome's rfc8032 Ed448ctx signature");
+        assert_eq!(sig.len(), 114);
+        verify_eddsa_ctx(&pk, msg, &sig, ctx).expect("must verify with the matching context");
+        // Wrong context must fail — proves the context actually binds the
+        // signature (domain separation), not just decoration.
+        assert!(verify_eddsa_ctx(&pk, msg, &sig, b"wrong-context").is_err());
+        // Empty/absent context (ordinary Ed448) must ALSO fail against a
+        // ctx-bound signature — the two modes are cryptographically
+        // distinct, not fallback-compatible.
+        assert!(verify_eddsa(&pk, msg, &sig).is_err());
+    }
+
+    /// KMIP/CACP coverage gap-analysis items 9a/9b (2026-08-30) —
+    /// `sign_ed25519_ctx`/`verify_ed25519_ctx`, verified against an
+    /// independently-generated reference: PyCryptodome's
+    /// `Crypto.Signature.eddsa` (`mode='rfc8032'`, explicit `context=`),
+    /// a different Ed25519 implementation than this crate's
+    /// `ed25519-dalek`. Byte-exact signature match, not just a
+    /// self-consistent round trip — same evidence bar as the Ed448ctx
+    /// test above.
+    #[test]
+    fn ed25519_ctx_matches_independent_reference() {
+        let sk = decode_hex(
+            "74be4cc39e6a519abda6b1ccda6358d33b1b5a6721b86e88ee32ca2267ce7f9b",
+        );
+        let pk = decode_hex(
+            "a6c8f6130f878b8f9fbbf24c1e0056b677015ef6de126767fddbe2836578f9a9",
+        );
+        let msg = b"hello Ed25519ctx test message";
+        let ctx = b"pqctoday-test-context";
+        let expected_sig = decode_hex(
+            "ec372e6a883bacbbe3e4d84ac732bfd1caf16c90e74b52711169984f49140b6\
+             c690b8ec3c89b4ce7603ceeda1e967bb26a6ec45f11f2172fc44df48c6c40f108",
+        );
+        let sig = sign_eddsa_ctx(&sk, msg, ctx).unwrap();
+        assert_eq!(sig, expected_sig, "must match PyCryptodome's rfc8032 Ed25519ctx signature");
+        assert_eq!(sig.len(), 64);
+        verify_eddsa_ctx(&pk, msg, &sig, ctx).expect("must verify with the matching context");
+        // Wrong context must fail — proves the context actually binds the
+        // signature (domain separation), not just decoration.
+        assert!(verify_eddsa_ctx(&pk, msg, &sig, b"wrong-context").is_err());
+        // Ordinary Ed25519 (no context) must ALSO fail against a
+        // ctx-bound signature — the two modes are cryptographically
+        // distinct, not fallback-compatible (same property proven for
+        // Ed448ctx above).
+        assert!(verify_eddsa(&pk, msg, &sig).is_err());
     }
 
     #[test]

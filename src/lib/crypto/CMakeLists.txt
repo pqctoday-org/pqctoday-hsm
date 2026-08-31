@@ -81,6 +81,7 @@ set(SOURCES
     OSSLEVPSymmetricAlgorithm.cpp
     OSSLHMAC.cpp
     OSSLKMAC.cpp
+    OSSLGMAC.cpp
     OSSLMD5.cpp
     OSSLRNG.cpp
     OSSLRSA.cpp
@@ -94,6 +95,7 @@ set(SOURCES
     OSSLSHA384.cpp
     OSSLSHA512.cpp
     OSSLSHA3.cpp
+    OSSLMuGenDigest.cpp
     OSSLUtil.cpp
 
     # Stateful Stateful Signatures (LMS/HSS and XMSS)

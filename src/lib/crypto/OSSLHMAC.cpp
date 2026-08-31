@@ -105,6 +105,26 @@ size_t OSSLHMACSHA512::getMacSize() const
 	return 64;
 }
 
+const EVP_MD* OSSLHMACSHA512_224::getEVPHash() const
+{
+	return EVP_sha512_224();
+}
+
+size_t OSSLHMACSHA512_224::getMacSize() const
+{
+	return 28;
+}
+
+const EVP_MD* OSSLHMACSHA512_256::getEVPHash() const
+{
+	return EVP_sha512_256();
+}
+
+size_t OSSLHMACSHA512_256::getMacSize() const
+{
+	return 32;
+}
+
 // SHA-3 HMAC variants
 
 const EVP_MD* OSSLHMACSHA3_224::getEVPHash() const

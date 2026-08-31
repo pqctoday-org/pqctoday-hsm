@@ -244,12 +244,18 @@ pub fn sign(
                     session, handle, native_mech, &req.data, ctx, det, internal, ext_mu, random,
                 )
             } else {
+                // KMIP/CACP coverage gap-analysis items 9a/9b (2026-08-30):
+                // EdDSA context string, the same `context_string` field the
+                // PQC branch above already reads — `sign_with_pss_salt`
+                // ignores it for every mechanism except CKM_EDDSA.
+                let eddsa_ctx = effective_cp.and_then(|c| c.context_string.as_deref());
                 softhsmrustv3::native::sign_with_pss_salt(
                     session,
                     handle,
                     native_mech,
                     &req.data,
                     pss_salt,
+                    eddsa_ctx,
                 )
             };
             super::helpers::emit_pkcs11_result(

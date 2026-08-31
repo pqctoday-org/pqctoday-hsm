@@ -306,7 +306,21 @@ CK_RV P11Object::saveTemplate(Token *token, bool isPrivate, CK_ATTRIBUTE_PTR pTe
 		//  ck14  MUST be non-empty if CKA_URL is empty.
 		//  ck15  MUST be non-empty if CKA_VALUE is empty.
 		//  ck16  Can only be empty if CKA_URL is empty.
-		if (op == OBJECT_OP_CREATE || op == OBJECT_OP_GENERATE)
+		// ck14/ck15/ck16 are the only checks below that read selfEmpty/urlEmpty/
+		// valueEmpty, and only ever apply to the handful of certificate value/
+		// URL/hash attributes that declare one of these flags (CKA_VALUE,
+		// CKA_URL, CKA_HASH_OF_{SUBJECT,ISSUER}_PUBLIC_KEY) — but this loop
+		// runs over EVERY attribute in the object's full schema (CKA_CLASS,
+		// CKA_TOKEN, CKA_KEY_TYPE, CKA_PARAMETER_SET, ...). Computing
+		// selfEmpty unconditionally called getByteStringValue(i->first) on
+		// attributes that were never byte-string typed, which the object
+		// store logs as an error every time — on every single key generation,
+		// once per attribute per key object (audit WART-1,
+		// docs/openssl-provider-coverage-audit-2026-08-25.md). Gate the whole
+		// block on the flags actually being set for this attribute so the
+		// generic byte-string probe only ever runs where it can be valid.
+		if ((op == OBJECT_OP_CREATE || op == OBJECT_OP_GENERATE) &&
+		    (checks & (P11Attribute::ck14 | P11Attribute::ck15 | P11Attribute::ck16)) != 0)
 		{
 			const bool selfEmpty = !osobject->attributeExists(i->first) ||
 			                       osobject->getByteStringValue(i->first).size() == 0;

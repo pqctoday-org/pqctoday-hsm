@@ -8,8 +8,10 @@
 
 #define DFLT_DIGEST "SHA256"
 
-DISPATCH_KEYMGMT_FN(common, gen_set_params);
-DISPATCH_KEYMGMT_FN(common, gen_cleanup);
+/* Non-static: shared with kem/mlkem.c's keymgmt GEN table, a separate
+ * translation unit (declared in keymgmt.h). */
+int p11prov_common_gen_set_params(void *genctx, const OSSL_PARAM params[]);
+void p11prov_common_gen_cleanup(void *genctx);
 
 DISPATCH_KEYMGMT_FN(rsa, new);
 DISPATCH_KEYMGMT_FN(rsa, gen_init);
@@ -128,6 +130,28 @@ struct key_generator {
         struct {
             CK_ML_DSA_PARAMETER_SET_TYPE param_set;
         } mldsa;
+        struct {
+            CK_SLH_DSA_PARAMETER_SET_TYPE param_set;
+        } slhdsa;
+        struct {
+            CK_ML_KEM_PARAMETER_SET_TYPE param_set;
+        } mlkem;
+        /* Remediation R41 (phase 8): CKA_PARAMETER_SET (RFC 8391 oid) is
+         * MANDATORY on the generated public key template per PKCS#11 v3.2
+         * SS6.66.6 -- both engines require it (or, for Rust, silently
+         * default; the provider itself always sets it explicitly, never
+         * relying on either engine's own default behavior). One hardcoded
+         * default oid each for XMSS/XMSS^MT (same "single documented
+         * default" scope sig/hss.c's own keymgmt already established for
+         * HSS -- XMSS/XMSS^MT between them have 33 RFC 8391 combinations,
+         * too many for a per-variant algorithm-name split the way
+         * ML-DSA/SLH-DSA/ML-KEM use; a non-default set is reachable the
+         * same way hss-w4-keygen.c's own precedent already established
+         * for HSS -- direct C_GenerateKeyPair with an explicit
+         * CK_XMSS_KEY_PAIR_GEN template, bypassing this keymgmt). */
+        struct {
+            CK_ULONG param_set;
+        } xmss;
     } data;
 
     OSSL_CALLBACK *cb_fn;
@@ -142,8 +166,7 @@ const CK_MECHANISM_TYPE p11prov_rsapss_mechs[P11PROV_N_RSAPSS_MECHS] = {
     CKM_SHA3_512_RSA_PKCS_PSS, CKM_RSA_PKCS_PSS
 };
 
-static int p11prov_common_gen_set_params(void *genctx,
-                                         const OSSL_PARAM params[])
+int p11prov_common_gen_set_params(void *genctx, const OSSL_PARAM params[])
 {
     struct key_generator *ctx = (struct key_generator *)genctx;
     const OSSL_PARAM *p;
@@ -269,7 +292,48 @@ static int p11prov_common_gen_set_params(void *genctx,
             }
         }
         break;
+    case CKK_EC_MONTGOMERY:
+        /* remediation R4 — same "p11prov_edname" trick as CKK_EC_EDWARDS
+         * above, curve names per the C++ engine's own parser
+         * (OSSLUtil.cpp byteString2oid: "curve25519"/"curve448"). */
+        p = OSSL_PARAM_locate_const(params, "p11prov_edname");
+        if (p) {
+            if (p->data_type != OSSL_PARAM_UTF8_STRING) {
+                return RET_OSSL_ERR;
+            }
+            if (strcmp(p->data, X25519_NAME) == 0) {
+                ctx->data.ec.ec_params = x25519_ec_params;
+                ctx->data.ec.ec_params_size = X25519_EC_PARAMS_LEN;
+            } else if (strcmp(p->data, X448_NAME) == 0) {
+                ctx->data.ec.ec_params = x448_ec_params;
+                ctx->data.ec.ec_params_size = X448_EC_PARAMS_LEN;
+            } else {
+                P11PROV_raise(ctx->provctx, CKR_ARGUMENTS_BAD,
+                              "Unknown montgomery curve '%*s'",
+                              (int)p->data_size, (char *)p->data);
+                return RET_OSSL_ERR;
+            }
+        }
+        break;
     case CKK_ML_DSA:
+    case CKK_ML_KEM:
+    case CKK_SLH_DSA:
+        /* R5: found live — TLS's ephemeral-key generation path (unlike a
+         * bare `genpkey` CLI call, which passes NULL/empty params and
+         * returns before this switch is ever reached) passes a real,
+         * non-empty OSSL_PARAM array into gen_init, hitting this switch's
+         * default case with "Invalid key gen type 73" (CKK_ML_KEM) for
+         * the very first `s_client -groups MLKEM768` attempt. Same latent
+         * gap for CKK_SLH_DSA, not yet triggered by anything but real by
+         * the same reasoning — fixed together. Neither type has anything
+         * curve/exponent-specific to parse here (mirrors ML-DSA's own
+         * no-op case, already correct). */
+        break;
+    case CKK_XMSS:
+    case CKK_XMSSMT:
+        /* Remediation R41 (phase 8): same R5 lesson as above — nothing
+         * curve/exponent-specific to parse here either; the param_set
+         * default was already set by gen_init before this function ran. */
         break;
     default:
         P11PROV_raise(ctx->provctx, CKR_ARGUMENTS_BAD,
@@ -512,7 +576,7 @@ done:
     return ret;
 }
 
-static void p11prov_common_gen_cleanup(void *genctx)
+void p11prov_common_gen_cleanup(void *genctx)
 {
     struct key_generator *ctx = (struct key_generator *)genctx;
 
@@ -1297,7 +1361,7 @@ static void *p11prov_ec_gen(void *genctx, OSSL_CALLBACK *cb_fn, void *cb_arg)
     }
 
     /* always leave space for CKA_ID and CKA_LABEL */
-#define EC_PUBKEY_TMPL_SIZE 5
+#define EC_PUBKEY_TMPL_SIZE 6
     CK_ATTRIBUTE pubkey_template[EC_PUBKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
         { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
         { CKA_DERIVE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
@@ -1305,6 +1369,18 @@ static void *p11prov_ec_gen(void *genctx, OSSL_CALLBACK *cb_fn, void *cb_arg)
         { CKA_WRAP, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
         { CKA_EC_PARAMS, (CK_BYTE *)ctx->data.ec.ec_params,
           ctx->data.ec.ec_params_size },
+        /* remediation R4: the C++ engine's generateED() (shared by
+         * CKM_EC_EDWARDS_KEY_PAIR_GEN and CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
+         * confirmed by reading SoftHSM_keygen.cpp directly — the mechanism
+         * itself is never passed into that function) determines the
+         * resulting object's CKK_* type SOLELY from an explicit
+         * CKA_KEY_TYPE on the public-key template, defaulting to
+         * CKK_EC_EDWARDS when absent. EC/Edwards never needed this
+         * (the default already matches them); Montgomery does, or the
+         * engine silently creates an Edwards-typed key instead — found
+         * live, not assumed: genpkey succeeded, but the resulting object
+         * read back as CKK_EC_EDWARDS (0x40), not CKK_EC_MONTGOMERY. */
+        { CKA_KEY_TYPE, DISCARD_CONST(&ctx->type), sizeof(CK_KEY_TYPE) },
     };
 #define EC_PRIVKEY_TMPL_SIZE 6
     CK_ATTRIBUTE privkey_template[EC_PRIVKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
@@ -1319,7 +1395,11 @@ static void *p11prov_ec_gen(void *genctx, OSSL_CALLBACK *cb_fn, void *cb_arg)
          * CKA_COPYABLE = true ?
          */
     };
-    int pubtsize = EC_PUBKEY_TMPL_SIZE;
+    /* EC/Edwards keep the pre-existing 5-attribute template (unchanged, to
+     * carry zero risk to their already-working paths); Montgomery adds the
+     * CKA_KEY_TYPE slot above. */
+    int pubtsize = (ctx->type == CKK_EC_MONTGOMERY) ? EC_PUBKEY_TMPL_SIZE
+                                                    : EC_PUBKEY_TMPL_SIZE - 1;
     int privtsize = EC_PRIVKEY_TMPL_SIZE;
 
     P11PROV_debug("ec gen %p %p %p", ctx, cb_fn, cb_arg);
@@ -2145,6 +2225,446 @@ const OSSL_DISPATCH p11prov_ed448_keymgmt_functions[] = {
     { 0, NULL },
 };
 
+/* X25519/X448 key exchange (remediation R4, gap ALG-5). Modeled directly on
+ * the ed25519/ed448 block above: NEW/GEN/FREE/HAS are already fully generic
+ * in p11prov_ec_* (reused as-is, same as Ed does); everything else needs a
+ * montgomery-specific function because the ed_* ones hardcode CKK_EC_EDWARDS
+ * (confirmed by reading them, not assumed by analogy). No SET_PARAMS/
+ * SETTABLE_PARAMS — ML-DSA's keymgmt tables omit them too and Ed's own
+ * versions are no-op stubs, so there is nothing worth reusing or stubbing. */
+static void *p11prov_montgomery_gen_init_int(void *provctx, int selection,
+                                             const OSSL_PARAM params[],
+                                             CK_KEY_TYPE keytype,
+                                             const char *edname,
+                                             size_t edname_size)
+{
+    struct key_generator *ctx = NULL;
+    const OSSL_PARAM curve[] = { OSSL_PARAM_utf8_string("p11prov_edname",
+                                                        (void *)edname,
+                                                        edname_size),
+                                 OSSL_PARAM_END };
+    int ret;
+
+    P11PROV_debug("montgomery gen_init %p", provctx);
+
+    ret = p11prov_ctx_status(provctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    /* same rationale as ed25519_gen_init: allow domain-params-only init,
+     * used by OpenSSL for ECDH to set expected params before importing a
+     * received peer public key */
+    if ((selection & OSSL_KEYMGMT_SELECT_ALL) == 0) {
+        P11PROV_raise(provctx, CKR_ARGUMENTS_BAD, "Unsupported selection");
+        return NULL;
+    }
+
+    ctx = OPENSSL_zalloc(sizeof(struct key_generator));
+    if (ctx == NULL) {
+        P11PROV_raise(provctx, CKR_HOST_MEMORY, "Failed to get key_generator");
+        return NULL;
+    }
+    ctx->provctx = (P11PROV_CTX *)provctx;
+    ctx->type = CKK_EC_MONTGOMERY;
+
+    /* R18 — server role: a domain/other-parameters-only selection (TLS's
+     * server-side ECDHE placeholder object, confirmed live —
+     * selection=0x84) must leave the mechanism at the CK_UNAVAILABLE_
+     * INFORMATION sentinel so p11prov_ec_gen's mock-object branch fires,
+     * same as p11prov_ec_gen_init's own else branch already does for
+     * plain EC. This function had no else branch at all: the struct's
+     * zero-initialized default (mechanism 0) leaked through instead,
+     * and p11prov_ec_gen's `if (mechanism == CK_UNAVAILABLE_INFORMATION)`
+     * check — comparing against the real sentinel, not 0 — never matched,
+     * so it fell into the REAL keygen path with mechanism 0 and the
+     * montgomery-shaped template, which the engine correctly rejected as
+     * "conflicting attributes". Live-traced: selection=0x84,
+     * mechanism ended up 0x0 instead of 0xffffffffffffffff. */
+    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) != 0) {
+        ctx->mechanism.mechanism = CKM_EC_MONTGOMERY_KEY_PAIR_GEN;
+    } else {
+        ctx->mechanism.mechanism = CK_UNAVAILABLE_INFORMATION;
+    }
+
+    ret = p11prov_common_gen_set_params(ctx, curve);
+    if (ret != RET_OSSL_OK) {
+        p11prov_common_gen_cleanup(ctx);
+        return NULL;
+    }
+    ret = p11prov_common_gen_set_params(ctx, params);
+    if (ret != RET_OSSL_OK) {
+        p11prov_common_gen_cleanup(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+static void *p11prov_x25519_gen_init(void *provctx, int selection,
+                                     const OSSL_PARAM params[])
+{
+    return p11prov_montgomery_gen_init_int(provctx, selection, params,
+                                           CKK_EC_MONTGOMERY, X25519_NAME,
+                                           sizeof(X25519_NAME));
+}
+
+static void *p11prov_x448_gen_init(void *provctx, int selection,
+                                   const OSSL_PARAM params[])
+{
+    return p11prov_montgomery_gen_init_int(provctx, selection, params,
+                                           CKK_EC_MONTGOMERY, X448_NAME,
+                                           sizeof(X448_NAME));
+}
+
+static const OSSL_PARAM *p11prov_montgomery_gen_settable_params(void *genctx,
+                                                                 void *provctx)
+{
+    static OSSL_PARAM p11prov_montgomery_params[] = {
+        OSSL_PARAM_utf8_string(P11PROV_PARAM_URI, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return p11prov_montgomery_params;
+}
+
+static void *p11prov_montgomery_load(const void *reference,
+                                     size_t reference_sz)
+{
+    P11PROV_debug("montgomery load %p, %ld", reference, reference_sz);
+    return p11prov_obj_from_typed_reference(reference, reference_sz,
+                                            CKK_EC_MONTGOMERY);
+}
+
+static int p11prov_montgomery_match(const void *keydata1, const void *keydata2,
+                                    int selection)
+{
+    P11PROV_debug("montgomery match %p %p %d", keydata1, keydata2, selection);
+    return p11prov_common_match(keydata1, keydata2, CKK_EC_MONTGOMERY,
+                                selection);
+}
+
+static int p11prov_montgomery_export(void *keydata, int selection,
+                                     OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    P11PROV_CTX *ctx = p11prov_obj_get_prov_ctx(key);
+    bool params_only = true;
+
+    P11PROV_debug("montgomery export %p", keydata);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        /* can't export private keys */
+        return RET_OSSL_ERR;
+    }
+    if (p11prov_ctx_allow_export(ctx) & DISALLOW_EXPORT_PUBLIC) {
+        return RET_OSSL_ERR;
+    }
+    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        params_only = false;
+    }
+    return p11prov_obj_export_public_key(key, CKK_EC_MONTGOMERY, true,
+                                         params_only, cb_fn, cb_arg);
+}
+
+static int p11prov_montgomery_import(void *keydata, int selection,
+                                     const OSSL_PARAM params[])
+{
+    return p11prov_ec_import_genr(CKK_EC_MONTGOMERY, keydata, selection,
+                                  params);
+}
+
+static const OSSL_PARAM *p11prov_montgomery_import_types(int selection)
+{
+    static const OSSL_PARAM p11prov_montgomery_imp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PRIV_KEY, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    if (selection & OSSL_KEYMGMT_SELECT_KEYPAIR) {
+        return p11prov_montgomery_imp_key_types;
+    }
+    return NULL;
+}
+
+static const OSSL_PARAM *p11prov_montgomery_export_types(int selection)
+{
+    static const OSSL_PARAM p11prov_montgomery_exp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    if (selection == OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        return p11prov_montgomery_exp_key_types;
+    }
+    return NULL;
+}
+
+static const char *p11prov_x25519_query_operation_name(int operation_id)
+{
+    if (operation_id == OSSL_OP_KEYEXCH) {
+        return P11PROV_NAME_X25519;
+    }
+    return NULL;
+}
+
+static const char *p11prov_x448_query_operation_name(int operation_id)
+{
+    if (operation_id == OSSL_OP_KEYEXCH) {
+        return P11PROV_NAME_X448;
+    }
+    return NULL;
+}
+
+static int p11prov_montgomery_get_params(void *keydata, OSSL_PARAM params[])
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    OSSL_PARAM *p;
+    CK_ULONG group_size;
+    int ret;
+
+    P11PROV_debug("montgomery get params %p", keydata);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    group_size = p11prov_obj_get_key_bit_size(key);
+    if (group_size == CK_UNAVAILABLE_INFORMATION) {
+        return RET_OSSL_ERR;
+    }
+
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_BITS);
+    if (p) {
+        ret = OSSL_PARAM_set_int(p, group_size);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_BITS);
+    if (p) {
+        int secbits;
+        if (group_size == X448_BIT_SIZE) {
+            secbits = X448_SEC_BITS;
+        } else if (group_size == X25519_BIT_SIZE) {
+            secbits = X25519_SEC_BITS;
+        } else {
+            return RET_OSSL_ERR;
+        }
+        ret = OSSL_PARAM_set_int(p, secbits);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
+    if (p) {
+        /* the shared secret is exactly the raw key size for X25519/X448,
+         * unlike Ed's MAX_SIZE (a signature size) -- there is no signing
+         * here. */
+        ret = OSSL_PARAM_set_int(p, group_size / 8);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_PUB_KEY);
+    if (p) {
+        CK_ATTRIBUTE *pub;
+
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) {
+            return RET_OSSL_ERR;
+        }
+        ret = p11prov_obj_get_ed_pub_key(key, &pub);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+        p->return_size = pub->ulValueLen;
+        if (p->data) {
+            if (p->data_size < pub->ulValueLen) {
+                return RET_OSSL_ERR;
+            }
+            memcpy(p->data, pub->pValue, pub->ulValueLen);
+        }
+    }
+    /* R18 — server role: TLS reads a key's own share via
+     * EVP_PKEY_get1_encoded_public_key (this param), the same gap R5
+     * already found and fixed for ML-KEM (kem/mlkem.c) — "only EC
+     * keymgmt had it before" per that fix's own comment; montgomery
+     * apparently never got the same treatment. For X25519/X448 the
+     * encoded form IS the raw public key, byte for byte (no point-
+     * compression step, unlike Weierstrass EC) — same accessor as the
+     * PUB_KEY branch just above, which already walks private->
+     * associated-public via p11prov_obj_get_ed_pub_key. Live-traced:
+     * without this, tls_construct_stoc_key_share fails trying to parse
+     * whatever garbage was in the uninitialized OSSL_PARAM buffer as
+     * ASN.1 DER ("header too long"/"bad object header") — the server
+     * generated a real keypair (R18's first fix) but had no way to hand
+     * its own public half back to TLS. */
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY);
+    if (p) {
+        CK_ATTRIBUTE *pub;
+
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) {
+            return RET_OSSL_ERR;
+        }
+        ret = p11prov_obj_get_ed_pub_key(key, &pub);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+        p->return_size = pub->ulValueLen;
+        if (p->data) {
+            if (p->data_size < pub->ulValueLen) {
+                return RET_OSSL_ERR;
+            }
+            memcpy(p->data, pub->pValue, pub->ulValueLen);
+        }
+    }
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_montgomery_gettable_params(void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+/* R18 — client role: unlike EC (which never reaches
+ * p11prov_obj_set_ec_encoded_public_key in this bare-object shape — see
+ * that function's own comment), montgomery's peer key arrives as a bare
+ * keymgmt NEW() object with no type/class established at all. Reusing
+ * p11prov_ec_set_params directly (as first tried) fails for exactly that
+ * reason: it delegates straight to the type-dispatch switch, which sees
+ * an unset object and rejects it. This wrapper establishes the object's
+ * type first — via p11prov_obj_ensure_ec_type, which each per-curve
+ * function passes its own known-at-compile-time CKK_EC_MONTGOMERY —
+ * before falling through to the exact same install logic EC's own
+ * function uses. */
+static int p11prov_montgomery_set_params(void *keydata,
+                                         const OSSL_PARAM params[])
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    const OSSL_PARAM *p;
+
+    P11PROV_debug("montgomery set params %p", keydata);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY);
+    if (p) {
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) {
+            return RET_OSSL_ERR;
+        }
+        if (p11prov_obj_ensure_ec_type(key, CKK_EC_MONTGOMERY) != CKR_OK) {
+            return RET_OSSL_ERR;
+        }
+        if (p11prov_obj_set_ec_encoded_public_key(key, p->data, p->data_size)
+            != CKR_OK) {
+            return RET_OSSL_ERR;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_montgomery_settable_params(void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_ENCODED_PUBLIC_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+const OSSL_DISPATCH p11prov_x25519_keymgmt_functions[] = {
+    DISPATCH_KEYMGMT_ELEM(ec, NEW, new),
+    { OSSL_FUNC_KEYMGMT_GEN_INIT, (void (*)(void))p11prov_x25519_gen_init },
+    DISPATCH_KEYMGMT_ELEM(ec, GEN, gen),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_CLEANUP, gen_cleanup),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_SET_PARAMS, gen_set_params),
+    { OSSL_FUNC_KEYMGMT_GEN_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_montgomery_gen_settable_params },
+    { OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))p11prov_montgomery_load },
+    DISPATCH_KEYMGMT_ELEM(ec, FREE, free),
+    DISPATCH_KEYMGMT_ELEM(ec, HAS, has),
+    { OSSL_FUNC_KEYMGMT_MATCH, (void (*)(void))p11prov_montgomery_match },
+    { OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))p11prov_montgomery_import },
+    { OSSL_FUNC_KEYMGMT_IMPORT_TYPES,
+      (void (*)(void))p11prov_montgomery_import_types },
+    { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))p11prov_montgomery_export },
+    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES,
+      (void (*)(void))p11prov_montgomery_export_types },
+    { OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME,
+      (void (*)(void))p11prov_x25519_query_operation_name },
+    { OSSL_FUNC_KEYMGMT_GET_PARAMS,
+      (void (*)(void))p11prov_montgomery_get_params },
+    { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS,
+      (void (*)(void))p11prov_montgomery_gettable_params },
+    /* R18 — server + client role: montgomery's own set_params/
+     * settable_params (not EC's directly reused — see
+     * p11prov_montgomery_set_params's own comment for why a thin
+     * wrapper is needed instead of the straight reuse first tried).
+     * This is the piece the "No SET_PARAMS/SETTABLE_PARAMS" comment on
+     * p11prov_montgomery_gen_init_int said wasn't worth reusing/
+     * stubbing — that reasoning covered ML-DSA and Ed's own no-op
+     * stubs, but missed that EC's underlying install logic
+     * (p11prov_obj_set_ec_encoded_public_key) is real, working code
+     * directly reusable here, once the object's type is established. */
+    { OSSL_FUNC_KEYMGMT_SET_PARAMS,
+      (void (*)(void))p11prov_montgomery_set_params },
+    { OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_montgomery_settable_params },
+    { 0, NULL },
+};
+
+const OSSL_DISPATCH p11prov_x448_keymgmt_functions[] = {
+    DISPATCH_KEYMGMT_ELEM(ec, NEW, new),
+    { OSSL_FUNC_KEYMGMT_GEN_INIT, (void (*)(void))p11prov_x448_gen_init },
+    DISPATCH_KEYMGMT_ELEM(ec, GEN, gen),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_CLEANUP, gen_cleanup),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_SET_PARAMS, gen_set_params),
+    { OSSL_FUNC_KEYMGMT_GEN_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_montgomery_gen_settable_params },
+    { OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))p11prov_montgomery_load },
+    DISPATCH_KEYMGMT_ELEM(ec, FREE, free),
+    DISPATCH_KEYMGMT_ELEM(ec, HAS, has),
+    { OSSL_FUNC_KEYMGMT_MATCH, (void (*)(void))p11prov_montgomery_match },
+    { OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))p11prov_montgomery_import },
+    { OSSL_FUNC_KEYMGMT_IMPORT_TYPES,
+      (void (*)(void))p11prov_montgomery_import_types },
+    { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))p11prov_montgomery_export },
+    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES,
+      (void (*)(void))p11prov_montgomery_export_types },
+    { OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME,
+      (void (*)(void))p11prov_x448_query_operation_name },
+    { OSSL_FUNC_KEYMGMT_GET_PARAMS,
+      (void (*)(void))p11prov_montgomery_get_params },
+    { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS,
+      (void (*)(void))p11prov_montgomery_gettable_params },
+    /* R18 — server + client role: montgomery's own set_params/
+     * settable_params (not EC's directly reused — see
+     * p11prov_montgomery_set_params's own comment for why a thin
+     * wrapper is needed instead of the straight reuse first tried).
+     * This is the piece the "No SET_PARAMS/SETTABLE_PARAMS" comment on
+     * p11prov_montgomery_gen_init_int said wasn't worth reusing/
+     * stubbing — that reasoning covered ML-DSA and Ed's own no-op
+     * stubs, but missed that EC's underlying install logic
+     * (p11prov_obj_set_ec_encoded_public_key) is real, working code
+     * directly reusable here, once the object's type is established. */
+    { OSSL_FUNC_KEYMGMT_SET_PARAMS,
+      (void (*)(void))p11prov_montgomery_set_params },
+    { OSSL_FUNC_KEYMGMT_SETTABLE_PARAMS,
+      (void (*)(void))p11prov_montgomery_settable_params },
+    { 0, NULL },
+};
+
 DISPATCH_KEYMGMT_FN(mldsa, new);
 DISPATCH_KEYMGMT_FN(mldsa, free);
 DISPATCH_KEYMGMT_FN(mldsa, has);
@@ -2496,6 +3016,30 @@ static int p11prov_mldsa_get_params(void *keydata, OSSL_PARAM params[])
             return ret;
         }
     }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_CATEGORY);
+    if (p) {
+        /* Phase 4 R20 (F36-5): NIST claimed security category, FIPS 204
+         * Table 1 (2/3/5 for ML-DSA-44/65/87). */
+        int category = 0;
+        switch (param_set) {
+        case CKP_ML_DSA_44:
+            category = 2;
+            break;
+        case CKP_ML_DSA_65:
+            category = 3;
+            break;
+        case CKP_ML_DSA_87:
+            category = 5;
+            break;
+        }
+        if (category == 0) {
+            return RET_OSSL_ERR;
+        }
+        ret = OSSL_PARAM_set_int(p, category);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
     p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
     if (p) {
         int sigsize = 0;
@@ -2557,6 +3101,7 @@ static const OSSL_PARAM *p11prov_mldsa_gettable_params(void *provctx)
         OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_CATEGORY, NULL),
         OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
         OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_MANDATORY_DIGEST, NULL, 0),
         OSSL_PARAM_END,
@@ -2621,6 +3166,1531 @@ const OSSL_DISPATCH p11prov_mldsa87_keymgmt_functions[] = {
     DISPATCH_KEYMGMT_ELEM(mldsa, EXPORT_TYPES, export_types),
     DISPATCH_KEYMGMT_ELEM(mldsa, GET_PARAMS, get_params),
     DISPATCH_KEYMGMT_ELEM(mldsa, GETTABLE_PARAMS, gettable_params),
+    { 0, NULL },
+};
+
+/* ML-KEM (FIPS 203) token keygen — modeled on the ML-DSA block above.
+ * The rest of ML-KEM's keymgmt (new/free/load/has/match/get_params/export)
+ * lives in kem/mlkem.c, a separate translation unit, because that file also
+ * owns the KEM encapsulate/decapsulate operation tables; only these gen
+ * functions plus the two shared p11prov_common_gen_* helpers above (now
+ * non-static for this reason) are exported via keymgmt.h so mlkem.c's
+ * per-variant OSSL_DISPATCH tables can reference them directly. */
+static void *p11prov_mlkem_gen_init_int(void *provctx, int selection,
+                                        const OSSL_PARAM params[],
+                                        CK_ML_KEM_PARAMETER_SET_TYPE param_set)
+{
+    struct key_generator *ctx = NULL;
+    int ret;
+
+    P11PROV_debug("mlkem gen_init %p", provctx);
+
+    ret = p11prov_ctx_status(provctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    /* R15 — server role: accept a domain/other-parameters-only selection
+     * too, not just a full keypair request. OpenSSL's TLS server-side KEM
+     * group handling does exactly this (same reasoning as
+     * p11prov_ec_gen_init's own comment for ECDH): set the expected
+     * parameters (which ML-KEM param set / group) first, then import the
+     * peer's public share into the resulting object once it arrives. */
+    if ((selection & OSSL_KEYMGMT_SELECT_ALL) == 0) {
+        P11PROV_raise(provctx, CKR_ARGUMENTS_BAD, "Unsupported selection");
+        return NULL;
+    }
+
+    ctx = OPENSSL_zalloc(sizeof(struct key_generator));
+    if (ctx == NULL) {
+        P11PROV_raise(provctx, CKR_HOST_MEMORY,
+                      "Failed to allocate key_generator structure");
+        return NULL;
+    }
+    ctx->provctx = (P11PROV_CTX *)provctx;
+    ctx->type = CKK_ML_KEM;
+    ctx->data.mlkem.param_set = param_set;
+
+    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) != 0) {
+        ctx->mechanism.mechanism = CKM_ML_KEM_KEY_PAIR_GEN;
+    } else {
+        ctx->mechanism.mechanism = CK_UNAVAILABLE_INFORMATION;
+    }
+
+    ret = p11prov_common_gen_set_params(ctx, params);
+    if (ret != RET_OSSL_OK) {
+        p11prov_common_gen_cleanup(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+void *p11prov_mlkem512_gen_init(void *provctx, int selection,
+                                const OSSL_PARAM params[])
+{
+    return p11prov_mlkem_gen_init_int(provctx, selection, params,
+                                      CKP_ML_KEM_512);
+}
+
+void *p11prov_mlkem768_gen_init(void *provctx, int selection,
+                                const OSSL_PARAM params[])
+{
+    return p11prov_mlkem_gen_init_int(provctx, selection, params,
+                                      CKP_ML_KEM_768);
+}
+
+void *p11prov_mlkem1024_gen_init(void *provctx, int selection,
+                                 const OSSL_PARAM params[])
+{
+    return p11prov_mlkem_gen_init_int(provctx, selection, params,
+                                      CKP_ML_KEM_1024);
+}
+
+void *p11prov_mlkem_gen(void *genctx, OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    struct key_generator *ctx = (struct key_generator *)genctx;
+    void *key;
+    CK_RV ret;
+
+    /* PKCS#11 v3.2 C_GenerateKeyPair sets CKA_ENCAPSULATE=true on the public
+     * key and CKA_DECAPSULATE=true on the private key for CKM_ML_KEM_
+     * KEY_PAIR_GEN; both engines enforce this server-side regardless of the
+     * template (SoftHSM_keygen.cpp:7591/7674, rust/src/ffi.rs:1647/1666) —
+     * requesting them explicitly here matches what a spec-correct caller
+     * sends, not what either engine strictly requires. CKA_PARAMETER_SET is
+     * mandatory on the public-key template (extractParameterSet, no silent
+     * default); the private-key copy is intentionally ignored by both
+     * engines and re-derived from the generated key pair, so — like
+     * ML-DSA's block above — it is left off the private template. */
+#define MLKEM_PUBKEY_TMPL_SIZE 3
+    CK_ATTRIBUTE pubkey_template[MLKEM_PUBKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_ENCAPSULATE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_PARAMETER_SET, &ctx->data.mlkem.param_set,
+          sizeof(ctx->data.mlkem.param_set) },
+    };
+#define MLKEM_PRIVKEY_TMPL_SIZE 4
+    CK_ATTRIBUTE
+    privkey_template[MLKEM_PRIVKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_PRIVATE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SENSITIVE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_DECAPSULATE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+    };
+    int pubtsize = MLKEM_PUBKEY_TMPL_SIZE;
+    int privtsize = MLKEM_PRIVKEY_TMPL_SIZE;
+
+    P11PROV_debug("mlkem gen %p %p %p", ctx, cb_fn, cb_arg);
+
+    if (ctx->mechanism.mechanism == CK_UNAVAILABLE_INFORMATION) {
+        /* R15 — server role: OpenSSL asked for a parameters-only object
+         * (see p11prov_mlkem_gen_init_int's comment) that it will fill
+         * with the peer's public share later via import. Same pattern as
+         * p11prov_ec_gen's own CK_UNAVAILABLE_INFORMATION branch. */
+        return mock_pub_mlkem_key(ctx->provctx, ctx->data.mlkem.param_set);
+    }
+
+    ret = p11prov_common_gen(ctx, pubkey_template, privkey_template, pubtsize,
+                             privtsize, cb_fn, cb_arg, &key);
+    if (ret != CKR_OK) {
+        P11PROV_raise(ctx->provctx, ret, "mlkem Key generation failed");
+        return NULL;
+    }
+    return key;
+}
+
+const OSSL_PARAM *p11prov_mlkem_gen_settable_params(void *genctx,
+                                                     void *provctx)
+{
+    static OSSL_PARAM p11prov_mlkem_params[] = {
+        OSSL_PARAM_utf8_string(P11PROV_PARAM_URI, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return p11prov_mlkem_params;
+}
+
+/* SLH-DSA (FIPS 205), all 12 parameter sets sharing CKM_SLH_DSA_KEY_PAIR_GEN,
+ * distinguished by CKA_PARAMETER_SET — modeled on the ML-DSA block above. */
+
+static void *p11prov_slhdsa_new(void *provctx)
+{
+    P11PROV_CTX *ctx = (P11PROV_CTX *)provctx;
+    CK_RV ret;
+
+    P11PROV_debug("slhdsa new");
+
+    ret = p11prov_ctx_status(ctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    return p11prov_obj_new(provctx, CK_UNAVAILABLE_INFORMATION,
+                           CK_P11PROV_IMPORTED_HANDLE,
+                           CK_UNAVAILABLE_INFORMATION);
+}
+
+static void p11prov_slhdsa_free(void *key)
+{
+    P11PROV_debug("slhdsa free %p", key);
+    p11prov_obj_free((P11PROV_OBJ *)key);
+}
+
+static void *p11prov_slhdsa_load(const void *reference, size_t reference_sz)
+{
+    P11PROV_debug("slhdsa load %p, %ld", reference, reference_sz);
+    return p11prov_obj_from_typed_reference(reference, reference_sz,
+                                            CKK_SLH_DSA);
+}
+
+static int p11prov_slhdsa_has(const void *keydata, int selection)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+
+    P11PROV_debug("slhdsa has %p %d", key, selection);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        if (p11prov_obj_get_class(key) != CKO_PRIVATE_KEY) {
+            return RET_OSSL_ERR;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static int p11prov_slhdsa_match(const void *keydata1, const void *keydata2,
+                                int selection)
+{
+    P11PROV_debug("slhdsa match %p %p %d", keydata1, keydata2, selection);
+
+    return p11prov_common_match(keydata1, keydata2, CKK_SLH_DSA, selection);
+}
+
+static void *p11prov_slhdsa_gen_init_int(void *provctx, int selection,
+                                         const OSSL_PARAM params[],
+                                         CK_SLH_DSA_PARAMETER_SET_TYPE
+                                             param_set)
+{
+    struct key_generator *ctx = NULL;
+    int ret;
+
+    P11PROV_debug("slhdsa gen_init %p", provctx);
+
+    ret = p11prov_ctx_status(provctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) == 0) {
+        P11PROV_raise(provctx, CKR_ARGUMENTS_BAD, "Unsupported selection");
+        return NULL;
+    }
+
+    ctx = OPENSSL_zalloc(sizeof(struct key_generator));
+    if (ctx == NULL) {
+        P11PROV_raise(provctx, CKR_HOST_MEMORY,
+                      "Failed to allocate key_generator structure");
+        return NULL;
+    }
+    ctx->provctx = (P11PROV_CTX *)provctx;
+    ctx->type = CKK_SLH_DSA;
+    ctx->data.slhdsa.param_set = param_set;
+
+    ctx->mechanism.mechanism = CKM_SLH_DSA_KEY_PAIR_GEN;
+
+    ret = p11prov_common_gen_set_params(ctx, params);
+    if (ret != RET_OSSL_OK) {
+        p11prov_common_gen_cleanup(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+#define SLHDSA_GEN_INIT(suffix, paramset) \
+    static void *p11prov_slhdsa_##suffix##_gen_init(void *provctx, \
+                                                     int selection, \
+                                                     const OSSL_PARAM \
+                                                         params[]) \
+    { \
+        return p11prov_slhdsa_gen_init_int(provctx, selection, params, \
+                                           paramset); \
+    }
+
+SLHDSA_GEN_INIT(sha2_128s, CKP_SLH_DSA_SHA2_128S)
+SLHDSA_GEN_INIT(shake_128s, CKP_SLH_DSA_SHAKE_128S)
+SLHDSA_GEN_INIT(sha2_128f, CKP_SLH_DSA_SHA2_128F)
+SLHDSA_GEN_INIT(shake_128f, CKP_SLH_DSA_SHAKE_128F)
+SLHDSA_GEN_INIT(sha2_192s, CKP_SLH_DSA_SHA2_192S)
+SLHDSA_GEN_INIT(shake_192s, CKP_SLH_DSA_SHAKE_192S)
+SLHDSA_GEN_INIT(sha2_192f, CKP_SLH_DSA_SHA2_192F)
+SLHDSA_GEN_INIT(shake_192f, CKP_SLH_DSA_SHAKE_192F)
+SLHDSA_GEN_INIT(sha2_256s, CKP_SLH_DSA_SHA2_256S)
+SLHDSA_GEN_INIT(shake_256s, CKP_SLH_DSA_SHAKE_256S)
+SLHDSA_GEN_INIT(sha2_256f, CKP_SLH_DSA_SHA2_256F)
+SLHDSA_GEN_INIT(shake_256f, CKP_SLH_DSA_SHAKE_256F)
+
+static void *p11prov_slhdsa_gen(void *genctx, OSSL_CALLBACK *cb_fn,
+                                void *cb_arg)
+{
+    struct key_generator *ctx = (struct key_generator *)genctx;
+    void *key;
+    CK_RV ret;
+
+    /* always leave space for CKA_ID and CKA_LABEL */
+#define SLHDSA_PUBKEY_TMPL_SIZE 3
+    CK_ATTRIBUTE pubkey_template[SLHDSA_PUBKEY_TMPL_SIZE + COMMON_TMPL_SIZE] =
+        {
+            { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+            { CKA_VERIFY, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+            { CKA_PARAMETER_SET, &ctx->data.slhdsa.param_set,
+              sizeof(ctx->data.slhdsa.param_set) },
+        };
+#define SLHDSA_PRIVKEY_TMPL_SIZE 4
+    CK_ATTRIBUTE
+    privkey_template[SLHDSA_PRIVKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_PRIVATE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SENSITIVE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SIGN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+    };
+    int pubtsize = SLHDSA_PUBKEY_TMPL_SIZE;
+    int privtsize = SLHDSA_PRIVKEY_TMPL_SIZE;
+
+    P11PROV_debug("slhdsa gen %p %p %p", ctx, cb_fn, cb_arg);
+
+    ret = p11prov_common_gen(ctx, pubkey_template, privkey_template,
+                             pubtsize, privtsize, cb_fn, cb_arg, &key);
+    if (ret != CKR_OK) {
+        P11PROV_raise(ctx->provctx, ret, "slhdsa Key generation failed");
+        return NULL;
+    }
+    return key;
+}
+
+static const OSSL_PARAM *p11prov_slhdsa_gen_settable_params(void *genctx,
+                                                             void *provctx)
+{
+    static OSSL_PARAM p11prov_slhdsa_params[] = {
+        OSSL_PARAM_utf8_string(P11PROV_PARAM_URI, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return p11prov_slhdsa_params;
+}
+
+static int p11prov_slhdsa_import(void *keydata, int selection,
+                                 const OSSL_PARAM params[],
+                                 CK_SLH_DSA_PARAMETER_SET_TYPE param_set)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    CK_OBJECT_CLASS class = CK_UNAVAILABLE_INFORMATION;
+    CK_RV rv;
+
+    P11PROV_debug("slhdsa import %p", key);
+
+    if (!key) {
+        return RET_OSSL_ERR;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        class = CKO_PRIVATE_KEY;
+    } else if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        class = CKO_PUBLIC_KEY;
+    } else if (selection & OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS) {
+        class = CKO_DOMAIN_PARAMETERS;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        const OSSL_PARAM *p;
+        p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PRIV_KEY);
+        if (!p) {
+            /* not really a private key */
+            class = CKO_PUBLIC_KEY;
+        }
+    }
+
+    rv = p11prov_obj_import_key(key, CKK_SLH_DSA, class, param_set, params);
+    if (rv != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+    return RET_OSSL_OK;
+}
+
+#define SLHDSA_IMPORT(suffix, paramset) \
+    static int p11prov_slhdsa_##suffix##_import(void *keydata, \
+                                                int selection, \
+                                                const OSSL_PARAM params[]) \
+    { \
+        return p11prov_slhdsa_import(keydata, selection, params, paramset); \
+    }
+
+SLHDSA_IMPORT(sha2_128s, CKP_SLH_DSA_SHA2_128S)
+SLHDSA_IMPORT(shake_128s, CKP_SLH_DSA_SHAKE_128S)
+SLHDSA_IMPORT(sha2_128f, CKP_SLH_DSA_SHA2_128F)
+SLHDSA_IMPORT(shake_128f, CKP_SLH_DSA_SHAKE_128F)
+SLHDSA_IMPORT(sha2_192s, CKP_SLH_DSA_SHA2_192S)
+SLHDSA_IMPORT(shake_192s, CKP_SLH_DSA_SHAKE_192S)
+SLHDSA_IMPORT(sha2_192f, CKP_SLH_DSA_SHA2_192F)
+SLHDSA_IMPORT(shake_192f, CKP_SLH_DSA_SHAKE_192F)
+SLHDSA_IMPORT(sha2_256s, CKP_SLH_DSA_SHA2_256S)
+SLHDSA_IMPORT(shake_256s, CKP_SLH_DSA_SHAKE_256S)
+SLHDSA_IMPORT(sha2_256f, CKP_SLH_DSA_SHA2_256F)
+SLHDSA_IMPORT(shake_256f, CKP_SLH_DSA_SHAKE_256F)
+
+static int p11prov_slhdsa_export(void *keydata, int selection,
+                                 OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    P11PROV_CTX *ctx = p11prov_obj_get_prov_ctx(key);
+    CK_OBJECT_CLASS class = p11prov_obj_get_class(key);
+
+    P11PROV_debug("slhdsa export %p, selection= %d", keydata, selection);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    if (p11prov_ctx_allow_export(ctx) & DISALLOW_EXPORT_PUBLIC) {
+        return RET_OSSL_ERR;
+    }
+
+    if ((class == CKO_PUBLIC_KEY) || (selection & ~(PUBLIC_PARAMS)) == 0) {
+        return p11prov_obj_export_public_key(key, CKK_SLH_DSA, true, false,
+                                             cb_fn, cb_arg);
+    }
+
+    return RET_OSSL_ERR;
+}
+
+static const OSSL_PARAM *p11prov_slhdsa_import_types(int selection)
+{
+    static const OSSL_PARAM p11prov_slhdsa_imp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PRIV_KEY, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    P11PROV_debug("slhdsa import types");
+    if (selection & OSSL_KEYMGMT_SELECT_KEYPAIR) {
+        return p11prov_slhdsa_imp_key_types;
+    }
+    return NULL;
+}
+
+static const OSSL_PARAM *p11prov_slhdsa_export_types(int selection)
+{
+    static const OSSL_PARAM p11prov_slhdsa_exp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    P11PROV_debug("slhdsa export types");
+    if (selection == OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        return p11prov_slhdsa_exp_key_types;
+    }
+    return NULL;
+}
+
+/* See FIPS-205, Table 2 — cross-checked live against native OpenSSL 3.6.3
+ * (genpkey + pkeyutl -sign for all 12 algorithms), not transcribed from
+ * the spec alone. */
+#define P11PROV_SLH_DSA_128_SIG_SIZE 7856
+#define P11PROV_SLH_DSA_128F_SIG_SIZE 17088
+#define P11PROV_SLH_DSA_192S_SIG_SIZE 16224
+#define P11PROV_SLH_DSA_192F_SIG_SIZE 35664
+#define P11PROV_SLH_DSA_256S_SIG_SIZE 29792
+#define P11PROV_SLH_DSA_256F_SIG_SIZE 49856
+
+static int p11prov_slhdsa_get_params(void *keydata, OSSL_PARAM params[])
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    CK_ULONG param_set = p11prov_obj_get_key_param_set(key);
+    OSSL_PARAM *p;
+    int ret;
+
+    P11PROV_debug("slhdsa get params %p", keydata);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_BITS);
+    if (p) {
+        CK_ULONG bits_size = p11prov_obj_get_key_bit_size(key);
+        if (bits_size == 0) {
+            return RET_OSSL_ERR;
+        }
+        ret = OSSL_PARAM_set_int(p, bits_size);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_BITS);
+    if (p) {
+        int secbits = 0;
+        switch (param_set) {
+        case CKP_SLH_DSA_SHA2_128S:
+        case CKP_SLH_DSA_SHAKE_128S:
+        case CKP_SLH_DSA_SHA2_128F:
+        case CKP_SLH_DSA_SHAKE_128F:
+            secbits = 128;
+            break;
+        case CKP_SLH_DSA_SHA2_192S:
+        case CKP_SLH_DSA_SHAKE_192S:
+        case CKP_SLH_DSA_SHA2_192F:
+        case CKP_SLH_DSA_SHAKE_192F:
+            secbits = 192;
+            break;
+        case CKP_SLH_DSA_SHA2_256S:
+        case CKP_SLH_DSA_SHAKE_256S:
+        case CKP_SLH_DSA_SHA2_256F:
+        case CKP_SLH_DSA_SHAKE_256F:
+            secbits = 256;
+            break;
+        }
+        if (secbits == 0) {
+            return RET_OSSL_ERR;
+        }
+        ret = OSSL_PARAM_set_int(p, secbits);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_CATEGORY);
+    if (p) {
+        /* Phase 4 R20 (F36-5): NIST claimed security category, FIPS 205
+         * Table 2 (1/3/5 for the 128/192/256-bit parameter sets, uniform
+         * across SHA2/SHAKE and s/f — the category tracks the hash output
+         * size, not the speed/size tradeoff). */
+        int category = 0;
+        switch (param_set) {
+        case CKP_SLH_DSA_SHA2_128S:
+        case CKP_SLH_DSA_SHAKE_128S:
+        case CKP_SLH_DSA_SHA2_128F:
+        case CKP_SLH_DSA_SHAKE_128F:
+            category = 1;
+            break;
+        case CKP_SLH_DSA_SHA2_192S:
+        case CKP_SLH_DSA_SHAKE_192S:
+        case CKP_SLH_DSA_SHA2_192F:
+        case CKP_SLH_DSA_SHAKE_192F:
+            category = 3;
+            break;
+        case CKP_SLH_DSA_SHA2_256S:
+        case CKP_SLH_DSA_SHAKE_256S:
+        case CKP_SLH_DSA_SHA2_256F:
+        case CKP_SLH_DSA_SHAKE_256F:
+            category = 5;
+            break;
+        }
+        if (category == 0) {
+            return RET_OSSL_ERR;
+        }
+        ret = OSSL_PARAM_set_int(p, category);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
+    if (p) {
+        int sigsize = 0;
+        switch (param_set) {
+        case CKP_SLH_DSA_SHA2_128S:
+        case CKP_SLH_DSA_SHAKE_128S:
+            sigsize = P11PROV_SLH_DSA_128_SIG_SIZE;
+            break;
+        case CKP_SLH_DSA_SHA2_128F:
+        case CKP_SLH_DSA_SHAKE_128F:
+            sigsize = P11PROV_SLH_DSA_128F_SIG_SIZE;
+            break;
+        case CKP_SLH_DSA_SHA2_192S:
+        case CKP_SLH_DSA_SHAKE_192S:
+            sigsize = P11PROV_SLH_DSA_192S_SIG_SIZE;
+            break;
+        case CKP_SLH_DSA_SHA2_192F:
+        case CKP_SLH_DSA_SHAKE_192F:
+            sigsize = P11PROV_SLH_DSA_192F_SIG_SIZE;
+            break;
+        case CKP_SLH_DSA_SHA2_256S:
+        case CKP_SLH_DSA_SHAKE_256S:
+            sigsize = P11PROV_SLH_DSA_256S_SIG_SIZE;
+            break;
+        case CKP_SLH_DSA_SHA2_256F:
+        case CKP_SLH_DSA_SHAKE_256F:
+            sigsize = P11PROV_SLH_DSA_256F_SIG_SIZE;
+            break;
+        }
+        if (sigsize == 0) {
+            return RET_OSSL_ERR;
+        }
+        ret = OSSL_PARAM_set_int(p, sigsize);
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MANDATORY_DIGEST);
+    if (p) {
+        /* SLH-DSA is hash-internal (FIPS 205 §10.1) — no external digest. */
+        ret = OSSL_PARAM_set_utf8_string(p, "");
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_PUB_KEY);
+    if (p) {
+        CK_ATTRIBUTE *pub;
+
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) {
+            return RET_OSSL_ERR;
+        }
+        pub = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!pub) {
+            return RET_OSSL_ERR;
+        }
+
+        p->return_size = pub->ulValueLen;
+        if (p->data) {
+            if (p->data_size < pub->ulValueLen) {
+                return RET_OSSL_ERR;
+            }
+            memcpy(p->data, pub->pValue, pub->ulValueLen);
+            p->data_size = pub->ulValueLen;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_slhdsa_gettable_params(void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_CATEGORY, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
+        OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_MANDATORY_DIGEST, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+#define SLHDSA_KEYMGMT_FUNCTIONS(suffix) \
+    const OSSL_DISPATCH p11prov_slhdsa_##suffix##_keymgmt_functions[] = { \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, NEW, new), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa_##suffix, GEN_INIT, gen_init), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, GEN, gen), \
+        DISPATCH_KEYMGMT_ELEM(common, GEN_CLEANUP, gen_cleanup), \
+        DISPATCH_KEYMGMT_ELEM(common, GEN_SET_PARAMS, gen_set_params), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, GEN_SETTABLE_PARAMS, \
+                              gen_settable_params), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, LOAD, load), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, FREE, free), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, HAS, has), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, MATCH, match), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa_##suffix, IMPORT, import), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, IMPORT_TYPES, import_types), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, EXPORT, export), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, EXPORT_TYPES, export_types), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, GET_PARAMS, get_params), \
+        DISPATCH_KEYMGMT_ELEM(slhdsa, GETTABLE_PARAMS, gettable_params), \
+        { 0, NULL }, \
+    };
+
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_128s)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_128s)
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_128f)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_128f)
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_192s)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_192s)
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_192f)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_192f)
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_256s)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_256s)
+SLHDSA_KEYMGMT_FUNCTIONS(sha2_256f)
+SLHDSA_KEYMGMT_FUNCTIONS(shake_256f)
+
+/* ===========================================================================
+ *  HSS/LMS (phase 4 R9) — CKK_HSS, single-level (L=1) only for now.
+ *
+ * Unlike ML-DSA/SLH-DSA/ML-KEM, HSS has no CKA_PARAMETER_SET enum — its
+ * shape (number of levels, per-level LMS/LM-OTS type) travels in the
+ * CKM_HSS_KEY_PAIR_GEN mechanism's own CK_HSS_KEY_PAIR_GEN_PARAMS
+ * (src/lib/vendor_mechanisms.h), which the engine treats as fully
+ * optional: omitting it (pParameter=NULL) gives a documented default of
+ * L=1, LMS_SHA256_N32_H5, LMOTS_SHA256_N32_W8 (SoftHSM_keygen.cpp, the
+ * CKM_HSS_KEY_PAIR_GEN branch) — exactly what this keymgmt generates.
+ * Sizes (pubkey/signature) are read from the actual CKA_VALUE length at
+ * runtime rather than hardcoded, since they vary with level count/params
+ * this keymgmt does not yet expose control over — avoids transcribing
+ * RFC 8554's LM-OTS "p" parameter table by hand for a size this project
+ * doesn't need compile-time-fixed. */
+DISPATCH_KEYMGMT_FN(hss, new);
+DISPATCH_KEYMGMT_FN(hss, free);
+DISPATCH_KEYMGMT_FN(hss, load);
+DISPATCH_KEYMGMT_FN(hss, has);
+DISPATCH_KEYMGMT_FN(hss, match);
+DISPATCH_KEYMGMT_FN(hss, gen_init);
+DISPATCH_KEYMGMT_FN(hss, gen);
+DISPATCH_KEYMGMT_FN(hss, gen_settable_params);
+DISPATCH_KEYMGMT_FN(hss, import);
+DISPATCH_KEYMGMT_FN(hss, import_types);
+DISPATCH_KEYMGMT_FN(hss, export);
+DISPATCH_KEYMGMT_FN(hss, export_types);
+DISPATCH_KEYMGMT_FN(hss, get_params);
+DISPATCH_KEYMGMT_FN(hss, gettable_params);
+
+static void *p11prov_hss_new(void *provctx)
+{
+    P11PROV_CTX *ctx = (P11PROV_CTX *)provctx;
+    CK_RV ret;
+
+    P11PROV_debug("hss new");
+
+    ret = p11prov_ctx_status(ctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    return p11prov_obj_new(provctx, CK_UNAVAILABLE_INFORMATION,
+                           CK_P11PROV_IMPORTED_HANDLE,
+                           CK_UNAVAILABLE_INFORMATION);
+}
+
+static void p11prov_hss_free(void *key)
+{
+    P11PROV_debug("hss free %p", key);
+    p11prov_obj_free((P11PROV_OBJ *)key);
+}
+
+static void *p11prov_hss_load(const void *reference, size_t reference_sz)
+{
+    P11PROV_debug("hss load %p, %ld", reference, reference_sz);
+    return p11prov_obj_from_typed_reference(reference, reference_sz, CKK_HSS);
+}
+
+static int p11prov_hss_has(const void *keydata, int selection)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+
+    P11PROV_debug("hss has %p %d", key, selection);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        if (p11prov_obj_get_class(key) != CKO_PRIVATE_KEY) {
+            return RET_OSSL_ERR;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static int p11prov_hss_match(const void *keydata1, const void *keydata2,
+                             int selection)
+{
+    P11PROV_debug("hss match %p %p %d", keydata1, keydata2, selection);
+
+    return p11prov_common_match(keydata1, keydata2, CKK_HSS, selection);
+}
+
+static void *p11prov_hss_gen_init(void *provctx, int selection,
+                                  const OSSL_PARAM params[])
+{
+    struct key_generator *ctx = NULL;
+    int ret;
+
+    P11PROV_debug("hss gen_init %p", provctx);
+
+    ret = p11prov_ctx_status(provctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) == 0) {
+        P11PROV_raise(provctx, CKR_ARGUMENTS_BAD, "Unsupported selection");
+        return NULL;
+    }
+
+    ctx = OPENSSL_zalloc(sizeof(struct key_generator));
+    if (ctx == NULL) {
+        P11PROV_raise(provctx, CKR_HOST_MEMORY,
+                      "Failed to allocate key_generator structure");
+        return NULL;
+    }
+    ctx->provctx = (P11PROV_CTX *)provctx;
+    ctx->type = CKK_HSS;
+    /* No mechanism params: the engine's own documented default (L=1,
+     * LMS_SHA256_N32_H5, LMOTS_SHA256_N32_W8) is exactly what this
+     * keymgmt supports for now. */
+    ctx->mechanism.mechanism = CKM_HSS_KEY_PAIR_GEN;
+
+    ret = p11prov_common_gen_set_params(ctx, params);
+    if (ret != RET_OSSL_OK) {
+        p11prov_common_gen_cleanup(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+static void *p11prov_hss_gen(void *genctx, OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    struct key_generator *ctx = (struct key_generator *)genctx;
+    void *key;
+    CK_RV ret;
+
+#define HSS_PUBKEY_TMPL_SIZE 2
+    CK_ATTRIBUTE pubkey_template[HSS_PUBKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_VERIFY, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+    };
+#define HSS_PRIVKEY_TMPL_SIZE 4
+    CK_ATTRIBUTE privkey_template[HSS_PRIVKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_PRIVATE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SENSITIVE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SIGN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+    };
+    int pubtsize = HSS_PUBKEY_TMPL_SIZE;
+    int privtsize = HSS_PRIVKEY_TMPL_SIZE;
+
+    P11PROV_debug("hss gen %p %p %p", ctx, cb_fn, cb_arg);
+
+    ret = p11prov_common_gen(ctx, pubkey_template, privkey_template, pubtsize,
+                             privtsize, cb_fn, cb_arg, &key);
+    if (ret != CKR_OK) {
+        P11PROV_raise(ctx->provctx, ret, "hss Key generation failed");
+        return NULL;
+    }
+    return key;
+}
+
+static const OSSL_PARAM *p11prov_hss_gen_settable_params(void *genctx,
+                                                          void *provctx)
+{
+    static OSSL_PARAM p11prov_hss_params[] = {
+        OSSL_PARAM_utf8_string(P11PROV_PARAM_URI, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return p11prov_hss_params;
+}
+
+static int p11prov_hss_import(void *keydata, int selection,
+                              const OSSL_PARAM params[])
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    CK_OBJECT_CLASS class = CK_UNAVAILABLE_INFORMATION;
+    CK_RV rv;
+
+    P11PROV_debug("hss import %p", key);
+
+    if (!key) {
+        return RET_OSSL_ERR;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        class = CKO_PRIVATE_KEY;
+    } else if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        class = CKO_PUBLIC_KEY;
+    } else if (selection & OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS) {
+        class = CKO_DOMAIN_PARAMETERS;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        const OSSL_PARAM *p;
+        p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PRIV_KEY);
+        if (!p) {
+            /* not really a private key */
+            class = CKO_PUBLIC_KEY;
+        }
+    }
+
+    /* param_set unused for HSS (no CKA_PARAMETER_SET) */
+    rv = p11prov_obj_import_key(key, CKK_HSS, class, 0, params);
+    if (rv != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_hss_import_types(int selection)
+{
+    static const OSSL_PARAM p11prov_hss_imp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PRIV_KEY, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    P11PROV_debug("hss import types");
+    if (selection & OSSL_KEYMGMT_SELECT_KEYPAIR) {
+        return p11prov_hss_imp_key_types;
+    }
+    return NULL;
+}
+
+static int p11prov_hss_export(void *keydata, int selection,
+                              OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    P11PROV_CTX *ctx = p11prov_obj_get_prov_ctx(key);
+    CK_OBJECT_CLASS class = p11prov_obj_get_class(key);
+
+    P11PROV_debug("hss export %p, selection= %d", keydata, selection);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    if (p11prov_ctx_allow_export(ctx) & DISALLOW_EXPORT_PUBLIC) {
+        return RET_OSSL_ERR;
+    }
+
+    if ((class == CKO_PUBLIC_KEY) || (selection & ~(PUBLIC_PARAMS)) == 0) {
+        return p11prov_obj_export_public_key(key, CKK_HSS, true, false, cb_fn,
+                                             cb_arg);
+    }
+
+    return RET_OSSL_ERR;
+}
+
+static const OSSL_PARAM *p11prov_hss_export_types(int selection)
+{
+    static const OSSL_PARAM p11prov_hss_exp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    P11PROV_debug("hss export types");
+    if (selection == OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        return p11prov_hss_exp_key_types;
+    }
+    return NULL;
+}
+
+static int p11prov_hss_get_params(void *keydata, OSSL_PARAM params[])
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    OSSL_PARAM *p;
+    int ret;
+
+    P11PROV_debug("hss get params %p", keydata);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    /* Sizes read from the actual object, not a per-parameter-set table —
+     * this keymgmt only ever generates the engine's single default
+     * variant, so there is exactly one real size, and reading it live
+     * avoids transcribing RFC 8554's LM-OTS "p" formula by hand. */
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_BITS);
+    if (p) {
+        /* CKA_VALUE lives only on the public half — a private-class HSS
+         * object (this is the path EVP_PKEY_get_size() takes before
+         * signing, since it always holds the private key) has none of
+         * its own. Walk to the associated public object first, same
+         * fallback ML-KEM's own ENCODED_PUBLIC_KEY handling uses — and
+         * treat "still not found" as "not available" (skip, not error):
+         * a get_params call requesting BITS *and* MAX_SIZE must not let
+         * BITS's absence abort MAX_SIZE, which EVP_PKEY_get_size() (and
+         * therefore every sign/verify path) actually needs. */
+        P11PROV_OBJ *pub_obj = key;
+        CK_ATTRIBUTE *pub = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!pub && p11prov_obj_get_class(key) == CKO_PRIVATE_KEY) {
+            P11PROV_OBJ *assoc = p11prov_obj_get_associated(key);
+            if (assoc) {
+                pub_obj = assoc;
+                pub = p11prov_obj_get_attr(pub_obj, CKA_VALUE);
+            }
+        }
+        if (pub) {
+            ret = OSSL_PARAM_set_int(p, (int)(pub->ulValueLen * 8));
+            if (ret != RET_OSSL_OK) {
+                return ret;
+            }
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
+    if (p) {
+        /* Phase 5 R25: was a hardcoded 1536 ("headroom" over the L=1/W8
+         * default's 1296) -- wrong for the Rust engine's own W4 default,
+         * whose real size (2352) exceeds that "headroom". Now shares
+         * sig/hss.c's real RFC 8554 formula via the key's own
+         * CKA_HSS_LEVELS/LMS_TYPE/LMOTS_TYPE (or its documented
+         * CKA_VALUE-parsing fallback), so it can never again undersize a
+         * parameter set this hardcode never accounted for. */
+        ret = OSSL_PARAM_set_int(p, (int)hss_sig_size_for_key(key));
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MANDATORY_DIGEST);
+    if (p) {
+        /* HSS/LMS is hash-internal (RFC 8554) — no external digest. */
+        ret = OSSL_PARAM_set_utf8_string(p, "");
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_PUB_KEY);
+    if (p) {
+        CK_ATTRIBUTE *pub;
+
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) {
+            return RET_OSSL_ERR;
+        }
+        pub = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!pub) {
+            return RET_OSSL_ERR;
+        }
+
+        p->return_size = pub->ulValueLen;
+        if (p->data) {
+            if (p->data_size < pub->ulValueLen) {
+                return RET_OSSL_ERR;
+            }
+            memcpy(p->data, pub->pValue, pub->ulValueLen);
+            p->data_size = pub->ulValueLen;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static const OSSL_PARAM *p11prov_hss_gettable_params(void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
+        OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_MANDATORY_DIGEST, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+const OSSL_DISPATCH p11prov_hss_keymgmt_functions[] = {
+    DISPATCH_KEYMGMT_ELEM(hss, NEW, new),
+    DISPATCH_KEYMGMT_ELEM(hss, GEN_INIT, gen_init),
+    DISPATCH_KEYMGMT_ELEM(hss, GEN, gen),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_CLEANUP, gen_cleanup),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_SET_PARAMS, gen_set_params),
+    DISPATCH_KEYMGMT_ELEM(hss, GEN_SETTABLE_PARAMS, gen_settable_params),
+    DISPATCH_KEYMGMT_ELEM(hss, LOAD, load),
+    DISPATCH_KEYMGMT_ELEM(hss, FREE, free),
+    DISPATCH_KEYMGMT_ELEM(hss, HAS, has),
+    DISPATCH_KEYMGMT_ELEM(hss, MATCH, match),
+    DISPATCH_KEYMGMT_ELEM(hss, IMPORT, import),
+    DISPATCH_KEYMGMT_ELEM(hss, IMPORT_TYPES, import_types),
+    DISPATCH_KEYMGMT_ELEM(hss, EXPORT, export),
+    DISPATCH_KEYMGMT_ELEM(hss, EXPORT_TYPES, export_types),
+    DISPATCH_KEYMGMT_ELEM(hss, GET_PARAMS, get_params),
+    DISPATCH_KEYMGMT_ELEM(hss, GETTABLE_PARAMS, gettable_params),
+    { 0, NULL },
+};
+
+/* ─── XMSS / XMSS^MT (remediation R41, phase 8) ─────────────────────────── */
+/* Mirrors sig/hss.c's own file-header rationale and the HSS keymgmt block
+ * directly above it: ONE algorithm name each for XMSS/XMSS^MT (not a
+ * per-variant split the way ML-DSA/SLH-DSA/ML-KEM use — XMSS + XMSS^MT
+ * between them have 33 RFC 8391 combinations, too many for that pattern),
+ * ONE hardcoded default parameter set each (PKCS#11 v3.2 SS6.66.6 makes
+ * CKA_PARAMETER_SET mandatory on the public template regardless of which
+ * oid is used — this keymgmt always sets it explicitly, on both halves).
+ * A non-default oid is reachable via direct C_GenerateKeyPair with an
+ * explicit template (hss-w4-keygen.c's own established precedent for the
+ * identical "this keymgmt has no dynamic param surface" situation). */
+
+DISPATCH_KEYMGMT_FN(xmss, new);
+DISPATCH_KEYMGMT_FN(xmss, free);
+DISPATCH_KEYMGMT_FN(xmss, load);
+DISPATCH_KEYMGMT_FN(xmss, has);
+DISPATCH_KEYMGMT_FN(xmss, match);
+DISPATCH_KEYMGMT_FN(xmss, gen_init);
+DISPATCH_KEYMGMT_FN(xmssmt, gen_init);
+DISPATCH_KEYMGMT_FN(xmss, gen);
+DISPATCH_KEYMGMT_FN(xmss, gen_settable_params);
+DISPATCH_KEYMGMT_FN(xmss, import);
+DISPATCH_KEYMGMT_FN(xmss, import_types);
+DISPATCH_KEYMGMT_FN(xmss, export);
+DISPATCH_KEYMGMT_FN(xmss, export_types);
+DISPATCH_KEYMGMT_FN(xmss, get_params);
+DISPATCH_KEYMGMT_FN(xmss, gettable_params);
+
+DISPATCH_KEYMGMT_FN(xmssmt, new);
+DISPATCH_KEYMGMT_FN(xmssmt, free);
+DISPATCH_KEYMGMT_FN(xmssmt, load);
+DISPATCH_KEYMGMT_FN(xmssmt, has);
+DISPATCH_KEYMGMT_FN(xmssmt, match);
+DISPATCH_KEYMGMT_FN(xmssmt, import);
+DISPATCH_KEYMGMT_FN(xmssmt, import_types);
+DISPATCH_KEYMGMT_FN(xmssmt, export);
+DISPATCH_KEYMGMT_FN(xmssmt, export_types);
+DISPATCH_KEYMGMT_FN(xmssmt, get_params);
+
+static void *p11prov_xmss_new_int(void *provctx, CK_KEY_TYPE type)
+{
+    P11PROV_CTX *ctx = (P11PROV_CTX *)provctx;
+    CK_RV ret;
+
+    P11PROV_debug("xmss new (type=%lu)", type);
+
+    ret = p11prov_ctx_status(ctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    return p11prov_obj_new(provctx, CK_UNAVAILABLE_INFORMATION,
+                           CK_P11PROV_IMPORTED_HANDLE,
+                           CK_UNAVAILABLE_INFORMATION);
+}
+
+static void *p11prov_xmss_new(void *provctx)
+{
+    return p11prov_xmss_new_int(provctx, CKK_XMSS);
+}
+
+static void *p11prov_xmssmt_new(void *provctx)
+{
+    return p11prov_xmss_new_int(provctx, CKK_XMSSMT);
+}
+
+static void p11prov_xmss_free(void *key)
+{
+    P11PROV_debug("xmss free %p", key);
+    p11prov_obj_free((P11PROV_OBJ *)key);
+}
+
+static void p11prov_xmssmt_free(void *key)
+{
+    p11prov_xmss_free(key);
+}
+
+static void *p11prov_xmss_load(const void *reference, size_t reference_sz)
+{
+    P11PROV_debug("xmss load %p, %ld", reference, reference_sz);
+    return p11prov_obj_from_typed_reference(reference, reference_sz,
+                                            CKK_XMSS);
+}
+
+static void *p11prov_xmssmt_load(const void *reference, size_t reference_sz)
+{
+    P11PROV_debug("xmssmt load %p, %ld", reference, reference_sz);
+    return p11prov_obj_from_typed_reference(reference, reference_sz,
+                                            CKK_XMSSMT);
+}
+
+static int p11prov_xmss_has(const void *keydata, int selection)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+
+    P11PROV_debug("xmss has %p %d", key, selection);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        if (p11prov_obj_get_class(key) != CKO_PRIVATE_KEY) {
+            return RET_OSSL_ERR;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static int p11prov_xmssmt_has(const void *keydata, int selection)
+{
+    return p11prov_xmss_has(keydata, selection);
+}
+
+static int p11prov_xmss_match(const void *keydata1, const void *keydata2,
+                              int selection)
+{
+    P11PROV_debug("xmss match %p %p %d", keydata1, keydata2, selection);
+
+    return p11prov_common_match(keydata1, keydata2, CKK_XMSS, selection);
+}
+
+static int p11prov_xmssmt_match(const void *keydata1, const void *keydata2,
+                                int selection)
+{
+    P11PROV_debug("xmssmt match %p %p %d", keydata1, keydata2, selection);
+
+    return p11prov_common_match(keydata1, keydata2, CKK_XMSSMT, selection);
+}
+
+static void *xmss_gen_init_int(void *provctx, int selection,
+                               const OSSL_PARAM params[], CK_KEY_TYPE type,
+                               CK_MECHANISM_TYPE mechanism,
+                               CK_ULONG default_param_set)
+{
+    struct key_generator *ctx = NULL;
+    int ret;
+
+    P11PROV_debug("xmss gen_init %p (type=%lu)", provctx, type);
+
+    ret = p11prov_ctx_status(provctx);
+    if (ret != CKR_OK) {
+        return NULL;
+    }
+
+    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) == 0) {
+        P11PROV_raise(provctx, CKR_ARGUMENTS_BAD, "Unsupported selection");
+        return NULL;
+    }
+
+    ctx = OPENSSL_zalloc(sizeof(struct key_generator));
+    if (ctx == NULL) {
+        P11PROV_raise(provctx, CKR_HOST_MEMORY,
+                      "Failed to allocate key_generator structure");
+        return NULL;
+    }
+    ctx->provctx = (P11PROV_CTX *)provctx;
+    ctx->type = type;
+    ctx->data.xmss.param_set = default_param_set;
+    ctx->mechanism.mechanism = mechanism;
+
+    ret = p11prov_common_gen_set_params(ctx, params);
+    if (ret != RET_OSSL_OK) {
+        p11prov_common_gen_cleanup(ctx);
+        return NULL;
+    }
+    return ctx;
+}
+
+static void *p11prov_xmss_gen_init(void *provctx, int selection,
+                                   const OSSL_PARAM params[])
+{
+    /* Default oid 0x01 = XMSS-SHA2_10_256 (RFC 8391 IANA registry / SP
+     * 800-208 SS4) — the smallest, fastest-to-test tree, and both engines'
+     * own xmss-reference vendoring default to it when nothing else is
+     * specified. */
+    return xmss_gen_init_int(provctx, selection, params, CKK_XMSS,
+                             CKM_XMSS_KEY_PAIR_GEN, 0x01UL);
+}
+
+static void *p11prov_xmssmt_gen_init(void *provctx, int selection,
+                                     const OSSL_PARAM params[])
+{
+    /* Default oid 0x01 = XMSSMT-SHA2_20/2_256 — the smallest XMSS^MT tree
+     * (2 layers, height 20), matching Rust's own get_sig_len() fallback
+     * default exactly (handlers.rs). */
+    return xmss_gen_init_int(provctx, selection, params, CKK_XMSSMT,
+                             CKM_XMSSMT_KEY_PAIR_GEN, 0x01UL);
+}
+
+static void *p11prov_xmss_gen(void *genctx, OSSL_CALLBACK *cb_fn,
+                              void *cb_arg)
+{
+    struct key_generator *ctx = (struct key_generator *)genctx;
+    void *key;
+    CK_RV ret;
+    CK_ULONG param_set;
+
+#define XMSS_PUBKEY_TMPL_SIZE 3
+    CK_ATTRIBUTE pubkey_template[XMSS_PUBKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_VERIFY, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_PARAMETER_SET, NULL, sizeof(CK_ULONG) },
+    };
+#define XMSS_PRIVKEY_TMPL_SIZE 4
+    CK_ATTRIBUTE privkey_template[XMSS_PRIVKEY_TMPL_SIZE + COMMON_TMPL_SIZE] = {
+        { CKA_TOKEN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_PRIVATE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SENSITIVE, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+        { CKA_SIGN, DISCARD_CONST(&val_true), sizeof(CK_BBOOL) },
+    };
+    int pubtsize = XMSS_PUBKEY_TMPL_SIZE;
+    int privtsize = XMSS_PRIVKEY_TMPL_SIZE;
+
+    P11PROV_debug("xmss gen %p %p %p", ctx, cb_fn, cb_arg);
+
+    param_set = ctx->data.xmss.param_set;
+    pubkey_template[2].pValue = &param_set;
+
+    ret = p11prov_common_gen(ctx, pubkey_template, privkey_template, pubtsize,
+                             privtsize, cb_fn, cb_arg, &key);
+    if (ret != CKR_OK) {
+        P11PROV_raise(ctx->provctx, ret, "xmss Key generation failed");
+        return NULL;
+    }
+    return key;
+}
+
+static const OSSL_PARAM *p11prov_xmss_gen_settable_params(void *genctx,
+                                                            void *provctx)
+{
+    static OSSL_PARAM p11prov_xmss_params[] = {
+        OSSL_PARAM_utf8_string(P11PROV_PARAM_URI, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return p11prov_xmss_params;
+}
+
+static int xmss_import_int(void *keydata, int selection,
+                           const OSSL_PARAM params[], CK_KEY_TYPE type)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    CK_OBJECT_CLASS class = CK_UNAVAILABLE_INFORMATION;
+    CK_RV rv;
+
+    P11PROV_debug("xmss import %p (type=%lu)", key, type);
+
+    if (!key) {
+        return RET_OSSL_ERR;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        class = CKO_PRIVATE_KEY;
+    } else if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        class = CKO_PUBLIC_KEY;
+    } else if (selection & OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS) {
+        class = CKO_DOMAIN_PARAMETERS;
+    }
+
+    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) {
+        const OSSL_PARAM *p;
+        p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PRIV_KEY);
+        if (!p) {
+            /* not really a private key */
+            class = CKO_PUBLIC_KEY;
+        }
+    }
+
+    /* param_set not threaded through import here (mirrors sig/hss.c's own
+     * keymgmt) -- the key's own wire format is self-describing (RFC 8391:
+     * a 4-byte oid prefix precedes the core key material), so the actual
+     * parameter set is recoverable from CKA_VALUE itself if ever needed,
+     * same reasoning hss_parse_pubkey_top_level() already established for
+     * HSS's own self-describing wire format. */
+    rv = p11prov_obj_import_key(key, type, class, 0, params);
+    if (rv != CKR_OK) {
+        return RET_OSSL_ERR;
+    }
+    return RET_OSSL_OK;
+}
+
+static int p11prov_xmss_import(void *keydata, int selection,
+                               const OSSL_PARAM params[])
+{
+    return xmss_import_int(keydata, selection, params, CKK_XMSS);
+}
+
+static int p11prov_xmssmt_import(void *keydata, int selection,
+                                 const OSSL_PARAM params[])
+{
+    return xmss_import_int(keydata, selection, params, CKK_XMSSMT);
+}
+
+static const OSSL_PARAM *p11prov_xmss_import_types(int selection)
+{
+    static const OSSL_PARAM p11prov_xmss_imp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PRIV_KEY, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    P11PROV_debug("xmss import types");
+    if (selection & OSSL_KEYMGMT_SELECT_KEYPAIR) {
+        return p11prov_xmss_imp_key_types;
+    }
+    return NULL;
+}
+
+static const OSSL_PARAM *p11prov_xmssmt_import_types(int selection)
+{
+    return p11prov_xmss_import_types(selection);
+}
+
+static int xmss_export_int(void *keydata, int selection, OSSL_CALLBACK *cb_fn,
+                           void *cb_arg, CK_KEY_TYPE type)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    P11PROV_CTX *ctx = p11prov_obj_get_prov_ctx(key);
+    CK_OBJECT_CLASS class = p11prov_obj_get_class(key);
+
+    P11PROV_debug("xmss export %p, selection=%d (type=%lu)", keydata,
+                  selection, type);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    if (p11prov_ctx_allow_export(ctx) & DISALLOW_EXPORT_PUBLIC) {
+        return RET_OSSL_ERR;
+    }
+
+    if ((class == CKO_PUBLIC_KEY) || (selection & ~(PUBLIC_PARAMS)) == 0) {
+        return p11prov_obj_export_public_key(key, type, true, false, cb_fn,
+                                             cb_arg);
+    }
+
+    return RET_OSSL_ERR;
+}
+
+static int p11prov_xmss_export(void *keydata, int selection,
+                               OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    return xmss_export_int(keydata, selection, cb_fn, cb_arg, CKK_XMSS);
+}
+
+static int p11prov_xmssmt_export(void *keydata, int selection,
+                                 OSSL_CALLBACK *cb_fn, void *cb_arg)
+{
+    return xmss_export_int(keydata, selection, cb_fn, cb_arg, CKK_XMSSMT);
+}
+
+static const OSSL_PARAM *p11prov_xmss_export_types(int selection)
+{
+    static const OSSL_PARAM p11prov_xmss_exp_key_types[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    P11PROV_debug("xmss export types");
+    if (selection == OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
+        return p11prov_xmss_exp_key_types;
+    }
+    return NULL;
+}
+
+static const OSSL_PARAM *p11prov_xmssmt_export_types(int selection)
+{
+    return p11prov_xmss_export_types(selection);
+}
+
+static int xmss_get_params_int(void *keydata, OSSL_PARAM params[],
+                                bool is_mt)
+{
+    P11PROV_OBJ *key = (P11PROV_OBJ *)keydata;
+    OSSL_PARAM *p;
+    int ret;
+
+    P11PROV_debug("xmss get params %p (is_mt=%d)", keydata, is_mt);
+
+    if (key == NULL) {
+        return RET_OSSL_ERR;
+    }
+
+    /* Same CKA_VALUE-on-public-half / walk-to-associated-public-object
+     * fallback as sig/hss.c's own keymgmt -- see that file's identical
+     * comment. */
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_BITS);
+    if (p) {
+        P11PROV_OBJ *pub_obj = key;
+        CK_ATTRIBUTE *pub = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!pub && p11prov_obj_get_class(key) == CKO_PRIVATE_KEY) {
+            P11PROV_OBJ *assoc = p11prov_obj_get_associated(key);
+            if (assoc) {
+                pub_obj = assoc;
+                pub = p11prov_obj_get_attr(pub_obj, CKA_VALUE);
+            }
+        }
+        if (pub) {
+            ret = OSSL_PARAM_set_int(p, (int)(pub->ulValueLen * 8));
+            if (ret != RET_OSSL_OK) {
+                return ret;
+            }
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
+    if (p) {
+        ret = OSSL_PARAM_set_int(p, (int)xmss_sig_size_for_key(key, is_mt));
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MANDATORY_DIGEST);
+    if (p) {
+        /* XMSS/XMSS^MT is hash-internal (RFC 8391) — no external digest. */
+        ret = OSSL_PARAM_set_utf8_string(p, "");
+        if (ret != RET_OSSL_OK) {
+            return ret;
+        }
+    }
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_PUB_KEY);
+    if (p) {
+        CK_ATTRIBUTE *pub;
+
+        if (p->data_type != OSSL_PARAM_OCTET_STRING) {
+            return RET_OSSL_ERR;
+        }
+        pub = p11prov_obj_get_attr(key, CKA_VALUE);
+        if (!pub) {
+            return RET_OSSL_ERR;
+        }
+
+        p->return_size = pub->ulValueLen;
+        if (p->data) {
+            if (p->data_size < pub->ulValueLen) {
+                return RET_OSSL_ERR;
+            }
+            memcpy(p->data, pub->pValue, pub->ulValueLen);
+            p->data_size = pub->ulValueLen;
+        }
+    }
+
+    return RET_OSSL_OK;
+}
+
+static int p11prov_xmss_get_params(void *keydata, OSSL_PARAM params[])
+{
+    return xmss_get_params_int(keydata, params, false);
+}
+
+static int p11prov_xmssmt_get_params(void *keydata, OSSL_PARAM params[])
+{
+    return xmss_get_params_int(keydata, params, true);
+}
+
+static const OSSL_PARAM *p11prov_xmss_gettable_params(void *provctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
+        OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_MANDATORY_DIGEST, NULL, 0),
+        OSSL_PARAM_END,
+    };
+    return params;
+}
+
+const OSSL_DISPATCH p11prov_xmss_keymgmt_functions[] = {
+    DISPATCH_KEYMGMT_ELEM(xmss, NEW, new),
+    DISPATCH_KEYMGMT_ELEM(xmss, GEN_INIT, gen_init),
+    DISPATCH_KEYMGMT_ELEM(xmss, GEN, gen),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_CLEANUP, gen_cleanup),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_SET_PARAMS, gen_set_params),
+    DISPATCH_KEYMGMT_ELEM(xmss, GEN_SETTABLE_PARAMS, gen_settable_params),
+    DISPATCH_KEYMGMT_ELEM(xmss, LOAD, load),
+    DISPATCH_KEYMGMT_ELEM(xmss, FREE, free),
+    DISPATCH_KEYMGMT_ELEM(xmss, HAS, has),
+    DISPATCH_KEYMGMT_ELEM(xmss, MATCH, match),
+    DISPATCH_KEYMGMT_ELEM(xmss, IMPORT, import),
+    DISPATCH_KEYMGMT_ELEM(xmss, IMPORT_TYPES, import_types),
+    DISPATCH_KEYMGMT_ELEM(xmss, EXPORT, export),
+    DISPATCH_KEYMGMT_ELEM(xmss, EXPORT_TYPES, export_types),
+    DISPATCH_KEYMGMT_ELEM(xmss, GET_PARAMS, get_params),
+    DISPATCH_KEYMGMT_ELEM(xmss, GETTABLE_PARAMS, gettable_params),
+    { 0, NULL },
+};
+
+const OSSL_DISPATCH p11prov_xmssmt_keymgmt_functions[] = {
+    DISPATCH_KEYMGMT_ELEM(xmssmt, NEW, new),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, GEN_INIT, gen_init),
+    DISPATCH_KEYMGMT_ELEM(xmss, GEN, gen),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_CLEANUP, gen_cleanup),
+    DISPATCH_KEYMGMT_ELEM(common, GEN_SET_PARAMS, gen_set_params),
+    DISPATCH_KEYMGMT_ELEM(xmss, GEN_SETTABLE_PARAMS, gen_settable_params),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, LOAD, load),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, FREE, free),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, HAS, has),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, MATCH, match),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, IMPORT, import),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, IMPORT_TYPES, import_types),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, EXPORT, export),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, EXPORT_TYPES, export_types),
+    DISPATCH_KEYMGMT_ELEM(xmssmt, GET_PARAMS, get_params),
+    DISPATCH_KEYMGMT_ELEM(xmss, GETTABLE_PARAMS, gettable_params),
     { 0, NULL },
 };
 

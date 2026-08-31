@@ -179,8 +179,40 @@ pub fn digest(mech: u32, data: &[u8]) -> Result<Vec<u8>, CkRv> {
         CKM_SHA256 => sha2::Sha256::digest(data).to_vec(),
         CKM_SHA384 => sha2::Sha384::digest(data).to_vec(),
         CKM_SHA512 => sha2::Sha512::digest(data).to_vec(),
+        // KMIP/CACP coverage gap-analysis item 10 (2026-08-30) — SHA3
+        // added for the same reason as SHA2 above: DeriveKey's HASH
+        // method, when the caller supplies explicit Derivation Data
+        // (non-secret bytes, no key-protection boundary to cross), needs
+        // a session-less digest and previously had no SHA3 path here.
+        CKM_SHA3_256 => sha3::Sha3_256::digest(data).to_vec(),
+        CKM_SHA3_384 => sha3::Sha3_384::digest(data).to_vec(),
+        CKM_SHA3_512 => sha3::Sha3_512::digest(data).to_vec(),
         _ => return Err(CKR_MECHANISM_INVALID),
     })
+}
+
+/// One-shot SHAKE-256 XOF (extendable-output function), squeezing `out_len`
+/// bytes. `sha3::Shake256` is already used inside this engine (`ffi.rs`'s
+/// ML-DSA external-mu digest path, `crypto/handlers.rs`'s `MuGen`); this
+/// exposes the same primitive as a plain one-shot function for a native
+/// caller that has no digest-derivation session state of its own — same
+/// motivation as [`digest`] above (get the hash from THIS engine instead of
+/// a caller-local `sha3` crate dependency). No `CKM_SHAKE_256` codepoint
+/// exists to route through `digest`/`digest_of` (both fixed-length
+/// `CKM_SHA*` families), and a XOF has no failure mode over raw bytes, so
+/// this returns `Vec<u8>` directly rather than `Result<_, CkRv>`.
+///
+/// Used by `openmls-provider`'s X-Wing key-expansion
+/// (draft-connolly-cfrg-xwing-kem §5.2 `expandDecapsulationKey`, §5.6
+/// `DeriveKeyPair`) — SHAKE-256 output is squeezed to a length that varies
+/// by call site (96 bytes / 32 bytes), not a fixed digest size.
+pub fn shake256_xof(data: &[u8], out_len: usize) -> Vec<u8> {
+    use sha3::digest::{ExtendableOutput, Update, XofReader};
+    let mut h = sha3::Shake256::default();
+    h.update(data);
+    let mut out = vec![0u8; out_len];
+    h.finalize_xof().read(&mut out);
+    out
 }
 
 /// HKDF (RFC 5869) over the PRF selected by `prf` — `Extract(salt, ikm)` then
@@ -554,5 +586,39 @@ mod tests {
             digest_key_derivation(session, base2, CKM_CONCATENATE_BASE_AND_KEY, None),
             Err(CKR_MECHANISM_INVALID)
         );
+    }
+
+    /// KMIP/CACP coverage gap-analysis item 10 (2026-08-30) — SHA3-256/
+    /// 384/512 added to `digest()` (the session-less path DeriveKey's
+    /// HASH method uses for explicit Derivation Data). Values are the
+    /// well-known SHA3("abc") KATs — cross-checked independently via
+    /// Python's `hashlib.sha3_256/384/512(b"abc")`, not derived from this
+    /// crate's own output. SHA2 arms were previously untested here too;
+    /// covered in the same pass since they're the same function.
+    #[test]
+    fn digest_matches_known_sha_kats() {
+        fn hex(s: &str) -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        }
+        assert_eq!(
+            digest(CKM_SHA256, b"abc").unwrap(),
+            hex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+        assert_eq!(
+            digest(CKM_SHA3_256, b"abc").unwrap(),
+            hex("3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532")
+        );
+        assert_eq!(
+            digest(CKM_SHA3_384, b"abc").unwrap(),
+            hex("ec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b298d88cea927ac7f539f1edf228376d25")
+        );
+        assert_eq!(
+            digest(CKM_SHA3_512, b"abc").unwrap(),
+            hex("b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0")
+        );
+        assert_eq!(digest(CKM_CONCATENATE_BASE_AND_KEY, b"abc"), Err(CKR_MECHANISM_INVALID));
     }
 }

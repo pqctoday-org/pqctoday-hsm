@@ -126,6 +126,11 @@ struct AsymMech
 		HASH_MLDSA_SHA3_512,// CKM_HASH_ML_DSA_SHA3_512
 		HASH_MLDSA_SHAKE128,// CKM_HASH_ML_DSA_SHAKE128
 		HASH_MLDSA_SHAKE256,// CKM_HASH_ML_DSA_SHAKE256
+		// Deliberately OUTSIDE the [MLDSA, HASH_MLDSA_SHAKE256] range check
+		// in SoftHSM_sign.cpp's applyPerMessageParam — this mechanism does
+		// not support C_MessageSign/Verify* (remediation R34,
+		// PQCTODAY-VENDOR-EXT-MU).
+		MLDSA_EXTERNAL_MU,  // CKM_ML_DSA_EXTERNAL_MU
 		SLHDSA,              // CKM_SLH_DSA pure-message sign/verify (FIPS 205)
 		HASH_SLHDSA,         // CKM_HASH_SLH_DSA (generic, hash in param)
 		HASH_SLHDSA_SHA224,  // CKM_HASH_SLH_DSA_SHA224
@@ -171,8 +176,13 @@ struct MLDSA_SIGN_PARAMS
 {
 	bool deterministic;          // CKH_DETERMINISTIC_REQUIRED → true
 	bool hedgeRequired;          // CKH_HEDGE_REQUIRED → true
-	bool preHash;                // true for CKM_HASH_ML_DSA_* mechanisms
-	HashAlgo::Type hashAlg;      // hash algorithm (only when preHash=true)
+	bool preHash;                // true for CKM_HASH_ML_DSA_<hash> mechanisms
+	                              // (§6.67.7 -- hash the message ON TOKEN)
+	bool phmInput;               // remediation R37 (phase 8): true for the
+	                              // bare generic CKM_HASH_ML_DSA (§6.67.6) --
+	                              // dataToSign IS an already-hashed PHM, not
+	                              // a message; never both this and preHash.
+	HashAlgo::Type hashAlg;      // hash algorithm (when preHash or phmInput)
 	size_t contextLen;           // 0-255
 	unsigned char context[255];  // FIPS 204 max context length
 };
@@ -203,8 +213,13 @@ struct EDDSA_SIGN_PARAMS
 struct SLHDSA_SIGN_PARAMS
 {
 	bool deterministic;          // CKH_DETERMINISTIC_REQUIRED → true (FIPS 205 §10)
-	bool preHash;                // true for CKM_HASH_SLH_DSA_* mechanisms
-	HashAlgo::Type hashAlg;      // hash algorithm (only when preHash=true)
+	bool preHash;                // true for CKM_HASH_SLH_DSA_<hash> mechanisms
+	                              // (§6.69.7 -- hash the message ON TOKEN)
+	bool phmInput;               // remediation R37 (phase 8): true for the
+	                              // bare generic CKM_HASH_SLH_DSA (§6.69.6) --
+	                              // dataToSign IS an already-hashed PHM, not
+	                              // a message; never both this and preHash.
+	HashAlgo::Type hashAlg;      // hash algorithm (when preHash or phmInput)
 	size_t contextLen;           // 0-255
 	unsigned char context[255];  // FIPS 205 max context length
 };

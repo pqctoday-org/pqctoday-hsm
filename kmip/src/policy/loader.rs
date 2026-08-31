@@ -964,7 +964,7 @@ rules:
   - type: mechanism_parameter_constraint
     ops: [Encrypt]
     algorithm: AES
-    allowed_block_cipher_modes: [GCM, CCM]
+    allowed_block_cipher_modes: [GCM, CTR]
     reason: "AEAD only"
   - type: mac_mechanism_policy
     ops: [MAC]

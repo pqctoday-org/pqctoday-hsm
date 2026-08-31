@@ -106,6 +106,10 @@ pub enum MultipartCipher {
     Cbc(CbcState),
     CbcPad(CbcPadState),
     Ctr(CtrState),
+    Ofb(OfbState),
+    Cfb128(Cfb128State),
+    Cfb8(Cfb8State),
+    Cfb1(Cfb1State),
     Gcm(GcmState),
 }
 
@@ -118,6 +122,10 @@ impl MultipartCipher {
             MultipartCipher::Cbc(s) => full_blocks(s.buf.len() + part_len),
             MultipartCipher::CbcPad(s) => s.update_len(part_len),
             MultipartCipher::Ctr(_) => part_len,
+            MultipartCipher::Ofb(_) => part_len,
+            MultipartCipher::Cfb128(s) => full_blocks(s.buf.len() + part_len),
+            MultipartCipher::Cfb8(_) => part_len,
+            MultipartCipher::Cfb1(_) => part_len,
             MultipartCipher::Gcm(s) => s.update_len(part_len),
         }
     }
@@ -127,8 +135,16 @@ impl MultipartCipher {
     /// unknowable before decryption (§5.2 permits over-estimates).
     pub fn final_len(&self) -> usize {
         match self {
-            MultipartCipher::Ecb(_) | MultipartCipher::Cbc(_) | MultipartCipher::Ctr(_) => 0,
+            MultipartCipher::Ecb(_)
+            | MultipartCipher::Cbc(_)
+            | MultipartCipher::Ctr(_)
+            | MultipartCipher::Ofb(_)
+            | MultipartCipher::Cfb8(_)
+            | MultipartCipher::Cfb1(_) => 0,
             MultipartCipher::CbcPad(_) => BLOCK,
+            // Exact: `finalize()` emits precisely the buffered short final
+            // segment, same convention as CbcPad's exact-except-decrypt note.
+            MultipartCipher::Cfb128(s) => s.buf.len(),
             MultipartCipher::Gcm(s) => match s.dir {
                 CipherDirection::Encrypt => s.tag_len,
                 CipherDirection::Decrypt => 0,
@@ -145,6 +161,10 @@ impl MultipartCipher {
             MultipartCipher::Cbc(s) => Ok(s.update(part)),
             MultipartCipher::CbcPad(s) => Ok(s.update(part)),
             MultipartCipher::Ctr(s) => Ok(s.update(part)),
+            MultipartCipher::Ofb(s) => Ok(s.update(part)),
+            MultipartCipher::Cfb128(s) => Ok(s.update(part)),
+            MultipartCipher::Cfb8(s) => Ok(s.update(part)),
+            MultipartCipher::Cfb1(s) => Ok(s.update(part)),
             MultipartCipher::Gcm(s) => Ok(s.update(part)),
         }
     }
@@ -157,6 +177,10 @@ impl MultipartCipher {
             MultipartCipher::Cbc(s) => s.finalize(),
             MultipartCipher::CbcPad(s) => s.finalize(),
             MultipartCipher::Ctr(_) => Ok(Vec::new()),
+            MultipartCipher::Ofb(_) => Ok(Vec::new()),
+            MultipartCipher::Cfb128(s) => Ok(s.finalize()),
+            MultipartCipher::Cfb8(_) => Ok(Vec::new()),
+            MultipartCipher::Cfb1(_) => Ok(Vec::new()),
             MultipartCipher::Gcm(s) => s.finalize(),
         }
     }
@@ -396,6 +420,366 @@ fn inc_be(block: &mut [u8; BLOCK], width: usize) {
         if block[i] != 0 {
             break;
         }
+    }
+}
+
+// ── OFB (§6.11, NIST SP 800-38A §6.4) ───────────────────────────────────────
+//
+// O_1 = CIPH_K(IV); O_j = CIPH_K(O_{j-1}); C_j = P_j XOR O_j. Direction-
+// symmetric like CTR (XOR is its own inverse) — no CipherDirection needed.
+
+pub struct OfbState {
+    key: AesKey,
+    register: [u8; BLOCK],
+    keystream: [u8; BLOCK],
+    ks_pos: usize,
+}
+
+impl OfbState {
+    pub fn new(key: AesKey, iv: [u8; BLOCK]) -> Self {
+        Self { key, register: iv, keystream: [0u8; BLOCK], ks_pos: BLOCK }
+    }
+
+    fn next_keystream_byte(&mut self) -> u8 {
+        if self.ks_pos == BLOCK {
+            self.key.encrypt_block(&mut self.register);
+            self.keystream = self.register;
+            self.ks_pos = 0;
+        }
+        let b = self.keystream[self.ks_pos];
+        self.ks_pos += 1;
+        b
+    }
+
+    fn update(&mut self, part: &[u8]) -> Vec<u8> {
+        part.iter().map(|&b| b ^ self.next_keystream_byte()).collect()
+    }
+
+    pub fn update_public(&mut self, part: &[u8]) -> Vec<u8> {
+        self.update(part)
+    }
+}
+
+// ── CFB-128 (§6.11, NIST SP 800-38A §6.3, segment size = block size) ───────
+//
+// O_j = CIPH_K(I_j); C_j = P_j XOR O_j (encrypt) / P_j = C_j XOR O_j
+// (decrypt); I_{j+1} = C_j (full-block feedback, always the CIPHERTEXT
+// segment regardless of direction). SP 800-38A allows a short final
+// segment; a short segment never needs its own feedback since there is no
+// following round, so `process_block` only shifts the register on a full
+// 16-byte segment.
+
+pub struct Cfb128State {
+    key: AesKey,
+    register: [u8; BLOCK],
+    dir: CipherDirection,
+    buf: Vec<u8>,
+}
+
+impl Cfb128State {
+    pub fn new(key: AesKey, iv: [u8; BLOCK], dir: CipherDirection) -> Self {
+        Self { key, register: iv, dir, buf: Vec::new() }
+    }
+
+    fn process_segment(&mut self, seg_in: &[u8]) -> Vec<u8> {
+        let mut o = self.register;
+        self.key.encrypt_block(&mut o);
+        let out: Vec<u8> = seg_in.iter().zip(o.iter()).map(|(&b, &k)| b ^ k).collect();
+        let ct_segment: &[u8] = match self.dir {
+            CipherDirection::Encrypt => &out,
+            CipherDirection::Decrypt => seg_in,
+        };
+        if ct_segment.len() == BLOCK {
+            self.register.copy_from_slice(ct_segment);
+        }
+        out
+    }
+
+    fn update(&mut self, part: &[u8]) -> Vec<u8> {
+        self.buf.extend_from_slice(part);
+        let mut out = Vec::new();
+        while self.buf.len() >= BLOCK {
+            let block: Vec<u8> = self.buf.drain(..BLOCK).collect();
+            out.extend(self.process_segment(&block));
+        }
+        out
+    }
+
+    /// Flush a genuinely short final segment (SP 800-38A permits this only
+    /// as the last segment of the message — see `process_segment`).
+    fn finalize(mut self) -> Vec<u8> {
+        if self.buf.is_empty() {
+            return Vec::new();
+        }
+        let rem = std::mem::take(&mut self.buf);
+        self.process_segment(&rem)
+    }
+
+    pub fn update_public(&mut self, part: &[u8]) -> Vec<u8> {
+        let mut out = self.update(part);
+        if !self.buf.is_empty() {
+            let rem: Vec<u8> = self.buf.drain(..).collect();
+            out.extend(self.process_segment(&rem));
+        }
+        out
+    }
+}
+
+// ── CFB-8 (§6.11, NIST SP 800-38A §6.3, segment size = 1 byte) ─────────────
+//
+// Byte-granular: every input byte costs one full AES block encryption.
+// I_{j+1} = LSB_120(I_j) || C_j (shift the 16-byte register left one byte,
+// append the ciphertext byte).
+
+pub struct Cfb8State {
+    key: AesKey,
+    register: [u8; BLOCK],
+    dir: CipherDirection,
+}
+
+impl Cfb8State {
+    pub fn new(key: AesKey, iv: [u8; BLOCK], dir: CipherDirection) -> Self {
+        Self { key, register: iv, dir }
+    }
+
+    fn step(&mut self, in_byte: u8) -> u8 {
+        let mut o = self.register;
+        self.key.encrypt_block(&mut o);
+        let out_byte = in_byte ^ o[0];
+        let ct_byte = match self.dir {
+            CipherDirection::Encrypt => out_byte,
+            CipherDirection::Decrypt => in_byte,
+        };
+        self.register.copy_within(1.., 0);
+        self.register[BLOCK - 1] = ct_byte;
+        out_byte
+    }
+
+    fn update(&mut self, part: &[u8]) -> Vec<u8> {
+        part.iter().map(|&b| self.step(b)).collect()
+    }
+
+    pub fn update_public(&mut self, part: &[u8]) -> Vec<u8> {
+        self.update(part)
+    }
+}
+
+// ── CFB-1 (§6.11, NIST SP 800-38A §6.3, segment size = 1 bit) ──────────────
+//
+// Bit-granular, MSB-first within each byte (matches this session's earlier
+// verification of OpenSSL's EVP_aes_128_cfb1 bit ordering for the C++
+// engine). I_{j+1} = the 128-bit register shifted left by 1 bit with the
+// ciphertext bit inserted at the LSB.
+
+pub struct Cfb1State {
+    key: AesKey,
+    register: [u8; BLOCK],
+    dir: CipherDirection,
+}
+
+impl Cfb1State {
+    pub fn new(key: AesKey, iv: [u8; BLOCK], dir: CipherDirection) -> Self {
+        Self { key, register: iv, dir }
+    }
+
+    fn step_bit(&mut self, in_bit: u8) -> u8 {
+        let mut o = self.register;
+        self.key.encrypt_block(&mut o);
+        let msb = (o[0] >> 7) & 1;
+        let out_bit = in_bit ^ msb;
+        let ct_bit = match self.dir {
+            CipherDirection::Encrypt => out_bit,
+            CipherDirection::Decrypt => in_bit,
+        };
+        let mut carry = ct_bit;
+        for byte in self.register.iter_mut().rev() {
+            let new_carry = (*byte >> 7) & 1;
+            *byte = (*byte << 1) | carry;
+            carry = new_carry;
+        }
+        out_bit
+    }
+
+    fn update(&mut self, part: &[u8]) -> Vec<u8> {
+        part.iter()
+            .map(|&byte_in| {
+                let mut out_byte = 0u8;
+                for i in 0..8 {
+                    let bit = (byte_in >> (7 - i)) & 1;
+                    let out_bit = self.step_bit(bit);
+                    out_byte = (out_byte << 1) | out_bit;
+                }
+                out_byte
+            })
+            .collect()
+    }
+
+    pub fn update_public(&mut self, part: &[u8]) -> Vec<u8> {
+        self.update(part)
+    }
+}
+
+// ── CCM (§6.11.3, NIST SP 800-38C) ──────────────────────────────────────────
+//
+// Hand-rolled directly on AesKey — no existing partial implementation to
+// build on (unlike GMAC/OFB/CFB) and the RustCrypto `ccm` crate's tag/nonce
+// lengths are compile-time generics, which doesn't fit PKCS#11's runtime-
+// variable CK_CCM_PARAMS.ulMACLen/ulNonceLen. Single-shot only (no
+// multipart streaming) — SP 800-38C bakes the total plaintext length into
+// the first CBC-MAC block (B_0), so the length must be known upfront, same
+// as this engine's existing RSA-OAEP/ChaCha20-Poly1305 single-part-only
+// mechanisms. `tag_len` in bytes (caller validates against the mechanism's
+// {4,6,8,10,12,14,16} set); `nonce.len()` in 7..=13 (q = 15-nonce.len() is
+// SP 800-38C's length-field width, 2..=8 bytes).
+
+fn ccm_flags_b0(aad_present: bool, tag_len: usize, q: usize) -> u8 {
+    let adata = if aad_present { 1u8 } else { 0u8 };
+    (adata << 6) | ((((tag_len - 2) / 2) as u8) << 3) | ((q - 1) as u8)
+}
+
+fn ccm_encode_len(len: u64, width: usize) -> Vec<u8> {
+    let full = len.to_be_bytes();
+    full[8 - width..].to_vec()
+}
+
+/// B_0 (SP 800-38C Appendix A): flags || nonce || [len(payload)]_q.
+fn ccm_b0(nonce: &[u8], aad_present: bool, tag_len: usize, payload_len: usize) -> [u8; BLOCK] {
+    let q = 15 - nonce.len();
+    let mut b0 = [0u8; BLOCK];
+    b0[0] = ccm_flags_b0(aad_present, tag_len, q);
+    b0[1..1 + nonce.len()].copy_from_slice(nonce);
+    b0[1 + nonce.len()..BLOCK].copy_from_slice(&ccm_encode_len(payload_len as u64, q));
+    b0
+}
+
+/// AAD length-prefix (2/6/10 bytes depending on magnitude) + AAD bytes,
+/// zero-padded to a 16-byte boundary (SP 800-38C Appendix A).
+fn ccm_aad_blocks(aad: &[u8]) -> Vec<u8> {
+    if aad.is_empty() {
+        return Vec::new();
+    }
+    let mut buf = Vec::new();
+    let n = aad.len() as u64;
+    if n < 0xFF00 {
+        buf.extend_from_slice(&(n as u16).to_be_bytes());
+    } else if n <= u32::MAX as u64 {
+        buf.push(0xFF);
+        buf.push(0xFE);
+        buf.extend_from_slice(&(n as u32).to_be_bytes());
+    } else {
+        buf.push(0xFF);
+        buf.push(0xFF);
+        buf.extend_from_slice(&n.to_be_bytes());
+    }
+    buf.extend_from_slice(aad);
+    while buf.len() % BLOCK != 0 {
+        buf.push(0);
+    }
+    buf
+}
+
+fn ccm_zero_pad(mut data: Vec<u8>) -> Vec<u8> {
+    while data.len() % BLOCK != 0 {
+        data.push(0);
+    }
+    data
+}
+
+/// CBC-MAC over B_0 || AAD-blocks || payload-blocks: Y_1 = E(K,B_0),
+/// Y_i = E(K, Y_{i-1} XOR B_i). `payload` is always the PLAINTEXT — CCM
+/// authenticates plaintext on both encrypt and decrypt.
+fn ccm_cbc_mac(
+    key: &AesKey,
+    nonce: &[u8],
+    aad: &[u8],
+    payload: &[u8],
+    tag_len: usize,
+) -> [u8; BLOCK] {
+    let mut y = ccm_b0(nonce, !aad.is_empty(), tag_len, payload.len());
+    key.encrypt_block(&mut y);
+    let mut mac_step = |block: &[u8]| {
+        let mut x = y;
+        for (xi, bi) in x.iter_mut().zip(block.iter()) {
+            *xi ^= bi;
+        }
+        key.encrypt_block(&mut x);
+        y = x;
+    };
+    for block in ccm_aad_blocks(aad).chunks(BLOCK) {
+        mac_step(block);
+    }
+    if !payload.is_empty() {
+        for block in ccm_zero_pad(payload.to_vec()).chunks(BLOCK) {
+            mac_step(block);
+        }
+    }
+    y
+}
+
+/// Counter block i: flags(Adata=0, tag-length bits=0, just [q-1]) || nonce
+/// || [i]_q. `i = 0` masks the tag (S_0); `i = 1, 2, ...` is the payload
+/// keystream.
+fn ccm_ctr_block(nonce: &[u8], counter: u64) -> [u8; BLOCK] {
+    let q = 15 - nonce.len();
+    let mut blk = [0u8; BLOCK];
+    blk[0] = (q - 1) as u8;
+    blk[1..1 + nonce.len()].copy_from_slice(nonce);
+    blk[1 + nonce.len()..BLOCK].copy_from_slice(&ccm_encode_len(counter, q));
+    blk
+}
+
+fn ccm_keystream_xor(key: &AesKey, nonce: &[u8], start_counter: u64, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut counter = start_counter;
+    for chunk in data.chunks(BLOCK) {
+        let mut ks = ccm_ctr_block(nonce, counter);
+        key.encrypt_block(&mut ks);
+        for (b, k) in chunk.iter().zip(ks.iter()) {
+            out.push(b ^ k);
+        }
+        counter += 1;
+    }
+    out
+}
+
+/// Returns ciphertext || tag (tag_len bytes appended), matching PKCS#11
+/// v3.2 §6.11.3's single-buffer CCM output convention.
+pub fn ccm_encrypt(key: &AesKey, nonce: &[u8], aad: &[u8], plaintext: &[u8], tag_len: usize) -> Vec<u8> {
+    let t = ccm_cbc_mac(key, nonce, aad, plaintext, tag_len);
+    let mut s0 = ccm_ctr_block(nonce, 0);
+    key.encrypt_block(&mut s0);
+    let tag: Vec<u8> = t.iter().zip(s0.iter()).take(tag_len).map(|(a, b)| a ^ b).collect();
+    let mut ct = ccm_keystream_xor(key, nonce, 1, plaintext);
+    ct.extend_from_slice(&tag);
+    ct
+}
+
+/// `ciphertext_and_tag` = ciphertext || tag (tag_len trailing bytes).
+/// Constant-time tag comparison; unauthenticated plaintext is zeroized
+/// before returning the error, matching GcmState::msg_verify_tag's
+/// convention elsewhere in this module.
+pub fn ccm_decrypt(
+    key: &AesKey,
+    nonce: &[u8],
+    aad: &[u8],
+    ciphertext_and_tag: &[u8],
+    tag_len: usize,
+) -> Result<Vec<u8>, u32> {
+    if ciphertext_and_tag.len() < tag_len {
+        return Err(CKR_ENCRYPTED_DATA_LEN_RANGE);
+    }
+    let split = ciphertext_and_tag.len() - tag_len;
+    let (ct, recv_tag) = ciphertext_and_tag.split_at(split);
+    let mut pt = ccm_keystream_xor(key, nonce, 1, ct);
+    let t = ccm_cbc_mac(key, nonce, aad, &pt, tag_len);
+    let mut s0 = ccm_ctr_block(nonce, 0);
+    key.encrypt_block(&mut s0);
+    let expected_tag: Vec<u8> = t.iter().zip(s0.iter()).take(tag_len).map(|(a, b)| a ^ b).collect();
+    if bool::from(expected_tag.ct_eq(recv_tag)) {
+        Ok(pt)
+    } else {
+        pt.zeroize();
+        Err(CKR_ENCRYPTED_DATA_INVALID)
     }
 }
 

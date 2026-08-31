@@ -1,0 +1,35 @@
+{
+  "algorithm": "ACVP-AES-CFB128",
+  "revision": "1.0",
+  "_provenance": {
+    "source_url": "https://raw.githubusercontent.com/usnistgov/ACVP-Server/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files/ACVP-AES-CFB128-1.0/internalProjection.json",
+    "source_release": "975de31eb83d87039ec88934fdc47d8c312b892d",
+    "retrieved": "2026-08-30",
+    "producer": "NIST ACVP-Server (reference/generator-validated sample vectors)",
+    "source_sha256": "a7f6788047c981589a86e6831b6e7e0546fa730ae384051b5b16830e4c983a8b",
+    "note": "WS-8 (2026-08-30): CKM_AES_CFB128 did not exist in this engine at all before this session (only ECB/CBC/CTR/GCM were implemented). Added as a thin OpenSSL EVP_aes_*_cfb128() wrapper in OSSLAES.cpp getCipher(). 1 decrypt-direction KAT per key size (128/192/256)."
+  },
+  "cases": [
+    {
+      "keyLen": 128,
+      "key": "00000000000000000000000000000000",
+      "iv": "96AB5C2FF612D9DFAAE8C31F30C42168",
+      "pt": "00000000000000000000000000000000",
+      "ct": "FF4F8391A6A40CA5B25D23BEDD44A597"
+    },
+    {
+      "keyLen": 192,
+      "key": "000000000000000000000000000000000000000000000000",
+      "iv": "1B077A6AF4B7F98229DE786D7516B639",
+      "pt": "00000000000000000000000000000000",
+      "ct": "275CFC0413D8CCB70513C3859B1D0F72"
+    },
+    {
+      "keyLen": 256,
+      "key": "0000000000000000000000000000000000000000000000000000000000000000",
+      "iv": "761C1FE41A18ACF20D241650611D90F1",
+      "pt": "00000000000000000000000000000000",
+      "ct": "623A52FCEA5D443E48D9181AB32C7421"
+    }
+  ]
+}

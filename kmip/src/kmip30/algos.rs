@@ -112,78 +112,48 @@ pub use softhsmrustv3::constants::{
 };
 
 // ── Standard PKCS#11 v3.2 mech codepoints used by classical algos ──────────
-// From src/lib/pkcs11/pkcs11t.h (in pqctoday-hsm root). These do NOT live in
-// the vendor manifest — they are part of the OASIS PKCS#11 v3.2 normative
-// surface.
+// Re-exported from the engine (`softhsmrustv3::constants`), same pattern and
+// same rationale as the PQC block above — single source of truth, values per
+// the normative pkcs11t.h. Until 2026-08-30 this block locally redefined
+// every value instead of importing it, which is exactly how CKM_CHACHA20 /
+// CKM_CHACHA20_POLY1305 drifted to stale codepoints (0x1071 / 0x1093) after
+// `softhsmrustv3::constants` was corrected and this file wasn't — see the
+// gap-analysis/remediation-plan docs' Phase 0.1 for the audit that found it.
+// Re-exporting instead of copying makes that class of bug structurally
+// impossible: there is no longer a second value to desynchronise from.
+//
+// Hash-qualified RSA/ECDSA sign/verify mechanisms (`CKM_SHA*_RSA_PKCS[_PSS]`,
+// `CKM_ECDSA_SHA*`) are what `native_sign_mech_with_params`
+// (kmip/src/ops/helpers.rs) actually resolves to at Sign/Verify time — never
+// the bare `CKM_RSA_PKCS_PSS`/`CKM_ECDSA` alone. Needed by
+// `usage_mask_to_allowed_mechanisms` so a KMIP-created key's
+// `CKA_ALLOWED_MECHANISMS` whitelist matches what Sign/Verify will really ask
+// for.
 
-pub const CKM_RSA_PKCS_KEY_PAIR_GEN: CkMechanismType = 0x0000;
-pub const CKM_RSA_PKCS: CkMechanismType              = 0x0001;
-pub const CKM_RSA_PKCS_OAEP: CkMechanismType         = 0x0009;
-pub const CKM_RSA_PKCS_PSS: CkMechanismType          = 0x000D;
-/// Hash-qualified RSA sign/verify mechanisms — what
-/// `native_sign_mech_with_params` (kmip/src/ops/helpers.rs) actually
-/// resolves to at Sign/Verify time (never the bare `CKM_RSA_PKCS_PSS`
-/// above). Needed by `usage_mask_to_allowed_mechanisms` so a KMIP-created
-/// key's `CKA_ALLOWED_MECHANISMS` whitelist matches what Sign/Verify will
-/// really ask for.
-pub const CKM_SHA256_RSA_PKCS: CkMechanismType     = 0x0040;
-pub const CKM_SHA384_RSA_PKCS: CkMechanismType     = 0x0041;
-pub const CKM_SHA512_RSA_PKCS: CkMechanismType     = 0x0042;
-pub const CKM_SHA256_RSA_PKCS_PSS: CkMechanismType = 0x0043;
-pub const CKM_SHA384_RSA_PKCS_PSS: CkMechanismType = 0x0044;
-pub const CKM_SHA512_RSA_PKCS_PSS: CkMechanismType = 0x0045;
-
-pub const CKM_EC_KEY_PAIR_GEN: CkMechanismType = 0x1040;
-pub const CKM_ECDSA: CkMechanismType           = 0x1041;
-pub const CKM_ECDSA_SHA256: CkMechanismType    = 0x1044;
-/// Same rationale as the RSA hash-qualified set above — ECDSA
-/// Sign/Verify always resolves to one of these three, never bare
-/// `CKM_ECDSA`.
-pub const CKM_ECDSA_SHA384: CkMechanismType = 0x1045;
-pub const CKM_ECDSA_SHA512: CkMechanismType = 0x1046;
-/// PKCS#11 v3.2 §6.17.2 — single-pass ECDH key agreement. Value verified
-/// against `rust/src/constants.rs`.
-pub const CKM_ECDH1_DERIVE: CkMechanismType = 0x1050;
-/// PKCS#11 v3.2 §6.24 — X25519/X448 (Montgomery-form) key agreement.
-/// Vendor-space codepoint per the engine's normative header (no OASIS
-/// codepoint exists for this yet) — same value as `rust/src/constants.rs`.
-pub const CKM_EC_MONTGOMERY_KEY_DERIVE: CkMechanismType = 0x8000_0011;
-
-/// PKCS#11 v3.2 §6.24 — EdDSA key pair generation (Edwards curve). Value
-/// verified against `rust/src/constants.rs` (softhsmrustv3's own mirror of
-/// `pkcs11t.h`, the project's source of truth for `CK*` values).
-pub const CKM_EC_EDWARDS_KEY_PAIR_GEN: CkMechanismType = 0x1055;
-/// PKCS#11 v3.2 §6.24 — EdDSA sign/verify (Ed25519/Ed448). Same
-/// verification source as above.
-pub const CKM_EDDSA: CkMechanismType = 0x1057;
-
-pub const CKM_AES_KEY_GEN: CkMechanismType = 0x1080;
-pub const CKM_AES_ECB: CkMechanismType     = 0x1081;
-pub const CKM_AES_CBC: CkMechanismType     = 0x1082;
-pub const CKM_AES_CBC_PAD: CkMechanismType = 0x1085;
-pub const CKM_AES_CTR: CkMechanismType     = 0x1086;
-pub const CKM_AES_GCM: CkMechanismType     = 0x1087;
-/// PKCS#11 v3.2 §6.31 — AES key wrap (RFC 3394). Value verified against
-/// `rust/src/constants.rs`.
-pub const CKM_AES_KEY_WRAP: CkMechanismType = 0x2109;
-/// PKCS#11 v3.2 §6.31 — AES key wrap with padding (RFC 5649). Same
-/// verification source as above.
-pub const CKM_AES_KEY_WRAP_KWP: CkMechanismType = 0x210B;
-
-/// PKCS#11 v3.2 §6.20 — IETF ChaCha20 stream cipher. Codepoint
-/// `0x1226` verified from the normative `pkcs11t.h`
-/// (`src/lib/pkcs11/pkcs11t.h:1132`) — the earlier `0x1071` here was a
-/// drifted duplicate that desynchronised from the engine when
-/// `softhsmrustv3::constants` was corrected to the spec value.
-pub const CKM_CHACHA20: CkMechanismType         = 0x1226;
-/// PKCS#11 v3.2 §6.20 — IETF ChaCha20-Poly1305 AEAD (RFC 8439).
-/// Codepoint `0x4021` per `pkcs11t.h:1187` (was a drifted `0x1093`).
-pub const CKM_CHACHA20_POLY1305: CkMechanismType = 0x4021;
-
-pub const CKM_GENERIC_SECRET_KEY_GEN: CkMechanismType = 0x0350;
-pub const CKM_SHA256_HMAC: CkMechanismType            = 0x0251;
-pub const CKM_SHA384_HMAC: CkMechanismType            = 0x0261;
-pub const CKM_SHA512_HMAC: CkMechanismType            = 0x0271;
+pub use softhsmrustv3::constants::{
+    CKM_RSA_PKCS_KEY_PAIR_GEN, CKM_RSA_PKCS, CKM_RSA_PKCS_OAEP, CKM_RSA_PKCS_PSS,
+    CKM_SHA256_RSA_PKCS, CKM_SHA384_RSA_PKCS, CKM_SHA512_RSA_PKCS,
+    CKM_SHA256_RSA_PKCS_PSS, CKM_SHA384_RSA_PKCS_PSS, CKM_SHA512_RSA_PKCS_PSS,
+    CKM_EC_KEY_PAIR_GEN, CKM_ECDSA, CKM_ECDSA_SHA256, CKM_ECDSA_SHA384, CKM_ECDSA_SHA512,
+    // PKCS#11 v3.2 §6.17.2 — single-pass ECDH key agreement.
+    CKM_ECDH1_DERIVE,
+    // PKCS#11 v3.2 §6.24 — X25519/X448 (Montgomery-form) key agreement.
+    // Vendor-space codepoint per the engine's normative header (no OASIS
+    // codepoint exists for this yet).
+    CKM_EC_MONTGOMERY_KEY_DERIVE,
+    // PKCS#11 v3.2 §6.24 — EdDSA key pair generation (Edwards curve) and
+    // sign/verify (Ed25519/Ed448).
+    CKM_EC_EDWARDS_KEY_PAIR_GEN, CKM_EDDSA,
+    CKM_AES_KEY_GEN, CKM_AES_ECB, CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_CTR, CKM_AES_GCM,
+    // PKCS#11 v3.2 §6.31 — AES key wrap (RFC 3394) and with padding (RFC 5649).
+    CKM_AES_KEY_WRAP, CKM_AES_KEY_WRAP_KWP,
+    // PKCS#11 v3.2 §6.20 — IETF ChaCha20 stream cipher and ChaCha20-Poly1305
+    // AEAD (RFC 8439).
+    CKM_CHACHA20, CKM_CHACHA20_POLY1305,
+    CKM_GENERIC_SECRET_KEY_GEN, CKM_SHA256_HMAC, CKM_SHA384_HMAC, CKM_SHA512_HMAC,
+    // KMIP/CACP coverage gap-analysis item 6 (2026-08-30).
+    CKM_SHA3_256_HMAC, CKM_SHA3_512_HMAC,
+};
 
 /// PKCS#11 operation that the bridge is about to perform — disambiguates the
 /// `(KmipAlgorithm, op) → mech` mapping. KMIP wire format carries the
@@ -224,6 +194,12 @@ pub enum KmipAlgorithm {
     HmacSha384,    // 0x0a
     HmacSha512,    // 0x0b
     Ecdh,          // 0x0e
+    /// KMIP/CACP coverage gap-analysis item 6 (2026-08-30): the engine has
+    /// supported HMAC-SHA3-256/512 since before this crate existed; this
+    /// enum simply never picked them up, so the Mac op could never select
+    /// them. Codepoints per OASIS KMIP 3.0 `Cryptographic Algorithm`.
+    HmacSha3_256,  // 0x24
+    HmacSha3_512,  // 0x26
     /// IETF ChaCha20 stream cipher (RFC 8439) — KMIP 3.0 §11
     /// `Cryptographic Algorithm` codepoint `0x1c`.
     ChaCha20,
@@ -423,6 +399,8 @@ impl KmipAlgorithm {
             HmacSha384 => 0x0000000a,
             HmacSha512 => 0x0000000b,
             Ecdh       => 0x0000000e,
+            HmacSha3_256 => 0x00000024,
+            HmacSha3_512 => 0x00000026,
             ChaCha20         => 0x0000001c,
             ChaCha20Poly1305 => 0x0000001e,
             Ed25519    => 0x00000037,
@@ -495,6 +473,8 @@ impl KmipAlgorithm {
             0x0000000a => HmacSha384,
             0x0000000b => HmacSha512,
             0x0000000e => Ecdh,
+            0x00000024 => HmacSha3_256,
+            0x00000026 => HmacSha3_512,
             0x0000001c => ChaCha20,
             0x0000001e => ChaCha20Poly1305,
             0x00000037 => Ed25519,
@@ -634,7 +614,9 @@ impl KmipAlgorithm {
     pub const fn quantum_safe_with_length(self, length_bits: u32) -> bool {
         use KmipAlgorithm::*;
         match self {
-            Aes | ChaCha20 | ChaCha20Poly1305 | HmacSha256 | HmacSha384 | HmacSha512 => {
+            Aes | ChaCha20 | ChaCha20Poly1305
+            | HmacSha256 | HmacSha384 | HmacSha512
+            | HmacSha3_256 | HmacSha3_512 => {
                 length_bits >= 256
             }
             Rsa | Ecdsa | Ecdh | Ed25519 => false,
@@ -724,11 +706,16 @@ impl KmipAlgorithm {
             (ChaCha20Poly1305, Encrypt | Decrypt) => Some(CKM_CHACHA20_POLY1305),
 
             // ── HMAC families ─────────────────────────────────────────────
-            (HmacSha256 | HmacSha384 | HmacSha512, KeyGen) =>
+            (HmacSha256 | HmacSha384 | HmacSha512 | HmacSha3_256 | HmacSha3_512, KeyGen) =>
                 Some(CKM_GENERIC_SECRET_KEY_GEN),
             (HmacSha256, Mac) => Some(CKM_SHA256_HMAC),
             (HmacSha384, Mac) => Some(CKM_SHA384_HMAC),
             (HmacSha512, Mac) => Some(CKM_SHA512_HMAC),
+            // KMIP/CACP coverage gap-analysis item 6 (2026-08-30) — the
+            // engine has supported HMAC-SHA3-256/512 all along; only the
+            // KMIP-layer algorithm identity was missing.
+            (HmacSha3_256, Mac) => Some(CKM_SHA3_256_HMAC),
+            (HmacSha3_512, Mac) => Some(CKM_SHA3_512_HMAC),
 
             // ── Ed25519 (RFC 8032 EdDSA) ────────────────────────────────────
             (Ed25519, KeyGen) => Some(CKM_EC_EDWARDS_KEY_PAIR_GEN),
@@ -893,6 +880,8 @@ impl KmipAlgorithm {
             HmacSha256 => "HMAC-SHA256",
             HmacSha384 => "HMAC-SHA384",
             HmacSha512 => "HMAC-SHA512",
+            HmacSha3_256 => "HMAC-SHA3-256",
+            HmacSha3_512 => "HMAC-SHA3-512",
             Ecdh       => "ECDH",
             ChaCha20         => "ChaCha20",
             ChaCha20Poly1305 => "ChaCha20-Poly1305",
@@ -969,7 +958,7 @@ mod tests {
     fn all_algos() -> &'static [KmipAlgorithm] {
         use KmipAlgorithm::*;
         &[
-            Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, Ecdh,
+            Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, HmacSha3_256, HmacSha3_512, Ecdh,
             MlKem512, MlKem768, MlKem1024,
             MlDsa44, MlDsa65, MlDsa87,
             SlhDsaSha2_128s, SlhDsaSha2_128f,

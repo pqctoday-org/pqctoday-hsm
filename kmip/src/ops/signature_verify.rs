@@ -234,6 +234,9 @@ pub fn signature_verify(
                     Err(rv) => Err(rv),
                 }
             } else {
+                // KMIP/CACP coverage gap-analysis items 9a/9b (2026-08-30) —
+                // see sign.rs's matching comment.
+                let eddsa_ctx = effective_cp.and_then(|c| c.context_string.as_deref());
                 softhsmrustv3::native::verify_with_pss_salt(
                     session,
                     handle,
@@ -241,6 +244,7 @@ pub fn signature_verify(
                     &req.data,
                     &req.signature,
                     pss_salt,
+                    eddsa_ctx,
                 )
             };
             emit_pkcs11_result(deps, correlation_id, "native::verify", Some(native_mech), &r);

@@ -1313,7 +1313,7 @@ fn v19_derive_key_raw_and_hkdf_parity() {
 
         // control — structured HKDF
         let hkdf_params = pqctoday_pkcs11_remote_core::verbs_v32::derive_params::hkdf(
-            true, true, 0x0000_0251 /* CKM_SHA256_HMAC */, 0x0000_0002 /* CKF_HKDF_SALT_DATA */, b"v19-salt", 0, b"v19-info",
+            true, true, 0x0000_0250 /* CKM_SHA256 — prfHashMechanism names the hash, not an HMAC mechanism id */, 0x0000_0002 /* CKF_HKDF_SALT_DATA */, b"v19-salt", 0, b"v19-info",
         );
         let (rv_hkdf_ctl, derived_hkdf_ctl) =
             v32::derive_key(ks, CKM_HKDF_DERIVE_LOCAL, hkdf_params.as_slice(), base_key, &out_tmpl);
@@ -1349,7 +1349,7 @@ fn v19_derive_key_raw_and_hkdf_parity() {
             template: g_out_tmpl.clone(),
             raw_parameter: vec![],
             structured: Some(proto::v32_derive_key_request::Structured::Hkdf(proto::V32HkdfParams {
-                extract: true, expand: true, prf_hash_mechanism: 0x0000_0251, salt_type: 0x0000_0002,
+                extract: true, expand: true, prf_hash_mechanism: 0x0000_0250, salt_type: 0x0000_0002,
                 salt: b"v19-salt".to_vec(), h_salt_key: 0, info: b"v19-info".to_vec(),
             })),
         }).await.unwrap().into_inner();
@@ -1377,7 +1377,7 @@ fn v19_derive_key_raw_and_hkdf_parity() {
 
         let rh = rest_post(&base, "derive-key", json!({
             "session_handle": sh, "mechanism": CKM_HKDF_DERIVE_LOCAL, "base_key_handle": base_key, "template": r_out_tmpl,
-            "hkdf": {"extract": true, "expand": true, "prf_hash_mechanism": 0x251, "salt_type": 2, "salt": b64(b"v19-salt"), "h_salt_key": 0, "info": b64(b"v19-info")},
+            "hkdf": {"extract": true, "expand": true, "prf_hash_mechanism": 0x250, "salt_type": 2, "salt": b64(b"v19-salt"), "h_salt_key": 0, "info": b64(b"v19-info")},
         })).await;
         assert_eq!(rh["ck_rv"].as_u64().unwrap() as u32, rv_hkdf_ctl);
         let rha = rest_post(&base, "get-attribute-value", json!({"session_handle": sh, "object_handle": rh["object_handle"], "attribute_types": [CKA_VALUE]})).await;

@@ -590,14 +590,14 @@ public final class SoftHSMv3Provider extends AuthProvider {
             }
         });
 
-        registerDigest("SHA-224", CKM_SHA224);
-        registerDigest("SHA-256", CKM_SHA256);
-        registerDigest("SHA-384", CKM_SHA384);
-        registerDigest("SHA-512", CKM_SHA512);
-        registerDigest("SHA3-224", CKM_SHA3_224);
-        registerDigest("SHA3-256", CKM_SHA3_256);
-        registerDigest("SHA3-384", CKM_SHA3_384);
-        registerDigest("SHA3-512", CKM_SHA3_512);
+        registerDigest("SHA-224", CKM_SHA224, 28);
+        registerDigest("SHA-256", CKM_SHA256, 32);
+        registerDigest("SHA-384", CKM_SHA384, 48);
+        registerDigest("SHA-512", CKM_SHA512, 64);
+        registerDigest("SHA3-224", CKM_SHA3_224, 28);
+        registerDigest("SHA3-256", CKM_SHA3_256, 32);
+        registerDigest("SHA3-384", CKM_SHA3_384, 48);
+        registerDigest("SHA3-512", CKM_SHA3_512, 64);
         // Deliberately NOT registered: SHA-1, MD5, RIPEMD-160 — see class javadoc.
 
         // W2: ML-DSA (FIPS 204) + SLH-DSA (FIPS 205) — KeyPairGenerator +
@@ -609,6 +609,28 @@ public final class SoftHSMv3Provider extends AuthProvider {
         registerPureSig("ML-DSA-44", CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA, CKP_ML_DSA_44);
         registerPureSig("ML-DSA-65", CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA, CKP_ML_DSA_65);
         registerPureSig("ML-DSA-87", CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA, CKP_ML_DSA_87);
+
+        // Item 6 (2026-08-30): CKM_ML_DSA_EXTERNAL_MU — signs/verifies a
+        // caller-precomputed 64-byte FIPS 204 mu value in place of a raw
+        // message. Reuses P11PureSigSignatureSpi UNCHANGED (the mechanism
+        // needs no parameters — see parseMLDSASignContext's null-param
+        // default path in SoftHSM_sign.cpp, confirmed before writing
+        // this) and the SAME "ML-DSA-44/65/87" KeyPairGenerator services
+        // above (identical CKK_ML_DSA key, only the mechanism differs) —
+        // registered as separate Signature-only names rather than an
+        // engineSetParameter-driven flag on the plain name, since the
+        // mechanism is fixed per name (same "one name = one fixed
+        // mechanism" shape as every other pure-sig entry in this file,
+        // e.g. SHA256withRSA), not caller-configured per call like
+        // RSASSA-PSS genuinely needs to be. Gated on the token
+        // advertising the mechanism at all (this is a PKCS#11 v3.3
+        // working-draft codepoint, not a ratified standard one) via
+        // Service#newInstance — the natural JCA place for "this
+        // algorithm isn't actually available", exercised fresh on every
+        // getInstance() call rather than once at registration time.
+        registerMLDSAExternalMu("ML-DSA-44-ExternalMu");
+        registerMLDSAExternalMu("ML-DSA-65-ExternalMu");
+        registerMLDSAExternalMu("ML-DSA-87-ExternalMu");
 
         registerPureSig("SLH-DSA-SHA2-128S", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHA2_128S);
         registerPureSig("SLH-DSA-SHAKE-128S", CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, CKP_SLH_DSA_SHAKE_128S);
@@ -649,9 +671,15 @@ public final class SoftHSMv3Provider extends AuthProvider {
                 return new P11ECKeyPairGeneratorSpi(lib);
             }
         });
+        // Item 4 (2026-08-30 follow-on): CKM_ECDSA_SHA224 / CKM_ECDSA_SHA3_224
+        // were the two scattered SHA-224/SHA3-224 signature holes in the
+        // ECDSA family — "SHA224withECDSA"/"SHA3-224withECDSA" confirmed
+        // live against real JDK 27's SunEC before adding.
+        registerECDSASignature("SHA224withECDSA", CKM_ECDSA_SHA224);
         registerECDSASignature("SHA256withECDSA", CKM_ECDSA_SHA256);
         registerECDSASignature("SHA384withECDSA", CKM_ECDSA_SHA384);
         registerECDSASignature("SHA512withECDSA", CKM_ECDSA_SHA512);
+        registerECDSASignature("SHA3-224withECDSA", CKM_ECDSA_SHA3_224);
         registerECDSASignature("SHA3-256withECDSA", CKM_ECDSA_SHA3_256);
         registerECDSASignature("SHA3-384withECDSA", CKM_ECDSA_SHA3_384);
         registerECDSASignature("SHA3-512withECDSA", CKM_ECDSA_SHA3_512);
@@ -676,9 +704,20 @@ public final class SoftHSMv3Provider extends AuthProvider {
                 return new P11RSAKeyPairGeneratorSpi(lib);
             }
         });
+        // Item 4 (2026-08-30 follow-on): the plain PKCS#1 v1.5 holes —
+        // CKM_SHA224_RSA_PKCS plus the full CKM_SHA3_*_RSA_PKCS family
+        // (224/256/384/512), none previously declared. "SHA224withRSA"
+        // and "SHA3-224/256/384/512withRSA" confirmed live against real
+        // JDK 27's SunRsaSign before adding — same pattern as this file's
+        // existing SHA3 PSS coverage above.
+        registerRSAPKCS1(("SHA224withRSA"), CKM_SHA224_RSA_PKCS);
         registerRSAPKCS1(("SHA256withRSA"), CKM_SHA256_RSA_PKCS);
         registerRSAPKCS1(("SHA384withRSA"), CKM_SHA384_RSA_PKCS);
         registerRSAPKCS1(("SHA512withRSA"), CKM_SHA512_RSA_PKCS);
+        registerRSAPKCS1(("SHA3-224withRSA"), CKM_SHA3_224_RSA_PKCS);
+        registerRSAPKCS1(("SHA3-256withRSA"), CKM_SHA3_256_RSA_PKCS);
+        registerRSAPKCS1(("SHA3-384withRSA"), CKM_SHA3_384_RSA_PKCS);
+        registerRSAPKCS1(("SHA3-512withRSA"), CKM_SHA3_512_RSA_PKCS);
         putService(new Service(this, "Signature", "RSASSA-PSS",
             P11RSAPSSSignatureSpi.class.getName(), List.of(), Map.of()) {
             @Override
@@ -765,6 +804,18 @@ public final class SoftHSMv3Provider extends AuthProvider {
                 return new P11ECDHKeyAgreementSpi(lib);
             }
         });
+        // Item 5 (2026-08-30): CKM_ECDH1_COFACTOR_DERIVE — "ECDHC", the
+        // real, live JCA name for cofactor ECDH (verified against Bouncy
+        // Castle, not SunEC — see P11ECDHKeyAgreementSpi's javadoc for
+        // why SunEC turned out NOT to have this name despite an earlier
+        // audit's claim).
+        putService(new Service(this, "KeyAgreement", "ECDHC",
+            P11ECDHKeyAgreementSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11ECDHKeyAgreementSpi(lib, true);
+            }
+        });
 
         // W4: AES (FIPS 197) — KeyGenerator, Cipher (GCM/CBC/CBC+PKCS5/CTR),
         // and AESWrap/AESWrapPad (SP 800-38F, via native C_WrapKey/
@@ -780,11 +831,46 @@ public final class SoftHSMv3Provider extends AuthProvider {
             }
         });
         registerAESCipher("AES/GCM/NoPadding", P11AESCipherSpi.Mode.GCM);
+        // Item 2 (2026-08-30): CKM_AES_CCM, exact same registration/
+        // dispatch shape as GCM above — see P11AESCipherSpi's Mode.CCM
+        // handling and P11Library#mechCcm's javadoc for the real
+        // CK_CCM_PARAMS shape (different field names/units than GCM's).
+        registerAESCipher("AES/CCM/NoPadding", P11AESCipherSpi.Mode.CCM);
         registerAESCipher("AES/CBC/NoPadding", P11AESCipherSpi.Mode.CBC);
         registerAESCipher("AES/CBC/PKCS5Padding", P11AESCipherSpi.Mode.CBC_PAD);
         registerAESCipher("AES/CTR/NoPadding", P11AESCipherSpi.Mode.CTR);
+        // Item 2 (2026-08-30 follow-on): CKM_AES_OFB/CFB1/CFB8/CFB128 —
+        // real standard JCA cipher modes (see P11AESCipherSpi's own
+        // javadoc for the Java Security Standard Algorithm Names
+        // confirmation and the exact transformation-string shape).
+        registerAESCipher("AES/OFB/NoPadding", P11AESCipherSpi.Mode.OFB);
+        registerAESCipher("AES/CFB1/NoPadding", P11AESCipherSpi.Mode.CFB1);
+        registerAESCipher("AES/CFB8/NoPadding", P11AESCipherSpi.Mode.CFB8);
+        registerAESCipher("AES/CFB128/NoPadding", P11AESCipherSpi.Mode.CFB128);
+        // Item 1 (2026-08-30 follow-on): CKM_AES_XTS + CKM_AES_XTS_KEY_GEN
+        // — see P11AESCipherSpi's and P11AESKeyGeneratorSpi's own javadocs
+        // for the live BC/JDK naming-precedent probe (neither registers
+        // anything AES-XTS-shaped) and the resulting disclosed, reasoned
+        // naming choice. A distinct "AES_XTS" KeyGenerator is required
+        // (not the plain "AES" one above) — CKM_AES_XTS_KEY_GEN produces a
+        // genuinely different, double-length CKK_AES_XTS key.
+        putService(new Service(this, "KeyGenerator", "AES_XTS",
+            P11AESKeyGeneratorSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11AESKeyGeneratorSpi(lib, true);
+            }
+        });
+        registerAESCipher("AES/XTS/NoPadding", P11AESCipherSpi.Mode.XTS);
         registerAESWrap("AESWrap", CKM_AES_KEY_WRAP);
         registerAESWrap("AESWrapPad", CKM_AES_KEY_WRAP_PAD);
+        // PKCS#11 v3.2 §6.16.3: CKM_AES_KEY_WRAP_PAD "is deprecated.
+        // CKM_AES_KEY_WRAP_KWP ... shall be used instead" — same RFC 5649
+        // construction (the C++ engine runs the identical
+        // EVP_aes_*_wrap_pad() path for both; see CHANGELOG.md), so this
+        // is a separate JCA name pointing at the spec-current mechanism,
+        // not a new code path.
+        registerAESWrap("AESWrapKWP", CKM_AES_KEY_WRAP_KWP);
 
         // W4: MAC (HMAC-SHA*/AESCMAC/KMAC128/256) — MAC is a plain
         // C_Sign operation in PKCS#11 (confirmed reading SoftHSM_sign.cpp
@@ -806,6 +892,20 @@ public final class SoftHSMv3Provider extends AuthProvider {
         registerHmac("HmacSHA3-256", CKM_SHA3_256_HMAC, 32);
         registerHmac("HmacSHA3-384", CKM_SHA3_384_HMAC, 48);
         registerHmac("HmacSHA3-512", CKM_SHA3_512_HMAC, 64);
+        // Item 3 (2026-08-30 follow-on): SHA-512/224 and SHA-512/256
+        // (FIPS 180-4 §5) digest + plain-HMAC coverage — the truncated-
+        // width SHA-512 variants, genuinely different digests from plain
+        // SHA-512 (different IV per FIPS 180-4), not a display alias.
+        // "SHA-512/224"/"SHA-512/256" and "HmacSHA512/224"/"HmacSHA512/256"
+        // confirmed live against real JDK 27 (SUN/SunJCE both register
+        // exactly these names) before adding — the same "JDK is the
+        // oracle" pattern this file's other SHA-2 entries already use.
+        // The *_KEY_DERIVATION mechanism family for these two is
+        // deliberately OUT of scope (see P11Constants' own comment).
+        registerDigest("SHA-512/224", CKM_SHA512_224, 28);
+        registerDigest("SHA-512/256", CKM_SHA512_256, 32);
+        registerHmac("HmacSHA512/224", CKM_SHA512_224_HMAC, 28);
+        registerHmac("HmacSHA512/256", CKM_SHA512_256_HMAC, 32);
         registerGenericSecretKeyGenerator("KMAC128", 16);
         registerGenericSecretKeyGenerator("KMAC256", 32);
         putService(new Service(this, "Mac", "KMAC128",
@@ -827,6 +927,46 @@ public final class SoftHSMv3Provider extends AuthProvider {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
                 return new P11MacSpi(lib, CKM_AES_CMAC, 16);
+            }
+        });
+
+        // Item 1 (2026-08-30): CKM_*_HMAC_GENERAL — truncated/variable-
+        // length HMAC output, requested via P11MacOutputLengthParameterSpec
+        // (see its own javadoc for why no standard javax.crypto.spec class
+        // covers this shape). Registered as their own JCA algorithm names
+        // ("HmacSHA256General" etc.), reading naturally next to the plain
+        // "HmacSHA256" registration above — NOT a settable mode on the
+        // existing Mac, since P11MacSpi's constructor already fixes one
+        // mechanism per Service, and the general-length variant genuinely
+        // requires a parameter the plain variant must never accept (kept
+        // that way — see P11MacSpi's own javadoc for how generalMech=0
+        // keeps the plain path completely unchanged). Reuses the SAME
+        // KeyGenerator as the plain digest (no new "*General" KeyGenerator
+        // registered) — P11MacSpi already doesn't enforce
+        // key.getAlgorithm() equality (see its own javadoc), so a key
+        // generated via "HmacSHA256" is already valid input here.
+        // Deliberately NOT "HmacSHA1General" — see P11Constants' own
+        // comment on why CKM_SHA_1_HMAC_GENERAL isn't even declared.
+        registerHmacGeneral("HmacSHA224General", CKM_SHA224_HMAC, CKM_SHA224_HMAC_GENERAL, 28);
+        registerHmacGeneral("HmacSHA256General", CKM_SHA256_HMAC, CKM_SHA256_HMAC_GENERAL, 32);
+        registerHmacGeneral("HmacSHA384General", CKM_SHA384_HMAC, CKM_SHA384_HMAC_GENERAL, 48);
+        registerHmacGeneral("HmacSHA512General", CKM_SHA512_HMAC, CKM_SHA512_HMAC_GENERAL, 64);
+        registerHmacGeneral("HmacSHA3-224General", CKM_SHA3_224_HMAC, CKM_SHA3_224_HMAC_GENERAL, 28);
+        registerHmacGeneral("HmacSHA3-256General", CKM_SHA3_256_HMAC, CKM_SHA3_256_HMAC_GENERAL, 32);
+        registerHmacGeneral("HmacSHA3-384General", CKM_SHA3_384_HMAC, CKM_SHA3_384_HMAC_GENERAL, 48);
+        registerHmacGeneral("HmacSHA3-512General", CKM_SHA3_512_HMAC, CKM_SHA3_512_HMAC_GENERAL, 64);
+
+        // Item 3 (2026-08-30): CKM_AES_GMAC — GMAC-as-a-MAC, a real,
+        // distinct mechanism from the CKM_AES_GCM AEAD cipher above (see
+        // P11GmacSpi's javadoc). Reuses the existing "AES" KeyGenerator
+        // (same CKK_AES key type CMAC already uses, no generic-secret
+        // fallback), registered as "AES-GMAC" — the exact same name
+        // Bouncy Castle's own AES$AESGMAC service uses.
+        putService(new Service(this, "Mac", "AES-GMAC",
+            P11GmacSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11GmacSpi(lib);
             }
         });
 
@@ -863,14 +1003,24 @@ public final class SoftHSMv3Provider extends AuthProvider {
             P11SP800108SecretKeyFactorySpi.class.getName(), List.of(), Map.of()) {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
-                return new P11SP800108SecretKeyFactorySpi(lib, false);
+                return new P11SP800108SecretKeyFactorySpi(lib, P11SP800108SecretKeyFactorySpi.Mode.COUNTER);
             }
         });
         putService(new Service(this, "SecretKeyFactory", "SP800-108-Feedback",
             P11SP800108SecretKeyFactorySpi.class.getName(), List.of(), Map.of()) {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
-                return new P11SP800108SecretKeyFactorySpi(lib, true);
+                return new P11SP800108SecretKeyFactorySpi(lib, P11SP800108SecretKeyFactorySpi.Mode.FEEDBACK);
+            }
+        });
+        // Item 4 (2026-08-30): CKM_SP800_108_DOUBLE_PIPELINE_KDF — the
+        // third SP 800-108 mode, same KBKDF backend as counter/feedback
+        // above (see P11SP800108SecretKeyFactorySpi's javadoc).
+        putService(new Service(this, "SecretKeyFactory", "SP800-108-DoublePipeline",
+            P11SP800108SecretKeyFactorySpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11SP800108SecretKeyFactorySpi(lib, P11SP800108SecretKeyFactorySpi.Mode.DOUBLE_PIPELINE);
             }
         });
 
@@ -945,6 +1095,17 @@ public final class SoftHSMv3Provider extends AuthProvider {
         });
     }
 
+    /** Item 1's "_HMAC_GENERAL" registration — see the call site's own comment for why this is a separate name rather than a mode on registerHmac's service. */
+    private void registerHmacGeneral(String name, long mech, long generalMech, int fullMacLength) {
+        putService(new Service(this, "Mac", name,
+            P11MacSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                return new P11MacSpi(lib, mech, generalMech, fullMacLength);
+            }
+        });
+    }
+
     private void registerGenericSecretKeyGenerator(String name, int defaultKeySizeBytes) {
         putService(new Service(this, "KeyGenerator", name,
             P11GenericSecretKeyGeneratorSpi.class.getName(), List.of(), Map.of()) {
@@ -1012,12 +1173,12 @@ public final class SoftHSMv3Provider extends AuthProvider {
         });
     }
 
-    private void registerDigest(String name, long mech) {
+    private void registerDigest(String name, long mech, int digestLenBytes) {
         putService(new Service(this, "MessageDigest", name,
             P11MessageDigestSpi.class.getName(), List.of(), Map.of("mechanism", Long.toString(mech))) {
             @Override
             public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
-                return new P11MessageDigestSpi(lib, mech);
+                return new P11MessageDigestSpi(lib, mech, digestLenBytes);
             }
         });
     }
@@ -1039,16 +1200,33 @@ public final class SoftHSMv3Provider extends AuthProvider {
         });
     }
 
+    /** Item 6's CKM_ML_DSA_EXTERNAL_MU registration — see the call site's own comment for the naming/gating rationale. */
+    private void registerMLDSAExternalMu(String name) {
+        putService(new Service(this, "Signature", name,
+            P11PureSigSignatureSpi.class.getName(), List.of(), Map.of()) {
+            @Override
+            public Object newInstance(Object ctrParamObj) throws NoSuchAlgorithmException {
+                if (!lib.mechanismSupported(CKM_ML_DSA_EXTERNAL_MU)) {
+                    throw new NoSuchAlgorithmException(
+                        name + " requires the token to advertise CKM_ML_DSA_EXTERNAL_MU");
+                }
+                return new P11PureSigSignatureSpi(lib, CKM_ML_DSA_EXTERNAL_MU);
+            }
+        });
+    }
+
     // ── SPIs ─────────────────────────────────────────────────────────────
 
     static final class P11MessageDigestSpi extends MessageDigestSpi {
         private final P11Library lib;
         private final long mech;
+        private final int digestLenBytes;
         private final java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
 
-        P11MessageDigestSpi(P11Library lib, long mech) {
+        P11MessageDigestSpi(P11Library lib, long mech, int digestLenBytes) {
             this.lib = lib;
             this.mech = mech;
+            this.digestLenBytes = digestLenBytes;
         }
 
         @Override protected void engineUpdate(byte input) { buf.write(input); }
@@ -1059,6 +1237,18 @@ public final class SoftHSMv3Provider extends AuthProvider {
             return out;
         }
         @Override protected void engineReset() { buf.reset(); }
+        // Real bug found live while adding item 3's SHA-512/224/256
+        // MessageDigest test (which, unlike every prior test in this
+        // module, actually checked getDigestLength()): this class never
+        // overrode it, so MessageDigestSpi's own default silently
+        // returned 0 for EVERY digest this provider has ever registered,
+        // not just the two new ones — a real, pre-existing gap, not
+        // specific to this item. Fixed at the root (this shared class)
+        // rather than only for the two algorithms that happened to
+        // surface it, via an explicit length passed at registration time
+        // (see registerDigest's own call sites) rather than guessed from
+        // the mechanism value.
+        @Override protected int engineGetDigestLength() { return digestLenBytes; }
     }
 
     /**

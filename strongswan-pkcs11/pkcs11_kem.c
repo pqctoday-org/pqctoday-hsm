@@ -107,6 +107,21 @@ static pkcs11_library_t *find_token(private_pkcs11_kem_t *this, CK_SESSION_HANDL
 	return found;
 }
 
+/* PKCS#11 v3.2 CKA_PARAMETER_SET values (pkcs11.h) for each FIPS 203
+ * ML-KEM size strongSwan can negotiate. pkcs11_kem_create() only ever
+ * constructs this object for ML_KEM_512/768/1024 (see its group switch),
+ * so the default arm below is unreachable in practice; it exists only to
+ * give the compiler a defined value for every key_exchange_method_t. */
+static CK_ULONG kem_parameter_set(key_exchange_method_t group)
+{
+	switch (group) {
+		case ML_KEM_512:  return CKP_ML_KEM_512;
+		case ML_KEM_768:  return CKP_ML_KEM_768;
+		case ML_KEM_1024: return CKP_ML_KEM_1024;
+		default:          return CKP_ML_KEM_768;
+	}
+}
+
 /**
  * Initiator: Generates an ML-KEM key pair and returns the public key
  * Responder: Encapsulates against initiator's public key, returning the ciphertext
@@ -126,9 +141,9 @@ METHOD(key_exchange_t, get_public_key, bool,
 	CK_BBOOL ck_true = CK_TRUE;
 	/* softhsmv3 requires CKA_PARAMETER_SET on the ML-KEM keygen template
 	 * to select the variant (512/768/1024). Without it C_GenerateKeyPair
-	 * returns CKR_TEMPLATE_INCOMPLETE. Currently pkcs11_kem only supports
-	 * ML-KEM-768; hardcode CKP_ML_KEM_768. */
-	CK_ULONG parameter_set = CKP_ML_KEM_768;
+	 * returns CKR_TEMPLATE_INCOMPLETE. Derive it from this->group so all
+	 * three ML-KEM sizes work, not just 768. */
+	CK_ULONG parameter_set = kem_parameter_set(this->group);
 
 	/* PKCS#11 v3.2 KEM flags. softhsmv3 also sets these internally during
 	 * keygen (SoftHSM_keygen.cpp 6651/6732) but being explicit is safer
@@ -265,7 +280,7 @@ static bool encapsulate_on_responder(private_pkcs11_kem_t *this)
 
 	CK_OBJECT_CLASS klass_key = CKO_PUBLIC_KEY;
 	CK_KEY_TYPE type_key = CKK_ML_KEM;
-	CK_ULONG parameter_set = CKP_ML_KEM_768;
+	CK_ULONG parameter_set = kem_parameter_set(this->group);
 	CK_BBOOL ck_true_encap = CK_TRUE;
 	/* softhsmv3 enforces CKA_ENCAPSULATE=TRUE on the pub key for
 	 * C_EncapsulateKey (SoftHSM_kem.cpp returns
@@ -509,17 +524,25 @@ pkcs11_kem_t *pkcs11_kem_create(key_exchange_method_t group, ...)
 	CK_MECHANISM_TYPE key_gen_mech = 0;
 	CK_MECHANISM_TYPE encap_mech = 0;
 
-	if (group == ML_KEM_768) {
-		/* softhsmv3 uses SEPARATE OIDs: CKM_ML_KEM_KEY_PAIR_GEN (0x0F)
-		 * for generating the Alice keypair, CKM_ML_KEM (0x17) for the
-		 * Bob encapsulate + Alice decapsulate call.  Prior code used
-		 * CKM_ML_KEM for both, which made C_GenerateKeyPair return
-		 * CKR_MECHANISM_INVALID and strongSwan silently fall through
-		 * to the openssl plugin — see pkcs11.h note above. */
-		key_gen_mech = CKM_ML_KEM_KEY_PAIR_GEN;
-		encap_mech = CKM_ML_KEM;
-	} else {
-		return NULL;
+	switch (group) {
+		case ML_KEM_512:
+		case ML_KEM_768:
+		case ML_KEM_1024:
+			/* softhsmv3 uses SEPARATE OIDs: CKM_ML_KEM_KEY_PAIR_GEN (0x0F)
+			 * for generating the Alice keypair, CKM_ML_KEM (0x17) for the
+			 * Bob encapsulate + Alice decapsulate call.  Prior code used
+			 * CKM_ML_KEM for both, which made C_GenerateKeyPair return
+			 * CKR_MECHANISM_INVALID and strongSwan silently fall through
+			 * to the openssl plugin — see pkcs11.h note above. These two
+			 * mechanisms are the same across all three ML-KEM sizes; the
+			 * variant is selected via CKA_PARAMETER_SET on the key
+			 * templates (see kem_parameter_set() above), not the
+			 * mechanism itself. */
+			key_gen_mech = CKM_ML_KEM_KEY_PAIR_GEN;
+			encap_mech = CKM_ML_KEM;
+			break;
+		default:
+			return NULL;
 	}
 
 	INIT(this,
@@ -532,7 +555,7 @@ pkcs11_kem_t *pkcs11_kem_create(key_exchange_method_t group, ...)
 				.destroy = _destroy,
 			},
 		},
-		.group = ML_KEM_768,
+		.group = group,
 		.mech_key = key_gen_mech,
 		.mech_encap = encap_mech,
 		.pri_key = CK_INVALID_HANDLE,

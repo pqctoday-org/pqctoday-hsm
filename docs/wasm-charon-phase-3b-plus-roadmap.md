@@ -1,5 +1,14 @@
 # strongSwan WASM charon — Phase 3b+ implementation roadmap
 
+> **Superseded (2026-08-31).** This roadmap targeted
+> `strongswan-wasm-v2-shims/`, which was deleted on this date — real
+> feature work (RFC 7383 fragmentation, RFC 9370 multi-KE, CHILD_SA)
+> landed in the sibling `strongswan-wasm-shims/` (v1) tree instead, and v2
+> was never carried past its Phase 3a/3b/3c/3d stubs described below. Kept
+> for historical/reference value only; do not use this as an active plan.
+> See `docs/remediation-plan-provider-wrapper-coverage-gaps-2026-08-31.md`
+> §4.4 for the deletion rationale.
+
 **Status as of 2026-04-22**: Phase 1 (boot + library_init) and Phase 3a
 (library-level validators for ML-DSA + ML-KEM recognition) shipped. The
 WASM binary **does not yet run an IKE handshake**; `wasm_vpn_configure_json`

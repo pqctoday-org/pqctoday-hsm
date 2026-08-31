@@ -102,6 +102,9 @@ pub const CKA_SEED: u32 = 0x0000_0637;
 /// this engine; WTLS/X.509-attribute-certificate types are recognized (to
 /// reject cleanly) but not implemented — no consumer in this workspace and
 /// no KMIP 3.0 counterpart.
+/// PKCS#11 v3.2 §4.5 — a generic data object (raw CKA_VALUE, no key
+/// semantics). The CKM_HKDF_DATA derive result lands here (§2.43).
+pub const CKO_DATA: u32 = 0x0000_0000;
 pub const CKO_CERTIFICATE: u32 = 0x0000_0001;
 pub const CKO_PUBLIC_KEY: u32 = 0x0000_0002;
 pub const CKO_PRIVATE_KEY: u32 = 0x0000_0003;
@@ -163,6 +166,7 @@ pub const CKK_RSA: u32 = 0x0000_0000;
 pub const CKK_EC: u32 = 0x0000_0003; // ECDSA (P-256, P-384)
 pub const CKK_GENERIC_SECRET: u32 = 0x0000_0010;
 pub const CKK_AES: u32 = 0x0000_001f;
+pub const CKK_AES_XTS: u32 = 0x0000_0035;
 pub const CKK_EC_EDWARDS: u32 = 0x0000_0040; // EdDSA (Ed25519)
 pub const CKK_EC_MONTGOMERY: u32 = 0x0000_0041; // X25519 (PKCS#11 v3.2 §6.7)
 pub const CKK_ML_KEM: u32 = 0x0000_0049;
@@ -399,13 +403,22 @@ pub const CKM_HASH_SLH_DSA: u32 = 0x0000_0034;
 pub const CKH_DETERMINISTIC_REQUIRED: u32 = 0x0000_0002;
 
 // SHA Digest
+pub const CKM_SHA_1: u32 = 0x0000_0220;
+pub const CKM_SHA_1_HMAC: u32 = 0x0000_0221;
 pub const CKM_SHA256: u32 = 0x0000_0250;
 pub const CKM_SHA224: u32 = 0x0000_0255;
+pub const CKM_SHA224_HMAC: u32 = 0x0000_0256;
 pub const CKM_SHA384: u32 = 0x0000_0260;
 pub const CKM_SHA512: u32 = 0x0000_0270;
+pub const CKM_SHA512_224: u32 = 0x0000_0048;
+pub const CKM_SHA512_224_HMAC: u32 = 0x0000_0049;
+pub const CKM_SHA512_256: u32 = 0x0000_004C;
+pub const CKM_SHA512_256_HMAC: u32 = 0x0000_004D;
 pub const CKM_SHA3_256: u32 = 0x0000_02B0;
 pub const CKM_SHA3_224: u32 = 0x0000_02B5;
+pub const CKM_SHA3_224_HMAC: u32 = 0x0000_02B6;
 pub const CKM_SHA3_384: u32 = 0x0000_02C0;
+pub const CKM_SHA3_384_HMAC: u32 = 0x0000_02C1;
 pub const CKM_SHA3_512: u32 = 0x0000_02D0;
 // RIPEMD-160 (historical) — digest + HMAC.
 pub const CKM_RIPEMD160: u32 = 0x0000_0240;
@@ -462,7 +475,11 @@ pub const CKM_UNAVAILABLE_INFORMATION: u32 = 0xFFFF_FFFF; // PKCS#11 v3.2 §4.3 
 pub const CKM_PKCS5_PBKD2: u32 = 0x0000_03b0;
 pub const CKM_SP800_108_COUNTER_KDF: u32 = 0x0000_03ac;
 pub const CKM_SP800_108_FEEDBACK_KDF: u32 = 0x0000_03ad;
+pub const CKM_SP800_108_DOUBLE_PIPELINE_KDF: u32 = 0x0000_03ae;
 pub const CKM_HKDF_DERIVE: u32 = 0x0000_402a;
+/// PKCS#11 v3.2 §2.43 — same HKDF computation as CKM_HKDF_DERIVE, output as
+/// a CKO_DATA object instead of a CKO_SECRET_KEY.
+pub const CKM_HKDF_DATA: u32 = 0x0000_402b;
 // Simple key-derivation mechanisms (PKCS#11 v3.2 §6.43 "Miscellaneous simple
 // key derivation"). Values verified against the vendored pkcs11t.h. The
 // composable building blocks for hybrid-KEM combiners (classical ‖ PQC),
@@ -491,6 +508,10 @@ pub const CKM_SHA3_512_KEY_DERIVATION: u32 = 0x0000_039a;
 // CKF_HKDF_SALT_DATA. Lets HKDF-Extract key on ANOTHER key's value (salt =
 // key handle), i.e. HMAC(salt_key, base) — the keyed dual-PRF combiner form.
 pub const CKF_HKDF_SALT_KEY: u32 = 0x0000_0004;
+// PKCS#11 v3.2 §6.62.2 — "no salt is supplied". Used only to validate
+// ulSaltType when bExtract is true (§6.62.3); the derive itself already
+// treats any non-DATA/non-KEY value as "no salt" by construction.
+pub const CKF_HKDF_SALT_NULL: u32 = 0x0000_0001;
 
 // ML-DSA pre-hash mechanisms (PKCS#11 v3.2, pkcs11t.h §1221-1231)
 pub const CKM_HASH_ML_DSA_SHA224: u32 = 0x0000_0023;
@@ -546,6 +567,7 @@ pub const CKM_BIP32_CHILD_DERIVE_LEGACY: u32 = 0x0000_105C;
 pub const CKF_BIP32_HARDENED: u32 = 0x8000_0000;
 
 pub const CKM_EC_KEY_PAIR_GEN: u32 = 0x0000_1040;
+pub const CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS: u32 = 0x0000_140B;
 pub const CKM_ECDSA: u32 = 0x0000_1041; // PKCS#11 v3.2 §6.3.12 — raw (pre-hashed), no parameter, single-part only, token truncates internally
 pub const CKM_ECDSA_SHA256: u32 = 0x0000_1044;
 pub const CKM_ECDSA_SHA384: u32 = 0x0000_1045;
@@ -576,6 +598,23 @@ pub const CKM_EC_MONTGOMERY_KEY_DERIVE: u32 = 0x8000_0011;
 // codepoints, mirroring how CKM_HSS_KEY_PAIR_GEN carries its levels/
 // param-set choice in one mechanism.
 pub const CKM_PQCTODAY_SPLIT_KEY: u32 = 0x8000_0012;
+// ML-DSA external-µ signing (remediation R34, 2026-08-26; adopted natively
+// 2026-08-30 from the real PKCS#11 v3.3 working draft). This is the v3.3
+// draft's own name and codepoint — no longer a vendor-range stopgap. See
+// docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md for
+// the original design rationale. NOTE: v3.3 itself is still only a
+// working draft; per docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/
+// working/identifier_db/raw_ids.db this codepoint's OASIS status is
+// "proposed" (not yet through final ballot) — double-check against the
+// final ratified v3.3 header once published.
+pub const CKM_ML_DSA_EXTERNAL_MU: u32 = 0x0000_403c;
+pub const PQCTODAY_ML_DSA_MU_LEN: usize = 64;
+// µ GENERATION (remediation R39, phase 8, 2026-08-26; adopted natively
+// 2026-08-30 from the real PKCS#11 v3.3 working draft) — the PRODUCE half
+// of external-µ (the mechanism above is the CONSUME half); a digest-type
+// mechanism (C_Digest/C_DigestUpdate/C_DigestFinal). Same "proposed",
+// not-yet-ratified caveat as the mechanism above.
+pub const CKM_ML_DSA_EXTERNAL_MU_GEN: u32 = 0x0000_403b;
 // PKCS#11 v3.2 §6.7 dedicated Montgomery-curve DH mechanisms, in the
 // CKM_VENDOR_DEFINED (0x80000000) range per the spec header:
 // CKM_X25519 = CKM_VENDOR_DEFINED | 0x1058, CKM_X448 = | 0x1059.
@@ -590,6 +629,8 @@ pub const CKM_EDDSA_PH: u32 = 0x8000_1057;
 
 // AES
 pub const CKM_AES_KEY_GEN: u32 = 0x0000_1080;
+pub const CKM_AES_XTS: u32 = 0x0000_1071;
+pub const CKM_AES_XTS_KEY_GEN: u32 = 0x0000_1072;
 /// PKCS#11 v3.2 §6.10 — AES-ECB. No IV; plaintext MUST be a multiple
 /// of 16 bytes (no padding); ciphertext same length.
 pub const CKM_AES_ECB: u32     = 0x0000_1081;
@@ -600,6 +641,14 @@ pub const CKM_AES_CBC: u32     = 0x0000_1082;
 pub const CKM_AES_CBC_PAD: u32 = 0x0000_1085;
 pub const CKM_AES_CTR: u32 = 0x0000_1086;
 pub const CKM_AES_GCM: u32 = 0x0000_1087;
+pub const CKM_AES_CCM: u32 = 0x0000_1088;
+pub const CKM_AES_GMAC: u32 = 0x0000_108E;
+// §6.11 stream-cipher variants. No CKM_AES_CFB64 — no ACVP dataset exists
+// for it, deliberately excluded (matching this session's C++-side scope).
+pub const CKM_AES_OFB: u32 = 0x0000_2104;
+pub const CKM_AES_CFB8: u32 = 0x0000_2106;
+pub const CKM_AES_CFB128: u32 = 0x0000_2107;
+pub const CKM_AES_CFB1: u32 = 0x0000_2108;
 pub const CKM_AES_KEY_WRAP: u32 = 0x0000_2109;
 // RFC 5649 AES Key Wrap with Padding. Both names denote the same RFC 5649
 // scheme; `_PAD` is the deprecated v2.40 name (was 0x1091), `_KWP` the v3.x
@@ -769,6 +818,11 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_HASH_ML_DSA_SHA3_512,
     CKM_HASH_ML_DSA_SHAKE128,
     CKM_HASH_ML_DSA_SHAKE256,
+    // ML-DSA external-µ (remediation R34) — PQCTODAY-VENDOR-EXT-MU.
+    CKM_ML_DSA_EXTERNAL_MU,
+    // ML-DSA external-µ GENERATION (remediation R39, phase 8) — the
+    // produce half; a digest-family mechanism, not sign/verify.
+    CKM_ML_DSA_EXTERNAL_MU_GEN,
     // SLH-DSA (FIPS 205) — pure + pre-hash.
     // Generic CKM_HASH_SLH_DSA (0x34) — same remap as CKM_HASH_ML_DSA above.
     CKM_SLH_DSA_KEY_PAIR_GEN,
@@ -810,6 +864,7 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_GENERIC_SECRET_KEY_GEN,
     // EC / ECDSA / EdDSA
     CKM_EC_KEY_PAIR_GEN,
+    CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS,
     CKM_ECDSA,
     CKM_ECDSA_SHA256,
     CKM_ECDSA_SHA384,
@@ -834,6 +889,14 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_AES_CBC_PAD,
     CKM_AES_CTR,
     CKM_AES_GCM,
+    CKM_AES_CCM,
+    CKM_AES_GMAC,
+    CKM_AES_OFB,
+    CKM_AES_CFB8,
+    CKM_AES_CFB128,
+    CKM_AES_CFB1,
+    CKM_AES_XTS,
+    CKM_AES_XTS_KEY_GEN,
     CKM_AES_KEY_WRAP,
     CKM_AES_KEY_WRAP_KWP,
     CKM_AES_KEY_WRAP_PAD,
@@ -845,8 +908,10 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     // Key derivation
     CKM_PKCS5_PBKD2,
     CKM_HKDF_DERIVE,
+    CKM_HKDF_DATA,
     CKM_SP800_108_COUNTER_KDF,
     CKM_SP800_108_FEEDBACK_KDF,
+    CKM_SP800_108_DOUBLE_PIPELINE_KDF,
     // Hybrid-KEM combiner building blocks — concatenate (key/data) + digest
     // key-derivation, all standard PKCS#11 v3.2 derive mechanisms composed
     // in-HSM (v3.2 has no dedicated hybrid-KEM mechanism). §6.43 / §6.22 / §6.29.
@@ -952,8 +1017,13 @@ pub const CKA_LMOTS_PARAM_SET: u32 = 0x8000_0103; // CKP_LMOTS_SHA256_N32_W* val
 pub const CKA_XMSS_PARAM_SET: u32 = 0x8000_0104; // CKP_XMSS_* value
 pub const CKA_XMSSMT_PARAM_SET: u32 = 0x8000_0107; // CKP_XMSSMT_* value (RFC 8391 OID)
 
-// Standard multi-level HSS level-type attribute (PKCS#11 v3.2 §6.14)
+// Official PKCS#11 v3.2 §6.14 HSS attributes (pkcs11t.h:636-638). Phase 5
+// R25: CKA_HSS_LEVELS was previously missing and CKA_HSS_LMS_TYPE was
+// misused locally to hold the level count instead of the actual LMS type —
+// fixed to match the spec (and the C++ engine's own convention).
+pub const CKA_HSS_LEVELS: u32 = 0x0000_0617;
 pub const CKA_HSS_LMS_TYPE: u32 = 0x0000_0618;
+pub const CKA_HSS_LMOTS_TYPE: u32 = 0x0000_0619;
 pub const CKA_HSS_KEYS_REMAINING: u32 = 0x0000_061c;
 
 // ── LMS / LMOTS Parameter Set Constants ─────────────────────────────────────

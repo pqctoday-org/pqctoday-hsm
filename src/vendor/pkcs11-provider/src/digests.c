@@ -113,6 +113,14 @@ struct p11prov_digest_ctx {
     CK_MECHANISM_TYPE mechtype;
 
     P11PROV_SESSION *session;
+
+    /* Software shadow of everything fed to update() so far. Used ONLY as
+     * a dupctx() fallback when the token can't export/restore digest
+     * operation state mid-stream (see dupctx() below) — never consulted
+     * on the normal init/update/final path. */
+    unsigned char *shadow;
+    size_t shadow_len;
+    size_t shadow_alloc;
 };
 
 typedef struct p11prov_digest_ctx P11PROV_DIGEST_CTX;
@@ -179,33 +187,77 @@ static void *p11prov_digest_dupctx(void *ctx)
      * operations in flight can be easily duplicated, with all the
      * cryptographic status and then both context can keep going
      * independently. We'll try to save/restore state here, but on failure
-     * we just 'move' the the session to the new context and hope there is no
-     * need for the old context which will have no session and just return
-     * errors if an update is attempted. */
+     * we fall back to replaying a software shadow of the input-so-far
+     * into a freshly opened session for the COPY (see below), leaving
+     * the ORIGINAL session/context untouched. */
 
     sess = p11prov_session_handle(dctx->session);
-
-    /* move old session to new context, we swap because often openssl continues
-     * on the duplicated context by default */
-    newctx->session = dctx->session;
-    dctx->session = NULL;
 
     /* NOTE: most tokens will probably return errors trying to do this on digest
      * sessions. If GetOperationState fails we don't even try to duplicate the
      * context. */
     ret = p11prov_GetOperationState(dctx->provctx, sess, NULL_PTR, &state_len);
     if (ret != CKR_OK) {
-        goto done;
+        /* The token can't export this digest session's state. A caller
+         * may duplicate the SAME still-live context more than once and
+         * must keep updating the original after each duplication (TLS's
+         * running handshake-transcript hash is the concrete case that
+         * surfaced this: it is snapshotted once for CertificateVerify and
+         * again for Finished). Moving the session to the copy — the
+         * previous behavior here — silently emptied the original after
+         * its first use, so instead replay what has been hashed so far
+         * into a brand new session for the copy, and leave dctx (and its
+         * session) completely alone. */
+        CK_MECHANISM mechanism = { 0 };
+        CK_SESSION_HANDLE newsess;
+
+        ret = p11prov_get_session(dctx->provctx, &slotid, NULL, NULL,
+                                  dctx->mechtype, NULL, NULL, false, false,
+                                  &newctx->session);
+        if (ret != CKR_OK) {
+            P11PROV_raise(dctx->provctx, ret, "Failed to open new session");
+            newctx->session = NULL;
+            return newctx;
+        }
+        newsess = p11prov_session_handle(newctx->session);
+        mechanism.mechanism = dctx->mechtype;
+        ret = p11prov_DigestInit(dctx->provctx, newsess, &mechanism);
+        if (ret == CKR_OK && dctx->shadow_len > 0) {
+            ret = p11prov_DigestUpdate(dctx->provctx, newsess, dctx->shadow,
+                                       dctx->shadow_len);
+        }
+        if (ret != CKR_OK) {
+            p11prov_return_session(newctx->session);
+            newctx->session = NULL;
+            return newctx;
+        }
+        if (dctx->shadow_len > 0) {
+            newctx->shadow = OPENSSL_malloc(dctx->shadow_len);
+            if (newctx->shadow != NULL) {
+                memcpy(newctx->shadow, dctx->shadow, dctx->shadow_len);
+                newctx->shadow_len = dctx->shadow_len;
+                newctx->shadow_alloc = dctx->shadow_len;
+            }
+        }
+        return newctx;
     }
     state = OPENSSL_malloc(state_len);
     if (state == NULL) {
-        goto done;
+        return newctx;
     }
 
     ret = p11prov_GetOperationState(dctx->provctx, sess, state, &state_len);
     if (ret != CKR_OK) {
         goto done;
     }
+
+    /* True state-based duplication is possible: move the live session to
+     * the copy (it already holds the exact in-flight state) and rebuild
+     * the original's session from the saved state so it can keep going
+     * independently. We swap because often openssl continues on the
+     * duplicated context by default. */
+    newctx->session = dctx->session;
+    dctx->session = NULL;
 
     ret =
         p11prov_get_session(dctx->provctx, &slotid, NULL, NULL, dctx->mechtype,
@@ -238,6 +290,7 @@ static void p11prov_digest_freectx(void *ctx)
         return;
     }
     p11prov_return_session(dctx->session);
+    OPENSSL_free(dctx->shadow);
     OPENSSL_clear_free(dctx, sizeof(P11PROV_DIGEST_CTX));
 }
 
@@ -313,6 +366,24 @@ static int p11prov_digest_update(void *ctx, const unsigned char *data,
     if (len == 0) {
         return RET_OSSL_OK;
     }
+
+    /* Grow the software shadow of the input-so-far — see dupctx() above
+     * for why this is kept and the only place it is read. */
+    if (dctx->shadow_len + len > dctx->shadow_alloc) {
+        size_t newalloc = dctx->shadow_alloc ? dctx->shadow_alloc : 4096;
+        unsigned char *newbuf;
+        while (newalloc < dctx->shadow_len + len) {
+            newalloc *= 2;
+        }
+        newbuf = OPENSSL_realloc(dctx->shadow, newalloc);
+        if (newbuf == NULL) {
+            return RET_OSSL_ERR;
+        }
+        dctx->shadow = newbuf;
+        dctx->shadow_alloc = newalloc;
+    }
+    memcpy(dctx->shadow + dctx->shadow_len, data, len);
+    dctx->shadow_len += len;
 
     sess = p11prov_session_handle(dctx->session);
 

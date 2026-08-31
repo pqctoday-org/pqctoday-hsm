@@ -28,6 +28,73 @@
 
 #define CKM_PQCTODAY_SPLIT_KEY 0x80000012UL  /* vendor */
 
+// ── ML-DSA external-µ signing (remediation R34, 2026-08-26; adopted natively
+// from the real PKCS#11 v3.3 working draft on 2026-08-30) ───────────────────
+// This is the v3.3 draft's own name and codepoint, used directly — no
+// longer a vendor-range stopgap. See
+// docs/openssl-provider-ml-dsa-external-mu-vendor-ext-2026-08-26.md for the
+// original design rationale (why this preserves pure ML-DSA's security
+// assumptions).
+//
+// No new parameter struct: this mechanism reuses CK_SIGN_ADDITIONAL_CONTEXT
+// verbatim (only hedgeVariant is meaningful; pContext/ulContextLen must be
+// empty — context has no defined meaning once µ already exists, FIPS 204
+// folds it in before the caller ever computes µ). The caller's 64-byte µ
+// travels via the normal C_Sign/C_Verify data argument, exactly like
+// CKM_HASH_ML_DSA's PHM and every other mechanism here — not embedded in
+// the mechanism parameter.
+//
+// NOTE: v3.3 itself is still only a working draft. Per
+// docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/working/identifier_db/
+// raw_ids.db, this codepoint's OASIS status is "proposed" (auto-allocated,
+// not yet through final ballot) — a future ballot could in principle
+// renumber it before v3.3 formally ratifies. Double-check this value
+// against the final ratified v3.3 header once it is published.
+
+#define CKM_ML_DSA_EXTERNAL_MU 0x0000403cUL
+
+#define PQCTODAY_ML_DSA_MU_LEN 64  /* FIPS 204 Eq.(2): SHAKE256 output, fixed */
+
+// ── ML-DSA external-µ GENERATION (remediation R39, phase 8, 2026-08-26;
+// adopted natively from the real PKCS#11 v3.3 working draft on 2026-08-30) ──
+// This is the v3.3 draft's own CKM_ML_DSA_EXTERNAL_MU_GEN, used directly —
+// no longer a vendor-range stopgap. A DIGEST-type mechanism
+// (C_Digest/C_DigestUpdate/C_DigestFinal, multi-part allowed) that computes
+// µ ON THE TOKEN from a streamed message, so a caller never needs the whole
+// message in one buffer (the Strenzke memory/bandwidth motivation).
+// CKM_ML_DSA_EXTERNAL_MU above is the CONSUME half (sign a caller-supplied
+// µ); this is the PRODUCE half. Engines only — deliberately NOT wired into
+// the OpenSSL provider (an OpenSSL caller already holds the public key and
+// can compute µ in software trivially; see the phase-8 plan's own R39
+// scope decision).
+//
+// µ = SHAKE256(tr‖0x00‖len(ctx)‖ctx‖M, 64), where tr = SHAKE256(pk_encode,
+// 64) — FIPS 204's own µ formula (Eq. 2), computed incrementally: init
+// resolves tr (from a key handle's CKA_VALUE, or the caller's own
+// precomputed tr) and seeds SHAKE256 with tr‖0x00‖len(ctx)‖ctx; update
+// streams M; final squeezes 64 bytes.
+//
+// NOTE: same "proposed", not-yet-ratified caveat as CKM_ML_DSA_EXTERNAL_MU
+// above — double-check this value against the final ratified v3.3 header
+// once it is published.
+
+#define CKM_ML_DSA_EXTERNAL_MU_GEN 0x0000403bUL
+
+// hKey: public/private key handle to derive tr from (CKA_VALUE ->
+// SHAKE256(pk,64)). pTR/ulTRLen: caller-precomputed 64-byte tr, used
+// instead of hKey when hKey is CK_INVALID_HANDLE. Exactly one of the two
+// must be supplied. Field names match the v3.3 draft's own CK_MU_GEN_PARAMS
+// (working/doc/spec/ml_dsa.md) exactly.
+typedef struct CK_MU_GEN_PARAMS {
+    CK_OBJECT_HANDLE hKey;
+    CK_BYTE_PTR      pTR;
+    CK_ULONG         ulTRLen;
+    CK_BYTE_PTR      pctx;
+    CK_ULONG         ulctxLen;
+} CK_MU_GEN_PARAMS;
+
+typedef CK_MU_GEN_PARAMS CK_PTR CK_MU_GEN_PARAMS_PTR;
+
 // ── Vendor: stateful key attributes ──────────────────────────────────────────
 // Range: 0x80000101–0x80000105 (offset from CKM vendor range to avoid confusion)
 

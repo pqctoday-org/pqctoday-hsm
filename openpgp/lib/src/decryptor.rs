@@ -143,6 +143,51 @@ impl sequoia_openpgp::crypto::Decryptor for Op11KeyPair {
                 Ok(session_key.as_slice().into())
             }
 
+            // -- Composite MLKEM1024_X448 (algorithm 36) — same combiner, sized
+            // up (remediation plan §2/Fix 2). Same two-op shape as
+            // MLKEM768_X25519 above: X448 ECDH derive on the traditional
+            // handle + ML-KEM-1024 C_DecapsulateKey on the PQC handle, then the
+            // identical draft §4.2.1 combiner + AES-256 key-unwrap. The
+            // combiner itself is untouched (SHA3-256 over the same field
+            // order); only the ECDH shared-point width differs (56 B for X448
+            // vs 32 B for X25519), handled by `x448_shared_point`.
+            sequoia_openpgp::crypto::mpi::Ciphertext::MLKEM1024_X448 { ecdh, mlkem, esk } => {
+                let pqc = self.pqc.ok_or_else(|| {
+                    sequoia_openpgp::Error::InvalidOperation(
+                        "MLKEM1024_X448 keypair is missing its ML-KEM custody handle".into(),
+                    )
+                })?;
+
+                let ecdh_public: Vec<u8> = match self.public.mpis() {
+                    sequoia_openpgp::crypto::mpi::PublicKey::MLKEM1024_X448 { ecdh, .. } => {
+                        ecdh.to_vec()
+                    }
+                    pk => {
+                        return Err(sequoia_openpgp::Error::InvalidOperation(format!(
+                            "MLKEM1024_X448 ciphertext with non-matching public key {pk:?}"
+                        ))
+                        .into())
+                    }
+                };
+
+                // 1) X448 ECDH shared point on the traditional handle.
+                let ecdh_keyshare = self.x448_shared_point(self.private, &ecdh[..])?;
+
+                // 2) ML-KEM-1024 decapsulation on the PQC handle.
+                let mlkem_keyshare = self.ml_kem_decapsulate(pqc, &mlkem[..])?;
+
+                // 3) Combine -> KEK, then AES-256 key-unwrap the ESK.
+                let kek = multi_key_combine(
+                    &mlkem_keyshare,
+                    &ecdh_keyshare,
+                    &ecdh[..],
+                    &ecdh_public,
+                    PublicKeyAlgorithm::MLKEM1024_X448,
+                )?;
+                let session_key = aes256_key_unwrap(&kek, esk)?;
+                Ok(session_key.as_slice().into())
+            }
+
             _ => Err(sequoia_openpgp::Error::InvalidOperation(
                 "Unexpected Ciphertext type.".to_string(),
             )
@@ -237,9 +282,47 @@ impl Op11KeyPair {
         read_secret_value(&session, derived)
     }
 
-    /// Decapsulate an ML-KEM-768 ciphertext on the PQC private object
-    /// (`handle`) via `CKM_ML_KEM` / `C_DecapsulateKey`, returning the 32-byte
-    /// ML-KEM shared secret.
+    /// Derive the raw X448 shared point from the recipient's X448 private
+    /// object (`handle`) and the sender's ephemeral X448 public key
+    /// (`peer_public`), via `CKM_ECDH1_DERIVE` with the null KDF. Returns the
+    /// 56-byte shared secret (remediation plan §2/Fix 2) — same op as
+    /// [`Self::x25519_shared_point`], sized for the wider Montgomery curve
+    /// (`CKA_VALUE_LEN` 56 instead of 32).
+    pub(crate) fn x448_shared_point(
+        &self,
+        handle: cryptoki::object::ObjectHandle,
+        peer_public: &[u8],
+    ) -> sequoia_openpgp::Result<Vec<u8>> {
+        use cryptoki::mechanism::elliptic_curve::{Ecdh1DeriveParams, EcKdf};
+
+        let params = Ecdh1DeriveParams::new(EcKdf::null(), peer_public);
+
+        let session = self.session.lock().unwrap();
+        let derived = session
+            .derive_key(
+                &Mechanism::Ecdh1Derive(params),
+                handle,
+                &[
+                    Attribute::Class(ObjectClass::SECRET_KEY),
+                    Attribute::KeyType(KeyType::GENERIC_SECRET),
+                    Attribute::Token(false),
+                    Attribute::Sensitive(false),
+                    Attribute::Extractable(true),
+                    Attribute::ValueLen(56u64.into()),
+                ],
+            )
+            .map_err(|e| {
+                sequoia_openpgp::Error::InvalidOperation(format!("X448 ECDH1_DERIVE failed: {e}"))
+            })?;
+
+        read_secret_value(&session, derived)
+    }
+
+    /// Decapsulate an ML-KEM ciphertext on the PQC private object (`handle`)
+    /// via `CKM_ML_KEM` / `C_DecapsulateKey`, returning the 32-byte ML-KEM
+    /// shared secret. Parameter-set-agnostic (768 or 1024 — plan §2/Fix 2):
+    /// the FIPS 203 shared secret is always 32 bytes regardless of parameter
+    /// set, and the mechanism reads the set from the key object itself.
     pub(crate) fn ml_kem_decapsulate(
         &self,
         handle: cryptoki::object::ObjectHandle,

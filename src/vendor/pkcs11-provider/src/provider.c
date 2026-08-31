@@ -48,6 +48,7 @@ struct p11prov_ctx {
     P11PROV_SLOTS_CTX *slots;
 
     OSSL_ALGORITHM *op_digest;
+    OSSL_ALGORITHM *op_mac;
     OSSL_ALGORITHM *op_kdf;
     OSSL_ALGORITHM *op_random;
     OSSL_ALGORITHM *op_exchange;
@@ -540,6 +541,7 @@ static void p11prov_ctx_free(P11PROV_CTX *ctx)
     }
 
     OPENSSL_free(ctx->op_digest);
+    OPENSSL_free(ctx->op_mac);
     OPENSSL_free(ctx->op_kdf);
     OPENSSL_free(ctx->op_random);
     OPENSSL_free(ctx->op_exchange);
@@ -836,6 +838,12 @@ static CK_RV alg_set_op(OSSL_ALGORITHM **op, int idx, OSSL_ALGORITHM *alg)
     CKM_SHA_1, CKM_SHA224, CKM_SHA256, CKM_SHA384, CKM_SHA512, CKM_SHA512_224, \
         CKM_SHA512_256, CKM_SHA3_224, CKM_SHA3_256, CKM_SHA3_384, CKM_SHA3_512
 
+/* R8 (OSSL_OP_MAC), phase-4 plan: bytes-in mode HMAC.
+ * R23 (phase 5): CMAC + KMAC-128/256 join it as real OSSL_OP_MAC
+ * implementations — the OP-1/ALG-8 remainder R8 left open. */
+#define HMAC_MECHS \
+    CKM_SHA_1_HMAC, CKM_SHA256_HMAC, CKM_SHA384_HMAC, CKM_SHA512_HMAC
+
 #define RSA_SIG_MECHS \
     CKM_RSA_PKCS, CKM_SHA1_RSA_PKCS, CKM_SHA224_RSA_PKCS, CKM_SHA256_RSA_PKCS, \
         CKM_SHA384_RSA_PKCS, CKM_SHA512_RSA_PKCS, CKM_SHA3_224_RSA_PKCS, \
@@ -856,12 +864,70 @@ static CK_RV alg_set_op(OSSL_ALGORITHM **op, int idx, OSSL_ALGORITHM *alg)
         CKM_ECDSA_SHA384, CKM_ECDSA_SHA512, CKM_ECDSA_SHA3_224, \
         CKM_ECDSA_SHA3_256, CKM_ECDSA_SHA3_384, CKM_ECDSA_SHA3_512
 
-#define PQC_MECHS CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN
+#define PQC_MECHS \
+    CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM, CKM_ML_KEM_KEY_PAIR_GEN, \
+        CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN, CKM_HSS, CKM_HSS_KEY_PAIR_GEN, \
+        CKM_XMSS, CKM_XMSS_KEY_PAIR_GEN, CKM_XMSSMT, CKM_XMSSMT_KEY_PAIR_GEN
+
+/* Remediation item 5 (2026-08-30 OpenSSL-provider gap audit, risk-accepted):
+ * PKCS#11 v3.2 §6.67.6/§6.67.7 HashML-DSA pre-hash family -- the bare
+ * generic CKM_HASH_ML_DSA (caller supplies an already-hashed PHM) plus its
+ * 10 "with hashing" siblings (CKM_HASH_ML_DSA_<digest>, hash computed ON
+ * TOKEN). All 11 values grepped from src/lib/pkcs11/pkcs11t.h, not
+ * guessed. This rests on OpenSSL's own documented testing-only
+ * "message-encoding=0" escape hatch for ML-DSA (EVP_SIGNATURE-ML-DSA(7):
+ * "OpenSSL does not support Pre Hash ML-DSA Signature Generation, but this
+ * may be done by the user by doing Pre hash encoding externally and then
+ * choosing the option to not encode the message" -- message-encoding=0 is
+ * documented as "used for testing", not a stable production contract) --
+ * see the HASH_ML_DSA/HASH_SLH_DSA case arm below and sig/mldsa.c's
+ * p11prov_hash_mldsa_* functions for where that caveat is preserved as a
+ * durable code comment. */
+#define HASH_MLDSA_MECHS \
+    CKM_HASH_ML_DSA, CKM_HASH_ML_DSA_SHA224, CKM_HASH_ML_DSA_SHA256, \
+        CKM_HASH_ML_DSA_SHA384, CKM_HASH_ML_DSA_SHA512, \
+        CKM_HASH_ML_DSA_SHA3_224, CKM_HASH_ML_DSA_SHA3_256, \
+        CKM_HASH_ML_DSA_SHA3_384, CKM_HASH_ML_DSA_SHA3_512, \
+        CKM_HASH_ML_DSA_SHAKE128, CKM_HASH_ML_DSA_SHAKE256
+
+/* Same family, SLH-DSA side (PKCS#11 v3.2 §6.69.6/§6.69.7). */
+#define HASH_SLHDSA_MECHS \
+    CKM_HASH_SLH_DSA, CKM_HASH_SLH_DSA_SHA224, CKM_HASH_SLH_DSA_SHA256, \
+        CKM_HASH_SLH_DSA_SHA384, CKM_HASH_SLH_DSA_SHA512, \
+        CKM_HASH_SLH_DSA_SHA3_224, CKM_HASH_SLH_DSA_SHA3_256, \
+        CKM_HASH_SLH_DSA_SHA3_384, CKM_HASH_SLH_DSA_SHA3_512, \
+        CKM_HASH_SLH_DSA_SHAKE128, CKM_HASH_SLH_DSA_SHAKE256
 
 #if SKEY_SUPPORT == 1
+/* phase 5 R26 prerequisite: CKM_AES_GCM was missing from this checklist,
+ * so it was never scanned into a slot's mechanism list and the ADD_ALGO
+ * registration below (case CKM_AES_GCM:) was unreachable dead code --
+ * a different kind of gap than CTR's own genuine unfinished-stub bug,
+ * fixed in p11prov_cipher_prep_mech() (cipher.c). */
+/* Remediation item 1 (2026-08-30 OpenSSL-provider gap audit): CKM_AES_CCM
+ * was missing from this checklist exactly like CKM_AES_GCM was above --
+ * the case CKM_AES_CCM: arm below (ADD_ALGO for AES_256/192/128_CCM) was
+ * real, correct, and completely unreachable dead code because the
+ * mechanism-scan loop never matched it against anything in checklist[]. */
+/* AES-XTS / AES Key Wrap remediation item (2026-08-30): CKM_AES_XTS,
+ * CKM_AES_KEY_WRAP, CKM_AES_KEY_WRAP_KWP were missing from this
+ * checklist entirely, same trap as CKM_AES_GCM/CKM_AES_CCM's own R26/
+ * remediation-item-1 comments above -- their own ADD_ALGO case arms
+ * below would otherwise be correct but unreachable dead code, since the
+ * mechanism-scan loop never matches anything not listed here. Deliberately
+ * NOT listing CKM_AES_KEY_WRAP_PAD: it has no separate OpenSSL
+ * registration (see cipher.c's own DISPATCH_TABLE_CIPHER_WRAP_FN call
+ * sites), so there is no case arm below for it to reach either -- it is
+ * left unmatched on purpose, same as any mechanism this provider simply
+ * does not register. */
 #define AES_MECHS \
     CKM_AES_ECB, CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_CTR, CKM_AES_CTS, \
-        CKM_AES_OFB, CKM_AES_CFB8, CKM_AES_CFB128, CKM_AES_CFB1
+        CKM_AES_OFB, CKM_AES_CFB8, CKM_AES_CFB128, CKM_AES_CFB1, \
+        CKM_AES_GCM, CKM_AES_CCM, CKM_AES_XTS, CKM_AES_KEY_WRAP, \
+        CKM_AES_KEY_WRAP_KWP
+
+/* phase 5 R26 */
+#define CHACHA_MECHS CKM_CHACHA20, CKM_CHACHA20_POLY1305
 #endif
 
 static void alg_rm_mechs(CK_ULONG *checklist, CK_ULONG *rmlist, int *clsize,
@@ -913,12 +979,26 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              ECDSA_SIG_MECHS,
                              CKM_ECDH1_DERIVE,
                              CKM_ECDH1_COFACTOR_DERIVE,
+                             CKM_X25519,
+                             CKM_X448,
                              CKM_HKDF_DERIVE,
+                             CKM_PKCS5_PBKD2,
+                             CKM_SP800_108_COUNTER_KDF,
+                             CKM_SP800_108_FEEDBACK_KDF,
+                             CKM_SP800_108_DOUBLE_PIPELINE_KDF,
+                             CKM_AES_CMAC,
+                             CKM_KMAC_128,
+                             CKM_KMAC_256,
                              DIGEST_MECHS,
+                             HMAC_MECHS,
                              CKM_EDDSA,
+                             CKM_EDDSA_PH,
                              PQC_MECHS,
+                             HASH_MLDSA_MECHS,
+                             HASH_SLHDSA_MECHS,
 #if SKEY_SUPPORT == 1
-                             AES_MECHS
+                             AES_MECHS,
+                             CHACHA_MECHS
 #endif
     };
     bool add_rsasig = false;
@@ -926,6 +1006,7 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
     bool add_ecdsasig = false;
     int cl_size = sizeof(checklist) / sizeof(CK_ULONG);
     int digest_idx = 0;
+    int mac_idx = 0;
     int kdf_idx = 0;
     int random_idx = 0;
     int exchange_idx = 0;
@@ -1151,17 +1232,45 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 break;
             case CKM_X25519:
                 ADD_ALGO(X25519, ecdh, exchange, prop);
-                UNCHECK_MECHS(CKM_X25519);
+                UNCHECK_MECHS(CKM_X25519, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
                 break;
             case CKM_X448:
                 ADD_ALGO(X448, ecdh, exchange, prop);
-                UNCHECK_MECHS(CKM_X448);
+                UNCHECK_MECHS(CKM_X448, CKM_EC_MONTGOMERY_KEY_PAIR_GEN);
                 break;
             case CKM_HKDF_DERIVE:
                 ADD_ALGO(HKDF, hkdf, kdf, prop);
                 ADD_ALGO(TLS13_KDF, tls13, kdf, prop);
                 ADD_ALGO(HKDF, hkdf, exchange, prop);
                 UNCHECK_MECHS(CKM_HKDF_DERIVE);
+                break;
+            /* Phase 4 R10: CKM_PKCS5_PBKD2 needs no base-key object (the
+             * password travels in the mechanism params), so unlike HKDF
+             * it gets no matching `exchange` registration. */
+            case CKM_PKCS5_PBKD2:
+                ADD_ALGO(PBKDF2, pbkdf2, kdf, prop);
+                UNCHECK_MECHS(CKM_PKCS5_PBKD2);
+                break;
+            /* Phase 5 R22: like PBKDF2 above, no matching `exchange`
+             * registration — OpenSSL's own "KBKDF" name is a KDF-only
+             * fetch, not a key-exchange one.
+             *
+             * Remediation item 2 (2026-08-30): CKM_SP800_108_DOUBLE_PIPELINE_KDF
+             * is SP800-108's third mode (Counter / Feedback / Double-Pipeline)
+             * and shares this exact same KBKDF backend -- it was missing from
+             * both this case's label list and its UNCHECK_MECHS call, so a
+             * token that supports ONLY double-pipeline (or that exposes it
+             * after the other two have already been unchecked from the
+             * checklist by an earlier scan iteration) would fall through to
+             * the `default: unhandled mechanism` arm below instead of
+             * registering KBKDF. */
+            case CKM_SP800_108_COUNTER_KDF:
+            case CKM_SP800_108_FEEDBACK_KDF:
+            case CKM_SP800_108_DOUBLE_PIPELINE_KDF:
+                ADD_ALGO(KBKDF, kbkdf, kdf, prop);
+                UNCHECK_MECHS(CKM_SP800_108_COUNTER_KDF,
+                              CKM_SP800_108_FEEDBACK_KDF,
+                              CKM_SP800_108_DOUBLE_PIPELINE_KDF);
                 break;
             case CKM_SHA_1:
                 ADD_ALGO(SHA1, sha1, digest, prop);
@@ -1207,6 +1316,37 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 ADD_ALGO(SHA3_512, sha3_512, digest, prop);
                 UNCHECK_MECHS(CKM_SHA3_512);
                 break;
+            case CKM_SHA_1_HMAC:
+                UNCHECK_MECHS(CKM_SHA_1_HMAC);
+                break;
+            case CKM_SHA256_HMAC:
+                /* Gate the single generic "HMAC" registration on this
+                 * one mechanism — mac.c's own runtime digest selection
+                 * (OSSL_MAC_PARAM_DIGEST) defaults to SHA2-256 and
+                 * checks CKM_SHA*_HMAC availability itself at
+                 * C_SignInit time for whichever digest is actually
+                 * requested, so one registration covers all four. */
+                ADD_ALGO(HMAC, hmac, mac, prop);
+                UNCHECK_MECHS(CKM_SHA256_HMAC);
+                break;
+            case CKM_SHA384_HMAC:
+                UNCHECK_MECHS(CKM_SHA384_HMAC);
+                break;
+            case CKM_SHA512_HMAC:
+                UNCHECK_MECHS(CKM_SHA512_HMAC);
+                break;
+            case CKM_AES_CMAC:
+                ADD_ALGO(CMAC, cmac, mac, prop);
+                UNCHECK_MECHS(CKM_AES_CMAC);
+                break;
+            case CKM_KMAC_128:
+                ADD_ALGO(KMAC128, kmac128, mac, prop);
+                UNCHECK_MECHS(CKM_KMAC_128);
+                break;
+            case CKM_KMAC_256:
+                ADD_ALGO(KMAC256, kmac256, mac, prop);
+                UNCHECK_MECHS(CKM_KMAC_256);
+                break;
             case CKM_EDDSA:
                 ADD_ALGO_EXT(ED25519, signature, prop,
                              p11prov_ed25519_signature_functions);
@@ -1214,14 +1354,41 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              p11prov_ed448_signature_functions);
                 UNCHECK_MECHS(CKM_EC_EDWARDS_KEY_PAIR_GEN, CKM_EDDSA);
 #if defined(OSSL_FUNC_SIGNATURE_SIGN_MESSAGE_INIT)
-                ADD_ALGO_EXT(ED25519ph, signature, prop,
-                             p11prov_ed25519ph_signature_functions);
+                /* Remediation item 4 (2026-08-30 OpenSSL-provider gap
+                 * audit): per real OpenSSL 4.0 docs (EVP_SIGNATURE-ED25519(7)
+                 * -- confirmed byte-identical in the vendored OpenSSL 3.6.3
+                 * tree's own doc/man7/EVP_SIGNATURE-ED25519.pod, which this
+                 * provider actually builds/links against), Ed25519,
+                 * Ed25519ctx and Ed448 are the three PureEdDSA instances --
+                 * they take the complete message and are all reachable
+                 * through the plain CKM_EDDSA mechanism (CK_EDDSA_PARAMS
+                 * with phFlag=CK_FALSE plus an optional context string), so
+                 * ED25519ctx stays gated on CKM_EDDSA here. Ed25519ph and
+                 * Ed448ph are the two HashEdDSA (pre-hash) instances --
+                 * moved to their own case arm below, gated on the real
+                 * CKM_EDDSA_PH mechanism instead of riding along
+                 * unconditionally with plain CKM_EDDSA. */
                 ADD_ALGO_EXT(ED25519ctx, signature, prop,
                              p11prov_ed25519ctx_signature_functions);
-                ADD_ALGO_EXT(ED448ph, signature, prop,
-                             p11prov_ed448ph_signature_functions);
 #endif
                 break;
+#if defined(OSSL_FUNC_SIGNATURE_SIGN_MESSAGE_INIT)
+            case CKM_EDDSA_PH:
+                /* Bug fixed here: previously Ed25519ph/Ed448ph were
+                 * registered unconditionally inside `case CKM_EDDSA:`
+                 * above, so they were advertised/functional even on a
+                 * token whose mechanism list never contained
+                 * CKM_EDDSA_PH at all. Now they are their own case arm,
+                 * gated on the real vendor-range CKM_EDDSA_PH mechanism
+                 * (src/lib/pkcs11/pkcs11t.h) -- if a token doesn't
+                 * advertise it, these two are simply never registered. */
+                ADD_ALGO_EXT(ED25519ph, signature, prop,
+                             p11prov_ed25519ph_signature_functions);
+                ADD_ALGO_EXT(ED448ph, signature, prop,
+                             p11prov_ed448ph_signature_functions);
+                UNCHECK_MECHS(CKM_EDDSA_PH);
+                break;
+#endif
             case CKM_ML_DSA:
             case CKM_ML_DSA_KEY_PAIR_GEN:
                 ADD_ALGO_EXT(ML_DSA_44, signature, prop,
@@ -1241,14 +1408,122 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              p11prov_composite_mldsa65_ecdsa_p256_sig_functions);
                 ADD_ALGO_EXT(COMPOSITE_MLDSA87_ECDSA_P384, signature, prop,
                              p11prov_composite_mldsa87_ecdsa_p384_sig_functions);
+                /* Phase 4 R7: profiles 4-8. Classical mechanisms
+                 * (CKM_ECDSA_SHA256, CKM_SHA512_RSA_PKCS_PSS, CKM_EDDSA)
+                 * are all already registered elsewhere in this function. */
+                ADD_ALGO_EXT(COMPOSITE_MLDSA44_ED25519, signature, prop,
+                             p11prov_composite_mldsa44_ed25519_sig_functions);
+                ADD_ALGO_EXT(COMPOSITE_MLDSA44_ECDSA_P256_SHA256, signature,
+                             prop,
+                             p11prov_composite_mldsa44_ecdsa_p256_sig_functions);
+                ADD_ALGO_EXT(COMPOSITE_MLDSA65_RSA3072_PSS, signature, prop,
+                             p11prov_composite_mldsa65_rsa3072_pss_sig_functions);
+                ADD_ALGO_EXT(COMPOSITE_MLDSA65_ED25519, signature, prop,
+                             p11prov_composite_mldsa65_ed25519_sig_functions);
+                ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P384, signature, prop,
+                             p11prov_composite_mldsa65_ecdsa_p384_sig_functions);
                 UNCHECK_MECHS(CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA);
                 break;
             case CKM_SLH_DSA:
             case CKM_SLH_DSA_KEY_PAIR_GEN:
-                // Scaffolding: Map SLH-DSA to SoftHSMv3
-                ADD_ALGO_EXT(SLH_DSA, signature, prop,
-                             p11prov_slhdsa_signature_functions);
+                /* Per-variant, not the single generic "SLH-DSA" name the
+                 * earlier scaffolding used — matches ML-DSA's own 44/65/87
+                 * pattern above and OpenSSL's 12 native algorithm names, so
+                 * `-algorithm SLH-DSA-SHA2-128s` etc. via ?provider=pkcs11
+                 * resolves straight to this provider (remediation R1). */
+                ADD_ALGO_EXT(SLH_DSA_SHA2_128S, signature, prop,
+                             p11prov_slhdsa_sha2_128s_signature_functions);
+                ADD_ALGO_EXT(SLH_DSA_SHAKE_128S, signature, prop,
+                             p11prov_slhdsa_shake_128s_signature_functions);
+                ADD_ALGO_EXT(SLH_DSA_SHA2_128F, signature, prop,
+                             p11prov_slhdsa_sha2_128f_signature_functions);
+                ADD_ALGO_EXT(SLH_DSA_SHAKE_128F, signature, prop,
+                             p11prov_slhdsa_shake_128f_signature_functions);
+                ADD_ALGO_EXT(SLH_DSA_SHA2_192S, signature, prop,
+                             p11prov_slhdsa_sha2_192s_signature_functions);
+                ADD_ALGO_EXT(SLH_DSA_SHAKE_192S, signature, prop,
+                             p11prov_slhdsa_shake_192s_signature_functions);
+                ADD_ALGO_EXT(SLH_DSA_SHA2_192F, signature, prop,
+                             p11prov_slhdsa_sha2_192f_signature_functions);
+                ADD_ALGO_EXT(SLH_DSA_SHAKE_192F, signature, prop,
+                             p11prov_slhdsa_shake_192f_signature_functions);
+                ADD_ALGO_EXT(SLH_DSA_SHA2_256S, signature, prop,
+                             p11prov_slhdsa_sha2_256s_signature_functions);
+                ADD_ALGO_EXT(SLH_DSA_SHAKE_256S, signature, prop,
+                             p11prov_slhdsa_shake_256s_signature_functions);
+                ADD_ALGO_EXT(SLH_DSA_SHA2_256F, signature, prop,
+                             p11prov_slhdsa_sha2_256f_signature_functions);
+                ADD_ALGO_EXT(SLH_DSA_SHAKE_256F, signature, prop,
+                             p11prov_slhdsa_shake_256f_signature_functions);
                 UNCHECK_MECHS(CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA);
+                break;
+            /* Remediation item 5 (2026-08-30, risk-accepted -- see
+             * HASH_MLDSA_MECHS's own comment above for the full caveat
+             * quoted from OpenSSL's own docs): one generic "HASH-ML-DSA"
+             * algorithm, paramset-agnostic like sig/xmss.c's XMSS/XMSS^MT
+             * entries -- p11prov_hash_mldsa_sign_init/verify_init resolve
+             * the actual ML-DSA-44/65/87 parameter set from the bound key
+             * at runtime via p11prov_obj_get_key_param_set(), the same
+             * accessor ML-DSA/SLH-DSA/ML-KEM/XMSS already share, rather
+             * than baking one paramset into the algorithm's own identity
+             * the way plain ML_DSA_44/65/87 do above. Registered only when
+             * the token's mechanism list actually contains at least one of
+             * the 11 CKM_HASH_ML_DSA* mechanisms (grouped into one case
+             * arm below, same multi-label/shared-body idiom the
+             * CKM_SP800_108_* KDF arm above uses, so the UNCHECK_MECHS call
+             * fires exactly once no matter which of the 11 the token's
+             * mechanism list happens to expose first). */
+            case CKM_HASH_ML_DSA:
+            case CKM_HASH_ML_DSA_SHA224:
+            case CKM_HASH_ML_DSA_SHA256:
+            case CKM_HASH_ML_DSA_SHA384:
+            case CKM_HASH_ML_DSA_SHA512:
+            case CKM_HASH_ML_DSA_SHA3_224:
+            case CKM_HASH_ML_DSA_SHA3_256:
+            case CKM_HASH_ML_DSA_SHA3_384:
+            case CKM_HASH_ML_DSA_SHA3_512:
+            case CKM_HASH_ML_DSA_SHAKE128:
+            case CKM_HASH_ML_DSA_SHAKE256:
+                ADD_ALGO_EXT(HASH_ML_DSA, signature, prop,
+                             p11prov_hash_mldsa_signature_functions);
+                UNCHECK_MECHS(
+                    CKM_HASH_ML_DSA, CKM_HASH_ML_DSA_SHA224,
+                    CKM_HASH_ML_DSA_SHA256, CKM_HASH_ML_DSA_SHA384,
+                    CKM_HASH_ML_DSA_SHA512, CKM_HASH_ML_DSA_SHA3_224,
+                    CKM_HASH_ML_DSA_SHA3_256, CKM_HASH_ML_DSA_SHA3_384,
+                    CKM_HASH_ML_DSA_SHA3_512, CKM_HASH_ML_DSA_SHAKE128,
+                    CKM_HASH_ML_DSA_SHAKE256);
+                break;
+            /* Same idiom, SLH-DSA side. */
+            case CKM_HASH_SLH_DSA:
+            case CKM_HASH_SLH_DSA_SHA224:
+            case CKM_HASH_SLH_DSA_SHA256:
+            case CKM_HASH_SLH_DSA_SHA384:
+            case CKM_HASH_SLH_DSA_SHA512:
+            case CKM_HASH_SLH_DSA_SHA3_224:
+            case CKM_HASH_SLH_DSA_SHA3_256:
+            case CKM_HASH_SLH_DSA_SHA3_384:
+            case CKM_HASH_SLH_DSA_SHA3_512:
+            case CKM_HASH_SLH_DSA_SHAKE128:
+            case CKM_HASH_SLH_DSA_SHAKE256:
+                ADD_ALGO_EXT(HASH_SLH_DSA, signature, prop,
+                             p11prov_hash_slhdsa_signature_functions);
+                UNCHECK_MECHS(
+                    CKM_HASH_SLH_DSA, CKM_HASH_SLH_DSA_SHA224,
+                    CKM_HASH_SLH_DSA_SHA256, CKM_HASH_SLH_DSA_SHA384,
+                    CKM_HASH_SLH_DSA_SHA512, CKM_HASH_SLH_DSA_SHA3_224,
+                    CKM_HASH_SLH_DSA_SHA3_256, CKM_HASH_SLH_DSA_SHA3_384,
+                    CKM_HASH_SLH_DSA_SHA3_512, CKM_HASH_SLH_DSA_SHAKE128,
+                    CKM_HASH_SLH_DSA_SHAKE256);
+                break;
+            case CKM_HSS_KEY_PAIR_GEN:
+                /* Phase 4 R9: single generic "HSS" name — unlike SLH-DSA's
+                 * 12 fixed parameter sets, this keymgmt only ever generates
+                 * one (the engine's own documented default when
+                 * CK_HSS_KEY_PAIR_GEN_PARAMS is omitted), so there is no
+                 * per-variant name to register. */
+                ADD_ALGO(HSS, hss, signature, prop);
+                UNCHECK_MECHS(CKM_HSS_KEY_PAIR_GEN, CKM_HSS);
                 break;
             case CKM_ML_KEM:
             case CKM_ML_KEM_KEY_PAIR_GEN:
@@ -1267,10 +1542,22 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 UNCHECK_MECHS(CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM);
                 break;
             case CKM_XMSS:
-                // Scaffolding: Map XMSS to SoftHSMv3 (Validation / Verification only)
+                /* Remediation R41 (phase 8): full sign+verify, mirroring
+                 * HSS's own shape (sig/xmss.c). Supersedes the earlier
+                 * "verify-only, keygen/sign not exposed" scaffolding note
+                 * that used to sit here -- that comment described a stub
+                 * with empty OSSL_DISPATCH tables (never actually
+                 * functional, and would have advertised "XMSS" as usable
+                 * while every real operation failed), not a considered
+                 * scope decision this item needed to preserve. */
                 ADD_ALGO_EXT(XMSS, signature, prop,
                              p11prov_xmss_signature_functions);
                 UNCHECK_MECHS(CKM_XMSS);
+                break;
+            case CKM_XMSSMT:
+                ADD_ALGO_EXT(XMSSMT, signature, prop,
+                             p11prov_xmssmt_signature_functions);
+                UNCHECK_MECHS(CKM_XMSSMT);
                 break;
 #if SKEY_SUPPORT == 1
             case CKM_AES_ECB:
@@ -1335,6 +1622,39 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 ADD_ALGO(AES_128_CCM, aes128ccm, cipher, prop);
                 UNCHECK_MECHS(CKM_AES_CCM);
                 break;
+            case CKM_AES_XTS:
+                /* AES-XTS remediation item (2026-08-30): no 192-bit
+                 * variant -- see cipher.h's own MODE_xts comment. */
+                ADD_ALGO(AES_256_XTS, aes256xts, cipher, prop);
+                ADD_ALGO(AES_128_XTS, aes128xts, cipher, prop);
+                UNCHECK_MECHS(CKM_AES_XTS);
+                break;
+            case CKM_AES_KEY_WRAP:
+                ADD_ALGO(AES_256_WRAP, aes256wrap, cipher, prop);
+                ADD_ALGO(AES_192_WRAP, aes192wrap, cipher, prop);
+                ADD_ALGO(AES_128_WRAP, aes128wrap, cipher, prop);
+                UNCHECK_MECHS(CKM_AES_KEY_WRAP);
+                break;
+            case CKM_AES_KEY_WRAP_KWP:
+                /* AES Key Wrap remediation item (2026-08-30): backs the
+                 * "AES-*-WRAP-PAD" OpenSSL names -- see cipher.c's own
+                 * DISPATCH_TABLE_CIPHER_WRAP_FN(..., wrappad, ...) call
+                 * sites for why CKM_AES_KEY_WRAP_PAD is deliberately not
+                 * a separate registration. */
+                ADD_ALGO(AES_256_WRAP_PAD, aes256wrappad, cipher, prop);
+                ADD_ALGO(AES_192_WRAP_PAD, aes192wrappad, cipher, prop);
+                ADD_ALGO(AES_128_WRAP_PAD, aes128wrappad, cipher, prop);
+                UNCHECK_MECHS(CKM_AES_KEY_WRAP_KWP);
+                break;
+            /* phase 5 R26 */
+            case CKM_CHACHA20:
+                ADD_ALGO(CHACHA20, chacha20256stream, cipher, prop);
+                UNCHECK_MECHS(CKM_CHACHA20);
+                break;
+            case CKM_CHACHA20_POLY1305:
+                ADD_ALGO(CHACHA20_POLY1305, chacha20256poly1305, cipher, prop);
+                UNCHECK_MECHS(CKM_CHACHA20_POLY1305);
+                break;
 #endif
             default:
                 P11PROV_raise(ctx, CKR_GENERAL_ERROR, "Unhandled mechanism %lu",
@@ -1357,6 +1677,7 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
     }
     /* terminations */
     TERM_ALGO(digest);
+    TERM_ALGO(mac);
     TERM_ALGO(kdf);
     TERM_ALGO(exchange);
     TERM_ALGO(signature);
@@ -1446,8 +1767,50 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
     ADD_ALGO_EXT(ML_DSA_87, encoder,
                  DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
                  p11prov_mldsa_encoder_spki_der_functions);
+    /* ML-KEM SPKI + text encoders (remediation R16) — one shared
+     * function/table across all 3 parameter sets, same as ML-DSA's block
+     * above; unconditional (not gated behind encode_pkey_as_pk11_uri,
+     * unlike the priv_key_info block further down), since encoding the
+     * PUBLIC key never touches private key material either way. */
+    ADD_ALGO_EXT(ML_KEM_512, encoder, DEFAULT_PROPERTY(",output=text"),
+                 p11prov_mlkem_encoder_text_functions);
+    ADD_ALGO_EXT(ML_KEM_512, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_mlkem_encoder_spki_der_functions);
+    ADD_ALGO_EXT(ML_KEM_768, encoder, DEFAULT_PROPERTY(",output=text"),
+                 p11prov_mlkem_encoder_text_functions);
+    ADD_ALGO_EXT(ML_KEM_768, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_mlkem_encoder_spki_der_functions);
+    ADD_ALGO_EXT(ML_KEM_1024, encoder, DEFAULT_PROPERTY(",output=text"),
+                 p11prov_mlkem_encoder_text_functions);
+    ADD_ALGO_EXT(ML_KEM_1024, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_mlkem_encoder_spki_der_functions);
+#define SLHDSA_ENCODER_TEXT_SPKI(NAME) \
+    ADD_ALGO_EXT(NAME, encoder, DEFAULT_PROPERTY(",output=text"), \
+                 p11prov_slhdsa_encoder_text_functions); \
+    ADD_ALGO_EXT( \
+        NAME, encoder, \
+        DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"), \
+        p11prov_slhdsa_encoder_spki_der_functions);
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHA2_128S)
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHAKE_128S)
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHA2_128F)
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHAKE_128F)
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHA2_192S)
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHAKE_192S)
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHA2_192F)
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHAKE_192F)
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHA2_256S)
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHAKE_256S)
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHA2_256F)
+    SLHDSA_ENCODER_TEXT_SPKI(SLH_DSA_SHAKE_256F)
+#undef SLHDSA_ENCODER_TEXT_SPKI
     /* Composite-ML-DSA SPKI encoders (draft-lamps-19): X509_PUBKEY for
-     * the three composite OIDs in DER + PEM. */
+     * all eight composite OIDs in DER + PEM. One shared dispatch table
+     * per format — the encoder resolves the profile from the keydata
+     * itself, not from which ADD_ALGO_EXT call registered it. */
     ADD_ALGO_EXT(COMPOSITE_MLDSA44_RSA2048_PSS, encoder,
                  DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
                  p11prov_composite_encoder_spki_der_functions);
@@ -1464,6 +1827,37 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
                  DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
                  p11prov_composite_encoder_spki_der_functions);
     ADD_ALGO_EXT(COMPOSITE_MLDSA87_ECDSA_P384, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    /* Phase 4 R7: profiles 4-8 */
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ED25519, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ED25519, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ECDSA_P256_SHA256, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ECDSA_P256_SHA256, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_RSA3072_PSS, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_RSA3072_PSS, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ED25519, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ED25519, encoder,
+                 DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_pem_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P384, encoder,
+                 DEFAULT_PROPERTY(",output=der,structure=SubjectPublicKeyInfo"),
+                 p11prov_composite_encoder_spki_der_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P384, encoder,
                  DEFAULT_PROPERTY(",output=pem,structure=SubjectPublicKeyInfo"),
                  p11prov_composite_encoder_spki_pem_functions);
     if (ctx->encode_pkey_as_pk11_uri) {
@@ -1482,6 +1876,14 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
         ADD_ALGO_EXT(ED448, encoder,
                      DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
                      p11prov_ec_edwards_encoder_priv_key_info_pem_functions);
+        /* X25519/X448 (remediation R16) — same shared-table pattern as
+         * Ed25519/Ed448 just above. */
+        ADD_ALGO_EXT(X25519, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_montgomery_encoder_priv_key_info_pem_functions);
+        ADD_ALGO_EXT(X448, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_montgomery_encoder_priv_key_info_pem_functions);
         ADD_ALGO_EXT(ML_DSA_44, encoder,
                      DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
                      p11prov_mldsa_encoder_priv_key_info_pem_functions);
@@ -1491,6 +1893,45 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
         ADD_ALGO_EXT(ML_DSA_87, encoder,
                      DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
                      p11prov_mldsa_encoder_priv_key_info_pem_functions);
+#define SLHDSA_ENCODER_URI_PEM(NAME) \
+    ADD_ALGO_EXT(NAME, encoder, \
+                 DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"), \
+                 p11prov_slhdsa_encoder_priv_key_info_pem_functions);
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHA2_128S)
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHAKE_128S)
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHA2_128F)
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHAKE_128F)
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHA2_192S)
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHAKE_192S)
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHA2_192F)
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHAKE_192F)
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHA2_256S)
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHAKE_256S)
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHA2_256F)
+        SLHDSA_ENCODER_URI_PEM(SLH_DSA_SHAKE_256F)
+#undef SLHDSA_ENCODER_URI_PEM
+        /* Phase 4 R9: HSS/LMS */
+        ADD_ALGO_EXT(HSS, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_hss_encoder_priv_key_info_pem_functions);
+        /* Remediation R41 (phase 8): XMSS/XMSS-MT */
+        ADD_ALGO_EXT(XMSS, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_xmss_encoder_priv_key_info_pem_functions);
+        ADD_ALGO_EXT(XMSSMT, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_xmssmt_encoder_priv_key_info_pem_functions);
+        /* ML-KEM (remediation R3 core) — one shared function/table across
+         * all 3 parameter sets, same as ML-DSA's block above. */
+        ADD_ALGO_EXT(ML_KEM_512, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_mlkem_encoder_priv_key_info_pem_functions);
+        ADD_ALGO_EXT(ML_KEM_768, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_mlkem_encoder_priv_key_info_pem_functions);
+        ADD_ALGO_EXT(ML_KEM_1024, encoder,
+                     DEFAULT_PROPERTY(",output=pem,structure=PrivateKeyInfo"),
+                     p11prov_mlkem_encoder_priv_key_info_pem_functions);
     }
 
     TERM_ALGO(encoder);
@@ -1509,6 +1950,39 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
                  p11prov_der_decoder_p11prov_ed25519_functions);
     ADD_ALGO_EXT(ED448, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
                  p11prov_der_decoder_p11prov_ed448_functions);
+    /* remediation R2: URI-PEM load-back for PQC key types. Each decoder's
+     * property-matched structure ("pk11-uri") is generic and type-agnostic
+     * (decoder.c) — the store side already emits the exact per-variant
+     * DATA_TYPE name each of these filters on (store.c), landed in R1 for
+     * SLH-DSA and pre-existing for ML-DSA/ML-KEM. */
+    ADD_ALGO_EXT(ML_DSA_44, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mldsa44_functions);
+    ADD_ALGO_EXT(ML_DSA_65, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mldsa65_functions);
+    ADD_ALGO_EXT(ML_DSA_87, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mldsa87_functions);
+    ADD_ALGO_EXT(ML_KEM_512, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mlkem512_functions);
+    ADD_ALGO_EXT(ML_KEM_768, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mlkem768_functions);
+    ADD_ALGO_EXT(ML_KEM_1024, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP),
+                 p11prov_der_decoder_p11prov_mlkem1024_functions);
+#define SLHDSA_DECODER_URI(NAME, suffix) \
+    ADD_ALGO_EXT(NAME, decoder, DEFAULT_PROPERTY(DER_DECODER_PROP), \
+                 p11prov_der_decoder_p11prov_##suffix##_functions);
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_128S, slhdsa_sha2_128s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_128S, slhdsa_shake_128s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_128F, slhdsa_sha2_128f)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_128F, slhdsa_shake_128f)
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_192S, slhdsa_sha2_192s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_192S, slhdsa_shake_192s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_192F, slhdsa_sha2_192f)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_192F, slhdsa_shake_192f)
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_256S, slhdsa_sha2_256s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_256S, slhdsa_shake_256s)
+    SLHDSA_DECODER_URI(SLH_DSA_SHA2_256F, slhdsa_sha2_256f)
+    SLHDSA_DECODER_URI(SLH_DSA_SHAKE_256F, slhdsa_shake_256f)
+#undef SLHDSA_DECODER_URI
     /* Composite SPKI decoders are DEFINED in composite.c but intentionally
      * NOT registered here. The implementation uses d2i_X509_PUBKEY which
      * itself invokes the OpenSSL DECODER chain, causing infinite recursion
@@ -1537,9 +2011,44 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
     ADD_ALGO(HKDF, hkdf, keymgmt, prop);
     ADD_ALGO_EXT(ED25519, keymgmt, prop, p11prov_ed25519_keymgmt_functions);
     ADD_ALGO_EXT(ED448, keymgmt, prop, p11prov_ed448_keymgmt_functions);
+    /* remediation R4: static, like every other keymgmt registration in this
+     * block — without it OpenSSL cannot load an X25519/X448 token key at
+     * all, so the mechanism-gated exchange registration alone (further up,
+     * in operations_init) is unreachable */
+    ADD_ALGO_EXT(X25519, keymgmt, prop, p11prov_x25519_keymgmt_functions);
+    ADD_ALGO_EXT(X448, keymgmt, prop, p11prov_x448_keymgmt_functions);
     ADD_ALGO_EXT(ML_DSA_44, keymgmt, prop, p11prov_mldsa44_keymgmt_functions);
     ADD_ALGO_EXT(ML_DSA_65, keymgmt, prop, p11prov_mldsa65_keymgmt_functions);
     ADD_ALGO_EXT(ML_DSA_87, keymgmt, prop, p11prov_mldsa87_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHA2_128S, keymgmt, prop,
+                 p11prov_slhdsa_sha2_128s_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHAKE_128S, keymgmt, prop,
+                 p11prov_slhdsa_shake_128s_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHA2_128F, keymgmt, prop,
+                 p11prov_slhdsa_sha2_128f_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHAKE_128F, keymgmt, prop,
+                 p11prov_slhdsa_shake_128f_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHA2_192S, keymgmt, prop,
+                 p11prov_slhdsa_sha2_192s_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHAKE_192S, keymgmt, prop,
+                 p11prov_slhdsa_shake_192s_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHA2_192F, keymgmt, prop,
+                 p11prov_slhdsa_sha2_192f_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHAKE_192F, keymgmt, prop,
+                 p11prov_slhdsa_shake_192f_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHA2_256S, keymgmt, prop,
+                 p11prov_slhdsa_sha2_256s_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHAKE_256S, keymgmt, prop,
+                 p11prov_slhdsa_shake_256s_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHA2_256F, keymgmt, prop,
+                 p11prov_slhdsa_sha2_256f_keymgmt_functions);
+    ADD_ALGO_EXT(SLH_DSA_SHAKE_256F, keymgmt, prop,
+                 p11prov_slhdsa_shake_256f_keymgmt_functions);
+    /* Phase 4 R9: HSS/LMS */
+    ADD_ALGO(HSS, hss, keymgmt, prop);
+    /* Remediation R41 (phase 8): XMSS/XMSS^MT */
+    ADD_ALGO(XMSS, xmss, keymgmt, prop);
+    ADD_ALGO(XMSSMT, xmssmt, keymgmt, prop);
     ADD_ALGO_EXT(ML_KEM_512, keymgmt, prop, p11prov_mlkem512_keymgmt_functions);
     ADD_ALGO_EXT(ML_KEM_768, keymgmt, prop, p11prov_mlkem768_keymgmt_functions);
     ADD_ALGO_EXT(ML_KEM_1024, keymgmt, prop, p11prov_mlkem1024_keymgmt_functions);
@@ -1550,6 +2059,17 @@ static CK_RV static_operations_init(P11PROV_CTX *ctx)
                  p11prov_composite_mldsa65_ecdsa_p256_keymgmt_functions);
     ADD_ALGO_EXT(COMPOSITE_MLDSA87_ECDSA_P384, keymgmt, prop,
                  p11prov_composite_mldsa87_ecdsa_p384_keymgmt_functions);
+    /* Phase 4 R7: profiles 4-8 */
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ED25519, keymgmt, prop,
+                 p11prov_composite_mldsa44_ed25519_keymgmt_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA44_ECDSA_P256_SHA256, keymgmt, prop,
+                 p11prov_composite_mldsa44_ecdsa_p256_keymgmt_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_RSA3072_PSS, keymgmt, prop,
+                 p11prov_composite_mldsa65_rsa3072_pss_keymgmt_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ED25519, keymgmt, prop,
+                 p11prov_composite_mldsa65_ed25519_keymgmt_functions);
+    ADD_ALGO_EXT(COMPOSITE_MLDSA65_ECDSA_P384, keymgmt, prop,
+                 p11prov_composite_mldsa65_ecdsa_p384_keymgmt_functions);
     TERM_ALGO(keymgmt);
 
 #if SKEY_SUPPORT == 1
@@ -1604,6 +2124,9 @@ p11prov_query_operation(void *provctx, int operation_id, int *no_cache)
     case OSSL_OP_DIGEST:
         *no_cache = ctx->status == P11PROV_UNINITIALIZED ? 1 : 0;
         return ctx->op_digest;
+    case OSSL_OP_MAC:
+        *no_cache = ctx->status == P11PROV_UNINITIALIZED ? 1 : 0;
+        return ctx->op_mac;
     case OSSL_OP_KDF:
         *no_cache = ctx->status == P11PROV_UNINITIALIZED ? 1 : 0;
         return ctx->op_kdf;

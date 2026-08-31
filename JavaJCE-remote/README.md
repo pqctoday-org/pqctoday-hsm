@@ -17,9 +17,23 @@ Narrower than `JavaJCE/` by real proto contract, not omission — exactly
 what `remoting/proto/proto/pkcs11_remote.proto`'s `Algorithm` enum
 covers:
 
-- `KeyPairGenerator`/`KeyFactory`: Ed25519, ML-DSA-44/65/87,
-  ML-KEM-512/768/1024
-- `Signature`: Ed25519, ML-DSA-44/65/87 (pure, single-part)
+- `KeyPairGenerator`: Ed25519, ML-DSA-44/65/87, ML-KEM-512/768/1024. No
+  `KeyFactory` is registered for any of these — this module's flows are
+  self-contained (generate/sign/verify/encapsulate against a key this
+  process created), not "import bytes for a key generated elsewhere," so
+  there's no reconstruction path to back a `KeyFactory` with. See
+  `docs/implementation-plan-jca-remaining-gaps-2026-08-25.md` §7 E1 for
+  the underlying architecture decision.
+- `Signature`: Ed25519, ML-DSA-44/65/87 (pure, single-part), plus
+  `ML-DSA-44/65/87-ExternalMu` (FIPS 204 external-µ mode, added
+  2026-08-31 — remote parity with local `JavaJCE/`'s own 2026-08-30
+  addition). `SignRequest`/`VerifyRequest` in `pkcs11_remote.proto` carry
+  a `bool external_mu` field for this; the buffered bytes for an
+  `-ExternalMu` `Signature` instance are the already-computed 64-byte
+  ML-DSA message representative µ, not a raw message — the server signs/
+  verifies µ directly instead of hashing it. Fixed service names, not a
+  parameter flag, mirroring local `JavaJCE`'s own
+  `registerMLDSAExternalMu` convention exactly.
 - `KEM`: ML-KEM-512/768/1024, registered under the bare `"ML-KEM"` name
   too (what JDK's own hybrid-TLS path requests)
 - `SoftHSMv3RemoteProvider.getSelfSignedCertificate(KeyPair, String subjectCn, long validityDays)`

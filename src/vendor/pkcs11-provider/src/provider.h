@@ -114,6 +114,20 @@
 #define P11PROV_NAME_HKDF "HKDF"
 #define P11PROV_NAMES_HKDF P11PROV_NAME_HKDF
 #define P11PROV_DESCS_HKDF "PKCS11 HKDF Implementation"
+/* Phase 4 R10: matches the default provider's own "PBKDF2" name +
+ * id-PBKDF2 OID — confirmed live via `openssl list -kdf-algorithms
+ * -provider default` (`{ 1.2.840.113549.1.5.12, PBKDF2 } @ default`),
+ * the same check R8 (MAC) made before assuming a name convention. */
+#define P11PROV_NAME_PBKDF2 "PBKDF2"
+#define P11PROV_NAMES_PBKDF2 "PBKDF2:1.2.840.113549.1.5.12"
+#define P11PROV_DESCS_PBKDF2 "PKCS11 PBKDF2 Implementation"
+/* Phase 5 R22: no OID alias — confirmed live via `openssl list
+ * -kdf-algorithms -provider default` (plain "KBKDF @ default", unlike
+ * PBKDF2's OID-qualified entry above), the same check made before
+ * assuming a name convention. */
+#define P11PROV_NAME_KBKDF "KBKDF"
+#define P11PROV_NAMES_KBKDF "KBKDF"
+#define P11PROV_DESCS_KBKDF "PKCS11 SP800-108 KBKDF Implementation"
 #define P11PROV_NAMES_ED25519 "ED25519:1.3.101.112"
 #define P11PROV_NAME_ED25519 "ED25519"
 #define P11PROV_DESCS_ED25519 "PKCS11 ED25519 Implementation"
@@ -126,6 +140,18 @@
 #define P11PROV_DESCS_ED448 "PKCS11 ED448 Implementation"
 #define P11PROV_NAMES_ED448ph "ED448ph"
 #define P11PROV_DESCS_ED448ph "PKCS11 ED448ph implementation"
+
+/* Remediation item 4 (2026-08-30 OpenSSL-provider gap audit): CKM_EDDSA_PH
+ * is a SoftHSMv3 vendor-range mechanism (src/lib/pkcs11/pkcs11t.h:
+ * `CKM_VENDOR_DEFINED | 0x1057`, "Our internal alias for Pre-hash EdDSA
+ * (phFlag=1)") -- not part of the standard PKCS#11 v3.2 header this
+ * provider vendors (src/vendor/pkcs11-provider/src/pkcs11.h), so it has
+ * no equivalent there. Defined locally here rather than in that
+ * upstream-tracked file, same pattern mac.h already uses for
+ * CKM_KMAC_128/256. */
+#ifndef CKM_EDDSA_PH
+#define CKM_EDDSA_PH (CKM_VENDOR_DEFINED | 0x00001057UL)
+#endif
 #define P11PROV_NAMES_ML_DSA_44 \
     "ML-DSA-44:MLDSA44:2.16.840.1.101.3.4.3.17:id-ml-dsa-44"
 #define P11PROV_DESCS_ML_DSA_44 "PKCS11 ML-DSA-44 implementation"
@@ -135,6 +161,31 @@
 #define P11PROV_NAMES_ML_DSA_87 \
     "ML-DSA-87:MLDSA87:2.16.840.1.101.3.4.3.19:id-ml-dsa-87"
 #define P11PROV_DESCS_ML_DSA_87 "PKCS11 ML-DSA-87 implementation"
+
+/* Remediation item 5 (2026-08-30, risk-accepted): bespoke vendor names --
+ * unlike ML_DSA_44/65/87 above, OpenSSL itself has no native "Pre Hash
+ * ML-DSA"/"Pre Hash SLH-DSA" algorithm identity or OID to alias (real
+ * OpenSSL 4.0 docs, EVP_SIGNATURE-ML-DSA(7) / EVP_SIGNATURE-SLH-DSA(7) --
+ * confirmed byte-identical in the vendored OpenSSL 3.6.3 tree this
+ * provider actually builds against, doc/man7/EVP_SIGNATURE-ML-DSA.pod /
+ * EVP_SIGNATURE-SLH-DSA.pod: "OpenSSL does not support Pre Hash ML-DSA
+ * [/SLH-DSA] Signature Generation, but this may be done by the user by
+ * doing Pre hash encoding externally and then choosing the option to not
+ * encode the message" -- message-encoding=0 is documented as "used for
+ * testing", not a stable production contract). One generic name per
+ * family, paramset-agnostic (see sig/mldsa.c's p11prov_hash_mldsa_* /
+ * sig/slhdsa.c's p11prov_hash_slhdsa_* — paramset is resolved from the
+ * bound key at runtime, mirroring sig/xmss.c's own generic-name pattern),
+ * following this file's own COMPOSITE_*-style convention for names this
+ * provider invents rather than a real external standard/OID. */
+#define P11PROV_NAMES_HASH_ML_DSA "HASH-ML-DSA"
+#define P11PROV_DESCS_HASH_ML_DSA \
+    "PKCS11 HashML-DSA pre-hash implementation (CKM_HASH_ML_DSA* family; " \
+    "rests on OpenSSL's own testing-only message-encoding=0 escape hatch)"
+#define P11PROV_NAMES_HASH_SLH_DSA "HASH-SLH-DSA"
+#define P11PROV_DESCS_HASH_SLH_DSA \
+    "PKCS11 HashSLH-DSA pre-hash implementation (CKM_HASH_SLH_DSA* family; " \
+    "rests on OpenSSL's own testing-only message-encoding=0 escape hatch)"
 
 /* Composite-ML-DSA signature profiles per draft-ietf-lamps-pq-composite-sigs-19.
  * OIDs are stable in draft-19 §6; PKIX alg arc 1.3.6.1.5.5.7.6.{37,45,49}. */
@@ -153,15 +204,52 @@
 #define P11PROV_DESCS_COMPOSITE_MLDSA87_ECDSA_P384 \
     "PKCS11 Composite ML-DSA-87 + ECDSA-P384-SHA512 (draft-lamps-19)"
 
+/* Phase 4 R7: profiles 4-8. OIDs verified against kmip/src/kmip30/algos.rs
+ * and draft-lamps-pq-composite-sigs-19 §6. */
+#define P11PROV_NAMES_COMPOSITE_MLDSA44_ED25519 \
+    "MLDSA44-Ed25519-SHA512:id-MLDSA44-Ed25519-SHA512:1.3.6.1.5.5.7.6.39"
+#define P11PROV_DESCS_COMPOSITE_MLDSA44_ED25519 \
+    "PKCS11 Composite ML-DSA-44 + Ed25519-SHA512 (draft-lamps-19)"
+
+#define P11PROV_NAMES_COMPOSITE_MLDSA44_ECDSA_P256_SHA256 \
+    "MLDSA44-ECDSA-P256-SHA256:id-MLDSA44-ECDSA-P256-SHA256:1.3.6.1.5.5.7.6.40"
+#define P11PROV_DESCS_COMPOSITE_MLDSA44_ECDSA_P256_SHA256 \
+    "PKCS11 Composite ML-DSA-44 + ECDSA-P256-SHA256 (draft-lamps-19)"
+
+#define P11PROV_NAMES_COMPOSITE_MLDSA65_RSA3072_PSS \
+    "MLDSA65-RSA3072-PSS-SHA512:id-MLDSA65-RSA3072-PSS-SHA512:1.3.6.1.5.5.7.6.41"
+#define P11PROV_DESCS_COMPOSITE_MLDSA65_RSA3072_PSS \
+    "PKCS11 Composite ML-DSA-65 + RSA-3072-PSS-SHA512 (draft-lamps-19)"
+
+#define P11PROV_NAMES_COMPOSITE_MLDSA65_ED25519 \
+    "MLDSA65-Ed25519-SHA512:id-MLDSA65-Ed25519-SHA512:1.3.6.1.5.5.7.6.48"
+#define P11PROV_DESCS_COMPOSITE_MLDSA65_ED25519 \
+    "PKCS11 Composite ML-DSA-65 + Ed25519-SHA512 (draft-lamps-19)"
+
+#define P11PROV_NAMES_COMPOSITE_MLDSA65_ECDSA_P384 \
+    "MLDSA65-ECDSA-P384-SHA512:id-MLDSA65-ECDSA-P384-SHA512:1.3.6.1.5.5.7.6.46"
+#define P11PROV_DESCS_COMPOSITE_MLDSA65_ECDSA_P384 \
+    "PKCS11 Composite ML-DSA-65 + ECDSA-P384-SHA512 (draft-lamps-19)"
+
 /* Composite keymgmt / signature / encoder dispatch tables (composite.c) */
 extern const OSSL_DISPATCH p11prov_composite_mldsa44_rsa2048_pss_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p256_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa87_ecdsa_p384_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa44_ed25519_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa44_ecdsa_p256_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_rsa3072_pss_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_ed25519_keymgmt_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p384_keymgmt_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa44_rsa2048_pss_sig_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p256_sig_functions[];
 extern const OSSL_DISPATCH p11prov_composite_mldsa87_ecdsa_p384_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa44_ed25519_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa44_ecdsa_p256_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_rsa3072_pss_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_ed25519_sig_functions[];
+extern const OSSL_DISPATCH p11prov_composite_mldsa65_ecdsa_p384_sig_functions[];
 /* Single SPKI encoder per output format — keyed by the composite profile
- * embedded in the keydata, so one table serves all three composite OIDs. */
+ * embedded in the keydata, so one table serves all eight composite OIDs. */
 extern const OSSL_DISPATCH p11prov_composite_encoder_spki_der_functions[];
 extern const OSSL_DISPATCH p11prov_composite_encoder_spki_pem_functions[];
 /* Per-profile SPKI DER decoders — used by X509_get0_pubkey to round-trip
@@ -183,9 +271,44 @@ extern const OSSL_DISPATCH
 #define P11PROV_NAMES_X448 "X448:1.3.101.111"
 #define P11PROV_DESCS_X448 "PKCS11 X448 Implementation"
 
-#define P11PROV_NAMES_SLH_DSA "SLH-DSA"
-#define P11PROV_NAME_SLH_DSA P11PROV_NAMES_SLH_DSA
-#define P11PROV_DESCS_SLH_DSA "PKCS11 SLH-DSA Implementation"
+/* SLH-DSA (FIPS 205), all 12 parameter sets — per-variant like ML-DSA's
+ * 44/65/87 (not the single generic name the earlier scaffolding used),
+ * so each variant gets its own OpenSSL namemap identity and
+ * `-algorithm SLH-DSA-SHA2-128s` etc. via `?provider=pkcs11` resolves
+ * straight to this provider's implementation instead of a name that
+ * doesn't match OpenSSL's own 12 native algorithm names. */
+#define P11PROV_NAMES_SLH_DSA_SHA2_128S "SLH-DSA-SHA2-128s"
+#define P11PROV_DESCS_SLH_DSA_SHA2_128S "PKCS11 SLH-DSA-SHA2-128s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_128S "SLH-DSA-SHAKE-128s"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_128S "PKCS11 SLH-DSA-SHAKE-128s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHA2_128F "SLH-DSA-SHA2-128f"
+#define P11PROV_DESCS_SLH_DSA_SHA2_128F "PKCS11 SLH-DSA-SHA2-128f Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_128F "SLH-DSA-SHAKE-128f"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_128F "PKCS11 SLH-DSA-SHAKE-128f Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHA2_192S "SLH-DSA-SHA2-192s"
+#define P11PROV_DESCS_SLH_DSA_SHA2_192S "PKCS11 SLH-DSA-SHA2-192s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_192S "SLH-DSA-SHAKE-192s"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_192S "PKCS11 SLH-DSA-SHAKE-192s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHA2_192F "SLH-DSA-SHA2-192f"
+#define P11PROV_DESCS_SLH_DSA_SHA2_192F "PKCS11 SLH-DSA-SHA2-192f Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_192F "SLH-DSA-SHAKE-192f"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_192F "PKCS11 SLH-DSA-SHAKE-192f Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHA2_256S "SLH-DSA-SHA2-256s"
+#define P11PROV_DESCS_SLH_DSA_SHA2_256S "PKCS11 SLH-DSA-SHA2-256s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_256S "SLH-DSA-SHAKE-256s"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_256S "PKCS11 SLH-DSA-SHAKE-256s Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHA2_256F "SLH-DSA-SHA2-256f"
+#define P11PROV_DESCS_SLH_DSA_SHA2_256F "PKCS11 SLH-DSA-SHA2-256f Implementation"
+#define P11PROV_NAMES_SLH_DSA_SHAKE_256F "SLH-DSA-SHAKE-256f"
+#define P11PROV_DESCS_SLH_DSA_SHAKE_256F "PKCS11 SLH-DSA-SHAKE-256f Implementation"
+/* Phase 4 R9: HSS/LMS. This provider generates/signs via CKK_HSS (the
+ * project's own key type — see CLAUDE.md), a genuinely different
+ * EVP_PKEY identity from OpenSSL's own software "LMS", so it gets its
+ * own name rather than aliasing into that one. */
+#define P11PROV_NAMES_HSS "HSS"
+#define P11PROV_DESCS_HSS "PKCS11 HSS/LMS Implementation"
+/* keymgmt tables: keymgmt.h. Encoder tables: encoder.h. Signature tables:
+ * sig/signature.h. Matches ML-DSA's own per-header convention. */
 
 #define P11PROV_NAMES_ML_KEM "ML-KEM:ML-KEM-512:ML-KEM-768:ML-KEM-1024"
 #define P11PROV_NAME_ML_KEM P11PROV_NAMES_ML_KEM
@@ -200,6 +323,10 @@ extern const OSSL_DISPATCH
 #define P11PROV_NAMES_XMSS "XMSS"
 #define P11PROV_NAME_XMSS P11PROV_NAMES_XMSS
 #define P11PROV_DESCS_XMSS "PKCS11 XMSS Implementation"
+/* Remediation R41 (phase 8) */
+#define P11PROV_NAMES_XMSSMT "XMSSMT:XMSS-MT"
+#define P11PROV_NAME_XMSSMT P11PROV_NAMES_XMSSMT
+#define P11PROV_DESCS_XMSSMT "PKCS11 XMSS^MT Implementation"
 
 #define P11PROV_NAMES_RAND "PKCS11-RAND"
 #define P11PROV_DESCS_RAND "PKCS11 Random Generator"
@@ -290,6 +417,41 @@ extern const OSSL_DISPATCH
 #define P11PROV_DESCS_AES_192_CCM "AES-192 CCM PKCS11 Provider Implementation"
 #define P11PROV_NAMES_AES_128_CCM "AES-128-CCM:id-aes128-CCM"
 #define P11PROV_DESCS_AES_128_CCM "AES-128 CCM PKCS11 Provider Implementation"
+/* AES-XTS remediation item (2026-08-30). Names confirmed against
+ * `docs.openssl.org/3.6/man7/EVP_CIPHER-AES/`: only 128/256-bit variants
+ * exist (XTS combines two AES keys, so there is no 192-bit XTS). */
+#define P11PROV_NAMES_AES_256_XTS "AES-256-XTS"
+#define P11PROV_DESCS_AES_256_XTS "AES-256 XTS PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_128_XTS "AES-128-XTS"
+#define P11PROV_DESCS_AES_128_XTS "AES-128 XTS PKCS11 Provider Implementation"
+/* AES Key Wrap remediation item (2026-08-30). Names confirmed against
+ * `docs.openssl.org/3.6/man7/EVP_CIPHER-AES/`. "AES-*-WRAP-PAD" (RFC
+ * 5649) is registered once, backed by CKM_AES_KEY_WRAP_KWP -- see
+ * cipher.c's own DISPATCH_TABLE_CIPHER_WRAP_FN(..., wrappad, ...) call
+ * sites for why CKM_AES_KEY_WRAP_PAD needs no separate registration. */
+#define P11PROV_NAMES_AES_256_WRAP "AES-256-WRAP:id-aes256-wrap"
+#define P11PROV_DESCS_AES_256_WRAP "AES-256 WRAP PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_192_WRAP "AES-192-WRAP:id-aes192-wrap"
+#define P11PROV_DESCS_AES_192_WRAP "AES-192 WRAP PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_128_WRAP "AES-128-WRAP:id-aes128-wrap"
+#define P11PROV_DESCS_AES_128_WRAP "AES-128 WRAP PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_256_WRAP_PAD "AES-256-WRAP-PAD:id-aes256-wrap-pad"
+#define P11PROV_DESCS_AES_256_WRAP_PAD \
+    "AES-256 WRAP-PAD PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_192_WRAP_PAD "AES-192-WRAP-PAD:id-aes192-wrap-pad"
+#define P11PROV_DESCS_AES_192_WRAP_PAD \
+    "AES-192 WRAP-PAD PKCS11 Provider Implementation"
+#define P11PROV_NAMES_AES_128_WRAP_PAD "AES-128-WRAP-PAD:id-aes128-wrap-pad"
+#define P11PROV_DESCS_AES_128_WRAP_PAD \
+    "AES-128 WRAP-PAD PKCS11 Provider Implementation"
+/* Phase 5 R26. Names confirmed live against `openssl list -cipher-
+ * algorithms -provider default` -- no OID alias for either, unlike most
+ * AES variants above. */
+#define P11PROV_NAMES_CHACHA20 "ChaCha20"
+#define P11PROV_DESCS_CHACHA20 "ChaCha20 PKCS11 Provider Implementation"
+#define P11PROV_NAMES_CHACHA20_POLY1305 "ChaCha20-Poly1305"
+#define P11PROV_DESCS_CHACHA20_POLY1305 \
+    "ChaCha20-Poly1305 PKCS11 Provider Implementation"
 #define P11PROV_NAME_GENERIC_SECRET "GENERIC-SECRET"
 #define P11PROV_NAMES_GENERIC_SECRET P11PROV_NAME_GENERIC_SECRET
 #define P11PROV_DESCS_GENERIC_SECRET "PKCS11 Generic Secret Implementation"
@@ -377,7 +539,6 @@ int p11prov_pop_error_to_mark(P11PROV_CTX *ctx);
     static OSSL_FUNC_##type##_##name##_fn prefix##_##name
 
 extern const OSSL_DISPATCH p11prov_slhdsa_signature_functions[];
-extern const OSSL_DISPATCH p11prov_xmss_signature_functions[];
 extern const OSSL_DISPATCH p11prov_mlkem_kem_functions[];
 extern const OSSL_DISPATCH p11prov_mlkem512_kem_functions[];
 extern const OSSL_DISPATCH p11prov_mlkem768_kem_functions[];
@@ -397,6 +558,7 @@ extern const OSSL_DISPATCH p11prov_mlkem1024_keymgmt_functions[];
 #include "kdf.h"
 #include "encoder.h"
 #include "digests.h"
+#include "mac.h"
 #include "util.h"
 #include "session.h"
 #include "slot.h"
@@ -411,5 +573,18 @@ extern const OSSL_DISPATCH p11prov_mlkem1024_keymgmt_functions[];
 /* TLS */
 int tls_group_capabilities(OSSL_CALLBACK *cb, void *arg);
 int tls_sigalg_capabilities(OSSL_CALLBACK *cb, void *arg);
+
+/* Phase 5 R25: real RFC 8554 HSS signature size for a given key (sig/hss.c),
+ * shared with keymgmt.c's own OSSL_PKEY_PARAM_MAX_SIZE so the two never
+ * drift apart. */
+size_t hss_sig_size_for_key(P11PROV_OBJ *key);
+
+/* Remediation R41 (phase 8): real RFC 8391/SP 800-208 XMSS/XMSS^MT
+ * signature size for a given key (sig/xmss.c), shared with keymgmt.c's
+ * own OSSL_PKEY_PARAM_MAX_SIZE -- same reason as hss_sig_size_for_key
+ * above. Reads CKA_PARAMETER_SET off the key; `is_mt` selects the
+ * XMSS vs XMSS^MT formula (the two have different parameter-set value
+ * spaces and different signature layouts, RFC 8391 SS4.2 vs SS4.2.3). */
+size_t xmss_sig_size_for_key(P11PROV_OBJ *key, bool is_mt);
 
 #endif /* _PROVIDER_H */

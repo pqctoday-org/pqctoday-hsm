@@ -8,7 +8,92 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.27.0] — 2026-08-31
+
+**Consolidated release: closes the WS-0/WS-8 PKCS#11 v3.2 coverage
+remediation (both engines), a real Rust engine correctness bug
+(`CKM_HKDF_DERIVE`'s silent PRF substitution), a security-relevant EdDSA
+mechanism-gating bypass in the OpenSSL provider, a full JDK 27 JCA/JCE
+provider gap-closure pass, and the KMIP/CACP coverage audit that ties the
+KMIP protocol layer and the crypto-agility policy engine to everything the
+PKCS#11 engines gained this round.** See `RELEASING.md`'s evidence
+checklist for what's regenerated alongside this release.
+
 ### Added
+
+- **KMIP/CACP: closed a full audit's worth of gaps between the engine's
+  PKCS#11 mechanism surface and what KMIP/CACP could actually reach.** A
+  2026-08-30 coverage audit found that several mechanisms already live in
+  the PKCS#11 engines had zero path through KMIP or CACP's policy
+  registry — real capability, invisible to the product's own
+  crypto-agility control plane. Closed, each with independent evidence
+  (byte-exact against real NIST ACVP vectors or a separately-generated
+  reference, not self-consistency):
+  - **HMAC-SHA3-256/512 via the `Mac` op** — the engine has supported
+    `CKM_SHA3_{256,512}_HMAC` since before this crate existed; the op
+    layer only ever dispatched SHA-2. Wired both `KmipAlgorithm` and the
+    `Mac` op's dispatch; verified against an independent Python
+    `hashlib`/`hmac` computation.
+  - **`CKM_AES_KEY_WRAP_KWP`** — every registry (CACP's policy grammar,
+    the `CKA_ALLOWED_MECHANISMS` builder) already knew the name; the one
+    op that would use it, `wrap_key_value`/`unwrap_key_value`, hard-
+    rejected anything but plain `NISTKeyWrap` before reaching the engine.
+    New engine-level `aes_key_wrap_kwp`/`_unwrap_kwp` (RFC 5649),
+    verified against Python `cryptography`'s
+    `aes_key_wrap_with_padding` on a 60-byte, non-8-aligned plaintext
+    (proving KWP's real benefit over plain AES-KW).
+  - **EdDSA context-string (RFC 8032), both curves.** Three independent
+    reads of the engine's own `SoftHSM_sign.cpp` (this session's, and
+    two concurrent provider-layer fixes below) converged on the same
+    finding: `CKM_EDDSA_PH` is a parameterless legacy shorthand — real
+    mode selection goes through `CKM_EDDSA` + `CK_EDDSA_PARAMS`. Ed448
+    uses `ed448-goldilocks`'s own `sign_ctx`/`verify_ctx` directly.
+    **Ed25519ctx had no equivalent in the pinned `ed25519-dalek` 2.2.0
+    at all** — implemented from RFC 8032 §5.1 using only that crate's
+    public API (`ExpandedSecretKey`'s documented key expansion,
+    `curve25519-dalek`'s public `Scalar`/`EdwardsPoint`), mirroring the
+    crate's own internal dom2-prefixed scheme with the one corrected
+    domain flag. Verified byte-exact, both sign and verify, against
+    PyCryptodome (`Crypto.Signature.eddsa`, `mode='rfc8032'`) — a
+    different Ed25519 implementation entirely. Threaded through KMIP's
+    `Sign`/`SignatureVerify` via the same `context_string` field the
+    PQC-signing branch already populated.
+  - **`DeriveKey`'s HASH method now reaches the real engine.** Its
+    sibling HMAC method already preferred the engine (`hmac_prf`) when a
+    handle was available, software fallback only for KMIP-store-only
+    keys; the HASH method never tried the engine at all. Wired to the
+    engine's own `digest_key_derivation` (`CKM_SHA*_KEY_DERIVATION`,
+    itself unused by any caller before this despite existing
+    specifically for this seam) — reads the resulting derived-secret
+    object's value, then destroys the transient object.
+  - **`DeriveKey`'s SP 800-108 Double-Pipeline mode.** Same
+    architecture as Counter mode (no dedicated engine primitive needed —
+    built on the existing engine-first `hmac_prf`), construction
+    verified against this repo's real ACVP vectors and the engine's own
+    `sp800_108_run_double_pipeline`.
+  - **`CKM_AES_CCM` and `CKM_AES_OFB` via `Encrypt`/`Decrypt`.** The
+    engine's WS-8 cipher work (below) had no `native::`-level entry
+    point for either — only inline FFI dispatch. Extracted thin
+    key-bytes wrappers reusing the same clean `crypto/multipart.rs`
+    primitives the FFI path already calls (`ccm_encrypt`/`_decrypt`,
+    `OfbState`), so nothing is duplicated between the two call paths.
+    Each verified byte-exact against real NIST ACVP KATs, plus
+    tamper-detection and AAD-authentication checks for CCM. CFB
+    (128/8/1) got the same engine-level wrappers but is **not** wired
+    through KMIP: KMIP's own Block Cipher Mode wire enum has exactly one
+    generic CFB codepoint, no width distinction — picking a default
+    silently would be a real design decision, not a coding task, and is
+    left open pending one.
+  - A non-fatal loader-time warning for policy rules that name a
+    mechanism/mode CACP's grammar recognizes but the op layer can't yet
+    execute (e.g. `XTS`, `CFB`) — previously such a rule loaded silently
+    and looked like it was enforcing something.
+  - Deliberately left as documented, permanent KMIP-unreachable gaps
+    (not implementation debt): `CKM_AES_GMAC` (KMIP 3.0 has no wire
+    representation for GMAC at all) and MAC general-length/truncated-tag
+    requests (no field anywhere in the MAC Request Payload for it).
+    `CKM_ML_DSA_EXTERNAL_MU_GEN` similarly has no KMIP path — closing it
+    would need a new client-facing operation, not a registry entry.
 
 - **CACP: modular crypto-agility policies — several small, non-conflicting
   files instead of one that keeps growing.** A single enterprise-wide policy
@@ -140,7 +225,112 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   running the identical `EVP_aes_*_wrap_pad()` path; a new conformance test
   asserts the two produce byte-identical output.
 
+- **C++ engine: 6 new `*_KEY_DERIVATION` mechanisms
+  (`CKM_SHA{256,384,512,3_256,3_384,3_512}_KEY_DERIVATION`, WS-6.2).**
+  `C_GetMechanismList` never advertised any of them and `C_DeriveKey`
+  answered `CKR_MECHANISM_INVALID` for all six — Rust already had the
+  identical set, ACVP-proven. Ported into `SoftHSM_keygen.cpp` mirroring
+  the existing `CKM_SHAKE_256_KEY_DERIVATION` arm's four touch points
+  (mechanism-accept switch, generic-secret-default condition, key-class
+  check, parameter-shape validation), registered in the mechanism table
+  and `C_GetMechanismInfo`. Each derive is cross-checked against this
+  same engine's own `C_Digest` output for the same hash (per spec the
+  two must be byte-identical), grounding correctness in evidence already
+  proven elsewhere rather than a new external oracle. ACVP: 180 → 186
+  PASS.
+
+- **C++ engine: SHA-512/224 and SHA-512/256 (WS-6.3) — digest, HMAC,
+  HMAC_GENERAL, and `*_KEY_DERIVATION`, all four.** FIPS 180-4's
+  truncated SHA-512 variants (distinct standardized initial hash
+  values, not SHA-512 output truncated post-hoc — via OpenSSL's
+  `EVP_sha512_224()`/`EVP_sha512_256()`) were entirely absent from C++;
+  Rust already partly had them. `CKM_SHA512_T` (arbitrary
+  caller-specified truncation length) is deliberately NOT implemented —
+  OpenSSL has no generic parameterized `EVP_MD` for it, would need a
+  from-scratch FIPS 180-4 §5.3.6 IV computation — documented, not
+  silently skipped. Wired against real Tier-1 ACVP digest and HMAC
+  KATs. ACVP: 209 → 219 PASS.
+
+- **Both engines: the WS-8 cipher-mechanism set — AES-GMAC, AES-XTS
+  (+`CKM_AES_XTS_KEY_GEN`), AES-OFB/CFB128/CFB8/CFB1, and the SP800-108
+  Double-Pipeline KDF — landed in C++ first this session, then ported to
+  Rust for parity, each backed by real ACVP vectors.** C++: new
+  `CKK_AES_XTS` key type threaded through the object model wherever
+  `CKK_AES` was hardcoded (`P11Attributes.cpp` check-value computation,
+  `SoftHSM_objects.cpp`'s object factory, `OSSLAES.cpp`'s AES bit-length
+  gate); GMAC via OpenSSL's `EVP_MAC` "GMAC" (required a new `setIV()`
+  virtual on `MacAlgorithm` and a `setTruncatedMacSize()` override,
+  caught by real ACVP evidence after the first pass silently failed
+  every truncated call). Rust: `CKM_AES_GMAC`/`CKM_SP800_108_DOUBLE_PIPELINE_KDF`
+  needed zero new dependencies; `CKM_AES_CCM` (`ccm` crate),
+  `CKM_AES_XTS`/`_KEY_GEN` (`xts-mode` crate, incl. a 5909-byte
+  ciphertext-stealing case), and `CKM_AES_OFB`/`CFB128`/`CFB8`/`CFB1`
+  (RustCrypto crates, `CFB1` hand-rolled — no published crate exists for
+  it) each added one; also closes `CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS`
+  (FIPS 186-5 A.2.2, P-256/384/521 — `secp256k1` isn't governed by
+  FIPS 186-5, so no ACVP evidence exists for it under this mode). C++
+  ACVP: 314 PASS after landing; Rust full regression suite
+  (`rust/test_p11_conformance.js`) 978/0 → **995/0**. See
+  `docs/remediation-plan-rust-pkcs11-v32-gaps-2026-08-30.md` for the
+  Rust side's per-item evidence table. `CKM_ECMQV_DERIVE` is
+  deliberately held back in both engines (protocol-risk gated).
+
 ### Fixed
+
+- **C++/test-harness: corrected the HashML-DSA/HashSLH-DSA pre-hash OID
+  encoding (WS-3.3) — a same-engine-blind-spot bug, not a test gap.**
+  `buildPreHashEncoding()` (`OSSLMLDSA.cpp` and its `OSSLSLHDSA.cpp`
+  twin) wrapped the FIPS 204/205 hash OID in a full X.509
+  `AlgorithmIdentifier` SEQUENCE instead of the raw OID both specs
+  actually call for in `M' = 0x01 || ctxLen || ctx || OID || PH(M)`.
+  Sign and verify used the same wrong bytes, so a same-engine round trip
+  stayed self-consistent — invisible until compared against the
+  vendored `fips204-patched`/`fips205-patched` reference crates. Real
+  deterministic sigGen KATs added for both ML-DSA (5 cases,
+  tgId 2/4/6/10/12) and SLH-DSA (7 cases, one per parameter set) —
+  byte-exact match isn't achievable for SLH-DSA sigGen (this engine's
+  OpenSSL backend and the ACVP reference generator make different,
+  individually FIPS-205-compliant randomness choices even in
+  deterministic mode — documented, verified via round-trip instead).
+  ACVP: 186 → 201 PASS across the three commits.
+
+- **Test harness: closed all 13 of WS-4's originally-orphaned ACVP
+  vector files** (real provenance on disk, zero test coverage) —
+  SHA-384/512 digest, ECDSA P-521, and a KMAC-128 negative KAT were the
+  final 6. Wiring P-521 surfaced a real bug in `importECPublicKey()`:
+  it hand-built the `CKA_EC_POINT` DER OCTET STRING with a single
+  length byte, correct only under 128 bytes — P-521's 133-byte point is
+  the first case to exceed that, silently corrupting the point and
+  failing every P-521 verify. Fixed with a real DER encoder (`asn1js`)
+  instead of patching the one-off overflow. ACVP: 201 → 209 PASS.
+
+- **Test harness: RSA signature KATs, 1/22 → 9/22 real evidence
+  (WS-5.1), plus a silent-wrong-answer bug in the test helper itself.**
+  `rsaVerify()` was a 3-case if/else hardcoding SHA-256/384 and silently
+  defaulting any other hash to SHA-256 with `sLen=32` — a wrong-but-
+  passing verify waiting to happen for any caller that hit the
+  fallback. Replaced with a full 9-hash PSS lookup table and removed
+  the silent salt-length default (PSS has no universal salt length).
+  ACVP: 219 → 227 PASS.
+
+- **Test harness: real X25519/X448 derive KAT via the actual spec
+  mechanism, `CKM_ECDH1_DERIVE` (WS-5.3) — `CKM_X448` had been
+  advertised and dispatched but never once executed.** The engine's
+  `CKM_X25519`/`CKM_X448` are vendor-range convenience aliases;
+  PKCS#11 v3.2 §6.3.11 defines exactly one derive mechanism for
+  Montgomery curves — `CKM_ECDH1_DERIVE` with a `CKK_EC_MONTGOMERY`
+  key — and that spec-compliant path had zero evidence too. Added
+  Montgomery-key import/derive helpers and the RFC 8410 `CKA_EC_PARAMS`
+  OIDs; vectors are RFC 7748 §5.2's iteration-1 case. ACVP: 227 → 229
+  PASS.
+
+- **Cross-engine differential harness: 6 new exhaustive scenarios**
+  giving full per-parameter-set coverage of ML-KEM keygen/encapsulate,
+  ML-DSA keygen/sign-verify, and SLH-DSA keygen/sign-verify across both
+  engines, plus a fix to the SP800-108 Double-Pipeline scenario (it was
+  driving `CK_SP800_108_ITERATION_VARIABLE`, not the
+  `CK_SP800_108_COUNTER` segment type C++ actually recognizes for that
+  mode). 4693 observations compared, 0 uncovered divergences.
 
 - **BREAKING (C++ engine): `C_WrapKey`/`C_UnwrapKey` under
   `CKM_RSA_PKCS_OAEP` now use the `hashAlg` you asked for, instead of
@@ -347,6 +537,49 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   KATs) — real defects for the Rust WS-2 gap-remediation pass, not this
   branch's scope. KMAC has real Tier-1 evidence but no harness helper yet.
   SHA3-384 still has no ACVP vector file at all.
+
+- **BREAKING (Rust engine): `CKM_HKDF_DERIVE` no longer silently
+  substitutes SHA-256 for an unrecognized PRF.** Unlike a missing-mechanism
+  gap, which fails loudly with a `CKR_*` error, this one didn't: a caller
+  requesting HKDF with any PRF other than SHA-384/512/SHA3-256/512 (found
+  by real ACVP KAT, not inspection alone) silently got SHA-256 HKDF output
+  instead — same shape of bug as the C++ engine's OAEP hash substitution
+  fixed earlier this release. Now rejects an unrecognized PRF with the
+  correct `CKR_*` error instead of guessing.
+- **Rust engine: SP800-108 Counter/Feedback KDF was missing SHA-1,
+  SHA-224, SHA3-224, and SHA-512-224/256 as PRF options** — a coverage
+  gap that failed safely (`CKR_MECHANISM_PARAM_INVALID`) rather than
+  silently, but was invisible without real ACVP vectors exercising those
+  PRFs. All five now supported, verified against real ACVP KATs.
+
+- **CACP: `Activate`/`Revoke`/`Destroy`/`Get`/`Locate` and the other
+  `Scope::Lifecycle` ops were refused under every named modular policy.**
+  Found via the hub's CACP playground: `Create` succeeds under the
+  `Classical` preset, then `Activate` is refused with `"No active module
+  covers op Activate; denying by default (uncovered-ops=deny)"`. Root
+  cause: none of the ~15 shipped presets declare `metadata.scopes:
+  [lifecycle]` — every one covers `signing`/`encryption`/
+  `key-establishment`/`global` only, since a crypto-agility policy has
+  never had anything to say about ops with no algorithm dimension. Under
+  the engine's default `uncovered-ops: Deny`, an op with no owning module
+  is refused outright, so basic key housekeeping was unreachable the
+  moment any named preset (not just `Classical`) was active — not a
+  deliberate policy choice, just no preset author having written the
+  necessarily-empty `lifecycle` module. Fixed structurally in
+  `Engine::evaluate_modular`: the whole `Lifecycle` scope is now exempt
+  from the uncovered-ops default, rather than requiring every current and
+  future preset to remember an empty scope declaration. Considered
+  leaving the attribute-write ops (`AddAttribute`/`ModifyAttribute`/
+  `SetAttribute`/etc.) gated as a hedge against post-creation tampering
+  with a `require_custom_attribute`-tagged key, but the one attribute
+  that would actually matter for crypto-agility — `CryptographicAlgorithm`
+  — is already protocol-level read-only
+  (`ops::attribute_mutate::attribute_is_read_only`), independent of
+  policy, so gating these ops here would not have protected anything
+  real. Two new engine tests pin the exemption's exact boundary (all 13
+  lifecycle ops allow through an otherwise-uncovered policy; a genuinely
+  uncovered op from any other scope still denies). `kmip/` full suite:
+  762 passed / 0 failed.
 
 ## [0.26.1] — 2026-08-27
 

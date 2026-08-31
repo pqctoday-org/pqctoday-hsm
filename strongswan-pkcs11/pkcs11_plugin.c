@@ -196,21 +196,39 @@ METHOD(plugin_t, get_features, int,
 			PLUGIN_PROVIDE(HASHER, HASH_SHA384),
 			PLUGIN_PROVIDE(HASHER, HASH_SHA512),
 	};
-	static plugin_feature_t f_dh[] = {
-		PLUGIN_REGISTER(KE, pkcs11_dh_create),
-			PLUGIN_PROVIDE(KE, MODP_2048_BIT),
-			PLUGIN_PROVIDE(KE, MODP_2048_224),
-			PLUGIN_PROVIDE(KE, MODP_2048_256),
-			PLUGIN_PROVIDE(KE, MODP_1536_BIT),
-			PLUGIN_PROVIDE(KE, MODP_3072_BIT),
-			PLUGIN_PROVIDE(KE, MODP_4096_BIT),
-			PLUGIN_PROVIDE(KE, MODP_6144_BIT),
-			PLUGIN_PROVIDE(KE, MODP_8192_BIT),
-			PLUGIN_PROVIDE(KE, MODP_1024_BIT),
-			PLUGIN_PROVIDE(KE, MODP_1024_160),
-			PLUGIN_PROVIDE(KE, MODP_768_BIT),
-			PLUGIN_PROVIDE(KE, MODP_CUSTOM),
-	};
+	/*
+	 * MODP (classical) Diffie-Hellman is intentionally NOT registered
+	 * here (no f_dh array/PLUGIN_PROVIDE(KE, MODP_*) block).
+	 *
+	 * pkcs11_dh_create()/create_modp() (pkcs11_dh.c) still implements the
+	 * CKM_DH_PKCS_KEY_PAIR_GEN/CKM_DH_PKCS_DERIVE path and would work
+	 * correctly against any PKCS#11 v3.2 token that actually supports
+	 * those mechanisms. But this plugin fork's only documented, tested
+	 * target — softhsmv3 (see README.md and
+	 * docs/softhsmv3opsguide.md §4) — implements ZERO CKM_DH_PKCS*
+	 * mechanisms (confirmed: `grep CKM_DH_PKCS src/lib/SoftHSM_slots.cpp`
+	 * returns nothing). Previously this plugin still advertised
+	 * MODP_2048_BIT et al. via PLUGIN_PROVIDE, so strongSwan would
+	 * consider them selectable for KE negotiation; pkcs11_dh.c's
+	 * find_token() (line ~312) would then never find a token exposing
+	 * the derive mechanism and pkcs11_dh_create() would return NULL —
+	 * a "registered but always fails at runtime" trap, not a genuine
+	 * missing-feature gap.
+	 *
+	 * We deregister at compile time rather than adding a runtime
+	 * mechanism probe here because, per this module's README/ops-guide,
+	 * there is no other-token deployment target for this fork today —
+	 * every documented and tested configuration points at softhsmv3.
+	 * If this plugin is ever deployed against a DIFFERENT PKCS#11 token
+	 * that DOES implement CKM_DH_PKCS*, reintroduce an f_dh block here,
+	 * ideally gated on a real runtime mechanism probe across the
+	 * configured token(s) (mirroring find_token()'s own enumeration)
+	 * rather than an unconditional PLUGIN_PROVIDE, so a mixed
+	 * softhsmv3-plus-other-token deployment doesn't regress the
+	 * softhsmv3 side back into this same trap. See
+	 * docs/remediation-plan-provider-wrapper-coverage-gaps-2026-08-31.md
+	 * §4.2 for the full analysis.
+	 */
 	static plugin_feature_t f_ecdh[] = {
 		PLUGIN_REGISTER(KE, pkcs11_dh_create),
 			PLUGIN_PROVIDE(KE, ECP_192_BIT),
@@ -221,7 +239,9 @@ METHOD(plugin_t, get_features, int,
 	};
 	static plugin_feature_t f_pqc[] = {
 		PLUGIN_REGISTER(KE, pkcs11_kem_create),
+			PLUGIN_PROVIDE(KE, ML_KEM_512),
 			PLUGIN_PROVIDE(KE, ML_KEM_768),
+			PLUGIN_PROVIDE(KE, ML_KEM_1024),
 		PLUGIN_REGISTER(PRIVKEY, pkcs11_private_key_connect, FALSE),
 			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_44),
 			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_65),
@@ -268,7 +288,7 @@ METHOD(plugin_t, get_features, int,
 			PLUGIN_PROVIDE(CUSTOM, "pkcs11-certs"),
 				PLUGIN_DEPENDS(CERT_DECODE, CERT_X509),
 	};
-	static plugin_feature_t f[countof(f_hash) + countof(f_dh) + countof(f_rng) +
+	static plugin_feature_t f[countof(f_hash) + countof(f_rng) +
 							  countof(f_ecdh) + countof(f_privkey) +
 							  countof(f_pubkey) + countof(f_manager) + countof(f_pqc)] = {};
 	static int count = 0;
@@ -299,7 +319,9 @@ METHOD(plugin_t, get_features, int,
 		if (lib->settings->get_bool(lib->settings,
 								"%s.plugins.pkcs11.use_dh", FALSE, lib->ns))
 		{
-			plugin_features_add(f, f_dh, countof(f_dh), &count);
+			/* No f_dh (MODP) here — see the comment above f_ecdh's
+			 * declaration for why MODP DH is intentionally not
+			 * registered against this engine. */
 			if (use_ecc)
 			{
 				plugin_features_add(f, f_ecdh, countof(f_ecdh), &count);

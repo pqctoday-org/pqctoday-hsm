@@ -7,6 +7,143 @@ file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+### Added — ML-DSA-44/87 and 8-of-12 SLH-DSA parameter set coverage (2026-08-31)
+
+This connector previously wired only ML-DSA-65 and SLH-DSA-SHA2-128s, even
+though the engine already supported all 3 ML-DSA and all 12 FIPS 205 SLH-DSA
+parameter sets, and the governing IETF drafts already named most of them.
+Remediation plan §3 (`docs/remediation-plan-provider-wrapper-coverage-gaps-2026-08-31.md`).
+
+**Code changes:**
+- `patches/ssh-mldsa.c` — generalized from a single hardcoded ML-DSA-65
+  implementation to a `DEFINE_MLDSA_IMPL(...)` macro instantiated 3 times
+  (`ssh-mldsa-44`, `ssh-mldsa-65`, `ssh-mldsa-87`), each producing its own
+  `sshkey_impl` (cleanup/equal/serialize/deserialize/copy/verify), sized per
+  parameter set.
+- `patches/ssh-slhdsa.c` — same generalization via `DEFINE_SLHDSA_IMPL(...)`,
+  instantiated 8 times: SHA2/SHAKE × {128,256} × {s,f}.
+- `patches/apply_mldsa_patches.py` — regenerated (21 anchors declared,
+  self-counted by the script; some steps that were previously chained per
+  algorithm are now consolidated into one multi-case insertion). Adds:
+  `sshkey.h` enum values for all 11 new key types; `sshkey.c` externs +
+  `keyimpls[]` registration; `myproposal.h` default proposal entries for all
+  11; and, in `ssh-pkcs11.c`, a **parameter-set dispatch table**
+  (`mldsa_variants[]` / `slhdsa_variants[]`) so the shared `CKK_ML_DSA` /
+  `CKK_SLH_DSA` PKCS#11 key types resolve to the right variant via
+  `CKA_PARAMETER_SET` or (preferentially) the self-describing decoded SPKI —
+  `pkcs11_fetch_mldsa_pubkey`/`pkcs11_sign_mldsa` and their SLH-DSA
+  equivalents are now single functions covering every parameter set in their
+  family, not one function per parameter set.
+- `wasm-shims/sshd_wasm_main.c` — the 3-way `HOSTKEY_MLDSA65/ECDSA_P256/
+  SLHDSA_128S` enum replaced with a `HOSTKEY_VARIANTS[]` table (12 entries:
+  11 PQC parameter sets + classical ECDSA P-256), so `set_handshake_config()`
+  can select any of them by name; `sm1_provision()`/`sm1_prove_sign()`/
+  `drive_kex()` are now table-driven instead of hardcoded per-type branches.
+- `sm6-paramsweep-smoke.cjs` (new) — generalizes the `sm1`/`sm5` smoke-test
+  pattern across all 11 parameter sets in one harness (fresh WASM instance
+  per variant, since `set_handshake_config` only takes effect before
+  `__wrap_main`). **Not executed** — see Verification below.
+- `patches/native_paramsweep_test.c` + `scripts/native-verify-paramsweep.sh`
+  (new) — a native (non-WASM) port of `sshd_wasm_main.c`'s in-process
+  `drive_kex()`/`do_userauth()` driver, used for real verification (below)
+  because this environment has no Emscripten toolchain.
+- `README.md` / `STATUS.md` — documentation catch-up: SLH-DSA disclosed
+  (previously undocumented, "ML-DSA-65 patches" only), `draft-sfluhrer-ssh-mldsa`
+  citation bumped `-06` → `-08`, `draft-ietf-sshm-mlkem-hybrid-kex-10`
+  attributed near the KEX section, and a new "Parameter set coverage" table
+  explaining the SLH-DSA 192 exclusion (below).
+
+**Byte sizes used, and where they came from** (not assumed — cross-checked
+against two independent sources: the vendored OpenSSL 3.6.3 this connector
+and the engine both build against, and the live IETF draft text):
+
+| Algorithm | pk (bytes) | sig (bytes) | Source |
+| --- | --- | --- | --- |
+| ML-DSA-44 | 1312 | 2420 | `deps/openssl-src/openssl-3.6.3/include/crypto/ml_dsa.h`; confirmed against live `draft-sfluhrer-ssh-mldsa-08` §4/§6 |
+| ML-DSA-65 | 1952 | 3309 | same (unchanged from the existing implementation) |
+| ML-DSA-87 | 2592 | **4627** | same. **Note**: the remediation plan's placeholder value was 4595 — wrong; the real FIPS 204 value, confirmed by both the vendored OpenSSL source and the live draft, is 4627 |
+| SLH-DSA-{SHA2,SHAKE}-128s | 32 | 7856 | `deps/openssl-src/openssl-3.6.3/crypto/slh_dsa/slh_params.c` (`OSSL_SLH_DSA_128S_*`); confirmed against live `draft-josefsson-ssh-sphincs-02` §4/§6/§10 Table 3 |
+| SLH-DSA-{SHA2,SHAKE}-128f | 32 | 17088 | same (`OSSL_SLH_DSA_128F_*`) |
+| SLH-DSA-{SHA2,SHAKE}-256s | 64 | 29792 | same (`OSSL_SLH_DSA_256S_*`) |
+| SLH-DSA-{SHA2,SHAKE}-256f | 64 | 49856 | same (`OSSL_SLH_DSA_256F_*`) |
+
+**SLH-DSA scope: 8 of 12, not 12 of 12 — a real spec gap, not a shortcut.**
+The task was to cover all 12 engine-supported FIPS 205 parameter sets, but
+`draft-josefsson-ssh-sphincs-02` (fetched live and cross-checked against its
+own IANA table, §10, and against a search of its full text for "192s"/
+"192f" — zero occurrences in any of revisions 00/01/02) **does not define
+standalone SSH wire-format names for the standard FIPS 205 192-category
+parameter sets** (SHA2/SHAKE-192s/192f, pk=48, sig=16224/35664). Its own
+192-bit table entries — `ssh-slh-dsa-sha2-192-24` and
+`ssh-slh-dsa-shake-192-24` — are a **different, non-FIPS-205 parameter
+family** from `[NIST.SP.800.230.IDP]` ("Additional SLH-DSA Parameter Sets
+for Limited Signature Use Cases"), with different sizes entirely (pk=48,
+sig=**7752**, per the draft's own Table 3) that this engine's OpenSSL 3.6.3
+backend does not implement at all (`src/lib/pkcs11/pkcs11t.h`'s
+`CKP_SLH_DSA_*` enumerates only the 12 standard sets — no `-24` variant
+exists anywhere in this codebase). Inventing an `ssh-slh-dsa-{sha2,shake}
+-192{s,f}` name not specified by the draft was explicitly out of scope
+("don't invent a naming pattern the draft doesn't specify"), so the 192
+category is left unexposed over SSH pending a future draft revision that
+defines one. This is disclosed in `README.md`'s new "Parameter set coverage"
+section, not silently dropped.
+
+**Verification.** This environment has no Emscripten toolchain (`emcc` not
+found), so the WASM smoke-test harnesses (`sm1-smoke.cjs`, `sm5-slhdsa-smoke.cjs`,
+the new `sm6-paramsweep-smoke.cjs`) could not be executed. Real, non-WASM
+verification was performed instead:
+
+1. `python3 patches/apply_mldsa_patches.py --dry-run` and a real apply
+   against a fresh `git clone --depth 1 --branch V_10_3_P1
+   openssh-portable` — all 21 anchors applied cleanly.
+2. A full **native** build (`autoreconf -i && ./configure --with-ssl-dir
+   $(brew --prefix openssl@3) && make`, Homebrew OpenSSL 3.6.3 — the exact
+   same OpenSSL version this repo vendors) — `ssh`, `sshd`, `ssh-keygen`,
+   `ssh-pkcs11-helper`, etc. all compiled and linked cleanly against the
+   generalized `ssh-mldsa.o`/`ssh-slhdsa.o`/`ssh-pkcs11.o`.
+3. `native_paramsweep_test.c` — a native, non-WASM port of
+   `sshd_wasm_main.c`'s in-process `drive_kex()`/`do_userauth()` logic —
+   compiled and linked against the real patched OpenSSH object files and the
+   **real native `libsofthsmv3.dylib`** (via genuine `dlopen`, OpenSSH's
+   actual `pkcs11_add_provider` provider path — not a mock, not the WASM
+   static-link shim). Reproducible via
+   `bash scripts/native-verify-paramsweep.sh` from a clean `openssh-src`
+   checkout.
+
+   For **all 11** ML-DSA/SLH-DSA parameter sets (all 3 ML-DSA + all 8
+   SLH-DSA this change adds), the harness: generated a real host+user
+   keypair on the token, negotiated `mlkem768x25519-sha256` KEX with that
+   exact host-key algorithm forced, ran OpenSSH's real KEX state machine to
+   `NEWKEYS` (host signature via real `C_Sign`), then ran real RFC 4252
+   `publickey` userauth to `USERAUTH_SUCCESS` (`sshkey_verify` on the
+   server side) — asserting the exact FIPS 204/205 signature length at both
+   steps. Result: **11/11 PASS, 0 failures.**
+
+   | Algorithm | Result | Sig len asserted |
+   | --- | --- | --- |
+   | `ssh-mldsa-44` | PASS | 2420 |
+   | `ssh-mldsa-65` | PASS | 3309 |
+   | `ssh-mldsa-87` | PASS | 4627 |
+   | `ssh-slh-dsa-sha2-128s` | PASS | 7856 |
+   | `ssh-slh-dsa-sha2-128f` | PASS | 17088 |
+   | `ssh-slh-dsa-shake-128s` | PASS | 7856 |
+   | `ssh-slh-dsa-shake-128f` | PASS | 17088 |
+   | `ssh-slh-dsa-sha2-256s` | PASS | 29792 |
+   | `ssh-slh-dsa-sha2-256f` | PASS | 49856 |
+   | `ssh-slh-dsa-shake-256s` | PASS | 29792 |
+   | `ssh-slh-dsa-shake-256f` | PASS | 49856 |
+
+**Not done / follow-up:** the WASM bundle (`dist/`) was not rebuilt or
+smoke-tested here — `sm6-paramsweep-smoke.cjs` needs a real run the next
+time this connector is built with `emcc` available (`bash
+scripts/build-wasm.sh`, then `node sm1-smoke.cjs && node sm5-slhdsa-smoke.cjs
+&& node sm6-paramsweep-smoke.cjs`). The `wasm-shims/sshd_wasm_main.c` changes
+were reviewed for correctness against the same table-driven pattern the
+native harness already proved works, but have not themselves been compiled.
+SLH-DSA-{SHA2,SHAKE}-192{s,f} remain unexposed over SSH pending a future
+draft revision (see above) — this is a scope decision to flag for review,
+not an oversight.
+
 ### Added — SLH-DSA-SHA2-128s SSH authentication, realigning this connector with the sandbox (2026-07-27)
 
 This connector's patch set had silently fallen behind the copy it was forked
