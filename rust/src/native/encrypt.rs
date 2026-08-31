@@ -1071,6 +1071,46 @@ pub fn aes_key_unwrap(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
     if ok { Ok(buf) } else { Err(CKR_ENCRYPTED_DATA_INVALID) }
 }
 
+/// AES Key Wrap with Padding (RFC 5649 / `CKM_AES_KEY_WRAP_KWP`) — the
+/// `native` counterpart of `ffi::C_WrapKey`'s `is_kwp` arm. Unlike
+/// [`aes_key_wrap`], supports arbitrary-length (non-empty) plaintext — no
+/// 8-byte-multiple/≥16-byte requirement, RFC 5649's padding handles the
+/// rest. KMIP/CACP coverage gap-analysis item 7 (2026-08-30): the engine
+/// has supported this since PR #189; KMIP's `wrap_key_value` never called
+/// it, hard-rejecting `BlockCipherMode::AESKeyWrapPadding` before ever
+/// reaching the engine.
+pub fn aes_key_wrap_kwp(kek: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use aes::cipher::generic_array::GenericArray;
+    if plaintext.is_empty() {
+        return Err(CKR_DATA_INVALID);
+    }
+    let result = match kek.len() {
+        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
+        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
+        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).wrap_with_padding_vec(plaintext),
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    };
+    result.map_err(|_| CKR_FUNCTION_FAILED)
+}
+
+/// AES Key Unwrap with Padding (RFC 5649) — inverse of
+/// [`aes_key_wrap_kwp`]. Ciphertext must be ≥ 16 bytes and a multiple of
+/// the 8-byte semiblock (RFC 5649 §5.18.4); integrity/padding-check
+/// failure → `CKR_WRAPPED_KEY_INVALID`, matching the FFI path exactly.
+pub fn aes_key_unwrap_kwp(kek: &[u8], wrapped: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use aes::cipher::generic_array::GenericArray;
+    if wrapped.len() < 16 || wrapped.len() % 8 != 0 {
+        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
+    }
+    let result = match kek.len() {
+        16 => aes_kw::KekAes128::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
+        24 => aes_kw::KekAes192::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
+        32 => aes_kw::KekAes256::new(GenericArray::from_slice(kek)).unwrap_with_padding_vec(wrapped),
+        _ => return Err(CKR_KEY_TYPE_INCONSISTENT),
+    };
+    result.map_err(|_| CKR_WRAPPED_KEY_INVALID)
+}
+
 // ── AES-ECB ────────────────────────────────────────────────────────────────
 //
 // PKCS#11 v3.2 §6.10 — `CKM_AES_ECB`. No IV, no padding. The plaintext
@@ -1402,6 +1442,43 @@ mod tests {
         assert_eq!(aes_key_unwrap(&kek, &bad).unwrap_err(), CKR_ENCRYPTED_DATA_INVALID);
         // Non-8-multiple input rejected per RFC 3394 §2.2.1.
         assert_eq!(aes_key_wrap(&kek, &pt[..15]).unwrap_err(), CKR_DATA_LEN_RANGE);
+    }
+
+    /// KMIP/CACP coverage gap-analysis item 7 (2026-08-30) —
+    /// `CKM_AES_KEY_WRAP_KWP` (RFC 5649), verified against an
+    /// independently-computed reference: Python's `cryptography` library
+    /// (`aes_key_wrap_with_padding`/`_unwrap_with_padding`), a different
+    /// implementation than this crate's `aes_kw`. Plaintext is
+    /// deliberately not a multiple of 8 bytes to prove KWP's arbitrary-
+    /// length support, which plain AES-KW above cannot do.
+    #[test]
+    fn aes_key_wrap_kwp_matches_independent_reference() {
+        let kek = vec![0x11u8; 32];
+        let pt = b"this is a KWP test of variable length, not a multiple of 8".to_vec();
+        // Reference vector from Python's
+        // `cryptography.hazmat.primitives.keywrap.aes_key_wrap_with_padding
+        // (bytes([0x11]*32), plaintext)` — computed independently, not
+        // derived from this crate's own output.
+        let expected: [u8; 72] = [
+            0x39, 0x07, 0x83, 0xf9, 0xec, 0x5b, 0x01, 0x95,
+            0xbe, 0x01, 0xa5, 0x47, 0x64, 0x82, 0x9c, 0x78,
+            0xfd, 0x58, 0x76, 0xc7, 0xe7, 0xf5, 0x65, 0x42,
+            0xbe, 0x79, 0x1d, 0x4c, 0x60, 0xa6, 0x4b, 0xa2,
+            0x0b, 0x83, 0x67, 0x89, 0x5d, 0x65, 0xe1, 0xda,
+            0x73, 0x92, 0xe1, 0xd2, 0x57, 0xf2, 0x6d, 0x00,
+            0x7c, 0x98, 0xc3, 0x5e, 0xd9, 0xf7, 0x73, 0xfa,
+            0x1d, 0x5c, 0xa3, 0xda, 0x80, 0x7d, 0x17, 0x65,
+            0xf4, 0xc8, 0x8c, 0xba, 0xd4, 0x3c, 0xb0, 0x75,
+        ];
+        let wrapped = aes_key_wrap_kwp(&kek, &pt).unwrap();
+        assert_eq!(wrapped, expected, "must match Python cryptography's aes_key_wrap_with_padding");
+        assert_eq!(aes_key_unwrap_kwp(&kek, &wrapped).unwrap(), pt);
+        // Tampered ciphertext → integrity-check failure, same as plain KW.
+        let mut bad = wrapped.clone();
+        bad[0] ^= 1;
+        assert_eq!(aes_key_unwrap_kwp(&kek, &bad).unwrap_err(), CKR_WRAPPED_KEY_INVALID);
+        // Empty plaintext rejected.
+        assert_eq!(aes_key_wrap_kwp(&kek, &[]).unwrap_err(), CKR_DATA_INVALID);
     }
 
     fn fresh_session() -> u32 {
