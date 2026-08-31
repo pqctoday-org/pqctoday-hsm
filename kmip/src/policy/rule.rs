@@ -1447,6 +1447,8 @@ pub fn ckm_name_to_code(name: &str) -> Option<u32> {
         "CKM_AES_CBC_PAD" => c::CKM_AES_CBC_PAD,
         "CKM_AES_CTR" => c::CKM_AES_CTR,
         "CKM_AES_GCM" => c::CKM_AES_GCM,
+        // KMIP/CACP coverage gap-analysis item 2.2 (2026-08-30).
+        "CKM_AES_CCM" => c::CKM_AES_CCM,
         "CKM_RSA_PKCS_OAEP" => c::CKM_RSA_PKCS_OAEP,
         "CKM_SHA256_RSA_PKCS" => c::CKM_SHA256_RSA_PKCS,
         "CKM_SHA384_RSA_PKCS" => c::CKM_SHA384_RSA_PKCS,

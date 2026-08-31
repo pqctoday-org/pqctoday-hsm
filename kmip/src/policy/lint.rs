@@ -177,9 +177,11 @@ fn lint_ops(idx: usize, field: &'static str, values: &[String], out: &mut Vec<Fi
 /// for CKM_EDDSA_PH), not separately.
 fn undispatched_block_cipher_mode_reason(name: &str) -> Option<&'static str> {
     match name {
-        "CCM" | "XTS" | "OFB" | "CFB" => Some(
+        // CCM wired 2026-08-30 (item 2.2) — removed from this list in the
+        // same change, per the module doc comment above.
+        "XTS" | "OFB" | "CFB" => Some(
             "recognised, but ops/helpers.rs::aes_mechanism_for only dispatches \
-             CBC/CBC_PAD/ECB/CTR/GCM today — this mode cannot execute yet \
+             CBC/CBC_PAD/ECB/CTR/GCM/CCM today — this mode cannot execute yet \
              (KMIP/CACP coverage gap-analysis Phase 2, not yet wired)",
         ),
         _ => None,
@@ -735,7 +737,9 @@ mod tests {
         let rule = Rule::MechanismParameterConstraint {
             ops: vec!["Encrypt".into()],
             algorithm: None,
-            allowed_block_cipher_modes: vec!["GCM".into(), "CCM".into()],
+            // CCM deliberately excluded here — wired 2026-08-30 (item 2.2),
+            // it's now genuinely dispatched like GCM.
+            allowed_block_cipher_modes: vec!["GCM".into(), "XTS".into()],
             allowed_padding_methods: vec![],
             require_deterministic: None,
             reason: "t".into(),
@@ -744,7 +748,7 @@ mod tests {
         };
         let findings = lint_rules(&[rule], false);
         assert!(!findings.iter().any(|f| f.fatal));
-        assert!(findings.iter().any(|f| f.value == "CCM" && !f.fatal));
+        assert!(findings.iter().any(|f| f.value == "XTS" && !f.fatal));
         assert!(!findings.iter().any(|f| f.value == "GCM"),
             "GCM is genuinely dispatched — must not trigger the advisory");
     }
