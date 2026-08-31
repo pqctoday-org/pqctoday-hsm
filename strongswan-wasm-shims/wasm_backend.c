@@ -202,11 +202,26 @@ void wasm_setup_config(int unused)
      * worker. wasm_kernel_register() is idempotent. */
     wasm_kernel_register();
 
-    switch (wasm_proposal_mode)
+    /* WASM_IKE_PROPOSAL, if set, overrides the fixed classical/pqc/hybrid
+     * strings below with an arbitrary caller-supplied IKE proposal string
+     * (e.g. "aes256-sha256-mlkem512" or "aes256-sha256-mlkem768-ke1_mlkem1024").
+     * Test/verification hook only — production callers keep using
+     * wasm_set_proposal_mode()'s three fixed modes. */
     {
-        case 1: ike_prop = proposal_ike_pqc;       break;
-        case 2: ike_prop = proposal_ike_hybrid;    break;
-        default: ike_prop = proposal_ike_classical; break;
+        const char *override_env = getenv("WASM_IKE_PROPOSAL");
+        if (override_env && *override_env)
+        {
+            ike_prop = override_env;
+        }
+        else
+        {
+            switch (wasm_proposal_mode)
+            {
+                case 1: ike_prop = proposal_ike_pqc;       break;
+                case 2: ike_prop = proposal_ike_hybrid;    break;
+                default: ike_prop = proposal_ike_classical; break;
+            }
+        }
     }
 
     /* IKE config — local/remote addresses depend on the worker's role.

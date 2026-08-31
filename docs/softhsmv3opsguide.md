@@ -195,7 +195,44 @@ charon {
 The adapter's `pkcs11_kem_t` uses `C_EncapsulateKey` / `C_DecapsulateKey`
 (PKCS#11 v3.2 §5.17) for the IKEv2 KE payload. The `token=` keyword in the
 PKCS#11 URI selects which softhsmv3 token slot to use; the ML‑KEM mechanism is
-resolved automatically when the peer negotiates a PQC key‑exchange group.
+resolved automatically when the peer negotiates a PQC key‑exchange group. All
+three FIPS 203 sizes are registered — `ML-KEM-512`, `ML-KEM-768`, and
+`ML-KEM-1024` — the variant used is whichever one the peers negotiate.
+
+```ini
+# swanctl.conf — pure PQC key exchange, no classical fallback
+connections {
+    peer {
+        proposals = aes256-sha256-mlkem1024
+        ...
+    }
+}
+```
+
+### Hybrid key exchange (RFC 9370)
+
+The plugin rides strongSwan's own real, unmodified RFC 9370 multi-key-exchange
+machinery (IKE_INTERMEDIATE, ADDKE1-7 transform types) — an ML-KEM group runs
+as the standard IKE_SA_INIT key exchange while a classical ECP group is
+negotiated as Additional Key Exchange 1 (`ke1_...`), so the resulting shared
+secret combines both. This is not PQC-replaces-classical; both algorithms
+contribute key material.
+
+```ini
+# swanctl.conf — hybrid: ML-KEM-1024 primary KE + ECP-256 as ADDKE1
+connections {
+    peer {
+        proposals = aes256-sha256-mlkem1024-ke1_ecp256
+        ...
+    }
+}
+```
+
+The same grammar works with `mlkem512` or `mlkem768` in place of `mlkem1024`
+as the primary KE method. `strongswan-wasm-shims/wasm_backend.c` exercises
+this exact proposal shape (`proposal_ike_hybrid`) in its hybrid proposal
+mode, and `strongswan-pkcs11/README.md` documents the same examples for the
+native plugin.
 
 ### ML-DSA Authentication
 
