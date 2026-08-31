@@ -40,7 +40,18 @@ void *p11prov_cipher_newctx(void *provctx, int size, CK_ULONG mechanism)
 
     cctx->provctx = ctx;
     cctx->mech.mechanism = mechanism;
-    cctx->keysize = size / 8;
+    /* AES-XTS remediation item (2026-08-30): `size` is always the AES
+     * strength named in the OpenSSL cipher ("128" for "AES-128-XTS",
+     * "256" for "AES-256-XTS") to keep DISPATCH_TABLE_CIPHER_FN's own
+     * generated symbol names (p11prov_aes128xts_..., p11prov_aes256xts_
+     * ...) matching every other cipher family's naming convention in
+     * this file -- but XTS's real key material is DOUBLE that (two
+     * independent AES sub-keys concatenated, PKCS#11 v3.2 §6.15.2:
+     * "AES-128-XTS" needs 256 raw bits, "AES-256-XTS" needs 512), so it
+     * is special-cased here rather than by passing a mismatched `size`
+     * at every XTS call site. */
+    cctx->keysize =
+        mechanism == CKM_AES_XTS ? (size * 2) / 8 : size / 8;
 
     /* OpenSSL Pads by default */
     cctx->pad = true;
@@ -144,7 +155,9 @@ static int p11prov_aes_get_params(OSSL_PARAM params[], int size, int mode,
 {
     int ciph_mode = 0;
     int flags = mode & MODE_flags_mask;
-    size_t keysize = size / 8;
+    /* AES-XTS remediation item (2026-08-30): see p11prov_cipher_newctx()'s
+     * own comment -- same doubling, same reason. */
+    size_t keysize = mechanism == CKM_AES_XTS ? (size * 2) / 8 : size / 8;
     size_t blocksize = AESBLOCK;
     size_t ivsize = 16; /* 128 bits for all modes but ECB */
 
@@ -196,6 +209,58 @@ static int p11prov_aes_get_params(OSSL_PARAM params[], int size, int mode,
                       * convention and every CCM caller/test in this
                       * project's own harness. */
         blocksize = AEAD_DECRYPT_MAX_MSG_LEN;
+        break;
+    case MODE_xts & MODE_modes_mask:
+        /* AES-XTS remediation item (2026-08-30). `size` here is the
+         * TOTAL key material (256 or 512 bits -- two AES-128 or two
+         * AES-256 sub-keys concatenated, PKCS#11 v3.2 §6.15.2), matching
+         * what OSSL_CIPHER_PARAM_KEYLEN needs to report for "AES-128-XTS"
+         * (256-bit total) / "AES-256-XTS" (512-bit total) to be correct;
+         * `keysize` above is computed from this same `size` so no
+         * override is needed here. */
+        ciph_mode = EVP_CIPH_XTS_MODE;
+        ivsize = 16; /* Data Unit Sequence Number (the tweak) */
+        break;
+    case MODE_wrap & MODE_modes_mask:
+        /* AES Key Wrap remediation item (2026-08-30): RFC 3394 operates
+         * on 8-byte "semiblocks", not the usual 16-byte AES block --
+         * matches OpenSSL's own AES-WRAP cipher's reported block size.
+         * ivsize=8 matches the default RFC 3394 IV OpenSSL reports for
+         * its own AES-WRAP cipher; this engine does not accept a
+         * caller-supplied alternative (see prep_mech's own CKM_AES_KEY_
+         * WRAP/_KWP case comment), so this is purely informational. */
+        ciph_mode = EVP_CIPH_WRAP_MODE;
+        blocksize = 8;
+        ivsize = 8;
+        break;
+    case MODE_wrappad & MODE_modes_mask:
+        /* Same construction, RFC 5649's 4-byte Alternative IV length
+         * convention (this engine computes the real AIV internally and,
+         * like plain WRAP above, never accepts a caller override).
+         *
+         * blocksize is DELIBERATELY 16 here, not 8 -- found live, not
+         * assumed: OpenSSL's own top-level EVP_EncryptUpdate (crypto/
+         * evp/evp_enc.c, confirmed by reading it directly) sizes the
+         * output buffer it hands to a provider's own update() as a
+         * generic `inl + block_size` for EVERY cipher mode, with no
+         * WRAP-specific case at all. RFC 5649's real growth is
+         * `((inl+7)/8)*8 + 8` -- for a payload that ISN'T already a
+         * multiple of 8, that formula rounds inl UP before adding the
+         * trailing block, so plain `inl + 8` under-shoots it (e.g.
+         * inl=30: needs 40 bytes, `inl+8` only promises 38) and
+         * SoftHSM_keygen.cpp's own C_WrapKey correctly reports
+         * CKR_BUFFER_TOO_SMALL against that too-small promise --
+         * reproduced live via a 30-byte (non-8-aligned) AES-*-WRAP-PAD
+         * payload in aes-wrap-probe.c before this fix. Algebra: needed
+         * <= inl + block_size holds for every inl only once block_size
+         * >= 16 (worst case is inl = 8k+1, which needs 8k+16 bytes).
+         * Plain WRAP (the case just above) never hits this: RFC 3394
+         * requires an already-block-aligned payload, so its `inl + 8`
+         * always exactly equals the real `inl + 8` growth -- 8 remains
+         * correct and sufficient there. */
+        ciph_mode = EVP_CIPH_WRAP_MODE;
+        blocksize = 16;
+        ivsize = 4;
         break;
     default:
         ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_SET_PARAMETER);
@@ -360,6 +425,32 @@ static CK_RV p11prov_cipher_prep_mech(struct p11prov_cipher_ctx *ctx,
     case CKM_AES_CBC_PAD:
     case CKM_AES_CTS:
         param_as_iv = true;
+        break;
+
+    case CKM_AES_XTS:
+        /* AES-XTS remediation item (2026-08-30): PKCS#11 v3.2 §6.15.4's
+         * single mechanism parameter is a 16-byte Data Unit Sequence
+         * Number (the tweak) -- a plain byte blob copied verbatim, same
+         * shape as CBC's IV above (confirmed against SoftHSM_cipher.cpp's
+         * own CKM_AES_XTS case: `pMechanism->ulParameterLen != 16`). */
+        param_as_iv = true;
+        break;
+
+    case CKM_AES_KEY_WRAP:
+    case CKM_AES_KEY_WRAP_KWP:
+        /* AES Key Wrap remediation item (2026-08-30): no mechanism
+         * parameter at all -- SoftHSM_keygen.cpp's own C_WrapKey/
+         * C_UnwrapKey hard-reject any non-NULL pParameter for these
+         * three PKCS#11 mechanism IDs with CKR_ARGUMENTS_BAD (both
+         * directions, confirmed by reading both switch statements
+         * directly), so unlike every other mechanism in this switch, a
+         * caller-supplied IV is never forwarded to the token -- it is
+         * silently unused. The real work for these two mechanisms
+         * happens in p11prov_aes_wrap_update(), not via this ctx->mech
+         * struct at all (no CK_EncryptInit/CK_DecryptInit call is ever
+         * made for them); this case only needs to exist so init doesn't
+         * fall through to `default: return CKR_MECHANISM_INVALID;`
+         * below. */
         break;
 
     case CKM_AES_CTR: {
@@ -708,6 +799,15 @@ static int p11prov_cipher_legacy_init(void *ctx, CK_FLAGS op,
         case CKM_CHACHA20:
         case CKM_CHACHA20_POLY1305:
             key_type = CKK_CHACHA20;
+            break;
+        case CKM_AES_XTS:
+            /* AES-XTS remediation item (2026-08-30): PKCS#11 v3.2
+             * §6.15.4 / SoftHSM_cipher.cpp's own dispatch both require
+             * CKK_AES_XTS specifically (CKR_KEY_TYPE_INCONSISTENT for
+             * plain CKK_AES) -- the double-width raw key bytes
+             * (256/512 bits) flow through unchanged either way, see
+             * objects.c's own p11prov_obj_import_secret_key() comment. */
+            key_type = CKK_AES_XTS;
             break;
         default:
             key_type = CKK_AES;
@@ -1269,6 +1369,16 @@ static int p11prov_aes_get_ctx_params(void *ctx, OSSL_PARAM params[])
      * in case a caller ever uses a non-default GCM IV length. */
     if (cctx->mech.mechanism == CKM_AES_ECB) {
         ivsize = 0;
+    } else if (cctx->mech.mechanism == CKM_AES_KEY_WRAP) {
+        /* AES Key Wrap remediation item (2026-08-30): same rationale as
+         * the CCM case just below -- report the mechanism's own real IV
+         * length rather than this function's generic 16-byte default
+         * (this engine never accepts a caller-supplied alternative, see
+         * prep_mech's own CKM_AES_KEY_WRAP/_KWP case comment, so this is
+         * purely informational). */
+        ivsize = 8;
+    } else if (cctx->mech.mechanism == CKM_AES_KEY_WRAP_KWP) {
+        ivsize = 4;
     } else if (cctx->mech.mechanism == CKM_AES_GCM) {
         ivsize = (cctx->is_aead && cctx->aead_ivlen > 0) ? cctx->aead_ivlen
                                                           : 12;
@@ -1612,6 +1722,13 @@ static const OSSL_PARAM *p11prov_aes_gettable_ctx_params(void *vctx,
     case CKM_AES_CFB8:
     case CKM_AES_CTR:
     case CKM_AES_CTS:
+    case CKM_AES_XTS:
+    case CKM_AES_KEY_WRAP:
+    case CKM_AES_KEY_WRAP_KWP:
+        /* AES-XTS / AES Key Wrap remediation item (2026-08-30): neither
+         * needs an AEAD tag or a CTS mode selector -- the generic array
+         * (KEYLEN/IVLEN/PADDING/NUM/IV/UPDATED_IV/TLS_MAC) covers what a
+         * caller can usefully query for both. */
         return p11prov_aes_generic_gettable_ctx_params;
     case CKM_AES_GCM:
     case CKM_AES_CCM:
@@ -1669,6 +1786,11 @@ static const OSSL_PARAM *p11prov_aes_settable_ctx_params(void *vctx,
     case CKM_AES_CFB1:
     case CKM_AES_CFB8:
     case CKM_AES_CTR:
+    case CKM_AES_XTS:
+    case CKM_AES_KEY_WRAP:
+    case CKM_AES_KEY_WRAP_KWP:
+        /* AES-XTS / AES Key Wrap remediation item (2026-08-30): same
+         * reasoning as the gettable-side switch above. */
         return p11prov_aes_generic_settable_ctx_params;
     case CKM_AES_CTS:
         return p11prov_aes_cts_settable_ctx_params;
@@ -1741,5 +1863,195 @@ DISPATCH_TABLE_CIPHER_FN(aes, 256, gcm, CKM_AES_GCM);
 DISPATCH_TABLE_CIPHER_FN(aes, 128, ccm, CKM_AES_CCM);
 DISPATCH_TABLE_CIPHER_FN(aes, 192, ccm, CKM_AES_CCM);
 DISPATCH_TABLE_CIPHER_FN(aes, 256, ccm, CKM_AES_CCM);
+
+/* AES-XTS remediation item (2026-08-30): cipher-registration only (see
+ * MODE_xts's own comment in cipher.h and objects.c's own
+ * p11prov_obj_import_secret_key() comment for the double-width-key
+ * question this item also had to answer). Genuinely a streaming cipher
+ * here -- reuses the generic update/final unchanged, same as CBC/CTS. No
+ * 192-bit variant: OpenSSL itself only defines AES-128-XTS/AES-256-XTS. */
+DISPATCH_TABLE_CIPHER_FN(aes, 128, xts, CKM_AES_XTS);
+DISPATCH_TABLE_CIPHER_FN(aes, 256, xts, CKM_AES_XTS);
+
+/* AES Key Wrap remediation item (2026-08-30): CKM_AES_KEY_WRAP,
+ * CKM_AES_KEY_WRAP_PAD, CKM_AES_KEY_WRAP_KWP (PKCS#11 v3.2 §6.16.3).
+ *
+ * This engine implements RFC 3394/5649 key wrap ONLY via C_WrapKey/
+ * C_UnwrapKey (key-object semantics) -- confirmed directly, not assumed:
+ * SoftHSM_cipher.cpp's own C_Encrypt/C_Decrypt mechanism switch (its
+ * "encMechs"-equivalent list) has no case for any of the three mechanism
+ * IDs, and SoftHSM_slots.cpp's own C_GetMechanismInfo advertises
+ * `CKF_WRAP | CKF_UNWRAP` ONLY for all three -- never CKF_ENCRYPT /
+ * CKF_DECRYPT. Every other cipher in this file rides C_EncryptInit/
+ * C_EncryptUpdate/C_EncryptFinal (or the Decrypt equivalents); AES-WRAP
+ * cannot, so it needs the dedicated p11prov_aes_wrap_update()/
+ * p11prov_aes_wrap_final() pair below and its own
+ * DISPATCH_TABLE_CIPHER_WRAP_FN (cipher.h) rather than the generic
+ * DISPATCH_TABLE_CIPHER_FN every other AES mode here uses.
+ *
+ * This matches OpenSSL's own AES-WRAP cipher's real dispatch shape
+ * (providers/implementations/ciphers/cipher_aes_wrp.c, confirmed via its
+ * source rather than assumed): the wrapping/unwrapping happens entirely
+ * inside a single OSSL_FUNC_CIPHER_UPDATE call -- "Multiple calls to
+ * update are not allowed, since the algorithm relies on all fields being
+ * present" -- and OSSL_FUNC_CIPHER_FINAL performs no work at all, just
+ * zero-length output. wrap_done (cipher.h) enforces the same single-call
+ * contract on this side.
+ *
+ * "AES-*-WRAP" (RFC 3394, plain) uses CKM_AES_KEY_WRAP. "AES-*-WRAP-PAD"
+ * (RFC 5649, padded) uses CKM_AES_KEY_WRAP_KWP, the PKCS#11 v3.0+ name --
+ * NOT the deprecated CKM_AES_KEY_WRAP_PAD spelling, and there is
+ * deliberately no separate OpenSSL registration for that deprecated
+ * spelling at all: SoftHSM_keygen.cpp's own WrapKeySym/UnwrapKeySym
+ * switches route CKM_AES_KEY_WRAP_PAD and CKM_AES_KEY_WRAP_KWP through
+ * the exact same `SymWrap::AES_KEYWRAP_PAD` / EVP_aes_*_wrap_pad() code
+ * path (confirmed by reading both switches directly), so registering
+ * both PKCS#11 mechanism IDs under the one "AES-*-WRAP-PAD" OpenSSL name
+ * would be pure duplication. */
+static int p11prov_aes_wrap_update(void *vctx, unsigned char *out,
+                                   size_t *outl, size_t outsize,
+                                   const unsigned char *in, size_t inl)
+{
+    struct p11prov_cipher_ctx *cctx = (struct p11prov_cipher_ctx *)vctx;
+    CK_SESSION_HANDLE sess;
+    CK_OBJECT_HANDLE tmpobj = CK_INVALID_HANDLE;
+    CK_OBJECT_CLASS key_class = CKO_SECRET_KEY;
+    CK_KEY_TYPE key_type = CKK_GENERIC_SECRET;
+    CK_BBOOL val_true = CK_TRUE;
+    CK_BBOOL val_false = CK_FALSE;
+    CK_BBOOL tokenobj = CK_FALSE;
+    CK_RV rv;
+
+    if (cctx->wrap_done) {
+        /* See this registration's own comment above: a second real
+         * update() call is out of contract for this mechanism family,
+         * exactly like OpenSSL's own AES-WRAP cipher. */
+        ERR_raise(ERR_LIB_PROV, PROV_R_CIPHER_OPERATION_FAILED);
+        return RET_OSSL_ERR;
+    }
+
+    if (!cctx->session) {
+        /* Deliberately does NOT call p11prov_cipher_session_init() (no
+         * C_EncryptInit/C_DecryptInit -- this engine has no such
+         * operation for these mechanisms, see above); just acquires a
+         * session bound to the wrapping/unwrapping key, exactly as
+         * p11prov_cipher_session_init() itself does before its own
+         * EncryptInit/DecryptInit call. cctx->session_state deliberately
+         * stays CIPHER_SESS_UNUSED so freectx() (cipher.c) never tries to
+         * cancel a PKCS#11 operation that was never started. */
+        rv = p11prov_try_session_ref(cctx->key, cctx->mech.mechanism, true,
+                                     false, &cctx->session);
+        if (rv != CKR_OK) {
+            return RET_OSSL_ERR;
+        }
+    }
+    sess = p11prov_session_handle(cctx->session);
+
+    if (cctx->operation == CKF_ENCRYPT) {
+        /* Wrap direction: `in`/`inl` is the raw plaintext key material an
+         * EVP caller wants wrapped. PKCS#11's C_WrapKey operates on a key
+         * OBJECT, not a byte buffer, so it is imported as a throwaway
+         * CKK_GENERIC_SECRET session object first. CKA_EXTRACTABLE=TRUE
+         * is mandatory here -- SoftHSM_keygen.cpp's own C_WrapKey returns
+         * CKR_KEY_UNEXTRACTABLE for a target key whose CKA_EXTRACTABLE
+         * defaults to CK_FALSE otherwise. */
+        CK_ATTRIBUTE tmpl[] = {
+            { CKA_CLASS, &key_class, sizeof(key_class) },
+            { CKA_TOKEN, &tokenobj, sizeof(tokenobj) },
+            { CKA_KEY_TYPE, &key_type, sizeof(key_type) },
+            { CKA_VALUE, (CK_VOID_PTR)in, (CK_ULONG)inl },
+            { CKA_EXTRACTABLE, &val_true, sizeof(val_true) },
+            { CKA_SENSITIVE, &val_false, sizeof(val_false) },
+        };
+        CK_ULONG wrapped_len = (CK_ULONG)outsize;
+
+        rv = p11prov_CreateObject(cctx->provctx, sess, tmpl,
+                                  sizeof(tmpl) / sizeof(tmpl[0]), &tmpobj);
+        if (rv != CKR_OK) {
+            goto err;
+        }
+
+        rv = p11prov_WrapKey(cctx->provctx, sess, &cctx->mech,
+                             p11prov_obj_get_handle(cctx->key), tmpobj, out,
+                             &wrapped_len);
+
+        (void)p11prov_DestroyObject(cctx->provctx, sess, tmpobj);
+
+        if (rv != CKR_OK) {
+            goto err;
+        }
+        *outl = wrapped_len;
+    } else if (cctx->operation == CKF_DECRYPT) {
+        /* Unwrap direction: C_UnwrapKey produces a new key OBJECT, not a
+         * byte buffer -- CKA_EXTRACTABLE=TRUE/CKA_SENSITIVE=FALSE in the
+         * template below are what make its CKA_VALUE readable back out
+         * at all via C_GetAttributeValue just below. A tampered wrapped
+         * blob fails INSIDE C_UnwrapKey itself (RFC 3394/5649's own
+         * built-in integrity check -- this engine reports that as
+         * CKR_WRAPPED_KEY_INVALID), so this never reaches the
+         * GetAttributeValue call with attacker-controlled output. */
+        CK_ATTRIBUTE tmpl[] = {
+            { CKA_CLASS, &key_class, sizeof(key_class) },
+            { CKA_TOKEN, &tokenobj, sizeof(tokenobj) },
+            { CKA_KEY_TYPE, &key_type, sizeof(key_type) },
+            { CKA_EXTRACTABLE, &val_true, sizeof(val_true) },
+            { CKA_SENSITIVE, &val_false, sizeof(val_false) },
+        };
+        CK_ATTRIBUTE value_tmpl = { CKA_VALUE, out, (CK_ULONG)outsize };
+
+        rv = p11prov_UnwrapKey(cctx->provctx, sess, &cctx->mech,
+                               p11prov_obj_get_handle(cctx->key),
+                               (CK_BYTE_PTR)in, (CK_ULONG)inl, tmpl,
+                               sizeof(tmpl) / sizeof(tmpl[0]), &tmpobj);
+        if (rv != CKR_OK) {
+            goto err;
+        }
+
+        rv = p11prov_GetAttributeValue(cctx->provctx, sess, tmpobj,
+                                       &value_tmpl, 1);
+
+        (void)p11prov_DestroyObject(cctx->provctx, sess, tmpobj);
+
+        if (rv != CKR_OK) {
+            goto err;
+        }
+        *outl = value_tmpl.ulValueLen;
+    } else {
+        goto err;
+    }
+
+    cctx->wrap_done = true;
+    p11prov_return_session(cctx->session);
+    cctx->session = NULL;
+    return RET_OSSL_OK;
+
+err:
+    if (cctx->session) {
+        p11prov_return_session(cctx->session);
+        cctx->session = NULL;
+    }
+    ERR_raise(ERR_LIB_PROV, PROV_R_CIPHER_OPERATION_FAILED);
+    return RET_OSSL_ERR;
+}
+
+static int p11prov_aes_wrap_final(void *vctx, unsigned char *out,
+                                  size_t *outl, size_t outsize)
+{
+    /* The real work already happened in p11prov_aes_wrap_update() above
+     * -- matches OpenSSL's own aes_wrap_final(), which performs no work
+     * either. */
+    (void)vctx;
+    (void)out;
+    (void)outsize;
+    *outl = 0;
+    return RET_OSSL_OK;
+}
+
+DISPATCH_TABLE_CIPHER_WRAP_FN(aes, 128, wrap, CKM_AES_KEY_WRAP);
+DISPATCH_TABLE_CIPHER_WRAP_FN(aes, 192, wrap, CKM_AES_KEY_WRAP);
+DISPATCH_TABLE_CIPHER_WRAP_FN(aes, 256, wrap, CKM_AES_KEY_WRAP);
+DISPATCH_TABLE_CIPHER_WRAP_FN(aes, 128, wrappad, CKM_AES_KEY_WRAP_KWP);
+DISPATCH_TABLE_CIPHER_WRAP_FN(aes, 192, wrappad, CKM_AES_KEY_WRAP_KWP);
+DISPATCH_TABLE_CIPHER_WRAP_FN(aes, 256, wrappad, CKM_AES_KEY_WRAP_KWP);
 
 #endif

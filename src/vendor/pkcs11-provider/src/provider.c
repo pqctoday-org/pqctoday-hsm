@@ -909,10 +909,22 @@ static CK_RV alg_set_op(OSSL_ALGORITHM **op, int idx, OSSL_ALGORITHM *alg)
  * the case CKM_AES_CCM: arm below (ADD_ALGO for AES_256/192/128_CCM) was
  * real, correct, and completely unreachable dead code because the
  * mechanism-scan loop never matched it against anything in checklist[]. */
+/* AES-XTS / AES Key Wrap remediation item (2026-08-30): CKM_AES_XTS,
+ * CKM_AES_KEY_WRAP, CKM_AES_KEY_WRAP_KWP were missing from this
+ * checklist entirely, same trap as CKM_AES_GCM/CKM_AES_CCM's own R26/
+ * remediation-item-1 comments above -- their own ADD_ALGO case arms
+ * below would otherwise be correct but unreachable dead code, since the
+ * mechanism-scan loop never matches anything not listed here. Deliberately
+ * NOT listing CKM_AES_KEY_WRAP_PAD: it has no separate OpenSSL
+ * registration (see cipher.c's own DISPATCH_TABLE_CIPHER_WRAP_FN call
+ * sites), so there is no case arm below for it to reach either -- it is
+ * left unmatched on purpose, same as any mechanism this provider simply
+ * does not register. */
 #define AES_MECHS \
     CKM_AES_ECB, CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_CTR, CKM_AES_CTS, \
         CKM_AES_OFB, CKM_AES_CFB8, CKM_AES_CFB128, CKM_AES_CFB1, \
-        CKM_AES_GCM, CKM_AES_CCM
+        CKM_AES_GCM, CKM_AES_CCM, CKM_AES_XTS, CKM_AES_KEY_WRAP, \
+        CKM_AES_KEY_WRAP_KWP
 
 /* phase 5 R26 */
 #define CHACHA_MECHS CKM_CHACHA20, CKM_CHACHA20_POLY1305
@@ -1609,6 +1621,30 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                 ADD_ALGO(AES_192_CCM, aes192ccm, cipher, prop);
                 ADD_ALGO(AES_128_CCM, aes128ccm, cipher, prop);
                 UNCHECK_MECHS(CKM_AES_CCM);
+                break;
+            case CKM_AES_XTS:
+                /* AES-XTS remediation item (2026-08-30): no 192-bit
+                 * variant -- see cipher.h's own MODE_xts comment. */
+                ADD_ALGO(AES_256_XTS, aes256xts, cipher, prop);
+                ADD_ALGO(AES_128_XTS, aes128xts, cipher, prop);
+                UNCHECK_MECHS(CKM_AES_XTS);
+                break;
+            case CKM_AES_KEY_WRAP:
+                ADD_ALGO(AES_256_WRAP, aes256wrap, cipher, prop);
+                ADD_ALGO(AES_192_WRAP, aes192wrap, cipher, prop);
+                ADD_ALGO(AES_128_WRAP, aes128wrap, cipher, prop);
+                UNCHECK_MECHS(CKM_AES_KEY_WRAP);
+                break;
+            case CKM_AES_KEY_WRAP_KWP:
+                /* AES Key Wrap remediation item (2026-08-30): backs the
+                 * "AES-*-WRAP-PAD" OpenSSL names -- see cipher.c's own
+                 * DISPATCH_TABLE_CIPHER_WRAP_FN(..., wrappad, ...) call
+                 * sites for why CKM_AES_KEY_WRAP_PAD is deliberately not
+                 * a separate registration. */
+                ADD_ALGO(AES_256_WRAP_PAD, aes256wrappad, cipher, prop);
+                ADD_ALGO(AES_192_WRAP_PAD, aes192wrappad, cipher, prop);
+                ADD_ALGO(AES_128_WRAP_PAD, aes128wrappad, cipher, prop);
+                UNCHECK_MECHS(CKM_AES_KEY_WRAP_KWP);
                 break;
             /* phase 5 R26 */
             case CKM_CHACHA20:

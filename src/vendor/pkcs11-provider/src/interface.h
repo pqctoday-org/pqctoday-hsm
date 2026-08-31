@@ -135,6 +135,16 @@ CK_RV p11prov_GenerateKeyPair(
     CK_ATTRIBUTE_PTR pPublicKeyTemplate, CK_ULONG ulPublicKeyAttributeCount,
     CK_ATTRIBUTE_PTR pPrivateKeyTemplate, CK_ULONG ulPrivateKeyAttributeCount,
     CK_OBJECT_HANDLE_PTR phPublicKey, CK_OBJECT_HANDLE_PTR phPrivateKey);
+CK_RV p11prov_WrapKey(P11PROV_CTX *ctx, CK_SESSION_HANDLE hSession,
+                      CK_MECHANISM_PTR pMechanism,
+                      CK_OBJECT_HANDLE hWrappingKey, CK_OBJECT_HANDLE hKey,
+                      CK_BYTE_PTR pWrappedKey, CK_ULONG_PTR pulWrappedKeyLen);
+CK_RV p11prov_UnwrapKey(P11PROV_CTX *ctx, CK_SESSION_HANDLE hSession,
+                       CK_MECHANISM_PTR pMechanism,
+                       CK_OBJECT_HANDLE hUnwrappingKey,
+                       CK_BYTE_PTR pWrappedKey, CK_ULONG ulWrappedKeyLen,
+                       CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+                       CK_OBJECT_HANDLE_PTR phKey);
 CK_RV p11prov_DeriveKey(P11PROV_CTX *ctx, CK_SESSION_HANDLE hSession,
                         CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hBaseKey,
                         CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
@@ -218,6 +228,8 @@ CK_INFO p11prov_module_ck_info(P11PROV_MODULE *mctx);
 #define P11PROV_BLOCK_VerifyFinal 0b0000000000000000
 #define P11PROV_BLOCK_GenerateKey 0b0000000000000000
 #define P11PROV_BLOCK_GenerateKeyPair 0b0000000000000000
+#define P11PROV_BLOCK_WrapKey 0b0000000000000000
+#define P11PROV_BLOCK_UnwrapKey 0b0000000000000000
 #define P11PROV_BLOCK_DeriveKey 0b0000000000000000
 #define P11PROV_BLOCK_SeedRandom 0b0000000000000000
 #define P11PROV_BLOCK_GenerateRandom 0b0000000000000000

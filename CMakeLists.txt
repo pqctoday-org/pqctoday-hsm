@@ -279,6 +279,28 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
     target_include_directories(aead_edge_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
     target_link_libraries(aead_edge_probe ${OPENSSL_LIBRARIES})
 
+    # aes-wrap-probe: OpenSSL-provider remediation item (2026-08-30) test
+    # helper for CKM_AES_KEY_WRAP/CKM_AES_KEY_WRAP_KWP -- wrap+unwrap round
+    # trip for all three AES key sizes and both plain/padded variants,
+    # plus a tampered-blob rejection check (RFC 3394/5649's own built-in
+    # integrity check). Plain OpenSSL linking -- the provider is loaded at
+    # runtime via openssl.cnf, same as aead_probe/aead_edge_probe.
+    add_executable(aes_wrap_probe scripts/aes-wrap-probe.c)
+    target_include_directories(aes_wrap_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(aes_wrap_probe ${OPENSSL_LIBRARIES})
+
+    # aes-xts-probe: OpenSSL-provider remediation item (2026-08-30) test
+    # helper for CKM_AES_XTS's own OSSL_OP_CIPHER registration -- a
+    # multi-call streaming round trip that genuinely exercises ciphertext
+    # stealing at a real update()/update() boundary (not just a single
+    # one-shot non-aligned call), cross-checked byte-for-byte against
+    # OpenSSL's own independent software AES-XTS (provider=default) to
+    # confirm the double-width raw key material is split into its two
+    # AES-XTS sub-keys correctly.
+    add_executable(aes_xts_probe scripts/aes-xts-probe.c)
+    target_include_directories(aes_xts_probe PRIVATE ${OPENSSL_INCLUDE_DIR})
+    target_link_libraries(aes_xts_probe ${OPENSSL_LIBRARIES})
+
     # skey-flow-probe: phase-5 R24 (F36-3) test helper — exercises the
     # EVP_SKEY opaque-key API (generate/derive_SKEY/init_SKEY) against
     # this provider's SKEYMGMT/HKDF/HMAC, cross-checking the derived
