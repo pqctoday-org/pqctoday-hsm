@@ -177,12 +177,21 @@ fn lint_ops(idx: usize, field: &'static str, values: &[String], out: &mut Vec<Fi
 /// for CKM_EDDSA_PH), not separately.
 fn undispatched_block_cipher_mode_reason(name: &str) -> Option<&'static str> {
     match name {
-        // CCM wired 2026-08-30 (item 2.2) — removed from this list in the
-        // same change, per the module doc comment above.
-        "XTS" | "OFB" | "CFB" => Some(
+        // CCM wired 2026-08-30 (item 2.2), OFB wired 2026-08-30 (item 2.4)
+        // — removed from this list in the same change, per the module
+        // doc comment above.
+        "XTS" => Some(
             "recognised, but ops/helpers.rs::aes_mechanism_for only dispatches \
-             CBC/CBC_PAD/ECB/CTR/GCM/CCM today — this mode cannot execute yet \
-             (KMIP/CACP coverage gap-analysis Phase 2, not yet wired)",
+             CBC/CBC_PAD/ECB/CTR/GCM/CCM/OFB today — this mode cannot execute \
+             yet (KMIP/CACP coverage gap-analysis Phase 2, not yet wired)",
+        ),
+        "CFB" => Some(
+            "recognised, and the engine now implements CFB128/CFB8/CFB1 — but \
+             KMIP's own Block Cipher Mode enum has no width-distinguishing \
+             value (only one generic CFB codepoint exists), so even a wired \
+             dispatch could only pick one width by convention, not per-request \
+             (KMIP/CACP coverage gap-analysis item 2.4 — needs a design \
+             decision before implementation, not yet resolved)",
         ),
         _ => None,
     }

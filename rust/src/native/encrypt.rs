@@ -825,6 +825,26 @@ pub fn encrypt_with_key_bytes(
             let nonce = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_ccm_encrypt(key_bytes, nonce, plaintext, aad, tag_len)
         }
+        // KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30). OFB is
+        // self-inverse (same keystream XOR encrypt/decrypt, like CTR
+        // above); CFB is direction-sensitive (its feedback register
+        // differs), hence CipherDirection::Encrypt here.
+        CKM_AES_OFB => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_ofb_apply(key_bytes, iv, plaintext)
+        }
+        CKM_AES_CFB128 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb128_apply(key_bytes, iv, plaintext, crate::crypto::multipart::CipherDirection::Encrypt)
+        }
+        CKM_AES_CFB8 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb8_apply(key_bytes, iv, plaintext, crate::crypto::multipart::CipherDirection::Encrypt)
+        }
+        CKM_AES_CFB1 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb1_apply(key_bytes, iv, plaintext, crate::crypto::multipart::CipherDirection::Encrypt)
+        }
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }
@@ -878,6 +898,24 @@ pub fn decrypt_with_key_bytes(
             let nonce = iv.ok_or(CKR_ARGUMENTS_BAD)?;
             aes_ccm_decrypt(key_bytes, nonce, ciphertext, aad, tag_len)
         }
+        // KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30).
+        CKM_AES_OFB => {
+            // OFB is self-inverse — same keystream XOR both directions.
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_ofb_apply(key_bytes, iv, ciphertext)
+        }
+        CKM_AES_CFB128 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb128_apply(key_bytes, iv, ciphertext, crate::crypto::multipart::CipherDirection::Decrypt)
+        }
+        CKM_AES_CFB8 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb8_apply(key_bytes, iv, ciphertext, crate::crypto::multipart::CipherDirection::Decrypt)
+        }
+        CKM_AES_CFB1 => {
+            let iv = iv.ok_or(CKR_ARGUMENTS_BAD)?;
+            aes_cfb1_apply(key_bytes, iv, ciphertext, crate::crypto::multipart::CipherDirection::Decrypt)
+        }
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }
@@ -924,6 +962,59 @@ fn aes_ccm_decrypt(
     }
     let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
     ccm_decrypt(&k, nonce, aad, ciphertext_and_tag, tag_len)
+}
+
+/// KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30) — thin
+/// key-bytes wrapper over [`crate::crypto::multipart::OfbState`],
+/// mirroring the FFI dispatch's own usage exactly (`ffi.rs`'s
+/// `CKM_AES_OFB` arms, both directions). Self-inverse: the same call
+/// serves encrypt and decrypt.
+fn aes_ofb_apply(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{AesKey, OfbState};
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let ivb: [u8; 16] = iv.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    Ok(OfbState::new(k, ivb).update_public(data))
+}
+
+/// KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30) — CFB128,
+/// direction-sensitive (unlike OFB), mirroring `ffi.rs`'s `CKM_AES_CFB128`
+/// arms exactly.
+fn aes_cfb128_apply(
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    dir: crate::crypto::multipart::CipherDirection,
+) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{AesKey, Cfb128State};
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let ivb: [u8; 16] = iv.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    Ok(Cfb128State::new(k, ivb, dir).update_public(data))
+}
+
+/// CFB8 counterpart of [`aes_cfb128_apply`].
+fn aes_cfb8_apply(
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    dir: crate::crypto::multipart::CipherDirection,
+) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{AesKey, Cfb8State};
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let ivb: [u8; 16] = iv.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    Ok(Cfb8State::new(k, ivb, dir).update_public(data))
+}
+
+/// CFB1 counterpart of [`aes_cfb128_apply`].
+fn aes_cfb1_apply(
+    key: &[u8],
+    iv: &[u8],
+    data: &[u8],
+    dir: crate::crypto::multipart::CipherDirection,
+) -> Result<Vec<u8>, CkRv> {
+    use crate::crypto::multipart::{AesKey, Cfb1State};
+    let k = AesKey::new(key).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
+    let ivb: [u8; 16] = iv.try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    Ok(Cfb1State::new(k, ivb, dir).update_public(data))
 }
 
 // ── RSA-OAEP ────────────────────────────────────────────────────────────────
@@ -1583,6 +1674,77 @@ mod tests {
         // Nonce/tag-length range checks (SP 800-38C).
         assert_eq!(aes_ccm_encrypt(&key, &[0u8; 6], &pt, &[], Some(16)).unwrap_err(), CKR_MECHANISM_PARAM_INVALID);
         assert_eq!(aes_ccm_encrypt(&key, &nonce, &pt, &[], Some(15)).unwrap_err(), CKR_MECHANISM_PARAM_INVALID);
+    }
+
+    /// KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30) —
+    /// `aes_ofb_apply`/`aes_cfb128_apply`/`aes_cfb8_apply`/`aes_cfb1_apply`,
+    /// each verified byte-exact against a real NIST ACVP test case from
+    /// this repo's own vector files (`tests/acvp/aes_{ofb,cfb128,cfb8,
+    /// cfb1}_test.json`) — the same files the C++ WS-8 fix for these
+    /// exact mechanisms was validated against. The CFB1 vector is
+    /// deliberately a byte-aligned (payloadLen=8) case per that file's
+    /// own provenance note, so a plain byte comparison is valid evidence
+    /// (no bit-level masking needed).
+    #[test]
+    fn aes_ofb_cfb_family_matches_nist_acvp_vectors() {
+        // OFB — self-inverse, one call serves both directions.
+        let ofb_key: [u8; 16] = [0x00; 16];
+        let ofb_iv: [u8; 16] = [
+            0xf3, 0x44, 0x81, 0xec, 0x3c, 0xc6, 0x27, 0xba, 0xcd, 0x5d, 0xc3, 0xfb, 0x08, 0xf2,
+            0x73, 0xe6,
+        ];
+        let ofb_pt: [u8; 16] = [0x00; 16];
+        let ofb_ct: [u8; 16] = [
+            0x03, 0x36, 0x76, 0x3e, 0x96, 0x6d, 0x92, 0x59, 0x5a, 0x56, 0x7c, 0xc9, 0xce, 0x53,
+            0x7f, 0x5e,
+        ];
+        let got = aes_ofb_apply(&ofb_key, &ofb_iv, &ofb_pt).unwrap();
+        assert_eq!(got, ofb_ct, "OFB must match the NIST ACVP KAT");
+        assert_eq!(aes_ofb_apply(&ofb_key, &ofb_iv, &ofb_ct).unwrap(), ofb_pt, "OFB decrypt (same call) must recover plaintext");
+
+        // CFB128
+        use crate::crypto::multipart::CipherDirection::{Decrypt, Encrypt};
+        let cfb128_key: [u8; 16] = [0x00; 16];
+        let cfb128_iv: [u8; 16] = [
+            0x96, 0xab, 0x5c, 0x2f, 0xf6, 0x12, 0xd9, 0xdf, 0xaa, 0xe8, 0xc3, 0x1f, 0x30, 0xc4,
+            0x21, 0x68,
+        ];
+        let cfb128_pt: [u8; 16] = [0x00; 16];
+        let cfb128_ct: [u8; 16] = [
+            0xff, 0x4f, 0x83, 0x91, 0xa6, 0xa4, 0x0c, 0xa5, 0xb2, 0x5d, 0x23, 0xbe, 0xdd, 0x44,
+            0xa5, 0x97,
+        ];
+        assert_eq!(aes_cfb128_apply(&cfb128_key, &cfb128_iv, &cfb128_pt, Encrypt).unwrap(), cfb128_ct);
+        assert_eq!(aes_cfb128_apply(&cfb128_key, &cfb128_iv, &cfb128_ct, Decrypt).unwrap(), cfb128_pt);
+
+        // CFB8
+        let cfb8_key: [u8; 16] = [0x00; 16];
+        let cfb8_iv: [u8; 16] = [
+            0x97, 0x98, 0xc4, 0x64, 0x0b, 0xad, 0x75, 0xc7, 0xc3, 0x22, 0x7d, 0xb9, 0x10, 0x17,
+            0x4e, 0x72,
+        ];
+        let cfb8_pt: [u8; 1] = [0x00];
+        let cfb8_ct: [u8; 1] = [0xa9];
+        assert_eq!(aes_cfb8_apply(&cfb8_key, &cfb8_iv, &cfb8_pt, Encrypt).unwrap(), cfb8_ct);
+        assert_eq!(aes_cfb8_apply(&cfb8_key, &cfb8_iv, &cfb8_ct, Decrypt).unwrap(), cfb8_pt);
+
+        // CFB1 (payloadLen=8 case, byte-aligned)
+        let cfb1_key: [u8; 16] = [
+            0x47, 0x5f, 0x9b, 0xcc, 0x8a, 0x22, 0x60, 0x1a, 0x4e, 0xf8, 0x77, 0xe5, 0x4d, 0xc9,
+            0x79, 0x77,
+        ];
+        let cfb1_iv: [u8; 16] = [
+            0x21, 0x1e, 0xae, 0x94, 0xdf, 0xac, 0x12, 0x7e, 0xd3, 0xcc, 0x36, 0x7d, 0xbc, 0x09,
+            0x4d, 0x0b,
+        ];
+        let cfb1_pt: [u8; 1] = [0x03];
+        let cfb1_ct: [u8; 1] = [0x2f];
+        assert_eq!(aes_cfb1_apply(&cfb1_key, &cfb1_iv, &cfb1_pt, Encrypt).unwrap(), cfb1_ct);
+        assert_eq!(aes_cfb1_apply(&cfb1_key, &cfb1_iv, &cfb1_ct, Decrypt).unwrap(), cfb1_pt);
+
+        // IV length validation, shared across all four.
+        assert_eq!(aes_ofb_apply(&ofb_key, &[0u8; 15], &ofb_pt).unwrap_err(), CKR_MECHANISM_PARAM_INVALID);
+        assert_eq!(aes_cfb128_apply(&cfb128_key, &[0u8; 15], &cfb128_pt, Encrypt).unwrap_err(), CKR_MECHANISM_PARAM_INVALID);
     }
 
     fn fresh_session() -> u32 {

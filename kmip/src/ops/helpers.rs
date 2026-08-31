@@ -527,6 +527,7 @@ pub fn aes_mechanism_for(
 ) -> Result<u32, KmipError> {
     use softhsmrustv3::constants::{
         CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_CCM, CKM_AES_CTR, CKM_AES_ECB, CKM_AES_GCM,
+        CKM_AES_OFB,
     };
     let bcm = cp.and_then(|c| c.block_cipher_mode);
     // KMIP 3.0 §11 `Padding Method` enum — codepoint 3 = `PKCS5`
@@ -545,6 +546,10 @@ pub fn aes_mechanism_for(
         // field) threads through the same generic `tag_len` param GCM
         // already uses — nothing else in this call path needed to change.
         (Some(8), _) => CKM_AES_CCM,
+        // KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30) — OFB has
+        // no width ambiguity (unlike CFB below), so it's unambiguous to
+        // wire. The engine has supported it since the WS-8 remediation.
+        (Some(5), _) => CKM_AES_OFB,
         (Some(9), _) | (None, _) => CKM_AES_GCM,
         (Some(other), _) => {
             return Err(KmipError::unsupported_cryptographic_parameters(format!(
@@ -1729,6 +1734,8 @@ mod tests {
             (Some(6), None, c::CKM_AES_CTR),
             // KMIP/CACP coverage gap-analysis item 2.2 (2026-08-30).
             (Some(8), None, c::CKM_AES_CCM),
+            // KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30).
+            (Some(5), None, c::CKM_AES_OFB),
             (Some(9), None, c::CKM_AES_GCM),
             (None, None, c::CKM_AES_GCM), // documented absent-mode default
         ];
@@ -1741,12 +1748,12 @@ mod tests {
 
     #[test]
     fn aes_mechanism_unsupported_modes_fail_0x3e() {
-        // PCBC, CFB, OFB, CMAC, CBC-MAC, XTS, AESKeyWrapPadding,
-        // NISTKeyWrap, AEAD — all must fail, never fall through to GCM.
-        // CCM (0x08) deliberately excluded here — wired 2026-08-30 (KMIP/
-        // CACP coverage gap-analysis item 2.2), it's now genuinely
+        // PCBC, CFB, CMAC, CBC-MAC, XTS, AESKeyWrapPadding, NISTKeyWrap,
+        // AEAD — all must fail, never fall through to GCM. CCM (0x08) and
+        // OFB (0x05) deliberately excluded here — wired 2026-08-30 (KMIP/
+        // CACP coverage gap-analysis items 2.2/2.4), both now genuinely
         // supported; see aes_mechanism_supported_modes_map_exactly below.
-        for mode in [3u32, 4, 5, 7, 0x0a, 0x0b, 0x0c, 0x0d, 0x12] {
+        for mode in [3u32, 4, 7, 0x0a, 0x0b, 0x0c, 0x0d, 0x12] {
             let err = aes_mechanism_for(Some(&cp(Some(mode), None, None)))
                 .expect_err(&format!("mode 0x{mode:02x} must fail"));
             assert_eq!(
