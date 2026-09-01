@@ -373,4 +373,6 @@ extern const OSSL_DISPATCH p11prov_aes256wrappad_cipher_functions[];
 extern const OSSL_DISPATCH p11prov_chacha20256stream_cipher_functions[];
 extern const OSSL_DISPATCH p11prov_chacha20256poly1305_cipher_functions[];
 
+int p11prov_chacha20_set_ctx_params(void *vctx, const OSSL_PARAM params[]);
+
 #endif /* _CIPHER_H */
