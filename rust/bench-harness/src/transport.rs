@@ -212,7 +212,7 @@ impl RemoteTransport for GrpcPersistent {
         let mut c = self.client.clone();
         let data = data.to_vec();
         self.rt.block_on(async move {
-            Ok(c.sign(Request::new(pb::SignRequest { session_handle: session, private_handle: key_handle, algorithm, data }))
+            Ok(c.sign(Request::new(pb::SignRequest { session_handle: session, private_handle: key_handle, algorithm, data, external_mu: false }))
                 .await?
                 .into_inner()
                 .signature)
@@ -230,6 +230,7 @@ impl RemoteTransport for GrpcPersistent {
                 algorithm,
                 data,
                 signature,
+                external_mu: false,
             }))
             .await?
             .into_inner()
@@ -328,7 +329,7 @@ impl RemoteTransport for GrpcPerRequest {
         let data = data.to_vec();
         self.call(move |mut c| {
             Box::pin(async move {
-                Ok(c.sign(Request::new(pb::SignRequest { session_handle: session, private_handle: key_handle, algorithm, data }))
+                Ok(c.sign(Request::new(pb::SignRequest { session_handle: session, private_handle: key_handle, algorithm, data, external_mu: false }))
                     .await?
                     .into_inner()
                     .signature)
@@ -341,7 +342,7 @@ impl RemoteTransport for GrpcPerRequest {
         let (data, signature) = (data.to_vec(), sig.to_vec());
         self.call(move |mut c| {
             Box::pin(async move {
-                Ok(c.verify(Request::new(pb::VerifyRequest { session_handle: session, public_handle: key_handle, algorithm, data, signature }))
+                Ok(c.verify(Request::new(pb::VerifyRequest { session_handle: session, public_handle: key_handle, algorithm, data, signature, external_mu: false }))
                     .await?
                     .into_inner()
                     .valid)
