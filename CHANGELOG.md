@@ -8,6 +8,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Rust engine: new `CKM_HPKE` mechanism family — full RFC 9180 HPKE
+  (all 4 modes) plus the draft-ietf-hpke-pq/draft-irtf-cfrg-hybrid-kems
+  PQ/T hybrid KEMs, entirely inside the engine with no private key or
+  intermediate shared secret ever crossing the FFI boundary in clear.**
+  `CKM_HPKE_KEM_KEY_PAIR_GEN` generates a uniform `CKK_HPKE_KEM` key
+  object (classical or hybrid, selected by `CKA_PARAMETER_SET`);
+  `CKM_HPKE` drives Encap/Decap + KeySchedule + AEAD key/exporter-secret
+  derivation in one call via `C_EncapsulateKey`/`C_DecapsulateKey` and a
+  new `CK_HPKE_PARAMS` struct. Hybrid suites (MLKEM768-X25519,
+  MLKEM768-P256, MLKEM1024-P384) use the CG-framework combiner
+  (`SHA3-256(ss_PQ‖ss_T‖ct_T‖ek_T‖Label)`, PQ-first) from
+  draft-irtf-cfrg-hybrid-kems/-concrete-hybrid-kems, matching
+  draft-ietf-hpke-pq's registered KEM IDs. Native to this engine —
+  PKCS#11 v3.2 has no HPKE mechanism, and v3.3's draft `CKM_COMP_KEM`
+  targets the structurally-similar-but-spec-distinct
+  draft-ietf-lamps-pq-composite-kem combiner instead. Provisional vendor
+  codepoints (`0x80000013`/`0x80000014`/`0x80000003`), full mechanism
+  semantics, and the FIPS/security rationale are in
+  `docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md`. Rust engine
+  only; C++ engine parity is a separately gated follow-on. Verified via
+  the native `native::hpke` test suite (54-case hybrid cross-product +
+  classical RFC 9180 A.3-aligned round trips), all asserting
+  non-extractability of every intermediate handle.
+
+### Fixed
+
+- **Rust engine: `CKM_HKDF_DERIVE`'s expand-only mode silently
+  re-extracted instead of treating the base key as the PRK.** With
+  `bExtract=0, bExpand=1`, the dispatch fell through to the
+  extract-and-expand path and ran `Hkdf::new(salt, ikm)` against the
+  caller's base key, instead of treating it as an already-extracted PRK
+  via `Hkdf::from_prk`. Found by cross-checking HPKE KeySchedule output
+  against a pure-JS HKDF reference (`hpkeService.ts`'s header comment)
+  — every HPKE Expand call in the hub had been silently going through
+  `C_Sign(HMAC)` instead of `C_DeriveKey(CKM_HKDF_DERIVE, bExpand)`, an
+  invisible correctness gap since both paths compute RFC 5869 HKDF-Expand
+  and happened to agree on the vectors exercised so far. Fixed by
+  restructuring the dispatch on `(bExtract, bExpand)` into its own
+  four-way match, with `CKR_MECHANISM_PARAM_INVALID` for the
+  neither-set case rather than a silent fallthrough. The C++ engine's
+  equivalent path was already correct — this was Rust-only.
+
 ## [0.27.0] — 2026-08-31
 
 **Consolidated release: closes the WS-0/WS-8 PKCS#11 v3.2 coverage

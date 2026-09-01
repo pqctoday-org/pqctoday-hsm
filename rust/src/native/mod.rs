@@ -74,6 +74,7 @@ pub mod agree;
 pub mod derive;
 pub mod encrypt;
 pub(crate) mod hbs;
+pub mod hpke;
 pub mod hybrid;
 pub mod keygen;
 pub mod object;

@@ -187,6 +187,40 @@ pub const CKK_XMSSMT: u32 = 0x0000_0048; // XMSS^MT multi-tree (standard)
 pub const CKK_PQCTODAY_FRODOKEM: u32 = 0x8000_0001;
 pub const CKK_PQCTODAY_CLASSIC_MCELIECE: u32 = 0x8000_0002;
 
+// CKM_HPKE (RFC 9180 over PKCS#11) — pending OASIS TC allocation, see
+// docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md. Allocated per
+// pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md §1.4.
+pub const CKK_HPKE_KEM: u32 = 0x8000_0003;
+
+/// `CK_HPKE_KEM_PARAMETER_SET_TYPE` values — deliberately equal to the wire
+/// `kem_id` from RFC 9180 §7.1 / draft-ietf-hpke-pq §8.1 (proposal §3): this
+/// registry is not reinvented.
+pub const CKP_HPKE_KEM_DHKEM_P256_HKDF_SHA256: u32 = 0x0010;
+pub const CKP_HPKE_KEM_DHKEM_P384_HKDF_SHA384: u32 = 0x0011;
+pub const CKP_HPKE_KEM_DHKEM_P521_HKDF_SHA512: u32 = 0x0012;
+pub const CKP_HPKE_KEM_DHKEM_X25519_HKDF_SHA256: u32 = 0x0020;
+pub const CKP_HPKE_KEM_DHKEM_X448_HKDF_SHA512: u32 = 0x0021;
+pub const CKP_HPKE_KEM_MLKEM768_P256: u32 = 0x0050;
+pub const CKP_HPKE_KEM_MLKEM1024_P384: u32 = 0x0051;
+pub const CKP_HPKE_KEM_MLKEM768_X25519: u32 = 0x647a;
+
+/// `CK_HPKE_KDF_TYPE` — equal to RFC 9180 §7.2's `kdf_id`.
+pub const CKD_HPKE_HKDF_SHA256: u32 = 0x0001;
+pub const CKD_HPKE_HKDF_SHA384: u32 = 0x0002;
+pub const CKD_HPKE_HKDF_SHA512: u32 = 0x0003;
+
+/// `CK_HPKE_AEAD_TYPE` — equal to RFC 9180 §7.3's `aead_id`.
+pub const CKZ_HPKE_AEAD_128_GCM: u32 = 0x0001;
+pub const CKZ_HPKE_AEAD_256_GCM: u32 = 0x0002;
+pub const CKZ_HPKE_AEAD_CHACHA20POLY1305: u32 = 0x0003;
+pub const CKZ_HPKE_AEAD_EXPORT_ONLY: u32 = 0xffff;
+
+/// `CK_HPKE_MODE_TYPE` — equal to RFC 9180 §5.1's mode byte.
+pub const CKZ_HPKE_MODE_BASE: u32 = 0x00;
+pub const CKZ_HPKE_MODE_PSK: u32 = 0x01;
+pub const CKZ_HPKE_MODE_AUTH: u32 = 0x02;
+pub const CKZ_HPKE_MODE_AUTH_PSK: u32 = 0x03;
+
 // ── PKCS#11 Semantic Attribute Types ─────────────────────────────────────────
 
 pub const CKA_CLASS: u32 = 0x0000_0000;
@@ -598,6 +632,15 @@ pub const CKM_EC_MONTGOMERY_KEY_DERIVE: u32 = 0x8000_0011;
 // codepoints, mirroring how CKM_HSS_KEY_PAIR_GEN carries its levels/
 // param-set choice in one mechanism.
 pub const CKM_PQCTODAY_SPLIT_KEY: u32 = 0x8000_0012;
+// CKM_HPKE — RFC 9180 (HPKE) composed as a native mechanism: KEM (+ PQ/T
+// hybrid combiner, draft-irtf-cfrg-hybrid-kems §5.5) + full §5.1 KeySchedule
+// in one C_EncapsulateKey/C_DecapsulateKey call. PKCS#11 v3.2 has no HPKE
+// mechanism (verified against the canonical header), and v3.3's CKM_COMP_KEM
+// targets a different spec (draft-ietf-lamps-pq-composite-kem) — see
+// docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md §1.2. Params struct:
+// ck_param::hpke_params.
+pub const CKM_HPKE_KEM_KEY_PAIR_GEN: u32 = 0x8000_0013;
+pub const CKM_HPKE: u32 = 0x8000_0014;
 // ML-DSA external-µ signing (remediation R34, 2026-08-26; adopted natively
 // 2026-08-30 from the real PKCS#11 v3.3 working draft). This is the v3.3
 // draft's own name and codepoint — no longer a vendor-range stopgap. See

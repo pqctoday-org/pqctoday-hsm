@@ -682,6 +682,61 @@ ck_struct!(
 });
 
 ck_struct!(
+    /// `CK_DERIVED_KEY` (v3.2 §6.42, canonical header
+    /// `docs/refs/pkcs11t-canonical-v3.2.h:2456`) — `{ pTemplate,
+    /// ulAttributeCount, phKey }`. Already used by `CK_SP800_108_KDF_PARAMS`'s
+    /// `pAdditionalDerivedKeys`; reused unmodified as `CKM_HPKE`'s
+    /// `CK_HPKE_PARAMS.pExporterKey` — see `docs/proposals/
+    /// pkcs11-ckm-hpke-mechanism-proposal.md` §4 OQ1.
+    derived_key, "CK_DERIVED_KEY", {
+    P_TEMPLATE: F::Ptr,
+    UL_ATTRIBUTE_COUNT: F::Ulong,
+    PH_KEY: F::Ptr,
+});
+
+ck_struct!(
+    /// `CK_HPKE_PARAMS` — proposed mechanism parameter for `CKM_HPKE`
+    /// (PQCToday vendor extension pending OASIS TC allocation; see
+    /// `docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md` §4). Field
+    /// order matches that proposal's `CK_HPKE_PARAMS` C declaration exactly.
+    ///
+    /// `enc` is NOT a field here — it flows through
+    /// `C_EncapsulateKey`/`C_DecapsulateKey`'s own built-in
+    /// `pCiphertext`/`pulCiphertextLen` parameters, exactly like every other
+    /// KEM mechanism in this engine (`CKM_ML_KEM`, `CKM_ECDH1_DERIVE`-as-KEM,
+    /// FrodoKEM, Classic McEliece) — a design-consistency fix caught while
+    /// wiring the FFI dispatch (the proposal doc's §4 originally had a
+    /// redundant `pEnc`/`pulEncLen` pair; corrected there too).
+    ///
+    /// `pEphemeralSeed`/`ulEphemeralSeedLen` (Phase-1 implementation detail,
+    /// not yet in the proposal's normative text — see proposal §8 OQ
+    /// "deterministic Encaps"): forces the ephemeral classical keypair for
+    /// byte-exact RFC 9180 Appendix A vector reproduction. CLASSICAL KEM IDs
+    /// ONLY in this implementation — supplying it for a hybrid `kemId`
+    /// returns `CKR_MECHANISM_PARAM_INVALID` (see native/hpke.rs). MUST NOT
+    /// be used outside test contexts: determinism defeats IND-CCA2 for real
+    /// traffic.
+    hpke_params, "CK_HPKE_PARAMS", {
+    KEM_ID: F::Ulong,
+    KDF_ID: F::Ulong,
+    AEAD_ID: F::Ulong,
+    MODE: F::Ulong,
+    H_PSK: F::Ulong,
+    P_PSK_ID: F::Ptr,
+    UL_PSK_ID_LEN: F::Ulong,
+    P_INFO: F::Ptr,
+    UL_INFO_LEN: F::Ulong,
+    H_SENDER_STATIC_KEY: F::Ulong,
+    P_SENDER_PK: F::Ptr,
+    UL_SENDER_PK_LEN: F::Ulong,
+    P_BASE_NONCE: F::Ptr,
+    UL_BASE_NONCE_LEN: F::Ulong,
+    P_EXPORTER_KEY: F::Ptr,
+    P_EPHEMERAL_SEED: F::Ptr,
+    UL_EPHEMERAL_SEED_LEN: F::Ulong,
+});
+
+ck_struct!(
     /// `CK_BIP32_CHILD_DERIVE_PARAMS` — a **PQCToday vendor extension**, not
     /// an OASIS structure. `CKM_BIP32_CHILD_DERIVE` is
     /// `CKM_VENDOR_DEFINED | 0x105c`; neither the mechanism nor the struct

@@ -2097,6 +2097,7 @@ fn C_GenerateKeyPair_impl(
             CKM_XMSSMT_KEY_PAIR_GEN => Some(CKK_XMSSMT),
             CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN => Some(CKK_PQCTODAY_FRODOKEM),
             CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => Some(CKK_PQCTODAY_CLASSIC_MCELIECE),
+            CKM_HPKE_KEM_KEY_PAIR_GEN => Some(CKK_HPKE_KEM),
             _ => None,
         };
         if let Some(exp) = expected_kt {
@@ -2112,6 +2113,30 @@ fn C_GenerateKeyPair_impl(
             }
         }
         match mech_type {
+            // CKM_HPKE_KEM_KEY_PAIR_GEN — see native/hpke.rs and
+            // docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md §5.4.
+            // Thin dispatch: native::hpke::keygen already builds the full
+            // CKK_HPKE_KEM object (classical or hybrid, per CKA_PARAMETER_SET)
+            // and allocates both handles itself.
+            CKM_HPKE_KEM_KEY_PAIR_GEN => {
+                let kem_id = match get_attr_ulong(
+                    p_public_key_template,
+                    ul_public_key_attribute_count,
+                    CKA_PARAMETER_SET,
+                ) {
+                    Some(p) => p,
+                    None => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                match crate::native::hpke::keygen(_h_session, kem_id, &[], "") {
+                    Ok((pub_h, priv_h)) => {
+                        *ph_public_key = pub_h;
+                        *ph_private_key = priv_h;
+                        CKR_OK
+                    }
+                    Err(rv) => rv,
+                }
+            }
+
             CKM_ML_KEM_KEY_PAIR_GEN => {
                 use ml_kem::{EncodedSizeUser, KemCore};
 
@@ -4181,6 +4206,46 @@ unsafe fn ecdh_kem_apply_template_value_len(
     Ok(())
 }
 
+/// Read a `CK_DERIVED_KEY*` (`{ pTemplate, ulAttributeCount, phKey }`,
+/// [PKCS11-BASE] §6.42, reused unmodified by `CK_HPKE_PARAMS.pExporterKey` —
+/// proposal §4 OQ1) into `(phKey pointer, raw template as (type, bytes)
+/// pairs)`. `None` if `p` is null (no exporter key requested). The template
+/// walk mirrors `crypto::handlers::absorb_template_attrs`'s raw
+/// `CK_ATTRIBUTE` layout (3 words per entry: type, pValue, ulValueLen) but,
+/// unlike that function, is type-blind — the caller's exporter-key template
+/// can carry any attribute, so this collects all of them rather than
+/// filtering to a known set.
+///
+/// # Safety
+/// `p` must be NULL or point to a readable `CK_DERIVED_KEY` whose
+/// `pTemplate`/`ulAttributeCount` describe a readable `CK_ATTRIBUTE` array.
+unsafe fn hpke_read_derived_key_template(p: *const u8) -> Option<(*const u8, Vec<(u32, Vec<u8>)>)> {
+    if p.is_null() {
+        return None;
+    }
+    let r = ck_param::ParamReader::new(p, ck_param::derived_key::LAYOUT.size(), &ck_param::derived_key::LAYOUT, ck_param::derived_key::FIELD_COUNT).ok()?;
+    let p_template = r.ptr(ck_param::derived_key::P_TEMPLATE);
+    let count = r.ulong(ck_param::derived_key::UL_ATTRIBUTE_COUNT);
+    let ph_key = r.ptr(ck_param::derived_key::PH_KEY);
+
+    let mut out = Vec::new();
+    if !p_template.is_null() && count > 0 && count <= 65536 {
+        let ptr = p_template as *const usize;
+        for i in 0..count {
+            let t = *ptr.add(i * 3) as u32;
+            let val_ptr = *ptr.add(i * 3 + 1) as *const u8;
+            let val_len = *ptr.add(i * 3 + 2);
+            let bytes = if !val_ptr.is_null() && val_len > 0 {
+                std::slice::from_raw_parts(val_ptr, val_len).to_vec()
+            } else {
+                Vec::new()
+            };
+            out.push((t, bytes));
+        }
+    }
+    Some((ph_key, out))
+}
+
 fn C_EncapsulateKey_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
@@ -4202,6 +4267,108 @@ fn C_EncapsulateKey_impl(
     }
     unsafe {
         let mech_type = ck_param::mech(p_mechanism).mechanism;
+
+        // CKM_HPKE — see native/hpke.rs and
+        // docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md §6.1. Full
+        // HPKE Encap (+ hybrid combiner) + KeySchedule in one call; `enc`
+        // flows through this function's OWN pCiphertext/pulCiphertextLen
+        // (query-then-fill, same convention as every other KEM mechanism
+        // here — see ck_param::hpke_params's doc comment for why there is
+        // no separate pEnc field).
+        if mech_type == CKM_HPKE {
+            let m = ck_param::mech(p_mechanism);
+            let r = match m.params(&ck_param::hpke_params::LAYOUT, ck_param::hpke_params::FIELD_COUNT) {
+                Ok(r) => r,
+                Err(ck_param::ParamErr::Absent) => return CKR_ARGUMENTS_BAD,
+                Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
+            };
+            use ck_param::hpke_params as hp;
+            let kem_id = r.ulong32(hp::KEM_ID);
+            let kdf_id = r.ulong32(hp::KDF_ID);
+            let aead_id = r.ulong32(hp::AEAD_ID);
+            let mode = r.ulong32(hp::MODE);
+            let h_psk = r.ulong32(hp::H_PSK);
+            let psk_id = r.buffer(hp::P_PSK_ID, hp::UL_PSK_ID_LEN);
+            let info = r.buffer(hp::P_INFO, hp::UL_INFO_LEN);
+            let h_sender_static = r.ulong32(hp::H_SENDER_STATIC_KEY);
+            let p_base_nonce = r.ptr(hp::P_BASE_NONCE);
+            let ul_base_nonce_len = r.ulong(hp::UL_BASE_NONCE_LEN);
+            let p_exporter_key = r.ptr(hp::P_EXPORTER_KEY);
+            let p_ephemeral_seed = r.ptr(hp::P_EPHEMERAL_SEED);
+            let ul_ephemeral_seed_len = r.ulong(hp::UL_EPHEMERAL_SEED_LEN);
+
+            let psk = if h_psk != 0 {
+                match get_object_value(h_psk) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                }
+            } else {
+                Vec::new()
+            };
+            let sender_static_priv = if h_sender_static != 0 {
+                match get_object_value(h_sender_static) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                }
+            } else {
+                Vec::new()
+            };
+            let ephemeral_seed = if !p_ephemeral_seed.is_null() && ul_ephemeral_seed_len > 0 {
+                Some(std::slice::from_raw_parts(p_ephemeral_seed, ul_ephemeral_seed_len).to_vec())
+            } else {
+                None
+            };
+            let (exporter_ph_ptr, exporter_tpl_vec) = match hpke_read_derived_key_template(p_exporter_key) {
+                Some((p, t)) => (Some(p), Some(t)),
+                None => (None, None),
+            };
+
+            let params = crate::native::hpke::HpkeParams {
+                kem_id,
+                kdf_id,
+                aead_id,
+                mode,
+                psk: &psk,
+                psk_id,
+                info,
+                sender_static_priv: if sender_static_priv.is_empty() { None } else { Some(sender_static_priv.as_slice()) },
+                sender_static_pub: None,
+                ephemeral_seed: ephemeral_seed.as_deref(),
+            };
+
+            let result = match crate::native::hpke::encapsulate(_h_session, h_key, &params, exporter_tpl_vec) {
+                Ok(r) => r,
+                Err(rv) => return rv,
+            };
+
+            if p_ciphertext.is_null() {
+                *pul_ciphertext_len = result.enc.len() as u32;
+                return CKR_OK;
+            }
+            if *pul_ciphertext_len < result.enc.len() as u32 {
+                *pul_ciphertext_len = result.enc.len() as u32;
+                return CKR_BUFFER_TOO_SMALL;
+            }
+            std::ptr::copy_nonoverlapping(result.enc.as_ptr(), p_ciphertext, result.enc.len());
+            *pul_ciphertext_len = result.enc.len() as u32;
+
+            if let Some(bn) = &result.base_nonce {
+                if p_base_nonce.is_null() || ul_base_nonce_len < bn.len() {
+                    return CKR_BUFFER_TOO_SMALL;
+                }
+                std::ptr::copy_nonoverlapping(bn.as_ptr(), p_base_nonce as *mut u8, bn.len());
+            }
+            if let Some(ph_key_ptr) = exporter_ph_ptr {
+                if !ph_key_ptr.is_null() {
+                    *(ph_key_ptr as *mut u32) = result.exporter_handle.unwrap_or(0);
+                }
+            }
+            *ph_key = match result.key_handle.or(result.exporter_handle) {
+                Some(h) => h,
+                None => return CKR_FUNCTION_FAILED,
+            };
+            return CKR_OK;
+        }
 
         // BSI TR-02102-1 §2.4.1/§2.4.2 vendor KEMs. Delegates the actual
         // crypto to `native::encrypt::encapsulate` (shared with KMIP's
@@ -4597,6 +4764,79 @@ fn C_DecapsulateKey_impl(
     }
     unsafe {
         let mech_type = ck_param::mech(p_mechanism).mechanism;
+
+        // CKM_HPKE — mirrors C_EncapsulateKey's arm; `enc` is the function's
+        // own pCiphertext (an input here, already non-null-checked by the
+        // `nonnull!` above).
+        if mech_type == CKM_HPKE {
+            let m = ck_param::mech(p_mechanism);
+            let r = match m.params(&ck_param::hpke_params::LAYOUT, ck_param::hpke_params::FIELD_COUNT) {
+                Ok(r) => r,
+                Err(ck_param::ParamErr::Absent) => return CKR_ARGUMENTS_BAD,
+                Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
+            };
+            use ck_param::hpke_params as hp;
+            let kem_id = r.ulong32(hp::KEM_ID);
+            let kdf_id = r.ulong32(hp::KDF_ID);
+            let aead_id = r.ulong32(hp::AEAD_ID);
+            let mode = r.ulong32(hp::MODE);
+            let h_psk = r.ulong32(hp::H_PSK);
+            let psk_id = r.buffer(hp::P_PSK_ID, hp::UL_PSK_ID_LEN);
+            let info = r.buffer(hp::P_INFO, hp::UL_INFO_LEN);
+            let sender_pk = r.buffer(hp::P_SENDER_PK, hp::UL_SENDER_PK_LEN);
+            let p_base_nonce = r.ptr(hp::P_BASE_NONCE);
+            let ul_base_nonce_len = r.ulong(hp::UL_BASE_NONCE_LEN);
+            let p_exporter_key = r.ptr(hp::P_EXPORTER_KEY);
+
+            let psk = if h_psk != 0 {
+                match get_object_value(h_psk) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                }
+            } else {
+                Vec::new()
+            };
+            let (exporter_ph_ptr, exporter_tpl_vec) = match hpke_read_derived_key_template(p_exporter_key) {
+                Some((p, t)) => (Some(p), Some(t)),
+                None => (None, None),
+            };
+
+            let params = crate::native::hpke::HpkeParams {
+                kem_id,
+                kdf_id,
+                aead_id,
+                mode,
+                psk: &psk,
+                psk_id,
+                info,
+                sender_static_priv: None,
+                sender_static_pub: if sender_pk.is_empty() { None } else { Some(sender_pk) },
+                ephemeral_seed: None,
+            };
+
+            let enc = std::slice::from_raw_parts(p_ciphertext, ul_ciphertext_len as usize);
+            let result = match crate::native::hpke::decapsulate(_h_session, h_private_key, enc, &params, exporter_tpl_vec) {
+                Ok(r) => r,
+                Err(rv) => return rv,
+            };
+
+            if let Some(bn) = &result.base_nonce {
+                if p_base_nonce.is_null() || ul_base_nonce_len < bn.len() {
+                    return CKR_BUFFER_TOO_SMALL;
+                }
+                std::ptr::copy_nonoverlapping(bn.as_ptr(), p_base_nonce as *mut u8, bn.len());
+            }
+            if let Some(ph_key_ptr) = exporter_ph_ptr {
+                if !ph_key_ptr.is_null() {
+                    *(ph_key_ptr as *mut u32) = result.exporter_handle.unwrap_or(0);
+                }
+            }
+            *ph_key = match result.key_handle.or(result.exporter_handle) {
+                Some(h) => h,
+                None => return CKR_FUNCTION_FAILED,
+            };
+            return CKR_OK;
+        }
 
         // BSI TR-02102-1 §2.4.1/§2.4.2 vendor KEMs — mirrors
         // `C_EncapsulateKey`'s delegation to `native::encrypt::decapsulate`.
@@ -9889,8 +10129,8 @@ pub fn C_DeriveKey(
                 // vectors (2026-08-30). CKR_MECHANISM_PARAM_INVALID matches
                 // the honest-failure convention already used by the
                 // SP800-108 Counter/Feedback PRF dispatch below.
-                if b_expand {
-                    macro_rules! hkdf_expand {
+                if b_extract && b_expand {
+                    macro_rules! hkdf_extract_expand {
                         ($H:ty) => {{
                             let hk = hkdf::Hkdf::<$H>::new(salt_opt, &ikm);
                             if hk.expand(info, &mut out).is_err() {
@@ -9899,20 +10139,57 @@ pub fn C_DeriveKey(
                         }};
                     }
                     match prf {
-                        CKM_SHA_1 => hkdf_expand!(sha1::Sha1),
-                        CKM_SHA224 => hkdf_expand!(sha2::Sha224),
-                        CKM_SHA256 => hkdf_expand!(sha2::Sha256),
-                        CKM_SHA384 => hkdf_expand!(sha2::Sha384),
-                        CKM_SHA512 => hkdf_expand!(sha2::Sha512),
-                        CKM_SHA512_224 => hkdf_expand!(sha2::Sha512_224),
-                        CKM_SHA512_256 => hkdf_expand!(sha2::Sha512_256),
-                        CKM_SHA3_224 => hkdf_expand!(sha3::Sha3_224),
-                        CKM_SHA3_256 => hkdf_expand!(sha3::Sha3_256),
-                        CKM_SHA3_384 => hkdf_expand!(sha3::Sha3_384),
-                        CKM_SHA3_512 => hkdf_expand!(sha3::Sha3_512),
+                        CKM_SHA_1 => hkdf_extract_expand!(sha1::Sha1),
+                        CKM_SHA224 => hkdf_extract_expand!(sha2::Sha224),
+                        CKM_SHA256 => hkdf_extract_expand!(sha2::Sha256),
+                        CKM_SHA384 => hkdf_extract_expand!(sha2::Sha384),
+                        CKM_SHA512 => hkdf_extract_expand!(sha2::Sha512),
+                        CKM_SHA512_224 => hkdf_extract_expand!(sha2::Sha512_224),
+                        CKM_SHA512_256 => hkdf_extract_expand!(sha2::Sha512_256),
+                        CKM_SHA3_224 => hkdf_extract_expand!(sha3::Sha3_224),
+                        CKM_SHA3_256 => hkdf_extract_expand!(sha3::Sha3_256),
+                        CKM_SHA3_384 => hkdf_extract_expand!(sha3::Sha3_384),
+                        CKM_SHA3_512 => hkdf_extract_expand!(sha3::Sha3_512),
                         _ => return CKR_MECHANISM_PARAM_INVALID,
                     }
-                } else {
+                } else if b_expand {
+                    // Split mode (bExtract=false, bExpand=true): PKCS#11 v3.2
+                    // §6.62.3 — the base key IS already the PRK, only the
+                    // Expand half of RFC 5869 runs. `Hkdf::from_prk` treats
+                    // `ikm` as the extracted PRK directly; `Hkdf::new` (used
+                    // above) would re-run Extract(salt, ikm) on it, which is
+                    // wrong here and is exactly the bug this arm used to
+                    // have — confirmed by cross-checking against RFC 9180
+                    // Appendix A.3 vectors via pqctoday-hub's HPKE service
+                    // (2026-08-31) and against the C++ engine's equivalent
+                    // OpenSSL EVP_KDF_HKDF_MODE_EXPAND_ONLY path, which was
+                    // already correct.
+                    macro_rules! hkdf_expand_from_prk {
+                        ($H:ty) => {{
+                            let hk = match hkdf::Hkdf::<$H>::from_prk(&ikm) {
+                                Ok(hk) => hk,
+                                Err(_) => return CKR_KEY_SIZE_RANGE,
+                            };
+                            if hk.expand(info, &mut out).is_err() {
+                                return CKR_FUNCTION_FAILED;
+                            }
+                        }};
+                    }
+                    match prf {
+                        CKM_SHA_1 => hkdf_expand_from_prk!(sha1::Sha1),
+                        CKM_SHA224 => hkdf_expand_from_prk!(sha2::Sha224),
+                        CKM_SHA256 => hkdf_expand_from_prk!(sha2::Sha256),
+                        CKM_SHA384 => hkdf_expand_from_prk!(sha2::Sha384),
+                        CKM_SHA512 => hkdf_expand_from_prk!(sha2::Sha512),
+                        CKM_SHA512_224 => hkdf_expand_from_prk!(sha2::Sha512_224),
+                        CKM_SHA512_256 => hkdf_expand_from_prk!(sha2::Sha512_256),
+                        CKM_SHA3_224 => hkdf_expand_from_prk!(sha3::Sha3_224),
+                        CKM_SHA3_256 => hkdf_expand_from_prk!(sha3::Sha3_256),
+                        CKM_SHA3_384 => hkdf_expand_from_prk!(sha3::Sha3_384),
+                        CKM_SHA3_512 => hkdf_expand_from_prk!(sha3::Sha3_512),
+                        _ => return CKR_MECHANISM_PARAM_INVALID,
+                    }
+                } else if b_extract {
                     // extract-only: write PRK to output using the requested PRF
                     macro_rules! hkdf_extract {
                         ($H:ty) => {{
@@ -9935,6 +10212,11 @@ pub fn C_DeriveKey(
                         CKM_SHA3_512 => hkdf_extract!(sha3::Sha3_512),
                         _ => return CKR_MECHANISM_PARAM_INVALID,
                     }
+                } else {
+                    // PKCS#11 v3.2 §6.62.3: "Either bExtract or bExpand must
+                    // be set to true" — matches the C++ engine's equivalent
+                    // gate (SoftHSM_keygen.cpp:4211).
+                    return CKR_MECHANISM_PARAM_INVALID;
                 }
                 out
             }
@@ -15443,11 +15725,18 @@ mod return_code_ffi_tests {
                 o.borrow_mut().insert(h, attrs);
             });
         }
-        // CK_HKDF_PARAMS = [flags(expand@bit8), prf, saltType, pSalt,
-        // ulSaltLen, hSaltKey, pInfo, ulInfoLen]. b_expand=1, SHA-256, no info.
+        // CK_HKDF_PARAMS = [flags(bExtract@byte0,bExpand@byte1), prf,
+        // saltType, pSalt, ulSaltLen, hSaltKey, pInfo, ulInfoLen].
+        // bExtract=1, bExpand=0 (extract-only), SHA-256 — output is the raw
+        // PRK, i.e. exactly HMAC(salt_key.value, ikm) as this test's own
+        // docstring describes. Was `0x100` (bExtract=0, bExpand=1) until
+        // the split-mode fix above started honoring bExtract=false as "the
+        // base key is already the PRK" — at 0x100 this closure would then
+        // have tried to Expand "input-keying-material" as if it were a
+        // 22-byte PRK, which fails length validation for SHA-256.
         let derive = |salt_type: u32, p_salt: usize, salt_len: usize, h_salt_key: usize| -> Vec<u8> {
             let params: [usize; 8] = [
-                0x100,
+                0x0001,
                 CKM_SHA256 as usize,
                 salt_type as usize,
                 p_salt,
@@ -15484,6 +15773,107 @@ mod return_code_ffi_tests {
         let via_key = derive(CKF_HKDF_SALT_KEY, 0, 0, h_salt as usize);
         assert_eq!(via_key, via_data, "salt-as-key must key HMAC on the salt key's CKA_VALUE");
         assert_eq!(via_key.len(), 32);
+    }
+
+    /// PKCS#11 v3.2 §6.62.3 split mode (bExtract=false, bExpand=true): the
+    /// base key IS the PRK already — this arm must Expand it directly, not
+    /// re-run Extract on it. Regression test for a real bug: this engine
+    /// used to call `Hkdf::new(salt, ikm)` (which always re-extracts)
+    /// instead of `Hkdf::from_prk(ikm)` for this mode, silently producing
+    /// the wrong output whenever a caller split Extract and Expand into two
+    /// C_DeriveKey calls — exactly the pattern RFC 9180 (HPKE)
+    /// LabeledExtract/LabeledExpand uses. Neither existing HKDF vector in
+    /// this repo would have caught it: this crate's ACVP KDA-HKDF corpus
+    /// (`tests/acvp/kda_hkdf_sp800_56cr1_test.json`) and the RFC 5869
+    /// Cases 1-3 vendored in `kmip/kat/sha/hkdf-acvp.json` both invoke HKDF
+    /// as a single combined Extract+Expand call — never Expand alone given
+    /// a raw PRK. The PRK/OKM pairs below are RFC 5869 §A.1 (Case 1) and
+    /// §A.3 (Case 3, zero-length salt/info), SHA-256; PRK values
+    /// independently recomputed via Python hmac.new(salt, ikm, sha256)
+    /// rather than transcribed (2026-08-31), and OKM values taken from the
+    /// already-vendored `hkdf-acvp.json`.
+    #[test]
+    fn hkdf_expand_only_treats_base_key_as_prk_not_ikm() {
+        let _guard = test_lock::acquire();
+        setup();
+
+        let prk1: [u8; 32] = [
+            0x07, 0x77, 0x09, 0x36, 0x2c, 0x2e, 0x32, 0xdf, 0x0d, 0xdc, 0x3f, 0x0d, 0xc4, 0x7b,
+            0xba, 0x63, 0x90, 0xb6, 0xc7, 0x3b, 0xb5, 0x0f, 0x9c, 0x31, 0x22, 0xec, 0x84, 0x4a,
+            0xd7, 0xc2, 0xb3, 0xe5,
+        ];
+        let info1: [u8; 10] = [0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9];
+        let okm1: [u8; 42] = [
+            0x3c, 0xb2, 0x5f, 0x25, 0xfa, 0xac, 0xd5, 0x7a, 0x90, 0x43, 0x4f, 0x64, 0xd0, 0x36,
+            0x2f, 0x2a, 0x2d, 0x2d, 0x0a, 0x90, 0xcf, 0x1a, 0x5a, 0x4c, 0x5d, 0xb0, 0x2d, 0x56,
+            0xec, 0xc4, 0xc5, 0xbf, 0x34, 0x00, 0x72, 0x08, 0xd5, 0xb8, 0x87, 0x18, 0x58, 0x65,
+        ];
+        let prk3: [u8; 32] = [
+            0x19, 0xef, 0x24, 0xa3, 0x2c, 0x71, 0x7b, 0x16, 0x7f, 0x33, 0xa9, 0x1d, 0x6f, 0x64,
+            0x8b, 0xdf, 0x96, 0x59, 0x67, 0x76, 0xaf, 0xdb, 0x63, 0x77, 0xac, 0x43, 0x4c, 0x1c,
+            0x29, 0x3c, 0xcb, 0x04,
+        ];
+        let okm3: [u8; 42] = [
+            0x8d, 0xa4, 0xe7, 0x75, 0xa5, 0x63, 0xc1, 0x8f, 0x71, 0x5f, 0x80, 0x2a, 0x06, 0x3c,
+            0x5a, 0x31, 0xb8, 0xa1, 0x1f, 0x5c, 0x5e, 0xe1, 0x87, 0x9e, 0xc3, 0x45, 0x4e, 0x5f,
+            0x3c, 0x73, 0x8d, 0x2d, 0x9d, 0x20, 0x13, 0x95, 0xfa, 0xa4, 0xb6, 0x1a, 0x96, 0xc8,
+        ];
+
+        let cases: [(&[u8], &[u8], &[u8]); 2] =
+            [(&prk1[..], &info1[..], &okm1[..]), (&prk3[..], &b""[..], &okm3[..])];
+
+        for (i, (prk, info, expect_okm)) in cases.into_iter().enumerate() {
+            let h_prk = 0x5334_0061 + i as u32;
+            OBJECTS.with(|o| {
+                let mut attrs = Attributes::new();
+                attrs.insert(CKA_VALUE, prk.to_vec());
+                store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+                store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+                store_bool(&mut attrs, CKA_DERIVE, true);
+                o.borrow_mut().insert(h_prk, attrs);
+            });
+
+            // CK_HKDF_PARAMS = [flags(bExtract@byte0=0,bExpand@byte1=1),
+            // prf, saltType, pSalt, ulSaltLen, hSaltKey, pInfo, ulInfoLen].
+            let params: [usize; 8] = [
+                0x0100,
+                CKM_SHA256 as usize,
+                CKF_HKDF_SALT_NULL as usize,
+                0,
+                0,
+                0,
+                info.as_ptr() as usize,
+                info.len(),
+            ];
+            let mut mech: [usize; 3] = [
+                CKM_HKDF_DERIVE as usize,
+                params.as_ptr() as usize,
+                std::mem::size_of::<[usize; 8]>(),
+            ];
+            let value_len: usize = expect_okm.len();
+            let tpl: [usize; 3] = [
+                CKA_VALUE_LEN as usize,
+                &value_len as *const usize as usize,
+                std::mem::size_of::<usize>(),
+            ];
+            let mut h_new: u32 = 0;
+            let rv = unsafe {
+                C_DeriveKey(
+                    SESSION,
+                    mech.as_mut_ptr() as *mut u8,
+                    h_prk,
+                    tpl.as_ptr() as *mut u8,
+                    1,
+                    &mut h_new,
+                )
+            };
+            assert_eq!(rv, CKR_OK, "case {i}");
+            let out = get_object_value(h_new).unwrap();
+            assert_eq!(
+                out, expect_okm,
+                "case {i}: expand-only must treat the base key as the PRK, not re-extract it"
+            );
+        }
     }
 
     /// Digest key derivation over the FFI ABI (§6.22): derived value =
@@ -16505,6 +16895,685 @@ mod pqc_vendor_kem_ffi_tests {
             ),
             CKR_ENCRYPTED_DATA_INVALID,
         );
+    }
+}
+
+#[cfg(test)]
+mod hpke_ffi_tests {
+    //! R1 (remediation-plan-ckm-hpke-and-hpke-gaps-2026-08-31.md) — FFI-level
+    //! coverage for `CKM_HPKE`/`CKM_HPKE_KEM_KEY_PAIR_GEN`. The 8 tests in
+    //! `native::hpke`'s own module call `keygen`/`encapsulate`/`decapsulate`
+    //! as direct Rust functions, never through `ck_param::mech(p_mechanism)`,
+    //! the raw `CK_HPKE_PARAMS` pointer reads, or
+    //! `hpke_read_derived_key_template`'s raw `CK_ATTRIBUTE` array walk —
+    //! exactly the layer that held both of this session's real marshalling
+    //! bugs (HKDF salt-key byte index; encapsulate/decapsulate template-count
+    //! 4-vs-5, both elsewhere in this file). These tests drive
+    //! `C_GenerateKeyPair`/`C_EncapsulateKey`/`C_DecapsulateKey` directly,
+    //! building `CK_HPKE_PARAMS` as a raw `[usize; 17]` word array — safe
+    //! because every field is `F::Ulong`/`F::Ptr` (no `F::Bbool` in the mix
+    //! to break word alignment; see `ck_param::hpke_params`), mirroring this
+    //! file's existing raw-mechanism-param idiom
+    //! (`hkdf_salt_as_key_equals_salt_as_data`,
+    //! `concatenate_base_and_key_ffi_produces_summed_length`). Not a second
+    //! copy of the native suite's 54-case matrix — that duplication is what
+    //! R2's hub-side vitest suite is for, at the WASM/JS boundary a real
+    //! caller actually crosses.
+    use super::*;
+    use crate::native::test_lock;
+
+    /// High fixed handles, disjoint from every other ffi test module and the
+    /// `native::*` allocators.
+    const SESSION: u32 = 0x8000_1001;
+
+    fn setup() {
+        crate::state::set_initialized(true);
+        SESSIONS.with(|s| {
+            s.borrow_mut().insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+        });
+        TOKEN_STORE.with(|ts| {
+            ts.borrow_mut()
+                .entry(0)
+                .or_insert_with(|| crate::state::TokenState {
+                    slot_id: 0,
+                    initialized: true,
+                    label: [0u8; 32],
+                    login_state: crate::state::LoginState::User,
+                    so_pin_salt: [0u8; 16],
+                    so_pin_hash: [0u8; 32],
+                    user_pin_salt: None,
+                    user_pin_hash: None,
+                })
+                .login_state = crate::state::LoginState::User;
+        });
+    }
+
+    fn obj_attr(handle: u32, attr_type: u32) -> Option<Vec<u8>> {
+        OBJECTS.with(|o| o.borrow().get(&handle).and_then(|a| a.get(&attr_type).cloned()))
+    }
+
+    fn mech0(m: u32) -> [usize; 3] {
+        [m as usize, 0, 0]
+    }
+
+    fn mech_with(m: u32, p: usize, len: usize) -> [usize; 3] {
+        [m as usize, p, len]
+    }
+
+    /// One-attribute CK_ATTRIBUTE template: `[CKA_PARAMETER_SET, &value,
+    /// sizeof(CK_ULONG)]` — the shape `CKM_HPKE_KEM_KEY_PAIR_GEN`'s FFI arm
+    /// reads via `get_attr_ulong`.
+    fn ps_template(ps: &u32) -> [usize; 3] {
+        let v: &'static crate::ck_abi::CK_ULONG = Box::leak(Box::new(*ps as crate::ck_abi::CK_ULONG));
+        [
+            CKA_PARAMETER_SET as usize,
+            v as *const crate::ck_abi::CK_ULONG as usize,
+            core::mem::size_of::<crate::ck_abi::CK_ULONG>(),
+        ]
+    }
+
+    /// Generate one `CKM_HPKE_KEM_KEY_PAIR_GEN` keypair through the real FFI
+    /// entry point (never `native::hpke::keygen` directly).
+    fn gen_hpke_keypair(kem_id: u32) -> (u32, u32) {
+        let mut pub_tpl = ps_template(&kem_id);
+        let mut prv_tpl = ps_template(&kem_id);
+        let mut kg_mech = mech0(CKM_HPKE_KEM_KEY_PAIR_GEN);
+        let mut h_pub: u32 = 0;
+        let mut h_prv: u32 = 0;
+        assert_eq!(
+            C_GenerateKeyPair(
+                SESSION,
+                kg_mech.as_mut_ptr() as *mut u8,
+                pub_tpl.as_mut_ptr() as *mut u8,
+                1,
+                prv_tpl.as_mut_ptr() as *mut u8,
+                1,
+                &mut h_pub,
+                &mut h_prv,
+            ),
+            CKR_OK,
+            "C_GenerateKeyPair(CKM_HPKE_KEM_KEY_PAIR_GEN)"
+        );
+        assert_ne!(h_pub, 0);
+        assert_ne!(h_prv, 0);
+        (h_pub, h_prv)
+    }
+
+    /// `CK_HPKE_PARAMS`, field order exactly matching `ck_param::hpke_params`
+    /// (KEM_ID .. UL_EPHEMERAL_SEED_LEN) — a second, independent transcription
+    /// of the proposal's struct, not a reuse of the production layout, so a
+    /// mismatch between the two is exactly what these tests would catch.
+    #[derive(Default)]
+    struct Hp<'a> {
+        kem_id: u32,
+        kdf_id: u32,
+        aead_id: u32,
+        mode: u32,
+        h_psk: u32,
+        psk_id: &'a [u8],
+        info: &'a [u8],
+        h_sender_static_key: u32,
+        sender_pk: &'a [u8],
+        p_base_nonce: usize,
+        ul_base_nonce_len: usize,
+        p_exporter_key: usize,
+        ephemeral_seed: &'a [u8],
+    }
+
+    fn hp_words(a: &Hp<'_>) -> [usize; 17] {
+        [
+            a.kem_id as usize,
+            a.kdf_id as usize,
+            a.aead_id as usize,
+            a.mode as usize,
+            a.h_psk as usize,
+            a.psk_id.as_ptr() as usize,
+            a.psk_id.len(),
+            a.info.as_ptr() as usize,
+            a.info.len(),
+            a.h_sender_static_key as usize,
+            a.sender_pk.as_ptr() as usize,
+            a.sender_pk.len(),
+            a.p_base_nonce,
+            a.ul_base_nonce_len,
+            a.p_exporter_key,
+            a.ephemeral_seed.as_ptr() as usize,
+            a.ephemeral_seed.len(),
+        ]
+    }
+
+    const HPKE_PARAMS_LEN: usize = core::mem::size_of::<[usize; 17]>();
+
+    /// R1.1 — one classical suite, Base mode, full round trip through the
+    /// real FFI entry points.
+    #[test]
+    fn hpke_classical_base_mode_ffi_round_trip() {
+        let _guard = test_lock::acquire();
+        setup();
+
+        let kem_id = CKP_HPKE_KEM_DHKEM_P256_HKDF_SHA256;
+        let (h_pub, h_prv) = gen_hpke_keypair(kem_id);
+        let info = b"hpke ffi classical base mode";
+
+        let mut base_nonce_e = [0u8; 12];
+        let hp_e = Hp {
+            kem_id,
+            kdf_id: CKD_HPKE_HKDF_SHA256,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
+            mode: CKZ_HPKE_MODE_BASE,
+            info,
+            p_base_nonce: base_nonce_e.as_mut_ptr() as usize,
+            ul_base_nonce_len: base_nonce_e.len(),
+            ..Default::default()
+        };
+        let mut words_e = hp_words(&hp_e);
+        let mut mech_e = mech_with(CKM_HPKE, words_e.as_mut_ptr() as usize, HPKE_PARAMS_LEN);
+
+        // Probe: NULL pCiphertext returns the required buffer length.
+        let mut ct_len: u32 = 0;
+        let mut h_ss1: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech_e.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ct_len,
+                &mut h_ss1,
+            ),
+            CKR_OK,
+            "C_EncapsulateKey length probe"
+        );
+        assert_eq!(ct_len, 65, "P-256 uncompressed SEC1 point");
+
+        let mut enc = vec![0u8; ct_len as usize];
+        let mut actual_len = ct_len;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech_e.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                enc.as_mut_ptr(),
+                &mut actual_len,
+                &mut h_ss1,
+            ),
+            CKR_OK,
+            "C_EncapsulateKey"
+        );
+        assert_eq!(actual_len, ct_len);
+        assert_ne!(h_ss1, 0);
+        assert_ne!(base_nonce_e, [0u8; 12], "pBaseNonce must have been written");
+
+        let mut base_nonce_d = [0u8; 12];
+        let hp_d = Hp {
+            kem_id,
+            kdf_id: CKD_HPKE_HKDF_SHA256,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
+            mode: CKZ_HPKE_MODE_BASE,
+            info,
+            p_base_nonce: base_nonce_d.as_mut_ptr() as usize,
+            ul_base_nonce_len: base_nonce_d.len(),
+            ..Default::default()
+        };
+        let mut words_d = hp_words(&hp_d);
+        let mut mech_d = mech_with(CKM_HPKE, words_d.as_mut_ptr() as usize, HPKE_PARAMS_LEN);
+        let mut h_ss2: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                mech_d.as_mut_ptr() as *mut u8,
+                h_prv,
+                std::ptr::null_mut(),
+                0,
+                enc.as_mut_ptr(),
+                ct_len,
+                &mut h_ss2,
+            ),
+            CKR_OK,
+            "C_DecapsulateKey"
+        );
+        assert_ne!(h_ss2, 0);
+
+        assert_eq!(get_object_attr_u32(h_ss1, CKA_KEY_TYPE), Some(CKK_AES));
+        assert_eq!(
+            obj_attr(h_ss1, CKA_VALUE),
+            obj_attr(h_ss2, CKA_VALUE),
+            "sender and recipient must derive the identical AEAD key"
+        );
+        assert_eq!(base_nonce_e, base_nonce_d, "sender and recipient must derive the identical base_nonce");
+    }
+
+    /// R1.2 — one hybrid suite, Base mode, same shape as R1.1.
+    #[test]
+    fn hpke_hybrid_base_mode_ffi_round_trip() {
+        let _guard = test_lock::acquire();
+        setup();
+
+        let kem_id = CKP_HPKE_KEM_MLKEM768_P256;
+        let (h_pub, h_prv) = gen_hpke_keypair(kem_id);
+        let info = b"hpke ffi hybrid base mode";
+
+        let mut base_nonce_e = [0u8; 12];
+        let hp_e = Hp {
+            kem_id,
+            kdf_id: CKD_HPKE_HKDF_SHA256,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
+            mode: CKZ_HPKE_MODE_BASE,
+            info,
+            p_base_nonce: base_nonce_e.as_mut_ptr() as usize,
+            ul_base_nonce_len: base_nonce_e.len(),
+            ..Default::default()
+        };
+        let mut words_e = hp_words(&hp_e);
+        let mut mech_e = mech_with(CKM_HPKE, words_e.as_mut_ptr() as usize, HPKE_PARAMS_LEN);
+
+        let mut ct_len: u32 = 0;
+        let mut h_ss1: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech_e.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ct_len,
+                &mut h_ss1,
+            ),
+            CKR_OK,
+            "C_EncapsulateKey length probe"
+        );
+        assert!(ct_len > 0);
+
+        let mut enc = vec![0u8; ct_len as usize];
+        let mut actual_len = ct_len;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech_e.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                enc.as_mut_ptr(),
+                &mut actual_len,
+                &mut h_ss1,
+            ),
+            CKR_OK,
+            "C_EncapsulateKey"
+        );
+        assert_ne!(h_ss1, 0);
+
+        let mut base_nonce_d = [0u8; 12];
+        let hp_d = Hp {
+            kem_id,
+            kdf_id: CKD_HPKE_HKDF_SHA256,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
+            mode: CKZ_HPKE_MODE_BASE,
+            info,
+            p_base_nonce: base_nonce_d.as_mut_ptr() as usize,
+            ul_base_nonce_len: base_nonce_d.len(),
+            ..Default::default()
+        };
+        let mut words_d = hp_words(&hp_d);
+        let mut mech_d = mech_with(CKM_HPKE, words_d.as_mut_ptr() as usize, HPKE_PARAMS_LEN);
+        let mut h_ss2: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                mech_d.as_mut_ptr() as *mut u8,
+                h_prv,
+                std::ptr::null_mut(),
+                0,
+                enc.as_mut_ptr(),
+                ct_len,
+                &mut h_ss2,
+            ),
+            CKR_OK,
+            "C_DecapsulateKey"
+        );
+        assert_ne!(h_ss2, 0);
+        assert_eq!(
+            obj_attr(h_ss1, CKA_VALUE),
+            obj_attr(h_ss2, CKA_VALUE),
+            "sender and recipient must derive the identical hybrid-combined AEAD key"
+        );
+        assert_eq!(base_nonce_e, base_nonce_d, "sender and recipient must derive the identical base_nonce");
+    }
+
+    /// R1.3 — `pExporterKey` non-null with a real template attribute: proves
+    /// `hpke_read_derived_key_template`'s raw, type-blind `CK_ATTRIBUTE[]`
+    /// walk actually reads the caller's attribute (type AND value), not just
+    /// that the pointer was non-null.
+    #[test]
+    fn hpke_exporter_key_nested_derived_key_pointer_walk() {
+        let _guard = test_lock::acquire();
+        setup();
+
+        let kem_id = CKP_HPKE_KEM_DHKEM_P256_HKDF_SHA256;
+        let (h_pub, _h_prv) = gen_hpke_keypair(kem_id);
+
+        let true_byte: u8 = 1;
+        let mut attr_arr: [usize; 3] = [CKA_EXTRACTABLE as usize, &true_byte as *const u8 as usize, 1];
+        let mut exporter_handle_out: u32 = 0;
+        let mut derived_key_arr: [usize; 3] =
+            [attr_arr.as_mut_ptr() as usize, 1, &mut exporter_handle_out as *mut u32 as usize];
+
+        let info = b"hpke ffi exporter pointer walk";
+        let mut base_nonce = [0u8; 12];
+        let hp = Hp {
+            kem_id,
+            kdf_id: CKD_HPKE_HKDF_SHA256,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
+            mode: CKZ_HPKE_MODE_BASE,
+            info,
+            p_exporter_key: derived_key_arr.as_mut_ptr() as usize,
+            p_base_nonce: base_nonce.as_mut_ptr() as usize,
+            ul_base_nonce_len: base_nonce.len(),
+            ..Default::default()
+        };
+        let mut words = hp_words(&hp);
+        let mut mech = mech_with(CKM_HPKE, words.as_mut_ptr() as usize, HPKE_PARAMS_LEN);
+
+        let mut ct_len: u32 = 0;
+        let mut h_ss: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ct_len,
+                &mut h_ss,
+            ),
+            CKR_OK
+        );
+        let mut enc = vec![0u8; ct_len as usize];
+        let mut actual_len = ct_len;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                enc.as_mut_ptr(),
+                &mut actual_len,
+                &mut h_ss,
+            ),
+            CKR_OK
+        );
+
+        assert_ne!(exporter_handle_out, 0, "phKey inside the nested CK_DERIVED_KEY must be populated");
+        assert_eq!(
+            obj_attr(exporter_handle_out, CKA_EXTRACTABLE),
+            Some(vec![1]),
+            "the caller's CKA_EXTRACTABLE=TRUE override inside pExporterKey->pTemplate must have taken \
+             effect — proves the raw 3-word CK_ATTRIBUTE array walk read the real type+value, not merely \
+             that the pointer was non-null"
+        );
+        assert_eq!(obj_attr(exporter_handle_out, CKA_VALUE).map(|v| v.len()), Some(32), "HKDF-SHA256 Nh");
+    }
+
+    /// R1.4 — `aeadId = CKZ_HPKE_AEAD_EXPORT_ONLY`: proves the
+    /// `phKey`-becomes-exporter fallback (`result.key_handle.or(result.
+    /// exporter_handle)`), reached with `pExporterKey` NULL — the exporter
+    /// object is still created internally and its own handle becomes the
+    /// call's sole output.
+    #[test]
+    fn hpke_export_only_aead_returns_exporter_as_key_handle() {
+        let _guard = test_lock::acquire();
+        setup();
+
+        let kem_id = CKP_HPKE_KEM_DHKEM_P256_HKDF_SHA256;
+        let (h_pub, h_prv) = gen_hpke_keypair(kem_id);
+        let info = b"hpke ffi export-only";
+
+        let hp_e = Hp {
+            kem_id,
+            kdf_id: CKD_HPKE_HKDF_SHA256,
+            aead_id: CKZ_HPKE_AEAD_EXPORT_ONLY,
+            mode: CKZ_HPKE_MODE_BASE,
+            info,
+            ..Default::default()
+        };
+        let mut words_e = hp_words(&hp_e);
+        let mut mech_e = mech_with(CKM_HPKE, words_e.as_mut_ptr() as usize, HPKE_PARAMS_LEN);
+
+        let mut ct_len: u32 = 0;
+        let mut h_out1: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech_e.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ct_len,
+                &mut h_out1,
+            ),
+            CKR_OK
+        );
+        let mut enc = vec![0u8; ct_len as usize];
+        let mut actual_len = ct_len;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech_e.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                enc.as_mut_ptr(),
+                &mut actual_len,
+                &mut h_out1,
+            ),
+            CKR_OK
+        );
+        assert_ne!(h_out1, 0);
+        // No AEAD key exists in export-only mode: CKA_ENCRYPT/CKA_DECRYPT
+        // are register_aead_key's fields, absent on an exporter object.
+        assert_eq!(get_object_attr_u32(h_out1, CKA_KEY_TYPE), Some(CKK_GENERIC_SECRET));
+        assert_eq!(obj_attr(h_out1, CKA_VALUE).map(|v| v.len()), Some(32), "HKDF-SHA256 Nh");
+
+        let hp_d = Hp {
+            kem_id,
+            kdf_id: CKD_HPKE_HKDF_SHA256,
+            aead_id: CKZ_HPKE_AEAD_EXPORT_ONLY,
+            mode: CKZ_HPKE_MODE_BASE,
+            info,
+            ..Default::default()
+        };
+        let mut words_d = hp_words(&hp_d);
+        let mut mech_d = mech_with(CKM_HPKE, words_d.as_mut_ptr() as usize, HPKE_PARAMS_LEN);
+        let mut h_out2: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                mech_d.as_mut_ptr() as *mut u8,
+                h_prv,
+                std::ptr::null_mut(),
+                0,
+                enc.as_mut_ptr(),
+                ct_len,
+                &mut h_out2,
+            ),
+            CKR_OK
+        );
+        assert_ne!(h_out2, 0);
+        assert_eq!(
+            obj_attr(h_out1, CKA_VALUE),
+            obj_attr(h_out2, CKA_VALUE),
+            "sender and recipient exporter secrets must match"
+        );
+    }
+
+    /// R1.5 — a short `ulParameterLen` reaches `ParamErr::TooShort`, not a
+    /// silent under-read: `hpke_params::LAYOUT`'s 17 fields need 17 words
+    /// (136 bytes on this LP64 test host); 8 covers barely one.
+    #[test]
+    fn hpke_short_parameter_len_rejected_on_both_calls() {
+        let _guard = test_lock::acquire();
+        setup();
+
+        let kem_id = CKP_HPKE_KEM_DHKEM_P256_HKDF_SHA256;
+        let (h_pub, h_prv) = gen_hpke_keypair(kem_id);
+        let info = b"unused";
+
+        let hp = Hp {
+            kem_id,
+            kdf_id: CKD_HPKE_HKDF_SHA256,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
+            mode: CKZ_HPKE_MODE_BASE,
+            info,
+            ..Default::default()
+        };
+        let mut words = hp_words(&hp);
+        let mut short_mech = mech_with(CKM_HPKE, words.as_mut_ptr() as usize, 8);
+
+        let mut ct_len: u32 = 0;
+        let mut h_out: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                short_mech.as_mut_ptr() as *mut u8,
+                h_pub,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ct_len,
+                &mut h_out,
+            ),
+            CKR_MECHANISM_PARAM_INVALID,
+            "a ulParameterLen too short for CK_HPKE_PARAMS must not be silently under-read"
+        );
+        assert_eq!(h_out, 0);
+
+        let mut dummy_ct = [0u8; 1];
+        let mut h_out_d: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                short_mech.as_mut_ptr() as *mut u8,
+                h_prv,
+                std::ptr::null_mut(),
+                0,
+                dummy_ct.as_mut_ptr(),
+                1,
+                &mut h_out_d,
+            ),
+            CKR_MECHANISM_PARAM_INVALID
+        );
+        assert_eq!(h_out_d, 0);
+    }
+
+    /// R1.6 — Auth mode with `hSenderStaticKey` (Encap) and `pSenderPk`
+    /// (Decap) populated: the two sender-key fields the native-level tests'
+    /// direct-argument calling convention never has to marshal from a raw
+    /// pointer, since they call `native::hpke::encapsulate`/`decapsulate`
+    /// with already-resolved Rust values.
+    #[test]
+    fn hpke_auth_mode_ffi_sender_static_key_and_sender_pk_round_trip() {
+        let _guard = test_lock::acquire();
+        setup();
+
+        let kem_id = CKP_HPKE_KEM_DHKEM_P256_HKDF_SHA256;
+        let (h_recipient_pub, h_recipient_prv) = gen_hpke_keypair(kem_id);
+        let (h_sender_pub, h_sender_prv) = gen_hpke_keypair(kem_id);
+        let sender_pk_bytes = obj_attr(h_sender_pub, CKA_VALUE).expect("sender public key value");
+
+        let info = b"hpke ffi auth mode";
+        let mut base_nonce_e = [0u8; 12];
+        let hp_e = Hp {
+            kem_id,
+            kdf_id: CKD_HPKE_HKDF_SHA256,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
+            mode: CKZ_HPKE_MODE_AUTH,
+            info,
+            h_sender_static_key: h_sender_prv,
+            p_base_nonce: base_nonce_e.as_mut_ptr() as usize,
+            ul_base_nonce_len: base_nonce_e.len(),
+            ..Default::default()
+        };
+        let mut words_e = hp_words(&hp_e);
+        let mut mech_e = mech_with(CKM_HPKE, words_e.as_mut_ptr() as usize, HPKE_PARAMS_LEN);
+
+        let mut ct_len: u32 = 0;
+        let mut h_ss1: u32 = 0;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech_e.as_mut_ptr() as *mut u8,
+                h_recipient_pub,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut ct_len,
+                &mut h_ss1,
+            ),
+            CKR_OK,
+            "Auth encapsulate length probe"
+        );
+        let mut enc = vec![0u8; ct_len as usize];
+        let mut actual_len = ct_len;
+        assert_eq!(
+            C_EncapsulateKey(
+                SESSION,
+                mech_e.as_mut_ptr() as *mut u8,
+                h_recipient_pub,
+                std::ptr::null_mut(),
+                0,
+                enc.as_mut_ptr(),
+                &mut actual_len,
+                &mut h_ss1,
+            ),
+            CKR_OK,
+            "Auth encapsulate"
+        );
+        assert_ne!(h_ss1, 0);
+
+        let mut base_nonce_d = [0u8; 12];
+        let hp_d = Hp {
+            kem_id,
+            kdf_id: CKD_HPKE_HKDF_SHA256,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
+            mode: CKZ_HPKE_MODE_AUTH,
+            info,
+            sender_pk: &sender_pk_bytes,
+            p_base_nonce: base_nonce_d.as_mut_ptr() as usize,
+            ul_base_nonce_len: base_nonce_d.len(),
+            ..Default::default()
+        };
+        let mut words_d = hp_words(&hp_d);
+        let mut mech_d = mech_with(CKM_HPKE, words_d.as_mut_ptr() as usize, HPKE_PARAMS_LEN);
+        let mut h_ss2: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                mech_d.as_mut_ptr() as *mut u8,
+                h_recipient_prv,
+                std::ptr::null_mut(),
+                0,
+                enc.as_mut_ptr(),
+                ct_len,
+                &mut h_ss2,
+            ),
+            CKR_OK,
+            "Auth decapsulate"
+        );
+        assert_ne!(h_ss2, 0);
+
+        assert_eq!(
+            obj_attr(h_ss1, CKA_VALUE),
+            obj_attr(h_ss2, CKA_VALUE),
+            "sender and recipient must derive the same AEAD key under Auth mode"
+        );
+        assert_eq!(base_nonce_e, base_nonce_d);
     }
 }
 
