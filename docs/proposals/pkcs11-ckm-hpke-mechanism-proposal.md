@@ -137,8 +137,8 @@ Parameter set types (values = the corresponding `kem_id` from [RFC9180] §7.1
 
 - CKD_HPKE_HKDF_SHA256 (0x0001), CKD_HPKE_HKDF_SHA384 (0x0002),
   CKD_HPKE_HKDF_SHA512 (0x0003)
-- CKA_HPKE_AEAD_128_GCM (0x0001), CKA_HPKE_AEAD_256_GCM (0x0002),
-  CKA_HPKE_AEAD_CHACHA20POLY1305 (0x0003), CKA_HPKE_AEAD_EXPORT_ONLY (0xFFFF)
+- CKZ_HPKE_AEAD_128_GCM (0x0001), CKZ_HPKE_AEAD_256_GCM (0x0002),
+  CKZ_HPKE_AEAD_CHACHA20POLY1305 (0x0003), CKZ_HPKE_AEAD_EXPORT_ONLY (0xFFFF)
 
 **CK_HPKE_MODE_TYPE**: CKZ_HPKE_MODE_BASE (0x00), CKZ_HPKE_MODE_PSK (0x01),
 CKZ_HPKE_MODE_AUTH (0x02), CKZ_HPKE_MODE_AUTH_PSK (0x03) — [RFC9180] §5.1.
@@ -171,7 +171,7 @@ The fields have the following meanings:
 
 _kemId, kdfId, aeadId, mode_
 : select the HPKE ciphersuite and mode exactly as [RFC9180] §5.1 defines
-  them. `aeadId = CKA_HPKE_AEAD_EXPORT_ONLY` selects "export-only" mode
+  them. `aeadId = CKZ_HPKE_AEAD_EXPORT_ONLY` selects "export-only" mode
   ([RFC9180] §5.1.2): no AEAD key is derived, and `phKey` (the function's
   returned handle) refers to the exporter key instead — `pExporterKey` MUST
   be NULL in that case.
@@ -322,13 +322,13 @@ Given a recipient `CKK_HPKE_KEM` public key handle `hKey` and a
 5. `key = LabeledExpand(secret, "key", key_schedule_context, Nk)` — created
    directly as the `aeadId`-appropriate key type (`CKK_AES` for the two GCM
    AEAD IDs, `CKK_CHACHA20` for ChaCha20-Poly1305), returned as `*phKey`.
-   Skipped entirely if `aeadId = CKA_HPKE_AEAD_EXPORT_ONLY`.
+   Skipped entirely if `aeadId = CKZ_HPKE_AEAD_EXPORT_ONLY`.
 6. `base_nonce = LabeledExpand(secret, "base_nonce", key_schedule_context,
    Nn)` — written to `pBaseNonce` (not templated; see §4).
 7. If `pExporterKey != NULL`: `exporter_secret = LabeledExpand(secret, "exp",
    key_schedule_context, Nh)`, created per `pExporterKey->pTemplate`, handle
    returned via `*pExporterKey->phKey`. If `aeadId =
-   CKA_HPKE_AEAD_EXPORT_ONLY` and `pExporterKey = NULL`, this value is
+   CKZ_HPKE_AEAD_EXPORT_ONLY` and `pExporterKey = NULL`, this value is
    instead what `*phKey` returns.
 
 ### 6.2 CKM_HPKE under C_DecapsulateKey (recipient)

@@ -578,10 +578,10 @@ fn kdf_prf_mech(kdf_id: u32) -> Result<(u32, usize), CkRv> {
 
 fn aead_sizes(aead_id: u32) -> Result<Option<(usize, usize)>, CkRv> {
     Ok(match aead_id {
-        CKA_HPKE_AEAD_128_GCM => Some((16, 12)),
-        CKA_HPKE_AEAD_256_GCM => Some((32, 12)),
-        CKA_HPKE_AEAD_CHACHA20POLY1305 => Some((32, 12)),
-        CKA_HPKE_AEAD_EXPORT_ONLY => None,
+        CKZ_HPKE_AEAD_128_GCM => Some((16, 12)),
+        CKZ_HPKE_AEAD_256_GCM => Some((32, 12)),
+        CKZ_HPKE_AEAD_CHACHA20POLY1305 => Some((32, 12)),
+        CKZ_HPKE_AEAD_EXPORT_ONLY => None,
         _ => return Err(CKR_MECHANISM_PARAM_INVALID),
     })
 }
@@ -621,7 +621,7 @@ pub struct HpkeResult {
 }
 
 fn register_aead_key(session: u32, key: Vec<u8>, aead_id: u32) -> u32 {
-    let key_type = if aead_id == CKA_HPKE_AEAD_CHACHA20POLY1305 { CKK_CHACHA20 } else { CKK_AES };
+    let key_type = if aead_id == CKZ_HPKE_AEAD_CHACHA20POLY1305 { CKK_CHACHA20 } else { CKK_AES };
     let mut attrs: Attributes = HashMap::new();
     let klen = key.len() as u32;
     attrs.insert(CKA_VALUE, key);
@@ -856,7 +856,7 @@ fn finish_encap_decap(
     let sched = key_schedule(kdf_prf, &sid, p.mode, shared_secret, p.info, p.psk, p.psk_id, aead_nk_nn, n_h)?;
 
     let key_handle = sched.key.map(|k| register_aead_key(session, k, p.aead_id));
-    let exporter_handle = if p.aead_id == CKA_HPKE_AEAD_EXPORT_ONLY {
+    let exporter_handle = if p.aead_id == CKZ_HPKE_AEAD_EXPORT_ONLY {
         Some(register_exporter_key(session, sched.exporter_secret, exporter_template.or(Some(Vec::new())))
             .ok_or(CKR_FUNCTION_FAILED)?)
     } else {
@@ -941,7 +941,7 @@ mod tests {
             CKP_HPKE_KEM_MLKEM1024_P384,
         ];
         let kdfs = [CKD_HPKE_HKDF_SHA256, CKD_HPKE_HKDF_SHA384, CKD_HPKE_HKDF_SHA512];
-        let aeads = [CKA_HPKE_AEAD_128_GCM, CKA_HPKE_AEAD_256_GCM, CKA_HPKE_AEAD_CHACHA20POLY1305];
+        let aeads = [CKZ_HPKE_AEAD_128_GCM, CKZ_HPKE_AEAD_256_GCM, CKZ_HPKE_AEAD_CHACHA20POLY1305];
         let modes = [CKZ_HPKE_MODE_BASE, CKZ_HPKE_MODE_PSK];
 
         let mut cases_run = 0;
@@ -1014,7 +1014,7 @@ mod tests {
         assert_eq!(cases_run, 54, "must exercise the full 3×3×3×2 hybrid matrix");
     }
 
-    /// Export-only mode (aeadId = CKA_HPKE_AEAD_EXPORT_ONLY): no AEAD key,
+    /// Export-only mode (aeadId = CKZ_HPKE_AEAD_EXPORT_ONLY): no AEAD key,
     /// `*phKey` (here: `HpkeResult::key_handle`, unset) instead surfaces the
     /// exporter secret via `exporter_handle` — proposal §4's "pExporterKey
     /// = NULL and aeadId = EXPORT_ONLY" case.
@@ -1027,7 +1027,7 @@ mod tests {
         let params = HpkeParams {
             kem_id: CKP_HPKE_KEM_MLKEM768_X25519,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_EXPORT_ONLY,
+            aead_id: CKZ_HPKE_AEAD_EXPORT_ONLY,
             mode: CKZ_HPKE_MODE_BASE,
             psk: &[],
             psk_id: &[],
@@ -1064,7 +1064,7 @@ mod tests {
         let params = HpkeParams {
             kem_id: CKP_HPKE_KEM_MLKEM768_P256,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_BASE,
             psk: &[],
             psk_id: &[],
@@ -1113,7 +1113,7 @@ mod tests {
             let params = HpkeParams {
                 kem_id,
                 kdf_id,
-                aead_id: CKA_HPKE_AEAD_128_GCM,
+                aead_id: CKZ_HPKE_AEAD_128_GCM,
                 mode: CKZ_HPKE_MODE_BASE,
                 psk: &[],
                 psk_id: &[],
@@ -1155,7 +1155,7 @@ mod tests {
         let mut params = HpkeParams {
             kem_id,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_AUTH,
             psk: &[],
             psk_id: &[],
@@ -1199,7 +1199,7 @@ mod tests {
         let params = HpkeParams {
             kem_id: CKP_HPKE_KEM_MLKEM768_X25519,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_AUTH,
             psk: &[],
             psk_id: &[],
@@ -1228,7 +1228,7 @@ mod tests {
             HpkeParams {
                 kem_id,
                 kdf_id: CKD_HPKE_HKDF_SHA256,
-                aead_id: CKA_HPKE_AEAD_128_GCM,
+                aead_id: CKZ_HPKE_AEAD_128_GCM,
                 mode: CKZ_HPKE_MODE_BASE,
                 psk: &[],
                 psk_id: &[],
@@ -1259,7 +1259,7 @@ mod tests {
         let params = HpkeParams {
             kem_id: CKP_HPKE_KEM_MLKEM768_X25519,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_BASE,
             psk: &[],
             psk_id: &[],

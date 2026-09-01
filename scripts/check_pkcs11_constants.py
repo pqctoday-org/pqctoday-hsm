@@ -248,6 +248,39 @@ PINNED = {
     # eprint 2026/617). Stopgap values pending official assignment.
     "CKM_ML_DSA_EXTERNAL_MU": (0x0000403C, "pre-ratification"),
     "CKM_ML_DSA_EXTERNAL_MU_GEN": (0x0000403B, "pre-ratification"),
+    # CKM_HPKE candidate mechanism family (RFC 9180 HPKE over PKCS#11, a
+    # PQCToday vendor proposal — no TC issue exists for it, unlike the
+    # ML-DSA external-mu entries above, so "vendor" not "pre-ratification").
+    # See docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md.
+    "CKM_HPKE_KEM_KEY_PAIR_GEN": (0x80000013, "vendor"),
+    "CKM_HPKE": (0x80000014, "vendor"),
+    "CKK_HPKE_KEM": (0x80000003, "vendor"),
+    # CK_HPKE_KDF_TYPE (RFC 9180 §7.2 kdf_id), CK_HPKE_AEAD_TYPE (§7.3
+    # aead_id), CK_HPKE_MODE_TYPE (§5.1 mode byte) — small-integer selector
+    # enums, not object attributes or standalone codepoints, same category
+    # as CKP_ML_DSA_*/CKP_ML_KEM_* in the OASIS header itself.
+    "CKD_HPKE_HKDF_SHA256": (0x0001, "param-set"),
+    "CKD_HPKE_HKDF_SHA384": (0x0002, "param-set"),
+    "CKD_HPKE_HKDF_SHA512": (0x0003, "param-set"),
+    "CKZ_HPKE_AEAD_128_GCM": (0x0001, "param-set"),
+    "CKZ_HPKE_AEAD_256_GCM": (0x0002, "param-set"),
+    "CKZ_HPKE_AEAD_CHACHA20POLY1305": (0x0003, "param-set"),
+    "CKZ_HPKE_AEAD_EXPORT_ONLY": (0xFFFF, "param-set"),
+    "CKZ_HPKE_MODE_BASE": (0x00, "param-set"),
+    "CKZ_HPKE_MODE_PSK": (0x01, "param-set"),
+    "CKZ_HPKE_MODE_AUTH": (0x02, "param-set"),
+    "CKZ_HPKE_MODE_AUTH_PSK": (0x03, "param-set"),
+    # CK_HPKE_KEM_TYPE — RFC 9180 §7.1 kem_id / draft-ietf-hpke-pq's PQ/T
+    # hybrid KEM ids. Vendor CKP_* param-set values (own numbering, not an
+    # IANA registry like the LMS/XMSS entries above), same exemption class.
+    "CKP_HPKE_KEM_DHKEM_P256_HKDF_SHA256": (0x0010, "param-set"),
+    "CKP_HPKE_KEM_DHKEM_P384_HKDF_SHA384": (0x0011, "param-set"),
+    "CKP_HPKE_KEM_DHKEM_P521_HKDF_SHA512": (0x0012, "param-set"),
+    "CKP_HPKE_KEM_DHKEM_X25519_HKDF_SHA256": (0x0020, "param-set"),
+    "CKP_HPKE_KEM_DHKEM_X448_HKDF_SHA512": (0x0021, "param-set"),
+    "CKP_HPKE_KEM_MLKEM768_P256": (0x0050, "param-set"),
+    "CKP_HPKE_KEM_MLKEM1024_P384": (0x0051, "param-set"),
+    "CKP_HPKE_KEM_MLKEM768_X25519": (0x647A, "param-set"),
 }
 
 # Cross-check: drift pins must equal their spec counterpart in the header.

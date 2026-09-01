@@ -210,10 +210,10 @@ pub const CKD_HPKE_HKDF_SHA384: u32 = 0x0002;
 pub const CKD_HPKE_HKDF_SHA512: u32 = 0x0003;
 
 /// `CK_HPKE_AEAD_TYPE` — equal to RFC 9180 §7.3's `aead_id`.
-pub const CKA_HPKE_AEAD_128_GCM: u32 = 0x0001;
-pub const CKA_HPKE_AEAD_256_GCM: u32 = 0x0002;
-pub const CKA_HPKE_AEAD_CHACHA20POLY1305: u32 = 0x0003;
-pub const CKA_HPKE_AEAD_EXPORT_ONLY: u32 = 0xffff;
+pub const CKZ_HPKE_AEAD_128_GCM: u32 = 0x0001;
+pub const CKZ_HPKE_AEAD_256_GCM: u32 = 0x0002;
+pub const CKZ_HPKE_AEAD_CHACHA20POLY1305: u32 = 0x0003;
+pub const CKZ_HPKE_AEAD_EXPORT_ONLY: u32 = 0xffff;
 
 /// `CK_HPKE_MODE_TYPE` — equal to RFC 9180 §5.1's mode byte.
 pub const CKZ_HPKE_MODE_BASE: u32 = 0x00;

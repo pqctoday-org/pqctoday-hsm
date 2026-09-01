@@ -47,7 +47,7 @@ not a full 54-case duplication (that's what R2's native-level suite is for):
    entry points, asserting on returned handles + `pBaseNonce` bytes.
 2. One hybrid suite, Base mode, same.
 3. `pExporterKey` non-null — proves the nested `CK_DERIVED_KEY` pointer walk.
-4. `aeadId = CKA_HPKE_AEAD_EXPORT_ONLY` — proves the `phKey`-becomes-exporter
+4. `aeadId = CKZ_HPKE_AEAD_EXPORT_ONLY` — proves the `phKey`-becomes-exporter
    fallback.
 5. A short-`ulParameterLen` case — proves `ParamErr::TooShort` is reached,
    not silently under-read (the failure mode `ck_param`'s own module doc

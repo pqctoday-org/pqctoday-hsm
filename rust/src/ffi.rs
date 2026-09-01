@@ -17059,7 +17059,7 @@ mod hpke_ffi_tests {
         let hp_e = Hp {
             kem_id,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_BASE,
             info,
             p_base_nonce: base_nonce_e.as_mut_ptr() as usize,
@@ -17112,7 +17112,7 @@ mod hpke_ffi_tests {
         let hp_d = Hp {
             kem_id,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_BASE,
             info,
             p_base_nonce: base_nonce_d.as_mut_ptr() as usize,
@@ -17161,7 +17161,7 @@ mod hpke_ffi_tests {
         let hp_e = Hp {
             kem_id,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_BASE,
             info,
             p_base_nonce: base_nonce_e.as_mut_ptr() as usize,
@@ -17211,7 +17211,7 @@ mod hpke_ffi_tests {
         let hp_d = Hp {
             kem_id,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_BASE,
             info,
             p_base_nonce: base_nonce_d.as_mut_ptr() as usize,
@@ -17267,7 +17267,7 @@ mod hpke_ffi_tests {
         let hp = Hp {
             kem_id,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_BASE,
             info,
             p_exporter_key: derived_key_arr.as_mut_ptr() as usize,
@@ -17320,7 +17320,7 @@ mod hpke_ffi_tests {
         assert_eq!(obj_attr(exporter_handle_out, CKA_VALUE).map(|v| v.len()), Some(32), "HKDF-SHA256 Nh");
     }
 
-    /// R1.4 — `aeadId = CKA_HPKE_AEAD_EXPORT_ONLY`: proves the
+    /// R1.4 — `aeadId = CKZ_HPKE_AEAD_EXPORT_ONLY`: proves the
     /// `phKey`-becomes-exporter fallback (`result.key_handle.or(result.
     /// exporter_handle)`), reached with `pExporterKey` NULL — the exporter
     /// object is still created internally and its own handle becomes the
@@ -17337,7 +17337,7 @@ mod hpke_ffi_tests {
         let hp_e = Hp {
             kem_id,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_EXPORT_ONLY,
+            aead_id: CKZ_HPKE_AEAD_EXPORT_ONLY,
             mode: CKZ_HPKE_MODE_BASE,
             info,
             ..Default::default()
@@ -17384,7 +17384,7 @@ mod hpke_ffi_tests {
         let hp_d = Hp {
             kem_id,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_EXPORT_ONLY,
+            aead_id: CKZ_HPKE_AEAD_EXPORT_ONLY,
             mode: CKZ_HPKE_MODE_BASE,
             info,
             ..Default::default()
@@ -17428,7 +17428,7 @@ mod hpke_ffi_tests {
         let hp = Hp {
             kem_id,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_BASE,
             info,
             ..Default::default()
@@ -17492,7 +17492,7 @@ mod hpke_ffi_tests {
         let hp_e = Hp {
             kem_id,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_AUTH,
             info,
             h_sender_static_key: h_sender_prv,
@@ -17541,7 +17541,7 @@ mod hpke_ffi_tests {
         let hp_d = Hp {
             kem_id,
             kdf_id: CKD_HPKE_HKDF_SHA256,
-            aead_id: CKA_HPKE_AEAD_128_GCM,
+            aead_id: CKZ_HPKE_AEAD_128_GCM,
             mode: CKZ_HPKE_MODE_AUTH,
             info,
             sender_pk: &sender_pk_bytes,
