@@ -28,9 +28,9 @@ use crate::crypto::{
 };
 use crate::crypto::handlers::{
     build_ec_spki_p256, build_ec_spki_p384, build_ec_spki_p521, build_ed25519_spki,
-    build_mldsa44_spki, build_mldsa65_spki, build_mldsa87_spki, build_mlkem1024_spki,
-    build_mlkem512_spki, build_mlkem768_spki, build_slhdsa_spki, build_spki_from_parts,
-    build_x25519_spki, build_x448_spki, Attributes,
+    build_ed448_spki, build_mldsa44_spki, build_mldsa65_spki, build_mldsa87_spki,
+    build_mlkem1024_spki, build_mlkem512_spki, build_mlkem768_spki, build_slhdsa_spki,
+    build_spki_from_parts, build_x25519_spki, build_x448_spki, Attributes,
 };
 use crate::state::{
     allocate_handle, compute_kcv, finalize_private_key_attrs, store_algo_family, store_bool,
@@ -781,6 +781,94 @@ pub fn generate_ed25519_keypair(
     // would corrupt it if the point's first byte happened to be 0x04).
     pub_attrs.insert(CKA_VALUE, vk_bytes.clone());
     pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ed25519_spki(&vk_bytes));
+
+    insert_id_and_label(&mut pub_attrs, cka_id, label);
+    insert_id_and_label(&mut prv_attrs, cka_id, label);
+
+    finalize_and_register(_session, pub_attrs, prv_attrs)
+}
+
+/// Generate an Ed448 (RFC 8032 EdDSA over Curve448, Edwards form) key pair.
+/// The native typed parallel of [`generate_ed25519_keypair`] — identical
+/// attribute scaffolding and CKA_VALUE convention, differing only in the
+/// underlying crate (`ed448_goldilocks` instead of `ed25519_dalek`) and key
+/// sizes (57-byte private seed / 57-byte public point vs Ed25519's 32/32 —
+/// see `crypto::handlers::sign_eddsa`/`verify_eddsa`, which already dispatch
+/// on the stored key's byte length to select the right curve, so no extra
+/// `CKA_EC_PARAMS` disambiguator is needed here any more than Ed25519 needs
+/// one).
+///
+/// KMIP/CACP coverage gap-analysis (2026-08-30) scoped Ed448 as "out of
+/// scope... doesn't exist in either engine either" — true then, stale as of
+/// the very next day: Ed448 keygen/sign/verify (both pure and prehash)
+/// shipped in the Rust engine's `0.27.0` release (2026-08-31), at the FFI
+/// layer (`ffi.rs::C_GenerateKeyPair`'s `CKM_EC_EDWARDS_KEY_PAIR_GEN` arm)
+/// and in `crypto::handlers::sign_eddsa`/`verify_eddsa`/`*_ctx`/`*_ph`
+/// (length-dispatched, so already Ed448-aware). What was still missing was
+/// this native-typed keygen entry point — the one the KMIP `CreateKeyPair`
+/// handler (`kmip/src/ops/create_key_pair.rs`) actually calls; `Sign` /
+/// `SignatureVerify` need no further changes at all, since they already
+/// route generically through `native::sign_with_pss_salt` /
+/// `verify_with_pss_salt` → the length-dispatching handlers above.
+///
+/// Returns `(public_handle, private_handle)`.
+///
+/// **Pre-condition**: `session` must be a valid R/W user session.
+pub fn generate_ed448_keypair(
+    _session: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    let mut pub_attrs: Attributes = HashMap::new();
+    let mut prv_attrs: Attributes = HashMap::new();
+
+    store_algo_family(&mut pub_attrs, ALGO_EDDSA);
+    store_algo_family(&mut prv_attrs, ALGO_EDDSA);
+
+    store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
+    store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_EC_EDWARDS);
+    store_ulong(&mut pub_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    store_bool(&mut pub_attrs, CKA_TOKEN, false);
+    store_bool(&mut pub_attrs, CKA_PRIVATE, false);
+    store_bool(&mut pub_attrs, CKA_ENCRYPT, false);
+    store_bool(&mut pub_attrs, CKA_VERIFY, true);
+    store_bool(&mut pub_attrs, CKA_WRAP, false);
+    store_bool(&mut pub_attrs, CKA_DERIVE, false);
+    store_bool(&mut pub_attrs, CKA_LOCAL, true);
+
+    store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+    store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_EC_EDWARDS);
+    store_ulong(&mut prv_attrs, CKA_KEY_GEN_MECHANISM, CKM_EC_EDWARDS_KEY_PAIR_GEN);
+    store_bool(&mut prv_attrs, CKA_TOKEN, false);
+    store_bool(&mut prv_attrs, CKA_PRIVATE, true);
+    store_bool(&mut prv_attrs, CKA_SENSITIVE, true);
+    store_bool(&mut prv_attrs, CKA_EXTRACTABLE, false);
+    store_bool(&mut prv_attrs, CKA_DECRYPT, false);
+    store_bool(&mut prv_attrs, CKA_SIGN, true);
+    store_bool(&mut prv_attrs, CKA_UNWRAP, false);
+    store_bool(&mut prv_attrs, CKA_DERIVE, false);
+    store_bool(&mut prv_attrs, CKA_LOCAL, true);
+
+    // Same RNG plumbing as `ffi::C_GenerateKeyPair`'s Ed448 arm: the
+    // `ed448_goldilocks::elliptic_curve::Generate` trait wants a
+    // `rand_core` (getrandom_0_4-aligned) RNG, not the `rand`-crate
+    // `OsRng` the Ed25519 branch above uses — the two curves' pinned
+    // crates depend on different major versions of `rand_core`.
+    use ed448_goldilocks::elliptic_curve::Generate;
+    use getrandom_0_4::rand_core::UnwrapErr;
+    use getrandom_0_4::SysRng;
+    let mut rng = UnwrapErr(SysRng);
+    let sk = ed448_goldilocks::SigningKey::generate_from_rng(&mut rng);
+    let vk = sk.verifying_key();
+
+    prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec()); // 57-byte seed
+    let vk_bytes = vk.to_bytes().to_vec(); // 57-byte encoded point
+    // Same CKA_VALUE convention as generate_ed25519_keypair (not
+    // CKA_EC_POINT — see that function's comment on why: `native::verify`
+    // (`state::get_object_value_from`) reads the verification key strictly
+    // from CKA_VALUE for CKM_EDDSA, with no CKA_EC_POINT fallback).
+    pub_attrs.insert(CKA_VALUE, vk_bytes.clone());
+    pub_attrs.insert(CKA_PUBLIC_KEY_INFO, build_ed448_spki(&vk_bytes));
 
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
@@ -2811,6 +2899,46 @@ mod tests {
         close_session(session).unwrap();
     }
 
+    /// Ed448 keygen: 57-byte seed, 57-byte encoded point, tagged
+    /// `ALGO_EDDSA` (mirrors `ed25519_keygen_produces_expected_lengths_and_family_tag`
+    /// exactly — same family tag and key type, different curve/size).
+    #[test]
+    fn ed448_keygen_produces_expected_lengths_and_family_tag() {
+        use crate::state::{get_object_algo_family, get_object_attr_u32, get_object_value};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) =
+            generate_ed448_keypair(session, b"\x01", "ed448-1").unwrap();
+        assert_eq!(get_object_value(prv_h).unwrap().len(), 57, "Ed448 seed");
+        assert_eq!(get_object_value(pub_h).unwrap().len(), 57, "Ed448 encoded point");
+        assert_eq!(get_object_algo_family(prv_h), ALGO_EDDSA, "tagged EdDSA, not ECDH/ECDSA");
+        assert_eq!(get_object_attr_u32(pub_h, CKA_KEY_TYPE), Some(CKK_EC_EDWARDS));
+        close_session(session).unwrap();
+    }
+
+    /// The public key round-trips through sign/verify — mirrors
+    /// `ed25519_keygen_produces_a_working_signing_key`. Proves
+    /// `generate_ed448_keypair` produces key material
+    /// `native::sign`/`native::verify` actually accept: `CKM_EDDSA` covers
+    /// both curves, dispatching internally on the stored key's byte length
+    /// (57 selects the Ed448 arm in `crypto::handlers::sign_eddsa`/
+    /// `verify_eddsa`).
+    #[test]
+    fn ed448_keygen_produces_a_working_signing_key() {
+        use crate::native::sign::{sign, verify};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let (pub_h, prv_h) =
+            generate_ed448_keypair(session, b"\x02", "ed448-2").unwrap();
+        let msg = b"Ed448 KMIP wiring audit trail, 2026-09-02";
+        let sig = sign(session, prv_h, CKM_EDDSA, msg).expect("sign");
+        assert_eq!(sig.len(), 114, "Ed448 signature is 114 bytes");
+        assert!(verify(session, pub_h, CKM_EDDSA, msg, &sig).unwrap());
+        // Tampered message must not verify.
+        assert!(!verify(session, pub_h, CKM_EDDSA, b"tampered", &sig).unwrap());
+        close_session(session).unwrap();
+    }
+
     /// AES-128: 16-byte key.
     #[test]
     fn aes_128_keygen_produces_16_byte_key() {
@@ -3204,6 +3332,37 @@ mod tests {
         let mut bad = mac.clone();
         bad[0] ^= 0xFF;
         assert_eq!(verify(session, handle, CKM_SHA256_HMAC, b"data", &bad), Ok(false));
+        close_session(session).unwrap();
+    }
+
+    /// G3 (2026-09-02) — the engine-resident-key branch of KMIP's
+    /// `hmac_prf` (`kmip/src/ops/derive_key.rs`) and `compute_mac`
+    /// (`kmip/src/ops/mac_and_hash.rs`) both call `native::sign`/`verify`
+    /// with these four mechanisms; this proves the widened dispatch
+    /// (`native::sign::sign_with_pss_salt`/`verify_with_pss_salt`'s match
+    /// arms, plus `crypto::handlers::sign_hmac`/`verify_hmac`) actually
+    /// reaches real, correct HMAC output for each — mirrors
+    /// `hmac_sha256_via_generic_secret_round_trip` above exactly, just
+    /// parameterised over the newly-added mechanisms.
+    #[test]
+    fn hmac_widening_via_generic_secret_round_trip() {
+        use crate::native::sign::{sign, verify};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        for (mech, expected_len) in [
+            (CKM_SHA512_224_HMAC, 28),
+            (CKM_SHA512_256_HMAC, 32),
+            (CKM_SHA3_224_HMAC, 28),
+            (CKM_SHA3_384_HMAC, 48),
+        ] {
+            let handle = generate_generic_secret(session, 256, b"\x01", "hmac-widen-key").unwrap();
+            let mac = sign(session, handle, mech, b"data").unwrap();
+            assert_eq!(mac.len(), expected_len, "mechanism 0x{mech:08x} output length");
+            assert!(verify(session, handle, mech, b"data", &mac).unwrap());
+            let mut bad = mac.clone();
+            bad[0] ^= 0xFF;
+            assert_eq!(verify(session, handle, mech, b"data", &bad), Ok(false));
+        }
         close_session(session).unwrap();
     }
 

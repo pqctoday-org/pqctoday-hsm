@@ -132,8 +132,9 @@ pub fn sign_with_pss_salt(
             // signature can grow optional args.
             sign_slh_dsa(m, ps, &sk_bytes, data, &[], false)
         }
-        CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
-        | CKM_SHA3_512_HMAC => sign_hmac(mechanism, &sk_bytes, data),
+        CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA512_224_HMAC
+        | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_256_HMAC
+        | CKM_SHA3_384_HMAC | CKM_SHA3_512_HMAC => sign_hmac(mechanism, &sk_bytes, data),
         CKM_KMAC_128 | CKM_KMAC_256 => sign_kmac(mechanism, &sk_bytes, data),
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
@@ -221,8 +222,9 @@ pub fn verify_with_pss_salt(
         m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {
             verify_slh_dsa(m, ps, &pk_bytes, data, signature, &[])
         }
-        CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
-        | CKM_SHA3_512_HMAC => verify_hmac(mechanism, &pk_bytes, data, signature),
+        CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA512_224_HMAC
+        | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_256_HMAC
+        | CKM_SHA3_384_HMAC | CKM_SHA3_512_HMAC => verify_hmac(mechanism, &pk_bytes, data, signature),
         CKM_KMAC_128 | CKM_KMAC_256 => {
             // KMAC verify is constant-time signature comparison against a
             // fresh MAC, mirroring `ffi::C_Verify` behaviour.

@@ -32,6 +32,20 @@ measurable Metal experiment**. Every mechanism gets the same seven fields:
 > KATs this plan specifies throughout (see the corecrypto note above and
 > [`NOTICE.md`](NOTICE.md)) — corecrypto/ACVP validation remains open per
 > `mldsa/README.md`'s checklist.
+>
+> **Follow-up check (2026-09-02): both confirmed still open, not just
+> unmentioned.** M3 — `mldsa/gpu/MLDSANTT.swift`'s actual production NTT
+> kernel declares a plain `threadgroup int* a` array with no padding
+> constant or bank-aware striding anywhere in the file; the technique this
+> section specifies (measured, GPU-family-specific padding) was never
+> applied. M9 — `bench/MetalPQCBench.swift`'s `benchM9()` exists and is a
+> real, runnable `simdgroup_matrix` feasibility benchmark (raw 8×8
+> multiply-accumulate throughput, gated on `.apple7` support), but it only
+> measures the hardware primitive in isolation — it does not implement the
+> actual ConvKyber-style "recast polynomial multiply as matmul" integration
+> this section describes as the real experiment. So: M9 has a completed
+> feasibility spike with no integration built on it yet; M3 has no
+> implementation attempt at all.
 
 ---
 

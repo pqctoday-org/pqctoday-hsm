@@ -611,13 +611,31 @@ fn hmac_prf<'a>(
         }
         (None, Some(session)) => {
             use softhsmrustv3::constants as c;
+            // G3 (2026-09-02) — widened from SHA-256/384/512 to also cover
+            // SHA-512/224, SHA-512/256, and the SHA3 family, mirroring
+            // `hash_derive`'s existing SHA3 convention below (same file) —
+            // engine constants confirmed via `rust/src/constants.rs`
+            // (`CKM_SHA512_224_HMAC` / `CKM_SHA512_256_HMAC` /
+            // `CKM_SHA3_224_HMAC` all pre-existed there; the plain HMAC
+            // Sign/Verify primitive at `crypto::handlers::sign_hmac` /
+            // `native::sign` didn't dispatch to them until this same
+            // change — see that function's own comment).
             let mech = match hash {
                 HashingAlgorithm::Sha256 => c::CKM_SHA256_HMAC,
                 HashingAlgorithm::Sha384 => c::CKM_SHA384_HMAC,
                 HashingAlgorithm::Sha512 => c::CKM_SHA512_HMAC,
+                HashingAlgorithm::Sha512224 => c::CKM_SHA512_224_HMAC,
+                HashingAlgorithm::Sha512256 => c::CKM_SHA512_256_HMAC,
+                HashingAlgorithm::Sha3224 => c::CKM_SHA3_224_HMAC,
+                HashingAlgorithm::Sha3256 => c::CKM_SHA3_256_HMAC,
+                HashingAlgorithm::Sha3384 => c::CKM_SHA3_384_HMAC,
+                HashingAlgorithm::Sha3512 => c::CKM_SHA3_512_HMAC,
                 other => {
                     return Err(fail(KmipError::unsupported_cryptographic_parameters(
-                        format!("HMAC PRF hash {other:?} not supported (SHA-256/384/512)"),
+                        format!(
+                            "HMAC PRF hash {other:?} not supported (SHA-256/384/512, \
+                             SHA-512/224, SHA-512/256, SHA3-224/256/384/512)"
+                        ),
                     )));
                 }
             };
@@ -656,8 +674,17 @@ fn soft_hmac(hash: HashingAlgorithm, key: &[u8], data: &[u8]) -> Result<Vec<u8>>
         HashingAlgorithm::Sha256 => mac!(Sha256),
         HashingAlgorithm::Sha384 => mac!(Sha384),
         HashingAlgorithm::Sha512 => mac!(Sha512),
+        // G3 (2026-09-02) — KMIP-store-only-key software fallback for the
+        // same widened set the engine-resident branch above now covers.
+        HashingAlgorithm::Sha512224 => mac!(sha2::Sha512_224),
+        HashingAlgorithm::Sha512256 => mac!(sha2::Sha512_256),
+        HashingAlgorithm::Sha3224 => mac!(sha3::Sha3_224),
+        HashingAlgorithm::Sha3256 => mac!(sha3::Sha3_256),
+        HashingAlgorithm::Sha3384 => mac!(sha3::Sha3_384),
+        HashingAlgorithm::Sha3512 => mac!(sha3::Sha3_512),
         other => Err(KmipError::unsupported_cryptographic_parameters(format!(
-            "HMAC PRF hash {other:?} not supported (SHA-256/384/512)"
+            "HMAC PRF hash {other:?} not supported (SHA-256/384/512, \
+             SHA-512/224, SHA-512/256, SHA3-224/256/384/512)"
         ))),
     }
 }
@@ -943,6 +970,95 @@ mod tests {
             DerivationMethod::Hmac, vec!["b1"], dp(), aes_template(512),
         ), &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::InvalidAttribute);
+    }
+
+    /// G3 (2026-09-02) widening — SHA-512/224, SHA-512/256, and the SHA3
+    /// family, driven through the real KMIP `DeriveKey` operation
+    /// (`DerivationMethod::Hmac`, the same construction
+    /// `hmac_method_matches_rfc4231_case2` above exercises for SHA-256),
+    /// cross-checked byte-exact against an independently computed
+    /// reference: Python's stdlib `hmac`/`hashlib` over the identical
+    /// key + message, computed outside this codebase.
+    ///
+    /// §7.13 — "the attributes of the derivation key provide enough
+    /// information about the PRF" for the HMAC method, so (per
+    /// `base_key_prf_hash`) the base object itself carries an explicit
+    /// `CryptographicParameters.HashingAlgorithm` — a plain `Aes`-typed
+    /// SecretData-ish base (not one of the three named `HmacSha*`
+    /// `KmipAlgorithm` variants, which don't exist for these six
+    /// algorithms) is how a caller selects them.
+    ///
+    /// This exercises the KMIP-store-only software fallback
+    /// (`soft_hmac`) — the base key here has `key_material` set, so
+    /// no engine session is needed, mirroring every other KAT test in
+    /// this module. The engine-resident branch (`native::sign` with
+    /// `CKM_SHA512_224_HMAC` / `CKM_SHA512_256_HMAC` / `CKM_SHA3_224_HMAC`
+    /// / `CKM_SHA3_384_HMAC`, newly wired in
+    /// `rust/src/crypto/handlers.rs::sign_hmac` +
+    /// `rust/src/native/sign.rs`'s dispatch match) is proven separately,
+    /// at the engine layer, by `native::keygen`'s own HMAC round-trip
+    /// tests plus this crate's `native_bridge_e2e.rs` engine-backed
+    /// suite — `hmac_prf`'s two branches share the identical `hash`
+    /// resolution and mechanism-selection code either way.
+    ///
+    /// ```python
+    /// import hmac
+    /// key = bytes(range(32))
+    /// msg = b"kmip g3 hmac prf widening test"
+    /// for name in ["sha512_224", "sha512_256", "sha3_224", "sha3_256", "sha3_384", "sha3_512"]:
+    ///     print(name, hmac.new(key, msg, name).hexdigest())
+    /// ```
+    #[test]
+    fn hmac_prf_widening_matches_hashlib() {
+        let (_r, d) = deps();
+        let key: Vec<u8> = (0u8..32).collect();
+        let msg = b"kmip g3 hmac prf widening test".to_vec();
+        let cases: &[(HashingAlgorithm, u32, &str)] = &[
+            (HashingAlgorithm::Sha512224, 224, "52036f200201a3642ac2f98d6aa10aae2699f2b43e0717871553ffd8"),
+            (HashingAlgorithm::Sha512256, 256, "832634bc746a4f22c76f3a14fb750d2c5b86292ed66a27de9a406a20d9651d85"),
+            (HashingAlgorithm::Sha3224, 224, "8c10e7a59778aba571bcf796ebf012123a1d3a7b5664f62394774b3c"),
+            (HashingAlgorithm::Sha3256, 256, "f23e2822980796db523d715767ac76ca39321e01f3667c497c21146b65983324"),
+            (HashingAlgorithm::Sha3384, 384, "b7668c97faac3ef616a97106bfab2306dd298d70d788d4e1cd800133a31d4c7c3f4df5adec8f96d89b491869b9543c42"),
+            (HashingAlgorithm::Sha3512, 512, "05de3bba90a6e5bc589d8e838a78a9cb9e59d2201f7e9698726ba37a8251adaba93494044ff663199fe8ca1b0135506432717e471016fa4284e325b737f30df9"),
+        ];
+        for &(algo, bits, expected_hex) in cases {
+            let uid = format!("hmac-widen-{algo:?}");
+            d.store.put(ObjectRecord {
+                uid: uid.clone(),
+                object_type: ObjectType::SecretData,
+                algorithm: KmipAlgorithm::Aes,
+                cryptographic_length: key.len() as u32 * 8,
+                usage_mask: UsageMask::DERIVE_KEY,
+                state: State::Active,
+                pkcs11_cka_id: vec![],
+                pkcs11_slot: 0,
+                initial_date: OffsetDateTime::now_utc(),
+                key_material: Some(key.clone()),
+                cryptographic_parameters: Some(CryptographicParameters {
+                    hashing_algorithm: Some(algo),
+                    ..Default::default()
+                }),
+                links: HashMap::new(),
+                custom_attributes: HashMap::new(),
+                ..ObjectRecord::default()
+            }).unwrap();
+
+            let resp = derive_key(&d, request(
+                DerivationMethod::Hmac,
+                vec![&uid],
+                DerivationParameters {
+                    derivation_data: Some(msg.clone()),
+                    ..Default::default()
+                },
+                aes_template(bits),
+            ), &AuthContext::open(), "c")
+            .unwrap_or_else(|e| panic!("DeriveKey HMAC({algo:?}) failed: {e:?}"));
+            let rec = d.store.get(&resp.uid).unwrap().unwrap();
+            assert_eq!(
+                hex::encode(rec.key_material.as_deref().unwrap()), expected_hex,
+                "HMAC-PRF({algo:?}) must match Python hmac/hashlib's independently computed digest",
+            );
+        }
     }
 
     /// HASH method over the derivation key (no Derivation Data):

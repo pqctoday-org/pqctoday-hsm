@@ -59,11 +59,39 @@ else
     docker exec "$RUST_CONTAINER" rustup target add wasm32-unknown-unknown
     docker exec "$RUST_CONTAINER" sh -c "command -v wasm-bindgen >/dev/null 2>&1 || cargo install wasm-bindgen-cli --version $WASM_BINDGEN_VERSION"
   fi
-  # The container mounts the parent of $ROOT at /ag, so derive the repo dir
-  # from $ROOT instead of hardcoding it — a `git worktree` checkout (e.g.
-  # pqctoday-hsm-kmip-honest-maximum) builds ITS OWN tree, not the main one.
-  run() { docker exec -e RUSTFLAGS="$RUSTFLAGS" "$RUST_CONTAINER" sh -c "cd /ag/$(basename "$ROOT")/wasm && $*"; }
-  CARGO_TARGET_ROOT="/cargo-target"
+  # Map $ROOT to its path INSIDE the container. Ask docker which host
+  # directory is actually mounted at /ag rather than assuming: the old
+  # `basename "$ROOT"` shortcut only held when this script created the
+  # container itself (block above, which mounts "$ROOT/.." as /ag). Against an
+  # already-running pqc-rust — which mounts ~/Antigravity — a worktree nested
+  # at .worktrees/<name> resolved to /ag/<name>, a path that does not exist,
+  # so the build failed outright instead of building that worktree. Falls back
+  # to the historical behavior if /ag can't be resolved.
+  AG_HOST="$(docker inspect "$RUST_CONTAINER" \
+    --format '{{range .Mounts}}{{if eq .Destination "/ag"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)"
+  case "${AG_HOST:-}" in
+    "") CONTAINER_ROOT="/ag/$(basename "$ROOT")" ;;
+    *)  case "$ROOT" in
+          "$AG_HOST"/*) CONTAINER_ROOT="/ag/${ROOT#"$AG_HOST"/}" ;;
+          *)            CONTAINER_ROOT="/ag/$(basename "$ROOT")" ;;
+        esac ;;
+  esac
+
+  # Per-worktree cargo build directory, matching scripts/local-gate.sh's
+  # convention exactly (same path for the same worktree, so the gate and this
+  # script share one warm cache rather than each paying a cold build). The
+  # container image sets a single global CARGO_TARGET_DIR=/cargo-target shared
+  # by every worktree, and nothing serializes concurrent access to it — on
+  # 2026-09-02 that let cargo reuse a wrong-feature-variant artifact and fail a
+  # gate step with a phantom error. See local-gate.sh's CARGO_TARGET_DIR_FOR_RUN
+  # block for the full incident write-up.
+  if [ "$CONTAINER_ROOT" = "/ag/pqctoday-hsm" ]; then
+    CARGO_TARGET_ROOT="/cargo-target"
+  else
+    CARGO_TARGET_ROOT="/cargo-target/worktrees/$(basename "$ROOT")"
+  fi
+  run() { docker exec -e RUSTFLAGS="$RUSTFLAGS" -e CARGO_TARGET_DIR="$CARGO_TARGET_ROOT" \
+            "$RUST_CONTAINER" sh -c "cd $CONTAINER_ROOT/wasm && $*"; }
 fi
 
 # ── 1. Compile the crate to wasm32 ───────────────────────────────────────────

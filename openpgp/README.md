@@ -19,6 +19,14 @@
 > - `openpgp/spike-pqc/` — the wire-format spike (RFC 9580 v6, algorithm ID 30).
 > - Design: `openpgp/docs/PQC_PGP_IMPLEMENTATION_PLAN.md` (authoritative;
 >   supersedes `SEQUOIA_PQC_MIGRATION.md`).
+>
+> **Known risk — RSA (Marvin Attack, no upstream fix):** `signer.rs`'s
+> `RSAEncryptSign` path exists for interop with legacy classical OpenPGP
+> keys only — this fork's actual mandate is the PQC composites above. The
+> `rsa` crate has an open, disclosed timing side-channel (RUSTSEC-2023-0071,
+> "Marvin Attack") with **no patched version available upstream** as of
+> 2026-09-02. Accepted risk, tracked via GitHub Dependabot; see `SECURITY.md`
+> for the full disposition. Revisit if/when a fix ships.
 
 ---
 
