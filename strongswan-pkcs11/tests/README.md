@@ -17,10 +17,11 @@ neither automated nor SLH-DSA-covering (`wasm_backend.c`'s
 below) and drives the exact credential-layer call sequence real IKEv2 peer
 authentication uses — `lib->creds->create(CRED_PRIVATE_KEY, ...,
 BUILD_PKCS11_*, ...)` → `private_key_t.sign()` (a real `C_Sign` on a real
-softhsmv3 token) → `public_key_t.verify()` (a real `C_Verify`) — for all 6
-signature key types this connector supports: ML-DSA-44/65/87 and
-SLH-DSA-SHA2-128s/192s/256s. Each case also asserts a corrupted signature is
-rejected (negative control).
+softhsmv3 token) → `public_key_t.verify()` (a real `C_Verify`) — for all 7
+signature key types this connector supports: ML-DSA-44/65/87,
+SLH-DSA-SHA2-128s/192s/256s, and Ed448 (added 2026-09-02 — `CKK_EC_EDWARDS`/
+`CKM_EDDSA` were previously unwired here at all). Each case also asserts a
+corrupted signature is rejected (negative control).
 
 This does **not** attempt a full two-peer IKEv2 network handshake — that
 would need either a Linux host with kernel IPsec (charon's `kernel-netlink`
@@ -52,9 +53,9 @@ exchange is using real key material and not a constant.
 
 | File | Role |
 |---|---|
-| `test_pkcs11_conn.c` | The real connector test for ML-DSA/SLH-DSA sign+verify (see its own header for the exact call path). |
+| `test_pkcs11_conn.c` | The real connector test for ML-DSA/SLH-DSA/Ed448 sign+verify (see its own header for the exact call path). |
 | `test_pkcs11_kem.c` | The real connector test for ML-KEM-768 key exchange (see its own header for the exact call path, and the two real prerequisites — `use_dh = yes` and a pre-established token login — its own investigation turned up). |
-| `keygen_pkcs11_key.c` | Dependency-free PKCS#11 C-API helper that provisions a token-persistent ML-DSA/SLH-DSA keypair with a chosen `CKA_ID`, so `test_pkcs11_conn` can find it via `BUILD_PKCS11_KEYID`. Needs nothing but `dlopen`/`dlsym` — no strongSwan or engine headers. Not needed by `test_pkcs11_kem` (it generates its own ephemeral ML-KEM keypairs), which instead reuses the same raw-PKCS11 technique inline (`raw_pkcs11_login()`) just to log the token in first. |
+| `keygen_pkcs11_key.c` | Dependency-free PKCS#11 C-API helper that provisions a token-persistent ML-DSA/SLH-DSA/Ed448 keypair with a chosen `CKA_ID`, so `test_pkcs11_conn` can find it via `BUILD_PKCS11_KEYID`. Needs nothing but `dlopen`/`dlsym` — no strongSwan or engine headers. Not needed by `test_pkcs11_kem` (it generates its own ephemeral ML-KEM keypairs), which instead reuses the same raw-PKCS11 technique inline (`raw_pkcs11_login()`) just to log the token in first. |
 
 ## Build (macOS or Linux; no Emscripten needed)
 
@@ -138,7 +139,7 @@ SOFTHSM=build-native/src/lib/libsofthsmv3.dylib   # .so on Linux
 build-native/src/bin/util/softhsm2-util --module "$SOFTHSM" \
   --init-token --slot 0 --label IKEv2Token --so-pin 1234 --pin 1234
 # note the reassigned slot ID printed above, then for each of:
-#   01 128s / 02 256s / 03 192s / 04 mldsa44 / 05 mldsa65 / 06 mldsa87
+#   01 128s / 02 256s / 03 192s / 04 mldsa44 / 05 mldsa65 / 06 mldsa87 / 07 ed448
 ./keygen_pkcs11_key "$SOFTHSM" IKEv2Token 1234 <id> <paramset> <label>
 
 # 2. Point a settings file at the module under the *same* config-name
@@ -202,11 +203,12 @@ PKCS11SPY="$(pwd)/$SOFTHSM" \
 
 (On Linux, `LD_LIBRARY_PATH` instead of `DYLD_LIBRARY_PATH`.)
 
-## Last confirmed run (2026-09-01)
+## Last confirmed run (2026-09-02)
 
-`test_pkcs11_conn`: all 6 PASS, real `C_Sign`/`C_Verify`, signature lengths
-byte-exact to FIPS 204/205, negative control rejecting a corrupted signature
-in every case:
+`test_pkcs11_conn`: all 7 PASS, real `C_Sign`/`C_Verify`, signature lengths
+byte-exact to FIPS 204/205 and RFC 8032 §5.2.6 (Ed448: 57-byte key -> 114-byte
+R||S signature), negative control rejecting a corrupted signature in every
+case:
 
 ```
 [SLH-DSA-SHA2-128s] C_Sign OK: signature length = 7856 bytes
@@ -218,8 +220,9 @@ in every case:
 [ML-DSA-44]  C_Sign OK: signature length = 2420 bytes ... PASS
 [ML-DSA-65]  C_Sign OK: signature length = 3309 bytes ... PASS
 [ML-DSA-87]  C_Sign OK: signature length = 4627 bytes ... PASS
+[Ed448]      C_Sign OK: signature length = 114 bytes ... PASS
 
-6 test(s), 0 failure(s)
+7 test(s), 0 failure(s)
 ```
 
 `test_pkcs11_kem`: both PASS — real `C_GenerateKeyPair`/`C_EncapsulateKey`/
@@ -248,15 +251,44 @@ two secrets correctly mismatched after a single corrupted ciphertext byte:
 
 Re-ran `test_pkcs11_conn` against the same freshly-initialized token
 immediately afterward to confirm the KEM test's build/patch process didn't
-disturb anything shared: still 6/6 PASS.
+disturb anything shared: still 7/7 PASS.
+
+**Ed448 independent-oracle cross-check**: the connector's own `C_Sign`/
+`C_Verify` round-trip only proves internal self-consistency (a wrong but
+symmetric `CK_EDDSA_PARAMS`/instance choice — e.g. accidentally signing under
+Ed448ph — would still pass it), so the genuine signature from the run above
+was additionally verified against OpenSSL 3.6's own, independently-invoked
+Ed448 verify — a real SubjectPublicKeyInfo built from the same raw 57-byte
+`CKA_EC_POINT` and the 114-byte signature from the same `C_Sign` call:
+
+```
+$ openssl pkey -pubin -inform DER -in ed448_pub.der -text -noout
+ED448 Public-Key:
+pub:
+    11:a1:9e:5e:d5:b0:6c:32:...
+
+$ openssl pkeyutl -verify -pubin -inkey ed448_pub.der -keyform DER \
+    -rawin -in ed448_msg.bin -sigfile ed448_sig.bin
+Signature Verified Successfully
+
+$ openssl pkeyutl -verify -pubin -inkey ed448_pub.der -keyform DER \
+    -rawin -in ed448_msg.bin -sigfile ed448_sig_bad.bin   # 1 byte flipped
+...ED448 digest_verify:...
+Signature Verification Failure
+```
+
+Both outcomes match the connector's own verdicts (genuine signature accepted,
+corrupted signature rejected) — the token's `CKM_EDDSA` dispatch is producing
+real, standards-correct RFC 8032 Ed448 signatures, not merely internally
+self-consistent ones.
 
 ## Known gaps, not covered here
 
-- **Ed448 / standalone EdDSA authentication**: this connector has never
-  wired `CKK_EC_EDWARDS`/`CKM_EDDSA` at all (grep `strongswan-pkcs11/*.c` for
-  `EC_EDWARDS`/`CKM_EDDSA`/`KEY_ED448` — zero hits outside the bundled
-  `pkcs11.h` constant header). The Rust engine's new Ed448 support
-  (`CHANGELOG.md` 0.27.0) has no IKEv2 auth-method mapping in this connector;
-  adding one is a real protocol-integration decision (which strongSwan
-  `SIGN_ED448`/`KEY_ED448` scheme to bind to which token mechanism), not a
-  missing test — flagged, not implemented here.
+- **Ed25519 / Ed25519ctx authentication**: only Ed448 is wired into this
+  connector (`pkcs11_private_key.c`/`pkcs11_public_key.c`'s `KEY_ED448`/
+  `SIGN_ED448` handling, `pkcs11_plugin.c`'s `f_pqc` registrations). Ed25519
+  is a separate, not-yet-implemented scope — this engine's own
+  `src/lib/crypto/OSSLEDDSA.cpp` already distinguishes Ed25519/Ed25519ctx/
+  Ed25519ph via `CK_EDDSA_PARAMS`, so wiring it in would follow the same
+  `CKK_EC_EDWARDS` pattern Ed448 uses here, just keyed off the 32-byte
+  `CKA_EC_POINT`/`CKA_VALUE` length instead of 57.
