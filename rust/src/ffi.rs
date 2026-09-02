@@ -11555,6 +11555,20 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SHA3_512_HMAC
             | CKM_KMAC_128
             | CKM_KMAC_256
+            // WS-3/G2 (2026-09-01): CKM_AES_GMAC's tag is a deterministic
+            // function of the full AAD, same as KMAC/HMAC just above --
+            // there is no reason for it to be single-part only, and the
+            // new pkcs11-provider GMAC arm (mac.c) drives every MAC
+            // mechanism through the standard EVP_MAC Init/Update/Final
+            // flow (matching CMAC/KMAC/HMAC's existing pattern), never
+            // one-shot C_Sign. Omitting it here was a real gap: C_SignInit
+            // stored the op fine, but C_SignUpdate's multipart_op_mech()
+            // gate rejected it with CKR_OPERATION_NOT_INITIALIZED before
+            // a single byte of AAD could be authenticated -- found live
+            // via the T40b harness case (sign_gmac() itself, and the
+            // CKM_AES_GMAC arms in C_Sign/C_Verify, were already correct;
+            // only this whitelist was stale).
+            | CKM_AES_GMAC
             | CKM_ML_DSA
             | CKM_ML_DSA_EXTERNAL_MU
             | CKM_SLH_DSA
