@@ -23,9 +23,23 @@ additions over upstream:
 
 ## Build
 
-Layer these sources into a strongSwan 6.0.5/6.0.6 tree (the ML-DSA core patch is
-`../strongswan-6.0.5-pqc.patch` / `../strongswan-6.0.6-pqc.patch`) and configure
-with the plugin enabled:
+**Confirmed baseline: strongSwan 6.0.7.** `../strongswan-pkcs11.patch` (which
+overlays this directory's sources onto `src/libstrongswan/plugins/pkcs11/`) is
+generated against — and requires — 6.0.7 specifically: 6.0.7 renamed
+`OID_SECT*R1` to `OID_SECP*R1` inside this same plugin directory, and this
+patch's `pkcs11_public_key.c` uses the new names (see that patch file's own
+header for the full rationale, and `regen-strongswan-pkcs11-patch.sh` to
+regenerate it if the pinned version bumps again). The top-level
+`../strongswan-6.0.5-pqc.patch`/`../strongswan-6.0.6-pqc.patch` files target
+older baselines and are not the patch set actually build-tested end to end —
+`strongswan-pkcs11/tests/README.md` documents the real, verified recipe (base
+6.0.7 + `../strongswan-pqc.patch` + `../strongswan-pqc-supplement.patch` +
+`../strongswan-pqc-slhdsa.patch` + `../strongswan-pkcs11.patch`, applied with
+`patch -p1` against a pristine 6.0.7 tree) and is the one to follow; that exact
+sequence was used to build a real `libstrongswan-pkcs11.so` and pass a live
+ML-DSA-44/65/87 + SLH-DSA-SHA2-128s/192s/256s sign/verify test (2026-09-01/02).
+
+Once patched, configure with the plugin enabled:
 
 ```bash
 ./configure --enable-pkcs11    # plus your usual strongSwan options
