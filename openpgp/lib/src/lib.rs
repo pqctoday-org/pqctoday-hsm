@@ -716,6 +716,72 @@ mod live_composite_tests {
         }
     }
 
+    /// One-time, idempotent test-infrastructure step: ensure a token
+    /// labeled `OP11_LABEL` (default "test") exists with user PIN
+    /// `OP11_PIN` (default "1234"), creating it via `C_InitToken` +
+    /// `C_InitPIN` if it doesn't exist yet.
+    ///
+    /// The Rust `softhsmrustv3` engine (this test file's `OP11_MODULE`)
+    /// starts every fresh process with an empty, uninitialized token store
+    /// (`state::init_token_store` seeds slot 0 with an *uninitialized*
+    /// token only) — nothing else in this file creates the token that
+    /// `open_session`'s label lookup requires. Since `cargo test` runs
+    /// every `#[test]` in this module inside ONE process, this only needs
+    /// to run once per `cargo test` invocation; the `aaa_` prefix makes
+    /// `libtest`'s alphabetical-by-name ordering put it first when run
+    /// with `--test-threads=1` (see the module-level doc for the exact
+    /// invocation), so every other `live_*` test in the same run finds
+    /// the token already there. Safe to run every time — it no-ops if a
+    /// matching token already exists.
+    #[test]
+    fn aaa_provision_test_token() {
+        let Some(e) = env() else {
+            eprintln!("SKIP aaa_provision_test_token: set OP11_MODULE to run against softhsmv3");
+            return;
+        };
+
+        let op11 = Op11::open(&e.module).expect("Op11::open");
+        let pkcs11 = op11.pkcs11();
+
+        let already = pkcs11
+            .get_slots_with_token()
+            .expect("get_slots_with_token")
+            .into_iter()
+            .any(|s| {
+                pkcs11
+                    .get_token_info(s)
+                    .map(|ti| ti.label().trim() == e.label)
+                    .unwrap_or(false)
+            });
+        if already {
+            eprintln!(
+                "aaa_provision_test_token: token '{}' already present, skipping init",
+                e.label
+            );
+            return;
+        }
+
+        let slots = pkcs11.get_all_slots().expect("get_all_slots");
+        let slot = *slots.first().expect("at least one slot");
+
+        let so_pin = cryptoki::types::AuthPin::new("12345678".to_string().into());
+        pkcs11
+            .init_token(slot, &so_pin, &e.label)
+            .expect("init_token");
+
+        let session = pkcs11.open_rw_session(slot).expect("open_rw_session");
+        session
+            .login(cryptoki::session::UserType::So, Some(&so_pin))
+            .expect("SO login");
+        let user_pin = cryptoki::types::AuthPin::new(e.pin.clone().into());
+        session.init_pin(&user_pin).expect("init_pin");
+
+        eprintln!(
+            "aaa_provision_test_token: initialized token '{}' (SO PIN set, user PIN set)",
+            e.label
+        );
+    }
+
     /// End-to-end composite gate: generate a MLDSA65_Ed25519 v6 cert in software,
     /// provision its TWO private halves into softhsmv3 via the composite upload
     /// path, resolve the two custody handles, sign a message through the bridge
@@ -1884,6 +1950,191 @@ mod live_composite_tests {
             "PASS live_composite generate-in-HSM ML-KEM-1024: in-HSM C_GenerateKeyPair -> \
              encrypt -> HSM decrypt -> plaintext MATCH; private halves NON-EXTRACTABLE"
         );
+
+        purge_id(&open_session(&e), id);
+    }
+
+    // =====================================================================
+    // Standalone (non-composite) Ed448 — RFC 9580 native v6 format,
+    // algorithm ID 28 (`PublicKeyAlgorithm::Ed448`), distinct from the
+    // composite `MLDSA87_Ed448` (algorithm 31) exercised above. Confirms
+    // the wiring added to `signer.rs`'s new `Ed448` match arm and
+    // `upload.rs`'s new `generate_ed448_in_hsm`. Before this fix, this
+    // algorithm was cleanly rejected by `signer.rs`'s `other => Err(...)`
+    // catch-all — there was no way to provision or sign with it at all.
+    // =====================================================================
+
+    /// draft/RFC 9580 codepoint for standalone Ed448.
+    const EXPECTED_ALGO_ID_ED448_STANDALONE: u8 = 28;
+
+    /// Standalone Ed448 gate — generate a single (non-composite) Ed448 key
+    /// DIRECTLY inside the HSM via `C_GenerateKeyPair` (non-extractable:
+    /// `CKA_SENSITIVE=true`, `CKA_EXTRACTABLE=false`, mirroring the
+    /// composite generate-in-HSM discipline), reload the keypair purely
+    /// from the token (no Cert, no X.509 — same token-resident `CKO_DATA`
+    /// path the composites use), sign through the bridge (a single
+    /// `C_Sign` call via `CKM_EDDSA`, RFC 8032 §5.2 empty-context Ed448),
+    /// and verify the resulting v6 signature packet (algorithm 28) with
+    /// `sequoia_openpgp`'s own `Signature::verify_message` — not a
+    /// hand-rolled check. Then confirms the private key is
+    /// non-extractable, and finally runs a tamper-rejection control:
+    /// corrupt the signature bytes on the wire and confirm sequoia
+    /// rejects the corrupted signature.
+    #[test]
+    fn live_ed448_standalone_generate_in_hsm_sign_verify_nonextractable() {
+        let Some(e) = env() else {
+            eprintln!("SKIP live_ed448_standalone_*: set OP11_MODULE to run against softhsmv3");
+            return;
+        };
+
+        let id = b"\x05ed448-standalone-genhsm";
+
+        // 1) GENERATE a standalone Ed448 key in-HSM. No software secret.
+        let s1 = open_session(&e);
+        purge_id(&s1, id);
+        let generated_public = s1
+            .generate_ed448_in_hsm(id)
+            .expect("generate standalone Ed448 in HSM");
+        assert_eq!(
+            u8::from(generated_public.pk_algo()),
+            EXPECTED_ALGO_ID_ED448_STANDALONE,
+            "generated key must be standalone Ed448 (algo 28), not the MLDSA87_Ed448 composite (algo 31)"
+        );
+        assert_eq!(generated_public.pk_algo(), PublicKeyAlgorithm::Ed448);
+        let expected_fp = generated_public.fingerprint();
+        drop(s1);
+
+        // 2) Reload from the token alone and sign.
+        let s2 = open_session(&e);
+        let public_reloaded = s2
+            .key(id, PgpKeyType::Sign, None)
+            .expect("reload generated Ed448 public key from token");
+        assert_eq!(
+            public_reloaded.fingerprint(),
+            expected_fp,
+            "reloaded fingerprint must match the generated key"
+        );
+        let kp = s2
+            .keypair(id, PgpKeyType::Sign, None)
+            .expect("reload generated Ed448 keypair from token");
+        assert!(
+            kp.pqc.is_none(),
+            "standalone Ed448 must resolve via the classical single-handle path (no PQC custody handle)"
+        );
+        let msg = b"pqctoday standalone Ed448: generated in-HSM, signed in-HSM";
+        let mut sig = Vec::new();
+        crate::signer::sign_on_card(kp, &mut &msg[..], &mut sig).expect("sign_on_card (Ed448)");
+
+        // 3) Wire + component assertions: v6 packet, algorithm 28,
+        //    114-byte native Ed448 signature (mpi::Signature::Ed448 { s }).
+        let pile = PacketPile::from_bytes(&sig).expect("re-parse signature");
+        let mut sig_packet = None;
+        for p in pile.descendants() {
+            if let Packet::Signature(s) = p {
+                sig_packet = Some(s.clone());
+            }
+        }
+        let sig_packet = sig_packet.expect("a Signature packet");
+        assert_eq!(sig_packet.version(), 6, "standalone Ed448 signature must be v6 (RFC 9580)");
+        assert_eq!(u8::from(sig_packet.pk_algo()), EXPECTED_ALGO_ID_ED448_STANDALONE);
+        assert_eq!(sig_packet.pk_algo(), PublicKeyAlgorithm::Ed448);
+        match sig_packet.mpis() {
+            sequoia_openpgp::crypto::mpi::Signature::Ed448 { s } => {
+                assert_eq!(s.len(), 114, "Ed448 signature must be 114 bytes");
+            }
+            other => panic!("expected standalone Ed448 signature, got {other:?}"),
+        }
+
+        // 4) Cryptographic verification: sequoia_openpgp's own real
+        //    verification path (Signature::verify_message), not a
+        //    hand-rolled check — directly against the in-HSM-generated
+        //    public key (no Cert needed for a detached-signature check).
+        sig_packet
+            .verify_message(&public_reloaded, msg)
+            .expect("HSM-generated standalone Ed448 signature must verify against the generated public key");
+
+        eprintln!(
+            "PASS live_ed448_standalone: HSM Ed448 signature is v6 + algo {EXPECTED_ALGO_ID_ED448_STANDALONE}, \
+             verified by sequoia 2.x ({} bytes armored)",
+            sig.len()
+        );
+
+        // 5) Tamper-rejection control: corrupt the raw signature bytes on
+        //    the wire and confirm sequoia's verifier rejects it. A
+        //    detached signature file is exactly one Signature packet, and
+        //    the algorithm-specific signature bytes (the native 114-byte
+        //    Ed448 `s`) are the LAST field in a v6 signature packet with
+        //    nothing following, so flipping the final byte of the
+        //    de-armored stream corrupts the signature payload itself
+        //    without touching any packet framing / subpacket structure.
+        {
+            let mut der = sequoia_openpgp::armor::Reader::from_bytes(
+                &sig,
+                sequoia_openpgp::armor::ReaderMode::Tolerant(None),
+            );
+            let mut raw = Vec::new();
+            std::io::copy(&mut der, &mut raw).expect("de-armor for tamper test");
+            let last = raw.len() - 1;
+            raw[last] ^= 0xFF;
+
+            let pile = PacketPile::from_bytes(&raw).expect("re-parse corrupted signature");
+            let mut corrupted = None;
+            for p in pile.descendants() {
+                if let Packet::Signature(s) = p {
+                    corrupted = Some(s.clone());
+                }
+            }
+            let corrupted = corrupted.expect("a Signature packet");
+            let err = corrupted
+                .verify_message(&public_reloaded, msg)
+                .expect_err("sequoia must reject a corrupted Ed448 signature");
+            eprintln!("    PASS tamper-rejection: corrupted signature rejected: {err}");
+        }
+
+        // 6) CONFIRM non-extractability of the private key (keypair()
+        //    consumed s2's session, so use a fresh session).
+        let s3 = open_session(&e);
+        let h = s3
+            .session
+            .find_objects(&[
+                Attribute::Token(true),
+                Attribute::Private(true),
+                Attribute::Id(id.to_vec()),
+                Attribute::Class(ObjectClass::PRIVATE_KEY),
+                Attribute::KeyType(cryptoki::object::KeyType::EC_EDWARDS),
+            ])
+            .expect("find_objects")[0];
+        let value_released = s3
+            .session
+            .get_attributes(h, &[cryptoki::object::AttributeType::Value])
+            .map(|attrs| attrs.iter().any(|a| matches!(a, Attribute::Value(v) if !v.is_empty())))
+            .unwrap_or(false);
+        assert!(
+            !value_released,
+            "Ed448 private CKA_VALUE was released — key IS extractable (must not be)"
+        );
+        let mut sensitive = None;
+        let mut extractable = None;
+        for a in s3
+            .session
+            .get_attributes(
+                h,
+                &[
+                    cryptoki::object::AttributeType::Sensitive,
+                    cryptoki::object::AttributeType::Extractable,
+                ],
+            )
+            .expect("get sensitive/extractable")
+        {
+            match a {
+                Attribute::Sensitive(x) => sensitive = Some(x),
+                Attribute::Extractable(x) => extractable = Some(x),
+                _ => {}
+            }
+        }
+        assert_eq!(sensitive, Some(true), "Ed448 CKA_SENSITIVE must be true");
+        assert_eq!(extractable, Some(false), "Ed448 CKA_EXTRACTABLE must be false");
+        eprintln!("    Ed448: CKA_VALUE refused, SENSITIVE=true, EXTRACTABLE=false");
 
         purge_id(&open_session(&e), id);
     }

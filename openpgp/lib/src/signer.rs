@@ -33,6 +33,21 @@ fn ed25519_sign(session: &Session, handle: ObjectHandle, digest: &[u8]) -> anyho
     Ok(session.sign(&Mechanism::Eddsa(params), handle, digest)?)
 }
 
+/// Sign `digest` with a pure Ed448 private-key object via `CKM_EDDSA`.
+///
+/// Unlike Ed25519, RFC 8032 §5.2 Ed448 is defined to always sign with a
+/// context string — pure contextless Ed448 is not a thing the spec
+/// permits, so `CK_EDDSA_PARAMS` must carry `contextData` even when the
+/// caller has nothing to say: an *empty* context (`&[]`), not an omitted
+/// one. This is exactly what the `MLDSA87_Ed448` composite's Ed448 half
+/// already does (`Signer::sign` below) — this helper factors that proven
+/// construction out so the standalone (non-composite) Ed448 arm can call
+/// the identical code instead of re-deriving it.
+fn ed448_sign(session: &Session, handle: ObjectHandle, digest: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let params = EddsaParams::new(EddsaSignatureScheme::Ed448(&[]));
+    Ok(session.sign(&Mechanism::Eddsa(params), handle, digest)?)
+}
+
 impl sequoia_openpgp::crypto::Signer for Op11KeyPair {
     fn public(&self) -> &Key<PublicParts, UnspecifiedRole> {
         &self.public
@@ -141,8 +156,7 @@ impl sequoia_openpgp::crypto::Signer for Op11KeyPair {
                 let pqc = self.pqc.ok_or_else(|| {
                     anyhow::anyhow!("MLDSA87_Ed448 keypair is missing its ML-DSA custody handle")
                 })?;
-                let params = EddsaParams::new(EddsaSignatureScheme::Ed448(&[]));
-                let eddsa = session.sign(&Mechanism::Eddsa(params), self.private, digest)?;
+                let eddsa = ed448_sign(&session, self.private, digest)?;
                 let mldsa = ml_dsa_sign(&session, pqc, digest)?;
 
                 let eddsa: Box<[u8; 114]> = eddsa
@@ -158,6 +172,24 @@ impl sequoia_openpgp::crypto::Signer for Op11KeyPair {
                         anyhow::anyhow!("ML-DSA-87 half is {} bytes, expected 4627", v.len())
                     })?;
                 Ok(mpi::Signature::MLDSA87_Ed448 { eddsa, mldsa })
+            }
+
+            // -- Standalone (non-composite) Ed448 (algorithm 28, RFC 9580
+            //    native v6 format) via CKM_EDDSA — a single C_Sign call,
+            //    mirroring the MLDSA87_Ed448 composite's Ed448 half exactly
+            //    (same `ed448_sign` helper, same 57-byte key / 114-byte
+            //    signature shape, same RFC 8032 §5.2 empty-context
+            //    handling). Distinct from `PublicKeyAlgorithm::MLDSA87_Ed448`
+            //    (algorithm 31) above: this key has no ML-DSA custody
+            //    handle at all (`self.pqc` is `None`).
+            PublicKeyAlgorithm::Ed448 => {
+                let sig = ed448_sign(&session, self.private, digest)?;
+                let sig: Box<[u8; 114]> = sig.into_boxed_slice().try_into().map_err(
+                    |v: Box<[u8]>| {
+                        anyhow::anyhow!("Ed448 signature is {} bytes, expected 114", v.len())
+                    },
+                )?;
+                Ok(mpi::Signature::Ed448 { s: sig })
             }
 
             other => Err(anyhow::anyhow!("Unsupported signing algorithm {other:?}")),

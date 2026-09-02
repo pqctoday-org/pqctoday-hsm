@@ -639,6 +639,70 @@ impl Op11Session {
         Ok(public)
     }
 
+    /// **Generate-in-HSM custody for a standalone (non-composite) Ed448
+    /// key** (RFC 9580 native v6 format, `PublicKeyAlgorithm::Ed448`,
+    /// algorithm ID 28 — distinct from the composite `MLDSA87_Ed448`,
+    /// algorithm 31, whose Ed448 half this mirrors exactly: same
+    /// `CKM_EDDSA`-capable `EccEdwardsKeyPairGen` mechanism, same curve
+    /// OID, same non-extractable custody discipline
+    /// (`CKA_SENSITIVE=true`, `CKA_EXTRACTABLE=false`). The only
+    /// structural difference from the composite path is that there is no
+    /// second (ML-DSA) custody handle — this key is a single PKCS#11
+    /// private-key object, so `keypair()`'s classical single-handle
+    /// resolution path (select by `CKA_SIGN` + `CKA_ID`, the same path
+    /// RSA/ECDSA keys already use) finds it, not the two-handle composite
+    /// path.
+    ///
+    /// Ed448 has no `AlgorithmId`/`Mechanism` entry in
+    /// `upload_self_sign_x509` (that dispatch is RSA/ECC-only), so —
+    /// exactly like the composite keys — this standalone key cannot ride
+    /// the X.509 self-sign metadata path either. Its public half is
+    /// persisted the same way the composites' are: as a token-resident
+    /// `CKO_DATA` object via `store_composite_public` (generic despite the
+    /// name — it just serializes whatever `Key<PublicParts,
+    /// UnspecifiedRole>` it is given), so the key reloads purely from
+    /// token data via `key()`'s existing `load_composite_public` check.
+    pub fn generate_ed448_in_hsm(
+        &self,
+        id: &[u8],
+    ) -> anyhow::Result<Key<PublicParts, UnspecifiedRole>> {
+        let ed_pub_t = vec![
+            Attribute::KeyType(KeyType::EC_EDWARDS),
+            Attribute::EcParams(ED448_OID_DER.to_vec()),
+            Attribute::Token(true),
+            Attribute::Verify(true),
+            Attribute::Id(id.to_vec()),
+            Attribute::Label(b"ed448-standalone".to_vec()),
+        ];
+        let ed_priv_t = vec![
+            Attribute::Token(true),
+            Attribute::Private(true),
+            Attribute::Sensitive(true),
+            Attribute::Extractable(false),
+            Attribute::Id(id.to_vec()),
+            Attribute::KeyType(KeyType::EC_EDWARDS),
+            Attribute::Sign(true),
+            Attribute::Label(b"ed448-standalone".to_vec()),
+        ];
+        let (ed_pub, _ed_priv) = self.session.generate_key_pair(
+            &Mechanism::EccEdwardsKeyPairGen,
+            &ed_pub_t,
+            &ed_priv_t,
+        )?;
+        let point = read_ec_point(&self.session, ed_pub)?;
+
+        let public: Key6<PublicParts, UnspecifiedRole> =
+            Key6::import_public_ed448(&point, None)
+                .map_err(|e| anyhow::anyhow!("assemble standalone Ed448 public key: {e}"))?;
+        let public: Key<PublicParts, UnspecifiedRole> = sequoia_openpgp::packet::Key::from(public);
+
+        // Persist the public key so it reloads from the token (mirrors
+        // task 1's composite reload discipline).
+        self.store_composite_public(id, &public)?;
+
+        Ok(public)
+    }
+
     /// Create an Edwards/Montgomery private-key object (raw scalar + curve OID).
     fn create_eddsa_object(
         &self,
