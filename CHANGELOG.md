@@ -6,7 +6,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [Unreleased]
+## [0.28.0] — 2026-09-02
+
+**Consolidated release: a cross-provider PKCS#11 validation pass and the
+defects it exposed.** Every PKCS#11 integration surface — the OpenSSL
+provider, KMIP/CACP, strongSwan, OpenPGP, MLS, JavaJCE — was validated
+against the engines' current mechanism surface rather than assumed correct,
+and the failures that surfaced were fixed with independent oracles (NIST
+ACVP vectors, RFC KATs, live OpenSSL processes, from-spec references)
+rather than against the code under test.
+
+The defects worth knowing about, because several were **silent**: EdDSA
+context strings were discarded, producing signatures that verified here and
+nowhere else; two of MLS's four ciphersuites did their HPKE in software,
+bypassing the HSM entirely; imported X25519/X448 keys were mis-detected as
+P-256 and derived a **wrong shared secret with no error**; imported EC
+points were mangled roughly 1 time in 256 by a tag byte that cannot mean
+what the code assumed; AES-CCM, AES-XTS and AES-GMAC had no working
+multi-part path; and several HMAC digests were unimplemented beneath the
+layer that claimed to offer them.
+
+Alongside the engine work, two pieces of the *evidence chain* itself were
+repaired: concurrent validation-gate runs shared one cargo build directory
+with no locking, which let cargo link a wrong-feature-variant artefact and
+produce failures unrelated to the code under test; and the PQC
+interoperability suite had been skipping silently on CI since it was
+written, so that claim had no automated evidence behind it at all. Both are
+fixed, the second with a guard that makes recurrence loud rather than
+silent.
+
+**Contains one BREAKING change** — `CKM_SP800_108_DOUBLE_PIPELINE_KDF` on
+the C++ engine no longer mixes in a counter the caller did not ask for,
+correcting a spec violation and a divergence from the Rust engine. Keys
+derived with no explicit `CK_SP800_108_COUNTER` must be re-derived; see the
+entry below for the full disposition. See `RELEASING.md`'s evidence
+checklist for what is regenerated alongside this release.
 
 ### Added
 
