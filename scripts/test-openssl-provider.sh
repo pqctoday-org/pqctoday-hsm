@@ -2355,6 +2355,133 @@ t39() { local w; w=$(mk_arena ed25519ctx "$CPP_ENGINE_SO") && use_arena "$w" || 
 }
 run_case T39 PASS "Ed25519ctx (RFC 8032 sec 5.1, non-empty context string) token sign, cross-verified against OpenSSL's own independent native Ed25519ctx implementation, wrong-context sabotage rejected (2026-08-30 remediation item 4: eddsa.c context-string plumbing + CKM_EDDSA_PH gating fix; wired into this harness 2026-09-02)" t39
 
+# ─── T40: AES-GMAC as EVP_MAC (WS-3/G2) ─────────────────────────────────────
+# CKM_AES_GMAC (PKCS#11 v3.2 §6.13.6) joins CMAC/KMAC-128/256 as a real
+# OSSL_OP_MAC implementation in mac.c -- this file's own gap a 2026-08-31
+# validation sweep found via `grep -rl GMAC src/vendor/pkcs11-provider/src/`
+# returning nothing, even though both engines have supported CKM_AES_GMAC
+# since the WS-8 cipher-mechanism set (SoftHSM_sign.cpp's applyGmacParams/
+# kMacMechTable, rust/src/ffi.rs's CKM_AES_GMAC sign/verify arms -- both
+# confirmed live by reading the source directly, not assumed) -- so unlike
+# CMAC (C++-only) this dispatches on BOTH engines and gets a real twin-arm
+# test (T40/T40b), same shape as T35/T35b, T37/T37h, etc.
+#
+# GMAC's own PKCS#11 mechanism param is CK_GCM_PARAMS -- the SAME struct
+# CKM_AES_GCM's own AEAD cipher already uses (cipher.c), confirmed against
+# docs/refs/pkcs11t-canonical-v3.2.h and both engines' own param parsing;
+# pAAD/ulAADLen inside it are unused by either engine for GMAC -- the
+# authenticated data is the C_Sign/C_SignUpdate payload itself (PKCS#11 v3.2
+# §6.13.6: "GMAC does not use plaintext or ciphertext", i.e. AAD-only). The
+# native OpenSSL oracle for cross-checking is its own "GMAC" EVP_MAC
+# (`openssl list -mac-algorithms -provider default` shows
+# `{ 1.0.9797.3.4, GMAC }`), confirmed live BEFORE writing this test:
+# `openssl mac -macopt hexkey:... -macopt hexiv:... -cipher aes-128-gcm -in
+# aad.bin GMAC` produces a real 16-byte tag standalone against the default
+# provider -- and, tellingly, FAILS with "invalid key length" if -cipher is
+# omitted, so this provider's own requirement that OSSL_MAC_PARAM_CIPHER be
+# set (mac_set_gmac_cipher) matches the default provider's own behavior,
+# not an invented restriction.
+t40_gmac() { # $1=engine.so $2=label-suffix $3=keybits(128|256, default 128)
+  local engine="$1" suffix="$2" keybits="${3:-128}" w
+  w="$ROOT_WORK/g2gmac${suffix}"; mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = DEBUG
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $engine
+pkcs11-module-token-pin = 1234
+pkcs11-module-load-behavior = early
+activate = 1
+EOF
+  OPENSSL_CONF=/dev/null SOFTHSM2_CONF="$w/softhsm2.conf" "$SOFTHSM_UTIL" --module "$engine" \
+    --init-token --free --label "g2gmac${suffix}" --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+
+  local key cipher
+  if [[ "$keybits" == 256 ]]; then
+    key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+    cipher=AES-256-GCM
+  else
+    key=000102030405060708090a0b0c0d0e0f
+    cipher=AES-128-GCM
+  fi
+  local iv=101112131415161718191a1b
+  printf '%s' "gmac harness AAD-only content, no plaintext" > "$w/aad.txt"
+
+  local tokout swout
+  tokout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" -macopt "hexiv:$iv" \
+    -cipher "$cipher" -in "$w/aad.txt" GMAC 2>"$w/tok.err.log") || return 1
+  swout=$(OPENSSL_CONF=/dev/null O mac -macopt "hexkey:$key" -macopt "hexiv:$iv" \
+    -cipher "$cipher" -in "$w/aad.txt" GMAC 2>/dev/null) || return 1
+  [[ -n "$tokout" && "$tokout" == "$swout" ]] || return 1
+  grep -q "Created new object" "$w/tok.err.log" || return 1
+
+  # Negative-control twin (R13): no propquery -> silently resolves to the
+  # DEFAULT provider (same output, no token object created) -- proves the
+  # tokout match above is genuinely because propquery forced the pkcs11
+  # provider, not because it's the only "GMAC" implementation reachable.
+  local ctrlout
+  ctrlout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -macopt "hexkey:$key" -macopt "hexiv:$iv" -cipher "$cipher" \
+    -in "$w/aad.txt" GMAC 2>"$w/ctrl.err.log") || return 1
+  [[ "$ctrlout" == "$swout" ]] || return 1
+  grep -q "Created new object" "$w/ctrl.err.log" && return 1
+
+  # Determinism: the SAME (key, IV, AAD) reproduces the SAME tag.
+  local tokout2
+  tokout2=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" -macopt "hexiv:$iv" \
+    -cipher "$cipher" -in "$w/aad.txt" GMAC 2>/dev/null) || return 1
+  [[ "$tokout2" == "$tokout" ]] || { echo "same (key,IV,AAD) produced a DIFFERENT tag across two calls"; return 1; }
+
+  # Sabotage: tampering the AAD (same key/IV) must NOT produce the same
+  # tag -- and the token's divergence must match software's own.
+  printf '%s' "gmac harness AAD-only content, no plaintext -- TAMPERED" > "$w/aad2.txt"
+  local sabout sabsw
+  sabout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" -macopt "hexiv:$iv" \
+    -cipher "$cipher" -in "$w/aad2.txt" GMAC 2>/dev/null) || return 1
+  sabsw=$(OPENSSL_CONF=/dev/null O mac -macopt "hexkey:$key" -macopt "hexiv:$iv" \
+    -cipher "$cipher" -in "$w/aad2.txt" GMAC 2>/dev/null) || return 1
+  [[ "$sabout" != "$tokout" ]] || { echo "sabotage: tampered AAD produced the SAME tag as the original"; return 1; }
+  [[ "$sabout" == "$sabsw" ]] || return 1
+
+  # Rejection: a non-AES-GCM cipher name is never honorable (this
+  # provider's GMAC, like its CMAC, derives the real AES variant from the
+  # key's own byte length -- the cipher name is validated, not forwarded).
+  if SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" -macopt "hexiv:$iv" \
+    -cipher AES-128-CBC -in "$w/aad.txt" GMAC >/dev/null 2>&1
+  then echo "non-GCM cipher was accepted (should be rejected)"; return 1; fi
+
+  # Rejection: a missing IV is never honorable -- GMAC/GCM's authentication
+  # guarantee depends on the (key, IV) pair never repeating (NIST SP
+  # 800-38D §8.3), so this provider refuses to invent one rather than ship
+  # a silent nonce-reuse trap (see mac.c's own mac_ensure_signinit comment).
+  if SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" -cipher "$cipher" \
+    -in "$w/aad.txt" GMAC >/dev/null 2>&1
+  then echo "missing IV was accepted (should be rejected)"; return 1; fi
+
+  return 0
+}
+t40() { t40_gmac "$CPP_ENGINE_SO" cpp128 128; }
+run_case T40 PASS "token AES-128-GMAC (CKM_AES_GMAC, PKCS#11 v3.2 §6.13.6) == OpenSSL's own native GMAC oracle (cross-checked, not self-verified), engine-log verified, deterministic for a fixed (key,IV), tampered-AAD sabotage rejected (both token and software diverge identically), non-GCM-cipher + missing-IV rejection, negative-control twin (R13) (WS-3/G2: this file's own prior total GMAC gap, mac.c had no arm at all)" t40
+t40c() { t40_gmac "$CPP_ENGINE_SO" cpp256 256; }
+run_case T40c PASS "token AES-256-GMAC, C++ arm: same proof as T40 for the 256-bit key variant -- confirms the AES-variant-from-key-length derivation (mac_set_gmac_cipher/p11prov_create_mac_key) genuinely follows the key, not a hardcoded 128-bit assumption (WS-3/G2)" t40c
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 
@@ -3108,6 +3235,66 @@ t39b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
   return 0
 }
 run_case T39b PASS "Ed25519ctx, Rust arm: CK_EDDSA_PARAMS' context now reaches sign_eddsa_ctx/verify_eddsa_ctx -- rust/src/ffi.rs's parse_sign_mech_params had no CKM_EDDSA branch at all, so ulContextDataLen/pContextData were silently dropped and every CKM_EDDSA call fell through to plain Ed25519 regardless of context, which self-verified against the SAME token's own C_Verify (both sides dropped it identically) but disagreed with OpenSSL's independent Ed25519ctx, which does not; the underlying sign_eddsa_ctx/verify_eddsa_ctx math was already correct (byte-exact vs PyCryptodome) -- fixes the capability gap found 2026-09-02 (WS1 crypto-bugs remediation, 2026-09-01); confirmed here plus by a new #[test] in ffi.rs driving the real C_SignInit/C_Sign/C_VerifyInit/C_Verify entry points against a real openssl pkeyutl process, both directions, wrong-context sabotage rejected both ways -- this run_case is the pending real-provider-.so confirmation" t39b
+
+# T40b: AES-128-GMAC, Rust arm -- twin proof of T40. rust/src/ffi.rs's own
+# CKM_AES_GMAC sign() (line ~6319) and verify() (line ~6655) arms parse the
+# identical CK_GCM_PARAMS layout (rust/src/ck_param.rs's own `gcm` struct:
+# P_IV/UL_IV_LEN/UL_IV_BITS/P_AAD/UL_AAD_LEN/UL_TAG_BITS, byte-for-byte the
+# same field order as the C++ engine's CK_GCM_PARAMS and this provider's own
+# vendored pkcs11.h) -- confirmed by reading the source directly before
+# writing this, not assumed. Uses mk_rust_cnf (defined above) for the
+# Rust-specific SOFTHSMRUST_STATE_FILE-backed token, same pattern as T39b.
+t40b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/rustgmac"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rustgmac --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+
+  local key=000102030405060708090a0b0c0d0e0f
+  local iv=101112131415161718191a1b
+  printf '%s' "gmac harness AAD-only content, no plaintext" > "$w/aad.txt"
+
+  # Note: unlike T40's C++ arm, this does NOT grep the engine log for
+  # "Created new object" -- that string is specific to the C++ engine's
+  # own OSToken.cpp/ObjectFile.cpp logging (SoftHSM_sign.cpp), which the
+  # Rust engine does not share (confirmed: every OTHER Rust-arm case in
+  # this harness, e.g. T15a/T15b/T24d, proves genuine engagement purely
+  # via -propquery "?provider=pkcs11" -- a fetch failure errors out rather
+  # than silently falling back -- plus a functional outcome, not by
+  # grepping engine-specific log text; found live when this exact grep
+  # made a byte-identical, propquery-forced tag comparison FAIL).
+  local tokout swout
+  tokout=$(SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" -macopt "hexiv:$iv" \
+    -cipher AES-128-GCM -in "$w/aad.txt" GMAC 2>"$w/tok.err.log") || return 1
+  swout=$(OPENSSL_CONF=/dev/null O mac -macopt "hexkey:$key" -macopt "hexiv:$iv" \
+    -cipher AES-128-GCM -in "$w/aad.txt" GMAC 2>/dev/null) || return 1
+  [[ -n "$tokout" && "$tokout" == "$swout" ]] || return 1
+
+  # Determinism, same as T40.
+  local tokout2
+  tokout2=$(SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" -macopt "hexiv:$iv" \
+    -cipher AES-128-GCM -in "$w/aad.txt" GMAC 2>/dev/null) || return 1
+  [[ "$tokout2" == "$tokout" ]] || { echo "Rust arm: same (key,IV,AAD) produced a DIFFERENT tag across two calls"; return 1; }
+
+  # Sabotage: tampered AAD -> different tag, matching software's own
+  # divergence.
+  printf '%s' "gmac harness AAD-only content, no plaintext -- TAMPERED" > "$w/aad2.txt"
+  local sabout sabsw
+  sabout=$(SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "hexkey:$key" -macopt "hexiv:$iv" \
+    -cipher AES-128-GCM -in "$w/aad2.txt" GMAC 2>/dev/null) || return 1
+  sabsw=$(OPENSSL_CONF=/dev/null O mac -macopt "hexkey:$key" -macopt "hexiv:$iv" \
+    -cipher AES-128-GCM -in "$w/aad2.txt" GMAC 2>/dev/null) || return 1
+  [[ "$sabout" != "$tokout" ]] || { echo "Rust arm sabotage: tampered AAD produced the SAME tag as the original"; return 1; }
+  [[ "$sabout" == "$sabsw" ]] || return 1
+
+  return 0
+}
+run_case T40b PASS "token AES-128-GMAC, Rust arm: same proof as T40 over libsofthsmrustv3.so -- rust/src/ffi.rs's own CKM_AES_GMAC sign/verify arms consume the identical CK_GCM_PARAMS this provider sends, cross-checked against OpenSSL's native GMAC oracle, deterministic, tampered-AAD sabotage rejected (WS-3/G2)" t40b
 
 
 # ─── R0.1 regression guard ──────────────────────────────────────────────────
