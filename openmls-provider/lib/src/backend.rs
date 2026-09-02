@@ -372,6 +372,22 @@ pub trait PkcsOps: Send + Sync {
     /// peer public key. Returns the raw 32-byte shared secret.
     fn ecdh_x25519(&self, sk: &[u8], peer_pk: &[u8]) -> Result<Vec<u8>, PqcTodayError>;
 
+    /// Compute a Diffie-Hellman shared secret via `CKM_ECDH1_DERIVE` (P-256,
+    /// `CKK_EC` / secp256r1). `sk` is the raw 32-byte private scalar
+    /// (big-endian, as produced by `hpke.rs`'s DHKEM(P-256) `DeriveKeyPair`);
+    /// `peer_pk` is the peer's raw 65-byte uncompressed SEC1 point
+    /// (`0x04 || X || Y`). Returns the raw 32-byte shared secret — the
+    /// x-coordinate of the resulting point, per PKCS#11 v3.2 §6.3.17's
+    /// `CKD_NULL` derivation and RFC 9180 §4.1's `DH()` for NIST curves.
+    ///
+    /// ECDH for standard Weierstrass curves is retained, non-PQC
+    /// functionality (see the crate-level `CLAUDE.md`'s "Retained
+    /// algorithms" list) — unlike the PQC primitives above, this has no
+    /// "not available on this backend" default: every `PkcsOps`
+    /// implementation is expected to support it, the same as
+    /// `ecdh_x25519`.
+    fn ecdh_p256(&self, sk: &[u8], peer_pk: &[u8]) -> Result<Vec<u8>, PqcTodayError>;
+
     // ── Signature keys ────────────────────────────────────────────────────────
 
     /// Generate a signing key pair for `scheme`.
@@ -719,6 +735,54 @@ impl PkcsOps for CryptokiBackend {
         })
     }
 
+    fn ecdh_p256(&self, sk: &[u8], peer_pk: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+        use cryptoki::mechanism::elliptic_curve::{EcKdf, Ecdh1DeriveParams};
+        use cryptoki::mechanism::Mechanism;
+        use cryptoki::object::{Attribute, AttributeType, KeyType, ObjectClass};
+        use cryptoki::types::Ulong;
+
+        // secp256r1 (P-256) OID: 1.2.840.10045.3.1.7 — same encoding
+        // `signature_key_gen`'s ECDSA_SECP256R1_SHA256 arm already uses.
+        const P256_OID: [u8; 10] = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+        const NSECRET: usize = 32;
+
+        self.hsm.with_session(|s| {
+            let sk_obj = s.create_object(&[
+                Attribute::Class(ObjectClass::PRIVATE_KEY),
+                Attribute::KeyType(KeyType::EC),
+                Attribute::Token(false),
+                Attribute::Sensitive(false),
+                Attribute::Extractable(true),
+                Attribute::Derive(true),
+                Attribute::EcParams(P256_OID.to_vec()),
+                Attribute::Value(sk.to_vec()),
+            ])?;
+            let params = Ecdh1DeriveParams::new(EcKdf::null(), peer_pk);
+            let mech = Mechanism::Ecdh1Derive(params);
+            let derived = s.derive_key(
+                &mech,
+                sk_obj,
+                &[
+                    Attribute::Class(ObjectClass::SECRET_KEY),
+                    Attribute::KeyType(KeyType::GENERIC_SECRET),
+                    Attribute::Token(false),
+                    Attribute::Sensitive(false),
+                    Attribute::Extractable(true),
+                    Attribute::ValueLen(Ulong::from(NSECRET as u64)),
+                ],
+            )?;
+            let attrs = s.get_attributes(derived, &[AttributeType::Value])?;
+            let _ = s.destroy_object(derived);
+            let _ = s.destroy_object(sk_obj);
+            for a in attrs {
+                if let Attribute::Value(v) = a {
+                    return Ok(v);
+                }
+            }
+            Err(PqcTodayError::ObjectNotFound)
+        })
+    }
+
     fn signature_key_gen(
         &self,
         scheme: SignatureScheme,
@@ -974,9 +1038,9 @@ mod wasm_backend {
         CKA_EXTRACTABLE, CKA_KEY_TYPE, CKA_SIGN, CKA_TOKEN, CKA_VALUE, CKA_VALUE_LEN, CKA_VERIFY,
         CKF_RW_SESSION, CKF_SERIAL_SESSION, CKK_AES, CKK_EC, CKK_EC_EDWARDS, CKK_EC_MONTGOMERY,
         CKK_GENERIC_SECRET, CKM_AES_GCM, CKM_EC_EDWARDS_KEY_PAIR_GEN, CKM_EC_KEY_PAIR_GEN,
-        CKM_EC_MONTGOMERY_KEY_DERIVE, CKM_ECDSA_SHA256, CKM_ECDSA_SHA384, CKM_ECDSA_SHA512,
-        CKM_EDDSA, CKM_SHA256, CKM_SHA256_HMAC, CKM_SHA384, CKM_SHA384_HMAC, CKM_SHA512,
-        CKM_SHA512_HMAC, CKO_PUBLIC_KEY, CKO_PRIVATE_KEY, CKO_SECRET_KEY, CKR_OK,
+        CKM_EC_MONTGOMERY_KEY_DERIVE, CKM_ECDH1_DERIVE, CKM_ECDSA_SHA256, CKM_ECDSA_SHA384,
+        CKM_ECDSA_SHA512, CKM_EDDSA, CKM_SHA256, CKM_SHA256_HMAC, CKM_SHA384, CKM_SHA384_HMAC,
+        CKM_SHA512, CKM_SHA512_HMAC, CKO_PUBLIC_KEY, CKO_PRIVATE_KEY, CKO_SECRET_KEY, CKR_OK,
     };
 
     use crate::error::PqcTodayError;
@@ -1488,6 +1552,106 @@ mod wasm_backend {
             ];
 
             // Derived key template: CKO_SECRET_KEY, CKK_GENERIC_SECRET, extractable, 32 B.
+            let mut d_class_buf = [0u8; 4];
+            let mut d_ktype_buf = [0u8; 4];
+            let mut d_vlen_buf = [0u8; 4];
+            let mut d_ext_buf: u8 = 0;
+            let mut d_token_buf: u8 = 0;
+            let d_class_ptr = u32_attr(&mut d_class_buf, CKO_SECRET_KEY);
+            let d_ktype_ptr = u32_attr(&mut d_ktype_buf, CKK_GENERIC_SECRET);
+            let d_vlen_ptr = u32_attr(&mut d_vlen_buf, NSECRET as u32);
+            let d_ext_ptr = bool_attr(&mut d_ext_buf, true);
+            let d_token_ptr = bool_attr(&mut d_token_buf, false);
+
+            #[rustfmt::skip]
+            let mut der_tmpl: [u32; 15] = [
+                CKA_CLASS,       d_class_ptr as u32, 4,
+                CKA_KEY_TYPE,    d_ktype_ptr as u32, 4,
+                CKA_VALUE_LEN,   d_vlen_ptr as u32,  4,
+                CKA_EXTRACTABLE, d_ext_ptr as u32,   1,
+                CKA_TOKEN,       d_token_ptr as u32, 1,
+            ];
+
+            let mut h_derived: u32 = 0;
+            use softhsmrustv3::ffi::C_DeriveKey;
+            let rv = C_DeriveKey(
+                h_sess,
+                mech.as_mut_ptr() as *mut u8,
+                h_sk,
+                der_tmpl.as_mut_ptr() as *mut u8,
+                5,
+                &mut h_derived,
+            );
+            C_DestroyObject(h_sess, h_sk);
+            if rv != CKR_OK {
+                return Err(PqcTodayError::Pkcs11Raw(rv));
+            }
+
+            let secret = get_single_attr(h_sess, h_derived, CKA_VALUE)?;
+            C_DestroyObject(h_sess, h_derived);
+            Ok(secret)
+        }
+
+        // ── ECDH P-256 ────────────────────────────────────────────────────────
+        //
+        // Same shape as `ecdh_x25519` above: import `sk` as a session
+        // CKO_PRIVATE_KEY / CKK_EC object (P-256 OID, not X25519's OID) and
+        // derive via CKM_ECDH1_DERIVE — the mechanism this Rust engine
+        // dedicates to the NIST Weierstrass curves (kmip/src/ops/helpers.rs's
+        // `classical_kem_mech` draws the same P-256-vs-X25519 mechanism
+        // split this function and `ecdh_x25519` embody). `peer_pk` is the
+        // raw 65-byte uncompressed SEC1 point.
+
+        fn ecdh_p256(&self, sk: &[u8], peer_pk: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+            const NSECRET: usize = 32;
+            let h_sess = open()?;
+
+            let mut class_buf = [0u8; 4];
+            let mut ktype_buf = [0u8; 4];
+            let mut derive_buf: u8 = 0;
+            let mut token_buf: u8 = 0;
+            let mut ext_buf: u8 = 0;
+            let mut no_sign_buf: u8 = 0;
+            let class_ptr = u32_attr(&mut class_buf, CKO_PRIVATE_KEY);
+            let ktype_ptr = u32_attr(&mut ktype_buf, CKK_EC);
+            let derive_ptr = bool_attr(&mut derive_buf, true);
+            let token_ptr = bool_attr(&mut token_buf, false);
+            let ext_ptr = bool_attr(&mut ext_buf, true);
+            let no_sign_ptr = bool_attr(&mut no_sign_buf, false);
+
+            #[rustfmt::skip]
+            let mut sk_tmpl: [u32; 24] = [
+                CKA_CLASS,       class_ptr as u32,               4,
+                CKA_KEY_TYPE,    ktype_ptr as u32,               4,
+                CKA_VALUE,       sk.as_ptr() as u32,             sk.len() as u32,
+                CKA_DERIVE,      derive_ptr as u32,              1,
+                CKA_TOKEN,       token_ptr as u32,               1,
+                CKA_EC_PARAMS,   P256_OID.as_ptr() as u32,       P256_OID.len() as u32,
+                CKA_EXTRACTABLE, ext_ptr as u32,                 1,
+                CKA_SIGN,        no_sign_ptr as u32,             1,
+            ];
+
+            let mut h_sk: u32 = 0;
+            let rv = C_CreateObject(h_sess, sk_tmpl.as_mut_ptr() as *mut u8, 8, &mut h_sk);
+            if rv != CKR_OK {
+                return Err(PqcTodayError::Pkcs11Raw(rv));
+            }
+
+            // CK_ECDH1_DERIVE_PARAMS (wasm32, 5 × u32 = 20 bytes) — same
+            // layout `ecdh_x25519` documents above.
+            let ecdh_params: [u32; 5] = [
+                CKD_NULL,
+                0,
+                0,
+                peer_pk.len() as u32,
+                peer_pk.as_ptr() as u32,
+            ];
+            let mut mech: [u32; 3] = [
+                CKM_ECDH1_DERIVE,
+                ecdh_params.as_ptr() as u32,
+                20,
+            ];
+
             let mut d_class_buf = [0u8; 4];
             let mut d_ktype_buf = [0u8; 4];
             let mut d_vlen_buf = [0u8; 4];
