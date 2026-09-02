@@ -93,23 +93,32 @@ calls and adds JS-side stubs for functions not yet in the Rust binary.
 | Category | Functions |
 |---|---|
 | **Lifecycle** | `C_Initialize`, `C_Finalize` |
-| **Session** | `C_OpenSession`, `C_CloseSession`, `C_Login`, `C_Logout`, `C_GetSessionInfo` |
-| **Slot / Token** | `C_GetSlotList`, `C_GetTokenInfo`, `C_GetMechanismList`, `C_GetMechanismInfo`, `C_InitToken`, `C_InitPIN` |
+| **Info / Interface** | `C_GetInfo`, `C_GetFunctionList`, `C_GetInterface`, `C_GetInterfaceList`, `C_GetFunctionStatus` |
+| **Session** | `C_OpenSession`, `C_CloseSession`, `C_CloseAllSessions`, `C_Login`, `C_LoginUser`, `C_Logout`, `C_GetSessionInfo`, `C_GetSessionValidationFlags` (v3.2), `C_SessionCancel` (v3.2 — clears in-flight Encrypt/Decrypt operation state per the `flags` bitmask) |
+| **Slot / Token** | `C_GetSlotList`, `C_GetSlotInfo`, `C_GetTokenInfo`, `C_GetMechanismList`, `C_GetMechanismInfo`, `C_InitToken`, `C_InitPIN`, `C_SetPIN` |
 | **Object** | `C_CreateObject`, `C_DestroyObject`, `C_FindObjectsInit`, `C_FindObjects`, `C_FindObjectsFinal`, `C_GetAttributeValue` |
 | **Key generation** | `C_GenerateKey` (AES-128/256), `C_GenerateKeyPair` (ML-KEM, ML-DSA, SLH-DSA, RSA, ECDSA P-256/P-384/P-521, Ed25519, `CKM_HPKE_KEM_KEY_PAIR_GEN` — vendor mechanism, Rust engine only) |
 | **KEM** | `C_EncapsulateKey`, `C_DecapsulateKey` (ML-KEM-512/768/1024; also `CKM_HPKE` — RFC 9180 HPKE, vendor mechanism, Rust engine only) |
 | **Encrypt / Decrypt** | `C_EncryptInit` + `C_Encrypt` (one-shot), `C_DecryptInit` + `C_Decrypt` (one-shot); mechanisms: AES-GCM, AES-CBC, AES-KW, RSA-OAEP; multipart `C_EncryptUpdate`/`C_EncryptFinal`, `C_DecryptUpdate`/`C_DecryptFinal` |
 | **Sign / Verify** | `C_SignInit` + `C_Sign` (one-shot), `C_VerifyInit` + `C_Verify` (one-shot), `C_SignMessage` (one-shot), `C_VerifyMessage` (one-shot); algorithms: ML-DSA-44/65/87, SLH-DSA (all 12), RSA-PKCS, RSA-PSS, ECDSA P-256/P-384/P-521, Ed25519; multipart `C_SignUpdate`/`C_SignFinal`, `C_VerifyUpdate`/`C_VerifyFinal`; pre-bound `C_VerifySignatureInit`/`C_VerifySignature` (+ multipart `C_VerifySignatureUpdate`/`C_VerifySignatureFinal`); recover `C_SignRecoverInit`/`C_SignRecover`, `C_VerifyRecoverInit`/`C_VerifyRecover` |
-| **Message API** | `C_MessageSignInit` + `C_MessageSignFinal` (one-shot envelope, + multipart `C_SignMessageBegin`/`C_SignMessageNext`), `C_MessageVerifyInit` + `C_MessageVerifyFinal` (one-shot envelope, + multipart `C_VerifyMessageBegin`/`C_VerifyMessageNext`), `C_MessageEncryptInit`/`C_EncryptMessage` (+ multipart `C_EncryptMessageBegin`/`C_EncryptMessageNext`), `C_MessageDecryptInit`/`C_DecryptMessage` (+ multipart `C_DecryptMessageBegin`/`C_DecryptMessageNext`) |
+| **Message API** | `C_MessageSignInit` + `C_MessageSignFinal` (one-shot envelope, + multipart `C_SignMessageBegin`/`C_SignMessageNext`), `C_MessageVerifyInit` + `C_MessageVerifyFinal` (one-shot envelope, + multipart `C_VerifyMessageBegin`/`C_VerifyMessageNext`), `C_MessageEncryptInit`/`C_EncryptMessage`/`C_MessageEncryptFinal` (+ multipart `C_EncryptMessageBegin`/`C_EncryptMessageNext`), `C_MessageDecryptInit`/`C_DecryptMessage`/`C_MessageDecryptFinal` (+ multipart `C_DecryptMessageBegin`/`C_DecryptMessageNext`) |
 | **Digest** | `C_DigestInit`, `C_Digest`, `C_DigestUpdate`, `C_DigestFinal`; SHA-256, SHA-384, SHA-512, SHA3-256, SHA3-512, HMAC |
 | **Dual-function** | `C_DigestEncryptUpdate`, `C_DecryptDigestUpdate`, `C_SignEncryptUpdate`, `C_DecryptVerifyUpdate` (composed from the single-function ops above) |
 | **Key wrap / unwrap** | `C_WrapKey`, `C_UnwrapKey` (AES-KW, AES-GCM wrap, RSA-OAEP wrap), `C_WrapKeyAuthenticated`/`C_UnwrapKeyAuthenticated` (AES-GCM), `C_DeriveKey` (ECDH, HKDF, PBKDF2) |
 | **Object mgmt** | `C_CopyObject`, `C_GetObjectSize`, `C_SetAttributeValue` |
-| **Random** | `C_GenerateRandom` (browser CSPRNG via `getrandom::js`) |
+| **Random** | `C_GenerateRandom` (browser CSPRNG via `getrandom::js`), `C_SeedRandom` (also corrected 2026-09-01 — was `CKR_FUNCTION_NOT_SUPPORTED` before, per its own code comment) |
+
+**Corrected 2026-09-02**: the table above previously enumerated ~85 of the
+engine's real 104 `_C_*` exports (`grep -oE 'js_name = _C_[A-Za-z]+' rust/src/ffi.rs
+rust/src/constants.rs | sort -u` — this exact command is the freshness check;
+re-run it and diff against the two tables here if this ever drifts again). The
+19 gaps found were all either basic info/interface getters or session-lifecycle
+functions with no exotic behavior — verified against each one's body, not
+assumed from the function name.
 
 ### Stubbed — `CKR_FUNCTION_NOT_SUPPORTED`
 
-**Corrected 2026-09-01**: every function this table previously listed except the
+**Corrected 2026-09-01/02**: every function this table previously listed except the
 three below is now fully implemented (moved into the table above) — verified
 directly against each function's body in `rust/src/ffi.rs`. Streaming
 sign/verify/encrypt/decrypt, the message streaming and message encrypt/decrypt
@@ -121,6 +130,7 @@ corrected 2026-08-13). Only these three remain genuine stubs:
 |---|---|
 | **Object mgmt** | `C_DigestKey` |
 | **Session state** | `C_GetOperationState`, `C_SetOperationState` |
+| **v3.2 Async / Cancel** | `C_AsyncComplete`, `C_AsyncGetID`, `C_AsyncJoin`, `C_CancelFunction`, `C_WaitForSlotEvent` (found 2026-09-02 — genuinely still `CKR_FUNCTION_NOT_SUPPORTED`, unlike the previous round's corrections) |
 
 ---
 
