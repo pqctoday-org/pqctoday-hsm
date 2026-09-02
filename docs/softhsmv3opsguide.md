@@ -125,6 +125,13 @@ Build it from the repo rather than pulling the upstream package.
 
 ### 3.1 Build and install the vendored provider
 
+If you built the token itself via this repo's normal native build
+(`cmake .. && make`, root `README.md`'s "Building (Native)" section), you
+already have a complete provider at
+`build/src/vendor/pkcs11-provider/pkcs11-provider.so` — the CMake build
+wires this provider in unconditionally. The steps below are only for
+installing it standalone/system-wide, independent of that build tree:
+
 ```bash
 cd src/vendor/pkcs11-provider
 meson setup build
@@ -138,6 +145,12 @@ If OpenSSL is installed to a non‑system prefix, override the module directory:
 meson setup build -Dopenssl_modulesdir=/opt/openssl-3.5/lib/ossl-modules
 ninja -C build install
 ```
+
+**Known gap:** `src/meson.build`'s source list currently omits `mac.c`,
+`chacha.c`, and `sig/hss.c` (the CMake build above already has all three),
+so a provider built via this standalone path will fail to load rather than
+just missing EVP_MAC/ChaCha20/HSS support — see
+`src/vendor/pkcs11-provider/BUILD.md`.
 
 ### 3.2 Update `openssl.cnf`
 

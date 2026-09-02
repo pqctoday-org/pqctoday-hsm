@@ -35,7 +35,15 @@ make && make install
 For the WASM path see `../strongswan-wasm-shims/` (the actively-maintained shim
 tree) and `../scripts/build-strongswan-wasm.sh`.
 
-## Test against softhsmv3
+## Automated connector test (no swanctl/network needed)
+
+`tests/test_pkcs11_conn.c` links directly against a real `libstrongswan.so` +
+this plugin and drives the actual credential-layer sign/verify path IKEv2
+peer auth uses, for all 6 signature key types this connector supports
+(ML-DSA-44/65/87, SLH-DSA-SHA2-128s/192s/256s) — see `tests/README.md` for
+the full build/run steps and the last confirmed pass/fail table.
+
+## Test against softhsmv3 (full IKEv2 handshake)
 
 1. Build/install softhsmv3 and initialize a token with an ML-DSA-65 key
    (see `../docs/softhsmv3opsguide.md` §4).

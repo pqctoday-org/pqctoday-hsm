@@ -24,10 +24,20 @@ man page. Example configurations and basic use cases can be found in [HOWTO](HOW
 
 ### Post-Quantum Cryptography & SoftHSMv3 Support
 
-This vendored provider has been inherently upgraded to support the `SoftHSMv3` implementation of the PKCS#11 v3.2 standard.
-- **ML-KEM**: Fully dispatches `OSSL_OP_KEM` encapsulations using FIPS 203 sizes (512, 768, 1024) natively through `C_EncapsulateKey`/`C_DecapsulateKey`.
-- **ML-DSA**: Directly maps the FIPS 204 signatures (44, 65, 87) natively down to the HSM via `C_Sign`/`C_Verify`.
-- **PKCS#11 v3.x Asynchronous Integrations**: Supports the simulated `CKF_ASYNC_SESSION` mode to decouple blocking threads and unblock asynchronous API network gateways utilizing `C_AsyncComplete` routines natively natively via `CKR_OPERATION_NOT_INITIALIZED`.
+This vendored provider has been inherently upgraded to support the `SoftHSMv3` implementation of the PKCS#11 v3.2 standard. A phase-3 through phase-8 remediation program (2026-08-25 through 2026-08-30; see `docs/README.md`'s "OpenSSL provider" historical-records list for the dated plans) closed most of the gap between what the two PKCS#11 engines can do and what this provider could actually reach:
+- **ML-KEM / ML-DSA / SLH-DSA / HSS / XMSS / XMSS^MT**: Native `OSSL_OP_KEM` (`C_EncapsulateKey`/`C_DecapsulateKey`) and `OSSL_OP_SIGNATURE` dispatch for all FIPS 203/204/205 parameter sets, plus SP 800-208 HSS/LMS and RFC 8391 XMSS/XMSS^MT token-resident signing (`src/sig/{mldsa,slhdsa,hss,xmss}.c`).
+- **ML-DSA external-µ** (`CKM_ML_DSA_EXTERNAL_MU`/`_GEN`, PKCS#11 v3.3 draft codepoints — still OASIS "proposed", adopted early): sign/verify against an independently-computed µ, cross-checked against OpenSSL's own native ML-DSA implementation (`src/sig/mldsa.c`).
+- **HashML-DSA / HashSLH-DSA pre-hash routing**: the `CKM_HASH_ML_DSA*`/`CKM_HASH_SLH_DSA*` mechanism families (SHA-2/SHA-3/SHAKE-128/256 digests) reachable via `openssl dgst -sign`/`-verify` (`src/provider.c`).
+- **Composite signatures**: all 8 draft-ietf-lamps-pq-composite-sigs profiles (ML-DSA-44/65/87 combined with RSA-PSS, ECDSA P-256/P-384, or Ed25519) as real `OSSL_OP_SIGNATURE` + keymgmt + encoder registrations (`src/composite.c`).
+- **X25519/X448 key exchange + ML-KEM TLS 1.3 groups**: token-backed `OSSL_OP_KEYEXCH` for both Montgomery curves, plus pure ML-KEM-512/768/1024 TLS 1.3 groups (client role, and a fully token-backed server role for the certificate signature *and* the KEM) (`src/tls.c`, `src/exchange.c`).
+- **EVP_MAC**: HMAC (SHA-1/256/384/512), CMAC, and KMAC-128/256, plus `OSSL_FUNC_MAC_INIT_SKEY` for all three (`src/mac.c` — see the Build note in `BUILD.md`: not yet wired into this fork's standalone `meson.build`).
+- **KDFs**: HKDF (RFC 5869), PBKDF2 (`CKM_PKCS5_PBKD2`), and SP 800-108 Counter/Feedback/Double-Pipeline KBKDF (`src/kdf.c`).
+- **Ciphers**: AES-GCM/CCM/CTR/OFB/CFB\*, AES-XTS, AES Key Wrap / Key Wrap with Padding (RFC 3394/5649), and ChaCha20/ChaCha20-Poly1305 (`src/cipher.c`, `src/chacha.c` — same standalone-`meson.build` caveat as EVP_MAC above).
+- **PKCS#11 v3.x Asynchronous Integrations**: Supports the simulated `CKF_ASYNC_SESSION` mode to decouple blocking threads and unblock asynchronous API network gateways utilizing `C_AsyncComplete` routines natively via `CKR_OPERATION_NOT_INITIALIZED`.
+
+#### Both PKCS#11 engines
+
+This provider is engine-agnostic by construction: it `dlopen`s whatever PKCS#11 module `pkcs11-module-path` (or `PKCS11_PROVIDER_MODULE`) points at and drives it through the standard `C_*` API, so the same built `pkcs11.so`/`.dylib` works unmodified against either the C++ engine's `libsofthsmv3.so`/`.dylib` or the Rust engine's `libsofthsmrustv3.so`/`.dylib` cdylib — there is no compile-time or link-time coupling to either engine. Several of the mechanisms above needed real provider-side fixes to reach the Rust engine correctly (e.g. reading a key's *actual* parameter set instead of assuming the C++ engine's own default for HSS/LMS); once fixed, that routing code is shared and reaches both engines identically. `scripts/test-openssl-provider.sh` proves this directly with Rust-arm twin cases (suffixed `b`/`c`/`d`/`e`, e.g. `T28b` external-µ, `T29b`/`T30b` HashML-DSA/HashSLH-DSA, `T31b` SHAKE128/256, `T32c` XMSS, `T24d`/`T24e` HSS) run against `libsofthsmrustv3.so` alongside the primary C++-arm cases.
 
 #### RSA-OAEP against a SoftHSMv3 token: pin the hash explicitly
 
@@ -65,9 +75,14 @@ Coverage against the real (non-vendored) OpenSSL 3.6+ oracle, both PKCS#11
 engines, and known gaps tracked as explicit XFAIL cases lives at
 `scripts/test-openssl-provider.sh` at the repo root — see
 `docs/openssl-provider-coverage-audit-2026-08-25.md` for the design record
-and `docs/openssl-provider-remediation-plan-2026-08-25.md` for the gap
-backlog. It is wired into `scripts/local-gate.sh` as the opt-in
-`--openssl-provider` step.
+and `docs/openssl-provider-remediation-plan-2026-08-25.md` (phases 2-8;
+`docs/README.md` lists the later dated phase plans) for the gap backlog.
+It is wired into `scripts/local-gate.sh` as the opt-in `--openssl-provider`
+step. The harness defaults to the provider built by the repo's own root
+CMake build (`build/src/vendor/pkcs11-provider/pkcs11-provider.so`, via
+`src/CMakeLists.txt` → this directory's `CMakeLists.txt`), **not** the
+standalone `meson.build` in this directory — see `BUILD.md` for why that
+distinction currently matters.
 
 The vendored `tests/` meson suite (upstream latchset's own tests, C-based
 plus a handful of shell scripts) is intentionally left unwired in this

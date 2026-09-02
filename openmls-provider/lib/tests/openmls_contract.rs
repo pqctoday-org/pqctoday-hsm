@@ -78,15 +78,26 @@ struct HsmEnv {
 }
 
 fn run_hsm(module: &PathBuf) -> (StateSnapshot, HsmEnv) {
-    run_hsm_for_suite(module, Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519)
+    run_hsm_for_suite(
+        module,
+        Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519,
+        SignatureScheme::ED25519,
+    )
 }
 
-/// Same 2-member lifecycle as [`run_hsm`], parameterised over ciphersuite so
-/// the ChaCha20-Poly1305-record-layer suites (3 and X-Wing) can be driven
-/// through the exact same real add-member / Commit / Application-message
-/// path, against the real HSM-backed provider — not a synthetic AEAD
-/// call in isolation.
-fn run_hsm_for_suite(module: &PathBuf, ciphersuite: Ciphersuite) -> (StateSnapshot, HsmEnv) {
+/// Same 2-member lifecycle as [`run_hsm`], parameterised over ciphersuite
+/// (so the ChaCha20-Poly1305-record-layer suites (3 and X-Wing) can be
+/// driven through the exact same real add-member / Commit /
+/// Application-message path, against the real HSM-backed provider — not a
+/// synthetic AEAD call in isolation) and over signature scheme, since a
+/// ciphersuite's own name binds it to a specific one (RFC 9420 §5.1) —
+/// `_P256` suites use ECDSA-P256, not Ed25519, and `KeyPackage::builder()`
+/// rejects a credential whose signature key doesn't match.
+fn run_hsm_for_suite(
+    module: &PathBuf,
+    ciphersuite: Ciphersuite,
+    signature_scheme: SignatureScheme,
+) -> (StateSnapshot, HsmEnv) {
     let tokens_dir = tempfile::tempdir().unwrap();
     let mut conf_file = tempfile::NamedTempFile::new().unwrap();
     writeln!(
@@ -115,10 +126,10 @@ fn run_hsm_for_suite(module: &PathBuf, ciphersuite: Ciphersuite) -> (StateSnapsh
     let bob_provider = alice_provider.spawn_sibling(None).expect("bob provider");
 
     let alice_signer: PqcTodayHsmSigner = alice_provider
-        .generate_signer(SignatureScheme::ED25519)
+        .generate_signer(signature_scheme)
         .unwrap();
     let bob_signer: PqcTodayHsmSigner = bob_provider
-        .generate_signer(SignatureScheme::ED25519)
+        .generate_signer(signature_scheme)
         .unwrap();
 
     let alice_cred = CredentialWithKey {
@@ -394,6 +405,7 @@ fn mls_group_roundtrip_suite3_chacha20poly1305() {
     let (state, _env) = run_hsm_for_suite(
         &module,
         Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519,
+        SignatureScheme::ED25519,
     );
     assert_real_group_roundtrip(
         &state,
@@ -415,11 +427,57 @@ fn mls_group_roundtrip_xwing_suite() {
     let (state, _env) = run_hsm_for_suite(
         &module,
         Ciphersuite::MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519,
+        SignatureScheme::ED25519,
     );
     assert_real_group_roundtrip(
         &state,
         b"alice contract test message",
         b"bob contract test reply",
         "X-Wing (ML-KEM-768 + X25519 + ChaCha20Poly1305)",
+    );
+}
+
+/// `MLS_128_DHKEMP256_AES128GCM_SHA256_P256` — declared in
+/// `supported_ciphersuites()` and accepted by `supports()`
+/// (`src/crypto.rs`) since before this test existed, but until now it had
+/// no real end-to-end coverage anywhere in this crate: every other
+/// declared suite (the default in [`run_hsm`], suite 3 above, and X-Wing
+/// above) has its own full add-member/Commit/Application-message run
+/// through the real HSM-backed provider, and this one did not — only a
+/// list-membership check in `tests/integration.rs::supported_ciphersuites_v0_1`.
+///
+/// Unlike the other three suites, this one's `HpkeConfig`
+/// (`DhKemP256`/`HkdfSha256`/`AesGcm128`) has no arm in `hpke::select()`
+/// (see `hpke.rs`'s `hsm_routing_boundary_tests::p256_suite_hpke_is_software_only`),
+/// so this test's own Welcome message (the KeyPackage's HPKE-encrypted
+/// `GroupSecrets`, RFC 9420 §5.4) and the TreeKEM commit path are sealed
+/// and opened entirely by `crypto.rs`'s in-process `hpke-rs` fallback, not
+/// the token — this test proves the ciphersuite's real, wired-up
+/// ECDSA-P256 signing (ECDSA-P256 keygen/sign/verify in
+/// `backend.rs::CryptokiBackend`, exercised nowhere else at the MLS-group
+/// level) and the HSM-backed AES-128-GCM record layer, while the HPKE
+/// portion of the same run is software-only — both facts true
+/// simultaneously, which is exactly the split
+/// `docs/gap-analysis-kmip-cacp-pkcs11-coverage-2026-08-30.md`'s "Phase
+/// 2.1" note describes.
+#[test]
+fn mls_group_roundtrip_p256_suite() {
+    let module = match resolve_module() {
+        Some(m) => m,
+        None => {
+            eprintln!("skip: no PKCS#11 module found — set PKCS11_MODULE or build the C++ engine");
+            return;
+        }
+    };
+    let (state, _env) = run_hsm_for_suite(
+        &module,
+        Ciphersuite::MLS_128_DHKEMP256_AES128GCM_SHA256_P256,
+        SignatureScheme::ECDSA_SECP256R1_SHA256,
+    );
+    assert_real_group_roundtrip(
+        &state,
+        b"alice contract test message",
+        b"bob contract test reply",
+        "P-256 (DHKemP256 + AES128GCM + ECDSA-P256, HPKE software-only)",
     );
 }

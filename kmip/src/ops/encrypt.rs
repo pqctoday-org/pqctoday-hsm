@@ -1073,6 +1073,135 @@ mod k6_no_silent_substitution_tests {
         assert_eq!(err.result_reason(), ResultReason::InvalidMessage);
     }
 
+    /// KMIP/CACP coverage gap-analysis item 2.2 (2026-08-30), closed per
+    /// CHANGELOG 0.27.0: `aes_mechanism_for()` now maps
+    /// `BlockCipherMode=CCM` (8) to `CKM_AES_CCM`. That change had engine-
+    /// level ACVP evidence but no KMIP-op-level test proving `Encrypt`/
+    /// `Decrypt` actually round-trip through this crate's own dispatch —
+    /// this closes that gap, with real AAD and a tamper-detection check
+    /// (CCM is AEAD; a flipped ciphertext byte MUST fail to decrypt).
+    ///
+    /// Also documents a real, smaller gap found while writing this test,
+    /// not fixed here (flagged, not silently patched): `is_aead` (used to
+    /// split the engine's `ciphertext || tag` into KMIP's separate
+    /// `Ciphertext`/`AuthenticatedEncryptionTag` fields per §6.1.21) only
+    /// matches `CKM_AES_GCM`/`CKM_CHACHA20_POLY1305` — `CKM_AES_CCM` is
+    /// also AEAD but isn't in that match, so `authenticated_encryption_tag`
+    /// comes back `None` and the tag stays embedded in `ciphertext`. The
+    /// round trip below still works (both `encrypt`/`decrypt` treat the
+    /// blob as opaque and symmetric), so this is a protocol-conformance
+    /// gap — a real KMIP client reading `AuthenticatedEncryptionTag` per
+    /// spec for an AEAD mechanism would find it empty for CCM — not a
+    /// functional break. Left as a finding: fixing `is_aead` is a
+    /// one-line change but alters the wire-visible response shape, which
+    /// deserves its own review rather than a silent piggyback on a test
+    /// addition.
+    #[test]
+    fn aes_ccm_encrypt_decrypt_round_trip() {
+        let d = test_deps();
+        let key: Vec<u8> = (0u8..32).collect();
+        put_aes_with_key(&d, "k", key);
+        let plaintext = b"K6/2.2: CCM is wired through aes_mechanism_for".to_vec();
+        let nonce = vec![0x5Au8; 12]; // CCM nonce, valid range is 7..=13 bytes
+        let aad = b"ccm-aad".to_vec();
+        let enc = encrypt(
+            &d,
+            EncryptRequest {
+                uid: "k".into(),
+                data: plaintext.clone(),
+                iv: Some(nonce.clone()),
+                aad: Some(aad.clone()),
+                cryptographic_parameters: Some(cp_mode(8)),
+                ..Default::default()
+            },
+            &crate::server::auth::AuthContext::open(),
+            "c-enc",
+        )
+        .unwrap();
+        assert_ne!(enc.ciphertext, plaintext);
+        assert!(
+            enc.authenticated_encryption_tag.is_none(),
+            "documents the is_aead gap above: CCM's tag stays embedded in \
+             `ciphertext` rather than riding in its own field like GCM's does"
+        );
+        let dec = crate::ops::decrypt::decrypt(
+            &d,
+            crate::kmip30::DecryptRequest {
+                uid: "k".into(),
+                data: enc.ciphertext.clone(),
+                iv: Some(nonce.clone()),
+                aad: Some(aad.clone()),
+                cryptographic_parameters: Some(cp_mode(8)),
+            },
+            &crate::server::auth::AuthContext::open(),
+            "c-dec",
+        )
+        .unwrap();
+        assert_eq!(dec.data, plaintext, "CCM Encrypt/Decrypt must round-trip");
+
+        // AEAD authentication must be real: a tampered ciphertext byte has
+        // to fail decryption, not silently return garbage plaintext.
+        let mut tampered = enc.ciphertext.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        let tamper_result = crate::ops::decrypt::decrypt(
+            &d,
+            crate::kmip30::DecryptRequest {
+                uid: "k".into(),
+                data: tampered,
+                iv: Some(nonce),
+                aad: Some(aad),
+                cryptographic_parameters: Some(cp_mode(8)),
+            },
+            &crate::server::auth::AuthContext::open(),
+            "c-dec-tamper",
+        );
+        assert!(tamper_result.is_err(), "a tampered CCM ciphertext must not decrypt");
+    }
+
+    /// KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30), closed per
+    /// CHANGELOG 0.27.0: `aes_mechanism_for()` now maps
+    /// `BlockCipherMode=OFB` (5) to `CKM_AES_OFB`. Same shape as the CTR
+    /// test above — OFB is not AEAD, so no tag handling to verify — this
+    /// just closes the missing KMIP-op-level round-trip proof for it.
+    #[test]
+    fn aes_ofb_encrypt_decrypt_round_trip() {
+        let d = test_deps();
+        let key: Vec<u8> = (0u8..32).collect();
+        put_aes_with_key(&d, "k", key);
+        let plaintext = b"K6/2.4: OFB is wired through, not GCM-substituted".to_vec();
+        let iv = vec![0x3Cu8; 16];
+        let enc = encrypt(
+            &d,
+            EncryptRequest {
+                uid: "k".into(),
+                data: plaintext.clone(),
+                iv: Some(iv.clone()),
+                cryptographic_parameters: Some(cp_mode(5)),
+                ..Default::default()
+            },
+            &crate::server::auth::AuthContext::open(),
+            "c-enc",
+        )
+        .unwrap();
+        assert_ne!(enc.ciphertext, plaintext);
+        assert!(enc.authenticated_encryption_tag.is_none(), "OFB is not AEAD");
+        let dec = crate::ops::decrypt::decrypt(
+            &d,
+            crate::kmip30::DecryptRequest {
+                uid: "k".into(),
+                data: enc.ciphertext,
+                iv: Some(iv),
+                cryptographic_parameters: Some(cp_mode(5)),
+                aad: None,
+            },
+            &crate::server::auth::AuthContext::open(),
+            "c-dec",
+        )
+        .unwrap();
+        assert_eq!(dec.data, plaintext);
+    }
+
     /// K6 — RSA Encrypt with PKCS1 v1.5 padding (0x08): the engine has
     /// no raw RSAES-PKCS1-v1_5 primitive, so this fails 0x3e instead of
     /// silently running OAEP.

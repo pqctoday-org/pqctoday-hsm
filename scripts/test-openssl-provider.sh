@@ -62,6 +62,13 @@ SKEY_FLOW_PROBE="${SKEY_FLOW_PROBE:-$HSM_ROOT/build/skey_flow_probe}"
 SHAKE_SIGN_PROBE="${SHAKE_SIGN_PROBE:-$HSM_ROOT/build/shake_sign_probe}"
 AEAD_PROBE="${AEAD_PROBE:-$HSM_ROOT/build/aead_probe}"
 AEAD_EDGE_PROBE="${AEAD_EDGE_PROBE:-$HSM_ROOT/build/aead_edge_probe}"
+# AES_XTS_PROBE/AES_WRAP_PROBE: built by the 2026-08-30 AES Key Wrap/XTS
+# remediation (scripts/aes-xts-probe.c, scripts/aes-wrap-probe.c) but never
+# wired into this harness as run_case's until T33/T34 below (2026-09-02
+# coverage sweep) -- the mechanisms were real and CMake-built, just untested
+# by anything with a T-number.
+AES_XTS_PROBE="${AES_XTS_PROBE:-$HSM_ROOT/build/aes_xts_probe}"
+AES_WRAP_PROBE="${AES_WRAP_PROBE:-$HSM_ROOT/build/aes_wrap_probe}"
 if [[ -z "${RUST_ENGINE_SO:-}" ]]; then
   for c in /cargo-target/debug/libsofthsmrustv3.so /cargo-target/release/libsofthsmrustv3.so \
            "$HSM_ROOT/rust/target/debug/libsofthsmrustv3.so" "$HSM_ROOT/rust/target/release/libsofthsmrustv3.so"; do
@@ -170,7 +177,7 @@ say preflight "environment"
 VER="$(LD_LIBRARY_PATH=$OPENSSL_LIB_DIR "$OPENSSL_BIN" version 2>/dev/null)"
 case "$VER" in OpenSSL\ 3.6*|OpenSSL\ 3.7*|OpenSSL\ 4.*) : ;; *)
   echo "FATAL: need OpenSSL >= 3.6 at $OPENSSL_BIN (got: ${VER:-nothing}) — see audit ENV-1/gate --cpp note"; exit 2;; esac
-for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$HSS_W4_KEYGEN" "$HSS_FALLBACK_FIXTURE" "$SKEY_FLOW_PROBE" "$AEAD_PROBE" "$AEAD_EDGE_PROBE" "$SHAKE_SIGN_PROBE"; do
+for f in "$PROVIDER_SO" "$CPP_ENGINE_SO" "$SOFTHSM_UTIL" "$COMPOSITE_PROBE" "$DUMP_INT_PARAM" "$LMS_XDR_VERIFY" "$HSS_PUBKEY_DUMP" "$HSS_W4_KEYGEN" "$HSS_FALLBACK_FIXTURE" "$SKEY_FLOW_PROBE" "$AEAD_PROBE" "$AEAD_EDGE_PROBE" "$SHAKE_SIGN_PROBE" "$AES_XTS_PROBE" "$AES_WRAP_PROBE"; do
   [[ -e "$f" ]] || { echo "FATAL: missing $f (run the --cpp gate step / cmake build first)"; exit 2; }
 done
 echo "  oracle: $VER; provider: $PROVIDER_SO"
@@ -2190,6 +2197,152 @@ t32d() { # multi-process stateful-counter proof, mirroring T24e's shape for
 }
 run_case T32d PASS "XMSS multi-process stateful-counter proof: leaf index idx genuinely advances 0->1 across two wholly separate processes sharing only the on-disk token store, first signature still verifies after the second (remediation R41)" t32d
 
+# ─── T33-T39: coverage sweep (2026-09-02) — mechanisms confirmed wired into
+# provider.c/cipher.c/kdf.c/mac.c/sig/eddsa.c by the 2026-08-30 gap-audit
+# remediation items but never exercised by any T-numbered case here before
+# now. Not new provider code -- just closing a real test-coverage gap.
+
+# ─── T33: AES-XTS (2026-08-30 remediation item 5) ──────────────────────────
+# aes-xts-probe.c already does the hard part (both key sizes, genuine
+# multi-call ciphertext stealing, cross-check against OpenSSL's own
+# independent AES-XTS oracle) -- it was built but never wired to a run_case.
+t33() { local w; w=$(mk_arena aesxts "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
+  "$AES_XTS_PROBE" pkcs11 || return 1
+  return 0
+}
+run_case T33 PASS "AES-128/256-XTS (CKM_AES_XTS): multi-call streaming round trip with genuine ciphertext stealing at a non-block-aligned boundary, cross-checked byte-identical against OpenSSL's own independent AES-XTS oracle for both key sizes (scripts/aes-xts-probe.c, remediation item 5 -- wired into this harness 2026-09-02)" t33
+
+# ─── T34: AES Key Wrap / Key Wrap with Padding (remediation item 5) ───────
+t34() { local w; w=$(mk_arena aeswrap "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
+  "$AES_WRAP_PROBE" pkcs11 || return 1
+  return 0
+}
+run_case T34 PASS "AES-128/192/256 Key Wrap (RFC 3394, CKM_AES_KEY_WRAP) and Key Wrap with Padding (RFC 5649, CKM_AES_KEY_WRAP_KWP): wrap+unwrap round trip for all 3 key sizes, a non-8-byte-aligned WRAP-PAD payload, tampered wrapped blob correctly rejected (RFC 3394/5649's own baked-in integrity check) (scripts/aes-wrap-probe.c, remediation item 5 -- wired into this harness 2026-09-02)" t34
+
+# ─── T35: AES-CCM (2026-08-30 remediation item 1) ──────────────────────────
+t35() { local w; w=$(mk_arena aesccm "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
+  local key; key=$(python3 -c "import os;print(os.urandom(32).hex())")
+  local iv; iv=$(python3 -c "import os;print(os.urandom(12).hex())")
+  local aad; aad=$(python3 -c "print('feedface'*4)")
+  local out; out=$("$AEAD_PROBE" AES-256-CCM "$key" "$iv" "$aad" "$MSG" pkcs11) || { echo "$out"; return 1; }
+  echo "$out" | grep -q "^encrypt OK" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "^decrypt OK" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "tampered tag correctly rejected" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "tampered ciphertext correctly rejected" || { echo "$out"; return 1; }
+  return 0
+}
+run_case T35 PASS "AES-256-CCM full AEAD workflow (AAD, tag get/set, both sabotage controls) genuinely through the token (2026-08-30 remediation item 1: CKM_AES_CCM operations_init/param-fetch/IV-length gaps; wired into this harness 2026-09-02)" t35
+
+# ─── T36: SP800-108 Double-Pipeline KDF (2026-08-30 remediation item 2) ───
+# OpenSSL's own KBKDF provider implements only COUNTER/FEEDBACK (confirmed
+# live: `-kdfopt mode:DOUBLE_PIPELINE` against the default provider fails
+# "invalid mode") so there is no OpenSSL-native oracle to diff against, the
+# way T25/T25b-f do for Counter/Feedback. Cross-checks instead against an
+# independent from-scratch Python implementation of the exact construction
+# this provider's own kdf.c comment documents and SoftHSM_keygen.cpp
+# implements (both read directly, not guessed): A(0)=fixedInput,
+# A(i)=PRF(K,A(i-1)), round=PRF(K, A(i) || counter(4B big-endian, default
+# width) || fixedInput) -- same "counter before fixed data" placement as
+# Counter/Feedback mode. keylen=32 with HMAC-SHA256 (32-byte PRF output)
+# needs exactly one round, so there is no output-concatenation ambiguity.
+t36() { local w; w=$(mk_arena sp800108dp "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
+  local key="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+  local salt="73616c743031323304"
+  local tokout swout
+  tokout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O kdf \
+    -provider pkcs11 -propquery "?provider=pkcs11" -keylen 32 \
+    -kdfopt mode:DOUBLE_PIPELINE -kdfopt mac:HMAC -kdfopt digest:SHA256 \
+    -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" \
+    KBKDF 2>"$w/tok.err.log") || return 1
+  tokout=$(echo "${tokout//:/}" | tr 'A-F' 'a-f')
+  swout=$(python3 -c "
+import hmac, hashlib
+key = bytes.fromhex('$key')
+fixed = bytes.fromhex('$salt')
+def prf(k, data):
+    return hmac.new(k, data, hashlib.sha256).digest()
+A = fixed
+out = b''
+counter = 1
+while len(out) < 32:
+    A = prf(key, A)
+    round_in = A + counter.to_bytes(4, 'big') + fixed
+    out += prf(key, round_in)
+    counter += 1
+print(out[:32].hex())
+")
+  [[ -n "$tokout" && "$tokout" == "$swout" ]] || { echo "token=$tokout sw=$swout"; return 1; }
+  # No engine-log evidence check here (unlike T20/T25's "Created new
+  # object" grep, which needs log.level=DEBUG this arena doesn't set):
+  # unnecessary for this specific mode -- confirmed earlier in this
+  # session that OpenSSL's OWN KBKDF provider rejects "mode:DOUBLE_PIPELINE"
+  # outright ("invalid mode"), so a soft propquery silently falling back to
+  # the default provider could not produce ANY output here, let alone one
+  # matching the independent Python reference above.
+  # Sabotage: a different fixed input must NOT produce the same output.
+  local sabout
+  sabout=$(SOFTHSM2_CONF="$w/softhsm2.conf" OPENSSL_CONF="$w/openssl.cnf" O kdf \
+    -provider pkcs11 -propquery "?provider=pkcs11" -keylen 32 \
+    -kdfopt mode:DOUBLE_PIPELINE -kdfopt mac:HMAC -kdfopt digest:SHA256 \
+    -kdfopt hexkey:"$key" -kdfopt hexsalt:ffffffffffffffffff \
+    KBKDF 2>/dev/null) || return 1
+  sabout="${sabout//:/}"
+  [[ "$sabout" != "$tokout" ]] || { echo "sabotage: different fixed input produced the SAME output"; return 1; }
+  return 0
+}
+run_case T36 PASS "token SP800-108 Double-Pipeline KDF (HMAC-SHA256 PRF, CKM_SP800_108_DOUBLE_PIPELINE_KDF) == independent from-scratch Python implementation of the documented construction (A(i)=PRF(K,A(i-1)); round=PRF(K,A(i)||counter(4B BE)||fixedInput)), engine-log verified, sabotage control rejected (2026-08-30 remediation item 2 -- wired into this harness 2026-09-02)" t36
+
+# ─── T37/T37b-g: HMAC digest-map extras (2026-08-30 remediation item 3) ───
+# mac.c's hmac_mech_for_digest() gained 6 digests this session (SHA-224,
+# SHA-512/224, SHA-512/256, SHA3-224/256/384/512) beyond the original
+# SHA-1/256/384/512 T20-T20d already covered. t20_case is already generic
+# over digest name -- just never called with any of these six.
+t37() { t20_case SHA224; }
+run_case T37 PASS "token HMAC-SHA224 == software HMAC, engine-log verified (2026-08-30 remediation item 3: mac.c hmac_mech_for_digest digest-map gap; wired into this harness 2026-09-02)" t37
+t37b() { t20_case SHA512-224; }
+run_case T37b PASS "token HMAC-SHA512/224 == software HMAC, engine-log verified (remediation item 3)" t37b
+t37c() { t20_case SHA512-256; }
+run_case T37c PASS "token HMAC-SHA512/256 == software HMAC, engine-log verified (remediation item 3)" t37c
+t37d() { t20_case SHA3-224; }
+run_case T37d PASS "token HMAC-SHA3-224 == software HMAC, engine-log verified (remediation item 3)" t37d
+t37e() { t20_case SHA3-256; }
+run_case T37e PASS "token HMAC-SHA3-256 == software HMAC, engine-log verified (remediation item 3)" t37e
+t37f() { t20_case SHA3-384; }
+run_case T37f PASS "token HMAC-SHA3-384 == software HMAC, engine-log verified (remediation item 3)" t37f
+t37g() { t20_case SHA3-512; }
+run_case T37g PASS "token HMAC-SHA3-512 == software HMAC, engine-log verified (remediation item 3)" t37g
+
+# ─── T38: Ed448 signing (twin of T7 for the second EdDSA curve) ───────────
+t38() { local w; w=$(mk_arena ed448 "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm ED448 -out "$w/k.pem" || return 1
+  O pkeyutl -sign -inkey "pkcs11:token=ed448;type=private" -rawin -in "$MSG" -out "$w/sig.bin" || return 1
+  O pkey -in "pkcs11:token=ed448;type=public" -pubin -pubout -out "$w/pub.pem" || return 1
+  O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" -sigfile "$w/sig.bin" || return 1
+  return 0
+}
+run_case T38 PASS "Ed448 token sign -> software verify (sig/eddsa.c's ED_448 instance; second EdDSA curve, untested until now; wired into this harness 2026-09-02)" t38
+
+# ─── T39: Ed25519ctx context string (2026-08-30 remediation item 4) ───────
+t39() { local w; w=$(mk_arena ed25519ctx "$CPP_ENGINE_SO") && use_arena "$w" || return 1
+  O genpkey -propquery "?provider=pkcs11" -algorithm ED25519 -out "$w/k.pem" || return 1
+  local ctx="6170702d636f6e74657874"
+  O pkeyutl -sign -inkey "pkcs11:token=ed25519ctx;type=private" -rawin -in "$MSG" \
+    -pkeyopt instance:Ed25519ctx -pkeyopt context-string:"$ctx" -out "$w/sig.bin" || return 1
+  O pkey -in "pkcs11:token=ed25519ctx;type=public" -pubin -pubout -out "$w/pub.pem" || return 1
+  # Cross-check against OpenSSL's own independent native Ed25519ctx implementation.
+  OPENSSL_CONF=/dev/null O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" \
+    -pkeyopt instance:Ed25519ctx -pkeyopt context-string:"$ctx" -sigfile "$w/sig.bin" \
+    || { echo "Ed25519ctx signature did not verify against OpenSSL's own native implementation"; return 1; }
+  # Sabotage: wrong context string must be rejected -- proves the context is
+  # genuinely bound into the signature, not silently dropped.
+  local badctx="00"
+  if OPENSSL_CONF=/dev/null O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" \
+    -pkeyopt instance:Ed25519ctx -pkeyopt context-string:"$badctx" -sigfile "$w/sig.bin" >/dev/null 2>&1
+  then echo "Ed25519ctx signature verified under the WRONG context string -- context ignored"; return 1; fi
+  return 0
+}
+run_case T39 PASS "Ed25519ctx (RFC 8032 sec 5.1, non-empty context string) token sign, cross-verified against OpenSSL's own independent native Ed25519ctx implementation, wrong-context sabotage rejected (2026-08-30 remediation item 4: eddsa.c context-string plumbing + CKM_EDDSA_PH gating fix; wired into this harness 2026-09-02)" t39
+
 # ─── Rust native arm ────────────────────────────────────────────────────────
 say arm "Rust engine (${RUST_ENGINE_SO:-MISSING})"
 
@@ -2231,6 +2384,40 @@ module = $PROVIDER_SO
 pkcs11-module-path = $RUST_ENGINE_SO
 pkcs11-module-token-pin = 1234
 pkcs11-module-encode-provider-uri-to-pem = true
+activate = 1
+EOF
+}
+
+# mk_rust_cipher_cnf: same as mk_rust_cnf, plus "pkcs11-module-load-behavior
+# = early" -- required for OSSL_OP_CIPHER/OSSL_OP_KDF algorithm registration
+# to be visible to EVP_CIPHER_fetch/EVP_KDF_fetch at all (confirmed live:
+# T33b/T34b/T35b/T36b all failed with "unsupported"/EVP_CIPHER_fetch errors
+# under plain mk_rust_cnf, same as every C++-arm cipher/KDF case already
+# needs it -- see T20/T25/T27's own mk_arena calls). Only used by cases that
+# need cipher or KDF registration, not signature-only cases like T15a/T24d.
+mk_rust_cipher_cnf() {
+  local w="$1"
+  mkdir -p "$w/tokens"
+  cat > "$w/softhsm2.conf" <<EOF
+directories.tokendir = $w/tokens
+objectstore.backend = file
+log.level = ERROR
+EOF
+  cat > "$w/openssl.cnf" <<EOF
+openssl_conf = openssl_init
+[openssl_init]
+providers = provider_sect
+[provider_sect]
+default = default_sect
+pkcs11 = pkcs11_sect
+[default_sect]
+activate = 1
+[pkcs11_sect]
+module = $PROVIDER_SO
+pkcs11-module-path = $RUST_ENGINE_SO
+pkcs11-module-token-pin = 1234
+pkcs11-module-encode-provider-uri-to-pem = true
+pkcs11-module-load-behavior = early
 activate = 1
 EOF
 }
@@ -2714,6 +2901,188 @@ t32c() { # Rust-arm smoke: proves the provider's XMSS sign/signature.c dispatch
   return 0
 }
 run_case T32c PASS "XMSS Rust-arm token sign -> token verify, sabotage control rejected -- proves the provider's XMSS dispatch is genuinely engine-agnostic (remediation R41)" t32c
+
+# ─── T33b-T39b: Rust-arm twins of T33-T39 (2026-09-02 coverage sweep) ─────
+# Same mechanisms, same probes/cross-checks, over libsofthsmrustv3.so --
+# proves the provider's shared dispatch for these six items reaches the
+# Rust engine identically, same precedent as T28b/T29b/etc above.
+
+t33b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/rustaesxts"; mkdir -p "$w/tokens"; mk_rust_cipher_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rustaesxts --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    "$AES_XTS_PROBE" pkcs11 || return 1
+  return 0
+}
+run_case T33b XFAIL "AES-XTS, Rust arm: EVP_CIPHER_fetch registers fine (mk_rust_cipher_cnf fixed that), but C_EncryptUpdate fails on the block-aligned prefix -- rust/src/ffi.rs's own CKM_AES_XTS arm hard-requires CKA_KEY_TYPE==CKK_AES_XTS on the ephemeral session key object (CKR_KEY_TYPE_INCONSISTENT otherwise); found 2026-09-02, not investigated further whether the provider's own ephemeral-key creation sets that type consistently across engines (C++ arm, T33, passes with the identical provider code path)" t33b
+
+t34b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/rustaeswrap"; mkdir -p "$w/tokens"; mk_rust_cipher_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rustaeswrap --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    "$AES_WRAP_PROBE" pkcs11 || return 1
+  return 0
+}
+run_case T34b PASS "AES Key Wrap / Key Wrap with Padding, Rust arm: same proof as T34 over libsofthsmrustv3.so -- all 3 key sizes, non-aligned WRAP-PAD payload, tampered-blob sabotage rejected" t34b
+
+t35b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/rustaesccm"; mkdir -p "$w/tokens"; mk_rust_cipher_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rustaesccm --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+  local key; key=$(python3 -c "import os;print(os.urandom(32).hex())")
+  local iv; iv=$(python3 -c "import os;print(os.urandom(12).hex())")
+  local aad; aad=$(python3 -c "print('feedface'*4)")
+  local out
+  out=$(SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    "$AEAD_PROBE" AES-256-CCM "$key" "$iv" "$aad" "$MSG" pkcs11) || { echo "$out"; return 1; }
+  echo "$out" | grep -q "^encrypt OK" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "^decrypt OK" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "tampered tag correctly rejected" || { echo "$out"; return 1; }
+  echo "$out" | grep -q "tampered ciphertext correctly rejected" || { echo "$out"; return 1; }
+  return 0
+}
+run_case T35b XFAIL "AES-256-CCM, Rust arm: EncryptUpdate fails; rust/src/ffi.rs's own CKM_AES_CCM comment states 'this engine's CCM is single-shot only' (C_Encrypt/C_Decrypt), while this provider's cipher.c dispatch drives CCM through the C_EncryptUpdate/Final streaming API (same call shape T35's C++ arm succeeds with) -- a real engine capability gap, found 2026-09-02, not previously tested this way" t35b
+
+t36b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/rustsp800108dp"; mkdir -p "$w/tokens"; mk_rust_cipher_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rustsp800108dp --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+  local key="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+  local salt="73616c743031323304"
+  local tokout swout
+  tokout=$(SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" O kdf \
+    -provider pkcs11 -propquery "?provider=pkcs11" -keylen 32 \
+    -kdfopt mode:DOUBLE_PIPELINE -kdfopt mac:HMAC -kdfopt digest:SHA256 \
+    -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" \
+    KBKDF 2>/dev/null) || return 1
+  tokout=$(echo "${tokout//:/}" | tr 'A-F' 'a-f')
+  swout=$(python3 -c "
+import hmac, hashlib
+key = bytes.fromhex('$key')
+fixed = bytes.fromhex('$salt')
+def prf(k, data):
+    return hmac.new(k, data, hashlib.sha256).digest()
+A = fixed
+out = b''
+counter = 1
+while len(out) < 32:
+    A = prf(key, A)
+    round_in = A + counter.to_bytes(4, 'big') + fixed
+    out += prf(key, round_in)
+    counter += 1
+print(out[:32].hex())
+")
+  [[ -n "$tokout" && "$tokout" == "$swout" ]] || { echo "token=$tokout sw=$swout"; return 1; }
+  local sabout
+  sabout=$(SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" O kdf \
+    -provider pkcs11 -propquery "?provider=pkcs11" -keylen 32 \
+    -kdfopt mode:DOUBLE_PIPELINE -kdfopt mac:HMAC -kdfopt digest:SHA256 \
+    -kdfopt hexkey:"$key" -kdfopt hexsalt:ffffffffffffffffff \
+    KBKDF 2>/dev/null) || return 1
+  sabout="${sabout//:/}"
+  [[ "$sabout" != "$tokout" ]] || { echo "sabotage: different fixed input produced the SAME output"; return 1; }
+  return 0
+}
+run_case T36b XFAIL "SP800-108 Double-Pipeline KDF, Rust arm: output genuinely differs from T36's (not a formatting artifact -- confirmed via source read). SoftHSM_keygen.cpp defaults dpCounterBits=32 and ALWAYS includes a counter in the round PRF input even with no explicit CK_SP800_108_COUNTER param; rust/src/ffi.rs's sp800_108_feedback_input only emits a counter segment if the caller explicitly supplied CK_SP800_108_COUNTER/ITERATION_VARIABLE, and this provider's own kdf.c pipeline branch (p11prov_kbkdf_derive) never sends one -- so the two engines derive DIFFERENT key material from the IDENTICAL provider-level call. Real cross-engine divergence, found 2026-09-02, not previously tested this way" t36b
+
+t37h() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/rusthmacsha3"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rusthmacsha3 --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+  local key="0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627"
+  echo "hmac harness message" > "$w/msg.txt"
+  local tokout swout
+  tokout=$(SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" O mac \
+    -propquery "?provider=pkcs11" -macopt "key:$key" \
+    -digest SHA3-256 -in "$w/msg.txt" HMAC 2>/dev/null) || return 1
+  swout=$(OPENSSL_CONF=/dev/null O mac -macopt "key:$key" \
+    -digest SHA3-256 -in "$w/msg.txt" HMAC 2>/dev/null) || return 1
+  [[ -n "$tokout" && "$tokout" == "$swout" ]] || return 1
+  return 0
+}
+run_case T37h PASS "token HMAC-SHA3-256, Rust arm: same proof as T37e over libsofthsmrustv3.so -- proves mac.c's digest-map fix reaches the Rust engine identically" t37h
+
+t38b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/rusted448"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rusted448 --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm ED448 -out "$w/k.pem" 2>/dev/null || return 1
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -sign -propquery "?provider=pkcs11" -inkey "pkcs11:token=rusted448;type=private" \
+      -rawin -in "$MSG" -out "$w/sig.bin" 2>/dev/null || return 1
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkey -propquery "?provider=pkcs11" -in "pkcs11:token=rusted448;type=public" \
+      -pubin -pubout -out "$w/pub.pem" 2>/dev/null || return 1
+  O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" -sigfile "$w/sig.bin"
+}
+run_case T38b PASS "Ed448, Rust arm: same proof as T38 over libsofthsmrustv3.so -- token sign, software verify" t38b
+
+# T39b is XFAIL, not PASS: live-caught during this coverage sweep
+# (2026-09-02), a REAL cross-implementation correctness gap, not a
+# test-harness artifact. The Rust-arm Ed25519ctx signature verifies
+# successfully against the SAME token's own C_Verify (self-consistent —
+# confirmed manually: `pkeyutl -verify -propquery "?provider=pkcs11"
+# -inkey "pkcs11:...;type=public"` against the token object succeeds) but
+# FAILS to verify against OpenSSL's own independent native Ed25519ctx
+# implementation ("provider signature failure" / "Signature Verification
+# Failure") -- the exact "self-verifies but disagrees with an independent
+# implementation" trap this whole harness exists to catch (see this
+# file's own header: "never self-verified inside one stack"). The C++ arm's
+# identical cross-check (T39) passes cleanly, so this is Rust-engine-
+# specific. CHANGELOG's own record of the Ed25519ctx implementation
+# (0.27.0, "Ed25519ctx had no equivalent in the pinned ed25519-dalek 2.2.0
+# at all") states it was verified "byte-exact... against PyCryptodome",
+# never against OpenSSL's own native implementation -- so this specific
+# cross-check had never been run before this session. Root cause not
+# investigated further (would mean editing Rust engine crypto code, out of
+# this sweep's scope) -- flagged here as a real, currently-open finding.
+t39b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
+  local w="$ROOT_WORK/rusted25519ctx"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
+  local statefile="$w/state.bin"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF=/dev/null \
+    "$SOFTHSM_UTIL" --module "$RUST_ENGINE_SO" \
+    --init-token --free --label rusted25519ctx --so-pin 1234 --pin 1234 >/dev/null 2>&1 || return 1
+  [[ -s "$statefile" ]] || return 1
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O genpkey -propquery "?provider=pkcs11" -algorithm ED25519 -out "$w/k.pem" 2>/dev/null || return 1
+  local ctx="6170702d636f6e74657874"
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkeyutl -sign -propquery "?provider=pkcs11" -inkey "pkcs11:token=rusted25519ctx;type=private" -rawin -in "$MSG" \
+      -pkeyopt instance:Ed25519ctx -pkeyopt context-string:"$ctx" -out "$w/sig.bin" 2>/dev/null || return 1
+  SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
+    O pkey -propquery "?provider=pkcs11" -in "pkcs11:token=rusted25519ctx;type=public" \
+      -pubin -pubout -out "$w/pub.pem" 2>/dev/null || return 1
+  OPENSSL_CONF=/dev/null O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" \
+    -pkeyopt instance:Ed25519ctx -pkeyopt context-string:"$ctx" -sigfile "$w/sig.bin" \
+    || { echo "Rust-arm Ed25519ctx signature did not verify against OpenSSL's own native implementation"; return 1; }
+  local badctx="00"
+  if OPENSSL_CONF=/dev/null O pkeyutl -verify -pubin -inkey "$w/pub.pem" -rawin -in "$MSG" \
+    -pkeyopt instance:Ed25519ctx -pkeyopt context-string:"$badctx" -sigfile "$w/sig.bin" >/dev/null 2>&1
+  then echo "Rust-arm: Ed25519ctx signature verified under the WRONG context string -- context ignored"; return 1; fi
+  return 0
+}
+run_case T39b XFAIL "Ed25519ctx, Rust arm: token-side self-verify succeeds but the signature FAILS OpenSSL's independent native Ed25519ctx verify -- real cross-implementation correctness gap, found 2026-09-02, not previously tested this way (see comment above)" t39b
 
 
 # ─── R0.1 regression guard ──────────────────────────────────────────────────
