@@ -52,6 +52,90 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   neither-set case rather than a silent fallthrough. The C++ engine's
   equivalent path was already correct — this was Rust-only.
 
+- **BREAKING (C++ engine): `CKM_SP800_108_DOUBLE_PIPELINE_KDF` no longer
+  silently mixes a counter into the round PRF input when the caller
+  didn't ask for one.** `SoftHSM_keygen.cpp`'s Double-Pipeline handler
+  (inside `SoftHSM::C_DeriveKey`, the `CKM_SP800_108_DOUBLE_PIPELINE_KDF`
+  arm) declared `int dpCounterBits = 32;` and used it unconditionally in every
+  round's PRF input (`A(i) || counter(dpCounterBits bits) ||
+  fixedInput`), regardless of whether the caller's `CK_PRF_DATA_PARAM`
+  array contained a `CK_SP800_108_COUNTER` entry at all. Per the PKCS#11
+  v3.3 draft's own SP 800-108 KDF spec
+  (`docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/working/doc/spec/sp800-108_key_derivation.md`,
+  "Double Pipeline Mode KDF" data-field table): "`CK_SP800_108_COUNTER` —
+  This data field type is optional... If specified, only one instance of
+  this type may be specified" — the ONLY mandatory field for this mode is
+  `CK_SP800_108_ITERATION_VARIABLE` (the A(i) chaining value, NIST SP
+  800-108 §5.3). That table's wording is byte-for-byte identical to
+  Feedback Mode's own `CK_SP800_108_COUNTER` row (same file, "Feedback
+  Mode KDF" section), and this engine's `CKM_SP800_108_FEEDBACK_KDF`
+  handler treats an absent counter correctly there — Double-Pipeline was
+  the outlier, not a deliberate design choice. The Rust engine
+  (`rust/src/ffi.rs`) was already spec-correct: `sp800_108_run_double_pipeline`
+  reuses `sp800_108_feedback_input`, which only emits a counter segment
+  when the caller's data-param array actually contains one — so identical
+  inputs produced genuinely different derived key material on the two
+  engines (caught by this session's `T36`/`T36b` coverage-sweep cases in
+  `scripts/test-openssl-provider.sh`, added 2026-09-02).
+  **Fix:** a new `dpCounterRequested` boolean tracks whether the caller
+  actually supplied `CK_SP800_108_COUNTER`; the round loop now mixes in
+  the counter bytes only when it's `true`. `dpCounterBits` keeps its
+  original, narrower job — the *width* to use once a counter is known to
+  be wanted — and is never read as an implicit "a counter was requested"
+  signal, so the pre-existing with-explicit-counter code path (width
+  parsing, byte order) is untouched.
+  **Compatibility: this is a breaking fix, deliberately with no
+  transitional flag.** Anyone who called `CKM_SP800_108_DOUBLE_PIPELINE_KDF`
+  on the C++ engine with NO `CK_SP800_108_COUNTER` in their
+  `CK_PRF_DATA_PARAM` array will get different derived key material after
+  this fix (now correctly counter-free, matching both the spec and the
+  Rust engine); any such existing derived keys must be re-derived. Calls
+  that DID supply an explicit `CK_SP800_108_COUNTER` are unaffected —
+  same width parsing, same byte placement, verified byte-identical to the
+  documented construction with an independent reference (below).
+  **Verification (native, no Docker):** built this worktree's own CMake
+  tree (`OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)`, `-DBUILD_TESTS=ON`)
+  and ran the full `p11_v32_compliance` ctest suite — 0 regressions,
+  including the Counter Mode and Feedback Mode KDF checks and their KCV
+  oracle cross-checks (`SP800_108_Counter_*`, `SP800_108_Feedback_*`, all
+  PASS). Wrote a standalone probe (`scripts/dp-kdf-counter-probe.cpp`)
+  that talks directly to the C++ engine's PKCS#11 API (no OpenSSL
+  provider — Apple's linker doesn't support the `-l:exact-filename` trick
+  `composite_sig_probe` needs) and derives both a no-counter and an
+  explicit-counter key from a fixed, known 32-byte base key. Built an
+  independent, from-scratch Python implementation of NIST SP 800-108
+  §5.3 directly from the spec text (not from either engine's source):
+  the fixed C++ engine's output matched byte-for-byte for BOTH the
+  no-counter case (`bd6b1f88af8814a4c0148e9de138a6a521fcdc5c034e154c4edfc7d61652ffb0208520ac29e082cc4b16747870a97a16`)
+  and the explicit-counter case
+  (`6eac2bf4afb8861530ebf2bb1722b8757ec5cdbbf89c317a05557cbbdcc51a51e2054bb0c97d0daaf1baa36daae699d3`).
+  Added a matching `#[test]` to `rust/src/ffi.rs`
+  (`sp800_108_double_pipeline_no_counter_matches_cpp_and_reference`,
+  under `cargo test`) that calls the Rust engine's own
+  `sp800_108_double_pipeline_kbkdf` directly with the identical key/fixed
+  input and asserts the same two hex strings — genuine three-way parity
+  (independent Python reference, fixed C++ engine, Rust engine) for the
+  no-counter case, and no change for the explicit-counter case. Updated
+  `scripts/test-openssl-provider.sh`'s `T36`/`T36b` Python oracles (which
+  used to hard-code the counter, matching the old bug) to the same
+  counter-free construction, and flipped `T36b` from `XFAIL` to `PASS`;
+  running that harness end-to-end against a real `.so` build is a
+  separate, later step (this fix's own verification above is fully
+  native and Docker-free). **Also checked, found already correct and
+  left untouched:** `CKM_SP800_108_COUNTER_KDF` (Counter Mode) — its
+  counter is mandatory per spec, so a default there is legitimate, not a
+  bug — and `CKM_SP800_108_FEEDBACK_KDF`, confirmed structurally
+  consistent with the fixed Double-Pipeline handler (see above). Separately
+  noted, NOT fixed here (out of this fix's scope): C++'s Feedback Mode
+  delegates to OpenSSL's own `KBKDF` provider (`mode=FEEDBACK`), whose
+  documented parameters (`EVP_KDF-KB(7ssl)`) offer no way to omit the
+  counter at all — only `"r"` (width, default 32 if unset) — so a
+  caller-omitted `CK_SP800_108_COUNTER` may *still* get a counter mixed
+  in on the Feedback Mode path, for a structurally different reason (an
+  OpenSSL provider limitation, not a hand-rolled default like
+  Double-Pipeline's). Flagged for a follow-up audit, not addressed by
+  this change.
+
 ## [0.27.0] — 2026-08-31
 
 **Consolidated release: closes the WS-0/WS-8 PKCS#11 v3.2 coverage
