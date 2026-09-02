@@ -1,6 +1,6 @@
 # softhsmrustv3 — Rust WASM Engine
 
-**Updated:** 2026-03-08 (Phase 2 — full classical + PQC algorithm parity)
+**Updated:** 2026-09-01 (adds `CKM_HPKE`; fixes stale function-count, crate-name, and Known Limitations claims)
 **Package:** `softhsmrustv3` (Rust crate, `cdylib` → `softhsmrustv3_bg.wasm`)
 **Companion:** [softhsmv3devguide.md](softhsmv3devguide.md) (C++ engine), [gap-analysis-pkcs11-v3.2.md](gap-analysis-pkcs11-v3.2.md) (compliance)
 
@@ -33,8 +33,8 @@ ecosystem. No OpenSSL, no system libraries, no native bindings.
 | Crate | Version | Algorithms |
 |---|---|---|
 | `ml-kem` | 0.2.3 | ML-KEM-512, ML-KEM-768, ML-KEM-1024 (FIPS 203) |
-| `ml-dsa` | 0.1.0-rc.7 (pkcs8) | ML-DSA-44, ML-DSA-65, ML-DSA-87 (FIPS 204) |
-| `slh-dsa` | 0.2.0-rc.4 | All 12 SLH-DSA parameter sets (FIPS 205) |
+| `fips204` (patched fork, `fips204-patched/`) | 0.4.6 | ML-DSA-44, ML-DSA-65, ML-DSA-87 (FIPS 204), incl. HashML-DSA pre-hash `Ph` variants — corrected 2026-09-01; this table previously named the unrelated, no-longer-used `ml-dsa` RustCrypto crate |
+| `fips205` (patched fork, `fips205-patched/`) | 0.4.1 | All 12 SLH-DSA parameter sets (FIPS 205), incl. HashSLH-DSA pre-hash `Ph` variants — corrected 2026-09-01; this table previously named the unrelated, no-longer-used `slh-dsa` RustCrypto crate |
 | `rsa` | 0.9 (sha2) | RSA-2048, RSA-3072, RSA-4096 (PKCS#1 v2.2) |
 | `p256` | 0.13 (ecdsa, ecdh) | ECDSA P-256, ECDH P-256 |
 | `p384` | 0.13 (ecdsa, ecdh) | ECDSA P-384, ECDH P-384 |
@@ -78,10 +78,13 @@ and `pqc-timeline-app/src/wasm/softhsmrustv3.{js,d.ts}`.
 
 ## PKCS#11 Surface — Implemented Functions
 
-The Rust WASM binary exports 102 `_C_*` functions via `wasm-bindgen` (count
-corrected 2026-08-13 — this document said "45" long after the surface grew),
-and `rust/src/ck_abi.rs` additionally provides the native C ABI
-(`CK_FUNCTION_LIST`-shaped, 104 `C_*` functions) for non-wasm consumers. The
+The Rust WASM binary exports 104 `_C_*` functions via `wasm-bindgen` (count
+corrected 2026-09-01 — this document said "45" long after the surface grew,
+then "102" as of a 2026-08-13 correction that itself undercounted by one:
+`_C_GetMechanismList`'s `#[wasm_bindgen]` export lives in `constants.rs`, not
+`ffi.rs`, and was missed by that count), and `rust/src/ck_abi.rs` additionally
+provides the native C ABI (`CK_FUNCTION_LIST`-shaped, 104 `C_*` functions) for
+non-wasm consumers. The
 TypeScript wrapper (`softhsm.ts: getSoftHSMRustModule()`) bridges all PKCS#11
 calls and adds JS-side stubs for functions not yet in the Rust binary.
 
@@ -93,30 +96,30 @@ calls and adds JS-side stubs for functions not yet in the Rust binary.
 | **Session** | `C_OpenSession`, `C_CloseSession`, `C_Login`, `C_Logout`, `C_GetSessionInfo` |
 | **Slot / Token** | `C_GetSlotList`, `C_GetTokenInfo`, `C_GetMechanismList`, `C_GetMechanismInfo`, `C_InitToken`, `C_InitPIN` |
 | **Object** | `C_CreateObject`, `C_DestroyObject`, `C_FindObjectsInit`, `C_FindObjects`, `C_FindObjectsFinal`, `C_GetAttributeValue` |
-| **Key generation** | `C_GenerateKey` (AES-128/256), `C_GenerateKeyPair` (ML-KEM, ML-DSA, SLH-DSA, RSA, ECDSA P-256/P-384/P-521, Ed25519) |
-| **KEM** | `C_EncapsulateKey`, `C_DecapsulateKey` (ML-KEM-512/768/1024) |
-| **Encrypt / Decrypt** | `C_EncryptInit` + `C_Encrypt` (one-shot), `C_DecryptInit` + `C_Decrypt` (one-shot); mechanisms: AES-GCM, AES-CBC, AES-KW, RSA-OAEP |
-| **Sign / Verify** | `C_SignInit` + `C_Sign` (one-shot), `C_VerifyInit` + `C_Verify` (one-shot), `C_SignMessage` (one-shot), `C_VerifyMessage` (one-shot); algorithms: ML-DSA-44/65/87, SLH-DSA (all 12), RSA-PKCS, RSA-PSS, ECDSA P-256/P-384/P-521, Ed25519 |
-| **Message API** | `C_MessageSignInit` + `C_MessageSignFinal` (one-shot envelope), `C_MessageVerifyInit` + `C_MessageVerifyFinal` (one-shot envelope) |
+| **Key generation** | `C_GenerateKey` (AES-128/256), `C_GenerateKeyPair` (ML-KEM, ML-DSA, SLH-DSA, RSA, ECDSA P-256/P-384/P-521, Ed25519, `CKM_HPKE_KEM_KEY_PAIR_GEN` — vendor mechanism, Rust engine only) |
+| **KEM** | `C_EncapsulateKey`, `C_DecapsulateKey` (ML-KEM-512/768/1024; also `CKM_HPKE` — RFC 9180 HPKE, vendor mechanism, Rust engine only) |
+| **Encrypt / Decrypt** | `C_EncryptInit` + `C_Encrypt` (one-shot), `C_DecryptInit` + `C_Decrypt` (one-shot); mechanisms: AES-GCM, AES-CBC, AES-KW, RSA-OAEP; multipart `C_EncryptUpdate`/`C_EncryptFinal`, `C_DecryptUpdate`/`C_DecryptFinal` |
+| **Sign / Verify** | `C_SignInit` + `C_Sign` (one-shot), `C_VerifyInit` + `C_Verify` (one-shot), `C_SignMessage` (one-shot), `C_VerifyMessage` (one-shot); algorithms: ML-DSA-44/65/87, SLH-DSA (all 12), RSA-PKCS, RSA-PSS, ECDSA P-256/P-384/P-521, Ed25519; multipart `C_SignUpdate`/`C_SignFinal`, `C_VerifyUpdate`/`C_VerifyFinal`; pre-bound `C_VerifySignatureInit`/`C_VerifySignature` (+ multipart `C_VerifySignatureUpdate`/`C_VerifySignatureFinal`); recover `C_SignRecoverInit`/`C_SignRecover`, `C_VerifyRecoverInit`/`C_VerifyRecover` |
+| **Message API** | `C_MessageSignInit` + `C_MessageSignFinal` (one-shot envelope, + multipart `C_SignMessageBegin`/`C_SignMessageNext`), `C_MessageVerifyInit` + `C_MessageVerifyFinal` (one-shot envelope, + multipart `C_VerifyMessageBegin`/`C_VerifyMessageNext`), `C_MessageEncryptInit`/`C_EncryptMessage` (+ multipart `C_EncryptMessageBegin`/`C_EncryptMessageNext`), `C_MessageDecryptInit`/`C_DecryptMessage` (+ multipart `C_DecryptMessageBegin`/`C_DecryptMessageNext`) |
 | **Digest** | `C_DigestInit`, `C_Digest`, `C_DigestUpdate`, `C_DigestFinal`; SHA-256, SHA-384, SHA-512, SHA3-256, SHA3-512, HMAC |
-| **Key wrap / unwrap** | `C_WrapKey`, `C_UnwrapKey` (AES-KW, AES-GCM wrap, RSA-OAEP wrap), `C_DeriveKey` (ECDH, HKDF, PBKDF2) |
+| **Dual-function** | `C_DigestEncryptUpdate`, `C_DecryptDigestUpdate`, `C_SignEncryptUpdate`, `C_DecryptVerifyUpdate` (composed from the single-function ops above) |
+| **Key wrap / unwrap** | `C_WrapKey`, `C_UnwrapKey` (AES-KW, AES-GCM wrap, RSA-OAEP wrap), `C_WrapKeyAuthenticated`/`C_UnwrapKeyAuthenticated` (AES-GCM), `C_DeriveKey` (ECDH, HKDF, PBKDF2) |
+| **Object mgmt** | `C_CopyObject`, `C_GetObjectSize`, `C_SetAttributeValue` |
 | **Random** | `C_GenerateRandom` (browser CSPRNG via `getrandom::js`) |
 
-### Stubbed — JS-side `CKR_NOT_IMPL` (0x70)
+### Stubbed — `CKR_FUNCTION_NOT_SUPPORTED`
 
-These functions are declared in `softhsmrustv3.d.ts` or padded in the TS wrapper.
-All are fully implemented in the C++ engine; Rust stubs are placeholders for future parity.
+**Corrected 2026-09-01**: every function this table previously listed except the
+three below is now fully implemented (moved into the table above) — verified
+directly against each function's body in `rust/src/ffi.rs`. Streaming
+sign/verify/encrypt/decrypt, the message streaming and message encrypt/decrypt
+API, authenticated wrap/unwrap, recovery ops, and the dual-function verbs were
+all stale here, contradicting the Algorithm Parity table below (itself already
+corrected 2026-08-13). Only these three remain genuine stubs:
 
 | Category | Stubbed Functions |
 |---|---|
-| **Streaming encrypt** | `C_EncryptUpdate`, `C_EncryptFinal`, `C_DecryptUpdate`, `C_DecryptFinal` |
-| **Streaming sign** | `C_SignUpdate`, `C_SignFinal`, `C_VerifyUpdate`, `C_VerifyFinal` |
-| **Message streaming** | `C_SignMessageBegin`, `C_SignMessageNext`, `C_VerifyMessageBegin`, `C_VerifyMessageNext` |
-| **Message encrypt/decrypt** | `C_MessageEncryptInit`, `C_EncryptMessage`, `C_EncryptMessageBegin/Next`, `C_MessageDecryptInit`, `C_DecryptMessage`, `C_DecryptMessageBegin/Next` |
-| **Authenticated wrap** | `C_WrapKeyAuthenticated`, `C_UnwrapKeyAuthenticated` |
-| **Recovery ops** | `C_SignRecoverInit`, `C_SignRecover`, `C_VerifyRecoverInit`, `C_VerifyRecover` |
-| **Dual-function** | `C_DigestEncryptUpdate`, `C_DecryptDigestUpdate`, `C_SignEncryptUpdate`, `C_DecryptVerifyUpdate` |
-| **Object mgmt** | `C_CopyObject`, `C_GetObjectSize`, `C_SetAttributeValue`, `C_DigestKey` |
+| **Object mgmt** | `C_DigestKey` |
 | **Session state** | `C_GetOperationState`, `C_SetOperationState` |
 
 ---
@@ -226,18 +229,21 @@ export const getSoftHSMRustModule = async (): Promise<SoftHSMModule> => {
 | Authenticated key wrap | ✅ | ✅ | Real implementation (no longer a stub); stale row corrected 2026-08-13 |
 | Streaming sign/verify/encrypt | ✅ | ✅ | Multipart Update/Final implemented (sign, verify, digest, encrypt/decrypt incl. AES-GCM/CBC-PAD); stale row corrected 2026-08-13 |
 | Message encrypt/decrypt API | ✅ | ✅ | `C_MessageEncrypt*` / `C_MessageDecrypt*` implemented incl. multipart GCM; stale row corrected 2026-08-13 |
+| HPKE (RFC 9180, `CKM_HPKE`) | ❌ | ✅ | Added 2026-09-01. Vendor mechanism, Rust engine only — not in PKCS#11 v3.2 (v3.3's draft `CKM_COMP_KEM` targets a different, composite-KEM spec); all 4 HPKE modes + PQ/T hybrid KEM combiner (MLKEM768-X25519, MLKEM768-P256, MLKEM1024-P384) via `C_GenerateKeyPair`/`C_EncapsulateKey`/`C_DecapsulateKey`; C++ parity is a separately gated follow-on. See `docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md` |
 
 ---
 
 ## Known Limitations
 
-- **No ML-DSA / SLH-DSA pre-hash in Rust** — the `ml-dsa` and `slh-dsa` RustCrypto crates
-  (rc versions) do not yet expose a pre-hash signing API. The C++ engine uses OpenSSL's
-  `OSSL_PARAM_utf8_string("digest", ...)` pattern which has no direct equivalent.
-- **XMSS-MT not supported in Rust engine** — the `xmss` crate (`0.1.0-pre.0`) only exposes
-  single-tree XMSS. HSS/LMS is supported via `hbs-lms`; single-tree XMSS is supported via
-  `xmss`. Use XMSS (single-tree) or HSS/LMS in the Rust engine; XMSS-MT requires the C++ engine.
-- **No SP 800-108 KDFs or ECDH cofactor** — not available as standalone crates; would
-  require manual OpenSSL-equivalent implementation.
 - **Single session handle** — `C_OpenSession` always returns handle `1`. Multi-session
   applications must use separate WASM module instances.
+
+**Corrected 2026-09-01**: this section previously listed "no ML-DSA/SLH-DSA pre-hash",
+"XMSS-MT not supported", and "no SP 800-108 KDFs or ECDH cofactor" as Rust-engine
+limitations. All three are stale and directly contradicted the Algorithm Parity table
+above (itself already corrected 2026-08-13) — verified against `rust/src/crypto/handlers.rs`
+(`CKM_HASH_ML_DSA`/`CKM_HASH_SLH_DSA` pre-hash dispatch), `rust/src/crypto/xmss_bridge.rs`
+(`xmssmt_keygen`/`xmssmt_sign`/`xmssmt_verify`), and `rust/src/ffi.rs`
+(`CKM_SP800_108_COUNTER_KDF`/`CKM_SP800_108_FEEDBACK_KDF`/`CKM_ECDH1_COFACTOR_DERIVE`
+dispatch) — all four are implemented in the Rust engine today. Removed rather than
+left stale.

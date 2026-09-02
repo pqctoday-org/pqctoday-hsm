@@ -1,3 +1,15 @@
+> **SUPERSEDED.** This is the original, single-commit early design doc for
+> `softhsmrustv3` — it predates the engine that actually shipped and
+> describes concepts (a `HashMap<u32, Vec<u8>>` in-memory object store,
+> generic direct use of the `ml-kem`/`ml-dsa`/`slh-dsa` crates, no mention
+> of a native C-ABI, KMIP, HPKE, or conformance evidence) that the real
+> engine has long since grown past. Kept for historical/context value only
+> — **do not cite anything in this file as describing the current engine.**
+> For the current state, see [`rust/README.md`](rust/README.md) (build,
+> testing, conformance — 999/0 PKCS#11 v3.2 conformance checks as of this
+> note) and [`docs/rust-engine.md`](docs/rust-engine.md) (architecture,
+> technology stack, current status).
+
 # SoftHSMv3 Rust WebAssembly Port (softhsmrustv3)
 
 ## 1. Executive Summary

@@ -16,6 +16,23 @@ measurable Metal experiment**. Every mechanism gets the same seven fields:
 
 **Status:** test design (no kernels written yet) · **Date:** 2026-06-13.
 
+> **Implementation update (2026-09-01):** kernels now exist for most of the
+> mechanisms below, and [`mldsa/README.md`](mldsa/README.md)'s "Validated
+> design decisions" table records which approach each experiment settled on:
+> M1 (~2.7×), M2 (barrier reduction gave little benefit), M4 (Montgomery
+> over Barrett), M5 (scalar-per-thread beat the cooperative-Keccak approach
+> this plan expected — no 64-bit `simd_shuffle` on Apple), M6 (~1.5×), M8
+> (2×, no host blit), and M10 (static dispatch — a GPU work-queue lost at
+> tested skew) are all resolved with a recorded outcome. M7 (on-the-fly
+> matrix expansion, this plan's specific technique) is still marked "to
+> build" even though `MLDSAMATVEC.swift` now does matrix multiply a
+> different way; M3 (bank-conflict padding) and M9 (matrix-unit multiply)
+> aren't mentioned there and appear still open. Also note: correctness
+> validation actually used is the pq-crystals reference, not the corecrypto
+> KATs this plan specifies throughout (see the corecrypto note above and
+> [`NOTICE.md`](NOTICE.md)) — corecrypto/ACVP validation remains open per
+> `mldsa/README.md`'s checklist.
+
 ---
 
 ## 0. Common measurement methodology

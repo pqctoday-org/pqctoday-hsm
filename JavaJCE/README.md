@@ -58,28 +58,28 @@ JAVA_HOME=/path/to/jdk-27 mvn test
 
 Every test runs live against the real engine (`PKCS11_MODULE`/`PKCS11_PIN`
 env vars, defaulting to `/usr/local/lib/softhsm/libsofthsmv3.so` / `1234`)
-— nothing is mocked. As of 2026-08-25: **198/198 passing.**
+— nothing is mocked. As of 2026-08-30: **272/272 passing.**
 
 ## What's actually implemented
 
 | JCA/JCE service | Algorithms | Notes |
 |---|---|---|
 | `SecureRandom` | `SoftHSMv3-DRBG` | Token DRBG via `C_GenerateRandom`/`C_SeedRandom` |
-| `MessageDigest` | SHA-224/256/384/512, SHA3-224/256/384/512 | |
-| `KeyPairGenerator` + `Signature` | ML-DSA-44/65/87 (FIPS 204) | |
+| `MessageDigest` | SHA-224/256/384/512, SHA-512/224, SHA-512/256, SHA3-224/256/384/512 | |
+| `KeyPairGenerator` + `Signature` | ML-DSA-44/65/87 (FIPS 204), plus fixed `ML-DSA-44/65/87-ExternalMu` names (FIPS 204 external-µ mode) | |
 | `KeyPairGenerator` + `Signature` | SLH-DSA — all 12 SHA2/SHAKE × 128S/128F/192S/192F/256S/256F param sets (FIPS 205) | |
 | `KeyPairGenerator` + `Signature` | Ed25519, Ed448 | |
-| `KeyPairGenerator` + `Signature` | `"EC"` (secp256r1/384r1/521r1, curve chosen via `ECGenParameterSpec`) — SHA256/384/512/SHA3-256/384/512withECDSA | Raw PKCS#11 r‖s output converted to ASN.1 DER for JCA interop |
-| `KeyPairGenerator` + `Signature` | `"RSA"` (2048/3072/4096) — SHA256/384/512withRSA (PKCS#1 v1.5), RSASSA-PSS (SHA-2 and SHA-3 families) | |
+| `KeyPairGenerator` + `Signature` | `"EC"` (secp256r1/384r1/521r1, curve chosen via `ECGenParameterSpec`) — SHA224/256/384/512/SHA3-224/256/384/512withECDSA | Raw PKCS#11 r‖s output converted to ASN.1 DER for JCA interop |
+| `KeyPairGenerator` + `Signature` | `"RSA"` (2048/3072/4096) — SHA224/256/384/512/SHA3-224/256/384/512withRSA (PKCS#1 v1.5), RSASSA-PSS (SHA-2 incl. SHA-224, and SHA-3 families) | |
 | `KeyFactory` | Public-key import for every algorithm above, plus ML-KEM-512/768/1024 | Public-key import only — private-key import is refused (FIPS 140-3 L3: keys are generated on-token, not brought in) |
 | `KeyPairGenerator` + `KEM` | ML-KEM-512/768/1024 (FIPS 203); also registered under the bare family name `"ML-KEM"` — the exact string JDK 27's own `Hybrid.getKEM()` requests for JEP 527 TLS | Decapsulated secret is the one deliberate exception to this module's opaque-key design — see §6.5 in the plan doc |
 | `Cipher` | `RSA/ECB/OAEPWith{SHA-256,SHA-384,SHA-512,SHA3-256,SHA3-384,SHA3-512}AndMGF1Padding` | |
-| `Cipher` | `AES/GCM/NoPadding`, `AES/CBC/NoPadding`, `AES/CBC/PKCS5Padding`, `AES/CTR/NoPadding`, `AESWrap`, `AESWrapPad` (SP 800-38F) | GCM encryption IVs are always module-generated (SP 800-38D §8.2) — a caller-supplied IV on `ENCRYPT_MODE` is refused |
-| `KeyAgreement` | `ECDH` (`CKD_NULL`, plain ECDH, no built-in KDF) | |
-| `KeyGenerator` | `AES`, `HmacSHA{224,256,384,512}`, `HmacSHA3-{224,256,384,512}`, `KMAC128`, `KMAC256` | |
-| `Mac` | Same HMAC/KMAC set as above, plus `AESCMAC` | |
+| `Cipher` | `AES/GCM/NoPadding`, `AES/CCM/NoPadding`, `AES/CBC/NoPadding`, `AES/CBC/PKCS5Padding`, `AES/CTR/NoPadding`, `AES/OFB/NoPadding`, `AES/CFB1/NoPadding`, `AES/CFB8/NoPadding`, `AES/CFB128/NoPadding`, `AES/XTS/NoPadding`, `AESWrap`, `AESWrapPad`, `AESWrapKWP` (SP 800-38F) | GCM encryption IVs are always module-generated (SP 800-38D §8.2) — a caller-supplied IV on `ENCRYPT_MODE` is refused. `AESWrapKWP` (`CKM_AES_KEY_WRAP_KWP`) is PKCS#11 v3.2 §6.16.3's spec-current successor to `AESWrapPad` |
+| `KeyAgreement` | `ECDH` (`CKD_NULL`, plain ECDH, no built-in KDF), `ECDHC` (`CKM_ECDH1_COFACTOR_DERIVE`) | |
+| `KeyGenerator` | `AES`, `AES_XTS` (double-width key), `HmacSHA{224,256,384,512}`, `HmacSHA512/224`, `HmacSHA512/256`, `HmacSHA3-{224,256,384,512}`, `KMAC128`, `KMAC256` | |
+| `Mac` | Same HMAC/KMAC set as above, plus `AESCMAC`, `AES-GMAC` (standalone `CKM_AES_GMAC`), and truncated-output `HmacSHA{224,256,384,512}General`/`HmacSHA3-{224,256,384,512}General` | |
 | `KDF` | `HKDF-SHA256/384/512` (JEP 478) | Single-IKM, single-salt only — a real PKCS#11 `CK_HKDF_PARAMS` constraint, not a shortcut |
-| `SecretKeyFactory` | `PBKDF2WithHmacSHA{256,384,512}` (SP 800-132), `SP800-108-Counter`, `SP800-108-Feedback` | |
+| `SecretKeyFactory` | `PBKDF2WithHmacSHA{256,384,512}` (SP 800-132), `SP800-108-Counter`, `SP800-108-Feedback`, `SP800-108-DoublePipeline` | |
 | `KeyStore` | `"PKCS11-SoftHSMv3"` | Full read/write/delete, both `PrivateKeyEntry` (with real certificate chains) and standalone `TrustedCertificateEntry`; genuine PKIX trust-path validation via the JDK's own `PKIXParameters`/`CertPathValidator` works against it |
 | `AuthProvider` | `login()`/`logout()`/`setCallbackHandler()` | Construction still logs in eagerly by default; explicit login/logout is for callers who want the real lifecycle — see the plan doc's §6.1 entry for the (real, disclosed) token-wide-state consequence of `logout()` |
 | `Provider.configure(String)` | File-based configuration | Plain `key = value` file, not a SunPKCS11-format port — see `configure()`'s own javadoc |

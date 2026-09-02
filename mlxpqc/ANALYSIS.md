@@ -1,5 +1,18 @@
 # mlxpqc — GPU-Accelerating ML-KEM / ML-DSA on Apple Silicon (Metal)
 
+> **Implementation update (2026-09-01):** the "Status: research / feasibility
+> analysis (no code yet)" line below and the §5 prototype roadmap now
+> describe a *completed* prototype, not a plan — all four roadmap steps
+> (SIMD-group Keccak/SHAKE, depth-first NTT, ballot+prefix-sum rejection
+> sampling, and the full keygen/sign/verify assembly) are implemented as
+> Metal kernels in [`mldsa/`](mldsa/) and validated bit-exact against the
+> pq-crystals reference — see [`mldsa/README.md`](mldsa/README.md)'s
+> checklist for current status per kernel. This document's technique-mapping
+> analysis (§§1–4) remains accurate engineering rationale for *why* each
+> choice was made; only its framing as pre-implementation planning is dated.
+> Validation against corecrypto/NIST ACVP KATs (vs. the pq-crystals
+> reference used so far) is still open.
+
 > **Note:** Apple corecrypto (`../arm/`) is **not included in this repository** — its
 > license forbids redistribution. References to `../arm/` below describe a *local,
 > read-only correctness oracle*; to reproduce that validation, download corecrypto

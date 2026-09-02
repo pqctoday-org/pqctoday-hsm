@@ -27,7 +27,7 @@ ACME. The leaf subject-key algorithm is selectable independently of the CA
 ## 1. Pinned version
 
 - Upstream: `github.com/smallstep/certificates`, tag `v0.30.2`, rev `6e8ec61…`
-- Software ML-DSA backend: `cloudflare/circl v1.6.3` (`sign/mldsa/mldsa65`, pure Go)
+- Software ML-DSA backend: `cloudflare/circl v1.6.3` (`sign/mldsa/mldsa44`/`mldsa65`/`mldsa87`, pure Go)
 - HSM ML-DSA backend: `miekg/pkcs11 v1.1.2` → softhsmv3 (`CKM_ML_DSA`). step-ca
   already links `miekg/pkcs11` via its PKCS#11 KMS, so CGO was already required.
 - Built/verified with go1.26.4 (darwin/arm64) against OpenSSL 3.6 and the native
@@ -36,18 +36,18 @@ ACME. The leaf subject-key algorithm is selectable independently of the CA
   `--depth 1` at **HEAD of `master` (unpinned)** and `tests/18_test_stepca.sh`
   faked PQC with raw `openssl` — step-ca was built but **never issued anything**.
 
-## 2. Patch surface (`step-ca-pqc.patch`, 10 files, +992)
+## 2. Patch surface (`step-ca-pqc.patch`, 10 files, +1135/-1)
 
 | File | Change |
 |------|--------|
-| `cas/softcas/softcas.go` | 6-line dispatch: when the issuer signer's **public key** is ML-DSA-65, route `CreateCertificate` through `createMLDSACertificate` instead of Go's `x509.CreateCertificate`. Keying on the public-key type means software and HSM signers share the path. |
-| `cas/softcas/mldsa.go` (NEW) | Hand-assembles the RFC 5280 TBSCertificate with the ML-DSA-65 `AlgorithmIdentifier` (OID `2.16.840.1.101.3.4.3.18`, no params per RFC 9881), signs the TBS through a `crypto.Signer` (pure ML-DSA, empty context), and generates a random serial when the template leaves it nil (step-ca's `GetTLSCertificate` does). `subjectPublicKeyInfo()` hand-encodes an ML-DSA-65 `SubjectPublicKeyInfo` (Go's `MarshalPKIXPublicKey` can't), enabling a fully-PQC chain. `CreateMLDSACertificate` exported for root self-issuance. |
-| `cas/softcas/pkcs11mldsa.go` (NEW, `//go:build cgo`) | `PKCS11MLDSASigner`: a `crypto.Signer` whose ML-DSA-65 key is generated on a PKCS#11 token as `CKA_SENSITIVE` + `CKA_EXTRACTABLE=false`; `Sign` is `C_Sign(CKM_ML_DSA=0x1D)` inside the module. Keygen template (`CKM_ML_DSA_KEY_PAIR_GEN=0x1C`, `CKA_PARAMETER_SET=CKP_ML_DSA_65`) mirrors the platform's verified PyKCS11 path (`tests/_ssh_seed.sh`). Tolerates a module already `C_Initialize`'d in-process. |
+| `cas/softcas/softcas.go` | 6-line dispatch: when the issuer signer's **public key** is ML-DSA (any of 44/65/87, via `isMLDSASigner`), route `CreateCertificate` through `createMLDSACertificate` instead of Go's `x509.CreateCertificate`. Keying on the public-key type means software and HSM signers share the path. |
+| `cas/softcas/mldsa.go` (NEW) | Hand-assembles the RFC 5280 TBSCertificate with the issuer's ML-DSA `AlgorithmIdentifier` — `mldsaOID()` type-switches over `*mldsa44/65/87.PublicKey` to pick OID `.17`/`.18`/`.19` (no params per RFC 9881) — signs the TBS through a `crypto.Signer` (pure ML-DSA, empty context), and generates a random serial when the template leaves it nil (step-ca's `GetTLSCertificate` does). `subjectPublicKeyInfo()` hand-encodes the matching ML-DSA `SubjectPublicKeyInfo` (Go's `MarshalPKIXPublicKey` can't), enabling a fully-PQC chain in any of the three parameter sets. `CreateMLDSACertificate` exported for root self-issuance. |
+| `cas/softcas/pkcs11mldsa.go` (NEW, `//go:build cgo`) | `PKCS11MLDSASigner`: a `crypto.Signer` whose ML-DSA key is generated on a PKCS#11 token as `CKA_SENSITIVE` + `CKA_EXTRACTABLE=false`; `Sign` is `C_Sign(CKM_ML_DSA=0x1D)` inside the module. `NewPKCS11MLDSASigner` takes a `paramSet` arg (`"44"`/`"65"`/`"87"`, default 65) mapped to `CKP_ML_DSA_44/65/87` for keygen (`CKM_ML_DSA_KEY_PAIR_GEN=0x1C`); an existing key's parameter set is inferred from its public-key length (1312/1952/2592 B). Tolerates a module already `C_Initialize`'d in-process. |
 | `cas/softcas/pkcs11mldsa_nocgo.go` (NEW, `//go:build !cgo`) | Stub so `cas/softcas` compiles under a `CGO_ENABLED=0` build; `NewPKCS11MLDSASigner` returns a clear "requires cgo" error. |
-| `kms/mldsahsm/mldsahsm.go` (NEW) | In-repo step-ca KMS (type `mldsahsm`) that returns the `PKCS11MLDSASigner`, so a **running** `step-ca` server can load an ML-DSA-65 issuing CA whose key lives in the HSM — `softkms` can't load an ML-DSA key and the upstream PKCS#11 KMS doesn't recognize `CKK_ML_DSA`. |
+| `kms/mldsahsm/mldsahsm.go` (NEW) | In-repo step-ca KMS (type `mldsahsm`) that returns the `PKCS11MLDSASigner`, so a **running** `step-ca` server can load an ML-DSA issuing CA whose key lives in the HSM — `softkms` can't load an ML-DSA key and the upstream PKCS#11 KMS doesn't recognize `CKK_ML_DSA`. Parameter set (`44`/`65`/`87`) is parsed from the key URI's `param-set=` query param, default `65`. |
 | `cmd/step-ca/main.go` | +1 blank import to register the `mldsahsm` KMS. |
 | `cas/softcas/mldsa_test.go` (NEW) | `TestSoftCAS_CreateCertificate_MLDSA65` — drives SoftCAS end-to-end, asserts the OID + ML-DSA signature verify. |
-| `cmd/mldsa-issue/main.go` (NEW, demo only) | Issues a full ML-DSA-65 chain via the real SoftCAS engine (`-ca-out`/`-out`); `-hsm` keeps the CA key in softhsmv3; `-bootstrap-ca` builds a step-ca PKI (software ML-DSA root signing an HSM-keyed ML-DSA intermediate); `-algo ec` exercises the classical path. Drives sandbox scenario 18. |
+| `cmd/mldsa-issue/main.go` (NEW, demo only) | Issues a full ML-DSA chain via the real SoftCAS engine (`-ca-out`/`-out`); `-algo mldsa44\|mldsa65\|mldsa87\|ec` selects the CA signature algorithm (default `mldsa65`); `-leaf-algo` independently selects the leaf subject-key algorithm (default: match `-algo`); `-hsm` keeps the CA key in softhsmv3; `-bootstrap-ca` builds a step-ca PKI (software ML-DSA root signing an HSM-keyed ML-DSA intermediate). Drives sandbox scenario 18. |
 | `go.mod` / `go.sum` | add `cloudflare/circl v1.6.3` + `miekg/pkcs11 v1.1.2` (minimal; no other module perturbed). |
 
 Classical RSA/EC/Ed25519 issuance paths are untouched (the dispatch only diverts

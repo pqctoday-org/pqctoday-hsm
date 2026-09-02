@@ -34,7 +34,9 @@ the exact seam cosign uses for ECDSA/RSA/Ed25519 — with two backends: pure-Go
 
 ## 3. Patch surface (`cosign-pqc.patch`)
 
-Minimal — 4 files, +310 lines, 0 deletions:
+9 files, +810/-4 lines (`git apply --stat`) — the CIRCL signer, the binary-CLI
+wiring (§7/§8), and the in-tree PKCS#11/HSM backend (§6/§8) are all in this one
+patch now:
 
 | File | Change |
 |---|---|
@@ -42,13 +44,18 @@ Minimal — 4 files, +310 lines, 0 deletions:
 | `go.sum` | `+` two circl checksum lines |
 | `pkg/signature/mldsa/mldsa65.go` | **NEW** — `SignerVerifier` implementing sigstore's `signature.Signer` + `Verifier` + `SignerVerifier` over CIRCL `mldsa65`; PEM marshal/load + `IsPrivateKeyPEM`/`IsPublicKeyPEM` branch helpers |
 | `pkg/signature/mldsa/mldsa65_test.go` | **NEW** — sign→verify round-trip, tamper-rejection, PEM-load tests |
+| `pkg/signature/mldsa/pkcs11.go` | **NEW** (`//go:build cgo`) — `PKCS11SignerVerifier`: HSM-resident ML-DSA-65 signing over the `mldsa-pkcs11:` key-ref scheme, `C_Sign(CKM_ML_DSA)` inside the token (§6) |
+| `pkg/signature/mldsa/pkcs11_nocgo.go` | **NEW** (`//go:build !cgo`) — stub `PKCS11SignerVerifier` that errors clearly on a `CGO_ENABLED=0` build |
+| `pkg/signature/keys.go` | ML-DSA branches in `VerifierForKeyRef` (incl. the `mldsa-pkcs11:` scheme), `loadKey`, and `PublicKeyPem` (§7) |
+| `internal/key/svkeypair.go` | ML-DSA branch in `NewSignerVerifierKeypair` (+ `GetHashAlgorithm`/`GetPublicKeyPem`) so the keypair adapter handles a non-x509-marshalable key (§7) |
+| `cmd/cosign/cli/generate/generate_key_pair.go` | `COSIGN_KEY_ALGORITHM=ml-dsa-65` keygen branch (§7) |
 
 ### Design decisions
 
 - **Interface seam, not algorithm fork.** ML-DSA-65 is a drop-in
   `signature.SignerVerifier`. cosign's `pkg/signature/keys.go` loaders
   (`SignerVerifierFromKeyRef`, `VerifierForKeyRef`) already return that
-  interface; the finish step is one branch each (see §7).
+  interface; the CLI wiring added one branch each (done — see §7/§8).
 - **Pure ML-DSA (no pre-hash).** `SignMessage` consumes the whole message and
   calls `mldsa65.SignTo` (FIPS 204 hashes internally). Empty signing context,
   matching cosign's context-free blob signing. Randomized (hedged) signing per
@@ -56,7 +63,8 @@ Minimal — 4 files, +310 lines, 0 deletions:
 - **Custom PEM types** (`ML-DSA-65 PRIVATE KEY` / `ML-DSA-65 PUBLIC KEY`)
   carrying raw FIPS 204 packed bytes — because Go 1.26 `crypto/x509` has **no
   ML-DSA OID support** (no `ParsePKCS8PrivateKey` / `MarshalPKIXPublicKey`
-  path). This is the same reason the binary CLI needs more work (§7).
+  path). This is the same reason the binary CLI needed dedicated ML-DSA
+  branches (done — §7/§8).
 - ML-DSA-65 sizes (FIPS 204): public key 1952 B, private key 4032 B,
   **signature 3309 B** (confirmed by the test, §4).
 
@@ -129,6 +137,12 @@ transparency-log step "pending upstream PQC support" in the sandbox README.
 
 ## 6. HSM path (finish-plan lead item — preferred per master plan)
 
+> **Shipped, via a different route than sketched below** (see §8's note). The
+> patch does **not** modify the sigstore-vendored `pkcs11key` wrapper described
+> in this section; it adds an in-tree `mldsa-pkcs11:` `SignerVerifier`
+> (`pkg/signature/mldsa/pkcs11.go`, §3) at the same interface seam. The
+> original design reasoning is kept below for context.
+
 The master-plan directive is **HSM-first**: route ML-DSA bytes through
 `pqctoday-hsm/softhsmv3` via `miekg/pkcs11`, never extracting the key.
 
@@ -169,17 +183,19 @@ Per the rules, the sandbox repo is left untouched. When the fork is ready:
   cosign verify-blob --key cosign-mldsa.pub --insecure-ignore-tlog \
                      --signature blob.sig artifact.tar
   ```
-  For the HSM path: `--key 'pkcs11:object=oci-signer;pin-value=1234'`.
+  For the HSM path (shipped as the in-tree `mldsa-pkcs11:` scheme, §3/§6, not
+  the sigstore-vendored `pkcs11:` scheme):
+  `--key 'mldsa-pkcs11:module-path=/usr/local/lib/softhsm/libsofthsmv3.so;token=pqc-playground;object=oci-signer;param-set=65?pin-value=1234'`.
 
-**Binary-CLI wiring still required** (the slice proves the interface, not yet
-the CLI). v3.0.6's sign-blob runs through an `internal/key.SignerVerifierKeypair`
-adapter (`internal/key/svkeypair.go`) that, for any key, calls:
+**Binary-CLI wiring — done (§8).** v3.0.6's sign-blob runs through an
+`internal/key.SignerVerifierKeypair` adapter (`internal/key/svkeypair.go`)
+that, for any key, calls:
 - `x509.MarshalPKIXPublicKey(pubKey)` — **fails for ML-DSA** (no x509 OID);
 - a `keyAlg` type switch over `ecdsa/rsa/ed25519` only → `"unsupported key type"`;
 - `signature.GetDefaultAlgorithmDetails(pubKey)` — **no ML-DSA in the registry**.
 
-So before `cosign sign-blob --key file:mldsa.key` works end-to-end on the v3.0.6
-binary, the fork must also:
+So for `cosign sign-blob --key file:mldsa.key` to work end-to-end on the v3.0.6
+binary, the fork also had to:
 1. Add an ML-DSA branch in `internal/key/svkeypair.go` (`keyAlg = "ML-DSA"`,
    a non-x509 public-key hint, and a fixed `AlgorithmDetails`/hash mapping).
 2. Add ML-DSA loader branches in `pkg/signature/keys.go`
@@ -188,9 +204,8 @@ binary, the fork must also:
    `mldsa.LoadPrivateKeyPEM` etc.
 3. Add `ml-dsa-65` to the `generate-key-pair --signing-algorithm` enum.
 
-These are mechanical but touch sigstore-vendored expectations (the keypair
-adapter assumes x509-marshalable keys), which is why the validated slice stops
-at the interface and proves it there rather than fabricating a CLI run.
+These were mechanical but touched sigstore-vendored expectations (the keypair
+adapter assumes x509-marshalable keys) — see §3 for the resulting file list.
 
 ## 8. Remaining work — status
 

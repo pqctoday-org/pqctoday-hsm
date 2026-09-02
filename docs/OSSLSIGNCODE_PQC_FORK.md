@@ -61,8 +61,10 @@ PKCS7 stack**, which has no ML-DSA support in two places:
    **non-NULL** message digest. ML-DSA is a *pure* signature scheme and requires
    `md == NULL`.
 
-The patch (single file, `helpers.c`, ~150 net new lines) adds a narrow ML-DSA
-branch and leaves every classic RSA/EC/EdDSA path **byte-for-byte unchanged**:
+The sign-side patch (in `helpers.c`, 211 net new lines) adds a narrow ML-DSA
+branch and leaves every classic RSA/EC/EdDSA path **byte-for-byte unchanged**
+(the symmetric verify-side branch lives in `osslsigncode.c`, +123 lines — see
+§3.6; the full patch is 2 files, +333/-1):
 
 | Symbol | Role |
 |---|---|

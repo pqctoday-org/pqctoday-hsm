@@ -46,10 +46,9 @@ WASM sandbox, with both private keys staying inside the in-WASM software HSM:
 `sm5-slhdsa-smoke.cjs` repeats the same round trip for SLH-DSA-SHA2-128s.
 `sm6-paramsweep-smoke.cjs` (added 2026-08-31) generalizes the same
 KAT-length-assertion pattern across every newly-added ML-DSA/SLH-DSA
-parameter set — see `CHANGELOG.md` for the full per-parameter-set
-verification table (native, since this environment has no `emcc`; WASM
-rebuild + `sm6` still need to run wherever Emscripten is available before
-this ships).
+parameter set — **11/11 PASS** against the real WASM bundle (confirmed
+2026-09-01; see `CHANGELOG.md`'s "Update (2026-09-01)" note for the run and
+the full per-parameter-set verification table for the byte-size sources).
 
 ## Configurability
 

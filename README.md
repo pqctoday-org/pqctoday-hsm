@@ -82,6 +82,7 @@ wrappers — each with its own README.
 | --- | --- | --- |
 | PKCS#11 engines (C++ + Rust) | `src/`, [`rust/`](rust/README.md) | The token; two interchangeable engines. Rust also has a 976/0 [PKCS#11 v3.2 conformance report](rust/RUST_P11_V32_CONFORMANCE_REPORT.md) |
 | KMIP 3.0 server + CACP policy engine | [`kmip/`](kmip/README.md) | Networked key management + crypto-agility policies; ML-KEM/ML-DSA/SLH-DSA + **hybrid KEMs** (X25519MLKEM768 / SecP256r1MLKEM768 / SecP384r1MLKEM1024, **OpenSSL-3.5-interop-verified**); X25519/X448 key agreement as standard KMIP ECDH + Recommended Curve; **pure-Rust certificate operations** (Certify / Validate / SPKI public-key verification, no external crypto dependency in the cert-ops path) |
+| PKCS#11 remoting (gRPC + REST) | [`remoting/`](remoting/REMOTE_P11_V32_COVERAGE.md) | The Rust engine's full PKCS#11 surface over the network — `pqc-grpc-pkcs11` (tonic) and `pqc-rest-pkcs11` (axum, JSON+base64); **99/104** `pkcs11f.h` functions live as RPCs, coverage checked against `cpp_compliance_report.json`. See [`docs/PKCS11_REMOTING.md`](docs/PKCS11_REMOTING.md) |
 | Wrappers | see the [Integration Interfaces](#integration-interfaces) table | OpenSSL provider, OpenSSH, OpenPGP, MLS, strongSwan, JavaJCE, WebRPC |
 
 ---
@@ -108,6 +109,7 @@ wrappers — each with its own README.
 | Key derivation (HKDF, KBKDF, cofactor ECDH) | Not supported | **`CKM_HKDF_DERIVE`, `CKM_SP800_108_COUNTER_KDF`, `CKM_SP800_108_FEEDBACK_KDF`, `CKM_ECDH1_COFACTOR_DERIVE`** |
 | PBKDF2 (`CKM_PKCS5_PBKD2`) | Not supported | **Implemented** — HMAC-SHA{1/224/256/384/512} PRF; BIP39 / SLIP-0010 seed derivation |
 | ECDH1 with KDF (`CKD_SHA*_KDF`) | Not supported | **Implemented** — X9.63 SHA{1/256/384/512} KDF on `CKM_ECDH1_DERIVE`; 5G SUCI deconcealment (TS 33.501 §6.12.2) |
+| HPKE (RFC 9180) | Not supported | **`CKM_HPKE`** — all 4 modes + PQ/T hybrid KEM combiner (MLKEM768-X25519, MLKEM768-P256, MLKEM1024-P384); vendor mechanism, Rust engine only |
 | LMS/HSS (SP 800-208) | Not supported | **SHA-256 + SHAKE-256** (N32/N24); all 80 NIST parameter combinations; C++↔Rust cross-engine verified |
 | XMSS / XMSS^MT (RFC 8391) | Not supported | **Both engines** (XMSS-MT: C++ only); all SHA2/SHAKE-256 param sets |
 | SHA-3 signature variants | Not supported | **C++:** `CKM_ECDSA_SHA3_224/256/384/512`, `CKM_RSA_SHA3_224/256/384/512_PKCS/_PKCS_PSS` — **Rust:** `CKM_ECDSA_SHA3_224/256/384/512` + `CKM_ECDSA_SHA512` (native for P-521; FIPS 186-5 §6.4 truncation for P-256/P-384) |
@@ -312,6 +314,24 @@ C_WrapKeyAuthenticated()
 C_UnwrapKeyAuthenticated()
 ```
 
+### HPKE (RFC 9180) — vendor mechanism, Rust engine only
+
+```c
+CKM_HPKE_KEM_KEY_PAIR_GEN  // Generate a CKK_HPKE_KEM key (classical or hybrid, via CKA_PARAMETER_SET)
+CKM_HPKE                   // Encap/Decap + KeySchedule + AEAD key/exporter-secret derivation, one call
+C_EncapsulateKey()          // HPKE Encap (new CK_HPKE_PARAMS struct)
+C_DecapsulateKey()          // HPKE Decap (new CK_HPKE_PARAMS struct)
+```
+
+Not a PKCS#11 v3.2 mechanism — the spec has no HPKE support (v3.3's draft `CKM_COMP_KEM`
+targets the structurally-similar-but-spec-distinct composite-KEM combiner instead).
+Provisional vendor codepoints. Hybrid suites (MLKEM768-X25519, MLKEM768-P256,
+MLKEM1024-P384) use the CG-framework combiner from draft-irtf-cfrg-hybrid-kems, matching
+draft-ietf-hpke-pq's registered KEM IDs. No private key or intermediate shared secret
+crosses the FFI boundary in clear. Rust engine only; C++ parity is a separately gated
+follow-on. Full mechanism semantics and FIPS/security rationale:
+[`docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md`](docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md).
+
 ### Classical Signatures — ECDSA
 
 ```c
@@ -484,6 +504,7 @@ Multi-part, admin, and async stubs return `CKR_FUNCTION_NOT_SUPPORTED`. The brow
 - ML-KEM-512/768/1024 (keygen, encapsulate, decapsulate)
 - ML-DSA-44/65/87 (keygen, sign, verify)
 - SLH-DSA — all 12 parameter sets: SHA2/SHAKE x 128/192/256 x s/f (keygen, sign, verify)
+- HPKE (RFC 9180, `CKM_HPKE`) — all 4 modes + PQ/T hybrid KEM combiner (MLKEM768-X25519/-P256, MLKEM1024-P384); vendor mechanism, not in PKCS#11 v3.2
 
 **Classical:**
 
@@ -497,9 +518,9 @@ Multi-part, admin, and async stubs return `CKR_FUNCTION_NOT_SUPPORTED`. The brow
 - KMAC-128/256 (`CKM_KMAC_128`, `CKM_KMAC_256`) — FIPS 202 / SP 800-185
 - HKDF (RFC 5869), PBKDF2 (`CKM_PKCS5_PBKD2`), SP 800-108 Counter/Feedback KDF
 
-> **Note:** RSA-SHA3 variants (`CKM_RSA_SHA3_*_PKCS`, `CKM_RSA_SHA3_*_PKCS_PSS`) and ECDH1 with X9.63 KDF are C++ engine only.
+> **Note:** RSA-SHA3 variants (`CKM_RSA_SHA3_*_PKCS`, `CKM_RSA_SHA3_*_PKCS_PSS`) are C++ engine only. ECDH1 with X9.63 KDF is implemented in both engines for `CKD_SHA{256,384,512}_KDF`; `CKD_SHA1_KDF` is C++ engine only.
 
-**70 mechanisms** registered in `C_GetMechanismList` — 100% have implementations. (Added: `CKM_HASH_ML_DSA`, `CKM_HASH_SLH_DSA`, `CKM_EDDSA_PH`, `CKM_SHA3_256`, `CKM_SHA3_256_HMAC`, `CKM_KMAC_128`, `CKM_KMAC_256`.)
+**129 mechanisms** registered in `C_GetMechanismList` — 100% have implementations, including the vendor `CKM_HPKE`/`CKM_HPKE_KEM_KEY_PAIR_GEN` pair (provisional codepoints). Count is the live `C_GetMechanismList` result checked in [`rust/RUST_P11_V32_CONFORMANCE_REPORT.md`](rust/RUST_P11_V32_CONFORMANCE_REPORT.md) — regenerate with `scripts/local-gate.sh --rust-p11`.
 
 ### PKCS#11 v3.2 Compliance Enforcement
 
@@ -526,8 +547,8 @@ From `rust/Cargo.toml`:
 | Crate | Purpose |
 | --- | --- |
 | `ml-kem` 0.2.3 | FIPS 203 key encapsulation |
-| `ml-dsa` =0.1.0-rc.7 | FIPS 204 digital signatures |
-| `slh-dsa` =0.2.0-rc.4 | FIPS 205 hash-based signatures |
+| `fips204` 0.4.6 (patched, `fips204-patched/`) | FIPS 204 digital signatures |
+| `fips205` 0.4.1 (patched, `fips205-patched/`) | FIPS 205 hash-based signatures |
 | `rsa` 0.9 | RSA PKCS#1 / OAEP / PSS |
 | `p256`, `p384`, `p521` 0.13 | NIST curve ECDSA + ECDH (P-256, P-384, P-521) |
 | `ed25519-dalek` 2.1 | Ed25519 signatures |
@@ -752,7 +773,8 @@ SoftHSMv3 exposes integration interfaces that cover the full stack from browser 
 | **OpenSSH Connector** | [`openssh-pkcs11/`](openssh-pkcs11/README.md) | ML-DSA-65 ssh / sshd (draft-sfluhrer-ssh-mldsa-06); WASM build runs a real PQ SSH handshake |
 | **OpenPGP Connector** | [`openpgp/`](openpgp/README.md) | OpenPGP signing / decryption with keys held on the token (ML-DSA / ML-KEM) |
 | **MLS Provider** | [`openmls-provider/`](openmls-provider/README.md) | OpenMLS crypto provider backed by the token |
-| **WebRPC** | [`webrpc/`](webrpc/README.md) | Roadmap — REST gateway to the module (not yet extracted) |
+| **PKCS#11 Remoting** | [`remoting/`](remoting/REMOTE_P11_V32_COVERAGE.md) | gRPC (`pqc-grpc-pkcs11`) + REST (`pqc-rest-pkcs11`) — the full PKCS#11 surface over the network, not signing-specific; see [`docs/PKCS11_REMOTING.md`](docs/PKCS11_REMOTING.md) |
+| **WebRPC** | [`webrpc/`](webrpc/README.md) | Roadmap — session-scoped signing gateway for the sandbox (not yet extracted); narrower scope than `remoting/` above |
 
 ---
 

@@ -77,7 +77,7 @@ engine. It has its own checked-in PKCS#11 v3.2 conformance evidence
 The original Phase 0–6 roadmap (import + strip legacy, OpenSSL 3.x EVP
 migration, ML-DSA, ML-KEM, Emscripten WASM, npm package, app integration) is
 **complete**, as is the later hardening/conformance work. Current release is
-tracked in `CHANGELOG.md` (**0.25.0**, 2026-08-25, plus unreleased work —
+tracked in `CHANGELOG.md` (**0.27.0**, 2026-08-31, plus unreleased work —
 always trust the CHANGELOG's top entry over any version echoed in this
 file). Recent programs: a real JDK 27 JCA/JCE provider (`JavaJCE/`, FFM-based)
 plus a second, gRPC-remote provider module (`JavaJCE-remote/`) with real
@@ -88,10 +88,14 @@ conformance evidence (real Split Key + asynchronous processing, honest
 `Query`), a follow-up gap-remediation audit (13 findings across both
 crates — silently-dropped errors, stub behavior — all fixed), the CACP
 crypto-agility policy engine (with its fail-open enforcement seams
-closed), hybrid KEMs, and an ongoing compliance-testing evidence/coverage
-remediation (2026-08-23 — see the repo's compliance-testing remediation
-plan for scope). See `CHANGELOG.md` for the authoritative per-release
-history rather than this file.
+closed), hybrid KEMs, a KMIP/CACP coverage audit tying the protocol and
+policy layers to the engines' full PKCS#11 mechanism surface, and (in
+`[Unreleased]`) a native `CKM_HPKE` mechanism family — full RFC 9180 HPKE
+plus a PQ/T hybrid KEM combiner, Rust engine only, no private key or
+intermediate shared secret crossing the FFI boundary in clear (see
+`docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md`). See
+`CHANGELOG.md` for the authoritative per-release history rather than this
+file.
 
 ## Key PKCS#11 v3.2 Constants (PQC)
 

@@ -5,6 +5,14 @@
 > A working prototype exists in
 > [`pqctoday-sandbox/api/kms_router.py`](https://github.com/pqctoday/pqctoday-sandbox/blob/main/api/kms_router.py).
 > This folder tracks the plan to graduate it into a proper softhsmv3 integration interface.
+>
+> **Related but distinct:** [`remoting/`](../remoting/REMOTE_P11_V32_COVERAGE.md) has
+> since shipped a real gRPC + REST service (`pqc-grpc-pkcs11` / `pqc-rest-pkcs11`) that
+> mirrors the full PKCS#11 surface (99/104 `pkcs11f.h` functions) over the network. It
+> is not a replacement for this proposal — it has no session-scoped bearer auth, no
+> per-session key TTL/revocation, and no orchestrator integration, all of which are this
+> document's actual value proposition. Read `docs/PKCS11_REMOTING.md` before extracting
+> this service, so the two don't duplicate the same wire-protocol work.
 
 ---
 

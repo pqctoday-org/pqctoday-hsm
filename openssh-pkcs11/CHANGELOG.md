@@ -144,6 +144,17 @@ SLH-DSA-{SHA2,SHAKE}-192{s,f} remain unexposed over SSH pending a future
 draft revision (see above) — this is a scope decision to flag for review,
 not an oversight.
 
+**Update (2026-09-01): WASM harness run — 11/11 PASS.** With `dist/`
+rebuilt, all three smoke harnesses now run and pass against the real WASM
+bundle: `sm1-smoke.cjs` (ML-DSA-65) and `sm5-slhdsa-smoke.cjs`
+(SLH-DSA-SHA2-128s) both reach `USERAUTH_SUCCESS`, and
+`sm6-paramsweep-smoke.cjs` confirms all 11 ML-DSA/SLH-DSA parameter sets
+end-to-end (`node sm6-paramsweep-smoke.cjs` → `SM6 OK — 11 parameter sets
+verified end-to-end`), with the exact signature lengths from the table
+above. This closes the "not executed" gap noted above — it was a real
+Emscripten-toolchain limitation of that session's environment, not a defect
+in the WASM shims.
+
 ### Added — SLH-DSA-SHA2-128s SSH authentication, realigning this connector with the sandbox (2026-07-27)
 
 This connector's patch set had silently fallen behind the copy it was forked

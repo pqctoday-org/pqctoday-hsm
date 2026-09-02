@@ -2,7 +2,9 @@
 
 > **This is the pqctoday fork.** It extends the upstream
 > [`heiko/openpgp-pkcs11`](https://codeberg.org/heiko/openpgp-pkcs11) Sequoia
-> bridge with **post-quantum OpenPGP** (ML-DSA-65 signing, ML-KEM decryption)
+> bridge with **post-quantum OpenPGP** — draft-ietf-openpgp-pqc composite
+> signing (`MLDSA65_Ed25519` algo 30, `MLDSA87_Ed448` algo 31) and composite
+> ML-KEM decryption (`MLKEM768_X25519` algo 35, `MLKEM1024_X448` algo 36) —
 > where the private key stays inside the **softhsmv3** PKCS#11 token. The
 > original upstream README follows below for reference — note its examples use
 > upstream SoftHSMv2 (`/usr/lib64/softhsm/libsofthsm.so`, YubiKey); in this repo

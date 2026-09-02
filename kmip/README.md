@@ -9,7 +9,7 @@ exercise it end to end.
 - **Data plane:** KMIP 3.0 TTLV over TLS (default `127.0.0.1:5696`).
 - **Control plane:** optional REST policy-admin facade over mTLS.
 - **Crypto:** ML-KEM, ML-DSA, SLH-DSA, AES/HMAC, and hybrid KEMs
-  **X25519MLKEM768** / **SecP256r1MLKEM768**.
+  **X25519MLKEM768** / **SecP256r1MLKEM768** / **SecP384r1MLKEM1024**.
 
 > New here? Run the one-command demo in §3, then read §5 (policies) and §6
 > (conformance). For the algorithm deprecation policy see
@@ -244,17 +244,20 @@ c.activate(imported.get("UniqueIdentifier"))
 ```
 
 Available `KmipClient` methods: `create_key_pair`, `create_symmetric`,
-`activate`, `sign`, `encrypt`, `encapsulate`, `decapsulate`, `locate`,
-`get_attributes`, `revoke`, `destroy`.
+`activate`, `get`, `sign`, `signature_verify`, `encrypt`, `register`,
+`encapsulate`, `decapsulate`, `locate`, `get_attributes`,
+`get_usage_allocation`, `get_constraints`, `set_endpoint_role`,
+`set_defaults`, `derive_key`, `rekey`, `rekey_key_pair`, `revoke`,
+`destroy` (plus `serve_as_endpoint`, §5.1 below).
 
-> **Register.** The server supports the KMIP `Register` operation, but the
-> Python client does not expose a `register()` helper — generate keys server-side
-> with `create_key_pair` / `create_symmetric`, or use the Rust
-> `pqctoday-kmip-client` binary. (Tracked as a client gap.)
-
-> **Hybrid KEM.** `X25519MLKEM768` / `SecP256r1MLKEM768` are exercised by the
-> Rust end-to-end test `cargo test --test hybrid_kem_e2e` (they also back the
-> admin-plane mTLS). A dedicated Python data-plane example is a known doc gap.
+> **Hybrid KEM.** `X25519MLKEM768` / `SecP256r1MLKEM768` /
+> `SecP384r1MLKEM1024` are exercised by the Rust end-to-end test
+> `cargo test --test hybrid_kem_e2e` (they also back the admin-plane mTLS).
+> For a Python data-plane example, see
+> [`python-client/README.md`](python-client/README.md) — `create_key_pair`
+> takes a hybrid group name exactly like an ML-KEM one (CSD02 makes them
+> first-class `CryptographicAlgorithm` values), so no special client-side
+> handling is needed.
 
 ### Control plane (policy admin over mTLS)
 
@@ -264,7 +267,9 @@ python -m pqctoday_kmip admin \
   --ca admin-certs/ca.crt --cert admin-certs/client.crt --key admin-certs/client.key \
   --host 127.0.0.1 --port 5697 list-policies
 # admin subcommands: healthz, version, list-policies, get-policy NAME,
-#                    create-policy, activate NAME, audit [--limit N], stream
+#                    active, activate NAME, validate YAML_FILE,
+#                    dry-run YAML_FILE --op OP [--algorithm ALG],
+#                    audit [--limit N], stream [--count N]
 ```
 
 ### Three-plane audit trail
@@ -334,9 +339,9 @@ python conformance/assert_replay_report.py     # gate the report
 ```
 
 Reports and analysis live in [`docs/CONFORMANCE_REPORT.md`](docs/CONFORMANCE_REPORT.md)
-and [`docs/PQC_INTEROP_TEST_PLAN.md`](docs/PQC_INTEROP_TEST_PLAN.md). The 10
-intentionally-skipped OASIS tests (5 of them deprecated algorithms) are
-explained in [`DEPRECATED.md`](DEPRECATED.md).
+and [`docs/PQC_INTEROP_TEST_PLAN.md`](docs/PQC_INTEROP_TEST_PLAN.md). The 5
+intentionally-skipped OASIS tests (all deprecated algorithms — DES/3DES/DSA)
+are explained in [`DEPRECATED.md`](DEPRECATED.md).
 
 ---
 
@@ -347,7 +352,7 @@ explained in [`DEPRECATED.md`](DEPRECATED.md).
 | `bin/pqctoday-kmip.rs` | The KMIP server |
 | `bin/pqctoday-kmip-client.rs` | Rust smoke client |
 | `src/kmip30/` | KMIP 3.0 wire codec + operations |
-| `src/hybrid_kem.rs` | Hybrid KEM (X25519MLKEM768 / SecP256r1MLKEM768) |
+| `src/hybrid_kem.rs` | Hybrid KEM (X25519MLKEM768 / SecP256r1MLKEM768 / SecP384r1MLKEM1024) |
 | `src/policy/` | CACP policy engine (loader, evaluation) |
 | `policies/*.yaml` | Shipped compliance policies — see [`policies/README.md`](policies/README.md) |
 | `cryptopolicy-manager/` | REST admin facade — see [`cryptopolicy-manager/README.md`](cryptopolicy-manager/README.md) |

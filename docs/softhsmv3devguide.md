@@ -15,15 +15,16 @@
    - [5.6 Authenticated key wrap / unwrap (AES-GCM)](#56-authenticated-key-wrap--unwrap-aes-gcm)
    - [5.7 Pre-bound signature verification](#57-pre-bound-signature-verification)
 6. [Error handling conventions](#6-error-handling-conventions)
-7. [StrongSwan IKEv2 Adapter](#7-strongswan-ikev2-adapter-strongswan-pkcs11)
-   - [7.1 ML-KEM key exchange](#71-ml-kem-key-exchange)
-   - [7.2 ML-DSA signing constants](#72-ml-dsa-signing-constants)
-8. [Java JCE Integration](#8-java-jce-integration-javajce)
-   - [8.1 Architecture](#81-architecture)
-   - [8.2 Registration](#82-registration)
-   - [8.3 ML-DSA signing](#83-ml-dsa-signing)
-   - [8.4 ML-KEM key agreement](#84-ml-kem-key-agreement)
-   - [8.5 Deployment (Docker)](#85-deployment-docker)
+7. [SLH-DSA Parameter Sets](#7-slh-dsa-parameter-sets)
+8. [Pre-Hash Encoding Reference](#8-pre-hash-encoding-reference)
+9. [StrongSwan IKEv2 Adapter](#9-strongswan-ikev2-adapter-strongswan-pkcs11)
+   - [9.1 ML-KEM key exchange](#91-ml-kem-key-exchange)
+   - [9.2 ML-DSA signing constants](#92-ml-dsa-signing-constants)
+10. [Java JCE Integration](#10-java-jce-integration-javajce)
+    - [10.1 Architecture](#101-architecture)
+    - [10.2 Registration](#102-registration)
+    - [10.3 ML-DSA signing / ML-KEM key exchange](#103-ml-dsa-signing--ml-kem-key-exchange)
+    - [10.4 Build and test](#104-build-and-test)
 
 ---
 
@@ -35,7 +36,7 @@ major extensions:
 | Dimension | SoftHSM2 | softhsmv3 |
 | --- | --- | --- |
 | Crypto backend | OpenSSL 1.x / Botan | OpenSSL ≥ 3.5 only (EVP API exclusively — no ENGINE, no legacy provider) |
-| PKCS#11 version | 3.0 | **3.2 (CSD01, April 2025)** |
+| PKCS#11 version | 3.0 | **3.2 (ratified OASIS Standard, 03 June 2026)** |
 | PQC algorithms | None | ML-KEM-512/768/1024, ML-DSA-44/65/87, SLH-DSA-SHA2/SHAKE × 4 variants × 3 security levels |
 | Build targets | Shared library | Shared library **+ Emscripten WASM** (`@pqctoday/softhsm-wasm` npm package) |
 
@@ -144,8 +145,10 @@ via `C_DeriveKey`. All use OpenSSL EVP KDF / `EVP_PKEY_CTX` APIs — no legacy p
 - **Stateful hash-based signatures (HSS/LMS, XMSS, XMSS-MT) are fully implemented** in the C++
   engine via embedded reference libraries (`stateful/hash-sigs/` for HSS/LMS,
   `stateful/xmss-reference/` for XMSS and XMSS-MT). The Rust WASM engine supports HSS/LMS
-  (via `hbs-lms` and a custom verifier for SP 800-208 SHAKE IDs `0x0F-0x18`) and single-tree
-  XMSS (via `xmss` crate); **XMSS-MT is not yet available in the Rust engine** due to a crate limitation.
+  (via `hbs-lms` and a custom verifier for SP 800-208 SHAKE IDs `0x0F-0x18`) and **both
+  single-tree XMSS and multi-tree XMSS-MT** — all 56 RFC 8391 XMSS-MT parameter sets
+  (SHA2/SHAKE × 256/512/192-bit × heights 20/40/60 with 2–12 layers) via the `xmss` crate
+  (`rust/src/crypto/xmss_bridge.rs`); XMSS-MT is no longer a Rust-engine gap.
 
   Key exhaustion: once all one-time signing slots are consumed, `C_Sign` returns
   `CKR_KEY_EXHAUSTED`. The remaining-use counter is tracked in `CKA_HSS_KEYS_REMAINING`
@@ -170,7 +173,7 @@ via `C_DeriveKey`. All use OpenSSL EVP KDF / `EVP_PKEY_CTX` APIs — no legacy p
 | Tool | Minimum | Notes |
 | --- | --- | --- |
 | CMake | 3.16 | |
-| OpenSSL | 3.6.0 | Required for ML-DSA and SLH-DSA EVP support |
+| OpenSSL | 3.5.0 | CMake enforces this floor with `FATAL_ERROR`; 3.6.2+ is needed for `CKA_SEED` deterministic ML-DSA/ML-KEM/SLH-DSA keygen (OpenSSL's seed `OSSL_PARAM` support), and CI is pinned to 3.6.3 |
 | C++ compiler | C++17 | g++ 11+ or clang++ 14+ |
 | Emscripten (WASM) | 3.1.50+ | WASM target only |
 
@@ -191,11 +194,12 @@ sudo apt-get install build-essential cmake
 ```bash
 # From the softhsmv3 repository root.
 # PQC (ML-KEM/ML-DSA/SLH-DSA) is always compiled in with the openssl backend —
-# there are no -DENABLE_MLKEM / -DENABLE_MLDSA flags. Add -DBUILD_TESTS=ON to
-# build p11test, and -DWITH_OBJECTSTORE_BACKEND_DB=ON for the SQLite backend.
+# there are no -DENABLE_MLKEM / -DENABLE_MLDSA flags, and WITH_CRYPTO_BACKEND
+# is hardcoded to "openssl" in CMakeLists.txt (no other backend is selectable).
+# Add -DBUILD_TESTS=ON to build p11test, and -DWITH_OBJECTSTORE_BACKEND_DB=ON
+# for the SQLite backend.
 cmake -B build \
     -DCMAKE_BUILD_TYPE=Release \
-    -DWITH_CRYPTO_BACKEND=openssl \
     -DBUILD_TESTS=ON \
     -DOPENSSL_ROOT_DIR="$OPENSSL_ROOT_DIR"   # macOS only
 
@@ -218,15 +222,32 @@ See `docs/howtotestsofthsmv3.md` for the full testing workflow including the
 
 ### 4.4 WASM build
 
+The easiest path is the packaged script, which also cross-compiles OpenSSL for
+wasm32 (into `deps/openssl-wasm/`) before configuring softhsmv3 itself:
+
 ```bash
-# Requires Emscripten SDK and OpenSSL 3.5+ cross-compiled for wasm32
+# Requires emcc 3.x+ in PATH (source your Emscripten SDK's emsdk_env.sh first)
+bash scripts/build-wasm.sh
+# SKIP_OPENSSL=1 bash scripts/build-wasm.sh   # if deps/openssl-wasm is already built
+```
+
+That produces `wasm/softhsm.js` + `wasm/softhsm.wasm`. To configure by hand
+(what the script does under the hood), use the project's own toolchain file —
+not the raw Emscripten SDK one — and point `OPENSSL_ROOT_DIR` at a wasm32
+OpenSSL build (see `scripts/build-openssl-wasm.sh`):
+
+```bash
 source /path/to/emsdk/emsdk_env.sh
 
-cmake -B build-wasm \
-    -DCMAKE_TOOLCHAIN_FILE="$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake" \
-    -DWITH_CRYPTO_BACKEND=openssl
+emcmake cmake -B build-wasm \
+    -DCMAKE_TOOLCHAIN_FILE="cmake/toolchain/emscripten.cmake" \
+    -DOPENSSL_ROOT_DIR="deps/openssl-wasm" \
+    -DOPENSSL_INCLUDE_DIR="deps/openssl-wasm/include" \
+    -DOPENSSL_CRYPTO_LIBRARY="deps/openssl-wasm/lib/libcrypto.a" \
+    -DOPENSSL_SSL_LIBRARY="deps/openssl-wasm/lib/libssl.a" \
+    -DBUILD_TESTS=OFF -DENABLE_STATIC=OFF
 
-emmake cmake --build build-wasm -j$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
+emmake cmake --build build-wasm --target softhsmv3 -j$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)
 ```
 
 ---
@@ -772,11 +793,11 @@ This encoding is transparent to callers — pass the raw message to `C_Sign` or 
 
 ---
 
-## 7. StrongSwan IKEv2 Adapter (`strongswan-pkcs11/`)
+## 9. StrongSwan IKEv2 Adapter (`strongswan-pkcs11/`)
 
 The `strongswan-pkcs11/` directory provides a strongSwan-compatible PKCS#11 plugin adapter. It exposes softhsmv3 ML-KEM and ML-DSA operations to the IKEv2 key-exchange and authentication layers without modifying strongSwan core.
 
-### 7.1 ML-KEM key exchange
+### 9.1 ML-KEM key exchange
 
 The adapter implements `pkcs11_kem_t` using the PKCS#11 v3.2 KEM API:
 
@@ -800,7 +821,7 @@ chunk_t shared_secret = kem->get_shared_secret(kem);
 
 Both paths call into softhsmv3's `C_EncapsulateKey` / `C_DecapsulateKey` (PKCS#11 v3.2 §5.17).
 
-### 7.2 ML-DSA signing constants
+### 9.2 ML-DSA signing constants
 
 `strongswan-pkcs11/pkcs11.h` adds the PKCS#11 v3.2 ML-DSA constants needed for the IKEv2 AUTH payload:
 
@@ -814,74 +835,107 @@ Pass `CKM_ML_DSA_KEY_PAIR_GEN` in the mechanism during `C_GenerateKeyPair`, set 
 
 ---
 
-## 8. Java JCE Integration (`JavaJCE/`)
+## 10. Java JCE Integration (`JavaJCE/`)
 
-The `JavaJCE/` module lets JCA-based applications (Hyperledger Besu, Spring Security, any JCA consumer) call softhsmv3 ML-DSA signing and ML-KEM key agreement through the standard Java `Signature` and `KeyAgreement` APIs.
+> **This section describes the current provider.** An earlier `JavaJCE/` module
+> (package `org.softhsmv3.jce`, class `SoftHSMJCEProvider`/`MLDSASignatureSpi`,
+> a patched-SunPKCS11-JNI design) never actually worked — an August 2026 audit
+> found its ML-DSA signer returned a hardcoded 2-byte array and its ML-KEM
+> `KeyAgreement` SPI never ran an encapsulation. It was removed and replaced
+> outright (see `CHANGELOG.md`, "Removed"/"Added" for that release). Nothing
+> below describes that removed module.
 
-### 8.1 Architecture
+The `JavaJCE/` module (package `com.pqctoday.hsm.jce`, `pom.xml`-built with
+Maven) lets JCA/JCE-based applications (Hyperledger Besu, Spring Security, any
+JCA consumer) call softhsmv3 through the standard Java `Signature`,
+`KeyPairGenerator`, `KEM`, `Cipher`, `KeyAgreement`, `KeyStore`, and related
+APIs. It is FFM-based (`java.lang.foreign`, JEP 454) — no JNI, no
+`sun.security.pkcs11.wrapper` internals, and no patched JRE/JNI to build.
+Every operation routes to the token; the provider never computes a signature,
+hash, key, or derived secret on the JVM side. See `JavaJCE/README.md` for the
+full algorithm coverage table and known limitations.
+
+### 10.1 Architecture
 
 ```
 Application code
-    │ Signature.getInstance("ML-DSA-65")
+    │ Signature.getInstance("ML-DSA-65", provider)
     ▼
-SoftHSMJCEProvider (JavaJCE/src/…/SoftHSMJCEProvider.java)
-    │ looks up registered SPI
+SoftHSMv3Provider (JavaJCE/src/main/java/com/pqctoday/hsm/jce/…)
+    │ looks up registered Service
     ▼
-MLDSASignatureSpi (JavaJCE/src/…/MLDSASignatureSpi.java)
-    │ translates to CKM_ML_DSA (0x0000001d)
+P11PureSigSignatureSpi (ML-DSA/SLH-DSA/EdDSA/ECDSA/RSA all share this SPI)
+    │ translates to CKM_ML_DSA (0x0000001d) via java.lang.foreign (FFM)
     ▼
-SunPKCS11 (patched JNI — accepts 0x1c/0x1d PKCS#11 v3.2 constants)
-    │ C_SignInit / C_Sign
-    ▼
-libsofthsmv3.so
+libsofthsmv3.so — C_SignInit / C_Sign
 ```
 
-### 8.2 Registration
+### 10.2 Registration
 
 ```java
-// Register at application startup (before any crypto calls)
 import java.security.Security;
-import org.softhsmv3.jce.SoftHSMJCEProvider;
+import com.pqctoday.hsm.jce.SoftHSMv3Provider;
 
-Security.addProvider(new SoftHSMJCEProvider());
+// Env-var driven (PKCS11_MODULE / PKCS11_PIN):
+Security.addProvider(new SoftHSMv3Provider());
+
+// Or explicit:
+SoftHSMv3Provider p =
+    new SoftHSMv3Provider("/usr/local/lib/softhsm/libsofthsmv3.so", "1234");
 ```
 
-### 8.3 ML-DSA signing
+### 10.3 ML-DSA signing / ML-KEM key exchange
+
+ML-DSA/SLH-DSA/EC/RSA all go through the standard `KeyPairGenerator` +
+`Signature` pair — there is no dedicated `MLDSASignatureSpi`:
 
 ```java
-Signature sig = Signature.getInstance("ML-DSA-65");
-sig.initSign(privateKey);   // privateKey is a PKCS11 key ref from SunPKCS11
-sig.update(message);
+KeyPairGenerator kpg = KeyPairGenerator.getInstance("ML-DSA-65", p);
+KeyPair kp = kpg.generateKeyPair();
+
+Signature sig = Signature.getInstance("ML-DSA-65", p);
+sig.initSign(kp.getPrivate());
+sig.update("hello".getBytes());
 byte[] signature = sig.sign();
 
-Signature ver = Signature.getInstance("ML-DSA-65");
-ver.initVerify(publicKey);
-ver.update(message);
+Signature ver = Signature.getInstance("ML-DSA-65", p);
+ver.initVerify(kp.getPublic());
+ver.update("hello".getBytes());
 boolean valid = ver.verify(signature);
 ```
 
-### 8.4 ML-KEM key agreement
+ML-KEM is exposed through JDK 24+'s `javax.crypto.KEM` API (JEP 452), **not**
+`KeyAgreement` — `KeyAgreement` in this provider is registered for classical
+ECDH only:
 
 ```java
-KeyAgreement ka = KeyAgreement.getInstance("ML-KEM-768");
-ka.init(privateKey);
-ka.doPhase(peerPublicKey, true);
-byte[] sharedSecret = ka.generateSecret();
+KeyPairGenerator kpg = KeyPairGenerator.getInstance("ML-KEM-768", p);
+KeyPair kp = kpg.generateKeyPair();
+
+KEM kem = KEM.getInstance("ML-KEM-768", p);
+KEM.Encapsulator enc = kem.newEncapsulator(kp.getPublic());
+KEM.Encapsulated encapsulated = enc.encapsulate();
+byte[] ciphertext = encapsulated.encapsulation();
+
+KEM.Decapsulator dec = kem.newDecapsulator(kp.getPrivate());
+SecretKey sharedSecret = dec.decapsulate(ciphertext);
 ```
 
-### 8.5 Deployment (Docker)
+ML-KEM is also registered under the bare family name `"ML-KEM"` — the exact
+string JDK 27's own JEP 527 hybrid-TLS path requests.
 
-The module must be compiled inside the patched JRE environment (the one that knows about `CKM_ML_DSA` = `0x1d`):
+### 10.4 Build and test
 
-```dockerfile
-COPY JavaJCE /JavaJCE
-RUN find /JavaJCE/src -name "*.java" > /tmp/sources.txt \
- && javac -cp /opt/jre/lib/ext/sunpkcs11.jar \
-          -d /build/javajce @/tmp/sources.txt \
- && jar -cf /opt/besu/lib/javajce-softhsm.jar -C /build/javajce .
+```bash
+JAVA_HOME=/path/to/jdk-27 mvn test
 ```
 
-Add the JAR to the Besu classpath; no further configuration is required once `SoftHSMJCEProvider` is registered.
+No Docker step and no patched-JRE compile are required — this is an ordinary
+Maven build. Every test runs live against the real engine (`PKCS11_MODULE`/
+`PKCS11_PIN` env vars, defaulting to `/usr/local/lib/softhsm/libsofthsmv3.so`
+/ `1234`); nothing is mocked. Add the built JAR to your application's
+classpath; no further configuration is required once `SoftHSMv3Provider` is
+registered.
 
 ---
 
