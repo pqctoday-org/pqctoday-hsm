@@ -723,6 +723,243 @@ fn kat_hpke_rfc9180_appendix_a1_1_dhkem_x25519() {
     assert_eq!(opened, pt_new);
 }
 
+#[test]
+fn kat_hpke_rfc9180_appendix_a2_dhkem_x25519_chacha20poly1305() {
+    // RFC 9180 Appendix A.2 — base mode, DHKEM(X25519, HKDF-SHA256),
+    // HKDF-SHA256, ChaCha20Poly1305. "Suite 3"'s HPKE config
+    // (MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519) — same KEM as
+    // §A.1.1 above, ChaCha20Poly1305 in place of AES-128-GCM.
+    require_softhsm!(env);
+    let provider = PqcTodayProvider::new(&env.config).expect("provider");
+    let mk_cfg = || {
+        HpkeConfig(
+            HpkeKemType::DhKem25519,
+            HpkeKdfType::HkdfSha256,
+            HpkeAeadType::ChaCha20Poly1305,
+        )
+    };
+
+    // ──── §A.2 published values ────
+    let ikm_e =
+        hex::decode("909a9b35d3dc4713a5e72a4da274b55d3d3821a37e5d099e74a647db583a904b").unwrap();
+    let pk_em =
+        hex::decode("1afa08d3dec047a643885163f1180476fa7ddb54c6a8029ea33f95796bf2ac4a").unwrap();
+    let sk_em =
+        hex::decode("f4ec9b33b792c372c1d2c2063507b684ef925b8c75a42dbcbf57d63ccd381600").unwrap();
+    let ikm_r =
+        hex::decode("1ac01f181fdf9f352797655161c58b75c656a6cc2716dcb66372da835542e1df").unwrap();
+    let pk_rm =
+        hex::decode("4310ee97d88cc1f088a5576c77ab0cf5c3ac797f3d95139c6c84b5429c59662a").unwrap();
+    let sk_rm =
+        hex::decode("8057991eef8f1f1af18f4a9491d16a1ce333f695d4db8e38da75975c4478e0fb").unwrap();
+    let info = hex::decode("4f6465206f6e2061204772656369616e2055726e").unwrap();
+    let aad_seq0 = hex::decode("436f756e742d30").unwrap();
+    let pt_seq0 =
+        hex::decode("4265617574792069732074727574682c20747275746820626561757479").unwrap();
+    let ct_seq0 = hex::decode(
+        "1c5250d8034ec2b784ba2cfd69dbdb8af406cfe3ff938e131f0def8c8b60b4d\
+         b21993c62ce81883d2dd1b51a28",
+    )
+    .unwrap();
+
+    // ──── (1) DeriveKeyPair determinism for BOTH sides ────
+    let kp_r = provider.crypto().derive_hpke_keypair(mk_cfg(), &ikm_r).unwrap();
+    assert_eq!(
+        hex::encode(&kp_r.public),
+        hex::encode(&pk_rm),
+        "DeriveKeyPair(ikmR) → pkRm matches RFC 9180 §A.2"
+    );
+    assert_eq!(
+        hex::encode(kp_r.private.as_ref()),
+        hex::encode(&sk_rm),
+        "DeriveKeyPair(ikmR) → skRm matches RFC 9180 §A.2"
+    );
+
+    let kp_e = provider.crypto().derive_hpke_keypair(mk_cfg(), &ikm_e).unwrap();
+    assert_eq!(
+        hex::encode(&kp_e.public),
+        hex::encode(&pk_em),
+        "DeriveKeyPair(ikmE) → pkEm matches RFC 9180 §A.2"
+    );
+    assert_eq!(
+        hex::encode(kp_e.private.as_ref()),
+        hex::encode(&sk_em),
+        "DeriveKeyPair(ikmE) → skEm matches RFC 9180 §A.2"
+    );
+
+    // ──── (2) Open the published ciphertext with the published sk_r ────
+    let published_ct = openmls_traits::types::HpkeCiphertext {
+        kem_output: pk_em.clone().into(),
+        ciphertext: ct_seq0.clone().into(),
+    };
+    let recovered = provider
+        .crypto()
+        .hpke_open(mk_cfg(), &published_ct, &sk_rm, &info, &aad_seq0)
+        .expect("RFC 9180 §A.2 ct opens with published sk_r");
+    assert_eq!(
+        recovered, pt_seq0,
+        "RFC 9180 §A.2 Encryption Seq 0 plaintext matches"
+    );
+
+    // ──── (3) Tampered AAD → AEAD failure ────
+    let mut bad_aad = aad_seq0.clone();
+    bad_aad[0] ^= 1;
+    assert!(
+        provider
+            .crypto()
+            .hpke_open(mk_cfg(), &published_ct, &sk_rm, &info, &bad_aad)
+            .is_err(),
+        "AAD tamper must fail AEAD verification"
+    );
+
+    // ──── (4) Roundtrip with §A.2 recipient ────
+    let pt_new = b"suite 3 KAT roundtrip with A.2 keys";
+    let ct = provider
+        .crypto()
+        .hpke_seal(mk_cfg(), &pk_rm, &info, &aad_seq0, pt_new)
+        .unwrap();
+    let opened = provider
+        .crypto()
+        .hpke_open(mk_cfg(), &ct, &sk_rm, &info, &aad_seq0)
+        .unwrap();
+    assert_eq!(opened, pt_new);
+}
+
+#[test]
+fn kat_hpke_rfc9180_appendix_a3_dhkem_p256() {
+    // RFC 9180 Appendix A.3 — base mode, DHKEM(P-256, HKDF-SHA256),
+    // HKDF-SHA256, AES-128-GCM. `MLS_128_DHKEMP256_AES128GCM_SHA256_P256`'s
+    // HPKE config. Exercises the DHKEM(P-256) DeriveKeyPair rejection
+    // sampling (§7.1.3), point (de)serialisation, and the HSM-routed
+    // CKM_ECDH1_DERIVE Encap/Decap path end to end.
+    require_softhsm!(env);
+    let provider = PqcTodayProvider::new(&env.config).expect("provider");
+    let mk_cfg = || {
+        HpkeConfig(
+            HpkeKemType::DhKemP256,
+            HpkeKdfType::HkdfSha256,
+            HpkeAeadType::AesGcm128,
+        )
+    };
+
+    // ──── §A.3 published values ────
+    let ikm_e =
+        hex::decode("4270e54ffd08d79d5928020af4686d8f6b7d35dbe470265f1f5aa22816ce860e").unwrap();
+    let pk_em = hex::decode(
+        "04a92719c6195d5085104f469a8b9814d5838ff72b60501e2c4466e5e67b325\
+         ac98536d7b61a1af4b78e5b7f951c0900be863c403ce65c9bfcb9382657222d\
+         18c4",
+    )
+    .unwrap();
+    let sk_em =
+        hex::decode("4995788ef4b9d6132b249ce59a77281493eb39af373d236a1fe415cb0c2d7beb").unwrap();
+    let ikm_r =
+        hex::decode("668b37171f1072f3cf12ea8a236a45df23fc13b82af3609ad1e354f6ef817550").unwrap();
+    let pk_rm = hex::decode(
+        "04fe8c19ce0905191ebc298a9245792531f26f0cece2460639e8bc39cb7f706\
+         a826a779b4cf969b8a0e539c7f62fb3d30ad6aa8f80e30f1d128aafd68a2ce7\
+         2ea0",
+    )
+    .unwrap();
+    let sk_rm =
+        hex::decode("f3ce7fdae57e1a310d87f1ebbde6f328be0a99cdbcadf4d6589cf29de4b8ffd2").unwrap();
+    let info = hex::decode("4f6465206f6e2061204772656369616e2055726e").unwrap();
+    let aad_seq0 = hex::decode("436f756e742d30").unwrap();
+    let pt_seq0 =
+        hex::decode("4265617574792069732074727574682c20747275746820626561757479").unwrap();
+    let ct_seq0 = hex::decode(
+        "5ad590bb8baa577f8619db35a36311226a896e7342a6d836d8b7bcd2f20b6c7\
+         f9076ac232e3ab2523f39513434",
+    )
+    .unwrap();
+
+    // ──── (1) DeriveKeyPair determinism for BOTH sides ────
+    // Spec values must come out of our HSM-routed labeled HKDF + P-256
+    // rejection-sampling scalar derivation byte-for-byte.
+    let kp_r = provider.crypto().derive_hpke_keypair(mk_cfg(), &ikm_r).unwrap();
+    assert_eq!(
+        hex::encode(&kp_r.public),
+        hex::encode(&pk_rm),
+        "DeriveKeyPair(ikmR) → pkRm matches RFC 9180 §A.3"
+    );
+    assert_eq!(
+        hex::encode(kp_r.private.as_ref()),
+        hex::encode(&sk_rm),
+        "DeriveKeyPair(ikmR) → skRm matches RFC 9180 §A.3"
+    );
+
+    let kp_e = provider.crypto().derive_hpke_keypair(mk_cfg(), &ikm_e).unwrap();
+    assert_eq!(
+        hex::encode(&kp_e.public),
+        hex::encode(&pk_em),
+        "DeriveKeyPair(ikmE) → pkEm matches RFC 9180 §A.3"
+    );
+    assert_eq!(
+        hex::encode(kp_e.private.as_ref()),
+        hex::encode(&sk_em),
+        "DeriveKeyPair(ikmE) → skEm matches RFC 9180 §A.3"
+    );
+
+    // ──── (2) Open the published ciphertext with the published sk_r ────
+    let published_ct = openmls_traits::types::HpkeCiphertext {
+        kem_output: pk_em.clone().into(),
+        ciphertext: ct_seq0.clone().into(),
+    };
+    let recovered = provider
+        .crypto()
+        .hpke_open(mk_cfg(), &published_ct, &sk_rm, &info, &aad_seq0)
+        .expect("RFC 9180 §A.3 ct opens with published sk_r");
+    assert_eq!(
+        recovered, pt_seq0,
+        "RFC 9180 §A.3 Encryption Seq 0 plaintext matches"
+    );
+
+    // ──── (3) Tampered AAD → AEAD failure ────
+    let mut bad_aad = aad_seq0.clone();
+    bad_aad[0] ^= 1;
+    assert!(
+        provider
+            .crypto()
+            .hpke_open(mk_cfg(), &published_ct, &sk_rm, &info, &bad_aad)
+            .is_err(),
+        "AAD tamper must fail AEAD verification"
+    );
+
+    // ──── (4) Invalid point rejection (RFC 9180 §7.1.1) ────
+    // The identity point's single-byte SEC1 encoding, and a same-length
+    // buffer that isn't a valid point at all, must both be rejected before
+    // any DH is attempted.
+    let identity_point = vec![0x00u8];
+    assert!(
+        provider
+            .crypto()
+            .hpke_seal(mk_cfg(), &identity_point, &info, &aad_seq0, b"x")
+            .is_err(),
+        "sealing to the identity point must fail point validation"
+    );
+    let mut bogus_point = pk_rm.clone();
+    bogus_point[1] ^= 0xff; // corrupt the X coordinate — no longer on the curve
+    assert!(
+        provider
+            .crypto()
+            .hpke_seal(mk_cfg(), &bogus_point, &info, &aad_seq0, b"x")
+            .is_err(),
+        "sealing to an off-curve point must fail point validation"
+    );
+
+    // ──── (5) Roundtrip with §A.3 recipient ────
+    let pt_new = b"P-256 KAT roundtrip with A.3 keys";
+    let ct = provider
+        .crypto()
+        .hpke_seal(mk_cfg(), &pk_rm, &info, &aad_seq0, pt_new)
+        .unwrap();
+    let opened = provider
+        .crypto()
+        .hpke_open(mk_cfg(), &ct, &sk_rm, &info, &aad_seq0)
+        .unwrap();
+    assert_eq!(opened, pt_new);
+}
+
 // `PqcTodayCrypto` / `PqcTodayRand` are visible — keep the type names in
 // the integration symbol graph so a future refactor that drops them fails
 // here loudly.

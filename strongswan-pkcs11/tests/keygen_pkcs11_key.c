@@ -56,6 +56,12 @@ typedef CK_ULONG CK_USER_TYPE;
 #define CKP_SLH_DSA_SHA2_128S 0x00000001UL
 #define CKP_SLH_DSA_SHA2_192S 0x00000005UL
 #define CKP_SLH_DSA_SHA2_256S 0x00000009UL
+/* CKK_EC_EDWARDS/CKM_EC_EDWARDS_KEY_PAIR_GEN/CKA_EC_PARAMS (PKCS#11 v3.2
+ * §2.3.7 / §6.66) — used for Ed448 below, distinct from ML-DSA/SLH-DSA:
+ * curve selected via CKA_EC_PARAMS, not CKA_PARAMETER_SET. */
+#define CKK_EC_EDWARDS 0x00000040UL
+#define CKM_EC_EDWARDS_KEY_PAIR_GEN 0x00001055UL
+#define CKA_EC_PARAMS 0x00000180UL
 
 typedef struct { CK_ATTRIBUTE_TYPE type; void *pValue; CK_ULONG ulValueLen; } CK_ATTRIBUTE;
 typedef struct { CK_MECHANISM_TYPE mechanism; void *pParameter; CK_ULONG ulParameterLen; } CK_MECHANISM;
@@ -78,7 +84,7 @@ int main(int argc, char **argv) {
     if (argc < 5) {
         fprintf(stderr,
             "usage: %s <module.so> <token-label> <pin> <keyid-hex> "
-            "[paramset:128s|192s|256s|mldsa44|mldsa65|mldsa87] [label]\n",
+            "[paramset:128s|192s|256s|mldsa44|mldsa65|mldsa87|ed448] [label]\n",
             argv[0]);
         return 2;
     }
@@ -172,11 +178,20 @@ int main(int argc, char **argv) {
 
     CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
     int is_mldsa = (strncmp(paramset_s, "mldsa", 5) == 0);
-    CK_KEY_TYPE ktype = is_mldsa ? CKK_ML_DSA : CKK_SLH_DSA;
-    CK_MECHANISM_TYPE kpMechType = is_mldsa ? CKM_ML_DSA_KEY_PAIR_GEN : CKM_SLH_DSA_KEY_PAIR_GEN;
+    int is_ed448 = (strcmp(paramset_s, "ed448") == 0);
+    CK_KEY_TYPE ktype = is_ed448 ? CKK_EC_EDWARDS : is_mldsa ? CKK_ML_DSA : CKK_SLH_DSA;
+    CK_MECHANISM_TYPE kpMechType = is_ed448 ? CKM_EC_EDWARDS_KEY_PAIR_GEN :
+                                    is_mldsa ? CKM_ML_DSA_KEY_PAIR_GEN : CKM_SLH_DSA_KEY_PAIR_GEN;
     CK_BBOOL bTrue = CK_TRUE;
-    CK_ULONG paramSet;
-    if (is_mldsa) {
+    CK_ULONG paramSet = 0;
+    /* RFC 8410 id-Ed448 OID (1.3.101.113), DER-encoded — this connector's
+     * canonical CKA_EC_PARAMS encoding for Ed448 (matches
+     * strongswan-pkcs11/pkcs11_public_key.c's ed448_ec_params_oid). Only
+     * used when is_ed448; ML-DSA/SLH-DSA keep using CKA_PARAMETER_SET. */
+    unsigned char ed448_oid[] = { 0x06, 0x03, 0x2b, 0x65, 0x71 };
+    if (is_ed448) {
+        /* no CKA_PARAMETER_SET for CKK_EC_EDWARDS — curve is in CKA_EC_PARAMS */
+    } else if (is_mldsa) {
         paramSet = (strcmp(paramset_s, "mldsa87") == 0) ? CKP_ML_DSA_87 :
                    (strcmp(paramset_s, "mldsa65") == 0) ? CKP_ML_DSA_65 : CKP_ML_DSA_44;
     } else {
@@ -184,11 +199,18 @@ int main(int argc, char **argv) {
                    (strcmp(paramset_s, "192s") == 0) ? CKP_SLH_DSA_SHA2_192S : CKP_SLH_DSA_SHA2_128S;
     }
 
+    /* CKA_EC_PARAMS goes on the PUBLIC key template only: the engine's
+     * P11Attribute checks table (P11Objects.cpp) registers CKA_EC_PARAMS
+     * with `ck3` (caller-settable at C_GenerateKeyPair) on the Edwards
+     * public-key object but `ck4|ck6` (MUST NOT be specified when
+     * generated — it derives/copies it internally, see generateED() in
+     * SoftHSM_keygen.cpp) on the private-key object. Including it in
+     * privTmpl fails C_GenerateKeyPair with CKR_ATTRIBUTE_READ_ONLY. */
     CK_ATTRIBUTE pubTmpl[] = {
         { CKA_CLASS, &pubClass, sizeof(pubClass) },
         { CKA_KEY_TYPE, &ktype, sizeof(ktype) },
         { CKA_VERIFY, &bTrue, sizeof(bTrue) },
-        { CKA_PARAMETER_SET, &paramSet, sizeof(paramSet) },
+        { 0, NULL, 0 }, /* set below: CKA_EC_PARAMS (Ed448) or CKA_PARAMETER_SET */
         { CKA_TOKEN, &bTrue, sizeof(bTrue) },
         { CKA_ID, keyid, (CK_ULONG)keyid_len },
         { CKA_LABEL, (void*)objlabel, (CK_ULONG)strlen(objlabel) },
@@ -197,14 +219,26 @@ int main(int argc, char **argv) {
         { CKA_CLASS, &privClass, sizeof(privClass) },
         { CKA_KEY_TYPE, &ktype, sizeof(ktype) },
         { CKA_SIGN, &bTrue, sizeof(bTrue) },
-        { CKA_PARAMETER_SET, &paramSet, sizeof(paramSet) },
+        { 0, NULL, 0 }, /* set below for ML-DSA/SLH-DSA only: CKA_PARAMETER_SET */
         { CKA_TOKEN, &bTrue, sizeof(bTrue) },
         { CKA_ID, keyid, (CK_ULONG)keyid_len },
         { CKA_LABEL, (void*)objlabel, (CK_ULONG)strlen(objlabel) },
     };
+    CK_ULONG privCount = 7;
+    if (is_ed448) {
+        pubTmpl[3].type = CKA_EC_PARAMS; pubTmpl[3].pValue = ed448_oid; pubTmpl[3].ulValueLen = sizeof(ed448_oid);
+        /* drop the unused slot 3 from privTmpl by shifting the remaining
+         * attributes down and shrinking the count passed to
+         * C_GenerateKeyPair. */
+        privTmpl[3] = privTmpl[4]; privTmpl[4] = privTmpl[5]; privTmpl[5] = privTmpl[6];
+        privCount = 6;
+    } else {
+        pubTmpl[3].type = CKA_PARAMETER_SET; pubTmpl[3].pValue = &paramSet; pubTmpl[3].ulValueLen = sizeof(paramSet);
+        privTmpl[3].type = CKA_PARAMETER_SET; privTmpl[3].pValue = &paramSet; privTmpl[3].ulValueLen = sizeof(paramSet);
+    }
     CK_MECHANISM mech = { kpMechType, NULL, 0 };
     CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
-    rv = fl->C_GenerateKeyPair(sess, &mech, pubTmpl, 7, privTmpl, 7, &hPub, &hPriv);
+    rv = fl->C_GenerateKeyPair(sess, &mech, pubTmpl, 7, privTmpl, privCount, &hPub, &hPriv);
     if (rv != 0) { fprintf(stderr, "C_GenerateKeyPair rv=%lu\n", rv); return 1; }
 
     printf("OK: generated %s keypair, CKA_ID=%s, pub handle=%lu priv handle=%lu\n",

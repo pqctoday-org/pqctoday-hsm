@@ -255,6 +255,7 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         ChaCha20 => "ChaCha20",
         ChaCha20Poly1305 => "ChaCha20-Poly1305",
         Ed25519 => "Ed25519",
+        Ed448 => "Ed448",
         MlKem512 => "ML-KEM-512",
         MlKem768 => "ML-KEM-768",
         MlKem1024 => "ML-KEM-1024",
@@ -857,7 +858,9 @@ pub fn native_sign_mech_with_params(
         HmacSha512 => c::CKM_SHA512_HMAC,
         // P1 (2026-07-05): pure EdDSA signs the message directly — no
         // caller-selectable hash parameter, unlike RSA/ECDSA above.
-        Ed25519 => c::CKM_EDDSA,
+        // Ed448 mirrors Ed25519 exactly here — CKM_EDDSA covers both
+        // curves (the engine dispatches on the stored key's byte length).
+        Ed25519 | Ed448 => c::CKM_EDDSA,
         // HSS/LMS (RFC 8554) — no caller-selectable hash parameter either;
         // the hash family is fixed by the key's own LMS parameter set
         // (CKA_LMS_PARAM_SET), not by CryptographicParameters.

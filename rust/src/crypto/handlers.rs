@@ -861,6 +861,18 @@ pub fn build_ed25519_spki(pk: &[u8]) -> Vec<u8> {
     build_spki_from_parts(alg_id, pk)
 }
 
+/// Build SPKI DER for Ed448 (id-Ed448, OID 1.3.101.113, RFC 8410) from a
+/// 57-byte key. Same AlgId bytes `ffi::C_GenerateKeyPair`'s
+/// `CKM_EC_EDWARDS_KEY_PAIR_GEN` Ed448 arm already inlines — factored out
+/// here so `native::generate_ed448_keypair` (the KMIP-layer entry point)
+/// doesn't have to duplicate them, mirroring how [`build_ed25519_spki`]
+/// already serves both the FFI and native Ed25519 paths.
+pub fn build_ed448_spki(pk: &[u8]) -> Vec<u8> {
+    // AlgId: 30 05 06 03 2b6571  (OID 1.3.101.113)
+    let alg_id: &[u8] = &[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x71];
+    build_spki_from_parts(alg_id, pk)
+}
+
 pub fn build_x25519_spki(pk: &[u8]) -> Vec<u8> {
     // AlgId: 30 05 06 03 2b656e  (OID 1.3.101.110 — id-X25519, RFC 8410)
     let alg_id: &[u8] = &[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e];
@@ -1605,8 +1617,40 @@ pub fn sign_hmac(mech: u32, key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32
             mac.update(msg);
             Ok(mac.finalize().into_bytes().to_vec())
         }
+        // KMIP/CACP coverage gap (G3, 2026-09-02): the mechanism constants
+        // and this crate's SP 800-108 KBKDF path (`sp800_108_counter_kbkdf`,
+        // `ffi.rs`) already covered SHA-512/224, SHA-512/256, and the SHA3
+        // family; the plain HMAC Sign/Verify primitive here did not (SHA3-
+        // 256/512 were added 2026-08-30, item 6 of the same coverage audit,
+        // but SHA-512/224, SHA-512/256, and SHA3-224/384 were still
+        // missing). `hmac_prf`'s widening in `kmip/` needs a real engine
+        // mechanism to dispatch to, not just a KMIP-layer match arm.
+        CKM_SHA512_224_HMAC => {
+            let mut mac = Hmac::<sha2::Sha512_224>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        CKM_SHA512_256_HMAC => {
+            let mut mac = Hmac::<sha2::Sha512_256>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        CKM_SHA3_224_HMAC => {
+            let mut mac = Hmac::<sha3::Sha3_224>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
         CKM_SHA3_256_HMAC => {
             let mut mac = Hmac::<sha3::Sha3_256>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        CKM_SHA3_384_HMAC => {
+            let mut mac = Hmac::<sha3::Sha3_384>::new_from_slice(key_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             mac.update(msg);
             Ok(mac.finalize().into_bytes().to_vec())
@@ -3115,6 +3159,75 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    /// G1 (2026-09-02) — RFC 8032 §7.4's own published Ed448 known-answer
+    /// vectors (the "ordinary Ed448", i.e. non-ctx/non-ph, empty-context
+    /// case), reproduced byte-exact through `sign_eddsa` — the plain
+    /// `CKM_EDDSA` primitive `native::sign`/`native::verify` dispatch to
+    /// for a 57-byte key, and therefore what the new KMIP `Ed448` wiring
+    /// (`kmip/src/kmip30/algos.rs::KmipAlgorithm::Ed448`,
+    /// `kmip/src/ops/create_key_pair.rs`) ultimately calls into for
+    /// `Sign`/`SignatureVerify`.
+    ///
+    /// Vectors transcribed from the pinned `ed448-goldilocks` 0.14.0-pre.11
+    /// crate's own `sign/verifying_key.rs` test module (`TEST_VECTORS[0]`
+    /// and `[1]`, sourced there from RFC 8032 §7.4 directly) — not
+    /// retyped from the RFC by hand, avoiding a transcription error in
+    /// either place independently producing a false pass. RFC 8032 EdDSA
+    /// signing is fully deterministic (no random hedge — see §5.2's `r`
+    /// derivation), so the same key + message always reproduces the same
+    /// signature bytes; a KMIP `CreateKeyPair` round trip can't exercise
+    /// this directly (no seeded/deterministic keygen path exists for
+    /// Ed25519 or Ed448 — see `kmip/tests/native_bridge_e2e.rs::
+    /// ed448_create_sign_verify_round_trip`'s doc comment), so this
+    /// byte-exact check runs at the engine layer instead.
+    #[test]
+    fn ed448_matches_rfc8032_section_7_4_vectors() {
+        // TEST_VECTORS[0]: empty message, empty context.
+        let sk = decode_hex(
+            "6c82a562cb808d10d632be89c8513ebf6c929f34ddfa8c9f63c9960ef6e348a\
+             3528c8a3fcc2f044e39a3fc5b94492f8f032e7549a20098f95b",
+        );
+        let pk = decode_hex(
+            "5fd7449b59b461fd2ce787ec616ad46a1da1342485a70e1f8a0ea75d80e9677\
+             8edf124769b46c7061bd6783df1e50f6cd1fa1abeafe8256180",
+        );
+        let msg: &[u8] = b"";
+        let expected_sig = decode_hex(
+            "533a37f6bbe457251f023c0d88f976ae2dfb504a843e34d2074fd823d41a591\
+             f2b233f034f628281f2fd7a22ddd47d7828c59bd0a21bfd3980ff0d2028d4b1\
+             8a9df63e006c5d1c2d345b925d8dc00b4104852db99ac5c7cdda8530a113a0f\
+             4dbb61149f05a7363268c71d95808ff2e652600",
+        );
+        assert_eq!(sk.len(), 57);
+        assert_eq!(pk.len(), 57);
+        assert_eq!(expected_sig.len(), 114);
+        let sig = sign_eddsa(&sk, msg).unwrap();
+        assert_eq!(sig, expected_sig, "must match RFC 8032 §7.4's empty-message Ed448 vector");
+        verify_eddsa(&pk, msg, &sig).expect("RFC vector's own signature must verify");
+
+        // TEST_VECTORS[1]: 1-byte message (0x03), empty context.
+        let sk = decode_hex(
+            "c4eab05d357007c632f3dbb48489924d552b08fe0c353a0d4a1f00acda2c463\
+             afbea67c5e8d2877c5e3bc397a659949ef8021e954e0a12274e",
+        );
+        let pk = decode_hex(
+            "43ba28f430cdff456ae531545f7ecd0ac834a55d9358c0372bfa0c6c6798c08\
+             66aea01eb00742802b8438ea4cb82169c235160627b4c3a9480",
+        );
+        let msg: &[u8] = &[0x03];
+        let expected_sig = decode_hex(
+            "26b8f91727bd62897af15e41eb43c377efb9c610d48f2335cb0bd0087810f43\
+             52541b143c4b981b7e18f62de8ccdf633fc1bf037ab7cd779805e0dbcc0aae1\
+             cbcee1afb2e027df36bc04dcecbf154336c19f0af7e0a6472905e799f1953d2\
+             a0ff3348ab21aa4adafd1d234441cf807c03a00",
+        );
+        let sig = sign_eddsa(&sk, msg).unwrap();
+        assert_eq!(sig, expected_sig, "must match RFC 8032 §7.4's 1-byte-message Ed448 vector");
+        verify_eddsa(&pk, msg, &sig).expect("RFC vector's own signature must verify");
+        // Tampered message must not verify — proves this isn't a vacuous check.
+        assert!(verify_eddsa(&pk, &[0x04], &sig).is_err());
     }
 
     /// KMIP/CACP coverage gap-analysis items 9a/9b (2026-08-30) —

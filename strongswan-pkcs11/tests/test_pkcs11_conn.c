@@ -1,23 +1,23 @@
 /*
  * test_pkcs11_conn.c — real functional test of the strongswan-pkcs11
- * connector's PQC authentication path (ML-DSA-44/65/87 and
- * SLH-DSA-SHA2-128s/192s/256s), added because none of it — least of all
- * SLH-DSA, registered in pkcs11_plugin.c since the ML-KEM-512/1024 +
- * SLH-DSA-registration commit but never exercised by any test — had a
- * single automated test anywhere in this repo. The only prior evidence
- * for this connector's PQC auth was a manually browser-verified WASM
- * IKEv2 handshake (ML-DSA-65 cert auth only; see
+ * connector's PQC/PQ-adjacent authentication path (ML-DSA-44/65/87,
+ * SLH-DSA-SHA2-128s/192s/256s, and Ed448), added because none of it —
+ * least of all SLH-DSA, registered in pkcs11_plugin.c since the
+ * ML-KEM-512/1024 + SLH-DSA-registration commit but never exercised by
+ * any test — had a single automated test anywhere in this repo. The only
+ * prior evidence for this connector's PQC auth was a manually
+ * browser-verified WASM IKEv2 handshake (ML-DSA-65 cert auth only; see
  * ../../strongswan-wasm-shims/STATUS.md), documented but not repeatable
- * from the command line and not covering SLH-DSA at all.
+ * from the command line and not covering SLH-DSA or Ed448 at all.
  *
  * This exercises exactly the credential-layer call sequence real IKEv2
  * peer authentication uses: lib->creds->create(CRED_PRIVATE_KEY, ...,
  * BUILD_PKCS11_*, ...) to connect to a token-resident key via the real
  * pkcs11_private_key_connect() in pkcs11_private_key.c, then
- * private_key_t.sign() (CKM_ML_DSA / CKM_SLH_DSA via a real C_Sign on
- * the real softhsmv3 module) and public_key_t.verify() (real C_Verify)
- * — genuine PKCS#11 dispatch, not a simulation — plus a negative control
- * that a corrupted signature is correctly rejected.
+ * private_key_t.sign() (CKM_ML_DSA / CKM_SLH_DSA / CKM_EDDSA via a real
+ * C_Sign on the real softhsmv3 module) and public_key_t.verify() (real
+ * C_Verify) — genuine PKCS#11 dispatch, not a simulation — plus a
+ * negative control that a corrupted signature is correctly rejected.
  *
  * Build (against a strongSwan 6.0.7 tree with strongswan-pkcs11.patch +
  * strongswan-pqc*.patch applied, per strongswan-pkcs11.patch's own
@@ -171,7 +171,7 @@ int main(int argc, char **argv)
      * so register one PIN per CKA_ID used below. */
     mem_cred_t *creds = mem_cred_create();
     {
-        const char *ids[] = {"01", "02", "03", "04", "05", "06"};
+        const char *ids[] = {"01", "02", "03", "04", "05", "06", "07"};
         for (size_t i = 0; i < countof(ids); i++)
         {
             chunk_t k = chunk_from_hex(chunk_from_str((char*)ids[i]), NULL);
@@ -185,7 +185,7 @@ int main(int argc, char **argv)
 
     /* CKA_ID assignment matches this directory's README.md worked example
      * and keygen_pkcs11_key.c invocations: 01/02/03 = SLH-DSA-SHA2
-     * 128s/256s/192s, 04/05/06 = ML-DSA-44/65/87. */
+     * 128s/256s/192s, 04/05/06 = ML-DSA-44/65/87, 07 = Ed448. */
     int failures = 0;
     failures += run_one(module, slot, "01", KEY_SLH_DSA_SHA2_128S,
                          SIGN_SLH_DSA_SHA2_128S, "SLH-DSA-SHA2-128s");
@@ -199,6 +199,8 @@ int main(int argc, char **argv)
                          SIGN_ML_DSA_65, "ML-DSA-65");
     failures += run_one(module, slot, "06", KEY_ML_DSA_87,
                          SIGN_ML_DSA_87, "ML-DSA-87");
+    failures += run_one(module, slot, "07", KEY_ED448,
+                         SIGN_ED448, "Ed448");
 
     lib->credmgr->remove_set(lib->credmgr, &creds->set);
     creds->destroy(creds);
@@ -206,6 +208,6 @@ int main(int argc, char **argv)
     library_deinit();
 
     printf("\n==================================================\n");
-    printf("%d test(s), %d failure(s)\n", 6, failures);
+    printf("%d test(s), %d failure(s)\n", 7, failures);
     return failures ? 1 : 0;
 }

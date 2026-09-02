@@ -104,3 +104,9 @@ build_consumers_wasm/
 build_audit_0812/
 build_reader/
 build_defects/
+
+# strongswan-pkcs11 native test binaries (compiled by hand per
+# strongswan-pkcs11/tests/README.md — never checked in, source .c only)
+strongswan-pkcs11/tests/keygen_pkcs11_key
+strongswan-pkcs11/tests/test_pkcs11_conn
+strongswan-pkcs11/tests/test_pkcs11_kem

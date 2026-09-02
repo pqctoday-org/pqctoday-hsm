@@ -3923,9 +3923,14 @@ CK_RV SoftHSM::C_DeriveKey
 	// same pattern as HDWalletDerivation.cpp/OSSLKMAC.cpp elsewhere in this
 	// codebase). Construction verified byte-for-byte against real ACVP
 	// KDF-1.0 vectors before use: A(0) = fixedInput; A(i) = PRF(Ki, A(i-1));
-	// round output = PRF(Ki, A(i) || counter || fixedInput) — the same
-	// "before fixed data" placement as this engine's COUNTER_KDF/FEEDBACK_KDF
-	// (see the comment there for why only that placement is supported).
+	// round output = PRF(Ki, A(i) || [counter] || fixedInput), where the
+	// counter is included ONLY when the caller supplied CK_SP800_108_COUNTER
+	// (it is an optional data field for this mode per the PKCS#11 v3.3 draft
+	// spec, not a mandatory one — see dpCounterRequested below; fixed prior to
+	// 2026-09 this handler always mixed in a default 32-bit counter even when
+	// none was requested) — the same "before fixed data" placement as this
+	// engine's COUNTER_KDF/FEEDBACK_KDF (see the comment there for why only
+	// that placement is supported).
 	if (pMechanism->mechanism == CKM_SP800_108_DOUBLE_PIPELINE_KDF)
 	{
 		if (pMechanism->pParameter == NULL_PTR ||
@@ -3993,9 +3998,21 @@ CK_RV SoftHSM::C_DeriveKey
 
 		// Parse CK_PRF_DATA_PARAM array (same shape as FEEDBACK_KDF above):
 		//   CK_SP800_108_BYTE_ARRAY → fixed input (per §2.44.3, also used as A(0))
-		//   CK_SP800_108_COUNTER → explicit optional counter width
+		//   CK_SP800_108_COUNTER → explicit OPTIONAL counter (PKCS#11 v3.3 draft
+		//     working/doc/spec/sp800-108_key_derivation.md, "Double Pipeline Mode
+		//     KDF" table: "This data field type is optional... If specified, only
+		//     one instance of this type may be specified" — identical wording to
+		//     Feedback Mode's own CK_SP800_108_COUNTER row). dpCounterRequested
+		//     tracks whether the caller actually supplied one; dpCounterBits is
+		//     ONLY the width to use *when* one was requested (its 32-bit default
+		//     must never be read as "a counter was asked for" — that was the bug:
+		//     a counter was unconditionally mixed into every round even with no
+		//     CK_SP800_108_COUNTER entry at all, diverging from the Rust engine's
+		//     already-correct sp800_108_feedback_input, which omits the counter
+		//     segment entirely when the caller didn't ask for one).
 		ByteString dpFixedInput;
 		int dpCounterBits = 32;
+		bool dpCounterRequested = false;
 		for (CK_ULONG i = 0; i < dpp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dpm = &dpp->pDataParams[i];
@@ -4010,7 +4027,10 @@ CK_RV SoftHSM::C_DeriveKey
 					{
 						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dpm->pValue;
 						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64)
+						{
 							dpCounterBits = (int)cf->ulWidthInBits;
+							dpCounterRequested = true;
+						}
 					}
 					break;
 				default:
@@ -4069,8 +4089,16 @@ CK_RV SoftHSM::C_DeriveKey
 				dpA = dpANext;
 
 				ByteString dpRoundIn = dpA;
-				for (int b = dpCounterBytes - 1; b >= 0; b--)
-					dpRoundIn += (unsigned char)((dpCounter >> (8 * b)) & 0xFF);
+				// Counter is mixed in ONLY when the caller explicitly supplied
+				// CK_SP800_108_COUNTER (see dpCounterRequested above) — an absent
+				// counter is a valid, spec-conformant call shape for Double
+				// Pipeline mode, not an error and not a "use the default width"
+				// signal.
+				if (dpCounterRequested)
+				{
+					for (int b = dpCounterBytes - 1; b >= 0; b--)
+						dpRoundIn += (unsigned char)((dpCounter >> (8 * b)) & 0xFF);
+				}
 				dpRoundIn += dpFixedInput;
 
 				ByteString dpBlock;
