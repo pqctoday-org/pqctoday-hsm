@@ -176,6 +176,11 @@ jobs:
         # runs first so the log always records which build was actually used.
         env:
           LD_LIBRARY_PATH: /opt/openssl-3.6/lib64:/opt/openssl-3.6/lib
+          # Turns a silent skip into a hard failure: if the openssl on PATH
+          # ever loses ML-KEM support again (cache miss, version bump, PATH
+          # change), these interop tests must FAIL rather than quietly assert
+          # nothing and still show green. See openssl_supports_mlkem768().
+          REQUIRE_PQC_INTEROP: "1"
         run: |
           export PATH="/opt/openssl-3.6/bin:$PATH"
           openssl version

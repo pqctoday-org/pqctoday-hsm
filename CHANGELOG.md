@@ -34,7 +34,121 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   classical RFC 9180 A.3-aligned round trips), all asserting
   non-extractability of every intermediate handle.
 
+- **OpenPGP: standalone (non-composite) Ed448 signing, RFC 9580 algorithm
+  28.** Ed448 was previously reachable only inside the `MLDSA87_Ed448`
+  composite, so a caller wanting plain Ed448 had no path at all. The
+  composite's Ed448-signing logic is factored into a shared `ed448_sign()`
+  helper rather than duplicated, so both paths sign through one
+  implementation, and `generate_ed448_in_hsm()` mirrors the composite's
+  keygen. The private key stays inside the token throughout — signing goes
+  through `C_Sign` like every other algorithm here. Verified with a real
+  live-HSM generate → sign → verify round trip, not a mock.
+
+- **KMIP: Ed448 (`KmipAlgorithm::Ed448`, wire `0x38`) and six further hash
+  algorithms.** The engine had gained Ed448 but the KMIP layer never
+  offered it, and `compute_hash()`/`hmac_prf()` exposed only 3 of the 8
+  digests the engine supports — now widened to SHA-512/224, SHA-512/256
+  and SHA3-224/256/384/512. Fixing the dispatch surfaced a deeper gap
+  behind it: `sign_hmac`/`verify_hmac` in `rust/src/crypto/handlers.rs`
+  and `native::sign`'s dispatch were themselves missing SHA-512/224,
+  SHA-512/256 and SHA3-384 arms, so several of those digests were not
+  merely unexposed by KMIP but unimplemented anywhere. Both layers fixed.
+
+- **OpenSSL provider: `CKM_AES_GMAC` as a real `EVP_MAC`.** GMAC was
+  supported by both engines but unreachable through the vendored
+  `pkcs11-provider`, so no OpenSSL caller could use it. Implemented as
+  `MAC_ALGO_GMAC` following the existing CMAC/KMAC pattern in
+  `src/vendor/pkcs11-provider/src/mac.c`.
+
+- **strongswan-pkcs11: Ed448 IKEv2 authentication.** `SIGN_ED448` /
+  `KEY_ED448` already exist in strongSwan 6.0.7 core but were never wired
+  to this connector's `CKM_EDDSA` path, so Ed448 could not be used for VPN
+  peer authentication at all. Cross-checked against an independent OpenSSL
+  oracle rather than only against this engine's own verify.
+
+- **strongswan-pkcs11: a real automated ML-KEM-768 key-exchange test.**
+  The `key_exchange_t` path had never been exercised by an automated test —
+  only manually, once, in a browser. `tests/test_pkcs11_kem.c` drives it
+  natively and, in doing so, documented two genuine deployment
+  preconditions that were previously undiscovered: `plugins.pkcs11.use_dh =
+  yes` is required, and the token must already be logged in before key
+  exchange (`C_Login` was never called on native builds, only under
+  `__EMSCRIPTEN__`).
+
+- **CI: `REQUIRE_PQC_INTEROP=1` turns a silently-skipped interop suite into
+  a hard failure.** `kmip/tests/openssl_kem_interop.rs` cross-checks
+  ML-KEM-768 and X25519MLKEM768 against a real OpenSSL process, and skips
+  when the `openssl` on `PATH` is too old. Skipping is correct on a
+  developer machine without a PQC-capable build; it is wrong where the
+  interop claim is meant to be *evidenced*. CI was in the second category
+  while behaving like the first — `ubuntu-24.04` ships OpenSSL 3.0.13,
+  which predates ML-KEM, so all four tests skipped on every run and this
+  project's PQC-interoperability claim had no CI evidence behind it: a
+  green tick asserting nothing. CI now builds a pinned OpenSSL 3.6.3 for
+  that job and sets this variable, so a future regression (cache miss,
+  version bump, `PATH` change) fails loudly instead of silently.
+
 ### Fixed
+
+- **Rust engine: EdDSA context strings were silently discarded, producing
+  signatures no other implementation accepts.** `parse_sign_mech_params`
+  in the FFI dispatch had no `CKM_EDDSA` branch at all, so
+  `CK_EDDSA_PARAMS.pContextData` / `ulContextDataLen` were never read and
+  Ed25519ctx/Ed448 signing silently fell back to context-free signing. The
+  result verified perfectly against this engine's own verify — and was
+  rejected by every independent implementation, which is precisely the
+  failure mode a self-consistency test cannot see. Caught by cross-checking
+  against a real OpenSSL process; the C++ engine's identical cross-check
+  already passed. Not a maths bug: a missing dispatch arm.
+
+- **Rust engine: `CKM_AES_CCM` and `CKM_AES_XTS` had no multi-part
+  dispatch whatsoever.** `build_multipart_cipher()` carried no arm for
+  either mechanism, so any caller feeding data through
+  `C_EncryptUpdate`/`C_EncryptFinal` — the normal path for streaming or
+  large payloads — got a generic data-length error rather than a result.
+  Both are structurally not "online" ciphers, so each now buffers its
+  `Update` input and runs the existing, unmodified one-shot primitive at
+  `Final`, leaving the verified primitives untouched.
+
+- **Rust engine: `CKM_AES_GMAC` could not stream.** `sign_gmac()` itself
+  was correct, but `CKM_AES_GMAC` was absent from
+  `sign_mech_supports_multipart()`'s whitelist, so `C_SignUpdate` returned
+  `CKR_OPERATION_NOT_INITIALIZED`. A one-line omission that made a working
+  primitive unreachable through its streaming interface.
+
+- **openmls-provider: two of the four MLS ciphersuites did their HPKE
+  entirely in software, bypassing the HSM.** Key material that was
+  supposed to stay inside the token was handled in ordinary process
+  memory instead, which defeats the purpose of backing MLS with an HSM at
+  all. All four ciphersuites now route HPKE through the engine. The most
+  security-relevant fix in this release.
+
+- **Rust engine: three key-import defects, none of which any existing test
+  could see** — every prior test generated keys in-engine rather than
+  importing them:
+  - `CKK_ML_DSA` / `CKK_ML_KEM` private keys supplied as PKCS#8 DER were
+    stored verbatim instead of unwrapped to the raw FIPS array, so every
+    sign or decapsulate on an *imported* PQC key failed.
+  - X25519/X448 curve detection defaulted any unrecognised OID to P-256
+    instead of using the `decode_ec_params()` decoder `C_GenerateKeyPair`
+    already used. `CKM_ECDH1_DERIVE` then computed a **wrong shared secret
+    using the wrong curve's maths, and returned no error** — a silent
+    wrong answer rather than a failure.
+  - `strip_ec_point_der` decided whether `CKA_EC_POINT` was DER-wrapped by
+    testing `ec_point[0] == 0x04`. A *raw* uncompressed SEC1 point also
+    begins `0x04` — that is its uncompressed marker, not a DER tag — so
+    for a raw 65-byte P-256 point the code compared `ec_point[1]`, which
+    is simply the first byte of the X coordinate, against `len - 2` (63).
+    Whenever X began with byte 63 it stripped two bytes off a valid point
+    and returned 63 bytes of garbage, surfacing as a spurious
+    `CKR_ARGUMENTS_BAD`: roughly **1 imported P-256 key in 256**. The same
+    trap applied to the bare Edwards/Montgomery values the function also
+    serves. Now decided on length, which is unambiguous — raw sizes
+    (32/56/57/65/97/133) and DER-wrapped totals (34/58/59/67/99/136) are
+    disjoint, so the encodings are distinguished exactly rather than
+    guessed at. Covered by a regression test that generates real keypairs
+    until it finds the triggering byte, and asserts the old code's output
+    is *rejected*, so it cannot pass vacuously.
 
 - **Validation gate: concurrent runs in different worktrees shared one
   cargo build directory, and cargo linked the wrong feature-variant of the
