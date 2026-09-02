@@ -193,8 +193,8 @@ int p11prov_cipher_aead_set_tag_param(struct p11prov_cipher_ctx *ctx,
 #define MODE_cfb1 MODE_cfb
 #define MODE_cfb8 MODE_cfb
 #define MODE_ctr 0x10
-#define MODE_gcm 0x20 | MODE_flag_aead
-#define MODE_ccm 0x40 | MODE_flag_aead
+#define MODE_gcm (0x20 | MODE_flag_aead)
+#define MODE_ccm (0x40 | MODE_flag_aead)
 #define MODE_cts MODE_flag_cts | MODE_cbc
 #define MODE_stream 0x80
 #define MODE_poly1305 0x81 | MODE_flag_aead
@@ -372,5 +372,7 @@ extern const OSSL_DISPATCH p11prov_aes256wrappad_cipher_functions[];
 
 extern const OSSL_DISPATCH p11prov_chacha20256stream_cipher_functions[];
 extern const OSSL_DISPATCH p11prov_chacha20256poly1305_cipher_functions[];
+
+int p11prov_chacha20_set_ctx_params(void *vctx, const OSSL_PARAM params[]);
 
 #endif /* _CIPHER_H */
