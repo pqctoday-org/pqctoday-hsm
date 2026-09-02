@@ -1311,11 +1311,53 @@ fn strip_ec_point_der(ec_point: Vec<u8>) -> Vec<u8> {
     //   - Long form 1B: 0x04 0x81 <len> <data>             (P-521 path — data=133)
     // P-256 / P-384 / secp256k1 fit short form (65 / 97 / 65 ≤ 127).
     // P-521's 133-byte SEC1 point requires long form.
+    //
+    // The tag byte ALONE cannot tell the two apart, and assuming it can was a
+    // real, silent, data-dependent bug (found 2026-09-02). A raw uncompressed
+    // SEC1 point also begins 0x04 — that is its "uncompressed" marker, not a
+    // DER OCTET STRING tag — so for a raw 65-byte P-256 point the old code
+    // compared ec_point[1], which is simply the FIRST BYTE OF THE X
+    // COORDINATE, against len-2 (= 63). Whenever X started with byte 63 it
+    // stripped two bytes off a perfectly good point and returned 63 bytes of
+    // garbage, which downstream surfaces as a bogus CKR_ARGUMENTS_BAD from
+    // p256::PublicKey::from_sec1_bytes. That is ~1 imported P-256 key in 256.
+    // The same trap applies to the bare Edwards/Montgomery values this
+    // function also serves (see get_key_material_from): a 32-byte X25519
+    // point whose first two bytes happen to be 0x04, 0x1e would be mangled
+    // identically. Engine-GENERATED keys always take the DER-wrapped path
+    // (native::keygen writes 0x04 <len> <point>), so this only ever bit
+    // IMPORTED keys — which is exactly why the test suite never caught it.
+    //
+    // Fix: decide on LENGTH, which is unambiguous here, not on the tag byte.
+    // Every key type this engine stores in CKA_EC_POINT has a known raw size,
+    // and no DER-wrapped total collides with any raw size (wrapped totals are
+    // 34/58/59/67/99/136; raw are 32/56/57/65/97/133), so the two sets can be
+    // told apart exactly rather than guessed at.
+    const RAW_LENS: [usize; 6] = [
+        32,  // X25519 / Ed25519
+        56,  // X448
+        57,  // Ed448
+        65,  // P-256 / secp256k1 uncompressed SEC1
+        97,  // P-384
+        133, // P-521
+    ];
+
+    // Already a bare value of a known size: never touch it, whatever its
+    // leading bytes happen to be. This is the case the old code got wrong.
+    if RAW_LENS.contains(&ec_point.len()) {
+        return ec_point;
+    }
+
     if ec_point.len() > 2 && ec_point[0] == 0x04 {
-        if ec_point[1] as usize == ec_point.len() - 2 {
+        // Short form — and only when what's inside is itself a plausible
+        // point, not merely when the arithmetic happens to line up.
+        if ec_point[1] as usize == ec_point.len() - 2 && RAW_LENS.contains(&(ec_point.len() - 2)) {
             return ec_point[2..].to_vec();
         }
-        if ec_point.len() > 3 && ec_point[1] == 0x81 && ec_point[2] as usize == ec_point.len() - 3
+        if ec_point.len() > 3
+            && ec_point[1] == 0x81
+            && ec_point[2] as usize == ec_point.len() - 3
+            && RAW_LENS.contains(&(ec_point.len() - 3))
         {
             return ec_point[3..].to_vec();
         }
@@ -1777,4 +1819,96 @@ pub fn free(ptr: *mut u8, _js_size: usize) {
     }
     // If addr not in ALLOC_SIZES, it was never allocated through our _malloc
     // (e.g. a wasm-bindgen internal pointer). Silently ignore.
+}
+
+#[cfg(test)]
+mod ec_point_encoding_tests {
+    use super::*;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+
+    /// Regression for the 2026-09-02 `strip_ec_point_der` bug: a RAW
+    /// uncompressed SEC1 point also starts 0x04, so the old tag-byte test
+    /// mistook `0x04 || X || Y` for a DER OCTET STRING whenever X's first
+    /// byte equalled len-2 (63 for P-256) and truncated it to 63 bytes of
+    /// garbage. Roughly 1 imported P-256 key in 256.
+    ///
+    /// Uses a REAL generated key rather than hand-built bytes, so the point
+    /// asserted on is one the p256 crate itself vouches for.
+    #[test]
+    fn raw_p256_point_with_0x3f_x_prefix_survives_strip() {
+        // Find a genuine keypair whose X coordinate starts with the one byte
+        // that triggered the bug. ~1/256 per try, so this converges quickly.
+        let mut raw = None;
+        for _ in 0..20_000 {
+            let sk = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+            let vk = p256::ecdsa::VerifyingKey::from(&sk);
+            let pt = vk.to_encoded_point(false).as_bytes().to_vec();
+            assert_eq!(pt.len(), 65, "uncompressed P-256 SEC1 point is 65 bytes");
+            assert_eq!(pt[0], 0x04, "uncompressed marker");
+            if pt[1] == 0x3f {
+                raw = Some(pt);
+                break;
+            }
+        }
+        let raw = raw.expect("no P-256 key with X[0]==0x3f in 20k tries (astronomically unlikely)");
+
+        // The exact trigger condition the old code keyed on.
+        assert_eq!(raw[1] as usize, raw.len() - 2, "this is the ambiguous shape");
+
+        // Fixed behaviour: a bare, known-size point is returned untouched.
+        let out = strip_ec_point_der(raw.clone());
+        assert_eq!(out, raw, "a raw 65-byte point must never be stripped");
+        assert!(
+            p256::PublicKey::from_sec1_bytes(&out).is_ok(),
+            "the surviving point must still parse as a real P-256 key"
+        );
+
+        // Sabotage: confirm the OLD logic really did destroy this input, so
+        // this test would have failed before the fix rather than passing
+        // vacuously.
+        let old_result = &raw[2..];
+        assert_eq!(old_result.len(), 63, "old code truncated to 63 bytes");
+        assert!(
+            p256::PublicKey::from_sec1_bytes(old_result).is_err(),
+            "the old code's output must be rejected — that was the bug"
+        );
+    }
+
+    /// The DER-wrapped forms the engine itself writes must still be unwrapped.
+    #[test]
+    fn der_wrapped_points_are_still_stripped() {
+        // Short form, P-256: 0x04 0x41 || (0x04 || X || Y)
+        let sk = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let vk = p256::ecdsa::VerifyingKey::from(&sk);
+        let inner = vk.to_encoded_point(false).as_bytes().to_vec();
+        let mut wrapped = vec![0x04, inner.len() as u8];
+        wrapped.extend_from_slice(&inner);
+        assert_eq!(wrapped.len(), 67);
+        assert_eq!(strip_ec_point_der(wrapped), inner, "short-form DER must unwrap");
+
+        // Long form, P-521 shape: 0x04 0x81 0x85 || 133 bytes
+        let mut inner521 = vec![0x04u8];
+        inner521.extend(std::iter::repeat(0xABu8).take(132));
+        assert_eq!(inner521.len(), 133);
+        let mut wrapped521 = vec![0x04, 0x81, 133u8];
+        wrapped521.extend_from_slice(&inner521);
+        assert_eq!(wrapped521.len(), 136);
+        assert_eq!(strip_ec_point_der(wrapped521), inner521, "long-form DER must unwrap");
+    }
+
+    /// The bare Edwards/Montgomery values this function also serves must be
+    /// left alone even when their leading bytes mimic a DER header.
+    #[test]
+    fn bare_montgomery_value_mimicking_a_der_header_is_untouched() {
+        // 32 bytes whose first two are exactly the ambiguous 0x04, 30.
+        let mut x25519 = vec![0x04u8, 30u8];
+        x25519.extend(std::iter::repeat(0x11u8).take(30));
+        assert_eq!(x25519.len(), 32);
+        assert_eq!(x25519[1] as usize, x25519.len() - 2, "ambiguous shape");
+        assert_eq!(
+            strip_ec_point_der(x25519.clone()),
+            x25519,
+            "a bare 32-byte X25519/Ed25519 value must never be stripped"
+        );
+    }
 }
