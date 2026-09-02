@@ -80,12 +80,39 @@ fn tmpdir(tag: &str) -> PathBuf {
 /// version gap.
 fn openssl_supports_mlkem768() -> bool {
     let dir = std::env::temp_dir();
-    Command::new("openssl")
+    let supported = Command::new("openssl")
         .args(["genpkey", "-algorithm", "ML-KEM-768", "-out", "/dev/null"])
         .current_dir(&dir)
         .output()
         .map(|out| out.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+
+    // REQUIRE_PQC_INTEROP=1 turns "quietly skip" into "fail loudly".
+    //
+    // Skipping is the right default for a developer machine that has no
+    // PQC-capable openssl, but it is the WRONG behaviour anywhere the interop
+    // claim is supposed to be evidenced. Until 2026-09-02 CI fell in the
+    // second category while behaving like the first: ubuntu-24.04 ships
+    // OpenSSL 3.0.13, which predates ML-KEM, so all four of these tests
+    // skipped on every run and this repo's PQC-interoperability claim had no
+    // CI evidence behind it whatsoever — a green tick that asserted nothing.
+    //
+    // The fix that put a 3.6.3 openssl on PATH is only half the job: nothing
+    // stopped it silently reverting to skipping if the cache missed, the
+    // pinned version moved, or PATH changed. With this set, that regression
+    // becomes a hard failure instead of a silent one. See ci.yml's
+    // "Run KMIP tests" step.
+    if !supported && std::env::var("REQUIRE_PQC_INTEROP").is_ok() {
+        panic!(
+            "REQUIRE_PQC_INTEROP is set, but the `openssl` on PATH cannot do ML-KEM-768 \
+             (needs OpenSSL 3.5+). These interop tests would have silently skipped, which \
+             defeats the point of running them. Put a PQC-capable openssl first on PATH \
+             (CI uses the pinned /opt/openssl-3.6 build), or unset REQUIRE_PQC_INTEROP to \
+             allow skipping on a machine that genuinely has no such build."
+        );
+    }
+
+    supported
 }
 
 /// Run `openssl <args>` in `dir`, panicking with stderr on failure.
