@@ -52,6 +52,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   neither-set case rather than a silent fallthrough. The C++ engine's
   equivalent path was already correct — this was Rust-only.
 
+- **KMIP: `Encrypt`/`Decrypt`'s `is_aead` tag-splitting didn't recognize
+  `CKM_AES_CCM`.** KMIP 3.0 §6.1.21 requires an AEAD mechanism's
+  authentication tag to ride in its own `AuthenticatedEncryptionTag`
+  response field, not embedded in `Data`; `is_aead` (in
+  `kmip/src/ops/encrypt.rs`) matched only `CKM_AES_GCM` and
+  `CKM_CHACHA20_POLY1305`, so a CCM `Encrypt` left its tag tacked onto
+  the end of `Data` instead — a real protocol-conformance gap flagged
+  (not silently patched) when 0.27.0's CCM round-trip test was written.
+  Added `CKM_AES_CCM` to the match; confirmed against the engine's own
+  `crypto::multipart::ccm_encrypt`/`ccm_decrypt` that CCM's output shape
+  (`ciphertext ‖ tag`, 16-byte default per SP 800-38C) is identical to
+  GCM's, so the existing split/recombine logic needed no other change.
+  `Decrypt`'s wire-layer recombination (`wire.rs::decode_decrypt_req`)
+  already worked for any mechanism generically, so only the `Encrypt`
+  response side was affected. Verified with a real round trip
+  (`Data` now exactly `plaintext.len()` bytes, tag in its own field) and
+  a tamper check against the split `AuthenticatedEncryptionTag` field
+  specifically.
+
 ## [0.27.0] — 2026-08-31
 
 **Consolidated release: closes the WS-0/WS-8 PKCS#11 v3.2 coverage
