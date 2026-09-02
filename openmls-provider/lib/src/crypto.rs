@@ -249,12 +249,18 @@ impl OpenMlsCrypto for PqcTodayCrypto {
             })
     }
 
-    // ── HPKE — software fallback (Phase 1) ───────────────────────────────────
+    // ── HPKE — HSM-routed for every declared ciphersuite, software fallback
+    //    for anything else ──────────────────────────────────────────────────
     //
-    // The 5 HPKE entry points below delegate to `hpke-rs` with the
-    // RustCrypto backend. Phase 2 will reroute these onto PKCS#11 KEM /
-    // HKDF / AEAD primitives so HPKE keys can live in the HSM. See
-    // README §Phase 2.
+    // Each of the 5 HPKE entry points below first tries `hpke::select()`
+    // (`pqhpke::select`), which recognizes all four `HpkeConfig`s this
+    // provider's `supported_ciphersuites()` declares and runs them through
+    // PKCS#11 KEM / HKDF / AEAD primitives (`hpke.rs`) so the HPKE private
+    // key and every intermediate secret live in the HSM. `mk_hpke` below
+    // (delegating to `hpke-rs` with the RustCrypto backend) is the fallback
+    // for any `HpkeConfig` `select()` doesn't recognize — i.e. a genuinely
+    // undeclared/unsupported curve or KDF, not one of the four this crate
+    // actually claims to support.
 
     fn hpke_seal(
         &self,
