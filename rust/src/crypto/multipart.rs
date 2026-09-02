@@ -23,6 +23,8 @@
 //! | `CKM_AES_CBC_PAD` (§6.27.4) | encrypt: as CBC; decrypt: hold back last full block | emit/strip PKCS#7 pad |
 //! | `CKM_AES_CTR` (§6.27.5)     | byte stream, no buffering | empty output |
 //! | `CKM_AES_GCM` (§6.27.7)     | byte stream + GHASH; decrypt holds back tag | emit/verify auth tag |
+//! | `CKM_AES_XTS` (§6.15)       | buffer everything, emit nothing | run the real one-shot XTS transform over the full buffered message |
+//! | `CKM_AES_CCM` (§6.11.3)     | buffer everything (SP 800-38C bakes total length into B_0, so nothing can be emitted online) | run `ccm_encrypt`/`ccm_decrypt` over the FULL buffered input |
 //!
 //! Length prediction (`update_len` / `final_len`) backs the PKCS#11 §5.2
 //! two-pass convention: a call with a NULL output pointer returns the
@@ -39,6 +41,7 @@ use zeroize::Zeroize;
 
 use crate::constants::{
     CKR_DATA_LEN_RANGE, CKR_ENCRYPTED_DATA_INVALID, CKR_ENCRYPTED_DATA_LEN_RANGE,
+    CKR_KEY_SIZE_RANGE, CKR_KEY_TYPE_INCONSISTENT,
 };
 
 const BLOCK: usize = 16;
@@ -111,6 +114,8 @@ pub enum MultipartCipher {
     Cfb8(Cfb8State),
     Cfb1(Cfb1State),
     Gcm(GcmState),
+    Ccm(CcmState),
+    Xts(XtsState),
 }
 
 impl MultipartCipher {
@@ -127,6 +132,14 @@ impl MultipartCipher {
             MultipartCipher::Cfb8(_) => part_len,
             MultipartCipher::Cfb1(_) => part_len,
             MultipartCipher::Gcm(s) => s.update_len(part_len),
+            // CCM cannot emit anything before `finalize()` sees the full
+            // message (see the module doc's CCM row) — every Update
+            // predicts, and later produces, zero bytes.
+            MultipartCipher::Ccm(_) => 0,
+            // XTS likewise (see the module doc's XTS row): ciphertext
+            // stealing needs the full message, so every Update predicts,
+            // and later produces, zero bytes.
+            MultipartCipher::Xts(_) => 0,
         }
     }
 
@@ -149,6 +162,17 @@ impl MultipartCipher {
                 CipherDirection::Encrypt => s.tag_len,
                 CipherDirection::Decrypt => 0,
             },
+            // Exact for encrypt (plaintext length + tag); an upper bound
+            // for decrypt (§5.2 explicitly permits this — the true
+            // plaintext length is unknowable until the tag has actually
+            // been verified inside `finalize()`).
+            MultipartCipher::Ccm(s) => match s.dir {
+                CipherDirection::Encrypt => s.buf.len() + s.tag_len,
+                CipherDirection::Decrypt => s.buf.len().saturating_sub(s.tag_len),
+            },
+            // Exact — XTS output length always equals input length (no
+            // padding, no tag; ciphertext stealing only rearranges bytes).
+            MultipartCipher::Xts(s) => s.buf.len(),
         }
     }
 
@@ -166,6 +190,8 @@ impl MultipartCipher {
             MultipartCipher::Cfb8(s) => Ok(s.update(part)),
             MultipartCipher::Cfb1(s) => Ok(s.update(part)),
             MultipartCipher::Gcm(s) => Ok(s.update(part)),
+            MultipartCipher::Ccm(s) => Ok(s.update(part)),
+            MultipartCipher::Xts(s) => Ok(s.update(part)),
         }
     }
 
@@ -182,6 +208,8 @@ impl MultipartCipher {
             MultipartCipher::Cfb8(_) => Ok(Vec::new()),
             MultipartCipher::Cfb1(_) => Ok(Vec::new()),
             MultipartCipher::Gcm(s) => s.finalize(),
+            MultipartCipher::Ccm(s) => s.finalize(),
+            MultipartCipher::Xts(s) => s.finalize(),
         }
     }
 }
@@ -624,11 +652,17 @@ impl Cfb1State {
 // Hand-rolled directly on AesKey — no existing partial implementation to
 // build on (unlike GMAC/OFB/CFB) and the RustCrypto `ccm` crate's tag/nonce
 // lengths are compile-time generics, which doesn't fit PKCS#11's runtime-
-// variable CK_CCM_PARAMS.ulMACLen/ulNonceLen. Single-shot only (no
-// multipart streaming) — SP 800-38C bakes the total plaintext length into
-// the first CBC-MAC block (B_0), so the length must be known upfront, same
-// as this engine's existing RSA-OAEP/ChaCha20-Poly1305 single-part-only
-// mechanisms. `tag_len` in bytes (caller validates against the mechanism's
+// variable CK_CCM_PARAMS.ulMACLen/ulNonceLen. `ccm_encrypt`/`ccm_decrypt`
+// below are whole-buffer PRIMITIVES, unavoidably so — SP 800-38C bakes the
+// total plaintext length into the first CBC-MAC block (B_0), so a single
+// CCM invocation must always see the entire message. That is a property of
+// the two functions below, not of the PKCS#11-level `C_EncryptUpdate`/
+// `C_EncryptFinal` sequence: `CcmState` further down (mirroring GcmState's
+// role for GCM) buffers multi-part input across Update calls and defers to
+// these primitives at Final, so CCM is NOT limited to `C_Encrypt`/
+// `C_Decrypt` the way RSA-OAEP/ChaCha20-Poly1305 genuinely are (those two
+// have no analogous buffering path — see `build_multipart_cipher` in
+// `ffi.rs`). `tag_len` in bytes (caller validates against the mechanism's
 // {4,6,8,10,12,14,16} set); `nonce.len()` in 7..=13 (q = 15-nonce.len() is
 // SP 800-38C's length-field width, 2..=8 bytes).
 
@@ -780,6 +814,164 @@ pub fn ccm_decrypt(
     } else {
         pt.zeroize();
         Err(CKR_ENCRYPTED_DATA_INVALID)
+    }
+}
+
+/// Multi-part CCM: buffers `C_EncryptUpdate`/`C_DecryptUpdate` input
+/// verbatim (plaintext on encrypt, ciphertext‖tag on decrypt) and defers
+/// to the single-shot [`ccm_encrypt`]/[`ccm_decrypt`] primitives at
+/// `finalize()`, once the FULL message is known — see this section's
+/// header comment for why that deferral, rather than genuine per-chunk
+/// streaming, is what SP 800-38C requires. This makes a multi-part
+/// Update×N → Final sequence produce byte-identical output to a single
+/// one-shot call over the same concatenated input: the buffering is
+/// transparent, not a distinct code path with its own room to diverge.
+///
+/// AAD is NOT fed via `update()` — PKCS#11 v3.2 §6.11.3's `CK_CCM_PARAMS`
+/// carries AAD as a mechanism parameter supplied at `C_EncryptInit`/
+/// `C_DecryptInit`, unlike the raw-EVP convention (used by e.g. OpenSSL's
+/// own `EVP_CipherUpdate` AAD calls) of feeding AAD through an Update-
+/// shaped call. `build_multipart_cipher` in `ffi.rs` reads `ctx.aad` once
+/// at construction, exactly like it does for `GcmState::new`.
+pub struct CcmState {
+    key: AesKey,
+    dir: CipherDirection,
+    nonce: Vec<u8>,
+    aad: Vec<u8>,
+    tag_len: usize,
+    /// Plaintext (encrypt) or ciphertext‖tag (decrypt), accumulated
+    /// verbatim across every `update()` call.
+    buf: Vec<u8>,
+}
+
+/// Best-effort cleanup: `buf` holds the full plaintext across the whole
+/// encrypt operation (and the recovered plaintext briefly on a decrypt
+/// tamper-rejection path upstream), so it is wiped on drop — the same
+/// convention as `GcmState`'s `Drop` impl just below.
+impl Drop for CcmState {
+    fn drop(&mut self) {
+        self.buf.zeroize();
+    }
+}
+
+impl CcmState {
+    pub fn new(key: AesKey, nonce: Vec<u8>, aad: Vec<u8>, tag_len: usize, dir: CipherDirection) -> Self {
+        Self { key, dir, nonce, aad, tag_len, buf: Vec::new() }
+    }
+
+    /// PKCS#11 v3.2 §5.2's producing-output convention permits an Update
+    /// call to legitimately report/emit zero bytes (the existing GCM
+    /// decrypt tag hold-back and CBC_PAD decrypt hold-back above already
+    /// rely on the same allowance) — CCM never has anything to emit
+    /// before `finalize()` sees the complete message, so every call here
+    /// buffers and returns empty, whether fed one byte, zero bytes, or
+    /// the entire message in a single call.
+    fn update(&mut self, part: &[u8]) -> Vec<u8> {
+        self.buf.extend_from_slice(part);
+        Vec::new()
+    }
+
+    fn finalize(self) -> Result<Vec<u8>, u32> {
+        match self.dir {
+            CipherDirection::Encrypt => {
+                Ok(ccm_encrypt(&self.key, &self.nonce, &self.aad, &self.buf, self.tag_len))
+            }
+            CipherDirection::Decrypt => {
+                ccm_decrypt(&self.key, &self.nonce, &self.aad, &self.buf, self.tag_len)
+            }
+        }
+    }
+}
+
+// ── XTS (§6.15, IEEE 1619 / NIST SP 800-38E) ─────────────────────────────────
+//
+// Ciphertext stealing needs the FULL message to determine the tweak and
+// stealing behaviour for the final partial block, and output length must
+// equal input length with no separate finalize chunk — XTS is therefore not
+// a streamable mode, for the same underlying reason as CCM just above.
+// `update()` only buffers; `finalize()` runs the same double-width-key
+// `Xts128` transform as the single-shot `C_Encrypt`/`C_Decrypt` `CKM_AES_XTS`
+// arm in `crate::ffi`, over the full buffered message, so a multi-part
+// Update×N → Final sequence produces byte-identical output to a one-shot
+// call over the same concatenated input — same transparency guarantee
+// `CcmState`'s doc comment above describes for CCM.
+//
+// The `CKA_KEY_TYPE == CKK_AES_XTS` gate (§6.15 — a double-length CKK_AES_XTS
+// key is required, never a same-length plain CKK_AES key) lives in
+// `build_multipart_cipher` (ffi.rs), matching the one-shot path exactly —
+// this state only ever sees key bytes that already passed that check.
+pub struct XtsState {
+    /// Raw double-width key material: 32 bytes (AES-128-XTS, two 16-byte
+    /// sub-keys) or 64 bytes (AES-256-XTS, two 32-byte sub-keys).
+    key_bytes: Vec<u8>,
+    /// Data Unit Sequence Number (the XTS tweak).
+    tweak: [u8; BLOCK],
+    dir: CipherDirection,
+    /// Plaintext (encrypt) or ciphertext (decrypt), accumulated verbatim
+    /// across every `update()` call.
+    buf: Vec<u8>,
+}
+
+/// Same rationale as `CcmState`'s `Drop` just above — `buf` holds the full
+/// plaintext/ciphertext across the whole operation, and `key_bytes` is the
+/// raw double-width key, so both are wiped on drop.
+impl Drop for XtsState {
+    fn drop(&mut self) {
+        self.buf.zeroize();
+        self.key_bytes.zeroize();
+    }
+}
+
+impl XtsState {
+    pub fn new(key_bytes: Vec<u8>, tweak: [u8; BLOCK], dir: CipherDirection) -> Self {
+        Self { key_bytes, tweak, dir, buf: Vec::new() }
+    }
+
+    /// See `CcmState::update`'s doc comment — same zero-output-until-
+    /// `finalize` convention, for the same reason (nothing can be emitted
+    /// online; the stealing boundary is only known once the message ends).
+    fn update(&mut self, part: &[u8]) -> Vec<u8> {
+        self.buf.extend_from_slice(part);
+        Vec::new()
+    }
+
+    fn finalize(mut self) -> Result<Vec<u8>, u32> {
+        // §6.15 — ciphertext stealing needs at least one full AES block;
+        // same floor the one-shot `C_Encrypt`/`C_Decrypt` XTS arm enforces.
+        if self.buf.len() < BLOCK {
+            return Err(self.dir.len_range_error());
+        }
+        // `self` implements `Drop` (to wipe `buf`/`key_bytes` on every other
+        // exit path), so its fields can't be moved out by value — take the
+        // buffer instead, leaving an empty (already-zeroized-on-drop) Vec
+        // behind.
+        let mut buf = std::mem::take(&mut self.buf);
+        match self.key_bytes.len() {
+            32 => {
+                let k1 = aes::Aes128::new_from_slice(&self.key_bytes[..16])
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                let k2 = aes::Aes128::new_from_slice(&self.key_bytes[16..])
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                let xts = xts_mode::Xts128::<aes::Aes128>::new(k1, k2);
+                match self.dir {
+                    CipherDirection::Encrypt => xts.encrypt_sector(&mut buf, self.tweak),
+                    CipherDirection::Decrypt => xts.decrypt_sector(&mut buf, self.tweak),
+                }
+            }
+            64 => {
+                let k1 = aes::Aes256::new_from_slice(&self.key_bytes[..32])
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                let k2 = aes::Aes256::new_from_slice(&self.key_bytes[32..])
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                let xts = xts_mode::Xts128::<aes::Aes256>::new(k1, k2);
+                match self.dir {
+                    CipherDirection::Encrypt => xts.encrypt_sector(&mut buf, self.tweak),
+                    CipherDirection::Decrypt => xts.decrypt_sector(&mut buf, self.tweak),
+                }
+            }
+            _ => return Err(CKR_KEY_SIZE_RANGE),
+        }
+        Ok(buf)
     }
 }
 
@@ -1549,5 +1741,298 @@ mod tests {
             g.msg_update(&[0u8; 7]); // 70 bytes total
         }
         assert_eq!(g.keystream_blocks(), 5); // ceil(70/16)
+    }
+
+    // ── CCM multi-part streaming (buffer-then-single-shot at Final) ────────
+    //
+    // `CcmState` cannot emit anything before `finalize()` sees the full
+    // message (this module's CCM section explains why SP 800-38C forces
+    // that), so these tests exercise the buffering itself: real NIST ACVP
+    // vectors (`tests/acvp/aes_ccm_test.json` — the same file this engine's
+    // one-shot `ccm_encrypt`/`ccm_decrypt` was already verified against, see
+    // `native/encrypt.rs`'s `aes_ccm_matches_nist_acvp_vector`) driven
+    // through Update×N -> Final across every `CHUNKINGS` shape (1-byte,
+    // block-aligned 16-byte, and non-block-aligned 7/3 and 33/1/5 shapes),
+    // cross-checked byte-identical against the one-shot primitives.
+
+    /// ACVP case 0 (AES-128-CCM encrypt: 13-byte nonce, no AAD, 32-byte
+    /// plaintext, 128-bit tag) and its decrypt inverse, each driven through
+    /// every `CHUNKINGS` shape via `drive()` — which also exercises
+    /// `update_len()` staying 0 on every non-final call and `final_len()`'s
+    /// upper-bound contract. A `[64]` chunking with 32 bytes of input
+    /// consumes everything in a single `C_EncryptUpdate`-shaped call
+    /// immediately followed by Final, exactly the "one big Update, then
+    /// Final" caller shape the one-shot `C_Encrypt` path is equivalent to.
+    #[test]
+    fn ccm_multipart_matches_nist_acvp_vector_and_one_shot() {
+        let key = hex("b4ce71a01a783c7851d19132b3b06e9a");
+        let nonce = hex("73d7bcba710c109945f7936cd4");
+        let pt = hex("41e2c125d41e372da9a4786d22a10ba4b04c3467454da0b4b8c6920fea641585");
+        let ct_tag = hex(
+            "caf31b083fd6ef0641713eb49f28f1cdb6fbb138251db94f6fc59bccdf0e230\
+             92ccd1c202526873d0ccd6053c79aeeaf",
+        );
+        // Sanity: the vector matches the existing one-shot primitive before
+        // testing the new buffered path against it.
+        let one_shot_ct = ccm_encrypt(&AesKey::new(&key).unwrap(), &nonce, &[], &pt, 16);
+        assert_eq!(one_shot_ct, ct_tag, "one-shot ccm_encrypt vs ACVP vector");
+
+        for sizes in CHUNKINGS {
+            let enc = MultipartCipher::Ccm(CcmState::new(
+                AesKey::new(&key).unwrap(),
+                nonce.clone(),
+                Vec::new(),
+                16,
+                CipherDirection::Encrypt,
+            ));
+            let got_ct = drive(enc, &pt, sizes).unwrap();
+            assert_eq!(got_ct, ct_tag, "encrypt sizes={sizes:?}");
+
+            let dec = MultipartCipher::Ccm(CcmState::new(
+                AesKey::new(&key).unwrap(),
+                nonce.clone(),
+                Vec::new(),
+                16,
+                CipherDirection::Decrypt,
+            ));
+            let got_pt = drive(dec, &ct_tag, sizes).unwrap();
+            assert_eq!(got_pt, pt, "decrypt sizes={sizes:?}");
+        }
+    }
+
+    /// ACVP decrypt cases 3-5 (AES-128/192/256, 9-byte nonce, 32-bit
+    /// truncated tag) — proves the buffered path handles every AES key
+    /// size and a short (non-default) tag length, not just the 128-bit-tag
+    /// case above.
+    #[test]
+    fn ccm_multipart_decrypt_matches_acvp_short_tag_vectors() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "e969a4f0c774ca0e3b6cd3fe2df471cd",
+                "80253883d54f4b112e",
+                "81696790cdd39d343d40957007c3a443f4925851007005e53050e2a4c696c0bb",
+                "b04bd26c19aed33bbbbfb5441af495e738e564128f51ecb882f11eb359a8fe67a8dd802f",
+            ),
+            (
+                "323f053eeaa06b7bc0cc18413fbebf75de4ae39245a502f0",
+                "a94ad76ba3f00628ac",
+                "9c1f839cd41c0dada22f2ef0eabf13fea6d4df77a2e2c9cd7440c0feb3cadb61",
+                "c3432911beb0d084933760a5955e7b6ec5081ea0f53d23f8564eae0e9a211447739ca9c8",
+            ),
+            (
+                "4aa4310a680e10b8b56a9c4545fa7d106acfbc6570273670a4ba29c574a6229f",
+                "7d80fa974dd66563f4",
+                "6d467c7f4b32385ee9361649ce3a38aabf0cf3f804d03ac6237d3ca16cfaeecc",
+                "7fe1cd4345e0d80647fe8a83afc9392c73a00b554196016e121f53d650893d4a1b86583d",
+            ),
+        ];
+        for (key_hex, nonce_hex, pt_hex, ct_hex) in cases {
+            let key = hex(key_hex);
+            let nonce = hex(nonce_hex);
+            let pt = hex(pt_hex);
+            let ct_tag = hex(ct_hex);
+            for sizes in CHUNKINGS {
+                let dec = MultipartCipher::Ccm(CcmState::new(
+                    AesKey::new(&key).unwrap(),
+                    nonce.clone(),
+                    Vec::new(),
+                    4,
+                    CipherDirection::Decrypt,
+                ));
+                assert_eq!(drive(dec, &ct_tag, sizes).unwrap(), pt, "key_hex={key_hex} sizes={sizes:?}");
+            }
+        }
+    }
+
+    /// ACVP case 6: zero-length payload with 32-byte AAD (CCM used
+    /// GMAC-style) and a 32-bit tag. Driven with deliberately-interspersed
+    /// zero-length `update()` calls — PKCS#11 v3.2 §5.2's "an Update call
+    /// may legitimately produce zero output bytes" allowance, which every
+    /// CCM Update relies on (see `CcmState::update`'s doc comment) and
+    /// which the ffi.rs `multipart_update` dispatcher depends on staying
+    /// correct for zero-length input specifically.
+    #[test]
+    fn ccm_multipart_aad_only_zero_payload_with_empty_updates() {
+        let key = hex("4b1f99d0ed2c990812c661752dcc60f5");
+        let nonce = hex("f6eda9c576572feefa");
+        let aad = hex("b73068eac6c1915bec047140e73f472b5b5d696c753117145ec95a134f81067d");
+        let ct_tag = hex("c4eda4f8"); // payload is empty, so this is JUST the 4-byte tag
+
+        let mut dec = MultipartCipher::Ccm(CcmState::new(
+            AesKey::new(&key).unwrap(),
+            nonce,
+            aad,
+            4,
+            CipherDirection::Decrypt,
+        ));
+        // Three genuinely empty Update calls before the real (tag-only)
+        // bytes, then one more empty Update after — every one of them must
+        // report zero required output and consume no state incorrectly.
+        for _ in 0..3 {
+            assert_eq!(dec.update_len(0), 0);
+            assert_eq!(dec.update(&[]).unwrap(), Vec::<u8>::new());
+        }
+        assert_eq!(dec.update_len(ct_tag.len()), 0);
+        assert_eq!(dec.update(&ct_tag).unwrap(), Vec::<u8>::new());
+        assert_eq!(dec.update(&[]).unwrap(), Vec::<u8>::new());
+        assert_eq!(dec.final_len(), 0);
+        assert_eq!(dec.finalize().unwrap(), Vec::<u8>::new(), "zero-length plaintext, tag verified");
+    }
+
+    /// Straight `C_EncryptInit` -> `C_EncryptFinal` with NO Update calls at
+    /// all (legal per PKCS#11 v3.2 §5.2.7 — it closes a zero-length
+    /// stream): an empty plaintext/AAD CCM operation must still produce a
+    /// valid tag-only ciphertext, matching the one-shot primitive.
+    ///
+    /// The decrypt inverse needs one real Update carrying those 16 tag
+    /// bytes — Final takes no input parameter of its own, so a ciphertext
+    /// (here, a bare tag) can ONLY arrive via Update. A decrypt Final with
+    /// truly zero Update calls (buffer still empty) therefore correctly
+    /// rejects with `CKR_ENCRYPTED_DATA_LEN_RANGE`: 0 buffered bytes can
+    /// never contain a 16-byte tag, on the one-shot path or this one.
+    #[test]
+    fn ccm_multipart_final_with_no_updates_at_all() {
+        let key = [0x77u8; 32];
+        let nonce = [0x11u8; 12];
+        let enc = MultipartCipher::Ccm(CcmState::new(
+            AesKey::new(&key).unwrap(),
+            nonce.to_vec(),
+            Vec::new(),
+            16,
+            CipherDirection::Encrypt,
+        ));
+        assert_eq!(enc.final_len(), 16); // just the tag
+        let tag_only = enc.finalize().unwrap();
+        assert_eq!(tag_only.len(), 16);
+        assert_eq!(
+            tag_only,
+            ccm_encrypt(&AesKey::new(&key).unwrap(), &nonce, &[], &[], 16),
+            "no-Update path must match the one-shot primitive on empty input"
+        );
+
+        // Realistic zero-plaintext decrypt: one Update carrying the tag.
+        let mut dec = MultipartCipher::Ccm(CcmState::new(
+            AesKey::new(&key).unwrap(),
+            nonce.to_vec(),
+            Vec::new(),
+            16,
+            CipherDirection::Decrypt,
+        ));
+        assert_eq!(dec.update(&tag_only).unwrap(), Vec::<u8>::new());
+        assert_eq!(dec.finalize().unwrap(), Vec::<u8>::new());
+
+        // Genuinely zero Update calls: nothing to verify against.
+        let dec_empty = MultipartCipher::Ccm(CcmState::new(
+            AesKey::new(&key).unwrap(),
+            nonce.to_vec(),
+            Vec::new(),
+            16,
+            CipherDirection::Decrypt,
+        ));
+        assert_eq!(dec_empty.finalize().unwrap_err(), CKR_ENCRYPTED_DATA_LEN_RANGE);
+    }
+
+    /// Tamper rejection, two ways: (1) ACVP case 7, a genuine
+    /// externally-tampered vector the NIST test suite itself expects
+    /// `testPassed=false` for, driven through the buffered multi-part path;
+    /// (2) a locally-produced valid ciphertext with one ciphertext byte
+    /// flipped before the (chunked) decrypt Update/Final sequence — the
+    /// exact "corrupt one byte before Final" scenario. Both must fail
+    /// closed with `CKR_ENCRYPTED_DATA_INVALID`, matching what the
+    /// existing one-shot `ccm_decrypt` already returns for the same
+    /// failure (see `ccm_decrypt`'s doc comment) — the buffered path must
+    /// not weaken this.
+    #[test]
+    fn ccm_multipart_tamper_rejection() {
+        // (1) Real ACVP tampered vector (case 7).
+        let key = hex("59f728f5afa2acc0f8436c487d085410");
+        let nonce = hex("84fdb73e36d5df6086");
+        let bad_ct = hex("a9e9ccf0c356151cef1a46ed208ca313e6d7a6778b8c6e686a92c8d407f72e13517aa6d8");
+        for sizes in CHUNKINGS {
+            let dec = MultipartCipher::Ccm(CcmState::new(
+                AesKey::new(&key).unwrap(),
+                nonce.clone(),
+                Vec::new(),
+                4,
+                CipherDirection::Decrypt,
+            ));
+            assert_eq!(
+                drive(dec, &bad_ct, sizes).unwrap_err(),
+                CKR_ENCRYPTED_DATA_INVALID,
+                "ACVP tampered vector, sizes={sizes:?}"
+            );
+        }
+
+        // (2) Self-produced ciphertext, one byte flipped after encrypt.
+        let key2 = [0x5Au8; 16];
+        let nonce2 = [0x99u8; 11];
+        let pt = b"attack at dawn, CCM multipart edition".to_vec();
+        let mut enc = MultipartCipher::Ccm(CcmState::new(
+            AesKey::new(&key2).unwrap(),
+            nonce2.to_vec(),
+            b"header".to_vec(),
+            12,
+            CipherDirection::Encrypt,
+        ));
+        enc.update(&pt).unwrap();
+        let mut ct = enc.finalize().unwrap();
+        ct[0] ^= 1; // corrupt one ciphertext byte
+        for sizes in CHUNKINGS {
+            let mut dec = MultipartCipher::Ccm(CcmState::new(
+                AesKey::new(&key2).unwrap(),
+                nonce2.to_vec(),
+                b"header".to_vec(),
+                12,
+                CipherDirection::Decrypt,
+            ));
+            let n = sizes[0].clamp(1, ct.len());
+            let mut off = 0;
+            while off < ct.len() {
+                let take = n.min(ct.len() - off);
+                dec.update(&ct[off..off + take]).unwrap();
+                off += take;
+            }
+            assert_eq!(dec.finalize().unwrap_err(), CKR_ENCRYPTED_DATA_INVALID, "sizes={sizes:?}");
+        }
+    }
+
+    /// Round-trip across a spread of plaintext lengths (including
+    /// non-block-multiples) and every `CHUNKINGS` shape, cross-checked
+    /// byte-identical against the one-shot `ccm_encrypt`/`ccm_decrypt` on
+    /// the SAME concatenated input — the "byte-identical multi-part-vs-
+    /// one-shot" correctness property the task allows in place of an
+    /// external vector for cases the ACVP file doesn't happen to cover
+    /// (e.g. AES-256 with AAD, or lengths spanning a chunk boundary that
+    /// isn't 16-byte-aligned, like 17 or 33 bytes with a `[7, 3]` chunking).
+    #[test]
+    fn ccm_multipart_round_trip_matches_one_shot_arbitrary_lengths() {
+        let key = [0xC3u8; 32]; // AES-256
+        let nonce = [0x08u8; 13];
+        let aad = b"associated data, not secret".to_vec();
+        for pt_len in [0usize, 1, 15, 16, 17, 31, 32, 100] {
+            let pt: Vec<u8> = (0..pt_len).map(|i| (i * 7 + 3) as u8).collect();
+            let expected_ct =
+                ccm_encrypt(&AesKey::new(&key).unwrap(), &nonce, &aad, &pt, 16);
+            for sizes in CHUNKINGS {
+                let enc = MultipartCipher::Ccm(CcmState::new(
+                    AesKey::new(&key).unwrap(),
+                    nonce.to_vec(),
+                    aad.clone(),
+                    16,
+                    CipherDirection::Encrypt,
+                ));
+                let got_ct = drive(enc, &pt, sizes).unwrap();
+                assert_eq!(got_ct, expected_ct, "pt_len={pt_len} sizes={sizes:?}");
+
+                let dec = MultipartCipher::Ccm(CcmState::new(
+                    AesKey::new(&key).unwrap(),
+                    nonce.to_vec(),
+                    aad.clone(),
+                    16,
+                    CipherDirection::Decrypt,
+                ));
+                assert_eq!(drive(dec, &expected_ct, sizes).unwrap(), pt, "pt_len={pt_len} sizes={sizes:?}");
+            }
+        }
     }
 }

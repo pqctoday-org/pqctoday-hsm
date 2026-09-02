@@ -2241,10 +2241,14 @@ run_case T35 PASS "AES-256-CCM full AEAD workflow (AAD, tag get/set, both sabota
 # independent from-scratch Python implementation of the exact construction
 # this provider's own kdf.c comment documents and SoftHSM_keygen.cpp
 # implements (both read directly, not guessed): A(0)=fixedInput,
-# A(i)=PRF(K,A(i-1)), round=PRF(K, A(i) || counter(4B big-endian, default
-# width) || fixedInput) -- same "counter before fixed data" placement as
-# Counter/Feedback mode. keylen=32 with HMAC-SHA256 (32-byte PRF output)
-# needs exactly one round, so there is no output-concatenation ambiguity.
+# A(i)=PRF(K,A(i-1)), round=PRF(K, A(i) || fixedInput) -- no counter, since
+# this provider path (p11prov_kbkdf_derive) never sends a
+# CK_SP800_108_COUNTER param and that field is OPTIONAL for Double-Pipeline
+# mode per the PKCS#11 v3.3 draft spec (2026-09 remediation: SoftHSM_keygen.cpp
+# used to default a 32-bit counter in regardless -- see T36b's history for
+# the cross-engine divergence this caused and the fix). keylen=32 with
+# HMAC-SHA256 (32-byte PRF output) needs exactly one round, so there is no
+# output-concatenation ambiguity.
 t36() { local w; w=$(mk_arena sp800108dp "$CPP_ENGINE_SO" "pkcs11-module-load-behavior = early") && use_arena "$w" || return 1
   local key="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
   local salt="73616c743031323304"
@@ -2255,6 +2259,16 @@ t36() { local w; w=$(mk_arena sp800108dp "$CPP_ENGINE_SO" "pkcs11-module-load-be
     -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" \
     KBKDF 2>"$w/tok.err.log") || return 1
   tokout=$(echo "${tokout//:/}" | tr 'A-F' 'a-f')
+  # 2026-09 remediation: this provider path (p11prov_kbkdf_derive) never
+  # sends a CK_SP800_108_COUNTER param, and that data field is OPTIONAL
+  # for Double-Pipeline mode per the PKCS#11 v3.3 draft spec (docs/refs/
+  # pkcs11-v3.3-draft-git-snapshot-20260828/working/doc/spec/
+  # sp800-108_key_derivation.md, "Double Pipeline Mode KDF" table) -- so
+  # the spec-correct round input omits the counter entirely. This
+  # reference used to hard-code a 4-byte BE counter, which only matched
+  # because SoftHSM_keygen.cpp's C++ engine used to default one in even
+  # when none was requested (the T36b XFAIL this fix closed). Both are
+  # now counter-free.
   swout=$(python3 -c "
 import hmac, hashlib
 key = bytes.fromhex('$key')
@@ -2263,12 +2277,10 @@ def prf(k, data):
     return hmac.new(k, data, hashlib.sha256).digest()
 A = fixed
 out = b''
-counter = 1
 while len(out) < 32:
     A = prf(key, A)
-    round_in = A + counter.to_bytes(4, 'big') + fixed
+    round_in = A + fixed
     out += prf(key, round_in)
-    counter += 1
 print(out[:32].hex())
 ")
   [[ -n "$tokout" && "$tokout" == "$swout" ]] || { echo "token=$tokout sw=$swout"; return 1; }
@@ -2290,7 +2302,7 @@ print(out[:32].hex())
   [[ "$sabout" != "$tokout" ]] || { echo "sabotage: different fixed input produced the SAME output"; return 1; }
   return 0
 }
-run_case T36 PASS "token SP800-108 Double-Pipeline KDF (HMAC-SHA256 PRF, CKM_SP800_108_DOUBLE_PIPELINE_KDF) == independent from-scratch Python implementation of the documented construction (A(i)=PRF(K,A(i-1)); round=PRF(K,A(i)||counter(4B BE)||fixedInput)), engine-log verified, sabotage control rejected (2026-08-30 remediation item 2 -- wired into this harness 2026-09-02)" t36
+run_case T36 PASS "token SP800-108 Double-Pipeline KDF (HMAC-SHA256 PRF, CKM_SP800_108_DOUBLE_PIPELINE_KDF), NO explicit CK_SP800_108_COUNTER supplied (this provider path never sends one) == independent from-scratch Python implementation of the documented construction (A(i)=PRF(K,A(i-1)); round=PRF(K,A(i)||fixedInput), counter-free), engine-log verified, sabotage control rejected (2026-08-30 remediation item 2 -- wired into this harness 2026-09-02; reference updated 2026-09 to drop the counter it used to hard-code, once SoftHSM_keygen.cpp stopped defaulting one in for this exact no-counter call shape -- see T36b)" t36
 
 # ─── T37/T37b-g: HMAC digest-map extras (2026-08-30 remediation item 3) ───
 # mac.c's hmac_mech_for_digest() gained 6 digests this session (SHA-224,
@@ -2918,7 +2930,7 @@ t33b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
     "$AES_XTS_PROBE" pkcs11 || return 1
   return 0
 }
-run_case T33b XFAIL "AES-XTS, Rust arm: EVP_CIPHER_fetch registers fine (mk_rust_cipher_cnf fixed that), but C_EncryptUpdate fails on the block-aligned prefix -- rust/src/ffi.rs's own CKM_AES_XTS arm hard-requires CKA_KEY_TYPE==CKK_AES_XTS on the ephemeral session key object (CKR_KEY_TYPE_INCONSISTENT otherwise); found 2026-09-02, not investigated further whether the provider's own ephemeral-key creation sets that type consistently across engines (C++ arm, T33, passes with the identical provider code path)" t33b
+run_case T33b PASS "AES-XTS, Rust arm: root cause was NOT the CKA_KEY_TYPE check the previous session's comment blamed -- rust/src/ffi.rs's build_multipart_cipher had NO arm at all for CKM_AES_XTS, so C_EncryptUpdate fell through to that function's generic default arm and returned CKR_DATA_LEN_RANGE on the very first (block-aligned-prefix) call, before the CKA_KEY_TYPE check (which only ever existed on the one-shot C_Encrypt/C_Decrypt path, never reachable from Update) was ever reached; confirmed by reproducing the missing-arm fallthrough directly, not by trusting either hypothesis. Fixed by adding a real CKM_AES_XTS arm plus a buffering XtsState in rust/src/crypto/multipart.rs (Update buffers verbatim since ciphertext stealing needs the full message, Final runs the existing one-shot Xts128 transform over the complete buffered message) -- same buffer-then-finalize pattern as the CCM fix at T35b, and the CKA_KEY_TYPE==CKK_AES_XTS gate is preserved (now checked in build_multipart_cipher itself, ahead of the buffering path). Confirmed via new #[test]s in rust/src/ffi.rs (ffi::multipart_ffi_tests) against real NIST ACVP AES-XTS 2.0 vectors (tests/acvp/aes_xts_test.json) -- byte-identical output between one-shot C_Encrypt/C_Decrypt and streaming C_EncryptUpdate/C_EncryptFinal across a block-aligned-prefix/sub-block-tail split (the aes-xts-probe.c shape), a single whole-message Update, and 1-byte-at-a-time Updates, for both AES-128-XTS and AES-256-XTS, encrypt and decrypt; plus the CKA_KEY_TYPE rejection and the <16-byte sub-block-message CKR_DATA_LEN_RANGE both re-verified on the streaming path. This run_case is the pending real-provider-.so confirmation -- native cargo test only" t33b
 
 t34b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
   local w="$ROOT_WORK/rustaeswrap"; mkdir -p "$w/tokens"; mk_rust_cipher_cnf "$w"
@@ -2952,7 +2964,7 @@ t35b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
   echo "$out" | grep -q "tampered ciphertext correctly rejected" || { echo "$out"; return 1; }
   return 0
 }
-run_case T35b XFAIL "AES-256-CCM, Rust arm: EncryptUpdate fails; rust/src/ffi.rs's own CKM_AES_CCM comment states 'this engine's CCM is single-shot only' (C_Encrypt/C_Decrypt), while this provider's cipher.c dispatch drives CCM through the C_EncryptUpdate/Final streaming API (same call shape T35's C++ arm succeeds with) -- a real engine capability gap, found 2026-09-02, not previously tested this way" t35b
+run_case T35b PASS "AES-256-CCM, Rust arm: CKM_AES_CCM now supports the C_EncryptUpdate/Final streaming API (same call shape T35's C++ arm uses) via CcmState in rust/src/crypto/multipart.rs, which buffers Update input and runs the existing single-shot ccm_encrypt/ccm_decrypt at Final -- fixes the capability gap found 2026-09-02 (WS1 crypto-bugs remediation, 2026-09-01); confirmed here plus by new #[test]s in multipart.rs against real NIST ACVP AES-CCM vectors (chunked, byte-identical to the one-shot path, tamper rejection preserved) -- this run_case is the pending real-provider-.so confirmation" t35b
 
 t36b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
   local w="$ROOT_WORK/rustsp800108dp"; mkdir -p "$w/tokens"; mk_rust_cipher_cnf "$w"
@@ -2970,6 +2982,11 @@ t36b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
     -kdfopt hexkey:"$key" -kdfopt hexsalt:"$salt" \
     KBKDF 2>/dev/null) || return 1
   tokout=$(echo "${tokout//:/}" | tr 'A-F' 'a-f')
+  # 2026-09 remediation: counter-free reference, same rationale as T36's
+  # (this provider path never sends CK_SP800_108_COUNTER, and the field is
+  # optional for Double-Pipeline mode per spec) -- this engine's own
+  # rust/src/ffi.rs sp800_108_feedback_input already omitted the counter
+  # correctly; it was only the C++ engine (T36) that diverged, now fixed.
   swout=$(python3 -c "
 import hmac, hashlib
 key = bytes.fromhex('$key')
@@ -2978,12 +2995,10 @@ def prf(k, data):
     return hmac.new(k, data, hashlib.sha256).digest()
 A = fixed
 out = b''
-counter = 1
 while len(out) < 32:
     A = prf(key, A)
-    round_in = A + counter.to_bytes(4, 'big') + fixed
+    round_in = A + fixed
     out += prf(key, round_in)
-    counter += 1
 print(out[:32].hex())
 ")
   [[ -n "$tokout" && "$tokout" == "$swout" ]] || { echo "token=$tokout sw=$swout"; return 1; }
@@ -2997,7 +3012,7 @@ print(out[:32].hex())
   [[ "$sabout" != "$tokout" ]] || { echo "sabotage: different fixed input produced the SAME output"; return 1; }
   return 0
 }
-run_case T36b XFAIL "SP800-108 Double-Pipeline KDF, Rust arm: output genuinely differs from T36's (not a formatting artifact -- confirmed via source read). SoftHSM_keygen.cpp defaults dpCounterBits=32 and ALWAYS includes a counter in the round PRF input even with no explicit CK_SP800_108_COUNTER param; rust/src/ffi.rs's sp800_108_feedback_input only emits a counter segment if the caller explicitly supplied CK_SP800_108_COUNTER/ITERATION_VARIABLE, and this provider's own kdf.c pipeline branch (p11prov_kbkdf_derive) never sends one -- so the two engines derive DIFFERENT key material from the IDENTICAL provider-level call. Real cross-engine divergence, found 2026-09-02, not previously tested this way" t36b
+run_case T36b PASS "SP800-108 Double-Pipeline KDF, Rust arm: was XFAIL (2026-09-02) because SoftHSM_keygen.cpp's C++ engine defaulted dpCounterBits=32 and ALWAYS mixed a counter into the round PRF input even with no explicit CK_SP800_108_COUNTER param, diverging from this engine's already-correct rust/src/ffi.rs (sp800_108_feedback_input, reused by sp800_108_run_double_pipeline, only emits a counter segment when the caller explicitly supplied CK_SP800_108_COUNTER) -- a real cross-engine divergence given this provider's own kdf.c pipeline branch (p11prov_kbkdf_derive) never sends one. Root cause confirmed against the PKCS#11 v3.3 draft's own SP800-108 spec doc (docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/.../sp800-108_key_derivation.md, Double Pipeline Mode KDF table: CK_SP800_108_COUNTER is explicitly optional, same as Feedback Mode's) -- C++ was the spec-incorrect arm. Fixed by tracking a separate dpCounterRequested flag (SoftHSM_keygen.cpp) so an absent CK_SP800_108_COUNTER now correctly omits the counter instead of defaulting one in; the explicit-counter call shape is untouched (same dpCounterBits parsing as before, now gated by dpCounterRequested rather than always applied). Verified natively (no Docker): independent from-scratch Python NIST SP 800-108 sec 5.3 reference, byte-exact against both the fixed C++ engine (scripts/dp-kdf-counter-probe.cpp, direct C_DeriveKey call) and this Rust engine (rust/src/ffi.rs test ffi::return_code_ffi_tests::sp800_108_double_pipeline_no_counter_matches_cpp_and_reference) for the no-counter case, plus explicit-counter byte-identical to the same references, confirming no regression on that path. This run_case (through the real .so + OpenSSL provider) is the pending full-harness confirmation -- see T36's swout/tokout reference above, updated to match (same fix, same rationale)" t36b
 
 t37h() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
   local w="$ROOT_WORK/rusthmacsha3"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
@@ -3038,25 +3053,35 @@ t38b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
 }
 run_case T38b PASS "Ed448, Rust arm: same proof as T38 over libsofthsmrustv3.so -- token sign, software verify" t38b
 
-# T39b is XFAIL, not PASS: live-caught during this coverage sweep
-# (2026-09-02), a REAL cross-implementation correctness gap, not a
-# test-harness artifact. The Rust-arm Ed25519ctx signature verifies
-# successfully against the SAME token's own C_Verify (self-consistent —
-# confirmed manually: `pkeyutl -verify -propquery "?provider=pkcs11"
-# -inkey "pkcs11:...;type=public"` against the token object succeeds) but
-# FAILS to verify against OpenSSL's own independent native Ed25519ctx
-# implementation ("provider signature failure" / "Signature Verification
-# Failure") -- the exact "self-verifies but disagrees with an independent
-# implementation" trap this whole harness exists to catch (see this
-# file's own header: "never self-verified inside one stack"). The C++ arm's
-# identical cross-check (T39) passes cleanly, so this is Rust-engine-
-# specific. CHANGELOG's own record of the Ed25519ctx implementation
-# (0.27.0, "Ed25519ctx had no equivalent in the pinned ed25519-dalek 2.2.0
-# at all") states it was verified "byte-exact... against PyCryptodome",
-# never against OpenSSL's own native implementation -- so this specific
-# cross-check had never been run before this session. Root cause not
-# investigated further (would mean editing Rust engine crypto code, out of
-# this sweep's scope) -- flagged here as a real, currently-open finding.
+# T39b was XFAIL from 2026-09-02 to the WS1 crypto-bugs remediation
+# (2026-09-01 branch date, same day). Root-caused: NOT a math bug in
+# Ed25519ctx (sign_eddsa_ctx/verify_eddsa_ctx in rust/src/crypto/
+# handlers.rs were already correct -- byte-exact against an independent
+# PyCryptodome computation, both at fixed KAT vectors and re-confirmed
+# against the exact seed/msg/context this failure used). The real bug was
+# one level up, in rust/src/ffi.rs's FFI/dispatch layer:
+# `parse_sign_mech_params` had NO branch for CKM_EDDSA at all, so
+# CK_EDDSA_PARAMS.ulContextDataLen/pContextData were parsed NOWHERE (only
+# phFlag was ever read, to choose CKM_EDDSA vs CKM_EDDSA_PH) -- every
+# CKM_EDDSA call therefore got an empty context and silently fell through
+# to plain sign_eddsa/verify_eddsa regardless of what the caller supplied.
+# Sign and verify agreed with each other (both dropped the context
+# identically), which is exactly why the token's own C_Verify self-check
+# passed while OpenSSL's independent Ed25519ctx implementation, which does
+# NOT drop it, disagreed -- the "self-verifies but disagrees with an
+# independent implementation" trap this whole harness exists to catch (see
+# this file's own header: "never self-verified inside one stack"). Fixed
+# by threading CK_EDDSA_PARAMS' context through parse_sign_mech_params and
+# the CKM_EDDSA arms of C_Sign/C_Verify to sign_eddsa_ctx/verify_eddsa_ctx
+# (already-correct functions that were simply unreachable from this
+# dispatch path for any CKM_EDDSA call). Verified natively (no Docker):
+# real C_SignInit/C_Sign/C_VerifyInit/C_Verify driven with real
+# CK_EDDSA_PARAMS byte buffers, cross-checked against a real native
+# `openssl pkeyutl` process in BOTH directions (engine signs / OpenSSL
+# verifies, and OpenSSL signs / engine verifies), wrong-context sabotage
+# rejected both ways -- see
+# `ffi::ed25519ctx_ffi_dispatch_tests::ed25519ctx_ffi_dispatch_cross_checks_against_openssl`
+# in rust/src/ffi.rs.
 t39b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
   local w="$ROOT_WORK/rusted25519ctx"; mkdir -p "$w/tokens"; mk_rust_cnf "$w"
   local statefile="$w/state.bin"
@@ -3082,7 +3107,7 @@ t39b() { [[ -n "$RUST_ENGINE_SO" ]] || return 1
   then echo "Rust-arm: Ed25519ctx signature verified under the WRONG context string -- context ignored"; return 1; fi
   return 0
 }
-run_case T39b XFAIL "Ed25519ctx, Rust arm: token-side self-verify succeeds but the signature FAILS OpenSSL's independent native Ed25519ctx verify -- real cross-implementation correctness gap, found 2026-09-02, not previously tested this way (see comment above)" t39b
+run_case T39b PASS "Ed25519ctx, Rust arm: CK_EDDSA_PARAMS' context now reaches sign_eddsa_ctx/verify_eddsa_ctx -- rust/src/ffi.rs's parse_sign_mech_params had no CKM_EDDSA branch at all, so ulContextDataLen/pContextData were silently dropped and every CKM_EDDSA call fell through to plain Ed25519 regardless of context, which self-verified against the SAME token's own C_Verify (both sides dropped it identically) but disagreed with OpenSSL's independent Ed25519ctx, which does not; the underlying sign_eddsa_ctx/verify_eddsa_ctx math was already correct (byte-exact vs PyCryptodome) -- fixes the capability gap found 2026-09-02 (WS1 crypto-bugs remediation, 2026-09-01); confirmed here plus by a new #[test] in ffi.rs driving the real C_SignInit/C_Sign/C_VerifyInit/C_Verify entry points against a real openssl pkeyutl process, both directions, wrong-context sabotage rejected both ways -- this run_case is the pending real-provider-.so confirmation" t39b
 
 
 # ─── R0.1 regression guard ──────────────────────────────────────────────────

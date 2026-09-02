@@ -5897,6 +5897,39 @@ unsafe fn parse_sign_mech_params(
         // error either way.
         return parse_sign_additional_ctx(p_mechanism);
     }
+    if mech_type == CKM_EDDSA {
+        // CK_EDDSA_PARAMS (v3.2 §6.3.7) — `phFlag` was already consumed by
+        // `eddsa_ph_flag` before this function was ever called (a `true`
+        // phFlag remaps `mech_type` to CKM_EDDSA_PH upstream, so a call
+        // reaching this branch always has phFlag=false). What's left,
+        // `ulContextDataLen`/`pContextData`, was previously read NOWHERE:
+        // this function had no CKM_EDDSA branch at all and fell through to
+        // the `Ok((Vec::new(), false))` default at the bottom, so
+        // `C_Sign`/`C_Verify`'s CKM_EDDSA arm always got an empty ctx_bytes
+        // and always called plain `sign_eddsa`/`verify_eddsa` — silently
+        // discarding any caller-supplied context. That's RFC 8032
+        // Ed25519ctx's entire distinguishing feature (a non-empty context
+        // changes the dom2 prefix fed into both hash calls), so a caller
+        // asking for Ed25519ctx over this mechanism got plain Ed25519
+        // instead: self-consistent (sign and verify agreed with each
+        // other, both ignoring the context) but silently wrong against any
+        // independent Ed25519ctx implementation, incl. OpenSSL's own
+        // (`-pkeyopt instance:Ed25519ctx -pkeyopt context-string:...`) —
+        // T39b. Absent/undersized parameter ⇒ empty context (plain EdDSA),
+        // same "no struct means no context" convention as
+        // `parse_sign_additional_ctx` above.
+        let r = match m.opt_params(&ck_param::eddsa::LAYOUT, ck_param::eddsa::FIELD_COUNT) {
+            Ok(Some(r)) => r,
+            _ => return Ok((Vec::new(), false)),
+        };
+        let context = r
+            .buffer(ck_param::eddsa::P_CONTEXT_DATA, ck_param::eddsa::UL_CONTEXT_DATA_LEN)
+            .to_vec();
+        if context.len() > 255 {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        return Ok((context, false));
+    }
     if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
         // CK_RSA_PKCS_PSS_PARAMS (§6.4.5) — params are caller-authoritative;
         // hashAlg/mgf must match the mechanism's digest. An absent parameter
@@ -6371,7 +6404,19 @@ fn C_Sign_impl(
             | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => {
                 sign_ecdsa(eff_mech, ps, &sk_bytes, eff_msg)
             }
-            CKM_EDDSA => sign_eddsa(&sk_bytes, eff_msg),
+            // ctx_bytes is CK_EDDSA_PARAMS.pContextData/ulContextDataLen,
+            // parsed by parse_sign_mech_params's CKM_EDDSA branch — empty
+            // means plain EdDSA, non-empty means RFC 8032 Ed25519ctx/
+            // Ed448ctx (see that branch's comment for why this dispatch
+            // used to always take the empty-context arm regardless of what
+            // the caller supplied — T39b).
+            CKM_EDDSA => {
+                if ctx_bytes.is_empty() {
+                    sign_eddsa(&sk_bytes, eff_msg)
+                } else {
+                    sign_eddsa_ctx(&sk_bytes, eff_msg, &ctx_bytes)
+                }
+            }
             CKM_EDDSA_PH => sign_eddsa_ph(&sk_bytes, eff_msg),
             _ => Err(CKR_MECHANISM_INVALID),
         };
@@ -6723,7 +6768,14 @@ pub fn C_Verify(
                     None => Err(CKR_KEY_TYPE_INCONSISTENT),
                 }
             }
-            CKM_EDDSA => verify_eddsa(&pk_bytes, eff_msg, sig_bytes),
+            // See C_Sign's matching CKM_EDDSA arm for what ctx_bytes is.
+            CKM_EDDSA => {
+                if ctx_bytes.is_empty() {
+                    verify_eddsa(&pk_bytes, eff_msg, sig_bytes)
+                } else {
+                    verify_eddsa_ctx(&pk_bytes, eff_msg, sig_bytes, &ctx_bytes)
+                }
+            }
             CKM_EDDSA_PH => verify_eddsa_ph(&pk_bytes, eff_msg, sig_bytes),
             _ => Err(CKR_MECHANISM_INVALID),
         } {
@@ -7301,12 +7353,17 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 (iv, aad, tag_bits)
             }
             CKM_AES_CCM => {
-                // CK_CCM_PARAMS (§6.11.3). ulDataLen is not threaded through
-                // — this engine's CCM is single-shot only (see
-                // crypto/multipart.rs's CCM section), so the real
-                // plaintext/ciphertext length is always known directly from
-                // the C_Encrypt/C_Decrypt buffer, making the separate
-                // upfront declaration redundant here.
+                // CK_CCM_PARAMS (§6.11.3). ulDataLen is not threaded through.
+                // Unlike OpenSSL's own EVP CCM (which needs the total length
+                // pre-declared via a NULL-output Update to stream correctly —
+                // see the C++ engine's OSSLEVPSymmetricAlgorithm.cpp), this
+                // engine's multi-part CCM (CcmState, crypto/multipart.rs)
+                // buffers every Update call and only runs the real
+                // ccm_encrypt/ccm_decrypt at Final, once the true buffered
+                // length is known directly from the buffer itself — so the
+                // separate upfront declaration stays redundant even now that
+                // C_EncryptUpdate/C_DecryptUpdate are supported, not just
+                // the one-shot C_Encrypt/C_Decrypt path.
                 let ccm = match ParamReader::new(
                     p_param,
                     ul_param_len,
@@ -8032,12 +8089,17 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 (iv, aad, tag_bits)
             }
             CKM_AES_CCM => {
-                // CK_CCM_PARAMS (§6.11.3). ulDataLen is not threaded through
-                // — this engine's CCM is single-shot only (see
-                // crypto/multipart.rs's CCM section), so the real
-                // plaintext/ciphertext length is always known directly from
-                // the C_Encrypt/C_Decrypt buffer, making the separate
-                // upfront declaration redundant here.
+                // CK_CCM_PARAMS (§6.11.3). ulDataLen is not threaded through.
+                // Unlike OpenSSL's own EVP CCM (which needs the total length
+                // pre-declared via a NULL-output Update to stream correctly —
+                // see the C++ engine's OSSLEVPSymmetricAlgorithm.cpp), this
+                // engine's multi-part CCM (CcmState, crypto/multipart.rs)
+                // buffers every Update call and only runs the real
+                // ccm_encrypt/ccm_decrypt at Final, once the true buffered
+                // length is known directly from the buffer itself — so the
+                // separate upfront declaration stays redundant even now that
+                // C_EncryptUpdate/C_DecryptUpdate are supported, not just
+                // the one-shot C_Encrypt/C_Decrypt path.
                 let ccm = match ParamReader::new(
                     p_param,
                     ul_param_len,
@@ -11802,6 +11864,41 @@ fn build_multipart_cipher(
                 dir,
             )))
         }
+        CKM_AES_CCM => {
+            // ctx.iv/aad/tag_bits carry (nonce, aad, mac_len_bytes) — same
+            // packing as the one-shot C_Encrypt/C_Decrypt CCM arm (see the
+            // CK_CCM_PARAMS parsing comment in C_EncryptInit above). SP
+            // 800-38C bakes the total plaintext length into B_0, so
+            // CcmState buffers every Update call's bytes verbatim and
+            // defers to the existing single-shot ccm_encrypt/ccm_decrypt
+            // at Final (crypto/multipart.rs's CCM section).
+            Ok(MultipartCipher::Ccm(CcmState::new(
+                make_key()?,
+                ctx.iv.clone(),
+                ctx.aad.clone(),
+                ctx.tag_bits as usize,
+                dir,
+            )))
+        }
+        CKM_AES_XTS => {
+            // §6.15 — same distinct-CKK_AES_XTS-key-type gate as the
+            // one-shot C_Encrypt/C_Decrypt XTS arm (see that arm's comment
+            // in C_Encrypt above for the full rationale: a 32/64-byte
+            // CKK_AES_XTS key must never be interchangeable with a
+            // same-length plain CKK_AES key). `make_key()` above builds a
+            // plain `AesKey` (16/24/32 bytes only) so it can't be reused
+            // here — XTS needs the raw double-width bytes split into two
+            // sub-keys, which only happens once the FULL message is known
+            // (crypto/multipart.rs's XTS section), so this arm fetches the
+            // key bytes directly instead.
+            if get_object_attr_u32(ctx.key_handle, CKA_KEY_TYPE) != Some(CKK_AES_XTS) {
+                return Err(CKR_KEY_TYPE_INCONSISTENT);
+            }
+            let key_bytes = get_object_value(ctx.key_handle).ok_or(CKR_ARGUMENTS_BAD)?;
+            let tweak: [u8; 16] =
+                ctx.iv.as_slice().try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            Ok(MultipartCipher::Xts(XtsState::new(key_bytes, tweak, dir)))
+        }
         // RSA-OAEP / ChaCha20-Poly1305 are single-part-only mechanisms:
         // feeding them through Update is an input-length violation.
         _ => Err(match dir {
@@ -14014,6 +14111,21 @@ mod multipart_ffi_tests {
         });
     }
 
+    /// Same as `install_aes_key`, but also tags the object
+    /// `CKA_KEY_TYPE == CKK_AES_XTS` — §6.15 requires this distinct key
+    /// type (not merely a same-length plain `CKK_AES` value) for
+    /// `CKM_AES_XTS`, and `build_multipart_cipher`'s XTS arm checks it via
+    /// `get_object_attr_u32` before ever touching the buffered data.
+    fn install_xts_key(key: &[u8]) {
+        crate::state::set_initialized(true);
+        OBJECTS.with(|o| {
+            let mut attrs = Attributes::new();
+            attrs.insert(CKA_VALUE, key.to_vec());
+            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES_XTS);
+            o.borrow_mut().insert(KEY_HANDLE, attrs);
+        });
+    }
+
     /// S4 — Update/Final now validate the session handle (§5.2 priority);
     /// register the test session so the seeded ctx is reachable.
     fn install_session(h: u32) {
@@ -14204,6 +14316,234 @@ mod multipart_ffi_tests {
         let mut len = 16u32;
         assert_eq!(C_EncryptFinal(session, buf.as_mut_ptr(), &mut len), CKR_DATA_LEN_RANGE);
         // Failed Final terminates the operation.
+        assert!(!ENCRYPT_STATE.borrow().contains_key(&session));
+    }
+
+    // ── T33b root-cause fix: CKM_AES_XTS streaming (§6.15) ───────────────
+    //
+    // Before `build_multipart_cipher` grew an XTS arm, `CKM_AES_XTS` fell
+    // through to that function's generic `_ => Err(...)` fallback and
+    // returned `CKR_DATA_LEN_RANGE` on the very FIRST `C_EncryptUpdate`
+    // call — not `CKR_KEY_TYPE_INCONSISTENT` from the `CKA_KEY_TYPE` check,
+    // which only ever existed on the one-shot `C_Encrypt`/`C_Decrypt` path
+    // and was never reachable from Update at all. `scripts/aes-xts-probe.c`
+    // (T33b) observed that as "fails on the block-aligned prefix", which is
+    // consistent with the fallback firing on the first Update regardless of
+    // its content. These tests drive the real streaming entry points and
+    // confirm: (1) they now succeed, (2) they match independent NIST ACVP
+    // vectors, (3) they match the one-shot path byte-for-byte for the same
+    // message under several different Update chunkings, and (4) the
+    // CKA_KEY_TYPE gate and the sub-block-message rejection still apply
+    // identically on the streaming path.
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// Split `data` into consecutive parts using `sizes` (cycled).
+    fn split_into<'a>(data: &'a [u8], sizes: &[usize]) -> Vec<&'a [u8]> {
+        let mut parts = Vec::new();
+        let mut off = 0;
+        let mut i = 0;
+        while off < data.len() {
+            let n = sizes[i % sizes.len()].min(data.len() - off).max(1);
+            parts.push(&data[off..off + n]);
+            off += n;
+            i += 1;
+        }
+        parts
+    }
+
+    /// NIST ACVP-AES-XTS 2.0 vectors (`tests/acvp/aes_xts_test.json`,
+    /// cases 0/1/3 — the other case, 2, is a ~5.9 KB decrypt vector not
+    /// needed here) as an INDEPENDENT external oracle, each checked
+    /// against both the one-shot `C_Encrypt`/`C_Decrypt` path and the
+    /// streaming `C_EncryptUpdate`/`C_EncryptFinal` path under several
+    /// Update chunkings: a single whole-message Update ("one big Update,
+    /// then Final" — what a one-shot-shaped caller looks like through this
+    /// API), many 1-byte Updates, and a block-aligned-prefix + sub-block-
+    /// tail split (the exact two-call shape `aes-xts-probe.c` drives to
+    /// force genuine ciphertext stealing at a real streaming boundary).
+    #[test]
+    fn xts_multipart_ffi_matches_acvp_vectors_and_one_shot() {
+        let _guard = test_lock::acquire();
+        let session = 0x4D50_1006;
+        install_session(session);
+
+        // (key, tweak, pt, ct, is_encrypt_case)
+        let cases: &[(&str, &str, &str, &str, bool)] = &[
+            // AES-128-XTS (32-byte double-width key), encrypt.
+            (
+                "6FA0AE27860CB658B40A3D95666954442E418EE3E4565657DD08EDC69E20E5D2",
+                "C7C71AC8A3F858145B9BA0E658491AF7",
+                "316F416DD8828155AAFE1EFA50361D48613E073E1B4B66B00D86A908626157D3058DCB83B1B6833580AA2F4A0663DE87115027F5F4EB60FCF2F2235BB801",
+                "74FCCB3C6FA20BAE9D1FBA9525519A5AEBB0BD4F2803A40C4EC0D80FBE3D5ECF53EA3D8C7456D23B4FD7772C4BC44B06C0C7A533E53747A4CB94927D4572",
+                true,
+            ),
+            // AES-256-XTS (64-byte double-width key), encrypt.
+            (
+                "A0E54B4453A9C9D7740A8A88F4F72FB3A76F16D078197A1C69E5F69E68A710FB3555068BFE708EE35224F8CDC5B238823A2B239E5CD6A0A6704AB4E18C1CFC6D",
+                "CC82ACDF52A949538B9CC27C8E61A04A",
+                "D7503A2C796ADECA0E73A619C0EA661DC683BA6414E74C708280F6DD3A9C56F83DB8B82CD0FE06F5903786A84722276627EF7DE3153A258F7C0B2A7F606E02941CED3CE7518D0D4466CF9F3A77",
+                "31611D514838AB07CE6167149DB16A0BCA816ED32C55C5311F6D9A3B7913243B334E01D9AC661F48D0379F641A0DCC2F8CB8C9442F2ADFDA7912CB4B5BA32563834821AD807A0BCA4AFC26E353",
+                true,
+            ),
+            // AES-256-XTS, decrypt.
+            (
+                "FE08576B2820261BB57EE5164416885F9B154BA446EC82E129345825E30721C87A13AC02FDE62CD5D7A34433E5EB021BE485EA54422113AA0B545154F5FDBEF9",
+                "89325D57B103C2CDC2BFA2E3327AA6FF",
+                "C1355EE7100214F1BF77A1D8D1B0C2229EC647806E7D8004CCA909350315A03D7D62B84DBA97CDA22359554B744B",
+                "B2CA0147326DE586698DC559978E367B894E23A101D3937C5ADE6FE36C96629CFDDBC21B668B690827EC27D59D6E",
+                false,
+            ),
+        ];
+
+        for (i, (key_hex, tweak_hex, pt_hex, ct_hex, is_encrypt)) in cases.iter().enumerate() {
+            let key = hex(key_hex);
+            let tweak = hex(tweak_hex);
+            let pt = hex(pt_hex);
+            let ct = hex(ct_hex);
+            install_xts_key(&key);
+            // Neither ACVP vector's own length happens to be block-aligned
+            // (62, 77 and 46 bytes — see payloadLenBits in the source
+            // file), so a block-aligned-prefix/sub-block-tail split always
+            // exercises real ciphertext stealing across the boundary.
+            let msg_len = pt.len().min(ct.len());
+            let prefix = (msg_len / 16 * 16).max(16);
+            let chunkings: &[&[usize]] = &[&[1_000_000], &[1], &[prefix]];
+
+            if *is_encrypt {
+                seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, tweak.clone(), Vec::new(), 0);
+                let mut out = vec![0u8; pt.len()];
+                let mut len = out.len() as u32;
+                assert_eq!(
+                    C_Encrypt(session, pt.as_ptr() as *mut u8, pt.len() as u32, out.as_mut_ptr(), &mut len),
+                    CKR_OK,
+                    "case {i}: one-shot encrypt",
+                );
+                assert_eq!(out, ct, "case {i}: one-shot encrypt vs ACVP ct");
+
+                for sizes in chunkings {
+                    seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, tweak.clone(), Vec::new(), 0);
+                    let parts = split_into(&pt, sizes);
+                    let got = run_multipart(session, true, &parts).unwrap();
+                    assert_eq!(got, ct, "case {i}: multipart encrypt sizes={sizes:?} vs ACVP ct");
+                }
+            } else {
+                seed_ctx(&DECRYPT_STATE, session, CKM_AES_XTS, tweak.clone(), Vec::new(), 0);
+                let mut out = vec![0u8; ct.len()];
+                let mut len = out.len() as u32;
+                assert_eq!(
+                    C_Decrypt(session, ct.as_ptr() as *mut u8, ct.len() as u32, out.as_mut_ptr(), &mut len),
+                    CKR_OK,
+                    "case {i}: one-shot decrypt",
+                );
+                assert_eq!(out, pt, "case {i}: one-shot decrypt vs ACVP pt");
+
+                for sizes in chunkings {
+                    seed_ctx(&DECRYPT_STATE, session, CKM_AES_XTS, tweak.clone(), Vec::new(), 0);
+                    let parts = split_into(&ct, sizes);
+                    let got = run_multipart(session, false, &parts).unwrap();
+                    assert_eq!(got, pt, "case {i}: multipart decrypt sizes={sizes:?} vs ACVP pt");
+                }
+            }
+        }
+    }
+
+    /// Broader chunking sweep on a synthetic (non-ACVP) message, well past
+    /// the ACVP vectors' ~46-77 byte range, cross-checked purely against
+    /// this engine's own one-shot `C_Encrypt`/`C_Decrypt` XTS path (T33's
+    /// existing, already-correct target) rather than an external vector —
+    /// per this task's fallback instruction when no independent oracle is
+    /// convenient. Round-trips through decrypt too.
+    #[test]
+    fn xts_multipart_ffi_matches_one_shot_various_chunkings() {
+        let _guard = test_lock::acquire();
+        let session = 0x4D50_1007;
+        install_session(session);
+        install_xts_key(&[0x5Au8; 64]); // AES-256-XTS
+        let tweak = vec![0x11u8; 16];
+        let pt: Vec<u8> = (0..247u8).map(|b| b.wrapping_mul(3).wrapping_add(1)).collect(); // 247 bytes, not block-aligned
+
+        seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, tweak.clone(), Vec::new(), 0);
+        let mut one_shot_ct = vec![0u8; pt.len()];
+        let mut len = one_shot_ct.len() as u32;
+        assert_eq!(
+            C_Encrypt(session, pt.as_ptr() as *mut u8, pt.len() as u32, one_shot_ct.as_mut_ptr(), &mut len),
+            CKR_OK,
+        );
+
+        let chunkings: &[&[usize]] = &[&[1], &[7, 3], &[16], &[33, 1, 5], &[64], &[1_000_000]];
+        for sizes in chunkings {
+            seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, tweak.clone(), Vec::new(), 0);
+            let parts = split_into(&pt, sizes);
+            let got_ct = run_multipart(session, true, &parts).unwrap();
+            assert_eq!(got_ct, one_shot_ct, "encrypt sizes={sizes:?}");
+
+            seed_ctx(&DECRYPT_STATE, session, CKM_AES_XTS, tweak.clone(), Vec::new(), 0);
+            let parts = split_into(&one_shot_ct, sizes);
+            let got_pt = run_multipart(session, false, &parts).unwrap();
+            assert_eq!(got_pt, pt, "decrypt sizes={sizes:?}");
+        }
+    }
+
+    /// §6.15's `CKA_KEY_TYPE == CKK_AES_XTS` gate must apply on the
+    /// streaming path exactly as it does one-shot (this task's explicit
+    /// constraint: don't relax that enforcement while fixing the streaming
+    /// gap). A plain (untagged) key of valid XTS length is rejected on the
+    /// very first Update, and the failed Update terminates the operation.
+    #[test]
+    fn xts_multipart_wrong_key_type_rejected() {
+        let _guard = test_lock::acquire();
+        let session = 0x4D50_1008;
+        install_session(session);
+        install_aes_key(&[0x33u8; 32]); // valid XTS length, but NOT tagged CKK_AES_XTS
+        seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, vec![0u8; 16], Vec::new(), 0);
+
+        let part = [0u8; 32];
+        let mut len = 0u32;
+        assert_eq!(
+            C_EncryptUpdate(session, part.as_ptr() as *mut u8, 32, std::ptr::null_mut(), &mut len),
+            CKR_KEY_TYPE_INCONSISTENT,
+        );
+        assert!(!ENCRYPT_STATE.borrow().contains_key(&session));
+    }
+
+    /// XTS ciphertext stealing needs at least one full AES block — same
+    /// floor the one-shot path enforces (`ffi.rs`'s `CKM_AES_XTS` arm in
+    /// `C_Encrypt`/`C_Decrypt`) — so a total buffered message under 16
+    /// bytes must fail at Final with the §6.16 length-range error, even
+    /// though every individual Update along the way succeeded.
+    #[test]
+    fn xts_multipart_sub_block_message_is_data_len_range_at_final() {
+        let _guard = test_lock::acquire();
+        let session = 0x4D50_1009;
+        install_session(session);
+        install_xts_key(&[0x22u8; 32]);
+        seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, vec![0u8; 16], Vec::new(), 0);
+
+        let part = [0u8; 10]; // under one block
+        let mut len = 0u32;
+        assert_eq!(
+            C_EncryptUpdate(session, part.as_ptr() as *mut u8, 10, std::ptr::null_mut(), &mut len),
+            CKR_OK,
+        );
+        assert_eq!(len, 0, "XTS Update never emits before Final");
+        let mut buf = [0u8; 10];
+        let mut len = 0u32;
+        assert_eq!(
+            C_EncryptUpdate(session, part.as_ptr() as *mut u8, 10, buf.as_mut_ptr(), &mut len),
+            CKR_OK,
+        );
+        let mut final_buf = [0u8; 10];
+        let mut final_len = 10u32;
+        assert_eq!(
+            C_EncryptFinal(session, final_buf.as_mut_ptr(), &mut final_len),
+            CKR_DATA_LEN_RANGE,
+        );
         assert!(!ENCRYPT_STATE.borrow().contains_key(&session));
     }
 }
@@ -16034,6 +16374,62 @@ mod return_code_ffi_tests {
 
         let derived_256 = sp800_108_counter_kbkdf(CKM_SHA256_HMAC, &key, &[], 32).unwrap();
         assert_ne!(derived, derived_256, "SHA-384 PRF produced the SHA-256 KO");
+    }
+
+    /// Cross-engine parity for the 2026-09 CKM_SP800_108_DOUBLE_PIPELINE_KDF
+    /// fix (SoftHSM_keygen.cpp): with NO CK_SP800_108_COUNTER segment at
+    /// all, this engine's `sp800_108_feedback_input` (reused by
+    /// `sp800_108_run_double_pipeline` for the round input) has always
+    /// omitted the counter — that was already spec-correct per the
+    /// PKCS#11 v3.3 draft's Double Pipeline Mode KDF table ("This data
+    /// field type is optional"). The C++ engine used to default a 32-bit
+    /// counter into every round regardless; it's now fixed to match this
+    /// exact behavior. Same base key / fixed input / output length as
+    /// scripts/dp-kdf-counter-probe.cpp's NOCTR/WITHCTR cases and
+    /// scratchpad's independent Python reference — all three (Python
+    /// reference, C++ engine post-fix, Rust engine) must agree byte-for-
+    /// byte on both hex strings below.
+    #[test]
+    fn sp800_108_double_pipeline_no_counter_matches_cpp_and_reference() {
+        let base_key: Vec<u8> = (0u8..32).collect();
+        let fixed_input = b"dp-kdf-probe-fixed-input".to_vec();
+
+        // NOCTR: no Sp800Seg::Counter segment at all.
+        let noctr_segs = vec![Sp800Seg::Bytes(fixed_input.clone())];
+        let noctr =
+            sp800_108_double_pipeline_kbkdf(CKM_SHA256_HMAC, &base_key, &noctr_segs, 48).unwrap();
+        let noctr_expected =
+            hex_decode("bd6b1f88af8814a4c0148e9de138a6a521fcdc5c034e154c4edfc7d61652ffb0208520ac29e082cc4b16747870a97a16");
+        assert_eq!(
+            noctr, noctr_expected,
+            "NOCTR must match the independent NIST SP 800-108 sec 5.3 reference and the fixed C++ engine"
+        );
+
+        // WITHCTR: explicit 32-bit big-endian counter segment, same
+        // position (before the fixed input) as the C++ probe/reference —
+        // this call shape must be byte-identical to before the fix.
+        let withctr_segs = vec![
+            Sp800Seg::Counter(false, 4),
+            Sp800Seg::Bytes(fixed_input),
+        ];
+        let withctr =
+            sp800_108_double_pipeline_kbkdf(CKM_SHA256_HMAC, &base_key, &withctr_segs, 48)
+                .unwrap();
+        let withctr_expected =
+            hex_decode("6eac2bf4afb8861530ebf2bb1722b8757ec5cdbbf89c317a05557cbbdcc51a51e2054bb0c97d0daaf1baa36daae699d3");
+        assert_eq!(
+            withctr, withctr_expected,
+            "WITHCTR (explicit counter) must remain unchanged by the no-counter fix"
+        );
+
+        assert_ne!(noctr, withctr, "the counter must actually change the derived output");
+    }
+
+    fn hex_decode(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 
     // ── AES-KW unwrap codes ─────────────────────────────────────────────────
@@ -21733,5 +22129,360 @@ mod param_struct_width_tests {
             unsafe { crate::crypto::handlers::get_attr_ulong(p, 4, CKA_VALUE_LEN) },
             Some(32),
         );
+    }
+}
+
+/// T39b regression coverage (2026-09-02 validation sweep + fix).
+///
+/// The bug lived in the FFI dispatch layer, not in the Ed25519ctx math:
+/// `parse_sign_mech_params` (this file) had NO branch for `CKM_EDDSA` at
+/// all, so `CK_EDDSA_PARAMS.ulContextDataLen`/`pContextData` were parsed
+/// NOWHERE — only `phFlag` was ever read (by `eddsa_ph_flag`, to choose
+/// between `CKM_EDDSA`/`CKM_EDDSA_PH`). `C_Sign`/`C_Verify`'s `CKM_EDDSA`
+/// arm therefore always received an empty `ctx_bytes` and always called
+/// plain `sign_eddsa`/`verify_eddsa` (no RFC 8032 dom2 prefix at all),
+/// silently discarding any context the caller supplied — a caller asking
+/// for Ed25519ctx got plain Ed25519 instead. Sign and verify agreed with
+/// each other (both dropped the context identically), so the token's own
+/// C_Verify self-check passed; only a cross-check against an independent
+/// Ed25519ctx implementation (OpenSSL's own, exactly as
+/// `scripts/test-openssl-provider.sh`'s T39b does over the real
+/// `pkcs11-provider` -> C_SignInit/C_Sign path) exposed it.
+/// `crypto::handlers::sign_eddsa_ctx`/`verify_eddsa_ctx` were already
+/// correct (byte-exact against PyCryptodome, see
+/// `crypto::handlers::tests::ed25519_ctx_matches_independent_reference`)
+/// and are UNCHANGED by this fix — they just weren't reachable through
+/// this dispatch path for any CKM_EDDSA call.
+///
+/// This module exercises the actual bug site: real `CK_MECHANISM`/
+/// `CK_EDDSA_PARAMS` byte buffers, laid out exactly as `ck_param::eddsa`
+/// says the native ABI requires (the same struct a real caller like
+/// `pkcs11-provider` marshals), through the real `C_SignInit`/`C_Sign`/
+/// `C_VerifyInit`/`C_Verify` entry points — not `crypto::handlers`
+/// directly, which would prove nothing about the dispatch bug. Both
+/// directions are cross-checked against a real, independently-invoked
+/// `openssl pkeyutl` process (not another Rust Ed25519 implementation),
+/// plus wrong-context sabotage in both directions.
+#[cfg(test)]
+mod ed25519ctx_ffi_dispatch_tests {
+    use super::*;
+    use crate::native::test_lock;
+    use std::io::Write;
+    use std::process::Command;
+
+    /// Same C_InitToken -> SO login -> C_InitPIN -> logout -> USER login
+    /// sequence as the other `*_ffi_tests` modules' `setup_session()` in
+    /// this file (duplicated locally per this file's existing per-module
+    /// test-helper convention — see e.g. `rsa_pkcs_wrap_ffi_tests`).
+    fn setup_session() -> u32 {
+        assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
+        crate::state::ensure_slot(0);
+        let so_pin = b"12345678";
+        assert_eq!(
+            C_InitToken(0, so_pin.as_ptr() as *mut u8, so_pin.len() as u32, [0u8; 32].as_mut_ptr()),
+            CKR_OK
+        );
+        let mut session = 0u32;
+        assert_eq!(
+            C_OpenSession(0, 0x00000004 | 0x00000002, std::ptr::null_mut(), std::ptr::null_mut(), &mut session),
+            CKR_OK
+        );
+        assert_eq!(C_Login(session, 0, so_pin.as_ptr() as *mut u8, so_pin.len() as u32), CKR_OK);
+        let user_pin = b"user1234";
+        assert_eq!(C_InitPIN(session, user_pin.as_ptr() as *mut u8, user_pin.len() as u32), CKR_OK);
+        assert_eq!(C_Logout(session), CKR_OK);
+        assert_eq!(C_Login(session, 1, user_pin.as_ptr() as *mut u8, user_pin.len() as u32), CKR_OK);
+        session
+    }
+
+    /// Reads CKA_VALUE straight out of the internal object store, bypassing
+    /// CKA_EXTRACTABLE — same pattern as this file's own `obj_attr()` test
+    /// helpers (see e.g. the KEM value-length tests above). Legitimate here
+    /// because this test needs the raw seed for an OUT-OF-BAND oracle
+    /// (openssl), the same information `native::sign`'s own internal
+    /// `get_object_value_from` reads to sign with.
+    fn obj_value(handle: u32) -> Vec<u8> {
+        OBJECTS
+            .with(|o| o.borrow().get(&handle).and_then(|a| a.get(&CKA_VALUE).cloned()))
+            .expect("CKA_VALUE must be set")
+    }
+
+    /// A real `CK_EDDSA_PARAMS` (v3.2 §6.3.7) byte buffer, laid out at
+    /// offsets `ck_param::eddsa::LAYOUT` computes for THIS target's ABI —
+    /// exactly the bytes a real caller (`pkcs11-provider`) marshals, not a
+    /// hand-picked offset. `phFlag` is left CK_FALSE (Ed25519ctx, not
+    /// Ed25519ph) — byte 0 of a zero-initialized buffer already is.
+    fn build_eddsa_params(ctx: &[u8]) -> Vec<u8> {
+        let layout = &ck_param::eddsa::LAYOUT;
+        let mut buf = vec![0u8; layout.size()];
+        let len_off = layout.offset(ck_param::eddsa::UL_CONTEXT_DATA_LEN);
+        buf[len_off..len_off + ck_param::WORD].copy_from_slice(&ctx.len().to_ne_bytes());
+        let ptr_off = layout.offset(ck_param::eddsa::P_CONTEXT_DATA);
+        buf[ptr_off..ptr_off + ck_param::WORD]
+            .copy_from_slice(&(ctx.as_ptr() as usize).to_ne_bytes());
+        buf
+    }
+
+    /// A real `CK_MECHANISM` (v3.2 §5.1.2) byte buffer pointing at `param`.
+    fn build_mechanism(mech: u32, param: &[u8]) -> Vec<u8> {
+        let layout = &ck_param::mechanism::LAYOUT;
+        let mut buf = vec![0u8; layout.size()];
+        let m_off = layout.offset(ck_param::mechanism::MECHANISM);
+        buf[m_off..m_off + ck_param::WORD].copy_from_slice(&(mech as usize).to_ne_bytes());
+        let p_off = layout.offset(ck_param::mechanism::P_PARAMETER);
+        let param_ptr = if param.is_empty() { std::ptr::null() } else { param.as_ptr() };
+        buf[p_off..p_off + ck_param::WORD].copy_from_slice(&(param_ptr as usize).to_ne_bytes());
+        let l_off = layout.offset(ck_param::mechanism::UL_PARAMETER_LEN);
+        buf[l_off..l_off + ck_param::WORD].copy_from_slice(&param.len().to_ne_bytes());
+        buf
+    }
+
+    /// RFC 8410 §10.3's fixed, well-known DER prefix for an unencrypted
+    /// Ed25519 PKCS#8 private key (`SEQUENCE { INTEGER 0,
+    /// AlgorithmIdentifier{id-Ed25519}, OCTET STRING { OCTET STRING <seed>
+    /// } }`) — verified byte-for-byte against a real `openssl genpkey
+    /// -algorithm ED25519 -outform DER` output before use here. Same
+    /// "well-known fixed prefix" convention as
+    /// `crypto::handlers::build_ed25519_spki` uses for the public half.
+    fn pkcs8_der_from_seed(seed: &[u8]) -> Vec<u8> {
+        assert_eq!(seed.len(), 32);
+        let mut der: Vec<u8> = vec![
+            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22,
+            0x04, 0x20,
+        ];
+        der.extend_from_slice(seed);
+        der
+    }
+
+    /// Resolves a native OpenSSL 3.x binary. Prefers `OPENSSL_BIN`, then the
+    /// Homebrew path this environment's CLAUDE.md documents (3.6.3), then
+    /// PATH. Returns `None` (skip, don't fail) rather than assume a
+    /// specific dev machine everywhere `cargo test` might run.
+    fn openssl_bin() -> Option<String> {
+        if let Ok(p) = std::env::var("OPENSSL_BIN") {
+            if std::path::Path::new(&p).exists() {
+                return Some(p);
+            }
+        }
+        for candidate in ["/opt/homebrew/bin/openssl", "/usr/local/bin/openssl", "openssl"] {
+            if let Ok(out) = Command::new(candidate).arg("version").output() {
+                if out.status.success() {
+                    return Some(candidate.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn run_openssl(openssl: &str, args: &[&str]) -> std::process::Output {
+        Command::new(openssl)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn {openssl}: {e}"))
+    }
+
+    /// Full round trip, both directions, both cross-checked against a real
+    /// OpenSSL process, plus wrong-context sabotage both ways. This is the
+    /// exact shape of `scripts/test-openssl-provider.sh`'s T39b, minus the
+    /// Docker-built `.so`/pkcs11-provider hop — it drives the same
+    /// `CK_EDDSA_PARAMS` bytes through the same in-process dispatch code
+    /// that hop ends up calling.
+    #[test]
+    fn ed25519ctx_ffi_dispatch_cross_checks_against_openssl() {
+        let Some(openssl) = openssl_bin() else {
+            eprintln!("skipping: no native openssl binary found");
+            return;
+        };
+
+        let _guard = test_lock::acquire();
+        let session = setup_session();
+
+        let (h_pub, h_priv) =
+            crate::native::keygen::generate_ed25519_keypair(session, b"\x01", "t39b-ctx-fix")
+                .expect("ed25519 keygen");
+        let pk_bytes = obj_value(h_pub);
+        let seed = obj_value(h_priv);
+        assert_eq!(pk_bytes.len(), 32);
+        assert_eq!(seed.len(), 32);
+
+        let tmp = std::env::temp_dir().join(format!("t39b_ffi_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let pub_der_path = tmp.join("pub.der");
+        let priv_der_path = tmp.join("priv.der");
+        let msg_path = tmp.join("msg.bin");
+        std::fs::write(&pub_der_path, crate::crypto::handlers::build_ed25519_spki(&pk_bytes))
+            .unwrap();
+        std::fs::write(&priv_der_path, pkcs8_der_from_seed(&seed)).unwrap();
+        let mut msg = b"T39b regression: the FFI layer must not drop the Ed25519ctx context"
+            .to_vec();
+        std::fs::write(&msg_path, &msg).unwrap();
+
+        // IMPORTANT, confirmed by direct experiment against this machine's
+        // real `openssl` binary: `pkeyutl -pkeyopt context-string:<value>`
+        // takes `<value>` LITERALLY (as the context's raw bytes, one byte
+        // per input character) — it does NOT hex-decode it, despite
+        // `scripts/test-openssl-provider.sh`'s T39/T39b using a
+        // hex-digit-shaped literal ($ctx="6170702d636f6e74657874") that
+        // looks like it should decode to "app-context". That shell script
+        // is still correct: it passes the SAME literal string to both the
+        // sign side and the independent-verify side, so the two agree on
+        // what the (25-byte, not "app-context"'s 11-byte) context actually
+        // is regardless of the misleading name. This test mirrors that: the
+        // context is the LITERAL bytes of `ctx`, passed to openssl as-is
+        // (no hex encoding) and to the engine's CK_EDDSA_PARAMS as-is.
+        // (Cost of getting this wrong while writing this test: the
+        // engine-vs-openssl cross-check failed with "provider signature
+        // failure" even though the engine's `sign_eddsa_ctx` output matched
+        // an independent PyCryptodome computation byte-for-byte over the
+        // SAME seed/msg/ctx — i.e. a test-harness bug that looked exactly
+        // like the bug this test exists to catch. Root-caused by comparing
+        // three independent oracles instead of trusting the first
+        // failure.)
+        let ctx = b"app-context".to_vec();
+        let wrong_ctx = b"wrong-context".to_vec(); // NUL can't survive argv -- any different literal proves the binding
+
+        // ── Direction A: engine signs (through the real FFI dispatch), ──
+        // ── OpenSSL's own independent Ed25519ctx verifies. ──────────────
+        let params = build_eddsa_params(&ctx);
+        let mech_buf = build_mechanism(CKM_EDDSA, &params);
+        assert_eq!(C_SignInit(session, mech_buf.as_ptr() as *mut u8, h_priv), CKR_OK);
+        let mut sig = [0u8; 64];
+        let mut sig_len: u32 = 64;
+        assert_eq!(
+            C_Sign(session, msg.as_mut_ptr(), msg.len() as u32, sig.as_mut_ptr(), &mut sig_len),
+            CKR_OK
+        );
+        assert_eq!(sig_len, 64);
+        let sig_path = tmp.join("sig_engine.bin");
+        std::fs::write(&sig_path, &sig[..sig_len as usize]).unwrap();
+
+        let ctx_str = std::str::from_utf8(&ctx).unwrap();
+        let out = run_openssl(
+            &openssl,
+            &[
+                "pkeyutl",
+                "-verify",
+                "-pubin",
+                "-inkey",
+                pub_der_path.to_str().unwrap(),
+                "-keyform",
+                "DER",
+                "-rawin",
+                "-in",
+                msg_path.to_str().unwrap(),
+                "-pkeyopt",
+                "instance:Ed25519ctx",
+                "-pkeyopt",
+                &format!("context-string:{ctx_str}"),
+                "-sigfile",
+                sig_path.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            out.status.success(),
+            "engine-produced Ed25519ctx signature must verify against OpenSSL's own \
+             independent implementation (T39b): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // Sabotage A: the SAME signature must be REJECTED under the WRONG
+        // context — proves OpenSSL's check is actually binding the context,
+        // not passing regardless.
+        let wrong_ctx_str = std::str::from_utf8(&wrong_ctx).unwrap();
+        let out_bad = run_openssl(
+            &openssl,
+            &[
+                "pkeyutl",
+                "-verify",
+                "-pubin",
+                "-inkey",
+                pub_der_path.to_str().unwrap(),
+                "-keyform",
+                "DER",
+                "-rawin",
+                "-in",
+                msg_path.to_str().unwrap(),
+                "-pkeyopt",
+                "instance:Ed25519ctx",
+                "-pkeyopt",
+                &format!("context-string:{wrong_ctx_str}"),
+                "-sigfile",
+                sig_path.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            !out_bad.status.success(),
+            "engine-produced signature verified under the WRONG context -- context ignored"
+        );
+
+        // ── Direction B: OpenSSL's own independent Ed25519ctx signs, ────
+        // ── the engine verifies (through the real FFI dispatch). ────────
+        let sig2_path = tmp.join("sig_openssl.bin");
+        let out_sign = run_openssl(
+            &openssl,
+            &[
+                "pkeyutl",
+                "-sign",
+                "-inkey",
+                priv_der_path.to_str().unwrap(),
+                "-keyform",
+                "DER",
+                "-rawin",
+                "-in",
+                msg_path.to_str().unwrap(),
+                "-pkeyopt",
+                "instance:Ed25519ctx",
+                "-pkeyopt",
+                &format!("context-string:{ctx_str}"),
+                "-out",
+                sig2_path.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            out_sign.status.success(),
+            "openssl pkeyutl -sign failed: {}",
+            String::from_utf8_lossy(&out_sign.stderr)
+        );
+        let mut sig2 = std::fs::read(&sig2_path).unwrap();
+        assert_eq!(sig2.len(), 64);
+
+        let params_v = build_eddsa_params(&ctx);
+        let mech_buf_v = build_mechanism(CKM_EDDSA, &params_v);
+        assert_eq!(C_VerifyInit(session, mech_buf_v.as_ptr() as *mut u8, h_pub), CKR_OK);
+        assert_eq!(
+            C_Verify(session, msg.as_mut_ptr(), msg.len() as u32, sig2.as_mut_ptr(), sig2.len() as u32),
+            CKR_OK,
+            "the engine must accept OpenSSL's own independent Ed25519ctx signature (T39b, \
+             reverse direction)"
+        );
+
+        // Sabotage B: the SAME OpenSSL-produced signature must be REJECTED
+        // by the engine's own C_Verify under the WRONG context.
+        let params_bad = build_eddsa_params(&wrong_ctx);
+        let mech_buf_bad = build_mechanism(CKM_EDDSA, &params_bad);
+        assert_eq!(C_VerifyInit(session, mech_buf_bad.as_ptr() as *mut u8, h_pub), CKR_OK);
+        assert_eq!(
+            C_Verify(session, msg.as_mut_ptr(), msg.len() as u32, sig2.as_mut_ptr(), sig2.len() as u32),
+            CKR_SIGNATURE_INVALID,
+            "engine C_Verify accepted an OpenSSL-produced signature under the WRONG context \
+             -- context ignored"
+        );
+
+        // Plain CKM_EDDSA (no CK_EDDSA_PARAMS at all) must still be ordinary
+        // Ed25519 with NO regression: the ctx-bound signature must NOT
+        // verify as plain EdDSA (the two modes are cryptographically
+        // distinct — same property `crypto::handlers::tests::
+        // ed25519_ctx_matches_independent_reference` already proves at the
+        // math layer; this checks the FFI dispatch layer keeps it true).
+        let mech_plain = build_mechanism(CKM_EDDSA, &[]);
+        assert_eq!(C_VerifyInit(session, mech_plain.as_ptr() as *mut u8, h_pub), CKR_OK);
+        assert_eq!(
+            C_Verify(session, msg.as_mut_ptr(), msg.len() as u32, sig2.as_mut_ptr(), sig2.len() as u32),
+            CKR_SIGNATURE_INVALID,
+            "a ctx-bound Ed25519ctx signature verified as plain Ed25519 -- modes must not \
+             be fallback-compatible"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
