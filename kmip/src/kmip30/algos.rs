@@ -218,6 +218,29 @@ pub enum KmipAlgorithm {
     /// / CKM_EDDSA) — this variant is the KMIP-layer plumbing that was
     /// missing.
     Ed25519,       // 0x37
+    /// EdDSA over Curve448 (RFC 8032) — KMIP 3.0 §11 codepoint `0x38`
+    /// (confirmed against `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums-
+    /// from-2023-11-30.json`'s `CryptographicAlgorithm` table: `Ed448` is
+    /// the entry immediately after `Ed25519`, same base-spec enum). Its
+    /// own algorithm identity — like `Ed25519`, NOT modelled as `Ecdh` +
+    /// `RecommendedCurve = CURVE448` (that combination is reserved for
+    /// X448, the Montgomery-form key-agreement sibling on the same
+    /// underlying curve; distinct key type, mechanism, and OID, exactly
+    /// as `Ed25519`'s own doc comment above already distinguishes it from
+    /// X25519).
+    ///
+    /// A 2026-08-30 KMIP/CACP coverage audit scoped Ed448 as "out of
+    /// scope... doesn't exist in either engine either" — true then, stale
+    /// the very next day: Ed448 keygen/sign/verify (pure and prehash)
+    /// shipped in the Rust engine's `0.27.0` release (2026-08-31). This
+    /// variant is the missing KMIP-layer plumbing, mirroring `Ed25519`'s
+    /// own P1 (2026-07-05) history exactly. `Sign`/`SignatureVerify` need
+    /// no algorithm-specific dispatch at all: `CKM_EDDSA` already covers
+    /// both curves, and `crypto::handlers::sign_eddsa`/`verify_eddsa`/
+    /// `*_ctx`/`*_ph` already dispatch on the stored key's byte length
+    /// (32 = Ed25519, 57 = Ed448) — see `native::generate_ed448_keypair`
+    /// (`rust/src/native/keygen.rs`), the one genuinely new piece.
+    Ed448,         // 0x38
 
     // ── FIPS PQC — ML-KEM (FIPS 203) ──────────────────────────────────────
     MlKem512,      // 0x39
@@ -404,6 +427,7 @@ impl KmipAlgorithm {
             ChaCha20         => 0x0000001c,
             ChaCha20Poly1305 => 0x0000001e,
             Ed25519    => 0x00000037,
+            Ed448      => 0x00000038,
             MlKem512   => 0x00000039,
             MlKem768   => 0x0000003a,
             MlKem1024  => 0x0000003b,
@@ -478,6 +502,7 @@ impl KmipAlgorithm {
             0x0000001c => ChaCha20,
             0x0000001e => ChaCha20Poly1305,
             0x00000037 => Ed25519,
+            0x00000038 => Ed448,
             0x00000039 => MlKem512,
             0x0000003a => MlKem768,
             0x0000003b => MlKem1024,
@@ -619,7 +644,7 @@ impl KmipAlgorithm {
             | HmacSha3_256 | HmacSha3_512 => {
                 length_bits >= 256
             }
-            Rsa | Ecdsa | Ecdh | Ed25519 => false,
+            Rsa | Ecdsa | Ecdh | Ed25519 | Ed448 => false,
             X25519MlKem768 | SecP256r1MlKem768 => true,
             _ => self.is_pqc(),
         }
@@ -717,9 +742,12 @@ impl KmipAlgorithm {
             (HmacSha3_256, Mac) => Some(CKM_SHA3_256_HMAC),
             (HmacSha3_512, Mac) => Some(CKM_SHA3_512_HMAC),
 
-            // ── Ed25519 (RFC 8032 EdDSA) ────────────────────────────────────
-            (Ed25519, KeyGen) => Some(CKM_EC_EDWARDS_KEY_PAIR_GEN),
-            (Ed25519, SignVerify) => Some(CKM_EDDSA),
+            // ── Ed25519 / Ed448 (RFC 8032 EdDSA) ─────────────────────────
+            // Same PKCS#11 mechanism family for both curves — CKM_EDDSA
+            // covers both (§6.3.14); the engine dispatches on the stored
+            // key's byte length, not a separate mechanism per curve.
+            (Ed25519 | Ed448, KeyGen) => Some(CKM_EC_EDWARDS_KEY_PAIR_GEN),
+            (Ed25519 | Ed448, SignVerify) => Some(CKM_EDDSA),
 
             // ── HSS/LMS (RFC 8554) ────────────────────────────────────────
             (Hss, KeyGen) => Some(CKM_HSS_KEY_PAIR_GEN),
@@ -886,6 +914,7 @@ impl KmipAlgorithm {
             ChaCha20         => "ChaCha20",
             ChaCha20Poly1305 => "ChaCha20-Poly1305",
             Ed25519    => "Ed25519",
+            Ed448      => "Ed448",
             MlKem512   => "ML-KEM-512",
             MlKem768   => "ML-KEM-768",
             MlKem1024  => "ML-KEM-1024",
@@ -959,6 +988,7 @@ mod tests {
         use KmipAlgorithm::*;
         &[
             Aes, Rsa, Ecdsa, HmacSha256, HmacSha384, HmacSha512, HmacSha3_256, HmacSha3_512, Ecdh,
+            Ed25519, Ed448,
             MlKem512, MlKem768, MlKem1024,
             MlDsa44, MlDsa65, MlDsa87,
             SlhDsaSha2_128s, SlhDsaSha2_128f,

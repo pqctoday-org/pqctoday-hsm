@@ -893,6 +893,7 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         ChaCha20         => "ChaCha20",
         ChaCha20Poly1305 => "ChaCha20-Poly1305",
         Ed25519    => "Ed25519",
+        Ed448      => "Ed448",
         MlKem512   => "ML-KEM-512",
         MlKem768   => "ML-KEM-768",
         MlKem1024  => "ML-KEM-1024",
@@ -987,6 +988,8 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         "SecP384r1MLKEM1024" => SecP384r1MlKem1024,
         // P1 (2026-07-05): Ed25519 has no size/curve suffix — exact name.
         "Ed25519" => Ed25519,
+        // Mirrors Ed25519 exactly — no size/curve suffix.
+        "Ed448" => Ed448,
         // Montgomery key-agreement curves collapse to `Ecdh` at the enum layer;
         // the caller (create_key_pair) turns these names into ECDH +
         // RecommendedCurve CURVE25519/CURVE448 so the label-only policy default
@@ -1226,6 +1229,14 @@ fn native_generate_keypair(
         Ed25519 => (
             "native::generate_ed25519_keypair",
             native::generate_ed25519_keypair(session, cka_id, label),
+        ),
+        // Mirrors Ed25519 exactly — no curve/size parameter, single fixed
+        // curve. `Sign`/`SignatureVerify` need no dispatch changes at all
+        // (CKM_EDDSA already covers both curves, length-dispatched inside
+        // the engine); this keygen call was the only missing piece.
+        Ed448 => (
+            "native::generate_ed448_keypair",
+            native::generate_ed448_keypair(session, cka_id, label),
         ),
         _ => {
             return Err(KmipError::failed(

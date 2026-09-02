@@ -357,7 +357,6 @@ static int set_iv(struct p11prov_cipher_ctx *ctx, const unsigned char *iv,
 }
 
 static int p11prov_aes_set_ctx_params(void *vctx, const OSSL_PARAM params[]);
-int p11prov_chacha20_set_ctx_params(void *vctx, const OSSL_PARAM params[]);
 
 /* Dispatches to the mechanism-family-specific set_ctx_params -- prep_mech
  * itself is shared across every cipher this provider registers, so it
