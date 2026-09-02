@@ -52,4 +52,21 @@ extern const OSSL_DISPATCH p11prov_kmac256_mac_functions[];
 #define P11PROV_NAMES_KMAC256 "KMAC-256:KMAC256:2.16.840.1.101.3.4.2.20"
 #define P11PROV_DESCS_KMAC256 "PKCS11 KMAC-256 Implementation"
 
+/* GMAC (CKM_AES_GMAC, PKCS#11 v3.2 §6.13.6): "GMAC is a special case of
+ * GCM that authenticates only the Additional Authenticated Data ...
+ * GMAC does not use plaintext or ciphertext" -- both engines' own
+ * CKM_AES_GMAC (SoftHSM_sign.cpp's applyGmacParams/kMacMechTable,
+ * rust/src/ffi.rs's CKM_AES_GMAC arms) take the caller's C_Sign/
+ * C_SignUpdate data as that AAD and a CK_GCM_PARAMS mechanism parameter
+ * for the IV + tag length (pAAD/ulAADLen inside CK_GCM_PARAMS itself are
+ * unused by either engine, confirmed by reading both directly). Name +
+ * OID confirmed live via `openssl list -mac-algorithms -provider
+ * default`, which shows `{ 1.0.9797.3.4, GMAC }` (ISO/IEC 9797-3's own
+ * GMAC OID) -- same "name[:name...]:OID" convention KMAC-128/256 use
+ * above. */
+extern const OSSL_DISPATCH p11prov_gmac_mac_functions[];
+
+#define P11PROV_NAMES_GMAC "GMAC:1.0.9797.3.4"
+#define P11PROV_DESCS_GMAC "PKCS11 AES-GMAC Implementation"
+
 #endif /* _MAC_H */

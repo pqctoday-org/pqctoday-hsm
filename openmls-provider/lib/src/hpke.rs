@@ -1,8 +1,11 @@
 //! RFC 9180 HPKE over PKCS#11 primitives.
 //!
-//! Scope (v0.2): **DhKem25519 + HKDF-SHA256 + AES-128-GCM** only —
-//! the suite used by `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`.
-//! Other suites stay on the `hpke-rs` fallback in `crypto.rs`.
+//! All four ciphersuites this crate declares in `supported_ciphersuites()`
+//! now route their HPKE through the token via [`select`] below:
+//! `DhKem25519`+AES-128-GCM (ciphersuite 1), `DhKem25519`+ChaCha20Poly1305
+//! ("suite 3"), `DhKemP256`+AES-128-GCM, and X-Wing+ChaCha20Poly1305
+//! (post-quantum). Any `HpkeConfig` `select()` doesn't recognize still
+//! falls through to the `hpke-rs` software fallback in `crypto.rs`.
 //!
 //! Where each piece runs:
 //!
@@ -11,11 +14,12 @@
 //! | LabeledExtract / LabeledExpand    | PKCS#11 HMAC-SHA256  |
 //! | DH (`Encap` / `Decap`)            | `CKM_ECDH1_DERIVE`   |
 //! | Key Schedule (KAT-driven HKDF)    | PKCS#11 HMAC-SHA256  |
-//! | Seal / Open AEAD                  | `CKM_AES_GCM`        |
-//! | `DeriveKeyPair` base-point mul    | `x25519-dalek` (no-secret arithmetic) |
+//! | Seal / Open AEAD                  | `CKM_AES_GCM` / `CKM_CHACHA20_POLY1305` |
+//! | `DeriveKeyPair` public-key math   | `x25519-dalek` / `p256` (no-secret arithmetic) |
 //!
 //! The sk → pk derivation is intentionally not routed through PKCS#11.
-//! For X25519 the base-point scalar multiplication produces the public
+//! For X25519 the base-point scalar multiplication, and for P-256 the
+//! scalar-times-generator point multiplication, produce only the public
 //! key, which is by definition non-secret; the operation reveals nothing
 //! about the scalar. Real Diffie-Hellman (with a peer-provided public
 //! point) runs inside the HSM in every code path.
@@ -24,6 +28,7 @@ use openmls_traits::types::{
     CryptoError, ExporterSecret, HashType, HpkeAeadType, HpkeCiphertext, HpkeConfig, HpkeKdfType,
     HpkeKemType, HpkeKeyPair, HpkePrivateKey, KemOutput,
 };
+use p256::elliptic_curve::sec1::ToEncodedPoint;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::backend::PkcsOps;
@@ -32,14 +37,20 @@ use crate::error::PqcTodayError;
 const NH: usize = 32; // HKDF-SHA256 output length
 const MODE_BASE: u8 = 0x00;
 
-/// Which KEM a suite uses. The two have different *shapes*, not just different
-/// algorithms: DH derives a secret from a private scalar and a peer public key,
-/// while X-Wing encapsulates — the sender produces a ciphertext and a secret
-/// from the recipient's public key alone.
+/// Which KEM a suite uses. The two *shapes* are: DH derives a secret from a
+/// private scalar and a peer public key (`DhX25519` and `DhP256` share this
+/// shape, differing only in curve — see `encap`/`decap`/`derive_keypair`'s
+/// `DhX25519 | DhP256` handling below), while X-Wing encapsulates — the
+/// sender produces a ciphertext and a secret from the recipient's public key
+/// alone.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum KemKind {
     /// DHKEM(X25519, HKDF-SHA256) — RFC 9180 §4.1.
     DhX25519,
+    /// DHKEM(P-256, HKDF-SHA256) — RFC 9180 §4.1 / §7.1, Table 2's
+    /// `kem_id = 0x0010`. Same DH-KEM shape as `DhX25519`; the curve and
+    /// point/scalar sizes are the only differences.
+    DhP256,
     /// X-Wing = ML-KEM-768 + X25519 — draft-connolly-cfrg-xwing-kem.
     XWing,
 }
@@ -90,11 +101,52 @@ const XWING_SHA256_CHACHA20: Suite = Suite {
     npk: 1216,
 };
 
+/// `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` ("suite 3")'s HPKE
+/// config. Identical KEM to `DHKEM_X25519_SHA256_AES128` above (same
+/// `kem_id`, same `KemKind::DhX25519` — so `encap`/`decap`/`derive_keypair`
+/// need no new arm at all for this suite); only the AEAD differs, and
+/// `aead_seal`/`aead_open` below already dispatch `aead_id == 0x0003` to
+/// `ops.chacha20_poly1305` (the same primitive the X-Wing suite's AEAD
+/// already used). `nk`/`nn` match X-Wing's ChaCha20-Poly1305 parameters
+/// exactly, since it's the same AEAD.
+const DHKEM_X25519_SHA256_CHACHA20: Suite = Suite {
+    kem: KemKind::DhX25519,
+    kem_id: 0x0020,
+    kdf_id: 0x0001,
+    aead_id: 0x0003,
+    nk: 32,
+    nn: 12,
+    nsecret: 32,
+    nenc: 32,
+    npk: 32,
+};
+
+/// `MLS_128_DHKEMP256_AES128GCM_SHA256_P256`'s HPKE config. RFC 9180 §7.1
+/// Table 2: DHKEM(P-256, HKDF-SHA256) `kem_id = 0x0010`, `Nsecret = 32`,
+/// `Nenc = Npk = 65` (uncompressed SEC1 point), `Nsk = 32`.
+const DHKEM_P256_SHA256_AES128: Suite = Suite {
+    kem: KemKind::DhP256,
+    kem_id: 0x0010,
+    kdf_id: 0x0001,
+    aead_id: 0x0001,
+    nk: 16,
+    nn: 12,
+    nsecret: 32,
+    nenc: 65,
+    npk: 65,
+};
+
 /// The suite for this config, if we can run it on the HSM path.
 pub(crate) fn select(cfg: &HpkeConfig) -> Option<Suite> {
     match (cfg.0, cfg.1, cfg.2) {
         (HpkeKemType::DhKem25519, HpkeKdfType::HkdfSha256, HpkeAeadType::AesGcm128) => {
             Some(DHKEM_X25519_SHA256_AES128)
+        }
+        (HpkeKemType::DhKem25519, HpkeKdfType::HkdfSha256, HpkeAeadType::ChaCha20Poly1305) => {
+            Some(DHKEM_X25519_SHA256_CHACHA20)
+        }
+        (HpkeKemType::DhKemP256, HpkeKdfType::HkdfSha256, HpkeAeadType::AesGcm128) => {
+            Some(DHKEM_P256_SHA256_AES128)
         }
         (HpkeKemType::XWingKemDraft6, HpkeKdfType::HkdfSha256, HpkeAeadType::ChaCha20Poly1305) => {
             Some(XWING_SHA256_CHACHA20)
@@ -201,6 +253,13 @@ fn dh_in_hsm(ops: &dyn PkcsOps, sk: &[u8], peer_pk: &[u8]) -> Result<Vec<u8>, Pq
     ops.ecdh_x25519(sk, peer_pk)
 }
 
+// P-256 ECDH against a peer-provided point, executed inside the HSM via
+// `CKM_ECDH1_DERIVE` (`backend.rs`'s `PkcsOps::ecdh_p256`) — the Weierstrass
+// counterpart of `dh_in_hsm` above.
+fn dh_p256_in_hsm(ops: &dyn PkcsOps, sk: &[u8], peer_pk: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+    ops.ecdh_p256(sk, peer_pk)
+}
+
 // ── DHKEM(X25519, HKDF-SHA256) — RFC 9180 §4.1 / §7.1 ────────────────────────
 
 fn derive_keypair_x25519(
@@ -228,6 +287,86 @@ fn extract_and_expand(
     let sid = kem_suite_id(su);
     let eae_prk = labeled_extract(ops, &sid, &[], b"eae_prk", dh)?;
     labeled_expand(ops, &sid, &eae_prk, b"shared_secret", kem_context, su.nsecret)
+}
+
+// ── DHKEM(P-256, HKDF-SHA256) — RFC 9180 §4.1 / §7.1 ─────────────────────────
+//
+// Same LabeledExtract/LabeledExpand + kem_context + ExtractAndExpand shape as
+// DHKEM(X25519) above (both are `extract_and_expand`, unmodified, keyed off
+// `su.kem_id` via `kem_suite_id`) — only the DH step (`dh_p256_in_hsm`, via
+// `CKM_ECDH1_DERIVE` rather than X25519's Montgomery-ladder derive) and the
+// point/scalar representation differ.
+
+const P256_NSK: usize = 32;
+
+/// RFC 9180 §7.1.3 `DeriveKeyPair` for a NIST curve — unlike X25519 (any
+/// 32-byte string is already a valid Curve25519 scalar once the DH function
+/// clamps it), a P-256 private key must be a nonzero integer strictly less
+/// than the curve order, so the spec defines this as bounded rejection
+/// sampling: expand a labeled candidate, mask its top byte with the curve's
+/// `bitmask` (0xFF for P-256 — a no-op; P-256's order is close enough to
+/// 2^256 that no bit-truncation is needed, unlike P-521's), and retry with
+/// an incremented counter until the candidate lands in range.
+/// `p256::SecretKey::from_slice` performs exactly that range check (nonzero,
+/// `< order`) — the same class of non-secret, public-key-only arithmetic
+/// `derive_keypair_x25519`'s base-point multiplication above already runs
+/// outside the HSM, since only the *validity* of a candidate scalar is being
+/// tested here, not a secret Diffie-Hellman exponentiation.
+fn derive_keypair_p256(
+    ops: &dyn PkcsOps,
+    su: &Suite,
+    ikm: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), PqcTodayError> {
+    let sid = kem_suite_id(su);
+    let dkp_prk = labeled_extract(ops, &sid, &[], b"dkp_prk", ikm)?;
+    for counter in 0u16..256 {
+        let candidate = labeled_expand(
+            ops,
+            &sid,
+            &dkp_prk,
+            b"candidate",
+            &[counter as u8],
+            P256_NSK,
+        )?;
+        // bitmask = 0xFF for P-256 (RFC 9180 §7.1.3): no bits masked.
+        if let Ok(sk) = p256::SecretKey::from_slice(&candidate) {
+            let pk_bytes = sk.public_key().to_encoded_point(false).as_bytes().to_vec();
+            return Ok((sk.to_bytes().to_vec(), pk_bytes));
+        }
+    }
+    Err(PqcTodayError::Hpke(
+        "P-256 DeriveKeyPair: no valid candidate scalar in 256 attempts".into(),
+    ))
+}
+
+/// Recompute a P-256 public key from its private scalar. Pure public-key
+/// arithmetic (no HSM, no secret exponentiation) — the P-256 analogue of
+/// `PublicKey::from(&StaticSecret::from(sk_r))` in X25519's `decap` below.
+fn p256_pk_from_sk(sk: &[u8]) -> Result<Vec<u8>, PqcTodayError> {
+    let sk = p256::SecretKey::from_slice(sk)
+        .map_err(|_| PqcTodayError::Hpke("malformed P-256 private key".into()))?;
+    Ok(sk.public_key().to_encoded_point(false).as_bytes().to_vec())
+}
+
+/// RFC 9180 §7.1.1 public-key validation for a NIST curve: the encoding must
+/// be exactly `Npk` bytes, and the point itself must be on the curve and not
+/// the identity ("point at infinity"). `p256::PublicKey::from_sec1_bytes`
+/// enforces both the on-curve check and the non-identity invariant as part
+/// of real SEC1 decoding — this doesn't hand-roll coordinate parsing.
+fn validate_p256_point(su: &Suite, pk: &[u8]) -> Result<(), PqcTodayError> {
+    if pk.len() != su.npk {
+        return Err(PqcTodayError::Hpke(format!(
+            "expected {}-byte P-256 public key, got {}",
+            su.npk,
+            pk.len()
+        )));
+    }
+    p256::PublicKey::from_sec1_bytes(pk).map(|_| ()).map_err(|_| {
+        PqcTodayError::Hpke(
+            "invalid P-256 public key: not a valid point on the curve, or the identity point"
+                .into(),
+        )
+    })
 }
 
 // ── X-Wing — draft-connolly-cfrg-xwing-kem §5 ────────────────────────────────
@@ -335,6 +474,16 @@ fn encap(
             let ss = extract_and_expand(ops, su, &dh, &kem_context)?;
             Ok((ss, pk_e.to_vec()))
         }
+        KemKind::DhP256 => {
+            validate_p256_point(su, pk_r)?;
+            let (sk_e, pk_e) = derive_keypair_p256(ops, su, ephemeral_ikm)?;
+            let dh = dh_p256_in_hsm(ops, &sk_e, pk_r)?;
+            let mut kem_context = Vec::with_capacity(pk_e.len() + pk_r.len());
+            kem_context.extend_from_slice(&pk_e);
+            kem_context.extend_from_slice(pk_r);
+            let ss = extract_and_expand(ops, su, &dh, &kem_context)?;
+            Ok((ss, pk_e))
+        }
     }
 }
 
@@ -353,6 +502,15 @@ fn decap(
             let pk_r = PublicKey::from(&StaticSecret::from(sk_r)).to_bytes();
             let mut kem_context = Vec::with_capacity(64);
             kem_context.extend_from_slice(&enc);
+            kem_context.extend_from_slice(&pk_r);
+            extract_and_expand(ops, su, &dh, &kem_context)
+        }
+        KemKind::DhP256 => {
+            validate_p256_point(su, enc)?;
+            let dh = dh_p256_in_hsm(ops, sk_r, enc)?;
+            let pk_r = p256_pk_from_sk(sk_r)?;
+            let mut kem_context = Vec::with_capacity(enc.len() + pk_r.len());
+            kem_context.extend_from_slice(enc);
             kem_context.extend_from_slice(&pk_r);
             extract_and_expand(ops, su, &dh, &kem_context)
         }
@@ -452,6 +610,13 @@ pub(crate) fn derive_keypair(
             Ok(HpkeKeyPair {
                 private: HpkePrivateKey::from(sk.to_vec()),
                 public: pk.to_vec(),
+            })
+        }
+        KemKind::DhP256 => {
+            let (sk, pk) = derive_keypair_p256(ops, su, ikm).map_err(CryptoError::from)?;
+            Ok(HpkeKeyPair {
+                private: HpkePrivateKey::from(sk),
+                public: pk,
             })
         }
         KemKind::XWing => {
@@ -585,9 +750,11 @@ pub(crate) const HASH_TYPE: HashType = HashType::Sha2_256;
 // not one that touches the token. These tests pin the boundary explicitly,
 // per `HpkeConfig`, for every ciphersuite this crate's own
 // `supported_ciphersuites()` declares — so it becomes a reviewed, deliberate
-// change rather than a silent one in either direction. See
+// change rather than a silent one in either direction. All four now assert
+// `is_some()`: the "suite 3" and P-256 gaps
 // `docs/gap-analysis-kmip-cacp-pkcs11-coverage-2026-08-30.md` ("Phase 2.1")
-// for the tracked follow-on to close the two `is_none()` cases below.
+// tracked are closed — see `DHKEM_X25519_SHA256_CHACHA20` and
+// `DHKEM_P256_SHA256_AES128` above.
 #[cfg(test)]
 mod hsm_routing_boundary_tests {
     use super::select;
@@ -622,46 +789,45 @@ mod hsm_routing_boundary_tests {
     }
 
     /// `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` ("suite 3") is
-    /// declared in `supported_ciphersuites()`, and its record-layer AEAD
-    /// genuinely runs on the HSM (`self.ops.chacha20_poly1305` —
+    /// declared in `supported_ciphersuites()`; its record-layer AEAD already
+    /// ran on the HSM (`self.ops.chacha20_poly1305` —
     /// `tests/openmls_contract.rs::mls_group_roundtrip_suite3_chacha20poly1305`
-    /// proves that for Application/Handshake messages). Its HPKE config is
-    /// NOT one of the two entries `select()` matches — only the
-    /// `AesGcm128` pairing exists for `DhKem25519` — so the private HPKE
-    /// key used for this suite's Welcome-message `GroupSecrets` encryption
-    /// and TreeKEM commit path (RFC 9420 §5.4/§7.9) never touches the
-    /// token, unlike the record-layer key. Asserted explicitly so this is
-    /// a pinned, intentional result, not a fact nothing else would catch.
+    /// proves that for Application/Handshake messages) before its HPKE did.
+    /// `select()` now also matches this suite's `HpkeConfig` — same
+    /// `DhKem25519` KEM as ciphersuite 1, `ChaCha20Poly1305` AEAD — so the
+    /// private HPKE key used for this suite's Welcome-message
+    /// `GroupSecrets` encryption and TreeKEM commit path (RFC 9420
+    /// §5.4/§7.9) now touches the token exactly like the record-layer key
+    /// does, closing the gap the previous version of this test pinned.
     #[test]
-    fn suite3_dhkem_x25519_chacha20poly1305_hpke_is_software_only() {
+    fn suite3_dhkem_x25519_chacha20poly1305_routes_through_hsm() {
         let cfg = HpkeConfig(Kem::DhKem25519, Kdf::HkdfSha256, Aead::ChaCha20Poly1305);
         assert!(
-            select(&cfg).is_none(),
-            "suite 3's HPKE config unexpectedly selected an HSM-backed Suite — if \
-             ChaCha20Poly1305 support was intentionally added for DhKem25519, update \
-             this test (and the KMIP/CACP gap-analysis Phase 2.1 note) to match"
+            select(&cfg).is_some(),
+            "MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519's HPKE config must \
+             select the HSM-backed Suite — this is the suite \
+             tests/openmls_contract.rs::mls_group_roundtrip_suite3_chacha20poly1305 \
+             exercises end to end"
         );
     }
 
     /// `MLS_128_DHKEMP256_AES128GCM_SHA256_P256` is declared in
-    /// `supported_ciphersuites()` and accepted by `supports()`, but
-    /// `select()` has no `DhKemP256` arm at all — its HPKE, including the
-    /// private key used for Welcome-message `GroupSecrets` encryption and
-    /// the TreeKEM commit path, runs entirely through `crypto.rs`'s
-    /// `mk_hpke` software fallback. No private HPKE key material for this
-    /// ciphersuite ever touches the token, and (unlike suite 3 above)
-    /// there is no HSM-backed operation anywhere in this suite's HPKE path
-    /// at all — not even the record layer, since AesGcm128 there also
-    /// still runs through `self.ops.aead_encrypt`/`_decrypt`, which IS
-    /// HSM-backed; only the HPKE construction itself is software-only.
+    /// `supported_ciphersuites()` and accepted by `supports()`. `select()`
+    /// now has a `DhKemP256` arm (DHKEM(P-256, HKDF-SHA256) per RFC 9180
+    /// §7.1, driven through `CKM_ECDH1_DERIVE` — see `backend.rs`'s
+    /// `PkcsOps::ecdh_p256`), so the private key used for this suite's
+    /// Welcome-message `GroupSecrets` encryption and TreeKEM commit path
+    /// now touches the token, the same as its already-HSM-backed
+    /// ECDSA-P256 signing and AES-128-GCM record layer.
     #[test]
-    fn p256_suite_hpke_is_software_only() {
+    fn p256_suite_routes_through_hsm() {
         let cfg = HpkeConfig(Kem::DhKemP256, Kdf::HkdfSha256, Aead::AesGcm128);
         assert!(
-            select(&cfg).is_none(),
-            "P-256 suite's HPKE config unexpectedly selected an HSM-backed Suite — if \
-             DhKemP256 support was added to hpke.rs, update this test and the P-256 \
-             coverage note in tests/openmls_contract.rs together"
+            select(&cfg).is_some(),
+            "MLS_128_DHKEMP256_AES128GCM_SHA256_P256's HPKE config must select the \
+             HSM-backed Suite — this is the suite \
+             tests/openmls_contract.rs::mls_group_roundtrip_p256_suite exercises end \
+             to end"
         );
     }
 }

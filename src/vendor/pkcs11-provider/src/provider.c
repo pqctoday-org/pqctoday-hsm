@@ -989,6 +989,7 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
                              CKM_AES_CMAC,
                              CKM_KMAC_128,
                              CKM_KMAC_256,
+                             CKM_AES_GMAC,
                              DIGEST_MECHS,
                              HMAC_MECHS,
                              CKM_EDDSA,
@@ -1346,6 +1347,17 @@ static CK_RV operations_init(P11PROV_CTX *ctx)
             case CKM_KMAC_256:
                 ADD_ALGO(KMAC256, kmac256, mac, prop);
                 UNCHECK_MECHS(CKM_KMAC_256);
+                break;
+            /* WS-3/G2: AES-GMAC (CKM_AES_GMAC, PKCS#11 v3.2 §6.13.6) — see
+             * mac.c/mac.h's own comments for the parameter-shape
+             * verification (CK_GCM_PARAMS, cross-checked against both
+             * engines) and this file's checklist[] array above, which
+             * this case would otherwise be unreachable dead code without
+             * (same trap R26/remediation-item-1 document for
+             * CKM_AES_GCM/CCM). */
+            case CKM_AES_GMAC:
+                ADD_ALGO(GMAC, gmac, mac, prop);
+                UNCHECK_MECHS(CKM_AES_GMAC);
                 break;
             case CKM_EDDSA:
                 ADD_ALGO_EXT(ED25519, signature, prop,

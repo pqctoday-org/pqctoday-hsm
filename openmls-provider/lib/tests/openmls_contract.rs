@@ -439,27 +439,22 @@ fn mls_group_roundtrip_xwing_suite() {
 
 /// `MLS_128_DHKEMP256_AES128GCM_SHA256_P256` — declared in
 /// `supported_ciphersuites()` and accepted by `supports()`
-/// (`src/crypto.rs`) since before this test existed, but until now it had
-/// no real end-to-end coverage anywhere in this crate: every other
+/// (`src/crypto.rs`), with full end-to-end coverage here like every other
 /// declared suite (the default in [`run_hsm`], suite 3 above, and X-Wing
-/// above) has its own full add-member/Commit/Application-message run
-/// through the real HSM-backed provider, and this one did not — only a
-/// list-membership check in `tests/integration.rs::supported_ciphersuites_v0_1`.
+/// above): its own add-member/Commit/Application-message run through the
+/// real HSM-backed provider.
 ///
-/// Unlike the other three suites, this one's `HpkeConfig`
-/// (`DhKemP256`/`HkdfSha256`/`AesGcm128`) has no arm in `hpke::select()`
-/// (see `hpke.rs`'s `hsm_routing_boundary_tests::p256_suite_hpke_is_software_only`),
-/// so this test's own Welcome message (the KeyPackage's HPKE-encrypted
+/// `hpke::select()` now has a `DhKemP256` arm (see `hpke.rs`'s
+/// `hsm_routing_boundary_tests::p256_suite_routes_through_hsm`), so this
+/// test's own Welcome message (the KeyPackage's HPKE-encrypted
 /// `GroupSecrets`, RFC 9420 §5.4) and the TreeKEM commit path are sealed
-/// and opened entirely by `crypto.rs`'s in-process `hpke-rs` fallback, not
-/// the token — this test proves the ciphersuite's real, wired-up
-/// ECDSA-P256 signing (ECDSA-P256 keygen/sign/verify in
-/// `backend.rs::CryptokiBackend`, exercised nowhere else at the MLS-group
-/// level) and the HSM-backed AES-128-GCM record layer, while the HPKE
-/// portion of the same run is software-only — both facts true
-/// simultaneously, which is exactly the split
-/// `docs/gap-analysis-kmip-cacp-pkcs11-coverage-2026-08-30.md`'s "Phase
-/// 2.1" note describes.
+/// and opened via the token — `CKM_ECDH1_DERIVE` for DHKEM(P-256)'s
+/// Encap/Decap (`backend.rs`'s `PkcsOps::ecdh_p256`), same as the
+/// already-HSM-backed ECDSA-P256 signing and AES-128-GCM record layer this
+/// test also exercises. See `tests/integration.rs::
+/// kat_hpke_rfc9180_appendix_a3_dhkem_p256` for the RFC 9180 §A.3
+/// known-answer coverage of the HPKE construction in isolation; this test
+/// is the real-group-lifecycle complement to that KAT.
 #[test]
 fn mls_group_roundtrip_p256_suite() {
     let module = match resolve_module() {
@@ -478,6 +473,6 @@ fn mls_group_roundtrip_p256_suite() {
         &state,
         b"alice contract test message",
         b"bob contract test reply",
-        "P-256 (DHKemP256 + AES128GCM + ECDSA-P256, HPKE software-only)",
+        "P-256 (DHKemP256 + AES128GCM + ECDSA-P256, HPKE HSM-routed)",
     );
 }

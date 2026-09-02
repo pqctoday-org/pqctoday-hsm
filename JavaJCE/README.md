@@ -149,3 +149,30 @@ document for the section-by-section mapping. Summary:
 - This module targets JDK 24+ for everything except TLS (W6), which rides
   JDK 27's JEP 527; JDK 27 itself is RC until ~2026-09-15 (see the plan's
   risk register for the GA-swap follow-up).
+- `CKM_HPKE` (RFC 9180, added to the Rust engine 2026-09-01) is not exposed
+  by this provider — deferred by explicit decision, not an oversight. The
+  engine's `C_EncapsulateKey`/`C_DecapsulateKey(CKM_HPKE)` return KEM +
+  KeySchedule output only (encapsulation, an AEAD key handle, base nonce,
+  optional exporter-secret handle) — not the AEAD Seal/Open step itself.
+  That return shape maps reasonably onto `javax.crypto.KEM`'s
+  `Encapsulator`/`Decapsulator` (the precedent this module already
+  established for `P11MLKEMSpi`), *if* the extra suite-selection (KEM/KDF/
+  AEAD IDs), mode (base/PSK/Auth/AuthPSK), and base-nonce output can ride in
+  a custom `AlgorithmParameterSpec`/`AlgorithmParameters` pair — but the
+  caller would then have to chain a separate, ordinary `Cipher` call for
+  Seal/Open, reproducing exactly the multi-call complexity `CKM_HPKE` exists
+  to collapse at the PKCS#11 layer. A custom ECIES/BC-style `Cipher` SPI
+  (`doFinal()` returning `enc‖ciphertext` as one self-describing blob) could
+  collapse that back into one call, but has no precedent in this module and
+  can't represent HPKE's Export-only mode (a derived secret, not
+  ciphertext) at all. Two real, imperfect candidate shapes, no clean third
+  option — this needs an explicit API-design decision, not a guess (see
+  `docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md` for the mechanism
+  itself). Revisit if/when a standard JDK HPKE API lands.
+- The engine/KMIP layer's eight §10.4 composite signature profiles
+  (`CKM_HASH_COMP_SIG_*`, vendor codepoints, closed 2026-08-31) are not
+  exposed via JCA — doubly documented as out of scope in
+  `docs/implementation-plan-jdk27-jca-provider-2026-08-24.md` §10 and
+  `docs/implementation-plan-jca-remaining-gaps-2026-08-25.md` §13. Reaffirmed
+  here rather than left to rediscovery: this is a scope boundary, not a gap
+  to close opportunistically.
