@@ -36,6 +36,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Validation gate: concurrent runs in different worktrees shared one
+  cargo build directory, and cargo linked the wrong feature-variant of the
+  engine crate as a result.** The container image sets a single global
+  `CARGO_TARGET_DIR=/cargo-target` used by every worktree and every crate,
+  and nothing serialized concurrent access to it — cargo's "Blocking
+  waiting for file lock on build directory" message appears in **0 of 26**
+  gate logs on the reference machine, and no `/cargo-target/.cargo-lock` is
+  held. On 2026-09-02, with three gates running at once, a `kmip cargo
+  test` step failed with `error[E0425]: cannot find function
+  reset_all_engine_state_for_test in crate softhsmrustv3`. Root cause, read
+  off the cache's own bookkeeping: **no** `softhsmrustv3` fingerprint was
+  written during that build (a gap from 05:42 to 08:14) and the compiler
+  warnings in the log were *replayed from cache* — cargo judged the
+  dependency fresh and reused an artifact built **without** the dev-only
+  `test-support` feature that `kmip`'s `#[cfg(test)]` `engine_lock()` needs.
+  The identical command run alone minutes later built the correct variant
+  and passed, and no source file involved (`rust/Cargo.toml`'s
+  `test-support` declaration, `kmip/Cargo.toml`'s dev-dependency, the
+  `#[cfg(any(test, feature = "test-support"))]` gate, the call site) differed
+  from `main` by a single byte. **Fix:** `scripts/local-gate.sh` now derives
+  a per-worktree build directory (`/cargo-target/worktrees/<name>`) and
+  passes it via `docker exec -e CARGO_TARGET_DIR`, so two gate runs can
+  never share a fingerprint database; the main tree keeps `/cargo-target`
+  unchanged so its warm cache is not discarded. Treated as a correctness
+  issue rather than a flake to retry, because a cache that can fabricate a
+  **failure** can equally fabricate a **pass** — which is disqualifying for
+  the one script this project relies on to decide whether a change is safe
+  to push. No shipped-code behavior changes.
 - **Rust engine: `CKM_HKDF_DERIVE`'s expand-only mode silently
   re-extracted instead of treating the base key as the PRK.** With
   `bExtract=0, bExpand=1`, the dispatch fell through to the
