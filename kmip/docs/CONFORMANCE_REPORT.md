@@ -1,12 +1,32 @@
 # KMIP 3.0 Conformance Report
 
-> **Current as of v0.26.0** (composite-profile / certificate-canonicality pass
-> at `5a107b2`, 2026-08-18; baseline re-stated for CSD02 on 2026-08-12). No
-> KMIP-behavior changes in v0.26.0 itself (remoting v3.2 PKCS#11 gRPC/REST
-> mirror release, additive alongside the existing engine — nothing in the
-> KMIP crate changed) — the figures below are unchanged from `5a107b2`. The
-> OASIS replay (97/0/5) was re-verified by this release's own gate run
-> (2026-08-26, `bash scripts/local-gate.sh --all`).
+> **Current as of v0.28.0** (2026-09-02). The replay figures below are
+> unchanged (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED, re-verified by this
+> release's own gate run), but unlike v0.26.0 and v0.27.0 this release **does**
+> change KMIP behavior, in three ways worth stating plainly here rather than
+> leaving to the changelog:
+>
+> 1. **`Encrypt` now returns an AEAD tag in its own field for AES-CCM.**
+>    KMIP 3.0 §6.1.21 requires an AEAD mechanism's authentication tag to ride
+>    in `AuthenticatedEncryptionTag`, not appended to `Data`. `is_aead()`
+>    matched only `CKM_AES_GCM` and `CKM_CHACHA20_POLY1305`, so a CCM
+>    `Encrypt` left its tag tacked onto the end of `Data` — a genuine
+>    protocol-conformance defect, now fixed. The `Decrypt` side already
+>    recombined generically and was unaffected. This is a **wire-visible
+>    change** for any client that was compensating for the old shape.
+> 2. **`KmipAlgorithm` gained Ed448** (wire `0x38`). The engine supported it;
+>    the KMIP layer never offered it. Note this does not disturb §5.1.1's
+>    deprecated-algorithm deviation below — that concerns DES/3DES/DSA, which
+>    remain deliberately absent.
+> 3. **Hash algorithm coverage widened from 3 to 8.** `compute_hash()` /
+>    `hmac_prf()` now accept SHA-512/224, SHA-512/256 and SHA3-224/256/384/512
+>    alongside the original three. Fixing the KMIP dispatch exposed a deeper
+>    gap behind it: `sign_hmac`/`verify_hmac` in the engine were themselves
+>    missing several of those arms, so some digests were not merely unexposed
+>    by KMIP but unimplemented anywhere. Both layers were fixed.
+>
+> Prior baseline for reference: composite-profile / certificate-canonicality
+> pass at `5a107b2`, 2026-08-18; baseline re-stated for CSD02 on 2026-08-12.
 > The replay figures below are regenerated per run via
 > `../conformance/harness/dispatcher_replay.py` and gated by the three Python scripts
 > described in §7 — **not** by `cargo test`; no Rust test reads the replay report. Both
@@ -92,7 +112,9 @@ phase in `GAP_REMEDIATION_PLAN.md`, each with new regression tests:
   Transparent form now genuinely produce a usable engine object (previously silent no-ops).
 - `CreateKeyPair` persists `CryptographicParameters` and rejects false `QuantumSafe` claims.
 - `Encrypt`/`Decrypt` pass real AAD and OAEP-hash choices through for engine-generated keys, not
-  just `Register`'d ones.
+  just `Register`'d ones. As of v0.28.0 `Encrypt` also returns AES-CCM's authentication tag in
+  `AuthenticatedEncryptionTag` per §6.1.21, instead of leaving it appended to `Data` — `is_aead()`
+  had recognised only GCM and ChaCha20-Poly1305.
 - Batch `Undo`/`$IDPlaceholder` now cover `Encapsulate`/`Decapsulate`/`CreateSplitKey`/`JoinSplitKey`.
 - `Locate` filters by cryptographic length, usage mask, and unique identifier instead of silently
   ignoring them.
