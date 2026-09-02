@@ -93,6 +93,10 @@ jobs:
   rust-test:
     name: Rust Tests (engine + KMIP)
     runs-on: ubuntu-24.04
+    env:
+      OPENSSL_VERSION: 3.6.3
+      OPENSSL_BIN: /opt/openssl-3.6/bin/openssl
+      LD_LIBRARY_PATH: /opt/openssl-3.6/lib64:/opt/openssl-3.6/lib
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,6 +112,31 @@ jobs:
             rust/target
             kmip/target
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('rust/Cargo.lock', 'kmip/Cargo.lock') }}
+      # Same pinned build the `build` job uses (see its comment for why
+      # 3.6.3 is pinned). Needed here too: the FFI suite's
+      # ed25519ctx_ffi_dispatch_cross_checks_against_openssl test shells out
+      # to `openssl pkeyutl -pkeyopt instance:Ed25519ctx`, which ubuntu-24.04's
+      # stock system OpenSSL package doesn't support ("Can't set parameter
+      # instance:Ed25519ctx" — command not supported). OPENSSL_BIN above
+      # points the test at this build instead of the system `openssl` on PATH.
+      - name: Cache OpenSSL ${{ env.OPENSSL_VERSION }}
+        id: cache-openssl
+        uses: actions/cache@v4
+        with:
+          path: /opt/openssl-3.6
+          key: ${{ runner.os }}-openssl-${{ env.OPENSSL_VERSION }}-release-v1
+      - name: Build and Install OpenSSL ${{ env.OPENSSL_VERSION }}
+        if: steps.cache-openssl.outputs.cache-hit != 'true'
+        run: |
+          sudo mkdir -p /opt/openssl-3.6
+          sudo chown -R $USER:$USER /opt/openssl-3.6
+          curl -fsSL -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          tar xzf openssl.tar.gz
+          cd "openssl-${OPENSSL_VERSION}"
+          ./Configure --prefix=/opt/openssl-3.6 --openssldir=/opt/openssl-3.6/ssl shared
+          make -j$(nproc)
+          make install_sw
       - name: Run engine tests
         # RUST_MIN_STACK: mceliece6688128's keygen needs more than the default
         # test-thread stack in an unoptimized debug build — seen overflowing
