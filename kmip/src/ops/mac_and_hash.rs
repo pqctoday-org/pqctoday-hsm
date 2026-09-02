@@ -359,9 +359,53 @@ fn compute_hash(algo: HashingAlgorithm, data: &[u8]) -> Result<Vec<u8>> {
             h.update(data);
             h.finalize().to_vec()
         }
+        // G3 (2026-09-02) — widening item: `Hash` (§6.1.30) is genuinely
+        // keyless/sessionless (see this file's own header comment and the
+        // `hash()` handler above, which never resolves an engine session
+        // at all), so — matching the SHA-256/384/512 arms directly
+        // above, the crate's own existing convention for this exact
+        // function — these stay in-process too, not routed through an
+        // engine mechanism. `hash_derive` (`ops/derive_key.rs`) is the
+        // crate's other Hash-family function, and it's engine-backed
+        // where a session is available; that pattern doesn't apply here
+        // because `compute_hash` (and `hash()`, its only caller) has no
+        // session parameter to route through in the first place.
+        HashingAlgorithm::Sha512224 => {
+            let mut h = sha2::Sha512_224::new();
+            h.update(data);
+            h.finalize().to_vec()
+        }
+        HashingAlgorithm::Sha512256 => {
+            let mut h = sha2::Sha512_256::new();
+            h.update(data);
+            h.finalize().to_vec()
+        }
+        HashingAlgorithm::Sha3224 => {
+            let mut h = sha3::Sha3_224::new();
+            h.update(data);
+            h.finalize().to_vec()
+        }
+        HashingAlgorithm::Sha3256 => {
+            let mut h = sha3::Sha3_256::new();
+            h.update(data);
+            h.finalize().to_vec()
+        }
+        HashingAlgorithm::Sha3384 => {
+            let mut h = sha3::Sha3_384::new();
+            h.update(data);
+            h.finalize().to_vec()
+        }
+        HashingAlgorithm::Sha3512 => {
+            let mut h = sha3::Sha3_512::new();
+            h.update(data);
+            h.finalize().to_vec()
+        }
         other => return Err(KmipError::failed(
             ResultReason::OperationNotSupported,
-            format!("Hash algorithm {other:?} not supported (v0.1 = SHA-256/384/512)"),
+            format!(
+                "Hash algorithm {other:?} not supported (v0.1 = SHA-256/384/512, \
+                 SHA-512/224, SHA-512/256, SHA3-224/256/384/512)"
+            ),
         )),
     })
 }
@@ -580,6 +624,47 @@ mod tests {
         }, "c").unwrap();
         // SHA-256("abc") = ba7816bf...
         assert_eq!(hex::encode(&r.data), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    /// G3 (2026-09-02) widening — SHA-512/224, SHA-512/256, and the SHA3
+    /// family, driven through the real KMIP `Hash` operation (`hash()`,
+    /// the same handler `hash_sha256_matches_known_value` above exercises
+    /// for SHA-256), cross-checked byte-exact against an independently
+    /// computed reference: Python's stdlib `hashlib` over the identical
+    /// input, computed outside this codebase.
+    ///
+    /// ```python
+    /// import hashlib
+    /// data = b"kmip g3 hash widening test"
+    /// for name in ["sha512_224", "sha512_256", "sha3_224", "sha3_256", "sha3_384", "sha3_512"]:
+    ///     print(name, hashlib.new(name, data).hexdigest())
+    /// ```
+    #[test]
+    fn hash_widening_matches_hashlib() {
+        let d = deps_with();
+        let data = b"kmip g3 hash widening test".to_vec();
+        let cases: &[(HashingAlgorithm, &str)] = &[
+            (HashingAlgorithm::Sha512224, "6b1bbe8987bbb5c527b0f725d75f8b3101cb4afcada6104256b225fb"),
+            (HashingAlgorithm::Sha512256, "c667acdec69910850d17e26a6d96db5a7896c38da2eda7f75d61ad69cfc6d661"),
+            (HashingAlgorithm::Sha3224, "a38efa69bf6edee9f8b6681498da05f527d7bd5b19ef878d06d77e80"),
+            (HashingAlgorithm::Sha3256, "99c33ff6c3595d54f8bf4963f202739daaa0c07ff6ba79cdb9a0867168ab2103"),
+            (HashingAlgorithm::Sha3384, "d7d23ebb56968024e7e880ea3dc6a424fdb79d4eda78930f08aef1531008a76e8315d03fad6099a393b55efc5edbd74d"),
+            (HashingAlgorithm::Sha3512, "71fb8df49cf1517bc810ca63186b7b3d1ff2cf7a30d5516576a61c1ded7a8eb7223bb94e6751bf13f9ffc6f55217ae400192d3cef88d48dc5969d75f33f98127"),
+        ];
+        for &(algo, expected_hex) in cases {
+            let r = hash(&d, HashRequest {
+                cryptographic_parameters: CP {
+                    hashing_algorithm: Some(algo),
+                    cryptographic_algorithm: None,
+                    ..CP::default()
+                },
+                data: data.clone(),
+            }, "c").unwrap_or_else(|e| panic!("Hash({algo:?}) failed: {e:?}"));
+            assert_eq!(
+                hex::encode(&r.data), expected_hex,
+                "Hash({algo:?}) must match Python hashlib's independently computed digest",
+            );
+        }
     }
 
     #[test]
