@@ -41,6 +41,25 @@ Out of scope:
 - PKCS#11 v3.2 `C_EncapsulateKey` / `C_DecapsulateKey` use ML-KEM (FIPS 203) via OpenSSL EVP
 - All EVP contexts are freed on every code path; no ENGINE API is used
 
+## Known Third-Party Dependency Risks
+
+- **`rsa` crate (`openpgp/lib/`) — Marvin Attack timing side-channel
+  (RUSTSEC-2023-0071 / GHSA-c58m-fhrc-h4r9, medium severity).** RSA PKCS#1
+  v1.5 decryption in the `rsa` crate is vulnerable to a timing-based padding
+  oracle. **No patched version exists upstream** as of 2026-09-02 (confirmed
+  via GitHub's own security-advisory data — `first_patched_version: null`
+  for the affected range `<= 0.9.6`) — this is not a dependency bump this
+  project can make.
+  - **Accepted risk**, not a gap in this project's own code. `openpgp/`'s
+    `RSAEncryptSign` path exists solely for interop with legacy classical
+    OpenPGP keys; this fork's actual security posture rests on the PQC
+    composite algorithms (`MLDSA65_Ed25519`, `MLDSA87_Ed448`,
+    `MLKEM768_X25519`, `MLKEM1024_X448`), none of which touch the `rsa`
+    crate at all.
+  - Tracked via GitHub Dependabot (`openpgp/lib/Cargo.toml`). Revisit if/when
+    the `rsa` crate ships a fix, or consider removing RSA support entirely
+    if legacy interop is ever deprioritized.
+
 ## WASM Security Limitations
 
 When built for WebAssembly (Emscripten or wasm32-unknown-unknown), the following platform-level security guarantees do **not** apply:
