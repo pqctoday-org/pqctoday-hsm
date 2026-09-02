@@ -95,14 +95,12 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       # OPENSSL_VERSION only — deliberately NOT OPENSSL_BIN/LD_LIBRARY_PATH.
-      # Those are scoped to the engine-test step alone (see there): setting
-      # LD_LIBRARY_PATH job-wide made "Run KMIP tests" execute the distro's
-      # openssl 3.0.13 BINARY against 3.6.3 LIBRARIES, a mixed-ABI pairing.
-      # kmip/tests/openssl_kem_interop.rs probes capability by running
-      # `Command::new("openssl")` — the binary on PATH, not $OPENSSL_BIN — and
-      # is designed to SKIP gracefully when that openssl predates ML-KEM. The
-      # job-wide variable broke exactly that skip and failed all 4 interop
-      # tests. Keep OpenSSL 3.6 exposure narrowed to the step that needs it.
+      # Each test step declares its own OpenSSL environment, because the two
+      # steps need DIFFERENT things and a job-wide setting got it wrong once
+      # already: LD_LIBRARY_PATH alone, applied job-wide, left PATH pointing at
+      # the distro's openssl 3.0.13 BINARY while feeding it 3.6.3 LIBRARIES,
+      # and that mixed-ABI pairing failed all 4 KMIP interop tests. Setting
+      # these per-step keeps binary and libraries matched in both places.
       OPENSSL_VERSION: 3.6.3
     steps:
       - uses: actions/checkout@v4
@@ -164,7 +162,24 @@ jobs:
         # Same RUST_MIN_STACK need as the engine tests above — this crate
         # has its own classic_mceliece_6688128_round_trip e2e test
         # (kmip/tests/frodokem_mceliece_e2e.rs).
-        run: cd kmip && RUST_MIN_STACK=134217728 cargo test --quiet
+        #
+        # PQC interop must actually be EXERCISED here, not skipped.
+        # kmip/tests/openssl_kem_interop.rs cross-checks our ML-KEM-768 and
+        # X25519MLKEM768 against a real OpenSSL process, and it probes support
+        # by running `Command::new("openssl")` — the binary on PATH. Against
+        # ubuntu-24.04's stock 3.0.13 (which predates ML-KEM) it skipped
+        # silently, so this repo's PQC interop claim had NO CI evidence behind
+        # it at all. Both PATH and LD_LIBRARY_PATH are pointed at the same
+        # 3.6.3 build so the binary and its libraries MATCH: supplying only
+        # LD_LIBRARY_PATH previously paired a 3.0.13 binary with 3.6.3
+        # libcrypto and failed all 4 interop tests outright. `openssl version`
+        # runs first so the log always records which build was actually used.
+        env:
+          LD_LIBRARY_PATH: /opt/openssl-3.6/lib64:/opt/openssl-3.6/lib
+        run: |
+          export PATH="/opt/openssl-3.6/bin:$PATH"
+          openssl version
+          cd kmip && RUST_MIN_STACK=134217728 cargo test --quiet
 
   kmip-conformance:
     name: KMIP OASIS Conformance Replay
