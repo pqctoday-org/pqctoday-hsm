@@ -2000,7 +2000,13 @@ fn finalize_secret_attrs(mut attrs: Attributes) -> Attributes {
 /// FIPS 204 §5 parameter-set table: `CKP_ML_DSA_*` → `(sk_len, pk_len)`.
 /// Lengths come from the `fips204` crate's per-variant constants — the
 /// same source `generate_ml_dsa_keypair` serializes from.
-fn ml_dsa_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
+///
+/// `pub(crate)` (B5, 2026-09-02): also the length table
+/// `ffi::normalize_pqc_pkcs8_import` uses to recognize the raw FIPS 204 `sk`
+/// length a PKCS#8-wrapped `CKA_VALUE` (C_CreateObject import) must unwrap
+/// down to — the single source of truth for what "correct length" means for
+/// this family, shared with `register_ml_dsa_private_key` above.
+pub(crate) fn ml_dsa_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
     match parameter_set {
         CKP_ML_DSA_44 => Some((fips204::ml_dsa_44::SK_LEN, fips204::ml_dsa_44::PK_LEN)),
         CKP_ML_DSA_65 => Some((fips204::ml_dsa_65::SK_LEN, fips204::ml_dsa_65::PK_LEN)),
@@ -2012,7 +2018,10 @@ fn ml_dsa_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
 /// FIPS 203 §7 parameter-set table: `CKP_ML_KEM_*` → `(dk_len, ek_len)`.
 /// Derived from the `ml-kem` crate's encoded sizes (512: 1632/800,
 /// 768: 2400/1184, 1024: 3168/1568) — same source keygen serializes from.
-fn ml_kem_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
+///
+/// `pub(crate)` (B5, 2026-09-02): see `ml_dsa_key_lens`'s doc comment above
+/// — same reuse by `ffi::normalize_pqc_pkcs8_import`.
+pub(crate) fn ml_kem_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
     use ml_kem::array::typenum::Unsigned;
     use ml_kem::{EncodedSizeUser, KemCore};
     macro_rules! lens {

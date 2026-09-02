@@ -5400,6 +5400,170 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
     Ok(())
 }
 
+/// Minimal definite-length DER TLV reader (BER indefinite-length is
+/// deliberately unsupported — every DER encoder in this codebase, e.g.
+/// `der_sequence`/`der_octet_string` below and the `pkcs8`/`rsa` crates this
+/// engine already depends on, only ever emits definite-length). Returns
+/// `(tag, content, bytes_consumed)` for the single value at the front of
+/// `buf`, or `None` if `buf` is truncated/malformed.
+fn der_read_tlv(buf: &[u8]) -> Option<(u8, &[u8], usize)> {
+    if buf.len() < 2 {
+        return None;
+    }
+    let tag = buf[0];
+    let len_byte = buf[1];
+    let (len, hdr) = if len_byte & 0x80 == 0 {
+        (len_byte as usize, 2usize)
+    } else {
+        let n = (len_byte & 0x7f) as usize;
+        if n == 0 || n > 4 || buf.len() < 2 + n {
+            return None;
+        }
+        let mut l = 0usize;
+        for k in 0..n {
+            l = (l << 8) | buf[2 + k] as usize;
+        }
+        (l, 2 + n)
+    };
+    let total = hdr.checked_add(len)?;
+    if buf.len() < total {
+        return None;
+    }
+    Some((tag, &buf[hdr..total], total))
+}
+
+/// B5 (2026-09-02) — unwrap a PKCS#8 `PrivateKeyInfo` DER blob down to the
+/// raw FIPS 204/203 `sk`/`dk` byte array `native::sign`/`native::encrypt`'s
+/// fixed-size-array dispatch requires, IF `value` is shaped like one.
+///
+/// Root cause this exists to fix: `openpgp/lib/src/upload.rs::
+/// seed_to_pkcs8_der` (the composite-key BYOK import path) derives an
+/// ML-DSA/ML-KEM `EVP_PKEY` from a raw FIPS seed via OpenSSL's
+/// `PKey::private_key_from_seed`, then DER-encodes it with
+/// `private_key_to_pkcs8()` before handing it to `C_CreateObject` as
+/// `CKA_VALUE` — the shape the C++ engine's own
+/// `OSSL{MLDSA,MLKEM}PrivateKey::createOSSLKey` parses via
+/// `d2i_PKCS8_PRIV_KEY_INFO`. `C_GenerateKeyPair` never produces this
+/// wrapper (it writes the `fips204`/`ml-kem` crates' own raw bytes
+/// directly), so only the C_CreateObject import path needs to undo it —
+/// confirmed by instrumenting a real end-to-end run: the imported ML-DSA-65
+/// object's `CKA_VALUE` was 4098 bytes (this PKCS#8 DER), not the 4032-byte
+/// raw `sk` `sign_ml_dsa`'s `sk_bytes.try_into()` requires, so every
+/// `C_Sign` failed with `CKR_KEY_TYPE_INCONSISTENT`.
+///
+/// The actual DER structure (verified byte-for-byte against a real OpenSSL
+/// 3.6 `private_key_to_pkcs8()` ML-DSA-65 export, not guessed):
+/// ```text
+/// SEQUENCE {                        -- PrivateKeyInfo
+///   INTEGER 0,                      -- version
+///   SEQUENCE { OID },                -- privateKeyAlgorithm
+///   OCTET STRING {                   -- privateKey
+///     SEQUENCE {                     -- draft-ietf-lamps-dilithium-
+///                                     -- certificates' "both" CHOICE
+///       OCTET STRING (seed),         -- 32B ML-DSA xi / 64B ML-KEM d||z
+///       OCTET STRING (raw sk/dk)     -- what this function returns
+///     }
+///   }
+/// }
+/// ```
+/// Also accepts the simpler single-OCTET-STRING `privateKey` shape (no
+/// nested SEQUENCE) — the form this file's OWN `pkcs8_private_key_info`
+/// (the `C_WrapKey` encoder, below) emits for these key types — so a key
+/// wrapped by THIS engine and re-imported round-trips too.
+///
+/// Returns `Some(raw)` only when an OCTET STRING of EXACTLY `expected_len`
+/// bytes is found in one of those two recognized positions; `None` for
+/// anything else (an unrecognized shape, or the wrong length even after
+/// unwrapping) — the caller treats that as a real error rather than
+/// guessing.
+fn unwrap_pqc_pkcs8_private_key(value: &[u8], expected_len: usize) -> Option<Vec<u8>> {
+    let (tag, body, consumed) = der_read_tlv(value)?;
+    if tag != 0x30 || consumed != value.len() {
+        return None; // not a single top-level DER SEQUENCE spanning `value`
+    }
+    let (tag_version, _version, used) = der_read_tlv(body)?;
+    if tag_version != 0x02 {
+        return None;
+    }
+    let rest = &body[used..];
+    let (tag_alg, _alg_id, used2) = der_read_tlv(rest)?;
+    if tag_alg != 0x30 {
+        return None;
+    }
+    let rest2 = &rest[used2..];
+    let (tag_priv, priv_body, _used3) = der_read_tlv(rest2)?;
+    if tag_priv != 0x04 {
+        return None;
+    }
+    if priv_body.len() == expected_len {
+        return Some(priv_body.to_vec());
+    }
+    // The "both" CHOICE: privateKey's content is itself a SEQUENCE whose
+    // children include the raw key as one of its OCTET STRINGs.
+    let (tag_inner, inner_body, consumed_inner) = der_read_tlv(priv_body)?;
+    if tag_inner == 0x30 && consumed_inner == priv_body.len() {
+        let mut cursor = inner_body;
+        while !cursor.is_empty() {
+            let (t, c, used) = der_read_tlv(cursor)?;
+            if t == 0x04 && c.len() == expected_len {
+                return Some(c.to_vec());
+            }
+            cursor = &cursor[used..];
+        }
+    }
+    None
+}
+
+/// B5 (2026-09-02) — normalize a just-absorbed `CKK_ML_DSA`/`CKK_ML_KEM`
+/// PRIVATE key's `CKA_VALUE` to the raw FIPS 204/203 byte array this
+/// engine's sign/decapsulate dispatch requires (see
+/// `unwrap_pqc_pkcs8_private_key`'s doc comment for the full root-cause
+/// story). Called only from `create_object_from_attrs`, i.e. only on the
+/// `C_CreateObject` import path — `C_GenerateKeyPair` already stores the
+/// raw shape directly and never needs this.
+///
+/// Leaves `CKA_VALUE` byte-for-byte UNCHANGED when it is already the
+/// correct raw length (the common case for a caller that already knows this
+/// engine's native shape, and for every existing test). When it is some
+/// OTHER length, this either unwraps a recognized PKCS#8 encoding down to
+/// the raw key, or — if the shape isn't recognized at all — rejects the
+/// import outright with `CKR_ATTRIBUTE_VALUE_INVALID` rather than silently
+/// storing unusable material that would only fail later, opaquely, as
+/// `CKR_KEY_TYPE_INCONSISTENT` on the first `C_Sign`/`C_DecapsulateKey`
+/// (the same "catch a malformed key value at creation" principle
+/// `validate_create_template` already applies to `CKK_AES`/`CKK_AES_XTS`
+/// `CKA_VALUE` lengths above).
+fn normalize_pqc_pkcs8_import(attrs: &mut Attributes) -> Result<(), u32> {
+    let key_type = match crate::state::get_object_attr_u32_from(attrs, CKA_KEY_TYPE) {
+        Some(kt) => kt,
+        None => return Ok(()), // validate_create_template already rejects this
+    };
+    let ps = crate::state::get_object_param_set_from(attrs);
+    let expected_len = match key_type {
+        CKK_ML_DSA => crate::native::keygen::ml_dsa_key_lens(ps).map(|(sk, _)| sk),
+        CKK_ML_KEM => crate::native::keygen::ml_kem_key_lens(ps).map(|(dk, _)| dk),
+        _ => return Ok(()),
+    };
+    let Some(expected_len) = expected_len else {
+        // Unknown/absent parameter set: not this function's job to diagnose
+        // (existing template validation / the sign-time length check own it).
+        return Ok(());
+    };
+    let Some(value) = attrs.get(&CKA_VALUE) else {
+        return Ok(()); // validate_create_template already requires CKA_VALUE here
+    };
+    if value.len() == expected_len {
+        return Ok(()); // already the raw shape C_GenerateKeyPair produces
+    }
+    match unwrap_pqc_pkcs8_private_key(value, expected_len) {
+        Some(raw) => {
+            attrs.insert(CKA_VALUE, raw);
+            Ok(())
+        }
+        None => Err(CKR_ATTRIBUTE_VALUE_INVALID),
+    }
+}
+
 /// Engine core of `C_CreateObject` — operates on an already-marshalled
 /// attribute map. Split from the FFI wrapper so policy can be unit-tested on
 /// 64-bit native builds, where CK_ATTRIBUTE templates (32-bit value pointers)
@@ -5444,21 +5608,64 @@ pub(crate) fn create_object_from_attrs(
             store_param_set(&mut new_attrs, ps);
         }
     } else if let Some(ec_params) = new_attrs.get(&CKA_EC_PARAMS).cloned() {
-        // Derive curve from CKA_EC_PARAMS OID for imported EC keys.
-        // P-384 OID (1.3.132.0.34): 06 05 2b 81 04 00 22 — last byte 0x22
-        // P-256 OID (1.2.840.10045.3.1.7): 06 07 2a 86 48 ce 3d 03 01 07 — last byte 0x07
-        let is_p521 = ec_params.len() >= 7 && ec_params[ec_params.len() - 1] == 0x23;
-        let is_p384 = ec_params.len() >= 7 && ec_params[ec_params.len() - 1] == 0x22;
-        store_param_set(
-            &mut new_attrs,
-            if is_p521 {
-                CURVE_P521
-            } else if is_p384 {
-                CURVE_P384
-            } else {
-                CURVE_P256
-            },
-        );
+        // B5 (2026-09-02) — decode the OID/curveName via decode_ec_params
+        // (the SAME decoder C_GenerateKeyPair's Edwards/Montgomery arms
+        // already use — see CKM_EC_EDWARDS_KEY_PAIR_GEN /
+        // CKM_EC_MONTGOMERY_KEY_PAIR_GEN below) instead of the hand-rolled
+        // last-byte sniff this used to be, which only recognized P-384/
+        // P-521 and silently defaulted EVERYTHING ELSE — X25519, X448,
+        // Ed25519, Ed448, secp256k1, and any genuinely unsupported curve —
+        // to CURVE_P256.
+        //
+        // For an imported CKK_EC_MONTGOMERY (X25519/X448) private key that
+        // meant CKA_PRIV_PARAM_SET became CURVE_P256 while
+        // CKA_PRIV_ALGO_FAMILY was left unset (0, since C_CreateObject
+        // never stamps it at all — only the keygen arms do). C_DeriveKey's
+        // CKM_ECDH1_DERIVE dispatch matches on `(algo, curve)`, and its
+        // `(0, CURVE_P256)` legacy fallback arm caught exactly this
+        // combination: an imported X25519 key silently ran P-256
+        // Weierstrass ECDH math over its Montgomery scalar instead of RFC
+        // 7748 X25519 — `p256::NonZeroScalar::try_from` on a random
+        // 32-byte value almost always succeeds (P-256's order is ~2^256),
+        // so this "succeeded" and produced A shared secret, just never the
+        // one the peer's real X25519 side computed. This is the confirmed
+        // root cause of the openpgp composite MLKEM768_X25519/
+        // MLKEM1024_X448 "No session key decrypted" failures: the ML-KEM
+        // half decapsulated correctly (see unwrap_pqc_pkcs8_private_key —
+        // proven byte-exact against an independent
+        // ml_kem::generate_deterministic re-derivation), but the X25519/
+        // X448 half's contribution to the KEK was silently wrong, so the
+        // AES-256 key-unwrap's integrity check failed downstream.
+        match crate::crypto::handlers::decode_ec_params(&ec_params) {
+            Ok(curve @ (CURVE_P256 | CURVE_P384 | CURVE_P521 | CURVE_K256)) => {
+                store_param_set(&mut new_attrs, curve);
+            }
+            Ok(CURVE_X25519) => {
+                store_param_set(&mut new_attrs, CURVE_X25519);
+                store_algo_family(&mut new_attrs, ALGO_ECDH_X25519);
+            }
+            Ok(CURVE_X448) => {
+                store_param_set(&mut new_attrs, CURVE_X448);
+                store_algo_family(&mut new_attrs, ALGO_ECDH_X448);
+            }
+            Ok(CURVE_ED25519) | Ok(CURVE_ED448) => {
+                // sign_eddsa/verify_eddsa dispatch purely on the stored
+                // key's byte length and never consult algo/curve, but
+                // stamp CKA_PRIV_ALGO_FAMILY anyway for parity with
+                // C_GenerateKeyPair's own Edwards arm and any future
+                // consumer (e.g. C_WrapKey's pkcs8_private_key_info) that
+                // does look at it.
+                store_algo_family(&mut new_attrs, ALGO_EDDSA);
+            }
+            // Unsupported/undecodable OID (or a curve this token simply
+            // doesn't implement). Leave CKA_PRIV_PARAM_SET unset rather
+            // than guessing P-256 — every dispatch site already has an
+            // honest failure mode for a missing/zero param set
+            // (CKR_KEY_TYPE_INCONSISTENT / CKR_ARGUMENTS_BAD /
+            // CKR_TEMPLATE_INCOMPLETE), which is the correct outcome here;
+            // silently mislabeling the curve is not.
+            _ => {}
+        }
     }
     let class = new_attrs
         .get(&CKA_CLASS)
@@ -5486,6 +5693,15 @@ pub(crate) fn create_object_from_attrs(
             CKA_KEY_GEN_MECHANISM,
             CKM_UNAVAILABLE_INFORMATION,
         );
+    }
+
+    // B5 (2026-09-02) — an imported CKK_ML_DSA/CKK_ML_KEM PRIVATE key may
+    // carry a PKCS#8-DER-wrapped CKA_VALUE (see normalize_pqc_pkcs8_import's
+    // doc comment); normalize it to the raw shape C_GenerateKeyPair stores
+    // and native::sign/native::encrypt require, or reject an unrecognized
+    // value outright rather than let it fail opaquely at first use.
+    if class == Some(CKO_PRIVATE_KEY) {
+        normalize_pqc_pkcs8_import(&mut new_attrs)?;
     }
 
     // PKCS#11 v3.2 §6.14 (and every other secret-key table): CKA_VALUE_LEN is
@@ -14862,6 +15078,107 @@ mod abi_hygiene_ffi_tests {
     }
 }
 
+/// B5 investigation (2026-09-02): one-shot helper to provision a real,
+/// on-disk, `SOFTHSMRUST_STATE_FILE`-persisted token (label "test", SO PIN
+/// "12345678", user PIN "1234") that a SEPARATE process (the `openpgp`
+/// crate's `live_composite_*` tests, run against the compiled
+/// `libsofthsmrustv3` cdylib) can load and log into. Run in isolation:
+///
+/// ```bash
+/// SOFTHSMRUST_STATE_FILE=/path/to/state.bin \
+///   cargo test --lib b5_setup_live_token_state -- --test-threads=1 --nocapture
+/// ```
+#[cfg(test)]
+mod b5_live_token_setup {
+    use super::*;
+
+    #[test]
+    fn b5_setup_live_token_state() {
+        let path = std::env::var("SOFTHSMRUST_STATE_FILE")
+            .expect("set SOFTHSMRUST_STATE_FILE to the desired output path");
+        // Fresh file each run.
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(C_Initialize(std::ptr::null_mut()), CKR_OK);
+        crate::state::ensure_slot(0);
+        let so_pin = b"12345678";
+        let mut label = [0x20u8; 32];
+        label[..4].copy_from_slice(b"test");
+        assert_eq!(
+            C_InitToken(0, so_pin.as_ptr() as *mut u8, so_pin.len() as u32, label.as_mut_ptr()),
+            CKR_OK
+        );
+        let mut session = 0u32;
+        assert_eq!(
+            C_OpenSession(0, 0x00000004 | 0x00000002, std::ptr::null_mut(), std::ptr::null_mut(), &mut session),
+            CKR_OK
+        );
+        assert_eq!(C_Login(session, 0, so_pin.as_ptr() as *mut u8, so_pin.len() as u32), CKR_OK);
+        let user_pin = b"1234";
+        assert_eq!(C_InitPIN(session, user_pin.as_ptr() as *mut u8, user_pin.len() as u32), CKR_OK);
+        assert_eq!(C_Logout(session), CKR_OK);
+        assert_eq!(C_CloseAllSessions(0), CKR_OK);
+        // C_Finalize serializes to SOFTHSMRUST_STATE_FILE (state.rs R6).
+        assert_eq!(C_Finalize(std::ptr::null_mut()), CKR_OK);
+        eprintln!("wrote initialized token state to {path}");
+        assert!(std::path::Path::new(&path).exists(), "state file must exist after C_Finalize");
+    }
+
+    /// B5 verification (2026-09-02): confirm `unwrap_pqc_pkcs8_private_key`'s
+    /// ML-KEM-768 extraction from a REAL, captured (live end-to-end run)
+    /// OpenSSL PKCS#8 DER blob produces the mathematically CORRECT raw `dk`
+    /// -- not just a structurally-plausible 2400-byte slice. The seed
+    /// (d||z, 64B) and extracted dk (2400B) below were captured verbatim
+    /// from `normalize_pqc_pkcs8_import`'s own debug trace against the
+    /// openpgp `live_composite_mlkem768_x25519_encrypt_decrypt` test's real
+    /// `seed_to_pkcs8_der(&mldsa_seed, ML_KEM_768)` output (a real OpenSSL
+    /// 3.6 `PKey::private_key_from_seed` + `private_key_to_pkcs8()` call, not
+    /// synthesized). Independently re-derives `dk` from the SAME seed via
+    /// `ml_kem::MlKem768::generate_deterministic(d, z)` (the `ml-kem` crate's
+    /// own FIPS 203 KeyGen) and asserts byte-for-byte equality -- proves the
+    /// extraction is not merely well-shaped but actually the right key.
+    #[test]
+    fn b5_ml_kem_768_pkcs8_unwrap_matches_independent_keygen_from_seed() {
+        use ml_kem::{EncodedSizeUser, KemCore};
+        fn decode_hex(s: &str) -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        }
+        // d || z, captured from the live run (see doc comment above).
+        let seed_hex = "04a688fce3372f9219760170c15e227b9b3e4792bef1dcd6e29f780d30b251b\
+                         3d84233d1c1b3ea9669ed47559e8969fe05193e3dccabdb9ee27d45652843bf12";
+        let seed = decode_hex(seed_hex);
+        assert_eq!(seed.len(), 64);
+        // Same construction as C_GenerateKeyPair's own CKM_ML_KEM_KEY_PAIR_GEN
+        // deterministic-seed arm (this file, `mlkem_gen!` macro) -- ml_kem::B32
+        // ::try_from(&slice), not a raw Array(..) tuple literal.
+        let d = ml_kem::B32::try_from(&seed[..32]).expect("length checked");
+        let z = ml_kem::B32::try_from(&seed[32..64]).expect("length checked");
+
+        let (dk, _ek) = <ml_kem::MlKem768 as KemCore>::generate_deterministic(&d, &z);
+        let dk_bytes = dk.as_bytes().to_vec();
+        assert_eq!(dk_bytes.len(), 2400);
+
+        // Run the ACTUAL production unwrap path over the real captured DER,
+        // rather than re-deriving expected bytes twice.
+        let der_hex = "308209be020100300b0609608648016503040402048209aa308209a6044004a688fce3372f9219760170c15e227b9b3e4792bef1dcd6e29f780d30b251b3d84233d1c1b3ea9669ed47559e8969fe05193e3dccabdb9ee27d45652843bf12048209609ac47edc0abe00509bd6b004a9f73ae25667249abe3bf03044eb32002501fdeccd455c78b6b66d48b3036cf03c2cf51065dcc306008625702a419051a58a623c60a2e1f4accf60c6b3bb00621260754c18013b97ee5b98de96b1cf593645b93a0827ce853b354d2484199267c3561649650d85660455f5ca5b27a5cc185e6c45a2f1bc6e28d316945ba5d159caf0da5c5677a0b2d6238921c3e8f8066f5b9c6b33c2df271192f2614e997e0bd989016a0e6f752de1c350570a923b119647cb5a90f7a668a07248d77ef3682e131a4c19982fa15c9a69ac05586a6adf1885f447360426b45a8b784f1531250c0dbaa99c14fc1c29529e9a769fca128680d864d51040ea8c8388a3c1156a850b3b1547675a7593c12229314e69abacf5928487a765f687da449c12a54efae56e9c824ecbdc257b35bc3f99cad2d5cb09ea2f14b02024c3cee2f45b0b87b3ea3c9ebe53aa556c16f53b26d3124cb5da9b6f98ae2e71839061006555760074a0d5e07685a616853c3208c06c29acb7283c83510a0646c402f21a70ffd70915542463f98218a66be42a430f1772b86276215a1d39fb8be0225f81e49c95f66c5610af7364cb51070edf882f113cccd6bc6994bc898d83b2bf66463e4364b0f314bc7b62ec549bc8fc4e689a39a1e42550f5bd17a53d5eb4b55fc41562d799786873c1234156b44ea7e5254cbc9999479c975bb3842a19a4a51c7726252f6a009477ca66b2585d99b39b846b92845020b56d1d64aba005641d45a230c0214b7b7e2ab7660431575be2170f601e3403c35f99ce8bc73009374beeb3977d986b05553cd5380b325a99de0455c62630c1785ba4f5459636b8c6e4cef43816a3755d931635b7c493a3c47c54b068370c395ec4c959f85c336bab3946bb89f07f8e600577dbcab68a80f3d42d0d44b6f3a3448c0139cfb25db9da7cdfe8254929c8daa6522eac19d929c4cbe27d3c30379ca74164c143b1cb0ae381715c5063d75a9720a3ad7035667db75b8d3b2c992b8c1794a0a9f27334e68025795cc2763868c459a3c08d492128ee162c33993aca9aa1f7996da51991af19005107b689191fe20b2312e96ea9150b6176a73f3b35d5d775790409b757904fe44adcfa7c50c257c5518c57da2311691ea0183b9710874827a94861491e857e2783828ac1cb77f7be3aec64cc40b373575df46978e6f93f44d08b72a03ec79217cabc329fc26d02581f30bc162907bc7bf276b4e3b8e1c51fd115736bd6acfdc597cb310d3ba9626e887772409ae8f26123f28e76f6a1898b79695c9976335464e8070e346ce0b604fa25444d4733aba9b0fa46228a2849e127920baa3caebc98cff539b5410811384fdb4a028546a47bb51631439e49081d93e246aef9afcba49f4f252a99c2912172b70df69178a5848f5bb599d4774dc14ac7a6c828fcc71dc11f12db14e43599117987af85c0a7c59980a4477262ce48b9cf0cd53b8fc4bf33243347630985f0737ae296db9a5a1aa4c93ce1a9b52a5bff6715f818aaa84c65b8fca45e1421815bac3d276607f8c9e728bdb18bc5b2fa772027373d3223dc1693d7b0427b861624296202a66efa134011698a8fb87d34874e5954cc868b8cdbec8bca0a29edf79cf608123354394ef49ab18a7debf032d458c75c99947ca3ac01f90f9a5b98ba05adbc1b6ac68209058b851f853037469dc92882cf5837eaab4d4385be5ce8477ff91523364c88c9523c145b86c061459710dfaa77969959b60cd0a6935a098772832711f0267b352303ab591181512cc8638e22788aff0b143c61385b71515245569ad86461f29ef0ba2bf7eb08e194cbd446758f5966d1a140d10446526b27b3500659e77146c929610a9849ca3eeedc82ab8a58f409c852e61b721a0a80d1714ee8c46532ccd3e23c291ba0ef037c3b9abdd6636ffd117a9407287862bfa1129d30115d37a95d281447801679d0fab1d0079008c701fcbc8257d6b92962697b5c23ae875316ab5df1286528009aa25b9de4e92ffab734a8475f7f3327e7bc2fd2d044b5e75f1fd8a2d1056e420581ed49cc73d88f154459e5ca4853a7869f88ab08e784193307a74822e8271266e5ceadb6a8a55b7ebbe70f13d3154c06859c1882d996319ba252f4cac454b84349f7a73db7328b9c0c11740e15955c961a515d7a83ea304ef1d01cbecc90151cb2810a9a4deac0d8d915e392c454c5842fb22d12f52c72e779f40536b9132b2fc116ef644828b006bcbbcdf4e826318c02ea11c0f91b20df9a1316184223010f5d34324661c65fd37acb621a94d832f1db4a981cb0d5f99398b3b008b98fcba7616dd48cc20c86942ab7eb6287b3bb551ac5c49737770ad227f15c4099c8ca9e05270df69f0797bc13d1b728a2392232b0b33640deb709ad04b3e80a73de6ba6308101bd932528e071cadc892fd42fa2cb72e8c089d46c294fc542e4fa61a7e22f61709b50f99c63ca962757aedb09b13547c338c9b95eb5aeae52ab8a05b68de54f8eda1390ac7a82a91cd47051817aa26aa67771eac898dc69c1b35fe0708b67889112dbbb62094ac6d1018a88633e09a5e22b1a2e8bb55b226bd80c8dcfd924f3c50ba6a8441f3a4407eb87d18a5bbc541820b460785cbd03902d1b3480d5801f75ecc19dc5575467226367bf67f8cea52078cb7847bf04796a35ce5496848d92bb0b24a55e5b1ee992ab2c637a2eb27bf9a2c8eeb41366e1b2d9db49fd7373246402eab5605c14903a6541b74c248cd37f1ff5cc3025bfe5f46944802f0f0b16b7e69ccd501cdf48414592b281c86605c837c5bc0edc0931a37abc2a1456df59b607d50fad290222b7550cab440d9a8063d9b51e7b180d040aa7e072550ca9b715075bf61ec1a337e134341696a77968c165791908a3b5cc26a36f45cde7d0ad8539b99c70881267858ecc9ff49a5fbff24b02592dc84476b632cd04069c0fa2316d0855feea32a741820af2aa10f165f3a5adf8a6bafb52a70e58418c4ca381c536b0707fe9b9bb4f5a792b96a10938407ef04105f7162ab6a29163450d6a41af442540002e74d42f908a2b5c6a36bcca861d50bde517901476ab5738b96ca25d16869be9cb321dab66708c72d79b97c5a82d86c33ef689cba0da9963d36bd74964f83c83fb22c1095a238aa14f4e924a8ae73c473c206fd6c3f9e947b4a2c5c363cc3ae23da55901ab01bca1e3972b8b69be47862757c63fa82473f7430b95483c47bac09c57c344a6ea49d0a76a1500c034140509abea5aeb24ef5edeec483e925258341688542272462a0b3bc8885e2510b53a512d4430e0a4d917a12a74a33a4722d84233d1c1b3ea9669ed47559e8969fe05193e3dccabdb9ee27d45652843bf12";
+        let der = decode_hex(der_hex);
+        let unwrapped = unwrap_pqc_pkcs8_private_key(&der, 2400)
+            .expect("unwrap_pqc_pkcs8_private_key must recognize this real DER shape");
+        assert_eq!(unwrapped.len(), 2400);
+
+        assert_eq!(
+            unwrapped, dk_bytes,
+            "unwrap_pqc_pkcs8_private_key's extracted dk must equal an INDEPENDENT \
+             ml_kem::MlKem768::generate_deterministic(d, z) re-derivation from the \
+             SAME embedded seed -- proves the extraction is the actually-correct key, \
+             not merely a plausible-length OCTET STRING"
+        );
+    }
+}
+
 #[cfg(test)]
 mod attr_integrity_ffi_tests {
     //! S3 — object attribute integrity: honest provenance on import,
@@ -14981,6 +15298,121 @@ mod attr_integrity_ffi_tests {
             u32::from_le_bytes([kgm[0], kgm[1], kgm[2], kgm[3]]),
             CKM_UNAVAILABLE_INFORMATION
         );
+    }
+
+    /// B5 (2026-09-02) — a `CKK_ML_DSA` private key imported with the raw,
+    /// already-correct-length `CKA_VALUE` (the shape `C_GenerateKeyPair`
+    /// itself produces) must pass through `normalize_pqc_pkcs8_import`
+    /// byte-for-byte UNCHANGED — no invented/padded/truncated bytes.
+    #[test]
+    fn create_object_ml_dsa_import_accepts_raw_length_unchanged() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = Attributes::new();
+        store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_ML_DSA);
+        store_ulong(&mut attrs, CKA_PARAMETER_SET, CKP_ML_DSA_65);
+        let raw = vec![0x5Au8; 4032]; // FIPS 204 §5 ML-DSA-65 sk length
+        attrs.insert(CKA_VALUE, raw.clone());
+        let h = create_object_from_attrs(SESSION, attrs).expect("import must succeed");
+        assert_eq!(obj_attr(h, CKA_VALUE), Some(raw), "raw-length CKA_VALUE must be untouched");
+    }
+
+    /// B5 sabotage check (2026-09-02) — a `CKK_ML_DSA` private key imported
+    /// with a `CKA_VALUE` that is NEITHER the raw FIPS 204 `sk` length NOR a
+    /// recognizable PKCS#8 `PrivateKeyInfo` wrapper around one (root cause:
+    /// see `unwrap_pqc_pkcs8_private_key`'s doc comment) must be REJECTED at
+    /// `C_CreateObject` time with `CKR_ATTRIBUTE_VALUE_INVALID` — never
+    /// silently accepted and stored as unusable key material.
+    #[test]
+    fn create_object_ml_dsa_import_rejects_unrecognized_value_shape() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = Attributes::new();
+        store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_ML_DSA);
+        store_ulong(&mut attrs, CKA_PARAMETER_SET, CKP_ML_DSA_65);
+        // Neither 4032 raw bytes nor a well-formed DER SEQUENCE.
+        attrs.insert(CKA_VALUE, vec![0x11u8; 100]);
+        assert_eq!(
+            create_object_from_attrs(SESSION, attrs).unwrap_err(),
+            CKR_ATTRIBUTE_VALUE_INVALID,
+            "an unrecognized-shape CKA_VALUE must be rejected at import time, not stored"
+        );
+    }
+
+    /// B5 sabotage check (2026-09-02) — companion to the above for
+    /// `CKK_ML_KEM`: a `CKA_VALUE` that is neither the raw FIPS 203 `dk`
+    /// length nor a recognizable PKCS#8 wrapper must be rejected the same
+    /// way.
+    #[test]
+    fn create_object_ml_kem_import_rejects_unrecognized_value_shape() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = Attributes::new();
+        store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_ML_KEM);
+        store_ulong(&mut attrs, CKA_PARAMETER_SET, CKP_ML_KEM_768);
+        // Neither 2400 raw bytes (ML-KEM-768 dk) nor a well-formed DER blob.
+        attrs.insert(CKA_VALUE, vec![0x22u8; 50]);
+        assert_eq!(
+            create_object_from_attrs(SESSION, attrs).unwrap_err(),
+            CKR_ATTRIBUTE_VALUE_INVALID,
+            "an unrecognized-shape CKA_VALUE must be rejected at import time, not stored"
+        );
+    }
+
+    /// B5 (2026-09-02) — the SECOND root cause: an imported `CKK_EC_
+    /// MONTGOMERY` (X25519) private key's `CKA_PRIV_ALGO_FAMILY`/
+    /// `CKA_PRIV_PARAM_SET` must be derived from `CKA_EC_PARAMS`' actual OID
+    /// via `decode_ec_params`, not defaulted to `CURVE_P256` the way any
+    /// non-P-384/P-521 OID used to be. Confirms `C_DeriveKey`'s
+    /// `CKM_ECDH1_DERIVE` dispatch — which matches on `(algo, curve)` — sees
+    /// `(ALGO_ECDH_X25519, CURVE_X25519)` for an imported X25519 key, not
+    /// the `(0, CURVE_P256)` combination that used to silently misroute it
+    /// into Weierstrass P-256 scalar math over a Montgomery scalar (the
+    /// confirmed root cause of the openpgp composite MLKEM768_X25519/
+    /// MLKEM1024_X448 "No session key decrypted" failures).
+    #[test]
+    fn create_object_x25519_import_gets_correct_algo_family_and_curve() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = Attributes::new();
+        store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_EC_MONTGOMERY);
+        attrs.insert(CKA_EC_PARAMS, vec![0x06, 0x03, 0x2b, 0x65, 0x6e]); // X25519 OID
+        attrs.insert(CKA_VALUE, vec![0x33u8; 32]);
+        let h = create_object_from_attrs(SESSION, attrs).expect("import must succeed");
+
+        let algo = obj_attr(h, CKA_PRIV_ALGO_FAMILY)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        let curve = obj_attr(h, CKA_PRIV_PARAM_SET)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        assert_eq!(algo, Some(ALGO_ECDH_X25519), "algo family must be ALGO_ECDH_X25519, not unset/0");
+        assert_eq!(curve, Some(CURVE_X25519), "curve must be CURVE_X25519, not CURVE_P256");
+    }
+
+    /// B5 regression guard (2026-09-02) — the `decode_ec_params`-based
+    /// rewrite of the CKA_EC_PARAMS curve-detection branch must still
+    /// correctly identify the Weierstrass curves it always handled
+    /// (P-256/P-384/P-521/secp256k1), not just the newly-fixed Edwards/
+    /// Montgomery cases. Covers P-384 specifically since that curve's OID
+    /// last byte (0x22) was the one the OLD hand-rolled sniff hard-coded a
+    /// special case for.
+    #[test]
+    fn create_object_p384_import_still_gets_correct_curve() {
+        let _guard = test_lock::acquire();
+        setup();
+        let mut attrs = Attributes::new();
+        store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_EC);
+        // secp384r1 OID: 06 05 2b 81 04 00 22
+        attrs.insert(CKA_EC_PARAMS, vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22]);
+        attrs.insert(CKA_VALUE, vec![0x44u8; 48]);
+        let h = create_object_from_attrs(SESSION, attrs).expect("import must succeed");
+        let curve = obj_attr(h, CKA_PRIV_PARAM_SET)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        assert_eq!(curve, Some(CURVE_P384));
     }
 
     /// §4.1.1 Table 12 — token-computed / SO-only attributes in a
@@ -22484,5 +22916,186 @@ mod ed25519ctx_ffi_dispatch_tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── B5 reproduction (2026-09-02): C_CreateObject import of a raw
+    // CKK_EC_EDWARDS scalar (the exact shape openpgp's
+    // `upload.rs::create_eddsa_object` emits: CKA_VALUE = raw 32/57-byte
+    // scalar + CKA_EC_PARAMS = the RFC 8410 curve OID, no CKA_SENSITIVE/
+    // CKA_EXTRACTABLE override), through the REAL C_CreateObject ->
+    // C_SignInit -> C_Sign dispatch, cross-checked against an independently
+    // constructed ed25519-dalek / ed448-goldilocks verifier (NOT the
+    // engine's own C_Verify). ────────────────────────────────────────────
+
+    const ED25519_OID_DER: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
+    const ED448_OID_DER: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x71];
+
+    fn eddsa_import_attrs(oid: &[u8], scalar: &[u8]) -> Attributes {
+        let mut attrs = Attributes::new();
+        store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_EC_EDWARDS);
+        attrs.insert(CKA_EC_PARAMS, oid.to_vec());
+        attrs.insert(CKA_VALUE, scalar.to_vec());
+        store_bool(&mut attrs, CKA_SIGN, true);
+        store_bool(&mut attrs, CKA_TOKEN, true);
+        store_bool(&mut attrs, CKA_PRIVATE, true);
+        attrs
+    }
+
+    #[test]
+    fn b5_eddsa_import_ed25519_sign_matches_independent_verify() {
+        let _guard = test_lock::acquire();
+        let session = setup_session();
+
+        // Reference implementation, entirely independent of the engine.
+        use ed25519_dalek::Signer;
+        let seed = [0x11u8; 32];
+        let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let vk = sk.verifying_key();
+
+        // Import via the real C_CreateObject engine core, exactly the
+        // template shape openpgp/lib/src/upload.rs::create_eddsa_object
+        // sends (CKA_VALUE = raw 32-byte scalar, CKA_EC_PARAMS = the
+        // Ed25519 OID, no CKA_SENSITIVE/CKA_EXTRACTABLE override).
+        let attrs = eddsa_import_attrs(ED25519_OID_DER, &seed);
+        let h = create_object_from_attrs(session, attrs).expect("import must succeed");
+
+        // Step 1: compare the STORED internal representation against the
+        // raw seed and against what C_GenerateKeyPair itself stores for the
+        // same key type.
+        let stored = obj_value(h);
+        assert_eq!(
+            stored, seed,
+            "imported CKA_VALUE must be the bare 32-byte scalar, byte for byte -- \
+             got {} bytes instead of 32 (would explain sign_eddsa's length dispatch \
+             hitting CKR_KEY_TYPE_INCONSISTENT)",
+            stored.len()
+        );
+        let (_gen_pub, gen_priv) =
+            crate::native::keygen::generate_ed25519_keypair(session, b"\x02", "b5-ref")
+                .expect("reference keygen");
+        let gen_stored = obj_value(gen_priv);
+        assert_eq!(
+            stored.len(),
+            gen_stored.len(),
+            "imported CKA_VALUE length must match C_GenerateKeyPair's internal \
+             representation length for the same key type"
+        );
+
+        // NOTE (out of scope for B5, left un-fixed here, tracked separately):
+        // a C_GetAttributeValue(CKA_VALUE) size query on THIS object
+        // currently returns CKR_ATTRIBUTE_SENSITIVE even though the
+        // template above never set CKA_SENSITIVE=TRUE. Root cause: PKCS#11
+        // v3.2 Table 28 defines CKA_EXTRACTABLE's default as CK_TRUE for a
+        // private key object, but `create_object_from_attrs` applies no
+        // such default on import (only the keygen arms set it explicitly),
+        // so `read_bool_attr` on the absent attribute silently reads FALSE
+        // instead -- `C_GetAttributeValue`'s `extractable = ... ||
+        // read_bool_attr(&obj_attrs, CKA_EXTRACTABLE)` gate then blocks
+        // CKA_VALUE for an object that never asked to be non-extractable.
+        // This does NOT affect signing (native::sign's get_object_value
+        // bypasses the sensitivity gate entirely -- see below) and is not
+        // part of the B5 CKR_KEY_TYPE_INCONSISTENT root cause this test
+        // module exists to prove fixed, so it is documented rather than
+        // fixed in this change.
+
+        // Sign through the real dispatch path.
+        let mech_buf = build_mechanism(CKM_EDDSA, &[]);
+        assert_eq!(C_SignInit(session, mech_buf.as_ptr() as *mut u8, h), CKR_OK);
+        let mut msg = b"B5: HSM-imported Ed25519 key signs a message".to_vec();
+        let mut sig = [0u8; 64];
+        let mut sig_len: u32 = 64;
+        let rv = C_Sign(session, msg.as_mut_ptr(), msg.len() as u32, sig.as_mut_ptr(), &mut sig_len);
+        assert_eq!(
+            rv, CKR_OK,
+            "C_Sign on an imported Ed25519 key must succeed (reported symptom: \
+             CKR_KEY_TYPE_INCONSISTENT here)"
+        );
+        assert_eq!(sig_len, 64);
+
+        // Independent verify: NOT the engine's own C_Verify.
+        let signature = ed25519_dalek::Signature::from_bytes(&sig);
+        vk.verify_strict(&msg, &signature)
+            .expect("independent ed25519-dalek verifier must accept the HSM-produced signature");
+    }
+
+    #[test]
+    fn b5_eddsa_import_ed448_sign_matches_independent_verify() {
+        let _guard = test_lock::acquire();
+        let session = setup_session();
+
+        // Reference implementation, entirely independent of the engine.
+        let seed = [0x22u8; 57];
+        let sk = ed448_goldilocks::SigningKey::try_from(seed.as_slice())
+            .expect("valid Ed448 57-byte seed");
+        let vk = sk.verifying_key();
+
+        let attrs = eddsa_import_attrs(ED448_OID_DER, &seed);
+        let h = create_object_from_attrs(session, attrs).expect("import must succeed");
+
+        let stored = obj_value(h);
+        assert_eq!(
+            stored, seed,
+            "imported CKA_VALUE must be the bare 57-byte scalar, byte for byte -- \
+             got {} bytes instead of 57",
+            stored.len()
+        );
+
+        let mech_buf = build_mechanism(CKM_EDDSA, &[]);
+        assert_eq!(C_SignInit(session, mech_buf.as_ptr() as *mut u8, h), CKR_OK);
+        let mut msg = b"B5: HSM-imported Ed448 key signs a message".to_vec();
+        let mut sig = [0u8; 114];
+        let mut sig_len: u32 = 114;
+        let rv = C_Sign(session, msg.as_mut_ptr(), msg.len() as u32, sig.as_mut_ptr(), &mut sig_len);
+        assert_eq!(
+            rv, CKR_OK,
+            "C_Sign on an imported Ed448 key must succeed (reported symptom: \
+             CKR_KEY_TYPE_INCONSISTENT here)"
+        );
+        assert_eq!(sig_len, 114);
+
+        let signature = ed448_goldilocks::Signature::try_from(sig.as_slice())
+            .expect("engine-produced Ed448 signature must at least be well-formed");
+        assert!(
+            vk.verify_raw(&signature, &msg).is_ok(),
+            "independent ed448-goldilocks verifier must accept the HSM-produced signature"
+        );
+    }
+
+    /// Sabotage check: a wrong-length CKA_VALUE for CKK_EC_EDWARDS must
+    /// never be accepted as a usable key -- either C_CreateObject rejects
+    /// it outright, or (today's behavior) it's stored as-is and C_Sign
+    /// later refuses it with CKR_KEY_TYPE_INCONSISTENT. Either is fine;
+    /// silently signing with garbage-length material is not.
+    #[test]
+    fn b5_eddsa_import_rejects_wrong_length_value() {
+        let _guard = test_lock::acquire();
+        let session = setup_session();
+
+        let bogus = vec![0x33u8; 31]; // neither 32 (Ed25519) nor 57 (Ed448)
+        let attrs = eddsa_import_attrs(ED25519_OID_DER, &bogus);
+        let create_rv = create_object_from_attrs(session, attrs);
+
+        match create_rv {
+            Err(_rv) => { /* rejected at import time -- fine */ }
+            Ok(h) => {
+                let mech_buf = build_mechanism(CKM_EDDSA, &[]);
+                assert_eq!(C_SignInit(session, mech_buf.as_ptr() as *mut u8, h), CKR_OK);
+                let mut msg = b"should never produce a signature".to_vec();
+                let mut sig = [0u8; 114];
+                let mut sig_len: u32 = 114;
+                let rv = C_Sign(
+                    session,
+                    msg.as_mut_ptr(),
+                    msg.len() as u32,
+                    sig.as_mut_ptr(),
+                    &mut sig_len,
+                );
+                assert_ne!(
+                    rv, CKR_OK,
+                    "a 31-byte CKA_VALUE must never produce a signature CKR_OK"
+                );
+            }
+        }
     }
 }
