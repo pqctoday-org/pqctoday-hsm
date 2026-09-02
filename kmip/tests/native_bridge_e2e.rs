@@ -2007,6 +2007,99 @@ fn ed25519_create_sign_verify_round_trip() {
     let _ = softhsmrustv3::native::session::finalize();
 }
 
+/// G1 (2026-09-02): Ed448 mirrors the Ed25519 gap fix above exactly.
+/// Ed448 keygen/sign/verify (pure and prehash) shipped in the Rust engine's
+/// `0.27.0` release (2026-08-31) — a day after a KMIP/CACP coverage audit
+/// scoped it "out of scope... doesn't exist in either engine either". No
+/// `KmipAlgorithm` variant existed to reach it through KMIP. Full real round
+/// trip: CreateKeyPair → Activate → Sign → SignatureVerify (correct +
+/// tampered), against the live engine. `Sign`/`SignatureVerify` needed NO
+/// handler changes at all — `CKM_EDDSA` already covers both curves,
+/// dispatching internally on the stored key's byte length (32 = Ed25519,
+/// 57 = Ed448); the only missing piece was `native::generate_ed448_keypair`
+/// plus this `KmipAlgorithm::Ed448` variant.
+///
+/// This proves the wiring against a freshly-generated key (KMIP's
+/// `CreateKeyPair` has no seeded/deterministic path for Ed25519 or Ed448 —
+/// same pre-existing limitation as Ed25519, not new to this fix). A
+/// byte-exact RFC 8032 §7.4 known-answer check against the engine's
+/// `sign_eddsa` primitive itself (proving the deterministic signing
+/// operation this Sign path dispatches into is standards-conformant) lives
+/// in `rust/src/crypto/handlers.rs`'s own test module, next to the existing
+/// Ed448ctx KAT test.
+#[test]
+fn ed448_create_sign_verify_round_trip() {
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let create_req = CreateKeyPairRequest {
+        common_attributes: vec![Attribute::CryptographicAlgorithm(KmipAlgorithm::Ed448)],
+        private_key_attributes: vec![Attribute::CryptographicUsageMask(
+            UsageMask::SIGN | UsageMask::VERIFY,
+        )],
+        public_key_attributes: vec![Attribute::CryptographicUsageMask(
+            UsageMask::SIGN | UsageMask::VERIFY,
+        )],
+        seed: None,
+    };
+    let kp_resp = create_key_pair(&deps, create_req, "CreateKeyPair:Sign", &AuthContext::open(), "ed448-e2e").unwrap();
+    let priv_rec = deps.store.get(&kp_resp.private_key_uid).unwrap().unwrap();
+    let pub_rec = deps.store.get(&kp_resp.public_key_uid).unwrap().unwrap();
+    assert_eq!(priv_rec.algorithm, KmipAlgorithm::Ed448);
+
+    use pqctoday_kmip::kmip30::ActivateRequest;
+    activate(&deps, ActivateRequest { uid: priv_rec.uid.clone() }, "ed448-activate-priv")
+        .unwrap();
+    activate(&deps, ActivateRequest { uid: pub_rec.uid.clone() }, "ed448-activate-pub").unwrap();
+
+    let message = b"Ed448 KMIP wiring audit trail, 2026-09-02";
+    let sig_resp = sign(
+        &deps,
+        SignRequest {
+            uid: priv_rec.uid.clone(),
+            data: message.to_vec(),
+            cryptographic_parameters: None,
+        },
+        &AuthContext::open(),
+        "ed448-sign",
+    )
+    .unwrap();
+    assert_eq!(sig_resp.signature.len(), 114, "RFC 8032 Ed448 signature is 114 bytes");
+
+    let verify_resp = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_rec.uid.clone(),
+            data: message.to_vec(),
+            signature: sig_resp.signature.clone(),
+            cryptographic_parameters: None,
+        },
+        &AuthContext::open(),
+        "ed448-verify-ok",
+    )
+    .unwrap();
+    assert_eq!(verify_resp.validity, SignatureValidity::Valid);
+
+    let mut tampered = sig_resp.signature.clone();
+    let mid = tampered.len() / 2;
+    tampered[mid] ^= 0xFF;
+    let verify_bad = signature_verify(
+        &deps,
+        SignatureVerifyRequest {
+            uid: pub_rec.uid.clone(),
+            data: message.to_vec(),
+            signature: tampered,
+            cryptographic_parameters: None,
+        },
+        &AuthContext::open(),
+        "ed448-verify-bad",
+    )
+    .unwrap();
+    assert_eq!(verify_bad.validity, SignatureValidity::Invalid);
+
+    let _ = softhsmrustv3::native::session::finalize();
+}
+
 /// Phase 7b gap-tightening: Locate's PKCS#11 reconciliation drops
 /// records whose engine handle is gone. Simulates the
 /// persistent-SQLite + volatile-engine restart scenario by finalising
