@@ -37,12 +37,17 @@ export PATH="$OPENSSL_ROOT_DIR/bin:$PATH"
 sudo apt-get install build-essential cmake libssl-dev libcppunit-dev
 ```
 
+> Ubuntu 24.04's `libssl-dev` is OpenSSL 3.0.13 — below the 3.5.0 floor CMake
+> enforces. If `apt`'s OpenSSL is too old, build one from source (real CI
+> pins and builds 3.6.3 this way — see `.github/workflows/ci.yml`) and pass
+> `-DOPENSSL_ROOT_DIR=/path/to/that/prefix`.
+
 ### Minimum versions
 
 | Dependency | Minimum | Notes |
 |---|---|---|
 | CMake | 3.16 | |
-| OpenSSL | 3.3 | 3.5+ for SLH-DSA; 3.6.0 for full PQC scope |
+| OpenSSL | 3.5.0 | CMake enforces this floor with `FATAL_ERROR`; 3.6.2+ is needed for `CKA_SEED` deterministic keygen, and CI is pinned to 3.6.3 |
 | CppUnit | 1.15 | For p11test only |
 | C++ compiler | C++17 | g++ 11+ or clang++ 14+ |
 
@@ -146,9 +151,13 @@ cmake --build build -j$(nproc || sysctl -n hw.logicalcpu)
 
 ### Run all tests
 
+CMake's Makefile generator has no `check` target here (that's an autotools
+convention SoftHSM2 used, not carried over) — use `ctest`, which is what real
+CI runs (`.github/workflows/ci.yml`):
+
 ```bash
 cd build
-make check
+ctest --output-on-failure
 ```
 
 Or run the test binary directly:
@@ -493,12 +502,21 @@ cmake -B build -DDEFAULT_LOG_LEVEL=DEBUG ...
 
 ## 9. CI Integration
 
+> Real CI (`.github/workflows/ci.yml`) builds OpenSSL 3.6.3 from source
+> (Ubuntu 24.04's `libssl-dev` is 3.0.13, below the 3.5.0 floor) and runs
+> `ctest --output-on-failure` — it does not build or run `pqc_validate`. The
+> snippet below is illustrative for a project that wants to add the
+> `pqc_validate` JSON artifact on top of that; adjust the OpenSSL install
+> step for your distro.
+
 ### Minimal CI snippet (GitHub Actions)
 
 ```yaml
 - name: Install dependencies
   run: |
     sudo apt-get install -y cmake libssl-dev libcppunit-dev
+    # libssl-dev on Ubuntu 24.04 is 3.0.13 — too old (CMake requires >= 3.5.0).
+    # Build/install a newer OpenSSL first, or point -DOPENSSL_ROOT_DIR at one.
 
 - name: Build
   run: |
@@ -506,7 +524,7 @@ cmake -B build -DDEFAULT_LOG_LEVEL=DEBUG ...
     cmake --build build -j$(nproc)
 
 - name: Run CppUnit tests
-  run: cd build && make check
+  run: cd build && ctest --output-on-failure
 
 - name: Download json.hpp
   run: |
@@ -534,38 +552,42 @@ cmake -B build -DDEFAULT_LOG_LEVEL=DEBUG ...
 
 ### Interpreting CI results
 
-- Exit code `0` with all classical tests PASS and PQC tests SKIP → Phase 1 is clean.
+- Current expectation (v0.8.0+, per §7): exit code `0` with **every** case —
+  classical and PQC — PASS. A SKIP now indicates a missing mechanism/build
+  problem, not a normal phase-in-progress result.
 - Any FAIL → regression; check the `error` field in the JSON artifact.
-- Upload the JSON artifact to track SKIP→PASS transitions across phases.
+- Upload the JSON artifact so a genuine SKIP or FAIL is easy to diff against
+  a prior green run.
 
 ---
 
 ## 10. Key Template Requirements
 
-> **Spec reference**: PKCS#11 v3.2 CSD01 (16 April 2025) — `docs/refs/pkcs11-spec-v3.2-csd01.pdf`
+> **Spec reference**: PKCS#11 v3.2, ratified OASIS Standard (03 June 2026) — `docs/refs/pkcs11-spec-v3.2-os.pdf`
+> (page/section/table numbers below are unchanged from the earlier CSD01 draft, verified against the ratified text)
 > §6.67 ML-DSA (p. 447) — Tables 280, 281; §6.67.4 key pair generation |
 > §6.68 ML-KEM (p. 453) — Tables 287, 288; §6.68.4 key pair generation; §6.68.5 Key Agreement |
 > §6.69 SLH-DSA (p. 456) — Tables 290, 291; §6.69.4 key pair generation
 
 ---
 
-### SoftHSMv3 attribute check flags (P11Attribute.h)
+### SoftHSMv3 attribute check flags (P11Attributes.h)
 
 These flags govern which attributes are mandatory, forbidden, or auto-set for each
 PKCS#11 creation operation. They are a SoftHSMv3 implementation detail (not in the spec).
 
 | Flag | Value | Meaning |
 | --- | --- | --- |
-| `ck1` | 1 | MUST NOT be specified on `C_CreateObject` |
-| `ck2` | 2 | MUST NOT be specified on `C_CopyObject` / key generation |
-| `ck3` | 4 | MUST be specified when created via `C_GenerateKey` / `C_GenerateKeyPair` |
-| `ck4` | 8 | Set internally after creation; caller must not supply |
+| `ck1` | 1 | MUST be specified when object is created with `C_CreateObject` |
+| `ck2` | 2 | MUST NOT be specified when object is created with `C_CreateObject` |
+| `ck3` | 4 | MUST be specified when object is generated with `C_GenerateKey` / `C_GenerateKeyPair` |
+| `ck4` | 8 | MUST NOT be specified when object is generated with `C_GenerateKey` / `C_GenerateKeyPair` (set internally instead) |
 | `ck6` | 32 | MUST NOT be specified on `C_UnwrapKey` |
 
 `CreateObject` with `OBJECT_OP_GENERATE` enforces **ck3**: if the attribute is not in the
 caller's template, it returns `CKR_TEMPLATE_INCOMPLETE`.
 
-Source: `src/lib/P11Objects.cpp` lines 261–282, `src/lib/P11Attributes.h` lines 76–80.
+Source: `src/lib/P11Objects.cpp` lines 261–282 (the per-op check loop), `src/lib/P11Attributes.h` lines 74–79 (flag definitions).
 
 ---
 
@@ -633,7 +655,11 @@ Parameter sets: `CKP_SLH_DSA_SHA2_128S/F`, `CKP_SLH_DSA_SHAKE_128S/F`, `CKP_SLH_
 
 ### C_GenerateKeyPair — ML-KEM key templates
 
-Source: spec §6.68.4; `src/lib/SoftHSM_kem.cpp` lines 50–100.
+Source: spec §6.68.4. Key-pair generation for every key type (RSA, EC, ML-DSA,
+ML-KEM, SLH-DSA, HSS, XMSS, XMSS-MT) is handled by one shared function,
+`SoftHSM::generateKeyPairImpl` in `src/lib/SoftHSM_keygen.cpp` — not
+`SoftHSM_kem.cpp`, which holds only `C_EncapsulateKey`/`C_DecapsulateKey` —
+dispatching on `CKM_ML_KEM_KEY_PAIR_GEN`.
 
 > **Spec rule**: `CKA_PARAMETER_SET` is specified in the **public key** template only.
 > It MUST NOT be in the private key template for `C_GenerateKeyPair` (spec §6.68.4:
@@ -662,7 +688,10 @@ The mechanism contributes `CKA_CLASS`, `CKA_KEY_TYPE`, `CKA_VALUE` to the public
 
 ### C_GenerateKeyPair — ML-DSA key templates
 
-Source: spec §6.67.4; `src/lib/SoftHSM_sign.cpp`.
+Source: spec §6.67.4; the same shared `SoftHSM::generateKeyPairImpl` in
+`src/lib/SoftHSM_keygen.cpp` described above (not `SoftHSM_sign.cpp` — that
+file holds the `C_Sign`/`C_Verify` operations only, not key generation),
+dispatching on `CKM_ML_DSA_KEY_PAIR_GEN`.
 
 Same rule: `CKA_PARAMETER_SET` in public key template only.
 
@@ -687,7 +716,10 @@ CK_ATTRIBUTE privTpl[] = {
 
 ### C_EncapsulateKey / C_DecapsulateKey — output secret key template
 
-Source: spec §6.68.5; `src/lib/SoftHSM_kem.cpp` lines 221–268 (encapsulate) / 395–443 (decapsulate).
+Source: spec §6.68.5; `src/lib/SoftHSM_kem.cpp` — `SoftHSM::encapsulateKeyImpl`
+(starts ~line 172, default-attribute merge via `extractObjectInformation(...,
+true)` ~line 305) and `SoftHSM::decapsulateKeyImpl` (starts ~line 505, same
+merge ~line 617).
 
 The spec (§6.68.5) states: *"The mechanism contributes the result as the CKA_VALUE attribute
 of the new key; other attributes required by the key type must be specified in the template."*
@@ -706,9 +738,11 @@ of the new key; other attributes required by the key type must be specified in t
 
 **SoftHSMv3 mandatory attribute — `CKA_VALUE_LEN` (0x00000161):**
 
-`P11AttrValueLen` is registered with `ck2|ck3` for `P11GenericSecretKeyObj`
-(`P11Objects.cpp` line 1472). Because `CreateObject` is called with `OBJECT_OP_GENERATE`,
-the `ck3` check fires and returns `CKR_TEMPLATE_INCOMPLETE` if `CKA_VALUE_LEN` is absent.
+`P11AttrValueLen`'s constructor defaults to `ck2|ck3`
+(`src/lib/P11Attributes.h` line 1251), and `P11GenericSecretKeyObj::init()`
+(`src/lib/P11Objects.cpp` line 1665) constructs it with that default. Because
+`CreateObject` is called with `OBJECT_OP_GENERATE`, the `ck3` check fires and
+returns `CKR_TEMPLATE_INCOMPLETE` if `CKA_VALUE_LEN` is absent.
 
 > **Note**: The PKCS#11 v3.2 spec example (§5.18.8) uses `CKK_AES` and does not include
 > `CKA_VALUE_LEN`. The requirement is a SoftHSMv3 implementation constraint enforced by

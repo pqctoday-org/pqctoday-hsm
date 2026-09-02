@@ -291,6 +291,141 @@ class AESCipherTest {
             "the unwrapped key must decrypt what the original (wrapped) key encrypted");
     }
 
+    // ── AES Key Wrap KWP (CKM_AES_KEY_WRAP_KWP, PKCS#11 v3.2 §6.16.3) ──────
+    //
+    // Registered (registerAESWrap("AESWrapKWP", CKM_AES_KEY_WRAP_KWP) and
+    // its deprecated-name twin registerAESWrap("AESWrapPad",
+    // CKM_AES_KEY_WRAP_PAD)) but, before this pass, exercised by NO test at
+    // this layer — the only existing wrap test above covers plain "AESWrap"
+    // (RFC 3394, unpadded) only. Both KWP and its deprecated alias run the
+    // identical RFC 5649 EVP_aes_*_wrap_pad() engine path per the C++
+    // engine's own CHANGELOG entry ("a new conformance test asserts the two
+    // produce byte-identical output") — verified again here at the JCA
+    // layer. Two independent external oracles are used: JDK 27's own
+    // SunJCE ("AES/KWP/NoPadding" — confirmed live via a container probe,
+    // the current NIST-standard name) and Bouncy Castle ("AESWrapPad").
+
+    @Test
+    void aesWrapKwpRoundTripsAndInteropsWithJdkAndBouncyCastle() throws Exception {
+        Security.addProvider(new BouncyCastleProvider());
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        byte[] rawWrapKey = new byte[32];
+        new java.security.SecureRandom().nextBytes(rawWrapKey);
+        long wrapHandle = importRawAesKeyReal(p.lib, rawWrapKey, false);
+        SecretKey ourWrapKey = new P11Key.Secret(p.lib, wrapHandle, "AES");
+        SecretKey externalWrapKey = new SecretKeySpec(rawWrapKey, "AES");
+
+        byte[] rawTargetKey = new byte[32];
+        new java.security.SecureRandom().nextBytes(rawTargetKey);
+        long targetHandle = importRawAesKeyReal(p.lib, rawTargetKey, true);
+        SecretKey targetKey = new P11Key.Secret(p.lib, targetHandle, "AES");
+
+        Cipher ourWrapper = Cipher.getInstance("AESWrapKWP", p);
+        ourWrapper.init(Cipher.WRAP_MODE, ourWrapKey);
+        byte[] wrapped = ourWrapper.wrap(targetKey);
+
+        // AESWrapKWP and its deprecated-name twin AESWrapPad must be
+        // byte-identical (same engine path, same construction).
+        Cipher legacyWrapper = Cipher.getInstance("AESWrapPad", p);
+        legacyWrapper.init(Cipher.WRAP_MODE, ourWrapKey);
+        byte[] wrappedLegacy = legacyWrapper.wrap(targetKey);
+        assertArrayEquals(wrapped, wrappedLegacy,
+            "AESWrapKWP and AESWrapPad (CKM_AES_KEY_WRAP_KWP vs the deprecated CKM_AES_KEY_WRAP_PAD) "
+            + "must produce byte-identical output per PKCS#11 v3.2 §6.16.3");
+
+        // JDK's own SunJCE must independently recover the original key.
+        Cipher jdkUnwrapper = Cipher.getInstance("AES/KWP/NoPadding");
+        jdkUnwrapper.init(Cipher.UNWRAP_MODE, externalWrapKey);
+        SecretKey jdkUnwrapped = (SecretKey) jdkUnwrapper.unwrap(wrapped, "AES", Cipher.SECRET_KEY);
+        assertArrayEquals(rawTargetKey, jdkUnwrapped.getEncoded(),
+            "JDK SunJCE's own AES/KWP/NoPadding must recover exactly our provider's AESWrapKWP-wrapped key");
+
+        // Bouncy Castle — a second, independent RFC 5649 implementation.
+        Cipher bcUnwrapper = Cipher.getInstance("AESWrapPad", "BC");
+        bcUnwrapper.init(Cipher.UNWRAP_MODE, externalWrapKey);
+        SecretKey bcUnwrapped = (SecretKey) bcUnwrapper.unwrap(wrapped, "AES", Cipher.SECRET_KEY);
+        assertArrayEquals(rawTargetKey, bcUnwrapped.getEncoded());
+
+        // And our own unwrap must recover a usable key (round trip through
+        // GCM), same discipline as the plain AESWrap test above.
+        Cipher ourUnwrapper = Cipher.getInstance("AESWrapKWP", p);
+        ourUnwrapper.init(Cipher.UNWRAP_MODE, ourWrapKey);
+        SecretKey recovered = (SecretKey) ourUnwrapper.unwrap(wrapped, "AES", Cipher.SECRET_KEY);
+
+        byte[] plaintext = "AESWrapKWP wrap/unwrap round trip".getBytes();
+        Cipher enc = Cipher.getInstance("AES/GCM/NoPadding", p);
+        enc.init(Cipher.ENCRYPT_MODE, targetKey);
+        byte[] iv = enc.getIV();
+        byte[] ct = enc.doFinal(plaintext);
+        Cipher dec = Cipher.getInstance("AES/GCM/NoPadding", p);
+        dec.init(Cipher.DECRYPT_MODE, recovered, new GCMParameterSpec(128, iv));
+        assertArrayEquals(plaintext, dec.doFinal(ct),
+            "the AESWrapKWP-unwrapped key must decrypt what the original (wrapped) key encrypted");
+    }
+
+    @Test
+    void aesWrapKwpRecoversExactLengthWherePlainAesWrapSilentlyPads() throws Exception {
+        // The actual reason RFC 5649/KWP exists (PKCS#11 v3.2 §6.16.3:
+        // "CKM_AES_KEY_WRAP_PAD is deprecated. CKM_AES_KEY_WRAP_KWP ...
+        // shall be used instead") and the exact scenario the C++ engine's
+        // own KWP conformance evidence used (a 60-byte, non-8-aligned
+        // plaintext) — proven here end-to-end through the JCA layer, not
+        // just at the engine.
+        //
+        // Live-probed before writing this assertion (not assumed): this
+        // engine's plain CKM_AES_KEY_WRAP does NOT reject a non-8-aligned
+        // target the way a strict RFC 3394 implementation might — it
+        // silently zero-pads to the next 8-byte boundary
+        // (SoftHSM_keygen.cpp's RFC3394Pad), and since RFC 3394 alone has
+        // no length field, that padding is indistinguishable from real
+        // data on unwrap: a 20-byte target wrapped and independently
+        // unwrapped via Bouncy Castle comes back as 24 bytes with 4 extra
+        // zero bytes appended, not the original 20. CKM_AES_KEY_WRAP_KWP's
+        // RFC 5649 message-length-indicator recovers the exact original
+        // length instead. That silent-padding/exact-recovery contrast,
+        // not an outright rejection, is the real, verifiable benefit KWP
+        // has over the plain mechanism for non-block-aligned data.
+        Security.addProvider(new BouncyCastleProvider());
+        SoftHSMv3Provider p = new SoftHSMv3Provider();
+        byte[] rawWrapKey = new byte[32];
+        new java.security.SecureRandom().nextBytes(rawWrapKey);
+        long wrapHandle = importRawAesKeyReal(p.lib, rawWrapKey, false);
+        SecretKey ourWrapKey = new P11Key.Secret(p.lib, wrapHandle, "AES");
+        SecretKey externalWrapKey = new SecretKeySpec(rawWrapKey, "AES");
+
+        // 20 raw bytes: not a multiple of 8.
+        byte[] rawTarget = new byte[20];
+        new java.security.SecureRandom().nextBytes(rawTarget);
+        SecretKey targetKey = new SecretKeySpec(rawTarget, "Generic");
+
+        Cipher plainWrap = Cipher.getInstance("AESWrap", p);
+        plainWrap.init(Cipher.WRAP_MODE, ourWrapKey);
+        byte[] plainWrapped = plainWrap.wrap(targetKey);
+
+        Cipher bcPlainUnwrap = Cipher.getInstance("AESWrap", "BC");
+        bcPlainUnwrap.init(Cipher.UNWRAP_MODE, externalWrapKey);
+        SecretKey bcRecoveredPlain = (SecretKey) bcPlainUnwrap.unwrap(plainWrapped, "Generic", Cipher.SECRET_KEY);
+        assertEquals(24, bcRecoveredPlain.getEncoded().length,
+            "plain AESWrap (RFC 3394, no length indicator) recovers the zero-padded 24 bytes, not the original 20");
+        assertFalse(java.util.Arrays.equals(rawTarget, bcRecoveredPlain.getEncoded()),
+            "plain AESWrap must NOT recover the exact original (unpadded) 20-byte target");
+
+        Cipher kwpWrap = Cipher.getInstance("AESWrapKWP", p);
+        kwpWrap.init(Cipher.WRAP_MODE, ourWrapKey);
+        byte[] kwpWrapped = kwpWrap.wrap(targetKey);
+
+        // Bouncy Castle independently recovers the exact original 20 bytes
+        // — proves both that KWP genuinely round-trips the non-aligned
+        // length losslessly and that our wire output is a real,
+        // spec-conformant RFC 5649 blob (not merely self-consistent with
+        // our own unwrap).
+        Cipher bcKwpUnwrap = Cipher.getInstance("AESWrapPad", "BC");
+        bcKwpUnwrap.init(Cipher.UNWRAP_MODE, externalWrapKey);
+        SecretKey bcRecoveredKwp = (SecretKey) bcKwpUnwrap.unwrap(kwpWrapped, "Generic", Cipher.SECRET_KEY);
+        assertArrayEquals(rawTarget, bcRecoveredKwp.getEncoded(),
+            "AESWrapKWP (RFC 5649) must recover the exact original, unpadded 20-byte target");
+    }
+
     @Test
     void gcmOutputSizeIsExactNotAConservativeUpperBound() throws Exception {
         // A real bug found live via plan §WS-B's TLS spike: JDK 27's own

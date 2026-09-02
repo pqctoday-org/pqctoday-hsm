@@ -569,3 +569,99 @@ pub(crate) fn setup_receiver_and_export(
 
 #[allow(unused)]
 pub(crate) const HASH_TYPE: HashType = HashType::Sha2_256;
+
+// ── HSM-vs-software HPKE routing boundary ────────────────────────────────────
+//
+// `select()` above is the ONLY gate deciding whether an `HpkeConfig` gets its
+// private key material (and every intermediate secret) run through the token,
+// or falls all the way through to `crypto.rs`'s `mk_hpke` — a fully
+// independent, fully spec-correct, entirely in-process `hpke-rs`
+// (RustCrypto backend) implementation with zero HSM involvement.
+//
+// This boundary is easy to shift by accident (a `Suite` typo, a dropped
+// match arm) with nothing else in this crate's test suite noticing: a full
+// MLS group round trip (`tests/openmls_contract.rs`) succeeds either way,
+// because `mk_hpke` is not a stub — it is a real HPKE implementation, just
+// not one that touches the token. These tests pin the boundary explicitly,
+// per `HpkeConfig`, for every ciphersuite this crate's own
+// `supported_ciphersuites()` declares — so it becomes a reviewed, deliberate
+// change rather than a silent one in either direction. See
+// `docs/gap-analysis-kmip-cacp-pkcs11-coverage-2026-08-30.md` ("Phase 2.1")
+// for the tracked follow-on to close the two `is_none()` cases below.
+#[cfg(test)]
+mod hsm_routing_boundary_tests {
+    use super::select;
+    use openmls_traits::types::{
+        HpkeAeadType as Aead, HpkeConfig, HpkeKdfType as Kdf, HpkeKemType as Kem,
+    };
+
+    /// `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519` — the suite every
+    /// `hpke_*` KAT/round-trip test in `tests/integration.rs` exercises.
+    #[test]
+    fn suite1_dhkem_x25519_aes128gcm_routes_through_hsm() {
+        let cfg = HpkeConfig(Kem::DhKem25519, Kdf::HkdfSha256, Aead::AesGcm128);
+        assert!(
+            select(&cfg).is_some(),
+            "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519's HPKE config must select \
+             the HSM-backed Suite — this is the one config every existing HPKE KAT \
+             test assumes is HSM-resident"
+        );
+    }
+
+    /// `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519` — the post-quantum
+    /// suite `tests/openmls_contract.rs::mls_group_roundtrip_xwing_suite`
+    /// and `tests/xwing_rust_engine.rs` exercise.
+    #[test]
+    fn xwing_suite_routes_through_hsm() {
+        let cfg = HpkeConfig(Kem::XWingKemDraft6, Kdf::HkdfSha256, Aead::ChaCha20Poly1305);
+        assert!(
+            select(&cfg).is_some(),
+            "MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519's HPKE config must select \
+             the HSM-backed Suite"
+        );
+    }
+
+    /// `MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519` ("suite 3") is
+    /// declared in `supported_ciphersuites()`, and its record-layer AEAD
+    /// genuinely runs on the HSM (`self.ops.chacha20_poly1305` —
+    /// `tests/openmls_contract.rs::mls_group_roundtrip_suite3_chacha20poly1305`
+    /// proves that for Application/Handshake messages). Its HPKE config is
+    /// NOT one of the two entries `select()` matches — only the
+    /// `AesGcm128` pairing exists for `DhKem25519` — so the private HPKE
+    /// key used for this suite's Welcome-message `GroupSecrets` encryption
+    /// and TreeKEM commit path (RFC 9420 §5.4/§7.9) never touches the
+    /// token, unlike the record-layer key. Asserted explicitly so this is
+    /// a pinned, intentional result, not a fact nothing else would catch.
+    #[test]
+    fn suite3_dhkem_x25519_chacha20poly1305_hpke_is_software_only() {
+        let cfg = HpkeConfig(Kem::DhKem25519, Kdf::HkdfSha256, Aead::ChaCha20Poly1305);
+        assert!(
+            select(&cfg).is_none(),
+            "suite 3's HPKE config unexpectedly selected an HSM-backed Suite — if \
+             ChaCha20Poly1305 support was intentionally added for DhKem25519, update \
+             this test (and the KMIP/CACP gap-analysis Phase 2.1 note) to match"
+        );
+    }
+
+    /// `MLS_128_DHKEMP256_AES128GCM_SHA256_P256` is declared in
+    /// `supported_ciphersuites()` and accepted by `supports()`, but
+    /// `select()` has no `DhKemP256` arm at all — its HPKE, including the
+    /// private key used for Welcome-message `GroupSecrets` encryption and
+    /// the TreeKEM commit path, runs entirely through `crypto.rs`'s
+    /// `mk_hpke` software fallback. No private HPKE key material for this
+    /// ciphersuite ever touches the token, and (unlike suite 3 above)
+    /// there is no HSM-backed operation anywhere in this suite's HPKE path
+    /// at all — not even the record layer, since AesGcm128 there also
+    /// still runs through `self.ops.aead_encrypt`/`_decrypt`, which IS
+    /// HSM-backed; only the HPKE construction itself is software-only.
+    #[test]
+    fn p256_suite_hpke_is_software_only() {
+        let cfg = HpkeConfig(Kem::DhKemP256, Kdf::HkdfSha256, Aead::AesGcm128);
+        assert!(
+            select(&cfg).is_none(),
+            "P-256 suite's HPKE config unexpectedly selected an HSM-backed Suite — if \
+             DhKemP256 support was added to hpke.rs, update this test and the P-256 \
+             coverage note in tests/openmls_contract.rs together"
+        );
+    }
+}

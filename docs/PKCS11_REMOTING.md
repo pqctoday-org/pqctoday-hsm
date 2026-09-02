@@ -207,7 +207,10 @@ representative slice, this one exposes essentially the whole engine.
 **Coverage is tracked as a live, checked artifact, not prose**:
 
 - `remoting/coverage_ledger.json` — one row per category in
-  `cpp_compliance_report.json` (63 categories), each with a disposition
+  `cpp_compliance_report.json`, plus vendor-only categories with no C++
+  analogue (e.g. `SplitKey`) — 66 rows total as of 2026-09-01 (count
+  corrected; this doc previously said 63, stale since the G2 Split Key
+  workstream), each with a disposition
   (`RPC` / `N/A-local` / `N/A-engine` / `SUITE-GAP`), the test case(s)
   that exercise it, and why.
 - `remoting/REMOTE_P11_V32_COVERAGE.md` — generated from the ledger via
@@ -220,8 +223,10 @@ representative slice, this one exposes essentially the whole engine.
   "remoting gRPC+REST services + three-transport parity" step.
 
 As of RW-T's coverage-ledger audit (2026-08-26, after RW5): **99 of 104
-`pkcs11f.h` functions are live RPCs** (61 of 63 compliance categories
-dispositioned `RPC`; 2 are `N/A-local` — Fork's RNG-divergence intent, and
+`pkcs11f.h` functions are live RPCs** (64 of 66 compliance categories
+dispositioned `RPC` as of 2026-09-01 — count corrected, up from 63/61 after
+later same-day ledger growth (G2's `SplitKey` vendor category, G3/G4); 2 are
+`N/A-local` — Fork's RNG-divergence intent, and
 `Init`'s `C_Initialize`/`C_Finalize` server lifecycle). The remaining 5
 functions (`C_Initialize`, `C_Finalize`, `C_GetFunctionList`,
 `C_GetInterface`, `C_GetInterfaceList`) are all deliberately N/A-local —

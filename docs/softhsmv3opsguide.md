@@ -125,6 +125,13 @@ Build it from the repo rather than pulling the upstream package.
 
 ### 3.1 Build and install the vendored provider
 
+If you built the token itself via this repo's normal native build
+(`cmake .. && make`, root `README.md`'s "Building (Native)" section), you
+already have a complete provider at
+`build/src/vendor/pkcs11-provider/pkcs11-provider.so` — the CMake build
+wires this provider in unconditionally. The steps below are only for
+installing it standalone/system-wide, independent of that build tree:
+
 ```bash
 cd src/vendor/pkcs11-provider
 meson setup build
@@ -138,6 +145,12 @@ If OpenSSL is installed to a non‑system prefix, override the module directory:
 meson setup build -Dopenssl_modulesdir=/opt/openssl-3.5/lib/ossl-modules
 ninja -C build install
 ```
+
+**Known gap:** `src/meson.build`'s source list currently omits `mac.c`,
+`chacha.c`, and `sig/hss.c` (the CMake build above already has all three),
+so a provider built via this standalone path will fail to load rather than
+just missing EVP_MAC/ChaCha20/HSS support — see
+`src/vendor/pkcs11-provider/BUILD.md`.
 
 ### 3.2 Update `openssl.cnf`
 
@@ -259,24 +272,35 @@ connections {
 
 ## 5. Java JCE Integration (Hyperledger Besu / JCA Apps)
 
-The `JavaJCE/` module bridges standard JCA calls (`Signature`, `KeyAgreement`)
-to softhsmv3 PKCS#11 v3.2, because the stock SunPKCS11 provider does not map
-`"ML-DSA-65"` to `CKM_ML_DSA` (0x1d) on its own. See
-`JavaJCE/JavaJCESofthsmv3.md` for the build and the exact provider class name.
+The `JavaJCE/` module (`com.pqctoday.hsm.jce.SoftHSMv3Provider`, Maven-built,
+FFM-based via `java.lang.foreign` — no JNI) bridges standard JCA/JCE calls
+(`Signature`, `KeyPairGenerator`, `KEM`, `Cipher`, `KeyAgreement`, `KeyStore`,
+etc.) to softhsmv3's PKCS#11 v3.2 engine. See `JavaJCE/README.md` for the full
+build steps, algorithm coverage table, and known limitations. (An earlier
+`JavaJCE/` module under a different package/class name never actually
+worked — see `CHANGELOG.md` — and was replaced outright by this one; nothing
+in this section describes that removed module.)
 
 ### Deployment
 
 ```java
-Security.addProvider(new org.softhsmv3.jce.SoftHSMJCEProvider());
+Security.addProvider(new com.pqctoday.hsm.jce.SoftHSMv3Provider());
+// PKCS11_MODULE / PKCS11_PIN env vars select the module + PIN, or construct
+// explicitly: new SoftHSMv3Provider("/usr/local/lib/softhsm/libsofthsmv3.so", "1234")
 ```
 
-After registration, `Signature.getInstance("ML-DSA-65")` and
-`KeyAgreement.getInstance("ML-KEM-768")` route through `libsofthsmv3.so`.
+After registration, `Signature.getInstance("ML-DSA-65", provider)` routes
+through `libsofthsmv3.so`. ML-KEM is exposed via the `KEM` API
+(`KEM.getInstance("ML-KEM-768", provider)`, JEP 452) — the provider's
+`KeyAgreement` service is registered for classical ECDH only, not ML-KEM.
 
 ### Key material for JCA
 
-Keys generated via `pkcs11-tool` against the softhsmv3 token are visible to the
-JCE layer:
+Keys can be generated on-token directly through the provider's own
+`KeyPairGenerator` (private-key import is refused by design — FIPS 140-3 L3
+keys are generated on-token, never brought in), or provisioned out-of-band
+with `pkcs11-tool` and then reached through the provider's `"PKCS11-SoftHSMv3"`
+`KeyStore` service:
 
 ```bash
 pkcs11-tool --module /usr/local/lib/softhsm/libsofthsmv3.so \

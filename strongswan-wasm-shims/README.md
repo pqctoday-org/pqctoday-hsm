@@ -15,8 +15,9 @@ effectively empty, so shipping them alongside the core tree is safe.
 | --- | --- | --- |
 | `socket_wasm.c`/`.h` | Replaces the POSIX UDP socket plugin with a SharedArrayBuffer-backed transport. Implements the `socket_t` interface (send/receive/get_port/supported_families/destroy). | `socket_wasm_create`, `wasm_socket_destroy`, `wasm_net_set_sab`, and the EM_JS env imports `wasm_net_receive`, `wasm_net_send`. |
 | `wasm_hsm_init.c` | softhsmv3 static-link token initializer. Opens a session against two slots (`charon-left`, `charon-right`), runs `C_InitToken`/`C_InitPIN`/`C_GenerateKeyPair`. | `wasm_hsm_init(alg_type, slot0_bits, slot1_bits)` |
-| `wasm_backend.c` | C-level config backend that registers a single `peer_cfg_t` + `ike_cfg_t` + `child_cfg_t` and a PSK shared key (from `WASM_PSK` env var). Also holds the proposal-mode selector (classical / pure-pqc / hybrid). | `wasm_setup_config`, `wasm_get_peer_by_name`, `wasm_create_peer_enum`, `wasm_create_ike_enum`, `wasm_initiate`, `wasm_set_proposal_mode`. |
-| `pkcs11_wasm_rpc.c` | PKCS#11 function-table wrappers. Provides both a pass-through wrapper and an RPC-mode wrapper that (will) forward calls to a softhsmv3 instance on the main thread over a SAB channel. Also declares the EM_JS imports the baseline WASM expects: `pkcs11_rpc_call`, `pkcs11_sab_wi32`, `pkcs11_sab_ri32`, `pkcs11_sab_read`, `pkcs11_sab_write`. | `pkcs11_wasm_wrap_function_list`, `pkcs11_wasm_rpc_function_list`, `pkcs11_set_rpc_mode`. |
+| `wasm_backend.c` | C-level config backend that registers a single `peer_cfg_t` + `ike_cfg_t` + `child_cfg_t` and a PSK shared key (from `WASM_PSK` env var) or an ML-DSA cert (`wasm_set_auth_mode(1)`). Holds the proposal-mode selector (classical / pure-pqc / hybrid, plus an opt-in `WASM_IKE_PROPOSAL` override string), enables RFC 7383 fragmentation by default (`WASM_FRAGMENTATION=no` to opt out), and — via `ke1_ecp256`-style proposal strings — RFC 9370 Additional Key Exchange rounds over the real IKE_INTERMEDIATE task. `WASM_CHILDSA=1` switches the IKE config from `CHILDLESS_FORCE` to negotiating a real CHILD_SA against `kernel_wasm.c` below. | `wasm_setup_config`, `wasm_get_peer_by_name`, `wasm_create_peer_enum`, `wasm_create_ike_enum`, `wasm_initiate`, `wasm_set_proposal_mode`, `wasm_set_auth_mode`. |
+| `kernel_wasm.c` | Tier A stub `kernel_ipsec_t` backend (added 2026-06-12) — the browser has no real kernel IPsec stack, so this hands out sequential SPIs and no-ops `add_sa`/`add_policy`/etc., letting a genuine CHILD_SA (real proposals, nonces, traffic selectors, KEYMAT) negotiate over the wire without a SADB/SPD to install into. Opt-in via `WASM_CHILDSA=1`. | `kernel_wasm_ipsec_create`. |
+| `pkcs11_wasm_rpc.c` | PKCS#11 function-table wrappers. `pkcs11_wasm_wrap_function_list` is the real path: a traced pass-through to the worker's own statically-linked softhsmv3. `pkcs11_wasm_rpc_function_list` is designed as a forward-to-main-thread-over-SAB path (its EM_JS imports — `pkcs11_rpc_call`, `pkcs11_sab_wi32`, `pkcs11_sab_ri32`, `pkcs11_sab_read`, `pkcs11_sab_write` — are declared) but is currently just an alias to the pass-through wrapper (no real cross-worker RPC yet — see the file's own comment and dual-auth's workaround below). | `pkcs11_wasm_wrap_function_list`, `pkcs11_wasm_rpc_function_list`, `pkcs11_set_rpc_mode`. |
 
 ## C↔JS ABI
 
@@ -66,9 +67,9 @@ The patch `strongswan-6.0.5-wasm.patch` does the following:
    included under `--enable-socket-wasm`.
 2. Registers `socket_wasm_create` in `src/libcharon/daemon.c` via the
    plugin-static-features hook, under `#ifdef __EMSCRIPTEN__`.
-3. Adds `wasm_hsm_init.c`, `wasm_backend.c`, `pkcs11_wasm_rpc.c` to
-   `src/charon/Makefile.am`'s `charon_SOURCES` — they compile directly
-   into the `charon` binary alongside `charon.c`.
+3. Adds `wasm_hsm_init.c`, `wasm_backend.c`, `pkcs11_wasm_rpc.c`,
+   `kernel_wasm.c` to `src/charon/Makefile.am`'s `charon_SOURCES` — they
+   compile directly into the `charon` binary alongside `charon.c`.
 4. In `src/charon/charon.c`, calls `wasm_setup_config(0)` after
    `charon->initialize()` and `wasm_initiate(0)` when `--role initiator`
    is passed on argv.

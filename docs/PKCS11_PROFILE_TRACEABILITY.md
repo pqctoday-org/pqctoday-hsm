@@ -1,5 +1,60 @@
 # PKCS#11 v3.2 Profile Traceability
 
+> **Staleness note (added 2026-09-01).** This matrix's citations were
+> confirmed against commit `a158095` (2026-08-23). Since then:
+> `rust/src/ffi.rs` has taken **27 commits** and grown from 18,233 to 21,737
+> lines — every line number this document cites in that file has drifted
+> (e.g. §3 condition 4's `profile_object_ffi_tests` module, cited here at
+> `rust/src/ffi.rs:15981-16088`, is now at `rust/src/ffi.rs:18997-19125`,
+> confirmed by direct grep — `baseline_profile_object_is_public_and_findable`,
+> `client_cannot_create_profile_object`, and `profile_object_is_fully_read_only`
+> still exist under those names, just at different lines).
+> `p11_v32_compliance_test.cpp` has taken 3 commits (10,482 → 10,814 lines);
+> `rust/src/state.rs` 4 commits (1,614 → 1,780 lines);
+> `src/lib/SoftHSM_objects.cpp` 2 commits (1,364 → 1,447 lines);
+> `rust/test_p11_conformance.js` 3 commits (3,226 → 3,396 lines); and
+> `tests/differential/scenarios.inc` + `tests/differential/exceptions.json`
+> 4 commits combined. This matrix has not been regenerated to reflect any
+> of this drift.
+>
+> **One of those changes is substantive, not line drift, and directly
+> contradicts §1 and §4 below.** Commit `dea9bfa1` ("WS-11 v3.2 conformance
+> gaps — token-wipe, profile claims, RESTORE_KEY flag, C++ find-order
+> (#188)", 2026-08-29 — six days after this matrix's `a158095` pin) made
+> both engines claim profiles this document says they don't, or doesn't
+> cover at all:
+> - **Rust now also claims `CKP_EXTENDED_PROVIDER`**
+>   (`rust/src/state.rs`'s `supported_profiles()`, currently lines 268-275),
+>   directly contradicting §1's table ("Rust... **Not** claimed") and §4's
+>   header ("Extended Provider (§5.3) — C++ engine only") and opening line
+>   ("Rust does not claim this profile"). Verified: `git show
+>   a158095:rust/src/state.rs` shows `init_profile_objects()` publishing only
+>   `CKP_BASELINE_PROVIDER` at the pin commit; the current file's
+>   `supported_profiles()` returns `[CKP_BASELINE_PROVIDER,
+>   CKP_EXTENDED_PROVIDER, CKP_AUTHENTICATION_TOKEN,
+>   CKP_PUBLIC_CERTIFICATES_TOKEN]`, and `init_profile_objects()` genuinely
+>   publishes one `CKO_PROFILE` object per entry at slot creation — not
+>   just an unused constant.
+> - **Both engines now additionally claim Authentication Token (§5.4) and
+>   Public Certificates Token (§5.5)** — confirmed the same way for the C++
+>   engine's `computeSupportedProfiles()` (`src/lib/SoftHSM_objects.cpp`,
+>   currently lines 1012-1076, was lines 949-991 at the pin commit with no
+>   such claims). Neither profile is discussed anywhere in this document;
+>   §5.4 and §5.5 have zero traceability rows.
+>
+> None of these three claims (Rust's new Extended Provider claim, and both
+> engines' new Authentication Token / Public Certificates Token claims)
+> have any test-traceability coverage in this document. Regenerating the
+> matrix for them is out of scope for this maintenance pass — flagged here
+> rather than left silently looking current.
+>
+> Checked and found NOT relevant to this specific profile-*conditions*
+> matrix: the new Rust-only `CKM_HPKE` mechanism family (added 2026-09-01)
+> and the `remoting/` gRPC+REST service. Every profile in scope here
+> specifies "no mechanisms" (condition 6/7), so a new mechanism does not
+> change any claim this document traces, and `remoting/` wraps the engines
+> rather than adding a third profile-claiming implementation.
+
 **Purpose.** This document maps every PKCS#11 v3.2 profile condition either
 engine in this repository actually *claims* to satisfy — the C++ engine
 (`softhsmv3`) and the Rust engine (`softhsmrustv3`) — to the specific,

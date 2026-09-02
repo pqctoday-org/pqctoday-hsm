@@ -11,6 +11,18 @@ network dependency.
 See `docs/implementation-plan-jca-remaining-gaps-2026-08-25.md` §7
 (WS-E) for the full design record.
 
+This module is a JCA/JCE-API-shaped **client** of the `pqc-grpc-pkcs11`
+server built from [`remoting/`](../remoting/) — it is not `remoting/`
+itself. `remoting/` exposes the engine's PKCS#11 surface directly over
+both gRPC and REST, raw `C_*` semantics and all (99/104 `pkcs11f.h`
+functions; see
+[`remoting/REMOTE_P11_V32_COVERAGE.md`](../remoting/REMOTE_P11_V32_COVERAGE.md)),
+for any caller that wants that shape. This module instead wraps only the
+gRPC side of that same service in a narrow, JCA-native surface —
+`KeyPairGenerator`, `Signature`, `KEM` — for the algorithms in Coverage
+below, so a JVM caller can use it exactly like any other `java.security`
+provider without touching PKCS#11 concepts or gRPC stubs directly.
+
 ## Coverage
 
 Narrower than `JavaJCE/` by real proto contract, not omission — exactly

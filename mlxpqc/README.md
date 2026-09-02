@@ -20,11 +20,15 @@ acceleration principles from the CUDA GPU-PQC literature to Apple Silicon.
 
 ## Status
 
-Early-stage. The forward NTT Metal kernel for ML-DSA is implemented and
-**validated bit-exact** vs the pq-crystals reference (2026-06-13), beating all
-CPU cores 8–31× for batched NTT. INTT, Montgomery reduction, SHAKE, and
-rejection sampling are TODO — see the live checklist in
-[`mldsa/README.md`](mldsa/README.md).
+The full ML-DSA-65 pipeline (keygen → sign → verify, plus every supporting
+kernel — NTT/INTT, Montgomery-domain matvec, SHAKE, rejection sampling,
+decompose/hint/challenge/ExpandMask) is implemented in Metal and
+**validated bit-exact** against the pq-crystals reference — re-confirmed by
+re-running every kernel binary on 2026-09-01 (Apple M5 Max), all PASS.
+Remaining open items: validation against NIST ACVP vectors / the corecrypto
+oracle (so far only checked against the pq-crystals reference), a
+constant-time (ISA-level) review, and re-running the crossover benchmarks on
+M4 Pro. See the detailed checklist in [`mldsa/README.md`](mldsa/README.md).
 
 ## Requirements
 

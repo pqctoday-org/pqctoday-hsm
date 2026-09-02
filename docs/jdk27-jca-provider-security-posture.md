@@ -5,7 +5,48 @@ Companion to
 (the full build record — every decision's rationale and live-verification
 result lives there; this document is the section-by-section summary the
 plan's §6 called for). Written 2026-08-25, against the implementation as
-of commit `233aa3e`.
+of commit `233aa3e`; its Area 8 row and "Bottom line" were updated the
+same day by commit `83092a7b` (WS-C, native-memory zeroization) — this
+document's own last edit, so its actual as-of point is `83092a7b`, not
+`233aa3e` (see the staleness note below for what has changed since).
+
+> **Staleness note (added 2026-09-01).** Since `83092a7b` (this document's
+> actual last-edit point, 2026-08-25 08:32), **4 further commits** have
+> touched `JavaJCE/`, in order: `82143b31` (same day, WS-D — SHA-3 PSS, GCM
+> IV uniqueness test, pre-hash ML-DSA/SLH-DSA disposition), then on
+> 2026-08-30: `e5f4e1b1` (`CKM_AES_KEY_WRAP_KWP`), `a39fc95c` (7 mechanism
+> gaps — `CKM_*_HMAC_GENERAL`, `CKM_AES_CCM`, standalone `CKM_AES_GMAC`,
+> `CKM_SP800_108_DOUBLE_PIPELINE_KDF`, `CKM_ECDH1_COFACTOR_DERIVE`
+> ("ECDHC"), `CKM_ML_DSA_EXTERNAL_MU`, EdDSA context/prehash), and
+> `e36ddd61` (AES-XTS, AES-OFB/CFB1/CFB8/CFB128, SHA-512/224+256 digests
+> and HMACs, signature-algorithm gaps). This document has not been
+> re-verified against any of these 4 commits. (Three more commits —
+> `d77382dd`, `0ec9ea86`, `3948594c` — landed between `233aa3e` and
+> `83092a7b`, i.e. before this document's own last edit, so their state is
+> already the state this document describes, even though none is narrated
+> by name.)
+>
+> Checked directly against the current source and found **still accurate**:
+> Area 1's exclusion list — none of the newly-registered mechanisms above
+> are on the excluded list (SHA-1/MD5/RIPEMD-160/Keccak-256, raw RSA as a
+> cipher, ChaCha20, AES-ECB, X25519/X448, BIP32, standalone
+> CONCATENATE/SHAKE-256-KDF, HSS/XMSS/XMSS-MT); `SoftHSMv3Provider.java`
+> still contains no registration for any of them (grepped directly), and
+> commit `a39fc95c`'s own message reaffirms the discipline live ("HmacSHA1General
+> deliberately NOT added — this provider's FIPS 140-3 L3 policy excludes
+> SHA-1 HMAC everywhere"). Area 3's claim (`CKU_USER` only, no SO role) —
+> no SO-login code exists anywhere under `JavaJCE/src/main/java` (grepped
+> directly; the only `CKU_SO` hit is a comment reconfirming its absence).
+>
+> **Not independently re-verified, flagged as likely stale:** Area 10's
+> "every change ships with a real, passing test suite (198/198 as of this
+> document)" figure. This environment has no `mvn`/`java` available to
+> re-run the suite, but the repository's own commit messages (self-reported
+> `mvn test` results, not independently reproduced here) show the count
+> climbing well past 198 since: `d77382dd` 200/200, `0ec9ea86` and
+> `83092a7b` 203/203, `82143b31` 208/208, `a39fc95c` 242/242, `e36ddd61`
+> 272/272 (the most recent one recorded, 2026-08-30). The true current
+> figure was not verified here — only that 198 is no longer it.
 
 ## Scope and what this document is NOT
 

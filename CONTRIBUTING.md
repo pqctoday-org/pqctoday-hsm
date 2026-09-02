@@ -24,7 +24,7 @@ pre-push hook that enforces the local gate described in step 4 below.
 | Tool | Minimum version |
 |------|----------------|
 | CMake | 3.16 |
-| OpenSSL | 3.5.0 (native + WASM builds, enforced by `CMakeLists.txt` line 93; also linked by `p11_v32_compliance_test` as an independent oracle) |
+| OpenSSL | 3.5.0 (native + WASM builds, enforced by `CMakeLists.txt` line 97; also linked by `p11_v32_compliance_test` as an independent oracle) |
 | Emscripten | 3.1.x (WASM build) |
 | C++ compiler | C++17 (GCC 10+, Clang 14+, MSVC 2022+) |
 | CppUnit | 1.15+ (only needed for the legacy upstream test suite under `src/lib/*/test/`) |
@@ -39,7 +39,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTS=ON \
 cmake --build build -j$(nproc)
 ```
 
-A full `cmake --build build` with `BUILD_TESTS=ON` builds everything: the shared library (`libsofthsmv3.dylib`), the modern `p11_v32_compliance_test` binary, and the legacy CppUnit-based upstream test targets under `src/lib/*/test/`. Earlier in 2026-06-01 the legacy targets failed with `fatal error: 'cppunit/extensions/HelperMacros.h' file not found` because the `CPPUNIT_INCLUDES` variable was not propagated to the per-sub-target `INCLUDE_DIRS` lists; that was fixed by commit `15ec74d` and CI now builds every target cleanly.
+A full `cmake --build build` with `BUILD_TESTS=ON` builds everything: the shared library (`libsofthsmv3.dylib`), the modern `p11_v32_compliance_test` binary, and the legacy CppUnit-based upstream test targets under `src/lib/*/test/`. Earlier in 2026-06-01 the legacy targets failed with `fatal error: 'cppunit/extensions/HelperMacros.h' file not found` because the `CPPUNIT_INCLUDES` variable was not propagated to the per-sub-target `INCLUDE_DIRS` lists; that has since been fixed (`CPPUNIT_INCLUDES` is now included in every sub-target's `INCLUDE_DIRS`, e.g. `src/lib/crypto/test/CMakeLists.txt`) and CI now builds every target cleanly.
 
 ### Compliance-test-only workflow (recommended)
 
@@ -59,7 +59,7 @@ cmake --build build --target softhsmv3 p11_v32_compliance_test -j$(nproc)
 ./build/p11_v32_compliance_test --engine ./build/src/lib/libsofthsmv3.dylib --category kcv
 ```
 
-Supported `--category` values: `all`, `init`, `discovery`, `attr`, `pqc-kem`, `pqc-dsa`, `pqc-slh`, `v32-adv`, `classical`, `negative`, `fips`, `session`, `cka-id`, `authwrap`, `kcv`. The `kcv` category covers PKCS#11 v3.2 §4.11 mandatory KCV population across `C_GenerateKey`, `C_UnwrapKey`, and `C_DeriveKey` (HKDF) with byte-exact comparison against an independent OpenSSL oracle.
+A representative subset of `--category` values (the suite has grown well past this list — run `./build/p11_v32_compliance_test --help` for the current full set, which also includes dated one-off categories like `gap-2026-08-24`): `all`, `discovery`, `attr`, `pqc-kem`, `pqc-dsa`, `pqc-slh`, `v32-adv`, `classical`, `negative`, `fips`, `session`, `cka-id`, `authwrap`, `kcv`. The `kcv` category covers PKCS#11 v3.2 §4.11 mandatory KCV population across `C_GenerateKey`, `C_UnwrapKey`, and `C_DeriveKey` (HKDF) with byte-exact comparison against an independent OpenSSL oracle.
 
 Reports land in `compliance_report.json` and `compliance_report.md`.
 
@@ -129,11 +129,12 @@ cmake --build build-asan --target softhsmv3 p11_v32_compliance_test -j$(nproc)
 
 ## Roadmap
 
-Feature work follows the phase roadmap tracked in GitHub Issues:
-
-- Phase 0–6 are described in [README.md](README.md)
-- New PQC algorithm support lands in Phase 2+
-- WASM-specific changes go in Phase 4–5
+The original PKCS#11-engine roadmap (Phases 0–19, all complete, tracked
+against GitHub Issues) is described in [README.md](README.md) and closed
+out at v0.4.24. Feature work since then — KMIP 3.0, CACP, hybrid KEMs, the
+Rust engine, and everything currently in progress — is tracked directly in
+[CHANGELOG.md](CHANGELOG.md) rather than by phase number; see its
+`[Unreleased]` section for what's currently active.
 
 ## License
 

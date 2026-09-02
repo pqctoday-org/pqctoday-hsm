@@ -100,10 +100,13 @@ cargo test --release --test integration -- --test-threads=1
 
 `--test-threads=1` is required: softhsmv3 doesn't support multiple
 concurrent `C_Initialize` calls in the same process, and each test spins
-up its own per-test token in a tmpdir. The integration suite (9 tests)
-covers SHA-256 / HMAC / HKDF (RFC 5869 §A.1 KATs), AES-128-GCM with tamper
-detection, Ed25519 and P-256 sign/verify, RNG, HPKE-X25519, and ciphersuite
-enumeration — all run end-to-end against a real softhsmv3 native module.
+up its own per-test token in a tmpdir. The integration suite (27 tests)
+covers SHA-256/384/512, HMAC, HKDF (RFC 5869 §A.1 KATs, incl. cross-impl
+checks for SHA-384/512), AES-128/256-GCM (with tamper detection and AAD
+cross-impl checks), Ed25519 and ECDSA P-256 sign/verify (incl. RFC 8032/
+RFC 6979 KATs), RNG, HPKE-X25519 (RFC 9180 §A.1.1), the X-Wing combiner,
+and ciphersuite enumeration — all run end-to-end against a real softhsmv3
+native module.
 
 ## Roadmap
 
@@ -195,22 +198,29 @@ fully in-browser.
     bound `$rng` as `&mut T` but with an *immutable binding*, breaking
     15 `&mut rng` re-borrows on wasm32 (E0596). Rebound through
     `let mut $rng = _acvp` to make the binding mutable. Native untouched.
-- ✅ **Architectural viability proven** ([`wasm-smoke/`](wasm-smoke/),
-  this session): a new workspace member compiles softhsmrustv3 into a
-  wasm32 module and drives its `C_*` PKCS#11 entry points from another
-  Rust crate. Two `#[wasm_bindgen_test]`s prove it works:
-  - `sha256_known_answer` — SHA-256("abc") via `C_DigestInit` +
-    `C_Digest` in wasm32 matches the FIPS 180-4 §B.1 KAT byte-exactly.
-  - `random_returns_nonzero_bytes` — `C_GenerateRandom` produces
-    non-trivial entropy under the wasm32 runtime.
+- ✅ **Architectural viability proven** ([`wasm-smoke/`](wasm-smoke/)):
+  a workspace member compiles softhsmrustv3 into a wasm32 module and
+  drives its `C_*` PKCS#11 entry points from another Rust crate. Grew from
+  the original 2 `#[wasm_bindgen_test]`s to 8, covering SHA-256
+  (`C_DigestInit`/`C_Digest`, FIPS 180-4 §B.1 KAT), HMAC-SHA256 (RFC 4231
+  TC1), `C_GenerateRandom` non-triviality, Ed25519 sign/verify round-trip
+  plus a negative (wrong-message-rejected) case, AES-128-GCM encrypt and
+  decrypt (NIST GCM spec TC3), and `CKO_DATA` object create/find/read/
+  destroy lifecycle — all in wasm32.
   Run with `wasm-pack test --node wasm-smoke` (requires Node 20+;
   softhsmrustv3 also gained an `#![allow(unsafe_op_in_unsafe_fn)]`
   to compile as a dependency under Rust 2024 edition).
 - ✅ **In-crate architecture refactor complete**: `PkcsOps` trait in
-  [`lib/src/backend.rs`](lib/src/backend.rs) abstracts the 10-method
-  PKCS#11 surface (`digest`, `hmac`, `hkdf_extract`, `hkdf_expand`,
-  `aead_encrypt`, `aead_decrypt`, `sign`, `verify`, `generate_key_pair`,
-  `random`). `CryptokiBackend` wraps `HsmSession` for native targets;
+  [`lib/src/backend.rs`](lib/src/backend.rs) abstracts the PKCS#11 (plus
+  softhsmrustv3-native, for the operations `cryptoki` can't express)
+  surface — `random`, `hash`, `hmac`, `aead_encrypt`/`aead_decrypt`,
+  `shake256`, `xwing_combine`, `chacha20_poly1305`,
+  `ml_kem_768_keygen_from_seed`/`ml_kem_decapsulate`/
+  `ml_kem_encapsulate_to`, `ecdh_x25519`,
+  `signature_key_gen`/`sign`/`verify_signature`, and
+  `snapshot_write`/`snapshot_read` (17 methods — grew from the original 10
+  when Phase 4's X-Wing work added the KEM/combiner/AEAD methods).
+  `CryptokiBackend` wraps `HsmSession` for native targets;
   `WasmPkcs11Backend` drives softhsmrustv3 `C_*` calls directly on
   `wasm32-unknown-unknown`. All call sites in `crypto.rs`, `hpke.rs`,
   `signer.rs`, and `persistence.rs` migrated to `Arc<dyn PkcsOps>`.
@@ -236,9 +246,9 @@ end-to-end against the canonical `openmls` library:
   named `semantic_equivalence_vs_rustcrypto`.
 - **[`lib/tests/rfc9420_kats.rs`](lib/tests/rfc9420_kats.rs)** — RFC
   9420 §8 key-schedule KAT against IETF-published vectors. Walks
-  10 epochs across 2 ciphersuites through our HSM-routed HKDF-Extract
-  + HKDF-Expand under the MLS `KDFLabel` encoding; every `welcome_secret`
-  matches byte-exactly.
+  15 epochs across 3 ciphersuites (grew from 10/2 once suite 3 was
+  declared) through our HSM-routed HKDF-Extract + HKDF-Expand under the
+  MLS `KDFLabel` encoding; every `welcome_secret` matches byte-exactly.
 - **[`interop/`](interop/)** — `tonic`-based gRPC server speaking the
   IETF `mls_client.MLSClient` contract from
   [`mlswg/mls-implementations`](https://github.com/mlswg/mls-implementations).
@@ -285,8 +295,8 @@ the PKCS#11-routed primitives satisfy the MLS sub-protocol math:
 
 | Vector file | What it exercises | Tests |
 | --- | --- | --- |
-| `key-schedule.json` | HKDF-Extract/Expand + HMAC over 10 epochs across 2 ciphersuites; `welcome_secret` asserted byte-exact | `rfc9420_key_schedule_hkdf_kat` |
-| `treekem.json` | `confirmed_transcript_hash` + `commit_secret` length assertions across 22 vectors / 124 update-paths | `rfc9420_treekem_vectors_structural_kat` |
+| `key-schedule.json` | HKDF-Extract/Expand + HMAC over 15 epochs across 3 ciphersuites; `welcome_secret` asserted byte-exact | `rfc9420_key_schedule_hkdf_kat` |
+| `treekem.json` | `confirmed_transcript_hash` + `commit_secret` length assertions across 33 vectors / 186 update-paths (of 77 total in the file — the rest cover DHKemP384/P521/448 suites still open per Phase 2.1) | `rfc9420_treekem_vectors_structural_kat` |
 
 `transcript-hashes.json` was evaluated but its runner is hard-wired to
 `OpenMlsRustCrypto` and cannot be plugged into our HSM provider — see
@@ -303,6 +313,14 @@ Primitive-layer KATs in the integration suite:
 | Ed25519 verify | RFC 8032 §7.1 | Test 2 |
 | ECDSA P-256 verify | RFC 6979 §A.2.5 | message `"sample"` |
 | HPKE (DhKem25519/SHA256/AES128GCM) full chain | RFC 9180 §A.1.1 | DeriveKeyPair determinism + decap of published ciphertext |
+
+X-Wing itself is verified separately, through the Rust engine directly
+(not via the integration suite above) in
+[`lib/tests/xwing_rust_engine.rs`](lib/tests/xwing_rust_engine.rs): seed
+expansion, encapsulate, and decapsulate against
+`draft-connolly-cfrg-xwing-kem-10`'s own published test vectors, plus a
+ChaCha20-Poly1305 known-answer test and an ML-KEM-768 round-trip check
+(6 tests total).
 
 ### Tier B — in-process cross-validation examples
 
@@ -348,6 +366,19 @@ cargo test --release --test two_process_e2e -- --test-threads=1
 Docker infrastructure for running all four implementations side-by-side lives
 in [`interop/docker/`](interop/docker/). See the `docker-compose.yml` header
 for the pairwise gate matrix and run commands.
+
+**Cross-vendor interop (no Docker)**: [`interop/tests/cross_vendor_mls_rs.rs`](interop/tests/cross_vendor_mls_rs.rs)
+drives `pqctoday-mls-grpc` against a real build of
+[`awslabs/mls-rs`](https://github.com/awslabs/mls-rs)'s own gRPC harness
+over the same IETF protobuf contract. The handshake (`Name` +
+`SupportedCiphersuites` + ciphersuite negotiation) passes end-to-end;
+`welcome_join` in either direction is currently blocked by two
+spec-interpretation differences between openmls and mls-rs (KeyPackage
+leaf-node lifetime range; default-extension-type advertisement) — neither
+is a bug in this provider, and both are documented inline as `#[ignore]`d
+tests with the finding. Skipped automatically unless `$MLS_RS_HARNESS`
+points at a built `harness_client` binary (see the file's module docs for
+the build steps); the rest of the workspace stays green without it.
 
 ### Running everything
 

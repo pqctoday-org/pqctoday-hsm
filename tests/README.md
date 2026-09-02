@@ -1,12 +1,17 @@
 # SoftHSMv3 PKCS#11 v3.2 Algorithm Validation
 
-`pqc_validate` is a standalone C++17 program that exercises every mechanism
-supported by OpenSSL 3.6.0 through the SoftHSMv3 PKCS#11 v3.2 interface.
+This document covers `pqc_validate`, a standalone C++17 program that
+exercises every mechanism supported by OpenSSL 3.6.0 through the native
+SoftHSMv3 PKCS#11 v3.2 interface (built by hand with `g++`, not wired into
+`ctest`). It's one of several test harnesses this directory holds — see
+[Other test harnesses in this directory](#other-test-harnesses-in-this-directory)
+below for the WASM/Node suites `npm test` and `npm run test:acvp` actually
+run, plus the cross-engine differential harness.
 
-Each test performs a **symmetric round-trip** (Sign→Verify, Encrypt→Decrypt,
-Encapsulate→Decapsulate) and includes **negative tamper tests** where
-applicable. Results are written to a dated JSON file that doubles as both an
-ops template and a result store.
+Each `pqc_validate` test performs a **symmetric round-trip** (Sign→Verify,
+Encrypt→Decrypt, Encapsulate→Decapsulate) and includes **negative tamper
+tests** where applicable. Results are written to a dated JSON file that
+doubles as both an ops template and a result store.
 
 ---
 
@@ -174,14 +179,63 @@ supports the fuller matrix below; extend the ops file to reach it.
 
 ---
 
+## Other test harnesses in this directory
+
+`pqc_validate` is native-only. The WASM builds (C++ and Rust engines) are
+exercised by a separate set of Node.js harnesses, run via the package
+scripts in the repo-root `package.json`:
+
+| Command | Runs | What it does |
+|---|---|---|
+| `npm test` | [`smoke-wasm.mjs`](smoke-wasm.mjs) | Full PKCS#11 v3.2 lifecycle smoke test against the C++ WASM module: `C_Initialize` → token init → `C_GenerateKeyPair`(ML-KEM-768) → encapsulate/decapsulate → `C_GenerateKeyPair`(ML-DSA-65) → sign/verify → `C_Finalize`. Requires `wasm/softhsm.{js,wasm}` (`npm run build` first). |
+| `npm run test:acvp` | [`acvp-wasm.mjs`](acvp-wasm.mjs) | 20 ACVP test suites against the C++ and/or Rust WASM engines via raw PKCS#11 calls, using the vectors in [`acvp/`](acvp/) (AES, RSA, ECDSA/EdDSA, HMAC, KMAC, KBKDF/HKDF, LMS, ML-DSA, ML-KEM, SLH-DSA, X25519/X448). `--engine=cpp\|rust\|both`, `--verbose`, `--json`. |
+
+Not wired into `package.json` but present and runnable directly with `node`:
+
+- [`parity-wasm.mjs`](parity-wasm.mjs) — cross-engine (C++ vs Rust WASM)
+  behavioral parity spot-check, via the shared [`helpers.mjs`](helpers.mjs)
+  loader.
+- [`c-get-function-list.mjs`](c-get-function-list.mjs) — Rust-only coverage
+  for `C_GetFunctionList`'s WASM indirect-function-table calling convention
+  (`table.get(idx)`), which every other harness here bypasses by calling
+  named exports directly.
+- [`test-ecdsa-sha512.mjs`](test-ecdsa-sha512.mjs) — focused unit test for
+  `CKM_ECDSA_SHA512` on P-256.
+- [`test_acvp_lms_sigver.py`](test_acvp_lms_sigver.py) — NIST ACVP LMS
+  sigVer vectors against `hss_validate_signature()` directly (bypasses
+  PKCS#11, since `C_CreateObject` doesn't support HSS key import).
+- [`test_raw.cpp`](test_raw.cpp) — minimal raw-OpenSSL SLH-DSA keygen probe,
+  independent of PKCS#11 entirely.
+
+**[`differential/`](differential/README.md)** is a separate, larger harness:
+it drives the C++ and Rust engines through identical call sequences and
+asserts identical observable outcomes wherever the spec mandates one, with
+legal divergences enumerated in `differential/exceptions.json`. Run via
+`./scripts/run-differential-harness.sh` from the repo root — see its own
+README for the full detail (`--list`, `--only`, `--verbose`, `--no-build`).
+
+`tokens/` holds a token directory left behind by a prior test run (not
+committed test fixture data — a `softhsm2-util`-managed slot).
+
 ## Files
 
 ```
 tests/
-├── pqc_validate.cpp          Main validation program
+├── pqc_validate.cpp          Main validation program (this doc's main subject)
 ├── pqc_validate_ops.json     Operations template (shipped) — 15 self-validating
 │                             round-trips + NIST/RFC known-answer vectors; the
 │                             default --ops-file. Extend with more cases as needed.
 ├── json.hpp                  nlohmann/json v3.11.3 (download via curl)
+├── smoke-wasm.mjs            npm test — C++ WASM lifecycle smoke test
+├── acvp-wasm.mjs             npm run test:acvp — 20-suite ACVP harness (C++/Rust)
+├── acvp/                     ACVP JSON test vectors consumed by acvp-wasm.mjs
+├── helpers.mjs                shared WASM engine-loading + PKCS#11 call helpers
+├── parity-wasm.mjs           cross-engine (C++ vs Rust) parity spot-check
+├── c-get-function-list.mjs   Rust WASM function-table C_GetFunctionList coverage
+├── test-ecdsa-sha512.mjs     CKM_ECDSA_SHA512/P-256 unit test
+├── test_acvp_lms_sigver.py   NIST ACVP LMS sigVer vectors (direct, no PKCS#11)
+├── test_raw.cpp              raw-OpenSSL SLH-DSA keygen probe
+├── differential/              cross-engine differential harness — see its own README
+├── tokens/                    leftover token dir from a prior local run
 └── README.md                 This file
 ```
