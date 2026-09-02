@@ -15106,7 +15106,15 @@ mod abi_hygiene_ffi_tests {
 mod b5_live_token_setup {
     use super::*;
 
+    // #[ignore]: this is a fixture GENERATOR, not a correctness check — it
+    // requires SOFTHSMRUST_STATE_FILE to be set and .expect()s it, so under a
+    // plain `cargo test` (which sets no such variable) it panicked and failed
+    // the gate's "rust engine cargo test" step every run. Same idiom this
+    // crate already uses for tests that must be invoked deliberately rather
+    // than swept up by the suite. Run it via the command in the doc comment
+    // above, which passes the variable explicitly.
     #[test]
+    #[ignore = "fixture generator: needs SOFTHSMRUST_STATE_FILE — see the module doc comment for the invocation"]
     fn b5_setup_live_token_state() {
         let path = std::env::var("SOFTHSMRUST_STATE_FILE")
             .expect("set SOFTHSMRUST_STATE_FILE to the desired output path");
