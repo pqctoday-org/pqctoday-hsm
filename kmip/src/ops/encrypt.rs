@@ -688,16 +688,30 @@ fn encrypt_classical(
         placeholder_bytes(&req.uid, &input, b"enc", input.len().max(16))
     };
     // AEAD mechanisms — the shim returns `ciphertext || tag`
-    // (the standard Rust `aead` crate convention). KMIP 3.0 §6.1.21
-    // requires the tag to ride in its own `AuthenticatedEncryptionTag`
-    // field, not tacked onto Data, so we split on the way out. The tag
-    // is `Tag Length` bytes when the request's CryptographicParameters
-    // pin one (NIST SP 800-38D §5.2.1.2 truncation; CS-BC-M-GCM-2 pair
-    // #91 pins a 15-byte tag over empty plaintext), 16 otherwise.
+    // (the standard Rust `aead` crate convention — and CCM's own
+    // hand-rolled `crypto::multipart::ccm_encrypt`/`ccm_decrypt`
+    // deliberately follow the identical convention, confirmed at
+    // `rust/src/crypto/multipart.rs`: `ccm_encrypt` appends the tag to
+    // the ciphertext, `ccm_decrypt` takes `ciphertext_and_tag` and
+    // splits the last `tag_len` bytes off). KMIP 3.0 §6.1.21 requires
+    // the tag to ride in its own `AuthenticatedEncryptionTag` field,
+    // not tacked onto Data, so we split on the way out. The tag is
+    // `Tag Length` bytes when the request's CryptographicParameters pin
+    // one (NIST SP 800-38D §5.2.1.2 truncation; CS-BC-M-GCM-2 pair #91
+    // pins a 15-byte tag over empty plaintext), 16 otherwise — CCM
+    // shares this same default (SP 800-38C: tag ∈ {4,6,8,10,12,14,16}
+    // bytes, default 16, see `native/encrypt.rs::aes_ccm_encrypt`).
+    //
+    // CKM_AES_CCM was added here 2026-09 (KMIP/CACP coverage
+    // gap-analysis item 2.2 follow-up) — previously CCM's tag stayed
+    // embedded in `Data` instead of its own field, a protocol-
+    // conformance gap flagged (not silently patched) when the CCM
+    // round-trip test below was first added.
     let is_aead = matches!(
         mech,
         softhsmrustv3::constants::CKM_AES_GCM
-            | softhsmrustv3::constants::CKM_CHACHA20_POLY1305,
+            | softhsmrustv3::constants::CKM_CHACHA20_POLY1305
+            | softhsmrustv3::constants::CKM_AES_CCM,
     );
     let split_tag = tag_len.unwrap_or(16);
     let (ciphertext, authenticated_encryption_tag) =
@@ -1079,23 +1093,28 @@ mod k6_no_silent_substitution_tests {
     /// level ACVP evidence but no KMIP-op-level test proving `Encrypt`/
     /// `Decrypt` actually round-trip through this crate's own dispatch —
     /// this closes that gap, with real AAD and a tamper-detection check
-    /// (CCM is AEAD; a flipped ciphertext byte MUST fail to decrypt).
+    /// (CCM is AEAD; a flipped tag byte MUST fail to decrypt).
     ///
-    /// Also documents a real, smaller gap found while writing this test,
-    /// not fixed here (flagged, not silently patched): `is_aead` (used to
-    /// split the engine's `ciphertext || tag` into KMIP's separate
+    /// This test originally documented (flagged, not silently patched) a
+    /// real protocol-conformance gap found while writing it: `is_aead`
+    /// (which splits the engine's `ciphertext || tag` into KMIP's separate
     /// `Ciphertext`/`AuthenticatedEncryptionTag` fields per §6.1.21) only
-    /// matches `CKM_AES_GCM`/`CKM_CHACHA20_POLY1305` — `CKM_AES_CCM` is
-    /// also AEAD but isn't in that match, so `authenticated_encryption_tag`
-    /// comes back `None` and the tag stays embedded in `ciphertext`. The
-    /// round trip below still works (both `encrypt`/`decrypt` treat the
-    /// blob as opaque and symmetric), so this is a protocol-conformance
-    /// gap — a real KMIP client reading `AuthenticatedEncryptionTag` per
-    /// spec for an AEAD mechanism would find it empty for CCM — not a
-    /// functional break. Left as a finding: fixing `is_aead` is a
-    /// one-line change but alters the wire-visible response shape, which
-    /// deserves its own review rather than a silent piggyback on a test
-    /// addition.
+    /// matched `CKM_AES_GCM`/`CKM_CHACHA20_POLY1305`, so CCM's tag stayed
+    /// embedded in `Data` instead of riding in its own field. That gap is
+    /// now fixed — `is_aead` includes `CKM_AES_CCM` — so this test asserts
+    /// the CORRECT wire-shape behavior instead: `Data`/`ciphertext` is
+    /// exactly the ciphertext (no trailing tag) and the tag rides
+    /// separately in `AuthenticatedEncryptionTag`, exactly like GCM.
+    ///
+    /// `DecryptRequest` (the op-level struct, below the wire layer) has no
+    /// separate tag field of its own — on the real wire path
+    /// `wire.rs::decode_decrypt_req` recombines
+    /// `Data ‖ AuthenticatedEncryptionTag` into one buffer before building
+    /// the request, since the engine's AEAD primitives expect
+    /// `ciphertext ‖ tag`. This test does that recombination by hand to
+    /// mirror what a real client/server round trip does, so the tamper
+    /// check below can corrupt the tag specifically (not `Data`) and still
+    /// exercise the real decrypt path.
     #[test]
     fn aes_ccm_encrypt_decrypt_round_trip() {
         let d = test_deps();
@@ -1119,16 +1138,30 @@ mod k6_no_silent_substitution_tests {
         )
         .unwrap();
         assert_ne!(enc.ciphertext, plaintext);
-        assert!(
-            enc.authenticated_encryption_tag.is_none(),
-            "documents the is_aead gap above: CCM's tag stays embedded in \
-             `ciphertext` rather than riding in its own field like GCM's does"
+
+        // KMIP 3.0 §6.1.21 — CCM is AEAD: the tag MUST ride in its own
+        // field (fixed `is_aead` match above), and `Data`/`ciphertext`
+        // must be exactly the ciphertext length, NOT ciphertext+tag.
+        let tag = enc.authenticated_encryption_tag.clone().expect(
+            "CCM is AEAD: tag must ride in AuthenticatedEncryptionTag, not stay embedded in Data",
         );
+        assert_eq!(tag.len(), 16, "CCM default tag length is 16 bytes (SP 800-38C)");
+        assert_eq!(
+            enc.ciphertext.len(),
+            plaintext.len(),
+            "Data must be exactly the ciphertext (no trailing tag)"
+        );
+
+        // Recombine as the wire layer does (wire.rs::decode_decrypt_req:
+        // Data ‖ AuthenticatedEncryptionTag) before calling the op-level
+        // decrypt() — DecryptRequest itself carries no separate tag field.
+        let mut ct_and_tag = enc.ciphertext.clone();
+        ct_and_tag.extend_from_slice(&tag);
         let dec = crate::ops::decrypt::decrypt(
             &d,
             crate::kmip30::DecryptRequest {
                 uid: "k".into(),
-                data: enc.ciphertext.clone(),
+                data: ct_and_tag,
                 iv: Some(nonce.clone()),
                 aad: Some(aad.clone()),
                 cryptographic_parameters: Some(cp_mode(8)),
@@ -1139,16 +1172,20 @@ mod k6_no_silent_substitution_tests {
         .unwrap();
         assert_eq!(dec.data, plaintext, "CCM Encrypt/Decrypt must round-trip");
 
-        // AEAD authentication must be real: a tampered ciphertext byte has
-        // to fail decryption, not silently return garbage plaintext.
-        let mut tampered = enc.ciphertext.clone();
-        let last = tampered.len() - 1;
-        tampered[last] ^= 0x01;
+        // Tamper check: corrupt the AuthenticatedEncryptionTag field
+        // specifically (not Data) before decrypt — confirms the tag is
+        // genuinely read from its own field and used, not silently
+        // ignored or reconstructed from Data alone.
+        let mut tampered_tag = tag.clone();
+        let last = tampered_tag.len() - 1;
+        tampered_tag[last] ^= 0x01;
+        let mut ct_and_tampered_tag = enc.ciphertext.clone();
+        ct_and_tampered_tag.extend_from_slice(&tampered_tag);
         let tamper_result = crate::ops::decrypt::decrypt(
             &d,
             crate::kmip30::DecryptRequest {
                 uid: "k".into(),
-                data: tampered,
+                data: ct_and_tampered_tag,
                 iv: Some(nonce),
                 aad: Some(aad),
                 cryptographic_parameters: Some(cp_mode(8)),
@@ -1156,7 +1193,10 @@ mod k6_no_silent_substitution_tests {
             &crate::server::auth::AuthContext::open(),
             "c-dec-tamper",
         );
-        assert!(tamper_result.is_err(), "a tampered CCM ciphertext must not decrypt");
+        assert!(
+            tamper_result.is_err(),
+            "a tampered CCM AuthenticatedEncryptionTag must not decrypt"
+        );
     }
 
     /// KMIP/CACP coverage gap-analysis item 2.4 (2026-08-30), closed per
