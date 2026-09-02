@@ -31,12 +31,30 @@ exchange actually calls: the connector's private_key/public_key sign/verify
 implementation against the genuine PKCS#11 mechanism, for every registered
 key type, with a negative control.
 
+`test_pkcs11_kem.c` (added 2026-09, same day) closes the other half of the
+gap: `pkcs11_kem.c` implements ML-KEM-768 key EXCHANGE, which strongSwan
+models through a completely different interface (`key_exchange_t`, not
+`private_key_t`/`public_key_t`) — `test_pkcs11_conn.c` doesn't touch it at
+all. Before this file, the connector's only evidence for ML-KEM-768 key
+exchange was the same browser-verified WASM handshake referenced above (real,
+but not automated and not runnable from the command line). This test drives
+two independently-created `pkcs11_kem_t` instances (via two separate
+`lib->crypto->create_ke(lib->crypto, ML_KEM_768)` calls, simulating the two
+IKEv2 peers) through the real `get_public_key()`/`set_public_key()`/
+`get_shared_secret()` sequence key_exchange_t's own header documents, with
+real `C_GenerateKeyPair`/`C_EncapsulateKey`/`C_DecapsulateKey` against the
+same softhsmv3 token — asserting both sides land on a byte-identical 32-byte
+shared secret, plus a negative control (one corrupted byte in the
+responder's ciphertext) that the two sides then *disagree*, proving the
+exchange is using real key material and not a constant.
+
 ## What's here
 
 | File | Role |
 |---|---|
-| `test_pkcs11_conn.c` | The real connector test (see its own header for the exact call path). |
-| `keygen_pkcs11_key.c` | Dependency-free PKCS#11 C-API helper that provisions a token-persistent ML-DSA/SLH-DSA keypair with a chosen `CKA_ID`, so `test_pkcs11_conn` can find it via `BUILD_PKCS11_KEYID`. Needs nothing but `dlopen`/`dlsym` — no strongSwan or engine headers. |
+| `test_pkcs11_conn.c` | The real connector test for ML-DSA/SLH-DSA sign+verify (see its own header for the exact call path). |
+| `test_pkcs11_kem.c` | The real connector test for ML-KEM-768 key exchange (see its own header for the exact call path, and the two real prerequisites — `use_dh = yes` and a pre-established token login — its own investigation turned up). |
+| `keygen_pkcs11_key.c` | Dependency-free PKCS#11 C-API helper that provisions a token-persistent ML-DSA/SLH-DSA keypair with a chosen `CKA_ID`, so `test_pkcs11_conn` can find it via `BUILD_PKCS11_KEYID`. Needs nothing but `dlopen`/`dlsym` — no strongSwan or engine headers. Not needed by `test_pkcs11_kem` (it generates its own ephemeral ML-KEM keypairs), which instead reuses the same raw-PKCS11 technique inline (`raw_pkcs11_login()`) just to log the token in first. |
 
 ## Build (macOS or Linux; no Emscripten needed)
 
@@ -98,9 +116,14 @@ cc -g -O0 -I"$SS/src/libstrongswan" -I"$SS" -DHAVE_CONFIG_H -include "$SS/config
   -c strongswan-pkcs11/tests/test_pkcs11_conn.c -o test_pkcs11_conn.o
 cc -g -O0 test_pkcs11_conn.o -L"$SS/src/libstrongswan/.libs" -lstrongswan \
   -Wl,-rpath,"$SS/src/libstrongswan/.libs" -o test_pkcs11_conn
+
+cc -g -O0 -I"$SS/src/libstrongswan" -I"$SS" -DHAVE_CONFIG_H -include "$SS/config.h" \
+  -c strongswan-pkcs11/tests/test_pkcs11_kem.c -o test_pkcs11_kem.o
+cc -g -O0 test_pkcs11_kem.o -L"$SS/src/libstrongswan/.libs" -lstrongswan \
+  -Wl,-rpath,"$SS/src/libstrongswan/.libs" -ldl -o test_pkcs11_kem
 ```
 
-## Run
+## Run — test_pkcs11_conn (signatures)
 
 ```bash
 # 1. Init a token and provision one keypair per CKA_ID the test expects
@@ -135,10 +158,55 @@ DYLD_LIBRARY_PATH="$SS/src/libstrongswan/.libs:$(brew --prefix openssl@3)/lib" \
 
 (On Linux, `LD_LIBRARY_PATH` instead of `DYLD_LIBRARY_PATH`.)
 
+## Run — test_pkcs11_kem (ML-KEM-768 key exchange)
+
+Reuses the same initialized token from above — no per-key provisioning
+needed (`pkcs11_kem_create()` generates its own ephemeral ML-KEM keypairs).
+Two things this test's own settings file needs that `test_pkcs11_conn`'s
+doesn't, both discovered empirically while building this test (see
+`test_pkcs11_kem.c`'s header comment for the full explanation of each):
+
+- `plugins.pkcs11.use_dh = yes` — `pkcs11_plugin.c` only registers its
+  `KE(ML_KEM_768)` feature (and, incidentally, the per-type ML-DSA/SLH-DSA
+  `PRIVKEY`/`PUBKEY` features) under this flag; without it,
+  `lib->crypto->create_ke(lib->crypto, ML_KEM_768)` returns `NULL` with zero
+  diagnostic output, because `pkcs11_kem_create()` is never even called.
+- `$PKCS11SPY` environment variable set to the module path —
+  `pkcs11_kem.c`'s `get_v3_kem_funcs()` resolves the real
+  `C_EncapsulateKey`/`C_DecapsulateKey` v3.2 entry points by `dlopen`ing
+  this path directly (falling back to a fixed `/usr/local/lib/softhsm/...`
+  path otherwise, which won't exist on a from-source native build).
+
+```bash
+# 1. Settings file — same module path as above, plus use_dh = yes:
+cat > test_kem.conf <<EOF
+test_pkcs11_kem {
+    plugins {
+        pkcs11 {
+            use_dh = yes
+            modules { softhsmv3 { path = $(pwd)/$SOFTHSM } }
+        }
+    }
+}
+EOF
+
+# 2. Run (module/token-label/pin are for this test's own pre-login step —
+#    see test_pkcs11_kem.c's header for why a real deployment always has
+#    the token already logged in by this point, and why the test
+#    reproduces that instead of special-casing pkcs11_kem.c):
+PKCS11SPY="$(pwd)/$SOFTHSM" \
+  DYLD_LIBRARY_PATH="$SS/src/libstrongswan/.libs:$(brew --prefix openssl@3)/lib" \
+  ./test_pkcs11_kem "$(pwd)/$SOFTHSM" IKEv2Token 1234 \
+  "$SS/src/libstrongswan/plugins/pkcs11/.libs" pkcs11 test_kem.conf
+```
+
+(On Linux, `LD_LIBRARY_PATH` instead of `DYLD_LIBRARY_PATH`.)
+
 ## Last confirmed run (2026-09-01)
 
-All 6 PASS, real `C_Sign`/`C_Verify`, signature lengths byte-exact to
-FIPS 204/205, negative control rejecting a corrupted signature in every case:
+`test_pkcs11_conn`: all 6 PASS, real `C_Sign`/`C_Verify`, signature lengths
+byte-exact to FIPS 204/205, negative control rejecting a corrupted signature
+in every case:
 
 ```
 [SLH-DSA-SHA2-128s] C_Sign OK: signature length = 7856 bytes
@@ -154,13 +222,36 @@ FIPS 204/205, negative control rejecting a corrupted signature in every case:
 6 test(s), 0 failure(s)
 ```
 
+`test_pkcs11_kem`: both PASS — real `C_GenerateKeyPair`/`C_EncapsulateKey`/
+`C_DecapsulateKey`, ciphertext/pubkey lengths byte-exact to FIPS 203
+(pubkey 1184B, ciphertext 1088B, shared secret 32B), positive case's two
+independently-computed shared secrets byte-identical, negative control's
+two secrets correctly mismatched after a single corrupted ciphertext byte:
+
+```
+[ML-KEM-768 positive] initiator get_public_key() OK: 1184 bytes (expect 1184)
+[ML-KEM-768 positive] responder set_public_key()+get_public_key() OK: ciphertext 1088 bytes (expect 1088)
+[ML-KEM-768 positive] responder get_shared_secret() OK: 32 bytes
+[ML-KEM-768 positive] initiator get_shared_secret() OK: 32 bytes
+[ML-KEM-768 positive] positive case OK: initiator and responder shared secrets are byte-identical
+[ML-KEM-768 positive] PASS
+[ML-KEM-768 negative-control] initiator get_public_key() OK: 1184 bytes (expect 1184)
+[ML-KEM-768 negative-control] responder set_public_key()+get_public_key() OK: ciphertext 1088 bytes (expect 1088)
+[ML-KEM-768 negative-control] responder get_shared_secret() OK: 32 bytes
+[ML-KEM-768 negative-control] negative control: flipped byte 0 of the responder's ciphertext
+[ML-KEM-768 negative-control] initiator get_shared_secret() OK: 32 bytes
+[ML-KEM-768 negative-control] negative control OK: corrupted ciphertext produced a MISMATCHED shared secret
+[ML-KEM-768 negative-control] PASS
+
+2 test(s), 0 failure(s)
+```
+
+Re-ran `test_pkcs11_conn` against the same freshly-initialized token
+immediately afterward to confirm the KEM test's build/patch process didn't
+disturb anything shared: still 6/6 PASS.
+
 ## Known gaps, not covered here
 
-- **ML-KEM key exchange** (`pkcs11_kem.c`, all 3 sizes) uses a different
-  strongSwan API (`key_exchange_t`, not `private_key_t`) and is not exercised
-  by this harness — it has real evidence via the WASM path's browser-verified
-  handshake (`../../strongswan-wasm-shims/STATUS.md`) but no standalone
-  native test yet.
 - **Ed448 / standalone EdDSA authentication**: this connector has never
   wired `CKK_EC_EDWARDS`/`CKM_EDDSA` at all (grep `strongswan-pkcs11/*.c` for
   `EC_EDWARDS`/`CKM_EDDSA`/`KEY_ED448` — zero hits outside the bundled
