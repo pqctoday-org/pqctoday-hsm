@@ -81,6 +81,35 @@ SANDBOX_CONTAINER="${SANDBOX_CONTAINER:-pqc-dev-sandbox}"
 AG_CONTAINER_ROOT="${AG_CONTAINER_ROOT:-/ag/pqctoday-hsm}"
 AG_KMIP="$AG_CONTAINER_ROOT/kmip"
 AG_RUST="$AG_CONTAINER_ROOT/rust"
+
+# Per-worktree cargo build directory (2026-09-02). The container image sets a
+# single global CARGO_TARGET_DIR=/cargo-target, shared by EVERY worktree and
+# every crate. Two gate runs in different worktrees therefore compiled into
+# one fingerprint database concurrently, and nothing serialized them: cargo's
+# "Blocking waiting for file lock on build directory" message appears in 0 of
+# 26 gate logs on this machine, and no /cargo-target/.cargo-lock is held.
+#
+# That is not theoretical. On 2026-09-02 a `kmip cargo test` step failed with
+#   error[E0425]: cannot find function `reset_all_engine_state_for_test`
+#                 in crate `softhsmrustv3`
+# while three gates ran concurrently. Root cause, from the cache's own
+# bookkeeping: no softhsmrustv3 fingerprint was written during that build at
+# all (a gap from 05:42 straight to 08:14) and the compiler warnings in the
+# log were REPLAYED from cache, i.e. cargo judged the dependency fresh and
+# reused an artifact — one built WITHOUT the dev-only `test-support` feature
+# that kmip's own #[cfg(test)] code needs. The identical command, run alone
+# minutes later, built the correct variant and passed.
+#
+# A cache that can fabricate a failure can equally fabricate a PASS, which is
+# disqualifying for a validation gate whose entire job is to be believed. So
+# isolate rather than retry-on-failure: every worktree gets its own build
+# directory. The main tree keeps /cargo-target unchanged, so its large warm
+# cache is not thrown away by this change.
+if [ "$AG_CONTAINER_ROOT" = "/ag/pqctoday-hsm" ]; then
+  CARGO_TARGET_DIR_FOR_RUN="/cargo-target"
+else
+  CARGO_TARGET_DIR_FOR_RUN="/cargo-target/worktrees/$(basename "$AG_CONTAINER_ROOT")"
+fi
 JAVAJCE_DIR="$ROOT/JavaJCE"
 JAVAJCE_REMOTE_DIR="$ROOT/JavaJCE-remote"
 
@@ -122,7 +151,11 @@ dexec() {
   # call, present and future, not just the one that already got bitten
   # (the differential harness step masked a real FATAL as PASS this way —
   # this function protects the equivalent-shaped ACVP wasm step too).
-  docker exec "$RUST_CONTAINER" bash -c "set -o pipefail; $1"
+  # -e CARGO_TARGET_DIR: overrides the image's single global /cargo-target so
+  # concurrent gate runs in different worktrees cannot share one fingerprint
+  # database — see the CARGO_TARGET_DIR_FOR_RUN block above for the incident
+  # that made this necessary.
+  docker exec -e CARGO_TARGET_DIR="$CARGO_TARGET_DIR_FOR_RUN" "$RUST_CONTAINER" bash -c "set -o pipefail; $1"
 }
 
 ensure_container() {
