@@ -1119,6 +1119,56 @@ int p11prov_cipher_update(void *ctx, unsigned char *out, size_t *outl,
             /* unconditionally return the session */
             p11prov_return_session(cctx->session);
             cctx->session = NULL;
+        } else if (cctx->mech.mechanism == CKM_AES_XTS) {
+            /* AES-XTS remediation item (2026-09-02): OpenSSL's own
+             * reference AES-XTS implementation
+             * (providers/implementations/ciphers/cipher_aes_xts.c,
+             * aes_xts_cipher()) does NOT stream in the way this bridge's
+             * generic Update path assumes -- confirmed by reading that
+             * file directly, not inferred. EVERY update() call there is
+             * encrypted as its own independent, self-contained
+             * ciphertext-stealing unit: ctx->base.iv (the tweak) is set
+             * once at Init and NEVER advanced or otherwise touched
+             * between calls, so a caller who splits one logical message
+             * across two EVP_EncryptUpdate() calls gets a DIFFERENT
+             * result than feeding it in one call -- not a streaming
+             * continuation, two unrelated encryptions under the same
+             * starting tweak. A call under one AES block is rejected
+             * outright there too (inl < AES_BLOCK_SIZE).
+             *
+             * The engine's own multi-part CKM_AES_XTS path (see
+             * rust/src/crypto/multipart.rs's XtsState, 2026-09-02) is
+             * deliberately NOT like this: it buffers and computes a
+             * single, mathematically pure, call-shape-INDEPENDENT result
+             * equal to a real one-shot C_Encrypt/C_Decrypt over the full
+             * message -- correct in isolation, genuinely round-trips,
+             * but not byte-identical to OpenSSL's own software AES-XTS
+             * for a real multi-call split (confirmed via
+             * scripts/aes-xts-probe.c, which cross-checks the token
+             * against OpenSSL's actual "provider=default" software
+             * cipher, not a re-derivation of the spec).
+             *
+             * Fix, scoped to THIS bridge only -- the engine's own
+             * streaming semantics are untouched, and stay available
+             * exactly as before for any other caller of C_EncryptUpdate/
+             * C_EncryptFinal that wants genuine flexible streaming:
+             * replicate OpenSSL's own per-call-independent convention by
+             * issuing a fresh, complete, ONE-SHOT p11prov_Encrypt for
+             * every chunk this bridge receives (never
+             * p11prov_EncryptUpdate for XTS), always against the same
+             * tweak captured at EncryptInit, then immediately releasing
+             * the session exactly as the TLS branch above does. The
+             * `!cctx->session` check at the top of this function then
+             * transparently re-establishes a fresh session + EncryptInit
+             * (same tweak, same key) on the NEXT chunk with no extra
+             * code needed here -- this branch only ever needs to run
+             * the one-shot call and hand the session back. */
+            rv = p11prov_Encrypt(cctx->provctx, session_handle, (void *)in,
+                                 inlen, out, &outlen);
+
+            cctx->session_state = CIPHER_SESS_FINALIZED;
+            p11prov_return_session(cctx->session);
+            cctx->session = NULL;
         } else {
             rv = p11prov_EncryptUpdate(cctx->provctx, session_handle,
                                        (void *)in, inlen, out, &outlen);
@@ -1153,6 +1203,17 @@ int p11prov_cipher_update(void *ctx, unsigned char *out, size_t *outl,
 
             /* Assumes inlen = outlen on correct decryption */
             rv = tlsunpad(cctx, out, inlen, &outlen);
+        } else if (cctx->mech.mechanism == CKM_AES_XTS) {
+            /* Decrypt-side mirror of the CKF_ENCRYPT CKM_AES_XTS branch
+             * above -- see that branch's comment for the full rationale.
+             * A one-shot p11prov_Decrypt per chunk, same tweak every
+             * time, immediate session release. */
+            rv = p11prov_Decrypt(cctx->provctx, session_handle, (void *)in,
+                                 inlen, out, &outlen);
+
+            cctx->session_state = CIPHER_SESS_FINALIZED;
+            p11prov_return_session(cctx->session);
+            cctx->session = NULL;
         } else {
             rv = p11prov_DecryptUpdate(cctx->provctx, session_handle,
                                        (void *)in, inlen, out, &outlen);
@@ -1275,6 +1336,20 @@ int p11prov_cipher_final(void *ctx, unsigned char *out, size_t *outl,
     struct p11prov_cipher_ctx *cctx = (struct p11prov_cipher_ctx *)ctx;
     CK_ULONG outlen = outsize;
     CK_RV rv;
+
+    if (cctx->mech.mechanism == CKM_AES_XTS) {
+        /* Mirrors OpenSSL's own aes_xts_stream_final() exactly (see the
+         * CKM_AES_XTS branches in p11prov_cipher_update() above for the
+         * full rationale): every real chunk was already a complete,
+         * self-closing one-shot p11prov_Encrypt/Decrypt call, so there is
+         * never an active token-side operation left for Final to close --
+         * `cctx->session` is NULL here whether at least one chunk ran (it
+         * released itself) or none did (a genuinely empty message, which
+         * OpenSSL's own Final also accepts unconditionally, unlike every
+         * other non-AEAD mode here). Always succeeds with zero bytes. */
+        *outl = 0;
+        return RET_OSSL_OK;
+    }
 
     if (!cctx->session) {
         /* AEAD with zero real update() calls (e.g. AAD-only / empty

@@ -23,7 +23,7 @@
 //! | `CKM_AES_CBC_PAD` (§6.27.4) | encrypt: as CBC; decrypt: hold back last full block | emit/strip PKCS#7 pad |
 //! | `CKM_AES_CTR` (§6.27.5)     | byte stream, no buffering | empty output |
 //! | `CKM_AES_GCM` (§6.27.7)     | byte stream + GHASH; decrypt holds back tag | emit/verify auth tag |
-//! | `CKM_AES_XTS` (§6.15)       | buffer everything, emit nothing | run the real one-shot XTS transform over the full buffered message |
+//! | `CKM_AES_XTS` (§6.15)       | release full blocks, holding back one full block against ciphertext stealing (2026-09-02) | run the real XTS transform over the FULL buffered message, emit only the not-yet-released tail |
 //! | `CKM_AES_CCM` (§6.11.3)     | buffer everything (SP 800-38C bakes total length into B_0, so nothing can be emitted online) | run `ccm_encrypt`/`ccm_decrypt` over the FULL buffered input |
 //!
 //! Length prediction (`update_len` / `final_len`) backs the PKCS#11 §5.2
@@ -136,10 +136,11 @@ impl MultipartCipher {
             // message (see the module doc's CCM row) — every Update
             // predicts, and later produces, zero bytes.
             MultipartCipher::Ccm(_) => 0,
-            // XTS likewise (see the module doc's XTS row): ciphertext
-            // stealing needs the full message, so every Update predicts,
-            // and later produces, zero bytes.
-            MultipartCipher::Xts(_) => 0,
+            // 2026-09-02: XTS now releases output progressively, holding
+            // back only what `XtsState::safe_len` proves can still be
+            // touched by ciphertext stealing — see that fn's doc comment
+            // for why this is NOT the same rule as CbcPad's above.
+            MultipartCipher::Xts(s) => s.update_len(part_len),
         }
     }
 
@@ -170,9 +171,10 @@ impl MultipartCipher {
                 CipherDirection::Encrypt => s.buf.len() + s.tag_len,
                 CipherDirection::Decrypt => s.buf.len().saturating_sub(s.tag_len),
             },
-            // Exact — XTS output length always equals input length (no
-            // padding, no tag; ciphertext stealing only rearranges bytes).
-            MultipartCipher::Xts(s) => s.buf.len(),
+            // Exact — the total buffered length minus whatever `update()`
+            // already handed back (2026-09-02: no longer always the whole
+            // buffer, now that XTS streams progressively).
+            MultipartCipher::Xts(s) => s.buf.len() - s.emitted,
         }
     }
 
@@ -191,7 +193,12 @@ impl MultipartCipher {
             MultipartCipher::Cfb1(s) => Ok(s.update(part)),
             MultipartCipher::Gcm(s) => Ok(s.update(part)),
             MultipartCipher::Ccm(s) => Ok(s.update(part)),
-            MultipartCipher::Xts(s) => Ok(s.update(part)),
+            // 2026-09-02: XtsState::update is itself fallible now (a
+            // caller sending more data after the commit point gets a real
+            // error, not silent corruption — see XtsState::update's doc
+            // comment), so this arm no longer wraps in Ok() like its
+            // infallible siblings above.
+            MultipartCipher::Xts(s) => s.update(part),
         }
     }
 
@@ -885,16 +892,26 @@ impl CcmState {
 
 // ── XTS (§6.15, IEEE 1619 / NIST SP 800-38E) ─────────────────────────────────
 //
-// Ciphertext stealing needs the FULL message to determine the tweak and
-// stealing behaviour for the final partial block, and output length must
-// equal input length with no separate finalize chunk — XTS is therefore not
-// a streamable mode, for the same underlying reason as CCM just above.
-// `update()` only buffers; `finalize()` runs the same double-width-key
-// `Xts128` transform as the single-shot `C_Encrypt`/`C_Decrypt` `CKM_AES_XTS`
-// arm in `crate::ffi`, over the full buffered message, so a multi-part
-// Update×N → Final sequence produces byte-identical output to a one-shot
-// call over the same concatenated input — same transparency guarantee
-// `CcmState`'s doc comment above describes for CCM.
+// Ciphertext stealing rewrites the second-to-last full block once the total
+// message length is known NOT to be block-aligned, so that one block can
+// never be released until the message is known to be complete. Everything
+// BEFORE that block, though, is fully independent per-block XTS math (no
+// chaining), so — unlike CCM, which genuinely cannot emit anything before
+// `finalize()` sees the whole message — XTS streams: `update()` releases
+// every full block except the last one, and `finalize()` re-runs the same
+// double-width-key `Xts128` transform as the single-shot `C_Encrypt`/
+// `C_Decrypt` `CKM_AES_XTS` arm in `crate::ffi` over the FULL buffered
+// message (unchanged, still the one ACVP-vector-tested code path), handing
+// back only the tail `update()` hadn't already released. See `XtsState::
+// safe_len`'s doc comment for the exact holdback rule and why it differs
+// from `CbcPad`'s `releasable()` above. A multi-part Update×N → Final
+// sequence still produces byte-identical output to a one-shot call over the
+// same concatenated input — same transparency guarantee `CcmState`'s doc
+// comment describes for CCM, just achieved by streaming rather than by
+// buffering everything (2026-09-02: was "buffer everything, emit nothing"
+// until this fix — the vendored OpenSSL provider bridge, unlike this
+// crate's own tests, sizes `Final`'s buffer for a small tail rather than
+// the whole message, and cannot ask for more after the fact).
 //
 // The `CKA_KEY_TYPE == CKK_AES_XTS` gate (§6.15 — a double-length CKK_AES_XTS
 // key is required, never a same-length plain CKK_AES key) lives in
@@ -910,6 +927,17 @@ pub struct XtsState {
     /// Plaintext (encrypt) or ciphertext (decrypt), accumulated verbatim
     /// across every `update()` call.
     buf: Vec<u8>,
+    /// Bytes of `buf`'s corresponding output already handed back via
+    /// `update()`. See `update()`'s doc comment (2026-09-02 fix) for why
+    /// this is safe: everything before this offset is guaranteed
+    /// byte-identical to what `finalize()` computes for the same span.
+    emitted: usize,
+    /// Set once a genuinely non-block-aligned `update()` has committed
+    /// this operation to being complete — see `update()`'s own doc
+    /// comment for exactly why that commit point exists and why it is
+    /// not optional. Any further non-empty `update()` after this point
+    /// is rejected loudly rather than silently producing wrong output.
+    committed: bool,
 }
 
 /// Same rationale as `CcmState`'s `Drop` just above — `buf` holds the full
@@ -924,28 +952,58 @@ impl Drop for XtsState {
 
 impl XtsState {
     pub fn new(key_bytes: Vec<u8>, tweak: [u8; BLOCK], dir: CipherDirection) -> Self {
-        Self { key_bytes, tweak, dir, buf: Vec::new() }
+        Self { key_bytes, tweak, dir, buf: Vec::new(), emitted: 0, committed: false }
     }
 
-    /// See `CcmState::update`'s doc comment — same zero-output-until-
-    /// `finalize` convention, for the same reason (nothing can be emitted
-    /// online; the stealing boundary is only known once the message ends).
-    fn update(&mut self, part: &[u8]) -> Vec<u8> {
-        self.buf.extend_from_slice(part);
-        Vec::new()
+    /// How much of `total` accumulated bytes may be safely transformed and
+    /// released, keeping the true ciphertext-stealing boundary forever out
+    /// of reach until the message is known to be complete.
+    ///
+    /// NOT the same rule as `CbcPad`'s `releasable()` above, and reusing it
+    /// here would be a real correctness bug, not just a style choice:
+    /// CbcPad only needs to hold back "the last full block" because that
+    /// block's *interpretation* (how much padding to strip) is unknown
+    /// until `finalize()` — every EARLIER block's bytes are already fully
+    /// correct as decrypted. XTS ciphertext stealing is different: when the
+    /// total length is not block-aligned, stealing rewrites the CIPHERTEXT
+    /// of the second-to-last full block itself (truncating/XORing it with
+    /// the final partial block), so that block cannot be released early
+    /// even if there is currently no partial tail after it — more data
+    /// could still arrive and make it exactly that block.
+    ///
+    /// So: always hold back one full block beyond the last complete block
+    /// boundary, whether or not a partial tail currently exists.
+    /// `full_blocks(total)` rounds `total` down to a block multiple, and
+    /// subtracting one more `BLOCK` guarantees the withheld region always
+    /// contains at least one whole block that could still turn out to be
+    /// the stealing boundary.
+    fn safe_len(total: usize) -> usize {
+        full_blocks(total).saturating_sub(BLOCK)
     }
 
-    fn finalize(mut self) -> Result<Vec<u8>, u32> {
-        // §6.15 — ciphertext stealing needs at least one full AES block;
-        // same floor the one-shot `C_Encrypt`/`C_Decrypt` XTS arm enforces.
-        if self.buf.len() < BLOCK {
-            return Err(self.dir.len_range_error());
+    /// Bytes `update()` will emit for `part_len` more input, without
+    /// mutating state — `multipart_update` (ffi.rs) sizes the caller's
+    /// buffer from this before `update()` runs, so it must be an exact
+    /// upper bound of what `update()` actually returns. Mirrors `update()`'s
+    /// own commit-point logic exactly — see that fn's doc comment.
+    fn update_len(&self, part_len: usize) -> usize {
+        if self.committed {
+            return 0;
         }
-        // `self` implements `Drop` (to wipe `buf`/`key_bytes` on every other
-        // exit path), so its fields can't be moved out by value — take the
-        // buffer instead, leaving an empty (already-zeroized-on-drop) Vec
-        // behind.
-        let mut buf = std::mem::take(&mut self.buf);
+        let total = self.buf.len() + part_len;
+        if total >= BLOCK && total % BLOCK != 0 {
+            total.saturating_sub(self.emitted)
+        } else {
+            Self::safe_len(total).saturating_sub(self.emitted)
+        }
+    }
+
+    /// Transforms `data` in place under this op's key/tweak/direction.
+    /// Shared by `update()`'s eager prefix pass and `finalize()`'s final
+    /// whole-buffer pass so both run the exact same, ACVP-vector-tested
+    /// crypto — only WHEN it runs, and how much of its output is handed
+    /// back at once, differs between the two callers.
+    fn transform(&self, data: &mut [u8]) -> Result<(), u32> {
         match self.key_bytes.len() {
             32 => {
                 let k1 = aes::Aes128::new_from_slice(&self.key_bytes[..16])
@@ -954,8 +1012,8 @@ impl XtsState {
                     .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
                 let xts = xts_mode::Xts128::<aes::Aes128>::new(k1, k2);
                 match self.dir {
-                    CipherDirection::Encrypt => xts.encrypt_sector(&mut buf, self.tweak),
-                    CipherDirection::Decrypt => xts.decrypt_sector(&mut buf, self.tweak),
+                    CipherDirection::Encrypt => xts.encrypt_sector(data, self.tweak),
+                    CipherDirection::Decrypt => xts.decrypt_sector(data, self.tweak),
                 }
             }
             64 => {
@@ -965,13 +1023,121 @@ impl XtsState {
                     .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
                 let xts = xts_mode::Xts128::<aes::Aes256>::new(k1, k2);
                 match self.dir {
-                    CipherDirection::Encrypt => xts.encrypt_sector(&mut buf, self.tweak),
-                    CipherDirection::Decrypt => xts.decrypt_sector(&mut buf, self.tweak),
+                    CipherDirection::Encrypt => xts.encrypt_sector(data, self.tweak),
+                    CipherDirection::Decrypt => xts.decrypt_sector(data, self.tweak),
                 }
             }
             _ => return Err(CKR_KEY_SIZE_RANGE),
         }
-        Ok(buf)
+        Ok(())
+    }
+
+    /// 2026-09-02 fix (T33b real-provider-.so confirmation) — TWO rounds:
+    ///
+    /// Round 1 released full blocks progressively but still deferred the
+    /// true final block (plus any tail) to `finalize()`. That matched this
+    /// crate's own native tests, which passed, but STILL failed against the
+    /// real vendored OpenSSL provider: instrumenting the provider directly
+    /// (`p11prov_cipher_final`) showed OpenSSL's generic EVP layer hands
+    /// `Final` a HARD-CAPPED, exactly-one-AES-block (16-byte) buffer, no
+    /// matter what — there is no query-then-allocate-more mechanism for
+    /// this cipher shape, so round 1's `held-back block + tail` requirement
+    /// (>16 bytes whenever the message isn't block-aligned) could never fit.
+    ///
+    /// Round 2 (this one) matches how AES-XTS is actually driven in
+    /// practice, confirmed by `scripts/aes-xts-probe.c`'s own doc comment
+    /// (itself citing OpenSSL's own reference AES-XTS implementation and
+    /// docs.openssl.org/3.6/man7/EVP_CIPHER-AES/): the caller sends any
+    /// number of block-aligned chunks, then AT MOST ONE final chunk that
+    /// may be shorter than a block — never a non-aligned chunk followed by
+    /// yet more data. So: the moment accumulated input reaches at least one
+    /// full block AND is not itself block-aligned, that is unambiguously
+    /// the true final chunk. Commit right there — run the real
+    /// ciphertext-stealing-aware transform over the WHOLE buffer immediately
+    /// (the exact same call `finalize()` already made, just moved earlier)
+    /// and hand back everything not yet emitted, so `finalize()` itself
+    /// never needs more than the empty flush this leaves it. Any further
+    /// non-empty `update()` after that point is rejected loudly (see the
+    /// `committed` guard below) rather than silently producing wrong
+    /// output — a caller violating the established convention gets a clear
+    /// error, not corrupted ciphertext.
+    ///
+    /// Below that commit threshold (still fewer than one full block, or
+    /// exactly block-aligned so far), the ORIGINAL round-1 logic still
+    /// applies unchanged: release every full block except the last one,
+    /// since more data may legitimately still arrive and that last block
+    /// could still turn out to be the ciphertext-stealing boundary — see
+    /// `safe_len()`'s own doc comment. A message that stays block-aligned
+    /// for its entire length never commits early at all, and `finalize()`
+    /// handles it exactly as before (needing exactly one held-back block,
+    /// which is exactly the observed 16-byte cap).
+    ///
+    /// XTS blocks are not chained (each block's transform depends only on
+    /// its own index and the fixed tweak, never on neighboring blocks), so
+    /// every one of these calls — whichever branch runs — reuses the exact
+    /// same, ACVP-vector-tested `transform()`; only WHEN it runs and how
+    /// much of its output is handed back at once ever changes.
+    fn update(&mut self, part: &[u8]) -> Result<Vec<u8>, u32> {
+        if self.committed {
+            if part.is_empty() {
+                return Ok(Vec::new()); // a size-query-shaped empty call is harmless
+            }
+            return Err(self.dir.len_range_error());
+        }
+        self.buf.extend_from_slice(part);
+        let total = self.buf.len();
+        if total >= BLOCK && total % BLOCK != 0 {
+            // The true final chunk has arrived — commit now rather than
+            // deferring to finalize(). See this fn's own doc comment for
+            // why that deferral is exactly what broke the real provider.
+            let mut whole = self.buf.clone();
+            self.transform(&mut whole)?;
+            let out = whole[self.emitted..].to_vec();
+            self.emitted = total;
+            self.committed = true;
+            return Ok(out);
+        }
+        let safe_len = Self::safe_len(total);
+        if safe_len <= self.emitted {
+            return Ok(Vec::new());
+        }
+        let mut prefix = self.buf[..safe_len].to_vec();
+        self.transform(&mut prefix)?;
+        let out = prefix[self.emitted..].to_vec();
+        self.emitted = safe_len;
+        Ok(out)
+    }
+
+    fn finalize(mut self) -> Result<Vec<u8>, u32> {
+        if self.committed {
+            // update()'s commit branch already ran the real
+            // ciphertext-stealing-aware transform over the whole message
+            // and set `emitted == buf.len()` — this is just the flush,
+            // always empty in the normal query-then-fill sequence.
+            return Ok(std::mem::take(&mut self.buf).split_off(self.emitted));
+        }
+        // §6.15 — ciphertext stealing needs at least one full AES block;
+        // same floor the one-shot `C_Encrypt`/`C_Decrypt` XTS arm enforces.
+        // Only reachable here when the message stayed block-aligned for its
+        // entire length (otherwise `update()` would already have committed
+        // above) — i.e. a message under one full block, or one that is a
+        // whole number of blocks with nothing left to steal against.
+        if self.buf.len() < BLOCK {
+            return Err(self.dir.len_range_error());
+        }
+        // `self` implements `Drop` (to wipe `buf`/`key_bytes` on every other
+        // exit path), so its fields can't be moved out by value — take the
+        // buffer instead, leaving an empty (already-zeroized-on-drop) Vec
+        // behind.
+        let mut buf = std::mem::take(&mut self.buf);
+        self.transform(&mut buf)?;
+        // Bytes before `emitted` were already handed back by `update()` —
+        // see that fn's doc comment for why they are guaranteed
+        // byte-identical to what this whole-buffer pass just recomputed
+        // for the same span. Only the genuinely new tail goes out here —
+        // for a block-aligned message this is exactly one block (16 bytes),
+        // matching the observed hard cap on Final's own buffer.
+        Ok(buf.split_off(self.emitted))
     }
 }
 
