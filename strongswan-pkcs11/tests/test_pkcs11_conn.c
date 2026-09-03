@@ -1,7 +1,7 @@
 /*
  * test_pkcs11_conn.c — real functional test of the strongswan-pkcs11
  * connector's PQC/PQ-adjacent authentication path (ML-DSA-44/65/87,
- * SLH-DSA-SHA2-128s/192s/256s, and Ed448), added because none of it —
+ * SLH-DSA-SHA2-128s/192s/256s, Ed448, and Ed25519), added because none of it —
  * least of all SLH-DSA, registered in pkcs11_plugin.c since the
  * ML-KEM-512/1024 + SLH-DSA-registration commit but never exercised by
  * any test — had a single automated test anywhere in this repo. The only
@@ -171,7 +171,7 @@ int main(int argc, char **argv)
      * so register one PIN per CKA_ID used below. */
     mem_cred_t *creds = mem_cred_create();
     {
-        const char *ids[] = {"01", "02", "03", "04", "05", "06", "07"};
+        const char *ids[] = {"01", "02", "03", "04", "05", "06", "07", "08"};
         for (size_t i = 0; i < countof(ids); i++)
         {
             chunk_t k = chunk_from_hex(chunk_from_str((char*)ids[i]), NULL);
@@ -185,7 +185,7 @@ int main(int argc, char **argv)
 
     /* CKA_ID assignment matches this directory's README.md worked example
      * and keygen_pkcs11_key.c invocations: 01/02/03 = SLH-DSA-SHA2
-     * 128s/256s/192s, 04/05/06 = ML-DSA-44/65/87, 07 = Ed448. */
+     * 128s/256s/192s, 04/05/06 = ML-DSA-44/65/87, 07 = Ed448, 08 = Ed25519. */
     int failures = 0;
     failures += run_one(module, slot, "01", KEY_SLH_DSA_SHA2_128S,
                          SIGN_SLH_DSA_SHA2_128S, "SLH-DSA-SHA2-128s");
@@ -201,6 +201,8 @@ int main(int argc, char **argv)
                          SIGN_ML_DSA_87, "ML-DSA-87");
     failures += run_one(module, slot, "07", KEY_ED448,
                          SIGN_ED448, "Ed448");
+    failures += run_one(module, slot, "08", KEY_ED25519,
+                         SIGN_ED25519, "Ed25519");
 
     lib->credmgr->remove_set(lib->credmgr, &creds->set);
     creds->destroy(creds);
@@ -208,6 +210,6 @@ int main(int argc, char **argv)
     library_deinit();
 
     printf("\n==================================================\n");
-    printf("%d test(s), %d failure(s)\n", 7, failures);
+    printf("%d test(s), %d failure(s)\n", 8, failures);
     return failures ? 1 : 0;
 }

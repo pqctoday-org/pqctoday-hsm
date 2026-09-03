@@ -253,9 +253,11 @@ METHOD(public_key_t, verify, bool,
 		case SIGN_ML_DSA_65:
 		case SIGN_ML_DSA_87:
 		case SIGN_ED448:
-			/* ML-DSA and Ed448 signatures are opaque raw byte blobs (Ed448's
-			 * R||S encoding, RFC 8032 §5.2.6) — do not strip leading zero
-			 * bytes, which would corrupt the signature. */
+		case SIGN_ED25519:
+			/* ML-DSA and Ed448/Ed25519 signatures are opaque raw byte blobs
+			 * (Ed448/Ed25519's R||S encoding, RFC 8032 §5.2.6/§5.1.6) — do
+			 * not strip leading zero bytes, which would corrupt the
+			 * signature. */
 			break;
 		default:
 			sig = chunk_skip_zero(sig);
@@ -576,17 +578,20 @@ static bool encode_ml_dsa(private_pkcs11_public_key_t *this,
 }
 
 /**
- * Encode/fingerprint an Ed448 public key.
+ * Encode/fingerprint an Ed448 or Ed25519 public key.
  *
  * Structurally identical to encode_ml_dsa() above (OID via
  * key_type_to_oid(), SPKI wrap via public_key_info_encode(), same four
  * cred_encoding_type_t cases) — the only difference is where the raw public
  * key bytes are read from: CKA_EC_POINT here, not CKA_VALUE, matching how
- * this connector stores Ed448 keys (see find_ed448_key()/create_ed448_key()
- * above and their comment on PKCS#11 v3.2's Edwards CKA_EC_POINT
- * convention).
+ * this connector stores Ed448/Ed25519 keys (see find_ed448_key()/
+ * create_ed448_key()/find_ed25519_key()/create_ed25519_key() above and
+ * their comment on PKCS#11 v3.2's Edwards CKA_EC_POINT convention). Already
+ * curve-generic (this->type drives key_type_to_oid()), so one function
+ * serves both KEY_ED448 and KEY_ED25519 — see get_encoding()/
+ * get_fingerprint() below.
  */
-static bool encode_ed448(private_pkcs11_public_key_t *this,
+static bool encode_eddsa(private_pkcs11_public_key_t *this,
 						 cred_encoding_type_t type, chunk_t *out)
 {
 	chunk_t raw = chunk_empty;
@@ -682,7 +687,8 @@ METHOD(public_key_t, get_encoding, bool,
 		case KEY_SLH_DSA_SHA2_256S:
 			return encode_ml_dsa(this, type, encoding);
 		case KEY_ED448:
-			return encode_ed448(this, type, encoding);
+		case KEY_ED25519:
+			return encode_eddsa(this, type, encoding);
 		default:
 			return FALSE;
 	}
@@ -709,7 +715,8 @@ METHOD(public_key_t, get_fingerprint, bool,
 		case KEY_SLH_DSA_SHA2_256S:
 			return encode_ml_dsa(this, type, fp);
 		case KEY_ED448:
-			return encode_ed448(this, type, fp);
+		case KEY_ED25519:
+			return encode_eddsa(this, type, fp);
 		default:
 			return FALSE;
 	}
@@ -1150,6 +1157,38 @@ static bool is_ed448_ec_params(chunk_t ecparams)
 }
 
 /**
+ * CKA_EC_PARAMS value for CKK_EC_EDWARDS Ed25519 keys on this connector's
+ * softhsmv3 target: a DER PrintableString "edwards25519" ("13 0c" + ASCII),
+ * mirroring ed448_ec_params above exactly (same OSSL::oid2ByteString
+ * normalisation in src/lib/SoftHSM_keygen.cpp's generateED(), confirmed
+ * against src/lib/crypto/OSSLUtil.cpp's oid2ByteString/byteString2oid,
+ * which map EVP_PKEY_ED25519 to the "edwards25519" curve name the same way
+ * EVP_PKEY_ED448 maps to "edwards448").
+ */
+static const unsigned char ed25519_ec_params[] = {
+	0x13, 0x0c, 'e', 'd', 'w', 'a', 'r', 'd', 's', '2', '5', '5', '1', '9'
+};
+
+/**
+ * The RFC 8410 id-Ed25519 OID DER (1.3.101.112) — the OTHER encoding
+ * CKA_EC_PARAMS can legally carry for an Ed25519 key, same role as
+ * ed448_ec_params_oid above for Ed448.
+ */
+static const unsigned char ed25519_ec_params_oid[] = {0x06, 0x03, 0x2b, 0x65, 0x70};
+
+/**
+ * See the comment on ed25519_ec_params/ed25519_ec_params_oid above.
+ */
+static bool is_ed25519_ec_params(chunk_t ecparams)
+{
+	return (ecparams.len == sizeof(ed25519_ec_params) &&
+			memeq(ecparams.ptr, ed25519_ec_params, sizeof(ed25519_ec_params))) ||
+		   (ecparams.len == sizeof(ed25519_ec_params_oid) &&
+			memeq(ecparams.ptr, ed25519_ec_params_oid,
+				 sizeof(ed25519_ec_params_oid)));
+}
+
+/**
  * Find an Ed448 key object matching the given raw public-key bytes.
  *
  * Unlike ML-DSA/SLH-DSA (raw public key in CKA_VALUE, variant selected via
@@ -1194,6 +1233,49 @@ static private_pkcs11_public_key_t* create_ed448_key(chunk_t pubkey,
 		CKM_EDDSA,
 	};
 	return create_key(KEY_ED448, keylen, mechs, countof(mechs), tmpl,
+					  countof(tmpl));
+}
+
+/**
+ * Find an Ed25519 key object matching the given raw public-key bytes.
+ *
+ * Identical shape to find_ed448_key() above (CKK_EC_EDWARDS, curve in
+ * CKA_EC_PARAMS, raw RFC 8032 point in CKA_EC_POINT) — only the curve
+ * template (ed25519_ec_params instead of ed448_ec_params) and key_type_t
+ * differ.
+ */
+static private_pkcs11_public_key_t* find_ed25519_key(chunk_t pubkey,
+													  size_t keylen)
+{
+	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
+	CK_KEY_TYPE type = CKK_EC_EDWARDS;
+	CK_ATTRIBUTE tmpl[] = {
+		{CKA_CLASS, &class, sizeof(class)},
+		{CKA_KEY_TYPE, &type, sizeof(type)},
+		{CKA_EC_PARAMS, (void*)ed25519_ec_params, sizeof(ed25519_ec_params)},
+		{CKA_EC_POINT, pubkey.ptr, pubkey.len},
+	};
+	return find_key(KEY_ED25519, keylen, tmpl, countof(tmpl));
+}
+
+/**
+ * Create an Ed25519 public key object in a suitable token session.
+ */
+static private_pkcs11_public_key_t* create_ed25519_key(chunk_t pubkey,
+														size_t keylen)
+{
+	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
+	CK_KEY_TYPE type = CKK_EC_EDWARDS;
+	CK_ATTRIBUTE tmpl[] = {
+		{CKA_CLASS, &class, sizeof(class)},
+		{CKA_KEY_TYPE, &type, sizeof(type)},
+		{CKA_EC_PARAMS, (void*)ed25519_ec_params, sizeof(ed25519_ec_params)},
+		{CKA_EC_POINT, pubkey.ptr, pubkey.len},
+	};
+	CK_MECHANISM_TYPE mechs[] = {
+		CKM_EDDSA,
+	};
+	return create_key(KEY_ED25519, keylen, mechs, countof(mechs), tmpl,
 					  countof(tmpl));
 }
 
@@ -1379,6 +1461,39 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
 			}
 		}
 	}
+	else if (type == KEY_ED25519)
+	{
+		chunk_t pubkey = chunk_empty;
+
+		/* Same convention as KEY_ED448 above — see that block's comment.
+		 * public_key_info_decode()/get_public_key_size() are already
+		 * curve-generic (via key_type_from_oid()/OID_ED25519); only the
+		 * token-side storage (find_ed25519_key/create_ed25519_key) differs. */
+		if (raw.ptr)
+		{
+			pubkey = raw;
+		}
+		else if (blob.ptr)
+		{
+			if (public_key_info_decode(blob, &pubkey) != type)
+			{
+				return NULL;
+			}
+		}
+		if (pubkey.ptr && pubkey.len == (size_t)get_public_key_size(type))
+		{
+			keylen = pubkey.len * 8;
+			this = find_ed25519_key(pubkey, keylen);
+			if (!this)
+			{
+				this = create_ed25519_key(pubkey, keylen);
+			}
+			if (this)
+			{
+				return &this->public;
+			}
+		}
+	}
 	return NULL;
 }
 
@@ -1423,6 +1538,7 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
 			type = CKK_SLH_DSA;
 			break;
 		case KEY_ED448:
+		case KEY_ED25519:
 			type = CKK_EC_EDWARDS;
 			break;
 		default:
@@ -1544,20 +1660,28 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
 			{
 				chunk_t ecparams;
 
-				/* Only Ed448 is recognised — see the matching comment in
-				 * pkcs11_private_key.c's find_key(). Compared against exact
-				 * bytes, not ASN.1-parsed: this engine's PUBLIC-key
-				 * CKA_EC_PARAMS is stored verbatim as however the object was
-				 * created (this connector's own create_ed448_key() above
-				 * uses the PrintableString form; a key generated by
+				/* Both Ed448 and Ed25519 are recognised — see the matching
+				 * comment in pkcs11_private_key.c's find_key(). Compared
+				 * against exact bytes, not ASN.1-parsed: this engine's
+				 * PUBLIC-key CKA_EC_PARAMS is stored verbatim as however the
+				 * object was created (this connector's own
+				 * create_ed448_key()/create_ed25519_key() above use the
+				 * PrintableString form; a key generated by
 				 * tests/keygen_pkcs11_key.c uses the OID DER form — see
-				 * is_ed448_ec_params()'s comment for why both exist). */
+				 * is_ed448_ec_params()'s/is_ed25519_ec_params()'s comments
+				 * for why both exist). */
 				if (p11->get_ck_attribute(p11, session, object, CKA_EC_PARAMS,
 										  &ecparams))
 				{
 					if (is_ed448_ec_params(ecparams))
 					{
 						key_type = KEY_ED448;
+						keylen = get_public_key_size(key_type) * 8;
+						found = TRUE;
+					}
+					else if (is_ed25519_ec_params(ecparams))
+					{
+						key_type = KEY_ED25519;
 						keylen = get_public_key_size(key_type) * 8;
 						found = TRUE;
 					}

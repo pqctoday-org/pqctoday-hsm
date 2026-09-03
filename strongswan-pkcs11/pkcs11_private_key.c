@@ -208,6 +208,8 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
 		 KEY_SLH_DSA_SHA2_256S, 0,						  HASH_IDENTITY},
 		{SIGN_ED448,					{CKM_EDDSA,				NULL, 0},
 		 KEY_ED448, 0,									  HASH_IDENTITY},
+		{SIGN_ED25519,					{CKM_EDDSA,				NULL, 0},
+		 KEY_ED25519, 0,									HASH_IDENTITY},
 
 	};
 
@@ -359,7 +361,7 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
 				mechanism->pParameter = rsa_pkcs_pss_params;
 				mechanism->ulParameterLen = sizeof(CK_RSA_PKCS_PSS_PARAMS);
 			}
-			else if (scheme == SIGN_ED448)
+			else if (scheme == SIGN_ED448 || scheme == SIGN_ED25519)
 			{
 				/* RFC 8032 §5.2 — Ed448 ("PureEdDSA on Curve448") ALWAYS
 				 * carries a context octet string in its dom4 prefix, empty
@@ -371,7 +373,20 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
 				 * explicit CK_EDDSA_PARAMS rather than leaving pParameter
 				 * NULL. Heap-allocated (not a static/const struct) because
 				 * the sign()/verify() callers below unconditionally
-				 * free(mechanism->pParameter) once done with it. */
+				 * free(mechanism->pParameter) once done with it.
+				 *
+				 * SIGN_ED25519 shares this branch: strongSwan's
+				 * signature_scheme_t has no separate "Ed25519ctx" value and
+				 * no params type carrying an RFC 8032 context string (see
+				 * tests/README.md's "Known gaps" note), so the ONLY EdDSA
+				 * scheme reachable through private_key_t.sign()/
+				 * public_key_t.verify() is plain Ed25519 — always an empty
+				 * context, same as here. This engine's own CKM_EDDSA
+				 * dispatch (src/lib/crypto/OSSLEDDSA.cpp's resolveInstance)
+				 * resolves phFlag=FALSE + zero-length context to plain
+				 * "Ed25519" for a 32-byte key, exactly like it resolves the
+				 * same shape to plain "Ed448" for a 57-byte key — so one
+				 * CK_EDDSA_PARAMS construction here is correct for both. */
 				INIT(eddsa_params,
 					.phFlag = CK_FALSE,
 					.ulContextDataLen = 0,
@@ -548,11 +563,13 @@ METHOD(private_key_t, sign, bool,
 			break;
 		default:
 			len = (get_keysize(this) + 7) / 8;
-			if (this->type == KEY_ECDSA || this->type == KEY_ED448)
+			if (this->type == KEY_ECDSA || this->type == KEY_ED448 ||
+				this->type == KEY_ED25519)
 			{	/* signature is twice the length of the base point order
 				 * (ECDSA r||s) resp. twice the encoded public key length
 				 * (Ed448: 57-byte key -> 114-byte R||S signature, RFC 8032
-				 * §5.2.6) */
+				 * §5.2.6; Ed25519: 32-byte key -> 64-byte R||S signature,
+				 * RFC 8032 §5.1.6) */
 				len *= 2;
 			}
 			break;
@@ -898,24 +915,30 @@ static pkcs11_library_t* find_lib_and_keyid_by_skid(chunk_t keyid_chunk,
 
 /**
  * The two CKA_EC_PARAMS encodings this connector's softhsmv3 target
- * actually produces for CKK_EC_EDWARDS Ed448 keys, confirmed by direct
- * C_GetAttributeValue readback against a CKM_EC_EDWARDS_KEY_PAIR_GEN
+ * actually produces for CKK_EC_EDWARDS Ed448/Ed25519 keys, confirmed by
+ * direct C_GetAttributeValue readback against a CKM_EC_EDWARDS_KEY_PAIR_GEN
  * keypair: the PRIVATE key object's CKA_EC_PARAMS is always the DER
- * PrintableString "edwards448" (src/lib/SoftHSM_keygen.cpp's generateED()
- * normalises it on output, regardless of what the caller's private-key
- * template supplied — indeed a caller-supplied CKA_EC_PARAMS on the
- * private-key template is rejected outright, see find_key() below), while
- * the PUBLIC key object's CKA_EC_PARAMS is stored verbatim as whatever the
- * caller's public-key template supplied at generation time — the RFC 8410
- * id-Ed448 OID DER in this connector's own create_ed448_key()/
- * find_ed448_key() (pkcs11_public_key.c) and in
+ * PrintableString "edwards448"/"edwards25519" (src/lib/SoftHSM_keygen.cpp's
+ * generateED() normalises it on output, via OSSL::oid2ByteString, regardless
+ * of what the caller's private-key template supplied — indeed a
+ * caller-supplied CKA_EC_PARAMS on the private-key template is rejected
+ * outright, see find_key() below), while the PUBLIC key object's
+ * CKA_EC_PARAMS is stored verbatim as whatever the caller's public-key
+ * template supplied at generation time — the RFC 8410 id-Ed448/id-Ed25519
+ * OID DER in this connector's own create_ed448_key()/find_ed448_key()/
+ * create_ed25519_key()/find_ed25519_key() (pkcs11_public_key.c) and in
  * strongswan-pkcs11/tests/keygen_pkcs11_key.c. Both are matched here so
- * this recognises an Ed448 key regardless of which encoding produced it.
+ * this recognises an Ed448/Ed25519 key regardless of which encoding
+ * produced it.
  */
 static const unsigned char ed448_ec_params_printable[] = {
 	0x13, 0x0a, 'e', 'd', 'w', 'a', 'r', 'd', 's', '4', '4', '8'
 };
 static const unsigned char ed448_ec_params_oid[] = {0x06, 0x03, 0x2b, 0x65, 0x71};
+static const unsigned char ed25519_ec_params_printable[] = {
+	0x13, 0x0c, 'e', 'd', 'w', 'a', 'r', 'd', 's', '2', '5', '5', '1', '9'
+};
+static const unsigned char ed25519_ec_params_oid[] = {0x06, 0x03, 0x2b, 0x65, 0x70};
 
 /**
  * See the comment on ed448_ec_params_printable/ed448_ec_params_oid above.
@@ -928,6 +951,20 @@ static bool is_ed448_ec_params(chunk_t ecparams)
 		   (ecparams.len == sizeof(ed448_ec_params_oid) &&
 			memeq(ecparams.ptr, ed448_ec_params_oid,
 				 sizeof(ed448_ec_params_oid)));
+}
+
+/**
+ * See the comment on ed25519_ec_params_printable/ed25519_ec_params_oid
+ * above.
+ */
+static bool is_ed25519_ec_params(chunk_t ecparams)
+{
+	return (ecparams.len == sizeof(ed25519_ec_params_printable) &&
+			memeq(ecparams.ptr, ed25519_ec_params_printable,
+				 sizeof(ed25519_ec_params_printable))) ||
+		   (ecparams.len == sizeof(ed25519_ec_params_oid) &&
+			memeq(ecparams.ptr, ed25519_ec_params_oid,
+				 sizeof(ed25519_ec_params_oid)));
 }
 
 /**
@@ -1066,9 +1103,9 @@ static bool find_key(private_pkcs11_private_key_t *this, chunk_t keyid)
 				 * CKA_PARAMETER_SET — but compared against exact bytes, not
 				 * ASN.1-parsed, since this engine's actual on-token encoding
 				 * is a DER PrintableString or OID DER depending on how the
-				 * key was created (see is_ed448_ec_params() above). Only
-				 * Ed448 is recognised here — Ed25519 support is a separate,
-				 * not-yet-implemented scope (see tests/README.md). */
+				 * key was created (see is_ed448_ec_params()/
+				 * is_ed25519_ec_params() above). Both Ed448 and Ed25519 are
+				 * recognised here. */
 				if (this->lib->get_ck_attribute(this->lib, this->session,
 												object, CKA_EC_PARAMS,
 												&ecparams))
@@ -1076,6 +1113,10 @@ static bool find_key(private_pkcs11_private_key_t *this, chunk_t keyid)
 					if (is_ed448_ec_params(ecparams))
 					{
 						this->type = KEY_ED448;
+					}
+					else if (is_ed25519_ec_params(ecparams))
+					{
+						this->type = KEY_ED25519;
 					}
 					chunk_free(&ecparams);
 				}

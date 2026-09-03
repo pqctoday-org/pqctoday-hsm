@@ -2,10 +2,10 @@
 
 A drop-in replacement for strongSwan's stock `pkcs11` plugin, extended so that
 IKEv2 can perform **ML-KEM key exchange** (all three sizes: ML-KEM-512/768/1024)
-and **ML-DSA (44/65/87) or SLH-DSA-SHA2 (128s/192s/256s) authentication**
-through a PKCS#11 v3.2 token — i.e. against the softhsmv3 module. Private keys
-stay inside the token; charon calls `C_EncapsulateKey` / `C_DecapsulateKey` and
-`C_Sign` on the module.
+and **ML-DSA (44/65/87), SLH-DSA-SHA2 (128s/192s/256s), Ed448, or Ed25519
+authentication** through a PKCS#11 v3.2 token — i.e. against the softhsmv3
+module. Private keys stay inside the token; charon calls `C_EncapsulateKey` /
+`C_DecapsulateKey` and `C_Sign` on the module.
 
 ## What it is
 
@@ -16,7 +16,7 @@ additions over upstream:
 | File | Role |
 |---|---|
 | `pkcs11_kem.c/.h` | `key_exchange_t` backed by ML-KEM `C_EncapsulateKey`/`C_DecapsulateKey` (IKEv2 KE payload), all three sizes (512/768/1024) |
-| `pkcs11_private_key.c` / `pkcs11_public_key.c` | ML-DSA (44/65/87) and SLH-DSA-SHA2 (128s/192s/256s) sign/verify + SPKI handling via the token |
+| `pkcs11_private_key.c` / `pkcs11_public_key.c` | ML-DSA (44/65/87), SLH-DSA-SHA2 (128s/192s/256s), Ed448, and Ed25519 sign/verify + SPKI handling via the token |
 | `pkcs11_library.c`, `pkcs11_manager.c` | Module load + slot/token management |
 | `pkcs11_creds.c`, `pkcs11_hasher.c`, `pkcs11_rng.c`, `pkcs11_dh.c` | Credentials, hashing, RNG, classical DH |
 | `test_ss.c` | Minimal standalone smoke of the key-type constants |
@@ -37,7 +37,8 @@ older baselines and are not the patch set actually build-tested end to end —
 `../strongswan-pqc-slhdsa.patch` + `../strongswan-pkcs11.patch`, applied with
 `patch -p1` against a pristine 6.0.7 tree) and is the one to follow; that exact
 sequence was used to build a real `libstrongswan-pkcs11.so` and pass a live
-ML-DSA-44/65/87 + SLH-DSA-SHA2-128s/192s/256s sign/verify test (2026-09-01/02).
+ML-DSA-44/65/87 + SLH-DSA-SHA2-128s/192s/256s + Ed448 + Ed25519 sign/verify
+test (2026-09-01/02, extended with Ed25519 2026-09-02).
 
 Once patched, configure with the plugin enabled:
 
@@ -53,9 +54,10 @@ tree) and `../scripts/build-strongswan-wasm.sh`.
 
 `tests/test_pkcs11_conn.c` links directly against a real `libstrongswan.so` +
 this plugin and drives the actual credential-layer sign/verify path IKEv2
-peer auth uses, for all 6 signature key types this connector supports
-(ML-DSA-44/65/87, SLH-DSA-SHA2-128s/192s/256s) — see `tests/README.md` for
-the full build/run steps and the last confirmed pass/fail table.
+peer auth uses, for all 8 signature key types this connector supports
+(ML-DSA-44/65/87, SLH-DSA-SHA2-128s/192s/256s, Ed448, Ed25519) — see
+`tests/README.md` for the full build/run steps and the last confirmed
+pass/fail table.
 
 ## Test against softhsmv3 (full IKEv2 handshake)
 

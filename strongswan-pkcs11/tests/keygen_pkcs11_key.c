@@ -1,7 +1,7 @@
 /* keygen_pkcs11_key.c — minimal, dependency-free PKCS#11 C-API keygen
- * helper: provisions a token-persistent ML-DSA or SLH-DSA keypair with a
- * caller-chosen CKA_ID/CKA_LABEL, for test_pkcs11_conn.c (or any other
- * strongswan-pkcs11 test) to find via BUILD_PKCS11_KEYID.
+ * helper: provisions a token-persistent ML-DSA, SLH-DSA, Ed448, or Ed25519
+ * keypair with a caller-chosen CKA_ID/CKA_LABEL, for test_pkcs11_conn.c (or
+ * any other strongswan-pkcs11 test) to find via BUILD_PKCS11_KEYID.
  *
  * dlopen()s the target PKCS#11 module directly and hand-rolls the handful
  * of CK_FUNCTION_LIST entries it needs (v2.01+ layout, unchanged since),
@@ -57,8 +57,8 @@ typedef CK_ULONG CK_USER_TYPE;
 #define CKP_SLH_DSA_SHA2_192S 0x00000005UL
 #define CKP_SLH_DSA_SHA2_256S 0x00000009UL
 /* CKK_EC_EDWARDS/CKM_EC_EDWARDS_KEY_PAIR_GEN/CKA_EC_PARAMS (PKCS#11 v3.2
- * §2.3.7 / §6.66) — used for Ed448 below, distinct from ML-DSA/SLH-DSA:
- * curve selected via CKA_EC_PARAMS, not CKA_PARAMETER_SET. */
+ * §2.3.7 / §6.66) — used for Ed448/Ed25519 below, distinct from
+ * ML-DSA/SLH-DSA: curve selected via CKA_EC_PARAMS, not CKA_PARAMETER_SET. */
 #define CKK_EC_EDWARDS 0x00000040UL
 #define CKM_EC_EDWARDS_KEY_PAIR_GEN 0x00001055UL
 #define CKA_EC_PARAMS 0x00000180UL
@@ -84,7 +84,8 @@ int main(int argc, char **argv) {
     if (argc < 5) {
         fprintf(stderr,
             "usage: %s <module.so> <token-label> <pin> <keyid-hex> "
-            "[paramset:128s|192s|256s|mldsa44|mldsa65|mldsa87|ed448] [label]\n",
+            "[paramset:128s|192s|256s|mldsa44|mldsa65|mldsa87|ed448|ed25519] "
+            "[label]\n",
             argv[0]);
         return 2;
     }
@@ -179,17 +180,21 @@ int main(int argc, char **argv) {
     CK_OBJECT_CLASS pubClass = CKO_PUBLIC_KEY, privClass = CKO_PRIVATE_KEY;
     int is_mldsa = (strncmp(paramset_s, "mldsa", 5) == 0);
     int is_ed448 = (strcmp(paramset_s, "ed448") == 0);
-    CK_KEY_TYPE ktype = is_ed448 ? CKK_EC_EDWARDS : is_mldsa ? CKK_ML_DSA : CKK_SLH_DSA;
-    CK_MECHANISM_TYPE kpMechType = is_ed448 ? CKM_EC_EDWARDS_KEY_PAIR_GEN :
+    int is_ed25519 = (strcmp(paramset_s, "ed25519") == 0);
+    int is_edwards = is_ed448 || is_ed25519;
+    CK_KEY_TYPE ktype = is_edwards ? CKK_EC_EDWARDS : is_mldsa ? CKK_ML_DSA : CKK_SLH_DSA;
+    CK_MECHANISM_TYPE kpMechType = is_edwards ? CKM_EC_EDWARDS_KEY_PAIR_GEN :
                                     is_mldsa ? CKM_ML_DSA_KEY_PAIR_GEN : CKM_SLH_DSA_KEY_PAIR_GEN;
     CK_BBOOL bTrue = CK_TRUE;
     CK_ULONG paramSet = 0;
-    /* RFC 8410 id-Ed448 OID (1.3.101.113), DER-encoded — this connector's
-     * canonical CKA_EC_PARAMS encoding for Ed448 (matches
-     * strongswan-pkcs11/pkcs11_public_key.c's ed448_ec_params_oid). Only
-     * used when is_ed448; ML-DSA/SLH-DSA keep using CKA_PARAMETER_SET. */
+    /* RFC 8410 id-Ed448/id-Ed25519 OIDs (1.3.101.113 / 1.3.101.112),
+     * DER-encoded — this connector's canonical CKA_EC_PARAMS encoding for
+     * Ed448/Ed25519 (matches strongswan-pkcs11/pkcs11_public_key.c's
+     * ed448_ec_params_oid/ed25519_ec_params_oid). Only used when
+     * is_edwards; ML-DSA/SLH-DSA keep using CKA_PARAMETER_SET. */
     unsigned char ed448_oid[] = { 0x06, 0x03, 0x2b, 0x65, 0x71 };
-    if (is_ed448) {
+    unsigned char ed25519_oid[] = { 0x06, 0x03, 0x2b, 0x65, 0x70 };
+    if (is_edwards) {
         /* no CKA_PARAMETER_SET for CKK_EC_EDWARDS — curve is in CKA_EC_PARAMS */
     } else if (is_mldsa) {
         paramSet = (strcmp(paramset_s, "mldsa87") == 0) ? CKP_ML_DSA_87 :
@@ -225,8 +230,10 @@ int main(int argc, char **argv) {
         { CKA_LABEL, (void*)objlabel, (CK_ULONG)strlen(objlabel) },
     };
     CK_ULONG privCount = 7;
-    if (is_ed448) {
-        pubTmpl[3].type = CKA_EC_PARAMS; pubTmpl[3].pValue = ed448_oid; pubTmpl[3].ulValueLen = sizeof(ed448_oid);
+    if (is_edwards) {
+        pubTmpl[3].type = CKA_EC_PARAMS;
+        pubTmpl[3].pValue = is_ed448 ? (void*)ed448_oid : (void*)ed25519_oid;
+        pubTmpl[3].ulValueLen = is_ed448 ? sizeof(ed448_oid) : sizeof(ed25519_oid);
         /* drop the unused slot 3 from privTmpl by shifting the remaining
          * attributes down and shrinking the count passed to
          * C_GenerateKeyPair. */
