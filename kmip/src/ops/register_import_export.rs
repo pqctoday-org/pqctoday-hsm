@@ -1124,6 +1124,11 @@ pub(crate) struct ExtractedAttrs {
     pub rotate_interval: Option<u32>,
     pub rotate_offset: Option<i32>,
     pub rotate_name: Option<String>,
+    /// §4.61 / §4.26 — client-set security posture for objects created by
+    /// operations that take an `Attributes` list (Encapsulate / Decapsulate
+    /// shared secrets, Derive Key outputs). `None` = server default.
+    pub sensitive: Option<bool>,
+    pub extractable: Option<bool>,
 }
 
 pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
@@ -1142,6 +1147,8 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         rotate_interval: None,
         rotate_offset: None,
         rotate_name: None,
+        sensitive: None,
+        extractable: None,
     };
     for a in attrs {
         match a {
@@ -1161,6 +1168,8 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::RotateInterval(n)           => out.rotate_interval = Some(*n),
             Attribute::RotateOffset(n)             => out.rotate_offset = Some(*n),
             Attribute::RotateName(s)               => out.rotate_name = Some(s.clone()),
+            Attribute::Sensitive(b)                => out.sensitive = Some(*b),
+            Attribute::Extractable(b)              => out.extractable = Some(*b),
             Attribute::UsageLimits { total, unit, .. } => {
                 out.usage_limits_total = Some(*total);
                 out.usage_limits_unit = *unit;

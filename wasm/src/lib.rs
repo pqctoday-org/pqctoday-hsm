@@ -1410,11 +1410,13 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             uid: uid(),
             input_key_material: None,
             cryptographic_parameters: None,
+            attributes: Vec::new(),
         }),
         "Decapsulate" => RequestPayload::Decapsulate(DecapsulateRequest {
             uid: uid(),
             data: spec_bytes(spec, "data", "_"),
             cryptographic_parameters: None,
+            attributes: Vec::new(),
         }),
         // `ivHex` threads the IV between the two calls of a symmetric round trip
         // (the UI carries it from Encrypt's `ivHex` response field back into

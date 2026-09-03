@@ -2494,3 +2494,65 @@ mod tests {
         close_session(session).unwrap();
     }
 }
+
+// ── Composite-key plan WP 0.4 (G-26): KEM shared secrets as handles ──────────
+//
+// The `encapsulate` / `decapsulate` functions above return the shared secret
+// as bytes to their caller. The KMIP server used to persist those bytes in its
+// own object store, which put every HPKE / KDF intermediate derived from them
+// into KMIP process memory. These wrappers perform the same KEM step and then
+// register the shared secret as an engine object via
+// `keygen::register_kem_shared_secret`, returning only the handle (plus the
+// public ciphertext on the encapsulate side). The bytes never cross out of
+// this crate.
+
+/// [`encapsulate`] + in-engine registration of the shared secret.
+/// Returns `(ciphertext, shared_secret_handle)`.
+#[allow(clippy::too_many_arguments)]
+pub fn encapsulate_to_handle(
+    session: u32,
+    public_key_handle: u32,
+    mechanism: u32,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<(Vec<u8>, u32), CkRv> {
+    let (ct, ss) = encapsulate(session, public_key_handle, mechanism)?;
+    let h = super::keygen::register_kem_shared_secret(session, &ss, cka_id, label, extractable, sensitive)?;
+    Ok((ct, h))
+}
+
+/// [`encapsulate_deterministic`] + in-engine registration of the shared secret.
+#[allow(clippy::too_many_arguments)]
+pub fn encapsulate_deterministic_to_handle(
+    session: u32,
+    public_key_handle: u32,
+    mechanism: u32,
+    m: &[u8],
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<(Vec<u8>, u32), CkRv> {
+    let (ct, ss) = encapsulate_deterministic(session, public_key_handle, mechanism, m)?;
+    let h = super::keygen::register_kem_shared_secret(session, &ss, cka_id, label, extractable, sensitive)?;
+    Ok((ct, h))
+}
+
+/// [`decapsulate`] + in-engine registration of the recovered shared secret.
+/// Returns the shared-secret handle.
+#[allow(clippy::too_many_arguments)]
+pub fn decapsulate_to_handle(
+    session: u32,
+    private_key_handle: u32,
+    mechanism: u32,
+    ciphertext: &[u8],
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<u32, CkRv> {
+    let ss = decapsulate(session, private_key_handle, mechanism, ciphertext)?;
+    super::keygen::register_kem_shared_secret(session, &ss, cka_id, label, extractable, sensitive)
+}

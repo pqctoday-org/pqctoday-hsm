@@ -346,3 +346,42 @@ mod tests {
         );
     }
 }
+
+// ── Composite-key plan WP 0.4 (G-26): hybrid KEM shared secrets as handles ──
+
+/// [`encapsulate`] + in-engine registration of the combined shared secret.
+/// Returns `(ciphertext, shared_secret_handle)`; see `encrypt.rs`'s
+/// `encapsulate_to_handle` for the rationale.
+#[allow(clippy::too_many_arguments)]
+pub fn encapsulate_to_handle(
+    session: u32,
+    hybrid: Hybrid,
+    peer_public: &[u8],
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<(Vec<u8>, u32), CkRv> {
+    let enc = encapsulate(session, hybrid, peer_public)?;
+    let h = super::keygen::register_kem_shared_secret(
+        session, &enc.shared_secret, cka_id, label, extractable, sensitive,
+    )?;
+    Ok((enc.ciphertext, h))
+}
+
+/// [`decapsulate`] + in-engine registration of the combined shared secret.
+#[allow(clippy::too_many_arguments)]
+pub fn decapsulate_to_handle(
+    session: u32,
+    hybrid: Hybrid,
+    mlkem_priv: u32,
+    classical_priv: u32,
+    ciphertext: &[u8],
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<u32, CkRv> {
+    let ss = decapsulate(session, hybrid, mlkem_priv, classical_priv, ciphertext)?;
+    super::keygen::register_kem_shared_secret(session, &ss, cka_id, label, extractable, sensitive)
+}

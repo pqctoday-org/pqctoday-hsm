@@ -42,6 +42,24 @@ const X25519_LEN: usize = 32;
 const X25519_SPKI_PREFIX: [u8; 12] =
     [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e, 0x03, 0x21, 0x00];
 
+
+/// Composite-key plan WP 0.4/0.5 — KEM shared secrets and derived keys are
+/// engine-resident (the KMIP store holds no material); read them the way a
+/// KMIP client would, via Get, never from the store.
+fn kmip_material(d: &Deps, uid: &str) -> Vec<u8> {
+    use pqctoday_kmip::kmip30::GetRequest;
+    use pqctoday_kmip::ops::get::get;
+    get(
+        d,
+        GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+        &AuthContext::open(),
+        "get-material",
+    )
+    .expect("Get of engine-resident material")
+    .key_block
+    .key_value
+}
+
 fn engine_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -202,13 +220,13 @@ fn mlkem768_our_encap_openssl_decap() {
     let pub_uid = register_key(&d, ObjectType::PublicKey, KmipAlgorithm::MlKem768, ek, UsageMask::ENCRYPT);
     let enc = encapsulate(
         &d,
-        EncapsulateRequest { uid: pub_uid, input_key_material: None, cryptographic_parameters: None },
+        EncapsulateRequest { uid: pub_uid, input_key_material: None, cryptographic_parameters: None, attributes: vec![] },
         &AuthContext::open(),
         "encap",
     )
     .expect("KMIP encapsulate");
     assert_eq!(enc.data.len(), 1088, "ML-KEM-768 ciphertext length");
-    let ss_ours = d.store.get(&enc.uid).unwrap().unwrap().key_material.expect("encap SS");
+    let ss_ours = kmip_material(&d, &enc.uid);
 
     // OpenSSL decapsulates our ciphertext with its private key.
     write(&dir, "ct.bin", &enc.data);
@@ -264,12 +282,12 @@ fn mlkem768_openssl_encap_our_decap() {
     // We decapsulate OpenSSL's ciphertext through the KMIP op.
     let dec = decapsulate(
         &d,
-        DecapsulateRequest { uid: priv_uid, data: ct, cryptographic_parameters: None },
+        DecapsulateRequest { uid: priv_uid, data: ct, cryptographic_parameters: None, attributes: vec![] },
         &AuthContext::open(),
         "decap",
     )
     .expect("KMIP decapsulate");
-    let ss_ours = d.store.get(&dec.uid).unwrap().unwrap().key_material.expect("decap SS");
+    let ss_ours = kmip_material(&d, &dec.uid);
 
     assert_eq!(ss_ours, ss_ossl, "OpenSSL encaps and our decaps must agree (interop)");
     assert_eq!(ss_ours.len(), 32);
@@ -318,13 +336,13 @@ fn x25519mlkem768_our_encap_openssl_component_decap() {
     // Our KMIP hybrid Encapsulate.
     let enc = encapsulate(
         &d,
-        EncapsulateRequest { uid: pub_uid, input_key_material: None, cryptographic_parameters: None },
+        EncapsulateRequest { uid: pub_uid, input_key_material: None, cryptographic_parameters: None, attributes: vec![] },
         &AuthContext::open(),
         "encap",
     )
     .expect("KMIP hybrid encapsulate");
     assert_eq!(enc.data.len(), MLKEM768_CT + X25519_LEN, "hybrid ciphertext length");
-    let ss_ours = d.store.get(&enc.uid).unwrap().unwrap().key_material.expect("encap SS");
+    let ss_ours = kmip_material(&d, &enc.uid);
     assert_eq!(ss_ours.len(), 64);
 
     // Verify each half against OpenSSL: ct = ct_mlkem ‖ x_eph.
@@ -422,12 +440,12 @@ fn x25519mlkem768_openssl_component_encap_our_decap() {
 
     let dec = decapsulate(
         &d,
-        DecapsulateRequest { uid: kp.private_key_uid, data: hybrid_ct, cryptographic_parameters: None },
+        DecapsulateRequest { uid: kp.private_key_uid, data: hybrid_ct, cryptographic_parameters: None, attributes: vec![] },
         &AuthContext::open(),
         "decap",
     )
     .expect("KMIP hybrid decapsulate");
-    let ss_ours = d.store.get(&dec.uid).unwrap().unwrap().key_material.expect("decap SS");
+    let ss_ours = kmip_material(&d, &dec.uid);
 
     assert_eq!(
         ss_ours, expected,

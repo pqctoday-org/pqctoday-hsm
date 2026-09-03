@@ -1350,6 +1350,73 @@ pub fn register_generic_secret_bytes(
     Ok(alloc_in_session_slot(_session, attrs))
 }
 
+/// Composite-key plan WP 0.4 (G-26) — register a KEM shared secret as an
+/// engine-resident generic-secret object **without the bytes ever leaving
+/// this crate**. Called by the `*_to_handle` KEM wrappers in `encrypt.rs` /
+/// `hybrid.rs` right after the KEM step; the KMIP layer receives only the
+/// handle (and the ciphertext, which is public). The secret is marked
+/// `CKA_DERIVE` (it is keying material — RFC 9180 §5.1 uses it as the HKDF
+/// salt / HMAC key) and `CKA_SIGN`/`CKA_VERIFY` (HMAC-based derivation via
+/// `native::sign`). `extractable` / `sensitive` come from the client's KMIP
+/// request Attributes; the defaults (true / false) keep the OASIS PQC interop
+/// transcripts' `Get` of the shared secret working.
+pub fn register_kem_shared_secret(
+    _session: u32,
+    secret: &[u8],
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<u32, CkRv> {
+    let mut attrs = build_generic_secret_attrs(secret.to_vec(), secret.len() as u32, cka_id, label);
+    // Provenance: produced by a KEM, not generated in-token (§4.3/§4.10).
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
+    store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
+    store_bool(&mut attrs, CKA_DERIVE, true);
+    store_bool(&mut attrs, CKA_SIGN, true);
+    store_bool(&mut attrs, CKA_VERIFY, true);
+    store_bool(&mut attrs, CKA_EXTRACTABLE, extractable);
+    store_bool(&mut attrs, CKA_SENSITIVE, sensitive);
+    compute_kcv(&mut attrs);
+    Ok(alloc_in_session_slot(_session, attrs))
+}
+
+/// Composite-key plan WP 0.5 (G-27) — register the OUTPUT of a key
+/// derivation as an engine-resident object of the requested type, so the
+/// derived material never leaves this crate. `key_type` is `CKK_AES` (a key
+/// KMIP Encrypt/Decrypt will use by handle) or `CKK_GENERIC_SECRET` (HMAC /
+/// Secret Data / further derivation). Provenance is "derived", not
+/// generated-in-token (§4.3/§4.9/§4.10).
+#[allow(clippy::too_many_arguments)]
+pub fn register_derived_key_typed(
+    _session: u32,
+    key_bytes: &[u8],
+    key_type: u32,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<u32, CkRv> {
+    let len = key_bytes.len() as u32;
+    let mut attrs = if key_type == CKK_AES {
+        build_aes_attrs(key_bytes.to_vec(), len, cka_id, label)
+    } else {
+        let mut a = build_generic_secret_attrs(key_bytes.to_vec(), len, cka_id, label);
+        store_bool(&mut a, CKA_DERIVE, true);
+        a
+    };
+    store_bool(&mut attrs, CKA_LOCAL, false);
+    store_ulong(&mut attrs, CKA_KEY_GEN_MECHANISM, CKM_UNAVAILABLE_INFORMATION);
+    store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
+    store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
+    store_bool(&mut attrs, CKA_EXTRACTABLE, extractable);
+    store_bool(&mut attrs, CKA_SENSITIVE, sensitive);
+    compute_kcv(&mut attrs);
+    Ok(alloc_in_session_slot(_session, attrs))
+}
+
 // ── PQC key import (fix-plan S7, consumed by KMIP K9 / B-6) ─────────────────
 //
 // Each `register_*` function accepts raw FIPS 203/204/205 key bytes plus
@@ -2018,7 +2085,7 @@ fn set_common_ec_prv_attrs(attrs: &mut Attributes) {
 
 /// Build the attribute map for an AES secret key. Mirrors
 /// `ffi::C_GenerateKey @ CKM_AES_KEY_GEN`.
-fn build_aes_attrs(key: Vec<u8>, key_len_bytes: u32, cka_id: &[u8], label: &str) -> Attributes {
+pub(crate) fn build_aes_attrs(key: Vec<u8>, key_len_bytes: u32, cka_id: &[u8], label: &str) -> Attributes {
     let mut attrs: Attributes = HashMap::new();
     attrs.insert(CKA_VALUE, key);
     store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);

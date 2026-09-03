@@ -1439,6 +1439,337 @@ fn register_ml_kem_768_pair(deps: &Deps) -> (String, String) {
 }
 
 /// Get a SecretData object's KeyMaterial (the shared secret bytes).
+/// Composite-key plan WP 0.4 (G-20 / G-26) — against the real engine the KEM
+/// shared secret is an ENGINE-RESIDENT object: the KMIP record holds no
+/// material, `Get` still serves it (extractable by default, as the OASIS PQC
+/// interop transcripts expect), and the request `Attributes` are honoured:
+/// `Extractable=false` + `Sensitive=true` make `Get` refuse, and an
+/// `Activation Date` in the past births the object Active (§4.67 transition 1).
+#[test]
+fn kem_shared_secret_is_engine_resident_and_honours_request_attributes() {
+    use pqctoday_kmip::kmip30::{Attribute, DecapsulateRequest, EncapsulateRequest, GetRequest, State};
+    use pqctoday_kmip::ops::decapsulate::decapsulate;
+    use pqctoday_kmip::ops::encapsulate::encapsulate;
+    use pqctoday_kmip::ops::get::get;
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+    let (priv_uid, pub_uid) = register_ml_kem_768_pair(&deps);
+
+    // Default: engine-resident, Pre-Active, Get works.
+    let enc = encapsulate(
+        &deps,
+        EncapsulateRequest { uid: pub_uid.clone(), input_key_material: None, cryptographic_parameters: None, attributes: vec![] },
+        &AuthContext::open(),
+        "ss-default",
+    )
+    .expect("Encapsulate");
+    let rec = deps.store.get(&enc.uid).unwrap().unwrap();
+    assert!(rec.key_material.is_none(), "shared secret must not be store-held");
+    assert_eq!(rec.state, State::PreActive, "no Activation Date → Pre-Active, unchanged");
+    assert_eq!(get_shared_secret(&deps, &enc.uid).len(), 32, "Get serves the engine object");
+
+    // Attributes honoured: non-extractable + sensitive + active.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let attrs = vec![
+        Attribute::Extractable(false),
+        Attribute::Sensitive(true),
+        Attribute::ActivationDate(now - 1),
+    ];
+    let dec = decapsulate(
+        &deps,
+        DecapsulateRequest { uid: priv_uid, data: enc.data.clone(), cryptographic_parameters: None, attributes: attrs },
+        &AuthContext::open(),
+        "ss-attrs",
+    )
+    .expect("Decapsulate");
+    let rec = deps.store.get(&dec.uid).unwrap().unwrap();
+    assert!(rec.key_material.is_none());
+    assert_eq!(rec.state, State::Active, "past Activation Date → Active at creation");
+    assert_eq!(rec.extractable, Some(false));
+    assert_eq!(rec.sensitive, Some(true));
+    let r = get(
+        &deps,
+        GetRequest { uid: dec.uid.clone(), key_format_type: None, key_wrapping_specification: None },
+        &AuthContext::open(),
+        "ss-get-refused",
+    );
+    assert!(r.is_err(), "a non-extractable, sensitive shared secret must not be served by Get");
+}
+
+/// Composite-key plan WP 0.5 (G-21 / G-27) — HMAC and HASH derivations run
+/// inside the engine and their output is engine-resident; correctness is
+/// pinned byte-exactly against an independent software computation:
+/// * HMAC over an engine-resident HMAC key (Register imports HMAC keys into
+///   the engine) → `Get(derived) == HMAC-SHA256(K, data)[..len]`;
+/// * HASH over a store-held raw key (temporary in-engine import branch)
+///   → `Get(derived) == SHA-256(K)[..len]`;
+/// * G-21: a base with no PRF of its own accepts the request's Hashing
+///   Algorithm.
+#[test]
+fn derive_key_hmac_and_hash_run_in_engine_and_match_software_vectors() {
+    use hmac::{Hmac, Mac};
+    use pqctoday_kmip::kmip30::{
+        Attribute, CryptographicParameters, DerivationMethod, DerivationParameters, DeriveKeyRequest,
+        HashingAlgorithm, KeyFormatType,
+    };
+    use pqctoday_kmip::ops::derive_key::derive_key;
+    use sha2::{Digest, Sha256};
+
+    let _guard = engine_test_lock();
+    let deps = build_deps_with_real_engine();
+
+    let k: Vec<u8> = (0u8..32).map(|i| i.wrapping_mul(7).wrapping_add(3)).collect();
+    let data = b"HPKE-v1\x00secret".to_vec();
+
+    // (1) HMAC method, engine-resident base (Register'd HMAC-SHA256 key).
+    let hmac_base = register_pqc(
+        &deps,
+        ObjectType::SymmetricKey,
+        KmipAlgorithm::HmacSha256,
+        KeyFormatType::Raw,
+        k.clone(),
+        UsageMask::DERIVE_KEY | UsageMask::MAC_GENERATE,
+    )
+    .expect("register HMAC base");
+    let derived = derive_key(
+        &deps,
+        DeriveKeyRequest {
+            object_type: ObjectType::SymmetricKey,
+            uids: vec![hmac_base],
+            derivation_method: DerivationMethod::Hmac,
+            derivation_parameters: DerivationParameters {
+                derivation_data: Some(data.clone()),
+                ..Default::default()
+            },
+            template_attribute: vec![
+                Attribute::CryptographicAlgorithm(KmipAlgorithm::Aes),
+                Attribute::CryptographicLength(128),
+                Attribute::CryptographicUsageMask(UsageMask::ENCRYPT | UsageMask::DECRYPT),
+                Attribute::ActivationDate(
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - 1,
+                ),
+            ],
+        },
+        &AuthContext::open(),
+        "dk-hmac",
+    )
+    .expect("HMAC DeriveKey");
+    let rec = deps.store.get(&derived.uid).unwrap().unwrap();
+    assert!(rec.key_material.is_none(), "derived AES key is engine-resident");
+    assert_eq!(rec.algorithm, KmipAlgorithm::Aes);
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&k).unwrap();
+    mac.update(&data);
+    let expected = mac.finalize().into_bytes()[..16].to_vec();
+    assert_eq!(get_shared_secret(&deps, &derived.uid), expected, "HMAC-SHA256(K, data)[..16]");
+
+    // (2) HASH method over a STORE-HELD raw base (temporary in-engine import),
+    //     and G-21: the base names no PRF, the request's hash is used.
+    let raw_base = register_pqc(
+        &deps,
+        ObjectType::SecretData,
+        KmipAlgorithm::Aes,
+        KeyFormatType::Raw,
+        k.clone(),
+        UsageMask::DERIVE_KEY,
+    )
+    .expect("register raw base");
+    let derived = derive_key(
+        &deps,
+        DeriveKeyRequest {
+            object_type: ObjectType::SecretData,
+            uids: vec![raw_base],
+            derivation_method: DerivationMethod::Hash,
+            derivation_parameters: DerivationParameters {
+                cryptographic_parameters: Some(CryptographicParameters {
+                    hashing_algorithm: Some(HashingAlgorithm::Sha256),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            template_attribute: vec![
+                Attribute::CryptographicLength(192),
+                Attribute::CryptographicUsageMask(UsageMask::DERIVE_KEY),
+                Attribute::ActivationDate(
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - 1,
+                ),
+            ],
+        },
+        &AuthContext::open(),
+        "dk-hash",
+    )
+    .expect("HASH DeriveKey");
+    let rec = deps.store.get(&derived.uid).unwrap().unwrap();
+    assert!(rec.key_material.is_none(), "derived secret is engine-resident");
+    let expected = Sha256::digest(&k)[..24].to_vec();
+    assert_eq!(get_shared_secret(&deps, &derived.uid), expected, "SHA-256(K)[..24]");
+
+    // (3) PBKDF2 method (WP 0.5 residue close-out, 2026-09-02) — RFC 7914 §11
+    // KAT: PBKDF2-HMAC-SHA-256(P="passwd", S="salt", c=1, dkLen=64). The
+    // password is a STORE-HELD raw base (temp-imported), same as the HASH
+    // case above; the point of this assertion is that the derived output is
+    // now engine-resident even though the password briefly lived in the
+    // engine only as a temporary import, never in this crate.
+    let pw_base = register_pqc(
+        &deps,
+        ObjectType::SecretData,
+        KmipAlgorithm::Aes,
+        KeyFormatType::Raw,
+        b"passwd".to_vec(),
+        UsageMask::DERIVE_KEY,
+    )
+    .expect("register PBKDF2 password base");
+    let derived = derive_key(
+        &deps,
+        DeriveKeyRequest {
+            object_type: ObjectType::SecretData,
+            uids: vec![pw_base],
+            derivation_method: DerivationMethod::Pbkdf2,
+            derivation_parameters: DerivationParameters {
+                cryptographic_parameters: Some(CryptographicParameters {
+                    hashing_algorithm: Some(HashingAlgorithm::Sha256),
+                    ..Default::default()
+                }),
+                salt: Some(b"salt".to_vec()),
+                iteration_count: Some(1),
+                ..Default::default()
+            },
+            template_attribute: vec![
+                Attribute::CryptographicLength(512),
+                Attribute::CryptographicUsageMask(UsageMask::DERIVE_KEY),
+                Attribute::ActivationDate(
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - 1,
+                ),
+            ],
+        },
+        &AuthContext::open(),
+        "dk-pbkdf2",
+    )
+    .expect("PBKDF2 DeriveKey");
+    let rec = deps.store.get(&derived.uid).unwrap().unwrap();
+    assert!(rec.key_material.is_none(), "PBKDF2 output is engine-resident, not returned to this crate");
+    let mut expected = vec![0u8; 64];
+    pbkdf2::pbkdf2_hmac::<Sha256>(b"passwd", b"salt", 1, &mut expected);
+    assert_eq!(
+        get_shared_secret(&deps, &derived.uid), expected,
+        "RFC 7914 §11 PBKDF2-HMAC-SHA-256(\"passwd\", \"salt\", c=1, dkLen=64)"
+    );
+
+    // (4) NIST800-108-C (Counter Mode), engine-resident base, three SHA-256
+    // blocks (72-byte request). Independently reconstructed here with the
+    // `hmac` crate directly — not by calling this stack's own `hmac_of` —
+    // pinning the same construction the KMIP-layer unit test
+    // `nist_108_counter_multi_block_concatenates_prf_blocks` locks against
+    // the no-session software path.
+    let kdk = register_pqc(
+        &deps,
+        ObjectType::SymmetricKey,
+        KmipAlgorithm::HmacSha256,
+        KeyFormatType::Raw,
+        b"kbkdf-base-key".to_vec(),
+        UsageMask::DERIVE_KEY,
+    )
+    .expect("register SP800-108-C base");
+    let label_ctx = b"L\x00C".to_vec();
+    let derived = derive_key(
+        &deps,
+        DeriveKeyRequest {
+            object_type: ObjectType::SecretData,
+            uids: vec![kdk],
+            derivation_method: DerivationMethod::Nist800_108C,
+            derivation_parameters: DerivationParameters {
+                derivation_data: Some(label_ctx.clone()),
+                ..Default::default()
+            },
+            template_attribute: vec![
+                Attribute::CryptographicLength(72 * 8),
+                Attribute::CryptographicUsageMask(UsageMask::DERIVE_KEY),
+                Attribute::ActivationDate(
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - 1,
+                ),
+            ],
+        },
+        &AuthContext::open(),
+        "dk-108c",
+    )
+    .expect("NIST800-108-C DeriveKey");
+    let rec = deps.store.get(&derived.uid).unwrap().unwrap();
+    assert!(rec.key_material.is_none(), "SP800-108-C output is engine-resident");
+    let mut expected = Vec::new();
+    for i in 1u32..=3 {
+        let mut input = i.to_be_bytes().to_vec();
+        input.extend_from_slice(&label_ctx);
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(b"kbkdf-base-key").unwrap();
+        mac.update(&input);
+        expected.extend_from_slice(&mac.finalize().into_bytes());
+    }
+    expected.truncate(72);
+    assert_eq!(
+        get_shared_secret(&deps, &derived.uid), expected,
+        "SP800-108 Counter Mode, 3 SHA-256 blocks, counter-before-fixed-data"
+    );
+
+    // (5) NIST800-108-DPI (Double-Pipeline Iteration Mode), same base and
+    // Derivation Data, independently reconstructed via the A(i) chain —
+    // A(1) = HMAC(K, data); round i = HMAC(K, A(i) ‖ [i]‖ data); A(i+1) =
+    // HMAC(K, A(i)) — mirroring `nist_108_double_pipeline_matches_construction`.
+    let kdk2 = register_pqc(
+        &deps,
+        ObjectType::SymmetricKey,
+        KmipAlgorithm::HmacSha256,
+        KeyFormatType::Raw,
+        b"kbkdf-base-key".to_vec(),
+        UsageMask::DERIVE_KEY,
+    )
+    .expect("register SP800-108-DPI base");
+    let derived = derive_key(
+        &deps,
+        DeriveKeyRequest {
+            object_type: ObjectType::SecretData,
+            uids: vec![kdk2],
+            derivation_method: DerivationMethod::Nist800_108Dpi,
+            derivation_parameters: DerivationParameters {
+                derivation_data: Some(label_ctx.clone()),
+                ..Default::default()
+            },
+            template_attribute: vec![
+                Attribute::CryptographicLength(72 * 8),
+                Attribute::CryptographicUsageMask(UsageMask::DERIVE_KEY),
+                Attribute::ActivationDate(
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - 1,
+                ),
+            ],
+        },
+        &AuthContext::open(),
+        "dk-108dpi",
+    )
+    .expect("NIST800-108-DPI DeriveKey");
+    let rec = deps.store.get(&derived.uid).unwrap().unwrap();
+    assert!(rec.key_material.is_none(), "SP800-108-DPI output is engine-resident");
+    let hmac_once = |key: &[u8], data: &[u8]| -> Vec<u8> {
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).unwrap();
+        mac.update(data);
+        mac.finalize().into_bytes().to_vec()
+    };
+    let mut a = hmac_once(b"kbkdf-base-key", &label_ctx); // A(1)
+    let mut expected = Vec::new();
+    for i in 1u32..=3 {
+        let mut round_input = a.clone();
+        round_input.extend_from_slice(&i.to_be_bytes());
+        round_input.extend_from_slice(&label_ctx);
+        expected.extend_from_slice(&hmac_once(b"kbkdf-base-key", &round_input));
+        a = hmac_once(b"kbkdf-base-key", &a); // A(i+1)
+    }
+    expected.truncate(72);
+    assert_eq!(
+        get_shared_secret(&deps, &derived.uid), expected,
+        "SP800-108 Double-Pipeline Iteration Mode, 3 SHA-256 rounds"
+    );
+}
+
 fn get_shared_secret(deps: &Deps, uid: &str) -> Vec<u8> {
     use pqctoday_kmip::kmip30::GetRequest;
     use pqctoday_kmip::ops::get::get;
@@ -1477,6 +1808,7 @@ fn wd19_encapsulate_decapsulate_byte_exact_against_real_engine() {
             uid: pub_uid.clone(),
             input_key_material: Some(coins.clone()),
             cryptographic_parameters: None,
+            attributes: vec![],
         },
         &AuthContext::open(),
         "wd19-encap-1",
@@ -1495,6 +1827,7 @@ fn wd19_encapsulate_decapsulate_byte_exact_against_real_engine() {
             uid: pub_uid.clone(),
             input_key_material: Some(coins.clone()),
             cryptographic_parameters: None,
+            attributes: vec![],
         },
         &AuthContext::open(),
         "wd19-encap-2",
@@ -1514,6 +1847,7 @@ fn wd19_encapsulate_decapsulate_byte_exact_against_real_engine() {
             uid: priv_uid.clone(),
             data: enc1.data.clone(),
             cryptographic_parameters: None,
+            attributes: vec![],
         },
         &AuthContext::open(),
         "wd19-decap",
@@ -1533,6 +1867,7 @@ fn wd19_encapsulate_decapsulate_byte_exact_against_real_engine() {
             uid: pub_uid,
             input_key_material: Some(vec![0xAB; 32]),
             cryptographic_parameters: None,
+            attributes: vec![],
         },
         &AuthContext::open(),
         "wd19-encap-3",
@@ -1664,6 +1999,7 @@ fn wd19_encapsulate_matches_oasis_transcript_vectors() {
             uid: pub_uid,
             input_key_material: Some(coins),
             cryptographic_parameters: None,
+            attributes: vec![],
         },
         &AuthContext::open(),
         "wd19-transcript-encap",

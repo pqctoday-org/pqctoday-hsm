@@ -622,3 +622,231 @@ mod tests {
         assert_eq!(digest(CKM_CONCATENATE_BASE_AND_KEY, b"abc"), Err(CKR_MECHANISM_INVALID));
     }
 }
+
+// ── Composite-key plan WP 0.5 (G-27): derivations whose output stays a handle ─
+//
+// `digest_key_derivation` above already keeps the digest inside the engine but
+// registers it under fixed defaults with no CKA_ID, so the KMIP layer read the
+// value back out (`get_attribute(CKA_VALUE)`) and stored it itself. These two
+// helpers compute the same transforms and register the result as a TYPED,
+// labelled, CKA_ID-addressable object via `keygen::register_derived_key_typed`,
+// so the KMIP Derive Key handler can persist a handle-backed record and never
+// touch the derived bytes.
+
+/// HMAC-keyed derivation (KMIP §11.15 `HMAC`: "derives a key by computing an
+/// HMAC over the derivation data"; also the single-block HKDF-Expand /
+/// HKDF-Extract shape RFC 9180 §5.1 needs): `HMAC_mech(base.CKA_VALUE, data)`,
+/// truncated to `out_len`, registered as `key_type`. The base is gated per
+/// §4.8 Table 13 against `hmac_mech` (needs `CKA_SIGN`, as `native::sign`
+/// would). `CKR_KEY_SIZE_RANGE` when `out_len` exceeds one MAC block.
+#[allow(clippy::too_many_arguments)]
+pub fn hmac_key_derivation(
+    session: u32,
+    base: u32,
+    hmac_mech: u32,
+    data: &[u8],
+    out_len: Option<usize>,
+    key_type: u32,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<u32, CkRv> {
+    let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+    let base_val =
+        crate::state::checked_value_for_mech(&access, base, hmac_mech, CKR_KEY_HANDLE_INVALID)?;
+    let mut mac = hmac_of(hmac_mech, &base_val, data)?;
+    if let Some(n) = out_len {
+        if n > mac.len() {
+            return Err(CKR_KEY_SIZE_RANGE);
+        }
+        mac.truncate(n);
+    }
+    super::keygen::register_derived_key_typed(session, &mac, key_type, cka_id, label, extractable, sensitive)
+}
+
+/// One-block HMAC keyed by `key` under a `CKM_SHA*_HMAC` mechanism. Shared by
+/// [`hmac_key_derivation`]; `CKR_MECHANISM_INVALID` for anything else.
+pub(crate) fn hmac_of(mech: u32, key: &[u8], data: &[u8]) -> Result<Vec<u8>, CkRv> {
+    use hmac::{Hmac, Mac};
+    macro_rules! mac {
+        ($H:ty) => {{
+            let mut h = <Hmac<$H> as Mac>::new_from_slice(key).map_err(|_| CKR_KEY_SIZE_RANGE)?;
+            h.update(data);
+            Ok(h.finalize().into_bytes().to_vec())
+        }};
+    }
+    match mech {
+        CKM_SHA256_HMAC => mac!(sha2::Sha256),
+        CKM_SHA384_HMAC => mac!(sha2::Sha384),
+        CKM_SHA512_HMAC => mac!(sha2::Sha512),
+        CKM_SHA512_224_HMAC => mac!(sha2::Sha512_224),
+        CKM_SHA512_256_HMAC => mac!(sha2::Sha512_256),
+        CKM_SHA3_224_HMAC => mac!(sha3::Sha3_224),
+        CKM_SHA3_256_HMAC => mac!(sha3::Sha3_256),
+        CKM_SHA3_384_HMAC => mac!(sha3::Sha3_384),
+        CKM_SHA3_512_HMAC => mac!(sha3::Sha3_512),
+        _ => Err(CKR_MECHANISM_INVALID),
+    }
+}
+
+/// [`digest_key_derivation`] with typed, labelled, CKA_ID-addressable output
+/// (KMIP §11.15 `HASH` over the derivation key).
+#[allow(clippy::too_many_arguments)]
+pub fn digest_key_derivation_typed(
+    session: u32,
+    base: u32,
+    mech: u32,
+    out_len: Option<usize>,
+    key_type: u32,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<u32, CkRv> {
+    let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+    let base_val =
+        crate::state::checked_value_for_mech(&access, base, mech, CKR_KEY_HANDLE_INVALID)?;
+    let mut digest = digest_of(mech, &base_val)?;
+    if let Some(n) = out_len {
+        if n > digest.len() {
+            return Err(CKR_KEY_SIZE_RANGE);
+        }
+        digest.truncate(n);
+    }
+    super::keygen::register_derived_key_typed(session, &digest, key_type, cka_id, label, extractable, sensitive)
+}
+
+/// PBKDF2 (KMIP §11.15 `PBKDF2` / PKCS#5 RFC 2898): `base.CKA_VALUE` is the
+/// password, `PBKDF2_HMAC_<hash>(password, salt, iterations)` truncated to
+/// `out_len`, registered as `key_type`. The base is gated per §4.8 Table 13
+/// against `CKM_PKCS5_PBKD2` — the real PKCS#11 v3.2 mechanism this
+/// construction belongs to, even though that mechanism's own `C_DeriveKey`
+/// form takes the password as a mechanism parameter rather than a base-key
+/// handle (§6.24: KMIP's "password = base object material" reading has no
+/// direct PKCS#11 mechanism-parameter equivalent, so this wrapper is the
+/// bridge, not a pass-through to the engine's `CKM_PKCS5_PBKD2` FFI arm).
+///
+/// Composite-key plan WP 0.5 residue close-out (2026-09-02): previously
+/// `kmip/src/ops/derive_key.rs` read `base.key_material` directly and ran
+/// `pbkdf2_hmac` in the kmip crate, so the derived bytes existed in that
+/// crate's memory before being handed to `register_derived_key_typed`. This
+/// wrapper does the same computation here instead, so an engine-resident
+/// base's password bytes and the derived output never cross the `native::`
+/// boundary — only this handle does.
+#[allow(clippy::too_many_arguments)]
+pub fn pbkdf2_key_derivation(
+    session: u32,
+    base: u32,
+    hash: PrfHash,
+    salt: &[u8],
+    iterations: u32,
+    out_len: usize,
+    key_type: u32,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<u32, CkRv> {
+    let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+    let password = crate::state::checked_value_for_mech(
+        &access,
+        base,
+        CKM_PKCS5_PBKD2,
+        CKR_KEY_HANDLE_INVALID,
+    )?;
+    let mut out = vec![0u8; out_len];
+    match hash {
+        PrfHash::Sha256 => pbkdf2::pbkdf2_hmac::<sha2::Sha256>(&password, salt, iterations, &mut out),
+        PrfHash::Sha384 => pbkdf2::pbkdf2_hmac::<sha2::Sha384>(&password, salt, iterations, &mut out),
+        PrfHash::Sha512 => pbkdf2::pbkdf2_hmac::<sha2::Sha512>(&password, salt, iterations, &mut out),
+    }
+    super::keygen::register_derived_key_typed(session, &out, key_type, cka_id, label, extractable, sensitive)
+}
+
+/// SP 800-108 KDF in Counter Mode (KMIP §11.15 `NIST800-108-C`): `K(i) =
+/// HMAC(base.CKA_VALUE, [i]_2(BE,32) ‖ derivation_data)`, `i` from 1,
+/// concatenated and truncated to `out_len`. Same fixed-input convention as
+/// `kmip/src/ops/derive_key.rs`'s own construction (itself matching the
+/// engine's `CKM_SP800_108_COUNTER_KDF` legacy-default counter placement in
+/// `rust/src/ffi.rs`) — moved in-engine, built from the already-tested
+/// [`hmac_of`] single-block primitive, purely for the same "never crosses
+/// the `native::` boundary" reason as [`pbkdf2_key_derivation`] above. Not a
+/// call into `ffi.rs`'s `sp800_108_counter_kbkdf` — that function serves the
+/// PKCS#11 mechanism-parameter (segmented fixed-input) form, a different,
+/// more general input shape than KMIP's single Derivation Data blob; reusing
+/// this crate's own `hmac_of` keeps the KMIP-shape construction exactly as
+/// specified without stretching the segment parser to fit it.
+#[allow(clippy::too_many_arguments)]
+pub fn sp800_108_counter_key_derivation(
+    session: u32,
+    base: u32,
+    hmac_mech: u32,
+    derivation_data: &[u8],
+    out_len: usize,
+    key_type: u32,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<u32, CkRv> {
+    let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+    let base_val =
+        crate::state::checked_value_for_mech(&access, base, hmac_mech, CKR_KEY_HANDLE_INVALID)?;
+    let mut out: Vec<u8> = Vec::with_capacity(out_len);
+    let mut counter: u32 = 1;
+    while out.len() < out_len {
+        let mut block_input = counter.to_be_bytes().to_vec();
+        block_input.extend_from_slice(derivation_data);
+        out.extend_from_slice(&hmac_of(hmac_mech, &base_val, &block_input)?);
+        counter += 1;
+    }
+    out.truncate(out_len);
+    super::keygen::register_derived_key_typed(session, &out, key_type, cka_id, label, extractable, sensitive)
+}
+
+/// SP 800-108 KDF in Double-Pipeline Iteration Mode (KMIP §11.15
+/// `NIST800-108-DPI`): `A(1) = HMAC(K, derivation_data)`, `K(i) = HMAC(K,
+/// A(i) ‖ [i]_2(BE,32) ‖ derivation_data)`, `A(i+1) = HMAC(K, A(i))`. Same
+/// construction and the same in-engine rationale as
+/// [`sp800_108_counter_key_derivation`] above.
+#[allow(clippy::too_many_arguments)]
+pub fn sp800_108_double_pipeline_key_derivation(
+    session: u32,
+    base: u32,
+    hmac_mech: u32,
+    derivation_data: &[u8],
+    out_len: usize,
+    key_type: u32,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+    sensitive: bool,
+) -> Result<u32, CkRv> {
+    let access = resolve_session_access(session).map_err(|_| CKR_KEY_HANDLE_INVALID)?;
+    let base_val =
+        crate::state::checked_value_for_mech(&access, base, hmac_mech, CKR_KEY_HANDLE_INVALID)?;
+    let mut a = hmac_of(hmac_mech, &base_val, derivation_data)?;
+    let mut out: Vec<u8> = Vec::with_capacity(out_len);
+    let mut counter: u32 = 1;
+    while out.len() < out_len {
+        let mut round_input = a.clone();
+        round_input.extend_from_slice(&counter.to_be_bytes());
+        round_input.extend_from_slice(derivation_data);
+        out.extend_from_slice(&hmac_of(hmac_mech, &base_val, &round_input)?);
+        a = hmac_of(hmac_mech, &base_val, &a)?;
+        counter += 1;
+    }
+    out.truncate(out_len);
+    super::keygen::register_derived_key_typed(session, &out, key_type, cka_id, label, extractable, sensitive)
+}
+
+/// PRF hash selector for [`pbkdf2_key_derivation`] — deliberately narrower
+/// than `HashingAlgorithm` (mirrors the kmip-layer fallback's own SHA-1-free
+/// PKCS#5 PRF set; this crate ships no SHA-1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrfHash {
+    Sha256,
+    Sha384,
+    Sha512,
+}

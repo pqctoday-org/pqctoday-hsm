@@ -738,6 +738,11 @@ pub struct EncapsulateRequest {
     /// `InputKeyMaterial`). Retained so the handler can inspect any other
     /// KEM parameters the request supplied.
     pub cryptographic_parameters: Option<CryptographicParameters>,
+    /// KMIP 3.0 §6.1.22 Table 317 `Attributes` — "desired attributes to be
+    /// associated with the new object" (the shared-secret Secret Data):
+    /// Activation Date, Cryptographic Usage Mask, Sensitive, Extractable,
+    /// Name… Composite-key plan WP 0.4 (G-20).
+    pub attributes: Vec<Attribute>,
 }
 
 /// `Encapsulate` response (KMIP 3.0 CSD02) — the UID of the NEW managed
@@ -779,6 +784,9 @@ pub struct DecapsulateRequest {
     pub data: Vec<u8>,
     /// Per-op `CryptographicParameters` (OPTIONAL).
     pub cryptographic_parameters: Option<CryptographicParameters>,
+    /// §6.1.15 `Attributes` for the recovered shared-secret object — same
+    /// role as [`EncapsulateRequest::attributes`].
+    pub attributes: Vec<Attribute>,
 }
 
 /// `Decapsulate` response (KMIP 3.0 CSD02) — the UID of the NEW managed

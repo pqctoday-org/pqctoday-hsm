@@ -1312,6 +1312,9 @@ fn request_payload_to_frame(p: &RequestPayload) -> Option<TtlvFrame> {
             ) {
                 k.push(f);
             }
+            if !r.attributes.is_empty() {
+                k.push(attributes_block(&r.attributes));
+            }
             k
         }
         RequestPayload::Decapsulate(r) => {
@@ -1320,6 +1323,9 @@ fn request_payload_to_frame(p: &RequestPayload) -> Option<TtlvFrame> {
                 k.push(encode_cryptographic_parameters(cp));
             }
             k.push(TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())));
+            if !r.attributes.is_empty() {
+                k.push(attributes_block(&r.attributes));
+            }
             k
         }
         // §6.1.x signing / MAC / hash — UID, [CryptographicParameters], Data[, extra].
@@ -2409,8 +2415,17 @@ fn decode_encapsulate_req(children: &[TtlvFrame]) -> Result<EncapsulateRequest, 
     let uid = required_uid(children)?;
     let mut cp = None;
     let mut input_key_material = None;
+    let mut attributes = Vec::new();
     for c in children {
         match c.tag.0 {
+            // §6.1.22 Table 317 — attributes for the new shared-secret object.
+            tags::Attributes => {
+                for child in expect_structure(c, "Attributes")? {
+                    if let Some(a) = decode_attribute_v3(child)? {
+                        attributes.push(a);
+                    }
+                }
+            }
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
                 // InputKeyMaterial rides inside CryptographicParameters
@@ -2433,7 +2448,7 @@ fn decode_encapsulate_req(children: &[TtlvFrame]) -> Result<EncapsulateRequest, 
             _ => {}
         }
     }
-    Ok(EncapsulateRequest { uid, input_key_material, cryptographic_parameters: cp })
+    Ok(EncapsulateRequest { uid, input_key_material, cryptographic_parameters: cp, attributes })
 }
 
 /// Encode an `Encapsulate` response payload (KMIP 3.0 CSD02):
@@ -2451,6 +2466,7 @@ fn decode_decapsulate_req(children: &[TtlvFrame]) -> Result<DecapsulateRequest, 
     let uid = required_uid(children)?;
     let mut data = Vec::new();
     let mut cp = None;
+    let mut attributes = Vec::new();
     for c in children {
         match c.tag.0 {
             tags::Data => {
@@ -2459,10 +2475,17 @@ fn decode_decapsulate_req(children: &[TtlvFrame]) -> Result<DecapsulateRequest, 
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
+            tags::Attributes => {
+                for child in expect_structure(c, "Attributes")? {
+                    if let Some(a) = decode_attribute_v3(child)? {
+                        attributes.push(a);
+                    }
+                }
+            }
             _ => {}
         }
     }
-    Ok(DecapsulateRequest { uid, data, cryptographic_parameters: cp })
+    Ok(DecapsulateRequest { uid, data, cryptographic_parameters: cp, attributes })
 }
 
 /// Encode a `Decapsulate` response payload (KMIP 3.0 CSD02):
@@ -7407,12 +7430,47 @@ mod tests {
     /// despite Encapsulate/Decapsulate being real, documented Batch-tab
     /// ops with their own preset recipes ("Provision-KEM",
     /// "Rollback reaches Encapsulate").
+    /// KMIP 3.0 §6.1.22 Table 317 / §6.1.15 — the `Attributes` list for the new
+    /// shared-secret object rides in both KEM requests and round-trips through
+    /// the codec (composite-key plan WP 0.4, G-20).
+    #[test]
+    fn kem_requests_round_trip_shared_secret_attributes() {
+        let attrs = vec![
+            Attribute::Sensitive(true),
+            Attribute::Extractable(false),
+            Attribute::ActivationDate(1_700_000_000),
+        ];
+        let req = RequestPayload::Encapsulate(EncapsulateRequest {
+            uid: "kem-pub".into(),
+            input_key_material: None,
+            cryptographic_parameters: None,
+            attributes: attrs.clone(),
+        });
+        let frame = request_payload_to_frame(&req).expect("encoder");
+        let Value::Structure(children) = &frame.value else { panic!("structure") };
+        let decoded = decode_encapsulate_req(children).unwrap();
+        assert_eq!(decoded.attributes, attrs);
+
+        let req = RequestPayload::Decapsulate(DecapsulateRequest {
+            uid: "kem-priv".into(),
+            data: vec![0xAA; 16],
+            cryptographic_parameters: None,
+            attributes: attrs.clone(),
+        });
+        let frame = request_payload_to_frame(&req).expect("encoder");
+        let Value::Structure(children) = &frame.value else { panic!("structure") };
+        let decoded = decode_decapsulate_req(children).unwrap();
+        assert_eq!(decoded.attributes, attrs);
+        assert_eq!(decoded.data, vec![0xAA; 16]);
+    }
+
     #[test]
     fn encapsulate_request_encodes_and_round_trips_input_key_material() {
         let req = RequestPayload::Encapsulate(EncapsulateRequest {
             uid: "kem-pub".into(),
             input_key_material: Some(vec![0x11; 32]),
             cryptographic_parameters: None,
+            attributes: vec![],
         });
         let frame = request_payload_to_frame(&req)
             .expect("Encapsulate must have a request encoder");
@@ -7434,6 +7492,7 @@ mod tests {
             uid: "kem-pub".into(),
             input_key_material: None,
             cryptographic_parameters: None,
+            attributes: vec![],
         });
         let frame = request_payload_to_frame(&req).expect("Encapsulate must have a request encoder");
         let Value::Structure(children) = &frame.value else {
@@ -7451,6 +7510,7 @@ mod tests {
             uid: "kem-priv".into(),
             data: vec![0x22; 1088],
             cryptographic_parameters: None,
+            attributes: vec![],
         });
         let frame = request_payload_to_frame(&req)
             .expect("Decapsulate must have a request encoder");
@@ -7477,6 +7537,7 @@ mod tests {
                     uid: "kem-pub".into(),
                     input_key_material: None,
                     cryptographic_parameters: None,
+                    attributes: vec![],
                 }),
             }],
         };

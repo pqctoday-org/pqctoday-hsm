@@ -27,6 +27,24 @@ use pqctoday_kmip::store::MemoryStore;
 
 // The softhsmrustv3 engine is global (lazy_static Mutex state); serialize the
 // per-test finalize/init so tests can't race (matches hybrid_kem_e2e.rs).
+
+/// Composite-key plan WP 0.4/0.5 — KEM shared secrets and derived keys are
+/// engine-resident (the KMIP store holds no material); read them the way a
+/// KMIP client would, via Get, never from the store.
+fn kmip_material(d: &Deps, uid: &str) -> Vec<u8> {
+    use pqctoday_kmip::kmip30::GetRequest;
+    use pqctoday_kmip::ops::get::get;
+    get(
+        d,
+        GetRequest { uid: uid.to_string(), key_format_type: None, key_wrapping_specification: None },
+        &AuthContext::open(),
+        "get-material",
+    )
+    .expect("Get of engine-resident material")
+    .key_block
+    .key_value
+}
+
 fn engine_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -82,6 +100,7 @@ fn round_trip(alg: KmipAlgorithm, ss_len: usize) {
             uid: kp.public_key_uid.clone(),
             input_key_material: None,
             cryptographic_parameters: None,
+            attributes: vec![],
         },
         &AuthContext::open(),
         "encap",
@@ -95,14 +114,15 @@ fn round_trip(alg: KmipAlgorithm, ss_len: usize) {
             uid: kp.private_key_uid.clone(),
             data: enc.data.clone(),
             cryptographic_parameters: None,
+            attributes: vec![],
         },
         &AuthContext::open(),
         "decap",
     )
     .unwrap_or_else(|e| panic!("{alg:?}: decapsulate failed: {e:?}"));
 
-    let ss_enc = d.store.get(&enc.uid).unwrap().unwrap().key_material.expect("encap SS material");
-    let ss_dec = d.store.get(&dec.uid).unwrap().unwrap().key_material.expect("decap SS material");
+    let ss_enc = kmip_material(&d, &enc.uid);
+    let ss_dec = kmip_material(&d, &dec.uid);
     assert_eq!(
         ss_enc, ss_dec,
         "{alg:?}: encapsulator and decapsulator must derive the same shared secret"

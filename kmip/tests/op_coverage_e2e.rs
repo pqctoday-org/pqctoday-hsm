@@ -505,9 +505,15 @@ fn derive_key_produces_usable_derived_object_with_links() {
     )
     .unwrap();
 
-    // Derived object exists, carries 32 bytes of material (usable).
+    // Derived object exists. Composite-key plan WP 0.5 (G-27): with a real
+    // engine session the derived key is ENGINE-RESIDENT — the KMIP store holds
+    // no material, the engine object under `pkcs11_cka_id` does (Get still
+    // serves it, extractable by default), and the §11 Digest is computed
+    // in-engine.
     let derived = deps.store.get(&resp.uid).unwrap().unwrap();
-    assert_eq!(derived.key_material.as_ref().map(|m| m.len()), Some(32), "derived key has material");
+    assert!(derived.key_material.is_none(), "derived key must not be store-held");
+    assert_eq!(derived.cryptographic_length, 256);
+    assert!(derived.digest_value.is_some(), "Digest computed in-engine");
     assert_eq!(derived.algorithm, KmipAlgorithm::Aes);
 
     // §6.1.18 links on BOTH objects — surfaced via GetAttributes.

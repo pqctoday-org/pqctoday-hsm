@@ -22,22 +22,31 @@
 //!
 //! ## Key-material routing (K15 convention, compliance-audit B-9)
 //!
-//! - **Engine-resident base key** (no `key_material` in the KMIP
-//!   store, engine session wired): the HMAC-family PRFs (HMAC /
-//!   NIST800-108-C) run through `softhsmrustv3::native::sign` with
-//!   `CKM_SHA{256,384,512,3-256,3-384,3-512}_HMAC` — the base key bytes
-//!   never leave the engine. Audit names `native::sign`. HASH derivation
-//!   (2026-08-30, KMIP/CACP coverage gap-analysis item 10) runs through
-//!   `native::digest_key_derivation` (`CKM_SHA*_KEY_DERIVATION`) the same
-//!   way — the engine creates a real derived-secret object, this op reads
-//!   its value and destroys the transient object. Audit names
-//!   `native::digest_key_derivation`.
-//! - **KMIP-store-only base key** (Register'd raw bytes): in-process
-//!   `hmac` / `sha2` / `pbkdf2` crates. Audit names `soft::derive`.
-//! - PBKDF2 still needs the raw base bytes (no engine primitive for
-//!   "PBKDF2 over CKA_VALUE") — an engine-resident base without store
-//!   material fails with `Key Value Not Present (0x13)` per Table 304.
-//!   HASH derivation no longer has this limitation.
+//! - **Any base key, session present** (composite-key plan WP 0.5 / G-27,
+//!   residue close-out 2026-09-02): HMAC, HASH, PBKDF2, NIST800-108-C and
+//!   NIST800-108-DPI all run and register their output entirely inside the
+//!   engine (`softhsmrustv3::native::{hmac_key_derivation,
+//!   digest_key_derivation_typed, pbkdf2_key_derivation,
+//!   sp800_108_counter_key_derivation,
+//!   sp800_108_double_pipeline_key_derivation}`) — this crate never sees the
+//!   base key's bytes, an intermediate HMAC/hash block, or the final
+//!   derived secret; only the resulting handle. A KMIP-store-only base
+//!   (Register'd raw bytes) is temp-imported into the engine first
+//!   (`engine_base_handle`) so the same engine path runs either way; the
+//!   temporary handle is destroyed immediately after. Audit names
+//!   `native::sign` (HMAC), `native::digest_key_derivation` (HASH),
+//!   `native::pbkdf2_key_derivation`,
+//!   `native::sp800_108_counter_key_derivation` /
+//!   `native::sp800_108_double_pipeline_key_derivation`.
+//! - **No session** (unit tests / placeholder builds): in-process `hmac` /
+//!   `sha2` / `pbkdf2` crates, unchanged from before WP 0.5. A base with no
+//!   readable material and no session fails `Key Value Not Present (0x13)`.
+//!   Audit names `soft::derive`.
+//! - ECDH truncation (`AsymmetricKey` method, below) remains documented
+//!   residue: the engine computes the shared secret in-HSM, but the
+//!   requested-length truncation happens in this crate before the result is
+//!   registered — the one remaining method not yet moved behind a typed
+//!   engine registration call.
 //!
 //! ## Links (§6.1.18)
 //!
@@ -265,6 +274,26 @@ pub fn derive_key(
     let request_hash = cp.and_then(|c| c.hashing_algorithm);
     let base = &bases[0];
 
+    // WP 0.5 (composite-key plan, G-27) — with an engine session, HMAC and
+    // HASH derivations run INSIDE the engine and their output is registered
+    // there under `derived_cka_id`; the kmip crate never sees the derived
+    // bytes. Methods still computed in-process (PBKDF2, SP 800-108, ECDH
+    // truncation — documented residue) produce `raw` bytes that are then
+    // registered in the engine below, so every derived key is engine-resident
+    // whenever a session exists. Without a session (unit tests / placeholder
+    // builds) the pre-existing store-held path is unchanged.
+    let derive_session = deps.resolve_tenant_session(auth.identity.as_ref()).ok();
+    let derived_cka_id = Uuid::new_v4().as_bytes().to_vec();
+    let derived_key_type = if req.object_type == ObjectType::SymmetricKey
+        && derived_algorithm == KmipAlgorithm::Aes
+    {
+        softhsmrustv3::constants::CKK_AES
+    } else {
+        softhsmrustv3::constants::CKK_GENERIC_SECRET
+    };
+    let derived_extractable = x.extractable.unwrap_or(true);
+    let derived_sensitive = x.sensitive.unwrap_or(false);
+    let mut engine_resident = false;
     // Derive the raw output per the method's spec construction.
     let raw: Vec<u8> = match req.derivation_method {
         // §11.15 Table 546 — "This method derives a key by computing
@@ -278,17 +307,56 @@ pub fn derive_key(
                     "HMAC derivation requires Derivation Data (§7.13 Table 465)",
                 ))
             })?;
-            let hash = base_key_prf_hash(base)
+            // G-21 — a base whose own attributes name no PRF (e.g. the Secret
+            // Data an Encapsulate produced, typed by its KEM algorithm) falls
+            // back to the request's Cryptographic Parameters hash. §7.13's
+            // "Cryptographic Parameters are ignored" describes the case where
+            // the key DOES identify the PRF; a server MAY still honour them
+            // otherwise (server policy, §4 preamble).
+            let hash = base_key_prf_hash(base).or(request_hash)
                 .ok_or_else(|| fail(KmipError::bad_cryptographic_parameters(format!(
                     "HMAC derivation: base key {} attributes identify no PRF \
-                     (algorithm {:?}; §7.13 — Cryptographic Parameters are ignored)",
+                     (algorithm {:?}) and the request names no Hashing Algorithm",
                     base.uid, base.algorithm
                 ))))?;
-            let out = hmac_prf(deps, deps.resolve_tenant_session(auth.identity.as_ref()).ok(), correlation_id, base, hash)?(data)?;
-            // §6.1.18 — "If the specified length exceeds the output of
-            // the derivation method, then the server SHALL return an
-            // error." Single HMAC ⇒ output = one hash block.
-            take_prefix(out, len_bytes).map_err(&fail)?
+            match derive_session {
+                Some(session) => {
+                    let hmac_mech = hmac_mech_for(hash).ok_or_else(|| {
+                        fail(KmipError::unsupported_cryptographic_parameters(format!(
+                            "HMAC PRF hash {hash:?} not supported"
+                        )))
+                    })?;
+                    let (base_h, temp) = engine_base_handle(deps, session, correlation_id, base)?;
+                    let r = softhsmrustv3::native::hmac_key_derivation(
+                        session,
+                        base_h,
+                        hmac_mech,
+                        data,
+                        Some(len_bytes),
+                        derived_key_type,
+                        &derived_cka_id,
+                        "kmip-derive",
+                        derived_extractable,
+                        derived_sensitive,
+                    );
+                    emit_pkcs11_result(deps, correlation_id, "native::hmac_key_derivation", Some(hmac_mech), &r);
+                    if let Some(t) = temp {
+                        let _ = softhsmrustv3::native::destroy_object(session, t);
+                    }
+                    // §6.1.18 — a request longer than one MAC block is an
+                    // error (CKR_KEY_SIZE_RANGE → Bad Cryptographic Parameters).
+                    r.map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")))?;
+                    engine_resident = true;
+                    Vec::new()
+                }
+                None => {
+                    let out = hmac_prf(deps, None, correlation_id, base, hash)?(data)?;
+                    // §6.1.18 — "If the specified length exceeds the output of
+                    // the derivation method, then the server SHALL return an
+                    // error." Single HMAC ⇒ output = one hash block.
+                    take_prefix(out, len_bytes).map_err(&fail)?
+                }
+            }
         }
 
         // §11.15 Table 546 — "This method derives a key by computing a
@@ -303,15 +371,43 @@ pub fn derive_key(
                      Cryptographic Parameters (§7.13)",
                 ))
             })?;
-            let out = hash_derive(
-                deps,
-                deps.resolve_tenant_session(auth.identity.as_ref()).ok(),
-                correlation_id,
-                base,
-                hash,
-                derivation_data.as_deref(),
-            )?;
-            take_prefix(out, len_bytes).map_err(&fail)?
+            match (derive_session, derivation_data.as_deref()) {
+                // HASH over the derivation KEY, engine session present → the
+                // digest is computed and registered inside the engine.
+                (Some(session), None) => {
+                    let mech = hash_to_key_derivation_ckm(hash).ok_or_else(|| {
+                        fail(KmipError::unsupported_cryptographic_parameters(format!(
+                            "HASH derivation hash {hash:?} not supported"
+                        )))
+                    })?;
+                    let (base_h, temp) = engine_base_handle(deps, session, correlation_id, base)?;
+                    let r = softhsmrustv3::native::digest_key_derivation_typed(
+                        session,
+                        base_h,
+                        mech,
+                        Some(len_bytes),
+                        derived_key_type,
+                        &derived_cka_id,
+                        "kmip-derive",
+                        derived_extractable,
+                        derived_sensitive,
+                    );
+                    emit_pkcs11_result(deps, correlation_id, "native::digest_key_derivation", Some(mech), &r);
+                    if let Some(t) = temp {
+                        let _ = softhsmrustv3::native::destroy_object(session, t);
+                    }
+                    r.map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")))?;
+                    engine_resident = true;
+                    Vec::new()
+                }
+                // HASH over public Derivation Data (no key involved), or no
+                // session: bytes path; registered in the engine below when a
+                // session exists.
+                (session, data) => {
+                    let out = hash_derive(deps, session, correlation_id, base, hash, data)?;
+                    take_prefix(out, len_bytes).map_err(&fail)?
+                }
+            }
         }
 
         // §11.15 Table 546 — "This method is used to derive a
@@ -337,33 +433,75 @@ pub fn derive_key(
                     "PBKDF2 Iteration Count must be positive; got {iterations}"
                 ))));
             }
-            let password = base.key_material.as_deref().ok_or_else(|| {
-                fail(KmipError::key_value_not_present(format!(
-                    "PBKDF2 needs the base object's material as the password; \
-                     {} holds none the KMIP layer can read",
-                    base.uid
-                )))
-            })?;
             let hash = request_hash.unwrap_or(HashingAlgorithm::Sha256);
-            let mut out = vec![0u8; len_bytes];
-            match hash {
-                HashingAlgorithm::Sha256 => {
-                    pbkdf2::pbkdf2_hmac::<Sha256>(password, salt, iterations as u32, &mut out)
-                }
-                HashingAlgorithm::Sha384 => {
-                    pbkdf2::pbkdf2_hmac::<Sha384>(password, salt, iterations as u32, &mut out)
-                }
-                HashingAlgorithm::Sha512 => {
-                    pbkdf2::pbkdf2_hmac::<Sha512>(password, salt, iterations as u32, &mut out)
-                }
+            let prf_hash = match hash {
+                HashingAlgorithm::Sha256 => softhsmrustv3::native::PrfHash::Sha256,
+                HashingAlgorithm::Sha384 => softhsmrustv3::native::PrfHash::Sha384,
+                HashingAlgorithm::Sha512 => softhsmrustv3::native::PrfHash::Sha512,
                 other => {
                     return Err(fail(KmipError::unsupported_cryptographic_parameters(
                         format!("PBKDF2 PRF hash {other:?} not supported (SHA-256/384/512)"),
                     )));
                 }
+            };
+            // WP 0.5 residue close-out (2026-09-02) — with a session, the
+            // password bytes and the derived output both stay inside the
+            // engine (`native::pbkdf2_key_derivation`); a store-held base is
+            // temp-imported first (`engine_base_handle`, the same K15
+            // convention Hmac/Hash already use above). Only without a
+            // session does this fall back to reading the base's store
+            // material directly and computing in-process.
+            match derive_session {
+                Some(session) => {
+                    let (base_h, temp) = engine_base_handle(deps, session, correlation_id, base)?;
+                    let r = softhsmrustv3::native::pbkdf2_key_derivation(
+                        session,
+                        base_h,
+                        prf_hash,
+                        salt,
+                        iterations as u32,
+                        len_bytes,
+                        derived_key_type,
+                        &derived_cka_id,
+                        "kmip-derive",
+                        derived_extractable,
+                        derived_sensitive,
+                    );
+                    emit_pkcs11_result(deps, correlation_id, "native::pbkdf2_key_derivation", None, &r);
+                    if let Some(t) = temp {
+                        let _ = softhsmrustv3::native::destroy_object(session, t);
+                    }
+                    r.map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")))?;
+                    engine_resident = true;
+                    Vec::new()
+                }
+                None => {
+                    let password = base.key_material.as_deref().ok_or_else(|| {
+                        fail(KmipError::key_value_not_present(format!(
+                            "PBKDF2 needs the base object's material as the password; \
+                             {} holds none the KMIP layer can read",
+                            base.uid
+                        )))
+                    })?;
+                    let mut out = vec![0u8; len_bytes];
+                    match hash {
+                        HashingAlgorithm::Sha256 => {
+                            pbkdf2::pbkdf2_hmac::<Sha256>(password, salt, iterations as u32, &mut out)
+                        }
+                        HashingAlgorithm::Sha384 => {
+                            pbkdf2::pbkdf2_hmac::<Sha384>(password, salt, iterations as u32, &mut out)
+                        }
+                        HashingAlgorithm::Sha512 => {
+                            pbkdf2::pbkdf2_hmac::<Sha512>(password, salt, iterations as u32, &mut out)
+                        }
+                        // Unreachable: `prf_hash` above already rejected any
+                        // other hash before this point.
+                        _ => unreachable!("PBKDF2 hash already validated"),
+                    }
+                    emit_pkcs11(deps, correlation_id, "soft::derive", None, 0, "CKR_OK");
+                    out
+                }
             }
-            emit_pkcs11(deps, correlation_id, "soft::derive", None, 0, "CKR_OK");
-            out
         }
 
         // §11.15 Table 546 — "This method derives a key by computing
@@ -386,17 +524,56 @@ pub fn derive_key(
             let hash = request_hash
                 .or_else(|| base_key_prf_hash(base))
                 .unwrap_or(HashingAlgorithm::Sha256);
-            let prf = hmac_prf(deps, deps.resolve_tenant_session(auth.identity.as_ref()).ok(), correlation_id, base, hash)?;
-            let mut out: Vec<u8> = Vec::with_capacity(len_bytes);
-            let mut counter: u32 = 1;
-            while out.len() < len_bytes {
-                let mut block_input = counter.to_be_bytes().to_vec();
-                block_input.extend_from_slice(data);
-                out.extend_from_slice(&prf(&block_input)?);
-                counter += 1;
+            // WP 0.5 residue close-out (2026-09-02) — with a session, every
+            // HMAC block AND the running concatenation stay inside the
+            // engine (`native::sp800_108_counter_key_derivation`); previously
+            // only the per-block PRF call was engine-routed (and only for a
+            // base with no store bytes — `hmac_prf`'s `(Some(key), _)` arm
+            // always fell back to software) while the multi-block
+            // concatenation itself ran in this crate. A store-held base is
+            // temp-imported first, same K15 convention as Hmac/Hash/Pbkdf2.
+            match derive_session {
+                Some(session) => {
+                    let hmac_mech = hmac_mech_for(hash).ok_or_else(|| {
+                        fail(KmipError::unsupported_cryptographic_parameters(format!(
+                            "NIST800-108-C PRF hash {hash:?} not supported"
+                        )))
+                    })?;
+                    let (base_h, temp) = engine_base_handle(deps, session, correlation_id, base)?;
+                    let r = softhsmrustv3::native::sp800_108_counter_key_derivation(
+                        session,
+                        base_h,
+                        hmac_mech,
+                        data,
+                        len_bytes,
+                        derived_key_type,
+                        &derived_cka_id,
+                        "kmip-derive",
+                        derived_extractable,
+                        derived_sensitive,
+                    );
+                    emit_pkcs11_result(deps, correlation_id, "native::sp800_108_counter_key_derivation", Some(hmac_mech), &r);
+                    if let Some(t) = temp {
+                        let _ = softhsmrustv3::native::destroy_object(session, t);
+                    }
+                    r.map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")))?;
+                    engine_resident = true;
+                    Vec::new()
+                }
+                None => {
+                    let prf = hmac_prf(deps, None, correlation_id, base, hash)?;
+                    let mut out: Vec<u8> = Vec::with_capacity(len_bytes);
+                    let mut counter: u32 = 1;
+                    while out.len() < len_bytes {
+                        let mut block_input = counter.to_be_bytes().to_vec();
+                        block_input.extend_from_slice(data);
+                        out.extend_from_slice(&prf(&block_input)?);
+                        counter += 1;
+                    }
+                    out.truncate(len_bytes);
+                    out
+                }
             }
-            out.truncate(len_bytes);
-            out
         }
 
         // §11.15 Table 546 / NIST SP 800-108r1 §5.3 — Double-Pipeline
@@ -425,20 +602,54 @@ pub fn derive_key(
             let hash = request_hash
                 .or_else(|| base_key_prf_hash(base))
                 .unwrap_or(HashingAlgorithm::Sha256);
-            let prf = hmac_prf(deps, deps.resolve_tenant_session(auth.identity.as_ref()).ok(), correlation_id, base, hash)?;
-            let mut a = prf(data)?; // A(1) = PRF(K, FixedInputData)
-            let mut out: Vec<u8> = Vec::with_capacity(len_bytes);
-            let mut counter: u32 = 1;
-            while out.len() < len_bytes {
-                let mut round_input = a.clone();
-                round_input.extend_from_slice(&counter.to_be_bytes());
-                round_input.extend_from_slice(data);
-                out.extend_from_slice(&prf(&round_input)?);
-                a = prf(&a)?; // A(i+1) = PRF(K, A(i))
-                counter += 1;
+            // WP 0.5 residue close-out (2026-09-02) — same in-engine move as
+            // the Counter-Mode arm above, including its A(i) chain; see
+            // `native::sp800_108_double_pipeline_key_derivation`.
+            match derive_session {
+                Some(session) => {
+                    let hmac_mech = hmac_mech_for(hash).ok_or_else(|| {
+                        fail(KmipError::unsupported_cryptographic_parameters(format!(
+                            "NIST800-108-DPI PRF hash {hash:?} not supported"
+                        )))
+                    })?;
+                    let (base_h, temp) = engine_base_handle(deps, session, correlation_id, base)?;
+                    let r = softhsmrustv3::native::sp800_108_double_pipeline_key_derivation(
+                        session,
+                        base_h,
+                        hmac_mech,
+                        data,
+                        len_bytes,
+                        derived_key_type,
+                        &derived_cka_id,
+                        "kmip-derive",
+                        derived_extractable,
+                        derived_sensitive,
+                    );
+                    emit_pkcs11_result(deps, correlation_id, "native::sp800_108_double_pipeline_key_derivation", Some(hmac_mech), &r);
+                    if let Some(t) = temp {
+                        let _ = softhsmrustv3::native::destroy_object(session, t);
+                    }
+                    r.map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")))?;
+                    engine_resident = true;
+                    Vec::new()
+                }
+                None => {
+                    let prf = hmac_prf(deps, None, correlation_id, base, hash)?;
+                    let mut a = prf(data)?; // A(1) = PRF(K, FixedInputData)
+                    let mut out: Vec<u8> = Vec::with_capacity(len_bytes);
+                    let mut counter: u32 = 1;
+                    while out.len() < len_bytes {
+                        let mut round_input = a.clone();
+                        round_input.extend_from_slice(&counter.to_be_bytes());
+                        round_input.extend_from_slice(data);
+                        out.extend_from_slice(&prf(&round_input)?);
+                        a = prf(&a)?; // A(i+1) = PRF(K, A(i))
+                        counter += 1;
+                    }
+                    out.truncate(len_bytes);
+                    out
+                }
             }
-            out.truncate(len_bytes);
-            out
         }
 
         // §7.13 — Asymmetric Key agreement (ECDH / X25519 / X448). The base
@@ -487,36 +698,46 @@ pub fn derive_key(
             )));
         }
     };
-    debug_assert_eq!(raw.len(), len_bytes);
+    if !engine_resident {
+        debug_assert_eq!(raw.len(), len_bytes);
+    }
 
     // ── Persist the derived object (full K11/K19 attribute pipeline) ──
     let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
     let now = OffsetDateTime::now_utc();
     let initial_state = super::register_import_export::compute_initial_state(now, &x);
-    let cka_id_bytes = Uuid::new_v4().as_bytes().to_vec();
-
-    // Mirror Register's engine-import convention: HMAC-family
-    // symmetric keys land as engine generic-secret objects (K9
-    // machinery) so MAC / future derives can use the engine handle;
-    // other derived material stays KMIP-store-held (same as Register'd
-    // raw AES, which Encrypt serves from `key_material`).
-    if let (Some(session), ObjectType::SymmetricKey) = (deps.resolve_tenant_session(auth.identity.as_ref()).ok(), req.object_type) {
-        if matches!(
-            derived_algorithm,
-            KmipAlgorithm::HmacSha256 | KmipAlgorithm::HmacSha384 | KmipAlgorithm::HmacSha512
-        ) {
-            let _ = softhsmrustv3::native::register_generic_secret_bytes(
-                session,
-                &raw,
-                &cka_id_bytes,
-                "kmip-derive",
-            );
+    let cka_id_bytes = derived_cka_id;
+    // WP 0.5 — engine-resident output. Whatever the method computed above
+    // (or registered already), the record holds no material when a session
+    // exists; Get serves the value from the engine object (extractable by
+    // default, per the template otherwise) and the §11 Digest is computed
+    // in-engine. Without a session the store-held convention is unchanged.
+    let (key_material, digest_value): (Option<Vec<u8>>, Option<Vec<u8>>) = match derive_session {
+        Some(session) => {
+            if !engine_resident {
+                let r = softhsmrustv3::native::register_derived_key_typed(
+                    session,
+                    &raw,
+                    derived_key_type,
+                    &cka_id_bytes,
+                    "kmip-derive",
+                    derived_extractable,
+                    derived_sensitive,
+                );
+                emit_pkcs11_result(deps, correlation_id, "native::register_derived_key_typed", None, &r);
+                r.map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")))?;
+            }
+            let h = super::helpers::find_handle_for_object(session, &cka_id_bytes, req.object_type)
+                .map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")))?
+                .ok_or_else(|| fail(KmipError::cryptographic_failure(
+                    "derived key was registered in the engine but cannot be found by CKA_ID",
+                )))?;
+            (None, softhsmrustv3::native::get_value_digest_sha256(session, h))
         }
-    }
-
-    // K-14 — KMIP §11 `Digest`: SHA-256 over the derived material
-    // (Register convention for store-held bytes).
-    let digest_value = Some(Sha256::digest(&raw).to_vec());
+        // K-14 — KMIP §11 `Digest`: SHA-256 over the derived material
+        // (Register convention for store-held bytes).
+        None => (Some(raw.clone()), Some(Sha256::digest(&raw).to_vec())),
+    };
 
     let mut links: HashMap<String, String> = HashMap::new();
     // §6.1.18 — Derivation Base Object Link on the derived object,
@@ -554,7 +775,7 @@ pub fn derive_key(
         name: x.name.clone(),
         links,
         custom_attributes: HashMap::new(),
-        key_material: Some(raw),
+        key_material,
         key_format_type: Some(0x01), // Raw — §6.2 KeyFormatType table
         digest_value,
         // KMIP §11 Fresh = True for server-generated objects.
@@ -578,6 +799,54 @@ pub fn derive_key(
 /// §7.13 — "the attributes of the derivation key provide enough
 /// information about the PRF": map the base object's algorithm (or its
 /// stored CryptographicParameters attribute) to the HMAC hash.
+/// `HashingAlgorithm` → `CKM_SHA*_HMAC` (PKCS#11 v3.2 §6.20–6.30).
+fn hmac_mech_for(hash: HashingAlgorithm) -> Option<u32> {
+    use softhsmrustv3::constants as c;
+    Some(match hash {
+        HashingAlgorithm::Sha256 => c::CKM_SHA256_HMAC,
+        HashingAlgorithm::Sha384 => c::CKM_SHA384_HMAC,
+        HashingAlgorithm::Sha512 => c::CKM_SHA512_HMAC,
+        HashingAlgorithm::Sha512224 => c::CKM_SHA512_224_HMAC,
+        HashingAlgorithm::Sha512256 => c::CKM_SHA512_256_HMAC,
+        HashingAlgorithm::Sha3224 => c::CKM_SHA3_224_HMAC,
+        HashingAlgorithm::Sha3256 => c::CKM_SHA3_256_HMAC,
+        HashingAlgorithm::Sha3384 => c::CKM_SHA3_384_HMAC,
+        HashingAlgorithm::Sha3512 => c::CKM_SHA3_512_HMAC,
+        _ => return None,
+    })
+}
+
+/// WP 0.5 — resolve a derivation base to an engine handle. Engine-resident
+/// bases (no store bytes) are found by CKA_ID; a legacy store-held base
+/// (Register'd raw material) is imported into the engine as a TEMPORARY
+/// derivable secret so the derivation itself runs in-engine, and the caller
+/// destroys the temporary handle (returned as `Some`) afterwards.
+fn engine_base_handle(
+    deps: &Deps,
+    session: u32,
+    correlation_id: &str,
+    base: &ObjectRecord,
+) -> Result<(u32, Option<u32>)> {
+    let fail = move |e: KmipError| fail_err(deps, correlation_id, "DeriveKey", e);
+    match &base.key_material {
+        None => {
+            let h = super::helpers::find_handle_for_object(session, &base.pkcs11_cka_id, base.object_type)
+                .map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")))?
+                .ok_or_else(|| fail(KmipError::object_not_found(&base.uid)))?;
+            Ok((h, None))
+        }
+        Some(bytes) => {
+            let tmp_id = Uuid::new_v4().as_bytes().to_vec();
+            let r = softhsmrustv3::native::register_kem_shared_secret(
+                session, bytes, &tmp_id, "kmip-derive-base-tmp", false, true,
+            );
+            emit_pkcs11_result(deps, correlation_id, "native::register_kem_shared_secret", None, &r);
+            let h = r.map_err(|rv| fail(super::helpers::ck_rv_to_kmip_error(rv, "DeriveKey")))?;
+            Ok((h, Some(h)))
+        }
+    }
+}
+
 fn base_key_prf_hash(base: &ObjectRecord) -> Option<HashingAlgorithm> {
     match base.algorithm {
         KmipAlgorithm::HmacSha256 => Some(HashingAlgorithm::Sha256),
