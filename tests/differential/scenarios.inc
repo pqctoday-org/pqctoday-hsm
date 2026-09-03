@@ -441,6 +441,61 @@ add({"create.generate_key_pair.xmss", "create",
          gen_pair(e, r, s, "gen", CKM_XMSS_KEY_PAIR_GEN, pub, 5, priv, 5);
      }});
 
+add({"create.generate_key_pair.xmssmt", "create",
+     "XMSS^MT key pair — HBS-1: sensitive MUST be true, extractable and "
+     "copyable MUST be false (§6.66.5; copyable is this engine's own "
+     "extension of the identical HSS/XMSS one-time-signature hazard)",
+     {CKM_XMSSMT_KEY_PAIR_GEN}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_KEY_TYPE kt = 0x00000048UL; // CKK_XMSSMT (pkcs11t.h)
+         static CK_ULONG psXmssMtSha2_20_2_256 = 1; // CKP_XMSSMT_SHA2_20_2_256
+         CK_ATTRIBUTE pub[] = {
+             ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+             ATTR(CKA_KEY_TYPE,      &kt,       sizeof kt),
+             ATTR(CKA_PARAMETER_SET, &psXmssMtSha2_20_2_256, sizeof psXmssMtSha2_20_2_256),
+             ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+             ATTR(CKA_VERIFY,        &bTrue,    sizeof bTrue),
+         };
+         CK_ATTRIBUTE priv[] = {
+             ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,      &kt,        sizeof kt),
+             ATTR(CKA_PARAMETER_SET, &psXmssMtSha2_20_2_256, sizeof psXmssMtSha2_20_2_256),
+             ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+             ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+         };
+         // The smallest available parameter set (height 20, 2 layers) still
+         // costs on the order of a minute per engine to generate — accepted
+         // deliberately (2026-09-03) so CKA_COPYABLE gets checked on this
+         // type too, not skipped for being the expensive one.
+         gen_pair(e, r, s, "gen", CKM_XMSSMT_KEY_PAIR_GEN, pub, 5, priv, 5);
+     }});
+
+add({"create.generate_key_pair.hss", "create",
+     "HSS key pair, default (no CK_HSS_KEY_PAIR_GEN_PARAMS) — HBS-1: "
+     "sensitive MUST be true, extractable and copyable MUST be false "
+     "(§6.65.3). No scenario exercised CKM_HSS_KEY_PAIR_GEN at all before "
+     "this: the pre-fix divergence (C++ copyable=FALSE, Rust copyable=TRUE) "
+     "was invisible to this harness for lack of a probe, not because the "
+     "check itself was broken. Also pins down the LMOTS default both "
+     "engines now share (W4) after HBS-1 aligned them.",
+     {CKM_HSS_KEY_PAIR_GEN}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_KEY_TYPE kt = 0x00000046UL; // CKK_HSS (pkcs11t.h)
+         CK_ATTRIBUTE pub[] = {
+             ATTR(CKA_CLASS,    &clPublic, sizeof clPublic),
+             ATTR(CKA_KEY_TYPE, &kt,       sizeof kt),
+             ATTR(CKA_TOKEN,    &bFalse,   sizeof bFalse),
+             ATTR(CKA_VERIFY,   &bTrue,    sizeof bTrue),
+         };
+         CK_ATTRIBUTE priv[] = {
+             ATTR(CKA_CLASS,    &clPrivate, sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE, &kt,        sizeof kt),
+             ATTR(CKA_TOKEN,    &bFalse,    sizeof bFalse),
+             ATTR(CKA_SIGN,     &bTrue,     sizeof bTrue),
+         };
+         gen_pair(e, r, s, "gen", CKM_HSS_KEY_PAIR_GEN, pub, 4, priv, 4);
+     }});
+
 add({"create.create_object.aes_secret", "create",
      "C_CreateObject of a secret key from a fixed value — the imported attribute set",
      {}, true, true,

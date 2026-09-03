@@ -1193,17 +1193,25 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 	if (op == OBJECT_OP_CREATE && objClass == CKO_PROFILE)
 		return CKR_ATTRIBUTE_READ_ONLY;
 
-	// ── S5 (2026-08-13) — hash-based-signature private keys ──────────────────
+	// ── S5 (2026-08-13, extended HBS-1 2026-09-03) — hash-based-signature
+	// private keys ────────────────────────────────────────────────────────
 	// PKCS#11 v3.2 §6.65.3 (HSS): "CKA_SENSITIVE MUST be true, CKA_EXTRACTABLE
 	// MUST be false, and CKA_COPYABLE MUST be false for this key."
 	// §6.66.4 (XMSS) / §6.66.5 (XMSS-MT): "CKA_SENSITIVE MUST be true and
-	// CKA_EXTRACTABLE MUST be false for this key."
+	// CKA_EXTRACTABLE MUST be false for this key" — the spec text does not
+	// repeat the COPYABLE sentence for these two, but the hazard it guards
+	// against is identical: a copied XMSS/XMSS-MT private key can advance or
+	// replay the same one-time leaf independently of the original, exactly
+	// the HSS forgery hazard the spec does spell out. HBS-1 (2026-09-03)
+	// closes that gap by enforcing CKA_COPYABLE FALSE for all three types,
+	// not HSS alone — this engine reads the two sections' silence on
+	// COPYABLE as an omission, not a deliberate looser bound.
 	//
 	// These keys hold the one-time-signature STATE in CKA_VALUE — the same
 	// tables warn that "exporting this value is dangerous as it would allow key
-	// reuse", and reuse of an LMS/XMSS one-time key permits forgery. Until this
-	// pass neither generation nor C_CreateObject set any of the three, so the
-	// class defaults applied (sensitive false) and the state was one
+	// reuse", and reuse of an LMS/XMSS one-time key permits forgery. Until the
+	// 08-13 pass neither generation nor C_CreateObject set any of the three, so
+	// the class defaults applied (sensitive false) and the state was one
 	// C_GetAttributeValue from extraction.
 	//
 	// Enforced here rather than in the keygen mechanism block because both
@@ -1217,8 +1225,7 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 		for (CK_ULONG i = 0; i < ulCount; i++)
 		{
 			const CK_ATTRIBUTE_TYPE t = pTemplate[i].type;
-			if (t != CKA_SENSITIVE && t != CKA_EXTRACTABLE &&
-			    !(keyType == CKK_HSS && t == CKA_COPYABLE))
+			if (t != CKA_SENSITIVE && t != CKA_EXTRACTABLE && t != CKA_COPYABLE)
 				continue;
 			if (pTemplate[i].pValue == NULL_PTR ||
 			    pTemplate[i].ulValueLen != sizeof(CK_BBOOL))
@@ -1248,7 +1255,7 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 		if (hbsPrivateKey &&
 		    (pTemplate[i].type == CKA_SENSITIVE ||
 		     pTemplate[i].type == CKA_EXTRACTABLE ||
-		     (keyType == CKK_HSS && pTemplate[i].type == CKA_COPYABLE)))
+		     pTemplate[i].type == CKA_COPYABLE))
 		{
 			// Validated above; the engine writes the mandated value itself.
 			continue;
@@ -1275,13 +1282,12 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 		attribs[attribsCount].pValue = &hbsExtractable;
 		attribs[attribsCount].ulValueLen = sizeof(hbsExtractable);
 		attribsCount++;
-		if (keyType == CKK_HSS)
-		{
-			attribs[attribsCount].type = CKA_COPYABLE;
-			attribs[attribsCount].pValue = &hbsCopyable;
-			attribs[attribsCount].ulValueLen = sizeof(hbsCopyable);
-			attribsCount++;
-		}
+		// HBS-1 (2026-09-03): forced for HSS, XMSS and XMSS-MT alike — see
+		// the enforcement comment above this block.
+		attribs[attribsCount].type = CKA_COPYABLE;
+		attribs[attribsCount].pValue = &hbsCopyable;
+		attribs[attribsCount].ulValueLen = sizeof(hbsCopyable);
+		attribsCount++;
 	}
 	for (CK_ULONG i=0; i < saveAttribsCount; i++)
 	{
