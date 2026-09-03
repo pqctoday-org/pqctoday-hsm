@@ -684,6 +684,10 @@ pub fn register(
         name,
         alternative_name: x.alternative_name.clone(),
         alternative_name_type: x.alternative_name_type,
+        rotate_automatic: x.rotate_automatic,
+        rotate_interval: x.rotate_interval,
+        rotate_offset: x.rotate_offset,
+        rotate_name: x.rotate_name.clone(),
         links,
         custom_attributes,
         object_groups: x.object_groups.clone(),
@@ -1112,6 +1116,14 @@ pub(crate) struct ExtractedAttrs {
     /// Gap-remediation Phase H, Finding #11 — sibling `Alternative Name
     /// Type` (§4.5 Enumeration), previously discarded on decode.
     pub alternative_name_type: Option<u32>,
+    /// KMIP 3.0 §4.54 / §4.57 / §4.59 / §4.60 — the client-settable half of
+    /// the rotation family, honoured at Create / Create Key Pair / Register
+    /// ("Initially set by: Client or Server"). Rotate Date / Generation /
+    /// Latest are server-set and never taken from a template.
+    pub rotate_automatic: Option<bool>,
+    pub rotate_interval: Option<u32>,
+    pub rotate_offset: Option<i32>,
+    pub rotate_name: Option<String>,
 }
 
 pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
@@ -1126,6 +1138,10 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         object_groups: Vec::new(),
         alternative_name: None,
         alternative_name_type: None,
+        rotate_automatic: None,
+        rotate_interval: None,
+        rotate_offset: None,
+        rotate_name: None,
     };
     for a in attrs {
         match a {
@@ -1141,6 +1157,10 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             Attribute::ProtectStopDate(t)  => out.protect_stop_date  = OffsetDateTime::from_unix_timestamp(*t).ok(),
             Attribute::CryptographicParameters(cp) => out.cryptographic_parameters = Some(cp.clone()),
             Attribute::QuantumSafe(b)              => out.quantum_safe = Some(*b),
+            Attribute::RotateAutomatic(b)          => out.rotate_automatic = Some(*b),
+            Attribute::RotateInterval(n)           => out.rotate_interval = Some(*n),
+            Attribute::RotateOffset(n)             => out.rotate_offset = Some(*n),
+            Attribute::RotateName(s)               => out.rotate_name = Some(s.clone()),
             Attribute::UsageLimits { total, unit, .. } => {
                 out.usage_limits_total = Some(*total);
                 out.usage_limits_unit = *unit;

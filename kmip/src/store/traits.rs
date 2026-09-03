@@ -195,6 +195,11 @@ pub struct ObjectRecord {
     pub quantum_safe: Option<bool>,
     /// KMIP §4 `Rotate Automatic` — server-driven rotation toggle.
     pub rotate_automatic: Option<bool>,
+    /// KMIP 3.0 §4.58 `Rotate Latest` — True on the newest generation of a
+    /// rotation set. `#[serde(default)]` keeps pre-existing sqlite blobs
+    /// readable.
+    #[serde(default)]
+    pub rotate_latest: Option<bool>,
 
     /// KMIP §4 `Short Unique Identifier` — abbreviated form of the UID
     /// (last 8 hex chars of the UUID portion). Generated lazily.
@@ -392,6 +397,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             key_value_present: None,
             quantum_safe: None,
             rotate_automatic: None,
+            rotate_latest: None,
             short_unique_identifier: None,
             alternative_name: None,
             alternative_name_type: None,

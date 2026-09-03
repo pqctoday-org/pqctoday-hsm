@@ -333,6 +333,9 @@ pub enum Attribute {
     KeyValuePresent(bool),
     QuantumSafe(bool),
     RotateAutomatic(bool),
+    /// `Rotate Latest` (0x420172, KMIP 3.0 §4.58) — server-set: True on the
+    /// most recent object of a rotation set (shared `Rotate Name`).
+    RotateLatest(bool),
 
     /// Identity / description strings.
     ShortUniqueIdentifier(String),

@@ -133,7 +133,8 @@ const CNSA_TAG: (&str, &str) = ("x-pqctoday-cnsa-classification", "TopSecret");
 // (kmip/src/policy/decision.rs) — a specific KMIP 3.0 §9.2 ResultReason per rule
 // family (`min_key_length` -> BadCryptographicParameters, `require_usage_mask` /
 // `require_custom_attribute` -> InvalidAttributeValue, `lifecycle_state_gate` ->
-// ObjectArchived, `max_key_age_days` -> WrongKeyLifecycleState, everything else
+// WrongKeyLifecycleState (was ObjectArchived before composite-key WP 0.6),
+// `max_key_age_days` -> WrongKeyLifecycleState, everything else
 // -> PermissionDenied) rather than collapsing every denial onto one generic
 // code, so a policy denial can surface as any of these five reasons. A policy
 // *allow* proceeds to key generation which, engine-less (integration tests

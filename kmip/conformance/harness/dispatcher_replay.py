@@ -986,7 +986,9 @@ def start_server(port: int = 9999, extra_args: list[str] | None = None) -> Serve
             f"run `cargo build --release --bin pqctoday-kmip` first"
         )
     proc = subprocess.Popen(
-        [str(SERVER_BINARY), "--listen", f"127.0.0.1:{port}", "--store-memory", *(extra_args or [])],
+        # --no-auto-composite: composite-key plan §7.1 — the corpus was recorded
+        # against one managed object per Create; keep it that way here.
+        [str(SERVER_BINARY), "--listen", f"127.0.0.1:{port}", "--store-memory", "--no-auto-composite", *(extra_args or [])],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=False,

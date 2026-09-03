@@ -208,6 +208,16 @@ pub struct DepsConfig {
     /// Pre-configured tenants for `TenancyMode::Strict`. Ignored in
     /// `Single`/`Auto` modes.
     pub strict_tenants: Vec<StrictTenantConfig>,
+
+    /// Composite-key plan (2026-09-02, decision §7.1): when `true` (the
+    /// default from Phase 2 on), Create / Create Key Pair mint a composite
+    /// around generation 0 and return the composite UID. The OASIS
+    /// conformance replay harness runs the server with
+    /// `--no-auto-composite` so the corpus keeps seeing one object per
+    /// Create, exactly as the transcripts were recorded. Inert until the
+    /// composite layer lands (Phase 2); plumbed now so the harness flag and
+    /// the binary agree from the first PR.
+    pub auto_composite: bool,
 }
 
 /// P2.3 — designates the single key/cert pair the server may use as a
@@ -342,6 +352,7 @@ impl Default for DepsConfig {
             rng_seed_mode: RngSeedMode::FullConsume,
             tenancy_mode: TenancyMode::Single, // today's behavior, unchanged
             strict_tenants: Vec::new(),
+            auto_composite: true,
         }
     }
 }

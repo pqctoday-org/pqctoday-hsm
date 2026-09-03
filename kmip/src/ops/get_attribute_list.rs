@@ -95,6 +95,7 @@ pub fn get_attribute_list(
     if obj.key_value_present.is_some()             { names.push("Key Value Present".into()); }
     if obj.quantum_safe.is_some()                  { names.push("Quantum Safe".into()); }
     if obj.rotate_automatic.is_some()              { names.push("Rotate Automatic".into()); }
+    if obj.rotate_latest.is_some()                 { names.push("Rotate Latest".into()); }
     if obj.short_unique_identifier.is_some()       { names.push("Short Unique Identifier".into()); }
     if obj.alternative_name.is_some()              { names.push("Alternative Name".into()); }
     if obj.comment.is_some()                       { names.push("Comment".into()); }

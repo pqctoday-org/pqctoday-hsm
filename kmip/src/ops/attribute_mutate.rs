@@ -617,7 +617,16 @@ fn attribute_is_read_only(a: &Attribute) -> bool {
         Attribute::SplitKeyParts(_) |
         Attribute::SplitKeyThreshold(_) |
         Attribute::KeyPartIdentifier(_) |
-        Attribute::SplitKeyPolynomial(_)
+        Attribute::SplitKeyPolynomial(_) |
+        // §4.55 / §4.56 / §4.58 — Rotate Date, Rotate Generation and Rotate
+        // Latest are "Initially set by: Server", "Modifiable by client: No".
+        // They describe the server's own rotation bookkeeping. (Rotate
+        // Automatic / Interval / Offset are client-settable at creation and
+        // Rotate Name is client-modifiable, §4.54/4.57/4.59/4.60 — those
+        // stay out of this gate.)
+        Attribute::RotateDate(_) |
+        Attribute::RotateGeneration(_) |
+        Attribute::RotateLatest(_)
     )
 }
 
@@ -881,6 +890,7 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::Fresh(b)                    => obj.fresh = Some(*b),
         Attribute::QuantumSafe(b)              => obj.quantum_safe = Some(*b),
         Attribute::RotateAutomatic(b)          => obj.rotate_automatic = Some(*b),
+        Attribute::RotateLatest(b)             => obj.rotate_latest = Some(*b),
         Attribute::AlternativeName { value, name_type } => {
             obj.alternative_name = Some(value.clone());
             obj.alternative_name_type = Some(*name_type);

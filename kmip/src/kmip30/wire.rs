@@ -488,6 +488,8 @@ pub(crate) mod tags {
     pub const RotateInterval: u32                = 0x42_016a;
     pub const RotateOffset: u32                  = 0x42_016c;
     pub const RotateGeneration: u32              = 0x42_016e;
+    /// KMIP 3.0 §4.58 `Rotate Latest` (Boolean). Extract line 1364.
+    pub const RotateLatest: u32                  = 0x42_0172;
     pub const InteropFunction: u32        = 0x42_0160;
     pub const InteropIdentifier: u32      = 0x42_0161;
     // Spec extraction: `Initial Date = 0x420039` (was wrongly set to
@@ -2746,12 +2748,30 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::ProcessStartDate => Attribute::ProcessStartDate(expect_datetime(frame, "Process Start Date")?),
         tags::ProtectStopDate => Attribute::ProtectStopDate(expect_datetime(frame, "Protect Stop Date")?),
         tags::OriginalCreationDate => Attribute::OriginalCreationDate(expect_datetime(frame, "Original Creation Date")?),
+        // KMIP 3.0 §4.55 — server-set on rotation; decoded so a client's
+        // Locate/Get Attributes reference and the store round-trip both work.
+        tags::RotateDate => Attribute::RotateDate(expect_datetime(frame, "Rotate Date")?),
         // ── §5.1.2 Baseline security-posture booleans ──
         tags::Sensitive => Attribute::Sensitive(expect_boolean(frame, "Sensitive")?),
         tags::Extractable => Attribute::Extractable(expect_boolean(frame, "Extractable")?),
         tags::Fresh => Attribute::Fresh(expect_boolean(frame, "Fresh")?),
         tags::KeyValuePresent => Attribute::KeyValuePresent(expect_boolean(frame, "Key Value Present")?),
         tags::QuantumSafe => Attribute::QuantumSafe(expect_boolean(frame, "Quantum Safe")?),
+        // KMIP 3.0 §4.54–4.60 rotation family (Baseline Server profile
+        // clause 8 requires all seven). Previously encode-only: a client
+        // setting `Rotate Interval` got Success and nothing stored (the
+        // decoder's `_ => Ok(None)` fallthrough). Rotate Name is the
+        // client-assigned, deliberately non-unique rotation-set handle
+        // (§4.59); Automatic/Interval/Offset are client-settable at
+        // creation (§4.54/4.57/4.60 "Initially set by: Client or Server");
+        // Date/Generation/Latest are server-set (read-only gate in
+        // attribute_mutate.rs).
+        tags::RotateAutomatic => Attribute::RotateAutomatic(expect_boolean(frame, "Rotate Automatic")?),
+        tags::RotateLatest => Attribute::RotateLatest(expect_boolean(frame, "Rotate Latest")?),
+        tags::RotateInterval => Attribute::RotateInterval(expect_interval(frame, "Rotate Interval")?),
+        tags::RotateOffset => Attribute::RotateOffset(expect_integer(frame, "Rotate Offset")?),
+        tags::RotateGeneration => Attribute::RotateGeneration(expect_integer(frame, "Rotate Generation")?),
+        tags::RotateName => Attribute::RotateName(expect_text(frame, "Rotate Name")?),
         // Phase 3.3 — Split Key attributes (§4.29/§4.30/§4.63-4.66).
         // Client-decodable so Create Split Key's generic Attributes
         // list can carry Split Key Polynomial (§4.63).
@@ -3817,6 +3837,9 @@ fn decode_derive_key_req(children: &[TtlvFrame]) -> Result<DeriveKeyRequest, Wir
                 // §6.1 preamble ID Placeholder — same convention as `required_uid`.
                 Value::Enumeration(v) if *v == 0x00000001 => {
                     uids.push(crate::dispatcher::ID_PLACEHOLDER_SENTINEL.to_string());
+                }
+                Value::Integer(n) => {
+                    uids.push(format!("{}{}", crate::dispatcher::ID_REF_PREFIX, n));
                 }
                 Value::Enumeration(v) => {
                     return Err(WireError::UnknownEnum {
@@ -5066,6 +5089,7 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::KeyValuePresent(b)          => TtlvFrame::new(Tag(tags::KeyValuePresent),          Value::Boolean(*b)),
         Attribute::QuantumSafe(b)              => TtlvFrame::new(Tag(tags::QuantumSafe),              Value::Boolean(*b)),
         Attribute::RotateAutomatic(b)          => TtlvFrame::new(Tag(tags::RotateAutomatic),          Value::Boolean(*b)),
+        Attribute::RotateLatest(b)             => TtlvFrame::new(Tag(tags::RotateLatest),             Value::Boolean(*b)),
         Attribute::ShortUniqueIdentifier(s)    => {
             // KMIP §11 `Short Unique Identifier` is a ByteString on
             // the wire — we carry it as a hex-encoded String in the
@@ -5234,6 +5258,7 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "KeyValuePresent"        => tags::KeyValuePresent,
         "QuantumSafe"            => tags::QuantumSafe,
         "RotateAutomatic"        => tags::RotateAutomatic,
+        "RotateLatest"           => tags::RotateLatest,
         "ShortUniqueIdentifier"  => tags::ShortUniqueIdentifier,
         "AlternativeName"        => tags::AlternativeName,
         "Comment"                => tags::Comment,
@@ -5324,6 +5349,8 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::ProcessStartDate       => "Process Start Date",
         tags::ProtectStopDate        => "Protect Stop Date",
         tags::RotateDate             => "Rotate Date",
+        tags::RotateAutomatic        => "Rotate Automatic",
+        tags::RotateLatest           => "Rotate Latest",
         tags::Sensitive              => "Sensitive",
         tags::AlwaysSensitive        => "Always Sensitive",
         tags::Extractable            => "Extractable",
@@ -5402,6 +5429,14 @@ fn required_uid(children: &[TtlvFrame]) -> Result<String, WireError> {
                 Value::Enumeration(v) if *v == 0x00000001 => {
                     return Ok(crate::dispatcher::ID_PLACEHOLDER_SENTINEL.to_string());
                 }
+                // KMIP 3.0 §4.68 — Integer form: "Zero based nth Unique
+                // Identifier in the response. If negative the count is
+                // backwards from the beginning of the current operation's
+                // batch item." Carried as a sentinel the dispatcher resolves
+                // (`ID_REF_PREFIX`), same design as the placeholder.
+                Value::Integer(n) => {
+                    return Ok(format!("{}{}", crate::dispatcher::ID_REF_PREFIX, n));
+                }
                 Value::Enumeration(v) => {
                     return Err(WireError::UnknownEnum {
                         field: "Unique Identifier (only IDPlaceholder=0x01 supported)",
@@ -5454,6 +5489,20 @@ fn expect_boolean(frame: &TtlvFrame, name: &'static str) -> Result<bool, WireErr
     match &frame.value {
         Value::Boolean(v) => Ok(*v),
         _ => Err(WireError::BadType { tag: frame.tag.0, name, msg: "expected Boolean".into() }),
+    }
+}
+
+fn expect_interval(frame: &TtlvFrame, name: &'static str) -> Result<u32, WireError> {
+    match &frame.value {
+        Value::Interval(v) => Ok(*v),
+        _ => Err(WireError::BadType { tag: frame.tag.0, name, msg: "expected Interval".into() }),
+    }
+}
+
+fn expect_text(frame: &TtlvFrame, name: &'static str) -> Result<String, WireError> {
+    match &frame.value {
+        Value::TextString(v) => Ok(v.clone()),
+        _ => Err(WireError::BadType { tag: frame.tag.0, name, msg: "expected TextString".into() }),
     }
 }
 
@@ -6057,6 +6106,45 @@ mod tests {
     /// P2.1 — `Object Group` (0x420056) attribute round-trips through
     /// the TTLV codec: TextString encode → decode yields the same
     /// `Attribute::ObjectGroup`, under the verified tag.
+    /// KMIP 3.0 §4.54–4.60 — the whole rotation family round-trips
+    /// through the codec under the spec tags (0x42016A–0x42016F,
+    /// 0x420172). Before this, six of the seven were encode-only and
+    /// `Rotate Latest` did not exist in the codec at all, so a client
+    /// could never set a rotation schedule or Locate the latest
+    /// generation (Baseline Server profile clause 8 gap).
+    /// KMIP 3.0 §4.68 — a request `Unique Identifier` may be an Integer:
+    /// the nth identifier the batch has returned (negative counts back from
+    /// the current item). The codec carries it as `$IDRef:n` for the
+    /// dispatcher, exactly like the `$IDPlaceholder` enumeration form.
+    #[test]
+    fn unique_identifier_integer_reference_decodes_to_ref_sentinel() {
+        for n in [0i32, 2, -1, -3] {
+            let frame = TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Integer(n));
+            let uid = required_uid(std::slice::from_ref(&frame)).unwrap();
+            assert_eq!(uid, format!("{}{}", crate::dispatcher::ID_REF_PREFIX, n));
+        }
+    }
+
+    #[test]
+    fn rotate_family_attributes_wire_round_trip() {
+        let cases = vec![
+            (Attribute::RotateAutomatic(true), tags::RotateAutomatic, 0x42_016bu32),
+            (Attribute::RotateDate(1_725_000_000), tags::RotateDate, 0x42_016d),
+            (Attribute::RotateGeneration(3), tags::RotateGeneration, 0x42_016e),
+            (Attribute::RotateInterval(86_400), tags::RotateInterval, 0x42_016a),
+            (Attribute::RotateLatest(true), tags::RotateLatest, 0x42_0172),
+            (Attribute::RotateName("payments-db-cipher".into()), tags::RotateName, 0x42_016f),
+            (Attribute::RotateOffset(-30), tags::RotateOffset, 0x42_016c),
+        ];
+        for (attr, tag, codepoint) in cases {
+            let frame = encode_attribute_v3(&attr);
+            assert_eq!(frame.tag.0, tag, "{attr:?} encodes under its own tag");
+            assert_eq!(tag, codepoint, "{attr:?} tag matches the CSD02 extract");
+            let decoded = decode_attribute_v3(&frame).unwrap();
+            assert_eq!(decoded, Some(attr), "round-trip");
+        }
+    }
+
     #[test]
     fn object_group_attribute_wire_round_trips() {
         let attr = Attribute::ObjectGroup("SASED-M-2-30-group".into());

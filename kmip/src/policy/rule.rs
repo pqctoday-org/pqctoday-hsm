@@ -917,8 +917,11 @@ impl Rule {
                     return None;
                 }
                 match req.state {
+                    // WP 0.6 — same condition the hard-coded op gates refuse
+                    // with 0x43; a policy denial for a wrong lifecycle state
+                    // must carry the same KMIP reason, not Object Archived.
                     Some(s) if !allowed_states.iter().any(|a| a == s) => Some(GatingDeny {
-                        kmip_reason: DenyReason::ObjectArchived,
+                        kmip_reason: DenyReason::WrongKeyLifecycleState,
                         human: reason.clone(),
                     }),
                     _ => None,

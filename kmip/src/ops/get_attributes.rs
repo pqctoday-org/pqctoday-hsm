@@ -144,6 +144,7 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     if let Some(b) = r.key_value_present { out.push(Attribute::KeyValuePresent(b)); }
     if let Some(b) = r.quantum_safe { out.push(Attribute::QuantumSafe(b)); }
     if let Some(b) = r.rotate_automatic { out.push(Attribute::RotateAutomatic(b)); }
+    if let Some(b) = r.rotate_latest { out.push(Attribute::RotateLatest(b)); }
     // KMIP §11 `Short Unique Identifier` — server-derived: a short
     // ByteString hash of the UID; honour the stored value when set,
     // otherwise generate a deterministic SHA-256 prefix.
@@ -362,6 +363,7 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::KeyValuePresent(_)        => "KeyValuePresent",
         Attribute::QuantumSafe(_)            => "QuantumSafe",
         Attribute::RotateAutomatic(_)        => "RotateAutomatic",
+        Attribute::RotateLatest(_)           => "RotateLatest",
         Attribute::ShortUniqueIdentifier(_)  => "ShortUniqueIdentifier",
         Attribute::AlternativeName { .. }    => "AlternativeName",
         Attribute::Comment(_)                => "Comment",

@@ -100,6 +100,13 @@ struct Cli {
     #[arg(long, conflicts_with = "store")]
     store_memory: bool,
 
+    /// Composite-key model (plan 2026-09-02 §7.1): do NOT wrap new keys in a
+    /// composite; Create / Create Key Pair return the bare generation UID.
+    /// Used by the OASIS conformance replay harness so the corpus keeps
+    /// seeing one object per Create. Inert until the composite layer lands.
+    #[arg(long)]
+    no_auto_composite: bool,
+
     /// Directory for the PKCS#11 engine's OWN durable store — the actual
     /// key material (encrypted at rest), as opposed to `--store`, which is
     /// this server's KMIP-level metadata only (UID, lifecycle state,
@@ -554,6 +561,7 @@ async fn main() -> anyhow::Result<()> {
         // plan's KMIP-axis multi-tenant benchmark cells need (§P2/§P3).
         tenancy_mode,
         strict_tenants,
+        auto_composite: !cli.no_auto_composite,
     };
     let deps = Arc::new(
         Deps::new(engine, store, sink, config).with_engine_session(engine_session),

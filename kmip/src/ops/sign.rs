@@ -122,7 +122,10 @@ pub fn sign(
         &stored_attrs,
     );
     p_req.usage_mask = Some(obj.usage_mask);
-    p_req.state = Some("Active");
+    // WP 0.6 — pass the real state (the hard-coded `state != Active` gate
+    // above already refused everything else, so today this is always
+    // Active; the composite's process/protect lanes will change that).
+    p_req.state = Some(super::helpers::state_name(obj.state));
     // name_pattern rules match on the stored key's Name (label-scoped rekey).
     p_req.name = obj.name.as_deref();
     p_req.current_object_algorithm = Some(&stored_algo);

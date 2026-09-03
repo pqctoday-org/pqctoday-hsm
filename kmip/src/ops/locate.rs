@@ -153,11 +153,19 @@ pub fn locate(
         });
     }
 
-    // Paging needs a stable total order — `MemoryStore::find` iterates a
-    // HashMap, so without a sort `Offset Items` would skip a *random* N.
-    // Sort on (Initial Date, UID): creation order with a deterministic
-    // tie-break.
-    matches.sort_by(|a, b| (a.initial_date, &a.uid).cmp(&(b.initial_date, &b.uid)));
+    // KMIP 3.0 §6.1.34: "Responses containing Unique Identifiers for
+    // multiple objects SHALL be returned in descending order of object
+    // creation (most recently created object first)." Paging also needs a
+    // stable total order (`MemoryStore::find` iterates a HashMap), so the
+    // tie-break on equal Initial Dates is ascending UID — deterministic,
+    // and unchanged for the pre-existing offset/max-items tests whose
+    // fixtures all share UNIX_EPOCH. Previously sorted OLDEST first, the
+    // reverse of the spec (composite-key plan WP 0.2, G-10).
+    matches.sort_by(|a, b| {
+        b.initial_date
+            .cmp(&a.initial_date)
+            .then_with(|| a.uid.cmp(&b.uid))
+    });
 
     // KMIP 3.0 §6.1.32 `Offset Items` — skip the first N matches, THEN
     // cap with `Maximum Items` (offset selects the page start, max the
@@ -214,6 +222,15 @@ struct LocateFilters {
     cryptographic_length: Option<u32>,
     cryptographic_usage_mask: Option<UsageMask>,
     unique_identifier: Option<String>,
+    /// KMIP 3.0 §4.59 `Rotate Name` — the client-assigned handle of a
+    /// rotation set (deliberately non-unique). `Locate(Rotate Name = X)`
+    /// returns the whole set newest-first; with `Rotate Latest = true`
+    /// it is the spec's own "find the current generation" query.
+    rotate_name: Option<String>,
+    /// KMIP 3.0 §4.58 `Rotate Latest`.
+    rotate_latest: Option<bool>,
+    /// KMIP 3.0 §4.56 `Rotate Generation`.
+    rotate_generation: Option<i32>,
 }
 
 impl LocateFilters {
@@ -255,6 +272,25 @@ impl LocateFilters {
             match &r.application_specific_information {
                 Some((have_ns, have_data)) if have_ns == ns && have_data == data => {}
                 _ => return false,
+            }
+        }
+        if let Some(want) = &self.rotate_name {
+            match &r.rotate_name {
+                Some(have) if have == want => {}
+                _ => return false,
+            }
+        }
+        if let Some(want) = self.rotate_latest {
+            // An object with no Rotate Latest value is not "the latest";
+            // a filter of `false` matches only objects explicitly marked
+            // superseded (the spec's Boolean, not tri-state).
+            if r.rotate_latest.unwrap_or(false) != want {
+                return false;
+            }
+        }
+        if let Some(want) = self.rotate_generation {
+            if r.rotate_generation != Some(want) {
+                return false;
             }
         }
         if let Some(want_gl) = &self.group_link {
@@ -318,6 +354,9 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
         application_specific_information: None,
         group_link: None,
         object_group: None,
+        rotate_name: None,
+        rotate_latest: None,
+        rotate_generation: None,
         certificate_subject_cn: None,
         x509_certificate_issuer: None,
         cryptographic_length: None,
@@ -344,6 +383,9 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
             Attribute::CryptographicLength(n) => f.cryptographic_length = Some(*n),
             Attribute::CryptographicUsageMask(m) => f.cryptographic_usage_mask = Some(*m),
             Attribute::UniqueIdentifier(uid) => f.unique_identifier = Some(uid.clone()),
+            Attribute::RotateName(n) => f.rotate_name = Some(n.clone()),
+            Attribute::RotateLatest(b) => f.rotate_latest = Some(*b),
+            Attribute::RotateGeneration(g) => f.rotate_generation = Some(*g),
             Attribute::ObjectGroup(g) => {
                 f.object_group = Some(g.clone());
             }
@@ -775,6 +817,78 @@ mod tests {
     /// Locate steps filter by this and previously relied on it being
     /// harmlessly ignored (returning every object); narrowing it to the
     /// single matching UID is still correct for those steps.
+    /// KMIP 3.0 §6.1.34 — multiple results SHALL come back newest first.
+    /// Three objects created at t, t+1, t+2 → [c, b, a]. The pre-existing
+    /// offset/max-items tests share one timestamp and pin the UID
+    /// tie-break, so this is the only test that pins the date order.
+    #[test]
+    fn locate_returns_most_recently_created_first() {
+        let d = deps_with();
+        for (i, uid) in ["a", "b", "c"].iter().enumerate() {
+            d.store.put(ObjectRecord {
+                uid: (*uid).into(),
+                object_type: ObjectType::SymmetricKey,
+                algorithm: KmipAlgorithm::Aes,
+                state: State::Active,
+                initial_date: OffsetDateTime::from_unix_timestamp(1_000 + i as i64).unwrap(),
+                ..ObjectRecord::default()
+            }).unwrap();
+        }
+        let r = locate(&d, LocateRequest::default(), &AuthContext::open(), "c").unwrap();
+        assert_eq!(r.uids, vec!["c", "b", "a"]);
+    }
+
+    /// KMIP 3.0 §4.58/§4.59 — `Locate(Rotate Name = X, Rotate Latest =
+    /// true)` is the spec-sanctioned "current generation of this
+    /// rotation set" query; `Locate(Rotate Name = X)` is the whole set,
+    /// newest first; `Rotate Generation` pins one member.
+    #[test]
+    fn locate_filters_by_rotate_name_latest_and_generation() {
+        let d = deps_with();
+        let mk = |uid: &str, generation: i32, latest: bool, secs: i64| {
+            d.store.put(ObjectRecord {
+                uid: uid.into(),
+                object_type: ObjectType::SymmetricKey,
+                algorithm: KmipAlgorithm::Aes,
+                state: State::Active,
+                initial_date: OffsetDateTime::from_unix_timestamp(secs).unwrap(),
+                rotate_name: Some("payments-db-cipher".into()),
+                rotate_generation: Some(generation),
+                rotate_latest: Some(latest),
+                ..ObjectRecord::default()
+            }).unwrap();
+        };
+        mk("g0", 0, false, 1_000);
+        mk("g1", 1, false, 2_000);
+        mk("g2", 2, true, 3_000);
+        // unrelated key, no rotation attributes
+        put(&d, "other", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active);
+
+        let by_name = |attrs: Vec<Attribute>| {
+            locate(&d, LocateRequest { attributes: attrs, ..Default::default() }, &AuthContext::open(), "c")
+                .unwrap()
+                .uids
+        };
+        assert_eq!(
+            by_name(vec![Attribute::RotateName("payments-db-cipher".into())]),
+            vec!["g2", "g1", "g0"],
+            "whole rotation set, newest first"
+        );
+        assert_eq!(
+            by_name(vec![Attribute::RotateName("payments-db-cipher".into()), Attribute::RotateLatest(true)]),
+            vec!["g2"],
+            "the current generation"
+        );
+        assert_eq!(
+            by_name(vec![Attribute::RotateName("payments-db-cipher".into()), Attribute::RotateGeneration(1)]),
+            vec!["g1"]
+        );
+        assert!(by_name(vec![Attribute::RotateName("nope".into())]).is_empty());
+        // `Rotate Latest = true` alone never matches an object that has no
+        // rotation bookkeeping at all.
+        assert_eq!(by_name(vec![Attribute::RotateLatest(true)]), vec!["g2"]);
+    }
+
     #[test]
     fn locate_filters_by_unique_identifier() {
         let d = deps_with();

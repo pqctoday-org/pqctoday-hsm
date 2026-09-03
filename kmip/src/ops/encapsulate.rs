@@ -117,7 +117,7 @@ pub fn encapsulate(
         &stored_attrs,
     );
     p_req.usage_mask = Some(obj.usage_mask);
-    p_req.state = Some("Active");
+    p_req.state = Some(super::helpers::state_name(obj.state)); // WP 0.6 — real state
     p_req.current_object_algorithm = Some(&stored_algo);
     p_req.target_uid = Some(&req.uid);
     p_req.object_activation_date = obj.activation_date; // F-3 — max_key_age_days

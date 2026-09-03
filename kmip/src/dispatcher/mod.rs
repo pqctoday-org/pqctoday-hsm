@@ -351,6 +351,12 @@ fn undo_wave(deps: &Deps, state: &mut BatchState, items: &mut [ResponseBatchItem
 #[derive(Default)]
 struct BatchState {
     id_placeholder: Option<String>,
+    /// Every Unique Identifier returned by the batch's successful items so
+    /// far, in response order (a key pair contributes private then public;
+    /// Locate contributes all matches). Backs the §4.68 Integer reference
+    /// form: `$IDRef:0` is the first UID the batch produced, `$IDRef:-1`
+    /// the most recent.
+    response_uids: Vec<String>,
     /// R7 Phase 4 — every successful state-mutating op pushes one
     /// or more `UidSnapshot`s here. On failure under Undo mode the
     /// stack is replayed in reverse to restore the store + engine
@@ -378,6 +384,14 @@ struct UidSnapshot {
 /// The dispatcher substitutes the live ID Placeholder before handing
 /// the request to the handler.
 pub const ID_PLACEHOLDER_SENTINEL: &str = "$IDPlaceholder";
+
+/// Sentinel prefix the wire codec emits for `<UniqueIdentifier
+/// type="Integer" value="n"/>` — KMIP 3.0 §4.68: "Zero based nth Unique
+/// Identifier in the response. If negative the count is backwards from
+/// the beginning of the current operation's batch item." The dispatcher
+/// resolves `$IDRef:n` against every Unique Identifier the batch has
+/// returned so far (composite-key plan WP 0.3, G-19).
+pub const ID_REF_PREFIX: &str = "$IDRef:";
 
 /// K3 — the dispatcher's REAL operation surface: exactly the ops
 /// `handle_payload` routes to an implemented handler (one entry per
@@ -819,59 +833,78 @@ fn substitute_id_placeholder(
 ) -> Result<RequestPayload, KmipError> {
     let live = state.id_placeholder.as_deref();
     let mut missing = false;
-    fn fix(s: &mut String, live: Option<&str>, missing: &mut bool) {
+    let mut bad_ref: Option<String> = None;
+    // `fix` resolves both batch-relative forms: the ID Placeholder
+    // enumeration (§6.1 preamble) and the Integer "nth Unique Identifier
+    // in the response" reference (§4.68).
+    let mut fix = |s: &mut String| {
         if s == ID_PLACEHOLDER_SENTINEL {
             match live {
                 Some(l) => *s = l.to_string(),
-                None => *missing = true,
+                None => missing = true,
+            }
+        } else if let Some(n) = s.strip_prefix(ID_REF_PREFIX) {
+            let n: i64 = n.parse().unwrap_or(i64::MAX);
+            let len = state.response_uids.len() as i64;
+            let idx = if n < 0 { len + n } else { n };
+            if idx >= 0 && idx < len {
+                *s = state.response_uids[idx as usize].clone();
+            } else {
+                bad_ref = Some(format!(
+                    "Unique Identifier reference {n} is out of range: this batch has returned {len} identifier(s) so far"
+                ));
             }
         }
-    }
+    };
     let mut p = payload;
     match &mut p {
-        RequestPayload::Get(r)             => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::GetAttributes(r)   => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::GetAttributeList(r)=> fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Activate(r)        => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Revoke(r)          => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Destroy(r)         => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Encrypt(r)         => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Decrypt(r)         => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Encapsulate(r)     => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Decapsulate(r)     => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Sign(r)            => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::SignatureVerify(r) => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Get(r)             => fix(&mut r.uid),
+        RequestPayload::GetAttributes(r)   => fix(&mut r.uid),
+        RequestPayload::GetAttributeList(r)=> fix(&mut r.uid),
+        RequestPayload::Activate(r)        => fix(&mut r.uid),
+        RequestPayload::Revoke(r)          => fix(&mut r.uid),
+        RequestPayload::Destroy(r)         => fix(&mut r.uid),
+        RequestPayload::Encrypt(r)         => fix(&mut r.uid),
+        RequestPayload::Decrypt(r)         => fix(&mut r.uid),
+        RequestPayload::Encapsulate(r)     => fix(&mut r.uid),
+        RequestPayload::Decapsulate(r)     => fix(&mut r.uid),
+        RequestPayload::Sign(r)            => fix(&mut r.uid),
+        RequestPayload::SignatureVerify(r) => fix(&mut r.uid),
         // P2.2 — Validate carries a repeatable UID list (§6.1.64).
         RequestPayload::Validate(r) => {
-            for uid in &mut r.uids { fix(uid, live, &mut missing); }
+            for uid in &mut r.uids { fix(uid); }
         }
-        RequestPayload::AddAttribute(r)    => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::ModifyAttribute(r) => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::DeleteAttribute(r) => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::SetAttribute(r)    => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::AdjustAttribute(r) => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Export(r)          => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Deactivate(r)      => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Check(r)           => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Archive(r)         => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Recover(r)         => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Obliterate(r)      => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::Mac(r)             => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::MacVerify(r)       => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::GetUsageAllocation(r) => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::AddAttribute(r)    => fix(&mut r.uid),
+        RequestPayload::ModifyAttribute(r) => fix(&mut r.uid),
+        RequestPayload::DeleteAttribute(r) => fix(&mut r.uid),
+        RequestPayload::SetAttribute(r)    => fix(&mut r.uid),
+        RequestPayload::AdjustAttribute(r) => fix(&mut r.uid),
+        RequestPayload::Export(r)          => fix(&mut r.uid),
+        RequestPayload::Deactivate(r)      => fix(&mut r.uid),
+        RequestPayload::Check(r)           => fix(&mut r.uid),
+        RequestPayload::Archive(r)         => fix(&mut r.uid),
+        RequestPayload::Recover(r)         => fix(&mut r.uid),
+        RequestPayload::Obliterate(r)      => fix(&mut r.uid),
+        RequestPayload::Mac(r)             => fix(&mut r.uid),
+        RequestPayload::MacVerify(r)       => fix(&mut r.uid),
+        RequestPayload::GetUsageAllocation(r) => fix(&mut r.uid),
         // K20 — Derive Key carries a repeatable UID list (§6.1.19).
         RequestPayload::DeriveKey(r) => {
-            for uid in &mut r.uids { fix(uid, live, &mut missing); }
+            for uid in &mut r.uids { fix(uid); }
         }
         // K21 — §6.1.53 / §6.1.52 Re-key targets.
-        RequestPayload::ReKey(r)           => fix(&mut r.uid, live, &mut missing),
-        RequestPayload::ReKeyKeyPair(r)    => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::ReKey(r)           => fix(&mut r.uid),
+        RequestPayload::ReKeyKeyPair(r)    => fix(&mut r.uid),
         // P2.3 — Certify MAY name a PublicKey by UID (Option); Re-certify
         // always names the existing Certificate.
-        RequestPayload::Certify(r)         => { if let Some(u) = &mut r.uid { fix(u, live, &mut missing); } }
-        RequestPayload::ReCertify(r)       => fix(&mut r.uid, live, &mut missing),
+        RequestPayload::Certify(r)         => { if let Some(u) = &mut r.uid { fix(u); } }
+        RequestPayload::ReCertify(r)       => fix(&mut r.uid),
         // Ops that don't take a UID (Create, Locate, Query, …) skip.
         _ => {}
+    }
+    drop(fix);
+    if let Some(msg) = bad_ref {
+        return Err(KmipError::invalid_field(msg));
     }
     if missing {
         return Err(KmipError::id_placeholder_unset());
@@ -893,7 +926,22 @@ fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
             [only] => Some(only.clone()),
             _ => None,
         };
+        state.response_uids.extend(r.uids.iter().cloned());
         return;
+    }
+    // §4.68 Integer references see EVERY identifier a response carried, in
+    // the order the response lists them (Table 411: private before public).
+    match payload {
+        ResponsePayload::CreateKeyPair(r) => {
+            state.response_uids.push(r.private_key_uid.clone());
+            state.response_uids.push(r.public_key_uid.clone());
+        }
+        ResponsePayload::ReKeyKeyPair(r) => {
+            state.response_uids.push(r.private_key_uid.clone());
+            state.response_uids.push(r.public_key_uid.clone());
+        }
+        ResponsePayload::CreateSplitKey(r) => state.response_uids.extend(r.uids.iter().cloned()),
+        _ => {}
     }
     let uid: Option<&str> = match payload {
         ResponsePayload::Create(r)      => Some(&r.uid),
@@ -943,7 +991,15 @@ fn update_id_placeholder(state: &mut BatchState, payload: &ResponsePayload) {
         ResponsePayload::Decrypt(r)         => Some(&r.uid),
         _ => None,
     };
-    if let Some(u) = uid { state.id_placeholder = Some(u.to_string()); }
+    if let Some(u) = uid {
+        state.id_placeholder = Some(u.to_string());
+        if !matches!(
+            payload,
+            ResponsePayload::CreateKeyPair(_) | ResponsePayload::ReKeyKeyPair(_) | ResponsePayload::CreateSplitKey(_)
+        ) {
+            state.response_uids.push(u.to_string());
+        }
+    }
 }
 
 fn handle_payload(
@@ -2354,6 +2410,68 @@ mod tests {
     /// found` (reported against the CACP KMIP playground's Batch tab: a
     /// denied `CreateKeyPair` cascaded into a confusing `ObjectNotFound`
     /// on the chained `Activate`/`Sign`).
+    /// KMIP 3.0 §4.68 — Integer Unique Identifier references: `$IDRef:n`
+    /// is the nth identifier this batch has returned (negative = from the
+    /// end). Composite-key plan WP 0.3 (G-19): needed so a batch can
+    /// address an object created several items earlier once the ID
+    /// Placeholder has moved on (HPKE-by-batching derives the key and the
+    /// nonce from the same PRK). Out of range is a clear Invalid Field.
+    #[test]
+    fn integer_unique_identifier_references_resolve_against_batch_history() {
+        let d = deps();
+        for uid in ["obj-a", "obj-b"] {
+            d.store.put(crate::store::ObjectRecord {
+                uid: uid.into(),
+                object_type: crate::kmip30::ObjectType::SymmetricKey,
+                algorithm: crate::kmip30::KmipAlgorithm::Aes,
+                state: crate::kmip30::State::Active,
+                initial_date: time::OffsetDateTime::UNIX_EPOCH,
+                ..crate::store::ObjectRecord::default()
+            }).unwrap();
+        }
+        let ga = |uid: &str| RequestBatchItem {
+            operation: crate::kmip30::Operation::GetAttributes,
+            payload: RP::GetAttributes(crate::kmip30::GetAttributesRequest {
+                uid: uid.to_string(),
+                attribute_references: vec![],
+            }),
+        };
+        let msg = crate::kmip30::RequestMessage {
+            header: RequestHeader {
+                batch_error_continuation_option: Some(BatchErrorContinuationOption::Continue),
+                ..RequestHeader::v3()
+            },
+            batch_items: vec![
+                ga("obj-a"),                                   // response_uids = [a]
+                ga("obj-b"),                                   // [a, b]
+                ga(&format!("{ID_REF_PREFIX}0")),              // → a; [a, b, a]
+                ga(&format!("{ID_REF_PREFIX}1")),              // → b; [a, b, a, b]
+                ga(&format!("{ID_REF_PREFIX}-1")),             // → b (most recent)
+                ga(&format!("{ID_REF_PREFIX}7")),              // out of range
+                ga(&format!("{ID_REF_PREFIX}-9")),             // out of range (negative)
+            ],
+        };
+        let resp = dispatch(&d, msg);
+        assert_eq!(resp.batch_items.len(), 7);
+        let uid_of = |i: usize| match &resp.batch_items[i].payload {
+            Some(ResponsePayload::GetAttributes(r)) => r.uid.clone(),
+            other => panic!("item {i}: expected GetAttributes payload, got {other:?}"),
+        };
+        assert_eq!(uid_of(2), "obj-a", "$IDRef:0 = first identifier returned");
+        assert_eq!(uid_of(3), "obj-b", "$IDRef:1 = second identifier returned");
+        assert_eq!(uid_of(4), "obj-b", "$IDRef:-1 = most recent identifier returned");
+        for i in [5usize, 6] {
+            assert_eq!(resp.batch_items[i].result_status, ResultStatus::OperationFailed);
+            assert_eq!(
+                resp.batch_items[i].result_reason,
+                Some(crate::error::ResultReason::InvalidField.to_wire_value()),
+                "item {i}: out-of-range reference → Invalid Field"
+            );
+            let text = resp.batch_items[i].result_message.as_deref().unwrap_or("");
+            assert!(text.contains("out of range"), "item {i}: {text}");
+        }
+    }
+
     #[test]
     fn id_placeholder_unset_gives_clear_message_not_raw_sentinel() {
         let d = deps();
