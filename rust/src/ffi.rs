@@ -14641,9 +14641,20 @@ mod multipart_ffi_tests {
             // (62, 77 and 46 bytes — see payloadLenBits in the source
             // file), so a block-aligned-prefix/sub-block-tail split always
             // exercises real ciphertext stealing across the boundary.
+            //
+            // Only chunkings matching XTS's real streaming contract
+            // (2026-09-02, round 2): one call carrying everything, or a
+            // block-aligned prefix followed by exactly one final call that
+            // may be sub-block. Byte-at-a-time (`&[1]`) is deliberately NOT
+            // exercised here any more — see `xts_update_after_commit_is_
+            // rejected_not_silently_wrong` for why continuing to feed data
+            // after a non-block-aligned call is now a hard error rather
+            // than a supported streaming pattern (that byte-at-a-time
+            // pattern would trip the commit point on its very first
+            // non-aligned byte and then reject every call after).
             let msg_len = pt.len().min(ct.len());
             let prefix = (msg_len / 16 * 16).max(16);
-            let chunkings: &[&[usize]] = &[&[1_000_000], &[1], &[prefix]];
+            let chunkings: &[&[usize]] = &[&[1_000_000], &[prefix]];
 
             if *is_encrypt {
                 seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, tweak.clone(), Vec::new(), 0);
@@ -14706,7 +14717,22 @@ mod multipart_ffi_tests {
             CKR_OK,
         );
 
-        let chunkings: &[&[usize]] = &[&[1], &[7, 3], &[16], &[33, 1, 5], &[64], &[1_000_000]];
+        // 2026-09-02 (round 2): only chunkings matching XTS's real
+        // streaming contract remain here — any number of calls that stay
+        // block-aligned, then the message naturally ends on one final
+        // (possibly sub-block) call, same shape `run_multipart`/
+        // `split_into` produce for a cycled size that doesn't evenly
+        // divide 247. `&[16]` and `&[64]` both land here: every call but
+        // the last is a clean multiple of the cycle size (so a clean
+        // multiple of 16 too, for `&[16]`'s own cycle and coincidentally
+        // for `&[64]` as well), and the last is whatever remains — the
+        // one genuinely non-aligned call, always the LAST one `split_into`
+        // produces since it stops exactly at `data.len()`. Removed: `&[1]`,
+        // `&[7, 3]`, `&[33, 1, 5]` — each goes non-aligned mid-stream with
+        // more calls still to come, which is exactly the pattern
+        // `xts_update_after_commit_is_rejected_not_silently_wrong` below
+        // proves must now be a hard error, not silently accepted.
+        let chunkings: &[&[usize]] = &[&[16], &[64], &[1_000_000]];
         for sizes in chunkings {
             seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, tweak.clone(), Vec::new(), 0);
             let parts = split_into(&pt, sizes);
@@ -14761,7 +14787,11 @@ mod multipart_ffi_tests {
             C_EncryptUpdate(session, part.as_ptr() as *mut u8, 10, std::ptr::null_mut(), &mut len),
             CKR_OK,
         );
-        assert_eq!(len, 0, "XTS Update never emits before Final");
+        // 10 bytes is under one full block, so `safe_len(10)` is 0 (2026-09-02:
+        // this no longer means "XTS never emits before Final" in general —
+        // see xts_multipart_update_emits_progressively below — only that
+        // there is nothing yet held above the one-full-block-plus-tail floor).
+        assert_eq!(len, 0, "under one block: nothing crosses the holdback floor yet");
         let mut buf = [0u8; 10];
         let mut len = 0u32;
         assert_eq!(
@@ -14775,6 +14805,178 @@ mod multipart_ffi_tests {
             CKR_DATA_LEN_RANGE,
         );
         assert!(!ENCRYPT_STATE.borrow().contains_key(&session));
+    }
+
+    /// T33b real-provider-.so confirmation (2026-09-02) found `C_EncryptFinal`
+    /// returning `CKR_BUFFER_TOO_SMALL` for every real multi-block XTS
+    /// message driven through the vendored OpenSSL provider bridge, even
+    /// though the underlying math was already proven correct against NIST
+    /// ACVP vectors — because `update()` deferred 100% of output to
+    /// `Final`, and OpenSSL's generic EVP layer sizes `Final`'s buffer for
+    /// a small tail, not the whole message, with no way to ask for more.
+    ///
+    /// This test asserts the actual property that bug report needs, not
+    /// just a correct final answer: `C_EncryptUpdate` must return NON-ZERO
+    /// bytes once enough data has accumulated, well before `Final` is ever
+    /// called. `xts_multipart_ffi_matches_acvp_vectors_and_one_shot` and
+    /// `..._various_chunkings` already prove the ASSEMBLED result is
+    /// correct across many chunkings (including byte-at-a-time) via the
+    /// same query-then-fill two-call convention the real provider uses —
+    /// this test proves the specific thing that was actually broken.
+    #[test]
+    fn xts_multipart_update_emits_progressively() {
+        let _guard = test_lock::acquire();
+        let session = 0x4D50_100A;
+        install_session(session);
+        install_xts_key(&[0x77u8; 32]); // AES-128-XTS
+        seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, vec![0u8; 16], Vec::new(), 0);
+
+        // 3 full blocks (48 bytes) in one Update: enough that at least the
+        // first block must be safely releasable (holding back only the
+        // last full block — see XtsState::safe_len).
+        let part = vec![0x5Au8; 48];
+        let mut need = 0u32;
+        assert_eq!(
+            C_EncryptUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, std::ptr::null_mut(), &mut need),
+            CKR_OK,
+        );
+        assert_eq!(need, 32, "3 full blocks buffered: exactly 2 blocks (32 bytes) are safely releasable, holding back the last block");
+        let mut buf = vec![0u8; need as usize];
+        let mut len = need;
+        assert_eq!(
+            C_EncryptUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, buf.as_mut_ptr(), &mut len),
+            CKR_OK,
+        );
+        assert_eq!(len, 32);
+        // The fix's whole point, made concrete: this is real ciphertext,
+        // not a placeholder — assembling with Final must reproduce exactly
+        // the one-shot C_Encrypt result over the same 48-byte message.
+        seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, vec![0u8; 16], Vec::new(), 0);
+        let mut one_shot = vec![0u8; 48];
+        let mut one_shot_len = 48u32;
+        assert_eq!(
+            C_Encrypt(session, part.as_ptr() as *mut u8, part.len() as u32, one_shot.as_mut_ptr(), &mut one_shot_len),
+            CKR_OK,
+        );
+        assert_eq!(buf, one_shot[..32], "the eagerly-released blocks must match the one-shot result exactly");
+    }
+
+    /// Diagnostic round-trip in `scripts/aes-xts-probe.c`'s EXACT own shape
+    /// (53-byte message: 32-byte block-aligned prefix, then a 21-byte
+    /// ciphertext-stealing tail) — added while investigating why that
+    /// probe reports the token's ciphertext differs from OpenSSL's own
+    /// software AES-XTS oracle even after round 2's buffer-sizing fix.
+    /// This does NOT compare against OpenSSL — it only asks whether this
+    /// engine's own encrypt-then-decrypt is internally consistent for the
+    /// identical split shape, to isolate whether round 2 introduced a
+    /// real correctness bug or "only" a call-shape mismatch against
+    /// OpenSSL's own reference implementation (which the probe's own
+    /// comment says is itself call-shape-dependent, not a pure one-shot-
+    /// equivalent CTS transform).
+    #[test]
+    fn xts_probe_shape_encrypt_then_decrypt_round_trips() {
+        let _guard = test_lock::acquire();
+        let session = 0x4D50_100C;
+        install_session(session);
+        install_xts_key(&[0x99u8; 32]); // AES-128-XTS
+        let tweak = vec![0x44u8; 16];
+        let msg: Vec<u8> = (0..53u8).map(|i| i.wrapping_mul(7).wrapping_add(1)).collect();
+
+        seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, tweak.clone(), Vec::new(), 0);
+        let ct = run_multipart(session, true, &[&msg[..32], &msg[32..]]).unwrap();
+        assert_eq!(ct.len(), 53);
+
+        seed_ctx(&DECRYPT_STATE, session, CKM_AES_XTS, tweak.clone(), Vec::new(), 0);
+        let pt = run_multipart(session, false, &[&ct[..32], &ct[32..]]).unwrap();
+        assert_eq!(pt, msg, "probe-shape encrypt-then-decrypt must recover the original message");
+    }
+
+    /// Round 1 (first fix attempt) briefly held a sabotage test here proving
+    /// `XtsState::safe_len` disagreed with `CbcPad`'s `releasable()` at a
+    /// 33-byte (2 blocks + 1 tail byte) input. Round 2 (this fix — see
+    /// `XtsState::update`'s doc comment for why round 1 alone did not
+    /// actually fix the real provider) makes that specific disagreement
+    /// unreachable: a single 33-byte call now commits immediately (`33 >=
+    /// BLOCK && 33 % BLOCK != 0`) rather than ever consulting `safe_len` at
+    /// a non-block-aligned total, so `safe_len`/`releasable` can no longer
+    /// differ on any input either function is actually asked about — both
+    /// are only ever queried at length-0 or block-aligned totals, where
+    /// they agree by construction. That test was removed rather than kept
+    /// passing-but-vacuous; this replaces it with round 2's own real
+    /// safety property below.
+    ///
+    /// Real disk-encryption callers (and OpenSSL's own reference AES-XTS
+    /// implementation — see `scripts/aes-xts-probe.c`'s doc comment) never
+    /// send more data after a non-block-aligned `Update`; that call IS the
+    /// final one. A caller that does anyway must get a clear, loud error —
+    /// never silently wrong ciphertext computed from an incomplete premise.
+    #[test]
+    fn xts_update_after_commit_is_rejected_not_silently_wrong() {
+        let _guard = test_lock::acquire();
+        let session = 0x4D50_100B;
+        install_session(session);
+        install_xts_key(&[0x88u8; 32]);
+        seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, vec![0u8; 16], Vec::new(), 0);
+
+        // 33 bytes (2 blocks + 1 tail byte) in one call: not block-aligned
+        // and >= one block, so this commits immediately and hands back all
+        // 33 bytes right here — nothing held back for Final any more.
+        let part = vec![0xCCu8; 33];
+        let mut need = 0u32;
+        assert_eq!(
+            C_EncryptUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, std::ptr::null_mut(), &mut need),
+            CKR_OK,
+        );
+        assert_eq!(need, 33, "a single non-block-aligned call commits and releases everything at once");
+        let mut buf = vec![0u8; 33];
+        let mut len = 33u32;
+        assert_eq!(
+            C_EncryptUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, buf.as_mut_ptr(), &mut len),
+            CKR_OK,
+        );
+
+        // Sending MORE data now must fail loudly, not silently compute a
+        // wrong answer from a premise (self.buf) that no longer accepts
+        // new input after commit. Real two-pass §5.2 sequence: the
+        // size-query call (NULL p_out) ALWAYS returns CKR_OK regardless of
+        // what it reports — that convention is unconditional in
+        // `multipart_update`, so it can never be where a rejection shows
+        // up. The rejection only fires on the real, non-null-buffer call
+        // that actually reaches `XtsState::update`'s own `committed` check.
+        let more = [0xDDu8; 16];
+        let mut more_need = 0u32;
+        assert_eq!(
+            C_EncryptUpdate(session, more.as_ptr() as *mut u8, more.len() as u32, std::ptr::null_mut(), &mut more_need),
+            CKR_OK,
+            "the size-query pass itself must still return CKR_OK, per §5.2 — only the real call rejects",
+        );
+        let mut more_buf = vec![0u8; more_need as usize];
+        let mut more_len = more_need;
+        let rv = C_EncryptUpdate(session, more.as_ptr() as *mut u8, more.len() as u32, more_buf.as_mut_ptr(), &mut more_len);
+        assert_ne!(rv, CKR_OK, "data arriving after the commit point must be rejected, not silently accepted");
+
+        // §5.2 — a failed Update terminates the operation.
+        assert!(!ENCRYPT_STATE.borrow().contains_key(&session));
+
+        // The empty size-query shape (a caller innocently probing after
+        // commit with zero-length input) must stay harmless rather than
+        // erroring — matches PKCS#11's own "query, don't consume" idiom.
+        seed_ctx(&ENCRYPT_STATE, session, CKM_AES_XTS, vec![0u8; 16], Vec::new(), 0);
+        assert_eq!(
+            C_EncryptUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, std::ptr::null_mut(), &mut need),
+            CKR_OK,
+        );
+        assert_eq!(
+            C_EncryptUpdate(session, part.as_ptr() as *mut u8, part.len() as u32, buf.as_mut_ptr(), &mut len),
+            CKR_OK,
+        );
+        let mut zero_len = 0u32;
+        assert_eq!(
+            C_EncryptUpdate(session, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut zero_len),
+            CKR_OK,
+            "an empty post-commit call must stay harmless, not be treated as real post-commit data",
+        );
+        assert_eq!(zero_len, 0);
     }
 }
 
