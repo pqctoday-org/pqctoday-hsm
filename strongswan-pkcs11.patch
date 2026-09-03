@@ -1,9 +1,13 @@
-# strongSwan PKCS#11 plugin — ML-DSA/ML-KEM PQC extension
+# strongSwan PKCS#11 plugin — ML-DSA/SLH-DSA/Ed448/Ed25519/ML-KEM PQC extension
 #
-# Generated 2026-08-08 (upgrade plan B6) against pristine strongSwan 6.0.7
-# src/libstrongswan/plugins/pkcs11/. Regenerate with
-# regen-strongswan-pkcs11-patch.sh whenever strongswan-pkcs11/ changes or the
-# pinned strongSwan version bumps.
+# Generated 2026-08-08 (upgrade plan B6), regenerated 2026-09-02 (fix/
+# strongswan-ed25519 — the previous regeneration predated G5's Ed448 wiring
+# and this branch's Ed25519 wiring, so it was stale: applying it reproduced
+# an EARLIER connector without either, contradicting tests/README.md's own
+# documented 7/7-then-8/8 pass transcripts. Always regenerate with
+# regen-strongswan-pkcs11-patch.sh after editing anything under
+# strongswan-pkcs11/, or whenever the pinned strongSwan version bumps — do
+# not assume this file is current just because it applies cleanly.
 #
 # Replaces a wholesale `COPY pqctoday-hsm/strongswan-pkcs11 .../plugins/pkcs11`
 # in Dockerfile.network that silently discarded upstream changes to any file
@@ -11,19 +15,19 @@
 # OID_SECP*R1 and removed the old names inside this same directory; a naive
 # COPY-based bump would have shipped 6.0.7 while keeping the pre-rename names,
 # which would not even compile. Applying via `patch -p1` instead means a
-# future upstream change to any of these 6 modified files surfaces as a fuzzy
+# future upstream change to any of these modified files surfaces as a fuzzy
 # hunk or an outright failure, not silence.
 #
 # Modified from upstream (6 files):
 #   src/libstrongswan/plugins/pkcs11/Makefile.am          (+pkcs11_kem.{c,h} to SOURCES)
-#   src/libstrongswan/plugins/pkcs11/pkcs11.h             (ML-DSA/ML-KEM mechanism + key type decls)
-#   src/libstrongswan/plugins/pkcs11/pkcs11_dh.c          (ML-KEM key agreement path)
-#   src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c      (PLUGIN_PROVIDE for KEY_ML_DSA_*, KE_ML_KEM_*)
-#   src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c (ML-DSA sign via CKM_ML_DSA)
-#   src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c  (ML-DSA verify + SPKI decode; OID_SECP*R1 usage)
+#   src/libstrongswan/plugins/pkcs11/pkcs11.h             (ML-DSA/SLH-DSA/ML-KEM mechanism + key type decls)
+#   src/libstrongswan/plugins/pkcs11/pkcs11_dh.c          (ML-KEM key agreement path; MODP DH deregistered — see pkcs11_plugin.c)
+#   src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c      (PLUGIN_PROVIDE for KEY_ML_DSA_*/SLH_DSA_*/ED448/ED25519, KE ML_KEM_512/768/1024)
+#   src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c (ML-DSA/SLH-DSA sign via CKM_ML_DSA/CKM_SLH_DSA; Ed448/Ed25519 via CKM_EDDSA)
+#   src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c  (ML-DSA/SLH-DSA/Ed448/Ed25519 verify + SPKI decode; OID_SECP*R1 usage)
 #
 # New files, not present upstream (4 files):
-#   src/libstrongswan/plugins/pkcs11/pkcs11_kem.{c,h}     (CKM_ML_KEM encapsulate/decapsulate wiring)
+#   src/libstrongswan/plugins/pkcs11/pkcs11_kem.{c,h}     (CKM_ML_KEM encapsulate/decapsulate wiring, all 3 sizes)
 #   src/libstrongswan/plugins/pkcs11/test_ss.c            (standalone PKCS#11 smoke test)
 #   src/libstrongswan/plugins/pkcs11/README.md            (fork notes)
 #
@@ -49,16 +53,17 @@ index a2a1bcf..6a95b74 100644
  libstrongswan_pkcs11_la_LDFLAGS = -module -avoid-version
 diff --git b/src/libstrongswan/plugins/pkcs11/README.md b/src/libstrongswan/plugins/pkcs11/README.md
 new file mode 100644
-index 0000000..adce69d
+index 0000000..2db9311
 --- /dev/null
 +++ b/src/libstrongswan/plugins/pkcs11/README.md
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,106 @@
 +# strongswan-pkcs11 — PQC-enabled strongSwan PKCS#11 plugin
 +
 +A drop-in replacement for strongSwan's stock `pkcs11` plugin, extended so that
-+IKEv2 can perform **ML-KEM key exchange** and **ML-DSA authentication** through
-+a PKCS#11 v3.2 token — i.e. against the softhsmv3 module. Private keys stay
-+inside the token; charon calls `C_EncapsulateKey` / `C_DecapsulateKey` and
++IKEv2 can perform **ML-KEM key exchange** (all three sizes: ML-KEM-512/768/1024)
++and **ML-DSA (44/65/87) or SLH-DSA-SHA2 (128s/192s/256s) authentication**
++through a PKCS#11 v3.2 token — i.e. against the softhsmv3 module. Private keys
++stay inside the token; charon calls `C_EncapsulateKey` / `C_DecapsulateKey` and
 +`C_Sign` on the module.
 +
 +## What it is
@@ -69,17 +74,31 @@ index 0000000..adce69d
 +
 +| File | Role |
 +|---|---|
-+| `pkcs11_kem.c/.h` | `key_exchange_t` backed by ML-KEM `C_EncapsulateKey`/`C_DecapsulateKey` (IKEv2 KE payload) |
-+| `pkcs11_private_key.c` / `pkcs11_public_key.c` | ML-DSA sign/verify + SPKI handling via the token |
++| `pkcs11_kem.c/.h` | `key_exchange_t` backed by ML-KEM `C_EncapsulateKey`/`C_DecapsulateKey` (IKEv2 KE payload), all three sizes (512/768/1024) |
++| `pkcs11_private_key.c` / `pkcs11_public_key.c` | ML-DSA (44/65/87) and SLH-DSA-SHA2 (128s/192s/256s) sign/verify + SPKI handling via the token |
 +| `pkcs11_library.c`, `pkcs11_manager.c` | Module load + slot/token management |
 +| `pkcs11_creds.c`, `pkcs11_hasher.c`, `pkcs11_rng.c`, `pkcs11_dh.c` | Credentials, hashing, RNG, classical DH |
 +| `test_ss.c` | Minimal standalone smoke of the key-type constants |
 +
 +## Build
 +
-+Layer these sources into a strongSwan 6.0.5/6.0.6 tree (the ML-DSA core patch is
-+`../strongswan-6.0.5-pqc.patch` / `../strongswan-6.0.6-pqc.patch`) and configure
-+with the plugin enabled:
++**Confirmed baseline: strongSwan 6.0.7.** `../strongswan-pkcs11.patch` (which
++overlays this directory's sources onto `src/libstrongswan/plugins/pkcs11/`) is
++generated against — and requires — 6.0.7 specifically: 6.0.7 renamed
++`OID_SECT*R1` to `OID_SECP*R1` inside this same plugin directory, and this
++patch's `pkcs11_public_key.c` uses the new names (see that patch file's own
++header for the full rationale, and `regen-strongswan-pkcs11-patch.sh` to
++regenerate it if the pinned version bumps again). The top-level
++`../strongswan-6.0.5-pqc.patch`/`../strongswan-6.0.6-pqc.patch` files target
++older baselines and are not the patch set actually build-tested end to end —
++`strongswan-pkcs11/tests/README.md` documents the real, verified recipe (base
++6.0.7 + `../strongswan-pqc.patch` + `../strongswan-pqc-supplement.patch` +
++`../strongswan-pqc-slhdsa.patch` + `../strongswan-pkcs11.patch`, applied with
++`patch -p1` against a pristine 6.0.7 tree) and is the one to follow; that exact
++sequence was used to build a real `libstrongswan-pkcs11.so` and pass a live
++ML-DSA-44/65/87 + SLH-DSA-SHA2-128s/192s/256s sign/verify test (2026-09-01/02).
++
++Once patched, configure with the plugin enabled:
 +
 +```bash
 +./configure --enable-pkcs11    # plus your usual strongSwan options
@@ -89,7 +108,15 @@ index 0000000..adce69d
 +For the WASM path see `../strongswan-wasm-shims/` (the actively-maintained shim
 +tree) and `../scripts/build-strongswan-wasm.sh`.
 +
-+## Test against softhsmv3
++## Automated connector test (no swanctl/network needed)
++
++`tests/test_pkcs11_conn.c` links directly against a real `libstrongswan.so` +
++this plugin and drives the actual credential-layer sign/verify path IKEv2
++peer auth uses, for all 6 signature key types this connector supports
++(ML-DSA-44/65/87, SLH-DSA-SHA2-128s/192s/256s) — see `tests/README.md` for
++the full build/run steps and the last confirmed pass/fail table.
++
++## Test against softhsmv3 (full IKEv2 handshake)
 +
 +1. Build/install softhsmv3 and initialize a token with an ML-DSA-65 key
 +   (see `../docs/softhsmv3opsguide.md` §4).
@@ -102,10 +129,40 @@ index 0000000..adce69d
 +   ```
 +
 +3. Configure an IKEv2 connection that negotiates a PQC key-exchange group
-+   (ML-KEM-768) and `auth = pubkey` referencing the token cert
-+   (`pkcs11:token=...;id=...;type=cert`), then initiate — the KE and the
-+   authentication signature both run through the token. See
-+   `../docs/softhsmv3opsguide.md` §4 for the full `swanctl.conf` example.
++   (ML-KEM-512, ML-KEM-768, or ML-KEM-1024 — all three are wired through
++   `pkcs11_kem_create()`/`PLUGIN_PROVIDE(KE, ...)`) and `auth = pubkey`
++   referencing the token cert (`pkcs11:token=...;id=...;type=cert`), then
++   initiate — the KE and the authentication signature both run through the
++   token. See `../docs/softhsmv3opsguide.md` §4 for the full
++   `swanctl.conf` example.
++
++## Hybrid key exchange (RFC 9370)
++
++This plugin's `pkcs11_kem_t` slots into strongSwan's own unmodified RFC 9370
++multi-key-exchange machinery (IKE_INTERMEDIATE, ADDKE1-7 transform types) —
++no wrapper-level hybrid logic of our own, just a `key_exchange_t`
++implementation strongSwan's real proposal parser can select for any KE
++round, including the additional ones. A proposal string that pairs an
++ML-KEM group as the initial IKE_SA_INIT key exchange with a classical ECP
++group as Additional Key Exchange 1 looks like:
++
++```
++aes256-sha256-mlkem768-ke1_ecp256
++```
++
++Any of the three registered ML-KEM sizes works as the primary KE method,
++independently of which one (if any) is layered in via `ke1_`:
++
++```
++aes256-sha256-mlkem512-ke1_ecp256
++aes256-sha256-mlkem768-ke1_ecp256
++aes256-sha256-mlkem1024-ke1_ecp256
++```
++
++`strongswan-wasm-shims/wasm_backend.c` demonstrates this proposal shape
++end-to-end (`proposal_ike_hybrid`) as part of its hybrid proposal mode; see
++`../docs/softhsmv3opsguide.md` §4 for the equivalent `swanctl.conf`
++`proposals =` line.
 diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11.h b/src/libstrongswan/plugins/pkcs11/pkcs11.h
 index b27bd84..1818d0b 100644
 --- a/src/libstrongswan/plugins/pkcs11/pkcs11.h
@@ -340,10 +397,10 @@ index 892bb5b..9453e91 100644
  				}
 diff --git b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.c b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.c
 new file mode 100644
-index 0000000..7236bad
+index 0000000..8cd5ca9
 --- /dev/null
 +++ b/src/libstrongswan/plugins/pkcs11/pkcs11_kem.c
-@@ -0,0 +1,548 @@
+@@ -0,0 +1,571 @@
 +/*
 + * Copyright (C) 2026 PQC Timeline Project
 + *
@@ -453,6 +510,21 @@ index 0000000..7236bad
 +	return found;
 +}
 +
++/* PKCS#11 v3.2 CKA_PARAMETER_SET values (pkcs11.h) for each FIPS 203
++ * ML-KEM size strongSwan can negotiate. pkcs11_kem_create() only ever
++ * constructs this object for ML_KEM_512/768/1024 (see its group switch),
++ * so the default arm below is unreachable in practice; it exists only to
++ * give the compiler a defined value for every key_exchange_method_t. */
++static CK_ULONG kem_parameter_set(key_exchange_method_t group)
++{
++	switch (group) {
++		case ML_KEM_512:  return CKP_ML_KEM_512;
++		case ML_KEM_768:  return CKP_ML_KEM_768;
++		case ML_KEM_1024: return CKP_ML_KEM_1024;
++		default:          return CKP_ML_KEM_768;
++	}
++}
++
 +/**
 + * Initiator: Generates an ML-KEM key pair and returns the public key
 + * Responder: Encapsulates against initiator's public key, returning the ciphertext
@@ -472,9 +544,9 @@ index 0000000..7236bad
 +	CK_BBOOL ck_true = CK_TRUE;
 +	/* softhsmv3 requires CKA_PARAMETER_SET on the ML-KEM keygen template
 +	 * to select the variant (512/768/1024). Without it C_GenerateKeyPair
-+	 * returns CKR_TEMPLATE_INCOMPLETE. Currently pkcs11_kem only supports
-+	 * ML-KEM-768; hardcode CKP_ML_KEM_768. */
-+	CK_ULONG parameter_set = CKP_ML_KEM_768;
++	 * returns CKR_TEMPLATE_INCOMPLETE. Derive it from this->group so all
++	 * three ML-KEM sizes work, not just 768. */
++	CK_ULONG parameter_set = kem_parameter_set(this->group);
 +
 +	/* PKCS#11 v3.2 KEM flags. softhsmv3 also sets these internally during
 +	 * keygen (SoftHSM_keygen.cpp 6651/6732) but being explicit is safer
@@ -611,7 +683,7 @@ index 0000000..7236bad
 +
 +	CK_OBJECT_CLASS klass_key = CKO_PUBLIC_KEY;
 +	CK_KEY_TYPE type_key = CKK_ML_KEM;
-+	CK_ULONG parameter_set = CKP_ML_KEM_768;
++	CK_ULONG parameter_set = kem_parameter_set(this->group);
 +	CK_BBOOL ck_true_encap = CK_TRUE;
 +	/* softhsmv3 enforces CKA_ENCAPSULATE=TRUE on the pub key for
 +	 * C_EncapsulateKey (SoftHSM_kem.cpp returns
@@ -855,17 +927,25 @@ index 0000000..7236bad
 +	CK_MECHANISM_TYPE key_gen_mech = 0;
 +	CK_MECHANISM_TYPE encap_mech = 0;
 +
-+	if (group == ML_KEM_768) {
-+		/* softhsmv3 uses SEPARATE OIDs: CKM_ML_KEM_KEY_PAIR_GEN (0x0F)
-+		 * for generating the Alice keypair, CKM_ML_KEM (0x17) for the
-+		 * Bob encapsulate + Alice decapsulate call.  Prior code used
-+		 * CKM_ML_KEM for both, which made C_GenerateKeyPair return
-+		 * CKR_MECHANISM_INVALID and strongSwan silently fall through
-+		 * to the openssl plugin — see pkcs11.h note above. */
-+		key_gen_mech = CKM_ML_KEM_KEY_PAIR_GEN;
-+		encap_mech = CKM_ML_KEM;
-+	} else {
-+		return NULL;
++	switch (group) {
++		case ML_KEM_512:
++		case ML_KEM_768:
++		case ML_KEM_1024:
++			/* softhsmv3 uses SEPARATE OIDs: CKM_ML_KEM_KEY_PAIR_GEN (0x0F)
++			 * for generating the Alice keypair, CKM_ML_KEM (0x17) for the
++			 * Bob encapsulate + Alice decapsulate call.  Prior code used
++			 * CKM_ML_KEM for both, which made C_GenerateKeyPair return
++			 * CKR_MECHANISM_INVALID and strongSwan silently fall through
++			 * to the openssl plugin — see pkcs11.h note above. These two
++			 * mechanisms are the same across all three ML-KEM sizes; the
++			 * variant is selected via CKA_PARAMETER_SET on the key
++			 * templates (see kem_parameter_set() above), not the
++			 * mechanism itself. */
++			key_gen_mech = CKM_ML_KEM_KEY_PAIR_GEN;
++			encap_mech = CKM_ML_KEM;
++			break;
++		default:
++			return NULL;
 +	}
 +
 +	INIT(this,
@@ -878,7 +958,7 @@ index 0000000..7236bad
 +				.destroy = _destroy,
 +			},
 +		},
-+		.group = ML_KEM_768,
++		.group = group,
 +		.mech_key = key_gen_mech,
 +		.mech_encap = encap_mech,
 +		.pri_key = CK_INVALID_HANDLE,
@@ -939,7 +1019,7 @@ index 0000000..976b635
 +
 +#endif
 diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c b/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c
-index aa27f1e..dfc01de 100644
+index aa27f1e..d4aca45 100644
 --- a/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c
 +++ b/src/libstrongswan/plugins/pkcs11/pkcs11_plugin.c
 @@ -30,6 +30,7 @@
@@ -950,13 +1030,70 @@ index aa27f1e..dfc01de 100644
  
  typedef struct private_pkcs11_plugin_t private_pkcs11_plugin_t;
  
-@@ -218,6 +219,36 @@ METHOD(plugin_t, get_features, int,
+@@ -195,21 +196,39 @@ METHOD(plugin_t, get_features, int,
+ 			PLUGIN_PROVIDE(HASHER, HASH_SHA384),
+ 			PLUGIN_PROVIDE(HASHER, HASH_SHA512),
+ 	};
+-	static plugin_feature_t f_dh[] = {
+-		PLUGIN_REGISTER(KE, pkcs11_dh_create),
+-			PLUGIN_PROVIDE(KE, MODP_2048_BIT),
+-			PLUGIN_PROVIDE(KE, MODP_2048_224),
+-			PLUGIN_PROVIDE(KE, MODP_2048_256),
+-			PLUGIN_PROVIDE(KE, MODP_1536_BIT),
+-			PLUGIN_PROVIDE(KE, MODP_3072_BIT),
+-			PLUGIN_PROVIDE(KE, MODP_4096_BIT),
+-			PLUGIN_PROVIDE(KE, MODP_6144_BIT),
+-			PLUGIN_PROVIDE(KE, MODP_8192_BIT),
+-			PLUGIN_PROVIDE(KE, MODP_1024_BIT),
+-			PLUGIN_PROVIDE(KE, MODP_1024_160),
+-			PLUGIN_PROVIDE(KE, MODP_768_BIT),
+-			PLUGIN_PROVIDE(KE, MODP_CUSTOM),
+-	};
++	/*
++	 * MODP (classical) Diffie-Hellman is intentionally NOT registered
++	 * here (no f_dh array/PLUGIN_PROVIDE(KE, MODP_*) block).
++	 *
++	 * pkcs11_dh_create()/create_modp() (pkcs11_dh.c) still implements the
++	 * CKM_DH_PKCS_KEY_PAIR_GEN/CKM_DH_PKCS_DERIVE path and would work
++	 * correctly against any PKCS#11 v3.2 token that actually supports
++	 * those mechanisms. But this plugin fork's only documented, tested
++	 * target — softhsmv3 (see README.md and
++	 * docs/softhsmv3opsguide.md §4) — implements ZERO CKM_DH_PKCS*
++	 * mechanisms (confirmed: `grep CKM_DH_PKCS src/lib/SoftHSM_slots.cpp`
++	 * returns nothing). Previously this plugin still advertised
++	 * MODP_2048_BIT et al. via PLUGIN_PROVIDE, so strongSwan would
++	 * consider them selectable for KE negotiation; pkcs11_dh.c's
++	 * find_token() (line ~312) would then never find a token exposing
++	 * the derive mechanism and pkcs11_dh_create() would return NULL —
++	 * a "registered but always fails at runtime" trap, not a genuine
++	 * missing-feature gap.
++	 *
++	 * We deregister at compile time rather than adding a runtime
++	 * mechanism probe here because, per this module's README/ops-guide,
++	 * there is no other-token deployment target for this fork today —
++	 * every documented and tested configuration points at softhsmv3.
++	 * If this plugin is ever deployed against a DIFFERENT PKCS#11 token
++	 * that DOES implement CKM_DH_PKCS*, reintroduce an f_dh block here,
++	 * ideally gated on a real runtime mechanism probe across the
++	 * configured token(s) (mirroring find_token()'s own enumeration)
++	 * rather than an unconditional PLUGIN_PROVIDE, so a mixed
++	 * softhsmv3-plus-other-token deployment doesn't regress the
++	 * softhsmv3 side back into this same trap. See
++	 * docs/remediation-plan-provider-wrapper-coverage-gaps-2026-08-31.md
++	 * §4.2 for the full analysis.
++	 */
+ 	static plugin_feature_t f_ecdh[] = {
+ 		PLUGIN_REGISTER(KE, pkcs11_dh_create),
+ 			PLUGIN_PROVIDE(KE, ECP_192_BIT),
+@@ -218,6 +237,46 @@ METHOD(plugin_t, get_features, int,
  			PLUGIN_PROVIDE(KE, ECP_384_BIT),
  			PLUGIN_PROVIDE(KE, ECP_521_BIT),
  	};
 +	static plugin_feature_t f_pqc[] = {
 +		PLUGIN_REGISTER(KE, pkcs11_kem_create),
++			PLUGIN_PROVIDE(KE, ML_KEM_512),
 +			PLUGIN_PROVIDE(KE, ML_KEM_768),
++			PLUGIN_PROVIDE(KE, ML_KEM_1024),
 +		PLUGIN_REGISTER(PRIVKEY, pkcs11_private_key_connect, FALSE),
 +			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_44),
 +			PLUGIN_PROVIDE(PRIVKEY, KEY_ML_DSA_65),
@@ -970,6 +1107,10 @@ index aa27f1e..dfc01de 100644
 +			PLUGIN_PROVIDE(PRIVKEY_SIGN, SIGN_SLH_DSA_SHA2_128S),
 +			PLUGIN_PROVIDE(PRIVKEY_SIGN, SIGN_SLH_DSA_SHA2_192S),
 +			PLUGIN_PROVIDE(PRIVKEY_SIGN, SIGN_SLH_DSA_SHA2_256S),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_ED448),
++			PLUGIN_PROVIDE(PRIVKEY_SIGN, SIGN_ED448),
++			PLUGIN_PROVIDE(PRIVKEY, KEY_ED25519),
++			PLUGIN_PROVIDE(PRIVKEY_SIGN, SIGN_ED25519),
 +		PLUGIN_REGISTER(PUBKEY, pkcs11_public_key_load, TRUE),
 +			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_44),
 +			PLUGIN_PROVIDE(PUBKEY, KEY_ML_DSA_65),
@@ -983,20 +1124,35 @@ index aa27f1e..dfc01de 100644
 +			PLUGIN_PROVIDE(PUBKEY_VERIFY, SIGN_SLH_DSA_SHA2_128S),
 +			PLUGIN_PROVIDE(PUBKEY_VERIFY, SIGN_SLH_DSA_SHA2_192S),
 +			PLUGIN_PROVIDE(PUBKEY_VERIFY, SIGN_SLH_DSA_SHA2_256S),
++			PLUGIN_PROVIDE(PUBKEY, KEY_ED448),
++			PLUGIN_PROVIDE(PUBKEY_VERIFY, SIGN_ED448),
++			PLUGIN_PROVIDE(PUBKEY, KEY_ED25519),
++			PLUGIN_PROVIDE(PUBKEY_VERIFY, SIGN_ED25519),
 +	};
  	static plugin_feature_t f_rng[] = {
  		PLUGIN_REGISTER(RNG, pkcs11_rng_create),
  			PLUGIN_PROVIDE(RNG, RNG_STRONG),
-@@ -239,7 +270,7 @@ METHOD(plugin_t, get_features, int,
+@@ -237,9 +296,9 @@ METHOD(plugin_t, get_features, int,
+ 			PLUGIN_PROVIDE(CUSTOM, "pkcs11-certs"),
+ 				PLUGIN_DEPENDS(CERT_DECODE, CERT_X509),
  	};
- 	static plugin_feature_t f[countof(f_hash) + countof(f_dh) + countof(f_rng) +
+-	static plugin_feature_t f[countof(f_hash) + countof(f_dh) + countof(f_rng) +
++	static plugin_feature_t f[countof(f_hash) + countof(f_rng) +
  							  countof(f_ecdh) + countof(f_privkey) +
 -							  countof(f_pubkey) + countof(f_manager)] = {};
 +							  countof(f_pubkey) + countof(f_manager) + countof(f_pqc)] = {};
  	static int count = 0;
  
  	if (!count)
-@@ -273,6 +304,7 @@ METHOD(plugin_t, get_features, int,
+@@ -268,11 +327,14 @@ METHOD(plugin_t, get_features, int,
+ 		if (lib->settings->get_bool(lib->settings,
+ 								"%s.plugins.pkcs11.use_dh", FALSE, lib->ns))
+ 		{
+-			plugin_features_add(f, f_dh, countof(f_dh), &count);
++			/* No f_dh (MODP) here — see the comment above f_ecdh's
++			 * declaration for why MODP DH is intentionally not
++			 * registered against this engine. */
+ 			if (use_ecc)
  			{
  				plugin_features_add(f, f_ecdh, countof(f_ecdh), &count);
  			}
@@ -1005,10 +1161,10 @@ index aa27f1e..dfc01de 100644
  	}
  	*features = f;
 diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c b/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c
-index 6a54b3f..bca3ddf 100644
+index 6a54b3f..f424bf9 100644
 --- a/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c
 +++ b/src/libstrongswan/plugins/pkcs11/pkcs11_private_key.c
-@@ -194,6 +194,19 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
+@@ -194,11 +194,29 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
  		 KEY_ECDSA, 384,									HASH_SHA384},
  		{SIGN_ECDSA_521,				{CKM_ECDSA,				NULL, 0},
  		 KEY_ECDSA, 521,									HASH_SHA512},
@@ -1024,11 +1180,63 @@ index 6a54b3f..bca3ddf 100644
 +		 KEY_SLH_DSA_SHA2_192S, 0,						  HASH_IDENTITY},
 +		{SIGN_SLH_DSA_SHA2_256S,		{CKM_SLH_DSA,			NULL, 0},
 +		 KEY_SLH_DSA_SHA2_256S, 0,						  HASH_IDENTITY},
++		{SIGN_ED448,					{CKM_EDDSA,				NULL, 0},
++		 KEY_ED448, 0,									  HASH_IDENTITY},
++		{SIGN_ED25519,					{CKM_EDDSA,				NULL, 0},
++		 KEY_ED25519, 0,									HASH_IDENTITY},
 +
  	};
  
  	CK_MECHANISM_PTR mechanism;
-@@ -459,7 +472,7 @@ METHOD(private_key_t, sign, bool,
+ 	CK_RSA_PKCS_PSS_PARAMS *rsa_pkcs_pss_params;
+ 	rsa_pss_params_t *rsa_pss_params;
++	CK_EDDSA_PARAMS *eddsa_params;
+ 	hash_algorithm_t hash_alg = HASH_UNKNOWN;
+ 	int i;
+ 
+@@ -343,6 +361,41 @@ CK_MECHANISM_PTR pkcs11_signature_scheme_to_mech(pkcs11_library_t *p11,
+ 				mechanism->pParameter = rsa_pkcs_pss_params;
+ 				mechanism->ulParameterLen = sizeof(CK_RSA_PKCS_PSS_PARAMS);
+ 			}
++			else if (scheme == SIGN_ED448 || scheme == SIGN_ED25519)
++			{
++				/* RFC 8032 §5.2 — Ed448 ("PureEdDSA on Curve448") ALWAYS
++				 * carries a context octet string in its dom4 prefix, empty
++				 * or not; unlike Ed25519, there is no context-less "pure"
++				 * variant of Ed448 at all. PKCS#11 v3.2 Table 73 marks
++				 * CK_EDDSA_PARAMS "Required" for the Ed448 scheme (phFlag
++				 * FALSE, empty context data is fine — that is exactly RFC
++				 * 8032 §7.4's own "Blank" test vector), so build a real,
++				 * explicit CK_EDDSA_PARAMS rather than leaving pParameter
++				 * NULL. Heap-allocated (not a static/const struct) because
++				 * the sign()/verify() callers below unconditionally
++				 * free(mechanism->pParameter) once done with it.
++				 *
++				 * SIGN_ED25519 shares this branch: strongSwan's
++				 * signature_scheme_t has no separate "Ed25519ctx" value and
++				 * no params type carrying an RFC 8032 context string (see
++				 * tests/README.md's "Known gaps" note), so the ONLY EdDSA
++				 * scheme reachable through private_key_t.sign()/
++				 * public_key_t.verify() is plain Ed25519 — always an empty
++				 * context, same as here. This engine's own CKM_EDDSA
++				 * dispatch (src/lib/crypto/OSSLEDDSA.cpp's resolveInstance)
++				 * resolves phFlag=FALSE + zero-length context to plain
++				 * "Ed25519" for a 32-byte key, exactly like it resolves the
++				 * same shape to plain "Ed448" for a 57-byte key — so one
++				 * CK_EDDSA_PARAMS construction here is correct for both. */
++				INIT(eddsa_params,
++					.phFlag = CK_FALSE,
++					.ulContextDataLen = 0,
++					.pContextData = NULL,
++				);
++				mechanism->pParameter = eddsa_params;
++				mechanism->ulParameterLen = sizeof(CK_EDDSA_PARAMS);
++				hash_alg = mappings[i].hash;
++			}
+ 			else
+ 			{
+ 				hash_alg = mappings[i].hash;
+@@ -459,7 +512,7 @@ METHOD(private_key_t, sign, bool,
  		DBG1(DBG_LIB, "C_SignInit() failed: %N", ck_rv_names, rv);
  		goto end;
  	}
@@ -1037,7 +1245,7 @@ index 6a54b3f..bca3ddf 100644
  	{
  		hasher_t *hasher;
  
-@@ -488,10 +501,33 @@ METHOD(private_key_t, sign, bool,
+@@ -488,10 +541,38 @@ METHOD(private_key_t, sign, bool,
  		}
  		data = hash;
  	}
@@ -1067,15 +1275,81 @@ index 6a54b3f..bca3ddf 100644
 +			break;
 +		default:
 +			len = (get_keysize(this) + 7) / 8;
-+			if (this->type == KEY_ECDSA)
-+			{	/* signature is twice the length of the base point order */
++			if (this->type == KEY_ECDSA || this->type == KEY_ED448 ||
++				this->type == KEY_ED25519)
++			{	/* signature is twice the length of the base point order
++				 * (ECDSA r||s) resp. twice the encoded public key length
++				 * (Ed448: 57-byte key -> 114-byte R||S signature, RFC 8032
++				 * §5.2.6; Ed25519: 32-byte key -> 64-byte R||S signature,
++				 * RFC 8032 §5.1.6) */
 +				len *= 2;
 +			}
 +			break;
  	}
  	buf = malloc(len);
  	rv = this->lib->f->C_Sign(session, data.ptr, data.len, buf, &len);
-@@ -877,6 +913,86 @@ static bool find_key(private_pkcs11_private_key_t *this, chunk_t keyid)
+@@ -832,6 +913,60 @@ static pkcs11_library_t* find_lib_and_keyid_by_skid(chunk_t keyid_chunk,
+ 	return found;
+ }
+ 
++/**
++ * The two CKA_EC_PARAMS encodings this connector's softhsmv3 target
++ * actually produces for CKK_EC_EDWARDS Ed448/Ed25519 keys, confirmed by
++ * direct C_GetAttributeValue readback against a CKM_EC_EDWARDS_KEY_PAIR_GEN
++ * keypair: the PRIVATE key object's CKA_EC_PARAMS is always the DER
++ * PrintableString "edwards448"/"edwards25519" (src/lib/SoftHSM_keygen.cpp's
++ * generateED() normalises it on output, via OSSL::oid2ByteString, regardless
++ * of what the caller's private-key template supplied — indeed a
++ * caller-supplied CKA_EC_PARAMS on the private-key template is rejected
++ * outright, see find_key() below), while the PUBLIC key object's
++ * CKA_EC_PARAMS is stored verbatim as whatever the caller's public-key
++ * template supplied at generation time — the RFC 8410 id-Ed448/id-Ed25519
++ * OID DER in this connector's own create_ed448_key()/find_ed448_key()/
++ * create_ed25519_key()/find_ed25519_key() (pkcs11_public_key.c) and in
++ * strongswan-pkcs11/tests/keygen_pkcs11_key.c. Both are matched here so
++ * this recognises an Ed448/Ed25519 key regardless of which encoding
++ * produced it.
++ */
++static const unsigned char ed448_ec_params_printable[] = {
++	0x13, 0x0a, 'e', 'd', 'w', 'a', 'r', 'd', 's', '4', '4', '8'
++};
++static const unsigned char ed448_ec_params_oid[] = {0x06, 0x03, 0x2b, 0x65, 0x71};
++static const unsigned char ed25519_ec_params_printable[] = {
++	0x13, 0x0c, 'e', 'd', 'w', 'a', 'r', 'd', 's', '2', '5', '5', '1', '9'
++};
++static const unsigned char ed25519_ec_params_oid[] = {0x06, 0x03, 0x2b, 0x65, 0x70};
++
++/**
++ * See the comment on ed448_ec_params_printable/ed448_ec_params_oid above.
++ */
++static bool is_ed448_ec_params(chunk_t ecparams)
++{
++	return (ecparams.len == sizeof(ed448_ec_params_printable) &&
++			memeq(ecparams.ptr, ed448_ec_params_printable,
++				 sizeof(ed448_ec_params_printable))) ||
++		   (ecparams.len == sizeof(ed448_ec_params_oid) &&
++			memeq(ecparams.ptr, ed448_ec_params_oid,
++				 sizeof(ed448_ec_params_oid)));
++}
++
++/**
++ * See the comment on ed25519_ec_params_printable/ed25519_ec_params_oid
++ * above.
++ */
++static bool is_ed25519_ec_params(chunk_t ecparams)
++{
++	return (ecparams.len == sizeof(ed25519_ec_params_printable) &&
++			memeq(ecparams.ptr, ed25519_ec_params_printable,
++				 sizeof(ed25519_ec_params_printable))) ||
++		   (ecparams.len == sizeof(ed25519_ec_params_oid) &&
++			memeq(ecparams.ptr, ed25519_ec_params_oid,
++				 sizeof(ed25519_ec_params_oid)));
++}
++
+ /**
+  * Find the key on the token
+  */
+@@ -877,6 +1012,125 @@ static bool find_key(private_pkcs11_private_key_t *this, chunk_t keyid)
  				this->object = object;
  				found = TRUE;
  				break;
@@ -1159,27 +1433,70 @@ index 6a54b3f..bca3ddf 100644
 +				}
 +				break;
 +			}
++			case CKK_EC_EDWARDS:
++			{
++				chunk_t ecparams;
++
++				/* Curve is carried in CKA_EC_PARAMS, matching this
++				 * connector's own ECDSA convention of keying off that
++				 * attribute (parse_ecdsa_public_key/keylen_from_ecparams in
++				 * pkcs11_public_key.c) rather than CKK_ML_DSA/CKK_SLH_DSA's
++				 * CKA_PARAMETER_SET — but compared against exact bytes, not
++				 * ASN.1-parsed, since this engine's actual on-token encoding
++				 * is a DER PrintableString or OID DER depending on how the
++				 * key was created (see is_ed448_ec_params()/
++				 * is_ed25519_ec_params() above). Both Ed448 and Ed25519 are
++				 * recognised here. */
++				if (this->lib->get_ck_attribute(this->lib, this->session,
++												object, CKA_EC_PARAMS,
++												&ecparams))
++				{
++					if (is_ed448_ec_params(ecparams))
++					{
++						this->type = KEY_ED448;
++					}
++					else if (is_ed25519_ec_params(ecparams))
++					{
++						this->type = KEY_ED25519;
++					}
++					chunk_free(&ecparams);
++				}
++				if (this->type != KEY_RSA)
++				{
++					if (attr[1].ulValueLen != CK_UNAVAILABLE_INFORMATION)
++					{
++						this->reauth = reauth;
++					}
++					this->object = object;
++					found = TRUE;
++				}
++				break;
++			}
  			default:
  				DBG1(DBG_CFG, "PKCS#11 key type %d not supported", type);
  				break;
 diff --git a/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c b/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c
-index 70dbbf5..954f884 100644
+index 70dbbf5..dfbe729 100644
 --- a/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c
 +++ b/src/libstrongswan/plugins/pkcs11/pkcs11_public_key.c
-@@ -249,6 +249,12 @@ METHOD(public_key_t, verify, bool,
+@@ -249,6 +249,16 @@ METHOD(public_key_t, verify, bool,
  			memcpy(sig.ptr + (len - r.len), r.ptr, r.len);
  			memcpy(sig.ptr + len + (len - s.len), s.ptr, s.len);
  			break;
 +		case SIGN_ML_DSA_44:
 +		case SIGN_ML_DSA_65:
 +		case SIGN_ML_DSA_87:
-+			/* ML-DSA signatures are opaque raw byte blobs — do not strip leading
-+			 * zero bytes, which would corrupt the signature. */
++		case SIGN_ED448:
++		case SIGN_ED25519:
++			/* ML-DSA and Ed448/Ed25519 signatures are opaque raw byte blobs
++			 * (Ed448/Ed25519's R||S encoding, RFC 8032 §5.2.6/§5.1.6) — do
++			 * not strip leading zero bytes, which would corrupt the
++			 * signature. */
 +			break;
  		default:
  			sig = chunk_skip_zero(sig);
  			break;
-@@ -267,7 +273,7 @@ METHOD(public_key_t, verify, bool,
+@@ -267,7 +277,7 @@ METHOD(public_key_t, verify, bool,
  		DBG1(DBG_LIB, "C_VerifyInit() failed: %N", ck_rv_names, rv);
  		goto end;
  	}
@@ -1188,7 +1505,7 @@ index 70dbbf5..954f884 100644
  	{
  		hasher_t *hasher;
  
-@@ -482,6 +488,91 @@ static bool encode_rsa(private_pkcs11_public_key_t *this,
+@@ -482,6 +492,183 @@ static bool encode_rsa(private_pkcs11_public_key_t *this,
  	return success;
  }
  
@@ -1277,10 +1594,102 @@ index 70dbbf5..954f884 100644
 +	}
 +}
 +
++/**
++ * Encode/fingerprint an Ed448 or Ed25519 public key.
++ *
++ * Structurally identical to encode_ml_dsa() above (OID via
++ * key_type_to_oid(), SPKI wrap via public_key_info_encode(), same four
++ * cred_encoding_type_t cases) — the only difference is where the raw public
++ * key bytes are read from: CKA_EC_POINT here, not CKA_VALUE, matching how
++ * this connector stores Ed448/Ed25519 keys (see find_ed448_key()/
++ * create_ed448_key()/find_ed25519_key()/create_ed25519_key() above and
++ * their comment on PKCS#11 v3.2's Edwards CKA_EC_POINT convention). Already
++ * curve-generic (this->type drives key_type_to_oid()), so one function
++ * serves both KEY_ED448 and KEY_ED25519 — see get_encoding()/
++ * get_fingerprint() below.
++ */
++static bool encode_eddsa(private_pkcs11_public_key_t *this,
++						 cred_encoding_type_t type, chunk_t *out)
++{
++	chunk_t raw = chunk_empty;
++	chunk_t asn1 = chunk_empty;
++	int oid;
++	bool success = FALSE;
++
++	if (type != PUBKEY_SPKI_ASN1_DER && type != PUBKEY_PEM &&
++		type != KEYID_PUBKEY_INFO_SHA1 && type != KEYID_PUBKEY_SHA1)
++	{
++		return FALSE;
++	}
++	if (!this->lib->get_ck_attribute(this->lib, this->session, this->object,
++									 CKA_EC_POINT, &raw))
++	{
++		return FALSE;
++	}
++	oid = key_type_to_oid(this->type);
++	if (oid == OID_UNKNOWN)
++	{
++		chunk_free(&raw);
++		return FALSE;
++	}
++
++	switch (type)
++	{
++		case KEYID_PUBKEY_SHA1:
++		{
++			hasher_t *hasher = lib->crypto->create_hasher(lib->crypto,
++														  HASH_SHA1);
++			if (hasher && hasher->allocate_hash(hasher, raw, out))
++			{
++				success = TRUE;
++			}
++			DESTROY_IF(hasher);
++			chunk_free(&raw);
++			if (success)
++			{
++				lib->encoding->cache(lib->encoding, type, this, out);
++			}
++			return success;
++		}
++		case PUBKEY_SPKI_ASN1_DER:
++			*out = public_key_info_encode(raw, oid);
++			chunk_free(&raw);
++			return TRUE;
++		case PUBKEY_PEM:
++			asn1 = public_key_info_encode(raw, oid);
++			chunk_free(&raw);
++			success = lib->encoding->encode(lib->encoding, PUBKEY_PEM, NULL,
++							out, CRED_PART_PUB_ASN1_DER, asn1, CRED_PART_END);
++			chunk_clear(&asn1);
++			return success;
++		case KEYID_PUBKEY_INFO_SHA1:
++		{
++			hasher_t *hasher;
++			asn1 = public_key_info_encode(raw, oid);
++			chunk_free(&raw);
++			hasher = lib->crypto->create_hasher(lib->crypto, HASH_SHA1);
++			if (hasher && hasher->allocate_hash(hasher, asn1, out))
++			{
++				success = TRUE;
++			}
++			DESTROY_IF(hasher);
++			chunk_clear(&asn1);
++			if (success)
++			{
++				lib->encoding->cache(lib->encoding, type, this, out);
++			}
++			return success;
++		}
++		default:
++			chunk_free(&raw);
++			return FALSE;
++	}
++}
++
  METHOD(public_key_t, get_encoding, bool,
  	private_pkcs11_public_key_t *this, cred_encoding_type_t type,
  	chunk_t *encoding)
-@@ -492,6 +583,13 @@ METHOD(public_key_t, get_encoding, bool,
+@@ -492,6 +679,16 @@ METHOD(public_key_t, get_encoding, bool,
  			return encode_rsa(this, type, NULL, encoding);
  		case KEY_ECDSA:
  			return encode_ecdsa(this, type, encoding);
@@ -1291,10 +1700,13 @@ index 70dbbf5..954f884 100644
 +		case KEY_SLH_DSA_SHA2_192S:
 +		case KEY_SLH_DSA_SHA2_256S:
 +			return encode_ml_dsa(this, type, encoding);
++		case KEY_ED448:
++		case KEY_ED25519:
++			return encode_eddsa(this, type, encoding);
  		default:
  			return FALSE;
  	}
-@@ -510,6 +608,13 @@ METHOD(public_key_t, get_fingerprint, bool,
+@@ -510,6 +707,16 @@ METHOD(public_key_t, get_fingerprint, bool,
  			return encode_rsa(this, type, this, fp);
  		case KEY_ECDSA:
  			return fingerprint_ecdsa(this, type, fp);
@@ -1305,10 +1717,13 @@ index 70dbbf5..954f884 100644
 +		case KEY_SLH_DSA_SHA2_192S:
 +		case KEY_SLH_DSA_SHA2_256S:
 +			return encode_ml_dsa(this, type, fp);
++		case KEY_ED448:
++		case KEY_ED25519:
++			return encode_eddsa(this, type, fp);
  		default:
  			return FALSE;
  	}
-@@ -783,16 +888,138 @@ static private_pkcs11_public_key_t* create_ecdsa_key(chunk_t ecparams,
+@@ -783,16 +990,305 @@ static private_pkcs11_public_key_t* create_ecdsa_key(chunk_t ecparams,
  					  countof(mechs), tmpl, countof(tmpl));
  }
  
@@ -1434,6 +1849,173 @@ index 70dbbf5..954f884 100644
 +					  countof(tmpl));
 +}
 +
++/**
++ * CKA_EC_PARAMS value for CKK_EC_EDWARDS Ed448 keys on this connector's
++ * softhsmv3 target: a DER PrintableString "edwards448" ("13 0a" + ASCII),
++ * NOT the RFC 8410 id-Ed448 OID DER (which this engine's
++ * OSSL::byteString2oid, src/lib/crypto/OSSLUtil.cpp, accepts as an
++ * alternative INPUT encoding, but never produces on output). Confirmed by
++ * direct C_GetAttributeValue readback against a key this engine generated
++ * itself via CKM_EC_EDWARDS_KEY_PAIR_GEN — src/lib/SoftHSM_keygen.cpp's
++ * generateED() always normalises CKA_EC_PARAMS to this PrintableString form
++ * (OSSL::oid2ByteString) regardless of what encoding the caller supplied at
++ * generation time, so an exact-byte-match template (used by find_ed448_key
++ * below and by find_key()/find_key_by_keyid()'s readback comparison) has to
++ * use the same normalised form the token actually stores, not the OID DER
++ * this connector's ECDSA code uses for CKA_EC_PARAMS on classical curves.
++ */
++static const unsigned char ed448_ec_params[] = {
++	0x13, 0x0a, 'e', 'd', 'w', 'a', 'r', 'd', 's', '4', '4', '8'
++};
++
++/**
++ * The RFC 8410 id-Ed448 OID DER — the OTHER encoding CKA_EC_PARAMS can
++ * legally carry for an Ed448 key (OSSL::byteString2oid accepts it as
++ * input), and the one this connector's own tests/keygen_pkcs11_key.c uses
++ * for the public-key template at C_GenerateKeyPair time (the engine stores
++ * the public object's CKA_EC_PARAMS verbatim as supplied, unlike the
++ * private object's, which it always normalises to ed448_ec_params above —
++ * see find_key_by_keyid()'s matching comment). is_ed448_ec_params() below
++ * recognises either, so a lookup works regardless of which encoding
++ * produced the object on token.
++ */
++static const unsigned char ed448_ec_params_oid[] = {0x06, 0x03, 0x2b, 0x65, 0x71};
++
++/**
++ * See the comment on ed448_ec_params/ed448_ec_params_oid above.
++ */
++static bool is_ed448_ec_params(chunk_t ecparams)
++{
++	return (ecparams.len == sizeof(ed448_ec_params) &&
++			memeq(ecparams.ptr, ed448_ec_params, sizeof(ed448_ec_params))) ||
++		   (ecparams.len == sizeof(ed448_ec_params_oid) &&
++			memeq(ecparams.ptr, ed448_ec_params_oid,
++				 sizeof(ed448_ec_params_oid)));
++}
++
++/**
++ * CKA_EC_PARAMS value for CKK_EC_EDWARDS Ed25519 keys on this connector's
++ * softhsmv3 target: a DER PrintableString "edwards25519" ("13 0c" + ASCII),
++ * mirroring ed448_ec_params above exactly (same OSSL::oid2ByteString
++ * normalisation in src/lib/SoftHSM_keygen.cpp's generateED(), confirmed
++ * against src/lib/crypto/OSSLUtil.cpp's oid2ByteString/byteString2oid,
++ * which map EVP_PKEY_ED25519 to the "edwards25519" curve name the same way
++ * EVP_PKEY_ED448 maps to "edwards448").
++ */
++static const unsigned char ed25519_ec_params[] = {
++	0x13, 0x0c, 'e', 'd', 'w', 'a', 'r', 'd', 's', '2', '5', '5', '1', '9'
++};
++
++/**
++ * The RFC 8410 id-Ed25519 OID DER (1.3.101.112) — the OTHER encoding
++ * CKA_EC_PARAMS can legally carry for an Ed25519 key, same role as
++ * ed448_ec_params_oid above for Ed448.
++ */
++static const unsigned char ed25519_ec_params_oid[] = {0x06, 0x03, 0x2b, 0x65, 0x70};
++
++/**
++ * See the comment on ed25519_ec_params/ed25519_ec_params_oid above.
++ */
++static bool is_ed25519_ec_params(chunk_t ecparams)
++{
++	return (ecparams.len == sizeof(ed25519_ec_params) &&
++			memeq(ecparams.ptr, ed25519_ec_params, sizeof(ed25519_ec_params))) ||
++		   (ecparams.len == sizeof(ed25519_ec_params_oid) &&
++			memeq(ecparams.ptr, ed25519_ec_params_oid,
++				 sizeof(ed25519_ec_params_oid)));
++}
++
++/**
++ * Find an Ed448 key object matching the given raw public-key bytes.
++ *
++ * Unlike ML-DSA/SLH-DSA (raw public key in CKA_VALUE, variant selected via
++ * CKA_PARAMETER_SET), Ed448 is a CKK_EC_EDWARDS key: the curve is selected
++ * via CKA_EC_PARAMS and the raw RFC 8032 public key point lives in
++ * CKA_EC_POINT — PKCS#11 v3.2's Edwards/Montgomery tables define that
++ * attribute as the bare RFC 8032/7748-encoded point, deliberately without
++ * the DER OCTET STRING wrapper the classical CKK_EC table uses (confirmed
++ * against this fork's own engine, src/lib/crypto/OSSLEDPublicKey.cpp's "E4"
++ * note) — so this mirrors find_ecdsa_key()'s attribute shape, not
++ * find_ml_dsa_key()'s.
++ */
++static private_pkcs11_public_key_t* find_ed448_key(chunk_t pubkey,
++													size_t keylen)
++{
++	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
++	CK_KEY_TYPE type = CKK_EC_EDWARDS;
++	CK_ATTRIBUTE tmpl[] = {
++		{CKA_CLASS, &class, sizeof(class)},
++		{CKA_KEY_TYPE, &type, sizeof(type)},
++		{CKA_EC_PARAMS, (void*)ed448_ec_params, sizeof(ed448_ec_params)},
++		{CKA_EC_POINT, pubkey.ptr, pubkey.len},
++	};
++	return find_key(KEY_ED448, keylen, tmpl, countof(tmpl));
++}
++
++/**
++ * Create an Ed448 public key object in a suitable token session.
++ */
++static private_pkcs11_public_key_t* create_ed448_key(chunk_t pubkey,
++													  size_t keylen)
++{
++	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
++	CK_KEY_TYPE type = CKK_EC_EDWARDS;
++	CK_ATTRIBUTE tmpl[] = {
++		{CKA_CLASS, &class, sizeof(class)},
++		{CKA_KEY_TYPE, &type, sizeof(type)},
++		{CKA_EC_PARAMS, (void*)ed448_ec_params, sizeof(ed448_ec_params)},
++		{CKA_EC_POINT, pubkey.ptr, pubkey.len},
++	};
++	CK_MECHANISM_TYPE mechs[] = {
++		CKM_EDDSA,
++	};
++	return create_key(KEY_ED448, keylen, mechs, countof(mechs), tmpl,
++					  countof(tmpl));
++}
++
++/**
++ * Find an Ed25519 key object matching the given raw public-key bytes.
++ *
++ * Identical shape to find_ed448_key() above (CKK_EC_EDWARDS, curve in
++ * CKA_EC_PARAMS, raw RFC 8032 point in CKA_EC_POINT) — only the curve
++ * template (ed25519_ec_params instead of ed448_ec_params) and key_type_t
++ * differ.
++ */
++static private_pkcs11_public_key_t* find_ed25519_key(chunk_t pubkey,
++													  size_t keylen)
++{
++	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
++	CK_KEY_TYPE type = CKK_EC_EDWARDS;
++	CK_ATTRIBUTE tmpl[] = {
++		{CKA_CLASS, &class, sizeof(class)},
++		{CKA_KEY_TYPE, &type, sizeof(type)},
++		{CKA_EC_PARAMS, (void*)ed25519_ec_params, sizeof(ed25519_ec_params)},
++		{CKA_EC_POINT, pubkey.ptr, pubkey.len},
++	};
++	return find_key(KEY_ED25519, keylen, tmpl, countof(tmpl));
++}
++
++/**
++ * Create an Ed25519 public key object in a suitable token session.
++ */
++static private_pkcs11_public_key_t* create_ed25519_key(chunk_t pubkey,
++														size_t keylen)
++{
++	CK_OBJECT_CLASS class = CKO_PUBLIC_KEY;
++	CK_KEY_TYPE type = CKK_EC_EDWARDS;
++	CK_ATTRIBUTE tmpl[] = {
++		{CKA_CLASS, &class, sizeof(class)},
++		{CKA_KEY_TYPE, &type, sizeof(type)},
++		{CKA_EC_PARAMS, (void*)ed25519_ec_params, sizeof(ed25519_ec_params)},
++		{CKA_EC_POINT, pubkey.ptr, pubkey.len},
++	};
++	CK_MECHANISM_TYPE mechs[] = {
++		CKM_EDDSA,
++	};
++	return create_key(KEY_ED25519, keylen, mechs, countof(mechs), tmpl,
++					  countof(tmpl));
++}
++
  /**
   * See header
   */
@@ -1449,7 +2031,7 @@ index 70dbbf5..954f884 100644
  	while (TRUE)
  	{
  		switch (va_arg(args, builder_part_t))
-@@ -800,6 +1027,12 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
+@@ -800,6 +1296,12 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
  			case BUILD_BLOB_ASN1_DER:
  				blob = va_arg(args, chunk_t);
  				continue;
@@ -1462,7 +2044,7 @@ index 70dbbf5..954f884 100644
  			case BUILD_RSA_MODULUS:
  				n = va_arg(args, chunk_t);
  				continue;
-@@ -849,6 +1082,77 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
+@@ -849,6 +1351,149 @@ pkcs11_public_key_t *pkcs11_public_key_load(key_type_t type, va_list args)
  			}
  		}
  	}
@@ -1537,10 +2119,82 @@ index 70dbbf5..954f884 100644
 +			}
 +		}
 +	}
++	else if (type == KEY_ED448)
++	{
++		chunk_t pubkey = chunk_empty;
++
++		/* Two inputs possible from the builder chain, same convention as
++		 * ML-DSA/SLH-DSA above:
++		 *   BUILD_BLOB          — raw RFC 8032 public key (unwrapped from
++		 *                         SPKI by pkcs1_builder's parse_public_key)
++		 *   BUILD_BLOB_ASN1_DER — full SubjectPublicKeyInfo
++		 * public_key_info_decode()/get_public_key_size() are already
++		 * curve-generic (via key_type_from_oid()/OID_ED448), so this reuses
++		 * them exactly as ML-DSA/SLH-DSA do — only the token-side storage
++		 * (find_ed448_key/create_ed448_key, CKA_EC_PARAMS+CKA_EC_POINT
++		 * instead of CKA_PARAMETER_SET+CKA_VALUE) differs. */
++		if (raw.ptr)
++		{
++			pubkey = raw;
++		}
++		else if (blob.ptr)
++		{
++			if (public_key_info_decode(blob, &pubkey) != type)
++			{
++				return NULL;
++			}
++		}
++		if (pubkey.ptr && pubkey.len == (size_t)get_public_key_size(type))
++		{
++			keylen = pubkey.len * 8;
++			this = find_ed448_key(pubkey, keylen);
++			if (!this)
++			{
++				this = create_ed448_key(pubkey, keylen);
++			}
++			if (this)
++			{
++				return &this->public;
++			}
++		}
++	}
++	else if (type == KEY_ED25519)
++	{
++		chunk_t pubkey = chunk_empty;
++
++		/* Same convention as KEY_ED448 above — see that block's comment.
++		 * public_key_info_decode()/get_public_key_size() are already
++		 * curve-generic (via key_type_from_oid()/OID_ED25519); only the
++		 * token-side storage (find_ed25519_key/create_ed25519_key) differs. */
++		if (raw.ptr)
++		{
++			pubkey = raw;
++		}
++		else if (blob.ptr)
++		{
++			if (public_key_info_decode(blob, &pubkey) != type)
++			{
++				return NULL;
++			}
++		}
++		if (pubkey.ptr && pubkey.len == (size_t)get_public_key_size(type))
++		{
++			keylen = pubkey.len * 8;
++			this = find_ed25519_key(pubkey, keylen);
++			if (!this)
++			{
++				this = create_ed25519_key(pubkey, keylen);
++			}
++			if (this)
++			{
++				return &this->public;
++			}
++		}
++	}
  	return NULL;
  }
  
-@@ -882,6 +1186,16 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
+@@ -882,6 +1527,20 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
  		case KEY_ECDSA:
  			type = CKK_ECDSA;
  			break;
@@ -1554,10 +2208,14 @@ index 70dbbf5..954f884 100644
 +		case KEY_SLH_DSA_SHA2_256S:
 +			type = CKK_SLH_DSA;
 +			break;
++		case KEY_ED448:
++		case KEY_ED25519:
++			type = CKK_EC_EDWARDS;
++			break;
  		default:
  			/* don't specify key type on KEY_ANY */
  			count--;
-@@ -929,6 +1243,74 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
+@@ -929,6 +1588,107 @@ static private_pkcs11_public_key_t *find_key_by_keyid(pkcs11_library_t *p11,
  				}
  				break;
  			}
@@ -1627,6 +2285,39 @@ index 70dbbf5..954f884 100644
 +				keylen = get_public_key_size(key_type) * 8;
 +				found = TRUE;
 +			slh_dsa_done:
++				break;
++			}
++			case CKK_EC_EDWARDS:
++			{
++				chunk_t ecparams;
++
++				/* Both Ed448 and Ed25519 are recognised — see the matching
++				 * comment in pkcs11_private_key.c's find_key(). Compared
++				 * against exact bytes, not ASN.1-parsed: this engine's
++				 * PUBLIC-key CKA_EC_PARAMS is stored verbatim as however the
++				 * object was created (this connector's own
++				 * create_ed448_key()/create_ed25519_key() above use the
++				 * PrintableString form; a key generated by
++				 * tests/keygen_pkcs11_key.c uses the OID DER form — see
++				 * is_ed448_ec_params()'s/is_ed25519_ec_params()'s comments
++				 * for why both exist). */
++				if (p11->get_ck_attribute(p11, session, object, CKA_EC_PARAMS,
++										  &ecparams))
++				{
++					if (is_ed448_ec_params(ecparams))
++					{
++						key_type = KEY_ED448;
++						keylen = get_public_key_size(key_type) * 8;
++						found = TRUE;
++					}
++					else if (is_ed25519_ec_params(ecparams))
++					{
++						key_type = KEY_ED25519;
++						keylen = get_public_key_size(key_type) * 8;
++						found = TRUE;
++					}
++					chunk_free(&ecparams);
++				}
 +				break;
 +			}
  			default:
