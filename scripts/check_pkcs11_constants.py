@@ -130,9 +130,19 @@ PINNED = {
     "CKP_XMSS_SHAKE_10_256": (0x07, "iana"),
     "CKP_XMSS_SHAKE_16_256": (0x08, "iana"),
     "CKP_XMSS_SHAKE_20_256": (0x09, "iana"),
+    "CKP_XMSS_SHAKE256_10_256": (0x10, "iana"),
     "CKP_XMSS_SHAKE256_16_256": (0x11, "iana"),
     "CKP_XMSS_SHAKE256_20_256": (0x12, "iana"),
     "CKP_XMSS_SHAKE256_10_192": (0x13, "iana"),
+    "CKP_XMSS_SHAKE256_16_192": (0x14, "iana"),
+    "CKP_XMSS_SHAKE256_20_192": (0x15, "iana"),
+    # XMSS SHA-256/192 sets (SP 800-208 Table 12, distinct id space from the
+    # SHAKE256/192 sets above — both engines lacked this family entirely
+    # until the SP 800-208 gap-closure fix; ids continue the same IANA "XMSS
+    # Signatures" registry sequence at the next unused slots).
+    "CKP_XMSS_SHA2_10_192": (0x0D, "iana"),
+    "CKP_XMSS_SHA2_16_192": (0x0E, "iana"),
+    "CKP_XMSS_SHA2_20_192": (0x0F, "iana"),
     # XMSS-MT parameter sets (RFC 8391 §8 numeric IDs, matching C++
     # xmssmt_parse_oid)
     "CKP_XMSSMT_SHA2_20_2_256": (0x01, "iana"),
