@@ -4,9 +4,12 @@ use xmss::*;
 /// Return the total signature capacity (2^H) for a given CKP_XMSS_* parameter set.
 pub fn xmss_param_max_sigs(xmss_param: u32) -> u32 {
     match xmss_param {
-        CKP_XMSS_SHA2_10_256 | CKP_XMSS_SHAKE_10_256 | CKP_XMSS_SHAKE256_10_192 => 1u32 << 10, // 1,024
-        CKP_XMSS_SHA2_16_256 | CKP_XMSS_SHAKE_16_256 | CKP_XMSS_SHAKE256_16_256 => 1u32 << 16, // 65,536
-        CKP_XMSS_SHA2_20_256 | CKP_XMSS_SHAKE_20_256 | CKP_XMSS_SHAKE256_20_256 => 1u32 << 20, // 1,048,576
+        CKP_XMSS_SHA2_10_256 | CKP_XMSS_SHAKE_10_256 | CKP_XMSS_SHAKE256_10_192
+        | CKP_XMSS_SHAKE256_10_256 | CKP_XMSS_SHA2_10_192 => 1u32 << 10, // 1,024
+        CKP_XMSS_SHA2_16_256 | CKP_XMSS_SHAKE_16_256 | CKP_XMSS_SHAKE256_16_256
+        | CKP_XMSS_SHAKE256_16_192 | CKP_XMSS_SHA2_16_192 => 1u32 << 16, // 65,536
+        CKP_XMSS_SHA2_20_256 | CKP_XMSS_SHAKE_20_256 | CKP_XMSS_SHAKE256_20_256
+        | CKP_XMSS_SHAKE256_20_192 | CKP_XMSS_SHA2_20_192 => 1u32 << 20, // 1,048,576
         _ => 1u32 << 10,                                            // safe fallback
     }
 }
@@ -51,9 +54,18 @@ pub fn set_kat_seed_value(v: Option<[u8; 96]>) {
 pub fn xmss_keygen(xmss_param: u32) -> Result<(Vec<u8>, Vec<u8>), ()> {
     macro_rules! dispatch {
         ($t:ty) => {{
-            let mut seed = [0u8; 96];
+            // Seed length is 3*n (XmssParameter::SEED_LEN), NOT a fixed 96
+            // bytes — that assumption held for every n=32 set (96 = 3*32)
+            // but is wrong for n=24 (SP 800-208's SHAKE256_*_192 family:
+            // 3*24 = 72). from_seed() validates the seed length strictly
+            // (Error::InvalidSeedLength) and rejects a 96-byte seed outright,
+            // which is why EVERY _192 set — including CKP_XMSS_SHAKE256_10_192,
+            // already dispatched before this fix — silently returned
+            // CKR_PARAMETER_SET_NOT_SUPPORTED for every keygen attempt.
+            let seed_len = <$t as XmssParameter>::SEED_LEN;
+            let mut seed = vec![0u8; seed_len];
             if let Some(kat) = kat_seed() {
-                seed.copy_from_slice(&kat);
+                seed.copy_from_slice(&kat[..seed_len]);
             } else {
                 getrandom::getrandom(&mut seed).map_err(|_| ())?;
             }
@@ -71,9 +83,15 @@ pub fn xmss_keygen(xmss_param: u32) -> Result<(Vec<u8>, Vec<u8>), ()> {
         CKP_XMSS_SHAKE_10_256 => dispatch!(XmssShake_10_256),
         CKP_XMSS_SHAKE_16_256 => dispatch!(XmssShake_16_256),
         CKP_XMSS_SHAKE_20_256 => dispatch!(XmssShake_20_256),
+        CKP_XMSS_SHAKE256_10_256 => dispatch!(XmssShake256_10_256),
         CKP_XMSS_SHAKE256_16_256 => dispatch!(XmssShake256_16_256),
         CKP_XMSS_SHAKE256_20_256 => dispatch!(XmssShake256_20_256),
         CKP_XMSS_SHAKE256_10_192 => dispatch!(XmssShake256_10_192),
+        CKP_XMSS_SHAKE256_16_192 => dispatch!(XmssShake256_16_192),
+        CKP_XMSS_SHAKE256_20_192 => dispatch!(XmssShake256_20_192),
+        CKP_XMSS_SHA2_10_192 => dispatch!(XmssSha2_10_192),
+        CKP_XMSS_SHA2_16_192 => dispatch!(XmssSha2_16_192),
+        CKP_XMSS_SHA2_20_192 => dispatch!(XmssSha2_20_192),
         _ => Err(()),
     }
 }
@@ -93,9 +111,15 @@ pub fn xmss_sign(xmss_param: u32, priv_key: &[u8], msg: &[u8]) -> Result<(Vec<u8
         CKP_XMSS_SHAKE_10_256 => dispatch!(XmssShake_10_256),
         CKP_XMSS_SHAKE_16_256 => dispatch!(XmssShake_16_256),
         CKP_XMSS_SHAKE_20_256 => dispatch!(XmssShake_20_256),
+        CKP_XMSS_SHAKE256_10_256 => dispatch!(XmssShake256_10_256),
         CKP_XMSS_SHAKE256_16_256 => dispatch!(XmssShake256_16_256),
         CKP_XMSS_SHAKE256_20_256 => dispatch!(XmssShake256_20_256),
         CKP_XMSS_SHAKE256_10_192 => dispatch!(XmssShake256_10_192),
+        CKP_XMSS_SHAKE256_16_192 => dispatch!(XmssShake256_16_192),
+        CKP_XMSS_SHAKE256_20_192 => dispatch!(XmssShake256_20_192),
+        CKP_XMSS_SHA2_10_192 => dispatch!(XmssSha2_10_192),
+        CKP_XMSS_SHA2_16_192 => dispatch!(XmssSha2_16_192),
+        CKP_XMSS_SHA2_20_192 => dispatch!(XmssSha2_20_192),
         _ => Err(CKR_FUNCTION_FAILED),
     }
 }
@@ -121,9 +145,15 @@ pub fn xmss_verify(xmss_param: u32, pub_key: &[u8], msg: &[u8], sig: &[u8]) -> b
         CKP_XMSS_SHAKE_10_256 => dispatch!(XmssShake_10_256),
         CKP_XMSS_SHAKE_16_256 => dispatch!(XmssShake_16_256),
         CKP_XMSS_SHAKE_20_256 => dispatch!(XmssShake_20_256),
+        CKP_XMSS_SHAKE256_10_256 => dispatch!(XmssShake256_10_256),
         CKP_XMSS_SHAKE256_16_256 => dispatch!(XmssShake256_16_256),
         CKP_XMSS_SHAKE256_20_256 => dispatch!(XmssShake256_20_256),
         CKP_XMSS_SHAKE256_10_192 => dispatch!(XmssShake256_10_192),
+        CKP_XMSS_SHAKE256_16_192 => dispatch!(XmssShake256_16_192),
+        CKP_XMSS_SHAKE256_20_192 => dispatch!(XmssShake256_20_192),
+        CKP_XMSS_SHA2_10_192 => dispatch!(XmssSha2_10_192),
+        CKP_XMSS_SHA2_16_192 => dispatch!(XmssSha2_16_192),
+        CKP_XMSS_SHA2_20_192 => dispatch!(XmssSha2_20_192),
         _ => false,
     }
 }
@@ -408,3 +438,128 @@ pub fn xmssmt_verify(xmssmt_param: u32, pub_key: &[u8], msg: &[u8], sig: &[u8]) 
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! SP 800-208 §4 defines six SHAKE256 XMSS parameter sets (Tables 14/16:
+    //! h∈{10,16,20} × n∈{32,24}). Before this fix, only the three n=32 sets
+    //! (0x11/0x12/0x13) were wired into keygen/sign/verify — the underlying
+    //! `xmss` crate (v0.1.0-pre.0) already implements all six concrete types
+    //! (`params.rs`), this crate's own dispatch tables just never routed to
+    //! three of them (0x10, 0x14, 0x15), which returned CKR_PARAMETER_SET_NOT_SUPPORTED.
+    use super::*;
+    use crate::native::test_lock;
+
+    /// Real keygen -> sign -> verify round trip, proving the parameter set is
+    /// genuinely wired to working cryptography, not merely reachable.
+    fn round_trip(param: u32) {
+        let _guard = test_lock::acquire();
+        set_kat_seed_value(None); // real randomness, not a fixed KAT seed
+        let (pub_bytes, priv_bytes) = xmss_keygen(param).expect("keygen must succeed");
+        let msg = b"xmss_bridge SP 800-208 gap-closure round trip";
+        let (sig, _updated_priv) = xmss_sign(param, &priv_bytes, msg).expect("sign must succeed");
+        assert!(xmss_verify(param, &pub_bytes, msg, &sig), "signature must verify");
+        assert!(
+            !xmss_verify(param, &pub_bytes, b"a different message", &sig),
+            "signature must not verify against a different message"
+        );
+    }
+
+    #[test]
+    fn xmss_shake256_10_256_round_trips() {
+        round_trip(CKP_XMSS_SHAKE256_10_256);
+    }
+
+    /// Diagnostic: CKP_XMSS_SHAKE256_10_192 was ALREADY dispatched before this
+    /// gap-closure (one of the three pre-existing arms) but had no round-trip
+    /// test of its own. Checking it in isolation tells us whether a from_seed
+    /// failure on the two new n=24 sets (16_192/20_192, below) is specific to
+    /// height, or affects this crate's whole n=24 (SHAKE256_*_192) family.
+    #[test]
+    fn xmss_shake256_10_192_round_trips() {
+        round_trip(CKP_XMSS_SHAKE256_10_192);
+    }
+
+    // Height ≥16 round trips are correctness-verified but deliberately
+    // #[ignore]d: single-tree XMSS keygen cost is O(2^h) leaf computations,
+    // independent of hash function (measured: SHAKE256 and SHA2 n=24 sets
+    // both take ~150s at h=16 in --release; h=10 is ~2-3s). h=20 was not
+    // run (~40min extrapolated from h=16's 16x-larger tree) — this is why
+    // XMSS^MT exists, not a defect in this fix. Run explicitly via
+    // `cargo test --release -- --ignored` before a release, not on every
+    // `cargo test`/local-gate invocation.
+
+    #[test]
+    #[ignore = "single-tree XMSS h=16: ~150s in --release, unusable in default `cargo test`"]
+    fn xmss_shake256_16_192_round_trips() {
+        round_trip(CKP_XMSS_SHAKE256_16_192);
+    }
+
+    #[test]
+    #[ignore = "single-tree XMSS h=20: ~40min extrapolated from h=16 timing, run manually before a release"]
+    fn xmss_shake256_20_192_round_trips() {
+        round_trip(CKP_XMSS_SHAKE256_20_192);
+    }
+
+    /// Regression: 16_192 and 20_192 used to fall through to the function's
+    /// `_ => 1u32 << 10` fallback (1,024) because they were absent from the
+    /// match — silently under-reporting capacity by 64x and 1024x. This was
+    /// latent (keygen/sign/verify didn't dispatch these params at all, so the
+    /// wrong capacity was never actually reachable) but would have shipped a
+    /// second bug the moment dispatch support was added without this check.
+    #[test]
+    fn max_sigs_correct_for_all_six_shake256_sets() {
+        assert_eq!(xmss_param_max_sigs(CKP_XMSS_SHAKE256_10_256), 1 << 10);
+        assert_eq!(xmss_param_max_sigs(CKP_XMSS_SHAKE256_16_256), 1 << 16);
+        assert_eq!(xmss_param_max_sigs(CKP_XMSS_SHAKE256_20_256), 1 << 20);
+        assert_eq!(xmss_param_max_sigs(CKP_XMSS_SHAKE256_10_192), 1 << 10);
+        assert_eq!(xmss_param_max_sigs(CKP_XMSS_SHAKE256_16_192), 1 << 16);
+        assert_eq!(xmss_param_max_sigs(CKP_XMSS_SHAKE256_20_192), 1 << 20);
+    }
+
+    /// SP 800-208 §5.2 Table 12 — the THIRD missing family, found only by
+    /// checking the standard's own tables directly: XMSS-SHA2_{10,16,20}_192
+    /// (0x0d/0x0e/0x0f), n=24, distinct from both the RFC 8391 n=32 SHA2
+    /// sets and the SHAKE256 n=24 sets above. Same crate, same seed-length
+    /// fix applies (SEED_LEN is computed per-type, not hardcoded).
+    #[test]
+    fn xmss_sha2_10_192_round_trips() {
+        round_trip(CKP_XMSS_SHA2_10_192);
+    }
+
+    #[test]
+    #[ignore = "single-tree XMSS h=16: ~156s in --release, unusable in default `cargo test`"]
+    fn xmss_sha2_16_192_round_trips() {
+        round_trip(CKP_XMSS_SHA2_16_192);
+    }
+
+    #[test]
+    #[ignore = "single-tree XMSS h=20: ~40min extrapolated from h=16 timing, run manually before a release"]
+    fn xmss_sha2_20_192_round_trips() {
+        round_trip(CKP_XMSS_SHA2_20_192);
+    }
+
+    #[test]
+    fn max_sigs_correct_for_sha2_192_family() {
+        assert_eq!(xmss_param_max_sigs(CKP_XMSS_SHA2_10_192), 1 << 10);
+        assert_eq!(xmss_param_max_sigs(CKP_XMSS_SHA2_16_192), 1 << 16);
+        assert_eq!(xmss_param_max_sigs(CKP_XMSS_SHA2_20_192), 1 << 20);
+    }
+
+    /// A signature from one parameter set's keypair must not verify under a
+    /// different (even same-height) parameter set's dispatch — proves the
+    /// three new arms aren't accidentally aliased onto an existing type.
+    #[test]
+    fn cross_param_set_signature_does_not_verify() {
+        let _guard = test_lock::acquire();
+        set_kat_seed_value(None);
+        let (pub_10_256, priv_10_256) = xmss_keygen(CKP_XMSS_SHAKE256_10_256).unwrap();
+        let msg = b"cross-param-set check";
+        let (sig, _) = xmss_sign(CKP_XMSS_SHAKE256_10_256, &priv_10_256, msg).unwrap();
+        assert!(xmss_verify(CKP_XMSS_SHAKE256_10_256, &pub_10_256, msg, &sig));
+        // Same message/signature bytes, wrong parameter set for verification —
+        // must fail (different type, different byte layout/semantics).
+        assert!(!xmss_verify(CKP_XMSS_SHAKE256_10_192, &pub_10_256, msg, &sig));
+    }
+}
+

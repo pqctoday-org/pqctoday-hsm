@@ -1126,12 +1126,19 @@ pub const CKP_LMOTS_SHAKE_N24_W8: u32 = 0x10;
 pub const CKP_XMSS_SHA2_10_256: u32 = 0x01;
 pub const CKP_XMSS_SHA2_16_256: u32 = 0x02;
 pub const CKP_XMSS_SHA2_20_256: u32 = 0x03;
+// SP 800-208 §5.2 Table 12 — SHA-256/192 (n=24, WOTSP-SHA2_192, len=51).
+pub const CKP_XMSS_SHA2_10_192: u32 = 0x0d; // XMSS-SHA2_10_192
+pub const CKP_XMSS_SHA2_16_192: u32 = 0x0e; // XMSS-SHA2_16_192
+pub const CKP_XMSS_SHA2_20_192: u32 = 0x0f; // XMSS-SHA2_20_192
 pub const CKP_XMSS_SHAKE_10_256: u32 = 0x07; // XMSS-SHAKE_10_256 (SHAKE128)
 pub const CKP_XMSS_SHAKE_16_256: u32 = 0x08; // XMSS-SHAKE_16_256 (SHAKE128)
 pub const CKP_XMSS_SHAKE_20_256: u32 = 0x09; // XMSS-SHAKE_20_256 (SHAKE128)
+pub const CKP_XMSS_SHAKE256_10_256: u32 = 0x10; // XMSS-SHAKE256_10_256
 pub const CKP_XMSS_SHAKE256_16_256: u32 = 0x11; // XMSS-SHAKE256_16_256
 pub const CKP_XMSS_SHAKE256_20_256: u32 = 0x12; // XMSS-SHAKE256_20_256
 pub const CKP_XMSS_SHAKE256_10_192: u32 = 0x13; // XMSS-SHAKE256_10_192
+pub const CKP_XMSS_SHAKE256_16_192: u32 = 0x14; // XMSS-SHAKE256_16_192
+pub const CKP_XMSS_SHAKE256_20_192: u32 = 0x15; // XMSS-SHAKE256_20_192
 
 // ── XMSS-MT Parameter Set Constants (RFC 8391 OIDs, matching C++ xmssmt_parse_oid) ──────────────
 // SHA2 / 256-bit (most common; selected subset for PKCS#11 v3.2 §6.66.6)

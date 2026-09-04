@@ -2256,9 +2256,18 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
                 .filter(|v| *v != 0)
                 .or_else(|| get_object_attr_u32(hkey, CKA_XMSS_PARAM_SET).filter(|v| *v != 0))
                 .unwrap_or(CKP_XMSS_SHA2_10_256);
-            // SHAKE256_10_192 is the one n=24 set (SP 800-208): len=51, h=10.
-            if xmss_param == CKP_XMSS_SHAKE256_10_192 {
-                return 4 + 24 + (51 + 10) * 24;
+            // SP 800-208's n=24 sets — SHAKE256/192 (§4, Tables 14/16) AND
+            // SHA-256/192 (§5.2, Table 12) — both use len=51 regardless of
+            // height: the WOTS+ chain count is a function of n and the
+            // Winternitz parameter w, not of the tree height h.
+            let n24_height: Option<u32> = match xmss_param {
+                CKP_XMSS_SHAKE256_10_192 | CKP_XMSS_SHA2_10_192 => Some(10),
+                CKP_XMSS_SHAKE256_16_192 | CKP_XMSS_SHA2_16_192 => Some(16),
+                CKP_XMSS_SHAKE256_20_192 | CKP_XMSS_SHA2_20_192 => Some(20),
+                _ => None,
+            };
+            if let Some(h) = n24_height {
+                return 4 + 24 + (51 + h) * 24;
             }
             let h: u32 = match xmss_param {
                 CKP_XMSS_SHA2_16_256 | CKP_XMSS_SHAKE_16_256 | CKP_XMSS_SHAKE256_16_256 => 16,
