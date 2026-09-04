@@ -6,6 +6,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Rust engine: `C_DeriveKey(CKM_ECDH1_DERIVE)` rejected roughly 1 in 256
+  valid raw SEC1 peer public keys with `CKR_ARGUMENTS_BAD`.** The ECDH
+  arm decided whether `pPublicData` was DER-wrapped by checking whether it
+  started with `0x04` — but a raw uncompressed SEC1 point *also* starts
+  with `0x04` (that's its own "uncompressed" marker), so the code then read
+  the next byte — the first byte of the X coordinate — as a DER length.
+  Whenever X started with `0x3F` (P-256), `0x5F` (P-384) or `0x83` (P-521),
+  two real bytes were stripped off a perfectly valid point and the
+  truncated remainder failed to parse. PKCS#11 v3.2's
+  `CK_ECDH1_DERIVE_PARAMS.pPublicData` row makes the raw form the **MUST**
+  case and DER the optional **MAY** — the mandatory path was the broken
+  one. Same mistake, same fix, as the `CKA_EC_POINT`-import bug fixed in
+  0.28.0 (#212) — that fix covered the attribute-read path only; this
+  arm, and the analogous `C_EncapsulateKey`/`C_DecapsulateKey`
+  ECDH-as-KEM paths, carried independent copies of the same tag-first
+  logic. All three now go through one curve-anchored
+  `unwrap_peer_ec_point()`, which decides by length against the base
+  key's known curve rather than by sniffing the leading byte. Found via
+  an intermittent (~25% of runs) failure in a downstream HPKE test suite
+  exercising real random keys; reproduced deterministically here by
+  retrying keygen until the exact byte pattern occurs.
+
 ## [0.28.0] — 2026-09-02
 
 **Consolidated release: a cross-provider PKCS#11 validation pass and the

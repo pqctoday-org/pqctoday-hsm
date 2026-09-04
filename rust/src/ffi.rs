@@ -4097,27 +4097,6 @@ fn der_wrap_ec_point(point: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Strip a DER OCTET STRING wrapper from an EC point if present. Mirrors the
-/// C++ engine's `getECDHPubData` tolerance: raw uncompressed SEC1 points for
-/// the supported curves (65/97/133 bytes) pass through untouched — length is
-/// checked FIRST because a raw point also starts with 0x04 and could
-/// otherwise be misread as a DER header.
-fn ec_point_unwrap(bytes: &[u8]) -> &[u8] {
-    match bytes.len() {
-        65 | 97 | 133 => bytes, // raw uncompressed SEC1 (P-256 / P-384 / P-521)
-        _ if bytes.len() >= 2 && bytes[0] == 0x04 => {
-            if bytes[1] < 0x80 && bytes[1] as usize + 2 == bytes.len() {
-                &bytes[2..]
-            } else if bytes.len() >= 3 && bytes[1] == 0x81 && bytes[2] as usize + 3 == bytes.len() {
-                &bytes[3..]
-            } else {
-                bytes
-            }
-        }
-        _ => bytes,
-    }
-}
-
 // ── KEM template CKA_VALUE_LEN reconciliation (PKCS#11 v3.2) ────────────────
 //
 // SPEC BASIS (all quotes from pkcs11-spec-v3.2-os, docs/refs/):
@@ -4534,12 +4513,15 @@ fn C_EncapsulateKey_impl(
                 return CKR_BUFFER_TOO_SMALL;
             }
             // Peer static public point (CKA_EC_POINT is DER-wrapped; raw
-            // SEC1 tolerated, mirroring the C++ getECDHPubData).
+            // SEC1 tolerated, mirroring the C++ getECDHPubData). `curve` is
+            // already known above, so the DER-vs-raw decision is anchored to
+            // its exact length rather than sniffed from the leading byte —
+            // see unwrap_peer_ec_point's doc comment.
             let peer_point_attr = match get_object_attr_bytes(h_key, CKA_EC_POINT) {
                 Some(v) => v,
                 None => return CKR_ARGUMENTS_BAD,
             };
-            let peer_point = ec_point_unwrap(&peer_point_attr);
+            let peer_point = crate::state::unwrap_peer_ec_point(&peer_point_attr, Some(ct_len as usize));
             use p256::elliptic_curve::sec1::ToEncodedPoint;
             macro_rules! ecdh_encap {
                 ($c:ident, $rng:expr) => {{
@@ -4963,7 +4945,20 @@ fn C_DecapsulateKey_impl(
             };
             let ct_bytes =
                 std::slice::from_raw_parts(p_ciphertext, ul_ciphertext_len as usize);
-            let peer_point = ec_point_unwrap(ct_bytes);
+            // `curve` is already known above — anchor the DER-vs-raw length
+            // check to it rather than sniffing the leading byte (see
+            // unwrap_peer_ec_point's doc comment). Montgomery curves have no
+            // DER form at all, but passing the exact expected length here is
+            // still correct — it simply never has a wrapped total to unwrap.
+            let expected_ct_len: Option<usize> = match curve {
+                CURVE_P256 => Some(65),
+                CURVE_P384 => Some(97),
+                CURVE_P521 => Some(133),
+                CURVE_X25519 => Some(32),
+                CURVE_X448 => Some(56),
+                _ => None,
+            };
+            let peer_point = crate::state::unwrap_peer_ec_point(ct_bytes, expected_ct_len);
             macro_rules! ecdh_decap {
                 ($c:ident) => {{
                     let sk = match $c::NonZeroScalar::try_from(scalar.as_slice()) {
@@ -10076,29 +10071,14 @@ pub fn C_DeriveKey(
                 if peer_pk_raw.is_empty() {
                     return CKR_ARGUMENTS_BAD;
                 }
-                // Strip DER OCTET STRING wrapper if present: 0x04 <len> <point bytes>
-                // PKCS#11 v3.2 §2.3.5 allows either raw SEC1 or the DER-wrapped form.
-                let peer_pk_bytes: &[u8] = if peer_pk_raw.len() >= 3 && peer_pk_raw[0] == 0x04 {
-                    if (peer_pk_raw[1] as usize) + 2 == peer_pk_raw.len() {
-                        &peer_pk_raw[2..]
-                    } else if peer_pk_raw.len() >= 4
-                        && peer_pk_raw[1] == 0x81
-                        && (peer_pk_raw[2] as usize) + 3 == peer_pk_raw.len()
-                    {
-                        &peer_pk_raw[3..]
-                    } else if peer_pk_raw.len() >= 5 && peer_pk_raw[1] == 0x82 {
-                        let len = ((peer_pk_raw[2] as usize) << 8) | (peer_pk_raw[3] as usize);
-                        if len + 4 == peer_pk_raw.len() {
-                            &peer_pk_raw[4..]
-                        } else {
-                            peer_pk_raw
-                        }
-                    } else {
-                        peer_pk_raw
-                    }
-                } else {
-                    peer_pk_raw
-                };
+                // PKCS#11 v3.2 §2.3.5 allows either raw SEC1/RFC 7748 octets
+                // (MUST) or the DER-wrapped form (MAY) for pPublicData. Which
+                // form is present is decided per-curve below, once the curve
+                // is known, via unwrap_peer_ec_point's exact-length check —
+                // NOT here by sniffing the leading byte, which used to
+                // misread a raw point's own X[0] as a DER length whenever it
+                // equalled len-2 (~1 valid point in 256; see that function's
+                // doc comment). `peer_pk_raw` is passed through unstripped.
                 let our_sk_bytes = match get_object_value(h_base_key) {
                     Some(v) => v,
                     None => return CKR_ARGUMENTS_BAD,
@@ -10120,6 +10100,7 @@ pub fn C_DeriveKey(
                 }
                 let shared = match (algo, curve) {
                     (ALGO_ECDSA, CURVE_P256) | (ALGO_ECDH_P256, _) | (0, CURVE_P256) => {
+                        let peer_pk_bytes = crate::state::unwrap_peer_ec_point(peer_pk_raw, Some(65));
                         let sk = match p256::NonZeroScalar::try_from(our_sk_bytes.as_slice()) {
                             Ok(s) => s,
                             Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
@@ -10133,6 +10114,7 @@ pub fn C_DeriveKey(
                             .to_vec()
                     }
                     (ALGO_ECDSA, CURVE_K256) | (0, CURVE_K256) => {
+                        let peer_pk_bytes = crate::state::unwrap_peer_ec_point(peer_pk_raw, Some(65));
                         let sk = match k256::NonZeroScalar::try_from(our_sk_bytes.as_slice()) {
                             Ok(s) => s,
                             Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
@@ -10146,6 +10128,7 @@ pub fn C_DeriveKey(
                             .to_vec()
                     }
                     (ALGO_ECDSA, CURVE_P384) | (0, CURVE_P384) => {
+                        let peer_pk_bytes = crate::state::unwrap_peer_ec_point(peer_pk_raw, Some(97));
                         let sk = match p384::NonZeroScalar::try_from(our_sk_bytes.as_slice()) {
                             Ok(s) => s,
                             Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
@@ -10159,6 +10142,7 @@ pub fn C_DeriveKey(
                             .to_vec()
                     }
                     (ALGO_ECDSA, CURVE_P521) | (0, CURVE_P521) => {
+                        let peer_pk_bytes = crate::state::unwrap_peer_ec_point(peer_pk_raw, Some(133));
                         let sk = match p521::NonZeroScalar::try_from(our_sk_bytes.as_slice()) {
                             Ok(s) => s,
                             Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
@@ -10172,6 +10156,7 @@ pub fn C_DeriveKey(
                             .to_vec()
                     }
                     (ALGO_ECDH_X25519, _) => {
+                        let peer_pk_bytes = crate::state::unwrap_peer_ec_point(peer_pk_raw, Some(32));
                         if our_sk_bytes.len() != 32 || peer_pk_bytes.len() != 32 {
                             return CKR_KEY_TYPE_INCONSISTENT;
                         }
@@ -10190,6 +10175,7 @@ pub fn C_DeriveKey(
                     (ALGO_ECDH_X448, _) => {
                         // X448 Diffie-Hellman (PKCS#11 v3.2 §6.7, RFC 7748 §6.2)
                         use x448::{PublicKey as X448PublicKey, StaticSecret as X448StaticSecret};
+                        let peer_pk_bytes = crate::state::unwrap_peer_ec_point(peer_pk_raw, Some(56));
                         if our_sk_bytes.len() != 56 || peer_pk_bytes.len() != 56 {
                             return CKR_KEY_TYPE_INCONSISTENT;
                         }
@@ -10208,6 +10194,15 @@ pub fn C_DeriveKey(
                         shared.as_bytes().to_vec()
                     }
                     _ => {
+                        // Unknown/legacy key metadata (algo/curve not one of
+                        // the above) — no curve ground truth to anchor a
+                        // length check against. Fall back to
+                        // unwrap_peer_ec_point's length-only rule (raw_len:
+                        // None, matches any of this engine's known raw point
+                        // sizes) — still never the tag byte alone — then
+                        // apply the same P-256-only heuristic this arm
+                        // already used for the ambiguous case.
+                        let peer_pk_bytes = crate::state::unwrap_peer_ec_point(peer_pk_raw, None);
                         if our_sk_bytes.len() == 32 && peer_pk_bytes.len() == 65 {
                             let sk = match p256::NonZeroScalar::try_from(our_sk_bytes.as_slice()) {
                                 Ok(s) => s,
@@ -20890,6 +20885,154 @@ mod ecdh_cofactor_ffi_tests {
             &mut key_handle,
         );
         assert_eq!(rv, CKR_OK, "cofactor mode must remain valid for CKK_EC (P-256)");
+    }
+}
+
+#[cfg(test)]
+mod ecdh1_raw_peer_point_regression_tests {
+    //! Regression for the 2026-09-03 fix: `C_DeriveKey(CKM_ECDH1_DERIVE)`
+    //! used to decide DER-vs-raw for `pPublicData` by sniffing its leading
+    //! byte (`0x04`), which a raw SEC1 point also starts with — so the code
+    //! then read `raw[1]`, the first byte of the X coordinate, as a DER
+    //! length, and stripped two real bytes off any point whose X happened to
+    //! start with `len-2`. ~1 valid raw point in 256 for P-256/P-384/P-521.
+    //! v3.2's `CK_ECDH1_DERIVE_PARAMS.pPublicData` row makes the raw form
+    //! the MUST case — the mandatory path was the broken one. Found live via
+    //! a hub-side probe against random real keys (~25% of a 74-derive HPKE
+    //! suite run); reproduced here on purpose by retrying native keygen
+    //! until the exact byte shows up, rather than relying on chance.
+    use super::*;
+    use crate::native::keygen::{generate_ecdsa_keypair, generate_x25519_keypair, EccCurve};
+    use crate::native::test_lock;
+    use crate::state::{get_ec_point_sec1, get_object_value};
+
+    fn setup() -> u32 {
+        let _ = crate::native::session::finalize();
+        crate::native::session::init().unwrap();
+        crate::native::session::bootstrap_default_token(0, "so", "user", "ecdh1-rawpoint-test").unwrap()
+    }
+
+    fn ecdh_mech(mechanism: u32, peer_public: &[u8]) -> ([usize; 3], [usize; 5]) {
+        let params: [usize; 5] =
+            [1 /* CKD_NULL */, 0, 0, peer_public.len(), peer_public.as_ptr() as usize];
+        let m: [usize; 3] =
+            [mechanism as usize, 0, std::mem::size_of::<[usize; 5]>()];
+        (m, params)
+    }
+
+    /// `C_DeriveKey(CKM_ECDH1_DERIVE)` against `peer_public`; returns the
+    /// derived `CKA_VALUE` on success, the raw `CKR_*` code on failure.
+    fn derive(session: u32, priv_handle: u32, peer_public: &[u8]) -> Result<Vec<u8>, u32> {
+        let (mut m, mut params) = ecdh_mech(CKM_ECDH1_DERIVE, peer_public);
+        m[1] = params.as_mut_ptr() as usize;
+        let class: u32 = CKO_SECRET_KEY;
+        let key_type: u32 = CKK_GENERIC_SECRET;
+        let extractable: u8 = 1; // CK_TRUE
+        let value_len: u32 = 32;
+        let mut tmpl: [usize; 12] = [
+            CKA_CLASS as usize, &class as *const u32 as usize, std::mem::size_of::<u32>(),
+            CKA_KEY_TYPE as usize, &key_type as *const u32 as usize, std::mem::size_of::<u32>(),
+            CKA_EXTRACTABLE as usize, &extractable as *const u8 as usize, std::mem::size_of::<u8>(),
+            CKA_VALUE_LEN as usize, &value_len as *const u32 as usize, std::mem::size_of::<u32>(),
+        ];
+        let mut key_handle: u32 = 0;
+        let rv = C_DeriveKey(
+            session,
+            m.as_mut_ptr() as *mut u8,
+            priv_handle,
+            tmpl.as_mut_ptr() as *mut u8,
+            4,
+            &mut key_handle,
+        );
+        if rv != CKR_OK {
+            return Err(rv);
+        }
+        Ok(get_object_value(key_handle).expect("a successfully derived key must be readable"))
+    }
+
+    fn der_wrap(raw: &[u8]) -> Vec<u8> {
+        assert!(raw.len() < 0x80, "long-form DER not needed by this test's curves");
+        let mut out = Vec::with_capacity(raw.len() + 2);
+        out.push(0x04);
+        out.push(raw.len() as u8);
+        out.extend_from_slice(raw);
+        out
+    }
+
+    /// Generate keypairs (native — no session/FFI churn per attempt, so this
+    /// converges in milliseconds) until the public point's raw SEC1 X[0]
+    /// equals `want`. Returns the raw (unwrapped) point.
+    fn raw_point_with_x0(session: u32, curve: EccCurve, want: u8) -> Vec<u8> {
+        for i in 0..20_000u32 {
+            let (pub_h, _priv_h) =
+                generate_ecdsa_keypair(session, curve, format!("x0-{i}").as_bytes(), "k").unwrap();
+            let point = get_ec_point_sec1(pub_h).unwrap();
+            if point[1] == want {
+                return point;
+            }
+        }
+        panic!("no keypair with X[0]=={want:#x} found in 20000 tries (astronomically unlikely)");
+    }
+
+    #[test]
+    fn p256_raw_peer_point_with_x0_0x3f_is_accepted() {
+        // 65-byte raw P-256 point, X[0] == 0x3F == 65-2: exactly the shape
+        // the old tag-first strip misread as "0x04 <len=0x3F> <63 bytes>".
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let (_pub_a, priv_a) = generate_ecdsa_keypair(session, EccCurve::P256, b"me", "me").unwrap();
+        let peer_raw = raw_point_with_x0(session, EccCurve::P256, 0x3f);
+        assert_eq!(peer_raw.len(), 65);
+
+        let via_raw =
+            derive(session, priv_a, &peer_raw).expect("raw point must be accepted (v3.2 MUST form)");
+        let via_der = derive(session, priv_a, &der_wrap(&peer_raw))
+            .expect("the identical point, DER-wrapped, must also be accepted");
+        assert_eq!(via_raw, via_der, "same point, two encodings, must derive the same shared secret");
+    }
+
+    #[test]
+    fn p384_raw_peer_point_with_x0_0x5f_is_accepted() {
+        // 97-byte raw P-384 point, X[0] == 0x5F == 97-2.
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let (_pub_a, priv_a) = generate_ecdsa_keypair(session, EccCurve::P384, b"me384", "me").unwrap();
+        let peer_raw = raw_point_with_x0(session, EccCurve::P384, 0x5f);
+        assert_eq!(peer_raw.len(), 97);
+
+        let via_raw =
+            derive(session, priv_a, &peer_raw).expect("raw point must be accepted (v3.2 MUST form)");
+        let via_der = derive(session, priv_a, &der_wrap(&peer_raw))
+            .expect("the identical point, DER-wrapped, must also be accepted");
+        assert_eq!(via_raw, via_der);
+    }
+
+    #[test]
+    fn x25519_raw_peer_point_starting_04_1e_is_accepted() {
+        // Any 32-byte string is a valid X25519 public key (RFC 7748
+        // clamping absorbs invalid points), so the trap shape — "0x04
+        // <len=32-2=0x1E>" — is built directly, no search needed.
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let (_pub_a, priv_a) = generate_x25519_keypair(session, b"mex", "me").unwrap();
+        let mut peer_raw = vec![0x04u8, 0x1e];
+        peer_raw.extend(std::iter::repeat(0x42u8).take(30));
+        assert_eq!(peer_raw.len(), 32);
+
+        let via_raw = derive(session, priv_a, &peer_raw)
+            .expect("raw X25519 point starting 0x04 0x1e must be accepted");
+        assert_eq!(via_raw.len(), 32);
+    }
+
+    #[test]
+    fn control_raw_peer_point_without_the_ambiguous_shape_is_accepted() {
+        // Sanity check that the fix doesn't just accept everything: an
+        // ordinary raw point (X[0] far from len-2) must round-trip too.
+        let _guard = test_lock::acquire();
+        let session = setup();
+        let (_pub_a, priv_a) = generate_ecdsa_keypair(session, EccCurve::P256, b"ctrl", "me").unwrap();
+        let peer_raw = raw_point_with_x0(session, EccCurve::P256, 0x7a);
+        assert!(derive(session, priv_a, &peer_raw).is_ok());
     }
 }
 
