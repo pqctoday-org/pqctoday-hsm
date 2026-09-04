@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.28.1] — 2026-09-04
+
 ### Fixed
 
 - **Rust engine: 9 of the 18 XMSS parameter sets from NIST SP 800-208 were
