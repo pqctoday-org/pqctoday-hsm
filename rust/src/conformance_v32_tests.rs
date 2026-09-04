@@ -2419,3 +2419,154 @@ fn v09_montgomery_keys_are_accepted_by_the_kem_entry_points() {
         "both ends must derive the same shared secret"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// HBS-1 (2026-09-03) — HSS/XMSS/XMSS-MT one-time-signature private keys must
+// never be CKA_COPYABLE, and a caller can never override the mandated
+// CKA_SENSITIVE/CKA_EXTRACTABLE/CKA_COPYABLE trio (§6.65.3, §6.66.4-5). A
+// duplicate or exported one-time-signature key can independently advance or
+// replay the same leaf, producing two valid signatures over the same
+// one-time key — the forgery hazard these schemes exist to prevent.
+// Previously CKA_COPYABLE was left at its PKCS#11 default (TRUE) for all
+// three types, and a private-key template supplied to C_GenerateKeyPair (or
+// C_CreateObject) could silently flip CKA_SENSITIVE/CKA_EXTRACTABLE too —
+// this file's `e2_...`/`c2_...` naming convention is item ids from the
+// 08-13 remediation plan; HBS-1 is a fresh, undocumented-elsewhere finding.
+// ─────────────────────────────────────────────────────────────────────────
+
+fn gen_pair_with_priv_template(
+    mech: u32,
+    pub_entries: Vec<(u32, Vec<u8>)>,
+    priv_entries: Vec<(u32, Vec<u8>)>,
+) -> (u32, u32, u32) {
+    let mut m = [0usize; 3];
+    m[0] = mech as usize;
+    let mut pt = Tmpl::new(pub_entries);
+    let pt_count = pt.count();
+    let mut kt = Tmpl::new(priv_entries);
+    let kt_count = kt.count();
+    let (mut hp, mut hs) = (0u32, 0u32);
+    let rv = unsafe {
+        C_GenerateKeyPair_impl(
+            E_SESSION,
+            m.as_mut_ptr() as *mut u8,
+            pt.ptr(),
+            pt_count,
+            kt.ptr(),
+            kt_count,
+            &mut hp,
+            &mut hs,
+        )
+    };
+    (rv, hp, hs)
+}
+
+#[test]
+fn hbs1_stateful_keys_are_never_copyable_by_default() {
+    let _guard = test_lock::acquire();
+    e_setup();
+
+    let (rv, _hp, hs) = gen_pair(CKM_XMSS_KEY_PAIR_GEN, vec![]);
+    assert_eq!(rv, CKR_OK);
+    assert_eq!(
+        obj_attr(hs, CKA_COPYABLE),
+        Some(bbool(false)),
+        "a fresh XMSS private key must be CKA_COPYABLE=FALSE"
+    );
+
+    let (rv, _hp, hs) = gen_pair(CKM_XMSSMT_KEY_PAIR_GEN, vec![]);
+    assert_eq!(rv, CKR_OK);
+    assert_eq!(
+        obj_attr(hs, CKA_COPYABLE),
+        Some(bbool(false)),
+        "a fresh XMSS^MT private key must be CKA_COPYABLE=FALSE"
+    );
+
+    let (rv, _hp, hs) = gen_pair(CKM_HSS_KEY_PAIR_GEN, vec![]);
+    assert_eq!(rv, CKR_OK);
+    assert_eq!(
+        obj_attr(hs, CKA_COPYABLE),
+        Some(bbool(false)),
+        "a fresh HSS private key must be CKA_COPYABLE=FALSE"
+    );
+}
+
+#[test]
+fn hbs1_keygen_rejects_a_private_template_overriding_the_mandated_trio() {
+    let _guard = test_lock::acquire();
+    e_setup();
+
+    // CKA_EXTRACTABLE=TRUE on the private-key template used to win over the
+    // engine's own default — the exact override this fix closes.
+    let (rv, hp, hs) =
+        gen_pair_with_priv_template(CKM_XMSS_KEY_PAIR_GEN, vec![], vec![(CKA_EXTRACTABLE, bbool(true))]);
+    assert_eq!(rv, CKR_ATTRIBUTE_VALUE_INVALID, "CKA_EXTRACTABLE=TRUE must be refused");
+    assert!(!obj_exists(hp) && !obj_exists(hs), "no half-created key pair on rejection");
+
+    let (rv, hp, hs) =
+        gen_pair_with_priv_template(CKM_XMSS_KEY_PAIR_GEN, vec![], vec![(CKA_SENSITIVE, bbool(false))]);
+    assert_eq!(rv, CKR_ATTRIBUTE_VALUE_INVALID, "CKA_SENSITIVE=FALSE must be refused");
+    assert!(!obj_exists(hp) && !obj_exists(hs));
+
+    let (rv, hp, hs) =
+        gen_pair_with_priv_template(CKM_XMSS_KEY_PAIR_GEN, vec![], vec![(CKA_COPYABLE, bbool(true))]);
+    assert_eq!(rv, CKR_ATTRIBUTE_VALUE_INVALID, "CKA_COPYABLE=TRUE must be refused");
+    assert!(!obj_exists(hp) && !obj_exists(hs));
+
+    // Restating the mandated value is a harmless no-op, both key types.
+    let (rv, _hp, hs) = gen_pair_with_priv_template(
+        CKM_XMSSMT_KEY_PAIR_GEN,
+        vec![],
+        vec![(CKA_SENSITIVE, bbool(true)), (CKA_EXTRACTABLE, bbool(false)), (CKA_COPYABLE, bbool(false))],
+    );
+    assert_eq!(rv, CKR_OK);
+    assert_eq!(obj_attr(hs, CKA_COPYABLE), Some(bbool(false)));
+
+    let (rv, hp, hs) =
+        gen_pair_with_priv_template(CKM_HSS_KEY_PAIR_GEN, vec![], vec![(CKA_COPYABLE, bbool(true))]);
+    assert_eq!(rv, CKR_ATTRIBUTE_VALUE_INVALID, "HSS CKA_COPYABLE=TRUE must be refused");
+    assert!(!obj_exists(hp) && !obj_exists(hs));
+}
+
+#[test]
+fn hbs1_create_object_import_rejects_the_same_overrides() {
+    let _guard = test_lock::acquire();
+    c_setup();
+
+    let mut attrs: Attributes = std::collections::HashMap::new();
+    attrs.insert(CKA_CLASS, ulong(CKO_PRIVATE_KEY));
+    attrs.insert(CKA_KEY_TYPE, ulong(CKK_XMSS));
+    attrs.insert(CKA_PARAMETER_SET, ulong(CKP_XMSS_SHA2_16_256));
+    attrs.insert(CKA_VALUE, vec![0x11u8; 64]);
+    attrs.insert(CKA_SENSITIVE, bbool(true));
+    attrs.insert(CKA_EXTRACTABLE, bbool(false));
+    attrs.insert(CKA_COPYABLE, bbool(true)); // the override under test
+
+    assert_eq!(
+        create_object_from_attrs(C_SESSION, attrs),
+        Err(CKR_ATTRIBUTE_VALUE_INVALID),
+        "C_CreateObject must not import a copyable XMSS private key"
+    );
+}
+
+#[test]
+fn hbs1_put_object_bypass_still_forces_the_mandated_trio() {
+    // `put_object` calls `allocate_handle` directly, skipping
+    // `create_object_from_attrs`'s reject-on-override check entirely — the
+    // defense-in-depth layer inside `apply_object_defaults` must still hold.
+    let _guard = test_lock::acquire();
+    c_setup();
+    let h = put_object(
+        0,
+        vec![
+            (CKA_CLASS, ulong(CKO_PRIVATE_KEY)),
+            (CKA_KEY_TYPE, ulong(CKK_HSS)),
+            (CKA_SENSITIVE, bbool(false)),
+            (CKA_EXTRACTABLE, bbool(true)),
+            (CKA_COPYABLE, bbool(true)),
+        ],
+    );
+    assert_eq!(obj_attr(h, CKA_SENSITIVE), Some(bbool(true)));
+    assert_eq!(obj_attr(h, CKA_EXTRACTABLE), Some(bbool(false)));
+    assert_eq!(obj_attr(h, CKA_COPYABLE), Some(bbool(false)));
+}

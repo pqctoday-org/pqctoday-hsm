@@ -8,6 +8,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.28.2] — 2026-09-04
+
+### Security
+
+- **HSS/XMSS/XMSS-MT private keys could be copied, and in the Rust engine
+  could be made extractable, defeating the one-time-signature protections
+  PKCS#11 v3.2 requires for these key types.** These keys hold hash-based
+  one-time-signature state; a duplicate object (via `C_CopyObject`) or an
+  exported value can independently advance or replay the same leaf,
+  producing two valid signatures over the same one-time key — the exact
+  forgery hazard the standard's `CKA_SENSITIVE`/`CKA_EXTRACTABLE`/
+  `CKA_COPYABLE` rules exist to prevent.
+  - **Rust engine** (the production KMIP/CACP backend): `CKA_COPYABLE` was
+    never forced `FALSE` for any of the three key types, and worse, a
+    caller's own `C_GenerateKeyPair`/`C_CreateObject` private-key template
+    could silently override the engine's `CKA_SENSITIVE`/`CKA_EXTRACTABLE`
+    defaults with no rejection. Fixed: both attributes plus `CKA_COPYABLE`
+    are now enforced at every creation path — a template may restate the
+    mandated values, never override them (`CKR_ATTRIBUTE_VALUE_INVALID`
+    otherwise) — with a defense-in-depth force in the engine's universal
+    object-defaults choke point as a second, independent guarantee.
+  - **C++ engine**: `CKA_COPYABLE=FALSE` was already forced for HSS
+    (PKCS#11 v3.2 §6.65.3 names it explicitly) but not for XMSS/XMSS-MT
+    (§6.66.4-5 do not repeat the sentence for these two, even though the
+    underlying hazard is identical). Extended the existing enforcement to
+    all three key types.
+  - **Also fixed**: the two engines defaulted to different LMOTS
+    one-time-signature parameters (C++: W8, Rust: W4) when a caller
+    generated an HSS key pair without an explicit
+    `CK_HSS_KEY_PAIR_GEN_PARAMS` — neither PKCS#11 v3.2 nor RFC 8554
+    mandates a default, so this was silent non-interoperability rather
+    than a security defect; C++ is now aligned to Rust's W4 default.
+  - **Cross-engine differential harness**: added scenarios exercising
+    `CKM_HSS_KEY_PAIR_GEN` and `CKM_XMSSMT_KEY_PAIR_GEN` — neither had any
+    coverage before this fix, which is why the original divergence went
+    undetected (the existing XMSS scenario's `CKA_COPYABLE` check couldn't
+    catch it either, since both engines agreed on the wrong default).
+
 ## [0.28.1] — 2026-09-04
 
 ### Fixed

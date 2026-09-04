@@ -373,6 +373,52 @@ pub struct VerifySigCtx {
 /// * `CKA_TRUSTED`            (0x086) — default `FALSE` — public keys and secret keys
 /// * `CKA_WRAP_WITH_TRUSTED`  (0x210) — default `FALSE` — private keys and secret keys
 /// * `CKA_ALWAYS_AUTHENTICATE`(0x202) — default `FALSE` — private keys only
+/// True for a private key of one of the three hash-based one-time-signature
+/// types (PKCS#11 v3.2 §6.65 HSS/LMS, §6.66 XMSS/XMSS-MT). `attrs` carries
+/// CKA_VALUE / vendor state attributes holding one-time signature state; a
+/// second live copy or an exported value can independently advance or
+/// replay that state, producing two valid signatures over the same
+/// one-time key — the forgery hazard these schemes exist to prevent.
+fn is_stateful_signature_private_key(attrs: &Attributes) -> bool {
+    if get_object_attr_u32_from(attrs, CKA_CLASS) != Some(CKO_PRIVATE_KEY) {
+        return false;
+    }
+    matches!(
+        get_object_attr_u32_from(attrs, CKA_KEY_TYPE),
+        Some(CKK_HSS) | Some(CKK_XMSS) | Some(CKK_XMSSMT)
+    )
+}
+
+/// PKCS#11 v3.2 §6.65.3 (HSS): "CKA_SENSITIVE MUST be true, CKA_EXTRACTABLE
+/// MUST be false, and CKA_COPYABLE MUST be false for this key." §6.66.4/
+/// §6.66.5 (XMSS/XMSS-MT) name only the first two in that exact wording —
+/// this engine treats the underlying hazard (see
+/// [`is_stateful_signature_private_key`]) as identical across all three key
+/// types and enforces CKA_COPYABLE FALSE for XMSS/XMSS-MT too, matching the
+/// equivalent C++ engine hardening.
+///
+/// Called on an already-merged attribute map (defaults + any caller
+/// template): a template that omits one of the three is silently fine (the
+/// caller of this function, or `apply_object_defaults`, fills the mandated
+/// value); one that restates the mandated value is a harmless no-op; one
+/// that contradicts it is rejected — a caller may never override, only
+/// confirm.
+pub fn reject_stateful_signature_key_override(attrs: &Attributes) -> Result<(), u32> {
+    if !is_stateful_signature_private_key(attrs) {
+        return Ok(());
+    }
+    if attrs.contains_key(&CKA_SENSITIVE) && !read_bool_attr(attrs, CKA_SENSITIVE) {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    if attrs.contains_key(&CKA_EXTRACTABLE) && read_bool_attr(attrs, CKA_EXTRACTABLE) {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    if attrs.contains_key(&CKA_COPYABLE) && read_bool_attr(attrs, CKA_COPYABLE) {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    Ok(())
+}
+
 fn apply_object_defaults(attrs: &mut Attributes) {
     if !attrs.contains_key(&CKA_MODIFIABLE) {
         store_bool(attrs, CKA_MODIFIABLE, true);
@@ -454,6 +500,18 @@ fn apply_object_defaults(attrs: &mut Attributes) {
                 store_bool(attrs, CKA_NEVER_EXTRACTABLE, v);
             }
         }
+    }
+    // Defense-in-depth companion to `reject_stateful_signature_key_override`:
+    // every creation path (C_CreateObject, C_GenerateKeyPair, and any future
+    // one) funnels through `allocate_handle`, which calls this function last.
+    // A path that forgot to call the reject-on-override check still cannot
+    // produce a stateful-signature private key with a defeated invariant —
+    // this unconditionally forces the mandated value rather than only
+    // filling an absent one.
+    if is_stateful_signature_private_key(attrs) {
+        store_bool(attrs, CKA_SENSITIVE, true);
+        store_bool(attrs, CKA_EXTRACTABLE, false);
+        store_bool(attrs, CKA_COPYABLE, false);
     }
 }
 

@@ -3471,6 +3471,13 @@ fn C_GenerateKeyPair_impl(
                     p_private_key_template,
                     ul_private_key_attribute_count,
                 );
+                // §6.65.3/§6.66.4-5 — CKA_SENSITIVE/CKA_EXTRACTABLE/CKA_COPYABLE
+                // are forced above; a caller's private-key template (just absorbed)
+                // may restate them but never override: see
+                // `reject_stateful_signature_key_override`.
+                if let Err(rv) = reject_stateful_signature_key_override(&prv_attrs) {
+                    return rv;
+                }
                 *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
                 *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
                 CKR_OK
@@ -3599,6 +3606,13 @@ fn C_GenerateKeyPair_impl(
                     p_private_key_template,
                     ul_private_key_attribute_count,
                 );
+                // §6.65.3/§6.66.4-5 — CKA_SENSITIVE/CKA_EXTRACTABLE/CKA_COPYABLE
+                // are forced above; a caller's private-key template (just absorbed)
+                // may restate them but never override: see
+                // `reject_stateful_signature_key_override`.
+                if let Err(rv) = reject_stateful_signature_key_override(&prv_attrs) {
+                    return rv;
+                }
                 *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
                 *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
                 CKR_OK
@@ -3689,6 +3703,13 @@ fn C_GenerateKeyPair_impl(
                     p_private_key_template,
                     ul_private_key_attribute_count,
                 );
+                // §6.65.3/§6.66.4-5 — CKA_SENSITIVE/CKA_EXTRACTABLE/CKA_COPYABLE
+                // are forced above; a caller's private-key template (just absorbed)
+                // may restate them but never override: see
+                // `reject_stateful_signature_key_override`.
+                if let Err(rv) = reject_stateful_signature_key_override(&prv_attrs) {
+                    return rv;
+                }
                 *ph_public_key = allocate_handle_owned(_h_session, pub_attrs);
                 *ph_private_key = allocate_handle_owned(_h_session, prv_attrs);
                 CKR_OK
@@ -5357,6 +5378,11 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
     if asym_only && class == CKO_SECRET_KEY {
         return Err(CKR_TEMPLATE_INCONSISTENT);
     }
+    // §6.65.3/§6.66.4-5 — an imported (C_CreateObject) HSS/XMSS/XMSS-MT
+    // private key template may restate CKA_SENSITIVE=TRUE/CKA_EXTRACTABLE=
+    // FALSE/CKA_COPYABLE=FALSE, but never override them: see
+    // `reject_stateful_signature_key_override`.
+    reject_stateful_signature_key_override(attrs)?;
     // Required key material per class/type (§4.7+ tables).
     if class == CKO_SECRET_KEY {
         let val = attrs.get(&CKA_VALUE).ok_or(CKR_TEMPLATE_INCOMPLETE)?;

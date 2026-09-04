@@ -841,9 +841,15 @@ CK_RV SoftHSM::generateKeyPairImpl
 			keyType = CKK_HSS;
 
 			// Parse HSS Params
+			// HBS-1 (2026-09-03): the LMOTS default was W8 (IANA 0x04) here and
+			// W4 (IANA 0x03) in the Rust engine — PKCS#11 v3.2/RFC 8554 mandate
+			// no default when CK_HSS_KEY_PAIR_GEN_PARAMS is omitted, so a caller
+			// relying on either engine's silent default got a different,
+			// non-interoperable key shape. Aligned to Rust's W4, since Rust is
+			// this repo's production KMIP/CACP backend (CLAUDE.md).
 			unsigned hss_levels = 1;
 			param_set_t lm_type[8] = { LMS_SHA256_N32_H5 };       // IANA 0x05
-			param_set_t lm_ots_type[8] = { LMOTS_SHA256_N32_W8 }; // IANA 0x04
+			param_set_t lm_ots_type[8] = { LMOTS_SHA256_N32_W4 }; // IANA 0x03
 			if (pMechanism->pParameter && pMechanism->ulParameterLen >= sizeof(CK_HSS_KEY_PAIR_GEN_PARAMS)) {
 				CK_HSS_KEY_PAIR_GEN_PARAMS* hP = (CK_HSS_KEY_PAIR_GEN_PARAMS*)pMechanism->pParameter;
 				hss_levels = hP->ulLevels;
