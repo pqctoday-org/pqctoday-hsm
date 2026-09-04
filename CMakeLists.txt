@@ -181,35 +181,44 @@ if(NOT EMSCRIPTEN AND BUILD_TESTS)
              WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
     # composite-sig-probe: phase-4 R7 test helper for the pkcs11-provider's
-    # composite (draft-lamps-pq-composite-sigs) signature support. Links
-    # pkcs11-provider.so directly (its composite bridge exports real C
+    # composite (draft-lamps-pq-composite-sigs) signature support. Calls
+    # into pkcs11-provider.so's composite bridge (its two exported C
     # symbols for exactly this — see composite.h) because the standard
     # openssl CLI cannot reach that path: there is no keymgmt GEN for
     # composite keys, only a two-subkey-URI bridge. Driven by
     # scripts/test-openssl-provider.sh's T21 (COMPSIG) cases, not run
     # under ctest directly (it needs a live per-case token arena the
     # harness script builds, same as every other T-case).
+    #
+    # pkcs11-provider is a MODULE library (add_library(... MODULE), no
+    # "lib" prefix, per provider-loading convention). Build-time linking
+    # an executable directly against it is not portable: on Linux a
+    # MODULE .so is an ordinary ELF shared object and GNU ld/gold/lld can
+    # link it (the earlier fix here used the -l:exact-filename form to
+    # dodge CMake re-deriving a bare, unresolvable -lpkcs11-provider flag
+    # from the lib-prefix-less target); on macOS a MODULE target builds
+    # as a Mach-O bundle (MH_BUNDLE, via -bundle) and Apple's ld refuses
+    # to link against bundles at all ("unsupported mach-o filetype" —
+    # only MH_OBJECT/MH_DYLIB are linkable there), so no linker-flag
+    # spelling fixes it. Both platforms' dlopen()/dlsym() load MH_BUNDLE
+    # and ELF .so identically, so composite-sig-probe.c resolves its two
+    # needed symbols (p11prov_composite_profile_by_oid,
+    # p11prov_composite_evp_pkey_from_uris) via dlopen at runtime instead
+    # of a build-time library dependency — same idiom already used by
+    # scripts/dp-kdf-counter-probe.cpp and scripts/hss-pubkey-dump.c for
+    # comparable cross-module boundaries. No linker flags, no platform
+    # branch, needed for this target at all.
     add_executable(composite_sig_probe scripts/composite-sig-probe.c)
     target_include_directories(composite_sig_probe PRIVATE
         ${OPENSSL_INCLUDE_DIR}
         ${CMAKE_SOURCE_DIR}/src/vendor/pkcs11-provider
         ${CMAKE_SOURCE_DIR}/src/vendor/pkcs11-provider/src)
     add_dependencies(composite_sig_probe pkcs11-provider)
-    # pkcs11-provider is a MODULE library named exactly pkcs11-provider.so
-    # (no "lib" prefix, per provider-loading convention). CMake recognizes
-    # any reference to its output path — target name, $<TARGET_FILE:...>,
-    # even a hardcoded literal matching that path — as "the pkcs11-provider
-    # target" and re-derives a bare -lpkcs11-provider flag, which the
-    # linker can't resolve (it looks for libpkcs11-provider.so). The GNU
-    # ld/gold/lld -l:exact-filename form bypasses the lib-prefix
-    # assumption while staying inside target_link_libraries' normal
-    # library ordering (so it lands after the object file that needs its
-    # symbols, unlike target_link_options' flag placement).
+    target_compile_definitions(composite_sig_probe PRIVATE
+        PKCS11_PROVIDER_SO_PATH="${CMAKE_BINARY_DIR}/src/vendor/pkcs11-provider/pkcs11-provider.so")
     target_link_libraries(composite_sig_probe
         ${OPENSSL_LIBRARIES}
-        -L${CMAKE_BINARY_DIR}/src/vendor/pkcs11-provider
-        -l:pkcs11-provider.so
-        -Wl,-rpath,${CMAKE_BINARY_DIR}/src/vendor/pkcs11-provider)
+        ${CMAKE_DL_LIBS})
 
     # dump-int-param: phase-4 R20 (F36-5) test helper — reads back an
     # arbitrary EVP_PKEY int param (OSSL_PKEY_PARAM_SECURITY_CATEGORY)
