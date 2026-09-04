@@ -10,6 +10,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Rust engine: 9 of the 18 XMSS parameter sets from NIST SP 800-208 were
+  either missing or silently broken.** Three sub-families were affected:
+  SHAKE256/256 (Table 14) was missing its 10-tree id; SHAKE256/192 (Table
+  16) had its 16- and 20-tree ids missing and its 10-tree id **dispatched
+  but non-functional since introduction**; SHA-256/192 (Table 12) was
+  entirely absent from both engines. Root cause of the `_192` breakage:
+  the keygen seed buffer was hardcoded to 96 bytes for every parameter
+  set, but n=24 (`_192`) sets need 72 bytes per `SEED_LEN = 3×n` —
+  confirmed against both the `xmss` crate's own trait constant and the
+  C++ engine's independent RFC 8391 implementation. Fixed generically via
+  `SEED_LEN` instead of a hardcoded constant, and wired all 9 param sets
+  into keygen/sign/verify/max-signatures dispatch and the CKM_XMSS
+  signature-length estimator.
+
 - **Rust engine: `C_DeriveKey(CKM_ECDH1_DERIVE)` rejected roughly 1 in 256
   valid raw SEC1 peer public keys with `CKR_ARGUMENTS_BAD`.** The ECDH
   arm decided whether `pPublicData` was DER-wrapped by checking whether it
