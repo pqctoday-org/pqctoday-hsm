@@ -1303,37 +1303,35 @@ pub fn get_object_value_from(attrs: &Attributes) -> Option<Vec<u8>> {
     attrs.get(&CKA_VALUE).cloned()
 }
 
-/// PKCS#11 v3.2 §2.3.3 — strip the DER OCTET STRING header some CKA_EC_POINT
-/// values carry around the raw SEC1 point. See [`get_ec_point_sec1_from`].
-fn strip_ec_point_der(ec_point: Vec<u8>) -> Vec<u8> {
-    // Two encodings exist:
-    //   - Short form  : 0x04 <len ≤ 127> <data>            (len = data.len())
-    //   - Long form 1B: 0x04 0x81 <len> <data>             (P-521 path — data=133)
-    // P-256 / P-384 / secp256k1 fit short form (65 / 97 / 65 ≤ 127).
-    // P-521's 133-byte SEC1 point requires long form.
-    //
-    // The tag byte ALONE cannot tell the two apart, and assuming it can was a
-    // real, silent, data-dependent bug (found 2026-09-02). A raw uncompressed
-    // SEC1 point also begins 0x04 — that is its "uncompressed" marker, not a
-    // DER OCTET STRING tag — so for a raw 65-byte P-256 point the old code
-    // compared ec_point[1], which is simply the FIRST BYTE OF THE X
-    // COORDINATE, against len-2 (= 63). Whenever X started with byte 63 it
-    // stripped two bytes off a perfectly good point and returned 63 bytes of
-    // garbage, which downstream surfaces as a bogus CKR_ARGUMENTS_BAD from
-    // p256::PublicKey::from_sec1_bytes. That is ~1 imported P-256 key in 256.
-    // The same trap applies to the bare Edwards/Montgomery values this
-    // function also serves (see get_key_material_from): a 32-byte X25519
-    // point whose first two bytes happen to be 0x04, 0x1e would be mangled
-    // identically. Engine-GENERATED keys always take the DER-wrapped path
-    // (native::keygen writes 0x04 <len> <point>), so this only ever bit
-    // IMPORTED keys — which is exactly why the test suite never caught it.
-    //
-    // Fix: decide on LENGTH, which is unambiguous here, not on the tag byte.
-    // Every key type this engine stores in CKA_EC_POINT has a known raw size,
-    // and no DER-wrapped total collides with any raw size (wrapped totals are
-    // 34/58/59/67/99/136; raw are 32/56/57/65/97/133), so the two sets can be
-    // told apart exactly rather than guessed at.
-    const RAW_LENS: [usize; 6] = [
+/// PKCS#11 v3.2 §2.3.5 (`CK_ECDH1_DERIVE_PARAMS.pPublicData`) and §2.3.3
+/// (`CKA_EC_POINT`) both allow a peer/stored EC point in two forms: a raw
+/// SEC1/RFC 7748 octet string (the MUST form for pPublicData; the form this
+/// engine itself writes for Montgomery CKA_VALUE) or a DER OCTET STRING
+/// wrapping it (the MAY form; what this engine writes for CKA_EC_POINT).
+///
+/// Which form is present is decided by LENGTH, never by the leading tag
+/// byte. A raw uncompressed SEC1 point also begins `0x04` — that is its
+/// "uncompressed point" marker, not a DER OCTET STRING tag — so sniffing the
+/// tag byte and then reading the NEXT byte as a DER length is reading the
+/// first byte of the X coordinate instead. Whenever X happens to equal
+/// `len - 2` (1 point in 256 for P-256/P-384/P-521; found live 2026-09-02 as
+/// a silent import bug here, and again 2026-09-03 as an intermittent
+/// `C_DeriveKey(CKM_ECDH1_DERIVE)` → `CKR_ARGUMENTS_BAD` — three independent
+/// copies of this exact mistake existed in this crate before this function
+/// became the one place the decision is made), two bytes get stripped off a
+/// perfectly good point and the truncated remainder fails to parse.
+///
+/// `raw_len`: the caller's known raw-point size for the curve/key already in
+/// hand (`Some(65)` for P-256, etc.) — pass this whenever the curve is known,
+/// which anchors the length check exactly and makes the ambiguity above
+/// impossible. Pass `None` only when no such ground truth exists (e.g. a
+/// `CKA_EC_POINT` attribute read with no key-type context at hand); the
+/// fallback then matches against every raw size this engine ever stores,
+/// which cannot collide with any DER-wrapped total (wrapped totals are
+/// 34/58/59/67/99/136; raw are 32/56/57/65/97/133) but is strictly weaker
+/// disambiguation than a known `raw_len`.
+pub(crate) fn unwrap_peer_ec_point(data: &[u8], raw_len: Option<usize>) -> &[u8] {
+    const KNOWN_RAW_LENS: [usize; 6] = [
         32,  // X25519 / Ed25519
         56,  // X448
         57,  // Ed448
@@ -1341,28 +1339,39 @@ fn strip_ec_point_der(ec_point: Vec<u8>) -> Vec<u8> {
         97,  // P-384
         133, // P-521
     ];
+    let is_plausible_raw =
+        |n: usize| raw_len.map_or_else(|| KNOWN_RAW_LENS.contains(&n), |want| n == want);
 
-    // Already a bare value of a known size: never touch it, whatever its
-    // leading bytes happen to be. This is the case the old code got wrong.
-    if RAW_LENS.contains(&ec_point.len()) {
-        return ec_point;
+    // Already a bare value of the expected (or, with no curve context, any
+    // known) size: never touch it, whatever its leading bytes happen to be.
+    if is_plausible_raw(data.len()) {
+        return data;
     }
 
-    if ec_point.len() > 2 && ec_point[0] == 0x04 {
-        // Short form — and only when what's inside is itself a plausible
-        // point, not merely when the arithmetic happens to line up.
-        if ec_point[1] as usize == ec_point.len() - 2 && RAW_LENS.contains(&(ec_point.len() - 2)) {
-            return ec_point[2..].to_vec();
+    if data.len() > 2 && data[0] == 0x04 {
+        // Short form: 0x04 <len ≤ 127> <data>, len = data.len() - 2.
+        if data[1] as usize == data.len() - 2 && is_plausible_raw(data.len() - 2) {
+            return &data[2..];
         }
-        if ec_point.len() > 3
-            && ec_point[1] == 0x81
-            && ec_point[2] as usize == ec_point.len() - 3
-            && RAW_LENS.contains(&(ec_point.len() - 3))
+        // Long form (1-byte length octet count): 0x04 0x81 <len> <data> —
+        // needed for P-521's 133-byte point, which exceeds short form's
+        // 127-byte ceiling.
+        if data.len() > 3 && data[1] == 0x81 && data[2] as usize == data.len() - 3
+            && is_plausible_raw(data.len() - 3)
         {
-            return ec_point[3..].to_vec();
+            return &data[3..];
         }
     }
-    ec_point
+    data
+}
+
+/// PKCS#11 v3.2 §2.3.3 — strip the DER OCTET STRING header some CKA_EC_POINT
+/// values carry around the raw SEC1 point. See [`get_ec_point_sec1_from`].
+/// No curve/key-type context is available at this call site, so this uses
+/// [`unwrap_peer_ec_point`]'s length-only fallback (`raw_len: None`) — see
+/// its doc comment for why that is still exact, just not curve-anchored.
+fn strip_ec_point_der(ec_point: Vec<u8>) -> Vec<u8> {
+    unwrap_peer_ec_point(&ec_point, None).to_vec()
 }
 
 /// E4 (2026-08-13) — the raw public-key MATERIAL of any key object,
@@ -1910,5 +1919,63 @@ mod ec_point_encoding_tests {
             x25519,
             "a bare 32-byte X25519/Ed25519 value must never be stripped"
         );
+    }
+
+    /// The curve-anchored form `unwrap_peer_ec_point` gained for
+    /// `C_DeriveKey(CKM_ECDH1_DERIVE)`'s `pPublicData` (2026-09-03): same
+    /// ambiguous X[0]==len-2 shape as above, but now checked with the exact
+    /// expected length in hand rather than the length-only fallback.
+    /// Anchoring changes nothing about WHEN a raw point survives (it always
+    /// did, per the tests above) — what it buys is at the OTHER boundary:
+    /// a truly wrapped point whose inner length happens to collide with a
+    /// DIFFERENT curve's raw size can no longer be misread, which the
+    /// length-only fallback cannot rule out. Exercised end-to-end (not just
+    /// this helper) by ffi.rs's `ecdh1_raw_peer_point_regression_tests`.
+    #[test]
+    fn raw_point_with_ambiguous_x0_survives_with_curve_anchored_length() {
+        let mut raw = None;
+        for _ in 0..20_000 {
+            let sk = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+            let vk = p256::ecdsa::VerifyingKey::from(&sk);
+            let pt = vk.to_encoded_point(false).as_bytes().to_vec();
+            if pt[1] == 0x3f {
+                raw = Some(pt);
+                break;
+            }
+        }
+        let raw = raw.expect("no P-256 key with X[0]==0x3f in 20k tries");
+        assert_eq!(
+            unwrap_peer_ec_point(&raw, Some(65)),
+            raw.as_slice(),
+            "curve-anchored (raw_len=Some(65)) must also leave a raw point untouched"
+        );
+    }
+
+    /// A wrapped point still unwraps correctly when the caller knows the
+    /// curve, for both DER forms.
+    #[test]
+    fn der_wrapped_points_still_unwrap_with_curve_anchored_length() {
+        let sk = p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng);
+        let vk = p256::ecdsa::VerifyingKey::from(&sk);
+        let inner = vk.to_encoded_point(false).as_bytes().to_vec();
+        let mut wrapped = vec![0x04, inner.len() as u8];
+        wrapped.extend_from_slice(&inner);
+        assert_eq!(unwrap_peer_ec_point(&wrapped, Some(65)), inner.as_slice());
+
+        let mut inner521 = vec![0x04u8];
+        inner521.extend(std::iter::repeat(0xABu8).take(132));
+        let mut wrapped521 = vec![0x04, 0x81, 133u8];
+        wrapped521.extend_from_slice(&inner521);
+        assert_eq!(unwrap_peer_ec_point(&wrapped521, Some(133)), inner521.as_slice());
+    }
+
+    /// A length that matches NEITHER the raw size for the given curve NOR a
+    /// recognizable wrapped form of it is returned untouched — the caller
+    /// (e.g. `p256::PublicKey::from_sec1_bytes`) is left to reject it, which
+    /// is the correct `CKR_ARGUMENTS_BAD` path for genuinely malformed input.
+    #[test]
+    fn wrong_length_for_the_given_curve_is_passed_through_unmodified() {
+        let garbage = vec![0x04u8; 40]; // neither 65 raw nor 65+2/65+3 wrapped
+        assert_eq!(unwrap_peer_ec_point(&garbage, Some(65)), garbage.as_slice());
     }
 }
