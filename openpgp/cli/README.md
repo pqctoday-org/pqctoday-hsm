@@ -1,5 +1,15 @@
 # openpgp-pkcs11-tools
 
+> **pqctoday fork note:** this crate is vendored from upstream
+> [`heiko/openpgp-pkcs11`](https://codeberg.org/heiko/openpgp-pkcs11) — the
+> content below is the **upstream** README and its examples (YubiKey,
+> YubiHSM, generic SoftHSMv2, classical RSA/ECC keys only). It does not
+> mention this fork's actual purpose: the `opgpkcs11` binary here also
+> uploads/signs/decrypts with **post-quantum** composite ML-DSA/ML-KEM keys
+> (plus standalone Ed448) against **softhsmv3**. See
+> [`../README.md`](../README.md) for the fork-specific overview and the
+> `openpgp/smoke-*` crates for real, HSM-verified PQC command examples.
+
 [![crates.io openpgp-pkcs11-tools](https://img.shields.io/crates/v/openpgp-pkcs11-tools.svg)](https://crates.io/crates/openpgp-pkcs11-tools)
 [![status-badge](https://ci.codeberg.org/api/badges/heiko/openpgp-pkcs11/status.svg)](https://ci.codeberg.org/heiko/openpgp-pkcs11)
 [![Mastodon](https://img.shields.io/badge/mastodon-read-5da168.svg)](https://fosstodon.org/@hko)

@@ -7,20 +7,20 @@ A `tonic`-based gRPC server implementing the
 HSM-resident provider against other registered MLS implementations
 (`openmls`, `cisco/mlspp`, `awslabs/mls-rs`, …).
 
-## What works today (v0.2.0)
+## What works today
 
-**21 of 34 RPCs implemented — full functional parity with
-`openmls/interop_client`.** The 13 "stubbed" RPCs in our impl
-(`ReInit*`, `Branch`, `ExternalSigner`, `NewMemberAddProposal`,
-`GroupContextExtensionsProposal`, `re_init_proposal`) are also `todo!()`
-or `Status::unimplemented` in the openmls reference itself — they're
-documented in the IETF protobuf but no implementation in the openmls
-workspace handles them. We match the reference RPC-for-RPC.
+**22 of 34 RPCs implemented.** The 12 remaining RPCs in our impl (the
+`ReInit*`, `Branch`, `ExternalSigner`, and `NewMemberAddProposal` families)
+are also `todo!()` or `Status::unimplemented` in the openmls reference
+itself — they're documented in the IETF protobuf but no implementation in
+the openmls workspace handles them.
 
 Concretely we cover: `welcome_join.json`, application message exchange,
-`external_join.json`, the external PSK ratchet, **and** `Commit.by_value`
-(inline Add/Remove/PSK proposals) — every IETF interop scenario the
-openmls reference can run.
+`external_join.json`, the external/resumption PSK ratchet, group-context
+extension proposals, **and** `Commit.by_reference` (proposal-then-commit) —
+every IETF interop scenario the openmls reference can run.
+`Commit.by_value` (inline proposals folded directly into the commit) is
+still `UNIMPLEMENTED` on our side.
 
 | RPC | Status | Notes |
 |---|---|---|
@@ -28,6 +28,8 @@ openmls reference can run.
 | `CreateGroup`, `CreateKeyPackage`, `Free` | ✅ | State mgmt + HSM-backed credential mint |
 | `JoinGroup` | ✅ | Welcome → `StagedWelcome` → `MlsGroup` |
 | `AddProposal`, `UpdateProposal`, `RemoveProposal` | ✅ | All three membership proposal kinds |
+| `StorePSK`, `ExternalPSKProposal`, `ResumptionPSKProposal` | ✅ | PSK injection + both PSK proposal types |
+| `GroupContextExtensionsProposal` | ✅ | Decodes proto extensions to their typed MLS form and auto-patches `RequiredCapabilities` so openmls's own commit validator accepts the result — see "Known asymmetry" below |
 | `Commit` | ✅ | `by_reference` path; `by_value` returns `UNIMPLEMENTED` |
 | `HandleCommit`, `HandlePendingCommit` | ✅ | Peer-commit merge + own-pending merge |
 | `Protect`, `Unprotect` | ✅ | Application-message AEAD with AAD |
@@ -35,9 +37,50 @@ openmls reference can run.
 | **`Export`** | ✅ | RFC 9420 §8.5 exporter via `export_secret` |
 | **`GroupInfo`** | ✅ | Serialised `GroupInfo` + optional ratchet tree |
 | **`ExternalJoin`** | ✅ | `MlsGroup::external_commit_builder` → joins via GroupInfo, no Welcome |
-| ReInit / Branch / ExternalSigner / NewMemberAddProposal / GroupContextExtensions | ⏸️ stubbed (13 RPCs) | Same RPCs `openmls/interop_client` also stubs out as `todo!()` / `Status::unimplemented` — full functional parity with the reference |
+| ReInit family (6 RPCs), `Branch`/`HandleBranch`, `NewMemberAddProposal`, `ExternalSigner` family (3 RPCs) | ⏸️ stubbed (12 RPCs) | Same RPCs `openmls/interop_client` also stubs out as `todo!()` / `Status::unimplemented` |
 | Cross-process interop on `localhost` (two of our binaries on different ports) | ⏸️ | Wired by [`tests/two_process_e2e.rs`](tests/two_process_e2e.rs) — see "Cross-process interop" below |
 | Cross-vendor interop vs `openmls` / `mlspp` / `mls-rs` | ⏸️ | All native binaries; instructions below — no Docker |
+
+### Known asymmetry: `GroupContextExtensionsProposal`
+
+Our `propose_group_context_extensions_proposal` RPC works and produces a
+spec-correct proposal. But the nightly gating job (below) shows most
+`commit` scenarios that exercise it **fail on the openmls reference side**,
+not ours: openmls 0.8.1's own commit-time validator has no implementation
+for this extension type yet (`Group context extension is not implemented
+yet`). So "22 of 34 implemented" is no longer full RPC-for-RPC parity with
+`openmls/interop_client` — for this one RPC we're ahead of the reference,
+which the gating numbers below make visible as reference-side failures
+rather than ours.
+
+## Nightly cross-implementation gating
+
+`.github/workflows/openmls-interop.yml` runs nightly (04:30 UTC) plus on
+`workflow_dispatch`: it builds Docker images for pqctoday and each peer
+(`docker/Dockerfile.{pqctoday,openmls,mls-rs,test-runner}`), runs
+[`run-gating-tests.sh`](run-gating-tests.sh) for `pqctoday vs {openmls,
+mls-rs} × {welcome_join, commit, external_join}` across ciphersuites 1-3,
+and uploads each JSON report (also kept in-repo under [`reports/`](reports/)
+for audit trail, 90-day artifact retention). It's deliberately not run on
+every PR (~30 min cold cache) — ordinary Rust-level regression coverage
+stays in `openmls-provider.yml`.
+
+```bash
+./run-gating-tests.sh              # all known healthy peers
+./run-gating-tests.sh openmls      # only pqctoday-vs-openmls
+```
+
+Only `welcome_join`, and only against `openmls` (not `mls-rs`), can fail the
+build — set via the script's `GATING_SCENARIOS`/`GATING_PEERS` env vars.
+`commit` and `external_join`, and the `mls-rs` peer, run and their reports
+are kept, but don't gate: `mls-rs` disagrees with openmls (which backs our
+client) on key-package lifetime limits, a policy RFC 9420 deliberately
+leaves to each application, not a real defect on either side; most `commit`
+failures against `openmls` are on the reference side (see "Known asymmetry"
+above and the script's own header comment for the measured breakdown by
+scenario). Ciphersuites 4-7 (the ones needing Ed448, P-384, or P-521
+signatures) aren't exercised by this harness at all — this crate has no
+Ed448/P-384/P-521 `signature_key_gen` support yet.
 
 ## Validation
 

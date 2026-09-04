@@ -55,6 +55,19 @@ no "vault dies on exit" problem for native deployments.
 > which *adds* the optional SQLite backend; the flat‑file backend is always
 > built.
 
+**Logging.** `log.level` accepts `ERROR`, `WARNING`, `INFO`, or `DEBUG`
+(`src/lib/common/log.cpp`) and is routed through **syslog** — not a file
+SoftHSMv3 writes itself. Point your log collector at the local syslog
+facility, or rebuild with `-DLOG_TO_STDERR=ON` (on by default only for
+`-DBUILD_TESTS=ON` builds — a production build must opt in explicitly) to
+also mirror messages to stderr for container/`journalctl`-style collection.
+
+**PIN policy.** PIN length is bounded by build-time CMake cache variables
+`MIN_PIN_LEN` (default `4`) and `MAX_PIN_LEN` (default `255`); a PIN outside
+that range is rejected at `C_InitPIN`/`C_SetPIN` with `CKR_PIN_LEN_RANGE`. If
+your deployment needs a stricter minimum, set `-DMIN_PIN_LEN=<n>` at build
+time — it is not a runtime config option.
+
 ### B. WASM build — RAM‑only
 
 The Emscripten/WASM build (`libsofthsmv3.wasm`, used for the in‑browser HSM)
@@ -178,8 +191,9 @@ openssl list -providers -provider pkcs11 -provider default
 
 ## 4. StrongSwan IKEv2 Integration
 
-The `strongswan-pkcs11/` adapter enables ML‑KEM‑768 key exchange and ML‑DSA
-signing inside IKEv2 sessions.
+The `strongswan-pkcs11/` adapter enables ML‑KEM key exchange (all three FIPS
+203 sizes) and post-quantum/classical authentication — ML‑DSA-44/65/87,
+SLH-DSA-SHA2 (128s/192s/256s), Ed448, or Ed25519 — inside IKEv2 sessions.
 
 ### Prerequisites
 
@@ -247,7 +261,12 @@ this exact proposal shape (`proposal_ike_hybrid`) in its hybrid proposal
 mode, and `strongswan-pkcs11/README.md` documents the same examples for the
 native plugin.
 
-### ML-DSA Authentication
+### Authentication — ML-DSA, SLH-DSA, EdDSA
+
+ML-DSA shown here as the representative example; SLH-DSA-SHA2 (128s/192s/256s)
+and Ed448/Ed25519 keys work the same way through `pkcs11-tool` with the
+matching `--key-type`, and are equally supported by the adapter's
+`pkcs11_private_key.c`/`pkcs11_public_key.c` — see `strongswan-pkcs11/README.md`.
 
 ```bash
 # Generate an ML-DSA-65 keypair inside softhsmv3

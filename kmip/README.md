@@ -77,24 +77,83 @@ For production, supply real certs (§4).
 ```
 pqctoday-kmip [OPTIONS]
 
+  # Network / store
   --listen <ADDR>            Data-plane TLS listener        [default 127.0.0.1:5696]
-  --store <PATH>             Durable SQLite key store
-  --store-memory             Volatile in-memory store (sandbox; default if --store omitted)
+  --store <PATH>             Durable SQLite store for KMIP-level metadata (UID, lifecycle
+                              state, dates) — NOT the key material itself (see --engine-store)
+  --store-memory             Volatile in-memory metadata store (sandbox; default if --store omitted)
+  --engine-store <DIR>       Durable store for the PKCS#11 engine's OWN key material
+                              (encrypted at rest; one .db per slot). Omitted ⇒ the engine stays
+                              memory-only regardless of --store, i.e. KMIP metadata can survive
+                              a restart while the keys it describes do not — pass this for a
+                              real durable deployment.
+
+  # Policy (Plane 1) — legacy single-policy mode
   --policy-dir <DIR>         Directory of policies/*.yaml   (empty = built-in permissive)
-  --policy <NAME>            Activate this policy on startup (overrides the .active marker)
+  --policy <NAME>            Activate this policy on startup (overrides the .active marker).
+                              Mutually exclusive with --module.
+
+  # Policy (Plane 1) — modular mode (schema v3, see policies/README.md)
+  --module <NAME>            Activate this policy as a MODULE on startup (repeatable, e.g.
+                              --module pqc-signing --module pqc-key-establishment). Mutually
+                              exclusive with --policy. Overrides the .active-modules marker.
+  --uncovered-ops <MODE>     deny | allow  [default deny] — what happens to a request whose op
+                              no active module's scope covers (modular mode only). `allow` is
+                              for the browser playground only, never a production default.
+
+  # TLS
   --tls-cert <PEM>           Server cert (omit ⇒ self-signed sandbox cert)
   --tls-key  <PEM>           Server key (pairs with --tls-cert)
   --tls-client-ca <PEM>      Require + verify client certs (mutual TLS on the data plane)
   --tls-profile <NAME>       permissive | quantum-safe      [default permissive] (§4.1)
+                              (env fallback: KMIP_TLS_PROFILE)
+
+  # Auth (K14) and multi-tenancy
+  --auth-user <USER:SHA256>  Credential-store entry, repeatable: username + sha256 hex of the
+                              password. Absent (default) = open-auth, every request passes and
+                              the KMIP Authentication header is ignored.
+  --tenancy <MODE>           single | auto | strict  [default single]. `single`: every request
+                              shares one engine session (today's default behaviour). `auto`:
+                              each mTLS-CN-derived identity auto-provisions a fresh PKCS#11
+                              token on first request. `strict`: only identities named via
+                              --strict-tenant may operate — fail-closed if none are given.
+  --strict-tenant <SPEC>     One pre-configured tenant for --tenancy strict, repeatable:
+                              <identity-cn>:<slot>:<so-pin>:<user-pin>.
+  --slot <N>                 PKCS#11 slot                   [default 0] (single-slot v0.1)
+  --pin <PIN>                PKCS#11 user PIN               [default 1234]
+
+  # Admin facade (control plane, cryptopolicy-manager/)
   --admin-listen <ADDR>      Enable the REST policy-admin facade (e.g. 127.0.0.1:5697)
   --admin-tls-cert/key <PEM> Admin facade server cert/key   (required with --admin-listen)
   --admin-client-ca <PEM>    Admin mTLS client-CA bundle    (required with --admin-listen)
-  --admin-write-cn <CN>      Client-cert CN(s) allowed to MUTATE policy (repeatable)
+  --admin-write-cn <CN>      Client-cert CN(s) allowed to MUTATE policy (repeatable). Empty
+                              (the default) ⇒ ALL writes denied (403) — fail closed.
   --init-certs <DIR>         Generate the admin mTLS CA+server+client certs on first boot
+                              (idempotent; skipped if <dir>/ca.crt already exists)
+
+  # Certify / Re-certify (§6.1.6 / §6.1.50)
+  --ca-key <UID>             UID of a stored PrivateKey (RSA/ECDSA/ML-DSA) used to sign issued
+                              certificates. Requires --ca-cert. Absent ⇒ every Certify request
+                              fails PermissionDenied (this server is not a CA by default).
+  --ca-cert <UID>            UID of the stored CA Certificate whose subject DN becomes the
+                              issuer DN of every issued cert. Requires --ca-key.
+
+  # Audit (fan out to all configured sinks at once)
+  --audit-log <PATH>         Append-only JSONL audit log
+  --syslog <ADDR>            Forward audit events to a UDP syslog target (RFC 5424)
+  --otlp-endpoint <URL>      Export audit events via OTLP/HTTP JSON (e.g. http://host:4318)
   --metrics-listen <ADDR>    Prometheus /metrics            [default 127.0.0.1:9095]
+
+  # Misc
+  --rng-seed-mode <MODE>     full | partial | ignore | deny  [default full] — §6.1.55 RNG Seed
+                              behavior; exists so the OASIS CS-RNG-O-{2,3,4} optional
+                              conformance tests can be exercised (each pins a non-default choice).
 ```
 
-**Durable deployment example** (SQLite store, real TLS, admin control plane):
+Run `pqctoday-kmip --help` for the authoritative, always-current list — every flag above is
+documented at its clap definition in [`bin/pqctoday-kmip.rs`](bin/pqctoday-kmip.rs).
+
+**Durable deployment example** (SQLite metadata store, real TLS, admin control plane):
 
 ```bash
 # One-time: generate admin mTLS material (CA + server + client certs) into ./admin-certs
@@ -103,6 +162,7 @@ pqctoday-kmip [OPTIONS]
 ./target/release/pqctoday-kmip \
   --listen 0.0.0.0:5696 \
   --store /var/lib/pqctoday-kmip/keys.db \
+  --engine-store /var/lib/pqctoday-kmip/engine \
   --tls-cert server.crt --tls-key server.key \
   --policy-dir policies --policy cnsa-2.0 \
   --admin-listen 127.0.0.1:5697 \
@@ -110,6 +170,12 @@ pqctoday-kmip [OPTIONS]
   --admin-client-ca admin-certs/ca.crt \
   --admin-write-cn kms-operator
 ```
+
+> **`--store` alone is not durable key material.** `--store` persists only
+> KMIP-level metadata (UID, lifecycle state, dates). The PKCS#11 engine that
+> actually holds key bytes stays in-memory unless `--engine-store <DIR>` is
+> also given — omit it and a restart loses every generated key even though
+> the metadata database survives. Always pass both for a real deployment.
 
 ### 4.1 Quantum-safe TLS profile (`--tls-profile quantum-safe`)
 
@@ -358,7 +424,10 @@ are explained in [`DEPRECATED.md`](DEPRECATED.md).
 | `cryptopolicy-manager/` | REST admin facade — see [`cryptopolicy-manager/README.md`](cryptopolicy-manager/README.md) |
 | `python-client/` | Stdlib-only test client + CLI — see [`python-client/README.md`](python-client/README.md) |
 | `conformance/` | OASIS corpus + replay harness + reports |
-| `kat/` | Known-answer-test vectors |
+| `kat/` | Known-answer-test vectors — see [`kat/README.md`](kat/README.md) |
+| `spec/` | Local OASIS KMIP/PKCS#11 spec copies — see [`spec/README.md`](spec/README.md) |
+| `tests/` | Rust integration test suite (TLS e2e, hybrid KEM, OASIS codec, ACVP KATs, …) |
+| `tools/extract_kmip_spec.rs` | `extract-kmip-spec` binary — regenerates `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json` from the baseline spec HTML |
 | `docs/` | Architecture, conformance, and interop plans |
 | `DEPRECATED.md` | Deprecated-algorithm policy + OASIS skip rationale |
 

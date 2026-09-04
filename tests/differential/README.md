@@ -20,6 +20,8 @@ and anything not listed there fails the run.
 ./scripts/run-differential-harness.sh --only bytes.   # one group
 ./scripts/run-differential-harness.sh --verbose       # also print the covered divergences
 ./scripts/run-differential-harness.sh --no-build      # reuse already-built engines
+./scripts/run-differential-harness.sh --parallel      # shard across every core
+./scripts/run-differential-harness.sh --jobs 6        # shard across exactly 6 workers
 ```
 
 Reports land in `build_union/p11_diff_report.{md,json}`. The Markdown one is the
@@ -65,9 +67,10 @@ that is the trigger condition, and the pointer check is where it will surface.
 
 ## What it compares
 
-For each of the 49 scenarios, both engines are driven through the identical
-sequence and every observation is recorded as a `path -> value` pair. The two
-recordings are then diffed field by field.
+For each of the 64 scenarios (`--list` prints the live count and names), both
+engines are driven through the identical sequence and every observation is
+recorded as a `path -> value` pair. The two recordings are then diffed field
+by field.
 
 Observations are of three kinds:
 
@@ -172,6 +175,12 @@ documentation-only entries.
 
 ### Three example entries
 
+*(The two `DEFECT-*` entries this section originally quoted —
+`DEFECT-RUST-AES-CTR-CIPHERTEXT` and `DEFECT-RUST-KEY-GEN-MECHANISM-NARROWED`
+— have since been fixed and removed from `exceptions.json`, which is the
+point of the exit-code-0-means-nothing-left mechanic this file describes.
+The examples below are quoted verbatim from the current file.)*
+
 A legal one, where the specification is genuinely silent:
 
 ```json
@@ -181,34 +190,39 @@ A legal one, where the specification is genuinely silent:
   "scenario": "env.mechanism_set",
   "path": "mech*",
   "justification": "The two engines advertise different mechanism sets (127 vs 116, 47 differences) and no profile THIS ENGINE CLAIMS requires any mechanism, so this is a product decision, not a conformance gap. Complete Provider does require all of them; neither engine claims it.",
-  "citation": "PKCS #11 Profiles v3.2 OS: Baseline Provider, Complete Provider, Extended Provider, Authentication Token and Public Certificates Token each state 'Supports the following mechanisms: a. None specified.' Only the HKDF TLS Token profile names one."
+  "citation": "PKCS #11 Profiles v3.2 OS §5.1/§5.3/§5.4/§5.5 (Baseline, Extended, Authentication Token, Public Certificates Token) each state \"Supports the following mechanisms: a. None specified\"; this engine claims Baseline. NOTE §5.2 Complete Provider condition 6 requires \"Supports all mechanisms [PKCS11_Spec] Section 6\" — under THAT profile these divergences would be defects, which is why neither engine claims it."
 }
 ```
 
-A defect found by this harness and confirmed against an independent oracle:
+A defect this harness found and adjudicated directly against the spec text
+(still open as of this writing — see `exceptions.json` for the full entry,
+including the `note` field explaining what blocks it):
 
 ```json
 {
-  "id": "DEFECT-RUST-AES-CTR-CIPHERTEXT",
+  "id": "DEFECT-RUST-WRAPPED-PRIVATE-KEY-NOT-PKCS8",
   "status": "defect",
-  "scenario": "bytes.aes_ctr",
-  "path": "*ct.bytes",
-  "justification": "AES-256-CTR over a fixed key, fixed counter block and fixed plaintext produces different ciphertext in the two engines, at BOTH 128-bit and 32-bit counter widths. An independent OpenSSL oracle agrees with C++, so Rust's CKM_AES_CTR is wrong. Found by this harness; not previously recorded anywhere.",
-  "citation": "PKCS#11 v3.2 §6.28 CK_AES_CTR_PARAMS: cb is the full 128-bit initial counter block and ulCounterBits names how many of its low-order bits increment. Oracle: openssl enc -aes-256-ctr with the same key/IV matches the C++ output byte for byte."
+  "scenario": "encoding.wrap_private_key_pkcs8",
+  "path": "wrapped.len",
+  "justification": "Wrapping the same P-256 private key under the same AES KEK yields 152 bytes from C++ and 72 from Rust. A PKCS#8 PrivateKeyInfo for P-256 is ~138 bytes before key wrapping; 72 bytes cannot contain one, so Rust is still wrapping its raw stored value. Plan item E6, open — and it depends on E5.",
+  "citation": "PKCS#11 v3.2 §6.7: 'For wrapping, a private key is BER-encoded according to [PKCS #8] PrivateKeyInfo ASN.1 type.'"
 }
 ```
 
-A defect that needed the value matchers to state precisely:
+A **legal** divergence that needed the value matchers to state precisely —
+found at the very path the old (now-fixed) `DEFECT-RUST-KEY-GEN-MECHANISM-NARROWED`
+defect above used to occupy, which is why the value matchers exist: a path
+can carry more than one question over time:
 
 ```json
 {
-  "id": "DEFECT-RUST-KEY-GEN-MECHANISM-NARROWED",
-  "status": "defect",
+  "id": "LEGAL-KEY-GEN-MECHANISM-ON-ENCAPSULATED-KEY",
+  "status": "legal",
   "path": "*CKA_KEY_GEN_MECHANISM*",
   "cpp": "ffffffffffffffff",
-  "rust": "ffffffff00000000",
-  "justification": "Rust writes CK_UNAVAILABLE_INFORMATION as a 32-bit -1 zero-extended into eight bytes (0x00000000FFFFFFFF) where the LP64 ABI value is eight bytes of 0xFF. A caller comparing against CK_UNAVAILABLE_INFORMATION therefore sees mechanism 4294967295 instead. Same width-narrowing family as S9.",
-  "citation": "PKCS#11 v3.2 §3.1: CK_UNAVAILABLE_INFORMATION is (~0UL); CK_ULONG is 'an unsigned value, at least 32 bits long' and is 8 bytes on LP64, which is what this ABI exports."
+  "rust": "1700000000000000",
+  "justification": "For a key produced by C_EncapsulateKey, Rust records CKM_ML_KEM as the generating mechanism and C++ records CK_UNAVAILABLE_INFORMATION. Encapsulation does generate the key material, so Rust's answer is the more useful one and neither is wrong.",
+  "citation": "PKCS#11 v3.2 §4.9: CKA_KEY_GEN_MECHANISM is the mechanism used to generate the key material, or CK_UNAVAILABLE_INFORMATION if the key was not generated by one."
 }
 ```
 
@@ -248,11 +262,14 @@ worthless. Two ways to check it is alive:
 
 ```bash
 ./scripts/run-differential-harness.sh --no-build \
-    --drop-exception DEFECT-RUST-AES-CTR-CIPHERTEXT --only bytes.aes_ctr
+    --drop-exception DEFECT-RUST-WRAPPED-PRIVATE-KEY-NOT-PKCS8 --only encoding.wrap_private_key_pkcs8
 ```
 
-The entry is ignored for that run, the AES-CTR ciphertext difference becomes
-uncovered, and the run exits non-zero.
+The entry is ignored for that run, the wrapped-private-key-length difference
+becomes uncovered, and the run exits non-zero. (Pick any current `defect`
+entry from `exceptions.json` for this — the point is that dropping a real one
+must always turn the run red; the specific id used here will itself go stale
+the day that defect is fixed, same as the last one did.)
 
 **Check a known-live defect is still reported.** `--verbose` prints the covered
 divergences grouped by entry, so any `defect`-status entry can be read back with

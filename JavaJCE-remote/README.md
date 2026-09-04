@@ -128,3 +128,43 @@ Or via the repo's gate: `bash scripts/local-gate.sh --javajce-remote`
 (separate from `--javajce`, which only covers the local FFM module —
 this step additionally requires the `pqc-grpc` stack from
 `pqctoday-sandbox`'s `docker-compose.yml` to be up).
+
+### Manual smoke test against a live server
+
+`LiveSmokeMain` (`src/test/java/.../LiveSmokeMain.java`) is a
+standalone `main()` — not a JUnit test — that drives every algorithm
+(sign/verify/tamper, certificate round-trip, KEM round-trip, the
+KEM-can't-sign-a-certificate rejection, and a bad-PIN rejection)
+against a real `pqc-grpc` server and prints a `PASS`/`FAIL` line per
+case plus a final tally. It's the same live target `RemoteProviderLiveTest`
+uses, useful for a quick manual check (or first-run debugging) without
+`mvn test`'s full suite. No `exec-maven-plugin` is wired in this
+module's `pom.xml`, so run it directly off the compiled classpath:
+
+```bash
+mvn test-compile
+java --enable-native-access=ALL-UNNAMED \
+  -cp "target/classes:target/test-classes:$(mvn -q dependency:build-classpath -Dmdep.outputFile=/dev/stdout)" \
+  com.pqctoday.hsm.jce.remote.LiveSmokeMain
+```
+
+Needs the same preconditions as `mvn test`: a reachable `pqc-grpc`
+server and real mTLS material at `/admin-certs` (`PKCS11_GRPC_HOST`/
+`PKCS11_GRPC_PORT`/`PKCS11_PIN`/`AGILE_KMIP_CERTS` env vars override
+the defaults — see "mTLS (mandatory)" above).
+
+## Extending: widening the algorithm set
+
+Unlike `JavaJCE/`, this module can't grow its algorithm coverage on
+its own: every `KeyPairGenerator`/`Signature`/`KEM` service here is a
+thin, generic wrapper (`RemoteKeyPairGeneratorSpi`/`RemoteSignatureSpi`/
+`RemoteKEMSpi`) around the `Algorithm` enum and verb set
+`remoting/proto/proto/pkcs11_remote.proto` actually defines — adding
+e.g. SLH-DSA or EC means widening that proto's `Algorithm` enum and the
+Rust `pqc-grpc` server's own dispatch first (plan
+`docs/implementation-plan-jca-remaining-gaps-2026-08-25.md` §7 E5),
+then adding one `registerKeyPairGenerator`/`registerSignature` call per
+new name in `SoftHSMv3RemoteProvider.registerServices()` — no new SPI
+class needed unless the new algorithm needs a JCA-side shape none of
+the three existing generic SPIs already cover (e.g. a `Cipher` for a
+future symmetric verb).

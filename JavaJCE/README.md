@@ -18,10 +18,14 @@ claims; see the CHANGELOG entry for what it replaced and why.
 
 ## Quick start
 
+Pass the provider instance directly to `getInstance(...)` — no
+`Security.addProvider` registration required (the pattern every test in
+this module uses):
+
 ```java
-Security.addProvider(new SoftHSMv3Provider());   // PKCS11_MODULE / PKCS11_PIN env vars
+SoftHSMv3Provider p = new SoftHSMv3Provider();   // PKCS11_MODULE / PKCS11_PIN env vars
 // or, explicitly:
-SoftHSMv3Provider p = new SoftHSMv3Provider("/usr/local/lib/softhsm/libsofthsmv3.so", "1234");
+SoftHSMv3Provider p2 = new SoftHSMv3Provider("/usr/local/lib/softhsm/libsofthsmv3.so", "1234");
 
 KeyPairGenerator kpg = KeyPairGenerator.getInstance("ML-DSA-65", p);
 KeyPair kp = kpg.generateKeyPair();
@@ -31,6 +35,12 @@ sig.initSign(kp.getPrivate());
 sig.update("hello".getBytes());
 byte[] signature = sig.sign();
 ```
+
+If you'd rather look the provider up by name (e.g. so other code that
+only calls `getInstance(alg)` without a provider argument can find it
+too), register it globally instead: `Security.addProvider(new
+SoftHSMv3Provider())`, then `KeyPairGenerator.getInstance("ML-DSA-65",
+"SoftHSMv3")`.
 
 Or configure from a file instead of env vars:
 
@@ -98,6 +108,67 @@ is the FIPS 140-3 L3 narrowing, not the engine's):
 - BIP32 key derivation (application-specific, out of scope)
 - `CONCATENATE_*`/standalone `SHAKE_256_KEY_DERIVATION` (internal KDF building blocks only)
 - HSS/XMSS/XMSS-MT (SP 800-208-approved, but deferred — stateful signatures need their own state-management design before any JCA mapping is safe; see plan §10)
+
+## Extending: adding a new algorithm
+
+Every JCA service this provider exposes is registered in one place,
+`SoftHSMv3Provider.registerServices()`, as a `putService(new Service(this,
+type, name, spiClassName, List.of(), Map.of()) { newInstance(...) {...} })`
+call — the anonymous `Service` subclass's `newInstance` is where the SPI
+object is actually constructed, closing over the provider's shared `lib`
+(`P11Library`) field. To add a new algorithm:
+
+1. **Reuse an existing `registerXxx` helper if the shape already exists.**
+   `registerDigest`/`registerHmac`/`registerPureSig`/`registerECDSASignature`/
+   `registerRSAPKCS1`/`registerAESCipher`/`registerAESWrap`/`registerRSAOAEP`/
+   `registerHKDF`/`registerPBKDF2`/`registerGenericSecretKeyGenerator`/
+   `registerMLKEMKeyPairGenerator`/`registerEdDSA` each cover one recurring
+   registration shape (e.g. "one mechanism-agnostic `SignatureSpi`, keyed
+   only by mechanism type" for `registerPureSig`). A new SLH-DSA-shaped
+   signature or another SHA-2/SHA-3 digest is usually a one-line call to
+   one of these, next to the existing calls in `registerServices()`.
+2. **Write a new SPI class only when the shape genuinely differs** — e.g.
+   `P11RSAPSSSignatureSpi` exists separately from
+   `P11PureSigSignatureSpi` because RSASSA-PSS's mechanism parameters are
+   chosen by the *caller* via `engineSetParameter(PSSParameterSpec)` after
+   construction, not fixed at registration time like every plain-digest
+   signature. Follow the `P11*Spi` naming convention and extend the
+   matching `java.security`/`javax.crypto` SPI base class
+   (`SignatureSpi`, `CipherSpi`, `KeyPairGeneratorSpi`, `KeyGeneratorSpi`,
+   `KeyAgreementSpi`, `MacSpi`, `SecretKeyFactorySpi`, `KDFSpi`, ...).
+3. **Add any new native binding to `P11Library`, not the SPI class.** If
+   the mechanism needs a `CK_MECHANISM_TYPE`/`CKA_*`/`CKR_*` constant this
+   module doesn't have yet, add it to `P11Constants` (grep
+   `src/lib/pkcs11/pkcs11t.h` first — see the repo's `CLAUDE.md`). If it
+   needs a PKCS#11 function this module hasn't bound yet, resolve it by
+   name in `P11Library`'s constructor via the existing `h(linker, lib,
+   "C_Xxx", fd(...))` pattern (FFM `dlsym`-by-name, no JDK-internal APIs
+   — see `P11Library`'s own class javadoc for why). If the mechanism
+   carries parameters, add a `mechXxx(Arena, ...)` builder alongside the
+   existing ones (`mechGcm`, `mechOaep`, `mechHkdf`, `mechPbkdf2`, ...) —
+   return a `BuiltMech` instead of a plain `MemorySegment` if any embedded
+   byte content is real secret material (see `P11Library`'s "Memory-lifetime
+   architecture" javadoc note on zeroing).
+4. **Gate on real mechanism advertisement if the mechanism isn't always
+   present** (a draft/optional PKCS#11 codepoint, not a ratified one) —
+   check `lib.mechanismSupported(CKM_...)` *inside* `Service#newInstance`,
+   not at registration time, and throw `NoSuchAlgorithmException` if
+   absent. `registerMLDSAExternalMu` is the worked example: registration
+   always happens, but `getInstance("ML-DSA-65-ExternalMu", p)` only
+   succeeds if the connected token actually advertises
+   `CKM_ML_DSA_EXTERNAL_MU`.
+5. **Respect the FIPS 140-3 L3 exclusion policy** — don't register a
+   mechanism this provider deliberately keeps out (see "What's
+   deliberately excluded" above) just because the engine happens to
+   support it.
+6. Add real, live tests (no mocks — every test in this module runs
+   against the real engine) following the shape of `MLDSATest.java` or
+   `MLKEMTest.java`: round-trip sign/verify or encapsulate/decapsulate,
+   a tamper-rejection case, and — where a standard JDK software
+   implementation of the same algorithm exists — a cross-verify against
+   it (`KeyFactory.getInstance(alg)` with no provider argument, `Signature
+   .getInstance(alg)` likewise) to prove the encoding is standards-correct,
+   not just self-consistent.
 
 ## FIPS 140-3 Level 3 operational posture
 

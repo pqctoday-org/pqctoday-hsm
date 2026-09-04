@@ -1,13 +1,24 @@
 # Known-Answer Test Vector Corpus — `pqctoday-hsm/kmip/kat/`
 
-128 KAT files across 8 algorithm families + 102 OASIS KMIP 3.0 conformance test cases.
+143 files total: 41 non-OASIS vector files (28 NIST ACVP/CAVP JSON vectors across
+8 crypto-primitive families, 6 FrodoKEM reference `.rsp` files, 6 hand-crafted TTLV
+byte vectors + a provenance manifest, 1 external composite-signature fixture, and 1
+OASIS PQC-interop engine-vector fixture) + 102 OASIS KMIP 3.0 conformance test cases
+(XML). Counts verified against the actual tree — recompute with `find . -type f \(
+-name "*.json" -o -name "*.xml" -o -name "*.rsp" -o -name "*.bin" \) | wc -l` if this
+drifts.
 
 Used by:
 
 - `tests/kat_replay.rs` — replays every TTLV byte pair in `ttlv-wire/` and OASIS XML test cases.
 - `tests/acvp_roundtrip.rs` — drives the `softhsmrustv3` engine directly with the NIST/ACVP
-  vector inputs and asserts byte-exact match (or expected pass/fail for sigVer KATs). See
-  the coverage matrix below.
+  vector inputs and asserts byte-exact match (or expected pass/fail for sigVer KATs). Also
+  the single orphan-file registry for everything under `kat/` (its `no_orphan_vector_files`
+  test walks the whole tree, not just its own `CONSUMED` list — see the coverage matrix below).
+- `tests/pqc_interop_engine.rs` — drives the engine against `pqc-interop/`'s vectors,
+  extracted from the OASIS 1452-transcript PQC interop set (see that row below).
+- `src/ops/validate.rs` (`external_composite_vectors_verify`, a `#[cfg(test)]` unit test in
+  the lib crate, not an integration test) — drives `composite-sigs/`'s vectors.
 - `compliance/profiles/*` — references vector files for profile-driven conformance runs.
 
 ## `tests/acvp_roundtrip.rs` — what it actually covers
@@ -82,6 +93,8 @@ The full sha256 manifest is `manifest.sha256` — regenerate after any addition 
 | `aes/` | Copy of `pqctoday-hub/src/data/acvp/aes{gcm,cbc,cmac,ctr,kw}_test.json` | 5 | NIST CAVP AES vectors in 5 modes |
 | `hmac/` | Copy of `pqctoday-hub/src/data/acvp/hmac{,_sha384,_sha512}_test.json` | 3 | NIST ACVP HMAC vectors |
 | `sha/` | Copy of `pqctoday-hub/src/data/acvp/{sha256,sha384,sha512,sha3_256,sha3_512,kmac,hkdf}_test.json` | 7 | NIST ACVP digest + KDF vectors |
+| `composite-sigs/external-composite-vectors.json` | Produced by **other** implementations, not this engine — deliberately, to catch cross-implementation interop bugs a self-generated vector structurally cannot (this file exists because a real one shipped 2026-08-17: the engine signed a composite certificate's classical half with SHA-512 instead of the draft-composite-sigs §6 "Traditional Signature Algorithm", and every self-round-trip test still passed because signer and verifier shared the same wrong table). 5 certificate vectors. **Never regenerate locally** — refresh only by pulling a newer upstream round | 1 | Cross-implementation composite-signature verification vectors |
+| `pqc-interop/pqc_interop_engine_vectors.json` | Extracted by `scripts/extract_pqc_interop_vectors.py` from the OASIS KMIP 3.0 PQC interop test set (`kmip-3-0-pqc-tests-03.zip`, 2025-02-26, the same 1452-transcript set `../conformance/pqc_corpus/` vendors a subset of) — engine-level (input → expected-output) vectors for keygen/encapsulate/decapsulate (vendored in full: 270/30/75) and a representative siggen/sigver subset, for `tests/pqc_interop_engine.rs`'s byte-exact I0 checks at the `native`/`crypto` level (no KMIP, no dispatcher) | 1 | OASIS PQC interop engine-level vectors |
 
 **Note on `oasis-kmip-2.1/`:** Not present by intent (the directory is created only when needed). The KMIP 3.0 mandatory profile already covers the classical surface; v2.1 fallback vectors are downloaded on demand from `https://docs.oasis-open.org/kmip/kmip-testcases/v2.1/`. See `../spec/oasis-kmip-2.1/kmip-spec-v2.1-os.pdf` for the reference.
 
@@ -151,8 +164,16 @@ The `-30` suffix marks KMIP 3.0; `-M-` denotes mandatory; `-O-` optional.
 1. Decide the algorithm family (or `oasis-kmip-3.0/` for protocol-level vectors).
 2. Drop the file into the right directory.
 3. Update this README's provenance table.
-4. Regenerate `manifest.sha256`.
-5. Add a test case in `tests/{kat_replay,acvp_roundtrip}.rs` that consumes the new vector.
+4. Regenerate `manifest.sha256` — `find . -type f \( -name "*.json" -o -name "*.xml" \) | sort | xargs shasum -a 256 > manifest.sha256`.
+5. Add a test case in `tests/{kat_replay,acvp_roundtrip}.rs` (or the specific
+   integration test / lib unit test that owns the family, e.g.
+   `tests/pqc_interop_engine.rs` for `pqc-interop/`) that consumes the new vector.
+6. **A new `*.json` under `kat/` will not build silently unconsumed.**
+   `tests/acvp_roundtrip.rs::no_orphan_vector_files` walks the entire `kat/`
+   tree (skipping only `ttlv-wire/` and `pqc-interop/`, which have their own
+   guards) and fails if a file is neither in that test's `CONSUMED` list nor
+   in `KNOWN_UNCONSUMED` with a reason — add the new file's path to whichever
+   list actually applies, or the integration test suite fails to compile clean.
 
 ## License
 
