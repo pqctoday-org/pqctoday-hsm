@@ -5739,6 +5739,40 @@ pub(crate) fn create_object_from_attrs(
         }
     }
 
+    // PKCS#11 v3.2 §5.18.4/§5.18.7/§5.18.8/§5.18.9 (C_UnwrapKey,
+    // C_UnwrapKeyAuthenticated, C_EncapsulateKey, C_DecapsulateKey) all say
+    // explicitly: "the CKA_EXTRACTABLE attribute is by default set to
+    // CK_TRUE" (or "...with a default of CK_TRUE if not provided") when the
+    // caller's template omits it — because by the time any of those calls
+    // run, the key material already exists OUTSIDE the token, so defaulting
+    // to non-extractable protects nothing. C_CreateObject's own §5.7.1
+    // narrative is silent on CKA_EXTRACTABLE's default (it only calls out
+    // CKA_ALWAYS_SENSITIVE/CKA_NEVER_EXTRACTABLE below), which formally
+    // leaves it to Table 29/30's generic "token-specific" footnote 9 — but
+    // C_CreateObject is the exact same category of operation (key material
+    // handed to the token from outside) as the four functions above, every
+    // one of which this engine already resolves that footnote to CK_TRUE for
+    // (see the identical `store_bool(&mut attrs, CKA_EXTRACTABLE, true)`
+    // guards in C_UnwrapKey/C_UnwrapKeyAuthenticated and the unconditional
+    // CK_TRUE on the C_Encapsulate/DecapsulateKey secret-key arms) — so
+    // C_CreateObject alone defaulting an omitted CKA_EXTRACTABLE to FALSE was
+    // an inconsistency, not a deliberate choice.
+    //
+    // Before this fix, `read_bool_attr`'s absent-key default (FALSE) meant an
+    // imported private/secret key whose template omitted CKA_EXTRACTABLE
+    // silently came back non-extractable. That is NOT merely cosmetic: it
+    // fed `value_is_blocked`/C_GetAttributeValue's CKR_ATTRIBUTE_SENSITIVE
+    // gate (diagnostic-only), but it ALSO fed C_WrapKey's and
+    // C_WrapKeyAuthenticated's `read_bool_attr(&target_attrs,
+    // CKA_EXTRACTABLE)` check — so wrapping/exporting a freshly imported key
+    // that never asked to be non-extractable incorrectly failed with
+    // CKR_KEY_UNEXTRACTABLE.
+    if matches!(class, Some(CKO_PRIVATE_KEY) | Some(CKO_SECRET_KEY))
+        && !new_attrs.contains_key(&CKA_EXTRACTABLE)
+    {
+        store_bool(&mut new_attrs, CKA_EXTRACTABLE, true);
+    }
+
     // PKCS#11 v3.2 §4.9/§4.10 — an object created via C_CreateObject was born
     // OUTSIDE the token, so it can never claim CKA_ALWAYS_SENSITIVE or
     // CKA_NEVER_EXTRACTABLE, regardless of the template's CKA_SENSITIVE /
@@ -16636,6 +16670,64 @@ mod return_code_ffi_tests {
         );
     }
 
+    /// Regression (2026-09-02, extractable-default fix) — a secret key
+    /// imported through the REAL `C_CreateObject` engine core
+    /// (`create_object_from_attrs`, not `install_key`'s direct object-store
+    /// insert used by the tests above) whose template never mentions
+    /// CKA_EXTRACTABLE at all -- the common case for a caller that just
+    /// wants to hand the token an existing key -- must default to
+    /// extractable (CK_TRUE), matching PKCS#11 v3.2's consistent default for
+    /// every other external-origin key-creation path (§5.18.4 C_UnwrapKey,
+    /// §5.18.7 C_UnwrapKeyAuthenticated, §5.18.8 C_EncapsulateKey, §5.18.9
+    /// C_DecapsulateKey all say so explicitly; C_CreateObject's own prose is
+    /// silent, which is what let this drift). So wrapping the freshly
+    /// imported key back out must succeed, not fail with
+    /// CKR_KEY_UNEXTRACTABLE the way `wrap_unextractable_target` above
+    /// correctly does for a key that WAS explicitly marked non-extractable.
+    ///
+    /// Sabotage-verified: with the `CKA_EXTRACTABLE` default block in
+    /// `create_object_from_attrs` commented back out, this test's
+    /// `read_bool_attr` assertion fails (`false` instead of `true`) and the
+    /// `wrap(...)` call returns `CKR_KEY_UNEXTRACTABLE` instead of `CKR_OK` —
+    /// i.e. this test reproduces the exact defect the fix closes.
+    #[test]
+    fn wrap_import_defaults_extractable_true() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h_wrap = 0x5334_0018;
+        install_key(h_wrap, 16, &[(CKA_WRAP, true)]);
+
+        // Import target AES key via the real engine core. Deliberately no
+        // CKA_EXTRACTABLE in the template.
+        let mut attrs = Attributes::new();
+        store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+        store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_AES);
+        attrs.insert(CKA_VALUE, vec![0x77u8; 16]);
+        assert!(
+            !attrs.contains_key(&CKA_EXTRACTABLE),
+            "test template must omit CKA_EXTRACTABLE to exercise the default path"
+        );
+        let h_tgt = create_object_from_attrs(SESSION, attrs).expect("import must succeed");
+
+        // Direct attribute check, independent of the wrap-gate behavior below.
+        let stored = OBJECTS.with(|o| o.borrow().get(&h_tgt).cloned()).unwrap();
+        assert!(
+            read_bool_attr(&stored, CKA_EXTRACTABLE),
+            "an imported key with no CKA_EXTRACTABLE override must default to extractable \
+             (CK_TRUE), not silently read back as non-extractable"
+        );
+
+        // Real-operation check: C_WrapKey must actually allow exporting it.
+        let mut len: u32 = 0;
+        assert_eq!(
+            wrap(SESSION, h_wrap, h_tgt, &mut [], &mut len),
+            CKR_OK,
+            "wrapping a freshly imported key that never asked to be non-extractable must \
+             succeed, not CKR_KEY_UNEXTRACTABLE"
+        );
+        assert!(len > 0, "CKM_AES_KEY_WRAP must report a nonzero wrapped length");
+    }
+
     /// §4.4 login gate — a CKA_PRIVATE wrapping key is invisible to a
     /// logged-out session: CKR_WRAPPING_KEY_HANDLE_INVALID (handle class),
     /// never CKR_KEY_FUNCTION_NOT_PERMITTED (which would leak existence).
@@ -23433,22 +23525,38 @@ mod ed25519ctx_ffi_dispatch_tests {
              representation length for the same key type"
         );
 
-        // NOTE (out of scope for B5, left un-fixed here, tracked separately):
-        // a C_GetAttributeValue(CKA_VALUE) size query on THIS object
-        // currently returns CKR_ATTRIBUTE_SENSITIVE even though the
-        // template above never set CKA_SENSITIVE=TRUE. Root cause: PKCS#11
-        // v3.2 Table 28 defines CKA_EXTRACTABLE's default as CK_TRUE for a
-        // private key object, but `create_object_from_attrs` applies no
-        // such default on import (only the keygen arms set it explicitly),
-        // so `read_bool_attr` on the absent attribute silently reads FALSE
-        // instead -- `C_GetAttributeValue`'s `extractable = ... ||
-        // read_bool_attr(&obj_attrs, CKA_EXTRACTABLE)` gate then blocks
+        // Follow-up to the NOTE that used to live here (2026-09-02,
+        // extractable-default fix): a C_GetAttributeValue(CKA_VALUE) size
+        // query on THIS object used to return CKR_ATTRIBUTE_SENSITIVE even
+        // though the template above never set CKA_SENSITIVE=TRUE. Root
+        // cause: `create_object_from_attrs` applied no default for
+        // CKA_EXTRACTABLE on import (only the keygen arms set it
+        // explicitly), so `read_bool_attr` on the absent attribute silently
+        // read FALSE instead -- `C_GetAttributeValue`'s `extractable = ... ||
+        // read_bool_attr(&obj_attrs, CKA_EXTRACTABLE)` gate then blocked
         // CKA_VALUE for an object that never asked to be non-extractable.
-        // This does NOT affect signing (native::sign's get_object_value
-        // bypasses the sensitivity gate entirely -- see below) and is not
-        // part of the B5 CKR_KEY_TYPE_INCONSISTENT root cause this test
-        // module exists to prove fixed, so it is documented rather than
-        // fixed in this change.
+        // Per PKCS#11 v3.2 §5.18.4/§5.18.7/§5.18.8/§5.18.9 (C_UnwrapKey,
+        // C_UnwrapKeyAuthenticated, C_EncapsulateKey, C_DecapsulateKey), the
+        // spec's consistent default for an externally-originated key's
+        // CKA_EXTRACTABLE is CK_TRUE when the template omits it; this
+        // engine already applied that default on every OTHER external-origin
+        // key-creation path, so C_CreateObject alone defaulting to FALSE was
+        // the actual bug (see `create_object_from_attrs`'s CKA_EXTRACTABLE
+        // block). This was broader than "diagnostic read-back only": the
+        // same absent-default also fed C_WrapKey/C_WrapKeyAuthenticated's
+        // `read_bool_attr(&target_attrs, CKA_EXTRACTABLE)` gate, so wrapping
+        // an imported key that never asked to be non-extractable incorrectly
+        // failed with CKR_KEY_UNEXTRACTABLE (covered separately by
+        // `return_code_ffi_tests::wrap_import_defaults_extractable_true`).
+        let mut value_tmpl: [usize; 3] = [CKA_VALUE as usize, 0, 0];
+        let rv = C_GetAttributeValue(session, h, value_tmpl.as_mut_ptr() as *mut u8, 1);
+        assert_eq!(
+            rv, CKR_OK,
+            "an imported private key whose template never set CKA_SENSITIVE or \
+             CKA_EXTRACTABLE must default to extractable (CK_TRUE), not read back as \
+             CKR_ATTRIBUTE_SENSITIVE"
+        );
+        assert_eq!(value_tmpl[2], seed.len(), "CKA_VALUE length must be the raw 32-byte scalar");
 
         // Sign through the real dispatch path.
         let mech_buf = build_mechanism(CKM_EDDSA, &[]);
