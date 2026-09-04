@@ -3645,7 +3645,12 @@ CK_RV SoftHSM::C_DeriveKey
 		return CKR_OK;
 	}
 
-	// SP 800-108 Feedback KDF (PKCS#11 v3.2 §2.44.2, CKM_SP800_108_FEEDBACK_KDF = 0x000003ad)
+	// SP 800-108 Feedback KDF (PKCS#11 v3.2 §2.44.2, CKM_SP800_108_FEEDBACK_KDF = 0x000003ad).
+	// 2026-09: hand-rolls the round loop on EVP_MAC rather than delegating to
+	// OpenSSL's own KBKDF provider (mode=FEEDBACK) — that provider has no
+	// parameter to omit the counter (see the long comment below, at the
+	// CK_SP800_108_COUNTER parse loop, for the empirical confirmation and the
+	// v3.2-canonical-header citation for why the counter is optional here).
 	if (pMechanism->mechanism == CKM_SP800_108_FEEDBACK_KDF)
 	{
 		if (pMechanism->pParameter == NULL_PTR ||
@@ -3717,13 +3722,40 @@ CK_RV SoftHSM::C_DeriveKey
 
 		// Parse CK_PRF_DATA_PARAM array:
 		//   CK_SP800_108_BYTE_ARRAY → append to fixed-input context buffer
-		//   CK_SP800_108_COUNTER → explicit optional counter (PKCS#11 v3.2 §2.44.2:
-		//     "invalid for this KDF type" does NOT apply here — that restriction is
-		//     COUNTER_KDF-only; feedback mode's counter is CK_SP800_108_COUNTER,
-		//     distinct from CK_SP800_108_ITERATION_VARIABLE which represents K(i-1)
-		//     and is handled implicitly by OpenSSL's mode=FEEDBACK + seed below.
+		//   CK_SP800_108_COUNTER → explicit OPTIONAL counter. PKCS#11 v3.2's own
+		//     canonical header (docs/refs/pkcs11t-canonical-v3.2.h; matches
+		//     src/lib/pkcs11/pkcs11t.h) #defines CK_SP800_108_COUNTER as a bare
+		//     alias for CK_SP800_108_OPTIONAL_COUNTER — optionality is baked into
+		//     the v3.2 constant's own name, independent of any later spec prose.
+		//     The v3.3 draft's Feedback Mode data field table agrees without
+		//     conflict ("This data field type is optional"). fbkCounterRequested
+		//     tracks whether the caller actually supplied one; fbkCounterBits is
+		//     ONLY the width to use *when* one was requested — its 32-bit default
+		//     must never be read as "a counter was asked for".
+		//
+		//     2026-09 remediation (companion to the CKM_SP800_108_DOUBLE_PIPELINE_KDF
+		//     fix): this handler used to hand the whole job to OpenSSL's own
+		//     KBKDF provider (mode=FEEDBACK). That provider has NO parameter to
+		//     omit the counter at all — core_names.h defines only
+		//     OSSL_KDF_PARAM_KBKDF_R (counter WIDTH, not presence), _USE_L, and
+		//     _USE_SEPARATOR for this provider — confirmed empirically: calling
+		//     EVP_KDF_derive with mode=FEEDBACK and no "r" param set at all still
+		//     mixes in a 32-bit BE counter every round, byte-identical to
+		//     explicitly setting r=32 (verified against an independent from-spec
+		//     NIST SP 800-108 §5.2 Python/HMAC reference: both OpenSSL calls
+		//     matched the WITH-counter reference, not the WITHOUT-counter one).
+		//     So a caller-omitted CK_SP800_108_COUNTER was STILL getting a
+		//     counter mixed in on this path — same class of bug as Double
+		//     Pipeline's, but for a structurally different reason (an OpenSSL
+		//     provider limitation, not a hand-rolled default). Fixed the same
+		//     way: hand-roll the round loop directly on EVP_MAC instead of
+		//     delegating to the KBKDF provider, so the counter can genuinely be
+		//     omitted (see rust/src/ffi.rs sp800_108_run_feedback, which has
+		//     always done this correctly — independently re-verified here, not
+		//     just trusted from its own commit history).
 		ByteString fbkFixedInput;
 		int fbkCounterBits = 32;
+		bool fbkCounterRequested = false;
 		for (CK_ULONG i = 0; i < fp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dp = &fp->pDataParams[i];
@@ -3738,7 +3770,10 @@ CK_RV SoftHSM::C_DeriveKey
 					{
 						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dp->pValue;
 						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64)
+						{
 							fbkCounterBits = (int)cf->ulWidthInBits;
+							fbkCounterRequested = true;
+						}
 					}
 					break;
 				default:
@@ -3746,63 +3781,81 @@ CK_RV SoftHSM::C_DeriveKey
 			}
 		}
 
-		// Derive via OpenSSL KBKDF feedback mode
+		// Derive via a hand-rolled Feedback Mode loop on EVP_MAC (the same PRF
+		// primitive OpenSSL's own KBKDF uses internally under the hood; same
+		// pattern as the CKM_SP800_108_DOUBLE_PIPELINE_KDF handler below).
+		// K(0) = IV (fp->pIV/fp->ulIVLen), or empty if none supplied — this
+		// engine's prior behavior when fp->pIV was NULL_PTR (the old code never
+		// set OSSL_KDF_PARAM_SEED in that case either), preserved unchanged
+		// here since this fix is scoped to the counter only. K(i) = PRF(Ki,
+		// K(i-1) || [counter] || fixedInput); counter bytes included ONLY when
+		// fbkCounterRequested — the "before fixed data" placement, matching
+		// this engine's COUNTER_KDF/DOUBLE_PIPELINE_KDF (see the comment on
+		// COUNTER_KDF above for why only that placement is supported).
 		ByteString fbkOut;
-		fbkOut.resize(fbkKeyLen);
 		{
-			static const char fbkModeStr[] = "FEEDBACK";
-			EVP_KDF* fbkAlgo = EVP_KDF_fetch(NULL, "KBKDF", NULL);
+			EVP_MAC* fbkAlgo = EVP_MAC_fetch(NULL, fbkMacName, NULL);
 			if (fbkAlgo == NULL)
 			{
-				ERROR_MSG("EVP_KDF_fetch KBKDF failed: 0x%08X", ERR_get_error());
-				return CKR_FUNCTION_FAILED;
-			}
-			EVP_KDF_CTX* fbkctx = EVP_KDF_CTX_new(fbkAlgo);
-			EVP_KDF_free(fbkAlgo);
-			if (fbkctx == NULL)
-			{
-				ERROR_MSG("EVP_KDF_CTX_new KBKDF failed");
+				ERROR_MSG("EVP_MAC_fetch %s failed: 0x%08X", fbkMacName, ERR_get_error());
 				return CKR_FUNCTION_FAILED;
 			}
 
-			// See the matching comment in CKM_SP800_108_COUNTER_KDF above: OpenSSL's
-			// KBKDF hardwires counter placement and auto-appends L/separator unless
-			// told not to. Same fix — route fixedInput through "info", disable both.
-			int fbkUseL = 0;
-			int fbkUseSep = 0;
-			OSSL_PARAM fbkParams[11];
-			int fpi = 0;
-			fbkParams[fpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE,
-			                        const_cast<char*>(fbkModeStr), 0);
-			fbkParams[fpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MAC,
-			                        const_cast<char*>(fbkMacName), 0);
+			OSSL_PARAM fbkInitParams[2];
+			int fbkParamCount = 0;
 			if (!fbkUseCmac)
-				fbkParams[fpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST,
-				                        const_cast<char*>(fbkDigestName), 0);
+				fbkInitParams[fbkParamCount++] = OSSL_PARAM_construct_utf8_string("digest", const_cast<char*>(fbkDigestName), 0);
 			else
-				fbkParams[fpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_CIPHER,
-				                        const_cast<char*>(fbkCipherName), 0);
-			fbkParams[fpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
-			                        fbkIKM.byte_str(), fbkIKM.size());
-			if (fbkFixedInput.size() > 0)
-				fbkParams[fpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
-				                        fbkFixedInput.byte_str(), fbkFixedInput.size());
-			// Optional IV/seed for feedback mode (PKCS#11 v3.2 §2.44.2 fp->pIV)
-			if (fp->pIV != NULL_PTR && fp->ulIVLen > 0)
-				fbkParams[fpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_SEED,
-				                        fp->pIV, (size_t)fp->ulIVLen);
-			fbkParams[fpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_R, &fbkCounterBits);
-			fbkParams[fpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_L, &fbkUseL);
-			fbkParams[fpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR, &fbkUseSep);
-			fbkParams[fpi] = OSSL_PARAM_construct_end();
+				fbkInitParams[fbkParamCount++] = OSSL_PARAM_construct_utf8_string("cipher", const_cast<char*>(fbkCipherName), 0);
+			fbkInitParams[fbkParamCount] = OSSL_PARAM_construct_end();
 
-			int fbkRet = EVP_KDF_derive(fbkctx, fbkOut.byte_str(), fbkKeyLen, fbkParams);
-			EVP_KDF_CTX_free(fbkctx);
-			if (fbkRet <= 0)
+			auto fbkRunMac = [&](const ByteString& in, ByteString& out) -> bool
 			{
-				ERROR_MSG("EVP_KDF_derive KBKDF feedback failed: 0x%08X", ERR_get_error());
+				EVP_MAC_CTX* ctx = EVP_MAC_CTX_new(fbkAlgo);
+				if (ctx == NULL) return false;
+				bool ok = EVP_MAC_init(ctx, fbkIKM.const_byte_str(), fbkIKM.size(), fbkInitParams) > 0 &&
+				          EVP_MAC_update(ctx, in.const_byte_str(), in.size()) > 0;
+				if (ok)
+				{
+					size_t macSize = EVP_MAC_CTX_get_mac_size(ctx);
+					out.resize(macSize);
+					size_t outLen = 0;
+					ok = EVP_MAC_final(ctx, out.byte_str(), &outLen, macSize) > 0;
+					if (ok) out.resize(outLen);
+				}
+				EVP_MAC_CTX_free(ctx);
+				return ok;
+			};
+
+			int fbkCounterBytes = fbkCounterBits / 8;
+			ByteString fbkKPrev;
+			if (fp->pIV != NULL_PTR && fp->ulIVLen > 0)
+				fbkKPrev = ByteString(fp->pIV, fp->ulIVLen);
+			unsigned long fbkCounter = 1;
+			bool fbkOK = true;
+			while (fbkOK && fbkOut.size() < fbkKeyLen)
+			{
+				ByteString fbkRoundIn = fbkKPrev;
+				if (fbkCounterRequested)
+				{
+					for (int b = fbkCounterBytes - 1; b >= 0; b--)
+						fbkRoundIn += (unsigned char)((fbkCounter >> (8 * b)) & 0xFF);
+				}
+				fbkRoundIn += fbkFixedInput;
+
+				ByteString fbkBlock;
+				if (!fbkRunMac(fbkRoundIn, fbkBlock)) { fbkOK = false; break; }
+				fbkKPrev = fbkBlock;
+				fbkOut += fbkBlock;
+				fbkCounter++;
+			}
+			EVP_MAC_free(fbkAlgo);
+			if (!fbkOK)
+			{
+				ERROR_MSG("CKM_SP800_108_FEEDBACK_KDF: EVP_MAC round failed: 0x%08X", ERR_get_error());
 				return CKR_FUNCTION_FAILED;
 			}
+			fbkOut.resize(fbkKeyLen);
 		}
 
 		// Build output key object (mirrors COUNTER_KDF handler)

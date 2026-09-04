@@ -17102,6 +17102,64 @@ mod return_code_ffi_tests {
         assert_ne!(noctr, withctr, "the counter must actually change the derived output");
     }
 
+    /// Cross-engine parity for the 2026-09 CKM_SP800_108_FEEDBACK_KDF fix
+    /// (SoftHSM_keygen.cpp): flagged-but-unverified alongside the Double
+    /// Pipeline fix above, then independently investigated. That handler
+    /// used to delegate entirely to OpenSSL's own KBKDF provider
+    /// (mode=FEEDBACK), which has no parameter able to omit the counter —
+    /// confirmed by direct EVP_KDF probing (core_names.h defines only "r"
+    /// / "use-l" / "use-separator" for this provider) — so a
+    /// caller-omitted CK_SP800_108_COUNTER was still getting a 32-bit BE
+    /// counter mixed into every round. CK_SP800_108_COUNTER is optional for
+    /// this KDF type per PKCS#11 v3.2's own canonical header (it #defines
+    /// CK_SP800_108_COUNTER as a bare alias of CK_SP800_108_OPTIONAL_COUNTER
+    /// — docs/refs/pkcs11t-canonical-v3.2.h), corroborated without conflict
+    /// by the v3.3 draft's Feedback Mode data field table. The C++ handler
+    /// is now hand-rolled on EVP_MAC instead of the KBKDF provider, same
+    /// pattern as Double Pipeline. This engine's `sp800_108_run_feedback`
+    /// has always omitted the counter correctly when absent — re-verified
+    /// here, not just trusted from history. Same base key / IV / fixed
+    /// input / output length as scripts/fb-kdf-counter-probe.cpp's
+    /// NOCTR/WITHCTR cases and scratchpad's independent Python reference
+    /// (NIST SP 800-108 §5.2, stdlib hmac/hashlib only) — all three (Python
+    /// reference, C++ engine post-fix, Rust engine) agree byte-for-byte on
+    /// both hex strings below.
+    #[test]
+    fn sp800_108_feedback_no_counter_matches_cpp_and_reference() {
+        let base_key: Vec<u8> = (0u8..32).collect();
+        let fixed_input = b"fb-kdf-probe-fixed-input".to_vec();
+        let iv = [0xAAu8; 32];
+
+        // NOCTR: no Sp800Seg::Counter segment at all.
+        let noctr_segs = vec![Sp800Seg::Bytes(fixed_input.clone())];
+        let noctr =
+            sp800_108_feedback_kbkdf(CKM_SHA256_HMAC, &base_key, &iv, &noctr_segs, 48).unwrap();
+        let noctr_expected =
+            hex_decode("2f212b9460b36ecf305bb9bd0167d5924f69f373777bccaa41ea20e7be3e9ff3502b1558c53274b6d6f86e7a75fe1c3d");
+        assert_eq!(
+            noctr, noctr_expected,
+            "NOCTR must match the independent NIST SP 800-108 sec 5.2 reference and the fixed C++ engine"
+        );
+
+        // WITHCTR: explicit 32-bit big-endian counter segment, same
+        // position (before the fixed input) as the C++ probe/reference —
+        // this call shape must be byte-identical to before the fix.
+        let withctr_segs = vec![
+            Sp800Seg::Counter(false, 4),
+            Sp800Seg::Bytes(fixed_input),
+        ];
+        let withctr =
+            sp800_108_feedback_kbkdf(CKM_SHA256_HMAC, &base_key, &iv, &withctr_segs, 48).unwrap();
+        let withctr_expected =
+            hex_decode("ec922ed633021239588e4614713b68453204a506da44b79843fbad149c0e0713302bc7469dd8377f75f7aab82aee3ef1");
+        assert_eq!(
+            withctr, withctr_expected,
+            "WITHCTR (explicit counter) must remain unchanged"
+        );
+
+        assert_ne!(noctr, withctr, "the counter must actually change the derived output");
+    }
+
     fn hex_decode(s: &str) -> Vec<u8> {
         (0..s.len())
             .step_by(2)
