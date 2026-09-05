@@ -201,9 +201,18 @@ pub fn xmssmt_keys_remaining(xmssmt_param: u32, priv_key: &[u8]) -> u64 {
 pub fn xmssmt_keygen(xmssmt_param: u32) -> Result<(Vec<u8>, Vec<u8>), ()> {
     macro_rules! dispatch {
         ($t:ty) => {{
-            let mut seed = [0u8; 96];
+            // 2026-09-04: was a hardcoded `[0u8; 96]`, same bug already fixed
+            // in xmss_keygen above — SEED_LEN is 3*n, not always 96 (96 =
+            // 3*32 holds for the n=32 sets, but SP 800-208's XMSS^MT *_192
+            // family is n=24, so SEED_LEN=72). from_seed() → init_keypair_buffers()
+            // validates seed.len() strictly against the real expected length
+            // and returns Error::InvalidSeedLength otherwise, so every one of
+            // the 16 XMSS^MT _192 parameter sets (params 33-40 SHA2, 49-56
+            // SHAKE256) failed every keygen attempt until this fix.
+            let seed_len = <$t as XmssParameter>::SEED_LEN;
+            let mut seed = vec![0u8; seed_len];
             if let Some(kat) = kat_seed() {
-                seed.copy_from_slice(&kat);
+                seed.copy_from_slice(&kat[..seed_len]);
             } else {
                 getrandom::getrandom(&mut seed).map_err(|_| ())?;
             }
