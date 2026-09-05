@@ -5,7 +5,9 @@
 > bridge with **post-quantum OpenPGP** — draft-ietf-openpgp-pqc composite
 > signing (`MLDSA65_Ed25519` algo 30, `MLDSA87_Ed448` algo 31) and composite
 > ML-KEM decryption (`MLKEM768_X25519` algo 35, `MLKEM1024_X448` algo 36) —
-> where the private key stays inside the **softhsmv3** PKCS#11 token. The
+> plus standalone (non-composite) **Ed448** signing (RFC 9580 algorithm 28,
+> distinct from the `MLDSA87_Ed448` composite) — where the private key stays
+> inside the **softhsmv3** PKCS#11 token. The
 > original upstream README follows below for reference — note its examples use
 > upstream SoftHSMv2 (`/usr/lib64/softhsm/libsofthsm.so`, YubiKey); in this repo
 > the module is **`libsofthsmv3`** and the PQC path is what's exercised.

@@ -212,7 +212,8 @@ it drives the C++ and Rust engines through identical call sequences and
 asserts identical observable outcomes wherever the spec mandates one, with
 legal divergences enumerated in `differential/exceptions.json`. Run via
 `./scripts/run-differential-harness.sh` from the repo root — see its own
-README for the full detail (`--list`, `--only`, `--verbose`, `--no-build`).
+README for the full detail (`--list`, `--only`, `--verbose`, `--no-build`,
+`--parallel`/`--jobs N` to shard across cores).
 
 `tokens/` holds a token directory left behind by a prior test run (not
 committed test fixture data — a `softhsm2-util`-managed slot).

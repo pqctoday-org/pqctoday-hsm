@@ -16,6 +16,17 @@ pip install -e .
 PYTHONPATH=src python -m pqctoday_kmip demo
 ```
 
+Installed name: `pqctoday-kmip-client` (`pyproject.toml`'s `[project].name`);
+imported module: `pqctoday_kmip`; console script: `pqctoday-kmip`.
+
+> **Name collision.** The Rust *server* binary built by `cargo build
+> --release` in the parent `kmip/` crate is **also** named `pqctoday-kmip`
+> (see the top-level [`../README.md`](../README.md)). If both this package's
+> console script and `kmip/target/release/` are on `PATH`, whichever comes
+> first wins and the other is shadowed. `PYTHONPATH=src python -m
+> pqctoday_kmip <cmd>` sidesteps the ambiguity entirely and is the safer
+> invocation on a machine with both installed.
+
 ## Data plane — KMIP 3.0 operations
 
 ```python
@@ -138,7 +149,28 @@ print(a.get_active())           # {'name': 'training-permissive', 'fingerprint':
 a.activate("pqc")               # live policy switch — zero downtime
 a.validate(open("my.yaml").read())     # parse-check before activating
 a.dry_run(open("my.yaml").read(), op="Sign", algorithm="AES")  # evaluate
+
+# Author / persist policy files over the same mTLS connection
+a.create_policy("new-policy", open("new-policy.yaml").read())   # POST — name comes from the YAML
+a.save_policy("new-policy", open("new-policy.yaml").read())     # PUT  — overwrite an existing one
+print(a.get_policy("new-policy"))     # {'name': …, 'yaml': …}
+print(a.openapi())                    # the server's own OpenAPI 3.1 spec, as text
+
+# Live audit stream (SSE) instead of polling get_audit()
+for event in a.stream_audit():        # blocks; iterate to consume, break to stop
+    print(event["plane"], event["event"]["type"])
 ```
+
+`AdminClient` does **not** yet wrap the modular-policy `active-modules` /
+`config/uncovered-ops` endpoints (`cryptopolicy-manager`'s 2026-08-28
+addition — see [`../cryptopolicy-manager/README.md`](../cryptopolicy-manager/README.md)
+for the full route list). Reach those with a raw `http.client.HTTPSConnection`
+against the same `ssl.SSLContext` this class builds, or extend `admin.py`.
+
+The `admin` CLI subcommand (below) covers `healthz`/`version`/`list-policies`/
+`get-policy`/`active`/`activate`/`validate`/`dry-run`/`audit`/`stream` — it
+has no `create-policy` verb yet even though `AdminClient.create_policy()`
+exists; call the Python API directly for that until one is added.
 
 ## Audit trail
 

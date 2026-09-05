@@ -80,7 +80,7 @@ wrappers — each with its own README.
 
 | Component | Path | What |
 | --- | --- | --- |
-| PKCS#11 engines (C++ + Rust) | `src/`, [`rust/`](rust/README.md) | The token; two interchangeable engines. Rust also has a 976/0 [PKCS#11 v3.2 conformance report](rust/RUST_P11_V32_CONFORMANCE_REPORT.md) |
+| PKCS#11 engines (C++ + Rust) | `src/`, [`rust/`](rust/README.md) | The token; two interchangeable engines. Rust also has a 999/0 [PKCS#11 v3.2 conformance report](rust/RUST_P11_V32_CONFORMANCE_REPORT.md) |
 | KMIP 3.0 server + CACP policy engine | [`kmip/`](kmip/README.md) | Networked key management + crypto-agility policies; ML-KEM/ML-DSA/SLH-DSA + **hybrid KEMs** (X25519MLKEM768 / SecP256r1MLKEM768 / SecP384r1MLKEM1024, **OpenSSL-3.5-interop-verified**); X25519/X448 key agreement as standard KMIP ECDH + Recommended Curve; **pure-Rust certificate operations** (Certify / Validate / SPKI public-key verification, no external crypto dependency in the cert-ops path) |
 | PKCS#11 remoting (gRPC + REST) | [`remoting/`](remoting/REMOTE_P11_V32_COVERAGE.md) | The Rust engine's full PKCS#11 surface over the network — `pqc-grpc-pkcs11` (tonic) and `pqc-rest-pkcs11` (axum, JSON+base64); **99/104** `pkcs11f.h` functions live as RPCs, coverage checked against `cpp_compliance_report.json`. See [`docs/PKCS11_REMOTING.md`](docs/PKCS11_REMOTING.md) |
 | Wrappers | see the [Integration Interfaces](#integration-interfaces) table | OpenSSL provider, OpenSSH, OpenPGP, MLS, strongSwan, JavaJCE, WebRPC |
@@ -117,9 +117,9 @@ wrappers — each with its own README.
 | WASM build | Not supported | **Emscripten + Rust `wasm32-unknown-unknown`** |
 | Rust WASM engine | N/A | **Pure Rust (~1.4 MB), drop-in parity** |
 | npm package | N/A | **@pqctoday/softhsm-wasm** |
-| StrongSwan IKEv2 ML-DSA | Not supported | **`strongswan-pkcs11/` adapter** — `CKK_ML_DSA` (0x4a), `CKM_ML_DSA_KEY_PAIR_GEN` (0x1c), `CKM_ML_DSA` (0x1d) |
+| StrongSwan IKEv2 PQC auth | Not supported | **`strongswan-pkcs11/` adapter** — ML-DSA-44/65/87 (`CKK_ML_DSA` 0x4a, `CKM_ML_DSA_KEY_PAIR_GEN` 0x1c, `CKM_ML_DSA` 0x1d), plus SLH-DSA-SHA2 (128s/192s/256s), Ed448, and Ed25519 authentication through the same PKCS#11 token |
 | Java JCA/JCE provider | Not supported | **`JavaJCE/` provider** — FFM-based (`java.lang.foreign`, no JDK-internal APIs), full standard-JCA coverage (signatures, KEM, Cipher, KeyAgreement, KDF, KeyStore) — see [Java JCA/JCE Provider](#java-jcajce-provider-javajce) below |
-| OpenSSH ML-DSA-65 signing | Not supported | **`openssh-pkcs11/` connector** — `ssh-mldsa-65` key type (draft-sfluhrer-ssh-mldsa-06) with signing via `CKM_ML_DSA` (0x1d); WASM client + privsep-free server |
+| OpenSSH ML-DSA / SLH-DSA signing | Not supported | **`openssh-pkcs11/` connector** — `ssh-mldsa-44/65/87` (draft-sfluhrer-ssh-mldsa-08, full FIPS 204) + `ssh-slh-dsa-{sha2,shake}-{128,256}{s,f}` (draft-josefsson-ssh-sphincs-02, 8 of 12 FIPS 205 sets) via `CKM_ML_DSA` (0x1d) / `CKM_SLH_DSA` (0x2e); WASM client + privsep-free server |
 
 ## PQC Algorithms
 
@@ -237,10 +237,16 @@ CKM_XMSSMT               // Pure XMSSMT sign / verify
 CKM_HSS_KEY_PAIR_GEN     // HSS key pair generation
 CKM_HSS                  // HSS sign / verify (multi-level LMS)
 
-// Key template attributes
-CKA_LMS_PARAM_SET        // LMS parameter set (e.g. CKP_LMS_SHA256_N32_H10)
-CKA_LMOTS_PARAM_SET      // LMOTS one-time-signature parameter (e.g. CKP_LMOTS_SHA256_N32_W4)
-CKA_HSS_KEYS_REMAINING   // Remaining one-time signature slots (read-only)
+// Key template attributes (spec §6.65 — verified against src/lib/pkcs11/pkcs11t.h;
+// there is no CKA_LMS_PARAM_SET / CKA_LMOTS_PARAM_SET or CKP_LMS_*/CKP_LMOTS_*
+// in the v3.2 header — LMS/LMOTS type codes are raw IANA-registered numeric
+// identifiers (RFC 8554 / RFC 9708), not named CKP_ enum constants)
+CKA_HSS_LEVELS           // 0x617 — number of LMS levels in the hierarchy
+CKA_HSS_LMS_TYPE         // 0x618 — LMS type ID of the top-level tree
+CKA_HSS_LMOTS_TYPE       // 0x619 — LMOTS type ID of the top-level tree
+CKA_HSS_LMS_TYPES        // 0x61a — per-level LMS type IDs (multi-value)
+CKA_HSS_LMOTS_TYPES      // 0x61b — per-level LMOTS type IDs (multi-value)
+CKA_HSS_KEYS_REMAINING   // 0x61c — Remaining one-time signature slots (read-only)
 ```
 
 ### Message Signing API (v3.0)
@@ -419,9 +425,9 @@ The `softhsmv3` implementations maintain strict compliance with current ACVP tes
 
 - **ACVP Testing (v0.4.21+)**: Both the C++ and Rust engines pass all ACVP algorithm test vectors with **zero failures and zero skips** across all implemented mechanisms in dual HSM mode. The test suite covers: ML-KEM (Decapsulate KAT + Round-Trip, all 3 variants), ML-DSA (SigVer KAT + Functional, all 3 variants), HashML-DSA (SHA-256/SHA-512, 3 variants), SLH-DSA (Functional 2 param sets + SigGen KAT), HashSLH-DSA (SHA2-128f-SHA256, SHA2-256f-SHA512), LMS/HSS SHA-256 + SHAKE-256 (sign+verify round-trips; NIST ACVP LMS sigVer KAT, 20 SHAKE groups per engine — newly passing on both engines as of v0.4.21), AES-GCM/CBC/CTR/KW/KWP, HMAC-SHA256/384/512, RSA-PSS, ECDSA P-256/P-384, EdDSA Ed25519, **Ed25519ph / `CKM_EDDSA_PH` (C++ + Rust, both engines as of v0.4.21)**, SHA-256 (3 vectors), SHA3-256 (empty-string vector), PBKDF2, and HKDF. C++↔Rust cross-engine HSS signing verification available in dual mode.
 - **NIST ACVP LMS sigVer**: **320/320** official NIST ACVP demo vectors validated against `lm_validate_signature()` — all 80 SP 800-208 parameter combinations (SHA-256 M32/M24 + SHAKE-256 M32/M24 × 5 tree heights × 4 Winternitz params). Source: [usnistgov/ACVP-Server](https://github.com/usnistgov/ACVP-Server/tree/master/gen-val/json-files/LMS-sigVer-1.0).
-- **PKCS#11 v3.2 Semantics (C++)**: The standalone C++ compliance validator (`p11_v32_compliance_test`) passes **779 / 0 / 36** (779 pass, 0 fail, 36 documented skips — features not advertised by the token; v3.2 mandates no particular mechanism set), covering PQC round-trips, classical algorithms (ECDSA, EdDSA, ECDH, RSA), KDFs (PBKDF2, HKDF, SP800-108), negative boundary paths (policy violation, extraction constraint, template completeness, signature forgery), and v3.2 session/message APIs against the compiled `libsofthsmv3.dylib`. Full report: [`cpp_compliance_report.md`](cpp_compliance_report.md).
-- **PKCS#11 v3.2 Conformance (Rust)**: The Rust engine carries its own checked-in evidence — **976/0** checks (976 passed, 0 failed) across 51 sections (exact `CKR_*` codes in spec priority order, PQC keygen/param-set, SP800-108 KBKDF, message-based crypto, `CKA_ALLOWED_MECHANISMS` and `CKO_CERTIFICATE`). See [`rust/RUST_P11_V32_CONFORMANCE_REPORT.md`](rust/RUST_P11_V32_CONFORMANCE_REPORT.md); regenerate with `scripts/local-gate.sh --rust-p11`.
-- **KMIP 3.0 Conformance**: The KMIP server is validated by the Rust integration suite (`kmip/ cargo test` — TLS e2e, hybrid KEM, OASIS codec, interop KATs) and the OASIS replay harness (`kmip/conformance/harness/dispatcher_replay.py`). See [`kmip/docs/CONFORMANCE_REPORT.md`](kmip/docs/CONFORMANCE_REPORT.md) and the deprecated-algorithm skip rationale in [`kmip/DEPRECATED.md`](kmip/DEPRECATED.md).
+- **PKCS#11 v3.2 Semantics (C++)**: The standalone C++ compliance validator (`p11_v32_compliance_test`) passes **891 / 0 / 48** (891 pass, 0 fail, 48 documented skips — features not advertised by the token; v3.2 mandates no particular mechanism set), covering PQC round-trips, classical algorithms (ECDSA, EdDSA, ECDH, RSA), KDFs (PBKDF2, HKDF, SP800-108), negative boundary paths (policy violation, extraction constraint, template completeness, signature forgery), and v3.2 session/message APIs against the compiled `libsofthsmv3.dylib`. Full report: [`cpp_compliance_report.md`](cpp_compliance_report.md) (checked in; regenerate via `ctest` / `scripts/local-gate.sh --cpp`).
+- **PKCS#11 v3.2 Conformance (Rust)**: The Rust engine carries its own checked-in evidence — **999/0** checks (999 passed, 0 failed) across 51 sections (exact `CKR_*` codes in spec priority order, PQC keygen/param-set, SP800-108 KBKDF, message-based crypto, `CKA_ALLOWED_MECHANISMS` and `CKO_CERTIFICATE`). See [`rust/RUST_P11_V32_CONFORMANCE_REPORT.md`](rust/RUST_P11_V32_CONFORMANCE_REPORT.md); regenerate via `scripts/local-gate.sh` (Rust PKCS#11 conformance runs by default as step 6 of the core gate; the older `--rust-p11` flag is accepted but is now a no-op). The checked-in report names the exact engine commit it was generated from — if that commit is behind `HEAD`, treat the number as approximate and regenerate.
+- **KMIP 3.0 Conformance**: The KMIP server is validated by the Rust integration suite (`kmip/ cargo test` — TLS e2e, hybrid KEM, OASIS codec, interop KATs) and the OASIS replay harness (`kmip/conformance/harness/dispatcher_replay.py`). See [`kmip/docs/CONFORMANCE_REPORT.md`](kmip/docs/CONFORMANCE_REPORT.md) and the deprecated-algorithm skip rationale in [`kmip/DEPRECATED.md`](kmip/DEPRECATED.md). Note: **KMIP 3.0 itself is an OASIS committee draft (CSD02), not a ratified standard** — "conformant" claims here are against that draft's Profiles/Usage Guide text, not a final OASIS Standard (contrast with PKCS#11 v3.2, which *is* ratified — see below).
 - **Playground E2E**: End-to-end token integration and ACVP matrix execution are verified via automated Playwright continuous integration (`playground-softhsm-acvp.spec.ts`) in dual HSM mode.
 - **Security Audit (March 2026)**: Full remediation of all HIGH and MEDIUM findings. See [`docs/security_audit_03222026.md`](docs/security_audit_03222026.md).
 
@@ -474,28 +480,37 @@ Memory management (`_malloc`, `_free`), `HEAPU8`, `setValue`, and `getValue` are
 
 ### Supported PKCS#11 Functions
 
-The Rust engine exports 85 PKCS#11 functions (63 fully implemented, 8 multi-part stubs, 11 stubs, plus `set_kat_seed`):
+The Rust engine exports **104** `C_*` PKCS#11 functions (verified by counting
+`#[wasm_bindgen(js_name = _C_*)]` exports in `rust/src/ffi.rs`), plus one
+non-spec test hook (`set_kat_seed`, for deterministic KAT-mode keygen — not a
+PKCS#11 function). Of the 104, **94 are functionally implemented** and **10
+deliberately return a spec-legal "not supported" code** for genuinely
+optional PKCS#11 v3.2 capabilities — none of the 10 are TODO gaps:
 
 | Category | Functions |
 | --- | --- |
-| Info / Slot | `C_GetInfo`, `C_GetSlotList`, `C_GetSlotInfo`, `C_GetTokenInfo`, `C_GetMechanismList`, `C_GetMechanismInfo` |
-| Session | `C_Initialize`, `C_Finalize`, `C_InitToken`, `C_OpenSession`, `C_CloseSession`, `C_Login`, `C_Logout`, `C_InitPIN`, `C_GetSessionInfo` |
+| Info / Slot | `C_GetInfo`, `C_GetSlotList`, `C_GetSlotInfo`, `C_GetTokenInfo`, `C_GetMechanismList`, `C_GetMechanismInfo`, `C_GetInterface`, `C_GetInterfaceList` |
+| Session / User | `C_Initialize`, `C_Finalize`, `C_InitToken`, `C_OpenSession`, `C_CloseSession`, `C_CloseAllSessions`, `C_GetSessionInfo`, `C_Login`, `C_LoginUser`, `C_Logout`, `C_InitPIN`, `C_SetPIN`, `C_SessionCancel` |
 | Key Generation | `C_GenerateKeyPair`, `C_GenerateKey` |
 | KEM | `C_EncapsulateKey`, `C_DecapsulateKey` |
-| Sign/Verify | `C_SignInit`, `C_Sign`, `C_VerifyInit`, `C_Verify` |
+| Sign/Verify (one-shot + multi-part) | `C_SignInit`, `C_Sign`, `C_SignUpdate`, `C_SignFinal`, `C_VerifyInit`, `C_Verify`, `C_VerifyUpdate`, `C_VerifyFinal` |
+| Sign/Verify Recover | `C_SignRecoverInit`, `C_SignRecover`, `C_VerifyRecoverInit`, `C_VerifyRecover` — RSA only (`CKM_RSA_PKCS`/`CKM_RSA_X_509`), mirroring the C++ engine's restriction |
 | Pre-Bound Verify (v3.2) | `C_VerifySignatureInit`, `C_VerifySignature`, `C_VerifySignatureUpdate`, `C_VerifySignatureFinal` |
-| Message Sign/Verify | `C_MessageSignInit`, `C_SignMessage`, `C_MessageSignFinal`, `C_MessageVerifyInit`, `C_VerifyMessage`, `C_MessageVerifyFinal` |
+| Message Sign/Verify | `C_MessageSignInit`, `C_SignMessage`, `C_SignMessageBegin`, `C_SignMessageNext`, `C_MessageSignFinal`, `C_MessageVerifyInit`, `C_VerifyMessage`, `C_VerifyMessageBegin`, `C_VerifyMessageNext`, `C_MessageVerifyFinal` |
 | Message Encrypt/Decrypt | `C_MessageEncryptInit`, `C_EncryptMessage`, `C_EncryptMessageBegin`, `C_EncryptMessageNext`, `C_MessageEncryptFinal`, `C_MessageDecryptInit`, `C_DecryptMessage`, `C_DecryptMessageBegin`, `C_DecryptMessageNext`, `C_MessageDecryptFinal` |
-| Encrypt/Decrypt | `C_EncryptInit`, `C_Encrypt`, `C_DecryptInit`, `C_Decrypt` |
+| Encrypt/Decrypt (one-shot + multi-part) | `C_EncryptInit`, `C_Encrypt`, `C_EncryptUpdate`, `C_EncryptFinal`, `C_DecryptInit`, `C_Decrypt`, `C_DecryptUpdate`, `C_DecryptFinal` |
+| Dual-function crypto | `C_DigestEncryptUpdate`, `C_DecryptDigestUpdate`, `C_SignEncryptUpdate`, `C_DecryptVerifyUpdate` |
 | Digest | `C_DigestInit`, `C_DigestUpdate`, `C_DigestFinal`, `C_Digest` |
-| Object | `C_CreateObject`, `C_DestroyObject`, `C_GetAttributeValue`, `C_FindObjectsInit`, `C_FindObjects`, `C_FindObjectsFinal` |
+| Object | `C_CreateObject`, `C_CopyObject`, `C_DestroyObject`, `C_GetObjectSize`, `C_GetAttributeValue`, `C_SetAttributeValue`, `C_FindObjectsInit`, `C_FindObjects`, `C_FindObjectsFinal` |
 | Key Management | `C_DeriveKey`, `C_WrapKey`, `C_UnwrapKey`, `C_WrapKeyAuthenticated`, `C_UnwrapKeyAuthenticated` |
-| Utility | `C_GenerateRandom` |
-| Multi-part (stubs) | `C_SignUpdate`, `C_SignFinal`, `C_VerifyUpdate`, `C_VerifyFinal`, `C_EncryptUpdate`, `C_EncryptFinal`, `C_DecryptUpdate`, `C_DecryptFinal` |
-| Admin (stubs) | `C_SetPIN`, `C_CopyObject`, `C_GetObjectSize`, `C_SetAttributeValue`, `C_DigestKey`, `C_GetOperationState`, `C_SetOperationState`, `C_SeedRandom` |
-| v3.2 Async (stubs) | `C_GetSessionValidationFlags`, `C_AsyncComplete`, `C_AsyncGetID` |
+| Utility | `C_GenerateRandom`, `C_GetSessionValidationFlags` (returns `CKR_OK` — software token, no validation constraints) |
+| Deliberately not supported (spec-legal, not gaps) | `C_DigestKey`, `C_GetOperationState`, `C_SetOperationState` — optional state serialization, `CKR_FUNCTION_NOT_SUPPORTED`; `C_SeedRandom` — `CKR_RANDOM_SEED_NOT_SUPPORTED`; `C_GetFunctionStatus`, `C_CancelFunction` — legacy parallel-function pair, `CKR_FUNCTION_NOT_PARALLEL` per spec §5.21; `C_WaitForSlotEvent` — `CKR_NO_EVENT` non-blocking / `CKR_FUNCTION_NOT_SUPPORTED` blocking (a soft token has no real slot-insertion event to block on); `C_AsyncComplete`, `C_AsyncGetID`, `C_AsyncJoin` — `CKR_FUNCTION_NOT_SUPPORTED` |
 
-Multi-part, admin, and async stubs return `CKR_FUNCTION_NOT_SUPPORTED`. The browser playground uses single-shot operations only.
+All multi-part sign/verify/encrypt/decrypt paths above (`C_SignUpdate`/
+`C_SignFinal`, `C_VerifyUpdate`/`C_VerifyFinal`, `C_EncryptUpdate`/
+`C_EncryptFinal`, `C_DecryptUpdate`/`C_DecryptFinal`) are **fully
+implemented**, not stubs — the browser playground happens to use single-shot
+operations only, which is a UI choice, not an engine limitation.
 
 ### Supported Algorithms
 
@@ -520,7 +535,7 @@ Multi-part, admin, and async stubs return `CKR_FUNCTION_NOT_SUPPORTED`. The brow
 
 > **Note:** RSA-SHA3 variants (`CKM_RSA_SHA3_*_PKCS`, `CKM_RSA_SHA3_*_PKCS_PSS`) are C++ engine only. ECDH1 with X9.63 KDF is implemented in both engines for `CKD_SHA{256,384,512}_KDF`; `CKD_SHA1_KDF` is C++ engine only.
 
-**129 mechanisms** registered in `C_GetMechanismList` — 100% have implementations, including the vendor `CKM_HPKE`/`CKM_HPKE_KEM_KEY_PAIR_GEN` pair (provisional codepoints). Count is the live `C_GetMechanismList` result checked in [`rust/RUST_P11_V32_CONFORMANCE_REPORT.md`](rust/RUST_P11_V32_CONFORMANCE_REPORT.md) — regenerate with `scripts/local-gate.sh --rust-p11`.
+**129 mechanisms** registered in `C_GetMechanismList` (verified: `SUPPORTED_MECHS` in `rust/src/constants.rs` — 129 unique `CKM_*` entries) — 100% have implementations. The vendor `CKM_HPKE`/`CKM_HPKE_KEM_KEY_PAIR_GEN` pair is **not** in that count: both are implemented and directly dispatchable via `C_GenerateKeyPair`/`C_EncapsulateKey`/`C_DecapsulateKey`, but neither is currently advertised in `C_GetMechanismList` — a caller must already know to ask for them. Count also cross-checked against [`rust/RUST_P11_V32_CONFORMANCE_REPORT.md`](rust/RUST_P11_V32_CONFORMANCE_REPORT.md); regenerate via `scripts/local-gate.sh`.
 
 ### PKCS#11 v3.2 Compliance Enforcement
 
@@ -768,9 +783,9 @@ SoftHSMv3 exposes integration interfaces that cover the full stack from browser 
 | **Direct PKCS#11** | `libsofthsmv3.so` / npm | Native C/C++ / Node.js — load via `dlopen` + `C_GetFunctionList` |
 | **OpenSSL 3.x Provider** | `src/vendor/pkcs11-provider/` | Transparent routing from any `openssl` CLI or linked app |
 | **KMIP 3.0 server + CACP** | [`kmip/`](kmip/README.md) | Networked key management (TTLV/TLS) + crypto-agility policy engine; ML-KEM/ML-DSA/SLH-DSA + hybrid KEMs (3 ECDHE-MLKEM groups, OpenSSL-interop-verified); X25519/X448 ECDH + key agreement |
-| **StrongSwan Adapter** | [`strongswan-pkcs11/`](strongswan-pkcs11/README.md) | IKEv2 VPN — ML-KEM-768 key exchange + ML-DSA signing |
+| **StrongSwan Adapter** | [`strongswan-pkcs11/`](strongswan-pkcs11/README.md) | IKEv2 VPN — ML-KEM-512/768/1024 key exchange + ML-DSA-44/65/87, SLH-DSA-SHA2 (128s/192s/256s), Ed448, or Ed25519 authentication |
 | **Java JCA/JCE Provider** | [`JavaJCE/`](JavaJCE/README.md) | Any JCA-based app — real, standard-JCA signatures/KEM/Cipher/KeyAgreement/KDF/KeyStore, plus JDK 27 JEP 527 hybrid-TLS support |
-| **OpenSSH Connector** | [`openssh-pkcs11/`](openssh-pkcs11/README.md) | ML-DSA-65 ssh / sshd (draft-sfluhrer-ssh-mldsa-06); WASM build runs a real PQ SSH handshake |
+| **OpenSSH Connector** | [`openssh-pkcs11/`](openssh-pkcs11/README.md) | ML-DSA-44/65/87 + SLH-DSA (8/12 FIPS 205 sets) ssh / sshd (draft-sfluhrer-ssh-mldsa-08, draft-josefsson-ssh-sphincs-02); WASM build runs a real PQ SSH handshake |
 | **OpenPGP Connector** | [`openpgp/`](openpgp/README.md) | OpenPGP signing / decryption with keys held on the token (ML-DSA / ML-KEM) |
 | **MLS Provider** | [`openmls-provider/`](openmls-provider/README.md) | OpenMLS crypto provider backed by the token |
 | **PKCS#11 Remoting** | [`remoting/`](remoting/REMOTE_P11_V32_COVERAGE.md) | gRPC (`pqc-grpc-pkcs11`) + REST (`pqc-rest-pkcs11`) — the full PKCS#11 surface over the network, not signing-specific; see [`docs/PKCS11_REMOTING.md`](docs/PKCS11_REMOTING.md) |
@@ -832,9 +847,12 @@ kem->set_public_key(kem, ciphertext_from_responder);
 chunk_t shared_secret = kem->get_shared_secret(kem); // from C_DecapsulateKey
 ```
 
-### ML-DSA Signing
+### Authentication — ML-DSA, SLH-DSA, EdDSA
 
-ML-DSA PKCS#11 v3.2 constants are defined in `strongswan-pkcs11/pkcs11.h`:
+The adapter's `pkcs11_private_key.c` / `pkcs11_public_key.c` implement IKEv2
+AUTH-payload sign/verify for **ML-DSA (44/65/87), SLH-DSA-SHA2 (128s/192s/256s),
+Ed448, and Ed25519** through the token — not ML-DSA alone. ML-DSA PKCS#11 v3.2
+constants are defined in `strongswan-pkcs11/pkcs11.h`:
 
 ```c
 #define CKK_ML_DSA              (0x0000004aUL)  // Key type
@@ -842,7 +860,7 @@ ML-DSA PKCS#11 v3.2 constants are defined in `strongswan-pkcs11/pkcs11.h`:
 #define CKM_ML_DSA              (0x0000001dUL)  // Sign / Verify
 ```
 
-These map directly to the softhsmv3 `C_SignInit` / `C_Sign` / `C_VerifyInit` / `C_Verify` dispatch for `CKM_ML_DSA`. Use the standard `CKA_PARAMETER_SET` attribute (`CKP_ML_DSA_44/65/87`) during key generation to select the security level.
+These map directly to the softhsmv3 `C_SignInit` / `C_Sign` / `C_VerifyInit` / `C_Verify` dispatch for `CKM_ML_DSA`. Use the standard `CKA_PARAMETER_SET` attribute (`CKP_ML_DSA_44/65/87`) during key generation to select the security level. SLH-DSA and Ed448/Ed25519 keys go through the analogous `CKM_SLH_DSA` / `CKM_EDDSA` mechanisms already used elsewhere in this engine; see `strongswan-pkcs11/README.md` for the exact swanctl auth-method wiring for each.
 
 ### Sandbox Integration Coverage
 
@@ -914,23 +932,35 @@ capability gap, not the local provider's opacity-by-design choice).
 
 ## OpenSSH PKCS#11 Connector (`openssh-pkcs11/`)
 
-The `openssh-pkcs11/` connector patches `openssh-portable` with the
-[`ssh-mldsa-65`](https://datatracker.ietf.org/doc/draft-sfluhrer-ssh-mldsa/)
-key type (draft-sfluhrer-ssh-mldsa-06, NIST Category 3, FIPS 204) and compiles
-the client and a privsep-free server to WebAssembly. All ML-DSA signing is
-delegated to softhsmv3 via `CKM_ML_DSA` (0x1d) over PKCS#11 v3.2.
+The `openssh-pkcs11/` connector patches `openssh-portable` with **ML-DSA
+(44/65/87, full FIPS 204 coverage)** and **SLH-DSA (8 of the 12 FIPS 205
+parameter sets)** key/signature types — `ssh-mldsa-44`/`-65`/`-87` and
+`ssh-slh-dsa-{sha2,shake}-{128,256}{s,f}` — implementing
+[draft-sfluhrer-ssh-mldsa-08](https://datatracker.ietf.org/doc/draft-sfluhrer-ssh-mldsa/)
+and [draft-josefsson-ssh-sphincs-02](https://datatracker.ietf.org/doc/draft-josefsson-ssh-sphincs/),
+and compiles the client and a privsep-free server to WebAssembly. The
+SLH-DSA-192 (s/f) FIPS 205 parameter sets are implemented by the engine but
+**not exposed over SSH** — `draft-josefsson-ssh-sphincs-02`'s own 192-bit
+wire names reference a different, non-FIPS-205 SP 800-230 parameter family
+this engine doesn't implement, so no name is defined for the standard one;
+see `openssh-pkcs11/README.md`'s "Parameter set coverage" for the full
+citation. All signing is delegated to softhsmv3 via `CKM_ML_DSA` (0x1d) /
+`CKM_SLH_DSA` (0x2e) over PKCS#11 v3.2.
 
 ### Layout
 
-| File | Role |
+| Path | Role |
 | --- | --- |
-| `patches/ssh-mldsa.c` | New OpenSSH key-type module — raw 1,952-byte ML-DSA-65 pubkey; signing is PKCS#11-only |
+| `patches/ssh-mldsa.c` | ML-DSA-44/65/87 key-type module — signing is PKCS#11-only |
+| `patches/ssh-slhdsa.c` | The 8 SLH-DSA key-type modules |
 | `patches/apply_mldsa_patches.py` | Python driver that applies source-tree patches to an extracted `openssh-portable` tree (`sshkey.c`, `ssh-pkcs11.c`, `Makefile.in`, …) |
-| `wasm-shims/sshd_wasm_main.c` | Privsep-free `sshd` entry point for the WASM build — replaces `fork()` / PAM / PTY / `setuid()` with a single-transport handshake |
+| `patches/native_paramsweep_test.c` | Native (non-WASM) end-to-end handshake test across every parameter set |
+| `wasm-shims/sshd_wasm_main.c` | Privsep-free `sshd` entry point for the WASM build — replaces `fork()` / PAM / PTY / `setuid()` with a single-transport handshake; `HOSTKEY_VARIANTS` drives all 11 PQC parameter sets + ECDSA P-256 |
 | `wasm-shims/pkcs11_static.c` | Static `C_GetFunctionList` linkage against softhsmv3 so the WASM bundle ships self-contained without `dlopen` |
 | `wasm-shims/{posix_stubs,socket_wasm}.c` | POSIX / networking stubs for Emscripten, bridging OpenSSH's file-descriptor I/O to the browser's SharedArrayBuffer transport |
 | `scripts/build-wasm.sh` | End-to-end Emscripten build producing `openssh-{client,server}.{js,wasm}` |
 | `scripts/copy-to-hub.sh` | Deploys built WASM bundles into the `pqctoday-hub` repo |
+| `scripts/native-verify-paramsweep.sh` | Native build (no Emscripten) + real handshake sweep across every parameter set |
 
 ### Build
 

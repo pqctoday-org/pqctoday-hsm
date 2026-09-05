@@ -61,9 +61,19 @@ major extensions:
 
 | Constant | Value | Algorithm family |
 | --- | --- | --- |
+| `CKK_HSS` | `0x46` | HSS / LMS (RFC 8554, SP 800-208) — stateful, hash-based |
+| `CKK_XMSS` | `0x47` | XMSS (RFC 8391, SP 800-208) — stateful, hash-based |
+| `CKK_XMSSMT` | `0x48` | XMSS^MT (RFC 8391, SP 800-208) — stateful, hash-based, C++ engine only |
 | `CKK_ML_KEM` | `0x49` | ML-KEM (FIPS 203) |
 | `CKK_ML_DSA` | `0x4a` | ML-DSA (FIPS 204) |
 | `CKK_SLH_DSA` | `0x4b` | SLH-DSA (FIPS 205) |
+
+> HSS/XMSS/XMSS-MT are **stateful** signatures: each private key holds a
+> bounded number of one-time-signature leaves, and reusing a leaf breaks the
+> scheme's security. PKCS#11 v3.2 §6.65.3/§6.66.4-5 require `CKA_COPYABLE`
+> forced `FALSE` on these private keys for exactly this reason — both engines
+> enforce it (see §3 below and `CHANGELOG.md`'s 0.28.2 entry for a real defect
+> this caught in the Rust engine).
 
 ### 2.2 PQC parameter sets (`CKA_PARAMETER_SET` / `CKP_*`)
 
@@ -124,6 +134,32 @@ major extensions:
 | `CKM_SP800_108_COUNTER_KDF` | `0x000003ac` | NIST SP 800-108 counter mode KBKDF; `C_DeriveKey` |
 | `CKM_SP800_108_FEEDBACK_KDF` | `0x000003ad` | NIST SP 800-108 feedback mode KBKDF (optional IV); `C_DeriveKey` |
 | `CKM_ECDH1_COFACTOR_DERIVE` | `0x00001051` | Cofactor ECDH (NIST SP 800-56A §5.7.1.2); `C_DeriveKey` |
+| `CKM_HSS_KEY_PAIR_GEN` | `0x4032` | Generate an HSS (multi-level LMS) key pair |
+| `CKM_HSS` | `0x4033` | HSS sign / verify — key exhaustion returns `CKR_KEY_EXHAUSTED` |
+| `CKM_XMSS_KEY_PAIR_GEN` | `0x4034` | Generate an XMSS key pair |
+| `CKM_XMSSMT_KEY_PAIR_GEN` | `0x4035` | Generate an XMSS^MT key pair (C++ engine only) |
+| `CKM_XMSS` | `0x4036` | XMSS sign / verify |
+| `CKM_XMSSMT` | `0x4037` | XMSS^MT sign / verify (C++ engine only) |
+
+#### HSS key template attributes (spec §6.65, verified against `src/lib/pkcs11/pkcs11t.h`)
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `CKA_HSS_LEVELS` | `0x617` | Number of LMS levels in the hierarchy |
+| `CKA_HSS_LMS_TYPE` | `0x618` | LMS type ID of the top-level tree |
+| `CKA_HSS_LMOTS_TYPE` | `0x619` | LMOTS type ID of the top-level tree |
+| `CKA_HSS_LMS_TYPES` | `0x61a` | Per-level LMS type IDs (multi-value, generated keys only) |
+| `CKA_HSS_LMOTS_TYPES` | `0x61b` | Per-level LMOTS type IDs (multi-value, generated keys only) |
+| `CKA_HSS_KEYS_REMAINING` | `0x61c` | Remaining one-time-signature slots (read-only) |
+
+There is **no** `CKA_LMS_PARAM_SET` / `CKA_LMOTS_PARAM_SET` and no
+`CKP_LMS_*` / `CKP_LMOTS_*` named constants in the v3.2 header — `CK_LMS_TYPE`
+and `CK_LMOTS_TYPE` are plain `CK_ULONG`s carrying the raw IANA-registered
+numeric type identifiers from RFC 8554 / RFC 9708, not a SoftHSMv3-defined
+enum. Both engines were fixed (2026-09-03) to source these values from that
+registry rather than SP 800-208's own (different) table — see
+`CHANGELOG.md`'s stateful-hash entries around that date if a value looks
+unfamiliar.
 
 ### 2.4 Classic algorithms (retained from SoftHSM2)
 
@@ -148,7 +184,11 @@ via `C_DeriveKey`. All use OpenSSL EVP KDF / `EVP_PKEY_CTX` APIs — no legacy p
   (via `hbs-lms` and a custom verifier for SP 800-208 SHAKE IDs `0x0F-0x18`) and **both
   single-tree XMSS and multi-tree XMSS-MT** — all 56 RFC 8391 XMSS-MT parameter sets
   (SHA2/SHAKE × 256/512/192-bit × heights 20/40/60 with 2–12 layers) via the `xmss` crate
-  (`rust/src/crypto/xmss_bridge.rs`); XMSS-MT is no longer a Rust-engine gap.
+  (`rust/src/crypto/xmss_bridge.rs`); XMSS-MT is no longer a Rust-engine gap. As of 2026-09-03
+  the Rust engine's **single-tree** XMSS also covers all 18 SP 800-208 parameter sets
+  (SHA-256 and SHAKE-256 × N=24/32 × heights 10/16/20) — 9 of the 18 were previously missing
+  or silently non-functional (a hardcoded 96-byte keygen seed instead of the per-parameter-set
+  `SEED_LEN = 3×n`), fixed together with pinning the 6 new `CKP_*` ids the fix introduced.
 
   Key exhaustion: once all one-time signing slots are consumed, `C_Sign` returns
   `CKR_KEY_EXHAUSTED`. The remaining-use counter is tracked in `CKA_HSS_KEYS_REMAINING`
@@ -161,8 +201,13 @@ via `C_DeriveKey`. All use OpenSSL EVP KDF / `EVP_PKEY_CTX` APIs — no legacy p
 - **Non-persistent token (WASM memory model).** In the WASM build all token state (objects, PIN, label) lives strictly in RAM, so reloading the
   module loses all objects. Callers that need persistence in the browser must serialize objects with `C_GetAttributeValue(CKA_VALUE)` and re-import on next session, or wire an IndexedDB backing store. (Native builds persist automatically via the `file`/`db` object store.)
 
-- **`C_CopyObject`, `C_CreateObject` for PQC keys are partially supported.** Importing raw PQC
-  key material via `C_CreateObject` works for AES and RSA; PQC import is not yet implemented.
+- **`C_CreateObject` for PQC keys is not yet implemented.** Importing raw key material via
+  `C_CreateObject` works for AES and RSA; PQC (ML-KEM/ML-DSA/SLH-DSA/HSS/XMSS) private-key
+  import is not. `C_CopyObject` itself is implemented in both engines for ordinary keys, but
+  is **refused by design** for HSS/XMSS/XMSS-MT private keys specifically (PKCS#11 v3.2
+  §6.65.3/§6.66.4-5 mandate `CKA_COPYABLE=FALSE` for these stateful one-time-signature key
+  types — duplicating one would let two copies independently advance/replay the same leaf,
+  a forgery hazard, not an accident to work around).
 
 ---
 
@@ -795,7 +840,7 @@ This encoding is transparent to callers — pass the raw message to `C_Sign` or 
 
 ## 9. StrongSwan IKEv2 Adapter (`strongswan-pkcs11/`)
 
-The `strongswan-pkcs11/` directory provides a strongSwan-compatible PKCS#11 plugin adapter. It exposes softhsmv3 ML-KEM and ML-DSA operations to the IKEv2 key-exchange and authentication layers without modifying strongSwan core.
+The `strongswan-pkcs11/` directory provides a strongSwan-compatible PKCS#11 plugin adapter. It exposes softhsmv3 ML-KEM key exchange (all three sizes) and ML-DSA (44/65/87), SLH-DSA-SHA2 (128s/192s/256s), Ed448, and Ed25519 authentication to the IKEv2 key-exchange and AUTH-payload layers without modifying strongSwan core — see `strongswan-pkcs11/README.md` for the full algorithm-to-file map; ML-DSA is walked through below as the representative example.
 
 ### 9.1 ML-KEM key exchange
 
@@ -823,7 +868,7 @@ Both paths call into softhsmv3's `C_EncapsulateKey` / `C_DecapsulateKey` (PKCS#1
 
 ### 9.2 ML-DSA signing constants
 
-`strongswan-pkcs11/pkcs11.h` adds the PKCS#11 v3.2 ML-DSA constants needed for the IKEv2 AUTH payload:
+`strongswan-pkcs11/pkcs11.h` adds the PKCS#11 v3.2 ML-DSA constants needed for the IKEv2 AUTH payload. (SLH-DSA-SHA2 and Ed448/Ed25519 authentication go through the same plugin via the existing `CKM_SLH_DSA` / `CKM_EDDSA` mechanisms — this walkthrough uses ML-DSA as the representative example, not because it's the only one supported.)
 
 ```c
 #define CKK_ML_DSA              (0x0000004aUL)  // key type
