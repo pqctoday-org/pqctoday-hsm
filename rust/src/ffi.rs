@@ -5342,6 +5342,39 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
             .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
         let hide_cka_value =
             key_type == Some(CKK_RSA) && (class == CKO_PUBLIC_KEY || class == CKO_PRIVATE_KEY);
+        // Phase-4 §4 (2026-09-07). The mirror image of the RSA case above, and
+        // it must NOT be handled the same way.
+        //
+        // §6.65.3 (HSS) and §6.66.4/§6.66.5 (XMSS, XMSS-MT) DO define
+        // CKA_VALUE for these private keys, with footnote 7 — "cannot be
+        // revealed if CKA_SENSITIVE is CK_TRUE or CKA_EXTRACTABLE is
+        // CK_FALSE" — and the same tables and footnote sets are unchanged in
+        // the v3.3 draft. So the correct answer is "the object has it and will
+        // not disclose it" (CKR_ATTRIBUTE_SENSITIVE), which is what C++
+        // returns. This engine was answering CKR_ATTRIBUTE_TYPE_INVALID, i.e.
+        // "no such attribute", denying an attribute the specification defines.
+        //
+        // WHY NOTHING IS MATERIALISED. The obvious fix — store the state blob
+        // under CKA_VALUE at keygen — would be wrong twice over. The state
+        // MUTATES on every signature (the one-time-signature leaf index
+        // advances), so a copy under CKA_VALUE would silently go stale and
+        // become a second, divergent record of the key's most safety-critical
+        // field. And the state lives at CKA_PRIV_STATEFUL_KEY_STATE
+        // deliberately: constants.rs:372-390 records that it was MOVED into
+        // the engine-private range precisely because a writable location let a
+        // client rewind the leaf index and reuse a one-time key. Copying it
+        // back into a standard attribute would re-open that door.
+        //
+        // Answering from the key type alone needs no copy and cannot go stale.
+        //
+        // Gated on the same (sensitive || !extractable) condition as the
+        // generic rule rather than unconditionally: §6.65.3/§6.66.4 make these
+        // keys MUST-be-sensitive, so the guard is expected always to hold, but
+        // if an object somehow reached this point without it the conservative
+        // answer is to fall through and report the attribute absent. No state
+        // is disclosed on any path.
+        let stateful_hash_private = class == CKO_PRIVATE_KEY
+            && matches!(key_type, Some(CKK_HSS) | Some(CKK_XMSS) | Some(CKK_XMSSMT));
         // PKCS#11 v3.2 §5.7.5 — process EVERY template entry, recording each
         // failure class, then return one consolidated code. The whole template
         // is filled in regardless of any single entry's failure.
@@ -5382,6 +5415,14 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
                 if hide_cka_value && attr_type == CKA_VALUE {
                     *val_len_ptr = usize::MAX; // CK_UNAVAILABLE_INFORMATION
                     had_missing = true;
+                    continue;
+                }
+                if stateful_hash_private
+                    && attr_type == CKA_VALUE
+                    && (sensitive || !extractable)
+                {
+                    *val_len_ptr = usize::MAX; // CK_UNAVAILABLE_INFORMATION
+                    had_sensitive = true;
                     continue;
                 }
                 if attr_is_sensitive_material(attr_type)
