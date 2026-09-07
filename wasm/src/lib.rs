@@ -1415,12 +1415,22 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             uid: uid(),
             data: data(),
             cryptographic_parameters: None,
+                    // The workbench drives single-shot operations; §6.1.62/§6.1.63
+            // streaming is a client-side flow the playground does not expose.
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
         }),
         "SignatureVerify" => RequestPayload::SignatureVerify(SignatureVerifyRequest {
             uid: uid(),
             data: data(),
             signature: spec_bytes(spec, "signature", "_"),
             cryptographic_parameters: None,
+                    // The workbench drives single-shot operations; §6.1.62/§6.1.63
+            // streaming is a client-side flow the playground does not expose.
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
         }),
         "Encapsulate" => RequestPayload::Encapsulate(EncapsulateRequest {
             uid: uid(),
