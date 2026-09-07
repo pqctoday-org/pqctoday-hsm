@@ -282,6 +282,14 @@ private:
 	CK_RV MacVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey);
 	CK_RV StatefulVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey);
 	CK_RV StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen);
+	// Shared verification core for HSS/XMSS/XMSSMT (AsymMech::Type 1000/1001/1002).
+	// Session-free by design: StatefulVerify (plain C_Verify) and the pre-bound
+	// C_VerifySignature/C_VerifySignatureFinal path (phase-5 §1) source hKey and
+	// the message differently and manage session state on their own timelines,
+	// but both end up needing exactly this. Neither resets any session state.
+	CK_RV StatefulVerifyCore(CK_OBJECT_HANDLE hKey, CK_SLOT_ID slotId, AsymMech::Type mechanism,
+	                          CK_BYTE_PTR pData, CK_ULONG ulDataLen,
+	                          CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen);
 	CK_RV AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey);
 
 	// Key generation
