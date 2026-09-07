@@ -193,6 +193,14 @@ struct Cli {
     #[arg(long = "auth-user")]
     auth_user: Vec<String>,
 
+    /// Enable the §6.1.32 `Interop` operation (Begin / End / Reset).
+    ///
+    /// KMIP 3.0 §6.1.32: Interop "SHALL NOT be available in a production
+    /// server" — it exists so a conformance run can bracket and reset test
+    /// cases. Off by default; the OASIS replay harness passes this flag.
+    #[arg(long = "enable-interop", default_value_t = false)]
+    enable_interop: bool,
+
     /// TLS posture: `permissive` (default, historical behaviour), `basic`,
     /// or `quantum-safe`.
     ///
@@ -565,6 +573,7 @@ async fn main() -> anyhow::Result<()> {
         // plan's KMIP-axis multi-tenant benchmark cells need (§P2/§P3).
         tenancy_mode,
         strict_tenants,
+        interop_enabled: cli.enable_interop,
     };
     let deps = Arc::new(
         Deps::new(engine, store, sink, config).with_engine_session(engine_session),

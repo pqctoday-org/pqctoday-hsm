@@ -1942,6 +1942,9 @@ pub struct ExportResponse {
 pub enum InteropFunction {
     Begin = 0x01,
     End   = 0x02,
+    /// §11.24 — "Resets the server to the state it would be in at the
+    /// beginning of an interop session."
+    Reset = 0x03,
 }
 
 impl InteropFunction {
@@ -1950,6 +1953,7 @@ impl InteropFunction {
         match v {
             0x01 => Some(Self::Begin),
             0x02 => Some(Self::End),
+            0x03 => Some(Self::Reset),
             _ => None,
         }
     }

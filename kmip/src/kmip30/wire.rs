@@ -163,9 +163,11 @@ pub(crate) mod tags {
     /// ResponseHeader. Codepoint verified from
     /// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`.
     pub const ServerCorrelationValue: u32 = 0x42_0106;
-    // `Client Correlation Value` (0x42_0105, request side only)
-    // intentionally absent — the decoder skips it; see curated-table
-    // note above.
+    /// KMIP 3.0 §9.7 — `Client Correlation Value`, a text string a client
+    /// MAY add to a request "to provide additional information to the
+    /// server. It need not be unique. The server SHOULD log this
+    /// information." Decoded and logged since R6; previously skipped.
+    pub const ClientCorrelationValue: u32 = 0x42_0105;
     pub const SignatureData: u32          = 0x42_00c3;
     pub const State: u32                  = 0x42_008d;
     pub const TimeStamp: u32              = 0x42_0092;
@@ -693,6 +695,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
     let mut max_resp_size: Option<i32> = None;
     let mut async_indicator: Option<crate::kmip30::AsynchronousIndicator> = None;
     let mut authentication: Vec<crate::kmip30::Credential> = Vec::new();
+    let mut client_correlation_value: Option<String> = None;
     for child in children {
         match child.tag.0 {
             tags::ProtocolVersion => {
@@ -708,6 +711,15 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
             tags::TimeStamp => {
                 if let Value::DateTime(ts) = child.value {
                     time_stamp = time::OffsetDateTime::from_unix_timestamp(ts).ok();
+                }
+            }
+            // §9.7 — the server SHOULD log this. Carried on the header so the
+            // dispatcher can put it in the audit record; never echoed back on
+            // a client-to-server response (§9.7 gives it to the RESPONSE only
+            // for server-to-client operations, which are encoded elsewhere).
+            tags::ClientCorrelationValue => {
+                if let Value::TextString(v) = &child.value {
+                    client_correlation_value = Some(v.clone());
                 }
             }
             // KMIP 3.0 §9.5 — `Batch Error Continuation Option`
@@ -762,6 +774,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
         maximum_response_size: max_resp_size,
         asynchronous_indicator: async_indicator,
         authentication,
+        client_correlation_value,
     })
 }
 
@@ -1231,6 +1244,7 @@ fn interop_function_code(f: InteropFunction) -> u32 {
     match f {
         InteropFunction::Begin => 0x01,
         InteropFunction::End => 0x02,
+        InteropFunction::Reset => 0x03,
     }
 }
 

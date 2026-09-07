@@ -999,9 +999,14 @@ def start_server(port: int = 9999, extra_args: list[str] | None = None) -> Serve
         if _profile and not any(a == "--tls-profile" for a in (extra_args or []))
         else []
     )
+    # R6 (2026-09-07) — §6.1.32 says Interop "SHALL NOT be available in a
+    # production server", so the server now refuses it unless started with
+    # --enable-interop. THIS is the conformance harness, which is exactly the
+    # context the operation exists for, so it opts in. A deployed server does
+    # not, which is the point of the flag.
     proc = subprocess.Popen(
         [str(SERVER_BINARY), "--listen", f"127.0.0.1:{port}", "--store-memory",
-         *_profile_args, *(extra_args or [])],
+         "--enable-interop", *_profile_args, *(extra_args or [])],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=False,

@@ -265,6 +265,12 @@ pub struct DepsConfig {
     /// enforces §8.1.2 authentication per batch item
     /// (`Authentication Not Successful (0x03)` on failure).
     pub auth_users: Vec<crate::server::auth::AuthUser>,
+    /// KMIP 3.0 §6.1.32 — Interop "SHALL NOT be available in a production
+    /// server". Defaults to **false**, so the operation is refused unless a
+    /// deployment opts in; the conformance harness turns it on explicitly.
+    /// Before R6 the operation was always available, which is exactly what
+    /// the spec forbids.
+    pub interop_enabled: bool,
 
     /// P2.3 — the server-configured Certificate Authority used by the
     /// §6.1.6 Certify / §6.1.52 Re-certify operations. `None` (the
@@ -420,6 +426,9 @@ impl Default for DepsConfig {
             rng_seed_mode: RngSeedMode::FullConsume,
             tenancy_mode: TenancyMode::Single, // today's behavior, unchanged
             strict_tenants: Vec::new(),
+            // §6.1.32 — off unless a deployment opts in. The conformance
+            // harness passes --enable-interop; a production server does not.
+            interop_enabled: false,
         }
     }
 }

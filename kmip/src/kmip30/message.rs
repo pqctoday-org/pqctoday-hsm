@@ -86,6 +86,11 @@ pub struct RequestHeader {
     /// configured; in open-auth mode (no users configured) they are
     /// carried but ignored.
     pub authentication: Vec<Credential>,
+    /// KMIP 3.0 §9.7 `Client Correlation Value` — free-form text a client
+    /// MAY attach to a request; "it need not be unique" and "the server
+    /// SHOULD log this information". Carried so the audit record can include
+    /// it; the server never invents one.
+    pub client_correlation_value: Option<String>,
 }
 
 /// KMIP 3.0 §7.40 Table 494 `Ticket` structure — `Ticket Type`
@@ -201,6 +206,7 @@ impl RequestHeader {
             maximum_response_size: None,
             asynchronous_indicator: None,
             authentication: Vec::new(),
+            client_correlation_value: None,
         }
     }
 }
