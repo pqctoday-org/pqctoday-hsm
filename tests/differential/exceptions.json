@@ -25,15 +25,6 @@
       "citation": "Profiles v3.2 mandates no mechanism; PKCS#11 v3.2 §6 is a catalogue of definitions, not a requirement list."
     },
     {
-      "id": "DEFECT-RUST-WRAPPED-PRIVATE-KEY-NOT-PKCS8",
-      "status": "defect",
-      "scenario": "encoding.wrap_private_key_pkcs8",
-      "path": "wrapped.len",
-      "justification": "Wrapping the same P-256 private key under the same AES KEK yields 152 bytes from C++ and 72 from Rust. A PKCS#8 PrivateKeyInfo for P-256 is ~138 bytes before key wrapping; 72 bytes cannot contain one, so Rust is still wrapping its raw stored value. Plan item E6, open — and it depends on E5.",
-      "citation": "PKCS#11 v3.2 §6.7: 'For wrapping, a private key is BER-encoded according to [PKCS #8] PrivateKeyInfo ASN.1 type.'",
-      "note": "DEFERRED, not half-done. E6 depends on E5 (the RSA CRT components and a defined per-type private-key attribute layout), which this engine does not have — its private keys are stored as an engine-internal blob under CKA_VALUE. Emitting PKCS#11 PrivateKeyInfo means first giving every private key type a spec-defined attribute set to build the PrivateKeyInfo FROM. Two further entries here are the same root cause and unblock with it: DEFECT-RUST-EC-PARAMS-ABSENT-ON-UNWRAPPED-PRIVATE (C++ recovers CKA_EC_PARAMS from the PKCS#8 AlgorithmIdentifier; Rust's raw blob does not carry the curve, so there is nothing to recover from) and DEFECT-RUST-CKA_VALUE-ON-ASYMMETRIC-KEYS."
-    },
-    {
       "id": "LEGAL-TOKEN-CAPACITIES-AND-VERSIONS",
       "status": "legal",
       "scenario": "env.token_info",
@@ -88,15 +79,6 @@
       "justification": "For Edwards and Montgomery curves C++ emits CKA_EC_PARAMS in the curveName form ('edwards25519', 'curve25519') and Rust in the oID form (1.3.101.112, 1.3.101.110). Covers the three observations that follow from that one choice: .len, .enc and .value. Both forms are explicitly legal and both engines accept both on input, which is what interoperability actually depends on.",
       "citation": "PKCS#11 v3.2 §6.3.10: these curves 'can only be specified in the CKA_EC_PARAMS attribute ... using the curveName or the oID methods' — the choice between them is the caller's, and the token's.",
       "scenario": "create.generate_key_pair.ed25519|create.generate_key_pair.x25519"
-    },
-    {
-      "id": "DEFECT-RUST-EC-PARAMS-ABSENT-ON-UNWRAPPED-PRIVATE",
-      "status": "defect",
-      "scenario": "encoding.wrap_private_key_pkcs8",
-      "path": "*CKA_EC_PARAMS*",
-      "justification": "An EC private key recovered through C_UnwrapKey has no CKA_EC_PARAMS in Rust. Plan item E2 was applied to generation on the public half only; the unwrap path never got it. This is the same root cause as the already-observed interop break where C++'s KEM path rejects Rust-generated EC keys.",
-      "citation": "PKCS#11 v3.2 §6.3.9: 'the mechanism contributes the CKA_CLASS, CKA_KEY_TYPE, CKA_EC_PARAMS and CKA_VALUE attributes to the new private key.'",
-      "note": "BLOCKED on DEFECT-RUST-WRAPPED-PRIVATE-KEY-NOT-PKCS8, established 2026-08-14: the harness's unwrap template supplies no CKA_EC_PARAMS, so C++ recovers it from the PKCS#8 AlgorithmIdentifier inside the wrapped blob. Rust wraps its raw stored value, which carries no curve identifier at all, so this cannot be fixed independently of E6 — only faked."
     },
     {
       "id": "LEGAL-SENSITIVE-DEFAULT-SLH-DSA",
