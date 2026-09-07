@@ -95,6 +95,16 @@ typedef CK_RV (*fn_DecapsulateKey)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJEC
                                    CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG,
                                    CK_OBJECT_HANDLE_PTR);
 
+// Pre-bound verify (§5.12, added by v3.0) — like Encapsulate/Decapsulate
+// above, CK_FUNCTION_LIST is the legacy v2.40 shape and has no member for
+// these, so they are resolved with dlsym rather than through e.fl.
+typedef CK_RV (*fn_VerifySignatureInit)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE,
+                                        CK_BYTE_PTR, CK_ULONG);
+typedef CK_RV (*fn_VerifySignature)(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG);
+typedef CK_RV (*fn_VerifySignatureUpdate)(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG);
+typedef CK_RV (*fn_VerifySignatureFinal)(CK_SESSION_HANDLE);
+typedef CK_RV (*fn_SessionCancel)(CK_SESSION_HANDLE, CK_FLAGS);
+
 // ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
@@ -105,6 +115,11 @@ struct Engine {
     CK_FUNCTION_LIST_PTR fl = nullptr;
     fn_EncapsulateKey    Encapsulate = nullptr;
     fn_DecapsulateKey    Decapsulate = nullptr;
+    fn_VerifySignatureInit   VerifySignatureInit   = nullptr;
+    fn_VerifySignature       VerifySignature       = nullptr;
+    fn_VerifySignatureUpdate VerifySignatureUpdate = nullptr;
+    fn_VerifySignatureFinal  VerifySignatureFinal  = nullptr;
+    fn_SessionCancel         SessionCancel         = nullptr;
     std::set<CK_MECHANISM_TYPE> mechs;
     CK_SLOT_ID           slot = 0;
     CK_SESSION_HANDLE    sess = CK_INVALID_HANDLE;
@@ -117,6 +132,8 @@ static std::string opt_report   = "p11_diff_report";
 static std::string opt_exceptions = "tests/differential/exceptions.json";
 static std::string opt_only;      // substring filter on scenario id
 static std::string opt_drop_exception; // demonstration: ignore one entry by id
+static std::string opt_dump_scenario; // phase-5 §2: raw-dump ONE scenario's full Recorder
+static std::string opt_dump_file;     //   (both engines, every key) instead of just its diff
 static bool        opt_verbose  = false;
 // --shard I/N — round-robin partition of gScenarios (index % N == I) so N
 // worker processes can split the run across cores. Each shard dlopens BOTH
@@ -870,6 +887,11 @@ static bool load_engine(Engine& e, const std::string& path, const std::string& n
     if (gfl(&e.fl) != CKR_OK || !e.fl) { fprintf(stdout, "FATAL: %s C_GetFunctionList failed\n", name.c_str()); return false; }
     e.Encapsulate = (fn_EncapsulateKey)dlsym(e.h, "C_EncapsulateKey");
     e.Decapsulate = (fn_DecapsulateKey)dlsym(e.h, "C_DecapsulateKey");
+    e.VerifySignatureInit   = (fn_VerifySignatureInit)dlsym(e.h, "C_VerifySignatureInit");
+    e.VerifySignature       = (fn_VerifySignature)dlsym(e.h, "C_VerifySignature");
+    e.VerifySignatureUpdate = (fn_VerifySignatureUpdate)dlsym(e.h, "C_VerifySignatureUpdate");
+    e.VerifySignatureFinal  = (fn_VerifySignatureFinal)dlsym(e.h, "C_VerifySignatureFinal");
+    e.SessionCancel         = (fn_SessionCancel)dlsym(e.h, "C_SessionCancel");
     return true;
 }
 
@@ -1185,6 +1207,9 @@ static void usage() {
     printf("  --drop-exception <id>  ignore one exception entry — proves the harness still detects\n");
     printf("  --list                 list scenarios and exit\n");
     printf("  --verbose              print covered divergences too\n");
+    printf("  --dump-scenario <id>   with --dump-file, dump ONE scenario's raw\n");
+    printf("                         per-engine observations (not just the diff)\n");
+    printf("  --dump-file <path>     JSON output path for --dump-scenario\n");
 }
 
 int main(int argc, char** argv) {
@@ -1200,6 +1225,8 @@ int main(int argc, char** argv) {
         {"verbose", no_argument, 0, 8},
         {"list", no_argument, 0, 9},
         {"shard", required_argument, 0, 10},
+        {"dump-scenario", required_argument, 0, 11},
+        {"dump-file", required_argument, 0, 12},
         {"help", no_argument, 0, 'h'},
         {0,0,0,0}
     };
@@ -1230,6 +1257,8 @@ int main(int argc, char** argv) {
                 }
                 break;
             }
+            case 11: opt_dump_scenario = optarg; break;
+            case 12: opt_dump_file = optarg; break;
             default: usage(); return 2;
         }
     }
@@ -1320,6 +1349,23 @@ int main(int argc, char** argv) {
         Recorder ra, rb;
         run_scenario(sc, gCpp, ra);
         run_scenario(sc, gRust, rb);
+
+        // Phase-5 §2 — the normal report below records only DIVERGENCES; a
+        // matching observation is silently dropped, so pinning every
+        // mechanism's key-size range (not just the ones that already
+        // disagree) needs the raw per-engine values, not the diff. This
+        // dumps both engines' COMPLETE Recorder for one named scenario,
+        // unfiltered, so a generator script can read real advertised
+        // values straight from the engines rather than a hand-copied table.
+        if (!opt_dump_scenario.empty() && sc.id == opt_dump_scenario && !opt_dump_file.empty()) {
+            json dj;
+            for (const auto& k : ra.order) dj["cpp"][k]  = ra.vals.at(k);
+            for (const auto& k : rb.order) dj["rust"][k] = rb.vals.at(k);
+            std::ofstream o(opt_dump_file);
+            o << std::setw(2) << dj << std::endl;
+            printf("dumped raw observations for %s -> %s\n", sc.id.c_str(), opt_dump_file.c_str());
+        }
+
         if (ra.vals.count("status") && ra.vals.at("status") == "SKIPPED_MECHANISM_ABSENT" &&
             rb.vals.count("status") && rb.vals.at("status") == "SKIPPED_MECHANISM_ABSENT") skipped++;
         else ran++;
