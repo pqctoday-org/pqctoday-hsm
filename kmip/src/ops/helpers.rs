@@ -245,6 +245,10 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
     match a {
         Aes => "AES",
         Dsa => "DSA",
+        Ec => "EC",
+        Xmss => "XMSS",
+        X25519 => "X25519",
+        X448 => "X448",
         Rsa => "RSA",
         Ecdsa => "ECDSA",
         HmacSha256 => "HMAC-SHA-256",
