@@ -169,3 +169,108 @@ mod tests {
         assert_eq!(err.result_reason(), ResultReason::PermissionDenied);
     }
 }
+
+/// §4.67 transition 6 — the **date-driven** part of the state machine.
+///
+/// The FSM above is enforced on explicit transitions (Activate, Revoke,
+/// Deactivate). What it did not do was let time move an object: an Active key
+/// whose `Protect Stop Date` had passed still reported `State = Active`, even
+/// though §4.67 transition 6 says reaching it moves the object to Deactivated
+/// with `Deactivation Reason Code = Protect Stop Date`.
+///
+/// The functional consequence was already partly contained — `Encrypt` and
+/// `Decrypt` refuse past the date — so this closes the reporting half: what
+/// `Get Attributes` says about `State` now matches what the operations do.
+///
+/// Applied on read rather than by a background sweep, deliberately: a sweep
+/// needs a scheduler, and every path that observes an object goes through the
+/// store anyway. It is a pure function of the record and the clock, so it
+/// cannot disagree with itself between callers.
+///
+/// Returns `Some((new_state, reason_code))` when time has moved the object,
+/// `None` when it has not.
+pub fn effective_state_for(
+    r: &crate::store::ObjectRecord,
+    now: time::OffsetDateTime,
+) -> Option<(crate::kmip30::State, u32)> {
+    use crate::kmip30::State;
+    // Only an Active object can be moved by a date. A Compromised or
+    // Destroyed object stays where it is — §4.67 permits only the listed
+    // transitions, and "time passed" is not a route out of those.
+    if r.state != State::Active {
+        return None;
+    }
+    const REASON_DEACTIVATION_DATE: u32 = 0x02;
+    const REASON_PROTECT_STOP_DATE: u32 = 0x03;
+    if let Some(t) = r.deactivation_date {
+        if now >= t {
+            return Some((State::Deactivated, REASON_DEACTIVATION_DATE));
+        }
+    }
+    if let Some(t) = r.protect_stop_date {
+        if now >= t {
+            return Some((State::Deactivated, REASON_PROTECT_STOP_DATE));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod date_transition_tests {
+    use super::*;
+    use crate::kmip30::State;
+    use crate::store::ObjectRecord;
+    use time::OffsetDateTime;
+
+    fn at(secs: i64) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp(secs).unwrap()
+    }
+
+    /// §4.67 transition 6 — reaching Protect Stop Date moves an Active object
+    /// to Deactivated with reason "Protect Stop Date" (0x03).
+    ///
+    /// Before this, `State` kept reporting Active indefinitely while
+    /// Encrypt/Decrypt refused the same key — the operations and the reported
+    /// state disagreed.
+    #[test]
+    fn protect_stop_date_deactivates_on_read() {
+        let mut r = ObjectRecord::default();
+        r.state = State::Active;
+        r.protect_stop_date = Some(at(1_000));
+
+        assert_eq!(effective_state_for(&r, at(999)), None, "before the date: unchanged");
+        assert_eq!(
+            effective_state_for(&r, at(1_000)),
+            Some((State::Deactivated, 0x03)),
+            "AT the date the transition has happened",
+        );
+        assert_eq!(effective_state_for(&r, at(5_000)), Some((State::Deactivated, 0x03)));
+    }
+
+    /// Deactivation Date is its own reason code (0x02), and takes precedence
+    /// when both are set — it names the object's own scheduled deactivation.
+    #[test]
+    fn deactivation_date_reports_its_own_reason() {
+        let mut r = ObjectRecord::default();
+        r.state = State::Active;
+        r.deactivation_date = Some(at(1_000));
+        r.protect_stop_date = Some(at(2_000));
+        assert_eq!(effective_state_for(&r, at(1_500)), Some((State::Deactivated, 0x02)));
+    }
+
+    /// Time is not a route out of the states §4.67 does not permit leaving.
+    /// A Compromised object stays Compromised however long you wait.
+    #[test]
+    fn a_date_cannot_move_an_object_out_of_a_terminal_state() {
+        for state in [State::Compromised, State::Destroyed, State::PreActive] {
+            let mut r = ObjectRecord::default();
+            r.state = state;
+            r.protect_stop_date = Some(at(1_000));
+            assert_eq!(
+                effective_state_for(&r, at(9_999)),
+                None,
+                "{state:?} must not be moved by a date",
+            );
+        }
+    }
+}

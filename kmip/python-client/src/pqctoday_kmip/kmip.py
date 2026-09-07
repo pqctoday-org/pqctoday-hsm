@@ -601,10 +601,10 @@ class KmipClient:
         )
 
     def activate(self, uid: str) -> KmipResult:
-        return self.request("Activate", _leaf("UniqueIdentifier", "TextString", uid))
+        return self.request("Activate", _leaf("UniqueIdentifier", "Identifier", uid))
 
     def get(self, uid: str, key_format_type: Optional[str] = None) -> KmipResult:
-        payload = [_leaf("UniqueIdentifier", "TextString", uid)]
+        payload = [_leaf("UniqueIdentifier", "Identifier", uid)]
         if key_format_type:
             payload.append(_leaf("KeyFormatType", "Enumeration", key_format_type))
         return self.request("Get", *payload)
@@ -621,7 +621,7 @@ class KmipClient:
         if block_cipher_mode:
             cp_children.append(_leaf("BlockCipherMode", "Enumeration", block_cipher_mode))
         payload = [
-            _leaf("UniqueIdentifier", "TextString", uid),
+            _leaf("UniqueIdentifier", "Identifier", uid),
             _struct("CryptographicParameters", *cp_children),
             _leaf("Data", "ByteString", data.hex()),
         ]
@@ -632,7 +632,7 @@ class KmipClient:
     def sign(self, uid: str, data: bytes, algorithm: str) -> KmipResult:
         return self.request(
             "Sign",
-            _leaf("UniqueIdentifier", "TextString", uid),
+            _leaf("UniqueIdentifier", "Identifier", uid),
             _struct(
                 "CryptographicParameters",
                 _leaf("CryptographicAlgorithm", "Enumeration", algorithm),
@@ -658,7 +658,7 @@ class KmipClient:
         Use :meth:`validity` for the verdict.
         """
         payload = [
-            _leaf("UniqueIdentifier", "TextString", uid),
+            _leaf("UniqueIdentifier", "Identifier", uid),
             _leaf("Data", "ByteString", data.hex()),
             _leaf("SignatureData", "ByteString", signature.hex()),
         ]
@@ -761,7 +761,7 @@ class KmipClient:
         ``.get("Data")`` and the derived secret's UID via
         ``.get("UniqueIdentifier")``.
         """
-        return self.request("Encapsulate", _leaf("UniqueIdentifier", "TextString", uid))
+        return self.request("Encapsulate", _leaf("UniqueIdentifier", "Identifier", uid))
 
     def decapsulate(self, uid: str, ciphertext: bytes) -> KmipResult:
         """Decapsulate ``ciphertext`` against a private key UID.
@@ -770,17 +770,17 @@ class KmipClient:
         """
         return self.request(
             "Decapsulate",
-            _leaf("UniqueIdentifier", "TextString", uid),
+            _leaf("UniqueIdentifier", "Identifier", uid),
             _leaf("Data", "ByteString", ciphertext.hex()),
         )
 
     def destroy(self, uid: str) -> KmipResult:
-        return self.request("Destroy", _leaf("UniqueIdentifier", "TextString", uid))
+        return self.request("Destroy", _leaf("UniqueIdentifier", "Identifier", uid))
 
     def revoke(self, uid: str, reason: str = "Unspecified") -> KmipResult:
         return self.request(
             "Revoke",
-            _leaf("UniqueIdentifier", "TextString", uid),
+            _leaf("UniqueIdentifier", "Identifier", uid),
             _struct("RevocationReason",
                     _leaf("RevocationReasonCode", "Enumeration", reason)),
         )
@@ -791,12 +791,12 @@ class KmipClient:
 
     def get_attributes(self, uid: str) -> KmipResult:
         """KMIP GetAttributes for a single UID."""
-        return self.request("GetAttributes", _leaf("UniqueIdentifier", "TextString", uid))
+        return self.request("GetAttributes", _leaf("UniqueIdentifier", "Identifier", uid))
 
     def get_usage_allocation(self, uid: str, usage_limits_count: Optional[int] = None) -> KmipResult:
         """KMIP GetUsageAllocation (§6.1.29) — grants a usage allocation by
         decrementing the object's tracked Usage Limits Count."""
-        payload = [_leaf("UniqueIdentifier", "TextString", uid)]
+        payload = [_leaf("UniqueIdentifier", "Identifier", uid)]
         if usage_limits_count is not None:
             payload.append(_leaf("UsageLimitsCount", "LongInteger", usage_limits_count))
         return self.request("GetUsageAllocation", *payload)
@@ -850,7 +850,7 @@ class KmipClient:
         return self.request(
             "DeriveKey",
             _leaf("ObjectType", "Enumeration", object_type),
-            _leaf("UniqueIdentifier", "TextString", base_uid),
+            _leaf("UniqueIdentifier", "Identifier", base_uid),
             _leaf("DerivationMethod", "Enumeration", method),
             _struct(
                 "DerivationParameters",
@@ -869,7 +869,7 @@ class KmipClient:
         inheriting its algorithm; the original is linked via
         ``ReplacedObjectLink``. Returns the new UID via
         ``.get("UniqueIdentifier")``."""
-        payload = [_leaf("UniqueIdentifier", "TextString", uid)]
+        payload = [_leaf("UniqueIdentifier", "Identifier", uid)]
         if offset is not None:
             payload.append(_leaf("Offset", "Interval", offset))
         return self.request("ReKey", *payload)
@@ -878,7 +878,7 @@ class KmipClient:
         """KMIP Re-key Key Pair (§6.1.54) — mint a replacement key pair for
         the private key ``uid``. Returns the new private/public UIDs via
         ``.get("PrivateKeyUniqueIdentifier")`` / ``.get("PublicKeyUniqueIdentifier")``."""
-        payload = [_leaf("UniqueIdentifier", "TextString", uid)]
+        payload = [_leaf("UniqueIdentifier", "Identifier", uid)]
         if offset is not None:
             payload.append(_leaf("Offset", "Interval", offset))
         return self.request("ReKeyKeyPair", *payload)

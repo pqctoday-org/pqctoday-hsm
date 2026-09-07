@@ -452,7 +452,7 @@ pub fn raw_custom_attrs(
     use crate::kmip30::Attribute;
     let mut m = std::collections::HashMap::new();
     for a in attrs {
-        if let Attribute::Custom { name, value } = a {
+        if let Attribute::Custom { name, value, .. } = a {
             m.insert(name.clone(), value.clone());
         }
     }
@@ -2142,5 +2142,135 @@ mod tests {
             mac_signature_key_information_present: false,
         }, &wrapped, &crate::server::auth::AuthContext::open(), "c");
         assert!(err.is_err(), "KWP-wrapped bytes must not silently unwrap as plain NISTKeyWrap");
+    }
+}
+
+/// KMIP 3.0 §4.13 — the five Counter attributes. Each records "a successful
+/// instance of usage of an object as the subject of a KMIP operation", and
+/// §4.13 says they SHALL be present for Certificates, Certificate Requests,
+/// Private keys, Public keys and Symmetric keys.
+///
+/// Which counter a given operation bumps. Named rather than passed as a
+/// string so a typo cannot silently increment nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Counter {
+    Certify,
+    Decrypt,
+    Encrypt,
+    Sign,
+    SignatureVerify,
+}
+
+/// Increment `which` on the object named by `uid`, after the operation it
+/// counts has already succeeded.
+///
+/// Deliberately best-effort and never fails the operation: a counter is
+/// bookkeeping, and refusing a completed Sign because its usage tally could
+/// not be written would turn an accounting problem into a crypto outage.
+/// A failed write is dropped rather than surfaced -- the same stance
+/// `commit_mutation` takes for its notification queue.
+///
+/// Rides the store write the operation performs anyway, so counting costs no
+/// extra round trip (the "measure after" half of that decision is a
+/// follow-up, not a claim made here).
+pub fn bump_counter(deps: &Deps, uid: &str, which: Counter) {
+    let Ok(Some(mut rec)) = deps.store.get(uid) else { return };
+    let slot = match which {
+        Counter::Certify => &mut rec.certify_counter,
+        Counter::Decrypt => &mut rec.decrypt_counter,
+        Counter::Encrypt => &mut rec.encrypt_counter,
+        Counter::Sign => &mut rec.sign_counter,
+        Counter::SignatureVerify => &mut rec.signature_verify_counter,
+    };
+    // Saturating: a counter that wrapped to a negative count would be worse
+    // than one that stopped being useful at i32::MAX.
+    *slot = Some(slot.unwrap_or(0).saturating_add(1));
+    let _ = deps.store.update(rec);
+}
+
+#[cfg(test)]
+mod counter_tests {
+    use super::*;
+    use crate::auditlog::{AuditSink, RingSink};
+    use crate::kmip30::{KmipAlgorithm, ObjectType, State, UsageMask};
+    use crate::policy::{load_from_str, Engine};
+    use crate::store::{MemoryStore, ObjectRecord};
+    use std::sync::Arc;
+    use time::OffsetDateTime;
+
+    const PERMISSIVE: &str = r#"
+schema_version: 1
+metadata: { name: p, description: p, authority: t, effective: "always" }
+rules: []
+"#;
+
+    fn deps() -> Deps {
+        let ring = Arc::new(RingSink::new(16));
+        let sink: Arc<dyn AuditSink> = ring.clone();
+        let engine = Engine::with_global_sink(sink.clone());
+        engine
+            .replace_all(load_from_str(PERMISSIVE, std::path::Path::new("<test>")).unwrap())
+            .unwrap();
+        Deps::new(engine, Arc::new(MemoryStore::new()), sink, super::super::deps::DepsConfig::default())
+    }
+
+    fn put_key(d: &Deps, uid: &str) {
+        d.store
+            .put(ObjectRecord {
+                uid: uid.into(),
+                object_type: ObjectType::SymmetricKey,
+                algorithm: KmipAlgorithm::Aes,
+                cryptographic_length: 128,
+                usage_mask: UsageMask::ENCRYPT | UsageMask::DECRYPT,
+                state: State::Active,
+                initial_date: OffsetDateTime::UNIX_EPOCH,
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+    }
+
+    /// §4.13 — a Counter records "a successful instance of usage". Starting
+    /// from absent (not 0), the first use makes it 1 and it accumulates.
+    #[test]
+    fn counters_start_absent_then_accumulate_per_use() {
+        let d = deps();
+        put_key(&d, "k1");
+        assert_eq!(d.store.get("k1").unwrap().unwrap().encrypt_counter, None,
+                   "a never-used object should carry no count, not a zero");
+
+        bump_counter(&d, "k1", Counter::Encrypt);
+        assert_eq!(d.store.get("k1").unwrap().unwrap().encrypt_counter, Some(1));
+
+        bump_counter(&d, "k1", Counter::Encrypt);
+        bump_counter(&d, "k1", Counter::Encrypt);
+        assert_eq!(d.store.get("k1").unwrap().unwrap().encrypt_counter, Some(3));
+
+        // Each counter is independent — an Encrypt must not move Decrypt.
+        assert_eq!(d.store.get("k1").unwrap().unwrap().decrypt_counter, None);
+        bump_counter(&d, "k1", Counter::Decrypt);
+        assert_eq!(d.store.get("k1").unwrap().unwrap().decrypt_counter, Some(1));
+        assert_eq!(d.store.get("k1").unwrap().unwrap().encrypt_counter, Some(3));
+    }
+
+    /// Bookkeeping must never fail the operation it counts: an unknown UID is
+    /// a no-op, not a panic and not an error the caller has to handle.
+    #[test]
+    fn bumping_an_unknown_object_is_a_silent_no_op() {
+        let d = deps();
+        bump_counter(&d, "does-not-exist", Counter::Sign);
+    }
+
+    /// Saturating rather than wrapping — a negative usage count would be
+    /// worse than one that stops being informative.
+    #[test]
+    fn counter_saturates_instead_of_wrapping_negative() {
+        let d = deps();
+        put_key(&d, "k2");
+        let mut rec = d.store.get("k2").unwrap().unwrap();
+        rec.sign_counter = Some(i32::MAX);
+        d.store.update(rec).unwrap();
+
+        bump_counter(&d, "k2", Counter::Sign);
+        assert_eq!(d.store.get("k2").unwrap().unwrap().sign_counter, Some(i32::MAX));
     }
 }

@@ -985,8 +985,23 @@ def start_server(port: int = 9999, extra_args: list[str] | None = None) -> Serve
             f"server binary missing: {SERVER_BINARY}\n"
             f"run `cargo build --release --bin pqctoday-kmip` first"
         )
+    # G3 (2026-09-06) — `KMIP_TLS_PROFILE` runs the whole replay under a
+    # chosen TLS posture. It exists because the conformance evidence was
+    # being measured under the DEFAULT posture, which does not satisfy
+    # Profiles §3.1.2 (it offers AES-128-GCM and TLS 1.2 suites the clause
+    # forbids) — while the report claimed Baseline Server conformance, and
+    # §6.2 requires the §3.1 suite. Set it to `basic` to measure under a
+    # conformant posture. A per-test `extra_args` still wins, since those
+    # pin a specific operator choice the transcript depends on.
+    _profile = os.environ.get("KMIP_TLS_PROFILE")
+    _profile_args = (
+        ["--tls-profile", _profile]
+        if _profile and not any(a == "--tls-profile" for a in (extra_args or []))
+        else []
+    )
     proc = subprocess.Popen(
-        [str(SERVER_BINARY), "--listen", f"127.0.0.1:{port}", "--store-memory", *(extra_args or [])],
+        [str(SERVER_BINARY), "--listen", f"127.0.0.1:{port}", "--store-memory",
+         *_profile_args, *(extra_args or [])],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=False,

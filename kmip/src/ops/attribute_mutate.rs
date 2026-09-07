@@ -656,6 +656,17 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         // while these were no-ops in `apply_attribute`, load-bearing
         // now that they're genuinely persisted.
         Attribute::GroupLink(_)                   => obj.links.contains_key("GroupLink"),
+        Attribute::CertificateLink(_) => obj.links.contains_key("CertificateLink"),
+        Attribute::ChildLink(_) => obj.links.contains_key("ChildLink"),
+        Attribute::ParentLink(_) => obj.links.contains_key("ParentLink"),
+        Attribute::Pkcs12CertificateLink(_) => obj.links.contains_key("Pkcs12CertificateLink"),
+        Attribute::Pkcs12PasswordLink(_) => obj.links.contains_key("Pkcs12PasswordLink"),
+        Attribute::WrappingKeyLink(_) => obj.links.contains_key("WrappingKeyLink"),
+        Attribute::CredentialLink(_) => obj.links.contains_key("CredentialLink"),
+        Attribute::PasswordLink(_) => obj.links.contains_key("PasswordLink"),
+        Attribute::SplitKeyBaseLink(_) => obj.links.contains_key("SplitKeyBaseLink"),
+        Attribute::JoinedSplitKeyPartsLink(_) => obj.links.contains_key("JoinedSplitKeyPartsLink"),
+        Attribute::CertificateRequestLink(_) => obj.links.contains_key("CertificateRequestLink"),
         Attribute::DerivationBaseObjectLink(_)    => obj.links.contains_key("DerivationBaseObjectLink"),
         Attribute::DerivedObjectLink(_)            => obj.links.contains_key("DerivedObjectLink"),
         Attribute::ReplacedObjectLink(_)           => obj.links.contains_key("ReplacedObjectLink"),
@@ -694,6 +705,16 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         Attribute::QuantumSafe(_)            => obj.quantum_safe.is_some(),
         Attribute::LeaseTime(_)              => obj.lease_time.is_some(),
         Attribute::RotateName(_)             => obj.rotate_name.is_some(),
+        Attribute::RotateLatest(_) => obj.rotate_latest.is_some(),
+        Attribute::ArchiveDate(_) => obj.archive_date.is_some(),
+        Attribute::NistSecurityCategory(_) => obj.nist_security_category.is_some(),
+        Attribute::OtpCounter(_) => obj.otp_counter.is_some(),
+        Attribute::Pkcs12FriendlyName(_) => obj.pkcs12_friendly_name.is_some(),
+        Attribute::CertifyCounter(_) => obj.certify_counter.is_some(),
+        Attribute::DecryptCounter(_) => obj.decrypt_counter.is_some(),
+        Attribute::EncryptCounter(_) => obj.encrypt_counter.is_some(),
+        Attribute::SignCounter(_) => obj.sign_counter.is_some(),
+        Attribute::SignatureVerifyCounter(_) => obj.signature_verify_counter.is_some(),
         // Conservative default: claim present for attrs we don't yet
         // route into a typed field. Tightens up over time as more
         // tests exercise them.
@@ -834,7 +855,7 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::ObjectType(_)             => {}  // Read-Only
         Attribute::State(_)                  => {}  // Read-Only
         Attribute::UniqueIdentifier(_)       => {}  // Read-Only
-        Attribute::Custom { name, value }    => {
+        Attribute::Custom { name, value, .. }    => {
             obj.custom_attributes.insert(name.clone(), value.clone());
         }
         // KMIP §11 Link attributes — UID references into the
@@ -845,6 +866,17 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::PublicKeyLink(uid)        => { obj.links.insert("PublicKeyLink".into(), uid.clone()); }
         Attribute::PrivateKeyLink(uid)       => { obj.links.insert("PrivateKeyLink".into(), uid.clone()); }
         Attribute::GroupLink(uid)            => { obj.links.insert("GroupLink".into(), uid.clone()); }
+        Attribute::CertificateLink(uid) => { obj.links.insert("CertificateLink".into(), uid.clone()); }
+        Attribute::ChildLink(uid) => { obj.links.insert("ChildLink".into(), uid.clone()); }
+        Attribute::ParentLink(uid) => { obj.links.insert("ParentLink".into(), uid.clone()); }
+        Attribute::Pkcs12CertificateLink(uid) => { obj.links.insert("Pkcs12CertificateLink".into(), uid.clone()); }
+        Attribute::Pkcs12PasswordLink(uid) => { obj.links.insert("Pkcs12PasswordLink".into(), uid.clone()); }
+        Attribute::WrappingKeyLink(uid) => { obj.links.insert("WrappingKeyLink".into(), uid.clone()); }
+        Attribute::CredentialLink(uid) => { obj.links.insert("CredentialLink".into(), uid.clone()); }
+        Attribute::PasswordLink(uid) => { obj.links.insert("PasswordLink".into(), uid.clone()); }
+        Attribute::SplitKeyBaseLink(uid) => { obj.links.insert("SplitKeyBaseLink".into(), uid.clone()); }
+        Attribute::JoinedSplitKeyPartsLink(uid) => { obj.links.insert("JoinedSplitKeyPartsLink".into(), uid.clone()); }
+        Attribute::CertificateRequestLink(uid) => { obj.links.insert("CertificateRequestLink".into(), uid.clone()); }
         // Gap-remediation Phase B — §4.19/§4.22/§4.51/§4.52 (Tables
         // 136/138/160/162): all "Modifiable by client: Yes", same
         // posture as the five link types just above. `link_target`
@@ -894,6 +926,16 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::X509CertificateIssuer(s)    => obj.x509_certificate_issuer = Some(s.clone()),
         Attribute::X509CertificateSubject(s)   => obj.x509_certificate_subject = Some(s.clone()),
         Attribute::RotateName(s)               => obj.rotate_name = Some(s.clone()),
+        Attribute::RotateLatest(x) => obj.rotate_latest = Some(*x),
+        Attribute::ArchiveDate(x) => obj.archive_date = Some(*x),
+        Attribute::NistSecurityCategory(x) => obj.nist_security_category = Some(*x),
+        Attribute::OtpCounter(x) => obj.otp_counter = Some(*x),
+        Attribute::Pkcs12FriendlyName(x) => obj.pkcs12_friendly_name = Some(x.clone()),
+        Attribute::CertifyCounter(x) => obj.certify_counter = Some(*x),
+        Attribute::DecryptCounter(x) => obj.decrypt_counter = Some(*x),
+        Attribute::EncryptCounter(x) => obj.encrypt_counter = Some(*x),
+        Attribute::SignCounter(x) => obj.sign_counter = Some(*x),
+        Attribute::SignatureVerifyCounter(x) => obj.signature_verify_counter = Some(*x),
         Attribute::LeaseTime(n)                => obj.lease_time = Some(*n),
         Attribute::ProtectionPeriod(n)         => obj.protection_period = Some(*n),
         Attribute::RotateInterval(n)           => obj.rotate_interval = Some(*n),

@@ -311,6 +311,8 @@ pub fn sign(
         },
     ));
 
+    // §4.13.4 — count a successful Sign against the key that signed.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Sign);
     Ok(SignResponse {
         uid: req.uid,
         signature,

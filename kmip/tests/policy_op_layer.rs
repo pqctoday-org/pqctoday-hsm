@@ -87,7 +87,7 @@ fn try_create_key_pair(
         common.push(Attribute::CryptographicLength(length));
     }
     for (k, v) in custom {
-        common.push(Attribute::Custom { name: (*k).to_string(), value: pqctoday_kmip::kmip30::CustomAttributeValue::Text((*v).to_string()) });
+        common.push(Attribute::Custom { vendor: None, name: (*k).to_string(), value: pqctoday_kmip::kmip30::CustomAttributeValue::Text((*v).to_string()) });
     }
     create_key_pair(
         deps,
@@ -120,7 +120,7 @@ fn try_create_sym(
         t.push(Attribute::CryptographicLength(length));
     }
     for (k, v) in custom {
-        t.push(Attribute::Custom { name: (*k).to_string(), value: pqctoday_kmip::kmip30::CustomAttributeValue::Text((*v).to_string()) });
+        t.push(Attribute::Custom { vendor: None, name: (*k).to_string(), value: pqctoday_kmip::kmip30::CustomAttributeValue::Text((*v).to_string()) });
     }
     create(deps, CreateRequest { object_type: ObjectType::SymmetricKey, template_attribute: t }, &AuthContext::open(), "cr")
         .map(|_| ())

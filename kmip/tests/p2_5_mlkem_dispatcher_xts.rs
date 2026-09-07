@@ -258,8 +258,7 @@ fn ml_kem_dispatcher_roundtrip(alg: KmipAlgorithm, dk_bytes: Vec<u8>, ek_bytes: 
             data: enc.ciphertext.clone(),
             iv: None,
             cryptographic_parameters: None,
-            aad: None,
-        },
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
     ) {
         DecryptResult::Ok(d) => d,
         DecryptResult::Failed(r) => panic!("decapsulate failed via dispatcher: reason={r:?}"),
@@ -282,8 +281,7 @@ fn ml_kem_dispatcher_roundtrip(alg: KmipAlgorithm, dk_bytes: Vec<u8>, ek_bytes: 
             data: short,
             iv: None,
             cryptographic_parameters: None,
-            aad: None,
-        },
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
     ) {
         DecryptResult::Failed(reason) => assert_eq!(
             reason,
@@ -377,8 +375,7 @@ fn ml_kem_768_corrupt_ciphertext_yields_different_secret_via_dispatcher() {
             data: corrupt,
             iv: None,
             cryptographic_parameters: None,
-            aad: None,
-        },
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
     ) {
         DecryptResult::Ok(d) => d,
         DecryptResult::Failed(r) => {

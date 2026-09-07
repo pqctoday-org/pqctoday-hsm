@@ -101,7 +101,15 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
         Attribute::ObjectType(r.object_type),
         Attribute::CryptographicAlgorithm(r.algorithm),
         Attribute::CryptographicUsageMask(r.usage_mask),
-        Attribute::State(r.state),
+        // §4.67 transition 6 (G8) — a date may have moved this object since
+        // it was last written. Report what the state actually IS now, not the
+        // last explicitly-set value: an Active key past its Protect Stop Date
+        // is Deactivated, and Encrypt/Decrypt already refuse it.
+        Attribute::State(
+            crate::store::lifecycle::effective_state_for(r, time::OffsetDateTime::now_utc())
+                .map(|(st, _)| st)
+                .unwrap_or(r.state),
+        ),
         Attribute::InitialDate(r.initial_date.unix_timestamp()),
     ];
     if r.cryptographic_length > 0 {
@@ -144,6 +152,22 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     if let Some(b) = r.key_value_present { out.push(Attribute::KeyValuePresent(b)); }
     if let Some(b) = r.quantum_safe { out.push(Attribute::QuantumSafe(b)); }
     if let Some(b) = r.rotate_automatic { out.push(Attribute::RotateAutomatic(b)); }
+    // §4.21 Deactivation Reason — when a date moved the object, say which one.
+    if let Some((_, code)) =
+        crate::store::lifecycle::effective_state_for(r, time::OffsetDateTime::now_utc())
+    {
+        out.push(Attribute::DeactivationReasonCode(code));
+    }
+    if let Some(x) = r.rotate_latest { out.push(Attribute::RotateLatest(x)); }
+    if let Some(x) = r.archive_date { out.push(Attribute::ArchiveDate(x)); }
+    if let Some(x) = r.nist_security_category { out.push(Attribute::NistSecurityCategory(x)); }
+    if let Some(x) = r.otp_counter { out.push(Attribute::OtpCounter(x)); }
+    if let Some(x) = &r.pkcs12_friendly_name { out.push(Attribute::Pkcs12FriendlyName(x.clone())); }
+    if let Some(x) = r.certify_counter { out.push(Attribute::CertifyCounter(x)); }
+    if let Some(x) = r.decrypt_counter { out.push(Attribute::DecryptCounter(x)); }
+    if let Some(x) = r.encrypt_counter { out.push(Attribute::EncryptCounter(x)); }
+    if let Some(x) = r.sign_counter { out.push(Attribute::SignCounter(x)); }
+    if let Some(x) = r.signature_verify_counter { out.push(Attribute::SignatureVerifyCounter(x)); }
     // KMIP §11 `Short Unique Identifier` — server-derived: a short
     // ByteString hash of the UID; honour the stored value when set,
     // otherwise generate a deterministic SHA-256 prefix.
@@ -237,6 +261,17 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
                 "ReplacementObjectLink" => {
                     out.push(Attribute::ReplacementObjectLink(uid))
                 }
+                "CertificateLink" => out.push(Attribute::CertificateLink(uid)),
+                "ChildLink" => out.push(Attribute::ChildLink(uid)),
+                "ParentLink" => out.push(Attribute::ParentLink(uid)),
+                "Pkcs12CertificateLink" => out.push(Attribute::Pkcs12CertificateLink(uid)),
+                "Pkcs12PasswordLink" => out.push(Attribute::Pkcs12PasswordLink(uid)),
+                "WrappingKeyLink" => out.push(Attribute::WrappingKeyLink(uid)),
+                "CredentialLink" => out.push(Attribute::CredentialLink(uid)),
+                "PasswordLink" => out.push(Attribute::PasswordLink(uid)),
+                "SplitKeyBaseLink" => out.push(Attribute::SplitKeyBaseLink(uid)),
+                "JoinedSplitKeyPartsLink" => out.push(Attribute::JoinedSplitKeyPartsLink(uid)),
+                "CertificateRequestLink" => out.push(Attribute::CertificateRequestLink(uid)),
                 // Unknown link-type keys have no wire codepoint in the
                 // Attribute enum yet — nothing stored writes them today.
                 _ => {}
@@ -261,7 +296,7 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     }
     // Custom attributes — surface each as Attribute::Custom.
     for (name, value) in &r.custom_attributes {
-        out.push(Attribute::Custom { name: name.clone(), value: value.clone() });
+        out.push(Attribute::Custom { vendor: None, name: name.clone(), value: value.clone() });
     }
 
     // K3 — group membership is emitted as `Group Link` (0x4201b3, a Name
@@ -378,6 +413,27 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::CertificateSubjectCN(_)   => "CertificateSubjectCN",
         Attribute::ProtectionStorageMask(_)  => "ProtectionStorageMask",
         Attribute::PublicKeyLink(_)          => "PublicKeyLink",
+        Attribute::RotateLatest(_) => "RotateLatest",
+        Attribute::ArchiveDate(_) => "ArchiveDate",
+        Attribute::NistSecurityCategory(_) => "NistSecurityCategory",
+        Attribute::OtpCounter(_) => "OtpCounter",
+        Attribute::Pkcs12FriendlyName(_) => "Pkcs12FriendlyName",
+        Attribute::CertifyCounter(_) => "CertifyCounter",
+        Attribute::DecryptCounter(_) => "DecryptCounter",
+        Attribute::EncryptCounter(_) => "EncryptCounter",
+        Attribute::SignCounter(_) => "SignCounter",
+        Attribute::SignatureVerifyCounter(_) => "SignatureVerifyCounter",
+        Attribute::CertificateLink(_) => "CertificateLink",
+        Attribute::ChildLink(_) => "ChildLink",
+        Attribute::ParentLink(_) => "ParentLink",
+        Attribute::Pkcs12CertificateLink(_) => "Pkcs12CertificateLink",
+        Attribute::Pkcs12PasswordLink(_) => "Pkcs12PasswordLink",
+        Attribute::WrappingKeyLink(_) => "WrappingKeyLink",
+        Attribute::CredentialLink(_) => "CredentialLink",
+        Attribute::PasswordLink(_) => "PasswordLink",
+        Attribute::SplitKeyBaseLink(_) => "SplitKeyBaseLink",
+        Attribute::JoinedSplitKeyPartsLink(_) => "JoinedSplitKeyPartsLink",
+        Attribute::CertificateRequestLink(_) => "CertificateRequestLink",
         Attribute::PrivateKeyLink(_)         => "PrivateKeyLink",
         Attribute::NextLink(_)               => "NextLink",
         Attribute::PreviousLink(_)           => "PreviousLink",
@@ -710,5 +766,39 @@ mod tests {
             _ => None,
         });
         assert_eq!(found, Some(("https://example/asset/1".to_string(), 2)));
+    }
+
+    /// G2 (2026-09-06) — `Certify` writes a `CertificateLink` onto both the
+    /// certificate and the public key (`ops/certify.rs`), but until the §4.35
+    /// link set was completed there was no `Attribute::CertificateLink`, so
+    /// `attributes_from_record`'s link loop hit its `_ => {}` arm and dropped
+    /// it. The server stored a link it could never tell anyone about.
+    ///
+    /// This asserts the whole set survives the record → wire-attribute step.
+    /// It fails if any of the eleven link types added in G2 loses its arm.
+    #[test]
+    fn every_completed_link_type_survives_the_record_to_attribute_step() {
+        let mut rec = ObjectRecord::default();
+        for k in [
+            "CertificateLink", "ChildLink", "ParentLink", "Pkcs12CertificateLink",
+            "Pkcs12PasswordLink", "WrappingKeyLink", "CredentialLink", "PasswordLink",
+            "SplitKeyBaseLink", "JoinedSplitKeyPartsLink", "CertificateRequestLink",
+        ] {
+            rec.links.insert(k.to_string(), format!("urn:target-of-{k}"));
+        }
+        let attrs = attributes_from_record(&rec);
+
+        let seen: Vec<&str> = attrs.iter().map(canonical_attribute_name).collect();
+        for k in [
+            "CertificateLink", "ChildLink", "ParentLink", "Pkcs12CertificateLink",
+            "Pkcs12PasswordLink", "WrappingKeyLink", "CredentialLink", "PasswordLink",
+            "SplitKeyBaseLink", "JoinedSplitKeyPartsLink", "CertificateRequestLink",
+        ] {
+            assert!(
+                seen.contains(&k),
+                "{k} was stored on the record but never emitted as an attribute \
+                 — the link loop dropped it (this is the CertificateLink bug)",
+            );
+        }
     }
 }

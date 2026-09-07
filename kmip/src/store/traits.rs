@@ -266,6 +266,35 @@ pub struct ObjectRecord {
     /// KMIP §4 `Rotate Generation` — sequence counter.
     pub rotate_generation: Option<i32>,
     pub rotate_name: Option<String>,
+
+    // ── G2 (2026-09-06): Profiles §5.1.2 item 8 completion ──────────────
+    //
+    // The five Counters are §4.13: the server increments each on a
+    // successful use of the object as that operation's subject, and they
+    // "SHALL be present for Certificates, Certificate Requests, Private
+    // keys, Public keys and Symmetric keys". Stored on the record and
+    // written through the same store put the operation already performs,
+    // so a count costs no extra round trip.
+    /// `Rotate Latest` (§4.58).
+    pub rotate_latest: Option<bool>,
+    /// `Archive Date` (§4.5).
+    pub archive_date: Option<i64>,
+    /// `NIST Security Category` (§4.39).
+    pub nist_security_category: Option<i32>,
+    /// `OTP Counter` (§4.44).
+    pub otp_counter: Option<i32>,
+    /// `PKCS#12 Friendly Name` (§4.45).
+    pub pkcs12_friendly_name: Option<String>,
+    /// `Certify Counter` (§4.13.1).
+    pub certify_counter: Option<i32>,
+    /// `Decrypt Counter` (§4.13.2).
+    pub decrypt_counter: Option<i32>,
+    /// `Encrypt Counter` (§4.13.3).
+    pub encrypt_counter: Option<i32>,
+    /// `Sign Counter` (§4.13.4).
+    pub sign_counter: Option<i32>,
+    /// `Signature Verify Counter` (§4.13.5).
+    pub signature_verify_counter: Option<i32>,
     /// KMIP §4 `Random Number Generator` — Structure carrying RNG
     /// metadata. v0.1 stores nothing; this field exists so the
     /// attribute surface table is honest.
@@ -424,6 +453,16 @@ impl From<BaselineDefaults> for ObjectRecord {
             rotate_offset: None,
             rotate_generation: None,
             rotate_name: None,
+            rotate_latest: None,
+            archive_date: None,
+            nist_security_category: None,
+            otp_counter: None,
+            pkcs12_friendly_name: None,
+            certify_counter: None,
+            decrypt_counter: None,
+            encrypt_counter: None,
+            sign_counter: None,
+            signature_verify_counter: None,
             random_number_generator_present: false,
             usage_limits_total: None,
             usage_limits_remaining: None,

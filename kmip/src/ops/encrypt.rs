@@ -404,6 +404,8 @@ fn encrypt_streaming(
             ct.extend_from_slice(&tail);
             None
         };
+        // §4.13.3 — count a successful Encrypt.
+        super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Encrypt);
         Ok(EncryptResponse {
             uid: req.uid.clone(),
             ciphertext: ct,
@@ -412,6 +414,11 @@ fn encrypt_streaming(
         })
     } else {
         // Middle part — put the stream back and echo the handle.
+        //
+        // Deliberately NOT counted (§4.13.3): a multi-part Encrypt is one
+        // use of the key, so the count lands on the final part. Counting
+        // each part would make the tally a function of how a client chose
+        // to chunk its data.
         streams.insert(cv.clone(), ctx);
         Ok(EncryptResponse {
             uid: req.uid.clone(),
@@ -483,6 +490,8 @@ fn encrypt_ml_kem(
             }
         }
     };
+    // §4.13.3 — count a successful Encrypt.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Encrypt);
     Ok(EncryptResponse {
         uid: req.uid.clone(),
         ciphertext,
@@ -733,6 +742,8 @@ fn encrypt_classical(
         }
     }
 
+    // §4.13.3 — count a successful Encrypt.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Encrypt);
     Ok(EncryptResponse {
         uid: req.uid.clone(),
         ciphertext,
@@ -1056,8 +1067,7 @@ mod k6_no_silent_substitution_tests {
                 data: enc.ciphertext,
                 iv: Some(iv),
                 cryptographic_parameters: Some(cp_mode(6)),
-                aad: None,
-            },
+                aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
             &crate::server::auth::AuthContext::open(),
             "c-dec",
         )
@@ -1164,8 +1174,7 @@ mod k6_no_silent_substitution_tests {
                 data: ct_and_tag,
                 iv: Some(nonce.clone()),
                 aad: Some(aad.clone()),
-                cryptographic_parameters: Some(cp_mode(8)),
-            },
+                cryptographic_parameters: Some(cp_mode(8)), init_indicator: None, final_indicator: None, correlation_value: None },
             &crate::server::auth::AuthContext::open(),
             "c-dec",
         )
@@ -1188,8 +1197,7 @@ mod k6_no_silent_substitution_tests {
                 data: ct_and_tampered_tag,
                 iv: Some(nonce),
                 aad: Some(aad),
-                cryptographic_parameters: Some(cp_mode(8)),
-            },
+                cryptographic_parameters: Some(cp_mode(8)), init_indicator: None, final_indicator: None, correlation_value: None },
             &crate::server::auth::AuthContext::open(),
             "c-dec-tamper",
         );
@@ -1233,8 +1241,7 @@ mod k6_no_silent_substitution_tests {
                 data: enc.ciphertext,
                 iv: Some(iv),
                 cryptographic_parameters: Some(cp_mode(5)),
-                aad: None,
-            },
+                aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
             &crate::server::auth::AuthContext::open(),
             "c-dec",
         )

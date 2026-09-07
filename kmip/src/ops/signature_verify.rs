@@ -279,6 +279,9 @@ pub fn signature_verify(
     };
     emit_success(deps, correlation_id, "SignatureVerify");
 
+    // §4.13.5 — a completed verification counts, whatever its verdict:
+    // the object WAS used as the subject of the operation.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::SignatureVerify);
     Ok(SignatureVerifyResponse { uid: req.uid, validity })
 }
 

@@ -286,11 +286,58 @@ pub enum QueryFunction {
     QueryApplicationNamespaces = 0x04,
     QueryProfiles           = 0x0a,
     QueryCapabilities       = 0x0b,
+    // ── G5 (2026-09-06): the nine §11.x functions this server could not
+    // even NAME. An unrecognised code made `query_function_from_code`
+    // return None, which the decoder turned into `UnknownEnum` — failing
+    // the WHOLE message, not just the unsupported function. §6.1.39 says
+    // "For each Query Function specified in the request, the corresponding
+    // items SHALL be returned in the response"; refusing everything else
+    // in the batch was never that.
+    QueryExtensionList             = 0x05,
+    QueryExtensionMap              = 0x06,
+    QueryAttestationTypes          = 0x07,
+    QueryRngs                      = 0x08,
+    QueryValidations               = 0x09,
+    QueryClientRegistrationMethods = 0x0c,
+    QueryDefaultsInformation       = 0x0d,
+    QueryStorageProtectionMasks    = 0x0e,
+    QueryCredentialInformation     = 0x0f,
+}
+
+/// §6.1.39 / §11 `Extension Information` — describes one vendor extension:
+/// its name, its tag codepoint, and the item type its value carries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionInformation {
+    pub extension_name: String,
+    /// The `0x54xxxx` tag itself (§11.57 reserves that range for extensions).
+    pub extension_tag: u32,
+    /// TTLV item type of the extension's value, as a §11.25 codepoint.
+    pub extension_type: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryResponse {
     pub operations: Option<Vec<Operation>>,
+    /// §6.1.39 `Extension Information` — one entry per vendor extension this
+    /// server implements (G5). Until 2026-09-06 the two Query functions that
+    /// ask for this could not be decoded at all, so a conformant client had
+    /// no way to discover the server's extensions; they had to be read out of
+    /// this repository's source.
+    pub extension_information: Option<Vec<ExtensionInformation>>,
+    /// §11.5 Attestation Types the server supports (empty = none).
+    pub attestation_types: Option<Vec<u32>>,
+    /// §4.52 RNG parameters — reported as RNG Algorithm codepoints.
+    pub rng_parameters: Option<Vec<u32>>,
+    /// §6.1.39 Validation Information (a server MAY return none).
+    pub validation_information: Option<Vec<String>>,
+    /// §11.10 Client Registration Methods.
+    pub client_registration_methods: Option<Vec<u32>>,
+    /// §12.3 Protection Storage Masks the server can honour.
+    pub storage_protection_masks: Option<Vec<u32>>,
+    /// §9.9 Credential Types that can actually authenticate.
+    pub credential_information: Option<Vec<u32>>,
+    /// §6.1.39 Defaults Information.
+    pub defaults_information: Option<Vec<String>>,
     pub object_types: Option<Vec<ObjectType>>,
     /// Top-level child of Query Response Payload per KMIP 3.0 §6.1.39
     /// (NOT a child of `ServerInformation`). Value-variable per
@@ -705,6 +752,21 @@ pub struct DecryptRequest {
     /// [`EncryptRequest::aad`]. MUST be byte-equal to the value passed
     /// at encryption time or the AEAD tag check will fail.
     pub aad: Option<Vec<u8>>,
+
+    // ── §6.1.21 multi-part (G6, 2026-09-06) ──────────────────────────────
+    //
+    // These three existed on `EncryptRequest` but not here, and the Decrypt
+    // decoder dropped the tags. A client doing a multi-part Decrypt was
+    // therefore answered as though every part were a whole message: each
+    // chunk decrypted independently, `Success`, and WRONG plaintext. The
+    // shared `Deps::streams` map and the engine's `CipherDirection` already
+    // supported the decrypt direction; only this side was missing.
+    /// Opens a stream. The response carries the `Correlation Value`.
+    pub init_indicator: Option<bool>,
+    /// Closes a stream — the last part; the response carries no handle.
+    pub final_indicator: Option<bool>,
+    /// Server-issued stream handle, echoed on every continuation part.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -713,6 +775,9 @@ pub struct DecryptResponse {
     /// For classical decrypt: the plaintext. For ML-KEM decapsulation: the
     /// derived shared secret.
     pub data: Vec<u8>,
+    /// §6.1.21 multi-part — present on the opening and middle parts, absent
+    /// on the final one. Mirrors `EncryptResponse::correlation_value`.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 // ── Encapsulate / Decapsulate (KMIP 3.0 CSD02, PQC Updates) ──────────────────
@@ -1516,18 +1581,34 @@ pub struct DeactivateResponse {
     pub uid: String,
 }
 
-/// `Deactivation Reason Code` Enumeration. Codepoints from the spec
-/// extract (`enums.Deactivation Reason Code`). Mirrors the structure
-/// of `Revocation Reason Code` per §3.x.
+/// `Deactivation Reason Code` Enumeration — KMIP 3.0 §11.14.
+///
+/// **Corrected 2026-09-06 (G8).** These names previously mirrored
+/// `Revocation Reason Code` (KeyCompromise / CACompromise /
+/// AffiliationChanged / Superseded / CessationOfOperation /
+/// PrivilegeWithdrawn), which is a DIFFERENT enumeration. §11.14 defines
+/// exactly four values, and they mean something else entirely at the same
+/// codepoints: `0x02` is "Deactivation Date", not "Key Compromise".
+///
+/// Nothing branched on the old names — the code was passed straight through
+/// to the record — so no stored data changes meaning. But any caller reading
+/// `KeyCompromise` off a Deactivate was being told the opposite of what the
+/// client sent, and `0x05`–`0x07` were accepted despite not existing in this
+/// enumeration at all.
+///
+/// Compromise IS expressible: it belongs to `Revoke` (§6.1.51) with
+/// `Revocation Reason Code`, which is a separate operation and enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeactivationReason {
-    Unspecified           = 0x01,
-    KeyCompromise         = 0x02,
-    CACompromise          = 0x03,
-    AffiliationChanged    = 0x04,
-    Superseded            = 0x05,
-    CessationOfOperation  = 0x06,
-    PrivilegeWithdrawn    = 0x07,
+    /// No reason given.
+    Unspecified     = 0x01,
+    /// The object's own `Deactivation Date` (§4.20) was reached.
+    DeactivationDate = 0x02,
+    /// The object's `Protect Stop Date` (§4.47) was reached — §4.67
+    /// transition 6.
+    ProtectStopDate = 0x03,
+    /// A `Usage Limits` (§4.69) count was exhausted.
+    UsageLimit      = 0x04,
 }
 
 impl DeactivationReason {
@@ -1537,12 +1618,13 @@ impl DeactivationReason {
     pub const fn from_wire_value(v: u32) -> Option<Self> {
         match v {
             0x01 => Some(Self::Unspecified),
-            0x02 => Some(Self::KeyCompromise),
-            0x03 => Some(Self::CACompromise),
-            0x04 => Some(Self::AffiliationChanged),
-            0x05 => Some(Self::Superseded),
-            0x06 => Some(Self::CessationOfOperation),
-            0x07 => Some(Self::PrivilegeWithdrawn),
+            0x02 => Some(Self::DeactivationDate),
+            0x03 => Some(Self::ProtectStopDate),
+            0x04 => Some(Self::UsageLimit),
+            // 0x05-0x07 were accepted here as Superseded /
+            // CessationOfOperation / PrivilegeWithdrawn. They are
+            // Revocation Reason codes; §11.14 has no such values, so they
+            // are refused rather than silently reinterpreted.
             _ => None,
         }
     }
