@@ -444,6 +444,18 @@ bool P11TrustObj::init(OSObject *inobject)
 	if (initialized) return true;
 	if (inobject == NULL) return false;
 
+	// Seed CKA_CLASS before the parent runs, the same way P11DataObj and the
+	// certificate/key classes do. P11AttrClass::setDefault() stores
+	// CKO_VENDOR_DEFINED, and P11AttrClass::updateAttr refuses a template
+	// class that differs from what the object already holds — so without this
+	// every CKO_TRUST template is rejected with CKR_TEMPLATE_INCONSISTENT.
+	if (!inobject->attributeExists(CKA_CLASS) ||
+	    inobject->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_TRUST)
+	{
+		OSAttribute setClass((unsigned long)CKO_TRUST);
+		inobject->setAttribute(CKA_CLASS, setClass);
+	}
+
 	// Create parent
 	if (!P11Object::init(inobject)) return false;
 

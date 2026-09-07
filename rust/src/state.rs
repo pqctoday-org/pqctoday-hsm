@@ -420,6 +420,18 @@ pub fn reject_stateful_signature_key_override(attrs: &Attributes) -> Result<(), 
 }
 
 fn apply_object_defaults(attrs: &mut Attributes) {
+    // §4.4 Table — every storage object has CKA_TOKEN, "CK_TRUE if object is
+    // a token object; CK_FALSE if object is a session object. Default is
+    // CK_FALSE." The engine READ this correctly everywhere (read_bool_attr
+    // treats absent as false) but never materialised it, so
+    // C_GetAttributeValue answered CKR_ATTRIBUTE_TYPE_INVALID — "the object
+    // does not possess such an attribute" — for an attribute every storage
+    // object possesses by definition. Surfaced by the new CKO_TRUST
+    // differential scenario, the first one that does not pass CKA_TOKEN in
+    // its own template; C++ has always materialised it.
+    if !attrs.contains_key(&CKA_TOKEN) {
+        store_bool(attrs, CKA_TOKEN, false);
+    }
     if !attrs.contains_key(&CKA_MODIFIABLE) {
         store_bool(attrs, CKA_MODIFIABLE, true);
     }
