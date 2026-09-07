@@ -2795,7 +2795,13 @@ fn decode_recertify_req(children: &[TtlvFrame]) -> Result<ReCertifyRequest, Wire
     for c in children {
         match c.tag.0 {
             tags::CertificateRequestUniqueIdentifier => {
-                if let Value::TextString(s) = &c.value { req.certificate_request_uid = Some(s.clone()); }
+                if let Some(s) = uid_context_value(
+                    &c.value,
+                    tags::CertificateRequestUniqueIdentifier,
+                    "Certificate Request Unique Identifier",
+                )? {
+                    req.certificate_request_uid = Some(s);
+                }
             }
             tags::CertificateRequestType => {
                 let v = expect_enum(c, "Certificate Request Type")?;
@@ -5780,6 +5786,35 @@ fn required_uid(children: &[TtlvFrame]) -> Result<String, WireError> {
     Err(WireError::Missing { tag: tags::UniqueIdentifier, name: "Unique Identifier" })
 }
 
+/// The other UID-shaped contexts §4.68 names: "Within protocol messages, the
+/// Unique Identifier may be referred with additional context in the form of
+/// Private Key Unique Identifier, Public Key Unique Identifier, Certificate
+/// Request Unique Identifier, Replaced Unique Identifier, Links, or within
+/// Encryption Key Information or MAC/Signature Key Information. In all of
+/// these contexts, the same encoding descriptions apply."
+///
+/// So they accept exactly what `required_uid` accepts and reject the legacy
+/// `TextString` the same way. Kept as one helper because the G1 pass missed
+/// two of these tags precisely by handling each site by hand — and neither
+/// `Replaced Unique Identifier` nor `Certificate Request Unique Identifier`
+/// appears anywhere in the OASIS corpus, so the replay cannot catch a
+/// regression here. Only a unit test can.
+fn uid_context_value(
+    value: &Value,
+    tag: u32,
+    name: &'static str,
+) -> Result<Option<String>, WireError> {
+    match value {
+        Value::Identifier(s) | Value::Reference(s) | Value::NameReference(s) => Ok(Some(s.clone())),
+        Value::TextString(_) => Err(WireError::BadType {
+            tag,
+            name,
+            msg: "carried as TextString (0x07); KMIP 3.0 requires Identifier (0x0C) — see §4.68 and §11.25".to_string(),
+        }),
+        _ => Ok(None),
+    }
+}
+
 fn expect_tag(frame: &TtlvFrame, expected: u32, name: &'static str) -> Result<(), WireError> {
     if frame.tag.0 != expected {
         return Err(WireError::UnexpectedTag { got: frame.tag.0, expected, name });
@@ -5930,7 +5965,7 @@ pub fn encode_put_message(req: &PutRequest, time_stamp: i64) -> Vec<u8> {
         if let Some(replaced) = &req.replaced_unique_identifier {
             children.push(TtlvFrame::new(
                 Tag(tags::ReplacedUniqueIdentifier),
-                Value::TextString(replaced.clone()),
+                Value::Identifier(replaced.clone()),
             ));
         }
     }
@@ -6311,14 +6346,11 @@ pub fn decode_server_to_client_message(bytes: &[u8]) -> Result<ServerToClientMes
     // Only the two push operations name a managed object; the three
     // interrogation operations have no Unique Identifier at all, so this has to
     // be read per-arm rather than up front.
-    let require_uid = || -> Result<String, WireError> {
-        p.iter()
-            .find_map(|c| match (c.tag.0, &c.value) {
-                (t, Value::TextString(s)) if t == tags::UniqueIdentifier => Some(s.clone()),
-                _ => None,
-            })
-            .ok_or(WireError::Missing { tag: tags::UniqueIdentifier, name: "Unique Identifier" })
-    };
+    // Was a hand-rolled TextString match, which the G1 item-type pass missed:
+    // the Notify/Put encoders emit `Identifier` via `uid_frame`, so this closure
+    // reported the UID as Missing on a message we had just produced ourselves.
+    // Delegate to the one strict reader instead of keeping a second copy.
+    let require_uid = || -> Result<String, WireError> { required_uid(p) };
 
     let attributes: Vec<Attribute> = p
         .iter()
@@ -6395,10 +6427,18 @@ pub fn decode_server_to_client_message(bytes: &[u8]) -> Result<ServerToClientMes
                     _ => None,
                 })
                 .ok_or(WireError::Missing { tag: tags::PutFunction, name: "Put Function" })?;
-            let replaced = p.iter().find_map(|c| match (c.tag.0, &c.value) {
-                (t, Value::TextString(s)) if t == tags::ReplacedUniqueIdentifier => Some(s.clone()),
-                _ => None,
-            });
+            let replaced = p
+                .iter()
+                .filter(|c| c.tag.0 == tags::ReplacedUniqueIdentifier)
+                .find_map(|c| {
+                    uid_context_value(
+                        &c.value,
+                        tags::ReplacedUniqueIdentifier,
+                        "Replaced Unique Identifier",
+                    )
+                    .transpose()
+                })
+                .transpose()?;
             Ok(ServerToClientMessage::Put(PutRequest {
                 unique_identifier: uid,
                 put_function,
