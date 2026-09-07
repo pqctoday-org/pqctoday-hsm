@@ -83,15 +83,30 @@ static constexpr CK_ULONG UNLIMITED_KEY_SIZE = 0x80000000UL;   // 2^31 — one o
 
 reported as `ulMaxKeySize` at five sites in `SoftHSM_slots.cpp` (`:1023, :1092, :1101, :1126, :1131`), all AES key-wrap mechanisms. Rust reports 16–32 for the same mechanisms, reading "key size" as the wrapping AES key rather than the payload.
 
-v3.2 does not state the cap, so this is a v3.3 gap-fill under the standing rule. Three ways out, and they are not equivalent:
+v3.2 does not state the cap, so this is a v3.3 gap-fill under the standing rule.
 
-| Option | Effect |
-|---|---|
-| **A** — `0x7FFFFFFF` | Minimal, keeps C++'s "payload size" reading, satisfies the cap. **Recommended.** |
-| **B** — adopt Rust's reading (16/32) | Removes a real cross-engine disagreement, but changes what C++ advertises about a mechanism it has advertised for years |
-| **C** — leave it | The value is one over a cap only an unpublished draft states, and no caller has complained |
+**§14.1 corrects the premise this section was first written on:** the five sites are not one homogeneous group, and they do not get one answer. As decided (E-1 / E-1a) the work splits in two.
 
-Sequenced **after §2**, so whichever value is chosen is pinned by the ledger the same day it changes.
+### 3.1 The two key-wrap rows — decided, mechanical
+
+`CKM_AES_KEY_WRAP` and `CKM_AES_KEY_WRAP_PAD` / `_KWP` adopt Rust's reading: `ulMaxKeySize` is the size of the **wrapping AES key**, not the payload. Set both to `16 – 32`, matching `ffi.rs:1556`. This also raises `_KWP`'s minimum from 1 to 16 — a wrapping key of one byte was never real.
+
+### 3.2 The three remaining rows — ground each against its own specification
+
+Decided E-1a: set each maximum from the governing standard, **not** from either engine's current value. Neither `2³¹` nor Rust's ceiling is evidence; both are policy that nobody has checked.
+
+| Mechanism | Source to read | Question to answer |
+|---|---|---|
+| `CKM_KMAC_128` / `CKM_KMAC_256` | **NIST SP 800-185 §4** (KMAC), and PKCS#11 v3.2 §6.28 for what the mechanism's key size means | Does SP 800-185 bound the key length at all? If it does not, what is the honest maximum for a token — and does the KMAC-256 minimum of 32 (C++) or 16 (Rust) follow from the security strength? |
+| `CKM_GENERIC_SECRET_KEY_GEN` | **PKCS#11 v3.2 §6.20** (generic secret key), Table for `CKA_VALUE_LEN` | Is there a stated bound, or is the limit whatever the token can store? If the latter, the maximum should describe **this** token, which is what the field is for |
+
+Whatever each lands on must also satisfy the `0x7FFFFFFF` cap — that constraint is independent and applies regardless.
+
+**Record the citation with the value.** A number in `SoftHSM_slots.cpp` with no source is how these three came to disagree in the first place; the ledger row from §2 is where the citation belongs so it survives.
+
+### 3.3 Sequencing
+
+**§2 first**, so the ledger pins today's values and every change in §3.1 and §3.2 shows up as a reviewable diff against a recorded baseline rather than as an unexplained edit.
 
 ---
 
@@ -252,6 +267,8 @@ E-1 was posed on my description of the five `UNLIMITED_KEY_SIZE` sites as "all A
 
 So E-1 as decided resolves the two key-wrap rows to `16 – 32`. The other three are a **different question**: they have no payload-vs-key ambiguity, and their maximum is genuinely "unbounded" in the sense C++ means it. For those, the choice is between clamping to `0x7FFFFFFF` (truthful, satisfies the cap) and adopting Rust's policy ceilings (closes the divergence, but under-advertises).
 
-**E-1a is open.** Nothing changes on those three rows until it is answered. The two key-wrap rows proceed as decided.
+**E-1a answered:** ground each of the three against its own specification — SP 800-185 for the two KMAC rows, PKCS#11 §6.20 for generic secret — and set the maximum from that, taking neither engine's current value as evidence. Specified in §3.2. The two key-wrap rows proceed as decided in §3.1.
+
+This is the more demanding of the options offered and it is the right one: `2³¹` and Rust's 512/64 are both unsourced policy, and picking between two unsourced numbers would have produced a third. The cost is a spec read per mechanism; the benefit is that the ledger row carries a citation instead of a preference.
 
 This is the same failure the plan's own verification standard warns about — I described a set of code sites from a summary (the exception's prose) instead of reading them, and posed a decision on the description. The exception text needs the same correction.
