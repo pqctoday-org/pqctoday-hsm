@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use time::OffsetDateTime;
 
 use crate::error::{KmipError, Result, ResultReason};
+use crate::kmip30::VendorAttributeKey;
 use crate::kmip30::{
     AddAttributeRequest, AddAttributeResponse,
     AdjustAttributeRequest, AdjustAttributeResponse, AdjustmentType,
@@ -667,7 +668,9 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         Attribute::ObjectType(_)             => true,
         Attribute::State(_)                  => true,
         Attribute::UniqueIdentifier(_)       => true,
-        Attribute::Custom { name, .. }       => obj.custom_attributes.contains_key(name),
+        Attribute::Custom { vendor, name, .. } => obj
+            .custom_attributes
+            .contains_key(&VendorAttributeKey::new(vendor.as_deref(), name)),
         Attribute::NextLink(_)               => obj.links.contains_key("NextLink"),
         Attribute::PreviousLink(_)           => obj.links.contains_key("PreviousLink"),
         Attribute::PublicKeyLink(_)          => obj.links.contains_key("PublicKeyLink"),
@@ -770,7 +773,15 @@ fn attribute_name_present(obj: &ObjectRecord, name: &str) -> bool {
         // `ItemNotFound` as a result. Match on `canonical` (already
         // space-stripped) instead, same as `remove_attribute_by_name`
         // below.
-        _ => obj.custom_attributes.contains_key(name) || obj.links.contains_key(&canonical),
+        // A by-NAME request carries no Vendor Identification, so it can only
+        // mean the client's own attributes: §4.70 reserves "x" for
+        // client-created and says a server-created "y" attribute is "not
+        // created …, set, added, adjusted, modified or deleted by the
+        // client". Scoping to "x" is what makes that rule hold.
+        _ => obj
+            .custom_attributes
+            .contains_key(&VendorAttributeKey::new(None, name))
+            || obj.links.contains_key(&canonical),
     }
 }
 
@@ -880,8 +891,9 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::ObjectType(_)             => {}  // Read-Only
         Attribute::State(_)                  => {}  // Read-Only
         Attribute::UniqueIdentifier(_)       => {}  // Read-Only
-        Attribute::Custom { name, value, .. }    => {
-            obj.custom_attributes.insert(name.clone(), value.clone());
+        Attribute::Custom { vendor, name, value } => {
+            obj.custom_attributes
+                .insert(VendorAttributeKey::new(vendor.as_deref(), name), value.clone());
         }
         // KMIP §11 Link attributes — UID references into the
         // record's `links` map keyed by canonical attribute name.
@@ -1004,7 +1016,9 @@ fn remove_attribute_by_value(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::Name(_)                   => obj.name = None,
         Attribute::CryptographicLength(_)    => obj.cryptographic_length = 0,
         Attribute::CryptographicUsageMask(_) => obj.usage_mask = UsageMask::empty(),
-        Attribute::Custom { name, .. }       => { obj.custom_attributes.remove(name); }
+        Attribute::Custom { vendor, name, .. } => {
+            obj.custom_attributes.remove(&VendorAttributeKey::new(vendor.as_deref(), name));
+        }
         // KMIP `Object Group` multi-instance — drop just the named
         // membership, leaving the object in any other groups.
         Attribute::ObjectGroup(g)            => { obj.object_groups.retain(|x| x != g); }
@@ -1057,7 +1071,9 @@ fn remove_attribute_by_name(obj: &mut ObjectRecord, name: &str) {
             obj.usage_limits_unit = None;
         }
         other => {
-            obj.custom_attributes.remove(other);
+            // By-name delete is scoped to the client's own "x" attributes —
+            // see the §4.70 note in `attribute_exists`.
+            obj.custom_attributes.remove(&VendorAttributeKey::new(None, other));
             obj.links.remove(other);
         }
     }

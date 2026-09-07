@@ -82,7 +82,14 @@ pub struct ObjectRecord {
     /// Typed (not a bare `String`) so an Integer- or DateTime-valued
     /// custom attribute round-trips its actual wire type instead of
     /// losing it — see [`crate::kmip30::CustomAttributeValue`].
-    pub custom_attributes: std::collections::HashMap<String, crate::kmip30::CustomAttributeValue>,
+    /// §4.70 vendor attributes, keyed by the (Vendor Identification,
+    /// Attribute Name) PAIR — two vendors may legitimately use the same name.
+    /// See `VendorAttributeKey` for why the pair is one string and how
+    /// records written before this loaded.
+    pub custom_attributes: std::collections::HashMap<
+        crate::kmip30::VendorAttributeKey,
+        crate::kmip30::CustomAttributeValue,
+    >,
     /// KMIP `Object Group` (0x420056) memberships — **multi-instance**:
     /// an object may belong to several groups, so this is a list of
     /// group-name labels rather than a single value. Populated from the

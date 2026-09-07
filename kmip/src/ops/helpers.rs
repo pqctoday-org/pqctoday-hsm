@@ -448,12 +448,17 @@ pub fn custom_attrs_from(attrs: &[crate::kmip30::Attribute]) -> std::collections
 /// through storage — see [`crate::kmip30::CustomAttributeValue`].
 pub fn raw_custom_attrs(
     attrs: &[crate::kmip30::Attribute],
-) -> std::collections::HashMap<String, crate::kmip30::CustomAttributeValue> {
-    use crate::kmip30::Attribute;
+) -> std::collections::HashMap<
+    crate::kmip30::VendorAttributeKey,
+    crate::kmip30::CustomAttributeValue,
+> {
+    use crate::kmip30::{Attribute, VendorAttributeKey};
     let mut m = std::collections::HashMap::new();
     for a in attrs {
-        if let Attribute::Custom { name, value, .. } = a {
-            m.insert(name.clone(), value.clone());
+        if let Attribute::Custom { vendor, name, value } = a {
+            // §4.70 identifies a vendor attribute by the PAIR, so two vendors
+            // using one name no longer overwrite each other here.
+            m.insert(VendorAttributeKey::new(vendor.as_deref(), name), value.clone());
         }
     }
     m
@@ -468,14 +473,24 @@ pub fn raw_custom_attrs(
 /// (`GetAttributes`) stay typed. Used at use-time ops (Sign / Encrypt / …)
 /// where the attributes come off the stored object, not the request.
 pub fn strip_x_prefixes(
-    raw: &std::collections::HashMap<String, crate::kmip30::CustomAttributeValue>,
+    raw: &std::collections::HashMap<
+        crate::kmip30::VendorAttributeKey,
+        crate::kmip30::CustomAttributeValue,
+    >,
 ) -> std::collections::HashMap<String, String> {
     raw.iter()
         .map(|(k, v)| {
-            let bare = k
+            // The key is now `vendor/name`; policy rules key on the NAME, so
+            // take that half first. The `x-` handling below is UNCHANGED and
+            // deliberately so: the `x-` NAME prefix is the KMIP 1.x custom
+            // attribute naming convention, which is related to but distinct
+            // from §4.70's reserved VENDOR value `"x"`. Conflating the two
+            // would silently change which policy rules match.
+            let name = k.name();
+            let bare = name
                 .strip_prefix("x-")
-                .or_else(|| k.strip_prefix("X-"))
-                .unwrap_or(k);
+                .or_else(|| name.strip_prefix("X-"))
+                .unwrap_or(name);
             (bare.to_string(), v.as_policy_string())
         })
         .collect()

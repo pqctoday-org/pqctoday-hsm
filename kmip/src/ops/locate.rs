@@ -241,8 +241,10 @@ struct LocateFilters {
     process_start_date: Vec<i64>,
     /// §4.20 Deactivation Date.
     deactivation_date: Vec<i64>,
-    /// §4.70 Vendor Attribute / custom attribute, matched by (name, value).
-    custom: Vec<(String, String)>,
+    /// §4.70 Vendor Attribute, matched by the (Vendor Identification,
+    /// Attribute Name) PAIR and value — keying by name alone would let one
+    /// vendor's filter match another vendor's attribute.
+    custom: Vec<(crate::kmip30::VendorAttributeKey, String)>,
     unique_identifier: Option<String>,
 }
 
@@ -371,8 +373,8 @@ impl LocateFilters {
         //
         // Every requested (name, value) pair must match — the same "all
         // filters narrow" rule §6.1.34 applies to the typed ones.
-        for (name, value) in &self.custom {
-            match r.custom_attributes.get(name) {
+        for (key, value) in &self.custom {
+            match r.custom_attributes.get(key) {
                 Some(crate::kmip30::CustomAttributeValue::Text(v)) if v == value => {}
                 _ => return false,
             }
@@ -458,9 +460,12 @@ fn build_filters(attrs: &[Attribute]) -> Result<LocateFilters> {
             Attribute::DeactivationDate(t) => f.deactivation_date.push(*t),
             // G7 — vendor/custom attributes (§4.70). The corpus filters by
             // these in its Tape Library steps.
-            Attribute::Custom { name, value, .. } => {
+            Attribute::Custom { vendor, name, value } => {
                 if let crate::kmip30::CustomAttributeValue::Text(v) = value {
-                    f.custom.push((name.clone(), v.clone()));
+                    f.custom.push((
+                        crate::kmip30::VendorAttributeKey::new(vendor.as_deref(), name),
+                        v.clone(),
+                    ));
                 }
             }
             // G7 — refuse rather than silently widen the result set.

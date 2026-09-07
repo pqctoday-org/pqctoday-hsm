@@ -158,7 +158,15 @@ pub fn get_attribute_list(
         link_keys.sort();
         for k in link_keys { names.push(k.clone()); }
     }
-    for k in obj.custom_attributes.keys() { names.push(k.clone()); }
+    // §6.1.27 lists attribute NAMES, so the vendor half of the stored key is
+    // not part of the answer. Two vendors using one name therefore list it
+    // once, which is what a name list means.
+    for k in obj.custom_attributes.keys() {
+        let n = k.name().to_string();
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
 
     emit_success(deps, correlation_id, "GetAttributeList");
     Ok(GetAttributeListResponse {

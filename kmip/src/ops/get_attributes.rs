@@ -295,8 +295,16 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
         });
     }
     // Custom attributes — surface each as Attribute::Custom.
-    for (name, value) in &r.custom_attributes {
-        out.push(Attribute::Custom { vendor: None, name: name.clone(), value: value.clone() });
+    for (key, value) in &r.custom_attributes {
+        // The stored key carries the vendor, so read-back no longer has to
+        // guess it. Before the pair key existed this said `vendor: None`,
+        // which meant GetAttributes could not tell a client WHICH vendor's
+        // attribute it was looking at — the storage half of the G9 defect.
+        out.push(Attribute::Custom {
+            vendor: Some(key.vendor().to_string()),
+            name: key.name().to_string(),
+            value: value.clone(),
+        });
     }
 
     // K3 — group membership is emitted as `Group Link` (0x4201b3, a Name

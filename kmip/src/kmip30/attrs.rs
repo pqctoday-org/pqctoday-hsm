@@ -272,6 +272,77 @@ impl CertificateNames {
     }
 }
 
+/// The identity of a vendor attribute at rest: §4.70's `(Vendor
+/// Identification, Attribute Name)` **pair**.
+///
+/// Two vendors may legitimately use the same attribute name, so keying by
+/// name alone makes them collide — the client's `x-env` and a partner's
+/// `x-env` become one value. The wire has carried the vendor correctly since
+/// G9; this makes the store agree.
+///
+/// Represented as one `vendor/name` string rather than a struct for a reason
+/// grounded in the spec, not convenience: §4.70 limits Vendor Identification
+/// to `[A-Za-z0-9_.]`, so `/` cannot occur in a vendor and the FIRST `/` is
+/// always the separator. The attribute name may contain anything, including
+/// further slashes. Being a string also keeps the record JSON-serialisable —
+/// `serde_json` map keys must be strings, and the store round-trips whole
+/// `ObjectRecord`s through `serde_json` (`store/sqlite.rs`).
+///
+/// §4.70 reserves `"x"` for client-created attributes and `"y"` for
+/// server-created ones. A client that sends no Vendor Identification is
+/// recorded under `"x"`, which is exactly what the encoder already emits for
+/// that case, so the wire and the store cannot disagree.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+#[serde(transparent)]
+pub struct VendorAttributeKey(String);
+
+/// §4.70 — client-created attributes with no explicit Vendor Identification.
+pub const VENDOR_CLIENT: &str = "x";
+/// §4.70 — server-created attributes.
+pub const VENDOR_SERVER: &str = "y";
+
+impl VendorAttributeKey {
+    pub fn new(vendor: Option<&str>, name: &str) -> Self {
+        Self(format!("{}/{}", vendor.unwrap_or(VENDOR_CLIENT), name))
+    }
+
+    /// The vendor half — everything before the first `/`.
+    pub fn vendor(&self) -> &str {
+        self.0.split_once('/').map(|(v, _)| v).unwrap_or(VENDOR_CLIENT)
+    }
+
+    /// The attribute-name half — everything after the first `/`.
+    pub fn name(&self) -> &str {
+        self.0.split_once('/').map(|(_, n)| n).unwrap_or(self.0.as_str())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Records written before this existed keyed by the bare attribute name, and
+/// the pre-G9 encoder hard-coded `"x"` for every one of them. So a legacy key
+/// with no `/` is exactly an `"x"` attribute, and is read back as one — no
+/// migration step, no data loss, and no silent reinterpretation of somebody
+/// else's vendor.
+impl<'de> serde::Deserialize<'de> for VendorAttributeKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Ok(if raw.contains('/') {
+            Self(raw)
+        } else {
+            Self(format!("{VENDOR_CLIENT}/{raw}"))
+        })
+    }
+}
+
+impl std::fmt::Display for VendorAttributeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CustomAttributeValue {
     Text(String),
@@ -809,5 +880,90 @@ mod tests {
             attrs[2],
             Attribute::CryptographicUsageMask(m) if m.contains(UsageMask::SIGN) && m.contains(UsageMask::VERIFY)
         ));
+    }
+}
+
+#[cfg(test)]
+mod vendor_attribute_key_tests {
+    use super::*;
+
+    /// The defect this key type exists to fix: two vendors using ONE attribute
+    /// name are two different attributes (§4.70 identifies them by the pair),
+    /// and must not overwrite each other at rest.
+    #[test]
+    fn two_vendors_using_one_name_do_not_collide() {
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            VendorAttributeKey::new(Some("acme"), "env"),
+            CustomAttributeValue::Text("prod".into()),
+        );
+        m.insert(
+            VendorAttributeKey::new(Some("globex"), "env"),
+            CustomAttributeValue::Text("staging".into()),
+        );
+
+        assert_eq!(m.len(), 2, "same name, different vendors — two attributes, not one");
+        assert_eq!(
+            m.get(&VendorAttributeKey::new(Some("acme"), "env")),
+            Some(&CustomAttributeValue::Text("prod".into()))
+        );
+        assert_eq!(
+            m.get(&VendorAttributeKey::new(Some("globex"), "env")),
+            Some(&CustomAttributeValue::Text("staging".into()))
+        );
+    }
+
+    /// §4.70 limits Vendor Identification to `[A-Za-z0-9_.]`, so `/` cannot
+    /// appear in a vendor and the FIRST `/` is always the separator. The
+    /// attribute NAME has no such restriction and may contain slashes.
+    #[test]
+    fn the_name_half_may_contain_slashes_the_vendor_half_cannot() {
+        let k = VendorAttributeKey::new(Some("acme.corp_1"), "path/to/thing");
+        assert_eq!(k.vendor(), "acme.corp_1");
+        assert_eq!(k.name(), "path/to/thing");
+    }
+
+    /// A client that sends no Vendor Identification is recorded under §4.70's
+    /// reserved client value, which is exactly what the encoder emits for that
+    /// case — so the wire and the store cannot disagree.
+    #[test]
+    fn an_absent_vendor_is_recorded_as_the_reserved_client_value() {
+        let k = VendorAttributeKey::new(None, "env");
+        assert_eq!(k.vendor(), VENDOR_CLIENT);
+        assert_eq!(k.name(), "env");
+        assert_eq!(k, VendorAttributeKey::new(Some(VENDOR_CLIENT), "env"));
+    }
+
+    /// Records written before the pair key existed keyed by the bare name, and
+    /// the pre-G9 encoder hard-coded "x" for every one. So a legacy key reads
+    /// back as an "x" attribute — no migration step, and no silently
+    /// reinterpreting someone else's vendor.
+    #[test]
+    fn a_legacy_bare_name_key_loads_as_a_client_attribute() {
+        let legacy: std::collections::HashMap<VendorAttributeKey, CustomAttributeValue> =
+            serde_json::from_str(r#"{"env":{"Text":"prod"}}"#).expect("legacy shape still loads");
+        let k = VendorAttributeKey::new(None, "env");
+        assert_eq!(
+            legacy.get(&k),
+            Some(&CustomAttributeValue::Text("prod".into())),
+            "a record written before the pair key must still be readable"
+        );
+        assert_eq!(legacy.keys().next().unwrap().vendor(), VENDOR_CLIENT);
+    }
+
+    /// Round-trips as a plain JSON string key, which is what keeps
+    /// `ObjectRecord` serialisable — `serde_json` map keys must be strings.
+    #[test]
+    fn it_serialises_as_a_plain_string_key() {
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            VendorAttributeKey::new(Some("acme"), "env"),
+            CustomAttributeValue::Text("prod".into()),
+        );
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"acme/env\""), "expected a string key, got {json}");
+        let back: std::collections::HashMap<VendorAttributeKey, CustomAttributeValue> =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
     }
 }
