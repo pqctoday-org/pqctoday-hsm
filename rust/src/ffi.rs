@@ -1465,7 +1465,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_RIPEMD160 => (0, 0, 0x00000400),
         CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
         | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
-        | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC | CKM_SHA_1_HMAC | CKM_MD5_HMAC | CKM_AES_CMAC => {
+        | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC | CKM_SHA_1_HMAC | CKM_MD5_HMAC => {
             (16, 64, 0x00000800 | 0x00002000)
         }
         CKM_SHA256_HMAC_GENERAL
@@ -9307,10 +9307,7 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
                     DigestCtx::Sha512_256(_) => 32,
                     DigestCtx::Sha3_224(_) => 28,
                     DigestCtx::Sha3_384(_) => 48,
-                DigestCtx::Sha1(_) => 20,
-                DigestCtx::Md5(_) => 16,
                     DigestCtx::Sha1(_) => 20,
-                DigestCtx::Md5(_) => 16,
                     DigestCtx::Md5(_) => 16,
                     DigestCtx::Keccak256(_) => 32,
                     DigestCtx::Ripemd160(_) => 20,
@@ -9424,7 +9421,6 @@ pub fn C_Digest(
                     DigestCtx::Sha3_224(_) => 28,
                     DigestCtx::Sha3_384(_) => 48,
                     DigestCtx::Sha1(_) => 20,
-                DigestCtx::Md5(_) => 16,
                     DigestCtx::Md5(_) => 16,
                     DigestCtx::Keccak256(_) => 32,
                     DigestCtx::Ripemd160(_) => 20,

@@ -1981,7 +1981,6 @@ pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<
                 CKM_ECDSA_SHA3_224 => sha3::Sha3_224::digest(msg).to_vec(),
                 CKM_ECDSA_SHA224 => sha2::Sha224::digest(msg).to_vec(),
                 CKM_ECDSA_SHA1 => sha1::Sha1::digest(msg).to_vec(),
-        CKM_ECDSA_SHA224 => sha2::Sha224::digest(msg).to_vec(),
                 _ => sha3::Sha3_256::digest(msg).to_vec(),
             };
             let sig: p256::ecdsa::Signature =
@@ -3040,7 +3039,7 @@ pub fn verify_ecdsa(
             let hash: Vec<u8> = match mech {
                 CKM_ECDSA_SHA3_224 => sha3::Sha3_224::digest(msg).to_vec(),
                 CKM_ECDSA_SHA224 => sha2::Sha224::digest(msg).to_vec(),
-        CKM_ECDSA_SHA224 => sha2::Sha224::digest(msg).to_vec(),
+                CKM_ECDSA_SHA1 => sha1::Sha1::digest(msg).to_vec(),
                 _ => sha3::Sha3_256::digest(msg).to_vec(),
             };
             vk.verify_prehash(&hash, &sig)
@@ -3283,6 +3282,58 @@ pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X1 follow-up (2026-09-07). Every hash-composite ECDSA mechanism this
+    /// engine advertises must ROUND-TRIP: the digest `sign_ecdsa` computes
+    /// and the digest `verify_ecdsa` computes have to be the same one.
+    ///
+    /// This is not hypothetical. `CKM_ECDSA_SHA1` on P-256 is dispatched by
+    /// a shared outer match arm that hands several mechanisms to one
+    /// prehash block, and the INNER hash match in the verify half was
+    /// missing its `CKM_ECDSA_SHA1` case — so signing hashed with SHA-1
+    /// while verifying hashed with SHA3-256 (the arm's `_` fallback), and no
+    /// signature the engine produced under that mechanism could ever be
+    /// verified by it. The mechanism was advertised the whole time.
+    ///
+    /// Testing only that sign succeeds, or only that verify accepts some
+    /// externally-produced signature, would have missed it. Test the seam.
+    #[test]
+    fn every_advertised_ecdsa_p256_mechanism_round_trips() {
+        // A fixed, non-trivial P-256 scalar (1..=32), so the test is
+        // deterministic and does not depend on key generation.
+        let sk_bytes: Vec<u8> = (1u8..=32).collect();
+        let sk = p256::ecdsa::SigningKey::from_slice(&sk_bytes).unwrap();
+        let pk_bytes = sk
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+
+        let msg = b"round-trip the seam, not the halves";
+
+        // Exactly the mechanisms whose outer dispatch arm names P-256.
+        for mech in [
+            CKM_ECDSA_SHA256,
+            CKM_ECDSA_SHA224,
+            CKM_ECDSA_SHA1,
+            CKM_ECDSA_SHA3_224,
+            CKM_ECDSA_SHA3_256,
+        ] {
+            let sig = sign_ecdsa(mech, CURVE_P256, &sk_bytes, msg)
+                .unwrap_or_else(|e| panic!("sign_ecdsa(0x{mech:x}) failed: 0x{e:x}"));
+            verify_ecdsa(mech, CURVE_P256, &pk_bytes, msg, &sig)
+                .unwrap_or_else(|e| panic!("verify_ecdsa(0x{mech:x}) rejected the engine's own signature: 0x{e:x}"));
+
+            // And the mechanism must actually bind the hash: a signature
+            // over a different message must NOT verify. Without this, a
+            // sign/verify pair that both hashed with the WRONG-but-same
+            // algorithm would still pass the check above.
+            assert!(
+                verify_ecdsa(mech, CURVE_P256, &pk_bytes, b"a different message", &sig).is_err(),
+                "0x{mech:x}: signature verified against the wrong message"
+            );
+        }
+    }
 
     fn decode_hex(s: &str) -> Vec<u8> {
         (0..s.len())
