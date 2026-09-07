@@ -1046,7 +1046,7 @@ fn uid_frame(uid: &str) -> TtlvFrame {
     if uid == crate::dispatcher::ID_PLACEHOLDER_SENTINEL {
         return TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Enumeration(0x00000001));
     }
-    TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(uid.to_string()))
+    TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(uid.to_string()))
 }
 
 /// Encapsulate's `CryptographicParameters` structure, PLUS the CSD02
@@ -1075,7 +1075,7 @@ fn encode_encapsulate_params(
 fn encode_key_wrapping_spec(s: &KeyWrappingSpec) -> TtlvFrame {
     let mut eki = vec![TtlvFrame::new(
         Tag(tags::UniqueIdentifier),
-        Value::TextString(s.encryption_key_uid.clone()),
+        Value::Identifier(s.encryption_key_uid.clone()),
     )];
     if let Some(cp) = &s.cryptographic_parameters {
         eki.push(encode_cryptographic_parameters(cp));
@@ -1713,7 +1713,7 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::CreateSplitKey(r)   => r
             .uids
             .iter()
-            .map(|u| TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(u.clone())))
+            .map(|u| TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(u.clone())))
             .collect(),
         ResponsePayload::JoinSplitKey(r)     => encode_uid_only_resp(&r.uid),
         ResponsePayload::Archive(r)          => encode_uid_only_resp(&r.uid),
@@ -1760,11 +1760,11 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::ReKeyKeyPair(r)     => vec![
             TtlvFrame::new(
                 Tag(tags::PrivateKeyUniqueIdentifier),
-                Value::TextString(r.private_key_uid.clone()),
+                Value::Identifier(r.private_key_uid.clone()),
             ),
             TtlvFrame::new(
                 Tag(tags::PublicKeyUniqueIdentifier),
-                Value::TextString(r.public_key_uid.clone()),
+                Value::Identifier(r.public_key_uid.clone()),
             ),
         ],
         // Phase 4 — §6.1.5 Table 262: Asynchronous Correlation Value +
@@ -1935,7 +1935,7 @@ fn decode_create_req(children: &[TtlvFrame]) -> Result<CreateRequest, WireError>
 fn encode_create_resp(r: &CreateResponse) -> Vec<TtlvFrame> {
     vec![
         TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(r.object_type.to_wire_value())),
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
     ]
 }
 
@@ -1995,11 +1995,11 @@ fn encode_create_key_pair_resp(r: &CreateKeyPairResponse) -> Vec<TtlvFrame> {
     vec![
         TtlvFrame::new(
             Tag(tags::PrivateKeyUniqueIdentifier),
-            Value::TextString(r.private_key_uid.clone()),
+            Value::Identifier(r.private_key_uid.clone()),
         ),
         TtlvFrame::new(
             Tag(tags::PublicKeyUniqueIdentifier),
-            Value::TextString(r.public_key_uid.clone()),
+            Value::Identifier(r.public_key_uid.clone()),
         ),
     ]
 }
@@ -2087,9 +2087,13 @@ fn decode_key_wrapping_spec(frame: &TtlvFrame) -> Result<KeyWrappingSpec, WireEr
             tags::EncryptionKeyInformation => {
                 for e in expect_structure(c, "Encryption Key Information")? {
                     match e.tag.0 {
+                        // §3.3 Table 36 — the wrapping key is named by
+                        // "Reference or Name Reference or Unique Identifier
+                        // Enumeration or Integer". `link_target` accepts the
+                        // three string forms; TextString is not one of them.
                         tags::UniqueIdentifier => {
-                            if let Value::TextString(s) = &e.value {
-                                encryption_key_uid = s.clone();
+                            if let Some(s) = link_target(&e.value) {
+                                encryption_key_uid = s;
                             }
                         }
                         tags::CryptographicParameters => {
@@ -2170,7 +2174,7 @@ fn encode_get_resp(r: &GetResponse) -> Vec<TtlvFrame> {
     };
     vec![
         TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(r.object_type.to_wire_value())),
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         managed_object,
     ]
 }
@@ -2210,7 +2214,7 @@ fn decode_locate_req(children: &[TtlvFrame]) -> Result<LocateRequest, WireError>
 fn encode_locate_resp(r: &LocateResponse) -> Vec<TtlvFrame> {
     r.uids
         .iter()
-        .map(|u| TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(u.clone())))
+        .map(|u| TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(u.clone())))
         .collect()
 }
 
@@ -2219,7 +2223,7 @@ fn decode_activate_req(children: &[TtlvFrame]) -> Result<ActivateRequest, WireEr
 }
 
 fn encode_activate_resp(r: &ActivateResponse) -> Vec<TtlvFrame> {
-    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone()))]
+    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone()))]
 }
 
 fn decode_revoke_req(children: &[TtlvFrame]) -> Result<RevokeRequest, WireError> {
@@ -2252,7 +2256,7 @@ fn decode_revoke_req(children: &[TtlvFrame]) -> Result<RevokeRequest, WireError>
 }
 
 fn encode_revoke_resp(r: &RevokeResponse) -> Vec<TtlvFrame> {
-    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone()))]
+    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone()))]
 }
 
 fn decode_destroy_req(children: &[TtlvFrame]) -> Result<DestroyRequest, WireError> {
@@ -2260,7 +2264,7 @@ fn decode_destroy_req(children: &[TtlvFrame]) -> Result<DestroyRequest, WireErro
 }
 
 fn encode_destroy_resp(r: &DestroyResponse) -> Vec<TtlvFrame> {
-    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone()))]
+    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone()))]
 }
 
 fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireError> {
@@ -2319,7 +2323,7 @@ fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
     // Authenticated Encryption Tag. CS-BC-M-GCM-2 pair #111 pins the
     // IV-before-tag ordering when RandomIV generates both.
     let mut out = vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.ciphertext.clone())),
     ];
     if let Some(iv) = &r.iv_counter_nonce {
@@ -2392,7 +2396,7 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
 
 fn encode_decrypt_resp(r: &DecryptResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())),
     ]
 }
@@ -2438,7 +2442,7 @@ fn decode_encapsulate_req(children: &[TtlvFrame]) -> Result<EncapsulateRequest, 
 /// `{ UniqueIdentifier (new shared-secret object), Data (ciphertext) }`.
 fn encode_encapsulate_resp(r: &EncapsulateResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())),
     ]
 }
@@ -2466,7 +2470,7 @@ fn decode_decapsulate_req(children: &[TtlvFrame]) -> Result<DecapsulateRequest, 
 /// Encode a `Decapsulate` response payload (KMIP 3.0 CSD02):
 /// `{ UniqueIdentifier (new shared-secret object) }`.
 fn encode_decapsulate_resp(r: &DecapsulateResponse) -> Vec<TtlvFrame> {
-    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone()))]
+    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone()))]
 }
 
 fn decode_sign_req(children: &[TtlvFrame]) -> Result<SignRequest, WireError> {
@@ -2487,7 +2491,7 @@ fn decode_sign_req(children: &[TtlvFrame]) -> Result<SignRequest, WireError> {
 
 fn encode_sign_resp(r: &SignResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::SignatureData), Value::ByteString(r.signature.clone())),
     ]
 }
@@ -2512,7 +2516,7 @@ fn decode_sigverify_req(children: &[TtlvFrame]) -> Result<SignatureVerifyRequest
 
 fn encode_sigverify_resp(r: &SignatureVerifyResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::ValidityIndicator), Value::Enumeration(r.validity as u32)),
     ]
 }
@@ -2544,8 +2548,8 @@ fn decode_validate_req(children: &[TtlvFrame]) -> Result<ValidateRequest, WireEr
                 }
             }
             tags::UniqueIdentifier => {
-                if let Value::TextString(s) = &c.value {
-                    uids.push(s.clone());
+                if let Some(s) = link_target(&c.value) {
+                    uids.push(s);
                 }
             }
             tags::ValidityDate => {
@@ -2587,7 +2591,7 @@ fn decode_certify_req(children: &[TtlvFrame]) -> Result<CertifyRequest, WireErro
     for c in children {
         match c.tag.0 {
             tags::UniqueIdentifier => {
-                if let Value::TextString(s) = &c.value { req.uid = Some(s.clone()); }
+                if let Some(s) = link_target(&c.value) { req.uid = Some(s.clone()); }
             }
             tags::CertificateRequestType => {
                 let v = expect_enum(c, "Certificate Request Type")?;
@@ -2712,8 +2716,8 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
             )
         }
         tags::UniqueIdentifier => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::UniqueIdentifier(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::UniqueIdentifier(s)
             } else {
                 return Err(WireError::BadType {
                     tag: frame.tag.0,
@@ -2900,32 +2904,40 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 Attribute::ObjectClass(match v { 2 => "System".into(), _ => "User".into() })
             } else { return Ok(None); }
         }
-        // KMIP 3.0 §11 — Link attributes (UID references). All three
-        // wire as TextString on the response side; the XML uses
-        // `type="Reference"` which the oasis_codec maps to TextString.
+        // KMIP 3.0 §4.35 — Link attributes. Each is encoded "Reference or
+        // Name Reference or Unique Identifier Enumeration or Integer": a
+        // `Reference` is early-binding (a specific object's UID), a
+        // `Name Reference` late-binding (whichever object currently has the
+        // matching Name). `Identifier` is accepted too, since a link target
+        // is itself a UID.
+        //
+        // Until 2026-09-06 these decoded from `TextString`, because the codec
+        // had no 0x0D/0x0E types and the replay harness rewrote the corpus's
+        // `type="Reference"` down to TextString. Both are fixed; TextString
+        // is no longer accepted here (strict).
         tags::NextLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::NextLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::NextLink(s)
             } else { return Ok(None); }
         }
         tags::PreviousLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::PreviousLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::PreviousLink(s)
             } else { return Ok(None); }
         }
         tags::PublicKeyLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::PublicKeyLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::PublicKeyLink(s)
             } else { return Ok(None); }
         }
         tags::PrivateKeyLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::PrivateKeyLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::PrivateKeyLink(s)
             } else { return Ok(None); }
         }
         tags::GroupLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::GroupLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::GroupLink(s)
             } else { return Ok(None); }
         }
         // KMIP `Object Group` (0x420056) — multi-instance membership
@@ -2938,24 +2950,24 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         }
         // K20 — Derive Key link pair (§4.35.5 / §6.1.19).
         tags::DerivationObjectLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::DerivationBaseObjectLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::DerivationBaseObjectLink(s)
             } else { return Ok(None); }
         }
         tags::DerivedObjectLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::DerivedObjectLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::DerivedObjectLink(s)
             } else { return Ok(None); }
         }
         // K21 — Re-key link pair (§6.1.53 / §6.1.52).
         tags::ReplacedObjectLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::ReplacedObjectLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::ReplacedObjectLink(s)
             } else { return Ok(None); }
         }
         tags::ReplacementObjectLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::ReplacementObjectLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::ReplacementObjectLink(s)
             } else { return Ok(None); }
         }
         tags::ApplicationSpecificInformation => {
@@ -3410,14 +3422,14 @@ fn decode_hash_req(children: &[TtlvFrame]) -> Result<HashRequest, WireError> {
 
 fn encode_mac_resp(r: &MacResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::MacData), Value::ByteString(r.mac_data.clone())),
     ]
 }
 
 fn encode_mac_verify_resp(r: &MacVerifyResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::ValidityIndicator), Value::Enumeration(r.validity as u32)),
     ]
 }
@@ -3523,8 +3535,8 @@ fn decode_create_split_key_req(children: &[TtlvFrame]) -> Result<CreateSplitKeyR
                 );
             }
             tags::UniqueIdentifier => {
-                if let Value::TextString(s) = &c.value {
-                    uid = Some(s.clone());
+                if let Some(s) = link_target(&c.value) {
+                    uid = Some(s);
                 }
             }
             tags::SplitKeyParts => {
@@ -3597,8 +3609,8 @@ fn decode_join_split_key_req(children: &[TtlvFrame]) -> Result<JoinSplitKeyReque
                 );
             }
             tags::UniqueIdentifier => {
-                if let Value::TextString(s) = &c.value {
-                    uids.push(s.clone());
+                if let Some(s) = link_target(&c.value) {
+                    uids.push(s);
                 }
             }
             tags::SecretDataType => {
@@ -3813,7 +3825,19 @@ fn decode_derive_key_req(children: &[TtlvFrame]) -> Result<DeriveKeyRequest, Wir
                 )?);
             }
             tags::UniqueIdentifier => match &c.value {
-                Value::TextString(s) => uids.push(s.clone()),
+                // §6.1.19 — the base objects are named as UIDs (§4.68
+                // `Identifier`) or as links (§4.35 `Reference`/`Name
+                // Reference`). TextString is not a spec form (strict).
+                Value::Identifier(s) | Value::Reference(s) | Value::NameReference(s) => {
+                    uids.push(s.clone())
+                }
+                Value::TextString(_) => {
+                    return Err(WireError::BadType {
+                        tag: tags::UniqueIdentifier,
+                        name: "Derive Key: Unique Identifier",
+                        msg: "carried as TextString (0x07); KMIP 3.0 requires Identifier (0x0C) or a Reference type".to_string(),
+                    });
+                }
                 // §6.1 preamble ID Placeholder — same convention as `required_uid`.
                 Value::Enumeration(v) if *v == 0x00000001 => {
                     uids.push(crate::dispatcher::ID_PLACEHOLDER_SENTINEL.to_string());
@@ -4590,7 +4614,7 @@ pub fn decode_transparent_rsa_public_key(
 fn encode_export_resp(r: &ExportResponse) -> Vec<TtlvFrame> {
     let mut out = vec![
         TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(r.object_type.to_wire_value())),
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
     ];
     out.push(TtlvFrame::new(
         Tag(tags::Attributes),
@@ -4683,7 +4707,7 @@ fn encode_key_block(kb: &KeyBlock, seed: Option<&[u8]>) -> TtlvFrame {
         // WrappingMethod + EncryptionKeyInformation{UID, CP}.
         let mut eki = vec![TtlvFrame::new(
             Tag(tags::UniqueIdentifier),
-            Value::TextString(kwd.encryption_key_uid.clone()),
+            Value::Identifier(kwd.encryption_key_uid.clone()),
         )];
         if let Some(cp) = &kwd.cryptographic_parameters {
             eki.push(encode_cryptographic_parameters(cp));
@@ -4717,7 +4741,7 @@ fn encode_key_block(kb: &KeyBlock, seed: Option<&[u8]>) -> TtlvFrame {
 fn encode_uid_only_resp(uid: &str) -> Vec<TtlvFrame> {
     vec![TtlvFrame::new(
         Tag(tags::UniqueIdentifier),
-        Value::TextString(uid.to_string()),
+        Value::Identifier(uid.to_string()),
     )]
 }
 
@@ -4909,7 +4933,7 @@ fn decode_get_attributes_req(children: &[TtlvFrame]) -> Result<GetAttributesRequ
 fn encode_get_attributes_resp(r: &GetAttributesResponse) -> Vec<TtlvFrame> {
     let mut out = vec![TtlvFrame::new(
         Tag(tags::UniqueIdentifier),
-        Value::TextString(r.uid.clone()),
+        Value::Identifier(r.uid.clone()),
     )];
     // KMIP 3.0 §6.1.21 — GetAttributes response wraps the returned
     // attributes in a single `Attributes` Structure whose children are
@@ -4930,7 +4954,7 @@ fn decode_get_attribute_list_req(children: &[TtlvFrame]) -> Result<GetAttributeL
 fn encode_get_attribute_list_resp(r: &GetAttributeListResponse) -> Vec<TtlvFrame> {
     let mut out = vec![TtlvFrame::new(
         Tag(tags::UniqueIdentifier),
-        Value::TextString(r.uid.clone()),
+        Value::Identifier(r.uid.clone()),
     )];
     // Per §6.1.22 a spec-defined attribute name is carried as an
     // AttributeReference Enumeration (the "enumerable Tag" form); a
@@ -5018,7 +5042,7 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         ),
         Attribute::UniqueIdentifier(s) => TtlvFrame::new(
             Tag(tags::UniqueIdentifier),
-            Value::TextString(s.clone()),
+            Value::Identifier(s.clone()),
         ),
         Attribute::Name(s) => TtlvFrame::new(
             Tag(tags::Name),
@@ -5112,16 +5136,16 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::CertificateType(v)          => TtlvFrame::new(Tag(tags::CertificateType),          Value::Enumeration(*v)),
         Attribute::CertificateValue(bs)        => TtlvFrame::new(Tag(tags::CertificateValue),         Value::ByteString(bs.clone())),
         Attribute::ProtectionStorageMask(m)    => TtlvFrame::new(Tag(tags::ProtectionStorageMask),    Value::Integer(*m as i32)),
-        Attribute::PublicKeyLink(s)            => TtlvFrame::new(Tag(tags::PublicKeyLink),            Value::TextString(s.clone())),
-        Attribute::PrivateKeyLink(s)           => TtlvFrame::new(Tag(tags::PrivateKeyLink),           Value::TextString(s.clone())),
-        Attribute::NextLink(s)                 => TtlvFrame::new(Tag(tags::NextLink),                 Value::TextString(s.clone())),
-        Attribute::PreviousLink(s)             => TtlvFrame::new(Tag(tags::PreviousLink),             Value::TextString(s.clone())),
-        Attribute::GroupLink(s)                => TtlvFrame::new(Tag(tags::GroupLink),                Value::TextString(s.clone())),
+        Attribute::PublicKeyLink(s)            => TtlvFrame::new(Tag(tags::PublicKeyLink),            Value::Reference(s.clone())),
+        Attribute::PrivateKeyLink(s)           => TtlvFrame::new(Tag(tags::PrivateKeyLink),           Value::Reference(s.clone())),
+        Attribute::NextLink(s)                 => TtlvFrame::new(Tag(tags::NextLink),                 Value::Reference(s.clone())),
+        Attribute::PreviousLink(s)             => TtlvFrame::new(Tag(tags::PreviousLink),             Value::Reference(s.clone())),
+        Attribute::GroupLink(s)                => TtlvFrame::new(Tag(tags::GroupLink),                Value::NameReference(s.clone())),
         Attribute::ObjectGroup(s)              => TtlvFrame::new(Tag(tags::ObjectGroup),              Value::TextString(s.clone())),
-        Attribute::DerivationBaseObjectLink(s) => TtlvFrame::new(Tag(tags::DerivationObjectLink),     Value::TextString(s.clone())),
-        Attribute::DerivedObjectLink(s)        => TtlvFrame::new(Tag(tags::DerivedObjectLink),        Value::TextString(s.clone())),
-        Attribute::ReplacedObjectLink(s)       => TtlvFrame::new(Tag(tags::ReplacedObjectLink),       Value::TextString(s.clone())),
-        Attribute::ReplacementObjectLink(s)    => TtlvFrame::new(Tag(tags::ReplacementObjectLink),    Value::TextString(s.clone())),
+        Attribute::DerivationBaseObjectLink(s) => TtlvFrame::new(Tag(tags::DerivationObjectLink),     Value::Reference(s.clone())),
+        Attribute::DerivedObjectLink(s)        => TtlvFrame::new(Tag(tags::DerivedObjectLink),        Value::Reference(s.clone())),
+        Attribute::ReplacedObjectLink(s)       => TtlvFrame::new(Tag(tags::ReplacedObjectLink),       Value::Reference(s.clone())),
+        Attribute::ReplacementObjectLink(s)    => TtlvFrame::new(Tag(tags::ReplacementObjectLink),    Value::Reference(s.clone())),
         Attribute::ApplicationSpecificInformation { namespace, data } => {
             TtlvFrame::new(Tag(tags::ApplicationSpecificInformation), Value::Structure(vec![
                 TtlvFrame::new(Tag(tags::ApplicationNamespace), Value::TextString(namespace.clone())),
@@ -5386,11 +5410,48 @@ fn tag_name_from_code(code: u32) -> &'static str {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/// A §4.35 Link target: `Reference` (early-binding), `Name Reference`
+/// (late-binding) or a plain `Identifier`. Returns `None` for anything else —
+/// notably `TextString`, which is not a spec encoding for a link and is no
+/// longer accepted (2026-09-06).
+///
+/// `Name Reference` resolution is deliberately NOT performed here: the decoder
+/// returns the name as written, and resolving it to whichever object currently
+/// carries that `Name` is the store's job at read time. Collapsing the two at
+/// decode time would turn a late-binding link into an early-binding one and
+/// silently change its meaning.
+fn link_target(v: &Value) -> Option<String> {
+    match v {
+        Value::Reference(s) | Value::NameReference(s) | Value::Identifier(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
 fn required_uid(children: &[TtlvFrame]) -> Result<String, WireError> {
     for c in children {
         if c.tag.0 == tags::UniqueIdentifier {
             match &c.value {
-                Value::TextString(s) => return Ok(s.clone()),
+                // §4.68 / §11.25 — a Unique Identifier is carried as the
+                // `Identifier` type (0x0C). Every one of the 1,576 UID
+                // occurrences in the OASIS corpus uses it.
+                //
+                // STRICT (2026-09-06): the legacy `TextString` form is NOT
+                // accepted. It is not a spec encoding for this field, and
+                // silently accepting it is what let the whole estate speak a
+                // non-conformant dialect unnoticed. A peer still sending it
+                // gets `Invalid Field` naming the type it sent.
+                Value::Identifier(s) => return Ok(s.clone()),
+                Value::TextString(_) => {
+                    return Err(WireError::BadType {
+                        tag: tags::UniqueIdentifier,
+                        name: "Unique Identifier",
+                        msg: "carried as TextString (0x07); KMIP 3.0 requires Identifier (0x0C) — see §4.68 and §11.25".to_string(),
+                    });
+                }
+                // A link-shaped UID reference is also accepted here: §4.35
+                // encodes links as `Reference` / `Name Reference`, and some
+                // payloads carry a target UID under the same tag.
+                Value::Reference(s) | Value::NameReference(s) => return Ok(s.clone()),
                 // KMIP 3.0 §6.1 preamble — `UniqueIdentifier` MAY be carried as
                 // an Enumeration referring to a previously-produced
                 // UID within the same batch. The OASIS Baseline corpus
@@ -6198,8 +6259,8 @@ mod tests {
         let full = vec![
             TtlvFrame::new(Tag(tags::ObjectType),
                            Value::Enumeration(ObjectType::SymmetricKey.to_wire_value())),
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u-1".into())),
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u-2".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u-1".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u-2".into())),
             TtlvFrame::new(Tag(tags::DerivationMethod),
                            Value::Enumeration(DerivationMethod::Nist800_108C.to_wire_value())),
             TtlvFrame::new(Tag(tags::DerivationParameters), Value::Structure(vec![
@@ -6278,7 +6339,7 @@ mod tests {
         let children = expect_structure(&frame, "Response Payload").unwrap();
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].tag.0, tags::UniqueIdentifier);
-        assert_eq!(children[0].value, Value::TextString("derived-1".into()));
+        assert_eq!(children[0].value, Value::Identifier("derived-1".into()));
     }
 
     #[test]
@@ -6335,14 +6396,14 @@ mod tests {
     #[test]
     fn k19_get_usage_allocation_request_decode() {
         let full = vec![
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u".into())),
             TtlvFrame::new(Tag(tags::UsageLimitsCount), Value::LongInteger(42)),
         ];
         let req = decode_get_usage_allocation_req(&full).unwrap();
         assert_eq!(req.uid, "u");
         assert_eq!(req.usage_limits_count, 42);
         let no_count = vec![
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u".into())),
         ];
         assert!(matches!(
             decode_get_usage_allocation_req(&no_count),
@@ -6488,7 +6549,7 @@ mod tests {
                                 // Stored Certificate object reference.
                                 TtlvFrame::new(
                                     Tag(tags::UniqueIdentifier),
-                                    Value::TextString("cert-uid-1".into()),
+                                    Value::Identifier("cert-uid-1".into()),
                                 ),
                                 // Validity Date.
                                 TtlvFrame::new(
@@ -6603,7 +6664,7 @@ mod tests {
         let bytes = envelope(
             Operation::ReCertify,
             vec![
-                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("cert-old".into())),
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("cert-old".into())),
                 TtlvFrame::new(Tag(tags::Offset), Value::Interval(3600)),
             ],
         );
@@ -6962,7 +7023,7 @@ mod tests {
             TtlvFrame::new(Tag(tags::KeyWrappingData), Value::Structure(vec![
                 TtlvFrame::new(Tag(tags::WrappingMethod), Value::Enumeration(0x01)),
                 TtlvFrame::new(Tag(tags::EncryptionKeyInformation), Value::Structure(vec![
-                    TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("kek-1".into())),
+                    TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("kek-1".into())),
                 ])),
                 TtlvFrame::new(Tag(tags::EncodingOption), Value::Enumeration(0x02)),
             ])),
@@ -6983,10 +7044,10 @@ mod tests {
         let frame = TtlvFrame::new(Tag(tags::KeyWrappingData), Value::Structure(vec![
             TtlvFrame::new(Tag(tags::WrappingMethod), Value::Enumeration(0x01)),
             TtlvFrame::new(Tag(tags::EncryptionKeyInformation), Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("kek-1".into())),
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("kek-1".into())),
             ])),
             TtlvFrame::new(Tag(tags::MacSignatureKeyInformation), Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("mac-key".into())),
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("mac-key".into())),
             ])),
         ]));
         let kwd = decode_key_wrapping_spec(&frame).unwrap();
@@ -7006,7 +7067,7 @@ mod tests {
 
     fn revoke_req_frame(reason_code: u32) -> Vec<TtlvFrame> {
         vec![
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u".into())),
             TtlvFrame::new(
                 Tag(tags::RevocationReason),
                 Value::Structure(vec![TtlvFrame::new(
@@ -7289,7 +7350,7 @@ mod tests {
     fn k10_decap_request_response_round_trip() {
         let encapsulation = vec![0xE0; 32];
         let req_children = vec![
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("kem-1".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("kem-1".into())),
             TtlvFrame::new(Tag(tags::Data), Value::ByteString(encapsulation.clone())),
         ];
         let req = decode_decrypt_req(&req_children).expect("decap request decodes");
@@ -7408,12 +7469,26 @@ mod tests {
         assert_eq!(placeholder.tag.0, tags::UniqueIdentifier);
         assert_eq!(placeholder.value, Value::Enumeration(0x00000001));
 
+        // §4.68 / §11.25 — a real UID rides as `Identifier` (0x0C), not a
+        // Text String. Every UID in the OASIS corpus uses this type.
         let real = uid_frame("urn:some-real-uid");
-        assert_eq!(real.value, Value::TextString("urn:some-real-uid".to_string()));
+        assert_eq!(real.value, Value::Identifier("urn:some-real-uid".to_string()));
+        assert_eq!(real.value.item_type().as_byte(), 0x0C);
 
         // Round-trips through the decoder that already expected this form.
         let decoded = required_uid(std::slice::from_ref(&placeholder)).unwrap();
         assert_eq!(decoded, crate::dispatcher::ID_PLACEHOLDER_SENTINEL);
+        assert_eq!(required_uid(std::slice::from_ref(&real)).unwrap(), "urn:some-real-uid");
+
+        // STRICT: the legacy Text String form is refused, not quietly taken.
+        let legacy = TtlvFrame::new(
+            Tag(tags::UniqueIdentifier),
+            Value::TextString("urn:some-real-uid".to_string()),
+        );
+        assert!(
+            matches!(required_uid(std::slice::from_ref(&legacy)), Err(WireError::BadType { .. })),
+            "a TextString UID must be refused, not accepted as if conformant",
+        );
     }
 
     /// Gap-remediation Phase C, Finding #7 — `tag_code_from_name`/
@@ -7449,7 +7524,7 @@ mod tests {
     #[test]
     fn delete_attribute_resolves_numeric_reference_for_split_key_method() {
         let frames = vec![
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u".into())),
             TtlvFrame::new(Tag(tags::AttributeReference), Value::Enumeration(tags::SplitKeyMethod)),
         ];
         let req = decode_delete_attribute_req(&frames).unwrap();

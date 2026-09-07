@@ -74,7 +74,7 @@ covered separately by the 42-transcript vendored subset in `../conformance/pqc_c
 
 | Layer | Status | Evidence |
 |---|---|---|
-| TTLV wire-format codec | ⚠️ **conformant for the 11 item types it implements** | 1234/1234 OASIS messages round-trip byte-identical — but only after the harness renders `Identifier`/`Reference`/`Name Reference` as Text String; the codec does not implement those three KMIP 3.0 types (gap **G1**, §8) |
+| TTLV wire-format codec | ✅ **all 14 KMIP 3.0 item types** | 1234/1234 OASIS messages round-trip byte-identical **against the types OASIS publishes** — `Identifier`/`Reference`/`Name Reference` implemented 2026-09-06 (**G1 closed**); nothing is downgraded anywhere in the measured path |
 | Dispatcher behaviour vs OASIS expectations | ✅ **97/97 actionable tests pass (100%)** | `conformance/REPLAY_REPORT.md` (regenerated per run) |
 | Op coverage | ✅ all ops used by the OASIS corpus | 0 `SKIP_OP` in the replay report |
 | Query honesty | ✅ **nothing advertised that isn't real** | both `ADVERTISED_UNIMPLEMENTED_*` lists in `ops/query.rs` are empty (Phase 6.1) |
@@ -88,15 +88,10 @@ covered separately by the 42-transcript vendored subset in `../conformance/pqc_c
 | Third-party interop (PyKMIP / vendor) | ⏸️ never run — **not currently possible** | KMIP 3.0 has no compatible OSS client; see §5.3 |
 
 **Bottom line**: the dispatcher matches the OASIS conformance transcripts on **all 97
-non-deprecated tests** in the corpus, and the wire bytes match the KMIP 3.0 CSD02 draft for every
-item type the codec implements — with the material qualification that three KMIP 3.0 item types are
-not implemented at all and are measured only after the harness downgrades them to Text String
-(**G1**, §8). Read §8 before quoting any figure in this report. The
-remaining 5 transcripts are a deliberate, documented policy skip — DES / 3DES / classical DSA are
-out of scope for the `softhsmrustv3` backend (`kmip/DEPRECATED.md`). There are, as of this
-revision, **zero** other skip categories: no `SKIP_OP`, no `SKIP_PRECONDITION`, no
-`SKIP_POLICY_VARIANT`, no `SKIP_PARSE` — every transcript the harness can meaningfully run,
-it runs to a real PASS or FAIL.
+non-deprecated tests**, and the wire bytes match CSD02 for all 14 item types — including
+`Identifier`/`Reference`/`Name Reference`, added 2026-09-06. Nothing is downgraded in the measured
+path. The remaining 5 transcripts are a deliberate, documented policy skip (DES / 3DES / classical
+DSA, `kmip/DEPRECATED.md`). There are zero other skip categories. Read §8 for the gaps still open.
 
 ## 0. Gap-remediation follow-up (v0.13.0, 2026-07-09)
 
@@ -874,7 +869,7 @@ customer-impact rating.
 
 | # | Severity | Gap | Where |
 |---|---|---|---|
-| **G1** | HIGH | **The codec implements 11 of the 14 KMIP 3.0 item types.** `Identifier` (0x0C), `Reference` (0x0D) and `Name Reference` (0x0E) — §11.25, encodings §10.1.2–§10.1.4 — are absent. The OASIS corpus uses them 1,000+ times (`<UniqueIdentifier type="Identifier">` ×1012, `type="Reference"` links ×47, `NameReference` ×2). The replay harness and the Python client both downgrade all three to Text String before encoding, so the "1234/1234 byte-identical" figure measures a downgraded rendering, not the corpus as published. A client sending spec-typed identifiers is rejected with `Invalid Message`. | `src/codec/value.rs`, `conformance/harness/oasis_codec.py`, `python-client/src/pqctoday_kmip/_ttlv.py` |
+| ~~**G1**~~ | **CLOSED 2026-09-06** | **The codec now implements all 14 KMIP 3.0 item types.** `Identifier` (0x0C), `Reference` (0x0D), `Name Reference` (0x0E) — §11.25, encodings §10.1.2–§10.1.4 — were absent; the corpus uses them 1,576 / 47 / 2 times, and the harness, Python client and hub encoders all rewrote them to Text String. Now implemented end to end and **strict**: a Text String identifier is refused, not silently accepted. Byte vectors regenerated (953 changed, none in length); OASIS replay 97/0/5 and PQC corpus 42/42 re-run against the published types. Regenerating also exposed 4 vectors **stale since the CSD02 corpus refresh** — they stayed green because the test checks codec self-consistency, not agreement with the corpus XML. | `src/codec/value.rs`, `src/kmip30/wire.rs`, `conformance/harness/oasis_codec.py` |
 | **G2** | HIGH | **Baseline §5.1.2 item 8 not met** — see the §5.1 table. Compounding it: an attribute the decoder does not model returns `Ok(None)` and the operation answers **Success**, so input is silently discarded. `Certify` writes a `CertificateLink` that `Get Attributes` then drops. | `src/kmip30/attrs.rs`, `src/kmip30/wire.rs`, `src/ops/get_attributes.rs` |
 | **G3** | HIGH | **The default TLS posture violates Profiles §3.1.2** — `permissive` is the rustls default provider: TLS 1.2 + 1.3, `TLS13_AES_128_GCM_SHA256` (forbidden) and unlisted 1.2 suites. §3.1.2 ends "SHALL NOT support any cipher suite not listed above". Conformant only under `--tls-profile quantum-safe`/`classical-baseline`, and the replay runs under the default. | `src/server/listener.rs` |
 | **G4** | HIGH (wording) | **§6.2 requires *all* Baseline mandatory test cases**; `BL-M-12-30`/`BL-M-13-30` (Register of Transparent DSA keys) are refused by policy. That remains an accepted deviation — but "all 13 conditions met" describes §5.1.2, not the §6.2 conformance clause. | `DEPRECATED.md` |

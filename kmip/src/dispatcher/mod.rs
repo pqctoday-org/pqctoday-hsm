@@ -1686,7 +1686,7 @@ mod tests {
                 Value::Enumeration(crate::kmip30::Operation::GetUsageAllocation.to_wire_value()),
             ),
             TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("k-usage".into())),
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("k-usage".into())),
                 TtlvFrame::new(Tag(tags::UsageLimitsCount), Value::LongInteger(25)),
             ])),
         ]));
@@ -1868,7 +1868,7 @@ mod tests {
                     Tag(tags::ObjectType),
                     Value::Enumeration(ObjectType::SymmetricKey.to_wire_value()),
                 ),
-                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("base-1".into())),
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("base-1".into())),
                 TtlvFrame::new(
                     Tag(tags::DerivationMethod),
                     Value::Enumeration(crate::kmip30::DerivationMethod::Hmac.to_wire_value()),
@@ -1961,7 +1961,7 @@ mod tests {
                 Value::Enumeration(crate::kmip30::Operation::ReKey.to_wire_value()),
             ),
             TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("old-aes".into())),
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("old-aes".into())),
                 // Offset = 0 seconds → AT2 = now → replacement Active,
                 // original Deactivated immediately.
                 TtlvFrame::new(Tag(tags::Offset), Value::Interval(0)),
@@ -2049,7 +2049,7 @@ mod tests {
                 Value::Enumeration(crate::kmip30::Operation::ReKeyKeyPair.to_wire_value()),
             ),
             TtlvFrame::new(Tag(tags::RequestPayload), Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("kp-priv".into())),
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("kp-priv".into())),
             ])),
         ]));
         let ga_item = TtlvFrame::new(Tag(tags::BatchItem), Value::Structure(vec![

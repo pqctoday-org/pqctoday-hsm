@@ -83,7 +83,7 @@ NAMED_INTEGER_MASKS: dict[str, dict[str, int]] = {
     "ProtectionStorageMask":  PROTECTION_STORAGE_MASK,
 }
 
-# TTLV type codepoints — KMIP 3.0 §9.1.1.
+# TTLV type codepoints — KMIP 3.0 CSD02 §11.25.
 TTLV_TYPE: dict[str, int] = {
     "Structure":        0x01,
     "Integer":          0x02,
@@ -96,16 +96,20 @@ TTLV_TYPE: dict[str, int] = {
     "DateTime":         0x09,
     "Interval":         0x0A,
     "DateTimeExtended": 0x0B,
+    # KMIP 3.0 (§11.25) — real wire types, not aliases.
+    "Identifier":       0x0C,
+    "Reference":        0x0D,
+    "NameReference":    0x0E,
 }
 
-# OASIS XML uses semantic type aliases that resolve to one of the 11 TTLV
-# primitives at wire encode time. ``Identifier`` / ``Reference`` /
-# ``NameReference`` are all UID-shaped TextStrings per KMIP 3.0 §9.1.1.
-XML_TYPE_ALIASES: dict[str, str] = {
-    "Identifier":     "TextString",
-    "Reference":      "TextString",
-    "NameReference":  "TextString",
-}
+# KMIP 3.0 (§11.25) gives Identifier (0x0C), Reference (0x0D) and Name
+# Reference (0x0E) their own item types. Until 2026-09-06 this table
+# rewrote all three to TextString before encoding, citing a "§9.1.1"
+# that does not exist in CSD02 — so the corpus was replayed in a
+# dialect OASIS never published, and "1234/1234 byte-identical"
+# measured that dialect. The codec now implements the real types;
+# nothing is downgraded.
+XML_TYPE_ALIASES: dict[str, str] = {}
 
 
 def _norm(name: str) -> str:
@@ -412,7 +416,8 @@ def _encode_value(node: TtlvNode) -> bytes:
     if t == "Boolean":
         # 8-byte body per §9.6.
         return struct.pack(">Q", 1 if str(v).lower() in ("true", "1") else 0)
-    if t == "TextString":
+    if t in ("TextString", "Identifier", "Reference", "NameReference"):
+        # §10.1.2 — all four are UTF-8 byte sequences; only the type byte differs.
         return str(v).encode("utf-8")
     if t == "ByteString":
         # Hex per OASIS convention.
@@ -523,7 +528,7 @@ def decode_one(buf: bytes, offset: int = 0) -> tuple[TtlvNode, int]:
         value = struct.unpack(">I", body)[0]
     elif type_name == "Boolean":
         value = bool(struct.unpack(">Q", body)[0])
-    elif type_name == "TextString":
+    elif type_name in ("TextString", "Identifier", "Reference", "NameReference"):
         value = body.decode("utf-8")
     elif type_name == "ByteString":
         value = body.hex()
@@ -554,6 +559,13 @@ PLACEHOLDER_STUBS: dict[str, str] = {
     "ByteString":           "00",
     "Interval":             "0",
     "BigInteger":           "0",
+    # KMIP 3.0 string types (§11.25). Same filler as TextString: before
+    # 2026-09-06 these were aliased to TextString before this lookup ran,
+    # so omitting them here would silently swap the filler for the "0"
+    # default and change 953 vectors' CONTENT, not just their type byte.
+    "Identifier":           "stub-placeholder",
+    "Reference":            "stub-placeholder",
+    "NameReference":        "stub-placeholder",
 }
 
 

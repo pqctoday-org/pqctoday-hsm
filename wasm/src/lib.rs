@@ -1253,6 +1253,17 @@ fn value_from_json(item_type: &str, node: &Json) -> Result<Ttlv, String> {
             .as_str()
             .map(|s| Ttlv::TextString(s.to_string()))
             .ok_or_else(|| format!("TextString value not a string: {value}")),
+        // KMIP 3.0 §11.25 — Identifier (0x0C) / Reference (0x0D) / Name
+        // Reference (0x0E). UTF-8 like a Text String; the type carries the
+        // meaning (own UID vs early- vs late-binding link).
+        "Identifier" | "Reference" | "NameReference" => value
+            .as_str()
+            .map(|s| match item_type {
+                "Identifier" => Ttlv::Identifier(s.to_string()),
+                "Reference" => Ttlv::Reference(s.to_string()),
+                _ => Ttlv::NameReference(s.to_string()),
+            })
+            .ok_or_else(|| format!("{item_type} value not a string: {value}")),
         "ByteString" => Ok(Ttlv::ByteString(json_hex_bytes(value)?)),
         "DateTime" => Ok(Ttlv::DateTime(json_i64(value)?)),
         "Interval" => Ok(Ttlv::Interval(json_i64(value)? as u32)),
@@ -1671,6 +1682,9 @@ fn frame_json(f: &TtlvFrame) -> Json {
         Ttlv::Enumeration(e) => json!({ "tag": tag, "type": "Enumeration", "value": format!("0x{e:08X}") }),
         Ttlv::Boolean(b) => json!({ "tag": tag, "type": "Boolean", "value": b }),
         Ttlv::TextString(s) => json!({ "tag": tag, "type": "TextString", "value": s }),
+        Ttlv::Identifier(s) => json!({ "tag": tag, "type": "Identifier", "value": s }),
+        Ttlv::Reference(s) => json!({ "tag": tag, "type": "Reference", "value": s }),
+        Ttlv::NameReference(s) => json!({ "tag": tag, "type": "NameReference", "value": s }),
         Ttlv::ByteString(b) => json!({ "tag": tag, "type": "ByteString", "value": to_hex(b) }),
         Ttlv::DateTime(d) => json!({ "tag": tag, "type": "DateTime", "value": d }),
         Ttlv::Interval(i) => json!({ "tag": tag, "type": "Interval", "value": i }),
