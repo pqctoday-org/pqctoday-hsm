@@ -1316,6 +1316,11 @@ fn custom_attrs_from_spec(spec: &Json) -> Vec<Attribute> {
         .map(|o| {
             o.iter()
                 .map(|(k, v)| Attribute::Custom {
+                    // §4.70: `None` = the client sent no Vendor Identification,
+                    // which is exactly this path — the workbench's `attrs`
+                    // object carries a bare name. The encoder then emits the
+                    // reserved client marker `"x"`, i.e. the pre-G9 behaviour.
+                    vendor: None,
                     name: k.strip_prefix("x-").unwrap_or(k).to_string(),
                     value: CustomAttributeValue::Text(v.as_str().unwrap_or_default().to_string()),
                 })
@@ -1448,6 +1453,11 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             iv: spec_hex_opt(spec, "ivHex"),
             cryptographic_parameters: None,
             aad: None,
+            // Multi-part Decrypt (G6) mirrors Encrypt above: the workbench
+            // drives single-shot ops, so all three stream markers stay unset.
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
         }),
         "Locate" => RequestPayload::Locate(LocateRequest {
             attributes: vec![],
