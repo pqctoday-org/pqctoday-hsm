@@ -750,8 +750,7 @@ fn k9_register_ml_kem_768_encap_decap_roundtrip() {
             data: enc.ciphertext,
             iv: None,
             cryptographic_parameters: None,
-            aad: None,
-        },
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
         &AuthContext::open(),
         "k9-decap",
     )
@@ -1809,8 +1808,7 @@ fn k21_rekeyed_aes_key_encrypts_against_real_engine() {
             data: ct_and_tag,
             iv: Some(iv),
             cryptographic_parameters: None,
-            aad: None,
-        },
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
         &AuthContext::open(),
         "k21-decrypt",
     )

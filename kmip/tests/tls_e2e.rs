@@ -786,3 +786,96 @@ fn _unused() {
     let _ = ResultStatus::Success;
     let _ = std::marker::PhantomData::<ResponsePayload>;
 }
+
+/// G3 (2026-09-06) — the Basic Authentication Suite (Profiles §3.1) is what
+/// the Baseline Server conformance clause §6.2 actually requires, and the
+/// DEFAULT posture does not satisfy it: `permissive` is rustls's default
+/// provider, which offers `TLS13_AES_128_GCM_SHA256` and TLS 1.2 suites that
+/// §3.1.2's closing "SHALL NOT support any cipher suite not listed above"
+/// forbids.
+///
+/// Asserted by behaviour, not by reading the config: a client offering ONLY
+/// the forbidden AES-128 suite is refused under `basic` and accepted under
+/// `permissive`. Without that second half, "the profile is enforced" would be
+/// a claim about a struct rather than about a handshake.
+#[tokio::test]
+async fn basic_profile_refuses_a_suite_3_1_2_does_not_list() {
+    use rustls::crypto::aws_lc_rs::{cipher_suite, kx_group};
+    let (dir, paths) = mint_certs("basicsuite");
+    let cert_pem = std::fs::read_to_string(&paths.ca_cert).unwrap();
+
+    async fn serve_under(
+        profile: TlsProfile,
+        paths: &pqctoday_kmip::cert_init::AdminCertPaths,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let l = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let bound = l.local_addr().unwrap();
+        drop(l);
+        let cfg = pqctoday_kmip::server::listener::tls_from_pem_with_profile(
+            &paths.server_cert, &paths.server_key, profile,
+        )
+        .expect("config builds");
+        let deps = build_deps();
+        let h = tokio::spawn(async move {
+            if let Err(e) = serve(bound, cfg, deps).await { eprintln!("server: {e}"); }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        (bound, h)
+    }
+
+    // ── under `basic` ────────────────────────────────────────────────────
+    let (bound, handle) = serve_under(TlsProfile::Basic, &paths).await;
+
+    // Positive control: a §3.1.2-listed suite connects, so a refusal below
+    // cannot just mean "no server there".
+    let ok = handshake_error_named(
+        bound, &cert_pem, "localhost",
+        vec![cipher_suite::TLS13_AES_256_GCM_SHA384],
+        vec![kx_group::X25519],
+        &[&rustls::version::TLS13],
+    ).await;
+    assert!(ok.is_none(), "control: a listed suite must connect, got {ok:?}");
+
+    // The other listed suite too — §3.1.2 requires BOTH.
+    let ok2 = handshake_error_named(
+        bound, &cert_pem, "localhost",
+        vec![cipher_suite::TLS13_CHACHA20_POLY1305_SHA256],
+        vec![kx_group::X25519],
+        &[&rustls::version::TLS13],
+    ).await;
+    assert!(ok2.is_none(), "§3.1.2 lists ChaCha20-Poly1305 too, got {ok2:?}");
+
+    // The negative: AES-128-GCM is NOT listed, so it must be refused.
+    let refused = handshake_error_named(
+        bound, &cert_pem, "localhost",
+        vec![cipher_suite::TLS13_AES_128_GCM_SHA256],
+        vec![kx_group::X25519],
+        &[&rustls::version::TLS13],
+    ).await;
+    assert!(
+        refused.is_some(),
+        "§3.1.2 ends \"SHALL NOT support any cipher suite not listed above\" — \
+         AES_128_GCM_SHA256 is not listed and must be refused under `basic`",
+    );
+    handle.abort();
+    let _ = handle.await;
+
+    // ── and the same client under `permissive`, to show the default really
+    //    is the non-conformant posture rather than the test being vacuous ──
+    let (bound2, handle2) = serve_under(TlsProfile::Permissive, &paths).await;
+    let accepted = handshake_error_named(
+        bound2, &cert_pem, "localhost",
+        vec![cipher_suite::TLS13_AES_128_GCM_SHA256],
+        vec![kx_group::X25519],
+        &[&rustls::version::TLS13],
+    ).await;
+    assert!(
+        accepted.is_none(),
+        "the default posture accepts the forbidden suite — this is exactly G3, \
+         and if it ever starts refusing, `basic` has become redundant",
+    );
+    handle2.abort();
+    let _ = handle2.await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -193,8 +193,19 @@ struct Cli {
     #[arg(long = "auth-user")]
     auth_user: Vec<String>,
 
-    /// TLS posture: `permissive` (default, historical behaviour) or
-    /// `quantum-safe`.
+    /// TLS posture: `permissive` (default, historical behaviour), `basic`,
+    /// or `quantum-safe`.
+    ///
+    /// `basic` enforces KMIP 3.0 Profiles §3.1 "Basic Authentication Suite" —
+    /// the suite the **Baseline Server** conformance clause (§6.2) requires:
+    /// TLS 1.3 only, and exactly the two §3.1.2 cipher suites. The default
+    /// `permissive` posture does NOT satisfy §3.1.2, which ends "SHALL NOT
+    /// support any cipher suite not listed above": rustls's defaults include
+    /// `TLS13_AES_128_GCM_SHA256` and TLS 1.2 suites the clause omits. Use
+    /// `basic` when the Baseline conformance claim has to hold on the wire.
+    /// (§3.1.2's TLS 1.2 list is static-RSA CBC, which rustls does not
+    /// implement, so 1.3-only is the conformant posture available — §3.1.1
+    /// makes 1.2 a SHOULD, not a SHALL.)
     ///
     /// `quantum-safe` enforces KMIP 3.0 Profiles §3.3 "Quantum Safe
     /// Authentication Suite": TLS 1.3 only (§3.3.1 makes TLS 1.2 a SHALL

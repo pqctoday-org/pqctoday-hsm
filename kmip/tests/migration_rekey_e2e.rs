@@ -335,8 +335,7 @@ fn legacy_signature_still_verifies_after_owner_key_rekeys() {
             data: ct,
             iv: Some(iv),
             cryptographic_parameters: None,
-            aad: None,
-        },
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
         &AuthContext::open(),
         "dec",
     )

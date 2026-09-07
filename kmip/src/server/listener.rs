@@ -77,6 +77,26 @@ pub enum TlsProfile {
     /// costume. Against this profile, the only thing that changes is the
     /// group — so the difference is the premium.
     ClassicalBaseline,
+    /// KMIP Profiles §3.1 **Basic Authentication Suite** — the suite the
+    /// Baseline Server conformance clause (§6.2) actually requires.
+    ///
+    /// §3.1.1: servers SHALL support TLS 1.3 (1.2 is only SHOULD).
+    /// §3.1.2: for TLS 1.3, exactly `TLS13-CHACHA20-POLY1305-SHA256` and
+    /// `TLS13-AES-256-GCM-SHA384`; the clause ends "SHALL NOT support any
+    /// cipher suite not listed above".
+    ///
+    /// **TLS 1.3 only, deliberately.** §3.1.2's TLS 1.2 list is static-RSA
+    /// CBC (`TLS_RSA_WITH_AES_256_CBC_SHA256` and friends), which rustls does
+    /// not implement — static-RSA key exchange has no forward secrecy.
+    /// Offering TLS 1.2 with any OTHER suite would breach the SHALL NOT, so
+    /// the conformant posture available here is 1.3-only, which §3.1.1
+    /// permits. Stated explicitly because "§3.1 conformant" would otherwise
+    /// read as full §3.1.2 coverage.
+    ///
+    /// Differs from [`TlsProfile::QuantumSafe`] only in key exchange: §3.1
+    /// says nothing about groups, so the classical ones stay. §3.3 is the
+    /// quantum-safe posture and remains separate.
+    Basic,
 }
 
 impl TlsProfile {
@@ -87,9 +107,10 @@ impl TlsProfile {
             "permissive" => Ok(Self::Permissive),
             "quantum-safe" | "quantum_safe" => Ok(Self::QuantumSafe),
             "classical-baseline" | "classical_baseline" => Ok(Self::ClassicalBaseline),
+            "basic" => Ok(Self::Basic),
             other => Err(format!(
-                "unknown TLS profile {other:?} (expected 'permissive', 'quantum-safe' \
-                 or 'classical-baseline')"
+                "unknown TLS profile {other:?} (expected 'permissive', 'basic', \
+                 'quantum-safe' or 'classical-baseline')"
             )),
         }
     }
@@ -137,6 +158,21 @@ pub fn quantum_safe_provider() -> rustls::crypto::CryptoProvider {
     }
 }
 
+/// The §3.1 Basic Authentication Suite provider — exactly the two cipher
+/// suites §3.1.2 permits for TLS 1.3, over rustls's default (classical) key
+/// exchange groups. Drops `TLS13_AES_128_GCM_SHA256`, which is on by default
+/// and which the clause does not list.
+pub fn basic_suite_provider() -> rustls::crypto::CryptoProvider {
+    use rustls::crypto::aws_lc_rs;
+    rustls::crypto::CryptoProvider {
+        cipher_suites: vec![
+            aws_lc_rs::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            aws_lc_rs::cipher_suite::TLS13_AES_256_GCM_SHA384,
+        ],
+        ..aws_lc_rs::default_provider()
+    }
+}
+
 /// The measurement baseline's provider: [`quantum_safe_provider`] with the
 /// hybrid groups swapped for classical ones. Everything else — provider,
 /// suites — is deliberately identical, so a comparison isolates the group.
@@ -169,6 +205,14 @@ pub fn tls_profile_summary(profile: TlsProfile) -> String {
              groups X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024 \
              [all three §3.3.3 groups; SecP384r1MLKEM1024 composed locally, \
              OpenSSL-3.6-interop-proven]"
+                .to_string()
+        }
+        TlsProfile::Basic => {
+            "basic (KMIP 3.0 Profiles §3.1 Basic Authentication Suite): TLS1.3 \
+             only; suites TLS13_CHACHA20_POLY1305_SHA256, \
+             TLS13_AES_256_GCM_SHA384 [exactly §3.1.2's TLS1.3 list; \
+             AES_128_GCM_SHA256 deliberately absent]; classical groups \
+             [§3.1 does not constrain key exchange — see §3.3 for that]"
                 .to_string()
         }
     }
@@ -204,6 +248,15 @@ fn profile_builder(
                 // so this is a restriction, not a minimum version.
                 .with_protocol_versions(&[&rustls::version::TLS13])
                 .map_err(|e| ServerError::Tls(format!("quantum-safe TLS setup: {e}")))
+        }
+        TlsProfile::Basic => {
+            ServerConfig::builder_with_provider(Arc::new(basic_suite_provider()))
+                // §3.1.1 — TLS 1.3 is the SHALL; 1.2 is only a SHOULD, and
+                // the 1.2 suites §3.1.2 lists are static-RSA CBC, which
+                // rustls does not implement. 1.3-only is therefore the
+                // conformant posture available here.
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .map_err(|e| ServerError::Tls(format!("basic TLS setup: {e}")))
         }
     }
 }
@@ -330,6 +383,7 @@ pub fn tls_mtls_with_profile(
         TlsProfile::Permissive => rustls::crypto::ring::default_provider(),
         TlsProfile::QuantumSafe => quantum_safe_provider(),
         TlsProfile::ClassicalBaseline => classical_baseline_provider(),
+        TlsProfile::Basic => basic_suite_provider(),
     });
     let verifier =
         WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), verifier_provider)
