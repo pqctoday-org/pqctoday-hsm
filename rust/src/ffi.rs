@@ -11007,32 +11007,88 @@ fn pkcs8_private_key_info(attrs: &Attributes) -> Result<Vec<u8>, u32> {
         return Ok(raw);
     }
 
-    // AlgorithmIdentifier for each family §6.7 enumerates.
-    let alg_id: Vec<u8> = match key_type {
+    // Two things vary by key family: the AlgorithmIdentifier, and — the part
+    // this used to get wrong — the CONTENT of the privateKey OCTET STRING.
+    // Emitting the bare stored scalar there produces a structure no other
+    // implementation can parse, and nothing notices until one tries:
+    //
+    //   * EC (RFC 5915): an ECPrivateKey SEQUENCE, not the bare scalar.
+    //   * Edwards / Montgomery (RFC 8410 §7): a CurvePrivateKey — the scalar
+    //     inside a SECOND OCTET STRING.
+    //   * PQC: the raw FIPS byte string (unchanged; see the note below).
+    //
+    // The shapes below were checked against OpenSSL 3.6.3 and reproduce its
+    // PrivateKeyInfo byte-for-byte for P-256/384/521, secp256k1, Ed25519,
+    // Ed448, X25519 and X448.
+    let (alg_id, private_key_content): (Vec<u8>, Vec<u8>) = match key_type {
         // id-ecPublicKey (1.2.840.10045.2.1) + the named-curve parameter.
         CKK_EC => {
-            let curve = attrs.get(&CKA_EC_PARAMS).cloned().ok_or(CKR_KEY_NOT_WRAPPABLE)?;
+            let curve_params = attrs
+                .get(&CKA_EC_PARAMS)
+                .cloned()
+                .ok_or(CKR_KEY_NOT_WRAPPABLE)?;
             let mut inner = vec![
                 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
             ];
-            inner.extend_from_slice(&curve);
-            der_sequence(&inner)
+            inner.extend_from_slice(&curve_params);
+            let curve = crate::crypto::handlers::decode_ec_params(&curve_params)
+                .map_err(|_| CKR_KEY_NOT_WRAPPABLE)?;
+            // ECPrivateKey ::= SEQUENCE { version INTEGER (1),
+            //   privateKey OCTET STRING, parameters [0] OPTIONAL,
+            //   publicKey [1] BIT STRING OPTIONAL }
+            //
+            // `parameters` is omitted because the curve is already in the
+            // AlgorithmIdentifier above (RFC 5915 §3). `publicKey` IS
+            // included, matching OpenSSL: the differential harness compares
+            // the wrapped LENGTH against the C++ engine, which emits
+            // OpenSSL's bytes, so omitting it would leave the two engines
+            // permanently apart on a legal-but-different encoding.
+            //
+            // The private object stores only CKA_EC_PARAMS and the scalar —
+            // there is no CKA_EC_POINT on the private half — so the public
+            // point is recomputed from the scalar, which is exactly what
+            // OpenSSL does internally.
+            let point = ec_public_point_from_scalar(curve, &raw)?;
+            let mut ec_priv = vec![0x02, 0x01, 0x01]; // version 1
+            ec_priv.extend_from_slice(&der_octet_string(&raw));
+            let mut bits = vec![0x00]; // BIT STRING: zero unused bits
+            bits.extend_from_slice(&point);
+            ec_priv.extend_from_slice(&der_tagged(0xA1, &der_tagged(0x03, &bits)));
+            (der_sequence(&inner), der_sequence(&ec_priv))
         }
-        // Ed25519 / X25519 / X448 carry no AlgorithmIdentifier parameters
+        // Edwards and Montgomery carry no AlgorithmIdentifier parameters
         // (RFC 8410 §3: "the parameters field MUST be absent").
-        CKK_EC_EDWARDS => der_sequence(&[0x06, 0x03, 0x2b, 0x65, 0x70]),
+        CKK_EC_EDWARDS => {
+            let curve = attrs.get(&CKA_EC_PARAMS).cloned().unwrap_or_default();
+            // This arm used to hard-code the Ed25519 OID for every Edwards
+            // key, so wrapping an Ed448 key produced a PrivateKeyInfo that
+            // announced Ed25519 over a 57-byte scalar.
+            let oid = if curve.last() == Some(&0x71) {
+                [0x06u8, 0x03, 0x2b, 0x65, 0x71] // id-Ed448
+            } else {
+                [0x06u8, 0x03, 0x2b, 0x65, 0x70] // id-Ed25519
+            };
+            (der_sequence(&oid), der_octet_string(&raw))
+        }
         CKK_EC_MONTGOMERY => {
             let curve = attrs.get(&CKA_EC_PARAMS).cloned().unwrap_or_default();
             let oid = if curve.last() == Some(&0x6f) {
-                [0x06u8, 0x03, 0x2b, 0x65, 0x6f]
+                [0x06u8, 0x03, 0x2b, 0x65, 0x6f] // id-X448
             } else {
-                [0x06u8, 0x03, 0x2b, 0x65, 0x6e]
+                [0x06u8, 0x03, 0x2b, 0x65, 0x6e] // id-X25519
             };
-            der_sequence(&oid)
+            (der_sequence(&oid), der_octet_string(&raw))
         }
         // NIST PQC OIDs are parameter-set-specific; the parameter set is
         // already on the object, and the engine's SPKI builders hold the same
         // table. Reuse it so the two encodings cannot disagree.
+        //
+        // The privateKey content stays the raw FIPS byte string: unlike the
+        // EC families above there is no reference proving a different inner
+        // structure is required, the relevant LAMPS drafts are still moving,
+        // and changing it would put the ML-DSA/ML-KEM import path (and the
+        // OpenPGP BYOK flow on top of it) at risk for no evidenced gain.
+        // Tracked as open question O-1 of the phase-2 plan.
         CKK_ML_DSA | CKK_ML_KEM | CKK_SLH_DSA | CKK_HSS | CKK_XMSS | CKK_XMSSMT => {
             let ps = attrs
                 .get(&CKA_PRIV_PARAM_SET)
@@ -11044,7 +11100,7 @@ fn pkcs8_private_key_info(attrs: &Attributes) -> Result<Vec<u8>, u32> {
             // so the PKCS#8 and SPKI encodings can never name different OIDs
             // for the same key.
             match pqc_alg_id_from_spki(key_type, ps) {
-                Some(a) => a,
+                Some(a) => (a, raw.clone()),
                 None => return Err(CKR_KEY_NOT_WRAPPABLE),
             }
         }
@@ -11055,8 +11111,120 @@ fn pkcs8_private_key_info(attrs: &Attributes) -> Result<Vec<u8>, u32> {
     //                               AlgorithmIdentifier, privateKey OCTET STRING }
     let mut body = vec![0x02, 0x01, 0x00]; // version 0
     body.extend_from_slice(&alg_id);
-    body.extend_from_slice(&der_octet_string(&raw));
+    body.extend_from_slice(&der_octet_string(&private_key_content));
     Ok(der_sequence(&body))
+}
+
+/// Recompute the uncompressed SEC1 public point from a private scalar.
+///
+/// Needed by `pkcs8_private_key_info`: RFC 5915's `ECPrivateKey` carries the
+/// public key in its `[1]` field and OpenSSL always emits it, but this
+/// engine's PRIVATE key objects hold only `CKA_EC_PARAMS` and the scalar —
+/// `CKA_EC_POINT` lives on the public half. Same derivation the ECDH, HPKE
+/// and BIP32 paths already do.
+fn ec_public_point_from_scalar(curve: u32, scalar: &[u8]) -> Result<Vec<u8>, u32> {
+    use crate::crypto::handlers::{CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521};
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    macro_rules! point_of {
+        ($krate:ident) => {{
+            let sk = $krate::SecretKey::from_slice(scalar).map_err(|_| CKR_KEY_NOT_WRAPPABLE)?;
+            sk.public_key().to_encoded_point(false).as_bytes().to_vec()
+        }};
+    }
+    Ok(match curve {
+        CURVE_P256 => point_of!(p256),
+        CURVE_P384 => point_of!(p384),
+        CURVE_P521 => point_of!(p521),
+        CURVE_K256 => point_of!(k256),
+        _ => return Err(CKR_KEY_NOT_WRAPPABLE),
+    })
+}
+
+/// DER TLV with an explicit tag — for the `BIT STRING` (0x03) and the
+/// context-specific `[1]` (0xA1) that RFC 5915's `ECPrivateKey` needs.
+fn der_tagged(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    der_push_len(&mut out, body.len());
+    out.extend_from_slice(body);
+    out
+}
+
+/// The inverse of [`pkcs8_private_key_info`] for the EC families: decompose a
+/// PKCS#8 `PrivateKeyInfo` into the attributes this engine actually stores.
+/// Returns `(CKA_KEY_TYPE, CKA_EC_PARAMS, raw private value)`.
+///
+/// `C_UnwrapKey` needs this because §6.7 makes the wrapped form of a private
+/// key a `PrivateKeyInfo`: what comes back from the unwrap is DER, while the
+/// engine stores (and signs with) the raw scalar. Without it the blob was kept
+/// verbatim, the key type defaulted to `CKK_AES`, and `CKA_EC_PARAMS` was
+/// never stamped — so a key wrapped by the C++ engine, or by this one, could
+/// not be used after unwrapping.
+///
+/// Returns `None` — leaving the payload untouched — for anything it does not
+/// positively recognise. That deliberately includes:
+///   * **RSA**, where this engine's stored form already IS a `PrivateKeyInfo`,
+///     so decomposing would corrupt it; and
+///   * **the PQC families**, whose inner encoding is open question O-1 of the
+///     phase-2 plan and must not be guessed at.
+fn parse_pkcs8_private_key_info(der: &[u8]) -> Option<(u32, Vec<u8>, Vec<u8>)> {
+    const OID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+
+    let (tag, body, used) = der_read_tlv(der)?;
+    if tag != 0x30 || used != der.len() {
+        return None; // not a single SEQUENCE spanning the whole payload
+    }
+    let (tag_v, version, n1) = der_read_tlv(body)?;
+    if tag_v != 0x02 || version != [0x00] {
+        return None; // PrivateKeyInfo version MUST be 0
+    }
+    let (tag_alg, alg, n2) = der_read_tlv(&body[n1..])?;
+    if tag_alg != 0x30 {
+        return None;
+    }
+    let (tag_pk, priv_content, _) = der_read_tlv(&body[n1 + n2..])?;
+    if tag_pk != 0x04 {
+        return None;
+    }
+    let (tag_oid, oid, oid_used) = der_read_tlv(alg)?;
+    if tag_oid != 0x06 {
+        return None;
+    }
+
+    if oid == OID_EC_PUBLIC_KEY {
+        // AlgId ::= SEQUENCE { id-ecPublicKey, namedCurve }; CKA_EC_PARAMS is
+        // that second OID, verbatim, exactly as C_GenerateKeyPair stores it.
+        let ec_params = alg.get(oid_used..)?.to_vec();
+        if ec_params.is_empty() {
+            return None;
+        }
+        // privateKey content is an RFC 5915 ECPrivateKey.
+        let (tag_ec, ec, _) = der_read_tlv(priv_content)?;
+        if tag_ec != 0x30 {
+            return None;
+        }
+        let (tag_ver, _, v1) = der_read_tlv(ec)?;
+        if tag_ver != 0x02 {
+            return None;
+        }
+        let (tag_scalar, scalar, _) = der_read_tlv(ec.get(v1..)?)?;
+        if tag_scalar != 0x04 {
+            return None;
+        }
+        return Some((CKK_EC, ec_params, scalar.to_vec()));
+    }
+
+    // RFC 8410: the OID alone identifies the curve, and the privateKey content
+    // is a CurvePrivateKey — the scalar inside its own OCTET STRING.
+    let key_type = match oid {
+        [0x2b, 0x65, 0x70] | [0x2b, 0x65, 0x71] => CKK_EC_EDWARDS,
+        [0x2b, 0x65, 0x6e] | [0x2b, 0x65, 0x6f] => CKK_EC_MONTGOMERY,
+        _ => return None, // RSA, the PQC families, anything unknown
+    };
+    let (tag_inner, scalar, inner_used) = der_read_tlv(priv_content)?;
+    if tag_inner != 0x04 || inner_used != priv_content.len() {
+        return None;
+    }
+    Some((key_type, der_tagged(0x06, oid), scalar.to_vec()))
 }
 
 /// DER SEQUENCE around `body` (definite length, long form when needed).
@@ -11528,6 +11696,50 @@ pub fn C_UnwrapKey(
         // Set key material from unwrap operation
         attrs.insert(CKA_VALUE, key_value);
 
+        // D-2 — §6.7: "For wrapping, a private key is BER-encoded according to
+        // [PKCS #8] PrivateKeyInfo." So for a private key what the unwrap just
+        // produced is DER, not the raw value this engine stores and signs
+        // with, and §6.3.10 says the mechanism contributes CKA_CLASS,
+        // CKA_KEY_TYPE, CKA_EC_PARAMS and CKA_VALUE to the new object.
+        // Previously the DER was stored verbatim, the key type fell through to
+        // the CKK_AES default below, and CKA_EC_PARAMS was never stamped — so
+        // a private key wrapped by the C++ engine (or by this one) was
+        // unusable after unwrapping, and could not even be identified.
+        //
+        // Attempted when the template says CKO_PRIVATE_KEY, or says nothing
+        // and the payload positively parses as a recognised PrivateKeyInfo.
+        // The parser returns None for anything it does not recognise — RSA
+        // included, since this engine's stored RSA form already IS a
+        // PrivateKeyInfo — so a secret key's bytes are never disturbed.
+        let template_class = attrs
+            .get(&CKA_CLASS)
+            .filter(|v| v.len() >= 4)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        if matches!(template_class, Some(CKO_PRIVATE_KEY) | None) {
+            if let Some(value) = attrs.get(&CKA_VALUE).cloned() {
+                if let Some((blob_key_type, ec_params, scalar)) =
+                    parse_pkcs8_private_key_info(&value)
+                {
+                    // A template CKA_KEY_TYPE that contradicts the wrapped
+                    // blob is a caller error, not something to resolve
+                    // silently in one direction or the other.
+                    let template_key_type = attrs
+                        .get(&CKA_KEY_TYPE)
+                        .filter(|v| v.len() >= 4)
+                        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+                    if let Some(t) = template_key_type {
+                        if t != blob_key_type {
+                            return CKR_TEMPLATE_INCONSISTENT;
+                        }
+                    }
+                    store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+                    store_ulong(&mut attrs, CKA_KEY_TYPE, blob_key_type);
+                    attrs.insert(CKA_EC_PARAMS, ec_params);
+                    attrs.insert(CKA_VALUE, scalar);
+                }
+            }
+        }
+
         // Apply defaults for missing attributes
         if !attrs.contains_key(&CKA_CLASS) {
             store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
@@ -11887,6 +12099,50 @@ pub fn C_UnwrapKeyAuthenticated(
 
         // Set key material from unwrap operation
         attrs.insert(CKA_VALUE, key_value);
+
+        // D-2 — §6.7: "For wrapping, a private key is BER-encoded according to
+        // [PKCS #8] PrivateKeyInfo." So for a private key what the unwrap just
+        // produced is DER, not the raw value this engine stores and signs
+        // with, and §6.3.10 says the mechanism contributes CKA_CLASS,
+        // CKA_KEY_TYPE, CKA_EC_PARAMS and CKA_VALUE to the new object.
+        // Previously the DER was stored verbatim, the key type fell through to
+        // the CKK_AES default below, and CKA_EC_PARAMS was never stamped — so
+        // a private key wrapped by the C++ engine (or by this one) was
+        // unusable after unwrapping, and could not even be identified.
+        //
+        // Attempted when the template says CKO_PRIVATE_KEY, or says nothing
+        // and the payload positively parses as a recognised PrivateKeyInfo.
+        // The parser returns None for anything it does not recognise — RSA
+        // included, since this engine's stored RSA form already IS a
+        // PrivateKeyInfo — so a secret key's bytes are never disturbed.
+        let template_class = attrs
+            .get(&CKA_CLASS)
+            .filter(|v| v.len() >= 4)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        if matches!(template_class, Some(CKO_PRIVATE_KEY) | None) {
+            if let Some(value) = attrs.get(&CKA_VALUE).cloned() {
+                if let Some((blob_key_type, ec_params, scalar)) =
+                    parse_pkcs8_private_key_info(&value)
+                {
+                    // A template CKA_KEY_TYPE that contradicts the wrapped
+                    // blob is a caller error, not something to resolve
+                    // silently in one direction or the other.
+                    let template_key_type = attrs
+                        .get(&CKA_KEY_TYPE)
+                        .filter(|v| v.len() >= 4)
+                        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+                    if let Some(t) = template_key_type {
+                        if t != blob_key_type {
+                            return CKR_TEMPLATE_INCONSISTENT;
+                        }
+                    }
+                    store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+                    store_ulong(&mut attrs, CKA_KEY_TYPE, blob_key_type);
+                    attrs.insert(CKA_EC_PARAMS, ec_params);
+                    attrs.insert(CKA_VALUE, scalar);
+                }
+            }
+        }
 
         // Apply defaults for missing attributes
         if !attrs.contains_key(&CKA_CLASS) {
@@ -23978,6 +24234,214 @@ mod ed25519ctx_ffi_dispatch_tests {
         assert!(
             vk.verify_strict(&msg, &signature).is_ok(),
             "independent verifier must accept the engine-produced signature"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pkcs8_encoding_fixture_tests {
+    //! D-2 — `pkcs8_private_key_info` must emit a real PKCS#8
+    //! `PrivateKeyInfo`, asserted against **OpenSSL 3.6.3** rather than
+    //! against the engine's own idea of the format.
+    //!
+    //! This distinction is the entire point of the item. The previous encoder
+    //! put the bare stored scalar in the `privateKey` OCTET STRING for every
+    //! key type. That round-trips perfectly through itself, so any test
+    //! written against the engine would have passed — and no other
+    //! implementation could parse the result. The C++ engine, which delegates
+    //! to OpenSSL, produced 152 bytes for a wrapped P-256 key where this
+    //! engine produced 72.
+    use super::*;
+    use crate::crypto::handlers::{CURVE_ED448, CURVE_X448};
+
+    const P256: &[u8] = include_bytes!("../kat/pkcs8/p256.p8.der");
+    const P384: &[u8] = include_bytes!("../kat/pkcs8/p384.p8.der");
+    const P521: &[u8] = include_bytes!("../kat/pkcs8/p521.p8.der");
+    const K256: &[u8] = include_bytes!("../kat/pkcs8/k256.p8.der");
+    const ED25519: &[u8] = include_bytes!("../kat/pkcs8/ed25519.p8.der");
+    const ED448: &[u8] = include_bytes!("../kat/pkcs8/ed448.p8.der");
+    const X25519: &[u8] = include_bytes!("../kat/pkcs8/x25519.p8.der");
+    const X448: &[u8] = include_bytes!("../kat/pkcs8/x448.p8.der");
+
+    /// Pull the curve identifier and the raw private scalar back out of a
+    /// reference encoding, so the engine is asked to encode *that same key*
+    /// and the comparison is of ENCODING only.
+    fn dissect(der: &[u8], is_ec: bool) -> (Vec<u8>, Vec<u8>) {
+        let (t, body, used) = der_read_tlv(der).expect("outer SEQUENCE");
+        assert_eq!(t, 0x30, "PrivateKeyInfo is a SEQUENCE");
+        assert_eq!(used, der.len(), "fixture is exactly one TLV");
+        let (_, _, n1) = der_read_tlv(body).expect("version");
+        let (_, alg, n2) = der_read_tlv(&body[n1..]).expect("AlgorithmIdentifier");
+        let (_, priv_content, _) = der_read_tlv(&body[n1 + n2..]).expect("privateKey");
+
+        if is_ec {
+            // AlgId ::= SEQUENCE { OID id-ecPublicKey, OID namedCurve }
+            let (_, _, o1) = der_read_tlv(alg).expect("id-ecPublicKey");
+            let curve_tlv = alg[o1..].to_vec(); // CKA_EC_PARAMS is the curve OID TLV
+            // privateKey content is an ECPrivateKey SEQUENCE.
+            let (_, ec, _) = der_read_tlv(priv_content).expect("ECPrivateKey");
+            let (_, _, v) = der_read_tlv(ec).expect("version 1");
+            let (_, scalar, _) = der_read_tlv(&ec[v..]).expect("privateKey OCTET STRING");
+            (curve_tlv, scalar.to_vec())
+        } else {
+            // AlgId ::= SEQUENCE { OID }; CurvePrivateKey ::= OCTET STRING.
+            let (_, scalar, _) = der_read_tlv(priv_content).expect("CurvePrivateKey");
+            (alg.to_vec(), scalar.to_vec())
+        }
+    }
+
+    fn attrs_for(key_type: u32, ec_params: &[u8], scalar: &[u8]) -> Attributes {
+        let mut a = Attributes::new();
+        store_ulong(&mut a, CKA_CLASS, CKO_PRIVATE_KEY);
+        store_ulong(&mut a, CKA_KEY_TYPE, key_type);
+        a.insert(CKA_EC_PARAMS, ec_params.to_vec());
+        a.insert(CKA_VALUE, scalar.to_vec());
+        a
+    }
+
+    fn check(name: &str, fixture: &[u8], key_type: u32) {
+        let is_ec = key_type == CKK_EC;
+        let (ec_params, scalar) = dissect(fixture, is_ec);
+        let got = pkcs8_private_key_info(&attrs_for(key_type, &ec_params, &scalar))
+            .unwrap_or_else(|rv| panic!("{name}: encoder refused the key (0x{rv:x})"));
+        assert_eq!(
+            got.len(),
+            fixture.len(),
+            "{name}: encoded length must match OpenSSL's ({} vs {})",
+            got.len(),
+            fixture.len()
+        );
+        assert_eq!(
+            got, fixture,
+            "{name}: encoding must be byte-identical to OpenSSL's PrivateKeyInfo"
+        );
+    }
+
+    /// The four short-Weierstrass curves: `privateKey` holds an RFC 5915
+    /// `ECPrivateKey`, including the `[1] publicKey` OpenSSL always emits —
+    /// which this engine has to recompute from the scalar, since a private
+    /// key object carries no `CKA_EC_POINT`.
+    #[test]
+    fn ec_pkcs8_matches_openssl_byte_for_byte() {
+        check("P-256", P256, CKK_EC);
+        check("P-384", P384, CKK_EC);
+        check("P-521", P521, CKK_EC);
+        check("secp256k1", K256, CKK_EC);
+    }
+
+    /// Edwards and Montgomery: `privateKey` holds an RFC 8410 §7
+    /// `CurvePrivateKey`, i.e. the scalar wrapped in a SECOND OCTET STRING.
+    #[test]
+    fn edwards_and_montgomery_pkcs8_match_openssl_byte_for_byte() {
+        check("Ed25519", ED25519, CKK_EC_EDWARDS);
+        check("Ed448", ED448, CKK_EC_EDWARDS);
+        check("X25519", X25519, CKK_EC_MONTGOMERY);
+        check("X448", X448, CKK_EC_MONTGOMERY);
+    }
+
+    /// The decoder must read a `PrivateKeyInfo` produced by **OpenSSL**, not
+    /// merely one produced by this engine. That is the whole interop claim:
+    /// a key wrapped by the C++ engine (which delegates to OpenSSL) has to be
+    /// usable after `C_UnwrapKey` here.
+    #[test]
+    fn openssl_pkcs8_parses_back_to_the_raw_stored_attributes() {
+        for (name, fixture, key_type, is_ec) in [
+            ("P-256", P256, CKK_EC, true),
+            ("P-384", P384, CKK_EC, true),
+            ("P-521", P521, CKK_EC, true),
+            ("secp256k1", K256, CKK_EC, true),
+            ("Ed25519", ED25519, CKK_EC_EDWARDS, false),
+            ("Ed448", ED448, CKK_EC_EDWARDS, false),
+            ("X25519", X25519, CKK_EC_MONTGOMERY, false),
+            ("X448", X448, CKK_EC_MONTGOMERY, false),
+        ] {
+            let (want_params, want_scalar) = dissect(fixture, is_ec);
+            let (got_kt, got_params, got_scalar) = parse_pkcs8_private_key_info(fixture)
+                .unwrap_or_else(|| panic!("{name}: OpenSSL PrivateKeyInfo must parse"));
+            assert_eq!(got_kt, key_type, "{name}: key type from the algorithm OID");
+            assert_eq!(got_params, want_params, "{name}: CKA_EC_PARAMS");
+            assert_eq!(got_scalar, want_scalar, "{name}: raw scalar");
+            assert_eq!(
+                got_scalar.len(),
+                want_scalar.len(),
+                "{name}: scalar must be the fixed-width raw value, not DER"
+            );
+        }
+    }
+
+    /// Round-trip through this engine: encode, then decode, and land back on
+    /// exactly the attributes we started from.
+    #[test]
+    fn encode_then_decode_round_trips() {
+        for (name, fixture, key_type, is_ec) in [
+            ("P-384", P384, CKK_EC, true),
+            ("Ed448", ED448, CKK_EC_EDWARDS, false),
+            ("X25519", X25519, CKK_EC_MONTGOMERY, false),
+        ] {
+            let (params, scalar) = dissect(fixture, is_ec);
+            let der = pkcs8_private_key_info(&attrs_for(key_type, &params, &scalar))
+                .expect("encode");
+            let (kt, p, s) = parse_pkcs8_private_key_info(&der).expect("decode");
+            assert_eq!((kt, p, s), (key_type, params, scalar), "{name}: round-trip");
+        }
+    }
+
+    /// The parser must decline anything it does not positively recognise,
+    /// leaving the payload untouched. RSA matters most: this engine already
+    /// STORES an RSA private key as a PrivateKeyInfo, so decomposing one would
+    /// corrupt it. The PQC families are declined for a different reason —
+    /// their inner encoding is an open question, and guessing would risk the
+    /// import path.
+    #[test]
+    fn unrecognised_algorithms_are_declined_not_guessed() {
+        // A structurally valid PrivateKeyInfo naming rsaEncryption.
+        let rsa_oid = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+        let alg = der_sequence(&[&der_tagged(0x06, &rsa_oid)[..], &[0x05, 0x00][..]].concat());
+        let mut body = vec![0x02, 0x01, 0x00];
+        body.extend_from_slice(&alg);
+        body.extend_from_slice(&der_octet_string(&[0x42u8; 64]));
+        assert!(
+            parse_pkcs8_private_key_info(&der_sequence(&body)).is_none(),
+            "an RSA PrivateKeyInfo must be left alone — the engine stores that form as-is"
+        );
+
+        // Raw key material that happens to start with 0x30 must not be
+        // mistaken for DER.
+        assert!(
+            parse_pkcs8_private_key_info(&[0x30u8; 32]).is_none(),
+            "raw bytes beginning 0x30 are not a PrivateKeyInfo"
+        );
+        assert!(
+            parse_pkcs8_private_key_info(&[]).is_none(),
+            "an empty payload is not a PrivateKeyInfo"
+        );
+    }
+
+    /// Ed448 and X448 must announce their OWN algorithm OID. The Edwards arm
+    /// used to hard-code id-Ed25519 for every `CKK_EC_EDWARDS` key, so an
+    /// Ed448 key was wrapped as a PrivateKeyInfo claiming Ed25519 over a
+    /// 57-byte scalar — self-consistent, and wrong to every other parser.
+    #[test]
+    fn the_448_curves_announce_their_own_oid() {
+        let (params, scalar) = dissect(ED448, false);
+        let der = pkcs8_private_key_info(&attrs_for(CKK_EC_EDWARDS, &params, &scalar))
+            .expect("Ed448 must encode");
+        assert!(
+            der.windows(5).any(|w| w == [0x06, 0x03, 0x2b, 0x65, 0x71]),
+            "Ed448 PrivateKeyInfo must carry id-Ed448 (1.3.101.113)"
+        );
+        assert!(
+            !der.windows(5).any(|w| w == [0x06, 0x03, 0x2b, 0x65, 0x70]),
+            "and must NOT carry id-Ed25519"
+        );
+        let _ = (CURVE_ED448, CURVE_X448); // curve ids used by the decoder side
+
+        let (params, scalar) = dissect(X448, false);
+        let der = pkcs8_private_key_info(&attrs_for(CKK_EC_MONTGOMERY, &params, &scalar))
+            .expect("X448 must encode");
+        assert!(
+            der.windows(5).any(|w| w == [0x06, 0x03, 0x2b, 0x65, 0x6f]),
+            "X448 PrivateKeyInfo must carry id-X448 (1.3.101.111)"
         );
     }
 }
