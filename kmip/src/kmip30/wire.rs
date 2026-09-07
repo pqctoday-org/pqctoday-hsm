@@ -142,6 +142,16 @@ pub(crate) mod tags {
     // ── K3 — Query Profiles / Capabilities reporting (§6.1.47) ─────────
     // Codepoints verified from `kmip-spec-3.0-tags-enums.json`.
     pub const ProfileInformation: u32     = 0x42_00eb;
+    /// §6.1.39 Extension Information (G5).
+    pub const ExtensionInformation: u32 = 0x42_00a4;
+    pub const ExtensionName: u32 = 0x42_00a5;
+    pub const ExtensionTag: u32 = 0x42_00a6;
+    pub const ExtensionType: u32 = 0x42_00a7;
+    pub const AttestationType: u32 = 0x42_00c7;
+    pub const RngParameters: u32 = 0x42_00d9;
+    pub const ValidationInformation: u32 = 0x42_00df;
+    pub const ClientRegistrationMethod: u32 = 0x42_00f6;
+    pub const CredentialInformation: u32 = 0x42_01b2;
     pub const ProfileName: u32            = 0x42_00ec;
     pub const CapabilityInformation: u32  = 0x42_00f7;
     pub const StreamingCapability: u32    = 0x42_00ef;
@@ -1204,6 +1214,15 @@ fn query_function_code(q: QueryFunction) -> u32 {
         QueryFunction::QueryServerInformation => 0x03,
         QueryFunction::QueryApplicationNamespaces => 0x04,
         QueryFunction::QueryProfiles => 0x0a,
+        QueryFunction::QueryExtensionList => 0x05,
+        QueryFunction::QueryExtensionMap => 0x06,
+        QueryFunction::QueryAttestationTypes => 0x07,
+        QueryFunction::QueryRngs => 0x08,
+        QueryFunction::QueryValidations => 0x09,
+        QueryFunction::QueryClientRegistrationMethods => 0x0c,
+        QueryFunction::QueryDefaultsInformation => 0x0d,
+        QueryFunction::QueryStorageProtectionMasks => 0x0e,
+        QueryFunction::QueryCredentialInformation => 0x0f,
         QueryFunction::QueryCapabilities => 0x0b,
     }
 }
@@ -1219,6 +1238,15 @@ fn query_function_from_code(v: u32) -> Option<QueryFunction> {
         0x03 => QueryFunction::QueryServerInformation,
         0x04 => QueryFunction::QueryApplicationNamespaces,
         0x0a => QueryFunction::QueryProfiles,
+        0x05 => QueryFunction::QueryExtensionList,
+        0x06 => QueryFunction::QueryExtensionMap,
+        0x07 => QueryFunction::QueryAttestationTypes,
+        0x08 => QueryFunction::QueryRngs,
+        0x09 => QueryFunction::QueryValidations,
+        0x0c => QueryFunction::QueryClientRegistrationMethods,
+        0x0d => QueryFunction::QueryDefaultsInformation,
+        0x0e => QueryFunction::QueryStorageProtectionMasks,
+        0x0f => QueryFunction::QueryCredentialInformation,
         0x0b => QueryFunction::QueryCapabilities,
         _ => return None,
     })
@@ -1934,6 +1962,77 @@ fn encode_query_resp(r: &QueryResponse) -> Vec<TtlvFrame> {
                 Value::Structure(vec![TtlvFrame::new(
                     Tag(tags::ProfileName),
                     Value::Enumeration(p.profile_name),
+                )]),
+            ));
+        }
+    }
+    // ── G5 (2026-09-06) — the nine functions' response items ────────────
+    if let Some(exts) = &r.extension_information {
+        for e in exts {
+            out.push(TtlvFrame::new(
+                Tag(tags::ExtensionInformation),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::ExtensionName), Value::TextString(e.extension_name.clone())),
+                    TtlvFrame::new(Tag(tags::ExtensionTag), Value::Integer(e.extension_tag as i32)),
+                    TtlvFrame::new(Tag(tags::ExtensionType), Value::Integer(e.extension_type as i32)),
+                ]),
+            ));
+        }
+    }
+    if let Some(v) = &r.attestation_types {
+        for t in v {
+            out.push(TtlvFrame::new(Tag(tags::AttestationType), Value::Enumeration(*t)));
+        }
+    }
+    if let Some(v) = &r.rng_parameters {
+        for algo in v {
+            out.push(TtlvFrame::new(
+                Tag(tags::RngParameters),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::RngAlgorithm),
+                    Value::Enumeration(*algo),
+                )]),
+            ));
+        }
+    }
+    if let Some(v) = &r.validation_information {
+        for name in v {
+            // No validation to claim today; if one is ever added, the
+            // structure gains its §11.x children here.
+            out.push(TtlvFrame::new(
+                Tag(tags::ValidationInformation),
+                Value::TextString(name.clone()),
+            ));
+        }
+    }
+    if let Some(v) = &r.client_registration_methods {
+        for m in v {
+            out.push(TtlvFrame::new(Tag(tags::ClientRegistrationMethod), Value::Enumeration(*m)));
+        }
+    }
+    if let Some(v) = &r.storage_protection_masks {
+        for m in v {
+            out.push(TtlvFrame::new(Tag(tags::ProtectionStorageMask), Value::Integer(*m as i32)));
+        }
+    }
+    if let Some(v) = &r.credential_information {
+        for c in v {
+            out.push(TtlvFrame::new(
+                Tag(tags::CredentialInformation),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::CredentialType),
+                    Value::Enumeration(*c),
+                )]),
+            ));
+        }
+    }
+    if let Some(v) = &r.defaults_information {
+        for name in v {
+            out.push(TtlvFrame::new(
+                Tag(tags::DefaultsInformation),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::AttributeName),
+                    Value::TextString(name.clone()),
                 )]),
             ));
         }
@@ -6659,6 +6758,14 @@ mod tests {
                     application_namespaces: None,
                     profile_information: None,
                     capability_information: None,
+                    extension_information: None,
+                    attestation_types: None,
+                    rng_parameters: None,
+                    validation_information: None,
+                    client_registration_methods: None,
+                    storage_protection_masks: None,
+                    credential_information: None,
+                    defaults_information: None,
                 })),
                 asynchronous_correlation_value: None,
             }],

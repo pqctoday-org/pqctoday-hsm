@@ -58,6 +58,14 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
         application_namespaces: None,
         profile_information: None,
         capability_information: None,
+        extension_information: None,
+        attestation_types: None,
+        rng_parameters: None,
+        validation_information: None,
+        client_registration_methods: None,
+        storage_protection_masks: None,
+        credential_information: None,
+        defaults_information: None,
     };
 
     for f in &req.functions {
@@ -92,6 +100,60 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
                 // until then an empty `Profile Information` list is
                 // the honest answer (nothing emitted on the wire).
                 resp.profile_information = Some(Vec::new());
+            }
+            // ── G5 (2026-09-06) ──────────────────────────────────────
+            //
+            // §6.1.39: "For each Query Function specified in the request, the
+            // corresponding items SHALL be returned in the response." These
+            // nine could not previously be DECODED, so asking for any of them
+            // failed the WHOLE message rather than that one function.
+            //
+            // Where the honest answer is "none", an EMPTY list is returned
+            // rather than an omission: an empty list says "asked and
+            // answered", silence says "did not understand the question".
+            QueryFunction::QueryExtensionList | QueryFunction::QueryExtensionMap => {
+                // The two functions that exist to disclose vendor extensions
+                // — and this server HAS one, `PQCToday-SharedSecret`
+                // (0x540001), which a conformant client could previously
+                // discover only by reading this repository.
+                resp.extension_information = Some(vec![crate::kmip30::ExtensionInformation {
+                    extension_name: "PQCToday-SharedSecret".to_string(),
+                    extension_tag: crate::kmip30::vendor_tags::PQCTODAY_SHARED_SECRET,
+                    // ByteString (§11.25 = 0x08) — the derived shared secret.
+                    extension_type: 0x08,
+                }]);
+            }
+            QueryFunction::QueryAttestationTypes => {
+                // Genuinely none — `attestation_capability` is false below.
+                resp.attestation_types = Some(Vec::new());
+            }
+            QueryFunction::QueryRngs => {
+                // §4.52 — the engine draws from the OS entropy pool
+                // (`rand::rngs::OsRng`), not a managed DRBG, so it reports
+                // `Unspecified` (0x01) for the same reason `Random Number
+                // Generator` does in Get Attributes.
+                resp.rng_parameters = Some(vec![0x01]);
+            }
+            QueryFunction::QueryValidations => {
+                // §6.1.39: "A server MAY elect to return no validation
+                // information." There is none to claim.
+                resp.validation_information = Some(Vec::new());
+            }
+            QueryFunction::QueryClientRegistrationMethods => {
+                resp.client_registration_methods = Some(Vec::new());
+            }
+            QueryFunction::QueryStorageProtectionMasks => {
+                // §12.3 — software storage only.
+                resp.storage_protection_masks = Some(vec![0x01]);
+            }
+            QueryFunction::QueryCredentialInformation => {
+                // §9.9 — only Username and Password can authenticate today.
+                resp.credential_information = Some(vec![0x01]);
+            }
+            QueryFunction::QueryDefaultsInformation => {
+                // Defaults are per-identity via `Set Defaults`, not global, so
+                // there is no server-level set to report. Empty, not absent.
+                resp.defaults_information = Some(Vec::new());
             }
             QueryFunction::QueryCapabilities => {
                 // K3 — honest CapabilityInformation (compliance-audit
@@ -379,5 +441,58 @@ mod tests {
         let _ = query(&d, QueryRequest { functions: vec![QueryFunction::QueryObjects] }, "corr-a").unwrap();
         let p2 = ring.filter_plane(Plane::Kmip);
         assert_eq!(p2.len(), 2); // RequestReceived + ResponseSent
+    }
+
+    /// G5 (2026-09-06) — all 15 §11.x Query Functions are answerable.
+    ///
+    /// Nine of them could not previously be DECODED, so `query_function_from_code`
+    /// returned None, the decoder raised `UnknownEnum`, and the WHOLE message
+    /// failed — not just the unsupported function. §6.1.39 says "For each
+    /// Query Function specified in the request, the corresponding items SHALL
+    /// be returned in the response".
+    #[test]
+    fn every_query_function_is_answerable_and_extensions_are_discoverable() {
+        let (_ring, d) = deps();
+        let all = vec![
+            QueryFunction::QueryOperations,
+            QueryFunction::QueryObjects,
+            QueryFunction::QueryServerInformation,
+            QueryFunction::QueryApplicationNamespaces,
+            QueryFunction::QueryExtensionList,
+            QueryFunction::QueryExtensionMap,
+            QueryFunction::QueryAttestationTypes,
+            QueryFunction::QueryRngs,
+            QueryFunction::QueryValidations,
+            QueryFunction::QueryProfiles,
+            QueryFunction::QueryCapabilities,
+            QueryFunction::QueryClientRegistrationMethods,
+            QueryFunction::QueryDefaultsInformation,
+            QueryFunction::QueryStorageProtectionMasks,
+            QueryFunction::QueryCredentialInformation,
+        ];
+        assert_eq!(all.len(), 15, "§11.x defines fifteen Query Functions");
+        let resp = query(&d, QueryRequest { functions: all }, "corr-all")
+            .expect("asking for every function must not fail the message");
+
+        // The one that matters: this server HAS a vendor extension, and a
+        // conformant client could previously find it only by reading source.
+        let exts = resp.extension_information.expect("Extension List answered");
+        assert_eq!(exts.len(), 1);
+        assert_eq!(exts[0].extension_name, "PQCToday-SharedSecret");
+        assert_eq!(exts[0].extension_tag, crate::kmip30::vendor_tags::PQCTODAY_SHARED_SECRET);
+        assert!(
+            (0x54_0000..=0x54_FFFF).contains(&exts[0].extension_tag),
+            "§11.57 reserves 0x540000-0x54FFFF for extensions",
+        );
+
+        // "None" is answered as an EMPTY list, not an omission — the
+        // difference between "asked and answered" and "not understood".
+        assert_eq!(resp.attestation_types.as_deref(), Some(&[][..]));
+        assert_eq!(resp.validation_information.map(|v| v.len()), Some(0));
+        // ...while the ones with a real answer carry it.
+        assert_eq!(resp.rng_parameters.as_deref(), Some(&[0x01u8 as u32][..]),
+                   "§4.52 — OS entropy pool, reported Unspecified");
+        assert_eq!(resp.credential_information.as_deref(), Some(&[0x01u32][..]),
+                   "§9.9 — only Username and Password authenticates today");
     }
 }

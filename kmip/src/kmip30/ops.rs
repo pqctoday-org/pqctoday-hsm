@@ -286,11 +286,58 @@ pub enum QueryFunction {
     QueryApplicationNamespaces = 0x04,
     QueryProfiles           = 0x0a,
     QueryCapabilities       = 0x0b,
+    // ── G5 (2026-09-06): the nine §11.x functions this server could not
+    // even NAME. An unrecognised code made `query_function_from_code`
+    // return None, which the decoder turned into `UnknownEnum` — failing
+    // the WHOLE message, not just the unsupported function. §6.1.39 says
+    // "For each Query Function specified in the request, the corresponding
+    // items SHALL be returned in the response"; refusing everything else
+    // in the batch was never that.
+    QueryExtensionList             = 0x05,
+    QueryExtensionMap              = 0x06,
+    QueryAttestationTypes          = 0x07,
+    QueryRngs                      = 0x08,
+    QueryValidations               = 0x09,
+    QueryClientRegistrationMethods = 0x0c,
+    QueryDefaultsInformation       = 0x0d,
+    QueryStorageProtectionMasks    = 0x0e,
+    QueryCredentialInformation     = 0x0f,
+}
+
+/// §6.1.39 / §11 `Extension Information` — describes one vendor extension:
+/// its name, its tag codepoint, and the item type its value carries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionInformation {
+    pub extension_name: String,
+    /// The `0x54xxxx` tag itself (§11.57 reserves that range for extensions).
+    pub extension_tag: u32,
+    /// TTLV item type of the extension's value, as a §11.25 codepoint.
+    pub extension_type: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryResponse {
     pub operations: Option<Vec<Operation>>,
+    /// §6.1.39 `Extension Information` — one entry per vendor extension this
+    /// server implements (G5). Until 2026-09-06 the two Query functions that
+    /// ask for this could not be decoded at all, so a conformant client had
+    /// no way to discover the server's extensions; they had to be read out of
+    /// this repository's source.
+    pub extension_information: Option<Vec<ExtensionInformation>>,
+    /// §11.5 Attestation Types the server supports (empty = none).
+    pub attestation_types: Option<Vec<u32>>,
+    /// §4.52 RNG parameters — reported as RNG Algorithm codepoints.
+    pub rng_parameters: Option<Vec<u32>>,
+    /// §6.1.39 Validation Information (a server MAY return none).
+    pub validation_information: Option<Vec<String>>,
+    /// §11.10 Client Registration Methods.
+    pub client_registration_methods: Option<Vec<u32>>,
+    /// §12.3 Protection Storage Masks the server can honour.
+    pub storage_protection_masks: Option<Vec<u32>>,
+    /// §9.9 Credential Types that can actually authenticate.
+    pub credential_information: Option<Vec<u32>>,
+    /// §6.1.39 Defaults Information.
+    pub defaults_information: Option<Vec<String>>,
     pub object_types: Option<Vec<ObjectType>>,
     /// Top-level child of Query Response Payload per KMIP 3.0 §6.1.39
     /// (NOT a child of `ServerInformation`). Value-variable per
