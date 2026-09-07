@@ -582,6 +582,9 @@ fn attribute_is_read_only(a: &Attribute) -> bool {
         // server-extracted from the Certificate Value DER bytes at
         // Register time. BL-M-10 step #4 pins `CertificateLength`.
         Attribute::CertificateLength(_) |
+        // §4.14 Table 86 — "Initially set by: Server", "Modifiable by
+        // client: No", "Deletable by client: No".
+        Attribute::CredentialType(_) |
         Attribute::CertificateSubjectCN(_) |
         Attribute::CertificateSubjectO(_) |
         Attribute::CertificateSubjectOU(_) |

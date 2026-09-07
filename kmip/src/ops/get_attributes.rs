@@ -213,6 +213,10 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     // table. SKLC-O-1 step #3 pins this.
     out.push(Attribute::KeyFormatType(r.key_format_type.unwrap_or(0x01)));
     if let Some(n) = r.certificate_length { out.push(Attribute::CertificateLength(n)); }
+    // §4.14 — present only on Credential Objects, which is what "applies to
+    // Object Types: Credential Objects" means; never fabricated for anything
+    // else.
+    if let Some(v) = r.credential_type { out.push(Attribute::CredentialType(v)); }
     push_certificate_names(&mut out, r);
     if let Some(b) = &r.certificate_value { out.push(Attribute::CertificateValue(b.clone())); }
     // KMIP §11 Lease Time — server default; OASIS Baseline corpus
@@ -418,6 +422,7 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::RotateName(_)             => "RotateName",
         Attribute::CertificateType(_)        => "CertificateType",
         Attribute::CertificateValue(_)       => "CertificateValue",
+        Attribute::CredentialType(_)         => "CredentialType",
         Attribute::CertificateSubjectCN(_)   => "CertificateSubjectCN",
         Attribute::CertificateSubjectO(_) => "CertificateSubjectO",
         Attribute::CertificateSubjectOU(_) => "CertificateSubjectOU",
@@ -875,6 +880,33 @@ mod tests {
                  — the link loop dropped it (this is the CertificateLink bug)",
             );
         }
+    }
+
+    /// §4.14 Table 86 — `Credential Type` is server-set, and "applies to
+    /// Object Types: **Credential Objects**". So it appears on a credential
+    /// and on nothing else; a symmetric key must not grow one.
+    #[test]
+    fn credential_type_appears_only_on_credential_objects() {
+        let mut cred = ObjectRecord {
+            object_type: crate::kmip30::ObjectType::PasswordCredential,
+            credential_type: Some(0x01),
+            ..ObjectRecord::default()
+        };
+        cred.uid = "c".into();
+        let names: Vec<&str> =
+            attributes_from_record(&cred).iter().map(canonical_attribute_name).collect();
+        assert!(
+            names.contains(&"CredentialType"),
+            "a Credential Object must carry §4.14 Credential Type"
+        );
+
+        let plain = attributes_from_record(&ObjectRecord::default());
+        let plain_names: Vec<&str> = plain.iter().map(canonical_attribute_name).collect();
+        assert!(
+            !plain_names.contains(&"CredentialType"),
+            "a non-credential object must NOT carry Credential Type — \
+             Table 86 scopes it to Credential Objects"
+        );
     }
 
     /// §4.6 Table 62, end to end through the projection, in both directions.

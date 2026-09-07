@@ -3607,6 +3607,17 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 });
             }
         }
+        tags::CredentialType => {
+            if let Value::Enumeration(v) = &frame.value {
+                Attribute::CredentialType(*v)
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Credential Type",
+                    msg: "expected Enumeration".into(),
+                });
+            }
+        }
         tags::CertificateSubjectCN => {
             if let Value::TextString(s) = &frame.value {
                 Attribute::CertificateSubjectCN(s.clone())
@@ -5822,6 +5833,7 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             ]))
         }
         Attribute::CertificateSubjectCN(s)     => TtlvFrame::new(Tag(tags::CertificateSubjectCN),     Value::TextString(s.clone())),
+        Attribute::CredentialType(v) => TtlvFrame::new(Tag(tags::CredentialType), Value::Enumeration(*v)),
         Attribute::CertificateSubjectO(s) => TtlvFrame::new(Tag(tags::CertificateSubjectO), Value::TextString(s.clone())),
         Attribute::CertificateSubjectOU(s) => TtlvFrame::new(Tag(tags::CertificateSubjectOU), Value::TextString(s.clone())),
         Attribute::CertificateSubjectEmail(s) => TtlvFrame::new(Tag(tags::CertificateSubjectEmail), Value::TextString(s.clone())),
@@ -5967,6 +5979,7 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "CertificateLength"      => tags::CertificateLength,
         "CertificateValue"       => tags::CertificateValue,
         "CertificateSubjectCN"   => tags::CertificateSubjectCN,
+        "CredentialType"         => tags::CredentialType,
         "CertificateSubjectO" => tags::CertificateSubjectO,
         "CertificateSubjectOU" => tags::CertificateSubjectOU,
         "CertificateSubjectEmail" => tags::CertificateSubjectEmail,
@@ -6093,6 +6106,7 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::CertificateLength      => "Certificate Length",
         tags::CertificateValue       => "Certificate Value",
         tags::CertificateSubjectCN   => "Certificate Subject CN",
+        tags::CredentialType         => "Credential Type",
         tags::CertificateSubjectO => "Certificate Subject O",
         tags::CertificateSubjectOU => "Certificate Subject OU",
         tags::CertificateSubjectEmail => "Certificate Subject Email",

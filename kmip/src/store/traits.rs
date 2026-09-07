@@ -225,6 +225,11 @@ pub struct ObjectRecord {
 
     /// KMIP §11 `Certificate Type` — Enumeration codepoint (e.g. X.509
     /// = 0x01, PGP = 0x02). v0.1 stores the raw wire value.
+    /// §4.14 `Credential Type` — set by the server when a Credential Object
+    /// is created, and never changed after. `None` for every other object
+    /// type, which is what Table 86's "applies to: Credential Objects" means.
+    #[serde(default)]
+    pub credential_type: Option<u32>,
     pub certificate_type: Option<u32>,
     pub certificate_length: Option<i32>,
     /// KMIP §6.2 / §11 — DER bytes of an X.509 / PGP Certificate
@@ -447,6 +452,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             x509_certificate_identifier: None,
             x509_certificate_issuer: None,
             x509_certificate_subject: None,
+            credential_type: None,
             certificate_type: None,
             certificate_length: None,
             certificate_value: None,
