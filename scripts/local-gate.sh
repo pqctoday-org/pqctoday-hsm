@@ -13,7 +13,7 @@
 #   3. rust  cargo test                       — softhsmrustv3 engine tests
 #   4. OASIS corpus provenance (the XML is the OASIS XML)
 #   5. OASIS byte vectors match that XML (drift guard, added 2026-09-07)
-#   6. OASIS KMIP 3.0 replay + baseline assert + staleness guard (97/0/5)
+#   6. OASIS KMIP 3.0 replay + baseline assert + staleness guard (99/0/3)
 #   7. wasm  smoke.cjs                         — CACP bundle boots + round-trips
 #   8. Rust engine PKCS#11 v3.2 conformance (257 checks) + report freshness
 #   9. cross-engine PKCS#11 differential harness (49 scenarios vs exceptions.json)
@@ -297,7 +297,7 @@ run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
 run_step "OASIS byte vectors match the XML corpus (1358 vectors)" \
   "cd $AG_KMIP && python3 conformance/harness/generate_byte_vectors.py --check"
 
-run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
+run_step "OASIS KMIP 3.0 replay (99 PASS / 0 FAIL / 3 SKIP_DEPRECATED)" \
   "cd $AG_KMIP && cargo build --release --bin pqctoday-kmip --quiet && \
    mkdir -p target/release && ln -sf \$(readlink -f \${CARGO_TARGET_DIR:-/cargo-target}/release/pqctoday-kmip) target/release/pqctoday-kmip 2>/dev/null; \
    python3 conformance/harness/dispatcher_replay.py >/dev/null && \
