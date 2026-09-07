@@ -74,7 +74,7 @@ covered separately by the 42-transcript vendored subset in `../conformance/pqc_c
 
 | Layer | Status | Evidence |
 |---|---|---|
-| TTLV wire-format codec | ✅ **100% conformant** | 1234/1234 OASIS messages round-trip byte-identical |
+| TTLV wire-format codec | ⚠️ **conformant for the 11 item types it implements** | 1234/1234 OASIS messages round-trip byte-identical — but only after the harness renders `Identifier`/`Reference`/`Name Reference` as Text String; the codec does not implement those three KMIP 3.0 types (gap **G1**, §8) |
 | Dispatcher behaviour vs OASIS expectations | ✅ **97/97 actionable tests pass (100%)** | `conformance/REPLAY_REPORT.md` (regenerated per run) |
 | Op coverage | ✅ all ops used by the OASIS corpus | 0 `SKIP_OP` in the replay report |
 | Query honesty | ✅ **nothing advertised that isn't real** | both `ADVERTISED_UNIMPLEMENTED_*` lists in `ops/query.rs` are empty (Phase 6.1) |
@@ -82,12 +82,16 @@ covered separately by the 42-transcript vendored subset in `../conformance/pqc_c
 | Stateful hash-based signatures | ✅ **real** — HSS/LMS wired to the engine | KMIP `Sign` on an HSS/LMS key advances + persists the real leaf index (Phase 1.5) |
 | Split Key / Join Split Key (§6.1.12/§6.1.33) | ✅ **real** — restored 2026-08-18 after a 5-day whitelist-bug regression that failed every key while `Query` kept advertising it | §4.5 below |
 | Composite signature profiles (LAMPS draft-19 §6/§10.4) | ✅ **8/8 implemented** (`.37`/`.39`/`.40`/`.41`/`.45`/`.46`/`.48`/`.49`) | §4.6 below |
-| Baseline Server profile (§5.1.2) | ✅ **all 13 conditions met** (item 10 closed 2026-08-13) | §5.1.4 below |
+| Baseline Server profile (§5.1.2) | ⚠️ **11 of 13 conditions met** — item 8 (Object Attributes) not met (**G2**); the §6.2 conformance clause additionally carries the DSA deviation (**G4**) | §5.1.4, §8 below |
 | Quantum Safe Authentication Suite (Profiles §3.3) | ✅ **all clauses met** — all 3 mandated hybrid groups, interop-proven vs OpenSSL 3.6 | §5.2 below |
+| Basic Authentication Suite (Profiles §3.1) | ⚠️ **met only under a non-default TLS profile** — the default `permissive` posture offers suites §3.1.2 forbids (**G3**) | §8 below |
 | Third-party interop (PyKMIP / vendor) | ⏸️ never run — **not currently possible** | KMIP 3.0 has no compatible OSS client; see §5.3 |
 
-**Bottom line**: the wire bytes match the KMIP 3.0 CSD02 draft byte-for-byte AND the dispatcher
-matches the OASIS conformance transcripts on **all 97 non-deprecated tests** in the corpus. The
+**Bottom line**: the dispatcher matches the OASIS conformance transcripts on **all 97
+non-deprecated tests** in the corpus, and the wire bytes match the KMIP 3.0 CSD02 draft for every
+item type the codec implements — with the material qualification that three KMIP 3.0 item types are
+not implemented at all and are measured only after the harness downgrades them to Text String
+(**G1**, §8). Read §8 before quoting any figure in this report. The
 remaining 5 transcripts are a deliberate, documented policy skip — DES / 3DES / classical DSA are
 out of scope for the `softhsmrustv3` backend (`kmip/DEPRECATED.md`). There are, as of this
 revision, **zero** other skip categories: no `SKIP_OP`, no `SKIP_PRECONDITION`, no
@@ -541,8 +545,11 @@ confirming it measures the real behavior rather than passing regardless.
 
 ### 5.1 Conformance claim — scope statement
 
-**The claim this subsystem makes: *"OASIS KMIP 3.0 CSD02 — all 13 Baseline Server profile
-conditions met. A committee draft, not a ratified Standard."*** Every actionable transcript in
+**The claim this subsystem makes: *"OASIS KMIP 3.0 CSD02 — 11 of the 13 Baseline Server profile
+conditions met, under a non-default TLS profile, with one declared deviation. A committee draft,
+not a ratified Standard."*** The 2026-09-06 re-audit (§8) found this section previously claimed
+all 13; items 4–8 were marked "Met — evidenced by codec conformance", which the §5.1.2 attribute
+list does not support. Every actionable transcript in
 the official `kmip-profiles-v3.0-csd02.zip` test suite passes (97/97 non-deprecated), the TTLV
 codec round-trips the full corpus byte-exactly, and item 10 — the last open condition — was
 closed on 2026-08-13 (§5.1.4).
@@ -568,9 +575,10 @@ own 13-item list rather than approximated:
 
 | §5.1.2 item | Requirement | Status |
 |---|---|---|
-| 1 | KMIP Server Implementation Conformance clauses | Met — the dispatcher/codec/op-handler layers below are the evidence |
+| 1 | KMIP Server Implementation Conformance clauses | Met — the dispatcher/codec/op-handler layers below are the evidence. Note the §6.2 *profile conformance* clause additionally requires the §3.1 Basic Authentication Suite, which the default TLS posture does not satisfy (**G3**), and all Baseline mandatory test cases, two of which are refused by policy (**G4**) |
 | 2–3 | System/User Objects: User, Group, Password Credential, Certificate | **Met** (Phase 6.1 correction — these were genuinely implemented all along via `CreateUser`/`CreateGroup`/`CreateCredential`; a stale Query-advertisement doc comment had mislabeled them "unimplemented" since before this server could actually create them) |
-| 4–8, 11–12 | Attribute/Message/Object/Operation data structures, message protocols | Met — evidenced by §2 codec conformance + §4 dispatcher conformance |
+| 4–7, 11–12 | Attribute/Message/Object/Operation data structures, message protocols | Met — evidenced by §2 codec conformance + §4 dispatcher conformance |
+| 8 | Object Attributes (the §5.1.2 list) | **NOT met (G2)** — no Counters (§4.13, 5 required), Certificate Attributes 1 of 26 (§4.6), Links 9 of 20 (§4.35), no Credential Type (§4.14), no Rotate Latest (§4.58). Unmodelled attributes are silently discarded and the operation still answers Success |
 | 9 | 32 named Client-to-Server Operations (Activate…Set Endpoint Role) | **Met** — every one of the 32 is a real, `HANDLED_OPERATIONS` handler. `Set Endpoint Role` accepts the identity request (role=Server) and, since 2026-08-13, also performs the real role switch (role=Client) for an authenticated caller — see §5.1.4 |
 | 10 | 5 named Server-to-Client Operations (Discover Versions, Notify, Put, Query, Set Endpoint Role, all issued *by the server*) | **Met (2026-08-13) — self-verified, not corpus-proven.** All five are implemented and exercised on the §6.1.61 role-swapped channel: `Notify`/`Put` are pushed, and `Discover Versions`/`Query`/`Set Endpoint Role` are issued by the server with the answers actually changing what it does — see §5.1.4, which also records how each was proven non-vacuous. Unlike items 1–9/11–12 above, this is never checked against an OASIS transcript: the corpus (§5.3) has zero server-to-client transcripts to replay, so the evidence is entirely this codebase's own — 14 Rust tests in `tests/server_to_client_messages.rs` + 9 tests in `python-client/tests/test_server_to_client_push.py` — the same self-verified/corpus-proven distinction §4.6 draws explicitly |
 | 13 | Optional non-contradicting extensions | N/A (optional) |
@@ -854,3 +862,31 @@ green; step 3 exists because a stale committed report once hid a 92→89 Locate 
 No Rust test reads the replay report — the gate is these Python scripts, run by
 `scripts/local-gate.sh` step 4 and by the `kmip-conformance` CI job. Running only
 `cargo test` proves nothing about corpus conformance.
+
+
+## 8. Known gaps (2026-09-06 re-audit)
+
+A full re-audit against CSD02 on 2026-09-06 found 11 gaps. They are listed here rather than left in
+a separate document, because the previous revision of this report overstated three claims and
+nothing in the report itself pointed at the shortfall. Remediation plan:
+`kmip30-remediation-plan-09062026.md` (workspace root). Severity is the auditor's, not a
+customer-impact rating.
+
+| # | Severity | Gap | Where |
+|---|---|---|---|
+| **G1** | HIGH | **The codec implements 11 of the 14 KMIP 3.0 item types.** `Identifier` (0x0C), `Reference` (0x0D) and `Name Reference` (0x0E) — §11.25, encodings §10.1.2–§10.1.4 — are absent. The OASIS corpus uses them 1,000+ times (`<UniqueIdentifier type="Identifier">` ×1012, `type="Reference"` links ×47, `NameReference` ×2). The replay harness and the Python client both downgrade all three to Text String before encoding, so the "1234/1234 byte-identical" figure measures a downgraded rendering, not the corpus as published. A client sending spec-typed identifiers is rejected with `Invalid Message`. | `src/codec/value.rs`, `conformance/harness/oasis_codec.py`, `python-client/src/pqctoday_kmip/_ttlv.py` |
+| **G2** | HIGH | **Baseline §5.1.2 item 8 not met** — see the §5.1 table. Compounding it: an attribute the decoder does not model returns `Ok(None)` and the operation answers **Success**, so input is silently discarded. `Certify` writes a `CertificateLink` that `Get Attributes` then drops. | `src/kmip30/attrs.rs`, `src/kmip30/wire.rs`, `src/ops/get_attributes.rs` |
+| **G3** | HIGH | **The default TLS posture violates Profiles §3.1.2** — `permissive` is the rustls default provider: TLS 1.2 + 1.3, `TLS13_AES_128_GCM_SHA256` (forbidden) and unlisted 1.2 suites. §3.1.2 ends "SHALL NOT support any cipher suite not listed above". Conformant only under `--tls-profile quantum-safe`/`classical-baseline`, and the replay runs under the default. | `src/server/listener.rs` |
+| **G4** | HIGH (wording) | **§6.2 requires *all* Baseline mandatory test cases**; `BL-M-12-30`/`BL-M-13-30` (Register of Transparent DSA keys) are refused by policy. That remains an accepted deviation — but "all 13 conditions met" describes §5.1.2, not the §6.2 conformance clause. | `DEPRECATED.md` |
+| **G5** | MEDIUM | **Query supports 6 of 15 Query Functions**; the other nine make the *whole message* fail (`UnknownEnum` → `Invalid Message`). Extension List/Map, Defaults, RNG Parameters, Validations, Attestation Types, Client Registration Methods, Storage Protection Masks, Credential Information are unreachable — so §5.1.2 item 7's Operations Data Structures cannot be returned, and the server's real vendor extensions are undiscoverable. `Query Profiles` returns an empty list while this report claims Baseline Server. | `src/ops/query.rs`, `src/kmip30/wire.rs` |
+| **G6** | MEDIUM | **Streaming is Encrypt-only, and `Query` advertises `streaming_capability: true`.** Only `EncryptRequest` carries Init/Final Indicator + Correlation Value; the Decrypt/Sign/MAC/Hash decoders drop those tags. A multi-part `Decrypt` is processed as single-part and returns **Success with wrong plaintext**. | `src/ops/decrypt.rs`, `src/kmip30/ops.rs`, `src/ops/query.rs` |
+| **G7** | MEDIUM | **Locate silently ignores filters it does not model** and returns over-broad results. Dates, Key Format Type, Digest, Alternative Name, links and vendor attributes all fall through a `_ => {}`. Note the OASIS Locate transcripts themselves send `Protect Stop Date` and vendor attributes as filters — they pass *because* the filter is dropped, so the missing filters must be implemented before the fall-through is made fail-closed. | `src/ops/locate.rs` |
+| **G8** | MEDIUM | **`Deactivation Reason Code` carries Revocation semantics.** §11.14 defines Unspecified / Deactivation Date / Protect Stop Date / Usage Limit; the engine enum names them KeyCompromise / CACompromise / AffiliationChanged and adds non-spec `0x05–0x07`. Separately there are **no date-driven state transitions** — a key past its Protect Stop Date still reads `Active` (§4.67 transition 6 never fires), though Encrypt/Decrypt do refuse. | `src/kmip30/ops.rs`, `src/store/lifecycle.rs` |
+| **G9** | MEDIUM | **Vendor Attribute (§4.70) loses its Vendor Identification** — ignored on decode, absent from `Attribute::Custom`, defaulted to `"x"` on encode. Two vendors' attributes with the same name collide, and the server echoes an identity the client never set. | `src/kmip30/wire.rs`, `src/kmip30/attrs.rs` |
+| **G10** | LOW/MED | **Result Reason coverage is 41 of 71**, and every codec fault maps to `Invalid Message`. Missing include `Unknown Tag`, `Unknown Enumeration`, `Codec Error`, `Unsupported Attribute`, `Read Only Attribute`, plus `Constraint Violation` and `Duplicate Process Request` — which name conditions this server already implements (`Set Constraints`, `Process`). | `src/error.rs`, `src/server/listener.rs` |
+| **G11** | LOW | Assorted: `Interop` `Reset` (0x03) not decoded; Cryptographic Algorithm 49 of 93 codepoints (most deliberate legacy, but `EC`/`X25519`/`X448`/`XMSS` and standard McEliece values deserve a decision); `Unique Identifier` enumeration 1 of 21; 1 of 8 credential types can authenticate; Client Correlation Value (§9.7) not logged; the removed-in-3.0 `Object Group` attribute survives as dead code; no HTTPS/XML/JSON message encodings (§10.2). | various |
+
+**What is not affected.** The 62-operation surface, the enum codepoints checked by
+`tests/spec_crosscheck.rs`, §3.3 Quantum Safe TLS, asynchronous processing, Split Key, the composite
+signature profiles, HSS/LMS statefulness and the §6.2 server-to-client push all stand as described
+above — they were re-verified during the audit.
