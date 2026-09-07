@@ -211,6 +211,138 @@ impl RevocationReason {
 /// back to being dropped at decode (same graceful-degradation posture as
 /// before this type existed), same as any other genuinely-unsupported
 /// wire shape.
+/// The 13 §4.6 Certificate Attributes for ONE side (Subject or Issuer).
+///
+/// Table 62 fixes the shape: "Multiple instances permitted: **Yes**", so each
+/// component is a list and never a single value; and "SHALL always have a
+/// value: **No**", so an empty list means the attribute is ABSENT from the
+/// wire, never present-and-empty.
+///
+/// `#[serde(default)]` on every field keeps records written before these
+/// attributes existed loadable — the store serialises `ObjectRecord` whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CertificateNames {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cn: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub o: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ou: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub email: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub c: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub st: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub l: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uid: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serial_number: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub title: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dc: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dn_qualifier: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dn: Option<String>,
+}
+
+impl CertificateNames {
+    /// True when the certificate carried no §4.6 component at all — an empty
+    /// Subject is legal (RFC 5280 §4.1.2.6 puts the identity in a critical
+    /// `subjectAltName` instead), and must project NO attributes rather than
+    /// twelve empty ones.
+    pub fn is_empty(&self) -> bool {
+        self.cn.is_empty()
+            && self.o.is_empty()
+            && self.ou.is_empty()
+            && self.email.is_empty()
+            && self.c.is_empty()
+            && self.st.is_empty()
+            && self.l.is_empty()
+            && self.uid.is_empty()
+            && self.serial_number.is_empty()
+            && self.title.is_empty()
+            && self.dc.is_empty()
+            && self.dn_qualifier.is_empty()
+            && self.dn.is_none()
+    }
+}
+
+/// The identity of a vendor attribute at rest: §4.70's `(Vendor
+/// Identification, Attribute Name)` **pair**.
+///
+/// Two vendors may legitimately use the same attribute name, so keying by
+/// name alone makes them collide — the client's `x-env` and a partner's
+/// `x-env` become one value. The wire has carried the vendor correctly since
+/// G9; this makes the store agree.
+///
+/// Represented as one `vendor/name` string rather than a struct for a reason
+/// grounded in the spec, not convenience: §4.70 limits Vendor Identification
+/// to `[A-Za-z0-9_.]`, so `/` cannot occur in a vendor and the FIRST `/` is
+/// always the separator. The attribute name may contain anything, including
+/// further slashes. Being a string also keeps the record JSON-serialisable —
+/// `serde_json` map keys must be strings, and the store round-trips whole
+/// `ObjectRecord`s through `serde_json` (`store/sqlite.rs`).
+///
+/// §4.70 reserves `"x"` for client-created attributes and `"y"` for
+/// server-created ones. A client that sends no Vendor Identification is
+/// recorded under `"x"`, which is exactly what the encoder already emits for
+/// that case, so the wire and the store cannot disagree.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+#[serde(transparent)]
+pub struct VendorAttributeKey(String);
+
+/// §4.70 — client-created attributes with no explicit Vendor Identification.
+pub const VENDOR_CLIENT: &str = "x";
+/// §4.70 — server-created attributes.
+pub const VENDOR_SERVER: &str = "y";
+
+impl VendorAttributeKey {
+    pub fn new(vendor: Option<&str>, name: &str) -> Self {
+        Self(format!("{}/{}", vendor.unwrap_or(VENDOR_CLIENT), name))
+    }
+
+    /// The vendor half — everything before the first `/`.
+    pub fn vendor(&self) -> &str {
+        self.0.split_once('/').map(|(v, _)| v).unwrap_or(VENDOR_CLIENT)
+    }
+
+    /// The attribute-name half — everything after the first `/`.
+    pub fn name(&self) -> &str {
+        self.0.split_once('/').map(|(_, n)| n).unwrap_or(self.0.as_str())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Records written before this existed keyed by the bare attribute name, and
+/// the pre-G9 encoder hard-coded `"x"` for every one of them. So a legacy key
+/// with no `/` is exactly an `"x"` attribute, and is read back as one — no
+/// migration step, no data loss, and no silent reinterpretation of somebody
+/// else's vendor.
+impl<'de> serde::Deserialize<'de> for VendorAttributeKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Ok(if raw.contains('/') {
+            Self(raw)
+        } else {
+            Self(format!("{VENDOR_CLIENT}/{raw}"))
+        })
+    }
+}
+
+impl std::fmt::Display for VendorAttributeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CustomAttributeValue {
     Text(String),
@@ -426,8 +558,6 @@ pub enum Attribute {
     /// an attribute list. Carries the group name (a `Name Reference`
     /// in the KMIP 3.0 `Object Groups` model — SASED-M-3 step #0 pins
     /// a Locate filter by it). Persisted onto the record at
-    /// Create / Register and matched by Locate (any membership hits).
-    ObjectGroup(String),
     /// `Derivation Base Object Link` (§4.35.5; wire tag `Derivation
     /// Object Link` 0x420192) — K20: on a derived Symmetric Key /
     /// Secret Data object, "expresses an association from a derived
@@ -490,9 +620,90 @@ pub enum Attribute {
     /// `Certificate Value` (0x42001e) — the DER bytes of the X.509
     /// certificate as supplied to Register / surfaced via Get.
     CertificateValue(Vec<u8>),
+    /// `Credential Type` (§4.14, tag 0x420024) — Enumeration naming which
+    /// kind of credential a Credential Object is. Table 86: "SHALL always
+    /// have a value: Yes", "Initially set by: Server", "Modifiable by client:
+    /// No", "Deletable by client: No", set implicitly at Register, and it
+    /// "applies to Object Types: Credential Objects" only.
+    CredentialType(u32),
     /// `Certificate Subject CN` (0x420108) — server-extracted from the
     /// DER Subject Name's commonName RDN. Marked Read-Only per §11.
     CertificateSubjectCN(String),
+    /// `Certificate Subject O` (0x420109) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectO(String),
+    /// `Certificate Subject OU` (0x42010a) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectOU(String),
+    /// `Certificate Subject Email` (0x42010b) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectEmail(String),
+    /// `Certificate Subject C` (0x42010c) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectC(String),
+    /// `Certificate Subject ST` (0x42010d) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectST(String),
+    /// `Certificate Subject L` (0x42010e) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectL(String),
+    /// `Certificate Subject UID` (0x42010f) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectUID(String),
+    /// `Certificate Subject Serial Number` (0x420110) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectSerialNumber(String),
+    /// `Certificate Subject Title` (0x420111) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectTitle(String),
+    /// `Certificate Subject DC` (0x420112) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectDC(String),
+    /// `Certificate Subject DN Qualifier` (0x420113) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectDNQualifier(String),
+    /// `Certificate Subject DN` (0x4201ba) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectDN(String),
+    /// `Certificate Issuer CN` (0x420114) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerCN(String),
+    /// `Certificate Issuer O` (0x420115) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerO(String),
+    /// `Certificate Issuer OU` (0x420116) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerOU(String),
+    /// `Certificate Issuer Email` (0x420117) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerEmail(String),
+    /// `Certificate Issuer C` (0x420118) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerC(String),
+    /// `Certificate Issuer ST` (0x420119) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerST(String),
+    /// `Certificate Issuer L` (0x42011a) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerL(String),
+    /// `Certificate Issuer UID` (0x42011b) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerUID(String),
+    /// `Certificate Issuer Serial Number` (0x42011c) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerSerialNumber(String),
+    /// `Certificate Issuer Title` (0x42011d) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerTitle(String),
+    /// `Certificate Issuer DC` (0x42011e) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerDC(String),
+    /// `Certificate Issuer DN Qualifier` (0x42011f) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerDNQualifier(String),
+    /// `Certificate Issuer DN` (0x4201bb) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerDN(String),
 
     /// Integers.
     CertificateLength(i32),
@@ -673,5 +884,90 @@ mod tests {
             attrs[2],
             Attribute::CryptographicUsageMask(m) if m.contains(UsageMask::SIGN) && m.contains(UsageMask::VERIFY)
         ));
+    }
+}
+
+#[cfg(test)]
+mod vendor_attribute_key_tests {
+    use super::*;
+
+    /// The defect this key type exists to fix: two vendors using ONE attribute
+    /// name are two different attributes (§4.70 identifies them by the pair),
+    /// and must not overwrite each other at rest.
+    #[test]
+    fn two_vendors_using_one_name_do_not_collide() {
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            VendorAttributeKey::new(Some("acme"), "env"),
+            CustomAttributeValue::Text("prod".into()),
+        );
+        m.insert(
+            VendorAttributeKey::new(Some("globex"), "env"),
+            CustomAttributeValue::Text("staging".into()),
+        );
+
+        assert_eq!(m.len(), 2, "same name, different vendors — two attributes, not one");
+        assert_eq!(
+            m.get(&VendorAttributeKey::new(Some("acme"), "env")),
+            Some(&CustomAttributeValue::Text("prod".into()))
+        );
+        assert_eq!(
+            m.get(&VendorAttributeKey::new(Some("globex"), "env")),
+            Some(&CustomAttributeValue::Text("staging".into()))
+        );
+    }
+
+    /// §4.70 limits Vendor Identification to `[A-Za-z0-9_.]`, so `/` cannot
+    /// appear in a vendor and the FIRST `/` is always the separator. The
+    /// attribute NAME has no such restriction and may contain slashes.
+    #[test]
+    fn the_name_half_may_contain_slashes_the_vendor_half_cannot() {
+        let k = VendorAttributeKey::new(Some("acme.corp_1"), "path/to/thing");
+        assert_eq!(k.vendor(), "acme.corp_1");
+        assert_eq!(k.name(), "path/to/thing");
+    }
+
+    /// A client that sends no Vendor Identification is recorded under §4.70's
+    /// reserved client value, which is exactly what the encoder emits for that
+    /// case — so the wire and the store cannot disagree.
+    #[test]
+    fn an_absent_vendor_is_recorded_as_the_reserved_client_value() {
+        let k = VendorAttributeKey::new(None, "env");
+        assert_eq!(k.vendor(), VENDOR_CLIENT);
+        assert_eq!(k.name(), "env");
+        assert_eq!(k, VendorAttributeKey::new(Some(VENDOR_CLIENT), "env"));
+    }
+
+    /// Records written before the pair key existed keyed by the bare name, and
+    /// the pre-G9 encoder hard-coded "x" for every one. So a legacy key reads
+    /// back as an "x" attribute — no migration step, and no silently
+    /// reinterpreting someone else's vendor.
+    #[test]
+    fn a_legacy_bare_name_key_loads_as_a_client_attribute() {
+        let legacy: std::collections::HashMap<VendorAttributeKey, CustomAttributeValue> =
+            serde_json::from_str(r#"{"env":{"Text":"prod"}}"#).expect("legacy shape still loads");
+        let k = VendorAttributeKey::new(None, "env");
+        assert_eq!(
+            legacy.get(&k),
+            Some(&CustomAttributeValue::Text("prod".into())),
+            "a record written before the pair key must still be readable"
+        );
+        assert_eq!(legacy.keys().next().unwrap().vendor(), VENDOR_CLIENT);
+    }
+
+    /// Round-trips as a plain JSON string key, which is what keeps
+    /// `ObjectRecord` serialisable — `serde_json` map keys must be strings.
+    #[test]
+    fn it_serialises_as_a_plain_string_key() {
+        let mut m = std::collections::HashMap::new();
+        m.insert(
+            VendorAttributeKey::new(Some("acme"), "env"),
+            CustomAttributeValue::Text("prod".into()),
+        );
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"acme/env\""), "expected a string key, got {json}");
+        let back: std::collections::HashMap<VendorAttributeKey, CustomAttributeValue> =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
     }
 }

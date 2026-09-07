@@ -227,7 +227,7 @@ pub fn create(
         // Y1 — persist the request's custom attributes so use-time gates read
         // the classification tag off the stored symmetric key.
         custom_attributes: super::helpers::raw_custom_attrs(&req.template_attribute),
-        object_groups: x.object_groups.clone(),
+        group_links: x.group_links.clone(),
 
         key_material: None,
 

@@ -551,7 +551,7 @@ mod tests {
         original.name = Some("my-signing-key".into()); // NOT persisted (D-1)
         original.key_material = Some(vec![9, 8, 7, 6]); // NOT persisted (D-1)
         original.custom_attributes.insert(
-            "env".into(),
+            crate::kmip30::VendorAttributeKey::new(None, "env"),
             crate::kmip30::CustomAttributeValue::Text("prod".into()),
         ); // NOT persisted (D-1)
 
@@ -576,7 +576,7 @@ mod tests {
         assert_eq!(loaded.name, Some("my-signing-key".into()));
         assert_eq!(loaded.key_material, Some(vec![9, 8, 7, 6]));
         assert_eq!(
-            loaded.custom_attributes.get("env"),
+            loaded.custom_attributes.get(&crate::kmip30::VendorAttributeKey::new(None, "env")),
             Some(&crate::kmip30::CustomAttributeValue::Text("prod".to_string()))
         );
         // The ENTIRE record round-trips byte-for-byte.

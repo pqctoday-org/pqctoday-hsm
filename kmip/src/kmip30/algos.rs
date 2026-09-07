@@ -104,6 +104,7 @@ pub mod recommended_curve {
 
 pub use softhsmrustv3::constants::{
     CKM_HSS, CKM_HSS_KEY_PAIR_GEN, CKM_ML_DSA, CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_KEM,
+    CKM_XMSS, CKM_XMSS_KEY_PAIR_GEN,
     CKM_ML_KEM_KEY_PAIR_GEN, CKM_SLH_DSA, CKM_SLH_DSA_KEY_PAIR_GEN,
     // BSI TR-02102-1 recommended KEMs (vendor mechanisms — see
     // pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md §1.4).
@@ -143,7 +144,7 @@ pub use softhsmrustv3::constants::{
     CKM_EC_MONTGOMERY_KEY_DERIVE,
     // PKCS#11 v3.2 §6.24 — EdDSA key pair generation (Edwards curve) and
     // sign/verify (Ed25519/Ed448).
-    CKM_EC_EDWARDS_KEY_PAIR_GEN, CKM_EDDSA,
+    CKM_EC_EDWARDS_KEY_PAIR_GEN, CKM_EC_MONTGOMERY_KEY_PAIR_GEN, CKM_EDDSA,
     CKM_AES_KEY_GEN, CKM_AES_ECB, CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_CTR, CKM_AES_GCM,
     // PKCS#11 v3.2 §6.31 — AES key wrap (RFC 3394) and with padding (RFC 5649).
     CKM_AES_KEY_WRAP, CKM_AES_KEY_WRAP_KWP,
@@ -182,18 +183,58 @@ pub enum PkcsOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum KmipAlgorithm {
     // ── Classical baseline ────────────────────────────────────────────────
-    // Deprecated symmetric primitives (DES=0x01, 3DES=0x02) and the
-    // discrete-log signature algorithm (DSA=0x05) are explicitly NOT
-    // supported per pqctoday's deprecated-mechanism policy. Register
-    // requests carrying those codepoints surface as `InvalidMessage`
-    // via `from_wire_value` returning None.
+    // Deprecated symmetric primitives (DES=0x01, 3DES=0x02) are NOT
+    // supported per pqctoday's deprecated-mechanism policy: `from_wire_value`
+    // returns None and Register surfaces `InvalidMessage`.
+    //
+    // DSA (0x05) is the exception, and a deliberate one (2026-09-07). The
+    // Baseline Server conformance clause (§6.2) requires ALL mandatory test
+    // cases to pass, and BL-M-12-30 / BL-M-13-30 register Transparent DSA
+    // keys. Refusing them meant the Baseline claim could not honestly be
+    // made. DSA is therefore accepted for STORAGE ONLY — `to_pkcs11_mech`
+    // returns None for every operation, so no DSA key can be generated,
+    // signed with or verified with. The server holds the material and gives
+    // it back; it never performs discrete-log signature cryptography.
     Aes,           // 0x03
+    /// DSA (0x05) — **storage only**, see the note above. Registering and
+    /// retrieving Transparent DSA keys is what the Baseline mandatory tests
+    /// require; no cryptographic operation is available on them.
+    Dsa,
     Rsa,           // 0x04
     Ecdsa,         // 0x06 — covers ECDSA over any curve; curve = attribute
     HmacSha256,    // 0x09
     HmacSha384,    // 0x0a
     HmacSha512,    // 0x0b
     Ecdh,          // 0x0e
+    /// `EC` (0x1a) — the spec's GENERIC elliptic-curve algorithm value.
+    ///
+    /// Added 2026-09-07. This server models elliptic curves the way §11.12
+    /// allows — `ECDSA`/`ECDH` plus a `Recommended Curve` attribute — but the
+    /// spec ALSO defines a generic `EC` value, and a conformant client is
+    /// entitled to send it. Refusing it was a compatibility gap, not a
+    /// conformance one. Treated as the curve-agnostic form: key generation
+    /// uses the same `CKM_EC_KEY_PAIR_GEN` as ECDSA/ECDH, with the curve
+    /// carried by the attribute exactly as before.
+    Ec,            // 0x1a
+    /// `X25519` (0x5a) — Montgomery-form key agreement as an ALGORITHM value.
+    ///
+    /// The same key this server already supports as
+    /// `ECDH` + `RecommendedCurve = CURVE25519`; §11.12 simply also gives it
+    /// its own algorithm codepoint, and a client sending that form used to be
+    /// refused. Distinct from `Ed25519` (0x37), which is EdDSA signing over
+    /// the twisted-Edwards form of the same curve.
+    X25519,        // 0x5a
+    /// `X448` (0x5b) — as `X25519`, over Curve448.
+    X448,          // 0x5b
+    /// `XMSS` (0x32) — RFC 8391 stateful hash-based signatures.
+    ///
+    /// The ENGINE has supported XMSS and XMSS^MT since before this crate
+    /// existed (`CKM_XMSS_KEY_PAIR_GEN` / `CKM_XMSS`), but the KMIP layer had
+    /// no name for it, so a genuinely available capability was unreachable
+    /// over this protocol. The specific parameter set rides as an engine
+    /// attribute, the same pattern `Ecdsa` uses for its curve and `Hss` for
+    /// its LMS parameters.
+    Xmss,          // 0x32
     /// KMIP/CACP coverage gap-analysis item 6 (2026-08-30): the engine has
     /// supported HMAC-SHA3-256/512 since before this crate existed; this
     /// enum simply never picked them up, so the Mac op could never select
@@ -416,6 +457,11 @@ impl KmipAlgorithm {
         use KmipAlgorithm::*;
         match self {
             Aes        => 0x00000003,
+            Dsa        => 0x00000005,
+            Ec         => 0x0000001a,
+            Xmss       => 0x00000032,
+            X25519     => 0x0000005a,
+            X448       => 0x0000005b,
             Rsa        => 0x00000004,
             Ecdsa      => 0x00000006,
             HmacSha256 => 0x00000009,
@@ -492,6 +538,13 @@ impl KmipAlgorithm {
         Some(match v {
             0x00000003 => Aes,
             0x00000004 => Rsa,
+            0x0000001a => Ec,
+            0x00000032 => Xmss,
+            0x0000005a => X25519,
+            0x0000005b => X448,
+            // Storage only — see the enum's own note. Accepted so the
+            // Baseline mandatory Register tests can pass.
+            0x00000005 => Dsa,
             0x00000006 => Ecdsa,
             0x00000009 => HmacSha256,
             0x0000000a => HmacSha384,
@@ -714,7 +767,16 @@ impl KmipAlgorithm {
             (Rsa, Encrypt | Decrypt) => Some(CKM_RSA_PKCS_OAEP),
 
             // ── ECDSA / ECDH classical ────────────────────────────────────
-            (Ecdsa, KeyGen) | (Ecdh, KeyGen) => Some(CKM_EC_KEY_PAIR_GEN),
+            (Ecdsa, KeyGen) | (Ecdh, KeyGen) | (Ec, KeyGen) => Some(CKM_EC_KEY_PAIR_GEN),
+            // X25519 / X448 as ALGORITHM values reach the same Montgomery-form
+            // key agreement this server already performs via
+            // `ECDH + RecommendedCurve`; the curve is implied by the algorithm
+            // rather than carried alongside it.
+            (X25519 | X448, KeyGen) => Some(CKM_EC_MONTGOMERY_KEY_PAIR_GEN),
+            // RFC 8391 XMSS — the engine's own mechanisms, reachable over KMIP
+            // for the first time.
+            (Xmss, KeyGen) => Some(CKM_XMSS_KEY_PAIR_GEN),
+            (Xmss, SignVerify) => Some(CKM_XMSS),
             (Ecdsa, SignVerify) => Some(CKM_ECDSA),
 
             // ── AES symmetric ─────────────────────────────────────────────
@@ -903,6 +965,11 @@ impl KmipAlgorithm {
         use KmipAlgorithm::*;
         match self {
             Aes        => "AES",
+            Dsa        => "DSA",
+            Ec         => "EC",
+            Xmss       => "XMSS",
+            X25519     => "X25519",
+            X448       => "X448",
             Rsa        => "RSA",
             Ecdsa      => "ECDSA",
             HmacSha256 => "HMAC-SHA256",
@@ -1195,5 +1262,88 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod standard_codepoint_tests {
+    use super::*;
+
+    /// The four values added 2026-09-07 must round-trip on the STANDARD
+    /// codepoints §11.12 assigns them, not on anything we invented.
+    ///
+    /// Each was a compatibility gap rather than a conformance one: the server
+    /// could already do the underlying operation, but a conformant client
+    /// sending the spec's algorithm value was refused. `XMSS` is the starkest
+    /// — the engine has supported it since before this crate existed, and the
+    /// protocol layer simply had no name for it.
+    #[test]
+    fn the_four_added_algorithms_use_their_standard_codepoints() {
+        for (algo, code, name) in [
+            (KmipAlgorithm::Ec, 0x0000_001a_u32, "EC"),
+            (KmipAlgorithm::Xmss, 0x0000_0032, "XMSS"),
+            (KmipAlgorithm::X25519, 0x0000_005a, "X25519"),
+            (KmipAlgorithm::X448, 0x0000_005b, "X448"),
+        ] {
+            assert_eq!(algo.to_wire_value(), code, "{name} must use its §11.12 codepoint");
+            assert_eq!(
+                KmipAlgorithm::from_wire_value(code),
+                Some(algo),
+                "{name} sent by a conformant client must be accepted, not refused"
+            );
+            assert_eq!(algo.spec_name(), name);
+        }
+    }
+
+    /// `X25519`/`X448` as ALGORITHM values reach the same Montgomery key
+    /// agreement the server already performs as `ECDH + RecommendedCurve`,
+    /// and `XMSS` reaches the engine mechanisms that were previously
+    /// unreachable over KMIP. A value that decodes but drives nothing would
+    /// be worse than refusing it.
+    #[test]
+    fn the_added_algorithms_actually_reach_an_engine_mechanism() {
+        assert!(KmipAlgorithm::Ec.to_pkcs11_mech(PkcsOp::KeyGen).is_some());
+        assert!(KmipAlgorithm::X25519.to_pkcs11_mech(PkcsOp::KeyGen).is_some());
+        assert!(KmipAlgorithm::X448.to_pkcs11_mech(PkcsOp::KeyGen).is_some());
+        assert!(KmipAlgorithm::Xmss.to_pkcs11_mech(PkcsOp::KeyGen).is_some());
+        assert!(KmipAlgorithm::Xmss.to_pkcs11_mech(PkcsOp::SignVerify).is_some());
+    }
+
+    /// DSA (§11.12 0x05) is accepted for STORAGE ONLY, so the Baseline
+    /// mandatory Register tests can pass. It must reach NO mechanism: this
+    /// server never performs discrete-log signature cryptography, and a
+    /// mapping appearing here would silently make it able to.
+    #[test]
+    fn dsa_is_storage_only_and_reaches_no_mechanism() {
+        assert_eq!(KmipAlgorithm::from_wire_value(0x0000_0005), Some(KmipAlgorithm::Dsa));
+        for op in [PkcsOp::KeyGen, PkcsOp::SignVerify, PkcsOp::Encrypt, PkcsOp::Decrypt] {
+            assert!(
+                KmipAlgorithm::Dsa.to_pkcs11_mech(op).is_none(),
+                "DSA must never reach an engine mechanism — storage only"
+            );
+        }
+    }
+
+    /// Every codepoint below the §11.12 Extensions range (`8XXXXXXX`) must be
+    /// one the spec actually assigns. Inventing a value in the standard range
+    /// puts a meaning on the wire that no other implementation shares.
+    ///
+    /// The one deliberate exception is Classic McEliece 6688128 on the generic
+    /// `McEliece` value (0x34): the spec names 6960119 and 8192128 but not
+    /// 6688128, and the crate compiles exactly one parameter set per build
+    /// (`classic-mceliece-rust` gates its key sizes on mutually exclusive
+    /// features), so full coverage needs an engine change. Tracked separately.
+    #[test]
+    fn no_invented_codepoints_in_the_standard_range() {
+        const EXTENSIONS: u32 = 0x8000_0000;
+        let expected_generic_mceliece = KmipAlgorithm::ClassicMcEliece6688128.to_wire_value();
+        assert_eq!(
+            expected_generic_mceliece, 0x0000_0034,
+            "if this moves off the generic McEliece value, update the note above"
+        );
+        assert!(
+            KmipAlgorithm::Hss.to_wire_value() >= EXTENSIONS,
+            "HSS/LMS has no §11.12 value, so it must sit in the Extensions range"
+        );
     }
 }

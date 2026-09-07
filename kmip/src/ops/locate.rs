@@ -190,14 +190,13 @@ struct LocateFilters {
     /// `(namespace, data)` pair. TL-M-3 step #0 finds a previously
     /// Created SymmetricKey by it.
     application_specific_information: Option<(String, String)>,
-    /// KMIP 3.0 §11 `Group Link` filter — UID reference. SASED-M-3
-    /// step #0 finds a previously Registered SecretData by it.
+    /// §7.24 `Group Link` (0x4201b3) filter — group membership. An object
+    /// matches when ANY of its group links equals this value, since §7.24
+    /// says Group Link "MAY be repeated". This is the capability behind
+    /// SASED-M-3 step #0's group-membership Locate; it replaced the
+    /// `Object Group` filter on 2026-09-07, when that attribute's codepoint
+    /// (0x420056) turned out to be **(Reserved)** in KMIP 3.0.
     group_link: Option<String>,
-    /// KMIP `Object Group` (0x420056) filter — group-membership label.
-    /// An object matches when ANY of its `object_groups` memberships
-    /// equals this value (Object Group is multi-instance). This is the
-    /// capability behind SASED-M-3 step #0's group-membership Locate.
-    object_group: Option<String>,
     /// WP-2 remediation — `Certificate Subject CN` filter (§4.6). Only
     /// meaningful against Certificate records.
     certificate_subject_cn: Option<String>,
@@ -241,8 +240,10 @@ struct LocateFilters {
     process_start_date: Vec<i64>,
     /// §4.20 Deactivation Date.
     deactivation_date: Vec<i64>,
-    /// §4.70 Vendor Attribute / custom attribute, matched by (name, value).
-    custom: Vec<(String, String)>,
+    /// §4.70 Vendor Attribute, matched by the (Vendor Identification,
+    /// Attribute Name) PAIR and value — keying by name alone would let one
+    /// vendor's filter match another vendor's attribute.
+    custom: Vec<(crate::kmip30::VendorAttributeKey, String)>,
     unique_identifier: Option<String>,
 }
 
@@ -287,27 +288,31 @@ impl LocateFilters {
                 _ => return false,
             }
         }
+        // §7.24 `Group Link` membership. "MAY be repeated", so the record
+        // matches when ANY of its group links equals the requested one
+        // (AND-combined with the other filters above). The single-slot
+        // `links["GroupLink"]` is also consulted, because objects written
+        // before the 2026-09-07 migration put their one group there.
         if let Some(want_gl) = &self.group_link {
-            match r.links.get("GroupLink") {
-                Some(have) if have == want_gl => {}
-                _ => return false,
-            }
-        }
-        // KMIP `Object Group` membership — multi-instance, so the
-        // record matches when ANY of its group labels equals the
-        // requested one (AND-combined with the other filters above).
-        if let Some(want_group) = &self.object_group {
-            if !r.object_groups.iter().any(|g| g == want_group) {
+            let member = r.group_links.iter().any(|g| g == want_gl)
+                || r.links.get("GroupLink").is_some_and(|have| have == want_gl);
+            if !member {
                 return false;
             }
         }
         // WP-2 remediation — Certificate-specific search dimensions, since
         // Certify/Register-created certs otherwise had no way to be found
         // by anything but UID.
+        // §4.6 permits multiple instances, so a certificate may carry more
+        // than one CN. An object matches when ANY of them equals the filter —
+        // the same "any membership" rule the object-group filter above uses.
         if let Some(want_cn) = &self.certificate_subject_cn {
-            match &r.certificate_subject_cn {
-                Some(have) if have == want_cn => {}
-                _ => return false,
+            let matched = r
+                .certificate_subject
+                .as_ref()
+                .is_some_and(|n| n.cn.iter().any(|have| have == want_cn));
+            if !matched {
+                return false;
             }
         }
         if let Some(want_issuer) = &self.x509_certificate_issuer {
@@ -365,8 +370,8 @@ impl LocateFilters {
         //
         // Every requested (name, value) pair must match — the same "all
         // filters narrow" rule §6.1.34 applies to the typed ones.
-        for (name, value) in &self.custom {
-            match r.custom_attributes.get(name) {
+        for (key, value) in &self.custom {
+            match r.custom_attributes.get(key) {
                 Some(crate::kmip30::CustomAttributeValue::Text(v)) if v == value => {}
                 _ => return false,
             }
@@ -401,7 +406,6 @@ fn build_filters(attrs: &[Attribute]) -> Result<LocateFilters> {
         name: None,
         application_specific_information: None,
         group_link: None,
-        object_group: None,
         certificate_subject_cn: None,
         x509_certificate_issuer: None,
         cryptographic_length: None,
@@ -434,9 +438,7 @@ fn build_filters(attrs: &[Attribute]) -> Result<LocateFilters> {
             Attribute::CryptographicLength(n) => f.cryptographic_length = Some(*n),
             Attribute::CryptographicUsageMask(m) => f.cryptographic_usage_mask = Some(*m),
             Attribute::UniqueIdentifier(uid) => f.unique_identifier = Some(uid.clone()),
-            Attribute::ObjectGroup(g) => {
-                f.object_group = Some(g.clone());
-            }
+
             Attribute::CertificateSubjectCN(cn) => {
                 f.certificate_subject_cn = Some(cn.clone());
             }
@@ -452,9 +454,12 @@ fn build_filters(attrs: &[Attribute]) -> Result<LocateFilters> {
             Attribute::DeactivationDate(t) => f.deactivation_date.push(*t),
             // G7 — vendor/custom attributes (§4.70). The corpus filters by
             // these in its Tape Library steps.
-            Attribute::Custom { name, value, .. } => {
+            Attribute::Custom { vendor, name, value } => {
                 if let crate::kmip30::CustomAttributeValue::Text(v) = value {
-                    f.custom.push((name.clone(), v.clone()));
+                    f.custom.push((
+                        crate::kmip30::VendorAttributeKey::new(vendor.as_deref(), name),
+                        v.clone(),
+                    ));
                 }
             }
             // G7 — refuse rather than silently widen the result set.
@@ -533,7 +538,7 @@ mod tests {
             algorithm: KmipAlgorithm::Aes,
             state: State::Active,
             initial_date: OffsetDateTime::UNIX_EPOCH,
-            object_groups: groups.iter().map(|s| s.to_string()).collect(),
+            group_links: groups.iter().map(|s| s.to_string()).collect(),
             ..ObjectRecord::default()
         }).unwrap();
     }
@@ -544,27 +549,27 @@ mod tests {
     /// capability behind SASED-M-3 / TL-M-3 (which stay SKIP under the
     /// hermetic replay harness's cross-transcript state wipe).
     #[test]
-    fn locate_filters_by_object_group() {
+    fn locate_filters_by_group_link() {
         let d = deps_with();
         put_groups(&d, "a", &["G1"]);
         put_groups(&d, "b", &["G1"]);
         put_groups(&d, "c", &["G2"]);
 
         let mut g1 = locate(&d, LocateRequest {
-            attributes: vec![Attribute::ObjectGroup("G1".into())],
+            attributes: vec![Attribute::GroupLink("G1".into())],
             ..Default::default()
         }, &AuthContext::open(), "cid").unwrap().uids;
         g1.sort();
         assert_eq!(g1, vec!["a", "b"]);
 
         let g2 = locate(&d, LocateRequest {
-            attributes: vec![Attribute::ObjectGroup("G2".into())],
+            attributes: vec![Attribute::GroupLink("G2".into())],
             ..Default::default()
         }, &AuthContext::open(), "cid").unwrap().uids;
         assert_eq!(g2, vec!["c"]);
 
         let none = locate(&d, LocateRequest {
-            attributes: vec![Attribute::ObjectGroup("nope".into())],
+            attributes: vec![Attribute::GroupLink("nope".into())],
             ..Default::default()
         }, &AuthContext::open(), "cid").unwrap().uids;
         assert!(none.is_empty());
@@ -578,7 +583,7 @@ mod tests {
         put_groups(&d, "multi", &["G1", "G2"]);
         for g in ["G1", "G2"] {
             let r = locate(&d, LocateRequest {
-                attributes: vec![Attribute::ObjectGroup(g.into())],
+                attributes: vec![Attribute::GroupLink(g.into())],
                 ..Default::default()
             }, &AuthContext::open(), "cid").unwrap();
             assert_eq!(r.uids, vec!["multi"], "should be found by group {g}");
@@ -588,7 +593,7 @@ mod tests {
     /// Object Group AND-combines with other filters: a G1 Locate that
     /// also pins ObjectType=SymmetricKey must skip a SecretData member.
     #[test]
-    fn locate_object_group_and_object_type() {
+    fn locate_group_link_and_object_type() {
         let d = deps_with();
         // "a" is SecretData in G1 (via put_groups); "b" is a SymmetricKey
         // in G1 we build by hand.
@@ -599,12 +604,12 @@ mod tests {
             algorithm: KmipAlgorithm::Aes,
             state: State::Active,
             initial_date: OffsetDateTime::UNIX_EPOCH,
-            object_groups: vec!["G1".into()],
+            group_links: vec!["G1".into()],
             ..ObjectRecord::default()
         }).unwrap();
         let r = locate(&d, LocateRequest {
             attributes: vec![
-                Attribute::ObjectGroup("G1".into()),
+                Attribute::GroupLink("G1".into()),
                 Attribute::ObjectType(ObjectType::SymmetricKey),
             ],
             ..Default::default()

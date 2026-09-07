@@ -84,7 +84,7 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
                 });
             }
             QueryFunction::QueryApplicationNamespaces => {
-                // KMIP 3.0 §6.1.39 — a Baseline server MAY surface
+                // KMIP 3.0 §6.1.47 — a Baseline server MAY surface
                 // supported application namespaces when asked.
                 // Profiles v3.0 §4.1.1 item 14 marks the value as
                 // variable AND optional; emitting an empty list keeps
@@ -94,16 +94,36 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
                 resp.application_namespaces = Some(Vec::new());
             }
             QueryFunction::QueryProfiles => {
-                // K3 — explicit empty list: the server does not (yet)
-                // formally claim any KMIP profile. Which profiles to
-                // claim (Baseline Server TTLV, …) is the K13 decision;
-                // until then an empty `Profile Information` list is
-                // the honest answer (nothing emitted on the wire).
-                resp.profile_information = Some(Vec::new());
+                // Baseline Server (`Profile Name` = 0x0000012b), and ONLY
+                // that one. Decided 2026-09-07; the list was deliberately
+                // empty until then because the server could not honestly
+                // claim it.
+                //
+                // Two things had to be true first, and both are now:
+                //   * §6.2 requires ALL Baseline mandatory test cases to
+                //     pass. BL-M-12-30 / BL-M-13-30 (Transparent DSA
+                //     Register) were refused by policy; DSA is now accepted
+                //     for storage, and the replay is 99 PASS / 0 FAIL / 3
+                //     SKIP — the three remaining skips are 3DES, which
+                //     belong to the Symmetric Key Foundry profile this
+                //     server does NOT claim.
+                //   * §6.2 also requires the §3.1 Basic Authentication
+                //     Suite. `basic` is now the DEFAULT TLS posture, so the
+                //     shipped configuration is the one the claim is measured
+                //     under — not a flag someone has to remember.
+                //
+                // Nothing else is advertised. The corpus passing for a
+                // profile is not evidence that its clause is met: each §5.x
+                // clause carries conditions beyond its test cases, and
+                // advertising on transcript evidence alone is exactly how
+                // this report's earlier overstatement happened.
+                resp.profile_information = Some(vec![crate::kmip30::ProfileInformation {
+                    profile_name: 0x0000_012b,
+                }]);
             }
             // ── G5 (2026-09-06) ──────────────────────────────────────
             //
-            // §6.1.39: "For each Query Function specified in the request, the
+            // §6.1.47: "For each Query Function specified in the request, the
             // corresponding items SHALL be returned in the response." These
             // nine could not previously be DECODED, so asking for any of them
             // failed the WHOLE message rather than that one function.
@@ -135,7 +155,7 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
                 resp.rng_parameters = Some(vec![0x01]);
             }
             QueryFunction::QueryValidations => {
-                // §6.1.39: "A server MAY elect to return no validation
+                // §6.1.47: "A server MAY elect to return no validation
                 // information." There is none to claim.
                 resp.validation_information = Some(Vec::new());
             }
@@ -404,8 +424,16 @@ mod tests {
         assert!(types.contains(&ObjectType::Group), "genuinely implemented — CreateGroup persists it");
     }
 
-    /// K3 — QueryCapabilities reports the honest capability set;
-    /// QueryProfiles returns an explicit empty list (K13 pending).
+    /// QueryCapabilities reports the honest capability set, and
+    /// QueryProfiles advertises **Baseline Server and nothing else**.
+    ///
+    /// The list was deliberately empty until 2026-09-07 because the server
+    /// could not honestly claim the profile: §6.2 requires all Baseline
+    /// mandatory test cases to pass (two were refused by policy) and the §3.1
+    /// Basic Authentication Suite (which was not the default TLS posture).
+    /// Both are now true. Anything ELSE appearing in this list is a
+    /// conformance claim nobody verified — which is what the assertion on
+    /// the exact contents is for.
     #[test]
     fn query_capabilities_and_profiles_are_honest() {
         let (_ring, d) = deps();
@@ -423,7 +451,12 @@ mod tests {
         assert!(!cap.attestation_capability, "no attestation");
         assert!(cap.batch_undo_capability, "§9.5 Undo is implemented");
         assert!(cap.batch_continue_capability, "§9.5 Continue is implemented");
-        assert_eq!(resp.profile_information, Some(vec![]), "explicit empty profile list");
+        assert_eq!(
+            resp.profile_information,
+            Some(vec![crate::kmip30::ProfileInformation { profile_name: 0x0000_012b }]),
+            "Baseline Server (0x12b) and nothing else — a second entry here would be \
+             a profile claim this server has not verified"
+        );
     }
 
     #[test]
@@ -447,7 +480,7 @@ mod tests {
     ///
     /// Nine of them could not previously be DECODED, so `query_function_from_code`
     /// returned None, the decoder raised `UnknownEnum`, and the WHOLE message
-    /// failed — not just the unsupported function. §6.1.39 says "For each
+    /// failed — not just the unsupported function. §6.1.47 says "For each
     /// Query Function specified in the request, the corresponding items SHALL
     /// be returned in the response".
     #[test]
@@ -482,7 +515,7 @@ mod tests {
         assert_eq!(exts[0].extension_tag, crate::kmip30::vendor_tags::PQCTODAY_SHARED_SECRET);
         assert!(
             (0x54_0000..=0x54_FFFF).contains(&exts[0].extension_tag),
-            "§11.57 reserves 0x540000-0x54FFFF for extensions",
+            "§11.58 reserves 0x540000-0x54FFFF for extensions",
         );
 
         // "None" is answered as an EMPTY list, not an omission — the

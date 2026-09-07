@@ -193,8 +193,24 @@ struct Cli {
     #[arg(long = "auth-user")]
     auth_user: Vec<String>,
 
-    /// TLS posture: `permissive` (default, historical behaviour), `basic`,
-    /// or `quantum-safe`.
+    /// Enable the §6.1.32 `Interop` operation (Begin / End / Reset).
+    ///
+    /// KMIP 3.0 §6.1.32: Interop "SHALL NOT be available in a production
+    /// server" — it exists so a conformance run can bracket and reset test
+    /// cases. Off by default; the OASIS replay harness passes this flag.
+    #[arg(long = "enable-interop", default_value_t = false)]
+    enable_interop: bool,
+
+    /// TLS posture: `basic` (**default since 2026-09-07**), `permissive`, or
+    /// `quantum-safe`.
+    ///
+    /// The default changed from `permissive` to `basic` so the posture this
+    /// server SHIPS with is the one its Baseline Server conformance claim is
+    /// measured under. `permissive` remains available and is a deliberate
+    /// choice to make, not the silent default: it offers TLS 1.2 and
+    /// `TLS13_AES_128_GCM_SHA256`, which §3.1.2 forbids, so a server running
+    /// it is NOT conformant however green the corpus replay looks. Existing
+    /// TLS 1.2 clients need `--tls-profile permissive` after this change.
     ///
     /// `basic` enforces KMIP 3.0 Profiles §3.1 "Basic Authentication Suite" —
     /// the suite the **Baseline Server** conformance clause (§6.2) requires:
@@ -224,7 +240,7 @@ struct Cli {
     /// posture without a rebuild: the sandbox runtime is distroless, so
     /// exec-form CMD cannot expand variables and there is no shell to do it
     /// in. Reading the env here keeps the escape hatch available.
-    #[arg(long = "tls-profile", default_value = "permissive",
+    #[arg(long = "tls-profile", default_value = "basic",
           env = "KMIP_TLS_PROFILE", value_parser = TlsProfile::parse)]
     tls_profile: TlsProfile,
 
@@ -565,6 +581,7 @@ async fn main() -> anyhow::Result<()> {
         // plan's KMIP-axis multi-tenant benchmark cells need (§P2/§P3).
         tenancy_mode,
         strict_tenants,
+        interop_enabled: cli.enable_interop,
     };
     let deps = Arc::new(
         Deps::new(engine, store, sink, config).with_engine_session(engine_session),

@@ -1,16 +1,16 @@
 {
-  "generated_at": 1788758014,
+  "generated_at": 1788792103,
   "summary": {
-    "pass": 97,
+    "pass": 99,
     "fail": 0,
     "error": 0,
     "skip_op": 0,
     "skip_parse": 0,
-    "skip_deprecated": 5,
+    "skip_deprecated": 3,
     "skip_precondition": 0,
     "skip_policy_variant": 0,
     "total": 102,
-    "candidates": 97
+    "candidates": 99
   },
   "tests": [
     {
@@ -111,15 +111,25 @@
     },
     {
       "name": "BL-M-12-30.xml",
-      "status": "SKIP_DEPRECATED",
-      "detail": "DSA \u2014 deprecated (NIST SP 800-186 \u00a75.4)",
-      "ops_used": []
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Get",
+        "GetAttributes",
+        "Interop",
+        "Register"
+      ]
     },
     {
       "name": "BL-M-13-30.xml",
-      "status": "SKIP_DEPRECATED",
-      "detail": "DSA \u2014 deprecated (NIST SP 800-186 \u00a75.4)",
-      "ops_used": []
+      "status": "PASS",
+      "detail": "",
+      "ops_used": [
+        "Get",
+        "GetAttributes",
+        "Interop",
+        "Register"
+      ]
     },
     {
       "name": "BL-M-14-30.xml",

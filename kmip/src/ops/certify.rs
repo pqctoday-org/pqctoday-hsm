@@ -899,10 +899,6 @@ fn dates_from_attributes(
 }
 
 /// Subject CN (best-effort) from a Name for the §11 CertificateSubjectCN.
-fn subject_cn(der: &[u8]) -> Option<String> {
-    super::der_x509::extract_subject_cn(der)
-}
-
 /// Build the X.509v3 extensions a self-signed **CA** certificate needs so
 /// independent verifiers (e.g. `openssl verify`) will accept it as a chain
 /// anchor for the certs it issues:
@@ -1053,6 +1049,10 @@ pub fn bootstrap_ca_certificate(
         signature: BitString::from_bytes(&sig).map_err(der_err)?,
     };
     let der = cert.to_der().map_err(der_err)?;
+    // §4.6 Table 62 lists Certify among "When implicitly set", so the
+    // Certificate Attributes are derived from the DER here exactly as Register
+    // derives them — one helper, so the two paths cannot drift.
+    let (cert_subject, cert_issuer) = super::der_x509::extract_certificate_names(&der);
 
     deps.store.put(ObjectRecord {
         uid: certificate_uid.to_string(),
@@ -1064,7 +1064,8 @@ pub fn bootstrap_ca_certificate(
         certificate_type: Some(0x01),
         certificate_value: Some(der.clone()),
         certificate_length: Some(der.len() as i32),
-        certificate_subject_cn: Some(subject_cn.to_string()),
+        certificate_subject: cert_subject,
+        certificate_issuer: cert_issuer,
         // Same CKA_ID as the CA key pair — see store_certificate's doc
         // comment on why (cert↔key matching, and Destroy lookup).
         pkcs11_cka_id: priv_rec.pkcs11_cka_id.clone(),
@@ -1367,6 +1368,7 @@ fn store_certificate(
     // certificate to its private key), else a fresh one so the engine
     // projection is still independently addressable and destroyable.
     let cka_id = linked_cka_id.unwrap_or_else(|| uuid::Uuid::new_v4().as_bytes().to_vec());
+    let (cert_subject, cert_issuer) = super::der_x509::extract_certificate_names(cert_der);
 
     deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: uid.clone(),
@@ -1389,7 +1391,8 @@ fn store_certificate(
         certificate_type: Some(0x01), // X.509
         certificate_value: Some(cert_der.to_vec()),
         certificate_length: Some(cert_der.len() as i32),
-        certificate_subject_cn: subject_cn(cert_der),
+        certificate_subject: cert_subject,
+        certificate_issuer: cert_issuer,
         // WP7-d (cert-ops plan) — was a direct `sha2::Sha256::digest`
         // call; the §11 Digest attribute is still a hash (a crypto
         // primitive per this crate's invariant), so it goes through

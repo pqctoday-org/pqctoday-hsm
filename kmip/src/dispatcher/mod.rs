@@ -97,6 +97,29 @@ pub fn dispatch_with_transport_identity(
     // (0x03)` — same per-item shape as the K4 async-indicator gate.
     // Open-auth mode (no users configured — the default, which the
     // hermetic replay harness relies on) skips enforcement entirely.
+    // KMIP 3.0 §9.7 — "The server SHOULD log this information." The Client
+    // Correlation Value is free-form text the client attaches to correlate its
+    // own records with ours; it need not be unique, and the server never
+    // invents one. Logged once per message, before authentication, because its
+    // whole purpose is letting a client find the record for a request that may
+    // well have FAILED. Distinct from the per-batch-item `correlation_id`
+    // below, which is our own audit UUID.
+    if let Some(ccv) = request.header.client_correlation_value.as_deref() {
+        deps.sink.emit(crate::auditlog::AuditEvent::at(
+            time::OffsetDateTime::now_utc(),
+            crate::auditlog::Plane::Kmip,
+            ccv,
+            crate::auditlog::EventPayload::KmipRequestReceived {
+                op: "RequestMessage".into(),
+                request_summary: format!(
+                    "client correlation value={ccv:?} batch_items={}",
+                    request.batch_items.len()
+                ),
+                client_cn: None,
+            },
+        ));
+    }
+
     let auth = match authenticate_request(deps, &request.header, transport_identity) {
         Ok(ctx) => ctx,
         Err(()) => {
@@ -2566,7 +2589,10 @@ mod tests {
                         uid: signer_a.clone(),
                         data: b"hello".to_vec(),
                         cryptographic_parameters: None,
-                    }),
+                        init_indicator: None,
+                        final_indicator: None,
+                        correlation_value: None,
+}),
                 },
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::GetAttributes,
@@ -2937,7 +2963,10 @@ rules:
                         uid: "urn:legacy".into(),
                         data: b"agility-lesson".to_vec(),
                         cryptographic_parameters: None,
-                    }),
+                        init_indicator: None,
+                        final_indicator: None,
+                        correlation_value: None,
+}),
                 },
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::Destroy,

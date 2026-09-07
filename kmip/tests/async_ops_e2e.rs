@@ -65,7 +65,10 @@ fn hash_payload(data: &[u8]) -> RequestPayload {
             ..CryptographicParameters::default()
         },
         data: data.to_vec(),
-    })
+        init_indicator: None,
+        final_indicator: None,
+        correlation_value: None,
+})
 }
 
 fn one_item(op: Operation, payload: RequestPayload, indicator: Option<AsynchronousIndicator>) -> RequestMessage {

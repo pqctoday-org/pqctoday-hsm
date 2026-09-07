@@ -624,7 +624,7 @@ impl PushEndpoint {
     }
 }
 
-/// Ask the peer what it speaks and what it can do (§6.1.21, §6.1.39, issued by
+/// Ask the peer what it speaks and what it can do (§6.1.21, §6.1.47, issued by
 /// the server — two of item 10's five operations).
 ///
 /// Both questions tolerate silence. A peer that treats our request as an opaque
@@ -656,7 +656,7 @@ where
         return endpoint;
     }
 
-    // §6.1.39 — only the operation list bears on what we may push.
+    // §6.1.47 — only the operation list bears on what we may push.
     let ask = crate::kmip30::wire::encode_query_message(
         &[crate::kmip30::QueryFunction::QueryOperations],
         now,

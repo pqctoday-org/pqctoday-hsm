@@ -136,13 +136,13 @@ pub(crate) mod tags {
     pub const RevocationReasonCode: u32   = 0x42_0082;
     pub const ServerInformation: u32      = 0x42_0088;
     pub const ServerVersion: u32          = 0x42_012f;
-    /// KMIP 3.0 §6.1.39 — `Application Namespace` TextString (zero or
+    /// KMIP 3.0 §6.1.47 — `Application Namespace` TextString (zero or
     /// more) returned for `QueryFunction::QueryApplicationNamespaces`.
     pub const ApplicationNamespace: u32   = 0x42_0003;
     // ── K3 — Query Profiles / Capabilities reporting (§6.1.47) ─────────
     // Codepoints verified from `kmip-spec-3.0-tags-enums.json`.
     pub const ProfileInformation: u32     = 0x42_00eb;
-    /// §6.1.39 Extension Information (G5).
+    /// §7.14 Extension Information (G5).
     pub const ExtensionInformation: u32 = 0x42_00a4;
     pub const ExtensionName: u32 = 0x42_00a5;
     pub const ExtensionTag: u32 = 0x42_00a6;
@@ -163,9 +163,11 @@ pub(crate) mod tags {
     /// ResponseHeader. Codepoint verified from
     /// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`.
     pub const ServerCorrelationValue: u32 = 0x42_0106;
-    // `Client Correlation Value` (0x42_0105, request side only)
-    // intentionally absent — the decoder skips it; see curated-table
-    // note above.
+    /// KMIP 3.0 §9.7 — `Client Correlation Value`, a text string a client
+    /// MAY add to a request "to provide additional information to the
+    /// server. It need not be unique. The server SHOULD log this
+    /// information." Decoded and logged since R6; previously skipped.
+    pub const ClientCorrelationValue: u32 = 0x42_0105;
     pub const SignatureData: u32          = 0x42_00c3;
     pub const State: u32                  = 0x42_008d;
     pub const TimeStamp: u32              = 0x42_0092;
@@ -304,7 +306,11 @@ pub(crate) mod tags {
     /// membership as `Group Link` and NEVER emits 0x420056; it still ACCEPTS
     /// 0x420056 on input as 2.x compatibility (normalised to the same internal
     /// membership set). Encodes as a TextString.
-    pub const ObjectGroup: u32            = 0x42_0056;
+    // `Object Group` (0x420056) is RETIRED. The §11.58 Tag Enumeration table
+    // in CSD02 lists 0x420056 as **(Reserved)**; KMIP 3.0 expresses group
+    // membership through the §7.24 `Object Groups` structure of repeated
+    // `Group Link` (0x4201b3) values instead. Emitting it meant putting a
+    // reserved codepoint on the wire.
     // K20 — Derive Key (§6.1.19 / §7.13). All six codepoints verified
     // against `kmip-spec-3.0-tags-enums.json`.
     /// `Derivation Method` Enumeration (§11.15).
@@ -454,7 +460,7 @@ pub(crate) mod tags {
     pub const Pkcs11OutputParameters: u32 = 0x42_015c;
     pub const Pkcs11ReturnCode: u32       = 0x42_015d;
     pub const CorrelationValue: u32       = 0x42_00d6;
-    // KMIP 3.0 §6.1.21 multi-part streaming (verified from
+    // KMIP 3.0 §6.1.23 multi-part streaming (verified from
     // kmip-spec-3.0-tags-enums.json: Init Indicator = 0x4200d7,
     // Final Indicator = 0x4200d8).
     pub const InitIndicator: u32          = 0x42_00d7;
@@ -518,6 +524,33 @@ pub(crate) mod tags {
     pub const CertificateValue: u32              = 0x42_001e;
     /// KMIP 3.0 §11 — Certificate Subject CN extracted from the DER.
     pub const CertificateSubjectCN: u32          = 0x42_0108;
+    // §4.6 Certificate Attributes — the other 25 (13 Subject + 13 Issuer,
+    // minus Subject CN above). Codepoints from kmip-spec-3.0-tags-enums.json.
+    pub const CertificateSubjectO: u32        = 0x42_0109;
+    pub const CertificateSubjectOU: u32       = 0x42_010A;
+    pub const CertificateSubjectEmail: u32    = 0x42_010B;
+    pub const CertificateSubjectC: u32        = 0x42_010C;
+    pub const CertificateSubjectST: u32       = 0x42_010D;
+    pub const CertificateSubjectL: u32        = 0x42_010E;
+    pub const CertificateSubjectUID: u32      = 0x42_010F;
+    pub const CertificateSubjectSerialNumber: u32 = 0x42_0110;
+    pub const CertificateSubjectTitle: u32    = 0x42_0111;
+    pub const CertificateSubjectDC: u32       = 0x42_0112;
+    pub const CertificateSubjectDNQualifier: u32 = 0x42_0113;
+    pub const CertificateSubjectDN: u32       = 0x42_01BA;
+    pub const CertificateIssuerCN: u32        = 0x42_0114;
+    pub const CertificateIssuerO: u32         = 0x42_0115;
+    pub const CertificateIssuerOU: u32        = 0x42_0116;
+    pub const CertificateIssuerEmail: u32     = 0x42_0117;
+    pub const CertificateIssuerC: u32         = 0x42_0118;
+    pub const CertificateIssuerST: u32        = 0x42_0119;
+    pub const CertificateIssuerL: u32         = 0x42_011A;
+    pub const CertificateIssuerUID: u32       = 0x42_011B;
+    pub const CertificateIssuerSerialNumber: u32 = 0x42_011C;
+    pub const CertificateIssuerTitle: u32     = 0x42_011D;
+    pub const CertificateIssuerDC: u32        = 0x42_011E;
+    pub const CertificateIssuerDNQualifier: u32 = 0x42_011F;
+    pub const CertificateIssuerDN: u32        = 0x42_01BB;
     /// P2.3 — §6.1.6 Certify / §6.1.52 Re-certify `Certificate Request`
     /// ByteString: the inline CSR (PKCS#10 / PEM / CRMF) bytes. The
     /// §6.1.6 payload table names the item "Certificate Request Value",
@@ -666,6 +699,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
     let mut max_resp_size: Option<i32> = None;
     let mut async_indicator: Option<crate::kmip30::AsynchronousIndicator> = None;
     let mut authentication: Vec<crate::kmip30::Credential> = Vec::new();
+    let mut client_correlation_value: Option<String> = None;
     for child in children {
         match child.tag.0 {
             tags::ProtocolVersion => {
@@ -681,6 +715,15 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
             tags::TimeStamp => {
                 if let Value::DateTime(ts) = child.value {
                     time_stamp = time::OffsetDateTime::from_unix_timestamp(ts).ok();
+                }
+            }
+            // §9.7 — the server SHOULD log this. Carried on the header so the
+            // dispatcher can put it in the audit record; never echoed back on
+            // a client-to-server response (§9.7 gives it to the RESPONSE only
+            // for server-to-client operations, which are encoded elsewhere).
+            tags::ClientCorrelationValue => {
+                if let Value::TextString(v) = &child.value {
+                    client_correlation_value = Some(v.clone());
                 }
             }
             // KMIP 3.0 §9.5 — `Batch Error Continuation Option`
@@ -735,6 +778,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
         maximum_response_size: max_resp_size,
         asynchronous_indicator: async_indicator,
         authentication,
+        client_correlation_value,
     })
 }
 
@@ -1204,6 +1248,7 @@ fn interop_function_code(f: InteropFunction) -> u32 {
     match f {
         InteropFunction::Begin => 0x01,
         InteropFunction::End => 0x02,
+        InteropFunction::Reset => 0x03,
     }
 }
 
@@ -1928,7 +1973,7 @@ fn encode_query_resp(r: &QueryResponse) -> Vec<TtlvFrame> {
         }
     }
     // VendorIdentification is a top-level child of the Query response
-    // payload per KMIP 3.0 §6.1.39, not nested inside ServerInformation.
+    // payload per KMIP 3.0 §6.1.47, not nested inside ServerInformation.
     if let Some(vendor) = &r.vendor_identification {
         out.push(TtlvFrame::new(
             Tag(tags::VendorIdentification),
@@ -2438,7 +2483,7 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
-            // KMIP 3.0 §6.1.21 multi-part streaming fields.
+            // KMIP 3.0 §6.1.23 multi-part streaming fields.
             tags::InitIndicator => {
                 if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
             }
@@ -2479,13 +2524,13 @@ fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.ciphertext.clone())),
     ];
     if let Some(iv) = &r.iv_counter_nonce {
-        // KMIP 3.0 §6.1.21 — server-generated IV/Counter/Nonce when
+        // KMIP 3.0 §6.1.23 — server-generated IV/Counter/Nonce when
         // the key's `RandomIV` is true. CS-BC-M-13 expects the server
         // to emit this field with the IV it used.
         out.push(TtlvFrame::new(Tag(tags::IvCounterNonce), Value::ByteString(iv.clone())));
     }
     if let Some(cv) = &r.correlation_value {
-        // §6.1.21 — handle for the client to chain the next stream part.
+        // §6.1.23 — handle for the client to chain the next stream part.
         out.push(TtlvFrame::new(
             Tag(tags::CorrelationValue),
             Value::ByteString(cv.clone()),
@@ -2499,7 +2544,7 @@ fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
     }
     if let Some(ss) = &r.shared_secret {
         // K10 — ML-KEM encapsulation shared secret rides the
-        // `PQCToday-SharedSecret` vendor-extension tag (0x540001, §11.57
+        // `PQCToday-SharedSecret` vendor-extension tag (0x540001, §11.58
         // Extensions range 0x540000–0x54FFFF). It previously abused the
         // standard IvCounterNonce tag, which is wire-ambiguous with
         // classical RandomIV responses (compliance-audit B-7).
@@ -2531,7 +2576,7 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
             tags::AuthenticatedEncryptionTag => {
                 if let Value::ByteString(b) = &c.value { tag = Some(b.clone()); }
             }
-            // §6.1.21 multi-part (G6) — these three were dropped here, so a
+            // §6.1.16 multi-part (G6) — these three were dropped here, so a
             // streaming Decrypt was silently treated as a single-shot one.
             tags::InitIndicator => {
                 if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
@@ -2552,7 +2597,7 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
         }
     }
     // For AEAD decrypt, the shim expects ciphertext||tag concatenated.
-    // KMIP keeps them as separate fields per §6.1.21; recombine on
+    // KMIP keeps them as separate fields per §6.1.23; recombine on
     // ingress so the shim sees what `aes-gcm` expects.
     if let Some(t) = tag {
         data.extend_from_slice(&t);
@@ -2646,16 +2691,29 @@ fn decode_sign_req(children: &[TtlvFrame]) -> Result<SignRequest, WireError> {
     let uid = required_uid(children)?;
     let mut data = Vec::new();
     let mut cp: Option<CryptographicParameters> = None;
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
+            // §6.1.62 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(SignRequest { uid, data, cryptographic_parameters: cp })
+    Ok(SignRequest { uid, data, cryptographic_parameters: cp, init_indicator, final_indicator, correlation_value })
 }
 
 fn encode_sign_resp(r: &SignResponse) -> Vec<TtlvFrame> {
@@ -2670,6 +2728,9 @@ fn decode_sigverify_req(children: &[TtlvFrame]) -> Result<SignatureVerifyRequest
     let mut data = Vec::new();
     let mut signature = Vec::new();
     let mut cp: Option<CryptographicParameters> = None;
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
@@ -2677,10 +2738,20 @@ fn decode_sigverify_req(children: &[TtlvFrame]) -> Result<SignatureVerifyRequest
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
+            // §6.1.63 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(SignatureVerifyRequest { uid, data, signature, cryptographic_parameters: cp })
+    Ok(SignatureVerifyRequest { uid, data, signature, cryptographic_parameters: cp, init_indicator, final_indicator, correlation_value })
 }
 
 fn encode_sigverify_resp(r: &SignatureVerifyResponse) -> Vec<TtlvFrame> {
@@ -3202,11 +3273,6 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         // KMIP `Object Group` (0x420056) — multi-instance membership
         // label, TextString on the wire. Each instance decodes to its
         // own Attribute; a record may carry several.
-        tags::ObjectGroup => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::ObjectGroup(s.clone())
-            } else { return Ok(None); }
-        }
         // K20 — Derive Key link pair (§4.35.5 / §6.1.19).
         tags::DerivationObjectLink => {
             if let Some(s) = link_target(&frame.value) {
@@ -3262,6 +3328,292 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                     tag: frame.tag.0,
                     name: "Certificate Value",
                     msg: "expected ByteString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectO => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectO(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject O",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectOU => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectOU(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject OU",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectEmail => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectEmail(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject Email",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject C",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectST => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectST(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject ST",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectL => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectL(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject L",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectUID => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectUID(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject UID",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectSerialNumber => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectSerialNumber(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject Serial Number",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectTitle => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectTitle(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject Title",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectDC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectDC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject DC",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectDNQualifier => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectDNQualifier(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject DN Qualifier",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectDN => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectDN(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject DN",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerCN => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerCN(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer CN",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerO => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerO(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer O",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerOU => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerOU(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer OU",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerEmail => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerEmail(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer Email",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer C",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerST => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerST(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer ST",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerL => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerL(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer L",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerUID => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerUID(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer UID",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerSerialNumber => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerSerialNumber(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer Serial Number",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerTitle => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerTitle(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer Title",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerDC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerDC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer DC",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerDNQualifier => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerDNQualifier(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer DN Qualifier",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerDN => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerDN(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer DN",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CredentialType => {
+            if let Value::Enumeration(v) = &frame.value {
+                Attribute::CredentialType(*v)
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Credential Type",
+                    msg: "expected Enumeration".into(),
                 });
             }
         }
@@ -3634,16 +3986,29 @@ fn decode_mac_req(children: &[TtlvFrame]) -> Result<MacRequest, WireError> {
     let uid = required_uid(children)?;
     let mut cp = None;
     let mut data = Vec::new();
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::CryptographicParameters => cp = Some(decode_cryptographic_parameters(c)?),
             tags::Data => {
                 if let Value::ByteString(b) = &c.value { data = b.clone(); }
             }
+            // §6.1.38 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(MacRequest { uid, cryptographic_parameters: cp, data })
+    Ok(MacRequest { uid, cryptographic_parameters: cp, data, init_indicator, final_indicator, correlation_value })
 }
 
 fn decode_mac_verify_req(children: &[TtlvFrame]) -> Result<MacVerifyRequest, WireError> {
@@ -3651,6 +4016,9 @@ fn decode_mac_verify_req(children: &[TtlvFrame]) -> Result<MacVerifyRequest, Wir
     let mut cp = None;
     let mut data = Vec::new();
     let mut mac_data = Vec::new();
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::CryptographicParameters => cp = Some(decode_cryptographic_parameters(c)?),
@@ -3660,25 +4028,48 @@ fn decode_mac_verify_req(children: &[TtlvFrame]) -> Result<MacVerifyRequest, Wir
             tags::MacData => {
                 if let Value::ByteString(b) = &c.value { mac_data = b.clone(); }
             }
+            // §6.1.39 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(MacVerifyRequest { uid, cryptographic_parameters: cp, data, mac_data })
+    Ok(MacVerifyRequest { uid, cryptographic_parameters: cp, data, mac_data, init_indicator, final_indicator, correlation_value })
 }
 
 fn decode_hash_req(children: &[TtlvFrame]) -> Result<HashRequest, WireError> {
     let mut cp = CryptographicParameters::default();
     let mut data = Vec::new();
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::CryptographicParameters => cp = decode_cryptographic_parameters(c)?,
             tags::Data => {
                 if let Value::ByteString(b) = &c.value { data = b.clone(); }
             }
+            // §6.1.30 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(HashRequest { cryptographic_parameters: cp, data })
+    Ok(HashRequest { cryptographic_parameters: cp, data, init_indicator, final_indicator, correlation_value })
 }
 
 fn encode_mac_resp(r: &MacResponse) -> Vec<TtlvFrame> {
@@ -5196,7 +5587,7 @@ fn encode_get_attributes_resp(r: &GetAttributesResponse) -> Vec<TtlvFrame> {
         Tag(tags::UniqueIdentifier),
         Value::Identifier(r.uid.clone()),
     )];
-    // KMIP 3.0 §6.1.21 — GetAttributes response wraps the returned
+    // KMIP 3.0 §6.1.26 — GetAttributes response wraps the returned
     // attributes in a single `Attributes` Structure whose children are
     // the typed-tag attribute values.
     let attrs = TtlvFrame::new(
@@ -5418,7 +5809,6 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::NextLink(s)                 => TtlvFrame::new(Tag(tags::NextLink),                 Value::Reference(s.clone())),
         Attribute::PreviousLink(s)             => TtlvFrame::new(Tag(tags::PreviousLink),             Value::Reference(s.clone())),
         Attribute::GroupLink(s)                => TtlvFrame::new(Tag(tags::GroupLink),                Value::NameReference(s.clone())),
-        Attribute::ObjectGroup(s)              => TtlvFrame::new(Tag(tags::ObjectGroup),              Value::TextString(s.clone())),
         Attribute::DerivationBaseObjectLink(s) => TtlvFrame::new(Tag(tags::DerivationObjectLink),     Value::Reference(s.clone())),
         Attribute::DerivedObjectLink(s)        => TtlvFrame::new(Tag(tags::DerivedObjectLink),        Value::Reference(s.clone())),
         Attribute::ReplacedObjectLink(s)       => TtlvFrame::new(Tag(tags::ReplacedObjectLink),       Value::Reference(s.clone())),
@@ -5441,6 +5831,32 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             ]))
         }
         Attribute::CertificateSubjectCN(s)     => TtlvFrame::new(Tag(tags::CertificateSubjectCN),     Value::TextString(s.clone())),
+        Attribute::CredentialType(v) => TtlvFrame::new(Tag(tags::CredentialType), Value::Enumeration(*v)),
+        Attribute::CertificateSubjectO(s) => TtlvFrame::new(Tag(tags::CertificateSubjectO), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectOU(s) => TtlvFrame::new(Tag(tags::CertificateSubjectOU), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectEmail(s) => TtlvFrame::new(Tag(tags::CertificateSubjectEmail), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectC(s) => TtlvFrame::new(Tag(tags::CertificateSubjectC), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectST(s) => TtlvFrame::new(Tag(tags::CertificateSubjectST), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectL(s) => TtlvFrame::new(Tag(tags::CertificateSubjectL), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectUID(s) => TtlvFrame::new(Tag(tags::CertificateSubjectUID), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectSerialNumber(s) => TtlvFrame::new(Tag(tags::CertificateSubjectSerialNumber), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectTitle(s) => TtlvFrame::new(Tag(tags::CertificateSubjectTitle), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectDC(s) => TtlvFrame::new(Tag(tags::CertificateSubjectDC), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectDNQualifier(s) => TtlvFrame::new(Tag(tags::CertificateSubjectDNQualifier), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectDN(s) => TtlvFrame::new(Tag(tags::CertificateSubjectDN), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerCN(s) => TtlvFrame::new(Tag(tags::CertificateIssuerCN), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerO(s) => TtlvFrame::new(Tag(tags::CertificateIssuerO), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerOU(s) => TtlvFrame::new(Tag(tags::CertificateIssuerOU), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerEmail(s) => TtlvFrame::new(Tag(tags::CertificateIssuerEmail), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerC(s) => TtlvFrame::new(Tag(tags::CertificateIssuerC), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerST(s) => TtlvFrame::new(Tag(tags::CertificateIssuerST), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerL(s) => TtlvFrame::new(Tag(tags::CertificateIssuerL), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerUID(s) => TtlvFrame::new(Tag(tags::CertificateIssuerUID), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerSerialNumber(s) => TtlvFrame::new(Tag(tags::CertificateIssuerSerialNumber), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerTitle(s) => TtlvFrame::new(Tag(tags::CertificateIssuerTitle), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerDC(s) => TtlvFrame::new(Tag(tags::CertificateIssuerDC), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerDNQualifier(s) => TtlvFrame::new(Tag(tags::CertificateIssuerDNQualifier), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerDN(s) => TtlvFrame::new(Tag(tags::CertificateIssuerDN), Value::TextString(s.clone())),
         Attribute::DigitalSignatureAlgorithm(v) => TtlvFrame::new(Tag(tags::DigitalSignatureAlgorithm), Value::Enumeration(*v)),
         Attribute::NistKeyType(v)              => TtlvFrame::new(Tag(tags::NistKeyType),              Value::Enumeration(*v)),
         Attribute::ProtectionLevel(v)          => TtlvFrame::new(Tag(tags::ProtectionLevel),          Value::Enumeration(*v)),
@@ -5561,6 +5977,32 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "CertificateLength"      => tags::CertificateLength,
         "CertificateValue"       => tags::CertificateValue,
         "CertificateSubjectCN"   => tags::CertificateSubjectCN,
+        "CredentialType"         => tags::CredentialType,
+        "CertificateSubjectO" => tags::CertificateSubjectO,
+        "CertificateSubjectOU" => tags::CertificateSubjectOU,
+        "CertificateSubjectEmail" => tags::CertificateSubjectEmail,
+        "CertificateSubjectC" => tags::CertificateSubjectC,
+        "CertificateSubjectST" => tags::CertificateSubjectST,
+        "CertificateSubjectL" => tags::CertificateSubjectL,
+        "CertificateSubjectUID" => tags::CertificateSubjectUID,
+        "CertificateSubjectSerialNumber" => tags::CertificateSubjectSerialNumber,
+        "CertificateSubjectTitle" => tags::CertificateSubjectTitle,
+        "CertificateSubjectDC" => tags::CertificateSubjectDC,
+        "CertificateSubjectDNQualifier" => tags::CertificateSubjectDNQualifier,
+        "CertificateSubjectDN" => tags::CertificateSubjectDN,
+        "CertificateIssuerCN" => tags::CertificateIssuerCN,
+        "CertificateIssuerO" => tags::CertificateIssuerO,
+        "CertificateIssuerOU" => tags::CertificateIssuerOU,
+        "CertificateIssuerEmail" => tags::CertificateIssuerEmail,
+        "CertificateIssuerC" => tags::CertificateIssuerC,
+        "CertificateIssuerST" => tags::CertificateIssuerST,
+        "CertificateIssuerL" => tags::CertificateIssuerL,
+        "CertificateIssuerUID" => tags::CertificateIssuerUID,
+        "CertificateIssuerSerialNumber" => tags::CertificateIssuerSerialNumber,
+        "CertificateIssuerTitle" => tags::CertificateIssuerTitle,
+        "CertificateIssuerDC" => tags::CertificateIssuerDC,
+        "CertificateIssuerDNQualifier" => tags::CertificateIssuerDNQualifier,
+        "CertificateIssuerDN" => tags::CertificateIssuerDN,
         "DigitalSignatureAlgorithm" => tags::DigitalSignatureAlgorithm,
         "NistKeyType"            => tags::NistKeyType,
         "ProtectionLevel"        => tags::ProtectionLevel,
@@ -5595,7 +6037,6 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "SplitKeyBaseLink" => tags::SplitKeyBaseLink,
         "JoinedSplitKeyPartsLink" => tags::JoinedSplitKeyPartsLink,
         "CertificateRequestLink" => tags::CertificateRequestLink,
-        "ObjectGroup"            => tags::ObjectGroup,
         "DerivationBaseObjectLink" => tags::DerivationObjectLink,
         "DerivedObjectLink"      => tags::DerivedObjectLink,
         "ReplacedObjectLink"     => tags::ReplacedObjectLink,
@@ -5662,6 +6103,32 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::CertificateLength      => "Certificate Length",
         tags::CertificateValue       => "Certificate Value",
         tags::CertificateSubjectCN   => "Certificate Subject CN",
+        tags::CredentialType         => "Credential Type",
+        tags::CertificateSubjectO => "Certificate Subject O",
+        tags::CertificateSubjectOU => "Certificate Subject OU",
+        tags::CertificateSubjectEmail => "Certificate Subject Email",
+        tags::CertificateSubjectC => "Certificate Subject C",
+        tags::CertificateSubjectST => "Certificate Subject ST",
+        tags::CertificateSubjectL => "Certificate Subject L",
+        tags::CertificateSubjectUID => "Certificate Subject UID",
+        tags::CertificateSubjectSerialNumber => "Certificate Subject Serial Number",
+        tags::CertificateSubjectTitle => "Certificate Subject Title",
+        tags::CertificateSubjectDC => "Certificate Subject DC",
+        tags::CertificateSubjectDNQualifier => "Certificate Subject DN Qualifier",
+        tags::CertificateSubjectDN => "Certificate Subject DN",
+        tags::CertificateIssuerCN => "Certificate Issuer CN",
+        tags::CertificateIssuerO => "Certificate Issuer O",
+        tags::CertificateIssuerOU => "Certificate Issuer OU",
+        tags::CertificateIssuerEmail => "Certificate Issuer Email",
+        tags::CertificateIssuerC => "Certificate Issuer C",
+        tags::CertificateIssuerST => "Certificate Issuer ST",
+        tags::CertificateIssuerL => "Certificate Issuer L",
+        tags::CertificateIssuerUID => "Certificate Issuer UID",
+        tags::CertificateIssuerSerialNumber => "Certificate Issuer Serial Number",
+        tags::CertificateIssuerTitle => "Certificate Issuer Title",
+        tags::CertificateIssuerDC => "Certificate Issuer DC",
+        tags::CertificateIssuerDNQualifier => "Certificate Issuer DN Qualifier",
+        tags::CertificateIssuerDN => "Certificate Issuer DN",
         tags::DigitalSignatureAlgorithm => "Digital Signature Algorithm",
         tags::NistKeyType            => "NIST Key Type",
         tags::ProtectionLevel        => "Protection Level",
@@ -5700,7 +6167,6 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::SplitKeyBaseLink => "Split Key Base Link",
         tags::JoinedSplitKeyPartsLink => "Joined Split Key Parts Link",
         tags::CertificateRequestLink => "Certificate Request Link",
-        tags::ObjectGroup            => "Object Group",
         tags::DerivationObjectLink   => "Derivation Object Link",
         tags::DerivedObjectLink      => "Derived Object Link",
         tags::ReplacedObjectLink     => "Replaced Object Link",
@@ -6041,7 +6507,7 @@ pub fn encode_discover_versions_message(versions: &[(i32, i32)], time_stamp: i64
     )
 }
 
-/// Encode a server-issued `Query` (§6.1.39) — the server asking the client what
+/// Encode a server-issued `Query` (§6.1.47) — the server asking the client what
 /// it can do.
 pub fn encode_query_message(functions: &[QueryFunction], time_stamp: i64) -> Vec<u8> {
     let children: Vec<TtlvFrame> = functions
@@ -6461,16 +6927,6 @@ mod tests {
 
     /// P2.1 — `Object Group` (0x420056) attribute round-trips through
     /// the TTLV codec: TextString encode → decode yields the same
-    /// `Attribute::ObjectGroup`, under the verified tag.
-    #[test]
-    fn object_group_attribute_wire_round_trips() {
-        let attr = Attribute::ObjectGroup("SASED-M-2-30-group".into());
-        let frame = encode_attribute_v3(&attr);
-        assert_eq!(frame.tag.0, tags::ObjectGroup);
-        assert_eq!(tags::ObjectGroup, 0x42_0056, "verified KMIP Object Group tag");
-        let decoded = decode_attribute_v3(&frame).unwrap();
-        assert_eq!(decoded, Some(attr));
-    }
 
     /// KMIP 3.0 §4.16 — Cryptographic Domain Parameters is a Structure at
     /// `0x420029` carrying `Recommended Curve` (Enumeration, `0x420075`) and
@@ -7919,19 +8375,24 @@ mod tests {
     /// `CertificateLink` nobody could read back, and why a client could set an
     /// attribute and never learn it had not been stored.
     ///
-    /// `Certificate Subject O` (0x420109) is a real §4.6 attribute this server
-    /// does not model — exactly the shape of input that used to vanish.
+    /// `Media Identifier` (0x4200aa) is a real spec attribute this server does
+    /// not model — exactly the shape of input that used to vanish. It was
+    /// `Certificate Subject O` until the §4.6 Certificate Attributes landed
+    /// and made that one modelled; if `Media Identifier` is ever implemented
+    /// too, repoint this at any other tag the spec defines and `tags` does
+    /// not. The subject of the test is the fail-closed BEHAVIOUR, not this
+    /// particular attribute.
     #[test]
     fn unmodelled_attribute_in_a_request_is_refused_not_dropped() {
         let attrs = TtlvFrame::new(
             Tag(tags::Attributes),
             Value::Structure(vec![
                 TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(256)),
-                TtlvFrame::new(Tag(0x42_0109), Value::TextString("Acme Corp".into())),
+                TtlvFrame::new(Tag(0x42_00aa), Value::TextString("LTO-9-000123".into())),
             ]),
         );
         match decode_attributes_block(&attrs) {
-            Err(WireError::UnsupportedAttribute { tag }) => assert_eq!(tag, 0x42_0109),
+            Err(WireError::UnsupportedAttribute { tag }) => assert_eq!(tag, 0x42_00aa),
             other => panic!("expected UnsupportedAttribute, got {other:?}"),
         }
 

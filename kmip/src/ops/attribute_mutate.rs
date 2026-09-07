@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use time::OffsetDateTime;
 
 use crate::error::{KmipError, Result, ResultReason};
+use crate::kmip30::VendorAttributeKey;
 use crate::kmip30::{
     AddAttributeRequest, AddAttributeResponse,
     AdjustAttributeRequest, AdjustAttributeResponse, AdjustmentType,
@@ -581,7 +582,35 @@ fn attribute_is_read_only(a: &Attribute) -> bool {
         // server-extracted from the Certificate Value DER bytes at
         // Register time. BL-M-10 step #4 pins `CertificateLength`.
         Attribute::CertificateLength(_) |
+        // §4.14 Table 86 — "Initially set by: Server", "Modifiable by
+        // client: No", "Deletable by client: No".
+        Attribute::CredentialType(_) |
         Attribute::CertificateSubjectCN(_) |
+        Attribute::CertificateSubjectO(_) |
+        Attribute::CertificateSubjectOU(_) |
+        Attribute::CertificateSubjectEmail(_) |
+        Attribute::CertificateSubjectC(_) |
+        Attribute::CertificateSubjectST(_) |
+        Attribute::CertificateSubjectL(_) |
+        Attribute::CertificateSubjectUID(_) |
+        Attribute::CertificateSubjectSerialNumber(_) |
+        Attribute::CertificateSubjectTitle(_) |
+        Attribute::CertificateSubjectDC(_) |
+        Attribute::CertificateSubjectDNQualifier(_) |
+        Attribute::CertificateSubjectDN(_) |
+        Attribute::CertificateIssuerCN(_) |
+        Attribute::CertificateIssuerO(_) |
+        Attribute::CertificateIssuerOU(_) |
+        Attribute::CertificateIssuerEmail(_) |
+        Attribute::CertificateIssuerC(_) |
+        Attribute::CertificateIssuerST(_) |
+        Attribute::CertificateIssuerL(_) |
+        Attribute::CertificateIssuerUID(_) |
+        Attribute::CertificateIssuerSerialNumber(_) |
+        Attribute::CertificateIssuerTitle(_) |
+        Attribute::CertificateIssuerDC(_) |
+        Attribute::CertificateIssuerDNQualifier(_) |
+        Attribute::CertificateIssuerDN(_) |
         Attribute::X509CertificateSubject(_) |
         Attribute::X509CertificateIssuer(_) |
         Attribute::X509CertificateIdentifier(_) |
@@ -642,7 +671,9 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         Attribute::ObjectType(_)             => true,
         Attribute::State(_)                  => true,
         Attribute::UniqueIdentifier(_)       => true,
-        Attribute::Custom { name, .. }       => obj.custom_attributes.contains_key(name),
+        Attribute::Custom { vendor, name, .. } => obj
+            .custom_attributes
+            .contains_key(&VendorAttributeKey::new(vendor.as_deref(), name)),
         Attribute::NextLink(_)               => obj.links.contains_key("NextLink"),
         Attribute::PreviousLink(_)           => obj.links.contains_key("PreviousLink"),
         Attribute::PublicKeyLink(_)          => obj.links.contains_key("PublicKeyLink"),
@@ -655,7 +686,8 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         // `AttributeSingleValued` instead of succeeding — harmless
         // while these were no-ops in `apply_attribute`, load-bearing
         // now that they're genuinely persisted.
-        Attribute::GroupLink(_)                   => obj.links.contains_key("GroupLink"),
+        Attribute::GroupLink(g)                   => obj.group_links.contains(g)
+            || obj.links.get("GroupLink").is_some_and(|h| h == g),
         Attribute::CertificateLink(_) => obj.links.contains_key("CertificateLink"),
         Attribute::ChildLink(_) => obj.links.contains_key("ChildLink"),
         Attribute::ParentLink(_) => obj.links.contains_key("ParentLink"),
@@ -680,7 +712,6 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         // exact membership already exists. AddAttribute may add further
         // distinct groups; re-adding the same one trips the §6.1.2
         // already-present guard.
-        Attribute::ObjectGroup(g)            => obj.object_groups.iter().any(|x| x == g),
         // Baseline Server attributes — presence depends on the typed
         // field actually being populated on the record. AddAttribute
         // MUST succeed when none of these is yet set (BL-M-5 step #3
@@ -745,7 +776,15 @@ fn attribute_name_present(obj: &ObjectRecord, name: &str) -> bool {
         // `ItemNotFound` as a result. Match on `canonical` (already
         // space-stripped) instead, same as `remove_attribute_by_name`
         // below.
-        _ => obj.custom_attributes.contains_key(name) || obj.links.contains_key(&canonical),
+        // A by-NAME request carries no Vendor Identification, so it can only
+        // mean the client's own attributes: §4.70 reserves "x" for
+        // client-created and says a server-created "y" attribute is "not
+        // created …, set, added, adjusted, modified or deleted by the
+        // client". Scoping to "x" is what makes that rule hold.
+        _ => obj
+            .custom_attributes
+            .contains_key(&VendorAttributeKey::new(None, name))
+            || obj.links.contains_key(&canonical),
     }
 }
 
@@ -855,8 +894,9 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::ObjectType(_)             => {}  // Read-Only
         Attribute::State(_)                  => {}  // Read-Only
         Attribute::UniqueIdentifier(_)       => {}  // Read-Only
-        Attribute::Custom { name, value, .. }    => {
-            obj.custom_attributes.insert(name.clone(), value.clone());
+        Attribute::Custom { vendor, name, value } => {
+            obj.custom_attributes
+                .insert(VendorAttributeKey::new(vendor.as_deref(), name), value.clone());
         }
         // KMIP §11 Link attributes — UID references into the
         // record's `links` map keyed by canonical attribute name.
@@ -865,7 +905,13 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::PreviousLink(uid)         => { obj.links.insert("PreviousLink".into(), uid.clone()); }
         Attribute::PublicKeyLink(uid)        => { obj.links.insert("PublicKeyLink".into(), uid.clone()); }
         Attribute::PrivateKeyLink(uid)       => { obj.links.insert("PrivateKeyLink".into(), uid.clone()); }
-        Attribute::GroupLink(uid)            => { obj.links.insert("GroupLink".into(), uid.clone()); }
+        // §7.24 Group Link "MAY be repeated", so this appends rather than
+        // replacing — the single-slot form could hold only one group.
+        Attribute::GroupLink(uid)            => {
+            if !obj.group_links.contains(uid) {
+                obj.group_links.push(uid.clone());
+            }
+        }
         Attribute::CertificateLink(uid) => { obj.links.insert("CertificateLink".into(), uid.clone()); }
         Attribute::ChildLink(uid) => { obj.links.insert("ChildLink".into(), uid.clone()); }
         Attribute::ParentLink(uid) => { obj.links.insert("ParentLink".into(), uid.clone()); }
@@ -891,11 +937,6 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         // KMIP `Object Group` (0x420056) — multi-instance: AddAttribute
         // appends a fresh membership; SetAttribute reuses this path so a
         // repeated value is idempotent (deduped).
-        Attribute::ObjectGroup(g)            => {
-            if !obj.object_groups.contains(g) {
-                obj.object_groups.push(g.clone());
-            }
-        }
         Attribute::ApplicationSpecificInformation { namespace, data } => {
             obj.application_specific_information = Some((namespace.clone(), data.clone()));
         }
@@ -979,10 +1020,11 @@ fn remove_attribute_by_value(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::Name(_)                   => obj.name = None,
         Attribute::CryptographicLength(_)    => obj.cryptographic_length = 0,
         Attribute::CryptographicUsageMask(_) => obj.usage_mask = UsageMask::empty(),
-        Attribute::Custom { name, .. }       => { obj.custom_attributes.remove(name); }
+        Attribute::Custom { vendor, name, .. } => {
+            obj.custom_attributes.remove(&VendorAttributeKey::new(vendor.as_deref(), name));
+        }
         // KMIP `Object Group` multi-instance — drop just the named
         // membership, leaving the object in any other groups.
-        Attribute::ObjectGroup(g)            => { obj.object_groups.retain(|x| x != g); }
         // Gap-remediation Phase B/T3 — `DeleteAttribute`'s
         // `current_attribute`-value path had no arms at all for any
         // Link type or for the three attributes Phase B just made
@@ -998,7 +1040,12 @@ fn remove_attribute_by_value(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::PreviousLink(_)                => { obj.links.remove("PreviousLink"); }
         Attribute::PublicKeyLink(_)               => { obj.links.remove("PublicKeyLink"); }
         Attribute::PrivateKeyLink(_)              => { obj.links.remove("PrivateKeyLink"); }
-        Attribute::GroupLink(_)                   => { obj.links.remove("GroupLink"); }
+        Attribute::GroupLink(g)                   => {
+            obj.group_links.retain(|x| x != g);
+            if obj.links.get("GroupLink").is_some_and(|h| h == g) {
+                obj.links.remove("GroupLink");
+            }
+        }
         Attribute::DerivationBaseObjectLink(_)    => { obj.links.remove("DerivationBaseObjectLink"); }
         Attribute::DerivedObjectLink(_)           => { obj.links.remove("DerivedObjectLink"); }
         Attribute::ReplacedObjectLink(_)          => { obj.links.remove("ReplacedObjectLink"); }
@@ -1032,7 +1079,9 @@ fn remove_attribute_by_name(obj: &mut ObjectRecord, name: &str) {
             obj.usage_limits_unit = None;
         }
         other => {
-            obj.custom_attributes.remove(other);
+            // By-name delete is scoped to the client's own "x" attributes —
+            // see the §4.70 note in `attribute_exists`.
+            obj.custom_attributes.remove(&VendorAttributeKey::new(None, other));
             obj.links.remove(other);
         }
     }
@@ -1121,6 +1170,44 @@ mod tests {
         // §6.1.2 — Add against an always-present (single-valued)
         // attribute fails the presence check first → `AttributeSingleValued`.
         assert_eq!(err.result_reason(), ResultReason::AttributeSingleValued);
+    }
+
+    /// §4.6 Table 62 — "Initially set by: Server", "Modifiable by client:
+    /// **No**", "Deletable by client: **No**". The 26 Certificate Attributes
+    /// are derived from the Certificate Value DER; a client that tries to
+    /// assert one must be refused, not quietly obeyed.
+    ///
+    /// This checks the SET path specifically. The decoder now ACCEPTS these
+    /// tags (they are modelled, so `decode_attributes_block` no longer refuses
+    /// them as unsupported), which is exactly why the read-only rule has to
+    /// hold on its own — without it, "modelled" would have silently become
+    /// "client-writable".
+    #[test]
+    fn a_client_cannot_set_a_certificate_attribute() {
+        let d = deps_with();
+        put(&d, "u");
+        for a in [
+            Attribute::CertificateSubjectOU("Attacker Unit".into()),
+            Attribute::CertificateIssuerCN("Not The Real CA".into()),
+            Attribute::CertificateSubjectDN("CN=spoofed".into()),
+        ] {
+            let err = modify_attribute(
+                &d,
+                ModifyAttributeRequest {
+                    uid: "u".into(),
+                    current_attribute: None,
+                    new_attribute: a.clone(),
+                },
+                &crate::server::auth::AuthContext::open(),
+                "c",
+            )
+            .unwrap_err();
+            assert_eq!(
+                err.result_reason(),
+                ResultReason::AttributeReadOnly,
+                "{a:?} is server-derived from the certificate DER; a client must not be able to assert it"
+            );
+        }
     }
 
     #[test]
