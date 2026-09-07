@@ -40,6 +40,20 @@ pub enum WireError {
     #[error("unknown enumeration value {value:#x} for {field}")]
     UnknownEnum { field: &'static str, value: u32 },
 
+    /// G2 (2026-09-06) — an attribute inside a request's `Attributes`
+    /// structure that this server does not model.
+    ///
+    /// Previously `decode_attribute_v3` returned `Ok(None)` for these and the
+    /// caller dropped them, so a client could set an attribute, get `Success`,
+    /// and find it was never stored. §11.48 has `Unsupported Attribute`
+    /// (0x1f) for exactly this; silence was never the conformant answer.
+    ///
+    /// Response decoding keeps the permissive behaviour — a server may send
+    /// attributes a client need not understand, and refusing those would break
+    /// forward compatibility. This is the request-accept path only.
+    #[error("unsupported attribute in request: tag {tag:#08x} is not modelled by this server")]
+    UnsupportedAttribute { tag: u32 },
+
     /// K8 — a `Key Format Type` codepoint outside the KMIP 3.0 §11
     /// table (or one this server cannot materialize). Surfaces on the
     /// batch item as `OperationFailed / Key Format Type Not Supported
@@ -3224,8 +3238,10 @@ fn encode_pkcs11_resp(r: &Pkcs11Response) -> Vec<TtlvFrame> {
 fn decode_attributes_block(frame: &TtlvFrame) -> Result<Vec<Attribute>, WireError> {
     let mut out = Vec::new();
     for c in expect_structure(frame, "Attributes")? {
-        if let Some(a) = decode_attribute_v3(c)? {
-            out.push(a);
+        match decode_attribute_v3(c)? {
+            Some(a) => out.push(a),
+            // G2 — refuse rather than drop. See `WireError::UnsupportedAttribute`.
+            None => return Err(WireError::UnsupportedAttribute { tag: c.tag.0 }),
         }
     }
     Ok(out)
@@ -7715,5 +7731,38 @@ mod tests {
         let frame = TtlvFrame::new(Tag(tags::AlternativeName), Value::TextString("legacy-label".into()));
         let decoded = decode_attribute_v3(&frame).unwrap().unwrap();
         assert_eq!(decoded, Attribute::AlternativeName { value: "legacy-label".into(), name_type: 1 });
+    }
+
+    /// G2 (2026-09-06) — an attribute this server does not model must be
+    /// REFUSED on the request path, not dropped while the operation answers
+    /// Success. That silent-discard behaviour is why `Certify` could store a
+    /// `CertificateLink` nobody could read back, and why a client could set an
+    /// attribute and never learn it had not been stored.
+    ///
+    /// `Certificate Subject O` (0x420109) is a real §4.6 attribute this server
+    /// does not model — exactly the shape of input that used to vanish.
+    #[test]
+    fn unmodelled_attribute_in_a_request_is_refused_not_dropped() {
+        let attrs = TtlvFrame::new(
+            Tag(tags::Attributes),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(256)),
+                TtlvFrame::new(Tag(0x42_0109), Value::TextString("Acme Corp".into())),
+            ]),
+        );
+        match decode_attributes_block(&attrs) {
+            Err(WireError::UnsupportedAttribute { tag }) => assert_eq!(tag, 0x42_0109),
+            other => panic!("expected UnsupportedAttribute, got {other:?}"),
+        }
+
+        // The permissive path is unchanged for attributes we DO model.
+        let ok = TtlvFrame::new(
+            Tag(tags::Attributes),
+            Value::Structure(vec![TtlvFrame::new(
+                Tag(tags::CryptographicLength),
+                Value::Integer(256),
+            )]),
+        );
+        assert_eq!(decode_attributes_block(&ok).unwrap().len(), 1);
     }
 }

@@ -673,8 +673,30 @@ fn wire_error_response(err: &WireError) -> crate::kmip30::ResponseMessage {
     // KMIP 3.0 §11 — a recognisable-but-unsupported ProtocolVersion is
     // `Unsupported Protocol Version` (0x3f), not `Invalid Message` (0x04)
     // which is reserved for genuinely malformed frames (K1, finding K-3).
+    //
+    // G10 (2026-09-06) — every other WireError used to collapse to
+    // `Invalid Message`, so a client could not tell an unknown tag from a
+    // malformed frame from a type mismatch. §11.48 names each of these; the
+    // reasons existed in the spec, just not in this enum.
     let reason = match err {
         WireError::UnsupportedVersion { .. } => ResultReason::UnsupportedProtocolVersion,
+        // A structurally sound frame naming a tag/enum this server does not
+        // know: `Unknown Tag` (0x3d) / `Unknown Enumeration` (0x3b).
+        WireError::UnexpectedTag { .. } => ResultReason::UnknownTag,
+        WireError::UnknownEnum { .. } => ResultReason::UnknownEnumeration,
+        // Right tag, wrong item type — §11.48 `Invalid Data Type` (0x1c).
+        WireError::BadType { .. } => ResultReason::InvalidDataType,
+        // NOT `Missing Data` (0x06). This function is the whole-message
+        // decode failure path: a message missing a required *envelope* field
+        // (Request Header, Batch Item) genuinely is malformed, which is what
+        // `Invalid Message` means and what the K-3 decision recorded. Missing
+        // Data belongs to per-operation payload validation, which fails
+        // through `KmipError` on the batch item instead. It falls through to
+        // the `_` arm below.
+        // The bytes themselves would not parse: `Codec Error` (0x26).
+        WireError::Codec(_) => ResultReason::CodecError,
+        WireError::UnsupportedKeyFormat { .. } => ResultReason::KeyFormatTypeNotSupported,
+        WireError::UnsupportedAttribute { .. } => ResultReason::UnsupportedAttribute,
         _ => ResultReason::InvalidMessage,
     };
     ResponseMessage {
@@ -838,6 +860,8 @@ mod tests {
             Some(0x0000_003f),
             "Unsupported Protocol Version codepoint per OASIS enums JSON"
         );
+        // A missing envelope field is a malformed message, not `Missing Data`
+        // (which is per-payload validation, reported on the batch item).
         let resp = wire_error_response(&WireError::Missing {
             tag: 0x42_0077,
             name: "Request Header",
@@ -846,5 +870,24 @@ mod tests {
             resp.batch_items[0].result_reason,
             Some(ResultReason::InvalidMessage as u32)
         );
+
+        // G10 (2026-09-06) — these three used to collapse to Invalid Message
+        // too, so a client could not tell an unknown tag from a type mismatch
+        // from unparseable bytes. §11.48 names each one.
+        let resp = wire_error_response(&WireError::UnknownEnum { field: "Operation", value: 0x999 });
+        assert_eq!(resp.batch_items[0].result_reason, Some(0x0000_003b), "Unknown Enumeration");
+
+        let resp = wire_error_response(&WireError::UnexpectedTag {
+            got: 0x42_0001, expected: 0x42_0077, name: "Request Header",
+        });
+        assert_eq!(resp.batch_items[0].result_reason, Some(0x0000_003d), "Unknown Tag");
+
+        let resp = wire_error_response(&WireError::BadType {
+            tag: 0x42_0094, name: "Unique Identifier", msg: "wrong type".into(),
+        });
+        assert_eq!(resp.batch_items[0].result_reason, Some(0x0000_001c), "Invalid Data Type");
+
+        let resp = wire_error_response(&WireError::Codec("truncated".into()));
+        assert_eq!(resp.batch_items[0].result_reason, Some(0x0000_0026), "Codec Error");
     }
 }
