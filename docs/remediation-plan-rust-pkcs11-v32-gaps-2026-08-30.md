@@ -1,6 +1,18 @@
 # Remediation plan — Rust engine (softhsmrustv3) PKCS#11 v3.2 gaps (2026-08-30)
 
-**Status:** Execution complete. Every item in this plan is implemented,
+> **Status correction, 2026-09-07 (H1).** The branch this document names,
+> `fix/ws1-4-and-ws2-rust-gaps`, **no longer exists**, and the "(not pushed)"
+> below is stale: the work shipped to `main` through a series of smaller
+> branches (`fix/ws1-crypto-bugs`, `fix/ws2-mls-hpke-full-hsm-routing`,
+> `fix/ws3-g1..g7`), most of which are merged. Verify any individual claim
+> here by grepping `origin/main` for the code, not by looking for that
+> branch — and note that this repository squash-merges, so
+> `git merge-base --is-ancestor` reports landed work as unmerged.
+> `CKM_ECMQV_DERIVE` remains deliberately held, which is still accurate.
+> See `remediation-plan-pkcs11-v32-gaps-09062026.md` §0 for the audit that
+> found this.
+
+**Status (as written 2026-08-30):** Execution complete. Every item in this plan is implemented,
 verified against real ACVP vectors (or, where ACVP structurally can't
 cover a step, independent hand/Python cross-checks plus end-to-end
 integration tests), and committed locally on branch
