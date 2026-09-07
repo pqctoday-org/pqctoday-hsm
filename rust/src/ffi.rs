@@ -1986,6 +1986,35 @@ unsafe fn xmss_keygen_param_set(
     ps.unwrap_or(default_ps)
 }
 
+/// P1 (2026-09-07). PKCS#11 v3.2 §4.10 Private key objects: "As a general
+/// guideline, private keys of any type SHOULD store sufficient information to
+/// retrieve the public key information", and §6.1.3 adds, for RSA
+/// specifically, "A token SHOULD also be able to return CKA_PUBLIC_KEY_INFO
+/// for an RSA private key."
+///
+/// Several keygen arms built the SubjectPublicKeyInfo and stored it only on
+/// the public half, so a private key answered CKR_ATTRIBUTE_TYPE_INVALID for
+/// an attribute Table 29 defines for it — 11 divergences against the C++
+/// engine, which returns it on both halves. This mirrors whatever the arm
+/// already computed, so there is exactly one SPKI encoder per key type and no
+/// second implementation to drift.
+///
+/// `or_insert_with` keeps it idempotent: arms that already populate both
+/// halves (ML-DSA, ML-KEM, SLH-DSA) are unaffected, and a template-supplied
+/// value is never overwritten.
+fn mirror_public_key_info(
+    pub_attrs: &std::collections::HashMap<u32, Vec<u8>>,
+    prv_attrs: &mut std::collections::HashMap<u32, Vec<u8>>,
+) {
+    if let Some(spki) = pub_attrs.get(&CKA_PUBLIC_KEY_INFO) {
+        if !spki.is_empty() {
+            prv_attrs
+                .entry(CKA_PUBLIC_KEY_INFO)
+                .or_insert_with(|| spki.clone());
+        }
+    }
+}
+
 /// FIPS 186-5 Appendix A.2.2 "Extra Random Bits" EC private-key
 /// generation, used by CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS: generate
 /// curve_bits+64 random bits, reduce mod (order-1), add 1.
@@ -2293,6 +2322,7 @@ fn C_GenerateKeyPair_impl(
                         prv_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                 }
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -2434,6 +2464,7 @@ fn C_GenerateKeyPair_impl(
                         prv_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                 }
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -2583,6 +2614,7 @@ fn C_GenerateKeyPair_impl(
                         prv_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                 }
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -2768,6 +2800,7 @@ fn C_GenerateKeyPair_impl(
                 packed.extend_from_slice(&e_bytes);
                 pub_attrs.insert(CKA_VALUE, packed);
                 prv_attrs.insert(CKA_VALUE, sk_der.as_bytes().to_vec());
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -2952,6 +2985,7 @@ fn C_GenerateKeyPair_impl(
                     let spki = build_ec_spki_p256(&vk_bytes);
                     pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                 }
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3118,6 +3152,7 @@ fn C_GenerateKeyPair_impl(
                         pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                 }
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3263,6 +3298,7 @@ fn C_GenerateKeyPair_impl(
                 pub_attrs.insert(CKA_EC_PARAMS, ec_params_oid.clone());
                 prv_attrs.insert(CKA_EC_PARAMS, ec_params_oid);
                 pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3393,6 +3429,7 @@ fn C_GenerateKeyPair_impl(
                     pub_attrs.insert(CKA_EC_POINT, pk_bytes.clone());
                 }
 
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3494,6 +3531,7 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3629,6 +3667,7 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3726,6 +3765,7 @@ fn C_GenerateKeyPair_impl(
                 store_ulong(&mut prv_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, mt_max);
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3816,6 +3856,7 @@ fn C_GenerateKeyPair_impl(
                 pub_attrs.insert(CKA_VALUE, ek.value().to_vec());
                 prv_attrs.insert(CKA_VALUE, dk.value().to_vec());
 
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3905,6 +3946,7 @@ fn C_GenerateKeyPair_impl(
                 pub_attrs.insert(CKA_VALUE, pk.as_ref().to_vec());
                 prv_attrs.insert(CKA_VALUE, sk.as_ref().to_vec());
 
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -5273,6 +5315,33 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
         let is_private_or_secret = class == CKO_PRIVATE_KEY || class == CKO_SECRET_KEY;
         let sensitive = is_private_or_secret && read_bool_attr(&obj_attrs, CKA_SENSITIVE);
         let extractable = !is_private_or_secret || read_bool_attr(&obj_attrs, CKA_EXTRACTABLE);
+        // E1 (2026-09-07). CKA_VALUE is defined PER KEY TYPE, not universally.
+        // The v3.2 key-object attribute tables give it to ML-DSA, ML-KEM,
+        // SLH-DSA, EC, Edwards, Montgomery, DSA, HSS, XMSS and XMSS-MT — but
+        // NOT to RSA: neither the RSA Public nor the RSA Private Key Object
+        // Attributes table has a row for it (§6.1.2/§6.1.3). This engine
+        // stores every asymmetric key's material under CKA_VALUE internally,
+        // which is its own business; ANSWERING C_GetAttributeValue for it on
+        // an RSA key advertises an attribute the class does not define. C++
+        // answers CKR_ATTRIBUTE_TYPE_INVALID, and so must this engine.
+        //
+        // Scoped to RSA deliberately. The three stateful-hash families look
+        // like the same defect and are not: §6.65/§6.66 DO define CKA_VALUE
+        // for HSS/XMSS/XMSS-MT keys, so hiding it there would replace one
+        // non-conformance with another. That divergence runs the opposite way
+        // (C++ correctly answers CKR_ATTRIBUTE_SENSITIVE, Rust wrongly says
+        // the attribute does not exist) and needs the attribute materialised,
+        // not suppressed — tracked separately.
+        //
+        // STORAGE IS UNTOUCHED. CKA_VALUE is how the key is held and is read
+        // internally (get_object_value, e.g. C_SignRecover); only the
+        // externally visible answer changes.
+        let key_type = obj_attrs
+            .get(&CKA_KEY_TYPE)
+            .filter(|v| v.len() >= 4)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        let hide_cka_value =
+            key_type == Some(CKK_RSA) && (class == CKO_PUBLIC_KEY || class == CKO_PRIVATE_KEY);
         // PKCS#11 v3.2 §5.7.5 — process EVERY template entry, recording each
         // failure class, then return one consolidated code. The whole template
         // is filled in regardless of any single entry's failure.
@@ -5303,6 +5372,18 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
                 // it may not read, when the object holds nothing of the kind.
                 // Forty-one observations in the differential harness, against
                 // C++'s correct CKR_ATTRIBUTE_TYPE_INVALID.
+                // Ordered BEFORE the sensitivity check on purpose: §5.7.5
+                // gives the two codes different meanings, and for an
+                // attribute the class does not define at all the honest
+                // answer is CKR_ATTRIBUTE_TYPE_INVALID, not
+                // CKR_ATTRIBUTE_SENSITIVE ("has it, won't disclose it").
+                // A sensitive RSA private key would otherwise get the
+                // wrong one of the two.
+                if hide_cka_value && attr_type == CKA_VALUE {
+                    *val_len_ptr = usize::MAX; // CK_UNAVAILABLE_INFORMATION
+                    had_missing = true;
+                    continue;
+                }
                 if attr_is_sensitive_material(attr_type)
                     && (sensitive || !extractable)
                     && obj_attrs.contains_key(&attr_type)
