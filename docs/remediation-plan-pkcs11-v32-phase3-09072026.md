@@ -229,3 +229,42 @@ C++ is **correct**: §6.65/§6.66 define `CKA_VALUE` for these keys with footnot
 Rust's answer is truthful about its own storage — per `LEGAL-XMSS-STATE-REPRESENTATION` it keeps stateful-hash state in engine-private vendor attributes, not in `CKA_VALUE` — so fixing it means **materialising** the attribute and gating it as sensitive. That is a representation change, not a filter, and it interacts with an existing adjudication. It is a separate item (§14), not part of E1.
 
 **Revised E1 scope: RSA only** — which both offered options agreed on.
+
+### §5 X3 — superseded by a better fix: enhance the harness, not a static parser
+
+The plan proposed extending the ledger with per-mechanism `{min, max, flags}` parsed statically from both engines' sources. Building it revealed that would have been the wrong tool, for two reasons.
+
+**First, the C++ side is not statically resolvable.** `C_GetMechanismInfo`'s key sizes come from runtime calls (`rsaMinSize = rsa->getMinKeySize()`), so a parser would have to chase into the crypto classes and would break the first time one moved.
+
+**Second, the diagnosis was wrong.** The plan said `LEGAL-MECHANISM-SET` "excuses the path glob `mech*` wholesale", hiding mechanism-info differences. It does not. `mech*` matches only membership (`mech.<NAME> = present`). The real situation was worse: `env.mechanism_info_aes_cbc` probed **exactly one mechanism**, so no other mechanism's range or flags was ever compared *at all*. Nothing was being excused — nothing was being observed.
+
+So the fix belongs in the harness, which already has both engines running and can simply ask them. Three enhancements landed (`66dac6df`):
+
+| | What it adds | What it found |
+|---|---|---|
+| `env.mechanism_info_all` | `CK_MECHANISM_INFO` for every mechanism **both** engines advertise | 152 divergences across 86 mechanisms, previously unobservable |
+| Wider `kProbe` | 10 more attributes (`CKA_SUBJECT`, the `*_TEMPLATE` family, `CKA_HSS_KEYS_REMAINING`, …) | 592 divergences, all the known materialisation convention |
+| `record_attr_invariants` | Four spec-stated consistency rules evaluated **per engine** | 0 violations |
+
+The third is the structurally interesting one. Everything else in the harness compares the two engines *against each other*, which has a blind spot it cannot see on its own: **a rule both engines break identically produces no divergence**. Both defects this programme fixed late — the `CKM_AES_CMAC` range and `CKA_VALUE` on RSA — were that shape. The invariants are recorded as `ok` / `VIOLATION:<detail>`, so a rule broken by one engine fails as a divergence and a rule broken by both is still loud in the report.
+
+Adjudication was split deliberately: key-size **ranges** are token policy and are excused; **flags** are not, because a flag is a capability claim. The one flag divergence found (`CKM_RSA_X_509`) was checked against both engines' code before being adjudicated legal — Rust implements only the recovery pair there and deliberately does not advertise what it does not implement.
+
+**Known limitation, recorded rather than hidden:** the range exception matches by path, not value, so a *future* change to either engine's ranges is also excused. Pinning the values belongs in the mechanism ledger, where each mechanism has a row and a change shows as a diff. That remains open.
+
+### Verification at the close of this session
+
+- differential harness, serial: **66 scenarios / 12,073 observations / 0 uncovered / PASS** (was 65 / 10,059)
+- Rust engine: **515 passed / 0 failed / 14 ignored**
+- JavaJCE: **274 passed** plus the new `ECExtraBitsTest` **8/8**, and 4 confirmed failures against a pre-X1 engine
+- mechanism ledger: consistent, C++-only set empty
+- `check_pkcs11_constants.py`: 0 failures
+
+### Still open
+
+- **HSS/XMSS/XMSS-MT `CKA_VALUE`** (3 divergences): Rust denies an attribute §6.65/§6.66 define. Needs the attribute materialised from the engine-private vendor attributes, which interacts with `LEGAL-XMSS-STATE-REPRESENTATION`.
+- **`CKA_PUBLIC_KEY_INFO`** on the stateful-hash families and the unwrap path (7 divergences): needs a new SPKI encoder and public-key derivation respectively, not a mirror.
+- **C++ materialises `CKA_HSS_KEYS_REMAINING` on XMSS keys** including public halves, value 0.
+- **Range pinning** in the ledger, per the limitation above.
+- **§4 H2** (justification-prose sweep) and **§6 R1** (43 build warnings) not started.
+- Nothing pushed; PR #226 still awaiting review.
