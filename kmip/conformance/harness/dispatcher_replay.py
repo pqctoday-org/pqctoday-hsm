@@ -130,10 +130,17 @@ IMPLEMENTED_OPS: set[str] = {
 # `SKIP_DEPRECATED` rather than `FAIL` and are removed from the
 # headline pass-rate denominator.
 _DEPRECATED_ALGO_TESTS: dict[str, str] = {
-    # `KmipAlgorithm = DSA` (0x05). Classical DSA discrete-log signatures.
-    "BL-M-12-30.xml": "DSA — deprecated (NIST SP 800-186 §5.4)",
-    "BL-M-13-30.xml": "DSA — deprecated (NIST SP 800-186 §5.4)",
-    # `KmipAlgorithm = 3DES / DES3` (0x02). Triple-DES.
+    # BL-M-12-30 / BL-M-13-30 (Transparent DSA key Register) were skipped here
+    # until 2026-09-07. They are no longer: the Baseline Server conformance
+    # clause (§6.2) requires ALL mandatory test cases to pass, so skipping them
+    # meant the Baseline claim could not honestly be made. DSA is now accepted
+    # for STORAGE ONLY — `KmipAlgorithm::to_pkcs11_mech` returns None for every
+    # operation, so the server holds the key material and returns it but can
+    # neither generate a DSA key nor sign or verify with one.
+    #
+    # `KmipAlgorithm = 3DES / DES3` (0x02). Triple-DES. These stay skipped:
+    # they belong to the Symmetric Key Foundry for FIPS profile, which this
+    # server does not claim, so refusing them costs no conformance claim.
     "SKFF-M-4-30.xml": "3DES — deprecated (NIST SP 800-131A r2 §1.2.1)",
     "SKFF-M-8-30.xml": "3DES — deprecated (NIST SP 800-131A r2 §1.2.1)",
     "SKFF-M-12-30.xml": "3DES — deprecated (NIST SP 800-131A r2 §1.2.1)",
@@ -892,6 +899,31 @@ def _values_equal(
         return True
     # XML always gives us strings; the decoder gives us typed values.
     # Coerce to a canonical form for the comparison.
+    # BigInteger — §9.6.5 is variable-length two's-complement big-endian,
+    # padded to an 8-byte boundary. The XML carries the RAW HEX BYTES and the
+    # decoder returns a Python int (`int.from_bytes(..., signed=True)`), so the
+    # two sides can never be `==` however correct the server is, and the
+    # padding is not semantic anyway. Compare NUMERICALLY.
+    #
+    # Found 2026-09-07 by un-skipping BL-M-13-30: the server returned exactly
+    # the bytes the corpus specifies and the harness reported a mismatch
+    # between `'0000...fca682ce...'` and `13232376895198612407...` — the same
+    # number written two ways. Nothing else in the corpus compares a
+    # BigInteger leaf on a response, which is why this went unnoticed.
+    if ttlv_type == "BigInteger":
+        def _as_int(v: Any) -> int | None:
+            if isinstance(v, int):
+                return v
+            sv = str(v)
+            try:
+                if all(c in "0123456789abcdefABCDEF" for c in sv) and len(sv) % 2 == 0:
+                    return int.from_bytes(bytes.fromhex(sv), "big", signed=True)
+                return int(sv, 0)
+            except (ValueError, TypeError):
+                return None
+        e_i, a_i = _as_int(expected), _as_int(actual)
+        return e_i is not None and a_i is not None and e_i == a_i
+
     if ttlv_type in ("Integer", "LongInteger", "DateTime", "DateTimeExtended", "Interval"):
         try:
             return int(str(expected), 0) == int(actual)

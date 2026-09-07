@@ -201,8 +201,16 @@ struct Cli {
     #[arg(long = "enable-interop", default_value_t = false)]
     enable_interop: bool,
 
-    /// TLS posture: `permissive` (default, historical behaviour), `basic`,
-    /// or `quantum-safe`.
+    /// TLS posture: `basic` (**default since 2026-09-07**), `permissive`, or
+    /// `quantum-safe`.
+    ///
+    /// The default changed from `permissive` to `basic` so the posture this
+    /// server SHIPS with is the one its Baseline Server conformance claim is
+    /// measured under. `permissive` remains available and is a deliberate
+    /// choice to make, not the silent default: it offers TLS 1.2 and
+    /// `TLS13_AES_128_GCM_SHA256`, which §3.1.2 forbids, so a server running
+    /// it is NOT conformant however green the corpus replay looks. Existing
+    /// TLS 1.2 clients need `--tls-profile permissive` after this change.
     ///
     /// `basic` enforces KMIP 3.0 Profiles §3.1 "Basic Authentication Suite" —
     /// the suite the **Baseline Server** conformance clause (§6.2) requires:
@@ -232,7 +240,7 @@ struct Cli {
     /// posture without a rebuild: the sandbox runtime is distroless, so
     /// exec-form CMD cannot expand variables and there is no shell to do it
     /// in. Reading the env here keeps the escape hatch available.
-    #[arg(long = "tls-profile", default_value = "permissive",
+    #[arg(long = "tls-profile", default_value = "basic",
           env = "KMIP_TLS_PROFILE", value_parser = TlsProfile::parse)]
     tls_profile: TlsProfile,
 

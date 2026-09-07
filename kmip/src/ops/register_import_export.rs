@@ -570,6 +570,8 @@ pub fn register(
     // server-managed Always Sensitive / Never Extractable shadows are
     // derived from the at-birth values.
     let mut sensitive: Option<bool> = None;
+    // §4.27 Fresh — captured from the request, see the match arm below.
+    let mut fresh: Option<bool> = None;
     let mut extractable: Option<bool> = None;
     for a in &req.attributes {
         match a {
@@ -581,6 +583,11 @@ pub fn register(
                     value.clone(),
                 );
             }
+            // §4.27 — "SHALL be set to True when a new object is created on
+            // the server UNLESS the client provides a False value in Register
+            // or Import." The client's value is honoured; the default is
+            // True, not False.
+            Attribute::Fresh(b)       => { fresh = Some(*b); }
             Attribute::Sensitive(b)   => { sensitive = Some(*b); }
             Attribute::Extractable(b) => { extractable = Some(*b); }
             // KMIP §11 Link family — UID references the Register
@@ -698,6 +705,8 @@ pub fn register(
         alternative_name_type: x.alternative_name_type,
         links,
         custom_attributes,
+        // §4.27 — True unless the client asked for False.
+        fresh: Some(fresh.unwrap_or(true)),
         object_groups: x.object_groups.clone(),
         key_material,
         key_format_type,

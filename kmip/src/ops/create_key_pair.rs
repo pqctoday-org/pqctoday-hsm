@@ -882,6 +882,7 @@ fn canonical_name(a: KmipAlgorithm) -> String {
     use KmipAlgorithm::*;
     match a {
         Aes        => "AES",
+        Dsa        => "DSA",
         Rsa        => "RSA",
         Ecdsa      => "ECDSA",
         HmacSha256 => "HMAC-SHA-256",

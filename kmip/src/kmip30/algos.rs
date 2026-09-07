@@ -182,12 +182,23 @@ pub enum PkcsOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum KmipAlgorithm {
     // ── Classical baseline ────────────────────────────────────────────────
-    // Deprecated symmetric primitives (DES=0x01, 3DES=0x02) and the
-    // discrete-log signature algorithm (DSA=0x05) are explicitly NOT
-    // supported per pqctoday's deprecated-mechanism policy. Register
-    // requests carrying those codepoints surface as `InvalidMessage`
-    // via `from_wire_value` returning None.
+    // Deprecated symmetric primitives (DES=0x01, 3DES=0x02) are NOT
+    // supported per pqctoday's deprecated-mechanism policy: `from_wire_value`
+    // returns None and Register surfaces `InvalidMessage`.
+    //
+    // DSA (0x05) is the exception, and a deliberate one (2026-09-07). The
+    // Baseline Server conformance clause (§6.2) requires ALL mandatory test
+    // cases to pass, and BL-M-12-30 / BL-M-13-30 register Transparent DSA
+    // keys. Refusing them meant the Baseline claim could not honestly be
+    // made. DSA is therefore accepted for STORAGE ONLY — `to_pkcs11_mech`
+    // returns None for every operation, so no DSA key can be generated,
+    // signed with or verified with. The server holds the material and gives
+    // it back; it never performs discrete-log signature cryptography.
     Aes,           // 0x03
+    /// DSA (0x05) — **storage only**, see the note above. Registering and
+    /// retrieving Transparent DSA keys is what the Baseline mandatory tests
+    /// require; no cryptographic operation is available on them.
+    Dsa,
     Rsa,           // 0x04
     Ecdsa,         // 0x06 — covers ECDSA over any curve; curve = attribute
     HmacSha256,    // 0x09
@@ -416,6 +427,7 @@ impl KmipAlgorithm {
         use KmipAlgorithm::*;
         match self {
             Aes        => 0x00000003,
+            Dsa        => 0x00000005,
             Rsa        => 0x00000004,
             Ecdsa      => 0x00000006,
             HmacSha256 => 0x00000009,
@@ -492,6 +504,9 @@ impl KmipAlgorithm {
         Some(match v {
             0x00000003 => Aes,
             0x00000004 => Rsa,
+            // Storage only — see the enum's own note. Accepted so the
+            // Baseline mandatory Register tests can pass.
+            0x00000005 => Dsa,
             0x00000006 => Ecdsa,
             0x00000009 => HmacSha256,
             0x0000000a => HmacSha384,
@@ -903,6 +918,7 @@ impl KmipAlgorithm {
         use KmipAlgorithm::*;
         match self {
             Aes        => "AES",
+            Dsa        => "DSA",
             Rsa        => "RSA",
             Ecdsa      => "ECDSA",
             HmacSha256 => "HMAC-SHA256",

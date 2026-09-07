@@ -145,10 +145,14 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     out.push(Attribute::AlwaysSensitive(r.always_sensitive.unwrap_or(false)));
     out.push(Attribute::NeverExtractable(r.never_extractable.unwrap_or(false)));
     // KMIP 3.0 §11 — `Fresh` is mandatory; True iff the object was
-    // server-generated (Create / CreateKeyPair) AND has never been
-    // exported. Register-imported objects are False. Default to
-    // False until Phase 7c adds the generation-tracking flag.
-    out.push(Attribute::Fresh(r.fresh.unwrap_or(false)));
+    // §4.27 — "SHALL be set to True when a new object is created on the
+    // server unless the client provides a False value in Register or Import",
+    // and the server "SHALL change the attribute value to False as soon as
+    // the object has been served via the Get operation". So the default for a
+    // record that predates the field is True, not False; `ops/get.rs` does
+    // the flip. This read False for every object until 2026-09-07, which
+    // inverted the spec's own default — surfaced by un-skipping BL-M-13-30.
+    out.push(Attribute::Fresh(r.fresh.unwrap_or(true)));
     if let Some(b) = r.key_value_present { out.push(Attribute::KeyValuePresent(b)); }
     if let Some(b) = r.quantum_safe { out.push(Attribute::QuantumSafe(b)); }
     if let Some(b) = r.rotate_automatic { out.push(Attribute::RotateAutomatic(b)); }
