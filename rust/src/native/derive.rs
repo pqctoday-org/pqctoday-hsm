@@ -157,6 +157,12 @@ pub(crate) fn digest_of(mech: u32, data: &[u8]) -> Result<Vec<u8>, CkRv> {
         CKM_SHA3_256_KEY_DERIVATION => sha3::Sha3_256::digest(data).to_vec(),
         CKM_SHA3_384_KEY_DERIVATION => sha3::Sha3_384::digest(data).to_vec(),
         CKM_SHA3_512_KEY_DERIVATION => sha3::Sha3_512::digest(data).to_vec(),
+        CKM_SHA512_224_KEY_DERIVATION => sha2::Sha512_224::digest(data).to_vec(),
+        CKM_SHA512_256_KEY_DERIVATION => sha2::Sha512_256::digest(data).to_vec(),
+        // CKM_SHAKE_256_KEY_DERIVATION is deliberately NOT here: SHAKE is an
+        // XOF, so its output length is the caller's CKA_VALUE_LEN rather than
+        // a property of the mechanism, and this function has no length to work
+        // with. It is handled in C_DeriveKey, where the template is visible.
         _ => return Err(CKR_MECHANISM_INVALID),
     })
 }

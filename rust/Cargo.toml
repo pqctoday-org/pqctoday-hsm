@@ -93,7 +93,16 @@ xts-mode = "0.5"
 cmac = "0.7"
 # SHA-1 — used ONLY for the CKA_CHECK_VALUE of generic-secret keys
 # (PKCS#11 v3.2 §6.8.2: first 3 bytes of SHA-1(value)). Not a signing primitive.
-sha1 = "0.10"
+# MD5, for parity with the C++ engine (§3 Wave 3, decision D2). MD5 is
+# thoroughly broken for any security purpose and must never be chosen for
+# new signatures; it is here so this engine can VERIFY legacy artefacts and
+# so the two engines advertise the same mechanism set. `oid` is needed for
+# CKM_MD5_RSA_PKCS's DigestInfo prefix.
+md-5 = { version = "0.10", features = ["oid"] }
+# `oid` exposes AssociatedOid, which rsa's PKCS#1 v1.5 needs to build the
+# DigestInfo prefix for CKM_SHA1_RSA_PKCS (§3 Wave 2). Same reason sha3
+# carries the feature below.
+sha1 = { version = "0.10", features = ["oid"] }
 # RIPEMD-160 — historical digest + HMAC (CKM_RIPEMD160 / _HMAC, §6.x).
 ripemd = "0.1"
 # Incremental GHASH (NIST SP 800-38D §6.4) — needed to implement

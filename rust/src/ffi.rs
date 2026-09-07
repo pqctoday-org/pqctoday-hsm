@@ -1404,7 +1404,12 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_RSA_X_509 => (1024, 4096, 0x00001000 | 0x00004000),
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
-        | CKM_RSA_PKCS_PSS | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS => {
+        | CKM_RSA_PKCS_PSS | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS
+        | CKM_SHA1_RSA_PKCS | CKM_SHA1_RSA_PKCS_PSS | CKM_MD5_RSA_PKCS
+        | CKM_SHA224_RSA_PKCS | CKM_SHA224_RSA_PKCS_PSS
+        | CKM_SHA3_224_RSA_PKCS | CKM_SHA3_224_RSA_PKCS_PSS
+        | CKM_SHA3_256_RSA_PKCS | CKM_SHA3_256_RSA_PKCS_PSS
+        | CKM_SHA3_512_RSA_PKCS | CKM_SHA3_512_RSA_PKCS_PSS => {
             (2048, 4096, 0x00000800 | 0x00002000)
         }
         // C3 (2026-08-13) — a mechanism flag is DEFINED as "the mechanism can
@@ -1452,12 +1457,12 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_SLH_DSA_KEY_PAIR_GEN => (32, 64, 0x00010000),
         CKM_SLH_DSA => (32, 64, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
         CKM_SHA256 | CKM_SHA384 | CKM_SHA512 | CKM_SHA3_256 | CKM_SHA3_512 | CKM_SHA224
-        | CKM_SHA512_224 | CKM_SHA512_256 | CKM_SHA3_224 | CKM_SHA3_384 => (0, 0, 0x00000400),
+        | CKM_SHA512_224 | CKM_SHA512_256 | CKM_SHA3_224 | CKM_SHA3_384 | CKM_SHA_1 | CKM_MD5 => (0, 0, 0x00000400),
         // Historical RIPEMD-160 digest (CKF_DIGEST).
         CKM_RIPEMD160 => (0, 0, 0x00000400),
         CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
         | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
-        | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC => {
+        | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC | CKM_SHA_1_HMAC | CKM_MD5_HMAC | CKM_AES_CMAC => {
             (16, 64, 0x00000800 | 0x00002000)
         }
         CKM_SHA256_HMAC_GENERAL
@@ -1470,8 +1475,13 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_SHA512_256_HMAC_GENERAL
         | CKM_SHA3_224_HMAC_GENERAL
         | CKM_SHA3_384_HMAC_GENERAL
-        | CKM_RIPEMD160_HMAC_GENERAL => (16, 64, 0x00000800 | 0x00002000),
+        | CKM_RIPEMD160_HMAC_GENERAL
+        | CKM_SHA_1_HMAC_GENERAL
+        | CKM_MD5_HMAC_GENERAL => (16, 64, 0x00000800 | 0x00002000),
         CKM_KMAC_128 | CKM_KMAC_256 => (16, 64, 0x00000800 | 0x00002000),
+        // §3 Wave 4 — AES-CMAC (NIST SP 800-38B), a 16-byte MAC over an
+        // AES key of 128/192/256 bits.
+        CKM_AES_CMAC => (16, 32, 0x00000800 | 0x00002000),
         // AES-GMAC (v3.2 Sec6.13.6) — CKF_SIGN | CKF_VERIFY, key sizes match
         // the other AES mechanisms (16/24/32-byte keys, table stores bytes).
         CKM_AES_GMAC => (16, 32, 0x00000800 | 0x00002000),
@@ -1556,7 +1566,11 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // ECDSA-SHA3 variants — T1: the sign/verify matrix now dispatches the
         // same named curves as the SHA-2 composites (P-256 / secp256k1 /
         // P-384 / P-521), so the range is unified with CKM_ECDSA_SHAx above.
-        CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => {
+        CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512
+        // §3 Waves 1b/2 — same key-size range and flags as the other
+        // hashed-ECDSA mechanisms; only the digest differs.
+        | CKM_ECDSA_SHA224
+        | CKM_ECDSA_SHA1 => {
             (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
         }
         // Key derivation functions
@@ -1594,12 +1608,16 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // digest key-derivation) — arbitrary-length secret values, CKF_DERIVE.
         CKM_CONCATENATE_BASE_AND_KEY
         | CKM_CONCATENATE_BASE_AND_DATA
+        | CKM_CONCATENATE_DATA_AND_BASE
         | CKM_SHA256_KEY_DERIVATION
         | CKM_SHA384_KEY_DERIVATION
         | CKM_SHA512_KEY_DERIVATION
         | CKM_SHA3_256_KEY_DERIVATION
         | CKM_SHA3_384_KEY_DERIVATION
-        | CKM_SHA3_512_KEY_DERIVATION => (0, 0, 0x00080000),
+        | CKM_SHA3_512_KEY_DERIVATION
+        | CKM_SHA512_224_KEY_DERIVATION
+        | CKM_SHA512_256_KEY_DERIVATION
+        | CKM_SHAKE_256_KEY_DERIVATION => (0, 0, 0x00080000),
         _ => return None,
     };
     Some(info)
@@ -6107,6 +6125,11 @@ fn rsa_pss_mech_params(mech: u32) -> Option<(u32, u32)> {
         CKM_SHA384_RSA_PKCS_PSS => Some((CKM_SHA384, CKG_MGF1_SHA384)),
         CKM_SHA512_RSA_PKCS_PSS => Some((CKM_SHA512, CKG_MGF1_SHA512)),
         CKM_SHA3_384_RSA_PKCS_PSS => Some((CKM_SHA3_384, CKG_MGF1_SHA3_384)),
+        CKM_SHA1_RSA_PKCS_PSS => Some((CKM_SHA_1, CKG_MGF1_SHA1)),
+        CKM_SHA224_RSA_PKCS_PSS => Some((CKM_SHA224, CKG_MGF1_SHA224)),
+        CKM_SHA3_224_RSA_PKCS_PSS => Some((CKM_SHA3_224, CKG_MGF1_SHA3_224)),
+        CKM_SHA3_256_RSA_PKCS_PSS => Some((CKM_SHA3_256, CKG_MGF1_SHA3_256)),
+        CKM_SHA3_512_RSA_PKCS_PSS => Some((CKM_SHA3_512, CKG_MGF1_SHA3_512)),
         _ => None,
     }
 }
@@ -6745,7 +6768,7 @@ fn C_Sign_impl(
             }
             CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
             | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
-            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC => {
+            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC | CKM_SHA_1_HMAC | CKM_MD5_HMAC | CKM_AES_CMAC => {
                 sign_hmac(eff_mech, &sk_bytes, eff_msg)
             }
             m if hmac_general_base(m).is_some() => {
@@ -6789,7 +6812,12 @@ fn C_Sign_impl(
             }
             CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
             | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
-            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS => {
+            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS
+            | CKM_SHA1_RSA_PKCS | CKM_SHA1_RSA_PKCS_PSS | CKM_MD5_RSA_PKCS
+            | CKM_SHA224_RSA_PKCS | CKM_SHA224_RSA_PKCS_PSS
+            | CKM_SHA3_224_RSA_PKCS | CKM_SHA3_224_RSA_PKCS_PSS
+            | CKM_SHA3_256_RSA_PKCS | CKM_SHA3_256_RSA_PKCS_PSS
+            | CKM_SHA3_512_RSA_PKCS | CKM_SHA3_512_RSA_PKCS_PSS => {
                 let pss_salt = if rsa_pss_mech_params(eff_mech).is_some() && ctx_bytes.len() >= 4 {
                     Some(u32::from_le_bytes([
                         ctx_bytes[0],
@@ -6975,6 +7003,9 @@ pub fn C_Verify(
                     | CKM_SHA3_224_HMAC
                     | CKM_SHA3_384_HMAC
                     | CKM_SHA224_HMAC
+                    | CKM_SHA_1_HMAC
+                    | CKM_MD5_HMAC
+                    | CKM_AES_CMAC
                     | CKM_KMAC_128
                     | CKM_KMAC_256
             ) =>
@@ -7077,7 +7108,7 @@ pub fn C_Verify(
             }
             CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
             | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
-            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC => {
+            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC | CKM_SHA_1_HMAC | CKM_MD5_HMAC | CKM_AES_CMAC => {
                 verify_hmac(eff_mech, &pk_bytes, eff_msg, sig_bytes)
             }
             m if hmac_general_base(m).is_some() => {
@@ -7153,7 +7184,12 @@ pub fn C_Verify(
             // CKA_VALUE is NOT defined for CKO_PUBLIC_KEY/CKK_RSA objects.
             CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
             | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
-            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS => {
+            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS
+            | CKM_SHA1_RSA_PKCS | CKM_SHA1_RSA_PKCS_PSS | CKM_MD5_RSA_PKCS
+            | CKM_SHA224_RSA_PKCS | CKM_SHA224_RSA_PKCS_PSS
+            | CKM_SHA3_224_RSA_PKCS | CKM_SHA3_224_RSA_PKCS_PSS
+            | CKM_SHA3_256_RSA_PKCS | CKM_SHA3_256_RSA_PKCS_PSS
+            | CKM_SHA3_512_RSA_PKCS | CKM_SHA3_512_RSA_PKCS_PSS => {
                 match get_rsa_public_components(hkey) {
                     Some((n, e)) => {
                         let pss_salt =
@@ -9097,6 +9133,8 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
             CKM_SHA512_256 => DigestCtx::Sha512_256(sha2::Sha512_256::new()),
             CKM_SHA3_224 => DigestCtx::Sha3_224(sha3::Sha3_224::new()),
             CKM_SHA3_384 => DigestCtx::Sha3_384(sha3::Sha3_384::new()),
+            CKM_SHA_1 => DigestCtx::Sha1(sha1::Sha1::new()),
+            CKM_MD5 => DigestCtx::Md5(md5::Md5::new()),
             CKM_KECCAK_256 => DigestCtx::Keccak256(Vec::new()),
             CKM_RIPEMD160 => DigestCtx::Ripemd160(ripemd::Ripemd160::new()),
             CKM_ML_DSA_EXTERNAL_MU_GEN => match init_mu_gen_digest(p_mechanism) {
@@ -9197,6 +9235,8 @@ pub fn C_DigestUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
                     DigestCtx::Sha512_256(h) => h.update(data),
                     DigestCtx::Sha3_224(h) => h.update(data),
                     DigestCtx::Sha3_384(h) => h.update(data),
+                    DigestCtx::Sha1(h) => h.update(data),
+                    DigestCtx::Md5(h) => h.update(data),
                     DigestCtx::Keccak256(buf) => crate::crypto::keccak::keccak256_update(buf, data),
                     DigestCtx::Ripemd160(h) => h.update(data),
                     DigestCtx::MuGen(h) => sha3::digest::Update::update(h, data),
@@ -9230,6 +9270,11 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
                     DigestCtx::Sha512_256(_) => 32,
                     DigestCtx::Sha3_224(_) => 28,
                     DigestCtx::Sha3_384(_) => 48,
+                DigestCtx::Sha1(_) => 20,
+                DigestCtx::Md5(_) => 16,
+                    DigestCtx::Sha1(_) => 20,
+                DigestCtx::Md5(_) => 16,
+                    DigestCtx::Md5(_) => 16,
                     DigestCtx::Keccak256(_) => 32,
                     DigestCtx::Ripemd160(_) => 20,
                     DigestCtx::MuGen(_) => 64,
@@ -9258,6 +9303,8 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
                 DigestCtx::Sha512_256(_) => 32,
                 DigestCtx::Sha3_224(_) => 28,
                 DigestCtx::Sha3_384(_) => 48,
+                DigestCtx::Sha1(_) => 20,
+                DigestCtx::Md5(_) => 16,
                 DigestCtx::Keccak256(_) => 32,
                 DigestCtx::Ripemd160(_) => 20,
                 DigestCtx::MuGen(_) => 64,
@@ -9287,6 +9334,8 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
             DigestCtx::Sha512_256(h) => h.finalize().to_vec(),
             DigestCtx::Sha3_224(h) => h.finalize().to_vec(),
             DigestCtx::Sha3_384(h) => h.finalize().to_vec(),
+            DigestCtx::Sha1(h) => h.finalize().to_vec(),
+            DigestCtx::Md5(h) => h.finalize().to_vec(),
             DigestCtx::Keccak256(buf) => crate::crypto::keccak::keccak256_finalize(&buf).to_vec(),
             DigestCtx::Ripemd160(h) => h.finalize().to_vec(),
             DigestCtx::MuGen(h) => {
@@ -9337,6 +9386,9 @@ pub fn C_Digest(
                     DigestCtx::Sha512_256(_) => 32,
                     DigestCtx::Sha3_224(_) => 28,
                     DigestCtx::Sha3_384(_) => 48,
+                    DigestCtx::Sha1(_) => 20,
+                DigestCtx::Md5(_) => 16,
+                    DigestCtx::Md5(_) => 16,
                     DigestCtx::Keccak256(_) => 32,
                     DigestCtx::Ripemd160(_) => 20,
                     DigestCtx::MuGen(_) => 64,
@@ -10265,6 +10317,30 @@ pub fn C_DeriveKey(
                 [base_val.as_slice(), data].concat()
             }
 
+            // §3 Wave 4 (2026-09-07) — the mirror of the arm above: the
+            // caller's data comes FIRST, then the base key's value. Same
+            // CK_KEY_DERIVATION_STRING_DATA parameter, opposite order; the
+            // C++ engine has always had both.
+            CKM_CONCATENATE_DATA_AND_BASE => {
+                let r = match ck_param::mech(p_mechanism).params(
+                    &ck_param::key_deriv_string::LAYOUT,
+                    ck_param::key_deriv_string::FIELD_COUNT,
+                ) {
+                    Ok(r) => r,
+                    Err(ck_param::ParamErr::Absent) => return CKR_ARGUMENTS_BAD,
+                    Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let data: &[u8] = r.buffer(
+                    ck_param::key_deriv_string::P_DATA,
+                    ck_param::key_deriv_string::UL_LEN,
+                );
+                let base_val = match get_object_value(h_base_key) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                };
+                [data, base_val.as_slice()].concat()
+            }
+
             // ── Digest key derivation (PKCS#11 v3.2 §6.22 SHA-2 / §6.29 SHA-3)
             // Derived value = SHAx(base.CKA_VALUE), left-truncated to an
             // explicit CKA_VALUE_LEN when the template supplies one. The
@@ -10275,7 +10351,9 @@ pub fn C_DeriveKey(
             | CKM_SHA512_KEY_DERIVATION
             | CKM_SHA3_256_KEY_DERIVATION
             | CKM_SHA3_384_KEY_DERIVATION
-            | CKM_SHA3_512_KEY_DERIVATION => {
+            | CKM_SHA3_512_KEY_DERIVATION
+            | CKM_SHA512_224_KEY_DERIVATION
+            | CKM_SHA512_256_KEY_DERIVATION => {
                 let base_val = match get_object_value(h_base_key) {
                     Some(v) => v,
                     None => return CKR_KEY_HANDLE_INVALID,
@@ -10297,6 +10375,26 @@ pub fn C_DeriveKey(
                     digest.truncate(want);
                 }
                 digest
+            }
+
+            // SHAKE-256 as a key-derivation function. Unlike the fixed-length
+            // digests above, SHAKE is an extendable-output function: the
+            // derived length is not a property of the mechanism, so
+            // CKA_VALUE_LEN is REQUIRED rather than optional, and the XOF is
+            // squeezed to exactly that many bytes instead of a fixed digest
+            // being truncated (truncating a fixed hash and squeezing an XOF
+            // are different constructions, and only the latter is what this
+            // mechanism names).
+            CKM_SHAKE_256_KEY_DERIVATION => {
+                let base_val = match get_object_value(h_base_key) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                };
+                let want = match get_attr_ulong(p_template, ul_attribute_count, CKA_VALUE_LEN) {
+                    Some(w) if w > 0 => w as usize,
+                    _ => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                crate::native::derive::shake256_xof(&base_val, want)
             }
 
             // ── ECDH ────────────────────────────────────────────────────────
@@ -12319,6 +12417,17 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SHA384_RSA_PKCS_PSS
             | CKM_SHA512_RSA_PKCS_PSS
             | CKM_SHA3_384_RSA_PKCS
+            | CKM_SHA1_RSA_PKCS
+            | CKM_SHA1_RSA_PKCS_PSS
+            | CKM_MD5_RSA_PKCS
+            | CKM_SHA224_RSA_PKCS
+            | CKM_SHA224_RSA_PKCS_PSS
+            | CKM_SHA3_224_RSA_PKCS
+            | CKM_SHA3_224_RSA_PKCS_PSS
+            | CKM_SHA3_256_RSA_PKCS
+            | CKM_SHA3_256_RSA_PKCS_PSS
+            | CKM_SHA3_512_RSA_PKCS
+            | CKM_SHA3_512_RSA_PKCS_PSS
             | CKM_SHA3_384_RSA_PKCS_PSS
             | CKM_ECDSA_SHA256
             | CKM_ECDSA_SHA384
@@ -12337,6 +12446,9 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SHA3_224_HMAC
             | CKM_SHA3_384_HMAC
             | CKM_SHA224_HMAC
+            | CKM_SHA_1_HMAC
+            | CKM_MD5_HMAC
+            | CKM_AES_CMAC
             | CKM_KMAC_128
             | CKM_KMAC_256
             // WS-3/G2 (2026-09-01): CKM_AES_GMAC's tag is a deterministic
@@ -17950,6 +18062,50 @@ mod return_code_ffi_tests {
             C_FindObjects(BOGUS_SESSION, &mut h, 1, &mut n),
             CKR_SESSION_HANDLE_INVALID,
         );
+    }
+
+    /// §3 Waves 2-3 (2026-09-07, decision D2) — SHA-1 and MD5, through the
+    /// real PKCS#11 digest path, against their published "abc" vectors
+    /// (FIPS 180-4 and RFC 1321 respectively).
+    ///
+    /// Both are broken for security purposes and must never be selected for
+    /// new signatures. They are advertised because callers still have to
+    /// VERIFY existing artefacts, and because two engines disagreeing about
+    /// their mechanism sets is its own hazard — the divergence this whole
+    /// parity item exists to remove.
+    #[test]
+    fn wave2_3_legacy_digests_match_published_vectors() {
+        let _guard = test_lock::acquire();
+        setup();
+        fn hex(t: &str) -> Vec<u8> {
+            (0..t.len()).step_by(2).map(|i| u8::from_str_radix(&t[i..i + 2], 16).unwrap()).collect()
+        }
+        for (mech, name, want) in [
+            (CKM_SHA_1, "SHA-1", "a9993e364706816aba3e25717850c26c9cd0d89d"),
+            (CKM_MD5, "MD5", "900150983cd24fb0d6963f7d28e17f72"),
+        ] {
+            let want = hex(want);
+            assert!(
+                crate::constants::SUPPORTED_MECHS.contains(&mech),
+                "{name}: must be advertised"
+            );
+            let mut m: [usize; 3] = [mech as usize, 0, 0];
+            assert_eq!(C_DigestInit(SESSION, m.as_mut_ptr() as *mut u8), CKR_OK, "{name}: init");
+            let mut len: u32 = 0;
+            assert_eq!(
+                C_Digest(SESSION, b"abc".as_ptr() as *mut u8, 3, std::ptr::null_mut(), &mut len),
+                CKR_OK,
+                "{name}: size query"
+            );
+            assert_eq!(len as usize, want.len(), "{name}: digest length");
+            let mut out = vec![0u8; len as usize];
+            assert_eq!(
+                C_Digest(SESSION, b"abc".as_ptr() as *mut u8, 3, out.as_mut_ptr(), &mut len),
+                CKR_OK,
+                "{name}: digest"
+            );
+            assert_eq!(out, want, "{name}: must match the published vector");
+        }
     }
 
     /// §3 Wave 1 (2026-09-07) — the five digests added for C++ parity, driven
