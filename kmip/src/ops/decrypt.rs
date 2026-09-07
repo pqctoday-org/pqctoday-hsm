@@ -161,7 +161,7 @@ pub fn decrypt(
     }
 
     // Plane-3: branch on algorithm — but a multi-part request comes first,
-    // exactly as `encrypt` decides (§6.1.21, G6). Before this branch existed
+    // exactly as `encrypt` decides (§6.1.23, G6). Before this branch existed
     // a streaming Decrypt fell through to the single-shot path and returned
     // Success with wrong plaintext.
     let resp = if req.init_indicator == Some(true) || req.correlation_value.is_some() {
@@ -240,7 +240,7 @@ fn decrypt_ml_kem(
 }
 
 
-/// §6.1.21 multi-part Decrypt (G6, 2026-09-06) — the mirror of
+/// §6.1.16 multi-part Decrypt (G6, 2026-09-06) — the mirror of
 /// `encrypt::encrypt_streaming`, sharing the same `Deps::streams` map and the
 /// same engine `MultipartCipher` with `CipherDirection::Decrypt`.
 ///
