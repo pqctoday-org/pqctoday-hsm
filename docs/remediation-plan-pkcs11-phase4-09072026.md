@@ -201,3 +201,18 @@ Before proposing a push: `bash scripts/local-gate.sh --cpp --javajce --openssl-p
 | **D-2** | §3 — is multi-part verify for stateful-hash mechanisms worth the risk, given no caller has asked? | Lowest value of the three adopted behaviour items. Reasonable to defer without reopening the decision. |
 | **D-3** | §9 `CKA_OBJECT_VALIDATION_FLAGS` footnote 12 — follow v3.3 and drop the read-only latch? | Ask the TC first (§10.8). It looks like an erratum, but dropping a read-only latch on the strength of an inference is the wrong direction to guess in. |
 | **D-4** | §10 — do you want the upstream list actually sent, or just recorded? | Record it here; sending is your call and your name on it. |
+
+
+---
+
+## 15. Decisions taken (2026-09-07)
+
+| Ref | Decision | Note |
+|---|---|---|
+| **Scope** | Follow §11's sequence | Scenarios → ML-DSA multi-part → prose sweep → stateful-hash `CKA_VALUE` → KEM templates |
+| **D-1** | Storage and enforcement land **together** | Default taken; storage alone would let a caller believe an unenforced restriction is active |
+| **D-2** | **Implement** §3 HSS/XMSS multi-part verify | *Overrides the recommendation to defer.* Proceed as originally adopted |
+| **D-3** | **Follow v3.3 — drop the read-only latch** on `CKA_OBJECT_VALIDATION_FLAGS` | *Overrides the recommendation to keep it and ask the TC.* Check what the engines do first: if neither implements the latch this is a record-only change |
+| **D-4** | Record the upstream list in the repo; sending stays the user's call | No draft message |
+
+Two decisions went against my recommendation (D-2, D-3). Both are recorded as the user's call and implemented as decided; the reasoning I offered against each stays above, unedited, so a later reader sees the trade-off that was accepted rather than a plan rewritten to look unanimous.
