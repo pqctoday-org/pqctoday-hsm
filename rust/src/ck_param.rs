@@ -763,7 +763,7 @@ ck_struct!(
     /// an OASIS structure. `CKM_BIP32_CHILD_DERIVE` is
     /// `CKM_VENDOR_DEFINED | 0x105c`; neither the mechanism nor the struct
     /// appears in `docs/refs/pkcs11t-canonical-v3.2.h` or in the v3.2
-    /// Standard's text. `src/lib/pkcs11/pkcs11t.h:2139` is therefore the sole
+    /// Standard's text. `src/lib/pkcs11/pkcs11t.h:2148` is therefore the sole
     /// definition, and it is what a third party compiles against:
     ///
     /// ```c
@@ -776,7 +776,7 @@ ck_struct!(
     ///
     /// So `flags` is at one word and `index` at two — 24 bytes on LP64, 12 on
     /// wasm32. The C++ engine already reads it exactly this way and rejects
-    /// any other `ulParameterLen` (`SoftHSM_keygen.cpp:3010`). Until
+    /// any other `ulParameterLen` (`SoftHSM_keygen.cpp:3222`). Until
     /// 2026-08-14 the Rust engine read two **`u32`s at offsets 0 and 4**, so
     /// it took `pNext` as `flags` and, on LP64, the high half of `pNext` as
     /// `index` — a field-ORDER defect on top of a width one, on every target.

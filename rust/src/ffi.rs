@@ -365,12 +365,26 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     // that already exists.
     //
     // What is actually true: `crate::store` IS the encrypted-at-rest
-    // persistence path for engine key material, and it already mirrors the
-    // C++ engine's SecureDataManager — one random AES-256 master key per
-    // token, wrapped under both the SO and User PINs, PBKDF2-HMAC-SHA256 at
-    // 210k iterations, AES-256-GCM, master key never written unwrapped, and
-    // private objects loaded only after the login that unwraps it. See
-    // store/mod.rs and store/crypto.rs.
+    // persistence path for engine key material, and it mirrors the SHAPE of
+    // the C++ engine's SecureDataManager — one random AES-256 master key per
+    // token, wrapped independently under the SO and User PINs, master key
+    // never written unwrapped, private objects loaded only after the login
+    // that unwraps it. CORRECTED 2026-09-07 (phase-5 §6 comment sweep): this
+    // paragraph used to also claim the PRIMITIVES are mirrored
+    // ("PBKDF2-HMAC-SHA256 at 210k iterations, AES-256-GCM") — false, and
+    // the wrong direction: those are THIS crate's OWN choices.
+    // SecureDataManager (src/lib/data_mgr/SecureDataManager.cpp:143,292,
+    // 370,470,524) uses AES-256-**CBC with no authentication tag**, keyed by
+    // RFC4880.cpp:41-58's iterated plain SHA-256 self-hash
+    // (salt‖password hashed, then re-hashed against itself,
+    // PBE_ITERATION_BASE_COUNT=1500 + salt[last byte] ⇒ ~1500-1755
+    // iterations, RFC4880.h:45) — not PBKDF2, and nowhere near 210k. See
+    // store/mod.rs and store/crypto.rs, whose own module doc already states
+    // this correctly ("modernized rather than copied ... a deliberate
+    // improvement: a wrong PIN or corrupted blob fails the GCM tag check
+    // instead of silently decrypting to garbage") — this comment simply
+    // failed to agree with it two files over, the exact defect class this
+    // whole paragraph exists to correct.
     //
     // THIS blob is a different thing: the wasm/emscripten rehydration
     // mechanism, reachable on native builds only through this opt-in env
@@ -4195,9 +4209,18 @@ pub fn C_GenerateKey(
 // ── ML-KEM Encapsulate/Decapsulate ──────────────────────────────────────────
 
 /// DER-wrap an uncompressed SEC1 EC point exactly the way the engines encode
-/// CKA_EC_POINT (OCTET STRING, short form or 0x81 long form). This is the
-/// byte format the C++ engine's `encapsulateECDH` emits as the KEM
-/// "ciphertext" (`ephPub->getQ()`), so cross-engine decapsulation works.
+/// CKA_EC_POINT (OCTET STRING, short form or 0x81 long form).
+// CORRECTED 2026-09-07 (phase-5 §6 comment sweep): this used to also claim
+// DER-wrapped is "the byte format the C++ engine's encapsulateECDH emits as
+// the KEM ciphertext" -- false in the wrong direction. C++ emits the RAW
+// SEC1 point there (SoftHSM_kem.cpp:1014-1019, DERUTIL::octet2Raw(ephPub->
+// getQ())) -- the tag/length wrapping is explicitly stripped before the
+// ciphertext is handed to the caller (that file's own "E1 (2026-08-13)"
+// comment: "the ciphertext is the RAW octet string ... not the ... DER
+// wrapping"). DER-wrapped is the STORAGE encoding CKA_EC_POINT itself uses,
+// which is genuinely what this helper is for -- its only caller, below,
+// builds a #[cfg(test)] key's CKA_EC_POINT, never a KEM ciphertext.
+//
 // Used only by the #[cfg(test)] EC key-pair installer below, so it is gated to
 // match. Gating is the honest fix; #[allow(dead_code)] would have hidden a
 // genuinely orphaned function just as effectively.
@@ -4611,10 +4634,15 @@ fn C_EncapsulateKey_impl(
         }
 
         // ── ECDH-as-KEM (PKCS#11 v3.2 §6.3.17 Table 78) ─────────────────────
-        // 2026-08-13 parity with the C++ engine's encapsulateECDH
-        // (SoftHSM_kem.cpp): the "ciphertext" is a fresh ephemeral public EC
-        // point, byte-identical to the C++ wire form (DER OCTET STRING
-        // wrapping the uncompressed SEC1 point — the CKA_EC_POINT encoding);
+        // CORRECTED 2026-09-07 (phase-5 §6 comment sweep): this banner used
+        // to claim the ciphertext was "byte-identical to the C++ wire form
+        // (DER OCTET STRING wrapping ... the CKA_EC_POINT encoding)" as a
+        // CURRENT fact. That was the PRE-fix format; the E1 note a few lines
+        // below already corrects it in place ("Both engines emitted the
+        // DER-wrapped form ... Mutual agreement is not a defence") but this
+        // banner was never updated to agree with its own neighbour. Current
+        // format, both engines: the ciphertext is a fresh ephemeral public
+        // EC point as the RAW uncompressed SEC1 point (no DER wrapping) --
         // the shared secret is the raw ECDH X coordinate, no KDF (combining
         // is the CALLER's job, e.g. CKM_CONCATENATE_BASE_AND_KEY — same
         // "DHKEM" ephemeral-static pattern as native/hybrid.rs).
@@ -4667,9 +4695,22 @@ fn C_EncapsulateKey_impl(
                 CURVE_P521 => 133,
                 CURVE_X25519 => 32,
                 CURVE_X448 => 56,
-                // secp256k1-as-KEM is not offered (the C++ mirror covers the
-                // NIST prime curves; this arm adds the Montgomery curves
-                // Table 78 lists).
+                // CORRECTED 2026-09-07 (phase-5 §6 comment sweep): this used
+                // to justify refusing secp256k1 by claiming "the C++ mirror
+                // covers the NIST prime curves" — false, and the wrong
+                // direction. C++'s encapsulateECDH/decapsulateECDH
+                // (SoftHSM_kem.cpp:941,1284) gate ONLY on key TYPE (CKK_EC |
+                // CKK_EC_MONTGOMERY), never on curve OID, and
+                // CKM_EC_KEY_PAIR_GEN has no CKR_CURVE_NOT_SUPPORTED path at
+                // all — C++ accepts secp256k1 for ECDH-as-KEM. MEASURED
+                // (create.encapsulate.ecdh_secp256k1): C++ returns CKR_OK
+                // with a real 65-byte raw point + derived shared secret;
+                // this arm is the one that refuses. Recorded as
+                // LEGAL-ECDH-KEM-CURVE-COVERAGE-SECP256K1 in
+                // exceptions.json, same shape as brainpool's curve coverage
+                // — a product scope choice, not a spec requirement (v3.2
+                // §6.3.17 Table 78 names no required curve set) — pending a
+                // decision on whether to add support here instead.
                 _ => return CKR_CURVE_NOT_SUPPORTED,
             };
             if p_ciphertext.is_null() {
@@ -10415,12 +10456,12 @@ pub fn C_DeriveKey(
                 // is 0, and so is the count in the v3.2 Standard's own text.
                 // That leaves three parties:
                 //
-                //   src/lib/pkcs11/pkcs11t.h:2139  pNext, flags, index
+                //   src/lib/pkcs11/pkcs11t.h:2148  pNext, flags, index
                 //                                  (24 bytes LP64 / 12 wasm32)
                 //   the C++ engine                 follows the header exactly,
                 //                                  and rejects any other
                 //                                  ulParameterLen outright
-                //                                  (SoftHSM_keygen.cpp:3010)
+                //                                  (SoftHSM_keygen.cpp:3222)
                 //   this engine + the hub's TS     two u32s, 8 bytes, no pNext
                 //   playground                     (helpers.ts
                 //                                  buildBIP32ChildDeriveParams)
@@ -11161,7 +11202,7 @@ pub fn C_DeriveKey(
                 } else {
                     // PKCS#11 v3.2 §6.62.3: "Either bExtract or bExpand must
                     // be set to true" — matches the C++ engine's equivalent
-                    // gate (SoftHSM_keygen.cpp:4211).
+                    // gate (SoftHSM_keygen.cpp:4341).
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
                 out
@@ -12717,21 +12758,30 @@ pub fn C_UnwrapKeyAuthenticated(
         // Set key material from unwrap operation
         attrs.insert(CKA_VALUE, key_value);
 
-        // D-2 — §6.7: "For wrapping, a private key is BER-encoded according to
-        // [PKCS #8] PrivateKeyInfo." So for a private key what the unwrap just
-        // produced is DER, not the raw value this engine stores and signs
-        // with, and §6.3.10 says the mechanism contributes CKA_CLASS,
-        // CKA_KEY_TYPE, CKA_EC_PARAMS and CKA_VALUE to the new object.
-        // Previously the DER was stored verbatim, the key type fell through to
-        // the CKK_AES default below, and CKA_EC_PARAMS was never stamped — so
-        // a private key wrapped by the C++ engine (or by this one) was
-        // unusable after unwrapping, and could not even be identified.
-        //
-        // Attempted when the template says CKO_PRIVATE_KEY, or says nothing
-        // and the payload positively parses as a recognised PrivateKeyInfo.
-        // The parser returns None for anything it does not recognise — RSA
-        // included, since this engine's stored RSA form already IS a
-        // PrivateKeyInfo — so a secret key's bytes are never disturbed.
+        // CORRECTED 2026-09-07 (phase-5 §6 comment sweep): this paragraph was
+        // copied from the plain C_UnwrapKey arm above, where it is accurate.
+        // It is NOT accurate here: under CKM_AES_GCM authenticated wrap,
+        // NEITHER engine transports a private key as PKCS#8 -- both move the
+        // RAW key value (C++'s C_WrapKeyAuthenticated encrypts CKA_VALUE
+        // directly, SoftHSM_keygen.cpp:2608-2621; this engine's own
+        // C_WrapKeyAuthenticated calls plain get_object_value, never
+        // pkcs8_private_key_info, unlike the plain-wrap arm which does). So
+        // the PKCS#8 parse below is inert for a genuine CKM_AES_GCM round
+        // trip -- harmless (`parse_pkcs8_private_key_info` returns None on a
+        // raw scalar, so the `if let` simply does nothing), but the comment
+        // hid a real, suspected-but-not-yet-scenario-confirmed gap: C++'s
+        // accept side for a raw scalar (`setECPrivateKey`,
+        // SoftHSM_keygen.cpp:8872-8879) only recognises exactly 32 or 48
+        // bytes (P-256/P-384). `setEDPrivateKey` (Edwards/Montgomery,
+        // SoftHSM_keygen.cpp:8936) has no raw-scalar path at all, and P-521's
+        // 66-byte scalar matches neither size -- both fall through to
+        // PKCS8Decode(), which a raw scalar is not. So a private key this
+        // engine (or C++ itself) wraps under CKM_AES_GCM for anything but
+        // P-256/P-384 EC may be unrecoverable on C++'s unwrap side. Needs a
+        // differential scenario (none exists today -- neither
+        // WrapKeyAuthenticated nor UnwrapKeyAuthenticated appears anywhere in
+        // tests/differential/) before treating this as more than a
+        // code-reading finding.
         let template_class = attrs
             .get(&CKA_CLASS)
             .filter(|v| v.len() >= 4)
@@ -24366,7 +24416,7 @@ mod param_struct_width_tests {
     //
     // Adjudication, 2026-08-14. BIP32 is a PQCToday vendor extension
     // (CKM_VENDOR_DEFINED | 0x105c) and appears nowhere in the OASIS header or
-    // the v3.2 text, so `src/lib/pkcs11/pkcs11t.h:2139` is the only definition
+    // the v3.2 text, so `src/lib/pkcs11/pkcs11t.h:2148` is the only definition
     // there is — and the C++ engine already implements exactly it. This engine
     // read two u32s at offsets 0 and 4, taking pNext as flags. The header
     // wins; these tests pin that.
