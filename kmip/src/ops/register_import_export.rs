@@ -570,7 +570,7 @@ pub fn register(
     let mut extractable: Option<bool> = None;
     for a in &req.attributes {
         match a {
-            Attribute::Custom { name, value } => {
+            Attribute::Custom { name, value, .. } => {
                 custom_attributes.insert(name.clone(), value.clone());
             }
             Attribute::Sensitive(b)   => { sensitive = Some(*b); }

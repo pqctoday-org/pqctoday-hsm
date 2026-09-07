@@ -2896,6 +2896,7 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
             let inner = expect_structure(frame, "Attribute")?;
             let mut name = String::new();
             let mut value = CustomAttributeValue::Text(String::new());
+            let mut vendor: Option<String> = None;
             for c in inner {
                 match c.tag.0 {
                     tags::AttributeName => {
@@ -2926,10 +2927,20 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                             _ => CustomAttributeValue::Text(String::new()),
                         };
                     }
-                    _ => {} // VendorIdentification + future fields ignored in v0.1
+                    // G9 (2026-09-06) — §4.70 identifies a vendor attribute
+                    // by the PAIR (Vendor Identification, Attribute Name).
+                    // This was discarded, so two vendors' attributes with the
+                    // same name were indistinguishable and the server echoed
+                    // "x" back regardless of what the client actually sent.
+                    tags::VendorIdentification => {
+                        if let Value::TextString(v) = &c.value {
+                            vendor = Some(v.clone());
+                        }
+                    }
+                    _ => {}
                 }
             }
-            Attribute::Custom { name, value }
+            Attribute::Custom { vendor, name, value }
         }
         // KMIP 3.0 §11 string-attribute decode arms — needed so that
         // AddAttribute / ModifyAttribute requests carrying these
@@ -5194,10 +5205,13 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             Tag(tags::Name),
             Value::TextString(s.clone()),
         ),
-        Attribute::Custom { name, value } => {
+        Attribute::Custom { vendor, name, value } => {
             // KMIP 3.0 §11 — Vendor-extension Custom attribute envelope:
             // Attribute Structure { VendorIdentification, AttributeName,
-            // AttributeValue }. v0.1 defaults VendorIdentification to "x".
+            // AttributeValue }. G9 — the client's own Vendor Identification is
+            // echoed when it sent one; "x" is the §4.70 default for a
+            // client-created attribute, not a value to impose on one that
+            // named its vendor.
             // BL-M-14 / SKFF-M-9 GetAttributes responses pin this shape.
             // AttributeValue's TTLV item type mirrors what the client
             // originally sent (mirrors the decode side) — an Integer- or
@@ -5211,7 +5225,10 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
                 CustomAttributeValue::Boolean(b) => Value::Boolean(*b),
             };
             TtlvFrame::new(Tag(tags::Attribute), Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::VendorIdentification), Value::TextString("x".into())),
+                TtlvFrame::new(
+                    Tag(tags::VendorIdentification),
+                    Value::TextString(vendor.clone().unwrap_or_else(|| "x".into())),
+                ),
                 TtlvFrame::new(Tag(tags::AttributeName), Value::TextString(name.clone())),
                 TtlvFrame::new(Tag(tags::AttributeValue), value_frame),
             ]))
@@ -7781,5 +7798,53 @@ mod tests {
             )]),
         );
         assert_eq!(decode_attributes_block(&ok).unwrap().len(), 1);
+    }
+
+    /// G9 (2026-09-06) — §4.70 identifies a vendor attribute by the PAIR
+    /// (Vendor Identification, Attribute Name). The decoder discarded the
+    /// vendor and the encoder hard-coded `"x"`, so two vendors' attributes
+    /// with the same name were indistinguishable, and the server echoed an
+    /// identity the client had never set.
+    #[test]
+    fn vendor_identification_round_trips_instead_of_becoming_x() {
+        let sent = TtlvFrame::new(
+            Tag(tags::Attribute),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::VendorIdentification), Value::TextString("acme".into())),
+                TtlvFrame::new(Tag(tags::AttributeName), Value::TextString("Barcode".into())),
+                TtlvFrame::new(Tag(tags::AttributeValue), Value::TextString("A-1".into())),
+            ]),
+        );
+        let decoded = decode_attribute_v3(&sent).unwrap().expect("a vendor attribute decodes");
+        match &decoded {
+            Attribute::Custom { vendor, name, .. } => {
+                assert_eq!(vendor.as_deref(), Some("acme"), "the client's vendor must survive");
+                assert_eq!(name, "Barcode");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+
+        // ...and comes back out as "acme", not "x".
+        let reencoded = encode_attribute_v3(&decoded);
+        let kids = match &reencoded.value {
+            Value::Structure(k) => k,
+            v => panic!("expected a Structure, got {v:?}"),
+        };
+        let vid = kids.iter().find(|f| f.tag.0 == tags::VendorIdentification).expect("vendor present");
+        assert_eq!(vid.value, Value::TextString("acme".into()));
+
+        // A client that names no vendor still gets §4.70's "x" default, which
+        // is what the BL-M-14 / TL-M-3 transcripts pin.
+        let anon = Attribute::Custom {
+            vendor: None,
+            name: "Barcode".into(),
+            value: CustomAttributeValue::Text("A-1".into()),
+        };
+        let kids = match &encode_attribute_v3(&anon).value {
+            Value::Structure(k) => k.clone(),
+            v => panic!("expected a Structure, got {v:?}"),
+        };
+        let vid = kids.iter().find(|f| f.tag.0 == tags::VendorIdentification).unwrap();
+        assert_eq!(vid.value, Value::TextString("x".into()));
     }
 }

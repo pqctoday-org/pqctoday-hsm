@@ -282,7 +282,7 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     }
     // Custom attributes — surface each as Attribute::Custom.
     for (name, value) in &r.custom_attributes {
-        out.push(Attribute::Custom { name: name.clone(), value: value.clone() });
+        out.push(Attribute::Custom { vendor: None, name: name.clone(), value: value.clone() });
     }
 
     // K3 — group membership is emitted as `Group Link` (0x4201b3, a Name

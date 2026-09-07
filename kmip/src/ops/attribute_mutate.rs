@@ -855,7 +855,7 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::ObjectType(_)             => {}  // Read-Only
         Attribute::State(_)                  => {}  // Read-Only
         Attribute::UniqueIdentifier(_)       => {}  // Read-Only
-        Attribute::Custom { name, value }    => {
+        Attribute::Custom { name, value, .. }    => {
             obj.custom_attributes.insert(name.clone(), value.clone());
         }
         // KMIP §11 Link attributes — UID references into the

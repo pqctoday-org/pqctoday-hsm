@@ -452,7 +452,7 @@ fn build_filters(attrs: &[Attribute]) -> Result<LocateFilters> {
             Attribute::DeactivationDate(t) => f.deactivation_date.push(*t),
             // G7 — vendor/custom attributes (§4.70). The corpus filters by
             // these in its Tape Library steps.
-            Attribute::Custom { name, value } => {
+            Attribute::Custom { name, value, .. } => {
                 if let crate::kmip30::CustomAttributeValue::Text(v) = value {
                     f.custom.push((name.clone(), v.clone()));
                 }

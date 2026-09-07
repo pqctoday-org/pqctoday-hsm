@@ -452,7 +452,7 @@ pub fn raw_custom_attrs(
     use crate::kmip30::Attribute;
     let mut m = std::collections::HashMap::new();
     for a in attrs {
-        if let Attribute::Custom { name, value } = a {
+        if let Attribute::Custom { name, value, .. } = a {
             m.insert(name.clone(), value.clone());
         }
     }

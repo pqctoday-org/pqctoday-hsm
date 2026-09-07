@@ -293,7 +293,22 @@ pub enum Attribute {
     /// `VendorIdentification` + `AttributeName` + `AttributeValue`
     /// envelope — e.g. the OASIS TL-M-2/TL-M-3 conformance transcripts'
     /// `Barcode`, `VendorAttribute1-3`). Both ride the same wire shape.
-    Custom { name: String, value: CustomAttributeValue },
+    Custom {
+        /// §4.70 `Vendor Identification`. A vendor attribute is identified by
+        /// the PAIR (Vendor Identification, Attribute Name) — two vendors may
+        /// legitimately use the same name. Until 2026-09-06 (G9) this was
+        /// dropped on decode and hard-coded to `"x"` on encode, so the pair
+        /// collapsed to the name and the server echoed an identity the client
+        /// had not set.
+        ///
+        /// `None` means the client sent none. §4.70 reserves `"x"` for
+        /// client-created and `"y"` for server-created attributes; `"x"`
+        /// remains the emitted default in that case, which is what the
+        /// BL-M-14 / SKFF-M-9 / TL-M-3 transcripts pin.
+        vendor: Option<String>,
+        name: String,
+        value: CustomAttributeValue,
+    },
 
     // ── KMIP Profiles v3.0 §5.1.2 Baseline Server attributes ──────────
     //
