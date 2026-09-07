@@ -155,3 +155,39 @@ The alternative I recommended — keeping the SoftHSM2 store indefinitely — wa
 ### Immediate scope
 
 Only Phase 1 proceeds now: PIN-derived encryption of the Rust snapshot. Phases 2-5 are deferred behind the PKCS#11 work.
+
+
+---
+
+## 8. CORRECTION (2026-09-07) — §1 and Phase 1 were wrong
+
+**Rust already has encryption at rest, and it already mirrors C++.** §1's table and Phase 1 were built on a stale code comment, and the urgency attached to them was mistaken.
+
+`rust/src/store/` is the native encrypted-at-rest persistence path for the engine's own key material:
+
+- one random AES-256 master key per token, wrapped **independently under the SO PIN and the User PIN**, so either login unlocks the same key;
+- PBKDF2-HMAC-SHA256 at **210,000** iterations — deliberately higher than the 10k used for login verification, because this protects long-lived key material rather than gating one login attempt;
+- **AES-256-GCM**, chosen over C++'s CBC-without-authentication so a wrong PIN fails a tag check instead of decrypting to garbage;
+- the master key is never written unwrapped, and is cached only after a successful login;
+- private objects are encrypted wholesale, matching C++'s `SecureDataManager`/`DBObject` split;
+- rehydration is split so an unauthenticated session never holds private object bytes — a consequence of the design, not an extra check.
+
+Its module doc states the `SecureDataManager` correspondence outright.
+
+### What went wrong
+
+The comment at `ffi.rs:353` claimed that "unlike the C++ engine's token directory (PIN-derived encryption of sensitive attributes), this snapshot is plaintext at rest". That half-sentence has been **false since `crate::store` landed**, and I quoted it as current evidence instead of checking. It cost a wrong finding, a wrong urgency, and a half-built duplicate key hierarchy — a second KEK, salt and wrap/unwrap parallel to one that already existed and was better. Two competing crypto hierarchies in one engine is a hazard, not merely waste.
+
+The stale comment has been corrected in place, since leaving it would mislead the next reader exactly as it misled this one. **This is the same defect class as item H2** — prose that was true when written and decayed as the code moved — and it is the second time today it has caused real damage. H2 swept `exceptions.json`; **code comments are the same hazard and were not swept.**
+
+### Revised position
+
+| | Status |
+|---|---|
+| Native Rust store | **Encrypted at rest, mirrors C++.** No gap. |
+| C++ store | Encrypted at rest. No gap. |
+| WASM/emscripten snapshot blob | Plaintext. A **different target and threat model** — the host holds the blob, there is no filesystem in the browser case, and it is reachable on native only through an opt-in env var. |
+
+**P-1 as written is void.** What remains is narrower and genuinely open: should the wasm snapshot be encrypted, or gated harder? That deserves its own answer rather than inheriting the urgency of a gap that does not exist.
+
+Everything else in this plan is unaffected — the two formats *are* unrelated, and the agility analysis in §3 stands on its own.

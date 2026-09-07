@@ -355,10 +355,30 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     // same reasoning, same ordering (must run before the cleanup pass
     // below), gated on the same opt-in env var C_Initialize checks rather
     // than a build-time cfg, since this is a deliberate dev/test opt-in
-    // for any native build, not an embedding-specific requirement. Honest
-    // limitation, not hidden: unlike the C++ engine's token directory
-    // (PIN-derived encryption of sensitive attributes), this snapshot is
-    // plaintext at rest — a dev/test persistence surface, not production.
+    // for any native build, not an embedding-specific requirement.
+    //
+    // NOTE CORRECTED 2026-09-07. This comment used to say that, "unlike the
+    // C++ engine's token directory (PIN-derived encryption of sensitive
+    // attributes), this snapshot is plaintext at rest". The first half of
+    // that has been WRONG since `crate::store` landed, and reading it as
+    // current wastes a reader's time — it did exactly that today, and nearly
+    // caused a second, competing key hierarchy to be built alongside the one
+    // that already exists.
+    //
+    // What is actually true: `crate::store` IS the encrypted-at-rest
+    // persistence path for engine key material, and it already mirrors the
+    // C++ engine's SecureDataManager — one random AES-256 master key per
+    // token, wrapped under both the SO and User PINs, PBKDF2-HMAC-SHA256 at
+    // 210k iterations, AES-256-GCM, master key never written unwrapped, and
+    // private objects loaded only after the login that unwraps it. See
+    // store/mod.rs and store/crypto.rs.
+    //
+    // THIS blob is a different thing: the wasm/emscripten rehydration
+    // mechanism, reachable on native builds only through this opt-in env
+    // var, and it is plaintext. Whether it should be encrypted too is a real
+    // but separate question with its own threat model (the host holds the
+    // blob; there is no filesystem in the browser case) — it is NOT the
+    // native store, and it is not the C++ comparison this note used to draw.
     // Best-effort write, matching stash_before_finalize's own pattern.
     if let Ok(path) = std::env::var("SOFTHSMRUST_STATE_FILE") {
         let blob = crate::state_snapshot::serialize_token_state();
