@@ -1501,6 +1501,60 @@ CK_RV P11AttrNameHashAlgorithm::updateAttr(Token* /*token*/, bool /*isPrivate*/,
 }
 
 /*****************************************
+ * CKA_HASH_OF_CERTIFICATE
+ *****************************************/
+
+// Set default value
+bool P11AttrHashOfCertificate::setDefault()
+{
+	// §4.7 Table 25 — "default empty".
+	OSAttribute attr(ByteString(""));
+	return osobject->setAttribute(type, attr);
+}
+
+/*****************************************
+ * CKA_TRUST_* (CK_TRUST usages)
+ *****************************************/
+
+// Set default value
+bool P11AttrTrustValue::setDefault()
+{
+	// §4.7 Table 25 footnote 3 — "Missing CKA_TRUST_XXX attributes are treated
+	// as CKT_TRUST_UNKNOWN", so that is also the materialised default.
+	OSAttribute attr((unsigned long)CKT_TRUST_UNKNOWN);
+	return osobject->setAttribute(type, attr);
+}
+
+// Update the value if allowed
+CK_RV P11AttrTrustValue::updateAttr(Token* /*token*/, bool /*isPrivate*/, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int /*op*/)
+{
+	if (ulValueLen != sizeof(CK_ULONG))
+	{
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+
+	// CK_TRUST is a closed set of five values (§4.7). A usage this token does
+	// not recognise is a caller error, not something to store and hand back
+	// later as though it meant something.
+	const CK_ULONG value = *(CK_ULONG*)pValue;
+	switch (value)
+	{
+		case CKT_TRUST_UNKNOWN:
+		case CKT_TRUSTED:
+		case CKT_TRUST_ANCHOR:
+		case CKT_NOT_TRUSTED:
+		case CKT_TRUST_MUST_VERIFY_TRUST:
+			break;
+		default:
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+
+	osobject->setAttribute(type, value);
+
+	return CKR_OK;
+}
+
+/*****************************************
  * CKA_DERIVE
  *****************************************/
 

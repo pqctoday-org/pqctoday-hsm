@@ -1115,6 +1115,77 @@ add({"errors.create_profile_object", "errors",
          r.rv("create_profile", e.fl->C_CreateObject(s, t, 3, &h));
      }});
 
+add({"create.trust_object", "create",
+     "§4.7 Table 25: CKO_TRUST mandatory attributes, CK_TRUST domain and prose defaults",
+     {}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_OBJECT_CLASS cl = CKO_TRUST;
+         CK_BYTE issuer[] = "CN=Differential Root CA";
+         CK_BYTE serial[] = { 0x01, 0x02, 0x03 };
+         CK_BYTE certHash[20]; memset(certHash, 0xab, sizeof certHash);
+         CK_ULONG trusted = CKT_TRUSTED;
+         CK_ULONG notTrusted = CKT_NOT_TRUSTED;
+         CK_ULONG bogus = 99;
+
+         // Footnote 1 — CKA_ISSUER and CKA_SERIAL_NUMBER identify the
+         // certificate; without them the object asserts trust about nothing.
+         {
+             CK_ATTRIBUTE t[] = {
+                 ATTR(CKA_CLASS,         &cl,     sizeof cl),
+                 ATTR(CKA_SERIAL_NUMBER, serial,  sizeof serial),
+             };
+             CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+             r.rv("create_no_issuer", e.fl->C_CreateObject(s, t, 2, &h));
+         }
+         // Footnote 2 — asserting CKT_TRUSTED without saying WHICH cert.
+         {
+             CK_ATTRIBUTE t[] = {
+                 ATTR(CKA_CLASS,             &cl,      sizeof cl),
+                 ATTR(CKA_ISSUER,            issuer,   sizeof issuer),
+                 ATTR(CKA_SERIAL_NUMBER,     serial,   sizeof serial),
+                 ATTR(CKA_TRUST_SERVER_AUTH, &trusted, sizeof trusted),
+             };
+             CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+             r.rv("create_trusted_without_hash", e.fl->C_CreateObject(s, t, 4, &h));
+         }
+         // ...but an object that vouches for NOTHING is exempt.
+         {
+             CK_ATTRIBUTE t[] = {
+                 ATTR(CKA_CLASS,             &cl,         sizeof cl),
+                 ATTR(CKA_ISSUER,            issuer,      sizeof issuer),
+                 ATTR(CKA_SERIAL_NUMBER,     serial,      sizeof serial),
+                 ATTR(CKA_TRUST_SERVER_AUTH, &notTrusted, sizeof notTrusted),
+             };
+             CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+             r.rv("create_not_trusted_no_hash", e.fl->C_CreateObject(s, t, 4, &h));
+         }
+         // CK_TRUST is a closed set of five values.
+         {
+             CK_ATTRIBUTE t[] = {
+                 ATTR(CKA_CLASS,                &cl,      sizeof cl),
+                 ATTR(CKA_ISSUER,               issuer,   sizeof issuer),
+                 ATTR(CKA_SERIAL_NUMBER,        serial,   sizeof serial),
+                 ATTR(CKA_HASH_OF_CERTIFICATE,  certHash, sizeof certHash),
+                 ATTR(CKA_TRUST_IPSEC_IKE,      &bogus,   sizeof bogus),
+             };
+             CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+             r.rv("create_out_of_domain_trust_value", e.fl->C_CreateObject(s, t, 5, &h));
+         }
+         // The fully-specified form, then its attributes.
+         {
+             CK_ATTRIBUTE t[] = {
+                 ATTR(CKA_CLASS,               &cl,      sizeof cl),
+                 ATTR(CKA_ISSUER,              issuer,   sizeof issuer),
+                 ATTR(CKA_SERIAL_NUMBER,       serial,   sizeof serial),
+                 ATTR(CKA_HASH_OF_CERTIFICATE, certHash, sizeof certHash),
+                 ATTR(CKA_TRUST_SERVER_AUTH,   &trusted, sizeof trusted),
+             };
+             CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+             r.rv("create_full", e.fl->C_CreateObject(s, t, 5, &h));
+             if (h != CK_INVALID_HANDLE) record_attrs(e, r, "trust", s, h);
+         }
+     }});
+
 add({"errors.unwrap_garbage", "errors",
      "An unwrap of non-ciphertext must fail, and with a wrapped-key code",
      {CKM_AES_KEY_WRAP}, true, true,

@@ -432,6 +432,57 @@ bool P11ProfileObj::init(OSObject *inobject)
 	return true;
 }
 
+// Constructor
+P11TrustObj::P11TrustObj()
+{
+	initialized = false;
+}
+
+// Add attributes
+bool P11TrustObj::init(OSObject *inobject)
+{
+	if (initialized) return true;
+	if (inobject == NULL) return false;
+
+	// Create parent
+	if (!P11Object::init(inobject)) return false;
+
+	// §4.7 Table 25. CKA_ISSUER + CKA_SERIAL_NUMBER identify the certificate;
+	// CKA_HASH_OF_CERTIFICATE (computed with CKA_NAME_HASH_ALGORITHM, which
+	// defaults to SHA-1) confirms it; the seven CKA_TRUST_* usages carry the
+	// actual assertions. Creation-time mandatory-attribute rules live in
+	// SoftHSM::CreateObject, where the whole template is visible.
+	P11Attribute* attrs[] = {
+		new P11AttrIssuer(osobject),
+		new P11AttrSerialNumber(osobject),
+		new P11AttrHashOfCertificate(osobject),
+		new P11AttrNameHashAlgorithm(osobject),
+		new P11AttrTrustValue(osobject, CKA_TRUST_SERVER_AUTH),
+		new P11AttrTrustValue(osobject, CKA_TRUST_CLIENT_AUTH),
+		new P11AttrTrustValue(osobject, CKA_TRUST_CODE_SIGNING),
+		new P11AttrTrustValue(osobject, CKA_TRUST_EMAIL_PROTECTION),
+		new P11AttrTrustValue(osobject, CKA_TRUST_IPSEC_IKE),
+		new P11AttrTrustValue(osobject, CKA_TRUST_TIME_STAMPING),
+		new P11AttrTrustValue(osobject, CKA_TRUST_OCSP_SIGNING),
+	};
+
+	for (size_t i = 0; i < sizeof(attrs) / sizeof(attrs[0]); ++i)
+	{
+		if (!attrs[i]->init())
+		{
+			ERROR_MSG("Could not initialize a trust-object attribute");
+			// Free the one that failed and every one not yet handed over.
+			for (size_t j = i; j < sizeof(attrs) / sizeof(attrs[0]); ++j)
+				delete attrs[j];
+			return false;
+		}
+		attributes[attrs[i]->getType()] = attrs[i];
+	}
+
+	initialized = true;
+	return true;
+}
+
 P11DataObj::P11DataObj()
 {
 	initialized = false;

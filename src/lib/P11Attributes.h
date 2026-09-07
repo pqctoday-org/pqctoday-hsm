@@ -678,6 +678,49 @@ protected:
 };
 
 /*****************************************
+ * CKA_HASH_OF_CERTIFICATE
+ *****************************************/
+
+// C2 (2026-09-07) — PKCS#11 v3.2 §4.7 Table 25. The cryptographic hash of the
+// certificate a trust object speaks about, computed with the mechanism named
+// by CKA_NAME_HASH_ALGORITHM. Default empty, per the table.
+class P11AttrHashOfCertificate : public P11Attribute
+{
+public:
+	// Constructor
+	P11AttrHashOfCertificate(OSObject* inobject) : P11Attribute(inobject) { type = CKA_HASH_OF_CERTIFICATE; checks = ck8; }
+
+protected:
+	// Set the default value of the attribute
+	virtual bool setDefault();
+};
+
+/*****************************************
+ * CKA_TRUST_* (the seven CK_TRUST usages)
+ *****************************************/
+
+// C2 (2026-09-07) — §4.7 Table 25 defines seven CKA_TRUST_XXX attributes that
+// differ only in which usage they describe, so they share one class rather
+// than being copy-pasted seven times. CK_TRUST is a closed set of five values
+// and updateAttr rejects anything outside it.
+//
+// Footnote 3: "Missing CKA_TRUST_XXX attributes are treated as
+// CKT_TRUST_UNKNOWN", which is also the default value here.
+class P11AttrTrustValue : public P11Attribute
+{
+public:
+	// Constructor
+	P11AttrTrustValue(OSObject* inobject, CK_ATTRIBUTE_TYPE attrType) : P11Attribute(inobject) { type = attrType; size = sizeof(CK_ULONG); checks = ck8; }
+
+protected:
+	// Set the default value of the attribute
+	virtual bool setDefault();
+
+	// Update the value if allowed
+	virtual CK_RV updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int op);
+};
+
+/*****************************************
  * CKA_DERIVE
  *****************************************/
 

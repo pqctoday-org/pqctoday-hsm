@@ -438,6 +438,23 @@ fn apply_object_defaults(attrs: &mut Attributes) {
         }
     });
     if let Some(class) = obj_class {
+        // §4.7 — a trust object's own defaults are spelled out in prose rather
+        // than in Table 25: "If CKA_MODIFIABLE is not set in the template, it
+        // defaults to CK_TRUE; if CKA_PRIVATE is not set in the template, it
+        // defaults to CK_FALSE." CKA_MODIFIABLE is already handled above for
+        // every class; CKA_PRIVATE was not set for this one at all.
+        //
+        // CKA_NAME_HASH_ALGORITHM's row says it "defaults to SHA-1 if not
+        // present", so materialise that rather than leaving the caller to
+        // guess which hash CKA_HASH_OF_CERTIFICATE was computed with.
+        if class == CKO_TRUST {
+            if !attrs.contains_key(&CKA_PRIVATE) {
+                store_bool(attrs, CKA_PRIVATE, false);
+            }
+            if !attrs.contains_key(&CKA_NAME_HASH_ALGORITHM) {
+                store_ulong(attrs, CKA_NAME_HASH_ALGORITHM, CKM_SHA_1);
+            }
+        }
         // CKA_TRUSTED: public keys + secret keys (object is not trusted-marked by default)
         if (class == CKO_PUBLIC_KEY || class == CKO_SECRET_KEY) && !attrs.contains_key(&CKA_TRUSTED)
         {

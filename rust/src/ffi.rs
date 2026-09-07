@@ -5355,6 +5355,62 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
     {
         return Err(CKR_ATTRIBUTE_READ_ONLY);
     }
+    // §4.7 Table 25 — CKO_TRUST. A trust object binds trusted usages to ONE
+    // specific certificate, and is looked up by `CKA_ISSUER` +
+    // `CKA_SERIAL_NUMBER`; without those it asserts trust about nothing in
+    // particular and can never be found. This class previously had no arm
+    // here at all, so any template was accepted whatever it contained.
+    if class == CKO_TRUST {
+        // Footnote 1 — "MUST be specified when the object is created."
+        if !attrs.contains_key(&CKA_ISSUER) || !attrs.contains_key(&CKA_SERIAL_NUMBER) {
+            return Err(CKR_TEMPLATE_INCOMPLETE);
+        }
+        const TRUST_ATTRS: [u32; 7] = [
+            CKA_TRUST_SERVER_AUTH,
+            CKA_TRUST_CLIENT_AUTH,
+            CKA_TRUST_CODE_SIGNING,
+            CKA_TRUST_EMAIL_PROTECTION,
+            CKA_TRUST_IPSEC_IKE,
+            CKA_TRUST_TIME_STAMPING,
+            CKA_TRUST_OCSP_SIGNING,
+        ];
+        // `CK_TRUST` is a closed set of five values; anything else is a
+        // caller error, not a usage this token merely doesn't understand.
+        //
+        // Footnote 2 makes the certificate hash mandatory "unless all trust
+        // attributes are CKT_TRUST_UNKNOWN, or CKT_NOT_TRUSTED" — i.e. it is
+        // required exactly when the object actually vouches for something,
+        // which is when binding it to the right certificate matters.
+        let mut vouches_for_something = false;
+        for t in TRUST_ATTRS {
+            let Some(v) = attrs.get(&t) else { continue }; // footnote 3
+            if v.len() < 4 {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+            }
+            let value = u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
+            if !matches!(
+                value,
+                CKT_TRUST_UNKNOWN
+                    | CKT_TRUSTED
+                    | CKT_TRUST_ANCHOR
+                    | CKT_NOT_TRUSTED
+                    | CKT_TRUST_MUST_VERIFY_TRUST
+            ) {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+            }
+            if !matches!(value, CKT_TRUST_UNKNOWN | CKT_NOT_TRUSTED) {
+                vouches_for_something = true;
+            }
+        }
+        if vouches_for_something && !attrs.contains_key(&CKA_HASH_OF_CERTIFICATE) {
+            return Err(CKR_TEMPLATE_INCOMPLETE);
+        }
+        // CKA_NAME_HASH_ALGORITHM is footnote-2 as well, but its own row says
+        // it "defaults to SHA-1 if not present" — the only reading on which
+        // both sentences hold is that the caller may omit it and take the
+        // default, so it is materialised in apply_object_defaults rather than
+        // demanded here.
+    }
     // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS is a packed CK_MECHANISM_TYPE[];
     // a length that isn't a whole number of entries is malformed. S9: the
     // element width is the exported ABI's (state::MECHANISM_TYPE_SIZE), the
@@ -15932,6 +15988,117 @@ mod attr_integrity_ffi_tests {
         assert_eq!(
             u32::from_le_bytes([kgm[0], kgm[1], kgm[2], kgm[3]]),
             CKM_UNAVAILABLE_INFORMATION
+        );
+    }
+
+    /// C2 (2026-09-07) — §4.7 Table 25. A trust object binds trusted usages
+    /// to ONE certificate and is looked up by `CKA_ISSUER` +
+    /// `CKA_SERIAL_NUMBER` (footnote 1), so those are mandatory; and
+    /// `CKA_HASH_OF_CERTIFICATE` is mandatory once the object vouches for
+    /// anything (footnote 2), because that is when binding the assertion to
+    /// the right certificate matters.
+    ///
+    /// The class previously had no validation arm at all: any template was
+    /// accepted, and the conformance suite's own WP4a section asserted that
+    /// an illegal one (trust asserted, no certificate hash) succeeded.
+    #[test]
+    fn trust_object_requires_the_attributes_that_identify_its_certificate() {
+        let _guard = test_lock::acquire();
+        setup();
+        let issuer = b"CN=Test Root CA".to_vec();
+        let serial = vec![0x01u8, 0x02, 0x03];
+        let cert_hash = vec![0xabu8; 20];
+
+        let base = |with: &[(u32, Vec<u8>)]| -> Attributes {
+            let mut a = Attributes::new();
+            store_ulong(&mut a, CKA_CLASS, CKO_TRUST);
+            for (t, v) in with {
+                a.insert(*t, v.clone());
+            }
+            a
+        };
+
+        // Footnote 1 — neither identifying attribute may be omitted.
+        assert_eq!(
+            create_object_from_attrs(SESSION, base(&[(CKA_SERIAL_NUMBER, serial.clone())]))
+                .expect_err("no CKA_ISSUER"),
+            CKR_TEMPLATE_INCOMPLETE
+        );
+        assert_eq!(
+            create_object_from_attrs(SESSION, base(&[(CKA_ISSUER, issuer.clone())]))
+                .expect_err("no CKA_SERIAL_NUMBER"),
+            CKR_TEMPLATE_INCOMPLETE
+        );
+
+        // Footnote 2 — asserting trust without saying WHICH certificate.
+        let trusted = crate::constants::CKT_TRUSTED.to_le_bytes().to_vec();
+        assert_eq!(
+            create_object_from_attrs(
+                SESSION,
+                base(&[
+                    (CKA_ISSUER, issuer.clone()),
+                    (CKA_SERIAL_NUMBER, serial.clone()),
+                    (CKA_TRUST_SERVER_AUTH, trusted.clone()),
+                ])
+            )
+            .expect_err("trust asserted with no certificate hash"),
+            CKR_TEMPLATE_INCOMPLETE
+        );
+
+        // ...but an object that vouches for NOTHING is exempt, which is the
+        // whole point of footnote 2's wording.
+        let not_trusted = crate::constants::CKT_NOT_TRUSTED.to_le_bytes().to_vec();
+        create_object_from_attrs(
+            SESSION,
+            base(&[
+                (CKA_ISSUER, issuer.clone()),
+                (CKA_SERIAL_NUMBER, serial.clone()),
+                (CKA_TRUST_SERVER_AUTH, not_trusted),
+            ]),
+        )
+        .expect("NOT_TRUSTED asserts nothing, so no certificate hash is required");
+
+        // CK_TRUST is a closed set of five values.
+        assert_eq!(
+            create_object_from_attrs(
+                SESSION,
+                base(&[
+                    (CKA_ISSUER, issuer.clone()),
+                    (CKA_SERIAL_NUMBER, serial.clone()),
+                    (CKA_HASH_OF_CERTIFICATE, cert_hash.clone()),
+                    (CKA_TRUST_IPSEC_IKE, 99u32.to_le_bytes().to_vec()),
+                ])
+            )
+            .expect_err("99 is not a CK_TRUST value"),
+            CKR_ATTRIBUTE_VALUE_INVALID
+        );
+
+        // The legal, fully-specified form, and its §4.7 prose defaults.
+        let h = create_object_from_attrs(
+            SESSION,
+            base(&[
+                (CKA_ISSUER, issuer),
+                (CKA_SERIAL_NUMBER, serial),
+                (CKA_HASH_OF_CERTIFICATE, cert_hash),
+                (CKA_TRUST_SERVER_AUTH, trusted),
+            ]),
+        )
+        .expect("a fully-specified trust object must be creatable");
+        assert_eq!(
+            obj_bool(h, CKA_PRIVATE),
+            Some(false),
+            "§4.7: CKA_PRIVATE defaults to CK_FALSE on a trust object"
+        );
+        assert_eq!(
+            obj_bool(h, CKA_MODIFIABLE),
+            Some(true),
+            "§4.7: CKA_MODIFIABLE defaults to CK_TRUE"
+        );
+        let alg = obj_attr(h, CKA_NAME_HASH_ALGORITHM).expect("CKA_NAME_HASH_ALGORITHM stored");
+        assert_eq!(
+            u32::from_le_bytes([alg[0], alg[1], alg[2], alg[3]]),
+            crate::constants::CKM_SHA_1,
+            "its row says it defaults to SHA-1 if not present"
         );
     }
 
