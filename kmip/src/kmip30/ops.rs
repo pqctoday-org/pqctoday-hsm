@@ -289,7 +289,7 @@ pub enum QueryFunction {
     // ── G5 (2026-09-06): the nine §11.x functions this server could not
     // even NAME. An unrecognised code made `query_function_from_code`
     // return None, which the decoder turned into `UnknownEnum` — failing
-    // the WHOLE message, not just the unsupported function. §6.1.39 says
+    // the WHOLE message, not just the unsupported function. §6.1.47 says
     // "For each Query Function specified in the request, the corresponding
     // items SHALL be returned in the response"; refusing everything else
     // in the batch was never that.
@@ -304,12 +304,12 @@ pub enum QueryFunction {
     QueryCredentialInformation     = 0x0f,
 }
 
-/// §6.1.39 / §11 `Extension Information` — describes one vendor extension:
+/// §7.14 `Extension Information` — describes one vendor extension:
 /// its name, its tag codepoint, and the item type its value carries.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExtensionInformation {
     pub extension_name: String,
-    /// The `0x54xxxx` tag itself (§11.57 reserves that range for extensions).
+    /// The `0x54xxxx` tag itself (§11.58 reserves that range for extensions).
     pub extension_tag: u32,
     /// TTLV item type of the extension's value, as a §11.25 codepoint.
     pub extension_type: u32,
@@ -318,7 +318,7 @@ pub struct ExtensionInformation {
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryResponse {
     pub operations: Option<Vec<Operation>>,
-    /// §6.1.39 `Extension Information` — one entry per vendor extension this
+    /// §7.14 `Extension Information` — one entry per vendor extension this
     /// server implements (G5). Until 2026-09-06 the two Query functions that
     /// ask for this could not be decoded at all, so a conformant client had
     /// no way to discover the server's extensions; they had to be read out of
@@ -328,7 +328,7 @@ pub struct QueryResponse {
     pub attestation_types: Option<Vec<u32>>,
     /// §4.52 RNG parameters — reported as RNG Algorithm codepoints.
     pub rng_parameters: Option<Vec<u32>>,
-    /// §6.1.39 Validation Information (a server MAY return none).
+    /// §7.42 Validation Information (a server MAY return none).
     pub validation_information: Option<Vec<String>>,
     /// §11.10 Client Registration Methods.
     pub client_registration_methods: Option<Vec<u32>>,
@@ -336,19 +336,19 @@ pub struct QueryResponse {
     pub storage_protection_masks: Option<Vec<u32>>,
     /// §9.9 Credential Types that can actually authenticate.
     pub credential_information: Option<Vec<u32>>,
-    /// §6.1.39 Defaults Information.
+    /// §7.12 Defaults Information.
     pub defaults_information: Option<Vec<String>>,
     pub object_types: Option<Vec<ObjectType>>,
-    /// Top-level child of Query Response Payload per KMIP 3.0 §6.1.39
+    /// Top-level child of Query Response Payload per KMIP 3.0 §6.1.47
     /// (NOT a child of `ServerInformation`). Value-variable per
     /// `kmip-profiles-v3.0` §4.1 Response Variations item 5.
     pub vendor_identification: Option<String>,
-    /// Vendor-extensible structure per §6.1.39. Contents are variable
+    /// Vendor-extensible structure per §6.1.47. Contents are variable
     /// per `kmip-profiles-v3.0` §4.1 Response Variations item 8 — the
     /// comparator skips its interior shape.
     pub server_info: Option<ServerInformation>,
     /// Zero or more `Application Namespace` TextStrings per KMIP 3.0
-    /// §6.1.39 — surfaced when the client passes
+    /// §6.1.47 — surfaced when the client passes
     /// `QueryFunction::QueryApplicationNamespaces`. Values are variable
     /// per §4.1.1 item 14.
     pub application_namespaces: Option<Vec<String>>,
@@ -672,7 +672,7 @@ pub struct EncryptRequest {
     pub data: Vec<u8>,
     /// IV (AES-GCM) or other per-op input. None for ML-KEM.
     pub iv: Option<Vec<u8>>,
-    /// KMIP 3.0 §6.1.21 — per-call override for the key's stored
+    /// KMIP 3.0 §6.1.23 — per-call override for the key's stored
     /// `CryptographicParameters`. When the client supplies
     /// `BlockCipherMode` here, it takes precedence over whatever was
     /// stored at Register/Create time.
@@ -681,14 +681,14 @@ pub struct EncryptRequest {
     /// AAD ("associated data") for AEAD ciphers (AES-GCM, ChaCha20-
     /// Poly1305). Bound into the auth tag computation, NOT encrypted.
     pub aad: Option<Vec<u8>>,
-    /// KMIP 3.0 §6.1.21 multi-part streaming — `Init Indicator` opens a
+    /// KMIP 3.0 §6.1.23 multi-part streaming — `Init Indicator` opens a
     /// stream: the server returns a `Correlation Value` instead of
     /// finalising. CS-BC-M-GCM-3 pins the GCM streaming flow.
     pub init_indicator: Option<bool>,
-    /// §6.1.21 — `Final Indicator` closes the stream identified by
+    /// §6.1.23 — `Final Indicator` closes the stream identified by
     /// `correlation_value`; the response carries the AEAD tag.
     pub final_indicator: Option<bool>,
-    /// §6.1.21 — server-issued handle chaining the parts of one stream.
+    /// §6.1.23 — server-issued handle chaining the parts of one stream.
     pub correlation_value: Option<Vec<u8>>,
 }
 
@@ -708,12 +708,12 @@ pub struct EncryptResponse {
     /// mechanism produces a separate tag — for non-AEAD modes (ECB /
     /// CBC / CBC_PAD) this is `None`.
     pub authenticated_encryption_tag: Option<Vec<u8>>,
-    /// KMIP 3.0 §6.1.21 — the IV/Counter/Nonce the server generated when
+    /// KMIP 3.0 §6.1.23 — the IV/Counter/Nonce the server generated when
     /// the key's `CryptographicParameters.RandomIV` was true. Echoed
     /// back so the client can use it for the subsequent Decrypt.
     /// `None` when the client supplied the IV (or the mech is keyless).
     pub iv_counter_nonce: Option<Vec<u8>>,
-    /// §6.1.21 streaming — echoed on every non-final part so the client
+    /// §6.1.23 streaming — echoed on every non-final part so the client
     /// can chain the next request. `None` for single-part ops and on
     /// the final part.
     pub correlation_value: Option<Vec<u8>>,
@@ -745,7 +745,7 @@ pub struct DecryptRequest {
     /// encapsulation bytes.
     pub data: Vec<u8>,
     pub iv: Option<Vec<u8>>,
-    /// KMIP 3.0 §6.1.21 — per-call override for the key's stored
+    /// KMIP 3.0 §6.1.23 — per-call override for the key's stored
     /// `CryptographicParameters`. See [`EncryptRequest`].
     pub cryptographic_parameters: Option<CryptographicParameters>,
     /// KMIP 3.0 §11 `Authenticated Encryption Additional Data`. See
@@ -753,7 +753,7 @@ pub struct DecryptRequest {
     /// at encryption time or the AEAD tag check will fail.
     pub aad: Option<Vec<u8>>,
 
-    // ── §6.1.21 multi-part (G6, 2026-09-06) ──────────────────────────────
+    // ── §6.1.16 multi-part (G6, 2026-09-06) ──────────────────────────────
     //
     // These three existed on `EncryptRequest` but not here, and the Decrypt
     // decoder dropped the tags. A client doing a multi-part Decrypt was
@@ -775,7 +775,7 @@ pub struct DecryptResponse {
     /// For classical decrypt: the plaintext. For ML-KEM decapsulation: the
     /// derived shared secret.
     pub data: Vec<u8>,
-    /// §6.1.21 multi-part — present on the opening and middle parts, absent
+    /// §6.1.16 multi-part — present on the opening and middle parts, absent
     /// on the final one. Mirrors `EncryptResponse::correlation_value`.
     pub correlation_value: Option<Vec<u8>>,
 }
@@ -1030,7 +1030,7 @@ pub struct ReCertifyResponse {
 
 // ── Group B: attribute family (KMIP 3.0 §6.1) ──────────────────────────────
 
-/// `GetAttributes` (§6.1.21) — read named attributes from one managed
+/// `GetAttributes` (§6.1.26) — read named attributes from one managed
 /// object. An empty `attribute_references` list means "all attributes".
 #[derive(Clone, Debug, PartialEq)]
 pub struct GetAttributesRequest {

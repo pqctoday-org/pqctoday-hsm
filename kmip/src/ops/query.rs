@@ -84,7 +84,7 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
                 });
             }
             QueryFunction::QueryApplicationNamespaces => {
-                // KMIP 3.0 §6.1.39 — a Baseline server MAY surface
+                // KMIP 3.0 §6.1.47 — a Baseline server MAY surface
                 // supported application namespaces when asked.
                 // Profiles v3.0 §4.1.1 item 14 marks the value as
                 // variable AND optional; emitting an empty list keeps
@@ -103,7 +103,7 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
             }
             // ── G5 (2026-09-06) ──────────────────────────────────────
             //
-            // §6.1.39: "For each Query Function specified in the request, the
+            // §6.1.47: "For each Query Function specified in the request, the
             // corresponding items SHALL be returned in the response." These
             // nine could not previously be DECODED, so asking for any of them
             // failed the WHOLE message rather than that one function.
@@ -135,7 +135,7 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
                 resp.rng_parameters = Some(vec![0x01]);
             }
             QueryFunction::QueryValidations => {
-                // §6.1.39: "A server MAY elect to return no validation
+                // §6.1.47: "A server MAY elect to return no validation
                 // information." There is none to claim.
                 resp.validation_information = Some(Vec::new());
             }
@@ -447,7 +447,7 @@ mod tests {
     ///
     /// Nine of them could not previously be DECODED, so `query_function_from_code`
     /// returned None, the decoder raised `UnknownEnum`, and the WHOLE message
-    /// failed — not just the unsupported function. §6.1.39 says "For each
+    /// failed — not just the unsupported function. §6.1.47 says "For each
     /// Query Function specified in the request, the corresponding items SHALL
     /// be returned in the response".
     #[test]
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(exts[0].extension_tag, crate::kmip30::vendor_tags::PQCTODAY_SHARED_SECRET);
         assert!(
             (0x54_0000..=0x54_FFFF).contains(&exts[0].extension_tag),
-            "§11.57 reserves 0x540000-0x54FFFF for extensions",
+            "§11.58 reserves 0x540000-0x54FFFF for extensions",
         );
 
         // "None" is answered as an EMPTY list, not an omission — the

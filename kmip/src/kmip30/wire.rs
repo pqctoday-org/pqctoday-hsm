@@ -136,13 +136,13 @@ pub(crate) mod tags {
     pub const RevocationReasonCode: u32   = 0x42_0082;
     pub const ServerInformation: u32      = 0x42_0088;
     pub const ServerVersion: u32          = 0x42_012f;
-    /// KMIP 3.0 §6.1.39 — `Application Namespace` TextString (zero or
+    /// KMIP 3.0 §6.1.47 — `Application Namespace` TextString (zero or
     /// more) returned for `QueryFunction::QueryApplicationNamespaces`.
     pub const ApplicationNamespace: u32   = 0x42_0003;
     // ── K3 — Query Profiles / Capabilities reporting (§6.1.47) ─────────
     // Codepoints verified from `kmip-spec-3.0-tags-enums.json`.
     pub const ProfileInformation: u32     = 0x42_00eb;
-    /// §6.1.39 Extension Information (G5).
+    /// §7.14 Extension Information (G5).
     pub const ExtensionInformation: u32 = 0x42_00a4;
     pub const ExtensionName: u32 = 0x42_00a5;
     pub const ExtensionTag: u32 = 0x42_00a6;
@@ -454,7 +454,7 @@ pub(crate) mod tags {
     pub const Pkcs11OutputParameters: u32 = 0x42_015c;
     pub const Pkcs11ReturnCode: u32       = 0x42_015d;
     pub const CorrelationValue: u32       = 0x42_00d6;
-    // KMIP 3.0 §6.1.21 multi-part streaming (verified from
+    // KMIP 3.0 §6.1.23 multi-part streaming (verified from
     // kmip-spec-3.0-tags-enums.json: Init Indicator = 0x4200d7,
     // Final Indicator = 0x4200d8).
     pub const InitIndicator: u32          = 0x42_00d7;
@@ -1955,7 +1955,7 @@ fn encode_query_resp(r: &QueryResponse) -> Vec<TtlvFrame> {
         }
     }
     // VendorIdentification is a top-level child of the Query response
-    // payload per KMIP 3.0 §6.1.39, not nested inside ServerInformation.
+    // payload per KMIP 3.0 §6.1.47, not nested inside ServerInformation.
     if let Some(vendor) = &r.vendor_identification {
         out.push(TtlvFrame::new(
             Tag(tags::VendorIdentification),
@@ -2465,7 +2465,7 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
-            // KMIP 3.0 §6.1.21 multi-part streaming fields.
+            // KMIP 3.0 §6.1.23 multi-part streaming fields.
             tags::InitIndicator => {
                 if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
             }
@@ -2506,13 +2506,13 @@ fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.ciphertext.clone())),
     ];
     if let Some(iv) = &r.iv_counter_nonce {
-        // KMIP 3.0 §6.1.21 — server-generated IV/Counter/Nonce when
+        // KMIP 3.0 §6.1.23 — server-generated IV/Counter/Nonce when
         // the key's `RandomIV` is true. CS-BC-M-13 expects the server
         // to emit this field with the IV it used.
         out.push(TtlvFrame::new(Tag(tags::IvCounterNonce), Value::ByteString(iv.clone())));
     }
     if let Some(cv) = &r.correlation_value {
-        // §6.1.21 — handle for the client to chain the next stream part.
+        // §6.1.23 — handle for the client to chain the next stream part.
         out.push(TtlvFrame::new(
             Tag(tags::CorrelationValue),
             Value::ByteString(cv.clone()),
@@ -2526,7 +2526,7 @@ fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
     }
     if let Some(ss) = &r.shared_secret {
         // K10 — ML-KEM encapsulation shared secret rides the
-        // `PQCToday-SharedSecret` vendor-extension tag (0x540001, §11.57
+        // `PQCToday-SharedSecret` vendor-extension tag (0x540001, §11.58
         // Extensions range 0x540000–0x54FFFF). It previously abused the
         // standard IvCounterNonce tag, which is wire-ambiguous with
         // classical RandomIV responses (compliance-audit B-7).
@@ -2558,7 +2558,7 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
             tags::AuthenticatedEncryptionTag => {
                 if let Value::ByteString(b) = &c.value { tag = Some(b.clone()); }
             }
-            // §6.1.21 multi-part (G6) — these three were dropped here, so a
+            // §6.1.16 multi-part (G6) — these three were dropped here, so a
             // streaming Decrypt was silently treated as a single-shot one.
             tags::InitIndicator => {
                 if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
@@ -2579,7 +2579,7 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
         }
     }
     // For AEAD decrypt, the shim expects ciphertext||tag concatenated.
-    // KMIP keeps them as separate fields per §6.1.21; recombine on
+    // KMIP keeps them as separate fields per §6.1.23; recombine on
     // ingress so the shim sees what `aes-gcm` expects.
     if let Some(t) = tag {
         data.extend_from_slice(&t);
@@ -5498,7 +5498,7 @@ fn encode_get_attributes_resp(r: &GetAttributesResponse) -> Vec<TtlvFrame> {
         Tag(tags::UniqueIdentifier),
         Value::Identifier(r.uid.clone()),
     )];
-    // KMIP 3.0 §6.1.21 — GetAttributes response wraps the returned
+    // KMIP 3.0 §6.1.26 — GetAttributes response wraps the returned
     // attributes in a single `Attributes` Structure whose children are
     // the typed-tag attribute values.
     let attrs = TtlvFrame::new(
@@ -6418,7 +6418,7 @@ pub fn encode_discover_versions_message(versions: &[(i32, i32)], time_stamp: i64
     )
 }
 
-/// Encode a server-issued `Query` (§6.1.39) — the server asking the client what
+/// Encode a server-issued `Query` (§6.1.47) — the server asking the client what
 /// it can do.
 pub fn encode_query_message(functions: &[QueryFunction], time_stamp: i64) -> Vec<u8> {
     let children: Vec<TtlvFrame> = functions

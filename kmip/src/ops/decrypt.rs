@@ -615,7 +615,7 @@ mod tests {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Deactivated, UsageMask::DECRYPT);
         // AES-GCM (the default for KmipAlgorithm::Aes) requires a
-        // 12-byte IV per KMIP 3.0 §6.1.21 + NIST SP 800-38D. Supply
+        // 12-byte IV per KMIP 3.0 §6.1.16 + NIST SP 800-38D. Supply
         // one so the lifecycle gate is what's actually under test.
         let _ = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None, init_indicator: None, final_indicator: None, correlation_value: None}, &crate::server::auth::AuthContext::open(), "c").unwrap();
     }

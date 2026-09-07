@@ -19,13 +19,13 @@ use crate::auditlog::AuditSink;
 use crate::policy::Engine;
 use crate::store::KeyStore;
 
-/// One in-flight multi-part cryptographic operation (KMIP 3.0 §6.1.21 /
+/// One in-flight multi-part cryptographic operation (KMIP 3.0 §6.1.23 /
 /// §6.1.16 streaming: `Init Indicator` → [parts…] → `Final Indicator`,
 /// chained by the server-issued `Correlation Value`).
 pub struct StreamCtx {
     /// The engine streaming state (owns key schedule + GHASH/CBC chain).
     pub cipher: softhsmrustv3::crypto::multipart::MultipartCipher,
-    /// UID the stream was initialised against — §6.1.21 requires every
+    /// UID the stream was initialised against — §6.1.23 requires every
     /// part to target the same key.
     pub uid: String,
     /// Part F §F7.5 — the tenant that opened this stream. A continuation

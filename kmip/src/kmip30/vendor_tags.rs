@@ -1,6 +1,6 @@
 //! PQCToday vendor-extension TTLV tags.
 //!
-//! KMIP 3.0 §11.57 (Tag Enumeration) reserves the Item Tag range
+//! KMIP 3.0 §11.58 (Tag Enumeration) reserves the Item Tag range
 //! `0x540000–0x54FFFF` for Extensions: "All tags SHALL contain either
 //! the value 42 in hex or the value 54 in hex as the first byte …
 //! Tags defined by this specification contain hex 42 in the first

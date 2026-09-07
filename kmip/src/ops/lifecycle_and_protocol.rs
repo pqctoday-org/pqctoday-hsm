@@ -248,7 +248,7 @@ pub fn obliterate(
     let _ = deps.store.get(&req.uid)?.ok_or_else(|| {
         fail_err(deps, correlation_id, "Obliterate", KmipError::object_not_found(&req.uid))
     })?;
-    // Per §6.1.39: "remove the Managed Object. All meta-data SHALL also
+    // Per §6.1.41: "remove the Managed Object. All meta-data SHALL also
     // be removed from the server." Unlike Destroy (which retains
     // metadata), Obliterate removes everything.
     deps.store.remove(&req.uid)?;
