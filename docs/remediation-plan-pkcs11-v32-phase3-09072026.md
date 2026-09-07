@@ -178,3 +178,54 @@ Nothing on this branch is pushed and no push should happen without explicit conf
 | **D-E1** | Fix the `CKA_VALUE` exposure, or re-defer with an honest reason? | Fix the RSA half; adjudicate the stateful-hash half against §6.65/§6.66. |
 | **D-P1** | Implement `CKA_PUBLIC_KEY_INFO` in Rust, or keep adjudicating against a SHOULD? | Implement it. |
 | **D-L1** | One PR or two? | Two — get #226 reviewed and merged first. |
+
+---
+
+## 12. Execution log (2026-09-07)
+
+### §1 J1 — JavaJCE: **done and genuinely verified**
+
+`P11ECExtraBitsGenParameterSpec` compiles under JDK 27 and the full existing suite passes **274/274** unchanged. A new `ECExtraBitsTest` (8 cases) asserts against `CKA_KEY_GEN_MECHANISM` read back off the generated key — deliberately not against anything the provider says about itself, because both mechanisms produce an ordinary working EC key and a sign/verify test would pass identically whichever one ran. Every positive case is paired with its negative, so a flag stuck permanently on would still fail.
+
+**Fails-pre-fix confirmed the hard way.** Run against an engine *with* the mechanism: 8/8 pass. Run against one *without*: 4 errors, `CKR_MECHANISM_INVALID (0x70)`, and exactly the four mechanism-agnostic cases still pass.
+
+**Operational finding — the gate has a false green here.** `--javajce` runs `mvn` against the container's installed `/usr/local/lib/softhsm/libsofthsmv3.so`, which is dated **2026-09-01** and predates X1. The gate therefore validates today's Java against a months-old native engine, and will keep reporting green while the two drift apart. This is not specific to X1 — any engine-side change is invisible to that step. It needs fixing (§13).
+
+For this verification the engine was built fresh inside `pqc-dev-sandbox` (it has cmake, g++ and OpenSSL 3.6.3) and installed to `/opt/x1-engine/`, a **separate path**; the shared container's library was deliberately not overwritten.
+
+### §2 O-1 — PQC PKCS#8 inner encoding: **resolved, no code change**
+
+Ground truth was established the way D-2's was — by reading bytes OpenSSL 3.6.3 actually produced, not by inferring from a draft. Seven keys generated and decoded:
+
+| Family | What OpenSSL 3.6.3 emits |
+|---|---|
+| ML-DSA-44/65/87 | `SEQUENCE { OCTET STRING seed(32), OCTET STRING expandedKey(2560/4032/4896) }` |
+| ML-KEM-512/768/1024 | `SEQUENCE { OCTET STRING seed(64), OCTET STRING expandedKey(1632/2400/3168) }` |
+| SLH-DSA-SHA2-128s | **bare raw**, 64 bytes, no nested structure |
+
+So OpenSSL's *emitted* form does differ from the engine's for ML-DSA and ML-KEM. That was the concern. But emission is not the interoperability question — acceptance is. Four candidate encodings were built by hand for ML-DSA-65 and ML-KEM-768 (bare raw as the engine emits; nested `OCTET STRING` expandedKey; `SEQUENCE{seed,key}`; `[0]` seed only) and fed back to OpenSSL:
+
+- **All four are accepted**, and all four derive a **byte-identical public key**. The engine's form interoperates.
+- For **SLH-DSA the engine's raw form is the only one accepted** — the nested `OCTET STRING` is *rejected*. The engine could not be doing anything else.
+
+**The premise is falsified.** Phase 2 §9 suspected PQC "may diverge from OpenSSL exactly as it does for EC". EC was a genuine interop break — OpenSSL rejected the engine's output. This is not: OpenSSL reads the engine's PQC output and gets the right key.
+
+One nuance to carry rather than act on: bare raw is not, strictly, one of the LAMPS draft's CHOICE alternatives (each is a TLV), so a stricter peer than OpenSSL could in principle reject it. Weighed against SLH-DSA *requiring* bare raw, and against changing a format that currently works, the answer is to leave it alone and record the finding. **No fix. O-1 closed.**
+
+### §3 E1 — the `CKA_VALUE` picture is not what the exception says
+
+The decision taken was "fix all five key types". Checking the specification first — before writing the filter — showed that would have been wrong for three of them, and that the exception misdescribes the defect in both directions.
+
+`CKA_VALUE` **is** defined on the key-object attribute tables for ML-DSA, ML-KEM, SLH-DSA, EC, Edwards, Montgomery, DSA, HSS, XMSS and XMSS-MT. It is **not** defined for **RSA** — neither the RSA Public nor the RSA Private Key Object Attributes table has a row for it. RSA is the whole violation.
+
+The three stateful-hash observations run the **other way**, which no one had checked:
+
+| | C++ | Rust |
+|---|---|---|
+| HSS / XMSS / XMSS-MT private, `CKA_VALUE` | `CKR_ATTRIBUTE_SENSITIVE` | `CKR_ATTRIBUTE_TYPE_INVALID` |
+
+C++ is **correct**: §6.65/§6.66 define `CKA_VALUE` for these keys with footnote 7 ("cannot be revealed if `CKA_SENSITIVE` is true"), and mandate `CKA_SENSITIVE`. Rust answers "the object does not possess such an attribute" about an attribute the specification defines for that class. Refusing it *harder*, as "fix all five" would have done, would have entrenched a violation rather than removed one.
+
+Rust's answer is truthful about its own storage — per `LEGAL-XMSS-STATE-REPRESENTATION` it keeps stateful-hash state in engine-private vendor attributes, not in `CKA_VALUE` — so fixing it means **materialising** the attribute and gating it as sensitive. That is a representation change, not a filter, and it interacts with an existing adjudication. It is a separate item (§14), not part of E1.
+
+**Revised E1 scope: RSA only** — which both offered options agreed on.

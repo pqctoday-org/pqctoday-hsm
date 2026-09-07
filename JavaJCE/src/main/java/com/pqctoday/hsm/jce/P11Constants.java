@@ -197,6 +197,7 @@ final class P11Constants {
     static final long CKA_EXTRACTABLE      = 0x00000162L;
     static final long CKA_PUBLIC_KEY_INFO  = 0x00000129L; // v3.2 §4.14: SubjectPublicKeyInfo DER
     static final long CKA_PARAMETER_SET    = 0x0000061dL;
+    static final long CKA_KEY_GEN_MECHANISM = 0x00000166L;
     static final long CKA_EC_PARAMS        = 0x00000180L;
     static final long CKA_EC_POINT         = 0x00000181L;
     static final long CKA_VALUE_LEN        = 0x00000161L;
