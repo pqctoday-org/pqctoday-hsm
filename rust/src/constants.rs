@@ -484,6 +484,15 @@ pub const CKM_SHA384_HMAC_GENERAL: u32 = 0x0000_0262;
 pub const CKM_SHA512_HMAC_GENERAL: u32 = 0x0000_0272;
 pub const CKM_SHA3_256_HMAC_GENERAL: u32 = 0x0000_02B2;
 pub const CKM_SHA3_512_HMAC_GENERAL: u32 = 0x0000_02D2;
+// §3 Wave 1 (2026-09-07) — the remaining HMAC_GENERAL codepoints the C++
+// engine advertises. Values taken from src/lib/pkcs11/pkcs11t.h, which
+// CLAUDE.md makes the sole source of truth for CK* values.
+pub const CKM_SHA224_HMAC_GENERAL: u32 = 0x0000_0257;
+pub const CKM_SHA512_224_HMAC_GENERAL: u32 = 0x0000_004A;
+pub const CKM_SHA512_256_HMAC_GENERAL: u32 = 0x0000_004E;
+pub const CKM_SHA3_224_HMAC_GENERAL: u32 = 0x0000_02B7;
+pub const CKM_SHA3_384_HMAC_GENERAL: u32 = 0x0000_02C2;
+pub const CKM_RIPEMD160_HMAC_GENERAL: u32 = 0x0000_0242;
 
 // MGF identifiers (CK_RSA_PKCS_MGF_TYPE)
 pub const CKG_MGF1_SHA1: u32 = 0x0000_0001;
@@ -902,6 +911,12 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA3_256,
     CKM_SHA3_512,
     CKM_RIPEMD160,
+    // §3 Wave 1 (2026-09-07) — digests the C++ engine has always advertised.
+    CKM_SHA224,
+    CKM_SHA512_224,
+    CKM_SHA512_256,
+    CKM_SHA3_224,
+    CKM_SHA3_384,
     // HMAC
     CKM_SHA256_HMAC,
     CKM_SHA384_HMAC,
@@ -924,6 +939,13 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA512_HMAC_GENERAL,
     CKM_SHA3_256_HMAC_GENERAL,
     CKM_SHA3_512_HMAC_GENERAL,
+    CKM_SHA224_HMAC,
+    CKM_SHA224_HMAC_GENERAL,
+    CKM_SHA512_224_HMAC_GENERAL,
+    CKM_SHA512_256_HMAC_GENERAL,
+    CKM_SHA3_224_HMAC_GENERAL,
+    CKM_SHA3_384_HMAC_GENERAL,
+    CKM_RIPEMD160_HMAC_GENERAL,
     // KMAC
     CKM_KMAC_128,
     CKM_KMAC_256,

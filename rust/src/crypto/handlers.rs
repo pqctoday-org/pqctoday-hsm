@@ -136,6 +136,14 @@ pub enum DigestCtx {
     Sha512(sha2::Sha512),
     Sha3_256(sha3::Sha3_256),
     Sha3_512(sha3::Sha3_512),
+    // §3 Wave 1 (2026-09-07) — the remaining FIPS 180-4 truncated variants
+    // and FIPS 202 sizes the C++ engine has always advertised. `sha2` and
+    // `sha3` already provided all five; only the plumbing was missing.
+    Sha224(sha2::Sha224),
+    Sha512_224(sha2::Sha512_224),
+    Sha512_256(sha2::Sha512_256),
+    Sha3_224(sha3::Sha3_224),
+    Sha3_384(sha3::Sha3_384),
     /// G11 — Keccak-256 (vendor CKM_KECCAK_256). Buffers data for single-shot finalize.
     Keccak256(Vec<u8>),
     /// Historical RIPEMD-160 (CKM_RIPEMD160) — 20-byte digest.
@@ -1625,6 +1633,12 @@ pub fn sign_hmac(mech: u32, key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32
         // but SHA-512/224, SHA-512/256, and SHA3-224/384 were still
         // missing). `hmac_prf`'s widening in `kmip/` needs a real engine
         // mechanism to dispatch to, not just a KMIP-layer match arm.
+        CKM_SHA224_HMAC => {
+            let mut mac = Hmac::<sha2::Sha224>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
         CKM_SHA512_224_HMAC => {
             let mut mac = Hmac::<sha2::Sha512_224>::new_from_slice(key_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -2175,6 +2189,15 @@ pub fn hmac_general_base(mech: u32) -> Option<(u32, usize)> {
         CKM_SHA512_HMAC_GENERAL => Some((CKM_SHA512_HMAC, 64)),
         CKM_SHA3_256_HMAC_GENERAL => Some((CKM_SHA3_256_HMAC, 32)),
         CKM_SHA3_512_HMAC_GENERAL => Some((CKM_SHA3_512_HMAC, 64)),
+        // §3 Wave 1 — the _GENERAL variants of every HMAC this engine can
+        // actually compute. The second element is the FULL mac length; the
+        // caller's CK_MAC_GENERAL_PARAMS truncates from there.
+        CKM_SHA224_HMAC_GENERAL => Some((CKM_SHA224_HMAC, 28)),
+        CKM_SHA512_224_HMAC_GENERAL => Some((CKM_SHA512_224_HMAC, 28)),
+        CKM_SHA512_256_HMAC_GENERAL => Some((CKM_SHA512_256_HMAC, 32)),
+        CKM_SHA3_224_HMAC_GENERAL => Some((CKM_SHA3_224_HMAC, 28)),
+        CKM_SHA3_384_HMAC_GENERAL => Some((CKM_SHA3_384_HMAC, 48)),
+        CKM_RIPEMD160_HMAC_GENERAL => Some((CKM_RIPEMD160_HMAC, 20)),
         _ => None,
     }
 }
@@ -2341,7 +2364,7 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         // R2'a — the four variants sign_hmac already implemented but which
         // nothing could reach: truncated SHA-2 (FIPS 180-4 §6.6/§6.7) and the
         // two remaining SHA-3 sizes (FIPS 202).
-        CKM_SHA512_224_HMAC | CKM_SHA3_224_HMAC => 28,
+        CKM_SHA224_HMAC | CKM_SHA512_224_HMAC | CKM_SHA3_224_HMAC => 28,
         CKM_SHA512_256_HMAC => 32,
         CKM_SHA3_384_HMAC => 48,
         CKM_KMAC_128 => 32,

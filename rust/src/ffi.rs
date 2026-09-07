@@ -1451,19 +1451,26 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // SLH-DSA pk: 32 B (128-bit sets) … 64 B (256-bit sets) — FIPS 205 Table 2.
         CKM_SLH_DSA_KEY_PAIR_GEN => (32, 64, 0x00010000),
         CKM_SLH_DSA => (32, 64, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
-        CKM_SHA256 | CKM_SHA384 | CKM_SHA512 | CKM_SHA3_256 | CKM_SHA3_512 => (0, 0, 0x00000400),
+        CKM_SHA256 | CKM_SHA384 | CKM_SHA512 | CKM_SHA3_256 | CKM_SHA3_512 | CKM_SHA224
+        | CKM_SHA512_224 | CKM_SHA512_256 | CKM_SHA3_224 | CKM_SHA3_384 => (0, 0, 0x00000400),
         // Historical RIPEMD-160 digest (CKF_DIGEST).
         CKM_RIPEMD160 => (0, 0, 0x00000400),
         CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
         | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
-        | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC => {
+        | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC => {
             (16, 64, 0x00000800 | 0x00002000)
         }
         CKM_SHA256_HMAC_GENERAL
         | CKM_SHA384_HMAC_GENERAL
         | CKM_SHA512_HMAC_GENERAL
         | CKM_SHA3_256_HMAC_GENERAL
-        | CKM_SHA3_512_HMAC_GENERAL => (16, 64, 0x00000800 | 0x00002000),
+        | CKM_SHA3_512_HMAC_GENERAL
+        | CKM_SHA224_HMAC_GENERAL
+        | CKM_SHA512_224_HMAC_GENERAL
+        | CKM_SHA512_256_HMAC_GENERAL
+        | CKM_SHA3_224_HMAC_GENERAL
+        | CKM_SHA3_384_HMAC_GENERAL
+        | CKM_RIPEMD160_HMAC_GENERAL => (16, 64, 0x00000800 | 0x00002000),
         CKM_KMAC_128 | CKM_KMAC_256 => (16, 64, 0x00000800 | 0x00002000),
         // AES-GMAC (v3.2 Sec6.13.6) — CKF_SIGN | CKF_VERIFY, key sizes match
         // the other AES mechanisms (16/24/32-byte keys, table stores bytes).
@@ -6738,7 +6745,7 @@ fn C_Sign_impl(
             }
             CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
             | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
-            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC => {
+            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC => {
                 sign_hmac(eff_mech, &sk_bytes, eff_msg)
             }
             m if hmac_general_base(m).is_some() => {
@@ -6967,6 +6974,7 @@ pub fn C_Verify(
                     | CKM_SHA512_256_HMAC
                     | CKM_SHA3_224_HMAC
                     | CKM_SHA3_384_HMAC
+                    | CKM_SHA224_HMAC
                     | CKM_KMAC_128
                     | CKM_KMAC_256
             ) =>
@@ -7069,7 +7077,7 @@ pub fn C_Verify(
             }
             CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
             | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
-            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC => {
+            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC => {
                 verify_hmac(eff_mech, &pk_bytes, eff_msg, sig_bytes)
             }
             m if hmac_general_base(m).is_some() => {
@@ -9084,6 +9092,11 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
             CKM_SHA512 => DigestCtx::Sha512(sha2::Sha512::new()),
             CKM_SHA3_256 => DigestCtx::Sha3_256(sha3::Sha3_256::new()),
             CKM_SHA3_512 => DigestCtx::Sha3_512(sha3::Sha3_512::new()),
+            CKM_SHA224 => DigestCtx::Sha224(sha2::Sha224::new()),
+            CKM_SHA512_224 => DigestCtx::Sha512_224(sha2::Sha512_224::new()),
+            CKM_SHA512_256 => DigestCtx::Sha512_256(sha2::Sha512_256::new()),
+            CKM_SHA3_224 => DigestCtx::Sha3_224(sha3::Sha3_224::new()),
+            CKM_SHA3_384 => DigestCtx::Sha3_384(sha3::Sha3_384::new()),
             CKM_KECCAK_256 => DigestCtx::Keccak256(Vec::new()),
             CKM_RIPEMD160 => DigestCtx::Ripemd160(ripemd::Ripemd160::new()),
             CKM_ML_DSA_EXTERNAL_MU_GEN => match init_mu_gen_digest(p_mechanism) {
@@ -9179,6 +9192,11 @@ pub fn C_DigestUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
                     DigestCtx::Sha512(h) => h.update(data),
                     DigestCtx::Sha3_256(h) => h.update(data),
                     DigestCtx::Sha3_512(h) => h.update(data),
+                    DigestCtx::Sha224(h) => h.update(data),
+                    DigestCtx::Sha512_224(h) => h.update(data),
+                    DigestCtx::Sha512_256(h) => h.update(data),
+                    DigestCtx::Sha3_224(h) => h.update(data),
+                    DigestCtx::Sha3_384(h) => h.update(data),
                     DigestCtx::Keccak256(buf) => crate::crypto::keccak::keccak256_update(buf, data),
                     DigestCtx::Ripemd160(h) => h.update(data),
                     DigestCtx::MuGen(h) => sha3::digest::Update::update(h, data),
@@ -9207,6 +9225,11 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
                     DigestCtx::Sha512(_) => 64,
                     DigestCtx::Sha3_256(_) => 32,
                     DigestCtx::Sha3_512(_) => 64,
+                    DigestCtx::Sha224(_) => 28,
+                    DigestCtx::Sha512_224(_) => 28,
+                    DigestCtx::Sha512_256(_) => 32,
+                    DigestCtx::Sha3_224(_) => 28,
+                    DigestCtx::Sha3_384(_) => 48,
                     DigestCtx::Keccak256(_) => 32,
                     DigestCtx::Ripemd160(_) => 20,
                     DigestCtx::MuGen(_) => 64,
@@ -9230,6 +9253,11 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
                 DigestCtx::Sha512(_) => 64,
                 DigestCtx::Sha3_256(_) => 32,
                 DigestCtx::Sha3_512(_) => 64,
+                DigestCtx::Sha224(_) => 28,
+                DigestCtx::Sha512_224(_) => 28,
+                DigestCtx::Sha512_256(_) => 32,
+                DigestCtx::Sha3_224(_) => 28,
+                DigestCtx::Sha3_384(_) => 48,
                 DigestCtx::Keccak256(_) => 32,
                 DigestCtx::Ripemd160(_) => 20,
                 DigestCtx::MuGen(_) => 64,
@@ -9254,6 +9282,11 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
             DigestCtx::Sha512(h) => h.finalize().to_vec(),
             DigestCtx::Sha3_256(h) => h.finalize().to_vec(),
             DigestCtx::Sha3_512(h) => h.finalize().to_vec(),
+            DigestCtx::Sha224(h) => h.finalize().to_vec(),
+            DigestCtx::Sha512_224(h) => h.finalize().to_vec(),
+            DigestCtx::Sha512_256(h) => h.finalize().to_vec(),
+            DigestCtx::Sha3_224(h) => h.finalize().to_vec(),
+            DigestCtx::Sha3_384(h) => h.finalize().to_vec(),
             DigestCtx::Keccak256(buf) => crate::crypto::keccak::keccak256_finalize(&buf).to_vec(),
             DigestCtx::Ripemd160(h) => h.finalize().to_vec(),
             DigestCtx::MuGen(h) => {
@@ -9299,6 +9332,11 @@ pub fn C_Digest(
                     DigestCtx::Sha512(_) => 64,
                     DigestCtx::Sha3_256(_) => 32,
                     DigestCtx::Sha3_512(_) => 64,
+                    DigestCtx::Sha224(_) => 28,
+                    DigestCtx::Sha512_224(_) => 28,
+                    DigestCtx::Sha512_256(_) => 32,
+                    DigestCtx::Sha3_224(_) => 28,
+                    DigestCtx::Sha3_384(_) => 48,
                     DigestCtx::Keccak256(_) => 32,
                     DigestCtx::Ripemd160(_) => 20,
                     DigestCtx::MuGen(_) => 64,
@@ -12298,6 +12336,7 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SHA512_256_HMAC
             | CKM_SHA3_224_HMAC
             | CKM_SHA3_384_HMAC
+            | CKM_SHA224_HMAC
             | CKM_KMAC_128
             | CKM_KMAC_256
             // WS-3/G2 (2026-09-01): CKM_AES_GMAC's tag is a deterministic
@@ -17913,6 +17952,71 @@ mod return_code_ffi_tests {
         );
     }
 
+    /// §3 Wave 1 (2026-09-07) — the five digests added for C++ parity, driven
+    /// through the REAL PKCS#11 digest path (C_DigestInit → size query →
+    /// C_Digest), not through native::derive::digest, which is a separate
+    /// function with its own dispatch. Checked against the published NIST
+    /// "abc" vectors, so the oracle is the standard rather than the crate the
+    /// engine happens to use.
+    ///
+    /// Before this the mechanisms existed as constants but had no DigestCtx
+    /// variant, so C_DigestInit answered CKR_MECHANISM_INVALID.
+    #[test]
+    fn wave1_digests_match_nist_abc_vectors_through_the_pkcs11_path() {
+        let _guard = test_lock::acquire();
+        setup();
+        fn hex(t: &str) -> Vec<u8> {
+            (0..t.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&t[i..i + 2], 16).unwrap())
+                .collect()
+        }
+        let msg = b"abc";
+        for (mech, name, want) in [
+            (CKM_SHA224, "SHA-224",
+             "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7"),
+            (CKM_SHA512_224, "SHA-512/224",
+             "4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa"),
+            (CKM_SHA512_256, "SHA-512/256",
+             "53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23"),
+            (CKM_SHA3_224, "SHA3-224",
+             "e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf"),
+            (CKM_SHA3_384, "SHA3-384",
+             "ec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b298d88cea927ac7f539f1edf228376d25"),
+        ] {
+            let want = hex(want);
+            assert!(
+                crate::constants::SUPPORTED_MECHS.contains(&mech),
+                "{name}: must be advertised through C_GetMechanismList"
+            );
+            let mut m: [usize; 3] = [mech as usize, 0, 0];
+            assert_eq!(
+                C_DigestInit(SESSION, m.as_mut_ptr() as *mut u8),
+                CKR_OK,
+                "{name}: C_DigestInit"
+            );
+            // §5.7.2 — a null output pointer is a size query and must NOT
+            // consume the operation.
+            let mut len: u32 = 0;
+            assert_eq!(
+                C_Digest(SESSION, msg.as_ptr() as *mut u8, msg.len() as u32,
+                         std::ptr::null_mut(), &mut len),
+                CKR_OK,
+                "{name}: size query"
+            );
+            assert_eq!(len as usize, want.len(), "{name}: advertised digest length");
+
+            let mut out = vec![0u8; len as usize];
+            assert_eq!(
+                C_Digest(SESSION, msg.as_ptr() as *mut u8, msg.len() as u32,
+                         out.as_mut_ptr(), &mut len),
+                CKR_OK,
+                "{name}: C_Digest"
+            );
+            assert_eq!(out, want, "{name}: digest of \"abc\" must match the NIST vector");
+        }
+    }
+
     // ── Digest one-shot after Update (§5.13) ────────────────────────────────
 
     /// C_Digest while the op is in its multi-part phase →
@@ -19960,6 +20064,87 @@ mod multipart_sign_verify_ffi_tests {
                 one_shot_verify(SESSION, mech, HMAC_KEY, msg, &sig),
                 CKR_OK,
                 "{name}: C_Verify must accept the MAC it just produced"
+            );
+        }
+    }
+
+    /// §3 Wave 1 (2026-09-07) — `CKM_SHA224_HMAC` plus the six remaining
+    /// `_HMAC_GENERAL` variants, which the C++ engine has always advertised.
+    ///
+    /// The `_GENERAL` forms take a `CK_MAC_GENERAL_PARAMS` giving the number
+    /// of bytes to keep, so this asserts BOTH that the full-length MAC equals
+    /// the RustCrypto reference and that a truncated request returns exactly
+    /// that prefix — truncation to the wrong end, or ignoring the parameter,
+    /// would both still "work" without this.
+    #[test]
+    fn wave1_hmac_family_matches_reference_and_truncates_correctly() {
+        let _guard = test_lock::acquire();
+        setup();
+        use hmac::Mac;
+        let msg = b"wave 1 HMAC parity";
+
+        macro_rules! reference {
+            ($d:ty) => {{
+                let mut m = hmac::Hmac::<$d>::new_from_slice(&HMAC_KEY_BYTES).unwrap();
+                m.update(msg);
+                m.finalize().into_bytes().to_vec()
+            }};
+        }
+
+        // (plain, general, full reference MAC)
+        let cases: [(u32, u32, Vec<u8>, &str); 6] = [
+            (CKM_SHA224_HMAC, CKM_SHA224_HMAC_GENERAL, reference!(sha2::Sha224), "SHA-224"),
+            (CKM_SHA512_224_HMAC, CKM_SHA512_224_HMAC_GENERAL, reference!(sha2::Sha512_224), "SHA-512/224"),
+            (CKM_SHA512_256_HMAC, CKM_SHA512_256_HMAC_GENERAL, reference!(sha2::Sha512_256), "SHA-512/256"),
+            (CKM_SHA3_224_HMAC, CKM_SHA3_224_HMAC_GENERAL, reference!(sha3::Sha3_224), "SHA3-224"),
+            (CKM_SHA3_384_HMAC, CKM_SHA3_384_HMAC_GENERAL, reference!(sha3::Sha3_384), "SHA3-384"),
+            (CKM_RIPEMD160_HMAC, CKM_RIPEMD160_HMAC_GENERAL, reference!(ripemd::Ripemd160), "RIPEMD-160"),
+        ];
+
+        for (plain, general, want, name) in cases {
+            for m in [plain, general] {
+                assert!(
+                    crate::constants::SUPPORTED_MECHS.contains(&m),
+                    "{name}: mechanism 0x{m:x} must be advertised"
+                );
+            }
+            // Full-length MAC through the plain mechanism.
+            let sig = one_shot_sign(SESSION, plain, HMAC_KEY, msg);
+            assert_eq!(sig, want, "{name}: MAC must equal the RustCrypto reference");
+            assert_eq!(
+                one_shot_verify(SESSION, plain, HMAC_KEY, msg, &sig),
+                CKR_OK,
+                "{name}: verify its own MAC"
+            );
+
+            // _GENERAL with a truncated length must return that exact prefix.
+            let keep = want.len() - 4;
+            // CK_MAC_GENERAL_PARAMS is a bare `typedef CK_ULONG`, so it is
+            // the NATIVE word width here (8 bytes on LP64), not a u32 — the
+            // engine reads it with ulong(), and a 4-byte value is rejected as
+            // CKR_MECHANISM_PARAM_INVALID.
+            let params = (keep as std::os::raw::c_ulong).to_le_bytes();
+            // CK_MECHANISM is {mechanism, pParameter, ulParameterLen}.
+            let mut mech: [usize; 3] =
+                [general as usize, params.as_ptr() as usize, params.len()];
+            assert_eq!(
+                C_SignInit(SESSION, mech.as_mut_ptr() as *mut u8, HMAC_KEY),
+                CKR_OK,
+                "{name}: C_SignInit(_GENERAL)"
+            );
+            let mut out = vec![0u8; want.len()];
+            let mut out_len = out.len() as u32;
+            assert_eq!(
+                C_Sign(SESSION, msg.as_ptr() as *mut u8, msg.len() as u32,
+                       out.as_mut_ptr(), &mut out_len),
+                CKR_OK,
+                "{name}: C_Sign(_GENERAL)"
+            );
+            assert_eq!(out_len as usize, keep, "{name}: _GENERAL honours the requested length");
+            assert_eq!(
+                &out[..keep],
+                &want[..keep],
+                "{name}: truncated MAC must be the PREFIX of the full one"
             );
         }
     }
