@@ -306,7 +306,11 @@ pub(crate) mod tags {
     /// membership as `Group Link` and NEVER emits 0x420056; it still ACCEPTS
     /// 0x420056 on input as 2.x compatibility (normalised to the same internal
     /// membership set). Encodes as a TextString.
-    pub const ObjectGroup: u32            = 0x42_0056;
+    // `Object Group` (0x420056) is RETIRED. The §11.58 Tag Enumeration table
+    // in CSD02 lists 0x420056 as **(Reserved)**; KMIP 3.0 expresses group
+    // membership through the §7.24 `Object Groups` structure of repeated
+    // `Group Link` (0x4201b3) values instead. Emitting it meant putting a
+    // reserved codepoint on the wire.
     // K20 — Derive Key (§6.1.19 / §7.13). All six codepoints verified
     // against `kmip-spec-3.0-tags-enums.json`.
     /// `Derivation Method` Enumeration (§11.15).
@@ -3269,11 +3273,6 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         // KMIP `Object Group` (0x420056) — multi-instance membership
         // label, TextString on the wire. Each instance decodes to its
         // own Attribute; a record may carry several.
-        tags::ObjectGroup => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::ObjectGroup(s.clone())
-            } else { return Ok(None); }
-        }
         // K20 — Derive Key link pair (§4.35.5 / §6.1.19).
         tags::DerivationObjectLink => {
             if let Some(s) = link_target(&frame.value) {
@@ -5810,7 +5809,6 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::NextLink(s)                 => TtlvFrame::new(Tag(tags::NextLink),                 Value::Reference(s.clone())),
         Attribute::PreviousLink(s)             => TtlvFrame::new(Tag(tags::PreviousLink),             Value::Reference(s.clone())),
         Attribute::GroupLink(s)                => TtlvFrame::new(Tag(tags::GroupLink),                Value::NameReference(s.clone())),
-        Attribute::ObjectGroup(s)              => TtlvFrame::new(Tag(tags::ObjectGroup),              Value::TextString(s.clone())),
         Attribute::DerivationBaseObjectLink(s) => TtlvFrame::new(Tag(tags::DerivationObjectLink),     Value::Reference(s.clone())),
         Attribute::DerivedObjectLink(s)        => TtlvFrame::new(Tag(tags::DerivedObjectLink),        Value::Reference(s.clone())),
         Attribute::ReplacedObjectLink(s)       => TtlvFrame::new(Tag(tags::ReplacedObjectLink),       Value::Reference(s.clone())),
@@ -6039,7 +6037,6 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "SplitKeyBaseLink" => tags::SplitKeyBaseLink,
         "JoinedSplitKeyPartsLink" => tags::JoinedSplitKeyPartsLink,
         "CertificateRequestLink" => tags::CertificateRequestLink,
-        "ObjectGroup"            => tags::ObjectGroup,
         "DerivationBaseObjectLink" => tags::DerivationObjectLink,
         "DerivedObjectLink"      => tags::DerivedObjectLink,
         "ReplacedObjectLink"     => tags::ReplacedObjectLink,
@@ -6170,7 +6167,6 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::SplitKeyBaseLink => "Split Key Base Link",
         tags::JoinedSplitKeyPartsLink => "Joined Split Key Parts Link",
         tags::CertificateRequestLink => "Certificate Request Link",
-        tags::ObjectGroup            => "Object Group",
         tags::DerivationObjectLink   => "Derivation Object Link",
         tags::DerivedObjectLink      => "Derived Object Link",
         tags::ReplacedObjectLink     => "Replaced Object Link",
@@ -6931,16 +6927,6 @@ mod tests {
 
     /// P2.1 — `Object Group` (0x420056) attribute round-trips through
     /// the TTLV codec: TextString encode → decode yields the same
-    /// `Attribute::ObjectGroup`, under the verified tag.
-    #[test]
-    fn object_group_attribute_wire_round_trips() {
-        let attr = Attribute::ObjectGroup("SASED-M-2-30-group".into());
-        let frame = encode_attribute_v3(&attr);
-        assert_eq!(frame.tag.0, tags::ObjectGroup);
-        assert_eq!(tags::ObjectGroup, 0x42_0056, "verified KMIP Object Group tag");
-        let decoded = decode_attribute_v3(&frame).unwrap();
-        assert_eq!(decoded, Some(attr));
-    }
 
     /// KMIP 3.0 §4.16 — Cryptographic Domain Parameters is a Structure at
     /// `0x420029` carrying `Recommended Curve` (Enumeration, `0x420075`) and

@@ -686,7 +686,8 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         // `AttributeSingleValued` instead of succeeding — harmless
         // while these were no-ops in `apply_attribute`, load-bearing
         // now that they're genuinely persisted.
-        Attribute::GroupLink(_)                   => obj.links.contains_key("GroupLink"),
+        Attribute::GroupLink(g)                   => obj.group_links.contains(g)
+            || obj.links.get("GroupLink").is_some_and(|h| h == g),
         Attribute::CertificateLink(_) => obj.links.contains_key("CertificateLink"),
         Attribute::ChildLink(_) => obj.links.contains_key("ChildLink"),
         Attribute::ParentLink(_) => obj.links.contains_key("ParentLink"),
@@ -711,7 +712,6 @@ fn attribute_present(obj: &ObjectRecord, a: &Attribute) -> bool {
         // exact membership already exists. AddAttribute may add further
         // distinct groups; re-adding the same one trips the §6.1.2
         // already-present guard.
-        Attribute::ObjectGroup(g)            => obj.object_groups.iter().any(|x| x == g),
         // Baseline Server attributes — presence depends on the typed
         // field actually being populated on the record. AddAttribute
         // MUST succeed when none of these is yet set (BL-M-5 step #3
@@ -905,7 +905,13 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::PreviousLink(uid)         => { obj.links.insert("PreviousLink".into(), uid.clone()); }
         Attribute::PublicKeyLink(uid)        => { obj.links.insert("PublicKeyLink".into(), uid.clone()); }
         Attribute::PrivateKeyLink(uid)       => { obj.links.insert("PrivateKeyLink".into(), uid.clone()); }
-        Attribute::GroupLink(uid)            => { obj.links.insert("GroupLink".into(), uid.clone()); }
+        // §7.24 Group Link "MAY be repeated", so this appends rather than
+        // replacing — the single-slot form could hold only one group.
+        Attribute::GroupLink(uid)            => {
+            if !obj.group_links.contains(uid) {
+                obj.group_links.push(uid.clone());
+            }
+        }
         Attribute::CertificateLink(uid) => { obj.links.insert("CertificateLink".into(), uid.clone()); }
         Attribute::ChildLink(uid) => { obj.links.insert("ChildLink".into(), uid.clone()); }
         Attribute::ParentLink(uid) => { obj.links.insert("ParentLink".into(), uid.clone()); }
@@ -931,11 +937,6 @@ fn apply_attribute(obj: &mut ObjectRecord, a: &Attribute) {
         // KMIP `Object Group` (0x420056) — multi-instance: AddAttribute
         // appends a fresh membership; SetAttribute reuses this path so a
         // repeated value is idempotent (deduped).
-        Attribute::ObjectGroup(g)            => {
-            if !obj.object_groups.contains(g) {
-                obj.object_groups.push(g.clone());
-            }
-        }
         Attribute::ApplicationSpecificInformation { namespace, data } => {
             obj.application_specific_information = Some((namespace.clone(), data.clone()));
         }
@@ -1024,7 +1025,6 @@ fn remove_attribute_by_value(obj: &mut ObjectRecord, a: &Attribute) {
         }
         // KMIP `Object Group` multi-instance — drop just the named
         // membership, leaving the object in any other groups.
-        Attribute::ObjectGroup(g)            => { obj.object_groups.retain(|x| x != g); }
         // Gap-remediation Phase B/T3 — `DeleteAttribute`'s
         // `current_attribute`-value path had no arms at all for any
         // Link type or for the three attributes Phase B just made
@@ -1040,7 +1040,12 @@ fn remove_attribute_by_value(obj: &mut ObjectRecord, a: &Attribute) {
         Attribute::PreviousLink(_)                => { obj.links.remove("PreviousLink"); }
         Attribute::PublicKeyLink(_)               => { obj.links.remove("PublicKeyLink"); }
         Attribute::PrivateKeyLink(_)              => { obj.links.remove("PrivateKeyLink"); }
-        Attribute::GroupLink(_)                   => { obj.links.remove("GroupLink"); }
+        Attribute::GroupLink(g)                   => {
+            obj.group_links.retain(|x| x != g);
+            if obj.links.get("GroupLink").is_some_and(|h| h == g) {
+                obj.links.remove("GroupLink");
+            }
+        }
         Attribute::DerivationBaseObjectLink(_)    => { obj.links.remove("DerivationBaseObjectLink"); }
         Attribute::DerivedObjectLink(_)           => { obj.links.remove("DerivedObjectLink"); }
         Attribute::ReplacedObjectLink(_)          => { obj.links.remove("ReplacedObjectLink"); }

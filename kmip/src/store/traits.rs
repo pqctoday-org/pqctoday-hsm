@@ -97,7 +97,17 @@ pub struct ObjectRecord {
     /// DeleteAttribute; Locate's Object Group filter matches when ANY
     /// element equals the requested group (SASED-M-3 step #0). Empty =
     /// not a member of any group.
-    pub object_groups: Vec<String>,
+    /// §7.24 `Object Groups` — the repeated `Group Link` (0x4201b3) values
+    /// naming the groups this object belongs to.
+    ///
+    /// Renamed from `object_groups` on 2026-09-07. KMIP 3.0 RETIRED the
+    /// `Object Group` attribute: its codepoint 0x420056 is listed as
+    /// **(Reserved)** in the §11.58 Tag Enumeration table, so emitting it was
+    /// using a reserved tag. §7.24 replaces it with a structure of `Group
+    /// Link` values, which "MAY be repeated" — hence a Vec and not the
+    /// single-slot `links` map.
+    #[serde(alias = "object_groups")]
+    pub group_links: Vec<String>,
     /// Raw KMIP `Key Material` bytes (KMIP 3.0 §6.2 KeyBlock →
     /// KeyValue → KeyMaterial). Populated by Register / Import when
     /// a client-supplied key payload arrives; surfaced by Get / Export.
@@ -416,7 +426,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             name: None,
             links: std::collections::HashMap::new(),
             custom_attributes: std::collections::HashMap::new(),
-            object_groups: Vec::new(),
+            group_links: Vec::new(),
             key_material: None,
             pkcs11_cka_id_secondary: None,
             recommended_curve: None,

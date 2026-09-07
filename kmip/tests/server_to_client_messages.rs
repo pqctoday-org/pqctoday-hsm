@@ -67,7 +67,10 @@ fn notify_carries_uid_changed_attributes_and_deleted_references() {
         &NotifyRequest {
             unique_identifier: "uid-42".into(),
             attributes: vec![Attribute::State(pqctoday_kmip::kmip30::attrs::State::Deactivated)],
-            deleted_attributes: vec!["Object Group".into()],
+            // Was "Object Group" until 2026-09-07, when that attribute was
+            // retired (its codepoint is (Reserved) in CSD02 §11.58). Any live
+            // attribute name serves — the test is about the reference form.
+            deleted_attributes: vec!["Group Link".into()],
         },
         TS,
     );
@@ -79,7 +82,7 @@ fn notify_carries_uid_changed_attributes_and_deleted_references() {
             assert_eq!(n.attributes.len(), 1, "the changed attribute must survive");
             assert_eq!(
                 n.deleted_attributes,
-                vec!["Object Group".to_string()],
+                vec!["Group Link".to_string()],
                 "a deleted attribute is reported by reference, not by value"
             );
         }

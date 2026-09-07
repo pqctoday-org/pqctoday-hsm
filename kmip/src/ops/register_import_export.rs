@@ -707,7 +707,7 @@ pub fn register(
         custom_attributes,
         // §4.27 — True unless the client asked for False.
         fresh: Some(fresh.unwrap_or(true)),
-        object_groups: x.object_groups.clone(),
+        group_links: x.group_links.clone(),
         key_material,
         key_format_type,
         digest_value,
@@ -1126,7 +1126,7 @@ pub(crate) struct ExtractedAttrs {
     /// `Object Group` (KMIP §11, 0x420056) memberships supplied in the
     /// template — multi-instance, so a list. SASED-M-2 registers an
     /// object into a group; SASED-M-3 then Locates it by that group.
-    pub object_groups: Vec<String>,
+    pub group_links: Vec<String>,
     /// `Alternative Name` (KMIP §4.4, 0x4200bf) — a client-set secondary
     /// name for the object (e.g. a barcode/serial-style label). Was
     /// decoded off the wire (`Attribute::AlternativeName`) but silently
@@ -1150,7 +1150,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         usage_limits_total: None,
         usage_limits_unit: None,
         application_specific_information: None,
-        object_groups: Vec::new(),
+        group_links: Vec::new(),
         alternative_name: None,
         alternative_name_type: None,
     };
@@ -1181,9 +1181,10 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             }
             // Multi-instance: accumulate every Object Group label so an
             // object Registered into several groups is locatable by any.
-            Attribute::ObjectGroup(g) => {
-                if !out.object_groups.contains(g) {
-                    out.object_groups.push(g.clone());
+            // §7.24 — repeated Group Link values are the group membership.
+            Attribute::GroupLink(g) => {
+                if !out.group_links.contains(g) {
+                    out.group_links.push(g.clone());
                 }
             }
             _ => {}

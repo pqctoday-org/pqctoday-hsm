@@ -320,7 +320,7 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     // Object Groups structure is a list of Group Link references). The
     // singular `Object Group` tag (0x420056) is RESERVED in KMIP 3.0 and is
     // never emitted. Multi-instance: one attribute per membership; empty → none.
-    for g in &r.object_groups {
+    for g in &r.group_links {
         out.push(Attribute::GroupLink(g.clone()));
     }
 
@@ -480,7 +480,6 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::NextLink(_)               => "NextLink",
         Attribute::PreviousLink(_)           => "PreviousLink",
         Attribute::GroupLink(_)              => "GroupLink",
-        Attribute::ObjectGroup(_)            => "ObjectGroup",
         // K20 — Derive Key link pair (§6.1.19 / §4.35.5).
         Attribute::DerivationBaseObjectLink(_) => "DerivationBaseObjectLink",
         Attribute::DerivedObjectLink(_)      => "DerivedObjectLink",

@@ -558,8 +558,6 @@ pub enum Attribute {
     /// an attribute list. Carries the group name (a `Name Reference`
     /// in the KMIP 3.0 `Object Groups` model — SASED-M-3 step #0 pins
     /// a Locate filter by it). Persisted onto the record at
-    /// Create / Register and matched by Locate (any membership hits).
-    ObjectGroup(String),
     /// `Derivation Base Object Link` (§4.35.5; wire tag `Derivation
     /// Object Link` 0x420192) — K20: on a derived Symmetric Key /
     /// Secret Data object, "expresses an association from a derived
