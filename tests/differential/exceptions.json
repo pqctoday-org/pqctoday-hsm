@@ -17,14 +17,6 @@
   ],
   "entries": [
     {
-      "id": "LEGAL-WEAK-PRIMITIVES-ABSENT-IN-RUST",
-      "status": "legal",
-      "scenario": "env.mechanism_set",
-      "path": "mech.CKM_SHA_1",
-      "justification": "Rust omits the MD5, SHA-1 and SHA-224 families deliberately; closing this 'gap' symmetrically would push weak primitives into a post-quantum engine. Kept as its own entry so a future reader does not mistake it for an oversight.",
-      "citation": "Profiles v3.2 mandates no mechanism; PKCS#11 v3.2 §6 is a catalogue of definitions, not a requirement list."
-    },
-    {
       "id": "LEGAL-TOKEN-CAPACITIES-AND-VERSIONS",
       "status": "legal",
       "scenario": "env.token_info",
@@ -61,7 +53,7 @@
       "status": "legal",
       "scenario": "env.mechanism_set",
       "path": "mech*",
-      "justification": "The two engines advertise different mechanism sets (127 vs 116, 47 differences) and no profile THIS ENGINE CLAIMS requires any mechanism, so this is a product decision, not a conformance gap. Complete Provider does require all of them; neither engine claims it.",
+      "justification": "The two engines advertise different mechanism sets and no profile THIS ENGINE CLAIMS requires any mechanism, so this is a product decision, not a conformance gap. Complete Provider does require all of them; neither engine claims it. UPDATED 2026-09-07 (item §3, decision D2): the sets have since CONVERGED — every mechanism the C++ engine advertises is now advertised by Rust too. What remains is one-directional: Rust additionally advertises PQC and vendor mechanisms the C++ engine does not implement, so this entry still matches, but it no longer describes a symmetric divergence. The stale counts it used to quote (127 vs 116, 47 differences) have been removed rather than updated, since a number in a justification goes stale silently.",
       "citation": "PKCS #11 Profiles v3.2 OS §5.1/§5.3/§5.4/§5.5 (Baseline, Extended, Authentication Token, Public Certificates Token) each state \"Supports the following mechanisms: a. None specified\"; this engine claims Baseline. NOTE §5.2 Complete Provider condition 6 requires \"Supports all mechanisms [PKCS11_Spec] Section 6\" — under THAT profile these divergences would be defects, which is why neither engine claims it."
     },
     {

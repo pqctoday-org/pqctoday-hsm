@@ -41,7 +41,13 @@ src/bin/
   softhsm2-keyconv/ # Key conversion utility
 ```
 
-**Retained algorithms**: RSA, ECDSA, ECDH, EdDSA, AES, SHA-1/224/256/384/512, HMAC, CMAC.
+**Retained algorithms**: RSA, ECDSA, ECDH, EdDSA, AES, SHA-1/224/256/384/512,
+SHA-3, MD5, RIPEMD-160, HMAC, CMAC. MD5 and SHA-1 are retained deliberately
+(decision D2, 2026-09-07) and are present in BOTH engines: they are broken for
+any security purpose and must never be selected for new signatures, but callers
+still have to verify existing artefacts, and two engines advertising different
+mechanism sets is its own hazard. As of 2026-09-07 the Rust engine advertises a
+superset of the C++ engine's mechanisms.
 
 **PQC additions**: ML-DSA-44/65/87, ML-KEM-512/768/1024, SLH-DSA (SHA2/SHAKE × 12
 param sets), and stateful HSS/LMS and XMSS/XMSS-MT. The named hybrid KEM

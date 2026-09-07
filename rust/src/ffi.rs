@@ -1417,6 +1417,9 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // CKM_RSA_PKCS_OAEP, CKM_AES_CBC and CKM_AES_CBC_PAD, so all three
         // under-advertised wrap: an application checking capabilities before
         // use would conclude the engine could not do what it in fact does.
+        // §3 Wave 4 — composite RSA+AES key transport; keyed by the RSA
+        // wrapping key, so the same size range as the other RSA mechanisms.
+        CKM_RSA_AES_KEY_WRAP => (512, 4096, 0x00020000 | 0x00040000),
         CKM_RSA_PKCS_OAEP => (
             2048,
             4096,
@@ -1609,6 +1612,8 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_CONCATENATE_BASE_AND_KEY
         | CKM_CONCATENATE_BASE_AND_DATA
         | CKM_CONCATENATE_DATA_AND_BASE
+        | CKM_AES_ECB_ENCRYPT_DATA
+        | CKM_AES_CBC_ENCRYPT_DATA
         | CKM_SHA256_KEY_DERIVATION
         | CKM_SHA384_KEY_DERIVATION
         | CKM_SHA512_KEY_DERIVATION
@@ -7710,6 +7715,38 @@ fn oaep_padding(hash_alg: u32, mgf: u32, label: &[u8]) -> Result<rsa::Oaep, u32>
 /// the exact precedent this copies: read as `*const usize`, which is 4
 /// bytes on wasm32 and 8 bytes on native 64-bit — one code path, both
 /// targets, matching the real struct's actual field width on each).
+
+/// §3 Wave 4 — read `CK_RSA_AES_KEY_WRAP_PARAMS` and the OAEP parameters it
+/// points at. Returns `(aes_key_bytes, oaep_padding_factory_inputs)`.
+///
+/// The AES size arrives in BITS and only 128/192/256 are defined; anything
+/// else is a caller error rather than something to round to a supported size.
+unsafe fn parse_rsa_aes_key_wrap_params(
+    p_mechanism: *const u8,
+) -> Result<(usize, u32, u32, Vec<u8>), u32> {
+    let m = ck_param::mech(p_mechanism);
+    let r = m
+        .params(
+            &ck_param::rsa_aes_key_wrap::LAYOUT,
+            ck_param::rsa_aes_key_wrap::FIELD_COUNT,
+        )
+        .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    let bits = r.ulong(ck_param::rsa_aes_key_wrap::UL_AES_KEY_BITS);
+    let aes_len = match bits {
+        128 => 16usize,
+        192 => 24,
+        256 => 32,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID),
+    };
+    let p_oaep = r.ptr(ck_param::rsa_aes_key_wrap::P_OAEP_PARAMS);
+    if p_oaep.is_null() {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let oaep_len = ck_param::oaep::LAYOUT.size();
+    let (hash_alg, mgf, label) = parse_oaep_params(p_oaep, oaep_len)?;
+    Ok((aes_len, hash_alg, mgf, label))
+}
+
 unsafe fn parse_oaep_params(p_param: *const u8, ul_param_len: usize) -> Result<(u32, u32, Vec<u8>), u32> {
     // Read progressively: a hashAlg-only prefix is meaningful here (it is
     // what several callers send), so the reader is built for ONE field and
@@ -10317,6 +10354,98 @@ pub fn C_DeriveKey(
                 [base_val.as_slice(), data].concat()
             }
 
+            // §3 Wave 4 (2026-09-07) — derive by ENCRYPTING the caller's data
+            // with the base key (v3.2 §6.27). The derived value is the
+            // ciphertext, so the base key is used as an AES key here rather
+            // than as raw key material to be hashed or concatenated.
+            //
+            // The data must be a whole number of AES blocks: these are the
+            // raw ECB/CBC modes, with no padding of their own, and silently
+            // padding (or truncating) a short input would hand the caller a
+            // key derived from bytes they did not supply.
+            CKM_AES_ECB_ENCRYPT_DATA | CKM_AES_CBC_ENCRYPT_DATA => {
+                use aes::cipher::{BlockEncryptMut, KeyIvInit, KeyInit, BlockEncrypt};
+                let base_val = match get_object_value(h_base_key) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                };
+                let m = ck_param::mech(p_mechanism);
+                let (iv, data): ([u8; 16], Vec<u8>) = if mech_type == CKM_AES_ECB_ENCRYPT_DATA {
+                    let r = match m.params(
+                        &ck_param::key_deriv_string::LAYOUT,
+                        ck_param::key_deriv_string::FIELD_COUNT,
+                    ) {
+                        Ok(r) => r,
+                        Err(ck_param::ParamErr::Absent) => return CKR_ARGUMENTS_BAD,
+                        Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
+                    };
+                    (
+                        [0u8; 16],
+                        r.buffer(
+                            ck_param::key_deriv_string::P_DATA,
+                            ck_param::key_deriv_string::UL_LEN,
+                        )
+                        .to_vec(),
+                    )
+                } else {
+                    let r = match m.params(
+                        &ck_param::aes_cbc_encrypt_data::LAYOUT,
+                        ck_param::aes_cbc_encrypt_data::FIELD_COUNT,
+                    ) {
+                        Ok(r) => r,
+                        Err(ck_param::ParamErr::Absent) => return CKR_ARGUMENTS_BAD,
+                        Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
+                    };
+                    let iv_bytes = r.bytes(ck_param::aes_cbc_encrypt_data::IV);
+                    let mut iv = [0u8; 16];
+                    if iv_bytes.len() != 16 {
+                        return CKR_MECHANISM_PARAM_INVALID;
+                    }
+                    iv.copy_from_slice(iv_bytes);
+                    (
+                        iv,
+                        r.buffer(
+                            ck_param::aes_cbc_encrypt_data::P_DATA,
+                            ck_param::aes_cbc_encrypt_data::UL_LEN,
+                        )
+                        .to_vec(),
+                    )
+                };
+                if data.is_empty() || data.len() % 16 != 0 {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                let mut out = data.clone();
+                macro_rules! encrypt_with {
+                    ($aes:ty) => {{
+                        if mech_type == CKM_AES_ECB_ENCRYPT_DATA {
+                            let c = match <$aes as KeyInit>::new_from_slice(&base_val) {
+                                Ok(c) => c,
+                                Err(_) => return CKR_KEY_SIZE_RANGE,
+                            };
+                            for blk in out.chunks_mut(16) {
+                                c.encrypt_block(blk.into());
+                            }
+                        } else {
+                            let c = match cbc::Encryptor::<$aes>::new_from_slices(&base_val, &iv) {
+                                Ok(c) => c,
+                                Err(_) => return CKR_KEY_SIZE_RANGE,
+                            };
+                            let mut enc = c;
+                            for blk in out.chunks_mut(16) {
+                                enc.encrypt_block_mut(blk.into());
+                            }
+                        }
+                    }};
+                }
+                match base_val.len() {
+                    16 => encrypt_with!(aes::Aes128),
+                    24 => encrypt_with!(aes::Aes192),
+                    32 => encrypt_with!(aes::Aes256),
+                    _ => return CKR_KEY_SIZE_RANGE,
+                }
+                out
+            }
+
             // §3 Wave 4 (2026-09-07) — the mirror of the arm above: the
             // caller's data comes FIRST, then the base key's value. Same
             // CK_KEY_DERIVATION_STRING_DATA parameter, opposite order; the
@@ -11482,7 +11611,8 @@ pub fn C_WrapKey(
         // primitive C_Encrypt/C_Decrypt's CKM_RSA_PKCS arms already use.
         let is_rsa_pkcs = mech_type == CKM_RSA_PKCS;
         let is_aes_cbc = mech_type == CKM_AES_CBC || mech_type == CKM_AES_CBC_PAD;
-        if !is_aes_wrap && !is_rsa_oaep && !is_rsa_pkcs && !is_aes_cbc {
+        let is_rsa_aes_wrap = mech_type == CKM_RSA_AES_KEY_WRAP;
+        if !is_aes_wrap && !is_rsa_oaep && !is_rsa_pkcs && !is_aes_cbc && !is_rsa_aes_wrap {
             return CKR_MECHANISM_INVALID;
         }
 
@@ -11620,6 +11750,62 @@ pub fn C_WrapKey(
                     Err(_) => return CKR_FUNCTION_FAILED,
                 }
             })
+        } else if is_rsa_aes_wrap {
+            // §3 Wave 4 — CKM_RSA_AES_KEY_WRAP (v3.2 §6.4.7). Composite key
+            // transport: an EPHEMERAL AES key wraps the target with AES-KWP
+            // (RFC 5649), and RSA-OAEP wraps that AES key. The output is the
+            // RSA blob followed by the KWP blob, which is also the order and
+            // framing the C++ engine emits — the two have to agree byte-for-
+            // byte or a key wrapped by one cannot be unwrapped by the other.
+            let (aes_len, hash_alg, mgf, label) =
+                match parse_rsa_aes_key_wrap_params(p_mechanism) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
+                };
+            if wrapping_key.len() < 8 {
+                return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            let n_len = u32::from_le_bytes([
+                wrapping_key[0],
+                wrapping_key[1],
+                wrapping_key[2],
+                wrapping_key[3],
+            ]) as usize;
+            if wrapping_key.len() < 4 + n_len + 1 {
+                return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            let n = rsa::BigUint::from_bytes_be(&wrapping_key[4..4 + n_len]);
+            let e = rsa::BigUint::from_bytes_be(&wrapping_key[4 + n_len..]);
+            let pk = match rsa::RsaPublicKey::new(n, e) {
+                Ok(k) => k,
+                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+            };
+            let mut aes_key = vec![0u8; aes_len];
+            if getrandom::getrandom(&mut aes_key).is_err() {
+                return CKR_FUNCTION_FAILED;
+            }
+            let kwp = match crate::native::encrypt::aes_key_wrap_kwp(&aes_key, &key_to_wrap) {
+                Ok(v) => v,
+                Err(rv) => return rv,
+            };
+            let oaep = match oaep_padding(hash_alg, mgf, &label) {
+                Ok(o) => o,
+                Err(rv) => return rv,
+            };
+            let mut out = with_rng!(rng, {
+                match pk.encrypt(&mut rng, oaep, &aes_key) {
+                    Ok(ct) => ct,
+                    Err(_) => {
+                        aes_key.iter_mut().for_each(|b| *b = 0);
+                        return CKR_FUNCTION_FAILED;
+                    }
+                }
+            });
+            // The ephemeral key exists only to bridge the two wraps; it must
+            // not linger in memory once the RSA blob carries it.
+            aes_key.iter_mut().for_each(|b| *b = 0);
+            out.extend_from_slice(&kwp);
+            out
         } else if is_rsa_pkcs {
             // Raw RSA PKCS#1 v1.5 wrap — same packed-modulus wrapping-key
             // parse as the OAEP arm above, PKCS1v15 padding instead of OAEP.
@@ -11735,7 +11921,8 @@ pub fn C_UnwrapKey(
         // WS-11 Phase 1 — mirrors C_WrapKey's is_rsa_pkcs above.
         let is_rsa_pkcs = mech_type == CKM_RSA_PKCS;
         let is_aes_cbc = mech_type == CKM_AES_CBC || mech_type == CKM_AES_CBC_PAD;
-        if !is_aes_wrap && !is_rsa_oaep && !is_rsa_pkcs && !is_aes_cbc {
+        let is_rsa_aes_wrap = mech_type == CKM_RSA_AES_KEY_WRAP;
+        if !is_aes_wrap && !is_rsa_oaep && !is_rsa_pkcs && !is_aes_cbc && !is_rsa_aes_wrap {
             return CKR_MECHANISM_INVALID;
         }
 
@@ -11801,6 +11988,48 @@ pub fn C_UnwrapKey(
                 Ok(pt) => pt,
                 // §6.16 — wrapped-key decode failure (uniform code).
                 Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+            }
+        } else if is_rsa_aes_wrap {
+            // §3 Wave 4 — the inverse of the composite wrap: the blob is
+            // RSA-OAEP(ephemeral AES key) || AES-KWP(target). The split point
+            // is the RSA modulus length, because OAEP output is always
+            // exactly one modulus wide.
+            let (aes_len, hash_alg, mgf, label) =
+                match parse_rsa_aes_key_wrap_params(p_mechanism) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
+                };
+            use rsa::pkcs8::DecodePrivateKey;
+            let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&unwrapping_key) {
+                Ok(k) => k,
+                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+            };
+            let n_len = rsa::traits::PublicKeyParts::size(&sk);
+            if wrapped_data.len() <= n_len {
+                // Not even room for the RSA blob plus one KWP block.
+                return CKR_WRAPPED_KEY_LEN_RANGE;
+            }
+            let (rsa_part, kwp_part) = wrapped_data.split_at(n_len);
+            let oaep = match oaep_padding(hash_alg, mgf, &label) {
+                Ok(o) => o,
+                Err(rv) => return rv,
+            };
+            let mut aes_key = match sk.decrypt(oaep, rsa_part) {
+                Ok(k) => k,
+                Err(_) => return CKR_WRAPPED_KEY_INVALID,
+            };
+            // The caller's ulAESKeyBits has to agree with what the blob
+            // actually carried; a mismatch means the two sides disagree about
+            // the wrap, not that the engine should proceed anyway.
+            if aes_key.len() != aes_len {
+                aes_key.iter_mut().for_each(|b| *b = 0);
+                return CKR_WRAPPED_KEY_INVALID;
+            }
+            let out = crate::native::encrypt::aes_key_unwrap_kwp(&aes_key, kwp_part);
+            aes_key.iter_mut().for_each(|b| *b = 0);
+            match out {
+                Ok(v) => v,
+                Err(rv) => return rv,
             }
         } else if is_rsa_pkcs {
             // Raw RSA PKCS#1 v1.5 unwrap — same PKCS8 private-key parse as

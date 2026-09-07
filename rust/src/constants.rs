@@ -582,6 +582,14 @@ pub const CKM_CONCATENATE_BASE_AND_DATA: u32 = 0x0000_0362;
 /// §3 Wave 4 (2026-09-07) — the mirror of the above: data first, then the
 /// base key's value. Value from src/lib/pkcs11/pkcs11t.h.
 pub const CKM_CONCATENATE_DATA_AND_BASE: u32 = 0x0000_0363;
+/// §3 Wave 4 — derive a key by ENCRYPTING caller-supplied data with the base
+/// key (v3.2 §6.27). Values from src/lib/pkcs11/pkcs11t.h.
+/// §3 Wave 4 — composite key transport (v3.2 §6.4.7): an ephemeral AES key
+/// wraps the target with AES-KWP, and RSA-OAEP wraps that AES key. The output
+/// is the RSA blob followed by the AES-KWP blob.
+pub const CKM_RSA_AES_KEY_WRAP: u32 = 0x0000_1054;
+pub const CKM_AES_ECB_ENCRYPT_DATA: u32 = 0x0000_1104;
+pub const CKM_AES_CBC_ENCRYPT_DATA: u32 = 0x0000_1105;
 
 // Digest key-derivation (PKCS#11 v3.2 §6.22 SHA-2 / §6.29 SHA-3): derived
 // value = SHAx(base.CKA_VALUE), left-truncated to CKA_VALUE_LEN when the
@@ -987,6 +995,9 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA3_512_HMAC_GENERAL,
     CKM_AES_CMAC,
     CKM_CONCATENATE_DATA_AND_BASE,
+    CKM_RSA_AES_KEY_WRAP,
+    CKM_AES_ECB_ENCRYPT_DATA,
+    CKM_AES_CBC_ENCRYPT_DATA,
     CKM_MD5,
     CKM_MD5_HMAC,
     CKM_MD5_HMAC_GENERAL,

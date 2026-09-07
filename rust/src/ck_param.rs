@@ -612,6 +612,28 @@ ck_struct!(
 });
 
 ck_struct!(
+    /// `CK_RSA_AES_KEY_WRAP_PARAMS` (v3.2 §6.4.7) — the AES key size in BITS
+    /// plus a POINTER to a nested `CK_RSA_PKCS_OAEP_PARAMS`. The nesting is
+    /// why this cannot reuse the OAEP layout directly: the OAEP struct lives
+    /// behind `P_OAEP_PARAMS`, not inline.
+    rsa_aes_key_wrap, "CK_RSA_AES_KEY_WRAP_PARAMS", {
+    UL_AES_KEY_BITS: F::Ulong,
+    P_OAEP_PARAMS: F::Ptr,
+});
+
+ck_struct!(
+    /// `CK_AES_CBC_ENCRYPT_DATA_PARAMS` (v3.2 §6.27) — a FIXED 16-byte IV
+    /// followed by the data pointer/length pair, unlike
+    /// `CK_KEY_DERIVATION_STRING_DATA` which is just the pair. The IV being
+    /// an inline array rather than a pointer is why this needs its own
+    /// layout instead of reusing that one.
+    aes_cbc_encrypt_data, "CK_AES_CBC_ENCRYPT_DATA_PARAMS", {
+    IV: F::Bytes(16),
+    P_DATA: F::Ptr,
+    UL_LEN: F::Ulong,
+});
+
+ck_struct!(
     /// `CK_PRF_DATA_PARAM` (v3.2 §6.42) — one element of the SP 800-108
     /// data-parameter array.
     prf_data_param, "CK_PRF_DATA_PARAM", {
