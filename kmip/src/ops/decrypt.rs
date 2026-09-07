@@ -333,8 +333,9 @@ fn decrypt_streaming(
         deps.streams.lock().unwrap().insert(
             cv.clone(),
             StreamCtx {
-                cipher,
-                uid: req.uid.clone(),
+                state: super::deps::StreamState::Cipher(cipher),
+                operation: crate::kmip30::Operation::Decrypt,
+                uid: Some(req.uid.clone()),
                 owner: auth.identity.as_ref().map(|i| i.username.clone()),
             },
         );
@@ -358,16 +359,30 @@ fn decrypt_streaming(
         streams.insert(cv.clone(), ctx);
         return Err(fail_err(deps, correlation_id, "Decrypt", invalid("unknown-correlation-value")));
     }
-    if ctx.uid != req.uid {
+    if ctx.uid.as_deref() != Some(req.uid.as_str()) {
         return Err(fail_err(deps, correlation_id, "Decrypt",
             invalid("correlation-value/uid mismatch")));
     }
-    let pt_result = ctx.cipher.update(&req.data);
+    // Correlation values share one namespace across every streaming
+    // operation, so nothing but this check stops a Decrypt part being applied
+    // to (say) an Encrypt stream's cipher state.
+    if ctx.operation != crate::kmip30::Operation::Decrypt {
+        return Err(fail_err(deps, correlation_id, "Decrypt",
+            invalid("correlation-value belongs to a different operation")));
+    }
+    let super::deps::StreamState::Cipher(ref mut cipher) = ctx.state else {
+        return Err(fail_err(deps, correlation_id, "Decrypt",
+            invalid("correlation-value is not a cipher stream")));
+    };
+    let pt_result = cipher.update(&req.data);
     emit_pkcs11_result(deps, correlation_id, "multipart::update", None, &pt_result);
     let mut pt =
         pt_result.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:update"))?;
     if req.final_indicator == Some(true) {
-        let tail_result = ctx.cipher.finalize();
+        let super::deps::StreamState::Cipher(cipher) = ctx.state else {
+            unreachable!("checked above")
+        };
+        let tail_result = cipher.finalize();
         emit_pkcs11_result(deps, correlation_id, "multipart::finalize", None, &tail_result);
         // On the decrypt side finalize returns trailing plaintext (or, for
         // AEAD, fails the tag check) — never a tag to hand back.

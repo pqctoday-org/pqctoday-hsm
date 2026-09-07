@@ -864,6 +864,12 @@ pub struct SignRequest {
     /// §6.1.60 — when present, overrides the object's stored
     /// `CryptographicParameters` attribute for this op.
     pub cryptographic_parameters: Option<CryptographicParameters>,
+    // ── §6.1.62 multi-part (R3) — `Init Indicator` opens a stream,
+    // `Correlation Value` chains the parts, `Final Indicator` closes it and
+    // produces the result. Absent on a single-shot request.
+    pub init_indicator: Option<bool>,
+    pub final_indicator: Option<bool>,
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -878,6 +884,10 @@ pub struct SignResponse {
     /// (no-rekey) path. Internal-only: never encoded onto the wire (see
     /// `wire.rs::encode_sign_resp`, which reads only `uid` + `signature`).
     pub rekeyed: Option<SignRekeyInfo>,
+    /// §6.1.62 streaming — server-issued handle echoed on every non-final
+    /// part so the client can chain the next one. Absent on the final part
+    /// and on a single-shot response.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 /// See [`SignResponse::rekeyed`].
@@ -901,12 +911,22 @@ pub struct SignatureVerifyRequest {
     /// absent, the server falls back to the object's stored
     /// `CryptographicParameters` attribute.
     pub cryptographic_parameters: Option<CryptographicParameters>,
+    // ── §6.1.63 multi-part (R3) — `Init Indicator` opens a stream,
+    // `Correlation Value` chains the parts, `Final Indicator` closes it and
+    // produces the result. Absent on a single-shot request.
+    pub init_indicator: Option<bool>,
+    pub final_indicator: Option<bool>,
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignatureVerifyResponse {
     pub uid: String,
     pub validity: SignatureValidity,
+    /// §6.1.63 streaming — server-issued handle echoed on every non-final
+    /// part so the client can chain the next one. Absent on the final part
+    /// and on a single-shot response.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1362,6 +1382,12 @@ pub struct MacRequest {
     pub cryptographic_parameters: Option<CryptographicParameters>,
     /// Wire tag `Data` (0x4200c2). Required for single-part.
     pub data: Vec<u8>,
+    // ── §6.1.38 multi-part (R3) — `Init Indicator` opens a stream,
+    // `Correlation Value` chains the parts, `Final Indicator` closes it and
+    // produces the result. Absent on a single-shot request.
+    pub init_indicator: Option<bool>,
+    pub final_indicator: Option<bool>,
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1369,6 +1395,10 @@ pub struct MacResponse {
     pub uid: String,
     /// Wire tag `MAC Data` (0x4200c6).
     pub mac_data: Vec<u8>,
+    /// §6.1.38 streaming — server-issued handle echoed on every non-final
+    /// part so the client can chain the next one. Absent on the final part
+    /// and on a single-shot response.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 /// `MACVerify` (KMIP 3.0 §6.1.39) — verify a previously computed MAC.
@@ -1381,12 +1411,22 @@ pub struct MacVerifyRequest {
     pub data: Vec<u8>,
     /// Wire tag `MAC Data` (0x4200c6). The MAC bytes to verify.
     pub mac_data: Vec<u8>,
+    // ── §6.1.39 multi-part (R3) — `Init Indicator` opens a stream,
+    // `Correlation Value` chains the parts, `Final Indicator` closes it and
+    // produces the result. Absent on a single-shot request.
+    pub init_indicator: Option<bool>,
+    pub final_indicator: Option<bool>,
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MacVerifyResponse {
     pub uid: String,
     pub validity: SignatureValidity,
+    /// §6.1.39 streaming — server-issued handle echoed on every non-final
+    /// part so the client can chain the next one. Absent on the final part
+    /// and on a single-shot response.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 /// `Hash` (KMIP 3.0 §6.1.30) — keyless cryptographic hash. The
@@ -1398,11 +1438,21 @@ pub struct HashRequest {
     pub cryptographic_parameters: CryptographicParameters,
     /// REQUIRED for single-part.
     pub data: Vec<u8>,
+    // ── §6.1.30 multi-part (R3) — `Init Indicator` opens a stream,
+    // `Correlation Value` chains the parts, `Final Indicator` closes it and
+    // produces the result. Absent on a single-shot request.
+    pub init_indicator: Option<bool>,
+    pub final_indicator: Option<bool>,
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HashResponse {
     pub data: Vec<u8>,
+    /// §6.1.30 streaming — server-issued handle echoed on every non-final
+    /// part so the client can chain the next one. Absent on the final part
+    /// and on a single-shot response.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 /// `Cryptographic Parameters` (KMIP 3.0 §11) — Structure holding the

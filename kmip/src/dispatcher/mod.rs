@@ -2566,7 +2566,10 @@ mod tests {
                         uid: signer_a.clone(),
                         data: b"hello".to_vec(),
                         cryptographic_parameters: None,
-                    }),
+                        init_indicator: None,
+                        final_indicator: None,
+                        correlation_value: None,
+}),
                 },
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::GetAttributes,
@@ -2937,7 +2940,10 @@ rules:
                         uid: "urn:legacy".into(),
                         data: b"agility-lesson".to_vec(),
                         cryptographic_parameters: None,
-                    }),
+                        init_indicator: None,
+                        final_indicator: None,
+                        correlation_value: None,
+}),
                 },
                 RequestBatchItem {
                     operation: crate::kmip30::Operation::Destroy,

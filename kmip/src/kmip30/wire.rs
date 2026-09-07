@@ -2673,16 +2673,29 @@ fn decode_sign_req(children: &[TtlvFrame]) -> Result<SignRequest, WireError> {
     let uid = required_uid(children)?;
     let mut data = Vec::new();
     let mut cp: Option<CryptographicParameters> = None;
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
+            // §6.1.62 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(SignRequest { uid, data, cryptographic_parameters: cp })
+    Ok(SignRequest { uid, data, cryptographic_parameters: cp, init_indicator, final_indicator, correlation_value })
 }
 
 fn encode_sign_resp(r: &SignResponse) -> Vec<TtlvFrame> {
@@ -2697,6 +2710,9 @@ fn decode_sigverify_req(children: &[TtlvFrame]) -> Result<SignatureVerifyRequest
     let mut data = Vec::new();
     let mut signature = Vec::new();
     let mut cp: Option<CryptographicParameters> = None;
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
@@ -2704,10 +2720,20 @@ fn decode_sigverify_req(children: &[TtlvFrame]) -> Result<SignatureVerifyRequest
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
+            // §6.1.63 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(SignatureVerifyRequest { uid, data, signature, cryptographic_parameters: cp })
+    Ok(SignatureVerifyRequest { uid, data, signature, cryptographic_parameters: cp, init_indicator, final_indicator, correlation_value })
 }
 
 fn encode_sigverify_resp(r: &SignatureVerifyResponse) -> Vec<TtlvFrame> {
@@ -3936,16 +3962,29 @@ fn decode_mac_req(children: &[TtlvFrame]) -> Result<MacRequest, WireError> {
     let uid = required_uid(children)?;
     let mut cp = None;
     let mut data = Vec::new();
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::CryptographicParameters => cp = Some(decode_cryptographic_parameters(c)?),
             tags::Data => {
                 if let Value::ByteString(b) = &c.value { data = b.clone(); }
             }
+            // §6.1.38 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(MacRequest { uid, cryptographic_parameters: cp, data })
+    Ok(MacRequest { uid, cryptographic_parameters: cp, data, init_indicator, final_indicator, correlation_value })
 }
 
 fn decode_mac_verify_req(children: &[TtlvFrame]) -> Result<MacVerifyRequest, WireError> {
@@ -3953,6 +3992,9 @@ fn decode_mac_verify_req(children: &[TtlvFrame]) -> Result<MacVerifyRequest, Wir
     let mut cp = None;
     let mut data = Vec::new();
     let mut mac_data = Vec::new();
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::CryptographicParameters => cp = Some(decode_cryptographic_parameters(c)?),
@@ -3962,25 +4004,48 @@ fn decode_mac_verify_req(children: &[TtlvFrame]) -> Result<MacVerifyRequest, Wir
             tags::MacData => {
                 if let Value::ByteString(b) = &c.value { mac_data = b.clone(); }
             }
+            // §6.1.39 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(MacVerifyRequest { uid, cryptographic_parameters: cp, data, mac_data })
+    Ok(MacVerifyRequest { uid, cryptographic_parameters: cp, data, mac_data, init_indicator, final_indicator, correlation_value })
 }
 
 fn decode_hash_req(children: &[TtlvFrame]) -> Result<HashRequest, WireError> {
     let mut cp = CryptographicParameters::default();
     let mut data = Vec::new();
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::CryptographicParameters => cp = decode_cryptographic_parameters(c)?,
             tags::Data => {
                 if let Value::ByteString(b) = &c.value { data = b.clone(); }
             }
+            // §6.1.30 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(HashRequest { cryptographic_parameters: cp, data })
+    Ok(HashRequest { cryptographic_parameters: cp, data, init_indicator, final_indicator, correlation_value })
 }
 
 fn encode_mac_resp(r: &MacResponse) -> Vec<TtlvFrame> {

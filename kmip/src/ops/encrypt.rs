@@ -352,8 +352,9 @@ fn encrypt_streaming(
         deps.streams.lock().unwrap().insert(
             cv.clone(),
             StreamCtx {
-                cipher,
-                uid: req.uid.clone(),
+                state: super::deps::StreamState::Cipher(cipher),
+                operation: crate::kmip30::Operation::Encrypt,
+                uid: Some(req.uid.clone()),
                 // Part F §F7.5 — tag the opening tenant (see StreamCtx).
                 owner: auth.identity.as_ref().map(|i| i.username.clone()),
             },
@@ -382,17 +383,31 @@ fn encrypt_streaming(
         return Err(fail_err(deps, correlation_id, "Encrypt",
             invalid("unknown-correlation-value")));
     }
-    if ctx.uid != req.uid {
+    if ctx.uid.as_deref() != Some(req.uid.as_str()) {
         return Err(fail_err(deps, correlation_id, "Encrypt",
             invalid("correlation-value/uid mismatch")));
     }
-    let ct_result = ctx.cipher.update(&req.data);
+    // Correlation values share one namespace across every streaming
+    // operation, so nothing but this check stops an Encrypt part being applied
+    // to another operation's stream state.
+    if ctx.operation != crate::kmip30::Operation::Encrypt {
+        return Err(fail_err(deps, correlation_id, "Encrypt",
+            invalid("correlation-value belongs to a different operation")));
+    }
+    let super::deps::StreamState::Cipher(ref mut cipher) = ctx.state else {
+        return Err(fail_err(deps, correlation_id, "Encrypt",
+            invalid("correlation-value is not a cipher stream")));
+    };
+    let ct_result = cipher.update(&req.data);
     emit_pkcs11_result(deps, correlation_id, "multipart::update", None, &ct_result);
     let mut ct =
         ct_result.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:update"))?;
     if req.final_indicator == Some(true) {
-        let is_aead = matches!(ctx.cipher, MultipartCipher::Gcm(_));
-        let tail_result = ctx.cipher.finalize();
+        let super::deps::StreamState::Cipher(cipher) = ctx.state else {
+            unreachable!("checked above")
+        };
+        let is_aead = matches!(cipher, MultipartCipher::Gcm(_));
+        let tail_result = cipher.finalize();
         emit_pkcs11_result(deps, correlation_id, "multipart::finalize", None, &tail_result);
         let tail =
             tail_result.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:final"))?;

@@ -2274,3 +2274,113 @@ rules: []
         assert_eq!(d.store.get("k2").unwrap().unwrap().sign_counter, Some(i32::MAX));
     }
 }
+
+// ── Multi-part streaming for the non-cipher operations (R3) ──────────────
+//
+// §6.1.30 Hash, §6.1.38 MAC, §6.1.39 MAC Verify, §6.1.62 Sign and §6.1.63
+// Signature Verify all carry `Init Indicator` / `Final Indicator` /
+// `Correlation Value`, exactly like Encrypt and Decrypt.
+//
+// Sign/Verify/MAC accumulate and run the existing one-shot at Final. That is
+// not a shortcut: it mirrors the ENGINE's own multi-part convention
+// (`rust/src/state.rs` `SIGN_MULTIPART_ACC` — `C_SignUpdate` accumulates,
+// `C_SignFinal` calls the one-shot handler), and it is the only correct shape
+// for pure ML-DSA and SLH-DSA, which must see the whole message. `Hash` is
+// different: `compute_hash` is in-process `sha2`/`sha3`, so it keeps real
+// incremental state and never buffers.
+
+use crate::kmip30::Operation;
+use crate::ops::deps::{StreamCtx, StreamState};
+
+/// Outcome of feeding one part into a streaming operation.
+pub enum StreamStep {
+    /// Not the final part — hand this correlation value back to the client.
+    More(Vec<u8>),
+    /// Final part — here is everything the operation accumulated.
+    Done(Vec<u8>),
+}
+
+/// True when a request's indicators mean "this is part of a stream".
+///
+/// Same rule the Decrypt fix established: an `Init Indicator` opens one, and a
+/// `Correlation Value` continues one. A request carrying neither is
+/// single-shot, which is what almost every caller sends.
+pub fn is_streaming(init: Option<bool>, correlation: &Option<Vec<u8>>) -> bool {
+    init == Some(true) || correlation.is_some()
+}
+
+/// Drive one part of a buffering stream (Sign / Signature Verify / MAC /
+/// MAC Verify).
+///
+/// Returns `More` while parts are still arriving and `Done` with the full
+/// accumulated message on the final part. The caller then runs its ordinary
+/// one-shot path over those bytes.
+pub fn buffered_stream_step(
+    deps: &Deps,
+    operation: Operation,
+    uid: Option<&str>,
+    auth: &crate::server::auth::AuthContext,
+    init: Option<bool>,
+    final_: Option<bool>,
+    correlation: Option<Vec<u8>>,
+    part: &[u8],
+) -> crate::error::Result<StreamStep> {
+    let invalid = |m: &str| KmipError::failed(crate::error::ResultReason::InvalidMessage, m.to_string());
+    let owner = auth.identity.as_ref().map(|i| i.username.clone());
+
+    if init == Some(true) {
+        let mut acc = part.to_vec();
+        // An Init that is ALSO Final is a legal one-part stream.
+        if final_ == Some(true) {
+            return Ok(StreamStep::Done(std::mem::take(&mut acc)));
+        }
+        let cv = deps.new_correlation_value();
+        deps.streams.lock().unwrap().insert(
+            cv.clone(),
+            StreamCtx {
+                state: StreamState::Buffered(acc),
+                operation,
+                uid: uid.map(str::to_string),
+                owner,
+            },
+        );
+        return Ok(StreamStep::More(cv));
+    }
+
+    let cv = correlation.ok_or_else(|| invalid("streaming part without a Correlation Value"))?;
+    let mut streams = deps.streams.lock().unwrap();
+    let mut ctx = streams.remove(&cv).ok_or_else(|| invalid("unknown-correlation-value"))?;
+
+    // Part F §F7.5 — a foreign tenant gets the same answer as an unknown
+    // handle, and the stream goes BACK so a stranger cannot destroy the
+    // owner's in-flight state.
+    if ctx.owner != owner {
+        streams.insert(cv.clone(), ctx);
+        return Err(invalid("unknown-correlation-value"));
+    }
+    // Correlation values share ONE namespace across every streaming
+    // operation, so without this a Sign part could be appended to a MAC
+    // stream — or worse, finalised by the wrong operation.
+    if ctx.operation != operation {
+        streams.insert(cv.clone(), ctx);
+        return Err(invalid("correlation-value belongs to a different operation"));
+    }
+    if ctx.uid.as_deref() != uid {
+        streams.insert(cv.clone(), ctx);
+        return Err(invalid("correlation-value/uid mismatch"));
+    }
+
+    let StreamState::Buffered(ref mut acc) = ctx.state else {
+        streams.insert(cv.clone(), ctx);
+        return Err(invalid("correlation-value is not a buffered stream"));
+    };
+    acc.extend_from_slice(part);
+
+    if final_ == Some(true) {
+        let StreamState::Buffered(acc) = ctx.state else { unreachable!("checked above") };
+        Ok(StreamStep::Done(acc))
+    } else {
+        streams.insert(cv.clone(), ctx);
+        Ok(StreamStep::More(cv))
+    }
+}
