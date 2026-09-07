@@ -527,6 +527,43 @@ if [[ $RUN_JAVAJCE == 1 ]]; then
   STEP=$((STEP+1)); say "step $STEP: JavaJCE provider suite (mvn test, pqc-dev-sandbox)"
   ensure_sandbox_container
   GATE_DEST=/tmp/hsm-javajce-gate
+
+  # 2026-09-07 — build the engine this step tests AGAINST, from this commit.
+  #
+  # Until now the suite ran against $SANDBOX_CONTAINER's INSTALLED
+  # /usr/local/lib/softhsm/libsofthsmv3.so, which is baked into the image and
+  # was dated 2026-09-01. So the step validated today's Java against a native
+  # engine months old, and would keep reporting green as the two drifted
+  # apart. That is not hypothetical: it was found by adding a JavaJCE test for
+  # CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS, which the installed engine did not have —
+  # the Java was correct and the engine was stale, and no gate run could have
+  # told the difference. ANY engine-side change was invisible here.
+  #
+  # $SANDBOX_CONTAINER has cmake, g++ and OpenSSL 3.6.3, so it can build its
+  # own. It MUST build its own: its glibc differs from $RUST_CONTAINER's, so
+  # the --cpp step's binaries are not interchangeable (JavaJCE/README.md).
+  #
+  # The build directory is kept between runs so an unchanged tree relinks
+  # rather than rebuilds. Only the files CMake needs are copied — the two
+  # *.in templates are easy to forget and configure fails without them.
+  JCE_ENGINE_SRC=/tmp/hsm-jce-engine
+  say "  building the C++ engine inside $SANDBOX_CONTAINER (so the suite tests THIS commit's engine)"
+  if ! dexec_sandbox "mkdir -p $JCE_ENGINE_SRC" \
+     || ! tar czf - -C "$ROOT" CMakeLists.txt cmake src config.h.in.cmake softhsmv3.pc.in 2>/dev/null \
+          | docker exec -i "$SANDBOX_CONTAINER" tar xzf - -C "$JCE_ENGINE_SRC" 2>/dev/null \
+     || ! dexec_sandbox "cd $JCE_ENGINE_SRC && \
+            (test -f b/CMakeCache.txt || cmake -S . -B b -DCMAKE_BUILD_TYPE=Release \
+               -DWITH_RIPEMD160=ON -DOPENSSL_ROOT_DIR=/usr/local/ssl >/tmp/jce-engine-cmake.log 2>&1) && \
+            LD_LIBRARY_PATH=/usr/local/ssl/lib64 cmake --build b --target softhsmv3 -j\$(nproc) \
+              >/tmp/jce-engine-build.log 2>&1"; then
+    bad "JavaJCE provider suite — could not build the engine inside $SANDBOX_CONTAINER (see /tmp/jce-engine-cmake.log and /tmp/jce-engine-build.log inside it)"
+  fi
+  JCE_MODULE="$JCE_ENGINE_SRC/b/src/lib/libsofthsmv3.so"
+  # Fail loudly rather than silently falling back to the installed engine —
+  # a silent fallback is exactly the failure this whole block removes.
+  if ! dexec_sandbox "test -f $JCE_MODULE"; then
+    bad "JavaJCE provider suite — engine built but $JCE_MODULE is missing"
+  fi
   # Maven emits real ANSI color escapes even under `docker exec` with no
   # TTY (confirmed live — `[INFO]` is genuinely `\x1b[1;34mINFO\x1b[m]` on
   # the wire, not just a terminal-rendering artifact) — strip them before
@@ -558,6 +595,7 @@ if [[ $RUN_JAVAJCE == 1 ]]; then
      && docker cp "$JAVAJCE_DIR" "$SANDBOX_CONTAINER:$GATE_DEST/JavaJCE" >/dev/null 2>&1 \
      && dexec_sandbox "cd $GATE_DEST/JavaJCE && \
           export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
+          export PKCS11_MODULE=$JCE_MODULE && \
           mvn -o test 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' > /tmp/javajce-gate.log; \
           grep -E '$AGG_PATTERN' /tmp/javajce-gate.log >/dev/null"; then
     ok "JavaJCE provider suite ($(dexec_sandbox "grep -E '$AGG_PATTERN' /tmp/javajce-gate.log | tail -1"))"
