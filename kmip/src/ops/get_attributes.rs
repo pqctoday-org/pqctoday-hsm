@@ -101,7 +101,15 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
         Attribute::ObjectType(r.object_type),
         Attribute::CryptographicAlgorithm(r.algorithm),
         Attribute::CryptographicUsageMask(r.usage_mask),
-        Attribute::State(r.state),
+        // §4.67 transition 6 (G8) — a date may have moved this object since
+        // it was last written. Report what the state actually IS now, not the
+        // last explicitly-set value: an Active key past its Protect Stop Date
+        // is Deactivated, and Encrypt/Decrypt already refuse it.
+        Attribute::State(
+            crate::store::lifecycle::effective_state_for(r, time::OffsetDateTime::now_utc())
+                .map(|(st, _)| st)
+                .unwrap_or(r.state),
+        ),
         Attribute::InitialDate(r.initial_date.unix_timestamp()),
     ];
     if r.cryptographic_length > 0 {
@@ -144,6 +152,12 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     if let Some(b) = r.key_value_present { out.push(Attribute::KeyValuePresent(b)); }
     if let Some(b) = r.quantum_safe { out.push(Attribute::QuantumSafe(b)); }
     if let Some(b) = r.rotate_automatic { out.push(Attribute::RotateAutomatic(b)); }
+    // §4.21 Deactivation Reason — when a date moved the object, say which one.
+    if let Some((_, code)) =
+        crate::store::lifecycle::effective_state_for(r, time::OffsetDateTime::now_utc())
+    {
+        out.push(Attribute::DeactivationReasonCode(code));
+    }
     if let Some(x) = r.rotate_latest { out.push(Attribute::RotateLatest(x)); }
     if let Some(x) = r.archive_date { out.push(Attribute::ArchiveDate(x)); }
     if let Some(x) = r.nist_security_category { out.push(Attribute::NistSecurityCategory(x)); }

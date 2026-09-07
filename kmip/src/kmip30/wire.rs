@@ -1226,13 +1226,12 @@ fn query_function_from_code(v: u32) -> Option<QueryFunction> {
 
 fn deactivation_reason_code(r: DeactivationReason) -> u32 {
     match r {
+        // §11.14 defines exactly these four (G8). The previous six mirrored
+        // `Revocation Reason Code`, a different enumeration.
         DeactivationReason::Unspecified => 0x01,
-        DeactivationReason::KeyCompromise => 0x02,
-        DeactivationReason::CACompromise => 0x03,
-        DeactivationReason::AffiliationChanged => 0x04,
-        DeactivationReason::Superseded => 0x05,
-        DeactivationReason::CessationOfOperation => 0x06,
-        DeactivationReason::PrivilegeWithdrawn => 0x07,
+        DeactivationReason::DeactivationDate => 0x02,
+        DeactivationReason::ProtectStopDate => 0x03,
+        DeactivationReason::UsageLimit => 0x04,
     }
 }
 

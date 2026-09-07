@@ -1534,18 +1534,34 @@ pub struct DeactivateResponse {
     pub uid: String,
 }
 
-/// `Deactivation Reason Code` Enumeration. Codepoints from the spec
-/// extract (`enums.Deactivation Reason Code`). Mirrors the structure
-/// of `Revocation Reason Code` per §3.x.
+/// `Deactivation Reason Code` Enumeration — KMIP 3.0 §11.14.
+///
+/// **Corrected 2026-09-06 (G8).** These names previously mirrored
+/// `Revocation Reason Code` (KeyCompromise / CACompromise /
+/// AffiliationChanged / Superseded / CessationOfOperation /
+/// PrivilegeWithdrawn), which is a DIFFERENT enumeration. §11.14 defines
+/// exactly four values, and they mean something else entirely at the same
+/// codepoints: `0x02` is "Deactivation Date", not "Key Compromise".
+///
+/// Nothing branched on the old names — the code was passed straight through
+/// to the record — so no stored data changes meaning. But any caller reading
+/// `KeyCompromise` off a Deactivate was being told the opposite of what the
+/// client sent, and `0x05`–`0x07` were accepted despite not existing in this
+/// enumeration at all.
+///
+/// Compromise IS expressible: it belongs to `Revoke` (§6.1.51) with
+/// `Revocation Reason Code`, which is a separate operation and enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeactivationReason {
-    Unspecified           = 0x01,
-    KeyCompromise         = 0x02,
-    CACompromise          = 0x03,
-    AffiliationChanged    = 0x04,
-    Superseded            = 0x05,
-    CessationOfOperation  = 0x06,
-    PrivilegeWithdrawn    = 0x07,
+    /// No reason given.
+    Unspecified     = 0x01,
+    /// The object's own `Deactivation Date` (§4.20) was reached.
+    DeactivationDate = 0x02,
+    /// The object's `Protect Stop Date` (§4.47) was reached — §4.67
+    /// transition 6.
+    ProtectStopDate = 0x03,
+    /// A `Usage Limits` (§4.69) count was exhausted.
+    UsageLimit      = 0x04,
 }
 
 impl DeactivationReason {
@@ -1555,12 +1571,13 @@ impl DeactivationReason {
     pub const fn from_wire_value(v: u32) -> Option<Self> {
         match v {
             0x01 => Some(Self::Unspecified),
-            0x02 => Some(Self::KeyCompromise),
-            0x03 => Some(Self::CACompromise),
-            0x04 => Some(Self::AffiliationChanged),
-            0x05 => Some(Self::Superseded),
-            0x06 => Some(Self::CessationOfOperation),
-            0x07 => Some(Self::PrivilegeWithdrawn),
+            0x02 => Some(Self::DeactivationDate),
+            0x03 => Some(Self::ProtectStopDate),
+            0x04 => Some(Self::UsageLimit),
+            // 0x05-0x07 were accepted here as Superseded /
+            // CessationOfOperation / PrivilegeWithdrawn. They are
+            // Revocation Reason codes; §11.14 has no such values, so they
+            // are refused rather than silently reinterpreted.
             _ => None,
         }
     }
