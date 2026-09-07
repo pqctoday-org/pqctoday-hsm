@@ -229,6 +229,8 @@ fn decrypt_ml_kem(
             }
         }
     };
+    // §4.13.2 — count a successful Decrypt.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Decrypt);
     Ok(DecryptResponse { uid: req.uid.clone(), data: shared_secret })
 }
 
@@ -340,6 +342,8 @@ fn decrypt_classical(
             }
         }
     }
+    // §4.13.2 — count a successful Decrypt.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Decrypt);
     Ok(DecryptResponse { uid: req.uid.clone(), data: plaintext })
 }
 

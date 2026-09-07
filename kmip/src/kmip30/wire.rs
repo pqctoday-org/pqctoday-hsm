@@ -252,6 +252,26 @@ pub(crate) mod tags {
     pub const ApplicationData: u32        = 0x42_0002;
     /// KMIP 3.0 §11 — `Group Link` Reference (UID of a Group object).
     pub const GroupLink: u32              = 0x42_01b3;
+    /// `Child Link` — §4.35.3.
+    pub const ChildLink: u32 = 0x42_0191;
+    /// `Parent Link` — §4.35.10.
+    pub const ParentLink: u32 = 0x42_0195;
+    /// `PKCS#12 Certificate Link` — §4.35.12.
+    pub const Pkcs12CertificateLink: u32 = 0x42_0196;
+    /// `PKCS#12 Password Link` — §4.35.13.
+    pub const Pkcs12PasswordLink: u32 = 0x42_0197;
+    /// `Wrapping Key Link` — §4.35.20.
+    pub const WrappingKeyLink: u32 = 0x42_019d;
+    /// `Credential Link` — §4.35.4.
+    pub const CredentialLink: u32 = 0x42_01a0;
+    /// `Password Link` — §4.35.11.
+    pub const PasswordLink: u32 = 0x42_01a5;
+    /// `Split Key Base Link` — §4.35.19.
+    pub const SplitKeyBaseLink: u32 = 0x42_01b4;
+    /// `Joined Split Key Parts Link` — §4.35.8.
+    pub const JoinedSplitKeyPartsLink: u32 = 0x42_01b5;
+    /// `Certificate Request Link` — §4.35.2.
+    pub const CertificateRequestLink: u32 = 0x42_01bc;
     /// `Object Group` (0x420056) — the KMIP **2.x** multi-instance
     /// group-membership label. K3: this tag is **RESERVED in KMIP 3.0**
     /// (verified against `kmip-spec-3.0-tags-enums.json` — 0x420056 is absent;
@@ -447,6 +467,26 @@ pub(crate) mod tags {
     pub const X509CertificateIssuer: u32         = 0x42_00b6;
     pub const X509CertificateSubject: u32        = 0x42_00b7;
     pub const RotateName: u32                    = 0x42_016f;
+    /// `Rotate Latest` — §4.58.
+    pub const RotateLatest: u32 = 0x42_0172;
+    /// `Archive Date` — §4.5.
+    pub const ArchiveDate: u32 = 0x42_0005;
+    /// `NIST Security Category` — §4.39.
+    pub const NistSecurityCategory: u32 = 0x42_01c2;
+    /// `OTP Counter` — §4.44.
+    pub const OtpCounter: u32 = 0x42_01ae;
+    /// `PKCS#12 Friendly Name` — §4.45.
+    pub const Pkcs12FriendlyName: u32 = 0x42_00fb;
+    /// `Certify Counter` — §4.13.1.
+    pub const CertifyCounter: u32 = 0x42_01bd;
+    /// `Decrypt Counter` — §4.13.2.
+    pub const DecryptCounter: u32 = 0x42_01be;
+    /// `Encrypt Counter` — §4.13.3.
+    pub const EncryptCounter: u32 = 0x42_01bf;
+    /// `Sign Counter` — §4.13.4.
+    pub const SignCounter: u32 = 0x42_01c0;
+    /// `Signature Verify Counter` — §4.13.5.
+    pub const SignatureVerifyCounter: u32 = 0x42_01c1;
     pub const CertificateType: u32               = 0x42_001d;
     /// KMIP 3.0 §6.2 — Certificate object outer Structure tag.
     pub const Certificate: u32                   = 0x42_0013;
@@ -2756,6 +2796,24 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::Fresh => Attribute::Fresh(expect_boolean(frame, "Fresh")?),
         tags::KeyValuePresent => Attribute::KeyValuePresent(expect_boolean(frame, "Key Value Present")?),
         tags::QuantumSafe => Attribute::QuantumSafe(expect_boolean(frame, "Quantum Safe")?),
+        // G2 (2026-09-06) — §5.1.2 item 8 completion. Note the five §4.13
+        // Counters are server-maintained: a client may READ them, and the
+        // read-only guard in attribute_mutate refuses a client write.
+        // `Rotate Latest` is likewise "Modifiable by client: No" (§4.58).
+        tags::RotateLatest => Attribute::RotateLatest(expect_boolean(frame, "Rotate Latest")?),
+        tags::ArchiveDate => Attribute::ArchiveDate(expect_datetime(frame, "Archive Date")?),
+        tags::NistSecurityCategory => Attribute::NistSecurityCategory(expect_integer(frame, "NIST Security Category")?),
+        tags::OtpCounter => Attribute::OtpCounter(expect_integer(frame, "OTP Counter")?),
+        tags::CertifyCounter => Attribute::CertifyCounter(expect_integer(frame, "Certify Counter")?),
+        tags::DecryptCounter => Attribute::DecryptCounter(expect_integer(frame, "Decrypt Counter")?),
+        tags::EncryptCounter => Attribute::EncryptCounter(expect_integer(frame, "Encrypt Counter")?),
+        tags::SignCounter => Attribute::SignCounter(expect_integer(frame, "Sign Counter")?),
+        tags::SignatureVerifyCounter => Attribute::SignatureVerifyCounter(expect_integer(frame, "Signature Verify Counter")?),
+        tags::Pkcs12FriendlyName => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::Pkcs12FriendlyName(s.clone())
+            } else { return Ok(None); }
+        }
         // Phase 3.3 — Split Key attributes (§4.29/§4.30/§4.63-4.66).
         // Client-decodable so Create Split Key's generic Attributes
         // list can carry Split Key Polynomial (§4.63).
@@ -2938,6 +2996,61 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::GroupLink => {
             if let Some(s) = link_target(&frame.value) {
                 Attribute::GroupLink(s)
+            } else { return Ok(None); }
+        }
+        tags::CertificateLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::CertificateLink(s)
+            } else { return Ok(None); }
+        }
+        tags::ChildLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::ChildLink(s)
+            } else { return Ok(None); }
+        }
+        tags::ParentLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::ParentLink(s)
+            } else { return Ok(None); }
+        }
+        tags::Pkcs12CertificateLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::Pkcs12CertificateLink(s)
+            } else { return Ok(None); }
+        }
+        tags::Pkcs12PasswordLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::Pkcs12PasswordLink(s)
+            } else { return Ok(None); }
+        }
+        tags::WrappingKeyLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::WrappingKeyLink(s)
+            } else { return Ok(None); }
+        }
+        tags::CredentialLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::CredentialLink(s)
+            } else { return Ok(None); }
+        }
+        tags::PasswordLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::PasswordLink(s)
+            } else { return Ok(None); }
+        }
+        tags::SplitKeyBaseLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::SplitKeyBaseLink(s)
+            } else { return Ok(None); }
+        }
+        tags::JoinedSplitKeyPartsLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::JoinedSplitKeyPartsLink(s)
+            } else { return Ok(None); }
+        }
+        tags::CertificateRequestLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::CertificateRequestLink(s)
             } else { return Ok(None); }
         }
         // KMIP `Object Group` (0x420056) — multi-instance membership
@@ -5133,6 +5246,16 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::X509CertificateIssuer(s)    => TtlvFrame::new(Tag(tags::X509CertificateIssuer),    Value::TextString(s.clone())),
         Attribute::X509CertificateSubject(s)   => TtlvFrame::new(Tag(tags::X509CertificateSubject),   Value::TextString(s.clone())),
         Attribute::RotateName(s)               => TtlvFrame::new(Tag(tags::RotateName),               Value::TextString(s.clone())),
+        Attribute::RotateLatest(v) => TtlvFrame::new(Tag(tags::RotateLatest), Value::Boolean(*v)),
+        Attribute::ArchiveDate(v) => TtlvFrame::new(Tag(tags::ArchiveDate), Value::DateTime(*v)),
+        Attribute::NistSecurityCategory(v) => TtlvFrame::new(Tag(tags::NistSecurityCategory), Value::Integer(*v)),
+        Attribute::OtpCounter(v) => TtlvFrame::new(Tag(tags::OtpCounter), Value::Integer(*v)),
+        Attribute::Pkcs12FriendlyName(s) => TtlvFrame::new(Tag(tags::Pkcs12FriendlyName), Value::TextString(s.clone())),
+        Attribute::CertifyCounter(v) => TtlvFrame::new(Tag(tags::CertifyCounter), Value::Integer(*v)),
+        Attribute::DecryptCounter(v) => TtlvFrame::new(Tag(tags::DecryptCounter), Value::Integer(*v)),
+        Attribute::EncryptCounter(v) => TtlvFrame::new(Tag(tags::EncryptCounter), Value::Integer(*v)),
+        Attribute::SignCounter(v) => TtlvFrame::new(Tag(tags::SignCounter), Value::Integer(*v)),
+        Attribute::SignatureVerifyCounter(v) => TtlvFrame::new(Tag(tags::SignatureVerifyCounter), Value::Integer(*v)),
         Attribute::CertificateType(v)          => TtlvFrame::new(Tag(tags::CertificateType),          Value::Enumeration(*v)),
         Attribute::CertificateValue(bs)        => TtlvFrame::new(Tag(tags::CertificateValue),         Value::ByteString(bs.clone())),
         Attribute::ProtectionStorageMask(m)    => TtlvFrame::new(Tag(tags::ProtectionStorageMask),    Value::Integer(*m as i32)),
@@ -5146,6 +5269,17 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::DerivedObjectLink(s)        => TtlvFrame::new(Tag(tags::DerivedObjectLink),        Value::Reference(s.clone())),
         Attribute::ReplacedObjectLink(s)       => TtlvFrame::new(Tag(tags::ReplacedObjectLink),       Value::Reference(s.clone())),
         Attribute::ReplacementObjectLink(s)    => TtlvFrame::new(Tag(tags::ReplacementObjectLink),    Value::Reference(s.clone())),
+        Attribute::CertificateLink(s) => TtlvFrame::new(Tag(tags::CertificateLink), Value::Reference(s.clone())),
+        Attribute::ChildLink(s) => TtlvFrame::new(Tag(tags::ChildLink), Value::Reference(s.clone())),
+        Attribute::ParentLink(s) => TtlvFrame::new(Tag(tags::ParentLink), Value::Reference(s.clone())),
+        Attribute::Pkcs12CertificateLink(s) => TtlvFrame::new(Tag(tags::Pkcs12CertificateLink), Value::Reference(s.clone())),
+        Attribute::Pkcs12PasswordLink(s) => TtlvFrame::new(Tag(tags::Pkcs12PasswordLink), Value::Reference(s.clone())),
+        Attribute::WrappingKeyLink(s) => TtlvFrame::new(Tag(tags::WrappingKeyLink), Value::Reference(s.clone())),
+        Attribute::CredentialLink(s) => TtlvFrame::new(Tag(tags::CredentialLink), Value::Reference(s.clone())),
+        Attribute::PasswordLink(s) => TtlvFrame::new(Tag(tags::PasswordLink), Value::Reference(s.clone())),
+        Attribute::SplitKeyBaseLink(s) => TtlvFrame::new(Tag(tags::SplitKeyBaseLink), Value::Reference(s.clone())),
+        Attribute::JoinedSplitKeyPartsLink(s) => TtlvFrame::new(Tag(tags::JoinedSplitKeyPartsLink), Value::Reference(s.clone())),
+        Attribute::CertificateRequestLink(s) => TtlvFrame::new(Tag(tags::CertificateRequestLink), Value::Reference(s.clone())),
         Attribute::ApplicationSpecificInformation { namespace, data } => {
             TtlvFrame::new(Tag(tags::ApplicationSpecificInformation), Value::Structure(vec![
                 TtlvFrame::new(Tag(tags::ApplicationNamespace), Value::TextString(namespace.clone())),
@@ -5296,6 +5430,17 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "PublicKeyLink"          => tags::PublicKeyLink,
         "PrivateKeyLink"         => tags::PrivateKeyLink,
         "GroupLink"              => tags::GroupLink,
+        "CertificateLink" => tags::CertificateLink,
+        "ChildLink" => tags::ChildLink,
+        "ParentLink" => tags::ParentLink,
+        "Pkcs12CertificateLink" => tags::Pkcs12CertificateLink,
+        "Pkcs12PasswordLink" => tags::Pkcs12PasswordLink,
+        "WrappingKeyLink" => tags::WrappingKeyLink,
+        "CredentialLink" => tags::CredentialLink,
+        "PasswordLink" => tags::PasswordLink,
+        "SplitKeyBaseLink" => tags::SplitKeyBaseLink,
+        "JoinedSplitKeyPartsLink" => tags::JoinedSplitKeyPartsLink,
+        "CertificateRequestLink" => tags::CertificateRequestLink,
         "ObjectGroup"            => tags::ObjectGroup,
         "DerivationBaseObjectLink" => tags::DerivationObjectLink,
         "DerivedObjectLink"      => tags::DerivedObjectLink,
@@ -5390,6 +5535,17 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::PublicKeyLink          => "Public Key Link",
         tags::PrivateKeyLink         => "Private Key Link",
         tags::GroupLink              => "Group Link",
+        tags::CertificateLink => "Certificate Link",
+        tags::ChildLink => "Child Link",
+        tags::ParentLink => "Parent Link",
+        tags::Pkcs12CertificateLink => "PKCS#12 Certificate Link",
+        tags::Pkcs12PasswordLink => "PKCS#12 Password Link",
+        tags::WrappingKeyLink => "Wrapping Key Link",
+        tags::CredentialLink => "Credential Link",
+        tags::PasswordLink => "Password Link",
+        tags::SplitKeyBaseLink => "Split Key Base Link",
+        tags::JoinedSplitKeyPartsLink => "Joined Split Key Parts Link",
+        tags::CertificateRequestLink => "Certificate Request Link",
         tags::ObjectGroup            => "Object Group",
         tags::DerivationObjectLink   => "Derivation Object Link",
         tags::DerivedObjectLink      => "Derived Object Link",

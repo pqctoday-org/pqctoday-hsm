@@ -1140,6 +1140,8 @@ pub fn certify(
 
     emit_success(deps, correlation_id, "Certify");
     let _ = started;
+    // §4.13.1 — count the successful Certify against the new certificate.
+    super::helpers::bump_counter(deps, &uid, super::helpers::Counter::Certify);
     Ok(CertifyResponse { uid })
 }
 

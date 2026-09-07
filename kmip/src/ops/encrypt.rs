@@ -404,6 +404,8 @@ fn encrypt_streaming(
             ct.extend_from_slice(&tail);
             None
         };
+        // §4.13.3 — count a successful Encrypt.
+        super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Encrypt);
         Ok(EncryptResponse {
             uid: req.uid.clone(),
             ciphertext: ct,
@@ -413,6 +415,8 @@ fn encrypt_streaming(
     } else {
         // Middle part — put the stream back and echo the handle.
         streams.insert(cv.clone(), ctx);
+        // §4.13.3 — count a successful Encrypt.
+        super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Encrypt);
         Ok(EncryptResponse {
             uid: req.uid.clone(),
             ciphertext: ct,
@@ -483,6 +487,8 @@ fn encrypt_ml_kem(
             }
         }
     };
+    // §4.13.3 — count a successful Encrypt.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Encrypt);
     Ok(EncryptResponse {
         uid: req.uid.clone(),
         ciphertext,
@@ -733,6 +739,8 @@ fn encrypt_classical(
         }
     }
 
+    // §4.13.3 — count a successful Encrypt.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Encrypt);
     Ok(EncryptResponse {
         uid: req.uid.clone(),
         ciphertext,

@@ -351,6 +351,26 @@ pub enum Attribute {
     X509CertificateIssuer(String),
     X509CertificateSubject(String),
     RotateName(String),
+    /// `Rotate Latest` (§4.58).
+    RotateLatest(bool),
+    /// `Archive Date` (§4.5).
+    ArchiveDate(i64),
+    /// `NIST Security Category` (§4.39).
+    NistSecurityCategory(i32),
+    /// `OTP Counter` (§4.44).
+    OtpCounter(i32),
+    /// `PKCS#12 Friendly Name` (§4.45).
+    Pkcs12FriendlyName(String),
+    /// `Certify Counter` (§4.13.1).
+    CertifyCounter(i32),
+    /// `Decrypt Counter` (§4.13.2).
+    DecryptCounter(i32),
+    /// `Encrypt Counter` (§4.13.3).
+    EncryptCounter(i32),
+    /// `Sign Counter` (§4.13.4).
+    SignCounter(i32),
+    /// `Signature Verify Counter` (§4.13.5).
+    SignatureVerifyCounter(i32),
 
     /// Enum codepoints.
     CertificateType(u32),
@@ -415,6 +435,39 @@ pub enum Attribute {
     /// SHALL create a Replacement Object Link attribute pointing to
     /// the replacement key."
     ReplacementObjectLink(String),
+
+    // ── §4.35 Link attributes completed (2026-09-06, G2) ───────────────
+    //
+    // Profiles §5.1.2 item 8 requires "all defined Link Attributes". Nine
+    // of the twenty were modelled; these eleven were not, so a client could
+    // set one and the server would silently discard it and answer Success.
+    // `Certificate Link` in particular was already WRITTEN by Certify and
+    // then dropped on the way out, because `get_attributes` had no arm.
+    //
+    // Each is a UID reference (§4.35: "Reference or Name Reference or
+    // Unique Identifier Enumeration or Integer").
+    /// `Certificate Link` (§4.35.1, tag 0x420190).
+    CertificateLink(String),
+    /// `Child Link` (§4.35.3, tag 0x420191).
+    ChildLink(String),
+    /// `Parent Link` (§4.35.10, tag 0x420195).
+    ParentLink(String),
+    /// `PKCS#12 Certificate Link` (§4.35.12, tag 0x420196).
+    Pkcs12CertificateLink(String),
+    /// `PKCS#12 Password Link` (§4.35.13, tag 0x420197).
+    Pkcs12PasswordLink(String),
+    /// `Wrapping Key Link` (§4.35.20, tag 0x42019d).
+    WrappingKeyLink(String),
+    /// `Credential Link` (§4.35.4, tag 0x4201a0).
+    CredentialLink(String),
+    /// `Password Link` (§4.35.11, tag 0x4201a5).
+    PasswordLink(String),
+    /// `Split Key Base Link` (§4.35.19, tag 0x4201b4).
+    SplitKeyBaseLink(String),
+    /// `Joined Split Key Parts Link` (§4.35.8, tag 0x4201b5).
+    JoinedSplitKeyPartsLink(String),
+    /// `Certificate Request Link` (§4.35.2, tag 0x4201bc).
+    CertificateRequestLink(String),
     /// `Application Specific Information` (0x420004) Structure —
     /// `ApplicationNamespace` + `ApplicationData` text-string pair.
     /// TL-M-3 step #0 pins a Locate filter by both fields.
