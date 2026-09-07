@@ -184,3 +184,60 @@ That makes this a **plain error in v3.2**, which the precedence rule already rea
 ### §2.5 — kept, and to be raised upstream
 
 The FIPS 186-4 deletions only ever *loosen* a security constraint, on the authority of an unpublished draft that gives no rationale. We keep v3.2's constraints. The deletion goes on the upstream question list alongside the draft defects in §4.
+
+---
+
+## 8. Second sweep — trust, validation, profile, mechanism and OTP objects
+
+### 8.1 `CKO_TRUST` is **identical in substance** — our recent work stands
+
+This was the reason for the second sweep: `CKO_TRUST` was implemented on both engines only days ago (plan item C2), adjudicated strictly against v3.2. Everything it relies on is reconfirmed:
+
+- All 11 attribute rows: none added, none removed, same order, types and meanings.
+- Footnote sets unchanged, **confirmed on the PDF page** rather than the text render: `CKA_ISSUER¹`, `CKA_SERIAL_NUMBER¹`, `CKA_HASH_OF_CERTIFICATE²`, `CKA_NAME_HASH_ALGORITHM²`, superscript `3` on all seven `CKA_TRUST_*` rows. Footnote texts 1/2/3 verbatim identical.
+- The **closed `CK_TRUST` value domain** — same five values, same order, header values byte-identical.
+- `CKA_NAME_HASH_ALGORITHM` **still defaults to SHA-1**.
+- The WTO merge algorithm, the `CKT_TRUST_MUST_VERIFY_TRUST` reset rule, and the EKU mapping are verbatim identical.
+- v3.3's new `object_classification.md` explicitly lists `CKO_TRUST` as a **storage object**, confirming the classification we chose.
+
+Only difference: v3.2's sample template typo `CKM_SHA265` is fixed. (Both versions still mislabel that block as "creating an X.509 certificate object" — the bug survives into v3.3.)
+
+### 8.2 Also identical in substance
+
+`CKO_VALIDATION` (all 11 rows, both enum domains, the validation-indicator rules), `CKO_PROFILE`, and `CKO_OTP_KEY` (16 rows, same footnotes) — no behavioural change. OTP keys merely **move** from the mechanisms chapter into the objects chapter.
+
+### 8.3 `CKO_MECHANISM` changes, but is not implementable
+
+v3.2 Table 32 has one row (`CKA_MECHANISM_TYPE`) and says it "may not be set". v3.3 adds `CKA_SUPPORTED_PARAMETER_SETS` and `CKA_FLAGS`, moves immutability from the attribute to the whole object, and adds a SHOULD that applications verify a parameter set against the specific mechanism rather than inferring it from a related one.
+
+**Neither new attribute has a numeric value anywhere** — not in v3.2, not in the v3.3 draft's own header. Spec-markdown only. Do not add to the local header or `V33_CORRECTIONS`.
+
+### 8.4 `CKO_VALIDATION` / `CKO_PROFILE` / `CKO_MECHANISM` are explicitly non-storage in v3.3
+
+v3.2 defines storage objects only positionally ("the object classes that follow"), which ambiguously sweeps these in. v3.3's `object_classification.md` states it outright. An engine that templates them as storage objects diverges from v3.3's explicit reading, though from no v3.2 text.
+
+---
+
+## 9. Verification of the adopted items — two need no code at all
+
+### 9.1 §2.1 HSS/XMSS input — **already conformant, no change**
+
+Verified in code, not inferred (see §7). Both engines pass the caller's buffer to the reference signers, which hash internally.
+
+### 9.2 §2.4 `CKA_UNIQUE_ID` on all object classes — **already conformant, no change**
+
+Both engines already mint it for **every** object, not just storage objects:
+
+- **C++**: `P11Object::init` (`P11Objects.cpp:91`) creates `P11AttrUniqueId` for every class, and every subclass — including `P11ProfileObj` (`:420`) — chains to it.
+- **Rust**: `state.rs:1348` inserts it unconditionally at "the single choke point through which all objects enter `OBJECTS`, so the attribute is guaranteed on every surface (FFI, native, KMIP)".
+
+Adopting v3.3 here **ratifies what both engines already do**. Under v3.2's narrower table this was arguably over-materialising; under v3.3 it is exactly right.
+
+### 9.3 Still to implement
+
+| Item | Status |
+|---|---|
+| §1.1 KEM encapsulate/decapsulate template enforcement | Not started — the real gap-fill |
+| §2.2 ML-DSA multi-part sign/verify | Not started |
+| §2.3 HSS/XMSS multi-part verify via `C_VerifySignatureInit` | Not started |
+| §2.5 FIPS 186-4 deletions | Kept; upstream question to draft |
