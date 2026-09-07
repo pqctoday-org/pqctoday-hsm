@@ -26,6 +26,10 @@ final class P11Constants {
     // a real, distinct mechanism (grepped in pkcs11t.h), not an alias.
     static final long CKM_EDDSA_PH             = 0x80001057L;
     static final long CKM_EC_KEY_PAIR_GEN      = 0x00001040L;
+    // FIPS 186-5 A.2.2 "extra random bits" EC key generation. Value read
+    // from src/lib/pkcs11/pkcs11t.h:1057, the repo's only source of truth
+    // for CK* values.
+    static final long CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS = 0x0000140BL;
     static final long CKM_ECDH1_DERIVE         = 0x00001050L;
     static final long CKM_ECDH1_COFACTOR_DERIVE = 0x00001051L;
     static final long CKM_ECDSA_SHA256         = 0x00001044L;
