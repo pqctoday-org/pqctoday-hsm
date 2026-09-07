@@ -906,6 +906,11 @@ bool P11PublicKeyObj::init(OSObject *inobject)
 	P11Attribute* attrWrap = new P11AttrWrap(osobject);
 	P11Attribute* attrTrusted = new P11AttrTrusted(osobject);
 	P11Attribute* attrWrapTemplate = new P11AttrWrapTemplate(osobject);
+	// CKA_ENCAPSULATE_TEMPLATE — v3.3 Table 27 Common Public Key Attributes.
+	// On the COMMON public key object, not only KEM key types, because that is
+	// where the table puts it. v3.2 defines the constant and gives it no row;
+	// the standing v3.2-baseline / v3.3-fills-gaps rule covers the gap.
+	P11Attribute* attrEncapsulateTemplate = new P11AttrEncapsulateTemplate(osobject);
 	// CKA_PUBLIC_KEY_INFO: default empty; populated with SPKI DER by keygen (G-PUB1 complete)
 	P11Attribute* attrPublicKeyInfo = new P11AttrPublicKeyInfo(osobject,0);
 	// NO CKA_CHECK_VALUE. PKCS#11 v3.2 §4.11 introduces the attribute as "the
@@ -930,6 +935,7 @@ bool P11PublicKeyObj::init(OSObject *inobject)
 		!attrWrap->init() ||
 		!attrTrusted->init() ||
 		!attrWrapTemplate->init() ||
+		!attrEncapsulateTemplate->init() ||
 		!attrPublicKeyInfo->init()
 	)
 	{
@@ -941,6 +947,7 @@ bool P11PublicKeyObj::init(OSObject *inobject)
 		delete attrWrap;
 		delete attrTrusted;
 		delete attrWrapTemplate;
+		delete attrEncapsulateTemplate;
 		delete attrPublicKeyInfo;
 		return false;
 	}
@@ -953,6 +960,7 @@ bool P11PublicKeyObj::init(OSObject *inobject)
 	attributes[attrWrap->getType()] = attrWrap;
 	attributes[attrTrusted->getType()] = attrTrusted;
 	attributes[attrWrapTemplate->getType()] = attrWrapTemplate;
+	attributes[attrEncapsulateTemplate->getType()] = attrEncapsulateTemplate;
 	attributes[attrPublicKeyInfo->getType()] = attrPublicKeyInfo;
 
 	initialized = true;
@@ -1252,6 +1260,10 @@ bool P11PrivateKeyObj::init(OSObject *inobject)
 	P11Attribute* attrNeverExtractable = new P11AttrNeverExtractable(osobject);
 	P11Attribute* attrWrapWithTrusted = new P11AttrWrapWithTrusted(osobject);
 	P11Attribute* attrUnwrapTemplate = new P11AttrUnwrapTemplate(osobject);
+	// CKA_DECAPSULATE_TEMPLATE — v3.3 Table 29 Common Private Key Attributes.
+	// Same provenance and same placement reasoning as CKA_ENCAPSULATE_TEMPLATE
+	// on the public key object.
+	P11Attribute* attrDecapsulateTemplate = new P11AttrDecapsulateTemplate(osobject);
 	// TODO: CKA_ALWAYS_AUTHENTICATE is accepted, but we do not use it
 	P11Attribute* attrAlwaysAuthenticate = new P11AttrAlwaysAuthenticate(osobject);
 	// CKA_PUBLIC_KEY_INFO: default empty; populated with SPKI DER by keygen (G-PUB1 complete)
@@ -1282,6 +1294,7 @@ bool P11PrivateKeyObj::init(OSObject *inobject)
 		!attrNeverExtractable->init() ||
 		!attrWrapWithTrusted->init() ||
 		!attrUnwrapTemplate->init() ||
+		!attrDecapsulateTemplate->init() ||
 		!attrAlwaysAuthenticate->init() ||
 		!attrPublicKeyInfo->init()
 	)
@@ -1298,6 +1311,7 @@ bool P11PrivateKeyObj::init(OSObject *inobject)
 		delete attrNeverExtractable;
 		delete attrWrapWithTrusted;
 		delete attrUnwrapTemplate;
+		delete attrDecapsulateTemplate;
 		delete attrAlwaysAuthenticate;
 		delete attrPublicKeyInfo;
 		return false;
@@ -1315,6 +1329,7 @@ bool P11PrivateKeyObj::init(OSObject *inobject)
 	attributes[attrNeverExtractable->getType()] = attrNeverExtractable;
 	attributes[attrWrapWithTrusted->getType()] = attrWrapWithTrusted;
 	attributes[attrUnwrapTemplate->getType()] = attrUnwrapTemplate;
+	attributes[attrDecapsulateTemplate->getType()] = attrDecapsulateTemplate;
 	attributes[attrAlwaysAuthenticate->getType()] = attrAlwaysAuthenticate;
 	attributes[attrPublicKeyInfo->getType()] = attrPublicKeyInfo;
 

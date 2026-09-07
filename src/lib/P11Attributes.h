@@ -1320,6 +1320,56 @@ protected:
 };
 
 /*****************************************
+ * CKA_ENCAPSULATE_TEMPLATE
+ *
+ * The KEM counterpart of CKA_WRAP_TEMPLATE, on the ENCAPSULATING key.
+ * PKCS#11 v3.2 defines the constant (pkcs11t.h) and then never mentions it
+ * again — no table row, and zero occurrences in the specification text. The
+ * v3.3 working draft supplies both: Table 27 Common Public Key Attributes,
+ * and SHALL-level enforcement in C_EncapsulateKey. Adopted under the standing
+ * v3.2-baseline / v3.3-fills-gaps rule (see CLAUDE.md).
+ *
+ * Placed on the COMMON public key object, not only on KEM key types, because
+ * that is where the table puts it.
+ *****************************************/
+
+class P11AttrEncapsulateTemplate : public P11Attribute
+{
+public:
+	// Constructor
+	P11AttrEncapsulateTemplate(OSObject* inobject) : P11Attribute(inobject) { type = CKA_ENCAPSULATE_TEMPLATE; checks = 0; }
+
+protected:
+	// Set the default value of the attribute
+	virtual bool setDefault();
+
+	// Update the value if allowed
+	virtual CK_RV updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int op);
+};
+
+/*****************************************
+ * CKA_DECAPSULATE_TEMPLATE
+ *
+ * The KEM counterpart of CKA_UNWRAP_TEMPLATE, on the DECAPSULATING key.
+ * v3.3 Table 29 Common Private Key Attributes; same provenance as
+ * CKA_ENCAPSULATE_TEMPLATE above.
+ *****************************************/
+
+class P11AttrDecapsulateTemplate : public P11Attribute
+{
+public:
+	// Constructor
+	P11AttrDecapsulateTemplate(OSObject* inobject) : P11Attribute(inobject) { type = CKA_DECAPSULATE_TEMPLATE; checks = 0; }
+
+protected:
+	// Set the default value of the attribute
+	virtual bool setDefault();
+
+	// Update the value if allowed
+	virtual CK_RV updateAttr(Token *token, bool isPrivate, CK_VOID_PTR pValue, CK_ULONG ulValueLen, int op);
+};
+
+/*****************************************
  * CKA_UNWRAP_TEMPLATE
  *****************************************/
 

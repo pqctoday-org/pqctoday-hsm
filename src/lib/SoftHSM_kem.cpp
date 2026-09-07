@@ -169,6 +169,77 @@ CK_RV SoftHSM::C_EncapsulateKey
 	return rv;
 }
 
+// CKA_ENCAPSULATE_TEMPLATE / CKA_DECAPSULATE_TEMPLATE enforcement.
+//
+// PKCS#11 v3.2 defines both constants (pkcs11t.h) and then never mentions them
+// again — no table row, zero occurrences in the specification text. The v3.3
+// working draft supplies both the rows and SHALL-level enforcement:
+//
+//   encapsulate — "an attribute set that will be compared against the
+//     attributes of the key to be encapsulated … If any attribute conflict
+//     occurs … SHALL return CKR_KEY_HANDLE_INVALID"
+//     (key_management_functions.md:762-771)
+//   decapsulate — "… added to attributes of the key to be decapsulated. If the
+//     attributes do not conflict with the user supplied attribute template …
+//     SHALL return CKR_TEMPLATE_INCONSISTENT" (:868-878)
+//
+// Adopted under the standing v3.2-baseline / v3.3-fills-gaps rule (CLAUDE.md).
+//
+// "The key to be encapsulated" is read as the key being CREATED:
+// C_EncapsulateKey takes a template and produces phKey, so no pre-existing key
+// exists to compare against. That is the only coherent reading for a KEM, and
+// it is why this compares against the CALLER'S pTemplate rather than a stored
+// OSObject — which also means the private-value decryption the
+// CKA_WRAP_TEMPLATE check must perform (SoftHSM_keygen.cpp:1595) does not apply
+// here: nothing has been stored or encrypted yet.
+//
+// One helper, called at all four sites (ML-KEM and ECDH-as-KEM, encapsulate and
+// decapsulate). The Rust engine had exactly the failure that four copies
+// produce, on the same day: one of three creation sites guarded, enforcement
+// silently doing nothing for the rest.
+static bool kemTemplatePermits(OSObject* kemKey, CK_ATTRIBUTE_TYPE templateAttr,
+                               CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount)
+{
+	if (kemKey == NULL_PTR || !kemKey->attributeExists(templateAttr))
+		return true;
+
+	OSAttribute attr = kemKey->getAttribute(templateAttr);
+	if (!attr.isAttributeMapAttribute())
+		return true;
+
+	typedef std::map<CK_ATTRIBUTE_TYPE,OSAttribute> attrmap_type;
+	const attrmap_type& map = attr.getAttributeMapValue();
+	if (map.empty())
+		return true;
+
+	for (attrmap_type::const_iterator it = map.begin(); it != map.end(); ++it)
+	{
+		bool found = false;
+		for (CK_ULONG i = 0; i < ulAttributeCount; ++i)
+		{
+			if (pTemplate[i].type != it->first) continue;
+			found = true;
+
+			ByteString required;
+			if (!it->second.peekValue(required))
+				return false;
+
+			if (pTemplate[i].pValue == NULL_PTR)
+				return false;
+			ByteString supplied((unsigned char*)pTemplate[i].pValue, pTemplate[i].ulValueLen);
+			if (supplied != required)
+				return false;
+			break;
+		}
+		// A restriction the caller did not answer is a conflict, not a pass:
+		// the key may only produce keys matching the set, and an unstated
+		// attribute does not match a stated one.
+		if (!found)
+			return false;
+	}
+	return true;
+}
+
 CK_RV SoftHSM::encapsulateKeyImpl
 (
 	CK_SESSION_HANDLE hSession,
@@ -311,6 +382,10 @@ CK_RV SoftHSM::encapsulateKeyImpl
 
 	if (objClass != CKO_SECRET_KEY)
 		return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	// v3.3: the encapsulating key may partition what it produces.
+	if (!kemTemplatePermits(keyObj, CKA_ENCAPSULATE_TEMPLATE, pTemplate, ulAttributeCount))
+		return CKR_KEY_HANDLE_INVALID;
 
 	// Check write authorization
 	rv = haveWrite(session->getState(), isOnToken, isPrivate);
@@ -646,6 +721,10 @@ CK_RV SoftHSM::decapsulateKeyImpl
 
 	if (objClass != CKO_SECRET_KEY)
 		return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	// v3.3: the decapsulating key may partition what it produces.
+	if (!kemTemplatePermits(keyObj, CKA_DECAPSULATE_TEMPLATE, pTemplate, ulAttributeCount))
+		return CKR_TEMPLATE_INCONSISTENT;
 
 	// Check write authorization
 	rv = haveWrite(session->getState(), isOnToken, isPrivate);
@@ -998,6 +1077,10 @@ CK_RV SoftHSM::encapsulateECDH
 	if (objClass != CKO_SECRET_KEY)
 		return CKR_ATTRIBUTE_VALUE_INVALID;
 
+	// v3.3: the encapsulating key may partition what it produces.
+	if (!kemTemplatePermits(keyObj, CKA_ENCAPSULATE_TEMPLATE, pTemplate, ulAttributeCount))
+		return CKR_KEY_HANDLE_INVALID;
+
 	rv = haveWrite(session->getState(), isOnToken, isPrivate);
 	if (rv != CKR_OK) return rv;
 
@@ -1275,6 +1358,10 @@ CK_RV SoftHSM::decapsulateECDH
 
 	if (objClass != CKO_SECRET_KEY)
 		return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	// v3.3: the decapsulating key may partition what it produces.
+	if (!kemTemplatePermits(keyObj, CKA_DECAPSULATE_TEMPLATE, pTemplate, ulAttributeCount))
+		return CKR_TEMPLATE_INCONSISTENT;
 
 	rv = haveWrite(session->getState(), isOnToken, isPrivate);
 	if (rv != CKR_OK) return rv;
