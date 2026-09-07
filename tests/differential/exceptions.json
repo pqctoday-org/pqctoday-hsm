@@ -17,6 +17,14 @@
   ],
   "entries": [
     {
+      "id": "LEGAL-ECDH-KEM-CURVE-COVERAGE-SECP256K1",
+      "status": "legal",
+      "scenario": "create.encapsulate.ecdh_secp256k1",
+      "path": "*",
+      "justification": "FOUND 2026-09-07 (phase-5 §6 comment sweep) — a stale ffi.rs comment falsely blamed a curve restriction on \"the C++ mirror\" that does not exist. Measured: C++ accepts secp256k1 for ECDH-as-KEM (encapsulateECDH/decapsulateECDH gate only on key TYPE, SoftHSM_kem.cpp:941,1284, never curve OID; CKM_EC_KEY_PAIR_GEN has no CKR_CURVE_NOT_SUPPORTED path at all) and returns CKR_OK with a real 65-byte raw point plus a derived shared secret; Rust hard-matches {P256,P384,P521,X25519,X448} and returns CKR_CURVE_NOT_SUPPORTED for anything else. Same shape as LEGAL-CURVE-COVERAGE-BRAINPOOL: which curves a token offers for a given mechanism is a product decision, and nothing in Table 78 names a required curve set for ECDH-as-KEM. Adjudicated legal rather than defect because the divergence is refusal-vs-acceptance of an EXTRA curve, not nonconformant behavior on a curve either engine claims to support — but recorded here rather than silently, since whether Rust SHOULD add secp256k1 support (the math already exists for BIP32/ECDSA) is a real, open product question, not a closed one.",
+      "citation": "PKCS#11 v3.2 §6.3.17 (ECDH-as-KEM), Table 78: lists CKK_EC and CKK_EC_MONTGOMERY as valid key types for CKM_ECDH1_DERIVE-based encapsulate/decapsulate and names no required or excluded curve. Coverage of a specific named curve is therefore unconstrained by the specification, same as LEGAL-CURVE-COVERAGE-BRAINPOOL's §6.3 citation."
+    },
+    {
       "id": "LEGAL-TOKEN-CAPACITIES-AND-VERSIONS",
       "status": "legal",
       "scenario": "env.token_info",

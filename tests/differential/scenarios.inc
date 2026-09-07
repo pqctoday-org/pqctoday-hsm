@@ -816,27 +816,89 @@ add({"create.encapsulate.ml_kem_768", "create",
      }});
 
 add({"create.encapsulate.ecdh_p256", "create",
-     "ECDH-as-KEM (§6.3.17) — the ciphertext MUST be the raw 65-byte ephemeral point (E1)",
+     "ECDH-as-KEM (§6.3.17) — the ciphertext MUST be the raw 65-byte ephemeral point (E1). "
+     "FIXED 2026-09-07 (phase-5 §6 comment sweep, incidentally): this scenario never set "
+     "CKA_ENCAPSULATE/CKA_DECAPSULATE, so encapsulateECDH/decapsulateECDH's own permission "
+     "check (SoftHSM_kem.cpp:931,1274) refused it on BOTH engines identically — the scenario "
+     "'passed' for 08+ months without ever exercising a successful ECDH-as-KEM round trip.",
      {CKM_EC_KEY_PAIR_GEN, CKM_ECDH1_DERIVE}, true, true,
      [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
          if (!e.Encapsulate || !e.Decapsulate) { r.put("fn", "ABSENT"); return; }
          CK_ATTRIBUTE pub[] = {
-             ATTR(CKA_CLASS,     &clPublic, sizeof clPublic),
-             ATTR(CKA_KEY_TYPE,  &ktEc,     sizeof ktEc),
-             ATTR(CKA_EC_PARAMS, kOidP256,  sizeof kOidP256),
-             ATTR(CKA_TOKEN,     &bFalse,   sizeof bFalse),
-             ATTR(CKA_DERIVE,    &bTrue,    sizeof bTrue),
+             ATTR(CKA_CLASS,       &clPublic, sizeof clPublic),
+             ATTR(CKA_KEY_TYPE,    &ktEc,     sizeof ktEc),
+             ATTR(CKA_EC_PARAMS,   kOidP256,  sizeof kOidP256),
+             ATTR(CKA_TOKEN,       &bFalse,   sizeof bFalse),
+             ATTR(CKA_DERIVE,      &bTrue,    sizeof bTrue),
+             ATTR(CKA_ENCAPSULATE, &bTrue,    sizeof bTrue),
          };
          CK_ATTRIBUTE priv[] = {
-             ATTR(CKA_CLASS,     &clPrivate, sizeof clPrivate),
-             ATTR(CKA_KEY_TYPE,  &ktEc,      sizeof ktEc),
-             ATTR(CKA_TOKEN,     &bFalse,    sizeof bFalse),
-             ATTR(CKA_DERIVE,    &bTrue,     sizeof bTrue),
-             ATTR(CKA_SENSITIVE, &bFalse,    sizeof bFalse),
+             ATTR(CKA_CLASS,       &clPrivate, sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,    &ktEc,      sizeof ktEc),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_DERIVE,      &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+             ATTR(CKA_DECAPSULATE, &bTrue,     sizeof bTrue),
          };
          CK_MECHANISM km = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
          CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
-         CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 5, &hPub, &hPriv);
+         CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 6, priv, 6, &hPub, &hPriv);
+         r.rv("keygen", rv);
+         if (rv != CKR_OK) return;
+         CK_ATTRIBUTE st[] = {
+             ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+             ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+         };
+         CK_ECDH1_DERIVE_PARAMS p; memset(&p, 0, sizeof p); p.kdf = CKD_NULL;
+         CK_MECHANISM em = { CKM_ECDH1_DERIVE, &p, sizeof p };
+         CK_BYTE ct[512]; CK_ULONG ctLen = sizeof ct;
+         CK_OBJECT_HANDLE hEnc = CK_INVALID_HANDLE, hDec = CK_INVALID_HANDLE;
+         rv = e.Encapsulate(s, &em, hPub, st, 5, ct, &ctLen, &hEnc);
+         r.rv("encapsulate", rv);
+         if (rv == CKR_OK) record_bytes(r, "ciphertext", ct, ctLen, ByteView::SHAPE);
+         record_attrs(e, r, "encap_key", s, hEnc);
+         if (rv != CKR_OK) return;
+         rv = e.Decapsulate(s, &em, hPriv, st, 5, ct, ctLen, &hDec);
+         r.rv("decapsulate", rv);
+         record_attrs(e, r, "decap_key", s, hDec);
+     }});
+
+add({"create.encapsulate.ecdh_secp256k1", "create",
+     "phase-5 §6 comment sweep — a stale ffi.rs comment claimed 'secp256k1-as-"
+     "KEM is not offered (the C++ mirror covers the NIST prime curves)'. "
+     "Measured before believing it: C++'s encapsulateECDH/decapsulateECDH "
+     "gate ONLY on key type (CKK_EC | CKK_EC_MONTGOMERY, SoftHSM_kem.cpp:941,"
+     "1284), never on curve OID, and CKM_EC_KEY_PAIR_GEN has no "
+     "CKR_CURVE_NOT_SUPPORTED path at all (SoftHSM_keygen.cpp; zero hits). "
+     "Rust's KEM arm hard-matches {P256,P384,P521,X25519,X448} and falls "
+     "through to CKR_CURVE_NOT_SUPPORTED for anything else (ffi.rs, the "
+     "match on `curve` in the CKM_ECDH1_DERIVE arm) — a real, untested "
+     "asymmetry the false comment was blaming on the wrong engine.",
+     {CKM_EC_KEY_PAIR_GEN, CKM_ECDH1_DERIVE}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         if (!e.Encapsulate || !e.Decapsulate) { r.put("fn", "ABSENT"); return; }
+         CK_ATTRIBUTE pub[] = {
+             ATTR(CKA_CLASS,       &clPublic, sizeof clPublic),
+             ATTR(CKA_KEY_TYPE,    &ktEc,     sizeof ktEc),
+             ATTR(CKA_EC_PARAMS,   kOidSecp256k1, sizeof kOidSecp256k1),
+             ATTR(CKA_TOKEN,       &bFalse,   sizeof bFalse),
+             ATTR(CKA_DERIVE,      &bTrue,    sizeof bTrue),
+             ATTR(CKA_ENCAPSULATE, &bTrue,    sizeof bTrue),
+         };
+         CK_ATTRIBUTE priv[] = {
+             ATTR(CKA_CLASS,       &clPrivate, sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,    &ktEc,      sizeof ktEc),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_DERIVE,      &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+             ATTR(CKA_DECAPSULATE, &bTrue,     sizeof bTrue),
+         };
+         CK_MECHANISM km = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+         CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+         CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 6, priv, 6, &hPub, &hPriv);
          r.rv("keygen", rv);
          if (rv != CKR_OK) return;
          CK_ATTRIBUTE st[] = {

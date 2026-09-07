@@ -686,6 +686,8 @@ static CK_BYTE kPlain32[32] = {
 };
 // DER OID for prime256v1 / P-256 — 06 08 2A 86 48 CE 3D 03 01 07
 static CK_BYTE kOidP256[] = {0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07};
+// DER OID for secp256k1 (1.3.132.0.10) — 06 05 2B 81 04 00 0A
+static CK_BYTE kOidSecp256k1[] = {0x06,0x05,0x2b,0x81,0x04,0x00,0x0a};
 // DER OID for Ed25519 (RFC 8410) — 06 03 2B 65 70
 static CK_BYTE kOidEd25519[] = {0x06,0x03,0x2b,0x65,0x70};
 // DER OID for X25519 (RFC 8410) — 06 03 2B 65 6E
