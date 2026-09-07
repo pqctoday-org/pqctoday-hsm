@@ -150,3 +150,37 @@ Out of the scope set for the three passes: `otp_key_objects.md`, `trust_objects.
 | **§3** additive | Watch. Re-pin the snapshot when the TC allocates constants. |
 | **§4** draft defects | Report upstream; do not implement. |
 | **§5** trust objects | Sweep next. |
+
+---
+
+## 7. Decisions taken (2026-09-07)
+
+Every §2 item was decided individually. The §2.1 framing in this document's first draft was **wrong and is corrected below**.
+
+| Item | Decision | Work |
+|---|---|---|
+| **§2.1** HSS/XMSS input: hash vs message | **Adopt v3.3. No code change.** | Record the adjudication |
+| **§2.2** ML-DSA single-part restriction dropped | **Adopt** | Allow multi-part ML-DSA sign/verify, both engines |
+| **§2.3** HSS/XMSS multi-part verify via `C_VerifySignatureInit` | **Adopt** | New capability, both engines |
+| **§2.4** `CKA_UNIQUE_ID` on all object classes | **Adopt** | Mint it for the non-storage classes too |
+| **§2.5** FIPS 186-4 deletions | **Do NOT adopt. Keep the v3.2 constraints**, and raise the deletion with the TC | Upstream question |
+| **§2.6** X.509 keyUsage → `CKA_ENCAPSULATE` mapping | No action | Guidance, not a MUST |
+| **§1.1** KEM encapsulate/decapsulate templates | **Implement in both engines** | SHALL-level enforcement |
+
+### Correction to §2.1 — it is not a wire-format change, and we were already right
+
+The first draft of this document listed HSS/XMSS signing input under "v3.3 changes its mind" and warned that adopting it "would change our signature bytes". **That was wrong**, and it was wrong because I reasoned from the two spec texts without first reading our own code.
+
+Both engines pass the caller's buffer **directly** to the reference signers, which hash the message internally per RFC 8554 / the XMSS reference:
+
+- C++ `SoftHSM_sign.cpp:1830` — `hss_generate_signature(..., pData, ulDataLen, ...)`
+- C++ `SoftHSM_sign.cpp:1858` — `xmss_sign(privKeyBytes.byte_str(), sig, &sig_len, pData, ulDataLen)`
+- Rust `crypto/lms.rs:130` — `lms::sign::<Sha256_256>(message, priv_key_bytes, ...)`
+
+So we already implement v3.3's reading. v3.2's text — "corresponds only to the part of LMS that **processes the hash value** … **it does not compute the hash value**" — contradicts RFC 8554, which is what both the hash-sigs and xmss-reference libraries implement and what every other token does.
+
+That makes this a **plain error in v3.2**, which the precedence rule already reaches. The consequence is the opposite of what the first draft implied: **no code change**, and the record exists so that a future auditor reading v3.2 literally does not "fix" the engines into a wrong and non-interoperable behaviour.
+
+### §2.5 — kept, and to be raised upstream
+
+The FIPS 186-4 deletions only ever *loosen* a security constraint, on the authority of an unpublished draft that gives no rationale. We keep v3.2's constraints. The deletion goes on the upstream question list alongside the draft defects in §4.
