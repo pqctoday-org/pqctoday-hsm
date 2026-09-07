@@ -12,7 +12,6 @@ use crate::crypto::*;
 use crate::slh_dsa_keygen;
 use crate::state::*;
 
-use rand::SeedableRng;
 use rand::rngs::OsRng;
 
 /// ACVP-aware RNG selection macro.
@@ -3099,7 +3098,6 @@ fn C_GenerateKeyPair_impl(
                     ],
                     _ => return CKR_CURVE_NOT_SUPPORTED,
                 };
-                use p521::elliptic_curve::Field;
                 match curve {
                     CURVE_P521 => {
                         store_param_set(&mut pub_attrs, CURVE_P521);
@@ -4200,6 +4198,10 @@ pub fn C_GenerateKey(
 /// CKA_EC_POINT (OCTET STRING, short form or 0x81 long form). This is the
 /// byte format the C++ engine's `encapsulateECDH` emits as the KEM
 /// "ciphertext" (`ephPub->getQ()`), so cross-engine decapsulation works.
+// Used only by the #[cfg(test)] EC key-pair installer below, so it is gated to
+// match. Gating is the honest fix; #[allow(dead_code)] would have hidden a
+// genuinely orphaned function just as effectively.
+#[cfg(test)]
 fn der_wrap_ec_point(point: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(3 + point.len());
     out.push(0x04); // DER OCTET STRING tag

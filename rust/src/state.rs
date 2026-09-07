@@ -1,5 +1,4 @@
 use rand_chacha::ChaCha20Rng;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 

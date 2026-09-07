@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU32;
 use wasm_bindgen::prelude::*;
 
 use crate::constants::*;
@@ -711,10 +710,20 @@ macro_rules! slh_dsa_sign_internal {
         // it signs the bare message (no `(0‖|ctx|‖ctx)` framing). `addrnd =
         // None` ⇒ the deterministic variant (addrnd = PK.seed); `Some(r)` ⇒
         // the hedged variant with the explicit ACVP/OASIS `<Random>` addrnd.
-        match $addrnd {
+        //
+        // The `deprecated` allow is scoped to this expression, not the crate.
+        // Upstream marks the raw primitive "_test_only_" because it bypasses
+        // the ctx framing; bypassing that framing is exactly what this macro
+        // needs, and the comment above says why. 24 of the crate's warnings
+        // came from here and 12 from its verify twin — 36 of 43 — which is
+        // enough noise to bury a real one, and did: the CKM_ECDSA_SHA1 defect
+        // this session was found in the handful of warnings left over.
+        #[allow(deprecated)]
+        let __sig = match $addrnd {
             Some(r) => sk._test_only_raw_sign(&mut crate::crypto::handlers::FixedRng::new(r), $msg, true),
             None => sk._test_only_raw_sign(&mut rand::rngs::OsRng, $msg, false),
-        }
+        };
+        __sig
         .map_err(|_| CKR_FUNCTION_FAILED)
         .map(|s| Into::<Vec<u8>>::into(s))
     }};
@@ -752,7 +761,11 @@ macro_rules! slh_dsa_verify_internal {
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
         let sig: <$ps as fips205::traits::Verifier>::Signature =
             $sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
-        match vk._test_only_raw_verify($msg, &sig) {
+        // Scoped allow — see the sign macro above for why the "_test_only_"
+        // primitive is the correct one here.
+        #[allow(deprecated)]
+        let __ok = vk._test_only_raw_verify($msg, &sig);
+        match __ok {
             Ok(true) => Ok(()),
             _ => Err(CKR_SIGNATURE_INVALID),
         }

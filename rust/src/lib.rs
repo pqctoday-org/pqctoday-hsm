@@ -3,6 +3,14 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::too_many_arguments)]
+// 2026-09-07. This lint is an ERROR, not a warning, because it already caught
+// a real defect this session: CKM_ECDSA_SHA1 on P-256 signed with SHA-1 and
+// verified with SHA3-256 — no signature the engine produced under that
+// mechanism could be verified by it — and the only outward sign was an
+// "unreachable pattern" warning sitting in a backlog of 43. A duplicate or
+// shadowed match arm in this crate is a dispatch bug often enough that it
+// should stop the build rather than join a queue.
+#![deny(unreachable_patterns)]
 // Edition 2024 promoted `unsafe_op_in_unsafe_fn` to a lint-on-by-default,
 // which requires every unsafe op inside an `unsafe fn` to be wrapped in
 // its own `unsafe { … }` block. softhsmrustv3's PKCS#11 surface uses the
