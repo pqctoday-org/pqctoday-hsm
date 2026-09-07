@@ -11,20 +11,22 @@
 #   2. kmip  cargo test -- --include-ignored  — the local-only suites CI skips
 #                                               (op-layer policy conformance …)
 #   3. rust  cargo test                       — softhsmrustv3 engine tests
-#   4. OASIS KMIP 3.0 replay + baseline assert + staleness guard (97/0/5)
-#   5. wasm  smoke.cjs                         — CACP bundle boots + round-trips
-#   6. Rust engine PKCS#11 v3.2 conformance (257 checks) + report freshness
-#   7. cross-engine PKCS#11 differential harness (49 scenarios vs exceptions.json)
-#   8. (--cpp)  C++ ctest incl. the v3.2 compliance harness + report freshness  [opt-in, slow]
-#   9. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
-#  10. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
-#  11. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
-#  12. (--javajce) JavaJCE provider suite (mvn test) in pqc-dev-sandbox  [opt-in]
-#  13. (--javajce-remote) JavaJCE-remote gRPC provider suite vs live pqc-grpc  [opt-in]
-#  14. (--openssl-provider) vendored pkcs11-provider vs real OpenSSL 3.6, both
+#   4. OASIS corpus provenance (the XML is the OASIS XML)
+#   5. OASIS byte vectors match that XML (drift guard, added 2026-09-07)
+#   6. OASIS KMIP 3.0 replay + baseline assert + staleness guard (97/0/5)
+#   7. wasm  smoke.cjs                         — CACP bundle boots + round-trips
+#   8. Rust engine PKCS#11 v3.2 conformance (257 checks) + report freshness
+#   9. cross-engine PKCS#11 differential harness (49 scenarios vs exceptions.json)
+#  10. (--cpp)  C++ ctest incl. the v3.2 compliance harness + report freshness  [opt-in, slow]
+#  11. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
+#  12. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
+#  13. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
+#  14. (--javajce) JavaJCE provider suite (mvn test) in pqc-dev-sandbox  [opt-in]
+#  15. (--javajce-remote) JavaJCE-remote gRPC provider suite vs live pqc-grpc  [opt-in]
+#  16. (--openssl-provider) vendored pkcs11-provider vs real OpenSSL 3.6, both
 #                            engines (27 PASS / 0 FAIL / 0 XFAIL / 0 XPASS)  [opt-in]
 #
-# Steps 6-7 (Rust PKCS#11 conformance, differential harness) were opt-in
+# Steps 8-9 (Rust PKCS#11 conformance, differential harness) were opt-in
 # until 2026-08-23 — both are core PKCS#11 v3.2 evidence, and both had gone
 # stale invisibly while opt-in (the Rust report 45 source-commits behind
 # HEAD; the differential harness never run at all outside a manual
@@ -282,6 +284,18 @@ run_step "remoting gRPC+REST services + three-transport parity" \
 # corpus we think it is, the replay figure below is measuring something else.
 run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
   "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py"
+
+# Immediately after the corpus check, and for the same reason. That step asks
+# "is the XML the OASIS XML?"; this asks "are the committed byte vectors what
+# that XML actually produces?" — a question NOTHING asked before 2026-09-07.
+# The Rust suites (oasis_codec_roundtrip.rs and friends) round-trip the
+# committed .bin files through our own codec, so a vector that no longer
+# matches its source XML still round-trips perfectly; the corpus is never
+# consulted. Four vectors were stale from the 2026-07 CSD02 refresh until
+# 2026-09-06 and surfaced only by accident, when an unrelated regeneration
+# changed their size. --check writes nothing.
+run_step "OASIS byte vectors match the XML corpus (1358 vectors)" \
+  "cd $AG_KMIP && python3 conformance/harness/generate_byte_vectors.py --check"
 
 run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
   "cd $AG_KMIP && cargo build --release --bin pqctoday-kmip --quiet && \

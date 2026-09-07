@@ -17,7 +17,20 @@ Run from ``kmip/``:
 
 .. code-block:: shell
 
-    python3 conformance/harness/generate_byte_vectors.py
+    python3 conformance/harness/generate_byte_vectors.py            # regenerate
+    python3 conformance/harness/generate_byte_vectors.py --check    # verify only
+
+``--check`` re-derives every vector from the XML corpus in memory and compares
+it against what is committed, exiting non-zero on any drift. It writes nothing.
+
+This exists because nothing else could see that drift. The Rust suites
+(``oasis_codec_roundtrip.rs`` and friends) round-trip the committed ``.bin``
+files through our own codec, so a vector that no longer matches the XML it
+came from still round-trips perfectly — the corpus is never consulted. Four
+vectors were stale from the 2026-07 CSD02 refresh until 2026-09-06 and were
+found only by accident, when an unrelated regeneration changed their size.
+``verify_corpus_provenance.py`` answers the adjacent question (is the XML the
+OASIS XML?); this answers "are the vectors what that XML actually produces?".
 """
 
 from __future__ import annotations
@@ -92,7 +105,8 @@ def write_tier(tier: str, vectors: list[dict]) -> None:
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
 
-def main() -> int:
+def build_tiers() -> tuple[list[dict], list[dict]]:
+    """Derive both tiers from the XML corpus, writing nothing."""
     pristine: list[dict] = []
     stubbed: list[dict] = []
 
@@ -120,6 +134,90 @@ def main() -> int:
                 stubbed.append(entry)
                 if not has_placeholder(n):
                     pristine.append(entry)
+
+    return pristine, stubbed
+
+
+def check_tier(tier: str, vectors: list[dict]) -> list[str]:
+    """Compare freshly-derived vectors against what is committed.
+
+    Checks three things, because each catches a different way to drift:
+      * the committed ``.bin`` equals the bytes the corpus produces today
+        (a stale vector, which is the case that actually happened);
+      * the manifest's ``sha256``/``size_bytes`` match those same bytes
+        (a hand-edited or half-regenerated manifest);
+      * neither side carries a vector the other does not (added/removed
+        transcripts).
+    """
+    problems: list[str] = []
+    out_dir = OUT_ROOT / tier
+    manifest_path = out_dir / "manifest.json"
+
+    if not manifest_path.is_file():
+        return [f"{tier}: manifest.json missing — run without --check to generate"]
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as e:
+        return [f"{tier}: manifest.json is not valid JSON: {e}"]
+
+    committed = {e["filename"]: e for e in manifest.get("vectors", [])}
+    fresh = {e["filename"]: e for e in vectors}
+
+    for name in sorted(set(committed) - set(fresh)):
+        problems.append(f"{tier}/{name}: committed but the corpus no longer produces it")
+    for name in sorted(set(fresh) - set(committed)):
+        problems.append(f"{tier}/{name}: the corpus produces it but it is not committed")
+
+    for name in sorted(set(fresh) & set(committed)):
+        raw = fresh[name]["bytes"]
+        digest = hashlib.sha256(raw).hexdigest()
+        entry = committed[name]
+
+        if entry.get("sha256") != digest:
+            problems.append(
+                f"{tier}/{name}: manifest sha256 {entry.get('sha256')} "
+                f"but the corpus now yields {digest}"
+            )
+        if entry.get("size_bytes") != len(raw):
+            problems.append(
+                f"{tier}/{name}: manifest size {entry.get('size_bytes')} "
+                f"but the corpus now yields {len(raw)}"
+            )
+
+        blob = out_dir / name
+        if not blob.is_file():
+            problems.append(f"{tier}/{name}: listed in the manifest but the .bin is missing")
+            continue
+        on_disk = blob.read_bytes()
+        if on_disk != raw:
+            problems.append(
+                f"{tier}/{name}: committed .bin is {len(on_disk)} bytes, "
+                f"the corpus yields {len(raw)} — STALE, regenerate"
+            )
+
+    return problems
+
+
+def main() -> int:
+    check_only = "--check" in sys.argv[1:]
+    pristine, stubbed = build_tiers()
+
+    if check_only:
+        problems = check_tier("pristine", pristine) + check_tier("stubbed", stubbed)
+        if problems:
+            print(f"VECTOR/CORPUS DRIFT — {len(problems)} problem(s):", file=sys.stderr)
+            for p in problems:
+                print(f"  {p}", file=sys.stderr)
+            print(
+                "\nRegenerate with:  python3 conformance/harness/generate_byte_vectors.py",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"VECTOR/CORPUS CHECK OK — {len(pristine)} pristine + {len(stubbed)} stubbed "
+            "vectors match the XML corpus byte-for-byte"
+        )
+        return 0
 
     write_tier("pristine", pristine)
     write_tier("stubbed", stubbed)
