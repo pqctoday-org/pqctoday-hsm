@@ -226,3 +226,32 @@ Before proposing a push: `bash scripts/local-gate.sh --cpp --javajce --openssl-p
 | **E-2** | §6 — sweep all 157 cross-engine claims, or only the 51 in `ffi.rs`? | **All 157.** The two failures today were both in Rust, but the 13 in `src/lib` are the same class and the total is small enough to finish. |
 | **E-3** | §1 — if Rust's `C_VerifySignatureInit` already handles the stateful mechanisms, do we still change C++? | **Yes.** A divergence where Rust is right and C++ refuses is still a divergence, and C++'s refusal is the non-conformant half. |
 | **E-4** | Does anything here block the landing, or do §5/§7/§8 (record-only) land with it? | Land the record-only items **with** the branch. They are documentation of decisions already taken; holding them back leaves the record incomplete for a reviewer. |
+
+---
+
+## 14. Decisions taken (2026-09-07)
+
+| Ref | Decision | Note |
+|---|---|---|
+| **E-1** | **Adopt Rust's reading** of `ulMaxKeySize` | *Overrides the recommendation to clamp to `0x7FFFFFFF`.* "Key size" means the key the mechanism uses, not the payload it may process. See §14.1 — the decision applies cleanly to two of the five sites and needs one follow-up for the rest |
+| **E-2** | Sweep **all 157** cross-engine comment claims | Default taken; `src/lib`'s 13 are the same defect class |
+| **E-3** | **Fix C++ regardless** of what Rust turns out to do | Default taken; C++'s refusal is the non-conformant half either way |
+| **E-4** | Record-only items (§5, §7, §8) **land with the branch** | Default taken; a reviewer should see the reasoning alongside the code |
+
+### 14.1 Correction — the five sites are not "the AES key-wrap mechanisms"
+
+E-1 was posed on my description of the five `UNLIMITED_KEY_SIZE` sites as "all AES key-wrap mechanisms". **That is wrong**, and I inherited it from `LEGAL-MECHANISM-INFO-KEY-SIZE-RANGES`, which says the same thing. Only two of the five are. Read from `SoftHSM_slots.cpp` against `ffi.rs:1503-1558`:
+
+| Mechanism | C++ today | Rust today | Does E-1's rationale apply? |
+|---|---|---|---|
+| `CKM_AES_KEY_WRAP` (`:1092`) | 16 – 2³¹ | 16 – 32 | **Yes.** The payload-vs-key ambiguity is exactly here |
+| `CKM_AES_KEY_WRAP_PAD` / `_KWP` (`:1101`) | 1 – 2³¹ | 16 – 32 | **Yes.** Same construction (RFC 5649) |
+| `CKM_GENERIC_SECRET_KEY_GEN` (`:1023`) | 1 – 2³¹ | 1 – 512 | **No.** There is no ambiguity — the value *is* the size of the secret generated. Adopting 512 would make C++ under-advertise a capability it has |
+| `CKM_KMAC_128` (`:1126`) | 16 – 2³¹ | 16 – 64 | **No.** SP 800-185 places no upper bound on a KMAC key; 64 is Rust's own policy, not a reading of the spec |
+| `CKM_KMAC_256` (`:1131`) | 32 – 2³¹ | 16 – 64 | **No**, and note the minimum also differs (32 vs 16) |
+
+So E-1 as decided resolves the two key-wrap rows to `16 – 32`. The other three are a **different question**: they have no payload-vs-key ambiguity, and their maximum is genuinely "unbounded" in the sense C++ means it. For those, the choice is between clamping to `0x7FFFFFFF` (truthful, satisfies the cap) and adopting Rust's policy ceilings (closes the divergence, but under-advertises).
+
+**E-1a is open.** Nothing changes on those three rows until it is answered. The two key-wrap rows proceed as decided.
+
+This is the same failure the plan's own verification standard warns about — I described a set of code sites from a summary (the exception's prose) instead of reading them, and posed a decision on the description. The exception text needs the same correction.
