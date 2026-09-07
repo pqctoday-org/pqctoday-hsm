@@ -329,7 +329,10 @@ private:
 		CK_BBOOL isPublicKeyOnToken,
 		CK_BBOOL isPublicKeyPrivate,
 		CK_BBOOL isPrivateKeyOnToken,
-		CK_BBOOL isPrivateKeyPrivate
+		CK_BBOOL isPrivateKeyPrivate,
+		// CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS selects FIPS 186-5 A.2.2 for the
+		// private scalar; it is otherwise identical to CKM_EC_KEY_PAIR_GEN
+		bool useExtraBits = false
 	);
 	CK_RV generateED
 	(

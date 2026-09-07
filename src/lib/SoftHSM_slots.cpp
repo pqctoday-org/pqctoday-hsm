@@ -598,6 +598,7 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 
 	// ECDSA + ECDH (DSA and DH PKCS removed)
 	t["CKM_EC_KEY_PAIR_GEN"]	= CKM_EC_KEY_PAIR_GEN;
+	t["CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS"]	= CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS;
 	t["CKM_ECDSA"]			= CKM_ECDSA;
 	t["CKM_ECDSA_SHA1"]		= CKM_ECDSA_SHA1;
 	t["CKM_ECDSA_SHA224"]		= CKM_ECDSA_SHA224;
@@ -1132,6 +1133,7 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			break;
 #ifdef WITH_ECC
 		case CKM_EC_KEY_PAIR_GEN:
+		case CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS:
 			pInfo->ulMinKeySize = ecdsaMinSize;
 			pInfo->ulMaxKeySize = ecdsaMaxSize;
 #define CKF_EC_COMMOM	(CKF_EC_F_P | CKF_EC_NAMEDCURVE | CKF_EC_UNCOMPRESS)
