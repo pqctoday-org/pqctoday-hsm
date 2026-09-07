@@ -123,3 +123,35 @@ The test that matters is not "each engine round-trips itself". It is:
 | **P-2** | One store per engine in a common format, or a common **interchange** format with each engine keeping its own store? | Interchange is far cheaper and gets the portability benefit. A single shared store is the stronger goal but forces a TTLV codec and a store rewrite into C++. |
 | **P-3** | Which KMIP revision does the format pin to? | The same one the server claims, recorded in the format header, refused rather than reinterpreted if unrecognised. |
 | **P-4** | Does the C++ engine adopt this as its *primary* store eventually, or permanently alongside SoftHSM2's? | Alongside. `softhsm2-util` and existing on-disk tokens depend on the current one. |
+
+
+---
+
+## 7. Decisions taken (2026-09-07)
+
+| Ref | Decision |
+|---|---|
+| **Priority** | Fix the plaintext-at-rest gap **now**; the format work waits until the PKCS#11 phase-4 queue is finished and the branch has landed |
+| **P-1 key source** | **PIN-derived**, matching C++ — same threat model and same protection whichever engine wrote the token |
+| **P-2 architecture** | **Interchange format**: each engine keeps its own store, both import/export a common TTLV-framed representation |
+| **P-4 C++ store** | When the new format lands in C++, it **replaces** the SoftHSM2 store rather than coexisting with it |
+
+### Reconciling P-2 and P-4
+
+These two pull in different directions and the tension is recorded rather than smoothed over, because it changes what Phase 4 has to deliver.
+
+P-2 says each engine keeps its own store. P-4 says that when a new format reaches C++, it replaces SoftHSM2's. Read together — and Q4 was posed conditionally, *"if a new format lands in C++"* — the coherent reading is:
+
+- **Near term:** interchange only. Neither store is replaced; both engines gain import/export. C++ needs no TTLV codec yet.
+- **When C++ does adopt the format:** it becomes *the* store, not a second one. No permanent dual-store in C++.
+
+That makes two things mandatory at that point, and they should be treated as blocking rather than follow-up:
+
+1. **A converter for tokens already on disk.** Replacement without one destroys existing tokens.
+2. **`softhsm2-util` taught to read the new format.** It is the CLI for this store; replacing the format without it breaks the tool users actually run.
+
+The alternative I recommended — keeping the SoftHSM2 store indefinitely — was not taken. That is the user's call and is implemented as decided; the cost is recorded here so the converter and the tool work are not discovered late.
+
+### Immediate scope
+
+Only Phase 1 proceeds now: PIN-derived encryption of the Rust snapshot. Phases 2-5 are deferred behind the PKCS#11 work.
