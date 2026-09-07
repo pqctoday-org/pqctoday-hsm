@@ -182,3 +182,29 @@ Branch `fix/pkcs11-d2-pkcs8-wire-format`, worktree `.worktrees/pkcs11-d2`. Every
 ### What the `CKM_AES_CMAC` bug says about §5
 
 It is worth recording why X2′ was the right item to build. The wrong `CK_MECHANISM_INFO` key range sat in `SUPPORTED_MECHS` and the differential harness did **not** flag it — `LEGAL-MECHANISM-SET` excuses the path glob `mech*` wholesale, so every mechanism-info divergence between the engines was invisible to it. A row-level ratchet that excuses a whole glob hides exactly the class of defect it looks like it covers. The ledger checks each `CKM_*` on its own, from the source files that build the advertised lists.
+
+
+### §6 H1 — done (2026-09-07)
+
+**H1.1/H1.2 — citations re-verified.** All 31 `citation` fields checked against `docs/refs/pkcs11-spec-v3.2-csd01.pdf`. **16 were wrong.** No verdict changed — every divergence is still legal — but the errors were not cosmetic:
+
+- **One quoted a sentence that does not exist** in any edition: `CKA_ALLOWED_MECHANISMS` "if not present, the key may be used with any mechanism". The specification defines no absence semantics for it at all. Re-justified on materialisation grounds.
+- **Ten shared one wrong section**: "§4.9 common key attribute table footnote". §4.9 is *Public key objects*; the common key attribute table is Table 26 in §4.8; the footnote is 9 of Table 13 in §4.2.
+- **One was in the wrong family**: `CKA_DERIVE`'s default is *specified* as `CK_FALSE` (footnote 8, not 9), so a token-specific-default justification never applied. Verified against the harness rather than assumed — all 10 divergences are `cpp='00'` vs `rust=<absent>`, pure materialisation, no value disagreement. Renamed `LEGAL-USAGE-FLAG-DEFAULT-DERIVE` → `LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-DERIVE` so a future *value* divergence there fails instead of being excused.
+- **Two corrections weaken their own entry** and were recorded rather than smoothed over: `CKA_PUBLIC_KEY_INFO`'s citation stopped one sentence before a SHOULD that argues the other way, and the Edwards/Montgomery entry's ellipsis hid "of the template for the public key" plus an explicit "incompatible" note.
+
+Two independent research passes disagreed on the private-key table number; that was settled by extracting the PDF's own text (Table 27 Public / 28 X.509 mapping / 29 Private / 30 Secret), not by preferring one report. **The vendored v3.3 draft must not be used for section or table numbers** — no numbers in its headings, and its content has drifted from v3.2.
+
+**H1.5 — serial harness run.** 65 scenarios, 10,065 observations, 1,814 legal, 11 known-defect, **0 uncovered, PASS**. Re-run after the citation edits: identical. **No stale entries** — every exception either matched or is one of the six the harness itself labels deliberately unobservable. H1.3 and H1.4 were completed in phase 1.
+
+## 11. Open questions — resolved
+
+- **O-2 — MD5/SHA-1 exposure.** Settled by decision D2 and shipped in §3 Wave 3. Both engines advertise them; `CLAUDE.md` records why.
+- **O-3 — `LEGAL-MECHANISM-SET` after §3.** Answered by running the harness, as the question required: the entry **stays**, with 1 hit. The divergence is now one-directional — Rust advertises PQC and vendor mechanisms the C++ engine does not, while the C++-only set is empty. Its stale hardcoded counts were removed rather than updated.
+- **O-1 — PQC private-key PKCS#8 inner encoding.** STILL OPEN, untouched, as §1 intended. Needs a reference check against OpenSSL 3.6.3 and the current LAMPS drafts before anything changes.
+
+## 12. What is NOT done
+
+- **JavaJCE half of X1** is written but **never compiled or run** — no JDK exists on this machine or in the `pqc-rust` container. `SoftHSMv3Provider`'s POST was deliberately left untouched for the same reason.
+- **O-1** above.
+- Nothing on this branch has been pushed.
