@@ -1,5 +1,23 @@
 # KMIP 3.0 Conformance Report
 
+> ## ⚠️ What "conformance" means in this document
+>
+> **KMIP 3.0 is not a ratified standard.** Every claim here is measured against
+> **CSD02** — Committee Specification Draft 02, whose public review closed
+> **13 August 2026**. The final text may renumber clauses or change
+> requirements, so a claim that holds today can stop holding without this
+> server changing at all. Re-run the full conformance pass when 3.0 is
+> ratified.
+>
+> **No claim here is independently verified.** No KMIP 3.0 implementation
+> exists to interop against — every open-source client is 2.x or older — so all
+> evidence is self-generated: replay of the official OASIS transcripts, plus
+> cross-checks between this repository's own C++ and Rust engines. That is
+> stronger than a hand-written self-test and weaker than two independent
+> implementations agreeing. **Do not describe this server as
+> "interoperable"** — only as "conformant to the OASIS CSD02 transcripts".
+> See §5.3.
+
 > **Current as of v0.28.0** (2026-09-02). The replay figures below are
 > unchanged (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED, re-verified by this
 > release's own gate run), but unlike v0.26.0 and v0.27.0 this release **does**
@@ -82,10 +100,10 @@ covered separately by the 42-transcript vendored subset in `../conformance/pqc_c
 | Stateful hash-based signatures | ✅ **real** — HSS/LMS wired to the engine | KMIP `Sign` on an HSS/LMS key advances + persists the real leaf index (Phase 1.5) |
 | Split Key / Join Split Key (§6.1.12/§6.1.33) | ✅ **real** — restored 2026-08-18 after a 5-day whitelist-bug regression that failed every key while `Query` kept advertising it | §4.5 below |
 | Composite signature profiles (LAMPS draft-19 §6/§10.4) | ✅ **8/8 implemented** (`.37`/`.39`/`.40`/`.41`/`.45`/`.46`/`.48`/`.49`) | §4.6 below |
-| Baseline Server profile (§5.1.2) | ✅ **all 13 conditions met** (item 8 closed 2026-09-06 apart from §4.6 Certificate Attributes — see **G2**); the §6.2 conformance clause carries the accepted DSA deviation (**G4**) | §5.1.4, §8 below |
+| Baseline Server profile (§5.1.2, CSD02 draft) | ✅ **all 13 conditions met** (item 8 closed 2026-09-06 apart from §4.6 Certificate Attributes — see **G2**); the §6.2 conformance clause carries the accepted DSA deviation (**G4**) | §5.1.4, §8 below |
 | Quantum Safe Authentication Suite (Profiles §3.3) | ✅ **all clauses met** — all 3 mandated hybrid groups, interop-proven vs OpenSSL 3.6 | §5.2 below |
 | Basic Authentication Suite (Profiles §3.1) | ✅ **met under `--tls-profile basic`**, and the conformance replay now runs under it. The DEFAULT `permissive` posture still does not satisfy §3.1.2 (**G3**) | §8 below |
-| Third-party interop (PyKMIP / vendor) | ⏸️ never run — **not currently possible** | KMIP 3.0 has no compatible OSS client; see §5.3 |
+| Third-party interop (another vendor's 3.0 endpoint) | ⏸️ never run — **not currently possible** | No KMIP 3.0 implementation exists to test against; see §5.3 |
 
 **Bottom line**: the dispatcher matches the OASIS conformance transcripts on **all 97
 non-deprecated tests**, and the wire bytes match CSD02 for all 14 item types — including
@@ -759,16 +777,28 @@ Re-check at the next spec revision.
 ## 5.3 Third-party interop: not currently possible
 
 No third-party interop test has ever been run, and it **cannot be run today**: KMIP 3.0
-has no compatible open-source client. PyKMIP implements ≤2.1, and this server pins
-protocol version 3.0. What exists instead, and what it is worth:
+has no compatible client, open-source or otherwise. Every open-source implementation is
+KMIP **2.x or older** — PyKMIP (2.x), `kmip-go` (1.0–1.4), KMIP4J (1.0), libkmip — and this
+server advertises 3.0 only, so the version intersection is empty and no handshake can
+begin. The exact minor version any of them reaches is beside the point.
+
+The cause is timing rather than neglect: KMIP 3.0's public review closed **13 August 2026**
+and the specification is not yet ratified, so no implementer has had a stable target. Re-checked
+2026-09-07; nothing has changed, and nothing realistically could have in three weeks.
+
+What exists instead, and what it is worth:
 
 - Full replay of the **official OASIS conformance transcripts** — the same request/response
   pairs any conforming implementation is measured against. This is stronger than a
   hand-written self-test but weaker than two independent implementations agreeing.
 - **Cross-implementation** checks between this repo's own C++ and Rust engines (ML-DSA-65,
   SLH-DSA-128f, ML-KEM-768, HSS — both directions each). Two implementations, one author.
-- A **Python conformance client** that drives the server over real TLS, including
-  `assert_quantum_safe_channel()` (proof by exclusion: a classical-only handshake must fail).
+- A **Python conformance client** (`kmip/python-client`, `pqctoday-kmip-client`) that drives
+  the server over real TLS, including `assert_quantum_safe_channel()` (proof by exclusion: a
+  classical-only handshake must fail). It is **first-party** — written in this repository
+  against this server — so it demonstrates the wire format is implementable from the spec by
+  someone who is not the server author's compiler, but it is NOT independent evidence and must
+  never be described as interop.
 
 **Revisit trigger**: any OSS KMIP 3.0 client, or access to another vendor's 3.0 endpoint.
 Until then, no material should claim "interoperable" — only "conformant to the OASIS
@@ -781,13 +811,14 @@ eventually actionable. It is not, and saying so is more useful than leaving it
 open.
 
 The blocker is structural, not a matter of effort. `SUPPORTED_VERSIONS`
-(`ops/lifecycle_and_protocol.rs`) is KMIP **3.0 only**; PyKMIP and every other
-open-source client implement ≤2.1. The version intersection is empty by
-construction, so no handshake between them can begin — there is nothing to fix
-at our end short of implementing a second protocol version.
+(`ops/lifecycle_and_protocol.rs`) is KMIP **3.0 only**; every open-source client
+is 2.x or older. The version intersection is empty by construction, so no
+handshake between them can begin — there is nothing to fix at our end short of
+implementing a second protocol version.
 
-**The option considered and declined.** Adding KMIP 2.1 request framing would
-make PyKMIP a real counterparty for the operations both versions share. It was
+**The option considered and declined.** Adding KMIP 2.x request framing would
+make an existing client a real counterparty for the operations both versions
+share. It was
 declined because 2.1 cannot carry the PQC surface this server exists for
 (`Encapsulate`/`Decapsulate`, the hybrid KEM codepoints, the PQC algorithm
 enumerations are all 3.0 additions), so the interop it would buy is interop on

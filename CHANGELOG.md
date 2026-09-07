@@ -34,7 +34,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The KMIP server now conforms to the Baseline Server profile and
   advertises it** via `Query Profiles` (`Profile Name` = 0x12b), and only
-  that profile. Conformance replay is 99 PASS / 0 FAIL / 3 SKIP; the three
+  that profile. **Two caveats that belong with the claim:** KMIP 3.0 is not
+  a ratified standard — this is measured against CSD02, whose public review
+  closed 13 August 2026 — and no KMIP 3.0 implementation exists to interop
+  against, so the evidence is the official OASIS transcripts rather than
+  another vendor agreeing with us. Conformant to those transcripts; not
+  "interoperable". Conformance replay is 99 PASS / 0 FAIL / 3 SKIP; the three
   skips are 3DES, which belongs to the Symmetric Key Foundry for FIPS
   profile this server does not claim.
 
