@@ -4341,6 +4341,44 @@ unsafe fn hpke_read_derived_key_template(p: *const u8) -> Option<(*const u8, Vec
     Some((ph_key, out))
 }
 
+/// CKA_ENCAPSULATE_TEMPLATE / CKA_DECAPSULATE_TEMPLATE enforcement.
+///
+/// v3.2 defines both constants in the header and then never mentions them
+/// again — no table row, no prose. v3.3 supplies both the rows and SHALL-level
+/// enforcement, adopted under the standing v3.2-baseline / v3.3-fills-gaps
+/// rule:
+///
+///   * encapsulate — "an attribute set that will be compared against the
+///     attributes of the key to be encapsulated. If all attributes match
+///     according to the C_FindObject rules … If any attribute conflict occurs
+///     … SHALL return CKR_KEY_HANDLE_INVALID" (key_management_functions.md:762)
+///   * decapsulate — "… added to attributes of the key to be decapsulated. If
+///     the attributes do not conflict with the user supplied attribute
+///     template … SHALL return CKR_TEMPLATE_INCONSISTENT" (:868)
+///
+/// "The key to be encapsulated" is read as the key being CREATED:
+/// C_EncapsulateKey takes a template and produces phKey, so there is no
+/// pre-existing key to compare against. That is the only coherent reading for
+/// a KEM.
+///
+/// A helper rather than four inline copies. The encapsulate path has THREE
+/// key-creation sites (vendor KEMs, ML-KEM, ECDH-as-KEM) and a first attempt
+/// guarded only one of them — the enforcement silently did nothing for
+/// CKM_ML_KEM, which is exactly the shape of bug that four copies of a rule
+/// produce. The differential scenario caught it because it tests the negative
+/// case.
+///
+/// Absent attribute ⇒ permitted, per "If this attribute is not present on the
+/// encapsulating key then no additional attributes will be added."
+fn kem_template_permits(h_kem_key: u32, template_attr: u32, new_attrs: &Attributes) -> bool {
+    match OBJECTS.with(|o| o.borrow().get(&h_kem_key).cloned()) {
+        Some(kem_attrs) => {
+            crate::state::key_template_permits(&kem_attrs, template_attr, new_attrs)
+        }
+        None => true,
+    }
+}
+
 fn C_EncapsulateKey_impl(
     _h_session: u32,
     p_mechanism: *mut u8,
@@ -4563,6 +4601,9 @@ fn C_EncapsulateKey_impl(
             ) {
                 return rv;
             }
+            if !kem_template_permits(h_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
+                return CKR_KEY_HANDLE_INVALID;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
@@ -4747,6 +4788,9 @@ fn C_EncapsulateKey_impl(
             ) {
                 return rv;
             }
+            if !kem_template_permits(h_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
+                return CKR_KEY_HANDLE_INVALID;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
@@ -4843,6 +4887,9 @@ fn C_EncapsulateKey_impl(
                     find_template_entry(_p_template, _ul_attribute_count, CKA_CHECK_VALUE).as_deref(),
                 ) {
                     return rv;
+                }
+                if !kem_template_permits(h_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
+                    return CKR_KEY_HANDLE_INVALID;
                 }
                 *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             }};
@@ -5052,6 +5099,9 @@ fn C_DecapsulateKey_impl(
             ) {
                 return rv;
             }
+            if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
+                return CKR_TEMPLATE_INCONSISTENT;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
@@ -5197,6 +5247,9 @@ fn C_DecapsulateKey_impl(
             ) {
                 return rv;
             }
+            if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
+                return CKR_TEMPLATE_INCONSISTENT;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
@@ -5294,6 +5347,9 @@ fn C_DecapsulateKey_impl(
                     find_template_entry(_p_template, _ul_attribute_count, CKA_CHECK_VALUE).as_deref(),
                 ) {
                     return rv;
+                }
+                if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
+                    return CKR_TEMPLATE_INCONSISTENT;
                 }
                 *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             }};

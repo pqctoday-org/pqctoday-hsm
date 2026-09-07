@@ -352,6 +352,28 @@ pub const CKA_UNWRAP_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0212;
 /// §5.18.3 — the derive counterpart. Defined for completeness of the array
 /// attribute family; not enforced by any derive path yet.
 pub const CKA_DERIVE_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0213;
+/// KEM counterpart of [`CKA_WRAP_TEMPLATE`], on the ENCAPSULATING key:
+/// "an attribute set that will be compared against the attributes of the key
+/// to be encapsulated. If all attributes match according to the C_FindObject
+/// rules of attribute matching then the wrap will proceed … If any attribute
+/// conflict occurs … the function SHALL return CKR_KEY_HANDLE_INVALID."
+///
+/// v3.2 defines the constant and then never mentions it again — no table row,
+/// no prose. The semantics above are v3.3's
+/// (key_management_functions.md:762-771), adopted under the standing rule
+/// that v3.3 governs where v3.2 has a gap.
+///
+/// CKF_ARRAY_ATTRIBUTE is set per the same rule: v3.2 omits it though the
+/// three older *_TEMPLATE attributes above all carry it. See V33_CORRECTIONS
+/// in scripts/check_pkcs11_constants.py.
+pub const CKA_ENCAPSULATE_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_062a;
+/// KEM counterpart of [`CKA_UNWRAP_TEMPLATE`], on the DECAPSULATING key:
+/// "an attribute set that will be added to attributes of the key to be
+/// decapsulated. If the attributes do not conflict with the user supplied
+/// attribute template … the decapsulation will proceed … If any attribute
+/// conflict occurs … the function SHALL return CKR_TEMPLATE_INCONSISTENT."
+/// (v3.3 key_management_functions.md:868-878.)
+pub const CKA_DECAPSULATE_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_062b;
 
 // Private attribute: stores the parameter set on generated keys
 pub const CKA_PRIV_PARAM_SET: u32 = 0xFFFF_0001;

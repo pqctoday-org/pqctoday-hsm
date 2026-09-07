@@ -390,6 +390,16 @@ pub(crate) fn attr_is_attribute_array(attr_type: u32) -> bool {
         crate::constants::CKA_WRAP_TEMPLATE
             | crate::constants::CKA_UNWRAP_TEMPLATE
             | crate::constants::CKA_DERIVE_TEMPLATE
+            // 2026-09-07. The two KEM template attributes were missing here,
+            // which was a latent instance of the exact bug the S2 comment in
+            // absorb_template_attrs describes: without this, a caller setting
+            // CKA_ENCAPSULATE_TEMPLATE had the raw CK_ATTRIBUTE structs copied
+            // — pointers into caller memory that dangle the moment the call
+            // returns — instead of the flattened, self-contained blob. v3.3
+            // makes the deep copy an explicit MUST (key_objects.md:67-135);
+            // v3.2 left it unstated, which is why it was missed.
+            | crate::constants::CKA_ENCAPSULATE_TEMPLATE
+            | crate::constants::CKA_DECAPSULATE_TEMPLATE
     )
 }
 

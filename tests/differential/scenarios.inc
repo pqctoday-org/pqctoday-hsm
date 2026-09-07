@@ -661,6 +661,104 @@ add({"create.unwrap.aes_kw", "create",
          record_attrs(e, r, "unwrapped", s, hu);
      }});
 
+add({"create.kem_template_enforcement", "create",
+     "CKA_ENCAPSULATE_TEMPLATE / CKA_DECAPSULATE_TEMPLATE restrict what a KEM key may produce",
+     {CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         // v3.2 defines both constants in the header and then never mentions
+         // them again — no table row, no prose. v3.3 supplies the rows AND
+         // SHALL-level enforcement (key_management_functions.md:762-771 and
+         // :868-878), adopted under the standing v3.2-baseline/v3.3-fills-gaps
+         // rule.
+         //
+         // THE NEGATIVE CASE IS THE TEST. An engine that stores the template
+         // and enforces nothing passes any positive-only check, and would leave
+         // a caller believing a restriction is active when it is not. Each
+         // template below therefore gets a request that SATISFIES it and one
+         // that VIOLATES it, and the violating call must be refused with the
+         // specific code the spec names.
+         if (!e.Encapsulate || !e.Decapsulate) { r.put("fn", "ABSENT"); return; }
+
+         // The restriction: encapsulated/decapsulated keys must be
+         // non-extractable. A caller asking for CKA_EXTRACTABLE=TRUE conflicts.
+         CK_ATTRIBUTE restrict_tmpl[] = {
+             ATTR(CKA_EXTRACTABLE, &bFalse, sizeof bFalse),
+         };
+         CK_ATTRIBUTE pub[] = {
+             ATTR(CKA_CLASS,                &clPublic,   sizeof clPublic),
+             ATTR(CKA_KEY_TYPE,             &ktMlKem,    sizeof ktMlKem),
+             ATTR(CKA_PARAMETER_SET,        &psMlKem768, sizeof psMlKem768),
+             ATTR(CKA_TOKEN,                &bFalse,     sizeof bFalse),
+             ATTR(CKA_ENCAPSULATE,          &bTrue,      sizeof bTrue),
+             ATTR(CKA_ENCAPSULATE_TEMPLATE, restrict_tmpl, sizeof restrict_tmpl),
+         };
+         CK_ATTRIBUTE priv[] = {
+             ATTR(CKA_CLASS,                &clPrivate,  sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,             &ktMlKem,    sizeof ktMlKem),
+             ATTR(CKA_PARAMETER_SET,        &psMlKem768, sizeof psMlKem768),
+             ATTR(CKA_TOKEN,                &bFalse,     sizeof bFalse),
+             ATTR(CKA_DECAPSULATE,          &bTrue,      sizeof bTrue),
+             ATTR(CKA_DECAPSULATE_TEMPLATE, restrict_tmpl, sizeof restrict_tmpl),
+         };
+         CK_MECHANISM km = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+         CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+         CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 6, priv, 6, &hPub, &hPriv);
+         r.rv("keygen", rv);
+         if (rv != CKR_OK) return;
+
+         // Did the template survive creation at all? Recorded separately from
+         // enforcement: "stored but not enforced" and "not stored" are
+         // different failures and must not look alike in the report.
+         for (const auto& pr : { std::make_pair("pub", hPub), std::make_pair("priv", hPriv) }) {
+             CK_ATTRIBUTE q = { pr.first[0] == 'p' && pr.first[1] == 'u'
+                                    ? (CK_ATTRIBUTE_TYPE)CKA_ENCAPSULATE_TEMPLATE
+                                    : (CK_ATTRIBUTE_TYPE)CKA_DECAPSULATE_TEMPLATE,
+                                NULL_PTR, 0 };
+             r.rv(std::string(pr.first) + ".template_readback", e.fl->C_GetAttributeValue(s, pr.second, &q, 1));
+         }
+
+         CK_MECHANISM em = { CKM_ML_KEM, NULL_PTR, 0 };
+         CK_BYTE ct[4096]; CK_ULONG ctLen = sizeof ct;
+         CK_OBJECT_HANDLE hEnc = CK_INVALID_HANDLE;
+
+         // (a) SATISFIES the encapsulate template — must succeed.
+         CK_ATTRIBUTE ok_tmpl[] = {
+             ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+             ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+             ATTR(CKA_VALUE_LEN,   &len32,     sizeof len32),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_EXTRACTABLE, &bFalse,    sizeof bFalse),
+         };
+         ctLen = sizeof ct;
+         r.rv("encap.satisfies", e.Encapsulate(s, &em, hPub, ok_tmpl, 5, ct, &ctLen, &hEnc));
+
+         // (b) VIOLATES it — SHALL be CKR_KEY_HANDLE_INVALID.
+         CK_ATTRIBUTE bad_tmpl[] = {
+             ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+             ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+             ATTR(CKA_VALUE_LEN,   &len32,     sizeof len32),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+         };
+         CK_BYTE ct2[4096]; CK_ULONG ct2Len = sizeof ct2;
+         CK_OBJECT_HANDLE hEncBad = CK_INVALID_HANDLE;
+         r.rv("encap.violates", e.Encapsulate(s, &em, hPub, bad_tmpl, 5, ct2, &ct2Len, &hEncBad));
+
+         // (c)/(d) the same pair on the decapsulate side. Needs a real
+         // ciphertext, so it reuses (a)'s.
+         if (ctLen > 0) {
+             CK_OBJECT_HANDLE hDec = CK_INVALID_HANDLE;
+             r.rv("decap.satisfies",
+                  e.Decapsulate(s, &em, hPriv, ok_tmpl, 5, ct, ctLen, &hDec));
+             CK_OBJECT_HANDLE hDecBad = CK_INVALID_HANDLE;
+             // VIOLATES — SHALL be CKR_TEMPLATE_INCONSISTENT, a DIFFERENT code
+             // from the encapsulate side. The specification names them
+             // separately and so does this test.
+             r.rv("decap.violates",
+                  e.Decapsulate(s, &em, hPriv, bad_tmpl, 5, ct, ctLen, &hDecBad));
+         }
+     }});
+
 add({"create.encapsulate.ml_kem_768", "create",
      "C_EncapsulateKey / C_DecapsulateKey ML-KEM-768 — ciphertext shape and both key attribute sets",
      {CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM}, true, true,
