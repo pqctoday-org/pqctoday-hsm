@@ -2394,6 +2394,23 @@ CK_RV SoftHSM::C_UnwrapKey
 			return rv;
 	}
 
+	// C1 (2026-09-06) — §5.18.4: "The CKA_EXTRACTABLE attribute is by default
+	// set to CK_TRUE" for an unwrapped key. P11AttrExtractable::setDefault()
+	// hard-codes CK_FALSE for every creation path, so without this a conforming
+	// caller that omits the attribute silently gets a key it can never wrap or
+	// export again. Scanned over the EFFECTIVE template — the caller's entries
+	// plus anything merged from the unwrapping key's CKA_UNWRAP_TEMPLATE above
+	// — so an explicit CK_FALSE from either source still wins.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	// Create the secret object using C_CreateObject
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, hKey, OBJECT_OP_UNWRAP);
 
@@ -2415,6 +2432,10 @@ CK_RV SoftHSM::C_UnwrapKey
 			// Common Secret Key Attributes
 			bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 			bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+			// C1 — §5.18.4's CK_TRUE default overrides the class-wide CK_FALSE,
+			// unless the effective template asked for something else.
+			if (!extractableSupplied)
+				bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 
 			// Secret Attributes
 			if (objClass == CKO_SECRET_KEY)
@@ -2786,6 +2807,19 @@ CK_RV SoftHSM::C_UnwrapKeyAuthenticated
 	}
 
 	*phKey = CK_INVALID_HANDLE;
+	// C1 (2026-09-06) — §5.18.7 C_UnwrapKeyAuthenticated carries the same
+	// sentence as §5.18.4: "The CKA_EXTRACTABLE attribute is by default set to
+	// CK_TRUE". See the C_UnwrapKey path for the full reasoning.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	CK_RV rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_UNWRAP);
 	if (rv == CKR_OK)
 	{
@@ -2800,6 +2834,10 @@ CK_RV SoftHSM::C_UnwrapKeyAuthenticated
 			bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
 			bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 			bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+			// C1 — §5.18.7's CK_TRUE default overrides the class-wide CK_FALSE,
+			// unless the effective template asked for something else.
+			if (!extractableSupplied)
+				bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 			if (objClass == CKO_SECRET_KEY)
 			{
 				ByteString value;
@@ -7922,7 +7960,7 @@ CK_RV SoftHSM::deriveSymmetric
 				// attributes set to CK_TRUE
 				bool bNeverExtractable = baseKey->getBooleanValue(CKA_NEVER_EXTRACTABLE, false) &&
 										 otherKey->getBooleanValue(CKA_NEVER_EXTRACTABLE, false);
-				bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, bNeverExtractable);
+				bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, bNeverExtractable);
 			}
 			else if (pMechanism->mechanism == CKM_CONCATENATE_BASE_AND_DATA ||
 				 pMechanism->mechanism == CKM_CONCATENATE_DATA_AND_BASE)
