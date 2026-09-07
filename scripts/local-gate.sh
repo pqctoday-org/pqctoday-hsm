@@ -275,8 +275,15 @@ run_step "rust engine cargo test" \
 # them without re-measuring, and do not remove #[ignore] from v21b without
 # first re-measuring its cost; 326s per run would take this step from
 # ~seconds to 5+ minutes for every contributor.
+# `tee /dev/stderr` for the same reason steps 2 and 5 have it, and for one
+# more: without it this step reports "85 passed, 1 failed" and DISCARDS the
+# failing test's name, so a failure here tells you something broke but not
+# what. On 2026-09-07 that gap led to a real failure being explained away with
+# a stored assumption instead of diagnosed — the name was never printed, and
+# the run was not reproducible afterwards. A step that reports a failure it
+# cannot identify invites exactly that.
 run_step "remoting gRPC+REST services + three-transport parity" \
-  "cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+  "cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
    cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}' && \
    cd $AG_CONTAINER_ROOT/remoting && python3 scripts/check_coverage_ledger.py"
 
