@@ -12,6 +12,47 @@ use pqctoday_pkcs11_remote_proto::pkcs11_remote_client::Pkcs11RemoteClient;
 use pqctoday_pkcs11_remote_proto::pkcs11_v32_client::Pkcs11V32Client;
 use tonic::transport::{Channel, Server};
 
+/// Wait until a spawned service is genuinely serving, instead of assuming a
+/// fixed delay is enough.
+///
+/// The four `spawn_*` helpers each used `sleep(50ms)` with the comment "give
+/// the listener a moment to be accept()-ready". That is a timing assumption,
+/// and timing assumptions fail under load: a gate run competing with other
+/// container work can leave the spawned task unscheduled well past 50 ms.
+///
+/// Note the subtlety — `TcpListener::bind` has already bound AND listened, so
+/// the kernel queues an inbound connection in the backlog whether or not the
+/// task has reached `accept()`. A bare TCP connect therefore proves nothing.
+/// What can still lag is the SERVICE: for gRPC the h2 handshake needs the
+/// server task actually polling. So the readiness probe has to be the real
+/// connect, retried.
+///
+/// Prompted by a single unreproduced 85/86 failure in this suite on
+/// 2026-09-07 (six subsequent runs were clean). This is a plausible cause,
+/// NOT a confirmed one — no reproduction was ever obtained. It is committed
+/// because a bounded retry is strictly more robust than a fixed sleep, not
+/// because the flake was diagnosed.
+async fn retry_until_ready<T, F, Fut>(what: &str, mut attempt: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut delay = std::time::Duration::from_millis(5);
+    loop {
+        match attempt().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(e.context(format!("{what} never became ready within 5s")));
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 /// Starts a real `pqc-grpc-pkcs11` service on an ephemeral loopback port
 /// (plaintext h2c — no TLS) and returns a connected client. The server
 /// task is detached; it lives for the test process's lifetime, which is
@@ -25,9 +66,10 @@ pub async fn spawn_grpc() -> Result<Pkcs11RemoteClient<Channel>> {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
         let _ = Server::builder().add_service(server).serve_with_incoming(incoming).await;
     });
-    // Give the listener a moment to be accept()-ready.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let channel = Channel::from_shared(format!("http://{addr}"))?.connect().await?;
+    let channel = retry_until_ready("grpc service", || async move {
+        Ok(Channel::from_shared(format!("http://{addr}"))?.connect().await?)
+    })
+    .await?;
     Ok(Pkcs11RemoteClient::new(channel))
 }
 
@@ -41,7 +83,10 @@ pub async fn spawn_rest() -> Result<String> {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app.into_make_service()).await;
     });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    retry_until_ready("rest service", || async move {
+        Ok(tokio::net::TcpStream::connect(addr).await.map(|_| ())?)
+    })
+    .await?;
     Ok(format!("http://{addr}"))
 }
 
@@ -75,8 +120,10 @@ pub async fn spawn_grpc_v32() -> Result<Pkcs11V32Client<Channel>> {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
         let _ = Server::builder().add_service(v32).serve_with_incoming(incoming).await;
     });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let channel = Channel::from_shared(format!("http://{addr}"))?.connect().await?;
+    let channel = retry_until_ready("grpc v32 service", || async move {
+        Ok(Channel::from_shared(format!("http://{addr}"))?.connect().await?)
+    })
+    .await?;
     Ok(Pkcs11V32Client::new(channel))
 }
 
@@ -89,6 +136,9 @@ pub async fn spawn_rest_v32() -> Result<String> {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app.into_make_service()).await;
     });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    retry_until_ready("rest v32 service", || async move {
+        Ok(tokio::net::TcpStream::connect(addr).await.map(|_| ())?)
+    })
+    .await?;
     Ok(format!("http://{addr}"))
 }

@@ -243,9 +243,15 @@ run_step "kmip known-slow mechanisms (live progress)" \
   "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet --test acvp_roundtrip slh_dsa_sigver_and_siggen -- --nocapture 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed'; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; \
    true"
 
+# The verdict must cover the WHOLE run, not one binary. This step used to end
+# in `cargo test --test policy_op_layer`, which decided the step's exit status:
+# 1032 tests ran, 10 were checked, and a failure in the other 1022 passed
+# silently (the leading `grep … && exit 1` cannot fail under pipefail — see the
+# wasm step's note). Same awk verdict as `kmip cargo test` and `rust engine
+# cargo test`, which were always correct; this one was the odd step out.
 run_step "kmip local-only suites (--include-ignored)" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   RUST_MIN_STACK=134217728 cargo test --quiet --test policy_op_layer -- --include-ignored 2>&1 | grep -E 'test result'"
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
 # tee before each grep below: cargo's own "test X has been running for over
 # 60 seconds" liveness warning survives --quiet but was being discarded by
