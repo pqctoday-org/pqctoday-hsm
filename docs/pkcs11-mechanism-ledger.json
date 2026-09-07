@@ -1,0 +1,2501 @@
+{
+  "$schema_note": "One row per CKM_* in docs/refs/pkcs11t-canonical-v3.2.h, plus one per engine extension advertised outside it. Per engine: 'implemented' (the engine advertises it), 'excluded-by-scope:<key>' (a deliberate product decision, prose in scope_reasons), 'deferred:<plan-ref>' or 'tracked-todo:<id>' (a worklist item — set these BY HAND). scripts/check_pkcs11_mechanism_ledger.py fails the gate when a row disagrees with what the engines actually advertise, in either direction, and when a header mechanism has no row at all.",
+  "generated_by": "scripts/gen_pkcs11_mechanism_ledger.py (plan item X2')",
+  "plan": "docs/remediation-plan-pkcs11-v32-phase2-09072026.md section 5",
+  "sources_of_truth": {
+    "values": "docs/refs/pkcs11t-canonical-v3.2.h",
+    "cpp_advertised": "src/lib/SoftHSM_slots.cpp :: SoftHSM::prepareSupportedMechanisms",
+    "rust_advertised": "rust/src/constants.rs :: SUPPORTED_MECHS"
+  },
+  "counts": {
+    "canonical_header_mechanisms": 473,
+    "cpp_advertised": 166,
+    "rust_advertised": 172,
+    "cpp_only": [],
+    "rust_only_count": 6
+  },
+  "scope_reasons": {
+    "legacy-block-ciphers": "Pre-AES or regional block ciphers (DES/3DES, RC2/RC4/RC5, CAST, IDEA, Blowfish/Twofish, SKIPJACK/BATON/JUNIPER/FORTEZZA, SEED, ARIA, Camellia, GOST 28147). This is a PQC engine with a deliberately narrow symmetric surface: AES and ChaCha20. Adding any of these would widen the attack surface to primitives no current caller should select.",
+    "legacy-hashes": "Superseded hash functions (MD2, RIPEMD-128, FASTHASH, GOST R 34.11). MD5, SHA-1 and RIPEMD-160 ARE present — decision D2, 2026-09-07 — because callers must still verify existing artefacts signed with them; these have no comparable installed base to verify against.",
+    "legacy-signature-and-kex": "DSA, GOST R 34.10 and KEA. Finite-field DSA is withdrawn from FIPS 186-5 for signature generation; GOST is a regional suite this engine does not target; KEA is a withdrawn NSA key-exchange algorithm.",
+    "legacy-rsa-signature": "ISO 9796 and ANSI X9.31 RSA signature encodings. Both are superseded by PKCS#1 v1.5 and PSS, which the engine does implement.",
+    "tpm-1x": "TPM 1.1 RSA blob formats. The repo's TPM work targets TPM 2.0 and does so through its own playground, not through PKCS#11 mechanisms.",
+    "deprecated-alias": "CKM_ECDSA_KEY_PAIR_GEN is the v2.11-era name; PKCS#11 renamed it CKM_EC_KEY_PAIR_GEN and the engines implement it under that name. Advertising both would present one capability as two.",
+    "finite-field-dh": "Finite-field Diffie-Hellman (PKCS#3 and X9.42, including their MQV and hybrid forms). The engine's key agreement is elliptic-curve and PQ/T hybrid; finite-field DH offers no migration path a PQC deployment wants.",
+    "protocol-kdfs-tls": "SSL 3.0 / TLS 1.0-1.2 / WTLS key-block and master-secret derivations. These bind the token to a specific handshake's internals. TLS 1.3 defines no such mechanism, and the engine's TLS integration works through the OpenSSL provider with ordinary key agreement instead.",
+    "password-based": "PKCS#5/PKCS#12 password-based encryption and authentication. CKM_PKCS5_PBKD2 IS implemented — deriving a key from a password is in scope; the PBE_* mechanisms bundle derivation with a legacy cipher (see legacy-block-ciphers) and cannot be adopted without it.",
+    "otp-tokens": "One-time-password token mechanisms (HOTP, ACTI, SecurID). These describe an authentication token product, not a cryptographic service; nothing in this engine, its KMIP server or its policy layer models an OTP credential.",
+    "signal-protocol": "Signal protocol primitives (XEdDSA, X3DH, Double Ratchet). A messaging protocol state machine, not a key-management primitive; the engine has no session-state model to hold a ratchet.",
+    "protocol-kdfs-ike": "IKEv1/IKEv2 PRF and derivation mechanisms. Same reasoning as the TLS KDFs: they encode one protocol's key schedule. The repo's strongSwan integration (strongswan-pkcs11/) uses ordinary key agreement instead.",
+    "blake2b": "The BLAKE2b family (digest, HMAC, key gen, key derivation, at four digest lengths). A well-regarded hash the engine simply does not implement — no standard this repo tracks (FIPS, NIST SP, LAMPS, KMIP 3.0) requires it, and it has no PQC role.",
+    "salsa20-poly1305": "Salsa20 and bare Poly1305. ChaCha20-Poly1305 IS implemented; Salsa20 is its predecessor and bare Poly1305 is the one-time authenticator used outside an AEAD construction, which no caller here needs.",
+    "sha-512-t": "The parameterised SHA-512/t family. The two FIPS 180-4 named instances, SHA-512/224 and SHA-512/256, ARE implemented; CKM_SHA512_T takes an arbitrary truncation length as a parameter, which FIPS 180-4 does not define initial hash values for beyond those two.",
+    "composite-ecdh-aes-wrap": "ECDH-then-AES-key-wrap composites. Both halves are implemented as separate mechanisms (CKM_ECDH1_DERIVE / CKM_ECDH1_COFACTOR_DERIVE and CKM_AES_KEY_WRAP), so a caller can build the composite; the fused mechanism is a convenience this engine does not offer.",
+    "superseded-aes-macs": "CKM_AES_MAC / AES_MAC_GENERAL (CBC-MAC) and AES_XCBC_MAC. CBC-MAC is unsafe for variable-length messages and XCBC-MAC was superseded by CMAC, which IS implemented (CKM_AES_CMAC). CKM_AES_CMAC_GENERAL — the truncated-output form — is the one item in this group with no such objection; it is unimplemented rather than rejected.",
+    "uncommon-aes-modes": "AES-CFB64, AES-CTS and AES_KEY_WRAP_PKCS7. The engine implements the modes its callers and KMIP 3.0 profiles use (ECB/CBC/CTR/GCM/CCM/XTS/OFB/CFB8/CFB128, KW and KWP).",
+    "hash-keyed-key-gen": "CKM_<hash>_KEY_GEN mechanisms, which generate a generic secret key sized for one HMAC. CKM_GENERIC_SECRET_KEY_GEN IS implemented and generates a key of any requested length, which is the same capability without one mechanism per digest.",
+    "hash-key-derivation": "CKM_<hash>_KEY_DERIVATION — single-pass 'hash the base key' derivation. The engine implements the KDFs standards actually specify (HKDF, SP 800-108 counter/feedback/double-pipeline, PBKDF2) plus CKM_SHAKE_256_KEY_DERIVATION for its XOF path.",
+    "kip": "The Key Injection Protocol mechanisms. A vendor key-loading protocol with no published specification this repo can verify an implementation against.",
+    "ecmqv": "CKM_ECMQV_DERIVE. Deliberately declined, and recorded here because THREE separate audits have each re-discovered it as an apparent gap. MQV's security depends on implicit key confirmation the PKCS#11 API cannot express, it is not in FIPS SP 800-56A rev3's approved schemes, and one-pass ECDH covers the deployed use. This row exists so the fourth audit reads a decision instead of filing it again.",
+    "misc-unadopted": "Individually unadopted mechanisms: CKM_NULL (no-op wrap), CKM_XOR_BASE_AND_DATA (superseded by CKM_CONCATENATE_* plus a real KDF), CKM_EXTRACT_KEY_FROM_KEY (bit-slicing a key), CKM_CMS_SIG (embeds CMS structure knowledge in the token), CKM_KEY_WRAP_LYNKS and CKM_KEY_WRAP_SET_OAEP (obsolete wrap formats), and CKM_PUB_KEY_FROM_PRIV_KEY (recovering a public key from a private one, which the engine does internally but does not expose as a mechanism).",
+    "ripemd160-rsa-composite": "CKM_RIPEMD160_RSA_PKCS, the fused RIPEMD-160-then-RSA-PKCS#1-v1.5 signature. Unlike the other exclusions here the underlying primitive IS in scope: both engines implement CKM_RIPEMD160 and its HMACs, for the same reason MD5 and SHA-1 are kept (decision D2) — callers have to verify existing artefacts. A caller who needs this signature can build it with CKM_RIPEMD160 plus CKM_RSA_PKCS, which takes a caller-supplied DigestInfo. The fused mechanism is simply not implemented, and no standard this repo tracks requires it.",
+    "vendor-base": "CKM_VENDOR_DEFINED is the base of the vendor range, not a mechanism. Both engines define vendor mechanisms above it; those appear in this ledger as engine-extension rows."
+  },
+  "rows": {
+    "CKM_ACTI": {
+      "value": "0x000002a0",
+      "cpp": "excluded-by-scope:otp-tokens",
+      "rust": "excluded-by-scope:otp-tokens"
+    },
+    "CKM_ACTI_KEY_GEN": {
+      "value": "0x000002a1",
+      "cpp": "excluded-by-scope:otp-tokens",
+      "rust": "excluded-by-scope:otp-tokens"
+    },
+    "CKM_AES_CBC": {
+      "value": "0x00001082",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_CBC_ENCRYPT_DATA": {
+      "value": "0x00001105",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_CBC_PAD": {
+      "value": "0x00001085",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_CCM": {
+      "value": "0x00001088",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_CFB1": {
+      "value": "0x00002108",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_CFB128": {
+      "value": "0x00002107",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_CFB64": {
+      "value": "0x00002105",
+      "cpp": "excluded-by-scope:uncommon-aes-modes",
+      "rust": "excluded-by-scope:uncommon-aes-modes"
+    },
+    "CKM_AES_CFB8": {
+      "value": "0x00002106",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_CMAC": {
+      "value": "0x0000108a",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_CMAC_GENERAL": {
+      "value": "0x0000108b",
+      "cpp": "excluded-by-scope:superseded-aes-macs",
+      "rust": "excluded-by-scope:superseded-aes-macs"
+    },
+    "CKM_AES_CTR": {
+      "value": "0x00001086",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_CTS": {
+      "value": "0x00001089",
+      "cpp": "excluded-by-scope:uncommon-aes-modes",
+      "rust": "excluded-by-scope:uncommon-aes-modes"
+    },
+    "CKM_AES_ECB": {
+      "value": "0x00001081",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_ECB_ENCRYPT_DATA": {
+      "value": "0x00001104",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_GCM": {
+      "value": "0x00001087",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_GMAC": {
+      "value": "0x0000108e",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_KEY_GEN": {
+      "value": "0x00001080",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_KEY_WRAP": {
+      "value": "0x00002109",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_KEY_WRAP_KWP": {
+      "value": "0x0000210B",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_KEY_WRAP_PAD": {
+      "value": "0x0000210A",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_KEY_WRAP_PKCS7": {
+      "value": "0x0000210C",
+      "cpp": "excluded-by-scope:uncommon-aes-modes",
+      "rust": "excluded-by-scope:uncommon-aes-modes"
+    },
+    "CKM_AES_MAC": {
+      "value": "0x00001083",
+      "cpp": "excluded-by-scope:superseded-aes-macs",
+      "rust": "excluded-by-scope:superseded-aes-macs"
+    },
+    "CKM_AES_MAC_GENERAL": {
+      "value": "0x00001084",
+      "cpp": "excluded-by-scope:superseded-aes-macs",
+      "rust": "excluded-by-scope:superseded-aes-macs"
+    },
+    "CKM_AES_OFB": {
+      "value": "0x00002104",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_XCBC_MAC": {
+      "value": "0x0000108c",
+      "cpp": "excluded-by-scope:superseded-aes-macs",
+      "rust": "excluded-by-scope:superseded-aes-macs"
+    },
+    "CKM_AES_XCBC_MAC_96": {
+      "value": "0x0000108d",
+      "cpp": "excluded-by-scope:superseded-aes-macs",
+      "rust": "excluded-by-scope:superseded-aes-macs"
+    },
+    "CKM_AES_XTS": {
+      "value": "0x00001071",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_AES_XTS_KEY_GEN": {
+      "value": "0x00001072",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ARIA_CBC": {
+      "value": "0x00000562",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_ARIA_CBC_ENCRYPT_DATA": {
+      "value": "0x00000567",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_ARIA_CBC_PAD": {
+      "value": "0x00000565",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_ARIA_ECB": {
+      "value": "0x00000561",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_ARIA_ECB_ENCRYPT_DATA": {
+      "value": "0x00000566",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_ARIA_KEY_GEN": {
+      "value": "0x00000560",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_ARIA_MAC": {
+      "value": "0x00000563",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_ARIA_MAC_GENERAL": {
+      "value": "0x00000564",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_BATON_CBC128": {
+      "value": "0x00001033",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_BATON_COUNTER": {
+      "value": "0x00001034",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_BATON_ECB128": {
+      "value": "0x00001031",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_BATON_ECB96": {
+      "value": "0x00001032",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_BATON_KEY_GEN": {
+      "value": "0x00001030",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_BATON_SHUFFLE": {
+      "value": "0x00001035",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_BATON_WRAP": {
+      "value": "0x00001036",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_BLAKE2B_160": {
+      "value": "0x0000400c",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_160_HMAC": {
+      "value": "0x0000400d",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_160_HMAC_GENERAL": {
+      "value": "0x0000400e",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_160_KEY_DERIVE": {
+      "value": "0x0000400f",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_160_KEY_GEN": {
+      "value": "0x00004010",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_256": {
+      "value": "0x00004011",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_256_HMAC": {
+      "value": "0x00004012",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_256_HMAC_GENERAL": {
+      "value": "0x00004013",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_256_KEY_DERIVE": {
+      "value": "0x00004014",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_256_KEY_GEN": {
+      "value": "0x00004015",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_384": {
+      "value": "0x00004016",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_384_HMAC": {
+      "value": "0x00004017",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_384_HMAC_GENERAL": {
+      "value": "0x00004018",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_384_KEY_DERIVE": {
+      "value": "0x00004019",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_384_KEY_GEN": {
+      "value": "0x0000401a",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_512": {
+      "value": "0x0000401b",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_512_HMAC": {
+      "value": "0x0000401c",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_512_HMAC_GENERAL": {
+      "value": "0x0000401d",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_512_KEY_DERIVE": {
+      "value": "0x0000401e",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLAKE2B_512_KEY_GEN": {
+      "value": "0x0000401f",
+      "cpp": "excluded-by-scope:blake2b",
+      "rust": "excluded-by-scope:blake2b"
+    },
+    "CKM_BLOWFISH_CBC": {
+      "value": "0x00001091",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_BLOWFISH_CBC_PAD": {
+      "value": "0x00001094",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_BLOWFISH_KEY_GEN": {
+      "value": "0x00001090",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAMELLIA_CBC": {
+      "value": "0x00000552",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAMELLIA_CBC_ENCRYPT_DATA": {
+      "value": "0x00000557",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAMELLIA_CBC_PAD": {
+      "value": "0x00000555",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAMELLIA_CTR": {
+      "value": "0x00000558",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAMELLIA_ECB": {
+      "value": "0x00000551",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAMELLIA_ECB_ENCRYPT_DATA": {
+      "value": "0x00000556",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAMELLIA_KEY_GEN": {
+      "value": "0x00000550",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAMELLIA_MAC": {
+      "value": "0x00000553",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAMELLIA_MAC_GENERAL": {
+      "value": "0x00000554",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST128_CBC": {
+      "value": "0x00000322",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST128_CBC_PAD": {
+      "value": "0x00000325",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST128_ECB": {
+      "value": "0x00000321",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST128_KEY_GEN": {
+      "value": "0x00000320",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST128_MAC": {
+      "value": "0x00000323",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST128_MAC_GENERAL": {
+      "value": "0x00000324",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST3_CBC": {
+      "value": "0x00000312",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST3_CBC_PAD": {
+      "value": "0x00000315",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST3_ECB": {
+      "value": "0x00000311",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST3_KEY_GEN": {
+      "value": "0x00000310",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST3_MAC": {
+      "value": "0x00000313",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST3_MAC_GENERAL": {
+      "value": "0x00000314",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST5_CBC": {
+      "value": "0x00000322",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST5_CBC_PAD": {
+      "value": "0x00000325",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST5_ECB": {
+      "value": "0x00000321",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST5_KEY_GEN": {
+      "value": "0x00000320",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST5_MAC": {
+      "value": "0x00000323",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST5_MAC_GENERAL": {
+      "value": "0x00000324",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST_CBC": {
+      "value": "0x00000302",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST_CBC_PAD": {
+      "value": "0x00000305",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST_ECB": {
+      "value": "0x00000301",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST_KEY_GEN": {
+      "value": "0x00000300",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST_MAC": {
+      "value": "0x00000303",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CAST_MAC_GENERAL": {
+      "value": "0x00000304",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CDMF_CBC": {
+      "value": "0x00000142",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CDMF_CBC_PAD": {
+      "value": "0x00000145",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CDMF_ECB": {
+      "value": "0x00000141",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CDMF_KEY_GEN": {
+      "value": "0x00000140",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CDMF_MAC": {
+      "value": "0x00000143",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CDMF_MAC_GENERAL": {
+      "value": "0x00000144",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_CHACHA20": {
+      "value": "0x00001226",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_CHACHA20_KEY_GEN": {
+      "value": "0x00001225",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_CHACHA20_POLY1305": {
+      "value": "0x00004021",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_CMS_SIG": {
+      "value": "0x00000500",
+      "cpp": "excluded-by-scope:misc-unadopted",
+      "rust": "excluded-by-scope:misc-unadopted"
+    },
+    "CKM_CONCATENATE_BASE_AND_DATA": {
+      "value": "0x00000362",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_CONCATENATE_BASE_AND_KEY": {
+      "value": "0x00000360",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_CONCATENATE_DATA_AND_BASE": {
+      "value": "0x00000363",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_DES2_KEY_GEN": {
+      "value": "0x00000130",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES3_CBC": {
+      "value": "0x00000133",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES3_CBC_ENCRYPT_DATA": {
+      "value": "0x00001103",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES3_CBC_PAD": {
+      "value": "0x00000136",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES3_CMAC": {
+      "value": "0x00000138",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES3_CMAC_GENERAL": {
+      "value": "0x00000137",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES3_ECB": {
+      "value": "0x00000132",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES3_ECB_ENCRYPT_DATA": {
+      "value": "0x00001102",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES3_KEY_GEN": {
+      "value": "0x00000131",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES3_MAC": {
+      "value": "0x00000134",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES3_MAC_GENERAL": {
+      "value": "0x00000135",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_CBC": {
+      "value": "0x00000122",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_CBC_ENCRYPT_DATA": {
+      "value": "0x00001101",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_CBC_PAD": {
+      "value": "0x00000125",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_CFB64": {
+      "value": "0x00000152",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_CFB8": {
+      "value": "0x00000153",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_ECB": {
+      "value": "0x00000121",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_ECB_ENCRYPT_DATA": {
+      "value": "0x00001100",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_KEY_GEN": {
+      "value": "0x00000120",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_MAC": {
+      "value": "0x00000123",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_MAC_GENERAL": {
+      "value": "0x00000124",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_OFB64": {
+      "value": "0x00000150",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DES_OFB8": {
+      "value": "0x00000151",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_DH_PKCS_DERIVE": {
+      "value": "0x00000021",
+      "cpp": "excluded-by-scope:finite-field-dh",
+      "rust": "excluded-by-scope:finite-field-dh"
+    },
+    "CKM_DH_PKCS_KEY_PAIR_GEN": {
+      "value": "0x00000020",
+      "cpp": "excluded-by-scope:finite-field-dh",
+      "rust": "excluded-by-scope:finite-field-dh"
+    },
+    "CKM_DH_PKCS_PARAMETER_GEN": {
+      "value": "0x00002001",
+      "cpp": "excluded-by-scope:finite-field-dh",
+      "rust": "excluded-by-scope:finite-field-dh"
+    },
+    "CKM_DSA": {
+      "value": "0x00000011",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_FIPS_G_GEN": {
+      "value": "0x00002005",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_KEY_PAIR_GEN": {
+      "value": "0x00000010",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_PARAMETER_GEN": {
+      "value": "0x00002000",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_PROBABILISTIC_PARAMETER_GEN": {
+      "value": "0x00002003",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_SHA1": {
+      "value": "0x00000012",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_SHA224": {
+      "value": "0x00000013",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_SHA256": {
+      "value": "0x00000014",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_SHA384": {
+      "value": "0x00000015",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_SHA3_224": {
+      "value": "0x00000018",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_SHA3_256": {
+      "value": "0x00000019",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_SHA3_384": {
+      "value": "0x0000001a",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_SHA3_512": {
+      "value": "0x0000001b",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_SHA512": {
+      "value": "0x00000016",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_DSA_SHAWE_TAYLOR_PARAMETER_GEN": {
+      "value": "0x00002004",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_ECDH1_COFACTOR_DERIVE": {
+      "value": "0x00001051",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECDH1_DERIVE": {
+      "value": "0x00001050",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECDH_AES_KEY_WRAP": {
+      "value": "0x00001053",
+      "cpp": "excluded-by-scope:composite-ecdh-aes-wrap",
+      "rust": "excluded-by-scope:composite-ecdh-aes-wrap"
+    },
+    "CKM_ECDH_COF_AES_KEY_WRAP": {
+      "value": "0x00004039",
+      "cpp": "excluded-by-scope:composite-ecdh-aes-wrap",
+      "rust": "excluded-by-scope:composite-ecdh-aes-wrap"
+    },
+    "CKM_ECDH_X_AES_KEY_WRAP": {
+      "value": "0x00004038",
+      "cpp": "excluded-by-scope:composite-ecdh-aes-wrap",
+      "rust": "excluded-by-scope:composite-ecdh-aes-wrap"
+    },
+    "CKM_ECDSA": {
+      "value": "0x00001041",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECDSA_KEY_PAIR_GEN": {
+      "value": "0x00001040",
+      "cpp": "excluded-by-scope:deprecated-alias",
+      "rust": "excluded-by-scope:deprecated-alias"
+    },
+    "CKM_ECDSA_SHA1": {
+      "value": "0x00001042",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECDSA_SHA224": {
+      "value": "0x00001043",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECDSA_SHA256": {
+      "value": "0x00001044",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECDSA_SHA384": {
+      "value": "0x00001045",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECDSA_SHA3_224": {
+      "value": "0x00001047",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECDSA_SHA3_256": {
+      "value": "0x00001048",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECDSA_SHA3_384": {
+      "value": "0x00001049",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECDSA_SHA3_512": {
+      "value": "0x0000104a",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECDSA_SHA512": {
+      "value": "0x00001046",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ECMQV_DERIVE": {
+      "value": "0x00001052",
+      "cpp": "excluded-by-scope:ecmqv",
+      "rust": "excluded-by-scope:ecmqv"
+    },
+    "CKM_EC_EDWARDS_KEY_PAIR_GEN": {
+      "value": "0x00001055",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_EC_KEY_PAIR_GEN": {
+      "value": "0x00001040",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS": {
+      "value": "0x0000140b",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_EC_MONTGOMERY_KEY_PAIR_GEN": {
+      "value": "0x00001056",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_EDDSA": {
+      "value": "0x00001057",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_EXTRACT_KEY_FROM_KEY": {
+      "value": "0x00000365",
+      "cpp": "excluded-by-scope:misc-unadopted",
+      "rust": "excluded-by-scope:misc-unadopted"
+    },
+    "CKM_FASTHASH": {
+      "value": "0x00001070",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_FORTEZZA_TIMESTAMP": {
+      "value": "0x00001020",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_GENERIC_SECRET_KEY_GEN": {
+      "value": "0x00000350",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_GOST28147": {
+      "value": "0x00001222",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_GOST28147_ECB": {
+      "value": "0x00001221",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_GOST28147_KEY_GEN": {
+      "value": "0x00001220",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_GOST28147_KEY_WRAP": {
+      "value": "0x00001224",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_GOST28147_MAC": {
+      "value": "0x00001223",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_GOSTR3410": {
+      "value": "0x00001201",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_GOSTR3410_DERIVE": {
+      "value": "0x00001204",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_GOSTR3410_KEY_PAIR_GEN": {
+      "value": "0x00001200",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_GOSTR3410_KEY_WRAP": {
+      "value": "0x00001203",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_GOSTR3410_WITH_GOSTR3411": {
+      "value": "0x00001202",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_GOSTR3411": {
+      "value": "0x00001210",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_GOSTR3411_HMAC": {
+      "value": "0x00001211",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_HASH_ML_DSA": {
+      "value": "0x0000001f",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_ML_DSA_SHA224": {
+      "value": "0x00000023",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_ML_DSA_SHA256": {
+      "value": "0x00000024",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_ML_DSA_SHA384": {
+      "value": "0x00000025",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_ML_DSA_SHA3_224": {
+      "value": "0x00000027",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_ML_DSA_SHA3_256": {
+      "value": "0x00000028",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_ML_DSA_SHA3_384": {
+      "value": "0x00000029",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_ML_DSA_SHA3_512": {
+      "value": "0x0000002a",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_ML_DSA_SHA512": {
+      "value": "0x00000026",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_ML_DSA_SHAKE128": {
+      "value": "0x0000002b",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_ML_DSA_SHAKE256": {
+      "value": "0x0000002c",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_SLH_DSA": {
+      "value": "0x00000034",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_SLH_DSA_SHA224": {
+      "value": "0x00000036",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_SLH_DSA_SHA256": {
+      "value": "0x00000037",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_SLH_DSA_SHA384": {
+      "value": "0x00000038",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_SLH_DSA_SHA3_224": {
+      "value": "0x0000003a",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_SLH_DSA_SHA3_256": {
+      "value": "0x0000003b",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_SLH_DSA_SHA3_384": {
+      "value": "0x0000003c",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_SLH_DSA_SHA3_512": {
+      "value": "0x0000003d",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_SLH_DSA_SHA512": {
+      "value": "0x00000039",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_SLH_DSA_SHAKE128": {
+      "value": "0x0000003e",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HASH_SLH_DSA_SHAKE256": {
+      "value": "0x0000003f",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HKDF_DATA": {
+      "value": "0x0000402b",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HKDF_DERIVE": {
+      "value": "0x0000402a",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HKDF_KEY_GEN": {
+      "value": "0x0000402c",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_HOTP": {
+      "value": "0x00000291",
+      "cpp": "excluded-by-scope:otp-tokens",
+      "rust": "excluded-by-scope:otp-tokens"
+    },
+    "CKM_HOTP_KEY_GEN": {
+      "value": "0x00000290",
+      "cpp": "excluded-by-scope:otp-tokens",
+      "rust": "excluded-by-scope:otp-tokens"
+    },
+    "CKM_HSS": {
+      "value": "0x00004033",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_HSS_KEY_PAIR_GEN": {
+      "value": "0x00004032",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_IDEA_CBC": {
+      "value": "0x00000342",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_IDEA_CBC_PAD": {
+      "value": "0x00000345",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_IDEA_ECB": {
+      "value": "0x00000341",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_IDEA_KEY_GEN": {
+      "value": "0x00000340",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_IDEA_MAC": {
+      "value": "0x00000343",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_IDEA_MAC_GENERAL": {
+      "value": "0x00000344",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_IKE1_EXTENDED_DERIVE": {
+      "value": "0x00004031",
+      "cpp": "excluded-by-scope:protocol-kdfs-ike",
+      "rust": "excluded-by-scope:protocol-kdfs-ike"
+    },
+    "CKM_IKE1_PRF_DERIVE": {
+      "value": "0x00004030",
+      "cpp": "excluded-by-scope:protocol-kdfs-ike",
+      "rust": "excluded-by-scope:protocol-kdfs-ike"
+    },
+    "CKM_IKE2_PRF_PLUS_DERIVE": {
+      "value": "0x0000402e",
+      "cpp": "excluded-by-scope:protocol-kdfs-ike",
+      "rust": "excluded-by-scope:protocol-kdfs-ike"
+    },
+    "CKM_IKE_PRF_DERIVE": {
+      "value": "0x0000402f",
+      "cpp": "excluded-by-scope:protocol-kdfs-ike",
+      "rust": "excluded-by-scope:protocol-kdfs-ike"
+    },
+    "CKM_JUNIPER_CBC128": {
+      "value": "0x00001062",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_JUNIPER_COUNTER": {
+      "value": "0x00001063",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_JUNIPER_ECB128": {
+      "value": "0x00001061",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_JUNIPER_KEY_GEN": {
+      "value": "0x00001060",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_JUNIPER_SHUFFLE": {
+      "value": "0x00001064",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_JUNIPER_WRAP": {
+      "value": "0x00001065",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_KEA_DERIVE": {
+      "value": "0x00001012",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_KEA_KEY_DERIVE": {
+      "value": "0x00001011",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_KEA_KEY_PAIR_GEN": {
+      "value": "0x00001010",
+      "cpp": "excluded-by-scope:legacy-signature-and-kex",
+      "rust": "excluded-by-scope:legacy-signature-and-kex"
+    },
+    "CKM_KEY_WRAP_LYNKS": {
+      "value": "0x00000400",
+      "cpp": "excluded-by-scope:misc-unadopted",
+      "rust": "excluded-by-scope:misc-unadopted"
+    },
+    "CKM_KEY_WRAP_SET_OAEP": {
+      "value": "0x00000401",
+      "cpp": "excluded-by-scope:misc-unadopted",
+      "rust": "excluded-by-scope:misc-unadopted"
+    },
+    "CKM_KIP_DERIVE": {
+      "value": "0x00000510",
+      "cpp": "excluded-by-scope:kip",
+      "rust": "excluded-by-scope:kip"
+    },
+    "CKM_KIP_MAC": {
+      "value": "0x00000512",
+      "cpp": "excluded-by-scope:kip",
+      "rust": "excluded-by-scope:kip"
+    },
+    "CKM_KIP_WRAP": {
+      "value": "0x00000511",
+      "cpp": "excluded-by-scope:kip",
+      "rust": "excluded-by-scope:kip"
+    },
+    "CKM_MD2": {
+      "value": "0x00000200",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_MD2_HMAC": {
+      "value": "0x00000201",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_MD2_HMAC_GENERAL": {
+      "value": "0x00000202",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_MD2_KEY_DERIVATION": {
+      "value": "0x00000391",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_MD2_RSA_PKCS": {
+      "value": "0x00000004",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_MD5": {
+      "value": "0x00000210",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_MD5_HMAC": {
+      "value": "0x00000211",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_MD5_HMAC_GENERAL": {
+      "value": "0x00000212",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_MD5_KEY_DERIVATION": {
+      "value": "0x00000390",
+      "cpp": "excluded-by-scope:hash-key-derivation",
+      "rust": "excluded-by-scope:hash-key-derivation"
+    },
+    "CKM_MD5_RSA_PKCS": {
+      "value": "0x00000005",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ML_DSA": {
+      "value": "0x0000001d",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ML_DSA_KEY_PAIR_GEN": {
+      "value": "0x0000001c",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ML_KEM": {
+      "value": "0x00000017",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_ML_KEM_KEY_PAIR_GEN": {
+      "value": "0x0000000f",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_NULL": {
+      "value": "0x0000400b",
+      "cpp": "excluded-by-scope:misc-unadopted",
+      "rust": "excluded-by-scope:misc-unadopted"
+    },
+    "CKM_PBA_SHA1_WITH_SHA1_HMAC": {
+      "value": "0x000003c0",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_MD2_DES_CBC": {
+      "value": "0x000003a0",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_MD5_CAST128_CBC": {
+      "value": "0x000003a4",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_MD5_CAST3_CBC": {
+      "value": "0x000003a3",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_MD5_CAST5_CBC": {
+      "value": "0x000003a4",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_MD5_CAST_CBC": {
+      "value": "0x000003a2",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_MD5_DES_CBC": {
+      "value": "0x000003a1",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_SHA1_CAST128_CBC": {
+      "value": "0x000003a5",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_SHA1_CAST5_CBC": {
+      "value": "0x000003a5",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_SHA1_DES2_EDE_CBC": {
+      "value": "0x000003a9",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_SHA1_DES3_EDE_CBC": {
+      "value": "0x000003a8",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_SHA1_RC2_128_CBC": {
+      "value": "0x000003aa",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_SHA1_RC2_40_CBC": {
+      "value": "0x000003ab",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_SHA1_RC4_128": {
+      "value": "0x000003a6",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PBE_SHA1_RC4_40": {
+      "value": "0x000003a7",
+      "cpp": "excluded-by-scope:password-based",
+      "rust": "excluded-by-scope:password-based"
+    },
+    "CKM_PKCS5_PBKD2": {
+      "value": "0x000003b0",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_POLY1305": {
+      "value": "0x00001228",
+      "cpp": "excluded-by-scope:salsa20-poly1305",
+      "rust": "excluded-by-scope:salsa20-poly1305"
+    },
+    "CKM_POLY1305_KEY_GEN": {
+      "value": "0x00001227",
+      "cpp": "excluded-by-scope:salsa20-poly1305",
+      "rust": "excluded-by-scope:salsa20-poly1305"
+    },
+    "CKM_PUB_KEY_FROM_PRIV_KEY": {
+      "value": "0x0000403a",
+      "cpp": "excluded-by-scope:misc-unadopted",
+      "rust": "excluded-by-scope:misc-unadopted"
+    },
+    "CKM_RC2_CBC": {
+      "value": "0x00000102",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC2_CBC_PAD": {
+      "value": "0x00000105",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC2_ECB": {
+      "value": "0x00000101",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC2_KEY_GEN": {
+      "value": "0x00000100",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC2_MAC": {
+      "value": "0x00000103",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC2_MAC_GENERAL": {
+      "value": "0x00000104",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC4": {
+      "value": "0x00000111",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC4_KEY_GEN": {
+      "value": "0x00000110",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC5_CBC": {
+      "value": "0x00000332",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC5_CBC_PAD": {
+      "value": "0x00000335",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC5_ECB": {
+      "value": "0x00000331",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC5_KEY_GEN": {
+      "value": "0x00000330",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC5_MAC": {
+      "value": "0x00000333",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RC5_MAC_GENERAL": {
+      "value": "0x00000334",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_RIPEMD128": {
+      "value": "0x00000230",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_RIPEMD128_HMAC": {
+      "value": "0x00000231",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_RIPEMD128_HMAC_GENERAL": {
+      "value": "0x00000232",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_RIPEMD128_RSA_PKCS": {
+      "value": "0x00000007",
+      "cpp": "excluded-by-scope:legacy-hashes",
+      "rust": "excluded-by-scope:legacy-hashes"
+    },
+    "CKM_RIPEMD160": {
+      "value": "0x00000240",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_RIPEMD160_HMAC": {
+      "value": "0x00000241",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_RIPEMD160_HMAC_GENERAL": {
+      "value": "0x00000242",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_RIPEMD160_RSA_PKCS": {
+      "value": "0x00000008",
+      "cpp": "excluded-by-scope:ripemd160-rsa-composite",
+      "rust": "excluded-by-scope:ripemd160-rsa-composite"
+    },
+    "CKM_RSA_9796": {
+      "value": "0x00000002",
+      "cpp": "excluded-by-scope:legacy-rsa-signature",
+      "rust": "excluded-by-scope:legacy-rsa-signature"
+    },
+    "CKM_RSA_AES_KEY_WRAP": {
+      "value": "0x00001054",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_RSA_PKCS": {
+      "value": "0x00000001",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_RSA_PKCS_KEY_PAIR_GEN": {
+      "value": "0x00000000",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_RSA_PKCS_OAEP": {
+      "value": "0x00000009",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_RSA_PKCS_OAEP_TPM_1_1": {
+      "value": "0x00004002",
+      "cpp": "excluded-by-scope:tpm-1x",
+      "rust": "excluded-by-scope:tpm-1x"
+    },
+    "CKM_RSA_PKCS_PSS": {
+      "value": "0x0000000d",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_RSA_PKCS_TPM_1_1": {
+      "value": "0x00004001",
+      "cpp": "excluded-by-scope:tpm-1x",
+      "rust": "excluded-by-scope:tpm-1x"
+    },
+    "CKM_RSA_X9_31": {
+      "value": "0x0000000b",
+      "cpp": "excluded-by-scope:legacy-rsa-signature",
+      "rust": "excluded-by-scope:legacy-rsa-signature"
+    },
+    "CKM_RSA_X9_31_KEY_PAIR_GEN": {
+      "value": "0x0000000a",
+      "cpp": "excluded-by-scope:legacy-rsa-signature",
+      "rust": "excluded-by-scope:legacy-rsa-signature"
+    },
+    "CKM_RSA_X_509": {
+      "value": "0x00000003",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SALSA20": {
+      "value": "0x00004020",
+      "cpp": "excluded-by-scope:salsa20-poly1305",
+      "rust": "excluded-by-scope:salsa20-poly1305"
+    },
+    "CKM_SALSA20_KEY_GEN": {
+      "value": "0x0000402d",
+      "cpp": "excluded-by-scope:salsa20-poly1305",
+      "rust": "excluded-by-scope:salsa20-poly1305"
+    },
+    "CKM_SALSA20_POLY1305": {
+      "value": "0x00004022",
+      "cpp": "excluded-by-scope:salsa20-poly1305",
+      "rust": "excluded-by-scope:salsa20-poly1305"
+    },
+    "CKM_SECURID": {
+      "value": "0x00000282",
+      "cpp": "excluded-by-scope:otp-tokens",
+      "rust": "excluded-by-scope:otp-tokens"
+    },
+    "CKM_SECURID_KEY_GEN": {
+      "value": "0x00000280",
+      "cpp": "excluded-by-scope:otp-tokens",
+      "rust": "excluded-by-scope:otp-tokens"
+    },
+    "CKM_SEED_CBC": {
+      "value": "0x00000652",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SEED_CBC_ENCRYPT_DATA": {
+      "value": "0x00000657",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SEED_CBC_PAD": {
+      "value": "0x00000655",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SEED_ECB": {
+      "value": "0x00000651",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SEED_ECB_ENCRYPT_DATA": {
+      "value": "0x00000656",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SEED_KEY_GEN": {
+      "value": "0x00000650",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SEED_MAC": {
+      "value": "0x00000653",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SEED_MAC_GENERAL": {
+      "value": "0x00000654",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SHA1_KEY_DERIVATION": {
+      "value": "0x00000392",
+      "cpp": "excluded-by-scope:hash-key-derivation",
+      "rust": "excluded-by-scope:hash-key-derivation"
+    },
+    "CKM_SHA1_RSA_PKCS": {
+      "value": "0x00000006",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA1_RSA_PKCS_PSS": {
+      "value": "0x0000000e",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA1_RSA_X9_31": {
+      "value": "0x0000000c",
+      "cpp": "excluded-by-scope:legacy-rsa-signature",
+      "rust": "excluded-by-scope:legacy-rsa-signature"
+    },
+    "CKM_SHA224": {
+      "value": "0x00000255",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA224_HMAC": {
+      "value": "0x00000256",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA224_HMAC_GENERAL": {
+      "value": "0x00000257",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA224_KEY_DERIVATION": {
+      "value": "0x00000396",
+      "cpp": "excluded-by-scope:hash-key-derivation",
+      "rust": "excluded-by-scope:hash-key-derivation"
+    },
+    "CKM_SHA224_KEY_GEN": {
+      "value": "0x00004004",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_SHA224_RSA_PKCS": {
+      "value": "0x00000046",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA224_RSA_PKCS_PSS": {
+      "value": "0x00000047",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA256": {
+      "value": "0x00000250",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA256_HMAC": {
+      "value": "0x00000251",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA256_HMAC_GENERAL": {
+      "value": "0x00000252",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA256_KEY_DERIVATION": {
+      "value": "0x00000393",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA256_KEY_GEN": {
+      "value": "0x00004005",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_SHA256_RSA_PKCS": {
+      "value": "0x00000040",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA256_RSA_PKCS_PSS": {
+      "value": "0x00000043",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA384": {
+      "value": "0x00000260",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA384_HMAC": {
+      "value": "0x00000261",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA384_HMAC_GENERAL": {
+      "value": "0x00000262",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA384_KEY_DERIVATION": {
+      "value": "0x00000394",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA384_KEY_GEN": {
+      "value": "0x00004006",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_SHA384_RSA_PKCS": {
+      "value": "0x00000041",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA384_RSA_PKCS_PSS": {
+      "value": "0x00000044",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_224": {
+      "value": "0x000002b5",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_224_HMAC": {
+      "value": "0x000002b6",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_224_HMAC_GENERAL": {
+      "value": "0x000002b7",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_224_KEY_DERIVATION": {
+      "value": "0x00000398",
+      "cpp": "excluded-by-scope:hash-key-derivation",
+      "rust": "excluded-by-scope:hash-key-derivation"
+    },
+    "CKM_SHA3_224_KEY_GEN": {
+      "value": "0x000002b8",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_SHA3_224_RSA_PKCS": {
+      "value": "0x00000066",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_224_RSA_PKCS_PSS": {
+      "value": "0x00000067",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_256": {
+      "value": "0x000002b0",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_256_HMAC": {
+      "value": "0x000002b1",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_256_HMAC_GENERAL": {
+      "value": "0x000002b2",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_256_KEY_DERIVATION": {
+      "value": "0x00000397",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_256_KEY_GEN": {
+      "value": "0x000002b3",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_SHA3_256_RSA_PKCS": {
+      "value": "0x00000060",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_256_RSA_PKCS_PSS": {
+      "value": "0x00000063",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_384": {
+      "value": "0x000002c0",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_384_HMAC": {
+      "value": "0x000002c1",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_384_HMAC_GENERAL": {
+      "value": "0x000002c2",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_384_KEY_DERIVATION": {
+      "value": "0x00000399",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_384_KEY_GEN": {
+      "value": "0x000002c3",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_SHA3_384_RSA_PKCS": {
+      "value": "0x00000061",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_384_RSA_PKCS_PSS": {
+      "value": "0x00000064",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_512": {
+      "value": "0x000002d0",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_512_HMAC": {
+      "value": "0x000002d1",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_512_HMAC_GENERAL": {
+      "value": "0x000002d2",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_512_KEY_DERIVATION": {
+      "value": "0x0000039a",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_512_KEY_GEN": {
+      "value": "0x000002d3",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_SHA3_512_RSA_PKCS": {
+      "value": "0x00000062",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA3_512_RSA_PKCS_PSS": {
+      "value": "0x00000065",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512": {
+      "value": "0x00000270",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_224": {
+      "value": "0x00000048",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_224_HMAC": {
+      "value": "0x00000049",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_224_HMAC_GENERAL": {
+      "value": "0x0000004a",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_224_KEY_DERIVATION": {
+      "value": "0x0000004b",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_224_KEY_GEN": {
+      "value": "0x00004008",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_SHA512_256": {
+      "value": "0x0000004c",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_256_HMAC": {
+      "value": "0x0000004d",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_256_HMAC_GENERAL": {
+      "value": "0x0000004e",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_256_KEY_DERIVATION": {
+      "value": "0x0000004f",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_256_KEY_GEN": {
+      "value": "0x00004009",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_SHA512_HMAC": {
+      "value": "0x00000271",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_HMAC_GENERAL": {
+      "value": "0x00000272",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_KEY_DERIVATION": {
+      "value": "0x00000395",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_KEY_GEN": {
+      "value": "0x00004007",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_SHA512_RSA_PKCS": {
+      "value": "0x00000042",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_RSA_PKCS_PSS": {
+      "value": "0x00000045",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA512_T": {
+      "value": "0x00000050",
+      "cpp": "excluded-by-scope:sha-512-t",
+      "rust": "excluded-by-scope:sha-512-t"
+    },
+    "CKM_SHA512_T_HMAC": {
+      "value": "0x00000051",
+      "cpp": "excluded-by-scope:sha-512-t",
+      "rust": "excluded-by-scope:sha-512-t"
+    },
+    "CKM_SHA512_T_HMAC_GENERAL": {
+      "value": "0x00000052",
+      "cpp": "excluded-by-scope:sha-512-t",
+      "rust": "excluded-by-scope:sha-512-t"
+    },
+    "CKM_SHA512_T_KEY_DERIVATION": {
+      "value": "0x00000053",
+      "cpp": "excluded-by-scope:sha-512-t",
+      "rust": "excluded-by-scope:sha-512-t"
+    },
+    "CKM_SHA512_T_KEY_GEN": {
+      "value": "0x0000400a",
+      "cpp": "excluded-by-scope:sha-512-t",
+      "rust": "excluded-by-scope:sha-512-t"
+    },
+    "CKM_SHAKE_128_KEY_DERIVATION": {
+      "value": "0x0000039b",
+      "cpp": "excluded-by-scope:hash-key-derivation",
+      "rust": "excluded-by-scope:hash-key-derivation"
+    },
+    "CKM_SHAKE_256_KEY_DERIVATION": {
+      "value": "0x0000039c",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA_1": {
+      "value": "0x00000220",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA_1_HMAC": {
+      "value": "0x00000221",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA_1_HMAC_GENERAL": {
+      "value": "0x00000222",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SHA_1_KEY_GEN": {
+      "value": "0x00004003",
+      "cpp": "excluded-by-scope:hash-keyed-key-gen",
+      "rust": "excluded-by-scope:hash-keyed-key-gen"
+    },
+    "CKM_SKIPJACK_CBC64": {
+      "value": "0x00001002",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SKIPJACK_CFB16": {
+      "value": "0x00001006",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SKIPJACK_CFB32": {
+      "value": "0x00001005",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SKIPJACK_CFB64": {
+      "value": "0x00001004",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SKIPJACK_CFB8": {
+      "value": "0x00001007",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SKIPJACK_ECB64": {
+      "value": "0x00001001",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SKIPJACK_KEY_GEN": {
+      "value": "0x00001000",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SKIPJACK_OFB64": {
+      "value": "0x00001003",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SKIPJACK_PRIVATE_WRAP": {
+      "value": "0x00001009",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SKIPJACK_RELAYX": {
+      "value": "0x0000100a",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SKIPJACK_WRAP": {
+      "value": "0x00001008",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_SLH_DSA": {
+      "value": "0x0000002e",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SLH_DSA_KEY_PAIR_GEN": {
+      "value": "0x0000002d",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SP800_108_COUNTER_KDF": {
+      "value": "0x000003ac",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SP800_108_DOUBLE_PIPELINE_KDF": {
+      "value": "0x000003ae",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SP800_108_FEEDBACK_KDF": {
+      "value": "0x000003ad",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_SSL3_KEY_AND_MAC_DERIVE": {
+      "value": "0x00000372",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_SSL3_MASTER_KEY_DERIVE": {
+      "value": "0x00000371",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_SSL3_MASTER_KEY_DERIVE_DH": {
+      "value": "0x00000373",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_SSL3_MD5_MAC": {
+      "value": "0x00000380",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_SSL3_PRE_MASTER_KEY_GEN": {
+      "value": "0x00000370",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_SSL3_SHA1_MAC": {
+      "value": "0x00000381",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS10_MAC_CLIENT": {
+      "value": "0x000003d7",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS10_MAC_SERVER": {
+      "value": "0x000003d6",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE": {
+      "value": "0x00000056",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS12_EXTENDED_MASTER_KEY_DERIVE_DH": {
+      "value": "0x00000057",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS12_KDF": {
+      "value": "0x000003d9",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS12_KEY_AND_MAC_DERIVE": {
+      "value": "0x000003e1",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS12_KEY_SAFE_DERIVE": {
+      "value": "0x000003e3",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS12_MAC": {
+      "value": "0x000003d8",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS12_MASTER_KEY_DERIVE": {
+      "value": "0x000003e0",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS12_MASTER_KEY_DERIVE_DH": {
+      "value": "0x000003e2",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS_KDF": {
+      "value": "0x000003e5",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS_KEY_AND_MAC_DERIVE": {
+      "value": "0x00000376",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS_MAC": {
+      "value": "0x000003e4",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS_MASTER_KEY_DERIVE": {
+      "value": "0x00000375",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS_MASTER_KEY_DERIVE_DH": {
+      "value": "0x00000377",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS_PRE_MASTER_KEY_GEN": {
+      "value": "0x00000374",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TLS_PRF": {
+      "value": "0x00000378",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_TWOFISH_CBC": {
+      "value": "0x00001093",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_TWOFISH_CBC_PAD": {
+      "value": "0x00001095",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_TWOFISH_KEY_GEN": {
+      "value": "0x00001092",
+      "cpp": "excluded-by-scope:legacy-block-ciphers",
+      "rust": "excluded-by-scope:legacy-block-ciphers"
+    },
+    "CKM_VENDOR_DEFINED": {
+      "value": "0x80000000",
+      "cpp": "excluded-by-scope:vendor-base",
+      "rust": "excluded-by-scope:vendor-base"
+    },
+    "CKM_WTLS_CLIENT_KEY_AND_MAC_DERIVE": {
+      "value": "0x000003d5",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_WTLS_MASTER_KEY_DERIVE": {
+      "value": "0x000003d1",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_WTLS_MASTER_KEY_DERIVE_DH_ECC": {
+      "value": "0x000003d2",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_WTLS_PRE_MASTER_KEY_GEN": {
+      "value": "0x000003d0",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_WTLS_PRF": {
+      "value": "0x000003d3",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_WTLS_SERVER_KEY_AND_MAC_DERIVE": {
+      "value": "0x000003d4",
+      "cpp": "excluded-by-scope:protocol-kdfs-tls",
+      "rust": "excluded-by-scope:protocol-kdfs-tls"
+    },
+    "CKM_X2RATCHET_DECRYPT": {
+      "value": "0x00004028",
+      "cpp": "excluded-by-scope:signal-protocol",
+      "rust": "excluded-by-scope:signal-protocol"
+    },
+    "CKM_X2RATCHET_ENCRYPT": {
+      "value": "0x00004027",
+      "cpp": "excluded-by-scope:signal-protocol",
+      "rust": "excluded-by-scope:signal-protocol"
+    },
+    "CKM_X2RATCHET_INITIALIZE": {
+      "value": "0x00004025",
+      "cpp": "excluded-by-scope:signal-protocol",
+      "rust": "excluded-by-scope:signal-protocol"
+    },
+    "CKM_X2RATCHET_RESPOND": {
+      "value": "0x00004026",
+      "cpp": "excluded-by-scope:signal-protocol",
+      "rust": "excluded-by-scope:signal-protocol"
+    },
+    "CKM_X3DH_INITIALIZE": {
+      "value": "0x00004023",
+      "cpp": "excluded-by-scope:signal-protocol",
+      "rust": "excluded-by-scope:signal-protocol"
+    },
+    "CKM_X3DH_RESPOND": {
+      "value": "0x00004024",
+      "cpp": "excluded-by-scope:signal-protocol",
+      "rust": "excluded-by-scope:signal-protocol"
+    },
+    "CKM_X9_42_DH_DERIVE": {
+      "value": "0x00000031",
+      "cpp": "excluded-by-scope:finite-field-dh",
+      "rust": "excluded-by-scope:finite-field-dh"
+    },
+    "CKM_X9_42_DH_HYBRID_DERIVE": {
+      "value": "0x00000032",
+      "cpp": "excluded-by-scope:finite-field-dh",
+      "rust": "excluded-by-scope:finite-field-dh"
+    },
+    "CKM_X9_42_DH_KEY_PAIR_GEN": {
+      "value": "0x00000030",
+      "cpp": "excluded-by-scope:finite-field-dh",
+      "rust": "excluded-by-scope:finite-field-dh"
+    },
+    "CKM_X9_42_DH_PARAMETER_GEN": {
+      "value": "0x00002002",
+      "cpp": "excluded-by-scope:finite-field-dh",
+      "rust": "excluded-by-scope:finite-field-dh"
+    },
+    "CKM_X9_42_MQV_DERIVE": {
+      "value": "0x00000033",
+      "cpp": "excluded-by-scope:finite-field-dh",
+      "rust": "excluded-by-scope:finite-field-dh"
+    },
+    "CKM_XEDDSA": {
+      "value": "0x00004029",
+      "cpp": "excluded-by-scope:signal-protocol",
+      "rust": "excluded-by-scope:signal-protocol"
+    },
+    "CKM_XMSS": {
+      "value": "0x00004036",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_XMSSMT": {
+      "value": "0x00004037",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_XMSSMT_KEY_PAIR_GEN": {
+      "value": "0x00004035",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_XMSS_KEY_PAIR_GEN": {
+      "value": "0x00004034",
+      "cpp": "implemented",
+      "rust": "implemented"
+    },
+    "CKM_XOR_BASE_AND_DATA": {
+      "value": "0x00000364",
+      "cpp": "excluded-by-scope:misc-unadopted",
+      "rust": "excluded-by-scope:misc-unadopted"
+    },
+    "CKM_BIP32_CHILD_DERIVE": {
+      "value": "engine-extension",
+      "cpp": "implemented",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_BIP32_MASTER_DERIVE": {
+      "value": "engine-extension",
+      "cpp": "implemented",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_EC_MONTGOMERY_KEY_DERIVE": {
+      "value": "engine-extension",
+      "cpp": "not-advertised",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_EDDSA_PH": {
+      "value": "engine-extension",
+      "cpp": "implemented",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_KECCAK_256": {
+      "value": "engine-extension",
+      "cpp": "not-advertised",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_KMAC_128": {
+      "value": "engine-extension",
+      "cpp": "implemented",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_KMAC_256": {
+      "value": "engine-extension",
+      "cpp": "implemented",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_ML_DSA_EXTERNAL_MU": {
+      "value": "engine-extension",
+      "cpp": "implemented",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_ML_DSA_EXTERNAL_MU_GEN": {
+      "value": "engine-extension",
+      "cpp": "implemented",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE": {
+      "value": "engine-extension",
+      "cpp": "not-advertised",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN": {
+      "value": "engine-extension",
+      "cpp": "not-advertised",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_PQCTODAY_FRODOKEM_ENCAPSULATE": {
+      "value": "engine-extension",
+      "cpp": "not-advertised",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN": {
+      "value": "engine-extension",
+      "cpp": "not-advertised",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_X25519": {
+      "value": "engine-extension",
+      "cpp": "implemented",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    },
+    "CKM_X448": {
+      "value": "engine-extension",
+      "cpp": "implemented",
+      "rust": "implemented",
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+    }
+  }
+}

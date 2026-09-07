@@ -7,6 +7,7 @@
 # before you push — GitHub is not a test platform.
 #
 # What it runs (in order; each step must pass):
+#   0. PKCS#11 mechanism ledger (per-CKM_*, both engines, static)
 #   1. kmip  cargo test                       — ~600 unit + integration tests
 #   2. kmip  cargo test -- --include-ignored  — the local-only suites CI skips
 #                                               (op-layer policy conformance …)
@@ -225,6 +226,16 @@ run_step_host "gate self-check (every step can fail)" \
 
 run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
   "cd $ROOT && python3 scripts/check_acvp_provenance.py"
+
+# X2' (2026-09-07): per-CKM_* ledger of what each engine implements, checked
+# against the two source files that BUILD the advertised lists — no engine is
+# built or run, so it costs nothing and can sit up front with the other pure
+# checks. Catches a mechanism added to an engine with no recorded decision, a
+# ledger row that overstates, and a new header mechanism with no row at all —
+# none of which the differential harness can see, because exceptions.json's
+# LEGAL-MECHANISM-SET excuses `mech*` wholesale.
+run_step_host "PKCS#11 mechanism ledger (per-CKM_*, both engines)" \
+  "cd $ROOT && python3 scripts/check_pkcs11_mechanism_ledger.py"
 
 ensure_container
 
