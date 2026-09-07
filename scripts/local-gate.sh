@@ -233,8 +233,12 @@ run_step "kmip cargo test" \
 # eprintln! lines cargo otherwise captures and discards on a passing test;
 # `tee /dev/stderr` preserves them in the gate log (which redirects both
 # stdout+stderr) while still letting grep see the stream for fail-detection.
+# The trailing `true` made this step unfailable for the same pipefail reason
+# documented on the wasm step below — a failing cargo run left the `&& exit 1`
+# unreached and `true` reported success. Verdict now comes from cargo's own
+# status (PIPESTATUS[0]); the grep still exists only to surface the line.
 run_step "kmip known-slow mechanisms (live progress)" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet --test acvp_roundtrip slh_dsa_sigver_and_siggen -- --nocapture 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet --test acvp_roundtrip slh_dsa_sigver_and_siggen -- --nocapture 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed'; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; \
    true"
 
 run_step "kmip local-only suites (--include-ignored)" \
@@ -293,8 +297,15 @@ run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
 # without a cfg gate, the whole gate went green, and the breakage was found days
 # later when someone tried to rebuild the bundle. A type-check is cheap; a full
 # wasm build is not, so this checks rather than builds.
+# `cmd | grep ... && exit 1` CANNOT fail once dexec sets pipefail: when the
+# real command errors, the PIPELINE's status is that error (not grep's 0), so
+# `&&` short-circuits and `exit 1` never runs — control falls to the statement
+# after the `;`, which reports success. Found 2026-09-07: this step printed two
+# E0063 errors and then "wasm32 type-check clean ✓" in the same breath, letting
+# a genuinely broken wasm crate through. Take the verdict from the compiler's
+# own status via PIPESTATUS[0] instead; grep stays purely for display.
 run_step "wasm target still compiles (cargo check)" \
-  "cd $AG_CONTAINER_ROOT/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6 && exit 1; echo '  wasm32 type-check clean'"
+  "cd $AG_CONTAINER_ROOT/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; echo '  wasm32 type-check clean'"
 
 # wasm smoke runs on the HOST (node lives there, not in the Rust container).
 # Runs the STAGED bundle — see the check above for why that is not sufficient on
