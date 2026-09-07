@@ -216,3 +216,37 @@ Before proposing a push: `bash scripts/local-gate.sh --cpp --javajce --openssl-p
 | **D-4** | Record the upstream list in the repo; sending stays the user's call | No draft message |
 
 Two decisions went against my recommendation (D-2, D-3). Both are recorded as the user's call and implemented as decided; the reasoning I offered against each stays above, unedited, so a later reader sees the trade-off that was accepted rather than a plan rewritten to look unanimous.
+
+
+---
+
+## 16. Correction — §0.1's "live divergence" does not exist, and §2 is a no-op
+
+**§0.1 is wrong.** I claimed the engines disagreed about multi-part ML-DSA, on the strength of `CKM_ML_DSA` being absent from Rust's `sign_mech_supports_multipart`. It is not absent — it is at `ffi.rs:12774`, alongside `CKM_ML_DSA_EXTERNAL_MU`, `CKM_SLH_DSA` and `CKM_EDDSA`. My `awk` window stopped at line 12762, twelve lines short, and I reported the truncation as a finding.
+
+The scenario was written first anyway, which is what caught it. Measured on both engines, every step returns `CKR_OK` and the signatures verify:
+
+| | C++ | Rust |
+|---|---|---|
+| `ml_dsa_65` update ×3 → final → verify | `CKR_OK`, sig 3309 B | `CKR_OK`, sig 3309 B |
+| `slh_dsa` update ×3 → final → verify | `CKR_OK`, sig 7856 B | `CKR_OK`, sig 7856 B |
+
+**§2 (ML-DSA multi-part) is therefore already done on both engines. No work.**
+
+### And the apparent SLH-DSA defect is not one either
+
+The dump showed both engines permitting multi-part *signing* for bare `CKM_SLH_DSA`, which the sweep had reported as "single-part only" in both spec versions. Checked before asserting a defect — and the sweep's summary was imprecise. **v3.2's own footnote** for that row (`/tmp/p11os.txt:16946`) reads:
+
+> "Verification is only for single part verifications or multipart verifications when the `C_VerifySignatureInit` interface is used"
+
+That is **identical to v3.3's**, and it restricts **verification**, not signing. Multi-part signing is unrestricted in both versions. Both engines are conformant; nothing to fix.
+
+This does sharpen §3: the HSS/XMSS wording genuinely *did* change (v3.2 "Single-part operations only" → v3.3's `C_VerifySignatureInit` clause), so that item stands as decided. SLH-DSA never had the restriction the sweep attributed to it.
+
+### What the scenario bought
+
+No defect, but real coverage: multi-part signing for PQC mechanisms was previously untested on either engine, and is now compared across 21 observations. Harness: **67 scenarios / 12,094 observations / 0 uncovered**.
+
+### The lesson, again
+
+This is the third time in this programme that a conclusion drawn from reading *about* the code or the spec — rather than measuring — was wrong. The verification standard already says "read the engines before reasoning from spec text alone". It now needs a companion: **when a grep defines the finding, show the whole range.** A truncated window is indistinguishable from an absence.

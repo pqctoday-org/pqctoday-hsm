@@ -26,6 +26,7 @@ static CK_KEY_TYPE ktMont     = CKK_EC_MONTGOMERY;
 static CK_KEY_TYPE ktRsa      = CKK_RSA;
 static CK_KEY_TYPE ktMlDsa    = CKK_ML_DSA;
 static CK_KEY_TYPE ktMlKem    = CKK_ML_KEM;
+static CK_KEY_TYPE ktSlhDsa   = CKK_SLH_DSA;
 
 static CK_BYTE kLabel[] = "p11diff";
 static CK_BYTE kId[]    = {0xd1, 0xff};
@@ -1958,6 +1959,98 @@ add({"create.generate_key_pair.ml_dsa_all_params", "create",
                  ATTR(CKA_EXTRACTABLE,   &bTrue,     sizeof bTrue),
              };
              gen_pair(e, r, s, std::string("gen_") + p.name, CKM_ML_DSA_KEY_PAIR_GEN, pub, 5, priv, 7);
+         }
+     }});
+
+add({"sign.multipart_pqc", "sign",
+     "Multi-part sign (C_SignUpdate/C_SignFinal) for ML-DSA and SLH-DSA — the surface no scenario reached",
+     {CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         // 2026-09-07. Added BEFORE changing either engine, deliberately.
+         //
+         // Nothing here exercised multi-part signing for ANY PQC mechanism,
+         // and the two engines already disagree: C++ sets bAllowMultiPartOp
+         // = true for CKM_ML_DSA (SoftHSM_sign.cpp:1144, :2852) while Rust
+         // omits it from sign_mech_supports_multipart (ffi.rs:12716), so
+         // C_SignUpdate answers CKR_OPERATION_NOT_INITIALIZED. Under v3.2
+         // ("single-part operations only") C++ is the non-conformant one;
+         // under the v3.3 draft, which drops that restriction for ML-DSA
+         // but KEEPS it for SLH-DSA, Rust is.
+         //
+         // The scenario records the disagreement rather than asserting an
+         // outcome, so the fix is measured against an observation that
+         // already exists.
+         //
+         // SLH-DSA is included as the CONTROL: v3.3 keeps its single-part
+         // restriction, so it must refuse multi-part on both engines. A
+         // test that only covered ML-DSA could not tell "multi-part was
+         // enabled for the right mechanism" from "multi-part was enabled
+         // for everything".
+         struct Case { const char* tag; CK_MECHANISM_TYPE kg; CK_MECHANISM_TYPE sign;
+                       CK_KEY_TYPE kt; CK_ULONG ps; };
+         const Case cases[] = {
+             {"ml_dsa_65",  CKM_ML_DSA_KEY_PAIR_GEN,  CKM_ML_DSA,  ktMlDsa,  2},
+             {"slh_dsa",    CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, ktSlhDsa, psSlhSha2128s},
+         };
+         for (const Case& c : cases) {
+             if (!e.mechs.count(c.kg) || !e.mechs.count(c.sign)) {
+                 r.put(std::string(c.tag) + ".mech", "ABSENT");
+                 continue;
+             }
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&c.ps, sizeof c.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,        &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&c.ps, sizeof c.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+             };
+             CK_MECHANISM km = { c.kg, NULL_PTR, 0 };
+             CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+             CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 5, &hPub, &hPriv);
+             r.rv(std::string(c.tag) + ".keygen", rv);
+             if (rv != CKR_OK) continue;
+
+             CK_MECHANISM sm = { c.sign, NULL_PTR, 0 };
+             r.rv(std::string(c.tag) + ".sign_init", e.fl->C_SignInit(s, &sm, hPriv));
+
+             // Three chunks whose concatenation is kPlain32, so the result is
+             // directly comparable with a single-part signature over the same
+             // bytes. Splitting unevenly (10/10/12) would catch an engine that
+             // only handles equal-sized parts.
+             CK_RV u1 = e.fl->C_SignUpdate(s, (CK_BYTE_PTR)kPlain32,      10);
+             CK_RV u2 = e.fl->C_SignUpdate(s, (CK_BYTE_PTR)kPlain32 + 10, 10);
+             CK_RV u3 = e.fl->C_SignUpdate(s, (CK_BYTE_PTR)kPlain32 + 20, 12);
+             r.rv(std::string(c.tag) + ".update1", u1);
+             r.rv(std::string(c.tag) + ".update2", u2);
+             r.rv(std::string(c.tag) + ".update3", u3);
+
+             CK_BYTE sig[16384]; CK_ULONG slen = sizeof sig;
+             CK_RV fin = e.fl->C_SignFinal(s, sig, &slen);
+             r.rv(std::string(c.tag) + ".sign_final", fin);
+             if (fin != CKR_OK) {
+                 // Refusal is a legitimate outcome (and the required one for
+                 // SLH-DSA). Terminate cleanly so the next case starts fresh.
+                 CK_MECHANISM cancel = { c.sign, NULL_PTR, 0 };
+                 (void)cancel;
+                 continue;
+             }
+             r.num(std::string(c.tag) + ".sig_len", slen);
+
+             // The signature must VERIFY against the whole message. Recording
+             // only that C_SignFinal returned CKR_OK would pass on an engine
+             // that accumulated the parts wrongly — ML-DSA is randomised, so
+             // the bytes cannot be compared against a single-part signature
+             // directly; verification is the only sound check.
+             r.rv(std::string(c.tag) + ".verify_init", e.fl->C_VerifyInit(s, &sm, hPub));
+             r.rv(std::string(c.tag) + ".verify",
+                  e.fl->C_Verify(s, (CK_BYTE_PTR)kPlain32, sizeof kPlain32, sig, slen));
          }
      }});
 
