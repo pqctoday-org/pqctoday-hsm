@@ -286,22 +286,69 @@ pub enum QueryFunction {
     QueryApplicationNamespaces = 0x04,
     QueryProfiles           = 0x0a,
     QueryCapabilities       = 0x0b,
+    // ── G5 (2026-09-06): the nine §11.x functions this server could not
+    // even NAME. An unrecognised code made `query_function_from_code`
+    // return None, which the decoder turned into `UnknownEnum` — failing
+    // the WHOLE message, not just the unsupported function. §6.1.47 says
+    // "For each Query Function specified in the request, the corresponding
+    // items SHALL be returned in the response"; refusing everything else
+    // in the batch was never that.
+    QueryExtensionList             = 0x05,
+    QueryExtensionMap              = 0x06,
+    QueryAttestationTypes          = 0x07,
+    QueryRngs                      = 0x08,
+    QueryValidations               = 0x09,
+    QueryClientRegistrationMethods = 0x0c,
+    QueryDefaultsInformation       = 0x0d,
+    QueryStorageProtectionMasks    = 0x0e,
+    QueryCredentialInformation     = 0x0f,
+}
+
+/// §7.14 `Extension Information` — describes one vendor extension:
+/// its name, its tag codepoint, and the item type its value carries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtensionInformation {
+    pub extension_name: String,
+    /// The `0x54xxxx` tag itself (§11.58 reserves that range for extensions).
+    pub extension_tag: u32,
+    /// TTLV item type of the extension's value, as a §11.25 codepoint.
+    pub extension_type: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryResponse {
     pub operations: Option<Vec<Operation>>,
+    /// §7.14 `Extension Information` — one entry per vendor extension this
+    /// server implements (G5). Until 2026-09-06 the two Query functions that
+    /// ask for this could not be decoded at all, so a conformant client had
+    /// no way to discover the server's extensions; they had to be read out of
+    /// this repository's source.
+    pub extension_information: Option<Vec<ExtensionInformation>>,
+    /// §11.5 Attestation Types the server supports (empty = none).
+    pub attestation_types: Option<Vec<u32>>,
+    /// §4.52 RNG parameters — reported as RNG Algorithm codepoints.
+    pub rng_parameters: Option<Vec<u32>>,
+    /// §7.42 Validation Information (a server MAY return none).
+    pub validation_information: Option<Vec<String>>,
+    /// §11.10 Client Registration Methods.
+    pub client_registration_methods: Option<Vec<u32>>,
+    /// §12.3 Protection Storage Masks the server can honour.
+    pub storage_protection_masks: Option<Vec<u32>>,
+    /// §9.9 Credential Types that can actually authenticate.
+    pub credential_information: Option<Vec<u32>>,
+    /// §7.12 Defaults Information.
+    pub defaults_information: Option<Vec<String>>,
     pub object_types: Option<Vec<ObjectType>>,
-    /// Top-level child of Query Response Payload per KMIP 3.0 §6.1.39
+    /// Top-level child of Query Response Payload per KMIP 3.0 §6.1.47
     /// (NOT a child of `ServerInformation`). Value-variable per
     /// `kmip-profiles-v3.0` §4.1 Response Variations item 5.
     pub vendor_identification: Option<String>,
-    /// Vendor-extensible structure per §6.1.39. Contents are variable
+    /// Vendor-extensible structure per §6.1.47. Contents are variable
     /// per `kmip-profiles-v3.0` §4.1 Response Variations item 8 — the
     /// comparator skips its interior shape.
     pub server_info: Option<ServerInformation>,
     /// Zero or more `Application Namespace` TextStrings per KMIP 3.0
-    /// §6.1.39 — surfaced when the client passes
+    /// §6.1.47 — surfaced when the client passes
     /// `QueryFunction::QueryApplicationNamespaces`. Values are variable
     /// per §4.1.1 item 14.
     pub application_namespaces: Option<Vec<String>>,
@@ -625,7 +672,7 @@ pub struct EncryptRequest {
     pub data: Vec<u8>,
     /// IV (AES-GCM) or other per-op input. None for ML-KEM.
     pub iv: Option<Vec<u8>>,
-    /// KMIP 3.0 §6.1.21 — per-call override for the key's stored
+    /// KMIP 3.0 §6.1.23 — per-call override for the key's stored
     /// `CryptographicParameters`. When the client supplies
     /// `BlockCipherMode` here, it takes precedence over whatever was
     /// stored at Register/Create time.
@@ -634,14 +681,14 @@ pub struct EncryptRequest {
     /// AAD ("associated data") for AEAD ciphers (AES-GCM, ChaCha20-
     /// Poly1305). Bound into the auth tag computation, NOT encrypted.
     pub aad: Option<Vec<u8>>,
-    /// KMIP 3.0 §6.1.21 multi-part streaming — `Init Indicator` opens a
+    /// KMIP 3.0 §6.1.23 multi-part streaming — `Init Indicator` opens a
     /// stream: the server returns a `Correlation Value` instead of
     /// finalising. CS-BC-M-GCM-3 pins the GCM streaming flow.
     pub init_indicator: Option<bool>,
-    /// §6.1.21 — `Final Indicator` closes the stream identified by
+    /// §6.1.23 — `Final Indicator` closes the stream identified by
     /// `correlation_value`; the response carries the AEAD tag.
     pub final_indicator: Option<bool>,
-    /// §6.1.21 — server-issued handle chaining the parts of one stream.
+    /// §6.1.23 — server-issued handle chaining the parts of one stream.
     pub correlation_value: Option<Vec<u8>>,
 }
 
@@ -661,12 +708,12 @@ pub struct EncryptResponse {
     /// mechanism produces a separate tag — for non-AEAD modes (ECB /
     /// CBC / CBC_PAD) this is `None`.
     pub authenticated_encryption_tag: Option<Vec<u8>>,
-    /// KMIP 3.0 §6.1.21 — the IV/Counter/Nonce the server generated when
+    /// KMIP 3.0 §6.1.23 — the IV/Counter/Nonce the server generated when
     /// the key's `CryptographicParameters.RandomIV` was true. Echoed
     /// back so the client can use it for the subsequent Decrypt.
     /// `None` when the client supplied the IV (or the mech is keyless).
     pub iv_counter_nonce: Option<Vec<u8>>,
-    /// §6.1.21 streaming — echoed on every non-final part so the client
+    /// §6.1.23 streaming — echoed on every non-final part so the client
     /// can chain the next request. `None` for single-part ops and on
     /// the final part.
     pub correlation_value: Option<Vec<u8>>,
@@ -698,13 +745,28 @@ pub struct DecryptRequest {
     /// encapsulation bytes.
     pub data: Vec<u8>,
     pub iv: Option<Vec<u8>>,
-    /// KMIP 3.0 §6.1.21 — per-call override for the key's stored
+    /// KMIP 3.0 §6.1.23 — per-call override for the key's stored
     /// `CryptographicParameters`. See [`EncryptRequest`].
     pub cryptographic_parameters: Option<CryptographicParameters>,
     /// KMIP 3.0 §11 `Authenticated Encryption Additional Data`. See
     /// [`EncryptRequest::aad`]. MUST be byte-equal to the value passed
     /// at encryption time or the AEAD tag check will fail.
     pub aad: Option<Vec<u8>>,
+
+    // ── §6.1.16 multi-part (G6, 2026-09-06) ──────────────────────────────
+    //
+    // These three existed on `EncryptRequest` but not here, and the Decrypt
+    // decoder dropped the tags. A client doing a multi-part Decrypt was
+    // therefore answered as though every part were a whole message: each
+    // chunk decrypted independently, `Success`, and WRONG plaintext. The
+    // shared `Deps::streams` map and the engine's `CipherDirection` already
+    // supported the decrypt direction; only this side was missing.
+    /// Opens a stream. The response carries the `Correlation Value`.
+    pub init_indicator: Option<bool>,
+    /// Closes a stream — the last part; the response carries no handle.
+    pub final_indicator: Option<bool>,
+    /// Server-issued stream handle, echoed on every continuation part.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -713,6 +775,9 @@ pub struct DecryptResponse {
     /// For classical decrypt: the plaintext. For ML-KEM decapsulation: the
     /// derived shared secret.
     pub data: Vec<u8>,
+    /// §6.1.16 multi-part — present on the opening and middle parts, absent
+    /// on the final one. Mirrors `EncryptResponse::correlation_value`.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 // ── Encapsulate / Decapsulate (KMIP 3.0 CSD02, PQC Updates) ──────────────────
@@ -799,6 +864,12 @@ pub struct SignRequest {
     /// §6.1.60 — when present, overrides the object's stored
     /// `CryptographicParameters` attribute for this op.
     pub cryptographic_parameters: Option<CryptographicParameters>,
+    // ── §6.1.62 multi-part (R3) — `Init Indicator` opens a stream,
+    // `Correlation Value` chains the parts, `Final Indicator` closes it and
+    // produces the result. Absent on a single-shot request.
+    pub init_indicator: Option<bool>,
+    pub final_indicator: Option<bool>,
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -813,6 +884,10 @@ pub struct SignResponse {
     /// (no-rekey) path. Internal-only: never encoded onto the wire (see
     /// `wire.rs::encode_sign_resp`, which reads only `uid` + `signature`).
     pub rekeyed: Option<SignRekeyInfo>,
+    /// §6.1.62 streaming — server-issued handle echoed on every non-final
+    /// part so the client can chain the next one. Absent on the final part
+    /// and on a single-shot response.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 /// See [`SignResponse::rekeyed`].
@@ -836,12 +911,22 @@ pub struct SignatureVerifyRequest {
     /// absent, the server falls back to the object's stored
     /// `CryptographicParameters` attribute.
     pub cryptographic_parameters: Option<CryptographicParameters>,
+    // ── §6.1.63 multi-part (R3) — `Init Indicator` opens a stream,
+    // `Correlation Value` chains the parts, `Final Indicator` closes it and
+    // produces the result. Absent on a single-shot request.
+    pub init_indicator: Option<bool>,
+    pub final_indicator: Option<bool>,
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignatureVerifyResponse {
     pub uid: String,
     pub validity: SignatureValidity,
+    /// §6.1.63 streaming — server-issued handle echoed on every non-final
+    /// part so the client can chain the next one. Absent on the final part
+    /// and on a single-shot response.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -965,7 +1050,7 @@ pub struct ReCertifyResponse {
 
 // ── Group B: attribute family (KMIP 3.0 §6.1) ──────────────────────────────
 
-/// `GetAttributes` (§6.1.21) — read named attributes from one managed
+/// `GetAttributes` (§6.1.26) — read named attributes from one managed
 /// object. An empty `attribute_references` list means "all attributes".
 #[derive(Clone, Debug, PartialEq)]
 pub struct GetAttributesRequest {
@@ -1297,6 +1382,12 @@ pub struct MacRequest {
     pub cryptographic_parameters: Option<CryptographicParameters>,
     /// Wire tag `Data` (0x4200c2). Required for single-part.
     pub data: Vec<u8>,
+    // ── §6.1.38 multi-part (R3) — `Init Indicator` opens a stream,
+    // `Correlation Value` chains the parts, `Final Indicator` closes it and
+    // produces the result. Absent on a single-shot request.
+    pub init_indicator: Option<bool>,
+    pub final_indicator: Option<bool>,
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1304,6 +1395,10 @@ pub struct MacResponse {
     pub uid: String,
     /// Wire tag `MAC Data` (0x4200c6).
     pub mac_data: Vec<u8>,
+    /// §6.1.38 streaming — server-issued handle echoed on every non-final
+    /// part so the client can chain the next one. Absent on the final part
+    /// and on a single-shot response.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 /// `MACVerify` (KMIP 3.0 §6.1.39) — verify a previously computed MAC.
@@ -1316,12 +1411,22 @@ pub struct MacVerifyRequest {
     pub data: Vec<u8>,
     /// Wire tag `MAC Data` (0x4200c6). The MAC bytes to verify.
     pub mac_data: Vec<u8>,
+    // ── §6.1.39 multi-part (R3) — `Init Indicator` opens a stream,
+    // `Correlation Value` chains the parts, `Final Indicator` closes it and
+    // produces the result. Absent on a single-shot request.
+    pub init_indicator: Option<bool>,
+    pub final_indicator: Option<bool>,
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MacVerifyResponse {
     pub uid: String,
     pub validity: SignatureValidity,
+    /// §6.1.39 streaming — server-issued handle echoed on every non-final
+    /// part so the client can chain the next one. Absent on the final part
+    /// and on a single-shot response.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 /// `Hash` (KMIP 3.0 §6.1.30) — keyless cryptographic hash. The
@@ -1333,11 +1438,21 @@ pub struct HashRequest {
     pub cryptographic_parameters: CryptographicParameters,
     /// REQUIRED for single-part.
     pub data: Vec<u8>,
+    // ── §6.1.30 multi-part (R3) — `Init Indicator` opens a stream,
+    // `Correlation Value` chains the parts, `Final Indicator` closes it and
+    // produces the result. Absent on a single-shot request.
+    pub init_indicator: Option<bool>,
+    pub final_indicator: Option<bool>,
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct HashResponse {
     pub data: Vec<u8>,
+    /// §6.1.30 streaming — server-issued handle echoed on every non-final
+    /// part so the client can chain the next one. Absent on the final part
+    /// and on a single-shot response.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 /// `Cryptographic Parameters` (KMIP 3.0 §11) — Structure holding the
@@ -1516,18 +1631,34 @@ pub struct DeactivateResponse {
     pub uid: String,
 }
 
-/// `Deactivation Reason Code` Enumeration. Codepoints from the spec
-/// extract (`enums.Deactivation Reason Code`). Mirrors the structure
-/// of `Revocation Reason Code` per §3.x.
+/// `Deactivation Reason Code` Enumeration — KMIP 3.0 §11.14.
+///
+/// **Corrected 2026-09-06 (G8).** These names previously mirrored
+/// `Revocation Reason Code` (KeyCompromise / CACompromise /
+/// AffiliationChanged / Superseded / CessationOfOperation /
+/// PrivilegeWithdrawn), which is a DIFFERENT enumeration. §11.14 defines
+/// exactly four values, and they mean something else entirely at the same
+/// codepoints: `0x02` is "Deactivation Date", not "Key Compromise".
+///
+/// Nothing branched on the old names — the code was passed straight through
+/// to the record — so no stored data changes meaning. But any caller reading
+/// `KeyCompromise` off a Deactivate was being told the opposite of what the
+/// client sent, and `0x05`–`0x07` were accepted despite not existing in this
+/// enumeration at all.
+///
+/// Compromise IS expressible: it belongs to `Revoke` (§6.1.51) with
+/// `Revocation Reason Code`, which is a separate operation and enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeactivationReason {
-    Unspecified           = 0x01,
-    KeyCompromise         = 0x02,
-    CACompromise          = 0x03,
-    AffiliationChanged    = 0x04,
-    Superseded            = 0x05,
-    CessationOfOperation  = 0x06,
-    PrivilegeWithdrawn    = 0x07,
+    /// No reason given.
+    Unspecified     = 0x01,
+    /// The object's own `Deactivation Date` (§4.20) was reached.
+    DeactivationDate = 0x02,
+    /// The object's `Protect Stop Date` (§4.47) was reached — §4.67
+    /// transition 6.
+    ProtectStopDate = 0x03,
+    /// A `Usage Limits` (§4.69) count was exhausted.
+    UsageLimit      = 0x04,
 }
 
 impl DeactivationReason {
@@ -1537,12 +1668,13 @@ impl DeactivationReason {
     pub const fn from_wire_value(v: u32) -> Option<Self> {
         match v {
             0x01 => Some(Self::Unspecified),
-            0x02 => Some(Self::KeyCompromise),
-            0x03 => Some(Self::CACompromise),
-            0x04 => Some(Self::AffiliationChanged),
-            0x05 => Some(Self::Superseded),
-            0x06 => Some(Self::CessationOfOperation),
-            0x07 => Some(Self::PrivilegeWithdrawn),
+            0x02 => Some(Self::DeactivationDate),
+            0x03 => Some(Self::ProtectStopDate),
+            0x04 => Some(Self::UsageLimit),
+            // 0x05-0x07 were accepted here as Superseded /
+            // CessationOfOperation / PrivilegeWithdrawn. They are
+            // Revocation Reason codes; §11.14 has no such values, so they
+            // are refused rather than silently reinterpreted.
             _ => None,
         }
     }
@@ -1810,6 +1942,9 @@ pub struct ExportResponse {
 pub enum InteropFunction {
     Begin = 0x01,
     End   = 0x02,
+    /// §11.24 — "Resets the server to the state it would be in at the
+    /// beginning of an interop session."
+    Reset = 0x03,
 }
 
 impl InteropFunction {
@@ -1818,6 +1953,7 @@ impl InteropFunction {
         match v {
             0x01 => Some(Self::Begin),
             0x02 => Some(Self::End),
+            0x03 => Some(Self::Reset),
             _ => None,
         }
     }

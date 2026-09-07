@@ -1253,6 +1253,17 @@ fn value_from_json(item_type: &str, node: &Json) -> Result<Ttlv, String> {
             .as_str()
             .map(|s| Ttlv::TextString(s.to_string()))
             .ok_or_else(|| format!("TextString value not a string: {value}")),
+        // KMIP 3.0 §11.25 — Identifier (0x0C) / Reference (0x0D) / Name
+        // Reference (0x0E). UTF-8 like a Text String; the type carries the
+        // meaning (own UID vs early- vs late-binding link).
+        "Identifier" | "Reference" | "NameReference" => value
+            .as_str()
+            .map(|s| match item_type {
+                "Identifier" => Ttlv::Identifier(s.to_string()),
+                "Reference" => Ttlv::Reference(s.to_string()),
+                _ => Ttlv::NameReference(s.to_string()),
+            })
+            .ok_or_else(|| format!("{item_type} value not a string: {value}")),
         "ByteString" => Ok(Ttlv::ByteString(json_hex_bytes(value)?)),
         "DateTime" => Ok(Ttlv::DateTime(json_i64(value)?)),
         "Interval" => Ok(Ttlv::Interval(json_i64(value)? as u32)),
@@ -1305,6 +1316,11 @@ fn custom_attrs_from_spec(spec: &Json) -> Vec<Attribute> {
         .map(|o| {
             o.iter()
                 .map(|(k, v)| Attribute::Custom {
+                    // §4.70: `None` = the client sent no Vendor Identification,
+                    // which is exactly this path — the workbench's `attrs`
+                    // object carries a bare name. The encoder then emits the
+                    // reserved client marker `"x"`, i.e. the pre-G9 behaviour.
+                    vendor: None,
                     name: k.strip_prefix("x-").unwrap_or(k).to_string(),
                     value: CustomAttributeValue::Text(v.as_str().unwrap_or_default().to_string()),
                 })
@@ -1399,12 +1415,22 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             uid: uid(),
             data: data(),
             cryptographic_parameters: None,
+                    // The workbench drives single-shot operations; §6.1.62/§6.1.63
+            // streaming is a client-side flow the playground does not expose.
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
         }),
         "SignatureVerify" => RequestPayload::SignatureVerify(SignatureVerifyRequest {
             uid: uid(),
             data: data(),
             signature: spec_bytes(spec, "signature", "_"),
             cryptographic_parameters: None,
+                    // The workbench drives single-shot operations; §6.1.62/§6.1.63
+            // streaming is a client-side flow the playground does not expose.
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
         }),
         "Encapsulate" => RequestPayload::Encapsulate(EncapsulateRequest {
             uid: uid(),
@@ -1437,6 +1463,11 @@ fn build_payload(op: &str, spec: &Json) -> Result<RequestPayload, String> {
             iv: spec_hex_opt(spec, "ivHex"),
             cryptographic_parameters: None,
             aad: None,
+            // Multi-part Decrypt (G6) mirrors Encrypt above: the workbench
+            // drives single-shot ops, so all three stream markers stay unset.
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
         }),
         "Locate" => RequestPayload::Locate(LocateRequest {
             attributes: vec![],
@@ -1671,6 +1702,9 @@ fn frame_json(f: &TtlvFrame) -> Json {
         Ttlv::Enumeration(e) => json!({ "tag": tag, "type": "Enumeration", "value": format!("0x{e:08X}") }),
         Ttlv::Boolean(b) => json!({ "tag": tag, "type": "Boolean", "value": b }),
         Ttlv::TextString(s) => json!({ "tag": tag, "type": "TextString", "value": s }),
+        Ttlv::Identifier(s) => json!({ "tag": tag, "type": "Identifier", "value": s }),
+        Ttlv::Reference(s) => json!({ "tag": tag, "type": "Reference", "value": s }),
+        Ttlv::NameReference(s) => json!({ "tag": tag, "type": "NameReference", "value": s }),
         Ttlv::ByteString(b) => json!({ "tag": tag, "type": "ByteString", "value": to_hex(b) }),
         Ttlv::DateTime(d) => json!({ "tag": tag, "type": "DateTime", "value": d }),
         Ttlv::Interval(i) => json!({ "tag": tag, "type": "Interval", "value": i }),

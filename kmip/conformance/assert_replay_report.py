@@ -7,12 +7,21 @@ conformance posture is EXACTLY the documented baseline
 (`HONEST_MAXIMUM_PLAN.md` Phases 0-4 + 6.1 — every non-deprecated
 transcript now passes for real, not just "at least 92 do"):
 
-  * PASS  == 97   (every non-deprecated transcript — the honest maximum
+  * PASS  == 99   (every non-deprecated transcript — the honest maximum
                     this corpus supports)
   * FAIL  == 0
   * ERROR == 0
-  * SKIP set == the documented 5, ALL of it SKIP_DEPRECATED
-    (DSA x2, 3DES x3 — out of scope by policy, `kmip/DEPRECATED.md`).
+  * SKIP set == the documented 3, ALL of it SKIP_DEPRECATED
+    (3DES x3 — out of scope by policy, `kmip/DEPRECATED.md`).
+
+    Was 97 PASS / 5 SKIP until 2026-09-07. The two DSA transcripts
+    (BL-M-12-30, BL-M-13-30) are no longer skipped: the Baseline Server
+    conformance clause (§6.2) requires ALL mandatory test cases to pass,
+    so refusing them meant the Baseline claim could not honestly be made.
+    DSA is accepted for STORAGE ONLY — it maps to no PKCS#11 mechanism, so
+    no DSA key can be generated, signed with or verified with. The 3DES
+    three stay skipped because they belong to the Symmetric Key Foundry
+    for FIPS profile, which this server does not claim.
   * No SKIP_OP / SKIP_PRECONDITION / SKIP_POLICY_VARIANT / SKIP_PARSE —
     those categories used to carry 5 more transcripts (2 precondition +
     3 policy-variant) before the chained-test-group harness feature and
@@ -40,15 +49,15 @@ from pathlib import Path
 # op is implemented and a SKIP_OP becomes a PASS), update them here in the
 # same PR that regenerates REPLAY_REPORT.json — that is the whole point of
 # the gate.
-EXPECT_PASS = 97
+EXPECT_PASS = 99
 EXPECTED_SKIP = {
-    "skip_deprecated": 5,
+    "skip_deprecated": 3,
     "skip_precondition": 0,
     "skip_policy_variant": 0,
     "skip_op": 0,
     "skip_parse": 0,
 }
-EXPECTED_SKIP_TOTAL = sum(EXPECTED_SKIP.values())  # == 5
+EXPECTED_SKIP_TOTAL = sum(EXPECTED_SKIP.values())  # == 3
 
 
 def main(argv: list[str]) -> int:
@@ -88,7 +97,7 @@ def main(argv: list[str]) -> int:
     if actual_skip_total != EXPECTED_SKIP_TOTAL:
         errors.append(
             f"total skips {actual_skip_total} != documented {EXPECTED_SKIP_TOTAL} "
-            f"(5 deprecated only)"
+            f"({EXPECTED_SKIP_TOTAL} deprecated only)"
         )
 
     if errors:
@@ -100,7 +109,7 @@ def main(argv: list[str]) -> int:
 
     print(
         f"REPLAY GATE OK: {n_pass} PASS / {n_fail} FAIL / "
-        f"{actual_skip_total} SKIP (5 deprecated only)"
+        f"{actual_skip_total} SKIP ({EXPECTED_SKIP_TOTAL} deprecated only)"
     )
     return 0
 

@@ -1,6 +1,6 @@
 # OASIS KMIP 3.0 Dispatcher Replay Report
 
-Generated: 2026-09-02 20:06:10 UTC
+Generated: 2026-09-07 14:41:43 UTC
 
 
 ## Aggregate
@@ -8,32 +8,28 @@ Generated: 2026-09-02 20:06:10 UTC
 
 | Status | Count | % of total |
 |---|---|---|
-| **PASS** | 97 | 95.1% |
+| **PASS** | 99 | 97.1% |
 | **FAIL** | 0 | 0.0% |
 | ERROR | 0 | 0.0% |
 | SKIP_OP (op not implemented) | 0 | 0.0% |
-| SKIP_DEPRECATED (DES / 3DES / DSA out of scope) | 5 | 4.9% |
+| SKIP_DEPRECATED (DES / 3DES / DSA out of scope) | 3 | 2.9% |
 | SKIP_PRECONDITION (needs prior-transcript state) | 0 | 0.0% |
 | SKIP_POLICY_VARIANT (mutually-exclusive policy) | 0 | 0.0% |
 | SKIP_PARSE (XML malformed) | 0 | 0.0% |
 | **Total** | **102** | 100.0% |
 
 
-Of the 97 tests that exercise only implemented + non-deprecated ops:
+Of the 99 tests that exercise only implemented + non-deprecated ops:
 
-  - **97 pass (100%)**
+  - **99 pass (100%)**
 
   - 0 fail
 
   - 0 errored
 
 
-5 test(s) skipped per the deprecated-mechanism policy 
+3 test(s) skipped per the deprecated-mechanism policy 
 (see `kmip/DEPRECATED.md`):
-
-  - `BL-M-12-30.xml` — DSA — deprecated (NIST SP 800-186 §5.4)
-
-  - `BL-M-13-30.xml` — DSA — deprecated (NIST SP 800-186 §5.4)
 
   - `SKFF-M-12-30.xml` — 3DES — deprecated (NIST SP 800-131A r2 §1.2.1)
 
@@ -57,6 +53,8 @@ Of the 97 tests that exercise only implemented + non-deprecated ops:
 | `BL-M-1-30.xml` | PASS |  |
 | `BL-M-10-30.xml` | PASS |  |
 | `BL-M-11-30.xml` | PASS |  |
+| `BL-M-12-30.xml` | PASS |  |
+| `BL-M-13-30.xml` | PASS |  |
 | `BL-M-14-30.xml` | PASS |  |
 | `BL-M-15-30.xml` | PASS |  |
 | `BL-M-16-30.xml` | PASS |  |
@@ -145,8 +143,6 @@ Of the 97 tests that exercise only implemented + non-deprecated ops:
 | `TL-M-1-30.xml` | PASS |  |
 | `TL-M-2-30.xml` | PASS |  |
 | `TL-M-3-30.xml` | PASS |  |
-| `BL-M-12-30.xml` | SKIP_DEPRECATED | DSA — deprecated (NIST SP 800-186 §5.4) |
-| `BL-M-13-30.xml` | SKIP_DEPRECATED | DSA — deprecated (NIST SP 800-186 §5.4) |
 | `SKFF-M-12-30.xml` | SKIP_DEPRECATED | 3DES — deprecated (NIST SP 800-131A r2 §1.2.1) |
 | `SKFF-M-4-30.xml` | SKIP_DEPRECATED | 3DES — deprecated (NIST SP 800-131A r2 §1.2.1) |
 | `SKFF-M-8-30.xml` | SKIP_DEPRECATED | 3DES — deprecated (NIST SP 800-131A r2 §1.2.1) |

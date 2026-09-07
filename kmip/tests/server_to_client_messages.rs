@@ -67,7 +67,10 @@ fn notify_carries_uid_changed_attributes_and_deleted_references() {
         &NotifyRequest {
             unique_identifier: "uid-42".into(),
             attributes: vec![Attribute::State(pqctoday_kmip::kmip30::attrs::State::Deactivated)],
-            deleted_attributes: vec!["Object Group".into()],
+            // Was "Object Group" until 2026-09-07, when that attribute was
+            // retired (its codepoint is (Reserved) in CSD02 §11.58). Any live
+            // attribute name serves — the test is about the reference form.
+            deleted_attributes: vec!["Group Link".into()],
         },
         TS,
     );
@@ -79,7 +82,7 @@ fn notify_carries_uid_changed_attributes_and_deleted_references() {
             assert_eq!(n.attributes.len(), 1, "the changed attribute must survive");
             assert_eq!(
                 n.deleted_attributes,
-                vec!["Object Group".to_string()],
+                vec!["Group Link".to_string()],
                 "a deleted attribute is reported by reference, not by value"
             );
         }
@@ -368,4 +371,67 @@ fn push_acknowledgement_still_decodes_as_no_payload() {
     assert_eq!(resp.operation, Some(Operation::Notify));
     assert!(resp.succeeded());
     assert_eq!(resp.payload, ClientResponsePayload::None);
+}
+
+/// Every UID-shaped field in a §6.2 message must ride the `Identifier` item
+/// type (0x0C), never the legacy `TextString` (0x07).
+///
+/// §4.68 is explicit that the contexts naming a UID with extra qualification —
+/// "Private Key Unique Identifier, Public Key Unique Identifier, Certificate
+/// Request Unique Identifier, Replaced Unique Identifier, Links, or within
+/// Encryption Key Information or MAC/Signature Key Information" — all take the
+/// same encoding: "In all of these contexts, the same encoding descriptions
+/// apply."
+///
+/// This asserts the TYPE, not the round trip, and that distinction is the whole
+/// point. `Replaced Unique Identifier` was encoded AND decoded as `TextString`,
+/// so it round-tripped perfectly while speaking the wrong dialect to every real
+/// peer; a round-trip assertion is blind to a self-consistent error. The OASIS
+/// corpus contains no `Replaced Unique Identifier` at all, so the replay cannot
+/// catch this either. Sabotage check: flip either encoder back to
+/// `Value::TextString` and this fails while every other test in the file still
+/// passes.
+#[test]
+fn every_uid_field_in_a_push_message_uses_the_identifier_item_type() {
+    fn payload_of(bytes: &[u8]) -> Vec<pqctoday_kmip::codec::TtlvFrame> {
+        let frame = decode_one(bytes).expect("decodes as TTLV");
+        let batch = structure(&frame.value)
+            .iter()
+            .find(|c| c.tag.0 == 0x42_000f)
+            .expect("Batch Item");
+        structure(child(batch, 0x42_0079).expect("Request Payload")).clone()
+    }
+
+    let notify = payload_of(&encode_notify_message(
+        &NotifyRequest {
+            unique_identifier: "uid-42".into(),
+            attributes: vec![],
+            deleted_attributes: vec![],
+        },
+        TS,
+    ));
+    match notify.iter().find(|c| c.tag.0 == 0x42_0094).map(|c| &c.value) {
+        Some(Value::Identifier(s)) => assert_eq!(s, "uid-42"),
+        other => panic!("Notify Unique Identifier must be Identifier (0x0C), got {other:?}"),
+    }
+
+    let put = payload_of(&encode_put_message(
+        &PutRequest {
+            unique_identifier: "new-cert".into(),
+            put_function: PutFunction::Replace,
+            replaced_unique_identifier: Some("expiring-cert".into()),
+            attributes: vec![],
+        },
+        TS,
+    ));
+    match put.iter().find(|c| c.tag.0 == 0x42_0094).map(|c| &c.value) {
+        Some(Value::Identifier(s)) => assert_eq!(s, "new-cert"),
+        other => panic!("Put Unique Identifier must be Identifier (0x0C), got {other:?}"),
+    }
+    match put.iter().find(|c| c.tag.0 == 0x42_0076).map(|c| &c.value) {
+        Some(Value::Identifier(s)) => assert_eq!(s, "expiring-cert"),
+        other => {
+            panic!("Replaced Unique Identifier must be Identifier (0x0C), got {other:?}")
+        }
+    }
 }

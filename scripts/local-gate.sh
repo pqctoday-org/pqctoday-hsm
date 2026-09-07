@@ -11,20 +11,22 @@
 #   2. kmip  cargo test -- --include-ignored  — the local-only suites CI skips
 #                                               (op-layer policy conformance …)
 #   3. rust  cargo test                       — softhsmrustv3 engine tests
-#   4. OASIS KMIP 3.0 replay + baseline assert + staleness guard (97/0/5)
-#   5. wasm  smoke.cjs                         — CACP bundle boots + round-trips
-#   6. Rust engine PKCS#11 v3.2 conformance (257 checks) + report freshness
-#   7. cross-engine PKCS#11 differential harness (49 scenarios vs exceptions.json)
-#   8. (--cpp)  C++ ctest incl. the v3.2 compliance harness + report freshness  [opt-in, slow]
-#   9. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
-#  10. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
-#  11. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
-#  12. (--javajce) JavaJCE provider suite (mvn test) in pqc-dev-sandbox  [opt-in]
-#  13. (--javajce-remote) JavaJCE-remote gRPC provider suite vs live pqc-grpc  [opt-in]
-#  14. (--openssl-provider) vendored pkcs11-provider vs real OpenSSL 3.6, both
+#   4. OASIS corpus provenance (the XML is the OASIS XML)
+#   5. OASIS byte vectors match that XML (drift guard, added 2026-09-07)
+#   6. OASIS KMIP 3.0 replay + baseline assert + staleness guard (99/0/3)
+#   7. wasm  smoke.cjs                         — CACP bundle boots + round-trips
+#   8. Rust engine PKCS#11 v3.2 conformance (257 checks) + report freshness
+#   9. cross-engine PKCS#11 differential harness (49 scenarios vs exceptions.json)
+#  10. (--cpp)  C++ ctest incl. the v3.2 compliance harness + report freshness  [opt-in, slow]
+#  11. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
+#  12. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
+#  13. (--tls-interop) §3.3.3 hybrid TLS groups vs real OpenSSL 3.6  [opt-in]
+#  14. (--javajce) JavaJCE provider suite (mvn test) in pqc-dev-sandbox  [opt-in]
+#  15. (--javajce-remote) JavaJCE-remote gRPC provider suite vs live pqc-grpc  [opt-in]
+#  16. (--openssl-provider) vendored pkcs11-provider vs real OpenSSL 3.6, both
 #                            engines (27 PASS / 0 FAIL / 0 XFAIL / 0 XPASS)  [opt-in]
 #
-# Steps 6-7 (Rust PKCS#11 conformance, differential harness) were opt-in
+# Steps 8-9 (Rust PKCS#11 conformance, differential harness) were opt-in
 # until 2026-08-23 — both are core PKCS#11 v3.2 evidence, and both had gone
 # stale invisibly while opt-in (the Rust report 45 source-commits behind
 # HEAD; the differential harness never run at all outside a manual
@@ -233,8 +235,12 @@ run_step "kmip cargo test" \
 # eprintln! lines cargo otherwise captures and discards on a passing test;
 # `tee /dev/stderr` preserves them in the gate log (which redirects both
 # stdout+stderr) while still letting grep see the stream for fail-detection.
+# The trailing `true` made this step unfailable for the same pipefail reason
+# documented on the wasm step below — a failing cargo run left the `&& exit 1`
+# unreached and `true` reported success. Verdict now comes from cargo's own
+# status (PIPESTATUS[0]); the grep still exists only to surface the line.
 run_step "kmip known-slow mechanisms (live progress)" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet --test acvp_roundtrip slh_dsa_sigver_and_siggen -- --nocapture 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet --test acvp_roundtrip slh_dsa_sigver_and_siggen -- --nocapture 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed'; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; \
    true"
 
 run_step "kmip local-only suites (--include-ignored)" \
@@ -279,7 +285,19 @@ run_step "remoting gRPC+REST services + three-transport parity" \
 run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
   "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py"
 
-run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
+# Immediately after the corpus check, and for the same reason. That step asks
+# "is the XML the OASIS XML?"; this asks "are the committed byte vectors what
+# that XML actually produces?" — a question NOTHING asked before 2026-09-07.
+# The Rust suites (oasis_codec_roundtrip.rs and friends) round-trip the
+# committed .bin files through our own codec, so a vector that no longer
+# matches its source XML still round-trips perfectly; the corpus is never
+# consulted. Four vectors were stale from the 2026-07 CSD02 refresh until
+# 2026-09-06 and surfaced only by accident, when an unrelated regeneration
+# changed their size. --check writes nothing.
+run_step "OASIS byte vectors match the XML corpus (1358 vectors)" \
+  "cd $AG_KMIP && python3 conformance/harness/generate_byte_vectors.py --check"
+
+run_step "OASIS KMIP 3.0 replay (99 PASS / 0 FAIL / 3 SKIP_DEPRECATED)" \
   "cd $AG_KMIP && cargo build --release --bin pqctoday-kmip --quiet && \
    mkdir -p target/release && ln -sf \$(readlink -f \${CARGO_TARGET_DIR:-/cargo-target}/release/pqctoday-kmip) target/release/pqctoday-kmip 2>/dev/null; \
    python3 conformance/harness/dispatcher_replay.py >/dev/null && \
@@ -293,8 +311,15 @@ run_step "OASIS KMIP 3.0 replay (97 PASS / 0 FAIL / 5 SKIP_DEPRECATED)" \
 # without a cfg gate, the whole gate went green, and the breakage was found days
 # later when someone tried to rebuild the bundle. A type-check is cheap; a full
 # wasm build is not, so this checks rather than builds.
+# `cmd | grep ... && exit 1` CANNOT fail once dexec sets pipefail: when the
+# real command errors, the PIPELINE's status is that error (not grep's 0), so
+# `&&` short-circuits and `exit 1` never runs — control falls to the statement
+# after the `;`, which reports success. Found 2026-09-07: this step printed two
+# E0063 errors and then "wasm32 type-check clean ✓" in the same breath, letting
+# a genuinely broken wasm crate through. Take the verdict from the compiler's
+# own status via PIPESTATUS[0] instead; grep stays purely for display.
 run_step "wasm target still compiles (cargo check)" \
-  "cd $AG_CONTAINER_ROOT/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6 && exit 1; echo '  wasm32 type-check clean'"
+  "cd $AG_CONTAINER_ROOT/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; echo '  wasm32 type-check clean'"
 
 # wasm smoke runs on the HOST (node lives there, not in the Rust container).
 # Runs the STAGED bundle — see the check above for why that is not sufficient on

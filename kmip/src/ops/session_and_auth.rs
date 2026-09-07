@@ -103,8 +103,16 @@ pub fn create_credential(
     }
 
     // K4 — persist under the true Credential Object Type, not Secret Data.
-    let uid =
-        persist_simple_record(deps, credential_object_type(req.credential_type), req.attributes, auth)?;
+    // §4.14 Table 86 — "Initially set by: Server", "When implicitly set:
+    // Register". The client names the type in the request payload; the SERVER
+    // is what puts it on the object, and nothing may change it afterwards.
+    let uid = persist_simple_record(
+        deps,
+        credential_object_type(req.credential_type),
+        req.attributes,
+        auth,
+        Some(req.credential_type),
+    )?;
     emit_success(deps, correlation_id, "CreateCredential");
     Ok(CreateCredentialResponse { uid })
 }
@@ -120,7 +128,7 @@ pub fn create_group(
     emit_request(deps, correlation_id, "CreateGroup", format!("attrs={}", req.attributes.len()));
     // K4 — KMIP 3.0 Object Type enum defines Group (0x0c); persist under it so
     // GetAttributes/Locate report the true type (was Secret Data).
-    let uid = persist_simple_record(deps, ObjectType::Group, req.attributes, auth)?;
+    let uid = persist_simple_record(deps, ObjectType::Group, req.attributes, auth, None)?;
     emit_success(deps, correlation_id, "CreateGroup");
     Ok(CreateGroupResponse { uid })
 }
@@ -135,7 +143,7 @@ pub fn create_user(
 ) -> Result<CreateUserResponse> {
     emit_request(deps, correlation_id, "CreateUser", format!("attrs={}", req.attributes.len()));
     // K4 — KMIP 3.0 Object Type enum defines User (0x0b); persist under it.
-    let uid = persist_simple_record(deps, ObjectType::User, req.attributes, auth)?;
+    let uid = persist_simple_record(deps, ObjectType::User, req.attributes, auth, None)?;
     emit_success(deps, correlation_id, "CreateUser");
     Ok(CreateUserResponse { uid })
 }
@@ -246,6 +254,8 @@ fn persist_simple_record(
     object_type: ObjectType,
     attrs: Vec<Attribute>,
     auth: &crate::server::auth::AuthContext,
+    // §4.14 — `Some` only for Credential Objects; `None` for User / Group.
+    credential_type: Option<u32>,
 ) -> Result<String> {
     let uid = format!("urn:pqctoday:obj:{}", Uuid::new_v4());
     let now = OffsetDateTime::now_utc();
@@ -256,6 +266,7 @@ fn persist_simple_record(
     deps.store.put(super::helpers::stamp_owner(ObjectRecord {
         uid: uid.clone(),
         object_type,
+        credential_type,
         // No cryptographic algorithm for a User / Group / Credential —
         // we store a placeholder so the existing ObjectRecord fields
         // stay typed. The Algorithm attribute will reflect the same

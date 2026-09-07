@@ -559,7 +559,10 @@ pub fn register(
     // attributes (vendor-extension envelope) so GetAttributes can
     // surface them. BL-M-14 / SKFF-M-{9..11} step #0 supply
     // `<Attribute>` envelopes inside `<Attributes>`.
-    let mut custom_attributes: HashMap<String, crate::kmip30::CustomAttributeValue> = HashMap::new();
+    let mut custom_attributes: HashMap<
+        crate::kmip30::VendorAttributeKey,
+        crate::kmip30::CustomAttributeValue,
+    > = HashMap::new();
     let mut links: HashMap<String, String> = HashMap::new();
     // KMIP 3.0 §11 — Sensitive / Extractable are client-settable at
     // Register time (BL-M-12 supplies Sensitive=true in the template);
@@ -567,12 +570,24 @@ pub fn register(
     // server-managed Always Sensitive / Never Extractable shadows are
     // derived from the at-birth values.
     let mut sensitive: Option<bool> = None;
+    // §4.27 Fresh — captured from the request, see the match arm below.
+    let mut fresh: Option<bool> = None;
     let mut extractable: Option<bool> = None;
     for a in &req.attributes {
         match a {
-            Attribute::Custom { name, value } => {
-                custom_attributes.insert(name.clone(), value.clone());
+            Attribute::Custom { vendor, name, value } => {
+                // §4.70 keys a vendor attribute by the PAIR, so a Register
+                // carrying two vendors' same-named attributes keeps both.
+                custom_attributes.insert(
+                    crate::kmip30::VendorAttributeKey::new(vendor.as_deref(), name),
+                    value.clone(),
+                );
             }
+            // §4.27 — "SHALL be set to True when a new object is created on
+            // the server UNLESS the client provides a False value in Register
+            // or Import." The client's value is honoured; the default is
+            // True, not False.
+            Attribute::Fresh(b)       => { fresh = Some(*b); }
             Attribute::Sensitive(b)   => { sensitive = Some(*b); }
             Attribute::Extractable(b) => { extractable = Some(*b); }
             // KMIP §11 Link family — UID references the Register
@@ -625,17 +640,21 @@ pub fn register(
     // certificate_payload is reused for OpaqueObject's OpaqueDataType
     // pass-through (no DER, no length, no CN). The wire decoder sets
     // `der.is_empty()` for that path.
-    let (certificate_type, certificate_value, certificate_length, certificate_subject_cn) =
+    let (certificate_type, certificate_value, certificate_length, certificate_subject, certificate_issuer) =
         match (&req.certificate_payload, req.object_type) {
             (Some((wire_ct, der)), ObjectType::Certificate) => {
                 let len = der.len() as i32;
-                let cn = super::der_x509::extract_subject_cn(der);
-                (Some(*wire_ct), Some(der.clone()), Some(len), cn)
+                // §4.6 Table 62, "When implicitly set: Register, Certify,
+                // Re-certify". A Name that yields nothing stays `None` (RFC
+                // 5280 §4.1.2.6 permits an empty Subject), so it projects no
+                // attributes rather than twelve empty ones.
+                let (subject, issuer) = super::der_x509::extract_certificate_names(der);
+                (Some(*wire_ct), Some(der.clone()), Some(len), subject, issuer)
             }
             (Some((wire_ct, _)), ObjectType::OpaqueObject) => {
-                (Some(*wire_ct), None, None, None)
+                (Some(*wire_ct), None, None, None, None)
             }
-            _ => (None, None, None, None),
+            _ => (None, None, None, None, None),
         };
 
     // K-14 — KMIP §11 `Digest`: SHA-256 over the client-supplied
@@ -686,7 +705,9 @@ pub fn register(
         alternative_name_type: x.alternative_name_type,
         links,
         custom_attributes,
-        object_groups: x.object_groups.clone(),
+        // §4.27 — True unless the client asked for False.
+        fresh: Some(fresh.unwrap_or(true)),
+        group_links: x.group_links.clone(),
         key_material,
         key_format_type,
         digest_value,
@@ -694,7 +715,8 @@ pub fn register(
         certificate_type,
         certificate_value: certificate_value.clone(),
         certificate_length,
-        certificate_subject_cn,
+        certificate_subject,
+        certificate_issuer,
         // Gap-remediation Phase C, Finding #8 — previously dropped at
         // decode time; a later Get always echoed the Password default
         // regardless of what was actually registered.
@@ -839,14 +861,18 @@ pub fn import_object(
     // Without this, Import(Certificate) either errored confusingly (no
     // CryptographicAlgorithm) or, if a client worked around that, silently
     // discarded the certificate DER entirely while still returning success.
-    let (certificate_type, certificate_value, certificate_length, certificate_subject_cn) =
+    let (certificate_type, certificate_value, certificate_length, certificate_subject, certificate_issuer) =
         match (&req.certificate_payload, req.object_type) {
             (Some((wire_ct, der)), ObjectType::Certificate) => {
                 let len = der.len() as i32;
-                let cn = super::der_x509::extract_subject_cn(der);
-                (Some(*wire_ct), Some(der.clone()), Some(len), cn)
+                // §4.6 Table 62, "When implicitly set: Register, Certify,
+                // Re-certify". A Name that yields nothing stays `None` (RFC
+                // 5280 §4.1.2.6 permits an empty Subject), so it projects no
+                // attributes rather than twelve empty ones.
+                let (subject, issuer) = super::der_x509::extract_certificate_names(der);
+                (Some(*wire_ct), Some(der.clone()), Some(len), subject, issuer)
             }
-            _ => (None, None, None, None),
+            _ => (None, None, None, None, None),
         };
 
     // K-14 — same Digest-at-creation rule as Register: SHA-256 over
@@ -883,7 +909,8 @@ pub fn import_object(
         certificate_type,
         certificate_value: certificate_value.clone(),
         certificate_length,
-        certificate_subject_cn,
+        certificate_subject,
+        certificate_issuer,
         ..ObjectRecord::default()
     }, auth))?;
 
@@ -1099,7 +1126,7 @@ pub(crate) struct ExtractedAttrs {
     /// `Object Group` (KMIP §11, 0x420056) memberships supplied in the
     /// template — multi-instance, so a list. SASED-M-2 registers an
     /// object into a group; SASED-M-3 then Locates it by that group.
-    pub object_groups: Vec<String>,
+    pub group_links: Vec<String>,
     /// `Alternative Name` (KMIP §4.4, 0x4200bf) — a client-set secondary
     /// name for the object (e.g. a barcode/serial-style label). Was
     /// decoded off the wire (`Attribute::AlternativeName`) but silently
@@ -1123,7 +1150,7 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
         usage_limits_total: None,
         usage_limits_unit: None,
         application_specific_information: None,
-        object_groups: Vec::new(),
+        group_links: Vec::new(),
         alternative_name: None,
         alternative_name_type: None,
     };
@@ -1154,9 +1181,10 @@ pub(crate) fn extract_attrs(attrs: &[Attribute]) -> ExtractedAttrs {
             }
             // Multi-instance: accumulate every Object Group label so an
             // object Registered into several groups is locatable by any.
-            Attribute::ObjectGroup(g) => {
-                if !out.object_groups.contains(g) {
-                    out.object_groups.push(g.clone());
+            // §7.24 — repeated Group Link values are the group membership.
+            Attribute::GroupLink(g) => {
+                if !out.group_links.contains(g) {
+                    out.group_links.push(g.clone());
                 }
             }
             _ => {}

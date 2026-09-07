@@ -82,7 +82,14 @@ pub struct ObjectRecord {
     /// Typed (not a bare `String`) so an Integer- or DateTime-valued
     /// custom attribute round-trips its actual wire type instead of
     /// losing it — see [`crate::kmip30::CustomAttributeValue`].
-    pub custom_attributes: std::collections::HashMap<String, crate::kmip30::CustomAttributeValue>,
+    /// §4.70 vendor attributes, keyed by the (Vendor Identification,
+    /// Attribute Name) PAIR — two vendors may legitimately use the same name.
+    /// See `VendorAttributeKey` for why the pair is one string and how
+    /// records written before this loaded.
+    pub custom_attributes: std::collections::HashMap<
+        crate::kmip30::VendorAttributeKey,
+        crate::kmip30::CustomAttributeValue,
+    >,
     /// KMIP `Object Group` (0x420056) memberships — **multi-instance**:
     /// an object may belong to several groups, so this is a list of
     /// group-name labels rather than a single value. Populated from the
@@ -90,7 +97,17 @@ pub struct ObjectRecord {
     /// DeleteAttribute; Locate's Object Group filter matches when ANY
     /// element equals the requested group (SASED-M-3 step #0). Empty =
     /// not a member of any group.
-    pub object_groups: Vec<String>,
+    /// §7.24 `Object Groups` — the repeated `Group Link` (0x4201b3) values
+    /// naming the groups this object belongs to.
+    ///
+    /// Renamed from `object_groups` on 2026-09-07. KMIP 3.0 RETIRED the
+    /// `Object Group` attribute: its codepoint 0x420056 is listed as
+    /// **(Reserved)** in the §11.58 Tag Enumeration table, so emitting it was
+    /// using a reserved tag. §7.24 replaces it with a structure of `Group
+    /// Link` values, which "MAY be repeated" — hence a Vec and not the
+    /// single-slot `links` map.
+    #[serde(alias = "object_groups")]
+    pub group_links: Vec<String>,
     /// Raw KMIP `Key Material` bytes (KMIP 3.0 §6.2 KeyBlock →
     /// KeyValue → KeyMaterial). Populated by Register / Import when
     /// a client-supplied key payload arrives; surfaced by Get / Export.
@@ -218,14 +235,27 @@ pub struct ObjectRecord {
 
     /// KMIP §11 `Certificate Type` — Enumeration codepoint (e.g. X.509
     /// = 0x01, PGP = 0x02). v0.1 stores the raw wire value.
+    /// §4.14 `Credential Type` — set by the server when a Credential Object
+    /// is created, and never changed after. `None` for every other object
+    /// type, which is what Table 86's "applies to: Credential Objects" means.
+    #[serde(default)]
+    pub credential_type: Option<u32>,
     pub certificate_type: Option<u32>,
     pub certificate_length: Option<i32>,
     /// KMIP §6.2 / §11 — DER bytes of an X.509 / PGP Certificate
     /// supplied via Register. `certificate_length` mirrors the byte
-    /// count; `certificate_subject_cn` is extracted server-side at
+    /// count; the §4.6 Certificate Attributes are extracted server-side at
     /// Register time. All three travel together.
     pub certificate_value: Option<Vec<u8>>,
-    pub certificate_subject_cn: Option<String>,
+    /// §4.6 Certificate Attributes, the 13 Subject and 13 Issuer components
+    /// server-extracted from `certificate_value` at Register / Certify /
+    /// Re-certify (Table 62, "When implicitly set"). `None` means the object
+    /// is not a certificate or carried no parseable Name; each component
+    /// inside is a list, because Table 62 permits multiple instances.
+    #[serde(default)]
+    pub certificate_subject: Option<crate::kmip30::CertificateNames>,
+    #[serde(default)]
+    pub certificate_issuer: Option<crate::kmip30::CertificateNames>,
     /// KMIP §11 `Digital Signature Algorithm` — Enumeration codepoint.
     pub digital_signature_algorithm: Option<u32>,
     /// KMIP §11 `NIST Key Type` — Enumeration codepoint.
@@ -266,6 +296,35 @@ pub struct ObjectRecord {
     /// KMIP §4 `Rotate Generation` — sequence counter.
     pub rotate_generation: Option<i32>,
     pub rotate_name: Option<String>,
+
+    // ── G2 (2026-09-06): Profiles §5.1.2 item 8 completion ──────────────
+    //
+    // The five Counters are §4.13: the server increments each on a
+    // successful use of the object as that operation's subject, and they
+    // "SHALL be present for Certificates, Certificate Requests, Private
+    // keys, Public keys and Symmetric keys". Stored on the record and
+    // written through the same store put the operation already performs,
+    // so a count costs no extra round trip.
+    /// `Rotate Latest` (§4.58).
+    pub rotate_latest: Option<bool>,
+    /// `Archive Date` (§4.5).
+    pub archive_date: Option<i64>,
+    /// `NIST Security Category` (§4.39).
+    pub nist_security_category: Option<i32>,
+    /// `OTP Counter` (§4.44).
+    pub otp_counter: Option<i32>,
+    /// `PKCS#12 Friendly Name` (§4.45).
+    pub pkcs12_friendly_name: Option<String>,
+    /// `Certify Counter` (§4.13.1).
+    pub certify_counter: Option<i32>,
+    /// `Decrypt Counter` (§4.13.2).
+    pub decrypt_counter: Option<i32>,
+    /// `Encrypt Counter` (§4.13.3).
+    pub encrypt_counter: Option<i32>,
+    /// `Sign Counter` (§4.13.4).
+    pub sign_counter: Option<i32>,
+    /// `Signature Verify Counter` (§4.13.5).
+    pub signature_verify_counter: Option<i32>,
     /// KMIP §4 `Random Number Generator` — Structure carrying RNG
     /// metadata. v0.1 stores nothing; this field exists so the
     /// attribute surface table is honest.
@@ -367,7 +426,7 @@ impl From<BaselineDefaults> for ObjectRecord {
             name: None,
             links: std::collections::HashMap::new(),
             custom_attributes: std::collections::HashMap::new(),
-            object_groups: Vec::new(),
+            group_links: Vec::new(),
             key_material: None,
             pkcs11_cka_id_secondary: None,
             recommended_curve: None,
@@ -403,10 +462,12 @@ impl From<BaselineDefaults> for ObjectRecord {
             x509_certificate_identifier: None,
             x509_certificate_issuer: None,
             x509_certificate_subject: None,
+            credential_type: None,
             certificate_type: None,
             certificate_length: None,
             certificate_value: None,
-            certificate_subject_cn: None,
+            certificate_subject: None,
+            certificate_issuer: None,
             digital_signature_algorithm: None,
             nist_key_type: None,
             protection_level: None,
@@ -424,6 +485,16 @@ impl From<BaselineDefaults> for ObjectRecord {
             rotate_offset: None,
             rotate_generation: None,
             rotate_name: None,
+            rotate_latest: None,
+            archive_date: None,
+            nist_security_category: None,
+            otp_counter: None,
+            pkcs12_friendly_name: None,
+            certify_counter: None,
+            decrypt_counter: None,
+            encrypt_counter: None,
+            sign_counter: None,
+            signature_verify_counter: None,
             random_number_generator_present: false,
             usage_limits_total: None,
             usage_limits_remaining: None,

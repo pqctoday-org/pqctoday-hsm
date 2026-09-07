@@ -64,7 +64,8 @@ pub fn locate(
     }
 
     // Build the predicate from the request's attribute filters.
-    let filters = build_filters(&req.attributes);
+    let filters = build_filters(&req.attributes)
+        .map_err(|e| fail_err(deps, correlation_id, "Locate", e))?;
 
     // K15 — Locate searches the Plane-2 store only; no PKCS#11 call is
     // made, so no `Pkcs11Call` audit record is fabricated for it.
@@ -189,14 +190,13 @@ struct LocateFilters {
     /// `(namespace, data)` pair. TL-M-3 step #0 finds a previously
     /// Created SymmetricKey by it.
     application_specific_information: Option<(String, String)>,
-    /// KMIP 3.0 §11 `Group Link` filter — UID reference. SASED-M-3
-    /// step #0 finds a previously Registered SecretData by it.
+    /// §7.24 `Group Link` (0x4201b3) filter — group membership. An object
+    /// matches when ANY of its group links equals this value, since §7.24
+    /// says Group Link "MAY be repeated". This is the capability behind
+    /// SASED-M-3 step #0's group-membership Locate; it replaced the
+    /// `Object Group` filter on 2026-09-07, when that attribute's codepoint
+    /// (0x420056) turned out to be **(Reserved)** in KMIP 3.0.
     group_link: Option<String>,
-    /// KMIP `Object Group` (0x420056) filter — group-membership label.
-    /// An object matches when ANY of its `object_groups` memberships
-    /// equals this value (Object Group is multi-instance). This is the
-    /// capability behind SASED-M-3 step #0's group-membership Locate.
-    object_group: Option<String>,
     /// WP-2 remediation — `Certificate Subject CN` filter (§4.6). Only
     /// meaningful against Certificate records.
     certificate_subject_cn: Option<String>,
@@ -213,6 +213,37 @@ struct LocateFilters {
     /// "every object").
     cryptographic_length: Option<u32>,
     cryptographic_usage_mask: Option<UsageMask>,
+    // ── G7 (2026-09-06) — the filters the OASIS corpus itself sends ──────
+    //
+    // These had to be implemented BEFORE the `_ => {}` fall-through could be
+    // made fail-closed. The corpus's own Locate steps filter by Protect Stop
+    // Date and by vendor attributes, and they passed only BECAUSE those
+    // filters were silently dropped: refusing unknown filters first would
+    // have failed transcripts that are supposed to pass.
+    // §6.1.34 date semantics: "Date attributes ... are used to specify a
+    // time or a time range for the search. If two instances of the same Date
+    // attribute are used (i.e. with two different values specifying a range),
+    // then objects for which the Date attribute is inside or at a limit of
+    // the range are considered to be matching."
+    //
+    // So each of these is a LIST, not a single value: one instance means
+    // equality, two mean an inclusive range. BL-M-4-30 sends two
+    // `ProtectStopDate`s and expects a hit — modelling this as equality made
+    // the second silently overwrite the first and matched nothing.
+    /// §4.47 Protect Stop Date.
+    protect_stop_date: Vec<i64>,
+    /// §4.1 Activation Date.
+    activation_date: Vec<i64>,
+    /// §4.28 Initial Date.
+    initial_date: Vec<i64>,
+    /// §4.46 Process Start Date.
+    process_start_date: Vec<i64>,
+    /// §4.20 Deactivation Date.
+    deactivation_date: Vec<i64>,
+    /// §4.70 Vendor Attribute, matched by the (Vendor Identification,
+    /// Attribute Name) PAIR and value — keying by name alone would let one
+    /// vendor's filter match another vendor's attribute.
+    custom: Vec<(crate::kmip30::VendorAttributeKey, String)>,
     unique_identifier: Option<String>,
 }
 
@@ -257,27 +288,31 @@ impl LocateFilters {
                 _ => return false,
             }
         }
+        // §7.24 `Group Link` membership. "MAY be repeated", so the record
+        // matches when ANY of its group links equals the requested one
+        // (AND-combined with the other filters above). The single-slot
+        // `links["GroupLink"]` is also consulted, because objects written
+        // before the 2026-09-07 migration put their one group there.
         if let Some(want_gl) = &self.group_link {
-            match r.links.get("GroupLink") {
-                Some(have) if have == want_gl => {}
-                _ => return false,
-            }
-        }
-        // KMIP `Object Group` membership — multi-instance, so the
-        // record matches when ANY of its group labels equals the
-        // requested one (AND-combined with the other filters above).
-        if let Some(want_group) = &self.object_group {
-            if !r.object_groups.iter().any(|g| g == want_group) {
+            let member = r.group_links.iter().any(|g| g == want_gl)
+                || r.links.get("GroupLink").is_some_and(|have| have == want_gl);
+            if !member {
                 return false;
             }
         }
         // WP-2 remediation — Certificate-specific search dimensions, since
         // Certify/Register-created certs otherwise had no way to be found
         // by anything but UID.
+        // §4.6 permits multiple instances, so a certificate may carry more
+        // than one CN. An object matches when ANY of them equals the filter —
+        // the same "any membership" rule the object-group filter above uses.
         if let Some(want_cn) = &self.certificate_subject_cn {
-            match &r.certificate_subject_cn {
-                Some(have) if have == want_cn => {}
-                _ => return false,
+            let matched = r
+                .certificate_subject
+                .as_ref()
+                .is_some_and(|n| n.cn.iter().any(|have| have == want_cn));
+            if !matched {
+                return false;
             }
         }
         if let Some(want_issuer) = &self.x509_certificate_issuer {
@@ -300,6 +335,47 @@ impl LocateFilters {
                 return false;
             }
         }
+
+        // ── G7 date filters (§6.1.34) ────────────────────────────────
+        //
+        // One value = equality; two = an inclusive range ("inside or at a
+        // limit"). An absent date on the record cannot match a requested one:
+        // "no activation date" is not "any activation date".
+        fn date_matches(want: &[i64], have: Option<i64>) -> bool {
+            if want.is_empty() {
+                return true;
+            }
+            let Some(h) = have else { return false };
+            match want.len() {
+                1 => h == want[0],
+                _ => {
+                    // Order is not guaranteed by the wire, so derive the
+                    // bounds rather than assuming request order.
+                    let lo = *want.iter().min().expect("non-empty");
+                    let hi = *want.iter().max().expect("non-empty");
+                    h >= lo && h <= hi
+                }
+            }
+        }
+        if !date_matches(&self.protect_stop_date, r.protect_stop_date.map(|t| t.unix_timestamp()))
+            || !date_matches(&self.activation_date, r.activation_date.map(|t| t.unix_timestamp()))
+            || !date_matches(&self.process_start_date, r.process_start_date.map(|t| t.unix_timestamp()))
+            || !date_matches(&self.deactivation_date, r.deactivation_date.map(|t| t.unix_timestamp()))
+            // Initial Date is non-optional on the record (§4.28).
+            || !date_matches(&self.initial_date, Some(r.initial_date.unix_timestamp()))
+        {
+            return false;
+        }
+        // ── G7 vendor/custom attribute filters (§4.70) ───────────────────
+        //
+        // Every requested (name, value) pair must match — the same "all
+        // filters narrow" rule §6.1.34 applies to the typed ones.
+        for (key, value) in &self.custom {
+            match r.custom_attributes.get(key) {
+                Some(crate::kmip30::CustomAttributeValue::Text(v)) if v == value => {}
+                _ => return false,
+            }
+        }
         if let Some(want) = &self.unique_identifier {
             if &r.uid != want {
                 return false;
@@ -309,7 +385,20 @@ impl LocateFilters {
     }
 }
 
-fn build_filters(attrs: &[Attribute]) -> LocateFilters {
+/// Build the filter set from a Locate request's attribute template.
+///
+/// **Fail-closed since 2026-09-06 (G7).** A filter this server cannot apply
+/// used to fall through a `_ => {}` arm and be dropped, so `Locate` answered a
+/// NARROWER question than it was asked — e.g. filtering on an Activation Date
+/// returned every object. Over-broad results from a key-management search are
+/// not a cosmetic defect: a client can act on an object it did not mean to
+/// select.
+///
+/// Refusing needs the filters to exist first, which is why the date and
+/// vendor-attribute filters landed in the same change: the OASIS corpus's own
+/// Locate steps use Protect Stop Date and vendor attributes, and they passed
+/// only because those were being dropped.
+fn build_filters(attrs: &[Attribute]) -> Result<LocateFilters> {
     let mut f = LocateFilters {
         algorithm: None,
         object_type: None,
@@ -317,12 +406,17 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
         name: None,
         application_specific_information: None,
         group_link: None,
-        object_group: None,
         certificate_subject_cn: None,
         x509_certificate_issuer: None,
         cryptographic_length: None,
         cryptographic_usage_mask: None,
         unique_identifier: None,
+        protect_stop_date: Vec::new(),
+        activation_date: Vec::new(),
+        initial_date: Vec::new(),
+        process_start_date: Vec::new(),
+        deactivation_date: Vec::new(),
+        custom: Vec::new(),
     };
     for a in attrs {
         match a {
@@ -344,19 +438,44 @@ fn build_filters(attrs: &[Attribute]) -> LocateFilters {
             Attribute::CryptographicLength(n) => f.cryptographic_length = Some(*n),
             Attribute::CryptographicUsageMask(m) => f.cryptographic_usage_mask = Some(*m),
             Attribute::UniqueIdentifier(uid) => f.unique_identifier = Some(uid.clone()),
-            Attribute::ObjectGroup(g) => {
-                f.object_group = Some(g.clone());
-            }
+
             Attribute::CertificateSubjectCN(cn) => {
                 f.certificate_subject_cn = Some(cn.clone());
             }
             Attribute::X509CertificateIssuer(issuer) => {
                 f.x509_certificate_issuer = Some(issuer.clone());
             }
-            _ => {}
+            // G7 — date filters. The corpus sends Protect Stop Date; the
+            // rest are the same shape and were equally dropped.
+            Attribute::ProtectStopDate(t) => f.protect_stop_date.push(*t),
+            Attribute::ActivationDate(t) => f.activation_date.push(*t),
+            Attribute::InitialDate(t) => f.initial_date.push(*t),
+            Attribute::ProcessStartDate(t) => f.process_start_date.push(*t),
+            Attribute::DeactivationDate(t) => f.deactivation_date.push(*t),
+            // G7 — vendor/custom attributes (§4.70). The corpus filters by
+            // these in its Tape Library steps.
+            Attribute::Custom { vendor, name, value } => {
+                if let crate::kmip30::CustomAttributeValue::Text(v) = value {
+                    f.custom.push((
+                        crate::kmip30::VendorAttributeKey::new(vendor.as_deref(), name),
+                        v.clone(),
+                    ));
+                }
+            }
+            // G7 — refuse rather than silently widen the result set.
+            other => {
+                return Err(KmipError::failed(
+                    crate::error::ResultReason::UnsupportedAttribute,
+                    format!(
+                        "Locate: filtering by {} is not supported by this server; \
+                         refusing rather than returning over-broad results",
+                        super::get_attributes::canonical_attribute_name(other),
+                    ),
+                ));
+            }
         }
     }
-    f
+    Ok(f)
 }
 
 #[cfg(test)]
@@ -419,7 +538,7 @@ mod tests {
             algorithm: KmipAlgorithm::Aes,
             state: State::Active,
             initial_date: OffsetDateTime::UNIX_EPOCH,
-            object_groups: groups.iter().map(|s| s.to_string()).collect(),
+            group_links: groups.iter().map(|s| s.to_string()).collect(),
             ..ObjectRecord::default()
         }).unwrap();
     }
@@ -430,27 +549,27 @@ mod tests {
     /// capability behind SASED-M-3 / TL-M-3 (which stay SKIP under the
     /// hermetic replay harness's cross-transcript state wipe).
     #[test]
-    fn locate_filters_by_object_group() {
+    fn locate_filters_by_group_link() {
         let d = deps_with();
         put_groups(&d, "a", &["G1"]);
         put_groups(&d, "b", &["G1"]);
         put_groups(&d, "c", &["G2"]);
 
         let mut g1 = locate(&d, LocateRequest {
-            attributes: vec![Attribute::ObjectGroup("G1".into())],
+            attributes: vec![Attribute::GroupLink("G1".into())],
             ..Default::default()
         }, &AuthContext::open(), "cid").unwrap().uids;
         g1.sort();
         assert_eq!(g1, vec!["a", "b"]);
 
         let g2 = locate(&d, LocateRequest {
-            attributes: vec![Attribute::ObjectGroup("G2".into())],
+            attributes: vec![Attribute::GroupLink("G2".into())],
             ..Default::default()
         }, &AuthContext::open(), "cid").unwrap().uids;
         assert_eq!(g2, vec!["c"]);
 
         let none = locate(&d, LocateRequest {
-            attributes: vec![Attribute::ObjectGroup("nope".into())],
+            attributes: vec![Attribute::GroupLink("nope".into())],
             ..Default::default()
         }, &AuthContext::open(), "cid").unwrap().uids;
         assert!(none.is_empty());
@@ -464,7 +583,7 @@ mod tests {
         put_groups(&d, "multi", &["G1", "G2"]);
         for g in ["G1", "G2"] {
             let r = locate(&d, LocateRequest {
-                attributes: vec![Attribute::ObjectGroup(g.into())],
+                attributes: vec![Attribute::GroupLink(g.into())],
                 ..Default::default()
             }, &AuthContext::open(), "cid").unwrap();
             assert_eq!(r.uids, vec!["multi"], "should be found by group {g}");
@@ -474,7 +593,7 @@ mod tests {
     /// Object Group AND-combines with other filters: a G1 Locate that
     /// also pins ObjectType=SymmetricKey must skip a SecretData member.
     #[test]
-    fn locate_object_group_and_object_type() {
+    fn locate_group_link_and_object_type() {
         let d = deps_with();
         // "a" is SecretData in G1 (via put_groups); "b" is a SymmetricKey
         // in G1 we build by hand.
@@ -485,12 +604,12 @@ mod tests {
             algorithm: KmipAlgorithm::Aes,
             state: State::Active,
             initial_date: OffsetDateTime::UNIX_EPOCH,
-            object_groups: vec!["G1".into()],
+            group_links: vec!["G1".into()],
             ..ObjectRecord::default()
         }).unwrap();
         let r = locate(&d, LocateRequest {
             attributes: vec![
-                Attribute::ObjectGroup("G1".into()),
+                Attribute::GroupLink("G1".into()),
                 Attribute::ObjectType(ObjectType::SymmetricKey),
             ],
             ..Default::default()
@@ -786,5 +905,68 @@ mod tests {
             ..Default::default()
         }, &AuthContext::open(), "c").unwrap();
         assert_eq!(r.uids, vec!["target"]);
+    }
+
+    /// G7 (2026-09-06) — §6.1.34: "If two instances of the same Date
+    /// attribute are used ... objects for which the Date attribute is inside
+    /// or at a limit of the range are considered to be matching."
+    ///
+    /// This is not academic: `BL-M-4-30` sends TWO `ProtectStopDate` values
+    /// and expects a hit. Modelling the filter as equality made the second
+    /// value overwrite the first and matched nothing — the replay caught it.
+    #[test]
+    fn two_date_instances_are_an_inclusive_range_not_an_overwrite() {
+        let mk = |secs: i64| {
+            let mut r = ObjectRecord::default();
+            r.uid = "x".into();
+            r.protect_stop_date = Some(OffsetDateTime::from_unix_timestamp(secs).unwrap());
+            r
+        };
+        let range = build_filters(&[
+            Attribute::ProtectStopDate(1_000),
+            Attribute::ProtectStopDate(2_000),
+        ])
+        .expect("a date range is a supported filter");
+
+        assert!(range.matches(&mk(1_500)), "inside the range matches");
+        assert!(range.matches(&mk(1_000)), "at the lower limit matches");
+        assert!(range.matches(&mk(2_000)), "at the upper limit matches");
+        assert!(!range.matches(&mk(999)), "below the range must not match");
+        assert!(!range.matches(&mk(2_001)), "above the range must not match");
+
+        // Bounds are derived, not assumed from request order.
+        let reversed = build_filters(&[
+            Attribute::ProtectStopDate(2_000),
+            Attribute::ProtectStopDate(1_000),
+        ])
+        .unwrap();
+        assert!(reversed.matches(&mk(1_500)), "order of the two values must not matter");
+
+        // One instance stays an equality match.
+        let exact = build_filters(&[Attribute::ProtectStopDate(1_000)]).unwrap();
+        assert!(exact.matches(&mk(1_000)));
+        assert!(!exact.matches(&mk(1_001)));
+
+        // An absent date cannot satisfy a requested one.
+        let mut no_date = ObjectRecord::default();
+        no_date.uid = "y".into();
+        assert!(!exact.matches(&no_date), "\"no date\" is not \"any date\"");
+    }
+
+    /// G7 — a filter this server cannot apply is REFUSED, not dropped.
+    ///
+    /// Dropping it made `Locate` answer a narrower question than it was
+    /// asked, returning objects the client never selected. That is a real
+    /// hazard in a key-management search, not a cosmetic one.
+    #[test]
+    fn an_unsupported_locate_filter_is_refused_not_silently_widened() {
+        let err = match build_filters(&[Attribute::Comment("anything".into())]) {
+            Err(e) => e,
+            Ok(_) => panic!("an unapplied filter must not silently widen the result set"),
+        };
+        assert_eq!(err.result_reason(), crate::error::ResultReason::UnsupportedAttribute);
+
+        // Supported filters still build.
+        assert!(build_filters(&[Attribute::CryptographicLength(256)]).is_ok());
     }
 }

@@ -18,7 +18,9 @@ pub mod wire;
 
 pub use algos::{CkMechanismType, KmipAlgorithm, PkcsOp};
 pub use attrs::{
-    Attribute, CustomAttributeValue, DigestAttribute, ObjectType, RevocationReason, RngAttribute,
+    Attribute, CertificateNames, CustomAttributeValue, DigestAttribute, ObjectType,
+    VendorAttributeKey, VENDOR_CLIENT, VENDOR_SERVER,
+    RevocationReason, RngAttribute,
     State, UsageMask,
 };
 pub use ops::{
@@ -41,7 +43,7 @@ pub use ops::{
     LocateRequest, LocateResponse,
     ModifyAttributeRequest, ModifyAttributeResponse,
     Operation,
-    ProfileInformation, CapabilityInformation,
+    ProfileInformation, CapabilityInformation, ExtensionInformation,
     QueryFunction, QueryRequest, QueryResponse,
     RevokeRequest, RevokeResponse,
     RngRetrieveRequest, RngRetrieveResponse,

@@ -312,20 +312,20 @@ fn import_material_round_trips_through_get_and_export() {
 /// tested; the transcripts stay skipped only because of cross-transcript
 /// state isolation, not a missing capability.
 #[test]
-fn object_group_create_into_group_then_locate_by_group_in_one_session() {
+fn group_link_create_into_group_then_locate_by_group_in_one_session() {
     let _guard = engine_test_lock();
     let deps = build_deps_with_real_engine();
 
     // Two keys into "G1", one into "G2", one with no group.
-    let a = create_aes(&deps, vec![Attribute::ObjectGroup("G1".into())], "og-a");
-    let b = create_aes(&deps, vec![Attribute::ObjectGroup("G1".into())], "og-b");
-    let c = create_aes(&deps, vec![Attribute::ObjectGroup("G2".into())], "og-c");
+    let a = create_aes(&deps, vec![Attribute::GroupLink("G1".into())], "og-a");
+    let b = create_aes(&deps, vec![Attribute::GroupLink("G1".into())], "og-b");
+    let c = create_aes(&deps, vec![Attribute::GroupLink("G2".into())], "og-c");
     let _ungrouped = create_aes(&deps, vec![], "og-none");
 
     // Locate by G1 → exactly {a, b}.
     let mut g1 = locate(
         &deps,
-        LocateRequest { attributes: vec![Attribute::ObjectGroup("G1".into())], ..Default::default() },
+        LocateRequest { attributes: vec![Attribute::GroupLink("G1".into())], ..Default::default() },
         &AuthContext::open(),
         "og-loc-g1",
     )
@@ -339,7 +339,7 @@ fn object_group_create_into_group_then_locate_by_group_in_one_session() {
     // Locate by G2 → exactly {c}.
     let g2 = locate(
         &deps,
-        LocateRequest { attributes: vec![Attribute::ObjectGroup("G2".into())], ..Default::default() },
+        LocateRequest { attributes: vec![Attribute::GroupLink("G2".into())], ..Default::default() },
         &AuthContext::open(),
         "og-loc-g2",
     )
@@ -350,7 +350,7 @@ fn object_group_create_into_group_then_locate_by_group_in_one_session() {
     // Locate by an unknown group → empty.
     let none = locate(
         &deps,
-        LocateRequest { attributes: vec![Attribute::ObjectGroup("ghost".into())], ..Default::default() },
+        LocateRequest { attributes: vec![Attribute::GroupLink("ghost".into())], ..Default::default() },
         &AuthContext::open(),
         "og-loc-ghost",
     )
@@ -1225,8 +1225,13 @@ fn certify_issues_certificate_get_able_with_links() {
     assert!(!g.key_block.key_value.is_empty(), "issued cert DER is returned by Get");
 
     let rec = deps.store.get(&resp.uid).unwrap().unwrap();
-    assert_eq!(rec.certificate_subject_cn.as_deref(), Some("e2e-client"),
-        "server-derived §11 CertificateSubjectCN");
+    let subject = rec.certificate_subject.as_ref().expect("§4.6 Subject attributes are derived at Certify");
+    assert_eq!(subject.cn, vec!["e2e-client".to_string()], "server-derived Certificate Subject CN");
+    assert!(subject.dn.is_some(), "a non-empty Subject renders a Certificate Subject DN");
+    assert!(
+        rec.certificate_issuer.is_some(),
+        "§4.6 Table 62 derives the Issuer side at Certify too, not just the Subject"
+    );
     assert_eq!(rec.certificate_length, Some(g.key_block.key_value.len() as i32));
 
     let _ = session::finalize();

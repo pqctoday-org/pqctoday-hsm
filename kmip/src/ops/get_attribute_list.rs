@@ -95,6 +95,16 @@ pub fn get_attribute_list(
     if obj.key_value_present.is_some()             { names.push("Key Value Present".into()); }
     if obj.quantum_safe.is_some()                  { names.push("Quantum Safe".into()); }
     if obj.rotate_automatic.is_some()              { names.push("Rotate Automatic".into()); }
+    if obj.rotate_latest.is_some() { names.push("Rotate Latest".into()); }
+    if obj.archive_date.is_some() { names.push("Archive Date".into()); }
+    if obj.nist_security_category.is_some() { names.push("NIST Security Category".into()); }
+    if obj.otp_counter.is_some() { names.push("OTP Counter".into()); }
+    if obj.pkcs12_friendly_name.is_some() { names.push("PKCS#12 Friendly Name".into()); }
+    if obj.certify_counter.is_some() { names.push("Certify Counter".into()); }
+    if obj.decrypt_counter.is_some() { names.push("Decrypt Counter".into()); }
+    if obj.encrypt_counter.is_some() { names.push("Encrypt Counter".into()); }
+    if obj.sign_counter.is_some() { names.push("Sign Counter".into()); }
+    if obj.signature_verify_counter.is_some() { names.push("Signature Verify Counter".into()); }
     if obj.short_unique_identifier.is_some()       { names.push("Short Unique Identifier".into()); }
     if obj.alternative_name.is_some()              { names.push("Alternative Name".into()); }
     if obj.comment.is_some()                       { names.push("Comment".into()); }
@@ -148,7 +158,15 @@ pub fn get_attribute_list(
         link_keys.sort();
         for k in link_keys { names.push(k.clone()); }
     }
-    for k in obj.custom_attributes.keys() { names.push(k.clone()); }
+    // §6.1.27 lists attribute NAMES, so the vendor half of the stored key is
+    // not part of the answer. Two vendors using one name therefore list it
+    // once, which is what a name list means.
+    for k in obj.custom_attributes.keys() {
+        let n = k.name().to_string();
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
 
     emit_success(deps, correlation_id, "GetAttributeList");
     Ok(GetAttributeListResponse {

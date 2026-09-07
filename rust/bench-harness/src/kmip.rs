@@ -401,13 +401,22 @@ impl KmipTransport for KmipEndpoint {
     }
 }
 
-/// Pull the first TextString under a Response Payload with `tag`.
+/// Pull the first string-shaped field under a Response Payload with `tag`.
+///
+/// Accepts `TextString` and, since 2026-09-06, the three KMIP 3.0 string
+/// types (§11.25): responses now carry a Unique Identifier as `Identifier`
+/// (0x0C) and links as `Reference`/`Name Reference`, so a TextString-only
+/// match would silently find nothing and every UID read here would be `None`.
 fn text_field(response: &[u8], tag: u32) -> Option<String> {
     fn walk(v: &codec::Value, tag: u32, out: &mut Option<String>) {
         if let codec::Value::Structure(children) = v {
             for c in children {
                 if c.tag.0 == tag {
-                    if let codec::Value::TextString(s) = &c.value {
+                    if let codec::Value::TextString(s)
+                        | codec::Value::Identifier(s)
+                        | codec::Value::Reference(s)
+                        | codec::Value::NameReference(s) = &c.value
+                    {
                         if out.is_none() {
                             *out = Some(s.clone());
                         }

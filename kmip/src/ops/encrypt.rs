@@ -193,7 +193,7 @@ pub fn encrypt(
         ));
     }
 
-    // KMIP 3.0 §6.1.21 multi-part streaming — `Init Indicator` opens a
+    // KMIP 3.0 §6.1.23 multi-part streaming — `Init Indicator` opens a
     // stream, `Correlation Value` chains parts, `Final Indicator`
     // closes it (emitting the AEAD tag). CS-BC-M-GCM-3 pins this flow.
     let resp = if req.init_indicator == Some(true) || req.correlation_value.is_some() {
@@ -352,8 +352,9 @@ fn encrypt_streaming(
         deps.streams.lock().unwrap().insert(
             cv.clone(),
             StreamCtx {
-                cipher,
-                uid: req.uid.clone(),
+                state: super::deps::StreamState::Cipher(cipher),
+                operation: crate::kmip30::Operation::Encrypt,
+                uid: Some(req.uid.clone()),
                 // Part F §F7.5 — tag the opening tenant (see StreamCtx).
                 owner: auth.identity.as_ref().map(|i| i.username.clone()),
             },
@@ -382,28 +383,44 @@ fn encrypt_streaming(
         return Err(fail_err(deps, correlation_id, "Encrypt",
             invalid("unknown-correlation-value")));
     }
-    if ctx.uid != req.uid {
+    if ctx.uid.as_deref() != Some(req.uid.as_str()) {
         return Err(fail_err(deps, correlation_id, "Encrypt",
             invalid("correlation-value/uid mismatch")));
     }
-    let ct_result = ctx.cipher.update(&req.data);
+    // Correlation values share one namespace across every streaming
+    // operation, so nothing but this check stops an Encrypt part being applied
+    // to another operation's stream state.
+    if ctx.operation != crate::kmip30::Operation::Encrypt {
+        return Err(fail_err(deps, correlation_id, "Encrypt",
+            invalid("correlation-value belongs to a different operation")));
+    }
+    let super::deps::StreamState::Cipher(ref mut cipher) = ctx.state else {
+        return Err(fail_err(deps, correlation_id, "Encrypt",
+            invalid("correlation-value is not a cipher stream")));
+    };
+    let ct_result = cipher.update(&req.data);
     emit_pkcs11_result(deps, correlation_id, "multipart::update", None, &ct_result);
     let mut ct =
         ct_result.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:update"))?;
     if req.final_indicator == Some(true) {
-        let is_aead = matches!(ctx.cipher, MultipartCipher::Gcm(_));
-        let tail_result = ctx.cipher.finalize();
+        let super::deps::StreamState::Cipher(cipher) = ctx.state else {
+            unreachable!("checked above")
+        };
+        let is_aead = matches!(cipher, MultipartCipher::Gcm(_));
+        let tail_result = cipher.finalize();
         emit_pkcs11_result(deps, correlation_id, "multipart::finalize", None, &tail_result);
         let tail =
             tail_result.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Encrypt:final"))?;
         // AEAD finalize emits the auth tag (own response field per
-        // §6.1.21); block-mode finalize emits trailing ciphertext.
+        // §6.1.23); block-mode finalize emits trailing ciphertext.
         let tag = if is_aead {
             Some(tail)
         } else {
             ct.extend_from_slice(&tail);
             None
         };
+        // §4.13.3 — count a successful Encrypt.
+        super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Encrypt);
         Ok(EncryptResponse {
             uid: req.uid.clone(),
             ciphertext: ct,
@@ -412,6 +429,11 @@ fn encrypt_streaming(
         })
     } else {
         // Middle part — put the stream back and echo the handle.
+        //
+        // Deliberately NOT counted (§4.13.3): a multi-part Encrypt is one
+        // use of the key, so the count lands on the final part. Counting
+        // each part would make the tally a function of how a client chose
+        // to chunk its data.
         streams.insert(cv.clone(), ctx);
         Ok(EncryptResponse {
             uid: req.uid.clone(),
@@ -483,6 +505,8 @@ fn encrypt_ml_kem(
             }
         }
     };
+    // §4.13.3 — count a successful Encrypt.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Encrypt);
     Ok(EncryptResponse {
         uid: req.uid.clone(),
         ciphertext,
@@ -499,7 +523,7 @@ fn encrypt_classical(
     auth: &crate::server::auth::AuthContext,
     correlation_id: &str,
 ) -> Result<EncryptResponse> {
-    // KMIP 3.0 §6.1.21 — the request MAY carry its own
+    // KMIP 3.0 §6.1.23 — the request MAY carry its own
     // `CryptographicParameters` that override the key-attached value.
     // CS-BC-M-4..13 exercise the override pattern (the AES mode lives
     // on the Encrypt call, not the registered key).
@@ -549,7 +573,7 @@ fn encrypt_classical(
     } else { None };
     let effective_iv: Option<&[u8]> = generated_iv.as_deref().or(req.iv.as_deref());
 
-    // KMIP 3.0 §6.1.21 + §11 — IV presence/size is a protocol-level
+    // KMIP 3.0 §6.1.23 + §11 — IV presence/size is a protocol-level
     // requirement, so a missing/short IV for an IV-bearing mech is
     // `InvalidMessage` (0x04), NOT the shim's downstream
     // `InvalidAttributeValue` (0x2d). OASIS CS-BC-M-11 / CS-BC-M-12
@@ -589,7 +613,7 @@ fn encrypt_classical(
         }
     }
 
-    // Plane-3 dispatch. KMIP 3.0 §6.1.21 — the engine performs the
+    // Plane-3 dispatch. KMIP 3.0 §6.1.23 — the engine performs the
     // cryptographic op via the PKCS#11 bridge. Three paths:
     //
     //   1. Engine session present AND key was generated inside the
@@ -693,7 +717,7 @@ fn encrypt_classical(
     // deliberately follow the identical convention, confirmed at
     // `rust/src/crypto/multipart.rs`: `ccm_encrypt` appends the tag to
     // the ciphertext, `ccm_decrypt` takes `ciphertext_and_tag` and
-    // splits the last `tag_len` bytes off). KMIP 3.0 §6.1.21 requires
+    // splits the last `tag_len` bytes off). KMIP 3.0 §6.1.23 requires
     // the tag to ride in its own `AuthenticatedEncryptionTag` field,
     // not tacked onto Data, so we split on the way out. The tag is
     // `Tag Length` bytes when the request's CryptographicParameters pin
@@ -733,6 +757,8 @@ fn encrypt_classical(
         }
     }
 
+    // §4.13.3 — count a successful Encrypt.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Encrypt);
     Ok(EncryptResponse {
         uid: req.uid.clone(),
         ciphertext,
@@ -1056,8 +1082,7 @@ mod k6_no_silent_substitution_tests {
                 data: enc.ciphertext,
                 iv: Some(iv),
                 cryptographic_parameters: Some(cp_mode(6)),
-                aad: None,
-            },
+                aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
             &crate::server::auth::AuthContext::open(),
             "c-dec",
         )
@@ -1098,7 +1123,7 @@ mod k6_no_silent_substitution_tests {
     /// This test originally documented (flagged, not silently patched) a
     /// real protocol-conformance gap found while writing it: `is_aead`
     /// (which splits the engine's `ciphertext || tag` into KMIP's separate
-    /// `Ciphertext`/`AuthenticatedEncryptionTag` fields per §6.1.21) only
+    /// `Ciphertext`/`AuthenticatedEncryptionTag` fields per §6.1.23) only
     /// matched `CKM_AES_GCM`/`CKM_CHACHA20_POLY1305`, so CCM's tag stayed
     /// embedded in `Data` instead of riding in its own field. That gap is
     /// now fixed — `is_aead` includes `CKM_AES_CCM` — so this test asserts
@@ -1139,7 +1164,7 @@ mod k6_no_silent_substitution_tests {
         .unwrap();
         assert_ne!(enc.ciphertext, plaintext);
 
-        // KMIP 3.0 §6.1.21 — CCM is AEAD: the tag MUST ride in its own
+        // KMIP 3.0 §6.1.23 — CCM is AEAD: the tag MUST ride in its own
         // field (fixed `is_aead` match above), and `Data`/`ciphertext`
         // must be exactly the ciphertext length, NOT ciphertext+tag.
         let tag = enc.authenticated_encryption_tag.clone().expect(
@@ -1164,8 +1189,7 @@ mod k6_no_silent_substitution_tests {
                 data: ct_and_tag,
                 iv: Some(nonce.clone()),
                 aad: Some(aad.clone()),
-                cryptographic_parameters: Some(cp_mode(8)),
-            },
+                cryptographic_parameters: Some(cp_mode(8)), init_indicator: None, final_indicator: None, correlation_value: None },
             &crate::server::auth::AuthContext::open(),
             "c-dec",
         )
@@ -1188,8 +1212,7 @@ mod k6_no_silent_substitution_tests {
                 data: ct_and_tampered_tag,
                 iv: Some(nonce),
                 aad: Some(aad),
-                cryptographic_parameters: Some(cp_mode(8)),
-            },
+                cryptographic_parameters: Some(cp_mode(8)), init_indicator: None, final_indicator: None, correlation_value: None },
             &crate::server::auth::AuthContext::open(),
             "c-dec-tamper",
         );
@@ -1233,8 +1256,7 @@ mod k6_no_silent_substitution_tests {
                 data: enc.ciphertext,
                 iv: Some(iv),
                 cryptographic_parameters: Some(cp_mode(5)),
-                aad: None,
-            },
+                aad: None, init_indicator: None, final_indicator: None, correlation_value: None },
             &crate::server::auth::AuthContext::open(),
             "c-dec",
         )

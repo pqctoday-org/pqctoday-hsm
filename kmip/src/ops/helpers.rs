@@ -244,6 +244,11 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
     use KmipAlgorithm::*;
     match a {
         Aes => "AES",
+        Dsa => "DSA",
+        Ec => "EC",
+        Xmss => "XMSS",
+        X25519 => "X25519",
+        X448 => "X448",
         Rsa => "RSA",
         Ecdsa => "ECDSA",
         HmacSha256 => "HMAC-SHA-256",
@@ -448,12 +453,17 @@ pub fn custom_attrs_from(attrs: &[crate::kmip30::Attribute]) -> std::collections
 /// through storage — see [`crate::kmip30::CustomAttributeValue`].
 pub fn raw_custom_attrs(
     attrs: &[crate::kmip30::Attribute],
-) -> std::collections::HashMap<String, crate::kmip30::CustomAttributeValue> {
-    use crate::kmip30::Attribute;
+) -> std::collections::HashMap<
+    crate::kmip30::VendorAttributeKey,
+    crate::kmip30::CustomAttributeValue,
+> {
+    use crate::kmip30::{Attribute, VendorAttributeKey};
     let mut m = std::collections::HashMap::new();
     for a in attrs {
-        if let Attribute::Custom { name, value } = a {
-            m.insert(name.clone(), value.clone());
+        if let Attribute::Custom { vendor, name, value } = a {
+            // §4.70 identifies a vendor attribute by the PAIR, so two vendors
+            // using one name no longer overwrite each other here.
+            m.insert(VendorAttributeKey::new(vendor.as_deref(), name), value.clone());
         }
     }
     m
@@ -468,14 +478,24 @@ pub fn raw_custom_attrs(
 /// (`GetAttributes`) stay typed. Used at use-time ops (Sign / Encrypt / …)
 /// where the attributes come off the stored object, not the request.
 pub fn strip_x_prefixes(
-    raw: &std::collections::HashMap<String, crate::kmip30::CustomAttributeValue>,
+    raw: &std::collections::HashMap<
+        crate::kmip30::VendorAttributeKey,
+        crate::kmip30::CustomAttributeValue,
+    >,
 ) -> std::collections::HashMap<String, String> {
     raw.iter()
         .map(|(k, v)| {
-            let bare = k
+            // The key is now `vendor/name`; policy rules key on the NAME, so
+            // take that half first. The `x-` handling below is UNCHANGED and
+            // deliberately so: the `x-` NAME prefix is the KMIP 1.x custom
+            // attribute naming convention, which is related to but distinct
+            // from §4.70's reserved VENDOR value `"x"`. Conflating the two
+            // would silently change which policy rules match.
+            let name = k.name();
+            let bare = name
                 .strip_prefix("x-")
-                .or_else(|| k.strip_prefix("X-"))
-                .unwrap_or(k);
+                .or_else(|| name.strip_prefix("X-"))
+                .unwrap_or(name);
             (bare.to_string(), v.as_policy_string())
         })
         .collect()
@@ -2142,5 +2162,245 @@ mod tests {
             mac_signature_key_information_present: false,
         }, &wrapped, &crate::server::auth::AuthContext::open(), "c");
         assert!(err.is_err(), "KWP-wrapped bytes must not silently unwrap as plain NISTKeyWrap");
+    }
+}
+
+/// KMIP 3.0 §4.13 — the five Counter attributes. Each records "a successful
+/// instance of usage of an object as the subject of a KMIP operation", and
+/// §4.13 says they SHALL be present for Certificates, Certificate Requests,
+/// Private keys, Public keys and Symmetric keys.
+///
+/// Which counter a given operation bumps. Named rather than passed as a
+/// string so a typo cannot silently increment nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Counter {
+    Certify,
+    Decrypt,
+    Encrypt,
+    Sign,
+    SignatureVerify,
+}
+
+/// Increment `which` on the object named by `uid`, after the operation it
+/// counts has already succeeded.
+///
+/// Deliberately best-effort and never fails the operation: a counter is
+/// bookkeeping, and refusing a completed Sign because its usage tally could
+/// not be written would turn an accounting problem into a crypto outage.
+/// A failed write is dropped rather than surfaced -- the same stance
+/// `commit_mutation` takes for its notification queue.
+///
+/// Rides the store write the operation performs anyway, so counting costs no
+/// extra round trip (the "measure after" half of that decision is a
+/// follow-up, not a claim made here).
+pub fn bump_counter(deps: &Deps, uid: &str, which: Counter) {
+    let Ok(Some(mut rec)) = deps.store.get(uid) else { return };
+    let slot = match which {
+        Counter::Certify => &mut rec.certify_counter,
+        Counter::Decrypt => &mut rec.decrypt_counter,
+        Counter::Encrypt => &mut rec.encrypt_counter,
+        Counter::Sign => &mut rec.sign_counter,
+        Counter::SignatureVerify => &mut rec.signature_verify_counter,
+    };
+    // Saturating: a counter that wrapped to a negative count would be worse
+    // than one that stopped being useful at i32::MAX.
+    *slot = Some(slot.unwrap_or(0).saturating_add(1));
+    let _ = deps.store.update(rec);
+}
+
+#[cfg(test)]
+mod counter_tests {
+    use super::*;
+    use crate::auditlog::{AuditSink, RingSink};
+    use crate::kmip30::{KmipAlgorithm, ObjectType, State, UsageMask};
+    use crate::policy::{load_from_str, Engine};
+    use crate::store::{MemoryStore, ObjectRecord};
+    use std::sync::Arc;
+    use time::OffsetDateTime;
+
+    const PERMISSIVE: &str = r#"
+schema_version: 1
+metadata: { name: p, description: p, authority: t, effective: "always" }
+rules: []
+"#;
+
+    fn deps() -> Deps {
+        let ring = Arc::new(RingSink::new(16));
+        let sink: Arc<dyn AuditSink> = ring.clone();
+        let engine = Engine::with_global_sink(sink.clone());
+        engine
+            .replace_all(load_from_str(PERMISSIVE, std::path::Path::new("<test>")).unwrap())
+            .unwrap();
+        Deps::new(engine, Arc::new(MemoryStore::new()), sink, super::super::deps::DepsConfig::default())
+    }
+
+    fn put_key(d: &Deps, uid: &str) {
+        d.store
+            .put(ObjectRecord {
+                uid: uid.into(),
+                object_type: ObjectType::SymmetricKey,
+                algorithm: KmipAlgorithm::Aes,
+                cryptographic_length: 128,
+                usage_mask: UsageMask::ENCRYPT | UsageMask::DECRYPT,
+                state: State::Active,
+                initial_date: OffsetDateTime::UNIX_EPOCH,
+                ..ObjectRecord::default()
+            })
+            .unwrap();
+    }
+
+    /// §4.13 — a Counter records "a successful instance of usage". Starting
+    /// from absent (not 0), the first use makes it 1 and it accumulates.
+    #[test]
+    fn counters_start_absent_then_accumulate_per_use() {
+        let d = deps();
+        put_key(&d, "k1");
+        assert_eq!(d.store.get("k1").unwrap().unwrap().encrypt_counter, None,
+                   "a never-used object should carry no count, not a zero");
+
+        bump_counter(&d, "k1", Counter::Encrypt);
+        assert_eq!(d.store.get("k1").unwrap().unwrap().encrypt_counter, Some(1));
+
+        bump_counter(&d, "k1", Counter::Encrypt);
+        bump_counter(&d, "k1", Counter::Encrypt);
+        assert_eq!(d.store.get("k1").unwrap().unwrap().encrypt_counter, Some(3));
+
+        // Each counter is independent — an Encrypt must not move Decrypt.
+        assert_eq!(d.store.get("k1").unwrap().unwrap().decrypt_counter, None);
+        bump_counter(&d, "k1", Counter::Decrypt);
+        assert_eq!(d.store.get("k1").unwrap().unwrap().decrypt_counter, Some(1));
+        assert_eq!(d.store.get("k1").unwrap().unwrap().encrypt_counter, Some(3));
+    }
+
+    /// Bookkeeping must never fail the operation it counts: an unknown UID is
+    /// a no-op, not a panic and not an error the caller has to handle.
+    #[test]
+    fn bumping_an_unknown_object_is_a_silent_no_op() {
+        let d = deps();
+        bump_counter(&d, "does-not-exist", Counter::Sign);
+    }
+
+    /// Saturating rather than wrapping — a negative usage count would be
+    /// worse than one that stops being informative.
+    #[test]
+    fn counter_saturates_instead_of_wrapping_negative() {
+        let d = deps();
+        put_key(&d, "k2");
+        let mut rec = d.store.get("k2").unwrap().unwrap();
+        rec.sign_counter = Some(i32::MAX);
+        d.store.update(rec).unwrap();
+
+        bump_counter(&d, "k2", Counter::Sign);
+        assert_eq!(d.store.get("k2").unwrap().unwrap().sign_counter, Some(i32::MAX));
+    }
+}
+
+// ── Multi-part streaming for the non-cipher operations (R3) ──────────────
+//
+// §6.1.30 Hash, §6.1.38 MAC, §6.1.39 MAC Verify, §6.1.62 Sign and §6.1.63
+// Signature Verify all carry `Init Indicator` / `Final Indicator` /
+// `Correlation Value`, exactly like Encrypt and Decrypt.
+//
+// Sign/Verify/MAC accumulate and run the existing one-shot at Final. That is
+// not a shortcut: it mirrors the ENGINE's own multi-part convention
+// (`rust/src/state.rs` `SIGN_MULTIPART_ACC` — `C_SignUpdate` accumulates,
+// `C_SignFinal` calls the one-shot handler), and it is the only correct shape
+// for pure ML-DSA and SLH-DSA, which must see the whole message. `Hash` is
+// different: `compute_hash` is in-process `sha2`/`sha3`, so it keeps real
+// incremental state and never buffers.
+
+use crate::kmip30::Operation;
+use crate::ops::deps::{StreamCtx, StreamState};
+
+/// Outcome of feeding one part into a streaming operation.
+pub enum StreamStep {
+    /// Not the final part — hand this correlation value back to the client.
+    More(Vec<u8>),
+    /// Final part — here is everything the operation accumulated.
+    Done(Vec<u8>),
+}
+
+/// True when a request's indicators mean "this is part of a stream".
+///
+/// Same rule the Decrypt fix established: an `Init Indicator` opens one, and a
+/// `Correlation Value` continues one. A request carrying neither is
+/// single-shot, which is what almost every caller sends.
+pub fn is_streaming(init: Option<bool>, correlation: &Option<Vec<u8>>) -> bool {
+    init == Some(true) || correlation.is_some()
+}
+
+/// Drive one part of a buffering stream (Sign / Signature Verify / MAC /
+/// MAC Verify).
+///
+/// Returns `More` while parts are still arriving and `Done` with the full
+/// accumulated message on the final part. The caller then runs its ordinary
+/// one-shot path over those bytes.
+pub fn buffered_stream_step(
+    deps: &Deps,
+    operation: Operation,
+    uid: Option<&str>,
+    auth: &crate::server::auth::AuthContext,
+    init: Option<bool>,
+    final_: Option<bool>,
+    correlation: Option<Vec<u8>>,
+    part: &[u8],
+) -> crate::error::Result<StreamStep> {
+    let invalid = |m: &str| KmipError::failed(crate::error::ResultReason::InvalidMessage, m.to_string());
+    let owner = auth.identity.as_ref().map(|i| i.username.clone());
+
+    if init == Some(true) {
+        let mut acc = part.to_vec();
+        // An Init that is ALSO Final is a legal one-part stream.
+        if final_ == Some(true) {
+            return Ok(StreamStep::Done(std::mem::take(&mut acc)));
+        }
+        let cv = deps.new_correlation_value();
+        deps.streams.lock().unwrap().insert(
+            cv.clone(),
+            StreamCtx {
+                state: StreamState::Buffered(acc),
+                operation,
+                uid: uid.map(str::to_string),
+                owner,
+            },
+        );
+        return Ok(StreamStep::More(cv));
+    }
+
+    let cv = correlation.ok_or_else(|| invalid("streaming part without a Correlation Value"))?;
+    let mut streams = deps.streams.lock().unwrap();
+    let mut ctx = streams.remove(&cv).ok_or_else(|| invalid("unknown-correlation-value"))?;
+
+    // Part F §F7.5 — a foreign tenant gets the same answer as an unknown
+    // handle, and the stream goes BACK so a stranger cannot destroy the
+    // owner's in-flight state.
+    if ctx.owner != owner {
+        streams.insert(cv.clone(), ctx);
+        return Err(invalid("unknown-correlation-value"));
+    }
+    // Correlation values share ONE namespace across every streaming
+    // operation, so without this a Sign part could be appended to a MAC
+    // stream — or worse, finalised by the wrong operation.
+    if ctx.operation != operation {
+        streams.insert(cv.clone(), ctx);
+        return Err(invalid("correlation-value belongs to a different operation"));
+    }
+    if ctx.uid.as_deref() != uid {
+        streams.insert(cv.clone(), ctx);
+        return Err(invalid("correlation-value/uid mismatch"));
+    }
+
+    let StreamState::Buffered(ref mut acc) = ctx.state else {
+        streams.insert(cv.clone(), ctx);
+        return Err(invalid("correlation-value is not a buffered stream"));
+    };
+    acc.extend_from_slice(part);
+
+    if final_ == Some(true) {
+        let StreamState::Buffered(acc) = ctx.state else { unreachable!("checked above") };
+        Ok(StreamStep::Done(acc))
+    } else {
+        streams.insert(cv.clone(), ctx);
+        Ok(StreamStep::More(cv))
     }
 }

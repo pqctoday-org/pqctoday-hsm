@@ -41,6 +41,35 @@ pub fn sign(
     correlation_id: &str,
 ) -> Result<SignResponse> {
     let session = deps.resolve_tenant_session(auth.identity.as_ref()).ok();
+    // §multi-part (R3) — accumulate the parts and run the ordinary one-shot
+    // path at `Final Indicator`. This mirrors the ENGINE's own convention
+    // (`rust/src/state.rs` SIGN_MULTIPART_ACC: C_SignUpdate accumulates,
+    // C_SignFinal calls the one-shot), and it is the only correct shape for
+    // pure ML-DSA / SLH-DSA, which must see the whole message.
+    let mut req = req;
+    if super::helpers::is_streaming(req.init_indicator, &req.correlation_value) {
+        let taken = req.correlation_value.take();
+        match super::helpers::buffered_stream_step(
+            deps,
+            crate::kmip30::Operation::Sign,
+            Some(&req.uid),
+            auth,
+            req.init_indicator,
+            req.final_indicator,
+            taken,
+            &req.data,
+        )
+        .map_err(|e| fail_err(deps, correlation_id, "Sign", e))?
+        {
+            super::helpers::StreamStep::More(cv) => {
+                return Ok(SignResponse { uid: req.uid, signature: Vec::new(), rekeyed: None, correlation_value: Some(cv) });
+            }
+            super::helpers::StreamStep::Done(all) => {
+                req.data = all;
+            }
+        }
+    }
+
     let started = OffsetDateTime::now_utc();
     deps.sink.emit(AuditEvent::at(
         started,
@@ -311,10 +340,13 @@ pub fn sign(
         },
     ));
 
+    // §4.13.4 — count a successful Sign against the key that signed.
+    super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Sign);
     Ok(SignResponse {
         uid: req.uid,
         signature,
         rekeyed: None,
+        correlation_value: None,
     })
 }
 
@@ -383,6 +415,13 @@ fn rekey_and_sign(
             uid: pair.private_uid.clone(),
             data: req.data.clone(),
             cryptographic_parameters: req.cryptographic_parameters.clone(),
+            // The rekey-and-sign path re-signs the WHOLE message with the
+            // fresh key, so it is single-shot by construction — the caller's
+            // stream (if any) has already been reassembled by the time we
+            // get here.
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
         },
         auth,
         correlation_id,
@@ -522,7 +561,10 @@ rules:
             uid: "u".into(),
             data: b"x".to_vec(),
             cryptographic_parameters: None,
-        }, &AuthContext::open(), "c").unwrap_err();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &AuthContext::open(), "c").unwrap_err();
         assert_eq!(err.result_reason(), ResultReason::IncompatibleCryptographicUsageMask);
     }
 
@@ -536,7 +578,10 @@ rules:
                 uid: "urn:uid:1".into(),
                 data: b"hello".to_vec(),
             cryptographic_parameters: None,
-        },
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+},
             &AuthContext::open(),
             "corr-sign",
         )
@@ -562,7 +607,10 @@ rules:
             &d,
             SignRequest { uid: "urn:nope".into(), data: vec![],
             cryptographic_parameters: None,
-        },
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+},
             &AuthContext::open(),
             "corr-404",
         )
@@ -602,7 +650,10 @@ rules:
         d.store.put(rec).unwrap();
         let err = sign(&d, SignRequest { uid: "urn:pre".into(), data: vec![],
             cryptographic_parameters: None,
-        }, &AuthContext::open(), "corr").unwrap_err();
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+}, &AuthContext::open(), "corr").unwrap_err();
         // KMIP 3.0 §11 — PreActive is a lifecycle-state failure.
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
     }
@@ -618,7 +669,10 @@ rules:
             &d,
             SignRequest { uid: "urn:ecdsa".into(), data: b"x".to_vec(),
             cryptographic_parameters: None,
-        },
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
+},
             &AuthContext::open(),
             "corr-rk",
         )

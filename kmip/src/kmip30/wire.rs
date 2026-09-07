@@ -40,6 +40,20 @@ pub enum WireError {
     #[error("unknown enumeration value {value:#x} for {field}")]
     UnknownEnum { field: &'static str, value: u32 },
 
+    /// G2 (2026-09-06) — an attribute inside a request's `Attributes`
+    /// structure that this server does not model.
+    ///
+    /// Previously `decode_attribute_v3` returned `Ok(None)` for these and the
+    /// caller dropped them, so a client could set an attribute, get `Success`,
+    /// and find it was never stored. §11.48 has `Unsupported Attribute`
+    /// (0x1f) for exactly this; silence was never the conformant answer.
+    ///
+    /// Response decoding keeps the permissive behaviour — a server may send
+    /// attributes a client need not understand, and refusing those would break
+    /// forward compatibility. This is the request-accept path only.
+    #[error("unsupported attribute in request: tag {tag:#08x} is not modelled by this server")]
+    UnsupportedAttribute { tag: u32 },
+
     /// K8 — a `Key Format Type` codepoint outside the KMIP 3.0 §11
     /// table (or one this server cannot materialize). Surfaces on the
     /// batch item as `OperationFailed / Key Format Type Not Supported
@@ -122,12 +136,22 @@ pub(crate) mod tags {
     pub const RevocationReasonCode: u32   = 0x42_0082;
     pub const ServerInformation: u32      = 0x42_0088;
     pub const ServerVersion: u32          = 0x42_012f;
-    /// KMIP 3.0 §6.1.39 — `Application Namespace` TextString (zero or
+    /// KMIP 3.0 §6.1.47 — `Application Namespace` TextString (zero or
     /// more) returned for `QueryFunction::QueryApplicationNamespaces`.
     pub const ApplicationNamespace: u32   = 0x42_0003;
     // ── K3 — Query Profiles / Capabilities reporting (§6.1.47) ─────────
     // Codepoints verified from `kmip-spec-3.0-tags-enums.json`.
     pub const ProfileInformation: u32     = 0x42_00eb;
+    /// §7.14 Extension Information (G5).
+    pub const ExtensionInformation: u32 = 0x42_00a4;
+    pub const ExtensionName: u32 = 0x42_00a5;
+    pub const ExtensionTag: u32 = 0x42_00a6;
+    pub const ExtensionType: u32 = 0x42_00a7;
+    pub const AttestationType: u32 = 0x42_00c7;
+    pub const RngParameters: u32 = 0x42_00d9;
+    pub const ValidationInformation: u32 = 0x42_00df;
+    pub const ClientRegistrationMethod: u32 = 0x42_00f6;
+    pub const CredentialInformation: u32 = 0x42_01b2;
     pub const ProfileName: u32            = 0x42_00ec;
     pub const CapabilityInformation: u32  = 0x42_00f7;
     pub const StreamingCapability: u32    = 0x42_00ef;
@@ -139,9 +163,11 @@ pub(crate) mod tags {
     /// ResponseHeader. Codepoint verified from
     /// `spec/oasis-kmip-3.0/kmip-spec-3.0-tags-enums.json`.
     pub const ServerCorrelationValue: u32 = 0x42_0106;
-    // `Client Correlation Value` (0x42_0105, request side only)
-    // intentionally absent — the decoder skips it; see curated-table
-    // note above.
+    /// KMIP 3.0 §9.7 — `Client Correlation Value`, a text string a client
+    /// MAY add to a request "to provide additional information to the
+    /// server. It need not be unique. The server SHOULD log this
+    /// information." Decoded and logged since R6; previously skipped.
+    pub const ClientCorrelationValue: u32 = 0x42_0105;
     pub const SignatureData: u32          = 0x42_00c3;
     pub const State: u32                  = 0x42_008d;
     pub const TimeStamp: u32              = 0x42_0092;
@@ -252,6 +278,26 @@ pub(crate) mod tags {
     pub const ApplicationData: u32        = 0x42_0002;
     /// KMIP 3.0 §11 — `Group Link` Reference (UID of a Group object).
     pub const GroupLink: u32              = 0x42_01b3;
+    /// `Child Link` — §4.35.3.
+    pub const ChildLink: u32 = 0x42_0191;
+    /// `Parent Link` — §4.35.10.
+    pub const ParentLink: u32 = 0x42_0195;
+    /// `PKCS#12 Certificate Link` — §4.35.12.
+    pub const Pkcs12CertificateLink: u32 = 0x42_0196;
+    /// `PKCS#12 Password Link` — §4.35.13.
+    pub const Pkcs12PasswordLink: u32 = 0x42_0197;
+    /// `Wrapping Key Link` — §4.35.20.
+    pub const WrappingKeyLink: u32 = 0x42_019d;
+    /// `Credential Link` — §4.35.4.
+    pub const CredentialLink: u32 = 0x42_01a0;
+    /// `Password Link` — §4.35.11.
+    pub const PasswordLink: u32 = 0x42_01a5;
+    /// `Split Key Base Link` — §4.35.19.
+    pub const SplitKeyBaseLink: u32 = 0x42_01b4;
+    /// `Joined Split Key Parts Link` — §4.35.8.
+    pub const JoinedSplitKeyPartsLink: u32 = 0x42_01b5;
+    /// `Certificate Request Link` — §4.35.2.
+    pub const CertificateRequestLink: u32 = 0x42_01bc;
     /// `Object Group` (0x420056) — the KMIP **2.x** multi-instance
     /// group-membership label. K3: this tag is **RESERVED in KMIP 3.0**
     /// (verified against `kmip-spec-3.0-tags-enums.json` — 0x420056 is absent;
@@ -260,7 +306,11 @@ pub(crate) mod tags {
     /// membership as `Group Link` and NEVER emits 0x420056; it still ACCEPTS
     /// 0x420056 on input as 2.x compatibility (normalised to the same internal
     /// membership set). Encodes as a TextString.
-    pub const ObjectGroup: u32            = 0x42_0056;
+    // `Object Group` (0x420056) is RETIRED. The §11.58 Tag Enumeration table
+    // in CSD02 lists 0x420056 as **(Reserved)**; KMIP 3.0 expresses group
+    // membership through the §7.24 `Object Groups` structure of repeated
+    // `Group Link` (0x4201b3) values instead. Emitting it meant putting a
+    // reserved codepoint on the wire.
     // K20 — Derive Key (§6.1.19 / §7.13). All six codepoints verified
     // against `kmip-spec-3.0-tags-enums.json`.
     /// `Derivation Method` Enumeration (§11.15).
@@ -410,7 +460,7 @@ pub(crate) mod tags {
     pub const Pkcs11OutputParameters: u32 = 0x42_015c;
     pub const Pkcs11ReturnCode: u32       = 0x42_015d;
     pub const CorrelationValue: u32       = 0x42_00d6;
-    // KMIP 3.0 §6.1.21 multi-part streaming (verified from
+    // KMIP 3.0 §6.1.23 multi-part streaming (verified from
     // kmip-spec-3.0-tags-enums.json: Init Indicator = 0x4200d7,
     // Final Indicator = 0x4200d8).
     pub const InitIndicator: u32          = 0x42_00d7;
@@ -447,6 +497,26 @@ pub(crate) mod tags {
     pub const X509CertificateIssuer: u32         = 0x42_00b6;
     pub const X509CertificateSubject: u32        = 0x42_00b7;
     pub const RotateName: u32                    = 0x42_016f;
+    /// `Rotate Latest` — §4.58.
+    pub const RotateLatest: u32 = 0x42_0172;
+    /// `Archive Date` — §4.5.
+    pub const ArchiveDate: u32 = 0x42_0005;
+    /// `NIST Security Category` — §4.39.
+    pub const NistSecurityCategory: u32 = 0x42_01c2;
+    /// `OTP Counter` — §4.44.
+    pub const OtpCounter: u32 = 0x42_01ae;
+    /// `PKCS#12 Friendly Name` — §4.45.
+    pub const Pkcs12FriendlyName: u32 = 0x42_00fb;
+    /// `Certify Counter` — §4.13.1.
+    pub const CertifyCounter: u32 = 0x42_01bd;
+    /// `Decrypt Counter` — §4.13.2.
+    pub const DecryptCounter: u32 = 0x42_01be;
+    /// `Encrypt Counter` — §4.13.3.
+    pub const EncryptCounter: u32 = 0x42_01bf;
+    /// `Sign Counter` — §4.13.4.
+    pub const SignCounter: u32 = 0x42_01c0;
+    /// `Signature Verify Counter` — §4.13.5.
+    pub const SignatureVerifyCounter: u32 = 0x42_01c1;
     pub const CertificateType: u32               = 0x42_001d;
     /// KMIP 3.0 §6.2 — Certificate object outer Structure tag.
     pub const Certificate: u32                   = 0x42_0013;
@@ -454,6 +524,33 @@ pub(crate) mod tags {
     pub const CertificateValue: u32              = 0x42_001e;
     /// KMIP 3.0 §11 — Certificate Subject CN extracted from the DER.
     pub const CertificateSubjectCN: u32          = 0x42_0108;
+    // §4.6 Certificate Attributes — the other 25 (13 Subject + 13 Issuer,
+    // minus Subject CN above). Codepoints from kmip-spec-3.0-tags-enums.json.
+    pub const CertificateSubjectO: u32        = 0x42_0109;
+    pub const CertificateSubjectOU: u32       = 0x42_010A;
+    pub const CertificateSubjectEmail: u32    = 0x42_010B;
+    pub const CertificateSubjectC: u32        = 0x42_010C;
+    pub const CertificateSubjectST: u32       = 0x42_010D;
+    pub const CertificateSubjectL: u32        = 0x42_010E;
+    pub const CertificateSubjectUID: u32      = 0x42_010F;
+    pub const CertificateSubjectSerialNumber: u32 = 0x42_0110;
+    pub const CertificateSubjectTitle: u32    = 0x42_0111;
+    pub const CertificateSubjectDC: u32       = 0x42_0112;
+    pub const CertificateSubjectDNQualifier: u32 = 0x42_0113;
+    pub const CertificateSubjectDN: u32       = 0x42_01BA;
+    pub const CertificateIssuerCN: u32        = 0x42_0114;
+    pub const CertificateIssuerO: u32         = 0x42_0115;
+    pub const CertificateIssuerOU: u32        = 0x42_0116;
+    pub const CertificateIssuerEmail: u32     = 0x42_0117;
+    pub const CertificateIssuerC: u32         = 0x42_0118;
+    pub const CertificateIssuerST: u32        = 0x42_0119;
+    pub const CertificateIssuerL: u32         = 0x42_011A;
+    pub const CertificateIssuerUID: u32       = 0x42_011B;
+    pub const CertificateIssuerSerialNumber: u32 = 0x42_011C;
+    pub const CertificateIssuerTitle: u32     = 0x42_011D;
+    pub const CertificateIssuerDC: u32        = 0x42_011E;
+    pub const CertificateIssuerDNQualifier: u32 = 0x42_011F;
+    pub const CertificateIssuerDN: u32        = 0x42_01BB;
     /// P2.3 — §6.1.6 Certify / §6.1.52 Re-certify `Certificate Request`
     /// ByteString: the inline CSR (PKCS#10 / PEM / CRMF) bytes. The
     /// §6.1.6 payload table names the item "Certificate Request Value",
@@ -602,6 +699,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
     let mut max_resp_size: Option<i32> = None;
     let mut async_indicator: Option<crate::kmip30::AsynchronousIndicator> = None;
     let mut authentication: Vec<crate::kmip30::Credential> = Vec::new();
+    let mut client_correlation_value: Option<String> = None;
     for child in children {
         match child.tag.0 {
             tags::ProtocolVersion => {
@@ -617,6 +715,15 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
             tags::TimeStamp => {
                 if let Value::DateTime(ts) = child.value {
                     time_stamp = time::OffsetDateTime::from_unix_timestamp(ts).ok();
+                }
+            }
+            // §9.7 — the server SHOULD log this. Carried on the header so the
+            // dispatcher can put it in the audit record; never echoed back on
+            // a client-to-server response (§9.7 gives it to the RESPONSE only
+            // for server-to-client operations, which are encoded elsewhere).
+            tags::ClientCorrelationValue => {
+                if let Value::TextString(v) = &child.value {
+                    client_correlation_value = Some(v.clone());
                 }
             }
             // KMIP 3.0 §9.5 — `Batch Error Continuation Option`
@@ -671,6 +778,7 @@ fn decode_request_header(frame: &TtlvFrame) -> Result<RequestHeader, WireError> 
         maximum_response_size: max_resp_size,
         asynchronous_indicator: async_indicator,
         authentication,
+        client_correlation_value,
     })
 }
 
@@ -1046,7 +1154,7 @@ fn uid_frame(uid: &str) -> TtlvFrame {
     if uid == crate::dispatcher::ID_PLACEHOLDER_SENTINEL {
         return TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Enumeration(0x00000001));
     }
-    TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(uid.to_string()))
+    TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(uid.to_string()))
 }
 
 /// Encapsulate's `CryptographicParameters` structure, PLUS the CSD02
@@ -1075,7 +1183,7 @@ fn encode_encapsulate_params(
 fn encode_key_wrapping_spec(s: &KeyWrappingSpec) -> TtlvFrame {
     let mut eki = vec![TtlvFrame::new(
         Tag(tags::UniqueIdentifier),
-        Value::TextString(s.encryption_key_uid.clone()),
+        Value::Identifier(s.encryption_key_uid.clone()),
     )];
     if let Some(cp) = &s.cryptographic_parameters {
         eki.push(encode_cryptographic_parameters(cp));
@@ -1140,6 +1248,7 @@ fn interop_function_code(f: InteropFunction) -> u32 {
     match f {
         InteropFunction::Begin => 0x01,
         InteropFunction::End => 0x02,
+        InteropFunction::Reset => 0x03,
     }
 }
 
@@ -1150,6 +1259,15 @@ fn query_function_code(q: QueryFunction) -> u32 {
         QueryFunction::QueryServerInformation => 0x03,
         QueryFunction::QueryApplicationNamespaces => 0x04,
         QueryFunction::QueryProfiles => 0x0a,
+        QueryFunction::QueryExtensionList => 0x05,
+        QueryFunction::QueryExtensionMap => 0x06,
+        QueryFunction::QueryAttestationTypes => 0x07,
+        QueryFunction::QueryRngs => 0x08,
+        QueryFunction::QueryValidations => 0x09,
+        QueryFunction::QueryClientRegistrationMethods => 0x0c,
+        QueryFunction::QueryDefaultsInformation => 0x0d,
+        QueryFunction::QueryStorageProtectionMasks => 0x0e,
+        QueryFunction::QueryCredentialInformation => 0x0f,
         QueryFunction::QueryCapabilities => 0x0b,
     }
 }
@@ -1165,6 +1283,15 @@ fn query_function_from_code(v: u32) -> Option<QueryFunction> {
         0x03 => QueryFunction::QueryServerInformation,
         0x04 => QueryFunction::QueryApplicationNamespaces,
         0x0a => QueryFunction::QueryProfiles,
+        0x05 => QueryFunction::QueryExtensionList,
+        0x06 => QueryFunction::QueryExtensionMap,
+        0x07 => QueryFunction::QueryAttestationTypes,
+        0x08 => QueryFunction::QueryRngs,
+        0x09 => QueryFunction::QueryValidations,
+        0x0c => QueryFunction::QueryClientRegistrationMethods,
+        0x0d => QueryFunction::QueryDefaultsInformation,
+        0x0e => QueryFunction::QueryStorageProtectionMasks,
+        0x0f => QueryFunction::QueryCredentialInformation,
         0x0b => QueryFunction::QueryCapabilities,
         _ => return None,
     })
@@ -1172,13 +1299,12 @@ fn query_function_from_code(v: u32) -> Option<QueryFunction> {
 
 fn deactivation_reason_code(r: DeactivationReason) -> u32 {
     match r {
+        // §11.14 defines exactly these four (G8). The previous six mirrored
+        // `Revocation Reason Code`, a different enumeration.
         DeactivationReason::Unspecified => 0x01,
-        DeactivationReason::KeyCompromise => 0x02,
-        DeactivationReason::CACompromise => 0x03,
-        DeactivationReason::AffiliationChanged => 0x04,
-        DeactivationReason::Superseded => 0x05,
-        DeactivationReason::CessationOfOperation => 0x06,
-        DeactivationReason::PrivilegeWithdrawn => 0x07,
+        DeactivationReason::DeactivationDate => 0x02,
+        DeactivationReason::ProtectStopDate => 0x03,
+        DeactivationReason::UsageLimit => 0x04,
     }
 }
 
@@ -1713,7 +1839,7 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::CreateSplitKey(r)   => r
             .uids
             .iter()
-            .map(|u| TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(u.clone())))
+            .map(|u| TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(u.clone())))
             .collect(),
         ResponsePayload::JoinSplitKey(r)     => encode_uid_only_resp(&r.uid),
         ResponsePayload::Archive(r)          => encode_uid_only_resp(&r.uid),
@@ -1760,11 +1886,11 @@ fn response_payload_to_frame(payload: &ResponsePayload) -> TtlvFrame {
         ResponsePayload::ReKeyKeyPair(r)     => vec![
             TtlvFrame::new(
                 Tag(tags::PrivateKeyUniqueIdentifier),
-                Value::TextString(r.private_key_uid.clone()),
+                Value::Identifier(r.private_key_uid.clone()),
             ),
             TtlvFrame::new(
                 Tag(tags::PublicKeyUniqueIdentifier),
-                Value::TextString(r.public_key_uid.clone()),
+                Value::Identifier(r.public_key_uid.clone()),
             ),
         ],
         // Phase 4 — §6.1.5 Table 262: Asynchronous Correlation Value +
@@ -1847,7 +1973,7 @@ fn encode_query_resp(r: &QueryResponse) -> Vec<TtlvFrame> {
         }
     }
     // VendorIdentification is a top-level child of the Query response
-    // payload per KMIP 3.0 §6.1.39, not nested inside ServerInformation.
+    // payload per KMIP 3.0 §6.1.47, not nested inside ServerInformation.
     if let Some(vendor) = &r.vendor_identification {
         out.push(TtlvFrame::new(
             Tag(tags::VendorIdentification),
@@ -1881,6 +2007,77 @@ fn encode_query_resp(r: &QueryResponse) -> Vec<TtlvFrame> {
                 Value::Structure(vec![TtlvFrame::new(
                     Tag(tags::ProfileName),
                     Value::Enumeration(p.profile_name),
+                )]),
+            ));
+        }
+    }
+    // ── G5 (2026-09-06) — the nine functions' response items ────────────
+    if let Some(exts) = &r.extension_information {
+        for e in exts {
+            out.push(TtlvFrame::new(
+                Tag(tags::ExtensionInformation),
+                Value::Structure(vec![
+                    TtlvFrame::new(Tag(tags::ExtensionName), Value::TextString(e.extension_name.clone())),
+                    TtlvFrame::new(Tag(tags::ExtensionTag), Value::Integer(e.extension_tag as i32)),
+                    TtlvFrame::new(Tag(tags::ExtensionType), Value::Integer(e.extension_type as i32)),
+                ]),
+            ));
+        }
+    }
+    if let Some(v) = &r.attestation_types {
+        for t in v {
+            out.push(TtlvFrame::new(Tag(tags::AttestationType), Value::Enumeration(*t)));
+        }
+    }
+    if let Some(v) = &r.rng_parameters {
+        for algo in v {
+            out.push(TtlvFrame::new(
+                Tag(tags::RngParameters),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::RngAlgorithm),
+                    Value::Enumeration(*algo),
+                )]),
+            ));
+        }
+    }
+    if let Some(v) = &r.validation_information {
+        for name in v {
+            // No validation to claim today; if one is ever added, the
+            // structure gains its §11.x children here.
+            out.push(TtlvFrame::new(
+                Tag(tags::ValidationInformation),
+                Value::TextString(name.clone()),
+            ));
+        }
+    }
+    if let Some(v) = &r.client_registration_methods {
+        for m in v {
+            out.push(TtlvFrame::new(Tag(tags::ClientRegistrationMethod), Value::Enumeration(*m)));
+        }
+    }
+    if let Some(v) = &r.storage_protection_masks {
+        for m in v {
+            out.push(TtlvFrame::new(Tag(tags::ProtectionStorageMask), Value::Integer(*m as i32)));
+        }
+    }
+    if let Some(v) = &r.credential_information {
+        for c in v {
+            out.push(TtlvFrame::new(
+                Tag(tags::CredentialInformation),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::CredentialType),
+                    Value::Enumeration(*c),
+                )]),
+            ));
+        }
+    }
+    if let Some(v) = &r.defaults_information {
+        for name in v {
+            out.push(TtlvFrame::new(
+                Tag(tags::DefaultsInformation),
+                Value::Structure(vec![TtlvFrame::new(
+                    Tag(tags::AttributeName),
+                    Value::TextString(name.clone()),
                 )]),
             ));
         }
@@ -1935,7 +2132,7 @@ fn decode_create_req(children: &[TtlvFrame]) -> Result<CreateRequest, WireError>
 fn encode_create_resp(r: &CreateResponse) -> Vec<TtlvFrame> {
     vec![
         TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(r.object_type.to_wire_value())),
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
     ]
 }
 
@@ -1995,11 +2192,11 @@ fn encode_create_key_pair_resp(r: &CreateKeyPairResponse) -> Vec<TtlvFrame> {
     vec![
         TtlvFrame::new(
             Tag(tags::PrivateKeyUniqueIdentifier),
-            Value::TextString(r.private_key_uid.clone()),
+            Value::Identifier(r.private_key_uid.clone()),
         ),
         TtlvFrame::new(
             Tag(tags::PublicKeyUniqueIdentifier),
-            Value::TextString(r.public_key_uid.clone()),
+            Value::Identifier(r.public_key_uid.clone()),
         ),
     ]
 }
@@ -2087,9 +2284,13 @@ fn decode_key_wrapping_spec(frame: &TtlvFrame) -> Result<KeyWrappingSpec, WireEr
             tags::EncryptionKeyInformation => {
                 for e in expect_structure(c, "Encryption Key Information")? {
                     match e.tag.0 {
+                        // §3.3 Table 36 — the wrapping key is named by
+                        // "Reference or Name Reference or Unique Identifier
+                        // Enumeration or Integer". `link_target` accepts the
+                        // three string forms; TextString is not one of them.
                         tags::UniqueIdentifier => {
-                            if let Value::TextString(s) = &e.value {
-                                encryption_key_uid = s.clone();
+                            if let Some(s) = link_target(&e.value) {
+                                encryption_key_uid = s;
                             }
                         }
                         tags::CryptographicParameters => {
@@ -2170,7 +2371,7 @@ fn encode_get_resp(r: &GetResponse) -> Vec<TtlvFrame> {
     };
     vec![
         TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(r.object_type.to_wire_value())),
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         managed_object,
     ]
 }
@@ -2210,7 +2411,7 @@ fn decode_locate_req(children: &[TtlvFrame]) -> Result<LocateRequest, WireError>
 fn encode_locate_resp(r: &LocateResponse) -> Vec<TtlvFrame> {
     r.uids
         .iter()
-        .map(|u| TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(u.clone())))
+        .map(|u| TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(u.clone())))
         .collect()
 }
 
@@ -2219,7 +2420,7 @@ fn decode_activate_req(children: &[TtlvFrame]) -> Result<ActivateRequest, WireEr
 }
 
 fn encode_activate_resp(r: &ActivateResponse) -> Vec<TtlvFrame> {
-    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone()))]
+    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone()))]
 }
 
 fn decode_revoke_req(children: &[TtlvFrame]) -> Result<RevokeRequest, WireError> {
@@ -2252,7 +2453,7 @@ fn decode_revoke_req(children: &[TtlvFrame]) -> Result<RevokeRequest, WireError>
 }
 
 fn encode_revoke_resp(r: &RevokeResponse) -> Vec<TtlvFrame> {
-    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone()))]
+    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone()))]
 }
 
 fn decode_destroy_req(children: &[TtlvFrame]) -> Result<DestroyRequest, WireError> {
@@ -2260,7 +2461,7 @@ fn decode_destroy_req(children: &[TtlvFrame]) -> Result<DestroyRequest, WireErro
 }
 
 fn encode_destroy_resp(r: &DestroyResponse) -> Vec<TtlvFrame> {
-    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone()))]
+    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone()))]
 }
 
 fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireError> {
@@ -2282,7 +2483,7 @@ fn decode_encrypt_req(children: &[TtlvFrame]) -> Result<EncryptRequest, WireErro
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
-            // KMIP 3.0 §6.1.21 multi-part streaming fields.
+            // KMIP 3.0 §6.1.23 multi-part streaming fields.
             tags::InitIndicator => {
                 if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
             }
@@ -2319,17 +2520,17 @@ fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
     // Authenticated Encryption Tag. CS-BC-M-GCM-2 pair #111 pins the
     // IV-before-tag ordering when RandomIV generates both.
     let mut out = vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.ciphertext.clone())),
     ];
     if let Some(iv) = &r.iv_counter_nonce {
-        // KMIP 3.0 §6.1.21 — server-generated IV/Counter/Nonce when
+        // KMIP 3.0 §6.1.23 — server-generated IV/Counter/Nonce when
         // the key's `RandomIV` is true. CS-BC-M-13 expects the server
         // to emit this field with the IV it used.
         out.push(TtlvFrame::new(Tag(tags::IvCounterNonce), Value::ByteString(iv.clone())));
     }
     if let Some(cv) = &r.correlation_value {
-        // §6.1.21 — handle for the client to chain the next stream part.
+        // §6.1.23 — handle for the client to chain the next stream part.
         out.push(TtlvFrame::new(
             Tag(tags::CorrelationValue),
             Value::ByteString(cv.clone()),
@@ -2343,7 +2544,7 @@ fn encode_encrypt_resp(r: &EncryptResponse) -> Vec<TtlvFrame> {
     }
     if let Some(ss) = &r.shared_secret {
         // K10 — ML-KEM encapsulation shared secret rides the
-        // `PQCToday-SharedSecret` vendor-extension tag (0x540001, §11.57
+        // `PQCToday-SharedSecret` vendor-extension tag (0x540001, §11.58
         // Extensions range 0x540000–0x54FFFF). It previously abused the
         // standard IvCounterNonce tag, which is wire-ambiguous with
         // classical RandomIV responses (compliance-audit B-7).
@@ -2362,6 +2563,9 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
     let mut iv = None;
     let mut cp = None;
     let mut tag: Option<Vec<u8>> = None;
+    let mut init_indicator = None;
+    let mut final_indicator = None;
+    let mut correlation_value = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
@@ -2371,6 +2575,17 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
             }
             tags::AuthenticatedEncryptionTag => {
                 if let Value::ByteString(b) = &c.value { tag = Some(b.clone()); }
+            }
+            // §6.1.16 multi-part (G6) — these three were dropped here, so a
+            // streaming Decrypt was silently treated as a single-shot one.
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
             }
             _ => {}
         }
@@ -2382,17 +2597,20 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
         }
     }
     // For AEAD decrypt, the shim expects ciphertext||tag concatenated.
-    // KMIP keeps them as separate fields per §6.1.21; recombine on
+    // KMIP keeps them as separate fields per §6.1.23; recombine on
     // ingress so the shim sees what `aes-gcm` expects.
     if let Some(t) = tag {
         data.extend_from_slice(&t);
     }
-    Ok(DecryptRequest { uid, data, iv, cryptographic_parameters: cp, aad })
+    Ok(DecryptRequest {
+        uid, data, iv, cryptographic_parameters: cp, aad,
+        init_indicator, final_indicator, correlation_value,
+    })
 }
 
 fn encode_decrypt_resp(r: &DecryptResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())),
     ]
 }
@@ -2438,7 +2656,7 @@ fn decode_encapsulate_req(children: &[TtlvFrame]) -> Result<EncapsulateRequest, 
 /// `{ UniqueIdentifier (new shared-secret object), Data (ciphertext) }`.
 fn encode_encapsulate_resp(r: &EncapsulateResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::Data), Value::ByteString(r.data.clone())),
     ]
 }
@@ -2466,28 +2684,41 @@ fn decode_decapsulate_req(children: &[TtlvFrame]) -> Result<DecapsulateRequest, 
 /// Encode a `Decapsulate` response payload (KMIP 3.0 CSD02):
 /// `{ UniqueIdentifier (new shared-secret object) }`.
 fn encode_decapsulate_resp(r: &DecapsulateResponse) -> Vec<TtlvFrame> {
-    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone()))]
+    vec![TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone()))]
 }
 
 fn decode_sign_req(children: &[TtlvFrame]) -> Result<SignRequest, WireError> {
     let uid = required_uid(children)?;
     let mut data = Vec::new();
     let mut cp: Option<CryptographicParameters> = None;
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
+            // §6.1.62 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(SignRequest { uid, data, cryptographic_parameters: cp })
+    Ok(SignRequest { uid, data, cryptographic_parameters: cp, init_indicator, final_indicator, correlation_value })
 }
 
 fn encode_sign_resp(r: &SignResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::SignatureData), Value::ByteString(r.signature.clone())),
     ]
 }
@@ -2497,6 +2728,9 @@ fn decode_sigverify_req(children: &[TtlvFrame]) -> Result<SignatureVerifyRequest
     let mut data = Vec::new();
     let mut signature = Vec::new();
     let mut cp: Option<CryptographicParameters> = None;
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
@@ -2504,15 +2738,25 @@ fn decode_sigverify_req(children: &[TtlvFrame]) -> Result<SignatureVerifyRequest
             tags::CryptographicParameters => {
                 cp = Some(decode_cryptographic_parameters(c)?);
             }
+            // §6.1.63 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(SignatureVerifyRequest { uid, data, signature, cryptographic_parameters: cp })
+    Ok(SignatureVerifyRequest { uid, data, signature, cryptographic_parameters: cp, init_indicator, final_indicator, correlation_value })
 }
 
 fn encode_sigverify_resp(r: &SignatureVerifyResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::ValidityIndicator), Value::Enumeration(r.validity as u32)),
     ]
 }
@@ -2544,8 +2788,8 @@ fn decode_validate_req(children: &[TtlvFrame]) -> Result<ValidateRequest, WireEr
                 }
             }
             tags::UniqueIdentifier => {
-                if let Value::TextString(s) = &c.value {
-                    uids.push(s.clone());
+                if let Some(s) = link_target(&c.value) {
+                    uids.push(s);
                 }
             }
             tags::ValidityDate => {
@@ -2587,7 +2831,7 @@ fn decode_certify_req(children: &[TtlvFrame]) -> Result<CertifyRequest, WireErro
     for c in children {
         match c.tag.0 {
             tags::UniqueIdentifier => {
-                if let Value::TextString(s) = &c.value { req.uid = Some(s.clone()); }
+                if let Some(s) = link_target(&c.value) { req.uid = Some(s.clone()); }
             }
             tags::CertificateRequestType => {
                 let v = expect_enum(c, "Certificate Request Type")?;
@@ -2622,7 +2866,13 @@ fn decode_recertify_req(children: &[TtlvFrame]) -> Result<ReCertifyRequest, Wire
     for c in children {
         match c.tag.0 {
             tags::CertificateRequestUniqueIdentifier => {
-                if let Value::TextString(s) = &c.value { req.certificate_request_uid = Some(s.clone()); }
+                if let Some(s) = uid_context_value(
+                    &c.value,
+                    tags::CertificateRequestUniqueIdentifier,
+                    "Certificate Request Unique Identifier",
+                )? {
+                    req.certificate_request_uid = Some(s);
+                }
             }
             tags::CertificateRequestType => {
                 let v = expect_enum(c, "Certificate Request Type")?;
@@ -2712,8 +2962,8 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
             )
         }
         tags::UniqueIdentifier => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::UniqueIdentifier(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::UniqueIdentifier(s)
             } else {
                 return Err(WireError::BadType {
                     tag: frame.tag.0,
@@ -2752,6 +3002,24 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
         tags::Fresh => Attribute::Fresh(expect_boolean(frame, "Fresh")?),
         tags::KeyValuePresent => Attribute::KeyValuePresent(expect_boolean(frame, "Key Value Present")?),
         tags::QuantumSafe => Attribute::QuantumSafe(expect_boolean(frame, "Quantum Safe")?),
+        // G2 (2026-09-06) — §5.1.2 item 8 completion. Note the five §4.13
+        // Counters are server-maintained: a client may READ them, and the
+        // read-only guard in attribute_mutate refuses a client write.
+        // `Rotate Latest` is likewise "Modifiable by client: No" (§4.58).
+        tags::RotateLatest => Attribute::RotateLatest(expect_boolean(frame, "Rotate Latest")?),
+        tags::ArchiveDate => Attribute::ArchiveDate(expect_datetime(frame, "Archive Date")?),
+        tags::NistSecurityCategory => Attribute::NistSecurityCategory(expect_integer(frame, "NIST Security Category")?),
+        tags::OtpCounter => Attribute::OtpCounter(expect_integer(frame, "OTP Counter")?),
+        tags::CertifyCounter => Attribute::CertifyCounter(expect_integer(frame, "Certify Counter")?),
+        tags::DecryptCounter => Attribute::DecryptCounter(expect_integer(frame, "Decrypt Counter")?),
+        tags::EncryptCounter => Attribute::EncryptCounter(expect_integer(frame, "Encrypt Counter")?),
+        tags::SignCounter => Attribute::SignCounter(expect_integer(frame, "Sign Counter")?),
+        tags::SignatureVerifyCounter => Attribute::SignatureVerifyCounter(expect_integer(frame, "Signature Verify Counter")?),
+        tags::Pkcs12FriendlyName => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::Pkcs12FriendlyName(s.clone())
+            } else { return Ok(None); }
+        }
         // Phase 3.3 — Split Key attributes (§4.29/§4.30/§4.63-4.66).
         // Client-decodable so Create Split Key's generic Attributes
         // list can carry Split Key Polynomial (§4.63).
@@ -2803,6 +3071,7 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
             let inner = expect_structure(frame, "Attribute")?;
             let mut name = String::new();
             let mut value = CustomAttributeValue::Text(String::new());
+            let mut vendor: Option<String> = None;
             for c in inner {
                 match c.tag.0 {
                     tags::AttributeName => {
@@ -2833,10 +3102,20 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                             _ => CustomAttributeValue::Text(String::new()),
                         };
                     }
-                    _ => {} // VendorIdentification + future fields ignored in v0.1
+                    // G9 (2026-09-06) — §4.70 identifies a vendor attribute
+                    // by the PAIR (Vendor Identification, Attribute Name).
+                    // This was discarded, so two vendors' attributes with the
+                    // same name were indistinguishable and the server echoed
+                    // "x" back regardless of what the client actually sent.
+                    tags::VendorIdentification => {
+                        if let Value::TextString(v) = &c.value {
+                            vendor = Some(v.clone());
+                        }
+                    }
+                    _ => {}
                 }
             }
-            Attribute::Custom { name, value }
+            Attribute::Custom { vendor, name, value }
         }
         // KMIP 3.0 §11 string-attribute decode arms — needed so that
         // AddAttribute / ModifyAttribute requests carrying these
@@ -2900,62 +3179,120 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 Attribute::ObjectClass(match v { 2 => "System".into(), _ => "User".into() })
             } else { return Ok(None); }
         }
-        // KMIP 3.0 §11 — Link attributes (UID references). All three
-        // wire as TextString on the response side; the XML uses
-        // `type="Reference"` which the oasis_codec maps to TextString.
+        // KMIP 3.0 §4.35 — Link attributes. Each is encoded "Reference or
+        // Name Reference or Unique Identifier Enumeration or Integer": a
+        // `Reference` is early-binding (a specific object's UID), a
+        // `Name Reference` late-binding (whichever object currently has the
+        // matching Name). `Identifier` is accepted too, since a link target
+        // is itself a UID.
+        //
+        // Until 2026-09-06 these decoded from `TextString`, because the codec
+        // had no 0x0D/0x0E types and the replay harness rewrote the corpus's
+        // `type="Reference"` down to TextString. Both are fixed; TextString
+        // is no longer accepted here (strict).
         tags::NextLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::NextLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::NextLink(s)
             } else { return Ok(None); }
         }
         tags::PreviousLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::PreviousLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::PreviousLink(s)
             } else { return Ok(None); }
         }
         tags::PublicKeyLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::PublicKeyLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::PublicKeyLink(s)
             } else { return Ok(None); }
         }
         tags::PrivateKeyLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::PrivateKeyLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::PrivateKeyLink(s)
             } else { return Ok(None); }
         }
         tags::GroupLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::GroupLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::GroupLink(s)
+            } else { return Ok(None); }
+        }
+        tags::CertificateLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::CertificateLink(s)
+            } else { return Ok(None); }
+        }
+        tags::ChildLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::ChildLink(s)
+            } else { return Ok(None); }
+        }
+        tags::ParentLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::ParentLink(s)
+            } else { return Ok(None); }
+        }
+        tags::Pkcs12CertificateLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::Pkcs12CertificateLink(s)
+            } else { return Ok(None); }
+        }
+        tags::Pkcs12PasswordLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::Pkcs12PasswordLink(s)
+            } else { return Ok(None); }
+        }
+        tags::WrappingKeyLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::WrappingKeyLink(s)
+            } else { return Ok(None); }
+        }
+        tags::CredentialLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::CredentialLink(s)
+            } else { return Ok(None); }
+        }
+        tags::PasswordLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::PasswordLink(s)
+            } else { return Ok(None); }
+        }
+        tags::SplitKeyBaseLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::SplitKeyBaseLink(s)
+            } else { return Ok(None); }
+        }
+        tags::JoinedSplitKeyPartsLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::JoinedSplitKeyPartsLink(s)
+            } else { return Ok(None); }
+        }
+        tags::CertificateRequestLink => {
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::CertificateRequestLink(s)
             } else { return Ok(None); }
         }
         // KMIP `Object Group` (0x420056) — multi-instance membership
         // label, TextString on the wire. Each instance decodes to its
         // own Attribute; a record may carry several.
-        tags::ObjectGroup => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::ObjectGroup(s.clone())
-            } else { return Ok(None); }
-        }
         // K20 — Derive Key link pair (§4.35.5 / §6.1.19).
         tags::DerivationObjectLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::DerivationBaseObjectLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::DerivationBaseObjectLink(s)
             } else { return Ok(None); }
         }
         tags::DerivedObjectLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::DerivedObjectLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::DerivedObjectLink(s)
             } else { return Ok(None); }
         }
         // K21 — Re-key link pair (§6.1.53 / §6.1.52).
         tags::ReplacedObjectLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::ReplacedObjectLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::ReplacedObjectLink(s)
             } else { return Ok(None); }
         }
         tags::ReplacementObjectLink => {
-            if let Value::TextString(s) = &frame.value {
-                Attribute::ReplacementObjectLink(s.clone())
+            if let Some(s) = link_target(&frame.value) {
+                Attribute::ReplacementObjectLink(s)
             } else { return Ok(None); }
         }
         tags::ApplicationSpecificInformation => {
@@ -2991,6 +3328,292 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                     tag: frame.tag.0,
                     name: "Certificate Value",
                     msg: "expected ByteString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectO => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectO(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject O",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectOU => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectOU(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject OU",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectEmail => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectEmail(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject Email",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject C",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectST => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectST(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject ST",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectL => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectL(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject L",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectUID => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectUID(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject UID",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectSerialNumber => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectSerialNumber(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject Serial Number",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectTitle => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectTitle(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject Title",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectDC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectDC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject DC",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectDNQualifier => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectDNQualifier(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject DN Qualifier",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectDN => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectDN(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject DN",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerCN => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerCN(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer CN",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerO => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerO(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer O",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerOU => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerOU(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer OU",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerEmail => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerEmail(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer Email",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer C",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerST => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerST(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer ST",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerL => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerL(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer L",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerUID => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerUID(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer UID",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerSerialNumber => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerSerialNumber(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer Serial Number",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerTitle => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerTitle(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer Title",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerDC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerDC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer DC",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerDNQualifier => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerDNQualifier(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer DN Qualifier",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerDN => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerDN(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer DN",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CredentialType => {
+            if let Value::Enumeration(v) = &frame.value {
+                Attribute::CredentialType(*v)
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Credential Type",
+                    msg: "expected Enumeration".into(),
                 });
             }
         }
@@ -3099,8 +3722,10 @@ fn encode_pkcs11_resp(r: &Pkcs11Response) -> Vec<TtlvFrame> {
 fn decode_attributes_block(frame: &TtlvFrame) -> Result<Vec<Attribute>, WireError> {
     let mut out = Vec::new();
     for c in expect_structure(frame, "Attributes")? {
-        if let Some(a) = decode_attribute_v3(c)? {
-            out.push(a);
+        match decode_attribute_v3(c)? {
+            Some(a) => out.push(a),
+            // G2 — refuse rather than drop. See `WireError::UnsupportedAttribute`.
+            None => return Err(WireError::UnsupportedAttribute { tag: c.tag.0 }),
         }
     }
     Ok(out)
@@ -3361,16 +3986,29 @@ fn decode_mac_req(children: &[TtlvFrame]) -> Result<MacRequest, WireError> {
     let uid = required_uid(children)?;
     let mut cp = None;
     let mut data = Vec::new();
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::CryptographicParameters => cp = Some(decode_cryptographic_parameters(c)?),
             tags::Data => {
                 if let Value::ByteString(b) = &c.value { data = b.clone(); }
             }
+            // §6.1.38 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(MacRequest { uid, cryptographic_parameters: cp, data })
+    Ok(MacRequest { uid, cryptographic_parameters: cp, data, init_indicator, final_indicator, correlation_value })
 }
 
 fn decode_mac_verify_req(children: &[TtlvFrame]) -> Result<MacVerifyRequest, WireError> {
@@ -3378,6 +4016,9 @@ fn decode_mac_verify_req(children: &[TtlvFrame]) -> Result<MacVerifyRequest, Wir
     let mut cp = None;
     let mut data = Vec::new();
     let mut mac_data = Vec::new();
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::CryptographicParameters => cp = Some(decode_cryptographic_parameters(c)?),
@@ -3387,37 +4028,60 @@ fn decode_mac_verify_req(children: &[TtlvFrame]) -> Result<MacVerifyRequest, Wir
             tags::MacData => {
                 if let Value::ByteString(b) = &c.value { mac_data = b.clone(); }
             }
+            // §6.1.39 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(MacVerifyRequest { uid, cryptographic_parameters: cp, data, mac_data })
+    Ok(MacVerifyRequest { uid, cryptographic_parameters: cp, data, mac_data, init_indicator, final_indicator, correlation_value })
 }
 
 fn decode_hash_req(children: &[TtlvFrame]) -> Result<HashRequest, WireError> {
     let mut cp = CryptographicParameters::default();
     let mut data = Vec::new();
+    let mut init_indicator: Option<bool> = None;
+    let mut final_indicator: Option<bool> = None;
+    let mut correlation_value: Option<Vec<u8>> = None;
     for c in children {
         match c.tag.0 {
             tags::CryptographicParameters => cp = decode_cryptographic_parameters(c)?,
             tags::Data => {
                 if let Value::ByteString(b) = &c.value { data = b.clone(); }
             }
+            // §6.1.30 multi-part streaming fields (R3).
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
+            }
             _ => {}
         }
     }
-    Ok(HashRequest { cryptographic_parameters: cp, data })
+    Ok(HashRequest { cryptographic_parameters: cp, data, init_indicator, final_indicator, correlation_value })
 }
 
 fn encode_mac_resp(r: &MacResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::MacData), Value::ByteString(r.mac_data.clone())),
     ]
 }
 
 fn encode_mac_verify_resp(r: &MacVerifyResponse) -> Vec<TtlvFrame> {
     vec![
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
         TtlvFrame::new(Tag(tags::ValidityIndicator), Value::Enumeration(r.validity as u32)),
     ]
 }
@@ -3523,8 +4187,8 @@ fn decode_create_split_key_req(children: &[TtlvFrame]) -> Result<CreateSplitKeyR
                 );
             }
             tags::UniqueIdentifier => {
-                if let Value::TextString(s) = &c.value {
-                    uid = Some(s.clone());
+                if let Some(s) = link_target(&c.value) {
+                    uid = Some(s);
                 }
             }
             tags::SplitKeyParts => {
@@ -3597,8 +4261,8 @@ fn decode_join_split_key_req(children: &[TtlvFrame]) -> Result<JoinSplitKeyReque
                 );
             }
             tags::UniqueIdentifier => {
-                if let Value::TextString(s) = &c.value {
-                    uids.push(s.clone());
+                if let Some(s) = link_target(&c.value) {
+                    uids.push(s);
                 }
             }
             tags::SecretDataType => {
@@ -3813,7 +4477,19 @@ fn decode_derive_key_req(children: &[TtlvFrame]) -> Result<DeriveKeyRequest, Wir
                 )?);
             }
             tags::UniqueIdentifier => match &c.value {
-                Value::TextString(s) => uids.push(s.clone()),
+                // §6.1.19 — the base objects are named as UIDs (§4.68
+                // `Identifier`) or as links (§4.35 `Reference`/`Name
+                // Reference`). TextString is not a spec form (strict).
+                Value::Identifier(s) | Value::Reference(s) | Value::NameReference(s) => {
+                    uids.push(s.clone())
+                }
+                Value::TextString(_) => {
+                    return Err(WireError::BadType {
+                        tag: tags::UniqueIdentifier,
+                        name: "Derive Key: Unique Identifier",
+                        msg: "carried as TextString (0x07); KMIP 3.0 requires Identifier (0x0C) or a Reference type".to_string(),
+                    });
+                }
                 // §6.1 preamble ID Placeholder — same convention as `required_uid`.
                 Value::Enumeration(v) if *v == 0x00000001 => {
                     uids.push(crate::dispatcher::ID_PLACEHOLDER_SENTINEL.to_string());
@@ -4590,7 +5266,7 @@ pub fn decode_transparent_rsa_public_key(
 fn encode_export_resp(r: &ExportResponse) -> Vec<TtlvFrame> {
     let mut out = vec![
         TtlvFrame::new(Tag(tags::ObjectType), Value::Enumeration(r.object_type.to_wire_value())),
-        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString(r.uid.clone())),
+        TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier(r.uid.clone())),
     ];
     out.push(TtlvFrame::new(
         Tag(tags::Attributes),
@@ -4683,7 +5359,7 @@ fn encode_key_block(kb: &KeyBlock, seed: Option<&[u8]>) -> TtlvFrame {
         // WrappingMethod + EncryptionKeyInformation{UID, CP}.
         let mut eki = vec![TtlvFrame::new(
             Tag(tags::UniqueIdentifier),
-            Value::TextString(kwd.encryption_key_uid.clone()),
+            Value::Identifier(kwd.encryption_key_uid.clone()),
         )];
         if let Some(cp) = &kwd.cryptographic_parameters {
             eki.push(encode_cryptographic_parameters(cp));
@@ -4717,7 +5393,7 @@ fn encode_key_block(kb: &KeyBlock, seed: Option<&[u8]>) -> TtlvFrame {
 fn encode_uid_only_resp(uid: &str) -> Vec<TtlvFrame> {
     vec![TtlvFrame::new(
         Tag(tags::UniqueIdentifier),
-        Value::TextString(uid.to_string()),
+        Value::Identifier(uid.to_string()),
     )]
 }
 
@@ -4909,9 +5585,9 @@ fn decode_get_attributes_req(children: &[TtlvFrame]) -> Result<GetAttributesRequ
 fn encode_get_attributes_resp(r: &GetAttributesResponse) -> Vec<TtlvFrame> {
     let mut out = vec![TtlvFrame::new(
         Tag(tags::UniqueIdentifier),
-        Value::TextString(r.uid.clone()),
+        Value::Identifier(r.uid.clone()),
     )];
-    // KMIP 3.0 §6.1.21 — GetAttributes response wraps the returned
+    // KMIP 3.0 §6.1.26 — GetAttributes response wraps the returned
     // attributes in a single `Attributes` Structure whose children are
     // the typed-tag attribute values.
     let attrs = TtlvFrame::new(
@@ -4930,7 +5606,7 @@ fn decode_get_attribute_list_req(children: &[TtlvFrame]) -> Result<GetAttributeL
 fn encode_get_attribute_list_resp(r: &GetAttributeListResponse) -> Vec<TtlvFrame> {
     let mut out = vec![TtlvFrame::new(
         Tag(tags::UniqueIdentifier),
-        Value::TextString(r.uid.clone()),
+        Value::Identifier(r.uid.clone()),
     )];
     // Per §6.1.22 a spec-defined attribute name is carried as an
     // AttributeReference Enumeration (the "enumerable Tag" form); a
@@ -5018,16 +5694,19 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         ),
         Attribute::UniqueIdentifier(s) => TtlvFrame::new(
             Tag(tags::UniqueIdentifier),
-            Value::TextString(s.clone()),
+            Value::Identifier(s.clone()),
         ),
         Attribute::Name(s) => TtlvFrame::new(
             Tag(tags::Name),
             Value::TextString(s.clone()),
         ),
-        Attribute::Custom { name, value } => {
+        Attribute::Custom { vendor, name, value } => {
             // KMIP 3.0 §11 — Vendor-extension Custom attribute envelope:
             // Attribute Structure { VendorIdentification, AttributeName,
-            // AttributeValue }. v0.1 defaults VendorIdentification to "x".
+            // AttributeValue }. G9 — the client's own Vendor Identification is
+            // echoed when it sent one; "x" is the §4.70 default for a
+            // client-created attribute, not a value to impose on one that
+            // named its vendor.
             // BL-M-14 / SKFF-M-9 GetAttributes responses pin this shape.
             // AttributeValue's TTLV item type mirrors what the client
             // originally sent (mirrors the decode side) — an Integer- or
@@ -5041,7 +5720,10 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
                 CustomAttributeValue::Boolean(b) => Value::Boolean(*b),
             };
             TtlvFrame::new(Tag(tags::Attribute), Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::VendorIdentification), Value::TextString("x".into())),
+                TtlvFrame::new(
+                    Tag(tags::VendorIdentification),
+                    Value::TextString(vendor.clone().unwrap_or_else(|| "x".into())),
+                ),
                 TtlvFrame::new(Tag(tags::AttributeName), Value::TextString(name.clone())),
                 TtlvFrame::new(Tag(tags::AttributeValue), value_frame),
             ]))
@@ -5109,19 +5791,39 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
         Attribute::X509CertificateIssuer(s)    => TtlvFrame::new(Tag(tags::X509CertificateIssuer),    Value::TextString(s.clone())),
         Attribute::X509CertificateSubject(s)   => TtlvFrame::new(Tag(tags::X509CertificateSubject),   Value::TextString(s.clone())),
         Attribute::RotateName(s)               => TtlvFrame::new(Tag(tags::RotateName),               Value::TextString(s.clone())),
+        Attribute::RotateLatest(v) => TtlvFrame::new(Tag(tags::RotateLatest), Value::Boolean(*v)),
+        Attribute::ArchiveDate(v) => TtlvFrame::new(Tag(tags::ArchiveDate), Value::DateTime(*v)),
+        Attribute::NistSecurityCategory(v) => TtlvFrame::new(Tag(tags::NistSecurityCategory), Value::Integer(*v)),
+        Attribute::OtpCounter(v) => TtlvFrame::new(Tag(tags::OtpCounter), Value::Integer(*v)),
+        Attribute::Pkcs12FriendlyName(s) => TtlvFrame::new(Tag(tags::Pkcs12FriendlyName), Value::TextString(s.clone())),
+        Attribute::CertifyCounter(v) => TtlvFrame::new(Tag(tags::CertifyCounter), Value::Integer(*v)),
+        Attribute::DecryptCounter(v) => TtlvFrame::new(Tag(tags::DecryptCounter), Value::Integer(*v)),
+        Attribute::EncryptCounter(v) => TtlvFrame::new(Tag(tags::EncryptCounter), Value::Integer(*v)),
+        Attribute::SignCounter(v) => TtlvFrame::new(Tag(tags::SignCounter), Value::Integer(*v)),
+        Attribute::SignatureVerifyCounter(v) => TtlvFrame::new(Tag(tags::SignatureVerifyCounter), Value::Integer(*v)),
         Attribute::CertificateType(v)          => TtlvFrame::new(Tag(tags::CertificateType),          Value::Enumeration(*v)),
         Attribute::CertificateValue(bs)        => TtlvFrame::new(Tag(tags::CertificateValue),         Value::ByteString(bs.clone())),
         Attribute::ProtectionStorageMask(m)    => TtlvFrame::new(Tag(tags::ProtectionStorageMask),    Value::Integer(*m as i32)),
-        Attribute::PublicKeyLink(s)            => TtlvFrame::new(Tag(tags::PublicKeyLink),            Value::TextString(s.clone())),
-        Attribute::PrivateKeyLink(s)           => TtlvFrame::new(Tag(tags::PrivateKeyLink),           Value::TextString(s.clone())),
-        Attribute::NextLink(s)                 => TtlvFrame::new(Tag(tags::NextLink),                 Value::TextString(s.clone())),
-        Attribute::PreviousLink(s)             => TtlvFrame::new(Tag(tags::PreviousLink),             Value::TextString(s.clone())),
-        Attribute::GroupLink(s)                => TtlvFrame::new(Tag(tags::GroupLink),                Value::TextString(s.clone())),
-        Attribute::ObjectGroup(s)              => TtlvFrame::new(Tag(tags::ObjectGroup),              Value::TextString(s.clone())),
-        Attribute::DerivationBaseObjectLink(s) => TtlvFrame::new(Tag(tags::DerivationObjectLink),     Value::TextString(s.clone())),
-        Attribute::DerivedObjectLink(s)        => TtlvFrame::new(Tag(tags::DerivedObjectLink),        Value::TextString(s.clone())),
-        Attribute::ReplacedObjectLink(s)       => TtlvFrame::new(Tag(tags::ReplacedObjectLink),       Value::TextString(s.clone())),
-        Attribute::ReplacementObjectLink(s)    => TtlvFrame::new(Tag(tags::ReplacementObjectLink),    Value::TextString(s.clone())),
+        Attribute::PublicKeyLink(s)            => TtlvFrame::new(Tag(tags::PublicKeyLink),            Value::Reference(s.clone())),
+        Attribute::PrivateKeyLink(s)           => TtlvFrame::new(Tag(tags::PrivateKeyLink),           Value::Reference(s.clone())),
+        Attribute::NextLink(s)                 => TtlvFrame::new(Tag(tags::NextLink),                 Value::Reference(s.clone())),
+        Attribute::PreviousLink(s)             => TtlvFrame::new(Tag(tags::PreviousLink),             Value::Reference(s.clone())),
+        Attribute::GroupLink(s)                => TtlvFrame::new(Tag(tags::GroupLink),                Value::NameReference(s.clone())),
+        Attribute::DerivationBaseObjectLink(s) => TtlvFrame::new(Tag(tags::DerivationObjectLink),     Value::Reference(s.clone())),
+        Attribute::DerivedObjectLink(s)        => TtlvFrame::new(Tag(tags::DerivedObjectLink),        Value::Reference(s.clone())),
+        Attribute::ReplacedObjectLink(s)       => TtlvFrame::new(Tag(tags::ReplacedObjectLink),       Value::Reference(s.clone())),
+        Attribute::ReplacementObjectLink(s)    => TtlvFrame::new(Tag(tags::ReplacementObjectLink),    Value::Reference(s.clone())),
+        Attribute::CertificateLink(s) => TtlvFrame::new(Tag(tags::CertificateLink), Value::Reference(s.clone())),
+        Attribute::ChildLink(s) => TtlvFrame::new(Tag(tags::ChildLink), Value::Reference(s.clone())),
+        Attribute::ParentLink(s) => TtlvFrame::new(Tag(tags::ParentLink), Value::Reference(s.clone())),
+        Attribute::Pkcs12CertificateLink(s) => TtlvFrame::new(Tag(tags::Pkcs12CertificateLink), Value::Reference(s.clone())),
+        Attribute::Pkcs12PasswordLink(s) => TtlvFrame::new(Tag(tags::Pkcs12PasswordLink), Value::Reference(s.clone())),
+        Attribute::WrappingKeyLink(s) => TtlvFrame::new(Tag(tags::WrappingKeyLink), Value::Reference(s.clone())),
+        Attribute::CredentialLink(s) => TtlvFrame::new(Tag(tags::CredentialLink), Value::Reference(s.clone())),
+        Attribute::PasswordLink(s) => TtlvFrame::new(Tag(tags::PasswordLink), Value::Reference(s.clone())),
+        Attribute::SplitKeyBaseLink(s) => TtlvFrame::new(Tag(tags::SplitKeyBaseLink), Value::Reference(s.clone())),
+        Attribute::JoinedSplitKeyPartsLink(s) => TtlvFrame::new(Tag(tags::JoinedSplitKeyPartsLink), Value::Reference(s.clone())),
+        Attribute::CertificateRequestLink(s) => TtlvFrame::new(Tag(tags::CertificateRequestLink), Value::Reference(s.clone())),
         Attribute::ApplicationSpecificInformation { namespace, data } => {
             TtlvFrame::new(Tag(tags::ApplicationSpecificInformation), Value::Structure(vec![
                 TtlvFrame::new(Tag(tags::ApplicationNamespace), Value::TextString(namespace.clone())),
@@ -5129,6 +5831,32 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             ]))
         }
         Attribute::CertificateSubjectCN(s)     => TtlvFrame::new(Tag(tags::CertificateSubjectCN),     Value::TextString(s.clone())),
+        Attribute::CredentialType(v) => TtlvFrame::new(Tag(tags::CredentialType), Value::Enumeration(*v)),
+        Attribute::CertificateSubjectO(s) => TtlvFrame::new(Tag(tags::CertificateSubjectO), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectOU(s) => TtlvFrame::new(Tag(tags::CertificateSubjectOU), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectEmail(s) => TtlvFrame::new(Tag(tags::CertificateSubjectEmail), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectC(s) => TtlvFrame::new(Tag(tags::CertificateSubjectC), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectST(s) => TtlvFrame::new(Tag(tags::CertificateSubjectST), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectL(s) => TtlvFrame::new(Tag(tags::CertificateSubjectL), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectUID(s) => TtlvFrame::new(Tag(tags::CertificateSubjectUID), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectSerialNumber(s) => TtlvFrame::new(Tag(tags::CertificateSubjectSerialNumber), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectTitle(s) => TtlvFrame::new(Tag(tags::CertificateSubjectTitle), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectDC(s) => TtlvFrame::new(Tag(tags::CertificateSubjectDC), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectDNQualifier(s) => TtlvFrame::new(Tag(tags::CertificateSubjectDNQualifier), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectDN(s) => TtlvFrame::new(Tag(tags::CertificateSubjectDN), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerCN(s) => TtlvFrame::new(Tag(tags::CertificateIssuerCN), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerO(s) => TtlvFrame::new(Tag(tags::CertificateIssuerO), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerOU(s) => TtlvFrame::new(Tag(tags::CertificateIssuerOU), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerEmail(s) => TtlvFrame::new(Tag(tags::CertificateIssuerEmail), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerC(s) => TtlvFrame::new(Tag(tags::CertificateIssuerC), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerST(s) => TtlvFrame::new(Tag(tags::CertificateIssuerST), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerL(s) => TtlvFrame::new(Tag(tags::CertificateIssuerL), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerUID(s) => TtlvFrame::new(Tag(tags::CertificateIssuerUID), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerSerialNumber(s) => TtlvFrame::new(Tag(tags::CertificateIssuerSerialNumber), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerTitle(s) => TtlvFrame::new(Tag(tags::CertificateIssuerTitle), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerDC(s) => TtlvFrame::new(Tag(tags::CertificateIssuerDC), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerDNQualifier(s) => TtlvFrame::new(Tag(tags::CertificateIssuerDNQualifier), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerDN(s) => TtlvFrame::new(Tag(tags::CertificateIssuerDN), Value::TextString(s.clone())),
         Attribute::DigitalSignatureAlgorithm(v) => TtlvFrame::new(Tag(tags::DigitalSignatureAlgorithm), Value::Enumeration(*v)),
         Attribute::NistKeyType(v)              => TtlvFrame::new(Tag(tags::NistKeyType),              Value::Enumeration(*v)),
         Attribute::ProtectionLevel(v)          => TtlvFrame::new(Tag(tags::ProtectionLevel),          Value::Enumeration(*v)),
@@ -5249,6 +5977,32 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "CertificateLength"      => tags::CertificateLength,
         "CertificateValue"       => tags::CertificateValue,
         "CertificateSubjectCN"   => tags::CertificateSubjectCN,
+        "CredentialType"         => tags::CredentialType,
+        "CertificateSubjectO" => tags::CertificateSubjectO,
+        "CertificateSubjectOU" => tags::CertificateSubjectOU,
+        "CertificateSubjectEmail" => tags::CertificateSubjectEmail,
+        "CertificateSubjectC" => tags::CertificateSubjectC,
+        "CertificateSubjectST" => tags::CertificateSubjectST,
+        "CertificateSubjectL" => tags::CertificateSubjectL,
+        "CertificateSubjectUID" => tags::CertificateSubjectUID,
+        "CertificateSubjectSerialNumber" => tags::CertificateSubjectSerialNumber,
+        "CertificateSubjectTitle" => tags::CertificateSubjectTitle,
+        "CertificateSubjectDC" => tags::CertificateSubjectDC,
+        "CertificateSubjectDNQualifier" => tags::CertificateSubjectDNQualifier,
+        "CertificateSubjectDN" => tags::CertificateSubjectDN,
+        "CertificateIssuerCN" => tags::CertificateIssuerCN,
+        "CertificateIssuerO" => tags::CertificateIssuerO,
+        "CertificateIssuerOU" => tags::CertificateIssuerOU,
+        "CertificateIssuerEmail" => tags::CertificateIssuerEmail,
+        "CertificateIssuerC" => tags::CertificateIssuerC,
+        "CertificateIssuerST" => tags::CertificateIssuerST,
+        "CertificateIssuerL" => tags::CertificateIssuerL,
+        "CertificateIssuerUID" => tags::CertificateIssuerUID,
+        "CertificateIssuerSerialNumber" => tags::CertificateIssuerSerialNumber,
+        "CertificateIssuerTitle" => tags::CertificateIssuerTitle,
+        "CertificateIssuerDC" => tags::CertificateIssuerDC,
+        "CertificateIssuerDNQualifier" => tags::CertificateIssuerDNQualifier,
+        "CertificateIssuerDN" => tags::CertificateIssuerDN,
         "DigitalSignatureAlgorithm" => tags::DigitalSignatureAlgorithm,
         "NistKeyType"            => tags::NistKeyType,
         "ProtectionLevel"        => tags::ProtectionLevel,
@@ -5272,7 +6026,17 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "PublicKeyLink"          => tags::PublicKeyLink,
         "PrivateKeyLink"         => tags::PrivateKeyLink,
         "GroupLink"              => tags::GroupLink,
-        "ObjectGroup"            => tags::ObjectGroup,
+        "CertificateLink" => tags::CertificateLink,
+        "ChildLink" => tags::ChildLink,
+        "ParentLink" => tags::ParentLink,
+        "Pkcs12CertificateLink" => tags::Pkcs12CertificateLink,
+        "Pkcs12PasswordLink" => tags::Pkcs12PasswordLink,
+        "WrappingKeyLink" => tags::WrappingKeyLink,
+        "CredentialLink" => tags::CredentialLink,
+        "PasswordLink" => tags::PasswordLink,
+        "SplitKeyBaseLink" => tags::SplitKeyBaseLink,
+        "JoinedSplitKeyPartsLink" => tags::JoinedSplitKeyPartsLink,
+        "CertificateRequestLink" => tags::CertificateRequestLink,
         "DerivationBaseObjectLink" => tags::DerivationObjectLink,
         "DerivedObjectLink"      => tags::DerivedObjectLink,
         "ReplacedObjectLink"     => tags::ReplacedObjectLink,
@@ -5339,6 +6103,32 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::CertificateLength      => "Certificate Length",
         tags::CertificateValue       => "Certificate Value",
         tags::CertificateSubjectCN   => "Certificate Subject CN",
+        tags::CredentialType         => "Credential Type",
+        tags::CertificateSubjectO => "Certificate Subject O",
+        tags::CertificateSubjectOU => "Certificate Subject OU",
+        tags::CertificateSubjectEmail => "Certificate Subject Email",
+        tags::CertificateSubjectC => "Certificate Subject C",
+        tags::CertificateSubjectST => "Certificate Subject ST",
+        tags::CertificateSubjectL => "Certificate Subject L",
+        tags::CertificateSubjectUID => "Certificate Subject UID",
+        tags::CertificateSubjectSerialNumber => "Certificate Subject Serial Number",
+        tags::CertificateSubjectTitle => "Certificate Subject Title",
+        tags::CertificateSubjectDC => "Certificate Subject DC",
+        tags::CertificateSubjectDNQualifier => "Certificate Subject DN Qualifier",
+        tags::CertificateSubjectDN => "Certificate Subject DN",
+        tags::CertificateIssuerCN => "Certificate Issuer CN",
+        tags::CertificateIssuerO => "Certificate Issuer O",
+        tags::CertificateIssuerOU => "Certificate Issuer OU",
+        tags::CertificateIssuerEmail => "Certificate Issuer Email",
+        tags::CertificateIssuerC => "Certificate Issuer C",
+        tags::CertificateIssuerST => "Certificate Issuer ST",
+        tags::CertificateIssuerL => "Certificate Issuer L",
+        tags::CertificateIssuerUID => "Certificate Issuer UID",
+        tags::CertificateIssuerSerialNumber => "Certificate Issuer Serial Number",
+        tags::CertificateIssuerTitle => "Certificate Issuer Title",
+        tags::CertificateIssuerDC => "Certificate Issuer DC",
+        tags::CertificateIssuerDNQualifier => "Certificate Issuer DN Qualifier",
+        tags::CertificateIssuerDN => "Certificate Issuer DN",
         tags::DigitalSignatureAlgorithm => "Digital Signature Algorithm",
         tags::NistKeyType            => "NIST Key Type",
         tags::ProtectionLevel        => "Protection Level",
@@ -5366,7 +6156,17 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::PublicKeyLink          => "Public Key Link",
         tags::PrivateKeyLink         => "Private Key Link",
         tags::GroupLink              => "Group Link",
-        tags::ObjectGroup            => "Object Group",
+        tags::CertificateLink => "Certificate Link",
+        tags::ChildLink => "Child Link",
+        tags::ParentLink => "Parent Link",
+        tags::Pkcs12CertificateLink => "PKCS#12 Certificate Link",
+        tags::Pkcs12PasswordLink => "PKCS#12 Password Link",
+        tags::WrappingKeyLink => "Wrapping Key Link",
+        tags::CredentialLink => "Credential Link",
+        tags::PasswordLink => "Password Link",
+        tags::SplitKeyBaseLink => "Split Key Base Link",
+        tags::JoinedSplitKeyPartsLink => "Joined Split Key Parts Link",
+        tags::CertificateRequestLink => "Certificate Request Link",
         tags::DerivationObjectLink   => "Derivation Object Link",
         tags::DerivedObjectLink      => "Derived Object Link",
         tags::ReplacedObjectLink     => "Replaced Object Link",
@@ -5386,11 +6186,48 @@ fn tag_name_from_code(code: u32) -> &'static str {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/// A §4.35 Link target: `Reference` (early-binding), `Name Reference`
+/// (late-binding) or a plain `Identifier`. Returns `None` for anything else —
+/// notably `TextString`, which is not a spec encoding for a link and is no
+/// longer accepted (2026-09-06).
+///
+/// `Name Reference` resolution is deliberately NOT performed here: the decoder
+/// returns the name as written, and resolving it to whichever object currently
+/// carries that `Name` is the store's job at read time. Collapsing the two at
+/// decode time would turn a late-binding link into an early-binding one and
+/// silently change its meaning.
+fn link_target(v: &Value) -> Option<String> {
+    match v {
+        Value::Reference(s) | Value::NameReference(s) | Value::Identifier(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
 fn required_uid(children: &[TtlvFrame]) -> Result<String, WireError> {
     for c in children {
         if c.tag.0 == tags::UniqueIdentifier {
             match &c.value {
-                Value::TextString(s) => return Ok(s.clone()),
+                // §4.68 / §11.25 — a Unique Identifier is carried as the
+                // `Identifier` type (0x0C). Every one of the 1,576 UID
+                // occurrences in the OASIS corpus uses it.
+                //
+                // STRICT (2026-09-06): the legacy `TextString` form is NOT
+                // accepted. It is not a spec encoding for this field, and
+                // silently accepting it is what let the whole estate speak a
+                // non-conformant dialect unnoticed. A peer still sending it
+                // gets `Invalid Field` naming the type it sent.
+                Value::Identifier(s) => return Ok(s.clone()),
+                Value::TextString(_) => {
+                    return Err(WireError::BadType {
+                        tag: tags::UniqueIdentifier,
+                        name: "Unique Identifier",
+                        msg: "carried as TextString (0x07); KMIP 3.0 requires Identifier (0x0C) — see §4.68 and §11.25".to_string(),
+                    });
+                }
+                // A link-shaped UID reference is also accepted here: §4.35
+                // encodes links as `Reference` / `Name Reference`, and some
+                // payloads carry a target UID under the same tag.
+                Value::Reference(s) | Value::NameReference(s) => return Ok(s.clone()),
                 // KMIP 3.0 §6.1 preamble — `UniqueIdentifier` MAY be carried as
                 // an Enumeration referring to a previously-produced
                 // UID within the same batch. The OASIS Baseline corpus
@@ -5413,6 +6250,35 @@ fn required_uid(children: &[TtlvFrame]) -> Result<String, WireError> {
         }
     }
     Err(WireError::Missing { tag: tags::UniqueIdentifier, name: "Unique Identifier" })
+}
+
+/// The other UID-shaped contexts §4.68 names: "Within protocol messages, the
+/// Unique Identifier may be referred with additional context in the form of
+/// Private Key Unique Identifier, Public Key Unique Identifier, Certificate
+/// Request Unique Identifier, Replaced Unique Identifier, Links, or within
+/// Encryption Key Information or MAC/Signature Key Information. In all of
+/// these contexts, the same encoding descriptions apply."
+///
+/// So they accept exactly what `required_uid` accepts and reject the legacy
+/// `TextString` the same way. Kept as one helper because the G1 pass missed
+/// two of these tags precisely by handling each site by hand — and neither
+/// `Replaced Unique Identifier` nor `Certificate Request Unique Identifier`
+/// appears anywhere in the OASIS corpus, so the replay cannot catch a
+/// regression here. Only a unit test can.
+fn uid_context_value(
+    value: &Value,
+    tag: u32,
+    name: &'static str,
+) -> Result<Option<String>, WireError> {
+    match value {
+        Value::Identifier(s) | Value::Reference(s) | Value::NameReference(s) => Ok(Some(s.clone())),
+        Value::TextString(_) => Err(WireError::BadType {
+            tag,
+            name,
+            msg: "carried as TextString (0x07); KMIP 3.0 requires Identifier (0x0C) — see §4.68 and §11.25".to_string(),
+        }),
+        _ => Ok(None),
+    }
 }
 
 fn expect_tag(frame: &TtlvFrame, expected: u32, name: &'static str) -> Result<(), WireError> {
@@ -5565,7 +6431,7 @@ pub fn encode_put_message(req: &PutRequest, time_stamp: i64) -> Vec<u8> {
         if let Some(replaced) = &req.replaced_unique_identifier {
             children.push(TtlvFrame::new(
                 Tag(tags::ReplacedUniqueIdentifier),
-                Value::TextString(replaced.clone()),
+                Value::Identifier(replaced.clone()),
             ));
         }
     }
@@ -5641,7 +6507,7 @@ pub fn encode_discover_versions_message(versions: &[(i32, i32)], time_stamp: i64
     )
 }
 
-/// Encode a server-issued `Query` (§6.1.39) — the server asking the client what
+/// Encode a server-issued `Query` (§6.1.47) — the server asking the client what
 /// it can do.
 pub fn encode_query_message(functions: &[QueryFunction], time_stamp: i64) -> Vec<u8> {
     let children: Vec<TtlvFrame> = functions
@@ -5946,14 +6812,11 @@ pub fn decode_server_to_client_message(bytes: &[u8]) -> Result<ServerToClientMes
     // Only the two push operations name a managed object; the three
     // interrogation operations have no Unique Identifier at all, so this has to
     // be read per-arm rather than up front.
-    let require_uid = || -> Result<String, WireError> {
-        p.iter()
-            .find_map(|c| match (c.tag.0, &c.value) {
-                (t, Value::TextString(s)) if t == tags::UniqueIdentifier => Some(s.clone()),
-                _ => None,
-            })
-            .ok_or(WireError::Missing { tag: tags::UniqueIdentifier, name: "Unique Identifier" })
-    };
+    // Was a hand-rolled TextString match, which the G1 item-type pass missed:
+    // the Notify/Put encoders emit `Identifier` via `uid_frame`, so this closure
+    // reported the UID as Missing on a message we had just produced ourselves.
+    // Delegate to the one strict reader instead of keeping a second copy.
+    let require_uid = || -> Result<String, WireError> { required_uid(p) };
 
     let attributes: Vec<Attribute> = p
         .iter()
@@ -6030,10 +6893,18 @@ pub fn decode_server_to_client_message(bytes: &[u8]) -> Result<ServerToClientMes
                     _ => None,
                 })
                 .ok_or(WireError::Missing { tag: tags::PutFunction, name: "Put Function" })?;
-            let replaced = p.iter().find_map(|c| match (c.tag.0, &c.value) {
-                (t, Value::TextString(s)) if t == tags::ReplacedUniqueIdentifier => Some(s.clone()),
-                _ => None,
-            });
+            let replaced = p
+                .iter()
+                .filter(|c| c.tag.0 == tags::ReplacedUniqueIdentifier)
+                .find_map(|c| {
+                    uid_context_value(
+                        &c.value,
+                        tags::ReplacedUniqueIdentifier,
+                        "Replaced Unique Identifier",
+                    )
+                    .transpose()
+                })
+                .transpose()?;
             Ok(ServerToClientMessage::Put(PutRequest {
                 unique_identifier: uid,
                 put_function,
@@ -6056,16 +6927,6 @@ mod tests {
 
     /// P2.1 — `Object Group` (0x420056) attribute round-trips through
     /// the TTLV codec: TextString encode → decode yields the same
-    /// `Attribute::ObjectGroup`, under the verified tag.
-    #[test]
-    fn object_group_attribute_wire_round_trips() {
-        let attr = Attribute::ObjectGroup("SASED-M-2-30-group".into());
-        let frame = encode_attribute_v3(&attr);
-        assert_eq!(frame.tag.0, tags::ObjectGroup);
-        assert_eq!(tags::ObjectGroup, 0x42_0056, "verified KMIP Object Group tag");
-        let decoded = decode_attribute_v3(&frame).unwrap();
-        assert_eq!(decoded, Some(attr));
-    }
 
     /// KMIP 3.0 §4.16 — Cryptographic Domain Parameters is a Structure at
     /// `0x420029` carrying `Recommended Curve` (Enumeration, `0x420075`) and
@@ -6198,8 +7059,8 @@ mod tests {
         let full = vec![
             TtlvFrame::new(Tag(tags::ObjectType),
                            Value::Enumeration(ObjectType::SymmetricKey.to_wire_value())),
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u-1".into())),
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u-2".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u-1".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u-2".into())),
             TtlvFrame::new(Tag(tags::DerivationMethod),
                            Value::Enumeration(DerivationMethod::Nist800_108C.to_wire_value())),
             TtlvFrame::new(Tag(tags::DerivationParameters), Value::Structure(vec![
@@ -6278,7 +7139,7 @@ mod tests {
         let children = expect_structure(&frame, "Response Payload").unwrap();
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].tag.0, tags::UniqueIdentifier);
-        assert_eq!(children[0].value, Value::TextString("derived-1".into()));
+        assert_eq!(children[0].value, Value::Identifier("derived-1".into()));
     }
 
     #[test]
@@ -6335,14 +7196,14 @@ mod tests {
     #[test]
     fn k19_get_usage_allocation_request_decode() {
         let full = vec![
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u".into())),
             TtlvFrame::new(Tag(tags::UsageLimitsCount), Value::LongInteger(42)),
         ];
         let req = decode_get_usage_allocation_req(&full).unwrap();
         assert_eq!(req.uid, "u");
         assert_eq!(req.usage_limits_count, 42);
         let no_count = vec![
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u".into())),
         ];
         assert!(matches!(
             decode_get_usage_allocation_req(&no_count),
@@ -6393,6 +7254,14 @@ mod tests {
                     application_namespaces: None,
                     profile_information: None,
                     capability_information: None,
+                    extension_information: None,
+                    attestation_types: None,
+                    rng_parameters: None,
+                    validation_information: None,
+                    client_registration_methods: None,
+                    storage_protection_masks: None,
+                    credential_information: None,
+                    defaults_information: None,
                 })),
                 asynchronous_correlation_value: None,
             }],
@@ -6488,7 +7357,7 @@ mod tests {
                                 // Stored Certificate object reference.
                                 TtlvFrame::new(
                                     Tag(tags::UniqueIdentifier),
-                                    Value::TextString("cert-uid-1".into()),
+                                    Value::Identifier("cert-uid-1".into()),
                                 ),
                                 // Validity Date.
                                 TtlvFrame::new(
@@ -6603,7 +7472,7 @@ mod tests {
         let bytes = envelope(
             Operation::ReCertify,
             vec![
-                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("cert-old".into())),
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("cert-old".into())),
                 TtlvFrame::new(Tag(tags::Offset), Value::Interval(3600)),
             ],
         );
@@ -6962,7 +7831,7 @@ mod tests {
             TtlvFrame::new(Tag(tags::KeyWrappingData), Value::Structure(vec![
                 TtlvFrame::new(Tag(tags::WrappingMethod), Value::Enumeration(0x01)),
                 TtlvFrame::new(Tag(tags::EncryptionKeyInformation), Value::Structure(vec![
-                    TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("kek-1".into())),
+                    TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("kek-1".into())),
                 ])),
                 TtlvFrame::new(Tag(tags::EncodingOption), Value::Enumeration(0x02)),
             ])),
@@ -6983,10 +7852,10 @@ mod tests {
         let frame = TtlvFrame::new(Tag(tags::KeyWrappingData), Value::Structure(vec![
             TtlvFrame::new(Tag(tags::WrappingMethod), Value::Enumeration(0x01)),
             TtlvFrame::new(Tag(tags::EncryptionKeyInformation), Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("kek-1".into())),
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("kek-1".into())),
             ])),
             TtlvFrame::new(Tag(tags::MacSignatureKeyInformation), Value::Structure(vec![
-                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("mac-key".into())),
+                TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("mac-key".into())),
             ])),
         ]));
         let kwd = decode_key_wrapping_spec(&frame).unwrap();
@@ -7006,7 +7875,7 @@ mod tests {
 
     fn revoke_req_frame(reason_code: u32) -> Vec<TtlvFrame> {
         vec![
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u".into())),
             TtlvFrame::new(
                 Tag(tags::RevocationReason),
                 Value::Structure(vec![TtlvFrame::new(
@@ -7289,7 +8158,7 @@ mod tests {
     fn k10_decap_request_response_round_trip() {
         let encapsulation = vec![0xE0; 32];
         let req_children = vec![
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("kem-1".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("kem-1".into())),
             TtlvFrame::new(Tag(tags::Data), Value::ByteString(encapsulation.clone())),
         ];
         let req = decode_decrypt_req(&req_children).expect("decap request decodes");
@@ -7297,7 +8166,7 @@ mod tests {
         assert_eq!(req.data, encapsulation);
         assert!(req.iv.is_none(), "decap request carries no IV");
 
-        let resp = DecryptResponse { uid: req.uid.clone(), data: vec![0x55; 32] };
+        let resp = DecryptResponse { uid: req.uid.clone(), data: vec![0x55; 32], correlation_value: None };
         let frames = encode_decrypt_resp(&resp);
         let data = frames
             .iter()
@@ -7408,12 +8277,26 @@ mod tests {
         assert_eq!(placeholder.tag.0, tags::UniqueIdentifier);
         assert_eq!(placeholder.value, Value::Enumeration(0x00000001));
 
+        // §4.68 / §11.25 — a real UID rides as `Identifier` (0x0C), not a
+        // Text String. Every UID in the OASIS corpus uses this type.
         let real = uid_frame("urn:some-real-uid");
-        assert_eq!(real.value, Value::TextString("urn:some-real-uid".to_string()));
+        assert_eq!(real.value, Value::Identifier("urn:some-real-uid".to_string()));
+        assert_eq!(real.value.item_type().as_byte(), 0x0C);
 
         // Round-trips through the decoder that already expected this form.
         let decoded = required_uid(std::slice::from_ref(&placeholder)).unwrap();
         assert_eq!(decoded, crate::dispatcher::ID_PLACEHOLDER_SENTINEL);
+        assert_eq!(required_uid(std::slice::from_ref(&real)).unwrap(), "urn:some-real-uid");
+
+        // STRICT: the legacy Text String form is refused, not quietly taken.
+        let legacy = TtlvFrame::new(
+            Tag(tags::UniqueIdentifier),
+            Value::TextString("urn:some-real-uid".to_string()),
+        );
+        assert!(
+            matches!(required_uid(std::slice::from_ref(&legacy)), Err(WireError::BadType { .. })),
+            "a TextString UID must be refused, not accepted as if conformant",
+        );
     }
 
     /// Gap-remediation Phase C, Finding #7 — `tag_code_from_name`/
@@ -7449,7 +8332,7 @@ mod tests {
     #[test]
     fn delete_attribute_resolves_numeric_reference_for_split_key_method() {
         let frames = vec![
-            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::TextString("u".into())),
+            TtlvFrame::new(Tag(tags::UniqueIdentifier), Value::Identifier("u".into())),
             TtlvFrame::new(Tag(tags::AttributeReference), Value::Enumeration(tags::SplitKeyMethod)),
         ];
         let req = decode_delete_attribute_req(&frames).unwrap();
@@ -7484,5 +8367,91 @@ mod tests {
         let frame = TtlvFrame::new(Tag(tags::AlternativeName), Value::TextString("legacy-label".into()));
         let decoded = decode_attribute_v3(&frame).unwrap().unwrap();
         assert_eq!(decoded, Attribute::AlternativeName { value: "legacy-label".into(), name_type: 1 });
+    }
+
+    /// G2 (2026-09-06) — an attribute this server does not model must be
+    /// REFUSED on the request path, not dropped while the operation answers
+    /// Success. That silent-discard behaviour is why `Certify` could store a
+    /// `CertificateLink` nobody could read back, and why a client could set an
+    /// attribute and never learn it had not been stored.
+    ///
+    /// `Media Identifier` (0x4200aa) is a real spec attribute this server does
+    /// not model — exactly the shape of input that used to vanish. It was
+    /// `Certificate Subject O` until the §4.6 Certificate Attributes landed
+    /// and made that one modelled; if `Media Identifier` is ever implemented
+    /// too, repoint this at any other tag the spec defines and `tags` does
+    /// not. The subject of the test is the fail-closed BEHAVIOUR, not this
+    /// particular attribute.
+    #[test]
+    fn unmodelled_attribute_in_a_request_is_refused_not_dropped() {
+        let attrs = TtlvFrame::new(
+            Tag(tags::Attributes),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(256)),
+                TtlvFrame::new(Tag(0x42_00aa), Value::TextString("LTO-9-000123".into())),
+            ]),
+        );
+        match decode_attributes_block(&attrs) {
+            Err(WireError::UnsupportedAttribute { tag }) => assert_eq!(tag, 0x42_00aa),
+            other => panic!("expected UnsupportedAttribute, got {other:?}"),
+        }
+
+        // The permissive path is unchanged for attributes we DO model.
+        let ok = TtlvFrame::new(
+            Tag(tags::Attributes),
+            Value::Structure(vec![TtlvFrame::new(
+                Tag(tags::CryptographicLength),
+                Value::Integer(256),
+            )]),
+        );
+        assert_eq!(decode_attributes_block(&ok).unwrap().len(), 1);
+    }
+
+    /// G9 (2026-09-06) — §4.70 identifies a vendor attribute by the PAIR
+    /// (Vendor Identification, Attribute Name). The decoder discarded the
+    /// vendor and the encoder hard-coded `"x"`, so two vendors' attributes
+    /// with the same name were indistinguishable, and the server echoed an
+    /// identity the client had never set.
+    #[test]
+    fn vendor_identification_round_trips_instead_of_becoming_x() {
+        let sent = TtlvFrame::new(
+            Tag(tags::Attribute),
+            Value::Structure(vec![
+                TtlvFrame::new(Tag(tags::VendorIdentification), Value::TextString("acme".into())),
+                TtlvFrame::new(Tag(tags::AttributeName), Value::TextString("Barcode".into())),
+                TtlvFrame::new(Tag(tags::AttributeValue), Value::TextString("A-1".into())),
+            ]),
+        );
+        let decoded = decode_attribute_v3(&sent).unwrap().expect("a vendor attribute decodes");
+        match &decoded {
+            Attribute::Custom { vendor, name, .. } => {
+                assert_eq!(vendor.as_deref(), Some("acme"), "the client's vendor must survive");
+                assert_eq!(name, "Barcode");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+
+        // ...and comes back out as "acme", not "x".
+        let reencoded = encode_attribute_v3(&decoded);
+        let kids = match &reencoded.value {
+            Value::Structure(k) => k,
+            v => panic!("expected a Structure, got {v:?}"),
+        };
+        let vid = kids.iter().find(|f| f.tag.0 == tags::VendorIdentification).expect("vendor present");
+        assert_eq!(vid.value, Value::TextString("acme".into()));
+
+        // A client that names no vendor still gets §4.70's "x" default, which
+        // is what the BL-M-14 / TL-M-3 transcripts pin.
+        let anon = Attribute::Custom {
+            vendor: None,
+            name: "Barcode".into(),
+            value: CustomAttributeValue::Text("A-1".into()),
+        };
+        let kids = match &encode_attribute_v3(&anon).value {
+            Value::Structure(k) => k.clone(),
+            v => panic!("expected a Structure, got {v:?}"),
+        };
+        let vid = kids.iter().find(|f| f.tag.0 == tags::VendorIdentification).unwrap();
+        assert_eq!(vid.value, Value::TextString("x".into()));
     }
 }

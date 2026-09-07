@@ -8,7 +8,68 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **The KMIP server's default TLS posture is now `basic`, not `permissive`.
+  Existing TLS 1.2 clients will fail to connect after this upgrade.**
+
+  KMIP 3.0 Profiles §3.1.2 lists the cipher suites a conformant server may
+  offer and closes with "SHALL NOT support any cipher suite not listed
+  above". The previous `permissive` default offered TLS 1.2 and
+  `TLS13_AES_128_GCM_SHA256`, which that clause forbids — so the posture the
+  server SHIPPED with was not the posture its Baseline Server conformance
+  claim was measured under. It now is.
+
+  **To restore the previous behaviour**, start the server with
+  `--tls-profile permissive` (or set `KMIP_TLS_PROFILE=permissive`, which is
+  how the distroless container images flip posture without a rebuild). That
+  configuration is NOT §3.1.2-conformant, and is now a deliberate choice
+  rather than a silent default.
+
+  `basic` is TLS 1.3 only. §3.1.2's TLS 1.2 list is static-RSA CBC, which
+  rustls does not implement, and §3.1.1 makes TLS 1.2 a SHOULD rather than a
+  SHALL — so 1.3-only is the conformant posture actually available.
+
+### Added
+
+- **The KMIP server now conforms to the Baseline Server profile and
+  advertises it** via `Query Profiles` (`Profile Name` = 0x12b), and only
+  that profile. Conformance replay is 99 PASS / 0 FAIL / 3 SKIP; the three
+  skips are 3DES, which belongs to the Symmetric Key Foundry for FIPS
+  profile this server does not claim.
+
+- Classical **DSA is accepted for STORAGE ONLY** (§11.12 codepoint 0x05), so
+  the Baseline mandatory Register tests (`BL-M-12-30`, `BL-M-13-30`) pass. It
+  maps to no PKCS#11 mechanism: the server holds and returns a DSA key but
+  can neither generate one nor sign or verify with it.
+
+- `EC` (0x1a), `X25519` (0x5a), `X448` (0x5b) and `XMSS` (0x32) are accepted
+  on their standard codepoints. All four were compatibility gaps where the
+  server could already perform the operation but refused the spec's
+  algorithm-value form — `XMSS` most notably, where the engine had supported
+  the algorithm all along with no way to name it over KMIP.
+
+- **Four HMAC mechanisms that were implemented but unreachable.**
+  `CKM_SHA512_224_HMAC`, `CKM_SHA512_256_HMAC`, `CKM_SHA3_224_HMAC` and
+  `CKM_SHA3_384_HMAC` had working implementations in the Rust engine's
+  `sign_hmac` and in its SP 800-108 PRF paths, but were missing from the
+  advertised mechanism list, from `C_GetMechanismInfo` and from the
+  `C_Sign`/`C_Verify` dispatch arms — so `C_SignInit` rejected all four and no
+  caller could reach the working code. Each is now advertised and routed, and
+  cross-checked against the RustCrypto reference implementation rather than
+  only against itself.
+
 ### Fixed
+
+- **`Object Group` (0x420056) is no longer emitted: that codepoint is
+  (Reserved) in KMIP 3.0.** Group membership now uses §7.24's repeated
+  `Group Link` (0x4201b3), which also makes membership genuinely
+  multi-valued as the clause requires. Records written before this still
+  load, and searches still find objects that stored their group the old way.
+
+- The §4.27 `Fresh` attribute was inverted — it defaulted to False for every
+  object and silently discarded a client-supplied value at Register.
+
 
 - **A key recovered with `C_UnwrapKey` — or produced by `C_EncapsulateKey` /
   `C_DecapsulateKey` — came back non-extractable in the C++ engine unless the
@@ -61,18 +122,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Common Criteria validation claim against the module. Both engines now
   refuse all four with `CKR_ATTRIBUTE_READ_ONLY` (the class value is valid,
   it simply is not the caller's to write).
-
-### Added
-
-- **Four HMAC mechanisms that were implemented but unreachable.**
-  `CKM_SHA512_224_HMAC`, `CKM_SHA512_256_HMAC`, `CKM_SHA3_224_HMAC` and
-  `CKM_SHA3_384_HMAC` had working implementations in the Rust engine's
-  `sign_hmac` and in its SP 800-108 PRF paths, but were missing from the
-  advertised mechanism list, from `C_GetMechanismInfo` and from the
-  `C_Sign`/`C_Verify` dispatch arms — so `C_SignInit` rejected all four and no
-  caller could reach the working code. Each is now advertised and routed, and
-  cross-checked against the RustCrypto reference implementation rather than
-  only against itself.
 
 ## [0.28.2] — 2026-09-04
 
