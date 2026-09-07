@@ -213,6 +213,16 @@ run_step_host() { # name, command(run on host) — for node/wasm steps
 # on the host (pure Python + network, nothing container-specific needed) and
 # first, before anything else: nothing downstream is trustworthy if the
 # vectors it's testing against might be self-generated or drifted.
+# Step 0 in spirit: the gate checks ITSELF before it checks anything else.
+# Four times on 2026-09-07 a guard turned out to be protecting a defect rather
+# than catching it, twice in this very file — a step that printed compiler
+# errors and then declared success, and a step that ran 1032 tests while
+# checking 10. Both are the same class: a verdict that cannot carry a failure.
+# `check_gate_steps_can_fail.py` re-runs that judgement mechanically, and is
+# sabotage-verified against both of those historical bugs.
+run_step_host "gate self-check (every step can fail)" \
+  "cd '$ROOT' && python3 scripts/check_gate_steps_can_fail.py"
+
 run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
   "cd $ROOT && python3 scripts/check_acvp_provenance.py"
 
