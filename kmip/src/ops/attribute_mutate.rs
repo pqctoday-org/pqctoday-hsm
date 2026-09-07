@@ -582,6 +582,31 @@ fn attribute_is_read_only(a: &Attribute) -> bool {
         // Register time. BL-M-10 step #4 pins `CertificateLength`.
         Attribute::CertificateLength(_) |
         Attribute::CertificateSubjectCN(_) |
+        Attribute::CertificateSubjectO(_) |
+        Attribute::CertificateSubjectOU(_) |
+        Attribute::CertificateSubjectEmail(_) |
+        Attribute::CertificateSubjectC(_) |
+        Attribute::CertificateSubjectST(_) |
+        Attribute::CertificateSubjectL(_) |
+        Attribute::CertificateSubjectUID(_) |
+        Attribute::CertificateSubjectSerialNumber(_) |
+        Attribute::CertificateSubjectTitle(_) |
+        Attribute::CertificateSubjectDC(_) |
+        Attribute::CertificateSubjectDNQualifier(_) |
+        Attribute::CertificateSubjectDN(_) |
+        Attribute::CertificateIssuerCN(_) |
+        Attribute::CertificateIssuerO(_) |
+        Attribute::CertificateIssuerOU(_) |
+        Attribute::CertificateIssuerEmail(_) |
+        Attribute::CertificateIssuerC(_) |
+        Attribute::CertificateIssuerST(_) |
+        Attribute::CertificateIssuerL(_) |
+        Attribute::CertificateIssuerUID(_) |
+        Attribute::CertificateIssuerSerialNumber(_) |
+        Attribute::CertificateIssuerTitle(_) |
+        Attribute::CertificateIssuerDC(_) |
+        Attribute::CertificateIssuerDNQualifier(_) |
+        Attribute::CertificateIssuerDN(_) |
         Attribute::X509CertificateSubject(_) |
         Attribute::X509CertificateIssuer(_) |
         Attribute::X509CertificateIdentifier(_) |
@@ -1121,6 +1146,44 @@ mod tests {
         // §6.1.2 — Add against an always-present (single-valued)
         // attribute fails the presence check first → `AttributeSingleValued`.
         assert_eq!(err.result_reason(), ResultReason::AttributeSingleValued);
+    }
+
+    /// §4.6 Table 62 — "Initially set by: Server", "Modifiable by client:
+    /// **No**", "Deletable by client: **No**". The 26 Certificate Attributes
+    /// are derived from the Certificate Value DER; a client that tries to
+    /// assert one must be refused, not quietly obeyed.
+    ///
+    /// This checks the SET path specifically. The decoder now ACCEPTS these
+    /// tags (they are modelled, so `decode_attributes_block` no longer refuses
+    /// them as unsupported), which is exactly why the read-only rule has to
+    /// hold on its own — without it, "modelled" would have silently become
+    /// "client-writable".
+    #[test]
+    fn a_client_cannot_set_a_certificate_attribute() {
+        let d = deps_with();
+        put(&d, "u");
+        for a in [
+            Attribute::CertificateSubjectOU("Attacker Unit".into()),
+            Attribute::CertificateIssuerCN("Not The Real CA".into()),
+            Attribute::CertificateSubjectDN("CN=spoofed".into()),
+        ] {
+            let err = modify_attribute(
+                &d,
+                ModifyAttributeRequest {
+                    uid: "u".into(),
+                    current_attribute: None,
+                    new_attribute: a.clone(),
+                },
+                &crate::server::auth::AuthContext::open(),
+                "c",
+            )
+            .unwrap_err();
+            assert_eq!(
+                err.result_reason(),
+                ResultReason::AttributeReadOnly,
+                "{a:?} is server-derived from the certificate DER; a client must not be able to assert it"
+            );
+        }
     }
 
     #[test]

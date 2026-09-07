@@ -625,17 +625,21 @@ pub fn register(
     // certificate_payload is reused for OpaqueObject's OpaqueDataType
     // pass-through (no DER, no length, no CN). The wire decoder sets
     // `der.is_empty()` for that path.
-    let (certificate_type, certificate_value, certificate_length, certificate_subject_cn) =
+    let (certificate_type, certificate_value, certificate_length, certificate_subject, certificate_issuer) =
         match (&req.certificate_payload, req.object_type) {
             (Some((wire_ct, der)), ObjectType::Certificate) => {
                 let len = der.len() as i32;
-                let cn = super::der_x509::extract_subject_cn(der);
-                (Some(*wire_ct), Some(der.clone()), Some(len), cn)
+                // §4.6 Table 62, "When implicitly set: Register, Certify,
+                // Re-certify". A Name that yields nothing stays `None` (RFC
+                // 5280 §4.1.2.6 permits an empty Subject), so it projects no
+                // attributes rather than twelve empty ones.
+                let (subject, issuer) = super::der_x509::extract_certificate_names(der);
+                (Some(*wire_ct), Some(der.clone()), Some(len), subject, issuer)
             }
             (Some((wire_ct, _)), ObjectType::OpaqueObject) => {
-                (Some(*wire_ct), None, None, None)
+                (Some(*wire_ct), None, None, None, None)
             }
-            _ => (None, None, None, None),
+            _ => (None, None, None, None, None),
         };
 
     // K-14 — KMIP §11 `Digest`: SHA-256 over the client-supplied
@@ -694,7 +698,8 @@ pub fn register(
         certificate_type,
         certificate_value: certificate_value.clone(),
         certificate_length,
-        certificate_subject_cn,
+        certificate_subject,
+        certificate_issuer,
         // Gap-remediation Phase C, Finding #8 — previously dropped at
         // decode time; a later Get always echoed the Password default
         // regardless of what was actually registered.
@@ -839,14 +844,18 @@ pub fn import_object(
     // Without this, Import(Certificate) either errored confusingly (no
     // CryptographicAlgorithm) or, if a client worked around that, silently
     // discarded the certificate DER entirely while still returning success.
-    let (certificate_type, certificate_value, certificate_length, certificate_subject_cn) =
+    let (certificate_type, certificate_value, certificate_length, certificate_subject, certificate_issuer) =
         match (&req.certificate_payload, req.object_type) {
             (Some((wire_ct, der)), ObjectType::Certificate) => {
                 let len = der.len() as i32;
-                let cn = super::der_x509::extract_subject_cn(der);
-                (Some(*wire_ct), Some(der.clone()), Some(len), cn)
+                // §4.6 Table 62, "When implicitly set: Register, Certify,
+                // Re-certify". A Name that yields nothing stays `None` (RFC
+                // 5280 §4.1.2.6 permits an empty Subject), so it projects no
+                // attributes rather than twelve empty ones.
+                let (subject, issuer) = super::der_x509::extract_certificate_names(der);
+                (Some(*wire_ct), Some(der.clone()), Some(len), subject, issuer)
             }
-            _ => (None, None, None, None),
+            _ => (None, None, None, None, None),
         };
 
     // K-14 — same Digest-at-creation rule as Register: SHA-256 over
@@ -883,7 +892,8 @@ pub fn import_object(
         certificate_type,
         certificate_value: certificate_value.clone(),
         certificate_length,
-        certificate_subject_cn,
+        certificate_subject,
+        certificate_issuer,
         ..ObjectRecord::default()
     }, auth))?;
 

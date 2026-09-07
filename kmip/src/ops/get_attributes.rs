@@ -1,4 +1,4 @@
-//! KMIP 3.0 §6.1.21 **GetAttributes** operation.
+//! KMIP 3.0 §6.1.26 **GetAttributes** operation.
 //!
 //! Returns one or more named attributes of a managed object. The
 //! `attribute_references` field on the request names which attributes
@@ -213,7 +213,7 @@ fn attributes_from_record(r: &ObjectRecord) -> Vec<Attribute> {
     // table. SKLC-O-1 step #3 pins this.
     out.push(Attribute::KeyFormatType(r.key_format_type.unwrap_or(0x01)));
     if let Some(n) = r.certificate_length { out.push(Attribute::CertificateLength(n)); }
-    if let Some(s) = &r.certificate_subject_cn { out.push(Attribute::CertificateSubjectCN(s.clone())); }
+    push_certificate_names(&mut out, r);
     if let Some(b) = &r.certificate_value { out.push(Attribute::CertificateValue(b.clone())); }
     // KMIP §11 Lease Time — server default; OASIS Baseline corpus
     // pins 3600 seconds for newly-created keys (BL-M-14 / AKLC-O-1 /
@@ -411,6 +411,31 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::CertificateType(_)        => "CertificateType",
         Attribute::CertificateValue(_)       => "CertificateValue",
         Attribute::CertificateSubjectCN(_)   => "CertificateSubjectCN",
+        Attribute::CertificateSubjectO(_) => "CertificateSubjectO",
+        Attribute::CertificateSubjectOU(_) => "CertificateSubjectOU",
+        Attribute::CertificateSubjectEmail(_) => "CertificateSubjectEmail",
+        Attribute::CertificateSubjectC(_) => "CertificateSubjectC",
+        Attribute::CertificateSubjectST(_) => "CertificateSubjectST",
+        Attribute::CertificateSubjectL(_) => "CertificateSubjectL",
+        Attribute::CertificateSubjectUID(_) => "CertificateSubjectUID",
+        Attribute::CertificateSubjectSerialNumber(_) => "CertificateSubjectSerialNumber",
+        Attribute::CertificateSubjectTitle(_) => "CertificateSubjectTitle",
+        Attribute::CertificateSubjectDC(_) => "CertificateSubjectDC",
+        Attribute::CertificateSubjectDNQualifier(_) => "CertificateSubjectDNQualifier",
+        Attribute::CertificateSubjectDN(_) => "CertificateSubjectDN",
+        Attribute::CertificateIssuerCN(_) => "CertificateIssuerCN",
+        Attribute::CertificateIssuerO(_) => "CertificateIssuerO",
+        Attribute::CertificateIssuerOU(_) => "CertificateIssuerOU",
+        Attribute::CertificateIssuerEmail(_) => "CertificateIssuerEmail",
+        Attribute::CertificateIssuerC(_) => "CertificateIssuerC",
+        Attribute::CertificateIssuerST(_) => "CertificateIssuerST",
+        Attribute::CertificateIssuerL(_) => "CertificateIssuerL",
+        Attribute::CertificateIssuerUID(_) => "CertificateIssuerUID",
+        Attribute::CertificateIssuerSerialNumber(_) => "CertificateIssuerSerialNumber",
+        Attribute::CertificateIssuerTitle(_) => "CertificateIssuerTitle",
+        Attribute::CertificateIssuerDC(_) => "CertificateIssuerDC",
+        Attribute::CertificateIssuerDNQualifier(_) => "CertificateIssuerDNQualifier",
+        Attribute::CertificateIssuerDN(_) => "CertificateIssuerDN",
         Attribute::ProtectionStorageMask(_)  => "ProtectionStorageMask",
         Attribute::PublicKeyLink(_)          => "PublicKeyLink",
         Attribute::RotateLatest(_) => "RotateLatest",
@@ -467,6 +492,48 @@ pub(crate) fn canonical_attribute_name(attr: &Attribute) -> &'static str {
         Attribute::CryptographicParameters(_) => "CryptographicParameters",
         Attribute::Digest(_)                  => "Digest",
         Attribute::RandomNumberGenerator(_)   => "RandomNumberGenerator",
+    }
+}
+
+
+/// Project the §4.6 Certificate Attributes.
+///
+/// Table 62 governs the shape twice over: "Multiple instances permitted: Yes"
+/// means one attribute instance PER value, so a Subject with two `OU`s yields
+/// two `Certificate Subject OU` attributes; and "SHALL always have a value:
+/// No" means an absent RDN yields NO attribute at all, never an empty string.
+/// An object that is not a certificate has neither Name and contributes
+/// nothing.
+fn push_certificate_names(out: &mut Vec<Attribute>, r: &ObjectRecord) {
+    if let Some(n) = &r.certificate_subject {
+        for v in &n.cn { out.push(Attribute::CertificateSubjectCN(v.clone())); }
+        for v in &n.o { out.push(Attribute::CertificateSubjectO(v.clone())); }
+        for v in &n.ou { out.push(Attribute::CertificateSubjectOU(v.clone())); }
+        for v in &n.email { out.push(Attribute::CertificateSubjectEmail(v.clone())); }
+        for v in &n.c { out.push(Attribute::CertificateSubjectC(v.clone())); }
+        for v in &n.st { out.push(Attribute::CertificateSubjectST(v.clone())); }
+        for v in &n.l { out.push(Attribute::CertificateSubjectL(v.clone())); }
+        for v in &n.uid { out.push(Attribute::CertificateSubjectUID(v.clone())); }
+        for v in &n.serial_number { out.push(Attribute::CertificateSubjectSerialNumber(v.clone())); }
+        for v in &n.title { out.push(Attribute::CertificateSubjectTitle(v.clone())); }
+        for v in &n.dc { out.push(Attribute::CertificateSubjectDC(v.clone())); }
+        for v in &n.dn_qualifier { out.push(Attribute::CertificateSubjectDNQualifier(v.clone())); }
+        if let Some(v) = &n.dn { out.push(Attribute::CertificateSubjectDN(v.clone())); }
+    }
+    if let Some(n) = &r.certificate_issuer {
+        for v in &n.cn { out.push(Attribute::CertificateIssuerCN(v.clone())); }
+        for v in &n.o { out.push(Attribute::CertificateIssuerO(v.clone())); }
+        for v in &n.ou { out.push(Attribute::CertificateIssuerOU(v.clone())); }
+        for v in &n.email { out.push(Attribute::CertificateIssuerEmail(v.clone())); }
+        for v in &n.c { out.push(Attribute::CertificateIssuerC(v.clone())); }
+        for v in &n.st { out.push(Attribute::CertificateIssuerST(v.clone())); }
+        for v in &n.l { out.push(Attribute::CertificateIssuerL(v.clone())); }
+        for v in &n.uid { out.push(Attribute::CertificateIssuerUID(v.clone())); }
+        for v in &n.serial_number { out.push(Attribute::CertificateIssuerSerialNumber(v.clone())); }
+        for v in &n.title { out.push(Attribute::CertificateIssuerTitle(v.clone())); }
+        for v in &n.dc { out.push(Attribute::CertificateIssuerDC(v.clone())); }
+        for v in &n.dn_qualifier { out.push(Attribute::CertificateIssuerDNQualifier(v.clone())); }
+        if let Some(v) = &n.dn { out.push(Attribute::CertificateIssuerDN(v.clone())); }
     }
 }
 
@@ -800,5 +867,70 @@ mod tests {
                  — the link loop dropped it (this is the CertificateLink bug)",
             );
         }
+    }
+
+    /// §4.6 Table 62, end to end through the projection, in both directions.
+    ///
+    /// "Multiple instances permitted: Yes" — a Subject with two `OU`s must
+    /// emit TWO `Certificate Subject OU` attributes, not one. The old
+    /// `Option<String>` record field could not represent the second at all.
+    ///
+    /// "SHALL always have a value: No" — a component the certificate does not
+    /// carry must emit NOTHING. Emitting an empty string would put a value on
+    /// the wire that is not in the certificate, which is the mistake `Digest`
+    /// is careful to avoid.
+    #[test]
+    fn certificate_attributes_repeat_per_value_and_stay_absent_when_unset() {
+        let mut rec = ObjectRecord::default();
+        rec.certificate_subject = Some(crate::kmip30::CertificateNames {
+            cn: vec!["multi.example".into()],
+            ou: vec!["Engineering".into(), "Cryptography".into()],
+            dn: Some("CN=multi.example,OU=Cryptography,OU=Engineering".into()),
+            ..Default::default()
+        });
+        rec.certificate_issuer = Some(crate::kmip30::CertificateNames {
+            cn: vec!["Issuing CA".into()],
+            ..Default::default()
+        });
+
+        let attrs = attributes_from_record(&rec);
+        let names: Vec<&str> = attrs.iter().map(canonical_attribute_name).collect();
+
+        assert_eq!(
+            names.iter().filter(|n| **n == "CertificateSubjectOU").count(),
+            2,
+            "two OU values must yield two Certificate Subject OU attributes, not one"
+        );
+        assert_eq!(names.iter().filter(|n| **n == "CertificateSubjectCN").count(), 1);
+        assert_eq!(names.iter().filter(|n| **n == "CertificateSubjectDN").count(), 1);
+        assert_eq!(
+            names.iter().filter(|n| **n == "CertificateIssuerCN").count(),
+            1,
+            "the Issuer side projects independently of the Subject side"
+        );
+
+        for absent in [
+            "CertificateSubjectO", "CertificateSubjectEmail", "CertificateSubjectC",
+            "CertificateSubjectST", "CertificateSubjectL", "CertificateSubjectUID",
+            "CertificateSubjectSerialNumber", "CertificateSubjectTitle",
+            "CertificateSubjectDC", "CertificateSubjectDNQualifier",
+            "CertificateIssuerOU", "CertificateIssuerDN",
+        ] {
+            assert!(
+                !names.contains(&absent),
+                "{absent} is not in the certificate, so §4.6 says emit nothing — \
+                 an empty value would be a fabricated attribute"
+            );
+        }
+
+        // An object that is not a certificate contributes neither Name.
+        let plain = attributes_from_record(&ObjectRecord::default());
+        let plain_names: Vec<&str> = plain.iter().map(canonical_attribute_name).collect();
+        assert!(
+            !plain_names.iter().any(|n| n.starts_with("Certificate Subject")
+                || n.starts_with("CertificateSubject")
+                || n.starts_with("CertificateIssuer")),
+            "a non-certificate object must project no §4.6 attributes at all"
+        );
     }
 }

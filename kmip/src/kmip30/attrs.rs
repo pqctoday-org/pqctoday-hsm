@@ -211,6 +211,67 @@ impl RevocationReason {
 /// back to being dropped at decode (same graceful-degradation posture as
 /// before this type existed), same as any other genuinely-unsupported
 /// wire shape.
+/// The 13 §4.6 Certificate Attributes for ONE side (Subject or Issuer).
+///
+/// Table 62 fixes the shape: "Multiple instances permitted: **Yes**", so each
+/// component is a list and never a single value; and "SHALL always have a
+/// value: **No**", so an empty list means the attribute is ABSENT from the
+/// wire, never present-and-empty.
+///
+/// `#[serde(default)]` on every field keeps records written before these
+/// attributes existed loadable — the store serialises `ObjectRecord` whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CertificateNames {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cn: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub o: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ou: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub email: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub c: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub st: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub l: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uid: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serial_number: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub title: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dc: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dn_qualifier: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dn: Option<String>,
+}
+
+impl CertificateNames {
+    /// True when the certificate carried no §4.6 component at all — an empty
+    /// Subject is legal (RFC 5280 §4.1.2.6 puts the identity in a critical
+    /// `subjectAltName` instead), and must project NO attributes rather than
+    /// twelve empty ones.
+    pub fn is_empty(&self) -> bool {
+        self.cn.is_empty()
+            && self.o.is_empty()
+            && self.ou.is_empty()
+            && self.email.is_empty()
+            && self.c.is_empty()
+            && self.st.is_empty()
+            && self.l.is_empty()
+            && self.uid.is_empty()
+            && self.serial_number.is_empty()
+            && self.title.is_empty()
+            && self.dc.is_empty()
+            && self.dn_qualifier.is_empty()
+            && self.dn.is_none()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CustomAttributeValue {
     Text(String),
@@ -493,6 +554,81 @@ pub enum Attribute {
     /// `Certificate Subject CN` (0x420108) — server-extracted from the
     /// DER Subject Name's commonName RDN. Marked Read-Only per §11.
     CertificateSubjectCN(String),
+    /// `Certificate Subject O` (0x420109) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectO(String),
+    /// `Certificate Subject OU` (0x42010a) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectOU(String),
+    /// `Certificate Subject Email` (0x42010b) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectEmail(String),
+    /// `Certificate Subject C` (0x42010c) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectC(String),
+    /// `Certificate Subject ST` (0x42010d) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectST(String),
+    /// `Certificate Subject L` (0x42010e) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectL(String),
+    /// `Certificate Subject UID` (0x42010f) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectUID(String),
+    /// `Certificate Subject Serial Number` (0x420110) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectSerialNumber(String),
+    /// `Certificate Subject Title` (0x420111) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectTitle(String),
+    /// `Certificate Subject DC` (0x420112) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectDC(String),
+    /// `Certificate Subject DN Qualifier` (0x420113) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectDNQualifier(String),
+    /// `Certificate Subject DN` (0x4201ba) — server-extracted from the certificate's
+    /// DER Subject Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateSubjectDN(String),
+    /// `Certificate Issuer CN` (0x420114) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerCN(String),
+    /// `Certificate Issuer O` (0x420115) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerO(String),
+    /// `Certificate Issuer OU` (0x420116) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerOU(String),
+    /// `Certificate Issuer Email` (0x420117) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerEmail(String),
+    /// `Certificate Issuer C` (0x420118) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerC(String),
+    /// `Certificate Issuer ST` (0x420119) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerST(String),
+    /// `Certificate Issuer L` (0x42011a) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerL(String),
+    /// `Certificate Issuer UID` (0x42011b) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerUID(String),
+    /// `Certificate Issuer Serial Number` (0x42011c) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerSerialNumber(String),
+    /// `Certificate Issuer Title` (0x42011d) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerTitle(String),
+    /// `Certificate Issuer DC` (0x42011e) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerDC(String),
+    /// `Certificate Issuer DN Qualifier` (0x42011f) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerDNQualifier(String),
+    /// `Certificate Issuer DN` (0x4201bb) — server-extracted from the certificate's
+    /// DER Issuer Name. §4.6 Table 62: read-only to clients, may repeat.
+    CertificateIssuerDN(String),
 
     /// Integers.
     CertificateLength(i32),

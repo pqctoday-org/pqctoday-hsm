@@ -222,10 +222,18 @@ pub struct ObjectRecord {
     pub certificate_length: Option<i32>,
     /// KMIP §6.2 / §11 — DER bytes of an X.509 / PGP Certificate
     /// supplied via Register. `certificate_length` mirrors the byte
-    /// count; `certificate_subject_cn` is extracted server-side at
+    /// count; the §4.6 Certificate Attributes are extracted server-side at
     /// Register time. All three travel together.
     pub certificate_value: Option<Vec<u8>>,
-    pub certificate_subject_cn: Option<String>,
+    /// §4.6 Certificate Attributes, the 13 Subject and 13 Issuer components
+    /// server-extracted from `certificate_value` at Register / Certify /
+    /// Re-certify (Table 62, "When implicitly set"). `None` means the object
+    /// is not a certificate or carried no parseable Name; each component
+    /// inside is a list, because Table 62 permits multiple instances.
+    #[serde(default)]
+    pub certificate_subject: Option<crate::kmip30::CertificateNames>,
+    #[serde(default)]
+    pub certificate_issuer: Option<crate::kmip30::CertificateNames>,
     /// KMIP §11 `Digital Signature Algorithm` — Enumeration codepoint.
     pub digital_signature_algorithm: Option<u32>,
     /// KMIP §11 `NIST Key Type` — Enumeration codepoint.
@@ -435,7 +443,8 @@ impl From<BaselineDefaults> for ObjectRecord {
             certificate_type: None,
             certificate_length: None,
             certificate_value: None,
-            certificate_subject_cn: None,
+            certificate_subject: None,
+            certificate_issuer: None,
             digital_signature_algorithm: None,
             nist_key_type: None,
             protection_level: None,

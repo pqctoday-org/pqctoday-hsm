@@ -304,10 +304,16 @@ impl LocateFilters {
         // WP-2 remediation — Certificate-specific search dimensions, since
         // Certify/Register-created certs otherwise had no way to be found
         // by anything but UID.
+        // §4.6 permits multiple instances, so a certificate may carry more
+        // than one CN. An object matches when ANY of them equals the filter —
+        // the same "any membership" rule the object-group filter above uses.
         if let Some(want_cn) = &self.certificate_subject_cn {
-            match &r.certificate_subject_cn {
-                Some(have) if have == want_cn => {}
-                _ => return false,
+            let matched = r
+                .certificate_subject
+                .as_ref()
+                .is_some_and(|n| n.cn.iter().any(|have| have == want_cn));
+            if !matched {
+                return false;
             }
         }
         if let Some(want_issuer) = &self.x509_certificate_issuer {

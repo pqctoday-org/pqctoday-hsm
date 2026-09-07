@@ -518,6 +518,33 @@ pub(crate) mod tags {
     pub const CertificateValue: u32              = 0x42_001e;
     /// KMIP 3.0 §11 — Certificate Subject CN extracted from the DER.
     pub const CertificateSubjectCN: u32          = 0x42_0108;
+    // §4.6 Certificate Attributes — the other 25 (13 Subject + 13 Issuer,
+    // minus Subject CN above). Codepoints from kmip-spec-3.0-tags-enums.json.
+    pub const CertificateSubjectO: u32        = 0x42_0109;
+    pub const CertificateSubjectOU: u32       = 0x42_010A;
+    pub const CertificateSubjectEmail: u32    = 0x42_010B;
+    pub const CertificateSubjectC: u32        = 0x42_010C;
+    pub const CertificateSubjectST: u32       = 0x42_010D;
+    pub const CertificateSubjectL: u32        = 0x42_010E;
+    pub const CertificateSubjectUID: u32      = 0x42_010F;
+    pub const CertificateSubjectSerialNumber: u32 = 0x42_0110;
+    pub const CertificateSubjectTitle: u32    = 0x42_0111;
+    pub const CertificateSubjectDC: u32       = 0x42_0112;
+    pub const CertificateSubjectDNQualifier: u32 = 0x42_0113;
+    pub const CertificateSubjectDN: u32       = 0x42_01BA;
+    pub const CertificateIssuerCN: u32        = 0x42_0114;
+    pub const CertificateIssuerO: u32         = 0x42_0115;
+    pub const CertificateIssuerOU: u32        = 0x42_0116;
+    pub const CertificateIssuerEmail: u32     = 0x42_0117;
+    pub const CertificateIssuerC: u32         = 0x42_0118;
+    pub const CertificateIssuerST: u32        = 0x42_0119;
+    pub const CertificateIssuerL: u32         = 0x42_011A;
+    pub const CertificateIssuerUID: u32       = 0x42_011B;
+    pub const CertificateIssuerSerialNumber: u32 = 0x42_011C;
+    pub const CertificateIssuerTitle: u32     = 0x42_011D;
+    pub const CertificateIssuerDC: u32        = 0x42_011E;
+    pub const CertificateIssuerDNQualifier: u32 = 0x42_011F;
+    pub const CertificateIssuerDN: u32        = 0x42_01BB;
     /// P2.3 — §6.1.6 Certify / §6.1.52 Re-certify `Certificate Request`
     /// ByteString: the inline CSR (PKCS#10 / PEM / CRMF) bytes. The
     /// §6.1.6 payload table names the item "Certificate Request Value",
@@ -3265,6 +3292,281 @@ fn decode_attribute_v3(frame: &TtlvFrame) -> Result<Option<Attribute>, WireError
                 });
             }
         }
+        tags::CertificateSubjectO => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectO(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject O",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectOU => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectOU(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject OU",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectEmail => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectEmail(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject Email",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject C",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectST => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectST(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject ST",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectL => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectL(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject L",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectUID => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectUID(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject UID",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectSerialNumber => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectSerialNumber(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject Serial Number",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectTitle => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectTitle(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject Title",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectDC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectDC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject DC",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectDNQualifier => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectDNQualifier(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject DN Qualifier",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateSubjectDN => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateSubjectDN(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Subject DN",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerCN => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerCN(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer CN",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerO => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerO(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer O",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerOU => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerOU(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer OU",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerEmail => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerEmail(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer Email",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer C",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerST => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerST(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer ST",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerL => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerL(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer L",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerUID => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerUID(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer UID",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerSerialNumber => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerSerialNumber(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer Serial Number",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerTitle => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerTitle(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer Title",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerDC => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerDC(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer DC",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerDNQualifier => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerDNQualifier(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer DN Qualifier",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
+        tags::CertificateIssuerDN => {
+            if let Value::TextString(s) = &frame.value {
+                Attribute::CertificateIssuerDN(s.clone())
+            } else {
+                return Err(WireError::BadType {
+                    tag: frame.tag.0,
+                    name: "Certificate Issuer DN",
+                    msg: "expected TextString".into(),
+                });
+            }
+        }
         tags::CertificateSubjectCN => {
             if let Value::TextString(s) = &frame.value {
                 Attribute::CertificateSubjectCN(s.clone())
@@ -5441,6 +5743,31 @@ fn encode_attribute_v3(a: &Attribute) -> TtlvFrame {
             ]))
         }
         Attribute::CertificateSubjectCN(s)     => TtlvFrame::new(Tag(tags::CertificateSubjectCN),     Value::TextString(s.clone())),
+        Attribute::CertificateSubjectO(s) => TtlvFrame::new(Tag(tags::CertificateSubjectO), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectOU(s) => TtlvFrame::new(Tag(tags::CertificateSubjectOU), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectEmail(s) => TtlvFrame::new(Tag(tags::CertificateSubjectEmail), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectC(s) => TtlvFrame::new(Tag(tags::CertificateSubjectC), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectST(s) => TtlvFrame::new(Tag(tags::CertificateSubjectST), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectL(s) => TtlvFrame::new(Tag(tags::CertificateSubjectL), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectUID(s) => TtlvFrame::new(Tag(tags::CertificateSubjectUID), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectSerialNumber(s) => TtlvFrame::new(Tag(tags::CertificateSubjectSerialNumber), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectTitle(s) => TtlvFrame::new(Tag(tags::CertificateSubjectTitle), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectDC(s) => TtlvFrame::new(Tag(tags::CertificateSubjectDC), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectDNQualifier(s) => TtlvFrame::new(Tag(tags::CertificateSubjectDNQualifier), Value::TextString(s.clone())),
+        Attribute::CertificateSubjectDN(s) => TtlvFrame::new(Tag(tags::CertificateSubjectDN), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerCN(s) => TtlvFrame::new(Tag(tags::CertificateIssuerCN), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerO(s) => TtlvFrame::new(Tag(tags::CertificateIssuerO), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerOU(s) => TtlvFrame::new(Tag(tags::CertificateIssuerOU), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerEmail(s) => TtlvFrame::new(Tag(tags::CertificateIssuerEmail), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerC(s) => TtlvFrame::new(Tag(tags::CertificateIssuerC), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerST(s) => TtlvFrame::new(Tag(tags::CertificateIssuerST), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerL(s) => TtlvFrame::new(Tag(tags::CertificateIssuerL), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerUID(s) => TtlvFrame::new(Tag(tags::CertificateIssuerUID), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerSerialNumber(s) => TtlvFrame::new(Tag(tags::CertificateIssuerSerialNumber), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerTitle(s) => TtlvFrame::new(Tag(tags::CertificateIssuerTitle), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerDC(s) => TtlvFrame::new(Tag(tags::CertificateIssuerDC), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerDNQualifier(s) => TtlvFrame::new(Tag(tags::CertificateIssuerDNQualifier), Value::TextString(s.clone())),
+        Attribute::CertificateIssuerDN(s) => TtlvFrame::new(Tag(tags::CertificateIssuerDN), Value::TextString(s.clone())),
         Attribute::DigitalSignatureAlgorithm(v) => TtlvFrame::new(Tag(tags::DigitalSignatureAlgorithm), Value::Enumeration(*v)),
         Attribute::NistKeyType(v)              => TtlvFrame::new(Tag(tags::NistKeyType),              Value::Enumeration(*v)),
         Attribute::ProtectionLevel(v)          => TtlvFrame::new(Tag(tags::ProtectionLevel),          Value::Enumeration(*v)),
@@ -5561,6 +5888,31 @@ fn tag_code_from_name(name: &str) -> Option<u32> {
         "CertificateLength"      => tags::CertificateLength,
         "CertificateValue"       => tags::CertificateValue,
         "CertificateSubjectCN"   => tags::CertificateSubjectCN,
+        "CertificateSubjectO" => tags::CertificateSubjectO,
+        "CertificateSubjectOU" => tags::CertificateSubjectOU,
+        "CertificateSubjectEmail" => tags::CertificateSubjectEmail,
+        "CertificateSubjectC" => tags::CertificateSubjectC,
+        "CertificateSubjectST" => tags::CertificateSubjectST,
+        "CertificateSubjectL" => tags::CertificateSubjectL,
+        "CertificateSubjectUID" => tags::CertificateSubjectUID,
+        "CertificateSubjectSerialNumber" => tags::CertificateSubjectSerialNumber,
+        "CertificateSubjectTitle" => tags::CertificateSubjectTitle,
+        "CertificateSubjectDC" => tags::CertificateSubjectDC,
+        "CertificateSubjectDNQualifier" => tags::CertificateSubjectDNQualifier,
+        "CertificateSubjectDN" => tags::CertificateSubjectDN,
+        "CertificateIssuerCN" => tags::CertificateIssuerCN,
+        "CertificateIssuerO" => tags::CertificateIssuerO,
+        "CertificateIssuerOU" => tags::CertificateIssuerOU,
+        "CertificateIssuerEmail" => tags::CertificateIssuerEmail,
+        "CertificateIssuerC" => tags::CertificateIssuerC,
+        "CertificateIssuerST" => tags::CertificateIssuerST,
+        "CertificateIssuerL" => tags::CertificateIssuerL,
+        "CertificateIssuerUID" => tags::CertificateIssuerUID,
+        "CertificateIssuerSerialNumber" => tags::CertificateIssuerSerialNumber,
+        "CertificateIssuerTitle" => tags::CertificateIssuerTitle,
+        "CertificateIssuerDC" => tags::CertificateIssuerDC,
+        "CertificateIssuerDNQualifier" => tags::CertificateIssuerDNQualifier,
+        "CertificateIssuerDN" => tags::CertificateIssuerDN,
         "DigitalSignatureAlgorithm" => tags::DigitalSignatureAlgorithm,
         "NistKeyType"            => tags::NistKeyType,
         "ProtectionLevel"        => tags::ProtectionLevel,
@@ -5662,6 +6014,31 @@ fn tag_name_from_code(code: u32) -> &'static str {
         tags::CertificateLength      => "Certificate Length",
         tags::CertificateValue       => "Certificate Value",
         tags::CertificateSubjectCN   => "Certificate Subject CN",
+        tags::CertificateSubjectO => "Certificate Subject O",
+        tags::CertificateSubjectOU => "Certificate Subject OU",
+        tags::CertificateSubjectEmail => "Certificate Subject Email",
+        tags::CertificateSubjectC => "Certificate Subject C",
+        tags::CertificateSubjectST => "Certificate Subject ST",
+        tags::CertificateSubjectL => "Certificate Subject L",
+        tags::CertificateSubjectUID => "Certificate Subject UID",
+        tags::CertificateSubjectSerialNumber => "Certificate Subject Serial Number",
+        tags::CertificateSubjectTitle => "Certificate Subject Title",
+        tags::CertificateSubjectDC => "Certificate Subject DC",
+        tags::CertificateSubjectDNQualifier => "Certificate Subject DN Qualifier",
+        tags::CertificateSubjectDN => "Certificate Subject DN",
+        tags::CertificateIssuerCN => "Certificate Issuer CN",
+        tags::CertificateIssuerO => "Certificate Issuer O",
+        tags::CertificateIssuerOU => "Certificate Issuer OU",
+        tags::CertificateIssuerEmail => "Certificate Issuer Email",
+        tags::CertificateIssuerC => "Certificate Issuer C",
+        tags::CertificateIssuerST => "Certificate Issuer ST",
+        tags::CertificateIssuerL => "Certificate Issuer L",
+        tags::CertificateIssuerUID => "Certificate Issuer UID",
+        tags::CertificateIssuerSerialNumber => "Certificate Issuer Serial Number",
+        tags::CertificateIssuerTitle => "Certificate Issuer Title",
+        tags::CertificateIssuerDC => "Certificate Issuer DC",
+        tags::CertificateIssuerDNQualifier => "Certificate Issuer DN Qualifier",
+        tags::CertificateIssuerDN => "Certificate Issuer DN",
         tags::DigitalSignatureAlgorithm => "Digital Signature Algorithm",
         tags::NistKeyType            => "NIST Key Type",
         tags::ProtectionLevel        => "Protection Level",
@@ -7919,19 +8296,24 @@ mod tests {
     /// `CertificateLink` nobody could read back, and why a client could set an
     /// attribute and never learn it had not been stored.
     ///
-    /// `Certificate Subject O` (0x420109) is a real §4.6 attribute this server
-    /// does not model — exactly the shape of input that used to vanish.
+    /// `Media Identifier` (0x4200aa) is a real spec attribute this server does
+    /// not model — exactly the shape of input that used to vanish. It was
+    /// `Certificate Subject O` until the §4.6 Certificate Attributes landed
+    /// and made that one modelled; if `Media Identifier` is ever implemented
+    /// too, repoint this at any other tag the spec defines and `tags` does
+    /// not. The subject of the test is the fail-closed BEHAVIOUR, not this
+    /// particular attribute.
     #[test]
     fn unmodelled_attribute_in_a_request_is_refused_not_dropped() {
         let attrs = TtlvFrame::new(
             Tag(tags::Attributes),
             Value::Structure(vec![
                 TtlvFrame::new(Tag(tags::CryptographicLength), Value::Integer(256)),
-                TtlvFrame::new(Tag(0x42_0109), Value::TextString("Acme Corp".into())),
+                TtlvFrame::new(Tag(0x42_00aa), Value::TextString("LTO-9-000123".into())),
             ]),
         );
         match decode_attributes_block(&attrs) {
-            Err(WireError::UnsupportedAttribute { tag }) => assert_eq!(tag, 0x42_0109),
+            Err(WireError::UnsupportedAttribute { tag }) => assert_eq!(tag, 0x42_00aa),
             other => panic!("expected UnsupportedAttribute, got {other:?}"),
         }
 

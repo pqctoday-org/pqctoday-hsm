@@ -1225,8 +1225,13 @@ fn certify_issues_certificate_get_able_with_links() {
     assert!(!g.key_block.key_value.is_empty(), "issued cert DER is returned by Get");
 
     let rec = deps.store.get(&resp.uid).unwrap().unwrap();
-    assert_eq!(rec.certificate_subject_cn.as_deref(), Some("e2e-client"),
-        "server-derived §11 CertificateSubjectCN");
+    let subject = rec.certificate_subject.as_ref().expect("§4.6 Subject attributes are derived at Certify");
+    assert_eq!(subject.cn, vec!["e2e-client".to_string()], "server-derived Certificate Subject CN");
+    assert!(subject.dn.is_some(), "a non-empty Subject renders a Certificate Subject DN");
+    assert!(
+        rec.certificate_issuer.is_some(),
+        "§4.6 Table 62 derives the Issuer side at Certify too, not just the Subject"
+    );
     assert_eq!(rec.certificate_length, Some(g.key_block.key_value.len() as i32));
 
     let _ = session::finalize();
