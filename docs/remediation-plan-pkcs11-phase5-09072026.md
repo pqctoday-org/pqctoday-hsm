@@ -72,7 +72,7 @@ Ledger rows today carry `{value, cpp, rust}` (488 rows, `docs/pkcs11-mechanism-l
 
 ## 3. `CK_ULONG` 32-bit cap — the one real audit finding
 
-**Effort: S to fix, but it needs a decision first.**
+**Effort: S to fix on two rows; the other three needed a spec read, now done — §3.2.1.**
 
 v3.3 (`introduction.md:303`) caps every `CK_ULONG` at `0x7FFFFFFF`. C++ defines:
 
@@ -81,7 +81,7 @@ v3.3 (`introduction.md:303`) caps every `CK_ULONG` at `0x7FFFFFFF`. C++ defines:
 static constexpr CK_ULONG UNLIMITED_KEY_SIZE = 0x80000000UL;   // 2^31 — one over the cap
 ```
 
-reported as `ulMaxKeySize` at five sites in `SoftHSM_slots.cpp` (`:1023, :1092, :1101, :1126, :1131`), all AES key-wrap mechanisms. Rust reports 16–32 for the same mechanisms, reading "key size" as the wrapping AES key rather than the payload.
+reported as `ulMaxKeySize` at five sites in `SoftHSM_slots.cpp` (`:1023, :1092, :1101, :1126, :1131`). **These are not all AES key-wrap mechanisms** — see §14.1; only two are, and the five do not share one answer.
 
 v3.2 does not state the cap, so this is a v3.3 gap-fill under the standing rule.
 
@@ -103,6 +103,38 @@ Decided E-1a: set each maximum from the governing standard, **not** from either 
 Whatever each lands on must also satisfy the `0x7FFFFFFF` cap — that constraint is independent and applies regardless.
 
 **Record the citation with the value.** A number in `SoftHSM_slots.cpp` with no source is how these three came to disagree in the first place; the ledger row from §2 is where the citation belongs so it survives.
+
+#### 3.2.1 Grounding done (2026-09-07) — and it reverses the E-1 premise
+
+Both specs read. The result changes which engine is wrong.
+
+**KMAC does not exist in v3.2.** Zero occurrences, case-insensitive, across all 24,215 lines of the v3.2 text. Our `CKM_KMAC_128` / `CKM_KMAC_256` are **vendor mechanisms** — `CKM_VENDOR_DEFINED | 0x100` and `| 0x101` (`pkcs11t.h:1273-1274`). This is a v3.2 gap, so v3.3 governs, and v3.3 says (`working/doc/spec/kmac.md`):
+
+> *"The key can be of arbitrary length, however it is recommended that the size of the key matches the security strength of the mechanism it is used with. For **CKM_KMAC128**, the key length should be at least 128 bits. For **CKM_KMAC256**, the key length should be at least 256 bits."* — `kmac.md:115-120`
+>
+> *"the `ulMinKeySize` and `ulMaxKeySize` fields of the **CK_MECHANISM_INFO** structure specify the supported range of KMAC key sizes, in bytes."* — `kmac.md:132-134`
+
+So, measured against the only specification that covers these mechanisms at all:
+
+| | C++ | Rust | Verdict |
+|---|---|---|---|
+| `CKM_KMAC_128` min | 16 bytes = 128 bits | 16 | Both match the recommendation |
+| `CKM_KMAC_256` min | 32 bytes = 256 bits | **16** | **C++ is right. Rust advertises a minimum below the recommended 256-bit key.** |
+| Max, both | 2³¹ | 64 | No spec ceiling exists — "arbitrary length" |
+
+**This reverses the premise E-1 was posed on.** On KMAC the divergence is not C++ over-advertising; it is **Rust under-specifying its minimum**, and adopting Rust's 16/64 would have propagated that error into C++ and thrown away a correct value. The maximum genuinely has no spec answer, so it is a statement about this token: clamp to `0x7FFFFFFF` and let the engines' real limits speak.
+
+**`CKM_GENERIC_SECRET_KEY_GEN` — the units are the finding, not the ceiling.** v3.2 §6.8 is explicit:
+
+> *"For this mechanism, the `ulMinKeySize` and `ulMaxKeySize` fields of the `CK_MECHANISM_INFO` structure specify the supported range of key sizes, **in bits**."* — `/tmp/p11os.txt:10504`
+
+C++ reports `1 – 2³¹` (bits — effectively unlimited, and conformant once clamped). Rust reports `1 – 512` (`ffi.rs:1510`). Rust's table is per-mechanism about units — its `CKM_AES_GMAC` comment says *"table stores bytes"* while `CKM_EC_KEY_PAIR_GEN` is `(256, 521)` in bits — so **512 here is unlabelled**, and it matters: as bits it is a 64-byte ceiling, which is a far narrower claim than C++'s.
+
+**Open, needs measurement not reading:** does Rust actually refuse a generic secret longer than its advertised maximum? If it does not, the number is a false statement about itself — a different defect from a mere policy difference, and the one worth catching. A scenario decides this.
+
+#### 3.2.2 A ninth question for the upstream list (§7)
+
+v3.3's `kmac.md` specifies `CKM_KMAC128` and `CKM_KMAC256` in prose, but **the draft's own header allocates neither** — no `CKM_KMAC*` and no `CKK_KMAC` anywhere in `working/headers/pkcs11t.h`, though the prose requires the key type. The same defect class as §7.7 (`CKO_MECHANISM`'s unallocated attributes). Note also the spelling: the draft writes `CKM_KMAC128`, we write `CKM_KMAC_128` — ours is a vendor mechanism, so there is no clash today, but the names will collide in intent the moment the TC allocates.
 
 ### 3.3 Sequencing
 
@@ -253,6 +285,11 @@ Before proposing a push: `bash scripts/local-gate.sh --cpp --javajce --openssl-p
 | **E-3** | **Fix C++ regardless** of what Rust turns out to do | Default taken; C++'s refusal is the non-conformant half either way |
 | **E-4** | Record-only items (§5, §7, §8) **land with the branch** | Default taken; a reviewer should see the reasoning alongside the code |
 
+| **E-5** | **Execute phase 5 on this branch**, in §10's order | The branch reaches ~55 commits before landing. Review size is the accepted cost |
+| **E-6** | §2 pins **all advertised mechanisms** (166 C++ / 172 Rust), not just the 86 that disagree | A mechanism that agrees today can drift tomorrow — which is exactly how `CKM_AES_CMAC` went unnoticed |
+| **E-7** | §8 wasm snapshot: **document the boundary, no code** | Default taken. A browser has no PIN-equivalent secret to derive from; the key would have to come from the host, which already holds the blob |
+| **E-8** | §6 sweep: **stop and fix** each concealed behaviour divergence before continuing | *Overrides the recommendation to record and keep sweeping.* See §14.2 |
+
 ### 14.1 Correction — the five sites are not "the AES key-wrap mechanisms"
 
 E-1 was posed on my description of the five `UNLIMITED_KEY_SIZE` sites as "all AES key-wrap mechanisms". **That is wrong**, and I inherited it from `LEGAL-MECHANISM-INFO-KEY-SIZE-RANGES`, which says the same thing. Only two of the five are. Read from `SoftHSM_slots.cpp` against `ffi.rs:1503-1558`:
@@ -272,3 +309,14 @@ So E-1 as decided resolves the two key-wrap rows to `16 – 32`. The other three
 This is the more demanding of the options offered and it is the right one: `2³¹` and Rust's 512/64 are both unsourced policy, and picking between two unsourced numbers would have produced a third. The cost is a spec read per mechanism; the benefit is that the ledger row carries a citation instead of a preference.
 
 This is the same failure the plan's own verification standard warns about — I described a set of code sites from a summary (the exception's prose) instead of reading them, and posed a decision on the description. The exception text needs the same correction.
+
+### 14.2 E-8 — what "stop and fix" costs, recorded before it bites
+
+The sweep's duration becomes unpredictable: 157 claims, an unknown number of which conceal something real, each one able to turn a documentation pass into a remediation. `ffi.rs:353` is the precedent — one stale half-sentence produced a wrong finding, a wrong urgency and a half-built key hierarchy.
+
+Implemented as decided. Two guards, so the decision does not quietly become an open-ended rewrite:
+
+1. **A divergence is what the harness shows, not what a comment implies.** Before fixing, write the scenario. A comment claiming the other engine differs is not evidence that it does — that is the same class of error the sweep exists to remove, and fixing on the strength of one would be doing the defect again in the opposite direction.
+2. **One commit per fix, separate from the comment correction.** A behaviour change buried in a 157-file documentation commit is unreviewable.
+
+If the sweep stalls on something large, that is a finding worth surfacing rather than absorbing silently.
