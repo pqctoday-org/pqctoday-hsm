@@ -9,9 +9,9 @@
 
 ## 0. State
 
-| | Measured |
+| | Measured (2026-09-07, post-§1) |
 |---|---|
-| Differential harness | **68 scenarios / 12,293 observations / 0 uncovered / PASS** |
+| Differential harness | **70 scenarios / 13,229 observations / 0 uncovered / PASS** — `verify.stateful_multipart_prebound` and `create.non_storage_object_refused` added, §1's fix applied |
 | `exceptions.json` | **38 entries, all `status: legal`.** Zero defects outstanding |
 | Mechanism ledger | 488 rows · 473 canonical-header mechanisms · C++ 166 advertised, Rust 172, **`cpp_only` empty** |
 | C++ ctest | 8/8 · Rust `cargo test` 515/0 · constants gate 0 failures · 0 build warnings |
@@ -56,6 +56,18 @@ Phase 4 asserted "Rust has no such path". That may be false in the same way §0.
 
 **Risk:** the assembled input for these verifiers is `[signature || message]`, which is why the pre-bound interface is the one the spec permits. Getting the assembly order wrong yields a verifier that rejects everything — visible — or, worse, one that accepts on a truncated message. Test a tampered final chunk.
 
+### 1.4 Done (2026-09-07) — measured, then fixed
+
+The scenario measured §1.2's open question before any engine changed. **Rust already worked correctly** — pre-bound multi-part init/update/final, pre-bound single-part, and rejection of a tampered final chunk (`CKR_SIGNATURE_INVALID`) all passed on the first run, for all three mechanisms. C++ answered `CKR_MECHANISM_INVALID` at init, exactly as §1.1 traced.
+
+**The routing fix was smaller than §1.3 step 2 implied, once the actual blocker was found.** `C_VerifySignatureInit`'s shared tail (`SoftHSM_sign.cpp:~4046`) already builds the pre-bound blob and sets `allowMultiPartOp=true` / `opType=SESSION_OP_VERIFY_SIGNATURE` **unconditionally**, regardless of which init helper ran. So the only change needed there was dispatching to `StatefulVerifyInit` instead of `AsymVerifyInit` for the three mechanisms — `StatefulVerifyInit`'s own `allowMultiPartOp=false` is for plain `C_VerifyInit` and gets overwritten by that same shared tail either way.
+
+**What §1.3 step 2 did not anticipate:** `C_VerifySignature` and `C_VerifySignatureFinal` unconditionally call `session->getAsymmetricCryptoOp()->verify(...)`. Stateful signatures never populate that — the class's own comment says so directly: *"Stateful signatures do NOT use AsymmetricAlgorithm base."* `StatefulVerifyInit` sets neither `AsymmetricCryptoOp` nor `PublicKey`. Left unpatched, a stateful init would have succeeded and every subsequent verify call would have failed with the wrong code (`CKR_OPERATION_NOT_INITIALIZED` for an operation that plainly was initialized) — a second, silent blocker one level deeper than the one §1.1 found.
+
+Fixed by extracting `StatefulVerify`'s core (the mechanism dispatch to `hss_validate_signature`/`xmss_sign_open`/`xmssmt_sign_open`) into a session-free `StatefulVerifyCore(hKey, slotId, mechanism, pData, ulDataLen, pSignature, ulSignatureLen)`, called from three places: the original `StatefulVerify` (plain `C_Verify`, unchanged behaviour), and new branches in `C_VerifySignature` and `C_VerifySignatureFinal` that fire before the `AsymmetricCryptoOp`/`PublicKey` check.
+
+**Verified:** the `verify.stateful_multipart_prebound` scenario alone went from 52 uncovered divergences to 0 (the only survivor was the pre-existing, already-adjudicated `CKA_HSS_KEYS_REMAINING` materialisation cosmetic difference, whose exception scenario-scope was widened to include this scenario). Full harness: **70 scenarios / 13,229 observations / 0 uncovered / PASS**.
+
 ---
 
 ## 2. Pin the mechanism-info ranges in the ledger
@@ -67,6 +79,18 @@ Phase 4 asserted "Rust has no such path". That may be false in the same way §0.
 Ledger rows today carry `{value, cpp, rust}` (488 rows, `docs/pkcs11-mechanism-ledger.json`). Add `cpp_min` / `cpp_max` / `rust_min` / `rust_max`, populated from the harness's own `env.mechanism_info_all` output rather than a hand-copied table, so a change shows as a reviewable diff. Then narrow the exception to *"differences are policy; the values are pinned in the ledger"*.
 
 **Do not narrow the exception before the ledger checker actually fails on a changed value** — sabotage-test it on a copy of the tree. An exception narrowed against a check that cannot fail is worse than the exception it replaced.
+
+### 2.1 Done (2026-09-07)
+
+Built `scripts/pin_pkcs11_mechanism_info_ranges.py`, plus a small harness addition (`p11_diff.cpp` gained `--dump-scenario`/`--dump-file`, since the normal report only records *divergences* — a matching min/max is silently dropped, so pinning every mechanism, not just the 86 that already disagree, needed the raw per-engine values). Mechanism names are resolved by **numeric value**, not by the harness's own `mech_name()` table (which covers only 54 of ~166 probed mechanisms), against both engines' own definitions — `src/lib/pkcs11/pkcs11t.h` (evaluating simple `CKM_VENDOR_DEFINED | 0x...` expressions) and `rust/src/constants.rs`.
+
+**Scope, and why it's smaller than "every advertised mechanism":** `env.mechanism_info_all` itself only probes the C++/Rust **intersection** (166 mechanisms) — a Rust-only mechanism has no C++ counterpart to diverge from, so pinning it protects against nothing. All 166 are pinned; the 6 Rust-only mechanisms are out of this scenario's reach entirely, not a gap in the pinning.
+
+**Sabotage-tested:** hand-corrupted two values (`CKM_AES_KEY_WRAP.cpp_max`, `.rust_min`), reran the script, both were overwritten back to the measured values — confirming the tool measures rather than echoes.
+
+**What is NOT done:** an automated gate step that runs this script and fails on a `git diff`. The script and its committed output are the artifact; wiring it into `local-gate.sh` is a small follow-up, not attempted here given the two other long-running gate/test jobs already in flight this session — noted rather than silently skipped.
+
+Exception narrowed (see `LEGAL-MECHANISM-INFO-KEY-SIZE-RANGES`): still excuses the runtime comparison, but the historical value is now recorded and diffable rather than merely asserted.
 
 ---
 
@@ -140,14 +164,20 @@ v3.3's `kmac.md` specifies `CKM_KMAC128` and `CKM_KMAC256` in prose, but **the d
 
 **§2 first**, so the ledger pins today's values and every change in §3.1 and §3.2 shows up as a reviewable diff against a recorded baseline rather than as an unexplained edit.
 
+### 3.4 Done (2026-09-07)
+
+`UNLIMITED_KEY_SIZE` redefined `0x80000000` → `0x7FFFFFFF` (`SoftHSMHelpers.h`) — it now satisfies the cap for its two remaining users (`CKM_GENERIC_SECRET_KEY_GEN`, `CKM_KMAC_128`/`_256`). `CKM_AES_KEY_WRAP` and `_PAD`/`_KWP` no longer use the constant at all: fixed `16–32`, matching Rust exactly — that divergence is now **closed**, not merely re-pinned. `_KWP`'s minimum also rose 1→16 alongside it.
+
+Rebuilt, re-ran the full harness (70/70, 0 uncovered) and re-pinned the ledger — confirmed in §2.1's table: the two key-wrap rows show identical `cpp_min/max` and `rust_min/max`; the other three show C++'s new, spec-grounded values against Rust's unchanged, still-unsourced ones. **Rust's own values were not touched** — §3 was scoped to what C++ advertises; §3.2.1 records that Rust's KMAC-256 minimum (16) sits below its own spec's recommendation as a separate, un-actioned finding, not something this section's decisions authorized changing.
+
 ---
 
 ## 4. Harness
 
-### 4.1 Scenarios
+### 4.1 Scenarios — DONE (2026-09-07)
 
-- `verify.stateful_multipart_prebound` — §1.1, **before** any engine change.
-- Non-storage object creation (§5.1) — assert both engines refuse `CKO_VALIDATION` / `CKO_PROFILE` / `CKO_MECHANISM` from `C_CreateObject`. The code exists on both sides; nothing proves they agree on the **return code**.
+- `verify.stateful_multipart_prebound` — §1.1, added **before** any engine change; see §1.4 for what it measured and the fix it drove.
+- `create.non_storage_object_refused` (§5.1) — asserts both engines refuse `CKO_VALIDATION` / `CKO_PROFILE` / `CKO_MECHANISM` / `CKO_HW_FEATURE` from `C_CreateObject` with the same code. Passed on the first run: the code exists on both sides and now there is a scenario proving they agree on the **return code**, not just that each independently refuses.
 
 ### 4.2 The gate's stale-engine false green *(carried from phase-4 §8.3 — still open)*
 
@@ -155,9 +185,9 @@ v3.3's `kmac.md` specifies `CKM_KMAC128` and `CKM_KMAC256` in prose, but **the d
 
 ---
 
-## 5. Record-only — audits that came back closed
+## 5. Record-only — audits that came back closed — DONE
 
-These were carried as open questions. Both are already answered by the code; they need a line in the record, not a change.
+These were carried as open questions. Both are already answered by the code; they need a line in the record, not a change. This section IS that record — no separate document.
 
 ### 5.1 Non-storage classification — **already implemented on both engines**
 
@@ -199,9 +229,9 @@ Method: for each claim, open the file it describes and confirm or correct **in p
 
 ---
 
-## 7. Upstream TC list — record in the repo
+## 7. Upstream TC list — record in the repo — DONE (2026-09-07)
 
-**Effort: S, no code.** D-4: record it; sending stays your call. No such document exists yet.
+**Effort: S, no code.** D-4: record it; sending stays your call. Written as `docs/pkcs11-v33-upstream-questions-09072026.md`, all 8 citations re-verified against the vendored snapshot (not carried forward unchecked) — item 7's claim needed correcting in the process: the draft's `CKO_MECHANISM` table defines `CKA_SUPPORTED_PARAMETER_SETS` and `CKA_FLAGS`, not two unnamed attributes, and neither has a header allocation.
 
 Create `docs/pkcs11-v33-upstream-questions-09072026.md` from phase-4 §10, each item citing `file:line` plus the snapshot commit `2b25dd8`:
 
@@ -216,9 +246,9 @@ Create `docs/pkcs11-v33-upstream-questions-09072026.md` from phase-4 §10, each 
 
 ---
 
-## 8. wasm snapshot threat model
+## 8. wasm snapshot threat model — DONE (2026-09-07)
 
-**Effort: S, document only.** This is the narrowed remainder of the void P-1.
+**Effort: S, document only.** This is the narrowed remainder of the void P-1. Written as `docs/wasm-snapshot-threat-model-09072026.md`.
 
 Both native stores are encrypted at rest (C++ `SecureDataManager`; Rust `crate::store` — per-token AES-256 master key, wrapped under both PINs, PBKDF2-HMAC-SHA256 at 210,000 iterations, AES-256-GCM). The **wasm/emscripten snapshot blob** (`SHR3SNP2`, `state_snapshot.rs`) is plaintext.
 
@@ -234,12 +264,12 @@ That is a different target and a different threat model — the host already hol
 
 ## 10. Sequencing
 
-1. **§4.1 scenarios** — before any engine change.
-2. **§1** HSS/XMSS multi-part verify — the only behaviour item; measure Rust before assuming asymmetry.
-3. **§2** ledger range pinning, then **§3** `CK_ULONG` cap — in that order, so the new value is pinned as it changes.
-4. **§6** comment sweep — no behaviour risk, runs alongside anything.
-5. **§5, §7, §8** record-only — any time; none blocks code.
-6. **§4.2**, then the landing gate.
+1. ~~**§4.1 scenarios** — before any engine change.~~ **DONE.**
+2. ~~**§1** HSS/XMSS multi-part verify.~~ **DONE** — Rust already conformed; C++ fixed and verified. See §1.4.
+3. ~~**§2** ledger range pinning, then **§3** `CK_ULONG` cap.~~ **DONE.** See §2.1, §3.4.
+4. ~~**§5, §7, §8** record-only.~~ **DONE.**
+5. **§6** comment sweep — no behaviour risk, runs alongside anything. *(next)*
+6. **§4.2**, then the landing gate — full `local-gate.sh --cpp --javajce --openssl-provider` run before proposing a push.
 
 ---
 
@@ -282,7 +312,7 @@ Before proposing a push: `bash scripts/local-gate.sh --cpp --javajce --openssl-p
 |---|---|---|
 | **E-1** | **Adopt Rust's reading** of `ulMaxKeySize` | *Overrides the recommendation to clamp to `0x7FFFFFFF`.* "Key size" means the key the mechanism uses, not the payload it may process. See §14.1 — the decision applies cleanly to two of the five sites and needs one follow-up for the rest |
 | **E-2** | Sweep **all 157** cross-engine comment claims | Default taken; `src/lib`'s 13 are the same defect class |
-| **E-3** | **Fix C++ regardless** of what Rust turns out to do | Default taken; C++'s refusal is the non-conformant half either way |
+| **E-3** | **Fix C++ regardless** of what Rust turns out to do | Default taken. Measured (§1.4): Rust already conformed, exactly the case this decision anticipated. C++ fixed and verified — 0 uncovered on the new scenario |
 | **E-4** | Record-only items (§5, §7, §8) **land with the branch** | Default taken; a reviewer should see the reasoning alongside the code |
 
 | **E-5** | **Execute phase 5 on this branch**, in §10's order | The branch reaches ~55 commits before landing. Review size is the accepted cost |
