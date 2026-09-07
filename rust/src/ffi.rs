@@ -301,6 +301,7 @@ pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
                         let seed_slice = std::slice::from_raw_parts(p_seed, 32);
                         let mut seed = [0u8; 32];
                         seed.copy_from_slice(seed_slice);
+                        use rand::SeedableRng;
                         let rng = rand_chacha::ChaCha20Rng::from_seed(seed);
                         ACVP_RNG.with(|r| {
                             *r.borrow_mut() = Some(rng);
