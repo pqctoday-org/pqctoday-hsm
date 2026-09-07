@@ -188,6 +188,14 @@ The stale comment has been corrected in place, since leaving it would mislead th
 | C++ store | Encrypted at rest. No gap. |
 | WASM/emscripten snapshot blob | Plaintext. A **different target and threat model** — the host holds the blob, there is no filesystem in the browser case, and it is reachable on native only through an opt-in env var. |
 
-**P-1 as written is void.** What remains is narrower and genuinely open: should the wasm snapshot be encrypted, or gated harder? That deserves its own answer rather than inheriting the urgency of a gap that does not exist.
+**P-1 as written is void.** What remains is narrower and genuinely open: should the wasm snapshot be encrypted, or gated harder? That deserves its own answer rather than inheriting the urgency of a gap that does not exist. (Answered: see `wasm-snapshot-threat-model-09072026.md` — plaintext is the correct scope boundary, not a gap.)
 
 Everything else in this plan is unaffected — the two formats *are* unrelated, and the agility analysis in §3 stands on its own.
+
+---
+
+## 9. ESCALATION (2026-09-07, phase-5 §6 comment sweep) — C++'s CBC-without-authentication is a real property, not just a comparison point
+
+Line 170 above already states the fact — "AES-256-GCM, chosen over C++'s CBC-without-authentication" — but only as a descriptive comparison justifying Rust's own design choice. The phase-5 comment sweep re-surfaced it while verifying a *different* stale comment, and it deserves a harder look than that framing gave it: **AES-256-CBC with no MAC/authentication tag** (`SecureDataManager.cpp:143,292,370,470,524`) means a corrupted or tampered ciphertext byte in a persisted private-object attribute can decrypt "successfully" to silently-corrupted plaintext, where an authenticated cipher would reject it outright. No differential test exists for this property today.
+
+**Not actioned.** Adding authentication to C++'s at-rest format is a production-cryptography change with on-disk-token migration implications for existing tokens — this belongs in this program's Phase 2-5 work (§4), when it resumes, not as a standalone mid-sweep fix. Recorded here as a concrete backlog item for that phase: a differential/tamper scenario proving the asymmetry, then a decision on whether and how to add authentication to the C++ format (matching P-2/P-4's already-decided direction of C++ eventually adopting a new interchange format outright, at which point this becomes moot rather than something to patch onto the existing SoftHSM2 store).

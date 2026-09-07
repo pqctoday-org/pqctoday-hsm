@@ -219,13 +219,43 @@ Scale, measured:
 
 | Where | Cross-engine claims |
 |---|---|
-| `rust/src/**` | **144** |
-| — of which `rust/src/ffi.rs` | 51 |
-| `src/lib/**` | 13 |
+| `rust/src/**` (recursive; 37 files) | **81** |
+| — of which `rust/src/ffi.rs` | 54 |
+| `src/lib/**` | 16 |
+
+**CORRECTED 2026-09-07** before the sweep started, not after: the 144/13 figures above were themselves wrong, from a non-recursive grep whose glob pattern (`rust/src/*.rs rust/src/**/*.rs` without `globstar` enabled) counted every top-level file twice -- 72 x 2 = 144 exactly. The real count, ungrepped a second time with true recursion into `crypto/`, `native/`, `store/`, is 81 + 16 = **97**. Recorded rather than quietly fixed, because it is the same defect class §6 exists to sweep: a number asserted without re-measuring.
 
 **Prioritise claims about the *other* engine.** A comment describing its own function is checked by every reader of that function; a comment asserting what the C++ engine does, sitting in Rust, is checked by nobody and rots fastest. That is precisely the shape of both failures above.
 
 Method: for each claim, open the file it describes and confirm or correct **in place**. Deleting a stale claim is acceptable; leaving it is not. Do not batch-rewrite — each one is a separate factual check.
+
+### 6.1 Done (2026-09-07)
+
+Delegated to three parallel read-only research agents (single-editor rule: research delegated freely, every edit made from the main session) — `rust/src/ffi.rs` (54 lines, split further into 5 sub-batches), the rest of `rust/src` (27 lines), and `src/lib` (16 lines). Each agent was required to open the *other* engine's current code before calling a claim accurate, not infer from the comment's own description.
+
+**Result: 93 of 97 accurate, 4 stale/wrong, all fixed** (`6d6fd123`):
+
+- The `C_Finalize` snapshot comment — already corrected once earlier today — still had it wrong: claimed `crate::store` "mirrors ... PBKDF2-HMAC-SHA256 at 210k iterations, AES-256-GCM" from C++'s `SecureDataManager`. C++ actually uses an iterated plain SHA-256 self-hash (~1500-1755 iterations, not PBKDF2) and AES-256-**CBC with no authentication** (not GCM) — those are *this crate's own* improvements, exactly as `store/crypto.rs`'s own module doc already stated two files over. The comment contradicted its own codebase's accurate documentation — this defect class, reintroduced by the very comment written to fix the first instance of it.
+- Three citation drifts (line numbers moved from unrelated edits; substance unaffected) — `CK_BIP32_CHILD_DERIVE_PARAMS` at `pkcs11t.h:2139`→`2148` (three sites across `ffi.rs` and `ck_param.rs`), its C++ length check `SoftHSM_keygen.cpp:3010`→`3222`, the HKDF gate `SoftHSM_keygen.cpp:4211`→`4341`.
+- Two comments describing the **pre-E1-fix** DER-wrapped KEM ciphertext format as current fact, contradicted by a neighbouring, correctly past-tense "E1" comment in the same file.
+- The `WrapKeyAuthenticated` PKCS8 rationale, wrong for `CKM_AES_GCM` specifically — recorded as a **suspected, not-yet-scenario-confirmed** gap (C++'s raw-scalar accept path covers only 32/48-byte EC scalars; Edwards/Montgomery/P-521 have no raw-scalar path and would fail `PKCS8Decode()`). No differential scenario exists for `WrapKeyAuthenticated`/`UnwrapKeyAuthenticated` today — flagged, not built, given everything else this sweep already turned up.
+- The secp256k1-as-KEM refusal rationale — see §6.2, the one finding that was a **real, measured divergence**, not just a stale comment.
+
+### 6.2 A concealed real divergence, confirmed by measurement — secp256k1-as-ECDH-KEM
+
+A Rust `ffi.rs` comment justified refusing secp256k1 for ECDH-as-KEM with *"the C++ mirror covers the NIST prime curves"*. Per §11's standing rule (a divergence is what the harness shows, not what a comment implies), built the scenario before trusting the claim: `create.encapsulate.ecdh_secp256k1` (`3f31c9d8`).
+
+**Measured:** C++'s `encapsulateECDH`/`decapsulateECDH` gate only on key **type** (`CKK_EC`/`CKK_EC_MONTGOMERY`, `SoftHSM_kem.cpp:941,1284`), never curve OID, and `CKM_EC_KEY_PAIR_GEN` has no `CKR_CURVE_NOT_SUPPORTED` path at all. C++ returns `CKR_OK` with a real 65-byte raw point and a derived 32-byte shared secret; Rust's arm hard-matches `{P256,P384,P521,X25519,X448}` and refuses everything else — the false comment blamed the wrong engine for its own restriction.
+
+Building the scenario also caught a second, unrelated bug: the **pre-existing** `create.encapsulate.ecdh_p256` scenario never set `CKA_ENCAPSULATE`/`CKA_DECAPSULATE`, so both engines identically refused with `CKR_KEY_FUNCTION_NOT_PERMITTED` — that scenario had "passed" without ever exercising a successful round trip. Fixed alongside its new sibling.
+
+**Adjudicated `legal`** (`LEGAL-ECDH-KEM-CURVE-COVERAGE-SECP256K1`), same shape as `LEGAL-CURVE-COVERAGE-BRAINPOOL` — §6.3.17 Table 78 names no required curve set, so this is a product-scope choice, not a conformance defect. **Decision needed (E-6): should Rust add secp256k1 support?** The curve math already exists in this crate (BIP32, ECDSA); this is the only reason it's flagged as a decision rather than closed as adjudicated-and-done.
+
+### 6.3 An escalation, outside phase-5's scope — SecureDataManager has no authenticated encryption
+
+The persistence-encoding plan already *stated* this in passing ("AES-256-GCM, chosen over C++'s CBC-without-authentication") when it corrected the P-1 finding. Verifying the `C_Finalize` comment (§6.1) re-surfaced it, and on a harder look it deserves more than a descriptive aside: C++'s `SecureDataManager` protects data at rest with AES-256-**CBC and no MAC/authentication tag** at all (`SecureDataManager.cpp:143,292,370,470,524`). A corrupted or tampered ciphertext byte in a persisted private-object attribute can decrypt "successfully" to silently-corrupted plaintext on C++, where Rust's GCM tag would reject it outright. No differential test exists for this property today.
+
+**Not actioned here.** Fixing it is a production-cryptography change with on-disk-token migration implications — squarely the already-deferred persistence-encoding program's territory (§9; `remediation-plan-persistence-encoding-09072026.md` §9, escalated there), not a phase-5 comment-sweep fix.
 
 ---
 
@@ -268,8 +298,8 @@ That is a different target and a different threat model — the host already hol
 2. ~~**§1** HSS/XMSS multi-part verify.~~ **DONE** — Rust already conformed; C++ fixed and verified. See §1.4.
 3. ~~**§2** ledger range pinning, then **§3** `CK_ULONG` cap.~~ **DONE.** See §2.1, §3.4.
 4. ~~**§5, §7, §8** record-only.~~ **DONE.**
-5. **§6** comment sweep — no behaviour risk, runs alongside anything. *(next)*
-6. **§4.2**, then the landing gate — full `local-gate.sh --cpp --javajce --openssl-provider` run before proposing a push.
+5. ~~**§6** comment sweep.~~ **DONE** — 4 stale comments fixed, one real divergence found and measured (§6.2, `LEGAL-ECDH-KEM-CURVE-COVERAGE-SECP256K1` — E-6 open: should Rust add secp256k1?), one finding escalated to the persistence program (§6.3). Full harness re-confirmed: 71 scenarios / 13,866 observations / 0 uncovered.
+6. **§4.2**, then the landing gate — full `local-gate.sh --cpp --javajce --openssl-provider` run before proposing a push. *(next)*
 
 ---
 
@@ -300,7 +330,7 @@ Before proposing a push: `bash scripts/local-gate.sh --cpp --javajce --openssl-p
 | Ref | Question | Recommendation |
 |---|---|---|
 | **E-1** | §3 — which reading for `UNLIMITED_KEY_SIZE`? | **Option A** (`0x7FFFFFFF`). Satisfies the cap, keeps C++'s long-standing "payload size" reading, one-line change. Option B is more correct but changes an advertised capability on the authority of a draft. |
-| **E-2** | §6 — sweep all 157 cross-engine claims, or only the 51 in `ffi.rs`? | **All 157.** The two failures today were both in Rust, but the 13 in `src/lib` are the same class and the total is small enough to finish. |
+| **E-2** | §6 — sweep all 157 cross-engine claims, or only the 51 in `ffi.rs`? | **All 157.** The two failures today were both in Rust, but the 13 in `src/lib` are the same class and the total is small enough to finish. *(The 157/51/13 figures were themselves wrong -- see §6's own correction. The decision's substance is unaffected: sweep everything, not just `ffi.rs`.)* |
 | **E-3** | §1 — if Rust's `C_VerifySignatureInit` already handles the stateful mechanisms, do we still change C++? | **Yes.** A divergence where Rust is right and C++ refuses is still a divergence, and C++'s refusal is the non-conformant half. |
 | **E-4** | Does anything here block the landing, or do §5/§7/§8 (record-only) land with it? | Land the record-only items **with** the branch. They are documentation of decisions already taken; holding them back leaves the record incomplete for a reviewer. |
 
@@ -311,7 +341,7 @@ Before proposing a push: `bash scripts/local-gate.sh --cpp --javajce --openssl-p
 | Ref | Decision | Note |
 |---|---|---|
 | **E-1** | **Adopt Rust's reading** of `ulMaxKeySize` | *Overrides the recommendation to clamp to `0x7FFFFFFF`.* "Key size" means the key the mechanism uses, not the payload it may process. See §14.1 — the decision applies cleanly to two of the five sites and needs one follow-up for the rest |
-| **E-2** | Sweep **all 157** cross-engine comment claims | Default taken; `src/lib`'s 13 are the same defect class |
+| **E-2** | Sweep **all** cross-engine comment claims (figure corrected to 97 -- see §6) | Default taken; `src/lib`'s share is the same defect class |
 | **E-3** | **Fix C++ regardless** of what Rust turns out to do | Default taken. Measured (§1.4): Rust already conformed, exactly the case this decision anticipated. C++ fixed and verified — 0 uncovered on the new scenario |
 | **E-4** | Record-only items (§5, §7, §8) **land with the branch** | Default taken; a reviewer should see the reasoning alongside the code |
 
@@ -347,6 +377,6 @@ The sweep's duration becomes unpredictable: 157 claims, an unknown number of whi
 Implemented as decided. Two guards, so the decision does not quietly become an open-ended rewrite:
 
 1. **A divergence is what the harness shows, not what a comment implies.** Before fixing, write the scenario. A comment claiming the other engine differs is not evidence that it does — that is the same class of error the sweep exists to remove, and fixing on the strength of one would be doing the defect again in the opposite direction.
-2. **One commit per fix, separate from the comment correction.** A behaviour change buried in a 157-file documentation commit is unreviewable.
+2. **One commit per fix, separate from the comment correction.** A behaviour change buried in a 97-file documentation commit is unreviewable.
 
 If the sweep stalls on something large, that is a finding worth surfacing rather than absorbing silently.
