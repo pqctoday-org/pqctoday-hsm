@@ -115,6 +115,54 @@ add({"env.mechanism_info_aes_cbc", "env",
          for (const auto& f : fl_) r.put(std::string("flag.") + f.n, (mi.flags & f.v) ? "1" : "0");
      }});
 
+add({"env.mechanism_info_all", "env",
+     "CK_MECHANISM_INFO for EVERY mechanism both engines advertise",
+     {}, true, false,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE) {
+         // 2026-09-07. env.mechanism_info_aes_cbc probed exactly ONE
+         // mechanism, so every other mechanism's key-size range and flags
+         // were never compared between the engines at all. That is not a
+         // glob excusing them — nothing observed them. It is how
+         // CKM_AES_CMAC came to advertise a 64-byte maximum key in Rust
+         // against C++'s 32 for weeks: no probe could see it.
+         //
+         // Scoped to the INTERSECTION on purpose. Iterating each engine's own
+         // list would emit one-sided observations for every mechanism the
+         // other lacks — dozens of them, all already adjudicated as a product
+         // decision by LEGAL-MECHANISM-SET — and drown the signal this
+         // scenario exists for: two engines that both claim a mechanism
+         // describing it differently.
+         std::vector<CK_MECHANISM_TYPE> shared;
+         for (CK_MECHANISM_TYPE m : gCpp.mechs)
+             if (gRust.mechs.count(m)) shared.push_back(m);
+         std::sort(shared.begin(), shared.end());
+         r.num("shared_mechanism_count", shared.size());
+         for (CK_MECHANISM_TYPE m : shared) {
+             const std::string mp = "mi." + mech_name(m);
+             CK_MECHANISM_INFO mi; memset(&mi, 0, sizeof mi);
+             CK_RV rv = e.fl->C_GetMechanismInfo(e.slot, m, &mi);
+             r.rv(mp, rv);
+             if (rv != CKR_OK) continue;
+             r.num(mp + ".min", mi.ulMinKeySize);
+             r.num(mp + ".max", mi.ulMaxKeySize);
+             // Flags are recorded BY NAME, not as one hex word: a bare
+             // number tells a reader which mechanism disagreed but not
+             // which capability, and the whole point is to make the
+             // difference legible without re-running anything.
+             static const NamePair mf[] = {
+                 {CKF_HW,"HW"},{CKF_ENCRYPT,"ENCRYPT"},{CKF_DECRYPT,"DECRYPT"},
+                 {CKF_DIGEST,"DIGEST"},{CKF_SIGN,"SIGN"},{CKF_SIGN_RECOVER,"SIGN_RECOVER"},
+                 {CKF_VERIFY,"VERIFY"},{CKF_VERIFY_RECOVER,"VERIFY_RECOVER"},
+                 {CKF_GENERATE,"GENERATE"},{CKF_GENERATE_KEY_PAIR,"GENERATE_KEY_PAIR"},
+                 {CKF_WRAP,"WRAP"},{CKF_UNWRAP,"UNWRAP"},{CKF_DERIVE,"DERIVE"},
+             };
+             std::string set;
+             for (const auto& f : mf)
+                 if (mi.flags & f.v) { if (!set.empty()) set += "|"; set += f.n; }
+             r.put(mp + ".flags", set.empty() ? "<none>" : set);
+         }
+     }});
+
 add({"env.library_info", "env", "C_GetInfo — versions, identity strings, flags",
      {}, true, false,
      [](Engine& e, Recorder& r, CK_SESSION_HANDLE) {

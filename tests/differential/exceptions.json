@@ -254,6 +254,51 @@
       "path": "*.CKA_SIGN_RECOVER.*|*.CKA_VERIFY_RECOVER.*",
       "justification": "Token-specific default for an unset usage flag, same family as the other LEGAL-USAGE-FLAG-DEFAULT-* entries: C++ defaults both to CK_TRUE, Rust to CK_FALSE. This REPLACES DEFECT-CPP-RECOVERY-ATTRIBUTES-STILL-ASSERTED, whose direction was wrong — it blamed C++ for possessing the attributes, but CKA_VERIFY_RECOVER is a COMMON PUBLIC key attribute (Table 27) and CKA_SIGN_RECOVER a COMMON PRIVATE key attribute (Table 28), so their ABSENCE in Rust was the defect and has been fixed. Plan item C3 concerned the CKF_*_RECOVER MECHANISM-INFO flags, which is a different question and correctly stays unadvertised on both engines. Worth recording for whoever reads this next: C++'s CK_TRUE overstates what its dispatch does, since C3 removed its recovery path — a C++-side follow-up, not a cross-engine conformance gap.",
       "citation": "PKCS#11 v3.2 Table 13 (§4.2) footnote 9, which both attributes carry: \"Default value is token-specific, and may depend on the values of other attributes.\" CKA_VERIFY_RECOVER is defined in Table 27 (§4.9 Public key objects) and CKA_SIGN_RECOVER in Table 29 (§4.10 Private key objects). CORRECTED 2026-09-07 (H1): this cited Table 28 for the private-key attributes; Table 28 is the X.509 key-usage mapping table, verified directly in pkcs11-spec-v3.2-csd01.pdf."
+    },
+    {
+      "id": "LEGAL-MECHANISM-INFO-KEY-SIZE-RANGES",
+      "status": "legal",
+      "scenario": "env.mechanism_info_all",
+      "path": "mi.*.min|mi.*.max",
+      "justification": "The two engines advertise different ulMinKeySize/ulMaxKeySize for 86 mechanisms they both implement. NEW 2026-09-07, and the first time anything ever looked: env.mechanism_info_aes_cbc probed exactly ONE mechanism, so every other mechanism's range was unobserved — which is how CKM_AES_CMAC advertised a 64-byte maximum in Rust against C++'s 32 for weeks without the harness noticing. The ranges are a token's statement about the key sizes IT supports, and the two engines genuinely support different ones: C++ accepts RSA 512-16384 bits where Rust accepts 2048-4096; C++ EC from secp112r1 (112) where Rust starts at P-256; C++ sets HMAC minimums to the digest size where Rust uses a flat 16. Each is accurate about itself. DELIBERATELY SCOPED TO .min AND .max. It does NOT cover mi.*.flags — a flag is a capability claim ('this mechanism can be used with function F'), and two engines disagreeing about what a mechanism can DO is a conformance question, not a policy one. That must keep failing. KNOWN LIMITATION, recorded rather than hidden: because this entry matches by path and not by value, a FUTURE change to either engine's ranges is also excused. Pinning the values belongs in docs/pkcs11-mechanism-ledger.json, where each mechanism has a row and a change shows up as a diff; that is the follow-up. One case worth a reader's attention: C++ reports UNLIMITED_KEY_SIZE (2^31) as the maximum for the AES key-wrap mechanisms, reading 'key size' as the size of the payload that may be wrapped, while Rust reports 16-32, reading it as the size of the wrapping AES key itself. The specification does not pin which is meant for a wrapping mechanism and no interoperability depends on it — a caller selects a KEK by its own CKA_VALUE_LEN — but C++'s is the looser reading of the two.",
+      "citation": "PKCS#11 v3.2 §5.4.4 C_GetMechanismInfo / CK_MECHANISM_INFO: ulMinKeySize and ulMaxKeySize are “the minimum/maximum size of the key” for the mechanism, stated in units that depend on the mechanism. No profile constrains the range, and Profiles v3.2 §5.1 requires no mechanism at all, so the supported range is a product decision."
+    },
+    {
+      "id": "LEGAL-RSA-X509-CAPABILITY-DIFFERENCE",
+      "status": "legal",
+      "scenario": "env.mechanism_info_all",
+      "path": "mi.CKM_RSA_X_509.flags",
+      "justification": "C++ advertises ENCRYPT|DECRYPT|SIGN|SIGN_RECOVER|VERIFY|VERIFY_RECOVER on CKM_RSA_X_509; Rust advertises only SIGN_RECOVER|VERIFY_RECOVER. This is the ONE flag divergence the new env.mechanism_info_all scenario found, and it was checked against both engines' code rather than assumed. Rust is being accurate about itself: it implements raw RSASP1/RSAVP1 for the recovery pair only (ffi.rs, the sign_recover/verify_recover path, verified against NIST ACVP vectors) and its own comment at ffi.rs:1400 records the decision not to advertise operations it does not implement. C++ implements the fuller set. Both advertisements are true of the engine making them, which is exactly what a capability flag is for. This entry is deliberately pinned to ONE mechanism's flags rather than folded into the key-size-range entry: every OTHER mechanism's flags must keep failing if they ever diverge.",
+      "citation": "PKCS#11 v3.2 §5.4.4: each CKF_* flag in CK_MECHANISM_INFO means “TRUE if the mechanism can be used with” that function — a statement about the token, not a requirement on it. Profiles v3.2 §5.1 (Baseline, which this engine claims) mandates no mechanism and therefore no capability."
+    },
+    {
+      "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-SUBJECT",
+      "status": "legal",
+      "path": "*.CKA_SUBJECT.*",
+      "justification": "C++ materialises every attribute in the object's class table with an empty default; Rust only materialises what it sets. An object need not possess an optional attribute. NEW 2026-09-07: surfaced by widening the harness's attribute probe — this attribute was never asked for before, so the divergence existed but nothing could see it. Direction and shape are identical to the rest of this family (cpp CKR_OK with a zero-length value, rust CKR_ATTRIBUTE_TYPE_INVALID).",
+      "citation": "PKCS#11 v3.2 §5.7.5 C_GetAttributeValue: where \"the object does not possess such an attribute\" the token sets CK_UNAVAILABLE_INFORMATION and \"should return the value CKR_ATTRIBUTE_TYPE_INVALID\" — 'should', not 'must'. CKA_SUBJECT is defined in Table 27 (§4.9 Public key objects) and Table 29 (§4.10 Private key objects) as an optional DER-encoded certificate subject name, with no MUST-possess."
+    },
+    {
+      "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-WRAP-TEMPLATE",
+      "status": "legal",
+      "path": "*.CKA_WRAP_TEMPLATE.*",
+      "justification": "C++ materialises every attribute in the object's class table with an empty default; Rust only materialises what it sets. An object need not possess an optional attribute. NEW 2026-09-07: surfaced by widening the harness's attribute probe — this attribute was never asked for before, so the divergence existed but nothing could see it. Direction and shape are identical to the rest of this family (cpp CKR_OK with a zero-length value, rust CKR_ATTRIBUTE_TYPE_INVALID).",
+      "citation": "PKCS#11 v3.2 §5.7.5 C_GetAttributeValue: where \"the object does not possess such an attribute\" the token sets CK_UNAVAILABLE_INFORMATION and \"should return the value CKR_ATTRIBUTE_TYPE_INVALID\" — 'should', not 'must'. CKA_WRAP_TEMPLATE is an optional array attribute constraining what a wrapping key may wrap; absent means unconstrained by it, and the engines agree on every wrap the harness actually performs."
+    },
+    {
+      "id": "LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-UNWRAP-TEMPLATE",
+      "status": "legal",
+      "path": "*.CKA_UNWRAP_TEMPLATE.*",
+      "justification": "C++ materialises every attribute in the object's class table with an empty default; Rust only materialises what it sets. An object need not possess an optional attribute. NEW 2026-09-07: surfaced by widening the harness's attribute probe — this attribute was never asked for before, so the divergence existed but nothing could see it. Direction and shape are identical to the rest of this family (cpp CKR_OK with a zero-length value, rust CKR_ATTRIBUTE_TYPE_INVALID).",
+      "citation": "PKCS#11 v3.2 §5.7.5 C_GetAttributeValue: where \"the object does not possess such an attribute\" the token sets CK_UNAVAILABLE_INFORMATION and \"should return the value CKR_ATTRIBUTE_TYPE_INVALID\" — 'should', not 'must'. CKA_UNWRAP_TEMPLATE is the optional counterpart of CKA_WRAP_TEMPLATE, applied to keys produced by C_UnwrapKey."
+    },
+    {
+      "id": "LEGAL-HSS-KEYS-REMAINING-MATERIALISED-ON-XMSS",
+      "status": "legal",
+      "scenario": "create.generate_key_pair.xmss|create.generate_key_pair.xmssmt",
+      "path": "*.CKA_HSS_KEYS_REMAINING.*",
+      "justification": "Same materialisation convention, but recorded separately because what C++ materialises here is odd enough that a future reader should see it rather than have it folded into a family entry. CKA_HSS_KEYS_REMAINING is an HSS attribute (Table 270), and C++ returns it on XMSS and XMSS-MT keys — on the PUBLIC half as well as the private — with the value 0. Zero would mean 'no one-time signatures left' on a key that has just been generated. Nothing reads it: the harness performs XMSS signing successfully in the same run, and neither engine consults this attribute to decide whether a key is exhausted. So it is a cosmetic artefact of C++ materialising its whole class table, not a capability claim, and Rust's absence is the more accurate answer of the two. Flagged for a C++-side follow-up rather than adjudicated away: the attribute should not be on an XMSS key at all, and certainly not on a public one.",
+      "citation": "PKCS#11 v3.2 defines only CKA_HSS_KEYS_REMAINING (0x0000061c, pkcs11t.h:641) and Table 270 scopes it to HSS private keys. The v3.3 draft deprecates the name in favour of CKA_KEYS_REMAINING — that rename is NOT in v3.2 and this harness targets v3.2, so the attribute probed here is the correct spelling for this specification version."
     }
   ],
   "_citation_verification": [

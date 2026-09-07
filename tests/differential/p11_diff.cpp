@@ -232,6 +232,17 @@ static const NamePair kRvNames[] = {
 };
 
 static const NamePair kAttrNames[] = {
+    // 2026-09-07 harness enhancement — attributes added to kProbe below.
+    {CKA_SUBJECT, "CKA_SUBJECT"},
+    {CKA_HSS_KEYS_REMAINING, "CKA_HSS_KEYS_REMAINING"},
+    {CKA_NAME_HASH_ALGORITHM, "CKA_NAME_HASH_ALGORITHM"},
+    {CKA_OBJECT_VALIDATION_FLAGS, "CKA_OBJECT_VALIDATION_FLAGS"},
+    {CKA_PUBLIC_CRC64_VALUE, "CKA_PUBLIC_CRC64_VALUE"},
+    {CKA_WRAP_TEMPLATE, "CKA_WRAP_TEMPLATE"},
+    {CKA_UNWRAP_TEMPLATE, "CKA_UNWRAP_TEMPLATE"},
+    {CKA_DERIVE_TEMPLATE, "CKA_DERIVE_TEMPLATE"},
+    {CKA_ENCAPSULATE_TEMPLATE, "CKA_ENCAPSULATE_TEMPLATE"},
+    {CKA_DECAPSULATE_TEMPLATE, "CKA_DECAPSULATE_TEMPLATE"},
     {CKA_CLASS, "CKA_CLASS"},
     {CKA_TOKEN, "CKA_TOKEN"},
     {CKA_PRIVATE, "CKA_PRIVATE"},
@@ -465,7 +476,121 @@ static const CK_ATTRIBUTE_TYPE kProbe[] = {
     CKA_PRIME_2, CKA_EXPONENT_1, CKA_EXPONENT_2, CKA_COEFFICIENT,
     CKA_EC_PARAMS, CKA_EC_POINT, CKA_PARAMETER_SET, CKA_SEED,
     CKA_ENCAPSULATE, CKA_DECAPSULATE, CKA_PUBLIC_KEY_INFO, CKA_ALLOWED_MECHANISMS,
+    // 2026-09-07. Attributes the class tables define that nothing was asking
+    // for. An attribute absent from this list is invisible to the harness:
+    // neither engine is ever asked, so a divergence in it cannot be observed.
+    // CKA_SUBJECT is a common public AND private key attribute (Tables 27/29);
+    // the *_TEMPLATE family is defined on the classes that wrap, unwrap,
+    // derive, encapsulate and decapsulate; CKA_OBJECT_VALIDATION_FLAGS and
+    // CKA_PUBLIC_CRC64_VALUE are v3.2 additions; CKA_HSS_KEYS_REMAINING is HSS's
+    // (Table 270) and CKA_NAME_HASH_ALGORITHM is CKO_TRUST's.
+    CKA_SUBJECT, CKA_HSS_KEYS_REMAINING, CKA_NAME_HASH_ALGORITHM,
+    CKA_OBJECT_VALIDATION_FLAGS, CKA_PUBLIC_CRC64_VALUE,
+    CKA_WRAP_TEMPLATE, CKA_UNWRAP_TEMPLATE, CKA_DERIVE_TEMPLATE,
+    CKA_ENCAPSULATE_TEMPLATE, CKA_DECAPSULATE_TEMPLATE,
 };
+
+// ---------------------------------------------------------------------------
+// record_attr_invariants — 2026-09-07 harness enhancement.
+//
+// WHY THIS EXISTS. Everything else in this file compares the two engines
+// against EACH OTHER. That is powerful, and it has one blind spot it can never
+// see on its own: a rule BOTH engines break identically produces no
+// divergence, so the harness reports green. The CKM_AES_CMAC key-range bug and
+// the CKA_VALUE-on-RSA violation were both of that shape — invisible until
+// someone read the specification by hand.
+//
+// These observations are derived from attributes the engine just returned and
+// evaluated against the specification's own consistency rules. They are
+// recorded as "ok" / "VIOLATION:<detail>" strings, so:
+//   * if one engine breaks a rule, it diverges from the other and fails as a
+//     normal uncovered divergence;
+//   * if BOTH break it, they agree — but the recorded value is a loud
+//     VIOLATION on both sides, visible in the report rather than silent.
+//
+// Only rules the specification states outright are asserted here. Anything
+// token-specific belongs in exceptions.json, not in this function.
+// ---------------------------------------------------------------------------
+static bool attr_bool(Engine& e, CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o,
+                      CK_ATTRIBUTE_TYPE t, bool* out) {
+    CK_BBOOL v = 0;
+    CK_ATTRIBUTE a = { t, &v, sizeof v };
+    if (e.fl->C_GetAttributeValue(s, o, &a, 1) != CKR_OK) return false;
+    if (a.ulValueLen != sizeof v) return false;
+    *out = (v != 0);
+    return true;
+}
+
+static bool attr_ulong(Engine& e, CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o,
+                       CK_ATTRIBUTE_TYPE t, CK_ULONG* out) {
+    CK_ULONG v = 0;
+    CK_ATTRIBUTE a = { t, &v, sizeof v };
+    if (e.fl->C_GetAttributeValue(s, o, &a, 1) != CKR_OK) return false;
+    if (a.ulValueLen != sizeof v) return false;
+    *out = v;
+    return true;
+}
+
+static void record_attr_invariants(Engine& e, Recorder& r, const std::string& prefix,
+                                   CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o) {
+    const std::string p = prefix + "._inv.";
+    bool sensitive = false, alwaysSensitive = false;
+    bool extractable = false, neverExtractable = false;
+
+    // §4.10 Table 29: CKA_ALWAYS_SENSITIVE is "CK_TRUE if key has always had
+    // the CKA_SENSITIVE attribute set to CK_TRUE". A key that is always
+    // sensitive but not sensitive NOW is a contradiction in the object.
+    if (attr_bool(e, s, o, CKA_ALWAYS_SENSITIVE, &alwaysSensitive) &&
+        attr_bool(e, s, o, CKA_SENSITIVE, &sensitive)) {
+        r.put(p + "always_sensitive_implies_sensitive",
+              (!alwaysSensitive || sensitive) ? "ok" : "VIOLATION:ALWAYS_SENSITIVE=1,SENSITIVE=0");
+    }
+
+    // Same shape for CKA_NEVER_EXTRACTABLE: "CK_TRUE if key has never had the
+    // CKA_EXTRACTABLE attribute set to CK_TRUE".
+    if (attr_bool(e, s, o, CKA_NEVER_EXTRACTABLE, &neverExtractable) &&
+        attr_bool(e, s, o, CKA_EXTRACTABLE, &extractable)) {
+        r.put(p + "never_extractable_implies_not_extractable",
+              (!neverExtractable || !extractable) ? "ok"
+                                                  : "VIOLATION:NEVER_EXTRACTABLE=1,EXTRACTABLE=1");
+    }
+
+    // §4.8 Table 26: CKA_MODULUS_BITS is "length in bits of modulus n". A
+    // stated bit length that disagrees with the modulus actually returned is
+    // an internally inconsistent key, and callers size buffers from it.
+    CK_ULONG modBits = 0;
+    CK_ATTRIBUTE modq = { CKA_MODULUS, NULL_PTR, 0 };
+    if (attr_ulong(e, s, o, CKA_MODULUS_BITS, &modBits) &&
+        e.fl->C_GetAttributeValue(s, o, &modq, 1) == CKR_OK &&
+        modq.ulValueLen != (CK_ULONG)-1 && modq.ulValueLen > 0) {
+        // A big integer may carry one leading zero byte, and the top byte need
+        // not have its high bit set, so the exact bit length is bounded rather
+        // than fixed: (len-1)*8 < bits <= len*8.
+        const unsigned long lo = (unsigned long)(modq.ulValueLen - 1) * 8;
+        const unsigned long hi = (unsigned long)modq.ulValueLen * 8;
+        const bool okBits = ((unsigned long)modBits > lo && (unsigned long)modBits <= hi);
+        r.put(p + "modulus_bits_matches_modulus",
+              okBits ? "ok"
+                     : "VIOLATION:MODULUS_BITS=" + std::to_string((unsigned long)modBits) +
+                       ",MODULUS_len=" + std::to_string((unsigned long)modq.ulValueLen));
+    }
+
+    // §4.8 Table 26: CKA_KEY_GEN_MECHANISM is "identifier of the mechanism
+    // used to generate the key material", and is only meaningful when
+    // CKA_LOCAL is true. CK_UNAVAILABLE_INFORMATION is the defined answer for
+    // a key that was not generated on the token; anything else on a
+    // non-local key is a claim the object cannot support.
+    bool local = false;
+    CK_ULONG kgm = 0;
+    if (attr_bool(e, s, o, CKA_LOCAL, &local) &&
+        attr_ulong(e, s, o, CKA_KEY_GEN_MECHANISM, &kgm)) {
+        const bool unavailable = (kgm == (CK_ULONG)-1);
+        r.put(p + "key_gen_mechanism_consistent_with_local",
+              (local != unavailable) ? "ok"
+                                     : (local ? "VIOLATION:LOCAL=1,KEY_GEN_MECHANISM=UNAVAILABLE"
+                                              : "VIOLATION:LOCAL=0,KEY_GEN_MECHANISM=set"));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // record_attrs — the heart of coverage priority #1.
@@ -517,6 +642,7 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
     for (size_t i = 0; i < present.size(); i++) { if (i) joined += ","; joined += present[i]; }
     r.put(prefix + "._ctx.attrs_present", joined);
     r.num(prefix + "._ctx.attrs_present_count", present.size());
+    record_attr_invariants(e, r, prefix, s, o);
 }
 
 // ---------------------------------------------------------------------------
