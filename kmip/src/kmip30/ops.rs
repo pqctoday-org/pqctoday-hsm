@@ -705,6 +705,21 @@ pub struct DecryptRequest {
     /// [`EncryptRequest::aad`]. MUST be byte-equal to the value passed
     /// at encryption time or the AEAD tag check will fail.
     pub aad: Option<Vec<u8>>,
+
+    // ── §6.1.21 multi-part (G6, 2026-09-06) ──────────────────────────────
+    //
+    // These three existed on `EncryptRequest` but not here, and the Decrypt
+    // decoder dropped the tags. A client doing a multi-part Decrypt was
+    // therefore answered as though every part were a whole message: each
+    // chunk decrypted independently, `Success`, and WRONG plaintext. The
+    // shared `Deps::streams` map and the engine's `CipherDirection` already
+    // supported the decrypt direction; only this side was missing.
+    /// Opens a stream. The response carries the `Correlation Value`.
+    pub init_indicator: Option<bool>,
+    /// Closes a stream — the last part; the response carries no handle.
+    pub final_indicator: Option<bool>,
+    /// Server-issued stream handle, echoed on every continuation part.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -713,6 +728,9 @@ pub struct DecryptResponse {
     /// For classical decrypt: the plaintext. For ML-KEM decapsulation: the
     /// derived shared secret.
     pub data: Vec<u8>,
+    /// §6.1.21 multi-part — present on the opening and middle parts, absent
+    /// on the final one. Mirrors `EncryptResponse::correlation_value`.
+    pub correlation_value: Option<Vec<u8>>,
 }
 
 // ── Encapsulate / Decapsulate (KMIP 3.0 CSD02, PQC Updates) ──────────────────

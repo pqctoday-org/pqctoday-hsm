@@ -2420,6 +2420,9 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
     let mut iv = None;
     let mut cp = None;
     let mut tag: Option<Vec<u8>> = None;
+    let mut init_indicator = None;
+    let mut final_indicator = None;
+    let mut correlation_value = None;
     for c in children {
         match c.tag.0 {
             tags::Data => { if let Value::ByteString(b) = &c.value { data = b.clone(); } }
@@ -2429,6 +2432,17 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
             }
             tags::AuthenticatedEncryptionTag => {
                 if let Value::ByteString(b) = &c.value { tag = Some(b.clone()); }
+            }
+            // §6.1.21 multi-part (G6) — these three were dropped here, so a
+            // streaming Decrypt was silently treated as a single-shot one.
+            tags::InitIndicator => {
+                if let Value::Boolean(b) = &c.value { init_indicator = Some(*b); }
+            }
+            tags::FinalIndicator => {
+                if let Value::Boolean(b) = &c.value { final_indicator = Some(*b); }
+            }
+            tags::CorrelationValue => {
+                if let Value::ByteString(b) = &c.value { correlation_value = Some(b.clone()); }
             }
             _ => {}
         }
@@ -2445,7 +2459,10 @@ fn decode_decrypt_req(children: &[TtlvFrame]) -> Result<DecryptRequest, WireErro
     if let Some(t) = tag {
         data.extend_from_slice(&t);
     }
-    Ok(DecryptRequest { uid, data, iv, cryptographic_parameters: cp, aad })
+    Ok(DecryptRequest {
+        uid, data, iv, cryptographic_parameters: cp, aad,
+        init_indicator, final_indicator, correlation_value,
+    })
 }
 
 fn encode_decrypt_resp(r: &DecryptResponse) -> Vec<TtlvFrame> {
@@ -7530,7 +7547,7 @@ mod tests {
         assert_eq!(req.data, encapsulation);
         assert!(req.iv.is_none(), "decap request carries no IV");
 
-        let resp = DecryptResponse { uid: req.uid.clone(), data: vec![0x55; 32] };
+        let resp = DecryptResponse { uid: req.uid.clone(), data: vec![0x55; 32], correlation_value: None };
         let frames = encode_decrypt_resp(&resp);
         let data = frames
             .iter()

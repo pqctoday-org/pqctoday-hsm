@@ -95,8 +95,19 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
             }
             QueryFunction::QueryCapabilities => {
                 // K3 — honest CapabilityInformation (compliance-audit
-                // K-11): multi-part Encrypt/Decrypt streaming is
-                // implemented (CS-BC-M-GCM-3); attestation is not.
+                // K-11). `streaming_capability` covers the symmetric data
+                // path: multi-part Encrypt (CS-BC-M-GCM-3) and, since
+                // 2026-09-06, multi-part Decrypt (G6) — before that, Decrypt
+                // silently ignored the Init/Final/Correlation tags and
+                // returned wrong plaintext with a Success status.
+                //
+                // Still NOT streaming: Sign / Signature Verify / MAC / MAC
+                // Verify / Hash. Their request types carry no multi-part
+                // fields, so a client attempting it gets single-shot
+                // semantics. Tracked as the remaining half of G6; the
+                // capability flag is not qualified per-operation on the wire,
+                // so this comment is where the limit is recorded.
+                // Attestation is not implemented.
                 // §9.5 Undo and Continue batch modes are implemented
                 // in the dispatcher. Phase 4 — asynchronous processing
                 // is now real too (§6.1.43/§6.1.5/§6.1.44/§6.1.46 all

@@ -160,8 +160,13 @@ pub fn decrypt(
         }
     }
 
-    // Plane-3: branch on algorithm.
-    let resp = if is_ml_kem(obj.algorithm) {
+    // Plane-3: branch on algorithm — but a multi-part request comes first,
+    // exactly as `encrypt` decides (§6.1.21, G6). Before this branch existed
+    // a streaming Decrypt fell through to the single-shot path and returned
+    // Success with wrong plaintext.
+    let resp = if req.init_indicator == Some(true) || req.correlation_value.is_some() {
+        decrypt_streaming(deps, &req, &obj, auth, correlation_id)
+    } else if is_ml_kem(obj.algorithm) {
         decrypt_ml_kem(deps, &req, &obj, auth, correlation_id)
     } else {
         decrypt_classical(deps, &req, &obj, auth, correlation_id)
@@ -231,7 +236,154 @@ fn decrypt_ml_kem(
     };
     // §4.13.2 — count a successful Decrypt.
     super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Decrypt);
-    Ok(DecryptResponse { uid: req.uid.clone(), data: shared_secret })
+    Ok(DecryptResponse { uid: req.uid.clone(), data: shared_secret, correlation_value: None })
+}
+
+
+/// §6.1.21 multi-part Decrypt (G6, 2026-09-06) — the mirror of
+/// `encrypt::encrypt_streaming`, sharing the same `Deps::streams` map and the
+/// same engine `MultipartCipher` with `CipherDirection::Decrypt`.
+///
+/// Before this existed, `DecryptRequest` had no Init/Final/Correlation fields
+/// and the decoder dropped those tags, so every part of a multi-part Decrypt
+/// was processed as a complete message: the client got `Success` and wrong
+/// plaintext. That is the one defect in the 2026-09-06 audit that returned a
+/// wrong ANSWER rather than an incomplete one.
+fn decrypt_streaming(
+    deps: &Deps,
+    req: &DecryptRequest,
+    obj: &crate::store::ObjectRecord,
+    auth: &crate::server::auth::AuthContext,
+    correlation_id: &str,
+) -> Result<DecryptResponse> {
+    use softhsmrustv3::crypto::multipart::{
+        AesKey, CbcPadState, CbcState, CipherDirection, CtrState, EcbState, GcmState,
+        MultipartCipher,
+    };
+    use super::deps::StreamCtx;
+
+    let invalid = |msg: &str| KmipError::failed(ResultReason::InvalidMessage, msg.to_string());
+
+    if req.init_indicator == Some(true) {
+        if obj.algorithm != KmipAlgorithm::Aes {
+            return Err(fail_err(deps, correlation_id, "Decrypt",
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    format!("streaming Decrypt not supported for {:?}", obj.algorithm),
+                )));
+        }
+        let effective_cp = req
+            .cryptographic_parameters
+            .as_ref()
+            .or(obj.cryptographic_parameters.as_ref());
+        let mech = super::helpers::aes_mechanism_for(effective_cp)
+            .map_err(|e| fail_err(deps, correlation_id, "Decrypt", e))?;
+        let key_bytes = obj.key_material.as_ref().ok_or_else(|| {
+            fail_err(deps, correlation_id, "Decrypt",
+                KmipError::failed(
+                    ResultReason::OperationNotSupported,
+                    "streaming Decrypt requires Registered key material".to_string(),
+                ))
+        })?;
+        let key = AesKey::new(key_bytes).ok_or_else(|| {
+            fail_err(deps, correlation_id, "Decrypt",
+                KmipError::failed(
+                    ResultReason::CryptographicFailure,
+                    format!("unsupported AES key length {}", key_bytes.len()),
+                ))
+        })?;
+        let iv = req.iv.as_deref().unwrap_or(&[]);
+        let tag_bits = effective_cp
+            .and_then(|c| c.tag_length)
+            .map(|n| (n as u32) * 8)
+            .unwrap_or(128);
+        use softhsmrustv3::constants as ck;
+        let cipher = match mech {
+            ck::CKM_AES_GCM => MultipartCipher::Gcm(GcmState::new(
+                key, iv, req.aad.as_deref().unwrap_or(&[]), tag_bits, CipherDirection::Decrypt,
+            )),
+            ck::CKM_AES_ECB => MultipartCipher::Ecb(EcbState::new(key, CipherDirection::Decrypt)),
+            ck::CKM_AES_CBC => {
+                let iv16: [u8; 16] = iv.try_into().map_err(|_| invalid("invalid-iv-length"))?;
+                MultipartCipher::Cbc(CbcState::new(key, iv16, CipherDirection::Decrypt))
+            }
+            ck::CKM_AES_CBC_PAD => {
+                let iv16: [u8; 16] = iv.try_into().map_err(|_| invalid("invalid-iv-length"))?;
+                MultipartCipher::CbcPad(CbcPadState::new(key, iv16, CipherDirection::Decrypt))
+            }
+            // CTR is its own inverse — one state type, no direction.
+            ck::CKM_AES_CTR => {
+                let cb: [u8; 16] = iv.try_into().map_err(|_| invalid("invalid-iv-length"))?;
+                MultipartCipher::Ctr(CtrState::new(key, cb))
+            }
+            _ => {
+                return Err(fail_err(deps, correlation_id, "Decrypt",
+                    KmipError::failed(
+                        ResultReason::OperationNotSupported,
+                        format!("streaming Decrypt: unsupported mechanism {mech:#x}"),
+                    )));
+            }
+        };
+        let mut cipher = cipher;
+        let pt_result = cipher.update(&req.data);
+        emit_pkcs11_result(deps, correlation_id, "multipart::update", Some(mech), &pt_result);
+        let pt = pt_result
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:update"))?;
+        let cv = deps.new_correlation_value();
+        deps.streams.lock().unwrap().insert(
+            cv.clone(),
+            StreamCtx {
+                cipher,
+                uid: req.uid.clone(),
+                owner: auth.identity.as_ref().map(|i| i.username.clone()),
+            },
+        );
+        return Ok(DecryptResponse {
+            uid: req.uid.clone(),
+            data: pt,
+            correlation_value: Some(cv),
+        });
+    }
+
+    // ── Continue / close ────────────────────────────────────────────────
+    let cv = req.correlation_value.as_ref().expect("checked by caller");
+    let mut streams = deps.streams.lock().unwrap();
+    let mut ctx = streams.remove(cv).ok_or_else(|| {
+        fail_err(deps, correlation_id, "Decrypt", invalid("unknown-correlation-value"))
+    })?;
+    // Same anti-oracle stance as Encrypt: a foreign continuation reads as an
+    // unknown handle, and the stream is put BACK so a stranger cannot destroy
+    // the owner's in-flight state.
+    if ctx.owner != auth.identity.as_ref().map(|i| i.username.clone()) {
+        streams.insert(cv.clone(), ctx);
+        return Err(fail_err(deps, correlation_id, "Decrypt", invalid("unknown-correlation-value")));
+    }
+    if ctx.uid != req.uid {
+        return Err(fail_err(deps, correlation_id, "Decrypt",
+            invalid("correlation-value/uid mismatch")));
+    }
+    let pt_result = ctx.cipher.update(&req.data);
+    emit_pkcs11_result(deps, correlation_id, "multipart::update", None, &pt_result);
+    let mut pt =
+        pt_result.map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:update"))?;
+    if req.final_indicator == Some(true) {
+        let tail_result = ctx.cipher.finalize();
+        emit_pkcs11_result(deps, correlation_id, "multipart::finalize", None, &tail_result);
+        // On the decrypt side finalize returns trailing plaintext (or, for
+        // AEAD, fails the tag check) — never a tag to hand back.
+        let tail = tail_result
+            .map_err(|rv| super::helpers::ck_rv_to_kmip_error(rv, "Decrypt:final"))?;
+        pt.extend_from_slice(&tail);
+        super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Decrypt);
+        Ok(DecryptResponse { uid: req.uid.clone(), data: pt, correlation_value: None })
+    } else {
+        streams.insert(cv.clone(), ctx);
+        Ok(DecryptResponse {
+            uid: req.uid.clone(),
+            data: pt,
+            correlation_value: Some(cv.clone()),
+        })
+    }
 }
 
 /// Classical decrypt — C_DecryptInit + C_Decrypt.
@@ -344,7 +496,7 @@ fn decrypt_classical(
     }
     // §4.13.2 — count a successful Decrypt.
     super::helpers::bump_counter(deps, &req.uid, super::helpers::Counter::Decrypt);
-    Ok(DecryptResponse { uid: req.uid.clone(), data: plaintext })
+    Ok(DecryptResponse { uid: req.uid.clone(), data: plaintext, correlation_value: None })
 }
 
 fn placeholder_bytes(uid: &str, input: &[u8], domain: &[u8], len: usize) -> Vec<u8> {
@@ -418,7 +570,7 @@ mod tests {
     fn ml_kem_branch_calls_decapsulate() {
         let (ring, d) = deps_and_ring();
         put(&d, "k", KmipAlgorithm::MlKem1024, ObjectType::PrivateKey, State::Active, UsageMask::KEY_AGREEMENT);
-        let r = decrypt(&d, DecryptRequest { uid: "k".into(), data: vec![0u8; 1568], iv: None , cryptographic_parameters: None, aad: None}, &crate::server::auth::AuthContext::open(), "c").unwrap();
+        let r = decrypt(&d, DecryptRequest { uid: "k".into(), data: vec![0u8; 1568], iv: None , cryptographic_parameters: None, aad: None, init_indicator: None, final_indicator: None, correlation_value: None}, &crate::server::auth::AuthContext::open(), "c").unwrap();
         assert_eq!(r.data.len(), 32, "shared secret length");
         // K15 — no engine session: the audit names the soft decap
         // fallback that actually ran, not the classical decrypt path.
@@ -441,8 +593,7 @@ mod tests {
             data: vec![0; 32],
             iv: Some(vec![0; 12]),
             cryptographic_parameters: None,
-            aad: None,
-        }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
+            aad: None, init_indicator: None, final_indicator: None, correlation_value: None }, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         assert_eq!(
             err.result_reason(),
             crate::error::ResultReason::IncompatibleCryptographicUsageMask
@@ -453,7 +604,7 @@ mod tests {
     fn classical_branch_audits_soft_decrypt_path() {
         let (ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::Active, UsageMask::DECRYPT);
-        let _r = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None}, &crate::server::auth::AuthContext::open(), "c").unwrap();
+        let _r = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None, init_indicator: None, final_indicator: None, correlation_value: None}, &crate::server::auth::AuthContext::open(), "c").unwrap();
         // K15 — no key material + no session: soft fallback is named.
         let p3: Vec<_> = ring.filter_plane(Plane::Pkcs11);
         assert!(p3.iter().any(|e| matches!(&e.event, EventPayload::Pkcs11Call { function, .. } if function == "soft::placeholder_decrypt")));
@@ -466,17 +617,86 @@ mod tests {
         // AES-GCM (the default for KmipAlgorithm::Aes) requires a
         // 12-byte IV per KMIP 3.0 §6.1.21 + NIST SP 800-38D. Supply
         // one so the lifecycle gate is what's actually under test.
-        let _ = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None}, &crate::server::auth::AuthContext::open(), "c").unwrap();
+        let _ = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: Some(vec![0; 12]) , cryptographic_parameters: None, aad: None, init_indicator: None, final_indicator: None, correlation_value: None}, &crate::server::auth::AuthContext::open(), "c").unwrap();
     }
 
     #[test]
     fn decrypt_pre_active_rejected() {
         let (_ring, d) = deps_and_ring();
         put(&d, "a", KmipAlgorithm::Aes, ObjectType::SymmetricKey, State::PreActive, UsageMask::DECRYPT);
-        let err = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None , cryptographic_parameters: None, aad: None}, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
+        let err = decrypt(&d, DecryptRequest { uid: "a".into(), data: vec![0; 32], iv: None , cryptographic_parameters: None, aad: None, init_indicator: None, final_indicator: None, correlation_value: None}, &crate::server::auth::AuthContext::open(), "c").unwrap_err();
         // KMIP 3.0 §11: PreActive is a lifecycle-state failure, not
         // "object archived". ObjectArchived (0x0d) is reserved for
         // Destroyed* per §6.1.19.
         assert_eq!(err.result_reason(), ResultReason::WrongKeyLifecycleState);
+    }
+
+    /// G6 (2026-09-06) — the round trip that was broken: encrypt in parts,
+    /// then DECRYPT IN PARTS and get the original bytes back.
+    ///
+    /// Before `decrypt_streaming` existed, `DecryptRequest` had no
+    /// Init/Final/Correlation fields and the decoder dropped those tags, so
+    /// each part was decrypted as if it were a whole message. The client got
+    /// `Success` and wrong plaintext — a wrong ANSWER, not a refusal.
+    ///
+    /// Tests the SEAM (encrypt-parts → decrypt-parts), not each half against
+    /// itself: a single-shot round trip passed throughout the broken period.
+    #[test]
+    fn multipart_decrypt_reassembles_what_multipart_encrypt_produced() {
+        use crate::kmip30::EncryptRequest;
+        let (_r, d) = deps_and_ring();
+        let mut rec = ObjectRecord {
+            uid: "aes".into(),
+            object_type: ObjectType::SymmetricKey,
+            algorithm: KmipAlgorithm::Aes,
+            cryptographic_length: 128,
+            usage_mask: UsageMask::ENCRYPT | UsageMask::DECRYPT,
+            state: State::Active,
+            initial_date: OffsetDateTime::UNIX_EPOCH,
+            activation_date: Some(OffsetDateTime::UNIX_EPOCH),
+            ..ObjectRecord::default()
+        };
+        rec.key_material = Some(vec![0x42; 16]);
+        // ECB keeps the test about STREAM ASSEMBLY rather than IV handling.
+        rec.cryptographic_parameters = Some(crate::kmip30::CryptographicParameters {
+            block_cipher_mode: Some(0x02),
+            ..Default::default()
+        });
+        d.store.put(rec).unwrap();
+
+        let auth = crate::server::auth::AuthContext::open();
+        let part1 = vec![0xAAu8; 16];
+        let part2 = vec![0xBBu8; 16];
+
+        // Encrypt in two parts.
+        let e1 = crate::ops::encrypt::encrypt(&d, EncryptRequest {
+            uid: "aes".into(), data: part1.clone(), init_indicator: Some(true), ..Default::default()
+        }, &auth, "c").unwrap();
+        let cv = e1.correlation_value.clone().expect("stream handle on the opening part");
+        let e2 = crate::ops::encrypt::encrypt(&d, EncryptRequest {
+            uid: "aes".into(), data: part2.clone(), correlation_value: Some(cv),
+            final_indicator: Some(true), ..Default::default()
+        }, &auth, "c").unwrap();
+        let ciphertext: Vec<u8> = e1.ciphertext.iter().chain(e2.ciphertext.iter()).copied().collect();
+        assert_eq!(ciphertext.len(), 32, "two AES blocks in, two out");
+
+        // Decrypt the SAME ciphertext in two parts.
+        let d1 = decrypt(&d, DecryptRequest {
+            uid: "aes".into(), data: ciphertext[..16].to_vec(),
+            init_indicator: Some(true), final_indicator: None, correlation_value: None,
+            iv: None, cryptographic_parameters: None, aad: None,
+        }, &auth, "c").unwrap();
+        let dcv = d1.correlation_value.clone()
+            .expect("Decrypt must issue a stream handle — without it the client cannot continue");
+        let d2 = decrypt(&d, DecryptRequest {
+            uid: "aes".into(), data: ciphertext[16..].to_vec(),
+            init_indicator: None, final_indicator: Some(true), correlation_value: Some(dcv),
+            iv: None, cryptographic_parameters: None, aad: None,
+        }, &auth, "c").unwrap();
+
+        let recovered: Vec<u8> = d1.data.iter().chain(d2.data.iter()).copied().collect();
+        let original: Vec<u8> = part1.iter().chain(part2.iter()).copied().collect();
+        assert_eq!(recovered, original,
+            "multi-part decrypt must reassemble the original plaintext");
     }
 }
