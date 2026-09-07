@@ -1455,7 +1455,10 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // Historical RIPEMD-160 digest (CKF_DIGEST).
         CKM_RIPEMD160 => (0, 0, 0x00000400),
         CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
-        | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC => (16, 64, 0x00000800 | 0x00002000),
+        | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
+        | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC => {
+            (16, 64, 0x00000800 | 0x00002000)
+        }
         CKM_SHA256_HMAC_GENERAL
         | CKM_SHA384_HMAC_GENERAL
         | CKM_SHA512_HMAC_GENERAL
@@ -4441,7 +4444,16 @@ fn C_EncapsulateKey_impl(
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.8 — KEM keys are not locally generated
-            store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, mech_type); // PKCS#11 v3.2 §4.3
+            // CKA_LOCAL is FALSE above, and CKA_KEY_GEN_MECHANISM "contains a
+            // valid value only if the CKA_LOCAL attribute has the value
+            // CK_TRUE. If CKA_LOCAL has the value CK_FALSE, the value of the
+            // attribute is CK_UNAVAILABLE_INFORMATION" — same rule the
+            // C_UnwrapKey path already applies.
+            store_ulong(
+                &mut ss_attrs,
+                CKA_KEY_GEN_MECHANISM,
+                CKM_UNAVAILABLE_INFORMATION,
+            );
             absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
             // §6.8.2 Table 103 — CKA_VALUE_LEN is "Length in bytes of key
             // value", so it is engine truth and is written AFTER absorb: it can
@@ -4621,7 +4633,12 @@ fn C_EncapsulateKey_impl(
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // §5.18.8 — KEM keys are not locally generated
-            store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, CKM_ECDH1_DERIVE); // §4.3
+            // CKA_LOCAL=FALSE ⇒ CK_UNAVAILABLE_INFORMATION (see the ML-KEM arm).
+            store_ulong(
+                &mut ss_attrs,
+                CKA_KEY_GEN_MECHANISM,
+                CKM_UNAVAILABLE_INFORMATION,
+            );
             absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
             // §6.8.2 Table 103 — CKA_VALUE_LEN is the length of the (possibly
             // truncated) CKA_VALUE; written AFTER absorb so it always agrees.
@@ -4714,7 +4731,12 @@ fn C_EncapsulateKey_impl(
                 store_bool(&mut ss_attrs, CKA_TOKEN, false);   // PKCS#11 v3.2 §4.1 default
                 store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
                 store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.8 — KEM keys are not locally generated
-                store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, CKM_ML_KEM); // PKCS#11 v3.2 §4.3
+                // CKA_LOCAL=FALSE ⇒ CK_UNAVAILABLE_INFORMATION (see above).
+                store_ulong(
+                    &mut ss_attrs,
+                    CKA_KEY_GEN_MECHANISM,
+                    CKM_UNAVAILABLE_INFORMATION,
+                );
                 absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
                 // §6.8.2 Table 103 — engine truth, written AFTER absorb.
                 store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss.as_slice().len() as u32);
@@ -4910,7 +4932,16 @@ fn C_DecapsulateKey_impl(
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.9 — KEM keys are not locally generated
-            store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, mech_type); // PKCS#11 v3.2 §4.3
+            // CKA_LOCAL is FALSE above, and CKA_KEY_GEN_MECHANISM "contains a
+            // valid value only if the CKA_LOCAL attribute has the value
+            // CK_TRUE. If CKA_LOCAL has the value CK_FALSE, the value of the
+            // attribute is CK_UNAVAILABLE_INFORMATION" — same rule the
+            // C_UnwrapKey path already applies.
+            store_ulong(
+                &mut ss_attrs,
+                CKA_KEY_GEN_MECHANISM,
+                CKM_UNAVAILABLE_INFORMATION,
+            );
             absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
             // §6.8.2 Table 103 — "Length in bytes of key value". This stored the
             // CIPHERTEXT length (`expected_ct`) until 2026-08-13: FrodoKEM-640
@@ -5053,7 +5084,12 @@ fn C_DecapsulateKey_impl(
             store_bool(&mut ss_attrs, CKA_TOKEN, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
             store_bool(&mut ss_attrs, CKA_LOCAL, false); // §5.18.9 — KEM keys are not locally generated
-            store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, CKM_ECDH1_DERIVE); // §4.3
+            // CKA_LOCAL=FALSE ⇒ CK_UNAVAILABLE_INFORMATION (see the ML-KEM arm).
+            store_ulong(
+                &mut ss_attrs,
+                CKA_KEY_GEN_MECHANISM,
+                CKM_UNAVAILABLE_INFORMATION,
+            );
             absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
             // §6.8.2 Table 103 — engine truth, written AFTER absorb.
             store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss_len);
@@ -5146,7 +5182,12 @@ fn C_DecapsulateKey_impl(
                 store_bool(&mut ss_attrs, CKA_TOKEN, false);   // PKCS#11 v3.2 §4.1 default
                 store_bool(&mut ss_attrs, CKA_PRIVATE, false); // PKCS#11 v3.2 §4.1 default
                 store_bool(&mut ss_attrs, CKA_LOCAL, false); // PKCS#11 v3.2 §5.18.9 — KEM keys are not locally generated
-                store_ulong(&mut ss_attrs, CKA_KEY_GEN_MECHANISM, CKM_ML_KEM); // PKCS#11 v3.2 §4.3
+                // CKA_LOCAL=FALSE ⇒ CK_UNAVAILABLE_INFORMATION (see above).
+                store_ulong(
+                    &mut ss_attrs,
+                    CKA_KEY_GEN_MECHANISM,
+                    CKM_UNAVAILABLE_INFORMATION,
+                );
                 absorb_template_attrs(&mut ss_attrs, _p_template, _ul_attribute_count);
                 // §6.8.2 Table 103 — engine truth, written AFTER absorb.
                 store_ulong(&mut ss_attrs, CKA_VALUE_LEN, ss.as_slice().len() as u32);
@@ -5291,11 +5332,27 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
         Some(v) if v.len() < 4 => return Err(CKR_ATTRIBUTE_VALUE_INVALID),
         Some(_) => read_u32(CKA_CLASS).unwrap(),
     };
-    // PKCS#11 Profiles v3.2 §3 — CKO_PROFILE identity is entirely
-    // token-computed (state::init_profile_objects, at slot creation); a
-    // client-supplied one is never valid, mirroring how CREATE_READ_ONLY
-    // below rejects other token-computed attributes.
-    if class == CKO_PROFILE {
+    // "Only objects that are considered Storage Objects can be created on a
+    // token, other kinds of object are generally built-in and attempting to
+    // create new objects of those kinds will result in an error"
+    // (Creating objects). The "Other Objects" table lists exactly four
+    // non-storage classes: CKO_HW_FEATURE, CKO_MECHANISM, CKO_PROFILE and
+    // CKO_VALIDATION. Each describes the TOKEN — the hardware it has, the
+    // mechanisms it implements, the profiles it conforms to, the third-party
+    // validations it holds — so a client-supplied one would be the caller
+    // asserting a property of the module. CKO_VALIDATION is the sharpest
+    // case: validation objects are "read only, token objects", and this
+    // token holds no FIPS 140-3/CC validation to describe, so accepting one
+    // would let an application fabricate a validation claim against it.
+    //
+    // CKR_ATTRIBUTE_READ_ONLY, not CKR_ATTRIBUTE_VALUE_INVALID: the class
+    // value is perfectly valid, it just isn't the caller's to write. Same
+    // code the C++ engine returns, so the two agree.
+    if class == CKO_PROFILE
+        || class == CKO_VALIDATION
+        || class == CKO_HW_FEATURE
+        || class == CKO_MECHANISM
+    {
         return Err(CKR_ATTRIBUTE_READ_ONLY);
     }
     // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS is a packed CK_MECHANISM_TYPE[];
@@ -5532,6 +5589,15 @@ fn unwrap_pqc_pkcs8_private_key(value: &[u8], expected_len: usize) -> Option<Vec
             cursor = &cursor[used..];
         }
     }
+    // R1' (2026-09-06) — RFC 8410 §7 `CurvePrivateKey`. For Ed25519, Ed448,
+    // X25519 and X448 the privateKey OCTET STRING's CONTENT is itself an
+    // OCTET STRING wrapping the raw scalar (`04 20 <32 bytes>` for Ed25519),
+    // not the raw bytes directly and not a SEQUENCE — so neither branch above
+    // matched it. This is the shape OpenSSL and every conforming RFC 8410
+    // encoder produce.
+    if tag_inner == 0x04 && consumed_inner == priv_body.len() && inner_body.len() == expected_len {
+        return Some(inner_body.to_vec());
+    }
     None
 }
 
@@ -5563,6 +5629,28 @@ fn normalize_pqc_pkcs8_import(attrs: &mut Attributes) -> Result<(), u32> {
     let expected_len = match key_type {
         CKK_ML_DSA => crate::native::keygen::ml_dsa_key_lens(ps).map(|(sk, _)| sk),
         CKK_ML_KEM => crate::native::keygen::ml_kem_key_lens(ps).map(|(dk, _)| dk),
+        // R1' (2026-09-06, decision D5) — the same leniency for Edwards and
+        // Montgomery private keys, so ONE import policy covers every private
+        // key type instead of two. Tables 67/69 define CKA_VALUE as the raw
+        // little-endian scalar (RFC 8032 / RFC 7748), and that is what a
+        // caller who knows this engine passes — but a caller holding an
+        // RFC 8410 PKCS#8 blob would otherwise have it stored verbatim and
+        // then fail later, opaquely, inside sign_eddsa's 32/57-byte length
+        // dispatch as CKR_KEY_TYPE_INCONSISTENT. Normalise a recognised
+        // encoding, or reject at creation — never store unusable material.
+        CKK_EC_EDWARDS | CKK_EC_MONTGOMERY => match attrs.get(&CKA_EC_PARAMS) {
+            // No curve to size the value against. validate_create_template
+            // owns that complaint; do not guess a length here.
+            None => return Ok(()),
+            Some(params) => match crate::crypto::handlers::decode_ec_params(params) {
+                Ok(crate::crypto::handlers::CURVE_ED25519) => Some(32usize),
+                Ok(crate::crypto::handlers::CURVE_ED448) => Some(57),
+                Ok(crate::crypto::handlers::CURVE_X25519) => Some(32),
+                Ok(crate::crypto::handlers::CURVE_X448) => Some(56),
+                // Unrecognised or unsupported curve: not this function's call.
+                _ => return Ok(()),
+            },
+        },
         _ => return Ok(()),
     };
     let Some(expected_len) = expected_len else {
@@ -6593,7 +6681,10 @@ fn C_Sign_impl(
                 sign_slh_dsa(m, ps, &sk_bytes, msg, &ctx_bytes, deterministic)
             }
             CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
-            | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC => sign_hmac(eff_mech, &sk_bytes, eff_msg),
+            | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
+            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC => {
+                sign_hmac(eff_mech, &sk_bytes, eff_msg)
+            }
             m if hmac_general_base(m).is_some() => {
                 let (base, _) = hmac_general_base(m).unwrap();
                 let mac_len = if ctx_bytes.len() >= 4 {
@@ -6816,6 +6907,10 @@ pub fn C_Verify(
                     | CKM_SHA512_HMAC
                     | CKM_SHA3_256_HMAC
                     | CKM_SHA3_512_HMAC
+                    | CKM_SHA512_224_HMAC
+                    | CKM_SHA512_256_HMAC
+                    | CKM_SHA3_224_HMAC
+                    | CKM_SHA3_384_HMAC
                     | CKM_KMAC_128
                     | CKM_KMAC_256
             ) =>
@@ -6917,7 +7012,8 @@ pub fn C_Verify(
                 verify_slh_dsa(m, ps, &pk_bytes, msg, sig_bytes, &ctx_bytes)
             }
             CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
-            | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC => {
+            | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
+            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC => {
                 verify_hmac(eff_mech, &pk_bytes, eff_msg, sig_bytes)
             }
             m if hmac_general_base(m).is_some() => {
@@ -11886,6 +11982,10 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SHA512_HMAC
             | CKM_SHA3_256_HMAC
             | CKM_SHA3_512_HMAC
+            | CKM_SHA512_224_HMAC
+            | CKM_SHA512_256_HMAC
+            | CKM_SHA3_224_HMAC
+            | CKM_SHA3_384_HMAC
             | CKM_KMAC_128
             | CKM_KMAC_256
             // WS-3/G2 (2026-09-01): CKM_AES_GMAC's tag is a deterministic
@@ -15577,6 +15677,42 @@ mod attr_integrity_ffi_tests {
             u32::from_le_bytes([kgm[0], kgm[1], kgm[2], kgm[3]]),
             CKM_UNAVAILABLE_INFORMATION
         );
+    }
+
+    /// R3 (2026-09-06) — "only objects that are considered Storage Objects can
+    /// be created on a token, other kinds of object are generally built-in and
+    /// attempting to create new objects of those kinds will result in an
+    /// error" (Creating objects). The "Other Objects" table names exactly four
+    /// non-storage classes, and all four describe the TOKEN rather than hold
+    /// application data. CKO_VALIDATION is the sharpest case: validation
+    /// objects are "read only, token objects" describing third-party
+    /// validations the module conforms to, and this software token holds none —
+    /// so accepting a client-supplied one would let an application fabricate a
+    /// FIPS/CC validation claim against the module.
+    ///
+    /// Before this fix only CKO_PROFILE was refused; the other three fell
+    /// through `validate_create_template`'s generic "no key-specific rule →
+    /// Ok(())" arm and were created as inert objects, so this test fails on the
+    /// pre-fix engine for CKO_VALIDATION, CKO_HW_FEATURE and CKO_MECHANISM.
+    #[test]
+    fn create_object_refuses_non_storage_classes() {
+        let _guard = test_lock::acquire();
+        setup();
+        for (class, name) in [
+            (CKO_PROFILE, "CKO_PROFILE"),
+            (CKO_VALIDATION, "CKO_VALIDATION"),
+            (CKO_HW_FEATURE, "CKO_HW_FEATURE"),
+            (CKO_MECHANISM, "CKO_MECHANISM"),
+        ] {
+            let mut attrs = Attributes::new();
+            store_ulong(&mut attrs, CKA_CLASS, class);
+            let rv = create_object_from_attrs(SESSION, attrs)
+                .expect_err(&format!("{name} is not a Storage Object — creation must be refused"));
+            assert_eq!(
+                rv, CKR_ATTRIBUTE_READ_ONLY,
+                "{name}: the class value is valid, it just is not the caller's to write"
+            );
+        }
     }
 
     /// B5 (2026-09-02) — a `CKK_ML_DSA` private key imported with the raw,
@@ -19332,6 +19468,79 @@ mod multipart_sign_verify_ffi_tests {
         assert_eq!(sig, mac.finalize().into_bytes().to_vec());
     }
 
+    /// R2'a (2026-09-06) — `CKM_SHA512_224_HMAC`, `CKM_SHA512_256_HMAC`,
+    /// `CKM_SHA3_224_HMAC` and `CKM_SHA3_384_HMAC` were ALREADY implemented
+    /// inside `crypto::handlers::sign_hmac` (and in the SP 800-108 PRF paths),
+    /// but were absent from `SUPPORTED_MECHS`, from `C_GetMechanismInfo` and
+    /// from the `C_Sign`/`C_Verify` dispatch arms — so `C_SignInit` rejected
+    /// every one of them and no caller could reach the working code. This test
+    /// fails on the pre-fix engine at the first `one_shot_sign`.
+    ///
+    /// Each MAC is cross-checked against the RustCrypto `hmac` crate over the
+    /// same key and message, so this asserts the output is CORRECT rather than
+    /// merely that the call now succeeds.
+    #[test]
+    fn previously_unreachable_hmac_variants_sign_verify_and_match_reference() {
+        let _guard = test_lock::acquire();
+        setup();
+        use hmac::Mac;
+        let msg = b"R2'a - these four HMAC variants used to be unreachable";
+
+        let reference = |mech: u32| -> Vec<u8> {
+            match mech {
+                CKM_SHA512_224_HMAC => {
+                    let mut m =
+                        hmac::Hmac::<sha2::Sha512_224>::new_from_slice(&HMAC_KEY_BYTES).unwrap();
+                    m.update(msg);
+                    m.finalize().into_bytes().to_vec()
+                }
+                CKM_SHA512_256_HMAC => {
+                    let mut m =
+                        hmac::Hmac::<sha2::Sha512_256>::new_from_slice(&HMAC_KEY_BYTES).unwrap();
+                    m.update(msg);
+                    m.finalize().into_bytes().to_vec()
+                }
+                CKM_SHA3_224_HMAC => {
+                    let mut m =
+                        hmac::Hmac::<sha3::Sha3_224>::new_from_slice(&HMAC_KEY_BYTES).unwrap();
+                    m.update(msg);
+                    m.finalize().into_bytes().to_vec()
+                }
+                CKM_SHA3_384_HMAC => {
+                    let mut m =
+                        hmac::Hmac::<sha3::Sha3_384>::new_from_slice(&HMAC_KEY_BYTES).unwrap();
+                    m.update(msg);
+                    m.finalize().into_bytes().to_vec()
+                }
+                other => panic!("unexpected mechanism 0x{other:x}"),
+            }
+        };
+
+        for (mech, name, mac_len) in [
+            (CKM_SHA512_224_HMAC, "SHA-512/224", 28usize),
+            (CKM_SHA512_256_HMAC, "SHA-512/256", 32),
+            (CKM_SHA3_224_HMAC, "SHA3-224", 28),
+            (CKM_SHA3_384_HMAC, "SHA3-384", 48),
+        ] {
+            assert!(
+                crate::constants::SUPPORTED_MECHS.contains(&mech),
+                "{name}: must be advertised through C_GetMechanismList"
+            );
+            let sig = one_shot_sign(SESSION, mech, HMAC_KEY, msg);
+            assert_eq!(sig.len(), mac_len, "{name}: MAC length");
+            assert_eq!(
+                sig,
+                reference(mech),
+                "{name}: MAC must equal the RustCrypto reference"
+            );
+            assert_eq!(
+                one_shot_verify(SESSION, mech, HMAC_KEY, msg, &sig),
+                CKR_OK,
+                "{name}: C_Verify must accept the MAC it just produced"
+            );
+        }
+    }
+
     // ── §5.13/§5.15 sequencing: one-shot after Update ───────────────────────
 
     /// C_Sign while the sign op is in its multi-part phase →
@@ -21896,6 +22105,32 @@ mod ecdh_kem_ffi_tests {
         assert_eq!(ss_e, ss_d, "both sides must derive the same shared secret");
         assert_eq!(ss_e.len(), (point_len - 1) / 2, "raw X-coordinate shared secret");
 
+        // D-4 (2026-09-06) — CKA_KEY_GEN_MECHANISM "contains a valid value only
+        // if the CKA_LOCAL attribute has the value CK_TRUE. If CKA_LOCAL has
+        // the value CK_FALSE, the value of the attribute is
+        // CK_UNAVAILABLE_INFORMATION." §5.18.8/§5.18.9 mandate CKA_LOCAL=FALSE
+        // here, so the ECDH-as-KEM arms must report the sentinel rather than
+        // CKM_ECDH1_DERIVE, which is what they used to store.
+        for (h, side) in [(h_ss_e, "encapsulate"), (h_ss_d, "decapsulate")] {
+            let (local, kgm) = OBJECTS.with(|o| {
+                let b = o.borrow();
+                let a = b.get(&h).expect("shared-secret object stored");
+                (
+                    a.get(&CKA_LOCAL).cloned().expect("CKA_LOCAL stored"),
+                    a.get(&CKA_KEY_GEN_MECHANISM)
+                        .cloned()
+                        .expect("CKA_KEY_GEN_MECHANISM stored"),
+                )
+            });
+            assert_eq!(local[0], 0x00, "{side}: CKA_LOCAL must be FALSE");
+            assert_eq!(
+                u32::from_le_bytes([kgm[0], kgm[1], kgm[2], kgm[3]]),
+                CKM_UNAVAILABLE_INFORMATION,
+                "{side}: CKA_LOCAL=FALSE ⇒ CKA_KEY_GEN_MECHANISM must be \
+                 CK_UNAVAILABLE_INFORMATION, not the producing mechanism"
+            );
+        }
+
         // E1 — the tolerant reader is KEPT: the historical DER-wrapped form
         // must still decapsulate to the same secret.
         let mut raw = {
@@ -22341,6 +22576,22 @@ mod mlkem_value_len_ffi_tests {
                 value_len_of(h),
                 ct_len as usize,
                 "{side}: CKA_VALUE_LEN must not be the ciphertext length"
+            );
+            // D-4 (2026-09-06) — §5.18.8/§5.18.9 mandate CKA_LOCAL=FALSE for an
+            // encapsulated/decapsulated key, and CKA_KEY_GEN_MECHANISM
+            // "contains a valid value only if the CKA_LOCAL attribute has the
+            // value CK_TRUE. If CKA_LOCAL has the value CK_FALSE, the value of
+            // the attribute is CK_UNAVAILABLE_INFORMATION." Every KEM arm used
+            // to store the producing mechanism here instead, which claimed the
+            // token had generated a key it had not.
+            let local = obj_attr(h, CKA_LOCAL).expect("CKA_LOCAL stored");
+            assert_eq!(local[0], 0x00, "{side}: CKA_LOCAL must be FALSE");
+            let kgm = obj_attr(h, CKA_KEY_GEN_MECHANISM).expect("CKA_KEY_GEN_MECHANISM stored");
+            assert_eq!(
+                u32::from_le_bytes([kgm[0], kgm[1], kgm[2], kgm[3]]),
+                CKM_UNAVAILABLE_INFORMATION,
+                "{side}: CKA_LOCAL=FALSE ⇒ CKA_KEY_GEN_MECHANISM must be \
+                 CK_UNAVAILABLE_INFORMATION, not the producing mechanism"
             );
         }
     }
@@ -23621,11 +23872,17 @@ mod ed25519ctx_ffi_dispatch_tests {
         );
     }
 
-    /// Sabotage check: a wrong-length CKA_VALUE for CKK_EC_EDWARDS must
-    /// never be accepted as a usable key -- either C_CreateObject rejects
-    /// it outright, or (today's behavior) it's stored as-is and C_Sign
-    /// later refuses it with CKR_KEY_TYPE_INCONSISTENT. Either is fine;
-    /// silently signing with garbage-length material is not.
+    /// A wrong-length `CKA_VALUE` for `CKK_EC_EDWARDS` must be refused at
+    /// IMPORT time.
+    ///
+    /// TIGHTENED by R1' (2026-09-06): this test used to accept either
+    /// outcome — rejection at create, or storage followed by a
+    /// `CKR_KEY_TYPE_INCONSISTENT` at first `C_Sign`. That made it pass
+    /// whatever the engine did, so it could never have caught a regression
+    /// in either direction. Under decision D5 the engine now has ONE import
+    /// policy for every private key type: raw at the known size, or a
+    /// recognised PKCS#8 encoding, or refused outright — never stored as
+    /// material that only fails later, opaquely, at first use.
     #[test]
     fn b5_eddsa_import_rejects_wrong_length_value() {
         let _guard = test_lock::acquire();
@@ -23633,28 +23890,94 @@ mod ed25519ctx_ffi_dispatch_tests {
 
         let bogus = vec![0x33u8; 31]; // neither 32 (Ed25519) nor 57 (Ed448)
         let attrs = eddsa_import_attrs(ED25519_OID_DER, &bogus);
-        let create_rv = create_object_from_attrs(session, attrs);
 
-        match create_rv {
-            Err(_rv) => { /* rejected at import time -- fine */ }
-            Ok(h) => {
-                let mech_buf = build_mechanism(CKM_EDDSA, &[]);
-                assert_eq!(C_SignInit(session, mech_buf.as_ptr() as *mut u8, h), CKR_OK);
-                let mut msg = b"should never produce a signature".to_vec();
-                let mut sig = [0u8; 114];
-                let mut sig_len: u32 = 114;
-                let rv = C_Sign(
-                    session,
-                    msg.as_mut_ptr(),
-                    msg.len() as u32,
-                    sig.as_mut_ptr(),
-                    &mut sig_len,
-                );
-                assert_ne!(
-                    rv, CKR_OK,
-                    "a 31-byte CKA_VALUE must never produce a signature CKR_OK"
-                );
-            }
-        }
+        let rv = create_object_from_attrs(session, attrs).expect_err(
+            "a 31-byte CKA_VALUE is neither the raw RFC 8032 scalar nor a \
+             recognised PKCS#8 encoding, so C_CreateObject must refuse it",
+        );
+        assert_eq!(
+            rv, CKR_ATTRIBUTE_VALUE_INVALID,
+            "malformed key material is an attribute-value problem"
+        );
+    }
+
+    /// R1' (2026-09-06, decision D5) — an Ed25519 private key handed to
+    /// `C_CreateObject` as an RFC 8410 PKCS#8 `PrivateKeyInfo` (the shape
+    /// OpenSSL and every conforming encoder emit) must be normalised to the
+    /// raw scalar on import and be usable for signing.
+    ///
+    /// Before this fix the blob was stored verbatim — `normalize_pqc_pkcs8_
+    /// import` handled only `CKK_ML_DSA`/`CKK_ML_KEM` — and `sign_eddsa`'s
+    /// 32/57-byte length dispatch then refused it with
+    /// `CKR_KEY_TYPE_INCONSISTENT`. The engine already accepted PKCS#8 for
+    /// the PQC key types, so EdDSA was the inconsistent case, not the rule.
+    /// This test fails on the pre-fix engine at `create_object_from_attrs`.
+    #[test]
+    fn r1_eddsa_import_accepts_rfc8410_pkcs8_and_signs() {
+        let _guard = test_lock::acquire();
+        let session = setup_session();
+
+        use ed25519_dalek::Signer;
+        let seed = [0x5au8; 32];
+        let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+        let vk = sk.verifying_key();
+
+        // RFC 8410 §7: PrivateKeyInfo { version 0,
+        //   AlgorithmIdentifier { id-Ed25519 = 1.3.101.112 },
+        //   privateKey OCTET STRING { CurvePrivateKey ::= OCTET STRING(32) } }
+        // The doubly-wrapped OCTET STRING is the whole point: it is neither
+        // the raw scalar nor the SEQUENCE shape the PQC unwrapper handled.
+        let mut der = vec![
+            0x30, 0x2e, // SEQUENCE, 46 bytes
+            0x02, 0x01, 0x00, // INTEGER 0
+            0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, // AlgId { OID 1.3.101.112 }
+            0x04, 0x22, // OCTET STRING, 34 bytes
+            0x04, 0x20, // CurvePrivateKey ::= OCTET STRING, 32 bytes
+        ];
+        der.extend_from_slice(&seed);
+        assert_eq!(der.len(), 48, "RFC 8410 Ed25519 PrivateKeyInfo is 48 bytes");
+
+        let attrs = eddsa_import_attrs(ED25519_OID_DER, &der);
+        let h = create_object_from_attrs(session, attrs)
+            .expect("an RFC 8410 PKCS#8 Ed25519 private key must import");
+
+        // The stored representation must be the bare scalar — proving the
+        // engine unwrapped it rather than keeping the 48-byte blob.
+        assert_eq!(
+            obj_value(h),
+            seed,
+            "CKA_VALUE must be normalised to the raw 32-byte scalar on import"
+        );
+
+        let mech_buf = build_mechanism(CKM_EDDSA, &[]);
+        assert_eq!(C_SignInit(session, mech_buf.as_ptr() as *mut u8, h), CKR_OK);
+        let mut msg = b"R1' - PKCS#8-wrapped Ed25519 import".to_vec();
+        let mut sig = [0u8; 64];
+        let mut sig_len: u32 = 64;
+        assert_eq!(
+            C_Sign(
+                session,
+                msg.as_mut_ptr(),
+                msg.len() as u32,
+                sig.as_mut_ptr(),
+                &mut sig_len,
+            ),
+            CKR_OK,
+            "signing with a PKCS#8-imported Ed25519 key must succeed"
+        );
+        assert_eq!(sig_len, 64);
+
+        // Byte-equality with an INDEPENDENT signer proves the engine
+        // recovered the right scalar, not merely one of the right length.
+        assert_eq!(
+            sig.to_vec(),
+            sk.sign(&msg).to_bytes().to_vec(),
+            "engine signature must equal the ed25519-dalek reference signature"
+        );
+        let signature = ed25519_dalek::Signature::from_bytes(&sig);
+        assert!(
+            vk.verify_strict(&msg, &signature).is_ok(),
+            "independent verifier must accept the engine-produced signature"
+        );
     }
 }
