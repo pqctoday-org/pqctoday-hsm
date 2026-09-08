@@ -2338,6 +2338,12 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         CKM_RIPEMD160_HMAC => 20,
         CKM_SHA384_HMAC => 48,
         CKM_SHA512_HMAC | CKM_SHA3_512_HMAC => 64,
+        // R2'a — the four variants sign_hmac already implemented but which
+        // nothing could reach: truncated SHA-2 (FIPS 180-4 §6.6/§6.7) and the
+        // two remaining SHA-3 sizes (FIPS 202).
+        CKM_SHA512_224_HMAC | CKM_SHA3_224_HMAC => 28,
+        CKM_SHA512_256_HMAC => 32,
+        CKM_SHA3_384_HMAC => 48,
         CKM_KMAC_128 => 32,
         CKM_KMAC_256 => 64,
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS

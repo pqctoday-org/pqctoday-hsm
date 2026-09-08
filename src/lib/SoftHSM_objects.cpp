@@ -1184,13 +1184,29 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 		return rv;
 	}
 
-	// C1 (2026-08-13). Profile objects describe what the LIBRARY conforms to, so
-	// they are read-only token objects the engine publishes for itself
-	// (publishProfileObjects below). An application creating one could otherwise
-	// claim conformance the implementation does not have. Rust's
-	// CKR_ATTRIBUTE_READ_ONLY is the better code than the CKR_ATTRIBUTE_VALUE_INVALID
-	// this used to fall through to.
-	if (op == OBJECT_OP_CREATE && objClass == CKO_PROFILE)
+	// C1 (2026-08-13, extended R3 2026-09-06). Profile objects describe what the
+	// LIBRARY conforms to, so they are read-only token objects the engine
+	// publishes for itself (publishProfileObjects below). An application creating
+	// one could otherwise claim conformance the implementation does not have.
+	// Rust's CKR_ATTRIBUTE_READ_ONLY is the better code than the
+	// CKR_ATTRIBUTE_VALUE_INVALID this used to fall through to.
+	//
+	// R3: the same reasoning covers the whole "Other Objects" (non-storage)
+	// table, not just profiles — "only objects that are considered Storage
+	// Objects can be created on a token, other kinds of object are generally
+	// built-in and attempting to create new objects of those kinds will result
+	// in an error". CKO_VALIDATION is the sharpest case: validation objects are
+	// read-only token objects describing third-party validations the module
+	// holds, and this software token holds none, so letting an application
+	// create one would let it fabricate a validation claim. CKO_HW_FEATURE and
+	// CKO_MECHANISM already fell through to CKR_ATTRIBUTE_VALUE_INVALID in
+	// newP11Object's default arm; naming them here returns the more accurate
+	// code and keeps both engines identical.
+	if (op == OBJECT_OP_CREATE &&
+	    (objClass == CKO_PROFILE ||
+	     objClass == CKO_VALIDATION ||
+	     objClass == CKO_HW_FEATURE ||
+	     objClass == CKO_MECHANISM))
 		return CKR_ATTRIBUTE_READ_ONLY;
 
 	// ── S5 (2026-08-13, extended HBS-1 2026-09-03) — hash-based-signature

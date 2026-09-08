@@ -54,6 +54,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   algorithm-value form — `XMSS` most notably, where the engine had supported
   the algorithm all along with no way to name it over KMIP.
 
+- **Four HMAC mechanisms that were implemented but unreachable.**
+  `CKM_SHA512_224_HMAC`, `CKM_SHA512_256_HMAC`, `CKM_SHA3_224_HMAC` and
+  `CKM_SHA3_384_HMAC` had working implementations in the Rust engine's
+  `sign_hmac` and in its SP 800-108 PRF paths, but were missing from the
+  advertised mechanism list, from `C_GetMechanismInfo` and from the
+  `C_Sign`/`C_Verify` dispatch arms — so `C_SignInit` rejected all four and no
+  caller could reach the working code. Each is now advertised and routed, and
+  cross-checked against the RustCrypto reference implementation rather than
+  only against itself.
+
 ### Fixed
 
 - **`Object Group` (0x420056) is no longer emitted: that codepoint is
@@ -65,6 +75,58 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The §4.27 `Fresh` attribute was inverted — it defaulted to False for every
   object and silently discarded a client-supplied value at Register.
 
+
+- **A key recovered with `C_UnwrapKey` — or produced by `C_EncapsulateKey` /
+  `C_DecapsulateKey` — came back non-extractable in the C++ engine unless the
+  caller explicitly asked otherwise.** PKCS#11 v3.2 says the opposite for all
+  four of these functions: `C_UnwrapKey`/`C_UnwrapKeyAuthenticated` state "the
+  `CKA_EXTRACTABLE` attribute is by default set to CK_TRUE", and the two KEM
+  functions set it "to the value of the input template with a default of
+  CK_TRUE if not provided". The engine applied one class-wide default of
+  `CK_FALSE` to every object-creation path instead, so a conforming
+  application that omitted the attribute silently received a key it could
+  never wrap or export again — and the key material had come from outside the
+  token in all four cases, so the conservative default protected nothing. The
+  Rust engine already behaved correctly. The cross-engine differential
+  harness had recorded this divergence as *legal*, citing "§5.18.4
+  `C_UnwrapKey` imposes no value"; the specification text vendored in this
+  repository says the opposite, so that exception has been deleted rather
+  than re-worded.
+
+- **A key derived with `CKM_CONCATENATE_BASE_AND_KEY` reported the wrong
+  provenance in the C++ engine.** The derivation computed
+  `CKA_NEVER_EXTRACTABLE` correctly and then stored the result into
+  `CKA_ALWAYS_SENSITIVE`, overwriting the value computed for it one line
+  earlier and leaving `CKA_NEVER_EXTRACTABLE` at its class default of
+  `CK_TRUE`. A derived key could therefore claim it had never been
+  extractable while being extractable — a false security attribute, not just
+  a cosmetic one. Nothing exercised it: the harness has no
+  `CKM_CONCATENATE_BASE_AND_KEY` scenario and the C++ compliance suite makes
+  no `CKA_NEVER_EXTRACTABLE` assertion at all.
+
+- **The Rust engine advertised a real generating mechanism on keys it had not
+  generated.** `CKA_KEY_GEN_MECHANISM` "contains a valid value only if the
+  `CKA_LOCAL` attribute has the value CK_TRUE. If `CKA_LOCAL` has the value
+  CK_FALSE, the value of the attribute is `CK_UNAVAILABLE_INFORMATION`", and
+  §5.18.8/§5.18.9 mandate `CKA_LOCAL=FALSE` for encapsulated and decapsulated
+  keys. All six KEM arms (ML-KEM, ECDH-as-KEM and the vendor FrodoKEM /
+  Classic McEliece paths) stored the producing mechanism anyway. The engine's
+  own `C_UnwrapKey` path already had this right, so this was an internal
+  inconsistency. The harness exception that called the divergence legal has
+  been deleted; its citation was also wrong.
+
+- **Objects that describe the token could be created by an application.**
+  Only Storage Objects may be created — "other kinds of object are generally
+  built-in and attempting to create new objects of those kinds will result in
+  an error" — and the specification's "Other Objects" table names four
+  non-storage classes: `CKO_HW_FEATURE`, `CKO_MECHANISM`, `CKO_PROFILE` and
+  `CKO_VALIDATION`. Only `CKO_PROFILE` was refused. `CKO_VALIDATION` is the
+  sharpest case: validation objects are read-only token objects describing
+  third-party validations the module holds, and this software token holds
+  none, so an application could create one and fabricate a FIPS 140-3 /
+  Common Criteria validation claim against the module. Both engines now
+  refuse all four with `CKR_ATTRIBUTE_READ_ONLY` (the class value is valid,
+  it simply is not the caller's to write).
 
 ## [0.28.2] — 2026-09-04
 

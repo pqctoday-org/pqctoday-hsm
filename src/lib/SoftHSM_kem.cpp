@@ -397,6 +397,25 @@ CK_RV SoftHSM::encapsulateKeyImpl
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
+	// C1 (2026-09-06) — §5.18.8/§5.18.9: the new key has "the CKA_EXTRACTABLE
+	// set to the value of the input template with a default of CK_TRUE if not
+	// provided". P11AttrExtractable::setDefault() hard-codes CK_FALSE for every
+	// creation path, so without this the engine silently hands back a
+	// non-extractable key whenever the caller omits the attribute — and the key
+	// material already exists outside the token here, so the conservative
+	// default protects nothing. Scanned over the EFFECTIVE template
+	// (secretAttribs, i.e. the caller's entries plus anything merged in above),
+	// so a template that really does ask for CK_FALSE still wins.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
 	if (rv != CKR_OK) return rv;
 
@@ -412,6 +431,10 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+	// C1 — see the scan above the CreateObject call: the spec's CK_TRUE default
+	// overrides the class-wide CK_FALSE, unless the template asked otherwise.
+	if (!extractableSupplied)
+		bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 
 	// Store the shared secret as CKA_VALUE (encrypted if isPrivate)
 	// PKCS#11 v3.2 §6.8.2 Table 103 — CKA_VALUE_LEN is the "Length in bytes of
@@ -701,6 +724,25 @@ CK_RV SoftHSM::decapsulateKeyImpl
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
+	// C1 (2026-09-06) — §5.18.8/§5.18.9: the new key has "the CKA_EXTRACTABLE
+	// set to the value of the input template with a default of CK_TRUE if not
+	// provided". P11AttrExtractable::setDefault() hard-codes CK_FALSE for every
+	// creation path, so without this the engine silently hands back a
+	// non-extractable key whenever the caller omits the attribute — and the key
+	// material already exists outside the token here, so the conservative
+	// default protects nothing. Scanned over the EFFECTIVE template
+	// (secretAttribs, i.e. the caller's entries plus anything merged in above),
+	// so a template that really does ask for CK_FALSE still wins.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
 	if (rv != CKR_OK) return rv;
 
@@ -716,6 +758,10 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+	// C1 — see the scan above the CreateObject call: the spec's CK_TRUE default
+	// overrides the class-wide CK_FALSE, unless the template asked otherwise.
+	if (!extractableSupplied)
+		bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 
 	// Store the shared secret as CKA_VALUE (encrypted if isPrivate)
 	// §6.8.2 Table 103 — CKA_VALUE_LEN is the PLAINTEXT length, captured before
@@ -1033,6 +1079,25 @@ CK_RV SoftHSM::encapsulateECDH
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
+	// C1 (2026-09-06) — §5.18.8/§5.18.9: the new key has "the CKA_EXTRACTABLE
+	// set to the value of the input template with a default of CK_TRUE if not
+	// provided". P11AttrExtractable::setDefault() hard-codes CK_FALSE for every
+	// creation path, so without this the engine silently hands back a
+	// non-extractable key whenever the caller omits the attribute — and the key
+	// material already exists outside the token here, so the conservative
+	// default protects nothing. Scanned over the EFFECTIVE template
+	// (secretAttribs, i.e. the caller's entries plus anything merged in above),
+	// so a template that really does ask for CK_FALSE still wins.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
 	if (rv != CKR_OK) return rv;
 
@@ -1048,6 +1113,10 @@ CK_RV SoftHSM::encapsulateECDH
 	bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+	// C1 — see the scan above the CreateObject call: the spec's CK_TRUE default
+	// overrides the class-wide CK_FALSE, unless the template asked otherwise.
+	if (!extractableSupplied)
+		bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 
 	// §6.8.2 Table 103 — plaintext length of the (possibly §6.3.17-truncated)
 	// secret, captured before the wipe below.
@@ -1283,6 +1352,25 @@ CK_RV SoftHSM::decapsulateECDH
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 	}
 
+	// C1 (2026-09-06) — §5.18.8/§5.18.9: the new key has "the CKA_EXTRACTABLE
+	// set to the value of the input template with a default of CK_TRUE if not
+	// provided". P11AttrExtractable::setDefault() hard-codes CK_FALSE for every
+	// creation path, so without this the engine silently hands back a
+	// non-extractable key whenever the caller omits the attribute — and the key
+	// material already exists outside the token here, so the conservative
+	// default protects nothing. Scanned over the EFFECTIVE template
+	// (secretAttribs, i.e. the caller's entries plus anything merged in above),
+	// so a template that really does ask for CK_FALSE still wins.
+	bool extractableSupplied = false;
+	for (CK_ULONG i = 0; i < secretAttribsCount; ++i)
+	{
+		if (secretAttribs[i].type == CKA_EXTRACTABLE)
+		{
+			extractableSupplied = true;
+			break;
+		}
+	}
+
 	rv = this->CreateObject(hSession, secretAttribs, secretAttribsCount, phKey, OBJECT_OP_DERIVE);
 	if (rv != CKR_OK) return rv;
 
@@ -1298,6 +1386,10 @@ CK_RV SoftHSM::decapsulateECDH
 	bOK = bOK && osobject->setAttribute(CKA_LOCAL, false);
 	bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, false);
 	bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, false);
+	// C1 — see the scan above the CreateObject call: the spec's CK_TRUE default
+	// overrides the class-wide CK_FALSE, unless the template asked otherwise.
+	if (!extractableSupplied)
+		bOK = bOK && osobject->setAttribute(CKA_EXTRACTABLE, true);
 
 	// §6.8.2 Table 103 — plaintext length of the (possibly §6.3.17-truncated)
 	// secret, captured before the wipe below.
