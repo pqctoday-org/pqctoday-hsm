@@ -478,6 +478,24 @@ static bool is_bignum_attr(CK_ATTRIBUTE_TYPE t) {
     }
 }
 
+// Key types whose CKA_VALUE is fixed-length raw key material with no ASN.1
+// framing at all — FIPS 203/204/205 and RFC 8554/8391-A each define the
+// encoded key as a flat byte string. This is the same random-byte trap as
+// is_unstructured_attr/is_bignum_attr above, just on CKA_VALUE instead: a
+// freshly generated public key's leading byte is uniformly random, so
+// ~1/256 of keys classify as a malformed ASN.1 SEQUENCE by pure chance
+// (found the hard way: create.generate_key_pair.slh_dsa_all_params flagged
+// gen_shake_128s.pub.CKA_VALUE as DER_SEQUENCE_MALFORMED_LEN vs the other
+// engine's RAW_32 on one run in a series that was otherwise identical).
+static bool is_raw_pqc_key_type(CK_ULONG kt) {
+    switch (kt) {
+        case CKK_ML_KEM: case CKK_ML_DSA: case CKK_SLH_DSA:
+        case CKK_HSS: case CKK_XMSS: case CKK_XMSSMT:
+            return true;
+        default: return false;
+    }
+}
+
 // The canonical attribute probe. Every object produced by every creation path
 // is interrogated with the SAME list, so "this engine does not set X" shows up
 // as a return-code difference rather than as a silently missing row.
@@ -615,6 +633,9 @@ static void record_attr_invariants(Engine& e, Recorder& r, const std::string& pr
 static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
                          CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o) {
     if (o == CK_INVALID_HANDLE) { r.put(prefix + ".object", "NONE"); return; }
+    CK_ULONG keyType = (CK_ULONG)-1;
+    const bool rawPqcValue = attr_ulong(e, s, o, CKA_KEY_TYPE, &keyType) &&
+                              is_raw_pqc_key_type(keyType);
     std::vector<std::string> present;
     for (CK_ATTRIBUTE_TYPE t : kProbe) {
         std::string an = attr_name(t);
@@ -643,8 +664,12 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
         // (a 3-byte check value present versus absent).
         // A big integer is not an encoding either: a 128-byte private exponent
         // whose first byte happens to be 0x30 classifies as an ASN.1 SEQUENCE,
-        // which is the same random-byte trap as the check value above.
-        if (!is_unstructured_attr(t) && !is_bignum_attr(t))
+        // which is the same random-byte trap as the check value above. Same
+        // trap again for CKA_VALUE on a raw fixed-length PQC key (see
+        // is_raw_pqc_key_type) — unlike a wrapped-key blob, there is no ASN.1
+        // framing to verify here at all.
+        if (!is_unstructured_attr(t) && !is_bignum_attr(t) &&
+            !(t == CKA_VALUE && rawPqcValue))
             r.put(prefix + "." + an + ".enc", classify(buf.data(), a.ulValueLen));
         if (is_opaque_attr(t)) {
             // Value intentionally not compared — see is_opaque_attr.

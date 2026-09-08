@@ -380,3 +380,19 @@ Implemented as decided. Two guards, so the decision does not quietly become an o
 2. **One commit per fix, separate from the comment correction.** A behaviour change buried in a 97-file documentation commit is unreviewable.
 
 If the sweep stalls on something large, that is a finding worth surfacing rather than absorbing silently.
+
+---
+
+## 15. Harness self-bug — spurious SLH-DSA divergence, found by the final clean `--cpp` gate — DONE (2026-09-07)
+
+The final, isolated `--cpp` gate run (no concurrent harness process this time, so the earlier race explanation didn't apply) came back with a real UNCOVERED divergence:
+
+```
+create.generate_key_pair.slh_dsa_all_params | gen_shake_128s.pub.CKA_VALUE.enc | value_differs | RAW_32 | DER_SEQUENCE_MALFORMED_LEN
+```
+
+Not a crypto defect. `classify()` in `p11_diff.cpp` sniffs a byte string's ASN.1 shape by its leading byte — `0x30` is treated as a candidate DER SEQUENCE tag, and anything starting `0x30` that doesn't also satisfy the length-prefix invariant falls through to `DER_SEQUENCE_MALFORMED_LEN`. SLH-DSA public keys (FIPS 205) are raw, unstructured fixed-length byte strings with no ASN.1 framing at all — a freshly generated key's leading byte is uniformly random, so ~1/256 of keys will spuriously read as a malformed SEQUENCE by pure chance. This is the exact same trap the file had already been bitten by twice before (`is_unstructured_attr` for identifiers/checksums, `is_bignum_attr` for RSA CRT values) — just not yet closed for `CKA_VALUE` on the newer PQC key types.
+
+**Fix:** added `is_raw_pqc_key_type(CK_ULONG)` (ML-KEM, ML-DSA, SLH-DSA, HSS, XMSS, XMSS-MT) and excluded `CKA_VALUE` from `classify()` for those key types in `record_attrs`, fetching `CKA_KEY_TYPE` up front to gate it. Structural fix, not a workaround — it doesn't depend on this run's random bytes, so it closes the whole class rather than papering over one instance. Verified: rebuilt, reran the 71-scenario suite in isolation — **0 uncovered divergences**, PASS.
+
+Not scoped to `record_bytes`'s other two call sites (operation outputs — signatures, KEM ciphertext, wrapped-key blobs) — those already choose `ByteView::SHAPE` vs `LEN` deliberately per-callsite based on whether framing is actually specified, and no divergence was observed there. If one surfaces, the same fix shape applies.
