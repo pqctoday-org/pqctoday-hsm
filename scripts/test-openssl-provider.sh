@@ -1505,8 +1505,8 @@ run_case T22e PASS "token PBKDF2 (HMAC-SHA512 PRF) == software PBKDF2, engine-lo
 # in this harness, silently falls back to the default provider through
 # `openssl kdf` without this flag), engine-log positive assertion +
 # negative-control twin (R13), sabotage (wrong salt -> different output).
-t25_case() { # $1=mode(COUNTER|FEEDBACK) $2=mac(HMAC|CMAC) $3=digest-or-cipher $4=keylen $5=extra kdfopt (seed, optional)
-  local mode="$1" mac="$2" dc="$3" keylen="$4" extra="${5:-}" w
+t25_case() { # $1=mode(COUNTER|FEEDBACK) $2=mac(HMAC|CMAC) $3=digest-or-cipher $4=keylen $5=extra kdfopt (seed, optional) $6=seed hex (FEEDBACK only, for the independent reference below)
+  local mode="$1" mac="$2" dc="$3" keylen="$4" extra="${5:-}" seedhex="${6:-}" w
   w="$ROOT_WORK/r22${mode}${mac}"
   mkdir -p "$w/tokens"
   cat > "$w/softhsm2.conf" <<EOF
@@ -1566,7 +1566,52 @@ EOF
     -kdfopt hexkey:"$key" -kdfopt hexinfo:"$salt" \
     -kdfopt use-l:0 -kdfopt use-separator:0 $extra \
     KBKDF 2>/dev/null) || return 1
-  [[ -n "$tokout" && "$tokout" == "$swout" ]] || return 1
+  # 2026-09-08: for FEEDBACK mode, $swout above is NOT a valid oracle for
+  # $tokout, even though it still IS a valid oracle for $ctrlout below (see
+  # that comparison). Same root cause as T36/T36b's Double-Pipeline fix:
+  # OpenSSL's own KBKDF provider mixes a 32-bit BE counter into every round
+  # regardless of whether one was requested (confirmed empirically -- see
+  # SoftHSM_keygen.cpp's CKM_SP800_108_FEEDBACK_KDF handler comment), so
+  # $swout is computed WITH a counter. SoftHSM_keygen.cpp's engine handler
+  # was fixed (2026-09, companion to the Double-Pipeline fix) to genuinely
+  # OMIT the counter when the caller does not request one -- which T25f
+  # never does -- so $tokout is correctly counter-free and stopped matching
+  # $swout the moment that engine fix landed, invisibly, because this test
+  # was never updated to match (found running the full gate 2026-09-07,
+  # root-caused by isolating this one case and reading both sides' logs).
+  # Independent Python reference instead, exactly T36's pattern: K(0)=IV
+  # (the seed), K(i)=PRF(K, K(i-1) || FixedInput), no counter.
+  local expected="$swout"
+  if [[ "$mode" == FEEDBACK ]]; then
+    if [[ "$mac" != HMAC ]]; then
+      echo "T25f-style reference not implemented for mac=$mac (only HMAC exercised today)"; return 1
+    fi
+    local pydigest; pydigest="$(echo "$dc" | tr 'A-Z-' 'a-z_')"
+    expected=$(python3 -c "
+import hmac, hashlib
+key = bytes.fromhex('$key')
+fixed = bytes.fromhex('$salt')
+Kprev = bytes.fromhex('$seedhex')
+def prf(k, data):
+    return hmac.new(k, data, hashlib.$pydigest).digest()
+out = b''
+while len(out) < $keylen:
+    Kprev = prf(key, Kprev + fixed)
+    out += Kprev
+print(out[:$keylen].hex())
+")
+    # $tokout is colon-separated uppercase hex (this tool's own `kdf` CLI
+    # output format, e.g. "3D:EA:1B:..."); the Python reference above is
+    # plain lowercase hex with no separators (same normalization T36 already
+    # needed for its own Python reference) -- compare a normalized COPY, not
+    # $tokout itself, since the sabotage check below still needs $tokout in
+    # its original colon-hex form to compare against $sabout (produced by
+    # the same `kdf` CLI, same format).
+    local tokout_norm; tokout_norm="$(echo "${tokout//:/}" | tr 'A-F' 'a-f')"
+    [[ -n "$tokout_norm" && "$tokout_norm" == "$expected" ]] || { echo "token=$tokout_norm expected=$expected"; return 1; }
+  else
+    [[ -n "$tokout" && "$tokout" == "$expected" ]] || { echo "token=$tokout expected=$expected"; return 1; }
+  fi
   # Engine-log evidence (R13): KBKDF is deterministic, so a silent
   # wrong-provider fallback is invisible in the output value alone.
   grep -q "Created new object" "$w/tok.err.log" || return 1
@@ -1603,8 +1648,8 @@ t25b() { t25_case COUNTER HMAC SHA3-256 32; }
 run_case T25b PASS "token SP800-108 Counter-KDF (HMAC-SHA3-256 PRF) == software KBKDF (remediation R22)" t25b
 t25c() { t25_case COUNTER CMAC AES-256-CBC 32; }
 run_case T25c PASS "token SP800-108 Counter-KDF (CMAC-AES-256 PRF) == software KBKDF (remediation R22)" t25c
-t25f() { t25_case FEEDBACK HMAC SHA384 48 "-kdfopt hexseed:$(printf 'aa%.0s' {1..48})"; }
-run_case T25f PASS "token SP800-108 Feedback-KDF (HMAC-SHA384 PRF, with IV/seed) == software KBKDF (remediation R22)" t25f
+t25f() { local seedhex; seedhex="$(printf 'aa%.0s' {1..48})"; t25_case FEEDBACK HMAC SHA384 48 "-kdfopt hexseed:$seedhex" "$seedhex"; }
+run_case T25f PASS "token SP800-108 Feedback-KDF (HMAC-SHA384 PRF, with IV/seed) == independent Python reference, NO explicit CK_SP800_108_COUNTER supplied (K(0)=seed, K(i)=PRF(K,K(i-1)||fixedInput), counter-free -- OpenSSL's own KBKDF provider cannot express this for FEEDBACK mode either, same T36/T36b class of gap) (remediation R22)" t25f
 
 # ─── T25r: KBKDF rejection controls — inputs the C++ engine's own SP800-108
 # handler cannot honor must fail loudly, never silently degrade (R10/F36-6
@@ -1700,7 +1745,12 @@ t24() { local w; w=$(mk_arena hsssign "$CPP_ENGINE_SO") && use_arena "$w" || ret
 
   # -rawin (DIGEST_SIGN/VERIFY dispatch)
   O pkeyutl -sign -rawin -inkey "pkcs11:token=hsssign;type=private" -in "$MSG" -out "$w/sig.bin" || return 1
-  [[ "$(filesize "$w/sig.bin")" == "1296" ]] || { echo "sig size $(filesize "$w/sig.bin") != 1296"; return 1; }
+  # HBS-1 (2026-09-03, commit 673a5a11): the engine's default LMOTS when
+  # CK_HSS_KEY_PAIR_GEN_PARAMS is omitted moved from W8 (1296-byte sig) to
+  # W4 (2352-byte sig), aligning with Rust's own default -- neither v3.2 nor
+  # RFC 8554 mandates a default, so this is the same size T24c already
+  # exercises explicitly, now also reached implicitly here.
+  [[ "$(filesize "$w/sig.bin")" == "2352" ]] || { echo "sig size $(filesize "$w/sig.bin") != 2352"; return 1; }
   O pkeyutl -verify -rawin -pubin -inkey "pkcs11:token=hsssign;type=public" -in "$MSG" -sigfile "$w/sig.bin" || return 1
 
   # plain SIGN/VERIFY dispatch (no -rawin)
@@ -1725,7 +1775,7 @@ t24() { local w; w=$(mk_arena hsssign "$CPP_ENGINE_SO") && use_arena "$w" || ret
   then echo "tampered HSS signature VERIFIED by the independent LMS implementation"; return 1; fi
   return 0
 }
-run_case T24 PASS "HSS/LMS token sign (size 1296, both -rawin and plain dispatch) -> token verify, both sabotage controls rejected, AND cross-verified by OpenSSL 3.6.3's own independent native LMS implementation (remediation R9)" t24
+run_case T24 PASS "HSS/LMS token sign, default params (size 2352, W4 -- HBS-1, both -rawin and plain dispatch) -> token verify, both sabotage controls rejected, AND cross-verified by OpenSSL 3.6.3's own independent native LMS implementation (remediation R9)" t24
 
 # T24c — phase-5 R25 (HSS param-set awareness). T24 above only ever
 # exercises the C++ engine's own documented default (LMOTS W8); this
@@ -2699,10 +2749,11 @@ t24d() {
   SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
     O genpkey -propquery "?provider=pkcs11" -algorithm HSS -out "$w/k.pem" 2>/dev/null || return 1
 
-  # Rust's own CKM_HSS_KEY_PAIR_GEN default is LMOTS_SHA256_N32_W4 (not
-  # the C++ engine's W8) -- 2352 bytes is the size assert that actually
-  # proves the provider read this key's real parameter set (R25)
-  # rather than assuming the C++ default's 1296.
+  # Rust's own CKM_HSS_KEY_PAIR_GEN default is LMOTS_SHA256_N32_W4, and the
+  # C++ engine's default was aligned to match (HBS-1, 2026-09-03, commit
+  # 673a5a11) -- both now produce 2352 bytes here. This assert still proves
+  # the provider reads this key's real parameter set (R25) rather than
+  # assuming a hardcoded size; it's just no longer a cross-engine divergence.
   SOFTHSM2_CONF="$w/softhsm2.conf" SOFTHSMRUST_STATE_FILE="$statefile" OPENSSL_CONF="$w/openssl.cnf" \
     O pkeyutl -sign -propquery "?provider=pkcs11" -rawin \
       -inkey "pkcs11:token=rusths;type=private" -in "$MSG" -out "$w/sig.bin" 2>/dev/null || return 1
