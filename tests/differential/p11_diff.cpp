@@ -634,8 +634,20 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
                          CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o) {
     if (o == CK_INVALID_HANDLE) { r.put(prefix + ".object", "NONE"); return; }
     CK_ULONG keyType = (CK_ULONG)-1;
-    const bool rawPqcValue = attr_ulong(e, s, o, CKA_KEY_TYPE, &keyType) &&
-                              is_raw_pqc_key_type(keyType);
+    CK_ULONG objClass = (CK_ULONG)-1;
+    // 2026-09-08: is_raw_pqc_key_type alone missed CKO_SECRET_KEY (AES,
+    // generic-secret, ...) -- found the hard way, same trap, one scenario
+    // over: create.generate_key.generic_secret sets CKA_SENSITIVE=FALSE
+    // specifically to expose CKA_VALUE, and a freshly generated secret's
+    // leading byte is exactly as uniformly random as a PQC public key's. A
+    // secret key's CKA_VALUE is never ASN.1-framed for ANY key type when
+    // it's actually returned in the clear -- there is no legitimate case
+    // where classify() has anything real to check here, so this is CKA_CLASS-
+    // gated rather than another per-key-type entry to keep adding to.
+    const bool rawValue = (attr_ulong(e, s, o, CKA_KEY_TYPE, &keyType) &&
+                            is_raw_pqc_key_type(keyType)) ||
+                           (attr_ulong(e, s, o, CKA_CLASS, &objClass) &&
+                            objClass == CKO_SECRET_KEY);
     std::vector<std::string> present;
     for (CK_ATTRIBUTE_TYPE t : kProbe) {
         std::string an = attr_name(t);
@@ -665,11 +677,11 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
         // A big integer is not an encoding either: a 128-byte private exponent
         // whose first byte happens to be 0x30 classifies as an ASN.1 SEQUENCE,
         // which is the same random-byte trap as the check value above. Same
-        // trap again for CKA_VALUE on a raw fixed-length PQC key (see
-        // is_raw_pqc_key_type) — unlike a wrapped-key blob, there is no ASN.1
-        // framing to verify here at all.
+        // trap again for CKA_VALUE on a raw fixed-length PQC key or a secret
+        // key (see rawValue's own comment) — unlike a wrapped-key blob, there
+        // is no ASN.1 framing to verify here at all.
         if (!is_unstructured_attr(t) && !is_bignum_attr(t) &&
-            !(t == CKA_VALUE && rawPqcValue))
+            !(t == CKA_VALUE && rawValue))
             r.put(prefix + "." + an + ".enc", classify(buf.data(), a.ulValueLen));
         if (is_opaque_attr(t)) {
             // Value intentionally not compared — see is_opaque_attr.
