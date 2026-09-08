@@ -109,6 +109,20 @@ pub const CKO_CERTIFICATE: u32 = 0x0000_0001;
 pub const CKO_PUBLIC_KEY: u32 = 0x0000_0002;
 pub const CKO_PRIVATE_KEY: u32 = 0x0000_0003;
 pub const CKO_SECRET_KEY: u32 = 0x0000_0004;
+/// Non-storage ("Other Objects") classes. These describe the TOKEN rather
+/// than holding application data, are built in rather than created, and are
+/// refused by `validate_create_template` — see the "Creating objects" rule
+/// that only Storage Objects may be created. `CKO_HW_FEATURE` and
+/// `CKO_MECHANISM` are defined here so that refusal can name them; this
+/// engine materialises neither (it is software, and advertises its
+/// mechanisms through `C_GetMechanismList`, not as objects).
+pub const CKO_HW_FEATURE: u32 = 0x0000_0005;
+pub const CKO_MECHANISM: u32 = 0x0000_0007;
+/// Validation objects describe third-party validations the module conforms
+/// to and are "read only, token objects". This engine never materialises
+/// one: it holds no real FIPS 140-3 / Common Criteria validation, and
+/// self-reporting one it does not have would be a false claim.
+pub const CKO_VALIDATION: u32 = 0x0000_000a;
 /// PKCS#11 v3.2 §4.7 — trust objects bind trusted usages (`CKA_TRUST_*`
 /// below) to individual certificates, keyed by `CKA_ISSUER` +
 /// `CKA_SERIAL_NUMBER`. Read/write, general-purpose object storage — no
@@ -894,6 +908,16 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA512_HMAC,
     CKM_SHA3_256_HMAC,
     CKM_SHA3_512_HMAC,
+    // R2'a (2026-09-06) — these four were ALREADY implemented in
+    // crypto::handlers::sign_hmac and in the SP 800-108 PRF paths, but were
+    // missing from this list, from C_GetMechanismInfo and from the
+    // C_Sign/C_Verify dispatch arms, so no caller could reach them through the
+    // PKCS#11 surface: implemented-but-unadvertised, the exact drift a
+    // header-vs-engine mechanism ledger is meant to catch.
+    CKM_SHA512_224_HMAC,
+    CKM_SHA512_256_HMAC,
+    CKM_SHA3_224_HMAC,
+    CKM_SHA3_384_HMAC,
     CKM_RIPEMD160_HMAC,
     CKM_SHA256_HMAC_GENERAL,
     CKM_SHA384_HMAC_GENERAL,

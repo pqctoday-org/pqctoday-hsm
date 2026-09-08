@@ -4,6 +4,16 @@
 [gap-analysis-kmip-cacp-pkcs11-coverage-2026-08-30.md](gap-analysis-kmip-cacp-pkcs11-coverage-2026-08-30.md).
 Nothing here has been implemented, tested, or committed as code.
 
+> **Status correction, 2026-09-07 (H1), PKCS#11 side only.** The update
+> below is right that the engine work is complete, but its *location* is
+> stale: `fix/ws1-4-and-ws2-rust-gaps` and the worktree `.worktrees/ws1-4-and-ws2`
+> no longer exist. That work reached `main` through smaller branches
+> (`fix/ws1-crypto-bugs`, `fix/ws2-mls-hpke-full-hsm-routing`,
+> `fix/ws3-g1..g7`), so "target the worktree's code directly" should now read
+> "target `origin/main`", and the merge/push decision it describes is settled.
+> This note deliberately says nothing about the KMIP/CACP side of this plan,
+> which is being worked separately and was not re-verified here.
+
 ## Update, 2026-08-30 (same day, later) — engine work is now complete
 
 All PKCS#11 remediation work is committed locally on
