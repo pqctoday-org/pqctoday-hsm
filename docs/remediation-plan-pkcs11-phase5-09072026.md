@@ -317,11 +317,13 @@ That is a different target and a different threat model — the host already hol
 
 ---
 
-## 12. Landing
+## 12. Landing — superseded by §16, kept for history
 
-Unchanged: **PR #226 is reviewed and merged first**, then one PR for the phase-2/3/4/5 work on top. 41 commits unpushed. Nothing is pushed without explicit confirmation.
+~~Unchanged: **PR #226 is reviewed and merged first**, then one PR for the phase-2/3/4/5 work on top. 41 commits unpushed. Nothing is pushed without explicit confirmation.~~
 
-Before proposing a push: `bash scripts/local-gate.sh --cpp --javajce --openssl-provider`, with `AG_CONTAINER_ROOT=/ag/pqctoday-hsm/.worktrees/pkcs11-d2` set on **every** run. Note §4.2 — until that is confirmed, the JavaJCE step's green is weaker than it looks.
+~~Before proposing a push: `bash scripts/local-gate.sh --cpp --javajce --openssl-provider`, with `AG_CONTAINER_ROOT=/ag/pqctoday-hsm/.worktrees/pkcs11-d2` set on **every** run. Note §4.2 — until that is confirmed, the JavaJCE step's green is weaker than it looks.~~
+
+PR #226 merged to `main` 2026-09-08 (merge commit `8d5b12f3f`, another session's work). §16 is the current landing state.
 
 ---
 
@@ -396,3 +398,36 @@ Not a crypto defect. `classify()` in `p11_diff.cpp` sniffs a byte string's ASN.1
 **Fix:** added `is_raw_pqc_key_type(CK_ULONG)` (ML-KEM, ML-DSA, SLH-DSA, HSS, XMSS, XMSS-MT) and excluded `CKA_VALUE` from `classify()` for those key types in `record_attrs`, fetching `CKA_KEY_TYPE` up front to gate it. Structural fix, not a workaround — it doesn't depend on this run's random bytes, so it closes the whole class rather than papering over one instance. Verified: rebuilt, reran the 71-scenario suite in isolation — **0 uncovered divergences**, PASS.
 
 Not scoped to `record_bytes`'s other two call sites (operation outputs — signatures, KEM ciphertext, wrapped-key blobs) — those already choose `ByteView::SHAPE` vs `LEN` deliberately per-callsite based on whether framing is actually specified, and no divergence was observed there. If one surfaces, the same fix shape applies.
+
+---
+
+## 16. Gate/test debt found running the real thing, and the actual landing plan (2026-09-08)
+
+§15 was found by the first genuinely clean, isolated `--cpp` gate run this branch had seen. Running the gate for real (not the narrow scoped checks used during iteration) kept finding more of the same shape: real, pre-existing gaps that only a full run surfaces, none of them caused by this branch's own PKCS#11 changes. Fixed as found, each verified before moving to the next, none by re-running the whole ~100+ minute suite.
+
+### 16.1 What's DONE
+
+| Item | What | Verified |
+|---|---|---|
+| **Gate 2x-runtime bug** | 4 steps (`kmip cargo test`, `kmip local-only suites`, `rust engine cargo test`, `remoting parity`) each ran their full suite TWICE back-to-back purely to get a summary line derivable from one run — the concrete majority of "why does a one-file change take hours." Single-capture now. | Full core gate rerun, 12/13 passed (only the pre-flagged wasm gap), correct per-step pass counts |
+| **T24** (openssl-provider) | Stale hardcoded HSS/LMS signature size (1296, W8) — the engine's default LMOTS moved to W4/2352 on 2026-09-03 (HBS-1, `673a5a11`) and the test was never updated | Isolated repro (preamble + this one section, run directly against the built engine) |
+| **T25f** (openssl-provider) | Software reference relied on OpenSSL's native KBKDF, which cannot express "no counter" for FEEDBACK mode (same class of gap T36/T36b already had fixed for Double-Pipeline mode) — replaced with an independent Python reference, same pattern T36 uses | Isolated repro; T25/T25b/T25c re-verified not to regress |
+| **Rebase onto `origin/main`** | pkcs11-d2 was still based on `fix/pkcs11-v32-gaps-0906`, merged into `main` as PR #226 2026-09-08 (`8d5b12f3f`) by another session. Rebased clean: `merge-base(HEAD, origin/main) == origin/main`. 3 conflicts — 2 were pure `REPLAY_REPORT` timestamp collisions (took main's side, identical pass/fail data both sides), 1 was `scripts/local-gate.sh` itself: **main had independently found and partially fixed the same 2x-runtime bug**, from a different angle each time (verdict scope, a discarded failing-test name) — my single-run fix already subsumes both, merged the code from mine with the historical rationale from both sides | `bash -n` both scripts; grepped both fixes' markers present post-rebase |
+
+Two real fix commits on this branch (`fix(gate): stop running the same test suite twice per step`, `fix(test): two stale assertions in the openssl-provider harness`), each paired with its own regenerated-evidence chore commit.
+
+### 16.2 What's NOT done — the actual remaining gap list
+
+| Gap | Why it's open | Effort if picked up |
+|---|---|---|
+| **`wasm CACP smoke`** | Needs `scripts/build-kmip-wasm.sh`, which stages build output into the sibling `pqctoday-hub` repo — out of scope for a hsm-only branch, flagged since the first gate run this session | Cross-repo work, not started |
+| **`--javajce-remote`** | Needs a live `pqc-grpc` server + `/admin-certs` mTLS material up via `pqctoday-sandbox`'s `docker-compose.yml` — not part of §12's stated pre-push checklist (`--cpp --javajce --openssl-provider`) | Not attempted this branch |
+| **`--acvp-wasm`, `--release-xmss`, `--tls-interop`** | All opt-in, none part of §12's stated checklist, no code this branch touched plausibly affects any of them | Not attempted this branch |
+| **Push** | 56 commits, rebased clean, nothing pushed — standing rule, needs explicit go-ahead each time regardless of gate state | Zero remaining technical work; a decision, not a gap |
+| **PR** | Not opened | Blocked on push |
+
+### 16.3 Recommendation
+
+The three opt-in legs in the second row of §16.2 were never part of this branch's own landing checklist (§12) — closing them out is scope creep beyond what phase 5 or this gap-hunt actually needs, unless something in the branch's diff plausibly touches them (nothing does: no wasm/, JavaJCE-remote/, or TLS-hybrid changes on this branch). Treat them as **not gaps of this branch**, not as deferred work.
+
+That leaves two real open items: the wasm smoke gap (cross-repo, genuinely out of scope for a hsm-only push) and the push/PR decision itself. Both are exactly where the previous report left them — nothing has changed on the technical side since; what changed is this section exists now as a written record instead of only a chat reply.
