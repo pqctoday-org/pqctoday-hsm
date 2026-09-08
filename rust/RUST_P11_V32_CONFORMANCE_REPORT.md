@@ -4,7 +4,7 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `dc60fb798d80` · **Generated:** 2026-09-08T03:10:23.807Z — machine-written
+**Engine commit:** `e2eb7b77a4bf` · **Generated:** 2026-09-08T04:03:57.745Z — machine-written
 by this harness itself (`writeReport()` in `test_p11_conformance.js`) at the
 end of every run, not hand-edited.
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
