@@ -213,6 +213,16 @@ run_step_host() { # name, command(run on host) — for node/wasm steps
 # on the host (pure Python + network, nothing container-specific needed) and
 # first, before anything else: nothing downstream is trustworthy if the
 # vectors it's testing against might be self-generated or drifted.
+# Step 0 in spirit: the gate checks ITSELF before it checks anything else.
+# Four times on 2026-09-07 a guard turned out to be protecting a defect rather
+# than catching it, twice in this very file — a step that printed compiler
+# errors and then declared success, and a step that ran 1032 tests while
+# checking 10. Both are the same class: a verdict that cannot carry a failure.
+# `check_gate_steps_can_fail.py` re-runs that judgement mechanically, and is
+# sabotage-verified against both of those historical bugs.
+run_step_host "gate self-check (every step can fail)" \
+  "cd '$ROOT' && python3 scripts/check_gate_steps_can_fail.py"
+
 run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
   "cd $ROOT && python3 scripts/check_acvp_provenance.py"
 
@@ -243,9 +253,15 @@ run_step "kmip known-slow mechanisms (live progress)" \
   "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet --test acvp_roundtrip slh_dsa_sigver_and_siggen -- --nocapture 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed'; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; \
    true"
 
+# The verdict must cover the WHOLE run, not one binary. This step used to end
+# in `cargo test --test policy_op_layer`, which decided the step's exit status:
+# 1032 tests ran, 10 were checked, and a failure in the other 1022 passed
+# silently (the leading `grep … && exit 1` cannot fail under pipefail — see the
+# wasm step's note). Same awk verdict as `kmip cargo test` and `rust engine
+# cargo test`, which were always correct; this one was the odd step out.
 run_step "kmip local-only suites (--include-ignored)" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   RUST_MIN_STACK=134217728 cargo test --quiet --test policy_op_layer -- --include-ignored 2>&1 | grep -E 'test result'"
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
 # tee before each grep below: cargo's own "test X has been running for over
 # 60 seconds" liveness warning survives --quiet but was being discarded by
@@ -275,8 +291,15 @@ run_step "rust engine cargo test" \
 # them without re-measuring, and do not remove #[ignore] from v21b without
 # first re-measuring its cost; 326s per run would take this step from
 # ~seconds to 5+ minutes for every contributor.
+# `tee /dev/stderr` for the same reason steps 2 and 5 have it, and for one
+# more: without it this step reports "85 passed, 1 failed" and DISCARDS the
+# failing test's name, so a failure here tells you something broke but not
+# what. On 2026-09-07 that gap led to a real failure being explained away with
+# a stored assumption instead of diagnosed — the name was never printed, and
+# the run was not reproducible afterwards. A step that reports a failure it
+# cannot identify invites exactly that.
 run_step "remoting gRPC+REST services + three-transport parity" \
-  "cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+  "cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
    cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}' && \
    cd $AG_CONTAINER_ROOT/remoting && python3 scripts/check_coverage_ledger.py"
 

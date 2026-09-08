@@ -145,7 +145,21 @@ impl KmipPlayground {
 
         // Plane 2 — volatile object store.
         let store = Arc::new(MemoryStore::new());
-        let config = DepsConfig { rng_seed_mode, ..DepsConfig::default() };
+        // §6.1.32 Interop is refused by default — the clause says it "SHALL
+        // NOT be available in a production server". This bundle is NOT a
+        // production server: it is the in-browser playground and conformance
+        // replay, the same role `dispatcher_replay.py` plays natively, and
+        // the OASIS transcripts open with `Interop Begin`. Without this every
+        // transcript fails at message #0.
+        //
+        // Found 2026-09-07 by the hub's own corpus replay, immediately after
+        // the gate landed. The lesson generalises: gating an operation behind
+        // a CLI flag silently disables it for every consumer that has no CLI.
+        let config = DepsConfig {
+            rng_seed_mode,
+            interop_enabled: true,
+            ..DepsConfig::default()
+        };
         let deps = Deps::new(engine, store, sink, config).with_engine_session(session);
 
         Ok(KmipPlayground { deps, ring, demo_ca_counter: 0 })
