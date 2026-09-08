@@ -247,9 +247,14 @@ ensure_container
 # gate invocation for no benefit — it's already exercised, just not in this
 # step. --skip matches by substring, so this also skips nothing else by
 # accident: no other test name contains this string.
+# 2026-09-07: was two full runs of the same suite back to back (one to grep
+# for FAILED, one to compute the summary line) — silently doubling this
+# step's wall-clock cost every gate invocation for zero extra information.
+# Single run now, captured once and grepped twice.
 run_step "kmip cargo test" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | tee /dev/stderr | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+  "cd $AG_KMIP && OUT=\$(RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | tee /dev/stderr); \
+   echo \"\$OUT\" | grep -qE 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   echo \"\$OUT\" | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
 # Progress-logged separately (not folded into the step above) so a slow run
 # reads as "12 parameter sets in flight," not silence — --nocapture shows the
@@ -267,20 +272,28 @@ run_step "kmip known-slow mechanisms (live progress)" \
 # The verdict must cover the WHOLE run, not one binary. This step used to end
 # in `cargo test --test policy_op_layer`, which decided the step's exit status:
 # 1032 tests ran, 10 were checked, and a failure in the other 1022 passed
-# silently (the leading `grep … && exit 1` cannot fail under pipefail — see the
-# wasm step's note). Same awk verdict as `kmip cargo test` and `rust engine
-# cargo test`, which were always correct; this one was the odd step out.
+# silently. Separately (2026-09-07): the run also had NO tee at all — a
+# potentially long --include-ignored pass produced zero visible output until
+# it finished, indistinguishable from a hang — and used to run the whole
+# suite TWICE just to get both the fail-check and the aggregate. Single run
+# now: streamed live via tee, captured once, and the summary is the true
+# aggregate across everything --include-ignored actually ran (same fix shape
+# as `kmip cargo test` and `rust engine cargo test` below).
 run_step "kmip local-only suites (--include-ignored)" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+  "cd $AG_KMIP && OUT=\$(RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | tee /dev/stderr); \
+   echo \"\$OUT\" | grep -qE 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   echo \"\$OUT\" | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
-# tee before each grep below: cargo's own "test X has been running for over
-# 60 seconds" liveness warning survives --quiet but was being discarded by
-# the grep filtering (same fix as kmip cargo test above) — pass/fail still
-# comes from the grep/awk exit codes via dexec's pipefail, unchanged.
+# tee: cargo's own "test X has been running for over 60 seconds" liveness
+# warning survives --quiet but was being discarded by the grep filtering.
+# 2026-09-07: this was TWO full runs of the ~529-test suite back to back
+# (~900s each, ~30 min total) purely to get a summary line derivable from a
+# single run — the single biggest concrete cost found in the "why does one
+# small change take hours" complaint. One run now, captured once.
 run_step "rust engine cargo test" \
-  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | tee /dev/stderr | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+  "cd $AG_RUST && OUT=\$(RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | tee /dev/stderr); \
+   echo \"\$OUT\" | grep -qE 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   echo \"\$OUT\" | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
 
 # The remoting workspace (gRPC + REST PKCS#11 services) had NO gate step at
 # all before 2026-08-26 — its three-transport parity suite
@@ -307,12 +320,16 @@ run_step "rust engine cargo test" \
 # failing test's name, so a failure here tells you something broke but not
 # what. On 2026-09-07 that gap led to a real failure being explained away with
 # a stored assumption instead of diagnosed — the name was never printed, and
-# the run was not reproducible afterwards. A step that reports a failure it
-# cannot identify invites exactly that.
+# the run was not reproducible afterwards. Separately (2026-09-07, same day):
+# this was also two full runs of `cargo test` back to back, neither teed on
+# the second pass, purely to get an aggregate derivable from the first run's
+# own output. Single run now: streamed live via tee (preserving the failing
+# test's name) and captured once for both the fail-check and the aggregate.
 run_step "remoting gRPC+REST services + three-transport parity" \
-  "cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   cd $AG_CONTAINER_ROOT/remoting && cargo test --quiet 2>&1 | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}' && \
-   cd $AG_CONTAINER_ROOT/remoting && python3 scripts/check_coverage_ledger.py"
+  "cd $AG_CONTAINER_ROOT/remoting && OUT=\$(cargo test --quiet 2>&1 | tee /dev/stderr); \
+   echo \"\$OUT\" | grep -qE 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
+   echo \"\$OUT\" | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}' && \
+   python3 scripts/check_coverage_ledger.py"
 
 # Cheap, and it runs BEFORE the replay on purpose: if the corpus is not the
 # corpus we think it is, the replay figure below is measuring something else.
