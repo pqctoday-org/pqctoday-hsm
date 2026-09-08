@@ -93,23 +93,25 @@ covered separately by the 42-transcript vendored subset in `../conformance/pqc_c
 | Layer | Status | Evidence |
 |---|---|---|
 | TTLV wire-format codec | ✅ **all 14 KMIP 3.0 item types** | 1234/1234 OASIS messages round-trip byte-identical **against the types OASIS publishes** — `Identifier`/`Reference`/`Name Reference` implemented 2026-09-06 (**G1 closed**); nothing is downgraded anywhere in the measured path |
-| Dispatcher behaviour vs OASIS expectations | ✅ **97/97 actionable tests pass (100%)** | `conformance/REPLAY_REPORT.md` (regenerated per run) |
+| Dispatcher behaviour vs OASIS expectations | ✅ **99/99 actionable tests pass (100%)** | `conformance/REPLAY_REPORT.md` (regenerated per run) |
 | Op coverage | ✅ all ops used by the OASIS corpus | 0 `SKIP_OP` in the replay report |
 | Query honesty | ✅ **nothing advertised that isn't real** | both `ADVERTISED_UNIMPLEMENTED_*` lists in `ops/query.rs` are empty (Phase 6.1) |
 | Asynchronous processing | ✅ **real** — job store + background executor | Poll/Cancel/Process/Query Asynchronous Requests all genuinely implemented (Phase 4) |
 | Stateful hash-based signatures | ✅ **real** — HSS/LMS wired to the engine | KMIP `Sign` on an HSS/LMS key advances + persists the real leaf index (Phase 1.5) |
 | Split Key / Join Split Key (§6.1.12/§6.1.33) | ✅ **real** — restored 2026-08-18 after a 5-day whitelist-bug regression that failed every key while `Query` kept advertising it | §4.5 below |
 | Composite signature profiles (LAMPS draft-19 §6/§10.4) | ✅ **8/8 implemented** (`.37`/`.39`/`.40`/`.41`/`.45`/`.46`/`.48`/`.49`) | §4.6 below |
-| Baseline Server profile (§5.1.2, CSD02 draft) | ✅ **all 13 conditions met** (item 8 closed 2026-09-06 apart from §4.6 Certificate Attributes — see **G2**); the §6.2 conformance clause carries the accepted DSA deviation (**G4**) | §5.1.4, §8 below |
+| Baseline Server profile (§5.1.2, CSD02 draft) | ✅ **all 13 conditions met**, item 8 fully closed 2026-09-07 including §4.6 Certificate Attributes (**G2**); the §6.2 conformance clause carries the accepted, documented DSA storage-only deviation (**G4**) — advertised in `Query Profiles` (**G5**) | §5.1.4, §8 below |
 | Quantum Safe Authentication Suite (Profiles §3.3) | ✅ **all clauses met** — all 3 mandated hybrid groups, interop-proven vs OpenSSL 3.6 | §5.2 below |
 | Basic Authentication Suite (Profiles §3.1) | ✅ **met under `--tls-profile basic`**, and the conformance replay now runs under it. The DEFAULT `permissive` posture still does not satisfy §3.1.2 (**G3**) | §8 below |
 | Third-party interop (another vendor's 3.0 endpoint) | ⏸️ never run — **not currently possible** | No KMIP 3.0 implementation exists to test against; see §5.3 |
 
-**Bottom line**: the dispatcher matches the OASIS conformance transcripts on **all 97
+**Bottom line**: the dispatcher matches the OASIS conformance transcripts on **all 99
 non-deprecated tests**, and the wire bytes match CSD02 for all 14 item types — including
 `Identifier`/`Reference`/`Name Reference`, added 2026-09-06. Nothing is downgraded in the measured
-path. The remaining 5 transcripts are a deliberate, documented policy skip (DES / 3DES / classical
-DSA, `kmip/DEPRECATED.md`). There are zero other skip categories. Read §8 for the gaps still open.
+path. The remaining 3 transcripts are a deliberate, documented policy skip (DES / 3DES,
+`kmip/DEPRECATED.md`) — the two classical-DSA transcripts are no longer among them; DSA is now
+accepted for storage (**G4**) and both pass. There are zero other skip categories. Read §8 for the
+gaps still open.
 
 ## 0. Gap-remediation follow-up (v0.13.0, 2026-07-09)
 
@@ -296,13 +298,14 @@ every OASIS transcript against a freshly started server per test
 (hermetic; in-memory store), resolves `$NOW` / `$UNIQUE_IDENTIFIER_n` /
 auto-bound tag placeholders, and compares responses tree-wise.
 
-Current standing: **97 PASS / 0 FAIL / 5 SKIP_DEPRECATED** out of 102
+Current standing: **99 PASS / 0 FAIL / 3 SKIP_DEPRECATED** out of 102
 transcripts (102/102 actionable-or-honestly-skipped; every
 non-deprecated transcript passes). Per-test detail:
-`conformance/REPLAY_REPORT.md`. The 5 skips are DES/3DES/classical-DSA
-mechanisms declared out of scope for the `softhsmrustv3` backend
-(`kmip/DEPRECATED.md`): `BL-M-12-30`, `BL-M-13-30` (DSA), `SKFF-M-4-30`,
-`SKFF-M-8-30`, `SKFF-M-12-30` (3DES).
+`conformance/REPLAY_REPORT.md`. The 3 skips are DES/3DES mechanisms
+declared out of scope for the `softhsmrustv3` backend
+(`kmip/DEPRECATED.md`): `SKFF-M-4-30`, `SKFF-M-8-30`, `SKFF-M-12-30`
+(3DES). `BL-M-12-30`/`BL-M-13-30` (Transparent DSA key Register) are no
+longer skipped — DSA is now accepted for storage (**G4**), so both pass.
 
 ### 4.1 Vendor extension: ML-KEM shared secret (K10)
 
@@ -558,37 +561,44 @@ confirming it measures the real behavior rather than passing regardless.
 
 ### 5.1 Conformance claim — scope statement
 
-**The claim this subsystem makes: *"OASIS KMIP 3.0 CSD02 — 11 of the 13 Baseline Server profile
-conditions met, under a non-default TLS profile, with one declared deviation. A committee draft,
-not a ratified Standard."*** The 2026-09-06 re-audit (§8) found this section previously claimed
-all 13; items 4–8 were marked "Met — evidenced by codec conformance", which the §5.1.2 attribute
-list does not support. Every actionable transcript in
-the official `kmip-profiles-v3.0-csd02.zip` test suite passes (97/97 non-deprecated), the TTLV
-codec round-trips the full corpus byte-exactly, and item 10 — the last open condition — was
-closed on 2026-08-13 (§5.1.4).
+**The claim this subsystem makes: *"OASIS KMIP 3.0 CSD02 — all 13 Baseline Server profile
+conditions met, and the §6.2 conformance clause satisfied, under a non-default TLS profile
+(`--tls-profile basic`), with one documented, accepted deviation: DSA support is storage-only.
+A committee draft, not a ratified Standard."*** The 2026-09-06 re-audit (§8) found this section
+had previously claimed all 13 while items 4–8 were marked "Met — evidenced by codec conformance,"
+which the §5.1.2 attribute list did not actually support — that gap (item 8, **G2**) and the
+§6.2 clause's own two preconditions (**G4**, **G5**) are now genuinely closed, not merely
+re-asserted. Every actionable transcript in the official `kmip-profiles-v3.0-csd02.zip` test
+suite passes (99/99 non-deprecated), the TTLV codec round-trips the full corpus byte-exactly,
+and item 10 — the last open condition from the original audit — was closed on 2026-08-13
+(§5.1.4).
 
 One qualification attaches to that claim, stated in full below: the accepted
-deprecated-algorithm skips (§5.1.1). Two others have closed — the Quantum Safe
+deprecated-algorithm skips (§5.1.1) — narrower now than it was, since DSA Register is no
+longer among them (**G4**). Two others have closed — the Quantum Safe
 Authentication Suite on 2026-08-12 (§5.2) and Baseline item 10 on 2026-08-13 (§5.1.4).
 What remains is a deliberate policy choice about broken cryptography, not a gap.
 
 ### 5.1.1 Deprecated-algorithm deviation (accepted)
 
-5 of the 102 transcripts are skipped by policy, not by inability: `BL-M-12-30` and
-`BL-M-13-30` (classical DSA) and `SKFF-M-4-30` / `SKFF-M-8-30` / `SKFF-M-12-30` (3DES).
-DES, 3DES and DSA are deliberately absent from `KmipAlgorithm` — they are disallowed by
-NIST SP 800-131A r2 §1.2.1 and SP 800-186 §5.4, and this server refuses to implement
-broken cryptography to pass a conformance transcript. Registry and rationale:
-`kmip/DEPRECATED.md`. **This is an accepted, permanent deviation** (re-confirmed by the
-maintainer 2026-08-12), not a backlog item; the replay gate asserts exactly these 5 skips
-and fails on any sixth.
+3 of the 102 transcripts are skipped by policy, not by inability: `SKFF-M-4-30` /
+`SKFF-M-8-30` / `SKFF-M-12-30` (3DES). DES and 3DES are deliberately absent from
+`KmipAlgorithm` entirely — they are disallowed by NIST SP 800-131A r2 §1.2.1, and this
+server refuses to implement broken cryptography to pass a conformance transcript.
+Registry and rationale: `kmip/DEPRECATED.md`. **This is an accepted, permanent
+deviation**, not a backlog item; the replay gate asserts exactly these 3 skips and fails
+on any fourth. Classical DSA (SP 800-186 §5.4) is a related but separate decision (**G4**,
+§8): `KmipAlgorithm` DOES include it, and `BL-M-12-30`/`BL-M-13-30` (DSA Register) now
+pass — accepted for storage only, since neither engine in this repository implements
+DSA cryptography, so it was never a deprecated-*algorithm* skip in the same sense as
+DES/3DES so much as a missing capability the mandatory tests don't actually require.
 
 Baseline Server profile conditions (kmip-profiles-v3.0 §5.1.2), checked against the spec's
 own 13-item list rather than approximated:
 
 | §5.1.2 item | Requirement | Status |
 |---|---|---|
-| 1 | KMIP Server Implementation Conformance clauses | Met — the dispatcher/codec/op-handler layers below are the evidence. Note the §6.2 *profile conformance* clause additionally requires the §3.1 Basic Authentication Suite, which the default TLS posture does not satisfy (**G3**), and all Baseline mandatory test cases, two of which are refused by policy (**G4**) |
+| 1 | KMIP Server Implementation Conformance clauses | Met — the dispatcher/codec/op-handler layers below are the evidence. Note the §6.2 *profile conformance* clause additionally requires the §3.1 Basic Authentication Suite, which the default TLS posture does not satisfy (**G3** — `basic` is available, just not the default); all Baseline mandatory test cases now pass, including the two DSA Register cases, which pass on the accepted storage-only deviation (**G4**) |
 | 2–3 | System/User Objects: User, Group, Password Credential, Certificate | **Met** (Phase 6.1 correction — these were genuinely implemented all along via `CreateUser`/`CreateGroup`/`CreateCredential`; a stale Query-advertisement doc comment had mislabeled them "unimplemented" since before this server could actually create them) |
 | 4–7, 11–12 | Attribute/Message/Object/Operation data structures, message protocols | Met — evidenced by §2 codec conformance + §4 dispatcher conformance |
 | 8 | Object Attributes (the §5.1.2 list) | **Met (2026-09-07)** — the five §4.13 Counters, all 20 §4.35 Links, Rotate Latest (§4.58) and the scalar attributes landed 2026-09-06; all 26 §4.6 Certificate Attributes landed 2026-09-07. An unmodelled attribute in a request is now refused with `Unsupported Attribute` rather than discarded while the operation answers Success |
@@ -877,13 +887,13 @@ python3 conformance/check_report_fresh.py          # 3. committed report must ma
 KMIP_REPLAY_CORPUS=conformance/pqc_corpus python3 conformance/harness/dispatcher_replay.py
 ```
 
-Expected: `conformance/REPLAY_REPORT.md` reports 97 PASS / 0 FAIL / 5 SKIP_DEPRECATED / 102 total,
+Expected: `conformance/REPLAY_REPORT.md` reports 99 PASS / 0 FAIL / 3 SKIP_DEPRECATED / 102 total,
 with 0 in every other status category. Any `FAIL` or unexpected `SKIP_*` here is a real dispatcher
 regression — investigate before landing.
 
 **All three steps matter, and none of them is `cargo test`.** Step 1 exits non-zero on
-FAIL/ERROR; step 2 pins the exact numbers (`EXPECT_PASS = 97`, and every skip category
-other than the 5 deprecated must be zero) so a silent drop in coverage cannot pass as
+FAIL/ERROR; step 2 pins the exact numbers (`EXPECT_PASS = 99`, and every skip category
+other than the 3 deprecated must be zero) so a silent drop in coverage cannot pass as
 green; step 3 exists because a stale committed report once hid a 92→89 Locate regression.
 No Rust test reads the replay report — the gate is these Python scripts, run by
 `scripts/local-gate.sh` step 4 and by the `kmip-conformance` CI job. Running only
@@ -896,16 +906,20 @@ A full re-audit against CSD02 on 2026-09-06 found 11 gaps. They are listed here 
 a separate document, because the previous revision of this report overstated three claims and
 nothing in the report itself pointed at the shortfall.
 
-**Status (2026-09-07):** ten of the eleven are closed, one carries a named remainder, and G4
-remains the accepted DSA deviation. Each fix has a test that fails when the fix is removed.
+**Status (2026-09-07):** ten of the eleven are closed outright; G4 is a **documented, accepted
+deviation** rather than an implementation gap — the mandatory test cases pass on a server that
+holds and returns Transparent DSA key material but performs no discrete-log cryptography with it,
+because neither engine in this repository implements DSA (a withdrawn classical algorithm; this is
+a post-quantum server). Each fix has a test that fails when the fix is removed.
 
 The remainders recorded on 2026-09-06 have since been closed in a second wave: §4.6 Certificate
 Attributes and §4.14 Credential Type (G2), streaming for the signature and digest operations (G6),
-per-vendor keying of custom attributes at rest (G9), and the mechanical half of G11. **The one
-thing still open is a decision, not an implementation:** `Query Profiles` returns an empty list
-(G5), because which profiles to formally advertise is a claim about this server, and advertising on
-transcript evidence alone is exactly how the overstatement this section exists to correct came
-about. G11's remaining items are likewise decisions, listed in its row.
+per-vendor keying of custom attributes at rest (G9), and the mechanical half of G11. `Query
+Profiles` now advertises Baseline Server and only that (G5) — the decision this report previously
+left open, deliberately, until both of §6.2's real preconditions were true: every Baseline mandatory
+test case passing (which needed the G4 DSA decision above) and `basic` becoming the default TLS
+posture (G3) rather than a flag a caller has to remember. G11's remaining items are still decisions,
+listed in its row.
 
 Remediation plans: `kmip30-remediation-plan-09062026.md` and
 `kmip30-remaining-gaps-remediation-plan-09072026.md` (workspace root). Severity is the auditor's,
@@ -916,8 +930,8 @@ not a customer-impact rating.
 | ~~**G1**~~ | **CLOSED 2026-09-06** | **The codec now implements all 14 KMIP 3.0 item types.** `Identifier` (0x0C), `Reference` (0x0D), `Name Reference` (0x0E) — §11.25, encodings §10.1.2–§10.1.4 — were absent; the corpus uses them 1,576 / 47 / 2 times, and the harness, Python client and hub encoders all rewrote them to Text String. Now implemented end to end and **strict**: a Text String identifier is refused, not silently accepted. Byte vectors regenerated (953 changed, none in length); OASIS replay 97/0/5 and PQC corpus 42/42 re-run against the published types. Regenerating also exposed 4 vectors **stale since the CSD02 corpus refresh** — they stayed green because the test checks codec self-consistency, not agreement with the corpus XML. | `src/codec/value.rs`, `src/kmip30/wire.rs`, `conformance/harness/oasis_codec.py` |
 | ~~**G2**~~ | **CLOSED 2026-09-06** | Baseline §5.1.2 item 8. Links 9→20 (§4.35), the five §4.13 Counters (which genuinely increment on Certify/Encrypt/Decrypt/Sign/Signature Verify), Rotate Latest, Archive Date, NIST Security Category, OTP Counter, PKCS#12 Friendly Name. And the behaviour behind it: an unmodelled attribute in a request is now refused with `Unsupported Attribute` instead of being dropped while the operation answers Success. `Certify`'s own `CertificateLink` was one of the casualties — stored, then dropped on the way out. **Remainder closed 2026-09-07:** all 26 Certificate Attributes (§4.6) are implemented, derived by one OID-keyed extractor at Register / Certify / Re-certify. Table 62 drove the data model: "Multiple instances permitted: Yes" makes every component a list (a two-`OU` subject yields two attributes, which the previous `Option<String>` could not represent), and "SHALL always have a value: No" means an absent RDN emits NO attribute rather than an empty string. All 26 are read-only to clients, with a test that a client asserting one is refused. | `kmip30/attrs.rs`, `ops/get_attributes.rs`, `ops/helpers.rs` |
 | ~~**G3**~~ | **CLOSED 2026-09-06** | `--tls-profile basic` enforces §3.1.2 exactly (TLS 1.3, the two listed suites). TLS 1.3-only is a real limit, not an oversight: §3.1.2's TLS 1.2 list is static-RSA CBC, which rustls does not implement, and offering 1.2 with any other suite would breach the clause's closing SHALL NOT. The conformance replay now runs under it (`KMIP_TLS_PROFILE=basic`), so the Baseline claim holds on the wire. The DEFAULT is still `permissive` and still non-conformant — flipping it drops TLS 1.2 clients, which is a deployment decision. | `server/listener.rs` |
-| **G4** | HIGH (wording) | **§6.2 requires *all* Baseline mandatory test cases**; `BL-M-12-30`/`BL-M-13-30` (Register of Transparent DSA keys) are refused by policy. That remains an accepted deviation — but "all 13 conditions met" describes §5.1.2, not the §6.2 conformance clause. | `DEPRECATED.md` |
-| ~~**G5**~~ | **MOSTLY CLOSED 2026-09-06** | All 15 Query Functions answer; the nine missing ones previously failed the WHOLE message. Extension List/Map now disclose `PQCToday-SharedSecret` (0x540001), which a conformant client could otherwise find only by reading this repository. **Still open, and deliberately so:** `Query Profiles` returns an empty list while this report claims Baseline Server. Which profiles to advertise is a claim about this server, and the corpus passing is not evidence that a clause is met — each §5.x clause carries conditions beyond its test cases. Owner decision, not an implementation gap. | `ops/query.rs` |
+| ~~**G4**~~ | **CLOSED (ACCEPTED DEVIATION) 2026-09-07** | §6.2 requires *all* Baseline mandatory test cases to pass; `BL-M-12-30`/`BL-M-13-30` (Register of Transparent DSA keys) do, but only because DSA is accepted for **storage only** — `KmipAlgorithm::to_pkcs11_mech` returns `None` for every DSA operation, so this server can hold and return a Transparent DSA key but can neither generate one nor sign or verify with it. This is a deliberate limit, not an oversight: neither engine in this repository (Rust or C++) implements DSA at all, and DSA itself was withdrawn from FIPS 186-5 for signature generation — there is no case for building discrete-log cryptography into a post-quantum server. The mandatory test cases only Register and Get; they never Sign. | `kmip30/algos.rs` |
+| ~~**G5**~~ | **CLOSED 2026-09-07** | All 15 Query Functions answer; the nine missing ones previously failed the WHOLE message. Extension List/Map now disclose `PQCToday-SharedSecret` (0x540001), which a conformant client could otherwise find only by reading this repository. `Query Profiles` now advertises **Baseline Server, and only that** — held back until both of §6.2's real preconditions were true (see G4, G3), because advertising on transcript evidence alone, before the clause's actual conditions held, is exactly how this report's earlier overstatement happened. | `ops/query.rs` |
 | ~~**G6**~~ | **MOSTLY CLOSED 2026-09-06** | Multi-part `Decrypt` implemented — it previously returned **Success with wrong plaintext**, the only defect here that produced a wrong answer rather than an omission. **Remainder closed 2026-09-07:** Sign, Signature Verify, MAC, MAC Verify and Hash all carry the three streaming fields now. `Hash` keeps REAL incremental state (`compute_hash` is in-process sha2/sha3, never an engine call); the other four accumulate and run the existing one-shot at Final, mirroring the engine's own `C_SignUpdate` convention and the only correct shape for pure ML-DSA / SLH-DSA. Streams also record the operation that opened them, so one operation can no longer finalise another's state through the shared correlation-value namespace. Tested across the seam, never half against half. | `ops/decrypt.rs` |
 | ~~**G7**~~ | **CLOSED 2026-09-06** | Date and vendor-attribute filters implemented, then the fall-through made fail-closed — in that order, because the corpus's own Locate steps use those filters and passed only while they were being dropped. Also implements §6.1.34 date RANGES (two instances of a date attribute are an inclusive range); modelling them as equality failed `BL-M-4-30` and the replay caught it. | `ops/locate.rs` |
 | ~~**G8**~~ | **CLOSED 2026-09-06** | `DeactivationReason` corrected to §11.14's four values — it had mirrored `Revocation Reason Code`, so `0x02` meant "Key Compromise" where the spec says "Deactivation Date". Nothing branched on the names, so no stored data changed meaning. Plus §4.67 transition 6: a date can now move an object, so an Active key past its Protect Stop Date reports Deactivated instead of disagreeing with the Encrypt/Decrypt paths that already refused it. | `kmip30/ops.rs`, `store/lifecycle.rs` |
