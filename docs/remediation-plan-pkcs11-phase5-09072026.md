@@ -425,7 +425,14 @@ Asked to challenge this plan; two of the "Verified" claims above didn't hold up:
 
 Also, §16.3's "no code this branch touched" affects wasm/JavaJCE-remote/TLS-hybrid is imprecise: `wasm/Cargo.lock` **is** touched (the already-known `md-5` lockfile pull-in, mechanical, not a functional wasm change) — the substance of the claim holds, the wording didn't.
 
-Closed by re-running the core gate post-rebase — see 16.1.2.
+#### 16.1.2 Core gate re-run post-rebase (2026-09-08) — found a real bug, not just a formality
+
+Ran `bash scripts/local-gate.sh` (core, no flags) against the actual rebased tree. **15 steps now** (main added step 1 "gate self-check" — a regression guard verifying every step can genuinely fail, closing the exact `pipefail`/`grep && exit 1` class of gap 16.1.1 point 2 worried about in the abstract — plus the two OASIS steps already known from the rebase diff). Result: **13/15 passed**, 2 failed:
+
+- **`wasm CACP smoke`** — the same pre-flagged, out-of-scope gap (needs cross-repo `build-kmip-wasm.sh`).
+- **`cross-engine PKCS#11 differential harness`** — a REAL, new-to-this-run uncovered divergence: `create.generate_key.generic_secret`'s `gen.key.CKA_VALUE.enc` classified `DER_SEQUENCE_MALFORMED_LEN` (C++) vs `RAW_32` (Rust). Same exact bug class as §15 (leading-byte DER-sniff false positive on a raw random key), one key type over: `is_raw_pqc_key_type` covered the six PQC public/private key types but not `CKO_SECRET_KEY` (AES, generic-secret) — missed because this scenario deliberately sets `CKA_SENSITIVE=FALSE` to expose `CKA_VALUE`, which I hadn't checked when reasoning §15's fix was scoped correctly. Generalized the fix to gate on `CKA_CLASS == CKO_SECRET_KEY` instead of enumerating key types one at a time. Rebuilt, reran the 71-scenario suite in isolation: 0 uncovered, PASS.
+
+So the self-challenge in 16.1.1 was justified twice over: the stale numbers really were stale, and the actual re-run found a genuine, previously-invisible bug — not just a formality. Current, real, post-rebase, post-fix state: core gate 13/15 (wasm smoke is the only remaining, pre-flagged gap); the `local-gate.sh` merge itself (16.1.1 point 2) is now behavior-verified, not just syntax-checked, since 13 of its 15 steps ran for real and produced correct per-step pass counts.
 
 ### 16.2 What's NOT done — the actual remaining gap list
 
