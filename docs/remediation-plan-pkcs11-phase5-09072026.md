@@ -409,12 +409,23 @@ Not scoped to `record_bytes`'s other two call sites (operation outputs — signa
 
 | Item | What | Verified |
 |---|---|---|
-| **Gate 2x-runtime bug** | 4 steps (`kmip cargo test`, `kmip local-only suites`, `rust engine cargo test`, `remoting parity`) each ran their full suite TWICE back-to-back purely to get a summary line derivable from one run — the concrete majority of "why does a one-file change take hours." Single-capture now. | Full core gate rerun, 12/13 passed (only the pre-flagged wasm gap), correct per-step pass counts |
+| **Gate 2x-runtime bug** | 4 steps (`kmip cargo test`, `kmip local-only suites`, `rust engine cargo test`, `remoting parity`) each ran their full suite TWICE back-to-back purely to get a summary line derivable from one run — the concrete majority of "why does a one-file change take hours." Single-capture now. | Full core gate rerun, 12/13 passed (only the pre-flagged wasm gap), correct per-step pass counts — **pre-rebase, see 16.1.1** |
 | **T24** (openssl-provider) | Stale hardcoded HSS/LMS signature size (1296, W8) — the engine's default LMOTS moved to W4/2352 on 2026-09-03 (HBS-1, `673a5a11`) and the test was never updated | Isolated repro (preamble + this one section, run directly against the built engine) |
 | **T25f** (openssl-provider) | Software reference relied on OpenSSL's native KBKDF, which cannot express "no counter" for FEEDBACK mode (same class of gap T36/T36b already had fixed for Double-Pipeline mode) — replaced with an independent Python reference, same pattern T36 uses | Isolated repro; T25/T25b/T25c re-verified not to regress |
-| **Rebase onto `origin/main`** | pkcs11-d2 was still based on `fix/pkcs11-v32-gaps-0906`, merged into `main` as PR #226 2026-09-08 (`8d5b12f3f`) by another session. Rebased clean: `merge-base(HEAD, origin/main) == origin/main`. 3 conflicts — 2 were pure `REPLAY_REPORT` timestamp collisions (took main's side, identical pass/fail data both sides), 1 was `scripts/local-gate.sh` itself: **main had independently found and partially fixed the same 2x-runtime bug**, from a different angle each time (verdict scope, a discarded failing-test name) — my single-run fix already subsumes both, merged the code from mine with the historical rationale from both sides | `bash -n` both scripts; grepped both fixes' markers present post-rebase |
+| **Rebase onto `origin/main`** | pkcs11-d2 was still based on `fix/pkcs11-v32-gaps-0906`, merged into `main` as PR #226 2026-09-08 (`8d5b12f3f`) by another session. Rebased clean: `merge-base(HEAD, origin/main) == origin/main`. 3 conflicts — 2 were pure `REPLAY_REPORT` timestamp collisions (took main's side, identical pass/fail data both sides), 1 was `scripts/local-gate.sh` itself: **main had independently found and partially fixed the same 2x-runtime bug**, from a different angle each time (verdict scope, a discarded failing-test name) — my single-run fix already subsumes both, merged the code from mine with the historical rationale from both sides | `bash -n` both scripts, markers grepped present — **syntax only, see 16.1.1** |
 
 Two real fix commits on this branch (`fix(gate): stop running the same test suite twice per step`, `fix(test): two stale assertions in the openssl-provider harness`), each paired with its own regenerated-evidence chore commit.
+
+#### 16.1.1 Self-challenge (2026-09-08) — two of the rows above overstated their verification
+
+Asked to challenge this plan; two of the "Verified" claims above didn't hold up:
+
+1. **The gate pass counts are stale.** "12/13" and (in a chat reply, not this doc) "14/16" were measured *before* the rebase. Main's 33 commits added two gate steps this branch had never run against — `#4 OASIS corpus provenance` and `#5 OASIS byte vectors match that XML (drift guard, added 2026-09-07)` — both now present in the merged `scripts/local-gate.sh`. Presenting the pre-rebase count as current state is exactly the class of error T24/T25f themselves were: a check that stopped describing reality once something else moved, uncaught because nobody re-ran it. Same mistake, this time in this plan doc.
+2. **The `local-gate.sh` merge conflict resolution was reasoned through and syntax-checked, never executed.** `bash -n` only proves the script parses; it proves nothing about whether the hand-merged `kmip local-only suites` / `remoting parity` steps actually behave correctly. This codebase has already been bitten once by exactly this shape of failure (`pipefail` silently defeating a `grep ... && exit 1` guard) — a syntax-valid script can still be behaviorally wrong.
+
+Also, §16.3's "no code this branch touched" affects wasm/JavaJCE-remote/TLS-hybrid is imprecise: `wasm/Cargo.lock` **is** touched (the already-known `md-5` lockfile pull-in, mechanical, not a functional wasm change) — the substance of the claim holds, the wording didn't.
+
+Closed by re-running the core gate post-rebase — see 16.1.2.
 
 ### 16.2 What's NOT done — the actual remaining gap list
 
@@ -428,6 +439,6 @@ Two real fix commits on this branch (`fix(gate): stop running the same test suit
 
 ### 16.3 Recommendation
 
-The three opt-in legs in the second row of §16.2 were never part of this branch's own landing checklist (§12) — closing them out is scope creep beyond what phase 5 or this gap-hunt actually needs, unless something in the branch's diff plausibly touches them (nothing does: no wasm/, JavaJCE-remote/, or TLS-hybrid changes on this branch). Treat them as **not gaps of this branch**, not as deferred work.
+The three opt-in legs in the second row of §16.2 were never part of this branch's own landing checklist (§12) — closing them out is scope creep beyond what phase 5 or this gap-hunt actually needs, unless something in the branch's diff plausibly touches them. Checked against the real diff (`git diff --name-only origin/main...HEAD`), not recalled from memory: no JavaJCE-remote/ or TLS-hybrid (`secp384r1mlkem`/tls) files touched at all; the only `wasm/` touch is `wasm/Cargo.lock` (the already-known `md-5` lockfile pull-in — mechanical, not functional wasm code). Treat them as **not gaps of this branch**, not as deferred work.
 
 That leaves two real open items: the wasm smoke gap (cross-repo, genuinely out of scope for a hsm-only push) and the push/PR decision itself. Both are exactly where the previous report left them — nothing has changed on the technical side since; what changed is this section exists now as a written record instead of only a chat reply.
