@@ -39,9 +39,13 @@ GATE = Path(__file__).resolve().parent / "local-gate.sh"
 
 
 def steps(text: str) -> list[tuple[str, str]]:
-    """(step name, command string) for every run_step / run_step_host call."""
+    """(step name, command string) for every run_step* call — run_step,
+    run_step_host, and the parallel-lane variants added 2026-09-08
+    (run_step_bg, run_step_bg_host, run_step_bg_seq) all share the same
+    `func "name" \\n "command"` call shape, so one pattern on the function
+    name's common prefix covers all of them without enumerating each one."""
     out: list[tuple[str, str]] = []
-    for m in re.finditer(r'run_step(?:_host)?\s+"([^"]+)"\s*\\?\s*\n', text):
+    for m in re.finditer(r'run_step\w*\s+"([^"]+)"\s*\\?\s*\n', text):
         name = m.group(1)
         # the command is the next double-quoted string, which may span lines
         # via trailing backslashes
