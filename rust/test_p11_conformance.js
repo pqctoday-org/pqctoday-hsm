@@ -1528,16 +1528,93 @@ section('WP4a — CKO_TRUST object lifecycle (§4.7 Table 25)');
   const issuer = new TextEncoder().encode('CN=Test Root CA');
   const serial = new Uint8Array([0x01, 0x02, 0x03]);
 
+  // Footnote 2 makes CKA_HASH_OF_CERTIFICATE mandatory once the object
+  // vouches for something (anything other than UNKNOWN/NOT_TRUSTED), because
+  // that is when binding the assertion to the RIGHT certificate matters.
+  // This template originally omitted it and was accepted — the engine had no
+  // CKO_TRUST validation at all, so the test was asserting that an illegal
+  // template succeeds.
+  const certHash = new Uint8Array(20).fill(0xab); // SHA-1-sized, per the default
   const tpl = buildTpl([
     { type: CKA.CLASS, ulong: CKO_TRUST },
     { type: CKA_TRUST.ISSUER, bytes: issuer },
     { type: CKA_TRUST.SERIAL_NUMBER, bytes: serial },
+    { type: CKA_TRUST.HASH_OF_CERTIFICATE, bytes: certHash },
     { type: CKA_TRUST.TRUST_SERVER_AUTH, bytes: ulongBytes(CKT.TRUSTED) },
     { type: CKA_TRUST.TRUST_CODE_SIGNING, bytes: ulongBytes(CKT.TRUST_ANCHOR) },
   ]);
   const hp = alloc(4);
-  check('C_CreateObject(CKO_TRUST) → OK', w._C_CreateObject(hS, tpl, 5, hp), CKR.OK);
+  check('C_CreateObject(CKO_TRUST) → OK', w._C_CreateObject(hS, tpl, 6, hp), CKR.OK);
   const hTrust = readU32(hp);
+
+  // §4.7 mandatory-attribute rules. Footnote 1: CKA_ISSUER and
+  // CKA_SERIAL_NUMBER identify the certificate the object speaks about, so
+  // without them it asserts trust about nothing and can never be looked up.
+  {
+    const noIssuer = buildTpl([
+      { type: CKA.CLASS, ulong: CKO_TRUST },
+      { type: CKA_TRUST.SERIAL_NUMBER, bytes: serial },
+    ]);
+    check('C_CreateObject(CKO_TRUST) without CKA_ISSUER → TEMPLATE_INCOMPLETE',
+      w._C_CreateObject(hS, noIssuer, 2, alloc(4)), CKR.TEMPLATE_INCOMPLETE);
+
+    const noSerial = buildTpl([
+      { type: CKA.CLASS, ulong: CKO_TRUST },
+      { type: CKA_TRUST.ISSUER, bytes: issuer },
+    ]);
+    check('C_CreateObject(CKO_TRUST) without CKA_SERIAL_NUMBER → TEMPLATE_INCOMPLETE',
+      w._C_CreateObject(hS, noSerial, 2, alloc(4)), CKR.TEMPLATE_INCOMPLETE);
+
+    // Footnote 2: asserting CKT_TRUSTED with no certificate hash.
+    const noHash = buildTpl([
+      { type: CKA.CLASS, ulong: CKO_TRUST },
+      { type: CKA_TRUST.ISSUER, bytes: issuer },
+      { type: CKA_TRUST.SERIAL_NUMBER, bytes: serial },
+      { type: CKA_TRUST.TRUST_SERVER_AUTH, bytes: ulongBytes(CKT.TRUSTED) },
+    ]);
+    check('C_CreateObject(CKO_TRUST) asserting trust without a cert hash → TEMPLATE_INCOMPLETE',
+      w._C_CreateObject(hS, noHash, 4, alloc(4)), CKR.TEMPLATE_INCOMPLETE);
+
+    // ...but the same template is legal when it asserts NOTHING: footnote 2
+    // exempts an object whose every trust value is UNKNOWN or NOT_TRUSTED.
+    const benign = buildTpl([
+      { type: CKA.CLASS, ulong: CKO_TRUST },
+      { type: CKA_TRUST.ISSUER, bytes: issuer },
+      { type: CKA_TRUST.SERIAL_NUMBER, bytes: serial },
+      { type: CKA_TRUST.TRUST_SERVER_AUTH, bytes: ulongBytes(CKT.NOT_TRUSTED) },
+    ]);
+    check('C_CreateObject(CKO_TRUST) asserting only NOT_TRUSTED, no hash → OK',
+      w._C_CreateObject(hS, benign, 4, alloc(4)), CKR.OK);
+
+    // CK_TRUST is a closed set of five values.
+    const badValue = buildTpl([
+      { type: CKA.CLASS, ulong: CKO_TRUST },
+      { type: CKA_TRUST.ISSUER, bytes: issuer },
+      { type: CKA_TRUST.SERIAL_NUMBER, bytes: serial },
+      { type: CKA_TRUST.HASH_OF_CERTIFICATE, bytes: certHash },
+      { type: CKA_TRUST.TRUST_IPSEC_IKE, bytes: ulongBytes(99) },
+    ]);
+    check('C_CreateObject(CKO_TRUST) with an out-of-domain CK_TRUST → ATTRIBUTE_VALUE_INVALID',
+      w._C_CreateObject(hS, badValue, 5, alloc(4)), CKR.ATTRIBUTE_VALUE_INVALID);
+  }
+
+  // §4.7 prose defaults: CKA_PRIVATE defaults FALSE, and
+  // CKA_NAME_HASH_ALGORITHM "defaults to SHA-1 if not present" — neither was
+  // materialised before, so a caller could not tell which hash the
+  // certificate digest had been computed with.
+  {
+    const outPriv = buildTpl([{ type: CKA.PRIVATE, bytes: new Uint8Array(1) }]);
+    check('CKA_PRIVATE defaults to FALSE on a trust object',
+      w._C_GetAttributeValue(hS, hTrust, outPriv, 1), CKR.OK);
+    check('  value is CK_FALSE',
+      new Uint8Array(mem().buffer, readU32(outPriv + 4), 1)[0], 0);
+
+    const outAlg = buildTpl([{ type: CKA_TRUST.NAME_HASH_ALGORITHM, bytes: new Uint8Array(4) }]);
+    check('CKA_NAME_HASH_ALGORITHM defaults to SHA-1',
+      w._C_GetAttributeValue(hS, hTrust, outAlg, 1), CKR.OK);
+    check('  value is CKM_SHA_1 (0x220)',
+      new Uint32Array(mem().buffer, readU32(outAlg + 4), 1)[0], 0x220);
+  }
 
   // Round-trip CKA_ISSUER and a CK_TRUST-typed attribute byte-exact. Two
   // separate single-attribute queries (rather than packed into one) so the

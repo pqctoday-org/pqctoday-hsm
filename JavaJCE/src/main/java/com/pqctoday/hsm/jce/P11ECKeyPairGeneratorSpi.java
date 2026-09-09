@@ -39,6 +39,8 @@ final class P11ECKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
     private final P11Library lib;
 
     private P11EcCurves.Curve curve;
+    /** Set only by {@link P11ECExtraBitsGenParameterSpec}; see plan item X1. */
+    private boolean extraBits;
 
     P11ECKeyPairGeneratorSpi(P11Library lib) {
         this.lib = lib;
@@ -55,6 +57,9 @@ final class P11ECKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
                 "unsupported EC key size " + keysize + " (use 256, 384, or 521)");
         };
         curve = P11EcCurves.BY_NAME.get(name);
+        // A bare key size cannot express a generation method; re-initialising
+        // must not silently inherit the previous call's choice.
+        extraBits = false;
     }
 
     @Override
@@ -70,6 +75,10 @@ final class P11ECKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
                 "unsupported curve " + ecSpec.getName() + " — supported: " + P11EcCurves.BY_NAME.keySet());
         }
         curve = c;
+        // P11ECExtraBitsGenParameterSpec IS an ECGenParameterSpec, so the
+        // check above already accepted it and the curve was resolved the
+        // same way; the subclass only carries the generation method.
+        extraBits = params instanceof P11ECExtraBitsGenParameterSpec;
     }
 
     @Override
@@ -78,7 +87,8 @@ final class P11ECKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
             throw new ProviderException("EC KeyPairGenerator was not initialized with a curve "
                 + "(call initialize(new ECGenParameterSpec(\"secp256r1\"|\"secp384r1\"|\"secp521r1\")) first)");
         }
-        P11Debug.log("EC KeyPairGenerator.generateKeyPair() — token C_GenerateKeyPair, curve=" + curve.name());
+        P11Debug.log("EC KeyPairGenerator.generateKeyPair() — token C_GenerateKeyPair, curve="
+            + curve.name() + (extraBits ? ", FIPS 186-5 A.2.2 extra random bits" : ""));
         P11Library.Attr[] pubTmpl = {
             P11Library.attrLong(CKA_CLASS, CKO_PUBLIC_KEY),
             P11Library.attrLong(CKA_KEY_TYPE, CKK_EC),
@@ -103,7 +113,9 @@ final class P11ECKeyPairGeneratorSpi extends KeyPairGeneratorSpi {
             // refusing a key that was never authorized for derive.
             P11Library.attrBool(CKA_DERIVE, true),
         };
-        long[] handles = lib.generateKeyPair(CKM_EC_KEY_PAIR_GEN, pubTmpl, prvTmpl);
+        long[] handles = lib.generateKeyPair(
+            extraBits ? CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS : CKM_EC_KEY_PAIR_GEN,
+            pubTmpl, prvTmpl);
         byte[] spki = lib.getAttributeBytes(handles[0], CKA_PUBLIC_KEY_INFO);
         // CKA_EC_POINT is a DER OCTET STRING wrapping the raw uncompressed
         // point (same convention already proven in P11ECDHKeyAgreementSpi/

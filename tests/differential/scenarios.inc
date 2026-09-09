@@ -26,6 +26,7 @@ static CK_KEY_TYPE ktMont     = CKK_EC_MONTGOMERY;
 static CK_KEY_TYPE ktRsa      = CKK_RSA;
 static CK_KEY_TYPE ktMlDsa    = CKK_ML_DSA;
 static CK_KEY_TYPE ktMlKem    = CKK_ML_KEM;
+static CK_KEY_TYPE ktSlhDsa   = CKK_SLH_DSA;
 
 static CK_BYTE kLabel[] = "p11diff";
 static CK_BYTE kId[]    = {0xd1, 0xff};
@@ -113,6 +114,54 @@ add({"env.mechanism_info_aes_cbc", "env",
              {CKF_WRAP,"CKF_WRAP"},{CKF_UNWRAP,"CKF_UNWRAP"},{CKF_DERIVE,"CKF_DERIVE"},
          };
          for (const auto& f : fl_) r.put(std::string("flag.") + f.n, (mi.flags & f.v) ? "1" : "0");
+     }});
+
+add({"env.mechanism_info_all", "env",
+     "CK_MECHANISM_INFO for EVERY mechanism both engines advertise",
+     {}, true, false,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE) {
+         // 2026-09-07. env.mechanism_info_aes_cbc probed exactly ONE
+         // mechanism, so every other mechanism's key-size range and flags
+         // were never compared between the engines at all. That is not a
+         // glob excusing them — nothing observed them. It is how
+         // CKM_AES_CMAC came to advertise a 64-byte maximum key in Rust
+         // against C++'s 32 for weeks: no probe could see it.
+         //
+         // Scoped to the INTERSECTION on purpose. Iterating each engine's own
+         // list would emit one-sided observations for every mechanism the
+         // other lacks — dozens of them, all already adjudicated as a product
+         // decision by LEGAL-MECHANISM-SET — and drown the signal this
+         // scenario exists for: two engines that both claim a mechanism
+         // describing it differently.
+         std::vector<CK_MECHANISM_TYPE> shared;
+         for (CK_MECHANISM_TYPE m : gCpp.mechs)
+             if (gRust.mechs.count(m)) shared.push_back(m);
+         std::sort(shared.begin(), shared.end());
+         r.num("shared_mechanism_count", shared.size());
+         for (CK_MECHANISM_TYPE m : shared) {
+             const std::string mp = "mi." + mech_name(m);
+             CK_MECHANISM_INFO mi; memset(&mi, 0, sizeof mi);
+             CK_RV rv = e.fl->C_GetMechanismInfo(e.slot, m, &mi);
+             r.rv(mp, rv);
+             if (rv != CKR_OK) continue;
+             r.num(mp + ".min", mi.ulMinKeySize);
+             r.num(mp + ".max", mi.ulMaxKeySize);
+             // Flags are recorded BY NAME, not as one hex word: a bare
+             // number tells a reader which mechanism disagreed but not
+             // which capability, and the whole point is to make the
+             // difference legible without re-running anything.
+             static const NamePair mf[] = {
+                 {CKF_HW,"HW"},{CKF_ENCRYPT,"ENCRYPT"},{CKF_DECRYPT,"DECRYPT"},
+                 {CKF_DIGEST,"DIGEST"},{CKF_SIGN,"SIGN"},{CKF_SIGN_RECOVER,"SIGN_RECOVER"},
+                 {CKF_VERIFY,"VERIFY"},{CKF_VERIFY_RECOVER,"VERIFY_RECOVER"},
+                 {CKF_GENERATE,"GENERATE"},{CKF_GENERATE_KEY_PAIR,"GENERATE_KEY_PAIR"},
+                 {CKF_WRAP,"WRAP"},{CKF_UNWRAP,"UNWRAP"},{CKF_DERIVE,"DERIVE"},
+             };
+             std::string set;
+             for (const auto& f : mf)
+                 if (mi.flags & f.v) { if (!set.empty()) set += "|"; set += f.n; }
+             r.put(mp + ".flags", set.empty() ? "<none>" : set);
+         }
      }});
 
 add({"env.library_info", "env", "C_GetInfo — versions, identity strings, flags",
@@ -612,6 +661,104 @@ add({"create.unwrap.aes_kw", "create",
          record_attrs(e, r, "unwrapped", s, hu);
      }});
 
+add({"create.kem_template_enforcement", "create",
+     "CKA_ENCAPSULATE_TEMPLATE / CKA_DECAPSULATE_TEMPLATE restrict what a KEM key may produce",
+     {CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         // v3.2 defines both constants in the header and then never mentions
+         // them again — no table row, no prose. v3.3 supplies the rows AND
+         // SHALL-level enforcement (key_management_functions.md:762-771 and
+         // :868-878), adopted under the standing v3.2-baseline/v3.3-fills-gaps
+         // rule.
+         //
+         // THE NEGATIVE CASE IS THE TEST. An engine that stores the template
+         // and enforces nothing passes any positive-only check, and would leave
+         // a caller believing a restriction is active when it is not. Each
+         // template below therefore gets a request that SATISFIES it and one
+         // that VIOLATES it, and the violating call must be refused with the
+         // specific code the spec names.
+         if (!e.Encapsulate || !e.Decapsulate) { r.put("fn", "ABSENT"); return; }
+
+         // The restriction: encapsulated/decapsulated keys must be
+         // non-extractable. A caller asking for CKA_EXTRACTABLE=TRUE conflicts.
+         CK_ATTRIBUTE restrict_tmpl[] = {
+             ATTR(CKA_EXTRACTABLE, &bFalse, sizeof bFalse),
+         };
+         CK_ATTRIBUTE pub[] = {
+             ATTR(CKA_CLASS,                &clPublic,   sizeof clPublic),
+             ATTR(CKA_KEY_TYPE,             &ktMlKem,    sizeof ktMlKem),
+             ATTR(CKA_PARAMETER_SET,        &psMlKem768, sizeof psMlKem768),
+             ATTR(CKA_TOKEN,                &bFalse,     sizeof bFalse),
+             ATTR(CKA_ENCAPSULATE,          &bTrue,      sizeof bTrue),
+             ATTR(CKA_ENCAPSULATE_TEMPLATE, restrict_tmpl, sizeof restrict_tmpl),
+         };
+         CK_ATTRIBUTE priv[] = {
+             ATTR(CKA_CLASS,                &clPrivate,  sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,             &ktMlKem,    sizeof ktMlKem),
+             ATTR(CKA_PARAMETER_SET,        &psMlKem768, sizeof psMlKem768),
+             ATTR(CKA_TOKEN,                &bFalse,     sizeof bFalse),
+             ATTR(CKA_DECAPSULATE,          &bTrue,      sizeof bTrue),
+             ATTR(CKA_DECAPSULATE_TEMPLATE, restrict_tmpl, sizeof restrict_tmpl),
+         };
+         CK_MECHANISM km = { CKM_ML_KEM_KEY_PAIR_GEN, NULL_PTR, 0 };
+         CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+         CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 6, priv, 6, &hPub, &hPriv);
+         r.rv("keygen", rv);
+         if (rv != CKR_OK) return;
+
+         // Did the template survive creation at all? Recorded separately from
+         // enforcement: "stored but not enforced" and "not stored" are
+         // different failures and must not look alike in the report.
+         for (const auto& pr : { std::make_pair("pub", hPub), std::make_pair("priv", hPriv) }) {
+             CK_ATTRIBUTE q = { pr.first[0] == 'p' && pr.first[1] == 'u'
+                                    ? (CK_ATTRIBUTE_TYPE)CKA_ENCAPSULATE_TEMPLATE
+                                    : (CK_ATTRIBUTE_TYPE)CKA_DECAPSULATE_TEMPLATE,
+                                NULL_PTR, 0 };
+             r.rv(std::string(pr.first) + ".template_readback", e.fl->C_GetAttributeValue(s, pr.second, &q, 1));
+         }
+
+         CK_MECHANISM em = { CKM_ML_KEM, NULL_PTR, 0 };
+         CK_BYTE ct[4096]; CK_ULONG ctLen = sizeof ct;
+         CK_OBJECT_HANDLE hEnc = CK_INVALID_HANDLE;
+
+         // (a) SATISFIES the encapsulate template — must succeed.
+         CK_ATTRIBUTE ok_tmpl[] = {
+             ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+             ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+             ATTR(CKA_VALUE_LEN,   &len32,     sizeof len32),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_EXTRACTABLE, &bFalse,    sizeof bFalse),
+         };
+         ctLen = sizeof ct;
+         r.rv("encap.satisfies", e.Encapsulate(s, &em, hPub, ok_tmpl, 5, ct, &ctLen, &hEnc));
+
+         // (b) VIOLATES it — SHALL be CKR_KEY_HANDLE_INVALID.
+         CK_ATTRIBUTE bad_tmpl[] = {
+             ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+             ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+             ATTR(CKA_VALUE_LEN,   &len32,     sizeof len32),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+         };
+         CK_BYTE ct2[4096]; CK_ULONG ct2Len = sizeof ct2;
+         CK_OBJECT_HANDLE hEncBad = CK_INVALID_HANDLE;
+         r.rv("encap.violates", e.Encapsulate(s, &em, hPub, bad_tmpl, 5, ct2, &ct2Len, &hEncBad));
+
+         // (c)/(d) the same pair on the decapsulate side. Needs a real
+         // ciphertext, so it reuses (a)'s.
+         if (ctLen > 0) {
+             CK_OBJECT_HANDLE hDec = CK_INVALID_HANDLE;
+             r.rv("decap.satisfies",
+                  e.Decapsulate(s, &em, hPriv, ok_tmpl, 5, ct, ctLen, &hDec));
+             CK_OBJECT_HANDLE hDecBad = CK_INVALID_HANDLE;
+             // VIOLATES — SHALL be CKR_TEMPLATE_INCONSISTENT, a DIFFERENT code
+             // from the encapsulate side. The specification names them
+             // separately and so does this test.
+             r.rv("decap.violates",
+                  e.Decapsulate(s, &em, hPriv, bad_tmpl, 5, ct, ctLen, &hDecBad));
+         }
+     }});
+
 add({"create.encapsulate.ml_kem_768", "create",
      "C_EncapsulateKey / C_DecapsulateKey ML-KEM-768 — ciphertext shape and both key attribute sets",
      {CKM_ML_KEM_KEY_PAIR_GEN, CKM_ML_KEM}, true, true,
@@ -669,27 +816,89 @@ add({"create.encapsulate.ml_kem_768", "create",
      }});
 
 add({"create.encapsulate.ecdh_p256", "create",
-     "ECDH-as-KEM (§6.3.17) — the ciphertext MUST be the raw 65-byte ephemeral point (E1)",
+     "ECDH-as-KEM (§6.3.17) — the ciphertext MUST be the raw 65-byte ephemeral point (E1). "
+     "FIXED 2026-09-07 (phase-5 §6 comment sweep, incidentally): this scenario never set "
+     "CKA_ENCAPSULATE/CKA_DECAPSULATE, so encapsulateECDH/decapsulateECDH's own permission "
+     "check (SoftHSM_kem.cpp:931,1274) refused it on BOTH engines identically — the scenario "
+     "'passed' for 08+ months without ever exercising a successful ECDH-as-KEM round trip.",
      {CKM_EC_KEY_PAIR_GEN, CKM_ECDH1_DERIVE}, true, true,
      [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
          if (!e.Encapsulate || !e.Decapsulate) { r.put("fn", "ABSENT"); return; }
          CK_ATTRIBUTE pub[] = {
-             ATTR(CKA_CLASS,     &clPublic, sizeof clPublic),
-             ATTR(CKA_KEY_TYPE,  &ktEc,     sizeof ktEc),
-             ATTR(CKA_EC_PARAMS, kOidP256,  sizeof kOidP256),
-             ATTR(CKA_TOKEN,     &bFalse,   sizeof bFalse),
-             ATTR(CKA_DERIVE,    &bTrue,    sizeof bTrue),
+             ATTR(CKA_CLASS,       &clPublic, sizeof clPublic),
+             ATTR(CKA_KEY_TYPE,    &ktEc,     sizeof ktEc),
+             ATTR(CKA_EC_PARAMS,   kOidP256,  sizeof kOidP256),
+             ATTR(CKA_TOKEN,       &bFalse,   sizeof bFalse),
+             ATTR(CKA_DERIVE,      &bTrue,    sizeof bTrue),
+             ATTR(CKA_ENCAPSULATE, &bTrue,    sizeof bTrue),
          };
          CK_ATTRIBUTE priv[] = {
-             ATTR(CKA_CLASS,     &clPrivate, sizeof clPrivate),
-             ATTR(CKA_KEY_TYPE,  &ktEc,      sizeof ktEc),
-             ATTR(CKA_TOKEN,     &bFalse,    sizeof bFalse),
-             ATTR(CKA_DERIVE,    &bTrue,     sizeof bTrue),
-             ATTR(CKA_SENSITIVE, &bFalse,    sizeof bFalse),
+             ATTR(CKA_CLASS,       &clPrivate, sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,    &ktEc,      sizeof ktEc),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_DERIVE,      &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+             ATTR(CKA_DECAPSULATE, &bTrue,     sizeof bTrue),
          };
          CK_MECHANISM km = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
          CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
-         CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 5, &hPub, &hPriv);
+         CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 6, priv, 6, &hPub, &hPriv);
+         r.rv("keygen", rv);
+         if (rv != CKR_OK) return;
+         CK_ATTRIBUTE st[] = {
+             ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+             ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+         };
+         CK_ECDH1_DERIVE_PARAMS p; memset(&p, 0, sizeof p); p.kdf = CKD_NULL;
+         CK_MECHANISM em = { CKM_ECDH1_DERIVE, &p, sizeof p };
+         CK_BYTE ct[512]; CK_ULONG ctLen = sizeof ct;
+         CK_OBJECT_HANDLE hEnc = CK_INVALID_HANDLE, hDec = CK_INVALID_HANDLE;
+         rv = e.Encapsulate(s, &em, hPub, st, 5, ct, &ctLen, &hEnc);
+         r.rv("encapsulate", rv);
+         if (rv == CKR_OK) record_bytes(r, "ciphertext", ct, ctLen, ByteView::SHAPE);
+         record_attrs(e, r, "encap_key", s, hEnc);
+         if (rv != CKR_OK) return;
+         rv = e.Decapsulate(s, &em, hPriv, st, 5, ct, ctLen, &hDec);
+         r.rv("decapsulate", rv);
+         record_attrs(e, r, "decap_key", s, hDec);
+     }});
+
+add({"create.encapsulate.ecdh_secp256k1", "create",
+     "phase-5 §6 comment sweep — a stale ffi.rs comment claimed 'secp256k1-as-"
+     "KEM is not offered (the C++ mirror covers the NIST prime curves)'. "
+     "Measured before believing it: C++'s encapsulateECDH/decapsulateECDH "
+     "gate ONLY on key type (CKK_EC | CKK_EC_MONTGOMERY, SoftHSM_kem.cpp:941,"
+     "1284), never on curve OID, and CKM_EC_KEY_PAIR_GEN has no "
+     "CKR_CURVE_NOT_SUPPORTED path at all (SoftHSM_keygen.cpp; zero hits). "
+     "Rust's KEM arm hard-matches {P256,P384,P521,X25519,X448} and falls "
+     "through to CKR_CURVE_NOT_SUPPORTED for anything else (ffi.rs, the "
+     "match on `curve` in the CKM_ECDH1_DERIVE arm) — a real, untested "
+     "asymmetry the false comment was blaming on the wrong engine.",
+     {CKM_EC_KEY_PAIR_GEN, CKM_ECDH1_DERIVE}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         if (!e.Encapsulate || !e.Decapsulate) { r.put("fn", "ABSENT"); return; }
+         CK_ATTRIBUTE pub[] = {
+             ATTR(CKA_CLASS,       &clPublic, sizeof clPublic),
+             ATTR(CKA_KEY_TYPE,    &ktEc,     sizeof ktEc),
+             ATTR(CKA_EC_PARAMS,   kOidSecp256k1, sizeof kOidSecp256k1),
+             ATTR(CKA_TOKEN,       &bFalse,   sizeof bFalse),
+             ATTR(CKA_DERIVE,      &bTrue,    sizeof bTrue),
+             ATTR(CKA_ENCAPSULATE, &bTrue,    sizeof bTrue),
+         };
+         CK_ATTRIBUTE priv[] = {
+             ATTR(CKA_CLASS,       &clPrivate, sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,    &ktEc,      sizeof ktEc),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_DERIVE,      &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+             ATTR(CKA_DECAPSULATE, &bTrue,     sizeof bTrue),
+         };
+         CK_MECHANISM km = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+         CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+         CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 6, priv, 6, &hPub, &hPriv);
          r.rv("keygen", rv);
          if (rv != CKR_OK) return;
          CK_ATTRIBUTE st[] = {
@@ -1113,6 +1322,113 @@ add({"errors.create_profile_object", "errors",
          };
          CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
          r.rv("create_profile", e.fl->C_CreateObject(s, t, 3, &h));
+     }});
+
+add({"create.trust_object", "create",
+     "§4.7 Table 25: CKO_TRUST mandatory attributes, CK_TRUST domain and prose defaults",
+     {}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_OBJECT_CLASS cl = CKO_TRUST;
+         CK_BYTE issuer[] = "CN=Differential Root CA";
+         CK_BYTE serial[] = { 0x01, 0x02, 0x03 };
+         CK_BYTE certHash[20]; memset(certHash, 0xab, sizeof certHash);
+         CK_ULONG trusted = CKT_TRUSTED;
+         CK_ULONG notTrusted = CKT_NOT_TRUSTED;
+         CK_ULONG bogus = 99;
+
+         // Footnote 1 — CKA_ISSUER and CKA_SERIAL_NUMBER identify the
+         // certificate; without them the object asserts trust about nothing.
+         {
+             CK_ATTRIBUTE t[] = {
+                 ATTR(CKA_CLASS,         &cl,     sizeof cl),
+                 ATTR(CKA_SERIAL_NUMBER, serial,  sizeof serial),
+             };
+             CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+             r.rv("create_no_issuer", e.fl->C_CreateObject(s, t, 2, &h));
+         }
+         // Footnote 2 — asserting CKT_TRUSTED without saying WHICH cert.
+         {
+             CK_ATTRIBUTE t[] = {
+                 ATTR(CKA_CLASS,             &cl,      sizeof cl),
+                 ATTR(CKA_ISSUER,            issuer,   sizeof issuer),
+                 ATTR(CKA_SERIAL_NUMBER,     serial,   sizeof serial),
+                 ATTR(CKA_TRUST_SERVER_AUTH, &trusted, sizeof trusted),
+             };
+             CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+             r.rv("create_trusted_without_hash", e.fl->C_CreateObject(s, t, 4, &h));
+         }
+         // ...but an object that vouches for NOTHING is exempt.
+         {
+             CK_ATTRIBUTE t[] = {
+                 ATTR(CKA_CLASS,             &cl,         sizeof cl),
+                 ATTR(CKA_ISSUER,            issuer,      sizeof issuer),
+                 ATTR(CKA_SERIAL_NUMBER,     serial,      sizeof serial),
+                 ATTR(CKA_TRUST_SERVER_AUTH, &notTrusted, sizeof notTrusted),
+             };
+             CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+             r.rv("create_not_trusted_no_hash", e.fl->C_CreateObject(s, t, 4, &h));
+         }
+         // CK_TRUST is a closed set of five values.
+         {
+             CK_ATTRIBUTE t[] = {
+                 ATTR(CKA_CLASS,                &cl,      sizeof cl),
+                 ATTR(CKA_ISSUER,               issuer,   sizeof issuer),
+                 ATTR(CKA_SERIAL_NUMBER,        serial,   sizeof serial),
+                 ATTR(CKA_HASH_OF_CERTIFICATE,  certHash, sizeof certHash),
+                 ATTR(CKA_TRUST_IPSEC_IKE,      &bogus,   sizeof bogus),
+             };
+             CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+             r.rv("create_out_of_domain_trust_value", e.fl->C_CreateObject(s, t, 5, &h));
+         }
+         // The fully-specified form, then its attributes.
+         {
+             CK_ATTRIBUTE t[] = {
+                 ATTR(CKA_CLASS,               &cl,      sizeof cl),
+                 ATTR(CKA_ISSUER,              issuer,   sizeof issuer),
+                 ATTR(CKA_SERIAL_NUMBER,       serial,   sizeof serial),
+                 ATTR(CKA_HASH_OF_CERTIFICATE, certHash, sizeof certHash),
+                 ATTR(CKA_TRUST_SERVER_AUTH,   &trusted, sizeof trusted),
+             };
+             CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+             r.rv("create_full", e.fl->C_CreateObject(s, t, 5, &h));
+             if (h != CK_INVALID_HANDLE) record_attrs(e, r, "trust", s, h);
+         }
+     }});
+
+add({"create.non_storage_object_refused", "create",
+     "Phase-5 §4.1/§5.1 — CKO_PROFILE/VALIDATION/HW_FEATURE/MECHANISM are "
+     "non-storage per v3.3 object_classification.md and per the spec's own "
+     "'Creating objects' text ('only Storage Objects can be created on a "
+     "token'). Both engines already refuse all four with the SAME code "
+     "(SoftHSM_objects.cpp:1211-1215; ffi.rs:5581-5586, both dated "
+     "2026-09-07) — this scenario is the proof that was missing: the "
+     "AUDIT read the code, nothing had exercised C_CreateObject against "
+     "these four classes to confirm the two engines agree on the return "
+     "code rather than each independently reaching CKR_ATTRIBUTE_READ_ONLY "
+     "for a different reason.",
+     {}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         struct Case { const char* tag; CK_OBJECT_CLASS cls; };
+         const Case cases[] = {
+             {"profile",    CKO_PROFILE},
+             {"validation", CKO_VALIDATION},
+             {"hw_feature", CKO_HW_FEATURE},
+             {"mechanism",  CKO_MECHANISM},
+         };
+         for (const Case& c : cases) {
+             CK_OBJECT_CLASS cls = c.cls;
+             CK_ATTRIBUTE t[] = {
+                 ATTR(CKA_CLASS, &cls, sizeof cls),
+             };
+             CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+             r.rv(std::string(c.tag) + ".create", e.fl->C_CreateObject(s, t, 1, &h));
+             // Refusal is the required outcome; nothing should have been
+             // created regardless of which error code came back.
+             if (h != CK_INVALID_HANDLE) {
+                 r.put(std::string(c.tag) + ".unexpected_handle", "OBJECT_WAS_CREATED");
+                 e.fl->C_DestroyObject(s, h);
+             }
+         }
      }});
 
 add({"errors.unwrap_garbage", "errors",
@@ -1839,6 +2155,299 @@ add({"create.generate_key_pair.ml_dsa_all_params", "create",
                  ATTR(CKA_EXTRACTABLE,   &bTrue,     sizeof bTrue),
              };
              gen_pair(e, r, s, std::string("gen_") + p.name, CKM_ML_DSA_KEY_PAIR_GEN, pub, 5, priv, 7);
+         }
+     }});
+
+add({"sign.multipart_pqc", "sign",
+     "Multi-part sign (C_SignUpdate/C_SignFinal) for ML-DSA and SLH-DSA — the surface no scenario reached",
+     {CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         // 2026-09-07. Added BEFORE changing either engine, deliberately.
+         //
+         // Nothing here exercised multi-part signing for ANY PQC mechanism,
+         // and the two engines already disagree: C++ sets bAllowMultiPartOp
+         // = true for CKM_ML_DSA (SoftHSM_sign.cpp:1144, :2852) while Rust
+         // omits it from sign_mech_supports_multipart (ffi.rs:12716), so
+         // C_SignUpdate answers CKR_OPERATION_NOT_INITIALIZED. Under v3.2
+         // ("single-part operations only") C++ is the non-conformant one;
+         // under the v3.3 draft, which drops that restriction for ML-DSA
+         // but KEEPS it for SLH-DSA, Rust is.
+         //
+         // The scenario records the disagreement rather than asserting an
+         // outcome, so the fix is measured against an observation that
+         // already exists.
+         //
+         // SLH-DSA is included as the CONTROL: v3.3 keeps its single-part
+         // restriction, so it must refuse multi-part on both engines. A
+         // test that only covered ML-DSA could not tell "multi-part was
+         // enabled for the right mechanism" from "multi-part was enabled
+         // for everything".
+         struct Case { const char* tag; CK_MECHANISM_TYPE kg; CK_MECHANISM_TYPE sign;
+                       CK_KEY_TYPE kt; CK_ULONG ps; };
+         const Case cases[] = {
+             {"ml_dsa_65",  CKM_ML_DSA_KEY_PAIR_GEN,  CKM_ML_DSA,  ktMlDsa,  2},
+             {"slh_dsa",    CKM_SLH_DSA_KEY_PAIR_GEN, CKM_SLH_DSA, ktSlhDsa, psSlhSha2128s},
+         };
+         for (const Case& c : cases) {
+             if (!e.mechs.count(c.kg) || !e.mechs.count(c.sign)) {
+                 r.put(std::string(c.tag) + ".mech", "ABSENT");
+                 continue;
+             }
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&c.ps, sizeof c.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,        &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&c.ps, sizeof c.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+             };
+             CK_MECHANISM km = { c.kg, NULL_PTR, 0 };
+             CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+             CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 5, &hPub, &hPriv);
+             r.rv(std::string(c.tag) + ".keygen", rv);
+             if (rv != CKR_OK) continue;
+
+             CK_MECHANISM sm = { c.sign, NULL_PTR, 0 };
+             r.rv(std::string(c.tag) + ".sign_init", e.fl->C_SignInit(s, &sm, hPriv));
+
+             // Three chunks whose concatenation is kPlain32, so the result is
+             // directly comparable with a single-part signature over the same
+             // bytes. Splitting unevenly (10/10/12) would catch an engine that
+             // only handles equal-sized parts.
+             CK_RV u1 = e.fl->C_SignUpdate(s, (CK_BYTE_PTR)kPlain32,      10);
+             CK_RV u2 = e.fl->C_SignUpdate(s, (CK_BYTE_PTR)kPlain32 + 10, 10);
+             CK_RV u3 = e.fl->C_SignUpdate(s, (CK_BYTE_PTR)kPlain32 + 20, 12);
+             r.rv(std::string(c.tag) + ".update1", u1);
+             r.rv(std::string(c.tag) + ".update2", u2);
+             r.rv(std::string(c.tag) + ".update3", u3);
+
+             CK_BYTE sig[16384]; CK_ULONG slen = sizeof sig;
+             CK_RV fin = e.fl->C_SignFinal(s, sig, &slen);
+             r.rv(std::string(c.tag) + ".sign_final", fin);
+             if (fin != CKR_OK) {
+                 // Refusal is a legitimate outcome (and the required one for
+                 // SLH-DSA). Terminate cleanly so the next case starts fresh.
+                 CK_MECHANISM cancel = { c.sign, NULL_PTR, 0 };
+                 (void)cancel;
+                 continue;
+             }
+             r.num(std::string(c.tag) + ".sig_len", slen);
+
+             // The signature must VERIFY against the whole message. Recording
+             // only that C_SignFinal returned CKR_OK would pass on an engine
+             // that accumulated the parts wrongly — ML-DSA is randomised, so
+             // the bytes cannot be compared against a single-part signature
+             // directly; verification is the only sound check.
+             r.rv(std::string(c.tag) + ".verify_init", e.fl->C_VerifyInit(s, &sm, hPub));
+             r.rv(std::string(c.tag) + ".verify",
+                  e.fl->C_Verify(s, (CK_BYTE_PTR)kPlain32, sizeof kPlain32, sig, slen));
+         }
+     }});
+
+add({"verify.stateful_multipart_prebound", "sign",
+     "HSS/XMSS/XMSS-MT verify via C_VerifySignatureInit — phase-5 §1, added "
+     "BEFORE either engine changes. v3.2's own footnote for these rows "
+     "permits verification single-part, OR multi-part when the "
+     "C_VerifySignatureInit interface is used; v3.3 keeps the same clause. "
+     "Neither engine reaches a stateful verifier through that interface "
+     "today: C++'s AsymVerifyInit (which C_VerifySignatureInit reuses, not "
+     "StatefulVerifyInit) has no CKM_HSS/XMSS/XMSSMT case at all and falls "
+     "to its default CKR_MECHANISM_INVALID; Rust's C_VerifySignatureInit is "
+     "mechanism-agnostic at init, so what its Update/Final do is genuinely "
+     "unmeasured before this. Also records the CONTROL required to make "
+     "'multi-part ONLY via C_VerifySignatureInit' a testable claim: plain "
+     "C_VerifyInit followed by multi-part C_VerifyUpdate must be refused "
+     "regardless of what the pre-bound path does.",
+     {CKM_HSS_KEY_PAIR_GEN, CKM_HSS, CKM_XMSS_KEY_PAIR_GEN, CKM_XMSS,
+      CKM_XMSSMT_KEY_PAIR_GEN, CKM_XMSSMT},
+     true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         // Probes one already-signed key across four cases. Records only —
+         // this scenario measures what exists today, it does not assert an
+         // outcome (§4.1/§1.3: the fix, when it lands, is judged against
+         // these observations rather than the other way round).
+         auto probe = [&](const std::string& tag, CK_MECHANISM_TYPE verifyMech,
+                           CK_OBJECT_HANDLE hPub, CK_BYTE_PTR sig, CK_ULONG sigLen) {
+             if (!e.VerifySignatureInit || !e.VerifySignatureUpdate ||
+                 !e.VerifySignatureFinal || !e.VerifySignature || !e.SessionCancel) {
+                 // A build that does not export the pre-bound verify interface
+                 // at all is itself an observation, not a crash.
+                 r.put(tag + ".prebound_interface", "NOT_EXPORTED");
+                 return;
+             }
+             CK_MECHANISM vm = { verifyMech, NULL_PTR, 0 };
+
+             // Case A: pre-bound, three-chunk multi-part (10/10/12, matching
+             // sign.multipart_pqc's uneven split so an engine that only
+             // handles equal-sized parts would be caught).
+             CK_RV initA = e.VerifySignatureInit(s, &vm, hPub, sig, sigLen);
+             r.rv(tag + ".prebound_multipart.init", initA);
+             if (initA == CKR_OK) {
+                 r.rv(tag + ".prebound_multipart.update1",
+                      e.VerifySignatureUpdate(s, (CK_BYTE_PTR)kPlain32,      10));
+                 r.rv(tag + ".prebound_multipart.update2",
+                      e.VerifySignatureUpdate(s, (CK_BYTE_PTR)kPlain32 + 10, 10));
+                 r.rv(tag + ".prebound_multipart.update3",
+                      e.VerifySignatureUpdate(s, (CK_BYTE_PTR)kPlain32 + 20, 12));
+                 r.rv(tag + ".prebound_multipart.final", e.VerifySignatureFinal(s));
+             } else {
+                 e.SessionCancel(s, CKF_VERIFY);
+             }
+
+             // Case A-tamper: same shape, but the final chunk is corrupted.
+             // Only meaningful once Case A's init succeeds somewhere — the
+             // risk this guards is an assembler that accepts on a truncated
+             // or altered message, which a positive-only test cannot catch.
+             if (initA == CKR_OK) {
+                 CK_RV initT = e.VerifySignatureInit(s, &vm, hPub, sig, sigLen);
+                 r.rv(tag + ".prebound_multipart_tampered.init", initT);
+                 if (initT == CKR_OK) {
+                     CK_BYTE tampered[12];
+                     memcpy(tampered, kPlain32 + 20, sizeof tampered);
+                     tampered[0] ^= 0xFF;
+                     r.rv(tag + ".prebound_multipart_tampered.update1",
+                          e.VerifySignatureUpdate(s, (CK_BYTE_PTR)kPlain32,      10));
+                     r.rv(tag + ".prebound_multipart_tampered.update2",
+                          e.VerifySignatureUpdate(s, (CK_BYTE_PTR)kPlain32 + 10, 10));
+                     r.rv(tag + ".prebound_multipart_tampered.update3",
+                          e.VerifySignatureUpdate(s, tampered, sizeof tampered));
+                     r.rv(tag + ".prebound_multipart_tampered.final",
+                          e.VerifySignatureFinal(s));
+                 } else {
+                     e.SessionCancel(s, CKF_VERIFY);
+                 }
+             }
+
+             // Case B: pre-bound, single-part (the control for "does the new
+             // interface work at all", independent of multi-part).
+             CK_RV initB = e.VerifySignatureInit(s, &vm, hPub, sig, sigLen);
+             r.rv(tag + ".prebound_singlepart.init", initB);
+             if (initB == CKR_OK) {
+                 r.rv(tag + ".prebound_singlepart.verify",
+                      e.VerifySignature(s, (CK_BYTE_PTR)kPlain32, sizeof kPlain32));
+             } else {
+                 e.SessionCancel(s, CKF_VERIFY);
+             }
+
+             // Case C: the CONTROL required by the spec's own wording — plain
+             // C_VerifyInit must still refuse multi-part regardless of
+             // anything above. Without this, "multi-part is permitted ONLY
+             // via C_VerifySignatureInit" is a description, not a test.
+             CK_RV initC = e.fl->C_VerifyInit(s, &vm, hPub);
+             r.rv(tag + ".plain_verifyinit.init", initC);
+             if (initC == CKR_OK) {
+                 r.rv(tag + ".plain_verifyinit.update",
+                      e.fl->C_VerifyUpdate(s, (CK_BYTE_PTR)kPlain32, 32));
+                 e.SessionCancel(s, CKF_VERIFY);
+             }
+         };
+
+         // HSS — no CKA_PARAMETER_SET (§6.65: default LMOTS/LMS chosen by the
+         // engine), matching create.generate_key_pair.hss.
+         if (e.mechs.count(CKM_HSS_KEY_PAIR_GEN) && e.mechs.count(CKM_HSS)) {
+             CK_KEY_TYPE kt = 0x00000046UL; // CKK_HSS
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,    &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE, &kt,       sizeof kt),
+                 ATTR(CKA_TOKEN,    &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,   &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,    &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE, &kt,        sizeof kt),
+                 ATTR(CKA_TOKEN,    &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,     &bTrue,     sizeof bTrue),
+             };
+             Pair p = gen_pair(e, r, s, "hss.gen", CKM_HSS_KEY_PAIR_GEN, pub, 4, priv, 4);
+             if (p.priv != CK_INVALID_HANDLE) {
+                 CK_MECHANISM sm = { CKM_HSS, NULL_PTR, 0 };
+                 r.rv("hss.sign_init", e.fl->C_SignInit(s, &sm, p.priv));
+                 CK_BYTE sig[16384]; CK_ULONG slen = sizeof sig;
+                 CK_RV signRv = e.fl->C_Sign(s, (CK_BYTE_PTR)kPlain32, sizeof kPlain32, sig, &slen);
+                 r.rv("hss.sign", signRv);
+                 if (signRv == CKR_OK) {
+                     r.num("hss.sig_len", slen);
+                     probe("hss", CKM_HSS, p.pub, sig, slen);
+                 }
+             }
+         } else {
+             r.put("hss.mech", "ABSENT");
+         }
+
+         // XMSS
+         if (e.mechs.count(CKM_XMSS_KEY_PAIR_GEN) && e.mechs.count(CKM_XMSS)) {
+             CK_KEY_TYPE kt = 0x00000047UL; // CKK_XMSS
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      &kt,       sizeof kt),
+                 ATTR(CKA_PARAMETER_SET, &psXmssSha2_10_256, sizeof psXmssSha2_10_256),
+                 ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,        &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      &kt,        sizeof kt),
+                 ATTR(CKA_PARAMETER_SET, &psXmssSha2_10_256, sizeof psXmssSha2_10_256),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+             };
+             Pair p = gen_pair(e, r, s, "xmss.gen", CKM_XMSS_KEY_PAIR_GEN, pub, 5, priv, 5);
+             if (p.priv != CK_INVALID_HANDLE) {
+                 CK_MECHANISM sm = { CKM_XMSS, NULL_PTR, 0 };
+                 r.rv("xmss.sign_init", e.fl->C_SignInit(s, &sm, p.priv));
+                 CK_BYTE sig[16384]; CK_ULONG slen = sizeof sig;
+                 CK_RV signRv = e.fl->C_Sign(s, (CK_BYTE_PTR)kPlain32, sizeof kPlain32, sig, &slen);
+                 r.rv("xmss.sign", signRv);
+                 if (signRv == CKR_OK) {
+                     r.num("xmss.sig_len", slen);
+                     probe("xmss", CKM_XMSS, p.pub, sig, slen);
+                 }
+             }
+         } else {
+             r.put("xmss.mech", "ABSENT");
+         }
+
+         // XMSS^MT — the expensive one (~1 min/engine at height 20/2 layers,
+         // per create.generate_key_pair.xmssmt's own note). Included anyway,
+         // deliberately: skipping the costly case is exactly how a real
+         // divergence has gone unobserved before in this programme.
+         if (e.mechs.count(CKM_XMSSMT_KEY_PAIR_GEN) && e.mechs.count(CKM_XMSSMT)) {
+             CK_KEY_TYPE kt = 0x00000048UL; // CKK_XMSSMT
+             static CK_ULONG psXmssMtSha2_20_2_256 = 1; // CKP_XMSSMT_SHA2_20_2_256
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      &kt,       sizeof kt),
+                 ATTR(CKA_PARAMETER_SET, &psXmssMtSha2_20_2_256, sizeof psXmssMtSha2_20_2_256),
+                 ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,        &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      &kt,        sizeof kt),
+                 ATTR(CKA_PARAMETER_SET, &psXmssMtSha2_20_2_256, sizeof psXmssMtSha2_20_2_256),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+             };
+             Pair p = gen_pair(e, r, s, "xmssmt.gen", CKM_XMSSMT_KEY_PAIR_GEN, pub, 5, priv, 5);
+             if (p.priv != CK_INVALID_HANDLE) {
+                 CK_MECHANISM sm = { CKM_XMSSMT, NULL_PTR, 0 };
+                 r.rv("xmssmt.sign_init", e.fl->C_SignInit(s, &sm, p.priv));
+                 CK_BYTE sig[16384]; CK_ULONG slen = sizeof sig;
+                 CK_RV signRv = e.fl->C_Sign(s, (CK_BYTE_PTR)kPlain32, sizeof kPlain32, sig, &slen);
+                 r.rv("xmssmt.sign", signRv);
+                 if (signRv == CKR_OK) {
+                     r.num("xmssmt.sig_len", slen);
+                     probe("xmssmt", CKM_XMSSMT, p.pub, sig, slen);
+                 }
+             }
+         } else {
+             r.put("xmssmt.mech", "ABSENT");
          }
      }});
 

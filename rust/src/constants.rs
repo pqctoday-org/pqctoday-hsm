@@ -352,6 +352,28 @@ pub const CKA_UNWRAP_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0212;
 /// §5.18.3 — the derive counterpart. Defined for completeness of the array
 /// attribute family; not enforced by any derive path yet.
 pub const CKA_DERIVE_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_0213;
+/// KEM counterpart of [`CKA_WRAP_TEMPLATE`], on the ENCAPSULATING key:
+/// "an attribute set that will be compared against the attributes of the key
+/// to be encapsulated. If all attributes match according to the C_FindObject
+/// rules of attribute matching then the wrap will proceed … If any attribute
+/// conflict occurs … the function SHALL return CKR_KEY_HANDLE_INVALID."
+///
+/// v3.2 defines the constant and then never mentions it again — no table row,
+/// no prose. The semantics above are v3.3's
+/// (key_management_functions.md:762-771), adopted under the standing rule
+/// that v3.3 governs where v3.2 has a gap.
+///
+/// CKF_ARRAY_ATTRIBUTE is set per the same rule: v3.2 omits it though the
+/// three older *_TEMPLATE attributes above all carry it. See V33_CORRECTIONS
+/// in scripts/check_pkcs11_constants.py.
+pub const CKA_ENCAPSULATE_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_062a;
+/// KEM counterpart of [`CKA_UNWRAP_TEMPLATE`], on the DECAPSULATING key:
+/// "an attribute set that will be added to attributes of the key to be
+/// decapsulated. If the attributes do not conflict with the user supplied
+/// attribute template … the decapsulation will proceed … If any attribute
+/// conflict occurs … the function SHALL return CKR_TEMPLATE_INCONSISTENT."
+/// (v3.3 key_management_functions.md:868-878.)
+pub const CKA_DECAPSULATE_TEMPLATE: u32 = CKF_ARRAY_ATTRIBUTE | 0x0000_062b;
 
 // Private attribute: stores the parameter set on generated keys
 pub const CKA_PRIV_PARAM_SET: u32 = 0xFFFF_0001;
@@ -423,6 +445,17 @@ pub const CKA_EXPONENT_2: u32 = 0x0000_0127;
 pub const CKA_COEFFICIENT: u32 = 0x0000_0128;
 // SHA3-384 RSA composite sign mechanisms (§6.4).
 pub const CKM_SHA3_384_RSA_PKCS: u32 = 0x0000_0061;
+// §3 Wave 1b (2026-09-07) — the remaining RSA hash combos the C++ engine
+// advertises. Values from src/lib/pkcs11/pkcs11t.h (the normative header).
+pub const CKM_SHA224_RSA_PKCS: u32 = 0x0000_0046;
+pub const CKM_SHA224_RSA_PKCS_PSS: u32 = 0x0000_0047;
+pub const CKM_SHA3_224_RSA_PKCS: u32 = 0x0000_0066;
+pub const CKM_SHA3_224_RSA_PKCS_PSS: u32 = 0x0000_0067;
+pub const CKM_SHA3_256_RSA_PKCS: u32 = 0x0000_0060;
+pub const CKM_SHA3_256_RSA_PKCS_PSS: u32 = 0x0000_0063;
+pub const CKM_SHA3_512_RSA_PKCS: u32 = 0x0000_0062;
+pub const CKM_SHA3_512_RSA_PKCS_PSS: u32 = 0x0000_0065;
+pub const CKM_ECDSA_SHA224: u32 = 0x0000_1043;
 pub const CKM_SHA3_384_RSA_PKCS_PSS: u32 = 0x0000_0064;
 
 // PQC - KEM
@@ -452,6 +485,21 @@ pub const CKH_DETERMINISTIC_REQUIRED: u32 = 0x0000_0002;
 
 // SHA Digest
 pub const CKM_SHA_1: u32 = 0x0000_0220;
+// §3 Wave 2 (2026-09-07, decision D2) — the SHA-1 family, for parity with the
+// C++ engine. `sha1` was already a dependency. SHA-1 is collision-broken and
+// must not be chosen for new signatures; it is advertised because callers
+// still have to VERIFY existing artefacts, and because the two engines
+// disagreeing on their mechanism sets is its own hazard.
+pub const CKM_SHA_1_HMAC_GENERAL: u32 = 0x0000_0222;
+// §3 Wave 3 (2026-09-07, decision D2) — the MD5 family. Historical; present
+// for C++ parity and legacy verification only.
+pub const CKM_MD5: u32 = 0x0000_0210;
+pub const CKM_MD5_HMAC: u32 = 0x0000_0211;
+pub const CKM_MD5_HMAC_GENERAL: u32 = 0x0000_0212;
+pub const CKM_MD5_RSA_PKCS: u32 = 0x0000_0005;
+pub const CKM_SHA1_RSA_PKCS: u32 = 0x0000_0006;
+pub const CKM_SHA1_RSA_PKCS_PSS: u32 = 0x0000_000E;
+pub const CKM_ECDSA_SHA1: u32 = 0x0000_1042;
 pub const CKM_SHA_1_HMAC: u32 = 0x0000_0221;
 pub const CKM_SHA256: u32 = 0x0000_0250;
 pub const CKM_SHA224: u32 = 0x0000_0255;
@@ -484,6 +532,15 @@ pub const CKM_SHA384_HMAC_GENERAL: u32 = 0x0000_0262;
 pub const CKM_SHA512_HMAC_GENERAL: u32 = 0x0000_0272;
 pub const CKM_SHA3_256_HMAC_GENERAL: u32 = 0x0000_02B2;
 pub const CKM_SHA3_512_HMAC_GENERAL: u32 = 0x0000_02D2;
+// §3 Wave 1 (2026-09-07) — the remaining HMAC_GENERAL codepoints the C++
+// engine advertises. Values taken from src/lib/pkcs11/pkcs11t.h, which
+// CLAUDE.md makes the sole source of truth for CK* values.
+pub const CKM_SHA224_HMAC_GENERAL: u32 = 0x0000_0257;
+pub const CKM_SHA512_224_HMAC_GENERAL: u32 = 0x0000_004A;
+pub const CKM_SHA512_256_HMAC_GENERAL: u32 = 0x0000_004E;
+pub const CKM_SHA3_224_HMAC_GENERAL: u32 = 0x0000_02B7;
+pub const CKM_SHA3_384_HMAC_GENERAL: u32 = 0x0000_02C2;
+pub const CKM_RIPEMD160_HMAC_GENERAL: u32 = 0x0000_0242;
 
 // MGF identifiers (CK_RSA_PKCS_MGF_TYPE)
 pub const CKG_MGF1_SHA1: u32 = 0x0000_0001;
@@ -491,6 +548,10 @@ pub const CKG_MGF1_SHA256: u32 = 0x0000_0002;
 pub const CKG_MGF1_SHA384: u32 = 0x0000_0003;
 pub const CKG_MGF1_SHA512: u32 = 0x0000_0004;
 pub const CKG_MGF1_SHA3_384: u32 = 0x0000_0008;
+pub const CKG_MGF1_SHA224: u32 = 0x0000_0005;
+pub const CKG_MGF1_SHA3_224: u32 = 0x0000_0006;
+pub const CKG_MGF1_SHA3_256: u32 = 0x0000_0007;
+pub const CKG_MGF1_SHA3_512: u32 = 0x0000_0009;
 // OAEP source type
 pub const CKZ_DATA_SPECIFIED: u32 = 0x0000_0001;
 // SP 800-108 data-param types (beyond BYTE_ARRAY below)
@@ -540,12 +601,27 @@ pub const CKM_CONCATENATE_BASE_AND_KEY: u32 = 0x0000_0360;
 //             For appending ciphertext/pubkey/label in transcript-binding
 //             combiners (X-Wing, Chempat).
 pub const CKM_CONCATENATE_BASE_AND_DATA: u32 = 0x0000_0362;
+/// §3 Wave 4 (2026-09-07) — the mirror of the above: data first, then the
+/// base key's value. Value from src/lib/pkcs11/pkcs11t.h.
+pub const CKM_CONCATENATE_DATA_AND_BASE: u32 = 0x0000_0363;
+/// §3 Wave 4 — derive a key by ENCRYPTING caller-supplied data with the base
+/// key (v3.2 §6.27). Values from src/lib/pkcs11/pkcs11t.h.
+/// §3 Wave 4 — composite key transport (v3.2 §6.4.7): an ephemeral AES key
+/// wraps the target with AES-KWP, and RSA-OAEP wraps that AES key. The output
+/// is the RSA blob followed by the AES-KWP blob.
+pub const CKM_RSA_AES_KEY_WRAP: u32 = 0x0000_1054;
+pub const CKM_AES_ECB_ENCRYPT_DATA: u32 = 0x0000_1104;
+pub const CKM_AES_CBC_ENCRYPT_DATA: u32 = 0x0000_1105;
 
 // Digest key-derivation (PKCS#11 v3.2 §6.22 SHA-2 / §6.29 SHA-3): derived
 // value = SHAx(base.CKA_VALUE), left-truncated to CKA_VALUE_LEN when the
 // template supplies one. The hash-second-step for concat-then-hash combiners
 // (SSH, X-Wing). Values verified against pkcs11t.h.
 pub const CKM_SHA256_KEY_DERIVATION: u32 = 0x0000_0393;
+// §3 Wave 1b (2026-09-07) — values from src/lib/pkcs11/pkcs11t.h.
+pub const CKM_SHA512_224_KEY_DERIVATION: u32 = 0x0000_004B;
+pub const CKM_SHA512_256_KEY_DERIVATION: u32 = 0x0000_004F;
+pub const CKM_SHAKE_256_KEY_DERIVATION: u32 = 0x0000_039C;
 pub const CKM_SHA384_KEY_DERIVATION: u32 = 0x0000_0394;
 pub const CKM_SHA512_KEY_DERIVATION: u32 = 0x0000_0395;
 pub const CKM_SHA3_256_KEY_DERIVATION: u32 = 0x0000_0397;
@@ -847,6 +923,15 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_RSA_X_509,
     CKM_RSA_PKCS_PSS,
     CKM_SHA3_384_RSA_PKCS,
+    CKM_SHA224_RSA_PKCS,
+    CKM_SHA224_RSA_PKCS_PSS,
+    CKM_SHA3_224_RSA_PKCS,
+    CKM_SHA3_224_RSA_PKCS_PSS,
+    CKM_SHA3_256_RSA_PKCS,
+    CKM_SHA3_256_RSA_PKCS_PSS,
+    CKM_SHA3_512_RSA_PKCS,
+    CKM_SHA3_512_RSA_PKCS_PSS,
+    CKM_ECDSA_SHA224,
     CKM_SHA3_384_RSA_PKCS_PSS,
     // ML-KEM (FIPS 203)
     CKM_ML_KEM_KEY_PAIR_GEN,
@@ -902,6 +987,12 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA3_256,
     CKM_SHA3_512,
     CKM_RIPEMD160,
+    // §3 Wave 1 (2026-09-07) — digests the C++ engine has always advertised.
+    CKM_SHA224,
+    CKM_SHA512_224,
+    CKM_SHA512_256,
+    CKM_SHA3_224,
+    CKM_SHA3_384,
     // HMAC
     CKM_SHA256_HMAC,
     CKM_SHA384_HMAC,
@@ -924,6 +1015,28 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_SHA512_HMAC_GENERAL,
     CKM_SHA3_256_HMAC_GENERAL,
     CKM_SHA3_512_HMAC_GENERAL,
+    CKM_AES_CMAC,
+    CKM_CONCATENATE_DATA_AND_BASE,
+    CKM_RSA_AES_KEY_WRAP,
+    CKM_AES_ECB_ENCRYPT_DATA,
+    CKM_AES_CBC_ENCRYPT_DATA,
+    CKM_MD5,
+    CKM_MD5_HMAC,
+    CKM_MD5_HMAC_GENERAL,
+    CKM_MD5_RSA_PKCS,
+    CKM_SHA_1,
+    CKM_SHA_1_HMAC,
+    CKM_SHA_1_HMAC_GENERAL,
+    CKM_SHA1_RSA_PKCS,
+    CKM_SHA1_RSA_PKCS_PSS,
+    CKM_ECDSA_SHA1,
+    CKM_SHA224_HMAC,
+    CKM_SHA224_HMAC_GENERAL,
+    CKM_SHA512_224_HMAC_GENERAL,
+    CKM_SHA512_256_HMAC_GENERAL,
+    CKM_SHA3_224_HMAC_GENERAL,
+    CKM_SHA3_384_HMAC_GENERAL,
+    CKM_RIPEMD160_HMAC_GENERAL,
     // KMAC
     CKM_KMAC_128,
     CKM_KMAC_256,
@@ -985,6 +1098,9 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_CONCATENATE_BASE_AND_KEY,
     CKM_CONCATENATE_BASE_AND_DATA,
     CKM_SHA256_KEY_DERIVATION,
+    CKM_SHA512_224_KEY_DERIVATION,
+    CKM_SHA512_256_KEY_DERIVATION,
+    CKM_SHAKE_256_KEY_DERIVATION,
     CKM_SHA384_KEY_DERIVATION,
     CKM_SHA512_KEY_DERIVATION,
     CKM_SHA3_256_KEY_DERIVATION,

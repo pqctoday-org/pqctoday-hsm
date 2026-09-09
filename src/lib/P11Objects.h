@@ -91,6 +91,24 @@ protected:
 	bool initialized;
 };
 
+// C2 (2026-09-07) — PKCS#11 v3.2 §4.7. A trust object binds trusted usages to
+// one certificate, identified by CKA_ISSUER + CKA_SERIAL_NUMBER and confirmed
+// against CKA_HASH_OF_CERTIFICATE. The class existed in the header but had no
+// implementation here, so C_CreateObject refused it outright while the Rust
+// engine accepted one with any attributes at all.
+class P11TrustObj : public P11Object
+{
+public:
+	// Constructor
+	P11TrustObj();
+
+	// Add attributes
+	virtual bool init(OSObject *inobject);
+
+protected:
+	bool initialized;
+};
+
 class P11DataObj : public P11Object
 {
 public:

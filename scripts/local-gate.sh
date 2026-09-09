@@ -7,6 +7,7 @@
 # before you push — GitHub is not a test platform.
 #
 # What it runs (in order; each step must pass):
+#   0. PKCS#11 mechanism ledger (per-CKM_*, both engines, static)
 #   1. kmip  cargo test                       — ~600 unit + integration tests
 #   2. kmip  cargo test -- --include-ignored  — the local-only suites CI skips
 #                                               (op-layer policy conformance …)
@@ -360,6 +361,16 @@ run_step_host "gate self-check (every step can fail)" \
 run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
   "cd $ROOT && python3 scripts/check_acvp_provenance.py"
 
+# X2' (2026-09-07): per-CKM_* ledger of what each engine implements, checked
+# against the two source files that BUILD the advertised lists — no engine is
+# built or run, so it costs nothing and can sit up front with the other pure
+# checks. Catches a mechanism added to an engine with no recorded decision, a
+# ledger row that overstates, and a new header mechanism with no row at all —
+# none of which the differential harness can see, because exceptions.json's
+# LEGAL-MECHANISM-SET excuses `mech*` wholesale.
+run_step_host "PKCS#11 mechanism ledger (per-CKM_*, both engines)" \
+  "cd $ROOT && python3 scripts/check_pkcs11_mechanism_ledger.py"
+
 ensure_container
 
 # Everything below down to the "join_bg_group" call is one parallel batch:
@@ -440,6 +451,30 @@ run_step_bg "rust engine cargo test" \
 # them without re-measuring, and do not remove #[ignore] from v21b without
 # first re-measuring its cost; 326s per run would take this step from
 # ~seconds to 5+ minutes for every contributor.
+# Cheap, and it runs BEFORE the replay on purpose: if the corpus is not the
+# corpus we think it is, the replay figure below is measuring something else.
+run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
+  "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py"
+
+# Immediately after the corpus check, and for the same reason. That step asks
+# "is the XML the OASIS XML?"; this asks "are the committed byte vectors what
+# that XML actually produces?" — a question NOTHING asked before 2026-09-07.
+# The Rust suites (oasis_codec_roundtrip.rs and friends) round-trip the
+# committed .bin files through our own codec, so a vector that no longer
+# matches its source XML still round-trips perfectly; the corpus is never
+# consulted. Four vectors were stale from the 2026-07 CSD02 refresh until
+# 2026-09-06 and surfaced only by accident, when an unrelated regeneration
+# changed their size. --check writes nothing.
+run_step "OASIS byte vectors match the XML corpus (1358 vectors)" \
+  "cd $AG_KMIP && python3 conformance/harness/generate_byte_vectors.py --check"
+
+run_step "OASIS KMIP 3.0 replay (99 PASS / 0 FAIL / 3 SKIP_DEPRECATED)" \
+  "cd $AG_KMIP && cargo build --release --bin pqctoday-kmip --quiet && \
+   mkdir -p target/release && ln -sf \$(readlink -f \${CARGO_TARGET_DIR:-/cargo-target}/release/pqctoday-kmip) target/release/pqctoday-kmip 2>/dev/null; \
+   python3 conformance/harness/dispatcher_replay.py >/dev/null && \
+   python3 conformance/assert_replay_report.py && \
+   python3 conformance/check_report_fresh.py"
+
 # Migrated to nextest along with the steps above. The old `tee /dev/stderr`
 # existed because cargo test's own summary line ("85 passed, 1 failed")
 # discards the failing test's NAME — on 2026-09-07 that gap led to a real
@@ -682,6 +717,17 @@ if [[ $RUN_TLS_INTEROP == 1 ]]; then
      cargo test --quiet --test secp384r1mlkem1024_interop -- --ignored --test-threads=1"
 fi
 
+# Shared between --javajce and --javajce-remote (both grep a Surefire log for
+# this same aggregate line) — must be defined unconditionally, not inside
+# either block below: running --javajce-remote alone used to crash on
+# "AGG_PATTERN: unbound variable" under this script's own `set -u`, since it
+# was previously declared only inside the --javajce block and nothing ever
+# ran --javajce-remote by itself to notice. Found 2026-09-08 doing exactly
+# that for the first time. Definition itself (why this exact pattern, the
+# end-anchor, the dual INFO/ERROR prefix) is unchanged — see the comment that
+# used to sit directly above it, now above --javajce's own use of it below.
+AGG_PATTERN='^\[(INFO|ERROR)\][[:space:]]+Tests run: [0-9]+, Failures: 0, Errors: 0, Skipped: [0-9]+$'
+
 if [[ $RUN_JAVAJCE == 1 ]]; then
   # JDK 27's javax.crypto.KDF (JEP 478) and the JEP 527 TLS 1.3 hybrid-KEM
   # path this provider bridges to both need the JDK 27 RC — only
@@ -692,6 +738,43 @@ if [[ $RUN_JAVAJCE == 1 ]]; then
   STEP=$((STEP+1)); say "step $STEP: JavaJCE provider suite (mvn test, pqc-dev-sandbox)"
   ensure_sandbox_container
   GATE_DEST=/tmp/hsm-javajce-gate
+
+  # 2026-09-07 — build the engine this step tests AGAINST, from this commit.
+  #
+  # Until now the suite ran against $SANDBOX_CONTAINER's INSTALLED
+  # /usr/local/lib/softhsm/libsofthsmv3.so, which is baked into the image and
+  # was dated 2026-09-01. So the step validated today's Java against a native
+  # engine months old, and would keep reporting green as the two drifted
+  # apart. That is not hypothetical: it was found by adding a JavaJCE test for
+  # CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS, which the installed engine did not have —
+  # the Java was correct and the engine was stale, and no gate run could have
+  # told the difference. ANY engine-side change was invisible here.
+  #
+  # $SANDBOX_CONTAINER has cmake, g++ and OpenSSL 3.6.3, so it can build its
+  # own. It MUST build its own: its glibc differs from $RUST_CONTAINER's, so
+  # the --cpp step's binaries are not interchangeable (JavaJCE/README.md).
+  #
+  # The build directory is kept between runs so an unchanged tree relinks
+  # rather than rebuilds. Only the files CMake needs are copied — the two
+  # *.in templates are easy to forget and configure fails without them.
+  JCE_ENGINE_SRC=/tmp/hsm-jce-engine
+  say "  building the C++ engine inside $SANDBOX_CONTAINER (so the suite tests THIS commit's engine)"
+  if ! dexec_sandbox "mkdir -p $JCE_ENGINE_SRC" \
+     || ! tar czf - -C "$ROOT" CMakeLists.txt cmake src config.h.in.cmake softhsmv3.pc.in 2>/dev/null \
+          | docker exec -i "$SANDBOX_CONTAINER" tar xzf - -C "$JCE_ENGINE_SRC" 2>/dev/null \
+     || ! dexec_sandbox "cd $JCE_ENGINE_SRC && \
+            (test -f b/CMakeCache.txt || cmake -S . -B b -DCMAKE_BUILD_TYPE=Release \
+               -DWITH_RIPEMD160=ON -DOPENSSL_ROOT_DIR=/usr/local/ssl >/tmp/jce-engine-cmake.log 2>&1) && \
+            LD_LIBRARY_PATH=/usr/local/ssl/lib64 cmake --build b --target softhsmv3 -j\$(nproc) \
+              >/tmp/jce-engine-build.log 2>&1"; then
+    bad "JavaJCE provider suite — could not build the engine inside $SANDBOX_CONTAINER (see /tmp/jce-engine-cmake.log and /tmp/jce-engine-build.log inside it)"
+  fi
+  JCE_MODULE="$JCE_ENGINE_SRC/b/src/lib/libsofthsmv3.so"
+  # Fail loudly rather than silently falling back to the installed engine —
+  # a silent fallback is exactly the failure this whole block removes.
+  if ! dexec_sandbox "test -f $JCE_MODULE"; then
+    bad "JavaJCE provider suite — engine built but $JCE_MODULE is missing"
+  fi
   # Maven emits real ANSI color escapes even under `docker exec` with no
   # TTY (confirmed live — `[INFO]` is genuinely `\x1b[1;34mINFO\x1b[m]` on
   # the wire, not just a terminal-rendering artifact) — strip them before
@@ -717,12 +800,13 @@ if [[ $RUN_JAVAJCE == 1 ]]; then
   # ", Time elapsed: ... -- in <ClassName>" text, hence the `$` anchor;
   # it is tagged [ERROR] instead of [INFO] on a real failure, hence
   # matching either prefix (a genuine failure still won't match the
-  # "Failures: 0" requirement itself).
-  AGG_PATTERN='^\[(INFO|ERROR)\][[:space:]]+Tests run: [0-9]+, Failures: 0, Errors: 0, Skipped: [0-9]+$'
+  # "Failures: 0" requirement itself). Definition (shared with --javajce-remote
+  # below) lives above both blocks now — see that comment for why.
   if dexec_sandbox "rm -rf $GATE_DEST/JavaJCE && mkdir -p $GATE_DEST" \
      && docker cp "$JAVAJCE_DIR" "$SANDBOX_CONTAINER:$GATE_DEST/JavaJCE" >/dev/null 2>&1 \
      && dexec_sandbox "cd $GATE_DEST/JavaJCE && \
           export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
+          export PKCS11_MODULE=$JCE_MODULE && \
           mvn -o test 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' > /tmp/javajce-gate.log; \
           grep -E '$AGG_PATTERN' /tmp/javajce-gate.log >/dev/null"; then
     ok "JavaJCE provider suite ($(dexec_sandbox "grep -E '$AGG_PATTERN' /tmp/javajce-gate.log | tail -1"))"

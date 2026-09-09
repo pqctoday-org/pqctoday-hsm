@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU32;
 use wasm_bindgen::prelude::*;
 
 use crate::constants::*;
@@ -136,6 +135,18 @@ pub enum DigestCtx {
     Sha512(sha2::Sha512),
     Sha3_256(sha3::Sha3_256),
     Sha3_512(sha3::Sha3_512),
+    // §3 Wave 1 (2026-09-07) — the remaining FIPS 180-4 truncated variants
+    // and FIPS 202 sizes the C++ engine has always advertised. `sha2` and
+    // `sha3` already provided all five; only the plumbing was missing.
+    Sha224(sha2::Sha224),
+    Sha512_224(sha2::Sha512_224),
+    Sha512_256(sha2::Sha512_256),
+    Sha3_224(sha3::Sha3_224),
+    Sha3_384(sha3::Sha3_384),
+    /// §3 Wave 2 — SHA-1, for C++ parity (decision D2).
+    Sha1(sha1::Sha1),
+    /// §3 Wave 3 — MD5. Historical; verification of legacy artefacts.
+    Md5(md5::Md5),
     /// G11 — Keccak-256 (vendor CKM_KECCAK_256). Buffers data for single-shot finalize.
     Keccak256(Vec<u8>),
     /// Historical RIPEMD-160 (CKM_RIPEMD160) — 20-byte digest.
@@ -378,6 +389,16 @@ pub(crate) fn attr_is_attribute_array(attr_type: u32) -> bool {
         crate::constants::CKA_WRAP_TEMPLATE
             | crate::constants::CKA_UNWRAP_TEMPLATE
             | crate::constants::CKA_DERIVE_TEMPLATE
+            // 2026-09-07. The two KEM template attributes were missing here,
+            // which was a latent instance of the exact bug the S2 comment in
+            // absorb_template_attrs describes: without this, a caller setting
+            // CKA_ENCAPSULATE_TEMPLATE had the raw CK_ATTRIBUTE structs copied
+            // — pointers into caller memory that dangle the moment the call
+            // returns — instead of the flattened, self-contained blob. v3.3
+            // makes the deep copy an explicit MUST (key_objects.md:67-135);
+            // v3.2 left it unstated, which is why it was missed.
+            | crate::constants::CKA_ENCAPSULATE_TEMPLATE
+            | crate::constants::CKA_DECAPSULATE_TEMPLATE
     )
 }
 
@@ -689,10 +710,20 @@ macro_rules! slh_dsa_sign_internal {
         // it signs the bare message (no `(0‖|ctx|‖ctx)` framing). `addrnd =
         // None` ⇒ the deterministic variant (addrnd = PK.seed); `Some(r)` ⇒
         // the hedged variant with the explicit ACVP/OASIS `<Random>` addrnd.
-        match $addrnd {
+        //
+        // The `deprecated` allow is scoped to this expression, not the crate.
+        // Upstream marks the raw primitive "_test_only_" because it bypasses
+        // the ctx framing; bypassing that framing is exactly what this macro
+        // needs, and the comment above says why. 24 of the crate's warnings
+        // came from here and 12 from its verify twin — 36 of 43 — which is
+        // enough noise to bury a real one, and did: the CKM_ECDSA_SHA1 defect
+        // this session was found in the handful of warnings left over.
+        #[allow(deprecated)]
+        let __sig = match $addrnd {
             Some(r) => sk._test_only_raw_sign(&mut crate::crypto::handlers::FixedRng::new(r), $msg, true),
             None => sk._test_only_raw_sign(&mut rand::rngs::OsRng, $msg, false),
-        }
+        };
+        __sig
         .map_err(|_| CKR_FUNCTION_FAILED)
         .map(|s| Into::<Vec<u8>>::into(s))
     }};
@@ -730,7 +761,11 @@ macro_rules! slh_dsa_verify_internal {
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
         let sig: <$ps as fips205::traits::Verifier>::Signature =
             $sig_bytes.try_into().map_err(|_| CKR_SIGNATURE_INVALID)?;
-        match vk._test_only_raw_verify($msg, &sig) {
+        // Scoped allow — see the sign macro above for why the "_test_only_"
+        // primitive is the correct one here.
+        #[allow(deprecated)]
+        let __ok = vk._test_only_raw_verify($msg, &sig);
+        match __ok {
             Ok(true) => Ok(()),
             _ => Err(CKR_SIGNATURE_INVALID),
         }
@@ -1625,6 +1660,52 @@ pub fn sign_hmac(mech: u32, key_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32
         // but SHA-512/224, SHA-512/256, and SHA3-224/384 were still
         // missing). `hmac_prf`'s widening in `kmip/` needs a real engine
         // mechanism to dispatch to, not just a KMIP-layer match arm.
+        // §3 Wave 4 — AES-CMAC (SP 800-38B). Key length selects the AES
+        // variant, exactly as the SP 800-108 double-pipeline path already
+        // does with cmac::Cmac<aes::AesNNN>.
+        CKM_AES_CMAC => {
+            use cmac::Mac as _;
+            let tag = match key_bytes.len() {
+                16 => {
+                    let mut m = cmac::Cmac::<aes::Aes128>::new_from_slice(key_bytes)
+                        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    m.update(msg);
+                    m.finalize().into_bytes().to_vec()
+                }
+                24 => {
+                    let mut m = cmac::Cmac::<aes::Aes192>::new_from_slice(key_bytes)
+                        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    m.update(msg);
+                    m.finalize().into_bytes().to_vec()
+                }
+                32 => {
+                    let mut m = cmac::Cmac::<aes::Aes256>::new_from_slice(key_bytes)
+                        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    m.update(msg);
+                    m.finalize().into_bytes().to_vec()
+                }
+                _ => return Err(CKR_KEY_SIZE_RANGE),
+            };
+            Ok(tag)
+        }
+        CKM_MD5_HMAC => {
+            let mut mac = Hmac::<md5::Md5>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        CKM_SHA_1_HMAC => {
+            let mut mac = Hmac::<sha1::Sha1>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
+        CKM_SHA224_HMAC => {
+            let mut mac = Hmac::<sha2::Sha224>::new_from_slice(key_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            mac.update(msg);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
         CKM_SHA512_224_HMAC => {
             let mut mac = Hmac::<sha2::Sha512_224>::new_from_slice(key_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -1749,6 +1830,17 @@ pub fn sign_rsa(
         CKM_SHA512_RSA_PKCS_PSS => pss_sign!(sha2::Sha512, 64),
         CKM_SHA3_384_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_384),
         CKM_SHA3_384_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_384, 48),
+        CKM_MD5_RSA_PKCS => pkcs1v15_sign!(md5::Md5),
+        CKM_SHA1_RSA_PKCS => pkcs1v15_sign!(sha1::Sha1),
+        CKM_SHA1_RSA_PKCS_PSS => pss_sign!(sha1::Sha1, 20),
+        CKM_SHA224_RSA_PKCS => pkcs1v15_sign!(sha2::Sha224),
+        CKM_SHA224_RSA_PKCS_PSS => pss_sign!(sha2::Sha224, 28),
+        CKM_SHA3_224_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_224),
+        CKM_SHA3_224_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_224, 28),
+        CKM_SHA3_256_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_256),
+        CKM_SHA3_256_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_256, 32),
+        CKM_SHA3_512_RSA_PKCS => pkcs1v15_sign!(sha3::Sha3_512),
+        CKM_SHA3_512_RSA_PKCS_PSS => pss_sign!(sha3::Sha3_512, 64),
         // Raw PKCS#1 v1.5: the caller supplies the bytes (already a DigestInfo
         // or arbitrary data); no hashing, no DigestInfo prefix.
         CKM_RSA_PKCS => private_key
@@ -1808,6 +1900,8 @@ fn ecdsa_mech_digest(mech: u32, msg: &[u8]) -> Option<Vec<u8>> {
         CKM_ECDSA_SHA384 => sha2::Sha384::digest(msg).to_vec(),
         CKM_ECDSA_SHA512 => sha2::Sha512::digest(msg).to_vec(),
         CKM_ECDSA_SHA3_224 => sha3::Sha3_224::digest(msg).to_vec(),
+        CKM_ECDSA_SHA224 => sha2::Sha224::digest(msg).to_vec(),
+        CKM_ECDSA_SHA1 => sha1::Sha1::digest(msg).to_vec(),
         CKM_ECDSA_SHA3_256 => sha3::Sha3_256::digest(msg).to_vec(),
         CKM_ECDSA_SHA3_384 => sha3::Sha3_384::digest(msg).to_vec(),
         CKM_ECDSA_SHA3_512 => sha3::Sha3_512::digest(msg).to_vec(),
@@ -1896,6 +1990,10 @@ pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<
         // SHA-3 prehash variants on P-256 — manually hash then sign prehash bytes
         (CKM_ECDSA_SHA3_224, CURVE_P256)
         | (CKM_ECDSA_SHA3_224, 0)
+        | (CKM_ECDSA_SHA224, CURVE_P256)
+        | (CKM_ECDSA_SHA224, 0)
+        | (CKM_ECDSA_SHA1, CURVE_P256)
+        | (CKM_ECDSA_SHA1, 0)
         | (CKM_ECDSA_SHA3_256, CURVE_P256)
         | (CKM_ECDSA_SHA3_256, 0) => {
             use p256::ecdsa::signature::hazmat::PrehashSigner;
@@ -1904,6 +2002,8 @@ pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let hash: Vec<u8> = match mech {
                 CKM_ECDSA_SHA3_224 => sha3::Sha3_224::digest(msg).to_vec(),
+                CKM_ECDSA_SHA224 => sha2::Sha224::digest(msg).to_vec(),
+                CKM_ECDSA_SHA1 => sha1::Sha1::digest(msg).to_vec(),
                 _ => sha3::Sha3_256::digest(msg).to_vec(),
             };
             let sig: p256::ecdsa::Signature =
@@ -2175,6 +2275,17 @@ pub fn hmac_general_base(mech: u32) -> Option<(u32, usize)> {
         CKM_SHA512_HMAC_GENERAL => Some((CKM_SHA512_HMAC, 64)),
         CKM_SHA3_256_HMAC_GENERAL => Some((CKM_SHA3_256_HMAC, 32)),
         CKM_SHA3_512_HMAC_GENERAL => Some((CKM_SHA3_512_HMAC, 64)),
+        // §3 Wave 1 — the _GENERAL variants of every HMAC this engine can
+        // actually compute. The second element is the FULL mac length; the
+        // caller's CK_MAC_GENERAL_PARAMS truncates from there.
+        CKM_SHA224_HMAC_GENERAL => Some((CKM_SHA224_HMAC, 28)),
+        CKM_SHA512_224_HMAC_GENERAL => Some((CKM_SHA512_224_HMAC, 28)),
+        CKM_SHA512_256_HMAC_GENERAL => Some((CKM_SHA512_256_HMAC, 32)),
+        CKM_SHA3_224_HMAC_GENERAL => Some((CKM_SHA3_224_HMAC, 28)),
+        CKM_SHA3_384_HMAC_GENERAL => Some((CKM_SHA3_384_HMAC, 48)),
+        CKM_RIPEMD160_HMAC_GENERAL => Some((CKM_RIPEMD160_HMAC, 20)),
+        CKM_SHA_1_HMAC_GENERAL => Some((CKM_SHA_1_HMAC, 20)),
+        CKM_MD5_HMAC_GENERAL => Some((CKM_MD5_HMAC, 16)),
         _ => None,
     }
 }
@@ -2335,20 +2446,27 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
             hss_sig_len(levels, lms_param, lmots_param)
         }
         CKM_SHA256_HMAC | CKM_SHA3_256_HMAC => 32,
-        CKM_RIPEMD160_HMAC => 20,
+        CKM_RIPEMD160_HMAC | CKM_SHA_1_HMAC => 20,
+        CKM_MD5_HMAC => 16,
+        CKM_AES_CMAC => 16,
         CKM_SHA384_HMAC => 48,
         CKM_SHA512_HMAC | CKM_SHA3_512_HMAC => 64,
         // R2'a — the four variants sign_hmac already implemented but which
         // nothing could reach: truncated SHA-2 (FIPS 180-4 §6.6/§6.7) and the
         // two remaining SHA-3 sizes (FIPS 202).
-        CKM_SHA512_224_HMAC | CKM_SHA3_224_HMAC => 28,
+        CKM_SHA224_HMAC | CKM_SHA512_224_HMAC | CKM_SHA3_224_HMAC => 28,
         CKM_SHA512_256_HMAC => 32,
         CKM_SHA3_384_HMAC => 48,
         CKM_KMAC_128 => 32,
         CKM_KMAC_256 => 64,
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
-        | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS => 512,
+        | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS
+        | CKM_SHA1_RSA_PKCS | CKM_SHA1_RSA_PKCS_PSS | CKM_MD5_RSA_PKCS
+        | CKM_SHA224_RSA_PKCS | CKM_SHA224_RSA_PKCS_PSS
+        | CKM_SHA3_224_RSA_PKCS | CKM_SHA3_224_RSA_PKCS_PSS
+        | CKM_SHA3_256_RSA_PKCS | CKM_SHA3_256_RSA_PKCS_PSS
+        | CKM_SHA3_512_RSA_PKCS | CKM_SHA3_512_RSA_PKCS_PSS => 512,
         // ECDSA — sig size = 2 × ⌈curve_bits / 8⌉, independent of the hash. The
         // SHA384/SHA3-384 hardcode for 96-byte was wrong for P-256 + P-521 etc;
         // size MUST come from the key's curve, not the hash mechanism.
@@ -2359,6 +2477,8 @@ pub fn get_sig_len(mech: u32, hkey: u32) -> u32 {
         | CKM_ECDSA_SHA384
         | CKM_ECDSA_SHA512
         | CKM_ECDSA_SHA3_224
+        | CKM_ECDSA_SHA224
+        | CKM_ECDSA_SHA1
         | CKM_ECDSA_SHA3_256
         | CKM_ECDSA_SHA3_384
         | CKM_ECDSA_SHA3_512 => match ps {
@@ -2798,7 +2918,18 @@ pub fn verify_rsa(
         CKM_SHA384_RSA_PKCS_PSS => pss_verify!(sha2::Sha384, 48),
         CKM_SHA512_RSA_PKCS_PSS => pss_verify!(sha2::Sha512, 64),
         CKM_SHA3_384_RSA_PKCS => pkcs1v15_verify!(sha3::Sha3_384),
+        CKM_MD5_RSA_PKCS => pkcs1v15_verify!(md5::Md5),
+        CKM_SHA1_RSA_PKCS => pkcs1v15_verify!(sha1::Sha1),
+        CKM_SHA224_RSA_PKCS => pkcs1v15_verify!(sha2::Sha224),
+        CKM_SHA3_224_RSA_PKCS => pkcs1v15_verify!(sha3::Sha3_224),
+        CKM_SHA3_256_RSA_PKCS => pkcs1v15_verify!(sha3::Sha3_256),
+        CKM_SHA3_512_RSA_PKCS => pkcs1v15_verify!(sha3::Sha3_512),
         CKM_SHA3_384_RSA_PKCS_PSS => pss_verify!(sha3::Sha3_384, 48),
+        CKM_SHA1_RSA_PKCS_PSS => pss_verify!(sha1::Sha1, 20),
+        CKM_SHA224_RSA_PKCS_PSS => pss_verify!(sha2::Sha224, 28),
+        CKM_SHA3_224_RSA_PKCS_PSS => pss_verify!(sha3::Sha3_224, 28),
+        CKM_SHA3_256_RSA_PKCS_PSS => pss_verify!(sha3::Sha3_256, 32),
+        CKM_SHA3_512_RSA_PKCS_PSS => pss_verify!(sha3::Sha3_512, 64),
         // Raw PKCS#1 v1.5 — caller-supplied bytes, no DigestInfo prefix.
         CKM_RSA_PKCS => public_key
             .verify(rsa::Pkcs1v15Sign::new_unprefixed(), msg, sig_bytes)
@@ -2916,6 +3047,10 @@ pub fn verify_ecdsa(
         // SHA-3 prehash variants on P-256 — manually hash then verify prehash bytes
         (CKM_ECDSA_SHA3_224, CURVE_P256)
         | (CKM_ECDSA_SHA3_224, 0)
+        | (CKM_ECDSA_SHA224, CURVE_P256)
+        | (CKM_ECDSA_SHA224, 0)
+        | (CKM_ECDSA_SHA1, CURVE_P256)
+        | (CKM_ECDSA_SHA1, 0)
         | (CKM_ECDSA_SHA3_256, CURVE_P256)
         | (CKM_ECDSA_SHA3_256, 0) => {
             use p256::ecdsa::signature::hazmat::PrehashVerifier;
@@ -2926,6 +3061,8 @@ pub fn verify_ecdsa(
                 p256::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
             let hash: Vec<u8> = match mech {
                 CKM_ECDSA_SHA3_224 => sha3::Sha3_224::digest(msg).to_vec(),
+                CKM_ECDSA_SHA224 => sha2::Sha224::digest(msg).to_vec(),
+                CKM_ECDSA_SHA1 => sha1::Sha1::digest(msg).to_vec(),
                 _ => sha3::Sha3_256::digest(msg).to_vec(),
             };
             vk.verify_prehash(&hash, &sig)
@@ -3168,6 +3305,58 @@ pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X1 follow-up (2026-09-07). Every hash-composite ECDSA mechanism this
+    /// engine advertises must ROUND-TRIP: the digest `sign_ecdsa` computes
+    /// and the digest `verify_ecdsa` computes have to be the same one.
+    ///
+    /// This is not hypothetical. `CKM_ECDSA_SHA1` on P-256 is dispatched by
+    /// a shared outer match arm that hands several mechanisms to one
+    /// prehash block, and the INNER hash match in the verify half was
+    /// missing its `CKM_ECDSA_SHA1` case — so signing hashed with SHA-1
+    /// while verifying hashed with SHA3-256 (the arm's `_` fallback), and no
+    /// signature the engine produced under that mechanism could ever be
+    /// verified by it. The mechanism was advertised the whole time.
+    ///
+    /// Testing only that sign succeeds, or only that verify accepts some
+    /// externally-produced signature, would have missed it. Test the seam.
+    #[test]
+    fn every_advertised_ecdsa_p256_mechanism_round_trips() {
+        // A fixed, non-trivial P-256 scalar (1..=32), so the test is
+        // deterministic and does not depend on key generation.
+        let sk_bytes: Vec<u8> = (1u8..=32).collect();
+        let sk = p256::ecdsa::SigningKey::from_slice(&sk_bytes).unwrap();
+        let pk_bytes = sk
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+
+        let msg = b"round-trip the seam, not the halves";
+
+        // Exactly the mechanisms whose outer dispatch arm names P-256.
+        for mech in [
+            CKM_ECDSA_SHA256,
+            CKM_ECDSA_SHA224,
+            CKM_ECDSA_SHA1,
+            CKM_ECDSA_SHA3_224,
+            CKM_ECDSA_SHA3_256,
+        ] {
+            let sig = sign_ecdsa(mech, CURVE_P256, &sk_bytes, msg)
+                .unwrap_or_else(|e| panic!("sign_ecdsa(0x{mech:x}) failed: 0x{e:x}"));
+            verify_ecdsa(mech, CURVE_P256, &pk_bytes, msg, &sig)
+                .unwrap_or_else(|e| panic!("verify_ecdsa(0x{mech:x}) rejected the engine's own signature: 0x{e:x}"));
+
+            // And the mechanism must actually bind the hash: a signature
+            // over a different message must NOT verify. Without this, a
+            // sign/verify pair that both hashed with the WRONG-but-same
+            // algorithm would still pass the check above.
+            assert!(
+                verify_ecdsa(mech, CURVE_P256, &pk_bytes, b"a different message", &sig).is_err(),
+                "0x{mech:x}: signature verified against the wrong message"
+            );
+        }
+    }
 
     fn decode_hex(s: &str) -> Vec<u8> {
         (0..s.len())
@@ -3422,6 +3611,105 @@ e3c0089c5f7f3293edcbef738e9f39431610289a6e67fececc85a4b0897e8672c6454613a4b7fc0b
             decode_hex(S6_MODULUS_HEX),
             vec![0x01, 0x00, 0x01],
         )
+    }
+
+    /// §3 Waves 2-3 — the legacy RSA combos (SHA-1, MD5) round-trip, reject
+    /// tampering, and produce DISTINCT PKCS#1 v1.5 signatures from each other
+    /// and from a modern hash, which is what proves each is bound to its own
+    /// DigestInfo prefix rather than silently sharing one.
+    #[test]
+    fn wave2_3_legacy_rsa_combos_round_trip() {
+        use crate::constants::*;
+        let (sk, n, e) = s6_key();
+        let mut sigs: Vec<(u32, Vec<u8>)> = Vec::new();
+        for (mech, name) in [
+            (CKM_SHA1_RSA_PKCS, "SHA-1 v1.5"),
+            (CKM_MD5_RSA_PKCS, "MD5 v1.5"),
+            (CKM_SHA256_RSA_PKCS, "SHA-256 v1.5 (control)"),
+        ] {
+            let sig = sign_rsa(mech, &sk, S6_MSG, None)
+                .unwrap_or_else(|rv| panic!("{name}: sign failed 0x{rv:x}"));
+            assert_eq!(verify_rsa(mech, &n, &e, S6_MSG, &sig, None), Ok(()), "{name}: verify");
+            let mut bad = sig.clone();
+            *bad.last_mut().unwrap() ^= 0x01;
+            assert_ne!(verify_rsa(mech, &n, &e, S6_MSG, &bad, None), Ok(()), "{name}: tampered");
+            sigs.push((mech, sig));
+        }
+        for i in 0..sigs.len() {
+            for j in (i + 1)..sigs.len() {
+                assert_ne!(
+                    sigs[i].1, sigs[j].1,
+                    "0x{:x} and 0x{:x} share a signature — wrong DigestInfo prefix",
+                    sigs[i].0, sigs[j].0
+                );
+            }
+        }
+        // SHA-1 PSS is signature-scheme-distinct, not just prefix-distinct.
+        let pss = sign_rsa(CKM_SHA1_RSA_PKCS_PSS, &sk, S6_MSG, None).expect("SHA-1 PSS sign");
+        assert_eq!(
+            verify_rsa(CKM_SHA1_RSA_PKCS_PSS, &n, &e, S6_MSG, &pss, None),
+            Ok(()),
+            "SHA-1 PSS must verify"
+        );
+    }
+
+    /// §3 Wave 1b (2026-09-07) — the RSA hash combos added for C++ parity.
+    /// Round-trips every one through the real sign/verify dispatch with the
+    /// S6 key, and asserts a tampered signature is REJECTED — a verify that
+    /// accepts everything would pass a round-trip-only test.
+    ///
+    /// PKCS#1 v1.5 additionally has a property worth pinning: it is
+    /// deterministic and the DigestInfo prefix differs per hash, so two
+    /// different mechanisms over the same message must NOT produce the same
+    /// signature. If a new arm were wired to the wrong digest, the round-trip
+    /// would still pass; this catches that.
+    #[test]
+    fn wave1b_rsa_hash_combos_round_trip_and_reject_tampering() {
+        use crate::constants::*;
+        let (sk, n, e) = s6_key();
+        let mut v15_sigs: Vec<(u32, Vec<u8>)> = Vec::new();
+
+        for (mech, name) in [
+            (CKM_SHA224_RSA_PKCS, "SHA-224 v1.5"),
+            (CKM_SHA3_224_RSA_PKCS, "SHA3-224 v1.5"),
+            (CKM_SHA3_256_RSA_PKCS, "SHA3-256 v1.5"),
+            (CKM_SHA3_512_RSA_PKCS, "SHA3-512 v1.5"),
+            (CKM_SHA224_RSA_PKCS_PSS, "SHA-224 PSS"),
+            (CKM_SHA3_224_RSA_PKCS_PSS, "SHA3-224 PSS"),
+            (CKM_SHA3_256_RSA_PKCS_PSS, "SHA3-256 PSS"),
+            (CKM_SHA3_512_RSA_PKCS_PSS, "SHA3-512 PSS"),
+        ] {
+            let sig = sign_rsa(mech, &sk, S6_MSG, None)
+                .unwrap_or_else(|rv| panic!("{name}: sign failed 0x{rv:x}"));
+            assert_eq!(
+                verify_rsa(mech, &n, &e, S6_MSG, &sig, None),
+                Ok(()),
+                "{name}: must verify its own signature"
+            );
+            let mut bad = sig.clone();
+            *bad.last_mut().unwrap() ^= 0x01;
+            assert_ne!(
+                verify_rsa(mech, &n, &e, S6_MSG, &bad, None),
+                Ok(()),
+                "{name}: a tampered signature must NOT verify"
+            );
+            if !name.contains("PSS") {
+                v15_sigs.push((mech, sig));
+            }
+        }
+
+        // Each v1.5 mechanism carries its own DigestInfo prefix, so no two may
+        // coincide — that is what proves each arm is bound to the right hash.
+        for i in 0..v15_sigs.len() {
+            for j in (i + 1)..v15_sigs.len() {
+                assert_ne!(
+                    v15_sigs[i].1, v15_sigs[j].1,
+                    "0x{:x} and 0x{:x} produced identical PKCS#1 v1.5 signatures — \
+                     one of them is wired to the wrong digest",
+                    v15_sigs[i].0, v15_sigs[j].0
+                );
+            }
+        }
     }
 
     /// PKCS#1 v1.5 is deterministic — our signature must byte-match OpenSSL's,

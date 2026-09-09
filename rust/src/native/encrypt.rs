@@ -24,8 +24,8 @@ use super::CkRv;
 use crate::constants::*;
 use crate::state::{
     check_mechanism_allowed_from, get_ec_point_sec1_from, get_object_attr_u32_from,
-    get_object_param_set_from, get_object_value, get_object_value_from, read_bool_attr,
-    resolve_session_access, with_object_checked, SessionAccess, OBJECTS,
+    get_object_param_set_from, get_object_value_from, read_bool_attr,
+    resolve_session_access, with_object_checked, SessionAccess,
 };
 
 // PKCS#11 v3.2 §5.18 — KEM permission flags. CKA_ENCAPSULATE / CKA_DECAPSULATE.
@@ -1562,6 +1562,10 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Used only by the tests below. Kept here rather than in the module's
+    // top-level import list, where it was an unused-import warning in a
+    // non-test build — the warning was real, the symbols were not unused.
+    use crate::state::{get_object_value, OBJECTS};
     use crate::native::keygen::{
         generate_classic_mceliece_keypair, generate_frodokem_keypair, generate_ml_dsa_keypair,
         generate_ml_kem_keypair,

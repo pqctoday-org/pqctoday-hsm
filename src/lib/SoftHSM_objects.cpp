@@ -164,6 +164,12 @@ static CK_RV newP11Object(CK_OBJECT_CLASS objClass, CK_KEY_TYPE keyType, CK_CERT
 			// one is refused in SoftHSM::CreateObject before it reaches here.
 			*p11object = new P11ProfileObj();
 			break;
+		case CKO_TRUST:
+			// C2 (2026-09-07) — §4.7. Unlike CKO_PROFILE this IS a storage
+			// object an application may create; it just has mandatory
+			// attributes, enforced in SoftHSM::CreateObject.
+			*p11object = new P11TrustObj();
+			break;
 		case CKO_DOMAIN_PARAMETERS:
 			return CKR_ATTRIBUTE_VALUE_INVALID;
 			break;
@@ -1208,6 +1214,61 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 	     objClass == CKO_HW_FEATURE ||
 	     objClass == CKO_MECHANISM))
 		return CKR_ATTRIBUTE_READ_ONLY;
+
+	// ── C2 (2026-09-07) — CKO_TRUST mandatory attributes (§4.7 Table 25) ──
+	// A trust object binds trusted usages to ONE certificate and is looked up
+	// by CKA_ISSUER + CKA_SERIAL_NUMBER, so footnote 1 makes both mandatory:
+	// without them the object asserts trust about nothing in particular and
+	// can never be found. Footnote 2 additionally requires
+	// CKA_HASH_OF_CERTIFICATE "unless all trust attributes are
+	// CKT_TRUST_UNKNOWN, or CKT_NOT_TRUSTED" — i.e. exactly when the object
+	// vouches for something, which is when binding it to the RIGHT
+	// certificate matters. Checked here rather than in P11TrustObj::init
+	// because only this function sees the caller's whole template.
+	if (op == OBJECT_OP_CREATE && objClass == CKO_TRUST)
+	{
+		bool haveIssuer = false, haveSerial = false, haveHash = false;
+		bool vouchesForSomething = false;
+
+		for (CK_ULONG i = 0; i < ulCount; i++)
+		{
+			switch (pTemplate[i].type)
+			{
+				case CKA_ISSUER:
+					haveIssuer = true;
+					break;
+				case CKA_SERIAL_NUMBER:
+					haveSerial = true;
+					break;
+				case CKA_HASH_OF_CERTIFICATE:
+					haveHash = true;
+					break;
+				case CKA_TRUST_SERVER_AUTH:
+				case CKA_TRUST_CLIENT_AUTH:
+				case CKA_TRUST_CODE_SIGNING:
+				case CKA_TRUST_EMAIL_PROTECTION:
+				case CKA_TRUST_IPSEC_IKE:
+				case CKA_TRUST_TIME_STAMPING:
+				case CKA_TRUST_OCSP_SIGNING:
+				{
+					if (pTemplate[i].ulValueLen != sizeof(CK_ULONG) ||
+					    pTemplate[i].pValue == NULL_PTR)
+						return CKR_ATTRIBUTE_VALUE_INVALID;
+					const CK_ULONG v = *(CK_ULONG*)pTemplate[i].pValue;
+					if (v != CKT_TRUST_UNKNOWN && v != CKT_NOT_TRUSTED)
+						vouchesForSomething = true;
+					break;
+				}
+				default:
+					break;
+			}
+		}
+
+		if (!haveIssuer || !haveSerial)
+			return CKR_TEMPLATE_INCOMPLETE;
+		if (vouchesForSomething && !haveHash)
+			return CKR_TEMPLATE_INCOMPLETE;
+	}
 
 	// ── S5 (2026-08-13, extended HBS-1 2026-09-03) — hash-based-signature
 	// private keys ────────────────────────────────────────────────────────

@@ -12,7 +12,6 @@ use crate::crypto::*;
 use crate::slh_dsa_keygen;
 use crate::state::*;
 
-use rand::SeedableRng;
 use rand::rngs::OsRng;
 
 /// ACVP-aware RNG selection macro.
@@ -302,6 +301,7 @@ pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
                         let seed_slice = std::slice::from_raw_parts(p_seed, 32);
                         let mut seed = [0u8; 32];
                         seed.copy_from_slice(seed_slice);
+                        use rand::SeedableRng;
                         let rng = rand_chacha::ChaCha20Rng::from_seed(seed);
                         ACVP_RNG.with(|r| {
                             *r.borrow_mut() = Some(rng);
@@ -355,10 +355,44 @@ pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     // same reasoning, same ordering (must run before the cleanup pass
     // below), gated on the same opt-in env var C_Initialize checks rather
     // than a build-time cfg, since this is a deliberate dev/test opt-in
-    // for any native build, not an embedding-specific requirement. Honest
-    // limitation, not hidden: unlike the C++ engine's token directory
-    // (PIN-derived encryption of sensitive attributes), this snapshot is
-    // plaintext at rest — a dev/test persistence surface, not production.
+    // for any native build, not an embedding-specific requirement.
+    //
+    // NOTE CORRECTED 2026-09-07. This comment used to say that, "unlike the
+    // C++ engine's token directory (PIN-derived encryption of sensitive
+    // attributes), this snapshot is plaintext at rest". The first half of
+    // that has been WRONG since `crate::store` landed, and reading it as
+    // current wastes a reader's time — it did exactly that today, and nearly
+    // caused a second, competing key hierarchy to be built alongside the one
+    // that already exists.
+    //
+    // What is actually true: `crate::store` IS the encrypted-at-rest
+    // persistence path for engine key material, and it mirrors the SHAPE of
+    // the C++ engine's SecureDataManager — one random AES-256 master key per
+    // token, wrapped independently under the SO and User PINs, master key
+    // never written unwrapped, private objects loaded only after the login
+    // that unwraps it. CORRECTED 2026-09-07 (phase-5 §6 comment sweep): this
+    // paragraph used to also claim the PRIMITIVES are mirrored
+    // ("PBKDF2-HMAC-SHA256 at 210k iterations, AES-256-GCM") — false, and
+    // the wrong direction: those are THIS crate's OWN choices.
+    // SecureDataManager (src/lib/data_mgr/SecureDataManager.cpp:143,292,
+    // 370,470,524) uses AES-256-**CBC with no authentication tag**, keyed by
+    // RFC4880.cpp:41-58's iterated plain SHA-256 self-hash
+    // (salt‖password hashed, then re-hashed against itself,
+    // PBE_ITERATION_BASE_COUNT=1500 + salt[last byte] ⇒ ~1500-1755
+    // iterations, RFC4880.h:45) — not PBKDF2, and nowhere near 210k. See
+    // store/mod.rs and store/crypto.rs, whose own module doc already states
+    // this correctly ("modernized rather than copied ... a deliberate
+    // improvement: a wrong PIN or corrupted blob fails the GCM tag check
+    // instead of silently decrypting to garbage") — this comment simply
+    // failed to agree with it two files over, the exact defect class this
+    // whole paragraph exists to correct.
+    //
+    // THIS blob is a different thing: the wasm/emscripten rehydration
+    // mechanism, reachable on native builds only through this opt-in env
+    // var, and it is plaintext. Whether it should be encrypted too is a real
+    // but separate question with its own threat model (the host holds the
+    // blob; there is no filesystem in the browser case) — it is NOT the
+    // native store, and it is not the C++ comparison this note used to draw.
     // Best-effort write, matching stash_before_finalize's own pattern.
     if let Ok(path) = std::env::var("SOFTHSMRUST_STATE_FILE") {
         let blob = crate::state_snapshot::serialize_token_state();
@@ -1404,7 +1438,12 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_RSA_X_509 => (1024, 4096, 0x00001000 | 0x00004000),
         CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
-        | CKM_RSA_PKCS_PSS | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS => {
+        | CKM_RSA_PKCS_PSS | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS
+        | CKM_SHA1_RSA_PKCS | CKM_SHA1_RSA_PKCS_PSS | CKM_MD5_RSA_PKCS
+        | CKM_SHA224_RSA_PKCS | CKM_SHA224_RSA_PKCS_PSS
+        | CKM_SHA3_224_RSA_PKCS | CKM_SHA3_224_RSA_PKCS_PSS
+        | CKM_SHA3_256_RSA_PKCS | CKM_SHA3_256_RSA_PKCS_PSS
+        | CKM_SHA3_512_RSA_PKCS | CKM_SHA3_512_RSA_PKCS_PSS => {
             (2048, 4096, 0x00000800 | 0x00002000)
         }
         // C3 (2026-08-13) — a mechanism flag is DEFINED as "the mechanism can
@@ -1412,6 +1451,9 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // CKM_RSA_PKCS_OAEP, CKM_AES_CBC and CKM_AES_CBC_PAD, so all three
         // under-advertised wrap: an application checking capabilities before
         // use would conclude the engine could not do what it in fact does.
+        // §3 Wave 4 — composite RSA+AES key transport; keyed by the RSA
+        // wrapping key, so the same size range as the other RSA mechanisms.
+        CKM_RSA_AES_KEY_WRAP => (512, 4096, 0x00020000 | 0x00040000),
         CKM_RSA_PKCS_OAEP => (
             2048,
             4096,
@@ -1451,20 +1493,32 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // SLH-DSA pk: 32 B (128-bit sets) … 64 B (256-bit sets) — FIPS 205 Table 2.
         CKM_SLH_DSA_KEY_PAIR_GEN => (32, 64, 0x00010000),
         CKM_SLH_DSA => (32, 64, 0x00000800 | 0x00002000 | 0x0008 | 0x0010),
-        CKM_SHA256 | CKM_SHA384 | CKM_SHA512 | CKM_SHA3_256 | CKM_SHA3_512 => (0, 0, 0x00000400),
+        CKM_SHA256 | CKM_SHA384 | CKM_SHA512 | CKM_SHA3_256 | CKM_SHA3_512 | CKM_SHA224
+        | CKM_SHA512_224 | CKM_SHA512_256 | CKM_SHA3_224 | CKM_SHA3_384 | CKM_SHA_1 | CKM_MD5 => (0, 0, 0x00000400),
         // Historical RIPEMD-160 digest (CKF_DIGEST).
         CKM_RIPEMD160 => (0, 0, 0x00000400),
         CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
         | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
-        | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC => {
+        | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC | CKM_SHA_1_HMAC | CKM_MD5_HMAC => {
             (16, 64, 0x00000800 | 0x00002000)
         }
         CKM_SHA256_HMAC_GENERAL
         | CKM_SHA384_HMAC_GENERAL
         | CKM_SHA512_HMAC_GENERAL
         | CKM_SHA3_256_HMAC_GENERAL
-        | CKM_SHA3_512_HMAC_GENERAL => (16, 64, 0x00000800 | 0x00002000),
+        | CKM_SHA3_512_HMAC_GENERAL
+        | CKM_SHA224_HMAC_GENERAL
+        | CKM_SHA512_224_HMAC_GENERAL
+        | CKM_SHA512_256_HMAC_GENERAL
+        | CKM_SHA3_224_HMAC_GENERAL
+        | CKM_SHA3_384_HMAC_GENERAL
+        | CKM_RIPEMD160_HMAC_GENERAL
+        | CKM_SHA_1_HMAC_GENERAL
+        | CKM_MD5_HMAC_GENERAL => (16, 64, 0x00000800 | 0x00002000),
         CKM_KMAC_128 | CKM_KMAC_256 => (16, 64, 0x00000800 | 0x00002000),
+        // §3 Wave 4 — AES-CMAC (NIST SP 800-38B), a 16-byte MAC over an
+        // AES key of 128/192/256 bits.
+        CKM_AES_CMAC => (16, 32, 0x00000800 | 0x00002000),
         // AES-GMAC (v3.2 Sec6.13.6) — CKF_SIGN | CKF_VERIFY, key sizes match
         // the other AES mechanisms (16/24/32-byte keys, table stores bytes).
         CKM_AES_GMAC => (16, 32, 0x00000800 | 0x00002000),
@@ -1549,7 +1603,11 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // ECDSA-SHA3 variants — T1: the sign/verify matrix now dispatches the
         // same named curves as the SHA-2 composites (P-256 / secp256k1 /
         // P-384 / P-521), so the range is unified with CKM_ECDSA_SHAx above.
-        CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => {
+        CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512
+        // §3 Waves 1b/2 — same key-size range and flags as the other
+        // hashed-ECDSA mechanisms; only the digest differs.
+        | CKM_ECDSA_SHA224
+        | CKM_ECDSA_SHA1 => {
             (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
         }
         // Key derivation functions
@@ -1587,12 +1645,18 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // digest key-derivation) — arbitrary-length secret values, CKF_DERIVE.
         CKM_CONCATENATE_BASE_AND_KEY
         | CKM_CONCATENATE_BASE_AND_DATA
+        | CKM_CONCATENATE_DATA_AND_BASE
+        | CKM_AES_ECB_ENCRYPT_DATA
+        | CKM_AES_CBC_ENCRYPT_DATA
         | CKM_SHA256_KEY_DERIVATION
         | CKM_SHA384_KEY_DERIVATION
         | CKM_SHA512_KEY_DERIVATION
         | CKM_SHA3_256_KEY_DERIVATION
         | CKM_SHA3_384_KEY_DERIVATION
-        | CKM_SHA3_512_KEY_DERIVATION => (0, 0, 0x00080000),
+        | CKM_SHA3_512_KEY_DERIVATION
+        | CKM_SHA512_224_KEY_DERIVATION
+        | CKM_SHA512_256_KEY_DERIVATION
+        | CKM_SHAKE_256_KEY_DERIVATION => (0, 0, 0x00080000),
         _ => return None,
     };
     Some(info)
@@ -1956,6 +2020,35 @@ unsafe fn xmss_keygen_param_set(
     ps.unwrap_or(default_ps)
 }
 
+/// P1 (2026-09-07). PKCS#11 v3.2 §4.10 Private key objects: "As a general
+/// guideline, private keys of any type SHOULD store sufficient information to
+/// retrieve the public key information", and §6.1.3 adds, for RSA
+/// specifically, "A token SHOULD also be able to return CKA_PUBLIC_KEY_INFO
+/// for an RSA private key."
+///
+/// Several keygen arms built the SubjectPublicKeyInfo and stored it only on
+/// the public half, so a private key answered CKR_ATTRIBUTE_TYPE_INVALID for
+/// an attribute Table 29 defines for it — 11 divergences against the C++
+/// engine, which returns it on both halves. This mirrors whatever the arm
+/// already computed, so there is exactly one SPKI encoder per key type and no
+/// second implementation to drift.
+///
+/// `or_insert_with` keeps it idempotent: arms that already populate both
+/// halves (ML-DSA, ML-KEM, SLH-DSA) are unaffected, and a template-supplied
+/// value is never overwritten.
+fn mirror_public_key_info(
+    pub_attrs: &std::collections::HashMap<u32, Vec<u8>>,
+    prv_attrs: &mut std::collections::HashMap<u32, Vec<u8>>,
+) {
+    if let Some(spki) = pub_attrs.get(&CKA_PUBLIC_KEY_INFO) {
+        if !spki.is_empty() {
+            prv_attrs
+                .entry(CKA_PUBLIC_KEY_INFO)
+                .or_insert_with(|| spki.clone());
+        }
+    }
+}
+
 /// FIPS 186-5 Appendix A.2.2 "Extra Random Bits" EC private-key
 /// generation, used by CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS: generate
 /// curve_bits+64 random bits, reduce mod (order-1), add 1.
@@ -2263,6 +2356,7 @@ fn C_GenerateKeyPair_impl(
                         prv_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                 }
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -2404,6 +2498,7 @@ fn C_GenerateKeyPair_impl(
                         prv_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                 }
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -2553,6 +2648,7 @@ fn C_GenerateKeyPair_impl(
                         prv_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                 }
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -2738,6 +2834,7 @@ fn C_GenerateKeyPair_impl(
                 packed.extend_from_slice(&e_bytes);
                 pub_attrs.insert(CKA_VALUE, packed);
                 prv_attrs.insert(CKA_VALUE, sk_der.as_bytes().to_vec());
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -2922,6 +3019,7 @@ fn C_GenerateKeyPair_impl(
                     let spki = build_ec_spki_p256(&vk_bytes);
                     pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                 }
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3015,7 +3113,6 @@ fn C_GenerateKeyPair_impl(
                     ],
                     _ => return CKR_CURVE_NOT_SUPPORTED,
                 };
-                use p521::elliptic_curve::Field;
                 match curve {
                     CURVE_P521 => {
                         store_param_set(&mut pub_attrs, CURVE_P521);
@@ -3088,6 +3185,7 @@ fn C_GenerateKeyPair_impl(
                         pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                 }
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3233,6 +3331,7 @@ fn C_GenerateKeyPair_impl(
                 pub_attrs.insert(CKA_EC_PARAMS, ec_params_oid.clone());
                 prv_attrs.insert(CKA_EC_PARAMS, ec_params_oid);
                 pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3363,6 +3462,7 @@ fn C_GenerateKeyPair_impl(
                     pub_attrs.insert(CKA_EC_POINT, pk_bytes.clone());
                 }
 
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3464,6 +3564,7 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3599,6 +3700,7 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3696,6 +3798,7 @@ fn C_GenerateKeyPair_impl(
                 store_ulong(&mut prv_attrs, CKA_PRIV_XMSS_KEYS_REMAINING, mt_max);
                 prv_attrs.insert(CKA_PRIV_STATEFUL_KEY_STATE, priv_bytes);
                 prv_attrs.insert(CKA_PRIV_LEAF_INDEX, 0u64.to_le_bytes().to_vec());
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3786,6 +3889,7 @@ fn C_GenerateKeyPair_impl(
                 pub_attrs.insert(CKA_VALUE, ek.value().to_vec());
                 prv_attrs.insert(CKA_VALUE, dk.value().to_vec());
 
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -3875,6 +3979,7 @@ fn C_GenerateKeyPair_impl(
                 pub_attrs.insert(CKA_VALUE, pk.as_ref().to_vec());
                 prv_attrs.insert(CKA_VALUE, sk.as_ref().to_vec());
 
+                mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
                     &mut pub_attrs,
                     p_public_key_template,
@@ -4105,9 +4210,22 @@ pub fn C_GenerateKey(
 // ── ML-KEM Encapsulate/Decapsulate ──────────────────────────────────────────
 
 /// DER-wrap an uncompressed SEC1 EC point exactly the way the engines encode
-/// CKA_EC_POINT (OCTET STRING, short form or 0x81 long form). This is the
-/// byte format the C++ engine's `encapsulateECDH` emits as the KEM
-/// "ciphertext" (`ephPub->getQ()`), so cross-engine decapsulation works.
+/// CKA_EC_POINT (OCTET STRING, short form or 0x81 long form).
+// CORRECTED 2026-09-07 (phase-5 §6 comment sweep): this used to also claim
+// DER-wrapped is "the byte format the C++ engine's encapsulateECDH emits as
+// the KEM ciphertext" -- false in the wrong direction. C++ emits the RAW
+// SEC1 point there (SoftHSM_kem.cpp:1014-1019, DERUTIL::octet2Raw(ephPub->
+// getQ())) -- the tag/length wrapping is explicitly stripped before the
+// ciphertext is handed to the caller (that file's own "E1 (2026-08-13)"
+// comment: "the ciphertext is the RAW octet string ... not the ... DER
+// wrapping"). DER-wrapped is the STORAGE encoding CKA_EC_POINT itself uses,
+// which is genuinely what this helper is for -- its only caller, below,
+// builds a #[cfg(test)] key's CKA_EC_POINT, never a KEM ciphertext.
+//
+// Used only by the #[cfg(test)] EC key-pair installer below, so it is gated to
+// match. Gating is the honest fix; #[allow(dead_code)] would have hidden a
+// genuinely orphaned function just as effectively.
+#[cfg(test)]
 fn der_wrap_ec_point(point: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(3 + point.len());
     out.push(0x04); // DER OCTET STRING tag
@@ -4247,6 +4365,44 @@ unsafe fn hpke_read_derived_key_template(p: *const u8) -> Option<(*const u8, Vec
         }
     }
     Some((ph_key, out))
+}
+
+/// CKA_ENCAPSULATE_TEMPLATE / CKA_DECAPSULATE_TEMPLATE enforcement.
+///
+/// v3.2 defines both constants in the header and then never mentions them
+/// again — no table row, no prose. v3.3 supplies both the rows and SHALL-level
+/// enforcement, adopted under the standing v3.2-baseline / v3.3-fills-gaps
+/// rule:
+///
+///   * encapsulate — "an attribute set that will be compared against the
+///     attributes of the key to be encapsulated. If all attributes match
+///     according to the C_FindObject rules … If any attribute conflict occurs
+///     … SHALL return CKR_KEY_HANDLE_INVALID" (key_management_functions.md:762)
+///   * decapsulate — "… added to attributes of the key to be decapsulated. If
+///     the attributes do not conflict with the user supplied attribute
+///     template … SHALL return CKR_TEMPLATE_INCONSISTENT" (:868)
+///
+/// "The key to be encapsulated" is read as the key being CREATED:
+/// C_EncapsulateKey takes a template and produces phKey, so there is no
+/// pre-existing key to compare against. That is the only coherent reading for
+/// a KEM.
+///
+/// A helper rather than four inline copies. The encapsulate path has THREE
+/// key-creation sites (vendor KEMs, ML-KEM, ECDH-as-KEM) and a first attempt
+/// guarded only one of them — the enforcement silently did nothing for
+/// CKM_ML_KEM, which is exactly the shape of bug that four copies of a rule
+/// produce. The differential scenario caught it because it tests the negative
+/// case.
+///
+/// Absent attribute ⇒ permitted, per "If this attribute is not present on the
+/// encapsulating key then no additional attributes will be added."
+fn kem_template_permits(h_kem_key: u32, template_attr: u32, new_attrs: &Attributes) -> bool {
+    match OBJECTS.with(|o| o.borrow().get(&h_kem_key).cloned()) {
+        Some(kem_attrs) => {
+            crate::state::key_template_permits(&kem_attrs, template_attr, new_attrs)
+        }
+        None => true,
+    }
 }
 
 fn C_EncapsulateKey_impl(
@@ -4471,15 +4627,23 @@ fn C_EncapsulateKey_impl(
             ) {
                 return rv;
             }
+            if !kem_template_permits(h_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
+                return CKR_KEY_HANDLE_INVALID;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
 
         // ── ECDH-as-KEM (PKCS#11 v3.2 §6.3.17 Table 78) ─────────────────────
-        // 2026-08-13 parity with the C++ engine's encapsulateECDH
-        // (SoftHSM_kem.cpp): the "ciphertext" is a fresh ephemeral public EC
-        // point, byte-identical to the C++ wire form (DER OCTET STRING
-        // wrapping the uncompressed SEC1 point — the CKA_EC_POINT encoding);
+        // CORRECTED 2026-09-07 (phase-5 §6 comment sweep): this banner used
+        // to claim the ciphertext was "byte-identical to the C++ wire form
+        // (DER OCTET STRING wrapping ... the CKA_EC_POINT encoding)" as a
+        // CURRENT fact. That was the PRE-fix format; the E1 note a few lines
+        // below already corrects it in place ("Both engines emitted the
+        // DER-wrapped form ... Mutual agreement is not a defence") but this
+        // banner was never updated to agree with its own neighbour. Current
+        // format, both engines: the ciphertext is a fresh ephemeral public
+        // EC point as the RAW uncompressed SEC1 point (no DER wrapping) --
         // the shared secret is the raw ECDH X coordinate, no KDF (combining
         // is the CALLER's job, e.g. CKM_CONCATENATE_BASE_AND_KEY — same
         // "DHKEM" ephemeral-static pattern as native/hybrid.rs).
@@ -4532,9 +4696,22 @@ fn C_EncapsulateKey_impl(
                 CURVE_P521 => 133,
                 CURVE_X25519 => 32,
                 CURVE_X448 => 56,
-                // secp256k1-as-KEM is not offered (the C++ mirror covers the
-                // NIST prime curves; this arm adds the Montgomery curves
-                // Table 78 lists).
+                // CORRECTED 2026-09-07 (phase-5 §6 comment sweep): this used
+                // to justify refusing secp256k1 by claiming "the C++ mirror
+                // covers the NIST prime curves" — false, and the wrong
+                // direction. C++'s encapsulateECDH/decapsulateECDH
+                // (SoftHSM_kem.cpp:941,1284) gate ONLY on key TYPE (CKK_EC |
+                // CKK_EC_MONTGOMERY), never on curve OID, and
+                // CKM_EC_KEY_PAIR_GEN has no CKR_CURVE_NOT_SUPPORTED path at
+                // all — C++ accepts secp256k1 for ECDH-as-KEM. MEASURED
+                // (create.encapsulate.ecdh_secp256k1): C++ returns CKR_OK
+                // with a real 65-byte raw point + derived shared secret;
+                // this arm is the one that refuses. Recorded as
+                // LEGAL-ECDH-KEM-CURVE-COVERAGE-SECP256K1 in
+                // exceptions.json, same shape as brainpool's curve coverage
+                // — a product scope choice, not a spec requirement (v3.2
+                // §6.3.17 Table 78 names no required curve set) — pending a
+                // decision on whether to add support here instead.
                 _ => return CKR_CURVE_NOT_SUPPORTED,
             };
             if p_ciphertext.is_null() {
@@ -4655,6 +4832,9 @@ fn C_EncapsulateKey_impl(
             ) {
                 return rv;
             }
+            if !kem_template_permits(h_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
+                return CKR_KEY_HANDLE_INVALID;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
@@ -4751,6 +4931,9 @@ fn C_EncapsulateKey_impl(
                     find_template_entry(_p_template, _ul_attribute_count, CKA_CHECK_VALUE).as_deref(),
                 ) {
                     return rv;
+                }
+                if !kem_template_permits(h_key, CKA_ENCAPSULATE_TEMPLATE, &ss_attrs) {
+                    return CKR_KEY_HANDLE_INVALID;
                 }
                 *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             }};
@@ -4960,6 +5143,9 @@ fn C_DecapsulateKey_impl(
             ) {
                 return rv;
             }
+            if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
+                return CKR_TEMPLATE_INCONSISTENT;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
@@ -5105,6 +5291,9 @@ fn C_DecapsulateKey_impl(
             ) {
                 return rv;
             }
+            if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
+                return CKR_TEMPLATE_INCONSISTENT;
+            }
             *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             return CKR_OK;
         }
@@ -5203,6 +5392,9 @@ fn C_DecapsulateKey_impl(
                 ) {
                     return rv;
                 }
+                if !kem_template_permits(h_private_key, CKA_DECAPSULATE_TEMPLATE, &ss_attrs) {
+                    return CKR_TEMPLATE_INCONSISTENT;
+                }
                 *ph_key = allocate_handle_owned(_h_session, ss_attrs);
             }};
         }
@@ -5243,6 +5435,66 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
         let is_private_or_secret = class == CKO_PRIVATE_KEY || class == CKO_SECRET_KEY;
         let sensitive = is_private_or_secret && read_bool_attr(&obj_attrs, CKA_SENSITIVE);
         let extractable = !is_private_or_secret || read_bool_attr(&obj_attrs, CKA_EXTRACTABLE);
+        // E1 (2026-09-07). CKA_VALUE is defined PER KEY TYPE, not universally.
+        // The v3.2 key-object attribute tables give it to ML-DSA, ML-KEM,
+        // SLH-DSA, EC, Edwards, Montgomery, DSA, HSS, XMSS and XMSS-MT — but
+        // NOT to RSA: neither the RSA Public nor the RSA Private Key Object
+        // Attributes table has a row for it (§6.1.2/§6.1.3). This engine
+        // stores every asymmetric key's material under CKA_VALUE internally,
+        // which is its own business; ANSWERING C_GetAttributeValue for it on
+        // an RSA key advertises an attribute the class does not define. C++
+        // answers CKR_ATTRIBUTE_TYPE_INVALID, and so must this engine.
+        //
+        // Scoped to RSA deliberately. The three stateful-hash families look
+        // like the same defect and are not: §6.65/§6.66 DO define CKA_VALUE
+        // for HSS/XMSS/XMSS-MT keys, so hiding it there would replace one
+        // non-conformance with another. That divergence runs the opposite way
+        // (C++ correctly answers CKR_ATTRIBUTE_SENSITIVE, Rust wrongly says
+        // the attribute does not exist) and needs the attribute materialised,
+        // not suppressed — tracked separately.
+        //
+        // STORAGE IS UNTOUCHED. CKA_VALUE is how the key is held and is read
+        // internally (get_object_value, e.g. C_SignRecover); only the
+        // externally visible answer changes.
+        let key_type = obj_attrs
+            .get(&CKA_KEY_TYPE)
+            .filter(|v| v.len() >= 4)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        let hide_cka_value =
+            key_type == Some(CKK_RSA) && (class == CKO_PUBLIC_KEY || class == CKO_PRIVATE_KEY);
+        // Phase-4 §4 (2026-09-07). The mirror image of the RSA case above, and
+        // it must NOT be handled the same way.
+        //
+        // §6.65.3 (HSS) and §6.66.4/§6.66.5 (XMSS, XMSS-MT) DO define
+        // CKA_VALUE for these private keys, with footnote 7 — "cannot be
+        // revealed if CKA_SENSITIVE is CK_TRUE or CKA_EXTRACTABLE is
+        // CK_FALSE" — and the same tables and footnote sets are unchanged in
+        // the v3.3 draft. So the correct answer is "the object has it and will
+        // not disclose it" (CKR_ATTRIBUTE_SENSITIVE), which is what C++
+        // returns. This engine was answering CKR_ATTRIBUTE_TYPE_INVALID, i.e.
+        // "no such attribute", denying an attribute the specification defines.
+        //
+        // WHY NOTHING IS MATERIALISED. The obvious fix — store the state blob
+        // under CKA_VALUE at keygen — would be wrong twice over. The state
+        // MUTATES on every signature (the one-time-signature leaf index
+        // advances), so a copy under CKA_VALUE would silently go stale and
+        // become a second, divergent record of the key's most safety-critical
+        // field. And the state lives at CKA_PRIV_STATEFUL_KEY_STATE
+        // deliberately: constants.rs:372-390 records that it was MOVED into
+        // the engine-private range precisely because a writable location let a
+        // client rewind the leaf index and reuse a one-time key. Copying it
+        // back into a standard attribute would re-open that door.
+        //
+        // Answering from the key type alone needs no copy and cannot go stale.
+        //
+        // Gated on the same (sensitive || !extractable) condition as the
+        // generic rule rather than unconditionally: §6.65.3/§6.66.4 make these
+        // keys MUST-be-sensitive, so the guard is expected always to hold, but
+        // if an object somehow reached this point without it the conservative
+        // answer is to fall through and report the attribute absent. No state
+        // is disclosed on any path.
+        let stateful_hash_private = class == CKO_PRIVATE_KEY
+            && matches!(key_type, Some(CKK_HSS) | Some(CKK_XMSS) | Some(CKK_XMSSMT));
         // PKCS#11 v3.2 §5.7.5 — process EVERY template entry, recording each
         // failure class, then return one consolidated code. The whole template
         // is filled in regardless of any single entry's failure.
@@ -5273,6 +5525,26 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
                 // it may not read, when the object holds nothing of the kind.
                 // Forty-one observations in the differential harness, against
                 // C++'s correct CKR_ATTRIBUTE_TYPE_INVALID.
+                // Ordered BEFORE the sensitivity check on purpose: §5.7.5
+                // gives the two codes different meanings, and for an
+                // attribute the class does not define at all the honest
+                // answer is CKR_ATTRIBUTE_TYPE_INVALID, not
+                // CKR_ATTRIBUTE_SENSITIVE ("has it, won't disclose it").
+                // A sensitive RSA private key would otherwise get the
+                // wrong one of the two.
+                if hide_cka_value && attr_type == CKA_VALUE {
+                    *val_len_ptr = usize::MAX; // CK_UNAVAILABLE_INFORMATION
+                    had_missing = true;
+                    continue;
+                }
+                if stateful_hash_private
+                    && attr_type == CKA_VALUE
+                    && (sensitive || !extractable)
+                {
+                    *val_len_ptr = usize::MAX; // CK_UNAVAILABLE_INFORMATION
+                    had_sensitive = true;
+                    continue;
+                }
                 if attr_is_sensitive_material(attr_type)
                     && (sensitive || !extractable)
                     && obj_attrs.contains_key(&attr_type)
@@ -5354,6 +5626,62 @@ fn validate_create_template(attrs: &Attributes) -> Result<(), u32> {
         || class == CKO_MECHANISM
     {
         return Err(CKR_ATTRIBUTE_READ_ONLY);
+    }
+    // §4.7 Table 25 — CKO_TRUST. A trust object binds trusted usages to ONE
+    // specific certificate, and is looked up by `CKA_ISSUER` +
+    // `CKA_SERIAL_NUMBER`; without those it asserts trust about nothing in
+    // particular and can never be found. This class previously had no arm
+    // here at all, so any template was accepted whatever it contained.
+    if class == CKO_TRUST {
+        // Footnote 1 — "MUST be specified when the object is created."
+        if !attrs.contains_key(&CKA_ISSUER) || !attrs.contains_key(&CKA_SERIAL_NUMBER) {
+            return Err(CKR_TEMPLATE_INCOMPLETE);
+        }
+        const TRUST_ATTRS: [u32; 7] = [
+            CKA_TRUST_SERVER_AUTH,
+            CKA_TRUST_CLIENT_AUTH,
+            CKA_TRUST_CODE_SIGNING,
+            CKA_TRUST_EMAIL_PROTECTION,
+            CKA_TRUST_IPSEC_IKE,
+            CKA_TRUST_TIME_STAMPING,
+            CKA_TRUST_OCSP_SIGNING,
+        ];
+        // `CK_TRUST` is a closed set of five values; anything else is a
+        // caller error, not a usage this token merely doesn't understand.
+        //
+        // Footnote 2 makes the certificate hash mandatory "unless all trust
+        // attributes are CKT_TRUST_UNKNOWN, or CKT_NOT_TRUSTED" — i.e. it is
+        // required exactly when the object actually vouches for something,
+        // which is when binding it to the right certificate matters.
+        let mut vouches_for_something = false;
+        for t in TRUST_ATTRS {
+            let Some(v) = attrs.get(&t) else { continue }; // footnote 3
+            if v.len() < 4 {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+            }
+            let value = u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
+            if !matches!(
+                value,
+                CKT_TRUST_UNKNOWN
+                    | CKT_TRUSTED
+                    | CKT_TRUST_ANCHOR
+                    | CKT_NOT_TRUSTED
+                    | CKT_TRUST_MUST_VERIFY_TRUST
+            ) {
+                return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+            }
+            if !matches!(value, CKT_TRUST_UNKNOWN | CKT_NOT_TRUSTED) {
+                vouches_for_something = true;
+            }
+        }
+        if vouches_for_something && !attrs.contains_key(&CKA_HASH_OF_CERTIFICATE) {
+            return Err(CKR_TEMPLATE_INCOMPLETE);
+        }
+        // CKA_NAME_HASH_ALGORITHM is footnote-2 as well, but its own row says
+        // it "defaults to SHA-1 if not present" — the only reading on which
+        // both sentences hold is that the caller may omit it and take the
+        // default, so it is materialised in apply_object_defaults rather than
+        // demanded here.
     }
     // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS is a packed CK_MECHANISM_TYPE[];
     // a length that isn't a whole number of entries is malformed. S9: the
@@ -6044,6 +6372,11 @@ fn rsa_pss_mech_params(mech: u32) -> Option<(u32, u32)> {
         CKM_SHA384_RSA_PKCS_PSS => Some((CKM_SHA384, CKG_MGF1_SHA384)),
         CKM_SHA512_RSA_PKCS_PSS => Some((CKM_SHA512, CKG_MGF1_SHA512)),
         CKM_SHA3_384_RSA_PKCS_PSS => Some((CKM_SHA3_384, CKG_MGF1_SHA3_384)),
+        CKM_SHA1_RSA_PKCS_PSS => Some((CKM_SHA_1, CKG_MGF1_SHA1)),
+        CKM_SHA224_RSA_PKCS_PSS => Some((CKM_SHA224, CKG_MGF1_SHA224)),
+        CKM_SHA3_224_RSA_PKCS_PSS => Some((CKM_SHA3_224, CKG_MGF1_SHA3_224)),
+        CKM_SHA3_256_RSA_PKCS_PSS => Some((CKM_SHA3_256, CKG_MGF1_SHA3_256)),
+        CKM_SHA3_512_RSA_PKCS_PSS => Some((CKM_SHA3_512, CKG_MGF1_SHA3_512)),
         _ => None,
     }
 }
@@ -6682,7 +7015,7 @@ fn C_Sign_impl(
             }
             CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
             | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
-            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC => {
+            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC | CKM_SHA_1_HMAC | CKM_MD5_HMAC | CKM_AES_CMAC => {
                 sign_hmac(eff_mech, &sk_bytes, eff_msg)
             }
             m if hmac_general_base(m).is_some() => {
@@ -6726,7 +7059,12 @@ fn C_Sign_impl(
             }
             CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
             | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
-            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS => {
+            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS
+            | CKM_SHA1_RSA_PKCS | CKM_SHA1_RSA_PKCS_PSS | CKM_MD5_RSA_PKCS
+            | CKM_SHA224_RSA_PKCS | CKM_SHA224_RSA_PKCS_PSS
+            | CKM_SHA3_224_RSA_PKCS | CKM_SHA3_224_RSA_PKCS_PSS
+            | CKM_SHA3_256_RSA_PKCS | CKM_SHA3_256_RSA_PKCS_PSS
+            | CKM_SHA3_512_RSA_PKCS | CKM_SHA3_512_RSA_PKCS_PSS => {
                 let pss_salt = if rsa_pss_mech_params(eff_mech).is_some() && ctx_bytes.len() >= 4 {
                     Some(u32::from_le_bytes([
                         ctx_bytes[0],
@@ -6911,6 +7249,10 @@ pub fn C_Verify(
                     | CKM_SHA512_256_HMAC
                     | CKM_SHA3_224_HMAC
                     | CKM_SHA3_384_HMAC
+                    | CKM_SHA224_HMAC
+                    | CKM_SHA_1_HMAC
+                    | CKM_MD5_HMAC
+                    | CKM_AES_CMAC
                     | CKM_KMAC_128
                     | CKM_KMAC_256
             ) =>
@@ -7013,7 +7355,7 @@ pub fn C_Verify(
             }
             CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
             | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
-            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC => {
+            | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC | CKM_SHA_1_HMAC | CKM_MD5_HMAC | CKM_AES_CMAC => {
                 verify_hmac(eff_mech, &pk_bytes, eff_msg, sig_bytes)
             }
             m if hmac_general_base(m).is_some() => {
@@ -7089,7 +7431,12 @@ pub fn C_Verify(
             // CKA_VALUE is NOT defined for CKO_PUBLIC_KEY/CKK_RSA objects.
             CKM_SHA256_RSA_PKCS | CKM_SHA384_RSA_PKCS | CKM_SHA512_RSA_PKCS
             | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS
-            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS => {
+            | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS | CKM_RSA_PKCS
+            | CKM_SHA1_RSA_PKCS | CKM_SHA1_RSA_PKCS_PSS | CKM_MD5_RSA_PKCS
+            | CKM_SHA224_RSA_PKCS | CKM_SHA224_RSA_PKCS_PSS
+            | CKM_SHA3_224_RSA_PKCS | CKM_SHA3_224_RSA_PKCS_PSS
+            | CKM_SHA3_256_RSA_PKCS | CKM_SHA3_256_RSA_PKCS_PSS
+            | CKM_SHA3_512_RSA_PKCS | CKM_SHA3_512_RSA_PKCS_PSS => {
                 match get_rsa_public_components(hkey) {
                     Some((n, e)) => {
                         let pss_salt =
@@ -7610,6 +7957,38 @@ fn oaep_padding(hash_alg: u32, mgf: u32, label: &[u8]) -> Result<rsa::Oaep, u32>
 /// the exact precedent this copies: read as `*const usize`, which is 4
 /// bytes on wasm32 and 8 bytes on native 64-bit — one code path, both
 /// targets, matching the real struct's actual field width on each).
+
+/// §3 Wave 4 — read `CK_RSA_AES_KEY_WRAP_PARAMS` and the OAEP parameters it
+/// points at. Returns `(aes_key_bytes, oaep_padding_factory_inputs)`.
+///
+/// The AES size arrives in BITS and only 128/192/256 are defined; anything
+/// else is a caller error rather than something to round to a supported size.
+unsafe fn parse_rsa_aes_key_wrap_params(
+    p_mechanism: *const u8,
+) -> Result<(usize, u32, u32, Vec<u8>), u32> {
+    let m = ck_param::mech(p_mechanism);
+    let r = m
+        .params(
+            &ck_param::rsa_aes_key_wrap::LAYOUT,
+            ck_param::rsa_aes_key_wrap::FIELD_COUNT,
+        )
+        .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+    let bits = r.ulong(ck_param::rsa_aes_key_wrap::UL_AES_KEY_BITS);
+    let aes_len = match bits {
+        128 => 16usize,
+        192 => 24,
+        256 => 32,
+        _ => return Err(CKR_MECHANISM_PARAM_INVALID),
+    };
+    let p_oaep = r.ptr(ck_param::rsa_aes_key_wrap::P_OAEP_PARAMS);
+    if p_oaep.is_null() {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let oaep_len = ck_param::oaep::LAYOUT.size();
+    let (hash_alg, mgf, label) = parse_oaep_params(p_oaep, oaep_len)?;
+    Ok((aes_len, hash_alg, mgf, label))
+}
+
 unsafe fn parse_oaep_params(p_param: *const u8, ul_param_len: usize) -> Result<(u32, u32, Vec<u8>), u32> {
     // Read progressively: a hashAlg-only prefix is meaningful here (it is
     // what several callers send), so the reader is built for ONE field and
@@ -9028,6 +9407,13 @@ pub fn C_DigestInit(h_session: u32, p_mechanism: *mut u8) -> u32 {
             CKM_SHA512 => DigestCtx::Sha512(sha2::Sha512::new()),
             CKM_SHA3_256 => DigestCtx::Sha3_256(sha3::Sha3_256::new()),
             CKM_SHA3_512 => DigestCtx::Sha3_512(sha3::Sha3_512::new()),
+            CKM_SHA224 => DigestCtx::Sha224(sha2::Sha224::new()),
+            CKM_SHA512_224 => DigestCtx::Sha512_224(sha2::Sha512_224::new()),
+            CKM_SHA512_256 => DigestCtx::Sha512_256(sha2::Sha512_256::new()),
+            CKM_SHA3_224 => DigestCtx::Sha3_224(sha3::Sha3_224::new()),
+            CKM_SHA3_384 => DigestCtx::Sha3_384(sha3::Sha3_384::new()),
+            CKM_SHA_1 => DigestCtx::Sha1(sha1::Sha1::new()),
+            CKM_MD5 => DigestCtx::Md5(md5::Md5::new()),
             CKM_KECCAK_256 => DigestCtx::Keccak256(Vec::new()),
             CKM_RIPEMD160 => DigestCtx::Ripemd160(ripemd::Ripemd160::new()),
             CKM_ML_DSA_EXTERNAL_MU_GEN => match init_mu_gen_digest(p_mechanism) {
@@ -9123,6 +9509,13 @@ pub fn C_DigestUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
                     DigestCtx::Sha512(h) => h.update(data),
                     DigestCtx::Sha3_256(h) => h.update(data),
                     DigestCtx::Sha3_512(h) => h.update(data),
+                    DigestCtx::Sha224(h) => h.update(data),
+                    DigestCtx::Sha512_224(h) => h.update(data),
+                    DigestCtx::Sha512_256(h) => h.update(data),
+                    DigestCtx::Sha3_224(h) => h.update(data),
+                    DigestCtx::Sha3_384(h) => h.update(data),
+                    DigestCtx::Sha1(h) => h.update(data),
+                    DigestCtx::Md5(h) => h.update(data),
                     DigestCtx::Keccak256(buf) => crate::crypto::keccak::keccak256_update(buf, data),
                     DigestCtx::Ripemd160(h) => h.update(data),
                     DigestCtx::MuGen(h) => sha3::digest::Update::update(h, data),
@@ -9151,6 +9544,13 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
                     DigestCtx::Sha512(_) => 64,
                     DigestCtx::Sha3_256(_) => 32,
                     DigestCtx::Sha3_512(_) => 64,
+                    DigestCtx::Sha224(_) => 28,
+                    DigestCtx::Sha512_224(_) => 28,
+                    DigestCtx::Sha512_256(_) => 32,
+                    DigestCtx::Sha3_224(_) => 28,
+                    DigestCtx::Sha3_384(_) => 48,
+                    DigestCtx::Sha1(_) => 20,
+                    DigestCtx::Md5(_) => 16,
                     DigestCtx::Keccak256(_) => 32,
                     DigestCtx::Ripemd160(_) => 20,
                     DigestCtx::MuGen(_) => 64,
@@ -9174,6 +9574,13 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
                 DigestCtx::Sha512(_) => 64,
                 DigestCtx::Sha3_256(_) => 32,
                 DigestCtx::Sha3_512(_) => 64,
+                DigestCtx::Sha224(_) => 28,
+                DigestCtx::Sha512_224(_) => 28,
+                DigestCtx::Sha512_256(_) => 32,
+                DigestCtx::Sha3_224(_) => 28,
+                DigestCtx::Sha3_384(_) => 48,
+                DigestCtx::Sha1(_) => 20,
+                DigestCtx::Md5(_) => 16,
                 DigestCtx::Keccak256(_) => 32,
                 DigestCtx::Ripemd160(_) => 20,
                 DigestCtx::MuGen(_) => 64,
@@ -9198,6 +9605,13 @@ pub fn C_DigestFinal(h_session: u32, p_digest: *mut u8, pul_digest_len: *mut u32
             DigestCtx::Sha512(h) => h.finalize().to_vec(),
             DigestCtx::Sha3_256(h) => h.finalize().to_vec(),
             DigestCtx::Sha3_512(h) => h.finalize().to_vec(),
+            DigestCtx::Sha224(h) => h.finalize().to_vec(),
+            DigestCtx::Sha512_224(h) => h.finalize().to_vec(),
+            DigestCtx::Sha512_256(h) => h.finalize().to_vec(),
+            DigestCtx::Sha3_224(h) => h.finalize().to_vec(),
+            DigestCtx::Sha3_384(h) => h.finalize().to_vec(),
+            DigestCtx::Sha1(h) => h.finalize().to_vec(),
+            DigestCtx::Md5(h) => h.finalize().to_vec(),
             DigestCtx::Keccak256(buf) => crate::crypto::keccak::keccak256_finalize(&buf).to_vec(),
             DigestCtx::Ripemd160(h) => h.finalize().to_vec(),
             DigestCtx::MuGen(h) => {
@@ -9243,6 +9657,13 @@ pub fn C_Digest(
                     DigestCtx::Sha512(_) => 64,
                     DigestCtx::Sha3_256(_) => 32,
                     DigestCtx::Sha3_512(_) => 64,
+                    DigestCtx::Sha224(_) => 28,
+                    DigestCtx::Sha512_224(_) => 28,
+                    DigestCtx::Sha512_256(_) => 32,
+                    DigestCtx::Sha3_224(_) => 28,
+                    DigestCtx::Sha3_384(_) => 48,
+                    DigestCtx::Sha1(_) => 20,
+                    DigestCtx::Md5(_) => 16,
                     DigestCtx::Keccak256(_) => 32,
                     DigestCtx::Ripemd160(_) => 20,
                     DigestCtx::MuGen(_) => 64,
@@ -10036,12 +10457,12 @@ pub fn C_DeriveKey(
                 // is 0, and so is the count in the v3.2 Standard's own text.
                 // That leaves three parties:
                 //
-                //   src/lib/pkcs11/pkcs11t.h:2139  pNext, flags, index
+                //   src/lib/pkcs11/pkcs11t.h:2148  pNext, flags, index
                 //                                  (24 bytes LP64 / 12 wasm32)
                 //   the C++ engine                 follows the header exactly,
                 //                                  and rejects any other
                 //                                  ulParameterLen outright
-                //                                  (SoftHSM_keygen.cpp:3010)
+                //                                  (SoftHSM_keygen.cpp:3222)
                 //   this engine + the hub's TS     two u32s, 8 bytes, no pNext
                 //   playground                     (helpers.ts
                 //                                  buildBIP32ChildDeriveParams)
@@ -10171,6 +10592,122 @@ pub fn C_DeriveKey(
                 [base_val.as_slice(), data].concat()
             }
 
+            // §3 Wave 4 (2026-09-07) — derive by ENCRYPTING the caller's data
+            // with the base key (v3.2 §6.27). The derived value is the
+            // ciphertext, so the base key is used as an AES key here rather
+            // than as raw key material to be hashed or concatenated.
+            //
+            // The data must be a whole number of AES blocks: these are the
+            // raw ECB/CBC modes, with no padding of their own, and silently
+            // padding (or truncating) a short input would hand the caller a
+            // key derived from bytes they did not supply.
+            CKM_AES_ECB_ENCRYPT_DATA | CKM_AES_CBC_ENCRYPT_DATA => {
+                use aes::cipher::{BlockEncryptMut, KeyIvInit, KeyInit, BlockEncrypt};
+                let base_val = match get_object_value(h_base_key) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                };
+                let m = ck_param::mech(p_mechanism);
+                let (iv, data): ([u8; 16], Vec<u8>) = if mech_type == CKM_AES_ECB_ENCRYPT_DATA {
+                    let r = match m.params(
+                        &ck_param::key_deriv_string::LAYOUT,
+                        ck_param::key_deriv_string::FIELD_COUNT,
+                    ) {
+                        Ok(r) => r,
+                        Err(ck_param::ParamErr::Absent) => return CKR_ARGUMENTS_BAD,
+                        Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
+                    };
+                    (
+                        [0u8; 16],
+                        r.buffer(
+                            ck_param::key_deriv_string::P_DATA,
+                            ck_param::key_deriv_string::UL_LEN,
+                        )
+                        .to_vec(),
+                    )
+                } else {
+                    let r = match m.params(
+                        &ck_param::aes_cbc_encrypt_data::LAYOUT,
+                        ck_param::aes_cbc_encrypt_data::FIELD_COUNT,
+                    ) {
+                        Ok(r) => r,
+                        Err(ck_param::ParamErr::Absent) => return CKR_ARGUMENTS_BAD,
+                        Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
+                    };
+                    let iv_bytes = r.bytes(ck_param::aes_cbc_encrypt_data::IV);
+                    let mut iv = [0u8; 16];
+                    if iv_bytes.len() != 16 {
+                        return CKR_MECHANISM_PARAM_INVALID;
+                    }
+                    iv.copy_from_slice(iv_bytes);
+                    (
+                        iv,
+                        r.buffer(
+                            ck_param::aes_cbc_encrypt_data::P_DATA,
+                            ck_param::aes_cbc_encrypt_data::UL_LEN,
+                        )
+                        .to_vec(),
+                    )
+                };
+                if data.is_empty() || data.len() % 16 != 0 {
+                    return CKR_MECHANISM_PARAM_INVALID;
+                }
+                let mut out = data.clone();
+                macro_rules! encrypt_with {
+                    ($aes:ty) => {{
+                        if mech_type == CKM_AES_ECB_ENCRYPT_DATA {
+                            let c = match <$aes as KeyInit>::new_from_slice(&base_val) {
+                                Ok(c) => c,
+                                Err(_) => return CKR_KEY_SIZE_RANGE,
+                            };
+                            for blk in out.chunks_mut(16) {
+                                c.encrypt_block(blk.into());
+                            }
+                        } else {
+                            let c = match cbc::Encryptor::<$aes>::new_from_slices(&base_val, &iv) {
+                                Ok(c) => c,
+                                Err(_) => return CKR_KEY_SIZE_RANGE,
+                            };
+                            let mut enc = c;
+                            for blk in out.chunks_mut(16) {
+                                enc.encrypt_block_mut(blk.into());
+                            }
+                        }
+                    }};
+                }
+                match base_val.len() {
+                    16 => encrypt_with!(aes::Aes128),
+                    24 => encrypt_with!(aes::Aes192),
+                    32 => encrypt_with!(aes::Aes256),
+                    _ => return CKR_KEY_SIZE_RANGE,
+                }
+                out
+            }
+
+            // §3 Wave 4 (2026-09-07) — the mirror of the arm above: the
+            // caller's data comes FIRST, then the base key's value. Same
+            // CK_KEY_DERIVATION_STRING_DATA parameter, opposite order; the
+            // C++ engine has always had both.
+            CKM_CONCATENATE_DATA_AND_BASE => {
+                let r = match ck_param::mech(p_mechanism).params(
+                    &ck_param::key_deriv_string::LAYOUT,
+                    ck_param::key_deriv_string::FIELD_COUNT,
+                ) {
+                    Ok(r) => r,
+                    Err(ck_param::ParamErr::Absent) => return CKR_ARGUMENTS_BAD,
+                    Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
+                };
+                let data: &[u8] = r.buffer(
+                    ck_param::key_deriv_string::P_DATA,
+                    ck_param::key_deriv_string::UL_LEN,
+                );
+                let base_val = match get_object_value(h_base_key) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                };
+                [data, base_val.as_slice()].concat()
+            }
+
             // ── Digest key derivation (PKCS#11 v3.2 §6.22 SHA-2 / §6.29 SHA-3)
             // Derived value = SHAx(base.CKA_VALUE), left-truncated to an
             // explicit CKA_VALUE_LEN when the template supplies one. The
@@ -10181,7 +10718,9 @@ pub fn C_DeriveKey(
             | CKM_SHA512_KEY_DERIVATION
             | CKM_SHA3_256_KEY_DERIVATION
             | CKM_SHA3_384_KEY_DERIVATION
-            | CKM_SHA3_512_KEY_DERIVATION => {
+            | CKM_SHA3_512_KEY_DERIVATION
+            | CKM_SHA512_224_KEY_DERIVATION
+            | CKM_SHA512_256_KEY_DERIVATION => {
                 let base_val = match get_object_value(h_base_key) {
                     Some(v) => v,
                     None => return CKR_KEY_HANDLE_INVALID,
@@ -10203,6 +10742,26 @@ pub fn C_DeriveKey(
                     digest.truncate(want);
                 }
                 digest
+            }
+
+            // SHAKE-256 as a key-derivation function. Unlike the fixed-length
+            // digests above, SHAKE is an extendable-output function: the
+            // derived length is not a property of the mechanism, so
+            // CKA_VALUE_LEN is REQUIRED rather than optional, and the XOF is
+            // squeezed to exactly that many bytes instead of a fixed digest
+            // being truncated (truncating a fixed hash and squeezing an XOF
+            // are different constructions, and only the latter is what this
+            // mechanism names).
+            CKM_SHAKE_256_KEY_DERIVATION => {
+                let base_val = match get_object_value(h_base_key) {
+                    Some(v) => v,
+                    None => return CKR_KEY_HANDLE_INVALID,
+                };
+                let want = match get_attr_ulong(p_template, ul_attribute_count, CKA_VALUE_LEN) {
+                    Some(w) if w > 0 => w as usize,
+                    _ => return CKR_TEMPLATE_INCOMPLETE,
+                };
+                crate::native::derive::shake256_xof(&base_val, want)
             }
 
             // ── ECDH ────────────────────────────────────────────────────────
@@ -10644,7 +11203,7 @@ pub fn C_DeriveKey(
                 } else {
                     // PKCS#11 v3.2 §6.62.3: "Either bExtract or bExpand must
                     // be set to true" — matches the C++ engine's equivalent
-                    // gate (SoftHSM_keygen.cpp:4211).
+                    // gate (SoftHSM_keygen.cpp:4341).
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
                 out
@@ -11007,32 +11566,88 @@ fn pkcs8_private_key_info(attrs: &Attributes) -> Result<Vec<u8>, u32> {
         return Ok(raw);
     }
 
-    // AlgorithmIdentifier for each family §6.7 enumerates.
-    let alg_id: Vec<u8> = match key_type {
+    // Two things vary by key family: the AlgorithmIdentifier, and — the part
+    // this used to get wrong — the CONTENT of the privateKey OCTET STRING.
+    // Emitting the bare stored scalar there produces a structure no other
+    // implementation can parse, and nothing notices until one tries:
+    //
+    //   * EC (RFC 5915): an ECPrivateKey SEQUENCE, not the bare scalar.
+    //   * Edwards / Montgomery (RFC 8410 §7): a CurvePrivateKey — the scalar
+    //     inside a SECOND OCTET STRING.
+    //   * PQC: the raw FIPS byte string (unchanged; see the note below).
+    //
+    // The shapes below were checked against OpenSSL 3.6.3 and reproduce its
+    // PrivateKeyInfo byte-for-byte for P-256/384/521, secp256k1, Ed25519,
+    // Ed448, X25519 and X448.
+    let (alg_id, private_key_content): (Vec<u8>, Vec<u8>) = match key_type {
         // id-ecPublicKey (1.2.840.10045.2.1) + the named-curve parameter.
         CKK_EC => {
-            let curve = attrs.get(&CKA_EC_PARAMS).cloned().ok_or(CKR_KEY_NOT_WRAPPABLE)?;
+            let curve_params = attrs
+                .get(&CKA_EC_PARAMS)
+                .cloned()
+                .ok_or(CKR_KEY_NOT_WRAPPABLE)?;
             let mut inner = vec![
                 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
             ];
-            inner.extend_from_slice(&curve);
-            der_sequence(&inner)
+            inner.extend_from_slice(&curve_params);
+            let curve = crate::crypto::handlers::decode_ec_params(&curve_params)
+                .map_err(|_| CKR_KEY_NOT_WRAPPABLE)?;
+            // ECPrivateKey ::= SEQUENCE { version INTEGER (1),
+            //   privateKey OCTET STRING, parameters [0] OPTIONAL,
+            //   publicKey [1] BIT STRING OPTIONAL }
+            //
+            // `parameters` is omitted because the curve is already in the
+            // AlgorithmIdentifier above (RFC 5915 §3). `publicKey` IS
+            // included, matching OpenSSL: the differential harness compares
+            // the wrapped LENGTH against the C++ engine, which emits
+            // OpenSSL's bytes, so omitting it would leave the two engines
+            // permanently apart on a legal-but-different encoding.
+            //
+            // The private object stores only CKA_EC_PARAMS and the scalar —
+            // there is no CKA_EC_POINT on the private half — so the public
+            // point is recomputed from the scalar, which is exactly what
+            // OpenSSL does internally.
+            let point = ec_public_point_from_scalar(curve, &raw)?;
+            let mut ec_priv = vec![0x02, 0x01, 0x01]; // version 1
+            ec_priv.extend_from_slice(&der_octet_string(&raw));
+            let mut bits = vec![0x00]; // BIT STRING: zero unused bits
+            bits.extend_from_slice(&point);
+            ec_priv.extend_from_slice(&der_tagged(0xA1, &der_tagged(0x03, &bits)));
+            (der_sequence(&inner), der_sequence(&ec_priv))
         }
-        // Ed25519 / X25519 / X448 carry no AlgorithmIdentifier parameters
+        // Edwards and Montgomery carry no AlgorithmIdentifier parameters
         // (RFC 8410 §3: "the parameters field MUST be absent").
-        CKK_EC_EDWARDS => der_sequence(&[0x06, 0x03, 0x2b, 0x65, 0x70]),
+        CKK_EC_EDWARDS => {
+            let curve = attrs.get(&CKA_EC_PARAMS).cloned().unwrap_or_default();
+            // This arm used to hard-code the Ed25519 OID for every Edwards
+            // key, so wrapping an Ed448 key produced a PrivateKeyInfo that
+            // announced Ed25519 over a 57-byte scalar.
+            let oid = if curve.last() == Some(&0x71) {
+                [0x06u8, 0x03, 0x2b, 0x65, 0x71] // id-Ed448
+            } else {
+                [0x06u8, 0x03, 0x2b, 0x65, 0x70] // id-Ed25519
+            };
+            (der_sequence(&oid), der_octet_string(&raw))
+        }
         CKK_EC_MONTGOMERY => {
             let curve = attrs.get(&CKA_EC_PARAMS).cloned().unwrap_or_default();
             let oid = if curve.last() == Some(&0x6f) {
-                [0x06u8, 0x03, 0x2b, 0x65, 0x6f]
+                [0x06u8, 0x03, 0x2b, 0x65, 0x6f] // id-X448
             } else {
-                [0x06u8, 0x03, 0x2b, 0x65, 0x6e]
+                [0x06u8, 0x03, 0x2b, 0x65, 0x6e] // id-X25519
             };
-            der_sequence(&oid)
+            (der_sequence(&oid), der_octet_string(&raw))
         }
         // NIST PQC OIDs are parameter-set-specific; the parameter set is
         // already on the object, and the engine's SPKI builders hold the same
         // table. Reuse it so the two encodings cannot disagree.
+        //
+        // The privateKey content stays the raw FIPS byte string: unlike the
+        // EC families above there is no reference proving a different inner
+        // structure is required, the relevant LAMPS drafts are still moving,
+        // and changing it would put the ML-DSA/ML-KEM import path (and the
+        // OpenPGP BYOK flow on top of it) at risk for no evidenced gain.
+        // Tracked as open question O-1 of the phase-2 plan.
         CKK_ML_DSA | CKK_ML_KEM | CKK_SLH_DSA | CKK_HSS | CKK_XMSS | CKK_XMSSMT => {
             let ps = attrs
                 .get(&CKA_PRIV_PARAM_SET)
@@ -11044,7 +11659,7 @@ fn pkcs8_private_key_info(attrs: &Attributes) -> Result<Vec<u8>, u32> {
             // so the PKCS#8 and SPKI encodings can never name different OIDs
             // for the same key.
             match pqc_alg_id_from_spki(key_type, ps) {
-                Some(a) => a,
+                Some(a) => (a, raw.clone()),
                 None => return Err(CKR_KEY_NOT_WRAPPABLE),
             }
         }
@@ -11055,8 +11670,120 @@ fn pkcs8_private_key_info(attrs: &Attributes) -> Result<Vec<u8>, u32> {
     //                               AlgorithmIdentifier, privateKey OCTET STRING }
     let mut body = vec![0x02, 0x01, 0x00]; // version 0
     body.extend_from_slice(&alg_id);
-    body.extend_from_slice(&der_octet_string(&raw));
+    body.extend_from_slice(&der_octet_string(&private_key_content));
     Ok(der_sequence(&body))
+}
+
+/// Recompute the uncompressed SEC1 public point from a private scalar.
+///
+/// Needed by `pkcs8_private_key_info`: RFC 5915's `ECPrivateKey` carries the
+/// public key in its `[1]` field and OpenSSL always emits it, but this
+/// engine's PRIVATE key objects hold only `CKA_EC_PARAMS` and the scalar —
+/// `CKA_EC_POINT` lives on the public half. Same derivation the ECDH, HPKE
+/// and BIP32 paths already do.
+fn ec_public_point_from_scalar(curve: u32, scalar: &[u8]) -> Result<Vec<u8>, u32> {
+    use crate::crypto::handlers::{CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521};
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    macro_rules! point_of {
+        ($krate:ident) => {{
+            let sk = $krate::SecretKey::from_slice(scalar).map_err(|_| CKR_KEY_NOT_WRAPPABLE)?;
+            sk.public_key().to_encoded_point(false).as_bytes().to_vec()
+        }};
+    }
+    Ok(match curve {
+        CURVE_P256 => point_of!(p256),
+        CURVE_P384 => point_of!(p384),
+        CURVE_P521 => point_of!(p521),
+        CURVE_K256 => point_of!(k256),
+        _ => return Err(CKR_KEY_NOT_WRAPPABLE),
+    })
+}
+
+/// DER TLV with an explicit tag — for the `BIT STRING` (0x03) and the
+/// context-specific `[1]` (0xA1) that RFC 5915's `ECPrivateKey` needs.
+fn der_tagged(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    der_push_len(&mut out, body.len());
+    out.extend_from_slice(body);
+    out
+}
+
+/// The inverse of [`pkcs8_private_key_info`] for the EC families: decompose a
+/// PKCS#8 `PrivateKeyInfo` into the attributes this engine actually stores.
+/// Returns `(CKA_KEY_TYPE, CKA_EC_PARAMS, raw private value)`.
+///
+/// `C_UnwrapKey` needs this because §6.7 makes the wrapped form of a private
+/// key a `PrivateKeyInfo`: what comes back from the unwrap is DER, while the
+/// engine stores (and signs with) the raw scalar. Without it the blob was kept
+/// verbatim, the key type defaulted to `CKK_AES`, and `CKA_EC_PARAMS` was
+/// never stamped — so a key wrapped by the C++ engine, or by this one, could
+/// not be used after unwrapping.
+///
+/// Returns `None` — leaving the payload untouched — for anything it does not
+/// positively recognise. That deliberately includes:
+///   * **RSA**, where this engine's stored form already IS a `PrivateKeyInfo`,
+///     so decomposing would corrupt it; and
+///   * **the PQC families**, whose inner encoding is open question O-1 of the
+///     phase-2 plan and must not be guessed at.
+fn parse_pkcs8_private_key_info(der: &[u8]) -> Option<(u32, Vec<u8>, Vec<u8>)> {
+    const OID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+
+    let (tag, body, used) = der_read_tlv(der)?;
+    if tag != 0x30 || used != der.len() {
+        return None; // not a single SEQUENCE spanning the whole payload
+    }
+    let (tag_v, version, n1) = der_read_tlv(body)?;
+    if tag_v != 0x02 || version != [0x00] {
+        return None; // PrivateKeyInfo version MUST be 0
+    }
+    let (tag_alg, alg, n2) = der_read_tlv(&body[n1..])?;
+    if tag_alg != 0x30 {
+        return None;
+    }
+    let (tag_pk, priv_content, _) = der_read_tlv(&body[n1 + n2..])?;
+    if tag_pk != 0x04 {
+        return None;
+    }
+    let (tag_oid, oid, oid_used) = der_read_tlv(alg)?;
+    if tag_oid != 0x06 {
+        return None;
+    }
+
+    if oid == OID_EC_PUBLIC_KEY {
+        // AlgId ::= SEQUENCE { id-ecPublicKey, namedCurve }; CKA_EC_PARAMS is
+        // that second OID, verbatim, exactly as C_GenerateKeyPair stores it.
+        let ec_params = alg.get(oid_used..)?.to_vec();
+        if ec_params.is_empty() {
+            return None;
+        }
+        // privateKey content is an RFC 5915 ECPrivateKey.
+        let (tag_ec, ec, _) = der_read_tlv(priv_content)?;
+        if tag_ec != 0x30 {
+            return None;
+        }
+        let (tag_ver, _, v1) = der_read_tlv(ec)?;
+        if tag_ver != 0x02 {
+            return None;
+        }
+        let (tag_scalar, scalar, _) = der_read_tlv(ec.get(v1..)?)?;
+        if tag_scalar != 0x04 {
+            return None;
+        }
+        return Some((CKK_EC, ec_params, scalar.to_vec()));
+    }
+
+    // RFC 8410: the OID alone identifies the curve, and the privateKey content
+    // is a CurvePrivateKey — the scalar inside its own OCTET STRING.
+    let key_type = match oid {
+        [0x2b, 0x65, 0x70] | [0x2b, 0x65, 0x71] => CKK_EC_EDWARDS,
+        [0x2b, 0x65, 0x6e] | [0x2b, 0x65, 0x6f] => CKK_EC_MONTGOMERY,
+        _ => return None, // RSA, the PQC families, anything unknown
+    };
+    let (tag_inner, scalar, inner_used) = der_read_tlv(priv_content)?;
+    if tag_inner != 0x04 || inner_used != priv_content.len() {
+        return None;
+    }
+    Some((key_type, der_tagged(0x06, oid), scalar.to_vec()))
 }
 
 /// DER SEQUENCE around `body` (definite length, long form when needed).
@@ -11122,7 +11849,8 @@ pub fn C_WrapKey(
         // primitive C_Encrypt/C_Decrypt's CKM_RSA_PKCS arms already use.
         let is_rsa_pkcs = mech_type == CKM_RSA_PKCS;
         let is_aes_cbc = mech_type == CKM_AES_CBC || mech_type == CKM_AES_CBC_PAD;
-        if !is_aes_wrap && !is_rsa_oaep && !is_rsa_pkcs && !is_aes_cbc {
+        let is_rsa_aes_wrap = mech_type == CKM_RSA_AES_KEY_WRAP;
+        if !is_aes_wrap && !is_rsa_oaep && !is_rsa_pkcs && !is_aes_cbc && !is_rsa_aes_wrap {
             return CKR_MECHANISM_INVALID;
         }
 
@@ -11260,6 +11988,62 @@ pub fn C_WrapKey(
                     Err(_) => return CKR_FUNCTION_FAILED,
                 }
             })
+        } else if is_rsa_aes_wrap {
+            // §3 Wave 4 — CKM_RSA_AES_KEY_WRAP (v3.2 §6.4.7). Composite key
+            // transport: an EPHEMERAL AES key wraps the target with AES-KWP
+            // (RFC 5649), and RSA-OAEP wraps that AES key. The output is the
+            // RSA blob followed by the KWP blob, which is also the order and
+            // framing the C++ engine emits — the two have to agree byte-for-
+            // byte or a key wrapped by one cannot be unwrapped by the other.
+            let (aes_len, hash_alg, mgf, label) =
+                match parse_rsa_aes_key_wrap_params(p_mechanism) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
+                };
+            if wrapping_key.len() < 8 {
+                return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            let n_len = u32::from_le_bytes([
+                wrapping_key[0],
+                wrapping_key[1],
+                wrapping_key[2],
+                wrapping_key[3],
+            ]) as usize;
+            if wrapping_key.len() < 4 + n_len + 1 {
+                return CKR_KEY_TYPE_INCONSISTENT;
+            }
+            let n = rsa::BigUint::from_bytes_be(&wrapping_key[4..4 + n_len]);
+            let e = rsa::BigUint::from_bytes_be(&wrapping_key[4 + n_len..]);
+            let pk = match rsa::RsaPublicKey::new(n, e) {
+                Ok(k) => k,
+                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+            };
+            let mut aes_key = vec![0u8; aes_len];
+            if getrandom::getrandom(&mut aes_key).is_err() {
+                return CKR_FUNCTION_FAILED;
+            }
+            let kwp = match crate::native::encrypt::aes_key_wrap_kwp(&aes_key, &key_to_wrap) {
+                Ok(v) => v,
+                Err(rv) => return rv,
+            };
+            let oaep = match oaep_padding(hash_alg, mgf, &label) {
+                Ok(o) => o,
+                Err(rv) => return rv,
+            };
+            let mut out = with_rng!(rng, {
+                match pk.encrypt(&mut rng, oaep, &aes_key) {
+                    Ok(ct) => ct,
+                    Err(_) => {
+                        aes_key.iter_mut().for_each(|b| *b = 0);
+                        return CKR_FUNCTION_FAILED;
+                    }
+                }
+            });
+            // The ephemeral key exists only to bridge the two wraps; it must
+            // not linger in memory once the RSA blob carries it.
+            aes_key.iter_mut().for_each(|b| *b = 0);
+            out.extend_from_slice(&kwp);
+            out
         } else if is_rsa_pkcs {
             // Raw RSA PKCS#1 v1.5 wrap — same packed-modulus wrapping-key
             // parse as the OAEP arm above, PKCS1v15 padding instead of OAEP.
@@ -11375,7 +12159,8 @@ pub fn C_UnwrapKey(
         // WS-11 Phase 1 — mirrors C_WrapKey's is_rsa_pkcs above.
         let is_rsa_pkcs = mech_type == CKM_RSA_PKCS;
         let is_aes_cbc = mech_type == CKM_AES_CBC || mech_type == CKM_AES_CBC_PAD;
-        if !is_aes_wrap && !is_rsa_oaep && !is_rsa_pkcs && !is_aes_cbc {
+        let is_rsa_aes_wrap = mech_type == CKM_RSA_AES_KEY_WRAP;
+        if !is_aes_wrap && !is_rsa_oaep && !is_rsa_pkcs && !is_aes_cbc && !is_rsa_aes_wrap {
             return CKR_MECHANISM_INVALID;
         }
 
@@ -11441,6 +12226,48 @@ pub fn C_UnwrapKey(
                 Ok(pt) => pt,
                 // §6.16 — wrapped-key decode failure (uniform code).
                 Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+            }
+        } else if is_rsa_aes_wrap {
+            // §3 Wave 4 — the inverse of the composite wrap: the blob is
+            // RSA-OAEP(ephemeral AES key) || AES-KWP(target). The split point
+            // is the RSA modulus length, because OAEP output is always
+            // exactly one modulus wide.
+            let (aes_len, hash_alg, mgf, label) =
+                match parse_rsa_aes_key_wrap_params(p_mechanism) {
+                    Ok(v) => v,
+                    Err(rv) => return rv,
+                };
+            use rsa::pkcs8::DecodePrivateKey;
+            let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&unwrapping_key) {
+                Ok(k) => k,
+                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+            };
+            let n_len = rsa::traits::PublicKeyParts::size(&sk);
+            if wrapped_data.len() <= n_len {
+                // Not even room for the RSA blob plus one KWP block.
+                return CKR_WRAPPED_KEY_LEN_RANGE;
+            }
+            let (rsa_part, kwp_part) = wrapped_data.split_at(n_len);
+            let oaep = match oaep_padding(hash_alg, mgf, &label) {
+                Ok(o) => o,
+                Err(rv) => return rv,
+            };
+            let mut aes_key = match sk.decrypt(oaep, rsa_part) {
+                Ok(k) => k,
+                Err(_) => return CKR_WRAPPED_KEY_INVALID,
+            };
+            // The caller's ulAESKeyBits has to agree with what the blob
+            // actually carried; a mismatch means the two sides disagree about
+            // the wrap, not that the engine should proceed anyway.
+            if aes_key.len() != aes_len {
+                aes_key.iter_mut().for_each(|b| *b = 0);
+                return CKR_WRAPPED_KEY_INVALID;
+            }
+            let out = crate::native::encrypt::aes_key_unwrap_kwp(&aes_key, kwp_part);
+            aes_key.iter_mut().for_each(|b| *b = 0);
+            match out {
+                Ok(v) => v,
+                Err(rv) => return rv,
             }
         } else if is_rsa_pkcs {
             // Raw RSA PKCS#1 v1.5 unwrap — same PKCS8 private-key parse as
@@ -11527,6 +12354,50 @@ pub fn C_UnwrapKey(
 
         // Set key material from unwrap operation
         attrs.insert(CKA_VALUE, key_value);
+
+        // D-2 — §6.7: "For wrapping, a private key is BER-encoded according to
+        // [PKCS #8] PrivateKeyInfo." So for a private key what the unwrap just
+        // produced is DER, not the raw value this engine stores and signs
+        // with, and §6.3.10 says the mechanism contributes CKA_CLASS,
+        // CKA_KEY_TYPE, CKA_EC_PARAMS and CKA_VALUE to the new object.
+        // Previously the DER was stored verbatim, the key type fell through to
+        // the CKK_AES default below, and CKA_EC_PARAMS was never stamped — so
+        // a private key wrapped by the C++ engine (or by this one) was
+        // unusable after unwrapping, and could not even be identified.
+        //
+        // Attempted when the template says CKO_PRIVATE_KEY, or says nothing
+        // and the payload positively parses as a recognised PrivateKeyInfo.
+        // The parser returns None for anything it does not recognise — RSA
+        // included, since this engine's stored RSA form already IS a
+        // PrivateKeyInfo — so a secret key's bytes are never disturbed.
+        let template_class = attrs
+            .get(&CKA_CLASS)
+            .filter(|v| v.len() >= 4)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        if matches!(template_class, Some(CKO_PRIVATE_KEY) | None) {
+            if let Some(value) = attrs.get(&CKA_VALUE).cloned() {
+                if let Some((blob_key_type, ec_params, scalar)) =
+                    parse_pkcs8_private_key_info(&value)
+                {
+                    // A template CKA_KEY_TYPE that contradicts the wrapped
+                    // blob is a caller error, not something to resolve
+                    // silently in one direction or the other.
+                    let template_key_type = attrs
+                        .get(&CKA_KEY_TYPE)
+                        .filter(|v| v.len() >= 4)
+                        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+                    if let Some(t) = template_key_type {
+                        if t != blob_key_type {
+                            return CKR_TEMPLATE_INCONSISTENT;
+                        }
+                    }
+                    store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+                    store_ulong(&mut attrs, CKA_KEY_TYPE, blob_key_type);
+                    attrs.insert(CKA_EC_PARAMS, ec_params);
+                    attrs.insert(CKA_VALUE, scalar);
+                }
+            }
+        }
 
         // Apply defaults for missing attributes
         if !attrs.contains_key(&CKA_CLASS) {
@@ -11888,6 +12759,59 @@ pub fn C_UnwrapKeyAuthenticated(
         // Set key material from unwrap operation
         attrs.insert(CKA_VALUE, key_value);
 
+        // CORRECTED 2026-09-07 (phase-5 §6 comment sweep): this paragraph was
+        // copied from the plain C_UnwrapKey arm above, where it is accurate.
+        // It is NOT accurate here: under CKM_AES_GCM authenticated wrap,
+        // NEITHER engine transports a private key as PKCS#8 -- both move the
+        // RAW key value (C++'s C_WrapKeyAuthenticated encrypts CKA_VALUE
+        // directly, SoftHSM_keygen.cpp:2608-2621; this engine's own
+        // C_WrapKeyAuthenticated calls plain get_object_value, never
+        // pkcs8_private_key_info, unlike the plain-wrap arm which does). So
+        // the PKCS#8 parse below is inert for a genuine CKM_AES_GCM round
+        // trip -- harmless (`parse_pkcs8_private_key_info` returns None on a
+        // raw scalar, so the `if let` simply does nothing), but the comment
+        // hid a real, suspected-but-not-yet-scenario-confirmed gap: C++'s
+        // accept side for a raw scalar (`setECPrivateKey`,
+        // SoftHSM_keygen.cpp:8872-8879) only recognises exactly 32 or 48
+        // bytes (P-256/P-384). `setEDPrivateKey` (Edwards/Montgomery,
+        // SoftHSM_keygen.cpp:8936) has no raw-scalar path at all, and P-521's
+        // 66-byte scalar matches neither size -- both fall through to
+        // PKCS8Decode(), which a raw scalar is not. So a private key this
+        // engine (or C++ itself) wraps under CKM_AES_GCM for anything but
+        // P-256/P-384 EC may be unrecoverable on C++'s unwrap side. Needs a
+        // differential scenario (none exists today -- neither
+        // WrapKeyAuthenticated nor UnwrapKeyAuthenticated appears anywhere in
+        // tests/differential/) before treating this as more than a
+        // code-reading finding.
+        let template_class = attrs
+            .get(&CKA_CLASS)
+            .filter(|v| v.len() >= 4)
+            .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+        if matches!(template_class, Some(CKO_PRIVATE_KEY) | None) {
+            if let Some(value) = attrs.get(&CKA_VALUE).cloned() {
+                if let Some((blob_key_type, ec_params, scalar)) =
+                    parse_pkcs8_private_key_info(&value)
+                {
+                    // A template CKA_KEY_TYPE that contradicts the wrapped
+                    // blob is a caller error, not something to resolve
+                    // silently in one direction or the other.
+                    let template_key_type = attrs
+                        .get(&CKA_KEY_TYPE)
+                        .filter(|v| v.len() >= 4)
+                        .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]]));
+                    if let Some(t) = template_key_type {
+                        if t != blob_key_type {
+                            return CKR_TEMPLATE_INCONSISTENT;
+                        }
+                    }
+                    store_ulong(&mut attrs, CKA_CLASS, CKO_PRIVATE_KEY);
+                    store_ulong(&mut attrs, CKA_KEY_TYPE, blob_key_type);
+                    attrs.insert(CKA_EC_PARAMS, ec_params);
+                    attrs.insert(CKA_VALUE, scalar);
+                }
+            }
+        }
+
         // Apply defaults for missing attributes
         if !attrs.contains_key(&CKA_CLASS) {
             store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
@@ -11969,6 +12893,17 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SHA384_RSA_PKCS_PSS
             | CKM_SHA512_RSA_PKCS_PSS
             | CKM_SHA3_384_RSA_PKCS
+            | CKM_SHA1_RSA_PKCS
+            | CKM_SHA1_RSA_PKCS_PSS
+            | CKM_MD5_RSA_PKCS
+            | CKM_SHA224_RSA_PKCS
+            | CKM_SHA224_RSA_PKCS_PSS
+            | CKM_SHA3_224_RSA_PKCS
+            | CKM_SHA3_224_RSA_PKCS_PSS
+            | CKM_SHA3_256_RSA_PKCS
+            | CKM_SHA3_256_RSA_PKCS_PSS
+            | CKM_SHA3_512_RSA_PKCS
+            | CKM_SHA3_512_RSA_PKCS_PSS
             | CKM_SHA3_384_RSA_PKCS_PSS
             | CKM_ECDSA_SHA256
             | CKM_ECDSA_SHA384
@@ -11986,6 +12921,10 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SHA512_256_HMAC
             | CKM_SHA3_224_HMAC
             | CKM_SHA3_384_HMAC
+            | CKM_SHA224_HMAC
+            | CKM_SHA_1_HMAC
+            | CKM_MD5_HMAC
+            | CKM_AES_CMAC
             | CKM_KMAC_128
             | CKM_KMAC_256
             // WS-3/G2 (2026-09-01): CKM_AES_GMAC's tag is a deterministic
@@ -15679,6 +16618,117 @@ mod attr_integrity_ffi_tests {
         );
     }
 
+    /// C2 (2026-09-07) — §4.7 Table 25. A trust object binds trusted usages
+    /// to ONE certificate and is looked up by `CKA_ISSUER` +
+    /// `CKA_SERIAL_NUMBER` (footnote 1), so those are mandatory; and
+    /// `CKA_HASH_OF_CERTIFICATE` is mandatory once the object vouches for
+    /// anything (footnote 2), because that is when binding the assertion to
+    /// the right certificate matters.
+    ///
+    /// The class previously had no validation arm at all: any template was
+    /// accepted, and the conformance suite's own WP4a section asserted that
+    /// an illegal one (trust asserted, no certificate hash) succeeded.
+    #[test]
+    fn trust_object_requires_the_attributes_that_identify_its_certificate() {
+        let _guard = test_lock::acquire();
+        setup();
+        let issuer = b"CN=Test Root CA".to_vec();
+        let serial = vec![0x01u8, 0x02, 0x03];
+        let cert_hash = vec![0xabu8; 20];
+
+        let base = |with: &[(u32, Vec<u8>)]| -> Attributes {
+            let mut a = Attributes::new();
+            store_ulong(&mut a, CKA_CLASS, CKO_TRUST);
+            for (t, v) in with {
+                a.insert(*t, v.clone());
+            }
+            a
+        };
+
+        // Footnote 1 — neither identifying attribute may be omitted.
+        assert_eq!(
+            create_object_from_attrs(SESSION, base(&[(CKA_SERIAL_NUMBER, serial.clone())]))
+                .expect_err("no CKA_ISSUER"),
+            CKR_TEMPLATE_INCOMPLETE
+        );
+        assert_eq!(
+            create_object_from_attrs(SESSION, base(&[(CKA_ISSUER, issuer.clone())]))
+                .expect_err("no CKA_SERIAL_NUMBER"),
+            CKR_TEMPLATE_INCOMPLETE
+        );
+
+        // Footnote 2 — asserting trust without saying WHICH certificate.
+        let trusted = crate::constants::CKT_TRUSTED.to_le_bytes().to_vec();
+        assert_eq!(
+            create_object_from_attrs(
+                SESSION,
+                base(&[
+                    (CKA_ISSUER, issuer.clone()),
+                    (CKA_SERIAL_NUMBER, serial.clone()),
+                    (CKA_TRUST_SERVER_AUTH, trusted.clone()),
+                ])
+            )
+            .expect_err("trust asserted with no certificate hash"),
+            CKR_TEMPLATE_INCOMPLETE
+        );
+
+        // ...but an object that vouches for NOTHING is exempt, which is the
+        // whole point of footnote 2's wording.
+        let not_trusted = crate::constants::CKT_NOT_TRUSTED.to_le_bytes().to_vec();
+        create_object_from_attrs(
+            SESSION,
+            base(&[
+                (CKA_ISSUER, issuer.clone()),
+                (CKA_SERIAL_NUMBER, serial.clone()),
+                (CKA_TRUST_SERVER_AUTH, not_trusted),
+            ]),
+        )
+        .expect("NOT_TRUSTED asserts nothing, so no certificate hash is required");
+
+        // CK_TRUST is a closed set of five values.
+        assert_eq!(
+            create_object_from_attrs(
+                SESSION,
+                base(&[
+                    (CKA_ISSUER, issuer.clone()),
+                    (CKA_SERIAL_NUMBER, serial.clone()),
+                    (CKA_HASH_OF_CERTIFICATE, cert_hash.clone()),
+                    (CKA_TRUST_IPSEC_IKE, 99u32.to_le_bytes().to_vec()),
+                ])
+            )
+            .expect_err("99 is not a CK_TRUST value"),
+            CKR_ATTRIBUTE_VALUE_INVALID
+        );
+
+        // The legal, fully-specified form, and its §4.7 prose defaults.
+        let h = create_object_from_attrs(
+            SESSION,
+            base(&[
+                (CKA_ISSUER, issuer),
+                (CKA_SERIAL_NUMBER, serial),
+                (CKA_HASH_OF_CERTIFICATE, cert_hash),
+                (CKA_TRUST_SERVER_AUTH, trusted),
+            ]),
+        )
+        .expect("a fully-specified trust object must be creatable");
+        assert_eq!(
+            obj_bool(h, CKA_PRIVATE),
+            Some(false),
+            "§4.7: CKA_PRIVATE defaults to CK_FALSE on a trust object"
+        );
+        assert_eq!(
+            obj_bool(h, CKA_MODIFIABLE),
+            Some(true),
+            "§4.7: CKA_MODIFIABLE defaults to CK_TRUE"
+        );
+        let alg = obj_attr(h, CKA_NAME_HASH_ALGORITHM).expect("CKA_NAME_HASH_ALGORITHM stored");
+        assert_eq!(
+            u32::from_le_bytes([alg[0], alg[1], alg[2], alg[3]]),
+            crate::constants::CKM_SHA_1,
+            "its row says it defaults to SHA-1 if not present"
+        );
+    }
+
     /// R3 (2026-09-06) — "only objects that are considered Storage Objects can
     /// be created on a token, other kinds of object are generally built-in and
     /// attempting to create new objects of those kinds will result in an
@@ -17488,6 +18538,115 @@ mod return_code_ffi_tests {
             C_FindObjects(BOGUS_SESSION, &mut h, 1, &mut n),
             CKR_SESSION_HANDLE_INVALID,
         );
+    }
+
+    /// §3 Waves 2-3 (2026-09-07, decision D2) — SHA-1 and MD5, through the
+    /// real PKCS#11 digest path, against their published "abc" vectors
+    /// (FIPS 180-4 and RFC 1321 respectively).
+    ///
+    /// Both are broken for security purposes and must never be selected for
+    /// new signatures. They are advertised because callers still have to
+    /// VERIFY existing artefacts, and because two engines disagreeing about
+    /// their mechanism sets is its own hazard — the divergence this whole
+    /// parity item exists to remove.
+    #[test]
+    fn wave2_3_legacy_digests_match_published_vectors() {
+        let _guard = test_lock::acquire();
+        setup();
+        fn hex(t: &str) -> Vec<u8> {
+            (0..t.len()).step_by(2).map(|i| u8::from_str_radix(&t[i..i + 2], 16).unwrap()).collect()
+        }
+        for (mech, name, want) in [
+            (CKM_SHA_1, "SHA-1", "a9993e364706816aba3e25717850c26c9cd0d89d"),
+            (CKM_MD5, "MD5", "900150983cd24fb0d6963f7d28e17f72"),
+        ] {
+            let want = hex(want);
+            assert!(
+                crate::constants::SUPPORTED_MECHS.contains(&mech),
+                "{name}: must be advertised"
+            );
+            let mut m: [usize; 3] = [mech as usize, 0, 0];
+            assert_eq!(C_DigestInit(SESSION, m.as_mut_ptr() as *mut u8), CKR_OK, "{name}: init");
+            let mut len: u32 = 0;
+            assert_eq!(
+                C_Digest(SESSION, b"abc".as_ptr() as *mut u8, 3, std::ptr::null_mut(), &mut len),
+                CKR_OK,
+                "{name}: size query"
+            );
+            assert_eq!(len as usize, want.len(), "{name}: digest length");
+            let mut out = vec![0u8; len as usize];
+            assert_eq!(
+                C_Digest(SESSION, b"abc".as_ptr() as *mut u8, 3, out.as_mut_ptr(), &mut len),
+                CKR_OK,
+                "{name}: digest"
+            );
+            assert_eq!(out, want, "{name}: must match the published vector");
+        }
+    }
+
+    /// §3 Wave 1 (2026-09-07) — the five digests added for C++ parity, driven
+    /// through the REAL PKCS#11 digest path (C_DigestInit → size query →
+    /// C_Digest), not through native::derive::digest, which is a separate
+    /// function with its own dispatch. Checked against the published NIST
+    /// "abc" vectors, so the oracle is the standard rather than the crate the
+    /// engine happens to use.
+    ///
+    /// Before this the mechanisms existed as constants but had no DigestCtx
+    /// variant, so C_DigestInit answered CKR_MECHANISM_INVALID.
+    #[test]
+    fn wave1_digests_match_nist_abc_vectors_through_the_pkcs11_path() {
+        let _guard = test_lock::acquire();
+        setup();
+        fn hex(t: &str) -> Vec<u8> {
+            (0..t.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&t[i..i + 2], 16).unwrap())
+                .collect()
+        }
+        let msg = b"abc";
+        for (mech, name, want) in [
+            (CKM_SHA224, "SHA-224",
+             "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7"),
+            (CKM_SHA512_224, "SHA-512/224",
+             "4634270f707b6a54daae7530460842e20e37ed265ceee9a43e8924aa"),
+            (CKM_SHA512_256, "SHA-512/256",
+             "53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23"),
+            (CKM_SHA3_224, "SHA3-224",
+             "e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf"),
+            (CKM_SHA3_384, "SHA3-384",
+             "ec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b298d88cea927ac7f539f1edf228376d25"),
+        ] {
+            let want = hex(want);
+            assert!(
+                crate::constants::SUPPORTED_MECHS.contains(&mech),
+                "{name}: must be advertised through C_GetMechanismList"
+            );
+            let mut m: [usize; 3] = [mech as usize, 0, 0];
+            assert_eq!(
+                C_DigestInit(SESSION, m.as_mut_ptr() as *mut u8),
+                CKR_OK,
+                "{name}: C_DigestInit"
+            );
+            // §5.7.2 — a null output pointer is a size query and must NOT
+            // consume the operation.
+            let mut len: u32 = 0;
+            assert_eq!(
+                C_Digest(SESSION, msg.as_ptr() as *mut u8, msg.len() as u32,
+                         std::ptr::null_mut(), &mut len),
+                CKR_OK,
+                "{name}: size query"
+            );
+            assert_eq!(len as usize, want.len(), "{name}: advertised digest length");
+
+            let mut out = vec![0u8; len as usize];
+            assert_eq!(
+                C_Digest(SESSION, msg.as_ptr() as *mut u8, msg.len() as u32,
+                         out.as_mut_ptr(), &mut len),
+                CKR_OK,
+                "{name}: C_Digest"
+            );
+            assert_eq!(out, want, "{name}: digest of \"abc\" must match the NIST vector");
+        }
     }
 
     // ── Digest one-shot after Update (§5.13) ────────────────────────────────
@@ -19537,6 +20696,87 @@ mod multipart_sign_verify_ffi_tests {
                 one_shot_verify(SESSION, mech, HMAC_KEY, msg, &sig),
                 CKR_OK,
                 "{name}: C_Verify must accept the MAC it just produced"
+            );
+        }
+    }
+
+    /// §3 Wave 1 (2026-09-07) — `CKM_SHA224_HMAC` plus the six remaining
+    /// `_HMAC_GENERAL` variants, which the C++ engine has always advertised.
+    ///
+    /// The `_GENERAL` forms take a `CK_MAC_GENERAL_PARAMS` giving the number
+    /// of bytes to keep, so this asserts BOTH that the full-length MAC equals
+    /// the RustCrypto reference and that a truncated request returns exactly
+    /// that prefix — truncation to the wrong end, or ignoring the parameter,
+    /// would both still "work" without this.
+    #[test]
+    fn wave1_hmac_family_matches_reference_and_truncates_correctly() {
+        let _guard = test_lock::acquire();
+        setup();
+        use hmac::Mac;
+        let msg = b"wave 1 HMAC parity";
+
+        macro_rules! reference {
+            ($d:ty) => {{
+                let mut m = hmac::Hmac::<$d>::new_from_slice(&HMAC_KEY_BYTES).unwrap();
+                m.update(msg);
+                m.finalize().into_bytes().to_vec()
+            }};
+        }
+
+        // (plain, general, full reference MAC)
+        let cases: [(u32, u32, Vec<u8>, &str); 6] = [
+            (CKM_SHA224_HMAC, CKM_SHA224_HMAC_GENERAL, reference!(sha2::Sha224), "SHA-224"),
+            (CKM_SHA512_224_HMAC, CKM_SHA512_224_HMAC_GENERAL, reference!(sha2::Sha512_224), "SHA-512/224"),
+            (CKM_SHA512_256_HMAC, CKM_SHA512_256_HMAC_GENERAL, reference!(sha2::Sha512_256), "SHA-512/256"),
+            (CKM_SHA3_224_HMAC, CKM_SHA3_224_HMAC_GENERAL, reference!(sha3::Sha3_224), "SHA3-224"),
+            (CKM_SHA3_384_HMAC, CKM_SHA3_384_HMAC_GENERAL, reference!(sha3::Sha3_384), "SHA3-384"),
+            (CKM_RIPEMD160_HMAC, CKM_RIPEMD160_HMAC_GENERAL, reference!(ripemd::Ripemd160), "RIPEMD-160"),
+        ];
+
+        for (plain, general, want, name) in cases {
+            for m in [plain, general] {
+                assert!(
+                    crate::constants::SUPPORTED_MECHS.contains(&m),
+                    "{name}: mechanism 0x{m:x} must be advertised"
+                );
+            }
+            // Full-length MAC through the plain mechanism.
+            let sig = one_shot_sign(SESSION, plain, HMAC_KEY, msg);
+            assert_eq!(sig, want, "{name}: MAC must equal the RustCrypto reference");
+            assert_eq!(
+                one_shot_verify(SESSION, plain, HMAC_KEY, msg, &sig),
+                CKR_OK,
+                "{name}: verify its own MAC"
+            );
+
+            // _GENERAL with a truncated length must return that exact prefix.
+            let keep = want.len() - 4;
+            // CK_MAC_GENERAL_PARAMS is a bare `typedef CK_ULONG`, so it is
+            // the NATIVE word width here (8 bytes on LP64), not a u32 — the
+            // engine reads it with ulong(), and a 4-byte value is rejected as
+            // CKR_MECHANISM_PARAM_INVALID.
+            let params = (keep as std::os::raw::c_ulong).to_le_bytes();
+            // CK_MECHANISM is {mechanism, pParameter, ulParameterLen}.
+            let mut mech: [usize; 3] =
+                [general as usize, params.as_ptr() as usize, params.len()];
+            assert_eq!(
+                C_SignInit(SESSION, mech.as_mut_ptr() as *mut u8, HMAC_KEY),
+                CKR_OK,
+                "{name}: C_SignInit(_GENERAL)"
+            );
+            let mut out = vec![0u8; want.len()];
+            let mut out_len = out.len() as u32;
+            assert_eq!(
+                C_Sign(SESSION, msg.as_ptr() as *mut u8, msg.len() as u32,
+                       out.as_mut_ptr(), &mut out_len),
+                CKR_OK,
+                "{name}: C_Sign(_GENERAL)"
+            );
+            assert_eq!(out_len as usize, keep, "{name}: _GENERAL honours the requested length");
+            assert_eq!(
+                &out[..keep],
+                &want[..keep],
+                "{name}: truncated MAC must be the PREFIX of the full one"
             );
         }
     }
@@ -23177,7 +24417,7 @@ mod param_struct_width_tests {
     //
     // Adjudication, 2026-08-14. BIP32 is a PQCToday vendor extension
     // (CKM_VENDOR_DEFINED | 0x105c) and appears nowhere in the OASIS header or
-    // the v3.2 text, so `src/lib/pkcs11/pkcs11t.h:2139` is the only definition
+    // the v3.2 text, so `src/lib/pkcs11/pkcs11t.h:2148` is the only definition
     // there is — and the C++ engine already implements exactly it. This engine
     // read two u32s at offsets 0 and 4, taking pNext as flags. The header
     // wins; these tests pin that.
@@ -23978,6 +25218,214 @@ mod ed25519ctx_ffi_dispatch_tests {
         assert!(
             vk.verify_strict(&msg, &signature).is_ok(),
             "independent verifier must accept the engine-produced signature"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pkcs8_encoding_fixture_tests {
+    //! D-2 — `pkcs8_private_key_info` must emit a real PKCS#8
+    //! `PrivateKeyInfo`, asserted against **OpenSSL 3.6.3** rather than
+    //! against the engine's own idea of the format.
+    //!
+    //! This distinction is the entire point of the item. The previous encoder
+    //! put the bare stored scalar in the `privateKey` OCTET STRING for every
+    //! key type. That round-trips perfectly through itself, so any test
+    //! written against the engine would have passed — and no other
+    //! implementation could parse the result. The C++ engine, which delegates
+    //! to OpenSSL, produced 152 bytes for a wrapped P-256 key where this
+    //! engine produced 72.
+    use super::*;
+    use crate::crypto::handlers::{CURVE_ED448, CURVE_X448};
+
+    const P256: &[u8] = include_bytes!("../kat/pkcs8/p256.p8.der");
+    const P384: &[u8] = include_bytes!("../kat/pkcs8/p384.p8.der");
+    const P521: &[u8] = include_bytes!("../kat/pkcs8/p521.p8.der");
+    const K256: &[u8] = include_bytes!("../kat/pkcs8/k256.p8.der");
+    const ED25519: &[u8] = include_bytes!("../kat/pkcs8/ed25519.p8.der");
+    const ED448: &[u8] = include_bytes!("../kat/pkcs8/ed448.p8.der");
+    const X25519: &[u8] = include_bytes!("../kat/pkcs8/x25519.p8.der");
+    const X448: &[u8] = include_bytes!("../kat/pkcs8/x448.p8.der");
+
+    /// Pull the curve identifier and the raw private scalar back out of a
+    /// reference encoding, so the engine is asked to encode *that same key*
+    /// and the comparison is of ENCODING only.
+    fn dissect(der: &[u8], is_ec: bool) -> (Vec<u8>, Vec<u8>) {
+        let (t, body, used) = der_read_tlv(der).expect("outer SEQUENCE");
+        assert_eq!(t, 0x30, "PrivateKeyInfo is a SEQUENCE");
+        assert_eq!(used, der.len(), "fixture is exactly one TLV");
+        let (_, _, n1) = der_read_tlv(body).expect("version");
+        let (_, alg, n2) = der_read_tlv(&body[n1..]).expect("AlgorithmIdentifier");
+        let (_, priv_content, _) = der_read_tlv(&body[n1 + n2..]).expect("privateKey");
+
+        if is_ec {
+            // AlgId ::= SEQUENCE { OID id-ecPublicKey, OID namedCurve }
+            let (_, _, o1) = der_read_tlv(alg).expect("id-ecPublicKey");
+            let curve_tlv = alg[o1..].to_vec(); // CKA_EC_PARAMS is the curve OID TLV
+            // privateKey content is an ECPrivateKey SEQUENCE.
+            let (_, ec, _) = der_read_tlv(priv_content).expect("ECPrivateKey");
+            let (_, _, v) = der_read_tlv(ec).expect("version 1");
+            let (_, scalar, _) = der_read_tlv(&ec[v..]).expect("privateKey OCTET STRING");
+            (curve_tlv, scalar.to_vec())
+        } else {
+            // AlgId ::= SEQUENCE { OID }; CurvePrivateKey ::= OCTET STRING.
+            let (_, scalar, _) = der_read_tlv(priv_content).expect("CurvePrivateKey");
+            (alg.to_vec(), scalar.to_vec())
+        }
+    }
+
+    fn attrs_for(key_type: u32, ec_params: &[u8], scalar: &[u8]) -> Attributes {
+        let mut a = Attributes::new();
+        store_ulong(&mut a, CKA_CLASS, CKO_PRIVATE_KEY);
+        store_ulong(&mut a, CKA_KEY_TYPE, key_type);
+        a.insert(CKA_EC_PARAMS, ec_params.to_vec());
+        a.insert(CKA_VALUE, scalar.to_vec());
+        a
+    }
+
+    fn check(name: &str, fixture: &[u8], key_type: u32) {
+        let is_ec = key_type == CKK_EC;
+        let (ec_params, scalar) = dissect(fixture, is_ec);
+        let got = pkcs8_private_key_info(&attrs_for(key_type, &ec_params, &scalar))
+            .unwrap_or_else(|rv| panic!("{name}: encoder refused the key (0x{rv:x})"));
+        assert_eq!(
+            got.len(),
+            fixture.len(),
+            "{name}: encoded length must match OpenSSL's ({} vs {})",
+            got.len(),
+            fixture.len()
+        );
+        assert_eq!(
+            got, fixture,
+            "{name}: encoding must be byte-identical to OpenSSL's PrivateKeyInfo"
+        );
+    }
+
+    /// The four short-Weierstrass curves: `privateKey` holds an RFC 5915
+    /// `ECPrivateKey`, including the `[1] publicKey` OpenSSL always emits —
+    /// which this engine has to recompute from the scalar, since a private
+    /// key object carries no `CKA_EC_POINT`.
+    #[test]
+    fn ec_pkcs8_matches_openssl_byte_for_byte() {
+        check("P-256", P256, CKK_EC);
+        check("P-384", P384, CKK_EC);
+        check("P-521", P521, CKK_EC);
+        check("secp256k1", K256, CKK_EC);
+    }
+
+    /// Edwards and Montgomery: `privateKey` holds an RFC 8410 §7
+    /// `CurvePrivateKey`, i.e. the scalar wrapped in a SECOND OCTET STRING.
+    #[test]
+    fn edwards_and_montgomery_pkcs8_match_openssl_byte_for_byte() {
+        check("Ed25519", ED25519, CKK_EC_EDWARDS);
+        check("Ed448", ED448, CKK_EC_EDWARDS);
+        check("X25519", X25519, CKK_EC_MONTGOMERY);
+        check("X448", X448, CKK_EC_MONTGOMERY);
+    }
+
+    /// The decoder must read a `PrivateKeyInfo` produced by **OpenSSL**, not
+    /// merely one produced by this engine. That is the whole interop claim:
+    /// a key wrapped by the C++ engine (which delegates to OpenSSL) has to be
+    /// usable after `C_UnwrapKey` here.
+    #[test]
+    fn openssl_pkcs8_parses_back_to_the_raw_stored_attributes() {
+        for (name, fixture, key_type, is_ec) in [
+            ("P-256", P256, CKK_EC, true),
+            ("P-384", P384, CKK_EC, true),
+            ("P-521", P521, CKK_EC, true),
+            ("secp256k1", K256, CKK_EC, true),
+            ("Ed25519", ED25519, CKK_EC_EDWARDS, false),
+            ("Ed448", ED448, CKK_EC_EDWARDS, false),
+            ("X25519", X25519, CKK_EC_MONTGOMERY, false),
+            ("X448", X448, CKK_EC_MONTGOMERY, false),
+        ] {
+            let (want_params, want_scalar) = dissect(fixture, is_ec);
+            let (got_kt, got_params, got_scalar) = parse_pkcs8_private_key_info(fixture)
+                .unwrap_or_else(|| panic!("{name}: OpenSSL PrivateKeyInfo must parse"));
+            assert_eq!(got_kt, key_type, "{name}: key type from the algorithm OID");
+            assert_eq!(got_params, want_params, "{name}: CKA_EC_PARAMS");
+            assert_eq!(got_scalar, want_scalar, "{name}: raw scalar");
+            assert_eq!(
+                got_scalar.len(),
+                want_scalar.len(),
+                "{name}: scalar must be the fixed-width raw value, not DER"
+            );
+        }
+    }
+
+    /// Round-trip through this engine: encode, then decode, and land back on
+    /// exactly the attributes we started from.
+    #[test]
+    fn encode_then_decode_round_trips() {
+        for (name, fixture, key_type, is_ec) in [
+            ("P-384", P384, CKK_EC, true),
+            ("Ed448", ED448, CKK_EC_EDWARDS, false),
+            ("X25519", X25519, CKK_EC_MONTGOMERY, false),
+        ] {
+            let (params, scalar) = dissect(fixture, is_ec);
+            let der = pkcs8_private_key_info(&attrs_for(key_type, &params, &scalar))
+                .expect("encode");
+            let (kt, p, s) = parse_pkcs8_private_key_info(&der).expect("decode");
+            assert_eq!((kt, p, s), (key_type, params, scalar), "{name}: round-trip");
+        }
+    }
+
+    /// The parser must decline anything it does not positively recognise,
+    /// leaving the payload untouched. RSA matters most: this engine already
+    /// STORES an RSA private key as a PrivateKeyInfo, so decomposing one would
+    /// corrupt it. The PQC families are declined for a different reason —
+    /// their inner encoding is an open question, and guessing would risk the
+    /// import path.
+    #[test]
+    fn unrecognised_algorithms_are_declined_not_guessed() {
+        // A structurally valid PrivateKeyInfo naming rsaEncryption.
+        let rsa_oid = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+        let alg = der_sequence(&[&der_tagged(0x06, &rsa_oid)[..], &[0x05, 0x00][..]].concat());
+        let mut body = vec![0x02, 0x01, 0x00];
+        body.extend_from_slice(&alg);
+        body.extend_from_slice(&der_octet_string(&[0x42u8; 64]));
+        assert!(
+            parse_pkcs8_private_key_info(&der_sequence(&body)).is_none(),
+            "an RSA PrivateKeyInfo must be left alone — the engine stores that form as-is"
+        );
+
+        // Raw key material that happens to start with 0x30 must not be
+        // mistaken for DER.
+        assert!(
+            parse_pkcs8_private_key_info(&[0x30u8; 32]).is_none(),
+            "raw bytes beginning 0x30 are not a PrivateKeyInfo"
+        );
+        assert!(
+            parse_pkcs8_private_key_info(&[]).is_none(),
+            "an empty payload is not a PrivateKeyInfo"
+        );
+    }
+
+    /// Ed448 and X448 must announce their OWN algorithm OID. The Edwards arm
+    /// used to hard-code id-Ed25519 for every `CKK_EC_EDWARDS` key, so an
+    /// Ed448 key was wrapped as a PrivateKeyInfo claiming Ed25519 over a
+    /// 57-byte scalar — self-consistent, and wrong to every other parser.
+    #[test]
+    fn the_448_curves_announce_their_own_oid() {
+        let (params, scalar) = dissect(ED448, false);
+        let der = pkcs8_private_key_info(&attrs_for(CKK_EC_EDWARDS, &params, &scalar))
+            .expect("Ed448 must encode");
+        assert!(
+            der.windows(5).any(|w| w == [0x06, 0x03, 0x2b, 0x65, 0x71]),
+            "Ed448 PrivateKeyInfo must carry id-Ed448 (1.3.101.113)"
+        );
+        assert!(
+            !der.windows(5).any(|w| w == [0x06, 0x03, 0x2b, 0x65, 0x70]),
+            "and must NOT carry id-Ed25519"
+        );
+        let _ = (CURVE_ED448, CURVE_X448); // curve ids used by the decoder side
+
+        let (params, scalar) = dissect(X448, false);
+        let der = pkcs8_private_key_info(&attrs_for(CKK_EC_MONTGOMERY, &params, &scalar))
+            .expect("X448 must encode");
+        assert!(
+            der.windows(5).any(|w| w == [0x06, 0x03, 0x2b, 0x65, 0x6f]),
+            "X448 PrivateKeyInfo must carry id-X448 (1.3.101.111)"
         );
     }
 }
