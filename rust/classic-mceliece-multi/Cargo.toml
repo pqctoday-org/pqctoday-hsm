@@ -1,0 +1,28 @@
+[workspace]
+# Temporary, for standalone `cargo check`/`test` while this crate isn't wired into
+# the parent rust/ workspace yet (Phase 1 step 3). Removed once
+# rust/Cargo.toml depends on this crate by path — at that point it becomes an
+# implicit member of that workspace instead, the same way every other vendored
+# fork here (fips204-patched, etc.) does.
+
+[package]
+name = "classic-mceliece-multi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Classic McEliece (all 10 NIST/ISO parameter sets, pure Rust) — a fork of classic-mceliece-rust 3.1.0 that compiles every parameter set into one build instead of exactly one per Cargo feature."
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+rand = { version = "0.8", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+zeroize = { version = "1.5", default-features = false }
+
+[profile.dev]
+opt-level = 3
+
+[profile.test]
+opt-level = 3
