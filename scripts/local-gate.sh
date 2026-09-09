@@ -534,6 +534,17 @@ if [[ $RUN_TLS_INTEROP == 1 ]]; then
      cargo test --quiet --test secp384r1mlkem1024_interop -- --ignored --test-threads=1"
 fi
 
+# Shared between --javajce and --javajce-remote (both grep a Surefire log for
+# this same aggregate line) — must be defined unconditionally, not inside
+# either block below: running --javajce-remote alone used to crash on
+# "AGG_PATTERN: unbound variable" under this script's own `set -u`, since it
+# was previously declared only inside the --javajce block and nothing ever
+# ran --javajce-remote by itself to notice. Found 2026-09-08 doing exactly
+# that for the first time. Definition itself (why this exact pattern, the
+# end-anchor, the dual INFO/ERROR prefix) is unchanged — see the comment that
+# used to sit directly above it, now above --javajce's own use of it below.
+AGG_PATTERN='^\[(INFO|ERROR)\][[:space:]]+Tests run: [0-9]+, Failures: 0, Errors: 0, Skipped: [0-9]+$'
+
 if [[ $RUN_JAVAJCE == 1 ]]; then
   # JDK 27's javax.crypto.KDF (JEP 478) and the JEP 527 TLS 1.3 hybrid-KEM
   # path this provider bridges to both need the JDK 27 RC — only
@@ -606,8 +617,8 @@ if [[ $RUN_JAVAJCE == 1 ]]; then
   # ", Time elapsed: ... -- in <ClassName>" text, hence the `$` anchor;
   # it is tagged [ERROR] instead of [INFO] on a real failure, hence
   # matching either prefix (a genuine failure still won't match the
-  # "Failures: 0" requirement itself).
-  AGG_PATTERN='^\[(INFO|ERROR)\][[:space:]]+Tests run: [0-9]+, Failures: 0, Errors: 0, Skipped: [0-9]+$'
+  # "Failures: 0" requirement itself). Definition (shared with --javajce-remote
+  # below) lives above both blocks now — see that comment for why.
   if dexec_sandbox "rm -rf $GATE_DEST/JavaJCE && mkdir -p $GATE_DEST" \
      && docker cp "$JAVAJCE_DIR" "$SANDBOX_CONTAINER:$GATE_DEST/JavaJCE" >/dev/null 2>&1 \
      && dexec_sandbox "cd $GATE_DEST/JavaJCE && \
