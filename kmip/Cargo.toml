@@ -267,3 +267,15 @@ softhsmrustv3 = { path = "../rust", features = ["test-support"] }
 fips204 = { path = "../rust/fips204-patched" }
 fips205 = { path = "../rust/fips205-patched" }
 hbs-lms = { path = "../rust/hbs-lms-patched" }
+
+# `kmip` is its own standalone crate (not a member of the `rust/` workspace),
+# so `rust/Cargo.toml`'s equivalent override doesn't apply here — `[profile.*]`
+# sections are read only from a workspace ROOT manifest, and this crate's
+# `softhsmrustv3` path dependency pulls in `classic-mceliece-multi` too.
+# Without this, an unoptimized debug-mode McEliece keygen takes minutes
+# (Goppa code generation) instead of well under a second — the same fix
+# already applied in `rust/Cargo.toml`.
+[profile.dev.package.classic-mceliece-multi]
+opt-level = 3
+[profile.test.package.classic-mceliece-multi]
+opt-level = 3

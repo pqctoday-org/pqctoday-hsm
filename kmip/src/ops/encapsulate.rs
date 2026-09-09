@@ -459,7 +459,19 @@ pub(crate) fn is_frodokem(a: KmipAlgorithm) -> bool {
 /// Classic McEliece (BSI TR-02102-1 §2.4.2) — scoped to `mceliece6688128`
 /// only (implementation plan Phase 0.5).
 pub(crate) fn is_classic_mceliece(a: KmipAlgorithm) -> bool {
-    matches!(a, KmipAlgorithm::ClassicMcEliece6688128)
+    matches!(
+        a,
+        KmipAlgorithm::ClassicMcEliece348864
+            | KmipAlgorithm::ClassicMcEliece348864F
+            | KmipAlgorithm::ClassicMcEliece460896
+            | KmipAlgorithm::ClassicMcEliece460896F
+            | KmipAlgorithm::ClassicMcEliece6688128
+            | KmipAlgorithm::ClassicMcEliece6688128F
+            | KmipAlgorithm::ClassicMcEliece6960119
+            | KmipAlgorithm::ClassicMcEliece6960119F
+            | KmipAlgorithm::ClassicMcEliece8192128
+            | KmipAlgorithm::ClassicMcEliece8192128F
+    )
 }
 
 /// Persist the derived shared secret as a fresh managed `SecretData`

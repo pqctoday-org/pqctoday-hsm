@@ -944,6 +944,15 @@ fn canonical_name(a: KmipAlgorithm) -> String {
         FrodoKem976Aes | FrodoKem976Shake => "FrodoKEM-976",
         FrodoKem1344Aes | FrodoKem1344Shake => "FrodoKEM-1344",
         ClassicMcEliece6688128 => "Classic-McEliece-6688128",
+        ClassicMcEliece6960119 => "Classic-McEliece-6960119",
+        ClassicMcEliece8192128 => "Classic-McEliece-8192128",
+        ClassicMcEliece348864 => "Classic-McEliece-348864",
+        ClassicMcEliece348864F => "Classic-McEliece-348864f",
+        ClassicMcEliece460896 => "Classic-McEliece-460896",
+        ClassicMcEliece460896F => "Classic-McEliece-460896f",
+        ClassicMcEliece6688128F => "Classic-McEliece-6688128f",
+        ClassicMcEliece6960119F => "Classic-McEliece-6960119f",
+        ClassicMcEliece8192128F => "Classic-McEliece-8192128f",
         Hss => "HSS",
         // Matches `KmipAlgorithm::spec_name()`'s strings exactly — see the
         // note there on why this isn't the `HybridDualSignRequirement`
@@ -1013,9 +1022,21 @@ pub(crate) fn parse_algorithm(s: &str) -> Result<KmipAlgorithm> {
         "FrodoKEM-640" => FrodoKem640Aes,
         "FrodoKEM-976" => FrodoKem976Aes,
         "FrodoKEM-1344" => FrodoKem1344Aes,
-        // BSI TR-02102-1 §2.4.2 — only one parameter set is implemented
-        // (see implementation plan Phase 0.5), so no ambiguity here.
+        // BSI TR-02102-1 §2.4.2 — all 10 parameter sets are separate
+        // `KmipAlgorithm` variants (implementation plan 2026-09-08, §3.2),
+        // each with its own unique `canonical_name` string, so unlike
+        // FrodoKEM's AES/SHAKE collapse above there is no ambiguity to
+        // resolve here.
         "Classic-McEliece-6688128" => ClassicMcEliece6688128,
+        "Classic-McEliece-6960119" => ClassicMcEliece6960119,
+        "Classic-McEliece-8192128" => ClassicMcEliece8192128,
+        "Classic-McEliece-348864" => ClassicMcEliece348864,
+        "Classic-McEliece-348864f" => ClassicMcEliece348864F,
+        "Classic-McEliece-460896" => ClassicMcEliece460896,
+        "Classic-McEliece-460896f" => ClassicMcEliece460896F,
+        "Classic-McEliece-6688128f" => ClassicMcEliece6688128F,
+        "Classic-McEliece-6960119f" => ClassicMcEliece6960119F,
+        "Classic-McEliece-8192128f" => ClassicMcEliece8192128F,
         // LAMPS composite signatures (draft-19) — exact names, matches
         // `canonical_name`'s output for these three variants.
         "ML-DSA-44-RSA2048-PSS" => CompositeMlDsa44Rsa2048PssSha256,
@@ -1117,9 +1138,14 @@ fn native_generate_keypair(
                 native::generate_frodokem_keypair(session, ps, cka_id, label),
             )
         }
-        ClassicMcEliece6688128 => {
+        ClassicMcEliece348864 | ClassicMcEliece348864F
+        | ClassicMcEliece460896 | ClassicMcEliece460896F
+        | ClassicMcEliece6688128 | ClassicMcEliece6688128F
+        | ClassicMcEliece6960119 | ClassicMcEliece6960119F
+        | ClassicMcEliece8192128 | ClassicMcEliece8192128F => {
             // BSI TR-02102-1 §2.4.2. No seeded/deterministic keygen exists
-            // for Classic McEliece in this engine.
+            // for Classic McEliece in this engine, for any of the 10
+            // parameter sets.
             if seed.is_some() {
                 return Err(KmipError::failed(
                     ResultReason::OperationNotSupported,

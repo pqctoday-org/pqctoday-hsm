@@ -286,6 +286,40 @@ fn training_permissive_allows_everything() {
 
 const HYBRID_PARTNER_TAG: (&str, &str) = ("pqctoday-hybrid-partner", "X25519");
 
+/// BSI's allow-list is exactly its 3 recommended parameter sets (each with
+/// its `f` sibling) — implementation plan 2026-09-08 §3.2: "BSI presets
+/// allow-list exactly BSI's six (460896, 6688128, 8192128 + f), not
+/// 348864/6960119." Named separately from the 4 not-allowed sets below so
+/// each test can assert the precise boundary, not just "some subset works".
+const BSI_ALLOWED_MCELIECE: [KmipAlgorithm; 6] = [
+    KmipAlgorithm::ClassicMcEliece460896,
+    KmipAlgorithm::ClassicMcEliece460896F,
+    KmipAlgorithm::ClassicMcEliece6688128,
+    KmipAlgorithm::ClassicMcEliece6688128F,
+    KmipAlgorithm::ClassicMcEliece8192128,
+    KmipAlgorithm::ClassicMcEliece8192128F,
+];
+
+const BSI_NOT_ALLOWED_MCELIECE: [KmipAlgorithm; 4] = [
+    KmipAlgorithm::ClassicMcEliece348864,
+    KmipAlgorithm::ClassicMcEliece348864F,
+    KmipAlgorithm::ClassicMcEliece6960119,
+    KmipAlgorithm::ClassicMcEliece6960119F,
+];
+
+const ALL_MCELIECE: [KmipAlgorithm; 10] = [
+    KmipAlgorithm::ClassicMcEliece348864,
+    KmipAlgorithm::ClassicMcEliece348864F,
+    KmipAlgorithm::ClassicMcEliece460896,
+    KmipAlgorithm::ClassicMcEliece460896F,
+    KmipAlgorithm::ClassicMcEliece6688128,
+    KmipAlgorithm::ClassicMcEliece6688128F,
+    KmipAlgorithm::ClassicMcEliece6960119,
+    KmipAlgorithm::ClassicMcEliece6960119F,
+    KmipAlgorithm::ClassicMcEliece8192128,
+    KmipAlgorithm::ClassicMcEliece8192128F,
+];
+
 #[test]
 #[ignore = "op-layer suite: run via local gate (--include-ignored)"]
 fn bsi_allows_frodokem_and_mceliece_with_hybrid_partner_tag() {
@@ -296,12 +330,30 @@ fn bsi_allows_frodokem_and_mceliece_with_hybrid_partner_tag() {
         )),
         "BSI must ALLOW FrodoKEM-976 with the hybrid-partner tag"
     );
-    assert!(
-        policy_allowed(&try_create_key_pair(
-            &deps, KmipAlgorithm::ClassicMcEliece6688128, 0, "kem", &[HYBRID_PARTNER_TAG]
-        )),
-        "BSI must ALLOW Classic-McEliece-6688128 with the hybrid-partner tag"
-    );
+    for alg in BSI_ALLOWED_MCELIECE {
+        assert!(
+            policy_allowed(&try_create_key_pair(&deps, alg, 0, "kem", &[HYBRID_PARTNER_TAG])),
+            "BSI must ALLOW {alg:?} with the hybrid-partner tag"
+        );
+    }
+}
+
+/// The precision-improvement half of the same claim: BSI's allow-list names
+/// exactly 6 of the 10 parameter sets, so the other 4 (348864/348864f and
+/// 6960119/6960119f — BSI recommends against these two, unlike its other
+/// picks) must be denied by the plain algorithm allowlist rule EVEN WITH
+/// the hybrid-partner tag present, distinct from the missing-tag denial
+/// below (Rule 3).
+#[test]
+#[ignore = "op-layer suite: run via local gate (--include-ignored)"]
+fn bsi_denies_the_four_mceliece_sets_it_does_not_recommend() {
+    let deps = deps_for("bsi-tr-02102.yaml");
+    for alg in BSI_NOT_ALLOWED_MCELIECE {
+        assert!(
+            policy_denied(&try_create_key_pair(&deps, alg, 0, "kem", &[HYBRID_PARTNER_TAG])),
+            "BSI must DENY {alg:?} (not one of its 6 recommended parameter sets), even with the hybrid-partner tag"
+        );
+    }
 }
 
 #[test]
@@ -312,17 +364,20 @@ fn bsi_denies_frodokem_and_mceliece_without_hybrid_partner_tag() {
         policy_denied(&try_create_key_pair(&deps, KmipAlgorithm::FrodoKem976Aes, 0, "kem", &[])),
         "BSI must DENY FrodoKEM-976 without the hybrid-partner tag (Rule 3)"
     );
-    assert!(
-        policy_denied(&try_create_key_pair(&deps, KmipAlgorithm::ClassicMcEliece6688128, 0, "kem", &[])),
-        "BSI must DENY Classic-McEliece-6688128 without the hybrid-partner tag (Rule 3)"
-    );
+    for alg in BSI_ALLOWED_MCELIECE {
+        assert!(
+            policy_denied(&try_create_key_pair(&deps, alg, 0, "kem", &[])),
+            "BSI must DENY {alg:?} without the hybrid-partner tag (Rule 3)"
+        );
+    }
 }
 
 /// The regional contrast the codebase's own docs describe: FIPS-only and
 /// CNSA 2.0 explicitly do NOT recognize FrodoKEM/Classic McEliece (they're
 /// not NIST-standardized), so both must deny them outright — regardless of
-/// any hybrid-partner tag — while BSI allows them. Same engine, same ops;
-/// the regulator's stance is a policy file, not a code path.
+/// any hybrid-partner tag, and regardless of which of the 10 parameter sets
+/// — while BSI allows its 6. Same engine, same ops; the regulator's stance
+/// is a policy file, not a code path.
 #[test]
 #[ignore = "op-layer suite: run via local gate (--include-ignored)"]
 fn fips_and_cnsa_deny_frodokem_and_mceliece_bsi_allows() {
@@ -334,12 +389,14 @@ fn fips_and_cnsa_deny_frodokem_and_mceliece_bsi_allows() {
             )),
             "{policy} must DENY FrodoKEM-976 (not NIST-standardized)"
         );
-        assert!(
-            policy_denied(&try_create_key_pair(
-                &deps, KmipAlgorithm::ClassicMcEliece6688128, 0, "kem", &[HYBRID_PARTNER_TAG, CNSA_TAG]
-            )),
-            "{policy} must DENY Classic-McEliece-6688128 (not NIST-standardized)"
-        );
+        for alg in ALL_MCELIECE {
+            assert!(
+                policy_denied(&try_create_key_pair(
+                    &deps, alg, 0, "kem", &[HYBRID_PARTNER_TAG, CNSA_TAG]
+                )),
+                "{policy} must DENY {alg:?} (not NIST-standardized)"
+            );
+        }
     }
     let bsi_deps = deps_for("bsi-tr-02102.yaml");
     assert!(policy_allowed(&try_create_key_pair(

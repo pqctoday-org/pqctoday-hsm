@@ -157,16 +157,60 @@ fn frodokem_1344_shake_round_trip() {
     round_trip(KmipAlgorithm::FrodoKem1344Shake, 32);
 }
 
-// ── Classic McEliece (BSI TR-02102-1 §2.4.2) — scoped to mceliece6688128
-// only (implementation plan Phase 0.5). Keygen is slow in debug builds
-// (Goppa code generation) — run with --release for a fast pass. ─────────
+// ── Classic McEliece (BSI TR-02102-1 §2.4.2) — all 10 parameter sets
+// (implementation plan 2026-09-08). No longer `#[ignore]`d: the
+// `[profile.dev.package.classic-mceliece-multi]` override in this crate's
+// own `Cargo.toml` (a standalone crate, not a `rust/` workspace member, so
+// it needed its own copy of that fix) makes debug-mode keygen fast for
+// every parameter set, eliminating the "minutes-slow in debug builds"
+// problem this ignore used to guard against. ─────────────────────────────
 
-/// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
-/// takes minutes in an unoptimized debug build — too slow for every CI
-/// run. Run manually with `cargo test --release -- --ignored
-/// classic_mceliece_6688128_round_trip` (release mode is fast).
 #[test]
-#[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
+fn classic_mceliece_348864_round_trip() {
+    round_trip(KmipAlgorithm::ClassicMcEliece348864, 32);
+}
+
+#[test]
+fn classic_mceliece_348864f_round_trip() {
+    round_trip(KmipAlgorithm::ClassicMcEliece348864F, 32);
+}
+
+#[test]
+fn classic_mceliece_460896_round_trip() {
+    round_trip(KmipAlgorithm::ClassicMcEliece460896, 32);
+}
+
+#[test]
+fn classic_mceliece_460896f_round_trip() {
+    round_trip(KmipAlgorithm::ClassicMcEliece460896F, 32);
+}
+
+#[test]
 fn classic_mceliece_6688128_round_trip() {
     round_trip(KmipAlgorithm::ClassicMcEliece6688128, 32);
+}
+
+#[test]
+fn classic_mceliece_6688128f_round_trip() {
+    round_trip(KmipAlgorithm::ClassicMcEliece6688128F, 32);
+}
+
+#[test]
+fn classic_mceliece_6960119_round_trip() {
+    round_trip(KmipAlgorithm::ClassicMcEliece6960119, 32);
+}
+
+#[test]
+fn classic_mceliece_6960119f_round_trip() {
+    round_trip(KmipAlgorithm::ClassicMcEliece6960119F, 32);
+}
+
+#[test]
+fn classic_mceliece_8192128_round_trip() {
+    round_trip(KmipAlgorithm::ClassicMcEliece8192128, 32);
+}
+
+#[test]
+fn classic_mceliece_8192128f_round_trip() {
+    round_trip(KmipAlgorithm::ClassicMcEliece8192128F, 32);
 }
