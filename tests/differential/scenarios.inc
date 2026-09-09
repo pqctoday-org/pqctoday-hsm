@@ -27,6 +27,13 @@ static CK_KEY_TYPE ktRsa      = CKK_RSA;
 static CK_KEY_TYPE ktMlDsa    = CKK_ML_DSA;
 static CK_KEY_TYPE ktMlKem    = CKK_ML_KEM;
 
+// Classic McEliece (BSI TR-02102-1 §2.4.2) vendor extension codepoints —
+// values from src/lib/vendor_mechanisms.h, not pkcs11t.h (no OASIS
+// assignment exists for this key type / these mechanisms at all).
+static const CK_MECHANISM_TYPE CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN = 0x80000003UL;
+static const CK_MECHANISM_TYPE CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE  = 0x80000004UL;
+static CK_KEY_TYPE ktClassicMcEliece = 0x80000002UL; // CKK_PQCTODAY_CLASSIC_MCELIECE
+
 static CK_BYTE kLabel[] = "p11diff";
 static CK_BYTE kId[]    = {0xd1, 0xff};
 
@@ -113,6 +120,20 @@ add({"env.mechanism_info_aes_cbc", "env",
              {CKF_WRAP,"CKF_WRAP"},{CKF_UNWRAP,"CKF_UNWRAP"},{CKF_DERIVE,"CKF_DERIVE"},
          };
          for (const auto& f : fl_) r.put(std::string("flag.") + f.n, (mi.flags & f.v) ? "1" : "0");
+     }});
+
+add({"env.mechanism_info_classic_mceliece", "env",
+     "CK_MECHANISM_INFO key-size range for CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN — "
+     "min/max MUST be the smallest/largest public-key size across all 10 parameter sets "
+     "(261120 / 1357824 bytes), matching FrodoKEM's existing multi-variant convention",
+     {CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN}, true, false,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE) {
+         CK_MECHANISM_INFO mi; memset(&mi, 0, sizeof mi);
+         CK_RV rv = e.fl->C_GetMechanismInfo(e.slot, CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN, &mi);
+         r.rv("info", rv);
+         if (rv != CKR_OK) return;
+         r.num("min", mi.ulMinKeySize); r.num("max", mi.ulMaxKeySize);
+         r.put("flag.CKF_GENERATE_KEY_PAIR", (mi.flags & CKF_GENERATE_KEY_PAIR) ? "1" : "0");
      }});
 
 add({"env.library_info", "env", "C_GetInfo — versions, identity strings, flags",
@@ -1072,6 +1093,52 @@ add({"errors.unsupported_curve", "errors",
          r.rv("missing_ec_params", e.fl->C_GenerateKeyPair(s, &m, pub2, 4, priv, 4, &hPub, &hPriv));
      }});
 
+add({"errors.classic_mceliece_parameter_set", "errors",
+     "Classic McEliece CKA_PARAMETER_SET is mandatory, no silent default (§3.1 of the "
+     "all-parameter-sets plan) — missing it entirely and an out-of-range value (never a "
+     "wrong-f swap between two real sizes — that is a legitimate different key, not an "
+     "error) must both be refused, never silently defaulted to a real parameter set",
+     {CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         CK_MECHANISM m = { CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN, NULL_PTR, 0 };
+         CK_ATTRIBUTE priv[] = {
+             ATTR(CKA_CLASS,       &clPrivate,          sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,    &ktClassicMcEliece,   sizeof ktClassicMcEliece),
+             ATTR(CKA_TOKEN,       &bFalse,              sizeof bFalse),
+             ATTR(CKA_DECAPSULATE, &bTrue,               sizeof bTrue),
+         };
+
+         // Missing CKA_PARAMETER_SET entirely → must be refused, not defaulted.
+         CK_ATTRIBUTE pubMissing[] = {
+             ATTR(CKA_CLASS,       &clPublic,           sizeof clPublic),
+             ATTR(CKA_KEY_TYPE,    &ktClassicMcEliece,   sizeof ktClassicMcEliece),
+             ATTR(CKA_TOKEN,       &bFalse,              sizeof bFalse),
+             ATTR(CKA_ENCAPSULATE, &bTrue,               sizeof bTrue),
+         };
+         CK_OBJECT_HANDLE hPub = CK_INVALID_HANDLE, hPriv = CK_INVALID_HANDLE;
+         CK_RV rv = e.fl->C_GenerateKeyPair(s, &m, pubMissing, 4, priv, 4, &hPub, &hPriv);
+         r.rv("missing_parameter_set", rv);
+         r.put("missing_parameter_set.outcome", rv == CKR_OK ? "key_produced" : "refused");
+
+         // An out-of-range CKP_CLASSIC_MCELIECE_* value (the real range is
+         // 0x1..0xA, densely contiguous — implementation plan §5.3) — 0x00
+         // and 0xFF are both outside it on either end.
+         for (CK_ULONG bad : {(CK_ULONG)0x00, (CK_ULONG)0xFF}) {
+             CK_ATTRIBUTE pubBad[] = {
+                 ATTR(CKA_CLASS,         &clPublic,          sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      &ktClassicMcEliece,  sizeof ktClassicMcEliece),
+                 ATTR(CKA_PARAMETER_SET, &bad,                sizeof bad),
+                 ATTR(CKA_TOKEN,         &bFalse,             sizeof bFalse),
+                 ATTR(CKA_ENCAPSULATE,   &bTrue,              sizeof bTrue),
+             };
+             hPub = hPriv = CK_INVALID_HANDLE;
+             std::string tag = "out_of_range_0x" + to_hex((CK_BYTE*)&bad, 1);
+             rv = e.fl->C_GenerateKeyPair(s, &m, pubBad, 5, priv, 4, &hPub, &hPriv);
+             r.rv(tag, rv);
+             r.put(tag + ".outcome", rv == CKR_OK ? "key_produced" : "refused");
+         }
+     }});
+
 add({"errors.find_objects_arguments", "errors",
      "W5: a null template with a non-zero count must not silently widen to find-all",
      {}, true, true,
@@ -1969,6 +2036,122 @@ add({"create.encapsulate.ml_kem_all_params", "create",
              std::vector<CK_BYTE> v1, v2;
              bool ok = val(hEnc, v1) && val(hDec, v2) && !v1.empty() && v1 == v2;
              r.put(tag + ".shared_secret_agrees", ok ? "yes" : "no");
+         }
+     }});
+
+add({"create.generate_key_pair.classic_mceliece_all_params", "create",
+     "Classic McEliece keygen across all 10 parameter sets (BSI TR-02102-1 §2.4.2) — "
+     "CKA_PARAMETER_SET round trip, same convention as create.generate_key_pair.ml_kem_all_params",
+     {CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         struct PS { const char* name; CK_ULONG ps; };
+         const PS sets[] = {
+             {"348864", 0x2}, {"348864f", 0x3}, {"460896", 0x4}, {"460896f", 0x5},
+             {"6688128", 0x1}, {"6688128f", 0x6}, {"6960119", 0x7}, {"6960119f", 0x8},
+             {"8192128", 0x9}, {"8192128f", 0xA},
+         };
+         for (const PS& p : sets) {
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic,           sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      &ktClassicMcEliece,   sizeof ktClassicMcEliece),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,             sizeof bFalse),
+                 ATTR(CKA_ENCAPSULATE,   &bTrue,              sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate,          sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      &ktClassicMcEliece,   sizeof ktClassicMcEliece),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,             sizeof bFalse),
+                 ATTR(CKA_DECAPSULATE,   &bTrue,              sizeof bTrue),
+                 ATTR(CKA_SENSITIVE,     &bFalse,             sizeof bFalse),
+                 ATTR(CKA_EXTRACTABLE,   &bTrue,              sizeof bTrue),
+             };
+             gen_pair(e, r, s, std::string("gen_") + p.name,
+                      CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN, pub, 5, priv, 7);
+         }
+     }});
+
+add({"create.encapsulate.classic_mceliece_all_params", "create",
+     "C_EncapsulateKey / C_DecapsulateKey across all 10 Classic McEliece parameter sets, "
+     "plus a ciphertext bit-flip: implicit rejection means decapsulate MUST still return "
+     "CKR_OK but recover a DIFFERENT (wrong) shared secret, never an error — unlike a "
+     "signature verify, there is no separate 'invalid' outcome to check for",
+     {CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN, CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         if (!e.Encapsulate || !e.Decapsulate) { r.put("fn", "ABSENT"); return; }
+         struct PS { const char* name; CK_ULONG ps; };
+         const PS sets[] = {
+             {"348864", 0x2}, {"348864f", 0x3}, {"460896", 0x4}, {"460896f", 0x5},
+             {"6688128", 0x1}, {"6688128f", 0x6}, {"6960119", 0x7}, {"6960119f", 0x8},
+             {"8192128", 0x9}, {"8192128f", 0xA},
+         };
+         for (const PS& p : sets) {
+             std::string tag = p.name;
+             CK_ATTRIBUTE pub[] = {
+                 ATTR(CKA_CLASS,         &clPublic,           sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      &ktClassicMcEliece,   sizeof ktClassicMcEliece),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,             sizeof bFalse),
+                 ATTR(CKA_ENCAPSULATE,   &bTrue,              sizeof bTrue),
+             };
+             CK_ATTRIBUTE priv[] = {
+                 ATTR(CKA_CLASS,         &clPrivate,          sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      &ktClassicMcEliece,   sizeof ktClassicMcEliece),
+                 ATTR(CKA_PARAMETER_SET, (CK_VOID_PTR)&p.ps, sizeof p.ps),
+                 ATTR(CKA_TOKEN,         &bFalse,             sizeof bFalse),
+                 ATTR(CKA_DECAPSULATE,   &bTrue,              sizeof bTrue),
+             };
+             CK_MECHANISM km = { CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN, NULL_PTR, 0 };
+             CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+             CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 5, priv, 5, &hPub, &hPriv);
+             r.rv(tag + ".keygen", rv);
+             if (rv != CKR_OK) continue;
+             CK_ATTRIBUTE st[] = {
+                 ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+                 ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+                 ATTR(CKA_VALUE_LEN,   &len32,     sizeof len32),
+                 ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+                 ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+                 ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+             };
+             CK_MECHANISM em = { CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE, NULL_PTR, 0 };
+             // 208 bytes covers the largest ciphertext across all 10 sets
+             // (6688128/6688128f/8192128/8192128f — see paramSetToSizes).
+             CK_BYTE ct[256]; CK_ULONG ctLen = sizeof ct;
+             CK_OBJECT_HANDLE hEnc = CK_INVALID_HANDLE, hDec = CK_INVALID_HANDLE;
+             rv = e.Encapsulate(s, &em, hPub, st, 6, ct, &ctLen, &hEnc);
+             r.rv(tag + ".encapsulate", rv);
+             if (rv == CKR_OK) record_bytes(r, tag + ".ciphertext", ct, ctLen, ByteView::LEN);
+             if (rv != CKR_OK) continue;
+             rv = e.Decapsulate(s, &em, hPriv, st, 6, ct, ctLen, &hDec);
+             r.rv(tag + ".decapsulate", rv);
+             auto val = [&](CK_OBJECT_HANDLE h, std::vector<CK_BYTE>& out) {
+                 CK_ATTRIBUTE a = { CKA_VALUE, NULL_PTR, 0 };
+                 if (e.fl->C_GetAttributeValue(s, h, &a, 1) != CKR_OK || a.ulValueLen == (CK_ULONG)-1) return false;
+                 out.resize(a.ulValueLen); a.pValue = out.data();
+                 return e.fl->C_GetAttributeValue(s, h, &a, 1) == CKR_OK;
+             };
+             std::vector<CK_BYTE> v1, v2;
+             bool ok = val(hEnc, v1) && val(hDec, v2) && !v1.empty() && v1 == v2;
+             r.put(tag + ".shared_secret_agrees", ok ? "yes" : "no");
+             if (rv != CKR_OK) continue;
+
+             // Implicit rejection: flip one ciphertext bit and decapsulate
+             // again with the SAME private key. Classic McEliece has no
+             // separate "ciphertext invalid" error path — C_DecapsulateKey
+             // MUST still return CKR_OK, but the recovered secret must now
+             // DIFFER from the untampered one (never silently match, which
+             // would mean the tamper had no effect on decryption at all).
+             CK_BYTE ctTampered[256];
+             memcpy(ctTampered, ct, ctLen);
+             ctTampered[0] ^= 0xff;
+             CK_OBJECT_HANDLE hDecTampered = CK_INVALID_HANDLE;
+             rv = e.Decapsulate(s, &em, hPriv, st, 6, ctTampered, ctLen, &hDecTampered);
+             r.rv(tag + ".decapsulate_tampered", rv);
+             std::vector<CK_BYTE> v3;
+             bool tamperedDiffers = (rv == CKR_OK) && val(hDecTampered, v3) && !v3.empty() && v3 != v1;
+             r.put(tag + ".tampered_ciphertext_yields_different_secret", tamperedDiffers ? "yes" : "no");
          }
      }});
 
