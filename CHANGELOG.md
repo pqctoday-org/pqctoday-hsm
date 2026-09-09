@@ -8,6 +8,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.30.0] — 2026-09-09
+
+### Added
+
+- **PKCS#11 v3.2 KEM template attributes.** `CKA_ENCAPSULATE_TEMPLATE` and
+  `CKA_DECAPSULATE_TEMPLATE` are now implemented and enforced on both engines.
+- **`CKO_TRUST` objects** implemented on both engines.
+- C++ gains `CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS` (engine, provider, and JavaJCE
+  proof).
+- A per-`CKM_*` mechanism ledger (`docs/pkcs11-mechanism-ledger.json`) pins
+  every shared mechanism's key-size range against its own spec citation, with
+  a gate step that ratchets against drift.
+
+### Changed
+
+- **Rust engine reaches full PKCS#11 mechanism parity with C++** (41
+  mechanisms, delivered in three waves).
+- Spec precedence rule adopted: PKCS#11 v3.2 is the baseline; the unpublished
+  v3.3 draft fills gaps or corrects plain errors, with every v3.3-derived
+  constant correction registered and cited (see `CLAUDE.md`).
+
+### Fixed
+
+- **Rust private keys now export a real PKCS#8 `PrivateKeyInfo`** instead of a
+  malformed wire encoding (D-2).
+- `CKA_VALUE` is no longer exposed on RSA keys; SPKI is now mirrored to the
+  matching private key. `CKA_VALUE` on stateful-hash private keys corrected.
+- `CKM_ECDSA_SHA1` on P-256 could never verify — fixed.
+- Stateful-hash verify (HSS/XMSS/XMSS-MT) now routes `C_VerifySignatureInit`
+  through `StatefulVerifyInit` on C++, matching the Rust engine.
+- `CK_ULONG` cap and a payload-vs-key size ambiguity on AES key wrap resolved.
+- `local-gate.sh`: four steps that ran their full suite twice, an
+  `--javajce-remote` crash on an unbound variable, two stale
+  openssl-provider assertions, and a missing `SeedableRng` import in the
+  wasm+acvp build.
+
 ## [0.29.0] — 2026-09-08
 
 ### Changed — BREAKING
