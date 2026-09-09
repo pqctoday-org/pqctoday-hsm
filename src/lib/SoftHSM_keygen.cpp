@@ -1666,7 +1666,12 @@ CK_RV SoftHSM::C_WrapKey
 		// already the serialised key material.  This avoids the
 		// newPrivateKey → PKCS8Encode() round-trip which can fail in
 		// the WASM build when OpenSSL cannot re-encode PQC keys.
-		if (keyType == CKK_ML_KEM || keyType == CKK_ML_DSA || keyType == CKK_SLH_DSA)
+		// CKK_PQCTODAY_CLASSIC_MCELIECE has no registered AlgorithmIdentifier
+		// OID at all (the IETF draft defines none), so it belongs on this
+		// raw-CKA_VALUE path unconditionally — not just as a WASM-build
+		// workaround, since there is no PKCS#8 form to produce on ANY build.
+		if (keyType == CKK_ML_KEM || keyType == CKK_ML_DSA || keyType == CKK_SLH_DSA ||
+		    keyType == CKK_PQCTODAY_CLASSIC_MCELIECE)
 		{
 			if (isKeyPrivate)
 			{

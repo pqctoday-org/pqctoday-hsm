@@ -17,9 +17,20 @@ option(ENABLE_PEDANTIC "Enable pedantic compile mode" OFF)
 option(ENABLE_STRICT "Enable strict compile mode" ON)
 option(ENABLE_STATIC "Build static libraries" ON)
 option(WITH_OBJECTSTORE_BACKEND_DB "Build with object store backend database (SQLite3)" OFF)
+# Classic McEliece (BSI TR-02102-1 §2.4.2) has no OpenSSL-EVP route — oqs-provider
+# dropped it in 0.8.0+ (open-quantum-safe/oqs-provider discussion #646) — so the C++
+# engine calls liboqs's own C API directly, the first non-OpenSSL crypto dependency
+# in this engine (a documented, deliberate exception to the EVP-only rule; see
+# docs/implementation-plan-classic-mceliece-all-parameter-sets-2026-09-08.md §5.1,
+# decision D-2). Off by default under Emscripten (D-4): liboqs is not cross-compiled
+# for wasm here, so the C++ wasm build never advertises McEliece.
+option(WITH_LIBOQS "Link liboqs for Classic McEliece (no OpenSSL EVP route exists)" ON)
 
 if(EMSCRIPTEN AND WITH_OBJECTSTORE_BACKEND_DB)
     set(WITH_OBJECTSTORE_BACKEND_DB OFF CACHE BOOL "Force disabled for WebAssembly backend" FORCE)
+endif()
+if(EMSCRIPTEN AND WITH_LIBOQS)
+    set(WITH_LIBOQS OFF CACHE BOOL "Force disabled for WebAssembly backend (D-4)" FORCE)
 endif()
 
 # ECC and EdDSA are always enabled — required for PQC roadmap.
@@ -98,6 +109,25 @@ if(OPENSSL_VERSION VERSION_LESS "3.5.0")
     message(FATAL_ERROR "OpenSSL >= 3.5.0 is required (found ${OPENSSL_VERSION})")
 endif()
 include(GenerateExportHeader)
+
+# ---- liboqs (Classic McEliece — D-2) -----------------------------------------
+#
+# Cache variables set BEFORE add_subdirectory so liboqs's own CMakeLists.txt
+# (which reads them as ordinary cache variables, not arguments) picks them up.
+# Exact identifiers and settings confirmed by two standalone spike builds (P0-2,
+# container x86_64 and native macOS arm64) before this add_subdirectory call was
+# ever written — both produced a working liboqs.a with exactly the 10 requested
+# KEMs enabled and zero build warnings in McEliece's own sources.
+if(WITH_LIBOQS)
+    set(OQS_BUILD_ONLY_LIB ON CACHE BOOL "" FORCE)
+    set(OQS_USE_OPENSSL ON CACHE BOOL "" FORCE)
+    # AVX2 + runtime CPU detection in one binary, matching the P0-2 spike.
+    set(OQS_DIST_BUILD ON CACHE BOOL "" FORCE)
+    set(OQS_MINIMAL_BUILD
+        "KEM_classic_mceliece_348864;KEM_classic_mceliece_348864f;KEM_classic_mceliece_460896;KEM_classic_mceliece_460896f;KEM_classic_mceliece_6688128;KEM_classic_mceliece_6688128f;KEM_classic_mceliece_6960119;KEM_classic_mceliece_6960119f;KEM_classic_mceliece_8192128;KEM_classic_mceliece_8192128f"
+        CACHE STRING "" FORCE)
+    add_subdirectory(src/lib/crypto/oqs/liboqs EXCLUDE_FROM_ALL)
+endif()
 
 # ---- Object Store -----------------------------------------------------------
 

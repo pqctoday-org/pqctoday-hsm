@@ -55,7 +55,8 @@ struct AsymAlgo
 		EDDSA,
 		MLDSA,    // ML-DSA (FIPS 204)
 		SLHDSA,   // SLH-DSA (FIPS 205)
-		MLKEM     // ML-KEM (FIPS 203)
+		MLKEM,    // ML-KEM (FIPS 203)
+		CLASSICMCELIECE  // Classic McEliece (BSI TR-02102-1 §2.4.2) — liboqs-backed, D-2
         };
 };
 

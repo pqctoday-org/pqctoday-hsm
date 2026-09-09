@@ -48,6 +48,11 @@ set(SOURCES
     MLKEMPrivateKey.cpp
     MLKEMParameters.cpp
 
+    # Classic McEliece (BSI TR-02102-1 §2.4.2) abstract bases and parameters
+    ClassicMcEliecePublicKey.cpp
+    ClassicMcEliecePrivateKey.cpp
+    ClassicMcElieceParameters.cpp
+
     # OpenSSL EVP implementations
     OSSLAES.cpp
     OSSLCMAC.cpp
@@ -75,6 +80,10 @@ set(SOURCES
     OSSLMLKEMKeyPair.cpp
     OSSLMLKEMPrivateKey.cpp
     OSSLMLKEMPublicKey.cpp
+    OSSLClassicMcEliece.cpp
+    OSSLClassicMcElieceKeyPair.cpp
+    OSSLClassicMcEliecePrivateKey.cpp
+    OSSLClassicMcEliecePublicKey.cpp
     OSSLEVPCMacAlgorithm.cpp
     OSSLEVPHashAlgorithm.cpp
     OSSLEVPMacAlgorithm.cpp
@@ -142,6 +151,14 @@ target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_OPTIONS})
 
 if(NOT CMAKE_VERSION VERSION_LESS "3.12")
     target_link_libraries(${PROJECT_NAME} ${CRYPTO_LIBS})
+    # liboqs (Classic McEliece — D-2). `oqs` is the target name liboqs's own
+    # CMakeLists.txt defines; linking it here propagates its public include
+    # directory (<oqs/oqs.h> etc.) to this OBJECT library automatically —
+    # confirmed against the P0-2 spike, which needed the same include path
+    # (`-I build/include`) built by this same liboqs CMake project.
+    if(WITH_LIBOQS)
+        target_link_libraries(${PROJECT_NAME} oqs)
+    endif()
 endif()
 
 if(BUILD_TESTS)
