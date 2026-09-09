@@ -190,17 +190,38 @@ Decisions still open are in §8.
    `CHANGELOG.md`, and add a `README.md` stating the upstream tag (3.1.0), what was
    changed, and that an upstream PR is intended (same convention as
    `rust/fips204-patched/README.md`).
-2. **Refactor shape** (spike first — P0-1): keep upstream's code nearly verbatim and
-   instantiate it **once per parameter set as a module** via a `macro_rules!` that
-   takes the set's constants (`GFBITS`, `SYS_N`, `SYS_T`, the size constants, the
-   `f`/semi-systematic switch). Every function that today reads a crate-level constant
-   reads its module's constant instead; the public API becomes
-   `classic_mceliece_multi::mceliece348864::{keypair_boxed, encapsulate_boxed, decapsulate_boxed, PublicKey, SecretKey, Ciphertext, SharedSecret}` × 10,
-   plus a `ParameterSet` enum with `fn sizes(self) -> (pk, sk, ct)` and
-   `fn from_ckp(u32) -> Option<Self>`. This keeps the diff against upstream reviewable
-   and avoids `generic_const_exprs` (array lengths derived from parameters are why
-   const generics don't work on stable). Fallback if the spike shows the macro
-   approach is unmanageable: runtime parameters with heap buffers (bigger diff,
+2. **Refactor shape — settled by the P0-1 spike, not the speculative macro idea
+   this bullet originally proposed.** A `trait McElieceParams` carries `GFBITS`/
+   `SYS_N`/`SYS_T`/`SEMI_SYSTEMATIC` plus every derived size as an associated const
+   (upstream's own `const fn` formulas — real, verified below to reproduce the
+   public-key/ciphertext sizes exactly — except `CRYPTO_SECRETKEYBYTES`, which
+   upstream itself never derives, only states as a literal per variant); the actual
+   buffer types (`PublicKey`/`SecretKey`/`Ciphertext`/`SharedSecret`) are generic over
+   a **bare `const N: usize`**, not `P::SOME_CONST` — the first spike attempt used the
+   latter and the compiler rejected it outright (`error: generic parameters may not
+   be used in const operations` / `type parameters may not be used in const
+   expressions`): an associated const reached through a still-generic type parameter
+   cannot size an array on stable Rust, confirming (not just documenting) why
+   `generic_const_exprs` matters here. Per-variant **type aliases** supply `N` as a
+   concrete expression at a non-generic call site (`type PublicKey348864 =
+   PublicKey<Mceliece348864, { Mceliece348864::CRYPTO_PUBLICKEYBYTES }>;`) — legal,
+   because at the alias site the type is concrete, not generic. Algorithm functions
+   stay real generic Rust (shared code, not macro-duplicated text) parameterized by
+   however many `const usize` values their own buffers need (verified for two at
+   once: `syndrome_shaped_buffer<P, const N: usize, const M: usize>`); a small
+   `macro_rules!` is still worth writing in Phase 1, but only to generate the ~10
+   short per-variant `impl`/type-alias blocks, never the algorithm bodies themselves.
+   Every function that today reads a crate-level constant reads its generic
+   parameter (or the trait's associated const, where the read isn't sizing an
+   array) instead; the public API becomes `classic_mceliece_multi::mceliece348864::
+   {keypair_boxed, encapsulate_boxed, decapsulate_boxed, PublicKey, SecretKey,
+   Ciphertext, SharedSecret}` × 10 either way, plus a `ParameterSet` enum with `fn
+   sizes(self) -> (pk, sk, ct)` and `fn from_ckp(u32) -> Option<Self>`. Remaining
+   risk, now scoped by the spike: whether porting the real 23-file, ~6,743-LOC
+   algorithm body onto multi-const-generic function signatures stays tractable once
+   several differently-sized buffers are threaded through one function (the spike
+   only proved it for one function taking two) — if that turns out unmanageable in
+   practice, the fallback is runtime parameters with heap buffers (bigger diff,
    smallest binary).
 3. **Engine wiring**: `rust/src/constants.rs` (the nine new `CKP_*`), `rust/src/ffi.rs`
    keygen arm (`:3911-3978`) and the mechanism-info table (`:1474-1479`),
@@ -335,7 +356,7 @@ not a silent `#[ignore]`.
 
 | # | Item | Done when |
 |---|---|---|
-| P0-1 | **Fork spike**: instantiate `mceliece348864` and `mceliece8192128f` together from the macro-module approach in a scratch copy; both round-trip; binary size delta measured natively and for wasm32. | A commit on this branch with the two-set prototype and the numbers, or a written verdict that the runtime-parameter fallback is needed. |
+| P0-1 | **DONE (2026-09-09, `rust/spike-mceliece-multi/`, throwaway).** Instantiated `Mceliece348864` and `Mceliece8192128f` together, both directions of the size extreme. **First design failed at compile time, and that failure is the real result**: a trait with associated-const sizes, read through a generic `P: McElieceParams` type parameter directly in array-length position, is rejected by the compiler outright (`generic parameters may not be used in const operations`) — not a style preference, a hard stable-Rust ceiling, now confirmed rather than assumed from documentation. **Second design compiles and passes**: bare `const N: usize` generic parameters on the buffer types, with the trait supplying sizes only at concrete (non-generic) per-variant type-alias call sites. 4/4 tests green: both variants' `CRYPTO_PUBLICKEYBYTES`/`CRYPTO_SECRETKEYBYTES`/`CRYPTO_CIPHERTEXTBYTES` match §1.1's table exactly (348864: 261,120/6,492/96; 8192128f: 1,357,824/14,120/208); both types coexist correctly-sized in one binary; a function generic over two independent buffer lengths at once works. Caught and fixed a real error in the spike's own first draft: a guessed `CRYPTO_SECRETKEYBYTES` formula (`SYS_N/8+IRR_BYTES+COND_BYTES+32`) was off by 8 bytes against the real 6,492 — upstream never derives this one, only states it as a literal, so the spike now does the same rather than trust an invented formula. Compiles clean on `wasm32-unknown-unknown` too (produces a valid `.wasm` module) — but with no real algorithm body yet, that wasm artifact is 356 bytes and proves the *pattern* cross-compiles, not a meaningful size number; a real size delta needs Phase 1's actual ported logic, not this spike. §4 step 2 rewritten to match this confirmed design instead of the speculative macro-module idea it originally proposed. |
 | P0-2 | **DONE (2026-09-09)**. Submodule `src/lib/crypto/oqs/liboqs` pinned to `0.16.0` (`5a1a854b0`). Minimal build (`-DOQS_MINIMAL_BUILD="KEM_classic_mceliece_348864;…_8192128f"` — exact identifiers confirmed in `.CMake/alg_support.cmake:440`, which even ships a matching `OQS_ALGS_ENABLED=NIST_R4` preset, unused here since it also pulls in HQC/BIKE we deliberately deferred) configured and built clean in the `pqc-rust` container against the OpenSSL 3.6.3 already resolved there (`Found OpenSSL: ...libcrypto.so ... "3.6.3"`), zero warnings, 1.2 MB static `liboqs.a`. A throwaway C program confirmed: `OQS_KEM_alg_count()` returns 41 (the full compiled-in identifier table, not just enabled ones — corrects this row's own earlier phrasing), of which **exactly 10 report `enabled=1`**, all Classic-McEliece; a full keypair→encaps→decaps round trip matched on both size extremes, `348864` (pk 261,120 / sk 6,492 / ct 96 / ss 32) and `8192128f` (pk 1,357,824 / sk 14,120 / ct 208 / ss 32) — both exactly matching §1.1's table. Not yet spiked on the macOS host (native build, no container) — low risk, same CMake path, deferred to Phase 2 itself rather than blocking Phase 0. |
 | P0-3 | **DONE (2026-09-09, `22c31699`)**. All 10 variants' `kat_kem.rsp` staged under `kmip/kat/classic-mceliece/raw/`, sourced from `classic.mceliece.org/nist/mceliece-kat-20221023.tar.gz` (sha256 pinned in the README), 10 vectors/variant (not FrodoKEM's 100 — confirmed by count, matches the much larger key size), checksums in `kmip/kat/manifest.sha256`. Sourcing only; no test consumes them yet (that's Phase 1/2's job). |
 | P0-4 | **Oracle version**: decide `LIBOQS_NO_VENDOR=1` (share the 0.16.0 build) vs recorded skew. | One line in the cross-validation test's doc comment and in this plan. |

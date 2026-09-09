@@ -1,0 +1,15 @@
+[workspace]
+# Standalone, deliberately NOT a member of the parent rust/ workspace this
+# spike sits under — throwaway, gets deleted before Phase 1's real fork lands.
+
+[package]
+name = "spike-mceliece-multi"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[profile.release]
+opt-level = 3
