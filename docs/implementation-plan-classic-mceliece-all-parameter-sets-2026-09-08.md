@@ -777,6 +777,70 @@ one const-generic buffer scheme, not a single sizing question.
 
 ---
 
+## 11. Execution log
+
+**2026-09-09 — Phase 1 complete (`86baf7ef`, `e0a5e898`).**
+
+`rust/classic-mceliece-multi/` (23 shared-module files + 10 per-variant modules,
+~5,600 lines) forks `classic-mceliece-rust` 3.1.0 per §4.1's five-axis design, with
+one real design correction found only during implementation: §4.1 as written
+proposed sharing algorithm bodies via functions generic over `GFBITS`/`SYS_N`/
+`SYS_T` **const-generic parameters**. Confirmed directly against `rustc` (not
+assumed) that this doesn't compile either — a bare const-generic parameter used in
+an *expression* in array-length position (`[T; N+1]`, `[T; 2*N]`, `[T; N/8]`) is
+rejected exactly like the `P::CONST` case P0-1 already found, not just for
+trait-associated consts. **Fix used instead**: internal algorithm functions take
+runtime **slices** with `debug_assert!` length checks (matching how the C
+reference implementation itself is written — pointer+length, not fixed-type-length)
+rather than `[T; SYS_N]`-shaped fixed arrays; fixed local scratch buffers are sized
+to the crate-wide maximum across all 10 variants (`MAX_SYS_T = 128`, `MAX_SYS_N =
+8192`, etc.), not to a generic parameter. This let *more* code end up genuinely
+shared than §4.1 anticipated — `controlbits.rs`, most of `gf.rs`, `transpose.rs`,
+and `benes.rs`'s wide-family core are now single copies used by up to all 10 (or
+all 8 wide) variants, not narrow/wide-duplicated as planned. Only `pk_gen.rs`/
+`operations.rs` (the genuinely per-variant axis) still need multiple concrete
+bodies, matching four templates (plain / 6960119 / f-generic / f+6960119f) instead
+of the originally-envisioned single generic function.
+
+Verified three independent ways, in order of what each actually proves:
+1. **Official Round-4 KAT vectors** (`kmip/kat/classic-mceliece/`, P0-3) —
+   `classic-mceliece-multi/tests/kat_verification.rs` decapsulates the official
+   `ct`/`sk` pair for all 10 variants and asserts the recovered secret matches the
+   published `ss` byte-for-byte. This is the one that actually proves the ported
+   arithmetic is *correct*, not merely self-consistent.
+2. **liboqs cross-validation** (`rust/src/native/encrypt.rs`, pre-existing test,
+   `#[ignore]` removed) — 20 trials each direction, real engine ↔ real liboqs, for
+   `mceliece6688128` (the only variant this test existed for before; extending it to
+   the other 9 is Phase 3/§7 scope, not required to trust the port itself given (1)).
+3. **Full PKCS#11 FFI path** (`rust/src/ffi.rs`) — `C_GenerateKeyPair` →
+   `C_EncapsulateKey` → `C_DecapsulateKey` round trip through the real ABI, plus a
+   new test exercising `generate_classic_mceliece_keypair` for all 10 CKP values
+   (not just the previously-shipped 6688128) and asserting the exact
+   `CRYPTO_PUBLICKEYBYTES`/`CRYPTO_SECRETKEYBYTES` per variant.
+
+Real, measured numbers, not estimates: all 10 variants' keygen → encapsulate →
+decapsulate in 8.1s (release) / 8.75s (debug, after the profile fix below); the
+full McEliece test set (8 tests, including the two 20-trial liboqs cross-validation
+tests) in 44.53s plain `cargo test` — no `--release` flag, no `#[ignore]`.
+`rust/Cargo.toml` gained `[profile.dev.package.classic-mceliece-multi] opt-level =
+3` / `[profile.test...]` — necessary because Cargo only reads `[profile.*]`
+sections from a **workspace root** manifest, so the fork's own such sections (in
+its own `Cargo.toml`, correct for standalone use) are silently ignored once it
+became a workspace dependency; this was verified as the actual fix, not assumed,
+by measuring debug-mode speed before and after (a single unoptimized-mode
+`8192128f` keygen attempt was independently measured at 23.6–24.0s during Phase 0's
+timing spike — the override removes that entirely from the default test path).
+
+Deferred to Phase 3 rather than done now: extending the 6688128-only differential-
+harness-equivalent engine tests (item 3 above) to all 10 variants at the Rust layer
+is *possible* but redundant with (1)+(2) for correctness; Phase 3's actual
+differential-harness scenarios (§6 item 1) are the real cross-engine gate this work
+still needs, and depend on Phase 2 (C++) existing to diff against.
+
+**Next**: Phase 2 (C++ engine, liboqs-backed, §5).
+
+---
+
 ## Sources
 
 - liboqs Classic McEliece page — https://openquantumsafe.org/liboqs/algorithms/kem/classic_mceliece.html
