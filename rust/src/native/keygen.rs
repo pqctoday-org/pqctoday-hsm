@@ -1577,9 +1577,40 @@ pub fn register_frodokem_public_key(
     ))
 }
 
+/// Map a `CKP_CLASSIC_MCELIECE_*` PKCS#11 value to the fork crate's own
+/// `ParameterSet` enum — the single source of truth for the CKP<->variant
+/// mapping (its own `sizes()` is what backs `classic_mceliece_key_lens`
+/// below), mirroring `frodokem_algorithm`'s role for FrodoKEM.
+pub(crate) fn classic_mceliece_parameter_set(
+    parameter_set: u32,
+) -> Result<classic_mceliece_multi::ParameterSet, CkRv> {
+    use classic_mceliece_multi::ParameterSet::*;
+    match parameter_set {
+        CKP_CLASSIC_MCELIECE_348864 => Ok(Mceliece348864),
+        CKP_CLASSIC_MCELIECE_348864F => Ok(Mceliece348864f),
+        CKP_CLASSIC_MCELIECE_460896 => Ok(Mceliece460896),
+        CKP_CLASSIC_MCELIECE_460896F => Ok(Mceliece460896f),
+        CKP_CLASSIC_MCELIECE_6688128 => Ok(Mceliece6688128),
+        CKP_CLASSIC_MCELIECE_6688128F => Ok(Mceliece6688128f),
+        CKP_CLASSIC_MCELIECE_6960119 => Ok(Mceliece6960119),
+        CKP_CLASSIC_MCELIECE_6960119F => Ok(Mceliece6960119f),
+        CKP_CLASSIC_MCELIECE_8192128 => Ok(Mceliece8192128),
+        CKP_CLASSIC_MCELIECE_8192128F => Ok(Mceliece8192128f),
+        _ => Err(CKR_ARGUMENTS_BAD),
+    }
+}
+
+/// `(pk_len, sk_len)` for a `CKP_CLASSIC_MCELIECE_*` value — thin wrapper
+/// around the fork crate's own `ParameterSet::sizes()` (which also returns
+/// `ct_len`, not needed by the two callers below), matching the shape
+/// `frodokem_key_lens` already established for FrodoKEM.
+pub(crate) fn classic_mceliece_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
+    let (pk, sk, _ct) = classic_mceliece_parameter_set(parameter_set).ok()?.sizes();
+    Some((pk, sk))
+}
+
 /// Register an existing Classic McEliece private (secret) key supplied as
-/// raw bytes. Scoped to `mceliece6688128` only (implementation plan Phase
-/// 0.5) — `parameter_set` MUST be `CKP_CLASSIC_MCELIECE_6688128`.
+/// raw bytes, for any of the 10 parameter sets.
 pub fn register_classic_mceliece_private_key(
     _session: u32,
     parameter_set: u32,
@@ -1587,10 +1618,9 @@ pub fn register_classic_mceliece_private_key(
     cka_id: &[u8],
     label: &str,
 ) -> Result<u32, CkRv> {
-    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
-        return Err(CKR_ARGUMENTS_BAD);
-    }
-    if sk_bytes.len() != classic_mceliece_rust::CRYPTO_SECRETKEYBYTES {
+    let (_pk_len, sk_len) =
+        classic_mceliece_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if sk_bytes.len() != sk_len {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     Ok(register_pqc_private(
@@ -1607,8 +1637,8 @@ pub fn register_classic_mceliece_private_key(
     ))
 }
 
-/// Register an existing Classic McEliece public key supplied as raw bytes.
-/// Scoped to `mceliece6688128` only. No SPKI builder exists for Classic
+/// Register an existing Classic McEliece public key supplied as raw bytes,
+/// for any of the 10 parameter sets. No SPKI builder exists for Classic
 /// McEliece (no standard AlgorithmIdentifier OID is registered for it).
 pub fn register_classic_mceliece_public_key(
     _session: u32,
@@ -1617,10 +1647,9 @@ pub fn register_classic_mceliece_public_key(
     cka_id: &[u8],
     label: &str,
 ) -> Result<u32, CkRv> {
-    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
-        return Err(CKR_ARGUMENTS_BAD);
-    }
-    if pk_bytes.len() != classic_mceliece_rust::CRYPTO_PUBLICKEYBYTES {
+    let (pk_len, _sk_len) =
+        classic_mceliece_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
+    if pk_bytes.len() != pk_len {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     Ok(register_pqc_public(
@@ -1881,13 +1910,14 @@ pub fn generate_frodokem_keypair(
 
 // ── Classic McEliece (BSI TR-02102-1 §2.4.2) ─────────────────────────────────
 
-/// Generate a Classic McEliece keypair. Scoped to `mceliece6688128` only
-/// (see implementation plan Phase 0.5 — `classic-mceliece-rust` can only
-/// have one parameter-set feature compiled in at a time); `parameter_set`
-/// MUST be `CKP_CLASSIC_MCELIECE_6688128`. Returns `(public_handle,
-/// private_handle)`.
+/// Generate a Classic McEliece keypair, for any of the 10 parameter sets
+/// (see the McEliece all-parameter-sets implementation plan §4.2 — this
+/// dispatches through the `classic-mceliece-multi` fork's 10 namespaced
+/// modules instead of the single crate-level API the one-set-per-build
+/// upstream crate exposed). `parameter_set` is required, no silent default
+/// (same rule as ML-KEM). Returns `(public_handle, private_handle)`.
 ///
-/// Unlike FrodoKEM, `classic-mceliece-rust` uses `rand 0.8`'s
+/// Unlike FrodoKEM, `classic-mceliece-multi` uses `rand 0.8`'s
 /// `CryptoRng`/`RngCore` (confirmed against its own `Cargo.toml`) — the
 /// same version the rest of this engine already uses, so
 /// `rand::rngs::OsRng` works directly here.
@@ -1897,9 +1927,7 @@ pub fn generate_classic_mceliece_keypair(
     cka_id: &[u8],
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
-    if parameter_set != CKP_CLASSIC_MCELIECE_6688128 {
-        return Err(CKR_ARGUMENTS_BAD);
-    }
+    let ps = classic_mceliece_parameter_set(parameter_set)?;
 
     let mut pub_attrs: Attributes = HashMap::new();
     let mut prv_attrs: Attributes = HashMap::new();
@@ -1915,9 +1943,54 @@ pub fn generate_classic_mceliece_keypair(
     insert_id_and_label(&mut prv_attrs, cka_id, label);
 
     let mut rng = rand::rngs::OsRng;
-    let (pk, sk) = classic_mceliece_rust::keypair_boxed(&mut rng);
-    pub_attrs.insert(CKA_VALUE, pk.as_ref().to_vec());
-    prv_attrs.insert(CKA_VALUE, sk.as_ref().to_vec());
+    let (pk_bytes, sk_bytes): (Vec<u8>, Vec<u8>) = {
+        use classic_mceliece_multi as cmm;
+        use classic_mceliece_multi::ParameterSet::*;
+        match ps {
+            Mceliece348864 => {
+                let (pk, sk) = cmm::mceliece348864::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece348864f => {
+                let (pk, sk) = cmm::mceliece348864f::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece460896 => {
+                let (pk, sk) = cmm::mceliece460896::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece460896f => {
+                let (pk, sk) = cmm::mceliece460896f::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece6688128 => {
+                let (pk, sk) = cmm::mceliece6688128::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece6688128f => {
+                let (pk, sk) = cmm::mceliece6688128f::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece6960119 => {
+                let (pk, sk) = cmm::mceliece6960119::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece6960119f => {
+                let (pk, sk) = cmm::mceliece6960119f::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece8192128 => {
+                let (pk, sk) = cmm::mceliece8192128::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+            Mceliece8192128f => {
+                let (pk, sk) = cmm::mceliece8192128f::keypair_boxed(&mut rng);
+                (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+            }
+        }
+    };
+    pub_attrs.insert(CKA_VALUE, pk_bytes);
+    prv_attrs.insert(CKA_VALUE, sk_bytes);
 
     finalize_and_register(_session, pub_attrs, prv_attrs)
 }
@@ -2572,17 +2645,62 @@ mod tests {
         close_session(session).unwrap();
     }
 
+    /// All 10 Classic McEliece parameter sets, one keygen each, through the
+    /// same native `generate_classic_mceliece_keypair` entry point the FFI
+    /// and KMIP layers both call — proves the dispatch added in the
+    /// all-parameter-sets implementation plan §4.2 actually reaches every
+    /// variant, not just the previously-shipped mceliece6688128 (the other
+    /// tests around this one predate that plan and only ever exercised
+    /// 6688128). Sizes are `classic-mceliece-multi`'s own
+    /// `CRYPTO_PUBLICKEYBYTES`/`CRYPTO_SECRETKEYBYTES` per module, which are
+    /// independently verified against the official Round-4 KAT vectors in
+    /// that crate's own `tests/kat_verification.rs`. Fast even in debug
+    /// builds thanks to `rust/Cargo.toml`'s `[profile.dev.package.classic-
+    /// mceliece-multi] opt-level = 3` override (§4.1 step 4) — no
+    /// `#[ignore]` needed.
+    #[test]
+    fn classic_mceliece_all_ten_parameter_sets_keygen_produces_expected_length() {
+        let _guard = test_lock::acquire();
+        let cases: [(u32, usize, usize); 10] = [
+            (CKP_CLASSIC_MCELIECE_348864, 261_120, 6_492),
+            (CKP_CLASSIC_MCELIECE_348864F, 261_120, 6_492),
+            (CKP_CLASSIC_MCELIECE_460896, 524_160, 13_608),
+            (CKP_CLASSIC_MCELIECE_460896F, 524_160, 13_608),
+            (CKP_CLASSIC_MCELIECE_6688128, 1_044_992, 13_932),
+            (CKP_CLASSIC_MCELIECE_6688128F, 1_044_992, 13_932),
+            (CKP_CLASSIC_MCELIECE_6960119, 1_047_319, 13_948),
+            (CKP_CLASSIC_MCELIECE_6960119F, 1_047_319, 13_948),
+            (CKP_CLASSIC_MCELIECE_8192128, 1_357_824, 14_120),
+            (CKP_CLASSIC_MCELIECE_8192128F, 1_357_824, 14_120),
+        ];
+        for (ps, expected_pk_len, expected_sk_len) in cases {
+            let session = fresh_session();
+            let (pub_h, prv_h) =
+                generate_classic_mceliece_keypair(session, ps, b"\x01", "mceliece-all-test")
+                    .unwrap_or_else(|e| panic!("keygen failed for ps={ps:#x}: {e:?}"));
+            assert!(pub_h > 0 && prv_h > 0 && pub_h != prv_h, "ps={ps:#x}");
+            assert_eq!(
+                get_object_value(pub_h).unwrap().len(),
+                expected_pk_len,
+                "pk length mismatch for ps={ps:#x}"
+            );
+            assert_eq!(
+                get_object_value(prv_h).unwrap().len(),
+                expected_sk_len,
+                "sk length mismatch for ps={ps:#x}"
+            );
+            close_session(session).unwrap();
+        }
+    }
+
     /// Classic McEliece (mceliece6688128 — BSI's recommended Category-5
     /// pick, §2.4.2) — pk = 1,044,992 bytes, sk = 13,932 bytes, verified
-    /// directly against `classic-mceliece-rust` v2.0.2's
-    /// `CRYPTO_PUBLICKEYBYTES`/`CRYPTO_SECRETKEYBYTES` for this variant.
-    ///
-    /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
-    /// takes minutes in an unoptimized debug build — too slow for every CI
-    /// run. Run manually with `cargo test --release -- --ignored
-    /// classic_mceliece_6688128_keygen` (release mode is fast).
+    /// directly against `classic-mceliece-multi`'s own
+    /// `CRYPTO_PUBLICKEYBYTES`/`CRYPTO_SECRETKEYBYTES` for this variant
+    /// (kept for its original historical name; superseded in coverage by
+    /// `classic_mceliece_all_ten_parameter_sets_keygen_produces_expected_length`
+    /// above, which now includes this exact case).
     #[test]
-    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn classic_mceliece_6688128_keygen_produces_expected_length() {
         let _guard = test_lock::acquire();
         let session = fresh_session();
@@ -2599,9 +2717,8 @@ mod tests {
         close_session(session).unwrap();
     }
 
-    /// Classic McEliece rejects any parameter set other than the one
-    /// scoped variant (Phase 0.5 — the crate can't compile in more than
-    /// one at a time).
+    /// Classic McEliece rejects any parameter set outside the 10 valid
+    /// `CKP_CLASSIC_MCELIECE_*` values.
     #[test]
     fn classic_mceliece_rejects_wrong_parameter_set() {
         let _guard = test_lock::acquire();

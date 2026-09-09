@@ -568,16 +568,15 @@ fn frodokem_decapsulate(access: &SessionAccess, private_key_handle: u32, ciphert
 }
 
 /// Classic McEliece encapsulation (BSI TR-02102-1 §2.4.2,
-/// `CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE`). Scoped to `mceliece6688128`
-/// only (implementation plan Phase 0.5). Returns `(ciphertext,
+/// `CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE`). Dispatches to the right of the
+/// `classic-mceliece-multi` fork's 10 namespaced modules by the key's stored
+/// `CKA_PARAMETER_SET` (implementation plan §4.2). Returns `(ciphertext,
 /// shared_secret)`.
 ///
 /// Unlike FrodoKEM, `classic-mceliece-rust` uses `rand 0.8` — the same
 /// version this engine already uses elsewhere — so `rand::rngs::OsRng`
 /// works directly.
 fn classic_mceliece_encapsulate(access: &SessionAccess, public_key_handle: u32) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
-    use classic_mceliece_rust::{encapsulate_boxed, PublicKey, CRYPTO_PUBLICKEYBYTES};
-
     let (can_encap, key_type, ps, pub_key_bytes) =
         with_object_checked(access, public_key_handle, |attrs| {
             (
@@ -593,27 +592,42 @@ fn classic_mceliece_encapsulate(access: &SessionAccess, public_key_handle: u32) 
     if key_type != Some(CKK_PQCTODAY_CLASSIC_MCELIECE) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    if ps != CKP_CLASSIC_MCELIECE_6688128 {
-        return Err(CKR_ARGUMENTS_BAD);
-    }
+    let mceliece_ps = crate::native::keygen::classic_mceliece_parameter_set(ps)?;
     let pub_key_bytes = pub_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
-    let mut pk_arr: [u8; CRYPTO_PUBLICKEYBYTES] = pub_key_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-    // v3+ API: `PublicKey::from` takes `&mut [u8; N]` now, not `&` (a
-    // breaking change from v2).
-    let pk = PublicKey::from(&mut pk_arr);
     let mut rng = rand::rngs::OsRng;
-    let (ct, ss) = encapsulate_boxed(&pk, &mut rng);
-    Ok((ct.as_array().to_vec(), ss.as_array().to_vec()))
+
+    macro_rules! encap_arm {
+        ($module:ident) => {{
+            let pk_arr: Box<[u8; classic_mceliece_multi::$module::CRYPTO_PUBLICKEYBYTES]> =
+                pub_key_bytes
+                    .into_boxed_slice()
+                    .try_into()
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let pk = classic_mceliece_multi::$module::PublicKeyOwned::from(pk_arr);
+            let (ct, ss) = classic_mceliece_multi::$module::encapsulate_boxed(&pk, &mut rng);
+            (ct.as_array().to_vec(), ss.as_array().to_vec())
+        }};
+    }
+
+    use classic_mceliece_multi::ParameterSet::*;
+    let (ct_vec, ss_vec) = match mceliece_ps {
+        Mceliece348864 => encap_arm!(mceliece348864),
+        Mceliece348864f => encap_arm!(mceliece348864f),
+        Mceliece460896 => encap_arm!(mceliece460896),
+        Mceliece460896f => encap_arm!(mceliece460896f),
+        Mceliece6688128 => encap_arm!(mceliece6688128),
+        Mceliece6688128f => encap_arm!(mceliece6688128f),
+        Mceliece6960119 => encap_arm!(mceliece6960119),
+        Mceliece6960119f => encap_arm!(mceliece6960119f),
+        Mceliece8192128 => encap_arm!(mceliece8192128),
+        Mceliece8192128f => encap_arm!(mceliece8192128f),
+    };
+    Ok((ct_vec, ss_vec))
 }
 
 /// Classic McEliece decapsulation (`CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE`).
 /// Returns the recovered shared secret.
 fn classic_mceliece_decapsulate(access: &SessionAccess, private_key_handle: u32, ciphertext: &[u8]) -> Result<Vec<u8>, CkRv> {
-    use classic_mceliece_rust::{decapsulate_boxed, Ciphertext, SecretKey, CRYPTO_CIPHERTEXTBYTES, CRYPTO_SECRETKEYBYTES};
-
     let (can_decap, key_type, ps, prv_key_bytes) =
         with_object_checked(access, private_key_handle, |attrs| {
             (
@@ -629,22 +643,42 @@ fn classic_mceliece_decapsulate(access: &SessionAccess, private_key_handle: u32,
     if key_type != Some(CKK_PQCTODAY_CLASSIC_MCELIECE) {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    if ps != CKP_CLASSIC_MCELIECE_6688128 {
-        return Err(CKR_ARGUMENTS_BAD);
+    let mceliece_ps = crate::native::keygen::classic_mceliece_parameter_set(ps)?;
+    let prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
+
+    macro_rules! decap_arm {
+        ($module:ident) => {{
+            if ciphertext.len() != classic_mceliece_multi::$module::CRYPTO_CIPHERTEXTBYTES {
+                return Err(CKR_ARGUMENTS_BAD);
+            }
+            let sk_arr: Box<[u8; classic_mceliece_multi::$module::CRYPTO_SECRETKEYBYTES]> =
+                prv_key_bytes
+                    .into_boxed_slice()
+                    .try_into()
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let sk = classic_mceliece_multi::$module::SecretKeyOwned::from(sk_arr);
+            let ct_arr: [u8; classic_mceliece_multi::$module::CRYPTO_CIPHERTEXTBYTES] =
+                ciphertext.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+            let ct = classic_mceliece_multi::$module::CiphertextOwned::from(ct_arr);
+            let ss = classic_mceliece_multi::$module::decapsulate_boxed(&ct, &sk);
+            ss.as_array().to_vec()
+        }};
     }
-    if ciphertext.len() != CRYPTO_CIPHERTEXTBYTES {
-        return Err(CKR_ARGUMENTS_BAD);
-    }
-    let mut prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
-    let sk_arr: &mut [u8; CRYPTO_SECRETKEYBYTES] = (&mut prv_key_bytes[..])
-        .try_into()
-        .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-    let sk = SecretKey::from(sk_arr);
-    let ct_arr: [u8; CRYPTO_CIPHERTEXTBYTES] =
-        ciphertext.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
-    let ct = Ciphertext::from(ct_arr);
-    let ss = decapsulate_boxed(&ct, &sk);
-    Ok(ss.as_array().to_vec())
+
+    use classic_mceliece_multi::ParameterSet::*;
+    let ss_vec = match mceliece_ps {
+        Mceliece348864 => decap_arm!(mceliece348864),
+        Mceliece348864f => decap_arm!(mceliece348864f),
+        Mceliece460896 => decap_arm!(mceliece460896),
+        Mceliece460896f => decap_arm!(mceliece460896f),
+        Mceliece6688128 => decap_arm!(mceliece6688128),
+        Mceliece6688128f => decap_arm!(mceliece6688128f),
+        Mceliece6960119 => decap_arm!(mceliece6960119),
+        Mceliece6960119f => decap_arm!(mceliece6960119f),
+        Mceliece8192128 => decap_arm!(mceliece8192128),
+        Mceliece8192128f => decap_arm!(mceliece8192128f),
+    };
+    Ok(ss_vec)
 }
 
 /// Classical encrypt. v0.1 supports `CKM_AES_GCM`.
@@ -1850,12 +1884,10 @@ mod tests {
     /// `classic-mceliece-rust` v3.1.0, liboqs, and the spec text directly),
     /// ss = 32 bytes.
     ///
-    /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
-    /// takes minutes in an unoptimized debug build — too slow for every CI
-    /// run. Run manually with `cargo test --release -- --ignored
-    /// classic_mceliece_6688128_encap_decap` (release mode is fast).
+    /// Real keygen at native debug-build speed thanks to `rust/Cargo.toml`'s
+    /// `[profile.dev.package.classic-mceliece-multi] opt-level = 3`
+    /// (implementation plan §4.1 step 4) — no longer needs `#[ignore]`.
     #[test]
-    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn classic_mceliece_6688128_encap_decap_round_trip() {
         let _guard = test_lock::acquire();
         let session = fresh_session();
@@ -1962,14 +1994,12 @@ mod tests {
     /// Direction A for Classic McEliece (mceliece6688128): encaps with
     /// `oqs`, decaps with our PKCS#11 engine.
     ///
-    /// `#[ignore]`: 20 fresh mceliece6688128 keypairs in an unoptimized
-    /// debug build take tens of minutes, not seconds — too slow for every
-    /// CI run. Run manually with `cargo test --release -- --ignored
-    /// classic_mceliece_6688128_cross_validate` (release mode is fast).
-    /// `classic_mceliece_6688128_round_trip` already covers the basic
-    /// correctness path on every run.
+    /// Real keygen at native debug-build speed (see the doc comment on
+    /// `classic_mceliece_6688128_encap_decap_round_trip` above) — no longer
+    /// needs `#[ignore]`. `classic_mceliece_6688128_round_trip` already
+    /// covers the basic correctness path on every run; this is the
+    /// independent-implementation cross-check.
     #[test]
-    #[ignore]
     fn classic_mceliece_6688128_cross_validate_oqs_encap_our_decap() {
         let _guard = test_lock::acquire();
         let session = fresh_session();
@@ -1977,17 +2007,17 @@ mod tests {
         let kem = oqs::kem::Kem::new(oqs::kem::Algorithm::ClassicMcEliece6688128)
             .expect("liboqs Classic McEliece 6688128 unavailable");
 
-        // No independently-hosted static Classic McEliece KAT file exists
-        // (unlike FrodoKEM — PQClean and classic-mceliece-rust's own KAT
-        // harness both GENERATE vectors deterministically rather than
-        // shipping a static file, and using classic-mceliece-rust's own
-        // generator would be circular). Since liboqs IS a genuinely
-        // independent implementation (verified directly against the spec
-        // text earlier, and now proven interoperable), run N fresh
-        // liboqs-generated keypairs through our engine instead of just
-        // one — the same statistical breadth FrodoKEM's 100-per-variant
-        // static KAT file gives, via repeated independent trials rather
-        // than a fixed file.
+        // The official Round-4 KAT vectors are now sourced and checksummed
+        // (kmip/kat/classic-mceliece/, P0-3 of the all-parameter-sets
+        // implementation plan) and independently verify the
+        // classic-mceliece-multi fork against the reference implementation
+        // (see that crate's own tests/kat_verification.rs) — this test's
+        // job is different: cross-checking THIS ENGINE'S key-import and
+        // decapsulate wiring against liboqs, a second independent
+        // implementation, not re-proving the algorithm itself. Run N fresh
+        // liboqs-generated keypairs through our engine — the same
+        // statistical breadth FrodoKEM's 100-per-variant static KAT file
+        // gives, via repeated independent trials rather than a fixed file.
         const N: usize = 20;
         for i in 0..N {
             let (pk, sk) = kem.keypair().unwrap_or_else(|e| panic!("liboqs keygen #{i}: {e}"));
@@ -2022,10 +2052,9 @@ mod tests {
     /// Direction B for Classic McEliece: encaps with our PKCS#11 engine,
     /// decaps with `oqs`. Same N-trial breadth as Direction A.
     ///
-    /// `#[ignore]`: same reason as Direction A above — 20 fresh debug-build
-    /// mceliece6688128 keygens is too slow for every CI run.
+    /// Real keygen at native debug-build speed (see Direction A above) — no
+    /// longer needs `#[ignore]`.
     #[test]
-    #[ignore]
     fn classic_mceliece_6688128_cross_validate_our_encap_oqs_decap() {
         let _guard = test_lock::acquire();
         let session = fresh_session();

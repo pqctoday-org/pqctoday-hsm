@@ -178,16 +178,17 @@ fips205 = "0.4.1"
 frodo-kem = { version = "0.1", default-features = false, features = [
     "frodo640aes", "frodo640shake", "frodo976aes", "frodo976shake", "frodo1344aes", "frodo1344shake",
 ] }
-# Only one parameter-set feature may be enabled at a time (crate constraint — see
-# cacp-frodokem-mceliece-softhsm-kmip-policy-plan-07062026.md Phase 0.5). Scoped to
-# mceliece6688128 (BSI's Category-5 pick) for this initial slice; 460896/8192128
-# follow-up tracked in that plan.
-# v3+ required — v2.0.2's ciphertext included a non-spec confirmation-hash
-# addition (K = H(1,e,C,H(2,e)) instead of the official spec's K = H(1,e,C));
-# v3.1.0 fixed this, matching mceliece-spec-20221023.pdf and liboqs exactly
-# (verified directly against both sources' source code — see the FrodoKEM/
-# Classic-McEliece/HQC implementation plan).
-classic-mceliece-rust = { version = "3", default-features = false, features = ["mceliece6688128", "alloc", "zeroize"] }
+# All 10 parameter sets in one build — a vendored fork of classic-mceliece-rust
+# 3.1.0 (not a [patch.crates-io], since the public API changed; a genuinely new
+# package name instead, same convention decision as fips204-patched/fips205-patched
+# vs. an upstream crate whose API could stay unchanged). See
+# classic-mceliece-multi/README.md and the implementation plan
+# (docs/implementation-plan-classic-mceliece-all-parameter-sets-2026-09-08.md) §4.
+# Supersedes the single-feature `classic-mceliece-rust = "3"` dependency this line
+# used to be (BSI's Category-5 mceliece6688128 pick only) — the v3+ ciphertext fix
+# (K = H(1,e,C), not the non-spec v2.0.2 K = H(1,e,C,H(2,e))) still applies, since
+# this fork is derived from the same 3.1.0 tag.
+classic-mceliece-multi = { path = "classic-mceliece-multi" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Native store backend (`store::sqlite`) — target-gated as a DEPENDENCY,
@@ -224,6 +225,19 @@ hbs-lms = { path = "hbs-lms-patched" }
 # Optimize purely for size in WASM
 opt-level = "s"
 lto = true
+
+# Classic McEliece keygen (Gaussian elimination over a PK_NROWS x SYS_N/8 matrix)
+# is measured minutes-slow at opt-level=0 for the largest sets (23.6-24.0s per
+# 8192128f attempt alone, ~55x slower than --release — implementation plan §4.1
+# step 4) — Cargo profile sections are only read from the WORKSPACE ROOT manifest,
+# so classic-mceliece-multi's own [profile.dev]/[profile.test] (in its own
+# Cargo.toml, useful only when it's built standalone outside this workspace) are
+# silently ignored once it's a dependency here; this is the real fix for debug/test
+# builds of the engine itself.
+[profile.dev.package.classic-mceliece-multi]
+opt-level = 3
+[profile.test.package.classic-mceliece-multi]
+opt-level = 3
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

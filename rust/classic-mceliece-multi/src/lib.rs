@@ -192,11 +192,12 @@ impl Debug for SharedSecret {
 
 /// A runtime-selectable parameter set, keyed the same way the engine's
 /// `CKP_CLASSIC_MCELIECE_*` PKCS#11 attribute values are (see the implementation
-/// plan §3.1) — `from_ckp`/`to_ckp` round-trip those exact values so the engine
-/// FFI layer (`rust/src/native/keygen.rs`, `encrypt.rs`) never has to hardcode a
-/// second copy of this mapping.
+/// plan §3.1). Deliberately **not** `#[non_exhaustive]`: this is a closed set (the
+/// 10 sizes liboqs/classic-mceliece-rust implement — D-1), so a caller matching on
+/// it in another crate (`rust/src/native/keygen.rs`, `encrypt.rs`, `ffi.rs`) should
+/// get a compile error if a future revision ever adds an 11th variant, not silently
+/// fall through a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum ParameterSet {
     Mceliece348864,
     Mceliece348864f,

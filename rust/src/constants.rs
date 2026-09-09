@@ -742,14 +742,24 @@ pub const CKP_FRODOKEM_976_SHAKE: u32 = 0x4;
 pub const CKP_FRODOKEM_1344_AES: u32 = 0x5;
 pub const CKP_FRODOKEM_1344_SHAKE: u32 = 0x6;
 
-// Classic McEliece (BSI TR-02102-1 §2.4.2) — scoped to mceliece6688128 (BSI's
-// Category-5 pick) for this slice; the crate can only have one parameter-set
-// feature compiled in at a time (see implementation plan Phase 0.5), so this
-// is the only valid value today. Kept as an explicit CKP_* (not a bare
-// literal) so CKA_PARAMETER_SET validation follows the same
-// no-silent-default pattern as ML-KEM, and so adding 460896/8192128 later is
-// additive, not a rename.
+// Classic McEliece (BSI TR-02102-1 §2.4.2) — all 10 liboqs/classic-mceliece-rust
+// parameter sets (5 sizes x {plain, f}), per the McEliece all-parameter-sets
+// implementation plan §3.1 (docs/implementation-plan-classic-mceliece-all-
+// parameter-sets-2026-09-08.md). `6688128 = 0x1` is unchanged from the original
+// single-variant allocation (BSI's Category-5 pick, already on the wire since
+// softhsmrustv3 v0.7.0); 0x2-0xA are additive. Reserved in the priv authority
+// file's §1.4.1 (pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-
+// allocation.md).
 pub const CKP_CLASSIC_MCELIECE_6688128: u32 = 0x1;
+pub const CKP_CLASSIC_MCELIECE_348864: u32 = 0x2;
+pub const CKP_CLASSIC_MCELIECE_348864F: u32 = 0x3;
+pub const CKP_CLASSIC_MCELIECE_460896: u32 = 0x4;
+pub const CKP_CLASSIC_MCELIECE_460896F: u32 = 0x5;
+pub const CKP_CLASSIC_MCELIECE_6688128F: u32 = 0x6;
+pub const CKP_CLASSIC_MCELIECE_6960119: u32 = 0x7;
+pub const CKP_CLASSIC_MCELIECE_6960119F: u32 = 0x8;
+pub const CKP_CLASSIC_MCELIECE_8192128: u32 = 0x9;
+pub const CKP_CLASSIC_MCELIECE_8192128F: u32 = 0xA;
 
 pub const CKP_ML_DSA_44: u32 = 0x1;
 pub const CKP_ML_DSA_65: u32 = 0x2;

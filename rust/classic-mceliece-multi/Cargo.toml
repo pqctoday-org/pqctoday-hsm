@@ -1,10 +1,3 @@
-[workspace]
-# Temporary, for standalone `cargo check`/`test` while this crate isn't wired into
-# the parent rust/ workspace yet (Phase 1 step 3). Removed once
-# rust/Cargo.toml depends on this crate by path — at that point it becomes an
-# implicit member of that workspace instead, the same way every other vendored
-# fork here (fips204-patched, etc.) does.
-
 [package]
 name = "classic-mceliece-multi"
 version = "0.1.0"

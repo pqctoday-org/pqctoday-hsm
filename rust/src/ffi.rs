@@ -1429,12 +1429,15 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // a version mismatch between the two).
         CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN => (9616, 21520, 0x00010000),
         CKM_PQCTODAY_FRODOKEM_ENCAPSULATE => (9616, 21520, 0x10000000 | 0x20000000),
-        // Classic McEliece (BSI TR-02102-1 §2.4.2) — scoped to mceliece6688128
-        // only (see implementation plan Phase 0.5); ek: 1,044,992 B, verified
-        // directly against `classic-mceliece-rust` v2.0.2's
-        // `CRYPTO_PUBLICKEYBYTES` for that parameter set.
-        CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => (1_044_992, 1_044_992, 0x00010000),
-        CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE => (1_044_992, 1_044_992, 0x10000000 | 0x20000000),
+        // Classic McEliece (BSI TR-02102-1 §2.4.2) — all 10 parameter sets; range
+        // spans the smallest (348864: 261,120 B) to the largest (8192128: 1,357,824
+        // B) public key, matching FrodoKEM's own "min = smallest variant, max =
+        // largest variant" convention on this same table. Verified against
+        // `classic-mceliece-multi`'s own `CRYPTO_PUBLICKEYBYTES` per module (which
+        // in turn is verified against the official Round-4 KAT vectors — see
+        // kmip/kat/classic-mceliece/README.md).
+        CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => (261_120, 1_357_824, 0x00010000),
+        CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE => (261_120, 1_357_824, 0x10000000 | 0x20000000),
         // ML-DSA pk: 1312 B (ML-DSA-44) … 2592 B (ML-DSA-87) — FIPS 204 Table 2.
         CKM_ML_DSA_KEY_PAIR_GEN => (1312, 2592, 0x00010000),
         // CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY —
@@ -3804,11 +3807,11 @@ fn C_GenerateKeyPair_impl(
                 CKR_OK
             }
 
-            // BSI TR-02102-1 §2.4.2 — scoped to mceliece6688128 only
-            // (implementation plan Phase 0.5: classic-mceliece-rust can only
-            // have one parameter-set feature compiled in at a time).
+            // BSI TR-02102-1 §2.4.2 — all 10 parameter sets (implementation plan
+            // §4.2: the classic-mceliece-multi fork exposes one namespaced module
+            // per set, dispatched here by `classic_mceliece_parameter_set`).
             CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => {
-                let ps = match get_attr_ulong(
+                let ps_raw = match get_attr_ulong(
                     p_public_key_template,
                     ul_public_key_attribute_count,
                     CKA_PARAMETER_SET,
@@ -3816,9 +3819,10 @@ fn C_GenerateKeyPair_impl(
                     Some(p) => p,
                     None => return CKR_TEMPLATE_INCOMPLETE,
                 };
-                if ps != CKP_CLASSIC_MCELIECE_6688128 {
-                    return CKR_ATTRIBUTE_VALUE_INVALID;
-                }
+                let ps = match crate::native::keygen::classic_mceliece_parameter_set(ps_raw) {
+                    Ok(ps) => ps,
+                    Err(_) => return CKR_ATTRIBUTE_VALUE_INVALID,
+                };
                 if get_attr_bytes(p_private_key_template, ul_private_key_attribute_count, CKA_SEED)
                     .is_some()
                     || get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
@@ -3829,13 +3833,13 @@ fn C_GenerateKeyPair_impl(
 
                 let mut pub_attrs = HashMap::new();
                 let mut prv_attrs = HashMap::new();
-                store_param_set(&mut pub_attrs, ps);
-                store_param_set(&mut prv_attrs, ps);
+                store_param_set(&mut pub_attrs, ps_raw);
+                store_param_set(&mut prv_attrs, ps_raw);
                 store_algo_family(&mut pub_attrs, ALGO_CLASSIC_MCELIECE);
                 store_algo_family(&mut prv_attrs, ALGO_CLASSIC_MCELIECE);
                 store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
                 store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_PQCTODAY_CLASSIC_MCELIECE);
-                store_ulong(&mut pub_attrs, CKA_PARAMETER_SET, ps);
+                store_ulong(&mut pub_attrs, CKA_PARAMETER_SET, ps_raw);
                 store_ulong(
                     &mut pub_attrs,
                     CKA_KEY_GEN_MECHANISM,
@@ -3851,7 +3855,7 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut pub_attrs, CKA_LOCAL, true);
                 store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
                 store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_PQCTODAY_CLASSIC_MCELIECE);
-                store_ulong(&mut prv_attrs, CKA_PARAMETER_SET, ps);
+                store_ulong(&mut prv_attrs, CKA_PARAMETER_SET, ps_raw);
                 store_ulong(
                     &mut prv_attrs,
                     CKA_KEY_GEN_MECHANISM,
@@ -3868,12 +3872,57 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_DERIVE, false);
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
 
-                // Unlike FrodoKEM, classic-mceliece-rust uses rand 0.8 — the
+                // Unlike FrodoKEM, classic-mceliece-multi uses rand 0.8 — the
                 // same version this engine already uses elsewhere.
                 let mut rng = rand::rngs::OsRng;
-                let (pk, sk) = classic_mceliece_rust::keypair_boxed(&mut rng);
-                pub_attrs.insert(CKA_VALUE, pk.as_ref().to_vec());
-                prv_attrs.insert(CKA_VALUE, sk.as_ref().to_vec());
+                let (pk_bytes, sk_bytes): (Vec<u8>, Vec<u8>) = {
+                    use classic_mceliece_multi as cmm;
+                    use classic_mceliece_multi::ParameterSet::*;
+                    match ps {
+                        Mceliece348864 => {
+                            let (pk, sk) = cmm::mceliece348864::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece348864f => {
+                            let (pk, sk) = cmm::mceliece348864f::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece460896 => {
+                            let (pk, sk) = cmm::mceliece460896::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece460896f => {
+                            let (pk, sk) = cmm::mceliece460896f::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece6688128 => {
+                            let (pk, sk) = cmm::mceliece6688128::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece6688128f => {
+                            let (pk, sk) = cmm::mceliece6688128f::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece6960119 => {
+                            let (pk, sk) = cmm::mceliece6960119::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece6960119f => {
+                            let (pk, sk) = cmm::mceliece6960119f::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece8192128 => {
+                            let (pk, sk) = cmm::mceliece8192128::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece8192128f => {
+                            let (pk, sk) = cmm::mceliece8192128f::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                    }
+                };
+                pub_attrs.insert(CKA_VALUE, pk_bytes);
+                prv_attrs.insert(CKA_VALUE, sk_bytes);
 
                 absorb_template_attrs(
                     &mut pub_attrs,
@@ -4406,10 +4455,10 @@ fn C_EncapsulateKey_impl(
                     Err(_) => return CKR_ARGUMENTS_BAD,
                 }
             } else {
-                if ps != CKP_CLASSIC_MCELIECE_6688128 {
-                    return CKR_ARGUMENTS_BAD;
+                match crate::native::keygen::classic_mceliece_parameter_set(ps) {
+                    Ok(mceliece_ps) => mceliece_ps.sizes().2 as u32, // (pk, sk, ct)
+                    Err(_) => return CKR_ARGUMENTS_BAD,
                 }
-                classic_mceliece_rust::CRYPTO_CIPHERTEXTBYTES as u32
             };
             if p_ciphertext.is_null() {
                 *pul_ciphertext_len = ct_len;
@@ -4892,10 +4941,10 @@ fn C_DecapsulateKey_impl(
                     Err(_) => return CKR_ARGUMENTS_BAD,
                 }
             } else {
-                if ps != CKP_CLASSIC_MCELIECE_6688128 {
-                    return CKR_ARGUMENTS_BAD;
+                match crate::native::keygen::classic_mceliece_parameter_set(ps) {
+                    Ok(mceliece_ps) => mceliece_ps.sizes().2 as u32, // (pk, sk, ct)
+                    Err(_) => return CKR_ARGUMENTS_BAD,
                 }
-                classic_mceliece_rust::CRYPTO_CIPHERTEXTBYTES as u32
             };
             // PKCS#11 v3.2 §5.18.9 — a ciphertext of the wrong length for the
             // key's parameter set is invalid input ciphertext.
@@ -18042,12 +18091,11 @@ mod pqc_vendor_kem_ffi_tests {
         );
     }
 
-    /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
-    /// takes minutes in an unoptimized debug build — too slow for every CI
-    /// run. Run manually with `cargo test --release -- --ignored
-    /// classic_mceliece_6688128_round_trip` (release mode is fast).
+    /// Real mceliece6688128 keygen, at native debug-build speed thanks to
+    /// `rust/Cargo.toml`'s `[profile.dev.package.classic-mceliece-multi]
+    /// opt-level = 3` (implementation plan §4.1 step 4) — no longer needs
+    /// `#[ignore]`.
     #[test]
-    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn classic_mceliece_6688128_round_trip() {
         round_trip(
             CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
@@ -18086,9 +18134,8 @@ mod pqc_vendor_kem_ffi_tests {
         }
     }
 
-    /// Classic McEliece is scoped to `mceliece6688128` only (implementation
-    /// plan Phase 0.5) — any other CKA_PARAMETER_SET value is rejected, not
-    /// silently coerced.
+    /// A `CKA_PARAMETER_SET` value outside the 10 valid `CKP_CLASSIC_MCELIECE_*`
+    /// values is rejected, not silently coerced.
     #[test]
     fn classic_mceliece_keygen_wrong_parameter_set_attribute_value_invalid() {
         let _guard = test_lock::acquire();
@@ -18155,11 +18202,10 @@ mod pqc_vendor_kem_ffi_tests {
     /// for ML-KEM) — encapsulate/decapsulate on a key of the wrong PQC
     /// vendor KEM family → CKR_KEY_TYPE_INCONSISTENT, not a crypto attempt.
     ///
-    /// `#[ignore]`: builds a real mceliece6688128 keypair first — minutes-slow
-    /// in an unoptimized debug build. Run manually with `cargo test --release
-    /// -- --ignored encapsulate_on_wrong_key_family` (release mode is fast).
+    /// Real keygen at native debug-build speed (see the doc comment on
+    /// `classic_mceliece_6688128_round_trip` above) — no longer needs
+    /// `#[ignore]`.
     #[test]
-    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn encapsulate_on_wrong_key_family_key_type_inconsistent() {
         let _guard = test_lock::acquire();
         setup();
@@ -18209,12 +18255,10 @@ mod pqc_vendor_kem_ffi_tests {
     /// §5.18.9-equivalent — a ciphertext of the wrong length for the vendor
     /// KEM's parameter set → CKR_ENCRYPTED_DATA_INVALID.
     ///
-    /// `#[ignore]`: builds a real mceliece6688128 keypair first — minutes-slow
-    /// in an unoptimized debug build. Run manually with `cargo test --release
-    /// -- --ignored pqc_vendor_kem_ffi_tests::decapsulate_wrong_ciphertext_len`
-    /// (release mode is fast).
+    /// Real keygen at native debug-build speed (see the doc comment on
+    /// `classic_mceliece_6688128_round_trip` above) — no longer needs
+    /// `#[ignore]`.
     #[test]
-    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn decapsulate_wrong_ciphertext_len_encrypted_data_invalid() {
         let _guard = test_lock::acquire();
         setup();

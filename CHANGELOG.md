@@ -8,6 +8,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Rust engine: Classic McEliece, all 10 parameter sets** (`348864`,
+  `348864f`, `460896`, `460896f`, `6688128`, `6688128f`, `6960119`,
+  `6960119f`, `8192128`, `8192128f` — BSI TR-02102-1 §2.4.2), up from the
+  single `mceliece6688128` variant this engine shipped before. Backed by a
+  new vendored fork, `rust/classic-mceliece-multi/`, which compiles every
+  parameter set into one build instead of the upstream `classic-mceliece-
+  rust` crate's one-per-Cargo-feature limit — see that crate's own
+  `README.md` and
+  `docs/implementation-plan-classic-mceliece-all-parameter-sets-2026-09-08.md`
+  for the design. `CKA_PARAMETER_SET` values `0x2`–`0xA` (`0x1`, unchanged,
+  stays `mceliece6688128`) join the PKCS#11 vendor mechanisms already
+  shipped (`CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN`/`_ENCAPSULATE`,
+  unchanged codepoints); `C_GetMechanismInfo`'s key-size range widens from a
+  single point (1,044,992 B) to the full span across all ten sets
+  (261,120–1,357,824 B). Verified against the official Round-4 KAT vectors
+  (all 10, byte-for-byte), against liboqs (bidirectional cross-validation,
+  the previously-shipped variant), and through the full PKCS#11 FFI path.
+  C++ engine parity (liboqs-backed, since `oqs-provider` dropped Classic
+  McEliece in 0.8.0+) is tracked separately as Phase 2 of the same plan.
+
+### Changed
+
+- `C_GetMechanismInfo` for `CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN`/
+  `_ENCAPSULATE` now reports `ulMinKeySize`/`ulMaxKeySize` as `261,120`/
+  `1,357,824` (public-key bytes across all 10 sets) instead of the single
+  hardcoded `1,044,992` the one-variant build reported.
+
 ## [0.29.0] — 2026-09-08
 
 ### Changed — BREAKING
