@@ -1,13 +1,13 @@
 # PKCS#11 v3.2 Compliance Report
 
 **Engine:** `./build/src/lib/libsofthsmv3.so`
-**Engine commit:** `e2eb7b77a4bff67ba523c949ccc87afb56c913ca`
-**Date:** 2026-09-08 04:16:01 UTC
+**Engine commit:** `1dbf2cd63c884d034b438d54cb41841f12ca6f66`
+**Date:** 2026-09-08 22:36:26 UTC
 
 ## Summary
 - **Total PASS:** 891
 - **Total FAIL:** 0
-- **Total SKIP:** 49
+- **Total SKIP:** 48
 - **Total XFAIL (known engine bugs, documented in-line):** 0
 
 Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL = unexpected non-conformance; SKIP = feature not advertised by the token (v3.2 mandates no particular mechanism set); XFAIL = known, pre-existing engine non-conformance reported here but outside this suite's scope to fix.
@@ -229,7 +229,7 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 
 | Test | Status | Details |
 |---|---|---|
-| Child_survived_and_reported | ✅ PASS | child pid 172479 exited status 0 |
+| Child_survived_and_reported | ✅ PASS | child pid 67535 exited status 0 |
 | Child_session_handle_resolves | ✅ PASS | C_GetSessionInfo RV=0 |
 | Child_login_state_preserved | ✅ PASS | child state=3 parent state=3 (CKS_RW_USER_FUNCTIONS=3) |
 | Child_session_object_readable | ✅ PASS | RV=0 len=8 |
@@ -237,10 +237,10 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Child_inherits_active_encryption_state | ✅ PASS | parent init RV=0 update RV=0 child final RV=0 len=16 |
 | Parent_encryption_state_independent | ✅ PASS | parent C_EncryptFinal after child's RV=0 |
 | Child_writes_do_not_reach_parent | ✅ PASS | child C_SetAttributeValue RV=0; parent label len=11 intact=1 |
-| Sibling_children_RNG_diverge | ✅ PASS | 8 sibling pairs, all distinct=1 childA=2EDA3D9C50BD86C4… childB=FE0607814B72C6DF… (identical output would repeat ECDSA nonces) |
+| Sibling_children_RNG_diverge | ✅ PASS | 8 sibling pairs, all distinct=1 childA=938D19C5CC2D3C9E… childB=C9763C649D6F06B5… (identical output would repeat ECDSA nonces) |
 | Fork_safe_flag_declared_in_interface_list | ✅ PASS | 3 interfaces, CKF_INTERFACE_FORK_SAFE declared=1 |
 | Fork_safe_interface_retrievable | ✅ PASS | C_GetInterface(flags=CKF_INTERFACE_FORK_SAFE) RV=0 |
-| Parent_and_child_RNG_diverge | ✅ PASS | child=4863A811DF6AB481… parent=7CA2C29B49C4B592… preFork=7EA44EBEAB65FAED… |
+| Parent_and_child_RNG_diverge | ✅ PASS | child=B51A3B763182FDF9… parent=571016624CC6CBBB… preFork=EE9A889D652C8924… |
 
 ### G-DA-X
 
@@ -296,7 +296,7 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Flag_AES_GCM_MESSAGE | ✅ PASS | flags=0x774 want 0x6 |
 | Flag_ML_DSA_MESSAGE | ✅ PASS | flags=0x10264 want 0x24 |
 | Flag_SLH_DSA_MESSAGE | ✅ PASS | flags=0x10264 want 0x24 |
-| AdvertiseSubsetDispatch | ✅ PASS | 166 advertised, 0 rejected by C_GetMechanismInfo |
+| AdvertiseSubsetDispatch | ✅ PASS | 165 advertised, 0 rejected by C_GetMechanismInfo |
 
 ### G3Keygen
 
@@ -676,7 +676,6 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Verify_0x00001046 | ✅ PASS | C_VerifyInit RV=0 |
 | OutOfScope_0x00001055 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
 | OutOfScope_0x00001040 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
-| OutOfScope_0x0000140b | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
 | OutOfScope_0x00001056 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
 | Sign_0x00001057 | ✅ PASS | C_SignInit RV=0 |
 | Verify_0x00001057 | ✅ PASS | C_VerifyInit RV=0 |
@@ -885,16 +884,16 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Verify_0x00004037 | ✅ PASS | C_VerifyInit RV=0 |
 | OutOfScope_0x00004035 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
 | OutOfScope_0x00004034 | ⚠️ SKIP | no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead |
-| Summary_AdvertisedImpliesDispatchable | ✅ PASS | 166 advertised, 120 mechanisms probed (230 Init calls across DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT), 46 out-of-scope (derive/generate/wrap-only), 0 answered CKR_MECHANISM_INVALID |
+| Summary_AdvertisedImpliesDispatchable | ✅ PASS | 165 advertised, 120 mechanisms probed (230 Init calls across DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT), 45 out-of-scope (derive/generate/wrap-only), 0 answered CKR_MECHANISM_INVALID |
 
 ### KCV
 
 | Test | Status | Details |
 |---|---|---|
-| AES_Generate_KCV_Present | ✅ PASS | 3 bytes: F81A6A |
-| AES_Generate_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | HSM=F81A6A == oracle=F81A6A |
-| AES_Unwrap_KCV_Present | ✅ PASS | 3 bytes: 63A010 |
-| AES_Unwrap_KCV_Equals_Original | ✅ PASS | original=63A010 unwrapped=63A010 |
+| AES_Generate_KCV_Present | ✅ PASS | 3 bytes: 06601A |
+| AES_Generate_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | HSM=06601A == oracle=06601A |
+| AES_Unwrap_KCV_Present | ✅ PASS | 3 bytes: F88F30 |
+| AES_Unwrap_KCV_Equals_Original | ✅ PASS | original=F88F30 unwrapped=F88F30 |
 | AES_Unwrap_KCV_Equals_OracleEcbZeroBlock | ✅ PASS | matches AES-ECB(zero block)[0:3] oracle |
 | HKDF_Derive_KCV_Present | ✅ PASS | 3 bytes: BEEF61 |
 | HKDF_Derive_KCV_Equals_OracleSha1 | ✅ PASS | HSM=BEEF61 == oracle=BEEF61 |
@@ -936,16 +935,16 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Test | Status | Details |
 |---|---|---|
 | Encap_KCV_present | ✅ PASS | got 3 bytes (§4.11 SHALL be supplied) |
-| Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=0A71C8 oracle=0A71C8 |
+| Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=C3C23E oracle=C3C23E |
 | Decap_KCV_present | ✅ PASS | got 3 bytes |
-| Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=0A71C8 oracle=0A71C8 |
-| Encap_and_Decap_KCV_agree | ✅ PASS | encap=0A71C8 decap=0A71C8 |
+| Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=C3C23E oracle=C3C23E |
+| Encap_and_Decap_KCV_agree | ✅ PASS | encap=C3C23E decap=C3C23E |
 | Decap_correct_caller_KCV_accepted | ✅ PASS | RV=0 (§4.11: a matching supplied value is legal) |
 | Decap_wrong_caller_KCV_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | Decap_zero_length_KCV_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
 | ECDH_Encap_KCV_present | ✅ PASS | got 3 bytes |
-| ECDH_Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=78D9B3 oracle=78D9B3 |
-| ECDH_Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=78D9B3 oracle=78D9B3 |
+| ECDH_Encap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=0B19DD oracle=0B19DD |
+| ECDH_Decap_KCV_equals_SHA1_oracle | ✅ PASS | HSM=0B19DD oracle=0B19DD |
 
 ### KEMNeg
 
@@ -993,40 +992,40 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 
 | Test | Status | Details |
 |---|---|---|
-| GenerateKey_AES_KCV_matches_oracle | ✅ PASS | engine=85368A oracle=85368A |
+| GenerateKey_AES_KCV_matches_oracle | ✅ PASS | engine=307226 oracle=307226 |
 | GenerateKey_AES_correct_value_accepted | ⚠️ SKIP | output is freshly random each call, so the caller cannot know the check value in advance |
 | GenerateKey_AES_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | GenerateKey_AES_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| GenerateKey_Generic_KCV_matches_oracle | ✅ PASS | engine=14779E oracle=14779E |
+| GenerateKey_Generic_KCV_matches_oracle | ✅ PASS | engine=B3A63C oracle=B3A63C |
 | GenerateKey_Generic_correct_value_accepted | ⚠️ SKIP | output is freshly random each call, so the caller cannot know the check value in advance |
 | GenerateKey_Generic_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | GenerateKey_Generic_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| UnwrapKey_AES_KCV_matches_oracle | ✅ PASS | engine=F1127B oracle=F1127B |
-| UnwrapKey_AES_correct_value_accepted | ✅ PASS | RV=0 readback=F1127B |
+| UnwrapKey_AES_KCV_matches_oracle | ✅ PASS | engine=2FA84B oracle=2FA84B |
+| UnwrapKey_AES_correct_value_accepted | ✅ PASS | RV=0 readback=2FA84B |
 | UnwrapKey_AES_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | UnwrapKey_AES_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_HKDF_KCV_matches_oracle | ✅ PASS | engine=6D4E3B oracle=6D4E3B |
-| DeriveKey_HKDF_correct_value_accepted | ✅ PASS | RV=0 readback=6D4E3B |
+| DeriveKey_HKDF_KCV_matches_oracle | ✅ PASS | engine=A9829F oracle=A9829F |
+| DeriveKey_HKDF_correct_value_accepted | ✅ PASS | RV=0 readback=A9829F |
 | DeriveKey_HKDF_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_HKDF_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_ECDH_KCV_matches_oracle | ✅ PASS | engine=7BF28D oracle=7BF28D |
-| DeriveKey_ECDH_correct_value_accepted | ✅ PASS | RV=0 readback=7BF28D |
+| DeriveKey_ECDH_KCV_matches_oracle | ✅ PASS | engine=5DCD11 oracle=5DCD11 |
+| DeriveKey_ECDH_correct_value_accepted | ✅ PASS | RV=0 readback=5DCD11 |
 | DeriveKey_ECDH_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_ECDH_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
 | DeriveKey_PBKD2_KCV_matches_oracle | ✅ PASS | engine=8422AA oracle=8422AA |
 | DeriveKey_PBKD2_correct_value_accepted | ✅ PASS | RV=0 readback=8422AA |
 | DeriveKey_PBKD2_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_PBKD2_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_SP800108_KCV_matches_oracle | ✅ PASS | engine=EEF337 oracle=EEF337 |
-| DeriveKey_SP800108_correct_value_accepted | ✅ PASS | RV=0 readback=EEF337 |
+| DeriveKey_SP800108_KCV_matches_oracle | ✅ PASS | engine=F35E29 oracle=F35E29 |
+| DeriveKey_SP800108_correct_value_accepted | ✅ PASS | RV=0 readback=F35E29 |
 | DeriveKey_SP800108_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_SP800108_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_Concat_KCV_matches_oracle | ⚠️ SKIP | CKA_VALUE unreadable (RV=17), engine KCV=08CF0D |
-| DeriveKey_Concat_correct_value_accepted | ✅ PASS | RV=0 readback=08CF0D |
+| DeriveKey_Concat_KCV_matches_oracle | ⚠️ SKIP | CKA_VALUE unreadable (RV=17), engine KCV=6F9307 |
+| DeriveKey_Concat_correct_value_accepted | ✅ PASS | RV=0 readback=6F9307 |
 | DeriveKey_Concat_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_Concat_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
-| DeriveKey_X25519_KCV_matches_oracle | ✅ PASS | engine=44C0AF oracle=44C0AF |
-| DeriveKey_X25519_correct_value_accepted | ✅ PASS | RV=0 readback=44C0AF |
+| DeriveKey_X25519_KCV_matches_oracle | ✅ PASS | engine=D2B329 oracle=D2B329 |
+| DeriveKey_X25519_correct_value_accepted | ✅ PASS | RV=0 readback=D2B329 |
 | DeriveKey_X25519_wrong_value_rejected | ✅ PASS | RV=19 (want CKR_ATTRIBUTE_VALUE_INVALID=0x13) |
 | DeriveKey_X25519_zero_length_suppresses | ✅ PASS | RV=0 kcv bytes=0 |
 | SetAttributeValue_correct_accepted | ✅ PASS | RV=0 |
@@ -1147,14 +1146,14 @@ Status legend: PASS = spec-conformant behavior for an advertised feature; FAIL =
 | Test | Status | Details |
 |---|---|---|
 | ML_DSA_44_CKA_VALUE_is_raw_FIPS_length | ✅ PASS | len=2560 (want 2560) |
-| ML_DSA_44_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0xb9 len=2560 |
+| ML_DSA_44_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0xb1 len=2560 |
 | ML_DSA_44_CKA_SEED_contributed | ✅ PASS | RV=0 len=32 (want 32) |
 | ML_DSA_44_sign_verify_round_trip | ✅ PASS | sign RV=0 verify RV=0 |
 | ML_KEM_768_CKA_VALUE_is_raw_FIPS_length | ✅ PASS | len=2400 (want 2400) |
-| ML_KEM_768_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0x93 len=2400 |
+| ML_KEM_768_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0x54 len=2400 |
 | ML_KEM_768_CKA_SEED_contributed | ✅ PASS | RV=0 len=64 (want 64) |
 | SLH_DSA_CKA_VALUE_is_raw_FIPS_length | ✅ PASS | len=64 (want 64) |
-| SLH_DSA_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0xf6 len=64 |
+| SLH_DSA_CKA_VALUE_not_DER_wrapped | ✅ PASS | first byte=0x45 len=64 |
 | SLH_DSA_CKA_SEED_absent | ✅ PASS | RV=0 len=0 |
 | SLH_DSA_sign_verify_round_trip | ✅ PASS | sign RV=0 verify RV=0 |
 

@@ -206,6 +206,140 @@ run_step_host() { # name, command(run on host) — for node/wasm steps
   if bash -c "set -o pipefail; $2"; then ok "$1"; else bad "$1"; fi
 }
 
+# ── parallel step groups (2026-09-08) ────────────────────────────────────────
+# The steps below were entirely sequential, one `docker exec` at a time, on a
+# machine with 18 idle cores and (after this same change) 62GB given to the
+# container instead of 16GB. Several of them touch completely different
+# crates/workspaces (kmip, rust, remoting, wasm) and have no dependency on one
+# another — the only reason they ever waited in line was that this script
+# asked them to.
+#
+# The one real hazard, and it is not hypothetical (see the CARGO_TARGET_DIR_FOR_RUN
+# comment above this function): two `cargo` invocations sharing ONE target
+# directory concurrently can make cargo believe a fingerprint is fresh when it
+# was built by the OTHER invocation with different features/profile, and reuse
+# the wrong artifact — silently. That is what happened on 2026-09-02 between
+# concurrent WORKTREES; running kmip/rust/remoting cargo commands concurrently
+# WITHIN one gate invocation, sharing $CARGO_TARGET_DIR_FOR_RUN, is the same
+# hazard one level down. So each parallel lane below gets its OWN target
+# directory (a subdirectory of this run's already-isolated one) — no two
+# concurrent cargo processes ever point at the same target dir. Steps that
+# stay logically sequential (the three kmip sub-steps: same crate, same
+# reasoning as the original comments on each) run one after another WITHIN a
+# single lane/subshell, so they still share a target dir safely, in series.
+declare -a BG_PIDS=() BG_NAMES=() BG_LOGS=()
+GATE_PARLOGS="$(mktemp -d "${TMPDIR:-/tmp}/gate-parallel.XXXXXX")"
+trap 'rm -rf "$GATE_PARLOGS"' EXIT
+
+dexec_lane() { # cmd, lane — like dexec, but isolated to its own target dir
+  docker exec -e CARGO_TARGET_DIR="$CARGO_TARGET_DIR_FOR_RUN/lanes/$2" "$RUST_CONTAINER" bash -c "set -o pipefail; $1"
+}
+
+run_step_bg() { # name, command(run in container), lane
+  STEP=$((STEP+1))
+  local step_no=$STEP name="$1" cmd="$2" lane="$3"
+  local log="$GATE_PARLOGS/step-$step_no.log"
+  say "step $step_no: $name (parallel, lane=$lane)"
+  ( dexec_lane "$cmd" "$lane" > "$log" 2>&1 ) &
+  BG_PIDS+=("$!"); BG_NAMES+=("$name"); BG_LOGS+=("$log")
+}
+
+run_step_bg_host() { # name, command(run on host)
+  STEP=$((STEP+1))
+  local step_no=$STEP name="$1" cmd="$2"
+  local log="$GATE_PARLOGS/step-$step_no.log"
+  say "step $step_no: $name (parallel, host)"
+  ( bash -c "set -o pipefail; $cmd" > "$log" 2>&1 ) &
+  BG_PIDS+=("$!"); BG_NAMES+=("$name"); BG_LOGS+=("$log")
+}
+
+# A lane that must stay sequential WITHIN itself (same crate as its
+# sibling sub-steps — see the kmip group below) but should still run
+# CONCURRENTLY with the other lanes: run_step_bg_seq queues a (name, cmd)
+# pair against a lane name without launching anything; launch_seq_lanes
+# starts exactly one background subshell per distinct lane afterward, which
+# runs that lane's queued commands one at a time, in the order queued — so
+# two commands in the same lane never share a target dir AT THE SAME TIME,
+# only in succession, which is what the CARGO_TARGET_DIR_FOR_RUN comment
+# above requires. check_gate_steps_can_fail.py parses this exactly like
+# run_step/run_step_bg (same `func "name" \n "cmd"` shape), so a step
+# written this way gets the same UNFAILABLE/NARROWED scrutiny as any other.
+declare -a SEQ_NAMES=() SEQ_CMDS=() SEQ_STEPS=() SEQ_LANES=()
+declare -a LANE_PIDS=() LANE_LANE_NAMES=()
+
+run_step_bg_seq() { # name, command(run in container), lane
+  STEP=$((STEP+1))
+  say "step $STEP: $1 (parallel, lane=$3, sequential within lane)"
+  SEQ_NAMES+=("$1"); SEQ_CMDS+=("$2"); SEQ_STEPS+=("$STEP"); SEQ_LANES+=("$3")
+}
+
+launch_seq_lanes() { # backgrounds one subshell per distinct lane queued above.
+                      # Each queued step gets its OWN rc file (step-N.rc,
+                      # next to its step-N.log) written by exactly one command
+                      # — no shared per-lane file to count lines in, and no
+                      # ambiguity if a lane's subshell dies partway through:
+                      # every step downstream of the death simply has no rc
+                      # file, which join_seq_lanes reports as a plain FAILED
+                      # rather than crashing the whole gate on a bad array
+                      # index (the bug this replaced: a shared lane-wide rc
+                      # file occasionally came back one line short of what
+                      # every step's own log proved had actually run to
+                      # completion — cause unconfirmed, consequence fixed by
+                      # removing the shared file entirely).
+  local lane i seen l2 log rc_file
+  local -a seen_lanes=()
+  for lane in "${SEQ_LANES[@]}"; do
+    seen=0
+    for l2 in "${seen_lanes[@]:-}"; do [ "$l2" = "$lane" ] && seen=1 && break; done
+    [ "$seen" -eq 1 ] && continue
+    seen_lanes+=("$lane")
+    (
+      for i in "${!SEQ_LANES[@]}"; do
+        [ "${SEQ_LANES[$i]}" = "$lane" ] || continue
+        log="$GATE_PARLOGS/step-${SEQ_STEPS[$i]}.log"
+        rc_file="$GATE_PARLOGS/step-${SEQ_STEPS[$i]}.rc"
+        dexec_lane "${SEQ_CMDS[$i]}" "$lane" > "$log" 2>&1
+        echo "$?" > "$rc_file"
+      done
+    ) &
+    LANE_PIDS+=("$!"); LANE_LANE_NAMES+=("$lane")
+  done
+}
+
+join_seq_lanes() { # waits for every lane started by launch_seq_lanes, THEN
+                    # prints each queued step's output and calls ok()/bad()
+                    # in the order it was queued — waiting for every lane
+                    # first, rather than per-lane, means a step's own rc file
+                    # is always fully written by the time anything reads it.
+  local li i rc
+  for li in "${!LANE_PIDS[@]}"; do
+    wait "${LANE_PIDS[$li]}"
+  done
+  for i in "${!SEQ_NAMES[@]}"; do
+    cat "$GATE_PARLOGS/step-${SEQ_STEPS[$i]}.log"
+    rc="$(cat "$GATE_PARLOGS/step-${SEQ_STEPS[$i]}.rc" 2>/dev/null)"
+    if [ "$rc" = "0" ]; then
+      ok "${SEQ_NAMES[$i]}"
+    else
+      bad "${SEQ_NAMES[$i]} (lane rc file: ${rc:-<missing — lane may have died early>})"
+    fi
+  done
+  SEQ_NAMES=(); SEQ_CMDS=(); SEQ_STEPS=(); SEQ_LANES=(); LANE_PIDS=(); LANE_LANE_NAMES=()
+}
+
+join_bg_group() { # waits for every job launched by run_step_bg(_host) since
+                   # the last join, in launch order, printing each one's
+                   # captured output and calling ok()/bad() exactly as if it
+                   # had run in place — same verdict semantics, different timing.
+  local i rc
+  for i in "${!BG_PIDS[@]}"; do
+    wait "${BG_PIDS[$i]}"; rc=$?
+    cat "${BG_LOGS[$i]}"
+    if [ "$rc" -eq 0 ]; then ok "${BG_NAMES[$i]}"; else bad "${BG_NAMES[$i]}"; fi
+  done
+  BG_PIDS=(); BG_NAMES=(); BG_LOGS=()
+}
+
 # ── steps ───────────────────────────────────────────────────────────────────
 
 # WS-0.4 (2026-08-30): every tests/acvp/*.json vector file must carry a real,
@@ -239,61 +373,63 @@ run_step_host "PKCS#11 mechanism ledger (per-CKM_*, both engines)" \
 
 ensure_container
 
-# slh_dsa_sigver_and_siggen is excluded here (-- --skip) and run separately
-# below with --nocapture: it's the one genuinely slow test in this suite
-# (12 SLH-DSA parameter sets, parallelized across threads but still ~200s
-# dominated by the slowest "s" set — 633s before parallelizing), and running
-# it a second time here would silently double real wall-clock cost every
-# gate invocation for no benefit — it's already exercised, just not in this
-# step. --skip matches by substring, so this also skips nothing else by
-# accident: no other test name contains this string.
-# 2026-09-07: was two full runs of the same suite back to back (one to grep
-# for FAILED, one to compute the summary line) — silently doubling this
-# step's wall-clock cost every gate invocation for zero extra information.
-# Single run now, captured once and grepped twice.
-run_step "kmip cargo test" \
-  "cd $AG_KMIP && OUT=\$(RUST_MIN_STACK=134217728 cargo test --quiet -- --skip slh_dsa_sigver_and_siggen 2>&1 | tee /dev/stderr); \
-   echo \"\$OUT\" | grep -qE 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   echo \"\$OUT\" | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+# Everything below down to the "join_bg_group" call is one parallel batch:
+# kmip (its own 3 sub-steps, kept sequential WITHIN this lane — same crate,
+# same reasoning each sub-step's original comment already gave), the rust
+# engine, remoting, and the wasm type-check are four independent lanes, each
+# with its own isolated target dir (see the block above run_step_bg's
+# definition for why that isolation is required, not optional); the wasm
+# smoke test and the differential harness run on the host, where there is no
+# shared-target-dir hazard at all. None of these five things touch a file the
+# others write, so nothing is gained by making them wait in line.
+# Migrated to `cargo nextest` 2026-09-08 — measured 3m12s wall-clock for this
+# ENTIRE crate (1016 tests, cold compile included) versus cargo test's default
+# of running each of the 33 separate integration-test FILES as its own
+# process, one at a time: parallelism only ever happened within a single
+# binary, never across the crate's many binaries, so most of the machine sat
+# idle for the whole step regardless of how many cores it had. nextest runs
+# every binary concurrently against one shared thread pool instead. Its exit
+# code is directly trustworthy (verified by sabotage: a deliberately failed
+# assertion produced exit 100, propagated correctly through PIPESTATUS)
+# without any of the pipefail/grep/awk machinery the cargo-test steps below
+# needed just to get a verdict that couldn't be silently defeated — there is
+# no pipe in any of these commands at all now, so there is nothing for
+# pipefail to matter to.
+#
+# slh_dsa_sigver_and_siggen is still excluded here and run separately below
+# with --no-capture: it's the one genuinely slow test in this suite (12
+# SLH-DSA parameter sets, ~200s dominated by the slowest "s" set), and running
+# it a second time here would silently double real wall-clock cost every gate
+# invocation for no benefit — it's already exercised, just not in this step.
+# --skip matches by substring, so this also skips nothing else by accident:
+# no other test name contains this string.
+run_step_bg_seq "kmip cargo test" \
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast -- --skip slh_dsa_sigver_and_siggen" \
+  kmip
 
 # Progress-logged separately (not folded into the step above) so a slow run
-# reads as "12 parameter sets in flight," not silence — --nocapture shows the
-# eprintln! lines cargo otherwise captures and discards on a passing test;
-# `tee /dev/stderr` preserves them in the gate log (which redirects both
-# stdout+stderr) while still letting grep see the stream for fail-detection.
-# The trailing `true` made this step unfailable for the same pipefail reason
-# documented on the wasm step below — a failing cargo run left the `&& exit 1`
-# unreached and `true` reported success. Verdict now comes from cargo's own
-# status (PIPESTATUS[0]); the grep still exists only to surface the line.
-run_step "kmip known-slow mechanisms (live progress)" \
-  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo test --quiet --test acvp_roundtrip slh_dsa_sigver_and_siggen -- --nocapture 2>&1 | tee /dev/stderr | grep -E 'test result: FAILED|[1-9][0-9]* failed'; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; \
-   true"
+# reads as "12 parameter sets in flight," not silence — nextest's own SLOW
+# marker (crossing 60s, then 120s) already does this automatically, so
+# --no-capture here is belt-and-braces rather than load-bearing the way
+# --nocapture was for cargo test.
+run_step_bg_seq "kmip known-slow mechanisms (live progress)" \
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --test acvp_roundtrip slh_dsa_sigver_and_siggen --no-capture" \
+  kmip
 
-# The verdict must cover the WHOLE run, not one binary. This step used to end
-# in `cargo test --test policy_op_layer`, which decided the step's exit status:
-# 1032 tests ran, 10 were checked, and a failure in the other 1022 passed
-# silently. Separately (2026-09-07): the run also had NO tee at all — a
-# potentially long --include-ignored pass produced zero visible output until
-# it finished, indistinguishable from a hang — and used to run the whole
-# suite TWICE just to get both the fail-check and the aggregate. Single run
-# now: streamed live via tee, captured once, and the summary is the true
-# aggregate across everything --include-ignored actually ran (same fix shape
-# as `kmip cargo test` and `rust engine cargo test` below).
-run_step "kmip local-only suites (--include-ignored)" \
-  "cd $AG_KMIP && OUT=\$(RUST_MIN_STACK=134217728 cargo test --quiet -- --include-ignored 2>&1 | tee /dev/stderr); \
-   echo \"\$OUT\" | grep -qE 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   echo \"\$OUT\" | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+# The verdict covers the WHOLE run: nextest's own exit code, not a narrower
+# re-run of one binary (the historic bug this step's old comment recorded —
+# a verdict taken from `--test policy_op_layer` alone, 10 of 1032 tests,
+# while the other 1022 passed silently — cannot recur here because there is
+# no second, narrower command left to accidentally decide the exit status).
+run_step_bg_seq "kmip local-only suites (--include-ignored)" \
+  "cd $AG_KMIP && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast --run-ignored all" \
+  kmip
 
-# tee: cargo's own "test X has been running for over 60 seconds" liveness
-# warning survives --quiet but was being discarded by the grep filtering.
-# 2026-09-07: this was TWO full runs of the ~529-test suite back to back
-# (~900s each, ~30 min total) purely to get a summary line derivable from a
-# single run — the single biggest concrete cost found in the "why does one
-# small change take hours" complaint. One run now, captured once.
-run_step "rust engine cargo test" \
-  "cd $AG_RUST && OUT=\$(RUST_MIN_STACK=134217728 cargo test --quiet 2>&1 | tee /dev/stderr); \
-   echo \"\$OUT\" | grep -qE 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   echo \"\$OUT\" | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}'"
+launch_seq_lanes
+
+run_step_bg "rust engine cargo test" \
+  "cd $AG_RUST && RUST_MIN_STACK=134217728 cargo nextest run --no-fail-fast" \
+  rust-engine
 
 # The remoting workspace (gRPC + REST PKCS#11 services) had NO gate step at
 # all before 2026-08-26 — its three-transport parity suite
@@ -315,22 +451,6 @@ run_step "rust engine cargo test" \
 # them without re-measuring, and do not remove #[ignore] from v21b without
 # first re-measuring its cost; 326s per run would take this step from
 # ~seconds to 5+ minutes for every contributor.
-# `tee /dev/stderr` for the same reason steps 2 and 5 have it, and for one
-# more: without it this step reports "85 passed, 1 failed" and DISCARDS the
-# failing test's name, so a failure here tells you something broke but not
-# what. On 2026-09-07 that gap led to a real failure being explained away with
-# a stored assumption instead of diagnosed — the name was never printed, and
-# the run was not reproducible afterwards. Separately (2026-09-07, same day):
-# this was also two full runs of `cargo test` back to back, neither teed on
-# the second pass, purely to get an aggregate derivable from the first run's
-# own output. Single run now: streamed live via tee (preserving the failing
-# test's name) and captured once for both the fail-check and the aggregate.
-run_step "remoting gRPC+REST services + three-transport parity" \
-  "cd $AG_CONTAINER_ROOT/remoting && OUT=\$(cargo test --quiet 2>&1 | tee /dev/stderr); \
-   echo \"\$OUT\" | grep -qE 'test result: FAILED|[1-9][0-9]* failed' && exit 1; \
-   echo \"\$OUT\" | grep -E 'test result' | awk '{p+=\$4; f+=\$6} END {print \"  \"p\" passed, \"f\" failed\"; exit (f>0)}' && \
-   python3 scripts/check_coverage_ledger.py"
-
 # Cheap, and it runs BEFORE the replay on purpose: if the corpus is not the
 # corpus we think it is, the replay figure below is measuring something else.
 run_step "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
@@ -355,6 +475,19 @@ run_step "OASIS KMIP 3.0 replay (99 PASS / 0 FAIL / 3 SKIP_DEPRECATED)" \
    python3 conformance/assert_replay_report.py && \
    python3 conformance/check_report_fresh.py"
 
+# Migrated to nextest along with the steps above. The old `tee /dev/stderr`
+# existed because cargo test's own summary line ("85 passed, 1 failed")
+# discards the failing test's NAME — on 2026-09-07 that gap led to a real
+# failure being explained away with a stored assumption instead of
+# diagnosed, since the name was never printed and the run wasn't
+# reproducible afterwards. nextest prints a `FAIL [time] (n/total) crate::test
+# full::test::name` line for every failure as part of its normal output, so
+# the name is never lost in the first place — nothing to route around.
+run_step_bg "remoting gRPC+REST services + three-transport parity" \
+  "cd $AG_CONTAINER_ROOT/remoting && cargo nextest run --no-fail-fast && \
+   python3 scripts/check_coverage_ledger.py" \
+  remoting
+
 # Does the wasm target still COMPILE? The smoke step below cannot answer that:
 # it runs the already-staged bundle, so a source change that breaks the wasm
 # build passes the gate and only surfaces at the next restage. That is not
@@ -369,15 +502,69 @@ run_step "OASIS KMIP 3.0 replay (99 PASS / 0 FAIL / 3 SKIP_DEPRECATED)" \
 # E0063 errors and then "wasm32 type-check clean ✓" in the same breath, letting
 # a genuinely broken wasm crate through. Take the verdict from the compiler's
 # own status via PIPESTATUS[0] instead; grep stays purely for display.
-run_step "wasm target still compiles (cargo check)" \
-  "cd $AG_CONTAINER_ROOT/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; echo '  wasm32 type-check clean'"
+run_step_bg "wasm target still compiles (cargo check)" \
+  "cd $AG_CONTAINER_ROOT/wasm && cargo check --quiet --release --target wasm32-unknown-unknown 2>&1 | grep -E '^error' -A6; rc=\${PIPESTATUS[0]}; [ \"\$rc\" -eq 0 ] || exit 1; echo '  wasm32 type-check clean'" \
+  wasm-check
 
 # wasm smoke runs on the HOST (node lives there, not in the Rust container).
-# Runs the STAGED bundle — see the check above for why that is not sufficient on
-# its own. Run scripts/build-kmip-wasm.sh after any wasm/ or kmip/ source change
-# to regenerate it.
-run_step_host "wasm CACP smoke" \
+# Runs the STAGED bundle — see the check above for why that is not sufficient
+# on its own. Run scripts/build-kmip-wasm.sh after any wasm/ or kmip/ source
+# change to regenerate it.
+run_step_bg_host "wasm CACP smoke" \
   "cd '$ROOT/wasm' && node smoke/smoke.cjs 2>&1 | tail -2 | grep -q 'PASS'"
+
+# Was a manual-only tool until 2026-08-23 — never wired into any gate,
+# despite being the instrument the 2026-08 remediation added specifically
+# "to gate the rest from rotting." Builds BOTH engines fresh (see the
+# script's own header for why that matters) and diffs every observable
+# outcome across 49 scenarios; only divergences already recorded with a
+# citation in tests/differential/exceptions.json are allowed. Runs on the
+# HOST, via its own `rust/target` (not the container's target dir at all),
+# so it shares no state with any lane above.
+run_step_bg_host "cross-engine PKCS#11 differential harness (49 scenarios)" \
+  "cd '$ROOT' && bash scripts/run-differential-harness.sh 2>&1 | tail -15"
+
+# These three touch $AG_KMIP but nothing else in the batch does, and none of
+# them shares a target dir with a debug test build: the two Python checks
+# below build nothing at all (pure XML/JSON/committed-.bin comparisons — the
+# CARGO_TARGET_DIR a lane sets is simply irrelevant to them), and the replay's
+# own `cargo build --release` is a different profile from every debug test
+# build above, so it was never sharing compiled work with them regardless of
+# when it runs. All three moved into the batch 2026-09-08 — they used to run
+# sequentially afterward for no reason stronger than "they happen to also
+# touch kmip/", which is not a real dependency.
+#
+# Cheap, and it's queued before the replay for the same reason it always ran
+# before it: if the corpus is not the corpus we think it is, the replay
+# figure is measuring something else — kept in reading order even though
+# nothing here enforces it at run time.
+run_step_bg "OASIS corpus provenance (102 transcripts vs the CSD02 zip)" \
+  "cd $AG_KMIP && python3 conformance/verify_corpus_provenance.py" \
+  oasis-checks
+
+# Immediately after the corpus check, and for the same reason. That step asks
+# "is the XML the OASIS XML?"; this asks "are the committed byte vectors what
+# that XML actually produces?" — a question NOTHING asked before 2026-09-07.
+# The Rust suites (oasis_codec_roundtrip.rs and friends) round-trip the
+# committed .bin files through our own codec, so a vector that no longer
+# matches its source XML still round-trips perfectly; the corpus is never
+# consulted. Four vectors were stale from the 2026-07 CSD02 refresh until
+# 2026-09-06 and surfaced only by accident, when an unrelated regeneration
+# changed their size. --check writes nothing.
+run_step_bg "OASIS byte vectors match the XML corpus (1358 vectors)" \
+  "cd $AG_KMIP && python3 conformance/harness/generate_byte_vectors.py --check" \
+  oasis-checks
+
+run_step_bg "OASIS KMIP 3.0 replay (99 PASS / 0 FAIL / 3 SKIP_DEPRECATED)" \
+  "cd $AG_KMIP && cargo build --release --bin pqctoday-kmip --quiet && \
+   mkdir -p target/release && ln -sf \$(readlink -f \${CARGO_TARGET_DIR:-/cargo-target}/release/pqctoday-kmip) target/release/pqctoday-kmip 2>/dev/null; \
+   python3 conformance/harness/dispatcher_replay.py >/dev/null && \
+   python3 conformance/assert_replay_report.py && \
+   python3 conformance/check_report_fresh.py" \
+  oasis-replay
+
+join_bg_group
+join_seq_lanes
 
 # Was opt-in (--rust-p11) until 2026-08-23. The Rust engine's own conformance
 # report went 45 source-commits stale while this was skippable — a default
@@ -388,6 +575,11 @@ run_step_host "wasm CACP smoke" \
 # per-section results every time it runs to completion; the freshness check
 # right after confirms the regenerated report actually matches what's
 # committed (or fails loudly if it doesn't — see check_pkcs11_reports_fresh.py).
+# Kept sequential, AFTER the parallel batch above rather than inside it: this
+# is the one place a lane's isolated target dir would cost more than it
+# saves — it wants the "rust engine cargo test" lane's own build of the same
+# rust/ crate to already be warm, not a second cold compile of it running at
+# the same time.
 STEP=$((STEP+1)); say "step $STEP: Rust PKCS#11 v3.2 conformance (257 checks)"
 # wasm-pack is built but not on the container's PATH — plain `wasm-pack` here
 # fails with "command not found" and always has, invisibly, because this step
@@ -400,15 +592,6 @@ if dexec "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=2097152' /cargo-tar
 else
   bad "Rust PKCS#11 v3.2 conformance (report regenerated regardless — check it, or check_pkcs11_reports_fresh.py, for the real failure)"
 fi
-
-# Was a manual-only tool until 2026-08-23 — never wired into any gate,
-# despite being the instrument the 2026-08 remediation added specifically
-# "to gate the rest from rotting." Builds BOTH engines fresh (see the
-# script's own header for why that matters) and diffs every observable
-# outcome across 49 scenarios; only divergences already recorded with a
-# citation in tests/differential/exceptions.json are allowed.
-run_step_host "cross-engine PKCS#11 differential harness (49 scenarios)" \
-  "cd '$ROOT' && bash scripts/run-differential-harness.sh 2>&1 | tail -15"
 
 if [[ $RUN_CPP == 1 ]]; then
   # Preflight. $RUST_CONTAINER is a long-lived pet container built for Rust, and
