@@ -144,6 +144,11 @@ const CKF = { RW_SESSION: 2, SERIAL_SESSION: 4 };
 const CKP = {
   ML_DSA_65: 2, ML_KEM_768: 2, SLH_DSA_SHA2_128F: 3,
   FRODOKEM_640_AES: 0x1,
+  // CKP_CLASSIC_MCELIECE_348864 (src/constants.rs) — the smallest/fastest
+  // of the 10 parameter sets (261,120-byte public key vs. up to
+  // 1,357,824 for the largest), chosen for the same reason FRODOKEM_640_AES
+  // was above.
+  CLASSIC_MCELIECE_348864: 0x2,
   PBKDF2_HMAC_SHA256: 0x04, PBKDF2_HMAC_SHA384: 0x05, PBKDF2_HMAC_SHA512: 0x06,
 };
 const CKU = { SO: 0, USER: 1 };
@@ -3087,20 +3092,55 @@ section('G8 — vendor-defined mechanisms: FrodoKEM / Keccak-256 / KMAC / BIP32 
   }
 }
 
-// CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN / _ENCAPSULATE (0x80000003 /
-// 0x80000004) — DELIBERATE, DOCUMENTED GAP, not silently skipped. The
-// engine's own native test suite marks every mceliece6688128 keygen test
-// `#[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see
-// doc comment"]` (src/ffi.rs, classic_mceliece_6688128_round_trip and
-// neighboring tests). This harness's wasm build is `--dev` (unoptimized,
-// per this file's own header comment and scripts/local-gate.sh), and the
-// public/private key sizes for this mechanism are ~1 MB each (ffi.rs's
-// mechanism-info table: 1_044_992 bytes min==max) — a real keygen here
-// would make every conformance run multi-minutes slower, is a structural
-// (not laziness) barrier, and Classic McEliece is scoped to exactly ONE
-// parameter set (mceliece6688128) per the implementation plan referenced in
-// src/ffi.rs, so there is no smaller/faster variant to substitute. Left
-// untested here — a real, separate finding, not silently covered.
+section('G8b — Classic McEliece (BSI TR-02102-1 §2.4.2, all 10 parameter sets)');
+{
+  // CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN / _ENCAPSULATE (0x80000003 /
+  // 0x80000004). The gap this closes: before the implementation plan
+  // (2026-09-08) landed, Classic McEliece was scoped to exactly ONE
+  // parameter set (mceliece6688128, ~1 MB keys) whose keygen was
+  // `#[ignore = "...minutes-slow in debug builds"]` in the engine's own
+  // native test suite — a real, structural barrier for a `--dev` wasm
+  // build, not laziness, so this section was left as a documented gap
+  // rather than silently skipped. Two things changed: all 10 parameter
+  // sets are now implemented, including 348864 (261,120-byte public key,
+  // the smallest of the ten), and rust/Cargo.toml's
+  // `[profile.dev.package.classic-mceliece-multi] opt-level = 3` override
+  // (added by the same plan) makes even debug-mode keygen fast — the
+  // override is package-scoped, not target-scoped, so it applies to this
+  // wasm32 build exactly as it does to native. Same real encap/decap SEAM
+  // discipline as the FrodoKEM block above.
+  {
+    const pub = [{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY }, { type: CKA.PARAMETER_SET, ulong: CKP.CLASSIC_MCELIECE_348864 }];
+    const prv = [{ type: CKA.CLASS, ulong: CKO.PRIVATE_KEY }, { type: CKA.PARAMETER_SET, ulong: CKP.CLASSIC_MCELIECE_348864 }];
+    const hPub = alloc(4), hPrv = alloc(4);
+    const rv = w._C_GenerateKeyPair(hS, buildMech(CKM.CLASSIC_MCELIECE_KEY_PAIR_GEN),
+      buildTpl(pub), pub.length, buildTpl(prv), prv.length, hPub, hPrv);
+    check('CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN (348864, previously untested) → OK', rv, CKR.OK);
+    const mPub = readU32(hPub), mPrv = readU32(hPrv);
+
+    const ctLenP = alloc(4); writeU32(ctLenP, 0);
+    const hSSp = alloc(4);
+    w._C_EncapsulateKey(hS, buildMech(CKM.CLASSIC_MCELIECE_ENCAPSULATE), mPub, 0, 0, 0, ctLenP, hSSp);
+    const ctLen = readU32(ctLenP);
+    const ctP = alloc(ctLen); writeU32(ctLenP, ctLen);
+    check('C_EncapsulateKey(CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE, previously untested) → OK',
+      w._C_EncapsulateKey(hS, buildMech(CKM.CLASSIC_MCELIECE_ENCAPSULATE), mPub, 0, 0, ctP, ctLenP, hSSp), CKR.OK);
+    const hEncapSS = readU32(hSSp);
+    const encapOut = buildTpl([{ type: CKA.VALUE, bytes: new Uint8Array(64) }]);
+    check('read encapsulator shared-secret CKA_VALUE → OK', w._C_GetAttributeValue(hS, hEncapSS, encapOut, 1), CKR.OK);
+    const encapSS = Buffer.from(new Uint8Array(mem().buffer, readU32(encapOut + 4), readU32(encapOut + 8)));
+
+    const hDecapSS = alloc(4);
+    check('C_DecapsulateKey(CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE, previously untested) → OK',
+      w._C_DecapsulateKey(hS, buildMech(CKM.CLASSIC_MCELIECE_ENCAPSULATE), mPrv, 0, 0, ctP, ctLen, hDecapSS), CKR.OK);
+    const hDecap = readU32(hDecapSS);
+    const decapOut = buildTpl([{ type: CKA.VALUE, bytes: new Uint8Array(64) }]);
+    check('read decapsulator shared-secret CKA_VALUE → OK', w._C_GetAttributeValue(hS, hDecap, decapOut, 1), CKR.OK);
+    const decapSS = Buffer.from(new Uint8Array(mem().buffer, readU32(decapOut + 4), readU32(decapOut + 8)));
+    check('Classic McEliece: encapsulate → decapsulate agree on the SAME shared secret (real SEAM)',
+      encapSS.equals(decapSS) ? 1 : 0, 1);
+  }
+}
 
 section('G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new)');
 {

@@ -4,7 +4,7 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `1dbf2cd63c88` · **Generated:** 2026-09-08T22:34:43.725Z — machine-written
+**Engine commit:** `808fc95cd970` · **Generated:** 2026-09-09T06:36:24.933Z — machine-written
 by this harness itself (`writeReport()` in `test_p11_conformance.js`) at the
 end of every run, not hand-edited.
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
@@ -17,7 +17,7 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**1007 passed / 0 failed** across 51 sections in this JS harness.
+**1013 passed / 0 failed** across 52 sections in this JS harness.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -167,6 +167,7 @@ silently double-succeed. Regression test:
 - G6 — RIPEMD160 / bare SHA384_HMAC+SHA512_HMAC / GENERIC_SECRET / CONCATENATE / PBKDF2 (39 passed / 0 failed)
 - G7 — stateful hash-based signatures: HSS (§6.14) (7 passed / 0 failed)
 - G8 — vendor-defined mechanisms: FrodoKEM / Keccak-256 / KMAC / BIP32 (≥ CKM_VENDOR_DEFINED) (29 passed / 0 failed)
+- G8b — Classic McEliece (BSI TR-02102-1 §2.4.2, all 10 parameter sets) (6 passed / 0 failed)
 - G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) (224 passed / 0 failed)
 
 ## Full transcript
@@ -1056,6 +1057,14 @@ silently double-succeed. Regression test:
   ✅ read child CKA_VALUE → OK
   ✅ BIP32 child derive (hardened): byte-equals independent HMAC-SHA512 + mod-n scalar addition
 
+── G8b — Classic McEliece (BSI TR-02102-1 §2.4.2, all 10 parameter sets) ──
+  ✅ CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN (348864, previously untested) → OK
+  ✅ C_EncapsulateKey(CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE, previously untested) → OK
+  ✅ read encapsulator shared-secret CKA_VALUE → OK
+  ✅ C_DecapsulateKey(CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE, previously untested) → OK
+  ✅ read decapsulator shared-secret CKA_VALUE → OK
+  ✅ Classic McEliece: encapsulate → decapsulate agree on the SAME shared secret (real SEAM)
+
 ── G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) ──
   ✅ fixture: live advertised mechanism count → 133
   ✅ 0x0 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
@@ -1282,5 +1291,5 @@ silently double-succeed. Regression test:
   ✅ 0x80000010 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ G9: probed at least one real operation for every flag-bearing advertised mechanism (222 probes total)
 
-════════ RESULT: 1007 passed, 0 failed ════════
+════════ RESULT: 1013 passed, 0 failed ════════
 ```
