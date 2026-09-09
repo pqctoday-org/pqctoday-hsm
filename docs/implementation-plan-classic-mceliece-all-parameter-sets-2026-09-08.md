@@ -839,9 +839,120 @@ still needs, and depend on Phase 2 (C++) existing to diff against.
 
 **Next**: Phase 2 (C++ engine, liboqs-backed, §5).
 
----
+**2026-09-09 — Phase 2 complete (`f499a851`, `09506e4f`, `28d3b747`).**
 
-## Sources
+Class hierarchy + liboqs CMake integration landed first (`f499a851`), then the
+PKCS#11 mechanism wiring (`09506e4f`): `SoftHSM::generateClassicMcEliece`,
+`encapsulateClassicMcEliece`/`decapsulateClassicMcEliece` (dispatched from
+`encapsulateKeyImpl`/`decapsulateKeyImpl` exactly like the existing
+`CKM_ECDH1_DERIVE` branch, since Classic McEliece is its own mechanism pair
+with no ML-KEM-shaped code to share), `P11ClassicMcEliecePublicKeyObj`/
+`PrivateKeyObj`, and mechanism-info registration. A new CppUnit suite
+(`src/lib/test/ClassicMcElieceTests.cpp`) drives a full
+`C_GenerateKeyPair` → `C_EncapsulateKey` → `C_DecapsulateKey` round trip
+through the real ABI for all 10 parameter sets — caught one real bug during
+development: `phKey` must be non-NULL even for a `C_EncapsulateKey` size
+query (checked unconditionally at function entry, before the
+`pCiphertext == NULL_PTR` branch), which the first draft test got wrong.
+
+§5.5 cross-validation (`28d3b747`) both directions:
+1. `test_classic_mceliece_kat.cpp` (ad-hoc, dlopen + `C_GetInterface` for the
+   v3.2 function list — `C_GetFunctionList` only returns the legacy v2.40
+   struct, discovered the hard way) decapsulates all 100 official Round-4 KAT
+   vectors (10 variants × 10 vectors): 100/100 matched.
+2. `test_classic_mceliece_cross_engine.cpp` +
+   `rust/classic-mceliece-multi/examples/cross_engine_cli.rs` round-trip both
+   engines against each other, both directions, all 10 variants (Rust
+   keygen → C++ encaps → Rust decaps, and the reverse): 20/20 matched —
+   proves wire-format compatibility for freshly generated keys, not just the
+   official vectors both engines already pass independently.
+
+§5.4 memory hygiene: a real `-DENABLE_ASAN=ON -DENABLE_UBSAN=ON` Debug build
+(this phase's first actual consumer of that CMake plumbing), run three ways —
+the 100 KAT decapsulations, a full keygen/encaps/decaps cycle for all 10
+variants via the ad-hoc cross-engine tool, and the full CppUnit suite
+(75 tests) — all clean. Sanity-checked LSan itself was actually firing in
+this container first (a deliberate `new int[10]` leak, correctly caught).
+Zero leaks touching Classic McEliece/liboqs code anywhere; the only leaks
+present at all (8 reports, generic across the whole suite) are OpenSSL's own
+`OSSL_PROVIDER_try_load_ex("legacy")` provider-init leak, unrelated to this
+algorithm and present regardless of it. liboqs's own CI-reported leak-test
+failures for `460896`/`460896f`/`6960119`/`6960119f` under clang -O2/-O3 did
+not reproduce here (GCC, Debug+ASan) — carrying the plan's own caveat: this
+doesn't disprove the upstream issue under different build flags, only that
+this engine's own usage pattern doesn't trigger it. No `exceptions.json`
+entry needed; all 10 variants stay advertised.
+
+**Next**: Phase 3 (§6).
+
+**2026-09-09 — Phase 3 complete for everything not blocked by PR #233
+(`808fc95c`, `7d2e6bc0`, `b823a3bb`).**
+
+§6 item 1 (differential harness, `808fc95c`): `tests/differential/scenarios.inc`
+had zero FrodoKEM or McEliece scenarios of any kind before this (confirmed by
+grep). Added the four the plan specifies — `create.generate_key_pair.
+classic_mceliece_all_params`, `create.encapsulate.classic_mceliece_all_params`
+(including a ciphertext-bit-flip implicit-rejection check: decapsulate MUST
+still return `CKR_OK` but recover a *different* secret, never an error —
+McEliece has no separate "invalid ciphertext" outcome the way a signature
+verify does), `errors.classic_mceliece_parameter_set` (missing/out-of-range
+`CKA_PARAMETER_SET`, deliberately never an f/non-f swap — that's a legitimate
+different key, not an error), `env.mechanism_info_classic_mceliece` — mirroring
+the ML-KEM pair's shape exactly. Ran the full 68-scenario suite against both
+engines fresh-built: exit 0, zero UNCOVERED divergences. The only divergences
+the 4 new scenarios produced matched pre-existing, algorithm-agnostic
+exceptions (optional-attribute-not-materialised, usage-flag defaults); no new
+`exceptions.json` entry was needed — the plan's anticipated
+`LEGAL-VENDOR-MECHANISMS` glob gap doesn't materialise since both engines now
+advertise all 10 sets symmetrically.
+
+§6 items 3-5 (KMIP/CACP, `7d2e6bc0`): the `KmipAlgorithm` registry grew from 1
+to 10 Classic McEliece variants (0x34/0x35/0x36 real OASIS codepoints +
+0x8000006e-0x80000074 vendor extension, exactly the range this revision's
+§3.2 table specified); every downstream consumer (`canonical_name` ×2,
+`to_pkcs11_mech`, `is_classic_mceliece`, `native_kem_mech`,
+`native_parameter_set`, the name↔variant reverse map) extended — two of these
+were genuine non-exhaustive-match compile errors once the enum grew, not just
+stale wildcards. BSI policy presets now allow-list exactly its 6 recommended
+sets (not all 10 — 348864/6960119 correctly stay off the list, a precision
+improvement over the prior single-variant state, not a relaxation); fips-only/
+cnsa-2.0 deny all 10 by name. `kmip/tests/classic_mceliece_kat.rs` (new)
+closes the "sourced, not yet consumed" gap §6 item 4 flagged — all 100
+official KAT vectors decapsulated through the KMIP-facing native functions
+directly, a third independent proof point alongside the crate-level and raw
+FFI ones from Phase 1. `frodokem_mceliece_e2e.rs`'s single `#[ignore]`d
+mceliece6688128 round trip is un-ignored and joined by the other 9 (the
+`kmip` crate needed its OWN copy of the `[profile.dev.package.
+classic-mceliece-multi]` override — it's a standalone crate, not a `rust/`
+workspace member, so `rust/Cargo.toml`'s doesn't propagate to it, the same
+profile-scoping fact Phase 1 already found once). `policy_op_layer.rs`'s 3
+McEliece assertions extended to the actual boundary the policy change draws
+(BSI's 6 allowed sets, a new assertion that the 4 not-recommended sets are
+denied even WITH the hybrid-partner tag, fips-only/cnsa-2.0 denying all 10).
+801 kmip lib tests pass; zero regressions.
+
+§6 item 6 (evidence regen, `b823a3bb`) — via the real gates, not hand-edited:
+`cpp_compliance_report.{json,md}` regenerated (891 PASS/0 FAIL/50 SKIP, was 48
+SKIP — the delta is exactly the 2 new vendor mechanisms now being discovered
+and correctly classified `OutOfScope` by that suite's own generic sweep;
+`p11_v32_compliance_test.cpp` itself has no McEliece-specific test code, so
+PASS/FAIL is otherwise unchanged by this plan). `rust/
+RUST_P11_V32_CONFORMANCE_REPORT.md`'s own documented "Classic McEliece
+deliberately untested here" gap (dated before this plan, when McEliece was
+one ~1MB-key parameter set with `#[ignore]`d keygen) is closed with a real
+new G8b section — both of the blockers that comment named are gone (10
+parameter sets including a genuinely small one, and the profile override
+applies to the wasm32 build too, package-scoped not target-scoped): 1013
+passed/0 failed, up from 1007. `scripts/check_pkcs11_reports_fresh.py --cpp
+--rust` passes clean against this commit.
+
+**Not done, correctly deferred**: §6 item 2 (ledger regen) remains hard-blocked
+on PR #233 per §10.1 — `scripts/gen_pkcs11_mechanism_ledger.py` and
+`scripts/pin_pkcs11_mechanism_info_ranges.py` still don't exist on this branch
+or `main`. §6 item 7 (hub follow-ups) is explicitly out of scope for this repo
+— separate repo, separate PR.
+
+
 
 - liboqs Classic McEliece page — https://openquantumsafe.org/liboqs/algorithms/kem/classic_mceliece.html
 - liboqs 0.16.0 release — https://github.com/open-quantum-safe/liboqs/releases/tag/0.16.0
