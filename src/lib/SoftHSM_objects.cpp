@@ -50,6 +50,7 @@
 #include "cryptoki.h"
 #include "P11Attributes.h"
 #include "P11Objects.h"
+#include "vendor_mechanisms.h"
 #include "SlotManager.h"
 #include "SymmetricKey.h"
 #include "AESKey.h"
@@ -92,6 +93,8 @@ static CK_RV newP11Object(CK_OBJECT_CLASS objClass, CK_KEY_TYPE keyType, CK_CERT
 				*p11object = new P11MLDSAPublicKeyObj();
 			else if (keyType == CKK_ML_KEM)
 				*p11object = new P11MLKEMPublicKeyObj();
+			else if (keyType == CKK_PQCTODAY_CLASSIC_MCELIECE)
+				*p11object = new P11ClassicMcEliecePublicKeyObj();
 			else if (keyType == CKK_SLH_DSA)
 				*p11object = new P11SLHDSAPublicKeyObj();
 			else if (keyType == CKK_HSS)
@@ -115,6 +118,8 @@ static CK_RV newP11Object(CK_OBJECT_CLASS objClass, CK_KEY_TYPE keyType, CK_CERT
 				*p11object = new P11MLDSAPrivateKeyObj();
 			else if (keyType == CKK_ML_KEM)
 				*p11object = new P11MLKEMPrivateKeyObj();
+			else if (keyType == CKK_PQCTODAY_CLASSIC_MCELIECE)
+				*p11object = new P11ClassicMcEliecePrivateKeyObj();
 			else if (keyType == CKK_SLH_DSA)
 				*p11object = new P11SLHDSAPrivateKeyObj();
 			else if (keyType == CKK_HSS)

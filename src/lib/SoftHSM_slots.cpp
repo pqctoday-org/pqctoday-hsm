@@ -667,6 +667,13 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 	t["CKM_ML_KEM_KEY_PAIR_GEN"]	= CKM_ML_KEM_KEY_PAIR_GEN;
 	t["CKM_ML_KEM"]			= CKM_ML_KEM;
 
+	// Classic McEliece (BSI TR-02102-1 §2.4.2) — vendor mechanisms, all 10
+	// parameter sets, liboqs-backed (implementation plan D-2). First time
+	// this engine advertises these two codepoints — the Rust engine has
+	// since softhsmrustv3 v0.7.0.
+	t["CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN"] = CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN;
+	t["CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE"]  = CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE;
+
 	// LMS / HSS stateful hash-based signatures (G10)
 	// CKM_HSS / CKM_HSS_KEY_PAIR_GEN are standard PKCS#11 v3.2 §6.65
 	t["CKM_HSS_KEY_PAIR_GEN"]	= CKM_HSS_KEY_PAIR_GEN;
@@ -1281,6 +1288,22 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_ML_KEM:
 			pInfo->ulMinKeySize = 800;
 			pInfo->ulMaxKeySize = 1568;
+			pInfo->flags = CKF_ENCAPSULATE | CKF_DECAPSULATE;
+			break;
+		// Classic McEliece (BSI TR-02102-1 §2.4.2) — sizes are public-key
+		// bytes across all 10 parameter sets: 261,120 (mceliece348864) to
+		// 1,357,824 (mceliece8192128/8192128f) — same "min = smallest
+		// variant, max = largest variant" convention this table already
+		// uses for ML-KEM/FrodoKEM. Matches the Rust engine's own range
+		// exactly (rust/src/ffi.rs).
+		case CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN:
+			pInfo->ulMinKeySize = 261120;
+			pInfo->ulMaxKeySize = 1357824;
+			pInfo->flags = CKF_GENERATE_KEY_PAIR;
+			break;
+		case CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE:
+			pInfo->ulMinKeySize = 261120;
+			pInfo->ulMaxKeySize = 1357824;
 			pInfo->flags = CKF_ENCAPSULATE | CKF_DECAPSULATE;
 			break;
 		// LMS / HSS stateful hash-based signatures (G10)

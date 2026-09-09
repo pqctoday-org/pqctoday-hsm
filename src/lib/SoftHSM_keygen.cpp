@@ -75,6 +75,9 @@
 #include "OSSLMLKEMPublicKey.h"
 #include "OSSLMLKEMPrivateKey.h"
 #include "OSSLMLKEM.h"
+#include "ClassicMcEliecePublicKey.h"
+#include "ClassicMcEliecePrivateKey.h"
+#include "ClassicMcElieceParameters.h"
 #include "OSSLRSAPublicKey.h"
 #include "OSSLECPublicKey.h"
 #include "OSSLEDPublicKey.h"
@@ -566,6 +569,9 @@ CK_RV SoftHSM::generateKeyPairImpl
 		case CKM_ML_KEM_KEY_PAIR_GEN:
 			keyType = CKK_ML_KEM;
 			break;
+		case CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN:
+			keyType = CKK_PQCTODAY_CLASSIC_MCELIECE;
+			break;
 		case CKM_HSS_KEY_PAIR_GEN:
 			keyType = CKK_HSS;
 			break;
@@ -602,6 +608,8 @@ CK_RV SoftHSM::generateKeyPairImpl
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN && keyType != CKK_ML_KEM)
 		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN && keyType != CKK_PQCTODAY_CLASSIC_MCELIECE)
+		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN && keyType != CKK_EC)
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN && keyType != CKK_HSS)
@@ -632,6 +640,8 @@ CK_RV SoftHSM::generateKeyPairImpl
 	if (pMechanism->mechanism == CKM_SLH_DSA_KEY_PAIR_GEN && keyType != CKK_SLH_DSA)
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN && keyType != CKK_ML_KEM)
+		return CKR_TEMPLATE_INCONSISTENT;
+	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN && keyType != CKK_PQCTODAY_CLASSIC_MCELIECE)
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN && keyType != CKK_EC)
 		return CKR_TEMPLATE_INCONSISTENT;
@@ -710,6 +720,16 @@ CK_RV SoftHSM::generateKeyPairImpl
 	if (pMechanism->mechanism == CKM_ML_KEM_KEY_PAIR_GEN)
 	{
 		return this->generateMLKEM(hSession,
+			pPublicKeyTemplate, ulPublicKeyAttributeCount,
+			pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
+			phPublicKey, phPrivateKey,
+			ispublicKeyToken, ispublicKeyPrivate, isprivateKeyToken, isprivateKeyPrivate);
+	}
+
+	// Generate Classic McEliece keys (BSI TR-02102-1 §2.4.2, all 10 sets)
+	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN)
+	{
+		return this->generateClassicMcEliece(hSession,
 			pPublicKeyTemplate, ulPublicKeyAttributeCount,
 			pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
 			phPublicKey, phPrivateKey,
@@ -8683,6 +8703,242 @@ CK_RV SoftHSM::generateMLKEM
 	}
 
 	cleanupKeyPair(mlkem, kp, NULL, phPublicKey, phPrivateKey, rv);
+
+	return rv;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Classic McEliece (BSI TR-02102-1 §2.4.2) — key helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+CK_RV SoftHSM::generateClassicMcEliece
+(CK_SESSION_HANDLE hSession,
+	CK_ATTRIBUTE_PTR pPublicKeyTemplate,
+	CK_ULONG ulPublicKeyAttributeCount,
+	CK_ATTRIBUTE_PTR pPrivateKeyTemplate,
+	CK_ULONG ulPrivateKeyAttributeCount,
+	CK_OBJECT_HANDLE_PTR phPublicKey,
+	CK_OBJECT_HANDLE_PTR phPrivateKey,
+	CK_BBOOL isPublicKeyOnToken,
+	CK_BBOOL isPublicKeyPrivate,
+	CK_BBOOL isPrivateKeyOnToken,
+	CK_BBOOL isPrivateKeyPrivate)
+{
+	*phPublicKey = CK_INVALID_HANDLE;
+	*phPrivateKey = CK_INVALID_HANDLE;
+
+	// Get the session
+	auto sessionGuard = handleManager->getSessionShared(hSession);
+	Session* session = sessionGuard.get();
+	if (session == NULL)
+		return CKR_SESSION_HANDLE_INVALID;
+
+	// Get the token
+	Token* token = session->getToken();
+	if (token == NULL)
+		return CKR_GENERAL_ERROR;
+
+	// Extract desired key information: CKA_PARAMETER_SET selects one of the
+	// 10 Classic McEliece variants. Mandatory per spec — no silent default
+	// (same rule as ML-KEM/ML-DSA). The 10 CKP_CLASSIC_MCELIECE_* values are
+	// densely 0x1..0xA (implementation plan §3.1), so the shared min/max
+	// range helper applies directly, same as every other PQC family here.
+	CK_ULONG parameterSet = 0;
+	{
+		CK_RV psrv = extractParameterSet(pPublicKeyTemplate, ulPublicKeyAttributeCount,
+		                                 CKP_CLASSIC_MCELIECE_6688128, CKP_CLASSIC_MCELIECE_8192128F,
+		                                 parameterSet);
+		if (psrv != CKR_OK) return psrv;
+	}
+
+	// No CKA_SEED handling: unlike ML-KEM, Classic McEliece has no genuine
+	// deterministic-keygen capability to expose (liboqs's own
+	// _keypair_derand entry points report a zero-length seed — see
+	// ClassicMcElieceParameters.h). A caller supplying CKA_SEED anyway is
+	// rejected rather than silently ignored, mirroring the FFI layer's own
+	// check for this mechanism (rust/src/ffi.rs).
+	for (CK_ULONG i = 0; i < ulPrivateKeyAttributeCount; i++)
+		if (pPrivateKeyTemplate[i].type == CKA_SEED)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+	for (CK_ULONG i = 0; i < ulPublicKeyAttributeCount; i++)
+		if (pPublicKeyTemplate[i].type == CKA_SEED)
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	// Set the parameters
+	ClassicMcElieceParameters p;
+	p.setParameterSet(parameterSet);
+
+	// Generate key pair
+	AsymmetricKeyPair* kp = NULL;
+	AsymmetricAlgorithm* mceliece = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::CLASSICMCELIECE);
+	if (mceliece == NULL) return CKR_GENERAL_ERROR;
+	if (!mceliece->generateKeyPair(&kp, &p))
+	{
+		ERROR_MSG("Could not generate Classic McEliece key pair");
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mceliece);
+		return CKR_GENERAL_ERROR;
+	}
+
+	ClassicMcEliecePublicKey* pub = (ClassicMcEliecePublicKey*) kp->getPublicKey();
+	ClassicMcEliecePrivateKey* priv = (ClassicMcEliecePrivateKey*) kp->getPrivateKey();
+
+	CK_RV rv = CKR_OK;
+
+	// Create a public key using C_CreateObject
+	if (rv == CKR_OK)
+	{
+		const CK_ULONG maxAttribs = 32;
+		CK_OBJECT_CLASS publicKeyClass = CKO_PUBLIC_KEY;
+		CK_KEY_TYPE publicKeyType = CKK_PQCTODAY_CLASSIC_MCELIECE;
+		CK_ATTRIBUTE publicKeyAttribs[maxAttribs] = {
+			{ CKA_CLASS, &publicKeyClass, sizeof(publicKeyClass) },
+			{ CKA_TOKEN, &isPublicKeyOnToken, sizeof(isPublicKeyOnToken) },
+			{ CKA_PRIVATE, &isPublicKeyPrivate, sizeof(isPublicKeyPrivate) },
+			{ CKA_KEY_TYPE, &publicKeyType, sizeof(publicKeyType) },
+		};
+		CK_ULONG publicKeyAttribsCount = 4;
+
+		if (ulPublicKeyAttributeCount > (maxAttribs - publicKeyAttribsCount))
+			rv = CKR_TEMPLATE_INCONSISTENT;
+		for (CK_ULONG i = 0; i < ulPublicKeyAttributeCount && rv == CKR_OK; ++i)
+		{
+			switch (pPublicKeyTemplate[i].type)
+			{
+				case CKA_CLASS:
+				case CKA_TOKEN:
+				case CKA_PRIVATE:
+				case CKA_KEY_TYPE:
+					continue;
+				default:
+					publicKeyAttribs[publicKeyAttribsCount++] = pPublicKeyTemplate[i];
+			}
+		}
+
+		if (rv == CKR_OK)
+			rv = this->CreateObject(hSession, publicKeyAttribs, publicKeyAttribsCount, phPublicKey, OBJECT_OP_GENERATE);
+
+		if (rv == CKR_OK)
+		{
+			OSObject* osobject = (OSObject*)handleManager->getObject(*phPublicKey);
+			if (osobject == NULL_PTR || !osobject->isValid()) {
+				rv = CKR_FUNCTION_FAILED;
+			} else if (osobject->startTransaction()) {
+				bool bOK = true;
+
+				bOK = bOK && osobject->setAttribute(CKA_LOCAL, true);
+				CK_ULONG ulKeyGenMechanism = (CK_ULONG)CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN;
+				bOK = bOK && osobject->setAttribute(CKA_KEY_GEN_MECHANISM, ulKeyGenMechanism);
+
+				// PKCS#11 v3.2: C_GenerateKeyPair sets CKA_ENCAPSULATE=true for public key
+				bOK = bOK && osobject->setAttribute(CKA_ENCAPSULATE, true);
+
+				// Classic McEliece Public Key Attributes — raw bytes (no SPKI
+				// builder exists: no registered AlgorithmIdentifier OID).
+				bOK = bOK && osobject->setAttribute(CKA_PARAMETER_SET, (unsigned long)pub->getParameterSet());
+				ByteString pubValue;
+				if (isPublicKeyPrivate)
+					bOK = bOK && token->encrypt(pub->getValue(), pubValue);
+				else
+					pubValue = pub->getValue();
+				bOK = bOK && osobject->setAttribute(CKA_VALUE, pubValue);
+				// CKA_CHECK_VALUE: SHA-256(plaintext) → 3 bytes
+				{
+					ByteString kcv = computeAsymKCV(pub->getValue());
+					bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+				}
+
+				if (bOK)
+					bOK = osobject->commitTransaction();
+				else
+					osobject->abortTransaction();
+
+				if (!bOK)
+					rv = CKR_FUNCTION_FAILED;
+			} else
+				rv = CKR_FUNCTION_FAILED;
+		}
+	}
+
+	// Create a private key using C_CreateObject
+	if (rv == CKR_OK)
+	{
+		const CK_ULONG maxAttribs = 32;
+		CK_OBJECT_CLASS privateKeyClass = CKO_PRIVATE_KEY;
+		CK_KEY_TYPE privateKeyType = CKK_PQCTODAY_CLASSIC_MCELIECE;
+		CK_ATTRIBUTE privateKeyAttribs[maxAttribs] = {
+			{ CKA_CLASS, &privateKeyClass, sizeof(privateKeyClass) },
+			{ CKA_TOKEN, &isPrivateKeyOnToken, sizeof(isPrivateKeyOnToken) },
+			{ CKA_PRIVATE, &isPrivateKeyPrivate, sizeof(isPrivateKeyPrivate) },
+			{ CKA_KEY_TYPE, &privateKeyType, sizeof(privateKeyType) },
+		};
+		CK_ULONG privateKeyAttribsCount = 4;
+		if (ulPrivateKeyAttributeCount > (maxAttribs - privateKeyAttribsCount))
+			rv = CKR_TEMPLATE_INCONSISTENT;
+		for (CK_ULONG i = 0; i < ulPrivateKeyAttributeCount && rv == CKR_OK; ++i)
+		{
+			switch (pPrivateKeyTemplate[i].type)
+			{
+				case CKA_CLASS:
+				case CKA_TOKEN:
+				case CKA_PRIVATE:
+				case CKA_KEY_TYPE:
+				case CKA_PARAMETER_SET: // set directly after CreateObject
+					continue;
+				default:
+					privateKeyAttribs[privateKeyAttribsCount++] = pPrivateKeyTemplate[i];
+			}
+		}
+
+		if (rv == CKR_OK)
+			rv = this->CreateObject(hSession, privateKeyAttribs, privateKeyAttribsCount, phPrivateKey, OBJECT_OP_GENERATE);
+
+		if (rv == CKR_OK)
+		{
+			OSObject* osobject = (OSObject*)handleManager->getObject(*phPrivateKey);
+			if (osobject == NULL_PTR || !osobject->isValid()) {
+				rv = CKR_FUNCTION_FAILED;
+			} else if (osobject->startTransaction()) {
+				bool bOK = true;
+
+				bOK = bOK && osobject->setAttribute(CKA_LOCAL, true);
+				CK_ULONG ulKeyGenMechanism = (CK_ULONG)CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN;
+				bOK = bOK && osobject->setAttribute(CKA_KEY_GEN_MECHANISM, ulKeyGenMechanism);
+
+				// PKCS#11 v3.2: C_GenerateKeyPair sets CKA_DECAPSULATE=true for private key
+				bOK = bOK && osobject->setAttribute(CKA_DECAPSULATE, true);
+
+				bool bAlwaysSensitive = osobject->getBooleanValue(CKA_SENSITIVE, false);
+				bOK = bOK && osobject->setAttribute(CKA_ALWAYS_SENSITIVE, bAlwaysSensitive);
+				bool bNeverExtractable = osobject->getBooleanValue(CKA_EXTRACTABLE, false) == false;
+				bOK = bOK && osobject->setAttribute(CKA_NEVER_EXTRACTABLE, bNeverExtractable);
+
+				// Classic McEliece Private Key Attributes — raw bytes.
+				bOK = bOK && osobject->setAttribute(CKA_PARAMETER_SET, (unsigned long)priv->getParameterSet());
+				ByteString privValue;
+				if (isPrivateKeyPrivate)
+					bOK = bOK && token->encrypt(priv->getValue(), privValue);
+				else
+					privValue = priv->getValue();
+				bOK = bOK && osobject->setAttribute(CKA_VALUE, privValue);
+				// CKA_CHECK_VALUE: SHA-256(plaintext) → 3 bytes
+				{
+					ByteString kcv = computeAsymKCV(priv->getValue());
+					bOK = bOK && osobject->setAttribute(CKA_CHECK_VALUE, kcv);
+				}
+
+				if (bOK)
+					bOK = osobject->commitTransaction();
+				else
+					osobject->abortTransaction();
+
+				if (!bOK)
+					rv = CKR_FUNCTION_FAILED;
+			} else
+				rv = CKR_FUNCTION_FAILED;
+		}
+	}
+
+	cleanupKeyPair(mceliece, kp, NULL, phPublicKey, phPrivateKey, rv);
 
 	return rv;
 }

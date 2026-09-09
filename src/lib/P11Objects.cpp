@@ -32,6 +32,7 @@
 
 #include "config.h"
 #include "P11Objects.h"
+#include "vendor_mechanisms.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <openssl/x509.h>
@@ -2232,6 +2233,106 @@ bool P11MLKEMPrivateKeyObj::init(OSObject *inobject)
 	attributes[attrValue->getType()]       = attrValue;
 	attributes[attrDecapsulate->getType()] = attrDecapsulate;
 	attributes[attrSeed->getType()]        = attrSeed;
+
+	initialized = true;
+	return true;
+}
+
+// ─── Classic McEliece Public Key (BSI TR-02102-1 §2.4.2, vendor extension) ──
+
+// Constructor
+P11ClassicMcEliecePublicKeyObj::P11ClassicMcEliecePublicKeyObj()
+{
+	initialized = false;
+}
+
+bool P11ClassicMcEliecePublicKeyObj::init(OSObject *inobject)
+{
+	if (initialized) return true;
+	if (inobject == NULL) return false;
+
+	if (!inobject->attributeExists(CKA_KEY_TYPE) || inobject->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_PQCTODAY_CLASSIC_MCELIECE)
+	{
+		OSAttribute setKeyType((unsigned long)CKK_PQCTODAY_CLASSIC_MCELIECE);
+		inobject->setAttribute(CKA_KEY_TYPE, setKeyType);
+	}
+
+	// Create parent
+	if (!P11PublicKeyObj::init(inobject)) return false;
+
+	// Create attributes — same shape as P11MLKEMPublicKeyObj: CKA_PARAMETER_SET,
+	// CKA_VALUE (raw bytes — no OID exists, so no PKCS#8/SPKI wrapper is
+	// possible), CKA_ENCAPSULATE. No CKA_SEED: Classic McEliece has no
+	// genuine seeded-keygen capability (ClassicMcElieceParameters carries no
+	// seed field — see SoftHSM_keygen.cpp's generateClassicMcEliece).
+	P11Attribute* attrParamSet    = new P11AttrParameterSet(osobject, P11Attribute::ck1|P11Attribute::ck3);
+	P11Attribute* attrValue       = new P11AttrValue(osobject, P11Attribute::ck1|P11Attribute::ck4);
+	P11Attribute* attrEncapsulate = new P11AttrEncapsulate(osobject);
+
+	// Initialize the attributes
+	if (!attrParamSet->init() || !attrValue->init() || !attrEncapsulate->init())
+	{
+		ERROR_MSG("Could not initialize the attribute");
+		delete attrParamSet;
+		delete attrValue;
+		delete attrEncapsulate;
+		return false;
+	}
+
+	// Add them to the map
+	attributes[attrParamSet->getType()]    = attrParamSet;
+	attributes[attrValue->getType()]       = attrValue;
+	attributes[attrEncapsulate->getType()] = attrEncapsulate;
+
+	initialized = true;
+	return true;
+}
+
+// ─── Classic McEliece Private Key (BSI TR-02102-1 §2.4.2, vendor extension) ─
+
+// Constructor
+P11ClassicMcEliecePrivateKeyObj::P11ClassicMcEliecePrivateKeyObj()
+{
+	initialized = false;
+}
+
+bool P11ClassicMcEliecePrivateKeyObj::init(OSObject *inobject)
+{
+	if (initialized) return true;
+	if (inobject == NULL) return false;
+
+	if (!inobject->attributeExists(CKA_KEY_TYPE) || inobject->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_PQCTODAY_CLASSIC_MCELIECE)
+	{
+		OSAttribute setKeyType((unsigned long)CKK_PQCTODAY_CLASSIC_MCELIECE);
+		inobject->setAttribute(CKA_KEY_TYPE, setKeyType);
+	}
+
+	// Create parent
+	if (!P11PrivateKeyObj::init(inobject)) return false;
+
+	// Create attributes. No CKA_SEED (see the public-key init() above); raw
+	// CKA_VALUE only, since there is no PKCS#8 form for this key type at all
+	// (ClassicMcEliecePrivateKey::PKCS8Encode/Decode are unreachable stubs —
+	// C_WrapKey routes CKK_PQCTODAY_CLASSIC_MCELIECE onto the raw-CKA_VALUE
+	// path instead, matching ML-KEM/ML-DSA/SLH-DSA's own precedent).
+	P11Attribute* attrParamSet    = new P11AttrParameterSet(osobject, P11Attribute::ck1|P11Attribute::ck4|P11Attribute::ck6);
+	P11Attribute* attrValue       = new P11AttrValue(osobject, P11Attribute::ck1 | P11Attribute::ck4 | P11Attribute::ck6 | P11Attribute::ck7);
+	P11Attribute* attrDecapsulate = new P11AttrDecapsulate(osobject);
+
+	// Initialize the attributes
+	if (!attrParamSet->init() || !attrValue->init() || !attrDecapsulate->init())
+	{
+		ERROR_MSG("Could not initialize the attribute");
+		delete attrParamSet;
+		delete attrValue;
+		delete attrDecapsulate;
+		return false;
+	}
+
+	// Add them to the map
+	attributes[attrParamSet->getType()]    = attrParamSet;
+	attributes[attrValue->getType()]       = attrValue;
+	attributes[attrDecapsulate->getType()] = attrDecapsulate;
 
 	initialized = true;
 	return true;

@@ -60,6 +60,8 @@ class SLHDSAPublicKey;
 class SLHDSAPrivateKey;
 class MLKEMPublicKey;
 class MLKEMPrivateKey;
+class ClassicMcEliecePublicKey;
+class ClassicMcEliecePrivateKey;
 
 class SoftHSM
 {
@@ -464,6 +466,23 @@ private:
 	);
 	CK_RV getMLKEMPrivateKey(MLKEMPrivateKey* privateKey, Token* token, OSObject* key);
 	CK_RV getMLKEMPublicKey(MLKEMPublicKey* publicKey, Token* token, OSObject* key);
+	CK_RV getClassicMcEliecePrivateKey(ClassicMcEliecePrivateKey* privateKey, Token* token, OSObject* key);
+	CK_RV getClassicMcEliecePublicKey(ClassicMcEliecePublicKey* publicKey, Token* token, OSObject* key);
+	// Classic McEliece (BSI TR-02102-1 §2.4.2) — all 10 parameter sets, liboqs-backed (D-2).
+	CK_RV generateClassicMcEliece
+	(
+		CK_SESSION_HANDLE hSession,
+		CK_ATTRIBUTE_PTR pPublicKeyTemplate,
+		CK_ULONG ulPublicKeyAttributeCount,
+		CK_ATTRIBUTE_PTR pPrivateKeyTemplate,
+		CK_ULONG ulPrivateKeyAttributeCount,
+		CK_OBJECT_HANDLE_PTR phPublicKey,
+		CK_OBJECT_HANDLE_PTR phPrivateKey,
+		CK_BBOOL isPublicKeyOnToken,
+		CK_BBOOL isPublicKeyPrivate,
+		CK_BBOOL isPrivateKeyOnToken,
+		CK_BBOOL isPrivateKeyPrivate
+	);
 	// ECDH-as-KEM (2026-07-25) — CKM_ECDH1_DERIVE under C_EncapsulateKey/
 	// C_DecapsulateKey (PKCS#11 v3.2 Table 78), CKK_EC or CKK_EC_MONTGOMERY.
 	// The real body of C_GenerateKeyPair; the public entry point wraps it to
@@ -495,6 +514,20 @@ private:
 	CK_RV decapsulateECDH(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPrivateKey,
 		CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
 		CK_BYTE_PTR pCiphertext, CK_ULONG ulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey);
+
+	// CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE under C_EncapsulateKey/
+	// C_DecapsulateKey, dispatched from encapsulateKeyImpl/decapsulateKeyImpl
+	// exactly like the CKM_ECDH1_DERIVE branch above (own mechanism, own key
+	// type, so kept as separate self-contained bodies rather than threading a
+	// third case through the ML-KEM-shaped generic code).
+	CK_RV encapsulateClassicMcEliece(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPublicKey,
+		CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+		CK_BYTE_PTR pCiphertext, CK_ULONG_PTR pulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey,
+		unsigned long* opLogSecretLen);
+	CK_RV decapsulateClassicMcEliece(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hPrivateKey,
+		CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount,
+		CK_BYTE_PTR pCiphertext, CK_ULONG ulCiphertextLen, CK_OBJECT_HANDLE_PTR phKey,
+		unsigned long* opLogSecretLen);
 	CK_RV getECDHPublicKey(ECPublicKey* publicKey, ECPrivateKey* privateKey, ByteString& pubData);
 	CK_RV getEDDHPublicKey(EDPublicKey* publicKey, EDPrivateKey* privateKey, ByteString& pubData);
 	CK_RV getSymmetricKey(SymmetricKey* skey, Token* token, OSObject* key);

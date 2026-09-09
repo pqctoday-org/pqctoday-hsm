@@ -468,6 +468,34 @@ protected:
 	bool initialized;
 };
 
+// ─── Classic McEliece (BSI TR-02102-1 §2.4.2, PKCS#11 v3.2 vendor extension) ─
+
+class P11ClassicMcEliecePublicKeyObj : public P11PublicKeyObj
+{
+public:
+	// Constructor
+	P11ClassicMcEliecePublicKeyObj();
+
+	// Add attributes
+	virtual bool init(OSObject *inobject);
+
+protected:
+	bool initialized;
+};
+
+class P11ClassicMcEliecePrivateKeyObj : public P11PrivateKeyObj
+{
+public:
+	// Constructor
+	P11ClassicMcEliecePrivateKeyObj();
+
+	// Add attributes
+	virtual bool init(OSObject *inobject);
+
+protected:
+	bool initialized;
+};
+
 // ─── SLH-DSA (FIPS 205, PKCS#11 v3.2) ───────────────────────────────────────
 
 class P11SLHDSAPublicKeyObj : public P11PublicKeyObj
