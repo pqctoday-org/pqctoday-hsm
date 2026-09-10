@@ -77,6 +77,65 @@ pub fn sign_with_pss_salt(
     pss_salt_len: Option<usize>,
     eddsa_ctx: Option<&[u8]>,
 ) -> Result<Vec<u8>, CkRv> {
+    let logging = crate::oplog::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(key_handle, mechanism)
+    } else {
+        String::new()
+    };
+
+    let result = sign_with_pss_salt_impl(session, key_handle, mechanism, data, pss_salt_len, eddsa_ctx);
+
+    if logging {
+        // `native::sign*` has no separate init/update/final phases — one
+        // call does the whole operation. Emitted as the SAME two-record
+        // shape ffi.rs's C_SignInit + C_Sign produce (see that module's
+        // "Operation-evidence wrappers" block) so this repo's one evidence
+        // consumer (pqctoday-sandbox/tests/_evidence.sh, which pairs the
+        // two records on `sess`) needs no changes to recognise KMIP's and
+        // PKCS#11 remoting's traffic — both go through this function, never
+        // through the ffi:: C-ABI (see rust/src/ffi.rs's own wrappers,
+        // which this native path bypasses entirely).
+        let rv = match &result {
+            Ok(_) => CKR_OK,
+            Err(e) => *e,
+        };
+        let out_len = result.as_ref().map(|s| s.len()).unwrap_or(0);
+        crate::oplog::emit(
+            "C_SignInit",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x}",
+                session,
+                crate::oplog::mech_name(mechanism),
+                mechanism,
+                key_fields,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+        crate::oplog::emit(
+            "C_Sign",
+            &format!(
+                "sess={} in={} out={} probe=0 rv={} rv_id=0x{:08x}",
+                session,
+                data.len(),
+                out_len,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    result
+}
+
+fn sign_with_pss_salt_impl(
+    session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+    pss_salt_len: Option<usize>,
+    eddsa_ctx: Option<&[u8]>,
+) -> Result<Vec<u8>, CkRv> {
     // Isolation gate (rust-hsm-perf-bench-scenario-plan-07182026.md Part F)
     // + CKA_SIGN + CKA_ALLOWED_MECHANISMS + CKA_VALUE + CKA_PRIV_PARAM_SET,
     // ALL read from the SAME borrowed attrs — one OBJECTS lock instead of
@@ -289,6 +348,72 @@ pub fn verify_with_pss_salt(
 /// hedge randomizer (ML-DSA rnd / SLH-DSA addrnd) when not deterministic.
 #[allow(clippy::too_many_arguments)]
 pub fn sign_pqc(
+    session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+    ctx: &[u8],
+    deterministic: bool,
+    internal: bool,
+    external_mu: bool,
+    random: Option<&[u8]>,
+) -> Result<Vec<u8>, CkRv> {
+    let logging = crate::oplog::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(key_handle, mechanism)
+    } else {
+        String::new()
+    };
+
+    let result = sign_pqc_impl(
+        session,
+        key_handle,
+        mechanism,
+        data,
+        ctx,
+        deterministic,
+        internal,
+        external_mu,
+        random,
+    );
+
+    if logging {
+        // Same two-record C_SignInit/C_Sign synthesis as sign_with_pss_salt
+        // above — see that function's comment for why.
+        let rv = match &result {
+            Ok(_) => CKR_OK,
+            Err(e) => *e,
+        };
+        let out_len = result.as_ref().map(|s| s.len()).unwrap_or(0);
+        crate::oplog::emit(
+            "C_SignInit",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x}",
+                session,
+                crate::oplog::mech_name(mechanism),
+                mechanism,
+                key_fields,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+        crate::oplog::emit(
+            "C_Sign",
+            &format!(
+                "sess={} in={} out={} probe=0 rv={} rv_id=0x{:08x}",
+                session,
+                data.len(),
+                out_len,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_pqc_impl(
     session: u32,
     key_handle: u32,
     mechanism: u32,

@@ -59,6 +59,45 @@ pub fn encapsulate(
     public_key_handle: u32,
     mechanism: u32,
 ) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    let logging = crate::oplog::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(public_key_handle, mechanism)
+    } else {
+        String::new()
+    };
+
+    let result = encapsulate_impl(session, public_key_handle, mechanism);
+
+    if logging {
+        // Same record shape as ffi::C_EncapsulateKey (see rust/src/ffi.rs's
+        // "Operation-evidence wrappers" block) — this native path is what
+        // KMIP and PKCS#11 remoting actually call, never the ffi:: C-ABI.
+        let (rv, ct_len) = match &result {
+            Ok((ct, _ss)) => (CKR_OK, ct.len()),
+            Err(e) => (*e, 0),
+        };
+        crate::oplog::emit(
+            "C_EncapsulateKey",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} ct={} probe=0 rv={} rv_id=0x{:08x}",
+                session,
+                crate::oplog::mech_name(mechanism),
+                mechanism,
+                key_fields,
+                ct_len,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    result
+}
+
+fn encapsulate_impl(
+    session: u32,
+    public_key_handle: u32,
+    mechanism: u32,
+) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     use ml_kem::{kem::Encapsulate, EncodedSizeUser, KemCore};
 
     let access = resolve_session_access(session)?;
@@ -226,6 +265,46 @@ pub fn encapsulate_deterministic(
 /// `CKA_DECAPSULATE = true`. `ciphertext` length must match the
 /// parameter set's ML-KEM ct size (768 / 1088 / 1568 for 512 / 768 / 1024).
 pub fn decapsulate(
+    session: u32,
+    private_key_handle: u32,
+    mechanism: u32,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CkRv> {
+    let logging = crate::oplog::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(private_key_handle, mechanism)
+    } else {
+        String::new()
+    };
+
+    let result = decapsulate_impl(session, private_key_handle, mechanism, ciphertext);
+
+    if logging {
+        // Same record shape as ffi::C_DecapsulateKey — no probe field
+        // there either: decapsulation takes the ciphertext by value with
+        // no length-query form to distinguish (see rust/src/ffi.rs).
+        let rv = match &result {
+            Ok(_) => CKR_OK,
+            Err(e) => *e,
+        };
+        crate::oplog::emit(
+            "C_DecapsulateKey",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} ct={} rv={} rv_id=0x{:08x}",
+                session,
+                crate::oplog::mech_name(mechanism),
+                mechanism,
+                key_fields,
+                ciphertext.len(),
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    result
+}
+
+fn decapsulate_impl(
     session: u32,
     private_key_handle: u32,
     mechanism: u32,

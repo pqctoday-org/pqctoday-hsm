@@ -42,6 +42,11 @@ pub mod native;
 /// same grammar as the C++ engine so one consumer parses both. The sink (not
 /// the call sites) is cfg-gated away from `wasm32-unknown-unknown`.
 pub mod oplog;
+/// Authentication-attempt evidence log — one record per failed login
+/// (KMIP credential/TLS handshake, PKCS#11-remoting PIN), gated at runtime
+/// by `PQC_AUTH_LOG`. Same shape as `oplog`, deliberately a separate sink —
+/// see that module's doc for why.
+pub mod authlog;
 pub mod state;
 /// Native, encrypted-at-rest persistence for the engine's own slots/tokens/
 /// objects. Separate from `state_snapshot.rs` (the Emscripten-only debug

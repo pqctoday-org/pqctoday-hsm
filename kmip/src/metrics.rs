@@ -8,6 +8,7 @@
 //! | `cacp_kmip_requests_total` | counter | operation, status | KMIP batch items |
 //! | `cacp_tls_handshakes_total` | counter | listener | TLS handshakes (kmip, admin) |
 //! | `cacp_admin_requests_total` | counter | method, route, status | Admin API requests |
+//! | `cacp_auth_failures_total` | counter | surface, reason | Failed authentication attempts (docs/remediation-plan-auth-visibility-evidence-log-09102026.md) |
 //!
 //! ## Usage
 //!
@@ -32,6 +33,7 @@ struct Metrics {
     kmip_requests: CounterVec,
     tls_handshakes: CounterVec,
     admin_requests: CounterVec,
+    auth_failures: CounterVec,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -76,7 +78,18 @@ pub fn init() {
         .expect("admin_requests counter");
         registry.register(Box::new(admin_requests.clone())).expect("register admin_requests");
 
-        Metrics { registry, build_info, kmip_requests, tls_handshakes, admin_requests }
+        // `surface` is fixed to a small enum-shaped set — see
+        // record_auth_failure's own doc for the exact values. `reason` is
+        // likewise a short fixed token per surface, never free text (same
+        // cardinality discipline as record_admin_request's `route` above).
+        let auth_failures = CounterVec::new(
+            Opts::new("cacp_auth_failures_total", "Failed authentication attempts"),
+            &["surface", "reason"],
+        )
+        .expect("auth_failures counter");
+        registry.register(Box::new(auth_failures.clone())).expect("register auth_failures");
+
+        Metrics { registry, build_info, kmip_requests, tls_handshakes, admin_requests, auth_failures }
     });
 }
 
@@ -109,6 +122,24 @@ pub fn record_admin_request(method: &str, route: &'static str, status: u16) {
             .with_label_values(&[method, route, &status.to_string()])
             .inc();
     }
+}
+
+/// Increment `cacp_auth_failures_total{surface, reason}` AND emit a
+/// `PQCAUTH` record via [`softhsmrustv3::authlog`] (docs/remediation-plan-
+/// auth-visibility-evidence-log-09102026.md, Q1/Q3). One call covers both
+/// the metric (reaches OpenMetrics/SNMP) and the log line (reaches syslog
+/// via the appliance's existing `imfile` tail of the shared auth-log path)
+/// so a call site never forgets one or the other.
+///
+/// `surface` ∈ `{"kmip-credential", "kmip-tls-handshake"}` for this crate
+/// (`"remoting-pin"` is PKCS#11 remoting's own, added at its call sites).
+/// `reason` is a short fixed token — see each call site.
+/// `peer`, when known, is `ip:port` (Q2: capture it where available).
+pub fn record_auth_failure(surface: &'static str, reason: &'static str, peer: Option<&str>) {
+    if let Some(m) = METRICS.get() {
+        m.auth_failures.with_label_values(&[surface, reason]).inc();
+    }
+    softhsmrustv3::authlog::emit(surface, reason, peer);
 }
 
 // ── Scrape endpoint ───────────────────────────────────────────────────────────

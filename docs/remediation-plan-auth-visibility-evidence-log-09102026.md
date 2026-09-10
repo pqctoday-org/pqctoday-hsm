@@ -1,8 +1,10 @@
 # Remediation plan — authentication-attempt visibility and the empty PKCS#11 evidence log
 
 **Date:** 2026-09-10
-**Status:** PLAN ONLY — nothing in this document has been executed. Written from a
-full read of the current `main` (`d56f2c7a`), not assumed from an earlier audit.
+**Status:** IMPLEMENTED on branch `feat/auth-visibility-evidence-log` (based on
+`main` `d56f2c7a`), 2026-09-10. Both gaps closed, proven live against real running
+binaries (not just unit tests) — see §5. Not pushed, no PR opened yet — this repo's
+own CI/review gate per the scope note below still applies before merge.
 **Origin:** found while building appliance-side monitoring in `pqctoday-cacp`
 (`docs/imx95-monitoring-plan-09102026.md`, WP0-WP2, done; this is that plan's WP8a,
 promoted to its own document because both findings turned out to be more precise —
@@ -234,7 +236,119 @@ firmer than the original 1.5-3.5 day range now that Q1-Q3 are fixed rather than
 forked (the remoting Prometheus endpoint, built now per Q3, is the single biggest
 driver of the increase over the original estimate).
 
-## 4. Open questions
+## 5. Implementation record (items 1-4; item 5 not started — see §3)
+
+**Item 1, Gap 2 (evidence log) — done.** `oplog::emit` calls added at the six
+`native::` entry points KMIP/remoting actually call: `sign_with_pss_salt` and
+`sign_pqc` (`rust/src/native/sign.rs`, each synthesising the same paired
+`C_SignInit`+`C_Sign` records `ffi.rs` emits, since the native path has no
+separate init/sign phases — same grammar, zero changes needed to this repo's
+one evidence consumer); `ml_dsa_keypair_impl`/`ml_kem_keypair_impl`/
+`generate_ed25519_keypair` (`rust/src/native/keygen.rs`, via a new shared
+`emit_generate_key_pair` helper — one call site each covers all of plain/
+from_seed/from_seed_extractable, since those all funnel through the same impl
+function); `encapsulate`/`decapsulate` (`rust/src/native/encrypt.rs`). New
+integration test `rust/tests/oplog_evidence_native.rs` (its own process, same
+reason `oplog_evidence.rs` already gives for not sharing one) drives all six
+through the real engine and asserts the resulting records — paired
+init/sign, correct mechanisms, correct sizes (ML-DSA-65 3309 bytes, Ed25519
+64 bytes, ML-KEM-768 ciphertext 1088 bytes), matching shared secrets on
+encaps/decaps. Found and fixed one small pre-existing gap along the way:
+`oplog::mech_name` was missing `CKM_EC_EDWARDS_KEY_PAIR_GEN` entirely
+(silently rendered `CKM_UNKNOWN` for every Ed25519/Ed448 keygen record ever
+emitted by either engine, not just this change's new call sites).
+Verified: `cargo test --lib` (rust/, 516 passed, 0 failed, 14 ignored — the
+existing suite, unmodified, still green) and both `oplog_evidence` /
+`oplog_evidence_native` integration tests, including the zero-cost gate
+(`oplog_zero_cost.rs`, ~62k signs/sec unaffected with logging off). Also
+confirmed the wasm32-unknown-unknown build still compiles.
+
+**Item 2, the shared auth-event log sink (Q1) — done.** New `rust/src/
+authlog.rs`, structurally identical to `oplog.rs` (env-var-gated
+`OnceLock` sink, `OpenOptions::append`, cfg'd to a no-op on
+`wasm32-unknown-unknown`), env var `PQC_AUTH_LOG`, grammar `PQCAUTH v=1
+ts=<ms> pid=<pid> surface=<s> reason=<r> peer=<ip:port|none>`. Exposed as
+`pub mod authlog` in `rust/src/lib.rs`, callable from any of the four
+crates that already depend on `softhsmrustv3` directly (kmip, remoting/
+core, remoting/grpc, remoting/rest — confirmed none needed a new Cargo.toml
+dependency to reach it).
+
+**Item 3, Gap 1 KMIP half — done.** `kmip/src/metrics.rs` gained
+`cacp_auth_failures_total{surface,reason}` and a `record_auth_failure`
+helper that increments it AND calls `authlog::emit` in one call (so a call
+site can't do one without the other). Wired at three sites: `kmip/src/
+server/listener.rs`'s TLS handshake rejection (new `ServerError::
+TlsHandshake` variant, kept separate from the shared `Io` arm seven other
+failure paths in the same function also produce; `peer: SocketAddr` now
+threaded into `handle_conn`, which didn't have it before); the same
+listener's request-level auth-gate rejection (checked after
+`dispatch_with_transport_identity` returns, by inspecting the response's
+first batch item for `ResultReason::AuthenticationNotSuccessful` — chosen
+over threading a new parameter through that dispatcher function, which has
+dozens of test call sites in `kmip/src/ops/tenancy_e2e.rs` alone; a
+`had_credential` bool captured before the request moves into the dispatch
+closure gives the missing-vs-bad-credential distinction without touching
+dispatcher/mod.rs at all); and the admin facade's own TLS handshake
+rejection (`kmip/cryptopolicy-manager/manager.rs`, same shape, `peer`
+likewise threaded into its `handle_conn`). The admin facade's existing 403
+authorization-denial path (`write_authorized` failing) was deliberately
+NOT touched — that's `PermissionDenied`, a different, already-counted
+signal (`record_admin_request(...,403)`), not `AuthenticationNotSuccessful`.
+Verified live against a real running `pqctoday-kmip` binary requiring
+mTLS: `openssl s_client` with no client certificate produced both a real
+`PQCAUTH ... surface=kmip-tls-handshake reason=handshake-rejected
+peer=127.0.0.1:51775` log line and a real `cacp_auth_failures_total{
+reason="handshake-rejected",surface="kmip-tls-handshake"} 1` on the
+scrape endpoint. The request-level credential path is covered by the
+pre-existing, unmodified, still-passing `k14_auth_configured_missing_
+credential_fails_every_item_0x03` / `k14_auth_configured_bad_credential_
+fails_0x03` tests (they prove the exact response shape this new check
+depends on) rather than a second live-fire test — building a full KMIP
+protocol client purely to re-prove already-tested response behaviour
+wasn't judged worth the added scope. `cargo test --lib -p pqctoday-kmip`:
+801 passed, 0 failed. `cargo test --test tls_e2e`: 9 passed, 0 failed
+(includes the handshake-rejection scenarios this change's code path
+handles). Full `cargo test -p pqctoday-kmip` (all integration test files):
+see the session's own final check before commit.
+
+**Item 4, Gap 1 remoting half — done, including Q2 and Q3.** New
+`remoting/core/src/metrics.rs` (added `prometheus` + `tokio` deps to
+`remoting/core/Cargo.toml`, not feature-gated — unlike kmip, this crate has
+no wasm32 target to keep lean for): the same `cacp_auth_failures_total`
+counter (`surface` hardcoded `"remoting-pin"`, matching §1.3's design),
+`record_auth_failure(reason, peer)` calling both the counter and
+`authlog::emit` in one call, and a `serve_metrics_forever` scrape endpoint
+mirroring KMIP's. Both `pqc-grpc-pkcs11` and `pqc-rest-pkcs11` gained a
+`--metrics-listen` flag (defaults `127.0.0.1:9097`/`9098` — placeholders;
+real port assignment is appliance-side work, item 5) and call `metrics::
+init()` + spawn the scrape endpoint before serving. Peer capture (Q2):
+gRPC reads `request.remote_addr()` before `into_inner()` discards it
+(`remoting/grpc/src/service.rs`); REST needed `axum_server`'s
+`into_make_service_with_connect_info::<SocketAddr>()` in `main.rs` plus a
+`ConnectInfo<SocketAddr>` extractor on the `open_session` handler
+(`remoting/rest/src/routes.rs`). `remoting/core`'s `open_session` itself
+is untouched, exactly as planned — callers alone do the recording.
+**A real regression this change caused, found and fixed by the existing
+test suite, not introduced silently**: `remoting/acceptance/src/lib.rs`'s
+`spawn_rest()`/`spawn_rest_v32()` test harness built its server with plain
+`into_make_service()`, not the connect-info variant — after adding the
+`ConnectInfo` extractor, axum's default (non-JSON) rejection broke every
+REST request through the test harness, caught immediately by
+`a1_wrong_pin_ckr_pin_incorrect_all_three_transports` failing with a JSON
+decode error. Fixed by giving the harness the same `into_make_service_
+with_connect_info` the real binary uses. After the fix: verified live
+against a real running `pqc-rest-pkcs11` — a `curl` wrong-PIN request
+produced a real `PQCAUTH ... surface=remoting-pin reason=pin-incorrect
+peer=127.0.0.1:51834` line and a real `cacp_auth_failures_total{
+reason="pin-incorrect",surface="remoting-pin"} 1`; the gRPC path is
+proven via the SAME now-passing `a1_wrong_pin_...` test, which spawns a
+real gRPC server and drives a real client through it — not a synthetic
+in-process call. Full `cargo test --manifest-path remoting/Cargo.toml`:
+every crate in the workspace (core, grpc, rest, proto, acceptance) green,
+0 failures.
+
+**Not started: item 5 (`pqctoday-cacp` side).** Correctly sequenced after
+this work is released/tagged, per §3's own note.
 
 **Q1 — DECIDED (owner, 2026-09-10): dedicated auth-event log sink**, not
 `ForwardToSyslog=yes` and not counters-only. New `PQC_AUTH_LOG` env var, same shape
