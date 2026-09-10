@@ -468,10 +468,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "classic-mceliece-rust"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62a9b6d27e553269a76625911aa8cf6afaa8659f1b0c85b410cb5f51a87183d9"
+name = "classic-mceliece-multi"
+version = "0.1.0"
 dependencies = [
  "rand 0.8.7",
  "sha3 0.10.9",
@@ -2917,7 +2915,7 @@ dependencies = [
  "cbc",
  "chacha20 0.9.1",
  "chacha20poly1305",
- "classic-mceliece-rust",
+ "classic-mceliece-multi",
  "cmac",
  "console_error_panic_hook",
  "ctr",
