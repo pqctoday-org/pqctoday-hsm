@@ -180,6 +180,11 @@ pub fn mech_name(mech: u32) -> &'static str {
         CKM_EC_KEY_PAIR_GEN => "CKM_EC_KEY_PAIR_GEN",
         CKM_ECDH1_DERIVE => "CKM_ECDH1_DERIVE",
         CKM_EDDSA => "CKM_EDDSA",
+        // Found running the evidence log against native::generate_ed25519_keypair
+        // for the first time (docs/remediation-plan-auth-visibility-evidence-log-
+        // 09102026.md, Gap 2): this mechanism exists in constants.rs and is used
+        // by both engines' Ed25519/Ed448 keygen, but was never added here.
+        CKM_EC_EDWARDS_KEY_PAIR_GEN => "CKM_EC_EDWARDS_KEY_PAIR_GEN",
         CKM_AES_KEY_GEN => "CKM_AES_KEY_GEN",
         _ => "CKM_UNKNOWN",
     }

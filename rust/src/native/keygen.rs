@@ -45,6 +45,45 @@ pub const CKA_LABEL: u32 = 0x0000_0003;
 /// `CKA_ID` — PKCS#11 v3.2 standard attribute. Codepoint per pkcs11t.h.
 pub const CKA_ID: u32 = 0x0000_0102;
 
+/// Shared evidence emission for every `generate_*_keypair` entry point below
+/// that this module instruments — same record shape as `ffi::
+/// C_GenerateKeyPair` (see that function's own comment in `rust/src/
+/// ffi.rs`'s "Operation-evidence wrappers" block), so this repo's one
+/// evidence consumer needs no changes to recognise it. Caller has already
+/// checked `oplog::enabled()`; this always emits.
+fn emit_generate_key_pair(session: u32, mechanism: u32, result: &Result<(u32, u32), CkRv>) {
+    let (h_pub, h_priv, rv) = match result {
+        Ok((p, s)) => (*p, *s, CKR_OK),
+        Err(e) => (0, 0, *e),
+    };
+    let (key_fields, custody) = if h_priv != 0 {
+        (
+            crate::oplog::key_fields(h_priv, mechanism),
+            crate::oplog::key_custody_fields(h_priv),
+        )
+    } else {
+        (
+            "key=- keytype=- paramset=-".to_string(),
+            "extractable=- sensitive=- never_extractable=- always_sensitive=- local=-".to_string(),
+        )
+    };
+    crate::oplog::emit(
+        "C_GenerateKeyPair",
+        &format!(
+            "sess={} mech={} mech_id=0x{:08x} {} {} hpub={} hpriv={} rv={} rv_id=0x{:08x}",
+            session,
+            crate::oplog::mech_name(mechanism),
+            mechanism,
+            key_fields,
+            custody,
+            h_pub,
+            h_priv,
+            crate::oplog::rv_name(rv),
+            rv
+        ),
+    );
+}
+
 // ── ML-KEM ──────────────────────────────────────────────────────────────────
 
 /// Generate an ML-KEM keypair. `parameter_set` ∈
@@ -91,6 +130,25 @@ pub fn generate_ml_kem_keypair_from_seed_extractable(
 }
 
 fn ml_kem_keypair_impl(
+    _session: u32,
+    parameter_set: u32,
+    seed: Option<&[u8]>,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+) -> Result<(u32, u32), CkRv> {
+    let logging = crate::oplog::enabled();
+    let result = ml_kem_keypair_inner(_session, parameter_set, seed, cka_id, label, extractable);
+    if logging {
+        // One call site covers all three public entry points (plain,
+        // from_seed, from_seed_extractable) — see generate_ml_kem_keypair
+        // and its siblings, which all funnel through this function.
+        emit_generate_key_pair(_session, CKM_ML_KEM_KEY_PAIR_GEN, &result);
+    }
+    result
+}
+
+fn ml_kem_keypair_inner(
     _session: u32,
     parameter_set: u32,
     seed: Option<&[u8]>,
@@ -213,6 +271,25 @@ pub fn generate_ml_dsa_keypair_from_seed_extractable(
 }
 
 fn ml_dsa_keypair_impl(
+    _session: u32,
+    parameter_set: u32,
+    seed: Option<&[u8]>,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+) -> Result<(u32, u32), CkRv> {
+    let logging = crate::oplog::enabled();
+    let result = ml_dsa_keypair_inner(_session, parameter_set, seed, cka_id, label, extractable);
+    if logging {
+        // One call site covers all three public entry points (plain,
+        // from_seed, from_seed_extractable) — see generate_ml_dsa_keypair
+        // and its siblings, which all funnel through this function.
+        emit_generate_key_pair(_session, CKM_ML_DSA_KEY_PAIR_GEN, &result);
+    }
+    result
+}
+
+fn ml_dsa_keypair_inner(
     _session: u32,
     parameter_set: u32,
     seed: Option<&[u8]>,
@@ -733,6 +810,19 @@ pub fn generate_ecdh_keypair(
 ///
 /// **Pre-condition**: `session` must be a valid R/W user session.
 pub fn generate_ed25519_keypair(
+    _session: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    let logging = crate::oplog::enabled();
+    let result = generate_ed25519_keypair_inner(_session, cka_id, label);
+    if logging {
+        emit_generate_key_pair(_session, CKM_EC_EDWARDS_KEY_PAIR_GEN, &result);
+    }
+    result
+}
+
+fn generate_ed25519_keypair_inner(
     _session: u32,
     cka_id: &[u8],
     label: &str,

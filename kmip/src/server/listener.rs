@@ -44,6 +44,16 @@ pub enum ServerError {
     Wire(#[from] WireError),
     #[error("rcgen cert: {0}")]
     Rcgen(String),
+    /// A rejected TLS handshake specifically (wrong/absent client cert),
+    /// as distinct from every other `Io` failure this connection can hit
+    /// after the handshake succeeds (docs/remediation-plan-auth-visibility-
+    /// evidence-log-09102026.md, Gap 1). Kept separate from `Io` rather than
+    /// folded in: `record_tls_handshake("kmip")` only fires on a
+    /// *successful* accept, so this is the one place that knows a handshake
+    /// specifically failed rather than some other I/O error later in the
+    /// same connection.
+    #[error("TLS handshake rejected: {0}")]
+    TlsHandshake(String),
 }
 
 /// Which TLS posture the listener enforces.
@@ -408,7 +418,7 @@ pub async fn serve(addr: SocketAddr, tls: Arc<ServerConfig>, deps: Arc<Deps>) ->
         let acceptor = acceptor.clone();
         let deps = Arc::clone(&deps);
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, acceptor, deps).await {
+            if let Err(e) = handle_conn(stream, acceptor, deps, peer).await {
                 tracing::warn!("conn {peer} closed with error: {e}");
             }
         });
@@ -419,8 +429,16 @@ async fn handle_conn(
     stream: TcpStream,
     acceptor: TlsAcceptor,
     deps: Arc<Deps>,
+    peer: SocketAddr,
 ) -> Result<(), ServerError> {
-    let mut tls_stream = acceptor.accept(stream).await.map_err(ServerError::Io)?;
+    let mut tls_stream = acceptor.accept(stream).await.map_err(|e| {
+        crate::metrics::record_auth_failure(
+            "kmip-tls-handshake",
+            "handshake-rejected",
+            Some(&peer.to_string()),
+        );
+        ServerError::TlsHandshake(e.to_string())
+    })?;
     crate::metrics::record_tls_handshake("kmip");
     // K14 mTLS — when the ServerConfig was built by [`tls_mtls`], the
     // handshake above already verified the client certificate chain
@@ -442,8 +460,15 @@ async fn handle_conn(
     // `dispatch_with_transport_identity` itself (`enforce_max_response_size`,
     // transport-agnostic — the wasm `submit()` entry point applies the same
     // check), so the response coming back here is already correctly capped.
+    // Captured before `request` moves into the blocking closure below —
+    // needed after `response` comes back to tell "no credential at all"
+    // from "a credential that didn't verify" (Gap 1, §1.3's `reason`
+    // values). `None` here means this connection never reached dispatch at
+    // all (a wire-decode failure, not an auth outcome).
+    let mut had_credential: Option<bool> = None;
     let response = match decode_request_message(&frame_bytes) {
         Ok(request) => {
+            had_credential = Some(!request.header.authentication.is_empty());
             // S-8 — the dispatch is synchronous and does real crypto (ML-DSA /
             // ML-KEM, plus the engine's global mutex). Run it on the blocking
             // pool so a slow op can't stall the tokio reactor and starve other
@@ -469,6 +494,27 @@ async fn handle_conn(
         // than replaced with another guess.
         Err(e) => wire_error_response(&e),
     };
+    // Gap 1, §1.3 — the request-level auth gate (dispatcher/mod.rs's
+    // `authenticate_request`) fails EVERY batch item with the same
+    // `AuthenticationNotSuccessful` reason (K14) when it rejects a request,
+    // so checking the first item is sufficient to detect that outcome; a
+    // response with no items at all cannot be this case. `had_credential`
+    // tells "no credential offered" from "one was offered and didn't
+    // verify" — the dispatcher itself does not currently distinguish those
+    // two beyond that boolean either (see authenticate_request's control
+    // flow: a missing-Credential fallthrough and a failed-verify
+    // fallthrough both just return `Err(())`).
+    if had_credential.is_some()
+        && response.batch_items.first().map(|item| item.result_reason)
+            == Some(Some(crate::error::ResultReason::AuthenticationNotSuccessful.to_wire_value()))
+    {
+        let reason = if had_credential == Some(false) {
+            "missing-credential"
+        } else {
+            "bad-credential"
+        };
+        crate::metrics::record_auth_failure("kmip-credential", reason, Some(&peer.to_string()));
+    }
     // Did the client just hand us the server role on this channel? §6.1.61 says
     // the swap applies to "the current client-to-server communication channel"
     // and that it "remains as established" — so the decision is made from the

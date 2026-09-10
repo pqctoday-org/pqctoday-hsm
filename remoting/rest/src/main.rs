@@ -37,6 +37,16 @@ struct Cli {
     /// the same name. OFF by default (plan RW0 posture).
     #[arg(long = "enable-destructive", env = "PKCS11_REMOTE_ENABLE_DESTRUCTIVE", default_value_t = false)]
     enable_destructive: bool,
+
+    /// Prometheus `/metrics` scrape endpoint, plain HTTP (same posture as
+    /// pqctoday-kmip's own `--metrics-listen`: same-pod/network-namespace
+    /// scraper, or a network policy). docs/remediation-plan-auth-visibility-
+    /// evidence-log-09102026.md, Gap 1/Q3 — currently just
+    /// cacp_auth_failures_total; appliance-side port choice (9098 here is a
+    /// placeholder distinct from KMIP's 9095) still needs coordinating with
+    /// pqctoday-cacp's systemd units and Fluent Bit scrape config.
+    #[arg(long, env = "PKCS11_REMOTE_METRICS_LISTEN", default_value = "127.0.0.1:9098")]
+    metrics_listen: SocketAddr,
 }
 
 #[tokio::main]
@@ -59,6 +69,12 @@ async fn main() -> anyhow::Result<()> {
 
     pqctoday_pkcs11_remote_core::verbs::bootstrap()?;
 
+    // Gap 1/Q3 — metrics registry init + scrape endpoint, same "before any
+    // task that could call record_*" ordering as pqctoday-kmip's own main.
+    pqctoday_pkcs11_remote_core::metrics::init();
+    tokio::spawn(pqctoday_pkcs11_remote_core::metrics::serve_metrics_forever(cli.metrics_listen));
+    tracing::info!(addr = %cli.metrics_listen, "metrics scrape endpoint on http://{}/metrics (plain HTTP)", cli.metrics_listen);
+
     let server_config = build_server_config(&cli)?;
     let rustls_config = RustlsConfig::from_config(Arc::new(server_config));
 
@@ -67,8 +83,10 @@ async fn main() -> anyhow::Result<()> {
     let app = routes::router_with(cli.enable_destructive)
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024));
     tracing::info!(addr = %cli.listen, "pqc-rest-pkcs11 listening (HTTP/1.1 only)");
+    // Q2 — ConnectInfo<SocketAddr> in the request extensions, needed for
+    // open_session's peer-address capture on a PIN failure.
     axum_server::bind_rustls(cli.listen, rustls_config)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
     Ok(())
 }
