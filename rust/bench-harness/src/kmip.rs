@@ -511,6 +511,10 @@ pub fn sign(
             uid: uid.to_string(),
             data: data.to_vec(),
             cryptographic_parameters: None,
+            // Single-shot request: no §6.1.62 multi-part stream.
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
         }),
     )?;
     bytes_field(&resp, TAG_SIGNATURE_DATA)
@@ -534,6 +538,10 @@ pub fn signature_verify(
             data: data.to_vec(),
             signature: signature.to_vec(),
             cryptographic_parameters: None,
+            // Single-shot request: no §6.1.63 multi-part stream.
+            init_indicator: None,
+            final_indicator: None,
+            correlation_value: None,
         }),
     )?;
     let (frame, _) = codec::decode(&resp)?;
@@ -1071,6 +1079,9 @@ pub fn run(args: &KmipArgs) -> Result<()> {
                                             uid: kp_priv.clone(),
                                             data: b"bench".to_vec(),
                                             cryptographic_parameters: None,
+                                            init_indicator: None,
+                                            final_indicator: None,
+                                            correlation_value: None,
                                         }),
                                         KmipClass::Kem => RequestPayload::Encapsulate(EncapsulateRequest {
                                             uid: kp_pub.clone(),
