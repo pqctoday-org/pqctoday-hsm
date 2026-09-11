@@ -248,6 +248,65 @@ pub fn verify_with_pss_salt(
     pss_salt_len: Option<usize>,
     eddsa_ctx: Option<&[u8]>,
 ) -> Result<bool, CkRv> {
+    let logging = crate::oplog::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(key_handle, mechanism)
+    } else {
+        String::new()
+    };
+
+    let result = verify_with_pss_salt_impl(
+        session, key_handle, mechanism, data, signature, pss_salt_len, eddsa_ctx,
+    );
+
+    if logging {
+        // Same synthetic paired-record shape sign_with_pss_salt emits for
+        // Sign — native has no separate init/verify phase split either.
+        // remediation-plan-verify-evidence-and-relp-receiver-pqc-09102026.md:
+        // Ok(true) -> CKR_OK, Ok(false) -> CKR_SIGNATURE_INVALID (a
+        // rejected signature is a normal outcome, not a Rust Err, for this
+        // function specifically — verify_pqc below uses a different
+        // convention, see its own wrapper), Err(e) -> e.
+        let rv = match &result {
+            Ok(true) => CKR_OK,
+            Ok(false) => CKR_SIGNATURE_INVALID,
+            Err(e) => *e,
+        };
+        crate::oplog::emit(
+            "C_VerifyInit",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x}",
+                session,
+                crate::oplog::mech_name(mechanism),
+                mechanism,
+                key_fields,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+        crate::oplog::emit(
+            "C_Verify",
+            &format!(
+                "sess={} in={} probe=0 rv={} rv_id=0x{:08x}",
+                session,
+                data.len(),
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    result
+}
+
+fn verify_with_pss_salt_impl(
+    session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+    signature: &[u8],
+    pss_salt_len: Option<usize>,
+    eddsa_ctx: Option<&[u8]>,
+) -> Result<bool, CkRv> {
     // Isolation gate + CKA_VERIFY + CKA_ALLOWED_MECHANISMS + every
     // key-material shape a verify mechanism might need, ALL read from one
     // borrowed attrs — one OBJECTS lock. `CKA_VALUE` holds the
@@ -499,6 +558,64 @@ fn slh_dsa_n(ps: u32) -> usize {
 /// 64-byte µ; `internal` ⇒ `*.Verify_internal`.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_pqc(
+    session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+    signature: &[u8],
+    ctx: &[u8],
+    internal: bool,
+    external_mu: bool,
+) -> Result<(), CkRv> {
+    let logging = crate::oplog::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(key_handle, mechanism)
+    } else {
+        String::new()
+    };
+
+    let result = verify_pqc_impl(
+        session, key_handle, mechanism, data, signature, ctx, internal, external_mu,
+    );
+
+    if logging {
+        // Different Result shape from verify_with_pss_salt above:
+        // crypto::handlers::verify_ml_dsa/verify_slh_dsa signal an invalid
+        // signature via Err(CKR_SIGNATURE_INVALID), not Ok(false) — no
+        // separate "signature invalid" arm needed here, it already falls
+        // out of the Err(e) case correctly.
+        let rv = match &result {
+            Ok(()) => CKR_OK,
+            Err(e) => *e,
+        };
+        crate::oplog::emit(
+            "C_VerifyInit",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x}",
+                session,
+                crate::oplog::mech_name(mechanism),
+                mechanism,
+                key_fields,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+        crate::oplog::emit(
+            "C_Verify",
+            &format!(
+                "sess={} in={} probe=0 rv={} rv_id=0x{:08x}",
+                session,
+                data.len(),
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_pqc_impl(
     session: u32,
     key_handle: u32,
     mechanism: u32,

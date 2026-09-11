@@ -36,7 +36,7 @@ fn native_entry_points_emit_pqcev_records() {
     let sess = native::open_session(slot, "87654321").expect("user session");
 
     // ── GenerateKeyPair (ML-DSA) + Sign (PQC path: native::sign_pqc) ────────
-    let (_mldsa_pub, mldsa_priv) =
+    let (mldsa_pub, mldsa_priv) =
         native::generate_ml_dsa_keypair(sess, CKP_ML_DSA_65, b"ev", "evidence-mldsa65")
             .expect("ml-dsa keygen");
     let msg = b"native-path operation-evidence smoke test";
@@ -57,7 +57,7 @@ fn native_entry_points_emit_pqcev_records() {
     // ── GenerateKeyPair (Ed25519) + Sign (classical path: native::sign) ─────
     // The exact call PKCS#11 remoting makes for its benchmark's Ed25519 arm
     // (remoting/core/src/verbs.rs: `Algorithm::Ed25519 => native::sign(...)`).
-    let (_ed_pub, ed_priv) =
+    let (ed_pub, ed_priv) =
         native::generate_ed25519_keypair(sess, b"ev", "evidence-ed25519").expect("ed25519 keygen");
     let ed_sig = native::sign(sess, ed_priv, CKM_EDDSA, msg).expect("sign (classical)");
     assert_eq!(ed_sig.len(), 64, "Ed25519 signature length (RFC 8032)");
@@ -69,6 +69,25 @@ fn native_entry_points_emit_pqcev_records() {
     let (ct, ss_enc) = native::encapsulate(sess, mlkem_pub, CKM_ML_KEM).expect("encapsulate");
     let ss_dec = native::decapsulate(sess, mlkem_priv, CKM_ML_KEM, &ct).expect("decapsulate");
     assert_eq!(ss_enc, ss_dec, "encapsulate/decapsulate shared secret must match");
+
+    // ── Verify (remediation-plan-verify-evidence-and-relp-receiver-pqc-
+    // 09102026.md): both entry points, genuine AND corrupted signatures, so
+    // the evidence log distinguishes a real CKR_OK from a real
+    // CKR_SIGNATURE_INVALID rather than only ever proving the happy path.
+    let ok = native::verify(sess, ed_pub, CKM_EDDSA, msg, &ed_sig).expect("verify (classical)");
+    assert!(ok, "genuine Ed25519 signature must verify");
+    let mut bad_ed_sig = ed_sig.clone();
+    bad_ed_sig[0] ^= 0xFF;
+    let bad = native::verify(sess, ed_pub, CKM_EDDSA, msg, &bad_ed_sig).expect("verify (classical, corrupted)");
+    assert!(!bad, "corrupted Ed25519 signature must NOT verify");
+
+    native::verify_pqc(sess, mldsa_pub, CKM_ML_DSA, msg, &sig, b"", false, false)
+        .expect("verify_pqc: genuine ML-DSA signature must verify");
+    let mut bad_mldsa_sig = sig.clone();
+    bad_mldsa_sig[0] ^= 0xFF;
+    let verify_pqc_err = native::verify_pqc(sess, mldsa_pub, CKM_ML_DSA, msg, &bad_mldsa_sig, b"", false, false)
+        .expect_err("corrupted ML-DSA signature must be rejected");
+    assert_eq!(verify_pqc_err, CKR_SIGNATURE_INVALID);
 
     let log = std::fs::read_to_string(&log_path).expect("evidence log readable");
     let records: Vec<&str> = log.lines().filter(|l| l.starts_with("PQCEV ")).collect();
@@ -111,6 +130,25 @@ fn native_entry_points_emit_pqcev_records() {
     // ML-KEM-768 ciphertext is 1088 bytes (FIPS 203 §7).
     assert!(encaps[0].contains("ct=1088"), "encaps ciphertext size: {}", encaps[0]);
     assert!(decaps[0].contains("ct=1088"), "decaps ciphertext size: {}", decaps[0]);
+
+    // Four verify operations (2 classical via native::verify, 2 PQC via
+    // native::verify_pqc — genuine + corrupted each), each as a paired
+    // C_VerifyInit + C_Verify, matching the ffi:: grammar exactly.
+    let verify_inits: Vec<&&str> = records.iter().filter(|r| r.contains("op=C_VerifyInit")).collect();
+    let verifies: Vec<&&str> = records.iter().filter(|r| r.contains("op=C_Verify ")).collect();
+    assert_eq!(verify_inits.len(), 4, "expected 4 C_VerifyInit records: {verify_inits:?}");
+    assert_eq!(verifies.len(), 4, "expected 4 C_Verify records: {verifies:?}");
+    let ok_verifies: Vec<&&&str> = verifies.iter().filter(|r| r.contains("rv=CKR_OK")).collect();
+    let invalid_verifies: Vec<&&&str> =
+        verifies.iter().filter(|r| r.contains("rv=CKR_SIGNATURE_INVALID")).collect();
+    assert_eq!(ok_verifies.len(), 2, "2 genuine signatures should verify OK: {verifies:?}");
+    assert_eq!(
+        invalid_verifies.len(), 2,
+        "2 corrupted signatures should be rejected, not silently ignored: {verifies:?}"
+    );
+    for r in &verifies {
+        assert!(r.contains("probe=0"), "native verify has no length-query phase: {r}");
+    }
 
     // Grammar/join-key sanity, same as oplog_evidence.rs.
     for r in &records {
