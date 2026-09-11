@@ -26,7 +26,7 @@
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 
-use prometheus::{CounterVec, Encoder, Opts, Registry, TextEncoder};
+use prometheus::{CounterVec, Encoder, GaugeVec, Opts, Registry, TextEncoder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -42,6 +42,25 @@ static METRICS: OnceLock<Metrics> = OnceLock::new();
 pub fn init() {
     let _ = METRICS.get_or_init(|| {
         let registry = Registry::new();
+        // Same shape and semantics as pqctoday-kmip::metrics's build_info
+        // (kmip/src/metrics.rs) — remaining-gaps-remediation-plan-09112026.md
+        // P1.1: before this, the sandbox's OpenMetrics panel showed
+        // `build_info: null` for both remoting services (there was no
+        // `cacp_build_info` family here at all, unlike KMIP), so a learner
+        // could see request counts but never what was actually running.
+        let build_info = GaugeVec::new(
+            Opts::new("cacp_build_info", "Build provenance (always 1)"),
+            &["version", "git_sha"],
+        )
+        .expect("build_info gauge");
+        registry.register(Box::new(build_info.clone())).expect("register build_info");
+        build_info
+            .with_label_values(&[
+                env!("CARGO_PKG_VERSION"),
+                option_env!("GIT_SHA").unwrap_or("unknown"),
+            ])
+            .set(1.0);
+
         // `reason` is a short fixed token (currently just "pin-incorrect" —
         // see CkError::class() in this crate's error.rs, the "for
         // logging/metrics" hook this counter finally uses), never free
