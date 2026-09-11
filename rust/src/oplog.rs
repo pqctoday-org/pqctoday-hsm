@@ -211,6 +211,15 @@ pub fn rv_name(rv: u32) -> &'static str {
         CKR_OPERATION_ACTIVE => "CKR_OPERATION_ACTIVE",
         CKR_OPERATION_NOT_INITIALIZED => "CKR_OPERATION_NOT_INITIALIZED",
         CKR_SESSION_HANDLE_INVALID => "CKR_SESSION_HANDLE_INVALID",
+        // Found live 2026-09-10 adding Verify instrumentation
+        // (remediation-plan-verify-evidence-and-relp-receiver-pqc-
+        // 09102026.md): a rejected signature is exactly the outcome this
+        // whole fix exists to make visible, and it rendered as the
+        // catch-all "CKR_UNKNOWN" before this line existed — the same class
+        // of gap `mech_name`'s missing `CKM_EC_EDWARDS_KEY_PAIR_GEN` was
+        // earlier this session, found the same way: by actually reading the
+        // evidence a live test produced, not by inspecting the code alone.
+        CKR_SIGNATURE_INVALID => "CKR_SIGNATURE_INVALID",
         CKR_TEMPLATE_INCOMPLETE => "CKR_TEMPLATE_INCOMPLETE",
         CKR_TEMPLATE_INCONSISTENT => "CKR_TEMPLATE_INCONSISTENT",
         CKR_USER_NOT_LOGGED_IN => "CKR_USER_NOT_LOGGED_IN",

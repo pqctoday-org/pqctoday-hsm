@@ -7139,8 +7139,7 @@ fn C_Sign_impl(
     }
 }
 
-#[wasm_bindgen(js_name = _C_VerifyInit)]
-pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
+fn C_VerifyInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
     // C2 — the NULL-mechanism CANCEL form (see cancel_active_operation).
@@ -7191,8 +7190,7 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     CKR_OK
 }
 
-#[wasm_bindgen(js_name = _C_Verify)]
-pub fn C_Verify(
+fn C_Verify_impl(
     h_session: u32,
     p_data: *mut u8,
     ul_data_len: u32,
@@ -13082,8 +13080,7 @@ pub fn C_VerifyUpdate(h_session: u32, p_part: *mut u8, ul_part_len: u32) -> u32 
     CKR_OK
 }
 
-#[wasm_bindgen(js_name = _C_VerifyFinal)]
-pub fn C_VerifyFinal(h_session: u32, p_signature: *mut u8, ul_signature_len: u32) -> u32 {
+fn C_VerifyFinal_impl(h_session: u32, p_signature: *mut u8, ul_signature_len: u32) -> u32 {
     require_init!();
     // §5.2 error priority (C2, 2026-08-13) — the session-handle class
     // takes MANDATORY precedence over argument and capability codes, so
@@ -23026,6 +23023,116 @@ pub fn C_SignFinal(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut
                 h_session,
                 out,
                 if p_signature.is_null() { 1 } else { 0 },
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    rv
+}
+
+// remediation-plan-verify-evidence-and-relp-receiver-pqc-09102026.md: brings
+// Verify's core three-function surface to parity with Sign's — a signature
+// verified (or rejected) left no evidence trail before this, unlike every
+// other core crypto operation. Same scope boundary Sign already has: the
+// broader v3.2 alternate-entry-point surface (C_SignMessage*/C_SignRecover*
+// and their Verify counterparts, C_VerifyUpdate) stays uninstrumented,
+// symmetric with Sign's own pre-existing omission there — not a new
+// asymmetry introduced here.
+#[wasm_bindgen(js_name = _C_VerifyInit)]
+pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
+    let logging = crate::oplog::enabled();
+    let mech = if logging && !p_mechanism.is_null() {
+        unsafe { ck_param::mech(p_mechanism).mechanism }
+    } else {
+        0
+    };
+    let key_fields = if logging {
+        crate::oplog::key_fields(h_key, mech)
+    } else {
+        String::new()
+    };
+
+    let rv = C_VerifyInit_impl(h_session, p_mechanism, h_key);
+
+    if logging {
+        crate::oplog::emit(
+            "C_VerifyInit",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x}",
+                h_session,
+                crate::oplog::mech_name(mech),
+                mech,
+                key_fields,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    rv
+}
+
+#[wasm_bindgen(js_name = _C_Verify)]
+pub fn C_Verify(
+    h_session: u32,
+    p_data: *mut u8,
+    ul_data_len: u32,
+    p_signature: *mut u8,
+    ul_signature_len: u32,
+) -> u32 {
+    let rv = C_Verify_impl(h_session, p_data, ul_data_len, p_signature, ul_signature_len);
+
+    if crate::oplog::enabled() {
+        // No `out`/probe field the way C_Sign's is meaningful: verify has no
+        // output-buffer size-query phase at all (PKCS#11 v3.2 §5.15.2 — the
+        // signature is an INPUT the caller already holds, never queried in
+        // two calls the way a produced signature is). probe=0 is a fixed
+        // placeholder kept only for field-shape consistency with
+        // native::verify_with_pss_salt's own emission of this same op name
+        // (see that function's comment) — this repo's one evidence consumer
+        // pairs records on sess + op name across both layers, so a
+        // record shape that differs per layer for the "same" operation
+        // would need special-casing there for no real benefit.
+        // rv already carries CKR_SIGNATURE_INVALID as an ordinary return
+        // code (confirmed in C_Verify_impl above) — no extra branch needed
+        // for "verify failed" vs "verify errored", unlike native::verify's
+        // Ok(true)/Ok(false)/Err(_) three-way Rust return.
+        crate::oplog::emit(
+            "C_Verify",
+            &format!(
+                "sess={} in={} probe=0 rv={} rv_id=0x{:08x}",
+                h_session,
+                ul_data_len,
+                crate::oplog::rv_name(rv),
+                rv
+            ),
+        );
+    }
+    rv
+}
+
+#[wasm_bindgen(js_name = _C_VerifyFinal)]
+pub fn C_VerifyFinal(h_session: u32, p_signature: *mut u8, ul_signature_len: u32) -> u32 {
+    let rv = C_VerifyFinal_impl(h_session, p_signature, ul_signature_len);
+
+    if crate::oplog::enabled() {
+        // C_VerifyUpdate deliberately NOT recorded — same reasoning as
+        // C_SignUpdate above. C_VerifyFinal_impl delegates to the (wrapped)
+        // C_Verify internally (mirrors C_SignFinal_impl calling the wrapped
+        // C_Sign — see that function), so a multi-part verify-final
+        // produces two records, "C_Verify" then "C_VerifyFinal", the same
+        // doubled shape multi-part sign-final already has. Not fixed here —
+        // out of scope for bringing Verify to Sign's existing parity, not a
+        // new inconsistency this change introduces.
+        // siglen (not "in", to avoid reading like C_Verify's message-length
+        // field above) — the accumulated message length isn't visible at
+        // this wrapper's scope, only the signature being checked is.
+        crate::oplog::emit(
+            "C_VerifyFinal",
+            &format!(
+                "sess={} siglen={} probe=0 rv={} rv_id=0x{:08x}",
+                h_session,
+                ul_signature_len,
                 crate::oplog::rv_name(rv),
                 rv
             ),
