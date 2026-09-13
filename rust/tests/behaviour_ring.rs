@@ -219,11 +219,8 @@ fn ring_is_shared_across_processes_and_mirrors_the_evidence_log() {
         .expect("auth record");
     assert_eq!(
         (auth.op, auth.result, auth.client),
-        (
-            op_auth("remoting-pin"),
-            RESULT_AUTH_FAIL,
-            client_bucket("10.0.0.9:4242")
-        )
+        (op_auth("remoting-pin"), RESULT_AUTH_FAIL, client_bucket("10.0.0.9")),
+        "peer bucketed by address, not by address:port"
     );
 
     // ── A second process joins the same file and appends ──────────────────

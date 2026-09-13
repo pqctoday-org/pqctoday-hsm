@@ -131,9 +131,13 @@ pub fn enabled() -> bool {
 pub fn emit(surface: &str, reason: &str, peer: Option<&str>) {
     if crate::behaviour::enabled() {
         use crate::behaviour::{RESULT_AUTH_FAIL, Record, SRC_AUTH, client_bucket, op_auth};
+        // Bucket the address only: the ephemeral source port would make
+        // every attempt from one host look like a new client — seen on the
+        // emulator, where 17 failed handshakes from one machine produced 17
+        // "distinct clients" in the monitor's window.
+        let host = peer.map(|p| p.rsplit_once(':').map(|(h, _)| h).unwrap_or(p)).unwrap_or("");
         crate::behaviour::emit(
-            Record::new(SRC_AUTH, op_auth(surface), 0, RESULT_AUTH_FAIL)
-                .client(client_bucket(peer.unwrap_or(""))),
+            Record::new(SRC_AUTH, op_auth(surface), 0, RESULT_AUTH_FAIL).client(client_bucket(host)),
         );
     }
     if !enabled() {
