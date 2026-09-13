@@ -33,6 +33,7 @@
  *****************************************************************************/
 
 #include "config.h"
+#include <cstdint>
 #include "LeakingPtr.h"
 #include "log.h"
 #include "cryptoki.h"
