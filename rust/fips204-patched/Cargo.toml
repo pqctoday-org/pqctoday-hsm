@@ -116,6 +116,7 @@ default = [
 ]
 default-rng = ["rand_core/getrandom"]
 dudect = []
+hw-accel = []
 ml-dsa-44 = []
 ml-dsa-65 = []
 ml-dsa-87 = []

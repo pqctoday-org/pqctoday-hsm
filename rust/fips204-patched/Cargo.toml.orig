@@ -23,6 +23,7 @@ ml-dsa-44 = []
 ml-dsa-65 = []
 ml-dsa-87 = []
 dudect = []
+hw-accel = []
 
 
 [dependencies]  # Some are marginally held-back to retain MSRV 1.70

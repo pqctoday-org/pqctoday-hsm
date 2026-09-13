@@ -2438,6 +2438,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pqc-hw"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "sha3 0.10.8",
+]
+
+[[package]]
 name = "pqctoday-kmip"
 version = "0.17.0"
 dependencies = [
@@ -3324,6 +3332,7 @@ dependencies = [
  "p521",
  "pbkdf2",
  "pkcs8 0.11.0",
+ "pqc-hw",
  "rand 0.8.6",
  "rand_chacha",
  "ripemd",

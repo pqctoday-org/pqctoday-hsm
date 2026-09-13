@@ -16,6 +16,55 @@ pub(crate) fn h256_xof(v: &[&[u8]]) -> impl XofReader {
     hasher.finalize_xof()
 }
 
+#[cfg(all(test, feature = "hw-accel"))]
+mod hw_accel_tests {
+    use super::*;
+    use std::vec::Vec;
+
+    fn shake128_batch(inputs: &[[u8; 34]], output_len: usize) -> Option<Vec<Vec<u8>>> {
+        if inputs.first().is_some_and(|input| input[0] == 0xa5) {
+            return Some(std::vec![std::vec![0; 3]]);
+        }
+        Some(
+            inputs
+                .iter()
+                .map(|input| {
+                    let mut output = std::vec![0; output_len];
+                    g128_xof(&[input]).read(&mut output);
+                    output
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn accelerated_expand_a_matches_reference_matrix() {
+        assert!(crate::set_expand_a_hook(shake128_batch));
+        let rho = [0x5a; 32];
+        let accelerated = expand_a::<false, 6, 5>(&rho);
+        let reference: [[T; 5]; 6] = core::array::from_fn(|r| {
+            core::array::from_fn(|s| rej_ntt_poly::<false>(&[&rho, &[s as u8], &[r as u8]]))
+        });
+        for r in 0..6 {
+            for s in 0..5 {
+                assert_eq!(accelerated[r][s].0, reference[r][s].0);
+            }
+        }
+
+        let fallback_rho = [0xa5; 32];
+        let fallback = expand_a::<false, 6, 5>(&fallback_rho);
+        let fallback_reference: [[T; 5]; 6] = core::array::from_fn(|r| {
+            core::array::from_fn(|s| {
+                rej_ntt_poly::<false>(&[&fallback_rho, &[s as u8], &[r as u8]])
+            })
+        });
+        for r in 0..6 {
+            for s in 0..5 {
+                assert_eq!(fallback[r][s].0, fallback_reference[r][s].0);
+            }
+        }
+    }
+}
 
 /// # Function `G(v,d)` of section 3.7 item 2 on bottom of page 14.
 /// Takes a reference to a list of byte-slice references and runs them through Shake128.
@@ -25,7 +74,6 @@ pub(crate) fn g128_xof(v: &[&[u8]]) -> impl XofReader {
     v.iter().for_each(|b| hasher.update(b));
     hasher.finalize_xof()
 }
-
 
 /// # Algorithm 29: `SampleInBall(ρ)` on page 36.
 /// Samples a polynomial `c ∈ Rq` with coefficients from `{−1, 0, 1}` and Hamming
@@ -99,7 +147,6 @@ pub(crate) fn sample_in_ball<const CTEST: bool>(tau: i32, rho: &[u8]) -> R {
     c
 }
 
-
 /// # Algorithm 30: `RejNTTPoly(ρ)` on page 37.
 /// Samples a polynomial ∈ `Tq`.
 ///
@@ -145,6 +192,21 @@ pub(crate) fn rej_ntt_poly<const CTEST: bool>(rhos: &[&[u8]]) -> T {
     a_hat
 }
 
+#[cfg(feature = "hw-accel")]
+fn rej_ntt_poly_from_bytes(bytes: &[u8]) -> Option<T> {
+    let mut polynomial = T0;
+    let mut accepted = 0;
+    for chunk in bytes.chunks_exact(3) {
+        if let Ok(coefficient) = coeff_from_three_bytes::<false>([chunk[0], chunk[1], chunk[2]]) {
+            polynomial.0[accepted] = coefficient;
+            accepted += 1;
+            if accepted == 256 {
+                return Some(polynomial);
+            }
+        }
+    }
+    None
+}
 
 /// # Algorithm 31 RejBoundedPoly(ρ) on page 37.
 /// Samples an element `a ∈ Rq` with coefficients in `[−η, η]` computed via rejection
@@ -212,7 +274,6 @@ pub(crate) fn rej_bounded_poly<const CTEST: bool>(eta: i32, rhos: &[&[u8]]) -> R
     a
 }
 
-
 /// # Algorithm 32 ExpandA(ρ) on page 38.
 /// Samples a k × ℓ matrix `cap_a_hat` of elements of `T_q`.
 ///
@@ -225,6 +286,37 @@ pub(crate) fn rej_bounded_poly<const CTEST: bool>(eta: i32, rhos: &[&[u8]]) -> R
 pub(crate) fn expand_a<const CTEST: bool, const K: usize, const L: usize>(
     rho: &[u8; 32],
 ) -> [[T; L]; K] {
+    #[cfg(feature = "hw-accel")]
+    if !CTEST && K == 6 && L == 5 {
+        let mut inputs = std::vec::Vec::with_capacity(K * L);
+        for r in 0..K {
+            for s in 0..L {
+                let mut input = [0; 34];
+                input[..32].copy_from_slice(rho);
+                input[32] = s as u8;
+                input[33] = r as u8;
+                inputs.push(input);
+            }
+        }
+        if let Some(outputs) = crate::hw_accel::expand_a(&inputs, 840) {
+            if outputs.len() == K * L {
+                let mut matrix = core::array::from_fn(|_| core::array::from_fn(|_| T0));
+                let mut complete = true;
+                for (index, output) in outputs.iter().enumerate() {
+                    if let Some(polynomial) = rej_ntt_poly_from_bytes(output) {
+                        matrix[index / L][index % L] = polynomial;
+                    } else {
+                        complete = false;
+                        break;
+                    }
+                }
+                if complete {
+                    return matrix;
+                }
+            }
+        }
+    }
+
     // 1: for r from 0 to k − 1 do
     // 2:   for s from 0 to ℓ − 1 do
     // 3:     rho′ ← rho || IntegerToBytes(s, 1) || IntegerToBytes(r, 1)
@@ -237,7 +329,6 @@ pub(crate) fn expand_a<const CTEST: bool, const K: usize, const L: usize>(
     });
     cap_a_hat
 }
-
 
 /// # Algorithm 33: `ExpandS(ρ)` on page 38.
 /// Samples vectors `s1 ∈ R^ℓ_q` and `s2 ∈ R^k_q`, each with coefficients in
@@ -270,7 +361,6 @@ pub(crate) fn expand_s<const CTEST: bool, const K: usize, const L: usize>(
     debug_assert!(s2.iter().all(|r| is_in_range(r, eta, eta)), "Alg 33: s2 out of range");
     (s1, s2)
 }
-
 
 /// # Algorithm 34: `ExpandMask(ρ,µ)` from page 38.
 /// Samples a vector `s ∈ R^ℓ_q` such that each polynomial `s_j` has coefficients
@@ -312,7 +402,6 @@ pub(crate) fn expand_mask<const L: usize>(gamma1: i32, rho: &[u8; 64], mu: u16) 
     y
 }
 
-
 /// Remediation R37 (phase 8): the same `(OID, expected PHM length)` pair
 /// [`hash_message`] returns, but WITHOUT hashing anything -- for callers
 /// (PKCS#11 v3.2 SS6.67.6's bare generic `CKM_HASH_ML_DSA`) that already
@@ -320,16 +409,66 @@ pub(crate) fn expand_mask<const L: usize>(gamma1: i32, rho: &[u8; 64], mu: u16) 
 /// expected length also doubles as the caller's own PHM-length validation.
 pub(crate) fn oid_and_len(ph: &Ph) -> ([u8; 11], usize) {
     match ph {
-        Ph::SHA224 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x04], 28),
-        Ph::SHA256 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01], 32),
-        Ph::SHA384 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02], 48),
-        Ph::SHA512 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03], 64),
-        Ph::SHA3_224 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x07], 28),
-        Ph::SHA3_256 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x08], 32),
-        Ph::SHA3_384 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x09], 48),
-        Ph::SHA3_512 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0a], 64),
-        Ph::SHAKE128 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0b], 32),
-        Ph::SHAKE256 => ([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0c], 64),
+        Ph::SHA224 => (
+            [
+                0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x04,
+            ],
+            28,
+        ),
+        Ph::SHA256 => (
+            [
+                0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+            ],
+            32,
+        ),
+        Ph::SHA384 => (
+            [
+                0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02,
+            ],
+            48,
+        ),
+        Ph::SHA512 => (
+            [
+                0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
+            ],
+            64,
+        ),
+        Ph::SHA3_224 => (
+            [
+                0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x07,
+            ],
+            28,
+        ),
+        Ph::SHA3_256 => (
+            [
+                0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x08,
+            ],
+            32,
+        ),
+        Ph::SHA3_384 => (
+            [
+                0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x09,
+            ],
+            48,
+        ),
+        Ph::SHA3_512 => (
+            [
+                0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0a,
+            ],
+            64,
+        ),
+        Ph::SHAKE128 => (
+            [
+                0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0b,
+            ],
+            32,
+        ),
+        Ph::SHAKE256 => (
+            [
+                0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0c,
+            ],
+            64,
+        ),
     }
 }
 
@@ -375,7 +514,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
         // ── New variants for PKCS#11 v3.2 §6.67.7 HashML-DSA-with-hashing ──────────
         Ph::SHA224 => (
             // id-sha224 OID 2.16.840.1.101.3.4.2.4
-            [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x04],
+            [
+                0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x04,
+            ],
             {
                 let mut hasher = Sha224::new();
                 Digest::update(&mut hasher, message);
@@ -385,7 +526,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
         ),
         Ph::SHA384 => (
             // id-sha384 OID 2.16.840.1.101.3.4.2.2
-            [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02],
+            [
+                0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02,
+            ],
             {
                 let mut hasher = Sha384::new();
                 Digest::update(&mut hasher, message);
@@ -395,7 +538,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
         ),
         Ph::SHA3_224 => (
             // id-sha3-224 OID 2.16.840.1.101.3.4.2.7
-            [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x07],
+            [
+                0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x07,
+            ],
             {
                 let mut hasher = Sha3_224::new();
                 Digest::update(&mut hasher, message);
@@ -405,7 +550,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
         ),
         Ph::SHA3_256 => (
             // id-sha3-256 OID 2.16.840.1.101.3.4.2.8
-            [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x08],
+            [
+                0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x08,
+            ],
             {
                 let mut hasher = Sha3_256::new();
                 Digest::update(&mut hasher, message);
@@ -415,7 +562,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
         ),
         Ph::SHA3_384 => (
             // id-sha3-384 OID 2.16.840.1.101.3.4.2.9
-            [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x09],
+            [
+                0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x09,
+            ],
             {
                 let mut hasher = Sha3_384::new();
                 Digest::update(&mut hasher, message);
@@ -425,7 +574,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
         ),
         Ph::SHA3_512 => (
             // id-sha3-512 OID 2.16.840.1.101.3.4.2.10 (0x0a)
-            [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0a],
+            [
+                0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0a,
+            ],
             {
                 let mut hasher = Sha3_512::new();
                 Digest::update(&mut hasher, message);
@@ -435,7 +586,9 @@ pub(crate) fn hash_message(message: &[u8], ph: &Ph, phm: &mut [u8; 64]) -> ([u8;
         ),
         Ph::SHAKE256 => (
             // id-shake256 OID 2.16.840.1.101.3.4.2.12 (0x0c) — 512-bit output per FIPS 204 Table 1
-            [0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0c],
+            [
+                0x06u8, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0c,
+            ],
             {
                 let mut hasher = Shake256::default();
                 hasher.update(message);

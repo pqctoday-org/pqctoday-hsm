@@ -13,6 +13,9 @@
 //
 #![doc = include_str!("../README.md")]
 
+#[cfg(feature = "hw-accel")]
+extern crate std;
+
 
 // TODO Roadmap
 //  1. Always more testing...
@@ -96,8 +99,13 @@ mod conversion;
 mod encodings;
 mod hashing;
 mod helpers;
+#[cfg(feature = "hw-accel")]
+mod hw_accel;
 mod high_low;
 mod ml_dsa;
+
+#[cfg(feature = "hw-accel")]
+pub use hw_accel::{ExpandAHook, set_expand_a_hook};
 mod ntt;
 mod types;
 

@@ -18,7 +18,7 @@ description = "A native Rust WebAssembly clone of SoftHSMv3"
 # hard way: bench-harness's first build failed on exactly those symbols
 # before this workspace declaration was added.
 [workspace]
-members = ["bench-harness"]
+members = ["bench-harness", "pqc-hw"]
 
 [lib]
 # `staticlib` added for the wasm32-unknown-emscripten target: emcc links the
@@ -56,6 +56,7 @@ acvp = []
 # entry, so it never reaches the shipped `pqctoday-kmip` binary or any
 # other consumer of this crate.
 test-support = []
+hw-accel = ["dep:pqc-hw", "fips204/hw-accel"]
 
 [dependencies]
 wasm-bindgen = "0.2.117"
@@ -212,6 +213,9 @@ classic-mceliece-rust = { version = "3", default-features = false, features = ["
 # `native` feature, for the identical reason.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
+pqc-hw = { path = "pqc-hw", optional = true }
+
 [dev-dependencies]
 # NIST ACVP keyGen KAT parsing (T7 seed-deterministic keygen tests reads
 # the internalProjection.json vector files shipped with the patched forks).
@@ -236,4 +240,3 @@ lto = true
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
-
