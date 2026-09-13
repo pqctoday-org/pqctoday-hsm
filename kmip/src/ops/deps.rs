@@ -558,6 +558,24 @@ pub struct Deps {
     pub request_started: Mutex<HashMap<String, std::time::Instant>>,
 }
 
+/// `Instant::now()`, or `None` where there is no clock to read: on
+/// `wasm32-unknown-unknown` `Instant::now()` aborts the whole module with
+/// "time not implemented on this platform" — the browser playground
+/// (`wasm/`, built by `scripts/build-kmip-wasm.sh`) hit exactly that on its
+/// first Query once the dispatcher started timing requests, caught by the
+/// bundle's smoke test. There is no latency consumer in the playground, so
+/// it keeps reporting `latency_ms: 0` rather than carrying a JS clock shim.
+fn monotonic_now() -> Option<std::time::Instant> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        None
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        Some(std::time::Instant::now())
+    }
+}
+
 impl Deps {
     pub fn new(
         engine: Engine,
@@ -591,11 +609,12 @@ impl Deps {
     /// Called once, by `dispatcher::RequestTimer::new`, at the top of
     /// `dispatch_one` — never call this directly from an op handler.
     pub fn record_request_start(&self, correlation_id: String) {
+        let Some(now) = monotonic_now() else { return };
         let mut m = match self.request_started.lock() {
             Ok(m) => m,
             Err(poisoned) => poisoned.into_inner(),
         };
-        m.insert(correlation_id, std::time::Instant::now());
+        m.insert(correlation_id, now);
     }
 
     /// P0 — read and remove the start time recorded for `correlation_id`,
