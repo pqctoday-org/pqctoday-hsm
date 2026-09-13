@@ -34,6 +34,7 @@
 #include "config.h"
 #include "log.h"
 #include "OpLog.h"
+#include "BehaviourRing.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -136,14 +137,23 @@ CK_RV SoftHSM::C_EncapsulateKey
 )
 {
 	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
 	const std::string keyFields = (logging && pMechanism != NULL_PTR)
 		? opLogKeyFields(hSession, hPublicKey, pMechanism->mechanism)
 		: std::string("key=- keytype=- paramset=-");
+	const uint8_t alg = (ring && pMechanism != NULL_PTR)
+		? behaviourAlg(hSession, hPublicKey, pMechanism->mechanism)
+		: BehaviourIds::ALG_NONE;
+	const uint64_t t0 = (logging || ring) ? BehaviourRing::nowMicros() : 0;
 
 	unsigned long secretLen = 0;
 	CK_RV rv = encapsulateKeyImpl(hSession, pMechanism, hPublicKey, pTemplate,
 	                              ulAttributeCount, pCiphertext, pulCiphertextLen,
 	                              phKey, logging ? &secretLen : NULL);
+
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+	if (ring)
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_ENCAPSULATEKEY, alg, rv, 0, dur));
 
 	if (logging)
 	{
@@ -155,7 +165,7 @@ CK_RV SoftHSM::C_EncapsulateKey
 		else               snprintf(secret, sizeof(secret), "-");
 
 		OpLog::emit("C_EncapsulateKey",
-		            "sess=%lu mech=%s mech_id=0x%08lx %s ct=%lu secret=%s probe=%d rv=%s rv_id=0x%08lx",
+		            "sess=%lu mech=%s mech_id=0x%08lx %s ct=%lu secret=%s probe=%d rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            OpLog::mechName(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
 		            (unsigned long)(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
@@ -163,7 +173,8 @@ CK_RV SoftHSM::C_EncapsulateKey
 		            (unsigned long)(pulCiphertextLen != NULL_PTR ? *pulCiphertextLen : 0),
 		            secret,
 		            (pCiphertext == NULL_PTR) ? 1 : 0,
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
 	}
 
 	return rv;
@@ -569,14 +580,24 @@ CK_RV SoftHSM::C_DecapsulateKey
 )
 {
 	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
 	const std::string keyFields = (logging && pMechanism != NULL_PTR)
 		? opLogKeyFields(hSession, hPrivateKey, pMechanism->mechanism)
 		: std::string("key=- keytype=- paramset=-");
+	const uint8_t alg = (ring && pMechanism != NULL_PTR)
+		? behaviourAlg(hSession, hPrivateKey, pMechanism->mechanism)
+		: BehaviourIds::ALG_NONE;
+	const uint64_t t0 = (logging || ring) ? BehaviourRing::nowMicros() : 0;
 
 	unsigned long secretLen = 0;
 	CK_RV rv = decapsulateKeyImpl(hSession, pMechanism, hPrivateKey, pTemplate,
 	                              ulAttributeCount, pCiphertext, ulCiphertextLen,
 	                              phKey, logging ? &secretLen : NULL);
+
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+	if (ring)
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_DECAPSULATEKEY, alg, rv,
+		                                       (uint64_t)ulCiphertextLen, dur));
 
 	if (logging)
 	{
@@ -587,14 +608,15 @@ CK_RV SoftHSM::C_DecapsulateKey
 		// No probe field: decapsulation takes the ciphertext by value and has no
 		// length-query form to distinguish.
 		OpLog::emit("C_DecapsulateKey",
-		            "sess=%lu mech=%s mech_id=0x%08lx %s ct=%lu secret=%s rv=%s rv_id=0x%08lx",
+		            "sess=%lu mech=%s mech_id=0x%08lx %s ct=%lu secret=%s rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            OpLog::mechName(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
 		            (unsigned long)(pMechanism != NULL_PTR ? pMechanism->mechanism : 0),
 		            keyFields.c_str(),
 		            (unsigned long)ulCiphertextLen,
 		            secret,
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
 	}
 
 	return rv;

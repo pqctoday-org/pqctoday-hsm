@@ -50,38 +50,61 @@ pub const CKA_ID: u32 = 0x0000_0102;
 /// C_GenerateKeyPair` (see that function's own comment in `rust/src/
 /// ffi.rs`'s "Operation-evidence wrappers" block), so this repo's one
 /// evidence consumer needs no changes to recognise it. Caller has already
-/// checked `oplog::enabled()`; this always emits.
-fn emit_generate_key_pair(session: u32, mechanism: u32, result: &Result<(u32, u32), CkRv>) {
+/// checked that at least one of `logging` / `ring` is on; each sink is
+/// then gated individually here. `param_set` is what the caller asked for
+/// (0 when the mechanism has none), so a failed keygen still records the
+/// right algorithm in the ring.
+fn emit_generate_key_pair(
+    session: u32,
+    mechanism: u32,
+    param_set: u32,
+    result: &Result<(u32, u32), CkRv>,
+    dur_us: u64,
+    logging: bool,
+    ring: bool,
+) {
     let (h_pub, h_priv, rv) = match result {
         Ok((p, s)) => (*p, *s, CKR_OK),
         Err(e) => (0, 0, *e),
     };
-    let (key_fields, custody) = if h_priv != 0 {
-        (
-            crate::oplog::key_fields(h_priv, mechanism),
-            crate::oplog::key_custody_fields(h_priv),
-        )
-    } else {
-        (
-            "key=- keytype=- paramset=-".to_string(),
-            "extractable=- sensitive=- never_extractable=- always_sensitive=- local=-".to_string(),
-        )
-    };
-    crate::oplog::emit(
-        "C_GenerateKeyPair",
-        &format!(
-            "sess={} mech={} mech_id=0x{:08x} {} {} hpub={} hpriv={} rv={} rv_id=0x{:08x}",
-            session,
-            crate::oplog::mech_name(mechanism),
-            mechanism,
-            key_fields,
-            custody,
-            h_pub,
-            h_priv,
-            crate::oplog::rv_name(rv),
-            rv
-        ),
-    );
+    if logging {
+        let (key_fields, custody) = if h_priv != 0 {
+            (
+                crate::oplog::key_fields(h_priv, mechanism),
+                crate::oplog::key_custody_fields(h_priv),
+            )
+        } else {
+            (
+                "key=- keytype=- paramset=-".to_string(),
+                "extractable=- sensitive=- never_extractable=- always_sensitive=- local=-".to_string(),
+            )
+        };
+        crate::oplog::emit(
+            "C_GenerateKeyPair",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} {} hpub={} hpriv={} rv={} rv_id=0x{:08x} dur={}",
+                session,
+                crate::oplog::mech_name(mechanism),
+                mechanism,
+                key_fields,
+                custody,
+                h_pub,
+                h_priv,
+                crate::oplog::rv_name(rv),
+                rv,
+                dur_us
+            ),
+        );
+    }
+    if ring {
+        crate::behaviour::emit(crate::behaviour::p11(
+            crate::behaviour::OP_PKCS11_C_GENERATEKEYPAIR,
+            crate::behaviour::alg_from_ckm(mechanism, param_set),
+            rv,
+            0,
+            dur_us,
+        ));
+    }
 }
 
 // ── ML-KEM ──────────────────────────────────────────────────────────────────
@@ -138,12 +161,15 @@ fn ml_kem_keypair_impl(
     extractable: bool,
 ) -> Result<(u32, u32), CkRv> {
     let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
     let result = ml_kem_keypair_inner(_session, parameter_set, seed, cka_id, label, extractable);
-    if logging {
+    if logging || ring {
         // One call site covers all three public entry points (plain,
         // from_seed, from_seed_extractable) — see generate_ml_kem_keypair
         // and its siblings, which all funnel through this function.
-        emit_generate_key_pair(_session, CKM_ML_KEM_KEY_PAIR_GEN, &result);
+        let dur = crate::behaviour::elapsed_us(t0);
+        emit_generate_key_pair(_session, CKM_ML_KEM_KEY_PAIR_GEN, parameter_set, &result, dur, logging, ring);
     }
     result
 }
@@ -279,12 +305,15 @@ fn ml_dsa_keypair_impl(
     extractable: bool,
 ) -> Result<(u32, u32), CkRv> {
     let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
     let result = ml_dsa_keypair_inner(_session, parameter_set, seed, cka_id, label, extractable);
-    if logging {
+    if logging || ring {
         // One call site covers all three public entry points (plain,
         // from_seed, from_seed_extractable) — see generate_ml_dsa_keypair
         // and its siblings, which all funnel through this function.
-        emit_generate_key_pair(_session, CKM_ML_DSA_KEY_PAIR_GEN, &result);
+        let dur = crate::behaviour::elapsed_us(t0);
+        emit_generate_key_pair(_session, CKM_ML_DSA_KEY_PAIR_GEN, parameter_set, &result, dur, logging, ring);
     }
     result
 }
@@ -815,9 +844,12 @@ pub fn generate_ed25519_keypair(
     label: &str,
 ) -> Result<(u32, u32), CkRv> {
     let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
     let result = generate_ed25519_keypair_inner(_session, cka_id, label);
-    if logging {
-        emit_generate_key_pair(_session, CKM_EC_EDWARDS_KEY_PAIR_GEN, &result);
+    if logging || ring {
+        let dur = crate::behaviour::elapsed_us(t0);
+        emit_generate_key_pair(_session, CKM_EC_EDWARDS_KEY_PAIR_GEN, 0, &result, dur, logging, ring);
     }
     result
 }

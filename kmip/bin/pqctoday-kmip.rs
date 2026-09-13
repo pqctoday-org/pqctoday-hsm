@@ -11,7 +11,8 @@
 //!   Phase-4 `Session` wrapper).
 //! - **All planes** — `auditlog::CompositeSink` fanning to: `RingSink` (always),
 //!   `SseSink` (SSE stream; always), plus optional `JsonlSink` (`--audit-log`),
-//!   `SyslogSink` (`--syslog`), and `OtlpSink` (`--otlp-endpoint`).
+//!   `SyslogSink` (`--syslog`), `OtlpSink` (`--otlp-endpoint`), and
+//!   `BehaviourSink` (env `PQC_BEHAVIOUR_RING`, the appliance's behaviour ring).
 //! - **Network** — TLS listener on `--listen <addr>`. Cert from
 //!   `--tls-cert / --tls-key`, or auto-generated self-signed for sandbox.
 
@@ -21,7 +22,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use pqctoday_kmip::auditlog::{AuditSink, CompositeSink, JsonlSink, OtlpSink, RingSink, SseSink, SyslogSink};
+use pqctoday_kmip::auditlog::{
+    AuditSink, BehaviourSink, CompositeSink, JsonlSink, OtlpSink, RingSink, SseSink, SyslogSink,
+};
 use pqctoday_kmip::cert_init::init_certs_if_missing;
 use pqctoday_kmip::ops::{Deps, DepsConfig, RngSeedMode, TenancyMode};
 use pqctoday_kmip::policy::{load_from_str, Engine, PolicyStore};
@@ -340,6 +343,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref url) = cli.otlp_endpoint {
         sink_legs.push(Arc::new(OtlpSink::spawn(url)?));
         tracing::info!("audit log → OTLP/HTTP {url}");
+    }
+    // Environment, not a flag: the same variable the PKCS#11 engines and the
+    // remoting services read, so one unit-file setting covers every producer.
+    if let Some(sink) = BehaviourSink::from_env() {
+        sink_legs.push(Arc::new(sink));
+        tracing::info!("audit log → behaviour ring {}", std::env::var("PQC_BEHAVIOUR_RING").unwrap_or_default());
     }
     let sink: Arc<dyn AuditSink> = Arc::new(CompositeSink::new(sink_legs));
 

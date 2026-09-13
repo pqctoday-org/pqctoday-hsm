@@ -41,6 +41,7 @@
 #include "config.h"
 #include "log.h"
 #include "OpLog.h"
+#include "BehaviourRing.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -478,12 +479,29 @@ CK_RV SoftHSM::C_GenerateKeyPair
 	CK_OBJECT_HANDLE_PTR phPrivateKey
 )
 {
+	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
+	const uint64_t t0  = (logging || ring) ? BehaviourRing::nowMicros() : 0;
+
 	CK_RV rv = generateKeyPairImpl(hSession, pMechanism,
 	                               pPublicKeyTemplate, ulPublicKeyAttributeCount,
 	                               pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
 	                               phPublicKey, phPrivateKey);
 
-	if (OpLog::enabled())
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+
+	if (ring)
+	{
+		// Parameter set read off the private key when there is one; a failed
+		// keygen records the family as ALG_OTHER rather than guessing a size.
+		const bool haveKey = (rv == CKR_OK && phPrivateKey != NULL_PTR && *phPrivateKey != CK_INVALID_HANDLE);
+		const uint8_t alg = (pMechanism != NULL_PTR)
+			? behaviourAlg(hSession, haveKey ? *phPrivateKey : CK_INVALID_HANDLE, pMechanism->mechanism)
+			: BehaviourIds::ALG_NONE;
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_GENERATEKEYPAIR, alg, rv, 0, dur));
+	}
+
+	if (logging)
 	{
 		const CK_MECHANISM_TYPE mech = (pMechanism != NULL_PTR) ? pMechanism->mechanism : 0;
 
@@ -500,13 +518,14 @@ CK_RV SoftHSM::C_GenerateKeyPair
 			: std::string("extractable=- sensitive=- never_extractable=- always_sensitive=- local=-");
 
 		OpLog::emit("C_GenerateKeyPair",
-		            "sess=%lu mech=%s mech_id=0x%08lx %s %s hpub=%lu hpriv=%lu rv=%s rv_id=0x%08lx",
+		            "sess=%lu mech=%s mech_id=0x%08lx %s %s hpub=%lu hpriv=%lu rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            OpLog::mechName(mech), (unsigned long)mech,
 		            keyFields.c_str(), custody.c_str(),
 		            (unsigned long)(phPublicKey  != NULL_PTR ? *phPublicKey  : CK_INVALID_HANDLE),
 		            (unsigned long)(phPrivateKey != NULL_PTR ? *phPrivateKey : CK_INVALID_HANDLE),
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
 	}
 
 	return rv;

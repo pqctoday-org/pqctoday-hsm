@@ -60,15 +60,18 @@ pub fn encapsulate(
     mechanism: u32,
 ) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
     let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
     let key_fields = if logging {
         crate::oplog::key_fields(public_key_handle, mechanism)
     } else {
         String::new()
     };
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
     let result = encapsulate_impl(session, public_key_handle, mechanism);
 
-    if logging {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging || ring {
         // Same record shape as ffi::C_EncapsulateKey (see rust/src/ffi.rs's
         // "Operation-evidence wrappers" block) — this native path is what
         // KMIP and PKCS#11 remoting actually call, never the ffi:: C-ABI.
@@ -76,19 +79,32 @@ pub fn encapsulate(
             Ok((ct, _ss)) => (CKR_OK, ct.len()),
             Err(e) => (*e, 0),
         };
-        crate::oplog::emit(
-            "C_EncapsulateKey",
-            &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} ct={} probe=0 rv={} rv_id=0x{:08x}",
-                session,
-                crate::oplog::mech_name(mechanism),
-                mechanism,
-                key_fields,
-                ct_len,
-                crate::oplog::rv_name(rv),
-                rv
-            ),
-        );
+        if logging {
+            crate::oplog::emit(
+                "C_EncapsulateKey",
+                &format!(
+                    "sess={} mech={} mech_id=0x{:08x} {} ct={} probe=0 rv={} rv_id=0x{:08x} dur={}",
+                    session,
+                    crate::oplog::mech_name(mechanism),
+                    mechanism,
+                    key_fields,
+                    ct_len,
+                    crate::oplog::rv_name(rv),
+                    rv,
+                    dur
+                ),
+            );
+        }
+        if ring {
+            crate::behaviour::emit(crate::behaviour::p11_with_key(
+                crate::behaviour::OP_PKCS11_C_ENCAPSULATEKEY,
+                Some(mechanism),
+                public_key_handle,
+                rv,
+                0,
+                dur,
+            ));
+        }
     }
     result
 }
@@ -271,15 +287,18 @@ pub fn decapsulate(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
     let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
     let key_fields = if logging {
         crate::oplog::key_fields(private_key_handle, mechanism)
     } else {
         String::new()
     };
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
     let result = decapsulate_impl(session, private_key_handle, mechanism, ciphertext);
 
-    if logging {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging || ring {
         // Same record shape as ffi::C_DecapsulateKey — no probe field
         // there either: decapsulation takes the ciphertext by value with
         // no length-query form to distinguish (see rust/src/ffi.rs).
@@ -287,19 +306,32 @@ pub fn decapsulate(
             Ok(_) => CKR_OK,
             Err(e) => *e,
         };
-        crate::oplog::emit(
-            "C_DecapsulateKey",
-            &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} ct={} rv={} rv_id=0x{:08x}",
-                session,
-                crate::oplog::mech_name(mechanism),
-                mechanism,
-                key_fields,
-                ciphertext.len(),
-                crate::oplog::rv_name(rv),
-                rv
-            ),
-        );
+        if logging {
+            crate::oplog::emit(
+                "C_DecapsulateKey",
+                &format!(
+                    "sess={} mech={} mech_id=0x{:08x} {} ct={} rv={} rv_id=0x{:08x} dur={}",
+                    session,
+                    crate::oplog::mech_name(mechanism),
+                    mechanism,
+                    key_fields,
+                    ciphertext.len(),
+                    crate::oplog::rv_name(rv),
+                    rv,
+                    dur
+                ),
+            );
+        }
+        if ring {
+            crate::behaviour::emit(crate::behaviour::p11_with_key(
+                crate::behaviour::OP_PKCS11_C_DECAPSULATEKEY,
+                Some(mechanism),
+                private_key_handle,
+                rv,
+                ciphertext.len() as u64,
+                dur,
+            ));
+        }
     }
     result
 }

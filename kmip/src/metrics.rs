@@ -107,20 +107,40 @@ pub fn record_kmip_request(operation: &'static str, success: bool) {
 
 /// Increment `cacp_tls_handshakes_total{listener}`.
 /// `listener` should be `"kmip"` or `"admin"`.
+///
+/// Also one `SRC_TLS` record in the behaviour ring (its own gate — see
+/// `softhsmrustv3::behaviour`): a handshake is a transaction the monitor
+/// wants to see next to the requests it precedes.
 pub fn record_tls_handshake(listener: &'static str) {
     if let Some(m) = METRICS.get() {
         m.tls_handshakes.with_label_values(&[listener]).inc();
+    }
+    if softhsmrustv3::behaviour::enabled() {
+        use softhsmrustv3::behaviour::{RESULT_OK, Record, SRC_TLS, op_tls};
+        softhsmrustv3::behaviour::emit(Record::new(SRC_TLS, op_tls(listener), 0, RESULT_OK));
     }
 }
 
 /// Increment `cacp_admin_requests_total{method, route, status}`.
 /// `route` must be a stable pattern (e.g. `"/api/v1/policies/{name}"`),
 /// never a raw path — unbounded cardinality breaks Prometheus.
+///
+/// Also one `SRC_KMIP_ADMIN` record in the behaviour ring, op = the route
+/// pattern's id, result from the HTTP status.
 pub fn record_admin_request(method: &str, route: &'static str, status: u16) {
     if let Some(m) = METRICS.get() {
         m.admin_requests
             .with_label_values(&[method, route, &status.to_string()])
             .inc();
+    }
+    if softhsmrustv3::behaviour::enabled() {
+        use softhsmrustv3::behaviour::{Record, SRC_KMIP_ADMIN, op_kmip_admin, result_from_http_status};
+        softhsmrustv3::behaviour::emit(Record::new(
+            SRC_KMIP_ADMIN,
+            op_kmip_admin(route),
+            0,
+            result_from_http_status(status),
+        ));
     }
 }
 
@@ -144,7 +164,10 @@ pub fn record_auth_failure(surface: &'static str, reason: &'static str, peer: Op
 
 // ── Scrape endpoint ───────────────────────────────────────────────────────────
 
-fn render() -> String {
+/// The scrape body (Prometheus text format 0.0.4); empty before `init()`.
+/// Public so an in-process check can compare counters against another
+/// signal without opening a socket (the behaviour-ring end-to-end test does).
+pub fn render() -> String {
     let Some(m) = METRICS.get() else { return String::new() };
     let mut buf = Vec::new();
     TextEncoder::new().encode(&m.registry.gather(), &mut buf).ok();
