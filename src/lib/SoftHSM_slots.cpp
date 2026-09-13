@@ -36,6 +36,7 @@
 #include "config.h"
 #include "log.h"
 #include "OpLog.h"
+#include "BehaviourRing.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -244,6 +245,8 @@ CK_RV SoftHSM::C_Initialize(CK_VOID_PTR pInitArgs)
 	// gated on purpose (see OpLog.h): the shipped binary and the binary evidence
 	// is collected from must be the same binary.
 	OpLog::init();
+	// Same for the behaviour ring (PQC_BEHAVIOUR_RING) -- see BehaviourRing.h.
+	BehaviourRing::init();
 
 	// Configure object store storage backend used by all tokens.
 	if (!ObjectStoreToken::selectBackend(Configuration::i()->getString("objectstore.backend", DEFAULT_OBJECTSTORE_BACKEND)))
@@ -298,6 +301,7 @@ CK_RV SoftHSM::C_Finalize(CK_VOID_PTR pReserved)
 	// Close the evidence sink before the teardown branch below, so a run that
 	// ends via process exit still leaves a properly closed, complete log.
 	OpLog::shutdown();
+	BehaviourRing::shutdown();
 
 	// During process teardown (OpenSSL's atexit cleanup unloading the provider),
 	// OpenSSL's globals are already being freed. The cleanup below reaches back

@@ -124,7 +124,18 @@ pub fn enabled() -> bool {
 /// Record one authentication-attempt failure. `surface` and `reason` should
 /// be short, fixed tokens (see module doc); `peer`, when known, should be
 /// `ip:port`.
+///
+/// Also feeds the behaviour ring (`crate::behaviour`, its own gate): one
+/// `SRC_AUTH` record whose `op` is the surface and whose `client` is the
+/// peer's bucket — the peer address itself never enters the ring.
 pub fn emit(surface: &str, reason: &str, peer: Option<&str>) {
+    if crate::behaviour::enabled() {
+        use crate::behaviour::{RESULT_AUTH_FAIL, Record, SRC_AUTH, client_bucket, op_auth};
+        crate::behaviour::emit(
+            Record::new(SRC_AUTH, op_auth(surface), 0, RESULT_AUTH_FAIL)
+                .client(client_bucket(peer.unwrap_or(""))),
+        );
+    }
     if !enabled() {
         return;
     }
