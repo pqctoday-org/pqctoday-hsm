@@ -15,6 +15,7 @@ rust-version = "1.70"
 
 
 [dependencies]
+pqc-phase-profile = { path = "../pqc-phase-profile", optional = true }
 zeroize = { version = "1.6.0", default-features = false, features = ["zeroize_derive"] }  # For MSRV 1.70 (dated)
 rand_core = { version = "0.6.4", default-features = false }
 sha3 = { version = "0.10.2", default-features = false }  # For MSRV 1.70 (dated)
@@ -33,6 +34,7 @@ default = ["default-rng", "slh_dsa_sha2_128s", "slh_dsa_shake_128s", "slh_dsa_sh
     "slh_dsa_sha2_192s", "slh_dsa_shake_192s", "slh_dsa_sha2_192f", "slh_dsa_shake_192f",
     "slh_dsa_sha2_256s", "slh_dsa_shake_256s", "slh_dsa_sha2_256f", "slh_dsa_shake_256f"]
 default-rng = ["rand_core/getrandom"]
+phase-profile = ["dep:pqc-phase-profile"]
 slh_dsa_sha2_128s = []
 slh_dsa_shake_128s = []
 slh_dsa_sha2_128f = []

@@ -18,6 +18,7 @@ use crate::{D, Q};
 pub(crate) fn pk_encode<const K: usize, const PK_LEN: usize>(
     rho: &[u8; 32], t1: &[R; K],
 ) -> [u8; PK_LEN] {
+    profile_phase!(Encoding);
     const BLQD: usize = bit_length(Q - 1) - D as usize;
     debug_assert!(t1.iter().all(|t| is_in_range(t, 0, (1 << BLQD) - 1)), "Alg 22: t1 out of range");
     debug_assert_eq!(PK_LEN, 32 + 32 * K * BLQD, "Alg 22: bad pk/config size");
@@ -55,6 +56,7 @@ pub(crate) fn pk_encode<const K: usize, const PK_LEN: usize>(
 pub(crate) fn pk_decode<const K: usize, const PK_LEN: usize>(
     pk: &[u8; PK_LEN],
 ) -> Result<(&[u8; 32], [R; K]), &'static str> {
+    profile_phase!(Encoding);
     const BLQD: usize = bit_length(Q - 1) - D as usize;
     debug_assert_eq!(pk.len(), 32 + 32 * K * BLQD, "Alg 23: incorrect pk length");
     debug_assert_eq!(PK_LEN, 32 + 32 * K * BLQD, "Alg 23: bad pk/config size");
@@ -94,6 +96,7 @@ pub(crate) fn pk_decode<const K: usize, const PK_LEN: usize>(
 pub(crate) fn sk_encode<const K: usize, const L: usize, const SK_LEN: usize>(
     eta: i32, rho: &[u8; 32], k: &[u8; 32], tr: &[u8; 64], s_1: &[R; L], s_2: &[R; K], t_0: &[R; K],
 ) -> [u8; SK_LEN] {
+    profile_phase!(Encoding);
     let top = 1 << (D - 1);
     debug_assert!((eta == 2) || (eta == 4), "Alg 24: incorrect eta");
     debug_assert!(s_1.iter().all(|x| is_in_range(x, eta, eta)), "Alg 24: s1 out of range");
@@ -168,6 +171,7 @@ pub(crate) fn sk_encode<const K: usize, const L: usize, const SK_LEN: usize>(
 pub(crate) fn sk_decode<const K: usize, const L: usize, const SK_LEN: usize>(
     eta: i32, sk: &[u8; SK_LEN],
 ) -> Result<(&[u8; 32], &[u8; 32], &[u8; 64], [R; L], [R; K], [R; K]), &'static str> {
+    profile_phase!(Encoding);
     const TOP: i32 = 1 << (D - 1);
     debug_assert!((eta == 2) || (eta == 4), "Alg 25: incorrect eta");
     debug_assert_eq!(
@@ -244,6 +248,7 @@ pub(crate) fn sig_encode<
 >(
     gamma1: i32, omega: i32, c_tilde: &[u8; LAMBDA_DIV4], z: &[R; L], h: &[R; K],
 ) -> [u8; SIG_LEN] {
+    profile_phase!(Encoding);
     debug_assert!(z.iter().all(|x| is_in_range(x, gamma1 - 1, gamma1)), "Alg 26: z out of range");
     debug_assert!(h.iter().all(|x| is_in_range(x, 0, 1)), "Alg 26: h out of range");
     debug_assert_eq!(
@@ -297,6 +302,7 @@ pub(crate) fn sig_decode<
 >(
     gamma1: i32, omega: i32, sigma: &[u8; SIG_LEN],
 ) -> Result<([u8; LAMBDA_DIV4], [R; L], Option<[R; K]>), &'static str> {
+    profile_phase!(Encoding);
     debug_assert_eq!(
         SIG_LEN,
         LAMBDA_DIV4 + L * 32 * (1 + bit_length(gamma1 - 1)) + omega.unsigned_abs() as usize + K,
@@ -336,6 +342,7 @@ pub(crate) fn sig_decode<
 /// **Input**: `w1 ∈ R^k` with coefficients in `[0, (q − 1)/(2γ_2) − 1]`.
 /// **Output**: A bit string representation, `w1_tilde ∈ {0,1}^{32·k·bitlen((q-1)/(2γ2)−1)}`.
 pub(crate) fn w1_encode<const K: usize>(gamma2: i32, w1: &[R; K], w1_tilde: &mut [u8]) {
+    profile_phase!(Encoding);
     let qm1_d_2g_m1 = (Q - 1) / (2 * gamma2) - 1;
     debug_assert_eq!(
         w1_tilde.len(),

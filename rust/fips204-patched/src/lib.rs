@@ -16,6 +16,17 @@
 #[cfg(feature = "hw-accel")]
 extern crate std;
 
+#[cfg(feature = "phase-profile")]
+macro_rules! profile_phase {
+    ($phase:ident) => {
+        let _pqc_phase_guard = pqc_phase_profile::span(pqc_phase_profile::Phase::$phase);
+    };
+}
+#[cfg(not(feature = "phase-profile"))]
+macro_rules! profile_phase {
+    ($phase:ident) => {};
+}
+
 
 // TODO Roadmap
 //  1. Always more testing...

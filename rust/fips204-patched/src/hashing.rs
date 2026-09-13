@@ -11,6 +11,7 @@ use sha3::{Sha3_224, Sha3_256, Sha3_384, Sha3_512, Shake128, Shake256};
 /// Takes a reference to a list of byte-slice references and runs them through Shake256.
 /// Returns a xof reader for extracting extendable output.
 pub(crate) fn h256_xof(v: &[&[u8]]) -> impl XofReader {
+    profile_phase!(Hashing);
     let mut hasher = Shake256::default();
     v.iter().for_each(|b| hasher.update(b));
     hasher.finalize_xof()
@@ -70,6 +71,7 @@ mod hw_accel_tests {
 /// Takes a reference to a list of byte-slice references and runs them through Shake128.
 /// Returns a xof reader for extracting extendable output.
 pub(crate) fn g128_xof(v: &[&[u8]]) -> impl XofReader {
+    profile_phase!(Hashing);
     let mut hasher = Shake128::default();
     v.iter().for_each(|b| hasher.update(b));
     hasher.finalize_xof()
@@ -89,6 +91,7 @@ pub(crate) fn g128_xof(v: &[&[u8]]) -> impl XofReader {
 /// **Input**: A seed `ρ ∈ B^{λ/4}` <br>
 /// **Output**: A polynomial `c` in `Rq`.
 pub(crate) fn sample_in_ball<const CTEST: bool>(tau: i32, rho: &[u8]) -> R {
+    profile_phase!(Sampling);
     let tau = usize::try_from(tau).expect("Alg 29: try_from fail");
 
     // 1: c ← 0
@@ -156,6 +159,7 @@ pub(crate) fn sample_in_ball<const CTEST: bool>(tau: i32, rho: &[u8]) -> R {
 /// **Input**: A seed `ρ ∈ B^{34}`.<br>
 /// **Output**: An element `a_hat ∈ T_q`.
 pub(crate) fn rej_ntt_poly<const CTEST: bool>(rhos: &[&[u8]]) -> T {
+    profile_phase!(Sampling);
     debug_assert_eq!(rhos.iter().map(|&i| i.len()).sum::<usize>(), 272 / 8, "Alg 30: bad rho size");
     let mut a_hat = T0;
 
@@ -286,6 +290,7 @@ pub(crate) fn rej_bounded_poly<const CTEST: bool>(eta: i32, rhos: &[&[u8]]) -> R
 pub(crate) fn expand_a<const CTEST: bool, const K: usize, const L: usize>(
     rho: &[u8; 32],
 ) -> [[T; L]; K] {
+    profile_phase!(Sampling);
     #[cfg(feature = "hw-accel")]
     if !CTEST && K == 6 && L == 5 {
         let mut inputs = std::vec::Vec::with_capacity(K * L);
@@ -343,6 +348,7 @@ pub(crate) fn expand_a<const CTEST: bool, const K: usize, const L: usize>(
 pub(crate) fn expand_s<const CTEST: bool, const K: usize, const L: usize>(
     eta: i32, rho: &[u8; 64],
 ) -> ([R; L], [R; K]) {
+    profile_phase!(Sampling);
     //
     // 1: for r from 0 to ℓ − 1 do
     // 2: s1[r] ← RejBoundedPoly(ρ || IntegerToBits(r, 16))
@@ -369,6 +375,7 @@ pub(crate) fn expand_s<const CTEST: bool, const K: usize, const L: usize>(
 /// **Input**: A bit string `ρ ∈ B^{64}` and a non-negative integer `µ`. <br>
 /// **Output**: Vector `y ∈ R^ℓ`.
 pub(crate) fn expand_mask<const L: usize>(gamma1: i32, rho: &[u8; 64], mu: u16) -> [R; L] {
+    profile_phase!(Sampling);
     let mut y = [R0; L];
     let mut v = [0u8; 32 * 20]; // leaving a few bytes on the table
 

@@ -88,6 +88,10 @@ version = "1.6.0"
 features = ["zeroize_derive"]
 default-features = false
 
+[dependencies.pqc-phase-profile]
+path = "../pqc-phase-profile"
+optional = true
+
 [dev-dependencies.criterion]
 version = "0.4.0"
 
@@ -117,6 +121,7 @@ default = [
 default-rng = ["rand_core/getrandom"]
 dudect = []
 hw-accel = []
+phase-profile = ["dep:pqc-phase-profile"]
 ml-dsa-44 = []
 ml-dsa-65 = []
 ml-dsa-87 = []

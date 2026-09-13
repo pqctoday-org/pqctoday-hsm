@@ -13,6 +13,16 @@ use crate::{D, Q};
 use rand_core::CryptoRngCore;
 use sha3::digest::XofReader;
 
+#[cfg(feature = "phase-profile")]
+fn mldsa_name(k: usize) -> &'static str {
+    match k {
+        4 => "ML-DSA-44",
+        6 => "ML-DSA-65",
+        8 => "ML-DSA-87",
+        _ => "ML-DSA",
+    }
+}
+
 
 /// # Algorithm: 1 `ML-DSA.KeyGen()` on page 17.
 /// Generates a public-private key pair.
@@ -63,6 +73,8 @@ pub(crate) fn key_gen_internal<
 >(
     eta: i32, xi: &[u8; 32],
 ) -> (PublicKey<K, L>, PrivateKey<K, L>) {
+    #[cfg(feature = "phase-profile")]
+    let _pqc_operation = pqc_phase_profile::operation(mldsa_name(K), "keygen");
     //
     // 1: (rho, rho′, 𝐾) ∈ 𝔹^{32} × 𝔹^{64} × 𝔹^{32} ← H(𝜉||IntegerToBytes(𝑘,1)||IntegerToBytes(ℓ,1),128)
     let mut h2 = h256_xof(&[xi, &[K.to_le_bytes()[0]], &[L.to_le_bytes()[0]]]);
@@ -163,6 +175,8 @@ pub(crate) fn sign_internal<
     message: &[u8], ctx: &[u8], oid: &[u8], phm: &[u8], rnd: [u8; 32], nist: bool,
     ext_mu: Option<[u8; 64]>,
 ) -> [u8; SIG_LEN] {
+    #[cfg(feature = "phase-profile")]
+    let _pqc_operation = pqc_phase_profile::operation(mldsa_name(K), "sign");
     //
     // 1: (ρ, K, tr, s_1, s_2, t_0) ← skDecode(sk)
     // --> calculated in `expand_private()` near the bottom of this file
@@ -368,6 +382,8 @@ pub(crate) fn verify_internal<
     sig: &[u8; SIG_LEN], ctx: &[u8], oid: &[u8], phm: &[u8], nist: bool,
     ext_mu: Option<[u8; 64]>,
 ) -> bool {
+    #[cfg(feature = "phase-profile")]
+    let _pqc_operation = pqc_phase_profile::operation(mldsa_name(K), "verify");
     //
     // 1: (ro, t_1) ← pkDecode(pk)  pull out pre-computed elements
     let PublicKey { rho, tr, t1_d2_hat_mont } = epk;

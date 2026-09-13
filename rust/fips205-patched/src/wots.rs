@@ -16,6 +16,7 @@ use crate::types::{Adrs, WotsPk, WotsSig, WOTS_PK, WOTS_PRF};
 pub(crate) fn chain<const K: usize, const LEN: usize, const M: usize, const N: usize>(
     hashers: &Hashers<K, LEN, M, N>, cap_x: [u8; N], i: u32, s: u32, pk_seed: &[u8], adrs: &Adrs,
 ) -> [u8; N] {
+    profile_phase!(Tree);
     debug_assert!(i + s < u32::MAX);
     let mut adrs = adrs.clone();
 
@@ -55,6 +56,7 @@ pub(crate) fn chain<const K: usize, const LEN: usize, const M: usize, const N: u
 pub(crate) fn wots_pkgen<const K: usize, const LEN: usize, const M: usize, const N: usize>(
     hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], pk_seed: &[u8], adrs: &Adrs,
 ) -> WotsPk<N> {
+    profile_phase!(Tree);
     let len32 = u32::try_from(LEN).unwrap();
     let mut adrs = adrs.clone();
     let mut tmp = [[0u8; N]; LEN];
@@ -112,6 +114,7 @@ pub(crate) fn wots_pkgen<const K: usize, const LEN: usize, const M: usize, const
 pub(crate) fn wots_sign<const K: usize, const LEN: usize, const M: usize, const N: usize>(
     hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], pk_seed: &[u8], adrs: &Adrs,
 ) -> WotsSig<LEN, N> {
+    profile_phase!(Tree);
     let n32 = u32::try_from(N).unwrap();
     let mut adrs = adrs.clone();
     let mut sig: WotsSig<LEN, N> = WotsSig { data: [[0u8; N]; LEN] };
@@ -183,6 +186,7 @@ pub(crate) fn wots_sign<const K: usize, const LEN: usize, const M: usize, const 
 pub(crate) fn wots_pk_from_sig<const K: usize, const LEN: usize, const M: usize, const N: usize>(
     hashers: &Hashers<K, LEN, M, N>, sig: &WotsSig<LEN, N>, m: &[u8], pk_seed: &[u8], adrs: &Adrs,
 ) -> WotsPk<N> {
+    profile_phase!(Tree);
     let n32 = u32::try_from(N).unwrap();
     let mut adrs = adrs.clone();
     let mut tmp = [[0u8; N]; LEN];
