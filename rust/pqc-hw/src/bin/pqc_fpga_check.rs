@@ -3,6 +3,10 @@ use pqc_hw::device::{Request, execute_batch};
 #[cfg(feature = "diagnostic-timing")]
 use pqc_hw::device::{StageTimes, execute_batch_timed};
 use pqc_hw::keccak::Mode;
+use pqc_hw::mldsa_device::{
+    MATRIX_COEFFICIENTS, MLDSA_N, MLDSA_Q, MLDSA65_K, MLDSA65_L, OUTPUT_COEFFICIENTS,
+    VECTOR_COEFFICIENTS, execute_mldsa65_matvec,
+};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::{Digest, Sha3_256, Sha3_512, Shake128, Shake256};
 use std::env;
@@ -15,6 +19,10 @@ use std::time::{Duration, Instant};
 const TIMEOUT: Duration = Duration::from_secs(2);
 const ACVP_MAGIC: &[u8; 8] = b"PQCAVP1\n";
 const DEFAULT_ACVP: &str = "/usr/share/pqc-fpga/acvp-byte-aft.bin";
+const MLDSA_VECTOR_DIGEST: [u8; 32] = [
+    0xc8, 0xb7, 0x48, 0xd9, 0x46, 0xea, 0x09, 0xb8, 0xf5, 0x88, 0x07, 0x15, 0x41, 0xeb, 0x2f, 0x28,
+    0x68, 0x82, 0xf7, 0xc7, 0x7a, 0x58, 0x66, 0x34, 0x04, 0x26, 0xf3, 0x82, 0xb4, 0x29, 0xa2, 0xa1,
+];
 
 #[derive(Clone, Copy)]
 struct Workload {
@@ -50,6 +58,170 @@ fn patterned_input(length: usize, salt: usize) -> Vec<u8> {
     (0..length)
         .map(|index| ((index * 131 + salt * 17 + 0x5a) & 0xff) as u8)
         .collect()
+}
+
+fn bit_reverse_8(value: usize) -> usize {
+    (value as u8).reverse_bits() as usize
+}
+
+fn modular_power(mut base: i64, mut exponent: usize) -> i32 {
+    let modulus = i64::from(MLDSA_Q);
+    let mut result = 1_i64;
+    while exponent != 0 {
+        if exponent & 1 != 0 {
+            result = result * base % modulus;
+        }
+        base = base * base % modulus;
+        exponent >>= 1;
+    }
+    result as i32
+}
+
+fn mldsa_forward_ntt(poly: &[i32]) -> Vec<i32> {
+    let modulus = i64::from(MLDSA_Q);
+    let mut output: Vec<i64> = poly
+        .iter()
+        .map(|&coefficient| i64::from(coefficient).rem_euclid(modulus))
+        .collect();
+    let mut root_index = 0;
+    for length in [128, 64, 32, 16, 8, 4, 2, 1] {
+        for start in (0..MLDSA_N).step_by(2 * length) {
+            root_index += 1;
+            let root = i64::from(modular_power(1753, bit_reverse_8(root_index)));
+            for index in start..start + length {
+                let term = root * output[index + length] % modulus;
+                let first = output[index];
+                output[index] = (first + term) % modulus;
+                output[index + length] = (first - term).rem_euclid(modulus);
+            }
+        }
+    }
+    output.into_iter().map(|value| value as i32).collect()
+}
+
+fn mldsa_inverse_ntt(poly: &[i64]) -> Vec<i32> {
+    let modulus = i64::from(MLDSA_Q);
+    let mut output: Vec<i64> = poly
+        .iter()
+        .map(|&coefficient| coefficient.rem_euclid(modulus))
+        .collect();
+    let mut root_index = 256;
+    for length in [1, 2, 4, 8, 16, 32, 64, 128] {
+        for start in (0..MLDSA_N).step_by(2 * length) {
+            root_index -= 1;
+            let root = -i64::from(modular_power(1753, bit_reverse_8(root_index)));
+            for index in start..start + length {
+                let first = output[index];
+                let second = output[index + length];
+                output[index] = (first + second) % modulus;
+                output[index + length] = (root * (first - second)).rem_euclid(modulus);
+            }
+        }
+    }
+    output
+        .into_iter()
+        .map(|value| (8_347_681_i64 * value % modulus) as i32)
+        .collect()
+}
+
+fn mldsa65_inputs() -> (Vec<i32>, Vec<i32>) {
+    const BOUND: u32 = 1 << 17;
+    let mut state = 0x4e54_5431_u32;
+    let mut word = || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        state
+    };
+    let matrix = (0..MATRIX_COEFFICIENTS)
+        .map(|_| (word() % MLDSA_Q as u32) as i32)
+        .collect();
+    let vector = (0..VECTOR_COEFFICIENTS)
+        .map(|_| (word() % (2 * BOUND + 1)) as i32 - BOUND as i32)
+        .collect();
+    (matrix, vector)
+}
+
+fn software_mldsa65_matvec(matrix: &[i32], vector: &[i32]) -> Vec<i32> {
+    let modulus = i64::from(MLDSA_Q);
+    let transformed: Vec<_> = vector
+        .chunks_exact(MLDSA_N)
+        .map(mldsa_forward_ntt)
+        .collect();
+    let mut output = Vec::with_capacity(OUTPUT_COEFFICIENTS);
+    for row in 0..MLDSA65_K {
+        let mut accumulated = vec![0_i64; MLDSA_N];
+        for column in 0..MLDSA65_L {
+            let matrix_poly = &matrix
+                [(row * MLDSA65_L + column) * MLDSA_N..(row * MLDSA65_L + column + 1) * MLDSA_N];
+            for coefficient in 0..MLDSA_N {
+                accumulated[coefficient] = (accumulated[coefficient]
+                    + i64::from(matrix_poly[coefficient])
+                        * i64::from(transformed[column][coefficient]))
+                    % modulus;
+            }
+        }
+        output.extend(mldsa_inverse_ntt(&accumulated));
+    }
+    output
+}
+
+fn mldsa_output_digest(output: &[i32]) -> [u8; 32] {
+    let mut hasher = Sha3_256::new();
+    for coefficient in output {
+        Digest::update(&mut hasher, coefficient.to_le_bytes());
+    }
+    hasher.finalize().into()
+}
+
+fn benchmark_mldsa65_matvec(iterations: usize) -> io::Result<()> {
+    let (matrix, vector) = mldsa65_inputs();
+    let expected = software_mldsa65_matvec(&matrix, &vector);
+    if mldsa_output_digest(&expected) != MLDSA_VECTOR_DIGEST {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ML-DSA fixture digest mismatch",
+        ));
+    }
+    if execute_mldsa65_matvec(&matrix, &vector, TIMEOUT)? != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ML-DSA FPGA warm-up mismatch",
+        ));
+    }
+    let mut hardware = Duration::ZERO;
+    let mut software = Duration::ZERO;
+    for iteration in 0..iterations {
+        let started = Instant::now();
+        let actual = execute_mldsa65_matvec(&matrix, &vector, TIMEOUT)?;
+        let hardware_sample = started.elapsed();
+        if actual != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "ML-DSA FPGA differential mismatch",
+            ));
+        }
+        let started = Instant::now();
+        std::hint::black_box(software_mldsa65_matvec(
+            std::hint::black_box(&matrix),
+            std::hint::black_box(&vector),
+        ));
+        let software_sample = started.elapsed();
+        hardware += hardware_sample;
+        software += software_sample;
+        println!(
+            "MLDSA_MATVEC_SAMPLE\t{iteration}\t{}\t{}",
+            hardware_sample.as_nanos(),
+            software_sample.as_nanos()
+        );
+    }
+    println!(
+        "MLDSA_MATVEC_RESULT\t{iterations}\t{}\t{}\t{:.2}\t{:.2}\t{:.4}",
+        hardware.as_micros(),
+        software.as_micros(),
+        iterations as f64 / hardware.as_secs_f64(),
+        iterations as f64 / software.as_secs_f64(),
+        software.as_secs_f64() / hardware.as_secs_f64()
+    );
+    Ok(())
 }
 
 fn requests<'a>(workload: Workload, inputs: &'a [Vec<u8>]) -> Vec<Request<'a>> {
@@ -355,6 +527,18 @@ fn run_stages(iterations: usize) -> io::Result<()> {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let mut mldsa_args = env::args().skip(1);
+    if mldsa_args.next().as_deref() == Some("--mldsa-matvec") {
+        let iterations: usize = mldsa_args
+            .next()
+            .unwrap_or_else(|| "20".to_owned())
+            .parse()?;
+        if iterations == 0 || mldsa_args.next().is_some() {
+            return Err("usage: pqc-fpga-check --mldsa-matvec [positive-iterations]".into());
+        }
+        println!("PQC_FPGA_CHECK\tmldsa65-matvec-v1");
+        return Ok(benchmark_mldsa65_matvec(iterations)?);
+    }
     #[cfg(feature = "diagnostic-timing")]
     let mut args = env::args().skip(1);
     #[cfg(feature = "diagnostic-timing")]
@@ -462,5 +646,14 @@ mod tests {
     #[test]
     fn patterned_inputs_change_with_salt() {
         assert_ne!(patterned_input(34, 0), patterned_input(34, 1));
+    }
+
+    #[test]
+    fn mldsa_reference_matches_committed_vector_digest() {
+        let (matrix, vector) = mldsa65_inputs();
+        assert_eq!(
+            mldsa_output_digest(&software_mldsa65_matvec(&matrix, &vector)),
+            MLDSA_VECTOR_DIGEST
+        );
     }
 }
