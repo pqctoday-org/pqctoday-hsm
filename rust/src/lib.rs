@@ -36,6 +36,8 @@ pub mod constants;
 pub mod ck_param;
 pub mod crypto;
 pub mod ffi;
+#[cfg(all(feature = "hw-accel", target_os = "linux", target_arch = "aarch64"))]
+pub mod hw_accel;
 pub mod native;
 /// PKCS#11 operation-evidence log — one machine-parseable record per completed
 /// cryptographic operation, gated at runtime by `SOFTHSM3_OP_LOG`. Emits the

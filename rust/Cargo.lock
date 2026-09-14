@@ -1107,6 +1107,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 name = "fips204"
 version = "0.4.6"
 dependencies = [
+ "pqc-phase-profile",
  "rand_core 0.6.4",
  "sha2",
  "sha3 0.10.8",
@@ -1117,6 +1118,7 @@ dependencies = [
 name = "fips205"
 version = "0.4.1"
 dependencies = [
+ "pqc-phase-profile",
  "rand_core 0.6.4",
  "sha2",
  "sha3 0.10.8",
@@ -1977,11 +1979,10 @@ dependencies = [
 [[package]]
 name = "ml-kem"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8de49b3df74c35498c0232031bb7e85f9389f913e2796169c8ab47a53993a18f"
 dependencies = [
  "hybrid-array 0.2.3",
  "kem",
+ "pqc-phase-profile",
  "rand_core 0.6.4",
  "sha3 0.10.8",
 ]
@@ -2435,6 +2436,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "pqc-hw"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "sha3 0.10.8",
+]
+
+[[package]]
+name = "pqc-phase-profile"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -3325,6 +3341,8 @@ dependencies = [
  "p521",
  "pbkdf2",
  "pkcs8 0.11.0",
+ "pqc-hw",
+ "pqc-phase-profile",
  "rand 0.8.6",
  "rand_chacha",
  "ripemd",

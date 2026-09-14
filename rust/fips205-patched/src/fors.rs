@@ -12,6 +12,7 @@ use crate::types::{Adrs, Auth, ForsPk, ForsSig, FORS_PRF, FORS_ROOTS};
 pub(crate) fn fors_sk_gen<const K: usize, const LEN: usize, const M: usize, const N: usize>(
     hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], pk_seed: &[u8], adrs: &Adrs, idx: u32,
 ) -> [u8; N] {
+    profile_phase!(Tree);
     // 1: skADRS ← ADRS    ▷ Copy address to create key generation address
     let mut sk_adrs = adrs.clone();
 
@@ -45,6 +46,7 @@ pub(crate) fn fors_node<
 >(
     hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], i: u32, z: u32, pk_seed: &[u8], adrs: &Adrs,
 ) -> Result<[u8; N], &'static str> {
+    profile_phase!(Tree);
     let mut adrs = adrs.clone();
 
     // Note this bounds check was only specified in the draft specification
@@ -108,6 +110,7 @@ pub(crate) fn fors_sign<
 >(
     hashers: &Hashers<K, LEN, M, N>, md: &[u8], sk_seed: &[u8], adrs: &Adrs, pk_seed: &[u8],
 ) -> Result<ForsSig<A, K, N>, &'static str> {
+    profile_phase!(Tree);
     let (a32, k32) = (u32::try_from(A).unwrap(), u32::try_from(K).unwrap());
 
     // 1: SIG_FORS = NULL    ▷ Initialize SIG_FORS as a zero-length byte string
@@ -179,6 +182,7 @@ pub(crate) fn fors_pk_from_sig<
     hashers: &Hashers<K, LEN, M, N>, sig_fors: &ForsSig<A, K, N>, md: &[u8], pk_seed: &[u8],
     adrs: &Adrs,
 ) -> ForsPk<N> {
+    profile_phase!(Tree);
     let (a32, k32) = (u32::try_from(A).unwrap(), u32::try_from(K).unwrap());
     let mut adrs = adrs.clone();
 

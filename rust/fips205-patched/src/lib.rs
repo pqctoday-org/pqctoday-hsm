@@ -13,6 +13,17 @@
 //
 #![doc = include_str!("../README.md")]
 
+#[cfg(feature = "phase-profile")]
+macro_rules! profile_phase {
+    ($phase:ident) => {
+        let _pqc_phase_guard = pqc_phase_profile::span(pqc_phase_profile::Phase::$phase);
+    };
+}
+#[cfg(not(feature = "phase-profile"))]
+macro_rules! profile_phase {
+    ($phase:ident) => {};
+}
+
 // Implements FIPS 205 Stateless Hash-Based Digital Signature Standard.
 // See <https://csrc.nist.gov/pubs/fips/205/final>
 //

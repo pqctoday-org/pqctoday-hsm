@@ -18,7 +18,8 @@ description = "A native Rust WebAssembly clone of SoftHSMv3"
 # hard way: bench-harness's first build failed on exactly those symbols
 # before this workspace declaration was added.
 [workspace]
-members = ["bench-harness"]
+members = ["bench-harness", "pqc-hw", "pqc-phase-profile"]
+exclude = ["ml-kem-patched"]
 
 [lib]
 # `staticlib` added for the wasm32-unknown-emscripten target: emcc links the
@@ -56,6 +57,13 @@ acvp = []
 # entry, so it never reaches the shipped `pqctoday-kmip` binary or any
 # other consumer of this crate.
 test-support = []
+hw-accel = ["dep:pqc-hw", "fips204/hw-accel"]
+phase-profile = [
+    "dep:pqc-phase-profile",
+    "fips204/phase-profile",
+    "fips205/phase-profile",
+    "ml-kem/phase-profile",
+]
 
 [dependencies]
 wasm-bindgen = "0.2.117"
@@ -137,6 +145,7 @@ hkdf = "0.12"
 # Algorithm 16 `ML-KEM.KeyGen_internal(d, z)` — used by the T7 CKA_SEED
 # deterministic-keygen path (PKCS#11 v3.2 §6.68.2).
 ml-kem = { version = "0.2.3", features = ["deterministic"] }
+pqc-phase-profile = { path = "pqc-phase-profile", optional = true }
 p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 p384 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 p521 = { version = "0.13", features = ["ecdsa", "ecdh"] }
@@ -215,6 +224,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # transitively, so no new crate enters the graph; same wasm gate as rusqlite.
 libc = "0.2"
 
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
+pqc-hw = { path = "pqc-hw", optional = true }
+
 [dev-dependencies]
 # NIST ACVP keyGen KAT parsing (T7 seed-deterministic keygen tests reads
 # the internalProjection.json vector files shipped with the patched forks).
@@ -227,6 +239,7 @@ oqs = { version = "0.10", default-features = false, features = ["kems", "vendore
 [patch.crates-io]
 fips204 = { path = "fips204-patched" }
 fips205 = { path = "fips205-patched" }
+ml-kem = { path = "ml-kem-patched" }
 # SP 800-208 SHAKE-256 type-ID support: upstream 0.1.1 serializes SHA-256
 # type codes for all hash families (gap-analysis hbs-lms finding; mirrors
 # the C++ engine's patched hash-sigs submodule).
@@ -239,4 +252,3 @@ lto = true
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
-
