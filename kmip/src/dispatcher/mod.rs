@@ -445,6 +445,33 @@ pub const HANDLED_OPERATIONS: &[crate::kmip30::Operation] = {
     ]
 };
 
+/// P0 (`imx95-npu-implementation-plan-09132026.md`) — RAII guard around one
+/// batch item's `correlation_id`, so its `deps.request_started` entry is
+/// always cleaned up exactly once no matter which of `dispatch_one`'s
+/// several return points fires. `Deps::take_request_latency_ms` (called
+/// from every `KmipResponseSent` emission site) removes the entry on the
+/// normal path; this guard's `Drop` is the safety net for every other exit
+/// (Poll's early return, an ineligible-for-async failure, ID-placeholder
+/// substitution failure) — `Deps::clear_request_start` is a no-op if the
+/// entry is already gone, so the two never conflict.
+struct RequestTimer<'a> {
+    deps: &'a Deps,
+    correlation_id: String,
+}
+
+impl<'a> RequestTimer<'a> {
+    fn new(deps: &'a Deps, correlation_id: String) -> Self {
+        deps.record_request_start(correlation_id.clone());
+        Self { deps, correlation_id }
+    }
+}
+
+impl Drop for RequestTimer<'_> {
+    fn drop(&mut self) {
+        self.deps.clear_request_start(&self.correlation_id);
+    }
+}
+
 fn dispatch_one(
     deps: &Deps,
     item: RequestBatchItem,
@@ -453,6 +480,11 @@ fn dispatch_one(
     asynchronous_indicator: Option<crate::kmip30::AsynchronousIndicator>,
 ) -> ResponseBatchItem {
     let correlation_id = Uuid::new_v4().to_string();
+    // P0 — started here, at the earliest point `correlation_id` exists, so
+    // every `KmipResponseSent` this item's handler eventually emits (via
+    // `helpers::fail_err`/`emit_success`, or a per-op-file equivalent) can
+    // report a real elapsed time instead of the old `latency_ms: 0`.
+    let _request_timer = RequestTimer::new(deps, correlation_id.clone());
     let op = item.operation;
     let payload = match substitute_id_placeholder(item.payload, state) {
         Ok(p) => p,
@@ -1210,6 +1242,65 @@ mod tests {
         assert_eq!(resp.batch_items.len(), 1);
         assert_eq!(resp.batch_items[0].result_status, ResultStatus::Success);
         assert!(matches!(resp.batch_items[0].payload, Some(ResponsePayload::Query(_))));
+    }
+
+    // ── P0 (imx95-npu-implementation-plan-09132026.md) — KMIP latency ──────
+
+    #[test]
+    fn take_request_latency_ms_measures_real_elapsed_time() {
+        // The timer mechanism `RequestTimer`/`take_request_latency_ms` are
+        // built on, exercised directly (no dispatch involved) so the
+        // assertion is about elapsed wall-clock time, not incidentally
+        // about how fast Query happens to run.
+        let d = deps();
+        d.record_request_start("cid-1".to_string());
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let latency = d.take_request_latency_ms("cid-1");
+        assert!(latency >= 10, "expected at least ~15ms elapsed, got {latency}ms");
+        // Consumed: a second read for the same id finds nothing and
+        // returns 0, proving the entry was actually removed (no
+        // double-counting a slow client's next request).
+        assert_eq!(d.take_request_latency_ms("cid-1"), 0);
+    }
+
+    #[test]
+    fn dispatch_leaves_no_request_started_entries_on_the_success_path() {
+        // `RequestTimer::new` inserts one entry per batch item; every
+        // `KmipResponseSent` emission site consumes it via
+        // `take_request_latency_ms`. After a real dispatch, nothing should
+        // remain regardless of how many items ran.
+        let d = deps();
+        assert_eq!(d.request_started_len(), 0);
+        let req = one_off_request(RequestPayload::Query(QueryRequest {
+            functions: vec![QueryFunction::QueryOperations],
+        }));
+        let _ = dispatch(&d, req);
+        assert_eq!(d.request_started_len(), 0);
+    }
+
+    #[test]
+    fn dispatch_leaves_no_request_started_entry_when_id_placeholder_substitution_fails() {
+        // An item that fails `substitute_id_placeholder` returns from
+        // `dispatch_one` BEFORE `handle_payload`/`fail_err`/`emit_success`
+        // ever run, so `take_request_latency_ms` is never called for it.
+        // Proves `RequestTimer`'s `Drop` — not the normal consume path —
+        // is what cleans this one up, so an item like this can never leak
+        // an entry into `request_started`.
+        let d = deps();
+        let req = RequestMessage {
+            header: crate::kmip30::RequestHeader::v3(),
+            batch_items: vec![RequestBatchItem {
+                operation: crate::kmip30::Operation::Get,
+                payload: RequestPayload::Get(crate::kmip30::GetRequest {
+                    uid: ID_PLACEHOLDER_SENTINEL.to_string(),
+                    key_format_type: None,
+                    key_wrapping_specification: None,
+                }),
+            }],
+        };
+        let resp = dispatch(&d, req);
+        assert_eq!(resp.batch_items[0].result_status, ResultStatus::OperationFailed);
+        assert_eq!(d.request_started_len(), 0);
     }
 
     #[test]

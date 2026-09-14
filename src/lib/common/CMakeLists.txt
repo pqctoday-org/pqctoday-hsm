@@ -10,6 +10,7 @@ set(SOURCES Configuration.cpp
             fatal.cpp
             log.cpp
             OpLog.cpp
+            BehaviourRing.cpp
             MutexFactory.cpp
             osmutex.cpp
             SimpleConfigLoader.cpp

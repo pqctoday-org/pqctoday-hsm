@@ -211,6 +211,9 @@ classic-mceliece-rust = { version = "3", default-features = false, features = ["
 # through emcc. kmip/Cargo.toml gates rusqlite the same way, via its
 # `native` feature, for the identical reason.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Behaviour ring (`behaviour`): mmap/munmap only. Already in Cargo.lock
+# transitively, so no new crate enters the graph; same wasm gate as rusqlite.
+libc = "0.2"
 
 [dev-dependencies]
 # NIST ACVP keyGen KAT parsing (T7 seed-deterministic keygen tests reads

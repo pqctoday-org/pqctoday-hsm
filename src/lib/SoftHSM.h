@@ -33,6 +33,7 @@
  *****************************************************************************/
 
 #include "config.h"
+#include <cstdint>
 #include "LeakingPtr.h"
 #include "log.h"
 #include "cryptoki.h"
@@ -639,6 +640,12 @@ private:
 	// assert non-extractability today with nothing behind the assertion; logging
 	// these at generation is what turns it into evidence.
 	std::string opLogKeyCustodyFields(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey);
+
+	// The behaviour ring's `alg` byte for (mechanism, key): the key's
+	// CKA_PARAMETER_SET resolved through BehaviourIds::algFromCkm, or the
+	// family-level id when the key has none. Only ever called behind
+	// BehaviourRing::enabled(); one object lookup, no decryption.
+	uint8_t behaviourAlg(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey, CK_MECHANISM_TYPE mech);
 
 	// Symmetric multi-part cipher primitives, shared between the single-op
 	// C_EncryptUpdate / C_DecryptUpdate paths and the §5.13 dual-function

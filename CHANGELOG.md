@@ -8,6 +8,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Behaviour event ring** (`behaviour/`, `PQC_BEHAVIOUR_RING`): every
+  producer on the appliance — both PKCS#11 engines at their evidence-log call
+  sites, the KMIP server (one record per response, plus policy deny / warn /
+  rekey / activation, TLS handshakes and admin routes) and the auth-failure
+  sink — writes one bucketed 8-byte record per operation into a shared
+  multi-producer ring file for an out-of-process behaviour monitor. Off unless
+  the variable is set; the id tables both engines use are generated from one
+  `behaviour/ids.json` and both test suites assert the same golden vectors.
+- **`dur=<µs>` on every `PQCEV` operation record**, both engines: the wall
+  time of the dispatch, measured in the function that emits it.
+
+### Fixed
+
+- **Auth-failure clients were counted by address *and port*.** The behaviour
+  ring bucketed a failing peer by `ip:port`, so seventeen refused handshakes
+  from one machine looked like seventeen different clients — the opposite of
+  what a brute-force signal should show. Found on the emulator under a forced
+  load; the bucket is now the address alone.
+- **KMIP `latency_ms` was always 0.** Every `KmipResponseSent` audit event
+  hard-coded `latency_ms: 0` at all nine emit sites; the dispatcher now times
+  each request from the moment it mints the correlation id and every emit site
+  reads that figure.
+
 ## [0.30.0] — 2026-09-09
 
 ### Added

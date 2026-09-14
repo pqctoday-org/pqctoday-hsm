@@ -22938,7 +22938,8 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     // tear down session state, and the key identity is most wanted on exactly
     // those records.
     let logging = crate::oplog::enabled();
-    let mech = if logging && !p_mechanism.is_null() {
+    let ring = crate::behaviour::enabled();
+    let mech = if (logging || ring) && !p_mechanism.is_null() {
         unsafe { ck_param::mech(p_mechanism).mechanism }
     } else {
         0
@@ -22948,22 +22949,38 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     } else {
         String::new()
     };
+    // Timed only when a sink will see the figure: a logging-off, ring-off
+    // run pays no clock read (hsm-perf-bench's measured configuration).
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
     let rv = C_SignInit_impl(h_session, p_mechanism, h_key);
 
+    let dur = crate::behaviour::elapsed_us(t0);
     if logging {
         crate::oplog::emit(
             "C_SignInit",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x}",
+                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
                 key_fields,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        let mech = (!p_mechanism.is_null()).then_some(mech);
+        crate::behaviour::emit(crate::behaviour::p11_with_key(
+            crate::behaviour::OP_PKCS11_C_SIGNINIT,
+            mech,
+            h_key,
+            rv,
+            0,
+            dur,
+        ));
     }
     rv
 }
@@ -22976,9 +22993,14 @@ pub fn C_Sign(
     p_signature: *mut u8,
     pul_signature_len: *mut u32,
 ) -> u32 {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
     let rv = C_Sign_impl(h_session, p_data, ul_data_len, p_signature, pul_signature_len);
 
-    if crate::oplog::enabled() {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging {
         // probe=1 marks the mandatory PKCS#11 length-query call (p_signature
         // null) that every caller makes before the real one. A consumer
         // counting signatures must skip those rather than double every count.
@@ -22990,24 +23012,44 @@ pub fn C_Sign(
         crate::oplog::emit(
             "C_Sign",
             &format!(
-                "sess={} in={} out={} probe={} rv={} rv_id=0x{:08x}",
+                "sess={} in={} out={} probe={} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 ul_data_len,
                 out,
                 if p_signature.is_null() { 1 } else { 0 },
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    // The session, not this call, holds the mechanism — alg stays 0 here and
+    // a consumer joins on the preceding C_SignInit record, as the PQCEV
+    // consumer already does. Probe calls are recorded too: they are part of
+    // the caller's behaviour, and a probe storm is one of the shapes the
+    // monitor exists to see.
+    if ring {
+        crate::behaviour::emit(crate::behaviour::p11(
+            crate::behaviour::OP_PKCS11_C_SIGN,
+            crate::behaviour::ALG_NONE,
+            rv,
+            ul_data_len as u64,
+            dur,
+        ));
     }
     rv
 }
 
 #[wasm_bindgen(js_name = _C_SignFinal)]
 pub fn C_SignFinal(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut u32) -> u32 {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
     let rv = C_SignFinal_impl(h_session, p_signature, pul_signature_len);
 
-    if crate::oplog::enabled() {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging {
         // C_SignUpdate is deliberately NOT recorded: it produces no signature,
         // and instrumenting it would emit one line per chunk of a large input
         // for no added evidence.
@@ -23019,14 +23061,24 @@ pub fn C_SignFinal(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut
         crate::oplog::emit(
             "C_SignFinal",
             &format!(
-                "sess={} out={} probe={} rv={} rv_id=0x{:08x}",
+                "sess={} out={} probe={} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 out,
                 if p_signature.is_null() { 1 } else { 0 },
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        crate::behaviour::emit(crate::behaviour::p11(
+            crate::behaviour::OP_PKCS11_C_SIGNFINAL,
+            crate::behaviour::ALG_NONE,
+            rv,
+            0,
+            dur,
+        ));
     }
     rv
 }
@@ -23042,7 +23094,8 @@ pub fn C_SignFinal(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut
 #[wasm_bindgen(js_name = _C_VerifyInit)]
 pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     let logging = crate::oplog::enabled();
-    let mech = if logging && !p_mechanism.is_null() {
+    let ring = crate::behaviour::enabled();
+    let mech = if (logging || ring) && !p_mechanism.is_null() {
         unsafe { ck_param::mech(p_mechanism).mechanism }
     } else {
         0
@@ -23052,22 +23105,36 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     } else {
         String::new()
     };
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
     let rv = C_VerifyInit_impl(h_session, p_mechanism, h_key);
 
+    let dur = crate::behaviour::elapsed_us(t0);
     if logging {
         crate::oplog::emit(
             "C_VerifyInit",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x}",
+                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
                 key_fields,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        let mech = (!p_mechanism.is_null()).then_some(mech);
+        crate::behaviour::emit(crate::behaviour::p11_with_key(
+            crate::behaviour::OP_PKCS11_C_VERIFYINIT,
+            mech,
+            h_key,
+            rv,
+            0,
+            dur,
+        ));
     }
     rv
 }
@@ -23080,9 +23147,14 @@ pub fn C_Verify(
     p_signature: *mut u8,
     ul_signature_len: u32,
 ) -> u32 {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
     let rv = C_Verify_impl(h_session, p_data, ul_data_len, p_signature, ul_signature_len);
 
-    if crate::oplog::enabled() {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging {
         // No `out`/probe field the way C_Sign's is meaningful: verify has no
         // output-buffer size-query phase at all (PKCS#11 v3.2 §5.15.2 — the
         // signature is an INPUT the caller already holds, never queried in
@@ -23100,22 +23172,37 @@ pub fn C_Verify(
         crate::oplog::emit(
             "C_Verify",
             &format!(
-                "sess={} in={} probe=0 rv={} rv_id=0x{:08x}",
+                "sess={} in={} probe=0 rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 ul_data_len,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        crate::behaviour::emit(crate::behaviour::p11(
+            crate::behaviour::OP_PKCS11_C_VERIFY,
+            crate::behaviour::ALG_NONE,
+            rv,
+            ul_data_len as u64,
+            dur,
+        ));
     }
     rv
 }
 
 #[wasm_bindgen(js_name = _C_VerifyFinal)]
 pub fn C_VerifyFinal(h_session: u32, p_signature: *mut u8, ul_signature_len: u32) -> u32 {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
     let rv = C_VerifyFinal_impl(h_session, p_signature, ul_signature_len);
 
-    if crate::oplog::enabled() {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging {
         // C_VerifyUpdate deliberately NOT recorded — same reasoning as
         // C_SignUpdate above. C_VerifyFinal_impl delegates to the (wrapped)
         // C_Verify internally (mirrors C_SignFinal_impl calling the wrapped
@@ -23130,13 +23217,23 @@ pub fn C_VerifyFinal(h_session: u32, p_signature: *mut u8, ul_signature_len: u32
         crate::oplog::emit(
             "C_VerifyFinal",
             &format!(
-                "sess={} siglen={} probe=0 rv={} rv_id=0x{:08x}",
+                "sess={} siglen={} probe=0 rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 ul_signature_len,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        crate::behaviour::emit(crate::behaviour::p11(
+            crate::behaviour::OP_PKCS11_C_VERIFYFINAL,
+            crate::behaviour::ALG_NONE,
+            rv,
+            0,
+            dur,
+        ));
     }
     rv
 }
@@ -23152,6 +23249,10 @@ pub fn C_GenerateKeyPair(
     ph_public_key: *mut u32,
     ph_private_key: *mut u32,
 ) -> u32 {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
     let rv = C_GenerateKeyPair_impl(
         h_session,
         p_mechanism,
@@ -23163,7 +23264,26 @@ pub fn C_GenerateKeyPair(
         ph_private_key,
     );
 
-    if crate::oplog::enabled() {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if ring {
+        // Parameter set read off the private key when there is one; a failed
+        // keygen records the family as ALG_OTHER rather than guessing a size.
+        let mech = (!p_mechanism.is_null()).then(|| unsafe { ck_param::mech(p_mechanism).mechanism });
+        let h_priv = if rv == CKR_OK && !ph_private_key.is_null() {
+            unsafe { *ph_private_key }
+        } else {
+            0
+        };
+        crate::behaviour::emit(crate::behaviour::p11_with_key(
+            crate::behaviour::OP_PKCS11_C_GENERATEKEYPAIR,
+            mech,
+            h_priv,
+            rv,
+            0,
+            dur,
+        ));
+    }
+    if logging {
         let mech = if p_mechanism.is_null() {
             0
         } else {
@@ -23197,7 +23317,7 @@ pub fn C_GenerateKeyPair(
         crate::oplog::emit(
             "C_GenerateKeyPair",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} {} hpub={} hpriv={} rv={} rv_id=0x{:08x}",
+                "sess={} mech={} mech_id=0x{:08x} {} {} hpub={} hpriv={} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
@@ -23206,7 +23326,8 @@ pub fn C_GenerateKeyPair(
                 h_pub,
                 h_priv,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
     }
@@ -23225,7 +23346,8 @@ pub fn C_EncapsulateKey(
     ph_key: *mut u32,
 ) -> u32 {
     let logging = crate::oplog::enabled();
-    let mech = if logging && !p_mechanism.is_null() {
+    let ring = crate::behaviour::enabled();
+    let mech = if (logging || ring) && !p_mechanism.is_null() {
         unsafe { ck_param::mech(p_mechanism).mechanism }
     } else {
         0
@@ -23235,6 +23357,7 @@ pub fn C_EncapsulateKey(
     } else {
         String::new()
     };
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
     let rv = C_EncapsulateKey_impl(
         h_session,
@@ -23247,6 +23370,7 @@ pub fn C_EncapsulateKey(
         ph_key,
     );
 
+    let dur = crate::behaviour::elapsed_us(t0);
     if logging {
         let ct = if pul_ciphertext_len.is_null() {
             0
@@ -23256,7 +23380,7 @@ pub fn C_EncapsulateKey(
         crate::oplog::emit(
             "C_EncapsulateKey",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} ct={} probe={} rv={} rv_id=0x{:08x}",
+                "sess={} mech={} mech_id=0x{:08x} {} ct={} probe={} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
@@ -23264,9 +23388,21 @@ pub fn C_EncapsulateKey(
                 ct,
                 if p_ciphertext.is_null() { 1 } else { 0 },
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        let mech = (!p_mechanism.is_null()).then_some(mech);
+        crate::behaviour::emit(crate::behaviour::p11_with_key(
+            crate::behaviour::OP_PKCS11_C_ENCAPSULATEKEY,
+            mech,
+            h_key,
+            rv,
+            0,
+            dur,
+        ));
     }
     rv
 }
@@ -23283,7 +23419,8 @@ pub fn C_DecapsulateKey(
     ph_key: *mut u32,
 ) -> u32 {
     let logging = crate::oplog::enabled();
-    let mech = if logging && !p_mechanism.is_null() {
+    let ring = crate::behaviour::enabled();
+    let mech = if (logging || ring) && !p_mechanism.is_null() {
         unsafe { ck_param::mech(p_mechanism).mechanism }
     } else {
         0
@@ -23293,6 +23430,7 @@ pub fn C_DecapsulateKey(
     } else {
         String::new()
     };
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
     let rv = C_DecapsulateKey_impl(
         h_session,
@@ -23305,22 +23443,35 @@ pub fn C_DecapsulateKey(
         ph_key,
     );
 
+    let dur = crate::behaviour::elapsed_us(t0);
     if logging {
         // No probe field: decapsulation takes the ciphertext by value and has
         // no length-query form to distinguish.
         crate::oplog::emit(
             "C_DecapsulateKey",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} ct={} rv={} rv_id=0x{:08x}",
+                "sess={} mech={} mech_id=0x{:08x} {} ct={} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
                 key_fields,
                 ul_ciphertext_len,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        let mech = (!p_mechanism.is_null()).then_some(mech);
+        crate::behaviour::emit(crate::behaviour::p11_with_key(
+            crate::behaviour::OP_PKCS11_C_DECAPSULATEKEY,
+            mech,
+            h_private_key,
+            rv,
+            ul_ciphertext_len as u64,
+            dur,
+        ));
     }
     rv
 }

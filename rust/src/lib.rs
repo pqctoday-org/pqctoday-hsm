@@ -47,6 +47,12 @@ pub mod oplog;
 /// by `PQC_AUTH_LOG`. Same shape as `oplog`, deliberately a separate sink —
 /// see that module's doc for why.
 pub mod authlog;
+/// Behaviour event ring — one 8-byte record per operation into a shared-
+/// memory ring for the appliance's behaviour monitor, gated at runtime by
+/// `PQC_BEHAVIOUR_RING`. Third evidence sink next to `oplog`/`authlog`;
+/// `cfg`'d to a no-op on every wasm target. Id tables are generated from
+/// `behaviour/ids.json` (see `behaviour/gen.py`).
+pub mod behaviour;
 pub mod state;
 /// Native, encrypted-at-rest persistence for the engine's own slots/tokens/
 /// objects. Separate from `state_snapshot.rs` (the Emscripten-only debug
