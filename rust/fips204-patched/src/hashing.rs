@@ -290,7 +290,7 @@ pub(crate) fn rej_bounded_poly<const CTEST: bool>(eta: i32, rhos: &[&[u8]]) -> R
 pub(crate) fn expand_a<const CTEST: bool, const K: usize, const L: usize>(
     rho: &[u8; 32],
 ) -> [[T; L]; K] {
-    profile_phase!(Sampling);
+    profile_phase!(MatrixExpansion);
     #[cfg(feature = "hw-accel")]
     if !CTEST && K == 6 && L == 5 {
         let mut inputs = std::vec::Vec::with_capacity(K * L);

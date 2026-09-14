@@ -15,17 +15,19 @@ use std::time::Instant;
 pub enum Phase {
     Hashing = 0,
     Sampling = 1,
-    Ntt = 2,
-    Multiplication = 3,
-    Encoding = 4,
-    Tree = 5,
-    Comparison = 6,
-    Orchestration = 7,
+    MatrixExpansion = 2,
+    Ntt = 3,
+    Multiplication = 4,
+    Encoding = 5,
+    Tree = 6,
+    Comparison = 7,
+    Orchestration = 8,
 }
 
-const PHASES: [(&str, Phase); 8] = [
+const PHASES: [(&str, Phase); 9] = [
     ("hashing", Phase::Hashing),
     ("sampling", Phase::Sampling),
+    ("matrix_expansion", Phase::MatrixExpansion),
     ("ntt", Phase::Ntt),
     ("multiplication", Phase::Multiplication),
     ("encoding", Phase::Encoding),
@@ -49,7 +51,7 @@ struct Trace {
     algorithm: &'static str,
     operation: &'static str,
     started: Instant,
-    metrics: [Metric; 8],
+    metrics: [Metric; 9],
     stack: Vec<Active>,
 }
 
@@ -89,7 +91,7 @@ pub fn operation(algorithm: &'static str, operation: &'static str) -> OperationG
             algorithm,
             operation,
             started: now,
-            metrics: [Metric::default(); 8],
+            metrics: [Metric::default(); 9],
             stack: vec![Active {
                 phase: Phase::Orchestration,
                 resumed: now,
@@ -189,9 +191,7 @@ fn emit(trace: Trace, finished: Instant) {
         ));
     }
     line.push_str("}}\n");
-    let mut file = file
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut file = file.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let _ = file.write_all(line.as_bytes());
 }
 
