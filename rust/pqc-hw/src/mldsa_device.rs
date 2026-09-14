@@ -104,17 +104,14 @@ fn validate_inputs(matrix_hat: &[i32], vector: &[i32]) -> io::Result<()> {
 
 fn encode_coefficients(destination: &mut [u8], coefficients: &[i32]) {
     debug_assert_eq!(destination.len(), coefficients.len() * COEFFICIENT_BYTES);
-    for (bytes, coefficient) in destination
-        .chunks_exact_mut(COEFFICIENT_BYTES)
-        .zip(coefficients)
-    {
+    for (bytes, coefficient) in destination.chunks_mut(COEFFICIENT_BYTES).zip(coefficients) {
         bytes.copy_from_slice(&coefficient.to_le_bytes());
     }
 }
 
 fn decode_coefficients(source: &[u8]) -> Vec<i32> {
     source
-        .chunks_exact(COEFFICIENT_BYTES)
+        .chunks(COEFFICIENT_BYTES)
         .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("four-byte chunk")))
         .collect()
 }
