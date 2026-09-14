@@ -82,6 +82,23 @@ impl<R: RegisterIo> Engine<R> {
     }
 
     pub fn submit_polling(&mut self, job: Submission, timeout: Duration) -> Result<(), Error> {
+        self.submit_polling_inner(job, timeout, None)
+    }
+    #[cfg(feature = "diagnostic-timing")]
+    pub fn submit_polling_timed(
+        &mut self,
+        job: Submission,
+        timeout: Duration,
+        times: &mut (Duration, Duration),
+    ) -> Result<(), Error> {
+        self.submit_polling_inner(job, timeout, Some(times))
+    }
+    fn submit_polling_inner(
+        &mut self,
+        job: Submission,
+        timeout: Duration,
+        mut times: Option<&mut (Duration, Duration)>,
+    ) -> Result<(), Error> {
         if job.count > 4096 {
             return Err(Error::TooManyJobs);
         }
@@ -91,6 +108,7 @@ impl<R: RegisterIo> Engine<R> {
         if self.registers.read32(CONTROL) & AP_IDLE == 0 {
             return Err(Error::Busy);
         }
+        let register_start = Instant::now();
         self.write64(JOBS, job.jobs_phys);
         self.registers.write32(COUNT, job.count);
         self.write64(INPUT, job.input_phys);
@@ -98,9 +116,16 @@ impl<R: RegisterIo> Engine<R> {
         self.write64(OUTPUT, job.output_phys);
         self.write64(OUTPUT_CAPACITY, job.output_capacity);
         self.registers.write32(CONTROL, AP_START);
+        let execution_start = Instant::now();
+        if let Some(ref mut values) = times {
+            values.0 = register_start.elapsed();
+        }
         let deadline = Instant::now() + timeout;
         loop {
             if self.registers.read32(CONTROL) & AP_DONE != 0 {
+                if let Some(ref mut values) = times {
+                    values.1 = execution_start.elapsed();
+                }
                 let status = self.registers.read32(RETURN) as i32;
                 return if status == 0 {
                     Ok(())

@@ -1,5 +1,7 @@
 //! KV260 Keccak accelerator validation and comparison benchmark.
 use pqc_hw::device::{Request, execute_batch};
+#[cfg(feature = "diagnostic-timing")]
+use pqc_hw::device::{StageTimes, execute_batch_timed};
 use pqc_hw::keccak::Mode;
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::{Digest, Sha3_256, Sha3_512, Shake128, Shake256};
@@ -134,10 +136,8 @@ fn benchmark(workload: Workload, iterations: usize) -> io::Result<()> {
     }
     let software: Duration = software_samples.iter().copied().sum();
     let bytes_processed = workload.batch * (workload.input_len + workload.output_len);
-    for (iteration, (hardware_sample, software_sample)) in hardware_samples
-        .iter()
-        .zip(&software_samples)
-        .enumerate()
+    for (iteration, (hardware_sample, software_sample)) in
+        hardware_samples.iter().zip(&software_samples).enumerate()
     {
         println!(
             "SAMPLE\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -277,7 +277,95 @@ fn parse_iterations() -> Result<usize, String> {
     Ok(iterations)
 }
 
+#[cfg(feature = "diagnostic-timing")]
+fn profile(workload: Workload, iterations: usize) -> io::Result<()> {
+    let inputs: Vec<_> = (0..workload.batch)
+        .map(|salt| patterned_input(workload.input_len, salt))
+        .collect();
+    let batch_requests = requests(workload, &inputs);
+    let expected: Vec<_> = inputs
+        .iter()
+        .map(|input| software_hash(workload.mode, input, workload.output_len))
+        .collect();
+    for iteration in 0..iterations {
+        let mut times = StageTimes::default();
+        let started = Instant::now();
+        let output = execute_batch_timed(&batch_requests, TIMEOUT, &mut times)?;
+        let end_to_end = started.elapsed();
+        if output != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} differential mismatch", workload.name),
+            ));
+        }
+        println!(
+            "STAGE\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            workload.name,
+            iteration,
+            workload.batch,
+            workload.input_len,
+            workload.output_len,
+            end_to_end.as_nanos(),
+            times.total().as_nanos(),
+            times.layout.as_nanos(),
+            times.uio_discovery.as_nanos(),
+            times.dma_open_map.as_nanos(),
+            times.input_copy.as_nanos(),
+            times.device_sync.as_nanos(),
+            times.uio_open_map.as_nanos(),
+            times.registers.as_nanos(),
+            times.start_to_done.as_nanos(),
+            times.cpu_sync.as_nanos(),
+            times.output_copy.as_nanos(),
+            times.scrub_sync.as_nanos(),
+            times.unmap.as_nanos(),
+            end_to_end.saturating_sub(times.total()).as_nanos()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "diagnostic-timing")]
+fn run_stages(iterations: usize) -> io::Result<()> {
+    run_kats()?;
+    println!(
+        "STAGE_COLUMNS\tname\titeration\tbatch\tinput_bytes\toutput_bytes\tend_to_end_ns\tattributed_ns\tlayout_ns\tuio_discovery_ns\tdma_open_map_ns\tinput_copy_ns\tdevice_sync_ns\tuio_open_map_ns\tregisters_ns\tstart_to_done_ns\tcpu_sync_ns\toutput_copy_ns\tscrub_sync_ns\tunmap_ns\tunattributed_ns"
+    );
+    for (name, batch, input_len, output_len) in [
+        ("shake-1", 1, 34, 840),
+        ("shake-8", 8, 34, 840),
+        ("shake-30", 30, 34, 840),
+        ("shake-input-168", 8, 168, 840),
+        ("shake-input-1024", 8, 1024, 840),
+        ("shake-output-64", 8, 34, 64),
+        ("shake-output-4096", 8, 34, 4096),
+    ] {
+        profile(
+            Workload {
+                name,
+                mode: Mode::Shake128,
+                input_len,
+                output_len,
+                batch,
+            },
+            iterations,
+        )?;
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "diagnostic-timing")]
+    let mut args = env::args().skip(1);
+    #[cfg(feature = "diagnostic-timing")]
+    if args.next().as_deref() == Some("--stages") {
+        let iterations: usize = args.next().unwrap_or_else(|| "20".to_owned()).parse()?;
+        if iterations == 0 || args.next().is_some() {
+            return Err("usage: pqc-fpga-check --stages [positive-iterations]".into());
+        }
+        println!("PQC_FPGA_CHECK\tdiagnostic-timing-v1");
+        return Ok(run_stages(iterations)?);
+    }
     let mut args = env::args().skip(1);
     if args.next().as_deref() == Some("--acvp") {
         let path = args.next().unwrap_or_else(|| DEFAULT_ACVP.to_owned());

@@ -12,6 +12,7 @@ pub struct Buffer {
     len: usize,
     phys_addr: u64,
     sysfs: PathBuf,
+    cleared: bool,
     _file: File,
 }
 
@@ -46,6 +47,7 @@ impl Buffer {
             len,
             phys_addr,
             sysfs: sysfs.to_path_buf(),
+            cleared: false,
             _file: file,
         })
     }
@@ -63,30 +65,46 @@ impl Buffer {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.cleared = false;
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 
-    pub fn clear(&mut self) {
-        for index in 0..self.len {
+    pub fn clear(&mut self) -> io::Result<()> {
+        if self.cleared {
+            return Ok(());
+        }
+        // mmap is page-aligned. Clear a word at a time while keeping each
+        // store observable; byte-wide volatile stores made teardown of the
+        // 1 MiB K26 allocation dominate every short accelerator request.
+        let words = self.len / std::mem::size_of::<u64>();
+        for index in 0..words {
+            unsafe { std::ptr::write_volatile(self.ptr.as_ptr().cast::<u64>().add(index), 0) }
+        }
+        for index in words * std::mem::size_of::<u64>()..self.len {
             unsafe { std::ptr::write_volatile(self.ptr.as_ptr().add(index), 0) }
         }
-        unsafe {
-            libc::msync(self.ptr.as_ptr().cast(), self.len, libc::MS_SYNC);
-        }
+        // msync returns EINVAL for u-dma-buf on the KV260. Explicitly flush
+        // the zeroes to device-visible DDR before allowing the next request.
+        self.sync_for_device()?;
+        self.cleared = true;
+        Ok(())
     }
 
     pub fn sync_for_device(&self) -> io::Result<()> {
         std::fs::write(self.sysfs.join("sync_for_device"), "1\n")
     }
 
-    pub fn sync_for_cpu(&self) -> io::Result<()> {
+    pub fn sync_for_cpu(&mut self) -> io::Result<()> {
+        self.cleared = false;
         std::fs::write(self.sysfs.join("sync_for_cpu"), "1\n")
     }
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        self.clear();
+        if let Err(error) = self.clear() {
+            eprintln!("PQC DMA zeroization sync failed: {error}");
+        }
         unsafe {
             libc::munmap(self.ptr.as_ptr().cast(), self.len);
         }

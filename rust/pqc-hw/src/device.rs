@@ -3,6 +3,41 @@ use crate::keccak::{Engine, Job, Mode, Submission};
 use crate::uio::Mapping;
 use std::io;
 use std::time::Duration;
+#[cfg(feature = "diagnostic-timing")]
+use std::time::Instant;
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct StageTimes {
+    pub layout: Duration,
+    pub uio_discovery: Duration,
+    pub dma_open_map: Duration,
+    pub input_copy: Duration,
+    pub device_sync: Duration,
+    pub uio_open_map: Duration,
+    pub registers: Duration,
+    pub start_to_done: Duration,
+    pub cpu_sync: Duration,
+    pub output_copy: Duration,
+    pub scrub_sync: Duration,
+    pub unmap: Duration,
+}
+
+impl StageTimes {
+    pub fn total(&self) -> Duration {
+        self.layout
+            + self.uio_discovery
+            + self.dma_open_map
+            + self.input_copy
+            + self.device_sync
+            + self.uio_open_map
+            + self.registers
+            + self.start_to_done
+            + self.cpu_sync
+            + self.output_copy
+            + self.scrub_sync
+            + self.unmap
+    }
+}
 
 pub struct Request<'a> {
     pub mode: Mode,
@@ -79,39 +114,134 @@ impl Layout {
 }
 
 pub fn execute_batch(requests: &[Request<'_>], timeout: Duration) -> io::Result<Vec<Vec<u8>>> {
+    execute_batch_inner(requests, timeout, None)
+}
+
+#[cfg(feature = "diagnostic-timing")]
+pub fn execute_batch_timed(
+    requests: &[Request<'_>],
+    timeout: Duration,
+    times: &mut StageTimes,
+) -> io::Result<Vec<Vec<u8>>> {
+    *times = StageTimes::default();
+    execute_batch_inner(requests, timeout, Some(times))
+}
+
+fn execute_batch_inner(
+    requests: &[Request<'_>],
+    timeout: Duration,
+    #[allow(unused_variables, unused_mut)] mut times: Option<&mut StageTimes>,
+) -> io::Result<Vec<Vec<u8>>> {
+    #[cfg(feature = "diagnostic-timing")]
+    let stage = Instant::now();
     let mut layout = Layout::build(requests)?;
+    #[cfg(feature = "diagnostic-timing")]
+    if let Some(ref mut t) = times {
+        t.layout = stage.elapsed();
+    }
+    #[cfg(feature = "diagnostic-timing")]
+    let stage = Instant::now();
     let uio = Mapping::find_by_address("/sys/class/uio", 0xa000_0000)?;
+    #[cfg(feature = "diagnostic-timing")]
+    if let Some(ref mut t) = times {
+        t.uio_discovery = stage.elapsed();
+    }
+    #[cfg(feature = "diagnostic-timing")]
+    let stage = Instant::now();
     let mut dma = Buffer::open("/dev/pqc-accel-dma", "/sys/class/u-dma-buf/pqc-accel-dma")?;
+    #[cfg(feature = "diagnostic-timing")]
+    if let Some(ref mut t) = times {
+        t.dma_open_map = stage.elapsed();
+    }
     if layout.bytes.len() > dma.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "batch exceeds DMA buffer",
         ));
     }
+    #[cfg(feature = "diagnostic-timing")]
+    let stage = Instant::now();
     dma.as_mut_slice()[..layout.bytes.len()].copy_from_slice(&layout.bytes);
+    #[cfg(feature = "diagnostic-timing")]
+    if let Some(ref mut t) = times {
+        t.input_copy = stage.elapsed();
+    }
+    #[cfg(feature = "diagnostic-timing")]
+    let stage = Instant::now();
     dma.sync_for_device()?;
+    #[cfg(feature = "diagnostic-timing")]
+    if let Some(ref mut t) = times {
+        t.device_sync = stage.elapsed();
+    }
     let base = dma.phys_addr();
-    Engine::new(Mapping::open(uio, 0x10000)?)
-        .submit_polling(
-            Submission {
-                jobs_phys: base,
-                count: requests.len() as u32,
-                input_phys: base + layout.input_start as u64,
-                input_capacity: layout.input_size as u64,
-                output_phys: base + layout.output_start as u64,
-                output_capacity: layout.output_size as u64,
-            },
-            timeout,
-        )
+    #[cfg(feature = "diagnostic-timing")]
+    let stage = Instant::now();
+    let mut engine = Engine::new(Mapping::open(uio, 0x10000)?);
+    #[cfg(feature = "diagnostic-timing")]
+    if let Some(ref mut t) = times {
+        t.uio_open_map = stage.elapsed();
+    }
+    let submission = Submission {
+        jobs_phys: base,
+        count: requests.len() as u32,
+        input_phys: base + layout.input_start as u64,
+        input_capacity: layout.input_size as u64,
+        output_phys: base + layout.output_start as u64,
+        output_capacity: layout.output_size as u64,
+    };
+    #[cfg(feature = "diagnostic-timing")]
+    if let Some(ref mut t) = times {
+        let mut engine_times = (Duration::ZERO, Duration::ZERO);
+        engine
+            .submit_polling_timed(submission, timeout, &mut engine_times)
+            .map_err(io::Error::other)?;
+        t.registers = engine_times.0;
+        t.start_to_done = engine_times.1;
+    } else {
+        engine
+            .submit_polling(submission, timeout)
+            .map_err(io::Error::other)?;
+    }
+    #[cfg(not(feature = "diagnostic-timing"))]
+    engine
+        .submit_polling(submission, timeout)
         .map_err(io::Error::other)?;
+    #[cfg(feature = "diagnostic-timing")]
+    let stage = Instant::now();
     dma.sync_for_cpu()?;
+    #[cfg(feature = "diagnostic-timing")]
+    if let Some(ref mut t) = times {
+        t.cpu_sync = stage.elapsed();
+    }
+    #[cfg(feature = "diagnostic-timing")]
+    let stage = Instant::now();
     let layout_len = layout.bytes.len();
     layout.bytes.copy_from_slice(&dma.as_slice()[..layout_len]);
-    Ok(layout
+    let outputs = layout
         .outputs
         .into_iter()
         .map(|(offset, len)| layout.bytes[offset..offset + len].to_vec())
-        .collect())
+        .collect();
+    #[cfg(feature = "diagnostic-timing")]
+    if let Some(ref mut t) = times {
+        t.output_copy = stage.elapsed();
+    }
+    #[cfg(feature = "diagnostic-timing")]
+    let stage = Instant::now();
+    dma.clear()?;
+    #[cfg(feature = "diagnostic-timing")]
+    if let Some(ref mut t) = times {
+        t.scrub_sync = stage.elapsed();
+    }
+    #[cfg(feature = "diagnostic-timing")]
+    let stage = Instant::now();
+    drop(dma);
+    drop(engine);
+    #[cfg(feature = "diagnostic-timing")]
+    if let Some(ref mut t) = times {
+        t.unmap = stage.elapsed();
+    }
+    Ok(outputs)
 }
 
 fn align64(value: usize) -> usize {
