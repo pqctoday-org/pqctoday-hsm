@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The KV260 resident ML-DSA-65 diagnostic now retains its UIO and DMA mappings
+  across a benchmark session, serializes ownership with a process lock, and
+  synchronizes and scrubs only the 41,984-byte live command region. Per-stage
+  timings separate encoding, DMA ownership transfers, FPGA execution,
+  decoding and zeroization. The one-shot API remains as a compatibility
+  wrapper around the session.
+
 ## [0.30.0] — 2026-09-09
 
 ### Added

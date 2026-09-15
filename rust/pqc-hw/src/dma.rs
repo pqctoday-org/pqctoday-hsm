@@ -85,18 +85,55 @@ impl Buffer {
         }
         // msync returns EINVAL for u-dma-buf on the KV260. Explicitly flush
         // the zeroes to device-visible DDR before allowing the next request.
-        self.sync_for_device()?;
+        self.configure_sync_range(0, self.len)?;
+        self.trigger_sync("sync_for_device")?;
         self.cleared = true;
         Ok(())
     }
 
     pub fn sync_for_device(&self) -> io::Result<()> {
-        std::fs::write(self.sysfs.join("sync_for_device"), "1\n")
+        self.sync_range_for_device(0, self.len)
     }
 
     pub fn sync_for_cpu(&mut self) -> io::Result<()> {
+        self.sync_range_for_cpu(0, self.len)
+    }
+
+    pub fn sync_range_for_device(&self, offset: usize, len: usize) -> io::Result<()> {
+        self.configure_sync_range(offset, len)?;
+        self.trigger_sync("sync_for_device")
+    }
+
+    pub fn sync_range_for_cpu(&mut self, offset: usize, len: usize) -> io::Result<()> {
+        self.configure_sync_range(offset, len)?;
+        self.trigger_sync("sync_for_cpu")?;
         self.cleared = false;
-        std::fs::write(self.sysfs.join("sync_for_cpu"), "1\n")
+        Ok(())
+    }
+
+    pub fn clear_range(&mut self, offset: usize, len: usize) -> io::Result<()> {
+        validate_range(self.len, offset, len)?;
+        let words = len / std::mem::size_of::<u64>();
+        for index in 0..words {
+            unsafe {
+                std::ptr::write_volatile(self.ptr.as_ptr().add(offset).cast::<u64>().add(index), 0)
+            }
+        }
+        for index in words * std::mem::size_of::<u64>()..len {
+            unsafe { std::ptr::write_volatile(self.ptr.as_ptr().add(offset + index), 0) }
+        }
+        self.sync_range_for_device(offset, len)?;
+        Ok(())
+    }
+
+    fn configure_sync_range(&self, offset: usize, len: usize) -> io::Result<()> {
+        validate_range(self.len, offset, len)?;
+        std::fs::write(self.sysfs.join("sync_offset"), format!("0x{offset:x}\n"))?;
+        std::fs::write(self.sysfs.join("sync_size"), format!("{len}\n"))
+    }
+
+    fn trigger_sync(&self, name: &str) -> io::Result<()> {
+        std::fs::write(self.sysfs.join(name), "1\n")
     }
 }
 
@@ -121,4 +158,28 @@ fn parse_number(path: PathBuf) -> io::Result<u64> {
         text.parse()
     };
     parsed.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn validate_range(buffer_len: usize, offset: usize, len: usize) -> io::Result<()> {
+    if len == 0 || offset.checked_add(len).is_none_or(|end| end > buffer_len) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "DMA synchronization range is outside the allocation",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_range;
+
+    #[test]
+    fn validates_bounded_nonempty_dma_ranges() {
+        assert!(validate_range(1024, 0, 1024).is_ok());
+        assert!(validate_range(1024, 64, 128).is_ok());
+        assert!(validate_range(1024, 0, 0).is_err());
+        assert!(validate_range(1024, 1024, 1).is_err());
+        assert!(validate_range(1024, usize::MAX, 2).is_err());
+    }
 }

@@ -4,8 +4,8 @@ use pqc_hw::device::{Request, execute_batch};
 use pqc_hw::device::{StageTimes, execute_batch_timed};
 use pqc_hw::keccak::Mode;
 use pqc_hw::mldsa_device::{
-    MATRIX_COEFFICIENTS, MLDSA_N, MLDSA_Q, MLDSA65_K, MLDSA65_L, OUTPUT_COEFFICIENTS,
-    VECTOR_COEFFICIENTS, execute_mldsa65_matvec,
+    MATRIX_COEFFICIENTS, MLDSA_N, MLDSA_Q, MLDSA65_K, MLDSA65_L, Mldsa65Session,
+    OUTPUT_COEFFICIENTS, VECTOR_COEFFICIENTS,
 };
 use sha3::digest::{ExtendableOutput, Update, XofReader};
 use sha3::{Digest, Sha3_256, Sha3_512, Shake128, Shake256};
@@ -181,7 +181,13 @@ fn benchmark_mldsa65_matvec(iterations: usize) -> io::Result<()> {
             "ML-DSA fixture digest mismatch",
         ));
     }
-    if execute_mldsa65_matvec(&matrix, &vector, TIMEOUT)? != expected {
+    let open_started = Instant::now();
+    let mut session = Mldsa65Session::open()?;
+    println!(
+        "MLDSA_MATVEC_SESSION_OPEN\t{}",
+        open_started.elapsed().as_nanos()
+    );
+    if session.execute(&matrix, &vector, TIMEOUT)? != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "ML-DSA FPGA warm-up mismatch",
@@ -191,7 +197,7 @@ fn benchmark_mldsa65_matvec(iterations: usize) -> io::Result<()> {
     let mut software = Duration::ZERO;
     for iteration in 0..iterations {
         let started = Instant::now();
-        let actual = execute_mldsa65_matvec(&matrix, &vector, TIMEOUT)?;
+        let (actual, phases) = session.execute_profiled(&matrix, &vector, TIMEOUT)?;
         let hardware_sample = started.elapsed();
         if actual != expected {
             return Err(io::Error::new(
@@ -211,6 +217,16 @@ fn benchmark_mldsa65_matvec(iterations: usize) -> io::Result<()> {
             "MLDSA_MATVEC_SAMPLE\t{iteration}\t{}\t{}",
             hardware_sample.as_nanos(),
             software_sample.as_nanos()
+        );
+        println!(
+            "MLDSA_MATVEC_PHASE_SAMPLE\t{iteration}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            phases.encode.as_nanos(),
+            phases.sync_for_device.as_nanos(),
+            phases.hardware.as_nanos(),
+            phases.sync_for_cpu.as_nanos(),
+            phases.decode_validate.as_nanos(),
+            phases.scrub.as_nanos(),
+            phases.total.as_nanos(),
         );
     }
     println!(

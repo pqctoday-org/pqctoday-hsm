@@ -3,8 +3,11 @@
 use crate::dma::Buffer;
 use crate::mldsa::{Engine, MLDSA65_CONTROL_BASE, Submission};
 use crate::uio::Mapping;
+use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::time::Duration;
+use std::time::Instant;
 
 pub const COEFFICIENT_BYTES: usize = 4;
 pub const MLDSA_N: usize = 256;
@@ -20,58 +23,157 @@ pub const VECTOR_OFFSET: usize = 0x7800;
 pub const OUTPUT_OFFSET: usize = 0x8c00;
 pub const TOTAL_BYTES: usize = 0xa400;
 
-pub fn execute_mldsa65_matvec(
-    matrix_hat: &[i32],
-    vector: &[i32],
-    timeout: Duration,
-) -> io::Result<Vec<i32>> {
-    validate_inputs(matrix_hat, vector)?;
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Mldsa65Timings {
+    pub encode: Duration,
+    pub sync_for_device: Duration,
+    pub hardware: Duration,
+    pub sync_for_cpu: Duration,
+    pub decode_validate: Duration,
+    pub scrub: Duration,
+    pub total: Duration,
+}
 
-    let uio = Mapping::find_by_address("/sys/class/uio", MLDSA65_CONTROL_BASE)?;
-    let mut dma = Buffer::open("/dev/pqc-accel-dma", "/sys/class/u-dma-buf/pqc-accel-dma")?;
-    if dma.len() < TOTAL_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "DMA buffer too small for ML-DSA-65 resident command",
-        ));
+pub struct Mldsa65Session {
+    engine: Engine<Mapping>,
+    dma: Buffer,
+    healthy: bool,
+    _lock: File,
+}
+
+impl Mldsa65Session {
+    pub fn open() -> io::Result<Self> {
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open("/run/lock/pqc-accel-dma.lock")?;
+        let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "FPGA DMA allocation is owned by another process",
+            ));
+        }
+
+        let uio = Mapping::find_by_address("/sys/class/uio", MLDSA65_CONTROL_BASE)?;
+        let mut dma = Buffer::open("/dev/pqc-accel-dma", "/sys/class/u-dma-buf/pqc-accel-dma")?;
+        if dma.len() < TOTAL_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "DMA buffer too small for ML-DSA-65 resident command",
+            ));
+        }
+        dma.clear()?;
+        Ok(Self {
+            engine: Engine::new(Mapping::open(uio, 0x10000)?),
+            dma,
+            healthy: true,
+            _lock: lock,
+        })
     }
 
-    encode_coefficients(
-        &mut dma.as_mut_slice()[MATRIX_OFFSET..VECTOR_OFFSET],
-        matrix_hat,
-    );
-    encode_coefficients(
-        &mut dma.as_mut_slice()[VECTOR_OFFSET..OUTPUT_OFFSET],
-        vector,
-    );
-    dma.as_mut_slice()[OUTPUT_OFFSET..TOTAL_BYTES].fill(0);
-    dma.sync_for_device()?;
+    pub fn execute(
+        &mut self,
+        matrix_hat: &[i32],
+        vector: &[i32],
+        timeout: Duration,
+    ) -> io::Result<Vec<i32>> {
+        self.execute_profiled(matrix_hat, vector, timeout)
+            .map(|(output, _)| output)
+    }
 
-    let base = dma.phys_addr();
-    Engine::new(Mapping::open(uio, 0x10000)?)
-        .submit_polling(
+    pub fn execute_profiled(
+        &mut self,
+        matrix_hat: &[i32],
+        vector: &[i32],
+        timeout: Duration,
+    ) -> io::Result<(Vec<i32>, Mldsa65Timings)> {
+        if !self.healthy {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "ML-DSA FPGA session is quarantined",
+            ));
+        }
+        let total_started = Instant::now();
+        validate_inputs(matrix_hat, vector)?;
+
+        let started = Instant::now();
+        encode_coefficients(
+            &mut self.dma.as_mut_slice()[MATRIX_OFFSET..VECTOR_OFFSET],
+            matrix_hat,
+        );
+        encode_coefficients(
+            &mut self.dma.as_mut_slice()[VECTOR_OFFSET..OUTPUT_OFFSET],
+            vector,
+        );
+        self.dma.as_mut_slice()[OUTPUT_OFFSET..TOTAL_BYTES].fill(0);
+        let encode = started.elapsed();
+
+        let started = Instant::now();
+        self.dma.sync_range_for_device(MATRIX_OFFSET, TOTAL_BYTES)?;
+        let sync_for_device = started.elapsed();
+
+        let base = self.dma.phys_addr();
+        let started = Instant::now();
+        if let Err(error) = self.engine.submit_polling(
             Submission {
                 matrix_hat_phys: base + MATRIX_OFFSET as u64,
                 vector_phys: base + VECTOR_OFFSET as u64,
                 output_phys: base + OUTPUT_OFFSET as u64,
             },
             timeout,
-        )
-        .map_err(io::Error::other)?;
+        ) {
+            self.healthy = false;
+            return Err(io::Error::other(error));
+        }
+        let hardware = started.elapsed();
 
-    dma.sync_for_cpu()?;
-    let output = decode_coefficients(&dma.as_slice()[OUTPUT_OFFSET..TOTAL_BYTES]);
-    if output
-        .iter()
-        .any(|&coefficient| !(0..MLDSA_Q).contains(&coefficient))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "FPGA returned a non-canonical ML-DSA coefficient",
-        ));
+        let started = Instant::now();
+        self.dma
+            .sync_range_for_cpu(OUTPUT_OFFSET, TOTAL_BYTES - OUTPUT_OFFSET)?;
+        let sync_for_cpu = started.elapsed();
+
+        let started = Instant::now();
+        let output = decode_coefficients(&self.dma.as_slice()[OUTPUT_OFFSET..TOTAL_BYTES]);
+        if output
+            .iter()
+            .any(|&coefficient| !(0..MLDSA_Q).contains(&coefficient))
+        {
+            self.healthy = false;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "FPGA returned a non-canonical ML-DSA coefficient",
+            ));
+        }
+        let decode_validate = started.elapsed();
+
+        let started = Instant::now();
+        self.dma.clear_range(MATRIX_OFFSET, TOTAL_BYTES)?;
+        let scrub = started.elapsed();
+        let total = total_started.elapsed();
+        Ok((
+            output,
+            Mldsa65Timings {
+                encode,
+                sync_for_device,
+                hardware,
+                sync_for_cpu,
+                decode_validate,
+                scrub,
+                total,
+            },
+        ))
     }
-    dma.clear()?;
-    Ok(output)
+}
+
+pub fn execute_mldsa65_matvec(
+    matrix_hat: &[i32],
+    vector: &[i32],
+    timeout: Duration,
+) -> io::Result<Vec<i32>> {
+    Mldsa65Session::open()?.execute(matrix_hat, vector, timeout)
 }
 
 fn validate_inputs(matrix_hat: &[i32], vector: &[i32]) -> io::Result<()> {
