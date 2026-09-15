@@ -18,6 +18,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   wrapper around the session. A diagnostic cached-matrix mode retains the
   30,720-byte public matrix and transfers and scrubs only the per-operation
   vector/output region.
+- The optional KV260 Rust ML-DSA-65 path now routes key-generation and signing
+  matrix/vector products through the resident cached session. Hardware failure
+  discards the session and recomputes the complete operation in software. The
+  slower standalone FPGA `ExpandA` hook is no longer installed while the two
+  accelerators share one DMA allocation.
 
 ## [0.30.0] — 2026-09-09
 

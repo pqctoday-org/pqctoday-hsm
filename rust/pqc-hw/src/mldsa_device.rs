@@ -42,6 +42,11 @@ pub struct Mldsa65Session {
     _lock: File,
 }
 
+// The mappings are exclusively owned by the session and every register/DMA
+// access requires `&mut self`. Moving a session between threads is therefore
+// safe; shared access still requires an external mutex.
+unsafe impl Send for Mldsa65Session {}
+
 impl Mldsa65Session {
     pub fn open() -> io::Result<Self> {
         let lock = OpenOptions::new()

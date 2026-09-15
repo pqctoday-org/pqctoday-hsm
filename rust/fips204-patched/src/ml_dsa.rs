@@ -9,6 +9,35 @@ use crate::helpers::{
 use crate::high_low::{high_bits, low_bits, make_hint, power2round, use_hint};
 use crate::ntt::{inv_ntt, ntt};
 use crate::types::{PrivateKey, PublicKey, R, T};
+#[cfg(feature = "hw-accel")]
+use std::vec::Vec;
+
+fn matrix_vector_product<const K: usize, const L: usize>(
+    matrix: &[[T; L]; K], vector: &[R; L],
+) -> [R; K] {
+    #[cfg(feature = "hw-accel")]
+    if K == 6 && L == 5 {
+        let flat_matrix: Vec<i32> = matrix
+            .iter()
+            .flat_map(|row| row.iter())
+            .flat_map(|polynomial| polynomial.0)
+            .collect();
+        let flat_vector: Vec<i32> = vector
+            .iter()
+            .flat_map(|polynomial| polynomial.0)
+            .collect();
+        if let Some(output) = crate::hw_accel::mldsa65_matvec(&flat_matrix, &flat_vector) {
+            if output.len() == K * 256 {
+                return core::array::from_fn(|row| {
+                    R(core::array::from_fn(|coefficient| output[row * 256 + coefficient]))
+                });
+            }
+        }
+    }
+    let vector_hat: [T; L] = ntt(vector);
+    let product_hat: [T; K] = mat_vec_mul(matrix, &vector_hat);
+    inv_ntt(&product_hat)
+}
 use crate::{D, Q};
 use rand_core::CryptoRngCore;
 use sha3::digest::XofReader;
@@ -95,9 +124,8 @@ pub(crate) fn key_gen_internal<
     // 6: (t_1, t_0) ← Power2Round(t, d)    ▷ Compress t
     let (t_1, t_0): ([R; K], [R; K]) = {
         let cap_a_hat: [[T; L]; K] = expand_a::<CTEST, K, L>(&rho);
-        let s_1_hat: [T; L] = ntt(&s_1);
-        let as1_hat: [T; K] = mat_vec_mul(&cap_a_hat, &s_1_hat);
-        let t_not_reduced: [R; K] = add_vector_ntt(&inv_ntt(&as1_hat), &s_2);
+        let t_not_reduced: [R; K] =
+            add_vector_ntt(&matrix_vector_product(&cap_a_hat, &s_1), &s_2);
         let t: [R; K] = core::array::from_fn(|k| {
             R(core::array::from_fn(|n| full_reduce32(t_not_reduced[k].0[n])))
         });
@@ -236,11 +264,7 @@ pub(crate) fn sign_internal<
         let y: [R; L] = expand_mask(gamma1, &rho_prime, kappa_ctr);
 
         // 12: w ← NTT−1(cap_a_hat ◦ NTT(y))
-        let w: [R; K] = {
-            let y_hat: [T; L] = ntt(&y);
-            let ay_hat: [T; K] = mat_vec_mul(&cap_a_hat, &y_hat);
-            inv_ntt(&ay_hat)
-        };
+        let w: [R; K] = matrix_vector_product(&cap_a_hat, &y);
 
         // 13: w_1 ← HighBits(w)    ▷ Signer’s commitment
         let w_1: [R; K] =
