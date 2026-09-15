@@ -15,7 +15,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   synchronizes and scrubs only the 41,984-byte live command region. Per-stage
   timings separate encoding, DMA ownership transfers, FPGA execution,
   decoding and zeroization. The one-shot API remains as a compatibility
-  wrapper around the session.
+  wrapper around the session. A diagnostic cached-matrix mode retains the
+  30,720-byte public matrix and transfers and scrubs only the per-operation
+  vector/output region.
 
 ## [0.30.0] — 2026-09-09
 
