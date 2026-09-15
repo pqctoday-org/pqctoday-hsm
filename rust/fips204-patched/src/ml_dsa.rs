@@ -275,6 +275,8 @@ pub(crate) fn sign_internal<
 
     // 10: while (z, h) = ⊥ do    ▷ Rejection sampling loop (with continue for ⊥)
     loop {
+        #[cfg(feature = "phase-profile")]
+        pqc_phase_profile::mldsa_attempt();
         //
         // 11: y ← ExpandMask(ρ′', κ)
         let y: [R; L] = expand_mask(gamma1, &rho_prime, kappa_ctr);
@@ -346,6 +348,8 @@ pub(crate) fn sign_internal<
         let r0_norm = infinity_norm(&r0);
         // CTEST is used only for constant-time measurements via `dudect`
         if !CTEST && ((z_norm >= (gamma1 - beta)) || (r0_norm >= (gamma2 - beta))) {
+            #[cfg(feature = "phase-profile")]
+            pqc_phase_profile::mldsa_rejection(pqc_phase_profile::MldsaRejection::Bounds);
             kappa_ctr += u16::try_from(L).expect("cannot fail; L is static parameter");
             continue;
             //
@@ -381,6 +385,8 @@ pub(crate) fn sign_internal<
             && ((infinity_norm(&c_t_0) >= gamma2)
                 || (h.iter().map(|h_i| h_i.0.iter().sum::<i32>()).sum::<i32>() > omega))
         {
+            #[cfg(feature = "phase-profile")]
+            pqc_phase_profile::mldsa_rejection(pqc_phase_profile::MldsaRejection::Hint);
             kappa_ctr += u16::try_from(L).expect("cannot fail; L is static parameter");
             continue;
             // 29: end if
@@ -392,6 +398,8 @@ pub(crate) fn sign_internal<
         // this is done just prior to each of the 'continue' statements above
 
         // if we made it here, we passed the 'continue' conditions, so have a solution
+        #[cfg(feature = "phase-profile")]
+        pqc_phase_profile::mldsa_accept();
         break;
 
         // 32: end while
