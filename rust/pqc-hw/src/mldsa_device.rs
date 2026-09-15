@@ -1,7 +1,7 @@
 //! Linux UIO/DMA transport for the resident ML-DSA-65 matrix/vector engine.
 
 use crate::dma::Buffer;
-use crate::mldsa::{Engine, MLDSA65_CONTROL_BASE, Submission};
+use crate::mldsa::{Engine, Submission, MLDSA65_CONTROL_BASE};
 use crate::uio::Mapping;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -49,6 +49,7 @@ unsafe impl Send for Mldsa65Session {}
 
 impl Mldsa65Session {
     pub fn open() -> io::Result<Self> {
+        diagnostic("session open begin");
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -71,19 +72,24 @@ impl Mldsa65Session {
                 "DMA buffer too small for ML-DSA-65 resident command",
             ));
         }
+        diagnostic("session initial scrub begin");
         dma.clear()?;
-        Ok(Self {
+        diagnostic("session initial scrub complete");
+        let session = Self {
             engine: Engine::new(Mapping::open(uio, 0x10000)?),
             dma,
             healthy: true,
             matrix_loaded: false,
             _lock: lock,
-        })
+        };
+        diagnostic("session open complete");
+        Ok(session)
     }
 
     /// Upload a public ML-DSA-65 NTT-domain matrix once for subsequent
     /// cached executions. Loading a different matrix replaces the slot.
     pub fn load_matrix(&mut self, matrix_hat: &[i32]) -> io::Result<Duration> {
+        diagnostic("load_matrix begin");
         if !self.healthy {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -99,6 +105,7 @@ impl Mldsa65Session {
         self.dma
             .sync_range_for_device(MATRIX_OFFSET, VECTOR_OFFSET - MATRIX_OFFSET)?;
         self.matrix_loaded = true;
+        diagnostic("load_matrix complete");
         Ok(started.elapsed())
     }
 
@@ -129,6 +136,7 @@ impl Mldsa65Session {
         validate_vector(vector)?;
         let total_started = Instant::now();
 
+        diagnostic("execute_cached encode begin");
         let started = Instant::now();
         encode_coefficients(
             &mut self.dma.as_mut_slice()[VECTOR_OFFSET..OUTPUT_OFFSET],
@@ -137,12 +145,14 @@ impl Mldsa65Session {
         self.dma.as_mut_slice()[OUTPUT_OFFSET..TOTAL_BYTES].fill(0);
         let encode = started.elapsed();
 
+        diagnostic("execute_cached sync_for_device begin");
         let started = Instant::now();
         self.dma
             .sync_range_for_device(VECTOR_OFFSET, TOTAL_BYTES - VECTOR_OFFSET)?;
         let sync_for_device = started.elapsed();
 
         let base = self.dma.phys_addr();
+        diagnostic("execute_cached hardware begin");
         let started = Instant::now();
         if let Err(error) = self.engine.submit_polling(
             Submission {
@@ -157,21 +167,25 @@ impl Mldsa65Session {
         }
         let hardware = started.elapsed();
 
+        diagnostic("execute_cached sync_for_cpu begin");
         let started = Instant::now();
         self.dma
             .sync_range_for_cpu(OUTPUT_OFFSET, TOTAL_BYTES - OUTPUT_OFFSET)?;
         let sync_for_cpu = started.elapsed();
 
+        diagnostic("execute_cached decode begin");
         let started = Instant::now();
         let output = decode_coefficients(&self.dma.as_slice()[OUTPUT_OFFSET..TOTAL_BYTES]);
         validate_output(&output).inspect_err(|_| self.healthy = false)?;
         let decode_validate = started.elapsed();
 
+        diagnostic("execute_cached scrub begin");
         let started = Instant::now();
         self.dma
             .clear_range(VECTOR_OFFSET, TOTAL_BYTES - VECTOR_OFFSET)?;
         let scrub = started.elapsed();
         let total = total_started.elapsed();
+        diagnostic("execute_cached complete");
         Ok((
             output,
             Mldsa65Timings {
@@ -268,6 +282,12 @@ impl Mldsa65Session {
                 total,
             },
         ))
+    }
+}
+
+fn diagnostic(message: &str) {
+    if std::env::var_os("PQC_HW_DIAGNOSTICS").is_some_and(|value| value == "1") {
+        eprintln!("PQC_HW_PHASE\t{message}");
     }
 }
 
