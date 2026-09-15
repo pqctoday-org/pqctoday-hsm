@@ -13,20 +13,26 @@ use crate::types::{PrivateKey, PublicKey, R, T};
 use std::vec::Vec;
 
 fn matrix_vector_product<const K: usize, const L: usize>(
-    matrix: &[[T; L]; K], vector: &[R; L],
+    matrix: &[[T; L]; K], _matrix_flat: Option<&[i32]>, vector: &[R; L],
 ) -> [R; K] {
     #[cfg(feature = "hw-accel")]
     if K == 6 && L == 5 {
-        let flat_matrix: Vec<i32> = matrix
-            .iter()
-            .flat_map(|row| row.iter())
-            .flat_map(|polynomial| polynomial.0)
-            .collect();
+        let owned_matrix;
+        let flat_matrix = if let Some(cached) = _matrix_flat {
+            cached
+        } else {
+            owned_matrix = matrix
+                .iter()
+                .flat_map(|row| row.iter())
+                .flat_map(|polynomial| polynomial.0)
+                .collect::<Vec<i32>>();
+            &owned_matrix
+        };
         let flat_vector: Vec<i32> = vector
             .iter()
             .flat_map(|polynomial| polynomial.0)
             .collect();
-        if let Some(output) = crate::hw_accel::mldsa65_matvec(&flat_matrix, &flat_vector) {
+        if let Some(output) = crate::hw_accel::mldsa65_matvec(flat_matrix, &flat_vector) {
             if output.len() == K * 256 {
                 return core::array::from_fn(|row| {
                     R(core::array::from_fn(|coefficient| output[row * 256 + coefficient]))
@@ -125,7 +131,7 @@ pub(crate) fn key_gen_internal<
     let (t_1, t_0): ([R; K], [R; K]) = {
         let cap_a_hat: [[T; L]; K] = expand_a::<CTEST, K, L>(&rho);
         let t_not_reduced: [R; K] =
-            add_vector_ntt(&matrix_vector_product(&cap_a_hat, &s_1), &s_2);
+            add_vector_ntt(&matrix_vector_product(&cap_a_hat, None, &s_1), &s_2);
         let t: [R; K] = core::array::from_fn(|k| {
             R(core::array::from_fn(|n| full_reduce32(t_not_reduced[k].0[n])))
         });
@@ -222,6 +228,16 @@ pub(crate) fn sign_internal<
     //
     // 5: cap_a_hat ← ExpandA(ρ)    ▷ A is generated and stored in NTT representation as Â
     let cap_a_hat: [[T; L]; K] = expand_a::<CTEST, K, L>(rho);
+    #[cfg(feature = "hw-accel")]
+    let cap_a_flat = (K == 6 && L == 5).then(|| {
+        cap_a_hat
+            .iter()
+            .flat_map(|row| row.iter())
+            .flat_map(|polynomial| polynomial.0)
+            .collect::<Vec<i32>>()
+    });
+    #[cfg(not(feature = "hw-accel"))]
+    let cap_a_flat: Option<&[i32]> = None;
 
     // 6: 𝜇 ← H(BytesToBits(𝑡𝑟)||𝑀 , 64)    ▷ Compute message representative µ
     // Calculate mu based on which of the three different paths led us here.
@@ -264,7 +280,14 @@ pub(crate) fn sign_internal<
         let y: [R; L] = expand_mask(gamma1, &rho_prime, kappa_ctr);
 
         // 12: w ← NTT−1(cap_a_hat ◦ NTT(y))
-        let w: [R; K] = matrix_vector_product(&cap_a_hat, &y);
+        let w: [R; K] = matrix_vector_product(
+            &cap_a_hat,
+            #[cfg(feature = "hw-accel")]
+            cap_a_flat.as_deref(),
+            #[cfg(not(feature = "hw-accel"))]
+            cap_a_flat,
+            &y,
+        );
 
         // 13: w_1 ← HighBits(w)    ▷ Signer’s commitment
         let w_1: [R; K] =
