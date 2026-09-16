@@ -45,6 +45,10 @@ pub fn destroy_object(session: u32, handle: u32) -> Result<(), CkRv> {
     if let Some(val) = attrs.get_mut(&CKA_VALUE) {
         val.zeroize();
     }
+    // The AWS-LC fast path may hold this key parsed; drop it with the object
+    // so no private material outlives the destroy (crypto::awslc_keycache).
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::crypto::awslc_keycache::clear();
 
     // PKCS#11 v3.2 — clean up any active operation state referencing the
     // destroyed key. Without this, a session that called native::sign +
@@ -170,6 +174,10 @@ pub fn set_attribute(
     // avoid touching a function ffi.rs also depends on).
     let access = resolve_session_access(session)?;
     with_object_checked(&access, handle, |_| ())?;
+    // A CKA_VALUE change makes any parsed copy of the old key stale material
+    // to be holding; drop the fast path's cache (crypto::awslc_keycache).
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::crypto::awslc_keycache::clear();
     crate::state::set_object_attr_checked(handle, attr_type, value)
 }
 
