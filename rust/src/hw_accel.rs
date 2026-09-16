@@ -9,17 +9,75 @@ struct ResidentMldsa65 {
     matrix: Vec<i32>,
 }
 
+static MLDSA65_SIGN: OnceLock<Mutex<Option<pqc_hw::mldsa_sign_device::Mldsa65SignSession>>> =
+    OnceLock::new();
+
 static MLDSA65: OnceLock<Mutex<Option<ResidentMldsa65>>> = OnceLock::new();
 
 pub fn probe_on_initialize() {
-    let available = *AVAILABLE.get_or_init(|| {
+    let _available = AVAILABLE.get_or_init(|| {
         if std::env::var_os("PQC_HW_DISABLE").is_some_and(|value| value == "1") {
             return false;
         }
-        pqc_hw::mldsa_device::Mldsa65Session::open().is_ok()
+        match pqc_hw::mldsa_sign_device::Mldsa65SignSession::open() {
+            Ok(_) => {
+                diagnostic("selected whole-signature ML-DSA-65 accelerator");
+                let _installed = fips204::set_mldsa65_sign_hook(mldsa65_sign);
+                true
+            }
+            Err(sign_error) => match pqc_hw::mldsa_device::Mldsa65Session::open() {
+                Ok(_) => {
+                    diagnostic(&format!(
+                        "whole-signature probe failed ({sign_error}); selected resident matvec accelerator"
+                    ));
+                    let _installed = fips204::set_mldsa65_matvec_hook(mldsa65_matvec);
+                    true
+                }
+                Err(matvec_error) => {
+                    diagnostic(&format!(
+                        "accelerator probe failed: whole-signature={sign_error}; matvec={matvec_error}"
+                    ));
+                    false
+                }
+            },
+        }
     });
-    if available {
-        let _installed = fips204::set_mldsa65_matvec_hook(mldsa65_matvec);
+}
+
+fn mldsa65_sign(
+    matrix: &[i32],
+    s1: &[i32],
+    s2: &[i32],
+    t0: &[i32],
+    mu: &[u8; 64],
+    rho_prime: &[u8; 64],
+    randomized: bool,
+) -> Option<Vec<u8>> {
+    let mut resident = match MLDSA65_SIGN.get_or_init(|| Mutex::new(None)).try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => return None,
+    };
+    if resident.is_none() {
+        *resident = pqc_hw::mldsa_sign_device::Mldsa65SignSession::open().ok();
+    }
+    let state = resident.as_mut()?;
+    match state.sign(
+        matrix,
+        s1,
+        s2,
+        t0,
+        mu,
+        rho_prime,
+        randomized,
+        128,
+        Duration::from_millis(250),
+    ) {
+        Ok(signature) => Some(signature),
+        Err(error) => {
+            diagnostic(&format!("whole-signature accelerator failed: {error}"));
+            *resident = None;
+            None
+        }
     }
 }
 

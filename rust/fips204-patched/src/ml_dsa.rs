@@ -265,6 +265,26 @@ pub(crate) fn sign_internal<
     let mut rho_prime = [0u8; 64];
     h7.read(&mut rho_prime);
 
+    #[cfg(feature = "hw-accel")]
+    if K == 6 && L == 5 {
+        let s1 = s_1_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>();
+        let s2 = s_2_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>();
+        let t0 = t_0_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>();
+        if let Some(signature) = crate::hw_accel::mldsa65_sign(
+            cap_a_flat.as_deref().expect("ML-DSA-65 matrix"),
+            &s1,
+            &s2,
+            &t0,
+            &mu,
+            &rho_prime,
+            rnd.iter().any(|byte| *byte != 0),
+        ) {
+            if let Ok(signature) = signature.try_into() {
+                return signature;
+            }
+        }
+    }
+
     // 8: κ ← 0    ▷ Initialize counter κ
     let mut kappa_ctr = 0u16;
 
