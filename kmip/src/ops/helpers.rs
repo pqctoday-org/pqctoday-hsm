@@ -309,8 +309,19 @@ pub fn canonical_name(a: KmipAlgorithm) -> String {
         FrodoKem640Aes | FrodoKem640Shake => "FrodoKEM-640",
         FrodoKem976Aes | FrodoKem976Shake => "FrodoKEM-976",
         FrodoKem1344Aes | FrodoKem1344Shake => "FrodoKEM-1344",
-        // BSI TR-02102-1 §2.4.2.
+        // BSI TR-02102-1 §2.4.2 — all 10 parameter sets, each with its own
+        // unique policy-facing name (unlike FrodoKEM's AES/SHAKE collapse
+        // above; matches `KmipAlgorithm::spec_name()`'s strings exactly).
         ClassicMcEliece6688128 => "Classic-McEliece-6688128",
+        ClassicMcEliece6960119 => "Classic-McEliece-6960119",
+        ClassicMcEliece8192128 => "Classic-McEliece-8192128",
+        ClassicMcEliece348864 => "Classic-McEliece-348864",
+        ClassicMcEliece348864F => "Classic-McEliece-348864f",
+        ClassicMcEliece460896 => "Classic-McEliece-460896",
+        ClassicMcEliece460896F => "Classic-McEliece-460896f",
+        ClassicMcEliece6688128F => "Classic-McEliece-6688128f",
+        ClassicMcEliece6960119F => "Classic-McEliece-6960119f",
+        ClassicMcEliece8192128F => "Classic-McEliece-8192128f",
         Hss => "HSS",
         // Matches `KmipAlgorithm::spec_name()`'s strings exactly.
         CompositeMlDsa44Rsa2048PssSha256 => "ML-DSA-44-RSA2048-PSS",
@@ -1034,7 +1045,12 @@ pub fn native_kem_mech(a: KmipAlgorithm) -> Option<u32> {
         FrodoKem640Aes | FrodoKem640Shake | FrodoKem976Aes
             | FrodoKem976Shake | FrodoKem1344Aes | FrodoKem1344Shake =>
             Some(c::CKM_PQCTODAY_FRODOKEM_ENCAPSULATE),
-        ClassicMcEliece6688128 => Some(c::CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE),
+        ClassicMcEliece348864 | ClassicMcEliece348864F
+            | ClassicMcEliece460896 | ClassicMcEliece460896F
+            | ClassicMcEliece6688128 | ClassicMcEliece6688128F
+            | ClassicMcEliece6960119 | ClassicMcEliece6960119F
+            | ClassicMcEliece8192128 | ClassicMcEliece8192128F =>
+            Some(c::CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE),
         _ => None,
     }
 }
@@ -1091,7 +1107,16 @@ pub fn native_parameter_set(a: KmipAlgorithm) -> Option<u32> {
         FrodoKem976Shake  => c::CKP_FRODOKEM_976_SHAKE,
         FrodoKem1344Aes   => c::CKP_FRODOKEM_1344_AES,
         FrodoKem1344Shake => c::CKP_FRODOKEM_1344_SHAKE,
-        ClassicMcEliece6688128 => c::CKP_CLASSIC_MCELIECE_6688128,
+        ClassicMcEliece6688128  => c::CKP_CLASSIC_MCELIECE_6688128,
+        ClassicMcEliece6688128F => c::CKP_CLASSIC_MCELIECE_6688128F,
+        ClassicMcEliece348864   => c::CKP_CLASSIC_MCELIECE_348864,
+        ClassicMcEliece348864F  => c::CKP_CLASSIC_MCELIECE_348864F,
+        ClassicMcEliece460896   => c::CKP_CLASSIC_MCELIECE_460896,
+        ClassicMcEliece460896F  => c::CKP_CLASSIC_MCELIECE_460896F,
+        ClassicMcEliece6960119  => c::CKP_CLASSIC_MCELIECE_6960119,
+        ClassicMcEliece6960119F => c::CKP_CLASSIC_MCELIECE_6960119F,
+        ClassicMcEliece8192128  => c::CKP_CLASSIC_MCELIECE_8192128,
+        ClassicMcEliece8192128F => c::CKP_CLASSIC_MCELIECE_8192128F,
         _ => return None,
     })
 }

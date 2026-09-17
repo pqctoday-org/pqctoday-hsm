@@ -24,6 +24,7 @@ set(SOURCES p11test.cpp
             SignVerifyTests.cpp
             AsymEncryptDecryptTests.cpp
             AsymWrapUnwrapTests.cpp
+            ClassicMcElieceTests.cpp
             BehaviourRingTests.cpp
             TestsBase.cpp
             TestsNoPINInitBase.cpp
