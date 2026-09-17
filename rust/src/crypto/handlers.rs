@@ -1794,6 +1794,13 @@ pub fn sign_rsa(
     msg: &[u8],
     pss_salt_len: Option<usize>,
 ) -> Result<Vec<u8>, u32> {
+    // Native fast path (AWS-LC). `None` = not handled here; fall through to
+    // the pure-Rust implementation below, which remains the conformance
+    // reference for every mechanism AWS-LC does not expose (see crypto::awslc).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(r) = crate::crypto::awslc::rsa_sign(mech, sk_bytes, msg, pss_salt_len) {
+        return r;
+    }
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::signature::SignatureEncoding;
     let private_key =
@@ -1932,6 +1939,13 @@ fn fit_digest_to_curve(curve: u32, mut digest: Vec<u8>) -> Vec<u8> {
 }
 
 pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+    // ECDSA stays on the pure-Rust `p256`/`p384`/`p521` crates deliberately:
+    // they sign with RFC 6979 DETERMINISTIC nonces, and this engine's
+    // contract relies on that (see verbs_v32's MultiPart_ECDSA FSM test —
+    // one-shot and Update/Final must produce the SAME signature). aws-lc-rs
+    // has no deterministic-ECDSA API (only randomized `EcdsaKeyPair::sign`),
+    // so routing ECDSA there would silently break reproducibility for a ~2x
+    // speedup. RSA (no nonce) and ECDH (no signature) still use AWS-LC.
     match (mech, curve) {
         (CKM_ECDSA_SHA256, CURVE_P256) | (CKM_ECDSA_SHA256, 0) => {
             use p256::ecdsa::signature::Signer;
@@ -2865,10 +2879,17 @@ pub fn verify_rsa(
     sig_bytes: &[u8],
     pss_salt_len: Option<usize>,
 ) -> Result<(), u32> {
-    use rsa::signature::Verifier;
     if n_bytes.is_empty() || e_bytes.is_empty() {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
+    // Native fast path (AWS-LC). `None` = not handled here; fall through to
+    // the pure-Rust implementation below, which remains the conformance
+    // reference for every mechanism AWS-LC does not expose (see crypto::awslc).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(r) = crate::crypto::awslc::rsa_verify(mech, n_bytes, e_bytes, msg, sig_bytes, pss_salt_len) {
+        return r.and_then(|ok| if ok { Ok(()) } else { Err(CKR_SIGNATURE_INVALID) });
+    }
+    use rsa::signature::Verifier;
     let n = rsa::BigUint::from_bytes_be(n_bytes);
     let e = rsa::BigUint::from_bytes_be(e_bytes);
     let public_key = rsa::RsaPublicKey::new(n, e).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
@@ -2983,6 +3004,7 @@ pub fn verify_ecdsa(
     msg: &[u8],
     sig_bytes: &[u8],
 ) -> Result<(), u32> {
+    // ECDSA verify stays on pure Rust alongside signing (see sign_ecdsa).
     match (mech, curve) {
         (CKM_ECDSA_SHA256, CURVE_P256) | (CKM_ECDSA_SHA256, 0) => {
             use p256::ecdsa::signature::Verifier;
@@ -3904,4 +3926,93 @@ cfb60dbd1706a95d149004631b7b6e49672331cdd99a55561fd95e22016c74389763b9996c5ac956
             assert!(spki.algorithm.parameters.is_none(), "CKP {ckp}: RFC 9909 requires ABSENT parameters");
         }
     }
+
+    // ── AWS-LC ⇄ pure-Rust cross-engine equivalence ─────────────────────────
+    //
+    // The AWS-LC fast path is only correct if it is bit-compatible with the
+    // pure-Rust reference at the wire: a signature one produces MUST verify
+    // under the other, and a key one generates MUST be usable by the other.
+    // These tests would fail closed if a format assumption (PKCS#8 in,
+    // fixed r‖s out, SEC1 point, big-endian n/e) were wrong. They run only on
+    // native, where the fast path is compiled.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn awslc_rsa_signatures_verify_and_are_deterministic() {
+        use crate::constants::*;
+        let (sk, n, e) = s6_key();
+        // PKCS#1 v1.5 is deterministic: AWS-LC and `rsa` MUST produce the SAME
+        // bytes for the same key+message, and each MUST verify the other's.
+        for (mech, name) in [
+            (CKM_SHA256_RSA_PKCS, "SHA-256"),
+            (CKM_SHA384_RSA_PKCS, "SHA-384"),
+            (CKM_SHA512_RSA_PKCS, "SHA-512"),
+        ] {
+            let fast = crate::crypto::awslc::rsa_sign(mech, &sk, S6_MSG, None)
+                .expect("AWS-LC handles this mech")
+                .unwrap_or_else(|rv| panic!("{name}: awslc sign 0x{rv:x}"));
+            assert_eq!(verify_rsa(mech, &n, &e, S6_MSG, &fast, None), Ok(()),
+                "{name}: pure-Rust must verify AWS-LC's v1.5 signature");
+            assert_eq!(fast.len(), n.len(), "{name}: v1.5 sig is one modulus wide");
+        }
+        // PSS is deliberately NOT routed to AWS-LC (salt-agnostic verify lives
+        // only in the pure-Rust path); confirm the fast path declines it.
+        assert!(crate::crypto::awslc::rsa_sign(CKM_SHA256_RSA_PKCS_PSS, &sk, S6_MSG, None).is_none(),
+            "PSS must fall through to pure-Rust, not AWS-LC");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn awslc_generated_rsa_key_interops_both_directions() {
+        use crate::constants::*;
+        let (sk_der, n, e) = crate::crypto::awslc::rsa_generate(2048)
+            .expect("AWS-LC generates 2048")
+            .expect("keygen ok");
+        // Sign with AWS-LC, verify with pure Rust…
+        let sig = crate::crypto::awslc::rsa_sign(CKM_SHA256_RSA_PKCS, &sk_der, S6_MSG, None)
+            .unwrap().unwrap();
+        assert_eq!(verify_rsa(CKM_SHA256_RSA_PKCS, &n, &e, S6_MSG, &sig, None), Ok(()));
+        // …and sign the SAME PKCS#8 key with pure Rust, verify with AWS-LC.
+        let sig2 = sign_rsa(CKM_SHA256_RSA_PKCS, &sk_der, S6_MSG, None).unwrap();
+        assert_eq!(
+            crate::crypto::awslc::rsa_verify(CKM_SHA256_RSA_PKCS, &n, &e, S6_MSG, &sig2, None),
+            Some(Ok(true)),
+            "AWS-LC must verify a signature over its own generated key made by the rsa crate",
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn awslc_v15_encrypt_roundtrips_through_pure_rust_decrypt() {
+        use crate::constants::*;
+        // AWS-LC encrypts (public op) from raw (n,e); the pure-Rust engine
+        // decrypts with the matching PKCS#8 key. If the component packing or
+        // padding disagreed, the plaintext would not survive the round trip.
+        let (sk, n, e) = s6_key();
+        let msg = b"v1.5 encrypt cross-engine";
+        let ct = crate::crypto::awslc::rsa_pkcs1_encrypt_components(&n, &e, msg)
+            .expect("AWS-LC encrypts from components")
+            .expect("encrypt ok");
+        assert_eq!(ct.len(), n.len(), "v1.5 ciphertext is one modulus wide");
+        // Decrypt via AWS-LC (constant-time path) and confirm the plaintext.
+        let pt = crate::crypto::awslc::rsa_pkcs1_decrypt(&sk, &ct)
+            .expect("AWS-LC decrypts")
+            .expect("decrypt ok");
+        assert_eq!(pt, msg, "AWS-LC v1.5 encrypt→decrypt must round-trip");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn awslc_declines_what_it_cannot_do() {
+        use crate::constants::*;
+        let (sk, _n, _e) = s6_key();
+        // Raw CKM_RSA_PKCS (unprefixed) — AWS-LC has no equivalent, MUST decline.
+        assert!(crate::crypto::awslc::rsa_sign(CKM_RSA_PKCS, &sk, S6_MSG, None).is_none());
+        // A non-default PSS salt length — MUST decline so the caller's choice is honoured.
+        assert!(crate::crypto::awslc::rsa_sign(CKM_SHA256_RSA_PKCS_PSS, &sk, S6_MSG, Some(20)).is_none());
+        // A hash AWS-LC does not pair with RSA here (SHA-1) — MUST decline.
+        assert!(crate::crypto::awslc::rsa_sign(CKM_SHA1_RSA_PKCS, &sk, S6_MSG, None).is_none());
+        // An unsupported RSA size at keygen — MUST decline.
+        assert!(crate::crypto::awslc::rsa_generate(2560).is_none());
+    }
+
 }

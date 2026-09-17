@@ -63,6 +63,7 @@
 #include "OSSLMLDSA.h"
 #include "OSSLSLHDSA.h"
 #include "OSSLMLKEM.h"
+#include "OSSLClassicMcEliece.h"
 #ifdef WITH_RIPEMD160
 #include "OSSLRIPEMD160.h"
 #endif
@@ -164,6 +165,8 @@ AsymmetricAlgorithm* OSSLCryptoFactory::getAsymmetricAlgorithm(AsymAlgo::Type al
 			return new OSSLSLHDSA();
 		case AsymAlgo::MLKEM:
 			return new OSSLMLKEM();
+		case AsymAlgo::CLASSICMCELIECE:
+			return new OSSLClassicMcEliece();
 		default:
 			break;
 	}

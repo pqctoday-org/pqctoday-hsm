@@ -214,7 +214,7 @@ pub fn query(deps: &Deps, req: QueryRequest, correlation_id: &str) -> Result<Que
         EventPayload::KmipResponseSent {
             op: "Query".into(),
             result: KmipOpResult::Success,
-            latency_ms: 0,
+            latency_ms: deps.take_request_latency_ms(correlation_id),
         },
     ));
 

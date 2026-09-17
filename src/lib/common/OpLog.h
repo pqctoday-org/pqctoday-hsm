@@ -36,6 +36,12 @@
       with backslash escaping. Unknown keys may be added over time; a parser
       must ignore keys it does not recognise rather than reject the line.
 
+      Every operation record ends with dur=<microseconds>: the wall time of the
+      dispatch the record describes, measured around the call in the same
+      function that emits it (added 2026-09-13 together with the behaviour
+      ring, BehaviourRing.h, which carries the same figure bucketed). The
+      oplog_init / oplog_shutdown records have no dur=.
+
  SOFTHSM3_OP_LOG accepts:
 
    (unset) or ""   logging disabled -- the shipped default

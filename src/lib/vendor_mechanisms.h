@@ -28,6 +28,33 @@
 
 #define CKM_PQCTODAY_SPLIT_KEY 0x80000012UL  /* vendor */
 
+// ── Classic McEliece (BSI TR-02102-1 §2.4.2) — implementation plan D-2/D-3 ───
+// First mechanism/key-type pair genuinely SHARED between both engines: the
+// Rust engine has advertised these since softhsmrustv3 v0.7.0 (one parameter
+// set only, then); this C++ engine's Phase 2 makes them the first C++-side
+// use of the 0x80000000|n vendor range. Values are pinned in the priv
+// authority file (pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-
+// allocation.md §1.4/§1.4.1) and mirrored in rust/src/constants.rs — this
+// header must match both exactly.
+
+#define CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN 0x80000003UL  /* vendor */
+#define CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE  0x80000004UL  /* vendor */
+#define CKK_PQCTODAY_CLASSIC_MCELIECE               0x80000002UL  /* vendor */
+
+// CKA_PARAMETER_SET values — own small-integer numbering (same convention as
+// CKP_ML_DSA_*/CKP_ML_KEM_*), NOT vendor-range: 0x1 is unchanged from the
+// value already on the wire (softhsmrustv3 v0.7.0, mceliece6688128 only).
+#define CKP_CLASSIC_MCELIECE_6688128  0x1UL
+#define CKP_CLASSIC_MCELIECE_348864   0x2UL
+#define CKP_CLASSIC_MCELIECE_348864F  0x3UL
+#define CKP_CLASSIC_MCELIECE_460896   0x4UL
+#define CKP_CLASSIC_MCELIECE_460896F  0x5UL
+#define CKP_CLASSIC_MCELIECE_6688128F 0x6UL
+#define CKP_CLASSIC_MCELIECE_6960119  0x7UL
+#define CKP_CLASSIC_MCELIECE_6960119F 0x8UL
+#define CKP_CLASSIC_MCELIECE_8192128  0x9UL
+#define CKP_CLASSIC_MCELIECE_8192128F 0xAUL
+
 // ── ML-DSA external-µ signing (remediation R34, 2026-08-26; adopted natively
 // from the real PKCS#11 v3.3 working draft on 2026-08-30) ───────────────────
 // This is the v3.3 draft's own name and codepoint, used directly — no

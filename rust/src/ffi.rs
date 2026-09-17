@@ -339,9 +339,23 @@ pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
     CKR_OK
 }
 
+/// Drop every parsed private key held by the AWS-LC fast path.
+///
+/// Called from each PKCS#11 lifecycle event that ends a key's accessibility.
+/// Correctness never depends on this (the cache is keyed by key material, so
+/// a hit already required holding that material) — it is there so private key
+/// bytes do not outlive the object, session or login that carried them. See
+/// `crypto::awslc_keycache`. No-op on wasm32, where the cache does not exist.
+#[inline]
+fn drop_awslc_key_cache() {
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::crypto::awslc_keycache::clear();
+}
+
 #[wasm_bindgen(js_name = _C_Finalize)]
 pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     require_init!();
+    drop_awslc_key_cache();
     // PKCS#11 v3.2 §5.6 — pReserved MUST be NULL.
     if !p_reserved.is_null() {
         return CKR_ARGUMENTS_BAD;
@@ -666,6 +680,7 @@ pub fn C_GetSlotList(token_present: u8, p_slot_list: *mut u32, pul_count: *mut u
 #[wasm_bindgen(js_name = _C_InitToken)]
 pub fn C_InitToken(slot_id: u32, p_pin: *mut u8, ul_pin_len: u32, p_label: *mut u8) -> u32 {
     require_init!();
+    drop_awslc_key_cache();
     if p_pin.is_null() || p_label.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
@@ -834,6 +849,7 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
     }
     // PKCS#11 v3.2 §4.4 — session objects die with their creating session.
     crate::state::destroy_session_objects(h_session);
+    drop_awslc_key_cache();
     // PKCS#11 v3.2 §5.6 — closing a session terminates all of its active
     // operations. Clear every per-session state map, zeroizing any that hold
     // raw key material (the message-based AEAD contexts).
@@ -872,6 +888,7 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
 #[wasm_bindgen(js_name = _C_CloseAllSessions)]
 pub fn C_CloseAllSessions(slot_id: u32) -> u32 {
     require_init!();
+    drop_awslc_key_cache();
     let valid = TOKEN_STORE.with(|ts| ts.borrow().contains_key(&slot_id));
     if !valid {
         return CKR_SLOT_ID_INVALID;
@@ -1108,6 +1125,7 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
 #[wasm_bindgen(js_name = _C_Logout)]
 pub fn C_Logout(h_session: u32) -> u32 {
     require_init!();
+    drop_awslc_key_cache();
     let session = match SESSIONS.with(|s| s.borrow().get(&h_session).cloned()) {
         Some(s) => s,
         None => return CKR_SESSION_HANDLE_INVALID,
@@ -1473,12 +1491,15 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // a version mismatch between the two).
         CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN => (9616, 21520, 0x00010000),
         CKM_PQCTODAY_FRODOKEM_ENCAPSULATE => (9616, 21520, 0x10000000 | 0x20000000),
-        // Classic McEliece (BSI TR-02102-1 §2.4.2) — scoped to mceliece6688128
-        // only (see implementation plan Phase 0.5); ek: 1,044,992 B, verified
-        // directly against `classic-mceliece-rust` v2.0.2's
-        // `CRYPTO_PUBLICKEYBYTES` for that parameter set.
-        CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => (1_044_992, 1_044_992, 0x00010000),
-        CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE => (1_044_992, 1_044_992, 0x10000000 | 0x20000000),
+        // Classic McEliece (BSI TR-02102-1 §2.4.2) — all 10 parameter sets; range
+        // spans the smallest (348864: 261,120 B) to the largest (8192128: 1,357,824
+        // B) public key, matching FrodoKEM's own "min = smallest variant, max =
+        // largest variant" convention on this same table. Verified against
+        // `classic-mceliece-multi`'s own `CRYPTO_PUBLICKEYBYTES` per module (which
+        // in turn is verified against the official Round-4 KAT vectors — see
+        // kmip/kat/classic-mceliece/README.md).
+        CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => (261_120, 1_357_824, 0x00010000),
+        CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE => (261_120, 1_357_824, 0x10000000 | 0x20000000),
         // ML-DSA pk: 1312 B (ML-DSA-44) … 2592 B (ML-DSA-87) — FIPS 204 Table 2.
         CKM_ML_DSA_KEY_PAIR_GEN => (1312, 2592, 0x00010000),
         // CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY —
@@ -3910,11 +3931,11 @@ fn C_GenerateKeyPair_impl(
                 CKR_OK
             }
 
-            // BSI TR-02102-1 §2.4.2 — scoped to mceliece6688128 only
-            // (implementation plan Phase 0.5: classic-mceliece-rust can only
-            // have one parameter-set feature compiled in at a time).
+            // BSI TR-02102-1 §2.4.2 — all 10 parameter sets (implementation plan
+            // §4.2: the classic-mceliece-multi fork exposes one namespaced module
+            // per set, dispatched here by `classic_mceliece_parameter_set`).
             CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN => {
-                let ps = match get_attr_ulong(
+                let ps_raw = match get_attr_ulong(
                     p_public_key_template,
                     ul_public_key_attribute_count,
                     CKA_PARAMETER_SET,
@@ -3922,9 +3943,10 @@ fn C_GenerateKeyPair_impl(
                     Some(p) => p,
                     None => return CKR_TEMPLATE_INCOMPLETE,
                 };
-                if ps != CKP_CLASSIC_MCELIECE_6688128 {
-                    return CKR_ATTRIBUTE_VALUE_INVALID;
-                }
+                let ps = match crate::native::keygen::classic_mceliece_parameter_set(ps_raw) {
+                    Ok(ps) => ps,
+                    Err(_) => return CKR_ATTRIBUTE_VALUE_INVALID,
+                };
                 if get_attr_bytes(p_private_key_template, ul_private_key_attribute_count, CKA_SEED)
                     .is_some()
                     || get_attr_bytes(p_public_key_template, ul_public_key_attribute_count, CKA_SEED)
@@ -3935,13 +3957,13 @@ fn C_GenerateKeyPair_impl(
 
                 let mut pub_attrs = HashMap::new();
                 let mut prv_attrs = HashMap::new();
-                store_param_set(&mut pub_attrs, ps);
-                store_param_set(&mut prv_attrs, ps);
+                store_param_set(&mut pub_attrs, ps_raw);
+                store_param_set(&mut prv_attrs, ps_raw);
                 store_algo_family(&mut pub_attrs, ALGO_CLASSIC_MCELIECE);
                 store_algo_family(&mut prv_attrs, ALGO_CLASSIC_MCELIECE);
                 store_ulong(&mut pub_attrs, CKA_CLASS, CKO_PUBLIC_KEY);
                 store_ulong(&mut pub_attrs, CKA_KEY_TYPE, CKK_PQCTODAY_CLASSIC_MCELIECE);
-                store_ulong(&mut pub_attrs, CKA_PARAMETER_SET, ps);
+                store_ulong(&mut pub_attrs, CKA_PARAMETER_SET, ps_raw);
                 store_ulong(
                     &mut pub_attrs,
                     CKA_KEY_GEN_MECHANISM,
@@ -3957,7 +3979,7 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut pub_attrs, CKA_LOCAL, true);
                 store_ulong(&mut prv_attrs, CKA_CLASS, CKO_PRIVATE_KEY);
                 store_ulong(&mut prv_attrs, CKA_KEY_TYPE, CKK_PQCTODAY_CLASSIC_MCELIECE);
-                store_ulong(&mut prv_attrs, CKA_PARAMETER_SET, ps);
+                store_ulong(&mut prv_attrs, CKA_PARAMETER_SET, ps_raw);
                 store_ulong(
                     &mut prv_attrs,
                     CKA_KEY_GEN_MECHANISM,
@@ -3974,12 +3996,57 @@ fn C_GenerateKeyPair_impl(
                 store_bool(&mut prv_attrs, CKA_DERIVE, false);
                 store_bool(&mut prv_attrs, CKA_LOCAL, true);
 
-                // Unlike FrodoKEM, classic-mceliece-rust uses rand 0.8 — the
+                // Unlike FrodoKEM, classic-mceliece-multi uses rand 0.8 — the
                 // same version this engine already uses elsewhere.
                 let mut rng = rand::rngs::OsRng;
-                let (pk, sk) = classic_mceliece_rust::keypair_boxed(&mut rng);
-                pub_attrs.insert(CKA_VALUE, pk.as_ref().to_vec());
-                prv_attrs.insert(CKA_VALUE, sk.as_ref().to_vec());
+                let (pk_bytes, sk_bytes): (Vec<u8>, Vec<u8>) = {
+                    use classic_mceliece_multi as cmm;
+                    use classic_mceliece_multi::ParameterSet::*;
+                    match ps {
+                        Mceliece348864 => {
+                            let (pk, sk) = cmm::mceliece348864::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece348864f => {
+                            let (pk, sk) = cmm::mceliece348864f::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece460896 => {
+                            let (pk, sk) = cmm::mceliece460896::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece460896f => {
+                            let (pk, sk) = cmm::mceliece460896f::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece6688128 => {
+                            let (pk, sk) = cmm::mceliece6688128::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece6688128f => {
+                            let (pk, sk) = cmm::mceliece6688128f::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece6960119 => {
+                            let (pk, sk) = cmm::mceliece6960119::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece6960119f => {
+                            let (pk, sk) = cmm::mceliece6960119f::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece8192128 => {
+                            let (pk, sk) = cmm::mceliece8192128::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                        Mceliece8192128f => {
+                            let (pk, sk) = cmm::mceliece8192128f::keypair_boxed(&mut rng);
+                            (pk.as_ref().to_vec(), sk.as_ref().to_vec())
+                        }
+                    }
+                };
+                pub_attrs.insert(CKA_VALUE, pk_bytes);
+                prv_attrs.insert(CKA_VALUE, sk_bytes);
 
                 mirror_public_key_info(&pub_attrs, &mut prv_attrs);
                 absorb_template_attrs(
@@ -4564,10 +4631,10 @@ fn C_EncapsulateKey_impl(
                     Err(_) => return CKR_ARGUMENTS_BAD,
                 }
             } else {
-                if ps != CKP_CLASSIC_MCELIECE_6688128 {
-                    return CKR_ARGUMENTS_BAD;
+                match crate::native::keygen::classic_mceliece_parameter_set(ps) {
+                    Ok(mceliece_ps) => mceliece_ps.sizes().2 as u32, // (pk, sk, ct)
+                    Err(_) => return CKR_ARGUMENTS_BAD,
                 }
-                classic_mceliece_rust::CRYPTO_CIPHERTEXTBYTES as u32
             };
             if p_ciphertext.is_null() {
                 *pul_ciphertext_len = ct_len;
@@ -5077,10 +5144,10 @@ fn C_DecapsulateKey_impl(
                     Err(_) => return CKR_ARGUMENTS_BAD,
                 }
             } else {
-                if ps != CKP_CLASSIC_MCELIECE_6688128 {
-                    return CKR_ARGUMENTS_BAD;
+                match crate::native::keygen::classic_mceliece_parameter_set(ps) {
+                    Ok(mceliece_ps) => mceliece_ps.sizes().2 as u32, // (pk, sk, ct)
+                    Err(_) => return CKR_ARGUMENTS_BAD,
                 }
-                classic_mceliece_rust::CRYPTO_CIPHERTEXTBYTES as u32
             };
             // PKCS#11 v3.2 §5.18.9 — a ciphertext of the wrong length for the
             // key's parameter set is invalid input ciphertext.
@@ -6259,6 +6326,7 @@ pub fn C_CreateObject(
 pub fn C_DestroyObject(h_session: u32, h_object: u32) -> u32 {
     require_init!();
     require_session!(h_session);
+    drop_awslc_key_cache();
     // PKCS#11 v3.2 §4.4 — a private object cannot be destroyed (or even seen)
     // by a session whose token is not logged in.
     let exists = OBJECTS.with(|o| o.borrow().contains_key(&h_object));
@@ -8651,8 +8719,24 @@ pub fn C_Encrypt(
                 if key_bytes.len() < 4 + n_len + 1 {
                     return CKR_KEY_TYPE_INCONSISTENT;
                 }
-                let n = rsa::BigUint::from_bytes_be(&key_bytes[4..4 + n_len]);
-                let e = rsa::BigUint::from_bytes_be(&key_bytes[4 + n_len..]);
+                let n_be = &key_bytes[4..4 + n_len];
+                let e_be = &key_bytes[4 + n_len..];
+                // Native fast path (AWS-LC). Public-key op, no oracle — routed
+                // for one v1.5 backend. `None` → pure-Rust fallback below.
+                #[cfg(not(target_arch = "wasm32"))]
+                let awslc_ct: Option<Vec<u8>> =
+                    match crate::crypto::awslc::rsa_pkcs1_encrypt_components(n_be, e_be, plaintext) {
+                        Some(Ok(ct)) => Some(ct),
+                        Some(Err(_)) => return CKR_FUNCTION_FAILED,
+                        None => None,
+                    };
+                #[cfg(target_arch = "wasm32")]
+                let awslc_ct: Option<Vec<u8>> = None;
+                if let Some(ct) = awslc_ct {
+                    ct
+                } else {
+                let n = rsa::BigUint::from_bytes_be(n_be);
+                let e = rsa::BigUint::from_bytes_be(e_be);
                 let pk = match rsa::RsaPublicKey::new(n, e) {
                     Ok(k) => k,
                     Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
@@ -8663,6 +8747,7 @@ pub fn C_Encrypt(
                         Err(_) => return CKR_FUNCTION_FAILED,
                     }
                 })
+                }
             }
             CKM_CHACHA20_POLY1305 => {
                 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::{Aead, Payload}};
@@ -9279,6 +9364,31 @@ pub fn C_Decrypt(
             // including future compliance audits of this file: this gap is
             // KNOWN and ACCEPTED, not missed.
             CKM_RSA_PKCS => {
+                // Native fast path (AWS-LC): its PKCS#1 v1.5 decrypt is
+                // constant-time, which CLOSES the padding-oracle documented
+                // above (RUSTSEC-2023-0071 / the `rsa` crate's own
+                // "MUST BE CONSTANT TIME" TODO). On non-wasm targets this is
+                // now the primary implementation, not the accepted-risk one.
+                // The `rsa`-crate branch below survives only as the wasm
+                // fallback (no network timing oracle in a browser tab) and for
+                // a key that is not PKCS#8 DER, which AWS-LC's loader declines.
+                // AWS-LC owns this key on native → constant-time unpad, no
+                // oracle. A decrypt failure is the uniform
+                // CKR_ENCRYPTED_DATA_INVALID (no padding-oracle distinction),
+                // same code the fallback yields. `None` (wasm, or a key AWS-LC
+                // cannot load) drops to the `rsa`-crate path below.
+                #[cfg(not(target_arch = "wasm32"))]
+                let awslc_pt: Option<Vec<u8>> =
+                    match crate::crypto::awslc::rsa_pkcs1_decrypt(&key_bytes, ciphertext) {
+                        Some(Ok(pt)) => Some(pt),
+                        Some(Err(_)) => return CKR_ENCRYPTED_DATA_INVALID,
+                        None => None,
+                    };
+                #[cfg(target_arch = "wasm32")]
+                let awslc_pt: Option<Vec<u8>> = None;
+                if let Some(pt) = awslc_pt {
+                    pt
+                } else {
                 use rsa::pkcs8::DecodePrivateKey;
                 let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&key_bytes) {
                     Ok(k) => k,
@@ -9294,6 +9404,7 @@ pub fn C_Decrypt(
                     // timing risk documented above, which is inherent to the
                     // `rsa` crate's own primitive.
                     Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                }
                 }
             }
             // T1 — ChaCha20-Poly1305 AEAD open (§6.25); tag verified before
@@ -12059,8 +12170,22 @@ pub fn C_WrapKey(
             if wrapping_key.len() < 4 + n_len + 1 {
                 return CKR_KEY_TYPE_INCONSISTENT;
             }
-            let n = rsa::BigUint::from_bytes_be(&wrapping_key[4..4 + n_len]);
-            let e = rsa::BigUint::from_bytes_be(&wrapping_key[4 + n_len..]);
+            let n_be = &wrapping_key[4..4 + n_len];
+            let e_be = &wrapping_key[4 + n_len..];
+            #[cfg(not(target_arch = "wasm32"))]
+            let awslc_ct: Option<Vec<u8>> =
+                match crate::crypto::awslc::rsa_pkcs1_encrypt_components(n_be, e_be, &key_to_wrap) {
+                    Some(Ok(ct)) => Some(ct),
+                    Some(Err(_)) => return CKR_FUNCTION_FAILED,
+                    None => None,
+                };
+            #[cfg(target_arch = "wasm32")]
+            let awslc_ct: Option<Vec<u8>> = None;
+            if let Some(ct) = awslc_ct {
+                ct
+            } else {
+            let n = rsa::BigUint::from_bytes_be(n_be);
+            let e = rsa::BigUint::from_bytes_be(e_be);
             let pk = match rsa::RsaPublicKey::new(n, e) {
                 Ok(k) => k,
                 Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
@@ -12071,6 +12196,7 @@ pub fn C_WrapKey(
                     Err(_) => return CKR_FUNCTION_FAILED,
                 }
             })
+            }
         } else if is_kwp {
             use aes::cipher::generic_array::GenericArray;
             // AES-KWP (RFC 5649) — supports arbitrary-length data
@@ -12270,8 +12396,21 @@ pub fn C_UnwrapKey(
                 Err(rv) => return rv,
             }
         } else if is_rsa_pkcs {
-            // Raw RSA PKCS#1 v1.5 unwrap — same PKCS8 private-key parse as
-            // the OAEP arm above, PKCS1v15 padding instead of OAEP.
+            // Raw RSA PKCS#1 v1.5 unwrap. Unwrap IS decryption, so this is the
+            // same Bleichenbacher/Marvin oracle as C_Decrypt's CKM_RSA_PKCS
+            // arm — route it through AWS-LC's constant-time unpad on native.
+            #[cfg(not(target_arch = "wasm32"))]
+            let awslc_pt: Option<Vec<u8>> =
+                match crate::crypto::awslc::rsa_pkcs1_decrypt(&unwrapping_key, wrapped_data) {
+                    Some(Ok(pt)) => Some(pt),
+                    Some(Err(_)) => return CKR_ENCRYPTED_DATA_INVALID,
+                    None => None,
+                };
+            #[cfg(target_arch = "wasm32")]
+            let awslc_pt: Option<Vec<u8>> = None;
+            if let Some(pt) = awslc_pt {
+                pt
+            } else {
             use rsa::pkcs8::DecodePrivateKey;
             let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&unwrapping_key) {
                 Ok(k) => k,
@@ -12281,6 +12420,7 @@ pub fn C_UnwrapKey(
                 Ok(pt) => pt,
                 // §6.16 — wrapped-key decode failure (uniform code).
                 Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+            }
             }
         } else if is_kwp {
             use aes::cipher::generic_array::GenericArray;
@@ -14465,6 +14605,7 @@ pub fn C_SetAttributeValue(
 ) -> u32 {
     require_init!();
     require_session!(h_session);
+    drop_awslc_key_cache();
     if p_template.is_null() && ul_count > 0 {
         return CKR_ARGUMENTS_BAD;
     }
@@ -19200,12 +19341,11 @@ mod pqc_vendor_kem_ffi_tests {
         );
     }
 
-    /// `#[ignore]`: a single mceliece6688128 keygen (Goppa code generation)
-    /// takes minutes in an unoptimized debug build — too slow for every CI
-    /// run. Run manually with `cargo test --release -- --ignored
-    /// classic_mceliece_6688128_round_trip` (release mode is fast).
+    /// Real mceliece6688128 keygen, at native debug-build speed thanks to
+    /// `rust/Cargo.toml`'s `[profile.dev.package.classic-mceliece-multi]
+    /// opt-level = 3` (implementation plan §4.1 step 4) — no longer needs
+    /// `#[ignore]`.
     #[test]
-    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn classic_mceliece_6688128_round_trip() {
         round_trip(
             CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN,
@@ -19244,9 +19384,8 @@ mod pqc_vendor_kem_ffi_tests {
         }
     }
 
-    /// Classic McEliece is scoped to `mceliece6688128` only (implementation
-    /// plan Phase 0.5) — any other CKA_PARAMETER_SET value is rejected, not
-    /// silently coerced.
+    /// A `CKA_PARAMETER_SET` value outside the 10 valid `CKP_CLASSIC_MCELIECE_*`
+    /// values is rejected, not silently coerced.
     #[test]
     fn classic_mceliece_keygen_wrong_parameter_set_attribute_value_invalid() {
         let _guard = test_lock::acquire();
@@ -19313,11 +19452,10 @@ mod pqc_vendor_kem_ffi_tests {
     /// for ML-KEM) — encapsulate/decapsulate on a key of the wrong PQC
     /// vendor KEM family → CKR_KEY_TYPE_INCONSISTENT, not a crypto attempt.
     ///
-    /// `#[ignore]`: builds a real mceliece6688128 keypair first — minutes-slow
-    /// in an unoptimized debug build. Run manually with `cargo test --release
-    /// -- --ignored encapsulate_on_wrong_key_family` (release mode is fast).
+    /// Real keygen at native debug-build speed (see the doc comment on
+    /// `classic_mceliece_6688128_round_trip` above) — no longer needs
+    /// `#[ignore]`.
     #[test]
-    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn encapsulate_on_wrong_key_family_key_type_inconsistent() {
         let _guard = test_lock::acquire();
         setup();
@@ -19367,12 +19505,10 @@ mod pqc_vendor_kem_ffi_tests {
     /// §5.18.9-equivalent — a ciphertext of the wrong length for the vendor
     /// KEM's parameter set → CKR_ENCRYPTED_DATA_INVALID.
     ///
-    /// `#[ignore]`: builds a real mceliece6688128 keypair first — minutes-slow
-    /// in an unoptimized debug build. Run manually with `cargo test --release
-    /// -- --ignored pqc_vendor_kem_ffi_tests::decapsulate_wrong_ciphertext_len`
-    /// (release mode is fast).
+    /// Real keygen at native debug-build speed (see the doc comment on
+    /// `classic_mceliece_6688128_round_trip` above) — no longer needs
+    /// `#[ignore]`.
     #[test]
-    #[ignore = "mceliece6688128 keygen is minutes-slow in debug builds — see doc comment"]
     fn decapsulate_wrong_ciphertext_len_encrypted_data_invalid() {
         let _guard = test_lock::acquire();
         setup();
@@ -22940,7 +23076,8 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     // tear down session state, and the key identity is most wanted on exactly
     // those records.
     let logging = crate::oplog::enabled();
-    let mech = if logging && !p_mechanism.is_null() {
+    let ring = crate::behaviour::enabled();
+    let mech = if (logging || ring) && !p_mechanism.is_null() {
         unsafe { ck_param::mech(p_mechanism).mechanism }
     } else {
         0
@@ -22950,22 +23087,38 @@ pub fn C_SignInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     } else {
         String::new()
     };
+    // Timed only when a sink will see the figure: a logging-off, ring-off
+    // run pays no clock read (hsm-perf-bench's measured configuration).
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
     let rv = C_SignInit_impl(h_session, p_mechanism, h_key);
 
+    let dur = crate::behaviour::elapsed_us(t0);
     if logging {
         crate::oplog::emit(
             "C_SignInit",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x}",
+                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
                 key_fields,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        let mech = (!p_mechanism.is_null()).then_some(mech);
+        crate::behaviour::emit(crate::behaviour::p11_with_key(
+            crate::behaviour::OP_PKCS11_C_SIGNINIT,
+            mech,
+            h_key,
+            rv,
+            0,
+            dur,
+        ));
     }
     rv
 }
@@ -22978,9 +23131,14 @@ pub fn C_Sign(
     p_signature: *mut u8,
     pul_signature_len: *mut u32,
 ) -> u32 {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
     let rv = C_Sign_impl(h_session, p_data, ul_data_len, p_signature, pul_signature_len);
 
-    if crate::oplog::enabled() {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging {
         // probe=1 marks the mandatory PKCS#11 length-query call (p_signature
         // null) that every caller makes before the real one. A consumer
         // counting signatures must skip those rather than double every count.
@@ -22992,24 +23150,44 @@ pub fn C_Sign(
         crate::oplog::emit(
             "C_Sign",
             &format!(
-                "sess={} in={} out={} probe={} rv={} rv_id=0x{:08x}",
+                "sess={} in={} out={} probe={} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 ul_data_len,
                 out,
                 if p_signature.is_null() { 1 } else { 0 },
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    // The session, not this call, holds the mechanism — alg stays 0 here and
+    // a consumer joins on the preceding C_SignInit record, as the PQCEV
+    // consumer already does. Probe calls are recorded too: they are part of
+    // the caller's behaviour, and a probe storm is one of the shapes the
+    // monitor exists to see.
+    if ring {
+        crate::behaviour::emit(crate::behaviour::p11(
+            crate::behaviour::OP_PKCS11_C_SIGN,
+            crate::behaviour::ALG_NONE,
+            rv,
+            ul_data_len as u64,
+            dur,
+        ));
     }
     rv
 }
 
 #[wasm_bindgen(js_name = _C_SignFinal)]
 pub fn C_SignFinal(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut u32) -> u32 {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
     let rv = C_SignFinal_impl(h_session, p_signature, pul_signature_len);
 
-    if crate::oplog::enabled() {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging {
         // C_SignUpdate is deliberately NOT recorded: it produces no signature,
         // and instrumenting it would emit one line per chunk of a large input
         // for no added evidence.
@@ -23021,14 +23199,24 @@ pub fn C_SignFinal(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut
         crate::oplog::emit(
             "C_SignFinal",
             &format!(
-                "sess={} out={} probe={} rv={} rv_id=0x{:08x}",
+                "sess={} out={} probe={} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 out,
                 if p_signature.is_null() { 1 } else { 0 },
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        crate::behaviour::emit(crate::behaviour::p11(
+            crate::behaviour::OP_PKCS11_C_SIGNFINAL,
+            crate::behaviour::ALG_NONE,
+            rv,
+            0,
+            dur,
+        ));
     }
     rv
 }
@@ -23044,7 +23232,8 @@ pub fn C_SignFinal(h_session: u32, p_signature: *mut u8, pul_signature_len: *mut
 #[wasm_bindgen(js_name = _C_VerifyInit)]
 pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     let logging = crate::oplog::enabled();
-    let mech = if logging && !p_mechanism.is_null() {
+    let ring = crate::behaviour::enabled();
+    let mech = if (logging || ring) && !p_mechanism.is_null() {
         unsafe { ck_param::mech(p_mechanism).mechanism }
     } else {
         0
@@ -23054,22 +23243,36 @@ pub fn C_VerifyInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     } else {
         String::new()
     };
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
     let rv = C_VerifyInit_impl(h_session, p_mechanism, h_key);
 
+    let dur = crate::behaviour::elapsed_us(t0);
     if logging {
         crate::oplog::emit(
             "C_VerifyInit",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x}",
+                "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
                 key_fields,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        let mech = (!p_mechanism.is_null()).then_some(mech);
+        crate::behaviour::emit(crate::behaviour::p11_with_key(
+            crate::behaviour::OP_PKCS11_C_VERIFYINIT,
+            mech,
+            h_key,
+            rv,
+            0,
+            dur,
+        ));
     }
     rv
 }
@@ -23082,9 +23285,14 @@ pub fn C_Verify(
     p_signature: *mut u8,
     ul_signature_len: u32,
 ) -> u32 {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
     let rv = C_Verify_impl(h_session, p_data, ul_data_len, p_signature, ul_signature_len);
 
-    if crate::oplog::enabled() {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging {
         // No `out`/probe field the way C_Sign's is meaningful: verify has no
         // output-buffer size-query phase at all (PKCS#11 v3.2 §5.15.2 — the
         // signature is an INPUT the caller already holds, never queried in
@@ -23102,22 +23310,37 @@ pub fn C_Verify(
         crate::oplog::emit(
             "C_Verify",
             &format!(
-                "sess={} in={} probe=0 rv={} rv_id=0x{:08x}",
+                "sess={} in={} probe=0 rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 ul_data_len,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        crate::behaviour::emit(crate::behaviour::p11(
+            crate::behaviour::OP_PKCS11_C_VERIFY,
+            crate::behaviour::ALG_NONE,
+            rv,
+            ul_data_len as u64,
+            dur,
+        ));
     }
     rv
 }
 
 #[wasm_bindgen(js_name = _C_VerifyFinal)]
 pub fn C_VerifyFinal(h_session: u32, p_signature: *mut u8, ul_signature_len: u32) -> u32 {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
     let rv = C_VerifyFinal_impl(h_session, p_signature, ul_signature_len);
 
-    if crate::oplog::enabled() {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging {
         // C_VerifyUpdate deliberately NOT recorded — same reasoning as
         // C_SignUpdate above. C_VerifyFinal_impl delegates to the (wrapped)
         // C_Verify internally (mirrors C_SignFinal_impl calling the wrapped
@@ -23132,13 +23355,23 @@ pub fn C_VerifyFinal(h_session: u32, p_signature: *mut u8, ul_signature_len: u32
         crate::oplog::emit(
             "C_VerifyFinal",
             &format!(
-                "sess={} siglen={} probe=0 rv={} rv_id=0x{:08x}",
+                "sess={} siglen={} probe=0 rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 ul_signature_len,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        crate::behaviour::emit(crate::behaviour::p11(
+            crate::behaviour::OP_PKCS11_C_VERIFYFINAL,
+            crate::behaviour::ALG_NONE,
+            rv,
+            0,
+            dur,
+        ));
     }
     rv
 }
@@ -23154,6 +23387,10 @@ pub fn C_GenerateKeyPair(
     ph_public_key: *mut u32,
     ph_private_key: *mut u32,
 ) -> u32 {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
     let rv = C_GenerateKeyPair_impl(
         h_session,
         p_mechanism,
@@ -23165,7 +23402,26 @@ pub fn C_GenerateKeyPair(
         ph_private_key,
     );
 
-    if crate::oplog::enabled() {
+    let dur = crate::behaviour::elapsed_us(t0);
+    if ring {
+        // Parameter set read off the private key when there is one; a failed
+        // keygen records the family as ALG_OTHER rather than guessing a size.
+        let mech = (!p_mechanism.is_null()).then(|| unsafe { ck_param::mech(p_mechanism).mechanism });
+        let h_priv = if rv == CKR_OK && !ph_private_key.is_null() {
+            unsafe { *ph_private_key }
+        } else {
+            0
+        };
+        crate::behaviour::emit(crate::behaviour::p11_with_key(
+            crate::behaviour::OP_PKCS11_C_GENERATEKEYPAIR,
+            mech,
+            h_priv,
+            rv,
+            0,
+            dur,
+        ));
+    }
+    if logging {
         let mech = if p_mechanism.is_null() {
             0
         } else {
@@ -23199,7 +23455,7 @@ pub fn C_GenerateKeyPair(
         crate::oplog::emit(
             "C_GenerateKeyPair",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} {} hpub={} hpriv={} rv={} rv_id=0x{:08x}",
+                "sess={} mech={} mech_id=0x{:08x} {} {} hpub={} hpriv={} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
@@ -23208,7 +23464,8 @@ pub fn C_GenerateKeyPair(
                 h_pub,
                 h_priv,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
     }
@@ -23227,7 +23484,8 @@ pub fn C_EncapsulateKey(
     ph_key: *mut u32,
 ) -> u32 {
     let logging = crate::oplog::enabled();
-    let mech = if logging && !p_mechanism.is_null() {
+    let ring = crate::behaviour::enabled();
+    let mech = if (logging || ring) && !p_mechanism.is_null() {
         unsafe { ck_param::mech(p_mechanism).mechanism }
     } else {
         0
@@ -23237,6 +23495,7 @@ pub fn C_EncapsulateKey(
     } else {
         String::new()
     };
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
     let rv = C_EncapsulateKey_impl(
         h_session,
@@ -23249,6 +23508,7 @@ pub fn C_EncapsulateKey(
         ph_key,
     );
 
+    let dur = crate::behaviour::elapsed_us(t0);
     if logging {
         let ct = if pul_ciphertext_len.is_null() {
             0
@@ -23258,7 +23518,7 @@ pub fn C_EncapsulateKey(
         crate::oplog::emit(
             "C_EncapsulateKey",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} ct={} probe={} rv={} rv_id=0x{:08x}",
+                "sess={} mech={} mech_id=0x{:08x} {} ct={} probe={} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
@@ -23266,9 +23526,21 @@ pub fn C_EncapsulateKey(
                 ct,
                 if p_ciphertext.is_null() { 1 } else { 0 },
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        let mech = (!p_mechanism.is_null()).then_some(mech);
+        crate::behaviour::emit(crate::behaviour::p11_with_key(
+            crate::behaviour::OP_PKCS11_C_ENCAPSULATEKEY,
+            mech,
+            h_key,
+            rv,
+            0,
+            dur,
+        ));
     }
     rv
 }
@@ -23285,7 +23557,8 @@ pub fn C_DecapsulateKey(
     ph_key: *mut u32,
 ) -> u32 {
     let logging = crate::oplog::enabled();
-    let mech = if logging && !p_mechanism.is_null() {
+    let ring = crate::behaviour::enabled();
+    let mech = if (logging || ring) && !p_mechanism.is_null() {
         unsafe { ck_param::mech(p_mechanism).mechanism }
     } else {
         0
@@ -23295,6 +23568,7 @@ pub fn C_DecapsulateKey(
     } else {
         String::new()
     };
+    let t0 = (logging || ring).then(std::time::Instant::now);
 
     let rv = C_DecapsulateKey_impl(
         h_session,
@@ -23307,22 +23581,35 @@ pub fn C_DecapsulateKey(
         ph_key,
     );
 
+    let dur = crate::behaviour::elapsed_us(t0);
     if logging {
         // No probe field: decapsulation takes the ciphertext by value and has
         // no length-query form to distinguish.
         crate::oplog::emit(
             "C_DecapsulateKey",
             &format!(
-                "sess={} mech={} mech_id=0x{:08x} {} ct={} rv={} rv_id=0x{:08x}",
+                "sess={} mech={} mech_id=0x{:08x} {} ct={} rv={} rv_id=0x{:08x} dur={}",
                 h_session,
                 crate::oplog::mech_name(mech),
                 mech,
                 key_fields,
                 ul_ciphertext_len,
                 crate::oplog::rv_name(rv),
-                rv
+                rv,
+                dur
             ),
         );
+    }
+    if ring {
+        let mech = (!p_mechanism.is_null()).then_some(mech);
+        crate::behaviour::emit(crate::behaviour::p11_with_key(
+            crate::behaviour::OP_PKCS11_C_DECAPSULATEKEY,
+            mech,
+            h_private_key,
+            rv,
+            ul_ciphertext_len as u64,
+            dur,
+        ));
     }
     rv
 }

@@ -6,8 +6,14 @@
 //! scenario does not need to know which one it is talking to:
 //!
 //! ```text
-//! PQCEV v=1 ts=<ms since epoch> pid=<pid> op=<C_ function> <key=value>...
+//! PQCEV v=1 ts=<ms since epoch> pid=<pid> op=<C_ function> <key=value>... dur=<µs>
 //! ```
+//!
+//! `dur=` is the wall time of the dispatch the record describes, measured
+//! around the call in the same function that emits it (2026-09-13, added
+//! with the behaviour ring — [`crate::behaviour`] carries the same figure
+//! bucketed). On the `native::*` path, which synthesises an init record next
+//! to the operation record, the init record carries `dur=0`.
 //!
 //! Why this exists: before it, the shipped Rust library emitted **nothing at
 //! all** — the only `println!`/`eprintln!` in the tree live in a KAT generator.

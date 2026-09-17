@@ -1,0 +1,26 @@
+[package]
+name = "classic-mceliece-multi"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Classic McEliece (all 10 NIST/ISO parameter sets, pure Rust) — a fork of classic-mceliece-rust 3.1.0 that compiles every parameter set into one build instead of exactly one per Cargo feature."
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+rand = { version = "0.8", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+zeroize = { version = "1.5", default-features = false }
+
+[dev-dependencies]
+# OS entropy source, for examples/cross_engine_cli.rs only — the library
+# itself stays default-features=false (no_std, no OS RNG dependency).
+rand = { version = "0.8", features = ["std", "std_rng"] }
+
+[profile.dev]
+opt-level = 3
+
+[profile.test]
+opt-level = 3

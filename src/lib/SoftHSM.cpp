@@ -35,6 +35,7 @@
 #include "config.h"
 #include "log.h"
 #include "OpLog.h"
+#include "BehaviourRing.h"
 #include "access.h"
 #include "Configuration.h"
 #include "SimpleConfigLoader.h"
@@ -252,6 +253,25 @@ std::string SoftHSM::opLogKeyFields(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE
 	out += " paramset=";
 	out += paramSetStr;
 	return out;
+}
+
+uint8_t SoftHSM::behaviourAlg(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey, CK_MECHANISM_TYPE mech)
+{
+	unsigned long paramSet = 0;
+	if (handleManager != NULL && hKey != CK_INVALID_HANDLE)
+	{
+		// Same guard discipline as opLogKeyFields: taken and released here,
+		// before the caller dispatches into the real operation.
+		auto guard = handleManager->getSessionShared(hSession);
+		Session* session = guard.get();
+		if (session != NULL && session->getSlot() != NULL)
+		{
+			OSObject* obj = (OSObject*)handleManager->getObject(hKey, session->getSlot()->getSlotID());
+			if (obj != NULL && obj->isValid() && obj->attributeExists(CKA_PARAMETER_SET))
+				paramSet = obj->getUnsignedLongValue(CKA_PARAMETER_SET, 0);
+		}
+	}
+	return BehaviourIds::algFromCkm((unsigned long)mech, paramSet);
 }
 
 std::string SoftHSM::opLogKeyCustodyFields(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey)

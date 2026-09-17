@@ -135,3 +135,13 @@ ab1d36f468d8020839a1dc4d1c25f27253788ca7dd474b91416641318b29eeae  ./sha/sha3-512
 26cba54ab5ba58120d87a1eed1c2b3d917e5e15a9ccdea066abfd4a2a083ee61  ./sha/sha512-acvp.json
 86d2be1d747b4001869cf08b63804717b210010f56819deb8f86a049ad09d520  ./slh-dsa/slh-dsa-acvp.json
 794e894e899e85c8530d959e3efa202a9454c33ec08e0fbdd2d8e8a0372c5f01  ./ttlv-wire/manifest.json
+76351ed2e95a616ca76230bac579cead21012d89181c7398381d0bbe904ab92c  ./classic-mceliece/raw/mceliece348864/kat_kem.rsp
+d0d5ea348a181740862dcc8476ff7d00ce44d1c6e36b2145289d97f580f2cd7d  ./classic-mceliece/raw/mceliece348864f/kat_kem.rsp
+fd785edfe1b721fb24fe159cb9f30cc17daec3d188d59a4bf47a83388880192e  ./classic-mceliece/raw/mceliece460896/kat_kem.rsp
+552da50baff2666db7b64486c88da4e2b65b25c3d5424be682ca08ffce15a356  ./classic-mceliece/raw/mceliece460896f/kat_kem.rsp
+3f926328959729c61a11b11ab6326246a42d9b3e76943bba2625342ea33723e2  ./classic-mceliece/raw/mceliece6688128/kat_kem.rsp
+7b64c9882a00bc984e0ca9d3748d0b1bd9215d1bcf921643ee88d28d539303d8  ./classic-mceliece/raw/mceliece6688128f/kat_kem.rsp
+e4d608fa9795c1a1704709ab9df3940ae1dbf0f708cc0dbdf76c8f3173088e46  ./classic-mceliece/raw/mceliece6960119/kat_kem.rsp
+d6d3e929ff505108fd545d14df5f5bac234cd6d882f0eed3fd628f122e3093c6  ./classic-mceliece/raw/mceliece6960119f/kat_kem.rsp
+beb28fc0d1555a0028afeb6ebc72b8337f424a826be3d49b47759b8bda50db90  ./classic-mceliece/raw/mceliece8192128/kat_kem.rsp
+3fdb40d47705829c16de4fb5a81f7c095eb4dadc306cfc2c89eff2f483c42402  ./classic-mceliece/raw/mceliece8192128f/kat_kem.rsp

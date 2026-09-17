@@ -196,16 +196,17 @@ fips205 = "0.4.1"
 frodo-kem = { version = "0.1", default-features = false, features = [
     "frodo640aes", "frodo640shake", "frodo976aes", "frodo976shake", "frodo1344aes", "frodo1344shake",
 ] }
-# Only one parameter-set feature may be enabled at a time (crate constraint — see
-# cacp-frodokem-mceliece-softhsm-kmip-policy-plan-07062026.md Phase 0.5). Scoped to
-# mceliece6688128 (BSI's Category-5 pick) for this initial slice; 460896/8192128
-# follow-up tracked in that plan.
-# v3+ required — v2.0.2's ciphertext included a non-spec confirmation-hash
-# addition (K = H(1,e,C,H(2,e)) instead of the official spec's K = H(1,e,C));
-# v3.1.0 fixed this, matching mceliece-spec-20221023.pdf and liboqs exactly
-# (verified directly against both sources' source code — see the FrodoKEM/
-# Classic-McEliece/HQC implementation plan).
-classic-mceliece-rust = { version = "3", default-features = false, features = ["mceliece6688128", "alloc", "zeroize"] }
+# All 10 parameter sets in one build — a vendored fork of classic-mceliece-rust
+# 3.1.0 (not a [patch.crates-io], since the public API changed; a genuinely new
+# package name instead, same convention decision as fips204-patched/fips205-patched
+# vs. an upstream crate whose API could stay unchanged). See
+# classic-mceliece-multi/README.md and the implementation plan
+# (docs/implementation-plan-classic-mceliece-all-parameter-sets-2026-09-08.md) §4.
+# Supersedes the single-feature `classic-mceliece-rust = "3"` dependency this line
+# used to be (BSI's Category-5 mceliece6688128 pick only) — the v3+ ciphertext fix
+# (K = H(1,e,C), not the non-spec v2.0.2 K = H(1,e,C,H(2,e))) still applies, since
+# this fork is derived from the same 3.1.0 tag.
+classic-mceliece-multi = { path = "classic-mceliece-multi" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Native store backend (`store::sqlite`) — target-gated as a DEPENDENCY,
@@ -220,6 +221,29 @@ classic-mceliece-rust = { version = "3", default-features = false, features = ["
 # through emcc. kmip/Cargo.toml gates rusqlite the same way, via its
 # `native` feature, for the identical reason.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Behaviour ring (`behaviour`): mmap/munmap only. Already in Cargo.lock
+# transitively, so no new crate enters the graph; same wasm gate as rusqlite.
+libc = "0.2"
+# Native crypto fast path (`crypto::awslc`): AWS-LC via aws-lc-rs, the
+# library rustls moved to as its default. Two reasons, both measured on the
+# FRDM-IMX95 board 2026-09-15 against OpenSSL 3.6.3 on the same core:
+#   * the pure-Rust `rsa` crate signs RSA-2048 at 57.7/s vs 166.8/s (2.9×
+#     slower) and `p256` signs ECDSA P-256 at 468/s vs 7861/s (16.8× slower —
+#     AWS-LC carries hand-written P-256 assembly, `p256` cannot);
+#   * `rsa` 0.9 is RUSTSEC-2023-0071 (Marvin: private-key recovery through a
+#     network-observable timing side channel), unpatched upstream, and this
+#     engine is statically linked into the KMIP server on :5696 where that
+#     timing IS network-observable. AWS-LC's RSA is constant-time.
+# Same wasm gate as rusqlite above, for the same reason: aws-lc-sys is a C
+# library and only targets wasm32-unknown-emscripten, never the hub's
+# wasm32-unknown-unknown / wasm-bindgen build. On wasm32 the pure-Rust crates
+# stay the only backend — there is no network timing oracle against a user's
+# own key inside their own browser tab. `rsa` and `p256` are NOT removed on
+# native either: they remain the fallback for what AWS-LC deliberately does
+# not expose (raw CKM_RSA_X_509, unprefixed CKM_RSA_PKCS, PSS with a
+# caller-chosen salt length, MD5/SHA-1/SHA-224/SHA-3 RSA variants, and
+# BIP32's P-256 scalar arithmetic). See `crypto::awslc` for the dispatch rule.
+aws-lc-rs = "1"
 
 [target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
 pqc-hw = { path = "pqc-hw", optional = true }
@@ -246,6 +270,19 @@ hbs-lms = { path = "hbs-lms-patched" }
 # Optimize purely for size in WASM
 opt-level = "s"
 lto = true
+
+# Classic McEliece keygen (Gaussian elimination over a PK_NROWS x SYS_N/8 matrix)
+# is measured minutes-slow at opt-level=0 for the largest sets (23.6-24.0s per
+# 8192128f attempt alone, ~55x slower than --release — implementation plan §4.1
+# step 4) — Cargo profile sections are only read from the WORKSPACE ROOT manifest,
+# so classic-mceliece-multi's own [profile.dev]/[profile.test] (in its own
+# Cargo.toml, useful only when it's built standalone outside this workspace) are
+# silently ignored once it's a dependency here; this is the real fix for debug/test
+# builds of the engine itself.
+[profile.dev.package.classic-mceliece-multi]
+opt-level = 3
+[profile.test.package.classic-mceliece-multi]
+opt-level = 3
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

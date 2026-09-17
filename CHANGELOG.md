@@ -8,6 +8,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Behaviour event ring** (`behaviour/`, `PQC_BEHAVIOUR_RING`): every
+  producer on the appliance — both PKCS#11 engines at their evidence-log call
+  sites, the KMIP server (one record per response, plus policy deny / warn /
+  rekey / activation, TLS handshakes and admin routes) and the auth-failure
+  sink — writes one bucketed 8-byte record per operation into a shared
+  multi-producer ring file for an out-of-process behaviour monitor. Off unless
+  the variable is set; the id tables both engines use are generated from one
+  `behaviour/ids.json` and both test suites assert the same golden vectors.
+- **`dur=<µs>` on every `PQCEV` operation record**, both engines: the wall
+  time of the dispatch, measured in the function that emits it.
+
+- **AWS-LC constant-time RSA and NIST-curve ECDH fast path** (Rust engine,
+  native targets only). RSA PKCS#1 v1.5 sign/verify, RSA-OAEP and PKCS#1 v1.5
+  encrypt/decrypt, RSA key generation, and P-256/384/521 ECDH now run through
+  AWS-LC (`aws-lc-rs`) instead of the pure-Rust `rsa`/`p256` crates. The
+  wasm32 build is byte-for-byte unchanged — it keeps the pure-Rust path, which
+  also remains the conformance reference for every mechanism AWS-LC does not
+  expose (raw `CKM_RSA_X_509`, all RSA-PSS, deterministic ECDSA, the legacy
+  hash variants, sub-2048-bit keys). The KMIP server and both remoting
+  services link this engine, so they inherit the fast path with no source
+  change of their own. See `rust/src/crypto/awslc.rs`.
+- **Parsed-RSA-key cache on the AWS-LC fast path** (`rust/src/crypto/awslc_keycache.rs`).
+  Every RSA private-key operation used to call `from_pkcs8` on the caller's
+  DER, which inside AWS-LC re-runs `RSA_check_key`, rebuilds three Montgomery
+  contexts and creates a fresh blinding factor — once per operation. The
+  parsed key is now cached (keyed by SHA-256 of the PKCS#8 DER, so the same
+  key reached over PKCS#11, `native::sign`, or KMIP shares one parse), and
+  dropped wholesale on every lifecycle event that ends a key's accessibility
+  (`C_Finalize`, `C_Logout`, `C_CloseSession`, `C_CloseAllSessions`,
+  `C_InitToken`, `C_DestroyObject`, `C_SetAttributeValue`). Measured on the
+  FRDM-IMX95 (6× Cortex-A55 @ 1.8 GHz), RSA-2048 sign through the PKCS#11 C
+  ABI rose from 80.8 to 105.4 /s single-threaded and from 356 to 481 /s across
+  six cores.
+
 ### Changed
 
 - The KV260 resident ML-DSA-65 diagnostic now retains its UIO and DMA mappings
@@ -23,6 +59,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   discards the session and recomputes the complete operation in software. The
   slower standalone FPGA `ExpandA` hook is no longer installed while the two
   accelerators share one DMA allocation.
+
+### Security
+
+- **RSA PKCS#1 v1.5 decryption is now constant-time on native targets**
+  (RUSTSEC-2023-0071, the Marvin attack). The pure-Rust `rsa` crate's v1.5
+  decrypt leaks key material through a timing side channel and is unpatched
+  upstream; the KMIP server that exposes RSA on `:5696` statically links this
+  engine. That operation, and the OAEP and sign paths alongside it, now run on
+  AWS-LC's constant-time implementation. The `rsa` crate stays only on the
+  wasm32 build (no network timing oracle inside a browser tab) and as the
+  fallback for the mechanisms AWS-LC does not implement.
+
+### Fixed
+
+- **Auth-failure clients were counted by address *and port*.** The behaviour
+  ring bucketed a failing peer by `ip:port`, so seventeen refused handshakes
+  from one machine looked like seventeen different clients — the opposite of
+  what a brute-force signal should show. Found on the emulator under a forced
+  load; the bucket is now the address alone.
+- **KMIP `latency_ms` was always 0.** Every `KmipResponseSent` audit event
+  hard-coded `latency_ms: 0` at all nine emit sites; the dispatcher now times
+  each request from the moment it mints the correlation id and every emit site
+  reads that figure.
+- **The wasm no-C-crypto guard matched on filesystem paths, not crate names.**
+  `wasm_dependency_graph_has_no_c_backed_crypto` asserted on
+  `tree.contains("aws-lc-rs")` over raw `cargo tree` output, whose root line
+  carries the checkout path — so it failed in a worktree named after a banned
+  crate and matched `ring` inside unrelated crate names like `stringprep`. It
+  now compares the package-name token from each line, with a test pinning both
+  directions.
 
 ## [0.30.0] — 2026-09-09
 
@@ -59,6 +125,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `--javajce-remote` crash on an unbound variable, two stale
   openssl-provider assertions, and a missing `SeedableRng` import in the
   wasm+acvp build.
+- **Rust engine: Classic McEliece, all 10 parameter sets** (`348864`,
+  `348864f`, `460896`, `460896f`, `6688128`, `6688128f`, `6960119`,
+  `6960119f`, `8192128`, `8192128f` — BSI TR-02102-1 §2.4.2), up from the
+  single `mceliece6688128` variant this engine shipped before. Backed by a
+  new vendored fork, `rust/classic-mceliece-multi/`, which compiles every
+  parameter set into one build instead of the upstream `classic-mceliece-
+  rust` crate's one-per-Cargo-feature limit — see that crate's own
+  `README.md` and
+  `docs/implementation-plan-classic-mceliece-all-parameter-sets-2026-09-08.md`
+  for the design. `CKA_PARAMETER_SET` values `0x2`–`0xA` (`0x1`, unchanged,
+  stays `mceliece6688128`) join the PKCS#11 vendor mechanisms already
+  shipped (`CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN`/`_ENCAPSULATE`,
+  unchanged codepoints); `C_GetMechanismInfo`'s key-size range widens from a
+  single point (1,044,992 B) to the full span across all ten sets
+  (261,120–1,357,824 B). Verified against the official Round-4 KAT vectors
+  (all 10, byte-for-byte), against liboqs (bidirectional cross-validation,
+  the previously-shipped variant), and through the full PKCS#11 FFI path.
+  C++ engine parity (liboqs-backed, since `oqs-provider` dropped Classic
+  McEliece in 0.8.0+) is tracked separately as Phase 2 of the same plan.
+
+### Changed
+
+- `C_GetMechanismInfo` for `CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN`/
+  `_ENCAPSULATE` now reports `ulMinKeySize`/`ulMaxKeySize` as `261,120`/
+  `1,357,824` (public-key bytes across all 10 sets) instead of the single
+  hardcoded `1,044,992` the one-variant build reported.
 
 ## [0.29.0] — 2026-09-08
 

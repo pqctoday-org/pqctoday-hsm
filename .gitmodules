@@ -4,3 +4,6 @@
 [submodule "src/lib/crypto/stateful/xmss-reference"]
 	path = src/lib/crypto/stateful/xmss-reference
 	url = https://github.com/XMSS/xmss-reference.git
+[submodule "src/lib/crypto/oqs/liboqs"]
+	path = src/lib/crypto/oqs/liboqs
+	url = https://github.com/open-quantum-safe/liboqs.git

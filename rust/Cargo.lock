@@ -210,6 +210,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce2b2dcc879c3bae0d371e77c99f2238400ef24ec001394befa67b6e543add9e"
 dependencies = [
  "aws-lc-sys",
+ "untrusted 0.7.1",
  "zeroize",
 ]
 
@@ -545,10 +546,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "classic-mceliece-rust"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62a9b6d27e553269a76625911aa8cf6afaa8659f1b0c85b410cb5f51a87183d9"
+name = "classic-mceliece-multi"
+version = "0.1.0"
 dependencies = [
  "rand 0.8.6",
  "sha3 0.10.8",
@@ -2836,7 +2835,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.17",
  "libc",
- "untrusted",
+ "untrusted 0.9.0",
  "windows-sys 0.52.0",
 ]
 
@@ -2987,7 +2986,7 @@ dependencies = [
  "aws-lc-rs",
  "ring",
  "rustls-pki-types",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -3309,10 +3308,11 @@ dependencies = [
  "aes 0.8.4",
  "aes-gcm",
  "aes-kw",
+ "aws-lc-rs",
  "cbc",
  "chacha20 0.9.1",
  "chacha20poly1305",
- "classic-mceliece-rust",
+ "classic-mceliece-multi",
  "cmac",
  "console_error_panic_hook",
  "ctr",
@@ -3331,6 +3331,7 @@ dependencies = [
  "js-sys",
  "k256",
  "lazy_static",
+ "libc",
  "md-5",
  "ml-kem",
  "num-bigint",
@@ -3918,6 +3919,12 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "untrusted"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "untrusted"

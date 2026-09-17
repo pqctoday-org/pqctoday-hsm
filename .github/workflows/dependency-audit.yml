@@ -30,4 +30,10 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: Run cargo audit
+        # RUSTSEC-2023-0071 (rsa crate, Marvin): the exposed v1.5 DECRYPT
+        # oracle was closed 2026-09-15 by routing the engine's decrypt through
+        # aws-lc-rs on native (see SECURITY.md). The crate stays for non-oracle
+        # paths (openpgp interop, engine fallback mechanisms AWS-LC does not
+        # expose, KMIP DER format conversion), so the ID is still ignored until
+        # the crate ships a constant-time release (RustCrypto/RSA #390).
         run: cd rust && cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0097

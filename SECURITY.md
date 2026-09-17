@@ -43,22 +43,47 @@ Out of scope:
 
 ## Known Third-Party Dependency Risks
 
-- **`rsa` crate (`openpgp/lib/`) — Marvin Attack timing side-channel
+- **`rsa` crate — Marvin Attack timing side-channel
   (RUSTSEC-2023-0071 / GHSA-c58m-fhrc-h4r9, medium severity).** RSA PKCS#1
   v1.5 decryption in the `rsa` crate is vulnerable to a timing-based padding
   oracle. **No patched version exists upstream** as of 2026-09-02 (confirmed
   via GitHub's own security-advisory data — `first_patched_version: null`
-  for the affected range `<= 0.9.6`) — this is not a dependency bump this
-  project can make.
-  - **Accepted risk**, not a gap in this project's own code. `openpgp/`'s
-    `RSAEncryptSign` path exists solely for interop with legacy classical
-    OpenPGP keys; this fork's actual security posture rests on the PQC
-    composite algorithms (`MLDSA65_Ed25519`, `MLDSA87_Ed448`,
-    `MLKEM768_X25519`, `MLKEM1024_X448`), none of which touch the `rsa`
-    crate at all.
-  - Tracked via GitHub Dependabot (`openpgp/lib/Cargo.toml`). Revisit if/when
-    the `rsa` crate ships a fix, or consider removing RSA support entirely
-    if legacy interop is ever deprioritized.
+  for the affected range `<= 0.9.6`).
+  - **The exposed decrypt oracle is closed on native builds.** An earlier
+    version of this note scoped the advisory to `openpgp/`'s legacy
+    `RSAEncryptSign` path only. That was wrong: the `softhsmrustv3` engine's
+    own `CKM_RSA_PKCS` decrypt and `C_UnwrapKey` used the `rsa` crate's
+    non-constant-time unpad, and that engine is statically linked into the
+    `pqctoday-kmip` server that serves RSA decrypt over TLS on a network port
+    — precisely where the timing is observable. As of 2026-09-15 both v1.5
+    decrypt sites route through **aws-lc-rs** (AWS-LC's constant-time unpad)
+    on every non-wasm32 target (`rust/src/crypto/awslc.rs`), so the network
+    oracle no longer exists in a native build. RSA sign, verify, keygen, OAEP
+    and PKCS#1 v1.5 encrypt/decrypt, plus NIST-curve ECDH, moved to AWS-LC in
+    the same change (1.39x RSA-2048 sign measured on the FRDM-IMX95 A55).
+    **ECDSA deliberately stays on the pure-Rust `p256`/`p384`/`p521` crates**:
+    they sign with RFC 6979 deterministic nonces, which this engine's contract
+    relies on, and aws-lc-rs offers no deterministic-ECDSA API — so ECDSA keeps
+    its determinism (and is unaffected by RUSTSEC-2023-0071, which is a
+    v1.5-decrypt issue, not an ECDSA one).
+  - **The `rsa` crate is still in the tree, so the advisory ID remains
+    ignored in CI**, but only on paths that are *not* the Marvin decrypt
+    surface: (a) `openpgp/`'s legacy classical OpenPGP interop; (b) the engine
+    fallback for mechanisms AWS-LC does not expose (raw `CKM_RSA_X_509`,
+    unprefixed `CKM_RSA_PKCS`, PSS with a caller-chosen salt length, and the
+    MD5/SHA-1/SHA-224/SHA-3 RSA variants) — none of which is v1.5 decryption;
+    (c) `pqctoday-kmip`'s DER key-format conversion (`KeyFormatType`
+    PKCS#1↔PKCS#8, component reconstruction), which performs no private-key
+    math and has no timing oracle. This fork's core posture continues to rest
+    on the PQC composite algorithms (`MLDSA65_Ed25519`, `MLDSA87_Ed448`,
+    `MLKEM768_X25519`, `MLKEM1024_X448`), none of which touch `rsa` at all.
+  - **wasm32** keeps the pure-Rust `rsa` path (aws-lc-rs is a C library and
+    does not build for the hub's `wasm32-unknown-unknown` target). A browser
+    tab has no network-observable timing channel against its own in-page key,
+    so the oracle that matters on a server does not apply there.
+  - Tracked via GitHub Dependabot. Revisit if/when the `rsa` crate ships a
+    constant-time release (its `crypto-bigint` migration, RustCrypto/RSA #390),
+    which would let the fallback paths drop the AWS-LC split.
 
 ## WASM Security Limitations
 
