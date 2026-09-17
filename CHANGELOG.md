@@ -44,6 +44,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ABI rose from 80.8 to 105.4 /s single-threaded and from 356 to 481 /s across
   six cores.
 
+### Changed
+
+- The KV260 resident ML-DSA-65 diagnostic now retains its UIO and DMA mappings
+  across a benchmark session, serializes ownership with a process lock, and
+  synchronizes and scrubs only the 41,984-byte live command region. Per-stage
+  timings separate encoding, DMA ownership transfers, FPGA execution,
+  decoding and zeroization. The one-shot API remains as a compatibility
+  wrapper around the session. A diagnostic cached-matrix mode retains the
+  30,720-byte public matrix and transfers and scrubs only the per-operation
+  vector/output region.
+- The optional KV260 Rust ML-DSA-65 path now routes key-generation and signing
+  matrix/vector products through the resident cached session. Hardware failure
+  discards the session and recomputes the complete operation in software. The
+  slower standalone FPGA `ExpandA` hook is no longer installed while the two
+  accelerators share one DMA allocation.
+
 ### Security
 
 - **RSA PKCS#1 v1.5 decryption is now constant-time on native targets**

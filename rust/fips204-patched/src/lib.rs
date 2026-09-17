@@ -116,7 +116,10 @@ mod high_low;
 mod ml_dsa;
 
 #[cfg(feature = "hw-accel")]
-pub use hw_accel::{ExpandAHook, set_expand_a_hook};
+pub use hw_accel::{
+    ExpandAHook, Mldsa65MatVecHook, Mldsa65SignHook, set_expand_a_hook,
+    set_mldsa65_matvec_hook, set_mldsa65_sign_hook,
+};
 mod ntt;
 mod types;
 

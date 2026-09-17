@@ -9,6 +9,41 @@ use crate::helpers::{
 use crate::high_low::{high_bits, low_bits, make_hint, power2round, use_hint};
 use crate::ntt::{inv_ntt, ntt};
 use crate::types::{PrivateKey, PublicKey, R, T};
+#[cfg(feature = "hw-accel")]
+use std::vec::Vec;
+
+fn matrix_vector_product<const K: usize, const L: usize>(
+    matrix: &[[T; L]; K], _matrix_flat: Option<&[i32]>, vector: &[R; L],
+) -> [R; K] {
+    #[cfg(feature = "hw-accel")]
+    if K == 6 && L == 5 {
+        let owned_matrix;
+        let flat_matrix = if let Some(cached) = _matrix_flat {
+            cached
+        } else {
+            owned_matrix = matrix
+                .iter()
+                .flat_map(|row| row.iter())
+                .flat_map(|polynomial| polynomial.0)
+                .collect::<Vec<i32>>();
+            &owned_matrix
+        };
+        let flat_vector: Vec<i32> = vector
+            .iter()
+            .flat_map(|polynomial| polynomial.0)
+            .collect();
+        if let Some(output) = crate::hw_accel::mldsa65_matvec(flat_matrix, &flat_vector) {
+            if output.len() == K * 256 {
+                return core::array::from_fn(|row| {
+                    R(core::array::from_fn(|coefficient| output[row * 256 + coefficient]))
+                });
+            }
+        }
+    }
+    let vector_hat: [T; L] = ntt(vector);
+    let product_hat: [T; K] = mat_vec_mul(matrix, &vector_hat);
+    inv_ntt(&product_hat)
+}
 use crate::{D, Q};
 use rand_core::CryptoRngCore;
 use sha3::digest::XofReader;
@@ -95,9 +130,8 @@ pub(crate) fn key_gen_internal<
     // 6: (t_1, t_0) ← Power2Round(t, d)    ▷ Compress t
     let (t_1, t_0): ([R; K], [R; K]) = {
         let cap_a_hat: [[T; L]; K] = expand_a::<CTEST, K, L>(&rho);
-        let s_1_hat: [T; L] = ntt(&s_1);
-        let as1_hat: [T; K] = mat_vec_mul(&cap_a_hat, &s_1_hat);
-        let t_not_reduced: [R; K] = add_vector_ntt(&inv_ntt(&as1_hat), &s_2);
+        let t_not_reduced: [R; K] =
+            add_vector_ntt(&matrix_vector_product(&cap_a_hat, None, &s_1), &s_2);
         let t: [R; K] = core::array::from_fn(|k| {
             R(core::array::from_fn(|n| full_reduce32(t_not_reduced[k].0[n])))
         });
@@ -194,6 +228,16 @@ pub(crate) fn sign_internal<
     //
     // 5: cap_a_hat ← ExpandA(ρ)    ▷ A is generated and stored in NTT representation as Â
     let cap_a_hat: [[T; L]; K] = expand_a::<CTEST, K, L>(rho);
+    #[cfg(feature = "hw-accel")]
+    let cap_a_flat = (K == 6 && L == 5).then(|| {
+        cap_a_hat
+            .iter()
+            .flat_map(|row| row.iter())
+            .flat_map(|polynomial| polynomial.0)
+            .collect::<Vec<i32>>()
+    });
+    #[cfg(not(feature = "hw-accel"))]
+    let cap_a_flat: Option<&[i32]> = None;
 
     // 6: 𝜇 ← H(BytesToBits(𝑡𝑟)||𝑀 , 64)    ▷ Compute message representative µ
     // Calculate mu based on which of the three different paths led us here.
@@ -221,6 +265,26 @@ pub(crate) fn sign_internal<
     let mut rho_prime = [0u8; 64];
     h7.read(&mut rho_prime);
 
+    #[cfg(feature = "hw-accel")]
+    if K == 6 && L == 5 {
+        let s1 = s_1_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>();
+        let s2 = s_2_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>();
+        let t0 = t_0_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>();
+        if let Some(signature) = crate::hw_accel::mldsa65_sign(
+            cap_a_flat.as_deref().expect("ML-DSA-65 matrix"),
+            &s1,
+            &s2,
+            &t0,
+            &mu,
+            &rho_prime,
+            rnd.iter().any(|byte| *byte != 0),
+        ) {
+            if let Ok(signature) = signature.try_into() {
+                return signature;
+            }
+        }
+    }
+
     // 8: κ ← 0    ▷ Initialize counter κ
     let mut kappa_ctr = 0u16;
 
@@ -231,16 +295,21 @@ pub(crate) fn sign_internal<
 
     // 10: while (z, h) = ⊥ do    ▷ Rejection sampling loop (with continue for ⊥)
     loop {
+        #[cfg(feature = "phase-profile")]
+        pqc_phase_profile::mldsa_attempt();
         //
         // 11: y ← ExpandMask(ρ′', κ)
         let y: [R; L] = expand_mask(gamma1, &rho_prime, kappa_ctr);
 
         // 12: w ← NTT−1(cap_a_hat ◦ NTT(y))
-        let w: [R; K] = {
-            let y_hat: [T; L] = ntt(&y);
-            let ay_hat: [T; K] = mat_vec_mul(&cap_a_hat, &y_hat);
-            inv_ntt(&ay_hat)
-        };
+        let w: [R; K] = matrix_vector_product(
+            &cap_a_hat,
+            #[cfg(feature = "hw-accel")]
+            cap_a_flat.as_deref(),
+            #[cfg(not(feature = "hw-accel"))]
+            cap_a_flat,
+            &y,
+        );
 
         // 13: w_1 ← HighBits(w)    ▷ Signer’s commitment
         let w_1: [R; K] =
@@ -299,6 +368,8 @@ pub(crate) fn sign_internal<
         let r0_norm = infinity_norm(&r0);
         // CTEST is used only for constant-time measurements via `dudect`
         if !CTEST && ((z_norm >= (gamma1 - beta)) || (r0_norm >= (gamma2 - beta))) {
+            #[cfg(feature = "phase-profile")]
+            pqc_phase_profile::mldsa_rejection(pqc_phase_profile::MldsaRejection::Bounds);
             kappa_ctr += u16::try_from(L).expect("cannot fail; L is static parameter");
             continue;
             //
@@ -334,6 +405,8 @@ pub(crate) fn sign_internal<
             && ((infinity_norm(&c_t_0) >= gamma2)
                 || (h.iter().map(|h_i| h_i.0.iter().sum::<i32>()).sum::<i32>() > omega))
         {
+            #[cfg(feature = "phase-profile")]
+            pqc_phase_profile::mldsa_rejection(pqc_phase_profile::MldsaRejection::Hint);
             kappa_ctr += u16::try_from(L).expect("cannot fail; L is static parameter");
             continue;
             // 29: end if
@@ -345,6 +418,8 @@ pub(crate) fn sign_internal<
         // this is done just prior to each of the 'continue' statements above
 
         // if we made it here, we passed the 'continue' conditions, so have a solution
+        #[cfg(feature = "phase-profile")]
+        pqc_phase_profile::mldsa_accept();
         break;
 
         // 32: end while
