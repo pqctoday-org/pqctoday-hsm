@@ -88,7 +88,10 @@ fn rsa_sign_alg(mech: u32, _pss_salt_len: Option<usize>) -> Option<&'static dyn 
 pub fn rsa_sign(mech: u32, sk_pkcs8: &[u8], msg: &[u8], pss_salt_len: Option<usize>) -> Option<Result<Vec<u8>, CkRv>> {
     let alg = rsa_sign_alg(mech, pss_salt_len)?;
     Some((|| {
-        let kp = rsa::KeyPair::from_pkcs8(sk_pkcs8).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Parsed once per distinct key, not once per signature — see
+        // `crypto::awslc_keycache`. A build failure keeps this function's
+        // pre-existing error code for an unparseable/unsupported key.
+        let kp = crate::crypto::awslc_keycache::signer(sk_pkcs8).ok_or(CKR_KEY_TYPE_INCONSISTENT)?;
         let mut sig = vec![0u8; kp.public_modulus_len()];
         kp.sign(alg, &SystemRandom::new(), msg, &mut sig).map_err(|_| CKR_FUNCTION_FAILED)?;
         Ok(sig)
@@ -173,8 +176,10 @@ pub fn rsa_oaep_encrypt(spki: &[u8], hash: u32, mgf_hash: u32, label: Option<&[u
 /// returns `None` for the same reason as above.
 pub fn rsa_oaep_decrypt(sk_pkcs8: &[u8], hash: u32, mgf_hash: u32, label: Option<&[u8]>, ciphertext: &[u8]) -> Option<Result<Vec<u8>, CkRv>> {
     let alg = oaep_alg(hash, mgf_hash)?;
-    let sk = rsa::PrivateDecryptingKey::from_pkcs8(sk_pkcs8).ok()?;
-    let sk = rsa::OaepPrivateDecryptingKey::new(sk).ok()?;
+    // Cached parse (see `crypto::awslc_keycache`). `None` still means "not
+    // handled here", so a PKCS#1 `RSAPrivateKey` DER falls through to the
+    // pure-Rust path exactly as before.
+    let sk = crate::crypto::awslc_keycache::oaep(sk_pkcs8)?;
     Some((|| {
         let mut out = vec![0u8; sk.min_output_size()];
         // PKCS#11 v3.2 §6.13 — an OAEP decode failure is
@@ -226,8 +231,9 @@ pub fn rsa_pkcs1_encrypt_components(n: &[u8], e: &[u8], plaintext: &[u8]) -> Opt
 /// timing; AWS-LC implements this operation in constant time, which is the
 /// point of routing it here rather than merely the speed.
 pub fn rsa_pkcs1_decrypt(sk_pkcs8: &[u8], ciphertext: &[u8]) -> Option<Result<Vec<u8>, CkRv>> {
-    let sk = rsa::PrivateDecryptingKey::from_pkcs8(sk_pkcs8).ok()?;
-    let sk = rsa::Pkcs1PrivateDecryptingKey::new(sk).ok()?;
+    // Cached parse (see `crypto::awslc_keycache`); `None` falls through to
+    // the pure-Rust path as before.
+    let sk = crate::crypto::awslc_keycache::pkcs1(sk_pkcs8)?;
     Some((|| {
         let mut out = vec![0u8; sk.min_output_size()];
         let n = sk.decrypt(ciphertext, &mut out).map_err(|_| CKR_ENCRYPTED_DATA_INVALID)?.len();

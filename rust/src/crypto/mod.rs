@@ -2,6 +2,9 @@ pub mod bip32;
 // Native-only AWS-LC fast path; see its module doc for the dispatch rule.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod awslc;
+// Parsed-private-key cache for the AWS-LC fast path; same cfg as `awslc`.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod awslc_keycache;
 pub mod handlers;
 pub mod keccak;
 pub mod lms;
