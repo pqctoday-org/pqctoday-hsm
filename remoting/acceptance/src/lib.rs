@@ -81,7 +81,13 @@ pub async fn spawn_rest() -> Result<String> {
     let addr: SocketAddr = listener.local_addr()?;
     let app = pqc_rest_pkcs11::routes::router();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app.into_make_service()).await;
+        // into_make_service_with_connect_info, not into_make_service: the
+        // real main.rs uses it (docs/remediation-plan-auth-visibility-
+        // evidence-log-09102026.md, Q2 — open_session's ConnectInfo<SocketAddr>
+        // extractor) — this harness's router must match, or open_session
+        // fails every request with axum's default (non-JSON) rejection
+        // instead of the real CKR_PIN_INCORRECT response this test asserts.
+        let _ = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await;
     });
     retry_until_ready("rest service", || async move {
         Ok(tokio::net::TcpStream::connect(addr).await.map(|_| ())?)
@@ -134,7 +140,9 @@ pub async fn spawn_rest_v32() -> Result<String> {
     let addr: SocketAddr = listener.local_addr()?;
     let app = pqc_rest_pkcs11::routes::router_with(true);
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app.into_make_service()).await;
+        // Same reason as spawn_rest() above: router_with(...) still mounts
+        // the v1 routes (including open_session), which need ConnectInfo.
+        let _ = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await;
     });
     retry_until_ready("rest v32 service", || async move {
         Ok(tokio::net::TcpStream::connect(addr).await.map(|_| ())?)

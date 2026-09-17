@@ -50,7 +50,7 @@ fn rust_engine_emits_pqcev_records_for_ml_dsa_signing() {
     native::close_session(so).expect("close SO session");
     let sess = native::open_session(slot, "87654321").expect("user session");
 
-    let (_pubh, privh) =
+    let (pubh, privh) =
         native::generate_ml_dsa_keypair(sess, CKP_ML_DSA_65, b"ev", "evidence-mldsa65")
             .expect("keygen");
 
@@ -81,12 +81,45 @@ fn rust_engine_emits_pqcev_records_for_ml_dsa_signing() {
     assert_eq!(rv, CKR_OK, "C_Sign");
     assert_eq!(sig_len, 3309, "ML-DSA-65 signature length (FIPS 204 Table 2)");
 
+    // remediation-plan-verify-evidence-and-relp-receiver-pqc-09102026.md:
+    // ffi::C_VerifyInit/C_Verify, genuine then corrupted, same instrumented
+    // entry points a real PKCS#11 caller uses — not native::verify.
+    let mut vmech = mechanism(CKM_ML_DSA);
+    let rv = ffi::C_VerifyInit(sess, vmech.as_mut_ptr() as *mut u8, pubh);
+    assert_eq!(rv, CKR_OK, "C_VerifyInit");
+    let rv = ffi::C_Verify(sess, msg.as_ptr() as *mut u8, msg.len() as u32, sig.as_mut_ptr(), sig_len);
+    assert_eq!(rv, CKR_OK, "C_Verify (genuine signature)");
+
+    let mut bad_sig = sig.clone();
+    bad_sig[0] ^= 0xFF;
+    let mut vmech2 = mechanism(CKM_ML_DSA);
+    let rv = ffi::C_VerifyInit(sess, vmech2.as_mut_ptr() as *mut u8, pubh);
+    assert_eq!(rv, CKR_OK, "C_VerifyInit (second)");
+    let rv = ffi::C_Verify(sess, msg.as_ptr() as *mut u8, msg.len() as u32, bad_sig.as_mut_ptr(), sig_len);
+    assert_eq!(rv, CKR_SIGNATURE_INVALID, "C_Verify (corrupted signature)");
+
     let log = std::fs::read_to_string(&log_path).expect("evidence log readable");
     let records: Vec<&str> = log.lines().filter(|l| l.starts_with("PQCEV ")).collect();
     assert!(
         !records.is_empty(),
         "no PQCEV records were written to {log_path:?}"
     );
+
+    let verify_inits: Vec<&&str> = records.iter().filter(|r| r.contains("op=C_VerifyInit")).collect();
+    let verifies: Vec<&&str> = records.iter().filter(|r| r.contains("op=C_Verify ")).collect();
+    assert_eq!(verify_inits.len(), 2, "expected 2 C_VerifyInit records: {verify_inits:?}");
+    assert_eq!(verifies.len(), 2, "expected 2 C_Verify records: {verifies:?}");
+    assert!(
+        verifies.iter().any(|r| r.contains("rv=CKR_OK")),
+        "genuine signature should verify OK: {verifies:?}"
+    );
+    assert!(
+        verifies.iter().any(|r| r.contains("rv=CKR_SIGNATURE_INVALID")),
+        "corrupted signature should be rejected, not silently ignored: {verifies:?}"
+    );
+    for r in &verifies {
+        assert!(r.contains("probe=0"), "C_Verify has no length-query phase: {r}");
+    }
 
     // The init record must name the mechanism, the key, and the parameter set —
     // those three are what make a claim like "ML-DSA-65 signed inside the

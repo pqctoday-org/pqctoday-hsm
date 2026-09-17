@@ -1465,7 +1465,11 @@ fn emit_success(deps: &Deps, correlation_id: &str, op: &str) {
         OffsetDateTime::now_utc(),
         Plane::Kmip,
         correlation_id,
-        EventPayload::KmipResponseSent { op: op.into(), result: KmipOpResult::Success, latency_ms: 0 },
+        EventPayload::KmipResponseSent {
+            op: op.into(),
+            result: KmipOpResult::Success,
+            latency_ms: deps.take_request_latency_ms(correlation_id),
+        },
     ));
 }
 
@@ -1477,7 +1481,7 @@ fn fail(deps: &Deps, correlation_id: &str, op: &str, err: KmipError) -> KmipErro
         EventPayload::KmipResponseSent {
             op: op.into(),
             result: KmipOpResult::OperationFailed { reason: format!("{:?}", err.result_reason()) },
-            latency_ms: 0,
+            latency_ms: deps.take_request_latency_ms(correlation_id),
         },
     ));
     err

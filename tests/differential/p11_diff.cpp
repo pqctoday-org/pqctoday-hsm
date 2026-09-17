@@ -95,6 +95,16 @@ typedef CK_RV (*fn_DecapsulateKey)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJEC
                                    CK_ATTRIBUTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG,
                                    CK_OBJECT_HANDLE_PTR);
 
+// Pre-bound verify (§5.12, added by v3.0) — like Encapsulate/Decapsulate
+// above, CK_FUNCTION_LIST is the legacy v2.40 shape and has no member for
+// these, so they are resolved with dlsym rather than through e.fl.
+typedef CK_RV (*fn_VerifySignatureInit)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE,
+                                        CK_BYTE_PTR, CK_ULONG);
+typedef CK_RV (*fn_VerifySignature)(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG);
+typedef CK_RV (*fn_VerifySignatureUpdate)(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULONG);
+typedef CK_RV (*fn_VerifySignatureFinal)(CK_SESSION_HANDLE);
+typedef CK_RV (*fn_SessionCancel)(CK_SESSION_HANDLE, CK_FLAGS);
+
 // ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
@@ -105,6 +115,11 @@ struct Engine {
     CK_FUNCTION_LIST_PTR fl = nullptr;
     fn_EncapsulateKey    Encapsulate = nullptr;
     fn_DecapsulateKey    Decapsulate = nullptr;
+    fn_VerifySignatureInit   VerifySignatureInit   = nullptr;
+    fn_VerifySignature       VerifySignature       = nullptr;
+    fn_VerifySignatureUpdate VerifySignatureUpdate = nullptr;
+    fn_VerifySignatureFinal  VerifySignatureFinal  = nullptr;
+    fn_SessionCancel         SessionCancel         = nullptr;
     std::set<CK_MECHANISM_TYPE> mechs;
     CK_SLOT_ID           slot = 0;
     CK_SESSION_HANDLE    sess = CK_INVALID_HANDLE;
@@ -117,6 +132,8 @@ static std::string opt_report   = "p11_diff_report";
 static std::string opt_exceptions = "tests/differential/exceptions.json";
 static std::string opt_only;      // substring filter on scenario id
 static std::string opt_drop_exception; // demonstration: ignore one entry by id
+static std::string opt_dump_scenario; // phase-5 §2: raw-dump ONE scenario's full Recorder
+static std::string opt_dump_file;     //   (both engines, every key) instead of just its diff
 static bool        opt_verbose  = false;
 // --shard I/N — round-robin partition of gScenarios (index % N == I) so N
 // worker processes can split the run across cores. Each shard dlopens BOTH
@@ -232,6 +249,17 @@ static const NamePair kRvNames[] = {
 };
 
 static const NamePair kAttrNames[] = {
+    // 2026-09-07 harness enhancement — attributes added to kProbe below.
+    {CKA_SUBJECT, "CKA_SUBJECT"},
+    {CKA_HSS_KEYS_REMAINING, "CKA_HSS_KEYS_REMAINING"},
+    {CKA_NAME_HASH_ALGORITHM, "CKA_NAME_HASH_ALGORITHM"},
+    {CKA_OBJECT_VALIDATION_FLAGS, "CKA_OBJECT_VALIDATION_FLAGS"},
+    {CKA_PUBLIC_CRC64_VALUE, "CKA_PUBLIC_CRC64_VALUE"},
+    {CKA_WRAP_TEMPLATE, "CKA_WRAP_TEMPLATE"},
+    {CKA_UNWRAP_TEMPLATE, "CKA_UNWRAP_TEMPLATE"},
+    {CKA_DERIVE_TEMPLATE, "CKA_DERIVE_TEMPLATE"},
+    {CKA_ENCAPSULATE_TEMPLATE, "CKA_ENCAPSULATE_TEMPLATE"},
+    {CKA_DECAPSULATE_TEMPLATE, "CKA_DECAPSULATE_TEMPLATE"},
     {CKA_CLASS, "CKA_CLASS"},
     {CKA_TOKEN, "CKA_TOKEN"},
     {CKA_PRIVATE, "CKA_PRIVATE"},
@@ -450,6 +478,24 @@ static bool is_bignum_attr(CK_ATTRIBUTE_TYPE t) {
     }
 }
 
+// Key types whose CKA_VALUE is fixed-length raw key material with no ASN.1
+// framing at all — FIPS 203/204/205 and RFC 8554/8391-A each define the
+// encoded key as a flat byte string. This is the same random-byte trap as
+// is_unstructured_attr/is_bignum_attr above, just on CKA_VALUE instead: a
+// freshly generated public key's leading byte is uniformly random, so
+// ~1/256 of keys classify as a malformed ASN.1 SEQUENCE by pure chance
+// (found the hard way: create.generate_key_pair.slh_dsa_all_params flagged
+// gen_shake_128s.pub.CKA_VALUE as DER_SEQUENCE_MALFORMED_LEN vs the other
+// engine's RAW_32 on one run in a series that was otherwise identical).
+static bool is_raw_pqc_key_type(CK_ULONG kt) {
+    switch (kt) {
+        case CKK_ML_KEM: case CKK_ML_DSA: case CKK_SLH_DSA:
+        case CKK_HSS: case CKK_XMSS: case CKK_XMSSMT:
+            return true;
+        default: return false;
+    }
+}
+
 // The canonical attribute probe. Every object produced by every creation path
 // is interrogated with the SAME list, so "this engine does not set X" shows up
 // as a return-code difference rather than as a silently missing row.
@@ -465,7 +511,121 @@ static const CK_ATTRIBUTE_TYPE kProbe[] = {
     CKA_PRIME_2, CKA_EXPONENT_1, CKA_EXPONENT_2, CKA_COEFFICIENT,
     CKA_EC_PARAMS, CKA_EC_POINT, CKA_PARAMETER_SET, CKA_SEED,
     CKA_ENCAPSULATE, CKA_DECAPSULATE, CKA_PUBLIC_KEY_INFO, CKA_ALLOWED_MECHANISMS,
+    // 2026-09-07. Attributes the class tables define that nothing was asking
+    // for. An attribute absent from this list is invisible to the harness:
+    // neither engine is ever asked, so a divergence in it cannot be observed.
+    // CKA_SUBJECT is a common public AND private key attribute (Tables 27/29);
+    // the *_TEMPLATE family is defined on the classes that wrap, unwrap,
+    // derive, encapsulate and decapsulate; CKA_OBJECT_VALIDATION_FLAGS and
+    // CKA_PUBLIC_CRC64_VALUE are v3.2 additions; CKA_HSS_KEYS_REMAINING is HSS's
+    // (Table 270) and CKA_NAME_HASH_ALGORITHM is CKO_TRUST's.
+    CKA_SUBJECT, CKA_HSS_KEYS_REMAINING, CKA_NAME_HASH_ALGORITHM,
+    CKA_OBJECT_VALIDATION_FLAGS, CKA_PUBLIC_CRC64_VALUE,
+    CKA_WRAP_TEMPLATE, CKA_UNWRAP_TEMPLATE, CKA_DERIVE_TEMPLATE,
+    CKA_ENCAPSULATE_TEMPLATE, CKA_DECAPSULATE_TEMPLATE,
 };
+
+// ---------------------------------------------------------------------------
+// record_attr_invariants — 2026-09-07 harness enhancement.
+//
+// WHY THIS EXISTS. Everything else in this file compares the two engines
+// against EACH OTHER. That is powerful, and it has one blind spot it can never
+// see on its own: a rule BOTH engines break identically produces no
+// divergence, so the harness reports green. The CKM_AES_CMAC key-range bug and
+// the CKA_VALUE-on-RSA violation were both of that shape — invisible until
+// someone read the specification by hand.
+//
+// These observations are derived from attributes the engine just returned and
+// evaluated against the specification's own consistency rules. They are
+// recorded as "ok" / "VIOLATION:<detail>" strings, so:
+//   * if one engine breaks a rule, it diverges from the other and fails as a
+//     normal uncovered divergence;
+//   * if BOTH break it, they agree — but the recorded value is a loud
+//     VIOLATION on both sides, visible in the report rather than silent.
+//
+// Only rules the specification states outright are asserted here. Anything
+// token-specific belongs in exceptions.json, not in this function.
+// ---------------------------------------------------------------------------
+static bool attr_bool(Engine& e, CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o,
+                      CK_ATTRIBUTE_TYPE t, bool* out) {
+    CK_BBOOL v = 0;
+    CK_ATTRIBUTE a = { t, &v, sizeof v };
+    if (e.fl->C_GetAttributeValue(s, o, &a, 1) != CKR_OK) return false;
+    if (a.ulValueLen != sizeof v) return false;
+    *out = (v != 0);
+    return true;
+}
+
+static bool attr_ulong(Engine& e, CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o,
+                       CK_ATTRIBUTE_TYPE t, CK_ULONG* out) {
+    CK_ULONG v = 0;
+    CK_ATTRIBUTE a = { t, &v, sizeof v };
+    if (e.fl->C_GetAttributeValue(s, o, &a, 1) != CKR_OK) return false;
+    if (a.ulValueLen != sizeof v) return false;
+    *out = v;
+    return true;
+}
+
+static void record_attr_invariants(Engine& e, Recorder& r, const std::string& prefix,
+                                   CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o) {
+    const std::string p = prefix + "._inv.";
+    bool sensitive = false, alwaysSensitive = false;
+    bool extractable = false, neverExtractable = false;
+
+    // §4.10 Table 29: CKA_ALWAYS_SENSITIVE is "CK_TRUE if key has always had
+    // the CKA_SENSITIVE attribute set to CK_TRUE". A key that is always
+    // sensitive but not sensitive NOW is a contradiction in the object.
+    if (attr_bool(e, s, o, CKA_ALWAYS_SENSITIVE, &alwaysSensitive) &&
+        attr_bool(e, s, o, CKA_SENSITIVE, &sensitive)) {
+        r.put(p + "always_sensitive_implies_sensitive",
+              (!alwaysSensitive || sensitive) ? "ok" : "VIOLATION:ALWAYS_SENSITIVE=1,SENSITIVE=0");
+    }
+
+    // Same shape for CKA_NEVER_EXTRACTABLE: "CK_TRUE if key has never had the
+    // CKA_EXTRACTABLE attribute set to CK_TRUE".
+    if (attr_bool(e, s, o, CKA_NEVER_EXTRACTABLE, &neverExtractable) &&
+        attr_bool(e, s, o, CKA_EXTRACTABLE, &extractable)) {
+        r.put(p + "never_extractable_implies_not_extractable",
+              (!neverExtractable || !extractable) ? "ok"
+                                                  : "VIOLATION:NEVER_EXTRACTABLE=1,EXTRACTABLE=1");
+    }
+
+    // §4.8 Table 26: CKA_MODULUS_BITS is "length in bits of modulus n". A
+    // stated bit length that disagrees with the modulus actually returned is
+    // an internally inconsistent key, and callers size buffers from it.
+    CK_ULONG modBits = 0;
+    CK_ATTRIBUTE modq = { CKA_MODULUS, NULL_PTR, 0 };
+    if (attr_ulong(e, s, o, CKA_MODULUS_BITS, &modBits) &&
+        e.fl->C_GetAttributeValue(s, o, &modq, 1) == CKR_OK &&
+        modq.ulValueLen != (CK_ULONG)-1 && modq.ulValueLen > 0) {
+        // A big integer may carry one leading zero byte, and the top byte need
+        // not have its high bit set, so the exact bit length is bounded rather
+        // than fixed: (len-1)*8 < bits <= len*8.
+        const unsigned long lo = (unsigned long)(modq.ulValueLen - 1) * 8;
+        const unsigned long hi = (unsigned long)modq.ulValueLen * 8;
+        const bool okBits = ((unsigned long)modBits > lo && (unsigned long)modBits <= hi);
+        r.put(p + "modulus_bits_matches_modulus",
+              okBits ? "ok"
+                     : "VIOLATION:MODULUS_BITS=" + std::to_string((unsigned long)modBits) +
+                       ",MODULUS_len=" + std::to_string((unsigned long)modq.ulValueLen));
+    }
+
+    // §4.8 Table 26: CKA_KEY_GEN_MECHANISM is "identifier of the mechanism
+    // used to generate the key material", and is only meaningful when
+    // CKA_LOCAL is true. CK_UNAVAILABLE_INFORMATION is the defined answer for
+    // a key that was not generated on the token; anything else on a
+    // non-local key is a claim the object cannot support.
+    bool local = false;
+    CK_ULONG kgm = 0;
+    if (attr_bool(e, s, o, CKA_LOCAL, &local) &&
+        attr_ulong(e, s, o, CKA_KEY_GEN_MECHANISM, &kgm)) {
+        const bool unavailable = (kgm == (CK_ULONG)-1);
+        r.put(p + "key_gen_mechanism_consistent_with_local",
+              (local != unavailable) ? "ok"
+                                     : (local ? "VIOLATION:LOCAL=1,KEY_GEN_MECHANISM=UNAVAILABLE"
+                                              : "VIOLATION:LOCAL=0,KEY_GEN_MECHANISM=set"));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // record_attrs — the heart of coverage priority #1.
@@ -473,6 +633,21 @@ static const CK_ATTRIBUTE_TYPE kProbe[] = {
 static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
                          CK_SESSION_HANDLE s, CK_OBJECT_HANDLE o) {
     if (o == CK_INVALID_HANDLE) { r.put(prefix + ".object", "NONE"); return; }
+    CK_ULONG keyType = (CK_ULONG)-1;
+    CK_ULONG objClass = (CK_ULONG)-1;
+    // 2026-09-08: is_raw_pqc_key_type alone missed CKO_SECRET_KEY (AES,
+    // generic-secret, ...) -- found the hard way, same trap, one scenario
+    // over: create.generate_key.generic_secret sets CKA_SENSITIVE=FALSE
+    // specifically to expose CKA_VALUE, and a freshly generated secret's
+    // leading byte is exactly as uniformly random as a PQC public key's. A
+    // secret key's CKA_VALUE is never ASN.1-framed for ANY key type when
+    // it's actually returned in the clear -- there is no legitimate case
+    // where classify() has anything real to check here, so this is CKA_CLASS-
+    // gated rather than another per-key-type entry to keep adding to.
+    const bool rawValue = (attr_ulong(e, s, o, CKA_KEY_TYPE, &keyType) &&
+                            is_raw_pqc_key_type(keyType)) ||
+                           (attr_ulong(e, s, o, CKA_CLASS, &objClass) &&
+                            objClass == CKO_SECRET_KEY);
     std::vector<std::string> present;
     for (CK_ATTRIBUTE_TYPE t : kProbe) {
         std::string an = attr_name(t);
@@ -501,8 +676,12 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
         // (a 3-byte check value present versus absent).
         // A big integer is not an encoding either: a 128-byte private exponent
         // whose first byte happens to be 0x30 classifies as an ASN.1 SEQUENCE,
-        // which is the same random-byte trap as the check value above.
-        if (!is_unstructured_attr(t) && !is_bignum_attr(t))
+        // which is the same random-byte trap as the check value above. Same
+        // trap again for CKA_VALUE on a raw fixed-length PQC key or a secret
+        // key (see rawValue's own comment) — unlike a wrapped-key blob, there
+        // is no ASN.1 framing to verify here at all.
+        if (!is_unstructured_attr(t) && !is_bignum_attr(t) &&
+            !(t == CKA_VALUE && rawValue))
             r.put(prefix + "." + an + ".enc", classify(buf.data(), a.ulValueLen));
         if (is_opaque_attr(t)) {
             // Value intentionally not compared — see is_opaque_attr.
@@ -517,6 +696,7 @@ static void record_attrs(Engine& e, Recorder& r, const std::string& prefix,
     for (size_t i = 0; i < present.size(); i++) { if (i) joined += ","; joined += present[i]; }
     r.put(prefix + "._ctx.attrs_present", joined);
     r.num(prefix + "._ctx.attrs_present_count", present.size());
+    record_attr_invariants(e, r, prefix, s, o);
 }
 
 // ---------------------------------------------------------------------------
@@ -543,6 +723,8 @@ static CK_BYTE kPlain32[32] = {
 };
 // DER OID for prime256v1 / P-256 — 06 08 2A 86 48 CE 3D 03 01 07
 static CK_BYTE kOidP256[] = {0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07};
+// DER OID for secp256k1 (1.3.132.0.10) — 06 05 2B 81 04 00 0A
+static CK_BYTE kOidSecp256k1[] = {0x06,0x05,0x2b,0x81,0x04,0x00,0x0a};
 // DER OID for Ed25519 (RFC 8410) — 06 03 2B 65 70
 static CK_BYTE kOidEd25519[] = {0x06,0x03,0x2b,0x65,0x70};
 // DER OID for X25519 (RFC 8410) — 06 03 2B 65 6E
@@ -744,6 +926,11 @@ static bool load_engine(Engine& e, const std::string& path, const std::string& n
     if (gfl(&e.fl) != CKR_OK || !e.fl) { fprintf(stdout, "FATAL: %s C_GetFunctionList failed\n", name.c_str()); return false; }
     e.Encapsulate = (fn_EncapsulateKey)dlsym(e.h, "C_EncapsulateKey");
     e.Decapsulate = (fn_DecapsulateKey)dlsym(e.h, "C_DecapsulateKey");
+    e.VerifySignatureInit   = (fn_VerifySignatureInit)dlsym(e.h, "C_VerifySignatureInit");
+    e.VerifySignature       = (fn_VerifySignature)dlsym(e.h, "C_VerifySignature");
+    e.VerifySignatureUpdate = (fn_VerifySignatureUpdate)dlsym(e.h, "C_VerifySignatureUpdate");
+    e.VerifySignatureFinal  = (fn_VerifySignatureFinal)dlsym(e.h, "C_VerifySignatureFinal");
+    e.SessionCancel         = (fn_SessionCancel)dlsym(e.h, "C_SessionCancel");
     return true;
 }
 
@@ -1059,6 +1246,9 @@ static void usage() {
     printf("  --drop-exception <id>  ignore one exception entry — proves the harness still detects\n");
     printf("  --list                 list scenarios and exit\n");
     printf("  --verbose              print covered divergences too\n");
+    printf("  --dump-scenario <id>   with --dump-file, dump ONE scenario's raw\n");
+    printf("                         per-engine observations (not just the diff)\n");
+    printf("  --dump-file <path>     JSON output path for --dump-scenario\n");
 }
 
 int main(int argc, char** argv) {
@@ -1074,6 +1264,8 @@ int main(int argc, char** argv) {
         {"verbose", no_argument, 0, 8},
         {"list", no_argument, 0, 9},
         {"shard", required_argument, 0, 10},
+        {"dump-scenario", required_argument, 0, 11},
+        {"dump-file", required_argument, 0, 12},
         {"help", no_argument, 0, 'h'},
         {0,0,0,0}
     };
@@ -1104,6 +1296,8 @@ int main(int argc, char** argv) {
                 }
                 break;
             }
+            case 11: opt_dump_scenario = optarg; break;
+            case 12: opt_dump_file = optarg; break;
             default: usage(); return 2;
         }
     }
@@ -1194,6 +1388,23 @@ int main(int argc, char** argv) {
         Recorder ra, rb;
         run_scenario(sc, gCpp, ra);
         run_scenario(sc, gRust, rb);
+
+        // Phase-5 §2 — the normal report below records only DIVERGENCES; a
+        // matching observation is silently dropped, so pinning every
+        // mechanism's key-size range (not just the ones that already
+        // disagree) needs the raw per-engine values, not the diff. This
+        // dumps both engines' COMPLETE Recorder for one named scenario,
+        // unfiltered, so a generator script can read real advertised
+        // values straight from the engines rather than a hand-copied table.
+        if (!opt_dump_scenario.empty() && sc.id == opt_dump_scenario && !opt_dump_file.empty()) {
+            json dj;
+            for (const auto& k : ra.order) dj["cpp"][k]  = ra.vals.at(k);
+            for (const auto& k : rb.order) dj["rust"][k] = rb.vals.at(k);
+            std::ofstream o(opt_dump_file);
+            o << std::setw(2) << dj << std::endl;
+            printf("dumped raw observations for %s -> %s\n", sc.id.c_str(), opt_dump_file.c_str());
+        }
+
         if (ra.vals.count("status") && ra.vals.at("status") == "SKIPPED_MECHANISM_ABSENT" &&
             rb.vals.count("status") && rb.vals.at("status") == "SKIPPED_MECHANISM_ABSENT") skipped++;
         else ran++;

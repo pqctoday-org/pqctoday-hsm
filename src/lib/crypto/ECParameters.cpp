@@ -50,6 +50,18 @@ const ByteString& ECParameters::getEC() const
 	return ec;
 }
 
+// Select the private-key generation method (see the header for why this is
+// not serialised)
+void ECParameters::setUseExtraBits(bool inUseExtraBits)
+{
+	useExtraBits = inUseExtraBits;
+}
+
+bool ECParameters::getUseExtraBits() const
+{
+	return useExtraBits;
+}
+
 // Are the parameters of the given type?
 bool ECParameters::areOfType(const char* inType)
 {

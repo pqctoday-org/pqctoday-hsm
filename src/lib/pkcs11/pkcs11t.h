@@ -655,8 +655,17 @@ typedef CK_ULONG          CK_ATTRIBUTE_TYPE;
 #define CKA_VALIDATION_VENDOR_URI       0x00000628UL
 #define CKA_VALIDATION_PROFILE          0x00000629UL
 /* KEM */
-#define CKA_ENCAPSULATE_TEMPLATE        0x0000062aUL
-#define CKA_DECAPSULATE_TEMPLATE        0x0000062bUL
+/* v3.2 omits CKF_ARRAY_ATTRIBUTE on these two, though they are array
+ * attributes exactly like CKA_WRAP_TEMPLATE / CKA_UNWRAP_TEMPLATE /
+ * CKA_DERIVE_TEMPLATE above, which DO carry it. The OASIS PKCS 11 TC's
+ * working tree corrects this (v3.3 draft snapshot, headers/pkcs11t.h:658-659,
+ * commit 2b25dd8). Applied here under the standing precedence rule: v3.2 is
+ * the baseline, and v3.3 governs where v3.2 has a gap or a plain error.
+ * This is the ONLY place this local header departs from the pinned canonical
+ * v3.2 include; scripts/check_pkcs11_constants.py carries the matching
+ * documented exception. */
+#define CKA_ENCAPSULATE_TEMPLATE        (CKF_ARRAY_ATTRIBUTE|0x0000062aUL)
+#define CKA_DECAPSULATE_TEMPLATE        (CKF_ARRAY_ATTRIBUTE|0x0000062bUL)
 /* trust objects */
 #define CKA_TRUST_SERVER_AUTH           0x0000062cUL
 #define CKA_TRUST_CLIENT_AUTH           0x0000062dUL

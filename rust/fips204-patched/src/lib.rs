@@ -13,6 +13,20 @@
 //
 #![doc = include_str!("../README.md")]
 
+#[cfg(feature = "hw-accel")]
+extern crate std;
+
+#[cfg(feature = "phase-profile")]
+macro_rules! profile_phase {
+    ($phase:ident) => {
+        let _pqc_phase_guard = pqc_phase_profile::span(pqc_phase_profile::Phase::$phase);
+    };
+}
+#[cfg(not(feature = "phase-profile"))]
+macro_rules! profile_phase {
+    ($phase:ident) => {};
+}
+
 
 // TODO Roadmap
 //  1. Always more testing...
@@ -96,8 +110,13 @@ mod conversion;
 mod encodings;
 mod hashing;
 mod helpers;
+#[cfg(feature = "hw-accel")]
+mod hw_accel;
 mod high_low;
 mod ml_dsa;
+
+#[cfg(feature = "hw-accel")]
+pub use hw_accel::{ExpandAHook, set_expand_a_hook};
 mod ntt;
 mod types;
 

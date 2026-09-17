@@ -20,6 +20,7 @@ pub(crate) fn xmss_node<
 >(
     hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], i: u32, z: u32, pk_seed: &[u8], adrs: &Adrs,
 ) -> [u8; N] {
+    profile_phase!(Tree);
     let mut adrs = adrs.clone();
 
     // Note this bounds check was only specified in the draft specification
@@ -86,6 +87,7 @@ pub(crate) fn xmss_sign<
     hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], idx: u32, pk_seed: &[u8],
     adrs: &Adrs,
 ) -> XmssSig<HP, LEN, N> {
+    profile_phase!(Tree);
     let hp32 = u32::try_from(HP).unwrap();
     let mut adrs = adrs.clone();
     let mut sig_xmss = XmssSig {
@@ -139,6 +141,7 @@ pub(crate) fn xmss_pk_from_sig<
     hashers: &Hashers<K, LEN, M, N>, idx: u32, sig_xmss: &XmssSig<HP, LEN, N>, m: &[u8],
     pk_seed: &[u8], adrs: &Adrs,
 ) -> [u8; N] {
+    profile_phase!(Tree);
     let hp32 = u32::try_from(HP).unwrap();
     let mut adrs = adrs.clone();
 

@@ -46,6 +46,47 @@ FUNC_HEADER = REPO / "src" / "lib" / "pkcs11" / "pkcs11f.h"
 CANONICAL_F = REPO / "docs" / "refs" / "pkcs11f-canonical-v3.2.h"
 MANIFEST = REPO / "kmip" / "pkcs11-mech-manifest.json"
 
+# ---------------------------------------------------------------------------
+# V33_CORRECTIONS — sanctioned departures from the pinned canonical v3.2
+# header, under the project's standing precedence rule:
+#
+#     PKCS#11 v3.2 (the published OASIS Standard) is the baseline. The OASIS
+#     PKCS 11 TC's v3.3 working tree governs WHERE v3.2 HAS A GAP OR A PLAIN
+#     ERROR. It does not otherwise supersede v3.2: the reported Cryptoki
+#     version stays 3.2, and citations continue to reference the v3.2 OS,
+#     because v3.3 is an unpublished working draft that still moves
+#     (docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/PROVENANCE.md).
+#
+# Every entry needs a reason and a citation naming the v3.3 file:line and the
+# snapshot commit, so a reader can check the correction rather than trust it.
+# An entry here is NOT a licence to drift — the value must match v3.3 exactly,
+# and anything not listed still fails against canonical v3.2.
+V33_CORRECTIONS = {
+    "CKA_ENCAPSULATE_TEMPLATE": {
+        "v32": 0x0000062A,
+        "v33": 0x4000062A,
+        "reason": (
+            "v3.2 omits CKF_ARRAY_ATTRIBUTE (0x40000000) on this attribute, though "
+            "it is an array attribute exactly like CKA_WRAP_TEMPLATE, "
+            "CKA_UNWRAP_TEMPLATE and CKA_DERIVE_TEMPLATE, all of which DO carry it "
+            "in v3.2 (pkcs11t.h:574-576). A plain omission, not a design choice."
+        ),
+        "citation": (
+            "docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/working/headers/"
+            "pkcs11t.h:658 (OASIS PKCS 11 TC working tree, commit 2b25dd8)"
+        ),
+    },
+    "CKA_DECAPSULATE_TEMPLATE": {
+        "v32": 0x0000062B,
+        "v33": 0x4000062B,
+        "reason": "Same omission as CKA_ENCAPSULATE_TEMPLATE, same correction.",
+        "citation": (
+            "docs/refs/pkcs11-v3.3-draft-git-snapshot-20260828/working/headers/"
+            "pkcs11t.h:659 (OASIS PKCS 11 TC working tree, commit 2b25dd8)"
+        ),
+    },
+}
+
 # sha256 of the canonical OASIS PKCS#11 v3.2 pkcs11t.h pinned in F1.
 # https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.2/include/pkcs11-v3.2/pkcs11t.h
 CANONICAL_SHA256 = "95738fdcd9b5c9c73f55f9132aefa87354556cec1c46f681b8a2000b8b5dbccb"
@@ -549,6 +590,21 @@ def check_canonical(spec: dict) -> list:
         if name not in spec:
             errors.append(f"CANONICAL-DELTA  {name} (0x{val:08x}) missing from local header")
         elif spec[name] != val:
+            fix = V33_CORRECTIONS.get(name)
+            # A sanctioned v3.3 correction must match BOTH sides exactly: the
+            # canonical file must still hold the v3.2 value (or the pin has
+            # moved under us) and the local header must hold the v3.3 one (or
+            # this is ordinary drift wearing a v3.3 label).
+            if fix and val == fix["v32"] and spec[name] == fix["v33"]:
+                continue
+            if fix:
+                errors.append(
+                    f"CANONICAL-DELTA  {name}: listed in V33_CORRECTIONS but the "
+                    f"values do not match it — local=0x{spec[name]:08x} "
+                    f"canonical=0x{val:08x}, expected local=0x{fix['v33']:08x} "
+                    f"canonical=0x{fix['v32']:08x}"
+                )
+                continue
             errors.append(
                 f"CANONICAL-DELTA  {name}: local=0x{spec[name]:08x} "
                 f"canonical=0x{val:08x}"

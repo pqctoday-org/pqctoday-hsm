@@ -45,6 +45,68 @@ pub const CKA_LABEL: u32 = 0x0000_0003;
 /// `CKA_ID` — PKCS#11 v3.2 standard attribute. Codepoint per pkcs11t.h.
 pub const CKA_ID: u32 = 0x0000_0102;
 
+/// Shared evidence emission for every `generate_*_keypair` entry point below
+/// that this module instruments — same record shape as `ffi::
+/// C_GenerateKeyPair` (see that function's own comment in `rust/src/
+/// ffi.rs`'s "Operation-evidence wrappers" block), so this repo's one
+/// evidence consumer needs no changes to recognise it. Caller has already
+/// checked that at least one of `logging` / `ring` is on; each sink is
+/// then gated individually here. `param_set` is what the caller asked for
+/// (0 when the mechanism has none), so a failed keygen still records the
+/// right algorithm in the ring.
+fn emit_generate_key_pair(
+    session: u32,
+    mechanism: u32,
+    param_set: u32,
+    result: &Result<(u32, u32), CkRv>,
+    dur_us: u64,
+    logging: bool,
+    ring: bool,
+) {
+    let (h_pub, h_priv, rv) = match result {
+        Ok((p, s)) => (*p, *s, CKR_OK),
+        Err(e) => (0, 0, *e),
+    };
+    if logging {
+        let (key_fields, custody) = if h_priv != 0 {
+            (
+                crate::oplog::key_fields(h_priv, mechanism),
+                crate::oplog::key_custody_fields(h_priv),
+            )
+        } else {
+            (
+                "key=- keytype=- paramset=-".to_string(),
+                "extractable=- sensitive=- never_extractable=- always_sensitive=- local=-".to_string(),
+            )
+        };
+        crate::oplog::emit(
+            "C_GenerateKeyPair",
+            &format!(
+                "sess={} mech={} mech_id=0x{:08x} {} {} hpub={} hpriv={} rv={} rv_id=0x{:08x} dur={}",
+                session,
+                crate::oplog::mech_name(mechanism),
+                mechanism,
+                key_fields,
+                custody,
+                h_pub,
+                h_priv,
+                crate::oplog::rv_name(rv),
+                rv,
+                dur_us
+            ),
+        );
+    }
+    if ring {
+        crate::behaviour::emit(crate::behaviour::p11(
+            crate::behaviour::OP_PKCS11_C_GENERATEKEYPAIR,
+            crate::behaviour::alg_from_ckm(mechanism, param_set),
+            rv,
+            0,
+            dur_us,
+        ));
+    }
+}
+
 // ── ML-KEM ──────────────────────────────────────────────────────────────────
 
 /// Generate an ML-KEM keypair. `parameter_set` ∈
@@ -91,6 +153,28 @@ pub fn generate_ml_kem_keypair_from_seed_extractable(
 }
 
 fn ml_kem_keypair_impl(
+    _session: u32,
+    parameter_set: u32,
+    seed: Option<&[u8]>,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+) -> Result<(u32, u32), CkRv> {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+    let result = ml_kem_keypair_inner(_session, parameter_set, seed, cka_id, label, extractable);
+    if logging || ring {
+        // One call site covers all three public entry points (plain,
+        // from_seed, from_seed_extractable) — see generate_ml_kem_keypair
+        // and its siblings, which all funnel through this function.
+        let dur = crate::behaviour::elapsed_us(t0);
+        emit_generate_key_pair(_session, CKM_ML_KEM_KEY_PAIR_GEN, parameter_set, &result, dur, logging, ring);
+    }
+    result
+}
+
+fn ml_kem_keypair_inner(
     _session: u32,
     parameter_set: u32,
     seed: Option<&[u8]>,
@@ -213,6 +297,28 @@ pub fn generate_ml_dsa_keypair_from_seed_extractable(
 }
 
 fn ml_dsa_keypair_impl(
+    _session: u32,
+    parameter_set: u32,
+    seed: Option<&[u8]>,
+    cka_id: &[u8],
+    label: &str,
+    extractable: bool,
+) -> Result<(u32, u32), CkRv> {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+    let result = ml_dsa_keypair_inner(_session, parameter_set, seed, cka_id, label, extractable);
+    if logging || ring {
+        // One call site covers all three public entry points (plain,
+        // from_seed, from_seed_extractable) — see generate_ml_dsa_keypair
+        // and its siblings, which all funnel through this function.
+        let dur = crate::behaviour::elapsed_us(t0);
+        emit_generate_key_pair(_session, CKM_ML_DSA_KEY_PAIR_GEN, parameter_set, &result, dur, logging, ring);
+    }
+    result
+}
+
+fn ml_dsa_keypair_inner(
     _session: u32,
     parameter_set: u32,
     seed: Option<&[u8]>,
@@ -415,14 +521,23 @@ pub fn generate_rsa_keypair(
     if !(2048..=4096).contains(&bits) {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let mut rng = rand::rngs::OsRng;
-    let private_key =
-        rsa::RsaPrivateKey::new(&mut rng, bits as usize).map_err(|_| CKR_FUNCTION_FAILED)?;
-    let public_key = rsa::RsaPublicKey::from(&private_key);
-
-    let sk_der = private_key.to_pkcs8_der().map_err(|_| CKR_FUNCTION_FAILED)?;
-    let n_bytes = public_key.n().to_bytes_be();
-    let e_bytes = public_key.e().to_bytes_be();
+    // Native fast path (AWS-LC) for the three sizes it generates; any other
+    // size in range keeps the pure-Rust generator (see crypto::awslc).
+    #[cfg(not(target_arch = "wasm32"))]
+    let fast = crate::crypto::awslc::rsa_generate(bits).transpose()?;
+    #[cfg(target_arch = "wasm32")]
+    let fast: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = None;
+    let (sk_der, n_bytes, e_bytes) = match fast {
+        Some(t) => t,
+        None => {
+            let mut rng = rand::rngs::OsRng;
+            let private_key = rsa::RsaPrivateKey::new(&mut rng, bits as usize)
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
+            let public_key = rsa::RsaPublicKey::from(&private_key);
+            let sk_der = private_key.to_pkcs8_der().map_err(|_| CKR_FUNCTION_FAILED)?;
+            (sk_der.as_bytes().to_vec(), public_key.n().to_bytes_be(), public_key.e().to_bytes_be())
+        }
+    };
 
     let mut pub_attrs: Attributes = HashMap::new();
     let mut prv_attrs: Attributes = HashMap::new();
@@ -462,10 +577,17 @@ pub fn generate_rsa_keypair(
     pub_attrs.insert(CKA_PUBLIC_EXPONENT, e_bytes.clone());
     store_ulong(&mut pub_attrs, CKA_MODULUS_BITS, bits);
 
-    // SubjectPublicKeyInfo DER (CKA_PUBLIC_KEY_INFO).
+    // SubjectPublicKeyInfo DER (CKA_PUBLIC_KEY_INFO). Rebuilt from the raw
+    // (n, e) components rather than a live key object, since the AWS-LC fast
+    // path above yields only the components, not an `rsa::RsaPublicKey`.
     use rsa::pkcs8::EncodePublicKey;
-    if let Ok(spki_der) = public_key.to_public_key_der() {
-        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki_der.as_bytes().to_vec());
+    if let Ok(spki_key) = rsa::RsaPublicKey::new(
+        rsa::BigUint::from_bytes_be(&n_bytes),
+        rsa::BigUint::from_bytes_be(&e_bytes),
+    ) {
+        if let Ok(spki_der) = spki_key.to_public_key_der() {
+            pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki_der.as_bytes().to_vec());
+        }
     }
 
     // Engine-internal packed CKA_VALUE on the public key so C_Encrypt
@@ -476,7 +598,7 @@ pub fn generate_rsa_keypair(
     packed.extend_from_slice(&n_bytes);
     packed.extend_from_slice(&e_bytes);
     pub_attrs.insert(CKA_VALUE, packed);
-    prv_attrs.insert(CKA_VALUE, sk_der.as_bytes().to_vec());
+    prv_attrs.insert(CKA_VALUE, sk_der);
 
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);
@@ -733,6 +855,22 @@ pub fn generate_ecdh_keypair(
 ///
 /// **Pre-condition**: `session` must be a valid R/W user session.
 pub fn generate_ed25519_keypair(
+    _session: u32,
+    cka_id: &[u8],
+    label: &str,
+) -> Result<(u32, u32), CkRv> {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let t0 = (logging || ring).then(std::time::Instant::now);
+    let result = generate_ed25519_keypair_inner(_session, cka_id, label);
+    if logging || ring {
+        let dur = crate::behaviour::elapsed_us(t0);
+        emit_generate_key_pair(_session, CKM_EC_EDWARDS_KEY_PAIR_GEN, 0, &result, dur, logging, ring);
+    }
+    result
+}
+
+fn generate_ed25519_keypair_inner(
     _session: u32,
     cka_id: &[u8],
     label: &str,

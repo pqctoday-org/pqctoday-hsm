@@ -210,6 +210,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce2b2dcc879c3bae0d371e77c99f2238400ef24ec001394befa67b6e543add9e"
 dependencies = [
  "aws-lc-sys",
+ "untrusted 0.7.1",
  "zeroize",
 ]
 
@@ -1105,6 +1106,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 name = "fips204"
 version = "0.4.6"
 dependencies = [
+ "pqc-phase-profile",
  "rand_core 0.6.4",
  "sha2",
  "sha3 0.10.8",
@@ -1115,6 +1117,7 @@ dependencies = [
 name = "fips205"
 version = "0.4.1"
 dependencies = [
+ "pqc-phase-profile",
  "rand_core 0.6.4",
  "sha2",
  "sha3 0.10.8",
@@ -1924,6 +1927,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1965,11 +1978,10 @@ dependencies = [
 [[package]]
 name = "ml-kem"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8de49b3df74c35498c0232031bb7e85f9389f913e2796169c8ab47a53993a18f"
 dependencies = [
  "hybrid-array 0.2.3",
  "kem",
+ "pqc-phase-profile",
  "rand_core 0.6.4",
  "sha3 0.10.8",
 ]
@@ -2426,6 +2438,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pqc-hw"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "sha3 0.10.8",
+]
+
+[[package]]
+name = "pqc-phase-profile"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "pqctoday-kmip"
 version = "0.17.0"
 dependencies = [
@@ -2808,7 +2835,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.17",
  "libc",
- "untrusted",
+ "untrusted 0.9.0",
  "windows-sys 0.52.0",
 ]
 
@@ -2959,7 +2986,7 @@ dependencies = [
  "aws-lc-rs",
  "ring",
  "rustls-pki-types",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -3281,6 +3308,7 @@ dependencies = [
  "aes 0.8.4",
  "aes-gcm",
  "aes-kw",
+ "aws-lc-rs",
  "cbc",
  "chacha20 0.9.1",
  "chacha20poly1305",
@@ -3303,6 +3331,8 @@ dependencies = [
  "js-sys",
  "k256",
  "lazy_static",
+ "libc",
+ "md-5",
  "ml-kem",
  "num-bigint",
  "oqs",
@@ -3311,6 +3341,8 @@ dependencies = [
  "p521",
  "pbkdf2",
  "pkcs8 0.11.0",
+ "pqc-hw",
+ "pqc-phase-profile",
  "rand 0.8.6",
  "rand_chacha",
  "ripemd",
@@ -3887,6 +3919,12 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "untrusted"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
 
 [[package]]
 name = "untrusted"

@@ -22,6 +22,7 @@ pub(crate) fn ht_sign<
     hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], pk_seed: &[u8], idx_tree: u64,
     idx_leaf: u32,
 ) -> Result<HtSig<D, HP, LEN, N>, &'static str> {
+    profile_phase!(Tree);
     let mut idx_tree = idx_tree;
     let (d32, hp32) = (u32::try_from(D).unwrap(), u32::try_from(HP).unwrap());
     //
@@ -108,6 +109,7 @@ pub(crate) fn ht_verify<
     hashers: &Hashers<K, LEN, M, N>, m: &[u8], sig_ht: &HtSig<D, HP, LEN, N>, pk_seed: &[u8],
     idx_tree: u64, idx_leaf: u32, pk_root: &[u8; N],
 ) -> bool {
+    profile_phase!(Tree);
     let mut idx_tree = idx_tree;
     let (d32, hp32) = (u32::try_from(D).unwrap(), u32::try_from(HP).unwrap());
     //

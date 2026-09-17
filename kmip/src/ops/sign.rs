@@ -336,7 +336,7 @@ pub fn sign(
         EventPayload::KmipResponseSent {
             op: "Sign".into(),
             result: KmipOpResult::Success,
-            latency_ms: 0,
+            latency_ms: deps.take_request_latency_ms(correlation_id),
         },
     ));
 
@@ -456,7 +456,7 @@ fn fail_err(deps: &Deps, correlation_id: &str, op: &str, err: KmipError) -> Kmip
             result: KmipOpResult::OperationFailed {
                 reason: format!("{:?}", err.result_reason()),
             },
-            latency_ms: 0,
+            latency_ms: deps.take_request_latency_ms(correlation_id),
         },
     ));
     err

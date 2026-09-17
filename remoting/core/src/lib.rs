@@ -7,6 +7,7 @@
 mod cert;
 pub mod algorithm;
 pub mod error;
+pub mod metrics;
 pub mod verbs;
 pub mod verbs_v32;
 

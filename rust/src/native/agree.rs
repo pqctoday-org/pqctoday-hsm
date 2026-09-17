@@ -9,6 +9,7 @@
 
 use super::CkRv;
 use crate::constants::*;
+use crate::crypto::handlers::{CURVE_P256, CURVE_P384, CURVE_P521};
 use crate::state::{
     get_object_attr_u32_from, get_object_value_from, resolve_session_access, with_object_checked,
 };
@@ -48,6 +49,27 @@ pub fn ecdh_agree(session: u32, priv_handle: u32, peer_public: &[u8]) -> Result<
     allowed?;
     let key_type = key_type.ok_or(CKR_KEY_HANDLE_INVALID)?;
     let scalar = scalar.ok_or(CKR_KEY_HANDLE_INVALID)?;
+    // Native fast path (AWS-LC) for the three NIST curves — constant-time and
+    // assembly-optimised. X25519/X448 stay on dalek/x448 (AWS-LC's agreement
+    // API here covers only the NIST curves we route). `None` falls through to
+    // the pure-Rust match below unchanged. See crypto::awslc.
+    #[cfg(not(target_arch = "wasm32"))]
+    if key_type == CKK_EC {
+        let curve = match scalar.len() {
+            32 => CURVE_P256,
+            48 => CURVE_P384,
+            66 => CURVE_P521,
+            _ => 0,
+        };
+        if curve != 0 {
+            if let Some(r) = crate::crypto::awslc::ecdh(curve, &scalar, peer_public) {
+                // AWS-LC surfaces a bad peer point as the generic failure code;
+                // remap to this function's ARGUMENTS_BAD to match the pure-Rust
+                // branches' anti-oracle behaviour.
+                return r.map_err(|_| CKR_ARGUMENTS_BAD);
+            }
+        }
+    }
     match (key_type, scalar.len()) {
         // ── X25519 (RFC 7748) ───────────────────────────────────────────────
         (CKK_EC_MONTGOMERY, 32) => {
@@ -95,6 +117,28 @@ pub fn ecdh_agree(session: u32, priv_handle: u32, peer_public: &[u8]) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    // AWS-LC and the pure-Rust p256 path must derive the IDENTICAL ECDH
+    // shared secret (both yield the x-coordinate). If the fast path returned
+    // a different encoding, every derived key would silently diverge.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn awslc_ecdh_p256_matches_pure_rust() {
+        // Two P-256 scalars; compute A·B two ways and require equality.
+        let a = [0x22u8; 32];
+        let b_sk = p256::SecretKey::from_bytes((&[0x33u8; 32]).into()).unwrap();
+        let b_pub = b_sk.public_key().to_sec1_bytes().to_vec();
+        // pure Rust: a_priv · b_pub
+        let a_sk = p256::SecretKey::from_bytes((&a).into()).unwrap();
+        let peer = p256::PublicKey::from_sec1_bytes(&b_pub).unwrap();
+        let pure = p256::ecdh::diffie_hellman(a_sk.to_nonzero_scalar(), peer.as_affine())
+            .raw_secret_bytes().to_vec();
+        // AWS-LC: same inputs
+        let fast = crate::crypto::awslc::ecdh(CURVE_P256, &a, &b_pub)
+            .expect("awslc handles P-256").unwrap();
+        assert_eq!(pure, fast, "AWS-LC and p256 must agree on the ECDH secret");
+        assert_eq!(fast.len(), 32, "P-256 ECDH secret is the 32-byte x-coordinate");
+    }
+
     use crate::native::keygen::{generate_ecdh_keypair, generate_x25519_keypair, generate_x448_keypair, EccCurve};
     use crate::native::test_lock;
     use crate::state::{get_ec_point_sec1, get_object_value as gov};

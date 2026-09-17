@@ -6,8 +6,14 @@
 //! scenario does not need to know which one it is talking to:
 //!
 //! ```text
-//! PQCEV v=1 ts=<ms since epoch> pid=<pid> op=<C_ function> <key=value>...
+//! PQCEV v=1 ts=<ms since epoch> pid=<pid> op=<C_ function> <key=value>... dur=<µs>
 //! ```
+//!
+//! `dur=` is the wall time of the dispatch the record describes, measured
+//! around the call in the same function that emits it (2026-09-13, added
+//! with the behaviour ring — [`crate::behaviour`] carries the same figure
+//! bucketed). On the `native::*` path, which synthesises an init record next
+//! to the operation record, the init record carries `dur=0`.
 //!
 //! Why this exists: before it, the shipped Rust library emitted **nothing at
 //! all** — the only `println!`/`eprintln!` in the tree live in a KAT generator.
@@ -180,6 +186,11 @@ pub fn mech_name(mech: u32) -> &'static str {
         CKM_EC_KEY_PAIR_GEN => "CKM_EC_KEY_PAIR_GEN",
         CKM_ECDH1_DERIVE => "CKM_ECDH1_DERIVE",
         CKM_EDDSA => "CKM_EDDSA",
+        // Found running the evidence log against native::generate_ed25519_keypair
+        // for the first time (docs/remediation-plan-auth-visibility-evidence-log-
+        // 09102026.md, Gap 2): this mechanism exists in constants.rs and is used
+        // by both engines' Ed25519/Ed448 keygen, but was never added here.
+        CKM_EC_EDWARDS_KEY_PAIR_GEN => "CKM_EC_EDWARDS_KEY_PAIR_GEN",
         CKM_AES_KEY_GEN => "CKM_AES_KEY_GEN",
         _ => "CKM_UNKNOWN",
     }
@@ -206,6 +217,15 @@ pub fn rv_name(rv: u32) -> &'static str {
         CKR_OPERATION_ACTIVE => "CKR_OPERATION_ACTIVE",
         CKR_OPERATION_NOT_INITIALIZED => "CKR_OPERATION_NOT_INITIALIZED",
         CKR_SESSION_HANDLE_INVALID => "CKR_SESSION_HANDLE_INVALID",
+        // Found live 2026-09-10 adding Verify instrumentation
+        // (remediation-plan-verify-evidence-and-relp-receiver-pqc-
+        // 09102026.md): a rejected signature is exactly the outcome this
+        // whole fix exists to make visible, and it rendered as the
+        // catch-all "CKR_UNKNOWN" before this line existed — the same class
+        // of gap `mech_name`'s missing `CKM_EC_EDWARDS_KEY_PAIR_GEN` was
+        // earlier this session, found the same way: by actually reading the
+        // evidence a live test produced, not by inspecting the code alone.
+        CKR_SIGNATURE_INVALID => "CKR_SIGNATURE_INVALID",
         CKR_TEMPLATE_INCOMPLETE => "CKR_TEMPLATE_INCOMPLETE",
         CKR_TEMPLATE_INCONSISTENT => "CKR_TEMPLATE_INCONSISTENT",
         CKR_USER_NOT_LOGGED_IN => "CKR_USER_NOT_LOGGED_IN",

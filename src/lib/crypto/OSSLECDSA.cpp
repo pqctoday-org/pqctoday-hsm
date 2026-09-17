@@ -44,6 +44,10 @@
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/objects.h>
+#include <openssl/bn.h>
+#include <openssl/ec.h>
+#include <openssl/param_build.h>
+#include <openssl/rand.h>
 #include <string.h>
 
 // Helper: convert OpenSSL DER-encoded ECDSA_SIG to raw r||s (PKCS#11 format)
@@ -418,6 +422,144 @@ bool OSSLECDSA::decrypt(PrivateKey* /*privateKey*/, const ByteString& /*encrypte
 }
 
 // Key factory
+// FIPS 186-5 A.2.2, "Key Pair Generation Using Extra Random Bits": draw
+// len(n)+64 random bits, reduce modulo (n-1) and add 1. PKCS#11 v3.2 exposes
+// this as CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS — a mechanism distinct from
+// CKM_EC_KEY_PAIR_GEN precisely because the two differ in how the private
+// scalar is drawn. This mirrors the Rust engine's ec_extra_bits_scalar()
+// (rust/src/ffi.rs) so both engines build the key by the same construction.
+//
+// OpenSSL exposes no knob for the generation method, so the scalar is drawn
+// here and the key assembled from (group, private, public) via
+// EVP_PKEY_fromdata. The public point has to be supplied explicitly:
+// fromdata will not derive it from the private scalar.
+static EVP_PKEY* ecGenerateKeyExtraBits(int nid, const char* curve_name)
+{
+	EVP_PKEY*       pkey      = NULL;
+	EC_GROUP*       grp       = NULL;
+	BN_CTX*         bnctx     = NULL;
+	const BIGNUM*   order     = NULL;
+	BIGNUM*         nMinus1   = NULL;
+	BIGNUM*         c         = NULL;
+	BIGNUM*         d         = NULL;
+	EC_POINT*       pubPt     = NULL;
+	unsigned char*  rndBits   = NULL;
+	unsigned char*  pubBuf    = NULL;
+	size_t          pubLen    = 0;
+	size_t          rndLen    = 0;
+	int             orderBits = 0;
+	OSSL_PARAM_BLD* bld       = NULL;
+	OSSL_PARAM*     params    = NULL;
+	EVP_PKEY_CTX*   ctx       = NULL;
+
+	grp = EC_GROUP_new_by_curve_name(nid);
+	if (grp == NULL)
+	{
+		ERROR_MSG("Failed to load EC group for extra-bits key generation");
+		goto done;
+	}
+
+	order = EC_GROUP_get0_order(grp);
+	if (order == NULL || BN_is_zero(order))
+	{
+		ERROR_MSG("EC group has no usable order for extra-bits key generation");
+		goto done;
+	}
+	orderBits = BN_num_bits(order);
+
+	// len(n) + 64 bits, rounded up to whole bytes
+	rndLen  = (size_t)((orderBits + 64 + 7) / 8);
+	rndBits = (unsigned char*) OPENSSL_malloc(rndLen);
+	bnctx   = BN_CTX_new();
+	nMinus1 = BN_new();
+	d       = BN_secure_new();
+	if (rndBits == NULL || bnctx == NULL || nMinus1 == NULL || d == NULL)
+	{
+		ERROR_MSG("Out of memory in extra-bits EC key generation");
+		goto done;
+	}
+
+	if (RAND_bytes(rndBits, (int)rndLen) != 1)
+	{
+		ERROR_MSG("RAND_bytes failed in extra-bits EC key generation");
+		goto done;
+	}
+
+	c = BN_bin2bn(rndBits, (int)rndLen, NULL);
+	if (c == NULL)
+	{
+		ERROR_MSG("Failed to import random bits in extra-bits EC key generation");
+		goto done;
+	}
+
+	// d = (c mod (n-1)) + 1, so 1 <= d <= n-1
+	if (BN_copy(nMinus1, order) == NULL ||
+	    BN_sub_word(nMinus1, 1) != 1 ||
+	    BN_mod(d, c, nMinus1, bnctx) != 1 ||
+	    BN_add_word(d, 1) != 1)
+	{
+		ERROR_MSG("Scalar reduction failed in extra-bits EC key generation");
+		goto done;
+	}
+
+	// Q = d * G
+	pubPt = EC_POINT_new(grp);
+	if (pubPt == NULL || EC_POINT_mul(grp, pubPt, d, NULL, NULL, bnctx) != 1)
+	{
+		ERROR_MSG("Failed to compute the public point in extra-bits EC key generation");
+		goto done;
+	}
+
+	pubLen = EC_POINT_point2oct(grp, pubPt, POINT_CONVERSION_UNCOMPRESSED, NULL, 0, bnctx);
+	if (pubLen == 0)
+	{
+		ERROR_MSG("Failed to size the public point in extra-bits EC key generation");
+		goto done;
+	}
+	pubBuf = (unsigned char*) OPENSSL_malloc(pubLen);
+	if (pubBuf == NULL ||
+	    EC_POINT_point2oct(grp, pubPt, POINT_CONVERSION_UNCOMPRESSED, pubBuf, pubLen, bnctx) != pubLen)
+	{
+		ERROR_MSG("Failed to encode the public point in extra-bits EC key generation");
+		goto done;
+	}
+
+	bld = OSSL_PARAM_BLD_new();
+	if (bld == NULL ||
+	    OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, curve_name, 0) != 1 ||
+	    OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, d) != 1 ||
+	    OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY, pubBuf, pubLen) != 1)
+	{
+		ERROR_MSG("Failed to build key parameters in extra-bits EC key generation");
+		goto done;
+	}
+	params = OSSL_PARAM_BLD_to_param(bld);
+	ctx    = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
+	if (params == NULL || ctx == NULL ||
+	    EVP_PKEY_fromdata_init(ctx) <= 0 ||
+	    EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_KEYPAIR, params) <= 0)
+	{
+		ERROR_MSG("EVP_PKEY_fromdata failed in extra-bits EC key generation (0x%08X)", ERR_get_error());
+		pkey = NULL;
+		goto done;
+	}
+
+done:
+	if (ctx     != NULL) EVP_PKEY_CTX_free(ctx);
+	if (params  != NULL) OSSL_PARAM_free(params);
+	if (bld     != NULL) OSSL_PARAM_BLD_free(bld);
+	if (pubBuf  != NULL) OPENSSL_free(pubBuf);
+	if (pubPt   != NULL) EC_POINT_free(pubPt);
+	if (d       != NULL) BN_clear_free(d);
+	if (c       != NULL) BN_clear_free(c);
+	if (nMinus1 != NULL) BN_free(nMinus1);
+	if (rndBits != NULL) OPENSSL_clear_free(rndBits, rndLen);
+	if (bnctx   != NULL) BN_CTX_free(bnctx);
+	if (grp     != NULL) EC_GROUP_free(grp);
+
+	return pkey;
+}
+
 bool OSSLECDSA::generateKeyPair(AsymmetricKeyPair** ppKeyPair, AsymmetricParameters* parameters, RNG* /*rng = NULL */)
 {
 	// Check parameters
@@ -447,6 +589,22 @@ bool OSSLECDSA::generateKeyPair(AsymmetricKeyPair** ppKeyPair, AsymmetricParamet
 	{
 		ERROR_MSG("Failed to get curve name for ECDSA key generation");
 		return false;
+	}
+
+	// CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS draws the private scalar itself
+	// (FIPS 186-5 A.2.2) rather than letting the provider choose a method
+	if (params->getUseExtraBits())
+	{
+		EVP_PKEY* xpkey = ecGenerateKeyExtraBits(nid, curve_name);
+		if (xpkey == NULL)
+			return false;
+
+		OSSLECKeyPair* xkp = new OSSLECKeyPair();
+		((OSSLECPublicKey*) xkp->getPublicKey())->setFromOSSL(xpkey);
+		((OSSLECPrivateKey*) xkp->getPrivateKey())->setFromOSSL(xpkey);
+		*ppKeyPair = xkp;
+		EVP_PKEY_free(xpkey);
+		return true;
 	}
 
 	// Generate the key-pair via EVP_PKEY_CTX

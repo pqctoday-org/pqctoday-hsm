@@ -3,6 +3,14 @@
 #![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::too_many_arguments)]
+// 2026-09-07. This lint is an ERROR, not a warning, because it already caught
+// a real defect this session: CKM_ECDSA_SHA1 on P-256 signed with SHA-1 and
+// verified with SHA3-256 — no signature the engine produced under that
+// mechanism could be verified by it — and the only outward sign was an
+// "unreachable pattern" warning sitting in a backlog of 43. A duplicate or
+// shadowed match arm in this crate is a dispatch bug often enough that it
+// should stop the build rather than join a queue.
+#![deny(unreachable_patterns)]
 // Edition 2024 promoted `unsafe_op_in_unsafe_fn` to a lint-on-by-default,
 // which requires every unsafe op inside an `unsafe fn` to be wrapped in
 // its own `unsafe { … }` block. softhsmrustv3's PKCS#11 surface uses the
@@ -28,12 +36,25 @@ pub mod constants;
 pub mod ck_param;
 pub mod crypto;
 pub mod ffi;
+#[cfg(all(feature = "hw-accel", target_os = "linux", target_arch = "aarch64"))]
+pub mod hw_accel;
 pub mod native;
 /// PKCS#11 operation-evidence log — one machine-parseable record per completed
 /// cryptographic operation, gated at runtime by `SOFTHSM3_OP_LOG`. Emits the
 /// same grammar as the C++ engine so one consumer parses both. The sink (not
 /// the call sites) is cfg-gated away from `wasm32-unknown-unknown`.
 pub mod oplog;
+/// Authentication-attempt evidence log — one record per failed login
+/// (KMIP credential/TLS handshake, PKCS#11-remoting PIN), gated at runtime
+/// by `PQC_AUTH_LOG`. Same shape as `oplog`, deliberately a separate sink —
+/// see that module's doc for why.
+pub mod authlog;
+/// Behaviour event ring — one 8-byte record per operation into a shared-
+/// memory ring for the appliance's behaviour monitor, gated at runtime by
+/// `PQC_BEHAVIOUR_RING`. Third evidence sink next to `oplog`/`authlog`;
+/// `cfg`'d to a no-op on every wasm target. Id tables are generated from
+/// `behaviour/ids.json` (see `behaviour/gen.py`).
+pub mod behaviour;
 pub mod state;
 /// Native, encrypted-at-rest persistence for the engine's own slots/tokens/
 /// objects. Separate from `state_snapshot.rs` (the Emscripten-only debug

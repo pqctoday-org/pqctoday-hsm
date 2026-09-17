@@ -14,7 +14,8 @@
 //!   Plane 3 ── emit() ─┘                                        ├─► SseSink     (SSE stream)
 //!                                                                ├─► JsonlSink   (durable file)
 //!                                                                ├─► SyslogSink  (UDP syslog)
-//!                                                                └─► OtlpSink    (OTLP/HTTP)
+//!                                                                ├─► OtlpSink    (OTLP/HTTP)
+//!                                                                └─► BehaviourSink (8-byte ring, PQC_BEHAVIOUR_RING)
 //! ```
 //!
 //! Each plane is constructed with an `Arc<dyn AuditSink>`. Production
@@ -35,6 +36,10 @@
 //! `Pkcs11Call` records with the actual softhsmrustv3 entry point + rv
 //! whenever `deps.engine_session` is present.
 
+// The behaviour ring is a shared-memory file — `native` only, like the
+// other out-of-process legs.
+#[cfg(feature = "native")]
+pub mod behaviour;
 pub mod composite;
 pub mod event;
 pub mod jsonl;
@@ -48,6 +53,8 @@ pub mod sink;
 pub mod sse;
 pub mod syslog;
 
+#[cfg(feature = "native")]
+pub use behaviour::BehaviourSink;
 pub use composite::CompositeSink;
 pub use event::{AuditEvent, CorrelationId, DecisionSummary, EventPayload, KmipOpResult, Plane};
 pub use jsonl::JsonlSink;

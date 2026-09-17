@@ -1,4 +1,6 @@
-use axum::extract::Path;
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Path};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use pqctoday_pkcs11_remote_core::verbs;
@@ -32,8 +34,15 @@ async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { ok: info.ok, engine_version: info.remoting_core_version.to_string() })
 }
 
-async fn open_session(Json(req): Json<OpenSessionRequest>) -> Result<Json<OpenSessionResponse>, ApiError> {
-    let handle = verbs::open_session(&req.user_pin)?;
+async fn open_session(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<OpenSessionRequest>,
+) -> Result<Json<OpenSessionResponse>, ApiError> {
+    let handle = verbs::open_session(&req.user_pin).map_err(|e| {
+        // docs/remediation-plan-auth-visibility-evidence-log-09102026.md, Q2.
+        pqctoday_pkcs11_remote_core::metrics::record_auth_failure(e.class(), Some(&peer.to_string()));
+        e
+    })?;
     Ok(Json(OpenSessionResponse { session_handle: handle }))
 }
 

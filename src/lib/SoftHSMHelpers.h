@@ -43,8 +43,14 @@
 // Defined as static constexpr so each TU gets its own copy without ODR issues.
 // ---------------------------------------------------------------------------
 
-/// Maximum ulMaxKeySize for mechanisms with no practical key-size limit (2^31).
-static constexpr CK_ULONG UNLIMITED_KEY_SIZE       = 0x80000000UL;
+/// Maximum ulMaxKeySize for mechanisms with no practical key-size limit.
+/// Phase-5 §3 (2026-09-07): was 2^31 (0x80000000), one over the CK_ULONG
+/// cap v3.3 introduction.md:303 states ("every CK_ULONG capped at
+/// 0x7FFFFFFF") and v3.2 leaves unstated -- a v3.3 gap-fill under the
+/// standing rule, not a correction to a v3.2 value. Clamped to the cap
+/// itself: still effectively unlimited for every mechanism that uses it
+/// (CKM_GENERIC_SECRET_KEY_GEN, CKM_KMAC_128/256), one bit narrower.
+static constexpr CK_ULONG UNLIMITED_KEY_SIZE       = 0x7FFFFFFFUL;
 
 /// Hard cap on generic secret key byte length in C_GenerateKey (128 MiB).
 static constexpr CK_ULONG MAX_GENERIC_KEY_LEN_BYTES = 0x8000000UL;

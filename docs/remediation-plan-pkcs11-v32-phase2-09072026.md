@@ -161,3 +161,50 @@ Extend the proven `remoting/coverage_ledger.json` + `remoting/scripts/check_cove
 - **O-1 — PQC private-key PKCS#8 inner encoding.** Is the current raw-in-OCTET-STRING form correct for ML-DSA/ML-KEM/SLH-DSA, or should the privateKey wrap a seed/expandedKey structure? OpenSSL's `private_key_to_pkcs8()` produced a nested `SEQUENCE{seed, expandedKey}` for ML-DSA-65 (observed during the PR #212 work), which suggests the engine's form may diverge from OpenSSL for PQC exactly as it does for EC. Needs a reference check against OpenSSL 3.6.3 and the current LAMPS drafts before anything changes; §1 deliberately leaves it alone.
 - **O-2 — MD5/SHA-1 exposure.** D2 says add them. Worth one explicit confirmation before Wave 3 lands, since it is the only irreversible-feeling piece (a new dependency plus broken primitives advertised by a PQC engine) and Waves 1–2 deliver most of the practical parity without it.
 - **O-3 — `LEGAL-MECHANISM-SET` after §3.** Once the sets converge, does the entry disappear entirely, or does a residual (build-flag-varying mechanisms) remain? Determined by re-running the harness, not by prediction.
+
+---
+
+## 10. Execution log
+
+Branch `fix/pkcs11-d2-pkcs8-wire-format`, worktree `.worktrees/pkcs11-d2`. Every item below was verified before it was committed; where a fix claimed a defect, the test was confirmed to **fail on the pre-fix code** first.
+
+| Item | Commit | State |
+|---|---|---|
+| §1 D-2 — PKCS#8 wire format | `bba2e255`, `7ba6eb4e` | **Done.** Encoder rewritten to emit RFC 5915 `ECPrivateKey` / RFC 8410 `CurvePrivateKey` inside `PrivateKeyInfo`; matching decoder; 8 OpenSSL-generated `.p8.der` fixtures under `rust/kat/pkcs8/`. Design was pinned to measured ground truth — a Python prototype reproduced OpenSSL 3.6.3 byte-for-byte for all 8 key types before any Rust was written. Fails-pre-fix confirmed: reverting the encoder reproduces the ledger's historical figure exactly (P-256 → 60 bytes, 72 through AES-KWP). Retired two tracked defects. |
+| §2 C2 — `CKO_TRUST` | `37f78970`, `57d61fd7` | **Done**, both engines. New `P11TrustObj` + parameterised `P11AttrTrustValue` with a closed `CK_TRUST` domain; footnotes 1/2/3 enforced. New differential scenario `create.trust_object`. Two engine-wide bugs surfaced and were fixed at the root rather than the call site: every object class must seed its own `CKA_CLASS` in `init()` (50 divergences), and Rust never applied the §4.4 `CKA_TOKEN` default (the last 4). |
+| §3 Parity (D2), waves 1–4 | `34efee23`, `f1708e81`, `75276719` | **Done.** Rust 129 → 172 advertised mechanisms; the C++-only set fell 43 → **0**. `LEGAL-WEAK-PRIMITIVES-ABSENT-IN-RUST` deleted (its premise became false under D2) and `LEGAL-MECHANISM-SET` rewritten without its stale hardcoded counts. |
+| §4 X1 — extra-bits EC keygen, engine | `f36675c0` | **Done.** `ECParameters` gains a non-serialised generation-method flag rather than changing the `AsymmetricAlgorithm::generateKeyPair` signature across every algorithm; `OSSLECDSA` draws the scalar per FIPS 186-5 A.2.2 and assembles the key with `EVP_PKEY_fromdata`, computing the public point explicitly. Unlike Rust's version it is not scoped to the NIST prime curves. Scenario `create.generate_key_pair.ec_extra_bits` now compares 755 observations where it previously compared none on the C++ side; `LEGAL-EC-EXTRA-BITS-CPP-UNIMPLEMENTED` deleted. |
+| §4 X1 — providers | `6d607f39` | **OpenSSL provider done** (`pkcs11_ec_extra_bits` keygen parameter; target builds clean). **JavaJCE written but NOT COMPILED AND NOT TESTED** — no JDK exists on this machine or in the container. Treat it as a patch awaiting verification. `SoftHSMv3Provider`'s POST was deliberately left alone: adding an untestable pairwise check to a path that runs on every provider load risks bricking the provider for no verifiable gain. |
+| — (found during X1) | `60d0df48` | **Real defect fixed.** `CKM_ECDSA_SHA1` on P-256 signed with SHA-1 but verified with SHA3-256 — no signature the engine produced under that mechanism could be verified by it, and it was advertised throughout. Introduced by `f1708e81`; found by chasing "unreachable pattern" warnings instead of dismissing them. New test `every_advertised_ecdsa_p256_mechanism_round_trips` tests the seam (sign → verify with the engine's own output, plus a wrong-message negative so a matching-but-wrong hash on both sides still fails). Also fixed: `CKM_AES_CMAC` reported a 64-byte max key, disagreeing with C++'s 16..32. |
+| §5 X2′ — mechanism ledger | `6121c8d3` | **Done.** `docs/pkcs11-mechanism-ledger.json`, 488 rows; `scripts/check_pkcs11_mechanism_ledger.py` wired into `local-gate.sh` as step 0. Verified by five sabotage cases on a **copy** of the tree. Independently confirms the §3 parity claim from a different source than the harness. |
+| §6 H1 — hygiene | see below | H1.3 (stale doc status lines) and H1.4 (stale branch deleted) done in phase 1. H1.1/H1.2 (citation re-verification, section-number drift) and H1.5 (serial harness run) below. |
+
+### What the `CKM_AES_CMAC` bug says about §5
+
+It is worth recording why X2′ was the right item to build. The wrong `CK_MECHANISM_INFO` key range sat in `SUPPORTED_MECHS` and the differential harness did **not** flag it — `LEGAL-MECHANISM-SET` excuses the path glob `mech*` wholesale, so every mechanism-info divergence between the engines was invisible to it. A row-level ratchet that excuses a whole glob hides exactly the class of defect it looks like it covers. The ledger checks each `CKM_*` on its own, from the source files that build the advertised lists.
+
+
+### §6 H1 — done (2026-09-07)
+
+**H1.1/H1.2 — citations re-verified.** All 31 `citation` fields checked against `docs/refs/pkcs11-spec-v3.2-csd01.pdf`. **16 were wrong.** No verdict changed — every divergence is still legal — but the errors were not cosmetic:
+
+- **One quoted a sentence that does not exist** in any edition: `CKA_ALLOWED_MECHANISMS` "if not present, the key may be used with any mechanism". The specification defines no absence semantics for it at all. Re-justified on materialisation grounds.
+- **Ten shared one wrong section**: "§4.9 common key attribute table footnote". §4.9 is *Public key objects*; the common key attribute table is Table 26 in §4.8; the footnote is 9 of Table 13 in §4.2.
+- **One was in the wrong family**: `CKA_DERIVE`'s default is *specified* as `CK_FALSE` (footnote 8, not 9), so a token-specific-default justification never applied. Verified against the harness rather than assumed — all 10 divergences are `cpp='00'` vs `rust=<absent>`, pure materialisation, no value disagreement. Renamed `LEGAL-USAGE-FLAG-DEFAULT-DERIVE` → `LEGAL-OPTIONAL-ATTR-NOT-MATERIALISED-DERIVE` so a future *value* divergence there fails instead of being excused.
+- **Two corrections weaken their own entry** and were recorded rather than smoothed over: `CKA_PUBLIC_KEY_INFO`'s citation stopped one sentence before a SHOULD that argues the other way, and the Edwards/Montgomery entry's ellipsis hid "of the template for the public key" plus an explicit "incompatible" note.
+
+Two independent research passes disagreed on the private-key table number; that was settled by extracting the PDF's own text (Table 27 Public / 28 X.509 mapping / 29 Private / 30 Secret), not by preferring one report. **The vendored v3.3 draft must not be used for section or table numbers** — no numbers in its headings, and its content has drifted from v3.2.
+
+**H1.5 — serial harness run.** 65 scenarios, 10,065 observations, 1,814 legal, 11 known-defect, **0 uncovered, PASS**. Re-run after the citation edits: identical. **No stale entries** — every exception either matched or is one of the six the harness itself labels deliberately unobservable. H1.3 and H1.4 were completed in phase 1.
+
+## 11. Open questions — resolved
+
+- **O-2 — MD5/SHA-1 exposure.** Settled by decision D2 and shipped in §3 Wave 3. Both engines advertise them; `CLAUDE.md` records why.
+- **O-3 — `LEGAL-MECHANISM-SET` after §3.** Answered by running the harness, as the question required: the entry **stays**, with 1 hit. The divergence is now one-directional — Rust advertises PQC and vendor mechanisms the C++ engine does not, while the C++-only set is empty. Its stale hardcoded counts were removed rather than updated.
+- **O-1 — PQC private-key PKCS#8 inner encoding.** STILL OPEN, untouched, as §1 intended. Needs a reference check against OpenSSL 3.6.3 and the current LAMPS drafts before anything changes.
+
+## 12. What is NOT done
+
+- **JavaJCE half of X1** is written but **never compiled or run** — no JDK exists on this machine or in the `pqc-rust` container. `SoftHSMv3Provider`'s POST was deliberately left untouched for the same reason.
+- **O-1** above.
+- Nothing on this branch has been pushed.

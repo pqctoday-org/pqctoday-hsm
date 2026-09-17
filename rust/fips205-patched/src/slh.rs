@@ -59,6 +59,8 @@ pub(crate) fn slh_keygen_internal<
 >(
     hashers: &Hashers<K, LEN, M, N>, sk_seed: [u8; N], sk_prf: [u8; N], pk_seed: [u8; N],
 ) -> (SlhPrivateKey<N>, SlhPublicKey<N>) {
+    #[cfg(feature = "phase-profile")]
+    let _pqc_operation = pqc_phase_profile::operation("SLH-DSA", "keygen");
     let (d32, hp32) = (u32::try_from(D).unwrap(), u32::try_from(HP).unwrap());
     //
     // 1: ADRS ← toByte(0, 32)    ▷ Generate the public key for the top-level XMSS tree
@@ -148,6 +150,8 @@ pub(crate) fn slh_sign_internal<
 >(
     hashers: &Hashers<K, LEN, M, N>, m: &[&[u8]], sk: &SlhPrivateKey<N>, opt_rand: [u8; N],
 ) -> Result<SlhDsaSig<A, D, HP, K, LEN, N>, &'static str> {
+    #[cfg(feature = "phase-profile")]
+    let _pqc_operation = pqc_phase_profile::operation("SLH-DSA", "sign");
     let (d32, h32) = (u32::try_from(D).unwrap(), u32::try_from(H).unwrap());
     //
     // 1: ADRS ← toByte(0, 32)
@@ -286,6 +290,8 @@ pub(crate) fn slh_verify_internal<
     hashers: &Hashers<K, LEN, M, N>, m: &[&[u8]], sig: &SlhDsaSig<A, D, HP, K, LEN, N>,
     pk: &SlhPublicKey<N>,
 ) -> bool {
+    #[cfg(feature = "phase-profile")]
+    let _pqc_operation = pqc_phase_profile::operation("SLH-DSA", "verify");
     let (d32, h32) = (u32::try_from(D).unwrap(), u32::try_from(H).unwrap());
 
     // 1: if |SIG| != (1 + k(1 + a) + h + d · len) · n then

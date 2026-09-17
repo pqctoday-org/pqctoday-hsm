@@ -16,7 +16,6 @@ use hbs_lms::{
     Shake256_192, Shake256_256,
 };
 
-use crate::constants::*;
 
 // ── Hash type dispatch ──────────────────────────────────────────────────────
 //

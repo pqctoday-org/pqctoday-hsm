@@ -708,7 +708,7 @@ pub fn create_key_pair(
         EventPayload::KmipResponseSent {
             op: op_canonical.into(),
             result: KmipOpResult::Success,
-            latency_ms: 0,
+            latency_ms: deps.take_request_latency_ms(correlation_id),
         },
     ));
 
@@ -1308,7 +1308,7 @@ fn fail<T>(deps: &Deps, correlation_id: &str, op: &str, err: KmipError) -> Resul
             result: KmipOpResult::OperationFailed {
                 reason: format!("{:?}", err.result_reason()),
             },
-            latency_ms: 0,
+            latency_ms: deps.take_request_latency_ms(correlation_id),
         },
     ));
     Err(err)

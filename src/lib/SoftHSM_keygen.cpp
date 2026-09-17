@@ -41,6 +41,7 @@
 #include "config.h"
 #include "log.h"
 #include "OpLog.h"
+#include "BehaviourRing.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -481,12 +482,29 @@ CK_RV SoftHSM::C_GenerateKeyPair
 	CK_OBJECT_HANDLE_PTR phPrivateKey
 )
 {
+	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
+	const uint64_t t0  = (logging || ring) ? BehaviourRing::nowMicros() : 0;
+
 	CK_RV rv = generateKeyPairImpl(hSession, pMechanism,
 	                               pPublicKeyTemplate, ulPublicKeyAttributeCount,
 	                               pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
 	                               phPublicKey, phPrivateKey);
 
-	if (OpLog::enabled())
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+
+	if (ring)
+	{
+		// Parameter set read off the private key when there is one; a failed
+		// keygen records the family as ALG_OTHER rather than guessing a size.
+		const bool haveKey = (rv == CKR_OK && phPrivateKey != NULL_PTR && *phPrivateKey != CK_INVALID_HANDLE);
+		const uint8_t alg = (pMechanism != NULL_PTR)
+			? behaviourAlg(hSession, haveKey ? *phPrivateKey : CK_INVALID_HANDLE, pMechanism->mechanism)
+			: BehaviourIds::ALG_NONE;
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_GENERATEKEYPAIR, alg, rv, 0, dur));
+	}
+
+	if (logging)
 	{
 		const CK_MECHANISM_TYPE mech = (pMechanism != NULL_PTR) ? pMechanism->mechanism : 0;
 
@@ -503,13 +521,14 @@ CK_RV SoftHSM::C_GenerateKeyPair
 			: std::string("extractable=- sensitive=- never_extractable=- always_sensitive=- local=-");
 
 		OpLog::emit("C_GenerateKeyPair",
-		            "sess=%lu mech=%s mech_id=0x%08lx %s %s hpub=%lu hpriv=%lu rv=%s rv_id=0x%08lx",
+		            "sess=%lu mech=%s mech_id=0x%08lx %s %s hpub=%lu hpriv=%lu rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            OpLog::mechName(mech), (unsigned long)mech,
 		            keyFields.c_str(), custody.c_str(),
 		            (unsigned long)(phPublicKey  != NULL_PTR ? *phPublicKey  : CK_INVALID_HANDLE),
 		            (unsigned long)(phPrivateKey != NULL_PTR ? *phPrivateKey : CK_INVALID_HANDLE),
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
 	}
 
 	return rv;
@@ -549,6 +568,7 @@ CK_RV SoftHSM::generateKeyPairImpl
 			break;
 #ifdef WITH_ECC
 		case CKM_EC_KEY_PAIR_GEN:
+		case CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS:
 			keyType = CKK_EC;
 			break;
 #endif
@@ -610,7 +630,8 @@ CK_RV SoftHSM::generateKeyPairImpl
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN && keyType != CKK_PQCTODAY_CLASSIC_MCELIECE)
 		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN && keyType != CKK_EC)
+	if ((pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN ||
+	     pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS) && keyType != CKK_EC)
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN && keyType != CKK_HSS)
 		return CKR_TEMPLATE_INCONSISTENT;
@@ -643,7 +664,8 @@ CK_RV SoftHSM::generateKeyPairImpl
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN && keyType != CKK_PQCTODAY_CLASSIC_MCELIECE)
 		return CKR_TEMPLATE_INCONSISTENT;
-	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN && keyType != CKK_EC)
+	if ((pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN ||
+	     pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS) && keyType != CKK_EC)
 		return CKR_TEMPLATE_INCONSISTENT;
 	if (pMechanism->mechanism == CKM_HSS_KEY_PAIR_GEN && keyType != CKK_HSS)
 		return CKR_TEMPLATE_INCONSISTENT;
@@ -676,13 +698,15 @@ CK_RV SoftHSM::generateKeyPairImpl
 
 
 	// Generate EC (Weierstrass curve) keys
-	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN)
+	if (pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN ||
+	    pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS)
 	{
 			return this->generateEC(hSession,
 									 pPublicKeyTemplate, ulPublicKeyAttributeCount,
 									 pPrivateKeyTemplate, ulPrivateKeyAttributeCount,
 									 phPublicKey, phPrivateKey,
-									 ispublicKeyToken, ispublicKeyPrivate, isprivateKeyToken, isprivateKeyPrivate);
+									 ispublicKeyToken, ispublicKeyPrivate, isprivateKeyToken, isprivateKeyPrivate,
+									 pMechanism->mechanism == CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS);
 	}
 
 	// Generate Edwards / Montgomery keys
@@ -5600,7 +5624,8 @@ CK_RV SoftHSM::generateEC
 	CK_BBOOL isPublicKeyOnToken,
 	CK_BBOOL isPublicKeyPrivate,
 	CK_BBOOL isPrivateKeyOnToken,
-	CK_BBOOL isPrivateKeyPrivate)
+	CK_BBOOL isPrivateKeyPrivate,
+	bool useExtraBits)
 {
 	*phPublicKey = CK_INVALID_HANDLE;
 	*phPrivateKey = CK_INVALID_HANDLE;
@@ -5639,6 +5664,7 @@ CK_RV SoftHSM::generateEC
 	// Set the parameters
 	ECParameters p;
 	p.setEC(params);
+	p.setUseExtraBits(useExtraBits);
 
 	// Generate key pair
 	AsymmetricKeyPair* kp = NULL;
@@ -5701,7 +5727,9 @@ CK_RV SoftHSM::generateEC
 
 				// Common Key Attributes
 				bOK = bOK && osobject->setAttribute(CKA_LOCAL,true);
-				CK_ULONG ulKeyGenMechanism = (CK_ULONG)CKM_EC_KEY_PAIR_GEN;
+				CK_ULONG ulKeyGenMechanism = useExtraBits
+					? (CK_ULONG)CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS
+					: (CK_ULONG)CKM_EC_KEY_PAIR_GEN;
 				bOK = bOK && osobject->setAttribute(CKA_KEY_GEN_MECHANISM,ulKeyGenMechanism);
 
 				// EC Public Key Attributes
@@ -5786,7 +5814,9 @@ CK_RV SoftHSM::generateEC
 
 				// Common Key Attributes
 				bOK = bOK && osobject->setAttribute(CKA_LOCAL,true);
-				CK_ULONG ulKeyGenMechanism = (CK_ULONG)CKM_EC_KEY_PAIR_GEN;
+				CK_ULONG ulKeyGenMechanism = useExtraBits
+					? (CK_ULONG)CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS
+					: (CK_ULONG)CKM_EC_KEY_PAIR_GEN;
 				bOK = bOK && osobject->setAttribute(CKA_KEY_GEN_MECHANISM,ulKeyGenMechanism);
 
 				// Common Private Key Attributes

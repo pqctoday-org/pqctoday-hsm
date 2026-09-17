@@ -36,6 +36,7 @@
 #include "config.h"
 #include "log.h"
 #include "OpLog.h"
+#include "BehaviourRing.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -244,6 +245,8 @@ CK_RV SoftHSM::C_Initialize(CK_VOID_PTR pInitArgs)
 	// gated on purpose (see OpLog.h): the shipped binary and the binary evidence
 	// is collected from must be the same binary.
 	OpLog::init();
+	// Same for the behaviour ring (PQC_BEHAVIOUR_RING) -- see BehaviourRing.h.
+	BehaviourRing::init();
 
 	// Configure object store storage backend used by all tokens.
 	if (!ObjectStoreToken::selectBackend(Configuration::i()->getString("objectstore.backend", DEFAULT_OBJECTSTORE_BACKEND)))
@@ -298,6 +301,7 @@ CK_RV SoftHSM::C_Finalize(CK_VOID_PTR pReserved)
 	// Close the evidence sink before the teardown branch below, so a run that
 	// ends via process exit still leaves a properly closed, complete log.
 	OpLog::shutdown();
+	BehaviourRing::shutdown();
 
 	// During process teardown (OpenSSL's atexit cleanup unloading the provider),
 	// OpenSSL's globals are already being freed. The cleanup below reaches back
@@ -598,6 +602,7 @@ void SoftHSM::prepareSupportedMechanisms(std::map<std::string, CK_MECHANISM_TYPE
 
 	// ECDSA + ECDH (DSA and DH PKCS removed)
 	t["CKM_EC_KEY_PAIR_GEN"]	= CKM_EC_KEY_PAIR_GEN;
+	t["CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS"]	= CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS;
 	t["CKM_ECDSA"]			= CKM_ECDSA;
 	t["CKM_ECDSA_SHA1"]		= CKM_ECDSA_SHA1;
 	t["CKM_ECDSA_SHA224"]		= CKM_ECDSA_SHA224;
@@ -1024,6 +1029,12 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMaxKeySize = rsaMaxSize;
 			pInfo->flags = CKF_ENCRYPT | CKF_DECRYPT | CKF_WRAP | CKF_UNWRAP;
 			break;
+		// Phase-5 §3.2 (2026-09-07): v3.2 §6.8 fixes ulMinKeySize/ulMaxKeySize
+		// for THIS mechanism as bits, not bytes — the one case in this
+		// switch where that distinction is spec-mandated rather than a
+		// convention. 1..UNLIMITED_KEY_SIZE is honest: nothing in the
+		// spec bounds a generic secret's length, so the ceiling is
+		// "whatever the CK_ULONG cap permits", not a Rust-style flat 512.
 		case CKM_GENERIC_SECRET_KEY_GEN:
 			pInfo->ulMinKeySize = 1;
 			pInfo->ulMaxKeySize = UNLIMITED_KEY_SIZE;
@@ -1093,18 +1104,28 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags = CKF_ENCRYPT | CKF_DECRYPT;
 			break;
+		// Phase-5 §3.1 (2026-09-07): ulMaxKeySize for a key-WRAP mechanism is
+		// ambiguous between "size of the payload that may be wrapped"
+		// (this engine's old reading) and "size of the wrapping AES key
+		// itself" (Rust's reading, and the one adopted here — a caller
+		// selects a KEK by its own CKA_VALUE_LEN, so the payload reading
+		// told a caller nothing a wrapping mechanism's key-size range is
+		// for). 16-32 matches CKM_AES_KEY_GEN and every other AES
+		// mechanism's key-size range in this switch.
 		case CKM_AES_KEY_WRAP:
 			pInfo->ulMinKeySize = 16;
-			pInfo->ulMaxKeySize = UNLIMITED_KEY_SIZE;
+			pInfo->ulMaxKeySize = 32;
 			pInfo->flags = CKF_WRAP | CKF_UNWRAP;
 			break;
 #ifdef HAVE_AES_KEY_WRAP_PAD
 		// Same RFC 5649 construction; KWP is the v3.0+ name for it and
 		// CKM_AES_KEY_WRAP_PAD is the deprecated spelling (v3.2 §6.16.3).
+		// Minimum raised from 1 to 16 alongside the §3.1 max change above —
+		// a one-byte AES wrapping key was never real under either reading.
 		case CKM_AES_KEY_WRAP_PAD:
 		case CKM_AES_KEY_WRAP_KWP:
-			pInfo->ulMinKeySize = 1;
-			pInfo->ulMaxKeySize = UNLIMITED_KEY_SIZE;
+			pInfo->ulMinKeySize = 16;
+			pInfo->ulMaxKeySize = 32;
 			pInfo->flags = CKF_WRAP | CKF_UNWRAP;
 			break;
 #endif
@@ -1127,6 +1148,14 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
+		// Phase-5 §3.2 (2026-09-07): KMAC is absent from v3.2 entirely (these
+		// are CKM_VENDOR_DEFINED mechanisms), so v3.3 governs by the
+		// standing rule. kmac.md:115-120 recommends a key of at least 128
+		// bits for KMAC128 and at least 256 for KMAC256 -- exactly these
+		// minimums, in bytes per kmac.md:132-134 -- and states the key "can
+		// be of arbitrary length" otherwise, so the maximum is a statement
+		// about this token, not the spec: the CK_ULONG cap, not Rust's
+		// unsourced flat 64 (which sits BELOW the recommended KMAC-256 key).
 		case CKM_KMAC_128:
 			pInfo->ulMinKeySize = 16;
 			pInfo->ulMaxKeySize = UNLIMITED_KEY_SIZE;
@@ -1139,6 +1168,7 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			break;
 #ifdef WITH_ECC
 		case CKM_EC_KEY_PAIR_GEN:
+		case CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS:
 			pInfo->ulMinKeySize = ecdsaMinSize;
 			pInfo->ulMaxKeySize = ecdsaMaxSize;
 #define CKF_EC_COMMOM	(CKF_EC_F_P | CKF_EC_NAMEDCURVE | CKF_EC_UNCOMPRESS)

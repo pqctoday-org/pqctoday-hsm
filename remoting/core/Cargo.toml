@@ -25,6 +25,14 @@ der = { version = "0.7", features = ["oid", "alloc"] }
 spki = { version = "0.7", features = ["alloc"] }
 const-oid = { version = "0.9", features = ["db"] }
 time = "0.3"
+# Auth-failure visibility (docs/remediation-plan-auth-visibility-evidence-log-
+# 09102026.md, Gap 1/Q3): a small, shared Prometheus registry both grpc and
+# rest use for cacp_auth_failures_total, plus the plain-HTTP scrape endpoint
+# each binary serves on its own port. Same version pqctoday-kmip already
+# pins (kmip/Cargo.toml), not feature-gated here — unlike kmip, this crate
+# has no wasm32 target to keep lean for.
+prometheus = { version = "0.13", default-features = false }
+tokio = { version = "1", features = ["net", "io-util", "rt"] }
 
 [dev-dependencies]
 serial_test = "3"

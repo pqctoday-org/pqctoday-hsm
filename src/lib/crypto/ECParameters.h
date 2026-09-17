@@ -49,6 +49,21 @@ public:
 	// Get the curve OID ec
 	const ByteString& getEC() const;
 
+	// Select the private-key generation method.
+	//
+	// false (the default) is the "testing candidates" method, i.e. whatever
+	// the provider does for a plain keygen; true is FIPS 186-5 A.2.2
+	// "Extra Random Bits", which PKCS#11 v3.2 exposes as the separate
+	// mechanism CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS. Only the generation of
+	// the private scalar differs; the resulting key is an ordinary EC key.
+	//
+	// This is deliberately NOT part of serialise()/deserialise(): the flag
+	// is an input to one key generation call, not a property of the curve,
+	// and ECParameters objects are persisted by callers that only ever
+	// carry the curve.
+	void setUseExtraBits(bool inUseExtraBits);
+	bool getUseExtraBits() const;
+
 	// Are the parameters of the given type?
 	virtual bool areOfType(const char* inType);
 
@@ -58,6 +73,7 @@ public:
 
 private:
 	ByteString ec;
+	bool useExtraBits = false;
 };
 
 #endif // !_SOFTHSM_V2_ECPARAMETERS_H

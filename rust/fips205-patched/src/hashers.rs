@@ -30,6 +30,7 @@ pub(crate) mod shake {
 
 
     fn shake256(input: &[&[u8]], out: &mut [u8]) {
+        profile_phase!(Hashing);
         let mut hasher = Shake256::default();
         input.iter().for_each(|item| hasher.update(item));
         let mut reader = hasher.finalize_xof();
@@ -103,6 +104,7 @@ pub(crate) mod sha2_cat_1 {
 
 
     fn sha2_256(input: &[&[u8]], out: &mut [u8]) {
+        profile_phase!(Hashing);
         let mut hasher = Sha256::new();
         input.iter().for_each(|item| hasher.update(item));
         let result = hasher.finalize();
@@ -142,6 +144,7 @@ pub(crate) mod sha2_cat_1 {
 
 
     fn hmac_sha_256(key: &[u8], a0: &[u8], m: &[&[u8]]) -> [u8; 32] {
+        profile_phase!(Hashing);
         let mut padding = [0x36; 64];
         for (p, &k) in padding.iter_mut().zip(key.iter()) {
             *p ^= k;
@@ -214,6 +217,7 @@ pub(crate) mod sha2_cat_3_5 {
 
 
     fn sha2_256(input: &[&[u8]], out: &mut [u8]) {
+        profile_phase!(Hashing);
         let mut hasher = Sha256::new();
         input.iter().for_each(|item| hasher.update(item));
         let result = hasher.finalize();
@@ -222,6 +226,7 @@ pub(crate) mod sha2_cat_3_5 {
 
 
     fn sha2_512(input: &[&[u8]], out: &mut [u8]) {
+        profile_phase!(Hashing);
         let mut hasher = Sha512::new();
         input.iter().for_each(|item| hasher.update(item));
         let result = hasher.finalize();
@@ -261,6 +266,7 @@ pub(crate) mod sha2_cat_3_5 {
 
 
     fn hmac_sha_512(key: &[u8], a0: &[u8], m: &[&[u8]]) -> [u8; 64] {
+        profile_phase!(Hashing);
         let mut padding = [0x36; 128];
         for (p, &k) in padding.iter_mut().zip(key.iter()) {
             *p ^= k;

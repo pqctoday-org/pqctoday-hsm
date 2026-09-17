@@ -24,8 +24,8 @@ use super::CkRv;
 use crate::constants::*;
 use crate::state::{
     check_mechanism_allowed_from, get_ec_point_sec1_from, get_object_attr_u32_from,
-    get_object_param_set_from, get_object_value, get_object_value_from, read_bool_attr,
-    resolve_session_access, with_object_checked, SessionAccess, OBJECTS,
+    get_object_param_set_from, get_object_value_from, read_bool_attr,
+    resolve_session_access, with_object_checked, SessionAccess,
 };
 
 // PKCS#11 v3.2 §5.18 — KEM permission flags. CKA_ENCAPSULATE / CKA_DECAPSULATE.
@@ -55,6 +55,61 @@ use crate::constants::{CKA_DECAPSULATE, CKA_DECRYPT, CKA_ENCAPSULATE, CKA_ENCRYP
 /// - ECDH-P256/P384/P521: ct = SEC1 uncompressed point (65/97/133), ss = curve field size (32/48/66).
 /// - X25519/X448 (RFC 7748): ct = 32/56, ss = 32/56.
 pub fn encapsulate(
+    session: u32,
+    public_key_handle: u32,
+    mechanism: u32,
+) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(public_key_handle, mechanism)
+    } else {
+        String::new()
+    };
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
+    let result = encapsulate_impl(session, public_key_handle, mechanism);
+
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging || ring {
+        // Same record shape as ffi::C_EncapsulateKey (see rust/src/ffi.rs's
+        // "Operation-evidence wrappers" block) — this native path is what
+        // KMIP and PKCS#11 remoting actually call, never the ffi:: C-ABI.
+        let (rv, ct_len) = match &result {
+            Ok((ct, _ss)) => (CKR_OK, ct.len()),
+            Err(e) => (*e, 0),
+        };
+        if logging {
+            crate::oplog::emit(
+                "C_EncapsulateKey",
+                &format!(
+                    "sess={} mech={} mech_id=0x{:08x} {} ct={} probe=0 rv={} rv_id=0x{:08x} dur={}",
+                    session,
+                    crate::oplog::mech_name(mechanism),
+                    mechanism,
+                    key_fields,
+                    ct_len,
+                    crate::oplog::rv_name(rv),
+                    rv,
+                    dur
+                ),
+            );
+        }
+        if ring {
+            crate::behaviour::emit(crate::behaviour::p11_with_key(
+                crate::behaviour::OP_PKCS11_C_ENCAPSULATEKEY,
+                Some(mechanism),
+                public_key_handle,
+                rv,
+                0,
+                dur,
+            ));
+        }
+    }
+    result
+}
+
+fn encapsulate_impl(
     session: u32,
     public_key_handle: u32,
     mechanism: u32,
@@ -226,6 +281,62 @@ pub fn encapsulate_deterministic(
 /// `CKA_DECAPSULATE = true`. `ciphertext` length must match the
 /// parameter set's ML-KEM ct size (768 / 1088 / 1568 for 512 / 768 / 1024).
 pub fn decapsulate(
+    session: u32,
+    private_key_handle: u32,
+    mechanism: u32,
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CkRv> {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(private_key_handle, mechanism)
+    } else {
+        String::new()
+    };
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
+    let result = decapsulate_impl(session, private_key_handle, mechanism, ciphertext);
+
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging || ring {
+        // Same record shape as ffi::C_DecapsulateKey — no probe field
+        // there either: decapsulation takes the ciphertext by value with
+        // no length-query form to distinguish (see rust/src/ffi.rs).
+        let rv = match &result {
+            Ok(_) => CKR_OK,
+            Err(e) => *e,
+        };
+        if logging {
+            crate::oplog::emit(
+                "C_DecapsulateKey",
+                &format!(
+                    "sess={} mech={} mech_id=0x{:08x} {} ct={} rv={} rv_id=0x{:08x} dur={}",
+                    session,
+                    crate::oplog::mech_name(mechanism),
+                    mechanism,
+                    key_fields,
+                    ciphertext.len(),
+                    crate::oplog::rv_name(rv),
+                    rv,
+                    dur
+                ),
+            );
+        }
+        if ring {
+            crate::behaviour::emit(crate::behaviour::p11_with_key(
+                crate::behaviour::OP_PKCS11_C_DECAPSULATEKEY,
+                Some(mechanism),
+                private_key_handle,
+                rv,
+                ciphertext.len() as u64,
+                dur,
+            ));
+        }
+    }
+    result
+}
+
+fn decapsulate_impl(
     session: u32,
     private_key_handle: u32,
     mechanism: u32,
@@ -1596,6 +1707,10 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Used only by the tests below. Kept here rather than in the module's
+    // top-level import list, where it was an unused-import warning in a
+    // non-test build — the warning was real, the symbols were not unused.
+    use crate::state::{get_object_value, OBJECTS};
     use crate::native::keygen::{
         generate_classic_mceliece_keypair, generate_frodokem_keypair, generate_ml_dsa_keypair,
         generate_ml_kem_keypair,

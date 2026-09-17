@@ -33,6 +33,7 @@
  *****************************************************************************/
 
 #include "config.h"
+#include <cstdint>
 #include "LeakingPtr.h"
 #include "log.h"
 #include "cryptoki.h"
@@ -284,6 +285,14 @@ private:
 	CK_RV MacVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey);
 	CK_RV StatefulVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey);
 	CK_RV StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen);
+	// Shared verification core for HSS/XMSS/XMSSMT (AsymMech::Type 1000/1001/1002).
+	// Session-free by design: StatefulVerify (plain C_Verify) and the pre-bound
+	// C_VerifySignature/C_VerifySignatureFinal path (phase-5 §1) source hKey and
+	// the message differently and manage session state on their own timelines,
+	// but both end up needing exactly this. Neither resets any session state.
+	CK_RV StatefulVerifyCore(CK_OBJECT_HANDLE hKey, CK_SLOT_ID slotId, AsymMech::Type mechanism,
+	                          CK_BYTE_PTR pData, CK_ULONG ulDataLen,
+	                          CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen);
 	CK_RV AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey);
 
 	// Key generation
@@ -331,7 +340,10 @@ private:
 		CK_BBOOL isPublicKeyOnToken,
 		CK_BBOOL isPublicKeyPrivate,
 		CK_BBOOL isPrivateKeyOnToken,
-		CK_BBOOL isPrivateKeyPrivate
+		CK_BBOOL isPrivateKeyPrivate,
+		// CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS selects FIPS 186-5 A.2.2 for the
+		// private scalar; it is otherwise identical to CKM_EC_KEY_PAIR_GEN
+		bool useExtraBits = false
 	);
 	CK_RV generateED
 	(
@@ -661,6 +673,12 @@ private:
 	// assert non-extractability today with nothing behind the assertion; logging
 	// these at generation is what turns it into evidence.
 	std::string opLogKeyCustodyFields(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey);
+
+	// The behaviour ring's `alg` byte for (mechanism, key): the key's
+	// CKA_PARAMETER_SET resolved through BehaviourIds::algFromCkm, or the
+	// family-level id when the key has none. Only ever called behind
+	// BehaviourRing::enabled(); one object lookup, no decryption.
+	uint8_t behaviourAlg(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey, CK_MECHANISM_TYPE mech);
 
 	// Symmetric multi-part cipher primitives, shared between the single-op
 	// C_EncryptUpdate / C_DecryptUpdate paths and the §5.13 dual-function

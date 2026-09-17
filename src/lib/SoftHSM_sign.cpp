@@ -40,6 +40,7 @@
 #include "config.h"
 #include "log.h"
 #include "OpLog.h"
+#include "BehaviourRing.h"
 #include "access.h"
 #include "SoftHSM.h"
 #include "SoftHSMHelpers.h"
@@ -1530,9 +1531,14 @@ CK_RV SoftHSM::C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanis
 	// Resolved before dispatch: a failed init can leave the session op state
 	// torn down, and the key identity is most wanted on exactly those records.
 	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
 	const std::string keyFields = logging
 		? opLogKeyFields(hSession, hKey, pMechanism->mechanism)
 		: std::string();
+	const uint8_t alg = ring ? behaviourAlg(hSession, hKey, pMechanism->mechanism) : 0;
+	// Timed only when a sink will see the figure: a logging-off, ring-off run
+	// pays no clock read.
+	const uint64_t t0 = (logging || ring) ? BehaviourRing::nowMicros() : 0;
 
 	CK_RV rv;
 	if (isMacMechanism(pMechanism))
@@ -1543,16 +1549,21 @@ CK_RV SoftHSM::C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanis
 	else
 		rv = AsymSignInit(hSession, pMechanism, hKey);
 
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+
 	// `sess` is the join key: C_Sign / C_SignFinal cannot cheaply recover the
 	// CK_MECHANISM_TYPE (the session stores the internal AsymMech::Type), so a
 	// consumer pairs the init record with the operation records by session.
 	if (logging)
-		OpLog::emit("C_SignInit", "sess=%lu mech=%s mech_id=0x%08lx %s rv=%s rv_id=0x%08lx",
+		OpLog::emit("C_SignInit", "sess=%lu mech=%s mech_id=0x%08lx %s rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            OpLog::mechName(pMechanism->mechanism),
 		            (unsigned long)pMechanism->mechanism,
 		            keyFields.c_str(),
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
+	if (ring)
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_SIGNINIT, alg, rv, 0, dur));
 
 	return rv;
 }
@@ -1934,6 +1945,10 @@ CK_RV SoftHSM::C_Sign(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ul
 
 	AsymMech::Type mechanism = session->getMechanism();
 
+	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
+	const uint64_t t0  = (logging || ring) ? BehaviourRing::nowMicros() : 0;
+
 	CK_RV rv;
 	if (mechanism == (AsymMech::Type)1000 || mechanism == (AsymMech::Type)1001 || mechanism == (AsymMech::Type)1002) {
 		rv = StatefulSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
@@ -1945,18 +1960,27 @@ CK_RV SoftHSM::C_Sign(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pData, CK_ULONG ul
 		rv = AsymSign(session, pData, ulDataLen,
 			      pSignature, pulSignatureLen);
 
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+
 	// probe=1 marks the mandatory PKCS#11 length-query call (pSignature NULL).
 	// Callers make it before every real signature, so a consumer counting
 	// signatures must ignore probe records rather than halve its count.
 	// The guard clauses above are deliberately not recorded: they reject the
 	// call before it reaches the token, so nothing cryptographic happened.
-	if (OpLog::enabled())
-		OpLog::emit("C_Sign", "sess=%lu in=%lu out=%lu probe=%d rv=%s rv_id=0x%08lx",
+	if (logging)
+		OpLog::emit("C_Sign", "sess=%lu in=%lu out=%lu probe=%d rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            (unsigned long)ulDataLen,
 		            (unsigned long)*pulSignatureLen,
 		            (pSignature == NULL_PTR) ? 1 : 0,
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
+	// alg stays 0 here (the session holds the mechanism); a consumer joins on
+	// the C_SignInit record. Probe calls are recorded too -- a probe storm is
+	// one of the shapes the monitor exists to see.
+	if (ring)
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_SIGN, BehaviourIds::ALG_NONE,
+		                                       rv, (uint64_t)ulDataLen, dur));
 
 	return rv;
 }
@@ -2162,21 +2186,30 @@ CK_RV SoftHSM::C_SignFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignature, C
 	if ((session->getOpType() != SESSION_OP_SIGN && !dualSignSurvivor) || !session->getAllowMultiPartOp())
 		return CKR_OPERATION_NOT_INITIALIZED;
 
+	const bool logging = OpLog::enabled();
+	const bool ring    = BehaviourRing::enabled();
+	const uint64_t t0  = (logging || ring) ? BehaviourRing::nowMicros() : 0;
+
 	CK_RV rv;
 	if (session->getMacOp() != NULL)
 		rv = MacSignFinal(session, pSignature, pulSignatureLen);
 	else
 		rv = AsymSignFinal(session, pSignature, pulSignatureLen);
 
+	const uint64_t dur = (logging || ring) ? BehaviourRing::nowMicros() - t0 : 0;
+
 	// The multi-part counterpart of the C_Sign record. C_SignUpdate is
 	// deliberately not recorded -- it produces no signature, and instrumenting
 	// it would emit one line per chunk of a large input for no added evidence.
-	if (OpLog::enabled())
-		OpLog::emit("C_SignFinal", "sess=%lu out=%lu probe=%d rv=%s rv_id=0x%08lx",
+	if (logging)
+		OpLog::emit("C_SignFinal", "sess=%lu out=%lu probe=%d rv=%s rv_id=0x%08lx dur=%llu",
 		            (unsigned long)hSession,
 		            (unsigned long)*pulSignatureLen,
 		            (pSignature == NULL_PTR) ? 1 : 0,
-		            OpLog::rvName(rv), (unsigned long)rv);
+		            OpLog::rvName(rv), (unsigned long)rv,
+		            (unsigned long long)dur);
+	if (ring)
+		BehaviourRing::emit(BehaviourRing::p11(BehaviourIds::OP_PKCS11_C_SIGNFINAL, BehaviourIds::ALG_NONE, rv, 0, dur));
 
 	return rv;
 }
@@ -3213,30 +3246,20 @@ CK_RV SoftHSM::StatefulVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR p
 
 // Stateful hash-based signature verification (HSS/LMS/XMSS/XMSSMT)
 // PKCS#11 v3.2 §6.14: verification is stateless — only needs public key + message + signature
-CK_RV SoftHSM::StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen)
+CK_RV SoftHSM::StatefulVerifyCore(CK_OBJECT_HANDLE hKey, CK_SLOT_ID slotId, AsymMech::Type mechanism,
+                                   CK_BYTE_PTR pData, CK_ULONG ulDataLen,
+                                   CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen)
 {
-	if (!session->getAllowSinglePartOp()) {
-		session->resetOp();
-		return CKR_OPERATION_NOT_INITIALIZED;
-	}
+	OSObject* osObj = (OSObject*)handleManager->getObject(hKey, slotId);
+	if (!osObj) return CKR_KEY_HANDLE_INVALID;
 
-	CK_OBJECT_HANDLE hKey = session->getVerifyKeyHandle();
-	OSObject* osObj = (OSObject*)handleManager->getObject(hKey, session->getSlot()->getSlotID());
-	if (!osObj) {
-		session->resetOp();
-		return CKR_KEY_HANDLE_INVALID;
-	}
-
-	AsymMech::Type mechanism = session->getMechanism();
 	ByteString pubKeyBytes = osObj->getByteStringValue(CKA_VALUE);
 
 	// GAP 4.6: pre-check the signature length so a malformed length reports
 	// CKR_SIGNATURE_LEN_RANGE (matching MacVerify / AsymVerify), not the
 	// catch-all CKR_SIGNATURE_INVALID. An empty signature is always malformed.
-	if (pSignature == NULL_PTR || ulSignatureLen == 0) {
-		session->resetOp();
+	if (pSignature == NULL_PTR || ulSignatureLen == 0)
 		return CKR_SIGNATURE_LEN_RANGE;
-	}
 	if (mechanism == (AsymMech::Type)1001 || mechanism == (AsymMech::Type)1002) {
 		// XMSS/XMSSMT signatures are fixed-length for the param set encoded in
 		// the public key OID; any other length is out of range.
@@ -3249,10 +3272,8 @@ CK_RV SoftHSM::StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDa
 			int prv = (mechanism == (AsymMech::Type)1001)
 			          ? xmss_parse_oid(&params, oid)
 			          : xmssmt_parse_oid(&params, oid);
-			if (prv == 0 && ulSignatureLen != (CK_ULONG)params.sig_bytes) {
-				session->resetOp();
+			if (prv == 0 && ulSignatureLen != (CK_ULONG)params.sig_bytes)
 				return CKR_SIGNATURE_LEN_RANGE;
-			}
 		}
 	}
 
@@ -3290,12 +3311,23 @@ CK_RV SoftHSM::StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDa
 		                           pubKeyBytes.const_byte_str());
 		verified = (ret == 0);
 	} else {
-		session->resetOp();
 		return CKR_MECHANISM_INVALID;
 	}
 
-	session->resetOp();
 	return verified ? CKR_OK : CKR_SIGNATURE_INVALID;
+}
+
+CK_RV SoftHSM::StatefulVerify(Session* session, CK_BYTE_PTR pData, CK_ULONG ulDataLen, CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen)
+{
+	if (!session->getAllowSinglePartOp()) {
+		session->resetOp();
+		return CKR_OPERATION_NOT_INITIALIZED;
+	}
+
+	CK_RV rv = StatefulVerifyCore(session->getVerifyKeyHandle(), session->getSlot()->getSlotID(),
+	                               session->getMechanism(), pData, ulDataLen, pSignature, ulSignatureLen);
+	session->resetOp();
+	return rv;
 }
 
 // Initialise a verification operation using the specified key and mechanism
@@ -4047,7 +4079,23 @@ CK_RV SoftHSM::C_VerifySignatureInit(CK_SESSION_HANDLE hSession,
 	// start any multi-part verifier (for mechanisms where bAllowMultiPartOp is
 	// true).  It also stores algo-specific params (ML-DSA / SLH-DSA context)
 	// in session->param.
-	CK_RV rv = AsymVerifyInit(hSession, pMechanism, hKey);
+	//
+	// Phase-5 §1 — HSS/XMSS/XMSSMT route through StatefulVerifyInit instead:
+	// AsymVerifyInit's mechanism switch has no case for them and falls to
+	// CKR_MECHANISM_INVALID. v3.2's own footnote for these mechanisms permits
+	// multi-part verification precisely when C_VerifySignatureInit is used
+	// (v3.3 keeps the same clause), so refusing them here was the gap, not a
+	// deliberate restriction — StatefulVerifyInit's OWN allowMultiPartOp=false
+	// is for plain C_VerifyInit and is overwritten below regardless of which
+	// init function ran. It sets the mechanism flag and verify key handle
+	// that C_VerifySignature/C_VerifySignatureFinal need (see their own
+	// stateful branch), and stores no algo params, so the blob built below is
+	// exactly [header || signature] for these three mechanisms.
+	CK_RV rv = (pMechanism->mechanism == CKM_HSS ||
+	            pMechanism->mechanism == CKM_XMSS ||
+	            pMechanism->mechanism == CKM_XMSSMT)
+	           ? StatefulVerifyInit(hSession, pMechanism, hKey)
+	           : AsymVerifyInit(hSession, pMechanism, hKey);
 	if (rv != CKR_OK) return rv;
 
 	// Re-acquire the session to read the algo params left by AsymVerifyInit and
@@ -4133,8 +4181,23 @@ CK_RV SoftHSM::C_VerifySignature(CK_SESSION_HANDLE hSession,
 		reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(blobPtr) + sizeof(PreBoundVerifySig) + hdr->sigLen) :
 		NULL;
 
+	AsymMech::Type mechanism = session->getMechanism();
+
+	// Phase-5 §1 — HSS/XMSS/XMSSMT never use the AsymmetricAlgorithm base
+	// (StatefulVerifyInit sets neither AsymmetricCryptoOp nor PublicKey), so
+	// the generic path below would misreport CKR_OPERATION_NOT_INITIALIZED
+	// for an operation that is genuinely initialised. Route to the same core
+	// StatefulVerify (plain C_Verify) uses, over the pre-bound sig + pData.
+	if (mechanism == (AsymMech::Type)1000 || mechanism == (AsymMech::Type)1001 ||
+	    mechanism == (AsymMech::Type)1002)
+	{
+		CK_RV srv = StatefulVerifyCore(session->getVerifyKeyHandle(), session->getSlot()->getSlotID(),
+		                                mechanism, pData, ulDataLen, sigBytes, hdr->sigLen);
+		session->resetOp();
+		return srv;
+	}
+
 	AsymmetricAlgorithm* asymCrypto = session->getAsymmetricCryptoOp();
-	AsymMech::Type mechanism        = session->getMechanism();
 	PublicKey* publicKey            = session->getPublicKey();
 	if (asymCrypto == NULL || publicKey == NULL)
 	{
@@ -4208,8 +4271,23 @@ CK_RV SoftHSM::C_VerifySignatureFinal(CK_SESSION_HANDLE hSession)
 		reinterpret_cast<void*>(reinterpret_cast<uint8_t*>(blobPtr) + sizeof(PreBoundVerifySig) + hdr->sigLen) :
 		NULL;
 
+	AsymMech::Type mechanism = session->getMechanism();
+
+	// Phase-5 §1 — same reasoning as C_VerifySignature: HSS/XMSS/XMSSMT never
+	// populate AsymmetricCryptoOp/PublicKey, so route to the stateful core
+	// over the message C_VerifySignatureUpdate accumulated.
+	if (mechanism == (AsymMech::Type)1000 || mechanism == (AsymMech::Type)1001 ||
+	    mechanism == (AsymMech::Type)1002)
+	{
+		ByteString msg(session->getMsgBuffer());
+		CK_RV srv = StatefulVerifyCore(session->getVerifyKeyHandle(), session->getSlot()->getSlotID(),
+		                                mechanism, const_cast<CK_BYTE_PTR>(msg.const_byte_str()),
+		                                (CK_ULONG)msg.size(), sigBytes, hdr->sigLen);
+		session->resetOp();
+		return srv;
+	}
+
 	AsymmetricAlgorithm* asymCrypto = session->getAsymmetricCryptoOp();
-	AsymMech::Type mechanism        = session->getMechanism();
 	PublicKey* publicKey            = session->getPublicKey();
 	if (asymCrypto == NULL || publicKey == NULL)
 	{

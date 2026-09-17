@@ -77,6 +77,96 @@ pub fn sign_with_pss_salt(
     pss_salt_len: Option<usize>,
     eddsa_ctx: Option<&[u8]>,
 ) -> Result<Vec<u8>, CkRv> {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(key_handle, mechanism)
+    } else {
+        String::new()
+    };
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
+    let result = sign_with_pss_salt_impl(session, key_handle, mechanism, data, pss_salt_len, eddsa_ctx);
+
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging || ring {
+        // `native::sign*` has no separate init/update/final phases — one
+        // call does the whole operation. Emitted as the SAME two-record
+        // shape ffi.rs's C_SignInit + C_Sign produce (see that module's
+        // "Operation-evidence wrappers" block) so this repo's one evidence
+        // consumer (pqctoday-sandbox/tests/_evidence.sh, which pairs the
+        // two records on `sess`) needs no changes to recognise KMIP's and
+        // PKCS#11 remoting's traffic — both go through this function, never
+        // through the ffi:: C-ABI (see rust/src/ffi.rs's own wrappers,
+        // which this native path bypasses entirely).
+        let rv = match &result {
+            Ok(_) => CKR_OK,
+            Err(e) => *e,
+        };
+        let out_len = result.as_ref().map(|s| s.len()).unwrap_or(0);
+        // `dur=` lands on the operation record; the synthetic init record
+        // carries dur=0 because nothing separate was timed for it — a
+        // consumer summing a pair's durations is then still right.
+        if logging {
+            crate::oplog::emit(
+                "C_SignInit",
+                &format!(
+                    "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x} dur=0",
+                    session,
+                    crate::oplog::mech_name(mechanism),
+                    mechanism,
+                    key_fields,
+                    crate::oplog::rv_name(rv),
+                    rv
+                ),
+            );
+            crate::oplog::emit(
+                "C_Sign",
+                &format!(
+                    "sess={} in={} out={} probe=0 rv={} rv_id=0x{:08x} dur={}",
+                    session,
+                    data.len(),
+                    out_len,
+                    crate::oplog::rv_name(rv),
+                    rv,
+                    dur
+                ),
+            );
+        }
+        // One ring record per PQCEV record, same shape as the ffi:: pair:
+        // the init record carries the algorithm, the operation record the
+        // size and duration. A consumer therefore sees the same sequence
+        // whichever surface a caller came through.
+        if ring {
+            emit_pair_to_ring(
+                crate::behaviour::OP_PKCS11_C_SIGNINIT,
+                crate::behaviour::OP_PKCS11_C_SIGN,
+                mechanism,
+                key_handle,
+                rv,
+                data.len() as u64,
+                dur,
+            );
+        }
+    }
+    result
+}
+
+/// The ring half of the native wrappers' synthetic init + operation pair.
+/// Only called behind `behaviour::enabled()`.
+fn emit_pair_to_ring(op_init: u8, op: u8, mechanism: u32, key_handle: u32, rv: u32, size: u64, dur_us: u64) {
+    crate::behaviour::emit(crate::behaviour::p11_with_key(op_init, Some(mechanism), key_handle, rv, 0, 0));
+    crate::behaviour::emit(crate::behaviour::p11(op, crate::behaviour::ALG_NONE, rv, size, dur_us));
+}
+
+fn sign_with_pss_salt_impl(
+    session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+    pss_salt_len: Option<usize>,
+    eddsa_ctx: Option<&[u8]>,
+) -> Result<Vec<u8>, CkRv> {
     // Isolation gate (rust-hsm-perf-bench-scenario-plan-07182026.md Part F)
     // + CKA_SIGN + CKA_ALLOWED_MECHANISMS + CKA_VALUE + CKA_PRIV_PARAM_SET,
     // ALL read from the SAME borrowed attrs — one OBJECTS lock instead of
@@ -181,6 +271,82 @@ pub fn verify(
 /// `eddsa_ctx`: see [`sign_with_pss_salt`]'s doc comment — same field,
 /// verify direction.
 pub fn verify_with_pss_salt(
+    session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+    signature: &[u8],
+    pss_salt_len: Option<usize>,
+    eddsa_ctx: Option<&[u8]>,
+) -> Result<bool, CkRv> {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(key_handle, mechanism)
+    } else {
+        String::new()
+    };
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
+    let result = verify_with_pss_salt_impl(
+        session, key_handle, mechanism, data, signature, pss_salt_len, eddsa_ctx,
+    );
+
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging || ring {
+        // Same synthetic paired-record shape sign_with_pss_salt emits for
+        // Sign — native has no separate init/verify phase split either.
+        // remediation-plan-verify-evidence-and-relp-receiver-pqc-09102026.md:
+        // Ok(true) -> CKR_OK, Ok(false) -> CKR_SIGNATURE_INVALID (a
+        // rejected signature is a normal outcome, not a Rust Err, for this
+        // function specifically — verify_pqc below uses a different
+        // convention, see its own wrapper), Err(e) -> e.
+        let rv = match &result {
+            Ok(true) => CKR_OK,
+            Ok(false) => CKR_SIGNATURE_INVALID,
+            Err(e) => *e,
+        };
+        if logging {
+            crate::oplog::emit(
+                "C_VerifyInit",
+                &format!(
+                    "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x} dur=0",
+                    session,
+                    crate::oplog::mech_name(mechanism),
+                    mechanism,
+                    key_fields,
+                    crate::oplog::rv_name(rv),
+                    rv
+                ),
+            );
+            crate::oplog::emit(
+                "C_Verify",
+                &format!(
+                    "sess={} in={} probe=0 rv={} rv_id=0x{:08x} dur={}",
+                    session,
+                    data.len(),
+                    crate::oplog::rv_name(rv),
+                    rv,
+                    dur
+                ),
+            );
+        }
+        if ring {
+            emit_pair_to_ring(
+                crate::behaviour::OP_PKCS11_C_VERIFYINIT,
+                crate::behaviour::OP_PKCS11_C_VERIFY,
+                mechanism,
+                key_handle,
+                rv,
+                data.len() as u64,
+                dur,
+            );
+        }
+    }
+    result
+}
+
+fn verify_with_pss_salt_impl(
     session: u32,
     key_handle: u32,
     mechanism: u32,
@@ -299,6 +465,89 @@ pub fn sign_pqc(
     external_mu: bool,
     random: Option<&[u8]>,
 ) -> Result<Vec<u8>, CkRv> {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(key_handle, mechanism)
+    } else {
+        String::new()
+    };
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
+    let result = sign_pqc_impl(
+        session,
+        key_handle,
+        mechanism,
+        data,
+        ctx,
+        deterministic,
+        internal,
+        external_mu,
+        random,
+    );
+
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging || ring {
+        // Same two-record C_SignInit/C_Sign synthesis as sign_with_pss_salt
+        // above — see that function's comment for why.
+        let rv = match &result {
+            Ok(_) => CKR_OK,
+            Err(e) => *e,
+        };
+        let out_len = result.as_ref().map(|s| s.len()).unwrap_or(0);
+        if logging {
+            crate::oplog::emit(
+                "C_SignInit",
+                &format!(
+                    "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x} dur=0",
+                    session,
+                    crate::oplog::mech_name(mechanism),
+                    mechanism,
+                    key_fields,
+                    crate::oplog::rv_name(rv),
+                    rv
+                ),
+            );
+            crate::oplog::emit(
+                "C_Sign",
+                &format!(
+                    "sess={} in={} out={} probe=0 rv={} rv_id=0x{:08x} dur={}",
+                    session,
+                    data.len(),
+                    out_len,
+                    crate::oplog::rv_name(rv),
+                    rv,
+                    dur
+                ),
+            );
+        }
+        if ring {
+            emit_pair_to_ring(
+                crate::behaviour::OP_PKCS11_C_SIGNINIT,
+                crate::behaviour::OP_PKCS11_C_SIGN,
+                mechanism,
+                key_handle,
+                rv,
+                data.len() as u64,
+                dur,
+            );
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sign_pqc_impl(
+    session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+    ctx: &[u8],
+    deterministic: bool,
+    internal: bool,
+    external_mu: bool,
+    random: Option<&[u8]>,
+) -> Result<Vec<u8>, CkRv> {
     let access = resolve_session_access(session)?;
     let (can_sign, mech_ok, sk, ps) = with_object_checked(&access, key_handle, |attrs| {
         (
@@ -374,6 +623,81 @@ fn slh_dsa_n(ps: u32) -> usize {
 /// 64-byte µ; `internal` ⇒ `*.Verify_internal`.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_pqc(
+    session: u32,
+    key_handle: u32,
+    mechanism: u32,
+    data: &[u8],
+    signature: &[u8],
+    ctx: &[u8],
+    internal: bool,
+    external_mu: bool,
+) -> Result<(), CkRv> {
+    let logging = crate::oplog::enabled();
+    let ring = crate::behaviour::enabled();
+    let key_fields = if logging {
+        crate::oplog::key_fields(key_handle, mechanism)
+    } else {
+        String::new()
+    };
+    let t0 = (logging || ring).then(std::time::Instant::now);
+
+    let result = verify_pqc_impl(
+        session, key_handle, mechanism, data, signature, ctx, internal, external_mu,
+    );
+
+    let dur = crate::behaviour::elapsed_us(t0);
+    if logging || ring {
+        // Different Result shape from verify_with_pss_salt above:
+        // crypto::handlers::verify_ml_dsa/verify_slh_dsa signal an invalid
+        // signature via Err(CKR_SIGNATURE_INVALID), not Ok(false) — no
+        // separate "signature invalid" arm needed here, it already falls
+        // out of the Err(e) case correctly.
+        let rv = match &result {
+            Ok(()) => CKR_OK,
+            Err(e) => *e,
+        };
+        if logging {
+            crate::oplog::emit(
+                "C_VerifyInit",
+                &format!(
+                    "sess={} mech={} mech_id=0x{:08x} {} rv={} rv_id=0x{:08x} dur=0",
+                    session,
+                    crate::oplog::mech_name(mechanism),
+                    mechanism,
+                    key_fields,
+                    crate::oplog::rv_name(rv),
+                    rv
+                ),
+            );
+            crate::oplog::emit(
+                "C_Verify",
+                &format!(
+                    "sess={} in={} probe=0 rv={} rv_id=0x{:08x} dur={}",
+                    session,
+                    data.len(),
+                    crate::oplog::rv_name(rv),
+                    rv,
+                    dur
+                ),
+            );
+        }
+        if ring {
+            emit_pair_to_ring(
+                crate::behaviour::OP_PKCS11_C_VERIFYINIT,
+                crate::behaviour::OP_PKCS11_C_VERIFY,
+                mechanism,
+                key_handle,
+                rv,
+                data.len() as u64,
+                dur,
+            );
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_pqc_impl(
     session: u32,
     key_handle: u32,
     mechanism: u32,

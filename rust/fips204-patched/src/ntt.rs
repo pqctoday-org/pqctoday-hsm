@@ -12,6 +12,7 @@ use crate::Q;
 /// **Input**: polynomial `w(X) = ∑_{j=0}^{255} w_j X^j ∈ R_q` <br>
 /// **Output**: `w_hat = (w_hat[0], ... , w_hat[255]) ∈ T_q`
 pub(crate) fn ntt<const KL: usize>(w: &[R; KL]) -> [T; KL] {
+    profile_phase!(Ntt);
     // 1: for j from 0 to 255 do
     // 2: w_hat[j] ← w_j
     // 3: end for
@@ -83,6 +84,7 @@ pub(crate) fn ntt<const KL: usize>(w: &[R; KL]) -> [T; KL] {
 /// **Input**: `w_hat` = `(w_hat[0], . . . , w_hat[255]) ∈ T_q` <br>
 /// **Output**: polynomial `w(X) = ∑_{j=0}^{255} w_j X^j ∈ R_q`
 pub(crate) fn inv_ntt<const KL: usize>(w_hat: &[T; KL]) -> [R; KL] {
+    profile_phase!(Ntt);
     //
     #[allow(clippy::cast_possible_truncation)]
     const F_MONT: i64 = 8_347_681_i128.wrapping_mul(1 << 32).rem_euclid(Q as i128) as i64;
