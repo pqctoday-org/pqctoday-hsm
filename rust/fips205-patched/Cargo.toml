@@ -86,6 +86,10 @@ version = "1.6.0"
 features = ["zeroize_derive"]
 default-features = false
 
+[dependencies.pqc-phase-profile]
+path = "../pqc-phase-profile"
+optional = true
+
 [dev-dependencies.criterion]
 version = "0.4.0"
 
@@ -118,6 +122,7 @@ default = [
     "slh_dsa_shake_256f",
 ]
 default-rng = ["rand_core/getrandom"]
+phase-profile = ["dep:pqc-phase-profile"]
 slh_dsa_sha2_128f = []
 slh_dsa_sha2_128s = []
 slh_dsa_sha2_192f = []

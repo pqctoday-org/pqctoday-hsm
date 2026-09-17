@@ -334,6 +334,8 @@ pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
         }
     }
     crate::state::set_initialized(true);
+    #[cfg(all(feature = "hw-accel", target_os = "linux", target_arch = "aarch64"))]
+    crate::hw_accel::probe_on_initialize();
     CKR_OK
 }
 
