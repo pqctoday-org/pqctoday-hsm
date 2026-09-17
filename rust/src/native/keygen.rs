@@ -521,14 +521,23 @@ pub fn generate_rsa_keypair(
     if !(2048..=4096).contains(&bits) {
         return Err(CKR_ARGUMENTS_BAD);
     }
-    let mut rng = rand::rngs::OsRng;
-    let private_key =
-        rsa::RsaPrivateKey::new(&mut rng, bits as usize).map_err(|_| CKR_FUNCTION_FAILED)?;
-    let public_key = rsa::RsaPublicKey::from(&private_key);
-
-    let sk_der = private_key.to_pkcs8_der().map_err(|_| CKR_FUNCTION_FAILED)?;
-    let n_bytes = public_key.n().to_bytes_be();
-    let e_bytes = public_key.e().to_bytes_be();
+    // Native fast path (AWS-LC) for the three sizes it generates; any other
+    // size in range keeps the pure-Rust generator (see crypto::awslc).
+    #[cfg(not(target_arch = "wasm32"))]
+    let fast = crate::crypto::awslc::rsa_generate(bits).transpose()?;
+    #[cfg(target_arch = "wasm32")]
+    let fast: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = None;
+    let (sk_der, n_bytes, e_bytes) = match fast {
+        Some(t) => t,
+        None => {
+            let mut rng = rand::rngs::OsRng;
+            let private_key = rsa::RsaPrivateKey::new(&mut rng, bits as usize)
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
+            let public_key = rsa::RsaPublicKey::from(&private_key);
+            let sk_der = private_key.to_pkcs8_der().map_err(|_| CKR_FUNCTION_FAILED)?;
+            (sk_der.as_bytes().to_vec(), public_key.n().to_bytes_be(), public_key.e().to_bytes_be())
+        }
+    };
 
     let mut pub_attrs: Attributes = HashMap::new();
     let mut prv_attrs: Attributes = HashMap::new();
@@ -568,10 +577,17 @@ pub fn generate_rsa_keypair(
     pub_attrs.insert(CKA_PUBLIC_EXPONENT, e_bytes.clone());
     store_ulong(&mut pub_attrs, CKA_MODULUS_BITS, bits);
 
-    // SubjectPublicKeyInfo DER (CKA_PUBLIC_KEY_INFO).
+    // SubjectPublicKeyInfo DER (CKA_PUBLIC_KEY_INFO). Rebuilt from the raw
+    // (n, e) components rather than a live key object, since the AWS-LC fast
+    // path above yields only the components, not an `rsa::RsaPublicKey`.
     use rsa::pkcs8::EncodePublicKey;
-    if let Ok(spki_der) = public_key.to_public_key_der() {
-        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki_der.as_bytes().to_vec());
+    if let Ok(spki_key) = rsa::RsaPublicKey::new(
+        rsa::BigUint::from_bytes_be(&n_bytes),
+        rsa::BigUint::from_bytes_be(&e_bytes),
+    ) {
+        if let Ok(spki_der) = spki_key.to_public_key_der() {
+            pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki_der.as_bytes().to_vec());
+        }
     }
 
     // Engine-internal packed CKA_VALUE on the public key so C_Encrypt
@@ -582,7 +598,7 @@ pub fn generate_rsa_keypair(
     packed.extend_from_slice(&n_bytes);
     packed.extend_from_slice(&e_bytes);
     pub_attrs.insert(CKA_VALUE, packed);
-    prv_attrs.insert(CKA_VALUE, sk_der.as_bytes().to_vec());
+    prv_attrs.insert(CKA_VALUE, sk_der);
 
     insert_id_and_label(&mut pub_attrs, cka_id, label);
     insert_id_and_label(&mut prv_attrs, cka_id, label);

@@ -8649,8 +8649,24 @@ pub fn C_Encrypt(
                 if key_bytes.len() < 4 + n_len + 1 {
                     return CKR_KEY_TYPE_INCONSISTENT;
                 }
-                let n = rsa::BigUint::from_bytes_be(&key_bytes[4..4 + n_len]);
-                let e = rsa::BigUint::from_bytes_be(&key_bytes[4 + n_len..]);
+                let n_be = &key_bytes[4..4 + n_len];
+                let e_be = &key_bytes[4 + n_len..];
+                // Native fast path (AWS-LC). Public-key op, no oracle — routed
+                // for one v1.5 backend. `None` → pure-Rust fallback below.
+                #[cfg(not(target_arch = "wasm32"))]
+                let awslc_ct: Option<Vec<u8>> =
+                    match crate::crypto::awslc::rsa_pkcs1_encrypt_components(n_be, e_be, plaintext) {
+                        Some(Ok(ct)) => Some(ct),
+                        Some(Err(_)) => return CKR_FUNCTION_FAILED,
+                        None => None,
+                    };
+                #[cfg(target_arch = "wasm32")]
+                let awslc_ct: Option<Vec<u8>> = None;
+                if let Some(ct) = awslc_ct {
+                    ct
+                } else {
+                let n = rsa::BigUint::from_bytes_be(n_be);
+                let e = rsa::BigUint::from_bytes_be(e_be);
                 let pk = match rsa::RsaPublicKey::new(n, e) {
                     Ok(k) => k,
                     Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
@@ -8661,6 +8677,7 @@ pub fn C_Encrypt(
                         Err(_) => return CKR_FUNCTION_FAILED,
                     }
                 })
+                }
             }
             CKM_CHACHA20_POLY1305 => {
                 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::{Aead, Payload}};
@@ -9277,6 +9294,31 @@ pub fn C_Decrypt(
             // including future compliance audits of this file: this gap is
             // KNOWN and ACCEPTED, not missed.
             CKM_RSA_PKCS => {
+                // Native fast path (AWS-LC): its PKCS#1 v1.5 decrypt is
+                // constant-time, which CLOSES the padding-oracle documented
+                // above (RUSTSEC-2023-0071 / the `rsa` crate's own
+                // "MUST BE CONSTANT TIME" TODO). On non-wasm targets this is
+                // now the primary implementation, not the accepted-risk one.
+                // The `rsa`-crate branch below survives only as the wasm
+                // fallback (no network timing oracle in a browser tab) and for
+                // a key that is not PKCS#8 DER, which AWS-LC's loader declines.
+                // AWS-LC owns this key on native → constant-time unpad, no
+                // oracle. A decrypt failure is the uniform
+                // CKR_ENCRYPTED_DATA_INVALID (no padding-oracle distinction),
+                // same code the fallback yields. `None` (wasm, or a key AWS-LC
+                // cannot load) drops to the `rsa`-crate path below.
+                #[cfg(not(target_arch = "wasm32"))]
+                let awslc_pt: Option<Vec<u8>> =
+                    match crate::crypto::awslc::rsa_pkcs1_decrypt(&key_bytes, ciphertext) {
+                        Some(Ok(pt)) => Some(pt),
+                        Some(Err(_)) => return CKR_ENCRYPTED_DATA_INVALID,
+                        None => None,
+                    };
+                #[cfg(target_arch = "wasm32")]
+                let awslc_pt: Option<Vec<u8>> = None;
+                if let Some(pt) = awslc_pt {
+                    pt
+                } else {
                 use rsa::pkcs8::DecodePrivateKey;
                 let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&key_bytes) {
                     Ok(k) => k,
@@ -9292,6 +9334,7 @@ pub fn C_Decrypt(
                     // timing risk documented above, which is inherent to the
                     // `rsa` crate's own primitive.
                     Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                }
                 }
             }
             // T1 — ChaCha20-Poly1305 AEAD open (§6.25); tag verified before
@@ -12057,8 +12100,22 @@ pub fn C_WrapKey(
             if wrapping_key.len() < 4 + n_len + 1 {
                 return CKR_KEY_TYPE_INCONSISTENT;
             }
-            let n = rsa::BigUint::from_bytes_be(&wrapping_key[4..4 + n_len]);
-            let e = rsa::BigUint::from_bytes_be(&wrapping_key[4 + n_len..]);
+            let n_be = &wrapping_key[4..4 + n_len];
+            let e_be = &wrapping_key[4 + n_len..];
+            #[cfg(not(target_arch = "wasm32"))]
+            let awslc_ct: Option<Vec<u8>> =
+                match crate::crypto::awslc::rsa_pkcs1_encrypt_components(n_be, e_be, &key_to_wrap) {
+                    Some(Ok(ct)) => Some(ct),
+                    Some(Err(_)) => return CKR_FUNCTION_FAILED,
+                    None => None,
+                };
+            #[cfg(target_arch = "wasm32")]
+            let awslc_ct: Option<Vec<u8>> = None;
+            if let Some(ct) = awslc_ct {
+                ct
+            } else {
+            let n = rsa::BigUint::from_bytes_be(n_be);
+            let e = rsa::BigUint::from_bytes_be(e_be);
             let pk = match rsa::RsaPublicKey::new(n, e) {
                 Ok(k) => k,
                 Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
@@ -12069,6 +12126,7 @@ pub fn C_WrapKey(
                     Err(_) => return CKR_FUNCTION_FAILED,
                 }
             })
+            }
         } else if is_kwp {
             use aes::cipher::generic_array::GenericArray;
             // AES-KWP (RFC 5649) — supports arbitrary-length data
@@ -12268,8 +12326,21 @@ pub fn C_UnwrapKey(
                 Err(rv) => return rv,
             }
         } else if is_rsa_pkcs {
-            // Raw RSA PKCS#1 v1.5 unwrap — same PKCS8 private-key parse as
-            // the OAEP arm above, PKCS1v15 padding instead of OAEP.
+            // Raw RSA PKCS#1 v1.5 unwrap. Unwrap IS decryption, so this is the
+            // same Bleichenbacher/Marvin oracle as C_Decrypt's CKM_RSA_PKCS
+            // arm — route it through AWS-LC's constant-time unpad on native.
+            #[cfg(not(target_arch = "wasm32"))]
+            let awslc_pt: Option<Vec<u8>> =
+                match crate::crypto::awslc::rsa_pkcs1_decrypt(&unwrapping_key, wrapped_data) {
+                    Some(Ok(pt)) => Some(pt),
+                    Some(Err(_)) => return CKR_ENCRYPTED_DATA_INVALID,
+                    None => None,
+                };
+            #[cfg(target_arch = "wasm32")]
+            let awslc_pt: Option<Vec<u8>> = None;
+            if let Some(pt) = awslc_pt {
+                pt
+            } else {
             use rsa::pkcs8::DecodePrivateKey;
             let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&unwrapping_key) {
                 Ok(k) => k,
@@ -12279,6 +12350,7 @@ pub fn C_UnwrapKey(
                 Ok(pt) => pt,
                 // §6.16 — wrapped-key decode failure (uniform code).
                 Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+            }
             }
         } else if is_kwp {
             use aes::cipher::generic_array::GenericArray;
