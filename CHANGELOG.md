@@ -21,6 +21,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`dur=<µs>` on every `PQCEV` operation record**, both engines: the wall
   time of the dispatch, measured in the function that emits it.
 
+- **AWS-LC constant-time RSA and NIST-curve ECDH fast path** (Rust engine,
+  native targets only). RSA PKCS#1 v1.5 sign/verify, RSA-OAEP and PKCS#1 v1.5
+  encrypt/decrypt, RSA key generation, and P-256/384/521 ECDH now run through
+  AWS-LC (`aws-lc-rs`) instead of the pure-Rust `rsa`/`p256` crates. The
+  wasm32 build is byte-for-byte unchanged — it keeps the pure-Rust path, which
+  also remains the conformance reference for every mechanism AWS-LC does not
+  expose (raw `CKM_RSA_X_509`, all RSA-PSS, deterministic ECDSA, the legacy
+  hash variants, sub-2048-bit keys). The KMIP server and both remoting
+  services link this engine, so they inherit the fast path with no source
+  change of their own. See `rust/src/crypto/awslc.rs`.
+- **Parsed-RSA-key cache on the AWS-LC fast path** (`rust/src/crypto/awslc_keycache.rs`).
+  Every RSA private-key operation used to call `from_pkcs8` on the caller's
+  DER, which inside AWS-LC re-runs `RSA_check_key`, rebuilds three Montgomery
+  contexts and creates a fresh blinding factor — once per operation. The
+  parsed key is now cached (keyed by SHA-256 of the PKCS#8 DER, so the same
+  key reached over PKCS#11, `native::sign`, or KMIP shares one parse), and
+  dropped wholesale on every lifecycle event that ends a key's accessibility
+  (`C_Finalize`, `C_Logout`, `C_CloseSession`, `C_CloseAllSessions`,
+  `C_InitToken`, `C_DestroyObject`, `C_SetAttributeValue`). Measured on the
+  FRDM-IMX95 (6× Cortex-A55 @ 1.8 GHz), RSA-2048 sign through the PKCS#11 C
+  ABI rose from 80.8 to 105.4 /s single-threaded and from 356 to 481 /s across
+  six cores.
+
+### Security
+
+- **RSA PKCS#1 v1.5 decryption is now constant-time on native targets**
+  (RUSTSEC-2023-0071, the Marvin attack). The pure-Rust `rsa` crate's v1.5
+  decrypt leaks key material through a timing side channel and is unpatched
+  upstream; the KMIP server that exposes RSA on `:5696` statically links this
+  engine. That operation, and the OAEP and sign paths alongside it, now run on
+  AWS-LC's constant-time implementation. The `rsa` crate stays only on the
+  wasm32 build (no network timing oracle inside a browser tab) and as the
+  fallback for the mechanisms AWS-LC does not implement.
+
 ### Fixed
 
 - **Auth-failure clients were counted by address *and port*.** The behaviour
@@ -32,6 +66,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   hard-coded `latency_ms: 0` at all nine emit sites; the dispatcher now times
   each request from the moment it mints the correlation id and every emit site
   reads that figure.
+- **The wasm no-C-crypto guard matched on filesystem paths, not crate names.**
+  `wasm_dependency_graph_has_no_c_backed_crypto` asserted on
+  `tree.contains("aws-lc-rs")` over raw `cargo tree` output, whose root line
+  carries the checkout path — so it failed in a worktree named after a banned
+  crate and matched `ring` inside unrelated crate names like `stringprep`. It
+  now compares the package-name token from each line, with a test pinning both
+  directions.
 
 ## [0.30.0] — 2026-09-09
 
