@@ -9,10 +9,10 @@
   },
   "counts": {
     "canonical_header_mechanisms": 473,
-    "cpp_advertised": 166,
+    "cpp_advertised": 168,
     "rust_advertised": 172,
     "cpp_only": [],
-    "rust_only_count": 6
+    "rust_only_count": 4
   },
   "scope_reasons": {
     "legacy-block-ciphers": "Pre-AES or regional block ciphers (DES/3DES, RC2/RC4/RC5, CAST, IDEA, Blowfish/Twofish, SKIPJACK/BATON/JUNIPER/FORTEZZA, SEED, ARIA, Camellia, GOST 28147). This is a PQC engine with a deliberately narrow symmetric surface: AES and ChaCha20. Adding any of these would widen the attack surface to primitives no current caller should select.",
@@ -3119,13 +3119,13 @@
     },
     "CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE": {
       "value": "engine-extension",
-      "cpp": "not-advertised",
+      "cpp": "implemented",
       "rust": "implemented",
       "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
     },
     "CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN": {
       "value": "engine-extension",
-      "cpp": "not-advertised",
+      "cpp": "implemented",
       "rust": "implemented",
       "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
     },
