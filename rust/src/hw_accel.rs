@@ -1,4 +1,5 @@
 //! Optional K26 accelerator probe. A failed probe never blocks PKCS#11.
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, TryLockError};
 use std::time::Duration;
 
@@ -9,8 +10,10 @@ struct ResidentMldsa65 {
     matrix: Vec<i32>,
 }
 
-static MLDSA65_SIGN: OnceLock<Mutex<Option<pqc_hw::mldsa_sign_device::Mldsa65SignSession>>> =
-    OnceLock::new();
+const SIGN_LANES: usize = pqc_hw::mldsa_sign_device::MLDSA65_SIGN_LANES;
+type SignLane = Mutex<Option<pqc_hw::mldsa_sign_device::Mldsa65SignSession>>;
+static MLDSA65_SIGN: OnceLock<[SignLane; SIGN_LANES]> = OnceLock::new();
+static NEXT_SIGN_LANE: AtomicUsize = AtomicUsize::new(0);
 
 static MLDSA65: OnceLock<Mutex<Option<ResidentMldsa65>>> = OnceLock::new();
 
@@ -53,32 +56,41 @@ fn mldsa65_sign(
     rho_prime: &[u8; 64],
     randomized: bool,
 ) -> Option<Vec<u8>> {
-    let mut resident = match MLDSA65_SIGN.get_or_init(|| Mutex::new(None)).try_lock() {
-        Ok(guard) => guard,
-        Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => return None,
-    };
-    if resident.is_none() {
-        *resident = pqc_hw::mldsa_sign_device::Mldsa65SignSession::open().ok();
-    }
-    let state = resident.as_mut()?;
-    match state.sign(
-        matrix,
-        s1,
-        s2,
-        t0,
-        mu,
-        rho_prime,
-        randomized,
-        128,
-        Duration::from_millis(250),
-    ) {
-        Ok(signature) => Some(signature),
-        Err(error) => {
-            diagnostic(&format!("whole-signature accelerator failed: {error}"));
-            *resident = None;
-            None
+    let lanes = MLDSA65_SIGN.get_or_init(|| std::array::from_fn(|_| Mutex::new(None)));
+    let first = NEXT_SIGN_LANE.fetch_add(1, Ordering::Relaxed) % SIGN_LANES;
+    for offset in 0..SIGN_LANES {
+        let lane = (first + offset) % SIGN_LANES;
+        let mut resident = match lanes[lane].try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => continue,
+        };
+        if resident.is_none() {
+            *resident = pqc_hw::mldsa_sign_device::Mldsa65SignSession::open_lane(lane).ok();
+        }
+        let Some(state) = resident.as_mut() else {
+            continue;
+        };
+        match state.sign(
+            matrix,
+            s1,
+            s2,
+            t0,
+            mu,
+            rho_prime,
+            randomized,
+            128,
+            Duration::from_millis(250),
+        ) {
+            Ok(signature) => return Some(signature),
+            Err(error) => {
+                diagnostic(&format!(
+                    "whole-signature accelerator lane {lane} failed: {error}"
+                ));
+                *resident = None;
+            }
         }
     }
+    None
 }
 
 pub fn available() -> bool {

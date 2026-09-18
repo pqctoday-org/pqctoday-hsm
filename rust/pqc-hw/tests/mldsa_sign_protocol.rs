@@ -108,6 +108,29 @@ fn signer_writes_all_resident_buffer_addresses() {
 }
 
 #[test]
+fn signer_uses_the_selected_lanes_memory_map() {
+    const LANE1_MAILBOX: u64 = 0xa003_0000;
+    const LANE1_SIGNATURE: u64 = 0xa003_2000;
+    let mut signer =
+        Signer::new_with_memory_map(Registers::new(true), LANE1_MAILBOX, LANE1_SIGNATURE);
+    signer
+        .sign(
+            SignSubmission {
+                tenant: 1,
+                generation: 2,
+                attempt_limit: 3,
+            },
+            Duration::from_millis(10),
+        )
+        .unwrap();
+    let registers = signer.into_inner();
+
+    assert!(registers.wrote64(0x88, LANE1_SIGNATURE));
+    assert!(registers.wrote64(0x94, LANE1_MAILBOX + DIAGNOSTICS_OFFSET));
+    assert!(registers.wrote64(0xa0, LANE1_MAILBOX + CONTEXT_INFO_OFFSET));
+}
+
+#[test]
 fn rejects_bad_dma_addresses_and_propagates_timeout() {
     for bad_address in [0, 0x6760_0004] {
         let mut controller = DmaController::new(Registers::new(true));

@@ -102,6 +102,8 @@ impl<R: RegisterIo> DmaController<R> {
 
 pub struct Signer<R> {
     registers: R,
+    mailbox_base: u64,
+    signature_base: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -113,7 +115,15 @@ pub struct SignSubmission {
 
 impl<R: RegisterIo> Signer<R> {
     pub fn new(registers: R) -> Self {
-        Self { registers }
+        Self::new_with_memory_map(registers, MAILBOX_BASE, SIGNATURE_BASE)
+    }
+
+    pub fn new_with_memory_map(registers: R, mailbox_base: u64, signature_base: u64) -> Self {
+        Self {
+            registers,
+            mailbox_base,
+            signature_base,
+        }
     }
 
     pub fn into_inner(self) -> R {
@@ -161,16 +171,16 @@ impl<R: RegisterIo> Signer<R> {
         write64(&mut self.registers, SIGN_S1, SECRET_BASE + SECRET_S1_OFFSET);
         write64(&mut self.registers, SIGN_S2, SECRET_BASE + SECRET_S2_OFFSET);
         write64(&mut self.registers, SIGN_T0, SECRET_BASE + SECRET_T0_OFFSET);
-        write64(&mut self.registers, SIGN_SIGNATURE, SIGNATURE_BASE);
+        write64(&mut self.registers, SIGN_SIGNATURE, self.signature_base);
         write64(
             &mut self.registers,
             SIGN_DIAGNOSTICS,
-            MAILBOX_BASE + DIAGNOSTICS_OFFSET,
+            self.mailbox_base + DIAGNOSTICS_OFFSET,
         );
         write64(
             &mut self.registers,
             SIGN_CONTEXT_INFO,
-            MAILBOX_BASE + CONTEXT_INFO_OFFSET,
+            self.mailbox_base + CONTEXT_INFO_OFFSET,
         );
     }
 }
