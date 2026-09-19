@@ -518,11 +518,13 @@ run_step_bg_host "wasm CACP smoke" \
 # "to gate the rest from rotting." Builds BOTH engines fresh (see the
 # script's own header for why that matters) and diffs every observable
 # outcome across 49 scenarios; only divergences already recorded with a
-# citation in tests/differential/exceptions.json are allowed. Runs on the
-# HOST, via its own `rust/target` (not the container's target dir at all),
-# so it shares no state with any lane above.
-run_step_bg_host "cross-engine PKCS#11 differential harness (49 scenarios)" \
-  "cd '$ROOT' && bash scripts/run-differential-harness.sh 2>&1 | tail -15"
+# citation in tests/differential/exceptions.json are allowed. Runs in the
+# Linux validation container so the same compiler and shared-library format
+# are used on every development host. Its dedicated build and cargo lane
+# keep it isolated from the Rust and KMIP jobs above.
+run_step_bg "cross-engine PKCS#11 differential harness (49 scenarios)" \
+  "cd $AG_CONTAINER_ROOT && P11DIFF_BUILD_DIR=build_union_linux bash scripts/run-differential-harness.sh --jobs 4 2>&1 | tail -15" \
+  differential
 
 # These three touch $AG_KMIP but nothing else in the batch does, and none of
 # them shares a target dir with a debug test build: the two Python checks

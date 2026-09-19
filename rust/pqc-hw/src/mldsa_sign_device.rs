@@ -4,7 +4,7 @@ use crate::dma::Buffer;
 use crate::keccak::RegisterIo;
 use crate::mldsa_sign::{
     DmaController, SignSubmission, Signer, DMA_CONTROL_BASE, MAILBOX_BASE, PHASE_ABORT,
-    PHASE_DISPATCH, PHASE_PUBLISH, SIGNER_CONTROL_BASE,
+    PHASE_DISPATCH, PHASE_PUBLISH, SIGNATURE_BASE, SIGNER_CONTROL_BASE,
 };
 use crate::uio::Mapping;
 use std::fs::{File, OpenOptions};
@@ -35,6 +35,40 @@ const MB_SIGNER_STATUS: usize = 11 * 4;
 const SIGN_DETERMINISTIC: u32 = 1;
 const SIGN_RANDOMIZED: u32 = 2;
 
+pub const MLDSA65_SIGN_LANES: usize = 2;
+
+#[derive(Clone, Copy)]
+struct LaneConfig {
+    mailbox_base: u64,
+    signature_base: u64,
+    dma_control_base: u64,
+    signer_control_base: u64,
+    lock_path: &'static str,
+    dma_path: &'static str,
+    dma_sysfs_path: &'static str,
+}
+
+const LANES: [LaneConfig; MLDSA65_SIGN_LANES] = [
+    LaneConfig {
+        mailbox_base: MAILBOX_BASE,
+        signature_base: SIGNATURE_BASE,
+        dma_control_base: DMA_CONTROL_BASE,
+        signer_control_base: SIGNER_CONTROL_BASE,
+        lock_path: "/run/lock/pqc-accel-dma.lock",
+        dma_path: "/dev/pqc-accel-dma",
+        dma_sysfs_path: "/sys/class/u-dma-buf/pqc-accel-dma",
+    },
+    LaneConfig {
+        mailbox_base: 0xa003_0000,
+        signature_base: 0xa003_2000,
+        dma_control_base: 0xa004_0000,
+        signer_control_base: 0xa005_0000,
+        lock_path: "/run/lock/pqc-accel-dma1.lock",
+        dma_path: "/dev/pqc-accel-dma1",
+        dma_sysfs_path: "/sys/class/u-dma-buf/pqc-accel-dma1",
+    },
+];
+
 pub struct Mldsa65SignSession {
     dma_controller: DmaController<Mapping>,
     signer: Signer<Mapping>,
@@ -51,22 +85,29 @@ unsafe impl Send for Mldsa65SignSession {}
 
 impl Mldsa65SignSession {
     pub fn open() -> io::Result<Self> {
+        Self::open_lane(0)
+    }
+
+    pub fn open_lane(lane: usize) -> io::Result<Self> {
+        let config = LANES.get(lane).copied().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid ML-DSA FPGA lane")
+        })?;
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open("/run/lock/pqc-accel-dma.lock")?;
+            .open(config.lock_path)?;
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "FPGA DMA allocation is owned by another process",
             ));
         }
-        let dma_uio = Mapping::find_by_address("/sys/class/uio", DMA_CONTROL_BASE)?;
-        let signer_uio = Mapping::find_by_address("/sys/class/uio", SIGNER_CONTROL_BASE)?;
-        let mailbox_uio = Mapping::find_by_address("/sys/class/uio", MAILBOX_BASE)?;
-        let mut dma = Buffer::open("/dev/pqc-accel-dma", "/sys/class/u-dma-buf/pqc-accel-dma")?;
+        let dma_uio = Mapping::find_by_address("/sys/class/uio", config.dma_control_base)?;
+        let signer_uio = Mapping::find_by_address("/sys/class/uio", config.signer_control_base)?;
+        let mailbox_uio = Mapping::find_by_address("/sys/class/uio", config.mailbox_base)?;
+        let mut dma = Buffer::open(config.dma_path, config.dma_sysfs_path)?;
         if dma.len() < OUTPUT_OFFSET + SIGN_OUTPUT_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -76,7 +117,11 @@ impl Mldsa65SignSession {
         dma.clear()?;
         Ok(Self {
             dma_controller: DmaController::new(Mapping::open(dma_uio, 0x10000)?),
-            signer: Signer::new(Mapping::open(signer_uio, 0x10000)?),
+            signer: Signer::new_with_memory_map(
+                Mapping::open(signer_uio, 0x10000)?,
+                config.mailbox_base,
+                config.signature_base,
+            ),
             mailbox: Mapping::open(mailbox_uio, 0x2000)?,
             dma,
             matrix: Vec::new(),

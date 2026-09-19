@@ -46,6 +46,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The optional KV260 whole-signature ML-DSA-65 path now schedules concurrent
+  requests across two independently mapped FPGA signing engines. Each lane has
+  its own UIO controls, DMA buffer, process lock, cached matrix context, and
+  failure recovery. Contending workers try the other lane and fall back to ARM
+  only when neither FPGA lane is available.
 - The KV260 resident ML-DSA-65 diagnostic now retains its UIO and DMA mappings
   across a benchmark session, serializes ownership with a process lock, and
   synchronizes and scrubs only the 41,984-byte live command region. Per-stage
@@ -73,6 +78,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- The cross-engine PKCS#11 gate now builds and runs inside the Linux
+  validation container, honors `CARGO_TARGET_DIR`, and selects the native
+  shared-library format. This prevents a mounted worktree from loading a stale
+  host-format Rust library during release validation.
 - **Auth-failure clients were counted by address *and port*.** The behaviour
   ring bucketed a failing peer by `ip:port`, so seventeen refused handshakes
   from one machine looked like seventeen different clients — the opposite of
