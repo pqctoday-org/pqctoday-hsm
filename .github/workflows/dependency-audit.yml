@@ -15,6 +15,8 @@ on:
     paths:
       - "rust/Cargo.toml"
       - "rust/Cargo.lock"
+      - "kmip/Cargo.toml"
+      - "kmip/Cargo.lock"
   workflow_dispatch: {}
 
 jobs:
@@ -28,7 +30,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-audit
-        run: cargo install cargo-audit
+        run: cargo install cargo-audit --locked
       - name: Run cargo audit
         # RUSTSEC-2023-0071 (rsa crate, Marvin): the exposed v1.5 DECRYPT
         # oracle was closed 2026-09-15 by routing the engine's decrypt through
@@ -36,4 +38,109 @@ jobs:
         # paths (openpgp interop, engine fallback mechanisms AWS-LC does not
         # expose, KMIP DER format conversion), so the ID is still ignored until
         # the crate ships a constant-time release (RustCrypto/RSA #390).
-        run: cd rust && cargo audit --deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0097
+        #
+        # RUSTSEC-2026-0097 (rand unsound with a custom logger) used to be
+        # ignored here too; every rand in rust/Cargo.lock is on a patched
+        # release as of 2026-09-21, so the ignore was dropped -- a stale ignore
+        # would silently mask a future regression to an affected version.
+        #
+        # 2026-09-21: the run had been red since 08-31 behind five denied
+        # warnings (fxhash / rustls-pemfile unmaintained, chacha20 / der /
+        # spin yanked) that hid a real rustls vulnerability (RUSTSEC-2026-
+        # 0285). All five were fixed at the source (scraper bump drops fxhash;
+        # rustls-pemfile replaced by rustls-pki-types' PEM API; cargo update
+        # for the yanked releases) -- NOT ignored. Keep it that way: an
+        # always-red audit is the same as no audit.
+        #
+        # kmip/Cargo.lock is audited too (added 2026-09-21): the shipped
+        # pqctoday-kmip server binary is built from THAT lock, not rust/'s,
+        # and it had drifted to rustls 0.23.40 (same RUSTSEC-2026-0285) while
+        # only rust/ was being scanned. Same ignore list, same policy.
+        run: |
+          set -eu
+          for crate in rust kmip; do
+            echo "::group::cargo audit ($crate/Cargo.lock)"
+            (cd "$crate" && cargo audit --deny warnings --ignore RUSTSEC-2023-0071)
+            echo "::endgroup::"
+          done
+
+  # ---------------------------------------------------------------------------
+  # Alerting for a scheduled workflow: a red cron run is otherwise silent
+  # (nobody is on the PR page for it). On failure this opens -- or comments
+  # on -- exactly ONE issue titled "<workflow name> is red" with the run URL;
+  # on success it closes that issue if it is open. Kept byte-identical in
+  # every scheduled workflow (dependency-audit.yml, openmls-interop.yml) so
+  # it can be lifted into a reusable workflow later without reconciling
+  # variants. A cancelled/skipped upstream leaves the issue untouched. Not
+  # run for pull_request events: a red PR is visible on the PR itself, and
+  # the token has no issues:write on a fork PR anyway.
+  # ---------------------------------------------------------------------------
+  alert:
+    name: Open or close the "is red" issue
+    runs-on: ubuntu-24.04
+    needs: [rust-audit]
+    if: always() && github.event_name != 'pull_request'
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Comma-joined results of every job this one `needs`. Any value
+          # other than "success" (failure, cancelled, skipped) counts as red;
+          # "cancelled" alone is ignored so a manual stop never files a ticket.
+          UPSTREAM_RESULTS: ${{ join(needs.*.result, ',') }}
+        with:
+          script: |
+            const title = `${process.env.WORKFLOW_NAME} is red`;
+            const runUrl = process.env.RUN_URL;
+            const results = process.env.UPSTREAM_RESULTS.split(',');
+            const green = results.every((r) => r === 'success');
+            const cancelledOnly = !green && results.every((r) => r === 'success' || r === 'cancelled');
+            const { owner, repo } = context.repo;
+
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const existing = open.find((i) => !i.pull_request && i.title === title);
+
+            if (cancelledOnly) {
+              core.info(`upstream cancelled (${results.join(',')}); leaving issue state as-is`);
+              return;
+            }
+
+            if (!green) {
+              const line = `Red run (${results.join(',')}): ${runUrl}`;
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number, body: line,
+                });
+                core.info(`updated #${existing.number}`);
+              } else {
+                const body = [
+                  `The scheduled workflow **${process.env.WORKFLOW_NAME}** failed.`,
+                  '',
+                  line,
+                  '',
+                  'This issue is maintained by the workflow itself: each further red run adds a comment; the first green run closes it.',
+                ].join('\n');
+                const created = await github.rest.issues.create({ owner, repo, title, body });
+                core.info(`opened #${created.data.number}`);
+              }
+              core.setFailed(`${process.env.WORKFLOW_NAME} is red: ${runUrl}`);
+              return;
+            }
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Green again: ${runUrl}`,
+              });
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number, state: 'closed', state_reason: 'completed',
+              });
+              core.info(`closed #${existing.number}`);
+            } else {
+              core.info('green, no open issue');
+            }

@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
@@ -285,12 +286,11 @@ pub fn tls_from_pem_with_profile(
 ) -> Result<Arc<ServerConfig>, ServerError> {
     let cert_bytes = std::fs::read(cert_pem_path)?;
     let key_bytes = std::fs::read(key_pem_path)?;
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &cert_bytes[..])
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_bytes)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| ServerError::Tls(format!("cert: {e}")))?;
-    let key = rustls_pemfile::private_key(&mut &key_bytes[..])
-        .map_err(|e| ServerError::Tls(format!("key: {e}")))?
-        .ok_or_else(|| ServerError::Tls("no private key in PEM".into()))?;
+    let key = PrivateKeyDer::from_pem_slice(&key_bytes)
+        .map_err(|e| ServerError::Tls(format!("key: {e}")))?;
     let config = profile_builder(profile)?
         .with_no_client_auth()
         .with_single_cert(certs, key)
@@ -365,14 +365,13 @@ pub fn tls_mtls_with_profile(
     client_ca_pem: &[u8],
     profile: TlsProfile,
 ) -> Result<Arc<ServerConfig>, ServerError> {
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &server_cert_pem[..])
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(server_cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| ServerError::Tls(format!("server cert: {e}")))?;
-    let key = rustls_pemfile::private_key(&mut &server_key_pem[..])
-        .map_err(|e| ServerError::Tls(format!("server key: {e}")))?
-        .ok_or_else(|| ServerError::Tls("no server private key".into()))?;
+    let key = PrivateKeyDer::from_pem_slice(server_key_pem)
+        .map_err(|e| ServerError::Tls(format!("server key: {e}")))?;
     let mut root_store = RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut &client_ca_pem[..]) {
+    for cert in CertificateDer::pem_slice_iter(client_ca_pem) {
         root_store
             .add(cert.map_err(|e| ServerError::Tls(format!("client CA: {e}")))?)
             .map_err(|e| ServerError::Tls(format!("root store add: {e}")))?;

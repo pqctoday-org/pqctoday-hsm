@@ -32,10 +32,19 @@
 
 name: pqctoday-mls-interop
 
+# Every service carries an explicit `image:` equal to the name compose would
+# pick by itself (`<project>-<service>`), so `docker buildx bake -f
+# docker-compose.yml --load` (what .github/workflows/openmls-interop.yml uses
+# to get GHA layer caching) tags the images identically and a subsequent
+# `docker compose up --no-build` finds them. Without `image:`, bake produces
+# untagged images. Plain `docker compose build` / `up` behave exactly as
+# before.
+
 services:
 
   # ── Our implementation ───────────────────────────────────────────────────
   pqctoday:
+    image: pqctoday-mls-interop-pqctoday
     build:
       # Context is the pqctoday-hsm repo root so both softhsmv3 C sources
       # and the Rust workspace are available to the Dockerfile.
@@ -58,6 +67,7 @@ services:
   # Note: openmls interop_client does not implement the gRPC health protocol,
   # so we check raw TCP connectivity instead.
   openmls:
+    image: pqctoday-mls-interop-openmls
     build:
       context: .
       dockerfile: Dockerfile.openmls
@@ -73,6 +83,7 @@ services:
 
   # ── AWS Wickr mls-rs implementation ─────────────────────────────────────
   mls-rs:
+    image: pqctoday-mls-interop-mls-rs
     build:
       context: .
       dockerfile: Dockerfile.mls-rs
@@ -94,6 +105,7 @@ services:
   # The test runner binary is built from Go source in that repo.
   # Configs live in mlswg/mls-implementations/interop/configs/.
   test-runner:
+    image: pqctoday-mls-interop-test-runner
     build:
       context: .
       dockerfile: Dockerfile.test-runner

@@ -10,7 +10,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustls::pki_types::ServerName;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -749,8 +750,7 @@ fn build_request_bytes(req: &RequestMessage) -> Vec<u8> {
 }
 
 fn pem_to_der(pem: &str) -> Vec<u8> {
-    let mut bytes = pem.as_bytes();
-    rustls_pemfile::certs(&mut bytes)
+    CertificateDer::pem_slice_iter(pem.as_bytes())
         .next()
         .expect("at least one cert")
         .expect("valid cert")

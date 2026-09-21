@@ -4,13 +4,35 @@ name: OpenMLS Interop (gating tests)
 #   pqctoday vs openmls reference (gating)
 #   pqctoday vs mls-rs (gating, best-effort)
 #
-# Heavy Docker build (~30 min cold cache) — runs nightly + on-demand only,
-# not on every PR. PR-level coverage is provided by the Rust check workflow.
+# Heavy Docker build (~30 min cold cache). It runs when its inputs change --
+# push / PR touching the provider, the C++ engine it links, or this file --
+# plus a weekly cron and on-demand, NOT nightly: from 2026-05-17 to 09-21 a
+# daily cron rebuilt OpenSSL 3.6.3 + softhsmv3 for code that had not
+# changed, and from 09-12 was red every day because the checkout lacked
+# `submodules: recursive` (liboqs empty -> CMake fails at
+# add_subdirectory(src/lib/crypto/oqs/liboqs)). Buildx layer cache (GHA
+# backend) keeps the OpenSSL and softhsmv3 stages between runs so only the
+# Rust stage rebuilds when the provider changes.
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'openmls-provider/**'
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/openmls-interop.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'openmls-provider/**'
+      - 'src/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/openmls-interop.yml'
   schedule:
-    # 04:30 UTC nightly
-    - cron: '30 4 * * *'
+    # Weekly, Mondays 04:30 UTC -- catches drift in the openmls / mls-rs
+    # peer images (built from upstream refs) when nothing here changed.
+    - cron: '30 4 * * 1'
   workflow_dispatch:
     inputs:
       peer:
@@ -36,19 +58,46 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # liboqs (Classic McEliece), hash-sigs, xmss-reference are git
+          # submodules under src/lib/crypto/; CMakeLists.txt add_subdirectory()s
+          # liboqs unconditionally (WITH_LIBOQS defaults ON), so an empty
+          # submodule dir breaks the pqctoday image at CMake configure time.
+          submodules: recursive
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build pqctoday + peer images
-        working-directory: openmls-provider/interop/docker
-        run: |
-          docker compose build pqctoday ${{ matrix.peer }}
+      # Build through bake so the compose services get the GitHub Actions
+      # layer cache (`type=gha`). `docker compose build` cannot reach that
+      # cache backend without the runtime token bake-action wires up; bake
+      # reads the same compose file, so the image definitions stay in ONE
+      # place. `load: true` puts the images in the local daemon under the
+      # compose default names (`<project>-<service>`, declared explicitly as
+      # `image:` in docker-compose.yml) so the `up -d` below does not rebuild.
+      # mode=max caches every stage, including the OpenSSL 3.6.3 build and
+      # the softhsmv3 build, not just the final runtime layers.
+      - name: Build pqctoday + peer images (GHA layer cache)
+        uses: docker/bake-action@v6
+        with:
+          workdir: openmls-provider/interop/docker
+          files: docker-compose.yml
+          targets: |
+            pqctoday
+            ${{ matrix.peer }}
+          load: true
+          # One cache scope per image: the pqctoday image is built by both
+          # matrix legs and would otherwise be stored twice under two scopes.
+          set: |
+            pqctoday.cache-from=type=gha,scope=interop-pqctoday
+            pqctoday.cache-to=type=gha,mode=max,scope=interop-pqctoday
+            ${{ matrix.peer }}.cache-from=type=gha,scope=interop-${{ matrix.peer }}
+            ${{ matrix.peer }}.cache-to=type=gha,mode=max,scope=interop-${{ matrix.peer }}
 
       - name: Start gRPC services
         working-directory: openmls-provider/interop/docker
         run: |
-          docker compose up -d pqctoday ${{ matrix.peer }}
+          docker compose up -d --no-build pqctoday ${{ matrix.peer }}
           # Wait for both health checks (max 2 min)
           for i in $(seq 1 24); do
             pq=$(docker inspect --format='{{.State.Health.Status}}' pqctoday-mls-interop-pqctoday-1 2>/dev/null || echo "starting")
@@ -85,3 +134,84 @@ jobs:
         if: always()
         working-directory: openmls-provider/interop/docker
         run: docker compose down -v
+
+  # ---------------------------------------------------------------------------
+  # Alerting for a scheduled workflow: a red cron run is otherwise silent
+  # (nobody is on the PR page for it). On failure this opens -- or comments
+  # on -- exactly ONE issue titled "<workflow name> is red" with the run URL;
+  # on success it closes that issue if it is open. Kept byte-identical in
+  # every scheduled workflow (dependency-audit.yml, openmls-interop.yml) so
+  # it can be lifted into a reusable workflow later without reconciling
+  # variants. A cancelled/skipped upstream leaves the issue untouched. Not
+  # run for pull_request events: a red PR is visible on the PR itself, and
+  # the token has no issues:write on a fork PR anyway.
+  # ---------------------------------------------------------------------------
+  alert:
+    name: Open or close the "is red" issue
+    runs-on: ubuntu-24.04
+    needs: [interop]
+    if: always() && github.event_name != 'pull_request'
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Comma-joined results of every job this one `needs`. Any value
+          # other than "success" (failure, cancelled, skipped) counts as red;
+          # "cancelled" alone is ignored so a manual stop never files a ticket.
+          UPSTREAM_RESULTS: ${{ join(needs.*.result, ',') }}
+        with:
+          script: |
+            const title = `${process.env.WORKFLOW_NAME} is red`;
+            const runUrl = process.env.RUN_URL;
+            const results = process.env.UPSTREAM_RESULTS.split(',');
+            const green = results.every((r) => r === 'success');
+            const cancelledOnly = !green && results.every((r) => r === 'success' || r === 'cancelled');
+            const { owner, repo } = context.repo;
+
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', per_page: 100,
+            });
+            const existing = open.find((i) => !i.pull_request && i.title === title);
+
+            if (cancelledOnly) {
+              core.info(`upstream cancelled (${results.join(',')}); leaving issue state as-is`);
+              return;
+            }
+
+            if (!green) {
+              const line = `Red run (${results.join(',')}): ${runUrl}`;
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number, body: line,
+                });
+                core.info(`updated #${existing.number}`);
+              } else {
+                const body = [
+                  `The scheduled workflow **${process.env.WORKFLOW_NAME}** failed.`,
+                  '',
+                  line,
+                  '',
+                  'This issue is maintained by the workflow itself: each further red run adds a comment; the first green run closes it.',
+                ].join('\n');
+                const created = await github.rest.issues.create({ owner, repo, title, body });
+                core.info(`opened #${created.data.number}`);
+              }
+              core.setFailed(`${process.env.WORKFLOW_NAME} is red: ${runUrl}`);
+              return;
+            }
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Green again: ${runUrl}`,
+              });
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number, state: 'closed', state_reason: 'completed',
+              });
+              core.info(`closed #${existing.number}`);
+            } else {
+              core.info('green, no open issue');
+            }

@@ -75,9 +75,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   AWS-LC's constant-time implementation. The `rsa` crate stays only on the
   wasm32 build (no network timing oracle inside a browser tab) and as the
   fallback for the mechanisms AWS-LC does not implement.
+- **rustls 0.23.45** (RUSTSEC-2026-0285: TLS 1.3 handshake messages accepted
+  across encryption-level boundaries) in every lock file that links a TLS
+  listener or client — the engine workspace, the KMIP server, the shared
+  `tls` crate and both remoting services. The weekly Rust dependency audit
+  had been red since 2026-08-31 behind five unrelated denied warnings, so
+  this advisory sat unseen for a week; all five were fixed rather than
+  ignored, and the audit now also scans `kmip/Cargo.lock` (the lock the
+  shipped server binary is built from), which had drifted to 0.23.40.
+  Alongside: the unmaintained `rustls-pemfile` is replaced by
+  `rustls-pki-types`' PEM API (RUSTSEC-2025-0134), `scraper` 0.20 → 0.27
+  drops the unmaintained `fxhash` (RUSTSEC-2025-0057), and `chacha20`,
+  `der`, `spin` move off yanked releases.
 
 ### Fixed
 
+- The OpenMLS interop workflow checks out submodules again, so its pqctoday
+  image builds since Classic McEliece made `liboqs` a hard CMake dependency
+  (red on every nightly run 2026-09-12 → 09-21). It now runs on push / PR to
+  the provider, the C++ engine or `CMakeLists.txt`, weekly, and on demand —
+  not nightly — with the OpenSSL 3.6.3 and softhsmv3 image stages kept in
+  the GitHub Actions layer cache between runs. Both it and the dependency
+  audit open (and later close) a single "<workflow> is red" issue, so a red
+  scheduled run is no longer silent.
 - The cross-engine PKCS#11 gate now builds and runs inside the Linux
   validation container, honors `CARGO_TARGET_DIR`, and selects the native
   shared-library format. This prevents a mounted worktree from loading a stale

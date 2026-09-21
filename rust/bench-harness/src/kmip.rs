@@ -34,6 +34,8 @@ use std::net::TcpStream;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use pqctoday_kmip::codec;
 use pqctoday_kmip::dispatcher::one_off_request;
@@ -117,8 +119,7 @@ impl KmipEndpoint {
 
     fn tls_config(&self) -> Result<Arc<rustls::ClientConfig>> {
         let mut roots = rustls::RootCertStore::empty();
-        let mut reader = &self.ca_pem[..];
-        let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+        let certs: Vec<_> = CertificateDer::pem_slice_iter(&self.ca_pem)
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("parsing CA PEM")?;
         if certs.is_empty() {
@@ -131,12 +132,11 @@ impl KmipEndpoint {
         // Parse the client identity once, so both profile branches share it.
         let client_auth = match (&self.client_cert_pem, &self.client_key_pem) {
             (Some(cert_pem), Some(key_pem)) => {
-                let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..])
+                let certs: Vec<_> = CertificateDer::pem_slice_iter(cert_pem)
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .context("parsing client cert PEM")?;
-                let key = rustls_pemfile::private_key(&mut &key_pem[..])
-                    .context("parsing client key PEM")?
-                    .ok_or_else(|| anyhow!("no private key found in the client key PEM"))?;
+                let key = PrivateKeyDer::from_pem_slice(key_pem)
+                    .context("parsing client key PEM")?;
                 Some((certs, key))
             }
             (None, None) => None,
