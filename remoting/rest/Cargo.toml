@@ -18,7 +18,8 @@ axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
-rustls-pemfile = "2"
+# PEM parsing via `rustls::pki_types::pem::PemObject` (re-exported by rustls);
+# `rustls-pemfile` is unmaintained upstream (RUSTSEC-2025-0134) — dropped 2026-09-21.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

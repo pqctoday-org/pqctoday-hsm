@@ -34,6 +34,8 @@ use base64::Engine;
 use pqctoday_pkcs11_remote_proto::pkcs11_remote_client::Pkcs11RemoteClient;
 use pqctoday_pkcs11_remote_proto::{self as pb};
 use pqctoday_tls::TlsProfile;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::Request;
 
@@ -58,15 +60,14 @@ fn client_tls_config(
     client_key_pem: Option<&[u8]>,
 ) -> Result<Arc<rustls::ClientConfig>> {
     let mut roots = rustls::RootCertStore::empty();
-    for c in rustls_pemfile::certs(&mut &ca_pem[..]) {
+    for c in CertificateDer::pem_slice_iter(ca_pem) {
         roots.add(c.context("parsing CA PEM")?).context("adding CA to trust store")?;
     }
     let client_auth = match (client_cert_pem, client_key_pem) {
         (Some(cert_pem), Some(key_pem)) => {
             let certs: Vec<_> =
-                rustls_pemfile::certs(&mut &cert_pem[..]).collect::<std::result::Result<_, _>>()?;
-            let key = rustls_pemfile::private_key(&mut &key_pem[..])?
-                .ok_or_else(|| anyhow!("no private key in client key PEM"))?;
+                CertificateDer::pem_slice_iter(cert_pem).collect::<std::result::Result<_, _>>()?;
+            let key = PrivateKeyDer::from_pem_slice(key_pem).context("parsing client key PEM")?;
             Some((certs, key))
         }
         (None, None) => None,

@@ -12,6 +12,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use pqc_rest_pkcs11::routes;
 use pqctoday_tls::TlsProfile;
+use rustls::pki_types::pem::PemObject;
 
 #[derive(Parser, Debug)]
 #[command(name = "pqc-rest-pkcs11")]
@@ -98,7 +99,7 @@ fn build_server_config(cli: &Cli) -> anyhow::Result<rustls::ServerConfig> {
     let mut config = if let Some(ca_path) = &cli.tls_client_ca {
         let ca_pem = std::fs::read(ca_path)?;
         let mut roots = rustls::RootCertStore::empty();
-        for cert in rustls_pemfile::certs(&mut &ca_pem[..]) {
+        for cert in rustls::pki_types::CertificateDer::pem_slice_iter(&ca_pem) {
             roots.add(cert?)?;
         }
         let provider = Arc::new(pqctoday_tls::client_provider_for(cli.tls_profile));
@@ -129,9 +130,10 @@ fn load_or_generate_identity(
         (Some(cert_path), Some(key_path)) => {
             let cert_pem = std::fs::read(cert_path)?;
             let key_pem = std::fs::read(key_path)?;
-            let certs = rustls_pemfile::certs(&mut &cert_pem[..]).collect::<Result<Vec<_>, _>>()?;
-            let key = rustls_pemfile::private_key(&mut &key_pem[..])?
-                .ok_or_else(|| anyhow::anyhow!("no private key in {key_path:?}"))?;
+            let certs = rustls::pki_types::CertificateDer::pem_slice_iter(&cert_pem)
+                .collect::<Result<Vec<_>, _>>()?;
+            let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
+                .map_err(|e| anyhow::anyhow!("no usable private key in {key_path:?}: {e}"))?;
             Ok((certs, key))
         }
         (None, None) => {

@@ -42,7 +42,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use serde_json::{json, Value};
@@ -87,15 +88,14 @@ pub fn pqc_mtls_config(
     ];
     let provider = Arc::new(provider);
 
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut &server_cert_pem[..])
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(server_cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| AdminError::Tls(format!("server cert: {e}")))?;
-    let key = rustls_pemfile::private_key(&mut &server_key_pem[..])
-        .map_err(|e| AdminError::Tls(format!("server key: {e}")))?
-        .ok_or_else(|| AdminError::Tls("no server private key in PEM".into()))?;
+    let key = PrivateKeyDer::from_pem_slice(server_key_pem)
+        .map_err(|e| AdminError::Tls(format!("server key: {e}")))?;
 
     let mut roots = RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut &client_ca_pem[..]) {
+    for cert in CertificateDer::pem_slice_iter(client_ca_pem) {
         roots
             .add(cert.map_err(|e| AdminError::Tls(format!("client CA: {e}")))?)
             .map_err(|e| AdminError::Tls(format!("root store add: {e}")))?;

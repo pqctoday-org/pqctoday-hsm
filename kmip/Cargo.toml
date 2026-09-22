@@ -58,7 +58,6 @@ native = [
     "dep:tokio",
     "dep:tokio-rustls",
     "dep:rustls",
-    "dep:rustls-pemfile",
     "dep:rcgen",
     "dep:rusqlite",
     "dep:rusqlite_migration",
@@ -76,7 +75,9 @@ tokio-rustls = { version = "0.26", optional = true }
 # `ring` backs the KMIP listener; `aws_lc_rs` backs the cryptopolicy-manager
 # admin facade (the only provider exposing the X25519MLKEM768 PQC hybrid KEX).
 rustls       = { version = "0.23", features = ["ring", "aws_lc_rs"], optional = true }
-rustls-pemfile = { version = "2", optional = true }
+# PEM parsing goes through `rustls::pki_types::pem::PemObject` (rustls-pki-types
+# >= 1.11, re-exported by rustls) — `rustls-pemfile` was retired upstream in
+# favour of it (RUSTSEC-2025-0134, 2025-11-28); dropped here 2026-09-21.
 
 # Self-signed cert auto-gen for sandbox / dev runs (Phase 7).
 # Production deployments mount real certs via --tls-cert / --tls-key.
@@ -208,7 +209,7 @@ rsa = "0.9"
 # HTML with deeply nested span trees that defy regex-based extraction; a real
 # DOM walker is the reliable path. Kept as a regular dep (not dev-) so the
 # tool builds in normal `cargo build`. `native` only (bin-tool dependency).
-scraper = { version = "0.20", optional = true }
+scraper = { version = "0.27", optional = true }
 
 [dev-dependencies]
 proptest   = "1"
