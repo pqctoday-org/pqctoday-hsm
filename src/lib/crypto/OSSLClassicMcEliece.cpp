@@ -41,6 +41,90 @@
 #include "OSSLClassicMcEliecePublicKey.h"
 #include "OSSLClassicMcEliecePrivateKey.h"
 #include "../vendor_mechanisms.h"
+// ─── Sign / Verify / Encrypt / Decrypt / deriveKey (not applicable) ─────────
+// Classic McEliece is a KEM; none of these operations are meaningful for it.
+// Unconditional (not guarded by WITH_LIBOQS): these bodies never call liboqs —
+// they were previously swept inside the WITH_LIBOQS block below by accident,
+// which meant a build without liboqs (the Emscripten wasm target, D-4) failed
+// to link OSSLClassicMcEliece at all, even though the class is unconditionally
+// instantiated by OSSLCryptoFactory::getAsymmetricAlgorithm. Moved out here so
+// they compile in every configuration, matching the intent already documented
+// below for encapsulate/decapsulate/generateKeyPair's #else stubs.
+bool OSSLClassicMcEliece::sign(PrivateKey* /*pk*/, const ByteString& /*data*/,
+                     ByteString& /*sig*/, const AsymMech::Type /*mech*/,
+                     const void* /*param*/, const size_t /*paramLen*/)
+{
+	ERROR_MSG("Classic McEliece does not support signing");
+	return false;
+}
+
+bool OSSLClassicMcEliece::signInit(PrivateKey* /*pk*/, const AsymMech::Type /*mech*/,
+                          const void* /*param*/, const size_t /*paramLen*/)
+{
+	ERROR_MSG("Classic McEliece does not support signing");
+	return false;
+}
+
+bool OSSLClassicMcEliece::signUpdate(const ByteString& /*data*/)
+{
+	ERROR_MSG("Classic McEliece does not support signing");
+	return false;
+}
+
+bool OSSLClassicMcEliece::signFinal(ByteString& /*sig*/)
+{
+	ERROR_MSG("Classic McEliece does not support signing");
+	return false;
+}
+
+bool OSSLClassicMcEliece::verify(PublicKey* /*pk*/, const ByteString& /*data*/,
+                       const ByteString& /*sig*/, const AsymMech::Type /*mech*/,
+                       const void* /*param*/, const size_t /*paramLen*/)
+{
+	ERROR_MSG("Classic McEliece does not support verification");
+	return false;
+}
+
+bool OSSLClassicMcEliece::verifyInit(PublicKey* /*pk*/, const AsymMech::Type /*mech*/,
+                            const void* /*param*/, const size_t /*paramLen*/)
+{
+	ERROR_MSG("Classic McEliece does not support verification");
+	return false;
+}
+
+bool OSSLClassicMcEliece::verifyUpdate(const ByteString& /*data*/)
+{
+	ERROR_MSG("Classic McEliece does not support verification");
+	return false;
+}
+
+bool OSSLClassicMcEliece::verifyFinal(const ByteString& /*sig*/)
+{
+	ERROR_MSG("Classic McEliece does not support verification");
+	return false;
+}
+
+bool OSSLClassicMcEliece::encrypt(PublicKey* /*pk*/, const ByteString& /*data*/,
+                         ByteString& /*enc*/, const AsymMech::Type /*pad*/)
+{
+	ERROR_MSG("Classic McEliece does not support encryption");
+	return false;
+}
+
+bool OSSLClassicMcEliece::decrypt(PrivateKey* /*pk*/, const ByteString& /*enc*/,
+                         ByteString& /*data*/, const AsymMech::Type /*pad*/)
+{
+	ERROR_MSG("Classic McEliece does not support decryption");
+	return false;
+}
+
+bool OSSLClassicMcEliece::deriveKey(SymmetricKey** /*ppKey*/, PublicKey* /*pub*/, PrivateKey* /*priv*/)
+{
+	ERROR_MSG("Classic McEliece does not support key derivation (use encapsulate/decapsulate)");
+	return false;
+}
+
+
 #ifdef WITH_LIBOQS
 #include <oqs/oqs.h>
 #endif
@@ -203,82 +287,6 @@ bool OSSLClassicMcEliece::decapsulate(PrivateKey* privateKey,
 	}
 
 	return true;
-}
-
-// ─── Sign / Verify / Encrypt / Decrypt (not applicable) ──────────────────────
-
-bool OSSLClassicMcEliece::sign(PrivateKey* /*pk*/, const ByteString& /*data*/,
-                     ByteString& /*sig*/, const AsymMech::Type /*mech*/,
-                     const void* /*param*/, const size_t /*paramLen*/)
-{
-	ERROR_MSG("Classic McEliece does not support signing");
-	return false;
-}
-
-bool OSSLClassicMcEliece::signInit(PrivateKey* /*pk*/, const AsymMech::Type /*mech*/,
-                          const void* /*param*/, const size_t /*paramLen*/)
-{
-	ERROR_MSG("Classic McEliece does not support signing");
-	return false;
-}
-
-bool OSSLClassicMcEliece::signUpdate(const ByteString& /*data*/)
-{
-	ERROR_MSG("Classic McEliece does not support signing");
-	return false;
-}
-
-bool OSSLClassicMcEliece::signFinal(ByteString& /*sig*/)
-{
-	ERROR_MSG("Classic McEliece does not support signing");
-	return false;
-}
-
-bool OSSLClassicMcEliece::verify(PublicKey* /*pk*/, const ByteString& /*data*/,
-                       const ByteString& /*sig*/, const AsymMech::Type /*mech*/,
-                       const void* /*param*/, const size_t /*paramLen*/)
-{
-	ERROR_MSG("Classic McEliece does not support verification");
-	return false;
-}
-
-bool OSSLClassicMcEliece::verifyInit(PublicKey* /*pk*/, const AsymMech::Type /*mech*/,
-                            const void* /*param*/, const size_t /*paramLen*/)
-{
-	ERROR_MSG("Classic McEliece does not support verification");
-	return false;
-}
-
-bool OSSLClassicMcEliece::verifyUpdate(const ByteString& /*data*/)
-{
-	ERROR_MSG("Classic McEliece does not support verification");
-	return false;
-}
-
-bool OSSLClassicMcEliece::verifyFinal(const ByteString& /*sig*/)
-{
-	ERROR_MSG("Classic McEliece does not support verification");
-	return false;
-}
-
-bool OSSLClassicMcEliece::encrypt(PublicKey* /*pk*/, const ByteString& /*data*/,
-                         ByteString& /*enc*/, const AsymMech::Type /*pad*/)
-{
-	ERROR_MSG("Classic McEliece does not support encryption");
-	return false;
-}
-
-bool OSSLClassicMcEliece::decrypt(PrivateKey* /*pk*/, const ByteString& /*enc*/,
-                         ByteString& /*data*/, const AsymMech::Type /*pad*/)
-{
-	ERROR_MSG("Classic McEliece does not support decryption");
-	return false;
-}
-
-bool OSSLClassicMcEliece::deriveKey(SymmetricKey** /*ppKey*/, PublicKey* /*pub*/, PrivateKey* /*priv*/)
-{
-	ERROR_MSG("Classic McEliece does not support key derivation (use encapsulate/decapsulate)");
-	return false;
 }
 
 // ─── Key factory ─────────────────────────────────────────────────────────────
