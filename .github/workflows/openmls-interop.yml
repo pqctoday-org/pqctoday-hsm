@@ -80,7 +80,13 @@ jobs:
       - name: Build pqctoday + peer images (GHA layer cache)
         uses: docker/bake-action@v6
         with:
-          workdir: openmls-provider/interop/docker
+          # `source` must be a LOCAL path: the default is the remote git
+          # context, which (a) resolves `files` from the repo root, so the
+          # first run failed with "lstat docker-compose.yml: no such file",
+          # and (b) would clone without submodules, losing liboqs again.
+          # Bake runs from this directory, so the compose file's relative
+          # build contexts (`../../..`) resolve exactly as they do locally.
+          source: openmls-provider/interop/docker
           files: docker-compose.yml
           targets: |
             pqctoday
