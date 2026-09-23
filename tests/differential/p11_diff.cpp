@@ -487,10 +487,33 @@ static bool is_bignum_attr(CK_ATTRIBUTE_TYPE t) {
 // (found the hard way: create.generate_key_pair.slh_dsa_all_params flagged
 // gen_shake_128s.pub.CKA_VALUE as DER_SEQUENCE_MALFORMED_LEN vs the other
 // engine's RAW_32 on one run in a series that was otherwise identical).
+//
+// The two vendor KEM key types are spelled as literals because this harness is
+// deliberately standalone — it dlopen()s both engines and includes only
+// src/lib/pkcs11/pkcs11.h, never the engine's own vendor_mechanisms.h. Values
+// per pqctoday-priv/docs/platform/data/pkcs11-vendor-mech-allocation.md §1.4,
+// which is the allocation authority, and mirrored in rust/src/constants.rs.
+#define CKK_PQCTODAY_FRODOKEM_VALUE         0x80000001UL
+#define CKK_PQCTODAY_CLASSIC_MCELIECE_VALUE 0x80000002UL
 static bool is_raw_pqc_key_type(CK_ULONG kt) {
     switch (kt) {
         case CKK_ML_KEM: case CKK_ML_DSA: case CKK_SLH_DSA:
         case CKK_HSS: case CKK_XMSS: case CKK_XMSSMT:
+        // Added 2026-09-23. Both were allocated as vendor mechanisms and never
+        // added here, so they kept hitting the very trap this guard exists for:
+        // a full gate run failed with ONE uncovered divergence,
+        //   scenario create.generate_key_pair.classic_mceliece_all_params
+        //   path    gen_460896f.priv.CKA_VALUE.enc
+        //   cpp     DER_SEQUENCE_MALFORMED_LEN      rust  RAW
+        // and an immediate re-run of the identical binaries on the identical
+        // commit reported 0 uncovered across the same 75 scenarios and 16,876
+        // observations. That is the ~1/256 coin-flip described above, not a
+        // spec difference — confirmed for Classic McEliece by the engine's own
+        // ClassicMcEliecePrivateKey.h ("CKA_VALUE stores the RAW secret key
+        // bytes", `ByteString value; // raw secret key bytes`), i.e. no ASN.1
+        // framing for a leading 0x30 to be the start of.
+        case CKK_PQCTODAY_CLASSIC_MCELIECE_VALUE:
+        case CKK_PQCTODAY_FRODOKEM_VALUE:
             return true;
         default: return false;
     }
