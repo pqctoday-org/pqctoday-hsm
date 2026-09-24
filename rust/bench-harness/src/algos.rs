@@ -72,6 +72,17 @@ pub enum KeygenParam {
 pub const P256_OID: &[u8] = &[0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
 pub const P384_OID: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22];
 pub const P521_OID: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x23];
+/// 1.3.132.0.10 — secp256k1. NOT a NIST/FIPS curve: it is here because it is
+/// what Bitcoin, Ethereum and most of the wider blockchain estate actually
+/// sign with, so "what does migrating THAT cost" is a real question this
+/// benchmark should be able to answer next to the P-curves.
+///
+/// Byte-identical to what the engine emits into `CKA_EC_PARAMS` for this curve
+/// (`ffi.rs` stores `06 05 2b 81 04 00 0a` for `CURVE_K256`) and to what
+/// `crypto/handlers.rs::decode_ec_params` accepts as INPUT — so EC_PARAMS
+/// round-trips through exactly the bytes the engine already recognises,
+/// the same property the P-curve OIDs above rely on.
+pub const SECP256K1_OID: &[u8] = &[0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x0A];
 /// id-Ed25519 (RFC 8032 / 1.3.101.112) — byte-identical to the OID
 /// `ffi.rs`'s Edwards keygen arm itself emits into the public key's
 /// `CKA_EC_PARAMS` (and, since the 2026-08-13 fix, requires as INPUT too).
@@ -106,6 +117,14 @@ pub const ED25519: SignatureAlgo = SignatureAlgo {
 pub const ECDSA_P256: SignatureAlgo = SignatureAlgo {
     name: "ECDSA-P256", security_level: "L1",
     keygen_mechanism: CKM_EC_KEY_PAIR_GEN, keygen_param: KeygenParam::EcParamsOid(P256_OID),
+    sign_mechanism: CKM_ECDSA_SHA256, slow: false,
+};
+/// secp256k1 ECDSA. Same 128-bit security class and the same
+/// `CKM_ECDSA_SHA256` mechanism as P-256 — deliberately, so the pair is a
+/// like-for-like read on the cost of the curve itself rather than of the hash.
+pub const ECDSA_K256: SignatureAlgo = SignatureAlgo {
+    name: "ECDSA-K256", security_level: "L1",
+    keygen_mechanism: CKM_EC_KEY_PAIR_GEN, keygen_param: KeygenParam::EcParamsOid(SECP256K1_OID),
     sign_mechanism: CKM_ECDSA_SHA256, slow: false,
 };
 pub const ECDSA_P384: SignatureAlgo = SignatureAlgo {
@@ -235,7 +254,7 @@ pub const RSA_PSS_4096: SignatureAlgo = SignatureAlgo {
 };
 
 pub const SIGNATURE_ALGOS: &[SignatureAlgo] = &[
-    ED25519, ECDSA_P256, ECDSA_P384, ECDSA_P521,
+    ED25519, ECDSA_P256, ECDSA_K256, ECDSA_P384, ECDSA_P521,
     ML_DSA_44, ML_DSA_65, ML_DSA_87,
     SLH_DSA_128S, SLH_DSA_256S,
     SLH_DSA_SHAKE_128S, SLH_DSA_SHA2_128F, SLH_DSA_SHAKE_128F,
