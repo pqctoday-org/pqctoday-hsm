@@ -14,8 +14,9 @@
 #![doc = include_str!("../README.md")]
 
 // pqctoday-hsm: the optional `parallel` feature (threaded tree building, see par.rs)
-// needs std::thread; without it the crate stays no_std.
-#[cfg(feature = "parallel")]
+// and the `hw-accel` hooks (process-wide hook registry, see hw_accel.rs) need std;
+// without them the crate stays no_std.
+#[cfg(any(feature = "parallel", feature = "hw-accel"))]
 extern crate std;
 
 #[cfg(feature = "phase-profile")]
@@ -71,10 +72,18 @@ macro_rules! profile_phase {
 /// All functionality is covered by traits, such that consumers can utilize trait objects as desired.
 pub mod traits;
 pub use types::Ph;
+#[cfg(feature = "hw-accel")]
+pub use hw_accel::{
+    reference_slh_keygen_root, reference_slh_sign_payload, set_slh_keygen_hook,
+    set_slh_reject_hook, set_slh_sign_hook, ReferenceError, SlhKeygenHook, SlhRejectHook,
+    SlhSignHook,
+};
 
 mod fors;
 mod hashers;
 mod helpers;
+#[cfg(feature = "hw-accel")]
+mod hw_accel;
 mod hypertree;
 mod par;
 mod slh;
@@ -115,6 +124,25 @@ macro_rules! functionality {
         /// Implements the [`crate::traits::KeyGen`] trait.
         #[derive(Zeroize, ZeroizeOnDrop)]
         pub struct KG(); // Arguable how useful an empty struct+trait is...
+
+
+        // pqctoday-hsm `hw-accel`: software reference of the tree work the
+        // hashsig engine performs for this parameter set (never calls a hook).
+        #[cfg(feature = "hw-accel")]
+        pub(crate) fn hw_reference_sign(
+            sk_seed: &[u8], pk_seed: &[u8], pk_root: &[u8], md: &[u8], idx_tree: u64, idx_leaf: u32,
+        ) -> Result<std::vec::Vec<u8>, crate::hw_accel::ReferenceError> {
+            crate::hw_accel::reference_sign::<A, D, H, HP, K, LEN, M, N>(
+                &HASHERS, sk_seed, pk_seed, pk_root, md, idx_tree, idx_leaf,
+            )
+        }
+
+        #[cfg(feature = "hw-accel")]
+        pub(crate) fn hw_reference_root(
+            sk_seed: &[u8], pk_seed: &[u8],
+        ) -> Result<std::vec::Vec<u8>, crate::hw_accel::ReferenceError> {
+            crate::hw_accel::reference_root::<D, H, HP, K, LEN, M, N>(&HASHERS, sk_seed, pk_seed)
+        }
 
 
         // ----- PRIMARY FUNCTIONS ---
@@ -594,7 +622,10 @@ pub mod slh_dsa_sha2_128s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 1 };
 
     functionality!();
 }
@@ -644,7 +675,10 @@ pub mod slh_dsa_shake_128s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 2 };
 
     functionality!();
 }
@@ -694,7 +728,10 @@ pub mod slh_dsa_sha2_128f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 3 };
 
     functionality!();
 }
@@ -744,7 +781,10 @@ pub mod slh_dsa_shake_128f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 4 };
 
     functionality!();
 }
@@ -794,7 +834,10 @@ pub mod slh_dsa_sha2_192s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 5 };
 
     functionality!();
 }
@@ -844,7 +887,10 @@ pub mod slh_dsa_shake_192s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 6 };
 
     functionality!();
 }
@@ -894,7 +940,10 @@ pub mod slh_dsa_sha2_192f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 7 };
 
     functionality!();
 }
@@ -944,7 +993,10 @@ pub mod slh_dsa_shake_192f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 8 };
 
     functionality!();
 }
@@ -994,7 +1046,10 @@ pub mod slh_dsa_sha2_256s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 9 };
 
     functionality!();
 }
@@ -1044,7 +1099,10 @@ pub mod slh_dsa_shake_256s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 10 };
 
     functionality!();
 }
@@ -1094,7 +1152,10 @@ pub mod slh_dsa_sha2_256f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 11 };
 
     functionality!();
 }
@@ -1144,7 +1205,10 @@ pub mod slh_dsa_shake_256f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 12 };
 
     functionality!();
 }

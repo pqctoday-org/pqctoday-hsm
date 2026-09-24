@@ -13,6 +13,10 @@ pub(crate) struct Hashers<const K: usize, const LEN: usize, const M: usize, cons
     pub(crate) h: fn(&PkSeed<N>, &Adrs, &[u8], &[u8]) -> [u8; N],
     pub(crate) t_l: fn(&PkSeed<N>, &Adrs, &[[u8; N]; LEN]) -> [u8; N],
     pub(crate) t_len: fn(&PkSeed<N>, &Adrs, &[[u8; N]; K]) -> [u8; N],
+    /// pqctoday-hsm: FIPS 205 Table 2 row of this parameter set, which is the
+    /// hashsig engine's ABI param id (read only by the `hw-accel` hooks).
+    #[allow(dead_code)]
+    pub(crate) hw_param: u32,
 }
 
 
