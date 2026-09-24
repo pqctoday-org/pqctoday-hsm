@@ -531,8 +531,28 @@ fn routing_parses_and_defaults_pin_sha2_to_the_cpu() {
     assert!(!accel.wants(Command::MerkleSubtree, abi::lms_param_set(0x05, 0x03), 5), "LMS SHA-256 → CPU");
     let accel = pool(&sim, Routing::parse("sha2=fpga").unwrap());
     assert!(accel.wants(Command::SlhSign, 1, 0));
+    accel.set_routing(Routing::parse("all=cpu").unwrap());
+    assert!(!accel.wants(Command::SlhSign, 1, 0));
+    assert!(!accel.wants(Command::SlhSign, 2, 0));
+    assert_eq!(accel.routing(), Routing { shake: Target::Cpu, sha2: Target::Cpu });
+    accel.set_routing(Routing::default());
+    assert!(accel.wants(Command::SlhSign, 2, 0));
     accel.set_enabled(false);
     assert!(!accel.wants(Command::SlhSign, 2, 0));
+}
+
+#[test]
+fn keygen_runs_twice_and_rejects_disagreeing_roots() {
+    let sim = toy_sim(full_caps());
+    let accel = pool(&sim, Routing::default());
+    let (sk, pk) = ([3u8; 16], [5u8; 16]);
+    let input = SlhKeygenInput { sk_seed: &sk, pk_seed: &pk };
+    let keygen0 = sim.executed(Command::SlhKeygen);
+    assert_eq!(accel.slh_keygen(2, input), Some(vec![3 ^ 5; 16]));
+    assert_eq!(sim.executed(Command::SlhKeygen), keygen0 + 2);
+    sim.inject(Fault::CorruptPayload);
+    assert_eq!(accel.slh_keygen(2, input), None, "roots disagree: computed on ARM");
+    assert_eq!(accel.stats().rejected_outputs.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
 #[test]

@@ -175,6 +175,11 @@ impl SimHandle {
         }
     }
 
+    /// True while a command started under [`Fault::Hang`] is outstanding.
+    pub fn is_hung(&self) -> bool {
+        self.lock().hung
+    }
+
     pub fn executed(&self, command: Command) -> u64 {
         *self.lock().executed.get(&command).unwrap_or(&0)
     }

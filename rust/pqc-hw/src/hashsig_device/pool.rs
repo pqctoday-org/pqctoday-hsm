@@ -32,7 +32,7 @@ use super::{Engine, Error, Health, Output};
 use crate::keccak::RegisterIo;
 use std::cell::Cell;
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -143,6 +143,18 @@ impl Routing {
             },
             Err(_) => (Self::default(), None),
         }
+    }
+}
+
+fn encode_routing(routing: Routing) -> u8 {
+    u8::from(routing.shake == Target::Fpga) | (u8::from(routing.sha2 == Target::Fpga) << 1)
+}
+
+fn decode_routing(bits: u8) -> Routing {
+    let target = |bit: u8| if bits & bit != 0 { Target::Fpga } else { Target::Cpu };
+    Routing {
+        shake: target(1),
+        sha2: target(2),
     }
 }
 
@@ -293,7 +305,8 @@ thread_local! {
 
 pub struct HashsigAccelerator {
     caps: Caps,
-    routing: Routing,
+    /// Bit 0: SHAKE → engine; bit 1: SHA-2 → engine.
+    routing: AtomicU8,
     min_merkle_height: u32,
     slots: Vec<Mutex<Slot>>,
     /// Set without the lock when an output of that instance was rejected.
@@ -356,7 +369,7 @@ impl HashsigAccelerator {
         }
         Ok(Self {
             caps,
-            routing,
+            routing: AtomicU8::new(encode_routing(routing)),
             min_merkle_height,
             suspect: (0..instances).map(|_| AtomicBool::new(false)).collect(),
             slots,
@@ -374,7 +387,12 @@ impl HashsigAccelerator {
     }
 
     pub fn routing(&self) -> Routing {
-        self.routing
+        decode_routing(self.routing.load(Ordering::Relaxed))
+    }
+
+    /// Change the routing policy at run time.
+    pub fn set_routing(&self, routing: Routing) {
+        self.routing.store(encode_routing(routing), Ordering::Relaxed);
     }
 
     pub fn stats(&self) -> &Stats {
@@ -404,7 +422,7 @@ impl HashsigAccelerator {
             return false;
         }
         ParamSet::decode(command, param_set)
-            .is_some_and(|p| self.routing.target(p.family()) == Target::Fpga)
+            .is_some_and(|p| self.routing().target(p.family()) == Target::Fpga)
     }
 
     /// SLH_SIGN: SIG_FORS ‖ SIG_HT, or `None` to sign on ARM.
@@ -417,12 +435,27 @@ impl HashsigAccelerator {
     }
 
     /// SLH_KEYGEN: PK.root, or `None` to compute it on ARM.
+    ///
+    /// A signature from the engine is checked on ARM against PK.root before
+    /// it is used, but nothing on ARM can check a root short of recomputing
+    /// it. The command therefore runs twice and a root is accepted only when
+    /// both runs agree; a disagreement is reported like a rejected output and
+    /// the root is computed on ARM. (Keygen is rare, and two engine runs still
+    /// cost a fraction of one ARM run.) A persistent fault that repeats
+    /// exactly is caught by the known-answer test at admission and recovery,
+    /// and at the latest by the PK.root check of the first signature.
     pub fn slh_keygen(&self, param: u32, input: SlhKeygenInput<'_>) -> Option<Vec<u8>> {
         if !self.wants(Command::SlhKeygen, param, 0) {
             return None;
         }
-        self.run(&Operation::SlhKeygen { param, input })
-            .map(|o| o.payload)
+        let op = Operation::SlhKeygen { param, input };
+        let first = self.run(&op)?.payload;
+        let second = self.run(&op)?.payload;
+        if first != second {
+            self.report_rejected_output();
+            return None;
+        }
+        Some(first)
     }
 
     /// MERKLE_SUBTREE: root ‖ auth[0..k−1], or `None` to build it on ARM.
