@@ -4333,8 +4333,6 @@ dependencies = [
 [[package]]
 name = "xmss"
 version = "0.1.0-pre.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5715f4f20c87b0d3f8e70ff92e15d1fe405183b493e39f79e77c81545a3b4d4b"
 dependencies = [
  "digest 0.10.7",
  "hybrid-array 0.2.3",

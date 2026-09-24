@@ -8,6 +8,7 @@
 //! cargo run --release --example hashsig_timing -- slh  [iters] [name filter]
 //! cargo run --release --example hashsig_timing -- lms  [signs]
 //! cargo run --release --example hashsig_timing -- xmss [signs]
+//! cargo run --release --example hashsig_timing -- slhcc <callers> <per caller> [shake]
 //! ```
 //!
 //! Every SLH-DSA key is derived from fixed seeds and signed deterministically,
@@ -190,6 +191,63 @@ fn xmss_run(signs: usize) {
     }
 }
 
+/// `callers` threads sign concurrently with one SLH-DSA-SHA2-128s key (or
+/// SHAKE-128s with `shake`), `per` signatures each. Reports the wall time of
+/// the whole batch, the mean latency per signature and the throughput. This
+/// is the "1 caller vs N concurrent callers" measurement for the process-wide
+/// core budget in fips205's `parallel` feature.
+fn slh_concurrent(callers: usize, per: usize, shake: bool) {
+    use fips205::traits::{KeyGen, SerDes};
+    let (name, ckp, sk_bytes) = if shake {
+        let (_, sk) =
+            fips205::slh_dsa_shake_128s::KG::keygen_with_seeds::<16>(&[1; 16], &[2; 16], &[3; 16]);
+        (
+            "SLH-DSA-SHAKE-128s",
+            CKP_SLH_DSA_SHAKE_128S,
+            sk.into_bytes().to_vec(),
+        )
+    } else {
+        let (_, sk) =
+            fips205::slh_dsa_sha2_128s::KG::keygen_with_seeds::<16>(&[1; 16], &[2; 16], &[3; 16]);
+        (
+            "SLH-DSA-SHA2-128s",
+            CKP_SLH_DSA_SHA2_128S,
+            sk.into_bytes().to_vec(),
+        )
+    };
+    fips205::budget_stats::reset();
+    let start = Instant::now();
+    let lat: Vec<Duration> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..callers)
+            .map(|_| {
+                s.spawn(|| {
+                    (0..per)
+                        .map(|_| {
+                            let t = Instant::now();
+                            sign_slh_dsa(CKM_SLH_DSA, ckp, &sk_bytes, b"m", b"", true)
+                                .expect("sign");
+                            t.elapsed()
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        hs.into_iter()
+            .flat_map(|h| h.join().expect("signer"))
+            .collect()
+    });
+    let wall = start.elapsed();
+    let mean = lat.iter().sum::<Duration>() / lat.len() as u32;
+    println!(
+        "{name:<20} callers {callers:>2} x {per} | batch {:>8.1} ms | mean latency {:>8.1} ms | {:>6.2} sig/s | peak extra threads {} (cores {})",
+        ms(wall),
+        ms(mean),
+        lat.len() as f64 / wall.as_secs_f64(),
+        fips205::budget_stats::peak_extra_threads(),
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let what = args.get(1).map(String::as_str).unwrap_or("slh");
@@ -198,6 +256,12 @@ fn main() {
         "slh" => slh(n, args.get(3).map(String::as_str).unwrap_or("")),
         "lms" => lms_run(n),
         "xmss" => xmss_run(n),
-        other => eprintln!("unknown mode {other}; use slh | lms | xmss"),
+        // slhcc <callers> <per-caller> [shake]
+        "slhcc" => slh_concurrent(
+            n,
+            args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3),
+            args.get(4).map(String::as_str) == Some("shake"),
+        ),
+        other => eprintln!("unknown mode {other}; use slh | slhcc | lms | xmss"),
     }
 }

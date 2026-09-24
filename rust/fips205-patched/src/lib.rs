@@ -86,6 +86,8 @@ mod helpers;
 mod hw_accel;
 mod hypertree;
 mod par;
+#[cfg(feature = "parallel")]
+pub use par::budget_stats;
 mod slh;
 mod types;
 mod wots;
