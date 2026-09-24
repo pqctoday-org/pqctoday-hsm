@@ -220,6 +220,9 @@ pub(crate) fn reference_sign<
     {
         return Err(ReferenceError::InvalidInput);
     }
+    // Count this thread against the process-wide core budget (par.rs), as
+    // slh_sign_internal does.
+    let _caller = crate::par::enter();
     // Algorithm 19 lines 11-13.
     let mut adrs = Adrs::default();
     adrs.set_tree_address(idx_tree);
@@ -247,6 +250,7 @@ pub(crate) fn reference_root<
 ) -> Result<Vec<u8>, ReferenceError> {
     let sk_seed = zeroize::Zeroizing::new(array::<N>(sk_seed)?);
     let pk_seed = array::<N>(pk_seed)?;
+    let _caller = crate::par::enter();
     let mut adrs = Adrs::default();
     adrs.set_layer_address(u32::try_from(D).map_err(|_| ReferenceError::InvalidInput)? - 1);
     let seed = (hashers.pk_seed)(&pk_seed);
