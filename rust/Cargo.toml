@@ -301,6 +301,48 @@ hbs-lms = { path = "hbs-lms-patched" }
 opt-level = "s"
 lto = true
 
+# Hash-based-signature hot path at opt-level 3 in every release build of this
+# workspace (native, the wasm bundle, the sandbox images built from it) without
+# anyone editing their build; everything else stays at "s", so the wasm bundle
+# grows only by these crates' code. Profiles are read from the WORKSPACE ROOT
+# only: wasm/ (also "s") carries the same table, keep the two in sync; kmip/
+# and remoting/ set no [profile.release], so their release builds already use
+# Cargo's default opt-level 3 for everything.
+#
+# LIMITATION (measured 2026-09-23, see the commit): with `lto = true` the
+# link-time optimisation of the merged module runs at the ROOT crate's level
+# ("s"), and that undoes most of what these overrides buy on the SHA-2 path
+# (SLH-DSA-SHA2-128s sign, one thread: 105.6 ms at "s", 101.2 ms with these
+# overrides, 76.0 ms at a global opt-level 3, 71.0 ms with these overrides and
+# LTO off). The keccak/SHAKE gain mostly survives (SHAKE-128s: 877 -> 770 ms,
+# 742 ms at global 3). Native builds that want the full gain use
+# [profile.release-native] below or CARGO_PROFILE_RELEASE_OPT_LEVEL=3.
+# Cost: the wasm bundle grows by ~244 KB (+8.7%, measured in the commit).
+[profile.release.package.fips205]
+opt-level = 3
+[profile.release.package.sha2]
+opt-level = 3
+[profile.release.package.sha3]
+opt-level = 3
+[profile.release.package.keccak]
+opt-level = 3
+[profile.release.package.hbs-lms]
+opt-level = 3
+[profile.release.package.xmss]
+opt-level = 3
+
+# Whole-crate opt-level 3 for NATIVE builds of this workspace (the KV260 /
+# i.MX 95 appliance images, the sandbox bench/network images):
+# `cargo build --profile release-native`, output in target/release-native/.
+# It still adds something over the per-package table above, because of the LTO
+# limitation described there (SHA-2 SLH-DSA sets ~25% faster; measured in the
+# commit). [profile.release] itself stays "s" for the wasm bundle. A build that
+# cannot pick a profile (the Yocto cargo class) gets the same with
+# CARGO_PROFILE_RELEASE_OPT_LEVEL=3.
+[profile.release-native]
+inherits = "release"
+opt-level = 3
+
 # Classic McEliece keygen (Gaussian elimination over a PK_NROWS x SYS_N/8 matrix)
 # is measured minutes-slow at opt-level=0 for the largest sets (23.6-24.0s per
 # 8192128f attempt alone, ~55x slower than --release — implementation plan §4.1

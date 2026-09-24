@@ -52,5 +52,20 @@ hbs-lms = { path = "../rust/hbs-lms-patched" }
 opt-level = "s"
 lto       = true
 
+# Same hash-signature hot-path overrides as rust/Cargo.toml (keep the two tables in
+# sync; profiles are read from the build root only, so they do not propagate here).
+[profile.release.package.fips205]
+opt-level = 3
+[profile.release.package.sha2]
+opt-level = 3
+[profile.release.package.sha3]
+opt-level = 3
+[profile.release.package.keccak]
+opt-level = 3
+[profile.release.package.hbs-lms]
+opt-level = 3
+[profile.release.package.xmss]
+opt-level = 3
+
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
