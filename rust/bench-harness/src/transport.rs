@@ -687,7 +687,7 @@ pub fn run(args: &TransportArgs) -> Result<()> {
                     })
                     .collect();
                 let (total_ops, latencies, elapsed) =
-                    crate::measure::run_point(args.duration_secs, args.warmup_secs, workers)?;
+                    crate::measure::run_point(args.duration_secs, args.warmup_secs, 0, args.duration_secs, workers)?;
                 let (p50, p99) = crate::measure::percentiles_ms(latencies);
                 samples[i].push((total_ops as f64 / elapsed, p50, p99, total_ops, elapsed));
             }

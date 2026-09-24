@@ -10,6 +10,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`bench-harness`: secp256k1 and a minimum-op-count measurement mode.**
+
+  `ECDSA-K256` (secp256k1, OID 1.3.132.0.10) joins the benchmark's signature
+  matrix — deliberately *not* a NIST curve, because it is what Bitcoin,
+  Ethereum and most of the wider blockchain estate sign with, so the cost of
+  migrating that estate becomes measurable. It is paired with the same
+  `CKM_ECDSA_SHA256` mechanism and the same L1 security class as ECDSA-P256, so
+  the two together read as the cost of the *curve* rather than of the hash. Its
+  `CKA_EC_PARAMS` bytes are byte-identical to what `ffi.rs` already emits for
+  `CURVE_K256` and what `crypto/handlers.rs::decode_ec_params` already accepts,
+  so nothing in the engine changed. Measured 2.2–3.6× faster than P-256 across
+  four aarch64 targets, including both appliance boards running their own
+  shipped engines.
+
+  `--min-ops N` / `--max-secs S` extend a measured point from "T seconds" to "at
+  least T seconds AND at least N operations, never longer than S". This is what
+  makes the slow SLH-DSA parameter sets measurable at all: at a 5-second window,
+  `SLH-DSA-SHA2-128s` signing completed 12 operations and
+  `SLH-DSA-SHAKE-256s` completed **zero**, so an ops/sec or a p99 derived from
+  them was noise. With `--min-ops 20`, SHAKE-256s returns 28 operations in
+  15.4 s (1.82 ops/s, p50 3,061 ms). `--min-ops 0` is the default and reproduces
+  the previous pure fixed-duration behaviour exactly; the KMIP and
+  gRPC/REST transport arms pass 0 and are unchanged, being network-bound and
+  never sample-starved. The op counter the controller polls is a single
+  `fetch_add` on the workers' hot path, and the hard ceiling means a
+  pathologically slow or wedged point returns a short sample instead of hanging
+  the run.
+
 - **Behaviour event ring** (`behaviour/`, `PQC_BEHAVIOUR_RING`): every
   producer on the appliance — both PKCS#11 engines at their evidence-log call
   sites, the KMIP server (one record per response, plus policy deny / warn /

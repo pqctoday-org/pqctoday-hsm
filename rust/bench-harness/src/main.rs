@@ -103,6 +103,22 @@ struct Cli {
     /// Unmeasured warm-up per point, seconds (§A7).
     #[arg(long, default_value_t = 0.5)]
     warmup_secs: f64,
+    /// Minimum operations per point. A point runs for `--duration-secs` and
+    /// then keeps going until it has at least this many operations, bounded by
+    /// `--max-secs`. 0 (default) = the original pure fixed-duration behaviour.
+    ///
+    /// This is what makes the slow SLH-DSA parameter sets measurable at all:
+    /// at `--duration-secs 5`, SLH-DSA-SHA2-128s signing managed 12 ops and
+    /// SLH-DSA-SHAKE-256s managed ZERO, so their ops/sec and p99 were noise.
+    /// Fast algorithms are unaffected — they satisfy this during the fixed
+    /// window and return at the same time as before.
+    #[arg(long, default_value_t = 0)]
+    min_ops: u64,
+    /// Hard ceiling per point, seconds, when `--min-ops` is set. Stops a
+    /// pathologically slow or wedged point from hanging the whole run: the
+    /// point returns whatever sample it has instead of being waited on.
+    #[arg(long, default_value_t = 60.0)]
+    max_secs: f64,
     /// Topology B (§A4.2): number of independent instances, 1-4. `1`
     /// (default) is Topology A (shared-1-instance) — unchanged in-process
     /// behavior. `>1` makes this invocation the parent orchestrator.
@@ -440,6 +456,8 @@ fn run_parent(cli: &Cli) -> Result<()> {
             .arg("--threads").arg(cli.threads.to_string())
             .arg("--duration-secs").arg(cli.duration_secs.to_string())
             .arg("--warmup-secs").arg(cli.warmup_secs.to_string())
+            .arg("--min-ops").arg(cli.min_ops.to_string())
+            .arg("--max-secs").arg(cli.max_secs.to_string())
             .arg("--instances").arg("1")
             .arg("--topology-instances").arg(cli.instances.to_string())
             .arg("--instance-id").arg(instance_id.to_string());
@@ -740,7 +758,7 @@ fn run_instance(cli: &Cli) -> Result<()> {
                         Ok(())
                     }
                 }).collect();
-                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
                 emit("sign", "signature", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
             }
             // verify — each worker signs ONE message once (setup,
@@ -762,7 +780,7 @@ fn run_instance(cli: &Cli) -> Result<()> {
                         Ok(())
                     })
                 }).collect::<Result<Vec<_>>>()?;
-                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
                 emit("verify", "signature", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
             }
         }
@@ -782,7 +800,7 @@ fn run_instance(cli: &Cli) -> Result<()> {
                     Ok(())
                 }
             }).collect();
-            let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+            let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
             emit("derive", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
         }
     }
@@ -802,7 +820,7 @@ fn run_instance(cli: &Cli) -> Result<()> {
                         Ok(())
                     }
                 }).collect();
-                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
                 emit("encapsulate", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
             }
             {
@@ -817,7 +835,7 @@ fn run_instance(cli: &Cli) -> Result<()> {
                         Ok(())
                     }
                 }).collect();
-                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
                 emit("decapsulate", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
             }
         }
@@ -844,7 +862,7 @@ fn run_instance(cli: &Cli) -> Result<()> {
                         Ok(())
                     }
                 }).collect();
-                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
                 emit("encrypt", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
             }
             // decrypt — each worker encrypts ONE message once (setup,
@@ -866,7 +884,7 @@ fn run_instance(cli: &Cli) -> Result<()> {
                         Ok(())
                     })
                 }).collect::<Result<Vec<_>>>()?;
-                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, workers)?;
+                let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
                 emit("decrypt", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
             }
         }
