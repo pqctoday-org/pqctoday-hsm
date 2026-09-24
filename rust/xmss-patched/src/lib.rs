@@ -8,6 +8,10 @@ mod hash_address;
 #[cfg(feature = "hw-accel")]
 mod hw_accel;
 mod params;
+// pqctoday-hsm: in-memory per-key subtree cache (see tree_cache.rs, PROVENANCE.md).
+mod tree_cache;
+#[doc(hidden)]
+pub use tree_cache::{cache_clear, cache_stats};
 #[cfg(feature = "pkcs8")]
 mod pkcs8;
 mod utils;

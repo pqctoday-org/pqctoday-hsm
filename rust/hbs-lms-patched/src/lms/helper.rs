@@ -19,12 +19,21 @@ pub fn get_tree_element<H: HashChain>(
         }
     }
 
+    // pqctoday-hsm: per-tree node memo (src/tree_cache.rs) — same value, not recomputed.
+    #[cfg(feature = "tree-cache")]
+    if let Some(result) = crate::tree_cache::lookup::<H>(private_key, index) {
+        return result;
+    }
+
     // pqctoday-hsm `hw-accel`: the hashsig engine computes the node (the root of
     // its subtree) when it claims this parameter set; `None` computes it here.
     // Skipped with auxiliary data so its contents stay those of the software path.
+    // An engine-computed node is recorded in the node memo like any other.
     #[cfg(feature = "hw-accel")]
     if aux_data.is_none() {
         if let Some(node) = crate::hw_accel::subtree_root(index, private_key) {
+            #[cfg(feature = "tree-cache")]
+            crate::tree_cache::store::<H>(private_key, index, node.as_slice());
             return node;
         }
     }
@@ -62,6 +71,9 @@ pub fn get_tree_element<H: HashChain>(
     if let Some(expanded_aux_data) = aux_data.as_mut() {
         hss_save_aux_data::<H>(expanded_aux_data, index, result.as_slice());
     }
+
+    #[cfg(feature = "tree-cache")]
+    crate::tree_cache::store::<H>(private_key, index, result.as_slice());
 
     result
 }

@@ -17,4 +17,13 @@ hbs-lms-patched: the package name and public API stay the same.
 
 ## pqctoday-hsm changes
 
-See `src/tree_cache.rs` and the git history of this directory.
+1. **In-memory per-key subtree cache** (`src/tree_cache.rs`, owner decision
+   2026-09-24). Upstream `xmssmt_core_sign` rebuilt every layer's whole subtree
+   (`treehash` over 2^h′ leaves) for every signature; `bds_k` is unused. The cache
+   keeps every node at height ≥ 3 per (parameter set, SK_SEED, PUB_SEED, layer,
+   tree); a signature recomputes only its leaf's height-3 subtree. Key generation
+   seeds the cache. Signatures and updated keys are byte-identical to upstream
+   (`xmss_core::cache_tests` signs sequences both ways, across subtree
+   boundaries); the key format and the index handling are unchanged. Memory,
+   invalidation and the 64 MiB LRU cap are documented at the top of the file.
+   `cache_stats`/`cache_clear` are doc(hidden) diagnostics.

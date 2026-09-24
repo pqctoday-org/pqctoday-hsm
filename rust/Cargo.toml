@@ -184,7 +184,11 @@ zeroize = "1"
 subtle = "2"
 
 # Stateful hash-based signatures (G10)
-hbs-lms = "0.1.1"
+# `tree-cache` (hbs-lms-patched src/tree_cache.rs): in-memory per-tree node cache,
+# so a signature no longer rebuilds the whole LMS tree and every HSS lower level
+# (upstream signs without aux data). Nothing is persisted; all targets (needs std,
+# which wasm32-unknown-unknown has).
+hbs-lms = { version = "0.1.1", features = ["tree-cache"] }
 
 # Keccak-256 (G11 — Ethereum address derivation)
 tiny-keccak = { version = "2.0", features = ["keccak"] }
