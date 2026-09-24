@@ -50,17 +50,8 @@ pub(crate) fn xmss_node<
         let rnode =
             xmss_node::<H, HP, K, LEN, M, N>(hashers, sk_seed, 2 * i + 1, z - 1, pk_seed, &adrs);
 
-        // 8: ADRS.setTypeAndClear(TREE)
-        adrs.set_type_and_clear(TREE);
-
-        // 9: ADRS.setTreeHeight(z)
-        adrs.set_tree_height(z);
-
-        // 10: ADRS.setTreeIndex(i)
-        adrs.set_tree_index(i);
-
-        // 11: node ← H(PK.seed, ADRS, lnode ∥ rnode)
-        (hashers.h)(pk_seed, &adrs, &lnode, &rnode)
+        // 8-11: node ← H(PK.seed, ADRS, lnode ∥ rnode)
+        xmss_parent(hashers, &lnode, &rnode, i, z, pk_seed, &adrs)
 
         // 12: end if
     };
@@ -70,14 +61,38 @@ pub(crate) fn xmss_node<
 }
 
 
+/// Steps 8-11 of Algorithm 9: the node at height `z`, index `i`, from its two children.
+/// Split out so the `parallel` feature's top-tree assembly uses the same address setup.
+pub(crate) fn xmss_parent<const K: usize, const LEN: usize, const M: usize, const N: usize>(
+    hashers: &Hashers<K, LEN, M, N>, lnode: &[u8; N], rnode: &[u8; N], i: u32, z: u32,
+    pk_seed: &PkSeed<N>, adrs: &Adrs,
+) -> [u8; N] {
+    let mut adrs = adrs.clone();
+
+    // 8: ADRS.setTypeAndClear(TREE)
+    adrs.set_type_and_clear(TREE);
+
+    // 9: ADRS.setTreeHeight(z)
+    adrs.set_tree_height(z);
+
+    // 10: ADRS.setTreeIndex(i)
+    adrs.set_tree_index(i);
+
+    // 11: node ← H(PK.seed, ADRS, lnode ∥ rnode)
+    (hashers.h)(pk_seed, &adrs, lnode, rnode)
+}
+
+
 /// Algorithm 10: `xmss_sign(M, SK.seed, idx, PK.seed, ADRS)` on page 23.
 /// Generates an XMSS signature.
 ///
 /// Input: n-byte message `M`, secret seed `SK.seed`, index `idx`, public seed `PK.seed`, address `ADRS`. <br>
 /// Output: XMSS signature SIGXMSS = (sig ∥ AUTH).
+///
+/// `auth_node(j, k, ADRS)` supplies `xmss_node(SK.seed, k, j, PK.seed, ADRS)`, the step-3
+/// authentication node at height `j` (pqctoday-hsm: see `fors_sign` for why).
 #[allow(clippy::similar_names)] // sk_seed and pk_seed
 pub(crate) fn xmss_sign<
-    const H: usize,
     const HP: usize,
     const K: usize,
     const LEN: usize,
@@ -85,7 +100,7 @@ pub(crate) fn xmss_sign<
     const N: usize,
 >(
     hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], idx: u32, pk_seed: &PkSeed<N>,
-    adrs: &Adrs,
+    adrs: &Adrs, auth_node: &dyn Fn(u32, u32, &Adrs) -> [u8; N],
 ) -> XmssSig<HP, LEN, N> {
     profile_phase!(Tree);
     let hp32 = u32::try_from(HP).unwrap();
@@ -102,8 +117,7 @@ pub(crate) fn xmss_sign<
         let k = (idx >> j) ^ 1;
 
         // 3: AUTH[j] ← xmss_node(SK.seed, k, j, PK.seed, ADRS)
-        sig_xmss.auth[j as usize] =
-            xmss_node::<H, HP, K, LEN, M, N>(hashers, sk_seed, k, j, pk_seed, &adrs);
+        sig_xmss.auth[j as usize] = auth_node(j, k, &adrs);
 
         // 4: end for
     }

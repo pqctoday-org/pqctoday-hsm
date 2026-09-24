@@ -122,6 +122,9 @@ default = [
     "slh_dsa_shake_256f",
 ]
 default-rng = ["rand_core/getrandom"]
+# pqctoday-hsm: build independent Merkle subtrees on several threads (src/par.rs).
+# Needs std; byte-identical output; FIPS205_THREADS=1 forces the serial path.
+parallel = []
 phase-profile = ["dep:pqc-phase-profile"]
 slh_dsa_sha2_128f = []
 slh_dsa_sha2_128s = []

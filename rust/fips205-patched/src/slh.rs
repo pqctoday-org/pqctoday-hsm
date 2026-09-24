@@ -70,9 +70,13 @@ pub(crate) fn slh_keygen_internal<
     adrs.set_layer_address(d32 - 1);
 
     // 3: PK.root ← xmss_node(SK.seed, 0, h′, PK.seed, ADRS)
+    // (on several threads with the `parallel` feature; same node, see par.rs)
     let seed = (hashers.pk_seed)(&pk_seed);
-    let pk_root =
-        xmss::xmss_node::<H, HP, K, LEN, M, N>(hashers, &sk_seed, 0, hp32, &seed, &adrs);
+    let pk_root = match crate::par::xmss_root::<H, HP, K, LEN, M, N>(hashers, &sk_seed, &seed, &adrs)
+    {
+        Some(root) => root,
+        None => xmss::xmss_node::<H, HP, K, LEN, M, N>(hashers, &sk_seed, 0, hp32, &seed, &adrs),
+    };
 
     // 4: return ( (SK.seed, SK.prf, PK.seed, PK.root), (PK.seed, PK.root) )
     let pk = SlhPublicKey { pk_seed, pk_root };
@@ -214,9 +218,30 @@ pub(crate) fn slh_sign_internal<
     // PK.seed with its tweakable-hash first block precomputed (hashers.rs)
     let seed = (hashers.pk_seed)(&sk.pk_seed);
 
+    // With the `parallel` feature, every FORS and hypertree authentication node is computed
+    // up front on several threads (par.rs); `None` otherwise, and then each node is computed
+    // inline where the algorithm needs it, exactly as specified.
+    let pre = crate::par::sign_nodes::<A, D, H, HP, K, LEN, M, N>(
+        hashers,
+        md,
+        &sk.sk_seed,
+        &seed,
+        &adrs,
+        idx_tree,
+        idx_leaf as u32,
+    )?;
+    let fors_auth = |i: u32, z: u32, index: u32| match &pre {
+        Some(p) => Ok(p.fors[i as usize][z as usize]),
+        None => fors::fors_node::<A, K, LEN, M, N>(hashers, &sk.sk_seed, index, z, &seed, &adrs),
+    };
+    let ht_auth = |layer: u32, z: u32, index: u32, layer_adrs: &Adrs| match &pre {
+        Some(p) => p.ht[layer as usize][z as usize],
+        None => xmss::xmss_node::<H, HP, K, LEN, M, N>(hashers, &sk.sk_seed, index, z, &seed, layer_adrs),
+    };
+
     // 14: SIG_FORS ← fors_sign(md, SK.seed, PK.seed, ADRS)
     // 15: SIG ← SIG ∥ SIG_FORS
-    sig.fors_sig = fors::fors_sign(hashers, md, &sk.sk_seed, &adrs, &seed)?;
+    sig.fors_sig = fors::fors_sign(hashers, md, &sk.sk_seed, &adrs, &seed, &fors_auth)?;
 
     // 16: PK_FORS ← fors_pkFromSig(SIG_FORS , md, PK.seed, ADRS)    ▷ Get FORS key
     let pk_fors =
@@ -224,13 +249,14 @@ pub(crate) fn slh_sign_internal<
 
     // 17: SIG_HT ← ht_sign(PK_FORS , SK.seed, PK.seed, idx_tree, idx_leaf)
     // 18: SIG ← SIG ∥ SIG_HT
-    let (ht_sig, ht_root) = hypertree::ht_sign::<D, H, HP, K, LEN, M, N>(
+    let (ht_sig, ht_root) = hypertree::ht_sign::<D, HP, K, LEN, M, N>(
         hashers,
         &pk_fors.key,
         &sk.sk_seed,
         &seed,
         idx_tree,
         idx_leaf as u32,
+        &ht_auth,
     )?;
     sig.ht_sig = ht_sig;
 

@@ -13,6 +13,11 @@
 //
 #![doc = include_str!("../README.md")]
 
+// pqctoday-hsm: the optional `parallel` feature (threaded tree building, see par.rs)
+// needs std::thread; without it the crate stays no_std.
+#[cfg(feature = "parallel")]
+extern crate std;
+
 #[cfg(feature = "phase-profile")]
 macro_rules! profile_phase {
     ($phase:ident) => {
@@ -71,6 +76,7 @@ mod fors;
 mod hashers;
 mod helpers;
 mod hypertree;
+mod par;
 mod slh;
 mod types;
 mod wots;
@@ -1141,4 +1147,48 @@ pub mod slh_dsa_shake_256f {
         Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
+}
+
+
+/// pqctoday-hsm: the `parallel` feature must not change a single output byte.
+/// One test owns the `FIPS205_THREADS` variable (no other test reads or writes it).
+#[cfg(all(test, feature = "parallel"))]
+mod parallel_tests {
+    use crate::traits::{KeyGen, SerDes, Signer, Verifier};
+    use rand_chacha::rand_core::SeedableRng;
+
+    macro_rules! same_output {
+        ($m:ident) => {{
+            use crate::$m::{KG, N};
+            let run = |threads: &str| {
+                std::env::set_var("FIPS205_THREADS", threads);
+                let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0x5eed);
+                let (pk, sk) = KG::keygen_with_seeds(&[7u8; N], &[8u8; N], &[9u8; N]);
+                let det = sk.try_sign_with_rng(&mut rng, b"message", b"ctx", false).unwrap();
+                let hedged = sk.try_sign_with_rng(&mut rng, b"message", b"ctx", true).unwrap();
+                assert!(pk.verify(b"message", &det, b"ctx"));
+                (pk.into_bytes(), sk.into_bytes(), det, hedged)
+            };
+            let serial = run("1");
+            let threaded = run("4");
+            assert!(serial == threaded, "{}: parallel output differs from serial", stringify!($m));
+        }};
+    }
+
+    #[test]
+    fn parallel_output_is_byte_identical_to_serial() {
+        same_output!(slh_dsa_sha2_128s);
+        same_output!(slh_dsa_shake_128s);
+        same_output!(slh_dsa_sha2_128f);
+        same_output!(slh_dsa_shake_128f);
+        same_output!(slh_dsa_sha2_192s);
+        same_output!(slh_dsa_shake_192s);
+        same_output!(slh_dsa_sha2_192f);
+        same_output!(slh_dsa_shake_192f);
+        same_output!(slh_dsa_sha2_256s);
+        same_output!(slh_dsa_shake_256s);
+        same_output!(slh_dsa_sha2_256f);
+        same_output!(slh_dsa_shake_256f);
+        std::env::remove_var("FIPS205_THREADS");
+    }
 }

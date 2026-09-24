@@ -244,6 +244,12 @@ libc = "0.2"
 # caller-chosen salt length, MD5/SHA-1/SHA-224/SHA-3 RSA variants, and
 # BIP32's P-256 scalar arithmetic). See `crypto::awslc` for the dispatch rule.
 aws-lc-rs = "1"
+# Multi-core SLH-DSA sign/keygen (fips205-patched `parallel` feature, src/par.rs):
+# independent FORS and hypertree subtrees are built on all cores, byte-identical
+# output. Native only: the wasm32 builds keep the no_std serial path. Set
+# FIPS205_THREADS=1 to force one thread (e.g. when many signing requests already
+# run concurrently); any other positive value caps the thread count.
+fips205 = { version = "0.4.1", features = ["parallel"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
 pqc-hw = { path = "pqc-hw", optional = true }
