@@ -58,7 +58,28 @@ done
 
 if [[ $DO_BUILD -eq 1 ]]; then
   echo "==> building the C++ engine ($BUILD_DIR)"
-  if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
+  # Reconfigure unless the previous configure actually SUCCEEDED. Testing
+  # CMakeCache.txt alone (what this did) tests only that configure once
+  # *started*: cmake writes the cache early and then, on a failure, leaves it
+  # behind with no generated build system. The next run therefore skipped
+  # configure and went straight to `cmake --build`, which died with
+  #
+  #     gmake: Makefile: No such file or directory
+  #
+  # and kept dying on every subsequent run until a human deleted the directory
+  # by hand. Any interrupted configure — Ctrl-C, a missing submodule, a full
+  # disk — wedged the build dir permanently.
+  #
+  # Found 2026-09-24: a first gate run failed to configure because this
+  # worktree's submodules were not initialised (src/lib/crypto/oqs/liboqs was
+  # an empty directory), and every later run then failed for this *different*
+  # reason, masking the real cause and costing a full gate cycle to diagnose.
+  #
+  # The generated build system is the honest success marker, so check for it
+  # too. Both generator outputs are accepted: Unix Makefiles (the default here)
+  # and Ninja, so this keeps working if -G Ninja is ever used.
+  if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]] \
+     || { [[ ! -f "$BUILD_DIR/Makefile" ]] && [[ ! -f "$BUILD_DIR/build.ninja" ]]; }; then
     cmake -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON \
           -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3 2>/dev/null || echo /usr)"
   fi
