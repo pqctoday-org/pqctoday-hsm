@@ -296,6 +296,10 @@ ml-kem = { path = "ml-kem-patched" }
 # type codes for all hash families (gap-analysis hbs-lms finding; mirrors
 # the C++ engine's patched hash-sigs submodule).
 hbs-lms = { path = "hbs-lms-patched" }
+# Vendored xmss 0.1.0-pre.0 (registry checksum 5715f4f2...) plus an in-memory
+# per-key auth-path cache so signing stops rebuilding the whole tree
+# (xmss-patched/PROVENANCE.md). Same public API; RFC 8391 output unchanged.
+xmss = { path = "xmss-patched" }
 
 [profile.release]
 # Optimize purely for size in WASM
