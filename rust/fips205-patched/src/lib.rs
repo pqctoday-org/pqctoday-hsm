@@ -429,8 +429,39 @@ macro_rules! functionality {
                 bytes
             }
 
-            // Documented in traits.rs
+            // Documented in traits.rs. Recomputes PK.root from SK.seed and
+            // PK.seed (one full top-layer XMSS tree) and rejects a key whose
+            // stored PK.root disagrees. Use this where a key ENTERS a key
+            // store (import, unwrap); see `from_bytes_unchecked` for the
+            // per-signature path.
             fn try_from_bytes(bytes: &Self::ByteArray) -> Result<Self, &'static str> {
+                let sk = PrivateKey::from_bytes_unchecked(bytes);
+                let (sk_test, _) = crate::slh::slh_keygen_internal::<D, H, HP, K, LEN, M, N>(&HASHERS, sk.0.sk_seed, sk.0.sk_prf, sk.0.pk_seed);
+                if sk_test.pk_root != sk.0.pk_root { return Err("Corrupted key")}
+                Ok(sk)
+            }
+        }
+
+
+        impl PrivateKey {
+            /// Deserializes a private key WITHOUT recomputing PK.root
+            /// (pqctoday-hsm addition, not in upstream fips205).
+            ///
+            /// [`SerDes::try_from_bytes`] rebuilds the whole top-layer XMSS
+            /// tree to check the stored PK.root: one `slh_keygen_internal`,
+            /// about 1/(d+1) of a signature's cost for the `s` sets, paid on
+            /// every decode. This constructor skips that. It is safe for a
+            /// key that was already checked when it entered the key store,
+            /// because signing re-establishes the same property at almost
+            /// no cost: `slh_sign_internal` recomputes the top-layer root
+            /// from the hypertree signature it has just built and returns an
+            /// error, releasing no signature, when that root differs from
+            /// PK.root. An inconsistent key therefore still cannot produce a
+            /// signature; it is only detected at sign time instead of at
+            /// decode time. (SK.prf is covered by neither check: it only
+            /// randomises R, exactly as before.)
+            #[must_use]
+            pub fn from_bytes_unchecked(bytes: &[u8; SK_LEN]) -> Self {
                 let mut sk = SlhPrivateKey {
                     sk_seed: [0u8; N],
                     sk_prf: [0u8; N],
@@ -441,9 +472,7 @@ macro_rules! functionality {
                 sk.sk_prf.copy_from_slice(&bytes[(SK_LEN / 4)..(SK_LEN / 2)]);
                 sk.pk_seed.copy_from_slice(&bytes[(SK_LEN / 2)..(3 * SK_LEN / 4)]);
                 sk.pk_root.copy_from_slice(&bytes[(3 * SK_LEN / 4)..]);
-                let (sk_test, _) = crate::slh::slh_keygen_internal::<D, H, HP, K, LEN, M, N>(&HASHERS, sk.sk_seed, sk.sk_prf, sk.pk_seed);
-                if sk_test.pk_root != sk.pk_root { return Err("Corrupted key")}
-                Ok(PrivateKey(sk))
+                PrivateKey(sk)
             }
         }
 
@@ -483,6 +512,31 @@ macro_rules! functionality {
                     assert!(result, "Signature failed to verify");
                     let result = pk2.hash_verify(&message, &sig, b"some other context", &ph);
                     assert!(!result, "Signature should not have verified");
+                }
+            }
+
+            // pqctoday-hsm: the checked decoder rejects a key whose PK.root
+            // does not match its seeds; the unchecked one accepts it, but
+            // signing with it then fails instead of releasing a signature.
+            #[test]
+            fn corrupted_key_rejected_at_decode_and_at_sign() {
+                let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+                let (_, sk) = KG::try_keygen_with_rng(&mut rng).unwrap();
+                let good = sk.into_bytes();
+                // Same bytes decode and sign identically either way.
+                let checked = PrivateKey::try_from_bytes(&good).unwrap();
+                let unchecked = PrivateKey::from_bytes_unchecked(&good);
+                assert_eq!(
+                    checked.try_sign_with_rng(&mut rng, b"m", b"", false).unwrap(),
+                    unchecked.try_sign_with_rng(&mut rng, b"m", b"", false).unwrap()
+                );
+                // Flip one bit in each of SK.seed, PK.seed and PK.root.
+                for byte in [0, SK_LEN / 2, 3 * SK_LEN / 4] {
+                    let mut bad = good;
+                    bad[byte] ^= 0x01;
+                    assert!(PrivateKey::try_from_bytes(&bad).is_err(), "byte {byte}");
+                    let sk_bad = PrivateKey::from_bytes_unchecked(&bad);
+                    assert!(sk_bad.try_sign_with_rng(&mut rng, b"m", b"", true).is_err(), "byte {byte}");
                 }
             }
         }

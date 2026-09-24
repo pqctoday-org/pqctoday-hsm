@@ -220,7 +220,7 @@ pub(crate) fn slh_sign_internal<
 
     // 17: SIG_HT ← ht_sign(PK_FORS , SK.seed, PK.seed, idx_tree, idx_leaf)
     // 18: SIG ← SIG ∥ SIG_HT
-    sig.ht_sig = hypertree::ht_sign::<D, H, HP, K, LEN, M, N>(
+    let (ht_sig, ht_root) = hypertree::ht_sign::<D, H, HP, K, LEN, M, N>(
         hashers,
         &pk_fors.key,
         &sk.sk_seed,
@@ -228,6 +228,17 @@ pub(crate) fn slh_sign_internal<
         idx_tree,
         idx_leaf as u32,
     )?;
+    sig.ht_sig = ht_sig;
+
+    // Key-consistency check (pqctoday-hsm, not in FIPS 205). The top-layer
+    // root recomputed from SIG_HT equals PK.root only if SK.seed and PK.seed
+    // are the values PK.root was generated from. A key that fails it would
+    // emit signatures that never verify, so no signature is released. This
+    // replaces the full `slh_keygen_internal` the private-key decoder used to
+    // run before every signature (see `PrivateKey::from_bytes_unchecked`).
+    if ht_root != sk.pk_root {
+        return Err("Alg19: PK.root does not match SK.seed/PK.seed (corrupted key)");
+    }
 
     // 19: return SIG
     Ok(sig)

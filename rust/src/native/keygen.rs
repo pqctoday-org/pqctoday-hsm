@@ -2397,9 +2397,35 @@ fn validate_ml_dsa_key(parameter_set: u32, bytes: &[u8], private: bool) -> Resul
     }
 }
 
+/// Integrity check for SLH-DSA private-key material arriving through a
+/// generic object path (`C_CreateObject`, `C_UnwrapKey`,
+/// `C_UnwrapKeyAuthenticated`), which do not go through
+/// [`register_slh_dsa_private_key`].
+///
+/// Runs the same checked `fips205` decode (PK.root recomputed from SK.seed
+/// and PK.seed) as that function, so every way a private key can enter the
+/// token rejects an inconsistent one. The sign path decodes without this
+/// check since 2026-09-23 (it re-checks PK.root against the hypertree it
+/// builds instead); before that, the sign-time decode was the only check
+/// these generic paths had.
+///
+/// Only a value of exactly the parameter set's `SK_LEN` is checked here. An
+/// unknown parameter set or any other length is left to the existing
+/// handling (the sign-time length check reports it), unchanged.
+pub(crate) fn check_slh_dsa_private_value(parameter_set: u32, sk_bytes: &[u8]) -> Result<(), CkRv> {
+    match slh_dsa_key_lens(parameter_set) {
+        Some((sk_len, _)) if sk_bytes.len() == sk_len => {
+            validate_slh_dsa_key(parameter_set, sk_bytes, true)
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Structural import-time validation for SLH-DSA key material via the
-/// `fips205` `try_from_bytes` deserialization (mirrors the use-time
-/// handler path). Caller has already length-checked `bytes`.
+/// `fips205` `try_from_bytes` deserialization. For a private key that is the
+/// checked decode, which recomputes PK.root; the sign path deliberately uses
+/// the unchecked one (see `crypto::handlers::slh_dsa_sign!`). Caller has
+/// already length-checked `bytes`.
 fn validate_slh_dsa_key(parameter_set: u32, bytes: &[u8], private: bool) -> Result<(), CkRv> {
     use fips205::traits::SerDes;
     macro_rules! chk {
@@ -3535,6 +3561,55 @@ mod tests {
                 .unwrap_err(),
             CKR_ARGUMENTS_BAD,
         );
+        close_session(session).unwrap();
+    }
+
+    /// An SLH-DSA private key whose PK.root disagrees with its SK.seed /
+    /// PK.seed is refused where it enters the token — both through
+    /// `register_slh_dsa_private_key` and through `C_CreateObject` — now
+    /// that `C_Sign` decodes without recomputing PK.root. A key that gets
+    /// past import anyway (injected straight into the object table here)
+    /// still cannot sign: signing re-checks PK.root against the hypertree.
+    #[test]
+    fn slh_dsa_inconsistent_pk_root_rejected_at_import_and_sign() {
+        use crate::ffi::create_object_from_attrs;
+        use crate::native::sign::sign;
+        use crate::state::{allocate_handle_owned, store_bool, store_ulong};
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let ps = CKP_SLH_DSA_SHA2_128F;
+        let (_, gen_prv) = generate_slh_dsa_keypair(session, ps, b"\x01", "gen").unwrap();
+        let good = get_object_value(gen_prv).unwrap();
+        let mut bad = good.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0x01; // PK.root is the last quarter of sk (FIPS 205 §9.1)
+
+        assert_eq!(
+            register_slh_dsa_private_key(session, ps, &bad, b"", "").unwrap_err(),
+            CKR_ATTRIBUTE_VALUE_INVALID,
+        );
+
+        let template = |value: &[u8]| {
+            let mut a: Attributes = std::collections::HashMap::new();
+            store_ulong(&mut a, CKA_CLASS, CKO_PRIVATE_KEY);
+            store_ulong(&mut a, CKA_KEY_TYPE, CKK_SLH_DSA);
+            store_ulong(&mut a, CKA_PARAMETER_SET, ps);
+            store_bool(&mut a, CKA_SIGN, true);
+            a.insert(CKA_VALUE, value.to_vec());
+            a
+        };
+        assert_eq!(create_object_from_attrs(session, template(&bad)), Err(CKR_ATTRIBUTE_VALUE_INVALID));
+        // The consistent key still imports through the same path and signs.
+        let imported = create_object_from_attrs(session, template(&good)).expect("good key imports");
+        assert!(sign(session, imported, CKM_SLH_DSA, b"m").is_ok());
+
+        // Bypass every import check: the sign-time PK.root check refuses it.
+        let mut injected = template(&bad);
+        store_ulong(&mut injected, CKA_PRIV_PARAM_SET, ps);
+        store_ulong(&mut injected, CKA_PRIV_ALGO_FAMILY, ALGO_SLH_DSA);
+        let h = allocate_handle_owned(session, injected);
+        assert_eq!(sign(session, h, CKM_SLH_DSA, b"m").unwrap_err(), CKR_FUNCTION_FAILED);
+
         close_session(session).unwrap();
     }
 

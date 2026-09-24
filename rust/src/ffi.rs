@@ -6070,6 +6070,23 @@ fn normalize_pqc_pkcs8_import(attrs: &mut Attributes) -> Result<(), u32> {
     }
 }
 
+/// Reject an SLH-DSA private key whose stored PK.root does not match its
+/// SK.seed/PK.seed, at the point the key enters the token from outside
+/// (`C_CreateObject`, `C_UnwrapKey`, `C_UnwrapKeyAuthenticated`). See
+/// `native::keygen::check_slh_dsa_private_value`. Any other object passes.
+fn check_imported_slh_dsa_private(attrs: &Attributes) -> Result<(), u32> {
+    let class = crate::state::get_object_attr_u32_from(attrs, CKA_CLASS);
+    let key_type = crate::state::get_object_attr_u32_from(attrs, CKA_KEY_TYPE);
+    if class != Some(CKO_PRIVATE_KEY) || key_type != Some(CKK_SLH_DSA) {
+        return Ok(());
+    }
+    let Some(value) = attrs.get(&CKA_VALUE) else {
+        return Ok(());
+    };
+    let ps = crate::state::get_object_param_set_from(attrs);
+    crate::native::keygen::check_slh_dsa_private_value(ps, value)
+}
+
 /// Engine core of `C_CreateObject` — operates on an already-marshalled
 /// attribute map. Split from the FFI wrapper so policy can be unit-tested on
 /// 64-bit native builds, where CK_ATTRIBUTE templates (32-bit value pointers)
@@ -6208,6 +6225,7 @@ pub(crate) fn create_object_from_attrs(
     // value outright rather than let it fail opaquely at first use.
     if class == Some(CKO_PRIVATE_KEY) {
         normalize_pqc_pkcs8_import(&mut new_attrs)?;
+        check_imported_slh_dsa_private(&new_attrs)?;
     }
 
     // PKCS#11 v3.2 §6.14 (and every other secret-key table): CKA_VALUE_LEN is
@@ -12605,6 +12623,13 @@ pub fn C_UnwrapKey(
             }
         }
 
+        // An SLH-DSA private key whose PK.root disagrees with its seeds is
+        // not a valid key (§5.18.4: CKR_WRAPPED_KEY_INVALID). Checked here,
+        // where it enters the token, rather than on every C_Sign.
+        if check_imported_slh_dsa_private(&attrs).is_err() {
+            return CKR_WRAPPED_KEY_INVALID;
+        }
+
         *ph_key = allocate_handle_owned(_h_session, attrs);
     }
     CKR_OK
@@ -12998,6 +13023,11 @@ pub fn C_UnwrapKeyAuthenticated(
         // secret-key object — C_UnwrapKeyAuthenticated counts as a new
         // object-creation path per §5.18.7.
         crate::state::compute_kcv(&mut attrs);
+
+        // Same SLH-DSA PK.root check as C_UnwrapKey.
+        if check_imported_slh_dsa_private(&attrs).is_err() {
+            return CKR_WRAPPED_KEY_INVALID;
+        }
 
         *ph_key = allocate_handle_owned(_h_session, attrs);
     }

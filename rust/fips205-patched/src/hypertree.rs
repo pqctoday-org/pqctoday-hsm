@@ -8,7 +8,7 @@ use crate::xmss;
 ///
 /// Input: Message `M`, private seed `SK.seed`, public seed `PK.seed`, tree index `idx_tree`, leaf
 /// index `idx_leaf`. <br>
-/// Output: HT signature `SIG_HT`.
+/// Output: HT signature `SIG_HT`, and the root of the top-layer XMSS tree recomputed from it.
 #[allow(clippy::similar_names)] // sk_seed and pk_seed
 pub(crate) fn ht_sign<
     const D: usize,
@@ -21,7 +21,7 @@ pub(crate) fn ht_sign<
 >(
     hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], pk_seed: &[u8], idx_tree: u64,
     idx_leaf: u32,
-) -> Result<HtSig<D, HP, LEN, N>, &'static str> {
+) -> Result<(HtSig<D, HP, LEN, N>, [u8; N]), &'static str> {
     profile_phase!(Tree);
     let mut idx_tree = idx_tree;
     let (d32, hp32) = (u32::try_from(D).unwrap(), u32::try_from(HP).unwrap());
@@ -74,21 +74,24 @@ pub(crate) fn ht_sign<
         sig_ht.xmss_sigs[j as usize] = sig_tmp.clone();
 
         // 13: if j < d − 1 then
-        if j < (d32 - 1) {
-            //
-            // 14: root ← xmss_PKFromSig(idx_leaf, SIG_tmp, root, PK.seed, ADRS)
-            root = xmss::xmss_pk_from_sig::<HP, K, LEN, M, N>(
-                hashers, idx_leaf, &sig_tmp, &root, pk_seed, &adrs,
-            );
-
-            // 15: end if
-        }
+        // 14: root ← xmss_PKFromSig(idx_leaf, SIG_tmp, root, PK.seed, ADRS)
+        // 15: end if
+        // Deviation (pqctoday-hsm): the root is also computed for the top
+        // layer j = d − 1, where the specification skips it. That root is
+        // PK.root exactly when SK.seed and PK.seed are the ones PK.root was
+        // generated from, so `slh_sign_internal` compares the two and refuses
+        // to release a signature from an inconsistent key. It costs one
+        // WOTS+ public-key recovery plus h′ hashes, against the full top-tree
+        // rebuild the decode-time check used to cost on every signature.
+        root = xmss::xmss_pk_from_sig::<HP, K, LEN, M, N>(
+            hashers, idx_leaf, &sig_tmp, &root, pk_seed, &adrs,
+        );
 
         // 16: end for
     }
 
-    // 17: return SIGHT
-    Ok(sig_ht)
+    // 17: return SIGHT (plus the recomputed top-layer root, see step 13)
+    Ok((sig_ht, root))
 }
 
 

@@ -607,8 +607,11 @@ macro_rules! slh_dsa_sign {
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         match crate::crypto::handlers::get_slh_dsa_ph($mech) {
             Some(ph) => sk
                 .try_hash_sign($msg, $ctx, &ph, !$deterministic)
@@ -665,8 +668,11 @@ macro_rules! slh_dsa_sign_phm {
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         let ph = crate::crypto::handlers::ph_from_digest_mech_slh_dsa($hash)
             .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
         sk.try_hash_sign_phm($phm, $ctx, &ph, !$deterministic)
@@ -704,8 +710,11 @@ macro_rules! slh_dsa_sign_internal {
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         // `_test_only_raw_sign` is FIPS 205 `slh_sign_internal(M, SK, addrnd)`:
         // it signs the bare message (no `(0‖|ctx|‖ctx)` framing). `addrnd =
         // None` ⇒ the deterministic variant (addrnd = PK.seed); `Some(r)` ⇒
@@ -736,8 +745,11 @@ macro_rules! slh_dsa_sign_external_rnd {
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         // External `SLH-DSA.Sign` (with `(0‖|ctx|‖ctx)` framing). `addrnd =
         // None` ⇒ deterministic (hedged=false → addrnd = PK.seed); `Some(r)` ⇒
         // hedged with the explicit `<Random>` addrnd drawn from `FixedRng`.
