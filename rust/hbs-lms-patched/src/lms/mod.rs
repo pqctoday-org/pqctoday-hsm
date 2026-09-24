@@ -6,7 +6,7 @@ use crate::lms::definitions::LmsPrivateKey;
 use crate::lms::definitions::LmsPublicKey;
 
 pub mod definitions;
-mod helper;
+pub(crate) mod helper;
 pub mod parameters;
 pub mod signing;
 pub mod verify;

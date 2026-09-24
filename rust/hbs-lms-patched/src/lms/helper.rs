@@ -19,6 +19,16 @@ pub fn get_tree_element<H: HashChain>(
         }
     }
 
+    // pqctoday-hsm `hw-accel`: the hashsig engine computes the node (the root of
+    // its subtree) when it claims this parameter set; `None` computes it here.
+    // Skipped with auxiliary data so its contents stay those of the software path.
+    #[cfg(feature = "hw-accel")]
+    if aux_data.is_none() {
+        if let Some(node) = crate::hw_accel::subtree_root(index, private_key) {
+            return node;
+        }
+    }
+
     let max_private_keys = private_key.lms_parameter.number_of_lm_ots_keys();
 
     let hasher = H::default()
