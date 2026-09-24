@@ -40,6 +40,9 @@ resolver = "2"
 
 [features]
 default = []
+# pqctoday-hsm: process-wide hook that lets the hashsig FPGA engine build XMSS
+# trees (MERKLE_SUBTREE). Byte-identical output; see src/hw_accel.rs.
+hw-accel = []
 pkcs8 = [
     "dep:pkcs8",
     "dep:spki",

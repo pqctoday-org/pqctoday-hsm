@@ -19,6 +19,12 @@ fn treehash(
     leaf_idx: u32,
     subtree_addr: &[u32; 8],
 ) -> XmssResult<()> {
+    // pqctoday-hsm `hw-accel`: the hashsig engine builds the tree when it
+    // claims this parameter set (see hw_accel.rs); otherwise it is built here.
+    #[cfg(feature = "hw-accel")]
+    if crate::hw_accel::treehash(params, root, auth_path, sk_seed, pub_seed, leaf_idx, subtree_addr) {
+        return Ok(());
+    }
     let n = params.n as usize;
     let tree_height = params.tree_height as usize;
     let mut stack = vec![0u8; (tree_height + 1) * n];

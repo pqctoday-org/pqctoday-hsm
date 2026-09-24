@@ -9,9 +9,10 @@
 //! * `hashsig` profile — the hash-signature engine (`pqc_hw::hashsig_device`,
 //!   pqctoday-cacp `fpga/hashsig/ABI.md`). After `QUERY_CAPS`, `RESET_CORE`
 //!   and a known-answer command, the fips205 `SLH_SIGN` / `SLH_KEYGEN` hooks
-//!   and the hbs-lms `MERKLE_SUBTREE` hook are installed for the commands the
-//!   engine implements; each call is then routed to the engine only for a
-//!   parameter set it claims and the routing policy sends there.
+//!   and the hbs-lms / xmss `MERKLE_SUBTREE` hooks are installed for the
+//!   commands and schemes the engine implements; each call is then routed to
+//!   the engine only for a parameter set it claims and the routing policy
+//!   sends there.
 //!
 //! Runtime switches (environment of the process that calls `C_Initialize`):
 //!
@@ -23,7 +24,8 @@
 //!   `PQC_HASHSIG_ROUTE=sha2=fpga` sends them to the engine as well;
 //!   `all=cpu` keeps the engine idle.
 //! * `PQC_HASHSIG_MERKLE_MIN_HEIGHT` — smallest LMS/XMSS subtree sent to the
-//!   engine (default 4).
+//!   engine (default 4). XMSS trees are offered whole (k = h/d); a tree taller
+//!   than `Caps.xmss_max_subtree_height` is built on ARM.
 //! * `PQC_HW_DIAGNOSTICS=1` — one stderr line per probe decision or fallback.
 //!
 //! Every hook keeps the ML-DSA lanes' policy: `try_lock` (a contending
@@ -150,11 +152,10 @@ pub fn install_hashsig(accelerator: HashsigAccelerator) -> bool {
         let _ = hbs_lms::set_merkle_subtree_hook(lms_subtree_hook);
         installed.push("MERKLE_SUBTREE(LMS)");
     }
-    // TODO(xmss): the xmss crate is still the registry `0.1.0-pre.0`. Once it
-    // is vendored as `xmss-patched` (feat/hashsig-cpu-0923) its tree-node
-    // hook is installed here when `caps.xmss_families != 0`, and
-    // `reference_merkle` below answers XMSS parameter sets. Until then XMSS
-    // and XMSS^MT always run on ARM.
+    if caps.implements(Command::MerkleSubtree) && caps.xmss_families != 0 {
+        let _ = xmss::set_xmss_subtree_hook(xmss_subtree_hook);
+        installed.push("MERKLE_SUBTREE(XMSS)");
+    }
     diagnostic(&format!(
         "selected hash-signature engine: build {:#x}, {} lane(s) ({} generic), \
          SLH sign sets {:#x}, keygen sets {:#x}, LMS families {:#x}/W {:#x}, \
@@ -243,6 +244,34 @@ fn lms_subtree_hook(
     Some(payload[..n].to_vec())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn xmss_subtree_hook(
+    raw_oid: u32,
+    sk_seed: &[u8],
+    pub_seed: &[u8],
+    subtree_height: u32,
+    leaf_start: u32,
+    auth_leaf: u32,
+    layer: u32,
+    tree_address: u64,
+) -> Option<Vec<u8>> {
+    if raw_oid > 0x00ff_ffff {
+        return None;
+    }
+    HASHSIG.get()?.merkle(
+        abi::xmss_param_set(raw_oid),
+        MerkleInput {
+            seed: sk_seed,
+            public: pub_seed,
+            subtree_height,
+            leaf_start,
+            auth_leaf,
+            layer,
+            tree_address,
+        },
+    )
+}
+
 /// Software computations the engine must reproduce, for its known-answer test.
 pub fn software_reference() -> Reference {
     Reference {
@@ -266,8 +295,17 @@ fn reference_merkle(param: u32, input: &MerkleInput<'_>) -> Option<Vec<u8>> {
             input.leaf_start,
             (input.auth_leaf != AUTH_LEAF_NONE).then_some(input.auth_leaf),
         ),
-        // TODO(xmss): answered once xmss-patched provides a reference.
-        ParamSet::Xmss(_) | ParamSet::Slh(_) => None,
+        ParamSet::Xmss(p) => xmss::reference_merkle_subtree(
+            p.raw_oid,
+            input.seed,
+            input.public,
+            input.subtree_height,
+            input.leaf_start,
+            (input.auth_leaf != AUTH_LEAF_NONE).then_some(input.auth_leaf),
+            input.layer,
+            input.tree_address,
+        ),
+        ParamSet::Slh(_) => None,
     }
 }
 
@@ -326,11 +364,20 @@ impl pqc_hw::hashsig_device::sim::SimBackend for SoftwareSimBackend {
 
     fn merkle_xmss(
         &self,
-        _param: &abi::XmssParam,
-        _fields: &pqc_hw::hashsig_device::sim::MerkleFields,
+        param: &abi::XmssParam,
+        fields: &pqc_hw::hashsig_device::sim::MerkleFields,
     ) -> Result<Vec<u8>, abi::Status> {
-        // TODO(xmss): see `install_hashsig`.
-        Err(abi::Status::InternalError)
+        xmss::reference_merkle_subtree(
+            param.raw_oid,
+            &fields.seed,
+            &fields.public,
+            fields.subtree_height,
+            fields.leaf_start,
+            (fields.auth_leaf != AUTH_LEAF_NONE).then_some(fields.auth_leaf),
+            fields.layer,
+            fields.tree_address,
+        )
+        .ok_or(abi::Status::InvalidInput)
     }
 }
 

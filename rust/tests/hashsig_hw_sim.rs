@@ -30,6 +30,9 @@ const PHYS: u64 = 0x7000_0000;
 /// Largest LMS subtree the simulated engine claims; H10 trees exercise the
 /// split path (root on ARM from two engine-computed children).
 const LMS_MAX_K: u32 = 8;
+/// Largest XMSS tree (h/d) the simulated engine claims; XMSS trees are
+/// offered whole, so a 16-high tree stays on ARM.
+const XMSS_MAX_K: u32 = 10;
 
 fn caps() -> Caps {
     let s_sets = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 6) | (1 << 9) | (1 << 10);
@@ -44,9 +47,10 @@ fn caps() -> Caps {
         lms_families: 0b1111,
         lmots_w: 0b1111,
         lms_max_subtree_height: LMS_MAX_K,
-        // XMSS is not wired yet (xmss-patched pending): claim nothing.
-        xmss_families: 0,
-        xmss_max_subtree_height: 0,
+        // SHA2 n32/n24, SHAKE128 n32, SHAKE256 n32/n24 (the n = 64 OIDs are
+        // never claimed in v1). Whole trees up to h/d = 10.
+        xmss_families: 0b1_1111,
+        xmss_max_subtree_height: XMSS_MAX_K,
         build_id: 0x041a_a370,
         max_batch: 16,
         sha256_cores: 2,
@@ -476,4 +480,102 @@ fn every_command_leaves_the_engine_scrubbed() {
     assert!(f.sim.caps().zeroizations > zeroizations0);
     assert!(f.sim.dma_is_zero());
     assert_eq!(f.sim.starts_while_busy(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// XMSS / XMSS^MT
+// ---------------------------------------------------------------------------
+
+struct XmssRun {
+    vk: Vec<u8>,
+    sk: Vec<u8>,
+    signatures: Vec<Vec<u8>>,
+    updated_keys: Vec<Vec<u8>>,
+}
+
+/// `mt_oid`: the RFC 8391 XMSS^MT OID. xmss 0.1.0-pre.0 serialises it bare,
+/// and re-parsing then picks the single-tree OID of the same number; the
+/// engine's xmss_bridge rewrites the prefix to the crate's internal XMSS^MT
+/// encoding (0x0001_0000 | oid) and so does this test.
+fn xmss_run<P: xmss::XmssParameter>(signatures: usize, mt_oid: Option<u32>) -> XmssRun {
+    let seed: Vec<u8> = (0..P::SEED_LEN).map(|i| 0x20 + i as u8).collect();
+    let mut pair = xmss::KeyPair::<P>::from_seed(&seed).unwrap();
+    let mut vk = pair.verifying_key().as_ref().to_vec();
+    let mut sk = pair.signing_key().as_ref().to_vec();
+    if let Some(oid) = mt_oid {
+        let internal = (0x0001_0000u32 | oid).to_be_bytes();
+        vk[..4].copy_from_slice(&internal);
+        sk[..4].copy_from_slice(&internal);
+    }
+    let verifier = xmss::VerifyingKey::<P>::try_from(vk.as_slice()).unwrap();
+    let mut key = sk.clone();
+    let mut run = XmssRun { vk, sk, signatures: Vec::new(), updated_keys: Vec::new() };
+    for i in 0..signatures {
+        let message = [b'x', i as u8];
+        let mut signer = xmss::SigningKey::<P>::try_from(key.as_slice()).unwrap();
+        let signature = signer.sign_detached(&message).unwrap();
+        verifier.verify_detached(&signature, &message).unwrap();
+        key = signer.as_ref().to_vec();
+        run.signatures.push(signature.as_ref().to_vec());
+        run.updated_keys.push(key.clone());
+    }
+    run
+}
+
+fn check_xmss<P: xmss::XmssParameter>(
+    fixture: &Fixture,
+    label: &str,
+    signatures: usize,
+    mt_oid: Option<u32>,
+    claimed: bool,
+) {
+    let (sim, accel) = (&fixture.sim, fixture.accel);
+    accel.set_enabled(false);
+    let merkle0 = sim.executed(Command::MerkleSubtree);
+    let off = xmss_run::<P>(signatures, mt_oid);
+    assert_eq!(sim.executed(Command::MerkleSubtree), merkle0, "{label}: hook off");
+    accel.set_enabled(true);
+    let on = xmss_run::<P>(signatures, mt_oid);
+    if claimed {
+        assert!(sim.executed(Command::MerkleSubtree) > merkle0, "{label}: engine used");
+    } else {
+        assert_eq!(sim.executed(Command::MerkleSubtree), merkle0, "{label}: not claimed, ARM");
+    }
+    assert_eq!(on.vk, off.vk, "{label}: public key");
+    assert_eq!(on.sk, off.sk, "{label}: private key");
+    assert_eq!(on.signatures, off.signatures, "{label}: signatures");
+    assert_eq!(on.updated_keys, off.updated_keys, "{label}: persisted key states");
+    assert!(sim.dma_is_zero());
+}
+
+#[test]
+fn xmss_every_claimed_family_is_byte_identical() {
+    let (_g, f) = fixture();
+    check_xmss::<xmss::XmssShake_10_256>(f, "XMSS-SHAKE_10_256 (SHAKE128 n32)", 2, None, true);
+    check_xmss::<xmss::XmssShake256_10_192>(f, "XMSS-SHAKE256_10_192", 2, None, true);
+    check_xmss::<xmss::XmssSha2_10_256>(f, "XMSS-SHA2_10_256", 2, None, true);
+    check_xmss::<xmss::XmssSha2_10_192>(f, "XMSS-SHA2_10_192", 1, None, true);
+    check_xmss::<xmss::XmssShake256_10_256>(f, "XMSS-SHAKE256_10_256", 1, None, true);
+}
+
+#[test]
+fn xmssmt_layers_are_byte_identical() {
+    let (_g, f) = fixture();
+    // d = 4 trees of height 5 and d = 2 trees of height 10: every layer's
+    // tree (with its layer and tree address) goes to the engine.
+    check_xmss::<xmss::XmssMtShake_20_4_256>(f, "XMSS^MT-SHAKE_20/4_256", 3, Some(0x12), true);
+    check_xmss::<xmss::XmssMtShake256_20_2_192>(f, "XMSS^MT-SHAKE256_20/2_192", 2, Some(0x31), true);
+}
+
+#[test]
+fn xmss_unclaimed_heights_and_n64_stay_on_arm() {
+    use pqc_hw::hashsig_device::abi::xmss_param_set;
+    let (_g, f) = fixture();
+    // n = 64 is never claimed in v1.
+    check_xmss::<xmss::XmssMtShake_20_4_512>(f, "XMSS^MT-SHAKE_20/4_512", 1, Some(0x1a), false);
+    // h/d = 16 or 20 is above the claimed whole-tree height (building one on
+    // ARM here would take minutes, so only the routing decision is checked).
+    assert!(!f.accel.wants(Command::MerkleSubtree, xmss_param_set(0x08), 16)); // XMSS-SHAKE_16_256
+    assert!(!f.accel.wants(Command::MerkleSubtree, xmss_param_set(0x0001_0016), 20)); // ^MT 60/3
+    assert!(f.accel.wants(Command::MerkleSubtree, xmss_param_set(0x07), 10)); // XMSS-SHAKE_10_256
 }
