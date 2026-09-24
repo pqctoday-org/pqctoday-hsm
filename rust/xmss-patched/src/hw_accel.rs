@@ -1,45 +1,54 @@
-//! pqctoday-hsm: optional, process-wide hook for the `hashsig` FPGA engine's
+//! pqctoday-hsm: optional, process-wide hooks for the `hashsig` FPGA engine's
 //! `MERKLE_SUBTREE` command on XMSS / XMSS^MT trees (pqctoday-cacp
 //! `fpga/hashsig/ABI.md` §6.3, §7.3).
 //!
-//! `treehash` computes one whole XMSS tree (height h/d) and the
-//! authentication path of one leaf, for keygen (the top tree) and for every
-//! layer of a signature. The hook is offered exactly that: SK_SEED,
-//! PUB_SEED, k = h/d, leaf_start = 0, auth_leaf = the leaf, and the layer and
-//! tree address of the tree. It returns root ‖ auth\[0..k\] or `None`; on
-//! `None` the tree is built here exactly as before, so output is
-//! byte-identical. The WOTS+ signature of the leaf stays on the CPU, the
-//! engine never sees the index, and the caller still receives (and
-//! persists) the advanced key together with the signature, as before.
+//! Every XMSS tree (height h′ = h/d) is served from the in-memory subtree
+//! cache (`tree_cache.rs`): keygen and signing call `root_and_auth`, which on
+//! a miss builds the cache entry — every node at height ≥ low(h′) — and then
+//! reads the root and the upper authentication path from it, rebuilding only
+//! the 2^low(h′) leaves around the signed leaf. The engine plugs into that
+//! miss: [`build_entry`] asks it for every height-low(h′) node (the roots of
+//! 2^(h′−low) subtrees, sent as request tables) and hashes the levels above
+//! on the CPU with the same addresses as upstream `treehash`. The entry is
+//! byte-identical to the one the CPU builds, it is cached and released
+//! exactly as before, and later signatures hit it without the engine.
+//!
+//! The engine never sees the index; WOTS+ signing, the per-signature leaf
+//! rebuild and the index update stay on the CPU, and the caller still
+//! receives (and persists) the advanced key together with the signature.
 
 use crate::hash::thash_h;
 use crate::hash_address::{
-    copy_subtree_addr, set_layer_addr, set_ltree_addr, set_ots_addr, set_tree_addr,
-    set_tree_height, set_tree_index, set_type, XMSS_ADDR_TYPE_HASHTREE, XMSS_ADDR_TYPE_LTREE,
-    XMSS_ADDR_TYPE_OTS,
+    copy_subtree_addr, set_layer_addr, set_tree_addr, set_tree_height, set_tree_index, set_type,
+    XMSS_ADDR_TYPE_HASHTREE,
 };
 use crate::params::{XmssOid, XmssParams};
-use crate::xmss_commons::gen_leaf_wots;
+use crate::tree_cache::{entry_len, level_offset, low, walk};
 use std::cell::Cell;
 use std::sync::OnceLock;
 
-/// `(raw_oid, SK_SEED, PUB_SEED, k, leaf_start, auth_leaf, layer, tree_address)`
-/// → root ‖ auth\[0..k\] (n bytes each), or `None` to build the tree on the
-/// CPU. `raw_oid` is this crate's encoding: `0x0000_00XX` for an XMSS OID,
-/// `0x0001_00XX` for an XMSS^MT OID.
-pub type XmssSubtreeHook = fn(u32, &[u8], &[u8], u32, u32, u32, u32, u64) -> Option<Vec<u8>>;
+/// `(raw_oid, SK_SEED, PUB_SEED, k, leaf_starts, layer, tree_address)` → the
+/// root (n bytes) of the height-`k` subtree at each leaf start of the tree at
+/// (`layer`, `tree_address`), in order, or `None` to build them on the CPU.
+/// `raw_oid` is this crate's encoding: `0x0000_00XX` for an XMSS OID,
+/// `0x0001_00XX` for an XMSS^MT OID (the ABI's XMSS `param_set` low bits).
+pub type XmssSubtreeHook = fn(u32, &[u8], &[u8], u32, &[u32], u32, u64) -> Option<Vec<Vec<u8>>>;
 
-static HOOK: OnceLock<XmssSubtreeHook> = OnceLock::new();
+/// `(raw_oid, k, subtrees)` → whether the engine would take that many
+/// height-`k` subtrees in one call. Cheap and lock-free.
+pub type XmssWantsHook = fn(u32, u32, usize) -> bool;
+
+static HOOKS: OnceLock<(XmssSubtreeHook, XmssWantsHook)> = OnceLock::new();
 
 std::thread_local! {
     /// Set while a software reference is computed, so it never uses the hook.
     static BYPASS: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Installs the process-wide XMSS subtree hook. Returns `false` when a hook
-/// was already installed.
-pub fn set_xmss_subtree_hook(hook: XmssSubtreeHook) -> bool {
-    HOOK.set(hook).is_ok()
+/// Installs the process-wide XMSS subtree hooks. Returns `false` when hooks
+/// were already installed.
+pub fn set_xmss_subtree_hook(compute: XmssSubtreeHook, wants: XmssWantsHook) -> bool {
+    HOOKS.set((compute, wants)).is_ok()
 }
 
 /// The raw OID whose parameters are `params`.
@@ -55,54 +64,76 @@ fn raw_oid(params: &XmssParams) -> Option<u32> {
         })
 }
 
-/// `treehash` on the hook. Fills `root` and `auth_path` and returns `true`,
-/// or returns `false` (nothing written) to build the tree on the CPU.
-pub(crate) fn treehash(
+/// The subtree-cache entry of the tree at `subtree_addr` (every node at
+/// height ≥ low(h′), in `tree_cache` layout), with the height-low(h′) nodes
+/// computed on the engine. `None` builds it on the CPU.
+pub(crate) fn build_entry(
     params: &XmssParams,
-    root: &mut [u8],
-    auth_path: &mut [u8],
     sk_seed: &[u8],
     pub_seed: &[u8],
-    leaf_idx: u32,
     subtree_addr: &[u32; 8],
-) -> bool {
-    let Some(hook) = HOOK.get() else {
-        return false;
-    };
+) -> Option<Vec<u8>> {
     if BYPASS.with(Cell::get) {
-        return false;
+        return None;
     }
-    let Some(oid) = raw_oid(params) else {
-        return false;
-    };
+    let &(compute, wants) = HOOKS.get()?;
+    let oid = raw_oid(params)?;
     let n = params.n as usize;
-    let k = params.tree_height;
+    let h = params.tree_height;
+    let lo = low(h);
+    let count = 1usize << (h - lo);
+    if !wants(oid, lo, count) {
+        return None;
+    }
+    let starts: Vec<u32> = (0..count as u32).map(|i| i << lo).collect();
     let tree_address = (u64::from(subtree_addr[1]) << 32) | u64::from(subtree_addr[2]);
-    let Some(payload) = hook(
+    let roots = compute(
         oid,
         &sk_seed[..n],
         &pub_seed[..n],
-        k,
-        0,
-        leaf_idx,
+        lo,
+        &starts,
         subtree_addr[0],
         tree_address,
-    ) else {
-        return false;
-    };
-    if payload.len() != n * (k as usize + 1) {
-        return false;
+    )?;
+    if roots.len() != count || roots.iter().any(|root| root.len() != n) {
+        return None;
     }
-    root[..n].copy_from_slice(&payload[..n]);
-    auth_path[..k as usize * n].copy_from_slice(&payload[n..]);
-    true
+    let mut nodes = vec![0u8; entry_len(h, n)];
+    let base = level_offset(h, lo, n);
+    for (i, root) in roots.iter().enumerate() {
+        nodes[base + i * n..base + (i + 1) * n].copy_from_slice(root);
+    }
+    // Levels lo+1..=h′: node (z, i) = H(node(z−1, 2i) ‖ node(z−1, 2i+1)) with the
+    // hash-tree address upstream `treehash` uses (tree height z−1, index i).
+    let mut node_addr = [0u32; 8];
+    copy_subtree_addr(&mut node_addr, subtree_addr);
+    set_type(&mut node_addr, XMSS_ADDR_TYPE_HASHTREE);
+    for z in lo + 1..=h {
+        let (below, here) = (level_offset(h, z - 1, n), level_offset(h, z, n));
+        for i in 0..1usize << (h - z) {
+            set_tree_height(&mut node_addr, z - 1);
+            set_tree_index(&mut node_addr, i as u32);
+            let children = nodes[below + 2 * i * n..below + (2 * i + 2) * n].to_vec();
+            thash_h(
+                params,
+                &mut nodes[here + i * n..here + (i + 1) * n],
+                &children,
+                &pub_seed[..n],
+                &mut node_addr,
+            )
+            .ok()?;
+        }
+    }
+    Some(nodes)
 }
 
 /// What the engine's `MERKLE_SUBTREE` must return for an XMSS / XMSS^MT
 /// tree: the root of the height-`k` subtree starting at `leaf_start`, then
 /// `auth[0..k]` for `auth_leaf` (zero when `None`), each n bytes, for the
-/// tree at (`layer`, `tree_address`). Computed on the CPU without the hook.
-/// `None` for an unknown OID, wrong seed sizes or out-of-range positions.
+/// tree at (`layer`, `tree_address`). Computed on the CPU with upstream's
+/// node functions, without the hooks and without the cache. `None` for an
+/// unknown OID, wrong seed sizes or out-of-range positions.
 #[allow(clippy::too_many_arguments)]
 pub fn reference_merkle_subtree(
     raw_oid: u32,
@@ -147,90 +178,13 @@ pub fn reference_merkle_subtree(
     set_tree_addr(&mut subtree_addr, tree_address);
     let mut out = vec![0u8; n * (k as usize + 1)];
     let (root, auth) = out.split_at_mut(n);
-    subtree_hash(
-        &params,
-        root,
-        auth,
-        sk_seed,
-        pub_seed,
-        leaf_start,
-        k,
-        auth_leaf,
-        &subtree_addr,
-    )
+    walk(&params, sk_seed, pub_seed, &subtree_addr, leaf_start, k, &mut |z, i, node| {
+        if z == k {
+            root.copy_from_slice(node);
+        } else if auth_leaf.is_some_and(|leaf| i == (leaf >> z) ^ 1) {
+            auth[z as usize * n..(z as usize + 1) * n].copy_from_slice(node);
+        }
+    })
     .ok()?;
     Some(out)
-}
-
-/// `xmss_core::treehash` generalised to the subtree of height `k` starting at
-/// `leaf_start` (leaf and node addresses stay those of the whole tree).
-#[allow(clippy::too_many_arguments)]
-fn subtree_hash(
-    params: &XmssParams,
-    root: &mut [u8],
-    auth_path: &mut [u8],
-    sk_seed: &[u8],
-    pub_seed: &[u8],
-    leaf_start: u32,
-    k: u32,
-    auth_leaf: Option<u32>,
-    subtree_addr: &[u32; 8],
-) -> crate::error::XmssResult<()> {
-    let n = params.n as usize;
-    let mut stack = vec![0u8; (k as usize + 1) * n];
-    let mut heights = vec![0u32; k as usize + 1];
-    let mut offset: usize = 0;
-
-    let mut ots_addr = [0u32; 8];
-    let mut ltree_addr = [0u32; 8];
-    let mut node_addr = [0u32; 8];
-    copy_subtree_addr(&mut ots_addr, subtree_addr);
-    copy_subtree_addr(&mut ltree_addr, subtree_addr);
-    copy_subtree_addr(&mut node_addr, subtree_addr);
-    set_type(&mut ots_addr, XMSS_ADDR_TYPE_OTS);
-    set_type(&mut ltree_addr, XMSS_ADDR_TYPE_LTREE);
-    set_type(&mut node_addr, XMSS_ADDR_TYPE_HASHTREE);
-
-    for idx in leaf_start..leaf_start + (1u32 << k) {
-        set_ltree_addr(&mut ltree_addr, idx);
-        set_ots_addr(&mut ots_addr, idx);
-        gen_leaf_wots(
-            params,
-            &mut stack[offset * n..(offset + 1) * n],
-            sk_seed,
-            pub_seed,
-            &mut ltree_addr,
-            &mut ots_addr,
-        )?;
-        offset += 1;
-        heights[offset - 1] = 0;
-        if auth_leaf.is_some_and(|leaf| (leaf ^ 0x1) == idx) {
-            auth_path[..n].copy_from_slice(&stack[(offset - 1) * n..offset * n]);
-        }
-        while offset >= 2 && heights[offset - 1] == heights[offset - 2] {
-            let tree_idx = idx >> (heights[offset - 1] + 1);
-            set_tree_height(&mut node_addr, heights[offset - 1]);
-            set_tree_index(&mut node_addr, tree_idx);
-            let tmp = stack[(offset - 2) * n..offset * n].to_vec();
-            thash_h(
-                params,
-                &mut stack[(offset - 2) * n..(offset - 1) * n],
-                &tmp,
-                pub_seed,
-                &mut node_addr,
-            )?;
-            offset -= 1;
-            heights[offset - 1] += 1;
-            if let Some(leaf) = auth_leaf {
-                let h = heights[offset - 1];
-                if h < k && ((leaf >> h) ^ 0x1) == tree_idx {
-                    let h = h as usize;
-                    auth_path[h * n..(h + 1) * n]
-                        .copy_from_slice(&stack[(offset - 1) * n..offset * n]);
-                }
-            }
-        }
-    }
-    root[..n].copy_from_slice(&stack[..n]);
-    Ok(())
 }

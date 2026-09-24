@@ -23,9 +23,15 @@
 //!   the A53, whose SHA-256 instructions beat one fabric SHA-256 unit.
 //!   `PQC_HASHSIG_ROUTE=sha2=fpga` sends them to the engine as well;
 //!   `all=cpu` keeps the engine idle.
-//! * `PQC_HASHSIG_MERKLE_MIN_HEIGHT` — smallest LMS/XMSS subtree sent to the
-//!   engine (default 4). XMSS trees are offered whole (k = h/d); a tree taller
-//!   than `Caps.xmss_max_subtree_height` is built on ARM.
+//! * `PQC_HASHSIG_MERKLE_MIN_HEIGHT` — fewest leaves (2^value, default 4)
+//!   worth one engine call; the node caches' many small subtrees are sent
+//!   together in request tables and count together.
+//!
+//! LMS and XMSS trees are served from their in-memory node caches
+//! (hbs-lms-patched and xmss-patched `tree_cache`); the engine only fills a
+//! cache miss, at the cache's lowest cached height (LMS max(4, h−16), XMSS 3),
+//! and the levels above are hashed on the CPU, so the cache holds exactly
+//! what the CPU would have put there and later signatures hit it.
 //! * `PQC_HW_DIAGNOSTICS=1` — one stderr line per probe decision or fallback.
 //!
 //! Every hook keeps the ML-DSA lanes' policy: `try_lock` (a contending
@@ -149,11 +155,11 @@ pub fn install_hashsig(accelerator: HashsigAccelerator) -> bool {
         installed.push("SLH_KEYGEN");
     }
     if caps.implements(Command::MerkleSubtree) && caps.lms_families != 0 && caps.lmots_w != 0 {
-        let _ = hbs_lms::set_merkle_subtree_hook(lms_subtree_hook);
+        let _ = hbs_lms::set_merkle_subtree_hook(lms_subtree_hook, lms_wants_hook);
         installed.push("MERKLE_SUBTREE(LMS)");
     }
     if caps.implements(Command::MerkleSubtree) && caps.xmss_families != 0 {
-        let _ = xmss::set_xmss_subtree_hook(xmss_subtree_hook);
+        let _ = xmss::set_xmss_subtree_hook(xmss_subtree_hook, xmss_wants_hook);
         installed.push("MERKLE_SUBTREE(XMSS)");
     }
     diagnostic(&format!(
@@ -223,14 +229,14 @@ fn lms_subtree_hook(
     seed: &[u8],
     identifier: &[u8],
     subtree_height: u32,
-    leaf_start: u32,
-) -> Option<Vec<u8>> {
+    leaf_starts: &[u32],
+) -> Option<Vec<Vec<u8>>> {
     if lms_type > 0xff || lmots_type > 0xff {
         return None;
     }
-    let payload = HASHSIG.get()?.merkle(
-        abi::lms_param_set(lms_type, lmots_type),
-        MerkleInput {
+    let inputs: Vec<MerkleInput<'_>> = leaf_starts
+        .iter()
+        .map(|&leaf_start| MerkleInput {
             seed,
             public: identifier,
             subtree_height,
@@ -238,38 +244,73 @@ fn lms_subtree_hook(
             auth_leaf: AUTH_LEAF_NONE,
             layer: 0,
             tree_address: 0,
-        },
-    )?;
-    let n = payload.len() / (subtree_height as usize + 1);
-    Some(payload[..n].to_vec())
+        })
+        .collect();
+    let payloads = HASHSIG
+        .get()?
+        .merkle_batch(abi::lms_param_set(lms_type, lmots_type), &inputs)?;
+    let n = payloads.first()?.len() / (subtree_height as usize + 1);
+    Some(
+        payloads
+            .into_iter()
+            .map(|mut payload| {
+                payload.truncate(n);
+                payload
+            })
+            .collect(),
+    )
 }
 
-#[allow(clippy::too_many_arguments)]
+fn lms_wants_hook(lms_type: u32, lmots_type: u32, subtree_height: u32, subtrees: usize) -> bool {
+    lms_type <= 0xff
+        && lmots_type <= 0xff
+        && HASHSIG.get().is_some_and(|accelerator| {
+            accelerator.wants_merkle(abi::lms_param_set(lms_type, lmots_type), subtree_height, subtrees)
+        })
+}
+
 fn xmss_subtree_hook(
     raw_oid: u32,
     sk_seed: &[u8],
     pub_seed: &[u8],
     subtree_height: u32,
-    leaf_start: u32,
-    auth_leaf: u32,
+    leaf_starts: &[u32],
     layer: u32,
     tree_address: u64,
-) -> Option<Vec<u8>> {
+) -> Option<Vec<Vec<u8>>> {
     if raw_oid > 0x00ff_ffff {
         return None;
     }
-    HASHSIG.get()?.merkle(
-        abi::xmss_param_set(raw_oid),
-        MerkleInput {
+    let inputs: Vec<MerkleInput<'_>> = leaf_starts
+        .iter()
+        .map(|&leaf_start| MerkleInput {
             seed: sk_seed,
             public: pub_seed,
             subtree_height,
             leaf_start,
-            auth_leaf,
+            auth_leaf: AUTH_LEAF_NONE,
             layer,
             tree_address,
-        },
+        })
+        .collect();
+    let payloads = HASHSIG.get()?.merkle_batch(abi::xmss_param_set(raw_oid), &inputs)?;
+    let n = payloads.first()?.len() / (subtree_height as usize + 1);
+    Some(
+        payloads
+            .into_iter()
+            .map(|mut payload| {
+                payload.truncate(n);
+                payload
+            })
+            .collect(),
     )
+}
+
+fn xmss_wants_hook(raw_oid: u32, subtree_height: u32, subtrees: usize) -> bool {
+    raw_oid <= 0x00ff_ffff
+        && HASHSIG.get().is_some_and(|accelerator| {
+            accelerator.wants_merkle(abi::xmss_param_set(raw_oid), subtree_height, subtrees)
+        })
 }
 
 /// Software computations the engine must reproduce, for its known-answer test.

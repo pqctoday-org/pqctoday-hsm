@@ -23,7 +23,7 @@ mod xmss_core;
 pub use error::{Error, XmssResult};
 // pqctoday-hsm: hashsig FPGA engine hook (MERKLE_SUBTREE) and its software reference.
 #[cfg(feature = "hw-accel")]
-pub use hw_accel::{reference_merkle_subtree, set_xmss_subtree_hook, XmssSubtreeHook};
+pub use hw_accel::{reference_merkle_subtree, set_xmss_subtree_hook, XmssSubtreeHook, XmssWantsHook};
 
 pub use params::{
     XmssMtSha2_20_2_192,

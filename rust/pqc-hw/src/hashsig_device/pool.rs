@@ -435,6 +435,20 @@ impl HashsigAccelerator {
             .is_some_and(|p| self.routing().target(p.family()) == Target::Fpga)
     }
 
+    /// Whether [`Self::merkle_batch`] would offer `subtrees` subtrees of
+    /// height `k` to the engine: claimed, routed to the engine, enabled, and
+    /// at least `2^PQC_HASHSIG_MERKLE_MIN_HEIGHT` leaves in total. Cheap and
+    /// lock-free.
+    pub fn wants_merkle(&self, param: u32, k: u32, subtrees: usize) -> bool {
+        if subtrees == 0 || !self.is_enabled() || !self.caps.claims(Command::MerkleSubtree, param, k) {
+            return false;
+        }
+        let leaves = (subtrees as u64).saturating_mul(1u64 << k.min(63));
+        leaves >= 1u64 << self.min_merkle_height.min(63)
+            && ParamSet::decode(Command::MerkleSubtree, param)
+                .is_some_and(|p| self.routing().target(p.family()) == Target::Fpga)
+    }
+
     /// SLH_SIGN: SIG_FORS ‖ SIG_HT, or `None` to sign on ARM.
     pub fn slh_sign(&self, param: u32, input: SlhSignInput<'_>) -> Option<Vec<u8>> {
         if !self.wants(Command::SlhSign, param, 0) {
@@ -487,17 +501,7 @@ impl HashsigAccelerator {
     pub fn merkle_batch(&self, param: u32, inputs: &[MerkleInput<'_>]) -> Option<Vec<Vec<u8>>> {
         let k = inputs.first()?.subtree_height;
         if inputs.iter().any(|input| input.subtree_height != k)
-            || !self.is_enabled()
-            || !self.caps.claims(Command::MerkleSubtree, param, k)
-        {
-            return None;
-        }
-        let leaves = (inputs.len() as u64).saturating_mul(1u64 << k.min(63));
-        if leaves < 1u64 << self.min_merkle_height.min(63) {
-            return None;
-        }
-        if !ParamSet::decode(Command::MerkleSubtree, param)
-            .is_some_and(|p| self.routing().target(p.family()) == Target::Fpga)
+            || !self.wants_merkle(param, k, inputs.len())
         {
             return None;
         }

@@ -60,18 +60,18 @@ fn with_cache<T>(f: impl FnOnce(&mut Cache) -> T) -> T {
 }
 
 /// Lowest cached level for a subtree of height `h`.
-fn low(h: u32) -> u32 {
+pub(crate) fn low(h: u32) -> u32 {
     LOW.min(h)
 }
 
 /// Byte offset of level `z` (`low(h) <= z <= h`) in an entry's node array.
-fn level_offset(h: u32, z: u32, n: usize) -> usize {
+pub(crate) fn level_offset(h: u32, z: u32, n: usize) -> usize {
     // nodes at level j: 2^(h−j); levels low..z-1 precede level z
     let nodes: u64 = (low(h)..z).map(|j| 1u64 << (h - j)).sum();
     nodes as usize * n
 }
 
-fn entry_len(h: u32, n: usize) -> usize {
+pub(crate) fn entry_len(h: u32, n: usize) -> usize {
     level_offset(h, h + 1, n)
 }
 
@@ -104,7 +104,7 @@ pub(crate) fn key_of(params: &XmssParams, sk_seed: &[u8], pub_seed: &[u8], subtr
 /// `start` (a multiple of `2^t`) of the subtree at `subtree_addr`. Calls `on_node(height,
 /// index, node)` for every leaf and every inner node, with the same leaf/ltree/node
 /// addresses upstream uses (`tree_idx = idx >> (height + 1)` is the global index).
-fn walk(
+pub(crate) fn walk(
     params: &XmssParams,
     sk_seed: &[u8],
     pub_seed: &[u8],
@@ -175,6 +175,13 @@ fn build_entry(
     pub_seed: &[u8],
     subtree_addr: &[u32; 8],
 ) -> XmssResult<Vec<u8>> {
+    // pqctoday-hsm `hw-accel`: the hashsig engine computes the height-low(h)
+    // nodes when it claims this parameter set, and the levels above are hashed
+    // here; same bytes, same layout (hw_accel.rs).
+    #[cfg(feature = "hw-accel")]
+    if let Some(nodes) = crate::hw_accel::build_entry(params, sk_seed, pub_seed, subtree_addr) {
+        return Ok(nodes);
+    }
     let n = params.n as usize;
     let h = params.tree_height;
     let lo = low(h);

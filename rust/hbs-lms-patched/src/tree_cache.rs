@@ -84,6 +84,15 @@ fn key_of<H: HashChain>(sk: &LmsPrivateKey<H>) -> [u8; 32] {
     d.finalize().into()
 }
 
+/// Lowest height the cache keeps for `sk`'s tree, or `None` while the cache is off
+/// (pqctoday-hsm `hw-accel`: the hashsig engine fills the cache from this height up).
+#[cfg(feature = "hw-accel")]
+pub(crate) fn floor<H: HashChain>(sk: &LmsPrivateKey<H>) -> Option<u32> {
+    let h = u32::from(sk.lms_parameter.get_tree_height());
+    let fits = slots(h) * (usize::from(H::OUTPUT_SIZE) + 1) <= CAP_BYTES;
+    (ENABLED.load(Ordering::Relaxed) && fits).then(|| low(h))
+}
+
 /// The cached value of node `index` of `sk`'s tree, if present.
 pub(crate) fn lookup<H: HashChain>(
     sk: &LmsPrivateKey<H>,

@@ -127,7 +127,9 @@ pub use crate::hss::{SigningKey, VerifyingKey};
 
 // pqctoday-hsm: hashsig FPGA engine hook (MERKLE_SUBTREE) and its software reference.
 #[cfg(feature = "hw-accel")]
-pub use crate::hw_accel::{reference_merkle_subtree, set_merkle_subtree_hook, MerkleSubtreeHook};
+pub use crate::hw_accel::{
+    reference_merkle_subtree, set_merkle_subtree_hook, MerkleSubtreeHook, MerkleWantsHook,
+};
 
 use core::convert::TryFrom;
 use signature::Error;

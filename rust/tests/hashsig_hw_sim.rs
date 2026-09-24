@@ -358,14 +358,17 @@ struct LmsRun {
     sk: Vec<u8>,
     signatures: Vec<Vec<u8>>,
     updated_keys: Vec<Vec<u8>>,
+    /// MERKLE_SUBTREE commands executed after keygen and after each signature.
+    engine_calls: Vec<u64>,
 }
 
-fn lms_run<H: hbs_lms::HashChain>(params: &[hbs_lms::HssParameter<H>]) -> LmsRun {
+fn lms_run<H: hbs_lms::HashChain>(sim: &SimHandle, params: &[hbs_lms::HssParameter<H>]) -> LmsRun {
     let mut seed = hbs_lms::Seed::<H>::default();
     for (i, byte) in seed.as_mut_slice().iter_mut().enumerate() {
         *byte = 0x30 + i as u8;
     }
     let (sk, vk) = hbs_lms::keygen::<H>(params, &seed, None).unwrap();
+    let mut engine_calls = vec![sim.executed(Command::MerkleSubtree)];
     let mut key = sk.as_slice().to_vec();
     let mut signatures = Vec::new();
     let mut updated_keys = Vec::new();
@@ -380,6 +383,7 @@ fn lms_run<H: hbs_lms::HashChain>(params: &[hbs_lms::HssParameter<H>]) -> LmsRun
         assert!(hbs_lms::verify::<H>(message, signature.as_ref(), vk.as_slice()).is_ok());
         signatures.push(signature.as_ref().to_vec());
         updated_keys.push(new_key.clone());
+        engine_calls.push(sim.executed(Command::MerkleSubtree));
         key = new_key;
     }
     LmsRun {
@@ -387,22 +391,45 @@ fn lms_run<H: hbs_lms::HashChain>(params: &[hbs_lms::HssParameter<H>]) -> LmsRun
         sk: sk.as_slice().to_vec(),
         signatures,
         updated_keys,
+        engine_calls,
     }
 }
 
+fn same_lms(label: &str, a: &LmsRun, b: &LmsRun) {
+    assert_eq!(a.vk, b.vk, "{label}: public key");
+    assert_eq!(a.sk, b.sk, "{label}: private key");
+    assert_eq!(a.signatures, b.signatures, "{label}: signatures");
+    assert_eq!(a.updated_keys, b.updated_keys, "{label}: persisted key states");
+}
+
+/// Hook off vs on, with the node cache on (the engine's configuration) and
+/// off. With the cache on, the engine fills it at keygen (and for a lower HSS
+/// tree at its first use) and the last signature needs no engine call.
 fn check_lms<H: hbs_lms::HashChain>(fixture: &Fixture, label: &str, params: &[hbs_lms::HssParameter<H>]) {
     let (sim, accel) = (&fixture.sim, fixture.accel);
+    hbs_lms::cache_set_enabled(true);
     accel.set_enabled(false);
+    hbs_lms::cache_clear();
     let merkle0 = sim.executed(Command::MerkleSubtree);
-    let off = lms_run(params);
+    let off = lms_run(sim, params);
     assert_eq!(sim.executed(Command::MerkleSubtree), merkle0, "{label}: hook off");
+
     accel.set_enabled(true);
-    let on = lms_run(params);
-    assert!(sim.executed(Command::MerkleSubtree) > merkle0, "{label}: engine used");
-    assert_eq!(on.vk, off.vk, "{label}: public key");
-    assert_eq!(on.sk, off.sk, "{label}: private key");
-    assert_eq!(on.signatures, off.signatures, "{label}: signatures");
-    assert_eq!(on.updated_keys, off.updated_keys, "{label}: persisted key states");
+    hbs_lms::cache_clear();
+    let merkle0 = sim.executed(Command::MerkleSubtree);
+    let on = lms_run(sim, params);
+    same_lms(label, &on, &off);
+    assert!(on.engine_calls[0] > merkle0, "{label}: keygen filled the cache on the engine");
+    assert!(hbs_lms::cache_stats().0 > 0, "{label}: cache populated");
+    assert_eq!(on.engine_calls[2], on.engine_calls[3], "{label}: a later signature hits the cache");
+
+    hbs_lms::cache_set_enabled(false);
+    hbs_lms::cache_clear();
+    let merkle0 = sim.executed(Command::MerkleSubtree);
+    let uncached = lms_run(sim, params);
+    hbs_lms::cache_set_enabled(true);
+    same_lms(&format!("{label} (cache off)"), &uncached, &off);
+    assert!(uncached.engine_calls[3] > merkle0, "{label} (cache off): engine used");
     assert!(sim.dma_is_zero());
 }
 
@@ -439,10 +466,11 @@ fn lms_sha256_follows_the_routing_policy() {
     use hbs_lms::{HssParameter, LmotsAlgorithm as W, LmsAlgorithm as T, Sha256_256, Shake256_256};
     let (_g, f) = fixture();
     f.accel.set_routing(Routing::default());
+    hbs_lms::cache_clear();
     let merkle0 = f.sim.executed(Command::MerkleSubtree);
-    let _ = lms_run(&[HssParameter::<Sha256_256>::new(W::LmotsW4, T::LmsH5)]);
+    let _ = lms_run(&f.sim, &[HssParameter::<Sha256_256>::new(W::LmotsW4, T::LmsH5)]);
     assert_eq!(f.sim.executed(Command::MerkleSubtree), merkle0, "SHA-256 → CPU by default");
-    let _ = lms_run(&[HssParameter::<Shake256_256>::new(W::LmotsW4, T::LmsH5)]);
+    let _ = lms_run(&f.sim, &[HssParameter::<Shake256_256>::new(W::LmotsW4, T::LmsH5)]);
     assert!(f.sim.executed(Command::MerkleSubtree) > merkle0, "SHAKE256 → engine by default");
 }
 
@@ -451,13 +479,13 @@ fn engine_path_never_releases_a_signature_whose_index_was_not_persisted() {
     use softhsmrustv3::crypto::lms::{hss_keygen, hss_sign, hss_verify};
     let (_g, f) = fixture();
     let lms_type = 0x0F; // SHAKE256/M32 H5
-    let (public, private) = hss_keygen(1, &[lms_type], &[0x0B]).unwrap();
     let merkle0 = f.sim.executed(Command::MerkleSubtree);
+    let (public, private) = hss_keygen(1, &[lms_type], &[0x0B]).unwrap();
+    assert!(f.sim.executed(Command::MerkleSubtree) > merkle0, "the tree work ran on the engine");
 
     // Persisting the reserved index fails: no signature is returned.
     let mut refuse = |_: &[u8]| Err(());
     assert!(hss_sign(lms_type, &private, b"m", &mut refuse).is_err());
-    assert!(f.sim.executed(Command::MerkleSubtree) > merkle0, "the tree work ran on the engine");
 
     // Persisting succeeds: exactly one update, before the signature exists
     // for the caller, and the signature verifies.
@@ -491,13 +519,15 @@ struct XmssRun {
     sk: Vec<u8>,
     signatures: Vec<Vec<u8>>,
     updated_keys: Vec<Vec<u8>>,
+    /// MERKLE_SUBTREE commands executed after keygen and after each signature.
+    engine_calls: Vec<u64>,
 }
 
 /// `mt_oid`: the RFC 8391 XMSS^MT OID. xmss 0.1.0-pre.0 serialises it bare,
 /// and re-parsing then picks the single-tree OID of the same number; the
 /// engine's xmss_bridge rewrites the prefix to the crate's internal XMSS^MT
 /// encoding (0x0001_0000 | oid) and so does this test.
-fn xmss_run<P: xmss::XmssParameter>(signatures: usize, mt_oid: Option<u32>) -> XmssRun {
+fn xmss_run<P: xmss::XmssParameter>(sim: &SimHandle, signatures: usize, mt_oid: Option<u32>) -> XmssRun {
     let seed: Vec<u8> = (0..P::SEED_LEN).map(|i| 0x20 + i as u8).collect();
     let mut pair = xmss::KeyPair::<P>::from_seed(&seed).unwrap();
     let mut vk = pair.verifying_key().as_ref().to_vec();
@@ -509,7 +539,13 @@ fn xmss_run<P: xmss::XmssParameter>(signatures: usize, mt_oid: Option<u32>) -> X
     }
     let verifier = xmss::VerifyingKey::<P>::try_from(vk.as_slice()).unwrap();
     let mut key = sk.clone();
-    let mut run = XmssRun { vk, sk, signatures: Vec::new(), updated_keys: Vec::new() };
+    let mut run = XmssRun {
+        vk,
+        sk,
+        signatures: Vec::new(),
+        updated_keys: Vec::new(),
+        engine_calls: vec![sim.executed(Command::MerkleSubtree)],
+    };
     for i in 0..signatures {
         let message = [b'x', i as u8];
         let mut signer = xmss::SigningKey::<P>::try_from(key.as_slice()).unwrap();
@@ -518,10 +554,14 @@ fn xmss_run<P: xmss::XmssParameter>(signatures: usize, mt_oid: Option<u32>) -> X
         key = signer.as_ref().to_vec();
         run.signatures.push(signature.as_ref().to_vec());
         run.updated_keys.push(key.clone());
+        run.engine_calls.push(sim.executed(Command::MerkleSubtree));
     }
     run
 }
 
+/// Hook off vs on, each from an empty subtree cache. With the hook on, the
+/// engine builds each cache entry (every node at height >= 3) and signatures
+/// that reuse an entry make no engine call.
 fn check_xmss<P: xmss::XmssParameter>(
     fixture: &Fixture,
     label: &str,
@@ -531,13 +571,18 @@ fn check_xmss<P: xmss::XmssParameter>(
 ) {
     let (sim, accel) = (&fixture.sim, fixture.accel);
     accel.set_enabled(false);
+    xmss::cache_clear();
     let merkle0 = sim.executed(Command::MerkleSubtree);
-    let off = xmss_run::<P>(signatures, mt_oid);
+    let off = xmss_run::<P>(sim, signatures, mt_oid);
     assert_eq!(sim.executed(Command::MerkleSubtree), merkle0, "{label}: hook off");
     accel.set_enabled(true);
-    let on = xmss_run::<P>(signatures, mt_oid);
+    xmss::cache_clear();
+    let merkle0 = sim.executed(Command::MerkleSubtree);
+    let on = xmss_run::<P>(sim, signatures, mt_oid);
     if claimed {
-        assert!(sim.executed(Command::MerkleSubtree) > merkle0, "{label}: engine used");
+        assert!(on.engine_calls[0] > merkle0, "{label}: keygen's tree built on the engine");
+        let last = on.engine_calls.len() - 1;
+        assert_eq!(on.engine_calls[last - 1], on.engine_calls[last], "{label}: a later signature hits the cache");
     } else {
         assert_eq!(sim.executed(Command::MerkleSubtree), merkle0, "{label}: not claimed, ARM");
     }
@@ -568,14 +613,16 @@ fn xmssmt_layers_are_byte_identical() {
 }
 
 #[test]
-fn xmss_unclaimed_heights_and_n64_stay_on_arm() {
+fn xmss_n64_stays_on_arm_and_tall_trees_are_split() {
     use pqc_hw::hashsig_device::abi::xmss_param_set;
     let (_g, f) = fixture();
     // n = 64 is never claimed in v1.
     check_xmss::<xmss::XmssMtShake_20_4_512>(f, "XMSS^MT-SHAKE_20/4_512", 1, Some(0x1a), false);
-    // h/d = 16 or 20 is above the claimed whole-tree height (building one on
-    // ARM here would take minutes, so only the routing decision is checked).
-    assert!(!f.accel.wants(Command::MerkleSubtree, xmss_param_set(0x08), 16)); // XMSS-SHAKE_16_256
-    assert!(!f.accel.wants(Command::MerkleSubtree, xmss_param_set(0x0001_0016), 20)); // ^MT 60/3
-    assert!(f.accel.wants(Command::MerkleSubtree, xmss_param_set(0x07), 10)); // XMSS-SHAKE_10_256
+    // The engine is asked for height-3 subtrees (the cache's lowest level),
+    // never for a whole tall tree, so a 16- or 20-high tree is split into
+    // request tables rather than refused. (Building one here would take
+    // minutes; only the decision is checked.)
+    assert!(!f.accel.wants_merkle(xmss_param_set(0x08), 16, 1), "whole XMSS-SHAKE_16_256 tree");
+    assert!(f.accel.wants_merkle(xmss_param_set(0x08), 3, 1 << 13), "its height-3 subtrees");
+    assert!(f.accel.wants_merkle(xmss_param_set(0x0001_0016), 3, 1 << 17), "XMSS^MT 60/3 trees");
 }

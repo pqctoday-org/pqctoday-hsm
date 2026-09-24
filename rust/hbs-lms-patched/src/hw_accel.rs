@@ -1,19 +1,28 @@
-//! pqctoday-hsm: optional, process-wide hook for the `hashsig` FPGA engine's
+//! pqctoday-hsm: optional, process-wide hooks for the `hashsig` FPGA engine's
 //! `MERKLE_SUBTREE` command (pqctoday-cacp `fpga/hashsig/ABI.md` §6.3).
 //!
-//! `get_tree_element` asks the hook for any node it has to compute: the node
-//! T[r] of an LMS tree of height H is the root of the subtree of height
-//! k = H − ⌊log2 r⌋ whose leftmost leaf is (r << k) − 2^H. The hook returns
-//! that root (n bytes) or `None`, and on `None` the node is computed here
-//! exactly as before. Keygen (T[1]) and every authentication-path node of a
-//! signature go through this one function, so both use the engine whenever it
-//! claims the parameter set. The engine never sees the leaf index being
-//! signed, and the index is still reserved and persisted by the caller's
-//! update function before any signature is returned (`hss_sign_core`).
+//! Node T[r] of an LMS tree of height H is the root of the subtree of height
+//! k = H − ⌊log2 r⌋ whose leftmost leaf is (r << k) − 2^H, which is exactly
+//! what the engine computes. `get_tree_element` consults, in order, the
+//! auxiliary data, the in-memory node cache (`tree_cache`, when enabled), then
+//! [`node`] here, then its own recursion; every value it returns is the same
+//! pure function of (types, I, SEED, r), so output is byte-identical.
 //!
-//! Nodes the caller reads from auxiliary data never reach the hook, and the
-//! hook is skipped whenever auxiliary data is in use, so the auxiliary-data
-//! contents stay exactly what the software path writes.
+//! * **Cache on** (the engine's configuration): a node at or above the
+//!   cache's lowest height L is never fetched alone. The first time one is
+//!   needed, every missing height-L node below it is computed on the engine
+//!   in request tables and stored in the cache; the unchanged recursion then
+//!   combines them from the cache (storing the upper nodes itself). So keygen
+//!   and the first signature fill the cache exactly as the software path
+//!   does, and later signatures hit it.
+//! * **Cache off** / below L: the node itself is one `MERKLE_SUBTREE` of
+//!   height k when the engine takes it.
+//!
+//! Keygen (T[1]) and every authentication-path node go through
+//! `get_tree_element`. The engine never sees the leaf index being signed, and
+//! `hss_sign_core` still persists the advanced key through the caller's update
+//! function before a signature is returned. The hooks are skipped while
+//! auxiliary data is in use, so its contents stay those of the software path.
 
 use crate::constants::{LmsTreeIdentifier, MAX_HASH_SIZE};
 use crate::hasher::HashChain;
@@ -27,59 +36,139 @@ use std::sync::OnceLock;
 use std::vec::Vec;
 use tinyvec::ArrayVec;
 
-/// `(lms_type, lmots_type, SEED, I, k, leaf_start)` → the root of the
-/// height-k subtree starting at `leaf_start` (n bytes), or `None` to compute
-/// it on the CPU. Type codes are the IANA LMS / LM-OTS typecodes.
-pub type MerkleSubtreeHook = fn(u32, u32, &[u8], &[u8], u32, u32) -> Option<Vec<u8>>;
+/// `(lms_type, lmots_type, SEED, I, k, leaf_starts)` → the root (n bytes) of
+/// the height-`k` subtree at each leaf start, in order, or `None` to compute
+/// them all on the CPU. Type codes are the IANA LMS / LM-OTS typecodes.
+pub type MerkleSubtreeHook = fn(u32, u32, &[u8], &[u8], u32, &[u32]) -> Option<Vec<Vec<u8>>>;
 
-static HOOK: OnceLock<MerkleSubtreeHook> = OnceLock::new();
+/// `(lms_type, lmots_type, k, subtrees)` → whether the engine would take
+/// that many height-`k` subtrees in one call. Cheap and lock-free; lets the
+/// cache fill skip its bookkeeping when the answer is no.
+pub type MerkleWantsHook = fn(u32, u32, u32, usize) -> bool;
+
+static HOOKS: OnceLock<(MerkleSubtreeHook, MerkleWantsHook)> = OnceLock::new();
 
 std::thread_local! {
     /// Set while a software reference is computed, so it never uses the hook.
     static BYPASS: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Installs the process-wide subtree hook. Returns `false` when a hook was
+/// Installs the process-wide subtree hooks. Returns `false` when hooks were
 /// already installed.
-pub fn set_merkle_subtree_hook(hook: MerkleSubtreeHook) -> bool {
-    HOOK.set(hook).is_ok()
+pub fn set_merkle_subtree_hook(compute: MerkleSubtreeHook, wants: MerkleWantsHook) -> bool {
+    HOOKS.set((compute, wants)).is_ok()
 }
 
-/// The hook's answer for tree node `index` (RFC 8554 numbering, root = 1).
-pub(crate) fn subtree_root<H: HashChain>(
-    index: usize,
-    private_key: &LmsPrivateKey<H>,
-) -> Option<ArrayVec<[u8; MAX_HASH_SIZE]>> {
-    let hook = HOOK.get()?;
+fn hooks() -> Option<&'static (MerkleSubtreeHook, MerkleWantsHook)> {
     if BYPASS.with(Cell::get) {
         return None;
     }
+    HOOKS.get()
+}
+
+/// The engine's value of tree node `index` (RFC 8554 numbering, root = 1),
+/// or `None` to let `get_tree_element` continue (cache prefilled, or CPU).
+pub(crate) fn node<H: HashChain>(
+    index: usize,
+    private_key: &LmsPrivateKey<H>,
+) -> Option<ArrayVec<[u8; MAX_HASH_SIZE]>> {
+    let &(compute, wants) = hooks()?;
     let height = u32::from(private_key.lms_parameter.get_tree_height());
     let index = index as u64;
     if index == 0 || height > 31 || index >> (height + 1) != 0 {
         return None;
     }
     let k = height - (63 - index.leading_zeros());
-    let leaf_start = u32::try_from((index << k) - (1u64 << height)).ok()?;
-    let root = hook(
+    let types = (
         private_key.lms_parameter.get_type_id(),
         private_key.lmots_parameter.get_type_id(),
+    );
+
+    #[cfg(feature = "tree-cache")]
+    if let Some(floor) = crate::tree_cache::floor(private_key) {
+        if k > floor {
+            prefill(compute, wants, private_key, types, height, index, k, floor);
+            return None;
+        }
+    }
+
+    if !wants(types.0, types.1, k, 1) {
+        return None;
+    }
+    let leaf_start = u32::try_from((index << k) - (1u64 << height)).ok()?;
+    let roots = compute(
+        types.0,
+        types.1,
         private_key.seed.as_slice(),
         &private_key.lms_tree_identifier,
         k,
-        leaf_start,
+        &[leaf_start],
     )?;
-    if root.len() != usize::from(H::OUTPUT_SIZE) {
+    let root = roots.first()?;
+    if roots.len() != 1 || root.len() != usize::from(H::OUTPUT_SIZE) {
         return None;
     }
     ArrayVec::try_from(root.as_slice()).ok()
 }
 
+/// Stores in the node cache every missing height-`floor` node below `index`
+/// (height `k`), computed on the engine. Does nothing when the engine does
+/// not take them; the recursion then computes them on the CPU.
+#[cfg(feature = "tree-cache")]
+#[allow(clippy::too_many_arguments)]
+fn prefill<H: HashChain>(
+    compute: MerkleSubtreeHook,
+    wants: MerkleWantsHook,
+    private_key: &LmsPrivateKey<H>,
+    types: (u32, u32),
+    height: u32,
+    index: u64,
+    k: u32,
+    floor: u32,
+) {
+    let below = 1usize << (k - floor);
+    if !wants(types.0, types.1, floor, below) {
+        return;
+    }
+    let first = index << (k - floor);
+    let missing: Vec<u64> = (first..first + below as u64)
+        .filter(|&r| crate::tree_cache::lookup(private_key, r as usize).is_none())
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let Ok(starts) = missing
+        .iter()
+        .map(|&r| u32::try_from((r << floor) - (1u64 << height)))
+        .collect::<Result<Vec<u32>, _>>()
+    else {
+        return;
+    };
+    let Some(roots) = compute(
+        types.0,
+        types.1,
+        private_key.seed.as_slice(),
+        &private_key.lms_tree_identifier,
+        floor,
+        &starts,
+    ) else {
+        return;
+    };
+    let n = usize::from(H::OUTPUT_SIZE);
+    if roots.len() != missing.len() || roots.iter().any(|root| root.len() != n) {
+        return;
+    }
+    for (r, root) in missing.iter().zip(&roots) {
+        crate::tree_cache::store(private_key, *r as usize, root);
+    }
+}
+
 /// What the engine's `MERKLE_SUBTREE` must return for an LMS tree: the root
 /// of the height-`k` subtree at `leaf_start`, then `auth[0..k]` for
 /// `auth_leaf` (all zero when `auth_leaf` is `None`), each n bytes. Computed
-/// on the CPU without the hook. `None` for unknown or mismatched typecodes,
-/// wrong field sizes or out-of-range positions.
+/// on the CPU without the hooks (it may read and fill the node cache, which
+/// only ever holds these same values). `None` for unknown or mismatched
+/// typecodes, wrong field sizes or out-of-range positions.
 pub fn reference_merkle_subtree(
     lms_type: u32,
     lmots_type: u32,
