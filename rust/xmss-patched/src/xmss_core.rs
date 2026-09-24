@@ -6,6 +6,7 @@ use crate::hash_address::*;
 use crate::params::XmssParams;
 use crate::utils::{bytes_to_ull, ull_to_bytes};
 use crate::wots::wots_sign;
+use crate::tree_cache;
 use crate::xmss_commons::gen_leaf_wots;
 
 /// For a given leaf index, computes the authentication path and the resulting
@@ -115,7 +116,9 @@ pub fn xmssmt_core_seed_keypair(
 
     // Copy pub_seed since pk is mutably borrowed by treehash.
     let pub_seed_copy = pk[n..2 * n].to_vec();
-    treehash(
+    // pqctoday-hsm: same root as upstream `treehash`, and the top subtree lands in the
+    // in-memory cache (tree_cache.rs), so the key's first signature does not rebuild it.
+    tree_cache::root_and_auth(
         params,
         pk,
         &mut auth_path,
@@ -123,6 +126,7 @@ pub fn xmssmt_core_seed_keypair(
         &pub_seed_copy,
         0,
         &top_tree_addr,
+        false,
     )?;
     sk[idx_bytes + 2 * n..idx_bytes + 3 * n].copy_from_slice(&pk[..n]);
 
@@ -150,6 +154,17 @@ pub fn xmssmt_core_keypair<R: rand::CryptoRng>(
 /// Signs a message. Returns the signature followed by the message
 /// and an updated secret key.
 pub fn xmssmt_core_sign(params: &XmssParams, sk: &mut [u8], m: &[u8]) -> XmssResult<Vec<u8>> {
+    xmssmt_core_sign_impl(params, sk, m, true)
+}
+
+/// `xmssmt_core_sign` with the subtree cache on (`use_cache`) or off (upstream `treehash`
+/// on every layer of every signature, kept as the reference the cache is tested against).
+pub(crate) fn xmssmt_core_sign_impl(
+    params: &XmssParams,
+    sk: &mut [u8],
+    m: &[u8],
+    use_cache: bool,
+) -> XmssResult<Vec<u8>> {
     let n = params.n as usize;
     let idx_bytes = params.index_bytes as usize;
     let mlen = m.len();
@@ -245,15 +260,33 @@ pub fn xmssmt_core_sign(params: &XmssParams, sk: &mut [u8], m: &[u8]) -> XmssRes
         )?;
         sm_offset += params.wots_sig_bytes as usize;
 
-        treehash(
-            params,
-            &mut root,
-            &mut sm[sm_offset..],
-            &sk_seed,
-            &pub_seed,
-            idx_leaf,
-            &ots_addr,
-        )?;
+        if use_cache {
+            // The signature with the last leaf of this subtree is the last one that will
+            // ever use it (the index only moves forward): drop its cache entry then.
+            let span = params.tree_height * (i + 1);
+            let lower = if span >= 64 { u64::MAX } else { (1u64 << span) - 1 };
+            let release = idx & lower == lower;
+            tree_cache::root_and_auth(
+                params,
+                &mut root,
+                &mut sm[sm_offset..],
+                &sk_seed,
+                &pub_seed,
+                idx_leaf,
+                &ots_addr,
+                release,
+            )?;
+        } else {
+            treehash(
+                params,
+                &mut root,
+                &mut sm[sm_offset..],
+                &sk_seed,
+                &pub_seed,
+                idx_leaf,
+                &ots_addr,
+            )?;
+        }
         sm_offset += params.tree_height as usize * n;
     }
 
@@ -271,4 +304,75 @@ pub fn xmssmt_core_sign(params: &XmssParams, sk: &mut [u8], m: &[u8]) -> XmssRes
     }
 
     Ok(sm)
+}
+
+#[cfg(test)]
+mod cache_tests {
+    //! pqctoday-hsm: the subtree cache must reproduce upstream `treehash` signatures exactly.
+    use super::*;
+    use crate::params::XmssOid;
+    use crate::utils::ull_to_bytes;
+
+    fn params(oid: XmssOid) -> XmssParams {
+        let mut p = XmssParams::default();
+        oid.initialize(&mut p).unwrap();
+        p
+    }
+
+    /// Signs `count` messages from index `start` twice — cache on and cache off (upstream
+    /// treehash on every layer) — from the same key, and requires identical signatures
+    /// and identical updated secret keys after every step.
+    fn same_sequence(oid: XmssOid, start: u64, count: usize) {
+        let p = params(oid);
+        let seed: Vec<u8> = (0..p.get_seed_length()).map(|i| (i * 7 + 3) as u8).collect();
+        let mut pk = vec![0u8; p.pk_bytes as usize];
+        let mut sk = vec![0u8; p.sk_bytes as usize];
+        xmssmt_core_seed_keypair(&p, &mut pk, &mut sk, &seed).unwrap();
+        ull_to_bytes(&mut sk[..p.index_bytes as usize], start);
+        let (mut sk_cached, mut sk_ref) = (sk.clone(), sk);
+        for k in 0..count {
+            let msg = [k as u8, 0x5a, 0xa5];
+            let a = xmssmt_core_sign_impl(&p, &mut sk_cached, &msg, true).unwrap();
+            let b = xmssmt_core_sign_impl(&p, &mut sk_ref, &msg, false).unwrap();
+            assert!(a == b, "{oid:?}: signature {k} (index {}) differs", start + k as u64);
+            assert!(sk_cached == sk_ref, "{oid:?}: updated key {k} differs");
+        }
+    }
+
+    #[test]
+    fn xmss_10_cached_signatures_match_upstream() {
+        // From the key's first index, then across the height-3..9 boundaries around 512.
+        same_sequence(XmssOid::XmssSha2_10_256, 0, 10);
+        same_sequence(XmssOid::XmssSha2_10_256, 505, 10);
+        // The last index of the tree: the entry is released and the key is exhausted.
+        same_sequence(XmssOid::XmssSha2_10_256, 1022, 2);
+    }
+
+    #[test]
+    fn xmssmt_cached_signatures_match_upstream_across_subtrees() {
+        // d = 4 layers of height-5 subtrees: 29..40 crosses the layer-0 boundary at 32
+        // (a new bottom subtree, and the old entry released), and 1020..1030 crosses the
+        // layer-1 boundary at 1024.
+        same_sequence(XmssOid::XmssMtSha2_20_4_256, 29, 11);
+        same_sequence(XmssOid::XmssMtSha2_20_4_256, 1020, 10);
+    }
+
+    #[test]
+    fn exhausted_subtrees_leave_the_cache() {
+        let p = params(XmssOid::XmssMtSha2_20_4_256);
+        let seed = vec![0x42u8; p.get_seed_length()];
+        let mut pk = vec![0u8; p.pk_bytes as usize];
+        let mut sk = vec![0u8; p.sk_bytes as usize];
+        xmssmt_core_seed_keypair(&p, &mut pk, &mut sk, &seed).unwrap();
+        let key = tree_cache::key_of(&p, &sk[p.index_bytes as usize..], &sk[p.index_bytes as usize + 3 * p.n as usize..], &{
+            let mut a = [0u32; 8];
+            set_layer_addr(&mut a, 0);
+            a
+        });
+        ull_to_bytes(&mut sk[..p.index_bytes as usize], 30);
+        let _ = xmssmt_core_sign(&p, &mut sk, b"a").unwrap(); // index 30: layer-0 tree 0 cached
+        assert!(tree_cache::contains(&key));
+        let _ = xmssmt_core_sign(&p, &mut sk, b"b").unwrap(); // index 31: its last leaf
+        assert!(!tree_cache::contains(&key), "exhausted subtree still cached");
+    }
 }

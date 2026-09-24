@@ -174,6 +174,12 @@ fn xmss_run(signs: usize) {
         let t = Instant::now();
         let (_pk, mut sk) = xmss_bridge::xmss_keygen(p).expect("keygen");
         let kg = t.elapsed();
+        // First signature after a process restart: nothing cached for this key yet.
+        xmss::cache_clear();
+        let t = Instant::now();
+        let (_sig, next) = xmss_bridge::xmss_sign(p, &sk, b"m").expect("sign");
+        let cold = t.elapsed();
+        sk = next;
         let mut times = Vec::new();
         for _ in 0..signs {
             let t = Instant::now();
@@ -183,8 +189,9 @@ fn xmss_run(signs: usize) {
         }
         let each: Vec<String> = times.iter().map(|d| format!("{:.1}", ms(*d))).collect();
         println!(
-            "{name:<22} keygen {:>9.2} ms   sign median {:>9.2} ms   each [{}]",
+            "{name:<22} keygen {:>9.2} ms   cold sign {:>9.2} ms   sign median {:>9.2} ms   each [{}]",
             ms(kg),
+            ms(cold),
             ms(median(times.clone())),
             each.join(", ")
         );

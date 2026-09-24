@@ -6,6 +6,10 @@ mod error;
 mod hash;
 mod hash_address;
 mod params;
+// pqctoday-hsm: in-memory per-key subtree cache (see tree_cache.rs, PROVENANCE.md).
+mod tree_cache;
+#[doc(hidden)]
+pub use tree_cache::{cache_clear, cache_stats};
 #[cfg(feature = "pkcs8")]
 mod pkcs8;
 mod utils;
