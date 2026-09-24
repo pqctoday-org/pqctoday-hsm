@@ -4,6 +4,7 @@
 pub mod device;
 #[cfg(unix)]
 pub mod dma;
+pub mod hashsig_device;
 pub mod keccak;
 pub mod mldsa;
 #[cfg(unix)]
