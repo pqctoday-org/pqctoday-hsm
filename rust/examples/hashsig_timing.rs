@@ -136,34 +136,49 @@ fn slh(iters: usize, filter: &str) {
 }
 
 fn lms_run(signs: usize) {
-    for (name, lms_param) in [
-        ("LMS SHA256 H5/W4", CKP_LMS_SHA256_M32_H5),
-        ("LMS SHA256 H10/W4", CKP_LMS_SHA256_M32_H10),
-        ("LMS SHA256 H15/W4", CKP_LMS_SHA256_M32_H15),
+    // (name, levels, per-level LMS type) — all LM-OTS W4, SHA-256/192... N32.
+    for (name, lms_params) in [
+        ("LMS SHA256 H5/W4", vec![CKP_LMS_SHA256_M32_H5]),
+        ("LMS SHA256 H10/W4", vec![CKP_LMS_SHA256_M32_H10]),
+        ("LMS SHA256 H15/W4", vec![CKP_LMS_SHA256_M32_H15]),
+        (
+            "HSS L2 H10+H10/W4",
+            vec![CKP_LMS_SHA256_M32_H10, CKP_LMS_SHA256_M32_H10],
+        ),
     ] {
+        let lmots = vec![CKP_LMOTS_SHA256_N32_W4; lms_params.len()];
         let t = Instant::now();
-        let (_pk, mut sk) = lms::lms_keygen(lms_param, CKP_LMOTS_SHA256_N32_W4).expect("keygen");
+        let (_pk, mut sk) = lms::hss_keygen(lms_params.len(), &lms_params, &lmots).expect("keygen");
         let kg = t.elapsed();
-        let mut times = Vec::new();
-        for _ in 0..signs {
+        let sign_once = |sk: &mut Vec<u8>| {
             let mut next = Vec::new();
             let t = Instant::now();
-            let _sig = lms::hss_sign(lms_param, &sk, b"m", &mut |s: &[u8]| {
+            let _sig = lms::hss_sign(lms_params[0], sk, b"m", &mut |s: &[u8]| {
                 next = s.to_vec();
                 Ok(())
             })
             .expect("sign");
-            times.push(t.elapsed());
-            sk = next;
-        }
+            *sk = next;
+            t.elapsed()
+        };
+        let cold = cold_start_lms().then(|| sign_once(&mut sk));
+        let times: Vec<Duration> = (0..signs).map(|_| sign_once(&mut sk)).collect();
         let each: Vec<String> = times.iter().map(|d| format!("{:.1}", ms(*d))).collect();
+        let cold = cold.map_or(String::new(), |d| format!("   cold sign {:>9.2} ms", ms(d)));
         println!(
-            "{name:<22} keygen {:>9.2} ms   sign median {:>9.2} ms   each [{}]",
+            "{name:<22} keygen {:>9.2} ms{cold}   sign median {:>9.2} ms   each [{}]",
             ms(kg),
             ms(median(times.clone())),
             each.join(", ")
         );
     }
+}
+
+/// Clears the in-process LMS tree cache so the next signature is the first one in a
+/// process that did not generate the key. Returns whether there is such a cache.
+fn cold_start_lms() -> bool {
+    hbs_lms::cache_clear();
+    true
 }
 
 fn xmss_run(signs: usize) {

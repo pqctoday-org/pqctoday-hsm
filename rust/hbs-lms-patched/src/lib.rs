@@ -89,7 +89,14 @@ mod hasher;
 mod hss;
 mod lm_ots;
 mod lms;
+// pqctoday-hsm: in-memory per-tree node cache (feature `tree-cache`, needs std).
+#[cfg(feature = "tree-cache")]
+mod tree_cache;
 mod util;
+
+#[cfg(feature = "tree-cache")]
+#[doc(hidden)]
+pub use tree_cache::{cache_clear, cache_set_enabled, cache_stats};
 
 // Re-export the `signature` crate
 pub use signature::{self};

@@ -19,6 +19,12 @@ pub fn get_tree_element<H: HashChain>(
         }
     }
 
+    // pqctoday-hsm: per-tree node memo (src/tree_cache.rs) — same value, not recomputed.
+    #[cfg(feature = "tree-cache")]
+    if let Some(result) = crate::tree_cache::lookup::<H>(private_key, index) {
+        return result;
+    }
+
     let max_private_keys = private_key.lms_parameter.number_of_lm_ots_keys();
 
     let hasher = H::default()
@@ -52,6 +58,9 @@ pub fn get_tree_element<H: HashChain>(
     if let Some(expanded_aux_data) = aux_data.as_mut() {
         hss_save_aux_data::<H>(expanded_aux_data, index, result.as_slice());
     }
+
+    #[cfg(feature = "tree-cache")]
+    crate::tree_cache::store::<H>(private_key, index, result.as_slice());
 
     result
 }
