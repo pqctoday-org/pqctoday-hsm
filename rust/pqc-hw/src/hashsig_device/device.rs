@@ -137,6 +137,12 @@ impl Lane for HashsigSession {
     fn execute(&mut self, op: &Operation<'_>) -> Result<Output, Error> {
         self.engine.execute(op, None)
     }
+    fn execute_batch(&mut self, ops: &[Operation<'_>]) -> Result<Vec<Result<Output, Error>>, Error> {
+        self.engine.execute_batch(ops, None)
+    }
+    fn max_batch(&self) -> usize {
+        self.engine.max_batch()
+    }
     fn health(&self) -> Health {
         self.engine.health()
     }

@@ -45,6 +45,10 @@ pub const RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
 /// One engine instance as the pool sees it.
 pub trait Lane: Send {
     fn execute(&mut self, op: &Operation<'_>) -> Result<Output, Error>;
+    /// A request table (ABI.md §4.1): one result per record, in order.
+    fn execute_batch(&mut self, ops: &[Operation<'_>]) -> Result<Vec<Result<Output, Error>>, Error>;
+    /// Largest request table the engine accepts (`Caps.max_batch`).
+    fn max_batch(&self) -> usize;
     fn health(&self) -> Health;
     fn mark_degraded(&mut self);
     fn recover(&mut self, kat: &Operation<'_>, expected: &[u8]) -> Health;
@@ -55,6 +59,12 @@ pub trait Lane: Send {
 impl<R: RegisterIo + Send, D: super::DmaRegion + Send> Lane for Engine<R, D> {
     fn execute(&mut self, op: &Operation<'_>) -> Result<Output, Error> {
         Engine::execute(self, op, None)
+    }
+    fn execute_batch(&mut self, ops: &[Operation<'_>]) -> Result<Vec<Result<Output, Error>>, Error> {
+        Engine::execute_batch(self, ops, None)
+    }
+    fn max_batch(&self) -> usize {
+        Engine::max_batch(self)
     }
     fn health(&self) -> Health {
         Engine::health(self)
@@ -467,6 +477,52 @@ impl HashsigAccelerator {
             .map(|o| o.payload)
     }
 
+    /// MERKLE_SUBTREE for several subtrees of one tree, all of height
+    /// `inputs[i].subtree_height` (the same for every input), sent as request
+    /// tables of up to `Caps.max_batch` records. Returns every payload, or
+    /// `None` (build them all on ARM) when the engine does not take them or
+    /// any record fails. The minimum-height policy applies to the leaves of
+    /// the whole call, so many small subtrees still make one worthwhile
+    /// submission.
+    pub fn merkle_batch(&self, param: u32, inputs: &[MerkleInput<'_>]) -> Option<Vec<Vec<u8>>> {
+        let k = inputs.first()?.subtree_height;
+        if inputs.iter().any(|input| input.subtree_height != k)
+            || !self.is_enabled()
+            || !self.caps.claims(Command::MerkleSubtree, param, k)
+        {
+            return None;
+        }
+        let leaves = (inputs.len() as u64).saturating_mul(1u64 << k.min(63));
+        if leaves < 1u64 << self.min_merkle_height.min(63) {
+            return None;
+        }
+        if !ParamSet::decode(Command::MerkleSubtree, param)
+            .is_some_and(|p| self.routing().target(p.family()) == Target::Fpga)
+        {
+            return None;
+        }
+        let ops: Vec<Operation<'_>> = inputs
+            .iter()
+            .map(|input| Operation::Merkle { param, input: *input })
+            .collect();
+        let chunk = (self.caps.max_batch.clamp(1, abi::MAX_BATCH)) as usize;
+        let mut payloads = Vec::with_capacity(inputs.len());
+        for ops in ops.chunks(chunk) {
+            let results = self.with_lane(|lane| lane.execute_batch(ops))?;
+            for result in results {
+                match result {
+                    Ok(output) => payloads.push(output.payload),
+                    Err(error) => {
+                        self.stats.errors.fetch_add(1, Ordering::Relaxed);
+                        (self.log)(&format!("hashsig engine batch record: {error}; running on ARM"));
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(payloads)
+    }
+
     /// The caller's ARM-side check of this thread's last hardware output
     /// failed (e.g. an SLH-DSA signature that does not verify). The engine
     /// that produced it is degraded before its next use.
@@ -492,6 +548,12 @@ impl HashsigAccelerator {
     }
 
     fn run(&self, op: &Operation<'_>) -> Option<Output> {
+        self.with_lane(|lane| lane.execute(op))
+    }
+
+    /// Runs `work` on the first free, healthy engine instance (try_lock,
+    /// never a wait), with the ARM-fallback bookkeeping of every hook.
+    fn with_lane<T>(&self, mut work: impl FnMut(&mut dyn Lane) -> Result<T, Error>) -> Option<T> {
         let count = self.slots.len();
         let first = self.next.fetch_add(1, Ordering::Relaxed) % count;
         let mut contended = 0;
@@ -523,7 +585,7 @@ impl HashsigAccelerator {
             if lane.health() != Health::Ready {
                 continue;
             }
-            match lane.execute(op) {
+            match work(lane.as_mut()) {
                 Ok(output) => {
                     self.stats.hardware.fetch_add(1, Ordering::Relaxed);
                     LAST_INSTANCE.with(|last| last.set(Some(index)));

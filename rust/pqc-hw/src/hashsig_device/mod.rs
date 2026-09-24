@@ -45,6 +45,12 @@ pub const OUTPUT_OFFSET: usize = 0x100;
 pub const TENANT_TAG: u32 = 0x5051_4354;
 /// Minimum driver timeout (ABI.md §9: `max(1 s, 4 × estimate)`).
 pub const MIN_TIMEOUT: Duration = Duration::from_secs(1);
+/// Input slot per request-table record (largest input 160, 64-byte aligned).
+pub const INPUT_SLOT: usize = 192;
+
+fn align(offset: usize) -> usize {
+    offset.div_ceil(DMA_ALIGNMENT) * DMA_ALIGNMENT
+}
 
 /// The DMA buffer shared with one engine instance.
 ///
@@ -292,16 +298,70 @@ impl<R: RegisterIo, D: DmaRegion> Engine<R, D> {
         self.submit(op, timeout)
     }
 
+    /// Runs up to `MAX_BATCH` commands in one start as a request table
+    /// (ABI.md §4.1). The outer `Err` is a failure of the whole submission
+    /// (busy, timeout, invalid completion, ...); otherwise each record has its
+    /// own result, in order. A record the engine refused does not stop the
+    /// ones after it, exactly as in the engine.
+    pub fn execute_batch(
+        &mut self,
+        ops: &[Operation<'_>],
+        timeout: Option<Duration>,
+    ) -> Result<Vec<Result<Output, Error>>, Error> {
+        if self.health != Health::Ready {
+            return Err(Error::Unavailable(self.health));
+        }
+        self.submit_batch(ops, timeout)
+    }
+
     fn submit(&mut self, op: &Operation<'_>, timeout: Option<Duration>) -> Result<Output, Error> {
-        let command = op.command();
-        let payload_len = op.payload_bytes().map_err(Error::Input)?;
-        let param = op.decoded_param().map_err(Error::Input)?;
-        let input_len = command.input_len();
-        // Encode (and range-check) the input before touching the device.
-        let mut input = Zeroizing::new(vec![0u8; input_len]);
-        op.encode_input(&mut input).map_err(Error::Input)?;
-        let output_len = COMPLETION_BYTES + payload_len;
-        if OUTPUT_OFFSET + output_len > self.dma.len() {
+        self.submit_batch(std::slice::from_ref(op), timeout)?
+            .pop()
+            .expect("one record, one result")
+    }
+
+    /// Largest request table this engine accepts.
+    pub fn max_batch(&self) -> usize {
+        self.caps
+            .map_or(1, |c| c.max_batch.clamp(1, abi::MAX_BATCH) as usize)
+    }
+
+    fn submit_batch(
+        &mut self,
+        ops: &[Operation<'_>],
+        timeout: Option<Duration>,
+    ) -> Result<Vec<Result<Output, Error>>, Error> {
+        let records = ops.len();
+        if records == 0 || records > abi::MAX_BATCH as usize || (records > 1 && records > self.max_batch()) {
+            return Err(Error::Input(InputError::FieldLength));
+        }
+        // Encode (and range-check) every input before touching the device.
+        // Layout: the request table, then one 192-byte input slot per record
+        // (the largest input is 160), then the output regions, all 64-byte
+        // aligned. A single record lands at 0x40 / 0x100 (INPUT_OFFSET,
+        // OUTPUT_OFFSET).
+        let table = REQUEST_BYTES * records;
+        let mut inputs = Vec::with_capacity(records);
+        let mut payload_lens = Vec::with_capacity(records);
+        let mut estimate = Duration::ZERO;
+        for op in ops {
+            let payload_len = op.payload_bytes().map_err(Error::Input)?;
+            let param = op.decoded_param().map_err(Error::Input)?;
+            let mut input = Zeroizing::new(vec![0u8; op.command().input_len()]);
+            op.encode_input(&mut input).map_err(Error::Input)?;
+            estimate = estimate.saturating_add(self.estimate_for(op, param.as_ref()));
+            inputs.push(input);
+            payload_lens.push(payload_len);
+        }
+        let input_base = table;
+        let output_base = align(input_base + INPUT_SLOT * records).max(OUTPUT_OFFSET);
+        let mut output_offsets = Vec::with_capacity(records);
+        let mut end = output_base;
+        for payload_len in &payload_lens {
+            output_offsets.push(end);
+            end = align(end + COMPLETION_BYTES + payload_len);
+        }
+        if end > self.dma.len() {
             return Err(Error::Input(InputError::FieldLength));
         }
 
@@ -310,31 +370,38 @@ impl<R: RegisterIo, D: DmaRegion> Engine<R, D> {
             return Err(Error::Busy);
         }
 
-        self.request_id = self.request_id.wrapping_add(1).max(1);
-        let request_id = self.request_id;
-        let request = Request {
-            magic: REQUEST_MAGIC,
-            abi_version: ABI_VERSION,
-            header_bytes: REQUEST_BYTES as u16,
-            total_bytes: REQUEST_BYTES as u32,
-            command: command as u32,
-            flags: 0,
-            param_set: op.param_set(),
-            request_id,
-            input_offset: if input_len == 0 { 0 } else { INPUT_OFFSET as u32 },
-            input_length: input_len as u32,
-            output_offset: OUTPUT_OFFSET as u32,
-            output_length: output_len as u32,
-            tenant_tag: TENANT_TAG,
-            reserved: [0; 3],
-        };
-        let timeout = timeout.unwrap_or_else(|| self.timeout_for(op, param.as_ref()));
+        let mut requests = Vec::with_capacity(records);
+        for (index, op) in ops.iter().enumerate() {
+            self.request_id = self.request_id.wrapping_add(1).max(1);
+            let input_len = inputs[index].len();
+            requests.push(Request {
+                magic: REQUEST_MAGIC,
+                abi_version: ABI_VERSION,
+                header_bytes: REQUEST_BYTES as u16,
+                total_bytes: if index == 0 { table as u32 } else { REQUEST_BYTES as u32 },
+                command: op.command() as u32,
+                flags: 0,
+                param_set: op.param_set(),
+                request_id: self.request_id,
+                input_offset: if input_len == 0 {
+                    0
+                } else {
+                    (input_base + INPUT_SLOT * index) as u32
+                },
+                input_length: input_len as u32,
+                output_offset: output_offsets[index] as u32,
+                output_length: (COMPLETION_BYTES + payload_lens[index]) as u32,
+                tenant_tag: TENANT_TAG,
+                reserved: [0; 3],
+            });
+        }
+        let timeout = timeout.unwrap_or(MIN_TIMEOUT.max(estimate.saturating_mul(4)));
         let started = Instant::now();
-        let result = self.run(&request, &input, timeout);
+        let result = self.run(&requests, &inputs, timeout);
         // Step 8 (every path): the whole buffer is zeroed before the lock is
         // released, so no secret input or output survives the command.
         let scrubbed = self.dma.scrub();
-        let (status, completion, payload) = match result {
+        let completed = match result {
             Ok(done) => done,
             Err(error) => {
                 if matches!(error, Error::Timeout | Error::BadCompletion(_) | Error::Io(_)) {
@@ -347,48 +414,56 @@ impl<R: RegisterIo, D: DmaRegion> Engine<R, D> {
             self.mark_degraded();
             return Err(Error::Io(error));
         }
-        match status {
-            Status::Success => {
-                let elapsed = started.elapsed();
-                self.learned
-                    .entry((command as u32, op.param_set(), op.subtree_height()))
-                    .or_insert(elapsed);
-                Ok(Output {
-                    payload,
-                    hash_steps: completion.hash_steps,
-                    lanes: completion.lanes,
-                    elapsed,
-                })
-            }
-            Status::UnsupportedCommand
-            | Status::UnsupportedParameterSet
-            | Status::BadDescriptor
-            | Status::InvalidInput => Err(Error::Rejected(status)),
-            Status::RootMismatch | Status::InternalError => {
-                self.mark_degraded();
-                Err(Error::Fault(status))
-            }
-            Status::ScrubFailure => {
-                self.health = Health::Disabled;
-                Err(Error::Fault(status))
-            }
+        let elapsed = started.elapsed();
+        let per_record = elapsed / records as u32;
+        let mut results = Vec::with_capacity(records);
+        for ((status, completion, payload), op) in completed.into_iter().zip(ops) {
+            results.push(match status {
+                Status::Success => {
+                    self.learned
+                        .entry((op.command() as u32, op.param_set(), op.subtree_height()))
+                        .or_insert(per_record);
+                    Ok(Output {
+                        payload,
+                        hash_steps: completion.hash_steps,
+                        lanes: completion.lanes,
+                        elapsed: per_record,
+                    })
+                }
+                Status::UnsupportedCommand
+                | Status::UnsupportedParameterSet
+                | Status::BadDescriptor
+                | Status::InvalidInput => Err(Error::Rejected(status)),
+                Status::RootMismatch | Status::InternalError => {
+                    self.mark_degraded();
+                    Err(Error::Fault(status))
+                }
+                Status::ScrubFailure => {
+                    self.health = Health::Disabled;
+                    Err(Error::Fault(status))
+                }
+            });
         }
+        Ok(results)
     }
 
-    /// Steps 3–7. Returns the engine status, the completion and the payload.
+    /// Steps 3–7. Returns each record's status, completion and payload.
     fn run(
         &mut self,
-        request: &Request,
-        input: &[u8],
+        requests: &[Request],
+        inputs: &[Zeroizing<Vec<u8>>],
         timeout: Duration,
-    ) -> Result<(Status, Completion, Vec<u8>), Error> {
-        // Step 3: request at offset 0, input at input_offset. The rest of the
-        // buffer is already zero (scrubbed after the previous command).
-        let mut record = [0u8; REQUEST_BYTES];
-        request.encode(&mut record);
-        self.dma.write(0, &record);
-        if !input.is_empty() {
-            self.dma.write(INPUT_OFFSET, input);
+    ) -> Result<Vec<(Status, Completion, Vec<u8>)>, Error> {
+        // Step 3: the request table at offset 0, each input at its
+        // input_offset. The rest of the buffer is already zero (scrubbed
+        // after the previous command).
+        for (index, (request, input)) in requests.iter().zip(inputs).enumerate() {
+            let mut record = [0u8; REQUEST_BYTES];
+            request.encode(&mut record);
+            self.dma.write(REQUEST_BYTES * index, &record);
+            if !input.is_empty() {
+                self.dma.write(request.input_offset as usize, input);
+            }
         }
         // Step 4: sync_for_device over the whole buffer.
         let len = self.dma.len();
@@ -421,74 +496,87 @@ impl<R: RegisterIo, D: DmaRegion> Engine<R, D> {
                 std::thread::sleep(step);
             }
         }
-        // Step 7: sync_for_cpu, RETURN, completion.
+        // Step 7: sync_for_cpu, RETURN, completions.
         self.dma.sync_for_cpu(0, len).map_err(Error::Io)?;
         let returned = self.registers.read32(REG_RETURN) as i32;
-        let mut record = [0u8; COMPLETION_BYTES];
-        self.dma.read(OUTPUT_OFFSET, &mut record);
-        let completion = Completion::decode(&record);
-        if completion.magic != COMPLETION_MAGIC {
-            return Err(Error::BadCompletion("magic"));
+        let mut first_failure = 0;
+        let mut done = Vec::with_capacity(requests.len());
+        for request in requests {
+            let output = request.output_offset as usize;
+            let mut record = [0u8; COMPLETION_BYTES];
+            self.dma.read(output, &mut record);
+            let completion = Completion::decode(&record);
+            if completion.magic != COMPLETION_MAGIC {
+                return Err(Error::BadCompletion("magic"));
+            }
+            if completion.abi_version != ABI_VERSION {
+                return Err(Error::BadCompletion("abi_version"));
+            }
+            if usize::from(completion.record_bytes) != COMPLETION_BYTES {
+                return Err(Error::BadCompletion("record_bytes"));
+            }
+            if completion.request_id != request.request_id {
+                return Err(Error::BadCompletion("request_id"));
+            }
+            if completion.command != request.command {
+                return Err(Error::BadCompletion("command"));
+            }
+            if completion.tenant_tag != request.tenant_tag {
+                return Err(Error::BadCompletion("tenant_tag"));
+            }
+            let Some(status) = Status::from_i32(completion.status) else {
+                return Err(Error::BadCompletion("unknown status"));
+            };
+            if first_failure == 0 {
+                first_failure = completion.status;
+            }
+            let payload_len = request.output_length as usize - COMPLETION_BYTES;
+            if status == Status::Success {
+                if completion.output_bytes as usize != payload_len {
+                    return Err(Error::BadCompletion("output_bytes"));
+                }
+                let mut payload = vec![0u8; payload_len];
+                self.dma.read(output + COMPLETION_BYTES, &mut payload);
+                done.push((status, completion, payload));
+            } else {
+                if completion.output_bytes != 0 {
+                    return Err(Error::BadCompletion("payload on failure"));
+                }
+                done.push((status, completion, Vec::new()));
+            }
         }
-        if completion.abi_version != ABI_VERSION {
-            return Err(Error::BadCompletion("abi_version"));
-        }
-        if usize::from(completion.record_bytes) != COMPLETION_BYTES {
-            return Err(Error::BadCompletion("record_bytes"));
-        }
-        if completion.request_id != request.request_id {
-            return Err(Error::BadCompletion("request_id"));
-        }
-        if completion.command != request.command {
-            return Err(Error::BadCompletion("command"));
-        }
-        if completion.tenant_tag != request.tenant_tag {
-            return Err(Error::BadCompletion("tenant_tag"));
-        }
-        if completion.status != returned {
+        // RETURN is 0, or the status of the first record that failed.
+        if returned != first_failure {
             return Err(Error::BadCompletion("status differs from RETURN"));
         }
-        let Some(status) = Status::from_i32(completion.status) else {
-            return Err(Error::BadCompletion("unknown status"));
-        };
-        let payload_len = request.output_length as usize - COMPLETION_BYTES;
-        if status == Status::Success {
-            if completion.output_bytes as usize != payload_len {
-                return Err(Error::BadCompletion("output_bytes"));
-            }
-            let mut payload = vec![0u8; payload_len];
-            self.dma.read(OUTPUT_OFFSET + COMPLETION_BYTES, &mut payload);
-            Ok((status, completion, payload))
-        } else {
-            if completion.output_bytes != 0 {
-                return Err(Error::BadCompletion("payload on failure"));
-            }
-            Ok((status, completion, Vec::new()))
+        Ok(done)
+    }
+
+    /// Estimated engine time of one command: the learned wall time of this
+    /// (command, param set, k), or the pessimistic cost model.
+    fn estimate_for(&self, op: &Operation<'_>, param: Option<&ParamSet>) -> Duration {
+        let key = (op.command() as u32, op.param_set(), op.subtree_height());
+        if let Some(learned) = self.learned.get(&key) {
+            return *learned;
         }
+        let ops = abi::estimated_hash_ops(op.command(), param, op.subtree_height());
+        let (per_op, lanes) = match param.map(ParamSet::family) {
+            Some(HashFamily::Sha2) => (
+                SHA2_OP_NS,
+                self.caps.map_or(1, |c| c.lanes_for(HashFamily::Sha2)),
+            ),
+            _ => (
+                SHAKE_OP_NS,
+                self.caps.map_or(1, |c| c.lanes_for(HashFamily::Shake)),
+            ),
+        };
+        Duration::from_nanos(ops.saturating_mul(per_op) / u64::from(lanes))
     }
 
     /// ABI.md §9: `max(1 s, 4 × estimate)`; the estimate is the learned wall
     /// time of this (command, param set, k), or the pessimistic cost model.
     pub fn timeout_for(&self, op: &Operation<'_>, param: Option<&ParamSet>) -> Duration {
-        let key = (op.command() as u32, op.param_set(), op.subtree_height());
-        let estimate = match self.learned.get(&key) {
-            Some(learned) => *learned,
-            None => {
-                let ops = abi::estimated_hash_ops(op.command(), param, op.subtree_height());
-                let (per_op, lanes) = match param.map(ParamSet::family) {
-                    Some(HashFamily::Sha2) => (
-                        SHA2_OP_NS,
-                        self.caps.map_or(1, |c| c.lanes_for(HashFamily::Sha2)),
-                    ),
-                    _ => (
-                        SHAKE_OP_NS,
-                        self.caps.map_or(1, |c| c.lanes_for(HashFamily::Shake)),
-                    ),
-                };
-                Duration::from_nanos(ops.saturating_mul(per_op) / u64::from(lanes))
-            }
-        };
-        MIN_TIMEOUT.max(estimate.saturating_mul(4))
+        MIN_TIMEOUT.max(self.estimate_for(op, param).saturating_mul(4))
     }
 
     /// Whether a (command, param set, k) already has a learned wall time.

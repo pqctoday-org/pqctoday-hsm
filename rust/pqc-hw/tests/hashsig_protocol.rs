@@ -695,3 +695,88 @@ fn lms_node_subtree_maps_rfc8554_node_numbers() {
     assert_eq!(lms_node_subtree(5, 64), None);
     assert_eq!(lms_node_subtree(5, 0), None);
 }
+
+// ---------------------------------------------------------------------------
+// Request tables (ABI.md §4.1)
+// ---------------------------------------------------------------------------
+
+/// Without an auth leaf the engine zeroes the auth part of the payload.
+fn root_only(mut payload: Vec<u8>) -> Vec<u8> {
+    payload[32..].fill(0);
+    payload
+}
+
+fn lms_input<'a>(seed: &'a [u8], id: &'a [u8], k: u32, start: u32) -> MerkleInput<'a> {
+    MerkleInput {
+        seed,
+        public: id,
+        subtree_height: k,
+        leaf_start: start,
+        auth_leaf: AUTH_LEAF_NONE,
+        layer: 0,
+        tree_address: 0,
+    }
+}
+
+#[test]
+fn a_request_table_runs_every_record_and_reports_each_result() {
+    let sim = toy_sim(full_caps());
+    let mut engine = engine(&sim);
+    engine.query_caps().unwrap();
+    assert_eq!(engine.max_batch(), 16);
+    let (seed, id) = ([7u8; 32], [8u8; 16]);
+    let param = abi::lms_param_set(0x10, 0x0B); // SHAKE256/M32 H10 / W4
+    let ops: Vec<Operation<'_>> = (0..16)
+        .map(|i| Operation::Merkle { param, input: lms_input(&seed, &id, 4, 16 * i) })
+        .collect();
+    let merkle0 = sim.executed(Command::MerkleSubtree);
+    let results = engine.execute_batch(&ops, None).unwrap();
+    assert_eq!(sim.executed(Command::MerkleSubtree), merkle0 + 16, "one start, sixteen records");
+    for (i, result) in results.iter().enumerate() {
+        let payload = &result.as_ref().unwrap().payload;
+        assert_eq!(payload, &root_only(fill(&seed, 16 * i as u64, 32 * 5)), "record {i}");
+    }
+    assert!(sim.dma_is_zero());
+    assert_eq!(sim.inputs_left_nonzero(), 0);
+
+    // A refused record does not stop the others; each result is its own.
+    sim.inject(Fault::Status(Status::UnsupportedParameterSet));
+    let results = engine.execute_batch(&ops[..3], None).unwrap();
+    assert!(matches!(results[0], Err(Error::Rejected(Status::UnsupportedParameterSet))));
+    assert!(results[1].is_ok() && results[2].is_ok());
+    assert_eq!(engine.health(), Health::Ready);
+
+    // More records than the engine takes is a driver-side refusal.
+    let too_many: Vec<Operation<'_>> = (0..17).map(|_| ops[0]).collect();
+    assert!(matches!(engine.execute_batch(&too_many, None), Err(Error::Input(_))));
+}
+
+#[test]
+fn merkle_batch_chunks_by_max_batch_and_applies_the_height_policy_to_the_total() {
+    let sim = toy_sim(full_caps());
+    let accel = pool(&sim, Routing::default());
+    let (seed, id) = ([3u8; 32], [4u8; 16]);
+    let param = abi::lms_param_set(0x10, 0x0B);
+    // 20 subtrees of height 2: below the per-call minimum height (4) each,
+    // 80 leaves together: two request tables (16 + 4).
+    let inputs: Vec<MerkleInput<'_>> = (0..20).map(|i| lms_input(&seed, &id, 2, 4 * i)).collect();
+    let merkle0 = sim.executed(Command::MerkleSubtree);
+    let payloads = accel.merkle_batch(param, &inputs).unwrap();
+    assert_eq!(payloads.len(), 20);
+    assert_eq!(sim.executed(Command::MerkleSubtree), merkle0 + 20);
+    for (i, payload) in payloads.iter().enumerate() {
+        assert_eq!(payload, &root_only(fill(&seed, 4 * i as u64, 32 * 3)));
+    }
+    // Two subtrees of height 2 (8 leaves) are below the minimum: ARM.
+    assert!(accel.merkle_batch(param, &inputs[..2]).is_none());
+    // Mixed heights are refused.
+    let mixed = [lms_input(&seed, &id, 2, 0), lms_input(&seed, &id, 3, 8)];
+    assert!(accel.merkle_batch(param, &mixed).is_none());
+    // SHA-256 LMS follows the routing policy (CPU by default).
+    let sha = abi::lms_param_set(0x06, 0x03);
+    assert!(accel.merkle_batch(sha, &inputs).is_none());
+    // One failed record sends the whole call to ARM.
+    sim.inject(Fault::Status(Status::InternalError));
+    assert!(accel.merkle_batch(param, &inputs).is_none());
+    assert_eq!(accel.health(), vec![Some(Health::Degraded)]);
+}
