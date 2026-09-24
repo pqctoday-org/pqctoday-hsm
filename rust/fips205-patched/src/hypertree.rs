@@ -1,4 +1,4 @@
-use crate::hashers::Hashers;
+use crate::hashers::{Hashers, PkSeed};
 use crate::types::{Adrs, HtSig, WotsSig, XmssSig};
 use crate::xmss;
 
@@ -19,7 +19,7 @@ pub(crate) fn ht_sign<
     const M: usize,
     const N: usize,
 >(
-    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], pk_seed: &[u8], idx_tree: u64,
+    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], pk_seed: &PkSeed<N>, idx_tree: u64,
     idx_leaf: u32,
 ) -> Result<(HtSig<D, HP, LEN, N>, [u8; N]), &'static str> {
     profile_phase!(Tree);
@@ -109,7 +109,7 @@ pub(crate) fn ht_verify<
     const M: usize,
     const N: usize,
 >(
-    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sig_ht: &HtSig<D, HP, LEN, N>, pk_seed: &[u8],
+    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sig_ht: &HtSig<D, HP, LEN, N>, pk_seed: &PkSeed<N>,
     idx_tree: u64, idx_leaf: u32, pk_root: &[u8; N],
 ) -> bool {
     profile_phase!(Tree);

@@ -565,7 +565,7 @@ macro_rules! functionality {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_128s")]
 pub mod slh_dsa_sha2_128s {
-    use crate::hashers::sha2_cat_1::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_1::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -588,7 +588,7 @@ pub mod slh_dsa_sha2_128s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }
@@ -615,7 +615,7 @@ pub mod slh_dsa_sha2_128s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_128s")]
 pub mod slh_dsa_shake_128s {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -638,7 +638,7 @@ pub mod slh_dsa_shake_128s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }
@@ -665,7 +665,7 @@ pub mod slh_dsa_shake_128s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_128f")]
 pub mod slh_dsa_sha2_128f {
-    use crate::hashers::sha2_cat_1::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_1::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -688,7 +688,7 @@ pub mod slh_dsa_sha2_128f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }
@@ -715,7 +715,7 @@ pub mod slh_dsa_sha2_128f {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_128f")]
 pub mod slh_dsa_shake_128f {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -738,7 +738,7 @@ pub mod slh_dsa_shake_128f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }
@@ -765,7 +765,7 @@ pub mod slh_dsa_shake_128f {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_192s")]
 pub mod slh_dsa_sha2_192s {
-    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -788,7 +788,7 @@ pub mod slh_dsa_sha2_192s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }
@@ -815,7 +815,7 @@ pub mod slh_dsa_sha2_192s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_192s")]
 pub mod slh_dsa_shake_192s {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -838,7 +838,7 @@ pub mod slh_dsa_shake_192s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }
@@ -865,7 +865,7 @@ pub mod slh_dsa_shake_192s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_192f")]
 pub mod slh_dsa_sha2_192f {
-    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -888,7 +888,7 @@ pub mod slh_dsa_sha2_192f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }
@@ -915,7 +915,7 @@ pub mod slh_dsa_sha2_192f {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_192f")]
 pub mod slh_dsa_shake_192f {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -938,7 +938,7 @@ pub mod slh_dsa_shake_192f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }
@@ -965,7 +965,7 @@ pub mod slh_dsa_shake_192f {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_256s")]
 pub mod slh_dsa_sha2_256s {
-    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -988,7 +988,7 @@ pub mod slh_dsa_sha2_256s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }
@@ -1015,7 +1015,7 @@ pub mod slh_dsa_sha2_256s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_256s")]
 pub mod slh_dsa_shake_256s {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -1038,7 +1038,7 @@ pub mod slh_dsa_shake_256s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }
@@ -1065,7 +1065,7 @@ pub mod slh_dsa_shake_256s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_256f")]
 pub mod slh_dsa_sha2_256f {
-    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -1088,7 +1088,7 @@ pub mod slh_dsa_sha2_256f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }
@@ -1115,7 +1115,7 @@ pub mod slh_dsa_sha2_256f {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_256f")]
 pub mod slh_dsa_shake_256f {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -1138,7 +1138,7 @@ pub mod slh_dsa_shake_256f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> { pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
 
     functionality!();
 }

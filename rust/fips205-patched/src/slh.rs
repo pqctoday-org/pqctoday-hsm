@@ -70,8 +70,9 @@ pub(crate) fn slh_keygen_internal<
     adrs.set_layer_address(d32 - 1);
 
     // 3: PK.root ← xmss_node(SK.seed, 0, h′, PK.seed, ADRS)
+    let seed = (hashers.pk_seed)(&pk_seed);
     let pk_root =
-        xmss::xmss_node::<H, HP, K, LEN, M, N>(hashers, &sk_seed, 0, hp32, &pk_seed, &adrs);
+        xmss::xmss_node::<H, HP, K, LEN, M, N>(hashers, &sk_seed, 0, hp32, &seed, &adrs);
 
     // 4: return ( (SK.seed, SK.prf, PK.seed, PK.root), (PK.seed, PK.root) )
     let pk = SlhPublicKey { pk_seed, pk_root };
@@ -210,13 +211,16 @@ pub(crate) fn slh_sign_internal<
     // 13: ADRS.setKeyPairAddress(idxleaf)
     adrs.set_key_pair_address(idx_leaf as u32);
 
+    // PK.seed with its tweakable-hash first block precomputed (hashers.rs)
+    let seed = (hashers.pk_seed)(&sk.pk_seed);
+
     // 14: SIG_FORS ← fors_sign(md, SK.seed, PK.seed, ADRS)
     // 15: SIG ← SIG ∥ SIG_FORS
-    sig.fors_sig = fors::fors_sign(hashers, md, &sk.sk_seed, &adrs, &sk.pk_seed)?;
+    sig.fors_sig = fors::fors_sign(hashers, md, &sk.sk_seed, &adrs, &seed)?;
 
     // 16: PK_FORS ← fors_pkFromSig(SIG_FORS , md, PK.seed, ADRS)    ▷ Get FORS key
     let pk_fors =
-        fors::fors_pk_from_sig::<A, K, LEN, M, N>(hashers, &sig.fors_sig, md, &sk.pk_seed, &adrs);
+        fors::fors_pk_from_sig::<A, K, LEN, M, N>(hashers, &sig.fors_sig, md, &seed, &adrs);
 
     // 17: SIG_HT ← ht_sign(PK_FORS , SK.seed, PK.seed, idx_tree, idx_leaf)
     // 18: SIG ← SIG ∥ SIG_HT
@@ -224,7 +228,7 @@ pub(crate) fn slh_sign_internal<
         hashers,
         &pk_fors.key,
         &sk.sk_seed,
-        &sk.pk_seed,
+        &seed,
         idx_tree,
         idx_leaf as u32,
     )?;
@@ -355,16 +359,19 @@ pub(crate) fn slh_verify_internal<
     let Ok(idx_leaf_u32) = u32::try_from(idx_leaf) else { return false };  // should never fail
     adrs.set_key_pair_address(idx_leaf_u32);
 
+    // PK.seed with its tweakable-hash first block precomputed (hashers.rs)
+    let seed = (hashers.pk_seed)(&pk.pk_seed);
+
     // 17: PK_FORS ← fors_pkFromSig(SIG_FORS, md, PK.seed, ADRS)
     let pk_fors =
-        fors::fors_pk_from_sig::<A, K, LEN, M, N>(hashers, sig_fors, md, &pk.pk_seed, &adrs);
+        fors::fors_pk_from_sig::<A, K, LEN, M, N>(hashers, sig_fors, md, &seed, &adrs);
 
     // 18: return ht_verify(PK_FORS, SIG_HT, PK.seed, idx_tree , idx_leaf, PK.root)
     hypertree::ht_verify::<D, HP, K, LEN, M, N>(
         hashers,
         &pk_fors.key,
         sig_ht,
-        &pk.pk_seed,
+        &seed,
         idx_tree,
         idx_leaf_u32,
         &pk.pk_root,

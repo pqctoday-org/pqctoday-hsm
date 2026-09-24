@@ -1,4 +1,4 @@
-use crate::hashers::Hashers;
+use crate::hashers::{Hashers, PkSeed};
 use crate::types::{Adrs, WotsSig, XmssSig, TREE, WOTS_HASH};
 use crate::wots;
 
@@ -18,7 +18,7 @@ pub(crate) fn xmss_node<
     const M: usize,
     const N: usize,
 >(
-    hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], i: u32, z: u32, pk_seed: &[u8], adrs: &Adrs,
+    hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], i: u32, z: u32, pk_seed: &PkSeed<N>, adrs: &Adrs,
 ) -> [u8; N] {
     profile_phase!(Tree);
     let mut adrs = adrs.clone();
@@ -84,7 +84,7 @@ pub(crate) fn xmss_sign<
     const M: usize,
     const N: usize,
 >(
-    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], idx: u32, pk_seed: &[u8],
+    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], idx: u32, pk_seed: &PkSeed<N>,
     adrs: &Adrs,
 ) -> XmssSig<HP, LEN, N> {
     profile_phase!(Tree);
@@ -139,7 +139,7 @@ pub(crate) fn xmss_pk_from_sig<
     const N: usize,
 >(
     hashers: &Hashers<K, LEN, M, N>, idx: u32, sig_xmss: &XmssSig<HP, LEN, N>, m: &[u8],
-    pk_seed: &[u8], adrs: &Adrs,
+    pk_seed: &PkSeed<N>, adrs: &Adrs,
 ) -> [u8; N] {
     profile_phase!(Tree);
     let hp32 = u32::try_from(HP).unwrap();
