@@ -57,7 +57,7 @@ acvp = []
 # entry, so it never reaches the shipped `pqctoday-kmip` binary or any
 # other consumer of this crate.
 test-support = []
-hw-accel = ["dep:pqc-hw", "fips204/hw-accel"]
+hw-accel = ["dep:pqc-hw", "fips204/hw-accel", "fips205/hw-accel", "hbs-lms/hw-accel"]
 phase-profile = [
     "dep:pqc-phase-profile",
     "fips204/phase-profile",
