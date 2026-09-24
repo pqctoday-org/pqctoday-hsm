@@ -61,6 +61,8 @@ pub(crate) fn slh_keygen_internal<
 ) -> (SlhPrivateKey<N>, SlhPublicKey<N>) {
     #[cfg(feature = "phase-profile")]
     let _pqc_operation = pqc_phase_profile::operation("SLH-DSA", "keygen");
+    // Count this thread against the process-wide core budget until keygen returns (par.rs).
+    let _caller = crate::par::enter();
     let (d32, hp32) = (u32::try_from(D).unwrap(), u32::try_from(HP).unwrap());
     //
     // 1: ADRS ← toByte(0, 32)    ▷ Generate the public key for the top-level XMSS tree
@@ -157,6 +159,8 @@ pub(crate) fn slh_sign_internal<
 ) -> Result<SlhDsaSig<A, D, HP, K, LEN, N>, &'static str> {
     #[cfg(feature = "phase-profile")]
     let _pqc_operation = pqc_phase_profile::operation("SLH-DSA", "sign");
+    // Count this thread against the process-wide core budget until signing returns (par.rs).
+    let _caller = crate::par::enter();
     let (d32, h32) = (u32::try_from(D).unwrap(), u32::try_from(H).unwrap());
     //
     // 1: ADRS ← toByte(0, 32)

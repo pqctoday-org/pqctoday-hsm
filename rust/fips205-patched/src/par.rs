@@ -17,9 +17,19 @@
 //! use, so the output is byte-identical; only the order of the hash calls changes.
 //!
 //! Without the feature (`no_std`, e.g. wasm32) the entry points return `None` and the serial
-//! path runs exactly as before. With it, one operation uses `available_parallelism()` threads,
-//! capped by the environment variable `FIPS205_THREADS` when that is a positive integer;
-//! `FIPS205_THREADS=1` restores the original serial path.
+//! path runs exactly as before.
+//!
+//! With it, threads come from ONE process-wide core budget of `available_parallelism()`
+//! (owner decision 2026-09-24): every SLH-DSA keygen/sign in flight counts its own calling
+//! thread against the budget for its whole duration ([`enter`]), and an operation may add
+//! an extra worker thread only while `callers + extra threads` stays within the budget. So
+//! when one signature runs alone it gets every spare core, and when as many operations as
+//! cores run at once they all run serially instead of oversubscribing the machine. Tokens are
+//! taken one at a time and without blocking, each time the calling thread picks its next
+//! subtree, and a helper returns its token as soon as there is no work left for it — so a
+//! token freed by one finished signature goes to whichever one is still running.
+//! `FIPS205_THREADS`, when a positive integer, caps the threads of ONE operation (caller
+//! included); `FIPS205_THREADS=1` always runs the original serial path.
 
 #[cfg(not(feature = "parallel"))]
 use crate::hashers::{Hashers, PkSeed};
@@ -77,8 +87,21 @@ pub(crate) fn xmss_root<
 }
 
 
+/// Registration of one keygen/sign in progress (no-op without the `parallel` feature).
+#[cfg(not(feature = "parallel"))]
+pub(crate) struct CallerGuard;
+
+/// Registers the calling thread of one keygen/sign against the core budget until the
+/// returned guard is dropped (no-op without the `parallel` feature).
+#[cfg(not(feature = "parallel"))]
+pub(crate) fn enter() -> CallerGuard { CallerGuard }
+
+
 #[cfg(feature = "parallel")]
-pub(crate) use threaded::{sign_nodes, xmss_root};
+pub(crate) use threaded::{enter, sign_nodes, xmss_root};
+
+#[cfg(feature = "parallel")]
+pub use threaded::budget_stats;
 
 
 #[cfg(feature = "parallel")]
@@ -92,40 +115,161 @@ mod threaded {
     use std::vec::Vec;
 
 
-    /// Threads one operation may use: `available_parallelism()`, capped by `FIPS205_THREADS`.
-    fn thread_count() -> usize {
-        let available =
-            std::thread::available_parallelism().map_or(1, core::num::NonZeroUsize::get);
+    /// Size of the process-wide budget (0 = not yet read; then `available_parallelism()`).
+    static BUDGET: AtomicUsize = AtomicUsize::new(0);
+    /// Calling threads of operations in flight plus the extra workers they hold.
+    static IN_USE: AtomicUsize = AtomicUsize::new(0);
+    /// Instrumentation for tests and diagnostics: largest `IN_USE` right after a grant of
+    /// extra threads, and the largest number of extra worker threads alive at once.
+    static MAX_AT_GRANT: AtomicUsize = AtomicUsize::new(0);
+    static LIVE_EXTRA: AtomicUsize = AtomicUsize::new(0);
+    static PEAK_EXTRA: AtomicUsize = AtomicUsize::new(0);
+
+    fn budget() -> usize {
+        match BUDGET.load(Ordering::Relaxed) {
+            0 => {
+                let n = std::thread::available_parallelism().map_or(1, core::num::NonZeroUsize::get);
+                // Racing first readers compute the same value; keep whichever lands first.
+                let _ = BUDGET.compare_exchange(0, n, Ordering::Relaxed, Ordering::Relaxed);
+                BUDGET.load(Ordering::Relaxed)
+            }
+            n => n,
+        }
+    }
+
+    /// Threads ONE operation may use at most (caller included): the budget, capped by
+    /// `FIPS205_THREADS` when that is a positive integer.
+    fn per_operation_cap() -> usize {
+        let budget = budget();
         match std::env::var("FIPS205_THREADS").ok().and_then(|v| v.trim().parse::<usize>().ok()) {
-            Some(n) if n >= 1 => n.min(available),
-            _ => available,
+            Some(n) if n >= 1 => n.min(budget),
+            _ => budget,
         }
     }
 
 
-    /// Computes `job(i)` for every `i` in `0..n` on up to `threads` scoped threads (the
-    /// calling thread included) and returns the results in index order. Indices are handed
-    /// out one at a time from a shared counter, so callers order them largest-job-first.
-    fn map_indexed<T: Send, F: Fn(usize) -> T + Sync>(n: usize, threads: usize, job: F) -> Vec<T> {
-        let workers = threads.min(n);
-        if workers <= 1 {
-            return (0..n).map(job).collect();
-        }
-        let next = AtomicUsize::new(0);
-        let run = || {
-            let mut done = Vec::new();
-            loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= n {
-                    break done;
-                }
-                done.push((i, job(i)));
+    /// The calling thread of one keygen/sign, counted against the budget until dropped.
+    pub(crate) struct CallerGuard(());
+
+    impl Drop for CallerGuard {
+        fn drop(&mut self) { let _ = IN_USE.fetch_sub(1, Ordering::AcqRel); }
+    }
+
+    /// Registers the calling thread of one keygen/sign against the budget. Never blocks and
+    /// never fails: a caller always runs, at worst serially.
+    pub(crate) fn enter() -> CallerGuard {
+        let _ = IN_USE.fetch_add(1, Ordering::AcqRel);
+        CallerGuard(())
+    }
+
+
+    /// Extra worker threads taken from the budget; returned when dropped.
+    struct ExtraGrant(usize);
+
+    impl Drop for ExtraGrant {
+        fn drop(&mut self) {
+            if self.0 > 0 {
+                let _ = IN_USE.fetch_sub(self.0, Ordering::AcqRel);
             }
+        }
+    }
+
+    /// Takes ONE extra-thread token if `IN_USE` (callers registered by [`enter`], this one
+    /// included, plus every extra thread held) is below the budget. Non-blocking.
+    fn take_one() -> Option<ExtraGrant> {
+        let budget = budget();
+        let mut cur = IN_USE.load(Ordering::Acquire);
+        loop {
+            if cur >= budget {
+                return None;
+            }
+            match IN_USE.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => {
+                    let _ = MAX_AT_GRANT.fetch_max(cur + 1, Ordering::Relaxed);
+                    return Some(ExtraGrant(1));
+                }
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
+
+    /// Test and diagnostic hooks for the process-wide core budget (pqctoday-hsm). Not part of
+    /// the FIPS 205 API; the numbers are process-global.
+    #[doc(hidden)]
+    pub mod budget_stats {
+        use super::{BUDGET, IN_USE, LIVE_EXTRA, MAX_AT_GRANT, PEAK_EXTRA};
+        use core::sync::atomic::Ordering;
+
+        /// Overrides the budget size (normally `available_parallelism()`); for tests.
+        pub fn set_budget(n: usize) { BUDGET.store(n.max(1), Ordering::Relaxed); }
+
+        /// Resets the peak counters.
+        pub fn reset() {
+            MAX_AT_GRANT.store(0, Ordering::Relaxed);
+            PEAK_EXTRA.store(0, Ordering::Relaxed);
+        }
+
+        /// Largest (callers + extra threads) in use right after any grant of extra threads.
+        #[must_use]
+        pub fn max_in_use_at_grant() -> usize { MAX_AT_GRANT.load(Ordering::Relaxed) }
+
+        /// Largest number of extra worker threads alive at the same time.
+        #[must_use]
+        pub fn peak_extra_threads() -> usize { PEAK_EXTRA.load(Ordering::Relaxed) }
+
+        /// Callers plus extra threads currently counted against the budget.
+        #[must_use]
+        pub fn in_use() -> usize { IN_USE.load(Ordering::Relaxed) }
+
+        /// Extra worker threads alive right now.
+        #[must_use]
+        pub fn live_extra_threads() -> usize { LIVE_EXTRA.load(Ordering::Relaxed) }
+    }
+
+
+    /// Computes `job(i)` for every `i` in `0..n` and returns the results in index order. The
+    /// calling thread works through the jobs itself and, before each one, adds a helper thread
+    /// for every spare token the budget has (at most `max_extra` helpers in total). A helper keeps
+    /// its token only until the job queue is empty. Tokens therefore flow to whichever
+    /// operation is still running when another finishes, instead of being fixed at the start.
+    /// Jobs are handed out one at a time from a shared counter, so callers order them
+    /// largest-job-first.
+    fn map_indexed<T: Send, F: Fn(usize) -> T + Sync>(n: usize, max_extra: usize, job: F) -> Vec<T> {
+        let next = AtomicUsize::new(0);
+        let run_one = || {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            (i < n).then(|| (i, job(i)))
+        };
+        let helper = |grant: ExtraGrant| {
+            let live = LIVE_EXTRA.fetch_add(1, Ordering::AcqRel) + 1;
+            let _ = PEAK_EXTRA.fetch_max(live, Ordering::Relaxed);
+            let mut done = Vec::new();
+            while let Some(r) = run_one() {
+                done.push(r);
+            }
+            let _ = LIVE_EXTRA.fetch_sub(1, Ordering::AcqRel);
+            drop(grant); // token back to the budget as soon as this helper runs dry
+            done
         };
         let parts: Vec<Vec<(usize, T)>> = std::thread::scope(|s| {
-            let handles: Vec<_> = (1..workers).map(|_| s.spawn(&run)).collect();
-            let mut parts = Vec::with_capacity(workers);
-            parts.push(run());
+            let mut handles = Vec::new();
+            let mut mine = Vec::new();
+            loop {
+                // Top up with every spare token before each job (not one per job: the first
+                // jobs are the largest subtrees, so a slow ramp-up would serialise them).
+                while handles.len() < max_extra && next.load(Ordering::Relaxed) + 1 < n {
+                    let Some(grant) = take_one() else { break };
+                    let helper = &helper;
+                    handles.push(s.spawn(move || helper(grant)));
+                }
+                match run_one() {
+                    Some(r) => mine.push(r),
+                    None => break,
+                }
+            }
+            let mut parts = Vec::with_capacity(handles.len() + 1);
+            parts.push(mine);
             for handle in handles {
                 parts.push(handle.join().unwrap_or_else(|e| std::panic::resume_unwind(e)));
             }
@@ -166,8 +310,9 @@ mod threaded {
         hashers: &Hashers<K, LEN, M, N>, md: &[u8], sk_seed: &[u8], pk_seed: &PkSeed<N>,
         fors_adrs: &Adrs, idx_tree: u64, idx_leaf: u32,
     ) -> Result<Option<SignNodes<A, D, HP, K, N>>, &'static str> {
-        let threads = thread_count();
-        if threads <= 1 {
+        // FIPS205_THREADS=1: the original serial path, untouched.
+        let max_extra = per_operation_cap().saturating_sub(1);
+        if max_extra == 0 {
             return Ok(None);
         }
         let (a32, k32, hp32) = (A as u32, K as u32, HP as u32);
@@ -212,7 +357,7 @@ mod threaded {
         }
         jobs.sort_by(|a, b| b.0.cmp(&a.0));
 
-        let results = map_indexed(jobs.len(), threads, |n| match jobs[n].1 {
+        let results = map_indexed(jobs.len(), max_extra, |n| match jobs[n].1 {
             Job::Fors { z, index, .. } => {
                 fors::fors_node::<A, K, LEN, M, N>(hashers, sk_seed, index, z, pk_seed, fors_adrs)
             }
@@ -252,14 +397,14 @@ mod threaded {
     >(
         hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], pk_seed: &PkSeed<N>, adrs: &Adrs,
     ) -> Option<[u8; N]> {
-        let threads = thread_count();
-        if threads <= 1 {
+        let max_extra = per_operation_cap().saturating_sub(1);
+        if max_extra == 0 {
             return None;
         }
         let hp32 = HP as u32;
         let split = hp32.min(6); // at most 64 subtrees
         let base = hp32 - split;
-        let mut level = map_indexed(1usize << split, threads, |i| {
+        let mut level = map_indexed(1usize << split, max_extra, |i| {
             xmss::xmss_node::<H, HP, K, LEN, M, N>(hashers, sk_seed, i as u32, base, pk_seed, adrs)
         });
         for z in (base + 1)..=hp32 {

@@ -64,6 +64,11 @@ path = "tests/messages.rs"
 name = "py_vectors"
 path = "tests/py_vectors.rs"
 
+[[test]]
+name = "parallel_budget"
+path = "tests/parallel_budget.rs"
+required-features = ["parallel"]
+
 [[bench]]
 name = "benchmark"
 path = "benches/benchmark.rs"
