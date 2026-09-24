@@ -248,6 +248,30 @@ aws-lc-rs = "1"
 [target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
 pqc-hw = { path = "pqc-hw", optional = true }
 
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+# Hardware SHA-2 for every sha2 0.10 user in the graph (fips205's SLH-DSA-SHA2
+# sets, hbs-lms, xmss, and the engine's own SHA-2/HMAC/HKDF). Feature
+# unification applies it to the one sha2 0.10 in Cargo.lock, including the
+# patched crates' uses.
+#
+# aarch64: sha2 0.10 compiles its Armv8 backend ONLY under the `asm` feature
+# (sha2-0.10.9 src/sha256.rs, src/sha512.rs cfg_if); without it SHA-256/512
+# always run the portable code. The backend chooses the instructions at run
+# time (cpufeatures reads HWCAP) and falls back to the portable code on a core
+# without them, so one binary is correct on any Armv8-A. Cortex-A53/A55 (KV260,
+# i.MX 95) have the SHA-256 instructions but not the Armv8.2 SHA-512 ones, so
+# there only SHA-256 is accelerated.
+#
+# x86_64 needs nothing here: sha2 0.10 already selects its SHA-NI (SHA-256) and
+# AVX2 (SHA-512) backends by default, with run-time detection and the portable
+# fallback (src/sha256/x86.rs `cpufeatures::new!(shani_cpuid, "sha", ...)`);
+# `asm` there would only swap the fallback for sha2-asm's and add a C build.
+#
+# wasm32 is excluded by construction: this table matches aarch64 only, so
+# sha2-asm and its `cc` build dependency never enter the wasm32 graph
+# (`cargo tree -i sha2-asm --target wasm32-unknown-unknown` prints nothing).
+sha2 = { version = "0.10.8", features = ["asm"] }
+
 [dev-dependencies]
 # NIST ACVP keyGen KAT parsing (T7 seed-deterministic keygen tests reads
 # the internalProjection.json vector files shipped with the patched forks).
