@@ -5151,9 +5151,13 @@ fn C_DecapsulateKey_impl(
                 }
             };
             // PKCS#11 v3.2 §5.18.9 — a ciphertext of the wrong length for the
-            // key's parameter set is invalid input ciphertext.
+            // key's parameter set. §5.18.9's return values list
+            // CKR_WRAPPED_KEY_LEN_RANGE (§5.1.6: "invalid solely on the basis
+            // of its length") and not CKR_ENCRYPTED_DATA_INVALID, whose §5.1.6
+            // definition is scoped to "a decryption operation" (E4). Same code
+            // the ML-KEM arm below returns.
             if ul_ciphertext_len != expected_ct {
-                return CKR_ENCRYPTED_DATA_INVALID;
+                return CKR_WRAPPED_KEY_LEN_RANGE;
             }
             if p_ciphertext.is_null() {
                 return CKR_ARGUMENTS_BAD;
@@ -19521,14 +19525,19 @@ mod pqc_vendor_kem_ffi_tests {
         );
     }
 
-    /// §5.18.9-equivalent — a ciphertext of the wrong length for the vendor
-    /// KEM's parameter set → CKR_ENCRYPTED_DATA_INVALID.
+    /// §5.18.9 — a ciphertext of the wrong length for the vendor KEM's
+    /// parameter set → CKR_WRAPPED_KEY_LEN_RANGE. Was
+    /// CKR_ENCRYPTED_DATA_INVALID, which §5.18.9's return-value list does not
+    /// name (§5.1.6 scopes it to "a decryption operation"); §5.1.6 defines
+    /// CKR_WRAPPED_KEY_LEN_RANGE as input "invalid solely on the basis of its
+    /// length" (E4). The native path (`native::encrypt::decapsulate`) is
+    /// asserted too — it answered CKR_ARGUMENTS_BAD.
     ///
     /// Real keygen at native debug-build speed (see the doc comment on
     /// `classic_mceliece_6688128_round_trip` above) — no longer needs
     /// `#[ignore]`.
     #[test]
-    fn decapsulate_wrong_ciphertext_len_encrypted_data_invalid() {
+    fn decapsulate_wrong_ciphertext_len_wrapped_key_len_range() {
         let _guard = test_lock::acquire();
         setup();
         let ps_val = CKP_CLASSIC_MCELIECE_6688128;
@@ -19565,7 +19574,72 @@ mod pqc_vendor_kem_ffi_tests {
                 ct.len() as u32,
                 &mut h_ss,
             ),
-            CKR_ENCRYPTED_DATA_INVALID,
+            CKR_WRAPPED_KEY_LEN_RANGE,
+        );
+        assert_eq!(h_ss, 0, "§5.18.9 — no key object on failure");
+        assert_eq!(
+            crate::native::encrypt::decapsulate(
+                SESSION,
+                h_prv,
+                CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE,
+                &ct,
+            ),
+            Err(CKR_WRAPPED_KEY_LEN_RANGE),
+        );
+    }
+
+    /// E4 — FrodoKEM: a one-byte-short ciphertext → CKR_WRAPPED_KEY_LEN_RANGE
+    /// on both the C-ABI (§5.18.9) and the native path, which answered
+    /// CKR_ARGUMENTS_BAD from `frodo_kem::Ciphertext::from_bytes`.
+    #[test]
+    fn frodokem_decapsulate_short_ciphertext_wrapped_key_len_range() {
+        let _guard = test_lock::acquire();
+        setup();
+        let ps_val = CKP_FRODOKEM_640_SHAKE;
+        let mut pub_tpl = ps_template(&ps_val);
+        let mut prv_tpl = ps_template(&ps_val);
+        let mut kg_mech = mech(CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN);
+        let mut h_pub: u32 = 0;
+        let mut h_prv: u32 = 0;
+        assert_eq!(
+            C_GenerateKeyPair(
+                SESSION,
+                kg_mech.as_mut_ptr() as *mut u8,
+                pub_tpl.as_mut_ptr() as *mut u8,
+                1,
+                prv_tpl.as_mut_ptr() as *mut u8,
+                1,
+                &mut h_pub,
+                &mut h_prv,
+            ),
+            CKR_OK
+        );
+        let alg = crate::native::keygen::frodokem_algorithm(ps_val).unwrap();
+        let mut ct = vec![0u8; alg.params().ciphertext_length - 1];
+        let mut kem_mech = mech(CKM_PQCTODAY_FRODOKEM_ENCAPSULATE);
+        let mut h_ss: u32 = 0;
+        assert_eq!(
+            C_DecapsulateKey(
+                SESSION,
+                kem_mech.as_mut_ptr() as *mut u8,
+                h_prv,
+                std::ptr::null_mut(),
+                0,
+                ct.as_mut_ptr(),
+                ct.len() as u32,
+                &mut h_ss,
+            ),
+            CKR_WRAPPED_KEY_LEN_RANGE,
+        );
+        assert_eq!(h_ss, 0);
+        assert_eq!(
+            crate::native::encrypt::decapsulate(
+                SESSION,
+                h_prv,
+                CKM_PQCTODAY_FRODOKEM_ENCAPSULATE,
+                &ct,
+            ),
+            Err(CKR_WRAPPED_KEY_LEN_RANGE),
         );
     }
 }

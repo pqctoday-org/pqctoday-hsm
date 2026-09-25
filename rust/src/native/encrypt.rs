@@ -329,8 +329,11 @@ fn decapsulate_impl(
         CKP_ML_KEM_1024 => 1568,
         _ => return Err(CKR_ARGUMENTS_BAD),
     };
+    // PKCS#11 v3.2 §5.18.9 return values name CKR_WRAPPED_KEY_LEN_RANGE
+    // (§5.1.6: input "invalid solely on the basis of its length"), not
+    // CKR_ARGUMENTS_BAD — same code as ffi::C_DecapsulateKey (E4).
     if ciphertext.len() != expected_ct_len {
-        return Err(CKR_ARGUMENTS_BAD);
+        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
     }
 
     let prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
@@ -497,10 +500,11 @@ fn classical_decapsulate(
             match scalar.len() {
                 32 => {
                     let arr: [u8; 32] = scalar.as_slice().try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                    // §5.18.9 / §5.1.6 — wrong-length ciphertext (E4).
                     if ciphertext.len() != 32 {
-                        return Err(CKR_ARGUMENTS_BAD);
+                        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
                     }
-                    let eph_pub: [u8; 32] = ciphertext.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
+                    let eph_pub: [u8; 32] = ciphertext.try_into().map_err(|_| CKR_WRAPPED_KEY_LEN_RANGE)?;
                     let secret = x25519_dalek::StaticSecret::from(arr);
                     let ss = secret.diffie_hellman(&x25519_dalek::PublicKey::from(eph_pub));
                     Ok(ss.as_bytes().to_vec())
@@ -509,6 +513,10 @@ fn classical_decapsulate(
                     let mut arr = [0u8; 56];
                     arr.copy_from_slice(scalar.as_slice());
                     let secret = x448::StaticSecret::from(arr);
+                    // §5.18.9 / §5.1.6 — wrong-length ciphertext (E4).
+                    if ciphertext.len() != 56 {
+                        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
+                    }
                     let eph_pub = x448::PublicKey::from_bytes(ciphertext).ok_or(CKR_ARGUMENTS_BAD)?;
                     let ss = secret.diffie_hellman(&eph_pub);
                     Ok(ss.as_bytes().to_vec())
@@ -584,6 +592,10 @@ fn frodokem_decapsulate(access: &SessionAccess, private_key_handle: u32, ciphert
     let prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
     let dk = frodo_kem::DecryptionKey::from_bytes(alg, &prv_key_bytes)
         .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    // §5.18.9 / §5.1.6 — wrong-length ciphertext is CKR_WRAPPED_KEY_LEN_RANGE (E4).
+    if ciphertext.len() != alg.params().ciphertext_length {
+        return Err(CKR_WRAPPED_KEY_LEN_RANGE);
+    }
     let ct = frodo_kem::Ciphertext::from_bytes(alg, ciphertext).map_err(|_| CKR_ARGUMENTS_BAD)?;
     // `B` is an unused generic on `DecryptionKey::decapsulate` (mirrors the
     // shape of `encapsulate`'s message-buffer type param, but decapsulate
@@ -673,8 +685,9 @@ fn classic_mceliece_decapsulate(access: &SessionAccess, private_key_handle: u32,
 
     macro_rules! decap_arm {
         ($module:ident) => {{
+            // §5.18.9 / §5.1.6 — wrong-length ciphertext (E4).
             if ciphertext.len() != classic_mceliece_multi::$module::CRYPTO_CIPHERTEXTBYTES {
-                return Err(CKR_ARGUMENTS_BAD);
+                return Err(CKR_WRAPPED_KEY_LEN_RANGE);
             }
             let sk_arr: Box<[u8; classic_mceliece_multi::$module::CRYPTO_SECRETKEYBYTES]> =
                 prv_key_bytes
@@ -2192,7 +2205,10 @@ mod tests {
         close_session(session).unwrap();
     }
 
-    /// Decap with wrong-length ciphertext → CKR_ARGUMENTS_BAD.
+    /// Decap with wrong-length ciphertext → CKR_WRAPPED_KEY_LEN_RANGE
+    /// (PKCS#11 v3.2 §5.18.9 return values; §5.1.6 "invalid solely on the
+    /// basis of its length"). Was CKR_ARGUMENTS_BAD, which §5.18.9 lists for
+    /// argument errors, not for a ciphertext of the wrong size (E4).
     #[test]
     fn decap_with_wrong_ciphertext_length_returns_err() {
         let _guard = test_lock::acquire();
@@ -2201,7 +2217,7 @@ mod tests {
             generate_ml_kem_keypair(session, CKP_ML_KEM_768, b"\x01", "wrong-len").unwrap();
         // ML-KEM-768 expects ct.len() == 1088; pass 1024.
         let result = decapsulate(session, prv_h, CKM_ML_KEM, &vec![0u8; 1024]);
-        assert_eq!(result.unwrap_err(), CKR_ARGUMENTS_BAD);
+        assert_eq!(result.unwrap_err(), CKR_WRAPPED_KEY_LEN_RANGE);
         close_session(session).unwrap();
     }
 
@@ -2499,6 +2515,29 @@ mod tests {
             56,
             56,
         );
+    }
+
+    /// E4 — a Montgomery-KEM ciphertext (the ephemeral public u-coordinate)
+    /// of the wrong length → CKR_WRAPPED_KEY_LEN_RANGE (PKCS#11 v3.2 §5.18.9
+    /// return values; §5.1.6 "invalid solely on the basis of its length").
+    /// X25519 answered CKR_ARGUMENTS_BAD; X448 fell through to
+    /// `PublicKey::from_bytes`'s own CKR_ARGUMENTS_BAD.
+    #[test]
+    fn classical_montgomery_decap_wrong_length_is_wrapped_key_len_range() {
+        let _g = test_lock::acquire();
+        let session = fresh_session();
+        let (_p25, v25) =
+            crate::native::keygen::generate_x25519_keypair(session, b"\x01", "kem-x25519-len").unwrap();
+        let (_p448, v448) =
+            crate::native::keygen::generate_x448_keypair(session, b"\x01", "kem-x448-len").unwrap();
+        for (h, bad_len) in [(v25, 31usize), (v25, 33), (v448, 55), (v448, 57)] {
+            assert_eq!(
+                decapsulate(session, h, CKM_EC_MONTGOMERY_KEY_DERIVE, &vec![9u8; bad_len]).unwrap_err(),
+                CKR_WRAPPED_KEY_LEN_RANGE,
+                "ciphertext length {bad_len}"
+            );
+        }
+        close_session(session).unwrap();
     }
 
     /// A classical key without CKA_ENCAPSULATE/CKA_DECAPSULATE can't use
