@@ -846,3 +846,30 @@ fn e11_every_hash_ecdsa_mechanism_executes_on_every_curve() {
         }
     }
 }
+
+/// E11(b) — raw CKM_ECDSA on P-521 refused a 32-byte input with
+/// CKR_FUNCTION_FAILED (the RustCrypto prehash API wants at least half the
+/// field). PKCS#11 v3.2 §6.3.12 takes any input length for raw ECDSA, and
+/// FIPS 186-5 §6.4.1 uses the leftmost min(N, len) bits of it, so a short
+/// input is its own integer value. Checked on every curve and several input
+/// lengths — including by cross-verifying the raw signature of SHA-256(M)
+/// as a CKM_ECDSA_SHA256 signature of M, which computes the same e.
+#[test]
+fn e11_raw_ecdsa_accepts_any_digest_length() {
+    use sha2::Digest as _;
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let msg = b"raw ECDSA input conditioning";
+    let raw = mechanism(CKM_ECDSA, &[]);
+    for curve in ["P-256", "secp256k1", "P-384", "P-521"] {
+        let (h_pub, h_prv) = ec_keypair(session, CKM_EC_KEY_PAIR_GEN, curve).expect("keygen");
+        for len in [1usize, 16, 20, 28, 32, 48, 64, 66] {
+            let input: Vec<u8> = (0..len as u8).map(|b| b.wrapping_mul(37).wrapping_add(1)).collect();
+            let sig = sign(session, &raw, h_prv, &input).unwrap_or_else(|rv| panic!("{curve} raw {len}: {rv:#x}"));
+            assert_eq!(verify(session, &raw, h_pub, &input, &sig), CKR_OK, "{curve} raw {len}");
+        }
+        let d = sha2::Sha256::digest(msg).to_vec();
+        let sig = sign(session, &raw, h_prv, &d).expect("raw sign of a SHA-256 digest");
+        assert_eq!(verify(session, &mechanism(CKM_ECDSA_SHA256, &[]), h_pub, msg, &sig), CKR_OK, "{curve}: raw(SHA-256(M)) == ECDSA_SHA256(M)");
+    }
+}

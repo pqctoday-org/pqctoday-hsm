@@ -2322,28 +2322,38 @@ pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<
         // CKM_ECDSA raw (pre-hashed) — PKCS#11 v3.2 §6.3.12
         // Spec: caller supplies the digest; token signs it directly; truncation done internally by token.
         // PrehashSigner accepts the digest bytes and signs without re-hashing.
+        // E11 (2026-09-25): §6.3.12 takes any input length, and FIPS 186-5
+        // §6.4.1 uses the leftmost min(N, len) bits — so the input is
+        // conditioned by fit_digest_to_curve first. The RustCrypto prehash
+        // API refuses inputs shorter than half the field (a 32-byte digest
+        // on P-521 was CKR_FUNCTION_FAILED); zero-extension keeps the
+        // integer value, and inputs of at least half the field sign exactly
+        // as before.
         (CKM_ECDSA, CURVE_P256) | (CKM_ECDSA, 0) => {
             use p256::ecdsa::signature::hazmat::PrehashSigner;
             let sk = p256::ecdsa::SigningKey::from_slice(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sig: p256::ecdsa::Signature =
-                sk.sign_prehash(msg).map_err(|_| CKR_FUNCTION_FAILED)?;
+            let sig: p256::ecdsa::Signature = sk
+                .sign_prehash(&fit_digest_to_curve(CURVE_P256, msg.to_vec()))
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_bytes().to_vec())
         }
         (CKM_ECDSA, CURVE_P384) => {
             use p384::ecdsa::signature::hazmat::PrehashSigner;
             let sk = p384::ecdsa::SigningKey::from_slice(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sig: p384::ecdsa::Signature =
-                sk.sign_prehash(msg).map_err(|_| CKR_FUNCTION_FAILED)?;
+            let sig: p384::ecdsa::Signature = sk
+                .sign_prehash(&fit_digest_to_curve(CURVE_P384, msg.to_vec()))
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_bytes().to_vec())
         }
         (CKM_ECDSA, CURVE_P521) => {
             use p521::ecdsa::signature::hazmat::PrehashSigner;
             let sk = p521::ecdsa::SigningKey::from_slice(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sig: p521::ecdsa::Signature =
-                sk.sign_prehash(msg).map_err(|_| CKR_FUNCTION_FAILED)?;
+            let sig: p521::ecdsa::Signature = sk
+                .sign_prehash(&fit_digest_to_curve(CURVE_P521, msg.to_vec()))
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_bytes().to_vec())
         }
         // P-224 (E13): raw input conditioned per FIPS 186-5 §6.4 like the
@@ -2355,8 +2365,9 @@ pub fn sign_ecdsa(mech: u32, curve: u32, sk_bytes: &[u8], msg: &[u8]) -> Result<
             use k256::ecdsa::signature::hazmat::PrehashSigner;
             let sk = k256::ecdsa::SigningKey::from_slice(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sig: k256::ecdsa::Signature =
-                sk.sign_prehash(msg).map_err(|_| CKR_FUNCTION_FAILED)?;
+            let sig: k256::ecdsa::Signature = sk
+                .sign_prehash(&fit_digest_to_curve(CURVE_K256, msg.to_vec()))
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_bytes().to_vec())
         }
         // ── T1 (round-2) — residual (hash-mech, named-curve) pairs ─────────
@@ -3438,7 +3449,7 @@ pub fn verify_ecdsa(
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig =
                 p256::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
-            vk.verify_prehash(msg, &sig)
+            vk.verify_prehash(&fit_digest_to_curve(CURVE_P256, msg.to_vec()), &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         (CKM_ECDSA, CURVE_P384) => {
@@ -3447,7 +3458,7 @@ pub fn verify_ecdsa(
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig =
                 p384::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
-            vk.verify_prehash(msg, &sig)
+            vk.verify_prehash(&fit_digest_to_curve(CURVE_P384, msg.to_vec()), &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         (CKM_ECDSA, CURVE_P521) => {
@@ -3456,7 +3467,7 @@ pub fn verify_ecdsa(
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig =
                 p521::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
-            vk.verify_prehash(msg, &sig)
+            vk.verify_prehash(&fit_digest_to_curve(CURVE_P521, msg.to_vec()), &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         (CKM_ECDSA, CURVE_P224) => verify_prehash_p224(
@@ -3470,7 +3481,7 @@ pub fn verify_ecdsa(
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig =
                 k256::ecdsa::Signature::try_from(sig_bytes).map_err(|_| CKR_SIGNATURE_INVALID)?;
-            vk.verify_prehash(msg, &sig)
+            vk.verify_prehash(&fit_digest_to_curve(CURVE_K256, msg.to_vec()), &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         // ── T1 (round-2) — residual (hash-mech, named-curve) pairs ─────────
