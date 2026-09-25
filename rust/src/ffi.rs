@@ -4485,8 +4485,15 @@ fn C_EncapsulateKey_impl(
     use ml_kem::KemCore;
 
     nonnull!(p_mechanism, ph_key, pul_ciphertext_len);
-    // PKCS#11 v3.2 §5.18.8 — the key must permit encapsulation.
-    if let Err(rv) = check_key_usage(_h_session, h_key, CKA_ENCAPSULATE) {
+    // PKCS#11 v3.2 §5.18.8 — the key must permit encapsulation; a key of the
+    // wrong type is CKR_KEY_TYPE_INCONSISTENT first (§5.1.6 priority, E6 —
+    // CKR_KEY_FUNCTION_NOT_PERMITTED is not in §5.18.8's list).
+    if let Err(rv) = check_key_for_mech(
+        _h_session,
+        h_key,
+        CKA_ENCAPSULATE,
+        unsafe { ck_param::mech(p_mechanism).mechanism },
+    ) {
         return rv;
     }
     unsafe {
@@ -6449,6 +6456,178 @@ fn check_key_usage_as(
 }
 
 
+/// Secret-key types this engine creates or accepts. A secret-key KDF whose
+/// section allows "any secret key" (§6.43 concatenation, §6.22/§6.29 digest
+/// key derivation, SP 800-108 with an HMAC or CMAC PRF) is checked against
+/// this list, so an asymmetric key is refused while every secret key type
+/// stays usable.
+const SECRET_KEY_TYPES: &[u32] = &[
+    CKK_GENERIC_SECRET,
+    CKK_AES,
+    CKK_AES_XTS,
+    CKK_CHACHA20,
+    CKK_HKDF,
+    CKK_MD5_HMAC,
+    CKK_SHA_1_HMAC,
+    CKK_RIPEMD160_HMAC,
+    CKK_SHA224_HMAC,
+    CKK_SHA256_HMAC,
+    CKK_SHA384_HMAC,
+    CKK_SHA512_HMAC,
+    CKK_SHA512_224_HMAC,
+    CKK_SHA512_256_HMAC,
+    CKK_SHA3_224_HMAC,
+    CKK_SHA3_256_HMAC,
+    CKK_SHA3_384_HMAC,
+    CKK_SHA3_512_HMAC,
+];
+
+/// E5 (2026-09-25) — the CKA_KEY_TYPE values a keyed mechanism accepts, from
+/// each mechanism's "Allowed key types" / key-type text in PKCS#11 v3.2
+/// chapter 6. `None` means the engine does not check the key type at init
+/// for that mechanism (it has no entry here: PBKDF2 takes no base key, BIP32
+/// and CKM_HPKE validate their own inputs).
+///
+/// Before this table the engine checked no key type at C_SignInit /
+/// C_VerifyInit / C_EncryptInit / C_DecryptInit / C_DeriveKey init: an AES
+/// key was accepted for every ML-DSA / SLH-DSA / ECDSA / EdDSA / RSA
+/// mechanism, and an EC key for every HMAC / AES / KDF mechanism, surfacing
+/// (if at all) as an unrelated error from the first C_Sign / C_Encrypt.
+fn mech_key_types(mech: u32) -> Option<&'static [u32]> {
+    use crate::crypto::handlers::{hmac_general_base, is_prehash_ml_dsa, is_prehash_slh_dsa};
+    // _GENERAL HMAC variants share their base mechanism's key types.
+    let base = hmac_general_base(mech).map(|(b, _)| b).unwrap_or(mech);
+    Some(match base {
+        // §6.1 — RSA (PKCS #1 v1.5, PSS, OAEP, X.509, RSA-AES key wrap).
+        CKM_RSA_PKCS | CKM_RSA_X_509 | CKM_RSA_PKCS_OAEP | CKM_RSA_PKCS_PSS
+        | CKM_RSA_AES_KEY_WRAP | CKM_MD5_RSA_PKCS | CKM_SHA1_RSA_PKCS
+        | CKM_SHA1_RSA_PKCS_PSS | CKM_SHA224_RSA_PKCS | CKM_SHA224_RSA_PKCS_PSS
+        | CKM_SHA256_RSA_PKCS | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS
+        | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS | CKM_SHA512_RSA_PKCS_PSS
+        | CKM_SHA3_224_RSA_PKCS | CKM_SHA3_224_RSA_PKCS_PSS | CKM_SHA3_256_RSA_PKCS
+        | CKM_SHA3_256_RSA_PKCS_PSS | CKM_SHA3_384_RSA_PKCS | CKM_SHA3_384_RSA_PKCS_PSS
+        | CKM_SHA3_512_RSA_PKCS | CKM_SHA3_512_RSA_PKCS_PSS => &[CKK_RSA],
+        // §6.3 — ECDSA (Weierstrass curves only).
+        CKM_ECDSA | CKM_ECDSA_SHA1 | CKM_ECDSA_SHA224 | CKM_ECDSA_SHA256
+        | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256
+        | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => &[CKK_EC],
+        // §6.3.15 — EdDSA.
+        CKM_EDDSA | CKM_EDDSA_PH => &[CKK_EC_EDWARDS],
+        // §6.3.17 Table 78 — ECDH allows CKK_EC and CKK_EC_MONTGOMERY;
+        // §6.3.18 Table 79 — the cofactor variant CKK_EC only.
+        CKM_ECDH1_DERIVE => &[CKK_EC, CKK_EC_MONTGOMERY],
+        CKM_ECDH1_COFACTOR_DERIVE => &[CKK_EC],
+        CKM_EC_MONTGOMERY_KEY_DERIVE | CKM_X25519 | CKM_X448 => &[CKK_EC_MONTGOMERY],
+        // §6.67 / §6.69 — ML-DSA and SLH-DSA, pure and pre-hash.
+        m if m == CKM_ML_DSA || m == CKM_HASH_ML_DSA || m == CKM_ML_DSA_EXTERNAL_MU
+            || is_prehash_ml_dsa(m) => &[CKK_ML_DSA],
+        m if m == CKM_SLH_DSA || m == CKM_HASH_SLH_DSA || is_prehash_slh_dsa(m) => &[CKK_SLH_DSA],
+        // §6.68 — ML-KEM; vendor KEMs carry their own vendor key types.
+        CKM_ML_KEM => &[CKK_ML_KEM],
+        CKM_PQCTODAY_FRODOKEM_ENCAPSULATE => &[CKK_PQCTODAY_FRODOKEM],
+        CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE => &[CKK_PQCTODAY_CLASSIC_MCELIECE],
+        // §6.14 / §6.66 — stateful hash-based signatures.
+        CKM_HSS => &[CKK_HSS],
+        CKM_XMSS => &[CKK_XMSS],
+        CKM_XMSSMT => &[CKK_XMSSMT],
+        // HMAC: CKK_GENERIC_SECRET or the digest-specific HMAC key type
+        // (same rule as the C++ engine's resolveMacMech).
+        CKM_MD5_HMAC => &[CKK_GENERIC_SECRET, CKK_MD5_HMAC],
+        CKM_SHA_1_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA_1_HMAC],
+        CKM_RIPEMD160_HMAC => &[CKK_GENERIC_SECRET, CKK_RIPEMD160_HMAC],
+        CKM_SHA224_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA224_HMAC],
+        CKM_SHA256_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA256_HMAC],
+        CKM_SHA384_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA384_HMAC],
+        CKM_SHA512_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA512_HMAC],
+        CKM_SHA512_224_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA512_224_HMAC],
+        CKM_SHA512_256_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA512_256_HMAC],
+        CKM_SHA3_224_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA3_224_HMAC],
+        CKM_SHA3_256_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA3_256_HMAC],
+        CKM_SHA3_384_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA3_384_HMAC],
+        CKM_SHA3_512_HMAC => &[CKK_GENERIC_SECRET, CKK_SHA3_512_HMAC],
+        // Vendor KMAC (SP 800-185) — generic secret, as in the C++ engine.
+        CKM_KMAC_128 | CKM_KMAC_256 => &[CKK_GENERIC_SECRET],
+        // §6.11 — AES (every mode, CMAC, GMAC, key wrap, ENCRYPT_DATA derive).
+        CKM_AES_ECB | CKM_AES_CBC | CKM_AES_CBC_PAD | CKM_AES_CTR | CKM_AES_GCM
+        | CKM_AES_CCM | CKM_AES_OFB | CKM_AES_CFB1 | CKM_AES_CFB8 | CKM_AES_CFB128
+        | CKM_AES_CMAC | CKM_AES_GMAC | CKM_AES_KEY_WRAP | CKM_AES_KEY_WRAP_PAD
+        | CKM_AES_KEY_WRAP_KWP | CKM_AES_ECB_ENCRYPT_DATA | CKM_AES_CBC_ENCRYPT_DATA => {
+            &[CKK_AES]
+        }
+        // §6.15.4 — "CKK_AES_XTS keys only".
+        CKM_AES_XTS => &[CKK_AES_XTS],
+        // §6.20 / §6.21 — ChaCha20 and ChaCha20-Poly1305.
+        CKM_CHACHA20 | CKM_CHACHA20_POLY1305 => &[CKK_CHACHA20],
+        // Secret-key KDFs — any secret key (see SECRET_KEY_TYPES). §6.62.3
+        // names CKK_HKDF / CKK_GENERIC_SECRET for HKDF; other secret key
+        // types stay accepted there as they were (engine latitude), while an
+        // asymmetric key is now refused.
+        CKM_HKDF_DERIVE | CKM_HKDF_DATA | CKM_CONCATENATE_BASE_AND_KEY
+        | CKM_CONCATENATE_BASE_AND_DATA | CKM_CONCATENATE_DATA_AND_BASE
+        | CKM_SHA256_KEY_DERIVATION | CKM_SHA384_KEY_DERIVATION | CKM_SHA512_KEY_DERIVATION
+        | CKM_SHA512_224_KEY_DERIVATION | CKM_SHA512_256_KEY_DERIVATION
+        | CKM_SHA3_256_KEY_DERIVATION | CKM_SHA3_384_KEY_DERIVATION
+        | CKM_SHA3_512_KEY_DERIVATION | CKM_SHAKE_256_KEY_DERIVATION
+        | CKM_SP800_108_COUNTER_KDF | CKM_SP800_108_FEEDBACK_KDF
+        | CKM_SP800_108_DOUBLE_PIPELINE_KDF => SECRET_KEY_TYPES,
+        _ => return None,
+    })
+}
+
+/// `check_key_usage_as` plus the key-type check, in the order PKCS#11 v3.2
+/// §5.1.6 requires: CKR_KEY_TYPE_INCONSISTENT "has a higher priority than
+/// CKR_KEY_FUNCTION_NOT_PERMITTED" (E6), so a wrong-type key that also lacks
+/// the usage attribute reports the type. A key object without CKA_KEY_TYPE
+/// (never produced by this engine's own create/generate paths) is not
+/// refused here; the operation's own dispatch still validates the material.
+///
+/// `type_rv` lets C_WrapKey / C_UnwrapKey report their role-specific
+/// CKR_WRAPPING_KEY_TYPE_INCONSISTENT / CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT
+/// (§5.18.3 / §5.18.4, E7).
+fn check_key_for_mech_as(
+    h_session: u32,
+    h_key: u32,
+    usage_attr: u32,
+    mech: u32,
+    handle_invalid_rv: u32,
+    type_rv: u32,
+) -> Result<(), u32> {
+    let attrs = match OBJECTS.with(|o| o.borrow().get(&h_key).cloned()) {
+        Some(a) => a,
+        None => return Err(handle_invalid_rv),
+    };
+    if !crate::state::can_access_object(h_session, &attrs) {
+        return Err(handle_invalid_rv);
+    }
+    if let (Some(allowed), Some(kt)) = (
+        mech_key_types(mech),
+        crate::state::get_object_attr_u32_from(&attrs, CKA_KEY_TYPE),
+    ) {
+        if !allowed.contains(&kt) {
+            return Err(type_rv);
+        }
+    }
+    if !read_bool_attr(&attrs, usage_attr) {
+        return Err(CKR_KEY_FUNCTION_NOT_PERMITTED);
+    }
+    Ok(())
+}
+
+/// `check_key_for_mech_as` with the plain CKR_KEY_HANDLE_INVALID /
+/// CKR_KEY_TYPE_INCONSISTENT codes (C_SignInit, C_VerifyInit, C_EncryptInit,
+/// C_DecryptInit, their message and recover forms, C_DeriveKey,
+/// C_EncapsulateKey — §5.8.1, §5.10.1, §5.13.1, §5.15.1, §5.18.5, §5.18.8).
+fn check_key_for_mech(h_session: u32, h_key: u32, usage_attr: u32, mech: u32) -> Result<(), u32> {
+    check_key_for_mech_as(
+        h_session,
+        h_key,
+        usage_attr,
+        mech,
+        CKR_KEY_HANDLE_INVALID,
+        CKR_KEY_TYPE_INCONSISTENT,
+    )
+}
+
 /// RSA-PSS mechanism → (expected CKM_* hashAlg, expected CKG_MGF1_* mgf) for
 /// CK_RSA_PKCS_PSS_PARAMS validation (§6.4.5: hashAlg/mgf must match the
 /// digest baked into the mechanism; MGF1 uses the same hash per §6.2).
@@ -6500,8 +6679,11 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         if p_mechanism.is_null() {
             return CKR_ARGUMENTS_BAD;
         }
-        // PKCS#11 v3.2 §5.12.4 — key handle, visibility, and CKA_SIGN permission.
-        if let Err(rv) = check_key_usage(h_session, h_key, CKA_SIGN) {
+        // PKCS#11 v3.2 §5.13.1 — key handle, visibility, key type (E5/E6),
+        // and CKA_SIGN permission.
+        if let Err(rv) =
+            check_key_for_mech(h_session, h_key, CKA_SIGN, ck_param::mech(p_mechanism).mechanism)
+        {
             return rv;
         }
         let mut mech_type = ck_param::mech(p_mechanism).mechanism;
@@ -7235,8 +7417,11 @@ fn C_VerifyInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         if p_mechanism.is_null() {
             return CKR_ARGUMENTS_BAD;
         }
-        // PKCS#11 v3.2 §5.12.4 — key handle, visibility, and CKA_VERIFY permission.
-        if let Err(rv) = check_key_usage(h_session, h_key, CKA_VERIFY) {
+        // PKCS#11 v3.2 §5.15.1 — key handle, visibility, key type (E5/E6),
+        // and CKA_VERIFY permission.
+        if let Err(rv) =
+            check_key_for_mech(h_session, h_key, CKA_VERIFY, ck_param::mech(p_mechanism).mechanism)
+        {
             return rv;
         }
         let mut mech_type = ck_param::mech(p_mechanism).mechanism;
@@ -7866,8 +8051,11 @@ pub fn C_VerifySignatureInit(
         if p_mechanism.is_null() || p_signature.is_null() {
             return CKR_ARGUMENTS_BAD;
         }
-        // PKCS#11 v3.2 §5.12.4 — key handle, visibility, and CKA_VERIFY permission.
-        if let Err(rv) = check_key_usage(h_session, h_key, CKA_VERIFY) {
+        // PKCS#11 v3.2 §5.15.1 — key handle, visibility, key type (E5/E6),
+        // and CKA_VERIFY permission.
+        if let Err(rv) =
+            check_key_for_mech(h_session, h_key, CKA_VERIFY, ck_param::mech(p_mechanism).mechanism)
+        {
             return rv;
         }
         let mut mech_type = ck_param::mech(p_mechanism).mechanism;
@@ -8112,8 +8300,11 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         if ENCRYPT_STATE.with(|s| s.borrow().contains_key(&h_session)) {
             return CKR_OPERATION_ACTIVE;
         }
-        // PKCS#11 v3.2 §5.12.4 — key handle, visibility, and CKA_ENCRYPT permission.
-        if let Err(rv) = check_key_usage(h_session, h_key, CKA_ENCRYPT) {
+        // PKCS#11 v3.2 §5.8.1 — key handle, visibility, key type (E5/E6),
+        // and CKA_ENCRYPT permission.
+        if let Err(rv) =
+            check_key_for_mech(h_session, h_key, CKA_ENCRYPT, ck_param::mech(p_mechanism).mechanism)
+        {
             return rv;
         }
         let mech_type = ck_param::mech(p_mechanism).mechanism;
@@ -8865,8 +9056,11 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         if DECRYPT_STATE.with(|s| s.borrow().contains_key(&h_session)) {
             return CKR_OPERATION_ACTIVE;
         }
-        // PKCS#11 v3.2 §5.12.4 — key handle, visibility, and CKA_DECRYPT permission.
-        if let Err(rv) = check_key_usage(h_session, h_key, CKA_DECRYPT) {
+        // PKCS#11 v3.2 §5.10.1 — key handle, visibility, key type (E5/E6),
+        // and CKA_DECRYPT permission.
+        if let Err(rv) =
+            check_key_for_mech(h_session, h_key, CKA_DECRYPT, ck_param::mech(p_mechanism).mechanism)
+        {
             return rv;
         }
         let mech_type = ck_param::mech(p_mechanism).mechanism;
@@ -10504,7 +10698,9 @@ pub fn C_DeriveKey(
         // CKR_KEY_FUNCTION_NOT_PERMITTED. PBKDF2 uses h_base_key=0
         // (password in params), so skip the check for that case.
         if h_base_key != 0 {
-            if let Err(rv) = check_key_usage(_h_session, h_base_key, CKA_DERIVE) {
+            // E5 — the base key's type is checked against the mechanism
+            // (§5.18.5 lists CKR_KEY_TYPE_INCONSISTENT) before CKA_DERIVE.
+            if let Err(rv) = check_key_for_mech(_h_session, h_base_key, CKA_DERIVE, mech_type) {
                 return rv;
             }
             // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the base key.
@@ -13870,7 +14066,8 @@ pub fn C_SignRecoverInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u3
     if mech_type != CKM_RSA_PKCS && mech_type != CKM_RSA_X_509 {
         return CKR_MECHANISM_INVALID;
     }
-    if let Err(rv) = check_key_usage(h_session, h_key, CKA_SIGN_RECOVER) {
+    // §5.13.5 — key type (E5/E6) before CKA_SIGN_RECOVER.
+    if let Err(rv) = check_key_for_mech(h_session, h_key, CKA_SIGN_RECOVER, mech_type) {
         return rv;
     }
     if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
@@ -13954,7 +14151,8 @@ pub fn C_VerifyRecoverInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> 
     if mech_type != CKM_RSA_PKCS && mech_type != CKM_RSA_X_509 {
         return CKR_MECHANISM_INVALID;
     }
-    if let Err(rv) = check_key_usage(h_session, h_key, CKA_VERIFY_RECOVER) {
+    // §5.15.5 — key type (E5/E6) before CKA_VERIFY_RECOVER.
+    if let Err(rv) = check_key_for_mech(h_session, h_key, CKA_VERIFY_RECOVER, mech_type) {
         return rv;
     }
     if let Err(rv) = check_mechanism_allowed(h_key, mech_type) {
@@ -14750,16 +14948,17 @@ pub fn msg_encrypt_init_internal(
             return CKR_MECHANISM_INVALID;
         }
 
-        let can_use = OBJECTS.with(|o| {
-            o.borrow()
-                .get(&h_key)
-                .map(|attrs| {
-                    read_bool_attr(attrs, if is_encrypt { CKA_ENCRYPT } else { CKA_DECRYPT })
-                })
-                .unwrap_or(false)
-        });
-        if !can_use {
-            return CKR_KEY_FUNCTION_NOT_PERMITTED;
+        // §5.9.1 / §5.11.1 — key handle, visibility, key type (E5/E6: an
+        // EC key reported CKR_KEY_FUNCTION_NOT_PERMITTED), then the usage
+        // attribute. Previously only the usage attribute was read, so an
+        // unknown handle also answered CKR_KEY_FUNCTION_NOT_PERMITTED.
+        if let Err(rv) = check_key_for_mech(
+            h_session,
+            h_key,
+            if is_encrypt { CKA_ENCRYPT } else { CKA_DECRYPT },
+            mech_type,
+        ) {
+            return rv;
         }
         // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS. Covers both
         // C_MessageEncryptInit and C_MessageDecryptInit, which both delegate
@@ -21203,7 +21402,29 @@ mod multipart_sign_verify_ffi_tests {
         // Genuinely single-part: raw RSA/ECDSA (caller supplies the digest) and
         // the stateful HSS/XMSS schemes. Pure ML-DSA / SLH-DSA / EdDSA are NOT
         // listed — they gained multi-part buffering (sign_mech_supports_multipart).
-        for mech in [CKM_RSA_PKCS_RAW, CKM_ECDSA, CKM_HSS, CKM_XMSS] {
+        //
+        // Each mechanism gets a key of its OWN type: the init now checks
+        // CKA_KEY_TYPE (§5.13.1 / §5.15.1 CKR_KEY_TYPE_INCONSISTENT, E5), so the
+        // generic-secret HMAC key this loop used to borrow for all four is
+        // refused. The key is never exercised — no Sign/Verify reaches the
+        // crypto — so only its type and usage flags matter.
+        const TYPED_KEY: u32 = 0x5434_2002;
+        for (mech, key_type) in [
+            (CKM_RSA_PKCS_RAW, CKK_RSA),
+            (CKM_ECDSA, CKK_EC),
+            (CKM_HSS, CKK_HSS),
+            (CKM_XMSS, CKK_XMSS),
+        ] {
+            OBJECTS.with(|o| {
+                let mut attrs = Attributes::new();
+                attrs.insert(CKA_VALUE, HMAC_KEY_BYTES.to_vec());
+                store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+                store_ulong(&mut attrs, CKA_KEY_TYPE, key_type);
+                store_bool(&mut attrs, CKA_SIGN, true);
+                store_bool(&mut attrs, CKA_VERIFY, true);
+                o.borrow_mut().insert(TYPED_KEY, attrs);
+            });
+            const HMAC_KEY: u32 = TYPED_KEY;
             // SignUpdate path.
             assert_eq!(sign_init(SESSION, mech, HMAC_KEY), CKR_OK, "mech 0x{mech:x}");
             assert_eq!(
@@ -22559,7 +22780,17 @@ mod generic_prehash_mech_ffi_tests {
     #[test]
     fn generic_hash_slh_dsa_requires_the_hash_param() {
         let _guard = test_lock::acquire();
-        let (session, _pub_h, priv_h) = setup();
+        let (session, _pub_h, _mldsa_priv) = setup();
+        // An SLH-DSA key: the ML-DSA key `setup` returns is now refused as
+        // CKR_KEY_TYPE_INCONSISTENT for CKM_HASH_SLH_DSA (§5.13.1, E5) before
+        // the parameter is ever read, which is not what this test is about.
+        let (_slh_pub, priv_h) = crate::native::keygen::generate_slh_dsa_keypair(
+            session,
+            CKP_SLH_DSA_SHA2_128F,
+            b"t",
+            "t",
+        )
+        .expect("slh-dsa-sha2-128f keygen");
         // No parameter at all — the generic mechanism cannot select a digest.
         let mut m: [usize; 3] = [CKM_HASH_SLH_DSA as usize, 0, 0];
         assert_eq!(
@@ -25918,3 +26149,10 @@ mod pkcs8_encoding_fixture_tests {
         );
     }
 }
+
+/// PKCS#11 v3.2 behaviour findings E5–E10, E18, E19 (ACVP gap-closure plan,
+/// 2026-09-25) — mirrors of the Hub G-8 error-path probes. See the module's
+/// own docs.
+#[cfg(test)]
+#[path = "p11_behaviour_tests.rs"]
+mod p11_behaviour_tests;
