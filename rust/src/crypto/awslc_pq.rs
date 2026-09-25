@@ -38,8 +38,8 @@
 //! | external µ sign, hedged | yes | `EVP_PKEY_sign` on a PQDSA key |
 //! | external µ sign, deterministic / explicit rnd | no | no rnd control |
 //! | external µ verify | yes | `EVP_PKEY_verify` on a PQDSA key |
-//! | ML-KEM KeyGen from (d ‖ z) | yes | `EVP_PKEY_keygen_deterministic` |
-//! | ML-KEM Encaps with the engine-drawn m | yes | `EVP_PKEY_encapsulate_deterministic` |
+//! | ML-KEM KeyGen from (d ‖ z) | with `awslc-pq-mlkem-seeded` | `EVP_PKEY_keygen_deterministic` (all-bindings only) |
+//! | ML-KEM Encaps with the engine-drawn m | with `awslc-pq-mlkem-seeded` | `EVP_PKEY_encapsulate_deterministic` (all-bindings only) |
 //! | ML-KEM Decaps (implicit rejection) | yes | `EVP_PKEY_decapsulate` |
 //!
 //! Every function returns `Option<_>` with the same rule as `crypto::awslc`:
@@ -503,6 +503,7 @@ pub fn mldsa_verify_mu(ps: u32, pk: &[u8], mu: &[u8], sig: &[u8]) -> Option<bool
 
 /// FIPS 203 Algorithm 16 `ML-KEM.KeyGen_internal(d, z)` with `seed = d ‖ z`:
 /// `(ek, dk)`, byte-identical to ml-kem `generate_deterministic(d, z)`.
+#[cfg(feature = "awslc-pq-mlkem-seeded")]
 pub fn mlkem_keygen_from_seed(ps: u32, seed: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let p = mlkem_params(ps)?;
     if !enabled() || seed.len() != 64 {
@@ -535,6 +536,7 @@ pub fn mlkem_keygen_from_seed(ps: u32, seed: &[u8]) -> Option<(Vec<u8>, Vec<u8>)
 /// caller draws `m` (32 bytes) from its own RNG exactly as ml-kem's
 /// `encapsulate(rng)` would, so both paths consume the RNG identically.
 /// `None` also when AWS-LC's FIPS 203 §7.2 modulus check rejects `ek`.
+#[cfg(feature = "awslc-pq-mlkem-seeded")]
 pub fn mlkem_encaps(ps: u32, ek: &[u8], m: &[u8; 32]) -> Option<(Vec<u8>, Vec<u8>)> {
     let p = mlkem_params(ps)?;
     if !enabled() || ek.len() != p.ek_len {
@@ -562,6 +564,19 @@ pub fn mlkem_encaps(ps: u32, ek: &[u8], m: &[u8; 32]) -> Option<(Vec<u8>, Vec<u8
         return None;
     }
     Some((ct, ss))
+}
+
+/// Without `awslc-pq-mlkem-seeded` the universal aws-lc-sys bindings lack the
+/// deterministic KeyGen / Encaps entry points, so both stay on ml-kem.
+#[cfg(not(feature = "awslc-pq-mlkem-seeded"))]
+pub fn mlkem_keygen_from_seed(_ps: u32, _seed: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    None
+}
+
+/// See [`mlkem_keygen_from_seed`]: ml-kem handles Encaps without the opt-in feature.
+#[cfg(not(feature = "awslc-pq-mlkem-seeded"))]
+pub fn mlkem_encaps(_ps: u32, _ek: &[u8], _m: &[u8; 32]) -> Option<(Vec<u8>, Vec<u8>)> {
+    None
 }
 
 /// FIPS 203 Algorithm 18 `ML-KEM.Decaps_internal(dk, c)`, including implicit
@@ -1163,17 +1178,21 @@ mod tests {
                     *b = (j as u8).wrapping_mul(i | 1).wrapping_add(ps as u8);
                 }
                 let (ek, dk) = rust_keygen(ps, &dz);
-                assert_eq!(
-                    mlkem_keygen_from_seed(ps, &dz).unwrap(),
-                    (ek.clone(), dk.clone())
-                );
+                if cfg!(feature = "awslc-pq-mlkem-seeded") {
+                    assert_eq!(
+                        mlkem_keygen_from_seed(ps, &dz).unwrap(),
+                        (ek.clone(), dk.clone())
+                    );
+                }
                 assert_eq!(
                     handlers::ml_kem_keygen_from_seed(ps, &dz).unwrap(),
                     (ek.clone(), dk.clone())
                 );
                 let m = [i ^ 0xa5; 32];
                 let (ct, ss) = rust_encaps(ps, &ek, &m);
-                assert_eq!(mlkem_encaps(ps, &ek, &m).unwrap(), (ct.clone(), ss.clone()));
+                if cfg!(feature = "awslc-pq-mlkem-seeded") {
+                    assert_eq!(mlkem_encaps(ps, &ek, &m).unwrap(), (ct.clone(), ss.clone()));
+                }
                 assert_eq!(
                     handlers::ml_kem_encaps(ps, &ek, &m).unwrap(),
                     (ct.clone(), ss.clone())

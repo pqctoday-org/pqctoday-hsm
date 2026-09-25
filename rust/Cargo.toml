@@ -55,6 +55,17 @@ acvp = []
 # matrix in src/crypto/awslc_pq.rs. Runtime escape hatch:
 # PQC_AWSLC_PQ_DISABLE=1 puts every call back on fips204 / ml-kem.
 awslc-pq = ["dep:aws-lc-sys"]
+# ML-KEM KeyGen(d ‖ z) and Encaps(ek, m) on AWS-LC need two functions
+# (EVP_PKEY_keygen_deterministic / EVP_PKEY_encapsulate_deterministic) that
+# are only in aws-lc-sys's per-target `all-bindings` set. That set exists only
+# for the targets aws-lc-sys ships pregenerated bindings for (e.g.
+# aarch64-unknown-linux-gnu); on any other triple -- Yocto's
+# aarch64-amd-linux-gnu -- it forces bindgen at build time and the build
+# fails. So `awslc-pq` keeps aws-lc-sys on its target-independent universal
+# bindings (default-features = false, like aws-lc-rs), and ML-KEM keygen and
+# encaps stay on ml-kem unless this opt-in feature is on. Decaps and every
+# ML-DSA route are unaffected.
+awslc-pq-mlkem-seeded = ["awslc-pq", "aws-lc-sys/all-bindings"]
 
 # Exposes `reset_all_engine_state_for_test` as a normal `pub fn` (it is
 # already always available under `#[cfg(test)]` for this crate's own
@@ -281,7 +292,7 @@ aws-lc-rs = "1"
 # copy. Only the public include/openssl API is used (bindgen'd, prefixed per
 # version), which is the same in both. Widen it when aws-lc-rs moves, and
 # regenerate pqctoday-cacp's Yocto crates.inc whenever the hsm pin moves.
-aws-lc-sys = { version = ">=0.44.0, <0.46.0", optional = true }
+aws-lc-sys = { version = ">=0.44.0, <0.46.0", optional = true, default-features = false }
 # Multi-core SLH-DSA sign/keygen (fips205-patched `parallel` feature, src/par.rs):
 # independent FORS and hypertree subtrees are built on spare cores, byte-identical
 # output. Threads come from one process-wide budget of available_parallelism():
