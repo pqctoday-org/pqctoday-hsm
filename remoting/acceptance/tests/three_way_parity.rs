@@ -297,11 +297,14 @@ fn a3_ml_dsa_65_sign_verify_parity_across_transports() {
 //
 // Grounded directly in the engine source
 // (`rust/src/native/encrypt.rs::decapsulate`): "if ciphertext.len() !=
-// expected_ct_len { return Err(CKR_ARGUMENTS_BAD) }" — an explicit,
-// citable check, not an empirical guess.
+// expected_ct_len { return Err(CKR_WRAPPED_KEY_LEN_RANGE) }" — an explicit,
+// citable check, not an empirical guess. PKCS#11 v3.2 §5.18.9 lists
+// CKR_WRAPPED_KEY_LEN_RANGE for C_DecapsulateKey (§5.1.6: input "invalid
+// solely on the basis of its length"); the engine answered CKR_ARGUMENTS_BAD
+// until 2026-09-25 (gap-closure finding E4).
 
 #[test]
-fn a4_decapsulate_wrong_length_ciphertext_ckr_arguments_bad_all_three_transports() {
+fn a4_decapsulate_wrong_length_ciphertext_ckr_wrapped_key_len_range_all_three_transports() {
     let rt = rt();
     rt.block_on(async {
         acceptance::bootstrap_once();
@@ -313,7 +316,7 @@ fn a4_decapsulate_wrong_length_ciphertext_ckr_arguments_bad_all_three_transports
             verbs::generate_key_pair(session, pqctoday_pkcs11_remote_core::Algorithm::MlKem768, b"\xB1", "a4-control").unwrap();
         let control_err =
             verbs::decapsulate(session, prv_h, pqctoday_pkcs11_remote_core::Algorithm::MlKem768, &bogus_ct).unwrap_err();
-        assert_eq!(control_err.raw(), CKR_ARGUMENTS_BAD);
+        assert_eq!(control_err.raw(), CKR_WRAPPED_KEY_LEN_RANGE);
 
         // (b) gRPC
         let mut grpc = acceptance::spawn_grpc().await.unwrap();
@@ -337,7 +340,7 @@ fn a4_decapsulate_wrong_length_ciphertext_ckr_arguments_bad_all_three_transports
             })
             .await
             .unwrap_err();
-        assert_eq!(grpc_raw_ck_rv(&g_err), Some(CKR_ARGUMENTS_BAD));
+        assert_eq!(grpc_raw_ck_rv(&g_err), Some(CKR_WRAPPED_KEY_LEN_RANGE));
 
         // (c) REST
         let rest_base = acceptance::spawn_rest().await.unwrap();
@@ -369,7 +372,7 @@ fn a4_decapsulate_wrong_length_ciphertext_ckr_arguments_bad_all_three_transports
             .await
             .unwrap();
         let body: serde_json::Value = resp.json().await.unwrap();
-        assert_eq!(rest_raw_ck_rv(&body), Some(CKR_ARGUMENTS_BAD));
+        assert_eq!(rest_raw_ck_rv(&body), Some(CKR_WRAPPED_KEY_LEN_RANGE));
     });
 }
 
