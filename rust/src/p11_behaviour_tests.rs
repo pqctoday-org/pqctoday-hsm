@@ -893,3 +893,39 @@ fn e10_kem_calls_cannot_create_a_token_object_in_a_read_only_session() {
         "a session-object encapsulation is permitted in a R/O session"
     );
 }
+
+// ── E10 — a second C_MessageEncryptInit while one is active ─────────────────
+
+/// §5.9.1 / §5.11.1 return values, §5.1.6 CKR_OPERATION_ACTIVE ("an active
+/// operation … prevents Cryptoki from activating the specified operation").
+/// The G-8 probe found a second C_MessageEncryptInit / C_MessageDecryptInit
+/// (CKM_AES_GCM, AES-128/256) on the same session returning CKR_OK — it
+/// silently replaced the active context. Message-sign/verify and every
+/// single-part init already refused. C_Message*Final ends the operation, so
+/// a new init succeeds after it.
+#[test]
+fn e10_second_message_encrypt_init_is_operation_active() {
+    let _guard = test_lock::acquire();
+    setup();
+    put_symmetric_keys();
+    let mut gcm = mech0(CKM_AES_GCM);
+    assert_eq!(C_MessageEncryptInit(SESSION, gcm.as_mut_ptr() as *mut u8, AES_TYPED), CKR_OK);
+    assert_eq!(
+        C_MessageEncryptInit(SESSION, gcm.as_mut_ptr() as *mut u8, AES_TYPED),
+        CKR_OPERATION_ACTIVE,
+        "second C_MessageEncryptInit"
+    );
+    assert_eq!(C_MessageEncryptFinal(SESSION), CKR_OK);
+    assert_eq!(C_MessageEncryptInit(SESSION, gcm.as_mut_ptr() as *mut u8, AES_TYPED), CKR_OK);
+    assert_eq!(C_MessageEncryptFinal(SESSION), CKR_OK);
+
+    assert_eq!(C_MessageDecryptInit(SESSION, gcm.as_mut_ptr() as *mut u8, AES_TYPED), CKR_OK);
+    assert_eq!(
+        C_MessageDecryptInit(SESSION, gcm.as_mut_ptr() as *mut u8, AES_TYPED),
+        CKR_OPERATION_ACTIVE,
+        "second C_MessageDecryptInit"
+    );
+    assert_eq!(C_MessageDecryptFinal(SESSION), CKR_OK);
+    assert_eq!(C_MessageDecryptInit(SESSION, gcm.as_mut_ptr() as *mut u8, AES_TYPED), CKR_OK);
+    assert_eq!(C_MessageDecryptFinal(SESSION), CKR_OK);
+}

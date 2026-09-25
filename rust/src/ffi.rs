@@ -15041,6 +15041,18 @@ pub fn msg_encrypt_init_internal(
     h_key: u32,
     is_encrypt: bool,
 ) -> u32 {
+    // E10 (2026-09-25) — §5.9.1 / §5.11.1 CKR_OPERATION_ACTIVE: at most one
+    // message-based encryption (decryption) operation per session. A second
+    // init used to overwrite the active context and return CKR_OK;
+    // C_MessageEncryptFinal / C_MessageDecryptFinal end the operation.
+    let active = if is_encrypt {
+        MESSAGE_ENCRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
+    } else {
+        MESSAGE_DECRYPT_STATE.with(|s| s.borrow().contains_key(&h_session))
+    };
+    if active {
+        return CKR_OPERATION_ACTIVE;
+    }
     unsafe {
         if p_mechanism.is_null() {
             return CKR_ARGUMENTS_BAD;
