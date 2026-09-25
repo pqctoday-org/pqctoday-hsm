@@ -147,7 +147,7 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			if (haveTr == haveKey)
 			{
 				ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN requires exactly one of hKey or pTR");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			ByteString tr;
@@ -156,7 +156,7 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				if (muParams->ulTRLen != 64)
 				{
 					ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: pTR must be exactly 64 bytes");
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 				}
 				tr = ByteString(muParams->pTR, 64);
 			}
@@ -197,12 +197,12 @@ CK_RV SoftHSM::C_DigestInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			if (muParams->ulctxLen > 255)
 			{
 				ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: context string too long (max 255)");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			if (muParams->ulctxLen > 0 && muParams->pctx == NULL_PTR)
 			{
 				ERROR_MSG("CKM_ML_DSA_EXTERNAL_MU_GEN: context pointer is NULL with non-zero length");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			OSSLMuGenDigest* muHash = new OSSLMuGenDigest();

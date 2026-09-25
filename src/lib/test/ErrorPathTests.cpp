@@ -480,3 +480,172 @@ void ErrorPathTests::testSignMessageBufferTooSmall()
 	CRYPTOKI_F_PTR( C_CloseSession(hSession) );
 	CPPUNIT_ASSERT_MESSAGE(fails, fails.empty());
 }
+
+static const CK_MECHANISM_TYPE RSA_PSS_MECHS[] = {
+	CKM_RSA_PKCS_PSS,
+	CKM_SHA1_RSA_PKCS_PSS, CKM_SHA224_RSA_PKCS_PSS, CKM_SHA256_RSA_PKCS_PSS,
+	CKM_SHA384_RSA_PKCS_PSS, CKM_SHA512_RSA_PKCS_PSS,
+	CKM_SHA3_224_RSA_PKCS_PSS, CKM_SHA3_256_RSA_PKCS_PSS,
+	CKM_SHA3_384_RSA_PKCS_PSS, CKM_SHA3_512_RSA_PKCS_PSS,
+};
+
+// E9 / decision D6 — a malformed mechanism parameter is
+// CKR_MECHANISM_PARAM_INVALID, §5.1.6: "Invalid parameters were supplied to
+// the mechanism specified to the cryptographic operation." Listed by every
+// function exercised here (§5.8.1, §5.10.1, §5.13.1, §5.15.1, §5.18.3,
+// §5.18.4, §5.18.5); §5.8.1 C_EncryptInit does not list CKR_ARGUMENTS_BAD at
+// all. The parameter is a single byte where a structure is required.
+void ErrorPathTests::testMechanismParamInvalid()
+{
+	CK_RV rv;
+	CK_SESSION_HANDLE hSession;
+	CPPUNIT_ASSERT(openUserSession(hSession) == CKR_OK);
+
+	CK_BBOOL bFalse = CK_FALSE;
+	CK_BBOOL bTrue = CK_TRUE;
+	CK_OBJECT_HANDLE hAes, hTarget, hRsaPuk, hRsaPrk, hDsaPuk, hDsaPrk, hSlhPuk, hSlhPrk;
+	CPPUNIT_ASSERT(aesKey(hSession, hAes) == CKR_OK);
+	CPPUNIT_ASSERT(aesKey(hSession, hTarget) == CKR_OK);
+	CPPUNIT_ASSERT(rsaKeyPair(hSession, hRsaPuk, hRsaPrk) == CKR_OK);
+	CPPUNIT_ASSERT(pqcKeyPair(hSession, CKM_ML_DSA_KEY_PAIR_GEN, CKK_ML_DSA, CKP_ML_DSA_44, hDsaPuk, hDsaPrk) == CKR_OK);
+	CPPUNIT_ASSERT(pqcKeyPair(hSession, CKM_SLH_DSA_KEY_PAIR_GEN, CKK_SLH_DSA, CKP_SLH_DSA_SHA2_128F, hSlhPuk, hSlhPrk) == CKR_OK);
+
+	CK_OBJECT_HANDLE hChacha = CK_INVALID_HANDLE;
+	{
+		CK_MECHANISM kg = { CKM_CHACHA20_KEY_GEN, NULL_PTR, 0 };
+		CK_ATTRIBUTE t[] = {
+			{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+			{ CKA_ENCRYPT, &bTrue, sizeof(bTrue) },
+			{ CKA_DECRYPT, &bTrue, sizeof(bTrue) },
+		};
+		if (advertised(CKM_CHACHA20_KEY_GEN))
+			CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_GenerateKey(hSession, &kg, t, 3, &hChacha) ) == CKR_OK);
+	}
+
+	CK_OBJECT_HANDLE hIkm = CK_INVALID_HANDLE;
+	{
+		CK_OBJECT_CLASS secretClass = CKO_SECRET_KEY;
+		CK_KEY_TYPE genKeyType = CKK_GENERIC_SECRET;
+		CK_BYTE ikm[32];
+		for (int i = 0; i < 32; i++) ikm[i] = (CK_BYTE)i;
+		CK_ATTRIBUTE t[] = {
+			{ CKA_CLASS, &secretClass, sizeof(secretClass) },
+			{ CKA_KEY_TYPE, &genKeyType, sizeof(genKeyType) },
+			{ CKA_VALUE, ikm, sizeof(ikm) },
+			{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+			{ CKA_DERIVE, &bTrue, sizeof(bTrue) },
+		};
+		CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_CreateObject(hSession, t, 5, &hIkm) ) == CKR_OK);
+	}
+
+	std::string fails;
+	CK_BYTE one[1] = { 0 };
+	auto bad = [&](CK_MECHANISM_TYPE mech) { CK_MECHANISM m = { mech, one, sizeof(one) }; return m; };
+	auto name = [](const char* fn, CK_MECHANISM_TYPE mech) {
+		char buf[96];
+		snprintf(buf, sizeof(buf), "%s mech 0x%08lx 1-byte parameter", fn, (unsigned long)mech);
+		return std::string(buf);
+	};
+
+	// C_EncryptInit / C_DecryptInit (§5.8.1 / §5.10.1).
+	struct CipherCase { CK_MECHANISM_TYPE mech; CK_OBJECT_HANDLE enc; CK_OBJECT_HANDLE dec; };
+	const CipherCase cipher[] = {
+		{ CKM_AES_CCM, hAes, hAes },
+		{ CKM_AES_CTR, hAes, hAes },
+		{ CKM_AES_GCM, hAes, hAes },
+		{ CKM_CHACHA20_POLY1305, hChacha, hChacha },
+		{ CKM_RSA_PKCS_OAEP, hRsaPuk, hRsaPrk },
+	};
+	for (const CipherCase& c : cipher)
+	{
+		if (!advertised(c.mech) || c.enc == CK_INVALID_HANDLE) continue;
+		CK_MECHANISM m = bad(c.mech);
+		rv = CRYPTOKI_F_PTR( C_EncryptInit(hSession, &m, c.enc) );
+		expect(fails, name("C_EncryptInit", c.mech), rv, CKR_MECHANISM_PARAM_INVALID);
+		if (rv == CKR_OK) CRYPTOKI_F_PTR( C_EncryptInit(hSession, NULL_PTR, CK_INVALID_HANDLE) );
+		rv = CRYPTOKI_F_PTR( C_DecryptInit(hSession, &m, c.dec) );
+		expect(fails, name("C_DecryptInit", c.mech), rv, CKR_MECHANISM_PARAM_INVALID);
+		if (rv == CKR_OK) CRYPTOKI_F_PTR( C_DecryptInit(hSession, NULL_PTR, CK_INVALID_HANDLE) );
+	}
+
+	// C_SignInit / C_VerifyInit (§5.13.1 / §5.15.1).
+	struct SignCase { CK_MECHANISM_TYPE mech; CK_OBJECT_HANDLE prk; CK_OBJECT_HANDLE puk; };
+	std::vector<SignCase> sign = {
+		{ CKM_HASH_ML_DSA, hDsaPrk, hDsaPuk },
+		{ CKM_HASH_SLH_DSA, hSlhPrk, hSlhPuk },
+	};
+	for (CK_MECHANISM_TYPE mech : RSA_PSS_MECHS) sign.push_back({ mech, hRsaPrk, hRsaPuk });
+	for (const SignCase& c : sign)
+	{
+		if (!advertised(c.mech)) continue;
+		CK_MECHANISM m = bad(c.mech);
+		rv = CRYPTOKI_F_PTR( C_SignInit(hSession, &m, c.prk) );
+		expect(fails, name("C_SignInit", c.mech), rv, CKR_MECHANISM_PARAM_INVALID);
+		if (rv == CKR_OK) CRYPTOKI_F_PTR( C_SignInit(hSession, NULL_PTR, CK_INVALID_HANDLE) );
+		rv = CRYPTOKI_F_PTR( C_VerifyInit(hSession, &m, c.puk) );
+		expect(fails, name("C_VerifyInit", c.mech), rv, CKR_MECHANISM_PARAM_INVALID);
+		if (rv == CKR_OK) CRYPTOKI_F_PTR( C_VerifyInit(hSession, NULL_PTR, CK_INVALID_HANDLE) );
+	}
+
+	// C_WrapKey / C_UnwrapKey (§5.18.3 / §5.18.4).
+	CK_OBJECT_CLASS secretClass = CKO_SECRET_KEY;
+	CK_KEY_TYPE aesType = CKK_AES;
+	CK_ATTRIBUTE unwrapTmpl[] = {
+		{ CKA_CLASS, &secretClass, sizeof(secretClass) },
+		{ CKA_KEY_TYPE, &aesType, sizeof(aesType) },
+		{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+	};
+	struct WrapCase { CK_MECHANISM_TYPE mech; CK_OBJECT_HANDLE wrap; CK_OBJECT_HANDLE unwrap; CK_ULONG wrappedLen; };
+	const WrapCase wrapCases[] = {
+		{ CKM_AES_CBC, hAes, hAes, 32 },
+		{ CKM_AES_CBC_PAD, hAes, hAes, 48 },
+		{ CKM_RSA_PKCS_OAEP, hRsaPuk, hRsaPrk, 256 },
+	};
+	for (const WrapCase& c : wrapCases)
+	{
+		if (!advertised(c.mech)) continue;
+		CK_MECHANISM m = bad(c.mech);
+		CK_BYTE out[512];
+		CK_ULONG outLen = sizeof(out);
+		rv = CRYPTOKI_F_PTR( C_WrapKey(hSession, &m, c.wrap, hTarget, out, &outLen) );
+		expect(fails, name("C_WrapKey", c.mech), rv, CKR_MECHANISM_PARAM_INVALID);
+		CK_BYTE wrapped[512] = { 0 };
+		CK_OBJECT_HANDLE hNew = CK_INVALID_HANDLE;
+		rv = CRYPTOKI_F_PTR( C_UnwrapKey(hSession, &m, c.unwrap, wrapped, c.wrappedLen,
+		                                 unwrapTmpl, sizeof(unwrapTmpl)/sizeof(CK_ATTRIBUTE), &hNew) );
+		expect(fails, name("C_UnwrapKey", c.mech), rv, CKR_MECHANISM_PARAM_INVALID);
+	}
+
+	// A well-formed but unsupported parameter is the same case: the 4-byte
+	// alternative initial value of CKM_AES_KEY_WRAP_KWP (§6.16.2), which this
+	// engine does not implement (§5.1.6: "Which parameter values are supported
+	// by a given mechanism can vary from token to token").
+	if (advertised(CKM_AES_KEY_WRAP_KWP))
+	{
+		CK_BYTE aiv[4] = { 0xA6, 0x59, 0x59, 0xA6 };
+		CK_MECHANISM m = { CKM_AES_KEY_WRAP_KWP, aiv, sizeof(aiv) };
+		CK_BYTE out[64];
+		CK_ULONG outLen = sizeof(out);
+		rv = CRYPTOKI_F_PTR( C_WrapKey(hSession, &m, hAes, hTarget, out, &outLen) );
+		expect(fails, "C_WrapKey CKM_AES_KEY_WRAP_KWP with an alternative IV", rv, CKR_MECHANISM_PARAM_INVALID);
+	}
+
+	// C_DeriveKey (§5.18.5).
+	if (advertised(CKM_HKDF_DERIVE))
+	{
+		CK_KEY_TYPE genKeyType = CKK_GENERIC_SECRET;
+		CK_ULONG outLen = 32;
+		CK_ATTRIBUTE outAttribs[] = {
+			{ CKA_CLASS, &secretClass, sizeof(secretClass) },
+			{ CKA_KEY_TYPE, &genKeyType, sizeof(genKeyType) },
+			{ CKA_VALUE_LEN, &outLen, sizeof(outLen) },
+		};
+		CK_MECHANISM m = bad(CKM_HKDF_DERIVE);
+		CK_OBJECT_HANDLE hOut = CK_INVALID_HANDLE;
+		rv = CRYPTOKI_F_PTR( C_DeriveKey(hSession, &m, hIkm, outAttribs, 3, &hOut) );
+		expect(fails, name("C_DeriveKey", CKM_HKDF_DERIVE), rv, CKR_MECHANISM_PARAM_INVALID);
+	}
+
+	CRYPTOKI_F_PTR( C_CloseSession(hSession) );
+	CPPUNIT_ASSERT_MESSAGE(fails, fails.empty());
+}

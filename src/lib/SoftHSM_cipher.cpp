@@ -95,7 +95,7 @@ static CK_RV parseChaCha20Params(CK_MECHANISM_PTR pMechanism, ByteString& iv)
 	if (p->pNonce == NULL_PTR)
 	{
 		DEBUG_MSG("CKM_CHACHA20 pNonce is NULL");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 
 	iv.resize(16);
@@ -183,7 +183,7 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_AES_CTR_PARAMS))
 			{
 				DEBUG_MSG("CTR mode requires a counter block");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			counterBits = CK_AES_CTR_PARAMS_PTR(pMechanism->pParameter)->ulCounterBits;
 			if (counterBits == 0 || counterBits > 128)
@@ -235,7 +235,7 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_CCM_PARAMS))
 			{
 				DEBUG_MSG("CCM mode requires CK_CCM_PARAMS");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			{
 				CK_CCM_PARAMS_PTR ccmp = CK_CCM_PARAMS_PTR(pMechanism->pParameter);
@@ -251,12 +251,12 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				if (ccmp->pNonce == NULL_PTR)
 				{
 					DEBUG_MSG("CCM pNonce is NULL");
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 				}
 				if (ccmp->ulAADLen > 0 && ccmp->pAAD == NULL_PTR)
 				{
 					DEBUG_MSG("CCM pAAD is NULL with non-zero ulAADLen");
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 				}
 				if (ccmp->ulMACLen != 4 && ccmp->ulMACLen != 6 && ccmp->ulMACLen != 8 &&
 				    ccmp->ulMACLen != 10 && ccmp->ulMACLen != 12 && ccmp->ulMACLen != 14 &&
@@ -299,7 +299,7 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_GCM_PARAMS))
 			{
 				DEBUG_MSG("GCM mode requires parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			// A zero-length IV would cause the OSSL layer to substitute a
 			// fixed all-zero nonce, producing catastrophic nonce reuse. Reject
@@ -314,13 +314,13 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_GCM_PARAMS_PTR(pMechanism->pParameter)->pIv == NULL_PTR)
 			{
 				DEBUG_MSG("GCM pIv is NULL with non-zero ulIvLen");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			if (CK_GCM_PARAMS_PTR(pMechanism->pParameter)->ulAADLen > 0 &&
 			    CK_GCM_PARAMS_PTR(pMechanism->pParameter)->pAAD == NULL_PTR)
 			{
 				DEBUG_MSG("GCM pAAD is NULL with non-zero ulAADLen");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			iv.resize(CK_GCM_PARAMS_PTR(pMechanism->pParameter)->ulIvLen);
 			if (CK_GCM_PARAMS_PTR(pMechanism->pParameter)->ulIvLen > 0)
@@ -332,7 +332,7 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			if (tagBytes > 128 || tagBytes % 8 != 0)
 			{
 				DEBUG_MSG("Invalid ulTagBits value");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			tagBytes = tagBytes / 8;
 			break;
@@ -345,7 +345,7 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_SALSA20_CHACHA20_POLY1305_PARAMS))
 			{
 				DEBUG_MSG("CHACHA20_POLY1305 mode requires parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			// ChaCha20-Poly1305 requires a 96-bit (12-byte) nonce per RFC 7539.
 			// A zero-length nonce would let the OSSL layer substitute a fixed
@@ -359,13 +359,13 @@ CK_RV SoftHSM::SymEncryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->pNonce == NULL_PTR)
 			{
 				DEBUG_MSG("CHACHA20_POLY1305 pNonce is NULL with non-zero ulNonceLen");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			if (CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->ulAADLen > 0 &&
 			    CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->pAAD == NULL_PTR)
 			{
 				DEBUG_MSG("CHACHA20_POLY1305 pAAD is NULL with non-zero ulAADLen");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			iv.resize(CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->ulNonceLen);
 			if (CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->ulNonceLen > 0)
@@ -1004,7 +1004,7 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_AES_CTR_PARAMS))
 			{
 				DEBUG_MSG("CTR mode requires a counter block");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			counterBits = CK_AES_CTR_PARAMS_PTR(pMechanism->pParameter)->ulCounterBits;
 			if (counterBits == 0 || counterBits > 128)
@@ -1056,7 +1056,7 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_CCM_PARAMS))
 			{
 				DEBUG_MSG("CCM mode requires CK_CCM_PARAMS");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			{
 				CK_CCM_PARAMS_PTR ccmp = CK_CCM_PARAMS_PTR(pMechanism->pParameter);
@@ -1072,12 +1072,12 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				if (ccmp->pNonce == NULL_PTR)
 				{
 					DEBUG_MSG("CCM pNonce is NULL");
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 				}
 				if (ccmp->ulAADLen > 0 && ccmp->pAAD == NULL_PTR)
 				{
 					DEBUG_MSG("CCM pAAD is NULL with non-zero ulAADLen");
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 				}
 				if (ccmp->ulMACLen != 4 && ccmp->ulMACLen != 6 && ccmp->ulMACLen != 8 &&
 				    ccmp->ulMACLen != 10 && ccmp->ulMACLen != 12 && ccmp->ulMACLen != 14 &&
@@ -1120,7 +1120,7 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_GCM_PARAMS))
 			{
 				DEBUG_MSG("GCM mode requires parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			// A zero-length IV would cause the OSSL layer to substitute a
 			// fixed all-zero nonce, producing catastrophic nonce reuse. Reject
@@ -1135,13 +1135,13 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_GCM_PARAMS_PTR(pMechanism->pParameter)->pIv == NULL_PTR)
 			{
 				DEBUG_MSG("GCM pIv is NULL with non-zero ulIvLen");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			if (CK_GCM_PARAMS_PTR(pMechanism->pParameter)->ulAADLen > 0 &&
 			    CK_GCM_PARAMS_PTR(pMechanism->pParameter)->pAAD == NULL_PTR)
 			{
 				DEBUG_MSG("GCM pAAD is NULL with non-zero ulAADLen");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			iv.resize(CK_GCM_PARAMS_PTR(pMechanism->pParameter)->ulIvLen);
 			if (CK_GCM_PARAMS_PTR(pMechanism->pParameter)->ulIvLen > 0)
@@ -1153,7 +1153,7 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			if (tagBytes > 128 || tagBytes % 8 != 0)
 			{
 				DEBUG_MSG("Invalid ulTagBits value");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			tagBytes = tagBytes / 8;
 			break;
@@ -1166,7 +1166,7 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_SALSA20_CHACHA20_POLY1305_PARAMS))
 			{
 				DEBUG_MSG("CHACHA20_POLY1305 mode requires parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			// ChaCha20-Poly1305 requires a 96-bit (12-byte) nonce per RFC 7539.
 			// A zero-length nonce would let the OSSL layer substitute a fixed
@@ -1180,13 +1180,13 @@ CK_RV SoftHSM::SymDecryptInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->pNonce == NULL_PTR)
 			{
 				DEBUG_MSG("CHACHA20_POLY1305 pNonce is NULL with non-zero ulNonceLen");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			if (CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->ulAADLen > 0 &&
 			    CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->pAAD == NULL_PTR)
 			{
 				DEBUG_MSG("CHACHA20_POLY1305 pAAD is NULL with non-zero ulAADLen");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			iv.resize(CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->ulNonceLen);
 			if (CK_SALSA20_CHACHA20_POLY1305_PARAMS_PTR(pMechanism->pParameter)->ulNonceLen > 0)
