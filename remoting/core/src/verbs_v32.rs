@@ -2795,11 +2795,12 @@ mod tests {
         assert_eq!(rv, 0);
         assert_eq!(attrs2[0].value.len(), 32);
 
-        // Below the engine's real 1000-iteration floor — a genuine
-        // CKR_ARGUMENTS_BAD, not a made-up code.
+        // Below the engine's real 1000-iteration policy floor (decision D7)
+        // — CKR_MECHANISM_PARAM_INVALID since 2026-09-25 (E15), the code
+        // PKCS#11 v3.2 §5.1.6 gives a parameter the token will not accept.
         let pbkdf2_params_low = derive_params::pbkd2(CKZ_SALT_SPECIFIED, b"pbkdf2-salt", 999, CKP_PBKDF2_HMAC_SHA256, &[], b"correct horse battery staple");
         let (rv, _) = derive_key(session, u64::from(ck::CKM_PKCS5_PBKD2), pbkdf2_params_low.as_slice(), 0, &out_tmpl);
-        assert_eq!(rv, CKR_ARGUMENTS_BAD);
+        assert_eq!(rv, softhsmrustv3::constants::CKR_MECHANISM_PARAM_INVALID);
 
         // Same password/salt/PRF, one MORE iteration than the first call —
         // must derive a DIFFERENT key (a real, meaningful check that
