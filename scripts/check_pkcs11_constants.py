@@ -690,6 +690,102 @@ def check_manifest(spec: dict) -> list:
     return errors
 
 
+# ---------------------------------------------------------------------------
+# VENDOR_PRESENCE — which sources each vendor allocation MUST appear in.
+#
+# Added 2026-09-23. check_source() below iterates the constants a source
+# CONTAINS, so it catches a wrong value and an unregistered name but is
+# structurally blind to a constant being ABSENT. That is how six allocations
+# registered here and shipped by the Rust engine stayed missing from
+# vendor_mechanisms.h while this gate reported OK.
+#
+# Deliberately derived from WHICH ENGINE IMPLEMENTS WHAT, not from the current
+# contents of either file. A map populated by observation would encode the
+# status quo as intent and pass trivially — it could never report that today's
+# state is wrong, which is the only thing worth checking.
+#
+#   "both"  — part of the PKCS#11 vendor surface; both engines must define it
+#   "rust"  — Rust-engine internal or Rust-only feature; C++ must NOT need it
+#   "cpp"   — C++-engine internal; Rust carries its own CKA_PRIV_* equivalent
+VENDOR_PRESENCE = {
+    # Public vendor surface — registered in the priv allocation authority §1.4
+    # and part of what a PKCS#11 caller can see. Both engines define these.
+    "CKA_LMOTS_PARAM_SET": "both",
+    "CKA_LMS_PARAM_SET": "both",
+    "CKA_XMSS_PARAM_SET": "both",
+    "CKA_XMSSMT_PARAM_SET": "both",
+    "CKK_PQCTODAY_CLASSIC_MCELIECE": "both",
+    "CKK_PQCTODAY_FRODOKEM": "both",
+    "CKK_HPKE_KEM": "both",
+    "CKM_KECCAK_256": "both",
+    "CKM_PQCTODAY_SPLIT_KEY": "both",
+    "CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN": "both",
+    "CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE": "both",
+    "CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN": "both",
+    "CKM_PQCTODAY_FRODOKEM_ENCAPSULATE": "both",
+    "CKM_HPKE_KEM_KEY_PAIR_GEN": "both",
+    "CKM_HPKE": "both",
+
+    # Engine-internal storage. These never cross the PKCS#11 boundary — the
+    # Rust engine labels them so in its own source ("Private attribute: stores
+    # the parameter set on generated keys"). The two engines solved the same
+    # problem separately and do NOT share values: C++ CKA_STATEFUL_KEY_STATE is
+    # 0x80000101 where Rust CKA_PRIV_STATEFUL_KEY_STATE is 0xffff0005, and
+    # likewise CKA_LEAF_INDEX / CKA_PRIV_LEAF_INDEX. Requiring either engine to
+    # carry the other's would be wrong, not merely noisy.
+    "CKA_PRIV_PARAM_SET": "rust",
+    "CKA_PRIV_ALGO_FAMILY": "rust",
+    "CKA_PRIV_OWNER_SESSION": "rust",
+    "CKA_PRIV_SLOT_ID": "rust",
+    "CKA_PRIV_STATEFUL_KEY_STATE": "rust",
+    "CKA_PRIV_LEAF_INDEX": "rust",
+    "CKA_PRIV_XMSS_KEYS_REMAINING": "rust",
+    "CKA_STATEFUL_KEY_STATE": "cpp",
+    "CKA_LEAF_INDEX": "cpp",
+
+    # Rust-engine-only features. NOT settled — flagged for a maintainer
+    # decision rather than silently blessed, because classifying by observation
+    # is exactly the trap this map exists to avoid. If any of these is meant to
+    # be part of the shared vendor surface, move it to "both" and the gate will
+    # then require the C++ header to carry it.
+    #   CKM_EC_MONTGOMERY_KEY_DERIVE — Rust derive path; C++ uses CKM_ECDH1_DERIVE
+    #   CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED — Rust state-snapshot error code
+    "CKM_EC_MONTGOMERY_KEY_DERIVE": "rust",
+    "CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED": "rust",
+}
+
+
+def check_completeness(vend: dict, rust: dict) -> list:
+    """Every PINNED vendor allocation must be PRESENT where it belongs.
+
+    The counterpart to check_source(): that one validates what a source
+    contains, this one validates what it is missing.
+    """
+    errors = []
+    for name, (val, kind) in sorted(PINNED.items()):
+        if kind != "vendor":
+            continue
+        where = VENDOR_PRESENCE.get(name)
+        if where is None:
+            errors.append(
+                f"UNCLASSIFIED  {name} = 0x{val:08x} is PINNED kind=vendor but "
+                f"absent from VENDOR_PRESENCE — say which sources must define "
+                f"it ('both' / 'rust' / 'cpp') rather than leaving it unchecked"
+            )
+            continue
+        if where in ("both", "cpp") and name not in vend:
+            errors.append(
+                f"MISSING     {name} = 0x{val:08x} expected in "
+                f"src/lib/vendor_mechanisms.h ({where}) but not defined there"
+            )
+        if where in ("both", "rust") and name not in rust:
+            errors.append(
+                f"MISSING     {name} = 0x{val:08x} expected in "
+                f"rust/src/constants.rs ({where}) but not defined there"
+            )
+    return errors
+
+
 def main() -> int:
     spec = parse_header(HEADER)
     if len(spec) < 900:
@@ -716,6 +812,8 @@ def main() -> int:
          check_source("vendor-hdr", vend, spec) + check_duplicates("vendor-hdr", vend)),
         ("kmip/pkcs11-mech-manifest.json (standard_pkcs11_v3_2)",
          check_manifest(spec)),
+        ("vendor allocation completeness (present, not just correct)",
+         check_completeness(vend, rust)),
     ]
 
     total_errors = 0

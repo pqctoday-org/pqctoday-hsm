@@ -49,6 +49,33 @@
 #define CKP_CLASSIC_MCELIECE_348864F  0x3UL
 #define CKP_CLASSIC_MCELIECE_460896   0x4UL
 #define CKP_CLASSIC_MCELIECE_460896F  0x5UL
+
+// ── Allocated elsewhere, implemented in the Rust engine only ────────────────
+// These are NOT implemented by this C++ engine. They are defined here because
+// this header is the complete map of the pqctoday vendor range, and an
+// incomplete map is how a collision happens: read only the block above and the
+// next free key type looks like 0x80000003, which is already CKK_HPKE_KEM.
+//
+// Presence here is an allocation record, NOT a capability claim. The Rust
+// engine (softhsmrustv3) implements FrodoKEM and HPKE; this engine advertises
+// neither, which tests/differential/exceptions.json adjudicates as legal under
+// LEGAL-MECHANISM-SET — both engines claim the Baseline profile, which mandates
+// no mechanisms, and neither claims Complete Provider.
+//
+// Note the vendor range reuses values across namespaces, which is legal
+// (PKCS#11 v3.2 §3.5) and is exactly why the whole range must be visible:
+//   0x80000001  CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN  and  CKK_PQCTODAY_FRODOKEM
+//   0x80000002  CKM_PQCTODAY_FRODOKEM_ENCAPSULATE   and  CKK_PQCTODAY_CLASSIC_MCELIECE
+//   0x80000003  CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN  and  CKK_HPKE_KEM
+
+#define CKM_PQCTODAY_FRODOKEM_KEY_PAIR_GEN 0x80000001UL  /* vendor; Rust engine */
+#define CKM_PQCTODAY_FRODOKEM_ENCAPSULATE  0x80000002UL  /* vendor; Rust engine */
+#define CKK_PQCTODAY_FRODOKEM              0x80000001UL  /* vendor; Rust engine */
+
+#define CKM_HPKE_KEM_KEY_PAIR_GEN          0x80000013UL  /* vendor; Rust engine */
+#define CKM_HPKE                           0x80000014UL  /* vendor; Rust engine */
+#define CKK_HPKE_KEM                       0x80000003UL  /* vendor; Rust engine */
+
 #define CKP_CLASSIC_MCELIECE_6688128F 0x6UL
 #define CKP_CLASSIC_MCELIECE_6960119  0x7UL
 #define CKP_CLASSIC_MCELIECE_6960119F 0x8UL
@@ -130,6 +157,9 @@ typedef CK_MU_GEN_PARAMS CK_PTR CK_MU_GEN_PARAMS_PTR;
 #define CKA_LMOTS_PARAM_SET    0x80000103UL  /* CKP_LMOTS_SHA256_N32_W* value */
 #define CKA_XMSS_PARAM_SET     0x80000104UL  /* CKP_XMSS_* value */
 #define CKA_LEAF_INDEX         0x80000105UL  /* current leaf index (CK_ULONG) */
+// 0x80000106 is UNUSED. Per the priv authority's mutation policy a retired
+// codepoint stays reserved forever, so confirm there before reusing it.
+#define CKA_XMSSMT_PARAM_SET   0x80000107UL  /* CKP_XMSSMT_* value */
 
 // ── LMS parameter set values (IANA registry, RFC 8554 + SP 800-208) ─────────
 // Used in CKA_LMS_PARAM_SET and CK_HSS_KEY_PAIR_GEN_PARAMS.ulLmsParamSet[].
