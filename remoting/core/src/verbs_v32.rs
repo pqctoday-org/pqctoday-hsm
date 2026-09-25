@@ -121,6 +121,7 @@ pub mod ck {
     pub use softhsmrustv3::constants::CKH_DETERMINISTIC_REQUIRED;
     pub use softhsmrustv3::constants::CKK_CHACHA20;
     pub use softhsmrustv3::constants::CKK_EC;
+    pub use softhsmrustv3::constants::CKK_EC_EDWARDS;
     pub use softhsmrustv3::constants::CKM_AES_CBC;
     pub use softhsmrustv3::constants::CKM_AES_CBC_PAD;
     pub use softhsmrustv3::constants::CKM_AES_CTR;
@@ -3569,16 +3570,20 @@ mod tests {
         assert!(!ec_point_attrs[0].value.is_empty(), "RawEncoding: CKA_EC_POINT must be readable");
 
         const ED25519_EC_PARAMS: [u8; 5] = [0x06, 0x03, 0x2B, 0x65, 0x70];
+        // CKK_EC_EDWARDS, not CKK_EC: PKCS#11 v3.2 §5.18.2 — a key type
+        // inconsistent with CKM_EC_EDWARDS_KEY_PAIR_GEN is
+        // CKR_TEMPLATE_INCONSISTENT, which the engine enforces since
+        // gap-closure finding E10 (2026-09-25; it used to overwrite it).
         let eddsa_public_tmpl = [
             attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
-            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC_EDWARDS),
             (CKA_EC_PARAMS, ED25519_EC_PARAMS.to_vec()),
             attr_bool(u64::from(ck::CKA_VERIFY), true),
             attr_bool(u64::from(ck::CKA_TOKEN), false),
         ];
         let eddsa_private_tmpl = [
             attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
-            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC_EDWARDS),
             attr_bool(u64::from(ck::CKA_SIGN), true),
             attr_bool(u64::from(ck::CKA_TOKEN), false),
         ];
@@ -3790,16 +3795,20 @@ mod tests {
         // Update calls (Ed25519 cannot be computed incrementally, but the
         // engine can and does buffer the message until Final).
         const ED25519_EC_PARAMS: [u8; 5] = [0x06, 0x03, 0x2B, 0x65, 0x70];
+        // CKK_EC_EDWARDS, not CKK_EC: PKCS#11 v3.2 §5.18.2 — a key type
+        // inconsistent with CKM_EC_EDWARDS_KEY_PAIR_GEN is
+        // CKR_TEMPLATE_INCONSISTENT, which the engine enforces since
+        // gap-closure finding E10 (2026-09-25; it used to overwrite it).
         let eddsa_public_tmpl = [
             attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PUBLIC_KEY),
-            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC_EDWARDS),
             (CKA_EC_PARAMS, ED25519_EC_PARAMS.to_vec()),
             attr_bool(u64::from(ck::CKA_VERIFY), true),
             attr_bool(u64::from(ck::CKA_TOKEN), false),
         ];
         let eddsa_private_tmpl = [
             attr_ulong(u64::from(ck::CKA_CLASS), ck::CKO_PRIVATE_KEY),
-            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC),
+            attr_ulong(u64::from(ck::CKA_KEY_TYPE), ck::CKK_EC_EDWARDS),
             attr_bool(u64::from(ck::CKA_SIGN), true),
             attr_bool(u64::from(ck::CKA_TOKEN), false),
         ];
