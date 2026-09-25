@@ -3029,6 +3029,20 @@ CK_RV SoftHSM::C_DeriveKey
 			ERROR_MSG("CKM_PKCS5_PBKD2: invalid password or iteration count");
 			return CKR_ARGUMENTS_BAD;
 		}
+		// E15 / decision D7 (ACVP gap-closure 2026-09-25): token policy floor
+		// of PBKDF2_MIN_ITERATIONS, aligned with the Rust engine
+		// (rust/src/ffi.rs CKM_PKCS5_PBKD2 arm: `iterations < 1000` ->
+		// CKR_ARGUMENTS_BAD — same code, so the two engines refuse alike).
+		// NIST SP 800-132 §5.2: "A minimum iteration count of 1,000 is
+		// recommended". PBKDF2 itself (RFC 8018 §5.2) accepts c >= 1, so this
+		// is policy, not an algorithm limit: NIST ACVP PBKDF samples with
+		// c < 1000 are "unsupported by policy" on both engines.
+		if (pbkdp->iterations < PBKDF2_MIN_ITERATIONS)
+		{
+			ERROR_MSG("CKM_PKCS5_PBKD2: iteration count %lu is below the token policy minimum %lu",
+			          (unsigned long)pbkdp->iterations, (unsigned long)PBKDF2_MIN_ITERATIONS);
+			return CKR_ARGUMENTS_BAD;
+		}
 
 		// Map PRF to OpenSSL digest
 		const EVP_MD* pbkdMd = NULL;

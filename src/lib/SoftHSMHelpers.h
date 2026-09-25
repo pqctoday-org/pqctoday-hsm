@@ -63,6 +63,11 @@ static constexpr CK_ULONG MAX_HMAC_KEY_BYTES        = 512UL;
 /// kMacMechTable enforces no HMAC floor (E17, see SoftHSM_slots.cpp).
 static constexpr CK_ULONG HMAC_MIN_KEY_BYTES        = 0UL;
 
+/// CKM_PKCS5_PBKD2 policy floor on CK_PKCS5_PBKD2_PARAMS2.iterations (E15 /
+/// decision D7): NIST SP 800-132 §5.2's recommended minimum, the same floor
+/// the Rust engine enforces. Below it C_DeriveKey returns CKR_ARGUMENTS_BAD.
+static constexpr CK_ULONG PBKDF2_MIN_ITERATIONS     = 1000UL;
+
 /// Valid AES key lengths in bytes.
 static constexpr CK_ULONG AES_KEY_BYTES_128         = 16UL;  ///< AES-128
 static constexpr CK_ULONG AES_KEY_BYTES_192         = 24UL;  ///< AES-192
