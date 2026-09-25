@@ -873,3 +873,67 @@ fn e11_raw_ecdsa_accepts_any_digest_length() {
         assert_eq!(verify(session, &mechanism(CKM_ECDSA_SHA256, &[]), h_pub, msg, &sig), CKR_OK, "{curve}: raw(SHA-256(M)) == ECDSA_SHA256(M)");
     }
 }
+
+/// E11(c) — AES-192 is inside every AES mechanism's advertised 16..32-byte
+/// range, but single-part CKM_AES_CBC_PAD returned CKR_KEY_TYPE_INCONSISTENT
+/// and C_MessageEncryptInit(CKM_AES_GCM) CKR_KEY_SIZE_RANGE for a 24-byte
+/// key. KATs: NIST SP 800-38A §F.2.3 CBC-AES192.Encrypt (the four blocks;
+/// the fifth, the PKCS#7 pad block, computed with pyca/cryptography 49.0.0),
+/// and McGrew-Viega GCM specification test case 8 (K = 0^192, IV = 0^96,
+/// P = 0^128 -> C = 98e7247c07f0fe411c267e4384b0f600,
+/// T = 2ff58d80033927ab8ef4d4587514f0fb).
+#[test]
+fn e11_aes192_cbc_pad_and_message_gcm() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let key = hx("8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b");
+    let iv = hx("000102030405060708090a0b0c0d0e0f");
+    let pt = hx("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710");
+    let want = hx("4f021db243bc633d7178183a9fa071e8b4d9ada9ad7dedf4e5e738763f69145a571b242012fb7ae07fa9baac3df102e008b0e27988598881d920a9e64f5615cd612ccd79224b350935d45dd6a98f8176");
+    let hk = secret_key(session, CKK_AES, &key);
+    let m = mechanism(CKM_AES_CBC_PAD, &iv);
+    assert_eq!(C_EncryptInit(session, m.as_ptr() as *mut u8, hk), CKR_OK);
+    let mut out = vec![0u8; 96];
+    let mut len = out.len() as u32;
+    assert_eq!(C_Encrypt(session, pt.as_ptr() as *mut u8, pt.len() as u32, out.as_mut_ptr(), &mut len), CKR_OK, "C_Encrypt AES-192 CBC_PAD");
+    out.truncate(len as usize);
+    assert_eq!(out, want, "SP 800-38A F.2.3 + PKCS#7 pad block");
+    assert_eq!(C_DecryptInit(session, m.as_ptr() as *mut u8, hk), CKR_OK);
+    let mut back = vec![0u8; 96];
+    let mut len = back.len() as u32;
+    assert_eq!(C_Decrypt(session, out.as_ptr() as *mut u8, out.len() as u32, back.as_mut_ptr(), &mut len), CKR_OK, "C_Decrypt AES-192 CBC_PAD");
+    back.truncate(len as usize);
+    assert_eq!(back, pt);
+
+    // Message-based GCM (§5.9 / §5.11) with an AES-192 key.
+    let gk = secret_key(session, CKK_AES, &[0u8; 24]);
+    let gm = mechanism(CKM_AES_GCM, &[]);
+    let mut nonce = [0u8; 12];
+    let mut tag = [0u8; 16];
+    let msg_params = |nonce: &mut [u8; 12], tag: &mut [u8; 16]| -> Vec<usize> {
+        // CK_GCM_MESSAGE_PARAMS: pIv, ulIvLen, ulIvFixedBits, ivGenerator, pTag, ulTagBits
+        vec![nonce.as_mut_ptr() as usize, 12, 0, 0, tag.as_mut_ptr() as usize, 128]
+    };
+    assert_eq!(C_MessageEncryptInit(session, gm.as_ptr() as *mut u8, gk), CKR_OK, "C_MessageEncryptInit AES-192");
+    let p = msg_params(&mut nonce, &mut tag);
+    let zero = [0u8; 16];
+    let mut ct = [0u8; 16];
+    let mut ct_len = 16u32;
+    assert_eq!(
+        C_EncryptMessage(session, p.as_ptr() as *mut u8, (p.len() * ck_param::WORD) as u32, std::ptr::null(), 0, zero.as_ptr(), 16, ct.as_mut_ptr(), &mut ct_len),
+        CKR_OK
+    );
+    assert_eq!(C_MessageEncryptFinal(session), CKR_OK);
+    assert_eq!(ct.to_vec(), hx("98e7247c07f0fe411c267e4384b0f600"), "GCM test case 8 C");
+    assert_eq!(tag.to_vec(), hx("2ff58d80033927ab8ef4d4587514f0fb"), "GCM test case 8 T");
+    assert_eq!(C_MessageDecryptInit(session, gm.as_ptr() as *mut u8, gk), CKR_OK, "C_MessageDecryptInit AES-192");
+    let p = msg_params(&mut nonce, &mut tag);
+    let mut pt2 = [0xffu8; 16];
+    let mut pt2_len = 16u32;
+    assert_eq!(
+        C_DecryptMessage(session, p.as_ptr() as *mut u8, (p.len() * ck_param::WORD) as u32, std::ptr::null(), 0, ct.as_ptr(), 16, pt2.as_mut_ptr(), &mut pt2_len),
+        CKR_OK
+    );
+    assert_eq!(pt2, zero);
+    assert_eq!(C_MessageDecryptFinal(session), CKR_OK);
+}

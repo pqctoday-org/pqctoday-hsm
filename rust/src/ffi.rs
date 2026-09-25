@@ -8575,12 +8575,21 @@ pub fn C_Encrypt(
             CKM_AES_CBC_PAD => {
                 use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
                 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+                type Aes192CbcEnc = cbc::Encryptor<aes::Aes192>;
                 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
                 let padded_len = plaintext.len() + 16 - (plaintext.len() % 16);
                 let mut buf = vec![0u8; padded_len];
                 buf[..plaintext.len()].copy_from_slice(plaintext);
                 match key_bytes.len() {
                     16 => match Aes128CbcEnc::new_from_slices(&key_bytes, &iv) {
+                        Ok(cipher) => match cipher.encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len()) {
+                            Ok(ct) => ct.to_vec(),
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        },
+                        Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                    },
+                    // E11 — AES-192 is inside the advertised 16..32 range.
+                    24 => match Aes192CbcEnc::new_from_slices(&key_bytes, &iv) {
                         Ok(cipher) => match cipher.encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len()) {
                             Ok(ct) => ct.to_vec(),
                             Err(_) => return CKR_FUNCTION_FAILED,
@@ -9215,10 +9224,19 @@ pub fn C_Decrypt(
             CKM_AES_CBC_PAD => {
                 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
                 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
+                type Aes192CbcDec = cbc::Decryptor<aes::Aes192>;
                 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
                 let mut buf = ciphertext.to_vec();
                 let pt_slice: &[u8] = match key_bytes.len() {
                     16 => match Aes128CbcDec::new_from_slices(&key_bytes, &iv) {
+                        Ok(cipher) => match cipher.decrypt_padded_mut::<Pkcs7>(&mut buf) {
+                            Ok(pt) => pt,
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        },
+                        Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                    },
+                    // E11 — AES-192 is inside the advertised 16..32 range.
+                    24 => match Aes192CbcDec::new_from_slices(&key_bytes, &iv) {
                         Ok(cipher) => match cipher.decrypt_padded_mut::<Pkcs7>(&mut buf) {
                             Ok(pt) => pt,
                             Err(_) => return CKR_FUNCTION_FAILED,
@@ -14831,7 +14849,8 @@ pub fn msg_encrypt_init_internal(
             None => return CKR_KEY_TYPE_INCONSISTENT,
         };
 
-        if key_bytes.len() != 16 && key_bytes.len() != 32 {
+        // E11 — AES-128/192/256: CKM_AES_GCM advertises 16..32-byte keys.
+        if !matches!(key_bytes.len(), 16 | 24 | 32) {
             return CKR_KEY_SIZE_RANGE;
         }
 
@@ -15076,8 +15095,8 @@ pub fn aes_gcm_exec(
 ) -> Result<Vec<u8>, u32> {
     use crate::crypto::multipart::{AesKey, CipherDirection, GcmState};
 
-    // The message API supports AES-128/256 (matches C_MessageEncryptInit).
-    if key.len() != 16 && key.len() != 32 {
+    // AES-128/192/256, matching C_MessageEncryptInit (E11).
+    if !matches!(key.len(), 16 | 24 | 32) {
         return Err(CKR_KEY_SIZE_RANGE);
     }
     let aes = AesKey::new(key).ok_or(CKR_KEY_SIZE_RANGE)?;
