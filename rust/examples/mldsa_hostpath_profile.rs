@@ -29,8 +29,9 @@
 //!   Workers are pinned to `cores` (default 4) cores.
 //!
 //! Model inputs (board time, microseconds; defaults from the 250 MHz
-//! co-simulation fit, see docs/proposals/kv260-mldsa-hostpath-0924.md):
-//! `SIM_SIGN_BASE_US` (777), `SIM_SIGN_PER_ATTEMPT_US` (371),
+//! co-simulation fit T(a) = 101,635 + 92,728 a cycles for `a` attempts, see
+//! docs/proposals/kv260-mldsa-hostpath-0924.md):
+//! `SIM_SIGN_BASE_US` (407), `SIM_SIGN_PER_ATTEMPT_US` (371),
 //! `SIM_MEAN_ATTEMPTS` (5.05), `SIM_DMA_PHASE_US` (25), `SIM_SYNC_CALL_US`
 //! (0), `SIM_SYNC_PER_LINE_NS` (0).
 #[cfg(all(feature = "hw-accel", target_os = "linux", target_arch = "aarch64"))]
@@ -155,7 +156,7 @@ mod profile {
         let us = |name: &str, default: f64| Duration::from_secs_f64(env_f64(name, default) / ratio / 1e6);
         (
             SimTiming {
-                sign_base: us("SIM_SIGN_BASE_US", 777.0),
+                sign_base: us("SIM_SIGN_BASE_US", 407.0),
                 sign_per_attempt: us("SIM_SIGN_PER_ATTEMPT_US", 371.0),
                 load: us("SIM_LOAD_US", 60.0),
                 dma_phase: us("SIM_DMA_PHASE_US", 25.0),
