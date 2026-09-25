@@ -12,9 +12,12 @@ pub mod mldsa_device;
 pub mod mldsa_sign;
 #[cfg(unix)]
 pub mod mldsa_sign_device;
+pub mod mldsa_sign_lane;
+pub mod mldsa_sign_sim;
 #[cfg(unix)]
 pub mod probe;
 pub mod runtime;
 pub mod sim;
+pub mod stage;
 #[cfg(unix)]
 pub mod uio;
