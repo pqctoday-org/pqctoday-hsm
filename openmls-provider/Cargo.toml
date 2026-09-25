@@ -17,6 +17,12 @@ members = ["lib", "interop", "wasm-smoke"]
 [patch.crates-io]
 fips204 = { path = "../rust/fips204-patched" }
 fips205 = { path = "../rust/fips205-patched" }
+# `tree-cache` feature (rust/Cargo.toml): softhsmrustv3 depends on this
+# feature, which only exists on the vendored hbs-lms-patched, not the
+# crates.io release. Missing here broke `cargo check --workspace` for
+# every push/PR touching src/**, since wasm-smoke's path dep on
+# softhsmrustv3 re-resolves hbs-lms without the workspace-local patch.
+hbs-lms = { path = "../rust/hbs-lms-patched" }
 
 # Pull the unreleased fix for the libcrux-chacha20poly1305 <0.0.8 advisory
 # (Dependabot alert #10 against this workspace's Cargo.lock — severity: high).
