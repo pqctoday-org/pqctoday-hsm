@@ -172,6 +172,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **C++ engine: five NIST ACVP findings fixed** (ACVP gap-closure plan
+  2026-09-25), each with a NIST ACVP-Server@975de31e known-answer suite in
+  `p11test` (`src/lib/test/`, vectors with provenance in `tests/acvp/`):
+  - **HashSLH-DSA signatures now interoperate.** `CKM_HASH_SLH_DSA_*`
+    signed and verified a doubly wrapped message, so no valid NIST (or
+    other implementation's) pre-hash signature verified. Pure SLH-DSA was
+    not affected.
+  - **ML-KEM keys are checked on import.** `C_CreateObject` refuses a key
+    of the wrong length, an unknown parameter set, or one failing the FIPS
+    203 modulus / hash check with `CKR_ATTRIBUTE_VALUE_INVALID`; a
+    ciphertext of another parameter set's length now returns
+    `CKR_WRAPPED_KEY_LEN_RANGE`.
+  - **KMAC honours its parameter.** `CKM_KMAC_128/256` now read
+    `CK_PQCTODAY_KMAC_PARAMS` (customization string and output length), as
+    the Rust engine does; before, any non-default MAC failed to verify.
+  - **HMAC key sizes are advertised truthfully.** `C_GetMechanismInfo` no
+    longer claims a digest-length minimum key the engine never enforced.
+  - **PBKDF2 refuses fewer than 1000 iterations** with
+    `CKR_MECHANISM_PARAM_INVALID`, the same policy the Rust engine applies.
+
 - **HashML-DSA and HashSLH-DSA signatures from KMIP / remoting now verify**
   (Rust engine). `native::sign_pqc`, the signing path behind KMIP and the
   gRPC/REST remoting services, signed every pre-hash mechanism

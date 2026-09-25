@@ -149,6 +149,23 @@ typedef struct CK_MU_GEN_PARAMS {
 
 typedef CK_MU_GEN_PARAMS CK_PTR CK_MU_GEN_PARAMS_PTR;
 
+// ── Vendor: KMAC mechanism parameter (CKM_KMAC_128 / CKM_KMAC_256) ──────────
+// CKM_KMAC_128/256 are vendor codepoints (pkcs11/pkcs11t.h's PQCToday block);
+// v3.2 has no KMAC at all, and the v3.3 draft's CK_KMAC_PARAMS (kmac.md) uses
+// different mechanism values and a different field order. This is the layout
+// the Rust engine has always read (rust/src/ck_param.rs `kmac`,
+// "CK_PQCTODAY_KMAC_PARAMS") and the Hub passes to BOTH engines — a
+// pointer-first, native-width struct. Absent parameter => the mechanism
+// defaults (empty customization S; output L = 32 bytes for KMAC-128, 64 for
+// KMAC-256). ulOutputLen is L in BYTES (NIST SP 800-185 §4.3); 0 = default.
+typedef struct CK_PQCTODAY_KMAC_PARAMS {
+    CK_BYTE_PTR pCustomization;
+    CK_ULONG    ulCustomizationLen;
+    CK_ULONG    ulOutputLen;
+} CK_PQCTODAY_KMAC_PARAMS;
+
+typedef CK_PQCTODAY_KMAC_PARAMS CK_PTR CK_PQCTODAY_KMAC_PARAMS_PTR;
+
 // ── Vendor: stateful key attributes ──────────────────────────────────────────
 // Range: 0x80000101–0x80000105 (offset from CKM vendor range to avoid confusion)
 

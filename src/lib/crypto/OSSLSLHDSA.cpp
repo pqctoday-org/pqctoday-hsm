@@ -370,16 +370,34 @@ bool OSSLSLHDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 	// Build OSSL_PARAM array for context string (FIPS 205 §9.2) and
 	// deterministic mode (FIPS 205 §10). Must be built BEFORE EVP_DigestSignInit_ex
 	// so the params are passed directly to slh_dsa_digest_signverify_init.
-	OSSL_PARAM osslParams[3];
+	//
+	// Pre-hash (HashSLH-DSA, FIPS 205 §10.2.2 Algorithm 23): signData is
+	// already the complete M' = 0x01 || len(ctx) || ctx || OID || PH(M), so
+	// OpenSSL must sign it as-is via slh_sign_internal. Its default "pure"
+	// message encoding would wrap it a second time as 0x00 || len(ctx) ||
+	// ctx || M' (FIPS 205 §10.2.1 Algorithm 22) -- so every HashSLH-DSA
+	// signature was a pure SLH-DSA signature over M', and no valid NIST
+	// HashSLH-DSA signature verified. Hence: message-encoding 0 (OpenSSL
+	// 3.5+ OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, "raw") and NO context
+	// param, because the context is already inside M'.
+	const bool preEncoded = slhdsaParams &&
+	                        (slhdsaParams->preHash || slhdsaParams->phmInput);
+	OSSL_PARAM osslParams[4];
 	int nParams = 0;
 	int deterministic = 0;
+	int msgEncoding = 0;
 	if (slhdsaParams)
 	{
-		if (slhdsaParams->contextLen > 0)
+		if (slhdsaParams->contextLen > 0 && !preEncoded)
 		{
 			osslParams[nParams++] = OSSL_PARAM_construct_octet_string(
 				OSSL_SIGNATURE_PARAM_CONTEXT_STRING,
 				(void*)slhdsaParams->context, slhdsaParams->contextLen);
+		}
+		if (preEncoded)
+		{
+			osslParams[nParams++] = OSSL_PARAM_construct_int(
+				OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, &msgEncoding);
 		}
 		if (slhdsaParams->deterministic)
 		{
@@ -499,13 +517,23 @@ bool OSSLSLHDSA::verify(PublicKey* publicKey, const ByteString& originalData,
 
 	// Build OSSL_PARAM for context string (FIPS 205 §9.2). Pass directly to
 	// EVP_DigestVerifyInit_ex so slh_dsa_digest_signverify_init receives them.
-	OSSL_PARAM osslParams[2];
+	// Pre-hash: verifyData is the complete M' -- raw message encoding, no
+	// context param (see sign()'s comment; FIPS 205 §10.3 Algorithm 25).
+	const bool preEncoded = slhdsaParams &&
+	                        (slhdsaParams->preHash || slhdsaParams->phmInput);
+	OSSL_PARAM osslParams[3];
 	int nParams = 0;
-	if (slhdsaParams && slhdsaParams->contextLen > 0)
+	int msgEncoding = 0;
+	if (slhdsaParams && slhdsaParams->contextLen > 0 && !preEncoded)
 	{
 		osslParams[nParams++] = OSSL_PARAM_construct_octet_string(
 			OSSL_SIGNATURE_PARAM_CONTEXT_STRING,
 			(void*)slhdsaParams->context, slhdsaParams->contextLen);
+	}
+	if (preEncoded)
+	{
+		osslParams[nParams++] = OSSL_PARAM_construct_int(
+			OSSL_SIGNATURE_PARAM_MESSAGE_ENCODING, &msgEncoding);
 	}
 	osslParams[nParams] = OSSL_PARAM_construct_end();
 

@@ -58,6 +58,17 @@ static constexpr CK_ULONG MAX_GENERIC_KEY_LEN_BYTES = 0x8000000UL;
 /// Maximum HMAC key length in bytes (512 bytes / 4096 bits, matches upstream).
 static constexpr CK_ULONG MAX_HMAC_KEY_BYTES        = 512UL;
 
+/// Minimum HMAC key length in bytes advertised by C_GetMechanismInfo — the
+/// smallest key MacSignInit/MacVerifyInit accept, which is none at all:
+/// kMacMechTable enforces no HMAC floor (E17, see SoftHSM_slots.cpp).
+static constexpr CK_ULONG HMAC_MIN_KEY_BYTES        = 0UL;
+
+/// CKM_PKCS5_PBKD2 policy floor on CK_PKCS5_PBKD2_PARAMS2.iterations (E15 /
+/// decision D7): NIST SP 800-132 §5.2's recommended minimum, the same floor
+/// the Rust engine enforces. Below it C_DeriveKey returns
+/// CKR_MECHANISM_PARAM_INVALID (decision D6).
+static constexpr CK_ULONG PBKDF2_MIN_ITERATIONS     = 1000UL;
+
 /// Valid AES key lengths in bytes.
 static constexpr CK_ULONG AES_KEY_BYTES_128         = 16UL;  ///< AES-128
 static constexpr CK_ULONG AES_KEY_BYTES_192         = 24UL;  ///< AES-192

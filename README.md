@@ -107,7 +107,7 @@ wrappers — each with its own README.
 | CKA_UNIQUE_ID | Not supported | **Auto-generated UUID v4** (PKCS#11 v3.0 §4.4, read-only) |
 | CKA_PROFILE_ID | Not supported | **Implemented** (PKCS#11 v3.0 §4.5, default 0) |
 | Key derivation (HKDF, KBKDF, cofactor ECDH) | Not supported | **`CKM_HKDF_DERIVE`, `CKM_SP800_108_COUNTER_KDF`, `CKM_SP800_108_FEEDBACK_KDF`, `CKM_ECDH1_COFACTOR_DERIVE`** |
-| PBKDF2 (`CKM_PKCS5_PBKD2`) | Not supported | **Implemented** — HMAC-SHA{1/224/256/384/512} PRF; BIP39 / SLIP-0010 seed derivation |
+| PBKDF2 (`CKM_PKCS5_PBKD2`) | Not supported | **Implemented** — HMAC-SHA{1/224/256/384/512} PRF; BIP39 / SLIP-0010 seed derivation; token policy: iteration count ≥ 1000 (NIST SP 800-132 §5.2), lower counts refused with `CKR_MECHANISM_PARAM_INVALID` |
 | ECDH1 with KDF (`CKD_SHA*_KDF`) | Not supported | **Implemented** — X9.63 SHA{1/256/384/512} KDF on `CKM_ECDH1_DERIVE`; 5G SUCI deconcealment (TS 33.501 §6.12.2) |
 | HPKE (RFC 9180) | Not supported | **`CKM_HPKE`** — all 4 modes + PQ/T hybrid KEM combiner (MLKEM768-X25519, MLKEM768-P256, MLKEM1024-P384); vendor mechanism, Rust engine only |
 | LMS/HSS (SP 800-208) | Not supported | **SHA-256 + SHAKE-256** (N32/N24); all 80 NIST parameter combinations; C++↔Rust cross-engine verified |
@@ -378,6 +378,8 @@ CKM_RSA_SHA3_512_PKCS_PSS  = 0x00000056
 // PRFs: CKP_PKCS5_PBKD2_HMAC_{SHA1, SHA224, SHA256, SHA384, SHA512}
 // Typical use: BIP39 mnemonic → 64-byte seed, SLIP-0010 child keys
 // pPassword in CK_PKCS5_PBKD2_PARAMS2; hBaseKey must be 0
+// Token policy (both engines): iterations >= 1000 (NIST SP 800-132 §5.2
+// recommended minimum); a lower count returns CKR_MECHANISM_PARAM_INVALID
 CKM_PKCS5_PBKD2            = 0x000003b0
 
 // ECDH1 with X9.63 KDF variants — SharedInfo passed as OSSL_KDF_PARAM_INFO
@@ -417,6 +419,10 @@ CKM_SHA3_256_HMAC          = 0x000002b1  // HMAC-SHA3-256
 // KMAC (FIPS 202 / SP 800-185) — keyed MAC using KECCAK-based XOF
 CKM_KMAC_128               = 0x80000100  // KMAC-128 (vendor-defined range)
 CKM_KMAC_256               = 0x80000101  // KMAC-256 (vendor-defined range)
+// Optional parameter (both engines): CK_PQCTODAY_KMAC_PARAMS
+//   { CK_BYTE_PTR pCustomization; CK_ULONG ulCustomizationLen; CK_ULONG ulOutputLen; }
+// = SP 800-185 customization S and output length L in bytes (0 = default 32/64).
+// Absent -> S = "", L = 32 (KMAC-128) / 64 (KMAC-256).
 ```
 
 ## Validation & Compliance Status

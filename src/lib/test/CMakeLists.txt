@@ -26,6 +26,11 @@ set(SOURCES p11test.cpp
             AsymWrapUnwrapTests.cpp
             ClassicMcElieceTests.cpp
             BehaviourRingTests.cpp
+            AcvpSlhDsaTests.cpp
+            MlKemInputCheckTests.cpp
+            KmacParamsTests.cpp
+            HmacMinKeySizeTests.cpp
+            Pbkdf2PolicyTests.cpp
             ErrorPathTests.cpp
             TestsBase.cpp
             TestsNoPINInitBase.cpp
@@ -50,6 +55,12 @@ include_directories(${INCLUDE_DIRS})
 target_link_libraries(${PROJECT_NAME} softhsmv3-static ${SQLITE3_LIBS} ${CPPUNIT_LIBRARIES})
 
 target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_OPTIONS})
+
+# NIST ACVP known-answer suites (Acvp*Tests.cpp and friends) read their vector
+# files straight from tests/acvp/ — the files scripts/check_acvp_provenance.py
+# re-verifies against upstream — and parse them with tests/json.hpp.
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+target_compile_definitions(${PROJECT_NAME} PRIVATE ACVP_VECTOR_DIR="${CMAKE_SOURCE_DIR}/tests/acvp")
 
 add_test(NAME ${PROJECT_NAME} COMMAND ${PROJECT_NAME}
          WORKING_DIRECTORY ${PROJECT_BINARY_DIR}

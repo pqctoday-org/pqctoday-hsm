@@ -3027,9 +3027,26 @@ CK_RV SoftHSM::C_DeriveKey
 			ERROR_MSG("CKM_PKCS5_PBKD2: only CKZ_SALT_SPECIFIED is supported");
 			return CKR_MECHANISM_PARAM_INVALID;
 		}
-		if (pbkdp->pPassword == NULL_PTR || pbkdp->iterations == 0)
+		if (pbkdp->pPassword == NULL_PTR)
 		{
-			ERROR_MSG("CKM_PKCS5_PBKD2: invalid password or iteration count");
+			ERROR_MSG("CKM_PKCS5_PBKD2: invalid password");
+			return CKR_MECHANISM_PARAM_INVALID;
+		}
+		// E15 / decision D7 (ACVP gap-closure 2026-09-25): token policy floor
+		// of PBKDF2_MIN_ITERATIONS (covers c = 0 too), aligned with the Rust
+		// engine's `iterations < 1000` refusal. Code per decision D6: the
+		// count is a field of the mechanism parameter (CK_PKCS5_PBKD2_PARAMS2),
+		// so CKR_MECHANISM_PARAM_INVALID ("invalid parameters were supplied
+		// to the mechanism", PKCS#11 v3.2 §5.1.6), not CKR_ARGUMENTS_BAD,
+		// which §5.1.6 reserves for bad function arguments.
+		// NIST SP 800-132 §5.2: "A minimum iteration count of 1,000 is
+		// recommended". PBKDF2 itself (RFC 8018 §5.2) accepts c >= 1, so this
+		// is policy, not an algorithm limit: NIST ACVP PBKDF samples with
+		// c < 1000 are "unsupported by policy" on both engines.
+		if (pbkdp->iterations < PBKDF2_MIN_ITERATIONS)
+		{
+			ERROR_MSG("CKM_PKCS5_PBKD2: iteration count %lu is below the token policy minimum %lu",
+			          (unsigned long)pbkdp->iterations, (unsigned long)PBKDF2_MIN_ITERATIONS);
 			return CKR_MECHANISM_PARAM_INVALID;
 		}
 

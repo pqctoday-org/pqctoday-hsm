@@ -22,10 +22,21 @@ OSSLKMACAlgorithm::~OSSLKMACAlgorithm()
 		EVP_MAC_CTX_free(curCTX);
 }
 
-bool OSSLKMACAlgorithm::signInit(const SymmetricKey* key)
+// NIST SP 800-185 §4.3: KMAC128(K, X, L, S) / KMAC256(K, X, L, S). L and S
+// are inputs to the computation, so both go to EVP_MAC_init. Before E16
+// (2026-09-25) only OSSL_MAC_PARAM_SIZE was set, fixed at construction to
+// 32/64 bytes, and S was never passed: every KMAC this engine produced or
+// verified was KMAC(K, X, 256|512, ""), whatever the caller asked for.
+bool OSSLKMACAlgorithm::setKmacParams(size_t outputLen, const ByteString& inCustomization)
 {
-	if (!MacAlgorithm::signInit(key)) return false;
+	if (curCTX != NULL) return false;  // must precede signInit/verifyInit
+	if (outputLen > 0) macSize = outputLen;
+	customization = inCustomization;
+	return true;
+}
 
+bool OSSLKMACAlgorithm::initCtx(const SymmetricKey* key)
+{
 	EVP_MAC *mac = EVP_MAC_fetch(NULL, macName, NULL);
 	if (mac == NULL) {
 		ERROR_MSG("EVP_MAC_fetch failed for %s", macName);
@@ -40,9 +51,15 @@ bool OSSLKMACAlgorithm::signInit(const SymmetricKey* key)
 		return false;
 	}
 
-	OSSL_PARAM params[2];
-	params[0] = OSSL_PARAM_construct_size_t(OSSL_MAC_PARAM_SIZE, &macSize);
-	params[1] = OSSL_PARAM_construct_end();
+	OSSL_PARAM params[3];
+	int n = 0;
+	params[n++] = OSSL_PARAM_construct_size_t(OSSL_MAC_PARAM_SIZE, &macSize);
+	if (customization.size() > 0)
+	{
+		params[n++] = OSSL_PARAM_construct_octet_string(OSSL_MAC_PARAM_CUSTOM,
+			(void*)customization.const_byte_str(), customization.size());
+	}
+	params[n] = OSSL_PARAM_construct_end();
 
 	if (EVP_MAC_init(curCTX, key->getKeyBits().const_byte_str(), key->getKeyBits().size(), params) != 1)
 	{
@@ -53,6 +70,12 @@ bool OSSLKMACAlgorithm::signInit(const SymmetricKey* key)
 	}
 
 	return true;
+}
+
+bool OSSLKMACAlgorithm::signInit(const SymmetricKey* key)
+{
+	if (!MacAlgorithm::signInit(key)) return false;
+	return initCtx(key);
 }
 
 bool OSSLKMACAlgorithm::signUpdate(const ByteString& dataToSign)
@@ -101,25 +124,7 @@ bool OSSLKMACAlgorithm::signFinal(ByteString& signature)
 bool OSSLKMACAlgorithm::verifyInit(const SymmetricKey* key)
 {
 	if (!MacAlgorithm::verifyInit(key)) return false;
-
-	EVP_MAC *mac = EVP_MAC_fetch(NULL, macName, NULL);
-	if (mac == NULL) return false;
-
-	curCTX = EVP_MAC_CTX_new(mac);
-	EVP_MAC_free(mac);
-	if (curCTX == NULL) return false;
-
-	OSSL_PARAM params[2];
-	params[0] = OSSL_PARAM_construct_size_t(OSSL_MAC_PARAM_SIZE, &macSize);
-	params[1] = OSSL_PARAM_construct_end();
-
-	if (EVP_MAC_init(curCTX, key->getKeyBits().const_byte_str(), key->getKeyBits().size(), params) != 1)
-	{
-		EVP_MAC_CTX_free(curCTX);
-		curCTX = NULL;
-		return false;
-	}
-	return true;
+	return initCtx(key);
 }
 
 bool OSSLKMACAlgorithm::verifyUpdate(const ByteString& originalData)

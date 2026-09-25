@@ -54,6 +54,10 @@
 #include "SlotManager.h"
 #include "SymmetricKey.h"
 #include "AESKey.h"
+#include "MLKEMPublicKey.h"
+#include "MLKEMPrivateKey.h"
+#include "OSSLMLKEMPublicKey.h"
+#include "OSSLMLKEMPrivateKey.h"
 
 // C3 (2026-08-13): the OpenPGP certificate type was carried at 0x00000003, an
 // UNASSIGNED OASIS codepoint below CKC_VENDOR_DEFINED — squatting a value the
@@ -332,6 +336,98 @@ CK_RV checkValueVerify(bool supplied, const ByteString& suppliedValue,
 	if (computed.size() == 0) return CKR_ATTRIBUTE_VALUE_INVALID;
 	if (suppliedValue == computed) return CKR_OK;
 	return CKR_ATTRIBUTE_VALUE_INVALID;
+}
+
+// E3 (ACVP gap-closure 2026-09-25) — ML-KEM key material at C_CreateObject.
+//
+// PKCS#11 v3.2 §6.68.2/§6.68.3 define an ML-KEM key's CKA_VALUE as the
+// encapsulation key ek / decapsulation key dk "as defined in [FIPS 203]", and
+// §4.1.1 rule 2 says a template that "specifies an invalid value for a valid
+// attribute" MUST fail with CKR_ATTRIBUTE_VALUE_INVALID. FIPS 203 §7.2/§7.3
+// give the input checks that decide validity: the type (length) check for
+// both keys, the modulus check for ek (every ByteDecode12 coefficient < q) and
+// the hash check for dk (H(ek) embedded in dk matches). Nothing ran any of
+// them here: a 1-byte-short dk, a short ek, or a dk with a modified H was
+// stored, and only failed (or, for a well-formed-length key, was caught)
+// later at C_EncapsulateKey/C_DecapsulateKey. OpenSSL's ML-KEM import
+// (EVP_PKEY_fromdata) performs exactly the modulus and hash checks, so the
+// value is run through the same OSSLMLKEM*Key path the KEM operations use.
+// An unknown CKA_PARAMETER_SET is refused for the same reason. Mirrors the
+// Rust engine's fix on fix/mlkem-input-checks-0925 (C_CreateObject ->
+// CKR_ATTRIBUTE_VALUE_INVALID).
+static CK_RV checkMLKEMKeyValue(CK_OBJECT_CLASS objClass,
+                                CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount)
+{
+	const CK_ATTRIBUTE* value = NULL;
+	const CK_ATTRIBUTE* paramSet = NULL;
+	for (CK_ULONG i = 0; i < ulCount; i++)
+	{
+		if (pTemplate[i].type == CKA_VALUE) value = &pTemplate[i];
+		else if (pTemplate[i].type == CKA_PARAMETER_SET) paramSet = &pTemplate[i];
+	}
+	// A missing attribute is CKR_TEMPLATE_INCOMPLETE, reported by
+	// saveTemplate() from the attributes' ck1 flags — not this check's job.
+	if (value == NULL || paramSet == NULL) return CKR_OK;
+	if (paramSet->pValue == NULL_PTR || paramSet->ulValueLen != sizeof(CK_ULONG))
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+
+	const CK_ULONG ps = *(const CK_ULONG*)paramSet->pValue;
+	size_t ekLen = 0, dkLen = 0;  // FIPS 203 Table 3: 384k+32 / 768k+96
+	switch (ps)
+	{
+		case CKP_ML_KEM_512:  ekLen =  800; dkLen = 1632; break;
+		case CKP_ML_KEM_768:  ekLen = 1184; dkLen = 2400; break;
+		case CKP_ML_KEM_1024: ekLen = 1568; dkLen = 3168; break;
+		default:
+			ERROR_MSG("Unknown ML-KEM parameter set %lu", (unsigned long)ps);
+			return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+
+	const bool isPrivate = (objClass == CKO_PRIVATE_KEY);
+	if (value->pValue == NULL_PTR || value->ulValueLen != (isPrivate ? dkLen : ekLen))
+	{
+		ERROR_MSG("ML-KEM %s key: CKA_VALUE is %lu bytes, FIPS 203 requires %zu",
+		          isPrivate ? "decapsulation" : "encapsulation",
+		          (unsigned long)value->ulValueLen, isPrivate ? dkLen : ekLen);
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+
+	AsymmetricAlgorithm* mlkem = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::MLKEM);
+	if (mlkem == NULL) return CKR_GENERAL_ERROR;
+	ByteString raw((const unsigned char*)value->pValue, value->ulValueLen);
+	bool ok = false;
+	if (isPrivate)
+	{
+		OSSLMLKEMPrivateKey* key = (OSSLMLKEMPrivateKey*)mlkem->newPrivateKey();
+		if (key != NULL)
+		{
+			key->setParameterSet(ps);
+			key->setValue(raw);
+			ok = (key->getOSSLKey() != NULL);  // FIPS 203 §7.3 hash check
+			mlkem->recyclePrivateKey(key);
+		}
+	}
+	else
+	{
+		OSSLMLKEMPublicKey* key = (OSSLMLKEMPublicKey*)mlkem->newPublicKey();
+		if (key != NULL)
+		{
+			key->setParameterSet(ps);
+			key->setValue(raw);
+			ok = (key->getOSSLKey() != NULL);  // FIPS 203 §7.2 modulus check
+			mlkem->recyclePublicKey(key);
+		}
+	}
+	raw.wipe();
+	CryptoFactory::i()->recycleAsymmetricAlgorithm(mlkem);
+	if (!ok)
+	{
+		ERROR_MSG("ML-KEM %s key fails the FIPS 203 %s input check",
+		          isPrivate ? "decapsulation" : "encapsulation",
+		          isPrivate ? "§7.3 hash" : "§7.2 modulus");
+		return CKR_ATTRIBUTE_VALUE_INVALID;
+	}
+	return CKR_OK;
 }
 
 CK_RV checkKeyLength(CK_KEY_TYPE keyType, size_t byteLen)
@@ -1319,6 +1415,15 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 			if ((v != CK_FALSE) != (required != CK_FALSE))
 				return CKR_ATTRIBUTE_VALUE_INVALID;
 		}
+	}
+
+	// E3 (2026-09-25): FIPS 203 §7.2/§7.3 input checks on imported ML-KEM
+	// keys — before any object exists, so a refused key leaves nothing behind.
+	if (op == OBJECT_OP_CREATE && keyType == CKK_ML_KEM &&
+	    (objClass == CKO_PUBLIC_KEY || objClass == CKO_PRIVATE_KEY))
+	{
+		rv = checkMLKEMKeyValue(objClass, pTemplate, ulCount);
+		if (rv != CKR_OK) return rv;
 	}
 
 	// Change order of attributes
