@@ -6861,6 +6861,21 @@ unsafe fn parse_sign_additional_ctx(p_mechanism: *const u8) -> Result<(Vec<u8>, 
     Ok((context, deterministic))
 }
 
+/// E16 (2026-09-25) — `CK_PQCTODAY_KMAC_PARAMS.ulOutputLen` as
+/// `parse_sign_mech_params` packed it (the leading LE u32 of the op's
+/// context bytes). `None` when absent or 0, where the mechanism default
+/// (32 bytes KMAC-128, 64 bytes KMAC-256; `get_sig_len`) applies. C_Sign's
+/// size query and C_Verify's length check both follow it; they used the
+/// default whatever the caller requested, so a valid 478-byte NIST MAC was
+/// CKR_SIGNATURE_LEN_RANGE and any non-default C_Sign was BUFFER_TOO_SMALL.
+fn kmac_requested_len(mech: u32, ctx_bytes: &[u8]) -> Option<u32> {
+    if !matches!(mech, CKM_KMAC_128 | CKM_KMAC_256) || ctx_bytes.len() < 4 {
+        return None;
+    }
+    let n = u32::from_le_bytes([ctx_bytes[0], ctx_bytes[1], ctx_bytes[2], ctx_bytes[3]]);
+    (n != 0).then_some(n)
+}
+
 fn C_Sign_impl(
     h_session: u32,
     p_data: *mut u8,
@@ -6894,7 +6909,9 @@ fn C_Sign_impl(
 
     unsafe {
         if p_signature.is_null() {
-            *pul_signature_len = if (hmac_general_base(mech).is_some() || mech == CKM_AES_GMAC)
+            *pul_signature_len = if let Some(n) = kmac_requested_len(mech, &ctx_bytes) {
+                n
+            } else if (hmac_general_base(mech).is_some() || mech == CKM_AES_GMAC)
                 && ctx_bytes.len() >= 4
             {
                 u32::from_le_bytes([ctx_bytes[0], ctx_bytes[1], ctx_bytes[2], ctx_bytes[3]])
@@ -7348,7 +7365,8 @@ fn C_Verify_impl(
                     | CKM_KMAC_256
             ) =>
         {
-            Some(get_sig_len(mech, hkey))
+            // E16 — a KMAC MAC is as long as the caller asked for.
+            Some(kmac_requested_len(mech, &ctx_bytes).unwrap_or_else(|| get_sig_len(mech, hkey)))
         }
         _ => None,
     };

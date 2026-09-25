@@ -619,3 +619,77 @@ fn e15_pbkdf2_prf_parity_with_cpp() {
     // the token does not accept.
     assert_eq!(pbkdf2_derive(session, 0x02, 4096, b"password", b"salt", 20), Err(CKR_MECHANISM_PARAM_INVALID));
 }
+
+// ═══ E16 — KMAC honours CK_PQCTODAY_KMAC_PARAMS.ulOutputLen ═══════════════
+
+fn kmac_params(customization: &[u8], out_len: usize) -> Vec<u8> {
+    pack(
+        &ck_param::kmac::LAYOUT,
+        &[
+            (ck_param::kmac::P_CUSTOMIZATION, ptr(customization)),
+            (ck_param::kmac::UL_CUSTOMIZATION_LEN, customization.len()),
+            (ck_param::kmac::UL_OUTPUT_LEN, out_len),
+        ],
+    )
+}
+
+/// KMAC-128 1.0 MVT (non-XOF, hex customization): tc799 is a valid 478-byte
+/// MAC and must verify; tc771 is a 32-byte MAC the upstream marks invalid
+/// and must be refused with CKR_SIGNATURE_INVALID. The same parameters
+/// must SIGN to the NIST MAC too (size query included).
+#[test]
+fn e16_kmac128_nist_mvt_output_length() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let doc = fixture("kmac_acvp_test.json");
+    let mut seen = 0;
+    for t in doc["testGroups"][0]["tests"].as_array().unwrap() {
+        let tc = &t["tcId"];
+        let key = hx(s(t, "key"));
+        let msg = hx(s(t, "msg"));
+        let mac = hx(s(t, "mac"));
+        let cust = hx(s(t, "customizationHex"));
+        let out_len = t["macLen"].as_u64().unwrap() as usize / 8;
+        assert_eq!(mac.len(), out_len);
+        let hk = secret_key(session, CKK_GENERIC_SECRET, &key);
+        let p = kmac_params(&cust, out_len);
+        let m = mechanism(CKM_KMAC_128, &p);
+        let rv = verify(session, &m, hk, &msg, &mac);
+        if t["testPassed"].as_bool().unwrap() {
+            assert_eq!(rv, CKR_OK, "tc {tc}: valid {out_len}-byte MAC");
+            let sig = sign(session, &m, hk, &msg).unwrap_or_else(|rv| panic!("tc {tc} sign: {rv:#x}"));
+            assert_eq!(sig, mac, "tc {tc}: C_Sign output");
+        } else {
+            assert_eq!(rv, CKR_SIGNATURE_INVALID, "tc {tc}: invalid MAC");
+        }
+        seen += 1;
+    }
+    assert_eq!(seen, 2);
+}
+
+/// A MAC whose length differs from the requested ulOutputLen is a length
+/// error (PKCS#11 v3.2 §5.15.2 CKR_SIGNATURE_LEN_RANGE), and ulOutputLen = 0
+/// keeps the mechanism default (32 bytes for KMAC-128, 64 for KMAC-256).
+/// Product-authored probe.
+#[test]
+fn e16_kmac_length_checks_follow_the_parameter() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let hk = secret_key(session, CKK_GENERIC_SECRET, &[0x42u8; 32]);
+    let msg = b"kmac output length";
+    for (mech, default_len) in [(CKM_KMAC_128, 32usize), (CKM_KMAC_256, 64)] {
+        let p = kmac_params(b"", 0);
+        let m = mechanism(mech, &p);
+        let sig = sign(session, &m, hk, msg).expect("default-length sign");
+        assert_eq!(sig.len(), default_len);
+        assert_eq!(verify(session, &m, hk, msg, &sig), CKR_OK);
+
+        let p = kmac_params(b"", 100);
+        let m = mechanism(mech, &p);
+        let sig = sign(session, &m, hk, msg).expect("100-byte sign");
+        assert_eq!(sig.len(), 100);
+        assert_eq!(verify(session, &m, hk, msg, &sig), CKR_OK);
+        assert_eq!(verify(session, &m, hk, msg, &sig[..99]), CKR_SIGNATURE_LEN_RANGE);
+        assert_eq!(verify(session, &m, hk, msg, &sig[..default_len]), CKR_SIGNATURE_LEN_RANGE);
+    }
+}
