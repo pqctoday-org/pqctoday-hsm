@@ -227,15 +227,15 @@ pub(crate) fn sign_internal<
     // --> the montgomery form is extracted from the private key struct above
     //
     // 5: cap_a_hat ← ExpandA(ρ)    ▷ A is generated and stored in NTT representation as Â
-    let cap_a_hat: [[T; L]; K] = expand_a::<CTEST, K, L>(rho);
+    let cap_a_hat: [[T; L]; K] = stage!(ExpandA, expand_a::<CTEST, K, L>(rho));
     #[cfg(feature = "hw-accel")]
-    let cap_a_flat = (K == 6 && L == 5).then(|| {
+    let cap_a_flat = stage!(Flatten, (K == 6 && L == 5).then(|| {
         cap_a_hat
             .iter()
             .flat_map(|row| row.iter())
             .flat_map(|polynomial| polynomial.0)
             .collect::<Vec<i32>>()
-    });
+    }));
     #[cfg(not(feature = "hw-accel"))]
     let cap_a_flat: Option<&[i32]> = None;
 
@@ -243,34 +243,39 @@ pub(crate) fn sign_internal<
     // Calculate mu based on which of the three different paths led us here.
     // `ext_mu` short-circuits this: the caller supplied µ directly (ACVP
     // "external mu" / FIPS 204 IPD pre-hash-µ mode), so skip the H(tr||M′) step.
-    let mut mu = [0u8; 64];
-    if let Some(ext) = ext_mu {
-        mu = ext;
-    } else {
-        let mut h6 = if nist {
-            // 6a. NIST vectors are being applied to "internal" functions
-            h256_xof(&[tr, message])
-        } else if oid.is_empty() {
-            // 6b. From ML-DSA.Sign():  𝑀′ ← BytesToBits(IntegerToBytes(0,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥) ∥ 𝑀
-            h256_xof(&[tr, &[0u8], &[ctx.len().to_le_bytes()[0]], ctx, message])
+    let (mu, rho_prime) = stage!(MessageHash, {
+        let mut mu = [0u8; 64];
+        if let Some(ext) = ext_mu {
+            mu = ext;
         } else {
-            // 6c. From HashML-DSA.Sign(): 𝑀′ ← BytesToBits(IntegerToBytes(1,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥 ∥ OID ∥ PH𝑀 )
-            h256_xof(&[tr, &[1u8], &[ctx.len().to_le_bytes()[0]], ctx, oid, phm])
-        };
-        h6.read(&mut mu);
-    }
+            let mut h6 = if nist {
+                // 6a. NIST vectors are being applied to "internal" functions
+                h256_xof(&[tr, message])
+            } else if oid.is_empty() {
+                // 6b. From ML-DSA.Sign():  𝑀′ ← BytesToBits(IntegerToBytes(0,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥) ∥ 𝑀
+                h256_xof(&[tr, &[0u8], &[ctx.len().to_le_bytes()[0]], ctx, message])
+            } else {
+                // 6c. From HashML-DSA.Sign(): 𝑀′ ← BytesToBits(IntegerToBytes(1,1) ∥ IntegerToBytes(|𝑐𝑡𝑥|,1) ∥ 𝑐𝑡𝑥 ∥ OID ∥ PH𝑀 )
+                h256_xof(&[tr, &[1u8], &[ctx.len().to_le_bytes()[0]], ctx, oid, phm])
+            };
+            h6.read(&mut mu);
+        }
 
-    // 7: ρ′' ← H(K || rnd || µ, 64)    ▷ Compute private random seed
-    let mut h7 = h256_xof(&[cap_k, &rnd, &mu]);
-    let mut rho_prime = [0u8; 64];
-    h7.read(&mut rho_prime);
+        // 7: ρ′' ← H(K || rnd || µ, 64)    ▷ Compute private random seed
+        let mut h7 = h256_xof(&[cap_k, &rnd, &mu]);
+        let mut rho_prime = [0u8; 64];
+        h7.read(&mut rho_prime);
+        (mu, rho_prime)
+    });
 
     #[cfg(feature = "hw-accel")]
     if K == 6 && L == 5 {
-        let s1 = s_1_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>();
-        let s2 = s_2_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>();
-        let t0 = t_0_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>();
-        if let Some(signature) = crate::hw_accel::mldsa65_sign(
+        let (s1, s2, t0) = stage!(Flatten, (
+            s_1_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>(),
+            s_2_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>(),
+            t_0_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>(),
+        ));
+        let signature = stage!(Accelerator, crate::hw_accel::mldsa65_sign(
             cap_a_flat.as_deref().expect("ML-DSA-65 matrix"),
             &s1,
             &s2,
@@ -278,12 +283,58 @@ pub(crate) fn sign_internal<
             &mu,
             &rho_prime,
             rnd.iter().any(|byte| *byte != 0),
-        ) {
+        ));
+        if let Some(signature) = signature {
             if let Ok(signature) = signature.try_into() {
                 return signature;
             }
         }
     }
+
+    let (signature, _attempts) = stage!(SoftwareLoop, rejection_loop::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, W1_LEN>(
+        beta,
+        gamma1,
+        gamma2,
+        omega,
+        tau,
+        &cap_a_hat,
+        #[cfg(feature = "hw-accel")]
+        cap_a_flat.as_deref(),
+        #[cfg(not(feature = "hw-accel"))]
+        cap_a_flat,
+        s_1_hat_mont,
+        s_2_hat_mont,
+        t_0_hat_mont,
+        &mu,
+        &rho_prime,
+    ));
+    signature
+}
+
+
+/// Steps 8-34 of Algorithm 7: the rejection loop and the signature encoding,
+/// from the expanded matrix, the pre-transformed secrets, `mu` and `rho'`.
+/// Returns the signature and the number of attempts the loop took.
+#[allow(
+    clippy::similar_names,
+    clippy::many_single_char_names,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
+pub(crate) fn rejection_loop<
+    const CTEST: bool,
+    const K: usize,
+    const L: usize,
+    const LAMBDA_DIV4: usize,
+    const SIG_LEN: usize,
+    const W1_LEN: usize,
+>(
+    beta: i32, gamma1: i32, gamma2: i32, omega: i32, tau: i32, cap_a_hat: &[[T; L]; K],
+    cap_a_flat: Option<&[i32]>, s_1_hat_mont: &[T; L], s_2_hat_mont: &[T; K],
+    t_0_hat_mont: &[T; K], mu: &[u8; 64], rho_prime: &[u8; 64],
+) -> ([u8; SIG_LEN], u32) {
+    let mu = *mu;
+    let rho_prime = *rho_prime;
 
     // 8: κ ← 0    ▷ Initialize counter κ
     let mut kappa_ctr = 0u16;
@@ -302,14 +353,7 @@ pub(crate) fn sign_internal<
         let y: [R; L] = expand_mask(gamma1, &rho_prime, kappa_ctr);
 
         // 12: w ← NTT−1(cap_a_hat ◦ NTT(y))
-        let w: [R; K] = matrix_vector_product(
-            &cap_a_hat,
-            #[cfg(feature = "hw-accel")]
-            cap_a_flat.as_deref(),
-            #[cfg(not(feature = "hw-accel"))]
-            cap_a_flat,
-            &y,
-        );
+        let w: [R; K] = matrix_vector_product(cap_a_hat, cap_a_flat, &y);
 
         // 13: w_1 ← HighBits(w)    ▷ Signer’s commitment
         let w_1: [R; K] =
@@ -429,7 +473,8 @@ pub(crate) fn sign_internal<
     // 34: return σ
     let zmodq: [R; L] =
         core::array::from_fn(|l| R(core::array::from_fn(|n| center_mod(z[l].0[n]))));
-    sig_encode::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN>(gamma1, omega, &c_tilde, &zmodq, &h)
+    let attempts = u32::from(kappa_ctr) / u32::try_from(L).expect("cannot fail; L is static parameter") + 1;
+    (sig_encode::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN>(gamma1, omega, &c_tilde, &zmodq, &h), attempts)
 }
 
 

@@ -43,7 +43,11 @@ use pqc_hw::hashsig_device::abi::{
     self, Command, MerkleInput, ParamSet, SlhKeygenInput, SlhSignInput, AUTH_LEAF_NONE,
 };
 use pqc_hw::hashsig_device::pool::{self, HashsigAccelerator, Lane, Opener, Reference, Routing};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use pqc_hw::keccak::RegisterIo;
+use pqc_hw::mldsa_sign_lane::{LaneStats, SignDma, SignLane};
+use pqc_hw::stage::{self, Stage};
+use std::io;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, TryLockError};
 use std::time::Duration;
 
@@ -54,10 +58,243 @@ struct ResidentMldsa65 {
     matrix: Vec<i32>,
 }
 
-const SIGN_LANES: usize = pqc_hw::mldsa_sign_device::MLDSA65_SIGN_LANES;
-type SignLane = Mutex<Option<pqc_hw::mldsa_sign_device::Mldsa65SignSession>>;
-static MLDSA65_SIGN: OnceLock<[SignLane; SIGN_LANES]> = OnceLock::new();
-static NEXT_SIGN_LANE: AtomicUsize = AtomicUsize::new(0);
+/// One whole-signature ML-DSA-65 signer lane as the signing hook sees it:
+/// the device session, or a simulated lane in tests and host-path profiles.
+pub trait Mldsa65Lane: Send {
+    #[allow(clippy::too_many_arguments)]
+    fn sign(
+        &mut self,
+        matrix: &[i32],
+        s1: &[i32],
+        s2: &[i32],
+        t0: &[i32],
+        mu: &[u8; 64],
+        rho_prime: &[u8; 64],
+        randomized: bool,
+        attempt_limit: u16,
+        timeout: Duration,
+    ) -> io::Result<Vec<u8>>;
+    fn stats(&self) -> LaneStats;
+}
+
+impl<R: RegisterIo + Send, D: SignDma + Send> Mldsa65Lane for SignLane<R, D> {
+    fn sign(
+        &mut self,
+        matrix: &[i32],
+        s1: &[i32],
+        s2: &[i32],
+        t0: &[i32],
+        mu: &[u8; 64],
+        rho_prime: &[u8; 64],
+        randomized: bool,
+        attempt_limit: u16,
+        timeout: Duration,
+    ) -> io::Result<Vec<u8>> {
+        SignLane::sign(
+            self,
+            matrix,
+            s1,
+            s2,
+            t0,
+            mu,
+            rho_prime,
+            randomized,
+            attempt_limit,
+            timeout,
+        )
+    }
+    fn stats(&self) -> LaneStats {
+        SignLane::stats(self)
+    }
+}
+
+impl Mldsa65Lane for pqc_hw::mldsa_sign_device::Mldsa65SignSession {
+    fn sign(
+        &mut self,
+        matrix: &[i32],
+        s1: &[i32],
+        s2: &[i32],
+        t0: &[i32],
+        mu: &[u8; 64],
+        rho_prime: &[u8; 64],
+        randomized: bool,
+        attempt_limit: u16,
+        timeout: Duration,
+    ) -> io::Result<Vec<u8>> {
+        self.lane_mut().sign(
+            matrix,
+            s1,
+            s2,
+            t0,
+            mu,
+            rho_prime,
+            randomized,
+            attempt_limit,
+            timeout,
+        )
+    }
+    fn stats(&self) -> LaneStats {
+        self.lane().stats()
+    }
+}
+
+/// Opens lane `index` (called lazily, and again after a lane failed).
+pub type Mldsa65LaneOpener = Box<dyn Fn(usize) -> io::Result<Box<dyn Mldsa65Lane>> + Send + Sync>;
+
+struct SignPool {
+    lanes: Vec<Mutex<Option<Box<dyn Mldsa65Lane>>>>,
+    /// Counters of lanes that were closed after a failure, so a report
+    /// covers the whole process.
+    retired: Mutex<Vec<LaneStats>>,
+    opener: Mldsa65LaneOpener,
+    next: AtomicUsize,
+}
+
+static MLDSA65_SIGN: OnceLock<SignPool> = OnceLock::new();
+/// Runtime switch for the whole-signature hook (tests compare on and off).
+static MLDSA65_SIGN_ENABLED: AtomicBool = AtomicBool::new(true);
+const SIGN_TIMEOUT: Duration = Duration::from_millis(250);
+const SIGN_ATTEMPT_LIMIT: u16 = 128;
+
+/// Installs the whole-signature ML-DSA-65 hook over `lanes` lanes opened
+/// by `opener`. `C_Initialize` calls this after a successful device probe;
+/// tests and the host-path profile call it with simulated lanes. Returns
+/// `false` when a pool was already installed in this process (hooks are
+/// process-wide and set once).
+pub fn install_mldsa65_sign(lanes: usize, opener: Mldsa65LaneOpener) -> bool {
+    let pool = SignPool {
+        lanes: (0..lanes.max(1)).map(|_| Mutex::new(None)).collect(),
+        retired: Mutex::new(Vec::new()),
+        opener,
+        next: AtomicUsize::new(0),
+    };
+    if MLDSA65_SIGN.set(pool).is_err() {
+        return false;
+    }
+    let _installed = fips204::set_mldsa65_sign_hook(mldsa65_sign);
+    true
+}
+
+/// Turns the installed whole-signature hook on or off at run time. Off,
+/// every ML-DSA-65 signature runs on the CPU exactly as without a device.
+pub fn set_mldsa65_sign_enabled(on: bool) {
+    MLDSA65_SIGN_ENABLED.store(on, Ordering::SeqCst);
+}
+
+/// Counters of every lane that has been open in this process, summed per
+/// lane index where a lane was reopened. Lanes busy right now are skipped.
+pub fn mldsa65_lane_stats() -> Vec<LaneStats> {
+    let Some(pool) = MLDSA65_SIGN.get() else {
+        return Vec::new();
+    };
+    let mut out = pool.retired.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for lane in &pool.lanes {
+        if let Ok(guard) = lane.try_lock()
+            && let Some(lane) = guard.as_ref()
+        {
+            out.push(lane.stats());
+        }
+    }
+    out
+}
+
+/// Installs the whole-signature hook over simulated lanes (tests and the
+/// host-path profile). Each lane is reopened on the same simulated device
+/// after a failure, as `C_Initialize`'s pool reopens a device lane.
+pub fn install_mldsa65_sim(
+    lanes: Vec<pqc_hw::mldsa_sign_sim::SimLane>,
+    mode: pqc_hw::mldsa_sign::WaitMode,
+) -> bool {
+    let count = lanes.len();
+    install_mldsa65_sign(
+        count,
+        Box::new(move |index| {
+            let lane = SignLane::new(lanes[index].parts(mode))?;
+            Ok(Box::new(lane) as Box<dyn Mldsa65Lane>)
+        }),
+    )
+}
+
+/// The fabric's computation for the lane simulator: fips204's own
+/// ML-DSA-65 rejection loop over exactly the bytes the signer reads.
+pub fn mldsa65_reference_backend() -> Box<dyn pqc_hw::mldsa_sign_sim::SignBackend> {
+    use pqc_hw::mldsa_sign_lane::SECRET_POLY_BYTES;
+    Box::new(pqc_hw::mldsa_sign_sim::FnBackend(
+        |job: &pqc_hw::mldsa_sign_sim::SignJob<'_>| {
+            let le = |bytes: &[u8]| {
+                bytes
+                    .chunks_exact(4)
+                    .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect::<Vec<i32>>()
+            };
+            let matrix = le(job.matrix);
+            let polys = le(&job.secrets[..SECRET_POLY_BYTES]);
+            let (s1, rest) = polys.split_at(5 * 256);
+            let (s2, t0) = rest.split_at(6 * 256);
+            let tail = &job.secrets[SECRET_POLY_BYTES..];
+            let mu: [u8; 64] = tail[..64].try_into().map_err(|_| -1)?;
+            let rho_prime: [u8; 64] = tail[64..128].try_into().map_err(|_| -1)?;
+            fips204::ml_dsa_65::reference_sign_loop(&matrix, s1, s2, t0, &mu, &rho_prime)
+                .map(|(signature, attempts)| (signature.to_vec(), attempts))
+                .ok_or(-1)
+        },
+    ))
+}
+
+/// Routes fips204's ML-DSA stage timings into `pqc_hw::stage` and turns the
+/// profiler on. Diagnostics only.
+pub fn install_stage_profile() {
+    stage::enable(true);
+    let _installed = fips204::set_mldsa_stage_hook(forward_stage);
+}
+
+fn forward_stage(which: fips204::MldsaStage, ns: u64) {
+    let mapped = match which {
+        fips204::MldsaStage::KeyDecode => Stage::KeyDecode,
+        fips204::MldsaStage::ExpandA => Stage::ExpandA,
+        fips204::MldsaStage::MessageHash => Stage::MessageHash,
+        fips204::MldsaStage::Flatten => Stage::Flatten,
+        fips204::MldsaStage::Accelerator => Stage::Accelerator,
+        fips204::MldsaStage::SoftwareLoop => Stage::SoftwareLoop,
+    };
+    stage::record(mapped, ns);
+}
+
+/// The stage table and lane counters as text, one record per line
+/// (`PQC_HW_STAGE` / `PQC_HW_LANE`); empty when profiling is off.
+pub fn stage_report() -> String {
+    if !stage::enabled() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for line in stage::snapshot().render().lines() {
+        out.push_str("PQC_HW_STAGE\t");
+        out.push_str(line);
+        out.push('\n');
+    }
+    for (index, lane) in mldsa65_lane_stats().iter().enumerate() {
+        let mean = if lane.signs == 0 { 0.0 } else { lane.attempts as f64 / lane.signs as f64 };
+        out.push_str(&format!(
+            "PQC_HW_LANE\t{index}\tsigns={}\tattempts={}\tmean_attempts={mean:.3}\tcontext_loads={}\tinterrupts={}\tmissed_interrupts={}\tregister_polls={}\n",
+            lane.signs,
+            lane.attempts,
+            lane.context_loads,
+            lane.signer_interrupts,
+            lane.signer_missed_interrupts,
+            lane.register_polls
+        ));
+    }
+    out
+}
+
+/// Called from `C_Finalize`: prints [`stage_report`] to stderr when
+/// `PQC_HW_STAGE_PROFILE=1` enabled the profiler.
+pub fn report_on_finalize() {
+    let report = stage_report();
+    if !report.is_empty() {
+        eprint!("{report}");
+    }
+}
 
 static MLDSA65: OnceLock<Mutex<Option<ResidentMldsa65>>> = OnceLock::new();
 
@@ -65,6 +302,9 @@ static MLDSA65: OnceLock<Mutex<Option<ResidentMldsa65>>> = OnceLock::new();
 static HASHSIG: OnceLock<HashsigAccelerator> = OnceLock::new();
 
 pub fn probe_on_initialize() {
+    if stage::enable_from_env() {
+        install_stage_profile();
+    }
     let _available = AVAILABLE.get_or_init(|| {
         if std::env::var_os("PQC_HW_DISABLE").is_some_and(|value| value == "1") {
             return false;
@@ -81,8 +321,13 @@ fn probe_mldsa() -> bool {
     match pqc_hw::mldsa_sign_device::Mldsa65SignSession::open() {
         Ok(_) => {
             diagnostic("selected whole-signature ML-DSA-65 accelerator");
-            let _installed = fips204::set_mldsa65_sign_hook(mldsa65_sign);
-            true
+            install_mldsa65_sign(
+                pqc_hw::mldsa_sign_device::MLDSA65_SIGN_LANES,
+                Box::new(|lane| {
+                    pqc_hw::mldsa_sign_device::Mldsa65SignSession::open_lane(lane)
+                        .map(|session| Box::new(session) as Box<dyn Mldsa65Lane>)
+                }),
+            )
         }
         Err(sign_error) => match pqc_hw::mldsa_device::Mldsa65Session::open() {
             Ok(_) => {
@@ -431,20 +676,26 @@ fn mldsa65_sign(
     rho_prime: &[u8; 64],
     randomized: bool,
 ) -> Option<Vec<u8>> {
-    let lanes = MLDSA65_SIGN.get_or_init(|| std::array::from_fn(|_| Mutex::new(None)));
-    let first = NEXT_SIGN_LANE.fetch_add(1, Ordering::Relaxed) % SIGN_LANES;
-    for offset in 0..SIGN_LANES {
-        let lane = (first + offset) % SIGN_LANES;
-        let mut resident = match lanes[lane].try_lock() {
+    if !MLDSA65_SIGN_ENABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let pool = MLDSA65_SIGN.get()?;
+    let lanes = pool.lanes.len();
+    let started = stage::start();
+    let first = pool.next.fetch_add(1, Ordering::Relaxed) % lanes;
+    for offset in 0..lanes {
+        let lane = (first + offset) % lanes;
+        let mut resident = match pool.lanes[lane].try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => continue,
         };
         if resident.is_none() {
-            *resident = pqc_hw::mldsa_sign_device::Mldsa65SignSession::open_lane(lane).ok();
+            *resident = (pool.opener)(lane).ok();
         }
         let Some(state) = resident.as_mut() else {
             continue;
         };
+        stage::end(Stage::LaneAcquire, started);
         match state.sign(
             matrix,
             s1,
@@ -453,15 +704,20 @@ fn mldsa65_sign(
             mu,
             rho_prime,
             randomized,
-            128,
-            Duration::from_millis(250),
+            SIGN_ATTEMPT_LIMIT,
+            SIGN_TIMEOUT,
         ) {
             Ok(signature) => return Some(signature),
             Err(error) => {
                 diagnostic(&format!(
                     "whole-signature accelerator lane {lane} failed: {error}"
                 ));
-                *resident = None;
+                if let Some(closed) = resident.take() {
+                    pool.retired
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(closed.stats());
+                }
             }
         }
     }

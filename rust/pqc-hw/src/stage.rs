@@ -2,17 +2,15 @@
 //!
 //! Off by default. When enabled (`enable(true)`, or `PQC_HW_STAGE_PROFILE=1`
 //! read by [`enable_from_env`]), every instrumented stage adds its wall time
-//! and one count to a thread-local table; [`take_thread`] returns and resets
-//! the calling thread's table and [`snapshot_global`] returns the sum over
-//! every thread that has called [`flush_thread`] (or [`report`]).
+//! and one count to a process-wide table of relaxed atomics; [`snapshot`]
+//! reads it and [`take`] reads and resets it. Stage times are wall time of
+//! the calling thread, so concurrent threads' stages add up.
 //!
 //! Records contain stage labels, counts and nanoseconds only: no key
 //! material, message, signature or intermediate value is ever retained.
 //! Disabled, each stage costs one relaxed atomic load and no clock read.
 
-use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Instrumented stages of one ML-DSA signing operation, in path order.
@@ -151,29 +149,19 @@ impl Table {
 }
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static GLOBAL: Mutex<Table> = Mutex::new(Table {
-    ns: [0; STAGES],
-    count: [0; STAGES],
-});
-
-thread_local! {
-    static LOCAL: RefCell<Table> = const {
-        RefCell::new(Table {
-            ns: [0; STAGES],
-            count: [0; STAGES],
-        })
-    };
-}
+static NS: [AtomicU64; STAGES] = [const { AtomicU64::new(0) }; STAGES];
+static COUNT: [AtomicU64; STAGES] = [const { AtomicU64::new(0) }; STAGES];
 
 pub fn enable(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }
 
-/// Enables profiling when `PQC_HW_STAGE_PROFILE=1`.
-pub fn enable_from_env() {
+/// Enables profiling when `PQC_HW_STAGE_PROFILE=1`. Returns whether it is on.
+pub fn enable_from_env() -> bool {
     if std::env::var_os("PQC_HW_STAGE_PROFILE").is_some_and(|value| value == "1") {
         enable(true);
     }
+    enabled()
 }
 
 #[inline]
@@ -195,38 +183,30 @@ pub fn end(stage: Stage, started: Option<Instant>) {
     }
 }
 
-/// Adds one measured occurrence of `stage` to the calling thread's table.
+/// Adds one measured occurrence of `stage` to the process-wide table.
 #[inline]
 pub fn record(stage: Stage, ns: u64) {
     if !enabled() {
         return;
     }
-    LOCAL.with(|table| {
-        let mut table = table.borrow_mut();
-        table.ns[stage as usize] += ns;
-        table.count[stage as usize] += 1;
-    });
+    NS[stage as usize].fetch_add(ns, Ordering::Relaxed);
+    COUNT[stage as usize].fetch_add(1, Ordering::Relaxed);
 }
 
-/// Returns and resets the calling thread's table.
-pub fn take_thread() -> Table {
-    LOCAL.with(|table| std::mem::take(&mut *table.borrow_mut()))
+/// The process-wide table.
+pub fn snapshot() -> Table {
+    Table {
+        ns: core::array::from_fn(|i| NS[i].load(Ordering::Relaxed)),
+        count: core::array::from_fn(|i| COUNT[i].load(Ordering::Relaxed)),
+    }
 }
 
-/// Moves the calling thread's table into the process-wide sum.
-pub fn flush_thread() {
-    let local = take_thread();
-    GLOBAL.lock().unwrap_or_else(|e| e.into_inner()).add(&local);
-}
-
-/// The process-wide sum of flushed tables.
-pub fn snapshot_global() -> Table {
-    *GLOBAL.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Returns and resets the process-wide sum.
-pub fn take_global() -> Table {
-    std::mem::take(&mut *GLOBAL.lock().unwrap_or_else(|e| e.into_inner()))
+/// Returns and resets the process-wide table.
+pub fn take() -> Table {
+    Table {
+        ns: core::array::from_fn(|i| NS[i].swap(0, Ordering::Relaxed)),
+        count: core::array::from_fn(|i| COUNT[i].swap(0, Ordering::Relaxed)),
+    }
 }
 
 #[cfg(test)]
@@ -235,21 +215,18 @@ mod tests {
 
     #[test]
     fn disabled_records_nothing_and_enabled_accumulates() {
-        // Thread-local tables make this immune to other tests' threads; the
-        // flag is process-wide, so this is the only test that toggles it.
-        let handle = std::thread::spawn(|| {
-            enable(false);
-            record(Stage::Encode, 10);
-            assert_eq!(take_thread(), Table::default());
-            enable(true);
-            record(Stage::Encode, 10);
-            record(Stage::Encode, 5);
-            let started = start();
-            end(Stage::Readback, started);
-            enable(false);
-            take_thread()
-        });
-        let table = handle.join().unwrap();
+        // The only test in this crate that touches the process-wide table.
+        enable(false);
+        let _ = take();
+        record(Stage::Encode, 10);
+        assert_eq!(take(), Table::default());
+        enable(true);
+        record(Stage::Encode, 10);
+        record(Stage::Encode, 5);
+        let started = start();
+        end(Stage::Readback, started);
+        enable(false);
+        let table = take();
         assert_eq!(table.ns(Stage::Encode), 15);
         assert_eq!(table.count(Stage::Encode), 2);
         assert_eq!(table.count(Stage::Readback), 1);

@@ -287,6 +287,25 @@ impl SimLane {
         self.lock().faults.push(fault);
     }
 
+    /// Faults injected and not yet consumed by a command.
+    pub fn pending_faults(&self) -> usize {
+        self.lock().faults.len()
+    }
+
+    /// Drops faults that no command has consumed yet.
+    pub fn clear_faults(&self) {
+        self.lock().faults.clear();
+    }
+
+    /// Lets a hung signer command finish now (as a fabric reset would).
+    pub fn release_hang(&self) {
+        let mut state = self.lock();
+        if state.signer.never {
+            state.signer.never = false;
+            state.signer.ready_at = Some(Instant::now());
+        }
+    }
+
     /// True when the secret bank and signature bank are all zero.
     pub fn banks_scrubbed(&self) -> bool {
         let state = self.lock();

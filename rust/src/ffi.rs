@@ -356,6 +356,10 @@ fn drop_awslc_key_cache() {
 pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     require_init!();
     drop_awslc_key_cache();
+    // PQC_HW_STAGE_PROFILE=1 diagnostics: the accelerator host-path stage
+    // table, printed once per process lifetime of the engine.
+    #[cfg(all(feature = "hw-accel", target_os = "linux", target_arch = "aarch64"))]
+    crate::hw_accel::report_on_finalize();
     // PKCS#11 v3.2 §5.6 — pReserved MUST be NULL.
     if !p_reserved.is_null() {
         return CKR_ARGUMENTS_BAD;

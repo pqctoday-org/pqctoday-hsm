@@ -27,6 +27,19 @@ macro_rules! profile_phase {
     ($phase:ident) => {};
 }
 
+// Host-path stage timing for the accelerator profile (`hw_accel` stage hook).
+// Without `hw-accel` it is exactly the wrapped expression.
+macro_rules! stage {
+    ($stage:ident, $body:expr) => {{
+        #[cfg(feature = "hw-accel")]
+        let stage_started = crate::hw_accel::stage_start();
+        let stage_result = $body;
+        #[cfg(feature = "hw-accel")]
+        crate::hw_accel::stage_end(crate::hw_accel::MldsaStage::$stage, stage_started);
+        stage_result
+    }};
+}
+
 
 // TODO Roadmap
 //  1. Always more testing...
@@ -117,8 +130,8 @@ mod ml_dsa;
 
 #[cfg(feature = "hw-accel")]
 pub use hw_accel::{
-    ExpandAHook, Mldsa65MatVecHook, Mldsa65SignHook, set_expand_a_hook,
-    set_mldsa65_matvec_hook, set_mldsa65_sign_hook,
+    ExpandAHook, Mldsa65MatVecHook, Mldsa65SignHook, MldsaStage, MldsaStageHook,
+    set_expand_a_hook, set_mldsa65_matvec_hook, set_mldsa65_sign_hook, set_mldsa_stage_hook,
 };
 mod ntt;
 mod types;
@@ -481,7 +494,7 @@ macro_rules! functionality {
 
 
             fn try_from_bytes(sk: Self::ByteArray) -> Result<Self, &'static str> {
-                let esk = ml_dsa::expand_private::<K, L, SK_LEN>(ETA, &sk)?;
+                let esk = stage!(KeyDecode, ml_dsa::expand_private::<K, L, SK_LEN>(ETA, &sk))?;
                 Ok(esk)
             }
 
@@ -653,6 +666,33 @@ macro_rules! functionality {
                 BETA, GAMMA1, GAMMA2, OMEGA, TAU, sk, message, ctx, &[], &[], rnd, true, None
             );
             Ok(sig)
+        }
+
+        /// The signing rejection loop (FIPS 204 Algorithm 7 steps 8-34) in
+        /// software, from the inputs an accelerator receives: the NTT-domain
+        /// matrix `Â` (row-major), the Montgomery-form NTT-domain `s1`, `s2`,
+        /// `t0` of a decoded private key, `mu` and `rho'`. Returns the encoded
+        /// signature and the number of loop attempts, or `None` on a length
+        /// mismatch. This is exactly the computation the whole-signature
+        /// accelerator reproduces; simulators and tests use it as the
+        /// reference.
+        #[cfg(feature = "hw-accel")]
+        #[must_use]
+        pub fn reference_sign_loop(
+            matrix: &[i32], s1: &[i32], s2: &[i32], t0: &[i32], mu: &[u8; 64], rho_prime: &[u8; 64],
+        ) -> Option<([u8; SIG_LEN], u32)> {
+            if matrix.len() != K * L * 256 || s1.len() != L * 256 || s2.len() != K * 256 || t0.len() != K * 256 {
+                return None;
+            }
+            let poly = |v: &[i32], i: usize| types::T(core::array::from_fn(|n| v[i * 256 + n]));
+            let cap_a_hat: [[types::T; L]; K] =
+                core::array::from_fn(|k| core::array::from_fn(|l| poly(matrix, k * L + l)));
+            let s1: [types::T; L] = core::array::from_fn(|l| poly(s1, l));
+            let s2: [types::T; K] = core::array::from_fn(|k| poly(s2, k));
+            let t0: [types::T; K] = core::array::from_fn(|k| poly(t0, k));
+            Some(ml_dsa::rejection_loop::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, W1_LEN>(
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, &cap_a_hat, None, &s1, &s2, &t0, mu, rho_prime,
+            ))
         }
 
         #[deprecated = "Temporary function to allow application of external-mu test vectors; will be removed"]
