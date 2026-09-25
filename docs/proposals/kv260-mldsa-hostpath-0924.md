@@ -88,7 +88,10 @@ after 0.023 x CPU-only; ~7 µs of container time either way, ~0.11 ms on the
 A53. Measured ratios, median (5 runs): opt-s 0.269 -> 0.085 (key cache) ->
 0.0135 (direct DMA) -> 0.0138 (final); opt-3 0.256 -> 0.044 -> 0.022 ->
 0.023. Thread CPU per FPGA signature with a modelled 250 MHz signer, one
-worker: 3,188 µs spinning, 206 µs with the interrupt wait.
+worker, container time (two runs on the loaded host): 3,188 / 3,468 µs
+spinning (the whole device time), 206 / 355 µs with the interrupt wait. The
+container cannot measure the wake-up latency the interrupt adds (its timers
+overshoot by milliseconds under the host's load); the board A/B must.
 
 ## 5. Throughput model
 
