@@ -8,11 +8,12 @@
  src/data/acvp/ @ c9c75a624).
 
  D7: keep the < 1000-iteration floor (NIST SP 800-132 §5.2's recommended
- minimum) on BOTH engines. The Rust engine already refuses c < 1000 with
- CKR_ARGUMENTS_BAD (rust/src/ffi.rs, CKM_PKCS5_PBKD2 arm); the C++ engine
- accepted c = 1. Every NIST case at or above the floor must derive
- byte-exact; the c = 1 case (tc20) must be refused "by policy" with the
- same code Rust returns, and the boundary sits exactly at 1000.
+ minimum) on BOTH engines. The Rust engine already refused c < 1000
+ (rust/src/ffi.rs, CKM_PKCS5_PBKD2 arm); the C++ engine accepted c = 1.
+ Every NIST case at or above the floor must derive byte-exact; the c = 1
+ case (tc20) must be refused "by policy" with CKR_MECHANISM_PARAM_INVALID
+ (decision D6: the count is a mechanism-parameter field, PKCS#11 v3.2
+ §5.1.6), and the boundary sits exactly at 1000 (c = 0 refused too).
  *****************************************************************************/
 
 #include <config.h>
@@ -84,8 +85,8 @@ void Pbkdf2PolicyTests::testNistPbkdfAndIterationFloor()
 			if (iters < kPolicyFloor)
 			{
 				belowFloor++;
-				f.check(rv == CKR_ARGUMENTS_BAD, id + " (c=" + std::to_string(iters) +
-				        "): expected refusal by policy (CKR_ARGUMENTS_BAD), got " + acvpkat::rvHex(rv));
+				f.check(rv == CKR_MECHANISM_PARAM_INVALID, id + " (c=" + std::to_string(iters) +
+				        "): expected refusal by policy (CKR_MECHANISM_PARAM_INVALID), got " + acvpkat::rvHex(rv));
 			}
 			else
 			{
@@ -100,7 +101,9 @@ void Pbkdf2PolicyTests::testNistPbkdfAndIterationFloor()
 	// The floor is exactly 1000: 999 refused, 1000 derives.
 	std::vector<unsigned char> out, salt(16, 0xa5);
 	rv = derive(hSession, "policy-floor", salt, kPolicyFloor - 1, CKP_PKCS5_PBKD2_HMAC_SHA256, 32, out);
-	f.check(rv == CKR_ARGUMENTS_BAD, "c=999: expected CKR_ARGUMENTS_BAD, got " + acvpkat::rvHex(rv));
+	f.check(rv == CKR_MECHANISM_PARAM_INVALID, "c=999: expected CKR_MECHANISM_PARAM_INVALID, got " + acvpkat::rvHex(rv));
+	rv = derive(hSession, "policy-floor", salt, 0, CKP_PKCS5_PBKD2_HMAC_SHA256, 32, out);
+	f.check(rv == CKR_MECHANISM_PARAM_INVALID, "c=0: expected CKR_MECHANISM_PARAM_INVALID, got " + acvpkat::rvHex(rv));
 	rv = derive(hSession, "policy-floor", salt, kPolicyFloor, CKP_PKCS5_PBKD2_HMAC_SHA256, 32, out);
 	f.check(rv == CKR_OK && out.size() == 32, "c=1000: expected CKR_OK, got " + acvpkat::rvHex(rv));
 

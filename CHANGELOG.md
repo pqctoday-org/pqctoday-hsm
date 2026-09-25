@@ -190,7 +190,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **HMAC key sizes are advertised truthfully.** `C_GetMechanismInfo` no
     longer claims a digest-length minimum key the engine never enforced.
   - **PBKDF2 refuses fewer than 1000 iterations** with
-    `CKR_ARGUMENTS_BAD`, the same policy the Rust engine applies.
+    `CKR_MECHANISM_PARAM_INVALID`, the same policy the Rust engine applies.
 
 - **HashML-DSA and HashSLH-DSA signatures from KMIP / remoting now verify**
   (Rust engine). `native::sign_pqc`, the signing path behind KMIP and the
