@@ -1689,6 +1689,13 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_SHA512_224_KEY_DERIVATION
         | CKM_SHA512_256_KEY_DERIVATION
         | CKM_SHAKE_256_KEY_DERIVATION => (0, 0, 0x00080000),
+        // E19 (2026-09-25) — the CKM_HPKE family (vendor range). Key size is
+        // selected by CKA_PARAMETER_SET (the RFC 9180 kem_id), not a bit
+        // length, so the range is (0, 0) as for HSS/XMSS. Key-pair
+        // generation: CKF_GENERATE_KEY_PAIR. CKM_HPKE: CKF_ENCAPSULATE |
+        // CKF_DECAPSULATE — the only two calls that dispatch it.
+        CKM_HPKE_KEM_KEY_PAIR_GEN => (0, 0, 0x00010000),
+        CKM_HPKE => (0, 0, 0x10000000 | 0x20000000),
         _ => return None,
     };
     Some(info)
@@ -1834,6 +1841,22 @@ mod mechanism_table_tests {
             // 256-bit key only, CKF_ENCRYPT | CKF_DECRYPT, no CKF_MESSAGE_*
             assert_eq!(mechanism_info(mech), Some((32, 32, 0x00000100 | 0x00000200)));
         }
+    }
+
+    /// E19 (2026-09-25) — advertise == dispatch for the CKM_HPKE family.
+    /// Both mechanisms are dispatched (C_GenerateKeyPair for the key-pair
+    /// generator; C_EncapsulateKey / C_DecapsulateKey for CKM_HPKE) and were
+    /// absent from C_GetMechanismList, so the Hub dispatch report listed them
+    /// as dispatched-but-not-advertised and every capability matrix left them
+    /// out. Pin: listed, answerable by C_GetMechanismInfo, and flagged for
+    /// exactly the calls that dispatch them.
+    #[test]
+    fn e19_hpke_mechs_advertised_with_the_flags_they_dispatch() {
+        for mech in [CKM_HPKE_KEM_KEY_PAIR_GEN, CKM_HPKE] {
+            assert!(SUPPORTED_MECHS.contains(&mech), "mech {mech:#x} missing from SUPPORTED_MECHS");
+        }
+        assert_eq!(mechanism_info(CKM_HPKE_KEM_KEY_PAIR_GEN), Some((0, 0, 0x00010000)));
+        assert_eq!(mechanism_info(CKM_HPKE), Some((0, 0, 0x10000000 | 0x20000000)));
     }
 
     /// S1 — BIP32 derive mechanisms are dispatched by C_DeriveKey and must be

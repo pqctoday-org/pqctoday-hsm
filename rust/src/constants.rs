@@ -1150,6 +1150,15 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_XMSSMT,
     // Keccak-256 digest (G11 — Rust engine only)
     CKM_KECCAK_256,
+    // CKM_HPKE family (vendor range, pending OASIS TC allocation — see
+    // docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md). Implemented and
+    // dispatched by C_GenerateKeyPair / C_EncapsulateKey / C_DecapsulateKey
+    // since the [Unreleased] CKM_HPKE work, with FFI tests
+    // (ffi::hpke_ffi_tests) and native tests (native::hpke), but never
+    // listed here — dispatched-but-not-advertised, so no caller could
+    // discover them (gap-closure finding E19, 2026-09-25).
+    CKM_HPKE_KEM_KEY_PAIR_GEN,
+    CKM_HPKE,
 ];
 
 /// PKCS#11 v3.2 §5.5 — C_GetMechanismList. Gated on library initialization
