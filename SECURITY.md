@@ -58,9 +58,19 @@ Out of scope:
     — precisely where the timing is observable. As of 2026-09-15 both v1.5
     decrypt sites route through **aws-lc-rs** (AWS-LC's constant-time unpad)
     on every non-wasm32 target (`rust/src/crypto/awslc.rs`), so the network
-    oracle no longer exists in a native build. RSA sign, verify, keygen, OAEP
-    and PKCS#1 v1.5 encrypt/decrypt, plus NIST-curve ECDH, moved to AWS-LC in
-    the same change (1.39x RSA-2048 sign measured on the FRDM-IMX95 A55).
+    oracle no longer exists in a native build. RSA sign, verify, keygen, and
+    PKCS#1 v1.5 encrypt/decrypt, plus NIST-curve ECDH, moved to AWS-LC in
+    that change (1.39x RSA-2048 sign measured on the FRDM-IMX95 A55).
+  - **OAEP decrypt followed on 2026-09-25, not in the 09-15 change.** An
+    earlier version of this note listed OAEP alongside the v1.5 sites above.
+    That was inaccurate: `awslc::rsa_oaep_decrypt` was written and cached but
+    had **no production callers**, so every OAEP decrypt — including the one
+    `pqctoday-kmip`'s Decrypt reaches on :5696 — still ran the pure-Rust
+    unpad. All four decrypt sites (`C_Decrypt`, `C_UnwrapKey`,
+    `CKM_RSA_AES_KEY_WRAP`, and `native::encrypt`, the KMIP path) now probe
+    AWS-LC first. A unit test pins the probe actually engaging, since a silent
+    fallback returns identical plaintext and no functional test can tell them
+    apart.
     **ECDSA deliberately stays on the pure-Rust `p256`/`p384`/`p521` crates**:
     they sign with RFC 6979 deterministic nonces, which this engine's contract
     relies on, and aws-lc-rs offers no deterministic-ECDSA API — so ECDSA keeps
@@ -70,8 +80,11 @@ Out of scope:
     ignored in CI**, but only on paths that are *not* the Marvin decrypt
     surface: (a) `openpgp/`'s legacy classical OpenPGP interop; (b) the engine
     fallback for mechanisms AWS-LC does not expose (raw `CKM_RSA_X_509`,
-    unprefixed `CKM_RSA_PKCS`, PSS with a caller-chosen salt length, and the
-    MD5/SHA-1/SHA-224/SHA-3 RSA variants) — none of which is v1.5 decryption;
+    unprefixed `CKM_RSA_PKCS`, PSS with a caller-chosen salt length, the
+    MD5/SHA-1/SHA-224/SHA-3 RSA variants, and OAEP where the hash differs
+    from the MGF1 hash or the private key is PKCS#1 `RSAPrivateKey` DER
+    rather than PKCS#8 — AWS-LC has no algorithm for the mismatched pairs and
+    its loader declines that key format) — none of which is v1.5 decryption;
     (c) `pqctoday-kmip`'s DER key-format conversion (`KeyFormatType`
     PKCS#1↔PKCS#8, component reconstruction), which performs no private-key
     math and has no timing oracle. This fork's core posture continues to rest

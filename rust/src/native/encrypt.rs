@@ -1190,6 +1190,35 @@ fn rsa_oaep_encrypt(pub_der: &[u8], plaintext: &[u8], params: &OaepParams) -> Re
 /// `KeyFormatType=PKCS_1`, `HashingAlgorithm=SHA_384`,
 /// `MaskGeneratorHashingAlgorithm=SHA_256`, and a `PSource` label.
 fn rsa_oaep_decrypt(priv_der: &[u8], ciphertext: &[u8], params: &OaepParams) -> Result<Vec<u8>, CkRv> {
+    // AWS-LC owns the unpad on native → constant time, no Marvin oracle on
+    // the path KMIP Decrypt (:5696) reaches. `None` means "not handled here"
+    // — wasm32, a PKCS#1 `RSAPrivateKey` DER (which AWS-LC's loader
+    // declines), or a hash/MGF pair with no matched AWS-LC algorithm — and
+    // falls through to the `rsa`-crate branch below unchanged.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let h = params.hash.unwrap_or(OaepHash::Sha256);
+        let m = params.mgf_hash.unwrap_or(h);
+        let ckm = |x: OaepHash| match x {
+            OaepHash::Sha256 => CKM_SHA256,
+            OaepHash::Sha384 => CKM_SHA384,
+            OaepHash::Sha512 => CKM_SHA512,
+        };
+        let ckg = |x: OaepHash| match x {
+            OaepHash::Sha256 => CKG_MGF1_SHA256,
+            OaepHash::Sha384 => CKG_MGF1_SHA384,
+            OaepHash::Sha512 => CKG_MGF1_SHA512,
+        };
+        if let Some(r) = crate::crypto::awslc::rsa_oaep_decrypt_ck(
+            priv_der,
+            ckm(h),
+            ckg(m),
+            params.label.unwrap_or(&[]),
+            ciphertext,
+        ) {
+            return r;
+        }
+    }
     let private_key = rsa_private_key_from_any_der(priv_der)?;
     let padding = oaep_for(params);
     private_key
