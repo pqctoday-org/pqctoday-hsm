@@ -26,6 +26,8 @@ fn maps_metadata_and_zeroizes_on_drop() {
     {
         let mut buffer = Buffer::open(&device, &sysfs).unwrap();
         assert_eq!(buffer.phys_addr(), 0x12345000);
+        // A plain file answers no u-dma-buf ioctl: syncs go through sysfs.
+        assert_eq!(buffer.sync_method(), pqc_hw::dma::SyncMethod::Sysfs);
         buffer.as_mut_slice()[0..4].copy_from_slice(b"KEY!");
         buffer.as_mut_slice()[4096..4101].copy_from_slice(b"TAIL!");
         buffer.sync_for_device().unwrap();
