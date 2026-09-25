@@ -17,6 +17,8 @@ on:
       - "rust/Cargo.lock"
       - "kmip/Cargo.toml"
       - "kmip/Cargo.lock"
+      - "openpgp/Cargo.toml"
+      - "openpgp/lib/Cargo.toml"
   workflow_dispatch: {}
 
 jobs:
@@ -56,10 +58,29 @@ jobs:
         # pqctoday-kmip server binary is built from THAT lock, not rust/'s,
         # and it had drifted to rustls 0.23.40 (same RUSTSEC-2026-0285) while
         # only rust/ was being scanned. Same ignore list, same policy.
+        #
+        # openpgp/Cargo.lock added 2026-09-25, and it is the reason this list
+        # must be exhaustive rather than "the two crates we think matter":
+        # openpgp/lib pinned rsa "0.7", resolving 0.7.2 -- inside ALL THREE
+        # open rsa advisories, including GHSA-9c48-w39g-hm26 which IS patched
+        # (0.9.10). Three Dependabot alerts sat against that one lock while
+        # this job scanned only rust/ and kmip/ (both already on 0.9.10, i.e.
+        # clean), so cargo audit was green and silent about it the whole time.
+        # Dependabot saw it; this job structurally could not.
+        #
+        # openpgp/Cargo.lock is gitignored (openpgp/.gitignore) -- the only
+        # workspace here whose lock is NOT committed -- so a fresh checkout has
+        # no lock for cargo audit to read. Generate one first; that audits the
+        # resolution a build would actually get, which is the question that
+        # matters. The two committed locks are audited as-is, untouched.
         run: |
           set -eu
-          for crate in rust kmip; do
-            echo "::group::cargo audit ($crate/Cargo.lock)"
+          for crate in rust kmip openpgp; do
+            echo "::group::cargo audit ($crate)"
+            if [ ! -f "$crate/Cargo.lock" ]; then
+              echo "no committed lock for $crate -- generating one to audit"
+              (cd "$crate" && cargo generate-lockfile)
+            fi
             (cd "$crate" && cargo audit --deny warnings --ignore RUSTSEC-2023-0071)
             echo "::endgroup::"
           done
