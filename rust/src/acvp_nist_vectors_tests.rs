@@ -937,3 +937,31 @@ fn e11_aes192_cbc_pad_and_message_gcm() {
     assert_eq!(pt2, zero);
     assert_eq!(C_MessageDecryptFinal(session), CKR_OK);
 }
+
+/// E11(d) — CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS advertises 256..521 bits and
+/// answered secp256k1 (a 256-bit curve CKM_EC_KEY_PAIR_GEN generates) with
+/// CKR_CURVE_NOT_SUPPORTED. CK_MECHANISM_INFO cannot exclude one 256-bit
+/// curve, so the curve is supported: FIPS 186-5 §A.2.1's extra-random-bits
+/// method (d = (c mod (n - 1)) + 1 over N + 64 random bits) is defined for
+/// any prime-order group. The key must sign and verify, and carry the
+/// secp256k1 OID and a 65-byte point.
+#[test]
+fn e11_w_extra_bits_secp256k1() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let (h_pub, h_prv) =
+        ec_keypair(session, CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS, "secp256k1").expect("W_EXTRA_BITS secp256k1 keygen");
+    let attr = |h: u32, a: u32| crate::state::OBJECTS.with(|o| o.borrow().get(&h).and_then(|m| m.get(&a).cloned()));
+    assert_eq!(attr(h_pub, CKA_EC_PARAMS), Some(curve_oid("secp256k1")));
+    let point = attr(h_pub, CKA_EC_POINT).expect("CKA_EC_POINT");
+    assert_eq!(&point[..3], &[0x04, 0x41, 0x04], "DER OCTET STRING of an uncompressed 65-byte point");
+    let pk = k256::PublicKey::from_sec1_bytes(&point[2..]).expect("on secp256k1");
+    let sk = k256::SecretKey::from_slice(&obj_value(h_prv)).expect("scalar in [1, n-1]");
+    assert_eq!(sk.public_key(), pk, "public point = d*G");
+    let mech = mechanism(CKM_ECDSA_SHA256, &[]);
+    let sig = sign(session, &mech, h_prv, b"extra bits").expect("sign");
+    assert_eq!(verify(session, &mech, h_pub, b"extra bits", &sig), CKR_OK);
+    for curve in ["P-256", "P-384", "P-521"] {
+        ec_keypair(session, CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS, curve).expect(curve);
+    }
+}

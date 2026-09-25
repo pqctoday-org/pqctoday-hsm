@@ -1569,8 +1569,8 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // Engine generates P-256/P-384/P-521 (+ secp256k1) — range unified
         // with CKM_ECDSA below (compliance-audit P-15).
         CKM_EC_KEY_PAIR_GEN => (256, 521, 0x00010000 | EC_CAPABILITY_FLAGS),
-        // FIPS 186-5 Appendix A.2.2 "extra bits" keygen — P-256/384/521 only
-        // (see the dispatch arm for why secp256k1 is out of scope here).
+        // FIPS 186-5 Appendix A.2.2 "extra bits" keygen — the same curves as
+        // CKM_EC_KEY_PAIR_GEN (P-256 / secp256k1 / P-384 / P-521; E11).
         CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => (256, 521, 0x00010000 | EC_CAPABILITY_FLAGS),
         // E13 (2026-09-25) — every ECDSA sign/verify mechanism covers P-224
         // (FIPS 186-5 / SP 800-186) for imported keys; key generation and
@@ -3089,12 +3089,14 @@ fn C_GenerateKeyPair_impl(
 
             CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => {
                 // FIPS 186-5 Appendix A.2.2 "Extra Random Bits" — see
-                // ec_extra_bits_scalar. Scoped to the NIST prime curves this
-                // engine supports AND that have real ACVP evidence for this
-                // secretGenerationMode (ECDSA-KeyGen-FIPS186-5, P-256/384/
-                // 521); secp256k1 isn't a FIPS186-5 curve at all, so it's
-                // out of scope here (still available via plain
-                // CKM_EC_KEY_PAIR_GEN).
+                // ec_extra_bits_scalar. E11 (2026-09-25): secp256k1 is
+                // included. It is not a FIPS 186-5 curve, but the mechanism
+                // advertises 256..521 bits, CK_MECHANISM_INFO cannot exclude
+                // one 256-bit curve, and CKM_EC_KEY_PAIR_GEN generates it;
+                // refusing it made an advertised cell fail. The extra-bits
+                // reduction d = (c mod (n-1)) + 1 is defined for any
+                // prime-order group, so the same method is applied with the
+                // secp256k1 order. NIST ACVP evidence remains P-256/384/521.
                 let ec_params = get_attr_bytes(
                     p_public_key_template,
                     ul_public_key_attribute_count,
@@ -3157,6 +3159,8 @@ fn C_GenerateKeyPair_impl(
                     CURVE_P256 => vec![
                         0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
                     ],
+                    // 1.3.132.0.10 secp256k1
+                    CURVE_K256 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a],
                     _ => return CKR_CURVE_NOT_SUPPORTED,
                 };
                 match curve {
@@ -3205,6 +3209,35 @@ fn C_GenerateKeyPair_impl(
                         ec_point.extend_from_slice(&vk_bytes);
                         pub_attrs.insert(CKA_EC_POINT, ec_point);
                         let spki = build_ec_spki_p384(&vk_bytes);
+                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                    }
+                    CURVE_K256 => {
+                        store_param_set(&mut pub_attrs, CURVE_K256);
+                        store_param_set(&mut prv_attrs, CURVE_K256);
+                        let n_minus_1 = (-k256::Scalar::ONE).to_bytes();
+                        let scalar = match ec_extra_bits_scalar(&n_minus_1, 256) {
+                            Ok(s) => s,
+                            Err(rv) => return rv,
+                        };
+                        let sk = match k256::ecdsa::SigningKey::from_slice(&scalar) {
+                            Ok(k) => k,
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        };
+                        let vk = k256::ecdsa::VerifyingKey::from(&sk);
+                        prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+                        let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+                        let mut ec_point = Vec::with_capacity(2 + vk_bytes.len());
+                        ec_point.push(0x04u8);
+                        ec_point.push(vk_bytes.len() as u8);
+                        ec_point.extend_from_slice(&vk_bytes);
+                        pub_attrs.insert(CKA_EC_POINT, ec_point);
+                        // Same SPKI as CKM_EC_KEY_PAIR_GEN's secp256k1 arm:
+                        // id-ecPublicKey + 1.3.132.0.10.
+                        let alg_id: &[u8] = &[
+                            0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+                            0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a,
+                        ];
+                        let spki = build_spki_from_parts(alg_id, &vk_bytes);
                         pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                     _ => {
