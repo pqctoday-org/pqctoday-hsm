@@ -956,7 +956,7 @@
       "rust": "implemented",
       "cpp_min": 112,
       "cpp_max": 521,
-      "rust_min": 256,
+      "rust_min": 224,
       "rust_max": 521
     },
     "CKM_ECDSA_KEY_PAIR_GEN": {
@@ -970,7 +970,7 @@
       "rust": "implemented",
       "cpp_min": 112,
       "cpp_max": 521,
-      "rust_min": 256,
+      "rust_min": 224,
       "rust_max": 521
     },
     "CKM_ECDSA_SHA224": {
@@ -979,7 +979,7 @@
       "rust": "implemented",
       "cpp_min": 112,
       "cpp_max": 521,
-      "rust_min": 256,
+      "rust_min": 224,
       "rust_max": 521
     },
     "CKM_ECDSA_SHA256": {
@@ -988,7 +988,7 @@
       "rust": "implemented",
       "cpp_min": 112,
       "cpp_max": 521,
-      "rust_min": 256,
+      "rust_min": 224,
       "rust_max": 521
     },
     "CKM_ECDSA_SHA384": {
@@ -997,7 +997,7 @@
       "rust": "implemented",
       "cpp_min": 112,
       "cpp_max": 521,
-      "rust_min": 256,
+      "rust_min": 224,
       "rust_max": 521
     },
     "CKM_ECDSA_SHA3_224": {
@@ -1006,7 +1006,7 @@
       "rust": "implemented",
       "cpp_min": 112,
       "cpp_max": 521,
-      "rust_min": 256,
+      "rust_min": 224,
       "rust_max": 521
     },
     "CKM_ECDSA_SHA3_256": {
@@ -1015,7 +1015,7 @@
       "rust": "implemented",
       "cpp_min": 112,
       "cpp_max": 521,
-      "rust_min": 256,
+      "rust_min": 224,
       "rust_max": 521
     },
     "CKM_ECDSA_SHA3_384": {
@@ -1024,7 +1024,7 @@
       "rust": "implemented",
       "cpp_min": 112,
       "cpp_max": 521,
-      "rust_min": 256,
+      "rust_min": 224,
       "rust_max": 521
     },
     "CKM_ECDSA_SHA3_512": {
@@ -1033,7 +1033,7 @@
       "rust": "implemented",
       "cpp_min": 112,
       "cpp_max": 521,
-      "rust_min": 256,
+      "rust_min": 224,
       "rust_max": 521
     },
     "CKM_ECDSA_SHA512": {
@@ -1042,7 +1042,7 @@
       "rust": "implemented",
       "cpp_min": 112,
       "cpp_max": 521,
-      "rust_min": 256,
+      "rust_min": 224,
       "rust_max": 521
     },
     "CKM_ECMQV_DERIVE": {
@@ -1592,8 +1592,8 @@
       "rust": "implemented",
       "cpp_min": 16,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_MD5_HMAC_GENERAL": {
       "value": "0x00000212",
@@ -1601,8 +1601,8 @@
       "rust": "implemented",
       "cpp_min": 16,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_MD5_KEY_DERIVATION": {
       "value": "0x00000390",
@@ -1864,8 +1864,8 @@
       "rust": "implemented",
       "cpp_min": 20,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_RIPEMD160_HMAC_GENERAL": {
       "value": "0x00000242",
@@ -1873,8 +1873,8 @@
       "rust": "implemented",
       "cpp_min": 20,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_RIPEMD160_RSA_PKCS": {
       "value": "0x00000008",
@@ -2068,8 +2068,8 @@
       "rust": "implemented",
       "cpp_min": 28,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA224_HMAC_GENERAL": {
       "value": "0x00000257",
@@ -2077,8 +2077,8 @@
       "rust": "implemented",
       "cpp_min": 28,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA224_KEY_DERIVATION": {
       "value": "0x00000396",
@@ -2123,8 +2123,8 @@
       "rust": "implemented",
       "cpp_min": 32,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA256_HMAC_GENERAL": {
       "value": "0x00000252",
@@ -2132,8 +2132,8 @@
       "rust": "implemented",
       "cpp_min": 32,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA256_KEY_DERIVATION": {
       "value": "0x00000393",
@@ -2182,8 +2182,8 @@
       "rust": "implemented",
       "cpp_min": 48,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA384_HMAC_GENERAL": {
       "value": "0x00000262",
@@ -2191,8 +2191,8 @@
       "rust": "implemented",
       "cpp_min": 48,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA384_KEY_DERIVATION": {
       "value": "0x00000394",
@@ -2241,8 +2241,8 @@
       "rust": "implemented",
       "cpp_min": 28,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA3_224_HMAC_GENERAL": {
       "value": "0x000002b7",
@@ -2250,8 +2250,8 @@
       "rust": "implemented",
       "cpp_min": 28,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA3_224_KEY_DERIVATION": {
       "value": "0x00000398",
@@ -2296,8 +2296,8 @@
       "rust": "implemented",
       "cpp_min": 32,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA3_256_HMAC_GENERAL": {
       "value": "0x000002b2",
@@ -2305,8 +2305,8 @@
       "rust": "implemented",
       "cpp_min": 32,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA3_256_KEY_DERIVATION": {
       "value": "0x00000397",
@@ -2355,8 +2355,8 @@
       "rust": "implemented",
       "cpp_min": 48,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA3_384_HMAC_GENERAL": {
       "value": "0x000002c2",
@@ -2364,8 +2364,8 @@
       "rust": "implemented",
       "cpp_min": 48,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA3_384_KEY_DERIVATION": {
       "value": "0x00000399",
@@ -2414,8 +2414,8 @@
       "rust": "implemented",
       "cpp_min": 64,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA3_512_HMAC_GENERAL": {
       "value": "0x000002d2",
@@ -2423,8 +2423,8 @@
       "rust": "implemented",
       "cpp_min": 64,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA3_512_KEY_DERIVATION": {
       "value": "0x0000039a",
@@ -2482,8 +2482,8 @@
       "rust": "implemented",
       "cpp_min": 28,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA512_224_HMAC_GENERAL": {
       "value": "0x0000004a",
@@ -2491,8 +2491,8 @@
       "rust": "implemented",
       "cpp_min": 28,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA512_224_KEY_DERIVATION": {
       "value": "0x0000004b",
@@ -2523,8 +2523,8 @@
       "rust": "implemented",
       "cpp_min": 32,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA512_256_HMAC_GENERAL": {
       "value": "0x0000004e",
@@ -2532,8 +2532,8 @@
       "rust": "implemented",
       "cpp_min": 32,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA512_256_KEY_DERIVATION": {
       "value": "0x0000004f",
@@ -2555,8 +2555,8 @@
       "rust": "implemented",
       "cpp_min": 64,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA512_HMAC_GENERAL": {
       "value": "0x00000272",
@@ -2564,8 +2564,8 @@
       "rust": "implemented",
       "cpp_min": 64,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA512_KEY_DERIVATION": {
       "value": "0x00000395",
@@ -2653,8 +2653,8 @@
       "rust": "implemented",
       "cpp_min": 20,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA_1_HMAC_GENERAL": {
       "value": "0x00000222",
@@ -2662,8 +2662,8 @@
       "rust": "implemented",
       "cpp_min": 20,
       "cpp_max": 512,
-      "rust_min": 16,
-      "rust_max": 64
+      "rust_min": 1,
+      "rust_max": 512
     },
     "CKM_SHA_1_KEY_GEN": {
       "value": "0x00004003",
@@ -3122,13 +3122,21 @@
       "value": "engine-extension",
       "cpp": "implemented",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism.",
+      "cpp_min": 261120,
+      "cpp_max": 1357824,
+      "rust_min": 261120,
+      "rust_max": 1357824
     },
     "CKM_PQCTODAY_CLASSIC_MCELIECE_KEY_PAIR_GEN": {
       "value": "engine-extension",
       "cpp": "implemented",
       "rust": "implemented",
-      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism."
+      "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism.",
+      "cpp_min": 261120,
+      "cpp_max": 1357824,
+      "rust_min": 261120,
+      "rust_max": 1357824
     },
     "CKM_PQCTODAY_FRODOKEM_ENCAPSULATE": {
       "value": "engine-extension",
