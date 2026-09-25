@@ -105,6 +105,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **HashML-DSA and HashSLH-DSA signatures from KMIP / remoting now verify**
+  (Rust engine). `native::sign_pqc`, the signing path behind KMIP and the
+  gRPC/REST remoting services, signed every pre-hash mechanism
+  (`CKM_HASH_ML_DSA_*`, `CKM_HASH_SLH_DSA_*`) as *pure* ML-DSA / SLH-DSA,
+  while `verify_pqc` checked them as pre-hash signatures, so they never
+  verified. It now hash-signs them, in the hedged, deterministic and
+  explicit-`<Random>` modes. The deterministic form is byte-identical to the
+  `C_Sign` path. `C_Sign` itself was not affected.
+
 - The OpenMLS interop workflow checks out submodules again, so its pqctoday
   image builds since Classic McEliece made `liboqs` a hard CMake dependency
   (red on every nightly run 2026-09-12 → 09-21). It now runs on push / PR to

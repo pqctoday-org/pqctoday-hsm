@@ -19,7 +19,8 @@ use super::CkRv;
 use crate::constants::*;
 use crate::crypto::handlers::{
     is_prehash_ml_dsa, is_prehash_slh_dsa, sign_ecdsa, sign_eddsa, sign_eddsa_ctx, sign_eddsa_ph,
-    sign_hmac, sign_kmac, sign_ml_dsa, sign_ml_dsa_external_mu, sign_ml_dsa_external_rnd,
+    sign_hash_ml_dsa_external_rnd, sign_hash_slh_dsa_external_rnd, sign_hmac, sign_kmac,
+    sign_ml_dsa, sign_ml_dsa_external_mu, sign_ml_dsa_external_rnd,
     sign_ml_dsa_internal, sign_rsa, sign_slh_dsa, sign_slh_dsa_external_rnd,
     sign_slh_dsa_internal, verify_ecdsa, verify_eddsa, verify_eddsa_ctx, verify_eddsa_ph,
     verify_hmac, verify_ml_dsa, verify_ml_dsa_external_mu,
@@ -595,6 +596,9 @@ fn sign_pqc_impl(
                 sign_ml_dsa_external_mu(ps, &sk, data, rnd)
             } else if internal {
                 sign_ml_dsa_internal(ps, &sk, data, ctx, rnd)
+            } else if is_prehash_ml_dsa(m) {
+                // HashML-DSA: hash-sign, the form verify_pqc checks.
+                sign_hash_ml_dsa_external_rnd(m, ps, &sk, data, ctx, rnd)
             } else {
                 sign_ml_dsa_external_rnd(ps, &sk, data, ctx, rnd)
             }
@@ -614,6 +618,9 @@ fn sign_pqc_impl(
             let addrnd = addrnd_buf.as_deref();
             if internal {
                 sign_slh_dsa_internal(ps, &sk, data, addrnd)
+            } else if is_prehash_slh_dsa(m) {
+                // HashSLH-DSA: hash-sign, the form verify_pqc checks.
+                sign_hash_slh_dsa_external_rnd(m, ps, &sk, data, ctx, addrnd)
             } else {
                 sign_slh_dsa_external_rnd(ps, &sk, data, ctx, addrnd)
             }
@@ -1056,6 +1063,55 @@ mod tests {
 
         let result = sign(session, prv_h, CKM_HSS, b"one too many");
         assert_eq!(result, Err(CKR_KEY_EXHAUSTED), "the 33rd sign must fail, not reuse a leaf");
+
+        close_session(session).unwrap();
+    }
+
+    /// Regression (2026-09-24): the KMIP/remoting PQC path (`sign_pqc`) signed
+    /// every HashML-DSA / HashSLH-DSA mechanism as PURE ML-DSA / SLH-DSA while
+    /// `verify_pqc` hash-verifies it, so those signatures never verified.
+    /// Each rnd mode must now hash-sign: it verifies under the same mechanism,
+    /// does NOT verify as pure, and the deterministic form is byte-identical
+    /// to the C_Sign path (`handlers::sign_ml_dsa` / `sign_slh_dsa`).
+    #[test]
+    fn prehash_sign_pqc_hash_signs_and_verifies() {
+        use crate::native::keygen::generate_slh_dsa_keypair;
+        let _guard = test_lock::acquire();
+        let session = fresh_session();
+        let msg = b"prehash regression";
+        let ctx = b"ctx";
+
+        let (pub_d, prv_d) =
+            generate_ml_dsa_keypair(session, CKP_ML_DSA_65, b"\x31", "hash-mldsa").unwrap();
+        let mech = CKM_HASH_ML_DSA_SHA256;
+        for (deterministic, random) in [(false, None), (true, None), (false, Some(&[7u8; 32][..]))] {
+            let sig = sign_pqc(session, prv_d, mech, msg, ctx, deterministic, false, false, random)
+                .expect("HashML-DSA sign");
+            assert!(verify_pqc(session, pub_d, mech, msg, &sig, ctx, false, false).is_ok(),
+                "HashML-DSA signature verifies (det={deterministic}, rnd={})", random.is_some());
+            assert!(verify_pqc(session, pub_d, CKM_ML_DSA, msg, &sig, ctx, false, false).is_err(),
+                "it is a hash signature, not a pure one");
+        }
+        let sk = crate::state::get_object_value(prv_d).unwrap();
+        let det = sign_pqc(session, prv_d, mech, msg, ctx, true, false, false, None).unwrap();
+        let reference = sign_ml_dsa(mech, CKP_ML_DSA_65, &sk, msg, ctx, true).unwrap();
+        assert_eq!(det, reference, "deterministic HashML-DSA matches the C_Sign path");
+
+        let (pub_s, prv_s) =
+            generate_slh_dsa_keypair(session, CKP_SLH_DSA_SHAKE_128F, b"\x32", "hash-slhdsa").unwrap();
+        let mech = CKM_HASH_SLH_DSA_SHA256;
+        for (deterministic, random) in [(false, None), (true, None), (false, Some(&[9u8; 16][..]))] {
+            let sig = sign_pqc(session, prv_s, mech, msg, ctx, deterministic, false, false, random)
+                .expect("HashSLH-DSA sign");
+            assert!(verify_pqc(session, pub_s, mech, msg, &sig, ctx, false, false).is_ok(),
+                "HashSLH-DSA signature verifies (det={deterministic}, rnd={})", random.is_some());
+            assert!(verify_pqc(session, pub_s, CKM_SLH_DSA, msg, &sig, ctx, false, false).is_err(),
+                "it is a hash signature, not a pure one");
+        }
+        let sk = crate::state::get_object_value(prv_s).unwrap();
+        let det = sign_pqc(session, prv_s, mech, msg, ctx, true, false, false, None).unwrap();
+        let reference = sign_slh_dsa(mech, CKP_SLH_DSA_SHAKE_128F, &sk, msg, ctx, true).unwrap();
+        assert_eq!(det, reference, "deterministic HashSLH-DSA matches the C_Sign path");
 
         close_session(session).unwrap();
     }

@@ -740,7 +740,7 @@ macro_rules! slh_dsa_sign_internal {
 
 #[macro_export]
 macro_rules! slh_dsa_sign_external_rnd {
-    ($ps:ty, $sk_bytes:expr, $msg:expr, $ctx:expr, $addrnd:expr) => {{
+    ($ps:ty, $sk_bytes:expr, $msg:expr, $ctx:expr, $addrnd:expr, $ph:expr) => {{
         use fips205::traits::Signer;
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
@@ -753,9 +753,14 @@ macro_rules! slh_dsa_sign_external_rnd {
         // External `SLH-DSA.Sign` (with `(0‖|ctx|‖ctx)` framing). `addrnd =
         // None` ⇒ deterministic (hedged=false → addrnd = PK.seed); `Some(r)` ⇒
         // hedged with the explicit `<Random>` addrnd drawn from `FixedRng`.
-        match $addrnd {
-            Some(r) => sk.try_sign_with_rng(&mut crate::crypto::handlers::FixedRng::new(r), $msg, $ctx, true),
-            None => sk.try_sign_with_rng(&mut rand::rngs::OsRng, $msg, $ctx, false),
+        // `$ph = Some(ph)` ⇒ HashSLH-DSA (FIPS 205 Algorithm 23, message
+        // hashed internally), the form `slh_dsa_verify!` checks for a
+        // pre-hash mechanism.
+        match ($ph, $addrnd) {
+            (Some(ph), Some(r)) => sk.try_hash_sign_with_rng(&mut crate::crypto::handlers::FixedRng::new(r), $msg, $ctx, &ph, true),
+            (Some(ph), None) => sk.try_hash_sign_with_rng(&mut rand::rngs::OsRng, $msg, $ctx, &ph, false),
+            (None, Some(r)) => sk.try_sign_with_rng(&mut crate::crypto::handlers::FixedRng::new(r), $msg, $ctx, true),
+            (None, None) => sk.try_sign_with_rng(&mut rand::rngs::OsRng, $msg, $ctx, false),
         }
         .map_err(|_| CKR_FUNCTION_FAILED)
         .map(|s| Into::<Vec<u8>>::into(s))
@@ -822,19 +827,47 @@ pub fn sign_slh_dsa_external_rnd(
     ctx: &[u8],
     addrnd: Option<&[u8]>,
 ) -> Result<Vec<u8>, u32> {
+    sign_slh_dsa_external_rnd_ph(None, ps, sk_bytes, msg, ctx, addrnd)
+}
+
+/// **HashSLH-DSA** external-interface signing with explicit `addrnd` — the
+/// pre-hash counterpart to [`sign_slh_dsa_external_rnd`] (FIPS 205
+/// Algorithm 23 `hash_slh_sign`, the form [`verify_slh_dsa`] checks).
+/// `addrnd = None` is the deterministic variant, byte-identical to
+/// [`sign_slh_dsa`] with `deterministic = true`.
+pub fn sign_hash_slh_dsa_external_rnd(
+    mech: u32,
+    ps: u32,
+    sk_bytes: &[u8],
+    msg: &[u8],
+    ctx: &[u8],
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, u32> {
+    let ph = get_slh_dsa_ph(mech).ok_or(CKR_MECHANISM_INVALID)?;
+    sign_slh_dsa_external_rnd_ph(Some(ph), ps, sk_bytes, msg, ctx, addrnd)
+}
+
+fn sign_slh_dsa_external_rnd_ph(
+    ph: Option<fips205::Ph>,
+    ps: u32,
+    sk_bytes: &[u8],
+    msg: &[u8],
+    ctx: &[u8],
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, u32> {
     match ps {
-        CKP_SLH_DSA_SHA2_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256f::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHA2_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
 }
@@ -1508,12 +1541,44 @@ pub fn sign_ml_dsa_external_rnd(
     ctx: &[u8],
     rnd: [u8; 32],
 ) -> Result<Vec<u8>, u32> {
+    sign_ml_dsa_external_rnd_ph(None, ps, sk_bytes, message, ctx, rnd)
+}
+
+/// **HashML-DSA** external-interface signing with an explicit 32-byte
+/// randomizer — the pre-hash counterpart to [`sign_ml_dsa_external_rnd`]
+/// (FIPS 204 Algorithm 4 `HashML-DSA.Sign`, `(1‖|ctx|‖ctx‖OID‖PH(M))`
+/// framing, the message hashed internally with the mechanism's hash — the
+/// form [`verify_ml_dsa`] checks). `rnd = [0u8; 32]` is the deterministic
+/// variant, byte-identical to [`sign_ml_dsa`] with `deterministic = true`.
+pub fn sign_hash_ml_dsa_external_rnd(
+    mech: u32,
+    ps: u32,
+    sk_bytes: &[u8],
+    message: &[u8],
+    ctx: &[u8],
+    rnd: [u8; 32],
+) -> Result<Vec<u8>, u32> {
+    let ph = get_ml_dsa_ph(mech).ok_or(CKR_MECHANISM_INVALID)?;
+    sign_ml_dsa_external_rnd_ph(Some(ph), ps, sk_bytes, message, ctx, rnd)
+}
+
+fn sign_ml_dsa_external_rnd_ph(
+    ph: Option<fips204::Ph>,
+    ps: u32,
+    sk_bytes: &[u8],
+    message: &[u8],
+    ctx: &[u8],
+    rnd: [u8; 32],
+) -> Result<Vec<u8>, u32> {
     use fips204::traits::Signer;
     macro_rules! sign_with {
         ($sk:expr) => {{
-            $sk.try_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx)
-                .map(|s| Into::<Vec<u8>>::into(s))
-                .map_err(|_| CKR_FUNCTION_FAILED)
+            match &ph {
+                Some(ph) => $sk.try_hash_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx, ph),
+                None => $sk.try_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx),
+            }
+            .map(|s| Into::<Vec<u8>>::into(s))
+            .map_err(|_| CKR_FUNCTION_FAILED)
         }};
     }
     // Native: the cached expanded key, as in [`sign_ml_dsa`].
