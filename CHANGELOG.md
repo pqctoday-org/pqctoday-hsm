@@ -31,6 +31,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   hash variants, sub-2048-bit keys). The KMIP server and both remoting
   services link this engine, so they inherit the fast path with no source
   change of their own. See `rust/src/crypto/awslc.rs`.
+- **Faster ML-DSA and ML-KEM on ARM boards** (Rust engine, native targets
+  only, feature `awslc-pq`, on by default). ML-DSA key generation, hedged
+  pure and external-µ signing, pure and external-µ verification, and ML-KEM
+  key generation, encapsulation and decapsulation now run on AWS-LC's
+  mldsa-native / mlkem-native, whose hand-written AArch64 NEON NTT, pointwise
+  and rejection-sampling code the pure-Rust crates lack (Apple M5 container,
+  not a board: ML-DSA-65 sign 3.8x, verify 3.3x, ML-KEM-768 2.4-2.6x with
+  the SHA3 instructions masked like on the A53/A55). Keys, deterministic
+  encapsulation and decapsulation are byte-identical; hedged signatures
+  cross-verify both ways. Deterministic and explicit-rnd ML-DSA, HashML-DSA
+  and the internal interface stay on fips204 (AWS-LC's public API cannot do
+  them); a loaded ML-DSA-65 FPGA signer keeps precedence for ML-DSA-65
+  signing; the wasm32 builds are unchanged. `PQC_AWSLC_PQ_DISABLE=1` puts
+  everything back on fips204 / ml-kem. Coverage matrix:
+  `rust/src/crypto/awslc_pq.rs`.
 - **Parsed-RSA-key cache on the AWS-LC fast path** (`rust/src/crypto/awslc_keycache.rs`).
   Every RSA private-key operation used to call `from_pkcs8` on the caller's
   DER, which inside AWS-LC re-runs `RSA_check_key`, rebuilds three Montgomery
