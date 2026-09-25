@@ -2211,6 +2211,11 @@ fn C_GenerateKeyPair_impl(
             CKM_RSA_PKCS_KEY_PAIR_GEN => Some(CKK_RSA),
             CKM_EC_KEY_PAIR_GEN => Some(CKK_EC),
             CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => Some(CKK_EC),
+            // E10 (2026-09-25) — §5.18.2: a key type inconsistent with the
+            // mechanism is CKR_TEMPLATE_INCONSISTENT. These two were missing,
+            // so CKA_KEY_TYPE = CKK_RSA was accepted (and then overwritten).
+            CKM_EC_EDWARDS_KEY_PAIR_GEN => Some(CKK_EC_EDWARDS),
+            CKM_EC_MONTGOMERY_KEY_PAIR_GEN => Some(CKK_EC_MONTGOMERY),
             // HSS, XMSS, and XMSS-MT keygen are all implemented below
             // (real LMS/LM-OTS / XMSS tree generation), and this FFI
             // layer's own C_Sign/C_Verify sign/verify both mechanisms

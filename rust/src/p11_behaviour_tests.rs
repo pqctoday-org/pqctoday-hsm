@@ -929,3 +929,65 @@ fn e10_second_message_encrypt_init_is_operation_active() {
     assert_eq!(C_MessageDecryptInit(SESSION, gcm.as_mut_ptr() as *mut u8, AES_TYPED), CKR_OK);
     assert_eq!(C_MessageDecryptFinal(SESSION), CKR_OK);
 }
+
+// ── E10 — Edwards / Montgomery key-pair generation, inconsistent key type ───
+
+/// §5.18.2: a template whose key type "is inconsistent with the … generation
+/// mechanism … fails and returns the error code CKR_TEMPLATE_INCONSISTENT"
+/// (also §4.1.1 rule 5). The G-8 probe found C_GenerateKeyPair with
+/// CKM_EC_EDWARDS_KEY_PAIR_GEN (Ed25519/Ed448) and
+/// CKM_EC_MONTGOMERY_KEY_PAIR_GEN (X25519/X448) and CKA_KEY_TYPE = CKK_RSA in
+/// the public template returning CKR_OK; every other key-pair mechanism
+/// already refused.
+#[test]
+fn e10_edwards_montgomery_keygen_with_inconsistent_key_type_is_template_inconsistent() {
+    let _guard = test_lock::acquire();
+    setup();
+    let ulong = std::mem::size_of::<crate::ck_abi::CK_ULONG>();
+    let rsa: &'static crate::ck_abi::CK_ULONG = Box::leak(Box::new(CKK_RSA as crate::ck_abi::CK_ULONG));
+    let ed25519_oid: &'static [u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
+    let ed448_oid: &'static [u8] = &[0x06, 0x03, 0x2b, 0x65, 0x71];
+    let x25519_oid: &'static [u8] = &[0x06, 0x03, 0x2b, 0x65, 0x6e];
+    let x448_oid: &'static [u8] = &[0x06, 0x03, 0x2b, 0x65, 0x6f];
+    for (mech, oid, right) in [
+        (CKM_EC_EDWARDS_KEY_PAIR_GEN, ed25519_oid, CKK_EC_EDWARDS),
+        (CKM_EC_EDWARDS_KEY_PAIR_GEN, ed448_oid, CKK_EC_EDWARDS),
+        (CKM_EC_MONTGOMERY_KEY_PAIR_GEN, x25519_oid, CKK_EC_MONTGOMERY),
+        (CKM_EC_MONTGOMERY_KEY_PAIR_GEN, x448_oid, CKK_EC_MONTGOMERY),
+    ] {
+        let mut m = mech0(mech);
+        let keygen = |pub_tpl: &mut [usize], n_pub: u32, prv_tpl: &mut [usize], n_prv: u32| {
+            let (mut hp, mut hv) = (0u32, 0u32);
+            let rv = C_GenerateKeyPair(
+                SESSION,
+                m.as_ptr() as *mut u8,
+                pub_tpl.as_mut_ptr() as *mut u8,
+                n_pub,
+                prv_tpl.as_mut_ptr() as *mut u8,
+                n_prv,
+                &mut hp,
+                &mut hv,
+            );
+            (rv, hp, hv)
+        };
+        let params = [CKA_EC_PARAMS as usize, oid.as_ptr() as usize, oid.len()];
+        let bad_type = [CKA_KEY_TYPE as usize, rsa as *const _ as usize, ulong];
+        // CKA_KEY_TYPE = CKK_RSA in the public template (the probe's case).
+        let mut pub_bad = [params, bad_type].concat();
+        let mut none: [usize; 0] = [];
+        let (rv, hp, hv) = keygen(&mut pub_bad, 2, &mut none, 0);
+        assert_eq!(rv, CKR_TEMPLATE_INCONSISTENT, "mech {mech:#x}, CKK_RSA in the public template");
+        assert_eq!((hp, hv), (0, 0));
+        // … and in the private template.
+        let mut pub_ok = params;
+        let mut prv_bad = bad_type;
+        let (rv, _, _) = keygen(&mut pub_ok, 1, &mut prv_bad, 1);
+        assert_eq!(rv, CKR_TEMPLATE_INCONSISTENT, "mech {mech:#x}, CKK_RSA in the private template");
+        // The mechanism's own key type is accepted.
+        let right: &'static crate::ck_abi::CK_ULONG = Box::leak(Box::new(right as crate::ck_abi::CK_ULONG));
+        let mut pub_right = [params, [CKA_KEY_TYPE as usize, right as *const _ as usize, ulong]].concat();
+        let (rv, hp, hv) = keygen(&mut pub_right, 2, &mut none, 0);
+        assert_eq!(rv, CKR_OK, "mech {mech:#x} with its own key type");
+        assert!(hp != 0 && hv != 0);
+    }
+}
