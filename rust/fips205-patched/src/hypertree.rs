@@ -1,4 +1,4 @@
-use crate::hashers::Hashers;
+use crate::hashers::{Hashers, PkSeed};
 use crate::types::{Adrs, HtSig, WotsSig, XmssSig};
 use crate::xmss;
 
@@ -8,20 +8,22 @@ use crate::xmss;
 ///
 /// Input: Message `M`, private seed `SK.seed`, public seed `PK.seed`, tree index `idx_tree`, leaf
 /// index `idx_leaf`. <br>
-/// Output: HT signature `SIG_HT`.
+/// Output: HT signature `SIG_HT`, and the root of the top-layer XMSS tree recomputed from it.
+///
+/// `auth_node(layer, j, k, ADRS)` supplies the authentication node `xmss_node(SK.seed, k, j,
+/// PK.seed, ADRS)` of the XMSS tree on `layer` (pqctoday-hsm: see `fors::fors_sign`).
 #[allow(clippy::similar_names)] // sk_seed and pk_seed
 pub(crate) fn ht_sign<
     const D: usize,
-    const H: usize,
     const HP: usize,
     const K: usize,
     const LEN: usize,
     const M: usize,
     const N: usize,
 >(
-    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], pk_seed: &[u8], idx_tree: u64,
-    idx_leaf: u32,
-) -> Result<HtSig<D, HP, LEN, N>, &'static str> {
+    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], pk_seed: &PkSeed<N>, idx_tree: u64,
+    idx_leaf: u32, auth_node: &dyn Fn(u32, u32, u32, &Adrs) -> [u8; N],
+) -> Result<(HtSig<D, HP, LEN, N>, [u8; N]), &'static str> {
     profile_phase!(Tree);
     let mut idx_tree = idx_tree;
     let (d32, hp32) = (u32::try_from(D).unwrap(), u32::try_from(HP).unwrap());
@@ -33,8 +35,9 @@ pub(crate) fn ht_sign<
     adrs.set_tree_address(idx_tree);
 
     // 3: SIG_tmp ← xmss_sign(M, SK.seed, idxleaf, PK.seed, ADRS)
-    let mut sig_tmp =
-        xmss::xmss_sign::<H, HP, K, LEN, M, N>(hashers, m, sk_seed, idx_leaf, pk_seed, &adrs);
+    let mut sig_tmp = xmss::xmss_sign::<HP, K, LEN, M, N>(
+        hashers, m, sk_seed, idx_leaf, pk_seed, &adrs, &|j, k, a| auth_node(0, j, k, a),
+    );
 
     // 4: SIG_HT ← SIG_tmp
     let mut sig_ht = HtSig {
@@ -66,29 +69,32 @@ pub(crate) fn ht_sign<
         adrs.set_tree_address(idx_tree);
 
         // 11: SIG_tmp ← xmss_sign(root, SK.seed, idx_leaf, PK.seed, ADRS)
-        sig_tmp = xmss::xmss_sign::<H, HP, K, LEN, M, N>(
-            hashers, &root, sk_seed, idx_leaf, pk_seed, &adrs,
+        sig_tmp = xmss::xmss_sign::<HP, K, LEN, M, N>(
+            hashers, &root, sk_seed, idx_leaf, pk_seed, &adrs, &|jj, k, a| auth_node(j, jj, k, a),
         );
 
         // 12: SIG_HT ← SIG_HT ∥ SIG_tmp
         sig_ht.xmss_sigs[j as usize] = sig_tmp.clone();
 
         // 13: if j < d − 1 then
-        if j < (d32 - 1) {
-            //
-            // 14: root ← xmss_PKFromSig(idx_leaf, SIG_tmp, root, PK.seed, ADRS)
-            root = xmss::xmss_pk_from_sig::<HP, K, LEN, M, N>(
-                hashers, idx_leaf, &sig_tmp, &root, pk_seed, &adrs,
-            );
-
-            // 15: end if
-        }
+        // 14: root ← xmss_PKFromSig(idx_leaf, SIG_tmp, root, PK.seed, ADRS)
+        // 15: end if
+        // Deviation (pqctoday-hsm): the root is also computed for the top
+        // layer j = d − 1, where the specification skips it. That root is
+        // PK.root exactly when SK.seed and PK.seed are the ones PK.root was
+        // generated from, so `slh_sign_internal` compares the two and refuses
+        // to release a signature from an inconsistent key. It costs one
+        // WOTS+ public-key recovery plus h′ hashes, against the full top-tree
+        // rebuild the decode-time check used to cost on every signature.
+        root = xmss::xmss_pk_from_sig::<HP, K, LEN, M, N>(
+            hashers, idx_leaf, &sig_tmp, &root, pk_seed, &adrs,
+        );
 
         // 16: end for
     }
 
-    // 17: return SIGHT
-    Ok(sig_ht)
+    // 17: return SIGHT (plus the recomputed top-layer root, see step 13)
+    Ok((sig_ht, root))
 }
 
 
@@ -106,7 +112,7 @@ pub(crate) fn ht_verify<
     const M: usize,
     const N: usize,
 >(
-    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sig_ht: &HtSig<D, HP, LEN, N>, pk_seed: &[u8],
+    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sig_ht: &HtSig<D, HP, LEN, N>, pk_seed: &PkSeed<N>,
     idx_tree: u64, idx_leaf: u32, pk_root: &[u8; N],
 ) -> bool {
     profile_phase!(Tree);

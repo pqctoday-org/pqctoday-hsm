@@ -13,6 +13,12 @@
 //
 #![doc = include_str!("../README.md")]
 
+// pqctoday-hsm: the optional `parallel` feature (threaded tree building, see par.rs)
+// and the `hw-accel` hooks (process-wide hook registry, see hw_accel.rs) need std;
+// without them the crate stays no_std.
+#[cfg(any(feature = "parallel", feature = "hw-accel"))]
+extern crate std;
+
 #[cfg(feature = "phase-profile")]
 macro_rules! profile_phase {
     ($phase:ident) => {
@@ -66,11 +72,22 @@ macro_rules! profile_phase {
 /// All functionality is covered by traits, such that consumers can utilize trait objects as desired.
 pub mod traits;
 pub use types::Ph;
+#[cfg(feature = "hw-accel")]
+pub use hw_accel::{
+    reference_slh_keygen_root, reference_slh_sign_payload, set_slh_keygen_hook,
+    set_slh_reject_hook, set_slh_sign_hook, ReferenceError, SlhKeygenHook, SlhRejectHook,
+    SlhSignHook,
+};
 
 mod fors;
 mod hashers;
 mod helpers;
+#[cfg(feature = "hw-accel")]
+mod hw_accel;
 mod hypertree;
+mod par;
+#[cfg(feature = "parallel")]
+pub use par::budget_stats;
 mod slh;
 mod types;
 mod wots;
@@ -109,6 +126,25 @@ macro_rules! functionality {
         /// Implements the [`crate::traits::KeyGen`] trait.
         #[derive(Zeroize, ZeroizeOnDrop)]
         pub struct KG(); // Arguable how useful an empty struct+trait is...
+
+
+        // pqctoday-hsm `hw-accel`: software reference of the tree work the
+        // hashsig engine performs for this parameter set (never calls a hook).
+        #[cfg(feature = "hw-accel")]
+        pub(crate) fn hw_reference_sign(
+            sk_seed: &[u8], pk_seed: &[u8], pk_root: &[u8], md: &[u8], idx_tree: u64, idx_leaf: u32,
+        ) -> Result<std::vec::Vec<u8>, crate::hw_accel::ReferenceError> {
+            crate::hw_accel::reference_sign::<A, D, H, HP, K, LEN, M, N>(
+                &HASHERS, sk_seed, pk_seed, pk_root, md, idx_tree, idx_leaf,
+            )
+        }
+
+        #[cfg(feature = "hw-accel")]
+        pub(crate) fn hw_reference_root(
+            sk_seed: &[u8], pk_seed: &[u8],
+        ) -> Result<std::vec::Vec<u8>, crate::hw_accel::ReferenceError> {
+            crate::hw_accel::reference_root::<D, H, HP, K, LEN, M, N>(&HASHERS, sk_seed, pk_seed)
+        }
 
 
         // ----- PRIMARY FUNCTIONS ---
@@ -429,8 +465,39 @@ macro_rules! functionality {
                 bytes
             }
 
-            // Documented in traits.rs
+            // Documented in traits.rs. Recomputes PK.root from SK.seed and
+            // PK.seed (one full top-layer XMSS tree) and rejects a key whose
+            // stored PK.root disagrees. Use this where a key ENTERS a key
+            // store (import, unwrap); see `from_bytes_unchecked` for the
+            // per-signature path.
             fn try_from_bytes(bytes: &Self::ByteArray) -> Result<Self, &'static str> {
+                let sk = PrivateKey::from_bytes_unchecked(bytes);
+                let (sk_test, _) = crate::slh::slh_keygen_internal::<D, H, HP, K, LEN, M, N>(&HASHERS, sk.0.sk_seed, sk.0.sk_prf, sk.0.pk_seed);
+                if sk_test.pk_root != sk.0.pk_root { return Err("Corrupted key")}
+                Ok(sk)
+            }
+        }
+
+
+        impl PrivateKey {
+            /// Deserializes a private key WITHOUT recomputing PK.root
+            /// (pqctoday-hsm addition, not in upstream fips205).
+            ///
+            /// [`SerDes::try_from_bytes`] rebuilds the whole top-layer XMSS
+            /// tree to check the stored PK.root: one `slh_keygen_internal`,
+            /// about 1/(d+1) of a signature's cost for the `s` sets, paid on
+            /// every decode. This constructor skips that. It is safe for a
+            /// key that was already checked when it entered the key store,
+            /// because signing re-establishes the same property at almost
+            /// no cost: `slh_sign_internal` recomputes the top-layer root
+            /// from the hypertree signature it has just built and returns an
+            /// error, releasing no signature, when that root differs from
+            /// PK.root. An inconsistent key therefore still cannot produce a
+            /// signature; it is only detected at sign time instead of at
+            /// decode time. (SK.prf is covered by neither check: it only
+            /// randomises R, exactly as before.)
+            #[must_use]
+            pub fn from_bytes_unchecked(bytes: &[u8; SK_LEN]) -> Self {
                 let mut sk = SlhPrivateKey {
                     sk_seed: [0u8; N],
                     sk_prf: [0u8; N],
@@ -441,9 +508,7 @@ macro_rules! functionality {
                 sk.sk_prf.copy_from_slice(&bytes[(SK_LEN / 4)..(SK_LEN / 2)]);
                 sk.pk_seed.copy_from_slice(&bytes[(SK_LEN / 2)..(3 * SK_LEN / 4)]);
                 sk.pk_root.copy_from_slice(&bytes[(3 * SK_LEN / 4)..]);
-                let (sk_test, _) = crate::slh::slh_keygen_internal::<D, H, HP, K, LEN, M, N>(&HASHERS, sk.sk_seed, sk.sk_prf, sk.pk_seed);
-                if sk_test.pk_root != sk.pk_root { return Err("Corrupted key")}
-                Ok(PrivateKey(sk))
+                PrivateKey(sk)
             }
         }
 
@@ -485,6 +550,31 @@ macro_rules! functionality {
                     assert!(!result, "Signature should not have verified");
                 }
             }
+
+            // pqctoday-hsm: the checked decoder rejects a key whose PK.root
+            // does not match its seeds; the unchecked one accepts it, but
+            // signing with it then fails instead of releasing a signature.
+            #[test]
+            fn corrupted_key_rejected_at_decode_and_at_sign() {
+                let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+                let (_, sk) = KG::try_keygen_with_rng(&mut rng).unwrap();
+                let good = sk.into_bytes();
+                // Same bytes decode and sign identically either way.
+                let checked = PrivateKey::try_from_bytes(&good).unwrap();
+                let unchecked = PrivateKey::from_bytes_unchecked(&good);
+                assert_eq!(
+                    checked.try_sign_with_rng(&mut rng, b"m", b"", false).unwrap(),
+                    unchecked.try_sign_with_rng(&mut rng, b"m", b"", false).unwrap()
+                );
+                // Flip one bit in each of SK.seed, PK.seed and PK.root.
+                for byte in [0, SK_LEN / 2, 3 * SK_LEN / 4] {
+                    let mut bad = good;
+                    bad[byte] ^= 0x01;
+                    assert!(PrivateKey::try_from_bytes(&bad).is_err(), "byte {byte}");
+                    let sk_bad = PrivateKey::from_bytes_unchecked(&bad);
+                    assert!(sk_bad.try_sign_with_rng(&mut rng, b"m", b"", true).is_err(), "byte {byte}");
+                }
+            }
         }
     };
 }
@@ -511,7 +601,7 @@ macro_rules! functionality {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_128s")]
 pub mod slh_dsa_sha2_128s {
-    use crate::hashers::sha2_cat_1::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_1::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -534,7 +624,10 @@ pub mod slh_dsa_sha2_128s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 1 };
 
     functionality!();
 }
@@ -561,7 +654,7 @@ pub mod slh_dsa_sha2_128s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_128s")]
 pub mod slh_dsa_shake_128s {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -584,7 +677,10 @@ pub mod slh_dsa_shake_128s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 2 };
 
     functionality!();
 }
@@ -611,7 +707,7 @@ pub mod slh_dsa_shake_128s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_128f")]
 pub mod slh_dsa_sha2_128f {
-    use crate::hashers::sha2_cat_1::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_1::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -634,7 +730,10 @@ pub mod slh_dsa_sha2_128f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 3 };
 
     functionality!();
 }
@@ -661,7 +760,7 @@ pub mod slh_dsa_sha2_128f {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_128f")]
 pub mod slh_dsa_shake_128f {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -684,7 +783,10 @@ pub mod slh_dsa_shake_128f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 4 };
 
     functionality!();
 }
@@ -711,7 +813,7 @@ pub mod slh_dsa_shake_128f {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_192s")]
 pub mod slh_dsa_sha2_192s {
-    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -734,7 +836,10 @@ pub mod slh_dsa_sha2_192s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 5 };
 
     functionality!();
 }
@@ -761,7 +866,7 @@ pub mod slh_dsa_sha2_192s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_192s")]
 pub mod slh_dsa_shake_192s {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -784,7 +889,10 @@ pub mod slh_dsa_shake_192s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 6 };
 
     functionality!();
 }
@@ -811,7 +919,7 @@ pub mod slh_dsa_shake_192s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_192f")]
 pub mod slh_dsa_sha2_192f {
-    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -834,7 +942,10 @@ pub mod slh_dsa_sha2_192f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 7 };
 
     functionality!();
 }
@@ -861,7 +972,7 @@ pub mod slh_dsa_sha2_192f {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_192f")]
 pub mod slh_dsa_shake_192f {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -884,7 +995,10 @@ pub mod slh_dsa_shake_192f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 8 };
 
     functionality!();
 }
@@ -911,7 +1025,7 @@ pub mod slh_dsa_shake_192f {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_256s")]
 pub mod slh_dsa_sha2_256s {
-    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -934,7 +1048,10 @@ pub mod slh_dsa_sha2_256s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 9 };
 
     functionality!();
 }
@@ -961,7 +1078,7 @@ pub mod slh_dsa_sha2_256s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_256s")]
 pub mod slh_dsa_shake_256s {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -984,7 +1101,10 @@ pub mod slh_dsa_shake_256s {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 10 };
 
     functionality!();
 }
@@ -1011,7 +1131,7 @@ pub mod slh_dsa_shake_256s {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_sha2_256f")]
 pub mod slh_dsa_sha2_256f {
-    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::sha2_cat_3_5::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -1034,7 +1154,10 @@ pub mod slh_dsa_sha2_256f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 11 };
 
     functionality!();
 }
@@ -1061,7 +1184,7 @@ pub mod slh_dsa_sha2_256f {
 /// See the top-level [crate] documentation for example code that implements the above flow.
 #[cfg(feature = "slh_dsa_shake_256f")]
 pub mod slh_dsa_shake_256f {
-    use crate::hashers::shake::{f, h, h_msg, prf, prf_msg, t_l};
+    use crate::hashers::shake::{f, h, h_msg, pk_seed, prf, prf_msg, t_l};
     use crate::hashers::Hashers;
 
     /// Seed size
@@ -1084,7 +1207,54 @@ pub mod slh_dsa_shake_256f {
     pub const SK_LEN: usize = PK_LEN * 2;
 
     static HASHERS: Hashers<K, LEN, M, N> =
-        Hashers::<K, LEN, M, N> { h_msg, prf, prf_msg, f, h, t_l, t_len: t_l };
+        Hashers::<K, LEN, M, N> {
+            pk_seed, h_msg, prf, prf_msg, f, h, t_l, t_len: t_l,
+            // pqctoday-hsm: FIPS 205 Table 2 row, the hashsig engine ABI param id.
+            hw_param: 12 };
 
     functionality!();
+}
+
+
+/// pqctoday-hsm: the `parallel` feature must not change a single output byte.
+/// One test owns the `FIPS205_THREADS` variable (no other test reads or writes it).
+#[cfg(all(test, feature = "parallel"))]
+mod parallel_tests {
+    use crate::traits::{KeyGen, SerDes, Signer, Verifier};
+    use rand_chacha::rand_core::SeedableRng;
+
+    macro_rules! same_output {
+        ($m:ident) => {{
+            use crate::$m::{KG, N};
+            let run = |threads: &str| {
+                std::env::set_var("FIPS205_THREADS", threads);
+                let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0x5eed);
+                let (pk, sk) = KG::keygen_with_seeds(&[7u8; N], &[8u8; N], &[9u8; N]);
+                let det = sk.try_sign_with_rng(&mut rng, b"message", b"ctx", false).unwrap();
+                let hedged = sk.try_sign_with_rng(&mut rng, b"message", b"ctx", true).unwrap();
+                assert!(pk.verify(b"message", &det, b"ctx"));
+                (pk.into_bytes(), sk.into_bytes(), det, hedged)
+            };
+            let serial = run("1");
+            let threaded = run("4");
+            assert!(serial == threaded, "{}: parallel output differs from serial", stringify!($m));
+        }};
+    }
+
+    #[test]
+    fn parallel_output_is_byte_identical_to_serial() {
+        same_output!(slh_dsa_sha2_128s);
+        same_output!(slh_dsa_shake_128s);
+        same_output!(slh_dsa_sha2_128f);
+        same_output!(slh_dsa_shake_128f);
+        same_output!(slh_dsa_sha2_192s);
+        same_output!(slh_dsa_shake_192s);
+        same_output!(slh_dsa_sha2_192f);
+        same_output!(slh_dsa_shake_192f);
+        same_output!(slh_dsa_sha2_256s);
+        same_output!(slh_dsa_shake_256s);
+        same_output!(slh_dsa_sha2_256f);
+        same_output!(slh_dsa_shake_256f);
+        std::env::remove_var("FIPS205_THREADS");
+    }
 }

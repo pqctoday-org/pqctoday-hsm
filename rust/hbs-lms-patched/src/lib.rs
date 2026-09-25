@@ -87,9 +87,18 @@ extern crate core;
 mod constants;
 mod hasher;
 mod hss;
+#[cfg(feature = "hw-accel")]
+mod hw_accel;
 mod lm_ots;
 mod lms;
+// pqctoday-hsm: in-memory per-tree node cache (feature `tree-cache`, needs std).
+#[cfg(feature = "tree-cache")]
+mod tree_cache;
 mod util;
+
+#[cfg(feature = "tree-cache")]
+#[doc(hidden)]
+pub use tree_cache::{cache_clear, cache_set_enabled, cache_stats};
 
 // Re-export the `signature` crate
 pub use signature::{self};
@@ -115,6 +124,12 @@ pub use crate::hss::hss_sign as sign;
 pub use crate::hss::hss_sign_mut as sign_mut;
 pub use crate::hss::hss_verify as verify;
 pub use crate::hss::{SigningKey, VerifyingKey};
+
+// pqctoday-hsm: hashsig FPGA engine hook (MERKLE_SUBTREE) and its software reference.
+#[cfg(feature = "hw-accel")]
+pub use crate::hw_accel::{
+    reference_merkle_subtree, set_merkle_subtree_hook, MerkleSubtreeHook, MerkleWantsHook,
+};
 
 use core::convert::TryFrom;
 use signature::Error;

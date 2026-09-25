@@ -89,4 +89,9 @@ fast_verify = [
     "crossbeam",
 ]
 std = []
+# pqctoday-hsm: process-wide hook that lets the hashsig FPGA engine compute
+# tree nodes (MERKLE_SUBTREE). Needs std; byte-identical output (src/hw_accel.rs).
+hw-accel = ["std"]
+# pqctoday-hsm: in-memory per-tree node cache (src/tree_cache.rs); needs std.
+tree-cache = ["std"]
 verbose = []

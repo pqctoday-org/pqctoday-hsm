@@ -1,4 +1,4 @@
-use crate::hashers::Hashers;
+use crate::hashers::{Hashers, PkSeed};
 use crate::helpers::base_2b;
 use crate::types::{Adrs, Auth, ForsPk, ForsSig, FORS_PRF, FORS_ROOTS};
 
@@ -10,7 +10,7 @@ use crate::types::{Adrs, Auth, ForsPk, ForsSig, FORS_PRF, FORS_ROOTS};
 /// Output: n-byte FORS private-key value.
 #[allow(clippy::similar_names)] // sk_seed and pk_seed
 pub(crate) fn fors_sk_gen<const K: usize, const LEN: usize, const M: usize, const N: usize>(
-    hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], pk_seed: &[u8], adrs: &Adrs, idx: u32,
+    hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], pk_seed: &PkSeed<N>, adrs: &Adrs, idx: u32,
 ) -> [u8; N] {
     profile_phase!(Tree);
     // 1: skADRS ← ADRS    ▷ Copy address to create key generation address
@@ -44,7 +44,7 @@ pub(crate) fn fors_node<
     const M: usize,
     const N: usize,
 >(
-    hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], i: u32, z: u32, pk_seed: &[u8], adrs: &Adrs,
+    hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], i: u32, z: u32, pk_seed: &PkSeed<N>, adrs: &Adrs,
 ) -> Result<[u8; N], &'static str> {
     profile_phase!(Tree);
     let mut adrs = adrs.clone();
@@ -100,6 +100,11 @@ pub(crate) fn fors_node<
 ///
 /// Input: Message digest `md`, secret seed `SK.seed`, address `ADRS`, public seed `PK.seed`. <br>
 /// Output: FORS signature `SIG_FORS`.
+///
+/// `auth_node(i, j, index)` supplies `fors_node(SK.seed, index, j, PK.seed, ADRS)`, the
+/// step-7 authentication node of tree `i` at height `j` (pqctoday-hsm: so the optional
+/// `parallel` feature can hand in nodes it computed ahead of time on several threads;
+/// the serial caller passes a closure that calls `fors_node` directly).
 #[allow(clippy::similar_names)] // sk_seed and pk_seed
 pub(crate) fn fors_sign<
     const A: usize,
@@ -108,7 +113,8 @@ pub(crate) fn fors_sign<
     const M: usize,
     const N: usize,
 >(
-    hashers: &Hashers<K, LEN, M, N>, md: &[u8], sk_seed: &[u8], adrs: &Adrs, pk_seed: &[u8],
+    hashers: &Hashers<K, LEN, M, N>, md: &[u8], sk_seed: &[u8], adrs: &Adrs, pk_seed: &PkSeed<N>,
+    auth_node: &dyn Fn(u32, u32, u32) -> Result<[u8; N], &'static str>,
 ) -> Result<ForsSig<A, K, N>, &'static str> {
     profile_phase!(Tree);
     let (a32, k32) = (u32::try_from(A).unwrap(), u32::try_from(K).unwrap());
@@ -143,14 +149,7 @@ pub(crate) fn fors_sign<
             let s = (indices[i as usize] >> j) ^ 1;
 
             // 7: AUTH[j] ← fors_node(SK.seed, i · 2^{a−j} + s, j, PK.seed, ADRS)
-            sig_fors.auth[i as usize].tree[j as usize] = fors_node::<A, K, LEN, M, N>(
-                hashers,
-                sk_seed,
-                (i << (a32 - j)) + s,
-                j,
-                pk_seed,
-                adrs,
-            )?;
+            sig_fors.auth[i as usize].tree[j as usize] = auth_node(i, j, (i << (a32 - j)) + s)?;
 
             // 8: end for
         }
@@ -179,7 +178,7 @@ pub(crate) fn fors_pk_from_sig<
     const M: usize,
     const N: usize,
 >(
-    hashers: &Hashers<K, LEN, M, N>, sig_fors: &ForsSig<A, K, N>, md: &[u8], pk_seed: &[u8],
+    hashers: &Hashers<K, LEN, M, N>, sig_fors: &ForsSig<A, K, N>, md: &[u8], pk_seed: &PkSeed<N>,
     adrs: &Adrs,
 ) -> ForsPk<N> {
     profile_phase!(Tree);

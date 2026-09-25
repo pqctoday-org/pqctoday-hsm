@@ -42,6 +42,31 @@ pub struct PrivateKey<const K: usize, const L: usize> {
 }
 
 
+/// A private key together with its expanded public matrix `Â = ExpandA(ρ)`.
+/// See `ml_dsa_xx::ExpandedPrivateKey`.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[repr(align(8))]
+pub struct ExpandedPrivateKey<const K: usize, const L: usize> {
+    pub(crate) sk: PrivateKey<K, L>,
+    pub(crate) cap_a_hat: [[T; L]; K],
+}
+
+impl<const K: usize, const L: usize> ExpandedPrivateKey<K, L> {
+    /// Expands `Â = ExpandA(ρ)` once for `sk`.
+    #[must_use]
+    pub fn new(sk: PrivateKey<K, L>) -> Self {
+        let cap_a_hat = stage!(ExpandA, crate::hashing::expand_a::<false, K, L>(&sk.rho));
+        Self { sk, cap_a_hat }
+    }
+
+    /// The decoded private key.
+    #[must_use]
+    pub fn private_key(&self) -> &PrivateKey<K, L> {
+        &self.sk
+    }
+}
+
+
 /// Public key specific to the target security parameter set that contains
 /// precomputed elements which improve verification performance.
 ///
@@ -71,3 +96,26 @@ pub(crate) const T0: T = T([0i32; 256]);
 
 /// Individual Zq element
 pub(crate) type Zq = i32;
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::KeyGen;
+    use zeroize::Zeroize;
+
+    /// What `ZeroizeOnDrop` runs on drop: every secret field of an expanded
+    /// key (and the public matrix) is cleared.
+    #[test]
+    fn expanded_private_key_zeroize_clears_every_field() {
+        let (_pk, sk) = crate::ml_dsa_65::KG::keygen_from_seed(&[9u8; 32]);
+        let mut expanded = ExpandedPrivateKey::new(sk);
+        assert!(expanded.sk.s_1_hat_mont.iter().any(|p| p.0.iter().any(|c| *c != 0)));
+        expanded.zeroize();
+        let sk = &expanded.sk;
+        assert!(sk.rho.iter().chain(&sk.cap_k).chain(&sk.tr).all(|b| *b == 0));
+        let polys = sk.s_1_hat_mont.iter().chain(&sk.s_2_hat_mont).chain(&sk.t_0_hat_mont);
+        assert!(polys.flat_map(|p| p.0.iter()).all(|c| *c == 0));
+        assert!(expanded.cap_a_hat.iter().flatten().flat_map(|p| p.0.iter()).all(|c| *c == 0));
+    }
+}

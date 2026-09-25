@@ -607,8 +607,11 @@ macro_rules! slh_dsa_sign {
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         match crate::crypto::handlers::get_slh_dsa_ph($mech) {
             Some(ph) => sk
                 .try_hash_sign($msg, $ctx, &ph, !$deterministic)
@@ -665,8 +668,11 @@ macro_rules! slh_dsa_sign_phm {
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         let ph = crate::crypto::handlers::ph_from_digest_mech_slh_dsa($hash)
             .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
         sk.try_hash_sign_phm($phm, $ctx, &ph, !$deterministic)
@@ -704,8 +710,11 @@ macro_rules! slh_dsa_sign_internal {
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         // `_test_only_raw_sign` is FIPS 205 `slh_sign_internal(M, SK, addrnd)`:
         // it signs the bare message (no `(0‖|ctx|‖ctx)` framing). `addrnd =
         // None` ⇒ the deterministic variant (addrnd = PK.seed); `Some(r)` ⇒
@@ -731,19 +740,27 @@ macro_rules! slh_dsa_sign_internal {
 
 #[macro_export]
 macro_rules! slh_dsa_sign_external_rnd {
-    ($ps:ty, $sk_bytes:expr, $msg:expr, $ctx:expr, $addrnd:expr) => {{
+    ($ps:ty, $sk_bytes:expr, $msg:expr, $ctx:expr, $addrnd:expr, $ph:expr) => {{
         use fips205::traits::Signer;
         let sk_arr: &<$ps as fips205::traits::SerDes>::ByteArray = $sk_bytes
             .try_into()
             .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-        let sk = <$ps as fips205::traits::SerDes>::try_from_bytes(sk_arr)
-            .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+        // Unchecked decode: the key's PK.root was verified when it entered
+        // the token, and signing re-checks it against the hypertree it
+        // builds (see fips205 `PrivateKey::from_bytes_unchecked`), so the
+        // full top-tree rebuild `try_from_bytes` does is not repeated here.
+        let sk = <$ps>::from_bytes_unchecked(sk_arr);
         // External `SLH-DSA.Sign` (with `(0‖|ctx|‖ctx)` framing). `addrnd =
         // None` ⇒ deterministic (hedged=false → addrnd = PK.seed); `Some(r)` ⇒
         // hedged with the explicit `<Random>` addrnd drawn from `FixedRng`.
-        match $addrnd {
-            Some(r) => sk.try_sign_with_rng(&mut crate::crypto::handlers::FixedRng::new(r), $msg, $ctx, true),
-            None => sk.try_sign_with_rng(&mut rand::rngs::OsRng, $msg, $ctx, false),
+        // `$ph = Some(ph)` ⇒ HashSLH-DSA (FIPS 205 Algorithm 23, message
+        // hashed internally), the form `slh_dsa_verify!` checks for a
+        // pre-hash mechanism.
+        match ($ph, $addrnd) {
+            (Some(ph), Some(r)) => sk.try_hash_sign_with_rng(&mut crate::crypto::handlers::FixedRng::new(r), $msg, $ctx, &ph, true),
+            (Some(ph), None) => sk.try_hash_sign_with_rng(&mut rand::rngs::OsRng, $msg, $ctx, &ph, false),
+            (None, Some(r)) => sk.try_sign_with_rng(&mut crate::crypto::handlers::FixedRng::new(r), $msg, $ctx, true),
+            (None, None) => sk.try_sign_with_rng(&mut rand::rngs::OsRng, $msg, $ctx, false),
         }
         .map_err(|_| CKR_FUNCTION_FAILED)
         .map(|s| Into::<Vec<u8>>::into(s))
@@ -810,19 +827,47 @@ pub fn sign_slh_dsa_external_rnd(
     ctx: &[u8],
     addrnd: Option<&[u8]>,
 ) -> Result<Vec<u8>, u32> {
+    sign_slh_dsa_external_rnd_ph(None, ps, sk_bytes, msg, ctx, addrnd)
+}
+
+/// **HashSLH-DSA** external-interface signing with explicit `addrnd` — the
+/// pre-hash counterpart to [`sign_slh_dsa_external_rnd`] (FIPS 205
+/// Algorithm 23 `hash_slh_sign`, the form [`verify_slh_dsa`] checks).
+/// `addrnd = None` is the deterministic variant, byte-identical to
+/// [`sign_slh_dsa`] with `deterministic = true`.
+pub fn sign_hash_slh_dsa_external_rnd(
+    mech: u32,
+    ps: u32,
+    sk_bytes: &[u8],
+    msg: &[u8],
+    ctx: &[u8],
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, u32> {
+    let ph = get_slh_dsa_ph(mech).ok_or(CKR_MECHANISM_INVALID)?;
+    sign_slh_dsa_external_rnd_ph(Some(ph), ps, sk_bytes, msg, ctx, addrnd)
+}
+
+fn sign_slh_dsa_external_rnd_ph(
+    ph: Option<fips205::Ph>,
+    ps: u32,
+    sk_bytes: &[u8],
+    msg: &[u8],
+    ctx: &[u8],
+    addrnd: Option<&[u8]>,
+) -> Result<Vec<u8>, u32> {
     match ps {
-        CKP_SLH_DSA_SHA2_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256s::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHA2_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256f::PrivateKey, sk_bytes, msg, ctx, addrnd),
-        CKP_SLH_DSA_SHAKE_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256f::PrivateKey, sk_bytes, msg, ctx, addrnd),
+        CKP_SLH_DSA_SHA2_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_128S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_128f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_128F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_128f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_192S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_192f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_192F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_192f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_256S => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256s::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHA2_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_sha2_256f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
+        CKP_SLH_DSA_SHAKE_256F => slh_dsa_sign_external_rnd!(fips205::slh_dsa_shake_256f::PrivateKey, sk_bytes, msg, ctx, addrnd, ph),
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
     }
 }
@@ -1232,14 +1277,18 @@ pub fn sign_ml_dsa(
     ctx: &[u8],
     deterministic: bool,
 ) -> Result<Vec<u8>, u32> {
+    // AWS-LC CPU path (crypto::awslc_pq): pure ML-DSA, hedged only. The
+    // deterministic variant and every HashML-DSA mechanism stay on fips204.
+    #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+    if mech == CKM_ML_DSA && !deterministic {
+        if let Some(sig) = crate::crypto::awslc_pq::mldsa_sign(ps, sk_bytes, msg, ctx) {
+            return Ok(sig);
+        }
+    }
     use fips204::traits::Signer;
-    macro_rules! ml_dsa_sign {
-        ($variant:path) => {{
-            type Sk = <$variant as KeyGen>::PrivateKey;
-            let sk_arr: &<Sk as fips204::traits::SerDes>::ByteArray =
-                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sk = <Sk as fips204::traits::SerDes>::try_from_bytes(*sk_arr)
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    macro_rules! sign_with {
+        ($sk:expr) => {{
+            let sk = $sk;
             let result = match (get_ml_dsa_ph(mech), deterministic) {
                 (Some(ph), false) => sk.try_hash_sign(msg, ctx, &ph),
                 (Some(ph), true) => sk.try_hash_sign_with_rng(&mut ZeroRng, msg, ctx, &ph),
@@ -1251,13 +1300,37 @@ pub fn sign_ml_dsa(
                 .map(|s| Into::<Vec<u8>>::into(s))
         }};
     }
-    use fips204::traits::KeyGen;
-    match ps {
-        CKP_ML_DSA_44 => ml_dsa_sign!(fips204::ml_dsa_44::KG),
-        CKP_ML_DSA_65 | 0 => ml_dsa_sign!(fips204::ml_dsa_65::KG),
-        CKP_ML_DSA_87 => ml_dsa_sign!(fips204::ml_dsa_87::KG),
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
-    }
+    // Native: the cached expanded key (skDecode + NTTs + ExpandA once per
+    // key; crypto::mldsa_keycache). Byte-identical to decoding per call,
+    // which the wasm build keeps.
+    #[cfg(not(target_arch = "wasm32"))]
+    let expanded = crate::crypto::mldsa_keycache::get(ps, sk_bytes)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    return match &*expanded {
+        crate::crypto::mldsa_keycache::Expanded::P44(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P65(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P87(sk) => sign_with!(sk.as_ref()),
+    };
+    #[cfg(target_arch = "wasm32")]
+    return {
+        use fips204::traits::KeyGen;
+        macro_rules! decoded {
+            ($variant:path) => {{
+                type Sk = <$variant as KeyGen>::PrivateKey;
+                let sk_arr: &<Sk as fips204::traits::SerDes>::ByteArray =
+                    sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                let sk = <Sk as fips204::traits::SerDes>::try_from_bytes(*sk_arr)
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                sign_with!(&sk)
+            }};
+        }
+        match ps {
+            CKP_ML_DSA_44 => decoded!(fips204::ml_dsa_44::KG),
+            CKP_ML_DSA_65 | 0 => decoded!(fips204::ml_dsa_65::KG),
+            CKP_ML_DSA_87 => decoded!(fips204::ml_dsa_87::KG),
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+        }
+    };
 }
 
 /// Remediation R37 (phase 8), PKCS#11 v3.2 §6.67.6: sign an ALREADY-HASHED
@@ -1403,6 +1476,21 @@ pub fn sign_ml_dsa_external_mu(
     }
 }
 
+/// Hedged external-µ signing with a fresh OS-random `rnd` — what `C_Sign`
+/// does for `CKM_ML_DSA_EXTERNAL_MU` without `CKH_DETERMINISTIC_REQUIRED`.
+/// AWS-LC signs it when routed (it draws its own rnd); otherwise the rnd is
+/// drawn here and [`sign_ml_dsa_external_mu`] signs, exactly as before.
+pub fn sign_ml_dsa_external_mu_hedged(ps: u32, sk_bytes: &[u8], mu: &[u8]) -> Result<Vec<u8>, u32> {
+    #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+    if let Some(sig) = crate::crypto::awslc_pq::mldsa_sign_mu(ps, sk_bytes, mu) {
+        return Ok(sig);
+    }
+    use rand::RngCore;
+    let mut rnd = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut rnd);
+    sign_ml_dsa_external_mu(ps, sk_bytes, mu, rnd)
+}
+
 /// ML-DSA external-µ verification — counterpart to [`sign_ml_dsa_external_mu`].
 pub fn verify_ml_dsa_external_mu(
     ps: u32,
@@ -1410,6 +1498,10 @@ pub fn verify_ml_dsa_external_mu(
     mu: &[u8],
     sig_bytes: &[u8],
 ) -> Result<(), u32> {
+    #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+    if let Some(ok) = crate::crypto::awslc_pq::mldsa_verify_mu(ps, pk_bytes, mu, sig_bytes) {
+        return if ok { Ok(()) } else { Err(CKR_SIGNATURE_INVALID) };
+    }
     use fips204::traits::Verifier;
     let mu64: [u8; 64] = mu.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
     macro_rules! ver {
@@ -1449,23 +1541,183 @@ pub fn sign_ml_dsa_external_rnd(
     ctx: &[u8],
     rnd: [u8; 32],
 ) -> Result<Vec<u8>, u32> {
-    use fips204::traits::{SerDes, Signer};
+    sign_ml_dsa_external_rnd_ph(None, ps, sk_bytes, message, ctx, rnd)
+}
+
+/// **HashML-DSA** external-interface signing with an explicit 32-byte
+/// randomizer — the pre-hash counterpart to [`sign_ml_dsa_external_rnd`]
+/// (FIPS 204 Algorithm 4 `HashML-DSA.Sign`, `(1‖|ctx|‖ctx‖OID‖PH(M))`
+/// framing, the message hashed internally with the mechanism's hash — the
+/// form [`verify_ml_dsa`] checks). `rnd = [0u8; 32]` is the deterministic
+/// variant, byte-identical to [`sign_ml_dsa`] with `deterministic = true`.
+pub fn sign_hash_ml_dsa_external_rnd(
+    mech: u32,
+    ps: u32,
+    sk_bytes: &[u8],
+    message: &[u8],
+    ctx: &[u8],
+    rnd: [u8; 32],
+) -> Result<Vec<u8>, u32> {
+    let ph = get_ml_dsa_ph(mech).ok_or(CKR_MECHANISM_INVALID)?;
+    sign_ml_dsa_external_rnd_ph(Some(ph), ps, sk_bytes, message, ctx, rnd)
+}
+
+fn sign_ml_dsa_external_rnd_ph(
+    ph: Option<fips204::Ph>,
+    ps: u32,
+    sk_bytes: &[u8],
+    message: &[u8],
+    ctx: &[u8],
+    rnd: [u8; 32],
+) -> Result<Vec<u8>, u32> {
+    use fips204::traits::Signer;
     macro_rules! sign_with {
+        ($sk:expr) => {{
+            match &ph {
+                Some(ph) => $sk.try_hash_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx, ph),
+                None => $sk.try_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx),
+            }
+            .map(|s| Into::<Vec<u8>>::into(s))
+            .map_err(|_| CKR_FUNCTION_FAILED)
+        }};
+    }
+    // Native: the cached expanded key, as in [`sign_ml_dsa`].
+    #[cfg(not(target_arch = "wasm32"))]
+    let expanded = crate::crypto::mldsa_keycache::get(ps, sk_bytes)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    return match &*expanded {
+        crate::crypto::mldsa_keycache::Expanded::P44(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P65(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P87(sk) => sign_with!(sk.as_ref()),
+    };
+    #[cfg(target_arch = "wasm32")]
+    return {
+        use fips204::traits::SerDes;
+        macro_rules! decoded {
+            ($m:ident) => {{
+                let arr: &<fips204::$m::PrivateKey as SerDes>::ByteArray =
+                    sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                let sk = <fips204::$m::PrivateKey as SerDes>::try_from_bytes(*arr)
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                sign_with!(sk)
+            }};
+        }
+        match ps {
+            CKP_ML_DSA_44 => decoded!(ml_dsa_44),
+            CKP_ML_DSA_65 | 0 => decoded!(ml_dsa_65),
+            CKP_ML_DSA_87 => decoded!(ml_dsa_87),
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+        }
+    };
+}
+
+/// FIPS 204 Algorithm 6 `ML-DSA.KeyGen_internal(ξ)` → `(pk, sk)` in the
+/// FIPS 204 encodings. Every ML-DSA key generation in the engine goes through
+/// here (the engine always keeps ξ as CKA_SEED). AWS-LC when routed — the
+/// output is byte-identical — else fips204. `None` for an unknown set.
+pub fn ml_dsa_keygen_from_seed(ps: u32, xi: &[u8; 32]) -> Option<(Vec<u8>, Vec<u8>)> {
+    use fips204::traits::{KeyGen, SerDes};
+    macro_rules! keygen_with {
         ($m:ident) => {{
-            let arr: &<fips204::$m::PrivateKey as SerDes>::ByteArray =
-                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sk = <fips204::$m::PrivateKey as SerDes>::try_from_bytes(*arr)
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            sk.try_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx)
-                .map(|s| Into::<Vec<u8>>::into(s))
-                .map_err(|_| CKR_FUNCTION_FAILED)
+            #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+            if let Some(keys) = crate::crypto::awslc_pq::mldsa_keygen_from_seed(ps, xi) {
+                return Some(keys);
+            }
+            let (vk, sk) = fips204::$m::KG::keygen_from_seed(xi);
+            Some((SerDes::into_bytes(vk).to_vec(), SerDes::into_bytes(sk).to_vec()))
         }};
     }
     match ps {
-        CKP_ML_DSA_44 => sign_with!(ml_dsa_44),
-        CKP_ML_DSA_65 | 0 => sign_with!(ml_dsa_65),
-        CKP_ML_DSA_87 => sign_with!(ml_dsa_87),
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+        CKP_ML_DSA_44 => keygen_with!(ml_dsa_44),
+        CKP_ML_DSA_65 => keygen_with!(ml_dsa_65),
+        CKP_ML_DSA_87 => keygen_with!(ml_dsa_87),
+        _ => None,
+    }
+}
+
+/// FIPS 203 Algorithm 16 `ML-KEM.KeyGen_internal(d, z)`, `dz = d ‖ z`
+/// (64 bytes, length checked by the caller) → `(ek, dk)`. AWS-LC when routed
+/// (byte-identical), else ml-kem. `None` for an unknown set.
+pub fn ml_kem_keygen_from_seed(ps: u32, dz: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    use ml_kem::{EncodedSizeUser, KemCore};
+    macro_rules! keygen_with {
+        ($t:ty) => {{
+            #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+            if let Some(keys) = crate::crypto::awslc_pq::mlkem_keygen_from_seed(ps, dz) {
+                return Some(keys);
+            }
+            let d = ml_kem::B32::try_from(&dz[..32]).ok()?;
+            let z = ml_kem::B32::try_from(&dz[32..64]).ok()?;
+            let (dk, ek) = <$t>::generate_deterministic(&d, &z);
+            Some((ek.as_bytes().as_slice().to_vec(), dk.as_bytes().as_slice().to_vec()))
+        }};
+    }
+    if dz.len() != 64 {
+        return None;
+    }
+    match ps {
+        CKP_ML_KEM_512 => keygen_with!(ml_kem::MlKem512),
+        CKP_ML_KEM_768 => keygen_with!(ml_kem::MlKem768),
+        CKP_ML_KEM_1024 => keygen_with!(ml_kem::MlKem1024),
+        _ => None,
+    }
+}
+
+/// FIPS 203 Algorithm 17 `ML-KEM.Encaps_internal(ek, m)` → `(c, K)`.
+/// Callers draw `m` (32 bytes) from their RNG in one `fill_bytes`, exactly
+/// the draw ml-kem's own `encapsulate(rng)` makes, so moving the
+/// randomness out of the crate changes no output (ACVP-seeded RNGs
+/// included). Errors are the ones the engine's encapsulation sites already
+/// returned: `ek` of the wrong length → `CKR_KEY_TYPE_INCONSISTENT`, unknown
+/// set → `CKR_ARGUMENTS_BAD`.
+pub fn ml_kem_encaps(ps: u32, ek_bytes: &[u8], m: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), u32> {
+    use ml_kem::{EncapsulateDeterministic, EncodedSizeUser, KemCore};
+    macro_rules! encaps {
+        ($t:ty) => {{
+            let ek_enc = ml_kem::array::Array::try_from(ek_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+            if let Some(out) = crate::crypto::awslc_pq::mlkem_encaps(ps, ek_bytes, m) {
+                return Ok(out);
+            }
+            let ek = <$t as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
+            let m = ml_kem::B32::from(*m);
+            let (ct, ss) = ek.encapsulate_deterministic(&m).map_err(|_| CKR_FUNCTION_FAILED)?;
+            Ok((ct.as_slice().to_vec(), ss.as_slice().to_vec()))
+        }};
+    }
+    match ps {
+        CKP_ML_KEM_512 => encaps!(ml_kem::MlKem512),
+        CKP_ML_KEM_768 => encaps!(ml_kem::MlKem768),
+        CKP_ML_KEM_1024 => encaps!(ml_kem::MlKem1024),
+        _ => Err(CKR_ARGUMENTS_BAD),
+    }
+}
+
+/// FIPS 203 Algorithm 18 `ML-KEM.Decaps_internal(dk, c)` → `K`, with implicit
+/// rejection. Errors as at the engine's decapsulation sites: `dk` of the
+/// wrong length → `CKR_KEY_TYPE_INCONSISTENT`, `c` of the wrong length →
+/// `CKR_ARGUMENTS_BAD`, unknown set → `CKR_ARGUMENTS_BAD`.
+pub fn ml_kem_decaps(ps: u32, dk_bytes: &[u8], ct: &[u8]) -> Result<Vec<u8>, u32> {
+    use ml_kem::kem::Decapsulate;
+    use ml_kem::{EncodedSizeUser, KemCore};
+    macro_rules! decaps {
+        ($t:ty) => {{
+            let dk_enc = ml_kem::array::Array::try_from(dk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+            let ct_enc = ml_kem::array::Array::try_from(ct).map_err(|_| CKR_ARGUMENTS_BAD)?;
+            #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+            if let Some(ss) = crate::crypto::awslc_pq::mlkem_decaps(ps, dk_bytes, ct) {
+                return Ok(ss);
+            }
+            let dk = <$t as KemCore>::DecapsulationKey::from_bytes(&dk_enc);
+            let ss = Decapsulate::decapsulate(&dk, &ct_enc).map_err(|_| CKR_FUNCTION_FAILED)?;
+            Ok(ss.as_slice().to_vec())
+        }};
+    }
+    match ps {
+        CKP_ML_KEM_512 => decaps!(ml_kem::MlKem512),
+        CKP_ML_KEM_768 => decaps!(ml_kem::MlKem768),
+        CKP_ML_KEM_1024 => decaps!(ml_kem::MlKem1024),
+        _ => Err(CKR_ARGUMENTS_BAD),
     }
 }
 
@@ -2577,6 +2829,15 @@ pub fn verify_ml_dsa(
     sig_bytes: &[u8],
     ctx: &[u8],
 ) -> Result<(), u32> {
+    // AWS-LC CPU path (crypto::awslc_pq): pure ML-DSA only; HashML-DSA stays
+    // on fips204. `None` (wrong lengths, refused key) falls through, so the
+    // error codes below are unchanged.
+    #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+    if mech == CKM_ML_DSA {
+        if let Some(ok) = crate::crypto::awslc_pq::mldsa_verify(ps, pk_bytes, msg, sig_bytes, ctx) {
+            return if ok { Ok(()) } else { Err(CKR_SIGNATURE_INVALID) };
+        }
+    }
     use fips204::traits::Verifier;
     match ps {
         CKP_ML_DSA_44 => {

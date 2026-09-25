@@ -17,3 +17,6 @@ path = "src/bin/pqc_fpga_check.rs"
 [dependencies]
 libc = "0.2"
 sha3 = "0.10.8"
+# Scrubs secret inputs (SK.seed / SEED) staged for the hashsig engine.
+# Already in Cargo.lock through the engine crate; no new crate enters the graph.
+zeroize = "1"

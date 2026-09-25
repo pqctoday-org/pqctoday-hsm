@@ -27,6 +27,19 @@ macro_rules! profile_phase {
     ($phase:ident) => {};
 }
 
+// Host-path stage timing for the accelerator profile (`hw_accel` stage hook).
+// Without `hw-accel` it is exactly the wrapped expression.
+macro_rules! stage {
+    ($stage:ident, $body:expr) => {{
+        #[cfg(feature = "hw-accel")]
+        let stage_started = crate::hw_accel::stage_start();
+        let stage_result = $body;
+        #[cfg(feature = "hw-accel")]
+        crate::hw_accel::stage_end(crate::hw_accel::MldsaStage::$stage, stage_started);
+        stage_result
+    }};
+}
+
 
 // TODO Roadmap
 //  1. Always more testing...
@@ -117,8 +130,8 @@ mod ml_dsa;
 
 #[cfg(feature = "hw-accel")]
 pub use hw_accel::{
-    ExpandAHook, Mldsa65MatVecHook, Mldsa65SignHook, set_expand_a_hook,
-    set_mldsa65_matvec_hook, set_mldsa65_sign_hook,
+    ExpandAHook, Mldsa65MatVecHook, Mldsa65SignHook, Mldsa65SignInput, MldsaStage, MldsaStageHook,
+    set_expand_a_hook, set_mldsa65_matvec_hook, set_mldsa65_sign_hook, set_mldsa_stage_hook,
 };
 mod ntt;
 mod types;
@@ -273,6 +286,101 @@ macro_rules! functionality {
         }
 
 
+        // Shared bodies of the two `Signer` impls below. `pre_a` is the
+        // expanded matrix `Â = ExpandA(ρ)` when the caller holds it
+        // (`ExpandedPrivateKey`); `None` expands it for this signature.
+        fn sign_with_rng(
+            esk: &PrivateKey, pre_a: Option<&[[types::T; L]; K]>, rng: &mut impl CryptoRngCore,
+            message: &[u8], ctx: &[u8],
+        ) -> Result<[u8; SIG_LEN], &'static str> {
+            // 1: if |ctx| > 255 then
+            // 2:   return ⊥    ▷ return an error indication if the context string is too long
+            // 3: end if
+            helpers::ensure!(ctx.len() < 256, "ML-DSA.Sign: ctx too long");
+
+            // 4:  (blank line in spec)
+
+            // 5: rnd ← 𝔹^{32}     ▷ for the optional deterministic variant, substitute rnd ← {0}^32
+            // 6: if rnd = NULL then
+            // 7:   return ⊥    ▷ return an error indication if random bit generation failed
+            // 8: end if
+            let mut rnd = [0u8; 32];
+            rng.try_fill_bytes(&mut rnd).map_err(|_| "ML-DSA.Sign: random number generator failed")?;
+
+            // 9:  (blank line in spec)
+
+            // Note: step 10 is done within sign_internal() and 'below'
+            // 10: 𝑀 ′ ← BytesToBits(IntegerToBytes(0, 1) ∥ IntegerToBytes(|𝑐𝑡𝑥|, 1) ∥ 𝑐𝑡𝑥) ∥ 𝑀
+            // 11: 𝜎 ← ML-DSA.Sign_internal(𝑠𝑘, 𝑀 ′ , 𝑟𝑛𝑑)
+            let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, esk, pre_a, message, ctx, &[], &[], rnd, false, None
+            );
+
+            // 12: return 𝜎
+            Ok(sig)
+        }
+
+
+        fn hash_sign_with_rng(
+            esk: &PrivateKey, pre_a: Option<&[[types::T; L]; K]>, rng: &mut impl CryptoRngCore,
+            message: &[u8], ctx: &[u8], ph: &types::Ph,
+        ) -> Result<[u8; SIG_LEN], &'static str> {
+            // 1: if |ctx| > 255 then
+            // 2:   return ⊥    ▷ return an error indication if the context string is too long
+            // 3: end if
+            helpers::ensure!(ctx.len() < 256, "HashML-DSA.Sign: ctx too long");
+
+            // 4:  (blank line in spec)
+
+            // 5: rnd ← 𝔹^{32}     ▷ for the optional deterministic variant, substitute rnd ← {0}^32
+            // 6: if rnd = NULL then
+            // 7:   return ⊥    ▷ return an error indication if random bit generation failed
+            // 8: end if
+            let mut rnd = [0u8; 32];
+            rng.try_fill_bytes(&mut rnd).map_err(|_| "HashML-DSA.Sign: random number generator failed")?;
+
+            // 9:  (blank line in spec)
+
+            // Note: steps 10-22 are performed within `hash_message()` below
+            let mut phm = [0u8; 64];  // hashers don't all play well with each other
+            let (oid, phm_len) = hashing::hash_message(message, ph, &mut phm);
+
+            // Note: step 23 is performed within `sign_internal()` and below.
+            // 23: 𝑀 ′ ← BytesToBits(IntegerToBytes(1, 1) ∥ IntegerToBytes(|𝑐𝑡𝑥|, 1) ∥ 𝑐𝑡𝑥 ∥ OID ∥ PH𝑀 )
+            // 24: 𝜎 ← ML-DSA.Sign_internal(𝑠𝑘, 𝑀 ′ , 𝑟𝑛𝑑)
+            let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, esk, pre_a, message, ctx, &oid, &phm[0..phm_len], rnd, false, None
+            );
+
+            // 25: return 𝜎
+            Ok(sig)
+        }
+
+
+        // Documented in traits.rs (remediation R37, phase 8). Same as
+        // hash_sign_with_rng above, except `phm` is used AS-IS
+        // instead of calling hashing::hash_message on a raw message --
+        // the OID still needs computing (hashing::oid_and_len, which
+        // ALSO gives the expected PHM length for validation).
+        fn hash_sign_with_rng_phm(
+            esk: &PrivateKey, pre_a: Option<&[[types::T; L]; K]>, rng: &mut impl CryptoRngCore,
+            phm: &[u8], ctx: &[u8], ph: &types::Ph,
+        ) -> Result<[u8; SIG_LEN], &'static str> {
+            helpers::ensure!(ctx.len() < 256, "HashML-DSA.Sign: ctx too long");
+            let (oid, expected_len) = hashing::oid_and_len(ph);
+            helpers::ensure!(phm.len() == expected_len, "HashML-DSA.Sign: PHM length mismatch");
+
+            let mut rnd = [0u8; 32];
+            rng.try_fill_bytes(&mut rnd).map_err(|_| "HashML-DSA.Sign: random number generator failed")?;
+
+            let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, esk, pre_a, &[], ctx, &oid, phm, rnd, false, None
+            );
+
+            Ok(sig)
+        }
+
+
         impl Signer for PrivateKey {
             type Signature = [u8; SIG_LEN];
             type PublicKey = PublicKey;
@@ -290,31 +398,7 @@ macro_rules! functionality {
             fn try_sign_with_rng(
                 &self, rng: &mut impl CryptoRngCore, message: &[u8], ctx: &[u8],
             ) -> Result<Self::Signature, &'static str> {
-                // 1: if |ctx| > 255 then
-                // 2:   return ⊥    ▷ return an error indication if the context string is too long
-                // 3: end if
-                helpers::ensure!(ctx.len() < 256, "ML-DSA.Sign: ctx too long");
-
-                // 4:  (blank line in spec)
-
-                // 5: rnd ← 𝔹^{32}     ▷ for the optional deterministic variant, substitute rnd ← {0}^32
-                // 6: if rnd = NULL then
-                // 7:   return ⊥    ▷ return an error indication if random bit generation failed
-                // 8: end if
-                let mut rnd = [0u8; 32];
-                rng.try_fill_bytes(&mut rnd).map_err(|_| "ML-DSA.Sign: random number generator failed")?;
-
-                // 9:  (blank line in spec)
-
-                // Note: step 10 is done within sign_internal() and 'below'
-                // 10: 𝑀 ′ ← BytesToBits(IntegerToBytes(0, 1) ∥ IntegerToBytes(|𝑐𝑡𝑥|, 1) ∥ 𝑐𝑡𝑥) ∥ 𝑀
-                // 11: 𝜎 ← ML-DSA.Sign_internal(𝑠𝑘, 𝑀 ′ , 𝑟𝑛𝑑)
-                let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
-                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, message, ctx, &[], &[], rnd, false, None
-                );
-
-                // 12: return 𝜎
-                Ok(sig)
+                sign_with_rng(self, None, rng, message, ctx)
             }
 
 
@@ -332,58 +416,15 @@ macro_rules! functionality {
             fn try_hash_sign_with_rng(
                 &self, rng: &mut impl CryptoRngCore, message: &[u8], ctx: &[u8], ph: &types::Ph,
             ) -> Result<Self::Signature, &'static str> {
-                // 1: if |ctx| > 255 then
-                // 2:   return ⊥    ▷ return an error indication if the context string is too long
-                // 3: end if
-                helpers::ensure!(ctx.len() < 256, "HashML-DSA.Sign: ctx too long");
-
-                // 4:  (blank line in spec)
-
-                // 5: rnd ← 𝔹^{32}     ▷ for the optional deterministic variant, substitute rnd ← {0}^32
-                // 6: if rnd = NULL then
-                // 7:   return ⊥    ▷ return an error indication if random bit generation failed
-                // 8: end if
-                let mut rnd = [0u8; 32];
-                rng.try_fill_bytes(&mut rnd).map_err(|_| "HashML-DSA.Sign: random number generator failed")?;
-
-                // 9:  (blank line in spec)
-
-                // Note: steps 10-22 are performed within `hash_message()` below
-                let mut phm = [0u8; 64];  // hashers don't all play well with each other
-                let (oid, phm_len) = hashing::hash_message(message, ph, &mut phm);
-
-                // Note: step 23 is performed within `sign_internal()` and below.
-                // 23: 𝑀 ′ ← BytesToBits(IntegerToBytes(1, 1) ∥ IntegerToBytes(|𝑐𝑡𝑥|, 1) ∥ 𝑐𝑡𝑥 ∥ OID ∥ PH𝑀 )
-                // 24: 𝜎 ← ML-DSA.Sign_internal(𝑠𝑘, 𝑀 ′ , 𝑟𝑛𝑑)
-                let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
-                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, message, ctx, &oid, &phm[0..phm_len], rnd, false, None
-                );
-
-                // 25: return 𝜎
-                Ok(sig)
+                hash_sign_with_rng(self, None, rng, message, ctx, ph)
             }
 
 
-            // Documented in traits.rs (remediation R37, phase 8). Same as
-            // try_hash_sign_with_rng above, except `phm` is used AS-IS
-            // instead of calling hashing::hash_message on a raw message --
-            // the OID still needs computing (hashing::oid_and_len, which
-            // ALSO gives the expected PHM length for validation).
+            // Documented in traits.rs (remediation R37, phase 8).
             fn try_hash_sign_with_rng_phm(
                 &self, rng: &mut impl CryptoRngCore, phm: &[u8], ctx: &[u8], ph: &types::Ph,
             ) -> Result<Self::Signature, &'static str> {
-                helpers::ensure!(ctx.len() < 256, "HashML-DSA.Sign: ctx too long");
-                let (oid, expected_len) = hashing::oid_and_len(ph);
-                helpers::ensure!(phm.len() == expected_len, "HashML-DSA.Sign: PHM length mismatch");
-
-                let mut rnd = [0u8; 32];
-                rng.try_fill_bytes(&mut rnd).map_err(|_| "HashML-DSA.Sign: random number generator failed")?;
-
-                let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
-                    BETA, GAMMA1, GAMMA2, OMEGA, TAU, &self, &[], ctx, &oid, phm, rnd, false, None
-                );
-
-                Ok(sig)
+                hash_sign_with_rng_phm(self, None, rng, phm, ctx, ph)
             }
 
 
@@ -391,6 +432,48 @@ macro_rules! functionality {
             #[allow(clippy::cast_lossless)]
             fn get_public_key(&self) -> Self::PublicKey {
                 ml_dsa::private_to_public_key(&self)
+            }
+        }
+
+
+        /// A decoded private key together with its expanded public matrix
+        /// `Â = ExpandA(ρ)`, for signing repeatedly with one key: every
+        /// signature skips `skDecode`, the NTTs of `s1`, `s2`, `t0` and
+        /// `ExpandA`. Signatures are byte-identical to [`PrivateKey`]'s.
+        /// Zeroized on drop.
+        ///
+        /// Implements the [`crate::traits::Signer`] trait.
+        pub type ExpandedPrivateKey = crate::types::ExpandedPrivateKey<K, L>;
+
+
+        impl Signer for ExpandedPrivateKey {
+            type Signature = [u8; SIG_LEN];
+            type PublicKey = PublicKey;
+
+            // Algorithm 2, as for `PrivateKey` (documented in traits.rs).
+            fn try_sign_with_rng(
+                &self, rng: &mut impl CryptoRngCore, message: &[u8], ctx: &[u8],
+            ) -> Result<Self::Signature, &'static str> {
+                sign_with_rng(&self.sk, Some(&self.cap_a_hat), rng, message, ctx)
+            }
+
+            // Algorithm 4, as for `PrivateKey` (documented in traits.rs).
+            fn try_hash_sign_with_rng(
+                &self, rng: &mut impl CryptoRngCore, message: &[u8], ctx: &[u8], ph: &types::Ph,
+            ) -> Result<Self::Signature, &'static str> {
+                hash_sign_with_rng(&self.sk, Some(&self.cap_a_hat), rng, message, ctx, ph)
+            }
+
+            // Documented in traits.rs (remediation R37, phase 8).
+            fn try_hash_sign_with_rng_phm(
+                &self, rng: &mut impl CryptoRngCore, phm: &[u8], ctx: &[u8], ph: &types::Ph,
+            ) -> Result<Self::Signature, &'static str> {
+                hash_sign_with_rng_phm(&self.sk, Some(&self.cap_a_hat), rng, phm, ctx, ph)
+            }
+
+            // Documented in traits.rs
+            fn get_public_key(&self) -> Self::PublicKey {
+                ml_dsa::private_to_public_key(&self.sk)
             }
         }
 
@@ -481,7 +564,7 @@ macro_rules! functionality {
 
 
             fn try_from_bytes(sk: Self::ByteArray) -> Result<Self, &'static str> {
-                let esk = ml_dsa::expand_private::<K, L, SK_LEN>(ETA, &sk)?;
+                let esk = stage!(KeyDecode, ml_dsa::expand_private::<K, L, SK_LEN>(ETA, &sk))?;
                 Ok(esk)
             }
 
@@ -630,7 +713,7 @@ macro_rules! functionality {
             let mut rnd = [0u8; 32];
             rng.try_fill_bytes(&mut rnd).map_err(|_| "Random number generator failed")?;
             let sig = ml_dsa::sign_internal::<true, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
-                BETA, GAMMA1, GAMMA2, OMEGA, TAU, &sk, message, &[1], &[2], &[3], rnd, true, None
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, &sk, None, message, &[1], &[2], &[3], rnd, true, None
             );
             Ok(sig)
         }
@@ -650,9 +733,36 @@ macro_rules! functionality {
         ) -> Result<[u8; SIG_LEN], &'static str> {
             helpers::ensure!(ctx.len() < 256, "_internal_sign: ctx too long");
             let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
-                BETA, GAMMA1, GAMMA2, OMEGA, TAU, sk, message, ctx, &[], &[], rnd, true, None
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, sk, None, message, ctx, &[], &[], rnd, true, None
             );
             Ok(sig)
+        }
+
+        /// The signing rejection loop (FIPS 204 Algorithm 7 steps 8-34) in
+        /// software, from the inputs an accelerator receives: the NTT-domain
+        /// matrix `Â` (row-major), the Montgomery-form NTT-domain `s1`, `s2`,
+        /// `t0` of a decoded private key, `mu` and `rho'`. Returns the encoded
+        /// signature and the number of loop attempts, or `None` on a length
+        /// mismatch. This is exactly the computation the whole-signature
+        /// accelerator reproduces; simulators and tests use it as the
+        /// reference.
+        #[cfg(feature = "hw-accel")]
+        #[must_use]
+        pub fn reference_sign_loop(
+            matrix: &[i32], s1: &[i32], s2: &[i32], t0: &[i32], mu: &[u8; 64], rho_prime: &[u8; 64],
+        ) -> Option<([u8; SIG_LEN], u32)> {
+            if matrix.len() != K * L * 256 || s1.len() != L * 256 || s2.len() != K * 256 || t0.len() != K * 256 {
+                return None;
+            }
+            let poly = |v: &[i32], i: usize| types::T(core::array::from_fn(|n| v[i * 256 + n]));
+            let cap_a_hat: [[types::T; L]; K] =
+                core::array::from_fn(|k| core::array::from_fn(|l| poly(matrix, k * L + l)));
+            let s1: [types::T; L] = core::array::from_fn(|l| poly(s1, l));
+            let s2: [types::T; K] = core::array::from_fn(|k| poly(s2, k));
+            let t0: [types::T; K] = core::array::from_fn(|k| poly(t0, k));
+            Some(ml_dsa::rejection_loop::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, W1_LEN>(
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, &cap_a_hat, None, &s1, &s2, &t0, mu, rho_prime,
+            ))
         }
 
         #[deprecated = "Temporary function to allow application of external-mu test vectors; will be removed"]
@@ -666,7 +776,7 @@ macro_rules! functionality {
             sk: &PrivateKey, mu: &[u8; 64], rnd: [u8; 32]
         ) -> Result<[u8; SIG_LEN], &'static str> {
             let sig = ml_dsa::sign_internal::<CTEST, K, L, LAMBDA_DIV4, SIG_LEN, SK_LEN, W1_LEN>(
-                BETA, GAMMA1, GAMMA2, OMEGA, TAU, sk, &[], &[], &[], &[], rnd, true, Some(*mu)
+                BETA, GAMMA1, GAMMA2, OMEGA, TAU, sk, None, &[], &[], &[], &[], rnd, true, Some(*mu)
             );
             Ok(sig)
         }

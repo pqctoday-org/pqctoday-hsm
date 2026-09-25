@@ -64,6 +64,11 @@ path = "tests/messages.rs"
 name = "py_vectors"
 path = "tests/py_vectors.rs"
 
+[[test]]
+name = "parallel_budget"
+path = "tests/parallel_budget.rs"
+required-features = ["parallel"]
+
 [[bench]]
 name = "benchmark"
 path = "benches/benchmark.rs"
@@ -122,6 +127,13 @@ default = [
     "slh_dsa_shake_256f",
 ]
 default-rng = ["rand_core/getrandom"]
+# pqctoday-hsm: build independent Merkle subtrees on several threads (src/par.rs).
+# Needs std; byte-identical output; FIPS205_THREADS=1 forces the serial path.
+parallel = []
+# pqctoday-hsm: process-wide hooks that let the hashsig FPGA engine compute
+# SIG_FORS || SIG_HT (slh_sign_internal) and the top-tree root
+# (slh_keygen_internal). Needs std. Byte-identical output; see src/hw_accel.rs.
+hw-accel = []
 phase-profile = ["dep:pqc-phase-profile"]
 slh_dsa_sha2_128f = []
 slh_dsa_sha2_128s = []

@@ -42,8 +42,30 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 #   cargo build --features acvp ...     # an authorized ACVP-lab submission
 # (Was `default = ["acvp"]`; flipped to opt-in per the 2026-06-21 compliance
 # audit — shipping a release build with this hook on is a §5.6 violation.)
-default = []
+default = ["awslc-pq"]
 acvp = []
+
+# ML-DSA / ML-KEM on AWS-LC's CPU path (`crypto::awslc_pq`): AWS-LC's
+# mldsa-native / mlkem-native carry hand-written AArch64 NEON NTT, pointwise,
+# rejection-sampling and norm routines the pure-Rust fips204 / ml-kem crates do
+# not. DEFAULT ON, but only native builds compile anything for it: the module
+# and `aws-lc-sys` are both gated on `not(target_arch = "wasm32")`, so the
+# wasm32 bundles keep fips204 / ml-kem unchanged whether or not the feature is
+# on. What it routes (and what stays on the Rust crates) is the coverage
+# matrix in src/crypto/awslc_pq.rs. Runtime escape hatch:
+# PQC_AWSLC_PQ_DISABLE=1 puts every call back on fips204 / ml-kem.
+awslc-pq = ["dep:aws-lc-sys"]
+# ML-KEM KeyGen(d ‖ z) and Encaps(ek, m) on AWS-LC need two functions
+# (EVP_PKEY_keygen_deterministic / EVP_PKEY_encapsulate_deterministic) that
+# are only in aws-lc-sys's per-target `all-bindings` set. That set exists only
+# for the targets aws-lc-sys ships pregenerated bindings for (e.g.
+# aarch64-unknown-linux-gnu); on any other triple -- Yocto's
+# aarch64-amd-linux-gnu -- it forces bindgen at build time and the build
+# fails. So `awslc-pq` keeps aws-lc-sys on its target-independent universal
+# bindings (default-features = false, like aws-lc-rs), and ML-KEM keygen and
+# encaps stay on ml-kem unless this opt-in feature is on. Decaps and every
+# ML-DSA route are unaffected.
+awslc-pq-mlkem-seeded = ["awslc-pq", "aws-lc-sys/all-bindings"]
 
 # Exposes `reset_all_engine_state_for_test` as a normal `pub fn` (it is
 # already always available under `#[cfg(test)]` for this crate's own
@@ -57,13 +79,24 @@ acvp = []
 # entry, so it never reaches the shipped `pqctoday-kmip` binary or any
 # other consumer of this crate.
 test-support = []
-hw-accel = ["dep:pqc-hw", "fips204/hw-accel"]
+hw-accel = [
+    "dep:pqc-hw",
+    "fips204/hw-accel",
+    "fips205/hw-accel",
+    "hbs-lms/hw-accel",
+    "xmss/hw-accel",
+]
 phase-profile = [
     "dep:pqc-phase-profile",
     "fips204/phase-profile",
     "fips205/phase-profile",
     "ml-kem/phase-profile",
 ]
+
+[[example]]
+# fips204 / ml-kem versus AWS-LC timing (`crypto::awslc_pq`); native only.
+name = "awslc_pq_bench"
+required-features = ["awslc-pq"]
 
 [dependencies]
 wasm-bindgen = "0.2.117"
@@ -178,7 +211,11 @@ zeroize = "1"
 subtle = "2"
 
 # Stateful hash-based signatures (G10)
-hbs-lms = "0.1.1"
+# `tree-cache` (hbs-lms-patched src/tree_cache.rs): in-memory per-tree node cache,
+# so a signature no longer rebuilds the whole LMS tree and every HSS lower level
+# (upstream signs without aux data). Nothing is persisted; all targets (needs std,
+# which wasm32-unknown-unknown has).
+hbs-lms = { version = "0.1.1", features = ["tree-cache"] }
 
 # Keccak-256 (G11 — Ethereum address derivation)
 tiny-keccak = { version = "2.0", features = ["keccak"] }
@@ -244,9 +281,52 @@ libc = "0.2"
 # caller-chosen salt length, MD5/SHA-1/SHA-224/SHA-3 RSA variants, and
 # BIP32's P-256 scalar arithmetic). See `crypto::awslc` for the dispatch rule.
 aws-lc-rs = "1"
+# The raw AWS-LC API under aws-lc-rs, for `crypto::awslc_pq` (feature
+# `awslc-pq`): aws-lc-rs 1.18 exposes ML-DSA without context strings and
+# ML-KEM without seeded key generation / encapsulation, which the engine's
+# PKCS#11 surface needs. NOT a second copy of AWS-LC: this must resolve to the
+# SAME aws-lc-sys that aws-lc-rs resolves (`cargo tree -d -i aws-lc-sys` must
+# print nothing). The range spans the two aws-lc-sys lines the workspace
+# lockfiles carry today — 0.44 under aws-lc-rs 1.18.0 (rust/, kmip/,
+# remoting/) and 0.45 under 1.18.1 (wasm/) — so each lock keeps its single
+# copy. Only the public include/openssl API is used (bindgen'd, prefixed per
+# version), which is the same in both. Widen it when aws-lc-rs moves, and
+# regenerate pqctoday-cacp's Yocto crates.inc whenever the hsm pin moves.
+aws-lc-sys = { version = ">=0.44.0, <0.46.0", optional = true, default-features = false }
+# Multi-core SLH-DSA sign/keygen (fips205-patched `parallel` feature, src/par.rs):
+# independent FORS and hypertree subtrees are built on spare cores, byte-identical
+# output. Threads come from one process-wide budget of available_parallelism():
+# concurrent signatures share it instead of each fanning out. Native only: the
+# wasm32 builds keep the no_std serial path. FIPS205_THREADS=<n> caps one
+# operation's threads; FIPS205_THREADS=1 always runs serially.
+fips205 = { version = "0.4.1", features = ["parallel"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "aarch64"))'.dependencies]
 pqc-hw = { path = "pqc-hw", optional = true }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+# Hardware SHA-2 for every sha2 0.10 user in the graph (fips205's SLH-DSA-SHA2
+# sets, hbs-lms, xmss, and the engine's own SHA-2/HMAC/HKDF). Feature
+# unification applies it to the one sha2 0.10 in Cargo.lock, including the
+# patched crates' uses.
+#
+# aarch64: sha2 0.10 compiles its Armv8 backend ONLY under the `asm` feature
+# (sha2-0.10.9 src/sha256.rs, src/sha512.rs cfg_if); without it SHA-256/512
+# always run the portable code. The backend chooses the instructions at run
+# time (cpufeatures reads HWCAP) and falls back to the portable code on a core
+# without them, so one binary is correct on any Armv8-A. Cortex-A53/A55 (KV260,
+# i.MX 95) have the SHA-256 instructions but not the Armv8.2 SHA-512 ones, so
+# there only SHA-256 is accelerated.
+#
+# x86_64 needs nothing here: sha2 0.10 already selects its SHA-NI (SHA-256) and
+# AVX2 (SHA-512) backends by default, with run-time detection and the portable
+# fallback (src/sha256/x86.rs `cpufeatures::new!(shani_cpuid, "sha", ...)`);
+# `asm` there would only swap the fallback for sha2-asm's and add a C build.
+#
+# wasm32 is excluded by construction: this table matches aarch64 only, so
+# sha2-asm and its `cc` build dependency never enter the wasm32 graph
+# (`cargo tree -i sha2-asm --target wasm32-unknown-unknown` prints nothing).
+sha2 = { version = "0.10.8", features = ["asm"] }
 
 [dev-dependencies]
 # NIST ACVP keyGen KAT parsing (T7 seed-deterministic keygen tests reads
@@ -265,11 +345,57 @@ ml-kem = { path = "ml-kem-patched" }
 # type codes for all hash families (gap-analysis hbs-lms finding; mirrors
 # the C++ engine's patched hash-sigs submodule).
 hbs-lms = { path = "hbs-lms-patched" }
+# Vendored xmss 0.1.0-pre.0 (registry checksum 5715f4f2...) plus an in-memory
+# per-key auth-path cache so signing stops rebuilding the whole tree
+# (xmss-patched/PROVENANCE.md). Same public API; RFC 8391 output unchanged.
+xmss = { path = "xmss-patched" }
 
 [profile.release]
 # Optimize purely for size in WASM
 opt-level = "s"
 lto = true
+
+# Hash-based-signature hot path at opt-level 3 in every release build of this
+# workspace (native, the wasm bundle, the sandbox images built from it) without
+# anyone editing their build; everything else stays at "s", so the wasm bundle
+# grows only by these crates' code. Profiles are read from the WORKSPACE ROOT
+# only: wasm/ (also "s") carries the same table, keep the two in sync; kmip/
+# and remoting/ set no [profile.release], so their release builds already use
+# Cargo's default opt-level 3 for everything.
+#
+# LIMITATION (measured 2026-09-23, see the commit): with `lto = true` the
+# link-time optimisation of the merged module runs at the ROOT crate's level
+# ("s"), and that undoes most of what these overrides buy on the SHA-2 path
+# (SLH-DSA-SHA2-128s sign, one thread: 105.6 ms at "s", 101.2 ms with these
+# overrides, 76.0 ms at a global opt-level 3, 71.0 ms with these overrides and
+# LTO off). The keccak/SHAKE gain mostly survives (SHAKE-128s: 877 -> 770 ms,
+# 742 ms at global 3). Native builds that want the full gain use
+# [profile.release-native] below or CARGO_PROFILE_RELEASE_OPT_LEVEL=3.
+# Cost: the wasm bundle grows by ~244 KB (+8.7%, measured in the commit).
+[profile.release.package.fips205]
+opt-level = 3
+[profile.release.package.sha2]
+opt-level = 3
+[profile.release.package.sha3]
+opt-level = 3
+[profile.release.package.keccak]
+opt-level = 3
+[profile.release.package.hbs-lms]
+opt-level = 3
+[profile.release.package.xmss]
+opt-level = 3
+
+# Whole-crate opt-level 3 for NATIVE builds of this workspace (the KV260 /
+# i.MX 95 appliance images, the sandbox bench/network images):
+# `cargo build --profile release-native`, output in target/release-native/.
+# It still adds something over the per-package table above, because of the LTO
+# limitation described there (SHA-2 SLH-DSA sets ~25% faster; measured in the
+# commit). [profile.release] itself stays "s" for the wasm bundle. A build that
+# cannot pick a profile (the Yocto cargo class) gets the same with
+# CARGO_PROFILE_RELEASE_OPT_LEVEL=3.
+[profile.release-native]
+inherits = "release"
+opt-level = 3
 
 # Classic McEliece keygen (Gaussian elimination over a PK_NROWS x SYS_N/8 matrix)
 # is measured minutes-slow at opt-level=0 for the largest sets (23.6-24.0s per

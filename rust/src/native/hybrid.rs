@@ -37,8 +37,6 @@
 //! fresh ephemeral against the peer's static public; decapsulation DHs the
 //! static secret (read from its handle) against the ephemeral public in the ct.
 
-use ml_kem::kem::Encapsulate;
-use ml_kem::{EncodedSizeUser, KemCore, MlKem1024, MlKem768};
 
 use super::derive::{run_combiner, Combiner};
 use super::keygen::{generate_ecdh_keypair, generate_ml_kem_keypair, generate_x25519_keypair, EccCurve};
@@ -144,8 +142,7 @@ pub fn encapsulate(session: u32, hybrid: Hybrid, peer_public: &[u8]) -> Result<E
                 return Err(CKR_ARGUMENTS_BAD);
             }
             let (ek_b, x_pub_b) = peer_public.split_at(MLKEM768_EK);
-            let ek = mlkem768_ek(ek_b)?;
-            let (ct_mlkem, ss_mlkem) = ek.encapsulate(&mut rng).map_err(|_| CKR_FUNCTION_FAILED)?;
+            let (ct_mlkem, ss_mlkem) = mlkem_encaps(CKP_ML_KEM_768, ek_b, &mut rng)?;
             let x_peer: [u8; 32] = x_pub_b.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
             let eph = x25519_dalek::EphemeralSecret::random_from_rng(&mut rng);
             let eph_pub = x25519_dalek::PublicKey::from(&eph);
@@ -160,8 +157,7 @@ pub fn encapsulate(session: u32, hybrid: Hybrid, peer_public: &[u8]) -> Result<E
                 return Err(CKR_ARGUMENTS_BAD);
             }
             let (p_pub_b, ek_b) = peer_public.split_at(P256_PUB);
-            let ek = mlkem768_ek(ek_b)?;
-            let (ct_mlkem, ss_mlkem) = ek.encapsulate(&mut rng).map_err(|_| CKR_FUNCTION_FAILED)?;
+            let (ct_mlkem, ss_mlkem) = mlkem_encaps(CKP_ML_KEM_768, ek_b, &mut rng)?;
             let peer_pub = p256::PublicKey::from_sec1_bytes(p_pub_b).map_err(|_| CKR_ARGUMENTS_BAD)?;
             let eph = p256::ecdh::EphemeralSecret::random(&mut rng);
             let eph_pub = p256::EncodedPoint::from(eph.public_key());
@@ -176,8 +172,7 @@ pub fn encapsulate(session: u32, hybrid: Hybrid, peer_public: &[u8]) -> Result<E
                 return Err(CKR_ARGUMENTS_BAD);
             }
             let (p_pub_b, ek_b) = peer_public.split_at(P384_PUB);
-            let ek = mlkem1024_ek(ek_b)?;
-            let (ct_mlkem, ss_mlkem) = ek.encapsulate(&mut rng).map_err(|_| CKR_FUNCTION_FAILED)?;
+            let (ct_mlkem, ss_mlkem) = mlkem_encaps(CKP_ML_KEM_1024, ek_b, &mut rng)?;
             let peer_pub = p384::PublicKey::from_sec1_bytes(p_pub_b).map_err(|_| CKR_ARGUMENTS_BAD)?;
             let eph = p384::ecdh::EphemeralSecret::random(&mut rng);
             let eph_pub = p384::EncodedPoint::from(eph.public_key());
@@ -264,16 +259,20 @@ fn combine(session: u32, components: &[&[u8]]) -> Result<Vec<u8>, CkRv> {
     run_combiner(session, components, &Combiner::Concat { finalize: vec![] })
 }
 
-// ── ML-KEM encapsulation-key helpers (encapsulate side, operates on peer bytes) ─
-fn mlkem768_ek(ek_b: &[u8]) -> Result<<MlKem768 as KemCore>::EncapsulationKey, CkRv> {
-    let arr = ml_kem::Encoded::<<MlKem768 as KemCore>::EncapsulationKey>::try_from(ek_b)
-        .map_err(|_| CKR_ARGUMENTS_BAD)?;
-    Ok(<MlKem768 as KemCore>::EncapsulationKey::from_bytes(&arr))
-}
-fn mlkem1024_ek(ek_b: &[u8]) -> Result<<MlKem1024 as KemCore>::EncapsulationKey, CkRv> {
-    let arr = ml_kem::Encoded::<<MlKem1024 as KemCore>::EncapsulationKey>::try_from(ek_b)
-        .map_err(|_| CKR_ARGUMENTS_BAD)?;
-    Ok(<MlKem1024 as KemCore>::EncapsulationKey::from_bytes(&arr))
+// ── ML-KEM encapsulation to peer bytes ─────────────────────────────────────
+/// ML-KEM.Encaps to a peer encapsulation key: `m` is one 32-byte draw from
+/// `rng` (what ml-kem's `encapsulate(rng)` draws), Encaps_internal runs on
+/// AWS-LC or ml-kem (`crypto::handlers::ml_kem_encaps`). The caller has
+/// already checked the share's total length, so `ek_b` has the set's length;
+/// a wrong length would still be CKR_ARGUMENTS_BAD, as before.
+fn mlkem_encaps(ps: u32, ek_b: &[u8], rng: &mut impl rand::RngCore) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
+    let want = if ps == CKP_ML_KEM_768 { MLKEM768_EK } else { MLKEM1024_EK };
+    if ek_b.len() != want {
+        return Err(CKR_ARGUMENTS_BAD);
+    }
+    let mut m = [0u8; 32];
+    rng.fill_bytes(&mut m);
+    crate::crypto::handlers::ml_kem_encaps(ps, ek_b, &m)
 }
 
 #[cfg(test)]

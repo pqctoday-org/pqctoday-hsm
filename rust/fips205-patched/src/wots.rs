@@ -1,4 +1,4 @@
-use crate::hashers::Hashers;
+use crate::hashers::{Hashers, PkSeed};
 use crate::helpers::{base_2b, to_byte};
 use crate::types::{Adrs, WotsPk, WotsSig, WOTS_PK, WOTS_PRF};
 
@@ -14,7 +14,7 @@ use crate::types::{Adrs, WotsPk, WotsSig, WOTS_PK, WOTS_PRF};
 /// Input: Input string `X`, start index `i`, number of steps `s`, public seed `PK.seed`, address `ADRS`. <br>
 /// Output: Value of `F` iterated `s` times on `X`.
 pub(crate) fn chain<const K: usize, const LEN: usize, const M: usize, const N: usize>(
-    hashers: &Hashers<K, LEN, M, N>, cap_x: [u8; N], i: u32, s: u32, pk_seed: &[u8], adrs: &Adrs,
+    hashers: &Hashers<K, LEN, M, N>, cap_x: [u8; N], i: u32, s: u32, pk_seed: &PkSeed<N>, adrs: &Adrs,
 ) -> [u8; N] {
     profile_phase!(Tree);
     debug_assert!(i + s < u32::MAX);
@@ -54,7 +54,7 @@ pub(crate) fn chain<const K: usize, const LEN: usize, const M: usize, const N: u
 /// Output: WOTS+ public key `pk`.
 #[allow(clippy::similar_names)] // pk_seed and sk_seed
 pub(crate) fn wots_pkgen<const K: usize, const LEN: usize, const M: usize, const N: usize>(
-    hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], pk_seed: &[u8], adrs: &Adrs,
+    hashers: &Hashers<K, LEN, M, N>, sk_seed: &[u8], pk_seed: &PkSeed<N>, adrs: &Adrs,
 ) -> WotsPk<N> {
     profile_phase!(Tree);
     let len32 = u32::try_from(LEN).unwrap();
@@ -112,7 +112,7 @@ pub(crate) fn wots_pkgen<const K: usize, const LEN: usize, const M: usize, const
 /// Output: WOTS+ signature sig.
 #[allow(clippy::similar_names)] // pk_seed and sk_seed
 pub(crate) fn wots_sign<const K: usize, const LEN: usize, const M: usize, const N: usize>(
-    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], pk_seed: &[u8], adrs: &Adrs,
+    hashers: &Hashers<K, LEN, M, N>, m: &[u8], sk_seed: &[u8], pk_seed: &PkSeed<N>, adrs: &Adrs,
 ) -> WotsSig<LEN, N> {
     profile_phase!(Tree);
     let n32 = u32::try_from(N).unwrap();
@@ -184,7 +184,7 @@ pub(crate) fn wots_sign<const K: usize, const LEN: usize, const M: usize, const 
 /// Input: WOTS+ signature `sig`, message `M`, public seed `PK.seed`, address `ADRS`. <br>
 /// Output: WOTS+ public key `pksig` derived from `sig`.
 pub(crate) fn wots_pk_from_sig<const K: usize, const LEN: usize, const M: usize, const N: usize>(
-    hashers: &Hashers<K, LEN, M, N>, sig: &WotsSig<LEN, N>, m: &[u8], pk_seed: &[u8], adrs: &Adrs,
+    hashers: &Hashers<K, LEN, M, N>, sig: &WotsSig<LEN, N>, m: &[u8], pk_seed: &PkSeed<N>, adrs: &Adrs,
 ) -> WotsPk<N> {
     profile_phase!(Tree);
     let n32 = u32::try_from(N).unwrap();

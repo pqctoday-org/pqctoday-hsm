@@ -1801,6 +1801,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -1889,6 +1899,7 @@ dependencies = [
  "aes-gcm",
  "aes-kw",
  "aws-lc-rs",
+ "aws-lc-sys",
  "cbc",
  "chacha20 0.9.1",
  "chacha20poly1305",
@@ -2401,8 +2412,6 @@ dependencies = [
 [[package]]
 name = "xmss"
 version = "0.1.0-pre.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5715f4f20c87b0d3f8e70ff92e15d1fe405183b493e39f79e77c81545a3b4d4b"
 dependencies = [
  "digest 0.10.7",
  "hybrid-array 0.2.3",

@@ -182,6 +182,11 @@ pub fn clear() {
     let mut c = locked();
     c.map.clear();
     c.order.clear();
+    drop(c);
+    // The ML-DSA keys parsed by `crypto::awslc_pq` follow the same lifetime
+    // rule, so every call site that empties this cache empties that one too.
+    #[cfg(feature = "awslc-pq")]
+    crate::crypto::awslc_pq::clear_key_cache();
 }
 
 /// Number of resident keys. Tests only.

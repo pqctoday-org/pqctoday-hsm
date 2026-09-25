@@ -117,3 +117,51 @@ fn test_44_no_verif() {
         assert!(!ver)
     }
 }
+
+// `ExpandedPrivateKey` (decoded key + Â expanded once) must sign exactly like
+// `PrivateKey` for every entry point and parameter set: same rnd, same bytes.
+#[test]
+fn expanded_private_key_signs_identically() {
+    use fips204::traits::SerDes;
+    use fips204::Ph;
+    macro_rules! check {
+        ($m:ident) => {{
+            use fips204::$m;
+            for seed in 0..3u64 {
+                let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+                let (pk, sk) = $m::try_keygen_with_rng(&mut rng).unwrap();
+                let expanded = $m::ExpandedPrivateKey::new(
+                    $m::PrivateKey::try_from_bytes(sk.clone().into_bytes()).unwrap(),
+                );
+                let message = [seed as u8; 77];
+                let pair = |f: &dyn Fn(&mut rand_chacha::ChaCha8Rng, bool) -> Vec<u8>| {
+                    let a = f(&mut rand_chacha::ChaCha8Rng::seed_from_u64(seed + 100), false);
+                    let b = f(&mut rand_chacha::ChaCha8Rng::seed_from_u64(seed + 100), true);
+                    assert_eq!(a, b);
+                    a
+                };
+                let sig = pair(&|r, e| {
+                    if e { expanded.try_sign_with_rng(r, &message, b"ctx").unwrap().to_vec() }
+                    else { sk.try_sign_with_rng(r, &message, b"ctx").unwrap().to_vec() }
+                });
+                assert!(pk.verify(&message, &sig.try_into().unwrap(), b"ctx"));
+                pair(&|r, e| {
+                    if e { expanded.try_hash_sign_with_rng(r, &message, &[], &Ph::SHA512).unwrap().to_vec() }
+                    else { sk.try_hash_sign_with_rng(r, &message, &[], &Ph::SHA512).unwrap().to_vec() }
+                });
+                let phm = [7u8; 32];
+                pair(&|r, e| {
+                    if e { expanded.try_hash_sign_with_rng_phm(r, &phm, &[], &Ph::SHA256).unwrap().to_vec() }
+                    else { sk.try_hash_sign_with_rng_phm(r, &phm, &[], &Ph::SHA256).unwrap().to_vec() }
+                });
+                assert!(expanded.get_public_key().into_bytes() == pk.clone().into_bytes());
+            }
+        }};
+    }
+    #[cfg(feature = "ml-dsa-44")]
+    check!(ml_dsa_44);
+    #[cfg(feature = "ml-dsa-65")]
+    check!(ml_dsa_65);
+    #[cfg(feature = "ml-dsa-87")]
+    check!(ml_dsa_87);
+}

@@ -59,6 +59,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   hash variants, sub-2048-bit keys). The KMIP server and both remoting
   services link this engine, so they inherit the fast path with no source
   change of their own. See `rust/src/crypto/awslc.rs`.
+- **Much faster ML-DSA on ARM boards: 3,150+ signatures/s on the KV260's
+  CPU alone** (Rust engine, native targets only, feature `awslc-pq`, on by
+  default). ML-DSA key generation, hedged pure and external-µ signing, pure
+  and external-µ verification, and ML-KEM decapsulation now run on AWS-LC's
+  mldsa-native / mlkem-native, whose hand-written AArch64 NEON code the
+  pure-Rust crates lack.
+  - Measured on the KV260 (4× Cortex-A53): ML-DSA-65 sign went from 404/s to
+    3,150-3,190/s (0.96 ms), and verify reached 8,400/s.
+  - Deterministic output and keys are byte-identical to the old path; hedged
+    signatures cross-verify both ways.
+  - Deterministic and explicit-rnd ML-DSA, HashML-DSA and the internal
+    interface stay on fips204 (AWS-LC's public API cannot do them).
+  - ML-KEM key generation and encapsulation stay on ml-kem by default. The
+    opt-in feature `awslc-pq-mlkem-seeded` routes them to AWS-LC too, but it
+    needs aws-lc-sys's per-target bindings, which Yocto's
+    `aarch64-amd-linux-gnu` does not have.
+  - A loaded ML-DSA-65 FPGA signer keeps precedence for ML-DSA-65 signing,
+    and the wasm32 builds are unchanged.
+  - `PQC_AWSLC_PQ_DISABLE=1` puts everything back on fips204 / ml-kem. The
+    coverage matrix is in `rust/src/crypto/awslc_pq.rs`.
+- **Hash-based signatures are many times faster on the CPU** (Rust engine,
+  all builds).
+  - Measured on the KV260 CPU: SLH-DSA-SHA2-128s sign went from 9.4 s to
+    191 ms (about 49x), and SLH-DSA-SHAKE-128s from 12.3 s to 2.1 s (about
+    5.8x).
+  - What changed:
+    - hash-signature crates compiled for speed (opt-level 3, also in WASM);
+    - the Armv8 SHA-256 instructions;
+    - the PK.seed block hashed once per operation;
+    - SLH-DSA subtrees built on all cores under one shared core budget
+      (`FIPS205_THREADS` caps it);
+    - no more full keygen on every SLH-DSA `C_Sign` (the key is checked once
+      when it enters the token, and each signature against PK.root).
+  - LMS/HSS and XMSS signing no longer rebuild the whole tree per signature.
+    Per-key in-memory node caches make XMSS_16 go from 19.6 s to 2.5 ms and
+    LMS H15 from 1.2 s to 0.6 ms (container measurements). The key format and
+    the "persist state before releasing the signature" order are unchanged.
+    `xmss` is now vendored as `rust/xmss-patched`.
+- **KV260 hash-signature FPGA engine support** (`--features hw-accel`).
+  - SLH-DSA-SHAKE-128s/192s/256s signing and key generation run on the
+    `hashsig` FPGA profile: 69 ms per SHAKE-128s signature on the KV260,
+    against 2.1 s on its CPU and 1.06 s on the i.MX 95.
+  - Every FPGA signature is checked on ARM against PK.root before release.
+  - Routing is set by `PQC_HASHSIG_ROUTE` (default `shake=fpga,sha2=cpu`).
+    Anything the engine does not claim runs on ARM.
+  - LMS/XMSS tree hooks (`MERKLE_SUBTREE`) are in place for a future
+    bitstream.
+- **ML-DSA FPGA signing nearly doubled.**
+  - With the `mldsa` profile the KV260 now signs ML-DSA-65 at 975/s with 8
+    bench threads (was 521/s) and about 1,260/s with 12.
+  - How: each key is decoded and its matrix expanded once instead of on
+    every signature; inputs are written straight into the DMA buffer; cache
+    syncs take one ioctl; and signer lanes sleep on the UIO interrupt instead
+    of spinning a core.
 - **Parsed-RSA-key cache on the AWS-LC fast path** (`rust/src/crypto/awslc_keycache.rs`).
   Every RSA private-key operation used to call `from_pkcs8` on the caller's
   DER, which inside AWS-LC re-runs `RSA_check_key`, rebuilds three Montgomery
@@ -117,6 +171,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `der`, `spin` move off yanked releases.
 
 ### Fixed
+
+- **HashML-DSA and HashSLH-DSA signatures from KMIP / remoting now verify**
+  (Rust engine). `native::sign_pqc`, the signing path behind KMIP and the
+  gRPC/REST remoting services, signed every pre-hash mechanism
+  (`CKM_HASH_ML_DSA_*`, `CKM_HASH_SLH_DSA_*`) as *pure* ML-DSA / SLH-DSA,
+  while `verify_pqc` checked them as pre-hash signatures, so they never
+  verified. It now hash-signs them, in the hedged, deterministic and
+  explicit-`<Random>` modes. The deterministic form is byte-identical to the
+  `C_Sign` path. `C_Sign` itself was not affected.
 
 - The OpenMLS interop workflow checks out submodules again, so its pqctoday
   image builds since Classic McEliece made `liboqs` a hard CMake dependency

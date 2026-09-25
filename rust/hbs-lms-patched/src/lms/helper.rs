@@ -19,6 +19,27 @@ pub fn get_tree_element<H: HashChain>(
         }
     }
 
+    // pqctoday-hsm: per-tree node memo (src/tree_cache.rs) — same value, not recomputed.
+    #[cfg(feature = "tree-cache")]
+    if let Some(result) = crate::tree_cache::lookup::<H>(private_key, index) {
+        return result;
+    }
+
+    // pqctoday-hsm `hw-accel`: the hashsig engine computes the node (the root of
+    // its subtree) when it claims this parameter set, or, with the node memo on,
+    // fills the memo's lowest cached level below this node and lets the recursion
+    // below combine it from there (hw_accel.rs). An engine-computed node is
+    // recorded in the memo like any other. Skipped with auxiliary data so its
+    // contents stay those of the software path.
+    #[cfg(feature = "hw-accel")]
+    if aux_data.is_none() {
+        if let Some(node) = crate::hw_accel::node(index, private_key) {
+            #[cfg(feature = "tree-cache")]
+            crate::tree_cache::store::<H>(private_key, index, node.as_slice());
+            return node;
+        }
+    }
+
     let max_private_keys = private_key.lms_parameter.number_of_lm_ots_keys();
 
     let hasher = H::default()
@@ -52,6 +73,9 @@ pub fn get_tree_element<H: HashChain>(
     if let Some(expanded_aux_data) = aux_data.as_mut() {
         hss_save_aux_data::<H>(expanded_aux_data, index, result.as_slice());
     }
+
+    #[cfg(feature = "tree-cache")]
+    crate::tree_cache::store::<H>(private_key, index, result.as_slice());
 
     result
 }
