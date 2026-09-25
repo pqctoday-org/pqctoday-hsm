@@ -848,14 +848,25 @@ if [[ $RUN_JAVAJCE_REMOTE == 1 ]]; then
             "$SANDBOX_CONTAINER:$GATE_DEST_REMOTE/remoting/proto/proto/pkcs11_remote.proto" >/dev/null 2>&1 \
        && dexec_sandbox "cd $GATE_DEST_REMOTE/JavaJCE && \
             export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
-            mvn -o install -DskipTests -q" \
+            mvn -o install -DskipTests 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' > /tmp/javajce-remote-install.log" \
        && dexec_sandbox "cd $GATE_DEST_REMOTE/JavaJCE-remote && \
             export JAVA_HOME=/usr/lib/jvm/jdk-27-rc && export PATH=\$JAVA_HOME/bin:\$PATH && \
             mvn -o test 2>&1 | sed -E 's/\x1b\[[0-9;]*m//g' > /tmp/javajce-remote-gate.log; \
             grep -E '$AGG_PATTERN' /tmp/javajce-remote-gate.log >/dev/null"; then
       ok "JavaJCE-remote provider suite ($(dexec_sandbox "grep -E '$AGG_PATTERN' /tmp/javajce-remote-gate.log | tail -1"))"
     else
-      bad "JavaJCE-remote provider suite — see /tmp/javajce-remote-gate.log inside $SANDBOX_CONTAINER for the real failure"
+      # Name BOTH logs, and say which is which. This step runs two Maven
+      # invocations and only the second one wrote a log, so a failure in the
+      # first (the JavaJCE `install`) used to print "see
+      # /tmp/javajce-remote-gate.log" for a file that did not exist —
+      # 2026-09-25, when an uncached maven-jar-plugin broke `install` and the
+      # message sent the reader to a nonexistent file. `install` now logs too,
+      # and dropped `-q` so that log has something in it.
+      #
+      # Note `install` reaches the `jar` phase while --javajce's `test` does
+      # not, so this step can fail on a missing plugin that --javajce never
+      # needs — which is why "but --javajce passed" is not evidence here.
+      bad "JavaJCE-remote provider suite — inside $SANDBOX_CONTAINER see /tmp/javajce-remote-install.log (JavaJCE 'mvn -o install', runs first) then /tmp/javajce-remote-gate.log (JavaJCE-remote 'mvn -o test')"
     fi
   fi
 fi
