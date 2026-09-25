@@ -1824,8 +1824,17 @@ fn e4_edwards_and_montgomery_public_keys_are_bare_little_endian() {
     );
     assert_eq!(rv, CKR_OK);
     let pt = obj_attr(hp, CKA_EC_POINT).expect("Edwards public key must carry CKA_EC_POINT");
-    assert_eq!(pt.len(), 32, "bare 32 bytes — no DER wrapper");
-    assert_ne!(pt[0], 0x04, "…and therefore no OCTET STRING tag");
+    // The length IS the proof: a DER-wrapped point would be 34 bytes
+    // (04 20 || 32), so at exactly 32 there is no room for a tag at all.
+    //
+    // There used to be an `assert_ne!(pt[0], 0x04)` here as a second check. It
+    // was redundant given the line above, and wrong: a bare Ed25519 public key
+    // is 32 effectively-random bytes, so its FIRST byte is 0x04 about 1 time in
+    // 256 — a legitimate key failing a conformance test roughly 0.4% of runs.
+    // Observed failing for real on 2026-09-25 ("left: 4, right: 4"). This is
+    // the same sniff-a-tag-on-raw-bytes mistake as the ~1/256 ECDH1 peer-point
+    // rejection fixed in the engine by #217; do not reintroduce it.
+    assert_eq!(pt.len(), 32, "bare 32 bytes — no DER wrapper, so no tag is possible");
     assert!(
         obj_attr(hp, CKA_EC_PARAMS).is_some(),
         "the parameters attribute must be present"
