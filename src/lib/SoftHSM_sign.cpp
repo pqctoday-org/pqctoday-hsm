@@ -3808,7 +3808,15 @@ CK_RV SoftHSM::C_SignMessage(CK_SESSION_HANDLE hSession,
 	// multi-message contract (caller may send further messages under this session).
 	session->setOpType(SESSION_OP_SIGN);
 	CK_RV rv = AsymSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
-	if (rv == CKR_OK)
+	// PKCS#11 v3.2 §5.14.2: a C_SignMessage call "begins and terminates a
+	// message signing operation unless it returns CKR_BUFFER_TOO_SMALL", and
+	// "C_SignMessage does not finish the message-based signing process" — only
+	// C_MessageSignFinal (§5.14.5) does. AsymSign leaves its context intact on
+	// CKR_BUFFER_TOO_SMALL, so restoring the message-sign state there is all a
+	// caller's retry needs. Before this, the state was left at SESSION_OP_SIGN
+	// and the retry got CKR_OPERATION_NOT_INITIALIZED (G-8 finding E8,
+	// 2026-09-25) — the same handling C_SignMessageNext already had.
+	if (rv == CKR_OK || rv == CKR_BUFFER_TOO_SMALL)
 	{
 		session->setOpType(SESSION_OP_MESSAGE_SIGN);
 		if (snap) session->setParameters(snap, snapLen);

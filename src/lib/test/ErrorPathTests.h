@@ -44,11 +44,13 @@ class ErrorPathTests : public TestsBase
 	CPPUNIT_TEST_SUITE(ErrorPathTests);
 	CPPUNIT_TEST(testKeyTypeInconsistentAtInit);
 	CPPUNIT_TEST(testUnwrapKeyTypeCode);
+	CPPUNIT_TEST(testSignMessageBufferTooSmall);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
 	void testKeyTypeInconsistentAtInit();
 	void testUnwrapKeyTypeCode();
+	void testSignMessageBufferTooSmall();
 
 protected:
 	CK_RV openUserSession(CK_SESSION_HANDLE& hSession);

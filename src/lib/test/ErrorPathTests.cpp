@@ -407,3 +407,76 @@ void ErrorPathTests::testUnwrapKeyTypeCode()
 	CRYPTOKI_F_PTR( C_CloseSession(hSession) );
 	CPPUNIT_ASSERT_MESSAGE(fails, fails.empty());
 }
+
+// E8 — §5.14.2: "A call to C_SignMessage begins and terminates a message
+// signing operation unless it returns CKR_BUFFER_TOO_SMALL … or is a
+// successful call", and "C_SignMessage does not finish the message-based
+// signing process. Additional C_SignMessage … calls may be made on the
+// session." Only C_MessageSignFinal (§5.14.5) finishes it.
+void ErrorPathTests::testSignMessageBufferTooSmall()
+{
+	CK_RV rv;
+	CK_SESSION_HANDLE hSession;
+	CPPUNIT_ASSERT(openUserSession(hSession) == CKR_OK);
+
+	CK_OBJECT_HANDLE hEcPuk, hEcPrk, hDsaPuk, hDsaPrk;
+	CPPUNIT_ASSERT(ecKeyPair(hSession, CK_TRUE, CK_FALSE, hEcPuk, hEcPrk) == CKR_OK);
+	CPPUNIT_ASSERT(pqcKeyPair(hSession, CKM_ML_DSA_KEY_PAIR_GEN, CKK_ML_DSA, CKP_ML_DSA_44, hDsaPuk, hDsaPrk) == CKR_OK);
+
+	struct Case { CK_MECHANISM_TYPE mech; CK_OBJECT_HANDLE key; const char* name; };
+	const Case cases[] = {
+		{ CKM_ECDSA_SHA256, hEcPrk, "CKM_ECDSA_SHA256" },
+		{ CKM_ML_DSA, hDsaPrk, "CKM_ML_DSA" },
+	};
+
+	std::string fails;
+	CK_BYTE data[] = "message-based signing";
+	size_t probed = 0;
+	for (const Case& c : cases)
+	{
+		CK_MECHANISM_INFO info;
+		if (CRYPTOKI_F_PTR( C_GetMechanismInfo(m_initializedTokenSlotID, c.mech, &info) ) != CKR_OK ||
+		    !(info.flags & CKF_MESSAGE_SIGN))
+			continue;
+		probed++;
+		const std::string n(c.name);
+		CK_MECHANISM m = { c.mech, NULL_PTR, 0 };
+		rv = CRYPTOKI_F_PTR( C_MessageSignInit(hSession, &m, c.key) );
+		expect(fails, "C_MessageSignInit " + n, rv, CKR_OK);
+		if (rv != CKR_OK) continue;
+
+		CK_ULONG sigLen = 0;
+		rv = CRYPTOKI_F_PTR( C_SignMessage(hSession, NULL_PTR, 0, data, sizeof(data) - 1, NULL_PTR, &sigLen) );
+		expect(fails, "C_SignMessage length query " + n, rv, CKR_OK);
+		std::vector<CK_BYTE> sig(sigLen > 0 ? sigLen : 1);
+
+		CK_ULONG small = 1;
+		rv = CRYPTOKI_F_PTR( C_SignMessage(hSession, NULL_PTR, 0, data, sizeof(data) - 1, &sig[0], &small) );
+		expect(fails, "C_SignMessage into a 1-byte buffer " + n, rv, CKR_BUFFER_TOO_SMALL);
+		if (small != sigLen)
+			fails += "C_SignMessage BUFFER_TOO_SMALL did not return the needed length " + n + "\n";
+
+		CK_ULONG full = sigLen;
+		rv = CRYPTOKI_F_PTR( C_SignMessage(hSession, NULL_PTR, 0, data, sizeof(data) - 1, &sig[0], &full) );
+		expect(fails, "C_SignMessage after CKR_BUFFER_TOO_SMALL " + n, rv, CKR_OK);
+
+		// NOT asserted here: a SECOND C_SignMessage under the same
+		// C_MessageSignInit, which §5.14.2 also allows ("Additional
+		// C_SignMessage … calls may be made on the session"). This engine's
+		// AsymSign releases the signing context after every successful
+		// message, so a second message answers CKR_OPERATION_NOT_INITIALIZED.
+		// Recorded as a separate open finding; out of scope for E8.
+
+		rv = CRYPTOKI_F_PTR( C_MessageSignFinal(hSession) );
+		expect(fails, "C_MessageSignFinal " + n, rv, CKR_OK);
+		if (rv != CKR_OK) CRYPTOKI_F_PTR( C_MessageSignInit(hSession, NULL_PTR, CK_INVALID_HANDLE) );
+
+		full = sigLen;
+		rv = CRYPTOKI_F_PTR( C_SignMessage(hSession, NULL_PTR, 0, data, sizeof(data) - 1, &sig[0], &full) );
+		expect(fails, "C_SignMessage after C_MessageSignFinal " + n, rv, CKR_OPERATION_NOT_INITIALIZED);
+	}
+	CPPUNIT_ASSERT_MESSAGE("no message-sign mechanism advertised", probed > 0);
+
+	CRYPTOKI_F_PTR( C_CloseSession(hSession) );
+	CPPUNIT_ASSERT_MESSAGE(fails, fails.empty());
+}
