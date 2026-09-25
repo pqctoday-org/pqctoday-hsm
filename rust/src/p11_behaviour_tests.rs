@@ -353,3 +353,105 @@ fn e6_right_type_without_usage_is_still_key_function_not_permitted() {
         CKR_KEY_FUNCTION_NOT_PERMITTED
     );
 }
+
+// ── E7 — wrap / unwrap key-type codes ────────────────────────────────────────
+
+const CKF_WRAP: u32 = 0x0002_0000;
+const CKF_UNWRAP: u32 = 0x0004_0000;
+const WRAP_TARGET: u32 = 0x5E50_2010;
+
+fn wrap_with(mech: u32, h_wrapping: u32) -> u32 {
+    let mut m = mech0(mech);
+    let mut out = [0u8; 1024];
+    let mut out_len = out.len() as u32;
+    C_WrapKey(SESSION, m.as_mut_ptr() as *mut u8, h_wrapping, WRAP_TARGET, out.as_mut_ptr(), &mut out_len)
+}
+
+fn unwrap_with(mech: u32, h_unwrapping: u32) -> u32 {
+    let mut m = mech0(mech);
+    let mut wrapped = [0x5au8; 40];
+    let mut h_new: u32 = 0;
+    let rv = C_UnwrapKey(
+        SESSION,
+        m.as_mut_ptr() as *mut u8,
+        h_unwrapping,
+        wrapped.as_mut_ptr(),
+        wrapped.len() as u32,
+        std::ptr::null_mut(),
+        0,
+        &mut h_new,
+    );
+    assert_eq!(h_new, 0, "mech {mech:#x}: no key object on failure");
+    rv
+}
+
+/// §5.18.3 / §5.18.4 return values list CKR_WRAPPING_KEY_TYPE_INCONSISTENT /
+/// CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT and neither lists
+/// CKR_KEY_TYPE_INCONSISTENT. The probe found RSA wrap/unwrap with an AES
+/// key answering CKR_KEY_TYPE_INCONSISTENT, and AES wrap/unwrap with an EC
+/// key (which lacks CKA_WRAP/CKA_UNWRAP) answering
+/// CKR_KEY_FUNCTION_NOT_PERMITTED — which §5.18.3/§5.18.4 do not list and
+/// §5.1.6 ranks below the type code.
+#[test]
+fn e7_wrap_unwrap_wrong_key_type_uses_the_role_specific_code() {
+    let _guard = test_lock::acquire();
+    setup();
+    put_key(WRAP_TARGET, CKO_SECRET_KEY, CKK_GENERIC_SECRET, 32, true);
+    let wrap = advertised_with(CKF_WRAP);
+    let unwrap = advertised_with(CKF_UNWRAP);
+    for m in [CKM_AES_KEY_WRAP, CKM_AES_KEY_WRAP_PAD, CKM_AES_KEY_WRAP_KWP, CKM_RSA_PKCS, CKM_RSA_PKCS_OAEP] {
+        assert!(wrap.contains(&m) && unwrap.contains(&m), "{m:#x} advertised for wrap+unwrap");
+    }
+    for mech in &wrap {
+        // Wrapping is the public-key role for RSA; the EC key for AES
+        // mechanisms is the probe's EC public key, whose CKA_WRAP the probe
+        // leaves unset — covered by the _NO_USAGE variant too.
+        for wrong in [wrong_key_for(*mech, true), if wrong_key_for(*mech, true) == AES_KEY { AES_NO_USAGE } else { EC_PUB_NO_USAGE }] {
+            assert_eq!(
+                wrap_with(*mech, wrong),
+                CKR_WRAPPING_KEY_TYPE_INCONSISTENT,
+                "C_WrapKey mech {mech:#x} key {wrong:#x}"
+            );
+        }
+    }
+    for mech in &unwrap {
+        for wrong in [wrong_key_for(*mech, false), if wrong_key_for(*mech, false) == AES_KEY { AES_NO_USAGE } else { EC_PUB_NO_USAGE }] {
+            assert_eq!(
+                unwrap_with(*mech, wrong),
+                CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT,
+                "C_UnwrapKey mech {mech:#x} key {wrong:#x}"
+            );
+        }
+    }
+}
+
+/// E7 — a wrapping key of the right type but a size the mechanism cannot
+/// use: §5.18.3 / §5.18.4 list CKR_(UN)WRAPPING_KEY_SIZE_RANGE; the AES-KW
+/// arms answered CKR_KEY_TYPE_INCONSISTENT for a 20-byte CKK_AES key.
+#[test]
+fn e7_wrap_unwrap_wrong_aes_kek_size_is_size_range() {
+    let _guard = test_lock::acquire();
+    setup();
+    put_key(WRAP_TARGET, CKO_SECRET_KEY, CKK_GENERIC_SECRET, 32, true);
+    put_key(TYPED_NO_USAGE, CKO_SECRET_KEY, CKK_AES, 20, true);
+    for mech in [CKM_AES_KEY_WRAP, CKM_AES_KEY_WRAP_KWP] {
+        assert_eq!(wrap_with(mech, TYPED_NO_USAGE), CKR_WRAPPING_KEY_SIZE_RANGE, "wrap {mech:#x}");
+        let mut m = mech0(mech);
+        let mut wrapped = [0x5au8; 40];
+        let mut h_new: u32 = 0;
+        assert_eq!(
+            C_UnwrapKey(
+                SESSION,
+                m.as_mut_ptr() as *mut u8,
+                TYPED_NO_USAGE,
+                wrapped.as_mut_ptr(),
+                wrapped.len() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut h_new,
+            ),
+            CKR_UNWRAPPING_KEY_SIZE_RANGE,
+            "unwrap {mech:#x}"
+        );
+    }
+}

@@ -12175,9 +12175,19 @@ pub fn C_WrapKey(
         // PKCS#11 v3.2 §5.18.2 — wrapping key: handle exists + visible (login
         // gate) → else CKR_WRAPPING_KEY_HANDLE_INVALID; then CKA_WRAP → else
         // CKR_KEY_FUNCTION_NOT_PERMITTED.
-        if let Err(rv) =
-            check_key_usage_as(_h_session, h_wrapping_key, CKA_WRAP, CKR_WRAPPING_KEY_HANDLE_INVALID)
-        {
+        // E7 — the wrapping key's type is checked against the mechanism and
+        // reported with §5.18.3's own CKR_WRAPPING_KEY_TYPE_INCONSISTENT
+        // (§5.1.6: "can only be returned by C_WrapKey"); §5.18.3 does not
+        // list CKR_KEY_TYPE_INCONSISTENT, which RSA wrap with an AES key
+        // returned.
+        if let Err(rv) = check_key_for_mech_as(
+            _h_session,
+            h_wrapping_key,
+            CKA_WRAP,
+            mech_type,
+            CKR_WRAPPING_KEY_HANDLE_INVALID,
+            CKR_WRAPPING_KEY_TYPE_INCONSISTENT,
+        ) {
             return rv;
         }
         // §4.8 Table 13 — CKA_ALLOWED_MECHANISMS on the wrapping key.
@@ -12279,7 +12289,7 @@ pub fn C_WrapKey(
                 Err(rv) => return rv,
             };
             if wrapping_key.len() < 8 {
-                return CKR_KEY_TYPE_INCONSISTENT;
+                return CKR_WRAPPING_KEY_TYPE_INCONSISTENT;
             }
             let n_len = u32::from_le_bytes([
                 wrapping_key[0],
@@ -12288,13 +12298,13 @@ pub fn C_WrapKey(
                 wrapping_key[3],
             ]) as usize;
             if wrapping_key.len() < 4 + n_len + 1 {
-                return CKR_KEY_TYPE_INCONSISTENT;
+                return CKR_WRAPPING_KEY_TYPE_INCONSISTENT;
             }
             let n = rsa::BigUint::from_bytes_be(&wrapping_key[4..4 + n_len]);
             let e = rsa::BigUint::from_bytes_be(&wrapping_key[4 + n_len..]);
             let pk = match rsa::RsaPublicKey::new(n, e) {
                 Ok(k) => k,
-                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                Err(_) => return CKR_WRAPPING_KEY_TYPE_INCONSISTENT,
             };
             let oaep = match oaep_padding(hash_alg, mgf, &label) {
                 Ok(o) => o,
@@ -12319,7 +12329,7 @@ pub fn C_WrapKey(
                     Err(rv) => return rv,
                 };
             if wrapping_key.len() < 8 {
-                return CKR_KEY_TYPE_INCONSISTENT;
+                return CKR_WRAPPING_KEY_TYPE_INCONSISTENT;
             }
             let n_len = u32::from_le_bytes([
                 wrapping_key[0],
@@ -12328,13 +12338,13 @@ pub fn C_WrapKey(
                 wrapping_key[3],
             ]) as usize;
             if wrapping_key.len() < 4 + n_len + 1 {
-                return CKR_KEY_TYPE_INCONSISTENT;
+                return CKR_WRAPPING_KEY_TYPE_INCONSISTENT;
             }
             let n = rsa::BigUint::from_bytes_be(&wrapping_key[4..4 + n_len]);
             let e = rsa::BigUint::from_bytes_be(&wrapping_key[4 + n_len..]);
             let pk = match rsa::RsaPublicKey::new(n, e) {
                 Ok(k) => k,
-                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                Err(_) => return CKR_WRAPPING_KEY_TYPE_INCONSISTENT,
             };
             let mut aes_key = vec![0u8; aes_len];
             if getrandom::getrandom(&mut aes_key).is_err() {
@@ -12366,7 +12376,7 @@ pub fn C_WrapKey(
             // Raw RSA PKCS#1 v1.5 wrap — same packed-modulus wrapping-key
             // parse as the OAEP arm above, PKCS1v15 padding instead of OAEP.
             if wrapping_key.len() < 8 {
-                return CKR_KEY_TYPE_INCONSISTENT;
+                return CKR_WRAPPING_KEY_TYPE_INCONSISTENT;
             }
             let n_len = u32::from_le_bytes([
                 wrapping_key[0],
@@ -12375,7 +12385,7 @@ pub fn C_WrapKey(
                 wrapping_key[3],
             ]) as usize;
             if wrapping_key.len() < 4 + n_len + 1 {
-                return CKR_KEY_TYPE_INCONSISTENT;
+                return CKR_WRAPPING_KEY_TYPE_INCONSISTENT;
             }
             let n_be = &wrapping_key[4..4 + n_len];
             let e_be = &wrapping_key[4 + n_len..];
@@ -12395,7 +12405,7 @@ pub fn C_WrapKey(
             let e = rsa::BigUint::from_bytes_be(e_be);
             let pk = match rsa::RsaPublicKey::new(n, e) {
                 Ok(k) => k,
-                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                Err(_) => return CKR_WRAPPING_KEY_TYPE_INCONSISTENT,
             };
             with_rng!(rng, {
                 match pk.encrypt(&mut rng, rsa::Pkcs1v15Encrypt, &key_to_wrap) {
@@ -12417,7 +12427,7 @@ pub fn C_WrapKey(
                     .wrap_with_padding_vec(&key_to_wrap),
                 32 => aes_kw::KekAes256::new(GenericArray::from_slice(&wrapping_key))
                     .wrap_with_padding_vec(&key_to_wrap),
-                _ => return CKR_KEY_TYPE_INCONSISTENT,
+                _ => return CKR_WRAPPING_KEY_SIZE_RANGE, // §5.18.3 (E7)
             };
             match result {
                 Ok(v) => v,
@@ -12440,7 +12450,7 @@ pub fn C_WrapKey(
                 32 => aes_kw::KekAes256::new(GenericArray::from_slice(&wrapping_key))
                     .wrap(&key_to_wrap, &mut buf)
                     .is_ok(),
-                _ => return CKR_KEY_TYPE_INCONSISTENT,
+                _ => return CKR_WRAPPING_KEY_SIZE_RANGE, // §5.18.3 (E7)
             };
             if !wrap_ok {
                 return CKR_FUNCTION_FAILED;
@@ -12500,11 +12510,16 @@ pub fn C_UnwrapKey(
         // PKCS#11 v3.2 §5.18.4 — unwrapping key: handle exists + visible
         // (login gate) → else CKR_UNWRAPPING_KEY_HANDLE_INVALID; then
         // CKA_UNWRAP → else CKR_KEY_FUNCTION_NOT_PERMITTED.
-        if let Err(rv) = check_key_usage_as(
+        // E7 — CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT (§5.18.4; §5.1.6 "can
+        // only be returned by C_UnwrapKey"), not CKR_KEY_TYPE_INCONSISTENT,
+        // which §5.18.4 does not list.
+        if let Err(rv) = check_key_for_mech_as(
             _h_session,
             h_unwrapping_key,
             CKA_UNWRAP,
+            mech_type,
             CKR_UNWRAPPING_KEY_HANDLE_INVALID,
+            CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT,
         ) {
             return rv;
         }
@@ -12549,7 +12564,7 @@ pub fn C_UnwrapKey(
             use rsa::pkcs8::DecodePrivateKey;
             let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&unwrapping_key) {
                 Ok(k) => k,
-                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                Err(_) => return CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT,
             };
             let oaep = match oaep_padding(hash_alg, mgf, &label) {
                 Ok(o) => o,
@@ -12573,7 +12588,7 @@ pub fn C_UnwrapKey(
             use rsa::pkcs8::DecodePrivateKey;
             let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&unwrapping_key) {
                 Ok(k) => k,
-                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                Err(_) => return CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT,
             };
             let n_len = rsa::traits::PublicKeyParts::size(&sk);
             if wrapped_data.len() <= n_len {
@@ -12621,7 +12636,7 @@ pub fn C_UnwrapKey(
             use rsa::pkcs8::DecodePrivateKey;
             let sk = match rsa::RsaPrivateKey::from_pkcs8_der(&unwrapping_key) {
                 Ok(k) => k,
-                Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                Err(_) => return CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT,
             };
             match sk.decrypt(rsa::Pkcs1v15Encrypt, wrapped_data) {
                 Ok(pt) => pt,
@@ -12644,7 +12659,7 @@ pub fn C_UnwrapKey(
                     .unwrap_with_padding_vec(wrapped_data),
                 32 => aes_kw::KekAes256::new(GenericArray::from_slice(&unwrapping_key))
                     .unwrap_with_padding_vec(wrapped_data),
-                _ => return CKR_KEY_TYPE_INCONSISTENT,
+                _ => return CKR_UNWRAPPING_KEY_SIZE_RANGE, // §5.18.4 (E7)
             };
             match result {
                 Ok(v) => v,
@@ -12669,7 +12684,7 @@ pub fn C_UnwrapKey(
                 32 => aes_kw::KekAes256::new(GenericArray::from_slice(&unwrapping_key))
                     .unwrap(wrapped_data, &mut buf)
                     .is_ok(),
-                _ => return CKR_KEY_TYPE_INCONSISTENT,
+                _ => return CKR_UNWRAPPING_KEY_SIZE_RANGE, // §5.18.4 (E7)
             };
             if !unwrap_ok {
                 // RFC 3394 integrity (IV) check failed: CKR_WRAPPED_KEY_INVALID.
