@@ -1741,7 +1741,8 @@
       "cpp_min": 1,
       "cpp_max": 512,
       "rust_min": 1,
-      "rust_max": 512
+      "rust_max": 512,
+      "note": "Engine policy, not a PKCS#11 rule (decision D7, 2026-09-25): the Rust engine refuses iterations < 1000 (SP 800-132 §5.2's recommended minimum) with CKR_MECHANISM_PARAM_INVALID (rust/src/constants.rs PBKDF2_MIN_ITERATIONS); D7 has the C++ engine adopt the same floor. PKCS#11 v3.2 sets no minimum and CK_MECHANISM_INFO cannot express one, so this row is where it is advertised. PRFs: CKP_PKCS5_PBKD2_HMAC_SHA1/SHA224/SHA256/SHA384/SHA512 (Rust SHA1 and SHA224 added 2026-09-25, E15, matching C++); any other PRF is CKR_MECHANISM_PARAM_INVALID."
     },
     "CKM_POLY1305": {
       "value": "0x00001228",

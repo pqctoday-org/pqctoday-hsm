@@ -94,8 +94,9 @@ fn ptr(v: &[u8]) -> usize {
     if v.is_empty() { 0 } else { v.as_ptr() as usize }
 }
 
+/// A CK_ULONG attribute value at this target's native width.
 fn ul(v: u32) -> Vec<u8> {
-    v.to_le_bytes().to_vec()
+    (v as usize).to_ne_bytes().to_vec()
 }
 
 fn create(session: u32, attrs: &[(u32, Vec<u8>)]) -> Result<u32, u32> {
@@ -536,4 +537,85 @@ fn e14_rsa_exponent_at_or_above_2_256_refused() {
         )
         .is_err()
     );
+}
+
+// ═══ E15 — PBKDF2 (SP 800-132) PRFs; the < 1000-iteration floor stays ═════
+
+const PRF_HMAC_SHA1: usize = 0x01; // CKP_PKCS5_PBKD2_HMAC_SHA1 (pkcs11t.h)
+const PRF_HMAC_SHA224: usize = 0x03; // CKP_PKCS5_PBKD2_HMAC_SHA224 (pkcs11t.h)
+
+fn pbkdf2_derive(session: u32, prf: usize, iterations: usize, password: &[u8], salt: &[u8], len: usize) -> Result<Vec<u8>, u32> {
+    let p = pack(
+        &ck_param::pbkd2::LAYOUT,
+        &[
+            (ck_param::pbkd2::SALT_SOURCE, CKZ_DATA_SPECIFIED as usize),
+            (ck_param::pbkd2::P_SALT_SOURCE_DATA, ptr(salt)),
+            (ck_param::pbkd2::UL_SALT_SOURCE_DATA_LEN, salt.len()),
+            (ck_param::pbkd2::ITERATIONS, iterations),
+            (ck_param::pbkd2::PRF, prf),
+            (ck_param::pbkd2::P_PASSWORD, ptr(password)),
+            (ck_param::pbkd2::UL_PASSWORD_LEN, password.len()),
+        ],
+    );
+    let m = mechanism(CKM_PKCS5_PBKD2, &p);
+    let attrs = [
+        (CKA_CLASS, ul(CKO_SECRET_KEY)),
+        (CKA_KEY_TYPE, ul(CKK_GENERIC_SECRET)),
+        (CKA_VALUE_LEN, ul(len as u32)),
+    ];
+    let t = template(&attrs);
+    let mut h = 0u32;
+    match C_DeriveKey(session, m.as_ptr() as *mut u8, 0, t.as_ptr() as *mut u8, attrs.len() as u32, &mut h) {
+        CKR_OK => Ok(obj_value(h)),
+        rv => Err(rv),
+    }
+}
+
+/// PBKDF 1.0 (HMAC-SHA2-224, the only PRF the pinned sample registers):
+/// the four cases with >= 1000 iterations derive the NIST key byte-exact;
+/// tc20 (iterationCount = 1) is refused by the engine's documented policy
+/// floor (decision D7, 2026-09-25) with CKR_MECHANISM_PARAM_INVALID — the
+/// code PKCS#11 v3.2 §5.1.6 gives a mechanism parameter the token will not
+/// accept — never with a derived key.
+#[test]
+fn e15_pbkdf2_nist_sha224_prf_and_iteration_floor() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let doc = fixture("pbkdf2_acvp_test.json");
+    let g = &doc["testGroups"][0];
+    assert_eq!(s(g, "hmacAlg"), "SHA2-224");
+    let (mut derived, mut floor) = (0, 0);
+    for t in g["tests"].as_array().unwrap() {
+        let tc = &t["tcId"];
+        let iterations = t["iterationCount"].as_u64().unwrap() as usize;
+        let want = hx(s(t, "derivedKey"));
+        assert_eq!(want.len() * 8, t["keyLen"].as_u64().unwrap() as usize);
+        let got = pbkdf2_derive(session, PRF_HMAC_SHA224, iterations, s(t, "password").as_bytes(), &hx(s(t, "salt")), want.len());
+        if iterations >= 1000 {
+            assert_eq!(got, Ok(want), "tc {tc}");
+            derived += 1;
+        } else {
+            assert_eq!(got, Err(CKR_MECHANISM_PARAM_INVALID), "tc {tc}: {iterations} iterations is below the policy floor");
+            floor += 1;
+        }
+    }
+    assert_eq!((derived, floor), (4, 1));
+}
+
+/// Every PRF the C++ engine implements is implemented here too, byte-equal
+/// to the RustCrypto pbkdf2 reference with the same PRF (product-authored
+/// inputs; RFC 6070 test 3 for HMAC-SHA1: P="password", S="salt", c=4096,
+/// dkLen=20 -> 4b007901b765489abead49d926f721d065a429c1).
+#[test]
+fn e15_pbkdf2_prf_parity_with_cpp() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    assert_eq!(
+        pbkdf2_derive(session, PRF_HMAC_SHA1, 4096, b"password", b"salt", 20),
+        Ok(hx("4b007901b765489abead49d926f721d065a429c1")),
+        "RFC 6070 §2 test 3"
+    );
+    // An unimplemented PRF (CKP_PKCS5_PBKD2_HMAC_GOSTR3411) is a parameter
+    // the token does not accept.
+    assert_eq!(pbkdf2_derive(session, 0x02, 4096, b"password", b"salt", 20), Err(CKR_MECHANISM_PARAM_INVALID));
 }

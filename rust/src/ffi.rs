@@ -11141,8 +11141,14 @@ pub fn C_DeriveKey(
                     Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
                 };
                 let iterations = r.ulong32(ck_param::pbkd2::ITERATIONS);
-                if iterations < 1000 {
-                    return CKR_ARGUMENTS_BAD;
+                // Engine policy floor (decision D7, 2026-09-25; documented in
+                // docs/pkcs11-mechanism-ledger.json): fewer than 1000
+                // iterations is refused, per SP 800-132 §5.2's minimum
+                // recommendation. PKCS#11 v3.2 sets no minimum, so the
+                // refusal names the parameter the token will not accept —
+                // CKR_MECHANISM_PARAM_INVALID (§5.1.6), not ARGUMENTS_BAD.
+                if iterations < PBKDF2_MIN_ITERATIONS {
+                    return CKR_MECHANISM_PARAM_INVALID;
                 }
                 let prf = r.ulong32(ck_param::pbkd2::PRF);
                 let salt = r.buffer(
@@ -11154,7 +11160,17 @@ pub fn C_DeriveKey(
                     ck_param::pbkd2::UL_PASSWORD_LEN,
                 );
                 let mut out = vec![0u8; key_len];
+                // E15 — every PRF the C++ engine implements (SHA-1 retained
+                // under decision D2 for existing artefacts; SHA-224 is the PRF
+                // NIST's PBKDF 1.0 sample registers). Any other CKP_ value is
+                // a parameter this token does not accept.
                 match prf {
+                    CKP_PBKDF2_HMAC_SHA1 => {
+                        pbkdf2::pbkdf2_hmac::<sha1::Sha1>(pass, salt, iterations, &mut out)
+                    }
+                    CKP_PBKDF2_HMAC_SHA224 => {
+                        pbkdf2::pbkdf2_hmac::<sha2::Sha224>(pass, salt, iterations, &mut out)
+                    }
                     CKP_PBKDF2_HMAC_SHA256 => {
                         pbkdf2::pbkdf2_hmac::<sha2::Sha256>(pass, salt, iterations, &mut out)
                     }
@@ -11164,7 +11180,7 @@ pub fn C_DeriveKey(
                     CKP_PBKDF2_HMAC_SHA512 => {
                         pbkdf2::pbkdf2_hmac::<sha2::Sha512>(pass, salt, iterations, &mut out)
                     }
-                    _ => return CKR_ARGUMENTS_BAD,
+                    _ => return CKR_MECHANISM_PARAM_INVALID,
                 }
                 out
             }
