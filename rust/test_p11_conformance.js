@@ -30,7 +30,8 @@ const CKR = {
   ATTRIBUTE_TYPE_INVALID: 0x12, ATTRIBUTE_VALUE_INVALID: 0x13,
   DATA_LEN_RANGE: 0x21, ENCRYPTED_DATA_INVALID: 0x40,
   FUNCTION_NOT_PARALLEL: 0x51, FUNCTION_NOT_SUPPORTED: 0x54,
-  KEY_HANDLE_INVALID: 0x60, KEY_FUNCTION_NOT_PERMITTED: 0x68, KEY_UNEXTRACTABLE: 0x6a,
+  KEY_HANDLE_INVALID: 0x60, KEY_TYPE_INCONSISTENT: 0x63, KEY_FUNCTION_NOT_PERMITTED: 0x68,
+  KEY_UNEXTRACTABLE: 0x6a,
   MECHANISM_INVALID: 0x70, MECHANISM_PARAM_INVALID: 0x71,
   OBJECT_HANDLE_INVALID: 0x82, OPERATION_ACTIVE: 0x90, OPERATION_NOT_INITIALIZED: 0x91,
   SESSION_HANDLE_INVALID: 0xb3, SESSION_PARALLEL_NOT_SUPPORTED: 0xb4,
@@ -58,7 +59,8 @@ const CKA = {
 };
 const CKO = { DATA: 0, CERTIFICATE: 1, PUBLIC_KEY: 2, PRIVATE_KEY: 3, SECRET_KEY: 4 };
 const CKC = { X_509: 0, X_509_ATTR_CERT: 1, WTLS: 2 };
-const CKK = { RSA: 0x00, AES: 0x1f, GENERIC_SECRET: 0x10, ML_KEM: 0x49, ML_DSA: 0x4a, SLH_DSA: 0x4b, EC: 0x03 };
+const CKK = { RSA: 0x00, AES: 0x1f, GENERIC_SECRET: 0x10, ML_KEM: 0x49, ML_DSA: 0x4a, SLH_DSA: 0x4b, EC: 0x03,
+  EC_EDWARDS: 0x40, EC_MONTGOMERY: 0x41 };
 const CKM = {
   RSA_PKCS_KEY_PAIR_GEN: 0x00, RSA_PKCS: 0x01, RSA_X_509: 0x03,
   ML_KEM_KEY_PAIR_GEN: 0x0f, ML_KEM: 0x17, ML_DSA_KEY_PAIR_GEN: 0x1c, ML_DSA: 0x1d,
@@ -309,10 +311,16 @@ const OID_X448 = oidBytes([0x2b, 0x65, 0x6f]); // 1.3.101.111 (RFC 8410)
 // EC/Edwards/Montgomery keypair generation — one shared helper for
 // CKM_EC_KEY_PAIR_GEN / CKM_EC_EDWARDS_KEY_PAIR_GEN / CKM_EC_MONTGOMERY_KEY_PAIR_GEN,
 // which only differ in mechanism id and the CKA_EC_PARAMS OID (§6.3.9/§6.3.14/§6.7).
+// The template's CKA_KEY_TYPE follows the mechanism: §5.18.2 makes a key type
+// inconsistent with the generation mechanism CKR_TEMPLATE_INCONSISTENT, which
+// the engine enforces for Edwards/Montgomery since 2026-09-25 (E10) — this
+// helper used to send CKK_EC for all three and relied on it being overwritten.
 function genEc(hSession, mech, ecParams, extraPub = [], extraPrv = []) {
-  const pub = [{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.EC },
+  const kt = mech === CKM.EC_EDWARDS_KEY_PAIR_GEN ? CKK.EC_EDWARDS
+    : mech === CKM.EC_MONTGOMERY_KEY_PAIR_GEN ? CKK.EC_MONTGOMERY : CKK.EC;
+  const pub = [{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY }, { type: CKA.KEY_TYPE, ulong: kt },
     { type: CKA.EC_PARAMS, bytes: ecParams }, { type: CKA.VERIFY, bool: true }, ...extraPub];
-  const prv = [{ type: CKA.CLASS, ulong: CKO.PRIVATE_KEY }, { type: CKA.KEY_TYPE, ulong: CKK.EC },
+  const prv = [{ type: CKA.CLASS, ulong: CKO.PRIVATE_KEY }, { type: CKA.KEY_TYPE, ulong: kt },
     { type: CKA.SIGN, bool: true }, { type: CKA.DERIVE, bool: true }, ...extraPrv];
   const hPub = alloc(4), hPrv = alloc(4);
   const rv = w._C_GenerateKeyPair(hSession, buildMech(mech),
@@ -418,8 +426,15 @@ const aes = genAes(hS);
 check('C_GenerateKey(AES-256) → OK', aes.rv, CKR.OK);
 check('C_SignInit with nonexistent key → KEY_HANDLE_INVALID',
   w._C_SignInit(hS, buildMech(CKM.ML_DSA), 0x7fffffff), CKR.KEY_HANDLE_INVALID);
+// CKM_AES_CMAC (0x108a, pkcs11t.h): a mechanism an AES key IS the right type
+// for, so the only thing wrong is the missing CKA_SIGN. This check used
+// CKM_SHA256_HMAC until 2026-09-25 — an AES key is the wrong type for HMAC,
+// and §5.1.6 gives CKR_KEY_TYPE_INCONSISTENT priority over
+// CKR_KEY_FUNCTION_NOT_PERMITTED, which the engine now honours (E5/E6).
 check('C_SignInit on AES key without CKA_SIGN → KEY_FUNCTION_NOT_PERMITTED',
-  w._C_SignInit(hS, buildMech(CKM.SHA256_HMAC), aes.h), CKR.KEY_FUNCTION_NOT_PERMITTED);
+  w._C_SignInit(hS, buildMech(0x108a /*CKM_AES_CMAC*/), aes.h), CKR.KEY_FUNCTION_NOT_PERMITTED);
+check('C_SignInit(CKM_SHA256_HMAC) on an AES key → KEY_TYPE_INCONSISTENT (§5.1.6 priority, E5/E6)',
+  w._C_SignInit(hS, buildMech(CKM.SHA256_HMAC), aes.h), CKR.KEY_TYPE_INCONSISTENT);
 
 section('R3.6 — CKA_PARAMETER_SET required for PQC keygen (§6.67.2)');
 check('ML-DSA keygen WITH param set → OK', genMlDsa(hS, true).rv, CKR.OK);
@@ -848,18 +863,30 @@ section('E8 — HMAC general-length (§6.x CK_MAC_GENERAL_PARAMS)');
 
 section('E2 — RSA-PSS params validated (§6.4.5)');
 {
-  // bad mgf in CK_RSA_PKCS_PSS_PARAMS must be rejected at SignInit.
-  // (Uses a dummy key handle — param validation precedes key-type checks
-  // only for mechanism params parsed at init; key check runs first, so
-  // generate a real RSA keypair is slow; instead use an AES key with SIGN.)
-  const tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.SECRET_KEY },
-    { type: CKA.KEY_TYPE, ulong: CKK.GENERIC_SECRET },
-    { type: CKA.VALUE, bytes: new Uint8Array(32) }, { type: CKA.SIGN, bool: true }]);
+  // bad mgf in CK_RSA_PKCS_PSS_PARAMS must be rejected at init. The key is
+  // an imported RSA PUBLIC key (C_CreateObject — no slow keygen) used with
+  // C_VerifyInit, which parses the same CK_RSA_PKCS_PSS_PARAMS. Until
+  // 2026-09-25 this used a GENERIC_SECRET key with C_SignInit; the engine now
+  // checks the key type first (§5.1.6, E5), so a wrong-type key no longer
+  // reaches the parameter check it was meant to exercise.
+  const n = new Uint8Array(128).fill(0x5a); n[0] = 0xc3; n[127] = 0x01;
+  const tpl = buildTpl([{ type: CKA.CLASS, ulong: CKO.PUBLIC_KEY },
+    { type: CKA.KEY_TYPE, ulong: CKK.RSA }, { type: CKA.MODULUS, bytes: n },
+    { type: CKA.PUBLIC_EXPONENT, bytes: new Uint8Array([0x01, 0x00, 0x01]) },
+    { type: CKA.VERIFY, bool: true }]);
   const hp = alloc(4);
-  w._C_CreateObject(hS, tpl, 4, hp);
+  check('fixture: RSA-1024 public key via C_CreateObject → OK', w._C_CreateObject(hS, tpl, 5, hp), CKR.OK);
   const pssBad = new Uint8Array(new Uint32Array([CKM.SHA256, 99 /*bad mgf*/, 32]).buffer);
   check('PSS params with bad MGF → MECHANISM_PARAM_INVALID',
-    w._C_SignInit(hS, buildMech(0x43 /*CKM_SHA256_RSA_PKCS_PSS*/, pssBad), readU32(hp)),
+    w._C_VerifyInit(hS, buildMech(0x43 /*CKM_SHA256_RSA_PKCS_PSS*/, pssBad), readU32(hp)),
+    CKR.MECHANISM_PARAM_INVALID);
+  // E9 / D6 (2026-09-25): a short (1-byte) or absent CK_RSA_PKCS_PSS_PARAMS is
+  // a malformed parameter too — it used to fall back to defaults.
+  check('PSS params 1 byte long → MECHANISM_PARAM_INVALID (E9)',
+    w._C_VerifyInit(hS, buildMech(0x43, new Uint8Array([0])), readU32(hp)),
+    CKR.MECHANISM_PARAM_INVALID);
+  check('PSS params absent → MECHANISM_PARAM_INVALID (E9, §6.1.11 "It has a parameter")',
+    w._C_VerifyInit(hS, buildMech(0x43), readU32(hp)),
     CKR.MECHANISM_PARAM_INVALID);
 }
 

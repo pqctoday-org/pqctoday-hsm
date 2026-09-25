@@ -4,7 +4,7 @@
 **Harness:** `rust/test_p11_conformance.js` (table-driven negative-path + KAT
 matrix asserting exact `CKR_*` codes in spec priority order §5.4/§5.12, plus
 PQC keygen/param-set, SP800-108 KBKDF, and message-based-crypto checks).
-**Engine commit:** `fc9d303dcbc9` · **Generated:** 2026-09-18T23:01:53.932Z — machine-written
+**Engine commit:** `ede1a0ada54f` · **Generated:** 2026-09-25T16:23:27.751Z — machine-written
 by this harness itself (`writeReport()` in `test_p11_conformance.js`) at the
 end of every run, not hand-edited.
 **Regenerate:** `scripts/local-gate.sh --rust-p11` (see below), or manually:
@@ -17,7 +17,7 @@ cd rust && node test_p11_conformance.js
 
 ## Result
 
-**1087 passed / 0 failed** across 52 sections in this JS harness.
+**1092 passed / 0 failed** across 52 sections in this JS harness.
 
 This is the Rust engine's OWN conformance evidence. Previously the only checked-in
 compliance artifact (`cpp_compliance_report.md`) targeted the **C++** engine,
@@ -123,7 +123,7 @@ silently double-succeed. Regression test:
 - R2.2 — session flags (§5.6) (2 passed / 0 failed)
 - Login fixture — SO sets user PIN, then User login (§4.4) (4 passed / 0 failed)
 - R2.1 — session-handle validation (§5.12 priority) (3 passed / 0 failed)
-- R2.4 — key-handle vs permission codes (§5.12.4) (3 passed / 0 failed)
+- R2.4 — key-handle vs permission codes (§5.12.4) (4 passed / 0 failed)
 - R3.6 — CKA_PARAMETER_SET required for PQC keygen (§6.67.2) (2 passed / 0 failed)
 - R1.4 — GCM IV validation (§6.27.7) (1 passed / 0 failed)
 - H-4 — single-shot two-call convention (§5.2) (5 passed / 0 failed)
@@ -143,7 +143,7 @@ silently double-succeed. Regression test:
 - E3 — GCM ulTagBits honored + validated (§6.27.7 / SP 800-38D §5.2.1.2) (11 passed / 0 failed)
 - E4 — AES-CTR ulCounterBits (§6.27.6) (11 passed / 0 failed)
 - E8 — HMAC general-length (§6.x CK_MAC_GENERAL_PARAMS) (10 passed / 0 failed)
-- E2 — RSA-PSS params validated (§6.4.5) (1 passed / 0 failed)
+- E2 — RSA-PSS params validated (§6.4.5) (4 passed / 0 failed)
 - R3.7/D2 — session-object lifecycle + SessionCancel (§4.4/§5.6) (12 passed / 0 failed)
 - Round-2 — keygen template + RNG codes (§5.16/§5.14) (2 passed / 0 failed)
 - Round-2 — wrap/unwrap role-specific handle codes (§5.18) (3 passed / 0 failed)
@@ -168,7 +168,7 @@ silently double-succeed. Regression test:
 - G7 — stateful hash-based signatures: HSS (§6.14) (7 passed / 0 failed)
 - G8 — vendor-defined mechanisms: FrodoKEM / Keccak-256 / KMAC / BIP32 (≥ CKM_VENDOR_DEFINED) (29 passed / 0 failed)
 - G8b — Classic McEliece (BSI TR-02102-1 §2.4.2, all 10 parameter sets) (6 passed / 0 failed)
-- G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) (289 passed / 0 failed)
+- G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) (290 passed / 0 failed)
 
 ## Full transcript
 
@@ -207,6 +207,7 @@ silently double-succeed. Regression test:
   ✅ C_GenerateKey(AES-256) → OK
   ✅ C_SignInit with nonexistent key → KEY_HANDLE_INVALID
   ✅ C_SignInit on AES key without CKA_SIGN → KEY_FUNCTION_NOT_PERMITTED
+  ✅ C_SignInit(CKM_SHA256_HMAC) on an AES key → KEY_TYPE_INCONSISTENT (§5.1.6 priority, E5/E6)
 
 ── R3.6 — CKA_PARAMETER_SET required for PQC keygen (§6.67.2) ──
   ✅ ML-DSA keygen WITH param set → OK
@@ -304,7 +305,7 @@ silently double-succeed. Regression test:
   ✅ C_DigestEncryptUpdate (no active ops) → OPERATION_NOT_INITIALIZED
 
 ── F1 — mechanism table reconciliation (R6.2) ──
-  ✅ all 172 advertised mechanisms answerable → 0 missing
+  ✅ all 174 advertised mechanisms answerable → 0 missing
 
 ── R3.1 — C_CreateObject template validation (§4.1.1) ──
   ✅ no CKA_CLASS → TEMPLATE_INCOMPLETE
@@ -354,7 +355,10 @@ silently double-succeed. Regression test:
   ✅ ulMacLength=33 > digest → MECHANISM_PARAM_INVALID
 
 ── E2 — RSA-PSS params validated (§6.4.5) ──
+  ✅ fixture: RSA-1024 public key via C_CreateObject → OK
   ✅ PSS params with bad MGF → MECHANISM_PARAM_INVALID
+  ✅ PSS params 1 byte long → MECHANISM_PARAM_INVALID (E9)
+  ✅ PSS params absent → MECHANISM_PARAM_INVALID (E9, §6.1.11 "It has a parameter")
 
 ── R3.7/D2 — session-object lifecycle + SessionCancel (§4.4/§5.6) ──
   ✅ second session opens → OK
@@ -1075,110 +1079,110 @@ silently double-succeed. Regression test:
   ✅ Classic McEliece: encapsulate → decapsulate agree on the SAME shared secret (real SEAM)
 
 ── G9 — advertise-vs-dispatch invariant: every advertised mechanism has a real dispatch path (new) ──
-  ✅ fixture: live advertised mechanism count → 172
+  ✅ fixture: live advertised mechanism count → 174
   ✅ 0x0 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x9 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x9 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x9 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
-  ✅ 0x9 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
-  ✅ 0x40 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x40 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x41 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x41 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x42 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x42 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x43 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x43 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x44 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x44 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x45 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x45 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
-  ✅ 0x1 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
-  ✅ 0xd SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0xd VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x61 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x61 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x46 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x46 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x47 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x47 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x66 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x66 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x67 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x67 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x60 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x60 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x63 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x63 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x62 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x62 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x65 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x65 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1043 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1043 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x64 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x64 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x9 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x9 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x9 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x115
+  ✅ 0x9 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xf2
+  ✅ 0x40 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x40 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x41 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x41 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x42 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x42 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x43 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x43 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x44 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x44 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x45 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x45 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x115
+  ✅ 0x1 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xf2
+  ✅ 0xd SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0xd VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x61 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x61 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x46 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x46 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x47 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x47 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x66 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x66 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x67 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x67 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x60 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x60 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x63 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x63 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x62 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x62 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x65 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x65 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1043 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1043 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x64 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x64 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0xf GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
   ✅ 0x80000001 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
   ✅ 0x80000003 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
   ✅ 0x1c GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
-  ✅ 0x1d SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1d VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1f SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x1f VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x23 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x23 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x24 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x24 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x25 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x25 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x26 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x26 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x27 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x27 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x28 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x28 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x29 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x29 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x2a SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x2a VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x2b SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x2b VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x2c SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x2c VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x403c SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x403c VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x1d SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1d VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1f SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1f VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x23 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x23 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x24 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x24 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x25 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x25 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x26 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x26 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x27 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x27 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x28 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x28 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x29 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x29 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x2a SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x2a VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x2b SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x2b VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x2c SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x2c VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x403c SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x403c VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x403b DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x2d GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
-  ✅ 0x2e SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x2e VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x34 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x34 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x36 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x36 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x37 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x37 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x38 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x38 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x39 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x39 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3a SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3a VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3b SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3b VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3c SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3c VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3d SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3d VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3e SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3e VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3f SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x3f VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x2e SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x2e VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x34 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x34 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x36 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x36 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x37 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x37 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x38 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x38 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x39 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x39 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3a SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3a VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3b SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3b VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3c SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3c VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3d SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3d VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3e SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3e VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3f SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x3f VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x250 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x260 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x270 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
@@ -1220,31 +1224,31 @@ silently double-succeed. Regression test:
   ✅ 0x2b2 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x2d2 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x2d2 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x108a SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x108a VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x108a SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x108a VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x363 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1054 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x1054 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x1104 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1105 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1054 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x115
+  ✅ 0x1054 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xf2
+  ✅ 0x1104 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1105 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x210 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x211 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x211 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x212 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x212 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x5 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x5 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x5 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x5 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x220 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x221 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x221 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x222 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x222 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x6 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x6 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0xe SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0xe VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1042 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1042 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x6 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x6 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0xe SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0xe VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1042 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1042 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x256 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x256 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x257 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
@@ -1266,62 +1270,62 @@ silently double-succeed. Regression test:
   ✅ 0x350 GenerateKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x1040 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
   ✅ 0x140b GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
-  ✅ 0x1041 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1041 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1044 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1044 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1045 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1045 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1046 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1046 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1047 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1047 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1048 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1048 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1049 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1049 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x104a SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x104a VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1050 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1051 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1041 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1041 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1044 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1044 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1045 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1045 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1046 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1046 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1047 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1047 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1048 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1048 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1049 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1049 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x104a SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x104a VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1050 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1051 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x1055 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
   ✅ 0x1056 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
-  ✅ 0x80000011 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x80001058 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x80001059 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1057 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1057 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x80001057 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x80001057 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x80000011 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x80001058 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x80001059 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1057 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1057 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x80001057 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x80001057 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x1080 GenerateKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
   ✅ 0x1081 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x1081 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x1082 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1082 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1082 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1082 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x1082 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x1082 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x1085 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1085 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1085 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1085 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x1085 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x1085 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x1086 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
   ✅ 0x1086 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x1087 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1087 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1088 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1088 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x108e SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x108e VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
-  ✅ 0x2104 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x2104 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x2106 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x2106 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x2107 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x2107 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x2108 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x2108 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1071 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1071 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1087 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1087 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1088 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1088 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x108e SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x108e VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x2104 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2104 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2106 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2106 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2107 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2107 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2108 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x2108 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x71
+  ✅ 0x1071 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1071 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x1072 GenerateKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
   ✅ 0x2109 WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x2109 UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x110
@@ -1329,11 +1333,11 @@ silently double-succeed. Regression test:
   ✅ 0x210b UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x110
   ✅ 0x210a WrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
   ✅ 0x210a UnwrapKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x110
-  ✅ 0x1226 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x1226 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x1226 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x1226 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x1225 GenerateKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x4021 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
-  ✅ 0x4021 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
+  ✅ 0x4021 EncryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x4021 DecryptInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x3b0 DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
   ✅ 0x402a DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
   ✅ 0x402b DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x7
@@ -1354,16 +1358,17 @@ silently double-succeed. Regression test:
   ✅ 0x8000105b DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd1
   ✅ 0x8000105c DeriveKey: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd1
   ✅ 0x4032 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x4033 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x4033 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x4033 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x4033 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x4034 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x209
-  ✅ 0x4036 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x4036 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x4036 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x4036 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x4035 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x209
-  ✅ 0x4037 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ 0x4037 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
+  ✅ 0x4037 SignInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
+  ✅ 0x4037 VerifyInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x63
   ✅ 0x80000010 DigestInit: dispatch reached (not CKR_MECHANISM_INVALID) → got 0x0
-  ✅ G9: probed at least one real operation for every flag-bearing advertised mechanism (287 probes total)
+  ✅ 0x80000013 GenerateKeyPair: dispatch reached (not CKR_MECHANISM_INVALID) → got 0xd0
+  ✅ G9: probed at least one real operation for every flag-bearing advertised mechanism (288 probes total)
 
-════════ RESULT: 1087 passed, 0 failed ════════
+════════ RESULT: 1092 passed, 0 failed ════════
 ```
