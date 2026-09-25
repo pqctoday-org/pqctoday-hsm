@@ -8332,7 +8332,9 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     ck_param::gcm::FIELD_COUNT,
                 ) {
                     Ok(r) => r,
-                    Err(_) => return CKR_ARGUMENTS_BAD,
+                    // §5.1.6 / D6 (E9): a missing or short parameter
+                    // struct is CKR_MECHANISM_PARAM_INVALID.
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
                 };
                 let iv_ptr = gcm.ptr(ck_param::gcm::P_IV);
                 let iv_len = gcm.ulong(ck_param::gcm::UL_IV_LEN);
@@ -8387,7 +8389,9 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     ck_param::ccm::FIELD_COUNT,
                 ) {
                     Ok(r) => r,
-                    Err(_) => return CKR_ARGUMENTS_BAD,
+                    // §5.1.6 / D6 (E9): a missing or short parameter
+                    // struct is CKR_MECHANISM_PARAM_INVALID.
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
                 };
                 let nonce_ptr = ccm.ptr(ck_param::ccm::P_NONCE);
                 let nonce_len = ccm.ulong(ck_param::ccm::UL_NONCE_LEN);
@@ -8416,8 +8420,11 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             // §6.27.2 — ECB takes no mechanism parameter.
             CKM_AES_ECB => (Vec::new(), Vec::new(), 0),
             CKM_AES_CBC | CKM_AES_CBC_PAD => {
-                if p_param.is_null() || ul_param_len < 16 {
-                    return CKR_ARGUMENTS_BAD;
+                // §6.11: the parameter is a 16-byte IV. Any other length —
+                // shorter, or longer and silently truncated — is a malformed
+                // mechanism parameter (E18, D6).
+                if p_param.is_null() || ul_param_len != 16 {
+                    return CKR_MECHANISM_PARAM_INVALID;
                 }
                 (
                     std::slice::from_raw_parts(p_param, 16).to_vec(),
@@ -8441,8 +8448,9 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             // XTS's mechanism param (§6.15) is likewise a bare 16-byte
             // value (the Data Unit Sequence Number / tweak) — same shape.
             CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 | CKM_AES_XTS => {
-                if p_param.is_null() || ul_param_len < 16 {
-                    return CKR_ARGUMENTS_BAD;
+                // Exactly 16 bytes (IV / §6.15 tweak) — E18, D6.
+                if p_param.is_null() || ul_param_len != 16 {
+                    return CKR_MECHANISM_PARAM_INVALID;
                 }
                 (
                     std::slice::from_raw_parts(p_param, 16).to_vec(),
@@ -8479,7 +8487,9 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     ck_param::salsa20_poly1305::FIELD_COUNT,
                 ) {
                     Ok(r) => r,
-                    Err(_) => return CKR_ARGUMENTS_BAD,
+                    // §5.1.6 / D6 (E9): a missing or short parameter
+                    // struct is CKR_MECHANISM_PARAM_INVALID.
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
                 };
                 if r.ulong(ck_param::salsa20_poly1305::UL_NONCE_LEN) != 12 {
                     return CKR_MECHANISM_PARAM_INVALID;
@@ -8602,7 +8612,8 @@ unsafe fn parse_chacha20_params(
         &ck_param::chacha20::LAYOUT,
         ck_param::chacha20::FIELD_COUNT,
     )
-    .map_err(|_| CKR_ARGUMENTS_BAD)?;
+    // §5.1.6 / D6 (E9) — a missing or short CK_CHACHA20_PARAMS.
+    .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
     let ctr_ptr = r.ptr(ck_param::chacha20::P_BLOCK_COUNTER);
     let ctr_bits = r.ulong(ck_param::chacha20::BLOCK_COUNTER_BITS);
     let nonce_ptr = r.ptr(ck_param::chacha20::P_NONCE);
@@ -9088,7 +9099,9 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     ck_param::gcm::FIELD_COUNT,
                 ) {
                     Ok(r) => r,
-                    Err(_) => return CKR_ARGUMENTS_BAD,
+                    // §5.1.6 / D6 (E9): a missing or short parameter
+                    // struct is CKR_MECHANISM_PARAM_INVALID.
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
                 };
                 let iv_ptr = gcm.ptr(ck_param::gcm::P_IV);
                 let iv_len = gcm.ulong(ck_param::gcm::UL_IV_LEN);
@@ -9143,7 +9156,9 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     ck_param::ccm::FIELD_COUNT,
                 ) {
                     Ok(r) => r,
-                    Err(_) => return CKR_ARGUMENTS_BAD,
+                    // §5.1.6 / D6 (E9): a missing or short parameter
+                    // struct is CKR_MECHANISM_PARAM_INVALID.
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
                 };
                 let nonce_ptr = ccm.ptr(ck_param::ccm::P_NONCE);
                 let nonce_len = ccm.ulong(ck_param::ccm::UL_NONCE_LEN);
@@ -9172,8 +9187,11 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             // §6.27.2 — ECB takes no mechanism parameter.
             CKM_AES_ECB => (Vec::new(), Vec::new(), 0),
             CKM_AES_CBC | CKM_AES_CBC_PAD => {
-                if p_param.is_null() || ul_param_len < 16 {
-                    return CKR_ARGUMENTS_BAD;
+                // §6.11: the parameter is a 16-byte IV. Any other length —
+                // shorter, or longer and silently truncated — is a malformed
+                // mechanism parameter (E18, D6).
+                if p_param.is_null() || ul_param_len != 16 {
+                    return CKR_MECHANISM_PARAM_INVALID;
                 }
                 (
                     std::slice::from_raw_parts(p_param, 16).to_vec(),
@@ -9197,8 +9215,9 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
             // XTS's mechanism param (§6.15) is likewise a bare 16-byte
             // value (the Data Unit Sequence Number / tweak) — same shape.
             CKM_AES_OFB | CKM_AES_CFB128 | CKM_AES_CFB8 | CKM_AES_CFB1 | CKM_AES_XTS => {
-                if p_param.is_null() || ul_param_len < 16 {
-                    return CKR_ARGUMENTS_BAD;
+                // Exactly 16 bytes (IV / §6.15 tweak) — E18, D6.
+                if p_param.is_null() || ul_param_len != 16 {
+                    return CKR_MECHANISM_PARAM_INVALID;
                 }
                 (
                     std::slice::from_raw_parts(p_param, 16).to_vec(),
@@ -9236,7 +9255,9 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                     ck_param::salsa20_poly1305::FIELD_COUNT,
                 ) {
                     Ok(r) => r,
-                    Err(_) => return CKR_ARGUMENTS_BAD,
+                    // §5.1.6 / D6 (E9): a missing or short parameter
+                    // struct is CKR_MECHANISM_PARAM_INVALID.
+                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
                 };
                 if r.ulong(ck_param::salsa20_poly1305::UL_NONCE_LEN) != 12 {
                     return CKR_MECHANISM_PARAM_INVALID;

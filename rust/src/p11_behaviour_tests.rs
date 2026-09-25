@@ -455,3 +455,121 @@ fn e7_wrap_unwrap_wrong_aes_kek_size_is_size_range() {
         );
     }
 }
+
+// ── E9 / E18 — malformed mechanism parameters (decision D6) ─────────────────
+
+const AES_TYPED: u32 = 0x5E50_2020;
+const XTS_TYPED: u32 = 0x5E50_2021;
+const CHACHA_TYPED: u32 = 0x5E50_2022;
+
+/// A key of the mechanism's own type with every usage attribute set.
+fn right_key_for(mech: u32) -> u32 {
+    match mech {
+        CKM_AES_XTS => XTS_TYPED,
+        CKM_CHACHA20 | CKM_CHACHA20_POLY1305 => CHACHA_TYPED,
+        _ => AES_TYPED,
+    }
+}
+
+fn put_symmetric_keys() {
+    put_key(AES_TYPED, CKO_SECRET_KEY, CKK_AES, 32, true);
+    put_key(XTS_TYPED, CKO_SECRET_KEY, CKK_AES_XTS, 64, true);
+    put_key(CHACHA_TYPED, CKO_SECRET_KEY, CKK_CHACHA20, 32, true);
+}
+
+fn mech_with_param(mech: u32, param: &mut [u8]) -> [usize; 3] {
+    [mech as usize, param.as_mut_ptr() as usize, param.len()]
+}
+
+/// §5.8.1 / §5.10.1 return values, §5.1.6 CKR_MECHANISM_PARAM_INVALID
+/// ("invalid parameters were supplied to the mechanism"). The G-8 probe
+/// replaced each mechanism's required parameter by a single byte: 11 of
+/// them answered CKR_ARGUMENTS_BAD, which C_EncryptInit's §5.8.1 list does
+/// not contain (CKM_AES_CTR already answered correctly). Decision D6.
+#[test]
+fn e9_one_byte_symmetric_parameter_is_mechanism_param_invalid() {
+    let _guard = test_lock::acquire();
+    setup();
+    put_symmetric_keys();
+    for mech in [
+        CKM_AES_CBC,
+        CKM_AES_CBC_PAD,
+        CKM_AES_CCM,
+        CKM_AES_CFB1,
+        CKM_AES_CFB8,
+        CKM_AES_CFB128,
+        CKM_AES_GCM,
+        CKM_AES_OFB,
+        CKM_AES_XTS,
+        CKM_AES_CTR,
+        CKM_CHACHA20,
+        CKM_CHACHA20_POLY1305,
+    ] {
+        let mut one = [0u8; 1];
+        let mut m = mech_with_param(mech, &mut one);
+        assert_eq!(
+            C_EncryptInit(SESSION, m.as_mut_ptr() as *mut u8, right_key_for(mech)),
+            CKR_MECHANISM_PARAM_INVALID,
+            "C_EncryptInit mech {mech:#x}"
+        );
+        assert_eq!(
+            C_DecryptInit(SESSION, m.as_mut_ptr() as *mut u8, right_key_for(mech)),
+            CKR_MECHANISM_PARAM_INVALID,
+            "C_DecryptInit mech {mech:#x}"
+        );
+        // An absent required parameter is the same defect.
+        let mut none = mech0(mech);
+        assert_eq!(
+            C_EncryptInit(SESSION, none.as_mut_ptr() as *mut u8, right_key_for(mech)),
+            CKR_MECHANISM_PARAM_INVALID,
+            "C_EncryptInit mech {mech:#x}, no parameter"
+        );
+    }
+    assert!(!ENCRYPT_STATE.with(|s| s.borrow().contains_key(&SESSION)));
+    assert!(!DECRYPT_STATE.with(|s| s.borrow().contains_key(&SESSION)));
+}
+
+/// E18 — §6.11 (AES-CBC, CBC-PAD, OFB, CFB*) and §6.15 (XTS): the parameter
+/// is a 16-byte IV / tweak. The WS-E NIST vectors found a wrong-length IV
+/// answered CKR_ARGUMENTS_BAD (shorter) or silently truncated to 16 bytes
+/// (longer). Both are CKR_MECHANISM_PARAM_INVALID; exactly 16 bytes starts
+/// the operation.
+#[test]
+fn e18_aes_iv_of_the_wrong_length_is_mechanism_param_invalid() {
+    let _guard = test_lock::acquire();
+    setup();
+    put_symmetric_keys();
+    for mech in [
+        CKM_AES_CBC,
+        CKM_AES_CBC_PAD,
+        CKM_AES_OFB,
+        CKM_AES_CFB1,
+        CKM_AES_CFB8,
+        CKM_AES_CFB128,
+        CKM_AES_XTS,
+    ] {
+        for len in [8usize, 12, 15, 17, 24, 32] {
+            let mut iv = vec![0x11u8; len];
+            let mut m = mech_with_param(mech, &mut iv);
+            assert_eq!(
+                C_EncryptInit(SESSION, m.as_mut_ptr() as *mut u8, right_key_for(mech)),
+                CKR_MECHANISM_PARAM_INVALID,
+                "C_EncryptInit mech {mech:#x}, {len}-byte IV"
+            );
+            assert_eq!(
+                C_DecryptInit(SESSION, m.as_mut_ptr() as *mut u8, right_key_for(mech)),
+                CKR_MECHANISM_PARAM_INVALID,
+                "C_DecryptInit mech {mech:#x}, {len}-byte IV"
+            );
+        }
+        let mut iv = vec![0x11u8; 16];
+        let mut m = mech_with_param(mech, &mut iv);
+        assert_eq!(
+            C_EncryptInit(SESSION, m.as_mut_ptr() as *mut u8, right_key_for(mech)),
+            CKR_OK,
+            "C_EncryptInit mech {mech:#x}, 16-byte IV"
+        );
+        // §5.8.1 — pMechanism = NULL_PTR terminates the operation.
+        assert_eq!(C_EncryptInit(SESSION, std::ptr::null_mut(), right_key_for(mech)), CKR_OK);
+    }
+}
