@@ -68,3 +68,76 @@ impl Drop for Mapping {
         }
     }
 }
+
+/// The interrupt line of one `generic-uio` device (`uio_pdrv_genirq`):
+/// writing 1 re-enables the line, `read` returns the event count once an
+/// interrupt has fired (the kernel handler disables the line again).
+pub struct UioInterrupt {
+    file: File,
+}
+
+impl UioInterrupt {
+    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        Ok(Self { file })
+    }
+
+    fn poll(&self, timeout: std::time::Duration) -> io::Result<bool> {
+        let mut fd = libc::pollfd {
+            fd: self.file.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ts = libc::timespec {
+            tv_sec: timeout.as_secs() as libc::time_t,
+            tv_nsec: timeout.subsec_nanos() as libc::c_long,
+        };
+        // SAFETY: one valid pollfd, a valid timespec, no signal mask.
+        let rc = unsafe { libc::ppoll(&mut fd, 1, &ts, std::ptr::null()) };
+        if rc < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        if rc > 0 && fd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+            return Err(io::Error::other("UIO interrupt poll error"));
+        }
+        Ok(rc > 0 && fd.revents & libc::POLLIN != 0)
+    }
+
+    fn consume(&mut self) -> io::Result<()> {
+        let mut count = [0u8; 4];
+        let n = std::io::Read::read(&mut self.file, &mut count)?;
+        if n != 4 {
+            return Err(io::Error::other("short UIO event read"));
+        }
+        Ok(())
+    }
+}
+
+impl crate::mldsa_sign::Interrupt for UioInterrupt {
+    fn drain(&mut self) -> io::Result<()> {
+        while self.poll(std::time::Duration::ZERO)? {
+            self.consume()?;
+        }
+        Ok(())
+    }
+
+    fn unmask(&mut self) -> io::Result<()> {
+        let n = std::io::Write::write(&mut self.file, &1u32.to_ne_bytes())?;
+        if n != 4 {
+            return Err(io::Error::other("short UIO irqcontrol write"));
+        }
+        Ok(())
+    }
+
+    fn wait(&mut self, timeout: std::time::Duration) -> io::Result<bool> {
+        if self.poll(timeout)? {
+            self.consume()?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+}

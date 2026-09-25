@@ -68,6 +68,7 @@ fn signs_through_every_wait_mode_with_identical_output() {
         dma_phase: Duration::from_micros(20),
         ..SimTiming::default()
     };
+    let mut spin_polls = 0;
     for mode in [WaitMode::Spin, WaitMode::Sleep, WaitMode::Interrupt] {
         let sim = sim(timing);
         let mut lane = lane(&sim, mode);
@@ -84,12 +85,15 @@ fn signs_through_every_wait_mode_with_identical_output() {
         // The hardware clears the staged secrets from DDR after DISPATCH.
         let staged = &lane.dma().bytes()[INPUT_OFFSET..INPUT_OFFSET + SECRET_BYTES];
         assert!(staged.iter().all(|b| *b == 0), "input region cleared ({mode:?})");
-        if mode != WaitMode::Spin {
-            // A sleeping or interrupt-driven wait polls the control register
-            // a handful of times, not thousands.
+        if mode == WaitMode::Spin {
+            spin_polls = lane.stats().register_polls;
+        } else {
+            // A sleeping or interrupt-driven wait polls only during its first
+            // SPIN_FIRST, then blocks: far fewer register reads than spinning
+            // through the whole modelled signature.
             assert!(
-                lane.stats().register_polls < 200,
-                "{mode:?}: {} polls",
+                lane.stats().register_polls * 4 < spin_polls,
+                "{mode:?}: {} polls vs {spin_polls} spinning",
                 lane.stats().register_polls
             );
         }
@@ -184,4 +188,42 @@ fn the_lane_reloads_only_when_the_matrix_id_changes() {
     let signs = sim.counters().signs;
     assert!(lane.sign_into(&input(a), 128, TIMEOUT, &mut [0u8; 10]).is_err());
     assert_eq!(sim.counters().signs, signs);
+}
+
+/// An interrupt line that never fires (e.g. not wired in a bitstream).
+struct DeadLine;
+
+impl pqc_hw::mldsa_sign::Interrupt for DeadLine {
+    fn drain(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn unmask(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn wait(&mut self, timeout: Duration) -> std::io::Result<bool> {
+        std::thread::sleep(timeout);
+        Ok(false)
+    }
+}
+
+#[test]
+fn a_line_that_never_fires_falls_back_to_sleep_polling() {
+    let timing = SimTiming {
+        sign_base: Duration::from_micros(300),
+        dma_phase: Duration::from_micros(40),
+        ..SimTiming::default()
+    };
+    let sim = sim(timing);
+    let mut parts = sim.parts(WaitMode::Interrupt);
+    parts.dma_interrupt = Some(Box::new(DeadLine));
+    parts.signer_interrupt = Some(Box::new(DeadLine));
+    let mut lane = SignLane::new(parts).unwrap();
+    let (a, s1, s2, t0, mu, rho) = inputs(31);
+    let want = expected(&a, &s1, &s2, &t0, &mu, &rho);
+    for _ in 0..6 {
+        assert_eq!(lane.sign(&a, &s1, &s2, &t0, &mu, &rho, true, 128, TIMEOUT).unwrap(), want);
+    }
+    assert_eq!(lane.wait_modes(), (WaitMode::Sleep, WaitMode::Sleep));
+    assert!(lane.stats().signer_missed_interrupts >= 3);
+    assert_eq!(lane.stats().signer_interrupts, 0);
 }

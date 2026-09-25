@@ -288,7 +288,6 @@ impl<R: RegisterIo, D: SignDma> SignLane<R, D> {
             ));
         }
         self.execute_dispatch(LOAD_DEVICE_EXTENT, timeout)?;
-        self.signer_wait.arm(self.signer.registers_mut());
         self.signer
             .start_load(TENANT)
             .map_err(hw_error)?;
@@ -367,7 +366,6 @@ impl<R: RegisterIo, D: SignDma> SignLane<R, D> {
         stage::end(Stage::Encode, started);
         self.execute_dispatch(SIGN_DEVICE_EXTENT, timeout)?;
         let started = stage::start();
-        self.signer_wait.arm(self.signer.registers_mut());
         self.signer
             .start_sign(SignSubmission {
                 tenant: TENANT,
@@ -446,7 +444,6 @@ impl<R: RegisterIo, D: SignDma> SignLane<R, D> {
     fn run_dma(&mut self, phase: u32, timeout: Duration) -> io::Result<i32> {
         let words = (self.dma.len() / 4) as u32;
         let phys = self.dma.phys_addr();
-        self.dma_wait.arm(self.dma_controller.registers_mut());
         self.dma_controller
             .start(phase, words, phys)
             .map_err(hw_error)?;

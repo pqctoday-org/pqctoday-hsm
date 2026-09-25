@@ -8,7 +8,7 @@ use crate::mldsa_sign::{
     DMA_CONTROL_BASE, MAILBOX_BASE, SIGNATURE_BASE, SIGNER_CONTROL_BASE, WaitMode,
 };
 use crate::mldsa_sign_lane::{LaneParts, SignLane};
-use crate::uio::Mapping;
+use crate::uio::{Mapping, UioInterrupt};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
@@ -90,16 +90,29 @@ impl Mldsa65SignSession {
         let signer_uio = Mapping::find_by_address("/sys/class/uio", config.signer_control_base)?;
         let mailbox_uio = Mapping::find_by_address("/sys/class/uio", config.mailbox_base)?;
         let dma = Buffer::open(config.dma_path, config.dma_sysfs_path)?;
+        // The mldsa overlay wires both HLS blocks' `interrupt` outputs to
+        // PL-PS IRQ lines (GIC SPI 89-92) under generic-uio. A waiting
+        // worker blocks on the line instead of spinning a core for the whole
+        // signature; the control register stays the authority, and a line
+        // that never fires falls back to sleep-polling (mldsa_sign::Wait).
+        let interrupt = |path: &std::path::Path| {
+            UioInterrupt::open(path)
+                .ok()
+                .map(|irq| Box::new(irq) as Box<dyn crate::mldsa_sign::Interrupt>)
+        };
+        let dma_interrupt = interrupt(&dma_uio);
+        let signer_interrupt = interrupt(&signer_uio);
         let lane = SignLane::new(LaneParts {
-            dma_control: Mapping::open(dma_uio, 0x10000)?,
-            signer_control: Mapping::open(signer_uio, 0x10000)?,
+            dma_control: Mapping::open(&dma_uio, 0x10000)?,
+            signer_control: Mapping::open(&signer_uio, 0x10000)?,
             mailbox: Mapping::open(mailbox_uio, 0x2000)?,
             dma,
             mailbox_base: config.mailbox_base,
             signature_base: config.signature_base,
-            dma_interrupt: None,
-            signer_interrupt: None,
-            wait_mode: WaitMode::Spin,
+            dma_interrupt,
+            signer_interrupt,
+            // PQC_HW_MLDSA_WAIT=spin|sleep|irq overrides for A/B runs.
+            wait_mode: WaitMode::from_env().unwrap_or(WaitMode::Interrupt),
         })?;
         Ok(Self { lane, _lock: lock })
     }

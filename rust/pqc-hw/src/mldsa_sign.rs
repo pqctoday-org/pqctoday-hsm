@@ -270,6 +270,12 @@ impl WaitMode {
 /// then costs at most this much latency, never a timeout).
 pub const SLEEP_STEP: Duration = Duration::from_micros(100);
 pub const INTERRUPT_SLICE: Duration = Duration::from_millis(1);
+/// Sleep and interrupt modes first poll for this long: a short DMA phase
+/// then completes without a sleep or a system call.
+pub const SPIN_FIRST: Duration = Duration::from_micros(20);
+/// Completions seen by polling with no interrupt ever delivered, after which
+/// a line is treated as unwired and the wait falls back to sleeping.
+const MISSED_BEFORE_FALLBACK: u64 = 3;
 
 /// Per-block waiting state: the mode, the interrupt (if any), and the
 /// shortest completion seen, which [`WaitMode::Sleep`] sleeps through first.
@@ -305,21 +311,23 @@ impl Wait {
         }
     }
 
-    /// Prepares the interrupt for the next command: acknowledge the block's
-    /// ISR, drop stale events, re-enable the line. Call before `ap_start`.
+    /// Arms the line for blocking: drop stale events, acknowledge the ISR,
+    /// re-enable the line. Called lazily, only once a wait outlasts
+    /// [`SPIN_FIRST`], so a short phase costs no system call. Safe after the
+    /// completion already happened: the caller re-reads the control register
+    /// before blocking, and a completion after that raises the (level) line.
     /// Falls back to [`WaitMode::Sleep`] if the line cannot be armed.
-    pub fn arm(&mut self, registers: &mut impl RegisterIo) {
-        if self.mode != WaitMode::Interrupt {
-            return;
-        }
-        acknowledge_interrupt(registers);
-        let armed = self
-            .interrupt
-            .as_mut()
-            .is_some_and(|irq| irq.drain().is_ok() && irq.unmask().is_ok());
+    fn arm(&mut self, registers: &mut impl RegisterIo) -> bool {
+        let armed = self.interrupt.as_mut().is_some_and(|irq| {
+            irq.drain().is_ok() && {
+                acknowledge_interrupt(registers);
+                irq.unmask().is_ok()
+            }
+        });
         if !armed {
             self.mode = WaitMode::Sleep;
         }
+        armed
     }
 
     fn learn(&mut self, elapsed: Duration) {
@@ -351,18 +359,20 @@ pub fn wait_done(
     let started = Instant::now();
     let deadline = started + timeout;
     let mut first_sleep = true;
+    let mut armed = false;
     loop {
         wait.register_polls += 1;
         if registers.read32(CONTROL) & AP_DONE != 0 {
             wait.learn(started.elapsed());
-            if wait.mode == WaitMode::Interrupt {
-                acknowledge_interrupt(registers);
-            }
             return Ok(registers.read32(RETURN) as i32);
         }
         let now = Instant::now();
         if now >= deadline {
             return Err(Error::Timeout);
+        }
+        if wait.mode != WaitMode::Spin && started.elapsed() < SPIN_FIRST {
+            std::hint::spin_loop();
+            continue;
         }
         match wait.mode {
             WaitMode::Spin => std::hint::spin_loop(),
@@ -380,6 +390,10 @@ pub fn wait_done(
                 };
                 std::thread::sleep(step.min(deadline - now));
             }
+            WaitMode::Interrupt if !armed => {
+                armed = wait.arm(registers);
+                // Re-read the control register before blocking.
+            }
             WaitMode::Interrupt => {
                 let slice = INTERRUPT_SLICE.min(deadline - now);
                 let irq = wait.interrupt.as_mut().expect("interrupt mode has a line");
@@ -390,8 +404,10 @@ pub fn wait_done(
                             // Done without an event: count it, then treat it
                             // as the completion it is.
                             wait.missed_interrupts += 1;
+                            if wait.interrupts == 0 && wait.missed_interrupts >= MISSED_BEFORE_FALLBACK {
+                                wait.mode = WaitMode::Sleep;
+                            }
                             wait.learn(started.elapsed());
-                            acknowledge_interrupt(registers);
                             return Ok(registers.read32(RETURN) as i32);
                         }
                     }

@@ -102,8 +102,22 @@ mod profile {
             || std::env::var_os("PROFILE_DETERMINISTIC").is_some_and(|v| v == "1")
     }
 
+    /// Another session on the (already logged-in) token, as each bench
+    /// worker has its own: login state is per token, operation state per
+    /// session.
     fn open_worker_session() -> u32 {
-        native::open_session(0, "87654321").expect("worker session")
+        const CKF_RW_SESSION: u32 = 0x2;
+        const CKF_SERIAL_SESSION: u32 = 0x4;
+        let mut session = 0u32;
+        let rv = ffi::C_OpenSession(
+            0,
+            CKF_SERIAL_SESSION | CKF_RW_SESSION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut session,
+        );
+        assert_eq!(rv, CKR_OK, "C_OpenSession 0x{rv:x}");
+        session
     }
 
     /// The operation `pqc-fpga-bench` times: C_SignInit, C_Sign(size), C_Sign.

@@ -33,6 +33,14 @@
 //! and the levels above are hashed on the CPU, so the cache holds exactly
 //! what the CPU would have put there and later signatures hit it.
 //! * `PQC_HW_DIAGNOSTICS=1` — one stderr line per probe decision or fallback.
+//! * `PQC_HW_MLDSA_WAIT=spin|sleep|irq` — how a worker waits for an ML-DSA
+//!   lane (default `irq`: block on the UIO interrupt, the control register
+//!   stays the authority, a line that never fires falls back to `sleep`).
+//! * `PQC_HW_DMA_SYNC=sysfs` — cache maintenance through the three sysfs
+//!   writes instead of one u-dma-buf ioctl (A/B runs).
+//! * `PQC_HW_STAGE_PROFILE=1` — per-stage host-path timing; the table and
+//!   per-lane counters (signs, FPGA attempts, interrupts) are printed to
+//!   stderr at `C_Finalize`.
 //!
 //! Every hook keeps the ML-DSA lanes' policy: `try_lock` (a contending
 //! caller runs the whole operation on ARM, never waits), a bounded timeout,
