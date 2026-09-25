@@ -2643,6 +2643,7 @@ dependencies = [
  "aes-gcm",
  "aes-kw",
  "aws-lc-rs",
+ "aws-lc-sys",
  "cbc",
  "chacha20 0.9.1",
  "chacha20poly1305",

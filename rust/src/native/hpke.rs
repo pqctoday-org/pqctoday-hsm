@@ -43,8 +43,6 @@
 use std::collections::HashMap;
 
 use hkdf::Hkdf;
-use ml_kem::kem::{Decapsulate, Encapsulate};
-use ml_kem::{EncodedSizeUser, KemCore};
 use sha3::Digest;
 
 use super::keygen::EccCurve;
@@ -348,37 +346,22 @@ fn curve_point_len(curve: Curve) -> usize {
 // ── ML-KEM (mirrors native::encrypt's encapsulate/decapsulate ML-KEM arm) ──
 
 fn mlkem_encap(ps: u32, ek_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
-    let mut rng = rand::rngs::OsRng;
-    macro_rules! run {
-        ($t:ty) => {{
-            let ek_enc = ml_kem::array::Array::try_from(ek_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <$t as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) = Encapsulate::encapsulate(&ek, &mut rng).map_err(|_| CKR_FUNCTION_FAILED)?;
-            Ok((ct.as_slice().to_vec(), ss.as_slice().to_vec()))
-        }};
+    // HPKE's ML-KEM suites are 768 and 1024 only.
+    if ps != CKP_ML_KEM_768 && ps != CKP_ML_KEM_1024 {
+        return Err(CKR_ARGUMENTS_BAD);
     }
-    match ps {
-        CKP_ML_KEM_768 => run!(ml_kem::MlKem768),
-        CKP_ML_KEM_1024 => run!(ml_kem::MlKem1024),
-        _ => Err(CKR_ARGUMENTS_BAD),
-    }
+    // One 32-byte OS draw for m (as ml-kem's encapsulate(rng)); then
+    // Encaps_internal on AWS-LC or ml-kem (crate::crypto::handlers).
+    let mut m = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut m);
+    crate::crypto::handlers::ml_kem_encaps(ps, ek_bytes, &m)
 }
 
 fn mlkem_decap(ps: u32, dk_bytes: &[u8], ct: &[u8]) -> Result<Vec<u8>, CkRv> {
-    macro_rules! run {
-        ($t:ty) => {{
-            let dk_enc = ml_kem::array::Array::try_from(dk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let dk = <$t as KemCore>::DecapsulationKey::from_bytes(&dk_enc);
-            let ct_enc = ml_kem::array::Array::try_from(ct).map_err(|_| CKR_ARGUMENTS_BAD)?;
-            let ss = Decapsulate::decapsulate(&dk, &ct_enc).map_err(|_| CKR_FUNCTION_FAILED)?;
-            Ok(ss.as_slice().to_vec())
-        }};
+    if ps != CKP_ML_KEM_768 && ps != CKP_ML_KEM_1024 {
+        return Err(CKR_ARGUMENTS_BAD);
     }
-    match ps {
-        CKP_ML_KEM_768 => run!(ml_kem::MlKem768),
-        CKP_ML_KEM_1024 => run!(ml_kem::MlKem1024),
-        _ => Err(CKR_ARGUMENTS_BAD),
-    }
+    crate::crypto::handlers::ml_kem_decaps(ps, dk_bytes, ct)
 }
 
 fn mlkem_sizes(ps: u32) -> (usize, usize) {
