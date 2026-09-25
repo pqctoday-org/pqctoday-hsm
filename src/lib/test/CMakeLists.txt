@@ -29,6 +29,7 @@ set(SOURCES p11test.cpp
             AcvpSlhDsaTests.cpp
             MlKemInputCheckTests.cpp
             KmacParamsTests.cpp
+            HmacMinKeySizeTests.cpp
             TestsBase.cpp
             TestsNoPINInitBase.cpp
             ../common/log.cpp

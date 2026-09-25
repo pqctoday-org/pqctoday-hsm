@@ -888,10 +888,24 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		// identical key-size and function constraints — it differs only in
 		// taking a CK_MAC_GENERAL_PARAMS output length — so each pairs with
 		// its plain mechanism here (PKCS#11 v3.2 §6.20.3 and siblings).
+		//
+		// E17 (ACVP gap-closure 2026-09-25): ulMinKeySize is the smallest key
+		// the token ACCEPTS, not a recommendation. It used to be the digest
+		// length (20..64), while resolveMacMech() (SoftHSM_sign.cpp,
+		// kMacMechTable minKeyBytes = 0) deliberately enforces no floor:
+		// RFC 2104 §3 / FIPS 198-1 §4 allow any key length, RFC 4231 TC1 uses
+		// a 20-byte key with SHA-256..512, and NIST's HMAC 2.0 ACVP samples
+		// use 8-bit keys. PKCS#11 v3.2 §6.22.3 (and siblings) only says a
+		// FIPS-198 token "MAY" require >= half the hash length; this token
+		// doesn't. So the advertisement is corrected to what is enforced —
+		// no minimum, 0 bytes (an empty key is accepted and HMAC'd as RFC
+		// 2104 defines: zero-padded to the block size) — rather than
+		// breaking those vectors, or RFC 5869-style empty-salt callers, with
+		// a new floor. The maximum is unchanged.
 #ifndef WITH_FIPS
 		case CKM_MD5_HMAC:
 		case CKM_MD5_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 16;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
@@ -899,74 +913,74 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 #ifdef WITH_RIPEMD160
 		case CKM_RIPEMD160_HMAC:
 		case CKM_RIPEMD160_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 20;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 #endif
 		case CKM_SHA_1_HMAC:
 		case CKM_SHA_1_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 20;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA224_HMAC:
 		case CKM_SHA224_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 28;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA256_HMAC:
 		case CKM_SHA256_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 32;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA384_HMAC:
 		case CKM_SHA384_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 48;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA512_HMAC:
 		case CKM_SHA512_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 64;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA512_224_HMAC:
 		case CKM_SHA512_224_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 28;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA512_256_HMAC:
 		case CKM_SHA512_256_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 32;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA3_224_HMAC:
 		case CKM_SHA3_224_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 28;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA3_256_HMAC:
 		case CKM_SHA3_256_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 32;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA3_384_HMAC:
 		case CKM_SHA3_384_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 48;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
 		case CKM_SHA3_512_HMAC:
 		case CKM_SHA3_512_HMAC_GENERAL:
-			pInfo->ulMinKeySize = 64;
+			pInfo->ulMinKeySize = HMAC_MIN_KEY_BYTES;
 			pInfo->ulMaxKeySize = MAX_HMAC_KEY_BYTES;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY;
 			break;
