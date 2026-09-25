@@ -43,8 +43,10 @@ pub const ENGINES: [EngineConfig; 1] = [EngineConfig {
 pub const UIO_SYSFS: &str = "/sys/class/uio";
 
 /// Finds the UIO device whose map 0 starts at `address`. When the device
-/// exposes a `name`, it must equal `name`; a map smaller than the ABI window
-/// is rejected.
+/// exposes a `name`, it must be `name` or `name@<unit-address>`: generic-uio
+/// on the KV260's 6.18 kernel reports the full device-tree node name
+/// (`hashsig@a0100000`), older kernels the bare `hashsig`. A map smaller than
+/// the ABI window is rejected.
 pub fn find_uio(sysfs_root: impl AsRef<Path>, address: u64, name: &str) -> io::Result<PathBuf> {
     for entry in std::fs::read_dir(sysfs_root)? {
         let entry = entry?;
@@ -57,7 +59,8 @@ pub fn find_uio(sysfs_root: impl AsRef<Path>, address: u64, name: &str) -> io::R
         }
         if let Ok(found) = std::fs::read_to_string(path.join("name")) {
             let found = found.trim();
-            if !found.is_empty() && found != name {
+            let base = found.split_once('@').map_or(found, |(base, _)| base);
+            if !found.is_empty() && base != name {
                 continue;
             }
         }
@@ -190,6 +193,24 @@ mod tests {
         assert_eq!(
             find_uio(&root, 0xa010_0000, "hashsig").unwrap(),
             std::path::PathBuf::from("/dev/uio3")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The KV260's 6.18 kernel names a generic-uio device after the full
+    /// device-tree node, `hashsig@a0100000` (seen on the board 2026-09-25);
+    /// `hashsig-other` or `other@a0100000` must still be rejected.
+    #[test]
+    fn accepts_node_name_with_unit_address() {
+        let root = std::env::temp_dir().join(format!("hashsig-uio-at-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        uio(&root, "uio4", "0x00000000a0100000\n", Some("other@a0100000"), "0x10000");
+        uio(&root, "uio5", "0x00000000a0100000\n", Some("hashsig-other"), "0x10000");
+        assert!(find_uio(&root, 0xa010_0000, "hashsig").is_err());
+        uio(&root, "uio6", "0x00000000a0100000\n", Some("hashsig@a0100000"), "0x10000");
+        assert_eq!(
+            find_uio(&root, 0xa010_0000, "hashsig").unwrap(),
+            std::path::PathBuf::from("/dev/uio6")
         );
         let _ = fs::remove_dir_all(&root);
     }
