@@ -1561,8 +1561,11 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // FIPS 186-5 Appendix A.2.2 "extra bits" keygen — P-256/384/521 only
         // (see the dispatch arm for why secp256k1 is out of scope here).
         CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => (256, 521, 0x00010000 | EC_CAPABILITY_FLAGS),
+        // E13 (2026-09-25) — every ECDSA sign/verify mechanism covers P-224
+        // (FIPS 186-5 / SP 800-186) for imported keys; key generation and
+        // ECDH stay 256..521 (CKM_EC_KEY_PAIR_GEN / CKM_ECDH1_* above).
         CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
-            (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
+            (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
         }
         // T1 — C_DeriveKey dispatches P-256 / secp256k1 / P-384 / P-521 for
         // both ECDH1 mechanisms; advertise the full dispatched range.
@@ -1640,7 +1643,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // hashed-ECDSA mechanisms; only the digest differs.
         | CKM_ECDSA_SHA224
         | CKM_ECDSA_SHA1 => {
-            (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
+            (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
         }
         // Key derivation functions
         CKM_PKCS5_PBKD2
@@ -1653,7 +1656,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // (a unit test iterates SUPPORTED_MECHS and asserts none of them
         //  return CKR_MECHANISM_INVALID here — keep the two in sync)
         // Raw ECDSA (§6.3.12) — pre-hashed input, sign/verify only
-        CKM_ECDSA => (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
+        CKM_ECDSA => (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // Ed25519ph / Ed448ph (pkcs11t.h CKM_EDDSA_PH 0x80001057)
         CKM_EDDSA_PH => (255, 448, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // Parametrized pre-hash mechanisms (hash chosen via param, §6.67.7/§6.69.7)
@@ -1874,8 +1877,12 @@ mod mechanism_table_tests {
     /// P-384 / P-521 for every one of these mechanisms).
     #[test]
     fn ecdsa_mech_ranges_cover_p521() {
+        for mech in [CKM_EC_KEY_PAIR_GEN, CKM_ECDH1_DERIVE, CKM_ECDH1_COFACTOR_DERIVE] {
+            let (min, max, _) = mechanism_info(mech).expect("EC mech must have info");
+            assert_eq!((min, max), (256, 521), "mech {mech:#06x}");
+        }
+        // E13 (2026-09-25) — sign/verify additionally cover imported P-224 keys.
         for mech in [
-            CKM_EC_KEY_PAIR_GEN,
             CKM_ECDSA,
             CKM_ECDSA_SHA256,
             CKM_ECDSA_SHA384,
@@ -1884,11 +1891,9 @@ mod mechanism_table_tests {
             CKM_ECDSA_SHA3_256,
             CKM_ECDSA_SHA3_384,
             CKM_ECDSA_SHA3_512,
-            CKM_ECDH1_DERIVE,
-            CKM_ECDH1_COFACTOR_DERIVE,
         ] {
             let (min, max, _) = mechanism_info(mech).expect("EC mech must have info");
-            assert_eq!((min, max), (256, 521), "mech {mech:#06x}");
+            assert_eq!((min, max), (224, 521), "mech {mech:#06x}");
         }
     }
 
@@ -1902,13 +1907,16 @@ mod mechanism_table_tests {
     #[test]
     fn t1_ecdsa_mech_curve_matrix_round_trips() {
         use crate::crypto::handlers::{
-            sign_ecdsa, verify_ecdsa, CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521,
+            sign_ecdsa, verify_ecdsa, CURVE_K256, CURVE_P224, CURVE_P256, CURVE_P384, CURVE_P521,
         };
 
         // Single source of truth: every named curve the engine supports,
         // with its key size in bits (what mechanism_info ranges are
         // expressed in). secp256k1 is a 256-bit curve.
         let curve_table: &[(u32, u32, &str)] = &[
+            // E13 — P-224 is inside the ECDSA mechanisms' advertised range
+            // (sign/verify of imported keys).
+            (CURVE_P224, 224, "P-224"),
             (CURVE_P256, 256, "P-256"),
             (CURVE_K256, 256, "secp256k1"),
             (CURVE_P384, 384, "P-384"),
@@ -1927,6 +1935,14 @@ mod mechanism_table_tests {
         fn gen_keypair(curve: u32) -> (Vec<u8>, Vec<u8>) {
             let mut rng = rand::rngs::OsRng;
             match curve {
+                CURVE_P224 => {
+                    let sk = p224::ecdsa::SigningKey::random(&mut rng);
+                    let pk = p224::ecdsa::VerifyingKey::from(&sk);
+                    (
+                        sk.to_bytes().to_vec(),
+                        pk.to_encoded_point(false).as_bytes().to_vec(),
+                    )
+                }
                 CURVE_P256 => {
                     let sk = p256::ecdsa::SigningKey::random(&mut rng);
                     let pk = p256::ecdsa::VerifyingKey::from(&sk);
@@ -6154,7 +6170,7 @@ pub(crate) fn create_object_from_attrs(
         // X448 half's contribution to the KEK was silently wrong, so the
         // AES-256 key-unwrap's integrity check failed downstream.
         match crate::crypto::handlers::decode_ec_params(&ec_params) {
-            Ok(curve @ (CURVE_P256 | CURVE_P384 | CURVE_P521 | CURVE_K256)) => {
+            Ok(curve @ (CURVE_P256 | CURVE_P384 | CURVE_P521 | CURVE_K256 | CURVE_P224)) => {
                 store_param_set(&mut new_attrs, curve);
             }
             Ok(CURVE_X25519) => {

@@ -23,7 +23,6 @@ use crate::constants::*;
 use crate::ffi::*;
 use crate::native::test_lock;
 
-const CKF_SIGN: u32 = 0x0000_0800;
 
 fn fixture(name: &str) -> serde_json::Value {
     let path = format!("{}/kat/acvp-ws-e/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -310,4 +309,142 @@ fn e12_aes_gcm_nist_all_iv_lengths() {
     }
     assert_eq!(enc + dec_ok + dec_rej, 60, "all 60 NIST cases executed");
     assert_eq!(enc, 30);
+}
+
+// ═══ E13 — ECDSA SigVer (FIPS 186-5), P-224 included ═══════════════════════
+
+fn ecdsa_hash_mech(hash: &str) -> u32 {
+    match hash {
+        "SHA2-224" => CKM_ECDSA_SHA224,
+        "SHA2-256" => CKM_ECDSA_SHA256,
+        "SHA2-384" => CKM_ECDSA_SHA384,
+        "SHA2-512" => CKM_ECDSA_SHA512,
+        "SHA3-224" => CKM_ECDSA_SHA3_224,
+        "SHA3-256" => CKM_ECDSA_SHA3_256,
+        "SHA3-384" => CKM_ECDSA_SHA3_384,
+        "SHA3-512" => CKM_ECDSA_SHA3_512,
+        other => panic!("hash {other}"),
+    }
+}
+
+/// ECDSA-SigVer-FIPS186-5: every executed group (P-224/256/384/521 x
+/// SHA2-256/512, SHA3-256/512; 7 cases each: 1 valid + 6 invalid reasons).
+/// Signatures over a modified message, r or s, or a zero r or s must be
+/// refused at C_Verify with CKR_SIGNATURE_INVALID; a modified key may be
+/// refused at any step.
+#[test]
+fn e13_ecdsa_sigver_nist_all_curves() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let doc = fixture("ecdsa_sigver_acvp_test.json");
+    let (mut ok, mut rej, mut p224) = (0, 0, 0);
+    for g in doc["testGroups"].as_array().unwrap() {
+        let curve = s(g, "curve");
+        let mech = mechanism(ecdsa_hash_mech(s(g, "hashAlg")), &[]);
+        let n = field_bytes(curve);
+        for t in g["tests"].as_array().unwrap() {
+            let tc = &t["tcId"];
+            let mut point = vec![0x04];
+            point.extend_from_slice(&left_pad(&hx(s(t, "qx")), n));
+            point.extend_from_slice(&left_pad(&hx(s(t, "qy")), n));
+            let mut sig = left_pad(&hx(s(t, "r")), n);
+            sig.extend_from_slice(&left_pad(&hx(s(t, "s")), n));
+            let msg = hx(s(t, "message"));
+            let hk = create(
+                session,
+                &[
+                    (CKA_CLASS, ul(CKO_PUBLIC_KEY)),
+                    (CKA_KEY_TYPE, ul(CKK_EC)),
+                    (CKA_EC_PARAMS, curve_oid(curve)),
+                    (CKA_EC_POINT, der_point(&point)),
+                    (CKA_VERIFY, vec![1]),
+                ],
+            );
+            let passed = t["testPassed"].as_bool().unwrap();
+            let reason = s(t, "reason");
+            let rv = match hk {
+                Ok(h) => verify(session, &mech, h, &msg, &sig),
+                Err(rv) => rv,
+            };
+            if passed {
+                assert_eq!(rv, CKR_OK, "tc {tc} {curve} valid signature");
+                ok += 1;
+            } else if reason == "modify key" {
+                assert_ne!(rv, CKR_OK, "tc {tc} {curve} modified key accepted");
+                rej += 1;
+            } else {
+                assert_eq!(rv, CKR_SIGNATURE_INVALID, "tc {tc} {curve} ({reason})");
+                rej += 1;
+            }
+            if curve == "P-224" {
+                p224 += 1;
+            }
+        }
+    }
+    assert_eq!(ok + rej, 112, "all 112 executed NIST cases");
+    assert_eq!(p224, 28, "the 28 P-224 cases");
+}
+
+/// Advertisement == dispatch: every CKM_ECDSA* mechanism's advertised
+/// ulMinKeySize covers P-224, and P-224 private keys sign through C_Sign
+/// with every hash-composite ECDSA mechanism (the signature then verifies
+/// through C_Verify and fails on a changed message). The private scalar is
+/// FIPS 186-5-irrelevant here (a product-authored fixed value, 1..=28).
+#[test]
+fn e13_ecdsa_p224_advertised_and_signs() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    for m in [
+        CKM_ECDSA, CKM_ECDSA_SHA1, CKM_ECDSA_SHA224, CKM_ECDSA_SHA256, CKM_ECDSA_SHA384,
+        CKM_ECDSA_SHA512, CKM_ECDSA_SHA3_224, CKM_ECDSA_SHA3_256, CKM_ECDSA_SHA3_384,
+        CKM_ECDSA_SHA3_512,
+    ] {
+        let (min, max, _) = mech_info(m);
+        assert!(min <= 224 && max >= 521, "mech {m:#x} advertises {min}..{max}");
+    }
+    let d: Vec<u8> = (1u8..=28).collect();
+    let sk = p224::ecdsa::SigningKey::from_slice(&d).unwrap();
+    let point = sk.verifying_key().to_encoded_point(false).as_bytes().to_vec();
+    let h_prv = create(
+        session,
+        &[
+            (CKA_CLASS, ul(CKO_PRIVATE_KEY)),
+            (CKA_KEY_TYPE, ul(CKK_EC)),
+            (CKA_EC_PARAMS, curve_oid("P-224")),
+            (CKA_VALUE, d.clone()),
+            (CKA_SIGN, vec![1]),
+        ],
+    )
+    .expect("P-224 private key");
+    let h_pub = create(
+        session,
+        &[
+            (CKA_CLASS, ul(CKO_PUBLIC_KEY)),
+            (CKA_KEY_TYPE, ul(CKK_EC)),
+            (CKA_EC_PARAMS, curve_oid("P-224")),
+            (CKA_EC_POINT, der_point(&point)),
+            (CKA_VERIFY, vec![1]),
+        ],
+    )
+    .expect("P-224 public key");
+    let msg = b"P-224 advertised == dispatched";
+    // (CKM_ECDSA_SHA1 / CKM_ECDSA_SHA224 are covered, on every curve, by the
+    // E11 matrix below.)
+    for m in [
+        CKM_ECDSA_SHA256, CKM_ECDSA_SHA384, CKM_ECDSA_SHA512, CKM_ECDSA_SHA3_224,
+        CKM_ECDSA_SHA3_256, CKM_ECDSA_SHA3_384, CKM_ECDSA_SHA3_512,
+    ] {
+        let mech = mechanism(m, &[]);
+        let sig = sign(session, &mech, h_prv, msg).unwrap_or_else(|rv| panic!("sign {m:#x}: {rv:#x}"));
+        assert_eq!(sig.len(), 56, "mech {m:#x}: r||s on P-224 is 56 bytes");
+        assert_eq!(verify(session, &mech, h_pub, msg, &sig), CKR_OK, "verify {m:#x}");
+        assert_eq!(verify(session, &mech, h_pub, b"other", &sig), CKR_SIGNATURE_INVALID, "tamper {m:#x}");
+    }
+    // Raw CKM_ECDSA over a SHA-256 digest verifies as CKM_ECDSA_SHA256
+    // (both condition the digest to the leftmost 224 bits, FIPS 186-5 §6.4).
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(msg).to_vec();
+    let sig = sign(session, &mechanism(CKM_ECDSA, &[]), h_prv, &digest).expect("raw sign");
+    assert_eq!(verify(session, &mechanism(CKM_ECDSA_SHA256, &[]), h_pub, msg, &sig), CKR_OK);
+    assert_eq!(verify(session, &mechanism(CKM_ECDSA, &[]), h_pub, &digest, &sig), CKR_OK);
 }

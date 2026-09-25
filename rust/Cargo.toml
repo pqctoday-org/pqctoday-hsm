@@ -179,6 +179,10 @@ hkdf = "0.12"
 # deterministic-keygen path (PKCS#11 v3.2 §6.68.2).
 ml-kem = { version = "0.2.3", features = ["deterministic"] }
 pqc-phase-profile = { path = "pqc-phase-profile", optional = true }
+# P-224 (FIPS 186-5 / SP 800-186) for ECDSA sign/verify only — imported keys;
+# key generation and ECDH stay P-256+ (E13, 2026-09-25). Same RustCrypto
+# primeorder family and elliptic-curve 0.13 line as p256/p384/p521.
+p224 = { version = "0.13", features = ["ecdsa"] }
 p256 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 p384 = { version = "0.13", features = ["ecdsa", "ecdh"] }
 p521 = { version = "0.13", features = ["ecdsa", "ecdh"] }
