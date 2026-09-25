@@ -10759,6 +10759,14 @@ pub fn C_DeriveKey(
         // gate) → else CKR_KEY_HANDLE_INVALID; then CKA_DERIVE → else
         // CKR_KEY_FUNCTION_NOT_PERMITTED. PBKDF2 uses h_base_key=0
         // (password in params), so skip the check for that case.
+        //
+        // E9 (2026-09-25) — for every OTHER mechanism, handle 0 is
+        // CKR_KEY_HANDLE_INVALID (§5.1.6: "0 is never a valid key handle").
+        // It used to skip the check too and fall through to the mechanism
+        // arm's own value lookup, which answered CKR_ARGUMENTS_BAD.
+        if h_base_key == 0 && mech_type != CKM_PKCS5_PBKD2 {
+            return CKR_KEY_HANDLE_INVALID;
+        }
         if h_base_key != 0 {
             // E5 — the base key's type is checked against the mechanism
             // (§5.18.5 lists CKR_KEY_TYPE_INCONSISTENT) before CKA_DERIVE.

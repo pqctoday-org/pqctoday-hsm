@@ -746,3 +746,40 @@ fn e9_rsa_oaep_parameter_struct_is_validated() {
     let rv = oaep_calls(&mut labelled, full);
     assert_eq!(&rv[..2], &[CKR_OK, CKR_OK], "valid labelled struct");
 }
+
+// ── E9 — C_DeriveKey with hBaseKey = 0 ──────────────────────────────────────
+
+/// §5.18.5 return values, §5.1.6 CKR_KEY_HANDLE_INVALID ("We reiterate here
+/// that 0 is never a valid key handle"). The G-8 probe found
+/// CKR_ARGUMENTS_BAD for CKM_ECDH1_DERIVE, CKM_ECDH1_COFACTOR_DERIVE and
+/// CKM_HKDF_DERIVE: the base-key check was skipped for handle 0 (reserved for
+/// PBKDF2, which has no base key) and the mechanism arm then failed its own
+/// value lookup. Every advertised derive mechanism that takes a base key now
+/// answers CKR_KEY_HANDLE_INVALID; PBKDF2 keeps accepting 0.
+#[test]
+fn e9_derive_with_base_key_handle_zero_is_key_handle_invalid() {
+    let _guard = test_lock::acquire();
+    setup();
+    let derive = advertised_with(CKF_DERIVE);
+    for m in [CKM_ECDH1_DERIVE, CKM_ECDH1_COFACTOR_DERIVE, CKM_HKDF_DERIVE] {
+        assert!(derive.contains(&m), "{m:#x} is advertised for derive");
+    }
+    for mech in derive.iter().copied().chain([CKM_BIP32_MASTER_DERIVE, CKM_BIP32_CHILD_DERIVE]) {
+        let mut m = mech0(mech);
+        let mut h_new: u32 = 0;
+        assert_eq!(
+            C_DeriveKey(SESSION, m.as_mut_ptr() as *mut u8, 0, std::ptr::null_mut(), 0, &mut h_new),
+            CKR_KEY_HANDLE_INVALID,
+            "C_DeriveKey mech {mech:#x}, hBaseKey = 0"
+        );
+        assert_eq!(h_new, 0);
+    }
+    // PBKDF2 derives from the password in its parameter, not from a key.
+    let mut m = mech0(CKM_PKCS5_PBKD2);
+    let mut h_new: u32 = 0;
+    assert_ne!(
+        C_DeriveKey(SESSION, m.as_mut_ptr() as *mut u8, 0, std::ptr::null_mut(), 0, &mut h_new),
+        CKR_KEY_HANDLE_INVALID,
+        "PBKDF2 takes no base key"
+    );
+}
