@@ -130,7 +130,7 @@ mod ml_dsa;
 
 #[cfg(feature = "hw-accel")]
 pub use hw_accel::{
-    ExpandAHook, Mldsa65MatVecHook, Mldsa65SignHook, MldsaStage, MldsaStageHook,
+    ExpandAHook, Mldsa65MatVecHook, Mldsa65SignHook, Mldsa65SignInput, MldsaStage, MldsaStageHook,
     set_expand_a_hook, set_mldsa65_matvec_hook, set_mldsa65_sign_hook, set_mldsa_stage_hook,
 };
 mod ntt;

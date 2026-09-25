@@ -44,10 +44,10 @@ use pqc_hw::hashsig_device::abi::{
 };
 use pqc_hw::hashsig_device::pool::{self, HashsigAccelerator, Lane, Opener, Reference, Routing};
 use pqc_hw::keccak::RegisterIo;
-use pqc_hw::mldsa_sign_lane::{LaneStats, SignDma, SignLane};
+use pqc_hw::mldsa_sign_lane::{LaneStats, SignDma, SignInputs, SignLane};
 use pqc_hw::stage::{self, Stage};
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, TryLockError};
 use std::time::Duration;
 
@@ -61,47 +61,25 @@ struct ResidentMldsa65 {
 /// One whole-signature ML-DSA-65 signer lane as the signing hook sees it:
 /// the device session, or a simulated lane in tests and host-path profiles.
 pub trait Mldsa65Lane: Send {
-    #[allow(clippy::too_many_arguments)]
-    fn sign(
+    fn sign_into(
         &mut self,
-        matrix: &[i32],
-        s1: &[i32],
-        s2: &[i32],
-        t0: &[i32],
-        mu: &[u8; 64],
-        rho_prime: &[u8; 64],
-        randomized: bool,
+        inputs: &dyn SignInputs,
         attempt_limit: u16,
         timeout: Duration,
-    ) -> io::Result<Vec<u8>>;
+        signature: &mut [u8],
+    ) -> io::Result<()>;
     fn stats(&self) -> LaneStats;
 }
 
 impl<R: RegisterIo + Send, D: SignDma + Send> Mldsa65Lane for SignLane<R, D> {
-    fn sign(
+    fn sign_into(
         &mut self,
-        matrix: &[i32],
-        s1: &[i32],
-        s2: &[i32],
-        t0: &[i32],
-        mu: &[u8; 64],
-        rho_prime: &[u8; 64],
-        randomized: bool,
+        inputs: &dyn SignInputs,
         attempt_limit: u16,
         timeout: Duration,
-    ) -> io::Result<Vec<u8>> {
-        SignLane::sign(
-            self,
-            matrix,
-            s1,
-            s2,
-            t0,
-            mu,
-            rho_prime,
-            randomized,
-            attempt_limit,
-            timeout,
-        )
+        signature: &mut [u8],
+    ) -> io::Result<()> {
+        SignLane::sign_into(self, inputs, attempt_limit, timeout, signature)
     }
     fn stats(&self) -> LaneStats {
         SignLane::stats(self)
@@ -109,32 +87,44 @@ impl<R: RegisterIo + Send, D: SignDma + Send> Mldsa65Lane for SignLane<R, D> {
 }
 
 impl Mldsa65Lane for pqc_hw::mldsa_sign_device::Mldsa65SignSession {
-    fn sign(
+    fn sign_into(
         &mut self,
-        matrix: &[i32],
-        s1: &[i32],
-        s2: &[i32],
-        t0: &[i32],
-        mu: &[u8; 64],
-        rho_prime: &[u8; 64],
-        randomized: bool,
+        inputs: &dyn SignInputs,
         attempt_limit: u16,
         timeout: Duration,
-    ) -> io::Result<Vec<u8>> {
-        self.lane_mut().sign(
-            matrix,
-            s1,
-            s2,
-            t0,
-            mu,
-            rho_prime,
-            randomized,
-            attempt_limit,
-            timeout,
-        )
+        signature: &mut [u8],
+    ) -> io::Result<()> {
+        self.lane_mut()
+            .sign_into(inputs, attempt_limit, timeout, signature)
     }
     fn stats(&self) -> LaneStats {
         self.lane().stats()
+    }
+}
+
+/// fips204's borrowed signing inputs, as the lane driver consumes them: the
+/// matrix is identified by `ρ` and every buffer is written straight into
+/// the lane's DMA memory.
+struct Fips204Inputs<'a, 'b>(&'a fips204::Mldsa65SignInput<'b>);
+
+impl SignInputs for Fips204Inputs<'_, '_> {
+    fn matrix_id(&self) -> [u8; 32] {
+        *self.0.matrix_id()
+    }
+    fn write_matrix(&self, out: &mut [u8]) -> bool {
+        self.0.write_matrix(out)
+    }
+    fn write_secret_polys(&self, out: &mut [u8]) -> bool {
+        self.0.write_secret_polys(out)
+    }
+    fn mu(&self) -> &[u8; 64] {
+        self.0.mu()
+    }
+    fn rho_prime(&self) -> &[u8; 64] {
+        self.0.rho_prime()
+    }
+    fn randomized(&self) -> bool {
+        self.0.randomized()
     }
 }
 
@@ -143,6 +133,10 @@ pub type Mldsa65LaneOpener = Box<dyn Fn(usize) -> io::Result<Box<dyn Mldsa65Lane
 
 struct SignPool {
     lanes: Vec<Mutex<Option<Box<dyn Mldsa65Lane>>>>,
+    /// First 8 bytes of the matrix id each lane last held (0 = none): read
+    /// without the lane lock to prefer the lane that already holds a key's
+    /// matrix. Only a hint; the lane itself compares the full id.
+    resident: Vec<AtomicU64>,
     /// Counters of lanes that were closed after a failure, so a report
     /// covers the whole process.
     retired: Mutex<Vec<LaneStats>>,
@@ -164,6 +158,7 @@ const SIGN_ATTEMPT_LIMIT: u16 = 128;
 pub fn install_mldsa65_sign(lanes: usize, opener: Mldsa65LaneOpener) -> bool {
     let pool = SignPool {
         lanes: (0..lanes.max(1)).map(|_| Mutex::new(None)).collect(),
+        resident: (0..lanes.max(1)).map(|_| AtomicU64::new(0)).collect(),
         retired: Mutex::new(Vec::new()),
         opener,
         next: AtomicUsize::new(0),
@@ -667,24 +662,29 @@ impl pqc_hw::hashsig_device::sim::SimBackend for SoftwareSimBackend {
     }
 }
 
-fn mldsa65_sign(
-    matrix: &[i32],
-    s1: &[i32],
-    s2: &[i32],
-    t0: &[i32],
-    mu: &[u8; 64],
-    rho_prime: &[u8; 64],
-    randomized: bool,
-) -> Option<Vec<u8>> {
+fn mldsa65_sign(input: &fips204::Mldsa65SignInput<'_>, signature: &mut [u8]) -> bool {
     if !MLDSA65_SIGN_ENABLED.load(Ordering::Relaxed) {
-        return None;
+        return false;
     }
-    let pool = MLDSA65_SIGN.get()?;
+    let Some(pool) = MLDSA65_SIGN.get() else {
+        return false;
+    };
+    let inputs = Fips204Inputs(input);
+    let id = input.matrix_id();
+    let fingerprint = u64::from_le_bytes(id[..8].try_into().expect("8 bytes")) | 1;
     let lanes = pool.lanes.len();
     let started = stage::start();
+    // Lane order: a lane that already holds this key's matrix first (no
+    // 30 KB upload), then round-robin. Every lane is only ever try-locked:
+    // a contending worker signs on the CPU instead of waiting.
     let first = pool.next.fetch_add(1, Ordering::Relaxed) % lanes;
-    for offset in 0..lanes {
-        let lane = (first + offset) % lanes;
+    let preferred = (0..lanes)
+        .map(|offset| (first + offset) % lanes)
+        .find(|lane| pool.resident[*lane].load(Ordering::Relaxed) == fingerprint);
+    let order = preferred
+        .into_iter()
+        .chain((0..lanes).map(|offset| (first + offset) % lanes).filter(|lane| Some(*lane) != preferred));
+    for lane in order {
         let mut resident = match pool.lanes[lane].try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => continue,
@@ -696,22 +696,16 @@ fn mldsa65_sign(
             continue;
         };
         stage::end(Stage::LaneAcquire, started);
-        match state.sign(
-            matrix,
-            s1,
-            s2,
-            t0,
-            mu,
-            rho_prime,
-            randomized,
-            SIGN_ATTEMPT_LIMIT,
-            SIGN_TIMEOUT,
-        ) {
-            Ok(signature) => return Some(signature),
+        match state.sign_into(&inputs, SIGN_ATTEMPT_LIMIT, SIGN_TIMEOUT, signature) {
+            Ok(()) => {
+                pool.resident[lane].store(fingerprint, Ordering::Relaxed);
+                return true;
+            }
             Err(error) => {
                 diagnostic(&format!(
                     "whole-signature accelerator lane {lane} failed: {error}"
                 ));
+                pool.resident[lane].store(0, Ordering::Relaxed);
                 if let Some(closed) = resident.take() {
                     pool.retired
                         .lock()
@@ -721,7 +715,7 @@ fn mldsa65_sign(
             }
         }
     }
-    None
+    false
 }
 
 pub fn available() -> bool {

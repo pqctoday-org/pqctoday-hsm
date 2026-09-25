@@ -146,9 +146,42 @@ fn modelled_syncs_are_counted_with_their_ranges() {
     let after = sim.counters();
     assert_eq!(after.syncs_for_device - before.syncs_for_device, 1);
     assert_eq!(after.syncs_for_cpu - before.syncs_for_cpu, 1);
+    // Only the request, padding and secret input are cleaned for the
+    // device; only the completion and signature are invalidated for the CPU.
+    assert_eq!(
+        after.sync_bytes_for_device - before.sync_bytes_for_device,
+        pqc_hw::mldsa_sign_lane::SIGN_DEVICE_EXTENT as u64
+    );
+    assert_eq!(
+        after.sync_bytes_for_cpu - before.sync_bytes_for_cpu,
+        pqc_hw::mldsa_sign_lane::SIGN_OUTPUT_BYTES as u64
+    );
     println!(
         "per sign: sync_for_device {} B, sync_for_cpu {} B",
         after.sync_bytes_for_device - before.sync_bytes_for_device,
         after.sync_bytes_for_cpu - before.sync_bytes_for_cpu
     );
+}
+
+#[test]
+fn the_lane_reloads_only_when_the_matrix_id_changes() {
+    use pqc_hw::mldsa_sign_lane::{SignInputs, SliceInputs};
+    let sim = sim(SimTiming::default());
+    let mut lane = lane(&sim, WaitMode::Spin);
+    let (a, s1, s2, t0, mu, rho) = inputs(21);
+    let (b, ..) = inputs(22);
+    let input = |matrix: &'static [i32]| SliceInputs { matrix, s1: &s1, s2: &s2, t0: &t0, mu: &mu, rho_prime: &rho, randomized: true };
+    let a: &'static [i32] = Box::leak(a.into_boxed_slice());
+    let b: &'static [i32] = Box::leak(b.into_boxed_slice());
+    let mut signature = vec![0u8; SIGNATURE_BYTES];
+    for (matrix, loads) in [(a, 1), (a, 1), (b, 2), (b, 2), (a, 3)] {
+        lane.sign_into(&input(matrix), 128, TIMEOUT, &mut signature).unwrap();
+        assert_eq!(signature, expected(matrix, &s1, &s2, &t0, &mu, &rho));
+        assert_eq!(sim.counters().loads, loads);
+        assert_eq!(lane.resident_matrix(), Some(input(matrix).matrix_id()));
+    }
+    // A wrong-sized output buffer is refused before anything is submitted.
+    let signs = sim.counters().signs;
+    assert!(lane.sign_into(&input(a), 128, TIMEOUT, &mut [0u8; 10]).is_err());
+    assert_eq!(sim.counters().signs, signs);
 }

@@ -203,3 +203,37 @@ fn device_failures_fall_back_to_identical_software_signatures() {
     }
     assert!(fixture.signs() > before, "lanes are back in service after faults");
 }
+
+#[test]
+fn alternating_keys_use_the_right_matrix_and_prefer_the_lane_that_holds_it() {
+    let (_guard, fixture) = fixture();
+    let keys: Vec<Vec<u8>> = (30..33).map(key).collect();
+    hw_accel::set_mldsa65_sign_enabled(false);
+    let expected: Vec<Vec<u8>> = keys
+        .iter()
+        .map(|sk| handlers::sign_ml_dsa(CKM_ML_DSA, CKP_ML_DSA_65, sk, b"alternate", &[], true).unwrap())
+        .collect();
+    hw_accel::set_mldsa65_sign_enabled(true);
+    let loads = || fixture.lanes.iter().map(|l| l.counters().loads).sum::<u64>();
+    // Three keys over two lanes, one caller: every switch of key on a lane
+    // must reload that lane's matrix (a stale matrix would sign wrongly).
+    for round in 0..4 {
+        for (sk, want) in keys.iter().zip(&expected) {
+            let got = handlers::sign_ml_dsa(CKM_ML_DSA, CKP_ML_DSA_65, sk, b"alternate", &[], true).unwrap();
+            assert_eq!(&got, want, "round {round}");
+        }
+    }
+    // Two keys over two lanes: after one upload each, affinity keeps each
+    // key on the lane that holds its matrix.
+    let (a, b) = (&keys[0], &keys[1]);
+    let _ = handlers::sign_ml_dsa(CKM_ML_DSA, CKP_ML_DSA_65, a, b"warm", &[], true).unwrap();
+    let _ = handlers::sign_ml_dsa(CKM_ML_DSA, CKP_ML_DSA_65, b, b"warm", &[], true).unwrap();
+    let before = loads();
+    for _ in 0..10 {
+        let got = handlers::sign_ml_dsa(CKM_ML_DSA, CKP_ML_DSA_65, a, b"alternate", &[], true).unwrap();
+        assert_eq!(got, expected[0]);
+        let got = handlers::sign_ml_dsa(CKM_ML_DSA, CKP_ML_DSA_65, b, b"alternate", &[], true).unwrap();
+        assert_eq!(got, expected[1]);
+    }
+    assert_eq!(loads(), before, "no matrix upload once each key has a lane");
+}

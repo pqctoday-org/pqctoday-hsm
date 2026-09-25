@@ -235,8 +235,10 @@ pub(crate) fn sign_internal<
         expanded = stage!(ExpandA, expand_a::<CTEST, K, L>(rho));
         &expanded
     };
+    // The resident matrix/vector accelerator (older bitstreams) takes Â
+    // flattened; only build that copy when such a hook is installed.
     #[cfg(feature = "hw-accel")]
-    let cap_a_flat = stage!(Flatten, (K == 6 && L == 5).then(|| {
+    let cap_a_flat = stage!(Flatten, (K == 6 && L == 5 && crate::hw_accel::has_mldsa65_matvec_hook()).then(|| {
         cap_a_hat
             .iter()
             .flat_map(|row| row.iter())
@@ -276,25 +278,20 @@ pub(crate) fn sign_internal<
     });
 
     #[cfg(feature = "hw-accel")]
-    if K == 6 && L == 5 {
-        let (s1, s2, t0) = stage!(Flatten, (
-            s_1_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>(),
-            s_2_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>(),
-            t_0_hat_mont.iter().flat_map(|p| p.0).collect::<Vec<i32>>(),
-        ));
-        let signature = stage!(Accelerator, crate::hw_accel::mldsa65_sign(
-            cap_a_flat.as_deref().expect("ML-DSA-65 matrix"),
-            &s1,
-            &s2,
-            &t0,
-            &mu,
-            &rho_prime,
-            rnd.iter().any(|byte| *byte != 0),
-        ));
-        if let Some(signature) = signature {
-            if let Ok(signature) = signature.try_into() {
-                return signature;
-            }
+    if K == 6 && L == 5 && crate::hw_accel::has_mldsa65_sign_hook() {
+        let input = crate::hw_accel::Mldsa65SignInput {
+            rho,
+            matrix: cap_a_hat.as_flattened(),
+            s1: s_1_hat_mont,
+            s2: s_2_hat_mont,
+            t0: t_0_hat_mont,
+            mu: &mu,
+            rho_prime: &rho_prime,
+            randomized: rnd.iter().any(|byte| *byte != 0),
+        };
+        let mut signature = [0u8; SIG_LEN];
+        if stage!(Accelerator, crate::hw_accel::mldsa65_sign(&input, &mut signature)) {
+            return signature;
         }
     }
 
