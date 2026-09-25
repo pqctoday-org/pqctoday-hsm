@@ -497,7 +497,7 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 		{
 			ERROR_MSG("Invalid ML-DSA parameter size (%lu, expected %lu)",
 				pMechanism->ulParameterLen, (unsigned long)sizeof(CK_SIGN_ADDITIONAL_CONTEXT));
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_SIGN_ADDITIONAL_CONTEXT* ctx =
 			(CK_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
@@ -518,13 +518,13 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 				break;
 			default:
 				ERROR_MSG("Invalid hedge variant %lu", ctx->hedgeVariant);
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 		}
 
 		if (ctx->ulContextLen > 255)
 		{
 			ERROR_MSG("ML-DSA context string too long (%lu, max 255)", ctx->ulContextLen);
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		out.contextLen = ctx->ulContextLen;
 		if (ctx->ulContextLen > 0)
@@ -532,7 +532,7 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 			if (ctx->pContext == NULL_PTR)
 			{
 				ERROR_MSG("ML-DSA context pointer is NULL with non-zero length");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
@@ -546,7 +546,7 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 			ERROR_MSG("Invalid HashML-DSA parameter size (%lu, expected %lu)",
 				pMechanism->ulParameterLen,
 				(unsigned long)sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT));
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_HASH_SIGN_ADDITIONAL_CONTEXT* ctx =
 			(CK_HASH_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
@@ -567,18 +567,18 @@ static CK_RV parseMLDSASignContext(CK_MECHANISM_PTR pMechanism, MLDSA_SIGN_PARAM
 				break;
 			default:
 				ERROR_MSG("Invalid hedge variant %lu", ctx->hedgeVariant);
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 		}
 
 		if (ctx->ulContextLen > 255)
 		{
 			ERROR_MSG("ML-DSA context string too long (%lu)", ctx->ulContextLen);
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		out.contextLen = ctx->ulContextLen;
 		if (ctx->ulContextLen > 0)
 		{
-			if (ctx->pContext == NULL_PTR) return CKR_ARGUMENTS_BAD;
+			if (ctx->pContext == NULL_PTR) return CKR_MECHANISM_PARAM_INVALID;
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
 		// Remediation R37 (phase 8): this branch (CK_HASH_SIGN_ADDITIONAL_
@@ -628,7 +628,7 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 			ERROR_MSG("Invalid SLH-DSA parameter size (%lu, expected %lu)",
 				pMechanism->ulParameterLen,
 				(unsigned long)sizeof(CK_SIGN_ADDITIONAL_CONTEXT));
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_SIGN_ADDITIONAL_CONTEXT* ctx =
 			(CK_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
@@ -640,7 +640,7 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 		{
 			ERROR_MSG("SLH-DSA context string too long (%lu, max 255)",
 				ctx->ulContextLen);
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		out.contextLen = ctx->ulContextLen;
 		if (ctx->ulContextLen > 0)
@@ -648,7 +648,7 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 			if (ctx->pContext == NULL_PTR)
 			{
 				ERROR_MSG("SLH-DSA context pointer is NULL with non-zero length");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
@@ -662,7 +662,7 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 			ERROR_MSG("Invalid HashSLH-DSA parameter size (%lu, expected %lu)",
 				pMechanism->ulParameterLen,
 				(unsigned long)sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT));
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_HASH_SIGN_ADDITIONAL_CONTEXT* ctx =
 			(CK_HASH_SIGN_ADDITIONAL_CONTEXT*)pMechanism->pParameter;
@@ -673,12 +673,12 @@ static CK_RV parseSLHDSASignContext(CK_MECHANISM_PTR pMechanism, SLHDSA_SIGN_PAR
 		if (ctx->ulContextLen > 255)
 		{
 			ERROR_MSG("SLH-DSA context string too long (%lu)", ctx->ulContextLen);
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		out.contextLen = ctx->ulContextLen;
 		if (ctx->ulContextLen > 0)
 		{
-			if (ctx->pContext == NULL_PTR) return CKR_ARGUMENTS_BAD;
+			if (ctx->pContext == NULL_PTR) return CKR_MECHANISM_PARAM_INVALID;
 			memcpy(out.context, ctx->pContext, ctx->ulContextLen);
 		}
 		// Remediation R37 (phase 8): see parseMLDSASignContext's identical
@@ -799,7 +799,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    pMechanism->ulParameterLen != sizeof(CK_RSA_PKCS_PSS_PARAMS))
 			{
 				ERROR_MSG("Invalid RSA-PSS parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_PKCS_PSS;
 			unsigned long allowedMgf;
@@ -832,12 +832,12 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 					break;
 				default:
 					ERROR_MSG("Invalid RSA-PSS hash");
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			if (CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != allowedMgf) {
 				ERROR_MSG("Hash and MGF don't match");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			pssParam.sLen = CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->sLen;
@@ -859,7 +859,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA1)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA1_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA1;
@@ -882,7 +882,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA224)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA224_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA224;
@@ -905,7 +905,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA256)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA256_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA256;
@@ -928,7 +928,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA384)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA384_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA384;
@@ -951,7 +951,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA512)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA512_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA512;
@@ -974,7 +974,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_224)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_224_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_224;
@@ -997,7 +997,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_256)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_256_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_256;
@@ -1020,7 +1020,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_384)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_384_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_384;
@@ -1043,7 +1043,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_512)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_512_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_512;
@@ -1156,7 +1156,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
 			{
 				ERROR_MSG("CKM_HASH_ML_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::HASH_MLDSA;
 			// Remediation R37 (phase 8): genuinely single-part -- the
@@ -1184,7 +1184,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				case CKM_SHA3_512: mldsaSignParam.hashAlg = HashAlgo::SHA3_512; break;
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_ML_DSA", hctx->hash);
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 			param = &mldsaSignParam;
 			paramLen = sizeof(mldsaSignParam);
@@ -1266,7 +1266,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
 			{
 				ERROR_MSG("CKM_HASH_SLH_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::HASH_SLHDSA;
 			// Remediation R37 (phase 8): see the CKM_HASH_ML_DSA case's
@@ -1290,7 +1290,7 @@ CK_RV SoftHSM::AsymSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechan
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_SLH_DSA",
 					          hctx->hash);
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 			param = &slhdsaSignParam;
 			paramLen = sizeof(slhdsaSignParam);
@@ -2541,7 +2541,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_RSA_PKCS_PSS_PARAMS))
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_PKCS_PSS;
 
@@ -2573,11 +2573,11 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 					expectedMgf = CKG_MGF1_SHA512;
 					break;
 				default:
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			if (CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != expectedMgf) {
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 
 			pssParam.sLen = CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->sLen;
@@ -2599,7 +2599,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA1)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA1_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA1;
@@ -2622,7 +2622,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA224)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA224_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA224;
@@ -2645,7 +2645,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA256)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA256_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA256;
@@ -2668,7 +2668,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA384)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA384_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA384;
@@ -2691,7 +2691,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA512)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA512_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA512;
@@ -2714,7 +2714,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_224)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_224_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_224;
@@ -2737,7 +2737,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_256)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_256_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_256;
@@ -2760,7 +2760,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_384)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_384_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_384;
@@ -2783,7 +2783,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    CK_RSA_PKCS_PSS_PARAMS_PTR(pMechanism->pParameter)->mgf != CKG_MGF1_SHA3_512)
 			{
 				ERROR_MSG("Invalid parameters");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::RSA_SHA3_512_PKCS_PSS;
 			pssParam.hashAlg = HashAlgo::SHA3_512;
@@ -2896,7 +2896,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
 			{
 				ERROR_MSG("CKM_HASH_ML_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::HASH_MLDSA;
 			// Remediation R37 (phase 8): genuinely single-part -- see the
@@ -2919,7 +2919,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				case CKM_SHA3_512: mldsaSignParam.hashAlg = HashAlgo::SHA3_512; break;
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_ML_DSA", hctx->hash);
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 			param = &mldsaSignParam;
 			paramLen = sizeof(mldsaSignParam);
@@ -3001,7 +3001,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 			    pMechanism->ulParameterLen != sizeof(CK_HASH_SIGN_ADDITIONAL_CONTEXT))
 			{
 				ERROR_MSG("CKM_HASH_SLH_DSA requires CK_HASH_SIGN_ADDITIONAL_CONTEXT");
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			mechanism = AsymMech::HASH_SLHDSA;
 			// Remediation R37 (phase 8): see the CKM_HASH_ML_DSA case's
@@ -3025,7 +3025,7 @@ CK_RV SoftHSM::AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMech
 				default:
 					ERROR_MSG("Unsupported hash 0x%08lx for CKM_HASH_SLH_DSA",
 					          hctx->hash);
-					return CKR_ARGUMENTS_BAD;
+					return CKR_MECHANISM_PARAM_INVALID;
 			}
 			param = &slhdsaSignParam;
 			paramLen = sizeof(slhdsaSignParam);
@@ -3808,7 +3808,15 @@ CK_RV SoftHSM::C_SignMessage(CK_SESSION_HANDLE hSession,
 	// multi-message contract (caller may send further messages under this session).
 	session->setOpType(SESSION_OP_SIGN);
 	CK_RV rv = AsymSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
-	if (rv == CKR_OK)
+	// PKCS#11 v3.2 §5.14.2: a C_SignMessage call "begins and terminates a
+	// message signing operation unless it returns CKR_BUFFER_TOO_SMALL", and
+	// "C_SignMessage does not finish the message-based signing process" — only
+	// C_MessageSignFinal (§5.14.5) does. AsymSign leaves its context intact on
+	// CKR_BUFFER_TOO_SMALL, so restoring the message-sign state there is all a
+	// caller's retry needs. Before this, the state was left at SESSION_OP_SIGN
+	// and the retry got CKR_OPERATION_NOT_INITIALIZED (G-8 finding E8,
+	// 2026-09-25) — the same handling C_SignMessageNext already had.
+	if (rv == CKR_OK || rv == CKR_BUFFER_TOO_SMALL)
 	{
 		session->setOpType(SESSION_OP_MESSAGE_SIGN);
 		if (snap) session->setParameters(snap, snapLen);

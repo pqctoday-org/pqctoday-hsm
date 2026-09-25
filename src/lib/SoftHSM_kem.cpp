@@ -364,6 +364,14 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	CK_RV rv = haveRead(session->getState(), isKeyOnToken, isKeyPrivate);
 	if (rv != CKR_OK) return rv;
 
+	// §5.1.6: CKR_KEY_TYPE_INCONSISTENT "has a higher priority than
+	// CKR_KEY_FUNCTION_NOT_PERMITTED", and §5.18.8 lists only the former for
+	// C_EncapsulateKey, so the key-type test runs before the CKA_ENCAPSULATE
+	// test (G-8 finding E6, 2026-09-25).
+	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
+	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_ML_KEM)
+		return CKR_KEY_TYPE_INCONSISTENT;
+
 	// Check capability
 	if (!keyObj->getBooleanValue(CKA_ENCAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
@@ -373,11 +381,6 @@ CK_RV SoftHSM::encapsulateKeyImpl
 	// (its convention: CKR_MECHANISM_INVALID for a disallowed mechanism).
 	if (!isMechanismPermitted(keyObj, pMechanism->mechanism))
 		return CKR_MECHANISM_INVALID;
-
-	// Check key type
-	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
-	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_ML_KEM)
-		return CKR_KEY_TYPE_INCONSISTENT;
 
 	// Load the ML-KEM algorithm
 	AsymmetricAlgorithm* mlkem = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::MLKEM);
@@ -1017,6 +1020,15 @@ CK_RV SoftHSM::encapsulateECDH
 	CK_RV rv = haveRead(session->getState(), isKeyOnToken, isKeyPrivate);
 	if (rv != CKR_OK) return rv;
 
+	// §5.1.6: CKR_KEY_TYPE_INCONSISTENT "has a higher priority than
+	// CKR_KEY_FUNCTION_NOT_PERMITTED", and §5.18.8 lists only the former for
+	// C_EncapsulateKey, so the key-type test runs before the CKA_ENCAPSULATE
+	// test (G-8 finding E6, 2026-09-25).
+	CK_ULONG peerKeyType = keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED);
+	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
+	    (peerKeyType != CKK_EC && peerKeyType != CKK_EC_MONTGOMERY))
+		return CKR_KEY_TYPE_INCONSISTENT;
+
 	if (!keyObj->getBooleanValue(CKA_ENCAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
 
@@ -1025,11 +1037,6 @@ CK_RV SoftHSM::encapsulateECDH
 	// CKM_ECDH1_DERIVE (see encapsulateKeyImpl), so the mechanism is fixed.
 	if (!isMechanismPermitted(keyObj, CKM_ECDH1_DERIVE))
 		return CKR_MECHANISM_INVALID;
-
-	CK_ULONG peerKeyType = keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED);
-	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
-	    (peerKeyType != CKK_EC && peerKeyType != CKK_EC_MONTGOMERY))
-		return CKR_KEY_TYPE_INCONSISTENT;
 
 	// Peer's raw public point — PKCS#11 v3.2 Table 78 stores this under
 	// CKA_EC_POINT for BOTH CKK_EC and CKK_EC_MONTGOMERY (confirmed against
@@ -1649,17 +1656,20 @@ CK_RV SoftHSM::encapsulateClassicMcEliece
 	CK_RV rv = haveRead(session->getState(), isKeyOnToken, isKeyPrivate);
 	if (rv != CKR_OK) return rv;
 
+	// §5.1.6: CKR_KEY_TYPE_INCONSISTENT "has a higher priority than
+	// CKR_KEY_FUNCTION_NOT_PERMITTED", and §5.18.8 lists only the former for
+	// C_EncapsulateKey, so the key-type test runs before the CKA_ENCAPSULATE
+	// test (G-8 finding E6, 2026-09-25).
+	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
+	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_PQCTODAY_CLASSIC_MCELIECE)
+		return CKR_KEY_TYPE_INCONSISTENT;
+
 	// Check capability
 	if (!keyObj->getBooleanValue(CKA_ENCAPSULATE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
 
 	if (!isMechanismPermitted(keyObj, CKM_PQCTODAY_CLASSIC_MCELIECE_ENCAPSULATE))
 		return CKR_MECHANISM_INVALID;
-
-	// Check key type
-	if (keyObj->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED) != CKO_PUBLIC_KEY ||
-	    keyObj->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_PQCTODAY_CLASSIC_MCELIECE)
-		return CKR_KEY_TYPE_INCONSISTENT;
 
 	// Load the Classic McEliece algorithm
 	AsymmetricAlgorithm* mceliece = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::CLASSICMCELIECE);

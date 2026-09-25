@@ -18,7 +18,7 @@
             "test": "KWP_matches_deprecated_PAD"
         },
         {
-            "details": "RV=7 (want CKR_ARGUMENTS_BAD=0x7)",
+            "details": "RV=113 (want CKR_MECHANISM_PARAM_INVALID=0x71)",
             "status": "PASS",
             "test": "KWP_rejects_unsupported_iv_param"
         }
@@ -691,14 +691,14 @@
             "test": "ML-KEM_Implicit_Rejection"
         },
         {
-            "details": "ctx>255 must be rejected, RV=7",
+            "details": "ctx>255 must be rejected, RV=113",
             "status": "PASS",
             "test": "ML-DSA_Oversized_Ctx"
         }
     ],
     "Fork": [
         {
-            "details": "child pid 194697 exited status 0",
+            "details": "child pid 1572973 exited status 0",
             "status": "PASS",
             "test": "Child_survived_and_reported"
         },
@@ -738,7 +738,7 @@
             "test": "Child_writes_do_not_reach_parent"
         },
         {
-            "details": "8 sibling pairs, all distinct=1 childA=7E10DA5D89676594… childB=FC4C7B3FC73028C6… (identical output would repeat ECDSA nonces)",
+            "details": "8 sibling pairs, all distinct=1 childA=1039BEDBD4FE7699… childB=EBA074CA03844118… (identical output would repeat ECDSA nonces)",
             "status": "PASS",
             "test": "Sibling_children_RNG_diverge"
         },
@@ -753,7 +753,7 @@
             "test": "Fork_safe_interface_retrievable"
         },
         {
-            "details": "child=EA85153492D083FC… parent=58558A75C78E5200… preFork=682907BC174326E9…",
+            "details": "child=0224091802E68B61… parent=BAE785F7D2C07436… preFork=B9BC441C348C21D0…",
             "status": "PASS",
             "test": "Parent_and_child_RNG_diverge"
         }
@@ -918,7 +918,7 @@
             "test": "Flag_SLH_DSA_MESSAGE"
         },
         {
-            "details": "167 advertised, 0 rejected by C_GetMechanismInfo",
+            "details": "168 advertised, 0 rejected by C_GetMechanismInfo",
             "status": "PASS",
             "test": "AdvertiseSubsetDispatch"
         }
@@ -1236,7 +1236,7 @@
             "test": "C_Verify_PSS"
         },
         {
-            "details": "expected ARGUMENTS_BAD/MECHANISM_PARAM_INVALID, RV=7",
+            "details": "expected CKR_MECHANISM_PARAM_INVALID, RV=113",
             "status": "PASS",
             "test": "C_SignInit_PSS_wrong_hashAlg"
         }
@@ -2094,12 +2094,12 @@
             "test": "Decrypt_0x00001085"
         },
         {
-            "details": "C_EncryptInit RV=7",
+            "details": "C_EncryptInit RV=113",
             "status": "PASS",
             "test": "Encrypt_0x00001088"
         },
         {
-            "details": "C_DecryptInit RV=7",
+            "details": "C_DecryptInit RV=113",
             "status": "PASS",
             "test": "Decrypt_0x00001088"
         },
@@ -2144,12 +2144,12 @@
             "test": "Verify_0x0000108a"
         },
         {
-            "details": "C_EncryptInit RV=7",
+            "details": "C_EncryptInit RV=113",
             "status": "PASS",
             "test": "Encrypt_0x00001086"
         },
         {
-            "details": "C_DecryptInit RV=7",
+            "details": "C_DecryptInit RV=113",
             "status": "PASS",
             "test": "Decrypt_0x00001086"
         },
@@ -2169,12 +2169,12 @@
             "test": "OutOfScope_0x00001104"
         },
         {
-            "details": "C_EncryptInit RV=7",
+            "details": "C_EncryptInit RV=113",
             "status": "PASS",
             "test": "Encrypt_0x00001087"
         },
         {
-            "details": "C_DecryptInit RV=7",
+            "details": "C_DecryptInit RV=113",
             "status": "PASS",
             "test": "Decrypt_0x00001087"
         },
@@ -2294,102 +2294,102 @@
             "test": "OutOfScope_0x00001050"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00001041"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00001041"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00001042"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00001042"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00001043"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00001043"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00001044"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00001044"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00001045"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00001045"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00001047"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00001047"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00001048"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00001048"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00001049"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00001049"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x0000104a"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x0000104a"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00001046"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00001046"
         },
@@ -2406,25 +2406,30 @@
         {
             "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
             "status": "SKIP",
+            "test": "OutOfScope_0x0000140b"
+        },
+        {
+            "details": "no DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT flag -- derive/generate/wrap-only mechanism, out of this invariant's documented forward-direction scope; covered by this file's per-mechanism round-trip tests instead",
+            "status": "SKIP",
             "test": "OutOfScope_0x00001056"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00001057"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00001057"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x80001057"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x80001057"
         },
@@ -2434,12 +2439,12 @@
             "test": "OutOfScope_0x00000350"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x0000001f"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x0000001f"
         },
@@ -2544,12 +2549,12 @@
             "test": "Verify_0x0000002c"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000034"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000034"
         },
@@ -2664,12 +2669,12 @@
             "test": "OutOfScope_0x0000402a"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00004033"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00004033"
         },
@@ -2724,12 +2729,12 @@
             "test": "Verify_0x00000212"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000005"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000005"
         },
@@ -2819,12 +2824,12 @@
             "test": "OutOfScope_0x00001054"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000001"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000001"
         },
@@ -2854,22 +2859,22 @@
             "test": "Decrypt_0x00000009"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x0000000d"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x0000000d"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000003"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000003"
         },
@@ -2884,22 +2889,22 @@
             "test": "Decrypt_0x00000003"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000006"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000006"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x0000000e"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x0000000e"
         },
@@ -2929,22 +2934,22 @@
             "test": "Verify_0x00000257"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000046"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000046"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000047"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000047"
         },
@@ -2979,22 +2984,22 @@
             "test": "OutOfScope_0x00000393"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000040"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000040"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000043"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000043"
         },
@@ -3029,22 +3034,22 @@
             "test": "OutOfScope_0x00000394"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000041"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000041"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000044"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000044"
         },
@@ -3074,22 +3079,22 @@
             "test": "Verify_0x000002b7"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000066"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000066"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000067"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000067"
         },
@@ -3124,22 +3129,22 @@
             "test": "OutOfScope_0x00000397"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000060"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000060"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000063"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000063"
         },
@@ -3174,22 +3179,22 @@
             "test": "OutOfScope_0x00000399"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000061"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000061"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000064"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000064"
         },
@@ -3224,22 +3229,22 @@
             "test": "OutOfScope_0x0000039a"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000062"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000062"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000065"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000065"
         },
@@ -3334,22 +3339,22 @@
             "test": "OutOfScope_0x00000395"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000042"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000042"
         },
         {
-            "details": "C_SignInit RV=7",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00000045"
         },
         {
-            "details": "C_VerifyInit RV=7",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00000045"
         },
@@ -3424,22 +3429,22 @@
             "test": "OutOfScope_0x80001059"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00004036"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00004036"
         },
         {
-            "details": "C_SignInit RV=0",
+            "details": "C_SignInit RV=99",
             "status": "PASS",
             "test": "Sign_0x00004037"
         },
         {
-            "details": "C_VerifyInit RV=0",
+            "details": "C_VerifyInit RV=99",
             "status": "PASS",
             "test": "Verify_0x00004037"
         },
@@ -3454,29 +3459,29 @@
             "test": "OutOfScope_0x00004034"
         },
         {
-            "details": "167 advertised, 120 mechanisms probed (230 Init calls across DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT), 47 out-of-scope (derive/generate/wrap-only), 0 answered CKR_MECHANISM_INVALID",
+            "details": "168 advertised, 120 mechanisms probed (230 Init calls across DIGEST/SIGN/VERIFY/ENCRYPT/DECRYPT), 48 out-of-scope (derive/generate/wrap-only), 0 answered CKR_MECHANISM_INVALID",
             "status": "PASS",
             "test": "Summary_AdvertisedImpliesDispatchable"
         }
     ],
     "KCV": [
         {
-            "details": "3 bytes: 3E7952",
+            "details": "3 bytes: 100BE9",
             "status": "PASS",
             "test": "AES_Generate_KCV_Present"
         },
         {
-            "details": "HSM=3E7952 == oracle=3E7952",
+            "details": "HSM=100BE9 == oracle=100BE9",
             "status": "PASS",
             "test": "AES_Generate_KCV_Equals_OracleEcbZeroBlock"
         },
         {
-            "details": "3 bytes: 58B395",
+            "details": "3 bytes: 2DDEF9",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Present"
         },
         {
-            "details": "original=58B395 unwrapped=58B395",
+            "details": "original=2DDEF9 unwrapped=2DDEF9",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Equals_Original"
         },
@@ -3617,7 +3622,7 @@
             "test": "Encap_KCV_present"
         },
         {
-            "details": "HSM=54CAAE oracle=54CAAE",
+            "details": "HSM=0A856D oracle=0A856D",
             "status": "PASS",
             "test": "Encap_KCV_equals_SHA1_oracle"
         },
@@ -3627,12 +3632,12 @@
             "test": "Decap_KCV_present"
         },
         {
-            "details": "HSM=54CAAE oracle=54CAAE",
+            "details": "HSM=0A856D oracle=0A856D",
             "status": "PASS",
             "test": "Decap_KCV_equals_SHA1_oracle"
         },
         {
-            "details": "encap=54CAAE decap=54CAAE",
+            "details": "encap=0A856D decap=0A856D",
             "status": "PASS",
             "test": "Encap_and_Decap_KCV_agree"
         },
@@ -3657,12 +3662,12 @@
             "test": "ECDH_Encap_KCV_present"
         },
         {
-            "details": "HSM=E42D9E oracle=E42D9E",
+            "details": "HSM=3C8FA3 oracle=3C8FA3",
             "status": "PASS",
             "test": "ECDH_Encap_KCV_equals_SHA1_oracle"
         },
         {
-            "details": "HSM=E42D9E oracle=E42D9E",
+            "details": "HSM=3C8FA3 oracle=3C8FA3",
             "status": "PASS",
             "test": "ECDH_Decap_KCV_equals_SHA1_oracle"
         }
@@ -3810,7 +3815,7 @@
     ],
     "KcvTemplate": [
         {
-            "details": "engine=FEB0BF oracle=FEB0BF",
+            "details": "engine=84C85B oracle=84C85B",
             "status": "PASS",
             "test": "GenerateKey_AES_KCV_matches_oracle"
         },
@@ -3830,7 +3835,7 @@
             "test": "GenerateKey_AES_zero_length_suppresses"
         },
         {
-            "details": "engine=0C28A5 oracle=0C28A5",
+            "details": "engine=22613B oracle=22613B",
             "status": "PASS",
             "test": "GenerateKey_Generic_KCV_matches_oracle"
         },
@@ -3850,12 +3855,12 @@
             "test": "GenerateKey_Generic_zero_length_suppresses"
         },
         {
-            "details": "engine=57B956 oracle=57B956",
+            "details": "engine=25FEF2 oracle=25FEF2",
             "status": "PASS",
             "test": "UnwrapKey_AES_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=57B956",
+            "details": "RV=0 readback=25FEF2",
             "status": "PASS",
             "test": "UnwrapKey_AES_correct_value_accepted"
         },
@@ -3870,12 +3875,12 @@
             "test": "UnwrapKey_AES_zero_length_suppresses"
         },
         {
-            "details": "engine=9CA766 oracle=9CA766",
+            "details": "engine=7D1582 oracle=7D1582",
             "status": "PASS",
             "test": "DeriveKey_HKDF_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=9CA766",
+            "details": "RV=0 readback=7D1582",
             "status": "PASS",
             "test": "DeriveKey_HKDF_correct_value_accepted"
         },
@@ -3890,12 +3895,12 @@
             "test": "DeriveKey_HKDF_zero_length_suppresses"
         },
         {
-            "details": "engine=ADE76E oracle=ADE76E",
+            "details": "engine=CFB521 oracle=CFB521",
             "status": "PASS",
             "test": "DeriveKey_ECDH_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=ADE76E",
+            "details": "RV=0 readback=CFB521",
             "status": "PASS",
             "test": "DeriveKey_ECDH_correct_value_accepted"
         },
@@ -3930,12 +3935,12 @@
             "test": "DeriveKey_PBKD2_zero_length_suppresses"
         },
         {
-            "details": "engine=035468 oracle=035468",
+            "details": "engine=586570 oracle=586570",
             "status": "PASS",
             "test": "DeriveKey_SP800108_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=035468",
+            "details": "RV=0 readback=586570",
             "status": "PASS",
             "test": "DeriveKey_SP800108_correct_value_accepted"
         },
@@ -3950,12 +3955,12 @@
             "test": "DeriveKey_SP800108_zero_length_suppresses"
         },
         {
-            "details": "CKA_VALUE unreadable (RV=17), engine KCV=33E7F5",
+            "details": "CKA_VALUE unreadable (RV=17), engine KCV=52C325",
             "status": "SKIP",
             "test": "DeriveKey_Concat_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=33E7F5",
+            "details": "RV=0 readback=52C325",
             "status": "PASS",
             "test": "DeriveKey_Concat_correct_value_accepted"
         },
@@ -3970,12 +3975,12 @@
             "test": "DeriveKey_Concat_zero_length_suppresses"
         },
         {
-            "details": "engine=BC947A oracle=BC947A",
+            "details": "engine=C47B41 oracle=C47B41",
             "status": "PASS",
             "test": "DeriveKey_X25519_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=BC947A",
+            "details": "RV=0 readback=C47B41",
             "status": "PASS",
             "test": "DeriveKey_X25519_correct_value_accepted"
         },
@@ -4373,7 +4378,7 @@
             "test": "ML_DSA_44_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0x8c len=2560",
+            "details": "first byte=0xbb len=2560",
             "status": "PASS",
             "test": "ML_DSA_44_CKA_VALUE_not_DER_wrapped"
         },
@@ -4393,7 +4398,7 @@
             "test": "ML_KEM_768_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0xb2 len=2400",
+            "details": "first byte=0x3a len=2400",
             "status": "PASS",
             "test": "ML_KEM_768_CKA_VALUE_not_DER_wrapped"
         },
@@ -4408,7 +4413,7 @@
             "test": "SLH_DSA_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0x6f len=64",
+            "details": "first byte=0x3f len=64",
             "status": "PASS",
             "test": "SLH_DSA_CKA_VALUE_not_DER_wrapped"
         },
@@ -4836,10 +4841,10 @@
     ],
     "_summary": {
         "engine": "./build/src/lib/libsofthsmv3.so",
-        "engine_commit": "808fc95cd97049e6410489ed6daf879e381cdc26",
+        "engine_commit": "2a8e174d837754a9f6b1a2560cfbb89bda593351",
         "fail": 0,
         "pass": 891,
-        "skip": 50,
+        "skip": 51,
         "xfail_known_engine_bugs": 0
     }
 }
