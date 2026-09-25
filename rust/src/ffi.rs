@@ -7221,10 +7221,11 @@ fn C_Sign_impl(
                     sign_rsa_pss_bare(hash_alg, &sk_bytes, eff_msg, s_len)
                 }
             }
-            CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
-            | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => {
-                sign_ecdsa(eff_mech, ps, &sk_bytes, eff_msg)
-            }
+            // E11 — CKM_ECDSA_SHA1 / CKM_ECDSA_SHA224 are advertised and
+            // sign_ecdsa implements them; this list had left them out.
+            CKM_ECDSA | CKM_ECDSA_SHA1 | CKM_ECDSA_SHA224 | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384
+            | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
+            | CKM_ECDSA_SHA3_512 => sign_ecdsa(eff_mech, ps, &sk_bytes, eff_msg),
             // ctx_bytes is CK_EDDSA_PARAMS.pContextData/ulContextDataLen,
             // parsed by parse_sign_mech_params's CKM_EDDSA branch — empty
             // means plain EdDSA, non-empty means RFC 8032 Ed25519ctx/
@@ -7352,7 +7353,9 @@ fn C_Verify_impl(
             || m == CKM_EDDSA_PH
             || matches!(
                 m,
-                CKM_ECDSA_SHA256
+                CKM_ECDSA_SHA1
+                    | CKM_ECDSA_SHA224
+                    | CKM_ECDSA_SHA256
                     | CKM_ECDSA_SHA384
                     | CKM_ECDSA_SHA512
                     | CKM_ECDSA_SHA3_224
@@ -7595,8 +7598,9 @@ fn C_Verify_impl(
                 }
             }
             // PKCS#11 v3.2: EC public key material is in CKA_EC_POINT.
-            CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
-            | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => {
+            CKM_ECDSA | CKM_ECDSA_SHA1 | CKM_ECDSA_SHA224 | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384
+            | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
+            | CKM_ECDSA_SHA3_512 => {
                 match &ec_point_bytes {
                     Some(b) => verify_ecdsa(eff_mech, ps, b, eff_msg, sig_bytes),
                     None => Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -13121,6 +13125,8 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SHA3_512_RSA_PKCS
             | CKM_SHA3_512_RSA_PKCS_PSS
             | CKM_SHA3_384_RSA_PKCS_PSS
+            | CKM_ECDSA_SHA1
+            | CKM_ECDSA_SHA224
             | CKM_ECDSA_SHA256
             | CKM_ECDSA_SHA384
             | CKM_ECDSA_SHA512

@@ -231,8 +231,8 @@ fn sign_with_pss_salt_impl(
         | CKM_SHA256_RSA_PKCS_PSS | CKM_SHA384_RSA_PKCS_PSS | CKM_SHA512_RSA_PKCS_PSS => {
             sign_rsa(mechanism, &sk_bytes, data, pss_salt_len)
         }
-        CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
-        | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
+        CKM_ECDSA | CKM_ECDSA_SHA1 | CKM_ECDSA_SHA224 | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384
+        | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
         | CKM_ECDSA_SHA3_512 => sign_ecdsa(mechanism, ps, &sk_bytes, data),
         CKM_EDDSA => match eddsa_ctx {
             Some(ctx) if !ctx.is_empty() => sign_eddsa_ctx(&sk_bytes, data, ctx),
@@ -414,8 +414,8 @@ fn verify_with_pss_salt_impl(
                 None => Err(CKR_KEY_TYPE_INCONSISTENT),
             }
         }
-        CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
-        | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
+        CKM_ECDSA | CKM_ECDSA_SHA1 | CKM_ECDSA_SHA224 | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384
+        | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
         | CKM_ECDSA_SHA3_512 => match ec_point {
             Some(point) => verify_ecdsa(mechanism, ps, &point, data, signature),
             None => Err(CKR_KEY_TYPE_INCONSISTENT),

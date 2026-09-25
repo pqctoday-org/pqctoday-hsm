@@ -799,3 +799,50 @@ fn e17_hmac_advertised_bounds_execute() {
         Ok(hx("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"))
     );
 }
+
+// ═══ E11 — advertised cells that did not execute (G-8 probes) ═════════════
+//
+// For each cell the G-8 probes found advertised but failing, the fix was to
+// make it execute (see each test). These are product-authored probes: the
+// expected values are either self-consistency across two engine paths that
+// compute the same function, or published KATs cited inline.
+
+const HASH_ECDSA_MECHS: &[u32] = &[
+    CKM_ECDSA_SHA1, CKM_ECDSA_SHA224, CKM_ECDSA_SHA256, CKM_ECDSA_SHA384, CKM_ECDSA_SHA512,
+    CKM_ECDSA_SHA3_224, CKM_ECDSA_SHA3_256, CKM_ECDSA_SHA3_384, CKM_ECDSA_SHA3_512,
+];
+
+/// E11(a) — CKM_ECDSA_SHA1 / CKM_ECDSA_SHA224 were advertised (CKF_SIGN |
+/// CKF_VERIFY, 224..521) and accepted at C_SignInit, then C_Sign returned
+/// CKR_MECHANISM_INVALID on every curve: the C_Sign/C_Verify dispatch lists
+/// named every other hash-composite ECDSA mechanism but not these two. Every
+/// advertised hash-composite ECDSA mechanism must now sign and verify on
+/// every generated curve, single- and multi-part, and bind the message.
+#[test]
+fn e11_every_hash_ecdsa_mechanism_executes_on_every_curve() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let msg = b"E11 advertised == dispatched";
+    for curve in ["P-256", "secp256k1", "P-384", "P-521"] {
+        let (h_pub, h_prv) = ec_keypair(session, CKM_EC_KEY_PAIR_GEN, curve).expect("keygen");
+        for &m in HASH_ECDSA_MECHS {
+            let (min, max, flags) = mech_info(m);
+            assert!(flags & 0x800 != 0 && min <= 256 && max >= 521, "{m:#x} advertisement");
+            let mech = mechanism(m, &[]);
+            let sig = sign(session, &mech, h_prv, msg).unwrap_or_else(|rv| panic!("{curve} {m:#x} C_Sign: {rv:#x}"));
+            assert_eq!(sig.len(), 2 * field_bytes(curve), "{curve} {m:#x}");
+            assert_eq!(verify(session, &mech, h_pub, msg, &sig), CKR_OK, "{curve} {m:#x} C_Verify");
+            assert_eq!(verify(session, &mech, h_pub, b"tampered", &sig), CKR_SIGNATURE_INVALID, "{curve} {m:#x}");
+            // Multi-part (§5.13.3/§5.15.3): hash-composite mechanisms stream.
+            assert_eq!(C_SignInit(session, mech.as_ptr() as *mut u8, h_prv), CKR_OK);
+            for part in [&msg[..7], &msg[7..]] {
+                assert_eq!(C_SignUpdate(session, part.as_ptr() as *mut u8, part.len() as u32), CKR_OK, "{curve} {m:#x} SignUpdate");
+            }
+            let mut mp = vec![0u8; 132];
+            let mut len = mp.len() as u32;
+            assert_eq!(C_SignFinal(session, mp.as_mut_ptr(), &mut len), CKR_OK, "{curve} {m:#x} SignFinal");
+            mp.truncate(len as usize);
+            assert_eq!(verify(session, &mech, h_pub, msg, &mp), CKR_OK, "{curve} {m:#x} multi-part signature");
+        }
+    }
+}
