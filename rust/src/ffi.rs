@@ -5393,10 +5393,19 @@ fn C_DecapsulateKey_impl(
             CKP_ML_KEM_1024 => 1568,
             _ => return CKR_ARGUMENTS_BAD,
         };
-        // PKCS#11 v3.2 §5.18.9 — a ciphertext of the wrong length for the
-        // key's parameter set is invalid input ciphertext.
+        // FIPS 203 §7.3 check 1 (ciphertext type check, "performed with
+        // every execution of ML-KEM.Decaps"). Return code: PKCS#11 v3.2
+        // §5.18.9's own return-value list names CKR_WRAPPED_KEY_LEN_RANGE
+        // and CKR_WRAPPED_KEY_INVALID and does NOT name either
+        // CKR_ENCRYPTED_DATA_* code (whose §5.1.6 definitions are scoped to
+        // "a decryption operation"). §5.1.6 defines CKR_WRAPPED_KEY_LEN_RANGE
+        // as input that "can be seen to be invalid solely on the basis of its
+        // length" — exactly this case. (§5.1.6's "can only be returned by
+        // C_UnwrapKey" sentence predates C_DecapsulateKey and is contradicted
+        // by §5.18.9's explicit list; the v3.3 draft keeps that same list.)
+        // Matches the C++ engine and docs/gap-analysis-pkcs11-v3.2.md G-KEM2.
         if ul_ciphertext_len != expected_ct {
-            return CKR_ENCRYPTED_DATA_INVALID;
+            return CKR_WRAPPED_KEY_LEN_RANGE;
         }
 
         let prv_key_bytes = match get_object_value(h_private_key) {
@@ -18870,10 +18879,15 @@ mod return_code_ffi_tests {
     }
 
     /// §5.18.9 — C_DecapsulateKey with a ciphertext of the wrong length for
-    /// the key's parameter set → CKR_ENCRYPTED_DATA_INVALID (was
-    /// CKR_ARGUMENTS_BAD).
+    /// the key's parameter set → CKR_WRAPPED_KEY_LEN_RANGE. History:
+    /// CKR_ARGUMENTS_BAD, then CKR_ENCRYPTED_DATA_INVALID — neither is in
+    /// §5.18.9's return-value list, which names CKR_WRAPPED_KEY_LEN_RANGE /
+    /// CKR_WRAPPED_KEY_INVALID; §5.1.6 defines the former as input "invalid
+    /// solely on the basis of its length". FIPS 203 §7.3 check 1 is this
+    /// ciphertext type check. Matches the C++ engine (NIST ACVP boundary
+    /// probe `decap-ct-short`/`decap-ct-long`, 2026-09-25).
     #[test]
-    fn decapsulate_wrong_ciphertext_len_encrypted_data_invalid() {
+    fn decapsulate_wrong_ciphertext_len_wrapped_key_len_range() {
         let _guard = test_lock::acquire();
         setup();
         let h_prv = 0x5334_0030;
@@ -18900,8 +18914,9 @@ mod return_code_ffi_tests {
                 ct.len() as u32,
                 &mut h_new,
             ),
-            CKR_ENCRYPTED_DATA_INVALID,
+            CKR_WRAPPED_KEY_LEN_RANGE,
         );
+        assert_eq!(h_new, 0, "§5.18.9 — no key object on failure");
     }
 
     /// S5 (compliance-audit P-10) — C_EncapsulateKey / C_DecapsulateKey on
