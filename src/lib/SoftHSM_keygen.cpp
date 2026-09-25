@@ -3226,6 +3226,23 @@ CK_RV SoftHSM::C_DeriveKey
 		return rv;
 	}
 
+	// HKDF base key (PKCS#11 v3.2 §6.62.3): "The input key must be of type
+	// CKK_HKDF or CKK_GENERIC_SECRET … The exception is a data object". An
+	// asymmetric key is therefore never a valid base key; C_DeriveKey (§5.18.5)
+	// lists CKR_KEY_TYPE_INCONSISTENT for it, and §5.1.6 ranks that above
+	// CKR_KEY_FUNCTION_NOT_PERMITTED, so this runs before the CKA_DERIVE test.
+	// Found by the Hub's G-8 probes (finding E5, 2026-09-25): an EC private key
+	// was accepted as the HKDF base key. Only the key CLASS is enforced here —
+	// secret keys of other types keep being accepted, because existing callers
+	// (the vendored pkcs11-provider's TLS 1.3 path among them) have not been
+	// audited for the narrower §6.62.3 key-type rule.
+	if (pMechanism->mechanism == CKM_HKDF_DERIVE || pMechanism->mechanism == CKM_HKDF_DATA)
+	{
+		CK_OBJECT_CLASS baseClass = key->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED);
+		if (baseClass != CKO_SECRET_KEY && baseClass != CKO_DATA)
+			return CKR_KEY_TYPE_INCONSISTENT;
+	}
+
 	// Check if key can be used for derive
 	if (!key->getBooleanValue(CKA_DERIVE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;

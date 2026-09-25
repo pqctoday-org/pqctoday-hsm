@@ -79,6 +79,7 @@
 #include "HandleManager.h"
 #include "P11Objects.h"
 #include "odd.h"
+#include "vendor_mechanisms.h"
 
 // C3 (2026-08-13): the OpenPGP certificate type was carried at 0x00000003, an
 // UNASSIGNED OASIS codepoint below CKC_VENDOR_DEFINED — squatting a value the
@@ -171,6 +172,112 @@ CK_RV SoftHSM::acquireSessionToken(CK_SESSION_HANDLE hSession,
 	return CKR_OK;
 }
 
+// The single key type a signature / asymmetric-cipher mechanism operates on, or
+// false when the mechanism is not one whose key type is fixed by the mechanism
+// alone (symmetric ciphers and MACs keep their own per-case checks).
+//
+// PKCS#11 v3.2 §5.1.6: CKR_KEY_TYPE_INCONSISTENT — "The specified key is not the
+// correct type of key to use with the specified mechanism. This return value
+// has a higher priority than CKR_KEY_FUNCTION_NOT_PERMITTED." C_SignInit
+// (§5.13.1), C_SignRecoverInit (§5.13.5), C_MessageSignInit (§5.14.1),
+// C_VerifyInit (§5.15.1), C_VerifyRecoverInit (§5.15.5), C_MessageVerifyInit
+// (§5.16.1) and C_EncryptInit/C_DecryptInit (§5.8.1/§5.10.1) all list it.
+//
+// Found by the Hub's G-8 error-path probes (2026-09-25, finding E5/E6): an AES
+// key was accepted with CKR_OK by C_SignInit/C_VerifyInit for every ECDSA,
+// EdDSA and RSA mechanism (AsymSignInit/AsymVerifyInit had lost upstream
+// SoftHSM's per-mechanism keyType checks; only the ML-DSA/SLH-DSA branches
+// kept theirs), and C_SignRecoverInit/C_VerifyRecoverInit answered
+// CKR_KEY_FUNCTION_NOT_PERMITTED for a wrong-type key because the usage
+// attribute was checked first.
+static bool mechanismFixedKeyType(CK_MECHANISM_TYPE mech, CK_KEY_TYPE& out)
+{
+	switch (mech)
+	{
+		case CKM_RSA_PKCS:
+		case CKM_RSA_X_509:
+		case CKM_RSA_PKCS_OAEP:
+		case CKM_RSA_PKCS_PSS:
+		case CKM_MD5_RSA_PKCS:
+		case CKM_SHA1_RSA_PKCS:
+		case CKM_SHA224_RSA_PKCS:
+		case CKM_SHA256_RSA_PKCS:
+		case CKM_SHA384_RSA_PKCS:
+		case CKM_SHA512_RSA_PKCS:
+		case CKM_SHA3_224_RSA_PKCS:
+		case CKM_SHA3_256_RSA_PKCS:
+		case CKM_SHA3_384_RSA_PKCS:
+		case CKM_SHA3_512_RSA_PKCS:
+		case CKM_SHA1_RSA_PKCS_PSS:
+		case CKM_SHA224_RSA_PKCS_PSS:
+		case CKM_SHA256_RSA_PKCS_PSS:
+		case CKM_SHA384_RSA_PKCS_PSS:
+		case CKM_SHA512_RSA_PKCS_PSS:
+		case CKM_SHA3_224_RSA_PKCS_PSS:
+		case CKM_SHA3_256_RSA_PKCS_PSS:
+		case CKM_SHA3_384_RSA_PKCS_PSS:
+		case CKM_SHA3_512_RSA_PKCS_PSS:
+			out = CKK_RSA;
+			return true;
+		case CKM_ECDSA:
+		case CKM_ECDSA_SHA1:
+		case CKM_ECDSA_SHA224:
+		case CKM_ECDSA_SHA256:
+		case CKM_ECDSA_SHA384:
+		case CKM_ECDSA_SHA512:
+		case CKM_ECDSA_SHA3_224:
+		case CKM_ECDSA_SHA3_256:
+		case CKM_ECDSA_SHA3_384:
+		case CKM_ECDSA_SHA3_512:
+			out = CKK_EC;
+			return true;
+		case CKM_EDDSA:
+		case CKM_EDDSA_PH:
+			out = CKK_EC_EDWARDS;
+			return true;
+		case CKM_ML_DSA:
+		case CKM_ML_DSA_EXTERNAL_MU:
+		case CKM_HASH_ML_DSA:
+		case CKM_HASH_ML_DSA_SHA224:
+		case CKM_HASH_ML_DSA_SHA256:
+		case CKM_HASH_ML_DSA_SHA384:
+		case CKM_HASH_ML_DSA_SHA512:
+		case CKM_HASH_ML_DSA_SHA3_224:
+		case CKM_HASH_ML_DSA_SHA3_256:
+		case CKM_HASH_ML_DSA_SHA3_384:
+		case CKM_HASH_ML_DSA_SHA3_512:
+		case CKM_HASH_ML_DSA_SHAKE128:
+		case CKM_HASH_ML_DSA_SHAKE256:
+			out = CKK_ML_DSA;
+			return true;
+		case CKM_SLH_DSA:
+		case CKM_HASH_SLH_DSA:
+		case CKM_HASH_SLH_DSA_SHA224:
+		case CKM_HASH_SLH_DSA_SHA256:
+		case CKM_HASH_SLH_DSA_SHA384:
+		case CKM_HASH_SLH_DSA_SHA512:
+		case CKM_HASH_SLH_DSA_SHA3_224:
+		case CKM_HASH_SLH_DSA_SHA3_256:
+		case CKM_HASH_SLH_DSA_SHA3_384:
+		case CKM_HASH_SLH_DSA_SHA3_512:
+		case CKM_HASH_SLH_DSA_SHAKE128:
+		case CKM_HASH_SLH_DSA_SHAKE256:
+			out = CKK_SLH_DSA;
+			return true;
+		case CKM_HSS:
+			out = CKK_HSS;
+			return true;
+		case CKM_XMSS:
+			out = CKK_XMSS;
+			return true;
+		case CKM_XMSSMT:
+			out = CKK_XMSSMT;
+			return true;
+		default:
+			return false;
+	}
+}
+
 CK_RV SoftHSM::acquireSessionTokenKey(CK_SESSION_HANDLE hSession,
                                        CK_OBJECT_HANDLE hKey,
                                        CK_ATTRIBUTE_TYPE usageAttr,
@@ -196,6 +303,12 @@ CK_RV SoftHSM::acquireSessionTokenKey(CK_SESSION_HANDLE hSession,
 			INFO_MSG("User is not authorized");
 		return rv;
 	}
+	// §5.1.6: CKR_KEY_TYPE_INCONSISTENT outranks CKR_KEY_FUNCTION_NOT_PERMITTED,
+	// so the key-type test runs before the usage-attribute test.
+	CK_KEY_TYPE wantType;
+	if (pMechanism != NULL_PTR && mechanismFixedKeyType(pMechanism->mechanism, wantType) &&
+	    outKey->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != wantType)
+		return CKR_KEY_TYPE_INCONSISTENT;
 	if (!outKey->getBooleanValue(usageAttr, false)) return CKR_KEY_FUNCTION_NOT_PERMITTED;
 	if (pMechanism != NULL_PTR && !isMechanismPermitted(outKey, pMechanism->mechanism))
 		return CKR_MECHANISM_INVALID;
