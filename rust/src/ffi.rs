@@ -8162,9 +8162,11 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 if iv_ptr.is_null() || iv_len == 0 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
-                if iv_len != 12 {
-                    return CKR_MECHANISM_PARAM_INVALID; // AES-GCM requires a 12-byte nonce
-                }
+                // E12 (2026-09-25) — no 96-bit-only restriction. PKCS#11 v3.2
+                // §6.13.7 CK_GCM_PARAMS: "The length of the initialization
+                // vector can be any number between 1 and (2^32) - 1"; GcmState
+                // derives J0 through GHASH for every non-96-bit IV (SP 800-38D
+                // §7.1 step 2). NIST ACVP-AES-GCM-1.0 registers 120-bit IVs.
                 let iv = std::slice::from_raw_parts(iv_ptr, iv_len).to_vec();
                 let aad = if !aad_ptr.is_null() && aad_len > 0 {
                     std::slice::from_raw_parts(aad_ptr, aad_len).to_vec()
@@ -8504,13 +8506,9 @@ pub fn C_Encrypt(
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
-                let iv12: [u8; 12] = match iv.as_slice().try_into() {
-                    Ok(v) => v,
-                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
-                };
                 let mut gcm = MultipartCipher::Gcm(GcmState::new(
                     key,
-                    &iv12,
+                    &iv,
                     &aad,
                     tag_bits,
                     CipherDirection::Encrypt,
@@ -8915,9 +8913,11 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 if iv_ptr.is_null() || iv_len == 0 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
-                if iv_len != 12 {
-                    return CKR_MECHANISM_PARAM_INVALID; // AES-GCM requires a 12-byte nonce
-                }
+                // E12 (2026-09-25) — no 96-bit-only restriction. PKCS#11 v3.2
+                // §6.13.7 CK_GCM_PARAMS: "The length of the initialization
+                // vector can be any number between 1 and (2^32) - 1"; GcmState
+                // derives J0 through GHASH for every non-96-bit IV (SP 800-38D
+                // §7.1 step 2). NIST ACVP-AES-GCM-1.0 registers 120-bit IVs.
                 let iv = std::slice::from_raw_parts(iv_ptr, iv_len).to_vec();
                 let aad = if !aad_ptr.is_null() && aad_len > 0 {
                     std::slice::from_raw_parts(aad_ptr, aad_len).to_vec()
@@ -9146,13 +9146,9 @@ pub fn C_Decrypt(
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
-                let iv12: [u8; 12] = match iv.as_slice().try_into() {
-                    Ok(v) => v,
-                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
-                };
                 let mut gcm = MultipartCipher::Gcm(GcmState::new(
                     key,
-                    &iv12,
+                    &iv,
                     &aad,
                     tag_bits,
                     CipherDirection::Decrypt,
@@ -13336,11 +13332,10 @@ fn build_multipart_cipher(
             ))
         }
         CKM_AES_GCM => {
-            let iv: [u8; 12] =
-                ctx.iv.as_slice().try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            // Any IV length C_EncryptInit/C_DecryptInit accepted (E12).
             Ok(MultipartCipher::Gcm(GcmState::new(
                 make_key()?,
-                &iv,
+                &ctx.iv,
                 &ctx.aad,
                 ctx.tag_bits,
                 dir,
