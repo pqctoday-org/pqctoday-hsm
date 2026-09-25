@@ -4942,6 +4942,15 @@ fn C_EncapsulateKey_impl(
             Some(v) => v,
             None => return CKR_ARGUMENTS_BAD,
         };
+        // FIPS 203 §7.2 — "ML-KEM.Encaps shall not be run with an
+        // encapsulation key that has not been checked". C_CreateObject
+        // already rejects a failing ek; this backstop covers keys that
+        // reached the store another way (C_UnwrapKey, a persisted token
+        // object from before that check existed). Same code this arm already
+        // returns for wrong-length key material (§5.18.8 lists it).
+        if crate::native::keygen::ml_kem_ek_check(ps, &pub_key_bytes) != Some(true) {
+            return CKR_KEY_TYPE_INCONSISTENT;
+        }
         macro_rules! encap {
             ($kem:ty, $rng:expr) => {{
                 // Length check first, so a malformed key draws no randomness.
@@ -5393,16 +5402,32 @@ fn C_DecapsulateKey_impl(
             CKP_ML_KEM_1024 => 1568,
             _ => return CKR_ARGUMENTS_BAD,
         };
-        // PKCS#11 v3.2 §5.18.9 — a ciphertext of the wrong length for the
-        // key's parameter set is invalid input ciphertext.
+        // FIPS 203 §7.3 check 1 (ciphertext type check, "performed with
+        // every execution of ML-KEM.Decaps"). Return code: PKCS#11 v3.2
+        // §5.18.9's own return-value list names CKR_WRAPPED_KEY_LEN_RANGE
+        // and CKR_WRAPPED_KEY_INVALID and does NOT name either
+        // CKR_ENCRYPTED_DATA_* code (whose §5.1.6 definitions are scoped to
+        // "a decryption operation"). §5.1.6 defines CKR_WRAPPED_KEY_LEN_RANGE
+        // as input that "can be seen to be invalid solely on the basis of its
+        // length" — exactly this case. (§5.1.6's "can only be returned by
+        // C_UnwrapKey" sentence predates C_DecapsulateKey and is contradicted
+        // by §5.18.9's explicit list; the v3.3 draft keeps that same list.)
+        // Matches the C++ engine and docs/gap-analysis-pkcs11-v3.2.md G-KEM2.
         if ul_ciphertext_len != expected_ct {
-            return CKR_ENCRYPTED_DATA_INVALID;
+            return CKR_WRAPPED_KEY_LEN_RANGE;
         }
 
         let prv_key_bytes = match get_object_value(h_private_key) {
             Some(v) => v,
             None => return CKR_ARGUMENTS_BAD,
         };
+        // FIPS 203 §7.3 checks 2-3 (dk type + hash check) — backstop for
+        // keys that did not enter through C_CreateObject's check (see the
+        // C_EncapsulateKey arm). Same code this arm already returns for
+        // wrong-length dk material.
+        if crate::native::keygen::ml_kem_dk_check(ps, &prv_key_bytes) != Some(true) {
+            return CKR_KEY_TYPE_INCONSISTENT;
+        }
         if p_ciphertext.is_null() {
             return CKR_ARGUMENTS_BAD;
         }
@@ -6081,6 +6106,31 @@ fn check_imported_slh_dsa_private(attrs: &Attributes) -> Result<(), u32> {
     crate::native::keygen::check_slh_dsa_private_value(ps, value)
 }
 
+/// FIPS 203 §7.2 (public `ek`) / §7.3 (private `dk`) key input checks for a
+/// `CKK_ML_KEM` object about to be created from caller-supplied bytes. Runs
+/// AFTER `normalize_pqc_pkcs8_import`, so a PKCS#8-wrapped `dk` is checked in
+/// its unwrapped raw form. `Err(CKR_ATTRIBUTE_VALUE_INVALID)` per PKCS#11
+/// v3.2 §4.1.1 rule 2. No-op for any other key type, a missing CKA_VALUE
+/// (`validate_create_template` owns that), or an absent/unknown parameter set.
+fn reject_invalid_ml_kem_key_value(class: Option<u32>, attrs: &Attributes) -> Result<(), u32> {
+    if crate::state::get_object_attr_u32_from(attrs, CKA_KEY_TYPE) != Some(CKK_ML_KEM) {
+        return Ok(());
+    }
+    let Some(value) = attrs.get(&CKA_VALUE) else {
+        return Ok(());
+    };
+    let ps = crate::state::get_object_param_set_from(attrs);
+    let verdict = match class {
+        Some(CKO_PUBLIC_KEY) => crate::native::keygen::ml_kem_ek_check(ps, value),
+        Some(CKO_PRIVATE_KEY) => crate::native::keygen::ml_kem_dk_check(ps, value),
+        _ => None,
+    };
+    match verdict {
+        Some(false) => Err(CKR_ATTRIBUTE_VALUE_INVALID),
+        _ => Ok(()),
+    }
+}
+
 /// Engine core of `C_CreateObject` — operates on an already-marshalled
 /// attribute map. Split from the FFI wrapper so policy can be unit-tested on
 /// 64-bit native builds, where CK_ATTRIBUTE templates (32-bit value pointers)
@@ -6221,6 +6271,17 @@ pub(crate) fn create_object_from_attrs(
         normalize_pqc_pkcs8_import(&mut new_attrs)?;
         check_imported_slh_dsa_private(&new_attrs)?;
     }
+
+    // FIPS 203 §7.2 / §7.3 key input checks on an imported ML-KEM key, run
+    // once here at creation (both sections: key checking "need not be
+    // performed ... with every execution"). PKCS#11 v3.2 §4.1.1: a template
+    // that "specifies an invalid value for a valid attribute" fails with
+    // CKR_ATTRIBUTE_VALUE_INVALID — and a CKA_VALUE that fails the FIPS 203
+    // checks is not the "encapsulation key ek / decapsulation key dk as
+    // defined in [FIPS 203]" the ML-KEM key tables (§6.68.2/§6.68.3) require.
+    // An absent/unknown parameter set is left alone: the KEM call sites
+    // already answer that with CKR_TEMPLATE_INCOMPLETE.
+    reject_invalid_ml_kem_key_value(class, &new_attrs)?;
 
     // PKCS#11 v3.2 §6.14 (and every other secret-key table): CKA_VALUE_LEN is
     // "Length in bytes of key value", defined for the key type regardless of
@@ -18870,10 +18931,15 @@ mod return_code_ffi_tests {
     }
 
     /// §5.18.9 — C_DecapsulateKey with a ciphertext of the wrong length for
-    /// the key's parameter set → CKR_ENCRYPTED_DATA_INVALID (was
-    /// CKR_ARGUMENTS_BAD).
+    /// the key's parameter set → CKR_WRAPPED_KEY_LEN_RANGE. History:
+    /// CKR_ARGUMENTS_BAD, then CKR_ENCRYPTED_DATA_INVALID — neither is in
+    /// §5.18.9's return-value list, which names CKR_WRAPPED_KEY_LEN_RANGE /
+    /// CKR_WRAPPED_KEY_INVALID; §5.1.6 defines the former as input "invalid
+    /// solely on the basis of its length". FIPS 203 §7.3 check 1 is this
+    /// ciphertext type check. Matches the C++ engine (NIST ACVP boundary
+    /// probe `decap-ct-short`/`decap-ct-long`, 2026-09-25).
     #[test]
-    fn decapsulate_wrong_ciphertext_len_encrypted_data_invalid() {
+    fn decapsulate_wrong_ciphertext_len_wrapped_key_len_range() {
         let _guard = test_lock::acquire();
         setup();
         let h_prv = 0x5334_0030;
@@ -18900,8 +18966,9 @@ mod return_code_ffi_tests {
                 ct.len() as u32,
                 &mut h_new,
             ),
-            CKR_ENCRYPTED_DATA_INVALID,
+            CKR_WRAPPED_KEY_LEN_RANGE,
         );
+        assert_eq!(h_new, 0, "§5.18.9 — no key object on failure");
     }
 
     /// S5 (compliance-audit P-10) — C_EncapsulateKey / C_DecapsulateKey on
@@ -24353,6 +24420,12 @@ mod mlkem_value_len_ffi_tests {
 #[cfg(test)]
 #[path = "conformance_v32_tests.rs"]
 mod conformance_v32_tests;
+
+/// FIPS 203 §7.2/§7.3 ML-KEM input checks vs the NIST ACVP-Server key-check
+/// vectors (2026-09-25) — see the module's own docs.
+#[cfg(test)]
+#[path = "mlkem_input_check_tests.rs"]
+mod mlkem_input_check_tests;
 
 // ── Mechanism-parameter struct widths (2026-08-13) ──────────────────────────
 //

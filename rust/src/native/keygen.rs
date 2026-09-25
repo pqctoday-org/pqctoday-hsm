@@ -1575,8 +1575,8 @@ pub fn register_ml_dsa_public_key(
 /// `CKA_DECAPSULATE=TRUE`, mirroring keygen defaults.
 ///
 /// The `ml-kem` backend's `DecapsulationKey::from_bytes` is infallible
-/// for a correct-length encoding, so the length check **is** the
-/// structural check for this family.
+/// for a correct-length encoding and never checks the embedded `h`, so the
+/// FIPS 203 §7.3 type + hash checks run here (`ml_kem_dk_check`).
 pub fn register_ml_kem_private_key(
     _session: u32,
     parameter_set: u32,
@@ -1586,6 +1586,10 @@ pub fn register_ml_kem_private_key(
 ) -> Result<u32, CkRv> {
     let (dk_len, _) = ml_kem_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
     if dk_bytes.len() != dk_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    // FIPS 203 §7.3 hash check.
+    if ml_kem_dk_check(parameter_set, dk_bytes) != Some(true) {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     Ok(register_pqc_private(
@@ -1614,6 +1618,10 @@ pub fn register_ml_kem_public_key(
 ) -> Result<u32, CkRv> {
     let (_, ek_len) = ml_kem_key_lens(parameter_set).ok_or(CKR_ARGUMENTS_BAD)?;
     if ek_bytes.len() != ek_len {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    // FIPS 203 §7.2 modulus check.
+    if ml_kem_ek_check(parameter_set, ek_bytes) != Some(true) {
         return Err(CKR_ATTRIBUTE_VALUE_INVALID);
     }
     let spki = match parameter_set {
@@ -2331,6 +2339,65 @@ pub(crate) fn ml_kem_key_lens(parameter_set: u32) -> Option<(usize, usize)> {
         CKP_ML_KEM_1024 => lens!(ml_kem::MlKem1024),
         _ => None,
     }
+}
+
+/// FIPS 203 §7.2 "Encapsulation key check" on a candidate `ek`:
+///   1. (Type check) `ek` is exactly 384k + 32 bytes for the parameter set;
+///   2. (Modulus check) `ByteEncode12(ByteDecode12(ek[0:384k])) == ek[0:384k]`,
+///      i.e. every encoded coefficient of t̂ lies in [0, q−1].
+///
+/// §7.2: "ML-KEM.Encaps shall not be run with an encapsulation key that has
+/// not been checked as above." The vendored `ml-kem` 0.2.3 exposes no
+/// validation function (its `EncapsulationKey::from_bytes` is infallible), so
+/// the check is built from the crate's OWN codec rather than a second
+/// implementation of it: `from_bytes` runs ByteDecode12, which reduces mod q
+/// (`ml-kem-patched/src/encode.rs` `byte_decode`, the `D::USIZE == 12` arm),
+/// and `as_bytes` runs ByteEncode12 and re-appends ρ verbatim. So the
+/// round-trip equals the input iff no coefficient was ≥ q.
+///
+/// `None` for a parameter set that is not ML-KEM (the caller owns that
+/// complaint); `Some(false)` when input checking failed.
+pub(crate) fn ml_kem_ek_check(parameter_set: u32, ek: &[u8]) -> Option<bool> {
+    use ml_kem::{EncodedSizeUser, KemCore};
+    macro_rules! check {
+        ($k:ty) => {{
+            let Ok(enc) = ml_kem::array::Array::try_from(ek) else {
+                return Some(false); // type check
+            };
+            let parsed = <$k as KemCore>::EncapsulationKey::from_bytes(&enc);
+            Some(parsed.as_bytes().as_slice() == ek) // modulus check
+        }};
+    }
+    match parameter_set {
+        CKP_ML_KEM_512 => check!(ml_kem::MlKem512),
+        CKP_ML_KEM_768 => check!(ml_kem::MlKem768),
+        CKP_ML_KEM_1024 => check!(ml_kem::MlKem1024),
+        _ => None,
+    }
+}
+
+/// FIPS 203 §7.3 decapsulation-KEY input checks on a candidate `dk`:
+///   2. (Decapsulation key type check) `dk` is exactly 768k + 96 bytes;
+///   3. (Hash check) `H(dk[384k : 768k+32]) == dk[768k+32 : 768k+64]`,
+///      H = SHA3-256 (FIPS 203 §4.1).
+///
+/// §7.3 check 1 (ciphertext type check) is per-ciphertext and stays at the
+/// decapsulation call site. `dk` layout (Algorithm 16 line 3 / the crate's
+/// `concat_dk`): dk_PKE (384k) ‖ ek (384k+32) ‖ h (32) ‖ z (32). `h` is a
+/// hash of public data, so a variable-time comparison leaks nothing secret.
+///
+/// `None` for a parameter set that is not ML-KEM; `Some(false)` when input
+/// checking failed.
+pub(crate) fn ml_kem_dk_check(parameter_set: u32, dk: &[u8]) -> Option<bool> {
+    use sha3::Digest;
+    let (dk_len, ek_len) = ml_kem_key_lens(parameter_set)?;
+    if dk.len() != dk_len {
+        return Some(false); // type check
+    }
+    let ek_off = ek_len - 32; // 384k
+    let ek = &dk[ek_off..ek_off + ek_len];
+    let h = &dk[ek_off + ek_len..ek_off + ek_len + 32];
+    Some(sha3::Sha3_256::digest(ek).as_slice() == h) // hash check
 }
 
 /// FIPS 205 §9.1 parameter-set table: `CKP_SLH_DSA_*` → `(sk_len, pk_len)`
