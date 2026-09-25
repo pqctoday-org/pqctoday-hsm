@@ -773,6 +773,24 @@ CK_RV SoftHSM::decapsulateKeyImpl
 		return CKR_GENERAL_ERROR;
 	}
 
+	// FIPS 203 §7.3 check 1 (ciphertext type check): c must be exactly the
+	// length of THIS key's parameter set. The old test only asked whether the
+	// length belonged to ANY parameter set, so a 768-byte ML-KEM-512
+	// ciphertext handed to an ML-KEM-768 key fell through to
+	// CKR_WRAPPED_KEY_INVALID. PKCS#11 v3.2 §5.1.6 defines
+	// CKR_WRAPPED_KEY_LEN_RANGE for input "invalid solely on the basis of its
+	// length", and §5.18.9 lists it for C_DecapsulateKey. Same shape as the
+	// Classic McEliece arm below, and as the Rust engine
+	// (fix/mlkem-input-checks-0925).
+	const CK_ULONG expectedCtLen =
+		(CK_ULONG)((MLKEMPrivateKey*)privateKey)->getCiphertextLength();
+	if (expectedCtLen == 0 || ulCiphertextLen != expectedCtLen)
+	{
+		mlkem->recyclePrivateKey(privateKey);
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(mlkem);
+		return CKR_WRAPPED_KEY_LEN_RANGE;
+	}
+
 	// Perform decapsulation
 	ByteString ciphertext;
 	ciphertext.resize(ulCiphertextLen);
@@ -783,8 +801,6 @@ CK_RV SoftHSM::decapsulateKeyImpl
 	{
 		mlkem->recyclePrivateKey(privateKey);
 		CryptoFactory::i()->recycleAsymmetricAlgorithm(mlkem);
-		if (ulCiphertextLen != 768 && ulCiphertextLen != 1088 && ulCiphertextLen != 1568)
-			return CKR_WRAPPED_KEY_LEN_RANGE;
 		return CKR_WRAPPED_KEY_INVALID;
 	}
 
