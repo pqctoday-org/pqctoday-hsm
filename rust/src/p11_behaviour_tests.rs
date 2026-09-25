@@ -67,16 +67,19 @@ fn setup() {
         s.insert(RO_SESSION, crate::state::SessionState { slot_id: 0, rw_session: false });
     });
     TOKEN_STORE.with(|ts| {
-        ts.borrow_mut().entry(0).or_insert_with(|| crate::state::TokenState {
-            slot_id: 0,
-            initialized: true,
-            label: [0u8; 32],
-            login_state: crate::state::LoginState::User,
-            so_pin_salt: [0u8; 16],
-            so_pin_hash: [0u8; 32],
-            user_pin_salt: None,
-            user_pin_hash: None,
-        });
+        ts.borrow_mut()
+            .entry(0)
+            .or_insert_with(|| crate::state::TokenState {
+                slot_id: 0,
+                initialized: true,
+                label: [0u8; 32],
+                login_state: crate::state::LoginState::User,
+                so_pin_salt: [0u8; 16],
+                so_pin_hash: [0u8; 32],
+                user_pin_salt: None,
+                user_pin_hash: None,
+            })
+            .login_state = crate::state::LoginState::User;
     });
     for sess in [SESSION, RO_SESSION] {
         SIGN_STATE.with(|s| s.borrow_mut().remove(&sess));
@@ -781,5 +784,112 @@ fn e9_derive_with_base_key_handle_zero_is_key_handle_invalid() {
         C_DeriveKey(SESSION, m.as_mut_ptr() as *mut u8, 0, std::ptr::null_mut(), 0, &mut h_new),
         CKR_KEY_HANDLE_INVALID,
         "PBKDF2 takes no base key"
+    );
+}
+
+// ── E10 — C_EncapsulateKey / C_DecapsulateKey in a read-only session ─────────
+
+/// `[CKA_TOKEN, &CK_TRUE, 1]` — a template asking for a token object.
+fn token_true_template() -> [usize; 3] {
+    let v: &'static u8 = Box::leak(Box::new(1u8));
+    [CKA_TOKEN as usize, v as *const u8 as usize, 1]
+}
+
+/// §5.18.8 / §5.18.9 return values, §5.1.6 CKR_SESSION_READ_ONLY ("unable to
+/// accomplish the desired action because it is a read-only session"), §5.7.1
+/// ("Only session objects can be created during a read-only session"). The
+/// G-8 probe found C_EncapsulateKey / C_DecapsulateKey creating a token
+/// object (CKA_TOKEN = CK_TRUE) from a session opened without
+/// CKF_RW_SESSION: CKR_OK for CKM_ML_KEM (all three sets) and
+/// CKM_ECDH1_DERIVE. Every other key-creating call already refused.
+#[test]
+fn e10_kem_calls_cannot_create_a_token_object_in_a_read_only_session() {
+    let _guard = test_lock::acquire();
+    setup();
+    // A real ML-KEM-512 pair and ciphertext, made in the R/W session, so the
+    // only thing wrong with the R/O calls below is the session.
+    let ps: &'static crate::ck_abi::CK_ULONG =
+        Box::leak(Box::new(CKP_ML_KEM_512 as crate::ck_abi::CK_ULONG));
+    let mut pub_tpl = [CKA_PARAMETER_SET as usize, ps as *const _ as usize, std::mem::size_of::<crate::ck_abi::CK_ULONG>()];
+    let mut prv_tpl = pub_tpl;
+    let mut kg = mech0(CKM_ML_KEM_KEY_PAIR_GEN);
+    let (mut h_pub, mut h_prv) = (0u32, 0u32);
+    assert_eq!(
+        C_GenerateKeyPair(
+            SESSION,
+            kg.as_mut_ptr() as *mut u8,
+            pub_tpl.as_mut_ptr() as *mut u8,
+            1,
+            prv_tpl.as_mut_ptr() as *mut u8,
+            1,
+            &mut h_pub,
+            &mut h_prv,
+        ),
+        CKR_OK
+    );
+    let mut kem = mech0(CKM_ML_KEM);
+    let mut ct = vec![0u8; 768];
+    let mut ct_len = ct.len() as u32;
+    let mut h_ss: u32 = 0;
+    assert_eq!(
+        C_EncapsulateKey(SESSION, kem.as_mut_ptr() as *mut u8, h_pub, std::ptr::null_mut(), 0, ct.as_mut_ptr(), &mut ct_len, &mut h_ss),
+        CKR_OK
+    );
+
+    let mut tok = token_true_template();
+    let before = OBJECTS.with(|o| o.borrow().len());
+    let mut ct2 = vec![0u8; 768];
+    let mut ct2_len = ct2.len() as u32;
+    let mut h_new: u32 = 0;
+    assert_eq!(
+        C_EncapsulateKey(
+            RO_SESSION,
+            kem.as_mut_ptr() as *mut u8,
+            h_pub,
+            tok.as_mut_ptr() as *mut u8,
+            1,
+            ct2.as_mut_ptr(),
+            &mut ct2_len,
+            &mut h_new,
+        ),
+        CKR_SESSION_READ_ONLY,
+        "C_EncapsulateKey(CKM_ML_KEM) with CKA_TOKEN=TRUE in a R/O session"
+    );
+    assert_eq!(h_new, 0);
+    assert_eq!(
+        C_DecapsulateKey(
+            RO_SESSION,
+            kem.as_mut_ptr() as *mut u8,
+            h_prv,
+            tok.as_mut_ptr() as *mut u8,
+            1,
+            ct.as_mut_ptr(),
+            ct_len,
+            &mut h_new,
+        ),
+        CKR_SESSION_READ_ONLY,
+        "C_DecapsulateKey(CKM_ML_KEM) with CKA_TOKEN=TRUE in a R/O session"
+    );
+    assert_eq!(h_new, 0);
+    // ECDH-as-KEM goes through the same gate.
+    let mut ecdh = mech0(CKM_ECDH1_DERIVE);
+    let mut n = 65u32;
+    let mut pt = [0u8; 65];
+    assert_eq!(
+        C_EncapsulateKey(RO_SESSION, ecdh.as_mut_ptr() as *mut u8, EC_PUB, tok.as_mut_ptr() as *mut u8, 1, pt.as_mut_ptr(), &mut n, &mut h_new),
+        CKR_SESSION_READ_ONLY
+    );
+    assert_eq!(
+        C_DecapsulateKey(RO_SESSION, ecdh.as_mut_ptr() as *mut u8, EC_PRIV, tok.as_mut_ptr() as *mut u8, 1, pt.as_mut_ptr(), 65, &mut h_new),
+        CKR_SESSION_READ_ONLY
+    );
+    assert_eq!(OBJECTS.with(|o| o.borrow().len()), before, "no object may be created");
+    // A session object (CKA_TOKEN absent → FALSE) is still allowed in R/O.
+    let mut ct3 = vec![0u8; 768];
+    let mut ct3_len = ct3.len() as u32;
+    assert_eq!(
+        C_EncapsulateKey(RO_SESSION, kem.as_mut_ptr() as *mut u8, h_pub, std::ptr::null_mut(), 0, ct3.as_mut_ptr(), &mut ct3_len, &mut h_new),
+        CKR_OK,
+        "a session-object encapsulation is permitted in a R/O session"
     );
 }

@@ -4485,6 +4485,15 @@ fn C_EncapsulateKey_impl(
     use ml_kem::KemCore;
 
     nonnull!(p_mechanism, ph_key, pul_ciphertext_len);
+    // E10 (2026-09-25) — §5.7.1 / §5.18.8 CKR_SESSION_READ_ONLY: the new key
+    // is a token object when the template says CKA_TOKEN = CK_TRUE, which a
+    // read-only session may not create (the same S7 gate C_GenerateKey,
+    // C_DeriveKey and C_UnwrapKey already apply).
+    if let Err(rv) =
+        unsafe { gate_ro_session_for_template(_h_session, _p_template, _ul_attribute_count) }
+    {
+        return rv;
+    }
     // PKCS#11 v3.2 §5.18.8 — the key must permit encapsulation; a key of the
     // wrong type is CKR_KEY_TYPE_INCONSISTENT first (§5.1.6 priority, E6 —
     // CKR_KEY_FUNCTION_NOT_PERMITTED is not in §5.18.8's list).
@@ -5043,6 +5052,14 @@ fn C_DecapsulateKey_impl(
     require_session!(_h_session);
 
     nonnull!(p_mechanism, p_ciphertext, ph_key);
+    // E10 (2026-09-25) — §5.7.1 / §5.18.9 CKR_SESSION_READ_ONLY for a
+    // CKA_TOKEN = CK_TRUE template in a read-only session (see
+    // C_EncapsulateKey_impl).
+    if let Err(rv) =
+        unsafe { gate_ro_session_for_template(_h_session, _p_template, _ul_attribute_count) }
+    {
+        return rv;
+    }
     // PKCS#11 v3.2 §5.18.9 — the key must permit decapsulation.
     if let Err(rv) = check_key_usage(_h_session, h_private_key, CKA_DECAPSULATE) {
         return rv;
