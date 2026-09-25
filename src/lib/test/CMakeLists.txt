@@ -28,6 +28,7 @@ set(SOURCES p11test.cpp
             BehaviourRingTests.cpp
             AcvpSlhDsaTests.cpp
             MlKemInputCheckTests.cpp
+            KmacParamsTests.cpp
             TestsBase.cpp
             TestsNoPINInitBase.cpp
             ../common/log.cpp

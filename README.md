@@ -417,6 +417,10 @@ CKM_SHA3_256_HMAC          = 0x000002b1  // HMAC-SHA3-256
 // KMAC (FIPS 202 / SP 800-185) — keyed MAC using KECCAK-based XOF
 CKM_KMAC_128               = 0x80000100  // KMAC-128 (vendor-defined range)
 CKM_KMAC_256               = 0x80000101  // KMAC-256 (vendor-defined range)
+// Optional parameter (both engines): CK_PQCTODAY_KMAC_PARAMS
+//   { CK_BYTE_PTR pCustomization; CK_ULONG ulCustomizationLen; CK_ULONG ulOutputLen; }
+// = SP 800-185 customization S and output length L in bytes (0 = default 32/64).
+// Absent -> S = "", L = 32 (KMAC-128) / 64 (KMAC-256).
 ```
 
 ## Validation & Compliance Status

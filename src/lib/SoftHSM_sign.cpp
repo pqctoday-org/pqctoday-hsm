@@ -315,6 +315,53 @@ static CK_RV applyGmacParams(CK_MECHANISM_PTR pMechanism, MacAlgorithm* mac)
 	return CKR_OK;
 }
 
+/**
+ * @brief Apply CKM_KMAC_128/256's CK_PQCTODAY_KMAC_PARAMS (E16, 2026-09-25).
+ *
+ * Absent parameter (NULL/0) keeps the mechanism defaults — empty
+ * customization, L = 32 bytes (KMAC-128) / 64 bytes (KMAC-256) — exactly
+ * what this engine always did. A present parameter must be the whole
+ * struct; ulOutputLen is L in bytes (0 = default). Before this, the
+ * parameter was ignored outright, so C_Verify of a MAC of any other length
+ * returned CKR_SIGNATURE_LEN_RANGE (the length check compares against
+ * getOutputMacSize()) and any customization string was silently dropped.
+ *
+ * Bounds: L <= 1024 bytes is the Rust engine's own cap (rust/src/ffi.rs
+ * parse_sign_mech_params, CKR_MECHANISM_PARAM_INVALID). S is capped at 512
+ * bytes, OpenSSL's KMAC_MAX_CUSTOM (providers/implementations/macs/
+ * kmac_prov.c) — the most this backend can compute; Rust allows 1024.
+ */
+static CK_RV applyKmacParams(CK_MECHANISM_PTR pMechanism, MacAlgorithm* mac)
+{
+	if (pMechanism->pParameter == NULL_PTR && pMechanism->ulParameterLen == 0)
+		return CKR_OK;
+
+	if (pMechanism->pParameter == NULL_PTR ||
+	    pMechanism->ulParameterLen != sizeof(CK_PQCTODAY_KMAC_PARAMS))
+	{
+		ERROR_MSG("CKM_KMAC_*: parameter must be a CK_PQCTODAY_KMAC_PARAMS (%lu bytes, got %lu)",
+			  (unsigned long)sizeof(CK_PQCTODAY_KMAC_PARAMS),
+			  (unsigned long)pMechanism->ulParameterLen);
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+	CK_PQCTODAY_KMAC_PARAMS_PTR kp = (CK_PQCTODAY_KMAC_PARAMS_PTR)pMechanism->pParameter;
+
+	if (kp->ulOutputLen > 1024 || kp->ulCustomizationLen > 512 ||
+	    (kp->ulCustomizationLen > 0 && kp->pCustomization == NULL_PTR))
+	{
+		ERROR_MSG("CKM_KMAC_*: invalid output length or customization string");
+		return CKR_MECHANISM_PARAM_INVALID;
+	}
+
+	ByteString custom;
+	if (kp->ulCustomizationLen > 0)
+		custom = ByteString(kp->pCustomization, kp->ulCustomizationLen);
+	if (!mac->setKmacParams((size_t)kp->ulOutputLen, custom))
+		return CKR_MECHANISM_PARAM_INVALID;
+
+	return CKR_OK;
+}
+
 } // anonymous namespace
 
 // MacAlgorithm version of C_SignInit
@@ -361,6 +408,15 @@ CK_RV SoftHSM::MacSignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechani
 	if (pMechanism->mechanism == CKM_AES_GMAC)
 	{
 		mechRv = applyGmacParams(pMechanism, mac);
+		if (mechRv != CKR_OK)
+		{
+			CryptoFactory::i()->recycleMacAlgorithm(mac);
+			return mechRv;
+		}
+	}
+	if (pMechanism->mechanism == CKM_KMAC_128 || pMechanism->mechanism == CKM_KMAC_256)
+	{
+		mechRv = applyKmacParams(pMechanism, mac);
 		if (mechRv != CKR_OK)
 		{
 			CryptoFactory::i()->recycleMacAlgorithm(mac);
@@ -2389,6 +2445,15 @@ CK_RV SoftHSM::MacVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMecha
 	if (pMechanism->mechanism == CKM_AES_GMAC)
 	{
 		mechRv = applyGmacParams(pMechanism, mac);
+		if (mechRv != CKR_OK)
+		{
+			CryptoFactory::i()->recycleMacAlgorithm(mac);
+			return mechRv;
+		}
+	}
+	if (pMechanism->mechanism == CKM_KMAC_128 || pMechanism->mechanism == CKM_KMAC_256)
+	{
+		mechRv = applyKmacParams(pMechanism, mac);
 		if (mechRv != CKR_OK)
 		{
 			CryptoFactory::i()->recycleMacAlgorithm(mac);
