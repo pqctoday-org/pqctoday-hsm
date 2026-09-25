@@ -11249,10 +11249,10 @@ pub fn C_DeriveKey(
                 // NIST's PBKDF 1.0 sample registers). Any other CKP_ value is
                 // a parameter this token does not accept.
                 match prf {
-                    CKP_PBKDF2_HMAC_SHA1 => {
+                    CKP_PKCS5_PBKD2_HMAC_SHA1 => {
                         pbkdf2::pbkdf2_hmac::<sha1::Sha1>(pass, salt, iterations, &mut out)
                     }
-                    CKP_PBKDF2_HMAC_SHA224 => {
+                    CKP_PKCS5_PBKD2_HMAC_SHA224 => {
                         pbkdf2::pbkdf2_hmac::<sha2::Sha224>(pass, salt, iterations, &mut out)
                     }
                     CKP_PBKDF2_HMAC_SHA256 => {

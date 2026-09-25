@@ -666,10 +666,11 @@ pub const CKD_SHA3_256_KDF: u32 = 0x0000_000B; // PKCS#11 v3.2 §5.2.12 — SHA3
 pub const CKD_SHA3_512_KDF: u32 = 0x0000_000D; // PKCS#11 v3.2 §5.2.12 — SHA3-512 X9.63 KDF
 
 // PBKDF2 PRF types
-// CKP_PKCS5_PBKD2_HMAC_* (pkcs11t.h) — SHA1 and SHA224 added 2026-09-25
-// (E15) for parity with the C++ engine's PRF set.
-pub const CKP_PBKDF2_HMAC_SHA1: u32 = 0x01;
-pub const CKP_PBKDF2_HMAC_SHA224: u32 = 0x03;
+// SHA1 and SHA224 PRFs added 2026-09-25 (E15) for parity with the C++
+// engine, under their pkcs11t.h names (the three CKP_PBKDF2_* below predate
+// that and are pinned as naming drift in scripts/check_pkcs11_constants.py).
+pub const CKP_PKCS5_PBKD2_HMAC_SHA1: u32 = 0x0000_0001;
+pub const CKP_PKCS5_PBKD2_HMAC_SHA224: u32 = 0x0000_0003;
 pub const CKP_PBKDF2_HMAC_SHA256: u32 = 0x04;
 pub const CKP_PBKDF2_HMAC_SHA384: u32 = 0x05;
 pub const CKP_PBKDF2_HMAC_SHA512: u32 = 0x06;
