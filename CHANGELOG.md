@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-09-25
+
 ### Added
 
 - **`bench-harness`: secp256k1 and a minimum-op-count measurement mode.**
