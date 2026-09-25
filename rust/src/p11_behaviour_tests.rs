@@ -573,3 +573,176 @@ fn e18_aes_iv_of_the_wrong_length_is_mechanism_param_invalid() {
         assert_eq!(C_EncryptInit(SESSION, std::ptr::null_mut(), right_key_for(mech)), CKR_OK);
     }
 }
+
+// ── E9 — RSA-PSS / RSA-OAEP parameter structs are validated (decision D6) ───
+
+const RSA_PRIV: u32 = 0x5E50_2030;
+const RSA_PUB: u32 = 0x5E50_2031;
+
+/// RSA-2048 key objects carrying only what the init-time checks read:
+/// CKK_RSA, the usage attributes and a 2048-bit CKA_MODULUS.
+fn put_rsa_keys() {
+    let mut n = vec![0x5au8; 256];
+    n[0] = 0xc3; // top bit set → a 2048-bit modulus
+    for (h, class) in [(RSA_PRIV, CKO_PRIVATE_KEY), (RSA_PUB, CKO_PUBLIC_KEY)] {
+        put_key(h, class, CKK_RSA, 64, true);
+        OBJECTS.with(|o| {
+            o.borrow_mut().get_mut(&h).unwrap().insert(CKA_MODULUS, n.clone());
+        });
+    }
+}
+
+/// `CK_RSA_PKCS_PSS_PARAMS` at native width.
+fn pss(hash_alg: u32, mgf: u32, s_len: usize) -> [usize; 3] {
+    [hash_alg as usize, mgf as usize, s_len]
+}
+
+const PSS_MECHS: [(u32, u32, u32, usize); 9] = [
+    (CKM_SHA1_RSA_PKCS_PSS, CKM_SHA_1, CKG_MGF1_SHA1, 20),
+    (CKM_SHA224_RSA_PKCS_PSS, CKM_SHA224, CKG_MGF1_SHA224, 28),
+    (CKM_SHA256_RSA_PKCS_PSS, CKM_SHA256, CKG_MGF1_SHA256, 32),
+    (CKM_SHA384_RSA_PKCS_PSS, CKM_SHA384, CKG_MGF1_SHA384, 48),
+    (CKM_SHA512_RSA_PKCS_PSS, CKM_SHA512, CKG_MGF1_SHA512, 64),
+    (CKM_SHA3_224_RSA_PKCS_PSS, CKM_SHA3_224, CKG_MGF1_SHA3_224, 28),
+    (CKM_SHA3_256_RSA_PKCS_PSS, CKM_SHA3_256, CKG_MGF1_SHA3_256, 32),
+    (CKM_SHA3_384_RSA_PKCS_PSS, CKM_SHA3_384, CKG_MGF1_SHA3_384, 48),
+    (CKM_SHA3_512_RSA_PKCS_PSS, CKM_SHA3_512, CKG_MGF1_SHA3_512, 64),
+];
+
+fn sign_verify_init_with(mech: u32, param: &mut [usize], len: usize) -> (u32, u32) {
+    let mut m: [usize; 3] = [mech as usize, param.as_mut_ptr() as usize, len];
+    let s = C_SignInit(SESSION, m.as_mut_ptr() as *mut u8, RSA_PRIV);
+    if s == CKR_OK {
+        assert_eq!(C_SignInit(SESSION, std::ptr::null_mut(), RSA_PRIV), CKR_OK);
+    }
+    let v = C_VerifyInit(SESSION, m.as_mut_ptr() as *mut u8, RSA_PUB);
+    if v == CKR_OK {
+        assert_eq!(C_VerifyInit(SESSION, std::ptr::null_mut(), RSA_PUB), CKR_OK);
+    }
+    (s, v)
+}
+
+/// §6.1.9 (CK_RSA_PKCS_PSS_PARAMS) and §6.1.10/§6.1.11 ("It has a parameter,
+/// a CK_RSA_PKCS_PSS_PARAMS structure"; "sLen … must be less than or equal
+/// to k*-2-hLen"), §5.1.6 CKR_MECHANISM_PARAM_INVALID. The G-8 probe found
+/// C_SignInit / C_VerifyInit accepting a 1-byte parameter (CKR_OK) for all
+/// nine hash-specific PSS mechanisms: a short or absent struct silently fell
+/// back to defaults, and sLen was never bounded.
+#[test]
+fn e9_rsa_pss_parameter_struct_is_validated() {
+    let _guard = test_lock::acquire();
+    setup();
+    put_rsa_keys();
+    let usz = std::mem::size_of::<usize>();
+    for (mech, hash, mgf, hlen) in PSS_MECHS {
+        let bad = CKR_MECHANISM_PARAM_INVALID;
+        let mut p = pss(hash, mgf, hlen);
+        assert_eq!(sign_verify_init_with(mech, &mut p, 1), (bad, bad), "{mech:#x}: 1-byte parameter");
+        assert_eq!(sign_verify_init_with(mech, &mut p, 2 * usz), (bad, bad), "{mech:#x}: short struct");
+        assert_eq!(sign_verify_init_with(mech, &mut p, 0), (bad, bad), "{mech:#x}: absent parameter");
+        let mut wrong_hash = pss(if hash == CKM_SHA256 { CKM_SHA384 } else { CKM_SHA256 }, mgf, hlen);
+        assert_eq!(sign_verify_init_with(mech, &mut wrong_hash, 3 * usz), (bad, bad), "{mech:#x}: hashAlg");
+        // 2048-bit modulus: k* = 256, so sLen ≤ 254 − hLen.
+        let max = 256 - 2 - hlen;
+        let mut too_long = pss(hash, mgf, max + 1);
+        assert_eq!(sign_verify_init_with(mech, &mut too_long, 3 * usz), (bad, bad), "{mech:#x}: sLen {}", max + 1);
+        let mut at_max = pss(hash, mgf, max);
+        assert_eq!(sign_verify_init_with(mech, &mut at_max, 3 * usz), (CKR_OK, CKR_OK), "{mech:#x}: sLen {max}");
+        let mut good = pss(hash, mgf, hlen);
+        assert_eq!(sign_verify_init_with(mech, &mut good, 3 * usz), (CKR_OK, CKR_OK), "{mech:#x}: valid");
+    }
+    // Bare CKM_RSA_PKCS_PSS (§6.1.10): same struct, same sLen bound.
+    let mut p = pss(CKM_SHA256, CKG_MGF1_SHA256, 32);
+    let bad = CKR_MECHANISM_PARAM_INVALID;
+    assert_eq!(sign_verify_init_with(CKM_RSA_PKCS_PSS, &mut p, 1), (bad, bad));
+    let mut too_long = pss(CKM_SHA256, CKG_MGF1_SHA256, 223);
+    assert_eq!(sign_verify_init_with(CKM_RSA_PKCS_PSS, &mut too_long, 3 * usz), (bad, bad));
+    assert_eq!(sign_verify_init_with(CKM_RSA_PKCS_PSS, &mut p, 3 * usz), (CKR_OK, CKR_OK));
+}
+
+/// `CK_RSA_PKCS_OAEP_PARAMS` at native width; the label (if any) must
+/// outlive the returned words.
+fn oaep(hash_alg: u32, mgf: u32, source: u32, label: Option<&[u8]>, label_len: usize) -> [usize; 5] {
+    [
+        hash_alg as usize,
+        mgf as usize,
+        source as usize,
+        label.map(|l| l.as_ptr() as usize).unwrap_or(0),
+        label_len,
+    ]
+}
+
+/// Every OAEP entry point with `param` (length `len`): encrypt, decrypt,
+/// wrap and unwrap init. Returns the four return values.
+fn oaep_calls(param: &mut [usize], len: usize) -> [u32; 4] {
+    let mut m: [usize; 3] = [CKM_RSA_PKCS_OAEP as usize, param.as_mut_ptr() as usize, len];
+    let e = C_EncryptInit(SESSION, m.as_mut_ptr() as *mut u8, RSA_PUB);
+    if e == CKR_OK {
+        assert_eq!(C_EncryptInit(SESSION, std::ptr::null_mut(), RSA_PUB), CKR_OK);
+    }
+    let d = C_DecryptInit(SESSION, m.as_mut_ptr() as *mut u8, RSA_PRIV);
+    if d == CKR_OK {
+        assert_eq!(C_DecryptInit(SESSION, std::ptr::null_mut(), RSA_PRIV), CKR_OK);
+    }
+    let mut out = [0u8; 512];
+    let mut out_len = out.len() as u32;
+    let w = C_WrapKey(SESSION, m.as_mut_ptr() as *mut u8, RSA_PUB, WRAP_TARGET, out.as_mut_ptr(), &mut out_len);
+    let mut wrapped = [0x5au8; 256];
+    let mut h_new: u32 = 0;
+    let u = C_UnwrapKey(
+        SESSION,
+        m.as_mut_ptr() as *mut u8,
+        RSA_PRIV,
+        wrapped.as_mut_ptr(),
+        wrapped.len() as u32,
+        std::ptr::null_mut(),
+        0,
+        &mut h_new,
+    );
+    [e, d, w, u]
+}
+
+/// §6.1.7 (CK_RSA_PKCS_OAEP_PARAMS: "source must be CKZ_DATA_SPECIFIED";
+/// pSourceData "must be NULL_PTR" exactly when ulSourceDataLen is 0) and
+/// §6.1.8 ("It has a parameter, a CK_RSA_PKCS_OAEP_PARAMS structure"),
+/// §5.1.6 CKR_MECHANISM_PARAM_INVALID. The G-8 probe found a 1-byte
+/// parameter accepted (CKR_OK) by C_EncryptInit / C_DecryptInit /
+/// C_WrapKey / C_UnwrapKey: a short or absent struct silently became
+/// SHA-256 / MGF1-SHA-256, and `source` was only checked for a non-empty
+/// label.
+#[test]
+fn e9_rsa_oaep_parameter_struct_is_validated() {
+    let _guard = test_lock::acquire();
+    setup();
+    put_rsa_keys();
+    put_key(WRAP_TARGET, CKO_SECRET_KEY, CKK_GENERIC_SECRET, 32, true);
+    let usz = std::mem::size_of::<usize>();
+    let full = 5 * usz;
+    let bad = [CKR_MECHANISM_PARAM_INVALID; 4];
+    let mut p = oaep(CKM_SHA256, CKG_MGF1_SHA256, CKZ_DATA_SPECIFIED, None, 0);
+    assert_eq!(oaep_calls(&mut p, 1), bad, "1-byte parameter");
+    assert_eq!(oaep_calls(&mut p, usz), bad, "hashAlg-only prefix");
+    assert_eq!(oaep_calls(&mut p, 4 * usz), bad, "short struct");
+    assert_eq!(oaep_calls(&mut p, 0), bad, "absent parameter");
+    let mut no_source = oaep(CKM_SHA256, CKG_MGF1_SHA256, 0, None, 0);
+    assert_eq!(oaep_calls(&mut no_source, full), bad, "source = 0");
+    let mut null_label = oaep(CKM_SHA256, CKG_MGF1_SHA256, CKZ_DATA_SPECIFIED, None, 4);
+    assert_eq!(oaep_calls(&mut null_label, full), bad, "NULL pSourceData, ulSourceDataLen 4");
+    let mut no_mgf = oaep(CKM_SHA256, 0, CKZ_DATA_SPECIFIED, None, 0);
+    assert_eq!(oaep_calls(&mut no_mgf, full), bad, "mgf = 0");
+    let mut unsupported = oaep(CKM_MD5, CKG_MGF1_SHA256, CKZ_DATA_SPECIFIED, None, 0);
+    assert_eq!(oaep_calls(&mut unsupported, full), bad, "hashAlg the engine cannot use for OAEP");
+    // A well-formed struct gets past parameter validation: the inits start,
+    // and wrap / unwrap proceed to the (placeholder) key material.
+    let mut good = oaep(CKM_SHA256, CKG_MGF1_SHA256, CKZ_DATA_SPECIFIED, None, 0);
+    let rv = oaep_calls(&mut good, full);
+    assert_eq!(&rv[..2], &[CKR_OK, CKR_OK], "valid struct, encrypt/decrypt init");
+    assert!(
+        rv[2] != CKR_MECHANISM_PARAM_INVALID && rv[3] != CKR_MECHANISM_PARAM_INVALID,
+        "valid struct must not be refused as a parameter error: {rv:x?}"
+    );
+    let label = b"label";
+    let mut labelled = oaep(CKM_SHA384, CKG_MGF1_SHA384, CKZ_DATA_SPECIFIED, Some(label), label.len());
+    let rv = oaep_calls(&mut labelled, full);
+    assert_eq!(&rv[..2], &[CKR_OK, CKR_OK], "valid labelled struct");
+}

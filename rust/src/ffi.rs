@@ -6664,6 +6664,39 @@ fn pss_hash_mgf_pairing_valid(hash_alg: u32, mgf: u32) -> bool {
     .any(|m| rsa_pss_mech_params(m) == Some((hash_alg, mgf)))
 }
 
+/// PKCS#11 v3.2 §6.1.10: for RSA-PSS "the sLen field must be less than or
+/// equal to k*-2-hLen", k* being the modulus length in bytes, one less when
+/// the modulus bit length is one more than a multiple of 8. A larger salt
+/// cannot be encoded, so it is a malformed mechanism parameter
+/// (CKR_MECHANISM_PARAM_INVALID, E9 / D6). Skipped when the key carries no
+/// CKA_MODULUS or `hash_alg` is not a digest this engine names — the sign
+/// path then reports its own error.
+fn pss_salt_len_fits(h_key: u32, hash_alg: u32, s_len: u32) -> Result<(), u32> {
+    let h_len: usize = match hash_alg {
+        CKM_SHA_1 => 20,
+        CKM_SHA224 | CKM_SHA3_224 => 28,
+        CKM_SHA256 | CKM_SHA3_256 => 32,
+        CKM_SHA384 | CKM_SHA3_384 => 48,
+        CKM_SHA512 | CKM_SHA3_512 => 64,
+        _ => return Ok(()),
+    };
+    let Some(n) = get_object_attr_bytes(h_key, CKA_MODULUS) else {
+        return Ok(());
+    };
+    let Some(first) = n.iter().position(|b| *b != 0) else {
+        return Ok(());
+    };
+    let bits = (n.len() - first - 1) * 8 + (8 - n[first].leading_zeros() as usize);
+    let mut k_star = bits.div_ceil(8);
+    if bits % 8 == 1 {
+        k_star -= 1;
+    }
+    if (s_len as usize).saturating_add(2 + h_len) > k_star {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    Ok(())
+}
+
 fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
     require_init!();
     require_session!(h_session);
@@ -6715,7 +6748,7 @@ fn C_SignInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         };
         // Mechanism parameters — see parse_sign_mech_params (shared with
         // the other two *SignInit/*VerifyInit entry points).
-        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type) {
+        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type, h_key) {
             Ok(v) => v,
             Err(rv) => return rv,
         };
@@ -6841,6 +6874,7 @@ unsafe fn eddsa_ph_flag(p_mechanism: *const u8) -> bool {
 unsafe fn parse_sign_mech_params(
     p_mechanism: *const u8,
     mech_type: u32,
+    h_key: u32,
 ) -> Result<(Vec<u8>, bool), u32> {
     let m = ck_param::mech(p_mechanism);
     if takes_sign_additional_ctx(mech_type) {
@@ -6891,27 +6925,24 @@ unsafe fn parse_sign_mech_params(
         return Ok((context, false));
     }
     if let Some((exp_hash, exp_mgf)) = rsa_pss_mech_params(mech_type) {
-        // CK_RSA_PKCS_PSS_PARAMS (§6.4.5) — params are caller-authoritative;
-        // hashAlg/mgf must match the mechanism's digest. An absent parameter
-        // keeps the legacy defaults, and so does a short one — unchanged from
-        // before this port, hence `.ok().flatten()` rather than `?`.
+        // CK_RSA_PKCS_PSS_PARAMS (v3.2 §6.1.9) — hashAlg/mgf must match the
+        // mechanism's digest. E9 / decision D6 (2026-09-25): the hash-specific
+        // PSS mechanisms "have a parameter, a CK_RSA_PKCS_PSS_PARAMS
+        // structure" (§6.1.11), so an absent or short struct is
+        // CKR_MECHANISM_PARAM_INVALID. It used to fall back to defaults — the
+        // Hub G-8 probe's 1-byte parameter was accepted with CKR_OK.
         let r = m
-            .opt_params(&ck_param::pss::LAYOUT, ck_param::pss::FIELD_COUNT)
-            .ok()
-            .flatten();
-        return Ok(match r {
-            Some(r) => {
-                let hash_alg = r.ulong32(ck_param::pss::HASH_ALG);
-                let mgf = r.ulong32(ck_param::pss::MGF);
-                let s_len = r.ulong32(ck_param::pss::S_LEN);
-                if hash_alg != exp_hash || mgf != exp_mgf {
-                    return Err(CKR_MECHANISM_PARAM_INVALID);
-                }
-                // carried to C_Sign/C_Verify in the ctx vec (LE u32)
-                (s_len.to_le_bytes().to_vec(), false)
-            }
-            None => (Vec::new(), false),
-        });
+            .params(&ck_param::pss::LAYOUT, ck_param::pss::FIELD_COUNT)
+            .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+        let hash_alg = r.ulong32(ck_param::pss::HASH_ALG);
+        let mgf = r.ulong32(ck_param::pss::MGF);
+        let s_len = r.ulong32(ck_param::pss::S_LEN);
+        if hash_alg != exp_hash || mgf != exp_mgf {
+            return Err(CKR_MECHANISM_PARAM_INVALID);
+        }
+        pss_salt_len_fits(h_key, hash_alg, s_len)?;
+        // carried to C_Sign/C_Verify in the ctx vec (LE u32)
+        return Ok((s_len.to_le_bytes().to_vec(), false));
     }
     if mech_type == CKM_RSA_PKCS_PSS {
         // R-1 (2026-08-24) — bare CKM_RSA_PKCS_PSS. Unlike the hash-specific
@@ -6930,6 +6961,7 @@ unsafe fn parse_sign_mech_params(
         if !pss_hash_mgf_pairing_valid(hash_alg, mgf) {
             return Err(CKR_MECHANISM_PARAM_INVALID);
         }
+        pss_salt_len_fits(h_key, hash_alg, s_len)?;
         // ctx vec layout for bare PSS: hashAlg(4) || mgf(4) || sLen(4), all
         // LE u32 — see C_Sign_impl / C_Verify's own CKM_RSA_PKCS_PSS arm,
         // which is the only reader of this 12-byte format.
@@ -7444,7 +7476,7 @@ fn C_VerifyInit_impl(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
         };
         // Mechanism parameters — see parse_sign_mech_params (shared with
         // the other two *SignInit/*VerifyInit entry points).
-        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type) {
+        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type, h_key) {
             Ok(v) => v,
             Err(rv) => return rv,
         };
@@ -8077,7 +8109,7 @@ pub fn C_VerifySignatureInit(
         };
         // Mechanism parameters — see parse_sign_mech_params (shared with
         // the other two *SignInit/*VerifyInit entry points).
-        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type) {
+        let (slh_ctx, slh_det) = match parse_sign_mech_params(p_mechanism, mech_type, h_key) {
             Ok(v) => v,
             Err(rv) => return rv,
         };
@@ -8257,28 +8289,37 @@ unsafe fn parse_rsa_aes_key_wrap_params(
 }
 
 unsafe fn parse_oaep_params(p_param: *const u8, ul_param_len: usize) -> Result<(u32, u32, Vec<u8>), u32> {
-    // Read progressively: a hashAlg-only prefix is meaningful here (it is
-    // what several callers send), so the reader is built for ONE field and
-    // `covers()` decides whether the rest is present. Both thresholds come
-    // from the declaration, not from `usz` arithmetic at the call site.
-    let r = match ParamReader::optional(p_param, ul_param_len, &ck_param::oaep::LAYOUT, 1) {
-        Ok(Some(r)) => r,
-        _ => return Ok((CKM_SHA256, CKG_MGF1_SHA256, Vec::new())),
-    };
+    // E9 / decision D6 (2026-09-25) — PKCS#11 v3.2 §6.1.8: CKM_RSA_PKCS_OAEP
+    // "has a parameter, a CK_RSA_PKCS_OAEP_PARAMS structure" (§6.1.7). An
+    // absent or short struct used to be read progressively and fall back to
+    // SHA-256 / MGF1-SHA-256 — the Hub G-8 probe's 1-byte parameter was
+    // accepted with CKR_OK. Every field is now required and validated, and a
+    // malformed struct is CKR_MECHANISM_PARAM_INVALID (§5.1.6).
+    let r = ParamReader::new(p_param, ul_param_len, &ck_param::oaep::LAYOUT, ck_param::oaep::FIELD_COUNT)
+        .map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
     let hash_alg = r.ulong32(ck_param::oaep::HASH_ALG);
-    if !r.covers(ck_param::oaep::FIELD_COUNT) {
-        return Ok((hash_alg, 0, Vec::new()));
-    }
     let mgf = r.ulong32(ck_param::oaep::MGF);
     let source = r.ulong32(ck_param::oaep::SOURCE);
-    let label = r.buffer(ck_param::oaep::P_SOURCE_DATA, ck_param::oaep::UL_SOURCE_DATA_LEN);
-    if !label.is_empty() {
-        // §6.4.4 — only CKZ_DATA_SPECIFIED carries a label.
-        if source != CKZ_DATA_SPECIFIED {
-            return Err(CKR_MECHANISM_PARAM_INVALID);
-        }
+    // §6.1.7: "source must be CKZ_DATA_SPECIFIED".
+    if source != CKZ_DATA_SPECIFIED {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
     }
-    Ok((hash_alg, mgf, label.to_vec()))
+    // §6.1.7: pSourceData "must be NULL_PTR" and ulSourceDataLen "must be 0"
+    // for the default (empty) label — one without the other is malformed.
+    let p_source = r.ptr(ck_param::oaep::P_SOURCE_DATA);
+    let source_len = r.ulong(ck_param::oaep::UL_SOURCE_DATA_LEN);
+    if p_source.is_null() != (source_len == 0) {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    // mgf 0 is not a CKG_MGF1_* value (Table 40).
+    if mgf == 0 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let label = r.buffer(ck_param::oaep::P_SOURCE_DATA, ck_param::oaep::UL_SOURCE_DATA_LEN).to_vec();
+    // hashAlg / mgf must name a combination this engine can run — refused at
+    // init rather than at the first C_Encrypt / C_Decrypt.
+    oaep_padding(hash_alg, mgf, &label)?;
+    Ok((hash_alg, mgf, label))
 }
 
 // ── Encrypt/Decrypt ─────────────────────────────────────────────────────────
@@ -20971,13 +21012,35 @@ mod multipart_sign_verify_ffi_tests {
         });
     }
 
+    /// The CK_MECHANISM for `mech`. The hash-specific RSA-PSS mechanisms
+    /// "have a parameter, a CK_RSA_PKCS_PSS_PARAMS structure" (v3.2
+    /// §6.1.11) and an absent one is CKR_MECHANISM_PARAM_INVALID since E9 /
+    /// decision D6, so they get the mechanism's own hash and MGF1 with a
+    /// hash-length salt — the values the engine defaulted to before.
+    fn mech_words(mech: u32) -> [usize; 3] {
+        match rsa_pss_mech_params(mech) {
+            Some((hash, mgf)) => {
+                let s_len = match hash {
+                    CKM_SHA_1 => 20,
+                    CKM_SHA224 | CKM_SHA3_224 => 28,
+                    CKM_SHA384 | CKM_SHA3_384 => 48,
+                    CKM_SHA512 | CKM_SHA3_512 => 64,
+                    _ => 32,
+                };
+                let p: &'static [usize; 3] = Box::leak(Box::new([hash as usize, mgf as usize, s_len]));
+                [mech as usize, p.as_ptr() as usize, 3 * std::mem::size_of::<usize>()]
+            }
+            None => [mech as usize, 0, 0],
+        }
+    }
+
     fn sign_init(sess: u32, mech: u32, key: u32) -> u32 {
-        let mut m: [usize; 3] = [mech as usize, 0, 0];
+        let mut m = mech_words(mech);
         C_SignInit(sess, m.as_mut_ptr() as *mut u8, key)
     }
 
     fn verify_init(sess: u32, mech: u32, key: u32) -> u32 {
-        let mut m: [usize; 3] = [mech as usize, 0, 0];
+        let mut m = mech_words(mech);
         C_VerifyInit(sess, m.as_mut_ptr() as *mut u8, key)
     }
 
@@ -24796,7 +24859,7 @@ mod param_struct_width_tests {
         let full = 16usize.to_ne_bytes();
         let m = packed_mech(mech, full.as_ptr(), full.len());
         assert_eq!(
-            unsafe { parse_sign_mech_params(m.as_ptr() as *const u8, mech) },
+            unsafe { parse_sign_mech_params(m.as_ptr() as *const u8, mech, 0) },
             Ok((16u32.to_le_bytes().to_vec(), false)),
         );
 
@@ -24805,7 +24868,7 @@ mod param_struct_width_tests {
         let m = packed_mech(mech, half.as_ptr(), half.len());
         if size_of::<usize>() == 8 {
             assert_eq!(
-                unsafe { parse_sign_mech_params(m.as_ptr() as *const u8, mech) },
+                unsafe { parse_sign_mech_params(m.as_ptr() as *const u8, mech, 0) },
                 Err(CKR_MECHANISM_PARAM_INVALID),
                 "require_len must reject a half-sized CK_MAC_GENERAL_PARAMS \
                  rather than reading four bytes past the caller's buffer",
@@ -24828,7 +24891,7 @@ mod param_struct_width_tests {
 
         let m = packed_mech(CKM_KMAC_128, param.as_ptr(), param.len());
         let (ctx, det) =
-            unsafe { parse_sign_mech_params(m.as_ptr() as *const u8, CKM_KMAC_128) }.unwrap();
+            unsafe { parse_sign_mech_params(m.as_ptr() as *const u8, CKM_KMAC_128, 0) }.unwrap();
         assert!(!det);
         // ctx = LE u32 output length, then the customization bytes verbatim.
         assert_eq!(&ctx[0..4], &32u32.to_le_bytes());
