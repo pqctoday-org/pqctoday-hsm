@@ -42,8 +42,19 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 #   cargo build --features acvp ...     # an authorized ACVP-lab submission
 # (Was `default = ["acvp"]`; flipped to opt-in per the 2026-06-21 compliance
 # audit — shipping a release build with this hook on is a §5.6 violation.)
-default = []
+default = ["awslc-pq"]
 acvp = []
+
+# ML-DSA / ML-KEM on AWS-LC's CPU path (`crypto::awslc_pq`): AWS-LC's
+# mldsa-native / mlkem-native carry hand-written AArch64 NEON NTT, pointwise,
+# rejection-sampling and norm routines the pure-Rust fips204 / ml-kem crates do
+# not. DEFAULT ON, but only native builds compile anything for it: the module
+# and `aws-lc-sys` are both gated on `not(target_arch = "wasm32")`, so the
+# wasm32 bundles keep fips204 / ml-kem unchanged whether or not the feature is
+# on. What it routes (and what stays on the Rust crates) is the coverage
+# matrix in src/crypto/awslc_pq.rs. Runtime escape hatch:
+# PQC_AWSLC_PQ_DISABLE=1 puts every call back on fips204 / ml-kem.
+awslc-pq = ["dep:aws-lc-sys"]
 
 # Exposes `reset_all_engine_state_for_test` as a normal `pub fn` (it is
 # already always available under `#[cfg(test)]` for this crate's own
@@ -70,6 +81,11 @@ phase-profile = [
     "fips205/phase-profile",
     "ml-kem/phase-profile",
 ]
+
+[[example]]
+# fips204 / ml-kem versus AWS-LC timing (`crypto::awslc_pq`); native only.
+name = "awslc_pq_bench"
+required-features = ["awslc-pq"]
 
 [dependencies]
 wasm-bindgen = "0.2.117"
@@ -254,6 +270,18 @@ libc = "0.2"
 # caller-chosen salt length, MD5/SHA-1/SHA-224/SHA-3 RSA variants, and
 # BIP32's P-256 scalar arithmetic). See `crypto::awslc` for the dispatch rule.
 aws-lc-rs = "1"
+# The raw AWS-LC API under aws-lc-rs, for `crypto::awslc_pq` (feature
+# `awslc-pq`): aws-lc-rs 1.18 exposes ML-DSA without context strings and
+# ML-KEM without seeded key generation / encapsulation, which the engine's
+# PKCS#11 surface needs. NOT a second copy of AWS-LC: this must resolve to the
+# SAME aws-lc-sys that aws-lc-rs resolves (`cargo tree -d -i aws-lc-sys` must
+# print nothing). The range spans the two aws-lc-sys lines the workspace
+# lockfiles carry today — 0.44 under aws-lc-rs 1.18.0 (rust/, kmip/,
+# remoting/) and 0.45 under 1.18.1 (wasm/) — so each lock keeps its single
+# copy. Only the public include/openssl API is used (bindgen'd, prefixed per
+# version), which is the same in both. Widen it when aws-lc-rs moves, and
+# regenerate pqctoday-cacp's Yocto crates.inc whenever the hsm pin moves.
+aws-lc-sys = { version = ">=0.44.0, <0.46.0", optional = true }
 # Multi-core SLH-DSA sign/keygen (fips205-patched `parallel` feature, src/par.rs):
 # independent FORS and hypertree subtrees are built on spare cores, byte-identical
 # output. Threads come from one process-wide budget of available_parallelism():

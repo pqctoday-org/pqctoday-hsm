@@ -2266,8 +2266,6 @@ fn C_GenerateKeyPair_impl(
             }
 
             CKM_ML_KEM_KEY_PAIR_GEN => {
-                use ml_kem::{EncodedSizeUser, KemCore};
-
                 // PKCS#11 v3.2 §6.68.2 — CKA_PARAMETER_SET is a REQUIRED template
                 // attribute for ML-KEM key-pair generation.
                 let ps = match get_attr_ulong(
@@ -2351,22 +2349,16 @@ fn C_GenerateKeyPair_impl(
                     rand::rngs::OsRng.fill_bytes(&mut dz);
                     seed = Some(dz.to_vec());
                 }
-                macro_rules! mlkem_gen {
-                    ($t:ty) => {{
-                        let s = seed.as_deref().expect("seed set above");
-                        let d = ml_kem::B32::try_from(&s[..32]).expect("length checked");
-                        let z = ml_kem::B32::try_from(&s[32..64]).expect("length checked");
-                        let (dk, ek) = <$t>::generate_deterministic(&d, &z);
-                        pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
-                        prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
-                    }};
-                }
-                match ps {
-                    CKP_ML_KEM_512 => mlkem_gen!(ml_kem::MlKem512),
-                    CKP_ML_KEM_768 => mlkem_gen!(ml_kem::MlKem768),
-                    CKP_ML_KEM_1024 => mlkem_gen!(ml_kem::MlKem1024),
+                // FIPS 203 KeyGen_internal(d, z) (AWS-LC or ml-kem, see
+                // crypto::handlers::ml_kem_keygen_from_seed).
+                let s = seed.as_deref().expect("seed set above");
+                match crate::crypto::handlers::ml_kem_keygen_from_seed(ps, s) {
+                    Some((ek, dk)) => {
+                        pub_attrs.insert(CKA_VALUE, ek);
+                        prv_attrs.insert(CKA_VALUE, dk);
+                    }
                     // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
-                    _ => return CKR_PARAMETER_SET_NOT_SUPPORTED,
+                    None => return CKR_PARAMETER_SET_NOT_SUPPORTED,
                 }
                 // Store the seed on the private object — engine-side, in the
                 // sensitive-blocked readback set (state::attr_is_sensitive_material).
@@ -2493,22 +2485,17 @@ fn C_GenerateKeyPair_impl(
                     rand::rngs::OsRng.fill_bytes(&mut xi);
                     seed = Some(xi.to_vec());
                 }
-                macro_rules! mldsa_gen {
-                    ($m:ident) => {{
-                        use fips204::traits::{KeyGen, SerDes};
-                        let s = seed.as_deref().expect("seed set above");
-                        let xi: &[u8; 32] = s.try_into().expect("length checked");
-                        let (vk, sk) = fips204::$m::KG::keygen_from_seed(xi);
-                        pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
-                        prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
-                    }};
-                }
-                match ps {
-                    CKP_ML_DSA_44 => mldsa_gen!(ml_dsa_44),
-                    CKP_ML_DSA_65 => mldsa_gen!(ml_dsa_65),
-                    CKP_ML_DSA_87 => mldsa_gen!(ml_dsa_87),
+                // FIPS 204 KeyGen_internal(ξ) (AWS-LC or fips204, see
+                // crypto::handlers::ml_dsa_keygen_from_seed).
+                let s = seed.as_deref().expect("seed set above");
+                let xi: &[u8; 32] = s.try_into().expect("length checked");
+                match crate::crypto::handlers::ml_dsa_keygen_from_seed(ps, xi) {
+                    Some((pk, sk)) => {
+                        pub_attrs.insert(CKA_VALUE, pk);
+                        prv_attrs.insert(CKA_VALUE, sk);
+                    }
                     // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
-                    _ => return CKR_PARAMETER_SET_NOT_SUPPORTED,
+                    None => return CKR_PARAMETER_SET_NOT_SUPPORTED,
                 }
                 // Store the seed on the private object — engine-side, in the
                 // sensitive-blocked readback set (state::attr_is_sensitive_material).
@@ -4495,7 +4482,7 @@ fn C_EncapsulateKey_impl(
 ) -> u32 {
     require_init!();
     require_session!(_h_session);
-    use ml_kem::{EncodedSizeUser, KemCore, kem::Encapsulate};
+    use ml_kem::KemCore;
 
     nonnull!(p_mechanism, ph_key, pul_ciphertext_len);
     // PKCS#11 v3.2 §5.18.8 — the key must permit encapsulation.
@@ -4957,14 +4944,20 @@ fn C_EncapsulateKey_impl(
         };
         macro_rules! encap {
             ($kem:ty, $rng:expr) => {{
-                let ek_enc = match ml_kem::array::Array::try_from(pub_key_bytes.as_slice()) {
-                    Ok(a) => a,
-                    Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
-                };
-                let ek = <$kem as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-                let (ct, ss) = match Encapsulate::encapsulate(&ek, $rng) {
+                // Length check first, so a malformed key draws no randomness.
+                let _ek_enc: ml_kem::Encoded<<$kem as KemCore>::EncapsulationKey> =
+                    match ml_kem::array::Array::try_from(pub_key_bytes.as_slice()) {
+                        Ok(a) => a,
+                        Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                    };
+                // m drawn exactly as ml-kem's encapsulate(rng) draws it (one
+                // 32-byte fill_bytes), so ACVP-seeded runs stay reproducible;
+                // then AWS-LC or ml-kem (crypto::handlers::ml_kem_encaps).
+                let mut m = [0u8; 32];
+                rand::RngCore::fill_bytes($rng, &mut m);
+                let (ct, ss) = match crate::crypto::handlers::ml_kem_encaps(ps, &pub_key_bytes, &m) {
                     Ok(r) => r,
-                    Err(_) => return CKR_FUNCTION_FAILED,
+                    Err(rv) => return rv,
                 };
                 std::ptr::copy_nonoverlapping(
                     ct.as_slice().as_ptr(),
@@ -5041,7 +5034,6 @@ fn C_DecapsulateKey_impl(
 ) -> u32 {
     require_init!();
     require_session!(_h_session);
-    use ml_kem::{EncodedSizeUser, KemCore, kem::Decapsulate};
 
     nonnull!(p_mechanism, p_ciphertext, ph_key);
     // PKCS#11 v3.2 §5.18.9 — the key must permit decapsulation.
@@ -5419,18 +5411,11 @@ fn C_DecapsulateKey_impl(
 
         macro_rules! decap {
             ($kem:ty) => {{
-                let dk_enc = match ml_kem::array::Array::try_from(prv_key_bytes.as_slice()) {
-                    Ok(a) => a,
-                    Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
-                };
-                let dk = <$kem as KemCore>::DecapsulationKey::from_bytes(&dk_enc);
-                let ct_enc = match ml_kem::array::Array::try_from(ct_bytes.as_slice()) {
-                    Ok(a) => a,
-                    Err(_) => return CKR_ARGUMENTS_BAD,
-                };
-                let ss = match Decapsulate::decapsulate(&dk, &ct_enc) {
+                // AWS-LC or ml-kem (crypto::handlers::ml_kem_decaps); same
+                // length checks and error codes as before.
+                let ss = match crate::crypto::handlers::ml_kem_decaps(ps, &prv_key_bytes, &ct_bytes) {
                     Ok(s) => s,
-                    Err(_) => return CKR_FUNCTION_FAILED,
+                    Err(rv) => return rv,
                 };
                 // §6.68.5 gives CKM_ML_KEM no length knob — §4.1.1 rules 5/6.
                 if let Err(rv) = kem_check_template_value_len(
@@ -7095,16 +7080,11 @@ fn C_Sign_impl(
                     Err(CKR_MECHANISM_PARAM_INVALID)
                 } else if msg.len() != PQCTODAY_ML_DSA_MU_LEN {
                     Err(CKR_ARGUMENTS_BAD)
+                } else if deterministic {
+                    sign_ml_dsa_external_mu(ps, &sk_bytes, msg, [0u8; 32])
                 } else {
-                    let rnd: [u8; 32] = if deterministic {
-                        [0u8; 32]
-                    } else {
-                        use rand::RngCore;
-                        let mut b = [0u8; 32];
-                        rand::rngs::OsRng.fill_bytes(&mut b);
-                        b
-                    };
-                    sign_ml_dsa_external_mu(ps, &sk_bytes, msg, rnd)
+                    // Fresh OS rnd (or AWS-LC's own, see crypto::awslc_pq).
+                    sign_ml_dsa_external_mu_hedged(ps, &sk_bytes, msg)
                 }
             }
             m if m == CKM_SLH_DSA || is_prehash_slh_dsa(m) => {

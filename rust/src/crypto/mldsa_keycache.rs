@@ -287,8 +287,18 @@ mod tests {
         let _ = native::finalize();
         native::init().unwrap();
         let session = native::bootstrap_default_token(0, "so", "user", "mldsa-cache").unwrap();
+        // Deterministic signing: that variant always runs on fips204 (the
+        // AWS-LC CPU path in crypto::awslc_pq takes hedged pure ML-DSA and
+        // has its own key cache), so this test exercises this cache whether
+        // or not the awslc-pq feature is on.
+        // CK_SIGN_ADDITIONAL_CONTEXT { hedgeVariant, pContext, ulContextLen }.
+        let param: [usize; 3] = [crate::constants::CKH_DETERMINISTIC_REQUIRED as usize, 0, 0];
         let sign = |handle: u32| {
-            let mut mech: [usize; 3] = [CKM_ML_DSA as usize, 0, 0];
+            let mut mech: [usize; 3] = [
+                CKM_ML_DSA as usize,
+                param.as_ptr() as usize,
+                std::mem::size_of_val(&param),
+            ];
             assert_eq!(ffi::C_SignInit(session, mech.as_mut_ptr() as *mut u8, handle), CKR_OK);
             let mut data = b"lifecycle".to_vec();
             let mut signature = vec![0u8; 3309];

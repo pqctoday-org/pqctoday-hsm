@@ -565,6 +565,21 @@ fn sign_pqc_impl(
     use rand::RngCore;
     match mechanism {
         m if m == CKM_ML_DSA || is_prehash_ml_dsa(m) => {
+            // Normal hedge (no caller rnd) on the AWS-LC CPU path when it
+            // covers the variant: pure ML-DSA or external µ, not the internal
+            // interface, not HashML-DSA (crate::crypto::awslc_pq). Anything
+            // else, or a `None` from it, takes the code below unchanged.
+            #[cfg(all(feature = "awslc-pq", not(target_arch = "wasm32")))]
+            if !deterministic && random.is_none() && !internal && (external_mu || m == CKM_ML_DSA) {
+                let routed = if external_mu {
+                    crate::crypto::awslc_pq::mldsa_sign_mu(ps, &sk, data)
+                } else {
+                    crate::crypto::awslc_pq::mldsa_sign(ps, &sk, data, ctx)
+                };
+                if let Some(sig) = routed {
+                    return Ok(sig);
+                }
+            }
             // rnd: deterministic ⇒ 0^32; hedged ⇒ explicit <Random> (must be
             // 32 bytes) or, when absent, drawn from the OS RNG (normal hedge).
             let rnd: [u8; 32] = if deterministic {

@@ -114,8 +114,6 @@ fn encapsulate_impl(
     public_key_handle: u32,
     mechanism: u32,
 ) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
-    use ml_kem::{kem::Encapsulate, EncodedSizeUser, KemCore};
-
     let access = resolve_session_access(session)?;
 
     if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
@@ -158,35 +156,11 @@ fn encapsulate_impl(
         return Err(CKR_TEMPLATE_INCOMPLETE);
     }
     let pub_key_bytes = pub_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
-    let mut rng = rand::rngs::OsRng;
-
-    let (ct, ss) = match ps {
-        CKP_ML_KEM_512 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem512 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) =
-                Encapsulate::encapsulate(&ek, &mut rng).map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        CKP_ML_KEM_768 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem768 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) =
-                Encapsulate::encapsulate(&ek, &mut rng).map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        CKP_ML_KEM_1024 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem1024 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) =
-                Encapsulate::encapsulate(&ek, &mut rng).map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        _ => return Err(CKR_ARGUMENTS_BAD),
-    };
+    // m from the OS RNG (one 32-byte draw, as ml-kem's encapsulate(rng)),
+    // then Encaps_internal on AWS-LC or ml-kem (crate::crypto::handlers).
+    let mut m = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut m);
+    let (ct, ss) = crate::crypto::handlers::ml_kem_encaps(ps, &pub_key_bytes, &m)?;
     Ok((ct, ss))
 }
 
@@ -212,8 +186,6 @@ pub fn encapsulate_deterministic(
     mechanism: u32,
     coins: &[u8],
 ) -> Result<(Vec<u8>, Vec<u8>), CkRv> {
-    use ml_kem::{EncapsulateDeterministic, EncodedSizeUser, KemCore};
-
     if mechanism != CKM_ML_KEM {
         return Err(CKR_MECHANISM_INVALID);
     }
@@ -239,39 +211,9 @@ pub fn encapsulate_deterministic(
         return Err(CKR_TEMPLATE_INCOMPLETE);
     }
     // FIPS 203 §7.2 — m is exactly 32 bytes.
-    let m = ml_kem::B32::try_from(coins).map_err(|_| CKR_ARGUMENTS_BAD)?;
+    let m: [u8; 32] = coins.try_into().map_err(|_| CKR_ARGUMENTS_BAD)?;
     let pub_key_bytes = pub_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
-
-    let (ct, ss) = match ps {
-        CKP_ML_KEM_512 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem512 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) = ek
-                .encapsulate_deterministic(&m)
-                .map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        CKP_ML_KEM_768 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem768 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) = ek
-                .encapsulate_deterministic(&m)
-                .map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        CKP_ML_KEM_1024 => {
-            let ek_enc = ml_kem::array::Array::try_from(pub_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let ek = <ml_kem::MlKem1024 as KemCore>::EncapsulationKey::from_bytes(&ek_enc);
-            let (ct, ss) = ek
-                .encapsulate_deterministic(&m)
-                .map_err(|_| CKR_FUNCTION_FAILED)?;
-            (ct.as_slice().to_vec(), ss.as_slice().to_vec())
-        }
-        _ => return Err(CKR_ARGUMENTS_BAD),
-    };
+    let (ct, ss) = crate::crypto::handlers::ml_kem_encaps(ps, &pub_key_bytes, &m)?;
     Ok((ct, ss))
 }
 
@@ -342,8 +284,6 @@ fn decapsulate_impl(
     mechanism: u32,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, CkRv> {
-    use ml_kem::{kem::Decapsulate, EncodedSizeUser, KemCore};
-
     let access = resolve_session_access(session)?;
 
     if mechanism == CKM_ECDH1_DERIVE || mechanism == CKM_EC_MONTGOMERY_KEY_DERIVE {
@@ -394,35 +334,9 @@ fn decapsulate_impl(
     }
 
     let prv_key_bytes = prv_key_bytes.ok_or(CKR_ARGUMENTS_BAD)?;
-
-    let ss = match ps {
-        CKP_ML_KEM_512 => {
-            let dk_enc = ml_kem::array::Array::try_from(prv_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let dk = <ml_kem::MlKem512 as KemCore>::DecapsulationKey::from_bytes(&dk_enc);
-            let ct_enc =
-                ml_kem::array::Array::try_from(ciphertext).map_err(|_| CKR_ARGUMENTS_BAD)?;
-            Decapsulate::decapsulate(&dk, &ct_enc).map_err(|_| CKR_FUNCTION_FAILED)?
-        }
-        CKP_ML_KEM_768 => {
-            let dk_enc = ml_kem::array::Array::try_from(prv_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let dk = <ml_kem::MlKem768 as KemCore>::DecapsulationKey::from_bytes(&dk_enc);
-            let ct_enc =
-                ml_kem::array::Array::try_from(ciphertext).map_err(|_| CKR_ARGUMENTS_BAD)?;
-            Decapsulate::decapsulate(&dk, &ct_enc).map_err(|_| CKR_FUNCTION_FAILED)?
-        }
-        CKP_ML_KEM_1024 => {
-            let dk_enc = ml_kem::array::Array::try_from(prv_key_bytes.as_slice())
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let dk = <ml_kem::MlKem1024 as KemCore>::DecapsulationKey::from_bytes(&dk_enc);
-            let ct_enc =
-                ml_kem::array::Array::try_from(ciphertext).map_err(|_| CKR_ARGUMENTS_BAD)?;
-            Decapsulate::decapsulate(&dk, &ct_enc).map_err(|_| CKR_FUNCTION_FAILED)?
-        }
-        _ => return Err(CKR_ARGUMENTS_BAD),
-    };
-    Ok(ss.as_slice().to_vec())
+    // Decaps_internal on AWS-LC or ml-kem (crate::crypto::handlers), with
+    // the length checks and error codes this function always had.
+    crate::crypto::handlers::ml_kem_decaps(ps, &prv_key_bytes, ciphertext)
 }
 
 /// Classical-KEM encapsulation (2026-07-05, crypto-agility for `Encapsulate`).

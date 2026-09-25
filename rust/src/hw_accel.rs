@@ -175,6 +175,10 @@ pub fn install_mldsa65_sign(lanes: usize, opener: Mldsa65LaneOpener) -> bool {
         return false;
     }
     let _installed = fips204::set_mldsa65_sign_hook(mldsa65_sign);
+    // ML-DSA-65 signing stays on fips204 (FPGA first); crypto::awslc_pq keeps
+    // verification and the other parameter sets on the AWS-LC CPU path.
+    #[cfg(feature = "awslc-pq")]
+    crate::crypto::awslc_pq::defer_mldsa65_to_accelerator(false);
     true
 }
 
@@ -338,6 +342,9 @@ fn probe_mldsa() -> bool {
                     "whole-signature probe failed ({sign_error}); selected resident matvec accelerator"
                 ));
                 let _installed = fips204::set_mldsa65_matvec_hook(mldsa65_matvec);
+                // fips204 also uses the matrix/vector hook in key generation.
+                #[cfg(feature = "awslc-pq")]
+                crate::crypto::awslc_pq::defer_mldsa65_to_accelerator(true);
                 true
             }
             Err(matvec_error) => {

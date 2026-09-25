@@ -182,7 +182,6 @@ fn ml_kem_keypair_inner(
     label: &str,
     extractable: bool,
 ) -> Result<(u32, u32), CkRv> {
-    use ml_kem::{EncodedSizeUser, KemCore};
 
     if let Some(s) = seed {
         // FIPS 203 §7.1 — seed material is d ‖ z, 32 bytes each.
@@ -210,26 +209,28 @@ fn ml_kem_keypair_inner(
 
     // Crypto keygen — deterministic from d ‖ z when a seed is supplied
     // (FIPS 203 Algorithm 16), OsRng otherwise.
-    macro_rules! mlkem_gen {
-        ($t:ty) => {{
-            let (dk, ek) = match seed {
-                Some(s) => {
-                    let d = ml_kem::B32::try_from(&s[..32]).expect("length checked");
-                    let z = ml_kem::B32::try_from(&s[32..64]).expect("length checked");
-                    <$t>::generate_deterministic(&d, &z)
-                }
-                None => <$t>::generate(&mut rand::rngs::OsRng),
-            };
-            pub_attrs.insert(CKA_VALUE, ek.as_bytes().as_slice().to_vec());
-            prv_attrs.insert(CKA_VALUE, dk.as_bytes().as_slice().to_vec());
-        }};
-    }
-    match parameter_set {
-        CKP_ML_KEM_512 => mlkem_gen!(ml_kem::MlKem512),
-        CKP_ML_KEM_768 => mlkem_gen!(ml_kem::MlKem768),
-        CKP_ML_KEM_1024 => mlkem_gen!(ml_kem::MlKem1024),
+    // Without a seed, d and z are drawn from the OS RNG in that order —
+    // what ml-kem's `generate(rng)` does — and expanded by the same
+    // KeyGen_internal (AWS-LC or ml-kem, crypto::handlers).
+    let drawn;
+    let dz: &[u8] = match seed {
+        Some(s) => s,
+        None => {
+            use rand::RngCore;
+            let mut b = [0u8; 64];
+            rand::rngs::OsRng.fill_bytes(&mut b[..32]);
+            rand::rngs::OsRng.fill_bytes(&mut b[32..]);
+            drawn = b;
+            &drawn
+        }
+    };
+    match crate::crypto::handlers::ml_kem_keygen_from_seed(parameter_set, dz) {
+        Some((ek, dk)) => {
+            pub_attrs.insert(CKA_VALUE, ek);
+            prv_attrs.insert(CKA_VALUE, dk);
+        }
         // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
-        _ => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
+        None => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
     }
     // Engine-side seed storage — sensitive-blocked readback set
     // (state::attr_is_sensitive_material).
@@ -350,32 +351,25 @@ fn ml_dsa_keypair_inner(
 
     // Crypto keygen — deterministic from ξ when a seed is supplied
     // (FIPS 204 Algorithm 6), OsRng otherwise.
-    macro_rules! mldsa_gen {
-        ($m:ident) => {{
-            use fips204::traits::{KeyGen, SerDes};
-            match seed {
-                Some(s) => {
-                    let xi: &[u8; 32] = s.try_into().expect("length checked");
-                    let (vk, sk) = fips204::$m::KG::keygen_from_seed(xi);
-                    pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
-                    prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
-                }
-                None => match fips204::$m::try_keygen_with_rng(&mut rand::rngs::OsRng) {
-                    Ok((vk, sk)) => {
-                        pub_attrs.insert(CKA_VALUE, SerDes::into_bytes(vk).to_vec());
-                        prv_attrs.insert(CKA_VALUE, SerDes::into_bytes(sk).to_vec());
-                    }
-                    Err(_) => return Err(CKR_FUNCTION_FAILED),
-                },
-            }
-        }};
-    }
-    match parameter_set {
-        CKP_ML_DSA_44 => mldsa_gen!(ml_dsa_44),
-        CKP_ML_DSA_65 => mldsa_gen!(ml_dsa_65),
-        CKP_ML_DSA_87 => mldsa_gen!(ml_dsa_87),
+    // Without a seed, ξ is drawn from the OS RNG (FIPS 204 Algorithm 1
+    // line 1, what fips204's `try_keygen_with_rng` does) and expanded by
+    // KeyGen_internal (AWS-LC or fips204, crate::crypto::handlers).
+    let xi: [u8; 32] = match seed {
+        Some(s) => s.try_into().expect("length checked"),
+        None => {
+            use rand::RngCore;
+            let mut b = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut b);
+            b
+        }
+    };
+    match crate::crypto::handlers::ml_dsa_keygen_from_seed(parameter_set, &xi) {
+        Some((pk, sk)) => {
+            pub_attrs.insert(CKA_VALUE, pk);
+            prv_attrs.insert(CKA_VALUE, sk);
+        }
         // Table 6 — unrecognized CKA_PARAMETER_SET value in the template.
-        _ => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
+        None => return Err(CKR_PARAMETER_SET_NOT_SUPPORTED),
     }
     // Engine-side seed storage — sensitive-blocked readback set
     // (state::attr_is_sensitive_material).
