@@ -1420,6 +1420,17 @@ pub fn C_GetMechanismInfo(slot_id: u32, mech_type: u32, p_info: *mut u8) -> u32 
 const EC_CAPABILITY_FLAGS: u32 =
     CKF_EC_F_P | CKF_EC_OID | CKF_EC_CURVENAME | CKF_EC_UNCOMPRESS;
 
+/// E17 (2026-09-25) — HMAC key sizes, in bytes (PKCS#11 v3.2 §6.22.6 et
+/// al.). The engine computes HMAC over any key length, as FIPS 198-1 §4 and
+/// RFC 2104 §3 allow (a key longer than the block is hashed first); v3.2
+/// §6.22.3 only says a FIPS-198 token "may" insist on half the digest. The
+/// former (16, 64) understated that: NIST HMAC 2.0 cases with 1..15-byte
+/// and 65..256-byte keys all compute correctly here. So the range says
+/// what is accepted — from 1 byte (an empty CKA_VALUE is not a key) — up
+/// to 512, the same bounds as CKM_GENERIC_SECRET_KEY_GEN, rather than
+/// adding a floor that would reject RFC 4231's own 4-byte test key.
+const HMAC_KEY_RANGE: (u32, u32, u32) = (1, 512, 0x00000800 | 0x00002000);
+
 pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
     let info = match mech_type {
         // WS-11 Phase 1 (2026-08-28) widened 1024-4096 to 512-16384 — the
@@ -1532,7 +1543,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
         | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
         | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC | CKM_SHA_1_HMAC | CKM_MD5_HMAC => {
-            (16, 64, 0x00000800 | 0x00002000)
+            HMAC_KEY_RANGE
         }
         CKM_SHA256_HMAC_GENERAL
         | CKM_SHA384_HMAC_GENERAL
@@ -1546,7 +1557,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_SHA3_384_HMAC_GENERAL
         | CKM_RIPEMD160_HMAC_GENERAL
         | CKM_SHA_1_HMAC_GENERAL
-        | CKM_MD5_HMAC_GENERAL => (16, 64, 0x00000800 | 0x00002000),
+        | CKM_MD5_HMAC_GENERAL => HMAC_KEY_RANGE,
         CKM_KMAC_128 | CKM_KMAC_256 => (16, 64, 0x00000800 | 0x00002000),
         // §3 Wave 4 — AES-CMAC (NIST SP 800-38B), a 16-byte MAC over an
         // AES key of 128/192/256 bits.

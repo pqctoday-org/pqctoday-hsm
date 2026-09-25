@@ -693,3 +693,109 @@ fn e16_kmac_length_checks_follow_the_parameter() {
         assert_eq!(verify(session, &m, hk, msg, &sig[..default_len]), CKR_SIGNATURE_LEN_RANGE);
     }
 }
+
+// ═══ E17 — HMAC key-size advertisement matches what the engine accepts ════
+
+/// Every HMAC / HMAC_GENERAL mechanism, paired with its general twin.
+const HMAC_MECHS: &[(u32, u32)] = &[
+    (CKM_MD5_HMAC, CKM_MD5_HMAC_GENERAL),
+    (CKM_SHA_1_HMAC, CKM_SHA_1_HMAC_GENERAL),
+    (CKM_RIPEMD160_HMAC, CKM_RIPEMD160_HMAC_GENERAL),
+    (CKM_SHA224_HMAC, CKM_SHA224_HMAC_GENERAL),
+    (CKM_SHA256_HMAC, CKM_SHA256_HMAC_GENERAL),
+    (CKM_SHA384_HMAC, CKM_SHA384_HMAC_GENERAL),
+    (CKM_SHA512_HMAC, CKM_SHA512_HMAC_GENERAL),
+    (CKM_SHA512_224_HMAC, CKM_SHA512_224_HMAC_GENERAL),
+    (CKM_SHA512_256_HMAC, CKM_SHA512_256_HMAC_GENERAL),
+    (CKM_SHA3_224_HMAC, CKM_SHA3_224_HMAC_GENERAL),
+    (CKM_SHA3_256_HMAC, CKM_SHA3_256_HMAC_GENERAL),
+    (CKM_SHA3_384_HMAC, CKM_SHA3_384_HMAC_GENERAL),
+    (CKM_SHA3_512_HMAC, CKM_SHA3_512_HMAC_GENERAL),
+];
+
+fn hmac_general_mech(hash: &str) -> u32 {
+    match hash {
+        "SHA-1" => CKM_SHA_1_HMAC_GENERAL,
+        "SHA2-224" => CKM_SHA224_HMAC_GENERAL,
+        "SHA2-256" => CKM_SHA256_HMAC_GENERAL,
+        "SHA2-384" => CKM_SHA384_HMAC_GENERAL,
+        "SHA2-512" => CKM_SHA512_HMAC_GENERAL,
+        "SHA2-512/224" => CKM_SHA512_224_HMAC_GENERAL,
+        "SHA2-512/256" => CKM_SHA512_256_HMAC_GENERAL,
+        "SHA3-224" => CKM_SHA3_224_HMAC_GENERAL,
+        "SHA3-256" => CKM_SHA3_256_HMAC_GENERAL,
+        "SHA3-384" => CKM_SHA3_384_HMAC_GENERAL,
+        "SHA3-512" => CKM_SHA3_512_HMAC_GENERAL,
+        other => panic!("hash {other}"),
+    }
+}
+
+/// HMAC 2.0 AFT, one upstream file per digest (11 digests, 63 cases, keys
+/// 1..256 bytes): C_Sign with CK_MAC_GENERAL_PARAMS reproduces the NIST MAC,
+/// C_Verify accepts it — and every key length the engine accepts lies
+/// inside what C_GetMechanismInfo advertises for both the general and the
+/// fixed-length mechanism. FIPS 198-1 §4 / RFC 2104 §3 allow any key
+/// length (a key longer than the block is hashed first); PKCS#11 v3.2
+/// §6.22.3 only says a FIPS-198 token "may" require >= half the digest.
+#[test]
+fn e17_hmac_nist_keys_inside_advertised_range() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let doc = fixture("hmac_acvp_matrix_test.json");
+    let mut n = 0;
+    for g in doc["testGroups"].as_array().unwrap() {
+        let general = hmac_general_mech(s(g, "hashAlg"));
+        let fixed = HMAC_MECHS.iter().find(|(_, gm)| *gm == general).unwrap().0;
+        for t in g["tests"].as_array().unwrap() {
+            let tc = &t["tcId"];
+            let key = hx(s(t, "key"));
+            let mac = hx(s(t, "mac"));
+            for m in [general, fixed] {
+                let (min, max, _) = mech_info(m);
+                assert!(
+                    (min as usize..=max as usize).contains(&key.len()),
+                    "tc {tc}: {}-byte key outside mech {m:#x}'s advertised {min}..{max}",
+                    key.len()
+                );
+            }
+            let hk = secret_key(session, CKK_GENERIC_SECRET, &key);
+            let p = pack(&ck_param::mac_general::LAYOUT, &[(ck_param::mac_general::UL_MAC_LENGTH, mac.len())]);
+            let mech = mechanism(general, &p);
+            let msg = hx(s(t, "msg"));
+            assert_eq!(sign(session, &mech, hk, &msg), Ok(mac.clone()), "tc {tc} C_Sign");
+            assert_eq!(verify(session, &mech, hk, &msg, &mac), CKR_OK, "tc {tc} C_Verify");
+            n += 1;
+        }
+    }
+    assert_eq!(n, 63, "every case in the 11 groups");
+}
+
+/// The advertised range, stated: 1 to 512 bytes for every HMAC mechanism —
+/// the same bounds as this engine's CKM_GENERIC_SECRET_KEY_GEN — and both
+/// ends really work. RFC 4231 §4.3 test case 2 (4-byte key "Jefe") and a
+/// 512-byte key round-trip through C_Sign/C_Verify on every mechanism.
+#[test]
+fn e17_hmac_advertised_bounds_execute() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    assert_eq!(mech_info(CKM_GENERIC_SECRET_KEY_GEN).0, 1);
+    let msg = b"what do ya want for nothing?";
+    let jefe = secret_key(session, CKK_GENERIC_SECRET, b"Jefe");
+    let big = secret_key(session, CKK_GENERIC_SECRET, &[0x5au8; 512]);
+    for &(fixed, general) in HMAC_MECHS {
+        for m in [fixed, general] {
+            let (min, max, _) = mech_info(m);
+            assert_eq!((min, max), (1, 512), "mech {m:#x}");
+        }
+        let mech = mechanism(fixed, &[]);
+        for hk in [jefe, big] {
+            let mac = sign(session, &mech, hk, msg).unwrap_or_else(|rv| panic!("{fixed:#x}: {rv:#x}"));
+            assert_eq!(verify(session, &mech, hk, msg, &mac), CKR_OK);
+        }
+    }
+    // RFC 4231 §4.3, HMAC-SHA-256 with the 4-byte key.
+    assert_eq!(
+        sign(session, &mechanism(CKM_SHA256_HMAC, &[]), jefe, msg),
+        Ok(hx("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"))
+    );
+}
