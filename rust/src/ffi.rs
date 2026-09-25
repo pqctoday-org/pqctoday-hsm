@@ -4942,6 +4942,15 @@ fn C_EncapsulateKey_impl(
             Some(v) => v,
             None => return CKR_ARGUMENTS_BAD,
         };
+        // FIPS 203 §7.2 — "ML-KEM.Encaps shall not be run with an
+        // encapsulation key that has not been checked". C_CreateObject
+        // already rejects a failing ek; this backstop covers keys that
+        // reached the store another way (C_UnwrapKey, a persisted token
+        // object from before that check existed). Same code this arm already
+        // returns for wrong-length key material (§5.18.8 lists it).
+        if crate::native::keygen::ml_kem_ek_check(ps, &pub_key_bytes) != Some(true) {
+            return CKR_KEY_TYPE_INCONSISTENT;
+        }
         macro_rules! encap {
             ($kem:ty, $rng:expr) => {{
                 // Length check first, so a malformed key draws no randomness.
@@ -5412,6 +5421,13 @@ fn C_DecapsulateKey_impl(
             Some(v) => v,
             None => return CKR_ARGUMENTS_BAD,
         };
+        // FIPS 203 §7.3 checks 2-3 (dk type + hash check) — backstop for
+        // keys that did not enter through C_CreateObject's check (see the
+        // C_EncapsulateKey arm). Same code this arm already returns for
+        // wrong-length dk material.
+        if crate::native::keygen::ml_kem_dk_check(ps, &prv_key_bytes) != Some(true) {
+            return CKR_KEY_TYPE_INCONSISTENT;
+        }
         if p_ciphertext.is_null() {
             return CKR_ARGUMENTS_BAD;
         }
@@ -6090,6 +6106,31 @@ fn check_imported_slh_dsa_private(attrs: &Attributes) -> Result<(), u32> {
     crate::native::keygen::check_slh_dsa_private_value(ps, value)
 }
 
+/// FIPS 203 §7.2 (public `ek`) / §7.3 (private `dk`) key input checks for a
+/// `CKK_ML_KEM` object about to be created from caller-supplied bytes. Runs
+/// AFTER `normalize_pqc_pkcs8_import`, so a PKCS#8-wrapped `dk` is checked in
+/// its unwrapped raw form. `Err(CKR_ATTRIBUTE_VALUE_INVALID)` per PKCS#11
+/// v3.2 §4.1.1 rule 2. No-op for any other key type, a missing CKA_VALUE
+/// (`validate_create_template` owns that), or an absent/unknown parameter set.
+fn reject_invalid_ml_kem_key_value(class: Option<u32>, attrs: &Attributes) -> Result<(), u32> {
+    if crate::state::get_object_attr_u32_from(attrs, CKA_KEY_TYPE) != Some(CKK_ML_KEM) {
+        return Ok(());
+    }
+    let Some(value) = attrs.get(&CKA_VALUE) else {
+        return Ok(());
+    };
+    let ps = crate::state::get_object_param_set_from(attrs);
+    let verdict = match class {
+        Some(CKO_PUBLIC_KEY) => crate::native::keygen::ml_kem_ek_check(ps, value),
+        Some(CKO_PRIVATE_KEY) => crate::native::keygen::ml_kem_dk_check(ps, value),
+        _ => None,
+    };
+    match verdict {
+        Some(false) => Err(CKR_ATTRIBUTE_VALUE_INVALID),
+        _ => Ok(()),
+    }
+}
+
 /// Engine core of `C_CreateObject` — operates on an already-marshalled
 /// attribute map. Split from the FFI wrapper so policy can be unit-tested on
 /// 64-bit native builds, where CK_ATTRIBUTE templates (32-bit value pointers)
@@ -6230,6 +6271,17 @@ pub(crate) fn create_object_from_attrs(
         normalize_pqc_pkcs8_import(&mut new_attrs)?;
         check_imported_slh_dsa_private(&new_attrs)?;
     }
+
+    // FIPS 203 §7.2 / §7.3 key input checks on an imported ML-KEM key, run
+    // once here at creation (both sections: key checking "need not be
+    // performed ... with every execution"). PKCS#11 v3.2 §4.1.1: a template
+    // that "specifies an invalid value for a valid attribute" fails with
+    // CKR_ATTRIBUTE_VALUE_INVALID — and a CKA_VALUE that fails the FIPS 203
+    // checks is not the "encapsulation key ek / decapsulation key dk as
+    // defined in [FIPS 203]" the ML-KEM key tables (§6.68.2/§6.68.3) require.
+    // An absent/unknown parameter set is left alone: the KEM call sites
+    // already answer that with CKR_TEMPLATE_INCOMPLETE.
+    reject_invalid_ml_kem_key_value(class, &new_attrs)?;
 
     // PKCS#11 v3.2 §6.14 (and every other secret-key table): CKA_VALUE_LEN is
     // "Length in bytes of key value", defined for the key type regardless of
@@ -24368,6 +24420,12 @@ mod mlkem_value_len_ffi_tests {
 #[cfg(test)]
 #[path = "conformance_v32_tests.rs"]
 mod conformance_v32_tests;
+
+/// FIPS 203 §7.2/§7.3 ML-KEM input checks vs the NIST ACVP-Server key-check
+/// vectors (2026-09-25) — see the module's own docs.
+#[cfg(test)]
+#[path = "mlkem_input_check_tests.rs"]
+mod mlkem_input_check_tests;
 
 // ── Mechanism-parameter struct widths (2026-08-13) ──────────────────────────
 //
