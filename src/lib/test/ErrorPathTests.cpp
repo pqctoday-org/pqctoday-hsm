@@ -649,3 +649,43 @@ void ErrorPathTests::testMechanismParamInvalid()
 	CRYPTOKI_F_PTR( C_CloseSession(hSession) );
 	CPPUNIT_ASSERT_MESSAGE(fails, fails.empty());
 }
+
+// E19 — C_GetMechanismList (§5.5.5) and C_DigestInit (§5.12.1) must agree:
+// CKM_RIPEMD160 digests iff it is advertised, and is CKR_MECHANISM_INVALID
+// otherwise (the WASM / no-legacy-provider build).
+void ErrorPathTests::testRipemd160AdvertisedIffDispatched()
+{
+	CK_RV rv;
+	CK_SESSION_HANDLE hSession;
+	CPPUNIT_ASSERT(openUserSession(hSession) == CKR_OK);
+
+	CK_ULONG count = 0;
+	CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_GetMechanismList(m_initializedTokenSlotID, NULL_PTR, &count) ) == CKR_OK);
+	std::vector<CK_MECHANISM_TYPE> list(count);
+	CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_GetMechanismList(m_initializedTokenSlotID, &list[0], &count) ) == CKR_OK);
+	bool listed = false;
+	for (CK_ULONG i = 0; i < count; i++) if (list[i] == CKM_RIPEMD160) listed = true;
+
+	CK_MECHANISM m = { CKM_RIPEMD160, NULL_PTR, 0 };
+	rv = CRYPTOKI_F_PTR( C_DigestInit(hSession, &m) );
+	if (listed)
+	{
+		CPPUNIT_ASSERT(rv == CKR_OK);
+		// RIPEMD-160("abc") — ISO/IEC 10118-3 / the RIPEMD-160 reference test vector.
+		const CK_BYTE expected[20] = {
+			0x8e, 0xb2, 0x08, 0xf7, 0xe0, 0x5d, 0x98, 0x7a, 0x9b, 0x04,
+			0x4a, 0x8e, 0x98, 0xc6, 0xb0, 0x87, 0xf1, 0x5a, 0x0b, 0xfc };
+		CK_BYTE abc[] = { 'a', 'b', 'c' };
+		CK_BYTE digest[20];
+		CK_ULONG digestLen = sizeof(digest);
+		rv = CRYPTOKI_F_PTR( C_Digest(hSession, abc, sizeof(abc), digest, &digestLen) );
+		CPPUNIT_ASSERT(rv == CKR_OK);
+		CPPUNIT_ASSERT(digestLen == 20 && memcmp(digest, expected, 20) == 0);
+	}
+	else
+	{
+		CPPUNIT_ASSERT(rv == CKR_MECHANISM_INVALID);
+	}
+
+	CRYPTOKI_F_PTR( C_CloseSession(hSession) );
+}

@@ -46,6 +46,7 @@ class ErrorPathTests : public TestsBase
 	CPPUNIT_TEST(testUnwrapKeyTypeCode);
 	CPPUNIT_TEST(testSignMessageBufferTooSmall);
 	CPPUNIT_TEST(testMechanismParamInvalid);
+	CPPUNIT_TEST(testRipemd160AdvertisedIffDispatched);
 	CPPUNIT_TEST_SUITE_END();
 
 public:
@@ -53,6 +54,7 @@ public:
 	void testUnwrapKeyTypeCode();
 	void testSignMessageBufferTooSmall();
 	void testMechanismParamInvalid();
+	void testRipemd160AdvertisedIffDispatched();
 
 protected:
 	CK_RV openUserSession(CK_SESSION_HANDLE& hSession);
