@@ -1590,7 +1590,7 @@
       "value": "0x00000211",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 16,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -1599,7 +1599,7 @@
       "value": "0x00000212",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 16,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -1861,7 +1861,7 @@
       "value": "0x00000241",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 20,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -1870,7 +1870,7 @@
       "value": "0x00000242",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 20,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2065,7 +2065,7 @@
       "value": "0x00000256",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 28,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2074,7 +2074,7 @@
       "value": "0x00000257",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 28,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2120,7 +2120,7 @@
       "value": "0x00000251",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 32,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2129,7 +2129,7 @@
       "value": "0x00000252",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 32,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2179,7 +2179,7 @@
       "value": "0x00000261",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 48,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2188,7 +2188,7 @@
       "value": "0x00000262",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 48,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2238,7 +2238,7 @@
       "value": "0x000002b6",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 28,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2247,7 +2247,7 @@
       "value": "0x000002b7",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 28,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2293,7 +2293,7 @@
       "value": "0x000002b1",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 32,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2302,7 +2302,7 @@
       "value": "0x000002b2",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 32,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2352,7 +2352,7 @@
       "value": "0x000002c1",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 48,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2361,7 +2361,7 @@
       "value": "0x000002c2",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 48,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2411,7 +2411,7 @@
       "value": "0x000002d1",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 64,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2420,7 +2420,7 @@
       "value": "0x000002d2",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 64,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2479,7 +2479,7 @@
       "value": "0x00000049",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 28,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2488,7 +2488,7 @@
       "value": "0x0000004a",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 28,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2520,7 +2520,7 @@
       "value": "0x0000004d",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 32,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2529,7 +2529,7 @@
       "value": "0x0000004e",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 32,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2552,7 +2552,7 @@
       "value": "0x00000271",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 64,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2561,7 +2561,7 @@
       "value": "0x00000272",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 64,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2650,7 +2650,7 @@
       "value": "0x00000221",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 20,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
@@ -2659,7 +2659,7 @@
       "value": "0x00000222",
       "cpp": "implemented",
       "rust": "implemented",
-      "cpp_min": 20,
+      "cpp_min": 0,
       "cpp_max": 512,
       "rust_min": 16,
       "rust_max": 64
