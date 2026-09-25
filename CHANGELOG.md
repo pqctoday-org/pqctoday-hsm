@@ -52,9 +52,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   time of the dispatch, measured in the function that emits it.
 
 - **AWS-LC constant-time RSA and NIST-curve ECDH fast path** (Rust engine,
-  native targets only). RSA PKCS#1 v1.5 sign/verify, RSA-OAEP and PKCS#1 v1.5
-  encrypt/decrypt, RSA key generation, and P-256/384/521 ECDH now run through
-  AWS-LC (`aws-lc-rs`) instead of the pure-Rust `rsa`/`p256` crates. The
+  native targets only). RSA PKCS#1 v1.5 sign/verify, RSA-OAEP encrypt and
+  PKCS#1 v1.5 encrypt/decrypt, RSA key generation, and P-256/384/521 ECDH now
+  run through AWS-LC (`aws-lc-rs`) instead of the pure-Rust `rsa`/`p256`
+  crates. (OAEP **decrypt** is listed separately under Fixed below — it was
+  claimed here before it was actually wired.) The
   wasm32 build is byte-for-byte unchanged — it keeps the pure-Rust path, which
   also remains the conformance reference for every mechanism AWS-LC does not
   expose (raw `CKM_RSA_X_509`, all RSA-PSS, deterministic ECDSA, the legacy
@@ -174,6 +176,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **RSA-OAEP decrypt now actually runs on AWS-LC** (Rust engine, native
+  targets). `awslc::rsa_oaep_decrypt` shipped fully written, cached and
+  error-mapped — but with **no production callers**, so every OAEP decrypt
+  still ran the pure-Rust `rsa` unpad, which is the Marvin timing side channel
+  (RUSTSEC-2023-0071, unpatched upstream). That path is reachable from
+  `pqctoday-kmip`'s Decrypt on :5696, i.e. over the network, where the timing
+  is observable — while `CHANGELOG.md` and `SECURITY.md` both stated the
+  opposite. All four decrypt sites now probe AWS-LC first: `C_Decrypt`,
+  `C_UnwrapKey`, `CKM_RSA_AES_KEY_WRAP`, and `native::encrypt` (the KMIP and
+  native path). An absent `mgf` field is normalized to MGF1-over-`hashAlg`
+  first, so the common default-parameter case reaches AWS-LC rather than
+  declining on a technicality. Error-code precedence is unchanged — the probe
+  sits *after* each site's existing key-parse and parameter validation, so
+  `CKR_KEY_TYPE_INCONSISTENT`, `CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT`,
+  `CKR_MECHANISM_PARAM_INVALID` and `CKR_WRAPPED_KEY_INVALID` all still win
+  exactly where they did. OAEP with a hash ≠ MGF1 hash, a PKCS#1
+  `RSAPrivateKey` DER key, and wasm32 keep the pure-Rust fallback by design.
+  A unit test pins the probe *engaging*, because a silent fallback returns
+  identical plaintext and no functional test can distinguish the two — which
+  is exactly how this went unnoticed.
 - **C++ engine: five NIST ACVP findings fixed** (ACVP gap-closure plan
   2026-09-25), each with a NIST ACVP-Server@975de31e known-answer suite in
   `p11test` (`src/lib/test/`, vectors with provenance in `tests/acvp/`):

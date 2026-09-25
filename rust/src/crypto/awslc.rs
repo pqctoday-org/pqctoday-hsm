@@ -198,6 +198,38 @@ pub fn rsa_oaep_decrypt(sk_pkcs8: &[u8], hash: u32, mgf_hash: u32, label: Option
     })())
 }
 
+/// Which MGF1 an absent `mgf` field means. The pure-Rust `oaep_padding`
+/// accept-set reads `mgf == 0` as "MGF1 over `hashAlg`" (its `(CKM_SHA256, 0)`
+/// style arms), so the same normalization has to happen here or the common
+/// default-params case would miss `oaep_alg`'s matched pairs and fall back.
+fn default_mgf1(hash_alg: u32) -> Option<u32> {
+    Some(match hash_alg {
+        CKM_SHA_1 => CKG_MGF1_SHA1,
+        CKM_SHA256 => CKG_MGF1_SHA256,
+        CKM_SHA384 => CKG_MGF1_SHA384,
+        CKM_SHA512 => CKG_MGF1_SHA512,
+        _ => return None,
+    })
+}
+
+/// `rsa_oaep_decrypt` in the `(hashAlg, mgf, label)` terms every OAEP decrypt
+/// site already holds from `CK_RSA_PKCS_OAEP_PARAMS`, so the dispatch sites
+/// carry no conversion logic of their own. An empty label is `None` (≡ empty
+/// label) on both paths. `None` still means "not handled here": a mismatched
+/// hash/MGF pair or a non-PKCS#8 key drops to the caller's pure-Rust branch
+/// exactly as before.
+pub fn rsa_oaep_decrypt_ck(
+    sk_pkcs8: &[u8],
+    hash_alg: u32,
+    mgf: u32,
+    label: &[u8],
+    ciphertext: &[u8],
+) -> Option<Result<Vec<u8>, CkRv>> {
+    let mgf = if mgf == 0 { default_mgf1(hash_alg)? } else { mgf };
+    let label = if label.is_empty() { None } else { Some(label) };
+    rsa_oaep_decrypt(sk_pkcs8, hash_alg, mgf, label, ciphertext)
+}
+
 /// PKCS#1 v1.5 encrypt (`CKM_RSA_PKCS`) with an X.509 SPKI public key.
 pub fn rsa_pkcs1_encrypt(spki: &[u8], plaintext: &[u8]) -> Option<Result<Vec<u8>, CkRv>> {
     let pk = rsa::PublicEncryptingKey::from_der(spki).ok()?;
@@ -274,4 +306,46 @@ pub fn ecdh(curve: u32, sk: &[u8], peer_uncompressed: &[u8]) -> Option<Result<Ve
         let peer = agreement::UnparsedPublicKey::new(alg, peer_uncompressed);
         agreement::agree(&sk, peer, CKR_FUNCTION_FAILED, |shared| Ok(shared.to_vec()))
     })())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The OAEP decrypt probe must actually ENGAGE for the default parameter
+    /// shape, not quietly return `None`.
+    ///
+    /// This is the regression this module most needs pinned: `rsa_oaep_decrypt`
+    /// shipped fully written but with zero production callers, so every OAEP
+    /// decrypt ran on the pure-Rust (Marvin-exposed) path while the CHANGELOG
+    /// and SECURITY.md both claimed otherwise. No functional test caught it,
+    /// because the fallback returns the same plaintext — only `Some` vs `None`
+    /// distinguishes them. A garbage ciphertext is enough: `Some(Err(..))`
+    /// proves AWS-LC owned the unpad and rejected it, `None` would prove the
+    /// caller silently fell back.
+    #[test]
+    fn oaep_probe_engages_for_default_params_and_absent_mgf() {
+        let (pkcs8, _n, _e) = rsa_generate(2048).expect("AWS-LC generates 2048").expect("keygen ok");
+        let garbage = vec![0u8; 256];
+
+        // mgf == 0 ("absent") must normalize to MGF1-SHA256, not fall through.
+        let absent_mgf = rsa_oaep_decrypt_ck(&pkcs8, CKM_SHA256, 0, &[], &garbage);
+        assert!(
+            matches!(absent_mgf, Some(Err(_))),
+            "absent mgf must reach AWS-LC, got {:?}",
+            absent_mgf.as_ref().map(|r| r.is_ok())
+        );
+
+        // Explicit matched pair, same expectation.
+        let explicit = rsa_oaep_decrypt_ck(&pkcs8, CKM_SHA256, CKG_MGF1_SHA256, &[], &garbage);
+        assert!(matches!(explicit, Some(Err(_))), "explicit matched pair must reach AWS-LC");
+
+        // A hash =/= MGF1 hash pair has no AWS-LC algorithm, so it MUST decline
+        // and leave the pure-Rust path to handle it (that path supports the 9
+        // mixed combos this one cannot).
+        assert!(
+            rsa_oaep_decrypt_ck(&pkcs8, CKM_SHA256, CKG_MGF1_SHA384, &[], &garbage).is_none(),
+            "mismatched hash/MGF must decline so the caller falls back"
+        );
+    }
 }

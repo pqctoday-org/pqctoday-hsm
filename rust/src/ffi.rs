@@ -9789,11 +9789,33 @@ pub fn C_Decrypt(
                     Ok(o) => o,
                     Err(rv) => return rv,
                 };
+                // AWS-LC owns the unpad on native → constant time, no Marvin
+                // oracle. Probed AFTER the key parse and `oaep_padding` above
+                // so the CKR_KEY_TYPE_INCONSISTENT / CKR_MECHANISM_PARAM_INVALID
+                // precedence is byte-for-byte what it was; this only replaces
+                // who performs the decrypt. `None` (wasm32, a non-PKCS#8 key,
+                // or a hash/MGF pair AWS-LC has no matched algorithm for)
+                // falls through to the `rsa`-crate branch below unchanged.
+                #[cfg(not(target_arch = "wasm32"))]
+                let awslc_pt: Option<Vec<u8>> =
+                    match crate::crypto::awslc::rsa_oaep_decrypt_ck(
+                        &key_bytes, tag_bits, mgf, &iv, ciphertext,
+                    ) {
+                        Some(Ok(pt)) => Some(pt),
+                        Some(Err(_)) => return CKR_ENCRYPTED_DATA_INVALID,
+                        None => None,
+                    };
+                #[cfg(target_arch = "wasm32")]
+                let awslc_pt: Option<Vec<u8>> = None;
+                if let Some(pt) = awslc_pt {
+                    pt
+                } else {
                 match sk.decrypt(oaep, ciphertext) {
                     Ok(pt) => pt,
                     // §6.16 — decode failure is CKR_ENCRYPTED_DATA_INVALID
                     // (uniform code, no padding-oracle distinction).
                     Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+                }
                 }
             }
             // R-2 (2026-08-24) — raw CKM_RSA_PKCS (PKCS#1 v1.5) decrypt.
@@ -12858,10 +12880,27 @@ pub fn C_UnwrapKey(
                 Ok(o) => o,
                 Err(rv) => return rv,
             };
+            // Constant-time unpad on native — see the C_Decrypt OAEP arm for
+            // why this is probed only after the two validations above.
+            #[cfg(not(target_arch = "wasm32"))]
+            let awslc_pt: Option<Vec<u8>> =
+                match crate::crypto::awslc::rsa_oaep_decrypt_ck(
+                    &unwrapping_key, hash_alg, mgf, &label, wrapped_data,
+                ) {
+                    Some(Ok(pt)) => Some(pt),
+                    Some(Err(_)) => return CKR_ENCRYPTED_DATA_INVALID,
+                    None => None,
+                };
+            #[cfg(target_arch = "wasm32")]
+            let awslc_pt: Option<Vec<u8>> = None;
+            if let Some(pt) = awslc_pt {
+                pt
+            } else {
             match sk.decrypt(oaep, wrapped_data) {
                 Ok(pt) => pt,
                 // §6.16 — wrapped-key decode failure (uniform code).
                 Err(_) => return CKR_ENCRYPTED_DATA_INVALID,
+            }
             }
         } else if is_rsa_aes_wrap {
             // §3 Wave 4 — the inverse of the composite wrap: the blob is
@@ -12888,9 +12927,26 @@ pub fn C_UnwrapKey(
                 Ok(o) => o,
                 Err(rv) => return rv,
             };
-            let mut aes_key = match sk.decrypt(oaep, rsa_part) {
-                Ok(k) => k,
-                Err(_) => return CKR_WRAPPED_KEY_INVALID,
+            // Constant-time unpad on native — see the C_Decrypt OAEP arm. Note
+            // this site's own failure code (CKR_WRAPPED_KEY_INVALID, not
+            // CKR_ENCRYPTED_DATA_INVALID) is kept on both branches.
+            #[cfg(not(target_arch = "wasm32"))]
+            let awslc_aes_key: Option<Vec<u8>> =
+                match crate::crypto::awslc::rsa_oaep_decrypt_ck(
+                    &unwrapping_key, hash_alg, mgf, &label, rsa_part,
+                ) {
+                    Some(Ok(k)) => Some(k),
+                    Some(Err(_)) => return CKR_WRAPPED_KEY_INVALID,
+                    None => None,
+                };
+            #[cfg(target_arch = "wasm32")]
+            let awslc_aes_key: Option<Vec<u8>> = None;
+            let mut aes_key = match awslc_aes_key {
+                Some(k) => k,
+                None => match sk.decrypt(oaep, rsa_part) {
+                    Ok(k) => k,
+                    Err(_) => return CKR_WRAPPED_KEY_INVALID,
+                },
             };
             // The caller's ulAESKeyBits has to agree with what the blob
             // actually carried; a mismatch means the two sides disagree about
