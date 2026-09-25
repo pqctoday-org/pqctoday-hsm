@@ -2283,8 +2283,11 @@ CK_RV SoftHSM::C_UnwrapKey
 	if ((pMechanism->mechanism == CKM_RSA_PKCS || pMechanism->mechanism == CKM_RSA_PKCS_OAEP || pMechanism->mechanism == CKM_RSA_AES_KEY_WRAP) &&
 		unwrapKey->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_RSA)
 		return CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT;
+	// §5.18.4 lists CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT; §5.1.6 says
+	// CKR_WRAPPING_KEY_TYPE_INCONSISTENT "can only be returned by C_WrapKey"
+	// (G-8 finding E7, 2026-09-25).
 	if ((pMechanism->mechanism == CKM_AES_CBC || pMechanism->mechanism == CKM_AES_CBC_PAD) && unwrapKey->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_AES)
-		return CKR_WRAPPING_KEY_TYPE_INCONSISTENT;
+		return CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT;
 	// Check if the unwrapping key can be used for unwrapping
 	if (unwrapKey->getBooleanValue(CKA_UNWRAP, false) == false)
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;

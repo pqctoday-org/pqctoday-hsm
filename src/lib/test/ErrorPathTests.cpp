@@ -369,3 +369,41 @@ void ErrorPathTests::testKeyTypeInconsistentAtInit()
 	CRYPTOKI_F_PTR( C_CloseSession(hSession) );
 	CPPUNIT_ASSERT_MESSAGE(fails, fails.empty());
 }
+
+// E7 — §5.18.4 C_UnwrapKey lists CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT; §5.1.6
+// says CKR_WRAPPING_KEY_TYPE_INCONSISTENT "can only be returned by C_WrapKey".
+void ErrorPathTests::testUnwrapKeyTypeCode()
+{
+	CK_RV rv;
+	CK_SESSION_HANDLE hSession;
+	CPPUNIT_ASSERT(openUserSession(hSession) == CKR_OK);
+
+	CK_OBJECT_HANDLE hEcPuk, hEcPrk;
+	CPPUNIT_ASSERT(ecKeyPair(hSession, CK_TRUE, CK_TRUE, hEcPuk, hEcPrk) == CKR_OK);
+
+	std::string fails;
+	CK_BYTE iv[16] = { 0 };
+	CK_BYTE wrapped[32] = { 0 };
+	CK_OBJECT_CLASS secretClass = CKO_SECRET_KEY;
+	CK_KEY_TYPE aesType = CKK_AES;
+	CK_BBOOL bFalse = CK_FALSE;
+	CK_ATTRIBUTE tmpl[] = {
+		{ CKA_CLASS, &secretClass, sizeof(secretClass) },
+		{ CKA_KEY_TYPE, &aesType, sizeof(aesType) },
+		{ CKA_TOKEN, &bFalse, sizeof(bFalse) },
+	};
+	const CK_MECHANISM_TYPE mechs[] = { CKM_AES_CBC, CKM_AES_CBC_PAD };
+	for (CK_MECHANISM_TYPE mech : mechs)
+	{
+		CK_MECHANISM m = { mech, iv, sizeof(iv) };
+		CK_OBJECT_HANDLE hNew = CK_INVALID_HANDLE;
+		char name[64];
+		snprintf(name, sizeof(name), "mech 0x%08lx", (unsigned long)mech);
+		rv = CRYPTOKI_F_PTR( C_UnwrapKey(hSession, &m, hEcPrk, wrapped, sizeof(wrapped),
+		                                 tmpl, sizeof(tmpl)/sizeof(CK_ATTRIBUTE), &hNew) );
+		expect(fails, std::string("C_UnwrapKey(EC private key) ") + name, rv, CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT);
+	}
+
+	CRYPTOKI_F_PTR( C_CloseSession(hSession) );
+	CPPUNIT_ASSERT_MESSAGE(fails, fails.empty());
+}
