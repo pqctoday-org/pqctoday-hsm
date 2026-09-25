@@ -1420,6 +1420,17 @@ pub fn C_GetMechanismInfo(slot_id: u32, mech_type: u32, p_info: *mut u8) -> u32 
 const EC_CAPABILITY_FLAGS: u32 =
     CKF_EC_F_P | CKF_EC_OID | CKF_EC_CURVENAME | CKF_EC_UNCOMPRESS;
 
+/// E17 (2026-09-25) — HMAC key sizes, in bytes (PKCS#11 v3.2 §6.22.6 et
+/// al.). The engine computes HMAC over any key length, as FIPS 198-1 §4 and
+/// RFC 2104 §3 allow (a key longer than the block is hashed first); v3.2
+/// §6.22.3 only says a FIPS-198 token "may" insist on half the digest. The
+/// former (16, 64) understated that: NIST HMAC 2.0 cases with 1..15-byte
+/// and 65..256-byte keys all compute correctly here. So the range says
+/// what is accepted — from 1 byte (an empty CKA_VALUE is not a key) — up
+/// to 512, the same bounds as CKM_GENERIC_SECRET_KEY_GEN, rather than
+/// adding a floor that would reject RFC 4231's own 4-byte test key.
+const HMAC_KEY_RANGE: (u32, u32, u32) = (1, 512, 0x00000800 | 0x00002000);
+
 pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
     let info = match mech_type {
         // WS-11 Phase 1 (2026-08-28) widened 1024-4096 to 512-16384 — the
@@ -1532,7 +1543,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         CKM_SHA256_HMAC | CKM_SHA384_HMAC | CKM_SHA512_HMAC | CKM_SHA3_256_HMAC
         | CKM_SHA3_512_HMAC | CKM_RIPEMD160_HMAC | CKM_SHA512_224_HMAC
         | CKM_SHA512_256_HMAC | CKM_SHA3_224_HMAC | CKM_SHA3_384_HMAC | CKM_SHA224_HMAC | CKM_SHA_1_HMAC | CKM_MD5_HMAC => {
-            (16, 64, 0x00000800 | 0x00002000)
+            HMAC_KEY_RANGE
         }
         CKM_SHA256_HMAC_GENERAL
         | CKM_SHA384_HMAC_GENERAL
@@ -1546,7 +1557,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_SHA3_384_HMAC_GENERAL
         | CKM_RIPEMD160_HMAC_GENERAL
         | CKM_SHA_1_HMAC_GENERAL
-        | CKM_MD5_HMAC_GENERAL => (16, 64, 0x00000800 | 0x00002000),
+        | CKM_MD5_HMAC_GENERAL => HMAC_KEY_RANGE,
         CKM_KMAC_128 | CKM_KMAC_256 => (16, 64, 0x00000800 | 0x00002000),
         // §3 Wave 4 — AES-CMAC (NIST SP 800-38B), a 16-byte MAC over an
         // AES key of 128/192/256 bits.
@@ -1558,11 +1569,14 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // Engine generates P-256/P-384/P-521 (+ secp256k1) — range unified
         // with CKM_ECDSA below (compliance-audit P-15).
         CKM_EC_KEY_PAIR_GEN => (256, 521, 0x00010000 | EC_CAPABILITY_FLAGS),
-        // FIPS 186-5 Appendix A.2.2 "extra bits" keygen — P-256/384/521 only
-        // (see the dispatch arm for why secp256k1 is out of scope here).
+        // FIPS 186-5 Appendix A.2.2 "extra bits" keygen — the same curves as
+        // CKM_EC_KEY_PAIR_GEN (P-256 / secp256k1 / P-384 / P-521; E11).
         CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => (256, 521, 0x00010000 | EC_CAPABILITY_FLAGS),
+        // E13 (2026-09-25) — every ECDSA sign/verify mechanism covers P-224
+        // (FIPS 186-5 / SP 800-186) for imported keys; key generation and
+        // ECDH stay 256..521 (CKM_EC_KEY_PAIR_GEN / CKM_ECDH1_* above).
         CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
-            (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
+            (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
         }
         // T1 — C_DeriveKey dispatches P-256 / secp256k1 / P-384 / P-521 for
         // both ECDH1 mechanisms; advertise the full dispatched range.
@@ -1640,7 +1654,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // hashed-ECDSA mechanisms; only the digest differs.
         | CKM_ECDSA_SHA224
         | CKM_ECDSA_SHA1 => {
-            (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
+            (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
         }
         // Key derivation functions
         CKM_PKCS5_PBKD2
@@ -1653,7 +1667,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // (a unit test iterates SUPPORTED_MECHS and asserts none of them
         //  return CKR_MECHANISM_INVALID here — keep the two in sync)
         // Raw ECDSA (§6.3.12) — pre-hashed input, sign/verify only
-        CKM_ECDSA => (256, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
+        CKM_ECDSA => (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // Ed25519ph / Ed448ph (pkcs11t.h CKM_EDDSA_PH 0x80001057)
         CKM_EDDSA_PH => (255, 448, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // Parametrized pre-hash mechanisms (hash chosen via param, §6.67.7/§6.69.7)
@@ -1874,8 +1888,12 @@ mod mechanism_table_tests {
     /// P-384 / P-521 for every one of these mechanisms).
     #[test]
     fn ecdsa_mech_ranges_cover_p521() {
+        for mech in [CKM_EC_KEY_PAIR_GEN, CKM_ECDH1_DERIVE, CKM_ECDH1_COFACTOR_DERIVE] {
+            let (min, max, _) = mechanism_info(mech).expect("EC mech must have info");
+            assert_eq!((min, max), (256, 521), "mech {mech:#06x}");
+        }
+        // E13 (2026-09-25) — sign/verify additionally cover imported P-224 keys.
         for mech in [
-            CKM_EC_KEY_PAIR_GEN,
             CKM_ECDSA,
             CKM_ECDSA_SHA256,
             CKM_ECDSA_SHA384,
@@ -1884,11 +1902,9 @@ mod mechanism_table_tests {
             CKM_ECDSA_SHA3_256,
             CKM_ECDSA_SHA3_384,
             CKM_ECDSA_SHA3_512,
-            CKM_ECDH1_DERIVE,
-            CKM_ECDH1_COFACTOR_DERIVE,
         ] {
             let (min, max, _) = mechanism_info(mech).expect("EC mech must have info");
-            assert_eq!((min, max), (256, 521), "mech {mech:#06x}");
+            assert_eq!((min, max), (224, 521), "mech {mech:#06x}");
         }
     }
 
@@ -1902,13 +1918,16 @@ mod mechanism_table_tests {
     #[test]
     fn t1_ecdsa_mech_curve_matrix_round_trips() {
         use crate::crypto::handlers::{
-            sign_ecdsa, verify_ecdsa, CURVE_K256, CURVE_P256, CURVE_P384, CURVE_P521,
+            sign_ecdsa, verify_ecdsa, CURVE_K256, CURVE_P224, CURVE_P256, CURVE_P384, CURVE_P521,
         };
 
         // Single source of truth: every named curve the engine supports,
         // with its key size in bits (what mechanism_info ranges are
         // expressed in). secp256k1 is a 256-bit curve.
         let curve_table: &[(u32, u32, &str)] = &[
+            // E13 — P-224 is inside the ECDSA mechanisms' advertised range
+            // (sign/verify of imported keys).
+            (CURVE_P224, 224, "P-224"),
             (CURVE_P256, 256, "P-256"),
             (CURVE_K256, 256, "secp256k1"),
             (CURVE_P384, 384, "P-384"),
@@ -1927,6 +1946,14 @@ mod mechanism_table_tests {
         fn gen_keypair(curve: u32) -> (Vec<u8>, Vec<u8>) {
             let mut rng = rand::rngs::OsRng;
             match curve {
+                CURVE_P224 => {
+                    let sk = p224::ecdsa::SigningKey::random(&mut rng);
+                    let pk = p224::ecdsa::VerifyingKey::from(&sk);
+                    (
+                        sk.to_bytes().to_vec(),
+                        pk.to_encoded_point(false).as_bytes().to_vec(),
+                    )
+                }
                 CURVE_P256 => {
                     let sk = p256::ecdsa::SigningKey::random(&mut rng);
                     let pk = p256::ecdsa::VerifyingKey::from(&sk);
@@ -3062,12 +3089,14 @@ fn C_GenerateKeyPair_impl(
 
             CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS => {
                 // FIPS 186-5 Appendix A.2.2 "Extra Random Bits" — see
-                // ec_extra_bits_scalar. Scoped to the NIST prime curves this
-                // engine supports AND that have real ACVP evidence for this
-                // secretGenerationMode (ECDSA-KeyGen-FIPS186-5, P-256/384/
-                // 521); secp256k1 isn't a FIPS186-5 curve at all, so it's
-                // out of scope here (still available via plain
-                // CKM_EC_KEY_PAIR_GEN).
+                // ec_extra_bits_scalar. E11 (2026-09-25): secp256k1 is
+                // included. It is not a FIPS 186-5 curve, but the mechanism
+                // advertises 256..521 bits, CK_MECHANISM_INFO cannot exclude
+                // one 256-bit curve, and CKM_EC_KEY_PAIR_GEN generates it;
+                // refusing it made an advertised cell fail. The extra-bits
+                // reduction d = (c mod (n-1)) + 1 is defined for any
+                // prime-order group, so the same method is applied with the
+                // secp256k1 order. NIST ACVP evidence remains P-256/384/521.
                 let ec_params = get_attr_bytes(
                     p_public_key_template,
                     ul_public_key_attribute_count,
@@ -3130,6 +3159,8 @@ fn C_GenerateKeyPair_impl(
                     CURVE_P256 => vec![
                         0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
                     ],
+                    // 1.3.132.0.10 secp256k1
+                    CURVE_K256 => vec![0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a],
                     _ => return CKR_CURVE_NOT_SUPPORTED,
                 };
                 match curve {
@@ -3178,6 +3209,35 @@ fn C_GenerateKeyPair_impl(
                         ec_point.extend_from_slice(&vk_bytes);
                         pub_attrs.insert(CKA_EC_POINT, ec_point);
                         let spki = build_ec_spki_p384(&vk_bytes);
+                        pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
+                    }
+                    CURVE_K256 => {
+                        store_param_set(&mut pub_attrs, CURVE_K256);
+                        store_param_set(&mut prv_attrs, CURVE_K256);
+                        let n_minus_1 = (-k256::Scalar::ONE).to_bytes();
+                        let scalar = match ec_extra_bits_scalar(&n_minus_1, 256) {
+                            Ok(s) => s,
+                            Err(rv) => return rv,
+                        };
+                        let sk = match k256::ecdsa::SigningKey::from_slice(&scalar) {
+                            Ok(k) => k,
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        };
+                        let vk = k256::ecdsa::VerifyingKey::from(&sk);
+                        prv_attrs.insert(CKA_VALUE, sk.to_bytes().to_vec());
+                        let vk_bytes = vk.to_encoded_point(false).as_bytes().to_vec();
+                        let mut ec_point = Vec::with_capacity(2 + vk_bytes.len());
+                        ec_point.push(0x04u8);
+                        ec_point.push(vk_bytes.len() as u8);
+                        ec_point.extend_from_slice(&vk_bytes);
+                        pub_attrs.insert(CKA_EC_POINT, ec_point);
+                        // Same SPKI as CKM_EC_KEY_PAIR_GEN's secp256k1 arm:
+                        // id-ecPublicKey + 1.3.132.0.10.
+                        let alg_id: &[u8] = &[
+                            0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+                            0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a,
+                        ];
+                        let spki = build_spki_from_parts(alg_id, &vk_bytes);
                         pub_attrs.insert(CKA_PUBLIC_KEY_INFO, spki);
                     }
                     _ => {
@@ -6204,7 +6264,7 @@ pub(crate) fn create_object_from_attrs(
         // X448 half's contribution to the KEK was silently wrong, so the
         // AES-256 key-unwrap's integrity check failed downstream.
         match crate::crypto::handlers::decode_ec_params(&ec_params) {
-            Ok(curve @ (CURVE_P256 | CURVE_P384 | CURVE_P521 | CURVE_K256)) => {
+            Ok(curve @ (CURVE_P256 | CURVE_P384 | CURVE_P521 | CURVE_K256 | CURVE_P224)) => {
                 store_param_set(&mut new_attrs, curve);
             }
             Ok(CURVE_X25519) => {
@@ -6906,6 +6966,21 @@ unsafe fn parse_sign_additional_ctx(p_mechanism: *const u8) -> Result<(Vec<u8>, 
     Ok((context, deterministic))
 }
 
+/// E16 (2026-09-25) — `CK_PQCTODAY_KMAC_PARAMS.ulOutputLen` as
+/// `parse_sign_mech_params` packed it (the leading LE u32 of the op's
+/// context bytes). `None` when absent or 0, where the mechanism default
+/// (32 bytes KMAC-128, 64 bytes KMAC-256; `get_sig_len`) applies. C_Sign's
+/// size query and C_Verify's length check both follow it; they used the
+/// default whatever the caller requested, so a valid 478-byte NIST MAC was
+/// CKR_SIGNATURE_LEN_RANGE and any non-default C_Sign was BUFFER_TOO_SMALL.
+fn kmac_requested_len(mech: u32, ctx_bytes: &[u8]) -> Option<u32> {
+    if !matches!(mech, CKM_KMAC_128 | CKM_KMAC_256) || ctx_bytes.len() < 4 {
+        return None;
+    }
+    let n = u32::from_le_bytes([ctx_bytes[0], ctx_bytes[1], ctx_bytes[2], ctx_bytes[3]]);
+    (n != 0).then_some(n)
+}
+
 fn C_Sign_impl(
     h_session: u32,
     p_data: *mut u8,
@@ -6939,7 +7014,9 @@ fn C_Sign_impl(
 
     unsafe {
         if p_signature.is_null() {
-            *pul_signature_len = if (hmac_general_base(mech).is_some() || mech == CKM_AES_GMAC)
+            *pul_signature_len = if let Some(n) = kmac_requested_len(mech, &ctx_bytes) {
+                n
+            } else if (hmac_general_base(mech).is_some() || mech == CKM_AES_GMAC)
                 && ctx_bytes.len() >= 4
             {
                 u32::from_le_bytes([ctx_bytes[0], ctx_bytes[1], ctx_bytes[2], ctx_bytes[3]])
@@ -7238,10 +7315,11 @@ fn C_Sign_impl(
                     sign_rsa_pss_bare(hash_alg, &sk_bytes, eff_msg, s_len)
                 }
             }
-            CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
-            | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => {
-                sign_ecdsa(eff_mech, ps, &sk_bytes, eff_msg)
-            }
+            // E11 — CKM_ECDSA_SHA1 / CKM_ECDSA_SHA224 are advertised and
+            // sign_ecdsa implements them; this list had left them out.
+            CKM_ECDSA | CKM_ECDSA_SHA1 | CKM_ECDSA_SHA224 | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384
+            | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
+            | CKM_ECDSA_SHA3_512 => sign_ecdsa(eff_mech, ps, &sk_bytes, eff_msg),
             // ctx_bytes is CK_EDDSA_PARAMS.pContextData/ulContextDataLen,
             // parsed by parse_sign_mech_params's CKM_EDDSA branch — empty
             // means plain EdDSA, non-empty means RFC 8032 Ed25519ctx/
@@ -7369,7 +7447,9 @@ fn C_Verify_impl(
             || m == CKM_EDDSA_PH
             || matches!(
                 m,
-                CKM_ECDSA_SHA256
+                CKM_ECDSA_SHA1
+                    | CKM_ECDSA_SHA224
+                    | CKM_ECDSA_SHA256
                     | CKM_ECDSA_SHA384
                     | CKM_ECDSA_SHA512
                     | CKM_ECDSA_SHA3_224
@@ -7393,7 +7473,8 @@ fn C_Verify_impl(
                     | CKM_KMAC_256
             ) =>
         {
-            Some(get_sig_len(mech, hkey))
+            // E16 — a KMAC MAC is as long as the caller asked for.
+            Some(kmac_requested_len(mech, &ctx_bytes).unwrap_or_else(|| get_sig_len(mech, hkey)))
         }
         _ => None,
     };
@@ -7611,8 +7692,9 @@ fn C_Verify_impl(
                 }
             }
             // PKCS#11 v3.2: EC public key material is in CKA_EC_POINT.
-            CKM_ECDSA | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512
-            | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384 | CKM_ECDSA_SHA3_512 => {
+            CKM_ECDSA | CKM_ECDSA_SHA1 | CKM_ECDSA_SHA224 | CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384
+            | CKM_ECDSA_SHA512 | CKM_ECDSA_SHA3_224 | CKM_ECDSA_SHA3_256 | CKM_ECDSA_SHA3_384
+            | CKM_ECDSA_SHA3_512 => {
                 match &ec_point_bytes {
                     Some(b) => verify_ecdsa(eff_mech, ps, b, eff_msg, sig_bytes),
                     None => Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -8223,9 +8305,11 @@ pub fn C_EncryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 if iv_ptr.is_null() || iv_len == 0 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
-                if iv_len != 12 {
-                    return CKR_MECHANISM_PARAM_INVALID; // AES-GCM requires a 12-byte nonce
-                }
+                // E12 (2026-09-25) — no 96-bit-only restriction. PKCS#11 v3.2
+                // §6.13.7 CK_GCM_PARAMS: "The length of the initialization
+                // vector can be any number between 1 and (2^32) - 1"; GcmState
+                // derives J0 through GHASH for every non-96-bit IV (SP 800-38D
+                // §7.1 step 2). NIST ACVP-AES-GCM-1.0 registers 120-bit IVs.
                 let iv = std::slice::from_raw_parts(iv_ptr, iv_len).to_vec();
                 let aad = if !aad_ptr.is_null() && aad_len > 0 {
                     std::slice::from_raw_parts(aad_ptr, aad_len).to_vec()
@@ -8565,13 +8649,9 @@ pub fn C_Encrypt(
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
-                let iv12: [u8; 12] = match iv.as_slice().try_into() {
-                    Ok(v) => v,
-                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
-                };
                 let mut gcm = MultipartCipher::Gcm(GcmState::new(
                     key,
-                    &iv12,
+                    &iv,
                     &aad,
                     tag_bits,
                     CipherDirection::Encrypt,
@@ -8589,12 +8669,21 @@ pub fn C_Encrypt(
             CKM_AES_CBC_PAD => {
                 use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
                 type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+                type Aes192CbcEnc = cbc::Encryptor<aes::Aes192>;
                 type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
                 let padded_len = plaintext.len() + 16 - (plaintext.len() % 16);
                 let mut buf = vec![0u8; padded_len];
                 buf[..plaintext.len()].copy_from_slice(plaintext);
                 match key_bytes.len() {
                     16 => match Aes128CbcEnc::new_from_slices(&key_bytes, &iv) {
+                        Ok(cipher) => match cipher.encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len()) {
+                            Ok(ct) => ct.to_vec(),
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        },
+                        Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                    },
+                    // E11 — AES-192 is inside the advertised 16..32 range.
+                    24 => match Aes192CbcEnc::new_from_slices(&key_bytes, &iv) {
                         Ok(cipher) => match cipher.encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len()) {
                             Ok(ct) => ct.to_vec(),
                             Err(_) => return CKR_FUNCTION_FAILED,
@@ -8976,9 +9065,11 @@ pub fn C_DecryptInit(h_session: u32, p_mechanism: *mut u8, h_key: u32) -> u32 {
                 if iv_ptr.is_null() || iv_len == 0 {
                     return CKR_MECHANISM_PARAM_INVALID;
                 }
-                if iv_len != 12 {
-                    return CKR_MECHANISM_PARAM_INVALID; // AES-GCM requires a 12-byte nonce
-                }
+                // E12 (2026-09-25) — no 96-bit-only restriction. PKCS#11 v3.2
+                // §6.13.7 CK_GCM_PARAMS: "The length of the initialization
+                // vector can be any number between 1 and (2^32) - 1"; GcmState
+                // derives J0 through GHASH for every non-96-bit IV (SP 800-38D
+                // §7.1 step 2). NIST ACVP-AES-GCM-1.0 registers 120-bit IVs.
                 let iv = std::slice::from_raw_parts(iv_ptr, iv_len).to_vec();
                 let aad = if !aad_ptr.is_null() && aad_len > 0 {
                     std::slice::from_raw_parts(aad_ptr, aad_len).to_vec()
@@ -9207,13 +9298,9 @@ pub fn C_Decrypt(
                     Some(k) => k,
                     None => return CKR_KEY_TYPE_INCONSISTENT,
                 };
-                let iv12: [u8; 12] = match iv.as_slice().try_into() {
-                    Ok(v) => v,
-                    Err(_) => return CKR_MECHANISM_PARAM_INVALID,
-                };
                 let mut gcm = MultipartCipher::Gcm(GcmState::new(
                     key,
-                    &iv12,
+                    &iv,
                     &aad,
                     tag_bits,
                     CipherDirection::Decrypt,
@@ -9231,10 +9318,19 @@ pub fn C_Decrypt(
             CKM_AES_CBC_PAD => {
                 use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
                 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
+                type Aes192CbcDec = cbc::Decryptor<aes::Aes192>;
                 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
                 let mut buf = ciphertext.to_vec();
                 let pt_slice: &[u8] = match key_bytes.len() {
                     16 => match Aes128CbcDec::new_from_slices(&key_bytes, &iv) {
+                        Ok(cipher) => match cipher.decrypt_padded_mut::<Pkcs7>(&mut buf) {
+                            Ok(pt) => pt,
+                            Err(_) => return CKR_FUNCTION_FAILED,
+                        },
+                        Err(_) => return CKR_KEY_TYPE_INCONSISTENT,
+                    },
+                    // E11 — AES-192 is inside the advertised 16..32 range.
+                    24 => match Aes192CbcDec::new_from_slices(&key_bytes, &iv) {
                         Ok(cipher) => match cipher.decrypt_padded_mut::<Pkcs7>(&mut buf) {
                             Ok(pt) => pt,
                             Err(_) => return CKR_FUNCTION_FAILED,
@@ -11190,8 +11286,14 @@ pub fn C_DeriveKey(
                     Err(ck_param::ParamErr::TooShort) => return CKR_MECHANISM_PARAM_INVALID,
                 };
                 let iterations = r.ulong32(ck_param::pbkd2::ITERATIONS);
-                if iterations < 1000 {
-                    return CKR_ARGUMENTS_BAD;
+                // Engine policy floor (decision D7, 2026-09-25; documented in
+                // docs/pkcs11-mechanism-ledger.json): fewer than 1000
+                // iterations is refused, per SP 800-132 §5.2's minimum
+                // recommendation. PKCS#11 v3.2 sets no minimum, so the
+                // refusal names the parameter the token will not accept —
+                // CKR_MECHANISM_PARAM_INVALID (§5.1.6), not ARGUMENTS_BAD.
+                if iterations < PBKDF2_MIN_ITERATIONS {
+                    return CKR_MECHANISM_PARAM_INVALID;
                 }
                 let prf = r.ulong32(ck_param::pbkd2::PRF);
                 let salt = r.buffer(
@@ -11203,7 +11305,17 @@ pub fn C_DeriveKey(
                     ck_param::pbkd2::UL_PASSWORD_LEN,
                 );
                 let mut out = vec![0u8; key_len];
+                // E15 — every PRF the C++ engine implements (SHA-1 retained
+                // under decision D2 for existing artefacts; SHA-224 is the PRF
+                // NIST's PBKDF 1.0 sample registers). Any other CKP_ value is
+                // a parameter this token does not accept.
                 match prf {
+                    CKP_PKCS5_PBKD2_HMAC_SHA1 => {
+                        pbkdf2::pbkdf2_hmac::<sha1::Sha1>(pass, salt, iterations, &mut out)
+                    }
+                    CKP_PKCS5_PBKD2_HMAC_SHA224 => {
+                        pbkdf2::pbkdf2_hmac::<sha2::Sha224>(pass, salt, iterations, &mut out)
+                    }
                     CKP_PBKDF2_HMAC_SHA256 => {
                         pbkdf2::pbkdf2_hmac::<sha2::Sha256>(pass, salt, iterations, &mut out)
                     }
@@ -11213,7 +11325,7 @@ pub fn C_DeriveKey(
                     CKP_PBKDF2_HMAC_SHA512 => {
                         pbkdf2::pbkdf2_hmac::<sha2::Sha512>(pass, salt, iterations, &mut out)
                     }
-                    _ => return CKR_ARGUMENTS_BAD,
+                    _ => return CKR_MECHANISM_PARAM_INVALID,
                 }
                 out
             }
@@ -13125,6 +13237,8 @@ fn sign_mech_supports_multipart(mech: u32) -> bool {
             | CKM_SHA3_512_RSA_PKCS
             | CKM_SHA3_512_RSA_PKCS_PSS
             | CKM_SHA3_384_RSA_PKCS_PSS
+            | CKM_ECDSA_SHA1
+            | CKM_ECDSA_SHA224
             | CKM_ECDSA_SHA256
             | CKM_ECDSA_SHA384
             | CKM_ECDSA_SHA512
@@ -13397,11 +13511,10 @@ fn build_multipart_cipher(
             ))
         }
         CKM_AES_GCM => {
-            let iv: [u8; 12] =
-                ctx.iv.as_slice().try_into().map_err(|_| CKR_MECHANISM_PARAM_INVALID)?;
+            // Any IV length C_EncryptInit/C_DecryptInit accepted (E12).
             Ok(MultipartCipher::Gcm(GcmState::new(
                 make_key()?,
-                &iv,
+                &ctx.iv,
                 &ctx.aad,
                 ctx.tag_bits,
                 dir,
@@ -14830,7 +14943,8 @@ pub fn msg_encrypt_init_internal(
             None => return CKR_KEY_TYPE_INCONSISTENT,
         };
 
-        if key_bytes.len() != 16 && key_bytes.len() != 32 {
+        // E11 — AES-128/192/256: CKM_AES_GCM advertises 16..32-byte keys.
+        if !matches!(key_bytes.len(), 16 | 24 | 32) {
             return CKR_KEY_SIZE_RANGE;
         }
 
@@ -15075,8 +15189,8 @@ pub fn aes_gcm_exec(
 ) -> Result<Vec<u8>, u32> {
     use crate::crypto::multipart::{AesKey, CipherDirection, GcmState};
 
-    // The message API supports AES-128/256 (matches C_MessageEncryptInit).
-    if key.len() != 16 && key.len() != 32 {
+    // AES-128/192/256, matching C_MessageEncryptInit (E11).
+    if !matches!(key.len(), 16 | 24 | 32) {
         return Err(CKR_KEY_SIZE_RANGE);
     }
     let aes = AesKey::new(key).ok_or(CKR_KEY_SIZE_RANGE)?;

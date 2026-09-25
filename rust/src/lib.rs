@@ -67,4 +67,9 @@ pub mod store;
 /// serialization halves are target-neutral so native tests cover the seam.
 pub mod state_snapshot;
 
+// NIST ACVP-Server vectors + advertised-cell probes through the real C_*
+// entry points (gap-closure plan 2026-09-25, findings E11-E17).
+#[cfg(test)]
+mod acvp_nist_vectors_tests;
+
 pub use ffi::*;
