@@ -315,6 +315,24 @@ mod tests {
         let _ = native::init();
     }
 
+    /// Zeroization: an expanded key is `ZeroizeOnDrop`, and after `clear()`
+    /// the cache holds no reference, so the key is dropped (and zeroized) as
+    /// soon as the last signer releases it — here, at once.
+    #[test]
+    fn clear_releases_the_key_so_it_is_zeroized() {
+        fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        assert_zeroize_on_drop::<fips204::ml_dsa_65::ExpandedPrivateKey>();
+        assert_zeroize_on_drop::<fips204::ml_dsa_44::ExpandedPrivateKey>();
+        assert_zeroize_on_drop::<fips204::ml_dsa_87::ExpandedPrivateKey>();
+        let sk = a_key(207);
+        let entry = get(CKP_ML_DSA_65, &sk).unwrap();
+        let weak = Arc::downgrade(&entry);
+        drop(entry);
+        assert!(weak.upgrade().is_some(), "resident while cached");
+        clear();
+        assert!(weak.upgrade().is_none(), "dropped (and zeroized) once cleared");
+    }
+
     /// The cache changes speed and nothing else: an expanded key signs
     /// exactly as a freshly decoded one (deterministic variant).
     #[test]

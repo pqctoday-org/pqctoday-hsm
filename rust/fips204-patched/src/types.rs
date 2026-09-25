@@ -96,3 +96,26 @@ pub(crate) const T0: T = T([0i32; 256]);
 
 /// Individual Zq element
 pub(crate) type Zq = i32;
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::KeyGen;
+    use zeroize::Zeroize;
+
+    /// What `ZeroizeOnDrop` runs on drop: every secret field of an expanded
+    /// key (and the public matrix) is cleared.
+    #[test]
+    fn expanded_private_key_zeroize_clears_every_field() {
+        let (_pk, sk) = crate::ml_dsa_65::KG::keygen_from_seed(&[9u8; 32]);
+        let mut expanded = ExpandedPrivateKey::new(sk);
+        assert!(expanded.sk.s_1_hat_mont.iter().any(|p| p.0.iter().any(|c| *c != 0)));
+        expanded.zeroize();
+        let sk = &expanded.sk;
+        assert!(sk.rho.iter().chain(&sk.cap_k).chain(&sk.tr).all(|b| *b == 0));
+        let polys = sk.s_1_hat_mont.iter().chain(&sk.s_2_hat_mont).chain(&sk.t_0_hat_mont);
+        assert!(polys.flat_map(|p| p.0.iter()).all(|c| *c == 0));
+        assert!(expanded.cap_a_hat.iter().flatten().flat_map(|p| p.0.iter()).all(|c| *c == 0));
+    }
+}
