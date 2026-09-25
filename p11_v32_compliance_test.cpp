@@ -3159,7 +3159,10 @@ void test_v32_kdfs() {
     rv = fl->C_DeriveKey(hSess, &ctrMechBad, hBaseKey, deriveTmpl, 7, &hDerivedBad);
     if (!mech_advertised(CKM_SP800_108_COUNTER_KDF)) {
         record_result("KDF", "SP800_108_BareHash_PRF_Rejected", "SKIP", "Mechanism not advertised");
-    } else if (rv == CKR_MECHANISM_PARAM_INVALID || rv == CKR_ARGUMENTS_BAD) {
+    } else if (rv == CKR_MECHANISM_PARAM_INVALID) {
+        // §5.1.6 CKR_MECHANISM_PARAM_INVALID is the one code for an invalid
+        // mechanism parameter (decision D6, 2026-09-25: CKR_ARGUMENTS_BAD is
+        // no longer accepted as an alternative).
         record_result("KDF", "SP800_108_BareHash_PRF_Rejected", "PASS",
                       "bare CKM_SHA256 PRF correctly rejected, RV=" + std::to_string(rv));
     } else {
@@ -3540,7 +3543,8 @@ void test_message_signatures() {
 
         // Negative: CKM_RSA_PKCS takes NO mechanism parameter. Supplying a
         // CK_SIGN_ADDITIONAL_CONTEXT (an ML-DSA/SLH-DSA parameter) MUST be
-        // rejected with CKR_MECHANISM_PARAM_INVALID (or CKR_ARGUMENTS_BAD).
+        // rejected with CKR_MECHANISM_PARAM_INVALID (§5.1.6; CKR_ARGUMENTS_BAD
+        // stopped being accepted with decision D6, 2026-09-25).
         refresh_session();
         CK_OBJECT_HANDLE hPub2=0, hPriv2=0;
         fl->C_GenerateKeyPair(hSess, &mech, pubTmpl, 6, privTmpl, 4, &hPub2, &hPriv2);
@@ -3554,7 +3558,7 @@ void test_message_signatures() {
         CK_MECHANISM signMechPQC = { CKM_RSA_PKCS, paramsPQC, sizeof(pqcParams) };
         rv = SignInit(hSess, &signMechPQC, hPriv2);
         record_result("MsgSign", "C_MessageSignInit_RSA_RejectsSignCtxParam",
-                      (rv == CKR_MECHANISM_PARAM_INVALID || rv == CKR_ARGUMENTS_BAD) ? "PASS" : "FAIL",
+                      rv == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
                       "expected CKR_MECHANISM_PARAM_INVALID, got RV=" + std::to_string(rv));
     } else {
         record_result("MsgSign", "C_GenerateKeyPair", "FAIL", "RV=" + std::to_string(rvGenDsa));
@@ -3953,8 +3957,9 @@ void test_message_verification() {
  *   - both mechs appear in C_GetMechanismList
  *   - CKM_SHA3_384_RSA_PKCS sign→verify round-trip (RSA-2048)
  *   - CKM_SHA3_384_RSA_PKCS_PSS round-trip with correct PSS params
- *   - PSS with a mismatched hashAlg is rejected (CKR_ARGUMENTS_BAD /
- *     CKR_MECHANISM_PARAM_INVALID), mirroring the SHA3-256 sibling.
+ *   - PSS with a mismatched hashAlg is rejected with
+ *     CKR_MECHANISM_PARAM_INVALID (§5.1.6; decision D6), mirroring the
+ *     SHA3-256 sibling.
  * ------------------------------------------------------------------------- */
 void test_g7_sha3_384_rsa() {
     // 1. Both new mechs advertised in C_GetMechanismList
@@ -4047,10 +4052,12 @@ void test_g7_sha3_384_rsa() {
         CK_RSA_PKCS_PSS_PARAMS badParams = { CKM_SHA3_256, CKG_MGF1_SHA3_256, 32 };
         CK_MECHANISM signMech = { CKM_SHA3_384_RSA_PKCS_PSS, &badParams, sizeof(badParams) };
         rv = fl->C_SignInit(hSess, &signMech, hPriv);
-        bool rejected = (rv == CKR_ARGUMENTS_BAD || rv == CKR_MECHANISM_PARAM_INVALID);
+        // §5.1.6 CKR_MECHANISM_PARAM_INVALID ("Invalid parameters were supplied
+        // to the mechanism"); CKR_ARGUMENTS_BAD is no longer accepted (D6).
+        bool rejected = (rv == CKR_MECHANISM_PARAM_INVALID);
         record_result("G7Sha3Rsa", "C_SignInit_PSS_wrong_hashAlg",
                       rejected ? "PASS" : "FAIL",
-                      "expected ARGUMENTS_BAD/MECHANISM_PARAM_INVALID, RV=" + std::to_string(rv));
+                      "expected CKR_MECHANISM_PARAM_INVALID, RV=" + std::to_string(rv));
     }
 }
 
@@ -4819,13 +4826,13 @@ void test_fips_edge_constraints() {
         };
         CK_MECHANISM signMech = { 0x0000001dUL /* CKM_ML_DSA */, &sigCtx, sizeof(sigCtx) };
         CK_RV rv = fl->C_SignInit(hSess, &signMech, hDsaPriv);
-        // FIPS 204 limits the context string to 255 bytes. Both rejection codes
-        // are defensible: CKR_MECHANISM_PARAM_INVALID (the mechanism parameter
-        // CK_SIGN_ADDITIONAL_CONTEXT carries an invalid field) and
-        // CKR_ARGUMENTS_BAD (a caller-supplied argument is out of range) —
-        // the spec does not pin one. Accept either; anything else is a FAIL.
+        // FIPS 204 limits the context string to 255 bytes. The oversized
+        // context is a field of the mechanism parameter
+        // CK_SIGN_ADDITIONAL_CONTEXT, so the answer is
+        // CKR_MECHANISM_PARAM_INVALID (§5.1.6). CKR_ARGUMENTS_BAD used to be
+        // accepted too; decision D6 (2026-09-25) pinned the one code.
         record_result("FIPS", "ML-DSA_Oversized_Ctx",
-                      (rv == CKR_ARGUMENTS_BAD || rv == CKR_MECHANISM_PARAM_INVALID) ? "PASS" : "FAIL",
+                      rv == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
                       "ctx>255 must be rejected, RV=" + std::to_string(rv));
         // Force cancel in case it (wrongly) succeeds
         if (rv == CKR_OK) fl->C_SignFinal(hSess, NULL_PTR, NULL_PTR);
@@ -8831,15 +8838,18 @@ void test_aes_key_wrap_kwp() {
 
     // A KWP mechanism parameter is the optional 4-byte alternative initial
     // value (§6.16.2); this engine does not implement one, and says so with
-    // CKR_ARGUMENTS_BAD rather than ignoring the caller's IV.
+    // CKR_MECHANISM_PARAM_INVALID rather than ignoring the caller's IV —
+    // §5.1.6: "Which parameter values are supported by a given mechanism can
+    // vary from token to token". (Was CKR_ARGUMENTS_BAD until decision D6,
+    // 2026-09-25.)
     {
         CK_BYTE iv[4] = { 0xA6, 0x59, 0x59, 0xA6 };
         CK_MECHANISM withIv = { CKM_AES_KEY_WRAP_KWP, iv, sizeof(iv) };
         CK_BYTE out[64]; CK_ULONG outLen = sizeof(out);
         CK_RV r = fl->C_WrapKey(hSess, &withIv, hKek, hTarget, out, &outLen);
         record_result(CAT, "KWP_rejects_unsupported_iv_param",
-                      r == CKR_ARGUMENTS_BAD ? "PASS" : "FAIL",
-                      "RV=" + std::to_string(r) + " (want CKR_ARGUMENTS_BAD=0x7)");
+                      r == CKR_MECHANISM_PARAM_INVALID ? "PASS" : "FAIL",
+                      "RV=" + std::to_string(r) + " (want CKR_MECHANISM_PARAM_INVALID=0x71)");
     }
 }
 

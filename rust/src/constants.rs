@@ -70,6 +70,10 @@ pub const CKR_UNWRAPPING_KEY_HANDLE_INVALID: u32 = 0x0000_00F0;
 pub const CKR_WRAPPED_KEY_INVALID: u32 = 0x0000_0110;
 pub const CKR_WRAPPED_KEY_LEN_RANGE: u32 = 0x0000_0112;
 pub const CKR_WRAPPING_KEY_HANDLE_INVALID: u32 = 0x0000_0113;
+pub const CKR_UNWRAPPING_KEY_SIZE_RANGE: u32 = 0x0000_00F1;
+pub const CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT: u32 = 0x0000_00F2;
+pub const CKR_WRAPPING_KEY_SIZE_RANGE: u32 = 0x0000_0114;
+pub const CKR_WRAPPING_KEY_TYPE_INCONSISTENT: u32 = 0x0000_0115;
 
 // ── PKCS#11 Attribute Types ──────────────────────────────────────────────────
 
@@ -191,6 +195,24 @@ pub const CKK_HSS: u32 = 0x0000_0046; // HSS/LMS multi-level (standard)
 pub const CKK_XMSS: u32 = 0x0000_0047; // XMSS single-tree (standard)
 pub const CKK_XMSSMT: u32 = 0x0000_0048; // XMSS^MT multi-tree (standard)
 // Vendor: single-level LMS (not in PKCS#11 v3.2 standard; same numeric space as CKK is separate from CKM)
+// HMAC key types (§6.44 and the per-digest HMAC sections) and CKK_HKDF
+// (§6.62.1) — values from pkcs11t.h. The engine creates HMAC keys as
+// CKK_GENERIC_SECRET; these are accepted as the digest-specific alternative
+// the HMAC mechanisms also allow (ffi::mech_key_types).
+pub const CKK_MD5_HMAC: u32 = 0x0000_0027;
+pub const CKK_SHA_1_HMAC: u32 = 0x0000_0028;
+pub const CKK_RIPEMD160_HMAC: u32 = 0x0000_002A;
+pub const CKK_SHA256_HMAC: u32 = 0x0000_002B;
+pub const CKK_SHA384_HMAC: u32 = 0x0000_002C;
+pub const CKK_SHA512_HMAC: u32 = 0x0000_002D;
+pub const CKK_SHA224_HMAC: u32 = 0x0000_002E;
+pub const CKK_SHA3_224_HMAC: u32 = 0x0000_0036;
+pub const CKK_SHA3_256_HMAC: u32 = 0x0000_0037;
+pub const CKK_SHA3_384_HMAC: u32 = 0x0000_0038;
+pub const CKK_SHA3_512_HMAC: u32 = 0x0000_0039;
+pub const CKK_HKDF: u32 = 0x0000_0042;
+pub const CKK_SHA512_224_HMAC: u32 = 0x0000_0043;
+pub const CKK_SHA512_256_HMAC: u32 = 0x0000_0044;
 
 // Vendor key types — FrodoKEM / Classic McEliece (BSI TR-02102-1 recommended KEMs,
 // not NIST-standardized, no PKCS#11 v3.2 standard codepoint exists for either).
@@ -666,9 +688,20 @@ pub const CKD_SHA3_256_KDF: u32 = 0x0000_000B; // PKCS#11 v3.2 §5.2.12 — SHA3
 pub const CKD_SHA3_512_KDF: u32 = 0x0000_000D; // PKCS#11 v3.2 §5.2.12 — SHA3-512 X9.63 KDF
 
 // PBKDF2 PRF types
+// SHA1 and SHA224 PRFs added 2026-09-25 (E15) for parity with the C++
+// engine, under their pkcs11t.h names (the three CKP_PBKDF2_* below predate
+// that and are pinned as naming drift in scripts/check_pkcs11_constants.py).
+pub const CKP_PKCS5_PBKD2_HMAC_SHA1: u32 = 0x0000_0001;
+pub const CKP_PKCS5_PBKD2_HMAC_SHA224: u32 = 0x0000_0003;
 pub const CKP_PBKDF2_HMAC_SHA256: u32 = 0x04;
 pub const CKP_PBKDF2_HMAC_SHA384: u32 = 0x05;
 pub const CKP_PBKDF2_HMAC_SHA512: u32 = 0x06;
+
+/// Engine policy, not a PKCS#11 rule (decision D7, 2026-09-25): CKM_PKCS5_PBKD2
+/// refuses fewer iterations than this with CKR_MECHANISM_PARAM_INVALID. SP 800-132
+/// §5.2: "A minimum iteration count of 1,000 is recommended." Recorded on the
+/// CKM_PKCS5_PBKD2 row of docs/pkcs11-mechanism-ledger.json.
+pub const PBKDF2_MIN_ITERATIONS: u32 = 1000;
 
 // HKDF salt types
 pub const CKF_HKDF_SALT_DATA: u32 = 0x0000_0002;
@@ -1128,6 +1161,15 @@ pub const SUPPORTED_MECHS: &[u32] = &[
     CKM_XMSSMT,
     // Keccak-256 digest (G11 — Rust engine only)
     CKM_KECCAK_256,
+    // CKM_HPKE family (vendor range, pending OASIS TC allocation — see
+    // docs/proposals/pkcs11-ckm-hpke-mechanism-proposal.md). Implemented and
+    // dispatched by C_GenerateKeyPair / C_EncapsulateKey / C_DecapsulateKey
+    // since the [Unreleased] CKM_HPKE work, with FFI tests
+    // (ffi::hpke_ffi_tests) and native tests (native::hpke), but never
+    // listed here — dispatched-but-not-advertised, so no caller could
+    // discover them (gap-closure finding E19, 2026-09-25).
+    CKM_HPKE_KEM_KEY_PAIR_GEN,
+    CKM_HPKE,
 ];
 
 /// PKCS#11 v3.2 §5.5 — C_GetMechanismList. Gated on library initialization

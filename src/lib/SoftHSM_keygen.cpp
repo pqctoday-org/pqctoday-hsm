@@ -1531,7 +1531,7 @@ CK_RV SoftHSM::C_WrapKey
 			// Does not handle optional init vector
 			if (pMechanism->pParameter != NULL_PTR ||
                             pMechanism->ulParameterLen != 0)
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			break;
 		case CKM_RSA_PKCS_OAEP:
 			rv = MechParamCheckRSAPKCSOAEP(pMechanism);
@@ -1547,7 +1547,7 @@ CK_RV SoftHSM::C_WrapKey
 	        case CKM_AES_CBC_PAD:
 			if (pMechanism->pParameter == NULL_PTR ||
                             pMechanism->ulParameterLen != 16)
-                                return CKR_ARGUMENTS_BAD;
+                                return CKR_MECHANISM_PARAM_INVALID;
                         break;
 		default:
 			return CKR_MECHANISM_INVALID;
@@ -2202,7 +2202,7 @@ CK_RV SoftHSM::C_UnwrapKey
 			// Does not handle optional init vector
 			if (pMechanism->pParameter != NULL_PTR ||
                             pMechanism->ulParameterLen != 0)
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			break;
 #endif
 #ifdef HAVE_AES_KEY_WRAP_PAD
@@ -2213,7 +2213,7 @@ CK_RV SoftHSM::C_UnwrapKey
 			// Does not handle optional init vector
 			if (pMechanism->pParameter != NULL_PTR ||
                             pMechanism->ulParameterLen != 0)
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			break;
 #endif
 		case CKM_RSA_PKCS:
@@ -2240,7 +2240,7 @@ CK_RV SoftHSM::C_UnwrapKey
 			// IV is mandatory and must be exactly one AES block (16 bytes).
 			if (pMechanism->pParameter == NULL_PTR ||
                             pMechanism->ulParameterLen != 16)
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			break;
 
 		default:
@@ -2283,8 +2283,11 @@ CK_RV SoftHSM::C_UnwrapKey
 	if ((pMechanism->mechanism == CKM_RSA_PKCS || pMechanism->mechanism == CKM_RSA_PKCS_OAEP || pMechanism->mechanism == CKM_RSA_AES_KEY_WRAP) &&
 		unwrapKey->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_RSA)
 		return CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT;
+	// §5.18.4 lists CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT; §5.1.6 says
+	// CKR_WRAPPING_KEY_TYPE_INCONSISTENT "can only be returned by C_WrapKey"
+	// (G-8 finding E7, 2026-09-25).
 	if ((pMechanism->mechanism == CKM_AES_CBC || pMechanism->mechanism == CKM_AES_CBC_PAD) && unwrapKey->getUnsignedLongValue(CKA_KEY_TYPE, CKK_VENDOR_DEFINED) != CKK_AES)
-		return CKR_WRAPPING_KEY_TYPE_INCONSISTENT;
+		return CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT;
 	// Check if the unwrapping key can be used for unwrapping
 	if (unwrapKey->getBooleanValue(CKA_UNWRAP, false) == false)
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
@@ -2602,11 +2605,11 @@ CK_RV SoftHSM::C_WrapKeyAuthenticated
 	if (pMechanism->mechanism != CKM_AES_GCM) return CKR_MECHANISM_INVALID;
 	if (pMechanism->pParameter == NULL_PTR ||
 	    pMechanism->ulParameterLen != sizeof(CK_AES_GCM_PARAMS))
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	CK_AES_GCM_PARAMS* gcmParam = reinterpret_cast<CK_AES_GCM_PARAMS*>(pMechanism->pParameter);
-	if (gcmParam->pIv == NULL_PTR || gcmParam->ulIvLen == 0) return CKR_ARGUMENTS_BAD;
+	if (gcmParam->pIv == NULL_PTR || gcmParam->ulIvLen == 0) return CKR_MECHANISM_PARAM_INVALID;
 	size_t tagLen = gcmParam->ulTagBits / 8;
-	if (tagLen == 0 || tagLen > 16) return CKR_ARGUMENTS_BAD;
+	if (tagLen == 0 || tagLen > 16) return CKR_MECHANISM_PARAM_INVALID;
 
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
@@ -2742,11 +2745,11 @@ CK_RV SoftHSM::C_UnwrapKeyAuthenticated
 	if (pMechanism->mechanism != CKM_AES_GCM) return CKR_MECHANISM_INVALID;
 	if (pMechanism->pParameter == NULL_PTR ||
 	    pMechanism->ulParameterLen != sizeof(CK_AES_GCM_PARAMS))
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	CK_AES_GCM_PARAMS* gcmParam = reinterpret_cast<CK_AES_GCM_PARAMS*>(pMechanism->pParameter);
-	if (gcmParam->pIv == NULL_PTR || gcmParam->ulIvLen == 0) return CKR_ARGUMENTS_BAD;
+	if (gcmParam->pIv == NULL_PTR || gcmParam->ulIvLen == 0) return CKR_MECHANISM_PARAM_INVALID;
 	size_t tagLen = gcmParam->ulTagBits / 8;
-	if (tagLen == 0 || tagLen > 16) return CKR_ARGUMENTS_BAD;
+	if (tagLen == 0 || tagLen > 16) return CKR_MECHANISM_PARAM_INVALID;
 	if (ulWrappedKeyLen <= tagLen) return CKR_WRAPPED_KEY_LEN_RANGE;
 
 	auto sessionGuard = handleManager->getSessionShared(hSession);
@@ -3016,7 +3019,7 @@ CK_RV SoftHSM::C_DeriveKey
 		    pMechanism->ulParameterLen != sizeof(CK_PKCS5_PBKD2_PARAMS2))
 		{
 			ERROR_MSG("CKM_PKCS5_PBKD2 requires CK_PKCS5_PBKD2_PARAMS2");
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_PKCS5_PBKD2_PARAMS2* pbkdp = (CK_PKCS5_PBKD2_PARAMS2*)pMechanism->pParameter;
 		if (pbkdp->saltSource != CKZ_SALT_SPECIFIED)
@@ -3027,7 +3030,7 @@ CK_RV SoftHSM::C_DeriveKey
 		if (pbkdp->pPassword == NULL_PTR)
 		{
 			ERROR_MSG("CKM_PKCS5_PBKD2: invalid password");
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		// E15 / decision D7 (ACVP gap-closure 2026-09-25): token policy floor
 		// of PBKDF2_MIN_ITERATIONS (covers c = 0 too), aligned with the Rust
@@ -3243,6 +3246,23 @@ CK_RV SoftHSM::C_DeriveKey
 		return rv;
 	}
 
+	// HKDF base key (PKCS#11 v3.2 §6.62.3): "The input key must be of type
+	// CKK_HKDF or CKK_GENERIC_SECRET … The exception is a data object". An
+	// asymmetric key is therefore never a valid base key; C_DeriveKey (§5.18.5)
+	// lists CKR_KEY_TYPE_INCONSISTENT for it, and §5.1.6 ranks that above
+	// CKR_KEY_FUNCTION_NOT_PERMITTED, so this runs before the CKA_DERIVE test.
+	// Found by the Hub's G-8 probes (finding E5, 2026-09-25): an EC private key
+	// was accepted as the HKDF base key. Only the key CLASS is enforced here —
+	// secret keys of other types keep being accepted, because existing callers
+	// (the vendored pkcs11-provider's TLS 1.3 path among them) have not been
+	// audited for the narrower §6.62.3 key-type rule.
+	if (pMechanism->mechanism == CKM_HKDF_DERIVE || pMechanism->mechanism == CKM_HKDF_DATA)
+	{
+		CK_OBJECT_CLASS baseClass = key->getUnsignedLongValue(CKA_CLASS, CKO_VENDOR_DEFINED);
+		if (baseClass != CKO_SECRET_KEY && baseClass != CKO_DATA)
+			return CKR_KEY_TYPE_INCONSISTENT;
+	}
+
 	// Check if key can be used for derive
 	if (!key->getBooleanValue(CKA_DERIVE, false))
 		return CKR_KEY_FUNCTION_NOT_PERMITTED;
@@ -3281,7 +3301,7 @@ CK_RV SoftHSM::C_DeriveKey
 			seed.wipe();
 		} else {
 			if (pMechanism->pParameter == NULL_PTR || pMechanism->ulParameterLen != sizeof(CK_BIP32_CHILD_DERIVE_PARAMS)) {
-				return CKR_ARGUMENTS_BAD;
+				return CKR_MECHANISM_PARAM_INVALID;
 			}
 			CK_BIP32_CHILD_DERIVE_PARAMS* params = (CK_BIP32_CHILD_DERIVE_PARAMS*)pMechanism->pParameter;
 			
@@ -3479,7 +3499,7 @@ CK_RV SoftHSM::C_DeriveKey
 		    pMechanism->ulParameterLen != sizeof(CK_SP800_108_KDF_PARAMS))
 		{
 			ERROR_MSG("CKM_SP800_108_COUNTER_KDF requires CK_SP800_108_KDF_PARAMS");
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_SP800_108_KDF_PARAMS* kp = (CK_SP800_108_KDF_PARAMS*)pMechanism->pParameter;
 
@@ -3761,7 +3781,7 @@ CK_RV SoftHSM::C_DeriveKey
 		    pMechanism->ulParameterLen != sizeof(CK_SP800_108_FEEDBACK_KDF_PARAMS))
 		{
 			ERROR_MSG("CKM_SP800_108_FEEDBACK_KDF requires CK_SP800_108_FEEDBACK_KDF_PARAMS");
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_SP800_108_FEEDBACK_KDF_PARAMS* fp = (CK_SP800_108_FEEDBACK_KDF_PARAMS*)pMechanism->pParameter;
 
@@ -4100,7 +4120,7 @@ CK_RV SoftHSM::C_DeriveKey
 		    pMechanism->ulParameterLen != sizeof(CK_SP800_108_KDF_PARAMS))
 		{
 			ERROR_MSG("CKM_SP800_108_DOUBLE_PIPELINE_KDF requires CK_SP800_108_KDF_PARAMS");
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_SP800_108_KDF_PARAMS* dpp = (CK_SP800_108_KDF_PARAMS*)pMechanism->pParameter;
 
@@ -4395,7 +4415,7 @@ CK_RV SoftHSM::C_DeriveKey
 		    pMechanism->ulParameterLen != sizeof(CK_HKDF_PARAMS))
 		{
 			ERROR_MSG("CKM_HKDF_DERIVE/DATA requires CK_HKDF_PARAMS");
-			return CKR_ARGUMENTS_BAD;
+			return CKR_MECHANISM_PARAM_INVALID;
 		}
 		CK_HKDF_PARAMS* hkdfp = (CK_HKDF_PARAMS*)pMechanism->pParameter;
 
@@ -9285,7 +9305,7 @@ CK_RV SoftHSM::MechParamCheckRSAPKCSOAEP(CK_MECHANISM_PTR pMechanism)
 	    pMechanism->ulParameterLen != sizeof(CK_RSA_PKCS_OAEP_PARAMS))
 	{
 		ERROR_MSG("pParameter must be of type CK_RSA_PKCS_OAEP_PARAMS");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 
 	CK_RSA_PKCS_OAEP_PARAMS_PTR params = (CK_RSA_PKCS_OAEP_PARAMS_PTR)pMechanism->pParameter;
@@ -9313,22 +9333,22 @@ CK_RV SoftHSM::MechParamCheckRSAPKCSOAEP(CK_MECHANISM_PTR pMechanism)
 	if (!validCombo)
 	{
 		ERROR_MSG("Invalid hashAlg/mgf combination for RSA-OAEP");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->source != CKZ_DATA_SPECIFIED)
 	{
 		ERROR_MSG("source must be CKZ_DATA_SPECIFIED");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->pSourceData != NULL)
 	{
 		ERROR_MSG("pSourceData must be NULL");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->ulSourceDataLen != 0)
 	{
 		ERROR_MSG("ulSourceDataLen must be 0");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	return CKR_OK;
 }
@@ -9345,19 +9365,19 @@ CK_RV SoftHSM::MechParamCheckRSAAESKEYWRAP(CK_MECHANISM_PTR pMechanism)
 	    pMechanism->ulParameterLen != sizeof(CK_RSA_AES_KEY_WRAP_PARAMS))
 	{
 		ERROR_MSG("pParameter must be of type CK_RSA_AES_KEY_WRAP_PARAMS");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 
 	CK_RSA_AES_KEY_WRAP_PARAMS_PTR params = (CK_RSA_AES_KEY_WRAP_PARAMS_PTR)pMechanism->pParameter;
 	if (params->ulAESKeyBits != 128 && params->ulAESKeyBits != 192 && params->ulAESKeyBits != 256)
 	{
 		ERROR_MSG("length of the temporary AES key in bits can be only 128, 192 or 256");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->pOAEPParams == NULL_PTR)
 	{
 		ERROR_MSG("pOAEPParams must be of type CK_RSA_PKCS_OAEP_PARAMS");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	// WS-1.1 (2026-08-29): this used to check ONLY that mgf fell in 1..5 and
 	// never looked at hashAlg at all — so CKM_RSA_AES_KEY_WRAP accepted any
@@ -9385,17 +9405,17 @@ CK_RV SoftHSM::MechParamCheckRSAAESKEYWRAP(CK_MECHANISM_PTR pMechanism)
 	if (params->pOAEPParams->source != CKZ_DATA_SPECIFIED)
 	{
 		ERROR_MSG("source must be CKZ_DATA_SPECIFIED");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->pOAEPParams->pSourceData != NULL)
 	{
 		ERROR_MSG("pSourceData must be NULL");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 	if (params->pOAEPParams->ulSourceDataLen != 0)
 	{
 		ERROR_MSG("ulSourceDataLen must be 0");
-		return CKR_ARGUMENTS_BAD;
+		return CKR_MECHANISM_PARAM_INVALID;
 	}
 
 	return CKR_OK;

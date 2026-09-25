@@ -119,6 +119,14 @@ pub fn rsa_verify(mech: u32, n: &[u8], e: &[u8], msg: &[u8], sig: &[u8], pss_sal
     if n_len < MIN_MODULUS_BYTES {
         return None;
     }
+    // E14 (2026-09-25) — AWS-LC refuses public exponents wider than 33 bits,
+    // and its refusal reads as a bad signature (`Ok(false)`). FIPS 186-5
+    // §A.1.1 allows any odd 2^16 < e < 2^256, so leave those to the
+    // pure-Rust path, which accepts them (see verify_rsa).
+    let e_sig = e.iter().position(|&b| b != 0).map_or(&e[e.len()..], |i| &e[i..]);
+    if e_sig.len() * 8 - e_sig.first().map_or(8, |b| b.leading_zeros() as usize) > 33 {
+        return None;
+    }
     let pk = signature::RsaPublicKeyComponents { n, e };
     Some(Ok(pk.verify(alg, msg, sig).is_ok()))
 }

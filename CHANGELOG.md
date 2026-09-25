@@ -201,6 +201,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   explicit-`<Random>` modes. The deterministic form is byte-identical to the
   `C_Sign` path. `C_Sign` itself was not affected.
 
+- **C++ engine error codes now match PKCS #11 v3.2 on five error paths**
+  found by the Hub's error-path probes, so callers that branch on the return
+  value get the one the specification names:
+  - a key of the wrong type (an AES key for ECDSA, EdDSA, RSA, HSS or XMSS; an
+    EC key as an HKDF base key) is refused with `CKR_KEY_TYPE_INCONSISTENT`
+    instead of being accepted, and that code now wins over
+    `CKR_KEY_FUNCTION_NOT_PERMITTED` as §5.1.6 requires (sign/verify-recover
+    and `C_EncapsulateKey` answered the latter);
+  - `C_UnwrapKey` with a wrong AES-CBC unwrapping key returns
+    `CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT`, not the `C_WrapKey`-only code;
+  - `C_SignMessage` into a too-small buffer no longer ends the message-signing
+    session, so the retry with the right size succeeds (§5.14.2);
+  - a malformed or unsupported mechanism parameter returns
+    `CKR_MECHANISM_PARAM_INVALID` instead of `CKR_ARGUMENTS_BAD` (102 checks,
+    every init, wrap/unwrap and derive path);
+  - `CKM_RIPEMD160` is dispatched only in builds that advertise it.
+
+  Known and not yet fixed: a second `C_SignMessage` under one
+  `C_MessageSignInit` still returns `CKR_OPERATION_NOT_INITIALIZED`.
+
 - The OpenMLS interop workflow checks out submodules again, so its pqctoday
   image builds since Classic McEliece made `liboqs` a hard CMake dependency
   (red on every nightly run 2026-09-12 → 09-21). It now runs on push / PR to
