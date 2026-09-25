@@ -3165,6 +3165,37 @@ pub fn verify_hmac(mech: u32, key_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) ->
 /// keeps the historical two-candidate acceptance: sLen = hashLen and
 /// sLen = modOctets - hashLen - 2 (OpenSSL's `rsa_pss_saltlen:auto`), which
 /// the KMIP conformance suite depends on.
+/// E14 (2026-09-25) — the public key for RSA signature VERIFICATION.
+///
+/// FIPS 186-5 §A.1.1 requires an odd public exponent with 2^16 < e < 2^256.
+/// `rsa::RsaPublicKey::new` additionally caps e at 2^33 - 1
+/// (`RsaPublicKey::MAX_PUB_EXPONENT`), so valid FIPS 186-5 keys — NIST's
+/// RSA-SigVer-FIPS186-5 sample uses 52- and 56-bit exponents — could not be
+/// verified at all. Every key the constructor accepts is still built by it,
+/// unchanged. Only an exponent above its cap gets a second look: it is
+/// accepted when it is odd, below 2^256 and below n, with the constructor's
+/// own modulus checks (odd n, at most `MAX_SIZE` bits) applied here.
+/// Signing and encryption keep the constructor's bound.
+fn rsa_verifying_key(n_bytes: &[u8], e_bytes: &[u8]) -> Result<rsa::RsaPublicKey, u32> {
+    let n = rsa::BigUint::from_bytes_be(n_bytes);
+    let e = rsa::BigUint::from_bytes_be(e_bytes);
+    if let Ok(k) = rsa::RsaPublicKey::new(n.clone(), e.clone()) {
+        return Ok(k);
+    }
+    let odd = |b: &[u8]| b.last().is_some_and(|x| x & 1 == 1);
+    let fips_186_5_wide_e = e.bits() > 33
+        && e.bits() <= 256
+        && odd(e_bytes)
+        && e < n
+        && odd(n_bytes)
+        && n.bits() <= rsa::RsaPublicKey::MAX_SIZE;
+    if fips_186_5_wide_e {
+        Ok(rsa::RsaPublicKey::new_unchecked(n, e))
+    } else {
+        Err(CKR_KEY_TYPE_INCONSISTENT)
+    }
+}
+
 pub fn verify_rsa(
     mech: u32,
     n_bytes: &[u8],
@@ -3184,9 +3215,7 @@ pub fn verify_rsa(
         return r.and_then(|ok| if ok { Ok(()) } else { Err(CKR_SIGNATURE_INVALID) });
     }
     use rsa::signature::Verifier;
-    let n = rsa::BigUint::from_bytes_be(n_bytes);
-    let e = rsa::BigUint::from_bytes_be(e_bytes);
-    let public_key = rsa::RsaPublicKey::new(n, e).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let public_key = rsa_verifying_key(n_bytes, e_bytes)?;
 
     macro_rules! pkcs1v15_verify {
         ($hash:ty) => {{
@@ -3272,9 +3301,7 @@ pub fn verify_rsa_pss_bare(
     if n_bytes.is_empty() || e_bytes.is_empty() {
         return Err(CKR_KEY_TYPE_INCONSISTENT);
     }
-    let n = rsa::BigUint::from_bytes_be(n_bytes);
-    let e = rsa::BigUint::from_bytes_be(e_bytes);
-    let public_key = rsa::RsaPublicKey::new(n, e).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    let public_key = rsa_verifying_key(n_bytes, e_bytes)?;
     macro_rules! pss_verify_prehashed {
         ($hash:ty) => {
             public_key

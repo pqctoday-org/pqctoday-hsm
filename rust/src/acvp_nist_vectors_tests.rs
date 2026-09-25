@@ -448,3 +448,92 @@ fn e13_ecdsa_p224_advertised_and_signs() {
     assert_eq!(verify(session, &mechanism(CKM_ECDSA_SHA256, &[]), h_pub, msg, &sig), CKR_OK);
     assert_eq!(verify(session, &mechanism(CKM_ECDSA, &[]), h_pub, &digest, &sig), CKR_OK);
 }
+
+// ═══ E14 — RSA SigVer (FIPS 186-5) with public exponents above 2^33 - 1 ═══
+
+/// RSA-SigVer-FIPS186-5: the four executed groups (PKCS#1 v1.5/SHA2-256 at
+/// 2048/3072/4096 bits, PSS/SHA3-256/MGF1 at 2048 bits; 6 cases each). Two
+/// groups carry exponents FIPS 186-5 §A.1.1 allows (odd, 2^16 < e < 2^256)
+/// but wider than 33 bits: e = 0xC9986A9C84FEE9 (56 bits) and
+/// e = 0x0ACC245201D531 (52 bits).
+#[test]
+fn e14_rsa_sigver_nist_large_exponents() {
+    let _g = test_lock::acquire();
+    let session = setup_session();
+    let doc = fixture("rsa_sigver_acvp_test.json");
+    let (mut ok, mut rej, mut wide_e) = (0, 0, 0);
+    for g in doc["testGroups"].as_array().unwrap() {
+        let n = hx(s(g, "n"));
+        let e_hex = s(g, "e");
+        let e = hx(&if e_hex.len() % 2 == 1 { format!("0{e_hex}") } else { e_hex.to_string() });
+        let pss_params;
+        let mech = match (s(g, "sigType"), s(g, "hashAlg")) {
+            ("pkcs1v1.5", "SHA2-256") => mechanism(CKM_SHA256_RSA_PKCS, &[]),
+            ("pss", "SHA3-256") => {
+                pss_params = pack(
+                    &ck_param::pss::LAYOUT,
+                    &[
+                        (ck_param::pss::HASH_ALG, CKM_SHA3_256 as usize),
+                        (ck_param::pss::MGF, CKG_MGF1_SHA3_256 as usize),
+                        (ck_param::pss::S_LEN, g["saltLen"].as_u64().unwrap() as usize),
+                    ],
+                );
+                mechanism(CKM_SHA3_256_RSA_PKCS_PSS, &pss_params)
+            }
+            other => panic!("group {other:?}"),
+        };
+        let significant = e.iter().skip_while(|&&b| b == 0).count();
+        let e_bits = if significant == 0 { 0 } else { significant * 8 - e[e.len() - significant].leading_zeros() as usize };
+        for t in g["tests"].as_array().unwrap() {
+            let tc = &t["tcId"];
+            let hk = create(
+                session,
+                &[
+                    (CKA_CLASS, ul(CKO_PUBLIC_KEY)),
+                    (CKA_KEY_TYPE, ul(CKK_RSA)),
+                    (CKA_MODULUS, n.clone()),
+                    (CKA_PUBLIC_EXPONENT, e.clone()),
+                    (CKA_VERIFY, vec![1]),
+                ],
+            )
+            .expect("RSA public key");
+            let rv = verify(session, &mech, hk, &hx(s(t, "message")), &hx(s(t, "signature")));
+            if t["testPassed"].as_bool().unwrap() {
+                assert_eq!(rv, CKR_OK, "tc {tc} (e = {e_bits} bits) valid signature");
+                ok += 1;
+            } else {
+                assert_eq!(rv, CKR_SIGNATURE_INVALID, "tc {tc} (e = {e_bits} bits) {}", s(t, "reason"));
+                rej += 1;
+            }
+            if e_bits > 33 {
+                wide_e += 1;
+            }
+        }
+    }
+    assert_eq!(ok + rej, 24, "all 24 executed NIST cases");
+    assert_eq!(wide_e, 12, "the 12 cases whose e exceeds 2^33 - 1");
+}
+
+/// The FIPS 186-5 §A.1.1 bound is kept at the top: an exponent of 2^256 + 1
+/// (odd, but >= 2^256) is refused. Product-authored probe, not a NIST case.
+#[test]
+fn e14_rsa_exponent_at_or_above_2_256_refused() {
+    let doc = fixture("rsa_sigver_acvp_test.json");
+    let g = &doc["testGroups"][0];
+    let n = hx(s(g, "n"));
+    let t = &g["tests"][0];
+    let mut e = vec![0x01];
+    e.extend_from_slice(&[0u8; 31]);
+    e.push(0x01); // 2^256 + 1
+    assert!(
+        crate::crypto::handlers::verify_rsa(
+            CKM_SHA256_RSA_PKCS,
+            &n,
+            &e,
+            &hx(s(t, "message")),
+            &hx(s(t, "signature")),
+            None
+        )
+        .is_err()
+    );
+}
