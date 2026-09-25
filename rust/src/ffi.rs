@@ -339,23 +339,28 @@ pub fn C_Initialize(p_init_args: *mut u8) -> u32 {
     CKR_OK
 }
 
-/// Drop every parsed private key held by the AWS-LC fast path.
+/// Drop every parsed/expanded private key held by the engine's key caches:
+/// the AWS-LC fast path (`crypto::awslc_keycache`) and the expanded ML-DSA
+/// signing keys (`crypto::mldsa_keycache`).
 ///
 /// Called from each PKCS#11 lifecycle event that ends a key's accessibility.
-/// Correctness never depends on this (the cache is keyed by key material, so
-/// a hit already required holding that material) — it is there so private key
-/// bytes do not outlive the object, session or login that carried them. See
-/// `crypto::awslc_keycache`. No-op on wasm32, where the cache does not exist.
+/// Correctness never depends on this (both caches are keyed by key material,
+/// so a hit already required holding that material) — it is there so private
+/// key material does not outlive the object, session or login that carried
+/// it. No-op on wasm32, where the caches do not exist.
 #[inline]
-fn drop_awslc_key_cache() {
+pub(crate) fn drop_key_caches() {
     #[cfg(not(target_arch = "wasm32"))]
-    crate::crypto::awslc_keycache::clear();
+    {
+        crate::crypto::awslc_keycache::clear();
+        crate::crypto::mldsa_keycache::clear();
+    }
 }
 
 #[wasm_bindgen(js_name = _C_Finalize)]
 pub fn C_Finalize(p_reserved: *mut u8) -> u32 {
     require_init!();
-    drop_awslc_key_cache();
+    drop_key_caches();
     // PQC_HW_STAGE_PROFILE=1 diagnostics: the accelerator host-path stage
     // table, printed once per process lifetime of the engine.
     #[cfg(all(feature = "hw-accel", target_os = "linux", target_arch = "aarch64"))]
@@ -684,7 +689,7 @@ pub fn C_GetSlotList(token_present: u8, p_slot_list: *mut u32, pul_count: *mut u
 #[wasm_bindgen(js_name = _C_InitToken)]
 pub fn C_InitToken(slot_id: u32, p_pin: *mut u8, ul_pin_len: u32, p_label: *mut u8) -> u32 {
     require_init!();
-    drop_awslc_key_cache();
+    drop_key_caches();
     if p_pin.is_null() || p_label.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
@@ -853,7 +858,7 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
     }
     // PKCS#11 v3.2 §4.4 — session objects die with their creating session.
     crate::state::destroy_session_objects(h_session);
-    drop_awslc_key_cache();
+    drop_key_caches();
     // PKCS#11 v3.2 §5.6 — closing a session terminates all of its active
     // operations. Clear every per-session state map, zeroizing any that hold
     // raw key material (the message-based AEAD contexts).
@@ -892,7 +897,7 @@ pub fn C_CloseSession(h_session: u32) -> u32 {
 #[wasm_bindgen(js_name = _C_CloseAllSessions)]
 pub fn C_CloseAllSessions(slot_id: u32) -> u32 {
     require_init!();
-    drop_awslc_key_cache();
+    drop_key_caches();
     let valid = TOKEN_STORE.with(|ts| ts.borrow().contains_key(&slot_id));
     if !valid {
         return CKR_SLOT_ID_INVALID;
@@ -1129,7 +1134,7 @@ pub fn C_Login(h_session: u32, user_type: u32, p_pin: *mut u8, ul_pin_len: u32) 
 #[wasm_bindgen(js_name = _C_Logout)]
 pub fn C_Logout(h_session: u32) -> u32 {
     require_init!();
-    drop_awslc_key_cache();
+    drop_key_caches();
     let session = match SESSIONS.with(|s| s.borrow().get(&h_session).cloned()) {
         Some(s) => s,
         None => return CKR_SESSION_HANDLE_INVALID,
@@ -6348,7 +6353,7 @@ pub fn C_CreateObject(
 pub fn C_DestroyObject(h_session: u32, h_object: u32) -> u32 {
     require_init!();
     require_session!(h_session);
-    drop_awslc_key_cache();
+    drop_key_caches();
     // PKCS#11 v3.2 §4.4 — a private object cannot be destroyed (or even seen)
     // by a session whose token is not logged in.
     let exists = OBJECTS.with(|o| o.borrow().contains_key(&h_object));
@@ -14639,7 +14644,7 @@ pub fn C_SetAttributeValue(
 ) -> u32 {
     require_init!();
     require_session!(h_session);
-    drop_awslc_key_cache();
+    drop_key_caches();
     if p_template.is_null() && ul_count > 0 {
         return CKR_ARGUMENTS_BAD;
     }

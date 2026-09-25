@@ -206,8 +206,8 @@ pub(crate) fn sign_internal<
     const W1_LEN: usize,
 >(
     beta: i32, gamma1: i32, gamma2: i32, omega: i32, tau: i32, esk: &PrivateKey<K, L>,
-    message: &[u8], ctx: &[u8], oid: &[u8], phm: &[u8], rnd: [u8; 32], nist: bool,
-    ext_mu: Option<[u8; 64]>,
+    pre_a: Option<&[[T; L]; K]>, message: &[u8], ctx: &[u8], oid: &[u8], phm: &[u8],
+    rnd: [u8; 32], nist: bool, ext_mu: Option<[u8; 64]>,
 ) -> [u8; SIG_LEN] {
     #[cfg(feature = "phase-profile")]
     let _pqc_operation = pqc_phase_profile::operation(mldsa_name(K), "sign");
@@ -227,7 +227,14 @@ pub(crate) fn sign_internal<
     // --> the montgomery form is extracted from the private key struct above
     //
     // 5: cap_a_hat ← ExpandA(ρ)    ▷ A is generated and stored in NTT representation as Â
-    let cap_a_hat: [[T; L]; K] = stage!(ExpandA, expand_a::<CTEST, K, L>(rho));
+    // An `ExpandedPrivateKey` carries Â already (it depends on ρ alone).
+    let expanded: [[T; L]; K];
+    let cap_a_hat: &[[T; L]; K] = if let Some(pre_a) = pre_a {
+        pre_a
+    } else {
+        expanded = stage!(ExpandA, expand_a::<CTEST, K, L>(rho));
+        &expanded
+    };
     #[cfg(feature = "hw-accel")]
     let cap_a_flat = stage!(Flatten, (K == 6 && L == 5).then(|| {
         cap_a_hat
@@ -297,7 +304,7 @@ pub(crate) fn sign_internal<
         gamma2,
         omega,
         tau,
-        &cap_a_hat,
+        cap_a_hat,
         #[cfg(feature = "hw-accel")]
         cap_a_flat.as_deref(),
         #[cfg(not(feature = "hw-accel"))]

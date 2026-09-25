@@ -1245,13 +1245,9 @@ pub fn sign_ml_dsa(
     deterministic: bool,
 ) -> Result<Vec<u8>, u32> {
     use fips204::traits::Signer;
-    macro_rules! ml_dsa_sign {
-        ($variant:path) => {{
-            type Sk = <$variant as KeyGen>::PrivateKey;
-            let sk_arr: &<Sk as fips204::traits::SerDes>::ByteArray =
-                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sk = <Sk as fips204::traits::SerDes>::try_from_bytes(*sk_arr)
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    macro_rules! sign_with {
+        ($sk:expr) => {{
+            let sk = $sk;
             let result = match (get_ml_dsa_ph(mech), deterministic) {
                 (Some(ph), false) => sk.try_hash_sign(msg, ctx, &ph),
                 (Some(ph), true) => sk.try_hash_sign_with_rng(&mut ZeroRng, msg, ctx, &ph),
@@ -1263,13 +1259,37 @@ pub fn sign_ml_dsa(
                 .map(|s| Into::<Vec<u8>>::into(s))
         }};
     }
-    use fips204::traits::KeyGen;
-    match ps {
-        CKP_ML_DSA_44 => ml_dsa_sign!(fips204::ml_dsa_44::KG),
-        CKP_ML_DSA_65 | 0 => ml_dsa_sign!(fips204::ml_dsa_65::KG),
-        CKP_ML_DSA_87 => ml_dsa_sign!(fips204::ml_dsa_87::KG),
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
-    }
+    // Native: the cached expanded key (skDecode + NTTs + ExpandA once per
+    // key; crypto::mldsa_keycache). Byte-identical to decoding per call,
+    // which the wasm build keeps.
+    #[cfg(not(target_arch = "wasm32"))]
+    let expanded = crate::crypto::mldsa_keycache::get(ps, sk_bytes)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    return match &*expanded {
+        crate::crypto::mldsa_keycache::Expanded::P44(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P65(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P87(sk) => sign_with!(sk.as_ref()),
+    };
+    #[cfg(target_arch = "wasm32")]
+    return {
+        use fips204::traits::KeyGen;
+        macro_rules! decoded {
+            ($variant:path) => {{
+                type Sk = <$variant as KeyGen>::PrivateKey;
+                let sk_arr: &<Sk as fips204::traits::SerDes>::ByteArray =
+                    sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                let sk = <Sk as fips204::traits::SerDes>::try_from_bytes(*sk_arr)
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                sign_with!(&sk)
+            }};
+        }
+        match ps {
+            CKP_ML_DSA_44 => decoded!(fips204::ml_dsa_44::KG),
+            CKP_ML_DSA_65 | 0 => decoded!(fips204::ml_dsa_65::KG),
+            CKP_ML_DSA_87 => decoded!(fips204::ml_dsa_87::KG),
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+        }
+    };
 }
 
 /// Remediation R37 (phase 8), PKCS#11 v3.2 §6.67.6: sign an ALREADY-HASHED
@@ -1461,24 +1481,42 @@ pub fn sign_ml_dsa_external_rnd(
     ctx: &[u8],
     rnd: [u8; 32],
 ) -> Result<Vec<u8>, u32> {
-    use fips204::traits::{SerDes, Signer};
+    use fips204::traits::Signer;
     macro_rules! sign_with {
-        ($m:ident) => {{
-            let arr: &<fips204::$m::PrivateKey as SerDes>::ByteArray =
-                sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            let sk = <fips204::$m::PrivateKey as SerDes>::try_from_bytes(*arr)
-                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
-            sk.try_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx)
+        ($sk:expr) => {{
+            $sk.try_sign_with_rng(&mut FixedRng::new(&rnd), message, ctx)
                 .map(|s| Into::<Vec<u8>>::into(s))
                 .map_err(|_| CKR_FUNCTION_FAILED)
         }};
     }
-    match ps {
-        CKP_ML_DSA_44 => sign_with!(ml_dsa_44),
-        CKP_ML_DSA_65 | 0 => sign_with!(ml_dsa_65),
-        CKP_ML_DSA_87 => sign_with!(ml_dsa_87),
-        _ => Err(CKR_KEY_TYPE_INCONSISTENT),
-    }
+    // Native: the cached expanded key, as in [`sign_ml_dsa`].
+    #[cfg(not(target_arch = "wasm32"))]
+    let expanded = crate::crypto::mldsa_keycache::get(ps, sk_bytes)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    return match &*expanded {
+        crate::crypto::mldsa_keycache::Expanded::P44(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P65(sk) => sign_with!(sk.as_ref()),
+        crate::crypto::mldsa_keycache::Expanded::P87(sk) => sign_with!(sk.as_ref()),
+    };
+    #[cfg(target_arch = "wasm32")]
+    return {
+        use fips204::traits::SerDes;
+        macro_rules! decoded {
+            ($m:ident) => {{
+                let arr: &<fips204::$m::PrivateKey as SerDes>::ByteArray =
+                    sk_bytes.try_into().map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                let sk = <fips204::$m::PrivateKey as SerDes>::try_from_bytes(*arr)
+                    .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+                sign_with!(sk)
+            }};
+        }
+        match ps {
+            CKP_ML_DSA_44 => decoded!(ml_dsa_44),
+            CKP_ML_DSA_65 | 0 => decoded!(ml_dsa_65),
+            CKP_ML_DSA_87 => decoded!(ml_dsa_87),
+            _ => Err(CKR_KEY_TYPE_INCONSISTENT),
+        }
+    };
 }
 
 pub fn sign_slh_dsa(

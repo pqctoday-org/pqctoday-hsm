@@ -42,6 +42,31 @@ pub struct PrivateKey<const K: usize, const L: usize> {
 }
 
 
+/// A private key together with its expanded public matrix `Â = ExpandA(ρ)`.
+/// See `ml_dsa_xx::ExpandedPrivateKey`.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[repr(align(8))]
+pub struct ExpandedPrivateKey<const K: usize, const L: usize> {
+    pub(crate) sk: PrivateKey<K, L>,
+    pub(crate) cap_a_hat: [[T; L]; K],
+}
+
+impl<const K: usize, const L: usize> ExpandedPrivateKey<K, L> {
+    /// Expands `Â = ExpandA(ρ)` once for `sk`.
+    #[must_use]
+    pub fn new(sk: PrivateKey<K, L>) -> Self {
+        let cap_a_hat = stage!(ExpandA, crate::hashing::expand_a::<false, K, L>(&sk.rho));
+        Self { sk, cap_a_hat }
+    }
+
+    /// The decoded private key.
+    #[must_use]
+    pub fn private_key(&self) -> &PrivateKey<K, L> {
+        &self.sk
+    }
+}
+
+
 /// Public key specific to the target security parameter set that contains
 /// precomputed elements which improve verification performance.
 ///

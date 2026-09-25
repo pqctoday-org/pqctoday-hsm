@@ -6,6 +6,10 @@ pub mod awslc;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod awslc_keycache;
 pub mod handlers;
+// Expanded ML-DSA private keys for repeated signing (native only, like the
+// AWS-LC cache: the wasm bundle keeps decoding per call).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mldsa_keycache;
 pub mod keccak;
 pub mod lms;
 pub mod multipart;

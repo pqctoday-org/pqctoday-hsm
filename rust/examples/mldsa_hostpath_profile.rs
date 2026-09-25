@@ -37,7 +37,7 @@
 mod profile {
     use pqc_hw::mldsa_sign::WaitMode;
     use pqc_hw::mldsa_sign_sim::{ModelBackend, SimLane, SimTiming};
-    use pqc_hw::stage;
+    use pqc_hw::stage::{self, Stage};
     use softhsmrustv3::{ffi, hw_accel, native};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
@@ -80,10 +80,26 @@ mod profile {
         native::logout(so).expect("logout");
         native::close_session(so).expect("close");
         let session = native::open_session(0, "87654321").expect("user session");
-        let (_public, private) =
-            native::generate_ml_dsa_keypair(session, CKP_ML_DSA_65, b"profile", "profile")
-                .expect("keygen");
+        // A fixed key, so deterministic runs repeat the same attempt sequence.
+        let (_public, private) = native::generate_ml_dsa_keypair_from_seed(
+            session,
+            CKP_ML_DSA_65,
+            &[0x42; 32],
+            b"profile",
+            "profile",
+        )
+        .expect("keygen");
         Bench { session, key: private }
+    }
+
+    /// `PROFILE_DETERMINISTIC=1`: CKH_DETERMINISTIC_REQUIRED and a message
+    /// counter, so the CPU rejection loop does the same work in every run
+    /// (the bench itself signs hedged; the attempt distribution is the same).
+    static FORCE_DETERMINISTIC: AtomicBool = AtomicBool::new(false);
+
+    fn deterministic() -> bool {
+        FORCE_DETERMINISTIC.load(Ordering::Relaxed)
+            || std::env::var_os("PROFILE_DETERMINISTIC").is_some_and(|v| v == "1")
     }
 
     fn open_worker_session() -> u32 {
@@ -92,7 +108,13 @@ mod profile {
 
     /// The operation `pqc-fpga-bench` times: C_SignInit, C_Sign(size), C_Sign.
     fn sign_once(session: u32, key: u32, message: &mut [u8], signature: &mut [u8]) {
-        let mut mechanism: [usize; 3] = [CKM_ML_DSA as usize, 0, 0];
+        // CK_SIGN_ADDITIONAL_CONTEXT { hedgeVariant, pContext, ulContextLen }.
+        let mut context: [usize; 3] = [2, 0, 0];
+        let mut mechanism: [usize; 3] = if deterministic() {
+            [CKM_ML_DSA as usize, context.as_mut_ptr() as usize, std::mem::size_of_val(&context)]
+        } else {
+            [CKM_ML_DSA as usize, 0, 0]
+        };
         let rv = ffi::C_SignInit(session, mechanism.as_mut_ptr().cast(), key);
         assert_eq!(rv, CKR_OK, "C_SignInit 0x{rv:x}");
         let mut length: u32 = 0;
@@ -163,7 +185,8 @@ mod profile {
         let _ = stage::take();
         let mut wall = Vec::with_capacity(signs);
         let mut cpu = Vec::with_capacity(signs);
-        for _ in 0..signs {
+        for index in 0..signs {
+            message[..8].copy_from_slice(&(index as u64).to_le_bytes());
             let (w0, c0) = (Instant::now(), thread_cpu());
             sign_once(bench.session, bench.key, &mut message, &mut signature);
             cpu.push((thread_cpu() - c0).as_secs_f64() * 1e6);
@@ -221,7 +244,84 @@ mod profile {
         }
     }
 
-    fn attempts(signs: usize) {
+    /// Alternating blocks of accelerated (simulated, zero latency) and
+    /// CPU-only signatures over the same deterministic message sequence and
+    /// key, in one process and one time window. On a shared host the
+    /// absolute times move with load; the RATIO host-path / CPU-only sign is
+    /// what carries to the board (`ratio x board CPU-only sign time`).
+    fn run_both(blocks: usize, per_block: usize) {
+        FORCE_DETERMINISTIC.store(true, Ordering::Relaxed);
+        let bench = setup();
+        let lanes = install(SimTiming::default(), 5.1, WaitMode::Spin);
+        hw_accel::install_stage_profile();
+        pin_to(0);
+        let mut message = b"hsm-perf-bench measured sign ML-DSA-65 - tenant 0".to_vec();
+        let mut signature = vec![0u8; 3309];
+        for _ in 0..50 {
+            sign_once(bench.session, bench.key, &mut message, &mut signature);
+        }
+        let mut accelerated = Vec::new();
+        let mut software = Vec::new();
+        let mut table = stage::Table::default();
+        let mut accelerated_signs = 0u64;
+        for block in 0..blocks {
+            for accelerate in [true, false] {
+                hw_accel::set_mldsa65_sign_enabled(accelerate);
+                let _ = stage::take();
+                let c0 = thread_cpu();
+                for index in 0..per_block {
+                    // The same message sequence in both modes and every run.
+                    let counter = (block * per_block + index) as u64;
+                    message[..8].copy_from_slice(&counter.to_le_bytes());
+                    sign_once(bench.session, bench.key, &mut message, &mut signature);
+                }
+                let per_sign = (thread_cpu() - c0).as_secs_f64() * 1e6 / per_block as f64;
+                if accelerate {
+                    accelerated.push(per_sign);
+                    table.add(&stage::take());
+                    accelerated_signs += per_block as u64;
+                } else {
+                    software.push(per_sign);
+                }
+            }
+        }
+        accelerated.sort_by(f64::total_cmp);
+        software.sort_by(f64::total_cmp);
+        let (a, s) = (percentile(&accelerated, 0.5), percentile(&software, 0.5));
+        println!(
+            "both blocks={blocks} per_block={per_block} accelerated_cpu_us_median={a:.1} (min {:.1}) arm_cpu_us_median={s:.1} (min {:.1}) host_path_over_arm={:.4}",
+            accelerated[0],
+            software[0],
+            a / s
+        );
+        let total: f64 = Stage::all().iter().map(|st| table.ns(*st) as f64).sum::<f64>();
+        let _ = total;
+        for stage_id in Stage::all() {
+            let count = table.count(stage_id);
+            if count == 0 {
+                continue;
+            }
+            let us = table.ns(stage_id) as f64 / 1e3 / accelerated_signs as f64;
+            println!(
+                "  stage {:<16} per_sign_us={us:>8.2} share_of_arm_sign={:.4} calls_per_sign={:.2}",
+                stage_id.name(),
+                us / s,
+                count as f64 / accelerated_signs as f64
+            );
+        }
+        let counters: Vec<_> = lanes.iter().map(SimLane::counters).collect();
+        let total_signs: u64 = counters.iter().map(|c| c.signs).sum();
+        let dev: u64 = counters.iter().map(|c| c.sync_bytes_for_device).sum();
+        let calls: u64 = counters.iter().map(|c| c.syncs_for_device + c.syncs_for_cpu).sum();
+        let loads: u64 = counters.iter().map(|c| c.loads).sum();
+        println!(
+            "  device: signs={total_signs} context_loads={loads} sync_calls_per_sign={:.2} sync_for_device_bytes_per_sign={:.0}",
+            calls as f64 / total_signs.max(1) as f64,
+            dev as f64 / total_signs.max(1) as f64
+        );
+    }
+
+    fn attempts(signs: usize, deterministic_sequence: bool) {
         let lanes: Vec<SimLane> = (0..1)
             .map(|_| SimLane::new(1 << 20, 0x7000_0000, hw_accel::mldsa65_reference_backend(), SimTiming::default()))
             .collect();
@@ -230,11 +330,23 @@ mod profile {
         let mut histogram = [0u64; 32];
         let mut last = 0;
         for index in 0..signs {
-            let (_pk, sk) = fips204::ml_dsa_65::KG::keygen_from_seed(&[(index % 16) as u8; 32]);
-            let sk = sk.into_bytes();
-            let message = (index as u64).to_le_bytes();
-            let _ = softhsmrustv3::crypto::handlers::sign_ml_dsa(CKM_ML_DSA, CKP_ML_DSA_65, &sk, &message, &[], false)
+            if deterministic_sequence {
+                // The `both` mode's sequence: key from seed 0x42, counter messages.
+                let (_pk, sk) = fips204::ml_dsa_65::KG::keygen_from_seed(&[0x42; 32]);
+                let mut message = b"hsm-perf-bench measured sign ML-DSA-65 - tenant 0".to_vec();
+                message[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                let _ = softhsmrustv3::crypto::handlers::sign_ml_dsa(
+                    CKM_ML_DSA, CKP_ML_DSA_65, &sk.into_bytes(), &message, &[], true,
+                )
                 .expect("sign");
+            } else {
+                let (_pk, sk) = fips204::ml_dsa_65::KG::keygen_from_seed(&[(index % 16) as u8; 32]);
+                let message = (index as u64).to_le_bytes();
+                let _ = softhsmrustv3::crypto::handlers::sign_ml_dsa(
+                    CKM_ML_DSA, CKP_ML_DSA_65, &sk.into_bytes(), &message, &[], false,
+                )
+                .expect("sign");
+            }
             let total = lanes[0].counters().attempts;
             histogram[((total - last) as usize).min(31)] += 1;
             last = total;
@@ -309,8 +421,10 @@ mod profile {
         let arg = |i: usize, default: &str| args.get(i).cloned().unwrap_or_else(|| default.to_string());
         match arg(0, "stages").as_str() {
             "stages" => run_single(arg(1, "2000").parse().unwrap(), true),
+            "both" => run_both(arg(1, "20").parse().unwrap(), arg(2, "150").parse().unwrap()),
             "arm" => run_single(arg(1, "2000").parse().unwrap(), false),
-            "attempts" => attempts(arg(1, "2000").parse().unwrap()),
+            "attempts" => attempts(arg(1, "2000").parse().unwrap(), false),
+            "attempts-det" => attempts(arg(1, "3000").parse().unwrap(), true),
             "throughput" => {
                 let mode = match arg(4, "spin").as_str() {
                     "sleep" => WaitMode::Sleep,
