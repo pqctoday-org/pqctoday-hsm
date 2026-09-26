@@ -1429,7 +1429,37 @@ const EC_CAPABILITY_FLAGS: u32 =
 /// what is accepted — from 1 byte (an empty CKA_VALUE is not a key) — up
 /// to 512, the same bounds as CKM_GENERIC_SECRET_KEY_GEN, rather than
 /// adding a floor that would reject RFC 4231's own 4-byte test key.
-const HMAC_KEY_RANGE: (u32, u32, u32) = (1, 512, 0x00000800 | 0x00002000);
+///
+/// Flags: CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY
+/// (0x800 | 0x2000 | 0x8 | 0x10). The two message flags were added 2026-09-25:
+/// this engine's C_MessageSignInit delegates to C_SignInit, so message-based
+/// signing with an HMAC key has ALWAYS worked here — it was simply never
+/// advertised, which is its own defect (a caller is expected to consult
+/// CK_MECHANISM_INFO before using the message-based entry points). Measured
+/// against the C++ engine, which refused the same call with
+/// CKR_MECHANISM_INVALID until it gained the MAC dispatch in the same change:
+/// tests/differential scenario sign.message_based_hmac.
+const HMAC_KEY_RANGE: (u32, u32, u32) =
+    (1, 512, 0x00000800 | 0x00002000 | MSG_SIGN_VERIFY);
+
+/// CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY (pkcs11t.h 0x8 / 0x10).
+///
+/// Added 2026-09-25 to every mechanism this engine accepts through
+/// C_MessageSignInit / C_MessageVerifyInit. Those entry points delegate to
+/// C_SignInit / C_VerifyInit, so message-based signing has always worked for
+/// the whole sign surface here — it was advertised for CKM_ML_DSA and
+/// CKM_SLH_DSA only, leaving 52 mechanisms working but unadvertised. That was
+/// invisible until the differential harness started recording the
+/// CKF_MESSAGE_* flags at all (they were absent from its flag list, and an
+/// exceptions.json entry claimed the difference was "unobservable"), and
+/// nothing observed it because nothing looked.
+///
+/// The set matches the C++ engine's: the RSA sign group, the ECDSA group,
+/// ML-DSA and SLH-DSA including their pre-hash variants, and the HMACs.
+/// Deliberately NOT on CKM_RSA_X_509 (sign-recover only here), the KMACs,
+/// AES-CMAC/GMAC, EdDSA, or the stateful HSS/XMSS schemes — a one-signature-
+/// per-key scheme has no business accepting several messages per operation.
+const MSG_SIGN_VERIFY: u32 = 0x0008 | 0x0010;
 
 pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
     let info = match mech_type {
@@ -1484,7 +1514,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_SHA3_224_RSA_PKCS | CKM_SHA3_224_RSA_PKCS_PSS
         | CKM_SHA3_256_RSA_PKCS | CKM_SHA3_256_RSA_PKCS_PSS
         | CKM_SHA3_512_RSA_PKCS | CKM_SHA3_512_RSA_PKCS_PSS => {
-            (2048, 4096, 0x00000800 | 0x00002000)
+            (2048, 4096, 0x00000800 | 0x00002000 | MSG_SIGN_VERIFY)
         }
         // C3 (2026-08-13) — a mechanism flag is DEFINED as "the mechanism can
         // be used with function F". C_WrapKey / C_UnwrapKey accept
@@ -1576,7 +1606,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // (FIPS 186-5 / SP 800-186) for imported keys; key generation and
         // ECDH stay 256..521 (CKM_EC_KEY_PAIR_GEN / CKM_ECDH1_* above).
         CKM_ECDSA_SHA256 | CKM_ECDSA_SHA384 | CKM_ECDSA_SHA512 => {
-            (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
+            (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS | MSG_SIGN_VERIFY)
         }
         // T1 — C_DeriveKey dispatches P-256 / secp256k1 / P-384 / P-521 for
         // both ECDH1 mechanisms; advertise the full dispatched range.
@@ -1634,7 +1664,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_HASH_ML_DSA_SHA3_384
         | CKM_HASH_ML_DSA_SHA3_512
         | CKM_HASH_ML_DSA_SHAKE128
-        | CKM_HASH_ML_DSA_SHAKE256 => (1312, 2592, 0x00000800 | 0x00002000),
+        | CKM_HASH_ML_DSA_SHAKE256 => (1312, 2592, 0x00000800 | 0x00002000 | MSG_SIGN_VERIFY),
         // SLH-DSA pre-hash variants — same sign/verify capabilities as pure SLH-DSA
         CKM_HASH_SLH_DSA_SHA224
         | CKM_HASH_SLH_DSA_SHA256
@@ -1645,7 +1675,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         | CKM_HASH_SLH_DSA_SHA3_384
         | CKM_HASH_SLH_DSA_SHA3_512
         | CKM_HASH_SLH_DSA_SHAKE128
-        | CKM_HASH_SLH_DSA_SHAKE256 => (32, 64, 0x00000800 | 0x00002000),
+        | CKM_HASH_SLH_DSA_SHAKE256 => (32, 64, 0x00000800 | 0x00002000 | MSG_SIGN_VERIFY),
         // ECDSA-SHA3 variants — T1: the sign/verify matrix now dispatches the
         // same named curves as the SHA-2 composites (P-256 / secp256k1 /
         // P-384 / P-521), so the range is unified with CKM_ECDSA_SHAx above.
@@ -1654,7 +1684,7 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // hashed-ECDSA mechanisms; only the digest differs.
         | CKM_ECDSA_SHA224
         | CKM_ECDSA_SHA1 => {
-            (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS)
+            (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS | MSG_SIGN_VERIFY)
         }
         // Key derivation functions
         CKM_PKCS5_PBKD2
@@ -1667,12 +1697,12 @@ pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {
         // (a unit test iterates SUPPORTED_MECHS and asserts none of them
         //  return CKR_MECHANISM_INVALID here — keep the two in sync)
         // Raw ECDSA (§6.3.12) — pre-hashed input, sign/verify only
-        CKM_ECDSA => (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
+        CKM_ECDSA => (224, 521, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS | MSG_SIGN_VERIFY),
         // Ed25519ph / Ed448ph (pkcs11t.h CKM_EDDSA_PH 0x80001057)
         CKM_EDDSA_PH => (255, 448, 0x00000800 | 0x00002000 | EC_CAPABILITY_FLAGS),
         // Parametrized pre-hash mechanisms (hash chosen via param, §6.67.7/§6.69.7)
-        CKM_HASH_ML_DSA => (1312, 2592, 0x00000800 | 0x00002000),
-        CKM_HASH_SLH_DSA => (32, 64, 0x00000800 | 0x00002000),
+        CKM_HASH_ML_DSA => (1312, 2592, 0x00000800 | 0x00002000 | MSG_SIGN_VERIFY),
+        CKM_HASH_SLH_DSA => (32, 64, 0x00000800 | 0x00002000 | MSG_SIGN_VERIFY),
         // Stateful hash-based signatures (§6.14/§6.66) — sign on the private
         // key only while it has leaves remaining; verify is stateless
         CKM_HSS_KEY_PAIR_GEN | CKM_XMSS_KEY_PAIR_GEN | CKM_XMSSMT_KEY_PAIR_GEN => {
@@ -1800,7 +1830,14 @@ mod mechanism_table_tests {
     }
 
     /// S6 — the four RSA hash-variant mechanisms are advertised at
-    /// (2048, 4096) with CKF_SIGN | CKF_VERIFY.
+    /// (2048, 4096) with CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN |
+    /// CKF_MESSAGE_VERIFY.
+    ///
+    /// The two message flags were added 2026-09-25 (see MSG_SIGN_VERIFY): this
+    /// engine has always accepted these mechanisms through C_MessageSignInit,
+    /// because that entry point delegates to C_SignInit — it simply never said
+    /// so in CK_MECHANISM_INFO. Asserted as a named constant rather than a
+    /// literal so a future flag change has one place to update, not two.
     #[test]
     fn s6_rsa_hash_variant_mechs_advertised() {
         for m in [
@@ -1812,7 +1849,7 @@ mod mechanism_table_tests {
             assert!(SUPPORTED_MECHS.contains(&m), "mech {m:#06x} not advertised");
             assert_eq!(
                 mechanism_info(m),
-                Some((2048, 4096, 0x00000800 | 0x00002000)),
+                Some((2048, 4096, 0x00000800 | 0x00002000 | MSG_SIGN_VERIFY)),
                 "mech {m:#06x}"
             );
         }

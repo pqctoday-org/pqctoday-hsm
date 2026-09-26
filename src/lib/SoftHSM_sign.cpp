@@ -3808,8 +3808,16 @@ static CK_RV applyPerMessageParam(Session* session,
 	return CKR_OK;
 }
 
-// C_MessageSignInit — initialise a multi-message sign context (PKCS#11 v3.0 §5.8.1)
-// See the declaration in SoftHSM.h for the ordering contract.
+// Rebuild the per-message crypto context. See the declaration in SoftHSM.h
+// for the ordering contract.
+//
+// The MAC branch mirrors C_SignInit's own dispatch (isMacMechanism → MacSignInit,
+// otherwise AsymSignInit): a message-based operation over CKM_*_HMAC has to be
+// re-armed through the MAC init, not the asymmetric one, or the re-init answers
+// CKR_MECHANISM_INVALID. Stateful HSS/XMSS is deliberately NOT routed here —
+// C_SignInit sends it to StatefulSignInit, but those are one-signature-per-key
+// schemes, so sending several messages under one operation is not a thing to
+// enable by accident.
 CK_RV SoftHSM::rearmMessageOp(CK_SESSION_HANDLE hSession, Session* session, bool sign)
 {
 	size_t initParamLen = 0;
@@ -3819,6 +3827,9 @@ CK_RV SoftHSM::rearmMessageOp(CK_SESSION_HANDLE hSession, Session* session, bool
 	remech.pParameter = initParam;
 	remech.ulParameterLen = (CK_ULONG)initParamLen;
 	CK_OBJECT_HANDLE hKey = session->getMessageOpKeyHandle();
+	if (isMacMechanism(&remech))
+		return sign ? MacSignInit(hSession, &remech, hKey)
+		            : MacVerifyInit(hSession, &remech, hKey);
 	return sign ? AsymSignInit(hSession, &remech, hKey)
 	            : AsymVerifyInit(hSession, &remech, hKey);
 }
@@ -3835,8 +3846,15 @@ CK_RV SoftHSM::C_MessageSignInit(CK_SESSION_HANDLE hSession,
 	// checks that outrank this one), so the cancel form routes into it.
 	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_MESSAGE_SIGN);
 
-	// Reuse existing asymmetric-sign init; it validates the key, mechanism, and session
-	CK_RV rv = AsymSignInit(hSession, pMechanism, hKey);
+	// Reuse the existing sign inits; they validate the key, mechanism, and
+	// session. The dispatch mirrors C_SignInit's: a MAC mechanism must go to
+	// MacSignInit. Until 2026-09-25 this called AsymSignInit unconditionally,
+	// so CKM_*_HMAC answered CKR_MECHANISM_INVALID here while the Rust engine
+	// accepted it — measured, not inferred (tests/differential
+	// sign.message_based_hmac).
+	CK_RV rv = isMacMechanism(pMechanism)
+		? MacSignInit(hSession, pMechanism, hKey)
+		: AsymSignInit(hSession, pMechanism, hKey);
 	if (rv != CKR_OK) return rv;
 
 	// Upgrade op type so C_Sign cannot be called against this context
@@ -3897,8 +3915,12 @@ CK_RV SoftHSM::C_SignMessage(CK_SESSION_HANDLE hSession,
 	// AsymSign calls resetOp() before returning (both size-query and real sign),
 	// so we must unconditionally restore MESSAGE_SIGN on success to keep the
 	// multi-message contract (caller may send further messages under this session).
+	// MacSign behaves identically in both respects, which is why one re-arm
+	// mechanism covers both (see rearmMessageOp).
 	session->setOpType(SESSION_OP_SIGN);
-	CK_RV rv = AsymSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
+	CK_RV rv = (session->getMacOp() != NULL)
+		? MacSign(session, pData, ulDataLen, pSignature, pulSignatureLen)
+		: AsymSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
 	// PKCS#11 v3.2 §5.14.2: a C_SignMessage call "begins and terminates a
 	// message signing operation unless it returns CKR_BUFFER_TOO_SMALL", and
 	// "C_SignMessage does not finish the message-based signing process" — only
@@ -3984,7 +4006,11 @@ CK_RV SoftHSM::C_MessageVerifyInit(CK_SESSION_HANDLE hSession,
 	// checks that outrank this one), so the cancel form routes into it.
 	if (pMechanism == NULL_PTR) return C_SessionCancel(hSession, CKF_MESSAGE_VERIFY);
 
-	CK_RV rv = AsymVerifyInit(hSession, pMechanism, hKey);
+	// MAC dispatch — see C_MessageSignInit for why this is not AsymVerifyInit
+	// unconditionally.
+	CK_RV rv = isMacMechanism(pMechanism)
+		? MacVerifyInit(hSession, pMechanism, hKey)
+		: AsymVerifyInit(hSession, pMechanism, hKey);
 	if (rv != CKR_OK) return rv;
 
 	auto sessionGuard = handleManager->getSessionShared(hSession);
@@ -4035,9 +4061,11 @@ CK_RV SoftHSM::C_VerifyMessage(CK_SESSION_HANDLE hSession,
 
 	// AsymVerify expects SESSION_OP_VERIFY; temporarily satisfy that check.
 	// AsymVerify calls resetOp() before returning, so restore MESSAGE_VERIFY on
-	// success to maintain the multi-message contract.
+	// success to maintain the multi-message contract. MacVerify matches.
 	session->setOpType(SESSION_OP_VERIFY);
-	CK_RV rv = AsymVerify(session, pData, ulDataLen, pSignature, ulSignatureLen);
+	CK_RV rv = (session->getMacOp() != NULL)
+		? MacVerify(session, pData, ulDataLen, pSignature, ulSignatureLen)
+		: AsymVerify(session, pData, ulDataLen, pSignature, ulSignatureLen);
 	if (rv == CKR_OK)
 	{
 		// Re-arm BEFORE relabelling: AsymVerify's success path reset the op to
@@ -4143,7 +4171,9 @@ CK_RV SoftHSM::C_SignMessageNext(CK_SESSION_HANDLE hSession,
 	// correctly-sized buffer.  All other errors: AsymSign called resetOp, leaving
 	// SESSION_OP_NONE — the multi-message context is terminated per spec.
 	session->setOpType(SESSION_OP_SIGN);
-	rv = AsymSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
+	rv = (session->getMacOp() != NULL)
+		? MacSign(session, pData, ulDataLen, pSignature, pulSignatureLen)
+		: AsymSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
 	if (rv == CKR_OK)
 	{
 		if (pSignature != NULL_PTR)
@@ -4212,7 +4242,9 @@ CK_RV SoftHSM::C_VerifyMessageNext(CK_SESSION_HANDLE hSession,
 
 	// AsymVerify requires SESSION_OP_VERIFY; satisfy temporarily then restore.
 	session->setOpType(SESSION_OP_VERIFY);
-	rv = AsymVerify(session, pData, ulDataLen, pSignature, ulSignatureLen);
+	rv = (session->getMacOp() != NULL)
+		? MacVerify(session, pData, ulDataLen, pSignature, ulSignatureLen)
+		: AsymVerify(session, pData, ulDataLen, pSignature, ulSignatureLen);
 	if (rv == CKR_OK)
 	{
 		// Re-arm BEFORE relabelling: AsymVerify's success path reset the op to
