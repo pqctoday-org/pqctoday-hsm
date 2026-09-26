@@ -698,7 +698,7 @@
     ],
     "Fork": [
         {
-            "details": "child pid 1572973 exited status 0",
+            "details": "child pid 2552148 exited status 0",
             "status": "PASS",
             "test": "Child_survived_and_reported"
         },
@@ -738,7 +738,7 @@
             "test": "Child_writes_do_not_reach_parent"
         },
         {
-            "details": "8 sibling pairs, all distinct=1 childA=1039BEDBD4FE7699… childB=EBA074CA03844118… (identical output would repeat ECDSA nonces)",
+            "details": "8 sibling pairs, all distinct=1 childA=4627E73842883D1C… childB=F5749485C31BA0A6… (identical output would repeat ECDSA nonces)",
             "status": "PASS",
             "test": "Sibling_children_RNG_diverge"
         },
@@ -753,7 +753,7 @@
             "test": "Fork_safe_interface_retrievable"
         },
         {
-            "details": "child=0224091802E68B61… parent=BAE785F7D2C07436… preFork=B9BC441C348C21D0…",
+            "details": "child=D5AD2601AFD7BB70… parent=C7FB0CBE6D30100A… preFork=FA8453C7D3A79AFC…",
             "status": "PASS",
             "test": "Parent_and_child_RNG_diverge"
         }
@@ -3466,22 +3466,22 @@
     ],
     "KCV": [
         {
-            "details": "3 bytes: 100BE9",
+            "details": "3 bytes: BC3F53",
             "status": "PASS",
             "test": "AES_Generate_KCV_Present"
         },
         {
-            "details": "HSM=100BE9 == oracle=100BE9",
+            "details": "HSM=BC3F53 == oracle=BC3F53",
             "status": "PASS",
             "test": "AES_Generate_KCV_Equals_OracleEcbZeroBlock"
         },
         {
-            "details": "3 bytes: 2DDEF9",
+            "details": "3 bytes: F3817B",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Present"
         },
         {
-            "details": "original=2DDEF9 unwrapped=2DDEF9",
+            "details": "original=F3817B unwrapped=F3817B",
             "status": "PASS",
             "test": "AES_Unwrap_KCV_Equals_Original"
         },
@@ -3622,7 +3622,7 @@
             "test": "Encap_KCV_present"
         },
         {
-            "details": "HSM=0A856D oracle=0A856D",
+            "details": "HSM=24BE4A oracle=24BE4A",
             "status": "PASS",
             "test": "Encap_KCV_equals_SHA1_oracle"
         },
@@ -3632,12 +3632,12 @@
             "test": "Decap_KCV_present"
         },
         {
-            "details": "HSM=0A856D oracle=0A856D",
+            "details": "HSM=24BE4A oracle=24BE4A",
             "status": "PASS",
             "test": "Decap_KCV_equals_SHA1_oracle"
         },
         {
-            "details": "encap=0A856D decap=0A856D",
+            "details": "encap=24BE4A decap=24BE4A",
             "status": "PASS",
             "test": "Encap_and_Decap_KCV_agree"
         },
@@ -3662,12 +3662,12 @@
             "test": "ECDH_Encap_KCV_present"
         },
         {
-            "details": "HSM=3C8FA3 oracle=3C8FA3",
+            "details": "HSM=BFA922 oracle=BFA922",
             "status": "PASS",
             "test": "ECDH_Encap_KCV_equals_SHA1_oracle"
         },
         {
-            "details": "HSM=3C8FA3 oracle=3C8FA3",
+            "details": "HSM=BFA922 oracle=BFA922",
             "status": "PASS",
             "test": "ECDH_Decap_KCV_equals_SHA1_oracle"
         }
@@ -3815,7 +3815,7 @@
     ],
     "KcvTemplate": [
         {
-            "details": "engine=84C85B oracle=84C85B",
+            "details": "engine=A3AE89 oracle=A3AE89",
             "status": "PASS",
             "test": "GenerateKey_AES_KCV_matches_oracle"
         },
@@ -3835,7 +3835,7 @@
             "test": "GenerateKey_AES_zero_length_suppresses"
         },
         {
-            "details": "engine=22613B oracle=22613B",
+            "details": "engine=3C3931 oracle=3C3931",
             "status": "PASS",
             "test": "GenerateKey_Generic_KCV_matches_oracle"
         },
@@ -3855,12 +3855,12 @@
             "test": "GenerateKey_Generic_zero_length_suppresses"
         },
         {
-            "details": "engine=25FEF2 oracle=25FEF2",
+            "details": "engine=D3D7C3 oracle=D3D7C3",
             "status": "PASS",
             "test": "UnwrapKey_AES_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=25FEF2",
+            "details": "RV=0 readback=D3D7C3",
             "status": "PASS",
             "test": "UnwrapKey_AES_correct_value_accepted"
         },
@@ -3875,12 +3875,12 @@
             "test": "UnwrapKey_AES_zero_length_suppresses"
         },
         {
-            "details": "engine=7D1582 oracle=7D1582",
+            "details": "engine=2C5991 oracle=2C5991",
             "status": "PASS",
             "test": "DeriveKey_HKDF_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=7D1582",
+            "details": "RV=0 readback=2C5991",
             "status": "PASS",
             "test": "DeriveKey_HKDF_correct_value_accepted"
         },
@@ -3895,12 +3895,12 @@
             "test": "DeriveKey_HKDF_zero_length_suppresses"
         },
         {
-            "details": "engine=CFB521 oracle=CFB521",
+            "details": "engine=C312BC oracle=C312BC",
             "status": "PASS",
             "test": "DeriveKey_ECDH_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=CFB521",
+            "details": "RV=0 readback=C312BC",
             "status": "PASS",
             "test": "DeriveKey_ECDH_correct_value_accepted"
         },
@@ -3935,12 +3935,12 @@
             "test": "DeriveKey_PBKD2_zero_length_suppresses"
         },
         {
-            "details": "engine=586570 oracle=586570",
+            "details": "engine=313ED6 oracle=313ED6",
             "status": "PASS",
             "test": "DeriveKey_SP800108_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=586570",
+            "details": "RV=0 readback=313ED6",
             "status": "PASS",
             "test": "DeriveKey_SP800108_correct_value_accepted"
         },
@@ -3955,12 +3955,12 @@
             "test": "DeriveKey_SP800108_zero_length_suppresses"
         },
         {
-            "details": "CKA_VALUE unreadable (RV=17), engine KCV=52C325",
+            "details": "CKA_VALUE unreadable (RV=17), engine KCV=75A11F",
             "status": "SKIP",
             "test": "DeriveKey_Concat_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=52C325",
+            "details": "RV=0 readback=75A11F",
             "status": "PASS",
             "test": "DeriveKey_Concat_correct_value_accepted"
         },
@@ -3975,12 +3975,12 @@
             "test": "DeriveKey_Concat_zero_length_suppresses"
         },
         {
-            "details": "engine=C47B41 oracle=C47B41",
+            "details": "engine=856CB3 oracle=856CB3",
             "status": "PASS",
             "test": "DeriveKey_X25519_KCV_matches_oracle"
         },
         {
-            "details": "RV=0 readback=C47B41",
+            "details": "RV=0 readback=856CB3",
             "status": "PASS",
             "test": "DeriveKey_X25519_correct_value_accepted"
         },
@@ -4129,6 +4129,11 @@
             "details": "RV=0",
             "status": "PASS",
             "test": "C_SignMessageBegin"
+        },
+        {
+            "details": "RV=7 (v3.2 5.14.3: NULL pulSignatureLen continues the operation; engine rejects it, so streaming sign is unimplemented)",
+            "status": "XFAIL",
+            "test": "C_SignMessageNext_NonFinalPart"
         },
         {
             "details": "RV=0 SigLen=128",
@@ -4378,7 +4383,7 @@
             "test": "ML_DSA_44_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0xbb len=2560",
+            "details": "first byte=0x7e len=2560",
             "status": "PASS",
             "test": "ML_DSA_44_CKA_VALUE_not_DER_wrapped"
         },
@@ -4398,7 +4403,7 @@
             "test": "ML_KEM_768_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0x3a len=2400",
+            "details": "first byte=0x2f len=2400",
             "status": "PASS",
             "test": "ML_KEM_768_CKA_VALUE_not_DER_wrapped"
         },
@@ -4413,7 +4418,7 @@
             "test": "SLH_DSA_CKA_VALUE_is_raw_FIPS_length"
         },
         {
-            "details": "first byte=0x3f len=64",
+            "details": "first byte=0x24 len=64",
             "status": "PASS",
             "test": "SLH_DSA_CKA_VALUE_not_DER_wrapped"
         },
@@ -4841,10 +4846,10 @@
     ],
     "_summary": {
         "engine": "./build/src/lib/libsofthsmv3.so",
-        "engine_commit": "2a8e174d837754a9f6b1a2560cfbb89bda593351",
+        "engine_commit": "87be373faa20de7b4b90ca9099c0cbb518b5e6f0",
         "fail": 0,
         "pass": 891,
         "skip": 51,
-        "xfail_known_engine_bugs": 0
+        "xfail_known_engine_bugs": 1
     }
 }

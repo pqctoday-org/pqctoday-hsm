@@ -3529,6 +3529,36 @@ void test_message_signatures() {
         record_result("MsgSign", "C_SignMessageBegin", rv == CKR_OK ? "PASS" : "FAIL", "RV=" + std::to_string(rv));
         
         if (rv == CKR_OK) {
+            // The NON-FINAL part first (pulSignatureLen == NULL_PTR), which is
+            // the half of the streaming contract nothing had ever exercised.
+            //
+            // §5.14.3: "After calling C_SignMessageBegin, the application should
+            // call C_SignMessageNext one or more times to sign the message in
+            // multiple parts. The message signature operation is active until the
+            // application uses a call to C_SignMessageNext with a non-NULL
+            // pulSignatureLen to actually obtain the signature." A NULL
+            // pulSignatureLen is therefore the CONTINUE shape, not an error.
+            //
+            // XFAIL, recorded 2026-09-25: BOTH engines answer CKR_ARGUMENTS_BAD,
+            // so neither can stream a signature. This check lives HERE, in the
+            // single-engine spec-anchored suite, precisely because the
+            // cross-engine differential harness cannot see it — the two engines
+            // agree, so there is no divergence to report and its scenario passes
+            // while both are wrong. Comparing implementations finds
+            // disagreements; only the spec finds a shared defect.
+            //
+            // Flip to a plain PASS assertion once C_SignMessageNext accepts the
+            // continue shape; CKF_MULTI_MESSAGE becomes advertisable at the same
+            // moment, and not before.
+            CK_BYTE part1[] = "streamed-";
+            CK_RV rvNonFinal = SignNext(hSess, NULL_PTR, 0, part1, sizeof(part1)-1,
+                                        NULL_PTR, NULL_PTR);
+            record_result("MsgSign", "C_SignMessageNext_NonFinalPart",
+                          rvNonFinal == CKR_OK ? "PASS" : "XFAIL",
+                          "RV=" + std::to_string(rvNonFinal) +
+                          " (v3.2 5.14.3: NULL pulSignatureLen continues the operation; "
+                          "engine rejects it, so streaming sign is unimplemented)");
+
             CK_BYTE msg[] = "test";
             CK_BYTE sig[5000]; CK_ULONG sigLen = sizeof(sig);
             // v3.0 signature call for single MessageNext finishing string.
