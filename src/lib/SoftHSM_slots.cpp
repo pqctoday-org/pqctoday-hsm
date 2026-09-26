@@ -783,6 +783,20 @@ CK_RV SoftHSM::C_GetMechanismList(CK_SLOT_ID slotID, CK_MECHANISM_TYPE_PTR pMech
 	return CKR_OK;
 }
 
+// The elliptic-curve capability flags every EC-family mechanism in this engine
+// shares: prime-field curves (CKF_EC_F_P), CKA_EC_PARAMS given as a curve OID
+// (CKF_EC_NAMEDCURVE, which pkcs11t.h defines as CKF_EC_OID), and uncompressed
+// point encodings (CKF_EC_UNCOMPRESS). PKCS#11 v3.2 §5.4.4 defines these as the
+// EC-family members of CK_MECHANISM_INFO.flags.
+//
+// Hoisted out of the switch below (2026-09-25). It used to be #defined inside
+// the CKM_EC_KEY_PAIR_GEN case, under `#ifdef WITH_ECC`, while the first
+// consumer added outside that block — the CKM_ECDH1_* arms, which live under
+// `#if defined(WITH_ECC) || defined(WITH_EDDSA)` — would not have compiled in
+// an EdDSA-only configuration. A shared flag set does not belong inside one
+// case label either way.
+#define CKF_EC_COMMOM	(CKF_EC_F_P | CKF_EC_NAMEDCURVE | CKF_EC_UNCOMPRESS)
+
 // Return more information about a mechanism for a given slot
 CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_MECHANISM_INFO_PTR pInfo)
 {
@@ -1185,7 +1199,6 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS:
 			pInfo->ulMinKeySize = ecdsaMinSize;
 			pInfo->ulMaxKeySize = ecdsaMaxSize;
-#define CKF_EC_COMMOM	(CKF_EC_F_P | CKF_EC_NAMEDCURVE | CKF_EC_UNCOMPRESS)
 			pInfo->flags = CKF_GENERATE_KEY_PAIR | CKF_EC_COMMOM;
 			break;
 		case CKM_ECDSA:
@@ -1212,14 +1225,24 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			// C_EncapsulateKey/C_DecapsulateKey (SoftHSM_kem.cpp, PKCS#11
 			// v3.2 §6.3.17 Table 78) — advertise it, mirroring the
 			// CKM_ML_KEM entry below. The cofactor variant stays derive-only.
+			//
+			// CKF_EC_COMMOM (2026-09-25, finding E20): both ECDH1 mechanisms
+			// are EC-family mechanisms (v3.2 §6.3), dispatched by C_DeriveKey
+			// through deriveECDH/deriveEDDSA over exactly the same key objects
+			// the CKM_ECDSA and CKM_EC_KEY_PAIR_GEN arms above already claim
+			// these flags for: prime-field curves, CKA_EC_PARAMS as a curve
+			// OID, uncompressed CKA_EC_POINT. Omitting them here said this
+			// engine could not do an ECDH over a named prime curve with an
+			// uncompressed peer point — which is the only form it does.
 			pInfo->ulMinKeySize = ecdhMinSize ? ecdhMinSize : eddsaMinSize;
 			pInfo->ulMaxKeySize = ecdhMaxSize ? ecdhMaxSize : eddsaMaxSize;
-			pInfo->flags = CKF_DERIVE | CKF_ENCAPSULATE | CKF_DECAPSULATE;
+			pInfo->flags = CKF_DERIVE | CKF_ENCAPSULATE | CKF_DECAPSULATE |
+			               CKF_EC_COMMOM;
 			break;
 		case CKM_ECDH1_COFACTOR_DERIVE:
 			pInfo->ulMinKeySize = ecdhMinSize ? ecdhMinSize : eddsaMinSize;
 			pInfo->ulMaxKeySize = ecdhMaxSize ? ecdhMaxSize : eddsaMaxSize;
-			pInfo->flags = CKF_DERIVE;
+			pInfo->flags = CKF_DERIVE | CKF_EC_COMMOM;
 			break;
 #endif
 		// Montgomery X25519/X448 + BIP32 derive (audit mech G6). These are
