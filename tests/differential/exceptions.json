@@ -17,36 +17,6 @@
   ],
   "entries": [
     {
-      "id": "DEFECT-CPP-STREAMING-VERIFY-REFUSES-NONFINAL-PART",
-      "status": "defect",
-      "scenario": "sign.message_based_streaming",
-      "path": "*.verify_next_nonfinal.rv",
-      "cpp": "CKR_ARGUMENTS_BAD",
-      "rust": "CKR_OK",
-      "justification": "C++ C_VerifyMessageNext rejects a NON-FINAL part (pSignature == NULL) with CKR_ARGUMENTS_BAD, so it cannot stream a verification at all; Rust accumulates the part and answers CKR_OK. Measured 2026-09-25, first time anything drove these entry points. C++ is the non-conformant engine here. Worklist: plan item D (streaming Begin/Next), pqctoday-hsm-remaining-gaps-plan-09252026.md.",
-      "citation": "PKCS#11 v3.2 §5.14.3 (C_SignMessageBegin) states the streaming contract: \"After calling C_SignMessageBegin, the application should call C_SignMessageNext one or more times to sign the message in multiple parts. The message signature operation is active until the application uses a call to C_SignMessageNext with a non-NULL pulSignatureLen to actually obtain the signature.\" §5.15.3/§5.15.4 are the verify analogue, where pSignature (not a length pointer) is the discriminator because C_VerifyMessageNext takes ulSignatureLen by value."
-    },
-    {
-      "id": "DEFECT-CPP-STREAMING-VERIFY-SEES-ONLY-LAST-PART",
-      "status": "defect",
-      "scenario": "sign.message_based_streaming",
-      "path": "*.verify_next_final.rv",
-      "cpp": "CKR_SIGNATURE_INVALID",
-      "rust": "CKR_OK",
-      "justification": "Consequence of the entry above, and the reason it matters rather than being cosmetic: against a signature computed over the WHOLE message by the ordinary one-shot path, Rust's streaming verify returns CKR_OK because it accumulated both parts, while C++ returns CKR_SIGNATURE_INVALID because it dropped the non-final part and verified only the last 20 bytes. A caller streaming a verification against C++ gets a false negative on a valid signature. Worklist: plan item D.",
-      "citation": "PKCS#11 v3.2 §5.14.3 (C_SignMessageBegin) states the streaming contract: \"After calling C_SignMessageBegin, the application should call C_SignMessageNext one or more times to sign the message in multiple parts. The message signature operation is active until the application uses a call to C_SignMessageNext with a non-NULL pulSignatureLen to actually obtain the signature.\" §5.15.3/§5.15.4 are the verify analogue, where pSignature (not a length pointer) is the discriminator because C_VerifyMessageNext takes ulSignatureLen by value."
-    },
-    {
-      "id": "DEFECT-CPP-STREAMING-VERIFY-FINAL-AFTER-FAILURE",
-      "status": "defect",
-      "scenario": "sign.message_based_streaming",
-      "path": "*.msg_verify_final.rv",
-      "cpp": "CKR_OPERATION_NOT_INITIALIZED",
-      "rust": "CKR_OK",
-      "justification": "Third-order consequence: C++'s failed C_VerifyMessageNext has already torn the operation down, so the subsequent C_MessageVerifyFinal finds nothing active. §5.15.5 ends the operation, so a caller following the documented sequence gets an error from a call that should have succeeded. Recorded separately from the two above because it is a distinct observable and would otherwise be absolved silently by a broader entry. Worklist: plan item D.",
-      "citation": "PKCS#11 v3.2 §5.14.3 (C_SignMessageBegin) states the streaming contract: \"After calling C_SignMessageBegin, the application should call C_SignMessageNext one or more times to sign the message in multiple parts. The message signature operation is active until the application uses a call to C_SignMessageNext with a non-NULL pulSignatureLen to actually obtain the signature.\" §5.15.3/§5.15.4 are the verify analogue, where pSignature (not a length pointer) is the discriminator because C_VerifyMessageNext takes ulSignatureLen by value."
-    },
-    {
       "id": "LEGAL-ECDH-KEM-CURVE-COVERAGE-SECP256K1",
       "status": "legal",
       "scenario": "create.encapsulate.ecdh_secp256k1",

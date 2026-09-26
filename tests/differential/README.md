@@ -130,6 +130,28 @@ actually is: a check value present versus absent, a modulus 256 bytes versus 0.
 Stated plainly, because a harness whose boundaries are vague gets trusted past
 them:
 
+- **Anything both engines get wrong in the SAME way.** This is structural, not a
+  scoping decision, and it is the one limitation that cannot be fixed by adding
+  scenarios here. The harness reports *divergences*. Where the two engines agree,
+  there is nothing to report — so a shared non-conformance produces a green run,
+  and adding a scenario for it makes the green run **more** confident rather than
+  less.
+
+  Measured instance, 2026-09-25: neither engine accepts the non-final shape of
+  `C_SignMessageNext` that v3.2 §5.14.3 mandates ("The message signature
+  operation is active until the application uses a call to `C_SignMessageNext`
+  with a non-NULL `pulSignatureLen` to actually obtain the signature"). Both
+  answer `CKR_ARGUMENTS_BAD`. `sign.message_based_streaming` drives it and
+  **passes**, because agreement is all this harness can measure. It records a
+  `sign_streamed` observation so the fact at least appears in the report instead
+  of being implied by an absence.
+
+  So: **agreement is not conformance.** A spec rule belongs in the single-engine,
+  spec-anchored suite (`p11_v32_compliance_test.cpp`, which has an `XFAIL` status
+  for exactly this) — that check is `MsgSign / C_SignMessageNext_NonFinalPart`.
+  Use this harness to find where the engines disagree, and that one to find where
+  they are both wrong. Neither substitutes for the other, and a green run here
+  says nothing about the second question.
 - **The Rust native API** (`rust/src/native/*`), which the KMIP server calls
   directly. This harness drives the Cryptoki C ABI only. That matters for one
   specific known residual: §C of the remediation plan records that Rust's native

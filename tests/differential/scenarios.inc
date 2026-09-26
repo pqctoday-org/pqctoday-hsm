@@ -1203,25 +1203,33 @@ add({"sign.message_based_streaming", "sign",
          // "continues ... or finishes" without stating the discriminator.
          //
          // MEASURED 2026-09-25, and worth reading before trusting this scenario's
-         // PASS: the two sides came out differently.
+         // PASS: the two sides behave differently, and only one was fixed.
          //
-         //   - Streaming VERIFY: Rust conformant, C++ not. C++ rejects the
-         //     non-final part outright, so against a whole-message signature it
-         //     sees only the last part and answers CKR_SIGNATURE_INVALID on a
-         //     valid signature. Three DEFECT-CPP-STREAMING-VERIFY-* entries in
-         //     exceptions.json record it with this citation.
+         //   - Streaming VERIFY: now conformant on BOTH engines. C++ used to
+         //     reject the non-final part outright, so against a whole-message
+         //     signature it saw only the last part and answered
+         //     CKR_SIGNATURE_INVALID on a VALID signature — a false negative,
+         //     which is why it was fixed ahead of the missing sign path
+         //     (SoftHSM_sign.cpp C_VerifyMessageNext). The three
+         //     DEFECT-CPP-STREAMING-VERIFY-* entries that recorded it were
+         //     deleted once the engines converged, per exceptions.json's own
+         //     rule about stale entries.
          //
-         //   - Streaming SIGN: NEITHER engine accepts the non-final shape; both
-         //     answer CKR_ARGUMENTS_BAD. That is a shared non-conformance, and a
-         //     differential harness CANNOT flag it — the engines agree, so there
-         //     is no divergence to report, and this scenario passes while both are
-         //     wrong. The `sign_streamed` observation is recorded precisely so the
-         //     fact is visible in the report rather than implied by an absence.
-         //     Comparing two implementations finds disagreements, not defects;
-         //     only the spec finds these.
+         //   - Streaming SIGN: STILL BROKEN, on BOTH engines. Both answer
+         //     CKR_ARGUMENTS_BAD to the non-final shape. That is a shared
+         //     non-conformance, and a differential harness CANNOT flag it — the
+         //     engines agree, so there is no divergence to report, and this
+         //     scenario PASSES while both are wrong. The `sign_streamed`
+         //     observation is recorded precisely so the fact is visible in the
+         //     report rather than implied by an absence. Comparing two
+         //     implementations finds disagreements, not defects; only the spec
+         //     finds these, which is why the §5.14.3 streaming contract also
+         //     belongs in the single-engine compliance harness.
          //
-         // Consequently CKF_MULTI_MESSAGE is owed by NEITHER engine today, which
-         // is why both still leave it unset — a measured answer, not a guess.
+         // CKF_MULTI_MESSAGE therefore remains owed by neither engine while the
+         // sign half is missing, and both still leave it unset — a measured
+         // answer, not a guess. Setting it becomes correct only once
+         // C_SignMessageNext accepts a NULL pulSignatureLen.
          struct Case { const char* tag; CK_MECHANISM_TYPE kg; CK_MECHANISM_TYPE mech;
                        CK_KEY_TYPE kt; int kind; }; // kind: 0=pqc 1=rsa 2=mac
          const Case cases[] = {
