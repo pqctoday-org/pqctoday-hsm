@@ -428,10 +428,24 @@ aes_point!(AES_128_GCM_64B,  "AES-128-GCM-64B",  "L1", 16, CKM_AES_GCM, 64,   12
 aes_point!(AES_128_GCM_1KB,  "AES-128-GCM-1KB",  "L1", 16, CKM_AES_GCM, 1024, 12);
 aes_point!(AES_256_GCM_64B,  "AES-256-GCM-64B",  "L5", 32, CKM_AES_GCM, 64,   12);
 aes_point!(AES_256_GCM_1KB,  "AES-256-GCM-1KB",  "L5", 32, CKM_AES_GCM, 1024, 12);
+// 16 KiB — TLS 1.3's maximum record size (RFC 8446 §5.1), i.e. the largest
+// single chunk a real transport hands a cipher in one call. Added 2026-09-26
+// after the first run showed WHY a third size is needed: at 64 B the per-call
+// PKCS#11 path dominates so completely that AES-256 measured no slower than
+// AES-128 (42,707 vs 41,714 TPS on the KV260 — the key schedule was invisible),
+// and even at 1 KiB the fixed overhead is still a visible share. At 16 KiB the
+// figure is the cipher's own bulk rate, which is what a "how fast is AES here"
+// question actually means.
+aes_point!(AES_128_CBC_16KB, "AES-128-CBC-16KB", "L1", 16, CKM_AES_CBC, 16384, 16);
+aes_point!(AES_256_CBC_16KB, "AES-256-CBC-16KB", "L5", 32, CKM_AES_CBC, 16384, 16);
+aes_point!(AES_128_GCM_16KB, "AES-128-GCM-16KB", "L1", 16, CKM_AES_GCM, 16384, 12);
+aes_point!(AES_256_GCM_16KB, "AES-256-GCM-16KB", "L5", 32, CKM_AES_GCM, 16384, 12);
 
 pub const SYMMETRIC_ALGOS: &[SymmetricAlgo] = &[
-    AES_128_CBC_64B, AES_128_CBC_1KB, AES_256_CBC_64B, AES_256_CBC_1KB,
-    AES_128_GCM_64B, AES_128_GCM_1KB, AES_256_GCM_64B, AES_256_GCM_1KB,
+    AES_128_CBC_64B, AES_128_CBC_1KB, AES_128_CBC_16KB,
+    AES_256_CBC_64B, AES_256_CBC_1KB, AES_256_CBC_16KB,
+    AES_128_GCM_64B, AES_128_GCM_1KB, AES_128_GCM_16KB,
+    AES_256_GCM_64B, AES_256_GCM_1KB, AES_256_GCM_16KB,
 ];
 
 /// One benchmarked DIGEST point — mechanism plus the message size it is
@@ -481,8 +495,20 @@ digest_point!(SHA3_256_64B, "SHA3-256-64B", "L1", CKM_SHA3_256, 64,   32);
 digest_point!(SHA3_256_1KB, "SHA3-256-1KB", "L1", CKM_SHA3_256, 1024, 32);
 digest_point!(SHA3_512_64B, "SHA3-512-64B", "L5", CKM_SHA3_512, 64,   64);
 digest_point!(SHA3_512_1KB, "SHA3-512-1KB", "L5", CKM_SHA3_512, 1024, 64);
+// 16 KiB, same reasoning as the AES 16 KiB points: at 64 B every digest here
+// landed within 12% of every other (347k-390k TPS on the KV260), which measures
+// the call path, not the hash. The large size is where SHA-2's `sha2` ISA
+// extension vs software Keccak actually separates.
+digest_point!(SHA256_16KB,   "SHA-256-16KB",  "L1", CKM_SHA256,   16384, 32);
+digest_point!(SHA384_16KB,   "SHA-384-16KB",  "L3", CKM_SHA384,   16384, 48);
+digest_point!(SHA512_16KB,   "SHA-512-16KB",  "L5", CKM_SHA512,   16384, 64);
+digest_point!(SHA3_256_16KB, "SHA3-256-16KB", "L1", CKM_SHA3_256, 16384, 32);
+digest_point!(SHA3_512_16KB, "SHA3-512-16KB", "L5", CKM_SHA3_512, 16384, 64);
 
 pub const DIGEST_ALGOS: &[DigestAlgo] = &[
-    SHA256_64B, SHA256_1KB, SHA384_64B, SHA384_1KB, SHA512_64B, SHA512_1KB,
-    SHA3_256_64B, SHA3_256_1KB, SHA3_512_64B, SHA3_512_1KB,
+    SHA256_64B, SHA256_1KB, SHA256_16KB,
+    SHA384_64B, SHA384_1KB, SHA384_16KB,
+    SHA512_64B, SHA512_1KB, SHA512_16KB,
+    SHA3_256_64B, SHA3_256_1KB, SHA3_256_16KB,
+    SHA3_512_64B, SHA3_512_1KB, SHA3_512_16KB,
 ];
