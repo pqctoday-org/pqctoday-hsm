@@ -1171,6 +1171,236 @@ add({"bytes.hmac_sha256", "bytes", "CKM_SHA256_HMAC under a fixed key — byte-i
          if (rv == CKR_OK) record_bytes(r, "mac", out, olen, ByteView::BYTES);
      }});
 
+add({"sign.message_based_streaming", "sign",
+     "C_SignMessageBegin / C_SignMessageNext and the verify pair — the STREAMING "
+     "form of a message-based operation (§5.14.3-4 / §5.15.3-4), which is what "
+     "CKF_MULTI_MESSAGE advertises",
+     {CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         // 2026-09-25. Nothing in this harness had EVER called C_SignMessageBegin
+         // or C_SignMessageNext, so the streaming form was entirely unobserved —
+         // and neither engine advertises CKF_MULTI_MESSAGE, the flag whose whole
+         // job is to say whether it works. v3.2's CK_MECHANISM_INFO flag table:
+         // "CKF_MULTI_MESSAGE ... True if the mechanism can be used with
+         // C_*MessageBegin. One of CKF_MESSAGE_* flag must also be set."
+         //
+         // So this scenario exists to answer, per mechanism family, whether the
+         // flag is OWED. Recorded as observations, not assertions: the decision
+         // about what to advertise is made from the numbers this produces, not
+         // from reading either engine.
+         //
+         // The interesting case is the NON-FINAL part, and the rule is normative.
+         // v3.2 §5.14.3 (C_SignMessageBegin): "After calling C_SignMessageBegin,
+         // the application should call C_SignMessageNext one or more times to sign
+         // the message in multiple parts. The message signature operation is
+         // active until the application uses a call to C_SignMessageNext with a
+         // non-NULL pulSignatureLen to actually obtain the signature." So a NULL
+         // pulSignatureLen is the CONTINUE shape, and an engine that rejects it
+         // cannot stream at all. Both engines are driven through both shapes.
+         //
+         // The citation is §5.14.3, not §5.14.4: that sentence is in the Begin
+         // section, and §5.14.4's own text only describes C_SignMessageNext as
+         // "continues ... or finishes" without stating the discriminator.
+         //
+         // MEASURED 2026-09-25, and worth reading before trusting this scenario's
+         // PASS: the two sides behave differently, and only one was fixed.
+         //
+         //   - Streaming VERIFY: now conformant on BOTH engines. C++ used to
+         //     reject the non-final part outright, so against a whole-message
+         //     signature it saw only the last part and answered
+         //     CKR_SIGNATURE_INVALID on a VALID signature — a false negative,
+         //     which is why it was fixed ahead of the missing sign path
+         //     (SoftHSM_sign.cpp C_VerifyMessageNext). The three
+         //     DEFECT-CPP-STREAMING-VERIFY-* entries that recorded it were
+         //     deleted once the engines converged, per exceptions.json's own
+         //     rule about stale entries.
+         //
+         //   - Streaming SIGN: STILL BROKEN, on BOTH engines. Both answer
+         //     CKR_ARGUMENTS_BAD to the non-final shape. That is a shared
+         //     non-conformance, and a differential harness CANNOT flag it — the
+         //     engines agree, so there is no divergence to report, and this
+         //     scenario PASSES while both are wrong. The `sign_streamed`
+         //     observation is recorded precisely so the fact is visible in the
+         //     report rather than implied by an absence. Comparing two
+         //     implementations finds disagreements, not defects; only the spec
+         //     finds these, which is why the §5.14.3 streaming contract also
+         //     belongs in the single-engine compliance harness.
+         //
+         // CKF_MULTI_MESSAGE therefore remains owed by neither engine while the
+         // sign half is missing, and both still leave it unset — a measured
+         // answer, not a guess. Setting it becomes correct only once
+         // C_SignMessageNext accepts a NULL pulSignatureLen.
+         struct Case { const char* tag; CK_MECHANISM_TYPE kg; CK_MECHANISM_TYPE mech;
+                       CK_KEY_TYPE kt; int kind; }; // kind: 0=pqc 1=rsa 2=mac
+         const Case cases[] = {
+             {"ml_dsa_65",  CKM_ML_DSA_KEY_PAIR_GEN,   CKM_ML_DSA,       ktMlDsa,   0},
+             {"rsa2048",    CKM_RSA_PKCS_KEY_PAIR_GEN, CKM_RSA_PKCS,     ktRsa,     1},
+             // HMAC is included because C_MessageSignInit gained MAC dispatch in
+             // the same release; whether the STREAMING form followed is a separate
+             // question from whether the one-shot form did.
+             {"hmac_sha256", 0,                        CKM_SHA256_HMAC,  ktGeneric, 2},
+         };
+         for (const Case& c : cases) {
+             const std::string t = c.tag;
+             if (!e.MessageSignInit || !e.SignMessageBegin || !e.SignMessageNext ||
+                 !e.MessageSignFinal) {
+                 r.put(t + ".entry_points", "ABSENT");
+                 continue;
+             }
+             if (!e.mechs.count(c.mech) || (c.kg && !e.mechs.count(c.kg))) {
+                 r.put(t + ".mech", "ABSENT");
+                 continue;
+             }
+
+             CK_OBJECT_HANDLE hSign = CK_INVALID_HANDLE, hVer = CK_INVALID_HANDLE;
+             if (c.kind == 2) {
+                 // Fixed key value, so a MAC over the streamed parts is comparable
+                 // between engines byte for byte, not just by return code.
+                 CK_ATTRIBUTE kt_[] = {
+                     ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+                     ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+                     ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+                     ATTR(CKA_VALUE,       kFixedAes,  sizeof kFixedAes),
+                     ATTR(CKA_SIGN,        &bTrue,     sizeof bTrue),
+                     ATTR(CKA_VERIFY,      &bTrue,     sizeof bTrue),
+                     ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+                     ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+                 };
+                 CK_RV cr = e.fl->C_CreateObject(s, kt_, 8, &hSign);
+                 r.rv(t + ".create_key", cr);
+                 if (cr != CKR_OK) continue;
+                 hVer = hSign;
+             } else {
+                 CK_ULONG bits = 2048;
+                 CK_BYTE  pe[] = {0x01, 0x00, 0x01};
+                 CK_ULONG ps   = 2;  // CKP_ML_DSA_65
+                 CK_ATTRIBUTE pubPqc[] = {
+                     ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+                     ATTR(CKA_KEY_TYPE,      (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                     ATTR(CKA_PARAMETER_SET, &ps,       sizeof ps),
+                     ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+                     ATTR(CKA_VERIFY,        &bTrue,    sizeof bTrue),
+                 };
+                 CK_ATTRIBUTE privPqc[] = {
+                     ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                     ATTR(CKA_KEY_TYPE,      (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                     ATTR(CKA_PARAMETER_SET, &ps,        sizeof ps),
+                     ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                     ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+                 };
+                 CK_ATTRIBUTE pubRsa[] = {
+                     ATTR(CKA_CLASS,           &clPublic, sizeof clPublic),
+                     ATTR(CKA_KEY_TYPE,        (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                     ATTR(CKA_MODULUS_BITS,    &bits,     sizeof bits),
+                     ATTR(CKA_PUBLIC_EXPONENT, pe,        sizeof pe),
+                     ATTR(CKA_TOKEN,           &bFalse,   sizeof bFalse),
+                     ATTR(CKA_VERIFY,          &bTrue,    sizeof bTrue),
+                 };
+                 CK_ATTRIBUTE privRsa[] = {
+                     ATTR(CKA_CLASS,    &clPrivate, sizeof clPrivate),
+                     ATTR(CKA_KEY_TYPE, (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                     ATTR(CKA_TOKEN,    &bFalse,    sizeof bFalse),
+                     ATTR(CKA_SIGN,     &bTrue,     sizeof bTrue),
+                 };
+                 CK_MECHANISM km = { c.kg, NULL_PTR, 0 };
+                 CK_RV gr = (c.kind == 0)
+                     ? e.fl->C_GenerateKeyPair(s, &km, pubPqc, 5, privPqc, 5, &hVer, &hSign)
+                     : e.fl->C_GenerateKeyPair(s, &km, pubRsa, 6, privRsa, 4, &hVer, &hSign);
+                 r.rv(t + ".keygen", gr);
+                 if (gr != CKR_OK) continue;
+             }
+
+             // Two unevenly-sized parts whose concatenation is kPlain32, so the
+             // result is directly checkable against a one-shot verify over the
+             // whole buffer. Uneven on purpose: an engine that only handles
+             // equal-sized parts would pass an even split.
+             CK_MECHANISM sm = { c.mech, NULL_PTR, 0 };
+             r.rv(t + ".msg_sign_init", e.MessageSignInit(s, &sm, hSign));
+             r.rv(t + ".begin", e.SignMessageBegin(s, NULL_PTR, 0));
+
+             // Non-final part: pulSignatureLen == NULL (§5.14.4).
+             CK_RV nf = e.SignMessageNext(s, NULL_PTR, 0, (CK_BYTE_PTR)kPlain32, 12,
+                                         NULL_PTR, NULL_PTR);
+             r.rv(t + ".next_nonfinal", nf);
+
+             // Final part: pulSignatureLen non-NULL, so this produces the signature.
+             CK_BYTE sig[16384]; CK_ULONG slen = sizeof sig;
+             CK_RV fin = e.SignMessageNext(s, NULL_PTR, 0, (CK_BYTE_PTR)kPlain32 + 12, 20,
+                                           sig, &slen);
+             r.rv(t + ".next_final", fin);
+             if (fin == CKR_OK) r.num(t + ".sig_len", slen);
+             r.rv(t + ".msg_sign_final", e.MessageSignFinal(s));
+
+             if (fin != CKR_OK) continue;
+
+             // Whether the SIGN side actually streamed is recorded explicitly,
+             // because every check below depends on it and the answer turned out
+             // to be "no" on both engines (2026-09-25). If the non-final part was
+             // refused, the signature covers only the LAST part, not the whole
+             // message — so a "verify over the whole message" check would fail by
+             // construction and say nothing about the engine. Recording the
+             // dependency is the difference between a measurement and a trap.
+             const bool streamed = (nf == CKR_OK);
+             r.put(t + ".sign_streamed", streamed ? "1" : "0");
+
+             // A MAC is deterministic, so its bytes are comparable across engines
+             // and worth recording; ML-DSA signs hedged, so they are not.
+             if (c.kind == 2) record_bytes(r, t + ".mac", sig, slen, ByteView::BYTES);
+
+             if (streamed) {
+                 // Only meaningful when the parts were actually accumulated: the
+                 // signature must verify over the WHOLE message via the ORDINARY
+                 // one-shot path. Recording only that the final Next returned
+                 // CKR_OK would pass on an engine that dropped or reordered a part.
+                 r.rv(t + ".verify_init", e.fl->C_VerifyInit(s, &sm, hVer));
+                 r.rv(t + ".verify_whole",
+                      e.fl->C_Verify(s, (CK_BYTE_PTR)kPlain32, sizeof kPlain32, sig, slen));
+             } else {
+                 // The signature covers bytes [12,32) only. Verify THAT, so the
+                 // scenario still proves the final part was signed correctly
+                 // rather than leaving the sign side unchecked entirely.
+                 r.rv(t + ".verify_init", e.fl->C_VerifyInit(s, &sm, hVer));
+                 r.rv(t + ".verify_final_part_only",
+                      e.fl->C_Verify(s, (CK_BYTE_PTR)kPlain32 + 12, 20, sig, slen));
+             }
+
+             // Now the streaming VERIFY side over the same two parts. Driven even
+             // when the sign side refused to stream: the two sides are separate
+             // code paths and, as measured, they do NOT agree with each other —
+             // C++ refuses a non-final verify part while Rust accepts it.
+             if (!e.MessageVerifyInit || !e.VerifyMessageBegin || !e.VerifyMessageNext ||
+                 !e.MessageVerifyFinal) {
+                 r.put(t + ".verify_entry_points", "ABSENT");
+                 continue;
+             }
+             // The signature used here is produced by the ORDINARY one-shot path
+             // over the WHOLE message, deliberately — not the streamed one above.
+             // That decouples the verify measurement from the sign side entirely:
+             // against a correct whole-message signature, an engine that streams
+             // correctly must answer CKR_OK, and one that silently drops the
+             // non-final part sees only the last 20 bytes and must answer
+             // CKR_SIGNATURE_INVALID. Reusing the streamed signature instead made
+             // the two sides' results depend on each other and measured neither.
+             CK_BYTE wsig[16384]; CK_ULONG wlen = sizeof wsig;
+             r.rv(t + ".whole_sign_init", e.fl->C_SignInit(s, &sm, hSign));
+             CK_RV wr = e.fl->C_Sign(s, (CK_BYTE_PTR)kPlain32, sizeof kPlain32, wsig, &wlen);
+             r.rv(t + ".whole_sign", wr);
+             if (wr != CKR_OK) continue;
+
+             r.rv(t + ".msg_verify_init", e.MessageVerifyInit(s, &sm, hVer));
+             r.rv(t + ".verify_begin", e.VerifyMessageBegin(s, NULL_PTR, 0));
+             // Non-final verify part: pSignature == NULL. C_VerifyMessageNext takes
+             // ulSignatureLen by VALUE, not by pointer, so pSignature is the only
+             // available discriminator on this side.
+             r.rv(t + ".verify_next_nonfinal",
+                  e.VerifyMessageNext(s, NULL_PTR, 0, (CK_BYTE_PTR)kPlain32, 12, NULL_PTR, 0));
+             r.rv(t + ".verify_next_final",
+                  e.VerifyMessageNext(s, NULL_PTR, 0, (CK_BYTE_PTR)kPlain32 + 12, 20,
+                                      wsig, wlen));
+             r.rv(t + ".msg_verify_final", e.MessageVerifyFinal(s));
+         }
+     }});
+
 add({"sign.message_based_hmac", "sign",
      "CKM_SHA256_HMAC under C_MessageSignInit — whether a MAC key is usable "
      "with the message-based entry points at all (§5.14)",

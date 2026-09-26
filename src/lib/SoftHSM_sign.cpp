@@ -4229,7 +4229,7 @@ CK_RV SoftHSM::C_VerifyMessageNext(CK_SESSION_HANDLE hSession,
 	CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
-	if (pData == NULL_PTR || pSignature == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	if (pData == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
@@ -4240,11 +4240,48 @@ CK_RV SoftHSM::C_VerifyMessageNext(CK_SESSION_HANDLE hSession,
 	CK_RV rv = applyPerMessageParam(session, pParameter, ulParameterLen);
 	if (rv != CKR_OK) return rv;
 
+	// pSignature == NULL_PTR marks a NON-FINAL part: accumulate it and return,
+	// leaving the operation in MESSAGE_VERIFY_BEGIN so further parts may follow.
+	//
+	// Until 2026-09-25 this whole function answered CKR_ARGUMENTS_BAD for a NULL
+	// pSignature, which made streaming verification impossible AND produced a
+	// wrong answer rather than a refusal: with the non-final part rejected, the
+	// final call verified only the LAST part, so a signature over the whole
+	// message came back CKR_SIGNATURE_INVALID. A false negative on a valid
+	// signature is worse than an unimplemented feature, which is why this was
+	// fixed ahead of the (still missing) streaming SIGN path.
+	//
+	// §5.14.3 states the rule for the sign side — "The message signature
+	// operation is active until the application uses a call to
+	// C_SignMessageNext with a non-NULL pulSignatureLen to actually obtain the
+	// signature" — and §5.15.3/§5.15.4 are the verify analogue. Here the
+	// discriminator is pSignature itself, because C_VerifyMessageNext takes
+	// ulSignatureLen BY VALUE and so has no length pointer to nullify.
+	//
+	// msgBuffer is the same accumulator C_VerifySignatureUpdate uses. Safe to
+	// share: that path runs under SESSION_OP_VERIFY_SIGNATURE and this one under
+	// SESSION_OP_MESSAGE_VERIFY_BEGIN, so the two are never live at once, and
+	// resetOp() clears it unconditionally either way.
+	if (pSignature == NULL_PTR)
+	{
+		session->appendToMsgBuffer(pData, ulDataLen);
+		return CKR_OK;
+	}
+
+	// Final part. Verify over everything accumulated so far followed by this
+	// part; with no preceding parts this is byte-for-byte the old behaviour.
+	ByteString whole(session->getMsgBuffer());
+	const bool streamed = whole.size() > 0;
+	if (streamed) whole += ByteString(pData, ulDataLen);
+	CK_BYTE_PTR vData   = streamed
+		? const_cast<CK_BYTE_PTR>(whole.const_byte_str()) : pData;
+	CK_ULONG    vDataLen = streamed ? (CK_ULONG)whole.size() : ulDataLen;
+
 	// AsymVerify requires SESSION_OP_VERIFY; satisfy temporarily then restore.
 	session->setOpType(SESSION_OP_VERIFY);
 	rv = (session->getMacOp() != NULL)
-		? MacVerify(session, pData, ulDataLen, pSignature, ulSignatureLen)
-		: AsymVerify(session, pData, ulDataLen, pSignature, ulSignatureLen);
+		? MacVerify(session, vData, vDataLen, pSignature, ulSignatureLen)
+		: AsymVerify(session, vData, vDataLen, pSignature, ulSignatureLen);
 	if (rv == CKR_OK)
 	{
 		// Re-arm BEFORE relabelling: AsymVerify's success path reset the op to
