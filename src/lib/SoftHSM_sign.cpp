@@ -3864,7 +3864,7 @@ CK_RV SoftHSM::C_MessageSignInit(CK_SESSION_HANDLE hSession,
 	session->setOpType(SESSION_OP_MESSAGE_SIGN);
 	// Remember what to re-arm with: AsymSign recycles the signing context after
 	// every message, so each per-message entry point rebuilds it from these.
-	// §5.14.2 keeps the operation alive until C_MessageSignFinal, not until the
+	// §5.14.1 keeps the operation alive until C_MessageSignFinal, not until the
 	// first message. Cleared there (and by the cancel path).
 	// Copy the CALLER's mechanism parameter, not the session's internal `param`
 	// — see Session::setMessageOp for why those are not interchangeable.
@@ -4149,7 +4149,7 @@ CK_RV SoftHSM::C_SignMessageNext(CK_SESSION_HANDLE hSession,
 	CK_BYTE_PTR pSignature, CK_ULONG_PTR pulSignatureLen)
 {
 	if (!isInitialised) return CKR_CRYPTOKI_NOT_INITIALIZED;
-	if (pData == NULL_PTR || pulSignatureLen == NULL_PTR) return CKR_ARGUMENTS_BAD;
+	if (pData == NULL_PTR) return CKR_ARGUMENTS_BAD;
 
 	auto sessionGuard = handleManager->getSessionShared(hSession);
 	Session* session = sessionGuard.get();
@@ -4160,6 +4160,43 @@ CK_RV SoftHSM::C_SignMessageNext(CK_SESSION_HANDLE hSession,
 	// pParameter in Next overrides Begin's committed params (spec §5.8.4: may be NULL)
 	CK_RV rv = applyPerMessageParam(session, pParameter, ulParameterLen);
 	if (rv != CKR_OK) return rv;
+
+	// pulSignatureLen == NULL_PTR marks a NON-FINAL part: accumulate it and
+	// return, staying in MESSAGE_SIGN_BEGIN so further parts may follow.
+	//
+	// §5.14.3: "After calling C_SignMessageBegin, the application should call
+	// C_SignMessageNext one or more times to sign the message in multiple
+	// parts. The message signature operation is active until the application
+	// uses a call to C_SignMessageNext with a non-NULL pulSignatureLen to
+	// actually obtain the signature." Until 2026-09-25 this function answered
+	// CKR_ARGUMENTS_BAD for a NULL pulSignatureLen, so streaming sign did not
+	// exist here; the Rust engine refused it too, from a shared C-ABI shim, so
+	// the two engines AGREED and the differential harness could not see it.
+	// Only the spec could.
+	//
+	// Note the asymmetry with a size query, which also passes no signature
+	// buffer: a size query has pSignature == NULL but pulSignatureLen != NULL.
+	// The two are distinguished by which pointer is null, so the size-query
+	// path below is unaffected.
+	//
+	// msgBuffer is the same accumulator C_VerifyMessageNext and
+	// C_VerifySignatureUpdate use — safe to share because opType is a single
+	// value, so no two of those operations are ever live in one session, and
+	// resetOp() clears it unconditionally.
+	if (pulSignatureLen == NULL_PTR)
+	{
+		session->appendToMsgBuffer(pData, ulDataLen);
+		return CKR_OK;
+	}
+
+	// Final part: sign over everything accumulated followed by this part. With
+	// no preceding parts this is byte-for-byte the previous behaviour.
+	ByteString wholeMsg(session->getMsgBuffer());
+	const bool streamed = wholeMsg.size() > 0;
+	if (streamed) wholeMsg += ByteString(pData, ulDataLen);
+	CK_BYTE_PTR sData    = streamed
+		? const_cast<CK_BYTE_PTR>(wholeMsg.const_byte_str()) : pData;
+	CK_ULONG    sDataLen = streamed ? (CK_ULONG)wholeMsg.size() : ulDataLen;
 
 	// AsymSign requires SESSION_OP_SIGN; satisfy temporarily then restore.
 	// Size-query path (pSignature==NULL): AsymSign does not call resetOp, so session
@@ -4172,8 +4209,8 @@ CK_RV SoftHSM::C_SignMessageNext(CK_SESSION_HANDLE hSession,
 	// SESSION_OP_NONE — the multi-message context is terminated per spec.
 	session->setOpType(SESSION_OP_SIGN);
 	rv = (session->getMacOp() != NULL)
-		? MacSign(session, pData, ulDataLen, pSignature, pulSignatureLen)
-		: AsymSign(session, pData, ulDataLen, pSignature, pulSignatureLen);
+		? MacSign(session, sData, sDataLen, pSignature, pulSignatureLen)
+		: AsymSign(session, sData, sDataLen, pSignature, pulSignatureLen);
 	if (rv == CKR_OK)
 	{
 		if (pSignature != NULL_PTR)
@@ -4254,7 +4291,7 @@ CK_RV SoftHSM::C_VerifyMessageNext(CK_SESSION_HANDLE hSession,
 	// §5.14.3 states the rule for the sign side — "The message signature
 	// operation is active until the application uses a call to
 	// C_SignMessageNext with a non-NULL pulSignatureLen to actually obtain the
-	// signature" — and §5.15.3/§5.15.4 are the verify analogue. Here the
+	// signature" — and §5.16.3/§5.16.4 are the verify analogue. Here the
 	// discriminator is pSignature itself, because C_VerifyMessageNext takes
 	// ulSignatureLen BY VALUE and so has no length pointer to nullify.
 	//

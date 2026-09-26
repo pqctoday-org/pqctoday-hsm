@@ -75,23 +75,22 @@ static constexpr CK_ULONG HMAC_MIN_KEY_BYTES        = 0UL;
 /// implement, or implementing one it does not advertise, are both defects, so
 /// these move together.
 ///
-/// CKF_MULTI_MESSAGE is deliberately NOT set here, and is not set by the Rust
-/// engine either.
-///
-/// CORRECTED 2026-09-25: an earlier version of this comment said that flag
-/// meant "several messages may be sent under one operation". It does not —
-/// that is simply what a message-based operation IS (§5.14.2), and needs no
-/// flag. v3.2's CK_MECHANISM_INFO flag table defines it as "True if the
+/// CKF_MULTI_MESSAGE is set as of 2026-09-25, and its meaning was corrected
+/// twice on the way here. It does NOT mean "several messages may be sent under
+/// one operation" — that is simply what a message-based operation IS (§5.14.2)
+/// and needs no flag. v3.2's CK_MECHANISM_INFO flag table: "True if the
 /// mechanism can be used with C_*MessageBegin. One of CKF_MESSAGE_* flag must
-/// also be set", i.e. it advertises the STREAMING Begin/Next form
-/// (C_SignMessageBegin / C_SignMessageNext), not multi-message support.
+/// also be set." It advertises the STREAMING Begin/Next form, and that
+/// co-requirement holds here because this same constant carries
+/// CKF_MESSAGE_SIGN/VERIFY.
 ///
-/// So whether it is owed here is a question about Begin/Next coverage per
-/// mechanism, which has not been measured in either engine. Left unset in both
-/// until it is: advertising a capability on the strength of a guess about what
-/// the flag means is how the divergence this constant fixes came about.
+/// It is claimed only now because until the same change, C_SignMessageNext
+/// refused the non-final shape §5.14.3 mandates (a NULL pulSignatureLen) in
+/// BOTH engines — so both agreed, and the cross-engine differential harness
+/// could not see it. Only reading the spec found it.
 static constexpr CK_FLAGS HMAC_MECH_FLAGS =
-	CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+	CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY |
+	CKF_MULTI_MESSAGE;
 
 /// CKM_PKCS5_PBKD2 policy floor on CK_PKCS5_PBKD2_PARAMS2.iterations (E15 /
 /// decision D7): NIST SP 800-132 §5.2's recommended minimum, the same floor

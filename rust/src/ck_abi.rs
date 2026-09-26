@@ -540,6 +540,58 @@ macro_rules! shim_msg_sign {
     )+};
 }
 
+/// Same shape as `shim_msg_sign!`, but a NULL `pulSignatureLen` is PASSED
+/// THROUGH instead of rejected.
+///
+/// `C_SignMessageNext` is the one function of this shape where a NULL length
+/// pointer is not a caller error. §5.14.3: "After calling C_SignMessageBegin,
+/// the application should call C_SignMessageNext one or more times to sign the
+/// message in multiple parts. The message signature operation is active until
+/// the application uses a call to C_SignMessageNext with a non-NULL
+/// pulSignatureLen to actually obtain the signature." So NULL means "this is a
+/// non-final part, accumulate it", and the engine already implements exactly
+/// that.
+///
+/// It used to share `shim_msg_sign!` with `C_SignMessage`, whose
+/// `with_len_out` correctly refuses a NULL length pointer per §5.2. The result
+/// was that streaming sign was unreachable: `C_SignMessageNext`'s accumulate
+/// branch in ffi.rs had never once executed, because this shim answered
+/// CKR_ARGUMENTS_BAD before the engine saw the call. Measured 2026-09-25, and
+/// only found because the differential harness started driving the streaming
+/// entry points at all.
+///
+/// `C_SignMessage` keeps the strict shim: it is a one-shot two-call function,
+/// so §5.2 applies to it unmodified.
+macro_rules! shim_msg_sign_streaming {
+    ($($name:ident),+ $(,)?) => {$(
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(
+            hSession: CK_SESSION_HANDLE,
+            pParameter: CK_VOID_PTR,
+            ulParameterLen: CK_ULONG,
+            pData: CK_BYTE_PTR,
+            ulDataLen: CK_ULONG,
+            pSignature: CK_BYTE_PTR,
+            pulSignatureLen: CK_ULONG_PTR,
+        ) -> CK_RV {
+            let h = narrow_or!(hSession, CKR_SESSION_HANDLE_INVALID);
+            let pl = narrow_or!(ulParameterLen, CKR_ARGUMENTS_BAD);
+            let dl = narrow_or!(ulDataLen, CKR_ARGUMENTS_BAD);
+            if pulSignatureLen.is_null() {
+                // Non-final part. Nothing to widen back, so the two-call
+                // clamping in with_len_out has no work to do either.
+                return rv(crate::ffi::$name(
+                    h, pParameter as *mut u8, pl, pData, dl, pSignature,
+                    core::ptr::null_mut(),
+                ));
+            }
+            with_len_out(pulSignatureLen, |po| {
+                crate::ffi::$name(h, pParameter as *mut u8, pl, pData, dl, pSignature, po)
+            })
+        }
+    )+};
+}
+
 /// (hSession, pParam, ulParamLen, pData, ulDataLen, pSig, ulSigLen) — the
 /// verify-message shape (param ignored by the engine).
 macro_rules! shim_msg_verify {
@@ -1360,7 +1412,10 @@ pub unsafe extern "C" fn C_DecryptMessageNext(
 }
 
 shim_mech_key!(C_MessageSignInit, C_MessageVerifyInit);
-shim_msg_sign!(C_SignMessage, C_SignMessageNext);
+// C_SignMessageNext is deliberately NOT in shim_msg_sign!: a NULL
+// pulSignatureLen is its "non-final part" marker (§5.14.3), not an error.
+shim_msg_sign!(C_SignMessage);
+shim_msg_sign_streaming!(C_SignMessageNext);
 shim_msg_param_only!(C_SignMessageBegin, C_VerifyMessageBegin);
 shim_session_only!(C_MessageSignFinal, C_MessageVerifyFinal);
 shim_msg_verify!(C_VerifyMessage, C_VerifyMessageNext);

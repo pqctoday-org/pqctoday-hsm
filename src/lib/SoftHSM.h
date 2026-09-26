@@ -296,7 +296,7 @@ private:
 	CK_RV AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey);
 
 	// Rebuild the crypto context of a live message-based operation so it can
-	// take another message (PKCS#11 v3.2 §5.14.2 / §5.15.2). AsymSign and
+	// take another message (PKCS#11 v3.2 §5.14.1 / §5.16.1). AsymSign and
 	// AsymVerify call Session::resetOp() after each successful message, which
 	// recycles the algorithm and the key; only C_Message*Final ends the
 	// operation itself. Replays the mechanism and key recorded by
