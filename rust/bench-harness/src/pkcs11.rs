@@ -25,8 +25,9 @@ use softhsmrustv3::ck_abi::{
     CK_VERSION, CK_VOID_PTR,
 };
 use softhsmrustv3::constants::{
-    CKA_EC_PARAMS, CKA_MODULUS_BITS, CKA_PARAMETER_SET, CKF_RW_SESSION, CKF_SERIAL_SESSION, CKR_OK,
-    CKU_SO, CKU_USER,
+    CKA_EC_PARAMS, CKA_MODULUS_BITS, CKA_PARAMETER_SET, CKA_VALUE_LEN, CKF_RW_SESSION,
+    CKF_SERIAL_SESSION, CKM_AES_CBC, CKM_AES_CBC_PAD, CKM_AES_ECB, CKM_AES_GCM, CKR_OK, CKU_SO,
+    CKU_USER,
 };
 
 use crate::algos::KeygenParam;
@@ -710,6 +711,198 @@ impl Engine {
         out.truncate(out_len as usize);
         Ok(out)
     }
+
+    /// §5.18.1 `C_GenerateKey` — one symmetric secret key (AES here).
+    /// `CKA_VALUE_LEN` is a REQUIRED template attribute for
+    /// `CKM_AES_KEY_GEN` (verified against `ffi.rs`'s own dispatch:
+    /// absent → `CKR_TEMPLATE_INCOMPLETE`, no silent 16-byte default),
+    /// and it is read by `get_attr_ulong_native` — i.e. at the
+    /// platform's NATIVE `CK_ULONG` width, exactly the convention
+    /// `KeygenParam::ParameterSet` above already has to honour, not a
+    /// fixed 4-byte `u32`. The engine sets CKA_ENCRYPT/CKA_DECRYPT itself
+    /// on a generated AES key, so no template attribute beyond the length
+    /// is needed for this harness's encrypt/decrypt use.
+    pub fn generate_key(
+        &self,
+        session: CK_SESSION_HANDLE,
+        mechanism: u32,
+        key_bytes: u32,
+    ) -> Result<CK_OBJECT_HANDLE> {
+        let mut mech = CK_MECHANISM {
+            mechanism: mechanism as CK_ULONG,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        let mut value_len: CK_ULONG = key_bytes as CK_ULONG;
+        let mut template = [CK_ATTRIBUTE {
+            attrType: CKA_VALUE_LEN as CK_ATTRIBUTE_TYPE,
+            pValue: &mut value_len as *mut CK_ULONG as CK_VOID_PTR,
+            ulValueLen: std::mem::size_of::<CK_ULONG>() as CK_ULONG,
+        }];
+        let mut handle: CK_OBJECT_HANDLE = 0;
+        ck(
+            unsafe {
+                (self.funcs().C_GenerateKey)(
+                    session,
+                    &mut mech,
+                    template.as_mut_ptr(),
+                    template.len() as CK_ULONG,
+                    &mut handle,
+                )
+            },
+            "C_GenerateKey",
+        )?;
+        Ok(handle)
+    }
+
+    /// `C_EncryptInit`/`C_DecryptInit` for a SYMMETRIC mechanism — kept
+    /// separate from `encrypt_init`/`decrypt_init` above, which
+    /// unconditionally build `CK_RSA_PKCS_OAEP_PARAMS` (correct for the
+    /// RSA-OAEP arms, meaningless for AES). Each mode's parameter shape
+    /// is what the engine's own `C_EncryptInit` dispatch requires,
+    /// verified against `ffi.rs` before writing this rather than assumed:
+    /// ECB takes NO parameter (§6.27.2), CBC takes a BARE 16-byte IV (not
+    /// a struct — any other length is `CKR_MECHANISM_PARAM_INVALID`), GCM
+    /// takes `CK_GCM_PARAMS` with a non-empty IV (a NULL/empty IV is
+    /// refused outright — the engine will not silently substitute a zero
+    /// nonce) and a tag length from SP 800-38D's permitted set.
+    fn sym_init(
+        &self,
+        session: CK_SESSION_HANDLE,
+        mechanism: u32,
+        key: CK_OBJECT_HANDLE,
+        iv: &mut [u8],
+        decrypt: bool,
+    ) -> Result<()> {
+        let mut gcm = CkGcmParams {
+            p_iv: std::ptr::null_mut(),
+            ul_iv_len: 0,
+            ul_iv_bits: 0,
+            p_aad: std::ptr::null_mut(),
+            ul_aad_len: 0,
+            ul_tag_bits: 0,
+        };
+        let mut mech = CK_MECHANISM {
+            mechanism: mechanism as CK_ULONG,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        match mechanism {
+            CKM_AES_ECB => {}
+            CKM_AES_CBC | CKM_AES_CBC_PAD => {
+                if iv.len() != 16 {
+                    bail!("CKM_AES_CBC needs exactly a 16-byte IV, got {} bytes", iv.len());
+                }
+                mech.pParameter = iv.as_mut_ptr() as CK_VOID_PTR;
+                mech.ulParameterLen = 16;
+            }
+            CKM_AES_GCM => {
+                if iv.is_empty() {
+                    bail!("CKM_AES_GCM needs a non-empty IV");
+                }
+                gcm.p_iv = iv.as_mut_ptr() as CK_VOID_PTR;
+                gcm.ul_iv_len = iv.len() as CK_ULONG;
+                // 0 would mean "default 128" to the engine; state it.
+                gcm.ul_tag_bits = 128;
+                mech.pParameter = &mut gcm as *mut CkGcmParams as CK_VOID_PTR;
+                mech.ulParameterLen = std::mem::size_of::<CkGcmParams>() as CK_ULONG;
+            }
+            other => bail!("sym_init: unsupported symmetric mechanism 0x{other:x}"),
+        }
+        if decrypt {
+            ck(unsafe { (self.funcs().C_DecryptInit)(session, &mut mech, key) }, "C_DecryptInit(symmetric)")
+        } else {
+            ck(unsafe { (self.funcs().C_EncryptInit)(session, &mut mech, key) }, "C_EncryptInit(symmetric)")
+        }
+    }
+
+    pub fn sym_encrypt_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE, iv: &mut [u8]) -> Result<()> {
+        self.sym_init(session, mechanism, key, iv, false)
+    }
+
+    pub fn sym_decrypt_init(&self, session: CK_SESSION_HANDLE, mechanism: u32, key: CK_OBJECT_HANDLE, iv: &mut [u8]) -> Result<()> {
+        self.sym_init(session, mechanism, key, iv, true)
+    }
+
+    /// One-shot `C_Encrypt` into a CALLER-OWNED output buffer — no
+    /// allocation and no input copy per call, unlike `encrypt` above.
+    /// That matters here and not for RSA: a 64-byte AES block costs
+    /// microseconds, so the `data.to_vec()` + output `vec![0; n]` a
+    /// convenience wrapper does per operation would be a visible share of
+    /// what the row reports, measuring this harness's allocator rather
+    /// than the engine's AES. `data` is `&mut` only because the C ABI
+    /// types the input as `CK_BYTE_PTR`; the engine does not write to it.
+    /// Returns the real ciphertext length the engine reported.
+    pub fn encrypt_into(&self, session: CK_SESSION_HANDLE, data: &mut [u8], out: &mut [u8]) -> Result<usize> {
+        let mut out_len: CK_ULONG = out.len() as CK_ULONG;
+        ck(
+            unsafe {
+                (self.funcs().C_Encrypt)(session, data.as_mut_ptr(), data.len() as CK_ULONG, out.as_mut_ptr(), &mut out_len)
+            },
+            "C_Encrypt(into)",
+        )?;
+        Ok(out_len as usize)
+    }
+
+    /// `decrypt_into` — `encrypt_into`'s counterpart, same reasoning.
+    pub fn decrypt_into(&self, session: CK_SESSION_HANDLE, ciphertext: &mut [u8], out: &mut [u8]) -> Result<usize> {
+        let mut out_len: CK_ULONG = out.len() as CK_ULONG;
+        ck(
+            unsafe {
+                (self.funcs().C_Decrypt)(session, ciphertext.as_mut_ptr(), ciphertext.len() as CK_ULONG, out.as_mut_ptr(), &mut out_len)
+            },
+            "C_Decrypt(into)",
+        )?;
+        Ok(out_len as usize)
+    }
+
+    /// §5.13 `C_DigestInit`. No mechanism parameter for any digest this
+    /// harness measures (SHA-2/SHA-3 take none).
+    pub fn digest_init(&self, session: CK_SESSION_HANDLE, mechanism: u32) -> Result<()> {
+        let mut mech = CK_MECHANISM {
+            mechanism: mechanism as CK_ULONG,
+            pParameter: std::ptr::null_mut(),
+            ulParameterLen: 0,
+        };
+        ck(unsafe { (self.funcs().C_DigestInit)(session, &mut mech) }, "C_DigestInit")
+    }
+
+    /// One-shot `C_Digest` into a caller-owned buffer — ONE FFI call per
+    /// operation, not the two-call size-then-fill convention `sign` uses.
+    /// The engine does support the size query for digests, but a digest's
+    /// output length is a fixed property of the mechanism (32/48/64
+    /// bytes), so the extra round trip would only add a second
+    /// dlopen'd-ABI call to every measured hash — inflating a 64-byte
+    /// SHA-256 point by roughly a whole extra call's overhead. Caller
+    /// passes a buffer at least as large as the mechanism's digest;
+    /// `CKR_BUFFER_TOO_SMALL` surfaces as a normal error if not.
+    pub fn digest_into(&self, session: CK_SESSION_HANDLE, data: &mut [u8], out: &mut [u8]) -> Result<usize> {
+        let mut out_len: CK_ULONG = out.len() as CK_ULONG;
+        ck(
+            unsafe {
+                (self.funcs().C_Digest)(session, data.as_mut_ptr(), data.len() as CK_ULONG, out.as_mut_ptr(), &mut out_len)
+            },
+            "C_Digest",
+        )?;
+        Ok(out_len as usize)
+    }
+}
+
+/// `CK_GCM_PARAMS` (§6.27.7) — six fields in the SAME order as the
+/// engine's own `ck_param::gcm::LAYOUT` (pIv, ulIvLen, ulIvBits, pAAD,
+/// ulAADLen, ulTagBits), each at NATIVE width: the engine reads them with
+/// `ParamReader` at `size_of::<usize>()` per field (48 bytes native), and
+/// reading them as `u32` is precisely the bug its own comment records —
+/// a valid 12-byte IV looked invalid because `ulIvLen` landed on the
+/// pointer's high half.
+#[repr(C)]
+struct CkGcmParams {
+    p_iv: CK_VOID_PTR,
+    ul_iv_len: CK_ULONG,
+    ul_iv_bits: CK_ULONG,
+    p_aad: CK_VOID_PTR,
+    ul_aad_len: CK_ULONG,
+    ul_tag_bits: CK_ULONG,
 }
 
 /// `CK_RSA_PKCS_OAEP_PARAMS` (§6.4.4) — `CK_ULONG`/`CK_VOID_PTR` fields are
