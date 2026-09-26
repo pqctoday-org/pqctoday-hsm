@@ -785,7 +785,8 @@ CK_RV SoftHSM::C_GetMechanismList(CK_SLOT_ID slotID, CK_MECHANISM_TYPE_PTR pMech
 
 // The elliptic-curve capability flags every EC-family mechanism in this engine
 // shares: prime-field curves (CKF_EC_F_P), CKA_EC_PARAMS given as a curve OID
-// (CKF_EC_NAMEDCURVE, which pkcs11t.h defines as CKF_EC_OID), and uncompressed
+// (CKF_EC_OID — pkcs11t.h:1354 keeps CKF_EC_NAMEDCURVE as a deprecated alias
+// for the same bit, retired in PKCS#11 3.00; prefer the current name), and uncompressed
 // point encodings (CKF_EC_UNCOMPRESS). PKCS#11 v3.2 §5.4.4 / Table 40 defines
 // these as the EC-family members of CK_MECHANISM_INFO.flags.
 //
@@ -795,7 +796,7 @@ CK_RV SoftHSM::C_GetMechanismList(CK_SLOT_ID slotID, CK_MECHANISM_TYPE_PTR pMech
 // `#if defined(WITH_ECC) || defined(WITH_EDDSA)` — would not have compiled in
 // an EdDSA-only configuration. A shared flag set does not belong inside one
 // case label either way.
-#define CKF_EC_COMMOM	(CKF_EC_F_P | CKF_EC_NAMEDCURVE | CKF_EC_UNCOMPRESS)
+#define CKF_EC_COMMOM	(CKF_EC_F_P | CKF_EC_OID | CKF_EC_UNCOMPRESS)
 
 // Return more information about a mechanism for a given slot
 CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_MECHANISM_INFO_PTR pInfo)
