@@ -743,13 +743,35 @@ VENDOR_PRESENCE = {
     "CKA_STATEFUL_KEY_STATE": "cpp",
     "CKA_LEAF_INDEX": "cpp",
 
-    # Rust-engine-only features. NOT settled — flagged for a maintainer
-    # decision rather than silently blessed, because classifying by observation
-    # is exactly the trap this map exists to avoid. If any of these is meant to
-    # be part of the shared vendor surface, move it to "both" and the gate will
-    # then require the C++ header to carry it.
-    #   CKM_EC_MONTGOMERY_KEY_DERIVE — Rust derive path; C++ uses CKM_ECDH1_DERIVE
-    #   CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED — Rust state-snapshot error code
+    # Rust-engine-only, and SETTLED as such on 2026-09-25 (these two carried a
+    # "NOT settled — flagged for a maintainer decision" note for months). Both
+    # were examined against the v3.2 spec and measured against both engines
+    # before deciding, because the obvious-looking answer was wrong in each
+    # case. Neither should move to "both": doing so makes the gate demand a
+    # C++ header entry that nothing in C++ could use.
+    #
+    # CKM_EC_MONTGOMERY_KEY_DERIVE (0x80000011) — redundant, not missing.
+    #   v3.2 §6.3.17 defines the STANDARD mechanism as covering both curve
+    #   families: CKM_ECDH1_DERIVE "is a mechanism for key derivation ... as
+    #   defined in [ANSI X9.63] for short Weierstrass EC keys and [RFC 7748]
+    #   for Montgomery keys". Measured (tests/differential scenario
+    #   create.encapsulate.ecdh_x25519): with an X25519 key, BOTH engines
+    #   answer CKR_OK to C_EncapsulateKey and C_DecapsulateKey under
+    #   CKM_ECDH1_DERIVE and agree on the 32-byte shared secret, and BOTH
+    #   answer CKR_MECHANISM_INVALID to this vendor mechanism in that path.
+    #   So the standard mechanism already is the portable way to ask for this,
+    #   and the vendor allocation earns nothing in C++.
+    #
+    # CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED (0x80000001) — unreachable in
+    #   C++ by construction. It is returned by exactly one place,
+    #   state_snapshot.rs's deserialize_token_state, when a snapshot carries
+    #   the superseded V1 magic. Token-state snapshots exist only because
+    #   openssl.wasm is built -sEXIT_RUNTIME=1 and loses all in-memory state
+    #   on teardown; the C++ engine has a file-backed token directory and so
+    #   has no snapshot format to reject. There is also no standard code to
+    #   borrow instead: v3.2 says of the nearest candidate,
+    #   "CKR_SAVED_STATE_INVALID: This value can only be returned by
+    #   C_SetOperationState", which this is not.
     "CKM_EC_MONTGOMERY_KEY_DERIVE": "rust",
     "CKR_PQCTODAY_SNAPSHOT_FORMAT_UNSUPPORTED": "rust",
 }
