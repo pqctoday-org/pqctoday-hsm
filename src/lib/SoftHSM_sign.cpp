@@ -3864,7 +3864,7 @@ CK_RV SoftHSM::C_MessageSignInit(CK_SESSION_HANDLE hSession,
 	session->setOpType(SESSION_OP_MESSAGE_SIGN);
 	// Remember what to re-arm with: AsymSign recycles the signing context after
 	// every message, so each per-message entry point rebuilds it from these.
-	// §5.14.2 keeps the operation alive until C_MessageSignFinal, not until the
+	// §5.14.1 keeps the operation alive until C_MessageSignFinal, not until the
 	// first message. Cleared there (and by the cancel path).
 	// Copy the CALLER's mechanism parameter, not the session's internal `param`
 	// — see Session::setMessageOp for why those are not interchangeable.
@@ -4291,7 +4291,7 @@ CK_RV SoftHSM::C_VerifyMessageNext(CK_SESSION_HANDLE hSession,
 	// §5.14.3 states the rule for the sign side — "The message signature
 	// operation is active until the application uses a call to
 	// C_SignMessageNext with a non-NULL pulSignatureLen to actually obtain the
-	// signature" — and §5.15.3/§5.15.4 are the verify analogue. Here the
+	// signature" — and §5.16.3/§5.16.4 are the verify analogue. Here the
 	// discriminator is pSignature itself, because C_VerifyMessageNext takes
 	// ulSignatureLen BY VALUE and so has no length pointer to nullify.
 	//

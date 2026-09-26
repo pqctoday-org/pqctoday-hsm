@@ -159,7 +159,7 @@ public:
 	void setVerifyKeyHandle(CK_OBJECT_HANDLE hKey);
 	CK_OBJECT_HANDLE getVerifyKeyHandle();
 
-	// Message-based operation re-arm state (PKCS#11 v3.2 §5.14.2 / §5.15.2).
+	// Message-based operation re-arm state (PKCS#11 v3.2 §5.14.1 / §5.16.1).
 	//
 	// A message-based operation outlives the individual messages sent under it:
 	// only C_MessageSignFinal / C_MessageVerifyFinal ends it. But AsymSign and
