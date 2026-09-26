@@ -98,12 +98,160 @@ static unsigned char* rawSigToDer(const unsigned char* raw, size_t orderLen, siz
 	return der;
 }
 
+// ── CKM_PQCTODAY_ECDSA_EXPLICIT_K ───────────────────────────────────────────
+// ECDSA with the caller's nonce k: a deliberate key-recovery primitive for
+// teaching (SECURITY.md). OpenSSL 3.x has no public API that signs with a
+// supplied k, so FIPS 186-5 §6.4.1 steps 3-9 are done here directly with the
+// (non-deprecated) BN / EC_GROUP / EC_POINT API, k supplied instead of
+// generated. Only P-256 / P-384 / P-521.
+
+// The key's group, when it is one this mechanism covers. `tooSmall` reports a
+// known curve below the advertised 256-bit minimum (P-224).
+static EC_GROUP* explicitKGroup(EVP_PKEY* pkey, bool& tooSmall)
+{
+	tooSmall = false;
+	char name[80] = { 0 };
+	if (EVP_PKEY_get_utf8_string_param(pkey, OSSL_PKEY_PARAM_GROUP_NAME,
+	                                   name, sizeof(name), NULL) != 1)
+		return NULL;
+	int nid = OBJ_txt2nid(name);
+	if (nid == NID_secp224r1)
+	{
+		tooSmall = true;
+		return NULL;
+	}
+	if (nid != NID_X9_62_prime256v1 && nid != NID_secp384r1 && nid != NID_secp521r1)
+		return NULL;
+	return EC_GROUP_new_by_curve_name(nid);
+}
+
+// k is exactly the order's byte length and 1 <= k < n. Loads it into `k`.
+static bool explicitKInRange(const EC_GROUP* grp, const void* param, size_t paramLen, BIGNUM* k)
+{
+	const BIGNUM* n = EC_GROUP_get0_order(grp);
+	if (param == NULL || n == NULL) return false;
+	if (paramLen != (size_t)BN_num_bytes(n)) return false;
+	if (BN_bin2bn((const unsigned char*)param, (int)paramLen, k) == NULL) return false;
+	return !BN_is_zero(k) && BN_cmp(k, n) < 0;
+}
+
+SignParamCheck::Type OSSLECDSA::checkSignParameters(PrivateKey* privateKey, const AsymMech::Type mechanism,
+                                                     const void* param, const size_t paramLen)
+{
+	if (mechanism != AsymMech::ECDSA_EXPLICIT_K) return SignParamCheck::OK;
+	if (!privateKey->isOfType(OSSLECPrivateKey::type)) return SignParamCheck::KEY_TYPE_INCONSISTENT;
+	EVP_PKEY* pkey = ((OSSLECPrivateKey*)privateKey)->getOSSLKey();
+	if (pkey == NULL) return SignParamCheck::KEY_TYPE_INCONSISTENT;
+	bool tooSmall = false;
+	EC_GROUP* grp = explicitKGroup(pkey, tooSmall);
+	if (grp == NULL)
+		return tooSmall ? SignParamCheck::KEY_SIZE_RANGE : SignParamCheck::KEY_TYPE_INCONSISTENT;
+	BIGNUM* k = BN_secure_new();
+	bool ok = k != NULL && explicitKInRange(grp, param, paramLen, k);
+	BN_clear_free(k);
+	EC_GROUP_free(grp);
+	return ok ? SignParamCheck::OK : SignParamCheck::PARAM_INVALID;
+}
+
+// r || s, each the order's byte length, from R = k·G, r = x(R) mod n,
+// s = k^-1 (z + r·d) mod n, where z is the leftmost min(N, 8·len) bits of the
+// input (FIPS 186-5 §6.4.1 step 2, N = bit length of n).
+static bool signExplicitK(EVP_PKEY* pkey, const ByteString& input,
+                          const void* param, size_t paramLen, ByteString& signature)
+{
+	bool tooSmall = false;
+	EC_GROUP* grp = explicitKGroup(pkey, tooSmall);
+	BN_CTX* bnctx = BN_CTX_secure_new();
+	BIGNUM* d = NULL;
+	BIGNUM* k = BN_secure_new();
+	BIGNUM* kinv = BN_secure_new();
+	BIGNUM* t = BN_secure_new();
+	BIGNUM* z = BN_new();
+	BIGNUM* x = BN_new();
+	BIGNUM* r = BN_new();
+	BIGNUM* s = BN_new();
+	EC_POINT* R = NULL;
+	bool ok = false;
+
+	do
+	{
+		if (grp == NULL || bnctx == NULL || k == NULL || kinv == NULL || t == NULL ||
+		    z == NULL || x == NULL || r == NULL || s == NULL)
+			break;
+		const BIGNUM* n = EC_GROUP_get0_order(grp);
+		const int nBits = BN_num_bits(n);
+		const size_t nBytes = (size_t)BN_num_bytes(n);
+		if (!explicitKInRange(grp, param, paramLen, k)) break;
+		BN_set_flags(k, BN_FLG_CONSTTIME);
+		if (EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY, &d) != 1) break;
+
+		const size_t take = std::min(input.size(), nBytes);
+		if (take == 0)
+			BN_zero(z);
+		else if (BN_bin2bn(input.const_byte_str(), (int)take, z) == NULL)
+			break;
+		if (take * 8 > (size_t)nBits && !BN_rshift(z, z, (int)(take * 8 - nBits))) break;
+
+		R = EC_POINT_new(grp);
+		if (R == NULL ||
+		    !EC_POINT_mul(grp, R, k, NULL, NULL, bnctx) ||
+		    !EC_POINT_get_affine_coordinates(grp, R, x, NULL, bnctx) ||
+		    !BN_nnmod(r, x, n, bnctx))
+			break;
+		// r = 0 or s = 0: FIPS 186-5 says choose another k; with k fixed by
+		// the caller there is no other, so no signature can be produced.
+		if (BN_is_zero(r)) break;
+		if (BN_mod_inverse(kinv, k, n, bnctx) == NULL ||
+		    !BN_mod_mul(t, r, d, n, bnctx) ||
+		    !BN_mod_add(t, t, z, n, bnctx) ||
+		    !BN_mod_mul(s, kinv, t, n, bnctx) ||
+		    BN_is_zero(s))
+			break;
+
+		signature.resize(2 * nBytes);
+		if (BN_bn2binpad(r, &signature[0], (int)nBytes) < 0 ||
+		    BN_bn2binpad(s, &signature[nBytes], (int)nBytes) < 0)
+			break;
+		ok = true;
+	} while (false);
+
+	if (!ok) ERROR_MSG("ECDSA explicit-k signing failed");
+	EC_POINT_free(R);
+	BN_clear_free(d);
+	BN_clear_free(k);
+	BN_clear_free(kinv);
+	BN_clear_free(t);
+	BN_free(z);
+	BN_free(x);
+	BN_free(r);
+	BN_free(s);
+	BN_CTX_free(bnctx);
+	EC_GROUP_free(grp);
+	return ok;
+}
+
 // Signing functions
 bool OSSLECDSA::sign(PrivateKey* privateKey, const ByteString& dataToSign,
 		     ByteString& signature, const AsymMech::Type mechanism,
-		     const void* /* param = NULL */, const size_t /* paramLen = 0 */)
+		     const void* param /* = NULL */, const size_t paramLen /* = 0 */)
 {
 	const EVP_MD* md = NULL;
+
+	if (mechanism == AsymMech::ECDSA_EXPLICIT_K)
+	{
+		if (!privateKey->isOfType(OSSLECPrivateKey::type))
+		{
+			ERROR_MSG("Invalid key type supplied");
+			return false;
+		}
+		EVP_PKEY* pkey = ((OSSLECPrivateKey*)privateKey)->getOSSLKey();
+		if (pkey == NULL)
+		{
+			ERROR_MSG("Could not get the OpenSSL private key");
+			return false;
+		}
+		return signExplicitK(pkey, dataToSign, param, paramLen, signature);
+	}
 
 	if (mechanism != AsymMech::ECDSA)
 	{

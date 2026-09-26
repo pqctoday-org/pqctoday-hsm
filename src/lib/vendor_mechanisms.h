@@ -28,6 +28,17 @@
 
 #define CKM_PQCTODAY_SPLIT_KEY 0x80000012UL  /* vendor */
 
+// ── Vendor: ECDSA with a caller-supplied nonce k — BOTH engines ─────────────
+// A deliberate key-recovery primitive for teaching (SECURITY.md, "Deliberate
+// key-recovery primitive"): anyone who knows k and one signature recovers the
+// private key, d = r^-1 (s*k - z) mod n. Same input as CKM_ECDSA (the caller's
+// digest); pParameter is k, big-endian, exactly the order's byte length,
+// 1 <= k < n, else CKR_MECHANISM_PARAM_INVALID at C_SignInit. Sign only,
+// single-part, P-256 / P-384 / P-521. Allocated in the priv vendor ledger
+// (pkcs11-vendor-mech-allocation.md §1.4.2); mirrored in rust/src/constants.rs.
+
+#define CKM_PQCTODAY_ECDSA_EXPLICIT_K 0x80000015UL  /* vendor */
+
 // ── Classic McEliece (BSI TR-02102-1 §2.4.2) — implementation plan D-2/D-3 ───
 // First mechanism/key-type pair genuinely SHARED between both engines: the
 // Rust engine has advertised these since softhsmrustv3 v0.7.0 (one parameter

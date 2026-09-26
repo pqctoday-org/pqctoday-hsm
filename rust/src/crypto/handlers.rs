@@ -2222,6 +2222,123 @@ fn fit_digest_to_curve(curve: u32, mut digest: Vec<u8>) -> Vec<u8> {
     }
 }
 
+/// (field bytes, order bits) for the curves CKM_PQCTODAY_ECDSA_EXPLICIT_K
+/// supports. `None` for any other curve — including 0, the "curve unknown"
+/// value C_CreateObject leaves for an undecodable CKA_EC_PARAMS, which is
+/// deliberately not guessed to be P-256 here.
+fn explicit_k_curve(curve: u32) -> Option<(usize, usize)> {
+    match curve {
+        CURVE_P256 => Some((32, 256)),
+        CURVE_P384 => Some((48, 384)),
+        CURVE_P521 => Some((66, 521)),
+        _ => None,
+    }
+}
+
+/// FIPS 186-5 §6.4.1 step 2: z is the leftmost min(N, hashlen) bits of the
+/// input, N the bit length of n — returned zero-padded to the field width so
+/// the ecdsa hazmat layer reduces it as-is. Byte-level truncation alone (what
+/// `fit_digest_to_curve` does) is exact only when N is a multiple of 8; on
+/// P-521 a 66-byte input would keep 528 bits instead of 521.
+fn bits2int_field(input: &[u8], order_bits: usize, field_len: usize) -> Vec<u8> {
+    let take = input.len().min(order_bits.div_ceil(8));
+    let mut v = input[..take].to_vec();
+    let excess = (v.len() * 8).saturating_sub(order_bits);
+    if excess > 0 {
+        let mut carry = 0u8;
+        for b in v.iter_mut() {
+            let next = *b << (8 - excess);
+            *b = (*b >> excess) | carry;
+            carry = next;
+        }
+    }
+    let mut out = vec![0u8; field_len - v.len()];
+    out.extend_from_slice(&v);
+    out
+}
+
+/// CKM_PQCTODAY_ECDSA_EXPLICIT_K's parameter check, run at C_SignInit so a
+/// bad k is CKR_MECHANISM_PARAM_INVALID there (§5.13.1) rather than a failure
+/// at C_Sign: k must be exactly the order's byte length and 1 <= k < n.
+/// A key on a curve the mechanism does not cover is refused with one of the
+/// two key codes §5.13.1 lists for C_SignInit: CKR_KEY_SIZE_RANGE for P-224
+/// (below the advertised 256-bit minimum), CKR_KEY_TYPE_INCONSISTENT for any
+/// other curve (secp256k1). CKR_CURVE_NOT_SUPPORTED is not used: §6.3 scopes
+/// it to creating, generating, deriving or unwrapping a key.
+pub fn ecdsa_explicit_k_check(curve: u32, k: &[u8]) -> Result<(), u32> {
+    use p256::elliptic_curve::{Field, PrimeField};
+    let (field_len, _) = explicit_k_curve(curve).ok_or(if curve == CURVE_P224 {
+        CKR_KEY_SIZE_RANGE
+    } else {
+        CKR_KEY_TYPE_INCONSISTENT
+    })?;
+    if k.len() != field_len {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    macro_rules! in_range {
+        ($crv:ident) => {{
+            let s = Option::<$crv::Scalar>::from($crv::Scalar::from_repr(
+                $crv::FieldBytes::clone_from_slice(k),
+            ));
+            matches!(s, Some(s) if !bool::from(s.is_zero()))
+        }};
+    }
+    let ok = match curve {
+        CURVE_P256 => in_range!(p256),
+        CURVE_P384 => in_range!(p384),
+        _ => in_range!(p521),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(CKR_MECHANISM_PARAM_INVALID)
+    }
+}
+
+/// ECDSA with the caller's nonce: (r, s) with R = k·G, r = x(R) mod n,
+/// s = k⁻¹(z + r·d) mod n (FIPS 186-5 §6.4.1 steps 3-9 with k supplied rather
+/// than generated). A deliberate key-recovery primitive — see SECURITY.md.
+/// `input` is the caller's digest, conditioned by bits2int exactly like
+/// CKM_ECDSA; the result is r || s, each the order's byte length.
+pub fn sign_ecdsa_explicit_k(
+    curve: u32,
+    sk_bytes: &[u8],
+    input: &[u8],
+    k: &[u8],
+) -> Result<Vec<u8>, u32> {
+    use p256::elliptic_curve::PrimeField;
+    ecdsa_explicit_k_check(curve, k)?;
+    let Some((field_len, order_bits)) = explicit_k_curve(curve) else {
+        return Err(CKR_KEY_TYPE_INCONSISTENT);
+    };
+    let z = bits2int_field(input, order_bits, field_len);
+    macro_rules! sign_with {
+        ($crv:ident, $Curve:ty) => {{
+            let d = $crv::SecretKey::from_slice(sk_bytes)
+                .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?
+                .to_nonzero_scalar();
+            let k = Option::<$crv::Scalar>::from($crv::Scalar::from_repr(
+                $crv::FieldBytes::clone_from_slice(k),
+            ))
+            .ok_or(CKR_MECHANISM_PARAM_INVALID)?;
+            let (sig, _) = ecdsa::hazmat::sign_prehashed::<$Curve, _>(
+                d.as_ref(),
+                k,
+                &$crv::FieldBytes::clone_from_slice(&z),
+            )
+            // r = 0 or s = 0: FIPS 186-5 says pick another k; with a fixed k
+            // there is no other, so the signature cannot be produced.
+            .map_err(|_| CKR_FUNCTION_FAILED)?;
+            Ok(sig.to_bytes().to_vec())
+        }};
+    }
+    match curve {
+        CURVE_P256 => sign_with!(p256, p256::NistP256),
+        CURVE_P384 => sign_with!(p384, p384::NistP384),
+        _ => sign_with!(p521, p521::NistP521),
+    }
+}
+
 /// P-224 ECDSA over an already-conditioned (FIPS 186-5 §6.4) digest, with
 /// the same RFC 6979 deterministic nonce as the other curves (see
 /// `sign_ecdsa`'s header comment).
