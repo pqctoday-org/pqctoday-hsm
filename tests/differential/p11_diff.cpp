@@ -116,6 +116,18 @@ typedef CK_RV (*fn_VerifyMessage)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG,
                                   CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG);
 typedef CK_RV (*fn_MessageVerifyFinal)(CK_SESSION_HANDLE);
 
+// The STREAMING form of a message-based operation (§5.14.3-4 / §5.15.3-4). This is
+// what CKF_MULTI_MESSAGE advertises — v3.2's CK_MECHANISM_INFO flag table: "True if
+// the mechanism can be used with C_*MessageBegin. One of CKF_MESSAGE_* flag must also
+// be set." Nothing in this harness drove these four before 2026-09-25, so no engine
+// difference in the streaming form could be observed at all.
+typedef CK_RV (*fn_SignMessageBegin)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG);
+typedef CK_RV (*fn_SignMessageNext)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG,
+                                    CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR);
+typedef CK_RV (*fn_VerifyMessageBegin)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG);
+typedef CK_RV (*fn_VerifyMessageNext)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG,
+                                      CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG);
+
 // ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
@@ -137,6 +149,10 @@ struct Engine {
     fn_MessageVerifyInit     MessageVerifyInit     = nullptr;
     fn_VerifyMessage         VerifyMessage         = nullptr;
     fn_MessageVerifyFinal    MessageVerifyFinal    = nullptr;
+    fn_SignMessageBegin      SignMessageBegin      = nullptr;
+    fn_SignMessageNext       SignMessageNext       = nullptr;
+    fn_VerifyMessageBegin    VerifyMessageBegin    = nullptr;
+    fn_VerifyMessageNext     VerifyMessageNext     = nullptr;
     std::set<CK_MECHANISM_TYPE> mechs;
     CK_SLOT_ID           slot = 0;
     CK_SESSION_HANDLE    sess = CK_INVALID_HANDLE;
@@ -977,6 +993,10 @@ static bool load_engine(Engine& e, const std::string& path, const std::string& n
     e.MessageVerifyInit     = (fn_MessageVerifyInit)dlsym(e.h, "C_MessageVerifyInit");
     e.VerifyMessage         = (fn_VerifyMessage)dlsym(e.h, "C_VerifyMessage");
     e.MessageVerifyFinal    = (fn_MessageVerifyFinal)dlsym(e.h, "C_MessageVerifyFinal");
+    e.SignMessageBegin      = (fn_SignMessageBegin)dlsym(e.h, "C_SignMessageBegin");
+    e.SignMessageNext       = (fn_SignMessageNext)dlsym(e.h, "C_SignMessageNext");
+    e.VerifyMessageBegin    = (fn_VerifyMessageBegin)dlsym(e.h, "C_VerifyMessageBegin");
+    e.VerifyMessageNext     = (fn_VerifyMessageNext)dlsym(e.h, "C_VerifyMessageNext");
     return true;
 }
 
