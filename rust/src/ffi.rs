@@ -7655,7 +7655,12 @@ fn C_Sign_impl(
                     sign_eddsa_ctx(&sk_bytes, eff_msg, &ctx_bytes)
                 }
             }
-            CKM_EDDSA_PH => sign_eddsa_ph(&sk_bytes, eff_msg),
+            // Ed25519ph/Ed448ph bind pContextData into the dom2/dom4 prefix
+            // exactly as Ed25519ctx does, so the SAME ctx_bytes must reach
+            // here. Passing None unconditionally (the pre-2026-09-26 shape)
+            // signed a different scheme than the caller selected and said
+            // CKR_OK while doing it.
+            CKM_EDDSA_PH => sign_eddsa_ph(&sk_bytes, eff_msg, &ctx_bytes),
             _ => Err(CKR_MECHANISM_INVALID),
         };
 
@@ -8033,7 +8038,7 @@ fn C_Verify_impl(
                     verify_eddsa_ctx(&pk_bytes, eff_msg, sig_bytes, &ctx_bytes)
                 }
             }
-            CKM_EDDSA_PH => verify_eddsa_ph(&pk_bytes, eff_msg, sig_bytes),
+            CKM_EDDSA_PH => verify_eddsa_ph(&pk_bytes, eff_msg, sig_bytes, &ctx_bytes),
             _ => Err(CKR_MECHANISM_INVALID),
         } {
             Ok(()) => CKR_OK,

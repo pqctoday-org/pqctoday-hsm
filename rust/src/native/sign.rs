@@ -238,7 +238,7 @@ fn sign_with_pss_salt_impl(
             Some(ctx) if !ctx.is_empty() => sign_eddsa_ctx(&sk_bytes, data, ctx),
             _ => sign_eddsa(&sk_bytes, data),
         },
-        CKM_EDDSA_PH => sign_eddsa_ph(&sk_bytes, data),
+        CKM_EDDSA_PH => sign_eddsa_ph(&sk_bytes, data, eddsa_ctx.unwrap_or(&[])),
         _ => Err(CKR_MECHANISM_INVALID),
     }
 }
@@ -424,7 +424,7 @@ fn verify_with_pss_salt_impl(
             Some(ctx) if !ctx.is_empty() => verify_eddsa_ctx(&pk_bytes, data, signature, ctx),
             _ => verify_eddsa(&pk_bytes, data, signature),
         },
-        CKM_EDDSA_PH => verify_eddsa_ph(&pk_bytes, data, signature),
+        CKM_EDDSA_PH => verify_eddsa_ph(&pk_bytes, data, signature, eddsa_ctx.unwrap_or(&[])),
         CKM_HSS => {
             // Stateless — RFC 8554 verification needs no key-object
             // mutation, unlike sign's leaf advance-and-persist.
