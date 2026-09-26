@@ -19,6 +19,12 @@ on:
       - "kmip/Cargo.lock"
       - "openpgp/Cargo.toml"
       - "openpgp/lib/Cargo.toml"
+      # Tracked from 2026-09-25 (it was the one workspace lock this repo did
+      # not commit). A lock change is the clearest possible signal that a
+      # dependency version moved, so it belongs in this list alongside the
+      # manifests — a manifest can specify a range that resolves differently
+      # without itself changing.
+      - "openpgp/Cargo.lock"
   workflow_dispatch: {}
 
 jobs:
