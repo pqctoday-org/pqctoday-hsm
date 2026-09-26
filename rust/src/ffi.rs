@@ -1459,6 +1459,15 @@ const HMAC_KEY_RANGE: (u32, u32, u32) =
 /// Deliberately NOT on CKM_RSA_X_509 (sign-recover only here), the KMACs,
 /// AES-CMAC/GMAC, EdDSA, or the stateful HSS/XMSS schemes — a one-signature-
 /// per-key scheme has no business accepting several messages per operation.
+///
+/// CKF_MULTI_MESSAGE (0x20) is NOT included, in either engine. CORRECTED
+/// 2026-09-25: an earlier comment here claimed that flag advertises
+/// "several messages under one operation". It does not — v3.2's
+/// CK_MECHANISM_INFO flag table defines it as "True if the mechanism can be
+/// used with C_*MessageBegin. One of CKF_MESSAGE_* flag must also be set",
+/// i.e. it advertises the STREAMING Begin/Next form. Whether it is owed is
+/// therefore a question about per-mechanism Begin/Next coverage, which has not
+/// been measured in either engine, so neither claims it.
 const MSG_SIGN_VERIFY: u32 = 0x0008 | 0x0010;
 
 pub fn mechanism_info(mech_type: u32) -> Option<(u32, u32, u32)> {

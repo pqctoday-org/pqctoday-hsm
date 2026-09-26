@@ -955,6 +955,124 @@ add({"create.encapsulate.ecdh_secp256k1", "create",
          record_attrs(e, r, "decap_key", s, hDec);
      }});
 
+add({"create.encapsulate.ecdh_x25519", "create",
+     "ECDH-as-KEM with a MONTGOMERY key, under the STANDARD CKM_ECDH1_DERIVE "
+     "and under the vendor CKM_EC_MONTGOMERY_KEY_DERIVE — v3.2 §6.3.17 says "
+     "the standard mechanism covers Montgomery keys per RFC 7748",
+     {CKM_EC_MONTGOMERY_KEY_PAIR_GEN}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         // 2026-09-25. X25519 appeared in exactly one scenario before this —
+         // create.generate_key_pair.x25519, which only generates a key pair.
+         // Nothing encapsulated with a Montgomery key, so the engines' KEM
+         // gating for that key type was never compared.
+         //
+         // v3.2 §6.3.17 is explicit: "The Elliptic Curve Diffie-Hellman (ECDH)
+         // key derivation mechanism, denoted CKM_ECDH1_DERIVE, is a mechanism
+         // for key derivation ... as defined in [ANSI X9.63] for short
+         // Weierstrass EC keys and [RFC 7748] for Montgomery keys". So the
+         // STANDARD mechanism is the conformant way to ask for this, and a
+         // vendor mechanism for the same thing is redundant at best.
+         //
+         // Both mechanisms are driven here because that is the open question,
+         // and existing comments disagree about the answer:
+         // create.encapsulate.ecdh_secp256k1 states that "Rust's KEM arm
+         // hard-matches {P256,P384,P521,X25519,X448}", while
+         // native/encrypt.rs's CKM_ECDH1_DERIVE arm opens with
+         // `if key_type != Some(CKK_EC) { return Err(CKR_KEY_TYPE_INCONSISTENT) }`,
+         // which cannot accept a Montgomery key at all. One of the two is
+         // stale; this scenario is how we find out which rather than trusting
+         // either.
+         //
+         // Recorded as observations, not assertions: whichever way each engine
+         // answers, the pair is what a later fix gets measured against.
+         if (!e.Encapsulate || !e.Decapsulate) { r.put("fn", "ABSENT"); return; }
+         if (!e.mechs.count(CKM_EC_MONTGOMERY_KEY_PAIR_GEN)) {
+             r.put("keygen_mech", "ABSENT");
+             return;
+         }
+         CK_ATTRIBUTE pub[] = {
+             ATTR(CKA_CLASS,       &clPublic, sizeof clPublic),
+             ATTR(CKA_KEY_TYPE,    &ktMont,   sizeof ktMont),
+             ATTR(CKA_EC_PARAMS,   kOidX25519, sizeof kOidX25519),
+             ATTR(CKA_TOKEN,       &bFalse,   sizeof bFalse),
+             ATTR(CKA_DERIVE,      &bTrue,    sizeof bTrue),
+             ATTR(CKA_ENCAPSULATE, &bTrue,    sizeof bTrue),
+         };
+         // No CKA_EC_PARAMS in the PRIVATE template: the C++ engine treats it
+         // as read-only there (it comes from the pair), and answered
+         // CKR_ATTRIBUTE_READ_ONLY when this scenario first included it —
+         // which silently cost the C++ half of the measurement. The two
+         // scenarios that already generate these keys
+         // (create.generate_key_pair.x25519, create.encapsulate.ecdh_secp256k1)
+         // both omit it; this now matches them.
+         CK_ATTRIBUTE priv[] = {
+             ATTR(CKA_CLASS,       &clPrivate, sizeof clPrivate),
+             ATTR(CKA_KEY_TYPE,    &ktMont,    sizeof ktMont),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_DERIVE,      &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+             ATTR(CKA_DECAPSULATE, &bTrue,     sizeof bTrue),
+         };
+         CK_MECHANISM km = { CKM_EC_MONTGOMERY_KEY_PAIR_GEN, NULL_PTR, 0 };
+         CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+         CK_RV rv = e.fl->C_GenerateKeyPair(s, &km, pub, 6, priv, 6, &hPub, &hPriv);
+         r.rv("keygen", rv);
+         if (rv != CKR_OK) return;
+
+         // CKM_EC_MONTGOMERY_KEY_DERIVE is vendor (0x80000011) and only the
+         // Rust engine defines it; the literal is used so the harness need not
+         // depend on a vendor header either engine might lack.
+         const CK_MECHANISM_TYPE kVendorMontDerive = 0x80000011UL;
+         struct Case { const char* tag; CK_MECHANISM_TYPE mech; };
+         const Case cases[] = {
+             {"standard_ecdh1", CKM_ECDH1_DERIVE},
+             {"vendor_mont",    kVendorMontDerive},
+         };
+         for (const Case& c : cases) {
+             CK_ATTRIBUTE st[] = {
+                 ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+                 ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+                 ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+                 ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+                 ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+             };
+             CK_ECDH1_DERIVE_PARAMS p; memset(&p, 0, sizeof p); p.kdf = CKD_NULL;
+             CK_MECHANISM em = { c.mech, &p, sizeof p };
+             CK_BYTE ct[512]; CK_ULONG ctLen = sizeof ct;
+             CK_OBJECT_HANDLE hEnc = CK_INVALID_HANDLE, hDec = CK_INVALID_HANDLE;
+             const std::string t = c.tag;
+             CK_RV er = e.Encapsulate(s, &em, hPub, st, 5, ct, &ctLen, &hEnc);
+             r.rv(t + ".encapsulate", er);
+             if (er != CKR_OK) continue;
+             // LEN, not SHAPE. An X25519 ephemeral public key is the bare 32
+             // RFC 7748 bytes with no framing byte, so its FIRST byte is
+             // uniformly random — SHAPE records that byte and the two engines
+             // disagreed on it (f3 vs 93) on the very first run, which is
+             // flakiness, not a finding. SHAPE is right for a Weierstrass point
+             // (fixed 0x04 prefix); a bare Montgomery key needs LEN.
+             record_bytes(r, t + ".ciphertext", ct, ctLen, ByteView::LEN);
+             CK_RV dr = e.Decapsulate(s, &em, hPriv, st, 5, ct, ctLen, &hDec);
+             r.rv(t + ".decapsulate", dr);
+             // The round trip is the point: both halves must agree on the
+             // shared secret, which recording only the return codes would not
+             // show. CKA_VALUE is readable here because the template above
+             // sets CKA_SENSITIVE=FALSE and CKA_EXTRACTABLE=TRUE.
+             if (dr == CKR_OK) {
+                 CK_BYTE encV[128], decV[128];
+                 CK_ATTRIBUTE ga[] = { ATTR(CKA_VALUE, encV, sizeof encV) };
+                 CK_ATTRIBUTE gb[] = { ATTR(CKA_VALUE, decV, sizeof decV) };
+                 CK_RV ra = e.fl->C_GetAttributeValue(s, hEnc, ga, 1);
+                 CK_RV rb = e.fl->C_GetAttributeValue(s, hDec, gb, 1);
+                 if (ra == CKR_OK && rb == CKR_OK) {
+                     r.num(t + ".secret_len", ga[0].ulValueLen);
+                     r.put(t + ".round_trip_agrees",
+                           (ga[0].ulValueLen == gb[0].ulValueLen &&
+                            memcmp(encV, decV, ga[0].ulValueLen) == 0) ? "1" : "0");
+                 }
+             }
+         }
+     }});
+
 // ---------------------------------------------------------------------------
 // encoding — Phase 3, the bytes the specification names
 // ---------------------------------------------------------------------------

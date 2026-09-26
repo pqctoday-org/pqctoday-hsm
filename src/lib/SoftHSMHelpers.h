@@ -76,10 +76,20 @@ static constexpr CK_ULONG HMAC_MIN_KEY_BYTES        = 0UL;
 /// these move together.
 ///
 /// CKF_MULTI_MESSAGE is deliberately NOT set here, and is not set by the Rust
-/// engine either: both engines do support several messages under one operation
-/// (that is what §5.14.2 requires), so it is arguably owed for every
-/// message-capable mechanism — but adding it is a separate, wider
-/// advertisement change than the one this constant records.
+/// engine either.
+///
+/// CORRECTED 2026-09-25: an earlier version of this comment said that flag
+/// meant "several messages may be sent under one operation". It does not —
+/// that is simply what a message-based operation IS (§5.14.2), and needs no
+/// flag. v3.2's CK_MECHANISM_INFO flag table defines it as "True if the
+/// mechanism can be used with C_*MessageBegin. One of CKF_MESSAGE_* flag must
+/// also be set", i.e. it advertises the STREAMING Begin/Next form
+/// (C_SignMessageBegin / C_SignMessageNext), not multi-message support.
+///
+/// So whether it is owed here is a question about Begin/Next coverage per
+/// mechanism, which has not been measured in either engine. Left unset in both
+/// until it is: advertising a capability on the strength of a guess about what
+/// the flag means is how the divergence this constant fixes came about.
 static constexpr CK_FLAGS HMAC_MECH_FLAGS =
 	CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
 
