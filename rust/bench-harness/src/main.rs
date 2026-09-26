@@ -57,7 +57,9 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use pkcs11::Engine;
 use softhsmrustv3::ck_abi::{CK_OBJECT_HANDLE, CK_SESSION_HANDLE, CK_SLOT_ID};
-use softhsmrustv3::constants::{CKA_EC_POINT, CKA_VALUE, CKR_KEY_HANDLE_INVALID, CKR_OBJECT_HANDLE_INVALID};
+use softhsmrustv3::constants::{
+    CKA_EC_POINT, CKA_VALUE, CKM_AES_KEY_GEN, CKR_KEY_HANDLE_INVALID, CKR_OBJECT_HANDLE_INVALID,
+};
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -215,6 +217,14 @@ struct Tenant {
     // work. Reuses SigMaterial's shape (just a pub/priv keypair) rather
     // than a near-identical duplicate struct.
     enc: HashMap<&'static str, SigMaterial>,
+    /// One generated AES key per `SymmetricAlgo` entry, keyed by that
+    /// entry's own name. A key is NOT shared between two entries of the
+    /// same length (e.g. AES-256-CBC-64B and AES-256-CBC-1KB each get
+    /// their own): `C_GenerateKey` for AES is a `getrandom` call plus a
+    /// handle allocation, so a shared key would save nothing measurable
+    /// while making every row depend on which other rows the run
+    /// happened to select.
+    sym: HashMap<&'static str, CK_OBJECT_HANDLE>,
 }
 
 /// Claim the next free slot (standard §5.4 `C_GetSlotList` auto-replenish
@@ -240,6 +250,8 @@ fn provision_tenant(
     kex_algos: &[algos::KeyAgreementAlgo],
     kem_algos: &[algos::KemAlgo],
     enc_algos: &[algos::EncAlgo],
+    sym_algos: &[algos::SymmetricAlgo],
+    digest_algos: &[algos::DigestAlgo],
 ) -> Result<(Tenant, HashMap<&'static str, f64>)> {
     let slots_before = engine.get_slot_list().context("C_GetSlotList")?;
     let slot = *slots_before
@@ -336,7 +348,55 @@ fn provision_tenant(
         enc.insert(algo.name, SigMaterial { pub_handle, priv_handle });
     }
 
-    Ok((Tenant { slot, session, sig, kex, kem, enc }, keygen_ms))
+    // ── Symmetric (AES) material. Same self-contained discipline as
+    // every other category: this tenant's own key must round-trip
+    // encrypt → decrypt back to the original plaintext before any row is
+    // measured with it. CBC is measured WITHOUT padding
+    // (`CKM_AES_CBC`), so the round-trip plaintext is the algorithm's own
+    // `data_len` — an exact multiple of the 16-byte block at both 64 B
+    // and 1 KiB — rather than a human-readable string of arbitrary
+    // length, which the mechanism would legitimately refuse.
+    let mut sym = HashMap::new();
+    for algo in sym_algos {
+        let keygen_start = std::time::Instant::now();
+        let key = engine
+            .generate_key(session, CKM_AES_KEY_GEN, algo.key_bytes)
+            .with_context(|| format!("C_GenerateKey({}, tenant={name})", algo.name))?;
+        keygen_ms.insert(algo.name, keygen_start.elapsed().as_secs_f64() * 1000.0);
+
+        let plaintext: Vec<u8> = (0..algo.data_len).map(|i| (i % 251) as u8).collect();
+        let mut iv = vec![0x5Au8; algo.iv_len];
+        let mut data = plaintext.clone();
+        // GCM appends a 16-byte tag; CBC is size-preserving. One buffer
+        // sized for the larger case covers both.
+        let mut ct = vec![0u8; algo.data_len + 16];
+        engine.sym_encrypt_init(session, algo.encrypt_mechanism, key, &mut iv).with_context(|| format!("C_EncryptInit({})", algo.name))?;
+        let ct_len = engine.encrypt_into(session, &mut data, &mut ct).with_context(|| format!("C_Encrypt({})", algo.name))?;
+        let mut ct_used = ct[..ct_len].to_vec();
+        let mut recovered = vec![0u8; algo.data_len + 16];
+        engine.sym_decrypt_init(session, algo.encrypt_mechanism, key, &mut iv).with_context(|| format!("C_DecryptInit({})", algo.name))?;
+        let pt_len = engine.decrypt_into(session, &mut ct_used, &mut recovered).with_context(|| format!("C_Decrypt({})", algo.name))?;
+        assert_eq!(&recovered[..pt_len], &plaintext[..], "tenant {name}'s {} decrypt must recover the original plaintext", algo.name);
+        sym.insert(algo.name, key);
+    }
+
+    // ── Digests need no key material at all; the provisioning-time
+    // proof is that the mechanism is really implemented (not
+    // CKR_MECHANISM_INVALID) and produces its standard-defined output
+    // length. Nothing is stored — the measured loop re-inits per op,
+    // exactly as a real caller does.
+    for algo in digest_algos {
+        let mut data: Vec<u8> = (0..algo.data_len).map(|i| (i % 251) as u8).collect();
+        let mut out = vec![0u8; algo.digest_len];
+        engine.digest_init(session, algo.mechanism).with_context(|| format!("C_DigestInit({})", algo.name))?;
+        let len = engine.digest_into(session, &mut data, &mut out).with_context(|| format!("C_Digest({})", algo.name))?;
+        assert_eq!(
+            len, algo.digest_len,
+            "{} must produce a {}-byte digest, got {len}", algo.name, algo.digest_len
+        );
+    }
+
+    Ok((Tenant { slot, session, sig, kex, kem, enc, sym }, keygen_ms))
 }
 
 fn main() -> Result<()> {
@@ -385,7 +445,15 @@ fn list_algorithms(cli: &Cli) -> Result<()> {
     let enc_algos: Vec<algos::EncAlgo> = algos::ENC_ALGOS.iter().copied()
         .filter(|a| algo_allowed(a.name, &selected))
         .collect();
-    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() && enc_algos.is_empty() {
+    let sym_algos: Vec<algos::SymmetricAlgo> = algos::SYMMETRIC_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let digest_algos: Vec<algos::DigestAlgo> = algos::DIGEST_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() && enc_algos.is_empty()
+        && sym_algos.is_empty() && digest_algos.is_empty()
+    {
         bail!("--algorithms matched no known algorithm: {:?}", cli.algorithms);
     }
 
@@ -412,6 +480,18 @@ fn list_algorithms(cli: &Cli) -> Result<()> {
         for op in ["encrypt", "decrypt"] {
             cells.push(AlgoCell { category: "key_establishment", algorithm: algo.name, security_level: algo.security_level, op });
         }
+    }
+    // Symmetric: a "keygen" cell IS reported here (unlike RSA-OAEP,
+    // whose keypair is borrowed from its RSA-PSS entry) — every AES
+    // entry generates its own real key via C_GenerateKey, and that cost
+    // is a genuine, separately-interesting number on a 4-core A53.
+    for algo in &sym_algos {
+        for op in ["keygen", "encrypt"] {
+            cells.push(AlgoCell { category: "symmetric", algorithm: algo.name, security_level: algo.security_level, op });
+        }
+    }
+    for algo in &digest_algos {
+        cells.push(AlgoCell { category: "digest", algorithm: algo.name, security_level: algo.security_level, op: "digest" });
     }
     println!("{}", serde_json::to_string(&cells)?);
     Ok(())
@@ -537,7 +617,15 @@ fn run_instance(cli: &Cli) -> Result<()> {
     let enc_algos: Vec<algos::EncAlgo> = algos::ENC_ALGOS.iter().copied()
         .filter(|a| algo_allowed(a.name, &selected))
         .collect();
-    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() && enc_algos.is_empty() {
+    let sym_algos: Vec<algos::SymmetricAlgo> = algos::SYMMETRIC_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    let digest_algos: Vec<algos::DigestAlgo> = algos::DIGEST_ALGOS.iter().copied()
+        .filter(|a| algo_allowed(a.name, &selected))
+        .collect();
+    if sig_algos.is_empty() && kex_algos.is_empty() && kem_algos.is_empty() && enc_algos.is_empty()
+        && sym_algos.is_empty() && digest_algos.is_empty()
+    {
         bail!("--algorithms matched no known algorithm: {:?}", cli.algorithms);
     }
 
@@ -545,15 +633,15 @@ fn run_instance(cli: &Cli) -> Result<()> {
     engine.initialize().context("C_Initialize")?;
     eprintln!("[ok] engine initialized: {}", cli.library);
     eprintln!(
-        "[ok] algorithm matrix: {} signature, {} key-agreement, {} KEM, {} key-transport ({})",
-        sig_algos.len(), kex_algos.len(), kem_algos.len(), enc_algos.len(),
+        "[ok] algorithm matrix: {} signature, {} key-agreement, {} KEM, {} key-transport, {} symmetric, {} digest ({})",
+        sig_algos.len(), kex_algos.len(), kem_algos.len(), enc_algos.len(), sym_algos.len(), digest_algos.len(),
         if cli.include_slow { "including slow algorithms" } else { "slow algorithms excluded, pass --include-slow to add them" }
     );
 
     // ── Two tenants, two real tokens, standard PKCS#11 v3.2 calls only. ─
-    let (mut alice, alice_keygen_ms) = provision_tenant(&engine, "alice", &sig_algos, &kex_algos, &kem_algos, &enc_algos)?;
+    let (mut alice, alice_keygen_ms) = provision_tenant(&engine, "alice", &sig_algos, &kex_algos, &kem_algos, &enc_algos, &sym_algos, &digest_algos)?;
     eprintln!("[ok] alice bootstrapped on slot {}: session={}", alice.slot, alice.session);
-    let (mut bob, bob_keygen_ms) = provision_tenant(&engine, "bob", &sig_algos, &kex_algos, &kem_algos, &enc_algos)?;
+    let (mut bob, bob_keygen_ms) = provision_tenant(&engine, "bob", &sig_algos, &kex_algos, &kem_algos, &enc_algos, &sym_algos, &digest_algos)?;
     eprintln!("[ok] bob bootstrapped on slot {}: session={}", bob.slot, bob.session);
     assert_ne!(alice.slot, bob.slot, "each tenant must land on its own slot");
     eprintln!("[ok] alice and bob each have their own token and full key material, every algorithm's own sign/verify or encap/decap round-trip verified");
@@ -740,6 +828,10 @@ fn run_instance(cli: &Cli) -> Result<()> {
         emit_keygen("key_establishment", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
         emit_keygen("key_establishment", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
     }
+    for algo in &sym_algos {
+        emit_keygen("symmetric", algo.name, algo.security_level, 0, alice.slot as u64, alice_keygen_ms[algo.name])?;
+        emit_keygen("symmetric", algo.name, algo.security_level, 1, bob.slot as u64, bob_keygen_ms[algo.name])?;
+    }
 
     // sign + verify, every signature algorithm, per tenant
     for algo in &sig_algos {
@@ -887,6 +979,83 @@ fn run_instance(cli: &Cli) -> Result<()> {
                 let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
                 emit("decrypt", "key_establishment", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
             }
+        }
+    }
+
+    // encrypt, every symmetric (AES) point, per tenant. Unlike the RSA
+    // arms above, the plaintext and ciphertext buffers are allocated ONCE
+    // per worker and reused every iteration (`encrypt_into`, not
+    // `encrypt`): a 64-byte AES-GCM operation is microseconds, so a
+    // per-op `Vec` allocation and input copy would be a visible share of
+    // the number this row reports — it would be measuring the harness's
+    // allocator, not the engine's AES.
+    //
+    // The GCM nonce is unique per (worker, operation): byte 0 carries the
+    // worker's own index (workers within a tenant SHARE that tenant's AES
+    // key, so a per-worker prefix is what keeps two workers from ever
+    // colliding) and the last 8 bytes carry a per-worker counter. That is
+    // real GCM usage rather than a fixed nonce repeated a million times
+    // under one key, and it costs an 8-byte copy per op. CBC's IV is left
+    // fixed: a CBC IV's uniqueness is a confidentiality property with no
+    // bearing on cost, and varying it would only add the same copy to a
+    // mode that does not need it here.
+    for algo in &sym_algos {
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            let tenant_index = tenant_index as u32;
+            let slot = tenant.slot as u64;
+            let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().enumerate().map(|(worker_index, &session)| {
+                let engine = Arc::clone(&engine);
+                let key = tenant.sym[algo.name];
+                let mechanism = algo.encrypt_mechanism;
+                let (data_len, iv_len) = (algo.data_len, algo.iv_len);
+                let is_gcm = mechanism == softhsmrustv3::constants::CKM_AES_GCM;
+                let mut data: Vec<u8> = (0..data_len).map(|i| (i % 251) as u8).collect();
+                // GCM appends a 16-byte tag; CBC is size-preserving.
+                let mut out = vec![0u8; data_len + 16];
+                let mut iv = vec![0x5Au8; iv_len];
+                iv[0] = worker_index as u8;
+                let mut counter: u64 = 0;
+                move || -> Result<()> {
+                    if is_gcm {
+                        counter += 1;
+                        iv[iv_len - 8..].copy_from_slice(&counter.to_be_bytes());
+                    }
+                    engine.sym_encrypt_init(session, mechanism, key, &mut iv)?;
+                    engine.encrypt_into(session, &mut data, &mut out)?;
+                    Ok(())
+                }
+            }).collect();
+            let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
+            emit("encrypt", "symmetric", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
+        }
+    }
+
+    // digest, every SHA-2/SHA-3 point, per tenant. No key material and no
+    // tenant-owned object is involved — the per-tenant split is kept
+    // anyway so a digest row sits in the same shape as every other row
+    // (and so a digest point runs under the same worker/session
+    // concurrency the rest of the matrix is measured at, which is what
+    // makes "how much of this board is left for hashing" comparable).
+    // C_DigestInit + one-shot C_Digest per operation, the sequence a real
+    // caller issues; the engine's digest state is per (thread, session),
+    // and every worker owns both.
+    for algo in &digest_algos {
+        for (tenant_index, tenant) in tenants.iter().enumerate() {
+            let tenant_index = tenant_index as u32;
+            let slot = tenant.slot as u64;
+            let workers: Vec<_> = worker_sessions_by_tenant[tenant_index as usize].iter().map(|&session| {
+                let engine = Arc::clone(&engine);
+                let mechanism = algo.mechanism;
+                let mut data: Vec<u8> = (0..algo.data_len).map(|i| (i % 251) as u8).collect();
+                let mut out = vec![0u8; algo.digest_len];
+                move || -> Result<()> {
+                    engine.digest_init(session, mechanism)?;
+                    engine.digest_into(session, &mut data, &mut out)?;
+                    Ok(())
+                }
+            }).collect();
+            let (total_ops, latencies_ms, duration_s) = measure::run_point(cli.duration_secs, cli.warmup_secs, cli.min_ops, cli.max_secs, workers)?;
+            emit("digest", "digest", algo.name, algo.security_level, tenant_index, slot, total_ops, latencies_ms, duration_s)?;
         }
     }
 
