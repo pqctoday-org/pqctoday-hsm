@@ -105,6 +105,17 @@ typedef CK_RV (*fn_VerifySignatureUpdate)(CK_SESSION_HANDLE, CK_BYTE_PTR, CK_ULO
 typedef CK_RV (*fn_VerifySignatureFinal)(CK_SESSION_HANDLE);
 typedef CK_RV (*fn_SessionCancel)(CK_SESSION_HANDLE, CK_FLAGS);
 
+// Message-based sign/verify (§5.14 / §5.15, added by v3.0). Same dlsym
+// treatment as the pre-bound verify block above, for the same reason.
+typedef CK_RV (*fn_MessageSignInit)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
+typedef CK_RV (*fn_SignMessage)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG,
+                                CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG_PTR);
+typedef CK_RV (*fn_MessageSignFinal)(CK_SESSION_HANDLE);
+typedef CK_RV (*fn_MessageVerifyInit)(CK_SESSION_HANDLE, CK_MECHANISM_PTR, CK_OBJECT_HANDLE);
+typedef CK_RV (*fn_VerifyMessage)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG,
+                                  CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG);
+typedef CK_RV (*fn_MessageVerifyFinal)(CK_SESSION_HANDLE);
+
 // ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
@@ -120,6 +131,12 @@ struct Engine {
     fn_VerifySignatureUpdate VerifySignatureUpdate = nullptr;
     fn_VerifySignatureFinal  VerifySignatureFinal  = nullptr;
     fn_SessionCancel         SessionCancel         = nullptr;
+    fn_MessageSignInit       MessageSignInit       = nullptr;
+    fn_SignMessage           SignMessage           = nullptr;
+    fn_MessageSignFinal      MessageSignFinal      = nullptr;
+    fn_MessageVerifyInit     MessageVerifyInit     = nullptr;
+    fn_VerifyMessage         VerifyMessage         = nullptr;
+    fn_MessageVerifyFinal    MessageVerifyFinal    = nullptr;
     std::set<CK_MECHANISM_TYPE> mechs;
     CK_SLOT_ID           slot = 0;
     CK_SESSION_HANDLE    sess = CK_INVALID_HANDLE;
@@ -954,6 +971,12 @@ static bool load_engine(Engine& e, const std::string& path, const std::string& n
     e.VerifySignatureUpdate = (fn_VerifySignatureUpdate)dlsym(e.h, "C_VerifySignatureUpdate");
     e.VerifySignatureFinal  = (fn_VerifySignatureFinal)dlsym(e.h, "C_VerifySignatureFinal");
     e.SessionCancel         = (fn_SessionCancel)dlsym(e.h, "C_SessionCancel");
+    e.MessageSignInit       = (fn_MessageSignInit)dlsym(e.h, "C_MessageSignInit");
+    e.SignMessage           = (fn_SignMessage)dlsym(e.h, "C_SignMessage");
+    e.MessageSignFinal      = (fn_MessageSignFinal)dlsym(e.h, "C_MessageSignFinal");
+    e.MessageVerifyInit     = (fn_MessageVerifyInit)dlsym(e.h, "C_MessageVerifyInit");
+    e.VerifyMessage         = (fn_VerifyMessage)dlsym(e.h, "C_VerifyMessage");
+    e.MessageVerifyFinal    = (fn_MessageVerifyFinal)dlsym(e.h, "C_MessageVerifyFinal");
     return true;
 }
 
