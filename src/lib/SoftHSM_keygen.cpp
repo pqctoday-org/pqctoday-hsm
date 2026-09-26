@@ -3562,11 +3562,41 @@ CK_RV SoftHSM::C_DeriveKey
 			}
 		}
 
-		// Parse CK_PRF_DATA_PARAM array:
-		//   CK_SP800_108_BYTE_ARRAY → append to fixed-input label/context buffer
-		//   CK_SP800_108_ITERATION_VARIABLE → extract counter width (default 32 bits)
-		ByteString kbkFixedInput;
-		int kbkCounterBits = 32;
+		// Parse the CK_PRF_DATA_PARAM array into ORDERED segments.
+		//
+		// §6.42.3 / Table 199 defines CK_SP800_108_ITERATION_VARIABLE as
+		// identifying "the location of the iteration variable in the
+		// constructed PRF input data", and for this KDF type "the iteration
+		// variable ... is a counter". That wording is locational, so the
+		// caller's array order — not a fixed library layout — decides the byte
+		// layout of each round's PRF input.
+		//
+		// 2026-09-26. This handler used to concatenate every BYTE_ARRAY into
+		// one buffer, take only the counter WIDTH from ITERATION_VARIABLE, and
+		// hand the derivation to OpenSSL's KBKDF provider, which hardwires
+		// counter || label || [separator] || context || [L]
+		// (providers/implementations/kdfs/kbkdf.c derive() writes the counter
+		// first regardless of array order). ACVP's "after fixed data" and
+		// "middle fixed data" counter placements were therefore unreachable —
+		// 4 failing vectors. Fixed by hand-rolling the round loop on EVP_MAC,
+		// the same treatment the FEEDBACK and DOUBLE_PIPELINE handlers below
+		// already received, producing the same layout as Rust's
+		// sp800_108_iter_input.
+		//
+		// Verified against an independent from-spec SP 800-108 §5.1 reference
+		// (Python/HMAC, written from the publication rather than from either
+		// engine) which matches 37 of 37 HMAC ACVP vectors across all five
+		// counterLocation values. Note that "middle fixed data" splits the
+		// fixed input at ACVP's breakLocation expressed in BITS.
+		struct KbkSeg
+		{
+			bool       isCounter;
+			ByteString bytes;      // literal segment bytes when !isCounter
+			bool       le;         // counter endianness
+			unsigned   widthBytes; // counter width
+		};
+		std::vector<KbkSeg> kbkSegs;
+		bool kbkHaveCounter = false;
 		for (CK_ULONG i = 0; i < kp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dp = &kp->pDataParams[i];
@@ -3574,84 +3604,141 @@ CK_RV SoftHSM::C_DeriveKey
 			{
 				case CK_SP800_108_BYTE_ARRAY:
 					if (dp->pValue != NULL_PTR && dp->ulValueLen > 0)
-						kbkFixedInput += ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+					{
+						KbkSeg s;
+						s.isCounter = false;
+						s.le = false;
+						s.widthBytes = 0;
+						s.bytes = ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+						kbkSegs.push_back(s);
+					}
 					break;
 				case CK_SP800_108_ITERATION_VARIABLE:
+				{
+					KbkSeg s;
+					s.isCounter = true;
+					s.le = false;
+					s.widthBytes = 4;
 					if (dp->pValue != NULL_PTR && dp->ulValueLen == sizeof(CK_SP800_108_COUNTER_FORMAT))
 					{
 						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dp->pValue;
-						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64)
-							kbkCounterBits = (int)cf->ulWidthInBits;
+						// The old path passed this width to the provider as
+						// OSSL_KDF_PARAM_KBKDF_R, which accepts only
+						// {8,16,24,32}; anything else failed deep inside
+						// EVP_KDF_derive and surfaced as CKR_FUNCTION_FAILED.
+						// Reject it up front with the specific code instead,
+						// which is also what Rust returns — one fewer
+						// cross-engine divergence.
+						if (cf->ulWidthInBits != 8  && cf->ulWidthInBits != 16 &&
+						    cf->ulWidthInBits != 24 && cf->ulWidthInBits != 32)
+						{
+							ERROR_MSG("CKM_SP800_108_COUNTER_KDF: counter width %lu bits is not 8/16/24/32",
+							          (unsigned long)cf->ulWidthInBits);
+							return CKR_MECHANISM_PARAM_INVALID;
+						}
+						s.le = (cf->bLittleEndian != 0);
+						s.widthBytes = (unsigned)(cf->ulWidthInBits / 8);
 					}
+					kbkSegs.push_back(s);
+					kbkHaveCounter = true;
 					break;
+				}
 				default:
-					break; // DKM_LENGTH, KEY_HANDLE not supported — skip
+					break; // COUNTER, DKM_LENGTH, KEY_HANDLE not supported — skip
 			}
 		}
-
-		// Derive via OpenSSL KBKDF counter mode
-		ByteString kbkOut;
-		kbkOut.resize(kbkKeyLen);
+		// No ITERATION_VARIABLE supplied at all: keep this engine's historical
+		// layout of a 32-bit big-endian counter first. That is what the
+		// OpenSSL provider did unconditionally, and what Rust's
+		// sp800_108_iter_input still does when no counter segment is present,
+		// so the default stays byte-identical across both engines.
+		if (!kbkHaveCounter)
 		{
-			static const char kbkModeStr[] = "COUNTER";
-			EVP_KDF* kbkAlgo = EVP_KDF_fetch(NULL, "KBKDF", NULL);
+			KbkSeg s;
+			s.isCounter = true;
+			s.le = false;
+			s.widthBytes = 4;
+			kbkSegs.insert(kbkSegs.begin(), s);
+		}
+
+		// Derive via a hand-rolled Counter Mode loop on EVP_MAC (SP 800-108
+		// §5.1): K(i) = PRF(Ki, <segments in caller order, counter = i>), with
+		// the output the leftmost kbkKeyLen bytes of K(1) || K(2) || ...
+		// EVP_MAC is the same PRF primitive OpenSSL's own KBKDF uses
+		// internally, so this stays EVP-only; what it does NOT inherit is that
+		// provider's fixed byte layout (see the segment parser above).
+		ByteString kbkOut;
+		{
+			EVP_MAC* kbkAlgo = EVP_MAC_fetch(NULL, kbkMacName, NULL);
 			if (kbkAlgo == NULL)
 			{
-				ERROR_MSG("EVP_KDF_fetch KBKDF failed: 0x%08X", ERR_get_error());
-				return CKR_FUNCTION_FAILED;
-			}
-			EVP_KDF_CTX* kbkctx = EVP_KDF_CTX_new(kbkAlgo);
-			EVP_KDF_free(kbkAlgo);
-			if (kbkctx == NULL)
-			{
-				ERROR_MSG("EVP_KDF_CTX_new KBKDF failed");
+				ERROR_MSG("EVP_MAC_fetch %s failed: 0x%08X", kbkMacName, ERR_get_error());
 				return CKR_FUNCTION_FAILED;
 			}
 
-			// OpenSSL's KBKDF provider hardwires the SP800-108 byte layout to
-			// counter || label || [0x00 separator] || context || [L] (see
-			// providers/implementations/kdfs/kbkdf.c derive(): the counter is
-			// always written first, regardless of CK_PRF_DATA_PARAM array order).
-			// Route the caller's fixed input through "info" (context) with an
-			// empty label, and disable the auto-appended separator/L fields —
-			// the caller's dataParams array is the single source of truth for
-			// what's in the PRF input, matching PKCS#11 v3.2 §6.26's model where
-			// CK_SP800_108_DKM_LENGTH (not implemented here) is what a caller
-			// would use to request an L field, not an implicit library default.
-			// Net effect: this engine can only produce ACVP's "before fixed
-			// data" counter placement, not "after fixed data" / "middle fixed
-			// data" — a real, documented limitation of the OpenSSL backend.
-			int kbkUseL = 0;
-			int kbkUseSep = 0;
-			OSSL_PARAM kbkParams[10];
-			int kpi = 0;
-			kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE,
-			                        const_cast<char*>(kbkModeStr), 0);
-			kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MAC,
-			                        const_cast<char*>(kbkMacName), 0);
+			OSSL_PARAM kbkInitParams[2];
+			int kbkParamCount = 0;
 			if (!kbkUseCmac)
-				kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST,
-				                        const_cast<char*>(kbkDigestName), 0);
+				kbkInitParams[kbkParamCount++] = OSSL_PARAM_construct_utf8_string("digest", const_cast<char*>(kbkDigestName), 0);
 			else
-				kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_CIPHER,
-				                        const_cast<char*>(kbkCipherName), 0);
-			kbkParams[kpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
-			                        kbkIKM.byte_str(), kbkIKM.size());
-			if (kbkFixedInput.size() > 0)
-				kbkParams[kpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
-				                        kbkFixedInput.byte_str(), kbkFixedInput.size());
-			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_R, &kbkCounterBits);
-			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_L, &kbkUseL);
-			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR, &kbkUseSep);
-			kbkParams[kpi] = OSSL_PARAM_construct_end();
+				kbkInitParams[kbkParamCount++] = OSSL_PARAM_construct_utf8_string("cipher", const_cast<char*>(kbkCipherName), 0);
+			kbkInitParams[kbkParamCount] = OSSL_PARAM_construct_end();
 
-			int kbkRet = EVP_KDF_derive(kbkctx, kbkOut.byte_str(), kbkKeyLen, kbkParams);
-			EVP_KDF_CTX_free(kbkctx);
-			if (kbkRet <= 0)
+			auto kbkRunMac = [&](const ByteString& in, ByteString& out) -> bool
 			{
-				ERROR_MSG("EVP_KDF_derive KBKDF failed: 0x%08X", ERR_get_error());
+				EVP_MAC_CTX* ctx = EVP_MAC_CTX_new(kbkAlgo);
+				if (ctx == NULL) return false;
+				bool ok = EVP_MAC_init(ctx, kbkIKM.const_byte_str(), kbkIKM.size(), kbkInitParams) > 0 &&
+				          EVP_MAC_update(ctx, in.const_byte_str(), in.size()) > 0;
+				if (ok)
+				{
+					size_t macSize = EVP_MAC_CTX_get_mac_size(ctx);
+					out.resize(macSize);
+					size_t outLen = 0;
+					ok = EVP_MAC_final(ctx, out.byte_str(), &outLen, macSize) > 0;
+					if (ok) out.resize(outLen);
+				}
+				EVP_MAC_CTX_free(ctx);
+				return ok;
+			};
+
+			unsigned long kbkCounter = 1;
+			bool kbkOK = true;
+			while (kbkOK && kbkOut.size() < kbkKeyLen)
+			{
+				ByteString kbkRoundIn;
+				for (size_t s = 0; s < kbkSegs.size(); s++)
+				{
+					const KbkSeg& seg = kbkSegs[s];
+					if (!seg.isCounter)
+					{
+						kbkRoundIn += seg.bytes;
+						continue;
+					}
+					if (seg.le)
+					{
+						for (unsigned b = 0; b < seg.widthBytes; b++)
+							kbkRoundIn += (unsigned char)((kbkCounter >> (8 * b)) & 0xFF);
+					}
+					else
+					{
+						for (int b = (int)seg.widthBytes - 1; b >= 0; b--)
+							kbkRoundIn += (unsigned char)((kbkCounter >> (8 * b)) & 0xFF);
+					}
+				}
+
+				ByteString kbkBlock;
+				if (!kbkRunMac(kbkRoundIn, kbkBlock)) { kbkOK = false; break; }
+				kbkOut += kbkBlock;
+				kbkCounter++;
+			}
+			EVP_MAC_free(kbkAlgo);
+			if (!kbkOK)
+			{
+				ERROR_MSG("CKM_SP800_108_COUNTER_KDF: EVP_MAC round failed: 0x%08X", ERR_get_error());
 				return CKR_FUNCTION_FAILED;
 			}
+			kbkOut.resize(kbkKeyLen);
 		}
 
 		// Build output key object (mirrors HKDF handler)
