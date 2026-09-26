@@ -460,12 +460,32 @@ void ErrorPathTests::testSignMessageBufferTooSmall()
 		rv = CRYPTOKI_F_PTR( C_SignMessage(hSession, NULL_PTR, 0, data, sizeof(data) - 1, &sig[0], &full) );
 		expect(fails, "C_SignMessage after CKR_BUFFER_TOO_SMALL " + n, rv, CKR_OK);
 
-		// NOT asserted here: a SECOND C_SignMessage under the same
-		// C_MessageSignInit, which §5.14.2 also allows ("Additional
-		// C_SignMessage … calls may be made on the session"). This engine's
-		// AsymSign releases the signing context after every successful
-		// message, so a second message answers CKR_OPERATION_NOT_INITIALIZED.
-		// Recorded as a separate open finding; out of scope for E8.
+		// A SECOND C_SignMessage under the SAME C_MessageSignInit. PKCS#11
+		// v3.2 §5.14.2: "C_SignMessage does not finish the message-based
+		// signing process" and "Additional C_SignMessage or
+		// C_SignMessageBegin and C_SignMessageNext calls may be made on the
+		// session" — only C_MessageSignFinal (§5.14.5) ends it. Until
+		// 2026-09-25 this returned CKR_OPERATION_NOT_INITIALIZED, because
+		// AsymSign's success path calls resetOp(), which recycles the
+		// AsymmetricAlgorithm and the PrivateKey; C_SignMessage restored the
+		// op-type label and the mechanism params but not those two, so the
+		// next call tripped AsymSign's NULL-context guard.
+		//
+		// No byte comparison against the first signature: ML-DSA and SLH-DSA
+		// sign hedged by default, so two signatures over the same message
+		// legitimately differ. CKR_OK plus a full-length signature is the
+		// contract being checked here.
+		CK_ULONG second = sigLen;
+		std::vector<CK_BYTE> sig2(sigLen > 0 ? sigLen : 1);
+		rv = CRYPTOKI_F_PTR( C_SignMessage(hSession, NULL_PTR, 0, data, sizeof(data) - 1, &sig2[0], &second) );
+		expect(fails, "SECOND C_SignMessage under one C_MessageSignInit " + n, rv, CKR_OK);
+		if (rv == CKR_OK && second != sigLen)
+			fails += "second C_SignMessage returned a short signature " + n + "\n";
+
+		// And a THIRD, so the fix cannot be a one-shot re-arm that works once.
+		CK_ULONG third = sigLen;
+		rv = CRYPTOKI_F_PTR( C_SignMessage(hSession, NULL_PTR, 0, data, sizeof(data) - 1, &sig2[0], &third) );
+		expect(fails, "THIRD C_SignMessage under one C_MessageSignInit " + n, rv, CKR_OK);
 
 		rv = CRYPTOKI_F_PTR( C_MessageSignFinal(hSession) );
 		expect(fails, "C_MessageSignFinal " + n, rv, CKR_OK);

@@ -159,6 +159,34 @@ public:
 	void setVerifyKeyHandle(CK_OBJECT_HANDLE hKey);
 	CK_OBJECT_HANDLE getVerifyKeyHandle();
 
+	// Message-based operation re-arm state (PKCS#11 v3.2 §5.14.2 / §5.15.2).
+	//
+	// A message-based operation outlives the individual messages sent under it:
+	// only C_MessageSignFinal / C_MessageVerifyFinal ends it. But AsymSign and
+	// AsymVerify call resetOp() after every successful message, which recycles
+	// the AsymmetricAlgorithm and the key, so the per-message entry points have
+	// to rebuild that context for the next message. These two values are what
+	// they need to do it, and they are deliberately NOT cleared by resetOp() —
+	// that is the whole point. Cleared by clearMessageOp(), which the Final and
+	// cancel paths call.
+	//
+	// The ORIGINAL CK_MECHANISM parameter bytes are copied here too, and that
+	// distinction matters: the session's own `param` holds an INTERNAL
+	// representation, not the caller's CK_MECHANISM parameter. Handing `param`
+	// back to an init as a `pParameter` is rejected — for CKM_ML_DSA it is a
+	// 272-byte internal struct and the re-init answered
+	// CKR_MECHANISM_PARAM_INVALID (measured 2026-09-25). So the re-arm has to
+	// replay what the CALLER passed to C_MessageSignInit.
+	//
+	// Wiped on clear with the same discipline resetOp() applies to `param`,
+	// since a mechanism parameter can carry sensitive material.
+	bool setMessageOp(CK_MECHANISM_TYPE inMechType, CK_OBJECT_HANDLE hKey,
+	                  void* inParam, size_t inParamLen);
+	CK_MECHANISM_TYPE getMessageOpMechType();
+	CK_OBJECT_HANDLE getMessageOpKeyHandle();
+	void* getMessageOpParam(size_t& outParamLen);
+	void clearMessageOp();
+
 private:
 	// Constructor
 	Session();
@@ -205,6 +233,12 @@ private:
 	AsymMech::Type mechanism;
 	void* param;
 	size_t paramLen;
+
+	// See setMessageOp() above. NOT cleared by resetOp() by design.
+	CK_MECHANISM_TYPE msgOpMechType;
+	CK_OBJECT_HANDLE msgOpKeyHandle;
+	void* msgOpParam;
+	size_t msgOpParamLen;
 	bool reAuthentication;
 	bool allowMultiPartOp;
 	bool allowSinglePartOp;

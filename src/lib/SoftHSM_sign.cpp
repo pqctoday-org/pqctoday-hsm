@@ -3809,6 +3809,20 @@ static CK_RV applyPerMessageParam(Session* session,
 }
 
 // C_MessageSignInit — initialise a multi-message sign context (PKCS#11 v3.0 §5.8.1)
+// See the declaration in SoftHSM.h for the ordering contract.
+CK_RV SoftHSM::rearmMessageOp(CK_SESSION_HANDLE hSession, Session* session, bool sign)
+{
+	size_t initParamLen = 0;
+	void* initParam = session->getMessageOpParam(initParamLen);
+	CK_MECHANISM remech;
+	remech.mechanism = session->getMessageOpMechType();
+	remech.pParameter = initParam;
+	remech.ulParameterLen = (CK_ULONG)initParamLen;
+	CK_OBJECT_HANDLE hKey = session->getMessageOpKeyHandle();
+	return sign ? AsymSignInit(hSession, &remech, hKey)
+	            : AsymVerifyInit(hSession, &remech, hKey);
+}
+
 CK_RV SoftHSM::C_MessageSignInit(CK_SESSION_HANDLE hSession,
 	CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
 {
@@ -3830,6 +3844,18 @@ CK_RV SoftHSM::C_MessageSignInit(CK_SESSION_HANDLE hSession,
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 	session->setOpType(SESSION_OP_MESSAGE_SIGN);
+	// Remember what to re-arm with: AsymSign recycles the signing context after
+	// every message, so each per-message entry point rebuilds it from these.
+	// §5.14.2 keeps the operation alive until C_MessageSignFinal, not until the
+	// first message. Cleared there (and by the cancel path).
+	// Copy the CALLER's mechanism parameter, not the session's internal `param`
+	// — see Session::setMessageOp for why those are not interchangeable.
+	if (!session->setMessageOp(pMechanism->mechanism, hKey,
+	                           pMechanism->pParameter, (size_t)pMechanism->ulParameterLen))
+	{
+		session->resetOp();
+		return CKR_HOST_MEMORY;
+	}
 	return CKR_OK;
 }
 
@@ -3883,8 +3909,47 @@ CK_RV SoftHSM::C_SignMessage(CK_SESSION_HANDLE hSession,
 	// 2026-09-25) — the same handling C_SignMessageNext already had.
 	if (rv == CKR_OK || rv == CKR_BUFFER_TOO_SMALL)
 	{
+		// Re-arm for the NEXT message, BEFORE relabelling the op type.
+		// Ordering is load-bearing: AsymSignInit -> acquireSession refuses with
+		// CKR_OPERATION_ACTIVE unless getOpType() is SESSION_OP_NONE
+		// (SoftHSM.cpp:155-158), and AsymSign's resetOp() has just left it
+		// there. Setting SESSION_OP_MESSAGE_SIGN first makes the re-arm fail.
+		//
+		// Only after a real signature: AsymSign returns CKR_OK from the size
+		// query (pSignature == NULL_PTR) and CKR_BUFFER_TOO_SMALL *before* it
+		// calls resetOp(), so in both of those cases the context is still live
+		// and re-initialising would double-init the algorithm and leak the live
+		// context. Relabelling alone is right for those two.
+		//
+		// Why re-init rather than simply not resetting: AsymSign's multi-part
+		// branch drives signUpdate()/signFinal(), which finishes the
+		// AsymmetricAlgorithm's operation, and AsymmetricAlgorithm::signInit
+		// refuses re-entry while one is live. A fresh signInit is genuinely
+		// required for those mechanisms, not merely a surviving pointer.
+		// AsymSignInit re-acquires the session by handle, which is safe while
+		// holding sessionGuard: HandleManager::getSessionShared releases
+		// handlesMutex before returning, so the guard is a refcount, not a lock.
+		bool rearmed = false;
+		if (rv == CKR_OK && pSignature != NULL_PTR)
+		{
+			CK_RV rearm = rearmMessageOp(hSession, session, true);
+			if (rearm != CKR_OK)
+			{
+				// The signature just produced IS valid and is already in the
+				// caller's buffer, so this call still succeeds — but the
+				// operation cannot accept another message. Tear it down rather
+				// than leave a context that looks live and is not.
+				session->clearMessageOp();
+				session->resetOp();
+				if (snap) free(snap);
+				return rv;
+			}
+			rearmed = true;
+		}
 		session->setOpType(SESSION_OP_MESSAGE_SIGN);
-		if (snap) session->setParameters(snap, snapLen);
+		// A successful re-arm already installed the params, from the stored
+		// init parameter via the mechanism above.
+		if (!rearmed && snap) session->setParameters(snap, snapLen);
 	}
 	if (snap) free(snap);
 	return rv;
@@ -3899,6 +3964,9 @@ CK_RV SoftHSM::C_MessageSignFinal(CK_SESSION_HANDLE hSession)
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 	if (session->getOpType() != SESSION_OP_MESSAGE_SIGN)
 		return CKR_OPERATION_NOT_INITIALIZED;
+	// §5.14.5: THIS is what ends the message-based operation, so the re-arm
+	// state dies here — not after the first message.
+	session->clearMessageOp();
 	session->resetOp();
 	return CKR_OK;
 }
@@ -3923,6 +3991,13 @@ CK_RV SoftHSM::C_MessageVerifyInit(CK_SESSION_HANDLE hSession,
 	Session* session = sessionGuard.get();
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 	session->setOpType(SESSION_OP_MESSAGE_VERIFY);
+	// Same re-arm bookkeeping as the sign half — see C_MessageSignInit.
+	if (!session->setMessageOp(pMechanism->mechanism, hKey,
+	                           pMechanism->pParameter, (size_t)pMechanism->ulParameterLen))
+	{
+		session->resetOp();
+		return CKR_HOST_MEMORY;
+	}
 	return CKR_OK;
 }
 
@@ -3965,8 +4040,24 @@ CK_RV SoftHSM::C_VerifyMessage(CK_SESSION_HANDLE hSession,
 	CK_RV rv = AsymVerify(session, pData, ulDataLen, pSignature, ulSignatureLen);
 	if (rv == CKR_OK)
 	{
+		// Re-arm BEFORE relabelling: AsymVerify's success path reset the op to
+		// SESSION_OP_NONE, the only state an init accepts (acquireSession
+		// answers CKR_OPERATION_ACTIVE otherwise). Verify has no size-query or
+		// CKR_BUFFER_TOO_SMALL path, so plain CKR_OK is the only case where the
+		// context was destroyed.
+		CK_RV rearm = rearmMessageOp(hSession, session, false);
+		if (rearm != CKR_OK)
+		{
+			// The verification result stands; the operation simply cannot take
+			// another message.
+			session->clearMessageOp();
+			session->resetOp();
+			if (snap) free(snap);
+			return rv;
+		}
 		session->setOpType(SESSION_OP_MESSAGE_VERIFY);
-		if (snap) session->setParameters(snap, snapLen);
+		// A successful re-arm reinstalled the params from the stored init
+		// parameter already.
 	}
 	if (snap) free(snap);
 	return rv;
@@ -3981,6 +4072,8 @@ CK_RV SoftHSM::C_MessageVerifyFinal(CK_SESSION_HANDLE hSession)
 	if (session == NULL) return CKR_SESSION_HANDLE_INVALID;
 	if (session->getOpType() != SESSION_OP_MESSAGE_VERIFY)
 		return CKR_OPERATION_NOT_INITIALIZED;
+	// §5.15.5 — this is what ends the operation, so the re-arm state dies here.
+	session->clearMessageOp();
 	session->resetOp();
 	return CKR_OK;
 }
@@ -4054,7 +4147,20 @@ CK_RV SoftHSM::C_SignMessageNext(CK_SESSION_HANDLE hSession,
 	if (rv == CKR_OK)
 	{
 		if (pSignature != NULL_PTR)
+		{
+			// Real sign: AsymSign reset the context, so rebuild it before
+			// relabelling (an init requires SESSION_OP_NONE). Without this the
+			// next C_SignMessageBegin/Next pair would find a NULL context —
+			// Begin only checks the op type, it does not re-init.
+			CK_RV rearm = rearmMessageOp(hSession, session, true);
+			if (rearm != CKR_OK)
+			{
+				session->clearMessageOp();
+				session->resetOp();
+				return rv;
+			}
 			session->setOpType(SESSION_OP_MESSAGE_SIGN);        // message complete
+		}
 		else
 			session->setOpType(SESSION_OP_MESSAGE_SIGN_BEGIN);  // size query, stay
 	}
@@ -4108,7 +4214,23 @@ CK_RV SoftHSM::C_VerifyMessageNext(CK_SESSION_HANDLE hSession,
 	session->setOpType(SESSION_OP_VERIFY);
 	rv = AsymVerify(session, pData, ulDataLen, pSignature, ulSignatureLen);
 	if (rv == CKR_OK)
+	{
+		// Re-arm BEFORE relabelling: AsymVerify's success path reset the op to
+		// SESSION_OP_NONE, the only state an init accepts (acquireSession
+		// answers CKR_OPERATION_ACTIVE otherwise). Verify has no size-query or
+		// CKR_BUFFER_TOO_SMALL path, so plain CKR_OK is the only case where the
+		// context was destroyed.
+		CK_RV rearm = rearmMessageOp(hSession, session, false);
+		if (rearm != CKR_OK)
+		{
+			// The verification result stands; the operation simply cannot take
+			// another message.
+			session->clearMessageOp();
+			session->resetOp();
+			return rv;
+		}
 		session->setOpType(SESSION_OP_MESSAGE_VERIFY);
+	}
 	return rv;
 }
 

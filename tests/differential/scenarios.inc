@@ -2317,6 +2317,142 @@ add({"sign.multipart_pqc", "sign",
          }
      }});
 
+add({"sign.message_based_multiple_messages", "sign",
+     "THREE messages under ONE C_MessageSignInit, then the same under "
+     "C_MessageVerifyInit — §5.14.2 / §5.15.2: only C_MessageSignFinal ends a "
+     "message-based operation, never an individual message",
+     {CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         // 2026-09-25. Added alongside the C++ fix for exactly the reason the
+         // bug survived this long: NOTHING here observed message-based signing
+         // at all — no scenario called C_MessageSignInit, so no divergence
+         // could be reported. The C++ engine ended the operation after the
+         // FIRST message (AsymSign calls resetOp(), which recycles the
+         // AsymmetricAlgorithm and the key), so a second C_SignMessage
+         // answered CKR_OPERATION_NOT_INITIALIZED, while Rust deliberately
+         // saved and restored SIGN_STATE around the signing call
+         // (ffi.rs:8009-8022) and accepted further messages. One engine
+         // conformant, one not, and the harness blind to it.
+         //
+         // THREE messages, not two. Two cannot distinguish "the operation
+         // survives" from "the context is rebuilt exactly once", which is the
+         // shape a naive fix takes.
+         //
+         // Signature bytes are NOT compared between messages or between
+         // engines: ML-DSA signs hedged, so two signatures over the same
+         // message legitimately differ. What is compared is the sequence of
+         // return codes and the fact that every signature VERIFIES — recording
+         // only that C_SignMessage returned CKR_OK would pass on an engine
+         // that signed the wrong bytes.
+         struct Case { const char* tag; CK_MECHANISM_TYPE kg; CK_MECHANISM_TYPE sign;
+                       CK_KEY_TYPE kt; bool pqc; };
+         const Case cases[] = {
+             {"ml_dsa_65", CKM_ML_DSA_KEY_PAIR_GEN,   CKM_ML_DSA,   ktMlDsa, true},
+             // RSA is the SECOND family on purpose. A fix that stored the
+             // mechanism parameter wrongly would still work for a mechanism
+             // whose parameter is absent; covering only ML-DSA could not tell
+             // "re-arm works" from "re-arm works for one mechanism".
+             {"rsa2048",   CKM_RSA_PKCS_KEY_PAIR_GEN, CKM_RSA_PKCS, ktRsa,   false},
+         };
+         for (const Case& c : cases) {
+             if (!e.mechs.count(c.kg) || !e.mechs.count(c.sign)) {
+                 r.put(std::string(c.tag) + ".mech", "ABSENT");
+                 continue;
+             }
+             if (!e.MessageSignInit || !e.SignMessage || !e.MessageSignFinal) {
+                 r.put(std::string(c.tag) + ".entry_points", "ABSENT");
+                 continue;
+             }
+
+             CK_ULONG bits = 2048;
+             CK_BYTE  pe[] = {0x01, 0x00, 0x01};
+             CK_ULONG ps   = 2;  // CKP_ML_DSA_65
+             CK_ATTRIBUTE pubPqc[] = {
+                 ATTR(CKA_CLASS,         &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,      (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                 ATTR(CKA_PARAMETER_SET, &ps,       sizeof ps),
+                 ATTR(CKA_TOKEN,         &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,        &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE pubRsa[] = {
+                 ATTR(CKA_CLASS,           &clPublic, sizeof clPublic),
+                 ATTR(CKA_KEY_TYPE,        (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                 ATTR(CKA_MODULUS_BITS,    &bits,     sizeof bits),
+                 ATTR(CKA_PUBLIC_EXPONENT, pe,        sizeof pe),
+                 ATTR(CKA_TOKEN,           &bFalse,   sizeof bFalse),
+                 ATTR(CKA_VERIFY,          &bTrue,    sizeof bTrue),
+             };
+             CK_ATTRIBUTE privPqc[] = {
+                 ATTR(CKA_CLASS,         &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,      (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                 ATTR(CKA_PARAMETER_SET, &ps,        sizeof ps),
+                 ATTR(CKA_TOKEN,         &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,          &bTrue,     sizeof bTrue),
+             };
+             CK_ATTRIBUTE privRsa[] = {
+                 ATTR(CKA_CLASS,      &clPrivate, sizeof clPrivate),
+                 ATTR(CKA_KEY_TYPE,   (CK_VOID_PTR)&c.kt, sizeof c.kt),
+                 ATTR(CKA_TOKEN,      &bFalse,    sizeof bFalse),
+                 ATTR(CKA_SIGN,       &bTrue,     sizeof bTrue),
+             };
+             CK_MECHANISM km = { c.kg, NULL_PTR, 0 };
+             CK_OBJECT_HANDLE hPub = 0, hPriv = 0;
+             CK_RV rv = c.pqc
+                 ? e.fl->C_GenerateKeyPair(s, &km, pubPqc, 5, privPqc, 5, &hPub, &hPriv)
+                 : e.fl->C_GenerateKeyPair(s, &km, pubRsa, 6, privRsa, 4, &hPub, &hPriv);
+             r.rv(std::string(c.tag) + ".keygen", rv);
+             if (rv != CKR_OK) continue;
+
+             // Three distinct messages, so a signature cannot verify against
+             // the wrong one by coincidence.
+             CK_BYTE m1[] = "message one";
+             CK_BYTE m2[] = "message two, a different length";
+             CK_BYTE m3[] = "3";
+             struct Msg { CK_BYTE_PTR p; CK_ULONG n; };
+             const Msg msgs[] = { {m1, sizeof m1 - 1}, {m2, sizeof m2 - 1}, {m3, sizeof m3 - 1} };
+
+             CK_MECHANISM sm = { c.sign, NULL_PTR, 0 };
+             r.rv(std::string(c.tag) + ".msg_sign_init", e.MessageSignInit(s, &sm, hPriv));
+
+             CK_BYTE sigs[3][16384];
+             CK_ULONG slens[3] = {0, 0, 0};
+             for (int i = 0; i < 3; ++i) {
+                 const std::string t = std::string(c.tag) + ".sign_msg" + std::to_string(i + 1);
+                 slens[i] = sizeof sigs[i];
+                 CK_RV sr = e.SignMessage(s, NULL_PTR, 0, msgs[i].p, msgs[i].n,
+                                          sigs[i], &slens[i]);
+                 r.rv(t, sr);
+                 if (sr == CKR_OK) r.num(t + ".len", slens[i]);
+                 else              slens[i] = 0;
+             }
+             r.rv(std::string(c.tag) + ".msg_sign_final", e.MessageSignFinal(s));
+
+             // Each signature verified through the ORDINARY one-shot path, not
+             // the message path. If message-verify were broken in the same way
+             // message-sign was, verifying through it would hide both faults.
+             for (int i = 0; i < 3; ++i) {
+                 if (!slens[i]) continue;
+                 const std::string t = std::string(c.tag) + ".verify_msg" + std::to_string(i + 1);
+                 r.rv(t + ".init", e.fl->C_VerifyInit(s, &sm, hPub));
+                 r.rv(t, e.fl->C_Verify(s, msgs[i].p, msgs[i].n, sigs[i], slens[i]));
+             }
+
+             // Now the verify side of the same rule: three C_VerifyMessage
+             // calls under one C_MessageVerifyInit.
+             if (!e.MessageVerifyInit || !e.VerifyMessage || !e.MessageVerifyFinal) {
+                 r.put(std::string(c.tag) + ".verify_entry_points", "ABSENT");
+                 continue;
+             }
+             r.rv(std::string(c.tag) + ".msg_verify_init", e.MessageVerifyInit(s, &sm, hPub));
+             for (int i = 0; i < 3; ++i) {
+                 if (!slens[i]) continue;
+                 r.rv(std::string(c.tag) + ".verify_msg_op" + std::to_string(i + 1),
+                      e.VerifyMessage(s, NULL_PTR, 0, msgs[i].p, msgs[i].n, sigs[i], slens[i]));
+             }
+             r.rv(std::string(c.tag) + ".msg_verify_final", e.MessageVerifyFinal(s));
+         }
+     }});
+
 add({"verify.stateful_multipart_prebound", "sign",
      "HSS/XMSS/XMSS-MT verify via C_VerifySignatureInit — phase-5 §1, added "
      "BEFORE either engine changes. v3.2's own footnote for these rows "
