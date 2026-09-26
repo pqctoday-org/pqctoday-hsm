@@ -2064,12 +2064,36 @@ pub fn sign_rsa(
     use rsa::signature::SignatureEncoding;
     let private_key =
         rsa::RsaPrivateKey::from_pkcs8_der(sk_bytes).map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
+    // BLINDED, via `RandomizedSigner` rather than `Signer` — the two differ in
+    // exactly the way that matters here. On the same `SigningKey`,
+    // `Signer::try_sign` calls the crate's `sign::<DummyRng>(None, ..)`
+    // (rsa-0.9.10 src/pkcs1v15/signing_key.rs:156), i.e. NO blinding of the
+    // modular exponentiation, while `RandomizedSigner::try_sign_with_rng`
+    // calls `sign(Some(rng), ..)` (:145) and does blind. This is the pure-Rust
+    // fallback for the RSA v1.5 variants AWS-LC does not expose (MD5, SHA-1,
+    // SHA-224, SHA-3), so on native these ALWAYS land here — unblinded
+    // private-key math is the Marvin-class exposure the rest of this file
+    // works to avoid, and `pss_sign!` directly below already used the blinded
+    // signer. This only makes the two consistent.
+    //
+    // The signature bytes are unchanged: PKCS#1 v1.5 is deterministic (no
+    // salt), and the blinding factor is divided back out inside the crate, so
+    // the output is identical. Note what did NOT already cover this:
+    // `wave2_3_legacy_rsa_combos_round_trip` only round-trips (sign, then
+    // verify), which passes whether or not the bytes changed, and
+    // `awslc_rsa_signatures_verify_and_are_deterministic` covers only
+    // SHA-256/384/512 — the mechanisms AWS-LC handles, which never reach this
+    // macro. `v15_blinded_signing_is_byte_identical_and_deterministic` below
+    // was added with this change to pin it for the legacy mechanisms that do.
     macro_rules! pkcs1v15_sign {
         ($hash:ty) => {{
             use rsa::pkcs1v15::SigningKey;
-            use rsa::signature::Signer;
+            use rsa::signature::RandomizedSigner;
             let signing_key = SigningKey::<$hash>::new(private_key);
-            let sig = signing_key.sign(msg);
+            let mut rng = rand::rngs::OsRng;
+            let sig = signing_key
+                .try_sign_with_rng(&mut rng, msg)
+                .map_err(|_| CKR_FUNCTION_FAILED)?;
             Ok(sig.to_vec())
         }};
     }
@@ -3971,6 +3995,43 @@ e3c0089c5f7f3293edcbef738e9f39431610289a6e67fececc85a4b0897e8672c6454613a4b7fc0b
             decode_hex(S6_MODULUS_HEX),
             vec![0x01, 0x00, 0x01],
         )
+    }
+
+    /// Blinding the v1.5 signing path must not change what it outputs.
+    ///
+    /// `sign_rsa`'s `pkcs1v15_sign!` uses `RandomizedSigner` so the private-key
+    /// exponentiation is blinded (the unblinded `Signer` was a Marvin-class
+    /// exposure on the legacy mechanisms AWS-LC declines). PKCS#1 v1.5 has no
+    /// salt and the crate divides the blinding factor back out, so two signs of
+    /// the same message under the same key MUST be byte-identical. If a future
+    /// change swapped in a genuinely randomized construction, this fails —
+    /// which is the point, because every existing test here only round-trips
+    /// and would keep passing.
+    ///
+    /// Deliberately uses SHA-1 and MD5: those are exactly the mechanisms AWS-LC
+    /// does not expose, so they reach the pure-Rust macro this guards. A
+    /// SHA-256 case would be answered by AWS-LC and prove nothing about it.
+    #[test]
+    fn v15_blinded_signing_is_byte_identical_and_deterministic() {
+        use crate::constants::*;
+        let (sk, n, e) = s6_key();
+        for (mech, name) in [(CKM_SHA1_RSA_PKCS, "SHA-1 v1.5"), (CKM_MD5_RSA_PKCS, "MD5 v1.5")] {
+            // Confirm the premise: AWS-LC must decline these, or this test is
+            // silently exercising the fast path instead of the blinded macro.
+            #[cfg(not(target_arch = "wasm32"))]
+            assert!(
+                crate::crypto::awslc::rsa_sign(mech, &sk, S6_MSG, None).is_none(),
+                "{name}: premise broken — AWS-LC now handles this, so this test no longer covers the pure-Rust macro"
+            );
+
+            let a = sign_rsa(mech, &sk, S6_MSG, None)
+                .unwrap_or_else(|rv| panic!("{name}: first sign failed 0x{rv:x}"));
+            let b = sign_rsa(mech, &sk, S6_MSG, None)
+                .unwrap_or_else(|rv| panic!("{name}: second sign failed 0x{rv:x}"));
+            assert_eq!(a, b, "{name}: blinded v1.5 signing must stay deterministic");
+            assert_eq!(verify_rsa(mech, &n, &e, S6_MSG, &a, None), Ok(()), "{name}: verify");
+            assert_eq!(a.len(), n.len(), "{name}: v1.5 sig is one modulus wide");
+        }
     }
 
     /// §3 Waves 2-3 — the legacy RSA combos (SHA-1, MD5) round-trip, reject
