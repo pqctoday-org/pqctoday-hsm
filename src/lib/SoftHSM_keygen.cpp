@@ -3297,6 +3297,21 @@ CK_RV SoftHSM::C_DeriveKey
 				seed = key->getByteStringValue(CKA_VALUE);
 			}
 
+			// Seed length contract: 16..64 bytes (maintainer ruling 2026-09-26),
+			// which is what C_GetMechanismInfo advertises as 16/64. BIP-32 permits
+			// 128 to 512 bits of seed entropy, so this range covers every real
+			// seed — including the 64-byte seed BIP-39 produces — while still being
+			// a range rather than "anything".
+			//
+			// Enforce it here rather than only advertising it: deriveMasterNode
+			// HMAC-SHA512s the seed as the MAC *message*, so any length would
+			// otherwise derive happily and the advertised range would be a
+			// constraint the engine does not have — finding E20's own defect class.
+			if (seed.size() < 16 || seed.size() > 64) {
+				seed.wipe();
+				return CKR_KEY_SIZE_RANGE;
+			}
+
 			deriveOk = HDWalletDerivation::deriveMasterNode(seed, curveOid, privKeyBytes, chainCodeBytes);
 			seed.wipe();
 		} else {

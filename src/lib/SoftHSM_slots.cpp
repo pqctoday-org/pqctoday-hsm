@@ -783,6 +783,21 @@ CK_RV SoftHSM::C_GetMechanismList(CK_SLOT_ID slotID, CK_MECHANISM_TYPE_PTR pMech
 	return CKR_OK;
 }
 
+// The elliptic-curve capability flags every EC-family mechanism in this engine
+// shares: prime-field curves (CKF_EC_F_P), CKA_EC_PARAMS given as a curve OID
+// (CKF_EC_OID — pkcs11t.h:1354 keeps CKF_EC_NAMEDCURVE as a deprecated alias
+// for the same bit, retired in PKCS#11 3.00; prefer the current name), and uncompressed
+// point encodings (CKF_EC_UNCOMPRESS). PKCS#11 v3.2 §5.4.4 / Table 40 defines
+// these as the EC-family members of CK_MECHANISM_INFO.flags.
+//
+// Hoisted out of the switch below (2026-09-25). It used to be #defined inside
+// the CKM_EC_KEY_PAIR_GEN case, under `#ifdef WITH_ECC`, while the first
+// consumer added outside that block — the CKM_ECDH1_* arms, which live under
+// `#if defined(WITH_ECC) || defined(WITH_EDDSA)` — would not have compiled in
+// an EdDSA-only configuration. A shared flag set does not belong inside one
+// case label either way.
+#define CKF_EC_COMMOM	(CKF_EC_F_P | CKF_EC_OID | CKF_EC_UNCOMPRESS)
+
 // Return more information about a mechanism for a given slot
 CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_MECHANISM_INFO_PTR pInfo)
 {
@@ -1186,7 +1201,6 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		case CKM_EC_KEY_PAIR_GEN_W_EXTRA_BITS:
 			pInfo->ulMinKeySize = ecdsaMinSize;
 			pInfo->ulMaxKeySize = ecdsaMaxSize;
-#define CKF_EC_COMMOM	(CKF_EC_F_P | CKF_EC_NAMEDCURVE | CKF_EC_UNCOMPRESS)
 			pInfo->flags = CKF_GENERATE_KEY_PAIR | CKF_EC_COMMOM;
 			break;
 		case CKM_ECDSA:
@@ -1214,25 +1228,83 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			// C_EncapsulateKey/C_DecapsulateKey (SoftHSM_kem.cpp, PKCS#11
 			// v3.2 §6.3.17 Table 78) — advertise it, mirroring the
 			// CKM_ML_KEM entry below. The cofactor variant stays derive-only.
+			//
+			// CKF_EC_COMMOM (2026-09-25, finding E20): both ECDH1 mechanisms
+			// are EC-family mechanisms (v3.2 §6.3), dispatched by C_DeriveKey
+			// through deriveECDH/deriveEDDSA over exactly the same key objects
+			// the CKM_ECDSA and CKM_EC_KEY_PAIR_GEN arms above already claim
+			// these flags for: prime-field curves, CKA_EC_PARAMS as a curve
+			// OID, uncompressed CKA_EC_POINT. Omitting them here said this
+			// engine could not do an ECDH over a named prime curve with an
+			// uncompressed peer point — which is the only form it does.
 			pInfo->ulMinKeySize = ecdhMinSize ? ecdhMinSize : eddsaMinSize;
 			pInfo->ulMaxKeySize = ecdhMaxSize ? ecdhMaxSize : eddsaMaxSize;
-			pInfo->flags = CKF_DERIVE | CKF_ENCAPSULATE | CKF_DECAPSULATE;
+			pInfo->flags = CKF_DERIVE | CKF_ENCAPSULATE | CKF_DECAPSULATE |
+			               CKF_EC_COMMOM;
 			break;
 		case CKM_ECDH1_COFACTOR_DERIVE:
 			pInfo->ulMinKeySize = ecdhMinSize ? ecdhMinSize : eddsaMinSize;
 			pInfo->ulMaxKeySize = ecdhMaxSize ? ecdhMaxSize : eddsaMaxSize;
-			pInfo->flags = CKF_DERIVE;
+			pInfo->flags = CKF_DERIVE | CKF_EC_COMMOM;
 			break;
 #endif
 		// Montgomery X25519/X448 + BIP32 derive (audit mech G6). These are
 		// dispatched by C_DeriveKey but were unreachable because the advertised
 		// table omitted them (isMechanismPermitted rejected them).
+		//
+		// E20 (2026-09-25) — these four were one case label reporting 0/0 for
+		// all of them. They are split now because their key sizes are neither
+		// unknown nor shared. X25519 and X448 are RFC 7748 Diffie-Hellman over
+		// ONE fixed curve each, so min == max, in bits, exactly as the
+		// CKM_EC_MONTGOMERY_KEY_PAIR_GEN / CKM_EC_MONTGOMERY_KEY_DERIVE arms
+		// below already report (eddsaMinSize = 255, eddsaMaxSize = 448, from
+		// OSSLEDDSA::getMin/MaxKeySize). Both curves are genuinely supported —
+		// C_DeriveKey routes a CKK_EC_MONTGOMERY base key to deriveEDDSA
+		// (SoftHSM_keygen.cpp) and OSSLUtil.cpp maps both "curve25519" and
+		// "curve448" to their EVP_PKEY types. 0/0 said the engine knew nothing
+		// about the key size of a mechanism whose key size is fixed by name.
 		case CKM_X25519:
+			pInfo->ulMinKeySize = 255;
+			pInfo->ulMaxKeySize = 255;
+			pInfo->flags = CKF_DERIVE;
+			break;
 		case CKM_X448:
-		case CKM_BIP32_MASTER_DERIVE:
+			pInfo->ulMinKeySize = 448;
+			pInfo->ulMaxKeySize = 448;
+			pInfo->flags = CKF_DERIVE;
+			break;
+		// BIP32 child derivation takes the parent's private scalar as its base
+		// key, which HDWalletDerivation::deriveChildNode consumes as a 32-byte
+		// value for every curve it supports (secp256k1, P-256, ed25519) — the
+		// same 32/32 the Rust engine advertises.
 		case CKM_BIP32_CHILD_DERIVE:
-			pInfo->ulMinKeySize = 0;
-			pInfo->ulMaxKeySize = 0;
+			pInfo->ulMinKeySize = 32;
+			pInfo->ulMaxKeySize = 32;
+			pInfo->flags = CKF_DERIVE;
+			break;
+		// CKM_BIP32_MASTER_DERIVE advertises 16/64 (maintainer ruling 2026-09-26).
+		// BIP-32 permits 128 to 512 bits of seed entropy, so this range describes
+		// what is actually accepted and usable while excluding nothing real —
+		// notably it ACCEPTS the 64-byte seed BIP-39 produces.
+		//
+		// This replaces an earlier 0/0 here, which was accurate about the old
+		// behaviour (deriveMasterNode HMAC-SHA512s a seed of any length) but
+		// claimed no contract at all. An intermediate 32/32 was considered and
+		// rejected precisely because it would have excluded BIP-39's seed length.
+		// The Rust engine moves 32/32 -> 16/64 to match, owned separately.
+		//
+		// The range is only honest because SoftHSM_keygen.cpp ENFORCES it
+		// (CKR_KEY_SIZE_RANGE below 16 or above 64). Advertising a range without
+		// that check would claim a constraint the engine does not have, which is
+		// finding E20's own defect class. Keep the two in step: if the enforcement
+		// is ever relaxed, this range has to go back to 0/0.
+		//
+		// Vendor mechanism (CKM_VENDOR_DEFINED | 0x105B), so this is a project
+		// ruling, NOT a v3.2 conformance requirement — canonical v3.2 does not
+		// define it.
+		case CKM_BIP32_MASTER_DERIVE:
+			pInfo->ulMinKeySize = 16;
+			pInfo->ulMaxKeySize = 64;
 			pInfo->flags = CKF_DERIVE;
 			break;
 #ifdef WITH_EDDSA
