@@ -3051,8 +3051,8 @@
       "cpp": "implemented",
       "rust": "implemented",
       "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism.",
-      "cpp_min": 0,
-      "cpp_max": 0,
+      "cpp_min": 16,
+      "cpp_max": 64,
       "rust_min": 32,
       "rust_max": 32
     },

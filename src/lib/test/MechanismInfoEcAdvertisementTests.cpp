@@ -29,10 +29,16 @@
       deriveChildNode consumes the parent private scalar as a 32-byte value
       on every curve it supports.
 
- CKM_BIP32_MASTER_DERIVE is deliberately NOT asserted to 32/32: its base key
- is the BIP-32 binary seed and deriveMasterNode HMAC-SHA512s a seed of any
- length, so it keeps 0/0. The test pins that too, so a future change to 32/32
- has to argue with this file.
+ CKM_BIP32_MASTER_DERIVE is asserted to 16/64 (maintainer ruling 2026-09-26).
+ This file previously pinned it at 0/0 — accurate about the old behaviour, since
+ deriveMasterNode HMAC-SHA512s a seed of any length — and demanded a decision
+ before anyone changed it. That decision was made: BIP-32 permits 128-512 bits of
+ seed entropy, so 16..64 bytes is the contract — it covers every real seed,
+ including BIP-39's 64. An intermediate 32/32 was considered and rejected for
+ excluding exactly that. The pin asserts all three parts: the advertised 16/64,
+ that BOTH ends of the range really derive, and the CKR_KEY_SIZE_RANGE refusal
+ outside it. A range without the refusal would be finding E20's own defect —
+ claiming a constraint the engine does not have.
  *****************************************************************************/
 
 #include <config.h>
@@ -44,8 +50,10 @@ CPPUNIT_TEST_SUITE_REGISTRATION(MechanismInfoEcAdvertisementTests);
 
 namespace {
 
-// PKCS#11 v3.2 §5.4.4 / pkcs11t.h: CKF_EC_NAMEDCURVE is defined as CKF_EC_OID.
-const CK_FLAGS EC_COMMON_FLAGS = CKF_EC_F_P | CKF_EC_NAMEDCURVE | CKF_EC_UNCOMPRESS;
+// PKCS#11 v3.2 §5.4.4. Use CKF_EC_OID, not the CKF_EC_NAMEDCURVE alias: pkcs11t.h
+// defines the latter AS the former (same bit, 0x00800000) but marks it deprecated
+// since PKCS#11 3.00. Same value, current name.
+const CK_FLAGS EC_COMMON_FLAGS = CKF_EC_F_P | CKF_EC_OID | CKF_EC_UNCOMPRESS;
 
 CK_RV login(CK_SESSION_HANDLE& hSession, CK_SLOT_ID slot,
             CK_UTF8CHAR_PTR pin, CK_ULONG pinLen)
@@ -299,15 +307,80 @@ void MechanismInfoEcAdvertisementTests::testBip32ChildDeriveAdvertisesItsParentK
 	                       std::to_string(info.ulMaxKeySize),
 	                       info.ulMaxKeySize == 32);
 
-	// CKM_BIP32_MASTER_DERIVE keeps 0/0 on purpose: deriveMasterNode accepts a
-	// seed of any length, so there is no range to claim. Pinned so that
-	// "make it match the Rust engine's 32/32" cannot land without a decision.
+	// CKM_BIP32_MASTER_DERIVE advertises 16/64 (maintainer ruling 2026-09-26,
+	// replacing the 0/0 pin this file used to hold). The decision that pin was
+	// demanding has been made: BIP-32 permits 128–512 bits of seed entropy, so
+	// 16/64 covers every real seed — including BIP-39's 64 bytes.
 	memset(&info, 0, sizeof info);
 	CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_GetMechanismInfo(m_initializedTokenSlotID,
 		CKM_BIP32_MASTER_DERIVE, &info) ) == CKR_OK);
-	CPPUNIT_ASSERT_MESSAGE("CKM_BIP32_MASTER_DERIVE: should advertise no key-size range (0/0) — "
-	                       "its seed length is unconstrained",
-	                       info.ulMinKeySize == 0 && info.ulMaxKeySize == 0);
+	CPPUNIT_ASSERT_MESSAGE("CKM_BIP32_MASTER_DERIVE: should advertise 16/64 per the seed "
+	                       "contract — got ulMinKeySize " + std::to_string(info.ulMinKeySize) +
+	                       " / ulMaxKeySize " + std::to_string(info.ulMaxKeySize),
+	                       info.ulMinKeySize == 16 && info.ulMaxKeySize == 64);
+
+	// Both ENDS of the advertised range must actually derive. 64 is the one that
+	// matters: it is BIP-39's seed length, and an earlier 32/32 proposal was
+	// rejected precisely because it would have refused it. If a future change
+	// narrows the enforcement, this is what fails.
+	for (CK_ULONG okLen : { (CK_ULONG)16, (CK_ULONG)64 })
+	{
+		CK_OBJECT_CLASS okClass = CKO_SECRET_KEY;
+		CK_KEY_TYPE okType = CKK_GENERIC_SECRET;
+		CK_BBOOL bDeriveOk = CK_TRUE;
+		CK_ATTRIBUTE okTmpl[] = {
+			{ CKA_CLASS, &okClass, sizeof(okClass) },
+			{ CKA_KEY_TYPE, &okType, sizeof(okType) },
+			{ CKA_VALUE_LEN, &okLen, sizeof(okLen) },
+			{ CKA_DERIVE, &bDeriveOk, sizeof(bDeriveOk) }
+		};
+		CK_OBJECT_HANDLE hOkSeed = CK_INVALID_HANDLE;
+		CK_MECHANISM genMechOk = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+		CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_GenerateKey(hSession, &genMechOk, okTmpl,
+			sizeof(okTmpl)/sizeof(CK_ATTRIBUTE), &hOkSeed) ) == CKR_OK);
+
+		CK_MECHANISM okMasterMech = { CKM_BIP32_MASTER_DERIVE, NULL_PTR, 0 };
+		CK_OBJECT_HANDLE hOkMaster = CK_INVALID_HANDLE;
+		CK_RV rvOk = CRYPTOKI_F_PTR( C_DeriveKey(hSession, &okMasterMech, hOkSeed,
+			nodeTmpl, nodeCount, &hOkMaster) );
+		CPPUNIT_ASSERT_MESSAGE("CKM_BIP32_MASTER_DERIVE: a " + std::to_string(okLen) +
+		                       "-byte seed is inside the advertised 16/64 range and must "
+		                       "derive, got rv " + std::to_string(rvOk),
+		                       rvOk == CKR_OK);
+		CPPUNIT_ASSERT(hOkMaster != CK_INVALID_HANDLE);
+	}
+
+	// The advertisement is only honest if the engine ENFORCES it. Without this,
+	// 16/64 would be a claimed constraint the code does not have — finding E20's
+	// own defect class, and the reason the ruling was implemented as advertisement
+	// + enforcement rather than a one-line range change. These are the lengths
+	// just outside each end.
+	for (CK_ULONG badLen : { (CK_ULONG)8, (CK_ULONG)15, (CK_ULONG)65, (CK_ULONG)128 })
+	{
+		CK_OBJECT_CLASS badClass = CKO_SECRET_KEY;
+		CK_KEY_TYPE badType = CKK_GENERIC_SECRET;
+		CK_BBOOL bDerive = CK_TRUE;
+		CK_ATTRIBUTE badTmpl[] = {
+			{ CKA_CLASS, &badClass, sizeof(badClass) },
+			{ CKA_KEY_TYPE, &badType, sizeof(badType) },
+			{ CKA_VALUE_LEN, &badLen, sizeof(badLen) },
+			{ CKA_DERIVE, &bDerive, sizeof(bDerive) }
+		};
+		CK_OBJECT_HANDLE hBadSeed = CK_INVALID_HANDLE;
+		CK_MECHANISM genMech2 = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+		CPPUNIT_ASSERT(CRYPTOKI_F_PTR( C_GenerateKey(hSession, &genMech2, badTmpl,
+			sizeof(badTmpl)/sizeof(CK_ATTRIBUTE), &hBadSeed) ) == CKR_OK);
+
+		CK_MECHANISM badMasterMech = { CKM_BIP32_MASTER_DERIVE, NULL_PTR, 0 };
+		CK_OBJECT_HANDLE hBadMaster = CK_INVALID_HANDLE;
+		CK_RV rv = CRYPTOKI_F_PTR( C_DeriveKey(hSession, &badMasterMech, hBadSeed,
+			nodeTmpl, nodeCount, &hBadMaster) );
+		CPPUNIT_ASSERT_MESSAGE("CKM_BIP32_MASTER_DERIVE: a " + std::to_string(badLen) +
+		                       "-byte seed is outside the advertised 16/64 range and must "
+		                       "be refused CKR_KEY_SIZE_RANGE, got rv " + std::to_string(rv),
+		                       rv == CKR_KEY_SIZE_RANGE);
+		CPPUNIT_ASSERT(hBadMaster == CK_INVALID_HANDLE);
+	}
 
 	CRYPTOKI_F_PTR( C_Finalize(NULL_PTR) );
 }

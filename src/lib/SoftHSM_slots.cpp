@@ -1280,16 +1280,29 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMaxKeySize = 32;
 			pInfo->flags = CKF_DERIVE;
 			break;
-		// CKM_BIP32_MASTER_DERIVE deliberately KEEPS 0/0. Its base key is the
-		// BIP-32 binary seed, and deriveMasterNode HMAC-SHA512s a seed of any
-		// length — it does not constrain one, so there is no size range this
-		// engine could truthfully claim. The Rust engine's 32/32 for this
-		// mechanism is the inaccurate side of that pair (it accepts any length
-		// too); see the E20 report. Excused meanwhile by
-		// LEGAL-MECHANISM-INFO-KEY-SIZE-RANGES.
+		// CKM_BIP32_MASTER_DERIVE advertises 16/64 (maintainer ruling 2026-09-26).
+		// BIP-32 permits 128 to 512 bits of seed entropy, so this range describes
+		// what is actually accepted and usable while excluding nothing real —
+		// notably it ACCEPTS the 64-byte seed BIP-39 produces.
+		//
+		// This replaces an earlier 0/0 here, which was accurate about the old
+		// behaviour (deriveMasterNode HMAC-SHA512s a seed of any length) but
+		// claimed no contract at all. An intermediate 32/32 was considered and
+		// rejected precisely because it would have excluded BIP-39's seed length.
+		// The Rust engine moves 32/32 -> 16/64 to match, owned separately.
+		//
+		// The range is only honest because SoftHSM_keygen.cpp ENFORCES it
+		// (CKR_KEY_SIZE_RANGE below 16 or above 64). Advertising a range without
+		// that check would claim a constraint the engine does not have, which is
+		// finding E20's own defect class. Keep the two in step: if the enforcement
+		// is ever relaxed, this range has to go back to 0/0.
+		//
+		// Vendor mechanism (CKM_VENDOR_DEFINED | 0x105B), so this is a project
+		// ruling, NOT a v3.2 conformance requirement — canonical v3.2 does not
+		// define it.
 		case CKM_BIP32_MASTER_DERIVE:
-			pInfo->ulMinKeySize = 0;
-			pInfo->ulMaxKeySize = 0;
+			pInfo->ulMinKeySize = 16;
+			pInfo->ulMaxKeySize = 64;
 			pInfo->flags = CKF_DERIVE;
 			break;
 #ifdef WITH_EDDSA
