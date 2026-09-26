@@ -63,6 +63,26 @@ static constexpr CK_ULONG MAX_HMAC_KEY_BYTES        = 512UL;
 /// kMacMechTable enforces no HMAC floor (E17, see SoftHSM_slots.cpp).
 static constexpr CK_ULONG HMAC_MIN_KEY_BYTES        = 0UL;
 
+/// CK_MECHANISM_INFO flags advertised for every CKM_*_HMAC mechanism.
+///
+/// CKF_MESSAGE_SIGN / CKF_MESSAGE_VERIFY were added 2026-09-25, when
+/// C_MessageSignInit and C_MessageVerifyInit started dispatching MAC
+/// mechanisms to MacSignInit / MacVerifyInit instead of routing everything
+/// through the asymmetric inits. Before that C++ refused message-based signing
+/// with a MAC key (CKR_MECHANISM_INVALID) while the Rust engine accepted it —
+/// measured, not inferred: tests/differential scenario
+/// sign.message_based_hmac. Advertising a capability the engine does not
+/// implement, or implementing one it does not advertise, are both defects, so
+/// these move together.
+///
+/// CKF_MULTI_MESSAGE is deliberately NOT set here, and is not set by the Rust
+/// engine either: both engines do support several messages under one operation
+/// (that is what §5.14.2 requires), so it is arguably owed for every
+/// message-capable mechanism — but adding it is a separate, wider
+/// advertisement change than the one this constant records.
+static constexpr CK_FLAGS HMAC_MECH_FLAGS =
+	CKF_SIGN | CKF_VERIFY | CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+
 /// CKM_PKCS5_PBKD2 policy floor on CK_PKCS5_PBKD2_PARAMS2.iterations (E15 /
 /// decision D7): NIST SP 800-132 §5.2's recommended minimum, the same floor
 /// the Rust engine enforces. Below it C_DeriveKey returns

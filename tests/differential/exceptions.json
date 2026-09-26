@@ -222,15 +222,6 @@
       "unobservable": "no scenario may deliberately exhaust a PIN — it would lock the token for every later scenario"
     },
     {
-      "id": "LEGAL-MESSAGE-BASED-SIGNING-FLAGS",
-      "status": "legal",
-      "scenario": "__never_matches__",
-      "path": "*",
-      "justification": "Recorded for completeness: the message-based signing and encryption flag sets differ between the engines. No profile requires the message-based functions and no function is individually mandatory.",
-      "citation": "PKCS#11 v3.2 §5.1.6 All other Cryptoki function return values: \"Even unsupported functions in the Cryptoki API should have a 'stub' in the library; this stub should simply return the value CKR_FUNCTION_NOT_SUPPORTED.\" CORRECTED 2026-09-07 (H1): this cited §5.11/§5.12, which are message-based DECRYPTION and message DIGESTING — neither is the message-based signing or encryption this entry is about, and neither says anything of the kind.",
-      "unobservable": "the message-based flag sets live in CK_MECHANISM_INFO, which env.mechanism_set already covers wholesale"
-    },
-    {
       "id": "LEGAL-BUILD-FLAG-VARYING-MECHANISM-SETS",
       "status": "legal",
       "scenario": "__never_matches__",

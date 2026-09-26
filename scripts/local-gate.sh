@@ -17,7 +17,7 @@
 #   6. OASIS KMIP 3.0 replay + baseline assert + staleness guard (99/0/3)
 #   7. wasm  smoke.cjs                         — CACP bundle boots + round-trips
 #   8. Rust engine PKCS#11 v3.2 conformance (257 checks) + report freshness
-#   9. cross-engine PKCS#11 differential harness (49 scenarios vs exceptions.json)
+#   9. cross-engine PKCS#11 differential harness (every scenario vs exceptions.json)
 #  10. (--cpp)  C++ ctest incl. the v3.2 compliance harness + report freshness  [opt-in, slow]
 #  11. (--acvp-wasm)  20-suite ACVP wasm harness              [opt-in, slow]
 #  12. (--release-xmss) XMSS/XMSS^MT round trip vs RELEASE wasm build  [opt-in, ~15s]
@@ -510,19 +510,27 @@ run_step_bg "wasm target still compiles (cargo check)" \
 # Runs the STAGED bundle — see the check above for why that is not sufficient
 # on its own. Run scripts/build-kmip-wasm.sh after any wasm/ or kmip/ source
 # change to regenerate it.
+#
+# wasm/pkg_node/ is gitignored, so a fresh worktree has never had one and this
+# step failed there on a missing module rather than on anything about the code.
+# Build it on demand, with --no-stage: without that flag the build also copies
+# its output into the sibling pqctoday-hub checkout and stamps the current
+# commit into that repo's corpus manifest, so running this gate in a feature
+# worktree quietly restaged the hub from an unmerged branch (observed
+# 2026-09-25). A gate must not modify a different repository.
 run_step_bg_host "wasm CACP smoke" \
-  "cd '$ROOT/wasm' && node smoke/smoke.cjs 2>&1 | tail -2 | grep -q 'PASS'"
+  "cd '$ROOT/wasm' && { [ -f pkg_node/pqctoday_kmip_wasm.js ] || NO_STAGE=1 bash '$ROOT/scripts/build-kmip-wasm.sh' --no-stage >/tmp/gate-wasm-pkgnode.log 2>&1; } && node smoke/smoke.cjs 2>&1 | tail -2 | grep -q 'PASS'"
 
 # Was a manual-only tool until 2026-08-23 — never wired into any gate,
 # despite being the instrument the 2026-08 remediation added specifically
 # "to gate the rest from rotting." Builds BOTH engines fresh (see the
 # script's own header for why that matters) and diffs every observable
-# outcome across 49 scenarios; only divergences already recorded with a
+# outcome across every registered scenario; only divergences already recorded with a
 # citation in tests/differential/exceptions.json are allowed. Runs in the
 # Linux validation container so the same compiler and shared-library format
 # are used on every development host. Its dedicated build and cargo lane
 # keep it isolated from the Rust and KMIP jobs above.
-run_step_bg "cross-engine PKCS#11 differential harness (49 scenarios)" \
+run_step_bg "cross-engine PKCS#11 differential harness" \
   "cd $AG_CONTAINER_ROOT && P11DIFF_BUILD_DIR=build_union_linux bash scripts/run-differential-harness.sh --jobs 4 2>&1 | tail -15" \
   differential
 

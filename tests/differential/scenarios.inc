@@ -171,12 +171,24 @@ add({"env.mechanism_info_all", "env",
              // number tells a reader which mechanism disagreed but not
              // which capability, and the whole point is to make the
              // difference legible without re-running anything.
+             // 2026-09-25: the five message-based flags were MISSING from this
+             // list, so no engine difference in message-based capability could
+             // ever be observed here — the same class of blind spot that let
+             // multi-message signing stay broken in C++ (fixed 2026-09-25).
+             // CKF_MULTI_MESSAGE is the flag whose whole purpose is to say
+             // "more than one message may be sent under one operation", which
+             // is exactly the capability that fix implemented.
              static const NamePair mf[] = {
                  {CKF_HW,"HW"},{CKF_ENCRYPT,"ENCRYPT"},{CKF_DECRYPT,"DECRYPT"},
                  {CKF_DIGEST,"DIGEST"},{CKF_SIGN,"SIGN"},{CKF_SIGN_RECOVER,"SIGN_RECOVER"},
                  {CKF_VERIFY,"VERIFY"},{CKF_VERIFY_RECOVER,"VERIFY_RECOVER"},
                  {CKF_GENERATE,"GENERATE"},{CKF_GENERATE_KEY_PAIR,"GENERATE_KEY_PAIR"},
                  {CKF_WRAP,"WRAP"},{CKF_UNWRAP,"UNWRAP"},{CKF_DERIVE,"DERIVE"},
+                 {CKF_MESSAGE_ENCRYPT,"MESSAGE_ENCRYPT"},
+                 {CKF_MESSAGE_DECRYPT,"MESSAGE_DECRYPT"},
+                 {CKF_MESSAGE_SIGN,"MESSAGE_SIGN"},
+                 {CKF_MESSAGE_VERIFY,"MESSAGE_VERIFY"},
+                 {CKF_MULTI_MESSAGE,"MULTI_MESSAGE"},
              };
              std::string set;
              for (const auto& f : mf)
@@ -1039,6 +1051,74 @@ add({"bytes.hmac_sha256", "bytes", "CKM_SHA256_HMAC under a fixed key — byte-i
          rv = e.fl->C_Sign(s, kPlain32, sizeof kPlain32, out, &olen);
          r.rv("sign", rv);
          if (rv == CKR_OK) record_bytes(r, "mac", out, olen, ByteView::BYTES);
+     }});
+
+add({"sign.message_based_hmac", "sign",
+     "CKM_SHA256_HMAC under C_MessageSignInit — whether a MAC key is usable "
+     "with the message-based entry points at all (§5.14)",
+     {CKM_SHA256_HMAC}, true, true,
+     [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
+         // 2026-09-25. Recorded BEFORE changing either engine, the same way
+         // sign.multipart_pqc was: the point is to measure the disagreement,
+         // not to assert whose answer is right.
+         //
+         // C++ C_MessageSignInit (SoftHSM_sign.cpp:3839) routes into
+         // AsymSignInit and nothing else, so a MAC key has no path through it;
+         // the Rust engine's C_MessageSignInit delegates to C_SignInit, which
+         // does accept HMAC. v3.2 §5.14 does not restrict message-based
+         // operations to asymmetric mechanisms, so if that is what both
+         // engines do here, C++ is the non-conformant one — but which return
+         // code each gives is exactly what was never measured, so it is
+         // recorded rather than assumed.
+         //
+         // A fixed key value (not C_GenerateKey) keeps the MAC bytes
+         // comparable between engines, so if BOTH accept the operation this
+         // also checks they compute the same MAC for each message.
+         if (!e.MessageSignInit || !e.SignMessage || !e.MessageSignFinal) {
+             r.put("entry_points", "ABSENT");
+             return;
+         }
+         CK_ATTRIBUTE t[] = {
+             ATTR(CKA_CLASS,       &clSecret,  sizeof clSecret),
+             ATTR(CKA_KEY_TYPE,    &ktGeneric, sizeof ktGeneric),
+             ATTR(CKA_TOKEN,       &bFalse,    sizeof bFalse),
+             ATTR(CKA_VALUE,       kFixedAes,  sizeof kFixedAes),
+             ATTR(CKA_SIGN,        &bTrue,     sizeof bTrue),
+             ATTR(CKA_VERIFY,      &bTrue,     sizeof bTrue),
+             ATTR(CKA_SENSITIVE,   &bFalse,    sizeof bFalse),
+             ATTR(CKA_EXTRACTABLE, &bTrue,     sizeof bTrue),
+         };
+         CK_OBJECT_HANDLE h = CK_INVALID_HANDLE;
+         CK_RV rv = e.fl->C_CreateObject(s, t, 8, &h);
+         r.rv("create_key", rv);
+         if (rv != CKR_OK) return;
+
+         CK_MECHANISM m = { CKM_SHA256_HMAC, NULL_PTR, 0 };
+         CK_RV init = e.MessageSignInit(s, &m, h);
+         r.rv("msg_sign_init", init);
+         if (init != CKR_OK) {
+             // Refusal is an outcome, not an error in the scenario. Nothing is
+             // active, so there is nothing to tear down.
+             return;
+         }
+
+         // TWO messages, for the same reason the ML-DSA scenario uses three:
+         // an engine that accepts the init but ends the operation after one
+         // message would otherwise look identical to a conformant one.
+         CK_BYTE msgA[] = "mac message one";
+         CK_BYTE msgB[] = "mac message two";
+         struct Msg { CK_BYTE_PTR p; CK_ULONG n; };
+         const Msg msgs[] = { {msgA, sizeof msgA - 1}, {msgB, sizeof msgB - 1} };
+         for (int i = 0; i < 2; ++i) {
+             const std::string tag = "sign_msg" + std::to_string(i + 1);
+             CK_BYTE out[64]; CK_ULONG olen = sizeof out;
+             CK_RV sr = e.SignMessage(s, NULL_PTR, 0, msgs[i].p, msgs[i].n, out, &olen);
+             r.rv(tag, sr);
+             // A MAC is deterministic, so unlike ML-DSA the bytes themselves
+             // are comparable across engines and worth recording.
+             if (sr == CKR_OK) record_bytes(r, tag + ".mac", out, olen, ByteView::BYTES);
+         }
+         r.rv("msg_sign_final", e.MessageSignFinal(s));
      }});
 
 static auto aes_case = [](CK_MECHANISM_TYPE mech, bool needs_iv) {
@@ -2353,6 +2433,13 @@ add({"sign.message_based_multiple_messages", "sign",
              // whose parameter is absent; covering only ML-DSA could not tell
              // "re-arm works" from "re-arm works for one mechanism".
              {"rsa2048",   CKM_RSA_PKCS_KEY_PAIR_GEN, CKM_RSA_PKCS, ktRsa,   false},
+             // 2026-09-25: these two are mechanisms where C++ advertises
+             // CKF_MESSAGE_SIGN|CKF_MESSAGE_VERIFY and Rust does NOT, so what
+             // is measured here is whether that advertisement difference
+             // reflects a BEHAVIOUR difference or is advertisement lag alone.
+             // Plain CKM_RSA_PKCS above is deliberately not in that set (both
+             // engines advertise it), which makes it the control.
+             {"sha256_rsa", CKM_RSA_PKCS_KEY_PAIR_GEN, CKM_SHA256_RSA_PKCS, ktRsa, false},
          };
          for (const Case& c : cases) {
              if (!e.mechs.count(c.kg) || !e.mechs.count(c.sign)) {
