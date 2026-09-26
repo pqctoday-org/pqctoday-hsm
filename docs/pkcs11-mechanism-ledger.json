@@ -3041,8 +3041,8 @@
       "cpp": "implemented",
       "rust": "implemented",
       "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism.",
-      "cpp_min": 0,
-      "cpp_max": 0,
+      "cpp_min": 32,
+      "cpp_max": 32,
       "rust_min": 32,
       "rust_max": 32
     },
@@ -3167,8 +3167,8 @@
       "cpp": "implemented",
       "rust": "implemented",
       "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism.",
-      "cpp_min": 0,
-      "cpp_max": 0,
+      "cpp_min": 255,
+      "cpp_max": 255,
       "rust_min": 255,
       "rust_max": 255
     },
@@ -3177,8 +3177,8 @@
       "cpp": "implemented",
       "rust": "implemented",
       "note": "Engine extension: advertised by at least one engine but not defined in the canonical v3.2 header. Verify it sits in the CKM_VENDOR_DEFINED range or is a later-version mechanism.",
-      "cpp_min": 0,
-      "cpp_max": 0,
+      "cpp_min": 448,
+      "cpp_max": 448,
       "rust_min": 448,
       "rust_max": 448
     }
