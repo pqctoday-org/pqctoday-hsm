@@ -6697,21 +6697,50 @@ const SECRET_KEY_TYPES: &[u32] = &[
 /// PKCS#11 v3.2 §6.43.3 — "If both a key type and a length are provided in the
 /// template, the length must be compatible with that key type." True when
 /// `vlen` bytes is a legal CKA_VALUE_LEN for a secret key of type `key_type`.
-/// The variable-length types (generic secret, HKDF, every HMAC key type —
-/// §6.62.1 and the HMAC sections put no bound on the key length) accept any
-/// non-empty length; the block/stream-cipher types carry their own fixed set.
+///
+/// Deliberately EXHAUSTIVE over [`SECRET_KEY_TYPES`] rather than defaulting to
+/// "any length is fine": §6.43.3 requires a type with a well-defined length to
+/// refuse an incompatible one, so a catch-all `true` would silently mint a
+/// wrong-length key of any fixed-length type added to that list later — and a
+/// wrong-length key is least visible on the wrap/unwrap paths, where nothing
+/// reads the value back. An unclassified type is therefore REFUSED, and
+/// `every_secret_key_type_is_length_classified` fails the build's test run if
+/// a new entry appears here without a length rule.
 fn secret_key_len_ok(key_type: u32, vlen: u32) -> bool {
     if vlen == 0 {
         return false;
     }
     match key_type {
+        // ── Fixed-length types (§6.43.3's "well-defined length") ──────────
         // §6.12 — AES-128/192/256.
         CKK_AES => matches!(vlen, 16 | 24 | 32),
-        // §6.13 — AES-XTS keys are two AES keys concatenated.
+        // §6.13 — an AES-XTS key is two AES keys concatenated.
         CKK_AES_XTS => matches!(vlen, 32 | 64),
-        // §6.61 — ChaCha20 takes a 256-bit key, no other size.
+        // §6.61 — ChaCha20 takes a 256-bit key and no other size.
         CKK_CHACHA20 => vlen == 32,
-        _ => true,
+
+        // ── Variable-length types ────────────────────────────────────────
+        // §6.28 (generic secret) holds "a variable-length byte string";
+        // §6.62.1's CKK_HKDF and every HMAC key type are bounded only by the
+        // PRF, which accepts any key length. Any non-empty length is legal.
+        CKK_GENERIC_SECRET
+        | CKK_HKDF
+        | CKK_MD5_HMAC
+        | CKK_SHA_1_HMAC
+        | CKK_RIPEMD160_HMAC
+        | CKK_SHA224_HMAC
+        | CKK_SHA256_HMAC
+        | CKK_SHA384_HMAC
+        | CKK_SHA512_HMAC
+        | CKK_SHA512_224_HMAC
+        | CKK_SHA512_256_HMAC
+        | CKK_SHA3_224_HMAC
+        | CKK_SHA3_256_HMAC
+        | CKK_SHA3_384_HMAC
+        | CKK_SHA3_512_HMAC => true,
+
+        // Not classified above — refuse rather than guess. See the doc comment.
+        _ => false,
     }
 }
 
@@ -18911,6 +18940,27 @@ mod return_code_ffi_tests {
         let via_key = derive(CKF_HKDF_SALT_KEY, 0, 0, h_salt as usize);
         assert_eq!(via_key, via_data, "salt-as-key must key HMAC on the salt key's CKA_VALUE");
         assert_eq!(via_key.len(), 32);
+    }
+
+    /// Guard for `secret_key_len_ok`'s refusing default: every member of
+    /// `SECRET_KEY_TYPES` must have an explicit length rule, so adding a key
+    /// type to that list without classifying its length fails here instead of
+    /// silently accepting any length for it on a derive.
+    #[test]
+    fn every_secret_key_type_is_length_classified() {
+        for &kt in SECRET_KEY_TYPES {
+            // Every classified type accepts at least one of these: 32 bytes
+            // (legal for AES, AES-XTS, ChaCha20 and every variable-length
+            // type) or 64 (AES-XTS's other size). An unclassified type hits
+            // the refusing `_ => false` arm and matches neither.
+            assert!(
+                secret_key_len_ok(kt, 32) || secret_key_len_ok(kt, 64),
+                "CKA_KEY_TYPE {kt:#x} is in SECRET_KEY_TYPES but secret_key_len_ok \
+                 has no arm for it — add its length rule (§6.43.3)",
+            );
+            // A zero-length secret key is never legal, whatever the type.
+            assert!(!secret_key_len_ok(kt, 0), "CKA_KEY_TYPE {kt:#x} accepted a 0-byte value");
+        }
     }
 
     /// E10 regression — a secret-key derivation must honour the template's
