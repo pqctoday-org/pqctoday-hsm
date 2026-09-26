@@ -10508,6 +10508,21 @@ enum Sp800Seg {
     /// [L]: pre-encoded DKM length field bytes
     DkmLength(Vec<u8>),
     Bytes(Vec<u8>),
+    /// The iteration variable's POSITION — K(i-1) in Feedback Mode, A(i) in
+    /// Double Pipeline Mode. Carries no bytes of its own: the runner
+    /// substitutes the current chaining value wherever this segment sits.
+    ///
+    /// Added 2026-09-26. Tables 199, 200 and 201 each state, in identical
+    /// words, that CK_SP800_108_ITERATION_VARIABLE "identifies the location of
+    /// the iteration variable in the constructed PRF input data" — so the
+    /// position is normative in all three modes, not only Counter Mode.
+    /// Previously sp800_108_run_feedback and sp800_108_run_double_pipeline fed
+    /// the chaining value into the MAC *before* walking the caller's segments,
+    /// so the iteration variable was always first and ACVP's "before iterator"
+    /// placement — the counter ahead of K(i-1)/A(i) — was unreachable. The C++
+    /// engine had the identical defect, which is exactly why the differential
+    /// harness could never see it: both engines agreed on the wrong answer.
+    IterationVariable,
 }
 
 /// PKCS#11 v3.2 §6.42.2 — PRF output length in bytes for the SP 800-108
@@ -10606,7 +10621,33 @@ unsafe fn parse_sp800_108_segments(
                 // counter [i] is OPTIONAL and SEPARATE from K(i-1), which is
                 // what CK_SP800_108_COUNTER exists for in those modes. Read as
                 // an editorial carry-over from Table 199.
-                if allow_explicit_counter && val_ptr.is_null() {
+                if allow_explicit_counter {
+                    // Feedback / Double Pipeline. §13515-13520 (v3.2 p352) is
+                    // explicit about the wire shape here: "For the Counter Mode
+                    // KDF, pValue must be assigned a valid
+                    // CK_SP800_108_COUNTER_FORMAT_PTR ... For all other KDF
+                    // types, pValue must be set to NULL_PTR and ulValueLen must
+                    // be set to 0." So NULL is the conformant value and a
+                    // supplied counter format describes nothing — Table 200/201
+                    // define this variable's "size, format and value" as coming
+                    // from "the internal KDF structure and PRF output".
+                    //
+                    // A non-NULL pValue is therefore non-conformant caller
+                    // input. We ignore the format rather than reject it: the
+                    // spec's "must" here is lowercase, so under v3.2's Key
+                    // Words clause ("when, and only when, they appear in all
+                    // capitals") it does not bind, and the C++ engine ignores
+                    // it too — so ignoring keeps the engines byte-identical on
+                    // input the spec does not define. Honouring it would mean
+                    // following Table 200's trailing "Exact formatting of the
+                    // counter value is defined by the
+                    // CK_SP800_108_COUNTER_FORMAT structure" sentence, which
+                    // contradicts the "defined as K(i-1)" line two rows above
+                    // it and is a known editorial carry-over from Table 199.
+                    //
+                    // Either way the POSITION is preserved, which is the part
+                    // all three tables make normative.
+                    out.push(Sp800Seg::IterationVariable);
                     continue;
                 }
                 // pValue → CK_SP800_108_COUNTER_FORMAT { bLittleEndian: CK_BBOOL,
@@ -10728,6 +10769,9 @@ fn sp800_108_fixed_only(segs: &[Sp800Seg]) -> Vec<Vec<u8>> {
     segs.iter()
         .filter_map(|s| match s {
             Sp800Seg::Counter(..) => None,
+            // A(0) is FixedInputData ALONE (SP 800-108 §5.3) — neither the
+            // counter nor the iteration variable enters the A chain.
+            Sp800Seg::IterationVariable => None,
             Sp800Seg::DkmLength(b) => Some(b.clone()),
             Sp800Seg::Bytes(b) => Some(b.clone()),
         })
@@ -10737,8 +10781,14 @@ fn sp800_108_fixed_only(segs: &[Sp800Seg]) -> Vec<Vec<u8>> {
 /// Feedback-mode per-iteration input: segments in order, NO implicit
 /// counter when ITERATION_VARIABLE is absent (SP 800-108 §4.2 makes the
 /// counter optional in feedback mode).
-fn sp800_108_feedback_input(segs: &[Sp800Seg], counter: u32) -> Vec<Vec<u8>> {
+fn sp800_108_feedback_input(segs: &[Sp800Seg], counter: u32, chain: &[u8]) -> Vec<Vec<u8>> {
     let mut pieces = Vec::new();
+    // No ITERATION_VARIABLE segment: the chaining value goes first, which is
+    // this engine's prior layout and also the C++ engine's fallback, so the
+    // default stays byte-identical across both.
+    if !segs.iter().any(|s| matches!(s, Sp800Seg::IterationVariable)) {
+        pieces.push(chain.to_vec());
+    }
     for seg in segs {
         match seg {
             Sp800Seg::Counter(le, width) => {
@@ -10753,6 +10803,7 @@ fn sp800_108_feedback_input(segs: &[Sp800Seg], counter: u32) -> Vec<Vec<u8>> {
                     full[8 - *width..].to_vec()
                 });
             }
+            Sp800Seg::IterationVariable => pieces.push(chain.to_vec()),
             Sp800Seg::DkmLength(b) => pieces.push(b.clone()),
             Sp800Seg::Bytes(b) => pieces.push(b.clone()),
         }
@@ -10763,7 +10814,7 @@ fn sp800_108_feedback_input(segs: &[Sp800Seg], counter: u32) -> Vec<Vec<u8>> {
 /// Per-iteration PRF input pieces, in segment order. With no
 /// ITERATION_VARIABLE segment the legacy 32-bit BE counter is prepended
 /// (the engine's historical behavior).
-fn sp800_108_iter_input(segs: &[Sp800Seg], counter: u32) -> Vec<Vec<u8>> {
+fn sp800_108_iter_input(segs: &[Sp800Seg], counter: u32, chain: &[u8]) -> Vec<Vec<u8>> {
     let mut pieces = Vec::new();
     let has_counter = segs.iter().any(|s| matches!(s, Sp800Seg::Counter(..)));
     if !has_counter {
@@ -10783,6 +10834,7 @@ fn sp800_108_iter_input(segs: &[Sp800Seg], counter: u32) -> Vec<Vec<u8>> {
                     full[8 - *width..].to_vec()
                 });
             }
+            Sp800Seg::IterationVariable => pieces.push(chain.to_vec()),
             Sp800Seg::DkmLength(b) => pieces.push(b.clone()),
             Sp800Seg::Bytes(b) => pieces.push(b.clone()),
         }
@@ -10804,7 +10856,10 @@ where
     let mut counter: u32 = 1;
     while out.len() < key_len {
         let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
-        for piece in sp800_108_iter_input(segs, counter) {
+        // Counter Mode has no chaining value: Table 199's iteration variable
+        // IS the counter, so it parses as Sp800Seg::Counter and no
+        // IterationVariable segment can occur here.
+        for piece in sp800_108_iter_input(segs, counter, &[]) {
             mac.update(&piece);
         }
         out.extend_from_slice(&mac.finalize().into_bytes());
@@ -10831,10 +10886,12 @@ where
     let mut counter: u32 = 1;
     while out.len() < key_len {
         let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
-        mac.update(&k_prev);
-        // Feedback mode: an absent ITERATION_VARIABLE means NO counter
-        // (unlike counter mode), so only emit explicitly-requested segments.
-        for piece in sp800_108_feedback_input(segs, counter) {
+        // K(i-1) is emitted by the segment walk at the position the caller's
+        // ITERATION_VARIABLE occupied, NOT unconditionally first — that
+        // hardcoding is what made "before iterator" unreachable. Feedback mode
+        // also treats an absent ITERATION_VARIABLE as NO counter (unlike
+        // counter mode), so only explicitly-requested segments are emitted.
+        for piece in sp800_108_feedback_input(segs, counter, &k_prev) {
             mac.update(&piece);
         }
         k_prev = mac.finalize().into_bytes().to_vec();
@@ -10874,8 +10931,8 @@ where
     let mut counter: u32 = 1;
     while out.len() < key_len {
         let mut mac = <M as Mac>::new_from_slice(base_key).map_err(|_| CKR_FUNCTION_FAILED)?;
-        mac.update(&a);
-        for piece in sp800_108_feedback_input(segs, counter) {
+        // A(i) emitted at the caller's ITERATION_VARIABLE position, as above.
+        for piece in sp800_108_feedback_input(segs, counter, &a) {
             mac.update(&piece);
         }
         out.extend_from_slice(&mac.finalize().into_bytes());
@@ -19233,6 +19290,178 @@ mod return_code_ffi_tests {
     /// (NIST SP 800-108 §5.2, stdlib hmac/hashlib only) — all three (Python
     /// reference, C++ engine post-fix, Rust engine) agree byte-for-byte on
     /// both hex strings below.
+    /// Every ACVP counterLocation placement, all three SP 800-108 modes
+    /// (2026-09-26).
+    ///
+    /// Tables 199, 200 and 201 each say CK_SP800_108_ITERATION_VARIABLE
+    /// "identifies the location of the iteration variable in the constructed
+    /// PRF input data", so its array position is normative in all three modes.
+    /// Both runners used to feed the chaining value into the MAC before walking
+    /// the caller's segments, which made "before iterator" — the counter ahead
+    /// of K(i-1)/A(i) — unreachable. The C++ engine had the identical defect, so
+    /// the differential harness could never see it; both engines agreed on the
+    /// wrong answer.
+    ///
+    /// The vectors are NIST ACVP KDF-1.0. Note the reachability guard below:
+    /// this repo's OTHER two KBKDF vector files hold 42 cases that are all
+    /// "before fixed data", so a test over those could never have failed.
+    #[test]
+    fn sp800_108_all_counter_placements_match_nist_acvp() {
+        #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+        enum Loc {
+            BeforeFixed,
+            AfterFixed,
+            MiddleFixed,
+            BeforeIter,
+            None_,
+        }
+        fn unhex(s: &str) -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+                .collect()
+        }
+        let json = include_str!("../../tests/acvp/sp800_108_kbkdf_placement_test.json");
+        let v: serde_json::Value = serde_json::from_str(json).expect("vector json");
+
+        let mut ran = 0usize;
+        let mut seen: std::collections::HashSet<Loc> = Default::default();
+        let mut skipped_cmac = 0usize;
+
+        for g in v["testGroups"].as_array().expect("testGroups") {
+            let mode = g["kdfMode"].as_str().unwrap_or("");
+            let loc = match g["counterLocation"].as_str().unwrap_or("") {
+                "before fixed data" => Loc::BeforeFixed,
+                "after fixed data" => Loc::AfterFixed,
+                "middle fixed data" => Loc::MiddleFixed,
+                "before iterator" => Loc::BeforeIter,
+                "none" => Loc::None_,
+                other => panic!("unknown counterLocation {other}"),
+            };
+            let prf = match g["macMode"].as_str().unwrap_or("") {
+                "HMAC-SHA-1" => CKM_SHA_1_HMAC,
+                "HMAC-SHA2-224" => CKM_SHA224_HMAC,
+                "HMAC-SHA2-256" => CKM_SHA256_HMAC,
+                "HMAC-SHA2-384" => CKM_SHA384_HMAC,
+                "HMAC-SHA2-512" => CKM_SHA512_HMAC,
+                // AES-CMAC and the SHA-3 HMACs go through the same segment
+                // logic; they are exercised by the C++ probe against these same
+                // vectors. Counted so the skip is visible rather than silent.
+                _ => {
+                    skipped_cmac += g["tests"].as_array().map(|a| a.len()).unwrap_or(0);
+                    continue;
+                }
+            };
+            let width_bits = g["counterLength"].as_u64().unwrap_or(32) as usize;
+            if loc != Loc::None_ && !matches!(width_bits, 8 | 16 | 24 | 32) {
+                continue;
+            }
+            let wb = width_bits / 8;
+
+            for t in g["tests"].as_array().expect("tests") {
+                let key = unhex(t["keyIn"].as_str().expect("keyIn"));
+                let fixed = unhex(t["fixedData"].as_str().unwrap_or(""));
+                let iv = unhex(t["iv"].as_str().unwrap_or(""));
+                let want = unhex(t["keyOut"].as_str().expect("keyOut"));
+                let klen = g["keyOutLength"].as_u64().expect("keyOutLength") as usize / 8;
+                let tc = t["tcId"].as_u64().unwrap_or(0);
+
+                // Segment order IS the placement. Counter mode's iteration
+                // variable is itself the counter (Table 199), so it appears as
+                // Sp800Seg::Counter; feedback and double-pipeline carry a
+                // separate optional counter plus the iteration variable's
+                // position.
+                let segs: Vec<Sp800Seg> = if mode == "counter" {
+                    match loc {
+                        Loc::BeforeFixed => vec![
+                            Sp800Seg::Counter(false, wb),
+                            Sp800Seg::Bytes(fixed.clone()),
+                        ],
+                        Loc::AfterFixed => vec![
+                            Sp800Seg::Bytes(fixed.clone()),
+                            Sp800Seg::Counter(false, wb),
+                        ],
+                        Loc::MiddleFixed => {
+                            // breakLocation is in BITS, not bytes. Getting this
+                            // wrong yields plausible wrong bytes, not an error.
+                            let b = t["breakLocation"].as_u64().expect("breakLocation") as usize / 8;
+                            vec![
+                                Sp800Seg::Bytes(fixed[..b].to_vec()),
+                                Sp800Seg::Counter(false, wb),
+                                Sp800Seg::Bytes(fixed[b..].to_vec()),
+                            ]
+                        }
+                        other => panic!("counter mode cannot have {other:?}"),
+                    }
+                } else {
+                    match loc {
+                        Loc::BeforeFixed => vec![
+                            Sp800Seg::IterationVariable,
+                            Sp800Seg::Counter(false, wb),
+                            Sp800Seg::Bytes(fixed.clone()),
+                        ],
+                        Loc::AfterFixed => vec![
+                            Sp800Seg::IterationVariable,
+                            Sp800Seg::Bytes(fixed.clone()),
+                            Sp800Seg::Counter(false, wb),
+                        ],
+                        Loc::BeforeIter => vec![
+                            Sp800Seg::Counter(false, wb),
+                            Sp800Seg::IterationVariable,
+                            Sp800Seg::Bytes(fixed.clone()),
+                        ],
+                        Loc::None_ => vec![
+                            Sp800Seg::IterationVariable,
+                            Sp800Seg::Bytes(fixed.clone()),
+                        ],
+                        other => panic!("{mode} cannot have {other:?}"),
+                    }
+                };
+
+                let got = match mode {
+                    "counter" => sp800_108_counter_kbkdf(prf, &key, &segs, klen),
+                    "feedback" => sp800_108_feedback_kbkdf(prf, &key, &iv, &segs, klen),
+                    "double pipeline iteration" => {
+                        sp800_108_double_pipeline_kbkdf(prf, &key, &segs, klen)
+                    }
+                    other => panic!("unknown kdfMode {other}"),
+                }
+                .unwrap_or_else(|e| panic!("tc{tc} {mode}/{loc:?}: derive failed 0x{e:x}"));
+
+                assert_eq!(
+                    got, want,
+                    "tc{tc} {mode}/{loc:?}: derived key mismatch — the caller's \
+                     segment order is not being honoured"
+                );
+                ran += 1;
+                seen.insert(loc);
+            }
+        }
+
+        // Reachability. A loop that ran zero times, or one that only ever saw
+        // "before fixed data", proves nothing — and that is precisely the state
+        // the repo's other two KBKDF vector files are in.
+        assert!(ran > 0, "no vectors were exercised");
+        for need in [
+            Loc::BeforeFixed,
+            Loc::AfterFixed,
+            Loc::MiddleFixed,
+            Loc::BeforeIter,
+            Loc::None_,
+        ] {
+            assert!(
+                seen.contains(&need),
+                "placement {need:?} was never exercised — this test cannot \
+                 detect a regression in it"
+            );
+        }
+        assert!(
+            skipped_cmac > 0,
+            "expected some AES-CMAC/SHA-3 groups to be skipped here; if none \
+             were, the vector file changed shape"
+        );
+    }
+
     #[test]
     fn sp800_108_feedback_no_counter_matches_cpp_and_reference() {
         let base_key: Vec<u8> = (0u8..32).collect();
