@@ -786,8 +786,8 @@ CK_RV SoftHSM::C_GetMechanismList(CK_SLOT_ID slotID, CK_MECHANISM_TYPE_PTR pMech
 // The elliptic-curve capability flags every EC-family mechanism in this engine
 // shares: prime-field curves (CKF_EC_F_P), CKA_EC_PARAMS given as a curve OID
 // (CKF_EC_NAMEDCURVE, which pkcs11t.h defines as CKF_EC_OID), and uncompressed
-// point encodings (CKF_EC_UNCOMPRESS). PKCS#11 v3.2 §5.4.4 defines these as the
-// EC-family members of CK_MECHANISM_INFO.flags.
+// point encodings (CKF_EC_UNCOMPRESS). PKCS#11 v3.2 §5.4.4 / Table 40 defines
+// these as the EC-family members of CK_MECHANISM_INFO.flags.
 //
 // Hoisted out of the switch below (2026-09-25). It used to be #defined inside
 // the CKM_EC_KEY_PAIR_GEN case, under `#ifdef WITH_ECC`, while the first
@@ -1248,10 +1248,45 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 		// Montgomery X25519/X448 + BIP32 derive (audit mech G6). These are
 		// dispatched by C_DeriveKey but were unreachable because the advertised
 		// table omitted them (isMechanismPermitted rejected them).
+		//
+		// E20 (2026-09-25) — these four were one case label reporting 0/0 for
+		// all of them. They are split now because their key sizes are neither
+		// unknown nor shared. X25519 and X448 are RFC 7748 Diffie-Hellman over
+		// ONE fixed curve each, so min == max, in bits, exactly as the
+		// CKM_EC_MONTGOMERY_KEY_PAIR_GEN / CKM_EC_MONTGOMERY_KEY_DERIVE arms
+		// below already report (eddsaMinSize = 255, eddsaMaxSize = 448, from
+		// OSSLEDDSA::getMin/MaxKeySize). Both curves are genuinely supported —
+		// C_DeriveKey routes a CKK_EC_MONTGOMERY base key to deriveEDDSA
+		// (SoftHSM_keygen.cpp) and OSSLUtil.cpp maps both "curve25519" and
+		// "curve448" to their EVP_PKEY types. 0/0 said the engine knew nothing
+		// about the key size of a mechanism whose key size is fixed by name.
 		case CKM_X25519:
+			pInfo->ulMinKeySize = 255;
+			pInfo->ulMaxKeySize = 255;
+			pInfo->flags = CKF_DERIVE;
+			break;
 		case CKM_X448:
-		case CKM_BIP32_MASTER_DERIVE:
+			pInfo->ulMinKeySize = 448;
+			pInfo->ulMaxKeySize = 448;
+			pInfo->flags = CKF_DERIVE;
+			break;
+		// BIP32 child derivation takes the parent's private scalar as its base
+		// key, which HDWalletDerivation::deriveChildNode consumes as a 32-byte
+		// value for every curve it supports (secp256k1, P-256, ed25519) — the
+		// same 32/32 the Rust engine advertises.
 		case CKM_BIP32_CHILD_DERIVE:
+			pInfo->ulMinKeySize = 32;
+			pInfo->ulMaxKeySize = 32;
+			pInfo->flags = CKF_DERIVE;
+			break;
+		// CKM_BIP32_MASTER_DERIVE deliberately KEEPS 0/0. Its base key is the
+		// BIP-32 binary seed, and deriveMasterNode HMAC-SHA512s a seed of any
+		// length — it does not constrain one, so there is no size range this
+		// engine could truthfully claim. The Rust engine's 32/32 for this
+		// mechanism is the inaccurate side of that pair (it accepts any length
+		// too); see the E20 report. Excused meanwhile by
+		// LEGAL-MECHANISM-INFO-KEY-SIZE-RANGES.
+		case CKM_BIP32_MASTER_DERIVE:
 			pInfo->ulMinKeySize = 0;
 			pInfo->ulMaxKeySize = 0;
 			pInfo->flags = CKF_DERIVE;
