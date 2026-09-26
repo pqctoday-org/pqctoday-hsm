@@ -3539,17 +3539,21 @@ void test_message_signatures() {
             // pulSignatureLen to actually obtain the signature." A NULL
             // pulSignatureLen is therefore the CONTINUE shape, not an error.
             //
-            // XFAIL, recorded 2026-09-25: BOTH engines answer CKR_ARGUMENTS_BAD,
-            // so neither can stream a signature. This check lives HERE, in the
-            // single-engine spec-anchored suite, precisely because the
-            // cross-engine differential harness cannot see it — the two engines
-            // agree, so there is no divergence to report and its scenario passes
-            // while both are wrong. Comparing implementations finds
-            // disagreements; only the spec finds a shared defect.
+            // History, kept because it is the point of this check existing:
+            // when first added (2026-09-25) BOTH engines answered
+            // CKR_ARGUMENTS_BAD here, so neither could stream a signature. It
+            // was recorded as XFAIL rather than FAIL, and it was found only
+            // because this suite measures ONE engine against the spec — the
+            // cross-engine differential harness could not see it at all, since
+            // the two engines agreed and so produced no divergence. Comparing
+            // implementations finds disagreements; only the spec finds a shared
+            // defect.
             //
-            // Flip to a plain PASS assertion once C_SignMessageNext accepts the
-            // continue shape; CKF_MULTI_MESSAGE becomes advertisable at the same
-            // moment, and not before.
+            // Both engines were fixed in the same change (C++ here,
+            // Rust via ck_abi.rs's shim), so this now reports PASS, and
+            // CKF_MULTI_MESSAGE became advertisable at that moment. The
+            // status is still computed rather than asserted, so a regression
+            // drops back to XFAIL and stays visible instead of vanishing.
             CK_BYTE part1[] = "streamed-";
             CK_RV rvNonFinal = SignNext(hSess, NULL_PTR, 0, part1, sizeof(part1)-1,
                                         NULL_PTR, NULL_PTR);

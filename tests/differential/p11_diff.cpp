@@ -116,7 +116,7 @@ typedef CK_RV (*fn_VerifyMessage)(CK_SESSION_HANDLE, CK_VOID_PTR, CK_ULONG,
                                   CK_BYTE_PTR, CK_ULONG, CK_BYTE_PTR, CK_ULONG);
 typedef CK_RV (*fn_MessageVerifyFinal)(CK_SESSION_HANDLE);
 
-// The STREAMING form of a message-based operation (§5.14.3-4 / §5.15.3-4). This is
+// The STREAMING form of a message-based operation (§5.14.3-4 / §5.16.3-4). This is
 // what CKF_MULTI_MESSAGE advertises — v3.2's CK_MECHANISM_INFO flag table: "True if
 // the mechanism can be used with C_*MessageBegin. One of CKF_MESSAGE_* flag must also
 // be set." Nothing in this harness drove these four before 2026-09-25, so no engine

@@ -1173,7 +1173,7 @@ add({"bytes.hmac_sha256", "bytes", "CKM_SHA256_HMAC under a fixed key — byte-i
 
 add({"sign.message_based_streaming", "sign",
      "C_SignMessageBegin / C_SignMessageNext and the verify pair — the STREAMING "
-     "form of a message-based operation (§5.14.3-4 / §5.15.3-4), which is what "
+     "form of a message-based operation (§5.14.3-4 / §5.16.3-4), which is what "
      "CKF_MULTI_MESSAGE advertises",
      {CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA}, true, true,
      [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
@@ -2747,7 +2747,7 @@ add({"sign.multipart_pqc", "sign",
 
 add({"sign.message_based_multiple_messages", "sign",
      "THREE messages under ONE C_MessageSignInit, then the same under "
-     "C_MessageVerifyInit — §5.14.2 / §5.15.2: only C_MessageSignFinal ends a "
+     "C_MessageVerifyInit — §5.14.1 / §5.16.1: only C_MessageSignFinal ends a "
      "message-based operation, never an individual message",
      {CKM_ML_DSA_KEY_PAIR_GEN, CKM_ML_DSA}, true, true,
      [](Engine& e, Recorder& r, CK_SESSION_HANDLE s) {
