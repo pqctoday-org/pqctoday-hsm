@@ -6694,6 +6694,27 @@ const SECRET_KEY_TYPES: &[u32] = &[
     CKK_SHA3_512_HMAC,
 ];
 
+/// PKCS#11 v3.2 §6.43.3 — "If both a key type and a length are provided in the
+/// template, the length must be compatible with that key type." True when
+/// `vlen` bytes is a legal CKA_VALUE_LEN for a secret key of type `key_type`.
+/// The variable-length types (generic secret, HKDF, every HMAC key type —
+/// §6.62.1 and the HMAC sections put no bound on the key length) accept any
+/// non-empty length; the block/stream-cipher types carry their own fixed set.
+fn secret_key_len_ok(key_type: u32, vlen: u32) -> bool {
+    if vlen == 0 {
+        return false;
+    }
+    match key_type {
+        // §6.12 — AES-128/192/256.
+        CKK_AES => matches!(vlen, 16 | 24 | 32),
+        // §6.13 — AES-XTS keys are two AES keys concatenated.
+        CKK_AES_XTS => matches!(vlen, 32 | 64),
+        // §6.61 — ChaCha20 takes a 256-bit key, no other size.
+        CKK_CHACHA20 => vlen == 32,
+        _ => true,
+    }
+}
+
 /// E5 (2026-09-25) — the CKA_KEY_TYPE values a keyed mechanism accepts, from
 /// each mechanism's "Allowed key types" / key-type text in PKCS#11 v3.2
 /// chapter 6. `None` means the engine does not check the key type at init
@@ -12048,6 +12069,47 @@ pub fn C_DeriveKey(
             // be marked ALWAYS_SENSITIVE / NEVER_EXTRACTABLE.
             store_bool(&mut attrs, CKA_ALWAYS_SENSITIVE, false);
             store_bool(&mut attrs, CKA_NEVER_EXTRACTABLE, false);
+
+            // E10 (2026-09-25) — CKA_KEY_TYPE on a secret-key derivation comes
+            // from the TEMPLATE, not from the token. `absorb_template_attrs`
+            // skips it (it is in `is_server_managed_attr`, which is right for
+            // C_GenerateKey — there CKM_AES_KEY_GEN et al. fix the type — but
+            // wrong here), so the CKK_GENERIC_SECRET default above used to
+            // stand unconditionally and a caller asking for CKK_AES /
+            // CKK_CHACHA20 got a generic-secret key whose later
+            // C_EncryptInit then failed CKR_KEY_TYPE_INCONSISTENT.
+            //
+            // PKCS#11 v3.2 §6.43.3 states the rule for the derive family:
+            //   "If no length or key type is provided in the template, then
+            //    the key produced by this mechanism will be a generic secret
+            //    key. […] If no length is provided in the template, but a key
+            //    type is, then that key type must have a well-defined length.
+            //    If it does, then the key produced by this mechanism will be
+            //    of the type specified in the template. If it doesn't, an
+            //    error will be returned. If both a key type and a length are
+            //    provided in the template, the length must be compatible with
+            //    that key type."
+            // §6.62.3 (HKDF derive) confirms it for this mechanism in
+            // particular: "The mechanism also contributes the CKA_CLASS, and
+            // CKA_VALUE attributes to the new key. Other attributes may be
+            // specified in the template" — CKA_KEY_TYPE is deliberately NOT
+            // in HKDF's contributed set, unlike the ~40 chapter-6 mechanisms
+            // that spell out "CKA_CLASS, CKA_KEY_TYPE, and CKA_VALUE".
+            // §5.18.5 adds that a template the call "cannot support" must
+            // fail rather than be silently ignored.
+            if let Some(req) = get_attr_ulong(p_template, ul_attribute_count, CKA_KEY_TYPE) {
+                if !SECRET_KEY_TYPES.contains(&req) {
+                    // Not a secret-key type at all (or one this engine never
+                    // creates) — the derived object is a CKO_SECRET_KEY, so
+                    // the template is self-inconsistent.
+                    return CKR_TEMPLATE_INCONSISTENT;
+                }
+                if !secret_key_len_ok(req, vlen) {
+                    // §6.43.3 — "the length must be compatible with that key type".
+                    return CKR_KEY_SIZE_RANGE;
+                }
+                store_ulong(&mut attrs, CKA_KEY_TYPE, req);
+            }
 
             // PKCS#11 v3.2 §4.11: KCV mandatory on every secret-key derivation result.
             crate::state::compute_kcv(&mut attrs);
@@ -18849,6 +18911,131 @@ mod return_code_ffi_tests {
         let via_key = derive(CKF_HKDF_SALT_KEY, 0, 0, h_salt as usize);
         assert_eq!(via_key, via_data, "salt-as-key must key HMAC on the salt key's CKA_VALUE");
         assert_eq!(via_key.len(), 32);
+    }
+
+    /// E10 regression — a secret-key derivation must honour the template's
+    /// CKA_KEY_TYPE. PKCS#11 v3.2 §6.43.3: "If both a key type and a length
+    /// are provided in the template, the length must be compatible with that
+    /// key type. The key produced by this mechanism will be of the specified
+    /// type and length"; §6.62.3 lists only CKA_CLASS and CKA_VALUE as
+    /// HKDF-contributed, so CKA_KEY_TYPE is the caller's to set.
+    ///
+    /// The engine used to stamp every derived key CKK_GENERIC_SECRET and drop
+    /// the template's CKA_KEY_TYPE (it is in `is_server_managed_attr`, which
+    /// `absorb_template_attrs` skips). Harmless until E5 started checking the
+    /// key type at C_EncryptInit — then a caller doing the RFC 9180 HPKE
+    /// KeySchedule (derive the AEAD key with CKA_KEY_TYPE=CKK_CHACHA20, then
+    /// C_EncryptInit(CKM_CHACHA20_POLY1305) on it) got
+    /// CKR_KEY_TYPE_INCONSISTENT on a wholly legal sequence. Asserted through
+    /// C_EncryptInit, not just the stored attribute, so the two checks are
+    /// pinned as agreeing.
+    #[test]
+    fn derive_honours_the_template_key_type() {
+        let _guard = test_lock::acquire();
+        setup();
+        let h_prk = 0x5334_0061;
+        // A 32-byte PRK, so expand-only HKDF-SHA256 is legal (§6.62.3).
+        OBJECTS.with(|o| {
+            let mut attrs = Attributes::new();
+            attrs.insert(CKA_VALUE, vec![0x5a; 32]);
+            store_ulong(&mut attrs, CKA_CLASS, CKO_SECRET_KEY);
+            store_ulong(&mut attrs, CKA_KEY_TYPE, CKK_GENERIC_SECRET);
+            store_bool(&mut attrs, CKA_DERIVE, true);
+            o.borrow_mut().insert(h_prk, attrs);
+        });
+
+        // bExtract=0, bExpand=1, SHA-256, no salt, no info.
+        let derive = |tmpl: &mut [[usize; 3]]| -> (u32, u32) {
+            let params: [usize; 8] = [0x0100, CKM_SHA256 as usize, CKF_HKDF_SALT_NULL as usize, 0, 0, 0, 0, 0];
+            let mut mech: [usize; 3] = [
+                CKM_HKDF_DERIVE as usize,
+                params.as_ptr() as usize,
+                std::mem::size_of::<[usize; 8]>(),
+            ];
+            let mut h_new: u32 = 0;
+            let rv = unsafe {
+                C_DeriveKey(
+                    SESSION,
+                    mech.as_mut_ptr() as *mut u8,
+                    h_prk,
+                    tmpl.as_mut_ptr() as *mut u8,
+                    tmpl.len() as u32,
+                    &mut h_new,
+                )
+            };
+            (rv, h_new)
+        };
+        // A template entry is [attr_type, pValue, ulValueLen]. A CK_ULONG value
+        // is `ck_param::WORD` bytes wide (8 native, 4 on wasm32) — anything
+        // else and `get_attr_ulong` correctly treats the attribute as absent.
+        let ulong = |t: u32, v: &usize| -> [usize; 3] {
+            [t as usize, v as *const usize as usize, crate::ck_param::WORD]
+        };
+        let entry = |t: u32, v: &usize, n: usize| -> [usize; 3] {
+            [t as usize, v as *const usize as usize, n]
+        };
+
+        // ── CKK_CHACHA20 at its one legal length (32 bytes) ──────────────
+        let (kt_chacha, vlen32, yes) = (CKK_CHACHA20 as usize, 32usize, 1usize);
+        let mut tmpl = [
+            ulong(CKA_KEY_TYPE, &kt_chacha),
+            ulong(CKA_VALUE_LEN, &vlen32),
+            entry(CKA_ENCRYPT, &yes, 1),
+        ];
+        let (rv, h_key) = derive(&mut tmpl);
+        assert_eq!(rv, CKR_OK, "a legal CKK_CHACHA20 derive template must be accepted");
+        assert_eq!(
+            OBJECTS.with(|o| crate::state::get_object_attr_u32_from(o.borrow().get(&h_key).unwrap(), CKA_KEY_TYPE)),
+            Some(CKK_CHACHA20),
+            "the derived key must carry the template's CKA_KEY_TYPE, not CKK_GENERIC_SECRET",
+        );
+        // The point of the whole fix. `check_key_for_mech` is verbatim the E5
+        // gate C_EncryptInit(CKM_CHACHA20_POLY1305) applies to its key — asserted
+        // directly rather than through C_EncryptInit so the assertion cannot be
+        // satisfied by an unrelated CK_SALSA20_CHACHA20_POLY1305_PARAMS error.
+        assert_eq!(
+            check_key_for_mech(SESSION, h_key, CKA_ENCRYPT, CKM_CHACHA20_POLY1305),
+            Ok(()),
+            "C_EncryptInit(CKM_CHACHA20_POLY1305) must accept a derived CKK_CHACHA20 key",
+        );
+
+        // ── CKK_AES at a legal length ────────────────────────────────────
+        let kt_aes = CKK_AES as usize;
+        let vlen16 = 16usize;
+        let mut tmpl = [ulong(CKA_KEY_TYPE, &kt_aes), ulong(CKA_VALUE_LEN, &vlen16)];
+        let (rv, h_aes) = derive(&mut tmpl);
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(
+            OBJECTS.with(|o| crate::state::get_object_attr_u32_from(o.borrow().get(&h_aes).unwrap(), CKA_KEY_TYPE)),
+            Some(CKK_AES),
+        );
+
+        // ── No CKA_KEY_TYPE at all → CKK_GENERIC_SECRET (§6.43.3 default) ─
+        let mut tmpl = [ulong(CKA_VALUE_LEN, &vlen32)];
+        let (rv, h_gen) = derive(&mut tmpl);
+        assert_eq!(rv, CKR_OK);
+        assert_eq!(
+            OBJECTS.with(|o| crate::state::get_object_attr_u32_from(o.borrow().get(&h_gen).unwrap(), CKA_KEY_TYPE)),
+            Some(CKK_GENERIC_SECRET),
+            "the default must not change when the template is silent",
+        );
+
+        // ── Incompatible length for the requested type → CKR_KEY_SIZE_RANGE ─
+        let mut tmpl = [ulong(CKA_KEY_TYPE, &kt_chacha), ulong(CKA_VALUE_LEN, &vlen16)];
+        assert_eq!(
+            derive(&mut tmpl).0,
+            CKR_KEY_SIZE_RANGE,
+            "§6.43.3 — a 16-byte ChaCha20 key is not a compatible length",
+        );
+
+        // ── An asymmetric key type on a secret-key derive → inconsistent ──
+        let kt_ec = CKK_EC as usize;
+        let mut tmpl = [ulong(CKA_KEY_TYPE, &kt_ec), ulong(CKA_VALUE_LEN, &vlen32)];
+        assert_eq!(
+            derive(&mut tmpl).0,
+            CKR_TEMPLATE_INCONSISTENT,
+            "a CKO_SECRET_KEY derivation cannot produce a CKK_EC key",
+        );
     }
 
     /// PKCS#11 v3.2 §6.62.3 split mode (bExtract=false, bExpand=true): the
