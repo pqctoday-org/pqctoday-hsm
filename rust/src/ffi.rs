@@ -5881,14 +5881,19 @@ pub fn C_GetAttributeValue(h_session: u32, h_object: u32, p_template: *mut u8, c
 /// CKR_ATTRIBUTE_VALUE_INVALID instead of producing an object whose reported
 /// attributes disagree with the key it actually uses.
 ///
-/// A template that already carries CKA_VALUE is left exactly as it was, so the
-/// existing DER import path is unchanged.
+/// A template that already carries CKA_VALUE (the non-standard blob route the
+/// hub's helper uses) is NOT synthesised, but it is checked — see
+/// `check_rsa_private_blob`.
 ///
-/// Known, deliberate limit: a public exponent at or above 2^33 is refused with
-/// CKR_ATTRIBUTE_VALUE_INVALID. That is the `rsa` crate's RSADoS cap, and
-/// `aws-lc-rs` refuses the same keys, although FIPS 186-5 allows them and
-/// OpenSSL (the C++ engine) accepts them. Lifting it was explored and declined;
-/// see `nist_oaep_small_e_decrypts_wide_e_refused_as_expected`.
+/// Known, deliberate limit, identical on both routes: a public exponent above
+/// the `rsa` crate's cap (2^33 - 1) is refused with CKR_ATTRIBUTE_VALUE_INVALID.
+/// That cap is RSADoS hardening; `aws-lc-rs` refuses the same keys, although
+/// FIPS 186-5 allows them and OpenSSL (the C++ engine) accepts them. In NIST
+/// ACVP terms this engine declares a restricted public-exponent capability
+/// rather than failing one. PKCS#11 v3.2 (and the v3.3 draft) has no dedicated
+/// return code for it — CKR_CURVE_NOT_SUPPORTED exists only for EC — so the
+/// generic code is used and its meaning documented here. Lifting the cap was
+/// explored and declined; see `nist_oaep_small_e_decrypts_wide_e_refused_as_expected`.
 fn synthesize_rsa_private_pkcs8(attrs: &mut Attributes) -> Result<(), u32> {
     let read_u32 = |a: &Attributes, t: u32| -> Option<u32> {
         a.get(&t)
@@ -5897,9 +5902,11 @@ fn synthesize_rsa_private_pkcs8(attrs: &mut Attributes) -> Result<(), u32> {
     };
     if read_u32(attrs, CKA_CLASS) != Some(CKO_PRIVATE_KEY)
         || read_u32(attrs, CKA_KEY_TYPE) != Some(CKK_RSA)
-        || attrs.contains_key(&CKA_VALUE)
     {
         return Ok(());
+    }
+    if let Some(blob) = attrs.get(&CKA_VALUE).cloned() {
+        return check_rsa_private_blob(attrs, &blob);
     }
 
     use rsa::pkcs8::EncodePrivateKey;
@@ -5947,6 +5954,72 @@ fn synthesize_rsa_private_pkcs8(attrs: &mut Attributes) -> Result<(), u32> {
 
     let der = sk.to_pkcs8_der().map_err(|_| CKR_FUNCTION_FAILED)?;
     attrs.insert(CKA_VALUE, der.as_bytes().to_vec());
+    Ok(())
+}
+
+/// The blob route (CKA_VALUE holding PKCS#8) for an RSA private key.
+///
+/// Two checks, both reading the blob with the raw DER decoder so no RSA
+/// library's key validation runs here:
+///
+/// 1. **Exponent cap, same as the component route.** Measured 2026-09-26: a
+///    blob for NIST's 34-bit-exponent OAEP key was accepted here (object
+///    created) while no RSA library in this engine can load it, so the caller
+///    got CKR_OK for a key that could never be used. It is now refused at
+///    import with the same code the component route returns.
+/// 2. **Agreement.** If Table 38 components are supplied alongside the blob,
+///    each must equal the corresponding field of the blob's RSAPrivateKey, else
+///    CKR_TEMPLATE_INCONSISTENT. Otherwise the object would report components
+///    (readable via C_GetAttributeValue) for a different key than the one it
+///    actually uses. A consistent template — which is what the hub's helper
+///    sends — is accepted unchanged.
+///
+/// A blob that cannot be parsed and comes WITHOUT components is left exactly
+/// as before (this change is scoped to the two checks above); with components
+/// it is refused, since agreement cannot be established.
+fn check_rsa_private_blob(attrs: &Attributes, blob: &[u8]) -> Result<(), u32> {
+    use rsa::pkcs8::der::Decode;
+    use rsa::BigUint;
+    const TABLE_38: [u32; 8] = [
+        CKA_MODULUS,
+        CKA_PUBLIC_EXPONENT,
+        CKA_PRIVATE_EXPONENT,
+        CKA_PRIME_1,
+        CKA_PRIME_2,
+        CKA_EXPONENT_1,
+        CKA_EXPONENT_2,
+        CKA_COEFFICIENT,
+    ];
+    let has_components = TABLE_38.iter().any(|t| attrs.contains_key(t));
+    let parsed = rsa::pkcs8::PrivateKeyInfo::from_der(blob)
+        .ok()
+        .and_then(|pki| rsa::pkcs1::RsaPrivateKey::from_der(pki.private_key).ok());
+    let k = match parsed {
+        Some(k) => k,
+        None if !has_components => return Ok(()),
+        None => return Err(CKR_ATTRIBUTE_VALUE_INVALID),
+    };
+    let e = BigUint::from_bytes_be(k.public_exponent.as_bytes());
+    if e > BigUint::from(rsa::RsaPublicKey::MAX_PUB_EXPONENT) {
+        return Err(CKR_ATTRIBUTE_VALUE_INVALID);
+    }
+    let blob_fields = [
+        k.modulus,
+        k.public_exponent,
+        k.private_exponent,
+        k.prime1,
+        k.prime2,
+        k.exponent1,
+        k.exponent2,
+        k.coefficient,
+    ];
+    for (attr, field) in TABLE_38.iter().zip(blob_fields.iter()) {
+        if let Some(supplied) = attrs.get(attr) {
+            if BigUint::from_bytes_be(supplied) != BigUint::from_bytes_be(field.as_bytes()) {
+                return Err(CKR_TEMPLATE_INCONSISTENT);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -26733,7 +26806,7 @@ mod rsa_private_component_import_tests {
     //! engine accepts exactly that form, rejects malformed variants with the
     //! specific return code, and leaves the existing CKA_VALUE path alone.
     use super::*;
-    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey};
     use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 
     fn ulong(v: u32) -> Vec<u8> {
@@ -26850,17 +26923,6 @@ mod rsa_private_component_import_tests {
         }
     }
 
-    /// The pre-existing import path — a template already carrying CKA_VALUE —
-    /// must be left byte-identical.
-    #[test]
-    fn template_with_cka_value_is_untouched() {
-        let mut a = crt_template();
-        a.insert(CKA_VALUE, vec![0xAB; 7]);
-        let before = a.clone();
-        synthesize_rsa_private_pkcs8(&mut a).expect("no-op");
-        assert_eq!(a, before);
-    }
-
     fn unhex(s: &str) -> Vec<u8> {
         (0..s.len())
             .step_by(2)
@@ -26945,6 +27007,132 @@ mod rsa_private_component_import_tests {
         }
         assert_eq!(decrypted, 2, "small-exponent NIST keys decrypted end to end");
         assert_eq!(refused, 18, "wide-exponent NIST keys refused as expected");
+    }
+
+    const SESSION: u32 = 0x5434_1001;
+
+    fn setup() {
+        crate::state::set_initialized(true);
+        SESSIONS.with(|s| {
+            s.borrow_mut()
+                .insert(SESSION, crate::state::SessionState { slot_id: 0, rw_session: true });
+        });
+    }
+
+    /// NIST ACVP OAEP tg1 tc1 as PKCS#8 DER, built by plain DER encoding so no
+    /// RSA library gets the chance to refuse the 34-bit exponent while we
+    /// construct the test input.
+    fn nist_wide_e_pkcs8() -> (Vec<u8>, serde_json::Value) {
+        use rsa::pkcs8::der::{asn1::UintRef, Encode};
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/acvp/rsa_oaep_test.json")).unwrap();
+        let t = v["testGroups"][0]["tests"][0].clone();
+        let f = |k: &str| unhex(t[k].as_str().unwrap());
+        let (n, e, d, p, q, dp, dq, qi) =
+            (f("n"), f("e"), f("d"), f("p"), f("q"), f("dp"), f("dq"), f("qi"));
+        let k1 = rsa::pkcs1::RsaPrivateKey {
+            modulus: UintRef::new(&n).unwrap(),
+            public_exponent: UintRef::new(&e).unwrap(),
+            private_exponent: UintRef::new(&d).unwrap(),
+            prime1: UintRef::new(&p).unwrap(),
+            prime2: UintRef::new(&q).unwrap(),
+            exponent1: UintRef::new(&dp).unwrap(),
+            exponent2: UintRef::new(&dq).unwrap(),
+            coefficient: UintRef::new(&qi).unwrap(),
+            other_prime_infos: None,
+        }
+        .to_der()
+        .unwrap();
+        let der = rsa::pkcs8::PrivateKeyInfo::new(rsa::pkcs1::ALGORITHM_ID, &k1).to_der().unwrap();
+        (der, t)
+    }
+
+    /// Blob route, exponent cap, through the real import path.
+    ///
+    /// Measured BEFORE this change on the same input: `create_object_from_attrs`
+    /// returned Ok(handle) while `from_pkcs8_der` could not load the key — a
+    /// success for an object that could never be used. The two routes now
+    /// agree: both refuse at import with CKR_ATTRIBUTE_VALUE_INVALID.
+    #[test]
+    fn wide_e_blob_is_refused_at_import() {
+        setup();
+        let (der, _) = nist_wide_e_pkcs8();
+        assert!(
+            rsa::RsaPrivateKey::from_pkcs8_der(&der).is_err(),
+            "precondition: no RSA library here can load this key"
+        );
+        let mut a = Attributes::new();
+        a.insert(CKA_CLASS, ulong(CKO_PRIVATE_KEY));
+        a.insert(CKA_KEY_TYPE, ulong(CKK_RSA));
+        a.insert(CKA_VALUE, der);
+        assert_eq!(
+            create_object_from_attrs(SESSION, a),
+            Err(CKR_ATTRIBUTE_VALUE_INVALID)
+        );
+    }
+
+    fn blob_of_key() -> Vec<u8> {
+        key().to_pkcs8_der().expect("pkcs8").as_bytes().to_vec()
+    }
+
+    /// What the hub's helper sends today: the components AND a blob for the
+    /// same key. Must keep working, and the blob must be kept as supplied.
+    #[test]
+    fn matching_components_and_blob_are_accepted() {
+        let mut a = crt_template();
+        a.insert(CKA_VALUE, blob_of_key());
+        let before = a.clone();
+        synthesize_rsa_private_pkcs8(&mut a).expect("consistent template");
+        assert_eq!(a, before);
+    }
+
+    /// Each Table 38 field is compared: tampering any one of the eight must be
+    /// caught. If a comparison were missing, that field's case would pass.
+    #[test]
+    fn mismatched_components_and_blob_are_inconsistent() {
+        for t in [
+            CKA_MODULUS,
+            CKA_PUBLIC_EXPONENT,
+            CKA_PRIVATE_EXPONENT,
+            CKA_PRIME_1,
+            CKA_PRIME_2,
+            CKA_EXPONENT_1,
+            CKA_EXPONENT_2,
+            CKA_COEFFICIENT,
+        ] {
+            let mut a = crt_template();
+            a.insert(CKA_VALUE, blob_of_key());
+            let mut x = rsa::BigUint::from_bytes_be(&a[&t]);
+            x += 2u32;
+            a.insert(t, x.to_bytes_be());
+            assert_eq!(
+                synthesize_rsa_private_pkcs8(&mut a),
+                Err(CKR_TEMPLATE_INCONSISTENT),
+                "tampered 0x{t:x} alongside a blob must be refused"
+            );
+        }
+    }
+
+    /// Scope guard: a blob that cannot be parsed and comes with NO components
+    /// is left exactly as before.
+    #[test]
+    fn unparseable_blob_alone_is_untouched() {
+        let mut a = Attributes::new();
+        a.insert(CKA_CLASS, ulong(CKO_PRIVATE_KEY));
+        a.insert(CKA_KEY_TYPE, ulong(CKK_RSA));
+        a.insert(CKA_VALUE, vec![0xAB; 7]);
+        let before = a.clone();
+        synthesize_rsa_private_pkcs8(&mut a).expect("no-op");
+        assert_eq!(a, before);
+    }
+
+    /// With components present, agreement cannot be shown against an
+    /// unparseable blob, so it is refused.
+    #[test]
+    fn unparseable_blob_with_components_is_value_invalid() {
+        let mut a = crt_template();
+        a.insert(CKA_VALUE, vec![0xAB; 7]);
+        assert_eq!(synthesize_rsa_private_pkcs8(&mut a), Err(CKR_ATTRIBUTE_VALUE_INVALID));
     }
 
     #[test]
