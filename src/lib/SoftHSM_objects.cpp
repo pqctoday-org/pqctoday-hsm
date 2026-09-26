@@ -56,6 +56,8 @@
 #include "AESKey.h"
 #include "MLKEMPublicKey.h"
 #include "MLKEMPrivateKey.h"
+#include "OSSLECPublicKey.h"
+#include "OSSLEDPublicKey.h"
 #include "OSSLMLKEMPublicKey.h"
 #include "OSSLMLKEMPrivateKey.h"
 
@@ -355,6 +357,101 @@ CK_RV checkValueVerify(bool supplied, const ByteString& suppliedValue,
 // An unknown CKA_PARAMETER_SET is refused for the same reason. Mirrors the
 // Rust engine's fix on fix/mlkem-input-checks-0925 (C_CreateObject ->
 // CKR_ATTRIBUTE_VALUE_INVALID).
+// Public key validation for imported EC / Edwards / Montgomery public keys
+// (2026-09-25). Same shape and placement as checkMLKEMKeyValue below: run from
+// the TEMPLATE before any object exists, so a refused key leaves nothing behind.
+//
+// Measured before writing it: all 10 invalid points in the NIST ACVP ECDSA and
+// EdDSA KeyVer vectors were accepted here — 6 ECDSA (3 "x or y out of range",
+// 3 "point not on curve") and 4 EdDSA ("point not on curve"). C_CreateObject
+// only stored the attributes and the crypto key is built lazily at first use,
+// so nothing ever checked the point.
+//
+// On the standard, stated precisely because it is easy to overstate: PKCS#11
+// v3.2 does NOT require public key validation. CKR_PUBLIC_KEY_INVALID occurs
+// exactly once in the whole document, permissively — "This error code may be
+// returned by C_CreateObject, when the public key is created, or by
+// C_VerifyInit..." (lowercase "may", so not even a BCP 14 MAY) — and chapter 6
+// has no validation mandate; all 22 of its X9.62 references are about point and
+// parameter ENCODING. The requirement being met is NIST SP 800-56A public key
+// validation, which the ACVP KeyVer groups exercise. So this is a security and
+// ACVP fix, not a conformance one.
+//
+// CKR_PUBLIC_KEY_INVALID is returned rather than checkMLKEMKeyValue's
+// CKR_ATTRIBUTE_VALUE_INVALID because the spec names this exact scenario for
+// it: "The public key fails a public key validation. For example, an EC public
+// key fails the public key validation specified in Section 5.2.2 of
+// [ANSI X9.62]." The ML-KEM path is a different case (length/hash input checks),
+// so the two codes are not inconsistent.
+//
+// The check is the crypto layer's own EVP_PKEY_public_check, reached by building
+// the key. For EC that covers on-curve, coordinate range AND prime-order
+// subgroup — which matters, because NO available KeyVer vector is small-order,
+// so a check written only to satisfy the vectors would drive the failures to
+// zero while still admitting a small-order point.
+static CK_RV checkECPublicKeyPoint(CK_OBJECT_CLASS objClass, CK_KEY_TYPE keyType,
+                                   CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount)
+{
+	if (objClass != CKO_PUBLIC_KEY) return CKR_OK;
+
+	CK_ATTRIBUTE_PTR ecParams = NULL_PTR, ecPoint = NULL_PTR;
+	for (CK_ULONG i = 0; i < ulCount; i++)
+	{
+		if (pTemplate[i].type == CKA_EC_PARAMS) ecParams = &pTemplate[i];
+		else if (pTemplate[i].type == CKA_EC_POINT) ecPoint = &pTemplate[i];
+	}
+	// Absent point is not this check's business — the per-attribute ck1 rules
+	// already require CKA_EC_POINT on create.
+	if (ecPoint == NULL || ecPoint->pValue == NULL_PTR) return CKR_OK;
+
+	ByteString params, point;
+	if (ecParams != NULL && ecParams->pValue != NULL_PTR)
+		params = ByteString((const unsigned char*)ecParams->pValue, ecParams->ulValueLen);
+	point = ByteString((const unsigned char*)ecPoint->pValue, ecPoint->ulValueLen);
+
+	bool ok = false;
+	if (keyType == CKK_EC)
+	{
+		if (params.size() == 0) return CKR_OK;   // ck1 rules cover absence
+		AsymmetricAlgorithm* ecdsa = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::ECDSA);
+		if (ecdsa == NULL) return CKR_GENERAL_ERROR;
+		OSSLECPublicKey* key = (OSSLECPublicKey*)ecdsa->newPublicKey();
+		if (key != NULL)
+		{
+			key->setEC(params);
+			key->setQ(point);
+			ok = (key->getOSSLKey() != NULL);  // SP 800-56A public key validation
+			ecdsa->recyclePublicKey(key);
+		}
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(ecdsa);
+	}
+	else if (keyType == CKK_EC_EDWARDS || keyType == CKK_EC_MONTGOMERY)
+	{
+		if (params.size() == 0) return CKR_OK;
+		AsymmetricAlgorithm* eddsa = CryptoFactory::i()->getAsymmetricAlgorithm(AsymAlgo::EDDSA);
+		if (eddsa == NULL) return CKR_GENERAL_ERROR;
+		OSSLEDPublicKey* key = (OSSLEDPublicKey*)eddsa->newPublicKey();
+		if (key != NULL)
+		{
+			key->setEC(params);
+			key->setA(point);
+			ok = (key->getOSSLKey() != NULL);
+			eddsa->recyclePublicKey(key);
+		}
+		CryptoFactory::i()->recycleAsymmetricAlgorithm(eddsa);
+	}
+	else return CKR_OK;
+
+	if (!ok)
+	{
+		ERROR_MSG("EC public key fails public key validation (SP 800-56A): point is "
+		          "off the curve, has a coordinate outside [0,p), or is outside the "
+		          "prime-order subgroup");
+		return CKR_PUBLIC_KEY_INVALID;
+	}
+	return CKR_OK;
+}
+
 static CK_RV checkMLKEMKeyValue(CK_OBJECT_CLASS objClass,
                                 CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount)
 {
@@ -1426,6 +1523,17 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 		if (rv != CKR_OK) return rv;
 	}
 
+	// SP 800-56A public key validation on imported EC / Edwards / Montgomery
+	// public keys — same "before any object exists" placement as the ML-KEM
+	// check above. See checkECPublicKeyPoint for why this is a security/ACVP
+	// fix rather than a conformance one.
+	if (op == OBJECT_OP_CREATE &&
+	    (keyType == CKK_EC || keyType == CKK_EC_EDWARDS || keyType == CKK_EC_MONTGOMERY))
+	{
+		rv = checkECPublicKeyPoint(objClass, keyType, pTemplate, ulCount);
+		if (rv != CKR_OK) return rv;
+	}
+
 	// Change order of attributes
 	const CK_ULONG maxAttribs = 32;
 	CK_ATTRIBUTE attribs[maxAttribs];
@@ -1521,6 +1629,7 @@ CK_RV SoftHSM::CreateObject(CK_SESSION_HANDLE hSession, CK_ATTRIBUTE_PTR pTempla
 	delete p11object;
 	if (rv != CKR_OK)
 		return rv;
+
 
 	if (op == OBJECT_OP_CREATE)
 	{
