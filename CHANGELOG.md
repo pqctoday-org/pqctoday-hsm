@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rust engine: RSA-OAEP with SHA-1, SHA-224 and SHA-3 was refused.** The
+  engine only accepted SHA-256, SHA-384 and SHA-512, so every other hash got
+  `CKR_MECHANISM_PARAM_INVALID` at `C_EncryptInit` / `C_DecryptInit` /
+  `C_WrapKey` / `C_UnwrapKey`. That included NIST's own SHA-1 OAEP vectors,
+  although PKCS#11 v3.2 leaves the hash open and SP 800-56B rev 2 allows
+  SHA-1. The C++ engine already accepted all nine hashes, each with its
+  matching MGF1, and the Rust engine now does too. The NIST OAEP test now
+  decrypts through `C_DecryptInit` / `C_Decrypt`. Before, it called the RSA
+  library directly, which proved the imported key material but not the
+  engine; that gap is how the refusal went unnoticed (reported by a parallel
+  review session).
+
 ### Added
 
 - **`bench-harness`: AES and SHA-2/SHA-3 measurement cells.**
