@@ -295,6 +295,19 @@ private:
 	                          CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen);
 	CK_RV AsymVerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey);
 
+	// Rebuild the crypto context of a live message-based operation so it can
+	// take another message (PKCS#11 v3.2 §5.14.2 / §5.15.2). AsymSign and
+	// AsymVerify call Session::resetOp() after each successful message, which
+	// recycles the algorithm and the key; only C_Message*Final ends the
+	// operation itself. Replays the mechanism and key recorded by
+	// Session::setMessageOp at init. `sign` picks the sign or verify half.
+	//
+	// MUST be called while getOpType() is SESSION_OP_NONE — i.e. straight after
+	// AsymSign/AsymVerify reset it, BEFORE relabelling the session as a message
+	// op — because acquireSession() refuses any init with CKR_OPERATION_ACTIVE
+	// while an operation is set.
+	CK_RV rearmMessageOp(CK_SESSION_HANDLE hSession, Session* session, bool sign);
+
 	// Key generation
 	CK_RV generateAES
 	(

@@ -63,6 +63,10 @@ Session::Session(Slot* inSlot, bool inIsReadWrite, bool inIsAsync, CK_VOID_PTR i
 	paramLen = 0;
 	signKeyHandle = CK_INVALID_HANDLE;
 	verifyKeyHandle = CK_INVALID_HANDLE;
+	msgOpMechType = CKM_VENDOR_DEFINED;
+	msgOpKeyHandle = CK_INVALID_HANDLE;
+	msgOpParam = NULL;
+	msgOpParamLen = 0;
 }
 
 // Constructor
@@ -95,11 +99,21 @@ Session::Session()
 	paramLen = 0;
 	signKeyHandle = CK_INVALID_HANDLE;
 	verifyKeyHandle = CK_INVALID_HANDLE;
+	msgOpMechType = CKM_VENDOR_DEFINED;
+	msgOpKeyHandle = CK_INVALID_HANDLE;
+	msgOpParam = NULL;
+	msgOpParamLen = 0;
 }
 
 // Destructor
 Session::~Session()
 {
+	// clearMessageOp() as well as resetOp(): resetOp() deliberately preserves
+	// the message-op re-arm state (that is what lets a message operation
+	// survive its own per-message resets), so closing a session while a
+	// message op is live would otherwise leak — and fail to wipe — the copied
+	// mechanism parameter.
+	clearMessageOp();
 	resetOp();
 }
 
@@ -680,4 +694,62 @@ void Session::setVerifyKeyHandle(CK_OBJECT_HANDLE hKey)
 CK_OBJECT_HANDLE Session::getVerifyKeyHandle()
 {
 	return verifyKeyHandle;
+}
+
+bool Session::setMessageOp(CK_MECHANISM_TYPE inMechType, CK_OBJECT_HANDLE hKey,
+                           void* inParam, size_t inParamLen)
+{
+	// Copy first so an OOM leaves the previous state untouched — same
+	// try-and-swap shape as setParameters().
+	void* newParam = NULL;
+	if (inParam != NULL && inParamLen > 0)
+	{
+		newParam = malloc(inParamLen);
+		if (newParam == NULL)
+			return false;
+		memcpy(newParam, inParam, inParamLen);
+	}
+
+	if (msgOpParam != NULL)
+	{
+		memset(msgOpParam, 0, msgOpParamLen);
+		free(msgOpParam);
+	}
+
+	msgOpMechType = inMechType;
+	msgOpKeyHandle = hKey;
+	msgOpParam = newParam;
+	msgOpParamLen = (newParam != NULL) ? inParamLen : 0;
+	return true;
+}
+
+void* Session::getMessageOpParam(size_t& outParamLen)
+{
+	outParamLen = msgOpParamLen;
+	return msgOpParam;
+}
+
+CK_MECHANISM_TYPE Session::getMessageOpMechType()
+{
+	return msgOpMechType;
+}
+
+CK_OBJECT_HANDLE Session::getMessageOpKeyHandle()
+{
+	return msgOpKeyHandle;
+}
+
+void Session::clearMessageOp()
+{
+	if (msgOpParam != NULL)
+	{
+		// Wiped, not just freed — same reason resetOp() wipes `param`: a
+		// mechanism parameter can carry sensitive material.
+		memset(msgOpParam, 0, msgOpParamLen);
+		free(msgOpParam);
+		msgOpParam = NULL;
+	}
+	msgOpParamLen = 0;
+	msgOpMechType = CKM_VENDOR_DEFINED;
+	msgOpKeyHandle = CK_INVALID_HANDLE;
 }
