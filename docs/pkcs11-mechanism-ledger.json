@@ -3154,7 +3154,7 @@
       "value": "engine-extension",
       "cpp": "implemented",
       "rust": "implemented",
-      "note": "Vendor mechanism 0x80000015 (CKM_VENDOR_DEFINED range; priv allocation ledger §1.4.2). ECDSA with a caller-supplied nonce k — a deliberate key-recovery teaching primitive, see SECURITY.md. Sign only, single-part, P-256/P-384/P-521; NIST ACVP ECDSA SigGen byte-matches in both engines (tests/acvp/ecdsa_siggen_explicit_k_test.json).",
+      "note": "Vendor mechanism 0x80000015 (CKM_VENDOR_DEFINED range; priv allocation ledger §1.4). ECDSA with a caller-supplied nonce k — a deliberate key-recovery teaching primitive, see SECURITY.md. Sign only, single-part, P-256/P-384/P-521; NIST ACVP ECDSA SigGen byte-matches in both engines (tests/acvp/ecdsa_siggen_explicit_k_test.json).",
       "cpp_min": 256,
       "cpp_max": 521,
       "rust_min": 256,

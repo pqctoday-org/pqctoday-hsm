@@ -770,7 +770,7 @@ pub const CKM_HPKE: u32 = 0x8000_0014;
 // exactly the curve's order length, 1 <= k < n. Anyone who knows k and one
 // signature recovers the private key: d = r^-1 (s*k - z) mod n. Sign only,
 // single-part, P-256/P-384/P-521. Allocated in the priv vendor ledger
-// (pkcs11-vendor-mech-allocation.md §1.4.2); mirrored in
+// (pkcs11-vendor-mech-allocation.md §1.4); mirrored in
 // src/lib/vendor_mechanisms.h.
 pub const CKM_PQCTODAY_ECDSA_EXPLICIT_K: u32 = 0x8000_0015;
 // ML-DSA external-µ signing (remediation R34, 2026-08-26; adopted natively

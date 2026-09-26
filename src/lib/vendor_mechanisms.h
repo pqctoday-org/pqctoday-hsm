@@ -35,7 +35,7 @@
 // digest); pParameter is k, big-endian, exactly the order's byte length,
 // 1 <= k < n, else CKR_MECHANISM_PARAM_INVALID at C_SignInit. Sign only,
 // single-part, P-256 / P-384 / P-521. Allocated in the priv vendor ledger
-// (pkcs11-vendor-mech-allocation.md §1.4.2); mirrored in rust/src/constants.rs.
+// (pkcs11-vendor-mech-allocation.md §1.4); mirrored in rust/src/constants.rs.
 
 #define CKM_PQCTODAY_ECDSA_EXPLICIT_K 0x80000015UL  /* vendor */
 
