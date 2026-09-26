@@ -1036,7 +1036,8 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMinKeySize = rsaMinSize;
 			pInfo->ulMaxKeySize = rsaMaxSize;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY |
-			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY |
+			               CKF_MULTI_MESSAGE;
 			break;
 		case CKM_RSA_PKCS_OAEP:
 			pInfo->ulMinKeySize = rsaMinSize;
@@ -1203,7 +1204,8 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMinKeySize = ecdsaMinSize;
 			pInfo->ulMaxKeySize = ecdsaMaxSize;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY | CKF_EC_COMMOM |
-			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY |
+			               CKF_MULTI_MESSAGE;
 			break;
 #endif
 #if defined(WITH_ECC) || defined(WITH_EDDSA)
@@ -1279,7 +1281,8 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMinKeySize = 1312;
 			pInfo->ulMaxKeySize = 2592;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY |
-			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY |
+			               CKF_MULTI_MESSAGE;
 			break;
 		// External-µ (remediation R34, PQCTODAY-VENDOR-EXT-MU) — CKF_SIGN |
 		// CKF_VERIFY only, no C_MessageSign/Verify* support for this
@@ -1320,7 +1323,8 @@ CK_RV SoftHSM::C_GetMechanismInfo(CK_SLOT_ID slotID, CK_MECHANISM_TYPE type, CK_
 			pInfo->ulMinKeySize = 32;
 			pInfo->ulMaxKeySize = 64;
 			pInfo->flags = CKF_SIGN | CKF_VERIFY |
-			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY;
+			               CKF_MESSAGE_SIGN | CKF_MESSAGE_VERIFY |
+			               CKF_MULTI_MESSAGE;
 			break;
 		// ML-KEM (FIPS 203) — sizes are encapsulation key bytes (not security bits)
 		// ML-KEM-512=800B, ML-KEM-768=1184B, ML-KEM-1024=1568B
