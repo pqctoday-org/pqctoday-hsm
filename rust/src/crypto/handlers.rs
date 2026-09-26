@@ -2567,7 +2567,35 @@ fn sign_ed25519_ctx(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec<u
     Ok(sig)
 }
 
-pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
+/// Ed25519ph / Ed448ph (RFC 8032 §5.1 / §5.2).
+///
+/// `context` is `CK_EDDSA_PARAMS.pContextData`. It is a REQUIRED parameter
+/// rather than an `Option` with a default on purpose: until 2026-09-26 both
+/// call sites passed `None` unconditionally, so a caller that supplied a
+/// context got a signature over the WRONG scheme — the context is bound into
+/// the dom2/dom4 prefix fed to both hash calls, so ignoring it changes the
+/// signed message while still returning CKR_OK and a structurally valid
+/// signature. Nothing observable told the caller. Making the argument
+/// mandatory means a new call site has to decide rather than inherit a silent
+/// default.
+///
+/// PKCS#11 v3.2 Table 73 lists Ed25519ph/Ed448ph with Mechanism Param
+/// *Required* and Context Data *Optional*, and v3.2 delegates the scheme
+/// itself to RFC 8032 — so an empty context is the legitimate no-context case
+/// and must stay byte-identical to the previous behaviour, which is why the
+/// empty case still passes `None` rather than `Some(&[])`. Those are NOT the
+/// same construction: `Some(&[])` would still take dalek's context path.
+///
+/// Unlike Ed25519**ctx** above, this needs no hand-rolled dom2: dalek's
+/// `sign_prehashed` hardcodes the Ed25519ph flag byte whenever a context is
+/// given, which is precisely what pre-hash mode wants. That same hardcoding is
+/// what forced `sign_ed25519_ctx` to be written out by hand.
+pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8], context: &[u8]) -> Result<Vec<u8>, u32> {
+    // RFC 8032 caps the context at 255 bytes; same check as sign_eddsa_ctx.
+    if context.len() > 255 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let ctx_opt = if context.is_empty() { None } else { Some(context) };
     match sk_bytes.len() {
         32 => {
             use sha2::Digest;
@@ -2575,7 +2603,7 @@ pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
             key_bytes.copy_from_slice(sk_bytes);
             let sk = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
             let prehash = sha2::Sha512::new().chain_update(msg);
-            sk.sign_prehashed(prehash, None)
+            sk.sign_prehashed(prehash, ctx_opt)
                 .map(|sig| sig.to_bytes().to_vec())
                 .map_err(|_| CKR_FUNCTION_FAILED)
         }
@@ -2591,7 +2619,7 @@ pub fn sign_eddsa_ph(sk_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, u32> {
             let sk = ed448_goldilocks::SigningKey::try_from(sk_bytes)
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let prehash: PreHasherXof<Shake256> = Shake256::default().chain(msg).into();
-            sk.sign_prehashed(None, prehash)
+            sk.sign_prehashed(ctx_opt, prehash)
                 .map(|sig| sig.to_bytes().to_vec())
                 .map_err(|_| CKR_FUNCTION_FAILED)
         }
@@ -3653,7 +3681,20 @@ fn verify_ed25519_ctx(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8], context: &[
     }
 }
 
-pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<(), u32> {
+/// Verify twin of [`sign_eddsa_ph`]. `context` is mandatory for the same
+/// reason: a verify that silently drops the context would reject signatures
+/// this engine's own signer produces for the same mechanism and parameters,
+/// which is the failure mode the ECDSA_SHA1 digest-mismatch bug had.
+pub fn verify_eddsa_ph(
+    pk_bytes: &[u8],
+    msg: &[u8],
+    sig_bytes: &[u8],
+    context: &[u8],
+) -> Result<(), u32> {
+    if context.len() > 255 {
+        return Err(CKR_MECHANISM_PARAM_INVALID);
+    }
+    let ctx_opt = if context.is_empty() { None } else { Some(context) };
     match pk_bytes.len() {
         32 => {
             use sha2::Digest;
@@ -3664,7 +3705,7 @@ pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig = ed25519_dalek::Signature::from_bytes(sig_arr);
             let prehash = sha2::Sha512::new().chain_update(msg);
-            vk.verify_prehashed(prehash, None, &sig)
+            vk.verify_prehashed(prehash, ctx_opt, &sig)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         57 => {
@@ -3679,7 +3720,7 @@ pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<
                 .map_err(|_| CKR_KEY_TYPE_INCONSISTENT)?;
             let sig = ed448_goldilocks::Signature::from_bytes(sig_arr);
             let prehash: PreHasherXof<Shake256> = Shake256::default().chain(msg).into();
-            vk.verify_prehashed(&sig, None, prehash)
+            vk.verify_prehashed(&sig, ctx_opt, prehash)
                 .map_err(|_| CKR_SIGNATURE_INVALID)
         }
         _ => Err(CKR_KEY_TYPE_INCONSISTENT),
@@ -3689,6 +3730,132 @@ pub fn verify_eddsa_ph(pk_bytes: &[u8], msg: &[u8], sig_bytes: &[u8]) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// Ed25519ph / Ed448ph with a NON-EMPTY context (2026-09-26).
+    ///
+    /// `sign_eddsa_ph` and `verify_eddsa_ph` passed `None` for the context
+    /// unconditionally, so `CK_EDDSA_PARAMS.pContextData` was accepted and
+    /// silently discarded. RFC 8032 binds the context into the dom2/dom4
+    /// prefix fed to BOTH hash calls, so the engine returned CKR_OK and a
+    /// structurally valid signature over a DIFFERENT scheme than the caller
+    /// selected. Nothing observable distinguished it.
+    ///
+    /// The vectors these assertions run on were already checked into
+    /// `tests/acvp/` — NIST ACVP EDDSA-SigGen-1.0 pre-hash groups, 10 Ed25519ph
+    /// and 10 Ed448ph cases, every one independently re-verified against
+    /// OpenSSL 3.6.3 through OSSL_SIGNATURE_PARAM_INSTANCE +
+    /// OSSL_SIGNATURE_PARAM_CONTEXT_STRING before adoption. **No test loaded
+    /// them.** The defect did not survive for want of evidence; it survived
+    /// because the evidence was orphaned. That is worth stating plainly,
+    /// because it is a different failure than a missing corpus and it is not
+    /// fixed by adding vectors.
+    ///
+    /// Signature equality is asserted, not just verify-accepts: a sign/verify
+    /// pair that drops the context on both sides round-trips perfectly against
+    /// itself while disagreeing with every other implementation — the same
+    /// self-consistent-but-wrong shape as the CKM_ECDSA_SHA1 digest mismatch.
+    #[test]
+    fn eddsa_ph_binds_context_matching_nist_acvp_vectors() {
+        for (json, want_scheme, sk_len) in [
+            (
+                include_str!("../../../tests/acvp/eddsa_test.json"),
+                "Ed25519ph",
+                32usize,
+            ),
+            (
+                include_str!("../../../tests/acvp/eddsa_ed448_test.json"),
+                "Ed448ph",
+                57usize,
+            ),
+        ] {
+            let v: serde_json::Value = serde_json::from_str(json).expect("vector json");
+            let sets = v["vectorSets"].as_array().expect("vectorSets");
+            let mut checked = 0usize;
+            let mut with_ctx = 0usize;
+            for set in sets {
+                if set["scheme"].as_str() != Some(want_scheme) {
+                    continue;
+                }
+                for t in set["tests"].as_array().expect("tests") {
+                    let d = unhex(t["d"].as_str().expect("d"));
+                    let q = unhex(t["q"].as_str().expect("q"));
+                    let msg = unhex(t["message"].as_str().expect("message"));
+                    let ctx = unhex(t["context"].as_str().unwrap_or(""));
+                    let want = unhex(t["signature"].as_str().expect("signature"));
+                    let id = t["id"].as_str().unwrap_or("?");
+                    assert_eq!(d.len(), sk_len, "{want_scheme} {id}: seed length");
+
+                    let got = sign_eddsa_ph(&d, &msg, &ctx)
+                        .unwrap_or_else(|e| panic!("{want_scheme} {id}: sign failed 0x{e:x}"));
+                    assert_eq!(
+                        got, want,
+                        "{want_scheme} {id}: signature mismatch with a {}-byte context \
+                         — the context is not reaching the dom2/dom4 prefix",
+                        ctx.len()
+                    );
+                    verify_eddsa_ph(&q, &msg, &got, &ctx)
+                        .unwrap_or_else(|e| panic!("{want_scheme} {id}: verify failed 0x{e:x}"));
+
+                    // A different context MUST produce a different signature,
+                    // and the original signature MUST NOT verify under it.
+                    // Without this, an implementation that ignores the context
+                    // still passes everything above.
+                    let mut other = ctx.clone();
+                    other.push(0xAA);
+                    if other.len() <= 255 {
+                        let got_other = sign_eddsa_ph(&d, &msg, &other).expect("sign other ctx");
+                        assert_ne!(
+                            got_other, got,
+                            "{want_scheme} {id}: changing the context did not change the \
+                             signature — the context is being ignored"
+                        );
+                        assert!(
+                            verify_eddsa_ph(&q, &msg, &got, &other).is_err(),
+                            "{want_scheme} {id}: signature verified under the WRONG context"
+                        );
+                    }
+
+                    checked += 1;
+                    if !ctx.is_empty() {
+                        with_ctx += 1;
+                    }
+                }
+            }
+            // Reachability: an assertion loop that ran zero times proves
+            // nothing, and a corpus of empty contexts would not exercise the
+            // defect at all.
+            assert!(checked > 0, "{want_scheme}: no vectors were exercised");
+            assert!(
+                with_ctx > 0,
+                "{want_scheme}: every vector had an EMPTY context, so this test \
+                 cannot detect a dropped context"
+            );
+        }
+    }
+
+    /// RFC 8032 caps the context at 255 bytes; 256 must be rejected as a
+    /// parameter error rather than truncated or passed through.
+    #[test]
+    fn eddsa_ph_rejects_oversized_context() {
+        let seed = [7u8; 32];
+        let too_long = vec![0u8; 256];
+        assert_eq!(
+            sign_eddsa_ph(&seed, b"msg", &too_long),
+            Err(CKR_MECHANISM_PARAM_INVALID)
+        );
+        assert_eq!(
+            sign_eddsa_ph(&seed, b"msg", &vec![0u8; 255]).map(|_| ()),
+            Ok(()),
+            "255 bytes is the documented maximum and must be accepted"
+        );
+    }
 
     /// X1 follow-up (2026-09-07). Every hash-composite ECDSA mechanism this
     /// engine advertises must ROUND-TRIP: the digest `sign_ecdsa` computes
