@@ -10572,6 +10572,43 @@ unsafe fn parse_sp800_108_segments(
         let val_len = seg.ulong(ck_param::prf_data_param::UL_VALUE_LEN);
         match seg_type {
             t if t == CK_SP800_108_ITERATION_VARIABLE => {
+                // Only COUNTER MODE's iteration variable carries a counter
+                // format. Table 199 (§6.42.3) says of it: "The iteration
+                // variable for this KDF type is a counter. Exact formatting of
+                // the counter value is defined by the
+                // CK_SP800_108_COUNTER_FORMAT structure."
+                //
+                // Feedback (Table 200, §6.42.4) and Double Pipeline
+                // (Table 201, §6.42.5) are different: there the iteration
+                // variable is "defined as K(i-1) in section 5.2 of
+                // [NIST SP800-108]" and "The size, format and value of this
+                // data input is defined by the internal KDF structure and PRF
+                // output." So a NULL pValue is legitimate for those modes, and
+                // sp800_108_run_feedback/_double_pipeline already emit K(i-1)
+                // (resp. A(i)) themselves, ahead of the caller's segments —
+                // which is why this arm must contribute NO segment there.
+                //
+                // Until 2026-09-26 the counter format was parsed in all three
+                // modes, and ParamReader::new returns Absent for a NULL pointer
+                // (ck_param.rs), so a conformant feedback-mode caller got
+                // CKR_MECHANISM_PARAM_INVALID. Measured before and after
+                // against both engines: Rust answered 0x71 where the C++ engine
+                // answered CKR_OK on the identical call.
+                //
+                // AMBIGUITY, AND THE APPEAL THAT RESOLVED IT: Tables 200/201
+                // each end their ITERATION_VARIABLE entry with "Exact
+                // formatting of the counter value is defined by the
+                // CK_SP800_108_COUNTER_FORMAT structure" — contradicting the
+                // sentence two lines above it. The v3.3 draft reproduces the
+                // contradiction verbatim
+                // (working/doc/spec/sp800-108_key_derivation.md), so it
+                // resolves nothing. NIST SP 800-108 §5.2 is the tiebreaker: the
+                // counter [i] is OPTIONAL and SEPARATE from K(i-1), which is
+                // what CK_SP800_108_COUNTER exists for in those modes. Read as
+                // an editorial carry-over from Table 199.
+                if allow_explicit_counter && val_ptr.is_null() {
+                    continue;
+                }
                 // pValue → CK_SP800_108_COUNTER_FORMAT { bLittleEndian: CK_BBOOL,
                 // ulWidthInBits: CK_ULONG } — width at one CK_ULONG offset.
                 let cf = ParamReader::new(

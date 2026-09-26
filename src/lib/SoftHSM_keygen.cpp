@@ -3562,11 +3562,41 @@ CK_RV SoftHSM::C_DeriveKey
 			}
 		}
 
-		// Parse CK_PRF_DATA_PARAM array:
-		//   CK_SP800_108_BYTE_ARRAY → append to fixed-input label/context buffer
-		//   CK_SP800_108_ITERATION_VARIABLE → extract counter width (default 32 bits)
-		ByteString kbkFixedInput;
-		int kbkCounterBits = 32;
+		// Parse the CK_PRF_DATA_PARAM array into ORDERED segments.
+		//
+		// §6.42.3 / Table 199 defines CK_SP800_108_ITERATION_VARIABLE as
+		// identifying "the location of the iteration variable in the
+		// constructed PRF input data", and for this KDF type "the iteration
+		// variable ... is a counter". That wording is locational, so the
+		// caller's array order — not a fixed library layout — decides the byte
+		// layout of each round's PRF input.
+		//
+		// 2026-09-26. This handler used to concatenate every BYTE_ARRAY into
+		// one buffer, take only the counter WIDTH from ITERATION_VARIABLE, and
+		// hand the derivation to OpenSSL's KBKDF provider, which hardwires
+		// counter || label || [separator] || context || [L]
+		// (providers/implementations/kdfs/kbkdf.c derive() writes the counter
+		// first regardless of array order). ACVP's "after fixed data" and
+		// "middle fixed data" counter placements were therefore unreachable —
+		// 4 failing vectors. Fixed by hand-rolling the round loop on EVP_MAC,
+		// the same treatment the FEEDBACK and DOUBLE_PIPELINE handlers below
+		// already received, producing the same layout as Rust's
+		// sp800_108_iter_input.
+		//
+		// Verified against an independent from-spec SP 800-108 §5.1 reference
+		// (Python/HMAC, written from the publication rather than from either
+		// engine) which matches 37 of 37 HMAC ACVP vectors across all five
+		// counterLocation values. Note that "middle fixed data" splits the
+		// fixed input at ACVP's breakLocation expressed in BITS.
+		struct KbkSeg
+		{
+			bool       isCounter;
+			ByteString bytes;      // literal segment bytes when !isCounter
+			bool       le;         // counter endianness
+			unsigned   widthBytes; // counter width
+		};
+		std::vector<KbkSeg> kbkSegs;
+		bool kbkHaveCounter = false;
 		for (CK_ULONG i = 0; i < kp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dp = &kp->pDataParams[i];
@@ -3574,84 +3604,141 @@ CK_RV SoftHSM::C_DeriveKey
 			{
 				case CK_SP800_108_BYTE_ARRAY:
 					if (dp->pValue != NULL_PTR && dp->ulValueLen > 0)
-						kbkFixedInput += ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+					{
+						KbkSeg s;
+						s.isCounter = false;
+						s.le = false;
+						s.widthBytes = 0;
+						s.bytes = ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+						kbkSegs.push_back(s);
+					}
 					break;
 				case CK_SP800_108_ITERATION_VARIABLE:
+				{
+					KbkSeg s;
+					s.isCounter = true;
+					s.le = false;
+					s.widthBytes = 4;
 					if (dp->pValue != NULL_PTR && dp->ulValueLen == sizeof(CK_SP800_108_COUNTER_FORMAT))
 					{
 						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dp->pValue;
-						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64)
-							kbkCounterBits = (int)cf->ulWidthInBits;
+						// The old path passed this width to the provider as
+						// OSSL_KDF_PARAM_KBKDF_R, which accepts only
+						// {8,16,24,32}; anything else failed deep inside
+						// EVP_KDF_derive and surfaced as CKR_FUNCTION_FAILED.
+						// Reject it up front with the specific code instead,
+						// which is also what Rust returns — one fewer
+						// cross-engine divergence.
+						if (cf->ulWidthInBits != 8  && cf->ulWidthInBits != 16 &&
+						    cf->ulWidthInBits != 24 && cf->ulWidthInBits != 32)
+						{
+							ERROR_MSG("CKM_SP800_108_COUNTER_KDF: counter width %lu bits is not 8/16/24/32",
+							          (unsigned long)cf->ulWidthInBits);
+							return CKR_MECHANISM_PARAM_INVALID;
+						}
+						s.le = (cf->bLittleEndian != 0);
+						s.widthBytes = (unsigned)(cf->ulWidthInBits / 8);
 					}
+					kbkSegs.push_back(s);
+					kbkHaveCounter = true;
 					break;
+				}
 				default:
-					break; // DKM_LENGTH, KEY_HANDLE not supported — skip
+					break; // COUNTER, DKM_LENGTH, KEY_HANDLE not supported — skip
 			}
 		}
-
-		// Derive via OpenSSL KBKDF counter mode
-		ByteString kbkOut;
-		kbkOut.resize(kbkKeyLen);
+		// No ITERATION_VARIABLE supplied at all: keep this engine's historical
+		// layout of a 32-bit big-endian counter first. That is what the
+		// OpenSSL provider did unconditionally, and what Rust's
+		// sp800_108_iter_input still does when no counter segment is present,
+		// so the default stays byte-identical across both engines.
+		if (!kbkHaveCounter)
 		{
-			static const char kbkModeStr[] = "COUNTER";
-			EVP_KDF* kbkAlgo = EVP_KDF_fetch(NULL, "KBKDF", NULL);
+			KbkSeg s;
+			s.isCounter = true;
+			s.le = false;
+			s.widthBytes = 4;
+			kbkSegs.insert(kbkSegs.begin(), s);
+		}
+
+		// Derive via a hand-rolled Counter Mode loop on EVP_MAC (SP 800-108
+		// §5.1): K(i) = PRF(Ki, <segments in caller order, counter = i>), with
+		// the output the leftmost kbkKeyLen bytes of K(1) || K(2) || ...
+		// EVP_MAC is the same PRF primitive OpenSSL's own KBKDF uses
+		// internally, so this stays EVP-only; what it does NOT inherit is that
+		// provider's fixed byte layout (see the segment parser above).
+		ByteString kbkOut;
+		{
+			EVP_MAC* kbkAlgo = EVP_MAC_fetch(NULL, kbkMacName, NULL);
 			if (kbkAlgo == NULL)
 			{
-				ERROR_MSG("EVP_KDF_fetch KBKDF failed: 0x%08X", ERR_get_error());
-				return CKR_FUNCTION_FAILED;
-			}
-			EVP_KDF_CTX* kbkctx = EVP_KDF_CTX_new(kbkAlgo);
-			EVP_KDF_free(kbkAlgo);
-			if (kbkctx == NULL)
-			{
-				ERROR_MSG("EVP_KDF_CTX_new KBKDF failed");
+				ERROR_MSG("EVP_MAC_fetch %s failed: 0x%08X", kbkMacName, ERR_get_error());
 				return CKR_FUNCTION_FAILED;
 			}
 
-			// OpenSSL's KBKDF provider hardwires the SP800-108 byte layout to
-			// counter || label || [0x00 separator] || context || [L] (see
-			// providers/implementations/kdfs/kbkdf.c derive(): the counter is
-			// always written first, regardless of CK_PRF_DATA_PARAM array order).
-			// Route the caller's fixed input through "info" (context) with an
-			// empty label, and disable the auto-appended separator/L fields —
-			// the caller's dataParams array is the single source of truth for
-			// what's in the PRF input, matching PKCS#11 v3.2 §6.26's model where
-			// CK_SP800_108_DKM_LENGTH (not implemented here) is what a caller
-			// would use to request an L field, not an implicit library default.
-			// Net effect: this engine can only produce ACVP's "before fixed
-			// data" counter placement, not "after fixed data" / "middle fixed
-			// data" — a real, documented limitation of the OpenSSL backend.
-			int kbkUseL = 0;
-			int kbkUseSep = 0;
-			OSSL_PARAM kbkParams[10];
-			int kpi = 0;
-			kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MODE,
-			                        const_cast<char*>(kbkModeStr), 0);
-			kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_MAC,
-			                        const_cast<char*>(kbkMacName), 0);
+			OSSL_PARAM kbkInitParams[2];
+			int kbkParamCount = 0;
 			if (!kbkUseCmac)
-				kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_DIGEST,
-				                        const_cast<char*>(kbkDigestName), 0);
+				kbkInitParams[kbkParamCount++] = OSSL_PARAM_construct_utf8_string("digest", const_cast<char*>(kbkDigestName), 0);
 			else
-				kbkParams[kpi++] = OSSL_PARAM_construct_utf8_string(OSSL_KDF_PARAM_CIPHER,
-				                        const_cast<char*>(kbkCipherName), 0);
-			kbkParams[kpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
-			                        kbkIKM.byte_str(), kbkIKM.size());
-			if (kbkFixedInput.size() > 0)
-				kbkParams[kpi++] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_INFO,
-				                        kbkFixedInput.byte_str(), kbkFixedInput.size());
-			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_R, &kbkCounterBits);
-			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_L, &kbkUseL);
-			kbkParams[kpi++] = OSSL_PARAM_construct_int(OSSL_KDF_PARAM_KBKDF_USE_SEPARATOR, &kbkUseSep);
-			kbkParams[kpi] = OSSL_PARAM_construct_end();
+				kbkInitParams[kbkParamCount++] = OSSL_PARAM_construct_utf8_string("cipher", const_cast<char*>(kbkCipherName), 0);
+			kbkInitParams[kbkParamCount] = OSSL_PARAM_construct_end();
 
-			int kbkRet = EVP_KDF_derive(kbkctx, kbkOut.byte_str(), kbkKeyLen, kbkParams);
-			EVP_KDF_CTX_free(kbkctx);
-			if (kbkRet <= 0)
+			auto kbkRunMac = [&](const ByteString& in, ByteString& out) -> bool
 			{
-				ERROR_MSG("EVP_KDF_derive KBKDF failed: 0x%08X", ERR_get_error());
+				EVP_MAC_CTX* ctx = EVP_MAC_CTX_new(kbkAlgo);
+				if (ctx == NULL) return false;
+				bool ok = EVP_MAC_init(ctx, kbkIKM.const_byte_str(), kbkIKM.size(), kbkInitParams) > 0 &&
+				          EVP_MAC_update(ctx, in.const_byte_str(), in.size()) > 0;
+				if (ok)
+				{
+					size_t macSize = EVP_MAC_CTX_get_mac_size(ctx);
+					out.resize(macSize);
+					size_t outLen = 0;
+					ok = EVP_MAC_final(ctx, out.byte_str(), &outLen, macSize) > 0;
+					if (ok) out.resize(outLen);
+				}
+				EVP_MAC_CTX_free(ctx);
+				return ok;
+			};
+
+			unsigned long kbkCounter = 1;
+			bool kbkOK = true;
+			while (kbkOK && kbkOut.size() < kbkKeyLen)
+			{
+				ByteString kbkRoundIn;
+				for (size_t s = 0; s < kbkSegs.size(); s++)
+				{
+					const KbkSeg& seg = kbkSegs[s];
+					if (!seg.isCounter)
+					{
+						kbkRoundIn += seg.bytes;
+						continue;
+					}
+					if (seg.le)
+					{
+						for (unsigned b = 0; b < seg.widthBytes; b++)
+							kbkRoundIn += (unsigned char)((kbkCounter >> (8 * b)) & 0xFF);
+					}
+					else
+					{
+						for (int b = (int)seg.widthBytes - 1; b >= 0; b--)
+							kbkRoundIn += (unsigned char)((kbkCounter >> (8 * b)) & 0xFF);
+					}
+				}
+
+				ByteString kbkBlock;
+				if (!kbkRunMac(kbkRoundIn, kbkBlock)) { kbkOK = false; break; }
+				kbkOut += kbkBlock;
+				kbkCounter++;
+			}
+			EVP_MAC_free(kbkAlgo);
+			if (!kbkOK)
+			{
+				ERROR_MSG("CKM_SP800_108_COUNTER_KDF: EVP_MAC round failed: 0x%08X", ERR_get_error());
 				return CKR_FUNCTION_FAILED;
 			}
+			kbkOut.resize(kbkKeyLen);
 		}
 
 		// Build output key object (mirrors HKDF handler)
@@ -3852,10 +3939,11 @@ CK_RV SoftHSM::C_DeriveKey
 		//     alias for CK_SP800_108_OPTIONAL_COUNTER — optionality is baked into
 		//     the v3.2 constant's own name, independent of any later spec prose.
 		//     The v3.3 draft's Feedback Mode data field table agrees without
-		//     conflict ("This data field type is optional"). fbkCounterRequested
-		//     tracks whether the caller actually supplied one; fbkCounterBits is
-		//     ONLY the width to use *when* one was requested — its 32-bit default
-		//     must never be read as "a counter was asked for".
+		//     conflict ("This data field type is optional"). Since 2026-09-26
+		//     optionality is carried by the segment list itself: a counter
+		//     segment exists only if the caller supplied CK_SP800_108_COUNTER,
+		//     so there is no default width that could be misread as "a counter
+		//     was asked for". That misreading was the original bug.
 		//
 		//     2026-09 remediation (companion to the CKM_SP800_108_DOUBLE_PIPELINE_KDF
 		//     fix): this handler used to hand the whole job to OpenSSL's own
@@ -3877,9 +3965,32 @@ CK_RV SoftHSM::C_DeriveKey
 		//     omitted (see rust/src/ffi.rs sp800_108_run_feedback, which has
 		//     always done this correctly — independently re-verified here, not
 		//     just trusted from its own commit history).
-		ByteString fbkFixedInput;
-		int fbkCounterBits = 32;
-		bool fbkCounterRequested = false;
+		//     2026-09-26 follow-up. The above fixed counter PRESENCE but not
+		//     counter POSITION: this loop flattened every BYTE_ARRAY into one
+		//     buffer and emitted K(i-1) || [counter] || fixedInput, with the
+		//     iteration variable hardcoded first and the counter always just
+		//     after it. CK_SP800_108_ITERATION_VARIABLE is what Table 199 calls
+		//     out as identifying "the location of the iteration variable in the
+		//     constructed PRF input data" — for this mode that variable IS
+		//     K(i-1) — so its array position is meaningful and was being
+		//     discarded. Both this and the double-pipeline handler now build
+		//     the round input from ORDERED segments, which is what makes
+		//     ACVP's "after fixed data" and "before iterator" placements
+		//     reachable. Rust has the same defect (Sp800Seg has no
+		//     iteration-variable variant and sp800_108_run_feedback updates the
+		//     MAC with k_prev before walking the segments), so "before
+		//     iterator" was unreachable in BOTH engines and the differential
+		//     harness could never see it — the oracle here is an independent
+		//     from-spec reference, not the other engine.
+		struct FbkSeg
+		{
+			int        kind;       // 0 = literal bytes, 1 = counter, 2 = K(i-1)
+			ByteString bytes;
+			bool       le;
+			unsigned   widthBytes;
+		};
+		std::vector<FbkSeg> fbkSegs;
+		bool fbkHaveIterVar = false;
 		for (CK_ULONG i = 0; i < fp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dp = &fp->pDataParams[i];
@@ -3887,22 +3998,58 @@ CK_RV SoftHSM::C_DeriveKey
 			{
 				case CK_SP800_108_BYTE_ARRAY:
 					if (dp->pValue != NULL_PTR && dp->ulValueLen > 0)
-						fbkFixedInput += ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+					{
+						FbkSeg s;
+						s.kind = 0;
+						s.le = false;
+						s.widthBytes = 0;
+						s.bytes = ByteString((CK_BYTE_PTR)dp->pValue, dp->ulValueLen);
+						fbkSegs.push_back(s);
+					}
 					break;
 				case CK_SP800_108_COUNTER:
 					if (dp->pValue != NULL_PTR && dp->ulValueLen == sizeof(CK_SP800_108_COUNTER_FORMAT))
 					{
 						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dp->pValue;
-						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64)
+						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64 &&
+						    (cf->ulWidthInBits % 8) == 0)
 						{
-							fbkCounterBits = (int)cf->ulWidthInBits;
-							fbkCounterRequested = true;
+							FbkSeg s;
+							s.kind = 1;
+							s.le = (cf->bLittleEndian != 0);
+							s.widthBytes = (unsigned)(cf->ulWidthInBits / 8);
+							fbkSegs.push_back(s);
 						}
 					}
 					break;
+				case CK_SP800_108_ITERATION_VARIABLE:
+				{
+					// Feedback mode's iteration variable is K(i-1), whose "size,
+					// format and value is defined by the internal KDF structure
+					// and PRF output" (Table 200) — so pValue is legitimately
+					// NULL here and carries no counter format. Only the POSITION
+					// is information.
+					FbkSeg s;
+					s.kind = 2;
+					s.le = false;
+					s.widthBytes = 0;
+					fbkSegs.push_back(s);
+					fbkHaveIterVar = true;
+					break;
+				}
 				default:
-					break; // ITERATION_VARIABLE (implicit K(i-1)), DKM_LENGTH, KEY_HANDLE not supported — skip
+					break; // DKM_LENGTH, KEY_HANDLE not supported — skip
 			}
+		}
+		// No ITERATION_VARIABLE supplied: K(i-1) goes first, which is this
+		// engine's prior layout and also Rust's.
+		if (!fbkHaveIterVar)
+		{
+			FbkSeg s;
+			s.kind = 2;
+			s.le = false;
+			s.widthBytes = 0;
+			fbkSegs.insert(fbkSegs.begin(), s);
 		}
 
 		// Derive via a hand-rolled Feedback Mode loop on EVP_MAC (the same PRF
@@ -3910,12 +4057,12 @@ CK_RV SoftHSM::C_DeriveKey
 		// pattern as the CKM_SP800_108_DOUBLE_PIPELINE_KDF handler below).
 		// K(0) = IV (fp->pIV/fp->ulIVLen), or empty if none supplied — this
 		// engine's prior behavior when fp->pIV was NULL_PTR (the old code never
-		// set OSSL_KDF_PARAM_SEED in that case either), preserved unchanged
-		// here since this fix is scoped to the counter only. K(i) = PRF(Ki,
-		// K(i-1) || [counter] || fixedInput); counter bytes included ONLY when
-		// fbkCounterRequested — the "before fixed data" placement, matching
-		// this engine's COUNTER_KDF/DOUBLE_PIPELINE_KDF (see the comment on
-		// COUNTER_KDF above for why only that placement is supported).
+		// set OSSL_KDF_PARAM_SEED in that case either), preserved unchanged.
+		// K(i) = PRF(Ki, <segments in caller order>), where the K(i-1) segment
+		// is emitted at the position CK_SP800_108_ITERATION_VARIABLE occupied
+		// and a counter segment appears only if CK_SP800_108_COUNTER was
+		// supplied. That is what makes all four ACVP placements reachable
+		// rather than only "before fixed data".
 		ByteString fbkOut;
 		{
 			EVP_MAC* fbkAlgo = EVP_MAC_fetch(NULL, fbkMacName, NULL);
@@ -3951,7 +4098,6 @@ CK_RV SoftHSM::C_DeriveKey
 				return ok;
 			};
 
-			int fbkCounterBytes = fbkCounterBits / 8;
 			ByteString fbkKPrev;
 			if (fp->pIV != NULL_PTR && fp->ulIVLen > 0)
 				fbkKPrev = ByteString(fp->pIV, fp->ulIVLen);
@@ -3959,13 +4105,29 @@ CK_RV SoftHSM::C_DeriveKey
 			bool fbkOK = true;
 			while (fbkOK && fbkOut.size() < fbkKeyLen)
 			{
-				ByteString fbkRoundIn = fbkKPrev;
-				if (fbkCounterRequested)
+				ByteString fbkRoundIn;
+				for (size_t s = 0; s < fbkSegs.size(); s++)
 				{
-					for (int b = fbkCounterBytes - 1; b >= 0; b--)
-						fbkRoundIn += (unsigned char)((fbkCounter >> (8 * b)) & 0xFF);
+					const FbkSeg& seg = fbkSegs[s];
+					if (seg.kind == 0)
+					{
+						fbkRoundIn += seg.bytes;
+					}
+					else if (seg.kind == 2)
+					{
+						fbkRoundIn += fbkKPrev;
+					}
+					else if (seg.le)
+					{
+						for (unsigned b = 0; b < seg.widthBytes; b++)
+							fbkRoundIn += (unsigned char)((fbkCounter >> (8 * b)) & 0xFF);
+					}
+					else
+					{
+						for (int b = (int)seg.widthBytes - 1; b >= 0; b--)
+							fbkRoundIn += (unsigned char)((fbkCounter >> (8 * b)) & 0xFF);
+					}
 				}
-				fbkRoundIn += fbkFixedInput;
 
 				ByteString fbkBlock;
 				if (!fbkRunMac(fbkRoundIn, fbkBlock)) { fbkOK = false; break; }
@@ -4186,16 +4348,36 @@ CK_RV SoftHSM::C_DeriveKey
 		//     KDF" table: "This data field type is optional... If specified, only
 		//     one instance of this type may be specified" — identical wording to
 		//     Feedback Mode's own CK_SP800_108_COUNTER row). dpCounterRequested
-		//     tracks whether the caller actually supplied one; dpCounterBits is
-		//     ONLY the width to use *when* one was requested (its 32-bit default
-		//     must never be read as "a counter was asked for" — that was the bug:
-		//     a counter was unconditionally mixed into every round even with no
-		//     CK_SP800_108_COUNTER entry at all, diverging from the Rust engine's
-		//     already-correct sp800_108_feedback_input, which omits the counter
-		//     segment entirely when the caller didn't ask for one).
-		ByteString dpFixedInput;
-		int dpCounterBits = 32;
-		bool dpCounterRequested = false;
+		//     tracked whether the caller actually supplied one. The original bug
+		//     was that a 32-bit default width was read as "a counter was asked
+		//     for", so a counter was unconditionally mixed into every round even
+		//     with no CK_SP800_108_COUNTER entry at all, diverging from the Rust
+		//     engine's already-correct sp800_108_feedback_input. Since
+		//     2026-09-26 the segment list itself carries that optionality: a
+		//     counter segment exists only if the caller asked for one.
+		//     2026-09-26 follow-up, twin of the FEEDBACK_KDF change above: this
+		//     loop also discarded the POSITION of both the counter and the
+		//     iteration variable, emitting A(i) || [counter] || fixedInput
+		//     unconditionally. Table 201's iteration variable for this mode is
+		//     A(i), and Table 199's "identifies the location of the iteration
+		//     variable in the constructed PRF input data" makes its array
+		//     position meaningful. Now built from ordered segments.
+		//
+		//     Note the asymmetry that makes this mode easy to get wrong: A(0)
+		//     is the FixedInputData ALONE — the counter never enters the A
+		//     chain, only each round's PRF input (SP 800-108 §5.3). Feeding a
+		//     counter into the A chain produces plausible wrong bytes rather
+		//     than an error.
+		struct DpSeg
+		{
+			int        kind;       // 0 = literal bytes, 1 = counter, 2 = A(i)
+			ByteString bytes;
+			bool       le;
+			unsigned   widthBytes;
+		};
+		std::vector<DpSeg> dpSegs;
+		ByteString dpFixedInput;   // A(0): byte-array segments only
+		bool dpHaveIterVar = false;
 		for (CK_ULONG i = 0; i < dpp->ulNumberOfDataParams; i++)
 		{
 			CK_PRF_DATA_PARAM* dpm = &dpp->pDataParams[i];
@@ -4203,22 +4385,55 @@ CK_RV SoftHSM::C_DeriveKey
 			{
 				case CK_SP800_108_BYTE_ARRAY:
 					if (dpm->pValue != NULL_PTR && dpm->ulValueLen > 0)
-						dpFixedInput += ByteString((CK_BYTE_PTR)dpm->pValue, dpm->ulValueLen);
+					{
+						DpSeg s;
+						s.kind = 0;
+						s.le = false;
+						s.widthBytes = 0;
+						s.bytes = ByteString((CK_BYTE_PTR)dpm->pValue, dpm->ulValueLen);
+						dpSegs.push_back(s);
+						dpFixedInput += s.bytes;
+					}
 					break;
 				case CK_SP800_108_COUNTER:
 					if (dpm->pValue != NULL_PTR && dpm->ulValueLen == sizeof(CK_SP800_108_COUNTER_FORMAT))
 					{
 						CK_SP800_108_COUNTER_FORMAT* cf = (CK_SP800_108_COUNTER_FORMAT*)dpm->pValue;
-						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64)
+						if (cf->ulWidthInBits > 0 && cf->ulWidthInBits <= 64 &&
+						    (cf->ulWidthInBits % 8) == 0)
 						{
-							dpCounterBits = (int)cf->ulWidthInBits;
-							dpCounterRequested = true;
+							DpSeg s;
+							s.kind = 1;
+							s.le = (cf->bLittleEndian != 0);
+							s.widthBytes = (unsigned)(cf->ulWidthInBits / 8);
+							dpSegs.push_back(s);
 						}
 					}
 					break;
+				case CK_SP800_108_ITERATION_VARIABLE:
+				{
+					// A(i) — defined by the internal KDF structure (Table 201),
+					// so pValue is legitimately NULL. Position is the payload.
+					DpSeg s;
+					s.kind = 2;
+					s.le = false;
+					s.widthBytes = 0;
+					dpSegs.push_back(s);
+					dpHaveIterVar = true;
+					break;
+				}
 				default:
-					break; // ITERATION_VARIABLE (implicit A(i)), DKM_LENGTH, KEY_HANDLE not supported — skip
+					break; // DKM_LENGTH, KEY_HANDLE not supported — skip
 			}
+		}
+		// No ITERATION_VARIABLE supplied: A(i) goes first, the prior layout.
+		if (!dpHaveIterVar)
+		{
+			DpSeg s;
+			s.kind = 2;
+			s.le = false;
+			s.widthBytes = 0;
+			dpSegs.insert(dpSegs.begin(), s);
 		}
 		if (dpFixedInput.size() == 0)
 		{
@@ -4261,7 +4476,6 @@ CK_RV SoftHSM::C_DeriveKey
 				return ok;
 			};
 
-			int dpCounterBytes = dpCounterBits / 8;
 			ByteString dpA = dpFixedInput; // A(0), PKCS#11 v3.2 §2.44.3
 			unsigned long dpCounter = 1;
 			bool dpOK = true;
@@ -4271,18 +4485,34 @@ CK_RV SoftHSM::C_DeriveKey
 				if (!dpRunMac(dpA, dpANext)) { dpOK = false; break; }
 				dpA = dpANext;
 
-				ByteString dpRoundIn = dpA;
-				// Counter is mixed in ONLY when the caller explicitly supplied
-				// CK_SP800_108_COUNTER (see dpCounterRequested above) — an absent
+				// Round input from ORDERED segments. A counter appears only
+				// when the caller supplied CK_SP800_108_COUNTER — an absent
 				// counter is a valid, spec-conformant call shape for Double
-				// Pipeline mode, not an error and not a "use the default width"
-				// signal.
-				if (dpCounterRequested)
+				// Pipeline mode, not an error and not a "use the default
+				// width" signal — and it appears wherever they put it.
+				ByteString dpRoundIn;
+				for (size_t s = 0; s < dpSegs.size(); s++)
 				{
-					for (int b = dpCounterBytes - 1; b >= 0; b--)
-						dpRoundIn += (unsigned char)((dpCounter >> (8 * b)) & 0xFF);
+					const DpSeg& seg = dpSegs[s];
+					if (seg.kind == 0)
+					{
+						dpRoundIn += seg.bytes;
+					}
+					else if (seg.kind == 2)
+					{
+						dpRoundIn += dpA;
+					}
+					else if (seg.le)
+					{
+						for (unsigned b = 0; b < seg.widthBytes; b++)
+							dpRoundIn += (unsigned char)((dpCounter >> (8 * b)) & 0xFF);
+					}
+					else
+					{
+						for (int b = (int)seg.widthBytes - 1; b >= 0; b--)
+							dpRoundIn += (unsigned char)((dpCounter >> (8 * b)) & 0xFF);
+					}
 				}
-				dpRoundIn += dpFixedInput;
 
 				ByteString dpBlock;
 				if (!dpRunMac(dpRoundIn, dpBlock)) { dpOK = false; break; }
