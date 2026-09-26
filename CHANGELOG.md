@@ -8,6 +8,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`bench-harness`: AES and SHA-2/SHA-3 measurement cells.**
+
+  The benchmark measured only asymmetric work — signatures, key agreement,
+  KEMs, RSA key transport — so the symmetric and hashing cost that carries bulk
+  traffic had no row. It now measures `AES-{128,256}-{CBC,GCM}` encryption and
+  `SHA-256/384/512` + `SHA3-256/512` digests, each at **64 B, 1 KiB and
+  16 KiB** (31 new cells; 131 per leg with `--include-slow`). The data size is
+  part of the algorithm name (`AES-256-GCM-16KB`) because symmetric throughput
+  depends on message size in a way an asymmetric operation's does not, and
+  every consumer of the JSONL keys a series by `algorithm` alone. 16 KiB is TLS
+  1.3's maximum record size (RFC 8446 §5.1).
+
+  New `pkcs11.rs` wrappers, each checked against `ffi.rs`'s dispatch before
+  use: `C_GenerateKey` (`CKA_VALUE_LEN` is required for `CKM_AES_KEY_GEN` and
+  read at native `CK_ULONG` width), a mode-aware symmetric
+  `C_EncryptInit`/`C_DecryptInit` (CBC takes a bare 16-byte IV; GCM takes six
+  native-width `CK_GCM_PARAMS` fields), and `C_DigestInit`/`C_Digest`. The
+  existing `encrypt_init` builds `CK_RSA_PKCS_OAEP_PARAMS` unconditionally, so
+  the symmetric path is separate. Symmetric and digest workers allocate their
+  buffers once (`encrypt_into`/`digest_into`, one FFI call per op) — at 64 B a
+  per-operation allocation would be a visible share of what the row reports.
+  GCM nonces are unique per (worker, operation), since workers share a
+  tenant's key.
+
+  **SHAKE is not measurable here, by construction**: PKCS#11 v3.2 defines no
+  SHAKE digest mechanism and `C_DigestInit` answers `CKR_MECHANISM_INVALID`
+  for it. SHA-3 is that family's row; the `SLH-DSA-SHAKE-*` signature rows
+  remain the real SHAKE workload.
+
+  First results (2026-09-26): at 64 B every algorithm on a board costs about
+  the same — the call path dominates — while at 16 KiB SHA-256 is 4–8× SHA-3 on
+  Cortex-A53/A55 (SHA-256 instructions present, none for SHA-3). They also
+  exposed that the engine's **AES ran its software backend on every aarch64
+  target**: `aes 0.8` and `polyval 0.6` include their ARMv8 backends only under
+  `--cfg aes_armv8` / `--cfg polyval_armv8`, which no build set. With both
+  flags, A-B-A-B on the same boards: AES-CBC 16 KiB **7.4–12.9×**, AES-GCM
+  **3.0–5.8×**, with ACVP-AES-GCM-1.0 (60 cases) and the SP 800-38A KATs
+  passing. The flags live in the appliance recipes (pqctoday-cacp#36) and the
+  bench sidecar (pqctoday-sandbox#83), not here: Yocto always exports
+  `RUSTFLAGS`, which would silently override a `.cargo/config.toml` entry.
+  GCM's smaller gain is consistent with `GcmState` feeding GHASH one byte at a
+  time once AES itself is fast — not yet measured.
+
 ## [0.31.0] — 2026-09-25
 
 ### Added
