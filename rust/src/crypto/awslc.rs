@@ -66,19 +66,28 @@ const MIN_MODULUS_BYTES: usize = 256;
 
 /// Maps a PKCS#11 RSA signing mechanism to AWS-LC's padding algorithm, or
 /// `None` when AWS-LC has no equivalent (see module doc).
-fn rsa_sign_alg(mech: u32, _pss_salt_len: Option<usize>) -> Option<&'static dyn signature::RsaEncoding> {
+fn rsa_sign_alg(mech: u32, pss_salt_len: Option<usize>) -> Option<&'static dyn signature::RsaEncoding> {
+    // RSASSA-PSS SIGN goes to AWS-LC only for the exact parameter set its
+    // encodings implement: SHA-256/384/512, MGF1 with the same hash (the only
+    // MGF the engine accepts for these mechanisms, checked at C_SignInit), and
+    // salt length == digest length (the PKCS#11 default when sLen is not given).
+    // Any other salt length falls through to the pure-Rust signer, which
+    // honours it exactly as before. VERIFY stays pure-Rust (see
+    // `rsa_verify_alg`): AWS-LC's PSS verify requires salt == digest length,
+    // while the engine verifies the given sLen, or, when none is given, both
+    // sLen = digest length and the maximum (a valid OASIS CS-AC-M-2-30
+    // signature uses the maximum). A signature made here uses salt = digest
+    // length, which that verifier accepts either way. Both signers blind the private
+    // exponentiation. RSA private ops on Cortex-A5x also get the vendored
+    // aws-lc-sys Montgomery kernel choice this way.
+    let pss_default = |hash_len: usize| pss_salt_len.map_or(true, |s| s == hash_len);
     match mech {
         CKM_SHA256_RSA_PKCS => Some(&signature::RSA_PKCS1_SHA256),
         CKM_SHA384_RSA_PKCS => Some(&signature::RSA_PKCS1_SHA384),
         CKM_SHA512_RSA_PKCS => Some(&signature::RSA_PKCS1_SHA512),
-        // RSA-PSS stays on the pure-Rust path, NOT AWS-LC. AWS-LC's PSS
-        // verify requires salt length == digest length, but the `rsa` crate
-        // (and the KMIP contract) do salt-length-AGNOSTIC verification —
-        // recovering the salt from the signature. Routing PSS here made a
-        // valid externally-produced signature (OASIS CS-AC-M-2-30, a
-        // non-default salt) verify as INVALID. PSS is randomized anyway, so
-        // it is not a meaningful speedup target; keep the whole scheme on the
-        // salt-agnostic pure-Rust path. `pss_salt_len` is now unused here.
+        CKM_SHA256_RSA_PKCS_PSS if pss_default(32) => Some(&signature::RSA_PSS_SHA256),
+        CKM_SHA384_RSA_PKCS_PSS if pss_default(48) => Some(&signature::RSA_PSS_SHA384),
+        CKM_SHA512_RSA_PKCS_PSS if pss_default(64) => Some(&signature::RSA_PSS_SHA512),
         _ => None,
     }
 }
