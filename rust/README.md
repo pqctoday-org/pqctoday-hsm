@@ -60,7 +60,7 @@ cargo test                     # engine unit/integration tests
 # WASM bundle (bundler target, dev profile) — the ACVP feature enables the
 # conformance KATs. Runs in the OrbStack/Docker `pqc-rust` container if cargo
 # isn't on PATH.
-RUSTFLAGS="-C link-arg=-zstack-size=2097152" \
+RUSTFLAGS="-C link-arg=-zstack-size=8388608" \
   wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp
 ```
 

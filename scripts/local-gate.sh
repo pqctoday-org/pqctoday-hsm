@@ -595,7 +595,11 @@ STEP=$((STEP+1)); say "step $STEP: Rust PKCS#11 v3.2 conformance (257 checks)"
 # fails with "command not found" and always has, invisibly, because this step
 # was opt-in until now. Full path, matching how it was actually invoked by
 # hand before this step was promoted to default. Found 2026-08-23.
-if dexec "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=2097152' /cargo-target/release/wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp >/dev/null 2>&1" \
+# Stack: 8 MiB, the same value rust/build-wasm-bundle.sh ships. This step used
+# 2 MiB until 2026-09-27, so the gate validated a configuration nobody ships;
+# with 2 MiB the ACVP harness dies at SLH-DSA-192f ("memory access out of
+# bounds", a wasm stack overflow). Keep the two in step.
+if dexec "cd $AG_RUST && RUSTFLAGS='-C link-arg=-zstack-size=8388608' /cargo-target/release/wasm-pack build --target bundler --out-dir pkg --dev -- --features acvp >/dev/null 2>&1" \
    && ( cd "$ROOT/rust" && node test_p11_conformance.js 2>&1 | grep -q 'RESULT: .* 0 failed' ) \
    && ( cd "$ROOT" && python3 scripts/check_pkcs11_reports_fresh.py --rust ); then
   ok "Rust PKCS#11 v3.2 conformance (report regenerated + fresh)"
