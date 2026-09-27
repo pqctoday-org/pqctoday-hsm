@@ -361,6 +361,13 @@ run_step_host "gate self-check (every step can fail)" \
 run_step_host "ACVP vector provenance (tests/acvp/*.json)" \
   "cd $ROOT && python3 scripts/check_acvp_provenance.py"
 
+# Plan item 2.C (ruled 2026-09-26: fail, no allowlist; live 2026-09-27 at zero
+# orphans). Every tracked vector file under the test-vector roots must be
+# named by a CODE line of some loader — a file only a comment or a provenance
+# checker mentions is an orphan. Its scope and counts print on every run.
+run_step_host "test-vector reachability (every vector file is loaded by code)" \
+  "cd $ROOT && python3 scripts/check_vector_reachability.py"
+
 # X2' (2026-09-07): per-CKM_* ledger of what each engine implements, checked
 # against the two source files that BUILD the advertised lists — no engine is
 # built or run, so it costs nothing and can sit up front with the other pure
